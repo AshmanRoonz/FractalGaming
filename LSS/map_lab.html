@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<!--
+  LSS Map Lab
+  Created: 2026-04-28
+  Last updated: 2026-04-28
+  Version: 1.0
+
+  Standalone level editor for Last Ship Sailing. Place rooms (spheres) and
+  connect them with tunnels; export as JSON, or copy a JS object literal that
+  drops directly into MAP_DATA in last_ship_sailing_v7_0.html.
+
+  Sits next to wall_pattern_lab.html and sound_lab.html as the third utility
+  surface for the project. No build step; opens in any modern browser.
+
+  Revision history:
+  - 2026-04-28 v1.0: initial. 3D viewport with orbit camera; click-to-place
+    rooms on the Y=0 plane; click-pair-rooms to connect with tunnels;
+    TransformControls gizmo on the selected room; sidebar with level metadata
+    and 8-slot palette; bidirectional editing (gizmo updates sidebar, sidebar
+    updates mesh); JSON download/upload; copy as JS object literal.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LSS Map Lab v1.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0a0a14; color: #ddd;
+    font-family: 'Rajdhani', 'Inter', system-ui, sans-serif;
+    font-weight: 500; letter-spacing: 0.02em;
+    overflow: hidden;
+  }
+  #app { display: flex; width: 100vw; height: 100vh; }
+  #viewport { flex: 1; position: relative; min-width: 0; }
+  #viewport canvas { display: block; }
+
+  #hud {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(8, 10, 20, 0.78);
+    padding: 8px 12px; border: 1px solid #2a3a55; border-radius: 4px;
+    font-size: 13px; pointer-events: none; max-width: 360px;
+  }
+  #hud-tool {
+    font-family: 'Orbitron', sans-serif; font-weight: 700;
+    color: #88aaff; text-transform: uppercase; letter-spacing: 0.12em;
+    font-size: 11px; margin-bottom: 2px;
+  }
+  #hud-info { color: #889; font-size: 12px; }
+
+  #sidebar {
+    width: 360px; flex: 0 0 360px;
+    background: #0e0e18; border-left: 1px solid #2a2a3a;
+    padding: 14px; overflow-y: auto;
+    font-size: 13px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-size: 20px; font-weight: 700;
+    margin: 0 0 4px 0; color: #88aaff;
+  }
+  .subtitle { color: #667; font-size: 11px; margin-bottom: 12px; }
+  h2 {
+    font-family: 'Orbitron', sans-serif; font-size: 11px; font-weight: 600;
+    margin: 14px 0 6px 0; color: #99a;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    border-bottom: 1px solid #1f1f2c; padding-bottom: 3px;
+  }
+  button {
+    background: #1c1c28; color: #ccc;
+    border: 1px solid #2e2e40;
+    padding: 6px 10px; cursor: pointer; font-family: inherit;
+    font-size: 12px; border-radius: 3px;
+    transition: background 0.12s;
+  }
+  button:hover { background: #262638; }
+  button.active {
+    background: #2e4f7a; border-color: #5588cc; color: #cfe6ff;
+  }
+  .toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+  .toolbar button { flex: 1 0 auto; min-width: 60px; }
+  input, select {
+    background: #14141e; color: #ddd; border: 1px solid #2a2a3a;
+    padding: 4px 6px; font-family: inherit; font-size: 12px;
+    border-radius: 2px;
+  }
+  input[type=text], input[type=number], select { width: 100%; }
+  input[type=color] { width: 32px; height: 24px; padding: 0; cursor: pointer; border: 1px solid #2a2a3a; }
+  .row { display: flex; gap: 6px; margin: 4px 0; align-items: center; }
+  .row label { flex: 0 0 64px; color: #889; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .row input, .row select { flex: 1; }
+  .palette-row { display: flex; gap: 4px; flex-wrap: wrap; }
+  .room-item, .tunnel-item {
+    padding: 5px 8px; margin: 2px 0;
+    background: #14141e; border: 1px solid #1f1f2c;
+    border-radius: 3px; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 12px;
+  }
+  .room-item.selected, .tunnel-item.selected {
+    background: #2a3a55; border-color: #66aaff; color: #cfe6ff;
+  }
+  .room-item:hover, .tunnel-item:hover { background: #1c1c28; }
+  .team-A { border-left: 3px solid #66aaff; padding-left: 6px; }
+  .team-B { border-left: 3px solid #ff6688; padding-left: 6px; }
+  textarea {
+    width: 100%; background: #08080f; color: #ddd;
+    border: 1px solid #2a2a3a; padding: 6px;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    min-height: 90px; resize: vertical;
+  }
+  .hint { color: #667; font-size: 11px; font-style: italic; margin-top: 4px; }
+  .stat { color: #889; font-family: 'Courier New', monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="viewport">
+    <div id="hud">
+      <div id="hud-tool">Tool: Select</div>
+      <div id="hud-info">Click a room to select. Drag empty space to orbit. Wheel to zoom.</div>
+    </div>
+  </div>
+  <div id="sidebar">
+    <h1>Map Lab</h1>
+    <div class="subtitle">Level editor for Last Ship Sailing</div>
+
+    <h2>Level</h2>
+    <div class="row"><label>Name</label><input id="lvl-name" type="text" value="Untitled" /></div>
+    <div class="row"><label>Key</label><input id="lvl-key" type="text" value="custom" /></div>
+    <div class="row"><label>Desc</label><input id="lvl-desc" type="text" placeholder="Short description" /></div>
+
+    <h2>Palette (8 slots, per-room)</h2>
+    <div id="palette" class="palette-row"></div>
+    <div class="hint">Slot i tints room i's wall pattern in-game.</div>
+
+    <h2>Tools <span class="stat">(1/2/3/4 hotkeys)</span></h2>
+    <div class="toolbar">
+      <button id="tool-select" class="active">Select</button>
+      <button id="tool-place-room">+ Room</button>
+      <button id="tool-connect-tunnel">+ Tunnel</button>
+      <button id="tool-delete">Delete</button>
+    </div>
+
+    <h2>Selected</h2>
+    <div id="selected-empty" class="hint">Nothing selected. Click a room or tunnel.</div>
+    <div id="selected-room" style="display:none;">
+      <div class="row"><label>ID</label><input id="sel-id" type="text" /></div>
+      <div class="row"><label>Team</label>
+        <select id="sel-team">
+          <option value="">none</option>
+          <option value="A">A</option>
+          <option value="B">B</option>
+        </select>
+      </div>
+      <div class="row"><label>X</label><input id="sel-x" type="number" step="10" /></div>
+      <div class="row"><label>Y</label><input id="sel-y" type="number" step="10" /></div>
+      <div class="row"><label>Z</label><input id="sel-z" type="number" step="10" /></div>
+      <div class="row"><label>Radius</label><input id="sel-r" type="number" step="10" min="50" /></div>
+    </div>
+    <div id="selected-tunnel" style="display:none;">
+      <div id="sel-tunnel-info" class="hint"></div>
+      <div class="hint">Press Delete to remove this tunnel.</div>
+    </div>
+
+    <h2>Rooms (<span id="room-count">0</span>)</h2>
+    <div id="rooms-list"></div>
+
+    <h2>Tunnels (<span id="tunnel-count">0</span>)</h2>
+    <div id="tunnels-list"></div>
+
+    <h2>Export</h2>
+    <div class="toolbar" style="margin-bottom: 6px;">
+      <button id="export-json">Download JSON</button>
+      <button id="export-js">Copy as JS</button>
+    </div>
+    <div class="hint">"Copy as JS" produces an object literal you can paste directly into the MAP_DATA block in last_ship_sailing_v7_0.html.</div>
+
+    <h2>Import</h2>
+    <div class="row"><input id="import-file" type="file" accept=".json,application/json" /></div>
+    <textarea id="import-text" placeholder="Or paste JSON here..."></textarea>
+    <div class="toolbar" style="margin-top: 6px;">
+      <button id="import-text-btn">Load from text</button>
+      <button id="new-map-btn">New (clear all)</button>
+    </div>
+
+    <h2>Help</h2>
+    <div class="hint" style="line-height: 1.5;">
+      <strong>+ Room:</strong> click in viewport to place a sphere on the Y=0 plane (radius 200; edit after).<br>
+      <strong>+ Tunnel:</strong> click two rooms in sequence to connect them.<br>
+      <strong>Select:</strong> click any room (or list entry) to edit its position, radius, team.<br>
+      <strong>Drag the gizmo</strong> on the selected room to move it in 3D.<br>
+      <strong>Delete</strong> tool removes whatever you click; or press Del/Backspace with something selected.<br>
+      <strong>Esc</strong> returns to Select tool / clears selection.
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+
+// ============================================================
+// State
+// ============================================================
+const state = {
+  level: {
+    name: 'Untitled',
+    key: 'custom',
+    description: '',
+    palette: [0x4477ff, 0xff4488, 0x44ff77, 0xffaa44, 0xaa44ff, 0x44ffff, 0xff44aa, 0xffff44],
+    rooms: [],
+    tunnels: []
+  },
+  selectedKind: null,    // 'room' | 'tunnel' | null
+  selectedIndex: -1,
+  tool: 'select',        // 'select' | 'place_room' | 'connect_tunnel' | 'delete'
+  pendingTunnelFirst: -1,// while in connect_tunnel mode, the first-clicked room index
+  nextRoomId: 1
+};
+
+// ============================================================
+// Three.js scene
+// ============================================================
+const viewport = document.getElementById('viewport');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a14);
+
+const camera = new THREE.PerspectiveCamera(60, 1, 1, 30000);
+camera.position.set(900, 700, 900);
+camera.lookAt(0, 0, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+viewport.appendChild(renderer.domElement);
+
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.08;
+orbit.target.set(0, 0, 0);
+
+const transform = new TransformControls(camera, renderer.domElement);
+transform.size = 0.8;
+scene.add(transform);
+
+transform.addEventListener('dragging-changed', (e) => {
+  // Disable orbit while dragging the gizmo so clicks don't spin the camera.
+  orbit.enabled = !e.value;
+});
+
+transform.addEventListener('change', () => {
+  if (state.selectedKind !== 'room' || state.selectedIndex < 0) return;
+  const room = state.level.rooms[state.selectedIndex];
+  const mesh = roomMeshes[state.selectedIndex];
+  if (!room || !mesh) return;
+  room.x = Math.round(mesh.position.x);
+  room.y = Math.round(mesh.position.y);
+  room.z = Math.round(mesh.position.z);
+  // Push to sidebar inputs
+  ui.selX.value = room.x;
+  ui.selY.value = room.y;
+  ui.selZ.value = room.z;
+  rebuildTunnelMeshes();
+});
+
+// Ground grid + axes for spatial reference.
+const grid = new THREE.GridHelper(6000, 60, 0x2a4466, 0x14223a);
+scene.add(grid);
+const axes = new THREE.AxesHelper(600);
+scene.add(axes);
+
+// Lighting: bright cartoon-ish so semi-transparent room spheres read clearly.
+scene.add(new THREE.AmbientLight(0x445577, 1.4));
+const keyLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+keyLight.position.set(1000, 2000, 800);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0x88aaff, 0.7);
+fillLight.position.set(-800, 600, -800);
+scene.add(fillLight);
+
+// ============================================================
+// Room and tunnel rendering
+// ============================================================
+const roomMeshes = [];   // parallel to state.level.rooms (one mesh per room)
+const tunnelMeshes = []; // parallel to state.level.tunnels (one or more meshes per tunnel)
+const roomGeo = new THREE.SphereGeometry(1, 32, 24);
+
+function teamColor(team) {
+  if (team === 'A') return 0x66aaff;
+  if (team === 'B') return 0xff6688;
+  return 0xb0c0d0;
+}
+
+function makeRoomMesh(room) {
+  const mat = new THREE.MeshStandardMaterial({
+    color: teamColor(room.team),
+    transparent: true,
+    opacity: 0.32,
+    metalness: 0.05,
+    roughness: 0.55,
+    side: THREE.DoubleSide,
+    depthWrite: false
+  });
+  const mesh = new THREE.Mesh(roomGeo, mat);
+  mesh.scale.setScalar(room.r);
+  mesh.position.set(room.x, room.y, room.z);
+  mesh.userData = { kind: 'room' };
+  return mesh;
+}
+
+function rebuildAllRoomMeshes() {
+  for (const m of roomMeshes) {
+    scene.remove(m);
+    m.material.dispose();
+  }
+  roomMeshes.length = 0;
+  for (const r of state.level.rooms) {
+    const m = makeRoomMesh(r);
+    scene.add(m);
+    roomMeshes.push(m);
+  }
+}
+
+function rebuildTunnelMeshes() {
+  for (const m of tunnelMeshes) {
+    scene.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+  }
+  tunnelMeshes.length = 0;
+  state.level.tunnels.forEach((t, ti) => {
+    const path = t.path;
+    if (!path || path.length < 2) return;
+    const tunR = t.r || 80;
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i], b = path[i + 1];
+      const va = new THREE.Vector3(a.x, a.y, a.z);
+      const vb = new THREE.Vector3(b.x, b.y, b.z);
+      const dir = new THREE.Vector3().subVectors(vb, va);
+      const len = dir.length();
+      if (len < 1) continue;
+      const geo = new THREE.CylinderGeometry(tunR, tunR, len, 16, 1, true);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x88aaff,
+        transparent: true,
+        opacity: 0.22,
+        metalness: 0.05,
+        roughness: 0.55,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.copy(va).lerp(vb, 0.5);
+      // Cylinder default axis is +Y; rotate to point along (vb - va).
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+      mesh.userData = { kind: 'tunnel', tunnelIndex: ti };
+      scene.add(mesh);
+      tunnelMeshes.push(mesh);
+    }
+  });
+}
+
+// ============================================================
+// Selection
+// ============================================================
+function selectRoom(idx) {
+  state.selectedKind = 'room';
+  state.selectedIndex = idx;
+  if (idx >= 0 && roomMeshes[idx]) {
+    transform.attach(roomMeshes[idx]);
+  } else {
+    transform.detach();
+  }
+  refreshSidebarSelection();
+  refreshLists();
+}
+
+function selectTunnel(idx) {
+  state.selectedKind = 'tunnel';
+  state.selectedIndex = idx;
+  transform.detach();
+  refreshSidebarSelection();
+  refreshLists();
+}
+
+function clearSelection() {
+  state.selectedKind = null;
+  state.selectedIndex = -1;
+  transform.detach();
+  refreshSidebarSelection();
+  refreshLists();
+}
+
+// ============================================================
+// Click handling: pointerdown captures position; pointerup fires only if
+// pointer didn't move enough to count as a drag (which would be orbit or
+// transform-gizmo dragging). This avoids false placements on camera drags.
+// ============================================================
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const placementPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+const CLICK_THRESHOLD_PX = 5;
+
+let pdPos = null;
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0) { pdPos = null; return; }
+  pdPos = { x: ev.clientX, y: ev.clientY };
+});
+renderer.domElement.addEventListener('pointerup', (ev) => {
+  if (!pdPos) return;
+  const dx = ev.clientX - pdPos.x;
+  const dy = ev.clientY - pdPos.y;
+  pdPos = null;
+  if (dx * dx + dy * dy > CLICK_THRESHOLD_PX * CLICK_THRESHOLD_PX) return; // was a drag
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  ndc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+
+  const roomHits = raycaster.intersectObjects(roomMeshes, false);
+  const tunnelHits = raycaster.intersectObjects(tunnelMeshes, false);
+
+  if (state.tool === 'select') {
+    if (roomHits.length) {
+      const idx = roomMeshes.indexOf(roomHits[0].object);
+      if (idx >= 0) selectRoom(idx);
+    } else if (tunnelHits.length) {
+      const ti = tunnelHits[0].object.userData.tunnelIndex;
+      if (typeof ti === 'number') selectTunnel(ti);
+    } else {
+      clearSelection();
+    }
+  } else if (state.tool === 'place_room') {
+    const target = new THREE.Vector3();
+    if (raycaster.ray.intersectPlane(placementPlane, target)) {
+      addRoom(target.x, target.y, target.z);
+    }
+  } else if (state.tool === 'connect_tunnel') {
+    if (roomHits.length) {
+      const idx = roomMeshes.indexOf(roomHits[0].object);
+      if (state.pendingTunnelFirst < 0) {
+        state.pendingTunnelFirst = idx;
+        setHud('+ Tunnel', `First room: ${state.level.rooms[idx].id}. Click second room to connect.`);
+      } else {
+        if (idx !== state.pendingTunnelFirst) {
+          addTunnel(state.pendingTunnelFirst, idx);
+        }
+        state.pendingTunnelFirst = -1;
+        setHud('+ Tunnel', 'Click first room to start a new tunnel.');
+      }
+    }
+  } else if (state.tool === 'delete') {
+    if (roomHits.length) {
+      const idx = roomMeshes.indexOf(roomHits[0].object);
+      if (idx >= 0) deleteRoom(idx);
+    } else if (tunnelHits.length) {
+      const ti = tunnelHits[0].object.userData.tunnelIndex;
+      if (typeof ti === 'number') deleteTunnel(ti);
+    }
+  }
+});
+
+// ============================================================
+// Add / delete room and tunnel
+// ============================================================
+function addRoom(x, y, z) {
+  const id = `room_${state.nextRoomId++}`;
+  state.level.rooms.push({
+    id,
+    team: null,
+    x: Math.round(x),
+    y: Math.round(y),
+    z: Math.round(z),
+    r: 200
+  });
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  selectRoom(state.level.rooms.length - 1);
+}
+
+function deleteRoom(idx) {
+  const room = state.level.rooms[idx];
+  if (!room) return;
+  // Remove tunnels whose endpoints touch this room's position.
+  state.level.tunnels = state.level.tunnels.filter(t =>
+    !t.path.some(p => p.x === room.x && p.y === room.y && p.z === room.z)
+  );
+  state.level.rooms.splice(idx, 1);
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  clearSelection();
+}
+
+function addTunnel(roomA, roomB) {
+  const a = state.level.rooms[roomA], b = state.level.rooms[roomB];
+  if (!a || !b) return;
+  // Avoid duplicate (A↔B already exists).
+  const dup = state.level.tunnels.some(t => {
+    if (t.path.length < 2) return false;
+    const p0 = t.path[0], p1 = t.path[t.path.length - 1];
+    const eq = (p, r) => p.x === r.x && p.y === r.y && p.z === r.z;
+    return (eq(p0, a) && eq(p1, b)) || (eq(p0, b) && eq(p1, a));
+  });
+  if (dup) return;
+  state.level.tunnels.push({
+    path: [
+      { x: a.x, y: a.y, z: a.z },
+      { x: b.x, y: b.y, z: b.z }
+    ]
+  });
+  rebuildTunnelMeshes();
+  refreshLists();
+}
+
+function deleteTunnel(idx) {
+  state.level.tunnels.splice(idx, 1);
+  rebuildTunnelMeshes();
+  clearSelection();
+}
+
+// ============================================================
+// Sidebar UI
+// ============================================================
+const ui = {
+  lvlName: document.getElementById('lvl-name'),
+  lvlKey: document.getElementById('lvl-key'),
+  lvlDesc: document.getElementById('lvl-desc'),
+  palette: document.getElementById('palette'),
+  toolSelect: document.getElementById('tool-select'),
+  toolPlaceRoom: document.getElementById('tool-place-room'),
+  toolConnectTunnel: document.getElementById('tool-connect-tunnel'),
+  toolDelete: document.getElementById('tool-delete'),
+  selectedEmpty: document.getElementById('selected-empty'),
+  selectedRoom: document.getElementById('selected-room'),
+  selectedTunnel: document.getElementById('selected-tunnel'),
+  selTunnelInfo: document.getElementById('sel-tunnel-info'),
+  selId: document.getElementById('sel-id'),
+  selTeam: document.getElementById('sel-team'),
+  selX: document.getElementById('sel-x'),
+  selY: document.getElementById('sel-y'),
+  selZ: document.getElementById('sel-z'),
+  selR: document.getElementById('sel-r'),
+  roomsList: document.getElementById('rooms-list'),
+  tunnelsList: document.getElementById('tunnels-list'),
+  roomCount: document.getElementById('room-count'),
+  tunnelCount: document.getElementById('tunnel-count'),
+  exportJson: document.getElementById('export-json'),
+  exportJs: document.getElementById('export-js'),
+  importFile: document.getElementById('import-file'),
+  importText: document.getElementById('import-text'),
+  importTextBtn: document.getElementById('import-text-btn'),
+  newMapBtn: document.getElementById('new-map-btn'),
+  hudTool: document.getElementById('hud-tool'),
+  hudInfo: document.getElementById('hud-info')
+};
+
+ui.lvlName.addEventListener('input', () => state.level.name = ui.lvlName.value);
+ui.lvlKey.addEventListener('input', () => state.level.key = ui.lvlKey.value);
+ui.lvlDesc.addEventListener('input', () => state.level.description = ui.lvlDesc.value);
+
+function buildPaletteUI() {
+  ui.palette.innerHTML = '';
+  for (let i = 0; i < 8; i++) {
+    const inp = document.createElement('input');
+    inp.type = 'color';
+    inp.value = '#' + state.level.palette[i].toString(16).padStart(6, '0');
+    inp.title = `Slot ${i}`;
+    inp.addEventListener('input', () => {
+      state.level.palette[i] = parseInt(inp.value.slice(1), 16);
+    });
+    ui.palette.appendChild(inp);
+  }
+}
+buildPaletteUI();
+
+const toolButtons = {
+  select: ui.toolSelect,
+  place_room: ui.toolPlaceRoom,
+  connect_tunnel: ui.toolConnectTunnel,
+  delete: ui.toolDelete
+};
+const toolLabel = {
+  select: { name: 'Select', info: 'Click a room or tunnel. Drag the gizmo to move. Esc to clear.' },
+  place_room: { name: '+ Room', info: 'Click on the Y=0 plane to place a sphere (radius 200).' },
+  connect_tunnel: { name: '+ Tunnel', info: 'Click first room to start a new tunnel.' },
+  delete: { name: 'Delete', info: 'Click a room or tunnel to delete it.' }
+};
+
+function setTool(t) {
+  state.tool = t;
+  state.pendingTunnelFirst = -1;
+  for (const k of Object.keys(toolButtons)) toolButtons[k].classList.remove('active');
+  if (toolButtons[t]) toolButtons[t].classList.add('active');
+  setHud(toolLabel[t].name, toolLabel[t].info);
+}
+
+ui.toolSelect.addEventListener('click', () => setTool('select'));
+ui.toolPlaceRoom.addEventListener('click', () => setTool('place_room'));
+ui.toolConnectTunnel.addEventListener('click', () => setTool('connect_tunnel'));
+ui.toolDelete.addEventListener('click', () => setTool('delete'));
+
+function setHud(toolName, infoText) {
+  ui.hudTool.textContent = `Tool: ${toolName}`;
+  if (infoText) ui.hudInfo.textContent = infoText;
+}
+
+function refreshSidebarSelection() {
+  if (state.selectedKind === 'room' && state.selectedIndex >= 0) {
+    const r = state.level.rooms[state.selectedIndex];
+    if (!r) return;
+    ui.selectedEmpty.style.display = 'none';
+    ui.selectedRoom.style.display = '';
+    ui.selectedTunnel.style.display = 'none';
+    ui.selId.value = r.id;
+    ui.selTeam.value = r.team || '';
+    ui.selX.value = r.x;
+    ui.selY.value = r.y;
+    ui.selZ.value = r.z;
+    ui.selR.value = r.r;
+  } else if (state.selectedKind === 'tunnel' && state.selectedIndex >= 0) {
+    const t = state.level.tunnels[state.selectedIndex];
+    if (!t) return;
+    ui.selectedEmpty.style.display = 'none';
+    ui.selectedRoom.style.display = 'none';
+    ui.selectedTunnel.style.display = '';
+    const a = t.path[0], b = t.path[t.path.length - 1];
+    const fromR = state.level.rooms.find(r => r.x === a.x && r.y === a.y && r.z === a.z);
+    const toR = state.level.rooms.find(r => r.x === b.x && r.y === b.y && r.z === b.z);
+    ui.selTunnelInfo.textContent =
+      `${fromR ? fromR.id : '?'} ↔ ${toR ? toR.id : '?'}, ${t.path.length} waypoints`;
+  } else {
+    ui.selectedEmpty.style.display = '';
+    ui.selectedRoom.style.display = 'none';
+    ui.selectedTunnel.style.display = 'none';
+  }
+}
+
+// Sidebar inputs → state + mesh
+ui.selId.addEventListener('input', () => {
+  if (state.selectedKind !== 'room') return;
+  const r = state.level.rooms[state.selectedIndex];
+  if (r) { r.id = ui.selId.value; refreshLists(); }
+});
+ui.selTeam.addEventListener('change', () => {
+  if (state.selectedKind !== 'room') return;
+  const r = state.level.rooms[state.selectedIndex];
+  if (!r) return;
+  r.team = ui.selTeam.value || null;
+  const mesh = roomMeshes[state.selectedIndex];
+  if (mesh) mesh.material.color.setHex(teamColor(r.team));
+  refreshLists();
+});
+for (const [key, inp] of [['x', ui.selX], ['y', ui.selY], ['z', ui.selZ]]) {
+  inp.addEventListener('input', () => {
+    if (state.selectedKind !== 'room') return;
+    const r = state.level.rooms[state.selectedIndex];
+    if (!r) return;
+    r[key] = +inp.value || 0;
+    const mesh = roomMeshes[state.selectedIndex];
+    if (mesh) mesh.position[key] = r[key];
+    rebuildTunnelMeshes();
+  });
+}
+ui.selR.addEventListener('input', () => {
+  if (state.selectedKind !== 'room') return;
+  const r = state.level.rooms[state.selectedIndex];
+  if (!r) return;
+  r.r = Math.max(50, +ui.selR.value || 200);
+  const mesh = roomMeshes[state.selectedIndex];
+  if (mesh) mesh.scale.setScalar(r.r);
+});
+
+// ============================================================
+// Lists
+// ============================================================
+function refreshLists() {
+  ui.roomCount.textContent = state.level.rooms.length;
+  ui.tunnelCount.textContent = state.level.tunnels.length;
+
+  ui.roomsList.innerHTML = '';
+  state.level.rooms.forEach((r, i) => {
+    const div = document.createElement('div');
+    div.className = 'room-item' + (state.selectedKind === 'room' && state.selectedIndex === i ? ' selected' : '') + (r.team ? ' team-' + r.team : '');
+    div.innerHTML = `<span>${escapeHtml(r.id)}${r.team ? ' [' + r.team + ']' : ''}</span><span class="stat">r=${r.r}</span>`;
+    div.addEventListener('click', () => selectRoom(i));
+    ui.roomsList.appendChild(div);
+  });
+
+  ui.tunnelsList.innerHTML = '';
+  state.level.tunnels.forEach((t, i) => {
+    const div = document.createElement('div');
+    div.className = 'tunnel-item' + (state.selectedKind === 'tunnel' && state.selectedIndex === i ? ' selected' : '');
+    const a = t.path[0], b = t.path[t.path.length - 1];
+    const fromR = state.level.rooms.find(r => r.x === a.x && r.y === a.y && r.z === a.z);
+    const toR = state.level.rooms.find(r => r.x === b.x && r.y === b.y && r.z === b.z);
+    div.innerHTML = `<span>${escapeHtml(fromR ? fromR.id : '?')} → ${escapeHtml(toR ? toR.id : '?')}</span><span class="stat">${t.path.length}wp</span>`;
+    div.addEventListener('click', () => selectTunnel(i));
+    ui.tunnelsList.appendChild(div);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ============================================================
+// Keyboard
+// ============================================================
+window.addEventListener('keydown', (ev) => {
+  if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA' || ev.target.tagName === 'SELECT') return;
+  if (ev.key === 'Delete' || ev.key === 'Backspace') {
+    if (state.selectedKind === 'room' && state.selectedIndex >= 0) deleteRoom(state.selectedIndex);
+    else if (state.selectedKind === 'tunnel' && state.selectedIndex >= 0) deleteTunnel(state.selectedIndex);
+  } else if (ev.key === 'Escape') {
+    if (state.tool !== 'select') setTool('select');
+    else clearSelection();
+  } else if (ev.key === '1') setTool('select');
+  else if (ev.key === '2') setTool('place_room');
+  else if (ev.key === '3') setTool('connect_tunnel');
+  else if (ev.key === '4') setTool('delete');
+});
+
+// ============================================================
+// Export / import
+// ============================================================
+function buildLevelExport() {
+  return {
+    name: state.level.name,
+    key: state.level.key,
+    description: state.level.description,
+    palette: state.level.palette.slice(),
+    rooms: state.level.rooms.map(r => ({
+      id: r.id, team: r.team, x: r.x, y: r.y, z: r.z, r: r.r
+    })),
+    tunnels: state.level.tunnels.map(t => ({
+      path: t.path.map(p => ({ x: p.x, y: p.y, z: p.z })),
+      ...(t.r ? { r: t.r } : {})
+    }))
+  };
+}
+
+function loadLevelImport(data) {
+  if (!data || !Array.isArray(data.rooms)) {
+    alert('Invalid level: missing "rooms" array.');
+    return;
+  }
+  state.level.name = data.name || 'Untitled';
+  state.level.key = data.key || 'custom';
+  state.level.description = data.description || '';
+  if (Array.isArray(data.palette) && data.palette.length === 8) {
+    state.level.palette = data.palette.map(c => (typeof c === 'string' ? parseInt(c.replace('#', ''), 16) : (c | 0)));
+  }
+  state.level.rooms = data.rooms.map(r => ({
+    id: r.id || ('room_' + Math.random().toString(36).slice(2, 6)),
+    team: r.team || null,
+    x: +r.x || 0, y: +r.y || 0, z: +r.z || 0,
+    r: Math.max(50, +r.r || 200)
+  }));
+  state.level.tunnels = (data.tunnels || []).map(t => ({
+    path: (t.path || []).map(p => ({ x: +p.x || 0, y: +p.y || 0, z: +p.z || 0 })),
+    ...(t.r ? { r: +t.r } : {})
+  }));
+  state.nextRoomId = state.level.rooms.length + 1;
+  ui.lvlName.value = state.level.name;
+  ui.lvlKey.value = state.level.key;
+  ui.lvlDesc.value = state.level.description;
+  buildPaletteUI();
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  clearSelection();
+}
+
+ui.exportJson.addEventListener('click', () => {
+  const data = buildLevelExport();
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (state.level.key || 'level') + '.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+ui.exportJs.addEventListener('click', async () => {
+  const data = buildLevelExport();
+  // Format as a JS object literal that drops into MAP_DATA verbatim.
+  let s = `${data.key}: {\n`;
+  s += `  name: ${JSON.stringify(data.name)},\n`;
+  if (data.description) s += `  description: ${JSON.stringify(data.description)},\n`;
+  s += `  palette: [\n    ${data.palette.map(c => '0x' + c.toString(16).padStart(6, '0')).join(', ')}\n  ],\n`;
+  s += `  rooms: [\n`;
+  for (const r of data.rooms) {
+    const parts = [`id: ${JSON.stringify(r.id)}`];
+    parts.push(r.team ? `team: ${JSON.stringify(r.team)}` : `team: null`);
+    parts.push(`x: ${r.x}`, `y: ${r.y}`, `z: ${r.z}`, `r: ${r.r}`);
+    s += `    { ${parts.join(', ')} },\n`;
+  }
+  s += `  ],\n`;
+  s += `  tunnels: [\n`;
+  for (const t of data.tunnels) {
+    const ps = t.path.map(p => `{x: ${p.x}, y: ${p.y}, z: ${p.z}}`).join(', ');
+    s += `    { path: [${ps}]${t.r ? ', r: ' + t.r : ''} },\n`;
+  }
+  s += `  ]\n}`;
+  try {
+    await navigator.clipboard.writeText(s);
+    setHud(toolLabel[state.tool].name, 'JS copied to clipboard. Paste it into MAP_DATA.');
+  } catch (e) {
+    ui.importText.value = s;
+    setHud(toolLabel[state.tool].name, 'Clipboard blocked; the JS is in the import textarea below. Copy it manually.');
+  }
+});
+
+ui.importFile.addEventListener('change', () => {
+  const f = ui.importFile.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try { loadLevelImport(JSON.parse(reader.result)); }
+    catch (e) { alert('Failed to parse JSON: ' + e.message); }
+  };
+  reader.readAsText(f);
+  ui.importFile.value = '';
+});
+
+ui.importTextBtn.addEventListener('click', () => {
+  const txt = ui.importText.value.trim();
+  if (!txt) return;
+  try { loadLevelImport(JSON.parse(txt)); }
+  catch (e) { alert('Failed to parse JSON: ' + e.message); }
+});
+
+ui.newMapBtn.addEventListener('click', () => {
+  if (!confirm('Clear current map and start fresh? Unsaved work will be lost.')) return;
+  state.level.rooms = [];
+  state.level.tunnels = [];
+  state.nextRoomId = 1;
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  clearSelection();
+});
+
+// ============================================================
+// Render loop and resize
+// ============================================================
+function fitRendererToViewport() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+}
+fitRendererToViewport();
+window.addEventListener('resize', fitRendererToViewport);
+
+function animate() {
+  requestAnimationFrame(animate);
+  orbit.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// ============================================================
+// Initial demo: two rooms connected by a tunnel so the editor isn't empty.
+// User can clear with "New".
+// ============================================================
+addRoom(-500, 0, 0);
+addRoom(500, 0, 0);
+addTunnel(0, 1);
+clearSelection();
+setTool('select');
+</script>
+</body>
+</html>

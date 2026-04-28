@@ -20470,28 +20470,35 @@ function buildRoomGraphLevel(level) {
     const _v7Palette = (level && Array.isArray(level.palette) && level.palette.length > 0)
       ? level.palette
       : [0x1a3050, 0x3a1010, 0x103a10, 0x351828, 0x183520, 0x2a2040, 0x1a4030, 0x402020];
-    const _v7Boost = 1.80; // matches PALETTE_BOOST in createMeshFromPositions
     const _v7HslTmp = { h: 0, s: 0, l: 0 };
+    // Light color = hue from palette[i], but saturation and lightness forced
+    // to vivid values. Level palettes are dark (gunmetal, deep ocean, etc.)
+    // for WALL tinting; using them directly as light colors produces nearly
+    // black light. We keep the hue identity (so each room's light matches
+    // its wall slot's color family) but force S/L bright enough to read
+    // through the existing cartoon ambient + key + fill rig.
+    const _v7LIGHT_SAT = 0.90;
+    const _v7LIGHT_LIT = 0.55;
     for (let i = 0; i < game.levelSpheres.length; i++) {
       const s = game.levelSpheres[i];
       const baseCol = new THREE.Color(_v7Palette[i % _v7Palette.length]);
       baseCol.getHSL(_v7HslTmp);
-      // Stash this room's base HSL so gameLoop can drift it in lockstep
-      // with the wall shader's matching roomColorsU[i] slot.
-      game.roomLightBaseHues.push({ h: _v7HslTmp.h, s: _v7HslTmp.s, l: _v7HslTmp.l });
-      // Boosted RGB seed; gameLoop will overwrite this each frame from the
-      // drifted hue.
-      const col = new THREE.Color(
-        Math.min(1.0, baseCol.r * _v7Boost),
-        Math.min(1.0, baseCol.g * _v7Boost),
-        Math.min(1.0, baseCol.b * _v7Boost)
-      );
-      // range = sphere radius * 1.6 with quadratic decay (decay=2). Lights
-      // die before bleeding far into adjacent rooms, but blend smoothly in
-      // the smooth-min overlap regions where two ⊙s share a wall.
-      // intensity 1.2 is tuned so ships read the room color clearly without
-      // washing out the cartoon-style key/fill directional rig overhead.
-      const light = new THREE.PointLight(col, 1.2, s.r * 1.6, 2.0);
+      // Stash this room's base HUE so gameLoop can drift it. We deliberately
+      // store the forced sat/lit values, not the palette's dark ones, because
+      // these are LIGHT colors (vivid), not wall colors (dark).
+      game.roomLightBaseHues.push({ h: _v7HslTmp.h, s: _v7LIGHT_SAT, l: _v7LIGHT_LIT });
+      // Build the seed color at the forced sat/lit. gameLoop will rebuild
+      // this each frame from the drifted hue with the same forced S/L.
+      const col = new THREE.Color();
+      col.setHSL(_v7HslTmp.h, _v7LIGHT_SAT, _v7LIGHT_LIT);
+      // range = sphere radius * 2.6 with linear decay (decay=1) to match the
+      // existing scene PointLight style (cartoon-bright, not PBR-correct).
+      // intensity 12 looks high but is what's needed to read against the
+      // ambient 3.9 + key 5.0 + fill 3.1 + under 1.8 + hemi 3.1 rig that
+      // already lights ships from every direction. Wider range lets the
+      // room color bleed into the smooth-min overlap regions and into
+      // tunnel mouths so ships entering a room feel its color rise.
+      const light = new THREE.PointLight(col, 12.0, s.r * 2.6, 1.0);
       light.position.set(s.cx, s.cy, s.cz);
       // Lights are conceptually invisible (no helper mesh, no glow sprite);
       // they exist only to illuminate ships passing through.
@@ -21698,22 +21705,29 @@ function gameLoop(timestamp) {
       const boost = game.wallPaletteBoost || 1.0;
       const colors = game.levelMaterial.uniforms.roomColorsU.value;
       const lights = game.roomLights || [];
+      const lightHues = game.roomLightBaseHues || [];
       // Mutating each THREE.Color is fine because Three.js samples the
       // uniform array each draw; no needsUpdate flag is required for
       // value-mutation on uniform arrays.
       for (let i = 0; i < colors.length; i++) {
-        const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
-        const driftedHue = (base.h + driftOffset) % 1;
-        _wallHueScratchColor.setHSL(driftedHue, base.s, base.l);
-        const r = Math.min(1.0, _wallHueScratchColor.r * boost);
-        const g = Math.min(1.0, _wallHueScratchColor.g * boost);
-        const b = Math.min(1.0, _wallHueScratchColor.b * boost);
-        // Walls: write the boosted RGB into the shader uniform slot.
-        colors[i].setRGB(r, g, b);
-        // (v7.0) Aperture lights: same drifted color, so the • light at the
-        // room's center and the ○ wall pattern around it read as one entity.
-        if (i < lights.length && lights[i]) {
-          lights[i].color.setRGB(r, g, b);
+        // Walls: dark palette HSL (gunmetal/ocean/etc.) drifted, then boosted.
+        const wbase = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+        const wallDriftedHue = (wbase.h + driftOffset) % 1;
+        _wallHueScratchColor.setHSL(wallDriftedHue, wbase.s, wbase.l);
+        const wr = Math.min(1.0, _wallHueScratchColor.r * boost);
+        const wg = Math.min(1.0, _wallHueScratchColor.g * boost);
+        const wb = Math.min(1.0, _wallHueScratchColor.b * boost);
+        colors[i].setRGB(wr, wg, wb);
+        // (v7.0) Aperture lights: SAME hue family, but vivid sat/lit so the
+        // light actually reads. Walls and lights share hue identity per room
+        // (locked via the palette), they differ in saturation/lightness
+        // because walls are tinted-dark surfaces and lights are bright
+        // emitters. The drift offset is identical, so they breathe together.
+        if (i < lights.length && lights[i] && i < lightHues.length) {
+          const lbase = lightHues[i] || { h: 0, s: 0.9, l: 0.55 };
+          const lightDriftedHue = (lbase.h + driftOffset) % 1;
+          _wallHueScratchColor.setHSL(lightDriftedHue, lbase.s, lbase.l);
+          lights[i].color.setRGB(_wallHueScratchColor.r, _wallHueScratchColor.g, _wallHueScratchColor.b);
         }
       }
     }
