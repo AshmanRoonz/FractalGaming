@@ -20999,23 +20999,37 @@ function buildRoomGraphLevel(level) {
     const roomCentersArr = [];
     const roomColorsArr = [];
     const roomRadiiArr = [];
+    // (post-v6.9 patch, 2026-04-28) Per-room palette differentiation. Each
+    // wall-shader slot now pulls a distinct hue from level.palette so each
+    // ⊙ has its own color identity, instead of all 8 slots cloning palette[0].
+    // The legacy comment near roomPalette explained that palette[1..7] were
+    // "no longer read by the wall shader" but kept on the map definitions
+    // "in case we want to re-enable per-room palettes later"; this patch is
+    // exactly that re-enable. Per-slot base HSL is stashed on game.wallRoomBaseHues
+    // so gameLoop can drift each room around its own hue while keeping the
+    // shared time offset that rotates the whole map through the spectrum.
+    game.wallRoomBaseHues = [];
+    const _slotHslTmp = { h: 0, s: 0, l: 0 };
     for (let i = 0; i < 8; i++) {
       if (i < numRooms) {
         const r = game.sdfRoomData[i];
         roomCentersArr.push(new THREE.Vector3(r.x, r.y, r.z));
-        // Initialize all slots to the boosted base color. gameLoop will
-        // hue-rotate them every frame, but we seed them so the first frame
-        // before gameLoop ticks already shows the right wall color.
-        const startCol = new THREE.Color(roomPalette[0]);
-        startCol.r = Math.min(1.0, startCol.r * PALETTE_BOOST);
-        startCol.g = Math.min(1.0, startCol.g * PALETTE_BOOST);
-        startCol.b = Math.min(1.0, startCol.b * PALETTE_BOOST);
+        const slotCol = new THREE.Color(roomPalette[i % roomPalette.length]);
+        slotCol.getHSL(_slotHslTmp);
+        game.wallRoomBaseHues.push({ h: _slotHslTmp.h, s: _slotHslTmp.s, l: _slotHslTmp.l });
+        const startCol = new THREE.Color(
+          Math.min(1.0, slotCol.r * PALETTE_BOOST),
+          Math.min(1.0, slotCol.g * PALETTE_BOOST),
+          Math.min(1.0, slotCol.b * PALETTE_BOOST)
+        );
         roomColorsArr.push(startCol);
         roomRadiiArr.push(r.r);
       } else {
         roomCentersArr.push(new THREE.Vector3(0, 99999, 0));
         roomColorsArr.push(new THREE.Color(0x000000));
         roomRadiiArr.push(0);
+        // Empty slot: parked hue so gameLoop's drift loop has a defined entry.
+        game.wallRoomBaseHues.push({ h: 0, s: 0, l: 0 });
       }
     }
 
@@ -21588,26 +21602,28 @@ function gameLoop(timestamp) {
   if (game.levelMaterial) {
     game.levelMaterial.uniforms.time.value = game.time;
 
-    // Drift the wall's base hue around the color wheel so the whole map
-    // slowly rotates through the spectrum as the round progresses. All 8
-    // room slots get the same color (single-hue map, see the wall-uniform
-    // construction in createMeshFromPositions). HUE_PERIOD = full cycle in
+    // (post-v6.9 patch, 2026-04-28) Drift each room's palette hue around the
+    // color wheel so the whole map slowly rotates through the spectrum as the
+    // round progresses. Each of the 8 room slots has its own base hue (stashed
+    // in game.wallRoomBaseHues by createMeshFromPositions from level.palette[i]);
+    // the same time-driven offset is applied to all of them so they rotate
+    // together while staying differentiated. HUE_PERIOD = full cycle in
     // seconds; longer = more subtle drift.
     const HUE_PERIOD = 240; // 4 minutes per full rotation
-    if (game.wallBaseHue !== undefined && game.levelMaterial.uniforms.roomColorsU) {
-      const driftedHue = (game.wallBaseHue + game.time / HUE_PERIOD) % 1;
-      const sat = game.wallBaseSat;
-      const lit = game.wallBaseLit;
+    if (game.wallRoomBaseHues && game.levelMaterial.uniforms.roomColorsU) {
+      const driftOffset = game.time / HUE_PERIOD;
       const boost = game.wallPaletteBoost || 1.0;
       const colors = game.levelMaterial.uniforms.roomColorsU.value;
-      // Compute once, write to every slot. Mutating each THREE.Color is fine
-      // because Three.js samples the array each draw; no needsUpdate flag
-      // is required for value-mutation on uniform arrays.
-      _wallHueScratchColor.setHSL(driftedHue, sat, lit);
-      const r = Math.min(1.0, _wallHueScratchColor.r * boost);
-      const g = Math.min(1.0, _wallHueScratchColor.g * boost);
-      const b = Math.min(1.0, _wallHueScratchColor.b * boost);
+      // Mutating each THREE.Color is fine because Three.js samples the
+      // uniform array each draw; no needsUpdate flag is required for
+      // value-mutation on uniform arrays.
       for (let i = 0; i < colors.length; i++) {
+        const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+        const driftedHue = (base.h + driftOffset) % 1;
+        _wallHueScratchColor.setHSL(driftedHue, base.s, base.l);
+        const r = Math.min(1.0, _wallHueScratchColor.r * boost);
+        const g = Math.min(1.0, _wallHueScratchColor.g * boost);
+        const b = Math.min(1.0, _wallHueScratchColor.b * boost);
         colors[i].setRGB(r, g, b);
       }
     }
