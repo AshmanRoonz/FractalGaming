@@ -5496,6 +5496,20 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (session) {
     session.addEventListener('inputsourceschange', _xrUpdateInputSources);
   }
+
+  // Auto-skip the initial Solo/Multi lobby when entering VR. The 2D lobby
+  // panel is invisible in the headset, so without this the user would be
+  // stuck pressing buttons blindly. After auto-click, they land in the
+  // ship-select panel; D-Pad up/down (left thumbstick) cycles ship, and B
+  // (right secondary, mapped to standard btn 9 = Start) commits.
+  try {
+    const soloBtn = document.getElementById('btn-solo');
+    const lobbyEl = document.getElementById('lobby');
+    const lobbyVisible = lobbyEl && lobbyEl.offsetParent !== null;
+    if (soloBtn && lobbyVisible) {
+      setTimeout(() => { try { soloBtn.click(); } catch (_) {} }, 50);
+    }
+  } catch (_) { /* lobby not present, ignore */ }
 });
 
 renderer.xr.addEventListener('sessionend', () => {
@@ -5577,32 +5591,44 @@ renderer.xr.addEventListener('sessionend', () => {
   });
 })();
 
-// Pre-render hook: copy player-pose-driven camera transform onto the
-// dolly so the XR pose composes correctly. Reset camera local so the
-// renderer's XR step writes the head pose into a clean transform.
-function _xrSyncDollyBeforeRender() {
+// Reset BOTH dolly and camera-local transform at the top of every frame.
+// At the end of each render three.js writes the headset pose into
+// camera.position (via xr.updateCamera). If on the next frame the game
+// logic does NOT overwrite camera.position (e.g., in ship-select / lobby
+// state where most update functions early-return), the stale head pose
+// would get copied into the dolly by _xrSyncDollyBeforeRender and the
+// dolly would drift away from the player. Resetting at the top of every
+// frame keeps everything anchored: in combat the game logic re-writes
+// camera.position to player.position; in lobby it stays at (0,0,0).
+function _xrResetDollyAtFrameStart() {
   if (!renderer.xr.isPresenting) return;
-  // camera.position / quaternion currently hold what the existing game
-  // logic considers the "ship view" pose (in world coordinates, since
-  // dolly is reset to identity below).
-  xrDolly.position.copy(camera.position);
-  xrDolly.quaternion.copy(camera.quaternion);
+  xrDolly.position.set(0, 0, 0);
+  xrDolly.quaternion.set(0, 0, 0, 1);
   xrDolly.updateMatrixWorld(true);
   camera.position.set(0, 0, 0);
   camera.quaternion.set(0, 0, 0, 1);
   camera.updateMatrixWorld(true);
 }
 
-// Reset the dolly to identity at the very top of each frame so the
-// existing per-frame camera updates (which write world-space values into
-// camera.position) end up in the correct frame: with dolly at identity,
-// camera.position is effectively in world space, which matches the rest
-// of the game's assumptions.
-function _xrResetDollyAtFrameStart() {
+// Pre-render hook. Lifts the player-pose that game logic wrote into
+// camera.position up onto the dolly, then zeros camera.local so three.js's
+// xr.updateCamera writes the headset pose into a clean transform. After
+// render, camera.matrixWorld = dolly.matrixWorld * head_pose = ship_pose *
+// head_pose, so the user is rendered "inside the cockpit, looking around".
+function _xrSyncDollyBeforeRender() {
   if (!renderer.xr.isPresenting) return;
-  xrDolly.position.set(0, 0, 0);
-  xrDolly.quaternion.set(0, 0, 0, 1);
+  // Defensive: any code path that re-adds camera to the scene root would
+  // detach it from the dolly. Reattach so the WebXRManager pose composition
+  // (parent.matrixWorld * head_pose) actually picks up the ship pose.
+  if (camera.parent !== xrDolly) {
+    xrDolly.add(camera);
+  }
+  xrDolly.position.copy(camera.position);
+  xrDolly.quaternion.copy(camera.quaternion);
   xrDolly.updateMatrixWorld(true);
+  camera.position.set(0, 0, 0);
+  camera.quaternion.set(0, 0, 0, 1);
+  camera.updateMatrixWorld(true);
 }
 
 // ---- IBL ENVIRONMENT MAP ----
