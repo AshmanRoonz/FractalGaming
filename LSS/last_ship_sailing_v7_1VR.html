@@ -1526,6 +1526,27 @@ const input = {
     scoreboard: 8, // Back
     menu: 9,       // Start
   },
+  // (VR fork) XR controller -> standard-layout gamepad btn mapping. Used
+  // by _xrSynthGamepad to build a virtual standard gamepad from the two
+  // XR controllers each frame. -1 = unbound. Defaults match the original
+  // hardcoded shim. Persisted via saveSettings.
+  xrBindings: {
+    rightTrigger:    7,   // RT (fire)
+    rightGrip:       5,   // RB (ability1)
+    rightStickClick: 11,  // R3 (moveDown)
+    rightA:          0,   // A  (dash)
+    rightB:          1,   // B  (unbound by default; also synthesizes Start, see xrSynth)
+    leftTrigger:     6,   // LT (altFire)
+    leftGrip:        4,   // LB (ability0)
+    leftStickClick:  10,  // L3 (moveUp)
+    leftX:           2,   // X  (reload)
+    leftY:           3,   // Y  (ability2; also synthesizes Back, see xrSynth)
+  },
+  xrSynth: {
+    rightBAlsoStart: true,
+    leftYAlsoBack:   true,
+    leftStickAsDpad: true,
+  },
   // (v6.9) Keyboard mappings. Values are KeyboardEvent.key values normalized
   // to lowercase (' ' for Space, 'control' for Ctrl, etc.). Empty string =
   // unbound (no key triggers this action). Defaults match the keys this game
@@ -5486,9 +5507,11 @@ renderer.xr.addEventListener('sessionstart', () => {
   document.body.classList.add('vr-active');
   // Re-parent camera under dolly so head pose composes with ship pose.
   if (camera.parent !== xrDolly) xrDolly.add(camera);
-  // Make the HUD mirror plane visible (created lazily on first use).
+  // Make both HUD planes visible (created lazily on first use).
   const hud = _xrEnsureHudMesh();
   if (hud) hud.visible = true;
+  const aux = _xrEnsureAuxMesh();
+  if (aux) aux.visible = true;
   // Reset camera local transform; the renderer will stamp the head pose
   // into camera.matrix on the very first XR frame.
   camera.position.set(0, 0, 0);
@@ -5520,6 +5543,7 @@ renderer.xr.addEventListener('sessionstart', () => {
 renderer.xr.addEventListener('sessionend', () => {
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
+  if (xrAuxMesh) xrAuxMesh.visible = false;
   // Hand the camera back to the scene root so the flat-screen render
   // path keeps working unchanged.
   if (camera.parent === xrDolly) {
@@ -5696,6 +5720,160 @@ function _xrEnsureHudMesh() {
   xrDolly.add(xrHudMesh);
   return xrHudMesh;
 }
+// Aux HUD plane: ability pie (drawn from game state) + score / round
+// timer. Lives below the crosshair plane so the player can glance down at
+// cooldowns the way they would at the bottom of a flatscreen cockpit.
+const _xrAuxCanvas = document.createElement('canvas');
+_xrAuxCanvas.width = 1024;
+_xrAuxCanvas.height = 768;
+const _xrAuxCtx = _xrAuxCanvas.getContext('2d');
+let _xrAuxTex = null;
+let xrAuxMesh = null;
+function _xrEnsureAuxMesh() {
+  if (xrAuxMesh) return xrAuxMesh;
+  _xrAuxTex = new THREE.CanvasTexture(_xrAuxCanvas);
+  _xrAuxTex.minFilter = THREE.LinearFilter;
+  _xrAuxTex.magFilter = THREE.LinearFilter;
+  _xrAuxTex.format = THREE.RGBAFormat;
+  _xrAuxTex.generateMipmaps = false;
+  const geo = new THREE.PlaneGeometry(2.0, 1.5);
+  const mat = new THREE.MeshBasicMaterial({
+    map: _xrAuxTex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  });
+  xrAuxMesh = new THREE.Mesh(geo, mat);
+  // 1.7m forward, 0.85m below eye, tilted ~26 deg toward face.
+  xrAuxMesh.position.set(0, -0.85, -1.7);
+  xrAuxMesh.rotation.x = 0.45;
+  xrAuxMesh.renderOrder = 998;
+  xrAuxMesh.frustumCulled = false;
+  xrDolly.add(xrAuxMesh);
+  return xrAuxMesh;
+}
+
+function _xrApFill(cls, barW) {
+  if (cls.indexOf('active-now') >= 0) return 'rgba(255,180,50,0.55)';
+  if (cls.indexOf('ready') >= 0)      return 'rgba(40,210,90,0.50)';
+  const p = Math.max(0, Math.min(1, (barW || 0) / 100));
+  const hue = p * 120;
+  return 'hsla(' + hue.toFixed(0) + ', 78%, 48%, 0.50)';
+}
+
+function _xrReadQuarterState(slotKey) {
+  let cls = 'ability-slot', barW = 100, abName = '', cdText = '';
+  try {
+    if (slotKey === 'core') {
+      const cp = Math.min(100, (typeof player !== 'undefined' && player.coreMeter) || 0);
+      abName = 'CORE';
+      if (cp >= 100) cls += ' ready';
+      else { cls += ' on-cooldown'; barW = cp; cdText = Math.floor(cp) + '%'; }
+    } else {
+      const ab = player && player.abilities && player.abilities[slotKey];
+      if (!ab) return { cls: cls, barW: 0, abName: '', cdText: '' };
+      abName = ab.name || '';
+      const cd = (player.abilityCooldowns && player.abilityCooldowns[slotKey]) || 0;
+      const active = player.abilityActive && player.abilityActive[slotKey];
+      if (active) cls += ' active-now';
+      else if (cd <= 0) cls += ' ready';
+      else {
+        cls += ' on-cooldown';
+        const dur = ab.cooldown || 1;
+        barW = Math.max(0, Math.min(100, 100 - (cd / dur) * 100));
+        cdText = cd.toFixed(1) + 's';
+      }
+    }
+  } catch (_) {}
+  return { cls: cls, barW: barW, abName: abName, cdText: cdText };
+}
+
+const _xrAuxQuarters = [
+  { t1: 225, t2: 315, key: 'Q', slotKey: 0 },
+  { t1: 315, t2: 405, key: 'E', slotKey: 1 },
+  { t1:  45, t2: 135, key: 'F', slotKey: 2 },
+  { t1: 135, t2: 225, key: 'V', slotKey: 'core' },
+];
+
+function _xrDrawAuxHud() {
+  const ctx = _xrAuxCtx;
+  const W = _xrAuxCanvas.width, H = _xrAuxCanvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+
+  const scoreA = (typeof game !== 'undefined' && typeof game.scoreA === 'number') ? game.scoreA : 0;
+  const scoreB = (typeof game !== 'undefined' && typeof game.scoreB === 'number') ? game.scoreB : 0;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.font = '700 64px Orbitron, sans-serif';
+  ctx.fillStyle = 'rgba(120,200,255,0.95)';
+  ctx.fillText('FLEET A   ' + scoreA, W * 0.27, 18);
+  ctx.fillStyle = 'rgba(255,140,110,0.95)';
+  ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 18);
+
+  let timerStr = '', stateStr = '';
+  try {
+    const tEl = document.getElementById('round-timer');
+    if (tEl && tEl.textContent) timerStr = tEl.textContent;
+    const sEl = document.getElementById('round-state');
+    if (sEl && sEl.textContent) stateStr = sEl.textContent;
+  } catch (_) {}
+  if (timerStr) {
+    ctx.font = '600 56px Orbitron, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fillText(timerStr, W / 2, 110);
+  }
+  if (stateStr) {
+    ctx.font = '500 24px Rajdhani, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillText(stateStr, W / 2, 180);
+  }
+
+  const cx = W / 2;
+  const cy = H * 0.62 + 110;
+  const outR = 230;
+  const labelR = outR * 0.58;
+  const gapDeg = 3;
+
+  for (const q of _xrAuxQuarters) {
+    const st = _xrReadQuarterState(q.slotKey);
+    const t1 = (q.t1 + gapDeg / 2) * Math.PI / 180;
+    const t2 = (q.t2 - gapDeg / 2) * Math.PI / 180;
+    ctx.fillStyle = _xrApFill(st.cls, st.barW);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + outR * Math.cos(t1), cy + outR * Math.sin(t1));
+    ctx.arc(cx, cy, outR, t1, t2, false);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const tMid = ((q.t1 + q.t2) / 2) * Math.PI / 180;
+    const lx = cx + labelR * Math.cos(tMid);
+    const ly = cy + labelR * Math.sin(tMid);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.96)';
+    ctx.font = '700 38px Orbitron, sans-serif';
+    ctx.fillText(q.key, lx, ly - 22);
+    if (st.abName) {
+      const shortName = String(st.abName).split(/\s+/)[0].slice(0, 11);
+      ctx.font = '600 18px Rajdhani, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(shortName.toUpperCase(), lx, ly + 4);
+    }
+    if (st.cdText) {
+      ctx.font = '500 16px Rajdhani, sans-serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.70)';
+      ctx.fillText(st.cdText, lx, ly + 24);
+    }
+  }
+
+  ctx.restore();
+}
+
 // Toggle HUD plane visibility from session events so it does not sit in
 // the world during flat-screen play.
 
@@ -6215,16 +6393,25 @@ function renderPostFX() {
 // for ammo/health/cooldown readouts. Tunable.
 const _xrHudUpdateEveryN = 2;
 let _xrHudUploadCounter = 0;
+let _xrAuxUploadCounter = 0;
 function renderFrame() {
   if (renderer.xr.isPresenting) {
     _xrSyncDollyBeforeRender();
-    // Refresh the mirrored HUD texture, but throttled. drawCircumpunctHUD
-    // already wrote to the canvas during updateHUD earlier this frame.
+    // Refresh the mirrored HUD texture, but throttled.
     if (_xrHudTex) {
       _xrHudUploadCounter++;
       if (_xrHudUploadCounter >= _xrHudUpdateEveryN) {
         _xrHudTex.needsUpdate = true;
         _xrHudUploadCounter = 0;
+      }
+    }
+    // Aux HUD: throttled draw + upload (ability pie + score + timer).
+    if (xrAuxMesh && _xrAuxTex) {
+      _xrAuxUploadCounter++;
+      if (_xrAuxUploadCounter >= _xrHudUpdateEveryN) {
+        _xrDrawAuxHud();
+        _xrAuxTex.needsUpdate = true;
+        _xrAuxUploadCounter = 0;
       }
     }
     renderer.setRenderTarget(null);
@@ -16913,42 +17100,52 @@ function _xrSynthGamepad() {
   const axes = [0, 0, 0, 0];
 
   function copyBtn(srcBtns, srcIdx, dstIdx) {
+    if (dstIdx == null || dstIdx < 0 || dstIdx > 16) return;
     const b = srcBtns && srcBtns[srcIdx];
     if (!b) return;
     buttons[dstIdx] = { pressed: !!b.pressed, touched: !!b.touched, value: b.value || (b.pressed ? 1 : 0) };
   }
   function setBtn(dstIdx, pressed) {
+    if (dstIdx == null || dstIdx < 0 || dstIdx > 16) return;
     const p = !!pressed;
     buttons[dstIdx] = { pressed: p, touched: p, value: p ? 1 : 0 };
   }
 
+  // (VR fork) Read user-configured mapping; fall back to original defaults
+  // if a key is missing (e.g., older saved settings).
+  const xb = (input && input.xrBindings) || {};
+  const xs = (input && input.xrSynth) || {};
+  const _g = (k, d) => (xb[k] != null ? xb[k] : d);
+
   if (right) {
-    copyBtn(right.buttons, 4, 0); // A
-    copyBtn(right.buttons, 5, 1); // B
-    copyBtn(right.buttons, 1, 5); // RB = right grip
-    copyBtn(right.buttons, 0, 7); // RT = right trigger
-    copyBtn(right.buttons, 3, 11); // R3 = right thumbstick click
+    copyBtn(right.buttons, 4, _g('rightA',          0));
+    copyBtn(right.buttons, 5, _g('rightB',          1));
+    copyBtn(right.buttons, 1, _g('rightGrip',       5));
+    copyBtn(right.buttons, 0, _g('rightTrigger',    7));
+    copyBtn(right.buttons, 3, _g('rightStickClick', 11));
     let rx = right.axes[2] || 0, ry = right.axes[3] || 0;
     if (rx === 0 && ry === 0) { rx = right.axes[0] || 0; ry = right.axes[1] || 0; }
     axes[2] = rx; axes[3] = ry;
-    if (right.buttons[5] && right.buttons[5].pressed) setBtn(9, true);
+    if (xs.rightBAlsoStart && right.buttons[5] && right.buttons[5].pressed) setBtn(9, true);
   }
 
   if (left) {
-    copyBtn(left.buttons, 4, 2); // X
-    copyBtn(left.buttons, 5, 3); // Y
-    copyBtn(left.buttons, 1, 4); // LB = left grip
-    copyBtn(left.buttons, 0, 6); // LT = left trigger
-    copyBtn(left.buttons, 3, 10); // L3 = left thumbstick click
+    copyBtn(left.buttons, 4, _g('leftX',          2));
+    copyBtn(left.buttons, 5, _g('leftY',          3));
+    copyBtn(left.buttons, 1, _g('leftGrip',       4));
+    copyBtn(left.buttons, 0, _g('leftTrigger',    6));
+    copyBtn(left.buttons, 3, _g('leftStickClick', 10));
     let lx = left.axes[2] || 0, ly = left.axes[3] || 0;
     if (lx === 0 && ly === 0) { lx = left.axes[0] || 0; ly = left.axes[1] || 0; }
     axes[0] = lx; axes[1] = ly;
-    if (left.buttons[5] && left.buttons[5].pressed) setBtn(8, true);
-    const T = 0.65;
-    if (ly < -T) setBtn(12, true);
-    if (ly >  T) setBtn(13, true);
-    if (lx < -T) setBtn(14, true);
-    if (lx >  T) setBtn(15, true);
+    if (xs.leftYAlsoBack && left.buttons[5] && left.buttons[5].pressed) setBtn(8, true);
+    if (xs.leftStickAsDpad) {
+      const T = 0.65;
+      if (ly < -T) setBtn(12, true);
+      if (ly >  T) setBtn(13, true);
+      if (lx < -T) setBtn(14, true);
+      if (lx >  T) setBtn(15, true);
+    }
   }
 
   return {
@@ -19104,6 +19301,29 @@ function buildSettingsPage() {
     </div>
 
     <div class="settings-section">
+      <h3>VR Controllers - Button Mapping</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Each XR controller button maps to a standard gamepad button index. The Action mapping above (Gamepad - Button Mapping) decides what each gamepad button does in-game; this section just decides which gamepad button each XR button presses.</label>
+      </div>
+      <div id="xr-bind-rows"></div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Right B also presses Start</label>
+        <input type="checkbox" id="set-xr-rightb-start" ${input.xrSynth && input.xrSynth.rightBAlsoStart ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Left Y also presses Back</label>
+        <input type="checkbox" id="set-xr-lefty-back" ${input.xrSynth && input.xrSynth.leftYAlsoBack ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Left thumbstick acts as D-Pad</label>
+        <input type="checkbox" id="set-xr-leftstick-dpad" ${input.xrSynth && input.xrSynth.leftStickAsDpad ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="margin-top:4px;">
+        <button id="xr-reset-defaults">Reset VR Defaults</button>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3>Keyboard - Mapping</h3>
       <div id="kb-bind-rows"></div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em; margin-top:6px;">
@@ -19458,6 +19678,74 @@ function buildSettingsPage() {
       saveSettings();
     });
   });
+
+  // ---- VR controller button mapping rows ----
+  const XR_LABELS = {
+    rightTrigger:    'R Trigger',
+    rightGrip:       'R Grip',
+    rightStickClick: 'R Stick Click',
+    rightA:          'R A',
+    rightB:          'R B',
+    leftTrigger:     'L Trigger',
+    leftGrip:        'L Grip',
+    leftStickClick:  'L Stick Click',
+    leftX:           'L X',
+    leftY:           'L Y',
+  };
+  const xrBindContainer = overlay.querySelector('#xr-bind-rows');
+  if (xrBindContainer) {
+    if (!input.xrBindings) input.xrBindings = {};
+    if (!input.xrSynth)    input.xrSynth    = {};
+    for (const [xrName, label] of Object.entries(XR_LABELS)) {
+      const row = document.createElement('div');
+      row.className = 'setting-row';
+      const cur = input.xrBindings[xrName];
+      let optionsHtml = '<option value="-1">None</option>';
+      for (let i = 0; i <= 15; i++) {
+        const sel = (i === cur) ? ' selected' : '';
+        optionsHtml += '<option value="' + i + '"' + sel + '>' + (GAMEPAD_BUTTON_NAMES[i] || ('Btn ' + i)) + '</option>';
+      }
+      if (cur === -1 || cur == null) {
+        optionsHtml = optionsHtml.replace('value="-1">', 'value="-1" selected>');
+      }
+      row.innerHTML = '<label>' + label + '</label>' +
+                      '<select class="xr-bind-select" data-xr="' + xrName + '">' + optionsHtml + '</select>';
+      xrBindContainer.appendChild(row);
+    }
+    overlay.querySelectorAll('.xr-bind-select').forEach(sel => {
+      sel.addEventListener('change', () => {
+        const xrName = sel.dataset.xr;
+        const v = parseInt(sel.value, 10);
+        input.xrBindings[xrName] = isNaN(v) ? -1 : v;
+        saveSettings();
+      });
+    });
+    const rbStartChk = overlay.querySelector('#set-xr-rightb-start');
+    if (rbStartChk) rbStartChk.addEventListener('change', () => {
+      input.xrSynth.rightBAlsoStart = !!rbStartChk.checked; saveSettings();
+    });
+    const lyBackChk = overlay.querySelector('#set-xr-lefty-back');
+    if (lyBackChk) lyBackChk.addEventListener('change', () => {
+      input.xrSynth.leftYAlsoBack = !!lyBackChk.checked; saveSettings();
+    });
+    const lsDpadChk = overlay.querySelector('#set-xr-leftstick-dpad');
+    if (lsDpadChk) lsDpadChk.addEventListener('change', () => {
+      input.xrSynth.leftStickAsDpad = !!lsDpadChk.checked; saveSettings();
+    });
+    const xrReset = overlay.querySelector('#xr-reset-defaults');
+    if (xrReset) xrReset.addEventListener('click', () => {
+      Object.assign(input.xrBindings, {
+        rightTrigger: 7, rightGrip: 5, rightStickClick: 11, rightA: 0, rightB: 1,
+        leftTrigger: 6,  leftGrip: 4,  leftStickClick: 10, leftX: 2,  leftY: 3,
+      });
+      Object.assign(input.xrSynth, {
+        rightBAlsoStart: true, leftYAlsoBack: true, leftStickAsDpad: true,
+      });
+      saveSettings();
+      buildSettingsPage();
+      openSettings();
+    });
+  }
 
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
@@ -19865,6 +20153,8 @@ function saveSettings() {
       triggerThreshold: input.triggerThreshold,
       gpBindings: input.gpBindings,
       kbBindings: input.kbBindings,
+      xrBindings: input.xrBindings,
+      xrSynth:    input.xrSynth,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
@@ -20018,6 +20308,8 @@ function loadSettings() {
     if (data.triggerThreshold !== undefined) input.triggerThreshold = data.triggerThreshold;
     if (data.gpBindings) Object.assign(input.gpBindings, data.gpBindings);
     if (data.kbBindings) Object.assign(input.kbBindings, data.kbBindings);
+    if (data.xrBindings) Object.assign(input.xrBindings, data.xrBindings);
+    if (data.xrSynth)    Object.assign(input.xrSynth,    data.xrSynth);
     // Audio volumes (applied later when initAudio creates the gain nodes)
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
     if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
