@@ -179,7 +179,10 @@
     </div>
     <div id="selected-tunnel" style="display:none;">
       <div id="sel-tunnel-info" class="hint"></div>
-      <div class="hint">Press Delete to remove this tunnel.</div>
+      <div class="row"><label>Radius</label><input id="sel-tunnel-r" type="number" step="10" min="60" max="400" /></div>
+      <div class="hint" style="line-height: 1.45;">
+        Default <span class="stat">180</span> (SU&times;1.2). Tightest pass-through is around <span class="stat">60</span> (Dreadnought collision r=56). Below ~80 starts rewarding Frigates and punishing Dreadnoughts. Press Delete to remove the tunnel.
+      </div>
     </div>
 
     <h2>Rooms (<span id="room-count">0</span>)</h2>
@@ -313,6 +316,14 @@ const roomMeshes = [];   // parallel to state.level.rooms (one mesh per room)
 const tunnelMeshes = []; // parallel to state.level.tunnels (one or more meshes per tunnel)
 const roomGeo = new THREE.SphereGeometry(1, 32, 24);
 
+// Game's default tunnel radius is TR = SU * 1.2 = 150 * 1.2 = 180
+// (see buildRoomGraphLevel in last_ship_sailing_v6_9.html). All shipped maps
+// inherit this default. The editor matches it so visualizations are accurate
+// to in-game appearance, and exposes per-tunnel overrides via the sidebar.
+const DEFAULT_TUNNEL_RADIUS = 180;
+const MIN_TUNNEL_RADIUS = 60;  // below this, even a Frigate (collision r=32) gets cramped
+const MAX_TUNNEL_RADIUS = 400; // tunnels wider than this read as rooms, not tunnels
+
 function roomDisplayColor(room) {
   // Champion takes visual priority over team because there's only one
   // champion-marked room per map and it's the most important game-state
@@ -363,7 +374,7 @@ function rebuildTunnelMeshes() {
   state.level.tunnels.forEach((t, ti) => {
     const path = t.path;
     if (!path || path.length < 2) return;
-    const tunR = t.r || 80;
+    const tunR = t.r || DEFAULT_TUNNEL_RADIUS;
     for (let i = 0; i < path.length - 1; i++) {
       const a = path[i], b = path[i + 1];
       const va = new THREE.Vector3(a.x, a.y, a.z);
@@ -540,7 +551,8 @@ function addTunnel(roomA, roomB) {
     path: [
       { x: a.x, y: a.y, z: a.z },
       { x: b.x, y: b.y, z: b.z }
-    ]
+    ],
+    r: DEFAULT_TUNNEL_RADIUS
   });
   rebuildTunnelMeshes();
   refreshLists();
@@ -568,6 +580,7 @@ const ui = {
   selectedRoom: document.getElementById('selected-room'),
   selectedTunnel: document.getElementById('selected-tunnel'),
   selTunnelInfo: document.getElementById('sel-tunnel-info'),
+  selTunnelR: document.getElementById('sel-tunnel-r'),
   selId: document.getElementById('sel-id'),
   selTeam: document.getElementById('sel-team'),
   selX: document.getElementById('sel-x'),
@@ -663,6 +676,7 @@ function refreshSidebarSelection() {
     const toR = state.level.rooms.find(r => r.x === b.x && r.y === b.y && r.z === b.z);
     ui.selTunnelInfo.textContent =
       `${fromR ? fromR.id : '?'} ↔ ${toR ? toR.id : '?'}, ${t.path.length} waypoints`;
+    ui.selTunnelR.value = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
   } else {
     ui.selectedEmpty.style.display = '';
     ui.selectedRoom.style.display = 'none';
@@ -730,9 +744,22 @@ ui.selR.addEventListener('input', () => {
   if (state.selectedKind !== 'room') return;
   const r = state.level.rooms[state.selectedIndex];
   if (!r) return;
-  r.r = Math.max(50, +ui.selR.value || 200);
+  r.r = Math.max(50, +ui.selR.value || 270);
   const mesh = roomMeshes[state.selectedIndex];
   if (mesh) mesh.scale.setScalar(r.r);
+});
+
+// Selected-tunnel radius input. Mutates state.level.tunnels[i].r and rebuilds
+// the tunnel cylinder mesh so the visualization tracks the change live.
+ui.selTunnelR.addEventListener('input', () => {
+  if (state.selectedKind !== 'tunnel') return;
+  const t = state.level.tunnels[state.selectedIndex];
+  if (!t) return;
+  const v = +ui.selTunnelR.value;
+  if (!Number.isFinite(v)) return;
+  t.r = Math.max(MIN_TUNNEL_RADIUS, Math.min(MAX_TUNNEL_RADIUS, v));
+  rebuildTunnelMeshes();
+  refreshLists();
 });
 
 // ============================================================
@@ -759,7 +786,8 @@ function refreshLists() {
     const a = t.path[0], b = t.path[t.path.length - 1];
     const fromR = state.level.rooms.find(r => r.x === a.x && r.y === a.y && r.z === a.z);
     const toR = state.level.rooms.find(r => r.x === b.x && r.y === b.y && r.z === b.z);
-    div.innerHTML = `<span>${escapeHtml(fromR ? fromR.id : '?')} → ${escapeHtml(toR ? toR.id : '?')}</span><span class="stat">${t.path.length}wp</span>`;
+    const tunR = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
+    div.innerHTML = `<span>${escapeHtml(fromR ? fromR.id : '?')} → ${escapeHtml(toR ? toR.id : '?')}</span><span class="stat">r=${tunR}</span>`;
     div.addEventListener('click', () => selectTunnel(i));
     ui.tunnelsList.appendChild(div);
   });
@@ -803,7 +831,11 @@ function buildLevelExport() {
     })),
     tunnels: state.level.tunnels.map(t => ({
       path: t.path.map(p => ({ x: p.x, y: p.y, z: p.z })),
-      ...(t.r ? { r: t.r } : {})
+      // Always emit r explicitly so authored tunnels are unambiguous and
+      // round-trip through export/import without silently reverting to the
+      // game default (180). The game still accepts tunnels without r and
+      // falls back to TR; this is just author hygiene.
+      r: (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS
     }))
   };
 }
@@ -838,7 +870,11 @@ function loadLevelImport(data) {
   }
   state.level.tunnels = (data.tunnels || []).map(t => ({
     path: (t.path || []).map(p => ({ x: +p.x || 0, y: +p.y || 0, z: +p.z || 0 })),
-    ...(t.r ? { r: +t.r } : {})
+    // Default to game's TR (180) if the imported tunnel has no explicit
+    // radius; game does the same fallback in buildRoomGraphLevel.
+    r: (typeof t.r === 'number')
+      ? Math.max(MIN_TUNNEL_RADIUS, Math.min(MAX_TUNNEL_RADIUS, +t.r))
+      : DEFAULT_TUNNEL_RADIUS
   }));
   state.nextRoomId = state.level.rooms.length + 1;
   ui.lvlName.value = state.level.name;
@@ -882,7 +918,8 @@ ui.exportJs.addEventListener('click', async () => {
   s += `  tunnels: [\n`;
   for (const t of data.tunnels) {
     const ps = t.path.map(p => `{x: ${p.x}, y: ${p.y}, z: ${p.z}}`).join(', ');
-    s += `    { path: [${ps}]${t.r ? ', r: ' + t.r : ''} },\n`;
+    const tr = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
+    s += `    { path: [${ps}], r: ${tr} },\n`;
   }
   s += `  ]\n}`;
   try {
