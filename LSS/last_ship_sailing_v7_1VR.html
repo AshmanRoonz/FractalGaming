@@ -1526,25 +1526,29 @@ const input = {
     scoreboard: 8, // Back
     menu: 9,       // Start
   },
-  // (VR fork) XR controller -> standard-layout gamepad btn mapping. Used
-  // by _xrSynthGamepad to build a virtual standard gamepad from the two
-  // XR controllers each frame. -1 = unbound. Defaults match the original
-  // hardcoded shim. Persisted via saveSettings.
+  // (VR fork) Action -> XR controller button name. The action keys here
+  // mirror gpBindings (fire / altFire / dash / ...); each value is one of
+  // the XR button names listed in XR_BUTTON_NAMES (or '' for unbound).
+  // _xrSynthGamepad reads this each frame, looks up the standard btn the
+  // gamepad mapping (gpBindings) assigned to that same action, and presses
+  // it when the corresponding XR button is held. Persisted via saveSettings.
   xrBindings: {
-    rightTrigger:    7,   // RT (fire)
-    rightGrip:       5,   // RB (ability1)
-    rightStickClick: 11,  // R3 (moveDown)
-    rightA:          0,   // A  (dash)
-    rightB:          1,   // B  (unbound by default; also synthesizes Start, see xrSynth)
-    leftTrigger:     6,   // LT (altFire)
-    leftGrip:        4,   // LB (ability0)
-    leftStickClick:  10,  // L3 (moveUp)
-    leftX:           2,   // X  (reload)
-    leftY:           3,   // Y  (ability2; also synthesizes Back, see xrSynth)
+    fire:       'rightTrigger',
+    altFire:    'leftTrigger',
+    dash:       'rightA',
+    reload:     'leftX',
+    ability0:   'leftGrip',
+    ability1:   'rightGrip',
+    ability2:   'leftY',
+    core:       '',                // no native XR D-pad; use stick-as-D-pad below
+    moveUp:     'leftStickClick',
+    moveDown:   'rightStickClick',
+    scoreboard: '',                // unbound by default; user can assign
+    menu:       'rightB',          // press right B to confirm / open menu
   },
+  // Synthetic-helpers config. The only knob worth keeping is the stick-
+  // as-D-pad fallback (XR controllers genuinely have no D-pad hardware).
   xrSynth: {
-    rightBAlsoStart: true,
-    leftYAlsoBack:   true,
     leftStickAsDpad: true,
   },
   // (VR fork) Head-aim nudge. While the user's head-forward is inside an
@@ -17165,34 +17169,25 @@ function _xrSynthGamepad() {
     buttons[dstIdx] = { pressed: p, touched: p, value: p ? 1 : 0 };
   }
 
-  // (VR fork) Read user-configured mapping; fall back to original defaults
-  // if a key is missing (e.g., older saved settings).
+  // (VR fork) New mapping: input.xrBindings is action-keyed (fire ->
+  // 'rightTrigger', etc.); we look up gpBindings[action] for the standard
+  // btn and press it when the user's chosen XR button is down. So users
+  // configure both tables consistently and rebinds work in either place.
   const xb = (input && input.xrBindings) || {};
   const xs = (input && input.xrSynth) || {};
-  const _g = (k, d) => (xb[k] != null ? xb[k] : d);
 
+  // Sticks: fixed assignment. Left stick -> axes[0,1] (move); right stick
+  // -> axes[2,3] (look). swapSticks in the gamepad section still works
+  // because pollGamepad applies it when reading these axes.
   if (right) {
-    copyBtn(right.buttons, 4, _g('rightA',          0));
-    copyBtn(right.buttons, 5, _g('rightB',          1));
-    copyBtn(right.buttons, 1, _g('rightGrip',       5));
-    copyBtn(right.buttons, 0, _g('rightTrigger',    7));
-    copyBtn(right.buttons, 3, _g('rightStickClick', 11));
     let rx = right.axes[2] || 0, ry = right.axes[3] || 0;
     if (rx === 0 && ry === 0) { rx = right.axes[0] || 0; ry = right.axes[1] || 0; }
     axes[2] = rx; axes[3] = ry;
-    if (xs.rightBAlsoStart && right.buttons[5] && right.buttons[5].pressed) setBtn(9, true);
   }
-
   if (left) {
-    copyBtn(left.buttons, 4, _g('leftX',          2));
-    copyBtn(left.buttons, 5, _g('leftY',          3));
-    copyBtn(left.buttons, 1, _g('leftGrip',       4));
-    copyBtn(left.buttons, 0, _g('leftTrigger',    6));
-    copyBtn(left.buttons, 3, _g('leftStickClick', 10));
     let lx = left.axes[2] || 0, ly = left.axes[3] || 0;
     if (lx === 0 && ly === 0) { lx = left.axes[0] || 0; ly = left.axes[1] || 0; }
     axes[0] = lx; axes[1] = ly;
-    if (xs.leftYAlsoBack && left.buttons[5] && left.buttons[5].pressed) setBtn(8, true);
     if (xs.leftStickAsDpad) {
       const T = 0.65;
       if (ly < -T) setBtn(12, true);
@@ -17200,6 +17195,48 @@ function _xrSynthGamepad() {
       if (lx < -T) setBtn(14, true);
       if (lx >  T) setBtn(15, true);
     }
+  }
+
+  // Logical XR-button-name -> (handedness, hardware index) lookup. Matches
+  // the xr-standard layout: btn 0 = trigger, 1 = grip, 3 = stick click, 4
+  // = primary face button (X / A), 5 = secondary face button (Y / B).
+  function readXRBtn(xrName) {
+    if (!xrName) return null;
+    let pad, idx;
+    if (xrName.charCodeAt(0) === 114 /* 'r' */) {       // "right..."
+      pad = right; const tail = xrName.slice(5);
+      if      (tail === 'Trigger')    idx = 0;
+      else if (tail === 'Grip')       idx = 1;
+      else if (tail === 'StickClick') idx = 3;
+      else if (tail === 'A')          idx = 4;
+      else if (tail === 'B')          idx = 5;
+    } else if (xrName.charCodeAt(0) === 108 /* 'l' */) { // "left..."
+      pad = left; const tail = xrName.slice(4);
+      if      (tail === 'Trigger')    idx = 0;
+      else if (tail === 'Grip')       idx = 1;
+      else if (tail === 'StickClick') idx = 3;
+      else if (tail === 'X')          idx = 4;
+      else if (tail === 'Y')          idx = 5;
+    }
+    if (!pad || idx == null) return null;
+    return pad.buttons[idx] || null;
+  }
+
+  // Walk every action binding; route the XR button's state into the
+  // standard btn that gpBindings has assigned to that same action.
+  for (const action in xb) {
+    const xrName = xb[action];
+    if (!xrName) continue;                    // unbound action
+    const xrBtn = readXRBtn(xrName);
+    if (!xrBtn) continue;                     // controller not connected, etc
+    const stdBtn = input.gpBindings && input.gpBindings[action];
+    if (stdBtn == null || stdBtn < 0) continue;
+    // OR-merge in case multiple actions resolve to the same standard btn.
+    const cur = buttons[stdBtn];
+    const pressed = cur.pressed || !!xrBtn.pressed;
+    const touched = cur.touched || !!xrBtn.touched;
+    const value   = Math.max(cur.value || 0, xrBtn.value || (xrBtn.pressed ? 1 : 0));
+    buttons[stdBtn] = { pressed: pressed, touched: touched, value: value };
   }
 
   return {
@@ -19357,18 +19394,10 @@ function buildSettingsPage() {
     <div class="settings-section">
       <h3>VR Controllers - Button Mapping</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Each XR controller button maps to a standard gamepad button index. The Action mapping above (Gamepad - Button Mapping) decides what each gamepad button does in-game; this section just decides which gamepad button each XR button presses.</label>
+        <label style="flex:1;">Pick which XR controller button performs each action. (The Gamepad - Button Mapping section above still applies on a flat-screen Xbox-style controller.)</label>
       </div>
       <div id="xr-bind-rows"></div>
       <div class="setting-row" style="margin-top:6px;">
-        <label>Right B also presses Start</label>
-        <input type="checkbox" id="set-xr-rightb-start" ${input.xrSynth && input.xrSynth.rightBAlsoStart ? 'checked' : ''}>
-      </div>
-      <div class="setting-row">
-        <label>Left Y also presses Back</label>
-        <input type="checkbox" id="set-xr-lefty-back" ${input.xrSynth && input.xrSynth.leftYAlsoBack ? 'checked' : ''}>
-      </div>
-      <div class="setting-row">
         <label>Left thumbstick acts as D-Pad</label>
         <input type="checkbox" id="set-xr-leftstick-dpad" ${input.xrSynth && input.xrSynth.leftStickAsDpad ? 'checked' : ''}>
       </div>
@@ -19759,53 +19788,59 @@ function buildSettingsPage() {
   });
 
   // ---- VR controller button mapping rows ----
-  const XR_LABELS = {
-    rightTrigger:    'R Trigger',
-    rightGrip:       'R Grip',
-    rightStickClick: 'R Stick Click',
-    rightA:          'R A',
-    rightB:          'R B',
-    leftTrigger:     'L Trigger',
-    leftGrip:        'L Grip',
-    leftStickClick:  'L Stick Click',
-    leftX:           'L X',
-    leftY:           'L Y',
+  // Each row is action-keyed (matches the Gamepad - Button Mapping table):
+  // left side is the action label (Fire / Dash / Reload / ...); right side
+  // is a dropdown of XR button names (R Trigger / R A / L Grip / etc.).
+  const XR_BUTTON_NAMES = {
+    '':                'None',
+    rightTrigger:      'R Trigger',
+    rightGrip:         'R Grip',
+    rightStickClick:   'R Stick Click',
+    rightA:            'R A',
+    rightB:            'R B',
+    leftTrigger:       'L Trigger',
+    leftGrip:          'L Grip',
+    leftStickClick:    'L Stick Click',
+    leftX:             'L X',
+    leftY:             'L Y',
+  };
+  const XR_DEFAULTS = {
+    fire:       'rightTrigger',
+    altFire:    'leftTrigger',
+    dash:       'rightA',
+    reload:     'leftX',
+    ability0:   'leftGrip',
+    ability1:   'rightGrip',
+    ability2:   'leftY',
+    core:       '',
+    moveUp:     'leftStickClick',
+    moveDown:   'rightStickClick',
+    scoreboard: '',
+    menu:       'rightB',
   };
   const xrBindContainer = overlay.querySelector('#xr-bind-rows');
   if (xrBindContainer) {
-    if (!input.xrBindings) input.xrBindings = {};
-    if (!input.xrSynth)    input.xrSynth    = {};
-    for (const [xrName, label] of Object.entries(XR_LABELS)) {
+    if (!input.xrBindings) input.xrBindings = Object.assign({}, XR_DEFAULTS);
+    if (!input.xrSynth)    input.xrSynth    = { leftStickAsDpad: true };
+    for (const [action, label] of Object.entries(ACTION_LABELS)) {
       const row = document.createElement('div');
       row.className = 'setting-row';
-      const cur = input.xrBindings[xrName];
-      let optionsHtml = '<option value="-1">None</option>';
-      for (let i = 0; i <= 15; i++) {
-        const sel = (i === cur) ? ' selected' : '';
-        optionsHtml += '<option value="' + i + '"' + sel + '>' + (GAMEPAD_BUTTON_NAMES[i] || ('Btn ' + i)) + '</option>';
-      }
-      if (cur === -1 || cur == null) {
-        optionsHtml = optionsHtml.replace('value="-1">', 'value="-1" selected>');
+      const cur = input.xrBindings[action] || '';
+      let optionsHtml = '';
+      for (const [val, displayName] of Object.entries(XR_BUTTON_NAMES)) {
+        const selAttr = (val === cur) ? ' selected' : '';
+        optionsHtml += '<option value="' + val + '"' + selAttr + '>' + displayName + '</option>';
       }
       row.innerHTML = '<label>' + label + '</label>' +
-                      '<select class="xr-bind-select" data-xr="' + xrName + '">' + optionsHtml + '</select>';
+                      '<select class="xr-bind-select" data-action="' + action + '">' + optionsHtml + '</select>';
       xrBindContainer.appendChild(row);
     }
     overlay.querySelectorAll('.xr-bind-select').forEach(sel => {
       sel.addEventListener('change', () => {
-        const xrName = sel.dataset.xr;
-        const v = parseInt(sel.value, 10);
-        input.xrBindings[xrName] = isNaN(v) ? -1 : v;
+        const action = sel.dataset.action;
+        input.xrBindings[action] = sel.value || '';
         saveSettings();
       });
-    });
-    const rbStartChk = overlay.querySelector('#set-xr-rightb-start');
-    if (rbStartChk) rbStartChk.addEventListener('change', () => {
-      input.xrSynth.rightBAlsoStart = !!rbStartChk.checked; saveSettings();
-    });
-    const lyBackChk = overlay.querySelector('#set-xr-lefty-back');
-    if (lyBackChk) lyBackChk.addEventListener('change', () => {
-      input.xrSynth.leftYAlsoBack = !!lyBackChk.checked; saveSettings();
     });
     const lsDpadChk = overlay.querySelector('#set-xr-leftstick-dpad');
     if (lsDpadChk) lsDpadChk.addEventListener('change', () => {
@@ -19813,13 +19848,8 @@ function buildSettingsPage() {
     });
     const xrReset = overlay.querySelector('#xr-reset-defaults');
     if (xrReset) xrReset.addEventListener('click', () => {
-      Object.assign(input.xrBindings, {
-        rightTrigger: 7, rightGrip: 5, rightStickClick: 11, rightA: 0, rightB: 1,
-        leftTrigger: 6,  leftGrip: 4,  leftStickClick: 10, leftX: 2,  leftY: 3,
-      });
-      Object.assign(input.xrSynth, {
-        rightBAlsoStart: true, leftYAlsoBack: true, leftStickAsDpad: true,
-      });
+      input.xrBindings = Object.assign({}, XR_DEFAULTS);
+      input.xrSynth = { leftStickAsDpad: true };
       saveSettings();
       buildSettingsPage();
       openSettings();
@@ -20415,8 +20445,16 @@ function loadSettings() {
     if (data.triggerThreshold !== undefined) input.triggerThreshold = data.triggerThreshold;
     if (data.gpBindings) Object.assign(input.gpBindings, data.gpBindings);
     if (data.kbBindings) Object.assign(input.kbBindings, data.kbBindings);
-    if (data.xrBindings) Object.assign(input.xrBindings, data.xrBindings);
-    if (data.xrSynth)    Object.assign(input.xrSynth,    data.xrSynth);
+    // VR controller mapping migration: v1 stored {xrButton: stdBtnIdx} (numbers),
+    // v2 stores {action: xrButtonName} (strings). If we see v1, drop it and let
+    // the in-code defaults stand.
+    if (data.xrBindings) {
+      const looksLikeV2 = Object.values(data.xrBindings).every(
+        v => v == null || typeof v === 'string'
+      );
+      if (looksLikeV2) Object.assign(input.xrBindings, data.xrBindings);
+    }
+    if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     // Audio volumes (applied later when initAudio creates the gain nodes)
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
