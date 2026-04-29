@@ -25970,9 +25970,24 @@ function updateDeathCam(dt) {
     // movement step) so the offset is well-defined.
     const t = deathCam.spectateTarget;
     const tgt = t.position;
-    const dir = (t.targetDir && t.targetDir.lengthSq() > 0.001)
-      ? t.targetDir
-      : new THREE.Vector3(0, 0, -1);
+    // (post-v6.9 patch, 2026-04-28) Track ACTUAL velocity direction instead
+    // of targetDir (the AI's intended movement). At close chase distances
+    // the difference reads as "ship flying backwards" because the mesh's
+    // nose follows targetDir (set by mesh.lookAt during AI tick) while the
+    // ship physically drifts along velocity, which can lag or oppose intent
+    // during decel / dodge / strafe / bank. Camera trailing the velocity
+    // vector keeps the spectated ship pointing roughly toward the screen
+    // edge regardless of intent. Fallback chain: velocity (when moving) →
+    // targetDir (locked-in-stasis or initial frames) → -Z (deep fallback).
+    const _spDir = new THREE.Vector3();
+    if (t.velocity && t.velocity.lengthSq() > 0.0001) {
+      _spDir.copy(t.velocity).normalize();
+    } else if (t.targetDir && t.targetDir.lengthSq() > 0.001) {
+      _spDir.copy(t.targetDir);
+    } else {
+      _spDir.set(0, 0, -1);
+    }
+    const dir = _spDir;
     const hull = (t.chassis && t.chassis.hullLength) ? t.chassis.hullLength : 80;
     const chaseDist = hull * 1.5;
     const heightOff = hull * 0.45;
