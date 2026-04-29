@@ -16818,15 +16818,9 @@ function _xrSynthGamepad() {
     copyBtn(right.buttons, 1, 5); // RB = right grip
     copyBtn(right.buttons, 0, 7); // RT = right trigger
     copyBtn(right.buttons, 3, 11); // R3 = right thumbstick click
-    // Right thumbstick: xr-standard exposes it on axes[2,3]; some runtimes
-    // report it on axes[0,1] when no touchpad exists. Prefer [2,3]; fall
-    // back to [0,1] if [2,3] are zero.
     let rx = right.axes[2] || 0, ry = right.axes[3] || 0;
     if (rx === 0 && ry === 0) { rx = right.axes[0] || 0; ry = right.axes[1] || 0; }
     axes[2] = rx; axes[3] = ry;
-    // B -> Start (standard btn 9), so the user can confirm ship-select /
-    // open the menu without an Xbox controller. Doubles up with B (btn 1)
-    // which is unbound by default.
     if (right.buttons[5] && right.buttons[5].pressed) setBtn(9, true);
   }
 
@@ -16839,16 +16833,12 @@ function _xrSynthGamepad() {
     let lx = left.axes[2] || 0, ly = left.axes[3] || 0;
     if (lx === 0 && ly === 0) { lx = left.axes[0] || 0; ly = left.axes[1] || 0; }
     axes[0] = lx; axes[1] = ly;
-    // Y -> Back (standard btn 8), so scoreboard / cancel works in VR.
     if (left.buttons[5] && left.buttons[5].pressed) setBtn(8, true);
-    // Synthesize D-pad from left-stick deflection (XR controllers have no
-    // physical d-pad). Threshold matches the in-engine d-pad-from-stick
-    // fallback further down in pollGamepad().
     const T = 0.65;
-    if (ly < -T) setBtn(12, true); // up
-    if (ly >  T) setBtn(13, true); // down
-    if (lx < -T) setBtn(14, true); // left
-    if (lx >  T) setBtn(15, true); // right
+    if (ly < -T) setBtn(12, true);
+    if (ly >  T) setBtn(13, true);
+    if (lx < -T) setBtn(14, true);
+    if (lx >  T) setBtn(15, true);
   }
 
   return {
@@ -22928,9 +22918,13 @@ function gameLoop(timestamp) {
   // nobody can see. Cuts lobby GPU cost by ~10x.
   if (game.state === 'select') {
     const _selNow = timestamp;
-    if (!game._selectLastRender || _selNow - game._selectLastRender >= 167) {
+    // VR fork: in immersive mode the headset still expects a frame each
+    // tick, so render every call (no throttle) when XR is presenting.
+    const _shouldRender = renderer.xr.isPresenting
+      || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
+    if (_shouldRender) {
       game._selectLastRender = _selNow;
-      renderPostFX();
+      renderFrame();
     }
     return;
   }
@@ -22940,9 +22934,11 @@ function gameLoop(timestamp) {
   // fine.
   if (settingsOpen) {
     const _setNow = timestamp;
-    if (!game._settingsLastRender || _setNow - game._settingsLastRender >= 167) {
+    const _shouldRender = renderer.xr.isPresenting
+      || (!game._settingsLastRender || _setNow - game._settingsLastRender >= 167);
+    if (_shouldRender) {
       game._settingsLastRender = _setNow;
-      renderPostFX();
+      renderFrame();
     }
     return;
   }
@@ -23079,7 +23075,7 @@ function gameLoop(timestamp) {
   // Update ambient sound bed (speed-reactive)
   updateAmbientBed();
 
-  renderPostFX();
+  renderFrame();
 }
 
 // ---- WEB AUDIO SOUND SYSTEM ----
@@ -26959,7 +26955,10 @@ _setupCustomMapLoader();
 document.addEventListener('click', initAudio, { once: false });
 document.addEventListener('keydown', initAudio, { once: false });
 
-requestAnimationFrame(gameLoop);
+// VR fork: use renderer.setAnimationLoop instead of raw requestAnimationFrame
+// so the same loop drives both flat-screen frames (browser RAF) and immersive
+// frames (XR device rAF cadence). Three.js handles the dispatch internally.
+renderer.setAnimationLoop(gameLoop);
 
 </script>
 </body>
