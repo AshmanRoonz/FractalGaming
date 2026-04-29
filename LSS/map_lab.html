@@ -179,9 +179,12 @@
     </div>
     <div id="selected-tunnel" style="display:none;">
       <div id="sel-tunnel-info" class="hint"></div>
-      <div class="row"><label>Radius</label><input id="sel-tunnel-r" type="number" step="10" min="60" max="400" /></div>
-      <div class="hint" style="line-height: 1.45;">
-        Default <span class="stat">180</span> (SU&times;1.2). Tightest pass-through is around <span class="stat">60</span> (Dreadnought collision r=56). Below ~80 starts rewarding Frigates and punishing Dreadnoughts. Press Delete to remove the tunnel.
+      <div class="row"><label>Radius</label><input id="sel-tunnel-r" type="number" step="5" min="5" max="400" /></div>
+      <div class="hint" style="line-height: 1.5;">
+        <span style="color:#88aaff">&ge;60</span> ship-passable (default <span class="stat">180</span>)<br>
+        <span style="color:#ffcc66">30&ndash;60</span> tight; rewards smaller chassis<br>
+        <span style="color:#ff8855">&lt;30</span> sightline / shoot-through only; ships do not fit<br>
+        Below ~30 the marching cubes may not visually resolve the opening, but the SDF still passes projectiles. Press Delete to remove.
       </div>
     </div>
 
@@ -321,8 +324,20 @@ const roomGeo = new THREE.SphereGeometry(1, 32, 24);
 // inherit this default. The editor matches it so visualizations are accurate
 // to in-game appearance, and exposes per-tunnel overrides via the sidebar.
 const DEFAULT_TUNNEL_RADIUS = 180;
-const MIN_TUNNEL_RADIUS = 60;  // below this, even a Frigate (collision r=32) gets cramped
+// Tunnel radius bands (the editor allows the full range; visualization tints
+// flag the band so the author can scan a map for ship-passable vs sightline-
+// only links at a glance):
+//   r >= 60   ship-passable (Dreadnought collision r=56, plus margin)
+//   30 <= r < 60   tight; rewards smaller chassis, punishes Dreadnoughts
+//   r < 30   sightline / shoot-through only; ships do not fit
+// Floor of 5 lets you author hairline slits for indirect-fire windows or
+// "you can shoot but not be shot back at" pockets. Below ~30, the marching
+// cubes grid (gridRes=96) may not visually resolve the opening even though
+// the SDF still allows projectile passage.
+const MIN_TUNNEL_RADIUS = 5;
 const MAX_TUNNEL_RADIUS = 400; // tunnels wider than this read as rooms, not tunnels
+const TUNNEL_PASSABLE_THRESHOLD = 60; // r >= this, all chassis fit
+const TUNNEL_SIGHTLINE_THRESHOLD = 30; // r < this, projectile / line-of-sight only
 
 function roomDisplayColor(room) {
   // Champion takes visual priority over team because there's only one
@@ -383,8 +398,14 @@ function rebuildTunnelMeshes() {
       const len = dir.length();
       if (len < 1) continue;
       const geo = new THREE.CylinderGeometry(tunR, tunR, len, 16, 1, true);
+      // Color cue by radius band: blue = ship-passable (>=60), amber = tight
+      // (30..60), red-orange = sightline only (<30). Gives an at-a-glance
+      // read of which links carry ships and which are projectile windows.
+      const tunColor = tunR >= TUNNEL_PASSABLE_THRESHOLD ? 0x88aaff
+                     : tunR >= TUNNEL_SIGHTLINE_THRESHOLD ? 0xffcc66
+                     : 0xff8855;
       const mat = new THREE.MeshStandardMaterial({
-        color: 0x88aaff,
+        color: tunColor,
         transparent: true,
         opacity: 0.22,
         metalness: 0.05,
