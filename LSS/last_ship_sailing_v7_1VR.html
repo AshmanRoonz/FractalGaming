@@ -5457,6 +5457,12 @@ document.body.appendChild(renderer.domElement);
 // =====================================================================
 
 renderer.xr.enabled = true;
+// 'local' is the most universally supported reference space type for
+// immersive-vr. Three.js r128 defaults to 'local-floor', which AWAITs a
+// requestReferenceSpace promise inside setSession; if the runtime doesn't
+// expose local-floor, that promise rejects silently and the session never
+// reaches isPresenting=true. We pick 'local' here for max compatibility.
+try { renderer.xr.setReferenceSpaceType('local'); } catch (_) {}
 // Slightly higher framebuffer scale: Quest panels look soft at 1.0, sharper
 // at ~1.4. Drop to 1.0 if perf is borderline.
 try { renderer.xr.setFramebufferScaleFactor(1.2); } catch (_) {}
@@ -5502,12 +5508,14 @@ renderer.xr.addEventListener('sessionstart', () => {
   // stuck pressing buttons blindly. After auto-click, they land in the
   // ship-select panel; D-Pad up/down (left thumbstick) cycles ship, and B
   // (right secondary, mapped to standard btn 9 = Start) commits.
+  // Long delay so this can't race with the renderer's first XR frames or
+  // any heavy shader compile that ship-select kicks off.
   try {
     const soloBtn = document.getElementById('btn-solo');
     const lobbyEl = document.getElementById('lobby');
     const lobbyVisible = lobbyEl && lobbyEl.offsetParent !== null;
     if (soloBtn && lobbyVisible) {
-      setTimeout(() => { try { soloBtn.click(); } catch (_) {} }, 50);
+      setTimeout(() => { try { soloBtn.click(); } catch (_) {} }, 600);
     }
   } catch (_) { /* lobby not present, ignore */ }
 });
@@ -5546,15 +5554,30 @@ renderer.xr.addEventListener('sessionend', () => {
     return;
   }
 
+  // Keep optionalFeatures conservative: 'local' is required by 'immersive-vr'
+  // anyway and we don't actually consume hand-tracking or layers in r128.
   const sessionInit = {
-    optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers']
+    optionalFeatures: ['local-floor']
   };
 
-  function onSessionStarted(session) {
+  async function onSessionStarted(session) {
     session.addEventListener('end', onSessionEnded);
-    renderer.xr.setSession(session);
-    btn.textContent = 'EXIT VR';
-    currentSession = session;
+    btn.textContent = 'STARTING...';
+    try {
+      // setSession is async (it await s requestReferenceSpace internally).
+      // If that rejects, three.js never flips isPresenting=true and the
+      // headset shows "three loading dots" forever. Awaiting + catching
+      // surfaces the error so the user can see what failed.
+      await renderer.xr.setSession(session);
+      btn.textContent = 'EXIT VR';
+      currentSession = session;
+    } catch (e) {
+      console.error('XR setSession failed:', e);
+      btn.textContent = 'VR INIT FAILED';
+      btn.title = String((e && e.message) || e);
+      try { session.end(); } catch (_) {}
+      currentSession = null;
+    }
   }
 
   function onSessionEnded() {
@@ -5569,11 +5592,11 @@ renderer.xr.addEventListener('sessionend', () => {
         .then(onSessionStarted)
         .catch((e) => {
           btn.textContent = 'VR FAILED';
-          btn.title = String(e && e.message || e);
+          btn.title = String((e && e.message) || e);
           console.warn('XR session request failed:', e);
         });
     } else {
-      currentSession.end();
+      try { currentSession.end(); } catch (_) {}
     }
   });
 
