@@ -25840,9 +25840,21 @@ function startDeathCam(attacker) {
   deathCam.angle = player.euler.y;
   deathCam.radius = player.chassis ? player.chassis.hullLength * 4 : 400;
   deathCam.spectateTarget = null;
-  deathCam._kbPrevLeft = false;
-  deathCam._kbPrevRight = false;
-  deathCam._kbPrevClick = false;
+  // (post-v6.9 patch, 2026-04-28) Pre-arm edge-detect prev flags from the
+  // CURRENT input state, not false. Otherwise a player who was firing or
+  // strafing at the moment of death would register held inputs as fresh
+  // presses on the first death-cam tick, instantly skipping the kill-cam
+  // cinematic and/or cycling the spectate target.
+  deathCam._kbPrevLeft  = !!(input.keys && (input.keys['a'] || input.keys['arrowleft']));
+  deathCam._kbPrevRight = !!(input.keys && (input.keys['d'] || input.keys['arrowright']));
+  deathCam._kbPrevClick = !!input.mouseDown;
+  // (post-v6.9 patch) Capture the killer name so we can defer the respawn
+  // overlay until AFTER the kill-cam, then re-show it for the spectate
+  // phase. Hide it now so the cinematic isn't obscured by the 60%-black
+  // scrim that the original playerDie just enabled.
+  deathCam.killerName = (attacker && attacker.loadout && attacker.loadout.name) ? attacker.loadout.name : '';
+  deathCam.overlayShown = false;
+  if (window.Overlays && Overlays.hideRespawn) Overlays.hideRespawn();
   // (v6.9) Kill-cam: capture start + end positions so updateDeathCam can
   // smoothly slerp between them across killCamDuration. Start point sits
   // a bit behind the killer's hull looking at the wreck ; if there's no
@@ -25883,7 +25895,13 @@ function updateDeathCam(dt) {
   // skips it (impatient players).
   if (deathCam.killCamTimer > 0) {
     deathCam.killCamTimer -= dt;
-    const skipKill = !!input.mouseDown;
+    // (post-v6.9 patch, 2026-04-28) Skip on a FRESH mouse click during the
+    // kill-cam (rising-edge detection), not on a held click left over from
+    // firing at the moment of death. _kbPrevClick is pre-armed in
+    // startDeathCam from the current input state for exactly this reason.
+    const _md = !!input.mouseDown;
+    const skipKill = _md && !deathCam._kbPrevClick;
+    deathCam._kbPrevClick = _md;
     if (skipKill) deathCam.killCamTimer = 0;
     if (deathCam.killCamStartCam && deathCam.killCamEndCam && deathCam.killCamDeathPos) {
       // Ease-out interpolation 0..1 across the duration.
@@ -25893,9 +25911,17 @@ function updateDeathCam(dt) {
       camera.lookAt(deathCam.killCamDeathPos);
     }
     if (deathCam.killCamTimer > 0) return;
-    // Kill cam just ended ; reset edge-detection so a held mouse click
-    // during the kill cam doesn't immediately register as a cycle.
-    deathCam._kbPrevClick = !!input.mouseDown;
+    // _kbPrevClick was already updated above; no extra arm needed.
+  }
+
+  // (post-v6.9 patch, 2026-04-28) Kill-cam has ended ; show the respawn
+  // overlay once for the spectate phase. Suppressed during the cinematic so
+  // the 60%-black scrim doesn't obscure the dolly. Fires exactly once on
+  // the transition; spectate updates after this run normally.
+  if (!deathCam.overlayShown) {
+    deathCam.overlayShown = true;
+    if (window.Overlays && Overlays.respawn) Overlays.respawn(deathCam.killerName || '');
+    if (typeof _updateSpectateOverlay === 'function') _updateSpectateOverlay();
   }
 
   // Input: cycle spectate target (keyboard + mouse; gamepad handled in the
@@ -25918,16 +25944,22 @@ function updateDeathCam(dt) {
   }
 
   if (deathCam.spectateTarget) {
-    // Chase cam: sit behind and slightly above the teammate's ship,
-    // looking along their heading.
+    // (post-v6.9 patch, 2026-04-28) Chase cam: sit just behind and slightly
+    // above the teammate's ship, looking along their heading. Previous
+    // chaseDist was hull*4 (320 for Frigate, 560 for Dreadnought), which
+    // routinely placed the camera outside the host room (rooms are 270-375
+    // radius), so the spectator saw their target through walls or against
+    // the void outside the map. hull*1.5 keeps the camera inside the room
+    // for typical layouts; targetDir is unit-length (normalized in the bot's
+    // movement step) so the offset is well-defined.
     const t = deathCam.spectateTarget;
     const tgt = t.position;
     const dir = (t.targetDir && t.targetDir.lengthSq() > 0.001)
       ? t.targetDir
       : new THREE.Vector3(0, 0, -1);
     const hull = (t.chassis && t.chassis.hullLength) ? t.chassis.hullLength : 80;
-    const chaseDist = hull * 4;
-    const heightOff = hull * 0.9;
+    const chaseDist = hull * 1.5;
+    const heightOff = hull * 0.45;
     camera.position.set(
       tgt.x - dir.x * chaseDist,
       tgt.y - dir.y * chaseDist + heightOff,
