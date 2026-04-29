@@ -42,7 +42,7 @@ canvas { display: block; }
    button is rendered above all UI so it's always reachable on a 2D screen
    even when ship-select / settings overlays are up. */
 #vr-button {
-  position: fixed; top: 12px; right: 12px; z-index: 10000;
+  position: fixed; top: 12px; left: 12px; z-index: 10000;
   padding: 10px 16px; font-family: 'Orbitron', sans-serif; font-weight: 700;
   font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase;
   background: rgba(10, 16, 30, 0.85); color: rgba(180, 230, 255, 0.95);
@@ -5462,6 +5462,8 @@ const lss_xr = {
   stickStrafeSpeed: 320,    // sideways
   stickVerticalSpeed: 280,  // up/down via stick click or secondary stick
   axisDeadzone: 0.12,       // standard gamepad axis deadzone for thumbstick noise
+  framebufferScale: 0.85,   // (v8.4) headset framebuffer scale; lower = faster, higher = sharper
+  hudUpdateEveryNFrames: 2, // (v8.4) HUD canvas upload cadence; 2 = ~36-45Hz upload at 72-90Hz frame rate
   // Was input.gpConnected forced on by XR? (so we restore to its real value
   // when the session ends without clobbering a real gamepad detection)
   _gpConnectedSavedValue: null,
@@ -5523,6 +5525,14 @@ function _lssXrOnSessionStart(session) {
   lss_xr.session = session;
   lss_xr.enabled = true;
   document.getElementById('vr-button')?.classList.add('presenting');
+  // (v8.4 perf) Drop the headset framebuffer to 85% of native res. Quest 2/3
+  // native is enormous (1832×1920 per eye on Quest 2, even higher on Quest 3),
+  // and the LSS scene has plenty of detail / particles / lighting that pile up
+  // per pixel. 0.85 cuts pixel cost ~28% with barely-visible aliasing on the
+  // ring HUD and ship hulls. Tunable at runtime via lss_xr.framebufferScale.
+  if (typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+    renderer.xr.setFramebufferScaleFactor(lss_xr.framebufferScale || 0.85);
+  }
   // (v8.2 redesign) "Just like the FPS, no PNG frame." We DO NOT reparent
   // the camera or build a rig. The base camera continues to follow the ship
   // exactly as flat-screen does (camera.position = player.position,
@@ -18006,10 +18016,17 @@ function updateHUD() {
 
   // Draw the circumpunct ring HUD
   drawCircumpunctHUD();
-  // (v8.1 VR) Mark the HUD canvas texture as dirty so the 3D plane parented
-  // to the XR rig re-uploads this frame. Cheap (just a flag); the actual
-  // GPU upload happens lazily on the next render of the plane.
-  if (lss_xr.enabled && lss_xr.hudTexture) lss_xr.hudTexture.needsUpdate = true;
+  // (v8.4 VR perf) Mark the HUD canvas texture for re-upload, but throttle
+  // to every Nth frame. The HUD canvas is window-sized (often 1216×900+ on
+  // Quest), so a per-frame upload at 72-90Hz costs serious GPU bandwidth.
+  // Every 2nd frame still feels live for ammo/health/cooldown readouts.
+  if (lss_xr.enabled && lss_xr.hudTexture) {
+    lss_xr._hudUploadCounter = (lss_xr._hudUploadCounter || 0) + 1;
+    if (lss_xr._hudUploadCounter >= (lss_xr.hudUpdateEveryNFrames || 2)) {
+      lss_xr.hudTexture.needsUpdate = true;
+      lss_xr._hudUploadCounter = 0;
+    }
+  }
 
   // Core meter (keep DOM element updated for backward compat)
   const corePct = Math.min(100, player.coreMeter);
