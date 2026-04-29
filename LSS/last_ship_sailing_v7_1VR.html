@@ -5506,6 +5506,12 @@ scene.add(xrDolly);
 // synthesized gamepad in pollGamepad() can read buttons/axes each frame.
 const xrControllers = { left: null, right: null, leftSrc: null, rightSrc: null };
 
+// (VR fork) Cached three.js ArrayCamera for the active XR session. r128's
+// getCamera(camera) REQUIRES the camera arg; capture cameraVR once on
+// sessionstart so we can read its .matrix every frame without re-calling
+// getCamera (which mutates camera.matrix as a side effect).
+let _xrCachedCameraVR = null;
+
 function _xrUpdateInputSources() {
   const session = renderer.xr.getSession && renderer.xr.getSession();
   xrControllers.leftSrc = null;
@@ -5527,6 +5533,10 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (hud) hud.visible = true;
   const aux = _xrEnsureAuxMesh();
   if (aux) aux.visible = true;
+  // Capture the cameraVR ArrayCamera. WebXRManager.onAnimationFrame writes
+  // the headset pose into cameraVR.matrix every frame; we read it for the
+  // head-aim nudge.
+  try { _xrCachedCameraVR = renderer.xr.getCamera(camera); } catch (e) { _xrCachedCameraVR = null; }
   // Reset camera local transform; the renderer will stamp the head pose
   // into camera.matrix on the very first XR frame.
   camera.position.set(0, 0, 0);
@@ -5559,6 +5569,7 @@ renderer.xr.addEventListener('sessionend', () => {
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
+  _xrCachedCameraVR = null;
   // Hand the camera back to the scene root so the flat-screen render
   // path keeps working unchanged.
   if (camera.parent === xrDolly) {
@@ -13549,13 +13560,15 @@ function updatePlayerMovement(dt) {
   // user can fine-tune aim with small head movements. When the offset
   // leaves the cone (head snaps to look at something to the side), no
   // nudge is applied; the user can free-look without disturbing aim.
-  if (renderer && renderer.xr && renderer.xr.isPresenting && input.vrHeadAim && input.vrHeadAim.enabled) {
+  if (renderer && renderer.xr && renderer.xr.isPresenting && input.vrHeadAim && input.vrHeadAim.enabled && _xrCachedCameraVR) {
     try {
-      const xrCam = renderer.xr.getCamera();
+      const xrCam = _xrCachedCameraVR;
       // Head forward in dolly-local space = head_quat * (0,0,-1). With
-      // dolly at identity (which it is at every frame's start, before the
-      // _xrSyncDollyBeforeRender step), dolly-local == world == ship-local
-      // for this purpose.
+      // dolly at identity (reset at the top of every frame), dolly-local
+      // == world == ship-local for this purpose. cameraVR.matrix is set
+      // by WebXRManager.onAnimationFrame to the first eye's view.transform
+      // matrix BEFORE our gameLoop callback fires, so it's fresh each
+      // frame without us having to re-call getCamera.
       _vrHeadQuatScratch.setFromRotationMatrix(xrCam.matrix);
       _vrHeadFwdScratch.set(0, 0, -1).applyQuaternion(_vrHeadQuatScratch);
       const fx = _vrHeadFwdScratch.x;
