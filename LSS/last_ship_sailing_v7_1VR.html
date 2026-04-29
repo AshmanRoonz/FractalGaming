@@ -1207,6 +1207,9 @@ body.vr-active .hit-marker {
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<!-- (VR fork) html2canvas: rasterizes DOM to canvas so we can mirror the
+     settings overlay / ship-select panel onto a 3D plane while in VR. -->
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 <!-- trystero loaded via dynamic import() in joinRoom(); uses BitTorrent trackers for P2P signaling -->
 <script>
 // ============================================================================
@@ -1498,6 +1501,8 @@ const input = {
   gpCore: false, gpCorePrev: false,
   gpMenu: false, gpMenuPrev: false,
   gpScoreboard: false, gpScoreboardPrev: false,
+  gpOpenSettings: false, gpOpenSettingsPrev: false,
+  gpCycleWallPattern: false, gpCycleWallPatternPrev: false,
   gpDpadUp: false, gpDpadUpPrev: false,
   gpDpadDown: false, gpDpadDownPrev: false,
   gpMoveX: 0, gpMoveY: 0,
@@ -1525,6 +1530,8 @@ const input = {
     moveDown: 11,  // R3 (right stick click)
     scoreboard: 8, // Back
     menu: 9,       // Start
+    openSettings:     -1, // unbound by default; configurable
+    cycleWallPattern: -1, // unbound by default; configurable
   },
   // (VR fork) Action -> XR controller button name. The action keys here
   // mirror gpBindings (fire / altFire / dash / ...); each value is one of
@@ -1545,6 +1552,8 @@ const input = {
     moveDown:   'rightStickClick',
     scoreboard: '',                // unbound by default; user can assign
     menu:       'rightB',          // press right B to confirm / open menu
+    openSettings:     '',          // unbound; user can assign in Settings
+    cycleWallPattern: '',          // unbound; user can assign in Settings
   },
   // Synthetic-helpers config. The only knob worth keeping is the stick-
   // as-D-pad fallback (XR controllers genuinely have no D-pad hardware).
@@ -5569,7 +5578,9 @@ renderer.xr.addEventListener('sessionend', () => {
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
+  if (xrMenuMesh) xrMenuMesh.visible = false;
   _xrCachedCameraVR = null;
+  _xrMenuLastTarget = null;
   // Hand the camera back to the scene root so the flat-screen render
   // path keeps working unchanged.
   if (camera.parent === xrDolly) {
@@ -5898,6 +5909,118 @@ function _xrDrawAuxHud() {
   }
 
   ctx.restore();
+}
+
+// Menu mirror plane. While the user is in VR and a 2D menu (settings or
+// ship-select) is on screen, html2canvas is used to rasterize the active
+// menu into a canvas every ~250 ms, which is then mirrored on a 3D plane
+// floating in front of the dolly. Existing gamepad/d-pad navigation works
+// unchanged; this is purely a "render the existing DOM in stereo" path.
+const _xrMenuCanvas = document.createElement('canvas');
+_xrMenuCanvas.width = 1024;
+_xrMenuCanvas.height = 1024;
+const _xrMenuCtx = _xrMenuCanvas.getContext('2d');
+let _xrMenuTex = null;
+let xrMenuMesh = null;
+let _xrMenuRasterizing = false;
+let _xrMenuLastRasterTime = 0;
+let _xrMenuLastTarget = null;
+function _xrEnsureMenuMesh() {
+  if (xrMenuMesh) return xrMenuMesh;
+  _xrMenuTex = new THREE.CanvasTexture(_xrMenuCanvas);
+  _xrMenuTex.minFilter = THREE.LinearFilter;
+  _xrMenuTex.magFilter = THREE.LinearFilter;
+  _xrMenuTex.format = THREE.RGBAFormat;
+  _xrMenuTex.generateMipmaps = false;
+  // Comfortable reading distance: 2.0m, large enough to read text. Square
+  // because the source DOM is variable aspect; we letterbox inside.
+  const geo = new THREE.PlaneGeometry(2.4, 2.4);
+  const mat = new THREE.MeshBasicMaterial({
+    map: _xrMenuTex,
+    transparent: true,
+    depthTest: false,    // always on top
+    depthWrite: false,
+  });
+  xrMenuMesh = new THREE.Mesh(geo, mat);
+  xrMenuMesh.position.set(0, 0.2, -2.0);
+  xrMenuMesh.renderOrder = 1000;
+  xrMenuMesh.frustumCulled = false;
+  xrMenuMesh.visible = false;
+  xrDolly.add(xrMenuMesh);
+  return xrMenuMesh;
+}
+
+// Rasterize a DOM element into _xrMenuCanvas using html2canvas. Async; the
+// pending flag prevents overlapping renders. Letterboxes the result into
+// the square menu canvas so the source DOM aspect is preserved.
+function _xrRasterizeMenu(targetEl) {
+  if (_xrMenuRasterizing) return;
+  if (!targetEl || typeof html2canvas === 'undefined') return;
+  _xrMenuRasterizing = true;
+  // Snapshot offsetWidth/Height before html2canvas does its DOM walk; the
+  // overlay can reflow under us during async work.
+  const w = Math.max(64, targetEl.offsetWidth  || 800);
+  const h = Math.max(64, targetEl.offsetHeight || 600);
+  html2canvas(targetEl, {
+    backgroundColor: null,
+    scale: 1,
+    logging: false,
+    width: w,
+    height: h,
+    useCORS: true,
+  }).then(srcCanvas => {
+    const ctx = _xrMenuCtx;
+    const dw = _xrMenuCanvas.width;
+    const dh = _xrMenuCanvas.height;
+    ctx.clearRect(0, 0, dw, dh);
+    const sw = srcCanvas.width || w;
+    const sh = srcCanvas.height || h;
+    const scale = Math.min(dw / sw, dh / sh);
+    const drawW = sw * scale;
+    const drawH = sh * scale;
+    const x = (dw - drawW) * 0.5;
+    const y = (dh - drawH) * 0.5;
+    ctx.drawImage(srcCanvas, x, y, drawW, drawH);
+    if (_xrMenuTex) _xrMenuTex.needsUpdate = true;
+    _xrMenuLastRasterTime = performance.now();
+    _xrMenuRasterizing = false;
+  }).catch((err) => {
+    console.warn('VR menu rasterize failed:', err);
+    _xrMenuRasterizing = false;
+  });
+}
+
+// Each frame in VR, decide which menu (if any) to mirror, and re-rasterize
+// it on a 250 ms cadence. Forces a rebuild immediately when the active
+// target changes (so the user sees the new menu right away, not after
+// the next interval).
+function _xrUpdateMenuMirror() {
+  if (!renderer.xr.isPresenting) {
+    if (xrMenuMesh) xrMenuMesh.visible = false;
+    return;
+  }
+  let target = null;
+  if (settingsOpen) {
+    target = document.getElementById('settings-overlay');
+  } else {
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) target = sel;
+  }
+  const mesh = _xrEnsureMenuMesh();
+  if (!target) {
+    mesh.visible = false;
+    _xrMenuLastTarget = null;
+    return;
+  }
+  mesh.visible = true;
+  const now = performance.now();
+  if (target !== _xrMenuLastTarget) {
+    // Switched menus: rebuild immediately.
+    _xrMenuLastTarget = target;
+    _xrRasterizeMenu(target);
+  } else if (now - _xrMenuLastRasterTime > 250) {
+    _xrRasterizeMenu(target);
+  }
 }
 
 // Toggle HUD plane visibility from session events so it does not sit in
@@ -6440,6 +6563,9 @@ function renderFrame() {
         _xrAuxUploadCounter = 0;
       }
     }
+    // Menu mirror: rasterize whichever overlay is open (settings / ship-
+    // select) and put it on the menu plane. Internally throttled to ~4Hz.
+    _xrUpdateMenuMirror();
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
     return;
@@ -17332,6 +17458,8 @@ function pollGamepad() {
   input.gpCorePrev = input.gpCore;
   input.gpMenuPrev = input.gpMenu;
   input.gpScoreboardPrev = input.gpScoreboard;
+  input.gpOpenSettingsPrev = input.gpOpenSettings;
+  input.gpCycleWallPatternPrev = input.gpCycleWallPattern;
   input.gpDpadUpPrev = input.gpDpadUp;
   input.gpDpadDownPrev = input.gpDpadDown;
   input.gpDpadLeftPrev = input.gpDpadLeft;
@@ -17351,6 +17479,10 @@ function pollGamepad() {
   // Menu buttons (fixed to Start/Back by convention; bindings are advisory)
   input.gpMenu = gpBtn('menu');            // Start (confirm/select)
   input.gpScoreboard = gpBtn('scoreboard'); // Back (cancel/esc)
+  // App-control actions (open settings / cycle wall pattern). Edge-triggered
+  // a few lines below; sticky-state read here so we have prev/now for both.
+  input.gpOpenSettings     = gpBtn('openSettings');
+  input.gpCycleWallPattern = gpBtn('cycleWallPattern');
   // D-pad up/down read directly (buttons 12/13) so menu nav still works when
   // button 12 is bound to 'core' for gameplay. We gate the gameplay core-edge
   // below whenever a menu is active, so there's no double-fire.
@@ -17432,6 +17564,24 @@ function pollGamepad() {
     } else if (game.state !== 'select') {
       openSettings();
       buildSettingsPage();
+    }
+  }
+
+  // Open Settings: toggle settings overlay regardless of current state.
+  // Useful as a dedicated VR button without doubling on Back/scoreboard.
+  if (input.gpOpenSettings && !input.gpOpenSettingsPrev) {
+    if (settingsOpen) {
+      closeSettings();
+    } else {
+      buildSettingsPage();
+      openSettings();
+    }
+  }
+
+  // Cycle Wall Pattern: same edge behavior as the keyboard 'P' shortcut.
+  if (input.gpCycleWallPattern && !input.gpCycleWallPatternPrev) {
+    if (typeof setWallPattern === 'function' && typeof game !== 'undefined') {
+      setWallPattern(((game.wallPattern | 0) + 1));
     }
   }
 
@@ -19302,6 +19452,7 @@ const ACTION_LABELS = {
   reload: 'Reload', ability0: 'Ability 1 (Offensive)', ability1: 'Ability 2 (Defensive)',
   ability2: 'Ability 3 (Utility)', core: 'Core Ability',
   moveUp: 'Move Up', moveDown: 'Move Down', scoreboard: 'Scoreboard', menu: 'Menu',
+  openSettings: 'Open Settings', cycleWallPattern: 'Cycle Wall Pattern',
 };
 
 // (v6.9) Keyboard action labels. Subset of gamepad labels because mouse owns
@@ -19830,6 +19981,8 @@ function buildSettingsPage() {
     moveDown:   'rightStickClick',
     scoreboard: '',
     menu:       'rightB',
+    openSettings:     '',
+    cycleWallPattern: '',
   };
   const xrBindContainer = overlay.querySelector('#xr-bind-rows');
   if (xrBindContainer) {
