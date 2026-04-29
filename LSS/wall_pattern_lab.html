@@ -153,6 +153,9 @@ select {
         <option value="14">Hex Pulse Radar</option>
         <option value="15">Cyber Datamosh</option>
         <option value="16">Neon Cube (raymarched)</option>
+        <option value="17">Panel Maze (architectural)</option>
+        <option value="18">Ring Tunnel</option>
+        <option value="19">Layered Neon Cube</option>
       </select>
     </div>
     <!-- Slot cue: updated on every pattern switch and slider edit. ● = this
@@ -913,6 +916,178 @@ const FRAG_SRC = `
     return col;
   }
 
+  // ============================================================
+  // PATTERN 17: Panel Maze (architectural plating)
+  // Multi-octave grid where each EDGE is hashed independently of
+  // either cell that touches it, so adjacent cells always agree on
+  // their shared boundary. The result reads as a hierarchical maze
+  // of bright panel borders rather than randomly-placed lines.
+  // 3-4 octaves stack at successively finer scales, each with a
+  // higher pass-threshold so finer scales are sparser ; the low
+  // octaves provide the architectural backbone, the high octaves
+  // add small-panel detail. u_iters drives the octave count;
+  // u_rings is repurposed as the edge thickness multiplier.
+  // ============================================================
+  vec3 patternPanelMaze(vec3 p, vec3 zoneC, float tt) {
+    vec3 ap = abs(p);
+    vec2 uv;
+    float seedAxis;
+    if (ap.x > ap.y && ap.x > ap.z) { uv = p.yz; seedAxis = p.x; }
+    else if (ap.y > ap.z)             { uv = p.xz; seedAxis = p.y; }
+    else                              { uv = p.xy; seedAxis = p.z; }
+    uv *= 4.0 + float(u_iters) * 0.3;
+
+    float lineSum = 0.0;
+    float thickBase = 0.025 * (0.5 + float(u_rings) * 0.2);
+
+    // Multi-octave: each level doubles the cell density. Capped at 4.
+    for (int level = 0; level < 4; level++) {
+      if (level >= u_iters) break;
+      float s = pow(2.0, float(level));
+      vec2 g = uv * s;
+      vec2 cellId = floor(g);
+      vec2 cellUv = fract(g);
+
+      // Edge identity: the two cells sharing a vertical edge see the
+      // same hash because right-edge of (x,y) = left-edge of (x+1,y).
+      // Same for horizontal edges. Higher levels get a higher pass
+      // threshold so finer detail is sparser.
+      float threshold = 0.42 + 0.12 * float(level);
+      float seedZ = float(level) + seedAxis * 0.1;
+      float leftH   = hash13(vec3(cellId.x,       cellId.y,       seedZ));
+      float rightH  = hash13(vec3(cellId.x + 1.0, cellId.y,       seedZ));
+      float bottomH = hash13(vec3(cellId.x,       cellId.y,       seedZ + 0.5));
+      float topH    = hash13(vec3(cellId.x,       cellId.y + 1.0, seedZ + 0.5));
+      float onL = step(threshold, leftH);
+      float onR = step(threshold, rightH);
+      float onB = step(threshold, bottomH);
+      float onT = step(threshold, topH);
+
+      float th = thickBase / s; // narrower lines at finer scales (in uv space)
+      // Translate cellUv distances to be on the same scale as `th` after the
+      // s-multiply on uv; cellUv is 0..1 in cell space, so we use the cell-
+      // space thickness (thickBase) directly.
+      float dL = cellUv.x;
+      float dR = 1.0 - cellUv.x;
+      float dB = cellUv.y;
+      float dT = 1.0 - cellUv.y;
+      float lineHere = max(max(
+        onL * smoothstep(thickBase, 0.0, dL),
+        onR * smoothstep(thickBase, 0.0, dR)),
+        max(
+        onB * smoothstep(thickBase, 0.0, dB),
+        onT * smoothstep(thickBase, 0.0, dT)));
+      lineSum = max(lineSum, lineHere * (1.0 - float(level) * 0.18));
+    }
+
+    // Subtle pulse so the maze breathes (very gentle so it stays architectural).
+    float pulsePhase = sin(uv.x * 0.4 + tt * 0.6) + sin(uv.y * 0.35 - tt * 0.5);
+    float pulse = 0.78 + 0.22 * (0.5 + 0.5 * sin(pulsePhase));
+    lineSum *= pulse;
+
+    // Color: bright warm-white edges, dark warm base with a hint of zone color.
+    vec3 edgeCol = mix(vec3(1.0, 0.95, 0.82), zoneC, u_hueSpin);
+    vec3 baseCol = mix(vec3(0.04, 0.035, 0.030), zoneC * 0.18, 0.55);
+    return baseCol + edgeCol * lineSum * 1.7;
+  }
+
+  // ============================================================
+  // PATTERN 18: Ring Tunnel
+  // Concentric rings centered on the nearest room. Alternating
+  // warm/cool glow at each ring boundary, radial slice marks between
+  // rings (the "mechanical detail" between architectural rings).
+  // u_iters drives ring density; u_hueSpin biases warm vs cool weights.
+  // ============================================================
+  vec3 patternRingTunnel(vec3 p, vec3 zoneC, float tt) {
+    // Find nearest room center in world space (the wp before u_scale).
+    // We re-derive a "world position" from p assuming the dispatcher's
+    // multiply by u_scale, so length comparisons stay sensible.
+    vec3 nearestC = vec3(0.0);
+    float minD = 99999.0;
+    for (int i = 0; i < 8; i++) {
+      if (i >= roomCount) break;
+      float d = length(vWorldPos - roomCenters[i]);
+      if (d < minD) { minD = d; nearestC = roomCenters[i]; }
+    }
+    vec3 toCenter = vWorldPos - nearestC;
+    // Pick 2D plane based on dominant axis of the wall normal.
+    vec3 ap = abs(vNormal);
+    vec2 uv2;
+    float axisAlong;
+    if (ap.x > ap.y && ap.x > ap.z) { uv2 = toCenter.yz; axisAlong = toCenter.x; }
+    else if (ap.y > ap.z)             { uv2 = toCenter.xz; axisAlong = toCenter.y; }
+    else                              { uv2 = toCenter.xy; axisAlong = toCenter.z; }
+    float r = length(uv2);
+    float ringSpacing = max(40.0, 280.0 / max(2.0, float(u_iters)));
+    float ringIdxF = r / ringSpacing;
+    float ringIdx = floor(ringIdxF);
+    float ringR = (ringIdx + 0.5) * ringSpacing;
+    float distToRing = abs(r - ringR);
+    float ringW = ringSpacing * 0.10;
+    float ringMask = smoothstep(ringW, 0.0, distToRing);
+    // Alternating warm/cool color per ring index.
+    float isWarm = mod(ringIdx + step(0.5, u_hueSpin), 2.0);
+    vec3 warmCol = vec3(1.0, 0.85, 0.40);
+    vec3 coolCol = vec3(0.30, 0.95, 1.00);
+    vec3 ringCol = mix(coolCol, warmCol, isWarm);
+    // Radial slice marks between rings (panel detail).
+    float angle = atan(uv2.y, uv2.x);
+    float sliceMark = pow(0.5 + 0.5 * sin(angle * (16.0 + float(u_rings) * 4.0)), 4.0);
+    float betweenRings = 1.0 - ringMask;
+    float sliceVal = sliceMark * betweenRings * 0.25;
+    // Pulse along the tunnel axis.
+    float pulse = 0.7 + 0.3 * sin(tt * 0.6 + ringIdx * 0.4 + axisAlong * 0.005);
+    vec3 baseCol = mix(vec3(0.04, 0.05, 0.06), zoneC * 0.15, 0.4);
+    vec3 col = baseCol + ringCol * ringMask * pulse * 1.6 + ringCol * sliceVal;
+    // Bright vanishing point at center.
+    float centerGlow = smoothstep(ringSpacing * 0.4, 0.0, r);
+    col += vec3(1.0, 0.95, 0.85) * centerGlow * 1.4;
+    return col;
+  }
+
+  // ============================================================
+  // PATTERN 19: Layered Neon Cube
+  // Clone of Neon Cube but the raymarch ACCUMULATES color along the
+  // ray instead of stopping at the first hit. Each cube edge adds a
+  // semi-transparent contribution; deeper edges fog out and contribute
+  // less. The result is nested transparent cube shells, so you see
+  // through outer cubes to inner ones; the optical illusion of the
+  // first Neon Cube is mitigated because depth gives multi-layer cues.
+  // u_iters drives the march depth.
+  // ============================================================
+  vec3 patternLayeredCube(vec3 p, vec3 zoneC, float tt) {
+    vec3 ro = vWorldPos * 0.003 + vec3(tt * 0.05, 0.0, 0.0);
+    vec3 rd = normalize(vWorldPos - cameraPosition);
+    float t = 0.0;
+    vec3 col = vec3(0.0);
+    float totalAlpha = 0.0;
+    for (int i = 0; i < 40; i++) {
+      if (i >= u_iters * 4) break;
+      vec3 wp = ro + rd * t;
+      vec3 cid;
+      float d = neonSceneSDF(wp, cid);
+      if (d < 0.012) {
+        float h = hash13(cid);
+        vec3 magenta = vec3(1.00, 0.15, 0.85);
+        vec3 cyan    = vec3(0.20, 0.95, 1.00);
+        vec3 cubeCol = (h > 0.5) ? cyan : magenta;
+        float pulse = 0.55 + 0.45 * sin(hash13(cid + vec3(7.0)) * 6.28 + tt * 1.5);
+        float fog = exp(-t * 0.30);
+        float layerA = 0.45 * fog * pulse;
+        col += cubeCol * layerA * (1.0 - totalAlpha);
+        totalAlpha += layerA * (1.0 - totalAlpha);
+        if (totalAlpha > 0.95) break;
+        // Step past this edge so we find the NEXT layer instead of the same one.
+        t += 0.12;
+      }
+      if (t > 9.0) break;
+      t += max(d * 0.85, 0.01);
+    }
+    float baseHue = rgbHue(zoneC);
+    col += hsv(baseHue, u_satBase * 0.4, 0.06);
+    return col * 1.5;
+  }
+
   // ---- Dispatcher ----
   vec3 cosmicField(vec3 wp, vec3 zoneC, float tt) {
     vec3 p = wp * u_scale;
@@ -934,6 +1109,9 @@ const FRAG_SRC = `
     if (u_patternId == 14) return patternHexPulse(p, zoneC, tt);
     if (u_patternId == 15) return patternCyberMosh(p, zoneC, tt);
     if (u_patternId == 16) return patternNeonCube(p, zoneC, tt);
+    if (u_patternId == 17) return patternPanelMaze(p, zoneC, tt);
+    if (u_patternId == 18) return patternRingTunnel(p, zoneC, tt);
+    if (u_patternId == 19) return patternLayeredCube(p, zoneC, tt);
     return vec3(0.0);
   }
 
@@ -1227,7 +1405,8 @@ const PATTERN_NAMES = [
   'Plasma FBM','Circumpunct','Soul Array',
   'Circuit Traces','Holographic Glitch','Cellular Membrane',
   'Warped Streaks','Caustic Shimmer','Hex Pulse Radar',
-  'Cyber Datamosh','Neon Cube'
+  'Cyber Datamosh','Neon Cube','Panel Maze',
+  'Ring Tunnel','Layered Cube'
 ];
 
 // Capture the current state of every slider into a flat wallParams blob

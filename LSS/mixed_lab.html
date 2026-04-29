@@ -1,0 +1,1131 @@
+<!DOCTYPE html>
+<!--
+  LSS Mixed Lab (Reaction-Diffusion + Wall Patterns)
+  Created: 2026-04-28
+  Last updated: 2026-04-28
+  Version: 1.0
+
+  Test bed for combining the Gray-Scott reaction-diffusion sim from
+  reaction_diffusion_lab.html with the wall pattern shaders from
+  wall_pattern_lab.html. The two technologies share one display shader:
+  the RD sim writes a 2D state texture every frame (ping-pong half-float
+  render targets), the wall pattern is computed in-shader at each pixel,
+  and a configurable mix mode combines them.
+
+  Six mix modes are exposed for comparison:
+    0: pattern-only       (debug; show the wall pattern alone)
+    1: RD-only            (debug; show the chemistry alone)
+    2: RD masks pattern   (pattern brightness multiplied by chemistry B)
+    3: pattern + RD glow  (pattern as base, RD adds bright accent on top)
+    4: RD warps pattern   (pattern sampled at vUv + grad(B)*scale; chemistry distorts the pattern)
+    5: substrate + flow   (pattern half-strength as backdrop, RD bright on top; "infrastructure with current")
+
+  Once a mix mode and pattern combo lands the look you want, the integration
+  into the main wall shader is a known shape: add an RD render-target
+  ping-pong loop in the game's main render path, pass the RD texture into
+  the wall ShaderMaterial as a sampler uniform, and add the mix-mode logic
+  to the wall fragment shader.
+
+  Revision history:
+  - 2026-04-28 v1.0: initial. Six wall patterns, six mix modes, full RD
+    controls, click-to-seed, pause/clear, color pickers.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LSS Mixed Lab v1.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a0a14; color: #ddd; font-family: 'Rajdhani', system-ui, sans-serif; overflow: hidden; }
+  #app { display: flex; width: 100vw; height: 100vh; }
+  #viewport { flex: 1; position: relative; min-width: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+  #viewport canvas { display: block; max-width: 100%; max-height: 100%; image-rendering: pixelated; border: 1px solid #2a3a55; cursor: crosshair; }
+  #hud { position: absolute; top: 12px; left: 12px; background: rgba(8, 10, 20, 0.78); padding: 8px 12px; border: 1px solid #2a3a55; border-radius: 4px; font-size: 12px; pointer-events: none; max-width: 360px; }
+  #hud .ttl { font-family: 'Orbitron', sans-serif; font-weight: 700; color: #88aaff; text-transform: uppercase; letter-spacing: 0.12em; font-size: 11px; margin-bottom: 4px; }
+  #hud .info { color: #889; font-size: 11px; line-height: 1.4; }
+  #sidebar { width: 340px; flex: 0 0 340px; background: #0e0e18; border-left: 1px solid #2a2a3a; padding: 14px; overflow-y: auto; font-size: 13px; }
+  h1 { font-family: 'Orbitron', sans-serif; font-size: 18px; font-weight: 700; margin: 0 0 4px 0; color: #88aaff; }
+  .subtitle { color: #667; font-size: 11px; margin-bottom: 12px; }
+  h2 { font-family: 'Orbitron', sans-serif; font-size: 11px; font-weight: 600; margin: 14px 0 6px 0; color: #99a; text-transform: uppercase; letter-spacing: 0.14em; border-bottom: 1px solid #1f1f2c; padding-bottom: 3px; }
+  button { background: #1c1c28; color: #ccc; border: 1px solid #2e2e40; padding: 6px 10px; cursor: pointer; font-family: inherit; font-size: 12px; border-radius: 3px; transition: background 0.12s; }
+  button:hover { background: #262638; }
+  button.active { background: #2e4f7a; border-color: #5588cc; color: #cfe6ff; }
+  .toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+  .toolbar button { flex: 1 0 auto; min-width: 60px; }
+  input, select { background: #14141e; color: #ddd; border: 1px solid #2a2a3a; padding: 4px 6px; font-family: inherit; font-size: 12px; border-radius: 2px; }
+  input[type=text], input[type=number], select { width: 100%; }
+  input[type=range] { width: 100%; }
+  input[type=color] { width: 32px; height: 24px; padding: 0; cursor: pointer; border: 1px solid #2a2a3a; }
+  .row { display: flex; gap: 6px; margin: 5px 0; align-items: center; }
+  .row label { flex: 0 0 90px; color: #889; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .row input, .row select { flex: 1; }
+  .row .val { flex: 0 0 52px; text-align: right; font-family: 'Courier New', monospace; font-size: 11px; color: #ccc; }
+  .hint { color: #667; font-size: 11px; font-style: italic; line-height: 1.45; }
+  .stat { color: #889; font-family: 'Courier New', monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="viewport">
+    <div id="hud">
+      <div class="ttl">Mixed Lab: RD + Wall Pattern</div>
+      <div class="info">
+        Pick a wall pattern, pick a mix mode, watch chemistry react.<br>
+        Click anywhere on the canvas to drop a B-chemical seed.
+      </div>
+    </div>
+  </div>
+  <div id="sidebar">
+    <h1>Mixed Lab</h1>
+    <div class="subtitle">Reaction-diffusion plus wall pattern</div>
+
+    <h2>Pattern</h2>
+    <div class="row">
+      <select id="pattern">
+        <option value="0">Kali IFS</option>
+        <option value="1">Voronoi Cells</option>
+        <option value="2" selected>Mandelbox Folds</option>
+        <option value="3">Hex Lattice</option>
+        <option value="4">Circuit Traces</option>
+        <option value="5">Caustic Shimmer</option>
+        <option value="6">Panel Maze (architectural)</option>
+        <option value="7">Apollonian Gasket</option>
+        <option value="8">Wave Interference</option>
+        <option value="9">Plasma FBM</option>
+        <option value="10">Circumpunct Lattice</option>
+        <option value="11">Holographic Glitch</option>
+        <option value="12">Cellular Membrane</option>
+        <option value="13">Domain-Warped Streaks</option>
+        <option value="14">Hex Pulse Radar</option>
+        <option value="15">Cyber Datamosh</option>
+        <option value="16">Ring Tunnel</option>
+        <option value="17">Neon Cube (raymarched)</option>
+        <option value="18">Layered Cube (transparent)</option>
+      </select>
+    </div>
+
+    <h2>Foreground Pattern (overlay)</h2>
+    <div class="row">
+      <select id="fgPattern">
+        <option value="-1" selected>None (single layer)</option>
+        <option value="17">Neon Cube</option>
+        <option value="18">Layered Cube</option>
+        <option value="16">Ring Tunnel</option>
+        <option value="14">Hex Pulse Radar</option>
+        <option value="11">Holographic Glitch</option>
+        <option value="12">Cellular Membrane</option>
+        <option value="4">Circuit Traces</option>
+        <option value="6">Panel Maze</option>
+        <option value="0">Kali IFS</option>
+        <option value="1">Voronoi</option>
+        <option value="2">Mandelbox</option>
+        <option value="3">Hex Lattice</option>
+        <option value="5">Caustic Shimmer</option>
+        <option value="7">Apollonian</option>
+        <option value="8">Wave Interference</option>
+        <option value="9">Plasma FBM</option>
+        <option value="10">Circumpunct</option>
+        <option value="13">Domain-Warped Streaks</option>
+        <option value="15">Cyber Datamosh</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>FG opacity</label>
+      <input type="range" id="fgAlpha" min="0" max="2" step="0.05" value="1.0">
+      <span class="val" id="fgAlpha-val">1.00</span>
+    </div>
+    <div class="hint" style="margin-top: 4px;">
+      Additive overlay on top of the background pattern. Set to None to render only the background. Try Layered Cube over Panel Maze or Cellular Membrane for the "tunnels with HUD" feel.
+    </div>
+
+    <h2>Mix Mode</h2>
+    <div class="row">
+      <select id="mix">
+        <option value="0">0: Pattern only (debug)</option>
+        <option value="1">1: RD only (debug)</option>
+        <option value="2">2: RD masks pattern</option>
+        <option value="3">3: Pattern + RD glow</option>
+        <option value="4">4: RD warps pattern</option>
+        <option value="5" selected>5: Substrate + flow</option>
+      </select>
+    </div>
+    <div class="hint" id="mix-hint" style="margin-top: 4px;">
+      Pattern half-strength as backdrop, RD bright on top. "Infrastructure with current."
+    </div>
+
+    <h2>RD Preset</h2>
+    <div class="row">
+      <select id="preset">
+        <option value="coral" selected>Coral (branchy reefs)</option>
+        <option value="maze">Maze (closed labyrinth)</option>
+        <option value="spots">Spots (settled dots)</option>
+        <option value="solitons">U-Skate (drifting solitons)</option>
+        <option value="worms">Worms (wriggling lines)</option>
+        <option value="dendrites">Dendrites (branching trees, circuit-like)</option>
+        <option value="filaments">Filaments (thin growing threads)</option>
+        <option value="veins">Veins (root/vein networks)</option>
+        <option value="mitosis">Mitosis (dividing blobs)</option>
+        <option value="negatons">Negatons (holes in a sea)</option>
+        <option value="stripes">Stripes (zebra)</option>
+        <option value="bacteria">Bacteria (growing fronts)</option>
+      </select>
+    </div>
+
+    <h2>Chemistry</h2>
+    <div class="row"><label>Feed F</label><input type="range" id="feed" min="0" max="0.10" step="0.0005" value="0.0545"><span class="val" id="feed-val">0.0545</span></div>
+    <div class="row"><label>Kill k</label><input type="range" id="kill" min="0" max="0.08" step="0.0005" value="0.062"><span class="val" id="kill-val">0.062</span></div>
+    <div class="row"><label>Da</label><input type="range" id="da" min="0.5" max="1.5" step="0.01" value="1.0"><span class="val" id="da-val">1.00</span></div>
+    <div class="row"><label>Db</label><input type="range" id="db" min="0.2" max="0.9" step="0.01" value="0.5"><span class="val" id="db-val">0.50</span></div>
+    <div class="row"><label>dt</label><input type="range" id="dt" min="0.5" max="1.4" step="0.01" value="1.0"><span class="val" id="dt-val">1.00</span></div>
+    <div class="row"><label>Steps/frame</label><input type="range" id="steps" min="1" max="16" step="1" value="6"><span class="val" id="steps-val">6</span></div>
+    <div class="row"><label>Brush size</label><input type="range" id="brush" min="0.01" max="0.15" step="0.005" value="0.04"><span class="val" id="brush-val">0.040</span></div>
+    <div class="hint">Da = A diffusion (substrate spread). Db = B diffusion (chemistry spread). Higher Da/Db ratio gives thinner growth (better for circuit-trace look).</div>
+
+    <h2>Pattern controls</h2>
+    <div class="row"><label>Iterations</label><input type="range" id="u_iters" min="1" max="12" step="1" value="8"><span class="val" id="u_iters-val">8</span></div>
+    <div class="row"><label>Scale</label><input type="range" id="u_scale" min="0.0005" max="0.02" step="0.0001" value="0.0035"><span class="val" id="u_scale-val">0.0035</span></div>
+    <div class="row"><label>Inv base</label><input type="range" id="u_invBase" min="2" max="20" step="0.1" value="9"><span class="val" id="u_invBase-val">9.0</span></div>
+    <div class="row"><label>Hue spin</label><input type="range" id="u_hueSpin" min="0" max="0.5" step="0.005" value="0.12"><span class="val" id="u_hueSpin-val">0.12</span></div>
+    <div class="row"><label>Sat base</label><input type="range" id="u_satBase" min="0" max="1" step="0.01" value="0.7"><span class="val" id="u_satBase-val">0.70</span></div>
+    <div class="row"><label>Cosmic</label><input type="range" id="K_COSMIC" min="0" max="6" step="0.05" value="1.5"><span class="val" id="K_COSMIC-val">1.50</span></div>
+
+    <h2>Warp / mix amount</h2>
+    <div class="row"><label>RD weight</label><input type="range" id="rdWeight" min="0" max="3" step="0.05" value="1.0"><span class="val" id="rdWeight-val">1.00</span></div>
+    <div class="row"><label>Warp scale</label><input type="range" id="warpScale" min="0" max="0.3" step="0.005" value="0.06"><span class="val" id="warpScale-val">0.060</span></div>
+
+    <h2>Display</h2>
+    <div class="row"><label>RD color A</label><input type="color" id="color-a" value="#0a1530"><span class="hint" style="flex:1;">low-B background</span></div>
+    <div class="row"><label>RD color B</label><input type="color" id="color-b" value="#88ccff"><span class="hint" style="flex:1;">high-B chemistry</span></div>
+    <div class="row"><label>Glow</label><input type="range" id="glow" min="0" max="2" step="0.05" value="1.0"><span class="val" id="glow-val">1.00</span></div>
+
+    <h2>Controls</h2>
+    <div class="toolbar">
+      <button id="reset">Re-seed</button>
+      <button id="pause">Pause</button>
+      <button id="clear">Clear</button>
+    </div>
+
+    <h2>Stats</h2>
+    <div class="stat" id="stats">FPS: -- · Steps: --</div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const viewport = document.getElementById('viewport');
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+renderer.autoClear = false;
+viewport.appendChild(renderer.domElement);
+
+const SIM_RES = 512;
+function fitCanvas() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  const s = Math.min(w, h);
+  renderer.setSize(s, s, true);
+}
+fitCanvas();
+new ResizeObserver(fitCanvas).observe(viewport);
+
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// ============================================================
+// Render targets (ping-pong half-float for RD sim)
+// ============================================================
+const rtOpts = {
+  minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter,
+  format: THREE.RGBAFormat, type: THREE.HalfFloatType,
+  wrapS: THREE.RepeatWrapping, wrapT: THREE.RepeatWrapping
+};
+let rtA = new THREE.WebGLRenderTarget(SIM_RES, SIM_RES, rtOpts);
+let rtB = new THREE.WebGLRenderTarget(SIM_RES, SIM_RES, rtOpts);
+let read = rtA, write = rtB;
+
+// ============================================================
+// RD simulation shader (Gray-Scott)
+// ============================================================
+const simMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tState: { value: null }, feed: { value: 0.0545 }, kill: { value: 0.062 },
+    Da: { value: 1.0 }, Db: { value: 0.5 }, dt: { value: 1.0 }, res: { value: SIM_RES }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tState; uniform float feed; uniform float kill;
+    uniform float Da; uniform float Db; uniform float dt; uniform float res;
+    varying vec2 vUv;
+    void main() {
+      float px = 1.0 / res;
+      vec4 c = texture2D(tState, vUv);
+      vec4 N  = texture2D(tState, vUv + vec2(0.0,  px));
+      vec4 S  = texture2D(tState, vUv + vec2(0.0, -px));
+      vec4 E  = texture2D(tState, vUv + vec2( px, 0.0));
+      vec4 W  = texture2D(tState, vUv + vec2(-px, 0.0));
+      vec4 NE = texture2D(tState, vUv + vec2( px,  px));
+      vec4 NW = texture2D(tState, vUv + vec2(-px,  px));
+      vec4 SE = texture2D(tState, vUv + vec2( px, -px));
+      vec4 SW = texture2D(tState, vUv + vec2(-px, -px));
+      vec2 lap = (N.rg + S.rg + E.rg + W.rg) * 0.20
+               + (NE.rg + NW.rg + SE.rg + SW.rg) * 0.05
+               - c.rg * 1.00;
+      float A = c.r, B = c.g;
+      float reaction = A * B * B;
+      float dA = Da * lap.x - reaction + feed * (1.0 - A);
+      float dB = Db * lap.y + reaction - (feed + kill) * B;
+      A = clamp(A + dA * dt, 0.0, 1.0);
+      B = clamp(B + dB * dt, 0.0, 1.0);
+      gl_FragColor = vec4(A, B, 0.0, 1.0);
+    }
+  `
+});
+
+// ============================================================
+// Seed shader (initial conditions: A=1 + scattered B blobs)
+// ============================================================
+const seedMat = new THREE.ShaderMaterial({
+  uniforms: { seed: { value: Math.random() * 1000.0 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform float seed; varying vec2 vUv;
+    float h(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7)) + seed) * 43758.5453); }
+    void main() {
+      vec2 g = floor(vUv * 24.0);
+      float B = (h(g) < 0.025) ? (0.5 + h(vUv) * 0.3) : 0.0;
+      vec2 fg = fract(vUv * 24.0) - 0.5;
+      B *= smoothstep(0.5, 0.0, length(fg));
+      gl_FragColor = vec4(1.0, B, 0.0, 1.0);
+    }
+  `
+});
+
+const clearMat = new THREE.ShaderMaterial({
+  uniforms: { val: { value: new THREE.Vector4(1.0, 0.0, 0.0, 1.0) } },
+  vertexShader: `void main(){ gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `uniform vec4 val; void main(){ gl_FragColor = val; }`
+});
+
+const splatMat = new THREE.ShaderMaterial({
+  uniforms: { tState: { value: null }, pos: { value: new THREE.Vector2(0.5, 0.5) }, radius: { value: 0.04 }, amount: { value: 0.6 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tState; uniform vec2 pos; uniform float radius; uniform float amount;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tState, vUv);
+      c.g = clamp(c.g + smoothstep(radius, 0.0, length(vUv - pos)) * amount, 0.0, 1.0);
+      gl_FragColor = c;
+    }
+  `
+});
+
+// ============================================================
+// Display shader: combines RD state + wall pattern via mix mode
+// ============================================================
+const dispMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tState: { value: null },
+    patternId: { value: 2 },
+    fgPatternId: { value: -1 },
+    fgAlpha: { value: 1.0 },
+    mixMode: { value: 5 },
+    time: { value: 0 },
+    u_iters: { value: 8 },
+    u_scale: { value: 0.0035 },
+    u_invBase: { value: 9.0 },
+    u_hueSpin: { value: 0.12 },
+    u_satBase: { value: 0.70 },
+    K_COSMIC: { value: 1.5 },
+    rdWeight: { value: 1.0 },
+    warpScale: { value: 0.06 },
+    res: { value: SIM_RES },
+    colorA: { value: new THREE.Color(0x0a1530) },
+    colorB: { value: new THREE.Color(0x88ccff) },
+    glow: { value: 1.0 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tState;
+    uniform int patternId;
+    uniform int fgPatternId;
+    uniform float fgAlpha;
+    uniform int mixMode;
+    uniform float time;
+    uniform int u_iters;
+    uniform float u_scale, u_invBase, u_hueSpin, u_satBase;
+    uniform float K_COSMIC;
+    uniform float rdWeight, warpScale, res;
+    uniform vec3 colorA, colorB;
+    uniform float glow;
+    varying vec2 vUv;
+
+    // ---- Helpers ----
+    vec3 hsv(float h, float s, float v) {
+      vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);
+      return v - v * s * clamp(min(k, 4.0 - k), 0.0, 1.0);
+    }
+    float rgbHue(vec3 c) {
+      float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+      float d = mx - mn;
+      if (d < 0.001) return 0.0;
+      float h;
+      if (mx == c.r) h = mod((c.g - c.b) / d + 6.0, 6.0) / 6.0;
+      else if (mx == c.g) h = ((c.b - c.r) / d + 2.0) / 6.0;
+      else h = ((c.r - c.g) / d + 4.0) / 6.0;
+      return h;
+    }
+    float hash13(vec3 p) {
+      p = fract(p * 0.1031);
+      p += dot(p, p.yzx + 33.33);
+      return fract((p.x + p.y) * p.z);
+    }
+    vec3 hash33(vec3 p) {
+      p = fract(p * vec3(443.897, 441.423, 437.195));
+      p += dot(p, p.yxz + 19.19);
+      return fract(vec3(p.x * p.y, p.x * p.z, p.y * p.z));
+    }
+
+    // ---- Pattern 0: Kali IFS ----
+    float kaliIFS(vec3 p, vec3 off, float inv) {
+      float s = 1.0;
+      for (int k = 0; k < 12; k++) {
+        if (k >= u_iters) break;
+        if (p.x + p.y < 0.0) p.xy = -p.yx;
+        if (p.x + p.z < 0.0) p.xz = -p.zx;
+        if (p.y + p.z < 0.0) p.yz = -p.zy;
+        float e = max(0.95, inv / dot(p, p));
+        s *= e;
+        p = p * e - off;
+      }
+      return s;
+    }
+    vec3 patternKali(vec3 p, vec3 zoneC, float tt) {
+      vec3 off = vec3(1.5, 1.62, 1.0);
+      float baseHue = rgbHue(zoneC);
+      float s = kaliIFS(p, off, u_invBase);
+      float val = clamp(s / 600.0, 0.0, 4.5);
+      float hue = fract(baseHue + tt * 0.02 + atan(p.x, p.z) * 0.05);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 1: Voronoi ----
+    vec3 patternVoronoi(vec3 p, vec3 zoneC, float tt) {
+      vec3 ip = floor(p), fp = fract(p);
+      float minD = 99.0;
+      vec3 nearest = vec3(0.0);
+      for (int dz = -1; dz <= 1; dz++)
+      for (int dy = -1; dy <= 1; dy++)
+      for (int dx = -1; dx <= 1; dx++) {
+        vec3 nid = ip + vec3(float(dx), float(dy), float(dz));
+        vec3 jit = hash33(nid);
+        vec3 f = vec3(float(dx), float(dy), float(dz)) + jit - fp;
+        float d = dot(f, f);
+        if (d < minD) { minD = d; nearest = nid; }
+      }
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + hash13(nearest) * u_hueSpin + tt * 0.02);
+      return hsv(hue, u_satBase, 1.0 - sqrt(minD));
+    }
+
+    // ---- Pattern 2: Mandelbox ----
+    vec3 patternMandelbox(vec3 p, vec3 zoneC, float tt) {
+      vec3 cv = p, q = p;
+      float dr = 1.0;
+      float scaleP = clamp(u_invBase * 0.18, 1.5, 2.6);
+      for (int k = 0; k < 8; k++) {
+        if (k >= u_iters) break;
+        q = clamp(q, -1.0, 1.0) * 2.0 - q;
+        float r2 = dot(q, q);
+        if (r2 < 0.5) { float t = 2.0; q *= t; dr *= t; }
+        else if (r2 < 1.0) { float t = 1.0 / r2; q *= t; dr *= t; }
+        q = scaleP * q + cv;
+        dr = dr * abs(scaleP) + 1.0;
+      }
+      float lum = length(q) / max(0.001, abs(dr));
+      float val = clamp(lum * 80.0 / 600.0, 0.0, 4.5);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + length(q) * u_hueSpin * 0.1 + tt * 0.02);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 3: Hex Lattice ----
+    float hex2D(vec2 q, float cell) {
+      q /= cell;
+      vec2 r = vec2(1.0, 1.7320508), h = r * 0.5;
+      vec2 a = mod(q, r) - h, b = mod(q + h, r) - h;
+      vec2 d = (dot(a, a) < dot(b, b)) ? a : b;
+      return max(abs(d.x), abs(d.y * 0.86603 + d.x * 0.5));
+    }
+    vec3 patternHex(vec3 p, vec3 zoneC, float tt) {
+      float baseHue = rgbHue(zoneC);
+      float cell = 1.0 / max(0.5, u_invBase * 0.1);
+      float h = hex2D(p.xz, cell);
+      float edge = smoothstep(0.46, 0.5, h);
+      float val = edge * 0.9 + (1.0 - edge) * 0.15;
+      float hue = fract(baseHue + h * u_hueSpin + tt * 0.03);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 4: Circuit Traces (Truchet) ----
+    vec3 patternCircuit(vec3 p, vec3 zoneC, float tt) {
+      vec3 ap = abs(p); vec2 uv; float seedAxis;
+      if (ap.x > ap.y && ap.x > ap.z) { uv = p.yz; seedAxis = p.x; }
+      else if (ap.y > ap.z)             { uv = p.xz; seedAxis = p.y; }
+      else                              { uv = p.xy; seedAxis = p.z; }
+      uv *= 6.0 + float(u_iters) * 0.4;
+      vec2 cellId = floor(uv), cellUv = fract(uv) - 0.5;
+      float h = hash13(vec3(cellId, floor(seedAxis * 5.0)));
+      float ang = floor(h * 4.0) * 1.5707963;
+      float ca = cos(ang), sa = sin(ang);
+      vec2 rUv = vec2(ca * cellUv.x - sa * cellUv.y, sa * cellUv.x + ca * cellUv.y);
+      float d1 = abs(length(rUv - vec2(-0.5, -0.5)) - 0.5);
+      float d2 = abs(length(rUv - vec2( 0.5,  0.5)) - 0.5);
+      float trace = max(smoothstep(0.06, 0.0, d1), smoothstep(0.06, 0.0, d2));
+      vec2 cFrom1 = rUv - vec2(-0.5, -0.5), cFrom2 = rUv - vec2(0.5, 0.5);
+      float p1 = 0.5 + 0.5 * sin(atan(cFrom1.y, cFrom1.x) * 4.0 + tt * 1.5 + h * 6.28);
+      float p2 = 0.5 + 0.5 * sin(atan(cFrom2.y, cFrom2.x) * 4.0 - tt * 1.5 + h * 6.28);
+      trace *= 0.4 + 0.6 * max(p1, p2);
+      float nodeD = min(min(length(cellUv - vec2(-0.5,-0.5)), length(cellUv - vec2(0.5,-0.5))),
+                        min(length(cellUv - vec2(-0.5, 0.5)), length(cellUv - vec2(0.5, 0.5))));
+      float node = smoothstep(0.10, 0.04, nodeD);
+      float val = max(trace, node * 1.8);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + h * u_hueSpin + tt * 0.02);
+      return hsv(hue, u_satBase, val * 1.2);
+    }
+
+    // ---- Pattern 6: Panel Maze (architectural plating) ----
+    vec3 patternPanelMaze(vec3 p, vec3 zoneC, float tt) {
+      vec3 ap = abs(p);
+      vec2 uv2;
+      float seedAxis;
+      if (ap.x > ap.y && ap.x > ap.z) { uv2 = p.yz; seedAxis = p.x; }
+      else if (ap.y > ap.z)             { uv2 = p.xz; seedAxis = p.y; }
+      else                              { uv2 = p.xy; seedAxis = p.z; }
+      uv2 *= 4.0 + float(u_iters) * 0.3;
+      float lineSum = 0.0;
+      float thickBase = 0.025;
+      for (int level = 0; level < 4; level++) {
+        if (level >= u_iters) break;
+        float s = pow(2.0, float(level));
+        vec2 g = uv2 * s;
+        vec2 cellId = floor(g);
+        vec2 cellUv = fract(g);
+        float threshold = 0.42 + 0.12 * float(level);
+        float seedZ = float(level) + seedAxis * 0.1;
+        float leftH   = hash13(vec3(cellId.x,       cellId.y,       seedZ));
+        float rightH  = hash13(vec3(cellId.x + 1.0, cellId.y,       seedZ));
+        float bottomH = hash13(vec3(cellId.x,       cellId.y,       seedZ + 0.5));
+        float topH    = hash13(vec3(cellId.x,       cellId.y + 1.0, seedZ + 0.5));
+        float onL = step(threshold, leftH);
+        float onR = step(threshold, rightH);
+        float onB = step(threshold, bottomH);
+        float onT = step(threshold, topH);
+        float lineHere = max(max(
+          onL * smoothstep(thickBase, 0.0, cellUv.x),
+          onR * smoothstep(thickBase, 0.0, 1.0 - cellUv.x)),
+          max(
+          onB * smoothstep(thickBase, 0.0, cellUv.y),
+          onT * smoothstep(thickBase, 0.0, 1.0 - cellUv.y)));
+        lineSum = max(lineSum, lineHere * (1.0 - float(level) * 0.18));
+      }
+      float pulse = 0.78 + 0.22 * (0.5 + 0.5 * sin(uv2.x * 0.4 + tt * 0.6));
+      lineSum *= pulse;
+      vec3 edgeCol = mix(vec3(1.0, 0.95, 0.82), zoneC, u_hueSpin);
+      vec3 baseCol = mix(vec3(0.04, 0.035, 0.030), zoneC * 0.18, 0.55);
+      return baseCol + edgeCol * lineSum * 1.7;
+    }
+
+    // ---- Pattern 5: Caustic Shimmer ----
+    vec3 patternCaustic(vec3 p, vec3 zoneC, float tt) {
+      vec3 q = p * 1.5;
+      float a1 = sin(q.x * 1.7 + q.y * 0.6 + tt * 0.7);
+      float a2 = sin(q.y * 1.3 - q.z * 0.9 + tt * 0.9);
+      float a3 = sin(q.z * 1.1 + q.x * 0.4 + tt * 0.5);
+      float caustic = a1 * a2 + a2 * a3 + a3 * a1;
+      caustic = pow(0.5 + 0.5 * caustic, 6.0);
+      float hum = 0.10 + 0.05 * sin(q.x + q.y + q.z + tt * 0.4);
+      float val = caustic * 1.6 + hum;
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + caustic * 0.08 + tt * 0.01);
+      return hsv(hue, u_satBase * 0.7, val);
+    }
+
+    // ---- Pattern 7: Apollonian Gasket ----
+    vec3 patternApollonian(vec3 p, vec3 zoneC, float tt) {
+      float baseHue = rgbHue(zoneC);
+      float scale = 1.0;
+      vec3 q = p;
+      for (int k = 0; k < 12; k++) {
+        if (k >= u_iters) break;
+        q = -1.0 + 2.0 * fract(0.5 * q + 0.5 * vec3(1.5, 1.62, 1.0));
+        float r2 = max(0.001, dot(q, q));
+        float kk = max(0.5, u_invBase * 0.13 / r2);
+        q *= kk; scale *= kk;
+      }
+      float lum = abs(0.25 * q.y / scale) * 100.0;
+      float val = clamp(lum / 600.0 * 60.0, 0.0, 4.5);
+      float hue = fract(baseHue + atan(q.x, q.z) * 0.10 + tt * 0.02);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 8: Wave Interference ----
+    vec3 patternWaves(vec3 p, vec3 zoneC, float tt) {
+      vec3 s1 = vec3( 2.0,  0.0,  0.0);
+      vec3 s2 = vec3(-1.0,  1.732, 0.0);
+      vec3 s3 = vec3(-1.0, -1.732, 0.0);
+      float k = u_invBase * 0.5;
+      float w1 = sin(length(p - s1) * k - tt * 2.0);
+      float w2 = sin(length(p - s2) * k - tt * 2.0);
+      float w3 = sin(length(p - s3) * k - tt * 2.0);
+      float sum = (w1 + w2 + w3) / 3.0;
+      float val = pow(0.5 + 0.5 * sum, 4.0);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + sum * u_hueSpin + tt * 0.02);
+      return hsv(hue, u_satBase, val * 1.5);
+    }
+
+    // ---- Pattern 9: Plasma FBM ----
+    float fbm3(vec3 p) {
+      float v = 0.0, a = 0.5;
+      for (int i = 0; i < 5; i++) {
+        v += a * sin(p.x) * cos(p.y) * sin(p.z);
+        p *= 2.0; a *= 0.5;
+      }
+      return v;
+    }
+    vec3 patternPlasma(vec3 p, vec3 zoneC, float tt) {
+      float n = fbm3(p * 2.0 + vec3(tt * 0.2, 0.0, tt * 0.1));
+      float val = pow(0.5 + 0.5 * n, 2.0);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + n * u_hueSpin + tt * 0.02);
+      return hsv(hue, u_satBase, val * 1.4);
+    }
+
+    // ---- Pattern 10: Circumpunct Lattice ----
+    vec3 patternCircumpunct(vec3 p, vec3 zoneC, float tt) {
+      vec3 cell = floor(p);
+      vec3 cellUv = fract(p) - 0.5;
+      float h = hash13(cell);
+      float dotR = 0.18;
+      float ringR = 0.36;
+      float d = length(cellUv);
+      float dotMask = smoothstep(dotR + 0.02, dotR - 0.02, d);
+      float ringMask = smoothstep(0.04, 0.0, abs(d - ringR));
+      float val = max(dotMask, ringMask) * (0.6 + 0.4 * sin(tt * 1.0 + h * 6.28));
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + h * u_hueSpin + tt * 0.02);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 11: Holographic Glitch ----
+    vec3 patternGlitch(vec3 p, vec3 zoneC, float tt) {
+      float scan = 0.5 + 0.5 * sin(p.y * (40.0 + float(u_iters) * 5.0) + tt * 8.0);
+      scan = pow(scan, 2.0);
+      float bandY = floor(p.y * 12.0 + tt * 3.0);
+      float bandHash = hash13(vec3(bandY, 0.0, floor(tt * 4.0)));
+      float jitter = (bandHash > 0.85) ? (bandHash - 0.85) * 6.0 : 0.0;
+      vec3 pj = p + vec3(jitter * 0.3, 0.0, 0.0);
+      float n0 = hash13(pj * 8.0);
+      float n1 = hash13(pj * 8.0 + vec3(0.05, 0.0, 0.0));
+      float n2 = hash13(pj * 8.0 - vec3(0.05, 0.0, 0.0));
+      float wave = 0.5 + 0.5 * sin(p.x * 2.0 + tt * 0.6);
+      float baseHue = fract(rgbHue(zoneC) + u_hueSpin * 0.5);
+      vec3 col = hsv(baseHue, u_satBase, scan * wave);
+      col.r *= 0.9 + n1 * 0.6;
+      col.g *= 0.9 + n0 * 0.4;
+      col.b *= 0.9 + n2 * 0.7;
+      if (jitter > 0.0) col = mix(col, vec3(1.0, 0.9, 0.8), 0.6);
+      return col;
+    }
+
+    // ---- Pattern 12: Cellular Membrane (Worley) ----
+    vec3 patternCellular(vec3 p, vec3 zoneC, float tt) {
+      vec3 pid = floor(p);
+      vec3 pf = fract(p);
+      float minD = 99.0, secondD = 99.0;
+      vec3 nearestId = vec3(0.0);
+      for (int dz = -1; dz <= 1; dz++)
+      for (int dy = -1; dy <= 1; dy++)
+      for (int dx = -1; dx <= 1; dx++) {
+        vec3 nid = pid + vec3(float(dx), float(dy), float(dz));
+        vec3 jit = hash33(nid);
+        jit = 0.5 + 0.5 * sin(jit * 6.28 + tt * 0.4);
+        vec3 f = vec3(float(dx), float(dy), float(dz)) + jit - pf;
+        float d = dot(f, f);
+        if (d < minD) { secondD = minD; minD = d; nearestId = nid; }
+        else if (d < secondD) { secondD = d; }
+      }
+      float edge = sqrt(secondD) - sqrt(minD);
+      float edgeMask = smoothstep(0.04, 0.0, edge);
+      float pulse = 0.5 + 0.5 * sin(hash13(nearestId) * 6.28 + tt * 1.2);
+      float val = edgeMask * (0.6 + 0.4 * pulse);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + hash13(nearestId) * u_hueSpin);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 13: Domain-Warped Streaks ----
+    vec3 patternStreaks(vec3 p, vec3 zoneC, float tt) {
+      vec3 q = p, warp = vec3(0.0);
+      for (int k = 0; k < 6; k++) {
+        if (k >= u_iters) break;
+        warp.x = sin(q.y * 1.3 + tt * 0.3 + warp.z * 2.0);
+        warp.y = sin(q.z * 1.7 + tt * 0.4 + warp.x * 2.0);
+        warp.z = sin(q.x * 1.1 + tt * 0.2 + warp.y * 2.0);
+        q = p + warp * (0.6 + float(k) * 0.2);
+      }
+      float field = warp.x + warp.y * 0.5 + warp.z * 0.3;
+      float streaks = abs(fract(field * 2.0) - 0.5) * 2.0;
+      streaks = smoothstep(0.85, 0.95, 1.0 - streaks);
+      float glow = 0.15 + 0.15 * sin(field * 3.0 + tt * 0.5);
+      float val = max(streaks * 1.5, glow);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + field * 0.05 + tt * 0.01);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 14: Hex Pulse Radar ----
+    vec3 patternHexPulse(vec3 p, vec3 zoneC, float tt) {
+      vec3 ap = abs(p);
+      vec2 uv2;
+      if (ap.x > ap.y && ap.x > ap.z) uv2 = p.yz;
+      else if (ap.y > ap.z)            uv2 = p.xz;
+      else                             uv2 = p.xy;
+      uv2 *= 5.0 + float(u_iters) * 0.4;
+      vec2 r = vec2(1.0, 1.7320508);
+      vec2 a = mod(uv2, r) - r * 0.5;
+      vec2 b = mod(uv2 - r * 0.5, r) - r * 0.5;
+      vec2 hcell = (dot(a, a) < dot(b, b)) ? a : b;
+      vec2 hid = uv2 - hcell;
+      float hexDist = max(abs(hcell.x) * 0.866 + abs(hcell.y) * 0.5, abs(hcell.y));
+      float edge = smoothstep(0.46, 0.5, hexDist);
+      float pulseVal = 0.5 + 0.5 * sin(length(p) * 0.8 - tt * 2.0);
+      pulseVal = smoothstep(0.7, 1.0, pulseVal);
+      float cellLight = hash13(vec3(hid, 0.0)) * 0.30 + pulseVal * 1.6;
+      float val = edge * 0.8 + cellLight * (1.0 - edge * 0.5);
+      float baseHue = rgbHue(zoneC);
+      float hue = fract(baseHue + pulseVal * u_hueSpin + tt * 0.01);
+      return hsv(hue, u_satBase, val);
+    }
+
+    // ---- Pattern 15: Cyber Datamosh ----
+    vec3 patternCyberMosh(vec3 p, vec3 zoneC, float tt) {
+      vec3 ap = abs(p);
+      vec2 uv2; float driftAxis;
+      if (ap.x > ap.y && ap.x > ap.z) { uv2 = p.yz; driftAxis = p.x; }
+      else if (ap.y > ap.z)             { uv2 = p.xz; driftAxis = p.y; }
+      else                              { uv2 = p.xy; driftAxis = p.z; }
+      uv2 *= 4.0;
+      uv2.x += driftAxis * 0.05;
+      float vScan = sin(uv2.x * (50.0 + float(u_iters) * 6.0) + tt * 4.0);
+      vScan = pow(0.5 + 0.5 * vScan, 6.0);
+      vec2 pix = floor(uv2 * 14.0);
+      float blockHash = hash13(vec3(pix, floor(tt * 6.0)));
+      float pixCorrupt = step(0.78, blockHash);
+      float bandY = floor(uv2.y * 9.0 + tt * 2.5);
+      float bandH = hash13(vec3(bandY, 0.0, floor(tt * 4.0)));
+      float band = step(0.88, bandH) * 1.6;
+      vec3 magenta = vec3(1.00, 0.10, 0.85);
+      vec3 cyan    = vec3(0.20, 0.95, 1.00);
+      float colorMix = 0.5 + 0.5 * sin(uv2.x * 0.6 + tt * 0.7);
+      vec3 baseCol = mix(cyan, magenta, colorMix);
+      float val = vScan * 0.55 + pixCorrupt * 0.85 + band;
+      vec3 col = baseCol * val;
+      float baseHue = rgbHue(zoneC);
+      col = mix(col, hsv(baseHue, u_satBase, val * 0.6), 0.18);
+      return col;
+    }
+
+    // ---- Pattern 16: Ring Tunnel (mixed_lab variant; centers on screen UV) ----
+    vec3 patternRingTunnel(vec3 p, vec3 zoneC, float tt) {
+      // Use the mixed_lab's screen-space UV centered at (0.5, 0.5).
+      vec2 d = vUv - 0.5;
+      float r = length(d) * 16.0;
+      float ringSpacing = max(0.4, 4.0 / max(2.0, float(u_iters)));
+      float ringIdx = floor(r / ringSpacing);
+      float ringR = (ringIdx + 0.5) * ringSpacing;
+      float ringMask = smoothstep(ringSpacing * 0.10, 0.0, abs(r - ringR));
+      float isWarm = mod(ringIdx + step(0.5, u_hueSpin), 2.0);
+      vec3 warmCol = vec3(1.0, 0.85, 0.40);
+      vec3 coolCol = vec3(0.30, 0.95, 1.00);
+      vec3 ringCol = mix(coolCol, warmCol, isWarm);
+      float angle = atan(d.y, d.x);
+      float sliceMark = pow(0.5 + 0.5 * sin(angle * 16.0), 4.0);
+      float sliceVal = sliceMark * (1.0 - ringMask) * 0.25;
+      float pulse = 0.7 + 0.3 * sin(tt * 0.6 + ringIdx * 0.4);
+      vec3 baseCol = mix(vec3(0.04, 0.05, 0.06), zoneC * 0.15, 0.4);
+      vec3 col = baseCol + ringCol * ringMask * pulse * 1.6 + ringCol * sliceVal;
+      col += vec3(1.0, 0.95, 0.85) * smoothstep(ringSpacing * 0.4, 0.0, r) * 1.2;
+      return col;
+    }
+
+    // ---- Pattern 17: Neon Cube (raymarched, fake perspective) ----
+    float sdBoxFrame(vec3 p, vec3 b, float e) {
+      p = abs(p) - b;
+      vec3 q = abs(p + e) - e;
+      float a = length(max(vec3(p.x, q.y, q.z), 0.0)) + min(max(p.x, max(q.y, q.z)), 0.0);
+      float b1 = length(max(vec3(q.x, p.y, q.z), 0.0)) + min(max(q.x, max(p.y, q.z)), 0.0);
+      float c = length(max(vec3(q.x, q.y, p.z), 0.0)) + min(max(q.x, max(q.y, p.z)), 0.0);
+      return min(min(a, b1), c);
+    }
+    float neonSceneSDF(vec3 wp, out vec3 cellId) {
+      float CELL = 1.4;
+      cellId = floor(wp / CELL);
+      vec3 local = mod(wp, CELL) - CELL * 0.5;
+      return sdBoxFrame(local, vec3(CELL * 0.42), 0.05);
+    }
+    vec3 patternNeonCube(vec3 p, vec3 zoneC, float tt) {
+      // Synthesize a perspective ray since the lab uses an ortho camera.
+      vec3 ro = vec3(0.0, 0.0, 0.0) + vec3(tt * 0.05, 0.0, 0.0);
+      vec3 rd = normalize(vec3((vUv - 0.5) * 1.2, -1.0));
+      float t = 0.0;
+      bool hit = false;
+      vec3 hitId = vec3(0.0);
+      float hitT = 0.0;
+      for (int i = 0; i < 32; i++) {
+        if (i >= u_iters * 3) break;
+        vec3 wp = ro + rd * t;
+        vec3 cid;
+        float d = neonSceneSDF(wp, cid);
+        if (d < 0.006) { hit = true; hitId = cid; hitT = t; break; }
+        if (t > 9.0) break;
+        t += max(d * 0.85, 0.01);
+      }
+      vec3 col = vec3(0.0);
+      if (hit) {
+        float h = hash13(hitId);
+        vec3 magenta = vec3(1.00, 0.15, 0.85);
+        vec3 cyan    = vec3(0.20, 0.95, 1.00);
+        vec3 cubeCol = (h > 0.5) ? cyan : magenta;
+        float pulse = 0.55 + 0.45 * sin(hash13(hitId + vec3(7.0)) * 6.28 + tt * 1.5);
+        float fog = exp(-hitT * 0.28);
+        col = cubeCol * pulse * fog * 1.8;
+      }
+      float baseHue = rgbHue(zoneC);
+      col += hsv(baseHue, u_satBase * 0.4, 0.06);
+      return col;
+    }
+
+    // ---- Pattern 18: Layered Cube (accumulate hits, transparent) ----
+    vec3 patternLayeredCube(vec3 p, vec3 zoneC, float tt) {
+      vec3 ro = vec3(0.0, 0.0, 0.0) + vec3(tt * 0.05, 0.0, 0.0);
+      vec3 rd = normalize(vec3((vUv - 0.5) * 1.2, -1.0));
+      float t = 0.0;
+      vec3 col = vec3(0.0);
+      float totalAlpha = 0.0;
+      for (int i = 0; i < 40; i++) {
+        if (i >= u_iters * 4) break;
+        vec3 wp = ro + rd * t;
+        vec3 cid;
+        float d = neonSceneSDF(wp, cid);
+        if (d < 0.012) {
+          float h = hash13(cid);
+          vec3 magenta = vec3(1.00, 0.15, 0.85);
+          vec3 cyan    = vec3(0.20, 0.95, 1.00);
+          vec3 cubeCol = (h > 0.5) ? cyan : magenta;
+          float pulse = 0.55 + 0.45 * sin(hash13(cid + vec3(7.0)) * 6.28 + tt * 1.5);
+          float fog = exp(-t * 0.30);
+          float layerA = 0.45 * fog * pulse;
+          col += cubeCol * layerA * (1.0 - totalAlpha);
+          totalAlpha += layerA * (1.0 - totalAlpha);
+          if (totalAlpha > 0.95) break;
+          t += 0.12;
+        }
+        if (t > 9.0) break;
+        t += max(d * 0.85, 0.01);
+      }
+      float baseHue = rgbHue(zoneC);
+      col += hsv(baseHue, u_satBase * 0.4, 0.06);
+      return col * 1.5;
+    }
+
+    // ---- Dispatcher ----
+    // Takes pid as arg so the same dispatcher can be invoked twice in main()
+    // with different patterns (background and foreground). Returns vec3(0.0)
+    // for pid < 0 so the foreground layer can be cleanly disabled.
+    vec3 sampleWallPattern(int pid, vec2 uv, vec3 zoneC, float tt) {
+      if (pid < 0) return vec3(0.0);
+      // Synthesize a 3D position from the 2D UV (range -1..1 with z drift).
+      vec3 wp = vec3((uv * 2.0 - 1.0) * 800.0, sin(tt * 0.05) * 100.0);
+      vec3 p = wp * u_scale;
+      float ca = cos(tt * 0.05), sa = sin(tt * 0.05);
+      p = vec3(ca * p.x - sa * p.z, p.y, sa * p.x + ca * p.z);
+      if (pid == 0)  return patternKali(p, zoneC, tt);
+      if (pid == 1)  return patternVoronoi(p, zoneC, tt);
+      if (pid == 2)  return patternMandelbox(p, zoneC, tt);
+      if (pid == 3)  return patternHex(p, zoneC, tt);
+      if (pid == 4)  return patternCircuit(p, zoneC, tt);
+      if (pid == 5)  return patternCaustic(p, zoneC, tt);
+      if (pid == 6)  return patternPanelMaze(p, zoneC, tt);
+      if (pid == 7)  return patternApollonian(p, zoneC, tt);
+      if (pid == 8)  return patternWaves(p, zoneC, tt);
+      if (pid == 9)  return patternPlasma(p, zoneC, tt);
+      if (pid == 10) return patternCircumpunct(p, zoneC, tt);
+      if (pid == 11) return patternGlitch(p, zoneC, tt);
+      if (pid == 12) return patternCellular(p, zoneC, tt);
+      if (pid == 13) return patternStreaks(p, zoneC, tt);
+      if (pid == 14) return patternHexPulse(p, zoneC, tt);
+      if (pid == 15) return patternCyberMosh(p, zoneC, tt);
+      if (pid == 16) return patternRingTunnel(p, zoneC, tt);
+      if (pid == 17) return patternNeonCube(p, zoneC, tt);
+      if (pid == 18) return patternLayeredCube(p, zoneC, tt);
+      return vec3(0.0);
+    }
+
+    void main() {
+      // RD state
+      vec4 s = texture2D(tState, vUv);
+      float B = s.g;
+      vec3 rdCol = mix(colorA, colorB, pow(B, 0.7));
+      rdCol += colorB * pow(B, 4.0) * glow;
+
+      // Wall pattern color, with an optional B-gradient warp for mode 4
+      vec2 uvForPattern = vUv;
+      if (mixMode == 4) {
+        float px = 1.0 / res;
+        float Bn = texture2D(tState, vUv + vec2(0.0, px)).g;
+        float Bs = texture2D(tState, vUv - vec2(0.0, px)).g;
+        float Be = texture2D(tState, vUv + vec2(px, 0.0)).g;
+        float Bw = texture2D(tState, vUv - vec2(px, 0.0)).g;
+        vec2 grad = vec2(Be - Bw, Bn - Bs);
+        uvForPattern = vUv + grad * warpScale * 12.0;
+      }
+      vec3 zoneC = colorB; // zone color seeded from RD's high-B color
+      // Background pattern (always active).
+      vec3 patternCol = sampleWallPattern(patternId, uvForPattern, zoneC, time) * K_COSMIC;
+      // Foreground overlay (additive; transparent patterns like Layered Cube
+      // naturally let the background show through their dark areas).
+      if (fgPatternId >= 0) {
+        vec3 fgCol = sampleWallPattern(fgPatternId, uvForPattern, zoneC, time) * K_COSMIC;
+        patternCol += fgCol * fgAlpha;
+      }
+
+      vec3 final;
+      if (mixMode == 0) {
+        final = patternCol;
+      } else if (mixMode == 1) {
+        final = rdCol;
+      } else if (mixMode == 2) {
+        // RD masks pattern: pattern visible only where chemistry is.
+        final = patternCol * (0.15 + B * 1.4 * rdWeight);
+      } else if (mixMode == 3) {
+        // Pattern + RD glow: pattern is base, RD glow added.
+        final = patternCol + rdCol * B * rdWeight;
+      } else if (mixMode == 4) {
+        // RD warps pattern (warp applied above when sampling).
+        final = patternCol;
+      } else {
+        // Mode 5: substrate + flow. Pattern dimmed as backdrop, RD glows on top.
+        final = patternCol * 0.5 + rdCol * (B * rdWeight + 0.05);
+      }
+
+      gl_FragColor = vec4(final, 1.0);
+    }
+  `
+});
+
+// ============================================================
+// Quad scenes
+// ============================================================
+const quad = new THREE.PlaneGeometry(2, 2);
+const simScene   = new THREE.Scene(); simScene.add(new THREE.Mesh(quad, simMat));
+const seedScene  = new THREE.Scene(); seedScene.add(new THREE.Mesh(quad, seedMat));
+const clearScene = new THREE.Scene(); clearScene.add(new THREE.Mesh(quad, clearMat));
+const splatScene = new THREE.Scene(); splatScene.add(new THREE.Mesh(quad, splatMat));
+const dispScene  = new THREE.Scene(); dispScene.add(new THREE.Mesh(quad, dispMat));
+
+// ============================================================
+// Operations
+// ============================================================
+function reseed() {
+  seedMat.uniforms.seed.value = Math.random() * 1000.0;
+  renderer.setRenderTarget(rtA); renderer.render(seedScene, camera);
+  renderer.setRenderTarget(rtB); renderer.render(seedScene, camera);
+  read = rtA; write = rtB;
+}
+function clearBoth() {
+  clearMat.uniforms.val.value.set(1.0, 0.0, 0.0, 1.0);
+  renderer.setRenderTarget(rtA); renderer.render(clearScene, camera);
+  renderer.setRenderTarget(rtB); renderer.render(clearScene, camera);
+  read = rtA; write = rtB;
+}
+function splatAt(uv) {
+  splatMat.uniforms.tState.value = read.texture;
+  splatMat.uniforms.pos.value.copy(uv);
+  renderer.setRenderTarget(write); renderer.render(splatScene, camera);
+  [read, write] = [write, read];
+}
+reseed();
+
+// ============================================================
+// UI
+// ============================================================
+function bindSlider(id, valId, target, fixedDigits) {
+  const slider = document.getElementById(id);
+  const valSpan = document.getElementById(valId);
+  function refresh() {
+    const v = parseFloat(slider.value);
+    valSpan.textContent = (fixedDigits === undefined) ? v : v.toFixed(fixedDigits);
+    target(v);
+  }
+  slider.addEventListener('input', refresh);
+  refresh();
+}
+bindSlider('feed', 'feed-val', v => simMat.uniforms.feed.value = v, 4);
+bindSlider('kill', 'kill-val', v => simMat.uniforms.kill.value = v, 4);
+bindSlider('da',   'da-val',   v => simMat.uniforms.Da.value   = v, 2);
+bindSlider('db',   'db-val',   v => simMat.uniforms.Db.value   = v, 2);
+bindSlider('dt',   'dt-val',   v => simMat.uniforms.dt.value   = v, 2);
+let stepsPerFrame = 6;
+bindSlider('steps','steps-val',v => stepsPerFrame             = v|0, 0);
+let brushRadius = 0.04;
+bindSlider('brush','brush-val',v => brushRadius               = v, 3);
+bindSlider('u_iters',   'u_iters-val',   v => dispMat.uniforms.u_iters.value   = v|0, 0);
+bindSlider('u_scale',   'u_scale-val',   v => dispMat.uniforms.u_scale.value   = v, 4);
+bindSlider('u_invBase', 'u_invBase-val', v => dispMat.uniforms.u_invBase.value = v, 1);
+bindSlider('u_hueSpin', 'u_hueSpin-val', v => dispMat.uniforms.u_hueSpin.value = v, 3);
+bindSlider('u_satBase', 'u_satBase-val', v => dispMat.uniforms.u_satBase.value = v, 2);
+bindSlider('K_COSMIC',  'K_COSMIC-val',  v => dispMat.uniforms.K_COSMIC.value  = v, 2);
+bindSlider('rdWeight',  'rdWeight-val',  v => dispMat.uniforms.rdWeight.value  = v, 2);
+bindSlider('warpScale', 'warpScale-val', v => dispMat.uniforms.warpScale.value = v, 3);
+bindSlider('glow',      'glow-val',      v => dispMat.uniforms.glow.value      = v, 2);
+
+document.getElementById('pattern').addEventListener('change', (e) => {
+  dispMat.uniforms.patternId.value = parseInt(e.target.value, 10) | 0;
+});
+document.getElementById('fgPattern').addEventListener('change', (e) => {
+  // -1 means "no foreground"; positive values select a pattern to overlay.
+  dispMat.uniforms.fgPatternId.value = parseInt(e.target.value, 10);
+});
+bindSlider('fgAlpha', 'fgAlpha-val', v => dispMat.uniforms.fgAlpha.value = v, 2);
+
+const MIX_HINTS = {
+  '0': 'Pattern only. Debug view; ignores chemistry.',
+  '1': 'RD only. Debug view; ignores pattern.',
+  '2': 'RD masks pattern. Pattern visible only where chemistry concentrates.',
+  '3': 'Pattern + RD glow. Pattern is base; chemistry adds bright accent on top.',
+  '4': 'RD warps pattern. Pattern is sampled at vUv + grad(B), so chemistry distorts the pattern.',
+  '5': 'Substrate + flow. Pattern dimmed as backdrop; RD glows on top. "Infrastructure with current."'
+};
+const mixHint = document.getElementById('mix-hint');
+document.getElementById('mix').addEventListener('change', (e) => {
+  const v = e.target.value;
+  dispMat.uniforms.mixMode.value = parseInt(v, 10) | 0;
+  mixHint.textContent = MIX_HINTS[v] || '';
+});
+
+// Each preset can also override Da and Db; growth-pattern presets often
+// need a higher Da/Db ratio to favor thin filament structures.
+const PRESETS = {
+  coral:     { feed: 0.0545, kill: 0.062,  Da: 1.0, Db: 0.5 },
+  maze:      { feed: 0.029,  kill: 0.057,  Da: 1.0, Db: 0.5 },
+  spots:     { feed: 0.025,  kill: 0.060,  Da: 1.0, Db: 0.5 },
+  solitons:  { feed: 0.0367, kill: 0.0649, Da: 1.0, Db: 0.5 },
+  worms:     { feed: 0.078,  kill: 0.061,  Da: 1.0, Db: 0.5 },
+  dendrites: { feed: 0.045,  kill: 0.063,  Da: 1.0, Db: 0.45 },
+  filaments: { feed: 0.082,  kill: 0.060,  Da: 1.1, Db: 0.40 },
+  veins:     { feed: 0.070,  kill: 0.060,  Da: 1.0, Db: 0.45 },
+  mitosis:   { feed: 0.0367, kill: 0.0649, Da: 1.0, Db: 0.5 },
+  negatons:  { feed: 0.040,  kill: 0.0596, Da: 1.0, Db: 0.5 },
+  stripes:   { feed: 0.022,  kill: 0.051,  Da: 1.0, Db: 0.5 },
+  bacteria:  { feed: 0.029,  kill: 0.057,  Da: 1.05,Db: 0.48 }
+};
+document.getElementById('preset').addEventListener('change', (e) => {
+  const p = PRESETS[e.target.value]; if (!p) return;
+  document.getElementById('feed').value = p.feed;
+  document.getElementById('kill').value = p.kill;
+  document.getElementById('da').value   = p.Da;
+  document.getElementById('db').value   = p.Db;
+  document.getElementById('feed-val').textContent = p.feed.toFixed(4);
+  document.getElementById('kill-val').textContent = p.kill.toFixed(4);
+  document.getElementById('da-val').textContent   = p.Da.toFixed(2);
+  document.getElementById('db-val').textContent   = p.Db.toFixed(2);
+  simMat.uniforms.feed.value = p.feed;
+  simMat.uniforms.kill.value = p.kill;
+  simMat.uniforms.Da.value   = p.Da;
+  simMat.uniforms.Db.value   = p.Db;
+  reseed();
+});
+
+const colA = document.getElementById('color-a');
+const colB = document.getElementById('color-b');
+function applyColors() {
+  dispMat.uniforms.colorA.value.set(colA.value);
+  dispMat.uniforms.colorB.value.set(colB.value);
+}
+colA.addEventListener('input', applyColors);
+colB.addEventListener('input', applyColors);
+applyColors();
+
+let paused = false;
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  pauseBtn.classList.toggle('active', paused);
+});
+document.getElementById('reset').addEventListener('click', reseed);
+document.getElementById('clear').addEventListener('click', clearBoth);
+
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const u = (ev.clientX - rect.left) / rect.width;
+  const v = 1.0 - (ev.clientY - rect.top) / rect.height;
+  splatMat.uniforms.radius.value = brushRadius;
+  splatAt(new THREE.Vector2(u, v));
+});
+
+// Auto-reseed on chemistry-parameter changes so dragging a slider shows the
+// growth dynamics from a fresh seed instead of mutating the already-settled
+// attractor (which all look brain-like for Gray-Scott regardless of (F, k)
+// because the model's stable attractor is "max boundary length" = labyrinth).
+// Debounced 250ms so rapid drag doesn't thrash the reseed every input tick.
+let _reseedTimer = null;
+function debouncedReseed() {
+  if (_reseedTimer) clearTimeout(_reseedTimer);
+  _reseedTimer = setTimeout(() => { _reseedTimer = null; reseed(); }, 250);
+}
+['feed', 'kill', 'da', 'db'].forEach(id => {
+  document.getElementById(id).addEventListener('input', debouncedReseed);
+});
+
+// ============================================================
+// Render loop
+// ============================================================
+function step() {
+  simMat.uniforms.tState.value = read.texture;
+  renderer.setRenderTarget(write);
+  renderer.render(simScene, camera);
+  [read, write] = [write, read];
+}
+
+let frameCount = 0, lastFpsT = performance.now(), startT = performance.now();
+function frame() {
+  requestAnimationFrame(frame);
+  if (!paused) {
+    for (let i = 0; i < stepsPerFrame; i++) step();
+  }
+  dispMat.uniforms.tState.value = read.texture;
+  dispMat.uniforms.time.value = (performance.now() - startT) * 0.001;
+  renderer.setRenderTarget(null);
+  renderer.render(dispScene, camera);
+
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsT >= 500) {
+    const fps = (frameCount * 1000 / (now - lastFpsT)) | 0;
+    frameCount = 0; lastFpsT = now;
+    document.getElementById('stats').textContent =
+      'FPS: ' + fps + ' · Sim steps/sec: ' + (fps * stepsPerFrame);
+  }
+}
+frame();
+</script>
+</body>
+</html>

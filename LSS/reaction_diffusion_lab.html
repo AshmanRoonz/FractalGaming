@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<!--
+  LSS Reaction-Diffusion Lab
+  Created: 2026-04-28
+  Last updated: 2026-04-28
+  Version: 1.0
+
+  Standalone test app for the Gray-Scott reaction-diffusion model. Lives
+  outside the main wall_pattern_lab because reaction-diffusion needs
+  ping-pong render targets (this frame's state reads last frame's state),
+  which is a different rendering pipeline than the stateless fragment-
+  shader patterns the main lab uses. If this looks good and feels right,
+  the technique can be ported into the main lab as a special pattern in a
+  follow-up.
+
+  The Gray-Scott model simulates two chemicals A and B diffusing across a
+  2D surface. A is fed in at rate F. B reacts with A autocatalytically:
+  A + 2B becomes 3B (consumes A, makes more B). B is removed at rate F+k.
+  Different (F, k) values produce wildly different emergent patterns:
+  spots, stripes, labyrinths, moving solitons, coral. This is one of the
+  cleanest examples of pattern formation from simple local rules.
+
+  Revision history:
+  - 2026-04-28 v1.0: initial. 512x512 ping-pong sim, half-float textures,
+    feed/kill/dt sliders, preset dropdown, click-to-seed, color pickers,
+    pause/reset buttons.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LSS Reaction-Diffusion Lab v1.0</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0a0a14; color: #ddd;
+    font-family: 'Rajdhani', system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #app { display: flex; width: 100vw; height: 100vh; }
+  #viewport { flex: 1; position: relative; min-width: 0; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; }
+  #viewport canvas { display: block; max-width: 100%; max-height: 100%;
+    image-rendering: pixelated;
+    border: 1px solid #2a3a55; cursor: crosshair; }
+  #hud {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(8, 10, 20, 0.78);
+    padding: 8px 12px; border: 1px solid #2a3a55; border-radius: 4px;
+    font-size: 12px; pointer-events: none; max-width: 360px;
+  }
+  #hud .ttl { font-family: 'Orbitron', sans-serif; font-weight: 700;
+    color: #88aaff; text-transform: uppercase; letter-spacing: 0.12em;
+    font-size: 11px; margin-bottom: 4px; }
+  #hud .info { color: #889; font-size: 11px; line-height: 1.4; }
+
+  #sidebar {
+    width: 320px; flex: 0 0 320px;
+    background: #0e0e18; border-left: 1px solid #2a2a3a;
+    padding: 14px; overflow-y: auto;
+    font-size: 13px;
+  }
+  h1 {
+    font-family: 'Orbitron', sans-serif; font-size: 18px; font-weight: 700;
+    margin: 0 0 4px 0; color: #88aaff;
+  }
+  .subtitle { color: #667; font-size: 11px; margin-bottom: 12px; }
+  h2 {
+    font-family: 'Orbitron', sans-serif; font-size: 11px; font-weight: 600;
+    margin: 14px 0 6px 0; color: #99a;
+    text-transform: uppercase; letter-spacing: 0.14em;
+    border-bottom: 1px solid #1f1f2c; padding-bottom: 3px;
+  }
+  button {
+    background: #1c1c28; color: #ccc;
+    border: 1px solid #2e2e40;
+    padding: 6px 10px; cursor: pointer; font-family: inherit;
+    font-size: 12px; border-radius: 3px;
+    transition: background 0.12s;
+  }
+  button:hover { background: #262638; }
+  button.active {
+    background: #2e4f7a; border-color: #5588cc; color: #cfe6ff;
+  }
+  .toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+  .toolbar button { flex: 1 0 auto; min-width: 60px; }
+  input, select {
+    background: #14141e; color: #ddd; border: 1px solid #2a2a3a;
+    padding: 4px 6px; font-family: inherit; font-size: 12px;
+    border-radius: 2px;
+  }
+  input[type=text], input[type=number], select { width: 100%; }
+  input[type=range] { width: 100%; }
+  input[type=color] { width: 32px; height: 24px; padding: 0; cursor: pointer; border: 1px solid #2a2a3a; }
+  .row { display: flex; gap: 6px; margin: 6px 0; align-items: center; }
+  .row label {
+    flex: 0 0 84px; color: #889; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .row input, .row select { flex: 1; }
+  .row .val {
+    flex: 0 0 52px; text-align: right; font-family: 'Courier New', monospace;
+    font-size: 11px; color: #ccc;
+  }
+  .hint { color: #667; font-size: 11px; font-style: italic; line-height: 1.45; }
+  .stat { color: #889; font-family: 'Courier New', monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="viewport">
+    <div id="hud">
+      <div class="ttl">Reaction-Diffusion (Gray-Scott)</div>
+      <div class="info">
+        Click on the canvas to drop a B-chemical seed.<br>
+        Try the presets to see how (F, k) shape the dynamics.
+      </div>
+    </div>
+  </div>
+  <div id="sidebar">
+    <h1>RD Lab</h1>
+    <div class="subtitle">Gray-Scott reaction-diffusion test bed</div>
+
+    <h2>Preset</h2>
+    <div class="row">
+      <select id="preset">
+        <option value="coral">Coral (F=0.0545, k=0.062)</option>
+        <option value="maze">Maze (F=0.029, k=0.057)</option>
+        <option value="spots">Spots (F=0.025, k=0.06)</option>
+        <option value="solitons">U-Skate solitons (F=0.0367, k=0.0649)</option>
+        <option value="mitosis">Mitosis (F=0.0367, k=0.0649)</option>
+        <option value="worms">Worms (F=0.078, k=0.061)</option>
+        <option value="bubbles">Bubbles (F=0.098, k=0.057)</option>
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+
+    <h2>Chemistry</h2>
+    <div class="row">
+      <label>Feed F</label>
+      <input type="range" id="feed" min="0" max="0.10" step="0.0005" value="0.0545">
+      <span class="val" id="feed-val">0.0545</span>
+    </div>
+    <div class="row">
+      <label>Kill k</label>
+      <input type="range" id="kill" min="0" max="0.08" step="0.0005" value="0.062">
+      <span class="val" id="kill-val">0.062</span>
+    </div>
+    <div class="row">
+      <label>Da</label>
+      <input type="range" id="da" min="0.5" max="1.5" step="0.01" value="1.0">
+      <span class="val" id="da-val">1.00</span>
+    </div>
+    <div class="row">
+      <label>Db</label>
+      <input type="range" id="db" min="0.2" max="0.9" step="0.01" value="0.5">
+      <span class="val" id="db-val">0.50</span>
+    </div>
+
+    <h2>Simulation</h2>
+    <div class="row">
+      <label>dt</label>
+      <input type="range" id="dt" min="0.5" max="1.4" step="0.01" value="1.0">
+      <span class="val" id="dt-val">1.00</span>
+    </div>
+    <div class="row">
+      <label>Steps/frame</label>
+      <input type="range" id="steps" min="1" max="16" step="1" value="8">
+      <span class="val" id="steps-val">8</span>
+    </div>
+    <div class="row">
+      <label>Resolution</label>
+      <select id="res">
+        <option value="256">256 (fast)</option>
+        <option value="512" selected>512 (standard)</option>
+        <option value="1024">1024 (detail, slow)</option>
+      </select>
+    </div>
+
+    <h2>Display</h2>
+    <div class="row">
+      <label>Color A</label>
+      <input type="color" id="color-a" value="#0a1530">
+      <span class="hint" style="flex:1;">Background (low B)</span>
+    </div>
+    <div class="row">
+      <label>Color B</label>
+      <input type="color" id="color-b" value="#88ccff">
+      <span class="hint" style="flex:1;">Pattern (high B)</span>
+    </div>
+    <div class="row">
+      <label>Glow</label>
+      <input type="range" id="glow" min="0" max="2" step="0.05" value="1.2">
+      <span class="val" id="glow-val">1.20</span>
+    </div>
+
+    <h2>Controls</h2>
+    <div class="toolbar">
+      <button id="reset">Re-seed</button>
+      <button id="pause">Pause</button>
+      <button id="clear">Clear</button>
+    </div>
+    <div class="hint" style="margin-top: 6px;">
+      Re-seed: scatter random B seeds. Clear: zero B everywhere. Pause: freeze the sim.
+    </div>
+
+    <h2>Stats</h2>
+    <div class="stat" id="stats">FPS: -- · Steps: --</div>
+
+    <h2>Notes</h2>
+    <div class="hint">
+      <strong>Gray-Scott</strong>: ∂A/∂t = D<sub>A</sub>∇²A − AB² + F(1−A), &nbsp;
+      ∂B/∂t = D<sub>B</sub>∇²B + AB² − (F+k)B.<br>
+      Boundaries wrap; all fields are stored in half-float textures so the dynamics survive thousands of steps without quantization death.
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ============================================================
+// Setup
+// ============================================================
+const viewport = document.getElementById('viewport');
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+renderer.autoClear = false;
+viewport.appendChild(renderer.domElement);
+
+// Pick the largest square canvas that fits the viewport.
+function fitCanvas() {
+  const w = viewport.clientWidth;
+  const h = viewport.clientHeight;
+  const s = Math.min(w, h);
+  renderer.setSize(s, s, true);
+}
+fitCanvas();
+window.addEventListener('resize', fitCanvas);
+new ResizeObserver(fitCanvas).observe(viewport);
+
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// ============================================================
+// Ping-pong render targets (half-float for accurate sim)
+// ============================================================
+let SIM_RES = 512;
+let rtA, rtB;
+function makeTargets(res) {
+  const opts = {
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+    format: THREE.RGBAFormat,
+    type: THREE.HalfFloatType,
+    wrapS: THREE.RepeatWrapping,
+    wrapT: THREE.RepeatWrapping
+  };
+  if (rtA) rtA.dispose();
+  if (rtB) rtB.dispose();
+  rtA = new THREE.WebGLRenderTarget(res, res, opts);
+  rtB = new THREE.WebGLRenderTarget(res, res, opts);
+  SIM_RES = res;
+}
+makeTargets(SIM_RES);
+
+let read = rtA, write = rtB;
+
+// ============================================================
+// Simulation shader (one Gray-Scott step)
+// ============================================================
+const simMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tState: { value: null },
+    feed:   { value: 0.0545 },
+    kill:   { value: 0.062 },
+    Da:     { value: 1.0 },
+    Db:     { value: 0.5 },
+    dt:     { value: 1.0 },
+    res:    { value: SIM_RES }
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tState;
+    uniform float feed;
+    uniform float kill;
+    uniform float Da;
+    uniform float Db;
+    uniform float dt;
+    uniform float res;
+    varying vec2 vUv;
+    void main() {
+      float px = 1.0 / res;
+      vec4 c = texture2D(tState, vUv);
+      float A = c.r;
+      float B = c.g;
+      // 9-point stencil laplacian (edges 0.20, corners 0.05, center -1.0).
+      // Empirically more isotropic than the 5-point classic stencil and
+      // produces cleaner labyrinth/coral structures.
+      vec4 N  = texture2D(tState, vUv + vec2(0.0,  px));
+      vec4 S  = texture2D(tState, vUv + vec2(0.0, -px));
+      vec4 E  = texture2D(tState, vUv + vec2( px, 0.0));
+      vec4 W  = texture2D(tState, vUv + vec2(-px, 0.0));
+      vec4 NE = texture2D(tState, vUv + vec2( px,  px));
+      vec4 NW = texture2D(tState, vUv + vec2(-px,  px));
+      vec4 SE = texture2D(tState, vUv + vec2( px, -px));
+      vec4 SW = texture2D(tState, vUv + vec2(-px, -px));
+      vec2 lap = (N.rg + S.rg + E.rg + W.rg) * 0.20
+               + (NE.rg + NW.rg + SE.rg + SW.rg) * 0.05
+               - c.rg * 1.00;
+      float reaction = A * B * B;
+      float dA = Da * lap.x - reaction + feed * (1.0 - A);
+      float dB = Db * lap.y + reaction - (feed + kill) * B;
+      A += dA * dt;
+      B += dB * dt;
+      A = clamp(A, 0.0, 1.0);
+      B = clamp(B, 0.0, 1.0);
+      gl_FragColor = vec4(A, B, 0.0, 1.0);
+    }
+  `
+});
+
+// ============================================================
+// Seed shader (writes initial A=1, B=0 with random B seed regions)
+// ============================================================
+const seedMat = new THREE.ShaderMaterial({
+  uniforms: {
+    seed:    { value: Math.random() * 1000.0 },
+    seedDensity: { value: 0.005 } // fraction of pixels that get a B seed
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform float seed;
+    uniform float seedDensity;
+    varying vec2 vUv;
+    float hash(vec2 p) {
+      return fract(sin(dot(p, vec2(127.1, 311.7)) + seed) * 43758.5453123);
+    }
+    void main() {
+      // Cluster the seed into a few blobs so the dynamics start with real
+      // gradients, not single-pixel speckle.
+      vec2 g = floor(vUv * 24.0);
+      float h = hash(g);
+      float B = (h < seedDensity * 5.0) ? (0.5 + hash(vUv) * 0.3) : 0.0;
+      // Soft falloff so seed regions look like clusters.
+      vec2 fg = fract(vUv * 24.0) - 0.5;
+      float blob = smoothstep(0.5, 0.0, length(fg));
+      B *= blob;
+      gl_FragColor = vec4(1.0, B, 0.0, 1.0);
+    }
+  `
+});
+
+// Solid-color clear shader (used for "Clear" button)
+const clearMat = new THREE.ShaderMaterial({
+  uniforms: { val: { value: new THREE.Vector4(1.0, 0.0, 0.0, 1.0) } },
+  vertexShader: `void main(){ gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `uniform vec4 val; void main(){ gl_FragColor = val; }`
+});
+
+// Click-to-seed shader (writes a small B blob at world UV `pos`)
+const splatMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tState: { value: null },
+    pos:    { value: new THREE.Vector2(0.5, 0.5) },
+    radius: { value: 0.04 },
+    amount: { value: 0.5 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tState;
+    uniform vec2 pos;
+    uniform float radius;
+    uniform float amount;
+    varying vec2 vUv;
+    void main() {
+      vec4 c = texture2D(tState, vUv);
+      float d = length(vUv - pos);
+      float blob = smoothstep(radius, 0.0, d) * amount;
+      c.g = clamp(c.g + blob, 0.0, 1.0);
+      gl_FragColor = c;
+    }
+  `
+});
+
+// ============================================================
+// Display shader (visualize current state with two-color gradient + glow)
+// ============================================================
+const dispMat = new THREE.ShaderMaterial({
+  uniforms: {
+    tState: { value: null },
+    colorA: { value: new THREE.Color(0x0a1530) },
+    colorB: { value: new THREE.Color(0x88ccff) },
+    glow:   { value: 1.2 }
+  },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: `
+    precision highp float;
+    uniform sampler2D tState;
+    uniform vec3 colorA;
+    uniform vec3 colorB;
+    uniform float glow;
+    varying vec2 vUv;
+    void main() {
+      vec4 s = texture2D(tState, vUv);
+      // Visualize B with a soft squashing curve so subtle structures pop.
+      float B = s.g;
+      float v = pow(B, 0.7);
+      vec3 col = mix(colorA, colorB, v);
+      // Add a hot bloom in regions where B is high.
+      col += colorB * pow(B, 4.0) * glow;
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `
+});
+
+// ============================================================
+// Quad geometry shared by all passes
+// ============================================================
+const quad = new THREE.PlaneGeometry(2, 2);
+const simScene = new THREE.Scene();   simScene.add(new THREE.Mesh(quad, simMat));
+const seedScene = new THREE.Scene();  seedScene.add(new THREE.Mesh(quad, seedMat));
+const clearScene = new THREE.Scene(); clearScene.add(new THREE.Mesh(quad, clearMat));
+const splatScene = new THREE.Scene(); splatScene.add(new THREE.Mesh(quad, splatMat));
+const dispScene = new THREE.Scene();  dispScene.add(new THREE.Mesh(quad, dispMat));
+
+// ============================================================
+// State
+// ============================================================
+let paused = false;
+let stepsPerFrame = 8;
+let frameCount = 0;
+let lastFpsT = performance.now();
+let fps = 0;
+
+// ============================================================
+// Utility: re-seed both targets with random B clusters
+// ============================================================
+function reseed() {
+  seedMat.uniforms.seed.value = Math.random() * 1000.0;
+  renderer.setRenderTarget(rtA);
+  renderer.render(seedScene, camera);
+  renderer.setRenderTarget(rtB);
+  renderer.render(seedScene, camera);
+  read = rtA; write = rtB;
+}
+function clearBoth() {
+  // Clear to A=1, B=0 (the "no chemistry yet" state).
+  clearMat.uniforms.val.value.set(1.0, 0.0, 0.0, 1.0);
+  renderer.setRenderTarget(rtA);
+  renderer.render(clearScene, camera);
+  renderer.setRenderTarget(rtB);
+  renderer.render(clearScene, camera);
+  read = rtA; write = rtB;
+}
+function splatAt(uv, radius, amount) {
+  splatMat.uniforms.tState.value = read.texture;
+  splatMat.uniforms.pos.value.copy(uv);
+  splatMat.uniforms.radius.value = radius;
+  splatMat.uniforms.amount.value = amount;
+  renderer.setRenderTarget(write);
+  renderer.render(splatScene, camera);
+  [read, write] = [write, read];
+}
+
+reseed();
+
+// ============================================================
+// UI bindings
+// ============================================================
+const ui = {
+  preset:  document.getElementById('preset'),
+  feed:    document.getElementById('feed'),
+  kill:    document.getElementById('kill'),
+  da:      document.getElementById('da'),
+  db:      document.getElementById('db'),
+  dt:      document.getElementById('dt'),
+  steps:   document.getElementById('steps'),
+  res:     document.getElementById('res'),
+  colorA:  document.getElementById('color-a'),
+  colorB:  document.getElementById('color-b'),
+  glow:    document.getElementById('glow'),
+  reset:   document.getElementById('reset'),
+  pause:   document.getElementById('pause'),
+  clear:   document.getElementById('clear'),
+  stats:   document.getElementById('stats'),
+};
+
+function bindSlider(id, valId, target, fixedDigits) {
+  const slider = document.getElementById(id);
+  const valSpan = document.getElementById(valId);
+  function refresh() {
+    const v = parseFloat(slider.value);
+    valSpan.textContent = (fixedDigits === undefined) ? v : v.toFixed(fixedDigits);
+    target(v);
+  }
+  slider.addEventListener('input', refresh);
+  refresh();
+}
+bindSlider('feed', 'feed-val', v => simMat.uniforms.feed.value = v, 4);
+bindSlider('kill', 'kill-val', v => simMat.uniforms.kill.value = v, 4);
+bindSlider('da',   'da-val',   v => simMat.uniforms.Da.value   = v, 2);
+bindSlider('db',   'db-val',   v => simMat.uniforms.Db.value   = v, 2);
+bindSlider('dt',   'dt-val',   v => simMat.uniforms.dt.value   = v, 2);
+bindSlider('steps','steps-val',v => stepsPerFrame              = v | 0, 0);
+bindSlider('glow', 'glow-val', v => dispMat.uniforms.glow.value = v, 2);
+
+// Color pickers
+function applyColorA() {
+  dispMat.uniforms.colorA.value.set(ui.colorA.value);
+}
+function applyColorB() {
+  dispMat.uniforms.colorB.value.set(ui.colorB.value);
+}
+ui.colorA.addEventListener('input', applyColorA);
+ui.colorB.addEventListener('input', applyColorB);
+applyColorA(); applyColorB();
+
+// Resolution change
+ui.res.addEventListener('change', () => {
+  makeTargets(parseInt(ui.res.value, 10));
+  simMat.uniforms.res.value = SIM_RES;
+  reseed();
+});
+
+// Presets
+const PRESETS = {
+  coral:    { feed: 0.0545, kill: 0.062, name: 'Coral' },
+  maze:     { feed: 0.029,  kill: 0.057, name: 'Maze' },
+  spots:    { feed: 0.025,  kill: 0.060, name: 'Spots' },
+  solitons: { feed: 0.0367, kill: 0.0649, name: 'U-Skate solitons' },
+  mitosis:  { feed: 0.0367, kill: 0.0649, name: 'Mitosis' },
+  worms:    { feed: 0.078,  kill: 0.061, name: 'Worms' },
+  bubbles:  { feed: 0.098,  kill: 0.057, name: 'Bubbles' }
+};
+ui.preset.addEventListener('change', () => {
+  const p = PRESETS[ui.preset.value];
+  if (!p) return;
+  ui.feed.value = p.feed;
+  ui.kill.value = p.kill;
+  document.getElementById('feed-val').textContent = p.feed.toFixed(4);
+  document.getElementById('kill-val').textContent = p.kill.toFixed(4);
+  simMat.uniforms.feed.value = p.feed;
+  simMat.uniforms.kill.value = p.kill;
+  reseed();
+});
+
+// Buttons
+ui.reset.addEventListener('click', () => reseed());
+ui.clear.addEventListener('click', () => clearBoth());
+ui.pause.addEventListener('click', () => {
+  paused = !paused;
+  ui.pause.textContent = paused ? 'Resume' : 'Pause';
+  ui.pause.classList.toggle('active', paused);
+});
+
+// Click-to-seed on the canvas
+renderer.domElement.addEventListener('pointerdown', (ev) => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const u = (ev.clientX - rect.left) / rect.width;
+  const v = 1.0 - (ev.clientY - rect.top) / rect.height;
+  splatAt(new THREE.Vector2(u, v), 0.04, 0.6);
+});
+
+// ============================================================
+// Render loop
+// ============================================================
+function step() {
+  simMat.uniforms.tState.value = read.texture;
+  simMat.uniforms.res.value = SIM_RES;
+  renderer.setRenderTarget(write);
+  renderer.render(simScene, camera);
+  [read, write] = [write, read];
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (!paused) {
+    for (let i = 0; i < stepsPerFrame; i++) step();
+  }
+  // Display
+  dispMat.uniforms.tState.value = read.texture;
+  renderer.setRenderTarget(null);
+  renderer.render(dispScene, camera);
+
+  // FPS counter
+  frameCount++;
+  const now = performance.now();
+  if (now - lastFpsT >= 500) {
+    fps = (frameCount * 1000 / (now - lastFpsT)) | 0;
+    frameCount = 0; lastFpsT = now;
+    ui.stats.textContent = 'FPS: ' + fps + ' · Steps/sec: ' + (fps * stepsPerFrame) + ' · Res: ' + SIM_RES;
+  }
+}
+frame();
+</script>
+</body>
+</html>

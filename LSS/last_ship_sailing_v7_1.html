@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing</title>
+<title>Last Ship Sailing v7.1 (layered walls)</title>
 <!-- Modern technical typography (v6.7 modernization). Orbitron for titles
      (geometric, sci-fi), Rajdhani for body (condensed humanist sans). Courier
      New stays as fallback for the canvas HUD readouts that are pixel-aligned. -->
@@ -19222,7 +19222,15 @@ const WALL_PATTERN_NAMES = [
   'Neon Cube (raymarched)',
   'Panel Maze (architectural)',
   'Ring Tunnel',
-  'Layered Cube (transparent)'
+  'Layered Cube (transparent)',
+  // (v7.1) Special composite slot at index 20. Routes to the multi-layer
+  // BG/FG1/FG2 path (Panel Maze + Layered Cube + Wave Interference baked
+  // from a mixed_lab_v2 export). The cosmicField shader function checks
+  // uPattern == 99 internally, but the wallPattern dispatcher sets
+  // uPattern via `(game.wallPattern | 0) % WALL_PATTERN_NAMES.length`,
+  // which means index 20 in this array maps to a uPattern of 20 ; the
+  // shader-side code maps that into the composite branch below.
+  'Lab Composite (3-layer)'
 ];
 
 const WALL_PARAM_DEFS = [
@@ -20929,16 +20937,42 @@ function buildRoomGraphLevel(level) {
       'uniform float K_DIFF_MIN;',
       'uniform float K_AO_FLOOR;',
       'uniform float K_FLOOR;',
-      // ---- Pattern math (live-tweakable) ----
-      'uniform int   u_iters;',
+      // ---- Pattern math: per-layer "active" globals (set by sampleWallPattern
+      //      from the per-layer uniforms below, then read by every pattern
+      //      function). u_rings, u_off, u_rotSpeed, u_valDiv stay shared.
+      // Per-fragment "active" pattern controls. Set by sampleWallPattern
+      // from its arguments before dispatching to the chosen pattern. Each
+      // pattern reads these as if they were uniforms, but they get
+      // rewritten per call so multi-layer mode can give each layer its
+      // own values without a refactor.
+      'int   u_iters;',
+      'float u_scale;',
+      'float u_invBase;',
+      'float u_hueSpin;',
+      'float u_satBase;',
+      // (v7.1 lab-match) Room-local world position (vWorldPos minus the
+      // nearest room center). Set by main() before cosmicField runs. Used
+      // by patterns whose math assumes vWorldPos magnitudes in the lab's
+      // ~270 range (small spheres) ; without this, the game's 1000-3000
+      // unit room positions push raymarches past their fractal good zones.
+      'vec3 g_localWp;',
       'uniform int   u_rings;',
-      'uniform float u_scale;',
       'uniform float u_rotSpeed;',
       'uniform vec3  u_off;',
-      'uniform float u_invBase;',
       'uniform float u_valDiv;',
-      'uniform float u_hueSpin;',
-      'uniform float u_satBase;',
+      // ---- Per-layer pattern uniforms (BG = background, FG/FG2 = overlays) ----
+      'uniform int   u_iters_bg,   u_iters_fg,   u_iters_fg2;',
+      'uniform float u_scale_bg,   u_scale_fg,   u_scale_fg2;',
+      'uniform float u_invBase_bg, u_invBase_fg, u_invBase_fg2;',
+      'uniform float u_hueSpin_bg, u_hueSpin_fg, u_hueSpin_fg2;',
+      'uniform float u_satBase_bg, u_satBase_fg, u_satBase_fg2;',
+      'uniform float K_COSMIC_bg,  K_COSMIC_fg,  K_COSMIC_fg2;',
+      // ---- Foreground compositing controls ----
+      'uniform int   bgPatternId, fgPatternId, fg2PatternId;',
+      'uniform int   fgBlend, fg2Blend;',
+      'uniform float fgAlpha, fg2Alpha;',
+      'uniform float fgHue,   fg2Hue;',
+      'uniform float fgTime,  fg2Time;',
       // ---- Soul Array tunables (live-tweakable) ----
       'uniform float SA_CELL_SIZE;',
       'uniform float SA_DOT_RADIUS;',
@@ -21094,33 +21128,25 @@ function buildRoomGraphLevel(level) {
       // ============================================================
       // PATTERN 3: Wave Interference (sum of plane waves)
       // ============================================================
+      // (v7.1 lab-match, 2026-04-29) Replaced the older 5-source hashed-
+      // direction wave field (which had per-iteration drift speeds) with
+      // the mixed_lab_v2 version: 3 fixed sources at the corners of a
+      // unit equilateral triangle in the xy plane, all driven at the same
+      // tt * 2.0 phase rate. The lab version produces a clean three-source
+      // standing-wave interference pattern ; the older one drifted because
+      // each iteration ran at a slightly different speed.
       'vec3 patternWaves(vec3 p, vec3 zoneC, float tt) {',
+      '  vec3 s1 = vec3( 2.0,  0.0,    0.0);',
+      '  vec3 s2 = vec3(-1.0,  1.732,  0.0);',
+      '  vec3 s3 = vec3(-1.0, -1.732,  0.0);',
+      '  float k = u_invBase * 0.5;',
+      '  float w1 = sin(length(p - s1) * k - tt * 2.0);',
+      '  float w2 = sin(length(p - s2) * k - tt * 2.0);',
+      '  float w3 = sin(length(p - s3) * k - tt * 2.0);',
+      '  float sum = (w1 + w2 + w3) / 3.0;',
+      '  float val = pow(0.5 + 0.5 * sum, 4.0);',
       '  float baseHue = rgbHue(zoneC);',
-      '  float v = 0.0;',
-      // Wave count hard-capped at 5. With more than ~6 averaged sine waves
-      // the sum trends toward zero (waves cancel) and the pattern flattens
-      // into uniform grey. Five is the sweet spot for visible standing-wave
-      // interference. Frequency clamped to a sensible band so very high
-      // u_invBase doesn\'t make the pattern noise-out, and very low values
-      // don\'t flatten it.
-      '  float freq = clamp(u_invBase * 0.05, 0.30, 1.20);',
-      '  int waveCap = 5;',
-      '  for (int k = 0; k < 5; k++) {',
-      '    if (k >= u_iters) break;',
-      '    float fk = float(k);',
-      '    vec3 dir = normalize(vec3(',
-      '      sin(fk * 1.7 + 0.3),',
-      '      cos(fk * 2.3 + 1.1),',
-      '      sin(fk * 0.9 + 2.5)',
-      '    ));',
-      '    v += sin(dot(p, dir) * freq + tt * (0.4 + fk * 0.07));',
-      '  }',
-      '  v /= float(waveCap);',
-      '  float lum = 0.5 + 0.5 * v;',
-      '  float val = clamp(pow(lum, 1.6) * 4.5 / u_valDiv * 80.0, 0.0, 4.5);',
-      '  float phase = atan(p.x, p.z);',
-      '  float hue = fract(baseHue + phase * 0.05 + v * u_hueSpin + tt * 0.02);',
-      '  return hsv(hue, u_satBase, val);',
+      '  return hsv(fract(baseHue + sum * u_hueSpin + tt * 0.02), u_satBase, val * 1.5);',
       '}',
       // ============================================================
       // PATTERN 4: Mandelbox Folds (box-fold + sphere-fold iterated)
@@ -21496,9 +21522,14 @@ function buildRoomGraphLevel(level) {
       '      onT * smoothstep(thickBase, 0.0, dT)));',
       '    lineSum = max(lineSum, lineHere * (1.0 - float(level) * 0.18));',
       '  }',
-      '  float pulsePhase = sin(uv.x * 0.4 + tt * 0.6) + sin(uv.y * 0.35 - tt * 0.5);',
-      '  float pulse = 0.78 + 0.22 * (0.5 + 0.5 * sin(pulsePhase));',
-      '  lineSum *= pulse;',
+      // (v7.1 lab-match, 2026-04-29) The lab's patternPanelMaze has no
+      // time-based pulse on the line lattice ; the architectural-grid look
+      // it gives is meant to be static. The earlier breath-pulse was a
+      // game-only addition that made the maze look like a beating heart
+      // rather than walls. Removed to match the lab.
+      // '  float pulsePhase = sin(uv.x * 0.4 + tt * 0.6) + sin(uv.y * 0.35 - tt * 0.5);',
+      // '  float pulse = 0.78 + 0.22 * (0.5 + 0.5 * sin(pulsePhase));',
+      // '  lineSum *= pulse;',
       '  vec3 edgeCol = mix(vec3(1.0, 0.95, 0.82), zoneC, u_hueSpin);',
       '  vec3 baseCol = mix(vec3(0.04, 0.035, 0.030), zoneC * 0.18, 0.55);',
       '  return baseCol + edgeCol * lineSum * 1.7;',
@@ -21544,13 +21575,27 @@ function buildRoomGraphLevel(level) {
       '}',
       // PATTERN 19: Layered Neon Cube (accumulate, see-through layers)
       'vec3 patternLayeredCube(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 ro = vWorldPos * 0.003 + vec3(tt * 0.05, 0.0, 0.0);',
+      // (v7.1 lab-match, 2026-04-29) The lab uses vWorldPos * 0.003 because
+      // its preview geometry sits at vWorldPos ~270 (small spheres). In the
+      // game, vWorldPos is in the 1000-3000 range (rooms on a big grid),
+      // and 0.003 * 3000 = 9 is way outside the cube SDF's good zone, so
+      // no cubes render. Fix: use g_localWp (vWorldPos minus the nearest
+      // room center, set in main() below before cosmicField runs). Local
+      // coordinates put us back in the lab's numerical range.
+      '  vec3 ro = g_localWp * 0.003 + vec3(tt * 0.05, 0.0, 0.0);',
       '  vec3 rd = normalize(vWorldPos - cameraPosition);',
       '  float t = 0.0;',
       '  vec3 col = vec3(0.0);',
       '  float totalAlpha = 0.0;',
-      '  for (int i = 0; i < 40; i++) {',
-      '    if (i >= u_iters * 4) break;',
+      // (v7.1 lag fix, 2026-04-29) Hard-cap at 24 raymarch steps regardless
+      // of u_iters. The user's lab config sets u_iters_fg = 12 ; with the
+      // older cap of u_iters * 4 = 48 steps, every wall fragment paid for
+      // up to 48 SDF evaluations and the round-start "Confirm & Launch"
+      // hitched badly. 24 steps still resolves the visible cube layers
+      // (most rays exit early via the totalAlpha > 0.95 break or the
+      // t > 9.0 break anyway) while halving the worst-case fragment cost.
+      '  for (int i = 0; i < 24; i++) {',
+      '    if (i >= u_iters * 2) break;',
       '    vec3 wp = ro + rd * t;',
       '    vec3 cid;',
       '    float d = neonSceneSDF(wp, cid);',
@@ -21575,33 +21620,85 @@ function buildRoomGraphLevel(level) {
       '  return col * 1.5;',
       '}',
       // ============================================================
-      // Lab pattern dispatcher: scale + rotate input, then route to one
-      // of the 8 lab patterns above.
+      // (v7.1 multi-layer rework) Pattern dispatcher takes a pattern ID
+      // and per-layer parameters, sets the active globals, then routes.
+      // Pattern functions don't need to change because they read u_iters
+      // etc. as globals (no longer uniforms).
       // ============================================================
-      'vec3 cosmicField(vec3 wp, vec3 zoneC, float tt) {',
+      'vec3 sampleWallPattern(int pid, vec3 wp, vec3 zoneC, float tt,',
+      '                      int   itersIn, float scaleIn, float invBaseIn,',
+      '                      float hueSpinIn, float satBaseIn) {',
+      '  if (pid < 0) return vec3(0.0);',
+      '  u_iters   = itersIn;',
+      '  u_scale   = scaleIn;',
+      '  u_invBase = invBaseIn;',
+      '  u_hueSpin = hueSpinIn;',
+      '  u_satBase = satBaseIn;',
       '  vec3 p = wp * u_scale;',
-      '  float ca = cos(tt * u_rotSpeed), sa = sin(tt * u_rotSpeed);',
-      '  p = vec3(ca * p.x - sa * p.z, p.y, sa * p.x + ca * p.z);',
-      '  if (uPattern == 0) return patternKali(p, zoneC, tt);',
-      '  if (uPattern == 1) return patternApollonian(p, zoneC, tt);',
-      '  if (uPattern == 2) return patternVoronoi(p, zoneC, tt);',
-      '  if (uPattern == 3) return patternWaves(p, zoneC, tt);',
-      '  if (uPattern == 4) return patternMandelbox(p, zoneC, tt);',
-      '  if (uPattern == 5) return patternHex(p, zoneC, tt);',
-      '  if (uPattern == 6) return patternPlasma(p, zoneC, tt);',
-      '  if (uPattern == 7) return patternCircumpunct(p, zoneC, tt);',
-      '  if (uPattern == 9)  return patternCircuit(p, zoneC, tt);',
-      '  if (uPattern == 10) return patternGlitch(p, zoneC, tt);',
-      '  if (uPattern == 11) return patternCellular(p, zoneC, tt);',
-      '  if (uPattern == 12) return patternStreaks(p, zoneC, tt);',
-      '  if (uPattern == 13) return patternCaustic(p, zoneC, tt);',
-      '  if (uPattern == 14) return patternHexPulse(p, zoneC, tt);',
-      '  if (uPattern == 15) return patternCyberMosh(p, zoneC, tt);',
-      '  if (uPattern == 16) return patternNeonCube(p, zoneC, tt);',
-      '  if (uPattern == 17) return patternPanelMaze(p, zoneC, tt);',
-      '  if (uPattern == 18) return patternRingTunnel(p, zoneC, tt);',
-      '  if (uPattern == 19) return patternLayeredCube(p, zoneC, tt);',
+      // (v7.1 lab-match, 2026-04-29) The dispatcher used to rotate p around
+      // the y-axis at u_rotSpeed (0.05-0.08 by default), which made the
+      // whole pattern volume slowly spin in-game. The mixed_lab_v2 preview
+      // does NO such rotation ; matching its behavior here freezes the
+      // pattern in world space the way the user tuned it. The u_rotSpeed
+      // uniform is left bound to keep older wallParams JSONs valid (just
+      // unused in the dispatch path now).
+      // '  float ca = cos(tt * u_rotSpeed), sa = sin(tt * u_rotSpeed);',
+      // '  p = vec3(ca * p.x - sa * p.z, p.y, sa * p.x + ca * p.z);',
+      '  if (pid == 0)  return patternKali(p, zoneC, tt);',
+      '  if (pid == 1)  return patternApollonian(p, zoneC, tt);',
+      '  if (pid == 2)  return patternVoronoi(p, zoneC, tt);',
+      '  if (pid == 3)  return patternWaves(p, zoneC, tt);',
+      '  if (pid == 4)  return patternMandelbox(p, zoneC, tt);',
+      '  if (pid == 5)  return patternHex(p, zoneC, tt);',
+      '  if (pid == 6)  return patternPlasma(p, zoneC, tt);',
+      '  if (pid == 7)  return patternCircumpunct(p, zoneC, tt);',
+      '  if (pid == 9)  return patternCircuit(p, zoneC, tt);',
+      '  if (pid == 10) return patternGlitch(p, zoneC, tt);',
+      '  if (pid == 11) return patternCellular(p, zoneC, tt);',
+      '  if (pid == 12) return patternStreaks(p, zoneC, tt);',
+      '  if (pid == 13) return patternCaustic(p, zoneC, tt);',
+      '  if (pid == 14) return patternHexPulse(p, zoneC, tt);',
+      '  if (pid == 15) return patternCyberMosh(p, zoneC, tt);',
+      '  if (pid == 16) return patternNeonCube(p, zoneC, tt);',
+      '  if (pid == 17) return patternPanelMaze(p, zoneC, tt);',
+      '  if (pid == 18) return patternRingTunnel(p, zoneC, tt);',
+      '  if (pid == 19) return patternLayeredCube(p, zoneC, tt);',
       '  return vec3(0.0);',
+      '}',
+      // Hue shift via Rodrigues rotation around the gray axis.
+      'vec3 hueShift(vec3 col, float shift) {',
+      '  vec3 k = vec3(0.57735, 0.57735, 0.57735);',
+      '  float angle = shift * 6.28318;',
+      '  float c2 = cos(angle), s2 = sin(angle);',
+      '  return col * c2 + cross(k, col) * s2 + k * dot(k, col) * (1.0 - c2);',
+      '}',
+      // Layer compositing modes (Add/Multiply/Screen/Max/Mix).
+      'vec3 applyBlend(vec3 base, vec3 layer, int mode, float alpha) {',
+      '  if (alpha <= 0.0) return base;',
+      '  if (mode == 0) return base + layer * alpha;',
+      '  if (mode == 1) return mix(base, base * (layer + 0.001), alpha);',
+      '  if (mode == 2) return mix(base, 1.0 - (1.0 - base) * (1.0 - layer), alpha);',
+      '  if (mode == 3) return mix(base, max(base, layer), alpha);',
+      '  if (mode == 4) return mix(base, layer, alpha);',
+      '  return base;',
+      '}',
+      // Composite three layers into the final cosmic contribution.
+      'vec3 cosmicField(vec3 wp, vec3 zoneC, float tt) {',
+      '  vec3 col = sampleWallPattern(bgPatternId, wp, zoneC, tt,',
+      '    u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;',
+      '  if (fgPatternId >= 0) {',
+      '    vec3 fg1 = sampleWallPattern(fgPatternId, wp, zoneC, tt * fgTime,',
+      '      u_iters_fg, u_scale_fg, u_invBase_fg, u_hueSpin_fg, u_satBase_fg) * K_COSMIC_fg;',
+      '    fg1 = hueShift(fg1, fgHue);',
+      '    col = applyBlend(col, fg1, fgBlend, fgAlpha);',
+      '  }',
+      '  if (fg2PatternId >= 0) {',
+      '    vec3 fg2 = sampleWallPattern(fg2PatternId, wp, zoneC, tt * fg2Time,',
+      '      u_iters_fg2, u_scale_fg2, u_invBase_fg2, u_hueSpin_fg2, u_satBase_fg2) * K_COSMIC_fg2;',
+      '    fg2 = hueShift(fg2, fg2Hue);',
+      '    col = applyBlend(col, fg2, fg2Blend, fg2Alpha);',
+      '  }',
+      '  return col;',
       '}',
       'void main() {',
       // Nearest room supplies the zone color and the local wall extent used
@@ -21617,6 +21714,11 @@ function buildRoomGraphLevel(level) {
       '  }',
       // Fraction along the nearest room's vertical extent: 0 at floor, 1 at ceiling.
       '  float heightFrac = clamp((vWorldPos.y - (nearC.y - nearR)) / (2.0 * nearR), 0.0, 1.0);',
+      // (v7.1 lab-match) Set the room-local world position global so
+      // patterns using lab-coordinate-range math (patternLayeredCube and
+      // anything else hardcoded for vWorldPos magnitudes ~270) can read
+      // a sensible value instead of the absolute world coords.
+      '  g_localWp = vWorldPos - nearC;',
       '  vec3 c = vec3(0.0);',
       '',
       '  if (uPattern == 8) {',
@@ -21667,18 +21769,52 @@ function buildRoomGraphLevel(level) {
       // Computed once; used by both Pure Black Base and normal paths below.
       '    float fracPulse = 0.92 + 0.12 * sin(time * 0.35);',
       '    float shimmer   = 0.90 + 0.18 * sin(time * 1.10 + vWorldPos.x * 0.003 + vWorldPos.z * 0.003);',
-      '    vec3 cosmic = cosmicField(vWorldPos, zoneColor, time);',
+      // (v7.1 lab-match attempt 3) Two render paths:
+      //   uPattern == 20: full multi-layer composite (Panel Maze + Layered
+      //     Cube + Wave Interference, the user's exported lab preset; this
+      //     is the "Lab Composite" entry in WALL_PATTERN_NAMES)
+      //   uPattern 0-19 (anything else): single-pattern mode using the BG
+      //     layer's per-layer uniforms as the active controls. Patterns 0-7
+      //     and 9-19 route through sampleWallPattern ; pattern 8 (Soul
+      //     Array) is handled by its own branch above this code path.
+      // Pattern cycling (P key) cycles uPattern through 0-20.
+      '    vec3 cosmic;',
+      '    if (uPattern == 20) {',
+      '      cosmic = cosmicField(vWorldPos, zoneColor, time);',
+      '    } else {',
+      '      cosmic = sampleWallPattern(uPattern, vWorldPos, zoneColor, time,',
+      '        u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;',
+      '    }',
       '    if (uBlackBase == 1) {',
       // Pure Black Base: render only the pattern over black. No dark floor,
       // no zone-color tint, no fresnel rim, no diffuse/AO shaping, no
       // zone-color floor. The geometry disappears and only the pattern reads.
-      '      c = cosmic * fracPulse * shimmer * K_COSMIC_BRIGHTNESS;',
+      // (v7.1 lab-match) Drop fracPulse * shimmer and K_COSMIC_BRIGHTNESS.
+      // The lab pipeline outputs the cosmic composite directly; matching that
+      // here keeps in-game walls sharp instead of breath-modulated.
+      // (v7.1 lab-match, 2026-04-29 attempt 2) Replicate the lab's full
+      // post-cosmic pipeline so layer interactions look the same:
+      //   fresnel rim added in zoneC * 0.15
+      //   then soft Reinhard tonemap c/(1+c*0.35) * 1.35
+      // The lab does this BEFORE handing to a no-post-process canvas. Game
+      // hands to ACES + bloom afterward, so this matched lab pre-compression
+      // gets further compressed downstream (the wall ends up slightly darker
+      // than the lab) but layer-relative blends now read like the lab.
+      '      vec3 vd_lab = normalize(cameraPosition - vWorldPos);',
+      '      float fres_lab = pow(1.0 - abs(dot(vNormal, vd_lab)), 2.0);',
+      '      c = cosmic + zoneColor * fres_lab * 0.15;',
+      '      c = c / (1.0 + c * 0.35);',
+      '      c *= 1.35;',
       '    } else {',
       // Normal path: dark base + zone tint + cosmic + diffuse + fresnel +
       // AO + zone floor. Walls read as 3D solid surfaces.
       '      vec3 dark = K_DARK_BASE + zoneColor * K_ZONE_TINT;',
       '      c = dark;',
-      '      c += cosmic * fracPulse * shimmer * K_COSMIC_BRIGHTNESS;',
+      // (v7.1) K_COSMIC_BRIGHTNESS removed; per-layer K_COSMIC_bg/_fg/_fg2
+      // are baked into the cosmic value already, so multiplying again would
+      // overexpose. Existing K_COSMIC_BRIGHTNESS uniform is left in scope
+      // (still a uniform) but unused here.
+      '      c += cosmic * fracPulse * shimmer;',
       '      vec3 vd = normalize(cameraPosition - vWorldPos);',
       '      float diff = K_DIFF_MIN + (1.0 - K_DIFF_MIN) * max(dot(vNormal, vd), 0.0);',
       '      float fresnelFactor = pow(1.0 - abs(dot(vNormal, vd)), 3.0);',
@@ -21695,21 +21831,17 @@ function buildRoomGraphLevel(level) {
       // through the top of any chamber. Back faces stay opaque. The pattern
       // continues to the fade edge so the transition reads as the level
       // dissolving into sky, not a ragged hole. Same for both patterns.
-      '  float upperMask = smoothstep(0.50, 0.80, heightFrac);',
+      // (v7.1 lab-match) Walls fully opaque so the bright pattern reads
+      // crisp instead of letting the upper-half-transparent fade let bloom
+      // from adjacent rooms (and the starfield) wash the foreground out.
+      // The lab preview is fully opaque; matching that here keeps the
+      // pattern detail visible.
+      '  float upperMask = 0.0;',
       '  float alpha = 1.0;',
-      '  if (gl_FrontFacing) {',
-      '    alpha = mix(1.0, 0.08, upperMask);',
-      '  }',
-      // (post-v6.9 patch, 2026-04-28) Soft tone-map the wall output so high-
-      // brightness patterns (Mandelbox, Cyber Datamosh, raymarched Neon Cube)
-      // don't feed runaway HDR into the bloom + ACES pipeline that follows.
-      // Reinhard-style: c / (1 + c * k) compresses the >1 range smoothly
-      // toward a ceiling of 1/k while leaving low values nearly untouched.
-      // k=0.35 keeps anything below ~0.5 within 5% of its original value
-      // and caps the output around 2.85 even for patterns outputting 50+.
-      // Bloom still picks up the bright bits ; it just doesn't get overdosed.
-      '  c = c / (1.0 + c * 0.35);',
-      '  c *= 1.35;',  // restore highlight punch lost to the compression
+      // (v7.1 lab-match, attempt 2) Tonemap and fresnel are now applied
+      // up in the uBlackBase==1 branch above (matching the lab's main()
+      // exactly). Final clamp here only catches truly runaway HDR.
+      '  c = min(c, vec3(4.0));',
       '  gl_FragColor = vec4(c, alpha);',
       '}'
     ].join('\n');
@@ -21805,26 +21937,68 @@ function buildRoomGraphLevel(level) {
         roomColorsU: { value: roomColorsArr },
         roomRadii: { value: roomRadiiArr },
         roomCount: { value: numRooms },
-        uPattern:   { value: game.wallPattern | 0 },
-        uBlackBase: { value: game.wallBlackBase ? 1 : 0 },
+        // (v7.1 attempt 3) Default to the Lab Composite (uPattern == 20),
+        // the multi-layer Panel Maze + Layered Cube + Wave Interference
+        // preset baked from the user's mixed_lab_v2 export. P-cycling
+        // walks through 0-19 (single patterns) and back to 20.
+        // uBlackBase = 1 so wall output is just the cosmic composite
+        // (no K_DARK_BASE, K_ZONE_TINT, fresnel, or diff/AO shaping),
+        // which matches the mixed_lab_v2 rendering pipeline. K_COSMIC_BRIGHTNESS
+        // = 1.0 since per-layer K_COSMIC_bg/_fg/_fg2 already provide brightness.
+        uPattern:   { value: 20 },
+        uBlackBase: { value: 1 },
         // ---- Wall constants ----
         K_DARK_BASE:         { value: new THREE.Vector3(wp.K_DARK_BASE_R, wp.K_DARK_BASE_G, wp.K_DARK_BASE_B) },
         K_ZONE_TINT:         { value: wp.K_ZONE_TINT },
-        K_COSMIC_BRIGHTNESS: { value: wp.K_COSMIC_BRIGHTNESS },
+        K_COSMIC_BRIGHTNESS: { value: 1.0 },
         K_FRESNEL_STRENGTH:  { value: wp.K_FRESNEL_STRENGTH },
         K_DIFF_MIN:          { value: wp.K_DIFF_MIN },
         K_AO_FLOOR:          { value: wp.K_AO_FLOOR },
         K_FLOOR:             { value: wp.K_FLOOR },
-        // ---- Pattern math ----
-        u_iters:    { value: wp.u_iters | 0 },
+        // ---- Pattern math (shared) ----
         u_rings:    { value: wp.u_rings | 0 },
-        u_scale:    { value: wp.u_scale },
         u_rotSpeed: { value: wp.u_rotSpeed },
         u_off:      { value: new THREE.Vector3(wp.u_off_x, wp.u_off_y, wp.u_off_z) },
-        u_invBase:  { value: wp.u_invBase },
         u_valDiv:   { value: wp.u_valDiv },
-        u_hueSpin:  { value: wp.u_hueSpin },
-        u_satBase:  { value: wp.u_satBase },
+        // ---- (v7.1) Multi-layer pattern controls baked from a mixed_lab_v2
+        //      export. Each layer (BG/FG1/FG2) has independent iters, scale,
+        //      invBase, hueSpin, satBase, K_COSMIC, plus blend mode, alpha,
+        //      hue shift, time speed for the foreground layers.
+        // (v7.1 attempt 4, 2026-04-29) User's second mixed_lab_v2 export.
+        // BG: Panel Maze with hue spin and slightly tighter scale.
+        // FG1: Layered Cube unchanged from prior export.
+        // FG2: Wave Interference rebalanced ; finer scale (0.0012), much
+        // higher invBase (16.7 = many wave fronts), full saturation,
+        // toned-down cosmic (1.5 vs 5.55) so multiply blend doesn't crush.
+        bgPatternId:   { value: 17 }, // lab 6  Panel Maze
+        u_iters_bg:    { value: 3 },
+        u_scale_bg:    { value: 0.0012 },
+        u_invBase_bg:  { value: 3.0 },
+        u_hueSpin_bg:  { value: 0.115 },
+        u_satBase_bg:  { value: 0.0 },
+        K_COSMIC_bg:   { value: 4.75 },
+        fgPatternId:   { value: 19 }, // lab 18 Layered Cube
+        fgAlpha:       { value: 2.0 },
+        fgBlend:       { value: 4 },  // Mix
+        fgHue:         { value: 0.06 },
+        fgTime:        { value: 0.3 },
+        u_iters_fg:    { value: 12 },
+        u_scale_fg:    { value: 0.02 },
+        u_invBase_fg:  { value: 2.0 },
+        u_hueSpin_fg:  { value: 0.09 },
+        u_satBase_fg:  { value: 0.92 },
+        K_COSMIC_fg:   { value: 0.65 },
+        fg2PatternId:  { value: 3 },  // lab 8 Wave Interference (game id 3 Waves)
+        fg2Alpha:      { value: 0.75 },
+        fg2Blend:      { value: 1 },  // Multiply
+        fg2Hue:        { value: 0.3 },
+        fg2Time:       { value: 0.95 },
+        u_iters_fg2:   { value: 7 },
+        u_scale_fg2:   { value: 0.0012 },
+        u_invBase_fg2: { value: 16.7 },
+        u_hueSpin_fg2: { value: 0.115 },
+        u_satBase_fg2: { value: 0.94 },
+        K_COSMIC_fg2:  { value: 1.5 },
         // ---- Soul Array ----
         SA_CELL_SIZE:      { value: wp.SA_CELL_SIZE },
         SA_DOT_RADIUS:     { value: wp.SA_DOT_RADIUS },
