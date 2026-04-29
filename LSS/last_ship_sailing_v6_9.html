@@ -687,6 +687,26 @@ canvas { display: block; }
 .map-dot.active {
   background: #ffaa00; box-shadow: 0 0 6px rgba(255,170,0,0.7);
 }
+/* (post-v6.9 patch, 2026-04-28) Custom-map loader controls in the map-select
+   panel. Match the existing yellow-accent map UI aesthetic. */
+.map-load-btn {
+  background: rgba(20,20,40,0.6);
+  border: 1px solid rgba(80,80,120,0.4);
+  color: #ffaa00; font-family: inherit;
+  font-size: 12px; font-weight: bold; letter-spacing: 0.08em;
+  padding: 8px 10px; width: 100%;
+  cursor: pointer; transition: all 0.15s;
+  pointer-events: all;
+}
+.map-load-btn:hover { border-color: #ffaa00; background: rgba(40,40,60,0.9); }
+.map-load-btn:active { background: rgba(60,50,15,0.9); }
+#map-load-status {
+  font-size: 10px; color: #88a; line-height: 1.3;
+  text-align: center; min-height: 12px;
+  letter-spacing: 0.04em; padding: 0 4px; word-break: break-word;
+}
+#map-load-status.error { color: #f88; }
+#map-load-status.success { color: #8f8; }
 .ship-list-entry { position: relative; }
 
 /* ==========================================================================
@@ -1124,6 +1144,12 @@ canvas { display: block; }
         <div id="map-indicator"></div>
         <button class="map-arrow" id="map-next" title="Next map">&#9654;</button>
       </div>
+      <!-- (post-v6.9 patch, 2026-04-28) Custom-map loader: pick a JSON exported
+           from map_lab.html and inject it into MAP_DATA at runtime. Loaded
+           maps persist via localStorage so they survive reloads. -->
+      <button class="map-load-btn" id="map-load-btn" title="Load a level JSON exported from Map Lab">+ LOAD CUSTOM MAP</button>
+      <input id="map-load-input" type="file" accept=".json,application/json" hidden />
+      <div id="map-load-status"></div>
     </div>
   </div>
   <div id="teammates-strip">
@@ -1834,6 +1860,175 @@ function cycleMap(dir) {
   const idx = keys.indexOf(game.selectedMap);
   const next = ((idx + dir) % keys.length + keys.length) % keys.length;
   selectMap(keys[next]);
+}
+
+// ============================================================================
+// (post-v6.9 patch, 2026-04-28) Custom-map loader.
+// Lets players load JSON levels exported from map_lab.html and inject them
+// into MAP_DATA at runtime. Loaded maps appear in the map-select carousel
+// alongside built-ins, and persist in localStorage under "lss_custom_maps"
+// so they survive reloads. Re-loading a map with the same key overwrites
+// the previous version (so the editor's iterate-and-reload loop is fast).
+// ============================================================================
+const _customMapKeys = new Set();
+const CUSTOM_MAPS_LSKEY = 'lss_custom_maps';
+
+function _slugifyMapKey(s) {
+  return String(s || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32) || 'custom';
+}
+
+function _validateCustomLevel(data) {
+  if (!data || typeof data !== 'object') return 'not an object';
+  if (typeof data.name !== 'string' || !data.name.trim()) return 'missing "name"';
+  if (!Array.isArray(data.rooms) || data.rooms.length === 0) return 'missing or empty "rooms" array';
+  for (let i = 0; i < data.rooms.length; i++) {
+    const r = data.rooms[i];
+    if (!r || typeof r !== 'object') return `room ${i} is not an object`;
+    if (!Number.isFinite(+r.x) || !Number.isFinite(+r.y) || !Number.isFinite(+r.z)) return `room ${i} missing x/y/z`;
+    if (!Number.isFinite(+r.r) || +r.r <= 0) return `room ${i} missing valid radius`;
+  }
+  if (data.tunnels && !Array.isArray(data.tunnels)) return '"tunnels" must be an array';
+  return null;
+}
+
+function _sanitizeCustomLevel(data) {
+  return {
+    name: String(data.name).trim(),
+    description: data.description ? String(data.description) : '',
+    palette: Array.isArray(data.palette) && data.palette.length > 0
+      ? data.palette.slice(0, 8).map(c => +c | 0)
+      : undefined,
+    rooms: data.rooms.map(r => {
+      const out = {
+        id: String(r.id || ('room_' + Math.random().toString(36).slice(2, 6))),
+        team: (r.team === 'A' || r.team === 'B') ? r.team : null,
+        x: +r.x, y: +r.y, z: +r.z, r: Math.max(50, +r.r)
+      };
+      if (r.champion) out.champion = true;
+      return out;
+    }),
+    tunnels: (data.tunnels || []).map(t => {
+      const out = { path: (t.path || []).map(p => ({ x: +p.x, y: +p.y, z: +p.z })) };
+      if (Number.isFinite(+t.r) && +t.r > 0) out.r = +t.r;
+      return out;
+    })
+  };
+}
+
+// Install a parsed level object into MAP_DATA. opts: { silent, persist }.
+// Returns the key the level was installed under (auto-renamed on collision
+// with built-in maps), or null if validation failed.
+function installCustomMap(level, opts) {
+  opts = opts || {};
+  const err = _validateCustomLevel(level);
+  if (err) {
+    if (!opts.silent) _showMapLoadStatus('error', 'INVALID: ' + err);
+    return null;
+  }
+  const sanitized = _sanitizeCustomLevel(level);
+  // Pick a key. Prefer level.key (explicit slug from the editor), else slug
+  // the name. Avoid colliding with non-custom (built-in) keys; allow
+  // overwriting a previously-loaded custom key (so re-loading a level
+  // updates the existing entry, fast iterate-edit-reload loop in map_lab).
+  let baseKey = level.key ? _slugifyMapKey(level.key) : _slugifyMapKey(sanitized.name);
+  let key = baseKey;
+  let n = 2;
+  while (MAP_DATA[key] && !_customMapKeys.has(key)) {
+    key = baseKey + '_' + (n++);
+  }
+  sanitized.__isCustom = true;
+  MAP_DATA[key] = sanitized;
+  _customMapKeys.add(key);
+  if (opts.persist !== false) _persistCustomMapsToLocalStorage();
+  // Refresh the carousel and switch to the new map for immediate feedback.
+  if (typeof buildMapSelector === 'function') {
+    buildMapSelector();
+    if (typeof selectMap === 'function' && game.selectedMap !== key) {
+      selectMap(key);
+    }
+  }
+  if (!opts.silent) {
+    _showMapLoadStatus('success', 'LOADED "' + sanitized.name + '" (' + key + ')');
+  }
+  return key;
+}
+
+function _persistCustomMapsToLocalStorage() {
+  try {
+    const arr = [];
+    for (const k of _customMapKeys) {
+      const m = MAP_DATA[k];
+      if (!m || !m.__isCustom) continue;
+      arr.push({
+        key: k,
+        name: m.name,
+        description: m.description,
+        palette: m.palette,
+        rooms: m.rooms,
+        tunnels: m.tunnels
+      });
+    }
+    localStorage.setItem(CUSTOM_MAPS_LSKEY, JSON.stringify(arr));
+  } catch (e) {
+    console.warn('[customMaps] persist failed:', e);
+  }
+}
+
+function _loadCustomMapsFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_MAPS_LSKEY);
+    if (!raw) return;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return;
+    let count = 0;
+    for (const lvl of arr) {
+      if (installCustomMap(lvl, { silent: true, persist: false })) count++;
+    }
+    if (count > 0) {
+      // Defer the status nudge; the status div doesn't exist until
+      // ship-select is built, so just log instead.
+      console.log('[customMaps] restored', count, 'custom map(s) from localStorage');
+    }
+  } catch (e) {
+    console.warn('[customMaps] load from localStorage failed:', e);
+  }
+}
+
+function _showMapLoadStatus(kind, msg) {
+  const el = document.getElementById('map-load-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.className = kind || '';
+  if (_showMapLoadStatus._timer) clearTimeout(_showMapLoadStatus._timer);
+  _showMapLoadStatus._timer = setTimeout(() => {
+    if (el.textContent === msg) { el.textContent = ''; el.className = ''; }
+  }, 5000);
+}
+
+function _setupCustomMapLoader() {
+  const btn = document.getElementById('map-load-btn');
+  const input = document.getElementById('map-load-input');
+  if (!btn || !input) return;
+  btn.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        installCustomMap(data);
+      } catch (e) {
+        _showMapLoadStatus('error', 'PARSE ERROR: ' + (e.message || e));
+      }
+    };
+    reader.onerror = () => _showMapLoadStatus('error', 'FAILED TO READ FILE');
+    reader.readAsText(f);
+    input.value = ''; // allow re-loading the same file (change fires on new selection)
+  });
 }
 
 function updateLobbyPeers() {
@@ -25636,8 +25831,13 @@ respawnPlayer = function() {
 
 initAudio();
 loadSettings();
+// (post-v6.9 patch, 2026-04-28) Restore previously-loaded custom maps from
+// localStorage and wire the loader button. Must run before buildShipSelect
+// so custom maps appear in the carousel on first open.
+_loadCustomMapsFromLocalStorage();
 buildShipSelect();
 buildSettingsPage();
+_setupCustomMapLoader();
 
 // Hook audio init on first user interaction
 document.addEventListener('click', initAudio, { once: false });
