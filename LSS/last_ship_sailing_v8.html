@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v7.1 (layered walls)</title>
+<title>Last Ship Sailing v8.0 (WebXR VR phase 1)</title>
 <!-- Modern technical typography (v6.7 modernization). Orbitron for titles
      (geometric, sci-fi), Rajdhani for body (condensed humanist sans). Courier
      New stays as fallback for the canvas HUD readouts that are pixel-aligned. -->
@@ -36,6 +36,27 @@ canvas { display: block; }
   opacity: 0; transition: opacity 0.35s ease-out;
 }
 #cockpit-frame.active { opacity: 1; }
+
+/* (v8.0) Enter VR button. Sits top-right when not presenting, hidden during a
+   session. Click triggers navigator.xr.requestSession('immersive-vr'). The
+   button is rendered above all UI so it's always reachable on a 2D screen
+   even when ship-select / settings overlays are up. */
+#vr-button {
+  position: fixed; top: 12px; right: 12px; z-index: 10000;
+  padding: 10px 16px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+  font-size: 13px; letter-spacing: 1.5px; text-transform: uppercase;
+  background: rgba(10, 16, 30, 0.85); color: rgba(180, 230, 255, 0.95);
+  border: 1px solid rgba(80, 220, 255, 0.55); border-radius: 6px;
+  cursor: pointer; pointer-events: auto;
+  box-shadow: 0 2px 16px rgba(0, 220, 255, 0.18), inset 0 1px 0 rgba(255,255,255,0.06);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
+          backdrop-filter: blur(8px) saturate(140%);
+  transition: background 0.18s ease, color 0.18s ease, transform 0.12s ease;
+}
+#vr-button:hover { background: rgba(20, 40, 70, 0.95); color: rgba(220, 245, 255, 1); transform: translateY(-1px); }
+#vr-button:active { transform: translateY(0); }
+#vr-button.unsupported { color: rgba(180, 180, 180, 0.55); border-color: rgba(120, 120, 120, 0.35); cursor: not-allowed; }
+#vr-button.presenting { display: none; }
 
 /* Old crosshair hidden; replaced by circumpunct HUD canvas */
 #crosshair { display: none; }
@@ -945,6 +966,11 @@ canvas { display: block; }
 
 <!-- Per-titan cockpit frame: PNG with alpha cutout, populated by updateCockpitFrame() -->
 <div id="cockpit-frame"></div>
+
+<!-- (v8.0) Enter VR button. Wired by the LSS_XR module after renderer init.
+     Hidden via .presenting class while an XR session is active; the Quest's
+     own system menu handles exit. -->
+<button id="vr-button" type="button">Enter VR</button>
 
 <div id="hud">
   <canvas id="health-canvas" width="500" height="70"></canvas>
@@ -5392,6 +5418,261 @@ renderer.outputEncoding = THREE.sRGBEncoding || 3001; // Vivid color output
 renderer.physicallyCorrectLights = true;
 document.body.appendChild(renderer.domElement);
 
+// =====================================================================
+// (v8.0) WebXR / VR module — phase 1
+// =====================================================================
+// Goal: let the player put on a Quest, click Enter VR, and fly the ship
+// using head orientation (yaw + pitch, no roll) plus thumbstick translation.
+// No visible ship body, no cockpit frame, no circumpunct HUD; just the world
+// and (next phase) two arm-guns with wrist HUDs and holographic gun sights.
+//
+// Design rules (locked in chat):
+//   - looking feels exactly like the FPS, you don't see the ship
+//   - head orientation 1:1 with ship orientation (yaw + pitch, roll locked)
+//   - configurable angular dead zone filters head jitter
+//   - left thumbstick translates the ship in its local frame
+//   - the player's body / cockpit / ship mesh are invisible from inside
+//
+// Implementation strategy:
+//   - renderer.xr.enabled = true
+//   - swap the top-level frame driver from requestAnimationFrame to
+//     renderer.setAnimationLoop so the XR system can drive the loop while
+//     presenting (mandatory for stereo rendering)
+//   - wrap the existing camera in an `xrRig` Group when a session starts;
+//     the rig translates with stick input, the camera (driven by headset
+//     pose) reads its world quaternion to derive ship orientation
+//   - branch the render path: skip the 5-pass post-FX pipeline in XR
+//     (XR rendering happens to the XR framebuffer, not our offscreen
+//     render targets) and call renderer.render(scene, camera) directly;
+//     post-FX is preserved as-is for the flat-screen path
+//
+// Anything VR-specific reads/writes lss_xr.* so it's easy to find later.
+const lss_xr = {
+  // Lifecycle
+  enabled: false,           // becomes true after a session starts; false on session end
+  session: null,            // active XRSession or null
+  rig: null,                // THREE.Group; camera is reparented here in XR
+  cameraOriginalParent: null, // remember scene parent so we can restore on exit
+  // Controllers (filled lazily on session start)
+  controller0: null,
+  controller1: null,
+  // Settings (exposed on lss_xr so the settings page can hook them later)
+  deadzoneRad: 0.0035,      // ~0.2 degrees; below this we don't update player.euler
+  stickMoveSpeed: 380,      // units/second at full deflection (matches roughly the kb/m forward speed)
+  stickStrafeSpeed: 320,    // sideways
+  stickVerticalSpeed: 280,  // up/down via stick click or secondary stick
+  axisDeadzone: 0.12,       // standard gamepad axis deadzone for thumbstick noise
+  // Was input.gpConnected forced on by XR? (so we restore to its real value
+  // when the session ends without clobbering a real gamepad detection)
+  _gpConnectedSavedValue: null,
+  _gpConnectedForced: false,
+  // Per-frame scratch (avoid GC churn)
+  _headQuat: new THREE.Quaternion(),
+  _headEuler: new THREE.Euler(0, 0, 0, 'YXZ'),
+  _moveVec: new THREE.Vector3(),
+  _forward: new THREE.Vector3(),
+  _right: new THREE.Vector3(),
+  _worldUp: new THREE.Vector3(0, 1, 0),
+  _shipQuatScratch: new THREE.Quaternion(), // synthesized ship orientation in XR
+  _decompPos: new THREE.Vector3(),
+  _decompScale: new THREE.Vector3(),
+};
+renderer.xr.enabled = true;
+
+// VR button wiring. The button itself is in the DOM (#vr-button); we just
+// attach the click handler and probe support to mark unsupported devices.
+function _lssXrSetupButton() {
+  const btn = document.getElementById('vr-button');
+  if (!btn) return;
+  if (!navigator.xr || !navigator.xr.isSessionSupported) {
+    btn.classList.add('unsupported');
+    btn.textContent = 'VR Unavailable';
+    btn.title = 'WebXR is not available in this browser';
+    btn.disabled = true;
+    return;
+  }
+  navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+    if (!supported) {
+      btn.classList.add('unsupported');
+      btn.textContent = 'VR Unavailable';
+      btn.title = 'Immersive VR not supported on this device';
+      btn.disabled = true;
+    }
+  }).catch(() => {/* leave the button as-is; click will surface real error */});
+
+  btn.addEventListener('click', async () => {
+    if (lss_xr.session) {
+      try { lss_xr.session.end(); } catch (_) {}
+      return;
+    }
+    try {
+      const session = await navigator.xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'bounded-floor'],
+      });
+      await renderer.xr.setSession(session);
+      _lssXrOnSessionStart(session);
+    } catch (err) {
+      console.warn('[LSS_XR] session request failed:', err);
+      btn.textContent = 'VR Failed (see console)';
+      btn.classList.add('unsupported');
+    }
+  });
+}
+
+function _lssXrOnSessionStart(session) {
+  lss_xr.session = session;
+  lss_xr.enabled = true;
+  document.getElementById('vr-button')?.classList.add('presenting');
+  // Build the rig the first time we enter XR. We reparent the existing camera
+  // under the rig so head pose is layered on top of rig transform; rig moves
+  // with the stick, head determines facing.
+  if (!lss_xr.rig) {
+    lss_xr.rig = new THREE.Group();
+    lss_xr.rig.name = 'lss_xr_rig';
+    scene.add(lss_xr.rig);
+  }
+  lss_xr.cameraOriginalParent = camera.parent;
+  lss_xr.rig.add(camera); // camera transforms become rig-local; XR adds head pose on render
+  // Place rig at the player's current world position so the first frame
+  // doesn't snap somewhere else. Orientation reset to identity so head is
+  // the only rotation source.
+  if (typeof player !== 'undefined' && player && player.position) {
+    lss_xr.rig.position.copy(player.position);
+  }
+  lss_xr.rig.quaternion.identity();
+  camera.position.set(0, 0, 0);
+  camera.quaternion.identity();
+  // Hide cockpit frame: in VR you ARE the ship, no painted frame around your view.
+  const cf = document.getElementById('cockpit-frame');
+  if (cf) cf.classList.remove('active');
+  // Hide screen-space HUD canvases; phase 2 replaces them with wrist HUDs.
+  const cphud = document.getElementById('circumpunct-hud');
+  if (cphud) cphud.style.display = 'none';
+  // Get controller refs (placeholder geometry for phase 1 so they're visible).
+  for (let i = 0; i < 2; i++) {
+    const ctrl = renderer.xr.getController(i);
+    if (!lss_xr.rig.children.includes(ctrl)) lss_xr.rig.add(ctrl);
+    // Simple cone placeholder pointing along -Z (the controller's forward).
+    if (ctrl.children.length === 0) {
+      const geom = new THREE.ConeGeometry(0.018, 0.16, 12);
+      geom.rotateX(-Math.PI / 2); // align cone tip with -Z
+      geom.translate(0, 0, -0.08);
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x88ccff, emissive: 0x224466, emissiveIntensity: 0.6,
+        metalness: 0.4, roughness: 0.5,
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      ctrl.add(mesh);
+    }
+    if (i === 0) lss_xr.controller0 = ctrl;
+    else         lss_xr.controller1 = ctrl;
+  }
+  session.addEventListener('end', _lssXrOnSessionEnd);
+  console.log('[LSS_XR] session started');
+}
+
+function _lssXrOnSessionEnd() {
+  console.log('[LSS_XR] session ended');
+  lss_xr.session = null;
+  lss_xr.enabled = false;
+  document.getElementById('vr-button')?.classList.remove('presenting');
+  // Reparent camera back to scene so flat-screen rendering keeps working.
+  if (lss_xr.cameraOriginalParent) {
+    lss_xr.cameraOriginalParent.add(camera);
+  } else {
+    scene.add(camera);
+  }
+  // Restore the input.gp* values so a real gamepad isn't permanently
+  // overridden by the leftover XR-pushed axes.
+  _lssXrRestoreGamepadConnected();
+  // Restore HUD; cockpit frame will redraw next time updateCockpitFrame fires.
+  const cphud = document.getElementById('circumpunct-hud');
+  if (cphud) cphud.style.display = '';
+  if (typeof player !== 'undefined' && player && player.loadoutKey) {
+    try { updateCockpitFrame(); } catch (_) {}
+  }
+}
+
+// Read head world quaternion -> ship orientation (yaw + pitch, roll dropped),
+// applying a small angular dead zone so micro-head-jitter doesn't twitch the
+// ship. Called from updatePlayerMovement when XR is presenting.
+function _lssXrApplyHeadOrientation() {
+  const xrCam = renderer.xr.getCamera(camera);
+  if (!xrCam) return;
+  // ArrayCamera's matrixWorld is the average of L/R eyes ~= head pose.
+  xrCam.matrixWorld.decompose(lss_xr._decompPos, lss_xr._headQuat, lss_xr._decompScale);
+  lss_xr._headEuler.setFromQuaternion(lss_xr._headQuat, 'YXZ');
+  // Dead zone: only commit a change if we moved more than the threshold.
+  // (Roll axis is dropped on every frame so head tilt never banks the ship.)
+  const dy = lss_xr._headEuler.y - player.euler.y;
+  const dx = lss_xr._headEuler.x - player.euler.x;
+  if (Math.abs(dy) > lss_xr.deadzoneRad) player.euler.y = lss_xr._headEuler.y;
+  if (Math.abs(dx) > lss_xr.deadzoneRad) player.euler.x = lss_xr._headEuler.x;
+  player.euler.z = 0;
+  player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
+}
+
+// Forward XR thumbstick axes into the existing input.gp* fields used by the
+// FPS movement path. This way the ship picks up acceleration / dash-speed-cap /
+// collision / boundary-clamp logic for free, with proper analog precision and
+// without any duplicate movement code paths.
+//   - Left stick X / Y    -> input.gpMoveX / input.gpMoveY     (strafe / fwd-back)
+//   - Right stick Y       -> input.gpMoveUp / input.gpMoveDown (vertical, edge flags)
+//   - Right stick X       -> reserved for future snap-turn (Phase 3)
+// We DO NOT touch input.gpLookX / input.gpLookY because the headset is the
+// only orientation source in XR.
+function _lssXrPopulateGamepadAxes() {
+  if (!lss_xr.session) return;
+  let lx = 0, ly = 0, rx = 0, ry = 0;
+  for (const src of lss_xr.session.inputSources) {
+    if (!src.gamepad || !src.gamepad.axes) continue;
+    const ax = src.gamepad.axes;
+    // Quest layout: axes[2]=X, axes[3]=Y for the primary thumbstick.
+    const x = ax.length >= 4 ? ax[2] : (ax[0] || 0);
+    const y = ax.length >= 4 ? ax[3] : (ax[1] || 0);
+    if (src.handedness === 'left') { lx = x; ly = y; }
+    else if (src.handedness === 'right') { rx = x; ry = y; }
+  }
+  // Per-axis dead zone with smooth re-mapping so just-past-deadzone is gentle.
+  const dz = lss_xr.axisDeadzone;
+  const _dz = (v) => {
+    if (Math.abs(v) < dz) return 0;
+    return (v - Math.sign(v) * dz) / (1 - dz);
+  };
+  lx = _dz(lx); ly = _dz(ly); rx = _dz(rx); ry = _dz(ry);
+  // The existing movement code in updatePlayerMovement reads:
+  //   moveDir.addScaledVector(forward, -input.gpMoveY * ch.flightSpeed * gpMoveMult);
+  //   moveDir.addScaledVector(right,    input.gpMoveX * ch.strafeSpeed * gpMoveMult);
+  // ly negative = stick pushed up = ship forward, which matches the FPS path.
+  input.gpMoveX = lx;
+  input.gpMoveY = ly;
+  input.gpMoveUp = ry < -0.5;
+  input.gpMoveDown = ry >  0.5;
+  // Force gpConnected on so the existing branch picks up the values; remember
+  // the prior value so the FPS-mode session-end restores cleanly.
+  if (!lss_xr._gpConnectedForced) {
+    lss_xr._gpConnectedSavedValue = input.gpConnected;
+    lss_xr._gpConnectedForced = true;
+  }
+  input.gpConnected = true;
+}
+
+function _lssXrRestoreGamepadConnected() {
+  if (lss_xr._gpConnectedForced) {
+    input.gpConnected = lss_xr._gpConnectedSavedValue || false;
+    lss_xr._gpConnectedForced = false;
+    lss_xr._gpConnectedSavedValue = null;
+    input.gpMoveX = 0; input.gpMoveY = 0;
+    input.gpMoveUp = false; input.gpMoveDown = false;
+  }
+}
+
+// Boot the button as soon as the DOM is parsed (it's already in the body).
+_lssXrSetupButton();
+// =====================================================================
+// end of WebXR / VR module
+// =====================================================================
+
 // ---- IBL ENVIRONMENT MAP ----
 // Procedural cubemap tuned to the corridor palette (deep purple-black with cool
 // rim and warm zone glow). Processed through PMREMGenerator so it can drive
@@ -5792,6 +6073,16 @@ const _postFXScratchV = new THREE.Vector3();
 const _envProbeCamPos = new THREE.Vector3();
 
 function renderPostFX() {
+  // (v8.0 VR) When presenting, render the scene directly to the XR
+  // framebuffer and skip the entire 5-pass post-FX pipeline. The stereo
+  // render targets and the orthographic composite quad don't make sense in
+  // VR (and the bloom cost would tank the Quest's per-eye budget). Phase 2
+  // can re-introduce a cheaper VR-tuned post-FX path if we want it.
+  if (lss_xr.enabled && renderer.xr.isPresenting) {
+    renderer.setRenderTarget(null);
+    renderer.render(scene, camera);
+    return;
+  }
   // Low-quality gate: skip the three bloom passes (bright-extract + horizontal
   // blur + vertical blur) whenever bloom cannot meaningfully be seen. Cuts
   // GPU cost from 5 fullscreen passes to 2 on menus / settings and when the
@@ -12386,6 +12677,13 @@ function frameImgToScreen(ix, iy, imgW, imgH, W, H) {
 }
 
 function updateCockpitFrame() {
+  // (v8.0 VR) Don't re-show the cockpit frame while a session is active;
+  // _lssXrOnSessionEnd calls back into updateCockpitFrame to restore it.
+  if (lss_xr.enabled && renderer.xr.isPresenting) {
+    const el = document.getElementById('cockpit-frame');
+    if (el) { el.classList.remove('active'); el.style.backgroundImage = ''; }
+    return;
+  }
   const el = document.getElementById('cockpit-frame');
   if (!el) return;
   const key = (player && player.loadoutKey) || null;
@@ -12445,6 +12743,10 @@ function updateCockpitFrame() {
 // Cheap because we only set backgroundImage when the target URL actually
 // changes (the cache tracks _currentUrl).
 function tickCockpitFrameAnimation() {
+  // (v8.0 VR) Cockpit PNG is suppressed entirely while presenting; the player
+  // is "inside the ship" with no painted frame. Skip even the URL swap so the
+  // <img> stays empty and unloaded.
+  if (lss_xr.enabled && renderer.xr.isPresenting) return;
   const el = document.getElementById('cockpit-frame');
   if (!el || !player || !player.loadoutKey) return;
   const entry = _cockpitFrameCache[player.loadoutKey];
@@ -12967,11 +13269,23 @@ const _mvClampMax = new THREE.Vector3();
 
 function updatePlayerMovement(dt) {
   if (player.shipState === 'dead' || !player.chassis) return;
+  // (v8.0 VR) When presenting, the head pose drives ship orientation and the
+  // XR rig owns the camera transform. We branch the LOOK code only; the rest
+  // of the function (collision, dash, spawn protection, doomed timer, soft
+  // boundary clamp) runs unchanged so VR doesn't lose any sim behavior.
+  const _xrOn = lss_xr.enabled && renderer.xr.isPresenting;
   // Immobilized during stasis field recharge OR during pre-round warmup
   // (ships locked in place until the 3-2-1-FIGHT countdown finishes).
   if (game.playerInStasis || game.state === 'warmup') {
     // Kill any residual velocity so we don't drift mid-lockout.
     player.velocity.set(0, 0, 0);
+    if (_xrOn) {
+      _lssXrApplyHeadOrientation();
+      input.mouseDX = 0; input.mouseDY = 0;
+      // Sync rig to player so head pose stays anchored on the ship.
+      if (lss_xr.rig) lss_xr.rig.position.copy(player.position);
+      return; // XR owns camera transform; nothing else to do during stasis/warmup.
+    }
     // Still allow looking around but no movement
     if (input.locked) {
       player.euler.y -= input.mouseDX * input.sensitivity;
@@ -12990,23 +13304,36 @@ function updatePlayerMovement(dt) {
 
   const ch = player.chassis;
 
-  // Mouse look + gamepad look
-  if (input.locked) {
-    player.euler.y -= input.mouseDX * input.sensitivity;
-    player.euler.x -= input.mouseDY * input.sensitivity;
-  }
-  // Gamepad look (curve already applied in pollGamepad)
-  if (input.gpConnected) {
-    player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
-    player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
-  }
-  player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
-  input.mouseDX = 0;
-  input.mouseDY = 0;
+  // (v8.0) Quaternion source for the move-frame math below. In FPS mode it's
+  // camera.quaternion (set from player.euler). In XR it's a synthesized
+  // quaternion from player.euler since camera.quaternion is owned by the XR
+  // system (reparented under lss_xr.rig and not written here).
+  const _moveQuat = lss_xr._shipQuatScratch;
+  if (_xrOn) {
+    _lssXrApplyHeadOrientation();
+    _lssXrPopulateGamepadAxes();
+    input.mouseDX = 0; input.mouseDY = 0;
+    _moveQuat.setFromEuler(player.euler);
+  } else {
+    // Mouse look + gamepad look
+    if (input.locked) {
+      player.euler.y -= input.mouseDX * input.sensitivity;
+      player.euler.x -= input.mouseDY * input.sensitivity;
+    }
+    // Gamepad look (curve already applied in pollGamepad)
+    if (input.gpConnected) {
+      player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
+      player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
+    }
+    player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
+    input.mouseDX = 0;
+    input.mouseDY = 0;
 
-  camera.quaternion.setFromEuler(player.euler);
-  const forward = _mvForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  const right = _mvRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+    camera.quaternion.setFromEuler(player.euler);
+    _moveQuat.copy(camera.quaternion);
+  }
+  const forward = _mvForward.set(0, 0, -1).applyQuaternion(_moveQuat);
+  const right = _mvRight.set(1, 0, 0).applyQuaternion(_moveQuat);
   const up = _mvUp;
 
   // Movement input (keyboard). Reads from input.kbBindings so the user can
@@ -13167,7 +13494,14 @@ function updatePlayerMovement(dt) {
   // Reuse cached corner scratches; Vector3.clamp accepts any THREE.Vector3.
   player.position.clamp(_mvClampMin.set(-s, -s, -s), _mvClampMax.set(s, s, s));
 
-  camera.position.copy(player.position);
+  if (_xrOn) {
+    // (v8.0) XR: rig owns the camera; sync rig position to ship so the head
+    // sits at the ship's collision-resolved location every frame. The XR
+    // system layers head pose on top of this rig transform.
+    if (lss_xr.rig) lss_xr.rig.position.copy(player.position);
+  } else {
+    camera.position.copy(player.position);
+  }
 }
 
 // ---- WEAPON FIRING ----
@@ -18550,6 +18884,10 @@ document.addEventListener('pointerlockchange', () => {
 document.addEventListener('contextmenu', e => e.preventDefault());
 
 window.addEventListener('resize', () => {
+  // (v8.0) When an XR session is active the headset compositor controls
+  // canvas size + camera aspect; mutating them from a window resize event
+  // mid-session causes flicker and projection-matrix mismatch in stereo.
+  if (lss_xr.enabled && renderer.xr.isPresenting) return;
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -22535,7 +22873,9 @@ function updateEnemyHealthBars() {
 const _wallHueScratchColor = new THREE.Color();
 
 function gameLoop(timestamp) {
-  requestAnimationFrame(gameLoop);
+  // (v8.0) Frame driver is renderer.setAnimationLoop (see bottom of file) so
+  // WebXR can take over scheduling when an immersive session is active. The
+  // explicit requestAnimationFrame self-call that lived here in v7.x is gone.
 
   if (!game.lastTime) game.lastTime = timestamp;
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
@@ -26627,7 +26967,9 @@ _setupCustomMapLoader();
 document.addEventListener('click', initAudio, { once: false });
 document.addEventListener('keydown', initAudio, { once: false });
 
-requestAnimationFrame(gameLoop);
+// (v8.0) Drive the loop via renderer.setAnimationLoop so WebXR can hand the
+// scheduling over to the headset compositor when a session starts.
+renderer.setAnimationLoop(gameLoop);
 
 </script>
 </body>
