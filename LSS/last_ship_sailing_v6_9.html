@@ -1340,6 +1340,17 @@ const game = {
   playerStasisTimer: 0,
   playerStasisDuration: 3,
   playerPreStasisVelocity: null,
+  // (post-v6.9 patch, 2026-04-28) Champion-field stasis. When the player
+  // enters the champion field this flag goes true and the regular
+  // updatePlayerStasis auto-decrement is suppressed; the champion handler
+  // in updateStasisFields drives the shield charge and resolves win/loss.
+  playerInChampionStasis: false,
+  // (post-v6.9 patch, 2026-04-28) Per-pattern wallParams. Each pattern (0..8)
+  // has its own slot here. game.wallParams is kept as a live reference to
+  // the active pattern's slot (via _switchToPatternSlot), so existing
+  // setWallParam / pushWallParamsToUniforms / saveSettings code keeps
+  // working unchanged. Tuning Mandelbox no longer overwrites Soul Array.
+  wallParamsByPattern: {},
   // Map/level for current round
   selectedMap: 'hourglass', // map key; changed via selectMap()
   mapWord: '',
@@ -12890,6 +12901,12 @@ function playerDie(attacker) {
 function respawnPlayer() {
   if (!player.loadout) return;
   if (window.Overlays) Overlays.hideRespawn();
+  // (post-v6.9 patch, 2026-04-28) Defensive clear: if the player was in
+  // champion stasis when they died, the champion handler already cleared
+  // these flags on the next tick after death; this guard catches any race
+  // where respawn fires before that tick.
+  game.playerInChampionStasis = false;
+  game.playerInStasis = false;
   const ch = player.chassis;
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
@@ -19282,9 +19299,13 @@ function setWallParam(key, value) {
 }
 
 // Reset all wall params to defaults and push to uniforms.
+// (post-v6.9 patch, 2026-04-28) Resets ONLY the active pattern's slot, so
+// resetting Mandelbox doesn't blow away your tuned Soul Array values.
 function resetWallParams() {
-  game.wallParams = {};
-  applyWallParamDefaults(game.wallParams);
+  const pat = (game.wallPattern | 0);
+  if (!game.wallParamsByPattern) game.wallParamsByPattern = {};
+  game.wallParamsByPattern[pat] = applyWallParamDefaults({});
+  game.wallParams = game.wallParamsByPattern[pat];
   pushWallParamsToUniforms();
   saveSettings();
 }
@@ -19321,27 +19342,48 @@ function importWallLabConfig(cfg) {
   if (typeof cfg.wallBlackBase === 'boolean') {
     setWallBlackBase(cfg.wallBlackBase);
   }
-  // wallParams is the bulk of the work.
-  const incoming = cfg.wallParams || {};
-  if (typeof incoming !== 'object') {
-    return { ok: false, message: 'wallParams field is missing or not an object.' };
+  // (post-v6.9 patch, 2026-04-28) Two import shapes accepted:
+  //   - cfg.wallParamsByPattern: per-pattern map; each slot's params merged
+  //     into game.wallParamsByPattern[idx]. Other patterns left alone.
+  //   - cfg.wallParams: flat blob, applied to the CURRENT pattern's slot
+  //     only (so importing a lab config tunes the pattern you're on, not
+  //     every pattern).
+  const incomingByPat = cfg.wallParamsByPattern;
+  const incomingFlat = cfg.wallParams;
+  if (!incomingByPat && (!incomingFlat || typeof incomingFlat !== 'object')) {
+    return { ok: false, message: 'wallParams or wallParamsByPattern field is missing.' };
   }
-  if (!game.wallParams) game.wallParams = {};
-  for (const key in incoming) {
-    if (!Object.prototype.hasOwnProperty.call(incoming, key)) continue;
-    const def = WALL_PARAM_DEFS.find(d => d.key === key);
-    if (!def) { skippedCount++; continue; }
-    let v = incoming[key];
-    if (typeof v === 'string') v = parseFloat(v);
-    if (!isFinite(v)) { skippedCount++; continue; }
-    if (def.type === 'i') v = v | 0;
-    // Clamp to slider range so weird values can't blow up the shader.
-    if (typeof def.min === 'number' && v < def.min) v = def.min;
-    if (typeof def.max === 'number' && v > def.max) v = def.max;
-    game.wallParams[key] = v;
-    appliedCount++;
+  if (!game.wallParamsByPattern) game.wallParamsByPattern = {};
+  const _applyToSlot = (slot, src) => {
+    for (const key in src) {
+      if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+      const def = WALL_PARAM_DEFS.find(d => d.key === key);
+      if (!def) { skippedCount++; continue; }
+      let v = src[key];
+      if (typeof v === 'string') v = parseFloat(v);
+      if (!isFinite(v)) { skippedCount++; continue; }
+      if (def.type === 'i') v = v | 0;
+      if (typeof def.min === 'number' && v < def.min) v = def.min;
+      if (typeof def.max === 'number' && v > def.max) v = def.max;
+      slot[key] = v;
+      appliedCount++;
+    }
+    applyWallParamDefaults(slot);
+  };
+  if (incomingByPat && typeof incomingByPat === 'object') {
+    for (const k of Object.keys(incomingByPat)) {
+      const idx = (k | 0);
+      if (idx < 0 || idx >= WALL_PATTERN_NAMES.length) continue;
+      const slot = _ensureWallParamsSlot(idx);
+      _applyToSlot(slot, incomingByPat[k] || {});
+    }
+  } else {
+    const slot = _ensureWallParamsSlot(game.wallPattern);
+    _applyToSlot(slot, incomingFlat);
   }
-  applyWallParamDefaults(game.wallParams);
+  // Re-point game.wallParams at the (possibly newly-mutated) active slot
+  // and push uniforms so the change is visible immediately.
+  _switchToPatternSlot(game.wallPattern);
   pushWallParamsToUniforms();
   saveSettings();
   return {
@@ -19382,6 +19424,18 @@ function saveSettings() {
       audioAmbient: audio.userVol.ambient,
       wallPattern: (typeof game.wallPattern === 'number') ? game.wallPattern : 0,
       wallBlackBase: !!game.wallBlackBase,
+      // (post-v6.9 patch, 2026-04-28) Per-pattern wallParams. Each slot
+      // saves under its pattern index. Legacy `wallParams` is still emitted
+      // for compatibility with older code paths that read it (and as a
+      // fallback if wallParamsByPattern is missing on load).
+      wallParamsByPattern: (function() {
+        const out = {};
+        const src = game.wallParamsByPattern || {};
+        for (const k of Object.keys(src)) {
+          out[k] = applyWallParamDefaults(Object.assign({}, src[k] || {}));
+        }
+        return out;
+      })(),
       wallParams: applyWallParamDefaults(game.wallParams || {}),
     };
     localStorage.setItem('lss_settings', JSON.stringify(data));
@@ -19461,18 +19515,43 @@ function loadSettings() {
           game.wallBlackBase = (typeof DEFAULT_WALL_CONFIG.wallBlackBase === 'boolean')
             ? DEFAULT_WALL_CONFIG.wallBlackBase
             : true;
-          const seedParams = (DEFAULT_WALL_CONFIG.wallParams && typeof DEFAULT_WALL_CONFIG.wallParams === 'object')
-            ? Object.assign({}, DEFAULT_WALL_CONFIG.wallParams)
-            : {};
-          game.wallParams = applyWallParamDefaults(seedParams);
+          // (post-v6.9 patch, 2026-04-28) Per-pattern seeding. Two shapes
+          // accepted: new wallParamsByPattern { 0: {...}, ..., 8: {...} },
+          // or legacy wallParams (flat) which gets copied to all 9 slots so
+          // every pattern starts from the same baseline (the user can then
+          // diverge per pattern via the wall lab). Either shape lands us at
+          // game.wallParamsByPattern populated and game.wallParams pointing
+          // at the active pattern's slot.
+          game.wallParamsByPattern = {};
+          const dpbp = DEFAULT_WALL_CONFIG.wallParamsByPattern;
+          if (dpbp && typeof dpbp === 'object') {
+            for (const k of Object.keys(dpbp)) {
+              const idx = (k | 0);
+              if (idx >= 0 && idx < WALL_PATTERN_NAMES.length) {
+                game.wallParamsByPattern[idx] = applyWallParamDefaults(Object.assign({}, dpbp[k] || {}));
+              }
+            }
+          } else {
+            const flat = (DEFAULT_WALL_CONFIG.wallParams && typeof DEFAULT_WALL_CONFIG.wallParams === 'object')
+              ? DEFAULT_WALL_CONFIG.wallParams : {};
+            for (let i = 0; i < WALL_PATTERN_NAMES.length; i++) {
+              game.wallParamsByPattern[i] = applyWallParamDefaults(Object.assign({}, flat));
+            }
+          }
+          _switchToPatternSlot(game.wallPattern);
         } else {
           game.wallBlackBase = true;
-          game.wallParams = applyWallParamDefaults({});
+          game.wallParamsByPattern = {};
+          for (let i = 0; i < WALL_PATTERN_NAMES.length; i++) {
+            game.wallParamsByPattern[i] = applyWallParamDefaults({});
+          }
+          _switchToPatternSlot(game.wallPattern || 0);
         }
       } catch(e) {
         try {
           game.wallBlackBase = true;
-          game.wallParams = applyWallParamDefaults({});
+          game.wallParamsByPattern = {};
+          _switchToPatternSlot(game.wallPattern || 0);
         } catch(_) {}
       }
       return;
@@ -19501,14 +19580,49 @@ function loadSettings() {
     // game so createMeshFromPositions can read it when the shader is built.
     if (data.wallPattern !== undefined) game.wallPattern = data.wallPattern | 0;
     if (data.wallBlackBase !== undefined) game.wallBlackBase = !!data.wallBlackBase;
-    // Wall lab parameters: merge saved values onto defaults so any new param
-    // added in a future version gets its default automatically.
-    if (data.wallParams && typeof data.wallParams === 'object') {
-      game.wallParams = applyWallParamDefaults(Object.assign({}, data.wallParams));
-    } else {
-      game.wallParams = applyWallParamDefaults({});
+    // (post-v6.9 patch, 2026-04-28) Wall lab parameters now live per-pattern.
+    // Migration: if persisted data has wallParamsByPattern (new shape), use
+    // it directly; else if it has the legacy flat wallParams, copy that blob
+    // to all 9 pattern slots so the user's previous tuning is preserved
+    // across every pattern as a baseline they can diverge from.
+    game.wallParamsByPattern = {};
+    if (data.wallParamsByPattern && typeof data.wallParamsByPattern === 'object') {
+      for (const k of Object.keys(data.wallParamsByPattern)) {
+        const idx = (k | 0);
+        if (idx >= 0 && idx < WALL_PATTERN_NAMES.length) {
+          game.wallParamsByPattern[idx] = applyWallParamDefaults(Object.assign({}, data.wallParamsByPattern[k] || {}));
+        }
+      }
+    } else if (data.wallParams && typeof data.wallParams === 'object') {
+      for (let i = 0; i < WALL_PATTERN_NAMES.length; i++) {
+        game.wallParamsByPattern[i] = applyWallParamDefaults(Object.assign({}, data.wallParams));
+      }
     }
+    _switchToPatternSlot(game.wallPattern || 0);
   } catch(e) {}
+}
+
+// (post-v6.9 patch, 2026-04-28) Per-pattern wallParams helpers. Each pattern
+// owns its own slot in game.wallParamsByPattern; game.wallParams is a live
+// reference to the active slot. Lazy-initializes a slot the first time a
+// pattern is touched, seeding from the currently-active wallParams so the
+// new pattern inherits whatever the user was looking at (intuitive default
+// instead of a jarring reset to code defaults). Existing callers that read
+// or write game.wallParams just naturally edit the active pattern.
+function _ensureWallParamsSlot(patternIdx) {
+  if (!game.wallParamsByPattern) game.wallParamsByPattern = {};
+  const pat = (patternIdx | 0);
+  if (!game.wallParamsByPattern[pat]) {
+    const seed = (game.wallParams && typeof game.wallParams === 'object')
+      ? Object.assign({}, game.wallParams)
+      : {};
+    game.wallParamsByPattern[pat] = applyWallParamDefaults(seed);
+  }
+  return game.wallParamsByPattern[pat];
+}
+function _switchToPatternSlot(patternIdx) {
+  game.wallParams = _ensureWallParamsSlot(patternIdx);
+  return game.wallParams;
 }
 
 // Switch the wall shader to one of the 9 patterns (0..8). Updates the live
@@ -19520,6 +19634,11 @@ function setWallPattern(idx) {
   idx = (idx | 0) % N;
   if (idx < 0) idx = (idx + N) % N;
   game.wallPattern = idx;
+  // (post-v6.9 patch, 2026-04-28) Swap game.wallParams to point at this
+  // pattern's slot, then push its values into the live shader uniforms so
+  // the visible rendering matches the new slot's tuned values.
+  _switchToPatternSlot(idx);
+  pushWallParamsToUniforms();
   if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uPattern) {
     game.levelMaterial.uniforms.uPattern.value = idx;
   }
@@ -19934,80 +20053,100 @@ function updateStasisFields(dt) {
     if (!field.alive) { game.stasisFields.splice(i, 1); continue; }
     field.update(dt);
 
-    // (v6.9) Champion fields use a contested-charge model instead of
-    // instant pickup. Determine which teams have a ship inside the radius
-    // ; one-team-only accumulates charge, two-team contested resets, no
-    // ships present resets. If a ship that was charging just died, the
-    // OTHER team wins immediately (death-while-charging penalty).
+    // (post-v6.9 patch, 2026-04-28) Champion fields now use a stasis-charge
+    // model: the first ship to enter gets LOCKED IN STASIS (velocity zero,
+    // position frozen) and its shields charge over CHAMPION_CHARGE_TIME.
+    // Full shields = round WIN for that team (instant resolution). If the
+    // locked ship dies mid-charge, the field is FREED (claimedBy = null)
+    // and another ship can attempt the capture; the round does NOT auto-
+    // resolve as a loss, it falls back to the default health-based scoring
+    // when the round timer expires. The field stays visible the entire
+    // time so the objective remains legible.
     if (field.championMode) {
-      let teamA_in = false;
-      let teamB_in = false;
-      // Track whether the player is the charging ship so the death-mid-
-      // charge penalty kicks in correctly. Bots that die mid-charge just
-      // reset the field (no auto-loss for the team).
-      let playerIn = false;
-      if (player.shipState !== 'dead' && player.position) {
-        const d = player.position.distanceTo(field.position);
-        if (d < field.radius) {
-          if (player.team === LSS.TEAM_FLEET_A) teamA_in = true;
-          else teamB_in = true;
-          playerIn = true;
-        }
-      }
-      for (const bot of game.entities) {
-        if (!bot.alive) continue;
-        if (bot.position.distanceTo(field.position) < field.radius) {
-          if (bot.team === LSS.TEAM_FLEET_A) teamA_in = true;
-          else teamB_in = true;
-        }
-      }
-      if (teamA_in && teamB_in) {
-        // Contested ; no charge progress.
-        field.chargingTeam = null;
-        field.chargeTimer = 0;
-      } else if (teamA_in || teamB_in) {
-        const team = teamA_in ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
-        if (field.chargingTeam !== team) {
-          field.chargingTeam = team;
+      // ---- 1. Resolve the currently-claimed ship, if any ----
+      if (field.claimedBy) {
+        const ship = field.claimedBy;
+        const isPlayer = (ship === player);
+        const shipDead = isPlayer ? (player.shipState === 'dead') : (!ship.alive);
+        if (shipDead) {
+          // Ship died trying to capture. Free the field for another attempt.
+          field.claimedBy = null;
           field.chargeTimer = 0;
-        }
-        field.chargeTimer += dt;
-        // Player-charging-this-frame snapshot for the death penalty:
-        // if the player is the charger, remember the team so a death
-        // next frame resolves as a loss.
-        if (playerIn) game._championPlayerChargingTeam = player.team;
-        else game._championPlayerChargingTeam = null;
-        if (field.chargeTimer >= LSS.CHAMPION_CHARGE_TIME) {
-          // Win condition met. Resolve the round to that team and remove
-          // the field cleanly.
-          game.championResult = (team === LSS.TEAM_FLEET_A) ? 'A' : 'B';
-          field.alive = false;
-          if (field.group.parent) scene.remove(field.group);
-          if (window.Overlays) {
-            const teamLabel = team === LSS.TEAM_FLEET_A ? 'FLEET A' : 'FLEET B';
-            Overlays.banner('CHAMPION CLAIMED', teamLabel + ' WINS THE ROUND');
+          field.chargingTeam = null;
+          if (isPlayer) {
+            game.playerInChampionStasis = false;
+            game.playerInStasis = false;
+            const w = document.getElementById('stasis-warning');
+            const v = document.getElementById('stasis-vignette');
+            if (w) w.style.display = 'none';
+            if (v) v.style.display = 'none';
           }
-          continue;
+          if (window.Overlays) Overlays.banner('CHAMPION FREED', 'Try again');
+        } else {
+          // Ship alive and locked. Hold position; charge shield over the
+          // champion charge duration; resolve win when shield is full.
+          ship.velocity.set(0, 0, 0);
+          const rate = (ship.maxShield || 1) / Math.max(0.001, LSS.CHAMPION_CHARGE_TIME);
+          ship.shield = Math.min(ship.maxShield || 0, (ship.shield || 0) + rate * dt);
+          // HUD bar for the player; bots have their own UI.
+          if (isPlayer) {
+            const fill = document.getElementById('stasis-fill');
+            if (fill) {
+              const progress = (ship.shield || 0) / (ship.maxShield || 1);
+              fill.style.width = (progress * 100) + '%';
+            }
+          }
+          // Win condition: shield charged to max.
+          if ((ship.shield || 0) >= (ship.maxShield || 0)) {
+            const team = ship.team;
+            game.championResult = (team === LSS.TEAM_FLEET_A) ? 'A' : 'B';
+            field.alive = false;
+            if (field.group && field.group.parent) scene.remove(field.group);
+            if (isPlayer) {
+              game.playerInChampionStasis = false;
+              game.playerInStasis = false;
+              const w = document.getElementById('stasis-warning');
+              const v = document.getElementById('stasis-vignette');
+              if (w) w.style.display = 'none';
+              if (v) v.style.display = 'none';
+            }
+            if (window.Overlays) {
+              const teamLabel = team === LSS.TEAM_FLEET_A ? 'FLEET A' : 'FLEET B';
+              Overlays.banner('CHAMPION CLAIMED', teamLabel + ' WINS THE ROUND');
+            }
+          }
         }
       } else {
-        // Field is empty. If the player WAS charging on the previous
-        // frame and is now dead (left the radius via death rather than
-        // moving out), the death-mid-charge penalty applies.
-        if (game._championPlayerChargingTeam != null && player.shipState === 'dead') {
-          const losingTeam = game._championPlayerChargingTeam;
-          game.championResult = (losingTeam === LSS.TEAM_FLEET_A) ? 'B' : 'A';
-          field.alive = false;
-          if (field.group.parent) scene.remove(field.group);
-          if (window.Overlays) {
-            const losingLabel = losingTeam === LSS.TEAM_FLEET_A ? 'FLEET A' : 'FLEET B';
-            Overlays.banner('CHAMPION FELL', losingLabel + ' loses the round');
+        // ---- 2. No ship claimed yet; check player + bots for entry ----
+        if (player.shipState !== 'dead' && player.position) {
+          const d = player.position.distanceTo(field.position);
+          if (d < field.radius) {
+            field.claimedBy = player;
+            field.chargingTeam = player.team;
+            field.chargeTimer = 0;
+            game.playerInChampionStasis = true;
+            game.playerInStasis = true;
+            game.playerPreStasisVelocity = player.velocity.clone();
+            player.velocity.set(0, 0, 0);
+            const w = document.getElementById('stasis-warning');
+            const v = document.getElementById('stasis-vignette');
+            if (w) w.style.display = 'block';
+            if (v) v.style.display = 'block';
+            if (window.Overlays) Overlays.banner('CHAMPION CHARGE', 'Hold for full shields to win');
           }
-          game._championPlayerChargingTeam = null;
-          continue;
         }
-        field.chargingTeam = null;
-        field.chargeTimer = 0;
-        game._championPlayerChargingTeam = null;
+        if (!field.claimedBy) {
+          for (const bot of game.entities) {
+            if (!bot.alive) continue;
+            if (bot.position.distanceTo(field.position) < field.radius) {
+              field.claimedBy = bot;
+              field.chargingTeam = bot.team;
+              field.chargeTimer = 0;
+              bot.velocity.set(0, 0, 0);
+              break;
+            }
+          }
+        }
       }
       // Skip the regular pickup paths for the champion field.
       continue;
@@ -20099,6 +20238,11 @@ function enterStasis(field) {
 
 function updatePlayerStasis(dt) {
   if (!game.playerInStasis) return;
+  // (post-v6.9 patch, 2026-04-28) Champion stasis is driven by the champion
+  // handler in updateStasisFields, not by this auto-decrement. Skip the
+  // timer/auto-exit body so the player stays locked until shield-full (win)
+  // or death (field freed).
+  if (game.playerInChampionStasis) return;
 
   game.playerStasisTimer -= dt;
   const progress = 1 - (game.playerStasisTimer / game.playerStasisDuration);

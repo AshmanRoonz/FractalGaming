@@ -133,7 +133,7 @@ select {
   <!-- Pattern math -->
   <div class="section">
     <h2>Pattern math</h2>
-    <div class="row" style="margin-bottom:8px;">
+    <div class="row" style="margin-bottom:4px;">
       <label>Pattern</label>
       <select id="p-pattern">
         <option value="0">Kali IFS (default)</option>
@@ -147,6 +147,9 @@ select {
         <option value="8">Soul Array (dot lattice)</option>
       </select>
     </div>
+    <!-- Slot cue: updated on every pattern switch and slider edit. ● = this
+         pattern has saved values from a previous edit; ○ = untouched. -->
+    <div id="pattern-slot-cue" style="font-size: 11px; color: #888; margin: 0 0 8px 4px; letter-spacing: 0.04em;">○ Editing slot: Kali IFS (0)</div>
     <div class="row"><label>Iterations</label><input type="range" id="p-iters" min="1" max="12" step="1" value="8"><span class="val" id="p-iters-val">8</span></div>
     <div class="row"><label>Ring count</label><input type="range" id="p-rings" min="1" max="5" step="1" value="3"><span class="val" id="p-rings-val">3</span></div>
     <div class="row"><label>Spatial scale</label><input type="range" id="p-scale" min="0.0005" max="0.012" step="0.0001" value="0.0028"><span class="val" id="p-scale-val">0.0028</span></div>
@@ -884,6 +887,100 @@ function animate() {
 }
 
 // ---------------------------------------------------------------
+// Per-pattern slot storage (lab-side mirror of game.wallParamsByPattern).
+// Each pattern (0..8) gets its own snapshot of every slider value. Switching
+// patterns saves the active slot and loads the new one, so tuning Mandelbox
+// no longer overwrites Soul Array. Slots are sparse: a pattern only has a
+// slot once it's been touched (or loaded from an imported config).
+// ---------------------------------------------------------------
+const patternSlots = {};
+let currentPatternId = 0; // tracker; sync'd with the #p-pattern dropdown
+
+const PATTERN_NAMES = [
+  'Kali IFS','Apollonian','Voronoi','Waves','Mandelbox','Hex Lattice',
+  'Plasma FBM','Circumpunct','Soul Array'
+];
+
+// Capture the current state of every slider into a flat wallParams blob
+// (same shape as collectConfig().wallParams).
+function captureCurrentParams() {
+  return {
+    K_DARK_BASE_R:       uniforms.K_DARK_BASE.value.x,
+    K_DARK_BASE_G:       uniforms.K_DARK_BASE.value.y,
+    K_DARK_BASE_B:       uniforms.K_DARK_BASE.value.z,
+    K_ZONE_TINT:         uniforms.K_ZONE_TINT.value,
+    K_COSMIC_BRIGHTNESS: uniforms.K_COSMIC_BRIGHTNESS.value,
+    K_FRESNEL_STRENGTH:  uniforms.K_FRESNEL_STRENGTH.value,
+    K_DIFF_MIN:          uniforms.K_DIFF_MIN.value,
+    K_AO_FLOOR:          uniforms.K_AO_FLOOR.value,
+    K_FLOOR:             uniforms.K_FLOOR.value,
+    u_iters:    uniforms.u_iters.value | 0,
+    u_rings:    uniforms.u_rings.value | 0,
+    u_scale:    uniforms.u_scale.value,
+    u_rotSpeed: uniforms.u_rotSpeed.value,
+    u_off_x:    uniforms.u_off.value.x,
+    u_off_y:    uniforms.u_off.value.y,
+    u_off_z:    uniforms.u_off.value.z,
+    u_invBase:  uniforms.u_invBase.value,
+    u_valDiv:   uniforms.u_valDiv.value,
+    u_hueSpin:  uniforms.u_hueSpin.value,
+    u_satBase:  uniforms.u_satBase.value,
+    SA_CELL_SIZE:      uniforms.SA_CELL_SIZE.value,
+    SA_DOT_RADIUS:     uniforms.SA_DOT_RADIUS.value,
+    SA_DOT_DEPTH_TOL:  uniforms.SA_DOT_DEPTH_TOL.value,
+    SA_WAVE_SPEED:     uniforms.SA_WAVE_SPEED.value,
+    SA_WAVE_PERIOD:    uniforms.SA_WAVE_PERIOD.value,
+    SA_WAVE_SHARPNESS: uniforms.SA_WAVE_SHARPNESS.value,
+    SA_BASE_DOT:       uniforms.SA_BASE_DOT.value,
+    SA_WAVE_PEAK:      uniforms.SA_WAVE_PEAK.value,
+    SA_BREATH_AMP:     uniforms.SA_BREATH_AMP.value,
+    SA_BREATH_RATE:    uniforms.SA_BREATH_RATE.value,
+    SA_DOT_SAT:        uniforms.SA_DOT_SAT.value,
+    SA_ZONE_FLOOR:     uniforms.SA_ZONE_FLOOR.value
+  };
+}
+
+// Save the current slider values into a pattern's slot.
+function savePatternSlot(id) {
+  patternSlots[id | 0] = captureCurrentParams();
+}
+
+// Apply a saved slot's values to every slider (DOM + display + shader uniform)
+// via LAB_PARAM_BINDINGS. Returns true if a slot existed and was loaded;
+// false if the slot was empty (caller can decide what to do).
+function loadPatternSlot(id) {
+  const slot = patternSlots[id | 0];
+  if (!slot) return false;
+  for (const key in LAB_PARAM_BINDINGS) {
+    if (!Object.prototype.hasOwnProperty.call(slot, key)) continue;
+    const binding = LAB_PARAM_BINDINGS[key];
+    const sliderId = binding[0], valId = binding[1], decimals = binding[2], writer = binding[3];
+    let v = slot[key];
+    if (typeof v === 'string') v = parseFloat(v);
+    if (!isFinite(v)) continue;
+    const slider = document.getElementById(sliderId);
+    const valEl  = document.getElementById(valId);
+    if (slider) slider.value = v;
+    if (valEl) valEl.textContent = (decimals === 0) ? (v | 0) : Number(v).toFixed(decimals);
+    writer(v);
+  }
+  return true;
+}
+
+// Update the small UI cue that tells the user which pattern's slot the
+// sliders are editing. Also flags whether this pattern's slot has been
+// saved before (○ untouched, ● has saved values).
+function updatePatternSlotCue() {
+  const el = document.getElementById('pattern-slot-cue');
+  if (!el) return;
+  const id = currentPatternId | 0;
+  const name = PATTERN_NAMES[id] || ('Pattern ' + id);
+  const has = !!patternSlots[id];
+  el.textContent = (has ? '● ' : '○ ') + 'Editing slot: ' + name + ' (' + id + ')';
+  el.style.color = has ? '#88ddff' : '#888';
+}
+
+// ---------------------------------------------------------------
 // Control wiring
 // ---------------------------------------------------------------
 function bindSlider(id, valId, target, fixedDigits) {
@@ -938,11 +1035,18 @@ function setupControls() {
   bindSlider('k-floor',   'k-floor-val',   v => uniforms.K_FLOOR.value = v, 3);
 
   // Pattern selector — switches the shader's dispatcher to the chosen
-  // pattern. All other pattern-math sliders apply to whichever pattern
-  // is active; their interpretation varies (see comments at each pattern
-  // function in the fragment shader).
+  // pattern AND swaps the per-pattern slot. Before the switch, the current
+  // slider values are saved to the OLD pattern's slot. After the switch,
+  // if the new pattern has a previously-saved slot, those values are
+  // applied to the sliders; otherwise the sliders keep their current
+  // values (which become this pattern's slot on the next save).
   document.getElementById('p-pattern').addEventListener('change', (e) => {
-    uniforms.u_patternId.value = parseInt(e.target.value, 10) || 0;
+    const newId = parseInt(e.target.value, 10) || 0;
+    savePatternSlot(currentPatternId);
+    currentPatternId = newId;
+    uniforms.u_patternId.value = newId;
+    loadPatternSlot(newId); // returns false if untouched; sliders keep current values
+    updatePatternSlotCue();
   });
   // Pattern math
   bindSlider('p-iters',    'p-iters-val',    v => uniforms.u_iters.value    = v|0, 0);
@@ -1086,15 +1190,28 @@ function setupControls() {
 // game ignores them (it gets palette from each map's definition).
 function collectConfig() {
   const id = uniforms.u_patternId.value | 0;
-  const patternNames = [
-    'Kali IFS','Apollonian','Voronoi','Waves','Mandelbox','Hex Lattice',
-    'Plasma FBM','Circumpunct','Soul Array'
-  ];
+  // Make sure the active pattern's slot reflects the latest slider values
+  // before we build the output (in case autosave hasn't fired yet).
+  savePatternSlot(id);
+  // Build wallParamsByPattern from every slot the user has touched. Lets a
+  // multi-pattern tune round-trip through one JSON file. The game's
+  // importWallLabConfig prefers wallParamsByPattern over flat wallParams.
+  const byPattern = {};
+  for (const k in patternSlots) {
+    if (Object.prototype.hasOwnProperty.call(patternSlots, k)) {
+      byPattern[k] = Object.assign({}, patternSlots[k]);
+    }
+  }
   return {
     wallPattern: id,
-    patternName: patternNames[id] || 'Kali IFS',
+    patternName: PATTERN_NAMES[id] || 'Kali IFS',
     palette: currentPalette.slice(),
     PALETTE_BOOST: parseFloat(document.getElementById('palette-boost').value),
+    // wallParamsByPattern: the new authoritative shape (every touched slot).
+    wallParamsByPattern: byPattern,
+    // wallParams: flat blob of the active pattern, retained for backward
+    // compatibility with older import paths and for users who paste this
+    // config into a tool that only knows the legacy shape.
     wallParams: {
       // ---- Wall constants ----
       K_DARK_BASE_R:       uniforms.K_DARK_BASE.value.x,
@@ -1178,11 +1295,12 @@ const LAB_PARAM_BINDINGS = {
 // missing keys (they keep their current value). Pattern dropdown also synced.
 function applyConfigToControls(cfg) {
   if (!cfg || typeof cfg !== 'object') return;
-  // Pattern selector
+  // Pattern selector and active-pattern tracker.
+  let newActiveId = (typeof cfg.wallPattern === 'number') ? (cfg.wallPattern | 0) : currentPatternId;
   if (typeof cfg.wallPattern === 'number') {
     const sel = document.getElementById('p-pattern');
-    sel.value = String(cfg.wallPattern | 0);
-    uniforms.u_patternId.value = cfg.wallPattern | 0;
+    sel.value = String(newActiveId);
+    uniforms.u_patternId.value = newActiveId;
   }
   // Palette
   if (Array.isArray(cfg.palette) && cfg.palette.length === 8) {
@@ -1200,20 +1318,64 @@ function applyConfigToControls(cfg) {
     v.textContent = cfg.PALETTE_BOOST.toFixed(2);
     updateRoomUniforms();
   }
-  // wallParams: every slider + display + uniform.
-  const params = cfg.wallParams || {};
-  for (const key in LAB_PARAM_BINDINGS) {
-    if (!Object.prototype.hasOwnProperty.call(params, key)) continue;
-    const [sliderId, valId, decimals, writer] = LAB_PARAM_BINDINGS[key];
-    let v = params[key];
-    if (typeof v === 'string') v = parseFloat(v);
-    if (!isFinite(v)) continue;
-    const slider = document.getElementById(sliderId);
-    const valEl  = document.getElementById(valId);
-    if (slider) slider.value = v;
-    if (valEl) valEl.textContent = (decimals === 0) ? (v|0) : Number(v).toFixed(decimals);
-    writer(v);
+  // Two wallParams shapes accepted:
+  //   - cfg.wallParamsByPattern: per-pattern map; populate every slot.
+  //   - cfg.wallParams: flat; populate only the active pattern's slot.
+  // After populating slots, load the active pattern's slot to the sliders
+  // so the visible UI matches.
+  const byPat = cfg.wallParamsByPattern;
+  if (byPat && typeof byPat === 'object') {
+    for (const k in byPat) {
+      if (!Object.prototype.hasOwnProperty.call(byPat, k)) continue;
+      patternSlots[k | 0] = Object.assign({}, byPat[k] || {});
+    }
+  } else if (cfg.wallParams && typeof cfg.wallParams === 'object') {
+    patternSlots[newActiveId] = Object.assign({}, cfg.wallParams);
   }
+  currentPatternId = newActiveId;
+  // Push the active slot to sliders. If the active pattern wasn't in the
+  // imported data, fall back to the legacy per-slider apply path so the
+  // sliders still reflect whatever was imported.
+  if (!loadPatternSlot(newActiveId)) {
+    const params = cfg.wallParams || {};
+    for (const key in LAB_PARAM_BINDINGS) {
+      if (!Object.prototype.hasOwnProperty.call(params, key)) continue;
+      const binding = LAB_PARAM_BINDINGS[key];
+      const sliderId = binding[0], valId = binding[1], decimals = binding[2], writer = binding[3];
+      let v = params[key];
+      if (typeof v === 'string') v = parseFloat(v);
+      if (!isFinite(v)) continue;
+      const slider = document.getElementById(sliderId);
+      const valEl  = document.getElementById(valId);
+      if (slider) slider.value = v;
+      if (valEl) valEl.textContent = (decimals === 0) ? (v|0) : Number(v).toFixed(decimals);
+      writer(v);
+    }
+  }
+  updatePatternSlotCue();
+}
+
+// Save-on-edit: any slider input on the right-side controls panel saves
+// the current state to the active pattern's slot, and refreshes the cue
+// so the user sees ● as soon as they touch a slider. Capture phase so we
+// run before any inner per-slider handlers (cosmetic; either ordering
+// would work). Light enough to fire on every input tick without lag.
+function _bindSlotAutosave() {
+  const root = document.getElementById('controls');
+  if (!root) return;
+  root.addEventListener('input', (ev) => {
+    // Only react to wallParams-bearing sliders (the keys in LAB_PARAM_BINDINGS);
+    // palette swatches and palette-boost are per-room and don't belong in slots.
+    const tgt = ev.target;
+    if (!tgt || !tgt.id) return;
+    let isParamSlider = false;
+    for (const k in LAB_PARAM_BINDINGS) {
+      if (LAB_PARAM_BINDINGS[k][0] === tgt.id) { isParamSlider = true; break; }
+    }
+    if (!isParamSlider) return;
+    savePatternSlot(currentPatternId);
+    updatePatternSlotCue();
+  }, true);
 }
 
 // ---------------------------------------------------------------
@@ -1221,6 +1383,11 @@ function applyConfigToControls(cfg) {
 // ---------------------------------------------------------------
 setupControls();
 updateRoomUniforms();
+// Seed the active pattern's slot from the initial slider defaults so the
+// cue starts as ● (this pattern has values) rather than dangling at ○.
+savePatternSlot(currentPatternId);
+updatePatternSlotCue();
+_bindSlotAutosave();
 animate();
 </script>
 </body>
