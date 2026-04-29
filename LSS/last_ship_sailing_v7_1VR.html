@@ -5456,16 +5456,10 @@ document.body.appendChild(renderer.domElement);
 //      hide while immersed (CSS handles this).
 // =====================================================================
 
-renderer.xr.enabled = true;
-// 'local' is the most universally supported reference space type for
-// immersive-vr. Three.js r128 defaults to 'local-floor', which AWAITs a
-// requestReferenceSpace promise inside setSession; if the runtime doesn't
-// expose local-floor, that promise rejects silently and the session never
-// reaches isPresenting=true. We pick 'local' here for max compatibility.
-try { renderer.xr.setReferenceSpaceType('local'); } catch (_) {}
-// Slightly higher framebuffer scale: Quest panels look soft at 1.0, sharper
-// at ~1.4. Drop to 1.0 if perf is borderline.
-try { renderer.xr.setFramebufferScaleFactor(1.2); } catch (_) {}
+// Note: renderer.xr.enabled is intentionally NOT set here. We flip it on
+// inside the VR button handler ONLY when the user explicitly enters VR,
+// then back off on sessionend. This keeps flat-mode rendering identical
+// to the non-VR build; nothing XR-related runs unless requested.
 
 // Dolly group; camera parents under this only while XR is presenting.
 const xrDolly = new THREE.Group();
@@ -5537,6 +5531,8 @@ renderer.xr.addEventListener('sessionend', () => {
   }
   xrControllers.leftSrc = null;
   xrControllers.rightSrc = null;
+  // Drop the renderer back into pure flat mode.
+  renderer.xr.enabled = false;
 });
 
 // ---- VR Button wiring ----
@@ -5564,6 +5560,11 @@ renderer.xr.addEventListener('sessionend', () => {
     session.addEventListener('end', onSessionEnded);
     btn.textContent = 'STARTING...';
     try {
+      // Configure WebXR right before binding the session, so flat mode
+      // never has these flags flipped on.
+      try { renderer.xr.setReferenceSpaceType('local'); } catch (_) {}
+      try { renderer.xr.setFramebufferScaleFactor(1.2); } catch (_) {}
+      renderer.xr.enabled = true;
       // setSession is async (it await s requestReferenceSpace internally).
       // If that rejects, three.js never flips isPresenting=true and the
       // headset shows "three loading dots" forever. Awaiting + catching
@@ -5575,6 +5576,7 @@ renderer.xr.addEventListener('sessionend', () => {
       console.error('XR setSession failed:', e);
       btn.textContent = 'VR INIT FAILED';
       btn.title = String((e && e.message) || e);
+      renderer.xr.enabled = false;
       try { session.end(); } catch (_) {}
       currentSession = null;
     }
