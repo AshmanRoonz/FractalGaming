@@ -1186,7 +1186,7 @@ const LSS = {
   // charging ship that dies in the field loses the round. If the timer
   // runs out with no champion declared, total team HP breaks the tie.
   CHAMPION_TIME: 10,
-  CHAMPION_CHARGE_TIME: 4,
+  CHAMPION_CHARGE_TIME: 5, // (post-v6.9 patch, 2026-04-28) capture takes a full 5s of uninterrupted hold
   SPAWN_PROTECTION: 3, DOOMED_HEALTH_PCT: 0.15, DOOMED_TIMER: 10,
   GRAVITY: 0, ARENA_SIZE: 25000, TICK_RATE: 60,
   // Seconds shown on the in-screen 3-2-1-LAUNCH ticker. The round-system
@@ -20073,6 +20073,7 @@ function updateStasisFields(dt) {
           field.claimedBy = null;
           field.chargeTimer = 0;
           field.chargingTeam = null;
+          field._championChargeStartShield = null;
           if (isPlayer) {
             game.playerInChampionStasis = false;
             game.playerInStasis = false;
@@ -20083,21 +20084,34 @@ function updateStasisFields(dt) {
           }
           if (window.Overlays) Overlays.banner('CHAMPION FREED', 'Try again');
         } else {
-          // Ship alive and locked. Hold position; charge shield over the
-          // champion charge duration; resolve win when shield is full.
+          // Ship alive and locked. Hold position; advance the field's
+          // chargeTimer; resolve win when it reaches CHAMPION_CHARGE_TIME.
+          // (post-v6.9 patch, 2026-04-28) Win is timer-based, not shield-
+          // based. Previously the check was "shield >= maxShield", which
+          // let a ship with already-full shields win instantly, and made
+          // the visible charge feel inconsistent (capture time depended on
+          // how empty your shields were when you entered). Now the timer
+          // is the source of truth and shield level is a derived visual
+          // gauge that ramps from its entry value to max over the hold.
           ship.velocity.set(0, 0, 0);
-          const rate = (ship.maxShield || 1) / Math.max(0.001, LSS.CHAMPION_CHARGE_TIME);
-          ship.shield = Math.min(ship.maxShield || 0, (ship.shield || 0) + rate * dt);
+          if (typeof field._championChargeStartShield !== 'number') {
+            field._championChargeStartShield = ship.shield || 0;
+          }
+          field.chargeTimer = (field.chargeTimer || 0) + dt;
+          const progress = Math.min(1, field.chargeTimer / Math.max(0.001, LSS.CHAMPION_CHARGE_TIME));
+          // Shield ramps linearly with progress for visual feedback.
+          const startS = field._championChargeStartShield;
+          const maxS = ship.maxShield || 0;
+          ship.shield = startS + (maxS - startS) * progress;
           // HUD bar for the player; bots have their own UI.
           if (isPlayer) {
             const fill = document.getElementById('stasis-fill');
             if (fill) {
-              const progress = (ship.shield || 0) / (ship.maxShield || 1);
               fill.style.width = (progress * 100) + '%';
             }
           }
-          // Win condition: shield charged to max.
-          if ((ship.shield || 0) >= (ship.maxShield || 0)) {
+          // Win condition: full hold duration elapsed.
+          if (progress >= 1) {
             const team = ship.team;
             game.championResult = (team === LSS.TEAM_FLEET_A) ? 'A' : 'B';
             field.alive = false;
@@ -20124,6 +20138,7 @@ function updateStasisFields(dt) {
             field.claimedBy = player;
             field.chargingTeam = player.team;
             field.chargeTimer = 0;
+            field._championChargeStartShield = null;
             game.playerInChampionStasis = true;
             game.playerInStasis = true;
             game.playerPreStasisVelocity = player.velocity.clone();
@@ -20142,6 +20157,7 @@ function updateStasisFields(dt) {
               field.claimedBy = bot;
               field.chargingTeam = bot.team;
               field.chargeTimer = 0;
+              field._championChargeStartShield = null;
               bot.velocity.set(0, 0, 0);
               break;
             }
