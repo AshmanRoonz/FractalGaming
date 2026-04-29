@@ -6110,6 +6110,20 @@ function renderPostFX() {
   renderer.render(postFX.passScene, postFX.quadCamera);
 }
 
+// VR fork: in immersive mode, the post-FX pipeline (offscreen RTs +
+// fullscreen quads) breaks the WebXR stereo viewport split. Skip it and
+// do a straight render(scene, camera) so three.js's WebXRManager can
+// dispatch left+right eye renders into the device framebuffer.
+function renderFrame() {
+  if (renderer.xr.isPresenting) {
+    _xrSyncDollyBeforeRender();
+    renderer.setRenderTarget(null);
+    renderer.render(scene, camera);
+    return;
+  }
+  renderPostFX();
+}
+
 // Cartoon-style lighting (bright, high-contrast, minimal shadow).
 // Boosted further so ships catch even more light from outside. Walls
 // use a self-lit ShaderMaterial and are NOT affected by these scene
@@ -22842,7 +22856,18 @@ function updateEnemyHealthBars() {
 const _wallHueScratchColor = new THREE.Color();
 
 function gameLoop(timestamp) {
-  requestAnimationFrame(gameLoop);
+  // VR fork: renderer.setAnimationLoop drives this every frame (in both
+  // flat and immersive modes), so we no longer self-schedule via
+  // requestAnimationFrame. setAnimationLoop also gives us correct
+  // headset-cadence timestamps when XR is presenting.
+  // setAnimationLoop's callback signature is (time, frame); time is in ms.
+  if (typeof timestamp !== 'number') timestamp = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+  // Reset the dolly to identity at the very top of each frame so that the
+  // existing per-frame logic, which writes camera.position in world space,
+  // produces correct world-space camera placement. _xrSyncDollyBeforeRender
+  // (just before render) will lift that pose up to the dolly.
+  _xrResetDollyAtFrameStart();
 
   if (!game.lastTime) game.lastTime = timestamp;
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
