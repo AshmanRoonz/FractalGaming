@@ -37,27 +37,16 @@ canvas { display: block; }
 }
 #cockpit-frame.active { opacity: 1; }
 
-/* (v8.0) Enter VR button. Sits top-right when not presenting, hidden during a
-   session. Click triggers navigator.xr.requestSession('immersive-vr'). The
-   button is rendered above all UI so it's always reachable on a 2D screen
-   even when ship-select / settings overlays are up. */
-/* (v8.5) Bottom-left, solid background (NO backdrop-filter — that triggered
-   per-frame fullscreen-area readback + GPU blur of the changing 3D canvas
-   behind it, tanking frame rate even outside VR). Hidden during combat
-   states (playing/warmup) via .in-combat class set from gameLoop based on
-   game.state. */
-#vr-button {
-  position: fixed; bottom: 12px; left: 12px; z-index: 10000;
-  padding: 8px 14px; font-family: 'Orbitron', sans-serif; font-weight: 700;
-  font-size: 12px; letter-spacing: 1.5px; text-transform: uppercase;
-  background: #0c1422; color: rgba(180, 230, 255, 0.95);
-  border: 1px solid rgba(80, 220, 255, 0.55); border-radius: 6px;
-  cursor: pointer; pointer-events: auto;
+/* (v8.6) Enter VR buttons live INLINE inside the lobby and ship-select
+   header now (no fixed-position floating button). Their inline styles
+   handle layout; these rules just paint state classes that
+   _lssXrSetupButton applies. */
+#vr-button.unsupported, #vr-button-lobby.unsupported {
+  color: rgba(180, 180, 180, 0.55) !important;
+  border-color: rgba(120, 120, 120, 0.35) !important;
+  cursor: not-allowed;
 }
-#vr-button:hover { background: #18304a; color: rgba(220, 245, 255, 1); }
-#vr-button.unsupported { color: rgba(180, 180, 180, 0.55); border-color: rgba(120, 120, 120, 0.35); cursor: not-allowed; }
-#vr-button.presenting { display: none; }
-#vr-button.in-combat { display: none; }
+#vr-button.presenting, #vr-button-lobby.presenting { display: none !important; }
 
 /* Old crosshair hidden; replaced by circumpunct HUD canvas */
 #crosshair { display: none; }
@@ -968,10 +957,12 @@ canvas { display: block; }
 <!-- Per-titan cockpit frame: PNG with alpha cutout, populated by updateCockpitFrame() -->
 <div id="cockpit-frame"></div>
 
-<!-- (v8.0) Enter VR button. Wired by the LSS_XR module after renderer init.
-     Hidden via .presenting class while an XR session is active; the Quest's
-     own system menu handles exit. -->
-<button id="vr-button" type="button">Enter VR</button>
+<!-- (v8.6) The Enter VR button has moved INTO the ship-select header (and
+     a copy into the lobby), so it sits inline next to SETTINGS / SOLO+BOTS
+     instead of floating fixed-position over the menu where it kept
+     overlapping things and disappearing behind panels. Wired up by
+     _lssXrSetupButton(). -->
+
 
 <div id="hud">
   <canvas id="health-canvas" width="500" height="70"></canvas>
@@ -1123,6 +1114,15 @@ canvas { display: block; }
       cursor:pointer;letter-spacing:2px;transition:all 0.2s;"
       onmouseover="this.style.borderColor='#888';this.style.color='#ccc'"
       onmouseout="this.style.borderColor='rgba(100,100,120,0.4)';this.style.color='#888'">SOLO + BOTS</button>
+
+    <!-- (v8.6) VR entry from the cold-boot lobby. Same id pattern as
+         #vr-button so _lssXrSetupButton finds whichever copy is present. -->
+    <button id="vr-button-lobby" type="button" title="Enter immersive VR" style="
+      background:rgba(20,40,80,0.4);border:1px solid rgba(80,220,255,0.55);color:rgba(180,230,255,0.95);
+      padding:10px 30px;font-family:'Courier New',monospace;font-size:13px;
+      cursor:pointer;letter-spacing:2px;transition:all 0.2s;margin-top:8px;"
+      onmouseover="this.style.background='rgba(40,80,140,0.55)'"
+      onmouseout="this.style.background='rgba(20,40,80,0.4)'">ENTER VR</button>
   </div>
 
   <div style="margin-top:40px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
@@ -1138,7 +1138,10 @@ canvas { display: block; }
       <h1>LAST SHIP SAILING</h1>
       <h2>CHOOSE YOUR SHIP</h2>
     </div>
-    <button id="lobby-settings-btn" title="Open settings (Esc)" style="background:#2a3040;color:#ddd;border:1px solid #557;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">SETTINGS</button>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button id="vr-button" type="button" title="Enter immersive VR" style="background:#0c1422;color:rgba(180,230,255,0.95);border:1px solid rgba(80,220,255,0.55);padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">ENTER VR</button>
+      <button id="lobby-settings-btn" title="Open settings (Esc)" style="background:#2a3040;color:#ddd;border:1px solid #557;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">SETTINGS</button>
+    </div>
   </div>
   <div id="ship-select-body">
     <div id="ship-list"></div>
@@ -5485,25 +5488,31 @@ renderer.xr.enabled = true;
 // VR button wiring. The button itself is in the DOM (#vr-button); we just
 // attach the click handler and probe support to mark unsupported devices.
 function _lssXrSetupButton() {
-  const btn = document.getElementById('vr-button');
-  if (!btn) return;
+  // (v8.6) Two entry points: one in the cold-boot lobby (#vr-button-lobby)
+  // and one in the ship-select header (#vr-button). Both are wired the same
+  // way and both share the same click handler / classes. Either one
+  // triggers the same XR session.
+  const btns = ['vr-button', 'vr-button-lobby']
+    .map(id => document.getElementById(id))
+    .filter(Boolean);
+  if (btns.length === 0) return;
+  const _markUnsupported = (label, title) => {
+    btns.forEach(b => {
+      b.classList.add('unsupported');
+      b.textContent = label;
+      b.title = title;
+      b.disabled = true;
+    });
+  };
   if (!navigator.xr || !navigator.xr.isSessionSupported) {
-    btn.classList.add('unsupported');
-    btn.textContent = 'VR Unavailable';
-    btn.title = 'WebXR is not available in this browser';
-    btn.disabled = true;
+    _markUnsupported('VR UNAVAILABLE', 'WebXR is not available in this browser');
     return;
   }
   navigator.xr.isSessionSupported('immersive-vr').then(supported => {
-    if (!supported) {
-      btn.classList.add('unsupported');
-      btn.textContent = 'VR Unavailable';
-      btn.title = 'Immersive VR not supported on this device';
-      btn.disabled = true;
-    }
-  }).catch(() => {/* leave the button as-is; click will surface real error */});
+    if (!supported) _markUnsupported('VR UNAVAILABLE', 'Immersive VR not supported on this device');
+  }).catch(() => {/* leave buttons as-is; click will surface real error */});
 
-  btn.addEventListener('click', async () => {
+  const onClick = async () => {
     if (lss_xr.session) {
       try { lss_xr.session.end(); } catch (_) {}
       return;
@@ -5516,16 +5525,18 @@ function _lssXrSetupButton() {
       _lssXrOnSessionStart(session);
     } catch (err) {
       console.warn('[LSS_XR] session request failed:', err);
-      btn.textContent = 'VR Failed (see console)';
-      btn.classList.add('unsupported');
+      btns.forEach(b => { b.textContent = 'VR FAILED (SEE CONSOLE)'; b.classList.add('unsupported'); });
     }
-  });
+  };
+  btns.forEach(b => b.addEventListener('click', onClick));
 }
 
 function _lssXrOnSessionStart(session) {
   lss_xr.session = session;
   lss_xr.enabled = true;
+  // (v8.6) Hide BOTH buttons (lobby + ship-select header) while presenting.
   document.getElementById('vr-button')?.classList.add('presenting');
+  document.getElementById('vr-button-lobby')?.classList.add('presenting');
   // (v8.4 perf) Drop the headset framebuffer to 85% of native res. Quest 2/3
   // native is enormous (1832×1920 per eye on Quest 2, even higher on Quest 3),
   // and the LSS scene has plenty of detail / particles / lighting that pile up
@@ -5605,6 +5616,7 @@ function _lssXrOnSessionEnd() {
   lss_xr.session = null;
   lss_xr.enabled = false;
   document.getElementById('vr-button')?.classList.remove('presenting');
+  document.getElementById('vr-button-lobby')?.classList.remove('presenting');
   // Restore the input.gp* values so a real gamepad isn't permanently
   // overridden by the leftover XR-pushed axes.
   _lssXrRestoreGamepadConnected();
@@ -22966,18 +22978,9 @@ function gameLoop(timestamp) {
   game.lastTime = timestamp;
   game.time += game.deltaTime;
 
-  // (v8.5) Hide the VR button during active combat states. Cheap once-per-
-  // frame classList toggle; the user only needs VR access from the lobby /
-  // ship-select / match-end screens. State of the button is cached on
-  // lss_xr to avoid touching the DOM when nothing changed.
-  {
-    const inCombat = (game.state === 'playing' || game.state === 'warmup');
-    if (inCombat !== lss_xr._lastInCombat) {
-      lss_xr._lastInCombat = inCombat;
-      const btn = document.getElementById('vr-button');
-      if (btn) btn.classList.toggle('in-combat', inCombat);
-    }
-  }
+  // (v8.6) The in-combat auto-hide toggle that lived here is gone — the VR
+  // buttons are now inline in the lobby and ship-select header, both of
+  // which are already hidden during combat by their parent panels.
 
   // Update level shader time for vein animations
   if (game.levelMaterial) {
@@ -23031,19 +23034,31 @@ function gameLoop(timestamp) {
   // still keep a "live" frame visible if the lobby is ever made translucent,
   // but we stop burning the wall shader + composite at 60 fps for a frame
   // nobody can see. Cuts lobby GPU cost by ~10x.
+  // (v8.6 VR fix) When an immersive session is active we MUST render every
+  // frame; otherwise the Quest compositor starves and shows a grey "no
+  // content" view. Bypass the 6Hz throttle in that case.
+  const _xrPresenting = lss_xr.enabled && renderer.xr.isPresenting;
   if (game.state === 'select') {
-    const _selNow = timestamp;
-    if (!game._selectLastRender || _selNow - game._selectLastRender >= 167) {
-      game._selectLastRender = _selNow;
+    if (_xrPresenting) {
       renderPostFX();
+    } else {
+      const _selNow = timestamp;
+      if (!game._selectLastRender || _selNow - game._selectLastRender >= 167) {
+        game._selectLastRender = _selNow;
+        renderPostFX();
+      }
     }
     return;
   }
 
   // Pause gameplay while settings are open. Same throttle reasoning as the
   // lobby: settings panel sits opaque on top, so 6 Hz background render is
-  // fine.
+  // fine. (Same XR exception as above.)
   if (settingsOpen) {
+    if (_xrPresenting) {
+      renderPostFX();
+      return;
+    }
     const _setNow = timestamp;
     if (!game._settingsLastRender || _setNow - game._settingsLastRender >= 167) {
       game._settingsLastRender = _setNow;
