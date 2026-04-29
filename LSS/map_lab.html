@@ -136,6 +136,16 @@
     <div id="palette" class="palette-row"></div>
     <div class="hint">Slot i tints room i's wall pattern in-game.</div>
 
+    <h2>Reference <span class="stat">SU = 150</span></h2>
+    <div class="hint" style="line-height: 1.5;">
+      Typical radii in shipped maps:<br>
+      <span class="stat">270</span> mid / connector (SU&times;1.8, most common)<br>
+      <span class="stat">300</span> large mid (SU&times;2.0)<br>
+      <span class="stat">330</span> spawn rooms (SU&times;2.2)<br>
+      <span class="stat">375</span> center / hub (SU&times;2.5)<br>
+      Spans run roughly &plusmn;1350 (SU&times;9) from origin.
+    </div>
+
     <h2>Tools <span class="stat">(1/2/3/4 hotkeys)</span></h2>
     <div class="toolbar">
       <button id="tool-select" class="active">Select</button>
@@ -154,6 +164,13 @@
           <option value="A">A</option>
           <option value="B">B</option>
         </select>
+      </div>
+      <div class="row">
+        <label>Champion</label>
+        <label style="flex: 1; display: flex; align-items: center; gap: 6px; color: #ccc; font-size: 12px; text-transform: none; letter-spacing: normal;">
+          <input id="sel-champion" type="checkbox" style="width: auto; flex: 0 0 auto;" />
+          <span class="hint" style="margin: 0;">Champion field spawns here at endgame</span>
+        </label>
       </div>
       <div class="row"><label>X</label><input id="sel-x" type="number" step="10" /></div>
       <div class="row"><label>Y</label><input id="sel-y" type="number" step="10" /></div>
@@ -296,17 +313,21 @@ const roomMeshes = [];   // parallel to state.level.rooms (one mesh per room)
 const tunnelMeshes = []; // parallel to state.level.tunnels (one or more meshes per tunnel)
 const roomGeo = new THREE.SphereGeometry(1, 32, 24);
 
-function teamColor(team) {
-  if (team === 'A') return 0x66aaff;
-  if (team === 'B') return 0xff6688;
+function roomDisplayColor(room) {
+  // Champion takes visual priority over team because there's only one
+  // champion-marked room per map and it's the most important game-state
+  // signal. Matches the in-game champion field's purple (0xaa55ff core).
+  if (room && room.champion) return 0xbb77ff;
+  if (room && room.team === 'A') return 0x66aaff;
+  if (room && room.team === 'B') return 0xff6688;
   return 0xb0c0d0;
 }
 
 function makeRoomMesh(room) {
   const mat = new THREE.MeshStandardMaterial({
-    color: teamColor(room.team),
+    color: roomDisplayColor(room),
     transparent: true,
-    opacity: 0.32,
+    opacity: room.champion ? 0.42 : 0.32, // a bit more opaque so champion stands out
     metalness: 0.05,
     roughness: 0.55,
     side: THREE.DoubleSide,
@@ -480,10 +501,11 @@ function addRoom(x, y, z) {
   state.level.rooms.push({
     id,
     team: null,
+    champion: false,
     x: Math.round(x),
     y: Math.round(y),
     z: Math.round(z),
-    r: 200
+    r: 270
   });
   rebuildAllRoomMeshes();
   rebuildTunnelMeshes();
@@ -625,6 +647,7 @@ function refreshSidebarSelection() {
     ui.selectedTunnel.style.display = 'none';
     ui.selId.value = r.id;
     ui.selTeam.value = r.team || '';
+    if (ui.selChampion) ui.selChampion.checked = !!r.champion;
     ui.selX.value = r.x;
     ui.selY.value = r.y;
     ui.selZ.value = r.z;
@@ -659,7 +682,37 @@ ui.selTeam.addEventListener('change', () => {
   if (!r) return;
   r.team = ui.selTeam.value || null;
   const mesh = roomMeshes[state.selectedIndex];
-  if (mesh) mesh.material.color.setHex(teamColor(r.team));
+  if (mesh) mesh.material.color.setHex(roomDisplayColor(r));
+  refreshLists();
+});
+
+// Champion checkbox: enforce single-room (toggling on clears any other room
+// that had it set) and update the visual treatment.
+ui.selChampion = document.getElementById('sel-champion');
+ui.selChampion.addEventListener('change', () => {
+  if (state.selectedKind !== 'room') return;
+  const r = state.level.rooms[state.selectedIndex];
+  if (!r) return;
+  const becomingChampion = !!ui.selChampion.checked;
+  if (becomingChampion) {
+    // Clear champion flag from all other rooms; only one champion per map.
+    state.level.rooms.forEach((other, i) => {
+      if (i !== state.selectedIndex && other.champion) {
+        other.champion = false;
+        const m = roomMeshes[i];
+        if (m) {
+          m.material.color.setHex(roomDisplayColor(other));
+          m.material.opacity = 0.32;
+        }
+      }
+    });
+  }
+  r.champion = becomingChampion;
+  const mesh = roomMeshes[state.selectedIndex];
+  if (mesh) {
+    mesh.material.color.setHex(roomDisplayColor(r));
+    mesh.material.opacity = r.champion ? 0.42 : 0.32;
+  }
   refreshLists();
 });
 for (const [key, inp] of [['x', ui.selX], ['y', ui.selY], ['z', ui.selZ]]) {
@@ -693,7 +746,8 @@ function refreshLists() {
   state.level.rooms.forEach((r, i) => {
     const div = document.createElement('div');
     div.className = 'room-item' + (state.selectedKind === 'room' && state.selectedIndex === i ? ' selected' : '') + (r.team ? ' team-' + r.team : '');
-    div.innerHTML = `<span>${escapeHtml(r.id)}${r.team ? ' [' + r.team + ']' : ''}</span><span class="stat">r=${r.r}</span>`;
+    const champBadge = r.champion ? ' <span style="color:#bb77ff">★</span>' : '';
+    div.innerHTML = `<span>${escapeHtml(r.id)}${r.team ? ' [' + r.team + ']' : ''}${champBadge}</span><span class="stat">r=${r.r}</span>`;
     div.addEventListener('click', () => selectRoom(i));
     ui.roomsList.appendChild(div);
   });
@@ -742,7 +796,10 @@ function buildLevelExport() {
     description: state.level.description,
     palette: state.level.palette.slice(),
     rooms: state.level.rooms.map(r => ({
-      id: r.id, team: r.team, x: r.x, y: r.y, z: r.z, r: r.r
+      id: r.id, team: r.team,
+      // Only emit champion when true to keep most rooms terse.
+      ...(r.champion ? { champion: true } : {}),
+      x: r.x, y: r.y, z: r.z, r: r.r
     })),
     tunnels: state.level.tunnels.map(t => ({
       path: t.path.map(p => ({ x: p.x, y: p.y, z: p.z })),
@@ -765,9 +822,20 @@ function loadLevelImport(data) {
   state.level.rooms = data.rooms.map(r => ({
     id: r.id || ('room_' + Math.random().toString(36).slice(2, 6)),
     team: r.team || null,
+    champion: !!r.champion,
     x: +r.x || 0, y: +r.y || 0, z: +r.z || 0,
-    r: Math.max(50, +r.r || 200)
+    r: Math.max(50, +r.r || 270)
   }));
+  // Defensive: enforce single-champion invariant on import. If a level
+  // somehow has more than one room with champion: true, keep only the first
+  // and clear the rest.
+  let _seenChampion = false;
+  for (const r of state.level.rooms) {
+    if (r.champion) {
+      if (_seenChampion) r.champion = false;
+      else _seenChampion = true;
+    }
+  }
   state.level.tunnels = (data.tunnels || []).map(t => ({
     path: (t.path || []).map(p => ({ x: +p.x || 0, y: +p.y || 0, z: +p.z || 0 })),
     ...(t.r ? { r: +t.r } : {})
@@ -806,6 +874,7 @@ ui.exportJs.addEventListener('click', async () => {
   for (const r of data.rooms) {
     const parts = [`id: ${JSON.stringify(r.id)}`];
     parts.push(r.team ? `team: ${JSON.stringify(r.team)}` : `team: null`);
+    if (r.champion) parts.push(`champion: true`);
     parts.push(`x: ${r.x}`, `y: ${r.y}`, `z: ${r.z}`, `r: ${r.r}`);
     s += `    { ${parts.join(', ')} },\n`;
   }
