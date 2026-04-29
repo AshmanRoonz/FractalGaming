@@ -1547,6 +1547,17 @@ const input = {
     leftYAlsoBack:   true,
     leftStickAsDpad: true,
   },
+  // (VR fork) Head-aim nudge. While the user's head-forward is inside an
+  // angular radius of the ship's forward direction, the head's offset
+  // adds a scaled rate to player.euler. This gives fine aim adjustment
+  // with small head movements without hijacking free-look (head outside
+  // the radius does nothing).
+  vrHeadAim: {
+    enabled:     true,
+    radiusDeg:   12,    // half-angle of the active cone
+    sensitivity: 2.0,   // rad-per-sec per radian of head offset
+    invertPitch: false,
+  },
   // (v6.9) Keyboard mappings. Values are KeyboardEvent.key values normalized
   // to lowercase (' ' for Space, 'control' for Ctrl, etc.). Empty string =
   // unbound (no key triggers this action). Defaults match the keys this game
@@ -13524,6 +13535,49 @@ function updatePlayerMovement(dt) {
     player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
     player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
   }
+
+  // (VR fork) Head-aim nudge. cameraVR.matrix is the headset pose in the
+  // current XR reference space; with our dolly-at-identity-at-frame-start
+  // setup, that's also the head's pose relative to the ship's forward
+  // direction. So decomposing it gives the head's yaw/pitch offset from
+  // ship-forward directly. While that offset is within input.vrHeadAim.
+  // radiusDeg, scale it by sensitivity*dt and add to player.euler so the
+  // user can fine-tune aim with small head movements. When the offset
+  // leaves the cone (head snaps to look at something to the side), no
+  // nudge is applied; the user can free-look without disturbing aim.
+  if (renderer && renderer.xr && renderer.xr.isPresenting && input.vrHeadAim && input.vrHeadAim.enabled) {
+    try {
+      const xrCam = renderer.xr.getCamera();
+      // Head forward in dolly-local space = head_quat * (0,0,-1). With
+      // dolly at identity (which it is at every frame's start, before the
+      // _xrSyncDollyBeforeRender step), dolly-local == world == ship-local
+      // for this purpose.
+      _vrHeadQuatScratch.setFromRotationMatrix(xrCam.matrix);
+      _vrHeadFwdScratch.set(0, 0, -1).applyQuaternion(_vrHeadQuatScratch);
+      const fx = _vrHeadFwdScratch.x;
+      const fy = _vrHeadFwdScratch.y;
+      const fz = _vrHeadFwdScratch.z;
+      // Yaw: angle in the XZ plane from -Z; pitch: rise above horizontal.
+      const yaw   = Math.atan2(fx, -fz);
+      const horiz = Math.sqrt(fx * fx + fz * fz);
+      const pitch = Math.atan2(fy, horiz);
+      const radiusRad = (input.vrHeadAim.radiusDeg || 12) * Math.PI / 180;
+      // Use the larger of |yaw| and |pitch| as the cone gate so a user
+      // looking up-and-to-the-side doesn't accidentally still be inside
+      // the cone if either component alone is small.
+      const offsetMag = Math.max(Math.abs(yaw), Math.abs(pitch));
+      if (offsetMag < radiusRad) {
+        const sens = input.vrHeadAim.sensitivity || 2.0;
+        // Sign convention matches the gamepad path: stick-right (+) yaws
+        // ship right (decreases euler.y); head-tilted-right (yaw > 0)
+        // also yaws ship right.
+        player.euler.y -= yaw * sens * dt;
+        const pitchDir = input.vrHeadAim.invertPitch ? -1 : 1;
+        player.euler.x += pitch * sens * dt * pitchDir;
+      }
+    } catch (_) { /* ignore: missing xr camera or matrix; nudge is best-effort */ }
+  }
+
   player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
   input.mouseDX = 0;
   input.mouseDY = 0;
@@ -19324,6 +19378,31 @@ function buildSettingsPage() {
     </div>
 
     <div class="settings-section">
+      <h3>VR - Head Aim Nudge</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Inside the cone, head movement adds a scaled rate to your aim for fine adjustment. Outside the cone (looking around fast), head input is ignored. Tune the cone half-angle and sensitivity below.</label>
+      </div>
+      <div class="setting-row">
+        <label>Enable</label>
+        <input type="checkbox" id="set-vrha-enabled" ${input.vrHeadAim && input.vrHeadAim.enabled ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Cone Radius (deg)</label>
+        <input type="range" id="set-vrha-radius" min="2" max="40" step="1" value="${(input.vrHeadAim && input.vrHeadAim.radiusDeg) || 12}">
+        <div class="value-display" id="val-vrha-radius">${(input.vrHeadAim && input.vrHeadAim.radiusDeg) || 12}</div>
+      </div>
+      <div class="setting-row">
+        <label>Nudge Sensitivity</label>
+        <input type="range" id="set-vrha-sens" min="0.1" max="6" step="0.1" value="${(input.vrHeadAim && input.vrHeadAim.sensitivity) || 2.0}">
+        <div class="value-display" id="val-vrha-sens">${((input.vrHeadAim && input.vrHeadAim.sensitivity) || 2.0).toFixed(1)}</div>
+      </div>
+      <div class="setting-row">
+        <label>Invert Pitch</label>
+        <input type="checkbox" id="set-vrha-invert" ${input.vrHeadAim && input.vrHeadAim.invertPitch ? 'checked' : ''}>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3>Keyboard - Mapping</h3>
       <div id="kb-bind-rows"></div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em; margin-top:6px;">
@@ -19747,6 +19826,33 @@ function buildSettingsPage() {
     });
   }
 
+  // ---- VR head-aim nudge widgets ----
+  if (!input.vrHeadAim) input.vrHeadAim = { enabled: true, radiusDeg: 12, sensitivity: 2.0, invertPitch: false };
+  const vrhaEnabled = overlay.querySelector('#set-vrha-enabled');
+  if (vrhaEnabled) vrhaEnabled.addEventListener('change', () => {
+    input.vrHeadAim.enabled = !!vrhaEnabled.checked; saveSettings();
+  });
+  const vrhaRadius = overlay.querySelector('#set-vrha-radius');
+  const vrhaRadiusVal = overlay.querySelector('#val-vrha-radius');
+  if (vrhaRadius) vrhaRadius.addEventListener('input', () => {
+    const v = parseInt(vrhaRadius.value, 10);
+    input.vrHeadAim.radiusDeg = v;
+    if (vrhaRadiusVal) vrhaRadiusVal.textContent = v;
+    saveSettings();
+  });
+  const vrhaSens = overlay.querySelector('#set-vrha-sens');
+  const vrhaSensVal = overlay.querySelector('#val-vrha-sens');
+  if (vrhaSens) vrhaSens.addEventListener('input', () => {
+    const v = parseFloat(vrhaSens.value);
+    input.vrHeadAim.sensitivity = v;
+    if (vrhaSensVal) vrhaSensVal.textContent = v.toFixed(1);
+    saveSettings();
+  });
+  const vrhaInv = overlay.querySelector('#set-vrha-invert');
+  if (vrhaInv) vrhaInv.addEventListener('change', () => {
+    input.vrHeadAim.invertPitch = !!vrhaInv.checked; saveSettings();
+  });
+
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
 
@@ -20155,6 +20261,7 @@ function saveSettings() {
       kbBindings: input.kbBindings,
       xrBindings: input.xrBindings,
       xrSynth:    input.xrSynth,
+      vrHeadAim:  input.vrHeadAim,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
@@ -20310,6 +20417,7 @@ function loadSettings() {
     if (data.kbBindings) Object.assign(input.kbBindings, data.kbBindings);
     if (data.xrBindings) Object.assign(input.xrBindings, data.xrBindings);
     if (data.xrSynth)    Object.assign(input.xrSynth,    data.xrSynth);
+    if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     // Audio volumes (applied later when initAudio creates the gain nodes)
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
     if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
@@ -23250,6 +23358,10 @@ function updateEnemyHealthBars() {
 // ---- MAIN GAME LOOP ----
 
 const _wallHueScratchColor = new THREE.Color();
+
+// (VR fork) Scratches for the head-aim nudge.
+const _vrHeadQuatScratch = new THREE.Quaternion();
+const _vrHeadFwdScratch  = new THREE.Vector3();
 
 function gameLoop(timestamp) {
   // VR fork: renderer.setAnimationLoop drives this every frame (in both
