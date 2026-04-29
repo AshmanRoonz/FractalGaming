@@ -41,6 +41,26 @@ body.xr-presenting #cockpit-frame,
   opacity: 0 !important;
   background-image: none !important;
 }
+#lss-vr-button {
+  position: fixed; right: 18px; bottom: 18px; z-index: 260;
+  background: rgba(10, 18, 32, 0.92); color: #ffaa00;
+  border: 1px solid rgba(255, 170, 0, 0.75); border-radius: 3px;
+  padding: 10px 16px; font-family: 'Orbitron', 'Rajdhani', sans-serif;
+  font-size: 11px; font-weight: 700; letter-spacing: 2px;
+  text-transform: uppercase; cursor: pointer; box-shadow: 0 0 18px rgba(255, 170, 0, 0.18);
+}
+#lss-vr-button:hover {
+  background: rgba(255, 170, 0, 0.18);
+  border-color: #ffaa00;
+}
+#lss-vr-button.unavailable {
+  color: #777; border-color: rgba(120, 120, 140, 0.55);
+  box-shadow: none; background: rgba(20, 20, 34, 0.86);
+}
+body.xr-presenting #lss-vr-button {
+  color: #66eeff; border-color: rgba(102, 238, 255, 0.85);
+  box-shadow: 0 0 18px rgba(102, 238, 255, 0.25);
+}
 
 /* Old crosshair hidden; replaced by circumpunct HUD canvas */
 #crosshair { display: none; }
@@ -5410,6 +5430,10 @@ function isXRPresenting() {
 
 function setXRPresentingClass(active) {
   document.body.classList.toggle('xr-presenting', !!active);
+  const vrButton = document.getElementById('lss-vr-button');
+  if (vrButton && !vrButton.classList.contains('unavailable')) {
+    vrButton.textContent = active ? 'EXIT VR' : 'ENTER VR';
+  }
   const frameEl = document.getElementById('cockpit-frame');
   if (frameEl) {
     frameEl.classList.toggle('xr-hidden', !!active);
@@ -5420,15 +5444,69 @@ function setXRPresentingClass(active) {
   }
 }
 
-function initWebXRButton() {
-  if (!navigator.xr || !window.VRButton || !VRButton.createButton) return;
-  try {
-    const btn = VRButton.createButton(renderer);
-    btn.id = 'vr-button';
-    document.body.appendChild(btn);
-  } catch (e) {
-    console.warn('VR button init failed:', e);
+const webXRUi = { supported: false, checking: false };
+
+function setVRButtonUnavailable(label) {
+  const btn = document.getElementById('lss-vr-button');
+  if (!btn) return;
+  btn.textContent = label || 'VR UNAVAILABLE';
+  btn.classList.add('unavailable');
+  btn.title = 'WebXR immersive VR requires a compatible browser, headset, and secure context such as https or localhost.';
+}
+
+async function toggleVRSessionFromButton() {
+  const btn = document.getElementById('lss-vr-button');
+  if (isXRPresenting()) {
+    const session = renderer.xr.getSession && renderer.xr.getSession();
+    if (session && session.end) session.end();
+    return;
   }
+  if (!navigator.xr || !navigator.xr.requestSession) {
+    setVRButtonUnavailable('VR NEEDS HTTPS');
+    return;
+  }
+  try {
+    if (btn) {
+      btn.classList.remove('unavailable');
+      btn.textContent = 'STARTING VR';
+    }
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor', 'bounded-floor'],
+    });
+    await renderer.xr.setSession(session);
+  } catch (e) {
+    console.warn('VR session failed:', e);
+    if (btn) {
+      btn.textContent = webXRUi.supported ? 'ENTER VR' : 'VR UNAVAILABLE';
+      if (!webXRUi.supported) btn.classList.add('unavailable');
+    }
+  }
+}
+
+function initWebXRButton() {
+  if (document.getElementById('lss-vr-button')) return;
+  const btn = document.createElement('button');
+  btn.id = 'lss-vr-button';
+  btn.type = 'button';
+  btn.textContent = 'ENTER VR';
+  btn.title = 'Enter VR';
+  btn.addEventListener('click', toggleVRSessionFromButton);
+  document.body.appendChild(btn);
+
+  if (!navigator.xr || !navigator.xr.isSessionSupported) {
+    setVRButtonUnavailable(window.isSecureContext ? 'VR UNAVAILABLE' : 'VR NEEDS HTTPS');
+    return;
+  }
+  webXRUi.checking = true;
+  navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+    webXRUi.checking = false;
+    webXRUi.supported = !!supported;
+    if (!supported) setVRButtonUnavailable('VR UNAVAILABLE');
+  }).catch((e) => {
+    webXRUi.checking = false;
+    console.warn('VR support check failed:', e);
+    setVRButtonUnavailable(window.isSecureContext ? 'VR UNAVAILABLE' : 'VR NEEDS HTTPS');
+  });
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
