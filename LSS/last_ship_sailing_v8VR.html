@@ -9847,6 +9847,16 @@ class Bot {
         const isMK = player._lastKillTime != null && (_now - player._lastKillTime) <= 4.0;
         triggerHitFeedback({ weight: isMK ? 'multikill' : 'kill', targetMesh: this.mesh });
       }
+      // v8VR: ship-AI announcer on kill. Multikill announcer reads the
+      // streak count that the existing system bumps right after this point;
+      // we peek at what it WILL be (current + 1 if inside window).
+      if (typeof ANN !== 'undefined') {
+        const _annNow = (typeof game !== 'undefined') ? game.time : 0;
+        const _annInside = player._lastKillTime != null && (_annNow - player._lastKillTime) <= 4.0;
+        const _annNext   = (player._streakCount || 0) + (_annInside ? 1 : 0);
+        if (_annNext >= 2 && typeof announceMultikill === 'function') announceMultikill(_annNext);
+        else ANN.enemyDown();
+      }
       // Cinematic: multi-kill streak window + medals.
       if (window.Overlays) {
         if (!player._streakCount) player._streakCount = 0;
@@ -11400,8 +11410,138 @@ function _warmupExplosionPool() {
   for (const m of acquired) _releaseExplosionMesh(m);
 }
 
+// =====================================================================
+// v8VR: InstancedMesh debris field
+// =====================================================================
+// One InstancedMesh feeds every explosion's chunk debris. 256 instances,
+// one draw call for the whole game. Each chunk has independent velocity,
+// tumble, lifetime, and size. Size shrinks as the chunk ages so they fade
+// out without needing per-instance opacity (which legacy three.js doesn't
+// expose without a custom shader). Round-robin allocation: when capacity
+// is full, the oldest slot gets stomped.
+//
+// Hooked into spawnExplosion below; counts scale with explosion size and
+// the existing QUALITY preset so low-spec systems still ship 1 draw call.
+// =====================================================================
+const v8Debris = {
+  capacity: 256,
+  mesh: null,
+  active: null, age: null, life: null, size: null,
+  vx: null, vy: null, vz: null,
+  rx: null, ry: null, rz: null,
+  px: null, py: null, pz: null,
+  cursor: 0,
+  _m: null, _q: null, _e: null, _s: null, _p: null,
+};
+
+function v8DebrisInit() {
+  if (v8Debris.mesh) return;
+  if (typeof scene === 'undefined' || !THREE.InstancedMesh) return;
+  const geo = new THREE.IcosahedronGeometry(1, 0); // chunky, low-poly
+  const mat = ('MeshPhysicalMaterial' in THREE)
+    ? new THREE.MeshStandardMaterial({ color: 0x666666, metalness: 0.7, roughness: 0.55, flatShading: true })
+    : new THREE.MeshBasicMaterial({ color: 0x666666 });
+  const mesh = new THREE.InstancedMesh(geo, mat, v8Debris.capacity);
+  mesh.frustumCulled = false; // we manage visibility via per-instance scale
+  mesh.count = v8Debris.capacity;
+  // Hide all instances initially (scale 0).
+  const m0 = new THREE.Matrix4(); m0.makeScale(0, 0, 0);
+  for (let i = 0; i < v8Debris.capacity; i++) mesh.setMatrixAt(i, m0);
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  v8Debris.mesh = mesh;
+
+  const C = v8Debris.capacity;
+  v8Debris.active = new Uint8Array(C);
+  v8Debris.age    = new Float32Array(C);
+  v8Debris.life   = new Float32Array(C);
+  v8Debris.size   = new Float32Array(C);
+  v8Debris.vx = new Float32Array(C); v8Debris.vy = new Float32Array(C); v8Debris.vz = new Float32Array(C);
+  v8Debris.rx = new Float32Array(C); v8Debris.ry = new Float32Array(C); v8Debris.rz = new Float32Array(C);
+  v8Debris.px = new Float32Array(C); v8Debris.py = new Float32Array(C); v8Debris.pz = new Float32Array(C);
+  v8Debris._m = new THREE.Matrix4();
+  v8Debris._q = new THREE.Quaternion();
+  v8Debris._e = new THREE.Euler();
+  v8Debris._s = new THREE.Vector3();
+  v8Debris._p = new THREE.Vector3();
+}
+
+function v8SpawnDebris(pos, count, baseSize, vScale) {
+  if (!v8Debris.mesh) v8DebrisInit();
+  if (!v8Debris.mesh) return;
+  for (let i = 0; i < count; i++) {
+    const idx = v8Debris.cursor;
+    v8Debris.cursor = (v8Debris.cursor + 1) % v8Debris.capacity;
+    v8Debris.active[idx] = 1;
+    v8Debris.px[idx] = pos.x; v8Debris.py[idx] = pos.y; v8Debris.pz[idx] = pos.z;
+    // Random outward direction on the unit sphere.
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const speed = (0.4 + Math.random() * 0.9) * vScale;
+    const sinP = Math.sin(phi);
+    v8Debris.vx[idx] = sinP * Math.cos(theta) * speed;
+    v8Debris.vy[idx] = sinP * Math.sin(theta) * speed;
+    v8Debris.vz[idx] = Math.cos(phi)            * speed;
+    // Tumble.
+    v8Debris.rx[idx] = (Math.random() - 0.5) * 10;
+    v8Debris.ry[idx] = (Math.random() - 0.5) * 10;
+    v8Debris.rz[idx] = (Math.random() - 0.5) * 10;
+    v8Debris.age[idx]  = 0;
+    v8Debris.life[idx] = 1.4 + Math.random() * 1.6;
+    v8Debris.size[idx] = baseSize * (0.4 + Math.random() * 0.8);
+  }
+}
+
+function v8UpdateDebris(dt) {
+  if (!v8Debris.mesh) return;
+  let dirty = false;
+  const drag = Math.pow(0.55, dt); // light drag, zero-g friendly
+  for (let i = 0; i < v8Debris.capacity; i++) {
+    if (!v8Debris.active[i]) continue;
+    dirty = true;
+    v8Debris.age[i] += dt;
+    if (v8Debris.age[i] >= v8Debris.life[i]) {
+      v8Debris.active[i] = 0;
+      v8Debris._m.makeScale(0, 0, 0);
+      v8Debris.mesh.setMatrixAt(i, v8Debris._m);
+      continue;
+    }
+    v8Debris.vx[i] *= drag; v8Debris.vy[i] *= drag; v8Debris.vz[i] *= drag;
+    v8Debris.px[i] += v8Debris.vx[i] * dt;
+    v8Debris.py[i] += v8Debris.vy[i] * dt;
+    v8Debris.pz[i] += v8Debris.vz[i] * dt;
+    const t = v8Debris.age[i] / v8Debris.life[i];
+    const fade = 1 - t * t;       // ease-out shrink
+    const s = v8Debris.size[i] * fade;
+    v8Debris._e.set(
+      v8Debris.rx[i] * v8Debris.age[i],
+      v8Debris.ry[i] * v8Debris.age[i],
+      v8Debris.rz[i] * v8Debris.age[i]
+    );
+    v8Debris._q.setFromEuler(v8Debris._e);
+    v8Debris._p.set(v8Debris.px[i], v8Debris.py[i], v8Debris.pz[i]);
+    v8Debris._s.set(s, s, s);
+    v8Debris._m.compose(v8Debris._p, v8Debris._q, v8Debris._s);
+    v8Debris.mesh.setMatrixAt(i, v8Debris._m);
+  }
+  if (dirty) v8Debris.mesh.instanceMatrix.needsUpdate = true;
+}
+
+window.v8Debris        = v8Debris;
+window.v8SpawnDebris   = v8SpawnDebris;
+
 function spawnExplosion(pos, size) {
   size = size || 20;
+
+  // v8VR: instanced debris cloud accompanies every explosion. Count scales
+  // with size and QUALITY preset; capped per-explosion so a chain of huge
+  // blasts doesn't stomp the entire pool in one frame.
+  if (typeof v8SpawnDebris === 'function') {
+    const _qm = (typeof QUALITY !== 'undefined' && QUALITY.particleRate) ? QUALITY.particleRate() : 1.0;
+    const count = Math.min(48, Math.max(6, Math.round(size * 0.6 * _qm)));
+    v8SpawnDebris(pos, count, Math.max(0.6, size * 0.05), Math.max(60, size * 6));
+  }
+
 
   // --- Distance-based camera shake (cinematic concussive feel) ---
   let _shockFalloff = 0;
@@ -13183,6 +13323,11 @@ function _disposeOrReleaseEffect(e) {
   if (e.mesh.material) e.mesh.material.dispose();
 }
 function updateEffects(dt) {
+  // v8VR: drive the InstancedMesh debris pool from inside the same per-frame
+  // effects update so debris ages on the same hitstop-respecting dt and
+  // freezes when the game pauses (settings, lobby).
+  if (typeof v8UpdateDebris === 'function') v8UpdateDebris(dt);
+
   // Cap effects: cull excess when over budget. Was using array.shift()
   // which is O(n) — moves up to 349 elements every cull, which during
   // heavy combat (shields up + multiple shooters) was firing every
@@ -14116,6 +14261,12 @@ function commitLoadout(key) {
 
   document.getElementById('ship-name').textContent = loadout.name;
   document.getElementById('ship-class').textContent = loadout.className;
+
+  // v8VR: ship-AI welcomes the pilot aboard the freshly-selected chassis.
+  // Speaks ship name (BLASTER, PYRO, etc.) so the player hears the swap.
+  if (typeof ANN !== 'undefined' && ANN.welcomeAboard && !midMatch) {
+    ANN.welcomeAboard(loadout.name);
+  }
   document.getElementById('weapon-name').textContent = loadout.weapon.name;
 
   buildAbilityHUD();
@@ -14417,15 +14568,32 @@ function playerTakeDamage(amount, attacker, projectile) {
     const hitPos = (attacker && attacker.position) ? attacker.position : player.position;
     spawnShieldHit(hitPos, player.chassis.hullLength * 0.9, 0x44aaff, player.mesh);
     if (amount <= player.shield) { player.shield -= amount; return; }
-    else { amount -= player.shield; player.shield = 0; }
+    else {
+      amount -= player.shield;
+      player.shield = 0;
+      // v8VR: announcer notifies the moment shields drop.
+      if (typeof ANN !== 'undefined') ANN.shieldDown();
+    }
   }
+  const _v8preHealth = player.health;
   player.health -= amount;
+  // v8VR: announcer thresholds. Fire each tier exactly when crossed.
+  if (typeof ANN !== 'undefined' && player.maxHealth > 0) {
+    const preFrac  = _v8preHealth / player.maxHealth;
+    const postFrac = player.health / player.maxHealth;
+    // 60% -> 30% range: hull damage callout
+    if (preFrac > 0.6 && postFrac <= 0.6) ANN.hullDamage();
+    // Below 30%: critical damage
+    if (preFrac > 0.3 && postFrac <= 0.3 && postFrac > 0) ANN.criticalDamage();
+  }
 
   // Shield does NOT regen in doomed state
   if (!player.doomed && player.health > 0 && player.health / player.maxHealth <= LSS.DOOMED_HEALTH_PCT) {
     player.doomed = true;
     player.doomTimer = LSS.DOOMED_TIMER;
     player.shipState = 'doomed';
+    // v8VR: signature ship-AI line on entering doomed state. Title drop.
+    if (typeof ANN !== 'undefined') ANN.doomed();
   }
   if (player.health <= 0) playerDie(attacker);
 }
@@ -17898,6 +18066,8 @@ function updateRoundSystem(dt) {
         Overlays.countdown('FIGHT', '');
         game._firstBloodClaimed = false;
       }
+      // v8VR: ship-AI announces the round transition.
+      if (typeof ANN !== 'undefined') ANN.roundStart();
     }
   } else if (game.state === 'playing') {
     game.roundTimer -= dt;
@@ -17914,12 +18084,28 @@ function updateRoundSystem(dt) {
       if (player.team === LSS.TEAM_FLEET_B) aliveB++;
       else aliveA++;
     }
+    // v8VR: while we're walking the entity list, also count enemies actively
+    // within an engagement bubble around the player so the ship AI can call
+    // out when it's getting overrun.
+    let _v8nearEnemies = 0;
+    const _v8engageR2 = 1800 * 1800; // ~1800 unit bubble; tune to taste
     for (let i = 0, n = game.entities.length; i < n; i++) {
       const b = game.entities[i];
       if (!b.alive) continue;
       if (b.team === LSS.TEAM_FLEET_A) aliveA++;
       else if (b.team === LSS.TEAM_FLEET_B) aliveB++;
+      // Enemy team only, and only if alive + within bubble.
+      if (player.shipState !== 'dead' && b.team !== player.team) {
+        const dx = b.position.x - player.position.x;
+        const dy = b.position.y - player.position.y;
+        const dz = b.position.z - player.position.z;
+        if ((dx * dx + dy * dy + dz * dz) < _v8engageR2) _v8nearEnemies++;
+      }
     }
+    // Threshold: 3+ enemies in the engagement bubble triggers the line; the
+    // announcer's per-key cooldown (15s) keeps it from spamming if the
+    // pack lingers around you.
+    if (_v8nearEnemies >= 3 && typeof ANN !== 'undefined') ANN.multipleHostiles();
 
     // (v6.9) Champion-mode resolution. championResult takes priority over
     // every other end-condition: if a team claimed the field (or fell
@@ -18000,6 +18186,12 @@ function updateRoundSystem(dt) {
         if (window.Overlays) {
           const winner = game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A' : 'FLEET B';
           Overlays.banner('VICTORY', winner + ' WINS');
+        }
+        // v8VR: ship-AI declares victory or defeat depending on the player's team.
+        if (typeof ANN !== 'undefined') {
+          const playerWon = (game.scoreA >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_A) ||
+                            (game.scoreB >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_B);
+          if (playerWon) ANN.victory(); else ANN.defeat();
         }
         // Release pointer lock so the user can see the scoreboard without
         // being stuck in mouselook.
@@ -20714,6 +20906,42 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="sound-import-status">${audio.labRecipes ? Object.keys(audio.labRecipes).length + ' recipes active' : 'using built-in synth for all sounds'}</div>
     </div>
 
+    <!-- v8VR: Ship AI announcer (Web Speech) settings. Voice list is filled
+         dynamically in the post-render hook because speechSynthesis voices
+         load asynchronously on most browsers. -->
+    <div class="settings-section">
+      <h3>Ship AI Voice</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Procedural voice for in-match callouts. Modern OSes ship "Online (Natural)" / "Premium" / "Enhanced" voices that sound near-human; pick one of those for the AAA feel. Edge has the best stock library on Windows. (Updated cmd-line: announcer.pitch / announcer.rate from console for fine-tuning.)</label>
+      </div>
+      <div class="setting-row">
+        <label>Enabled</label>
+        <input type="checkbox" id="set-ann-enabled" ${announcer.enabled ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Voice</label>
+        <select id="set-ann-voice" style="flex:1; min-width:0; max-width:60%;">
+          <option value="">(loading voices...)</option>
+        </select>
+        <button id="set-ann-test" style="margin-left:6px;">Test</button>
+      </div>
+      <div class="setting-row">
+        <label>Pitch</label>
+        <input type="range" id="set-ann-pitch" min="0.5" max="1.5" step="0.05" value="${announcer.pitch}">
+        <div class="value-display" id="val-ann-pitch">${announcer.pitch.toFixed(2)}</div>
+      </div>
+      <div class="setting-row">
+        <label>Rate</label>
+        <input type="range" id="set-ann-rate" min="0.6" max="1.6" step="0.05" value="${announcer.rate}">
+        <div class="value-display" id="val-ann-rate">${announcer.rate.toFixed(2)}</div>
+      </div>
+      <div class="setting-row">
+        <label>Volume</label>
+        <input type="range" id="set-ann-vol" min="0" max="1" step="0.05" value="${announcer.volume}">
+        <div class="value-display" id="val-ann-vol">${announcer.volume.toFixed(2)}</div>
+      </div>
+    </div>
+
     <button id="settings-close">CLOSE</button>
     <button id="settings-reset">RESET TO DEFAULTS</button>
   `;
@@ -20983,6 +21211,72 @@ function buildSettingsPage() {
       }
     });
   }
+
+  // v8VR: Ship AI announcer settings wiring.
+  // The voice list loads asynchronously on most browsers, so we populate
+  // immediately AND on the voiceschanged event in case it's empty now.
+  const annVoiceSel = overlay.querySelector('#set-ann-voice');
+  function _v8RefreshVoiceOptions() {
+    if (!annVoiceSel) return;
+    if (typeof speechSynthesis === 'undefined') {
+      annVoiceSel.innerHTML = '<option value="">(SpeechSynthesis unavailable)</option>';
+      annVoiceSel.disabled = true;
+      return;
+    }
+    const list = (typeof announcerListVoices === 'function') ? announcerListVoices() : [];
+    if (list.length === 0) {
+      annVoiceSel.innerHTML = '<option value="">(no English voices found)</option>';
+      return;
+    }
+    const current = announcer.voice ? announcer.voice.name : '';
+    const opts = list.map(v => {
+      const tag = /natural|neural|premium|enhanced|online/i.test(v.name) ? ' ★' : '';
+      return '<option value="' + v.name.replace(/"/g, '&quot;') + '"' +
+             (v.name === current ? ' selected' : '') + '>' +
+             v.name + ' (' + v.lang + ')' + tag + '</option>';
+    });
+    annVoiceSel.innerHTML = opts.join('');
+  }
+  _v8RefreshVoiceOptions();
+  if (typeof speechSynthesis !== 'undefined') {
+    // One-shot listener: many browsers fire this once after the voices array populates.
+    speechSynthesis.addEventListener('voiceschanged', _v8RefreshVoiceOptions, { once: true });
+  }
+  if (annVoiceSel) {
+    annVoiceSel.addEventListener('change', () => {
+      if (annVoiceSel.value) announcerSetVoiceByName(annVoiceSel.value);
+    });
+  }
+  const annTestBtn = overlay.querySelector('#set-ann-test');
+  if (annTestBtn) {
+    annTestBtn.addEventListener('click', () => {
+      // Make sure the latest dropdown selection is committed first.
+      if (annVoiceSel && annVoiceSel.value) announcerSetVoiceByName(annVoiceSel.value);
+      announcerAudition();
+    });
+  }
+  const annEnabled = overlay.querySelector('#set-ann-enabled');
+  if (annEnabled) {
+    annEnabled.addEventListener('change', () => {
+      announcer.enabled = !!annEnabled.checked;
+      if (typeof saveSettings === 'function') saveSettings();
+    });
+  }
+  // Pitch / rate / volume sliders.
+  const _annSlider = (id, valId, lo, hi, key) => {
+    const el = overlay.querySelector('#' + id);
+    const val = overlay.querySelector('#' + valId);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      const v = Math.max(lo, Math.min(hi, parseFloat(el.value)));
+      announcer[key] = v;
+      if (val) val.textContent = v.toFixed(2);
+      if (typeof saveSettings === 'function') saveSettings();
+    });
+  };
+  _annSlider('set-ann-pitch', 'val-ann-pitch', 0.5, 1.5, 'pitch');
+  _annSlider('set-ann-rate',  'val-ann-rate',  0.6, 1.6, 'rate');
+  _annSlider('set-ann-vol',   'val-ann-vol',   0,   1,   'volume');
 
   // Bind dropdowns
   overlay.querySelectorAll('.bind-select').forEach(sel => {
@@ -21528,6 +21822,12 @@ function saveSettings() {
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
+      // v8VR: ship-AI announcer prefs.
+      annEnabled: announcer.enabled,
+      annVoice:   announcer.voice ? announcer.voice.name : (announcer.voiceName || ''),
+      annPitch:   announcer.pitch,
+      annRate:    announcer.rate,
+      annVolume:  announcer.volume,
       wallPattern: (typeof game.wallPattern === 'number') ? game.wallPattern : 0,
       wallBlackBase: !!game.wallBlackBase,
       // (post-v6.9 patch, 2026-04-28) Per-pattern wallParams. Each slot
@@ -21711,6 +22011,26 @@ function loadSettings() {
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
     if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
     if (data.audioAmbient !== undefined) audio.userVol.ambient = data.audioAmbient;
+    // v8VR: ship-AI announcer prefs. The voice itself is resolved later
+    // by announcerInit / pickVoice once the SpeechSynthesis voice list
+    // is ready; we stash the saved name on `announcer.voiceName` and the
+    // picker honors it on first match.
+    if (typeof announcer !== 'undefined') {
+      if (data.annEnabled !== undefined) announcer.enabled = !!data.annEnabled;
+      if (typeof data.annPitch  === 'number') announcer.pitch  = data.annPitch;
+      if (typeof data.annRate   === 'number') announcer.rate   = data.annRate;
+      if (typeof data.annVolume === 'number') announcer.volume = data.annVolume;
+      if (typeof data.annVoice  === 'string' && data.annVoice) {
+        announcer.voiceName = data.annVoice;
+        // If voices already loaded, resolve immediately. Otherwise the
+        // voiceschanged listener installed in announcerInit will pick it up.
+        if (typeof speechSynthesis !== 'undefined') {
+          const voices = speechSynthesis.getVoices() || [];
+          const v = voices.find(x => x.name === data.annVoice);
+          if (v) announcer.voice = v;
+        }
+      }
+    }
     // Wall pattern (0..7 = lab cosmic patterns, 8 = Soul Array). Stored on
     // game so createMeshFromPositions can read it when the shader is built.
     if (data.wallPattern !== undefined) game.wallPattern = data.wallPattern | 0;
@@ -24659,6 +24979,254 @@ function updateHitstop(dt) {
 
 window.triggerHitFeedback = triggerHitFeedback;
 window.hitFX              = hitFX;
+
+// =====================================================================
+// v8VR: Ship AI announcer (Web Speech API)
+// =====================================================================
+// Procedural in-game voice line system. Uses the browser's built-in
+// SpeechSynthesis, no audio assets shipped. Tuned to sound like a ship's
+// onboard AI: low pitch + slightly fast rate + male/robotic voice
+// preference. Lines route through a queue + per-key cooldown + global
+// anti-chain gap so the AI never overlaps itself or spams the player.
+//
+// Fits the v7.1VR procedural-audio philosophy; speech is generated locally
+// by the user's OS each play, no downloads, no recording session.
+// =====================================================================
+const announcer = {
+  enabled: true,
+  voice: null,             // resolved SpeechSynthesisVoice object
+  voiceName: null,         // persisted voice name (resolves to .voice on init)
+  rate: 1.0,               // natural cadence; 0.9-1.15 reads well
+  pitch: 1.0,              // natural pitch; lower the slider for ship-AI feel
+  volume: 0.9,
+  globalGap: 600,          // ms between any two lines (anti-chain)
+  cooldowns: {},
+  _lastSpokenAt: 0,
+  // Voice preferences in priority order. We bias toward modern *neural* /
+  // *natural* voices that ship with current OSes (Edge's "Online (Natural)"
+  // family on Windows, Apple's "Premium" / "Enhanced" on macOS, Google's
+  // server-side voices in Chrome). The old "Microsoft David" / robotic
+  // Speech API defaults are deliberately near the bottom; they only get
+  // picked when nothing better is available.
+  voicePrefs: [
+    // Microsoft Edge / Windows 11 neural voices (newest, most natural):
+    'Microsoft Andrew Online (Natural)',
+    'Microsoft Brandon Online (Natural)',
+    'Microsoft Brian Online (Natural)',
+    'Microsoft Christopher Online (Natural)',
+    'Microsoft Eric Online (Natural)',
+    'Microsoft Guy Online (Natural)',
+    'Microsoft Roger Online (Natural)',
+    'Microsoft Steffan Online (Natural)',
+    'Microsoft Aria Online (Natural)',
+    'Microsoft Jenny Online (Natural)',
+    'Online (Natural)',                            // generic catch-all
+    // Apple premium / enhanced:
+    'Tom (Premium)', 'Tom (Enhanced)',
+    'Alex (Enhanced)', 'Daniel (Enhanced)',
+    'Premium', 'Enhanced',                          // generic catch-all
+    // Google (Chrome built-in):
+    'Google UK English Male', 'Google US English',
+    // Fallback: legacy SAPI voices (more robotic).
+    'Microsoft David', 'Microsoft Mark',
+    'Daniel', 'Alex', 'Fred',
+    'en-GB', 'en-US',
+  ],
+};
+
+function announcerInit() {
+  if (typeof speechSynthesis === 'undefined') {
+    announcer.enabled = false;
+    console.log('[v8VR Announcer] SpeechSynthesis API not available; disabled.');
+    return;
+  }
+  function pickVoice() {
+    const voices = speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return false;
+
+    // 1) Honor a previously-saved exact voice name first.
+    if (announcer.voiceName) {
+      const exact = voices.find(v => v.name === announcer.voiceName);
+      if (exact) { announcer.voice = exact; return true; }
+    }
+    // 2) Walk our preference list looking for substring match in name OR
+    // lang prefix match. First win sticks.
+    let chosen = null;
+    for (const pref of announcer.voicePrefs) {
+      chosen = voices.find(v =>
+        v.name.toLowerCase().includes(pref.toLowerCase()) ||
+        v.lang.toLowerCase().startsWith(pref.toLowerCase())
+      );
+      if (chosen) break;
+    }
+    // 3) Fallback heuristics: any English neural-flavored voice.
+    if (!chosen) chosen = voices.find(v => /^en[-_]/i.test(v.lang) && /natural|neural|premium|enhanced|online/i.test(v.name));
+    if (!chosen) chosen = voices.find(v => /^en[-_]/i.test(v.lang));
+    if (!chosen) chosen = voices[0];
+    announcer.voice = chosen;
+    if (chosen) console.log('[v8VR Announcer] Voice:', chosen.name, '(' + chosen.lang + ')');
+    return !!chosen;
+  }
+  if (!pickVoice()) {
+    speechSynthesis.addEventListener('voiceschanged', pickVoice, { once: true });
+  }
+}
+
+// Settings-UI helpers.
+// Filters and groups available voices into a tidy list of Englishy options.
+function announcerListVoices() {
+  if (typeof speechSynthesis === 'undefined') return [];
+  const voices = speechSynthesis.getVoices() || [];
+  const eng = voices.filter(v => /^en[-_]/i.test(v.lang));
+  // Sort: natural / premium / enhanced first, then alphabetical.
+  return eng.sort((a, b) => {
+    const score = (v) => /natural|neural|premium|enhanced|online/i.test(v.name) ? 0 : 1;
+    const sd = score(a) - score(b);
+    if (sd !== 0) return sd;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function announcerSetVoiceByName(name) {
+  if (typeof speechSynthesis === 'undefined') return false;
+  const voices = speechSynthesis.getVoices() || [];
+  const v = voices.find(x => x.name === name);
+  if (!v) return false;
+  announcer.voice     = v;
+  announcer.voiceName = name;
+  if (typeof saveSettings === 'function') saveSettings();
+  return true;
+}
+
+function announcerAudition() {
+  // Cancel any in-flight speech and play a short representative line so
+  // the user can A/B voices without waiting for a real game event.
+  if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  // Bypass the per-key cooldown by speaking directly with priority.
+  announcerSay('Systems online. Targeting array calibrated. Engage hostiles.', { priority: true });
+}
+
+// Speak a line. opts: { key, cooldown, priority, rate, pitch, volume }
+// - key: groups identical lines for cooldown bookkeeping
+// - cooldown: seconds before this key can speak again
+// - priority: cancels any current speech to play this immediately
+function announcerSay(text, opts) {
+  opts = opts || {};
+  if (!announcer.enabled || !text) return false;
+  if (typeof speechSynthesis === 'undefined') return false;
+  // Skip in VR (the headset audio path differs and TTS is awkward there);
+  // can be revisited if Quest-side TTS becomes desirable.
+  if (typeof renderer !== 'undefined' && renderer.xr && renderer.xr.isPresenting) return false;
+
+  const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  // Per-key cooldown gate.
+  if (opts.key) {
+    const readyAt = announcer.cooldowns[opts.key] || 0;
+    if (now < readyAt) return false;
+    if (opts.cooldown > 0) announcer.cooldowns[opts.key] = now + opts.cooldown * 1000;
+  }
+  // Anti-chain global gap (priority lines bypass it).
+  if (!opts.priority && (now - announcer._lastSpokenAt) < announcer.globalGap) return false;
+  announcer._lastSpokenAt = now;
+
+  if (opts.priority) speechSynthesis.cancel();
+
+  const u = new SpeechSynthesisUtterance(text);
+  if (announcer.voice) u.voice = announcer.voice;
+  u.rate   = opts.rate   != null ? opts.rate   : announcer.rate;
+  u.pitch  = opts.pitch  != null ? opts.pitch  : announcer.pitch;
+  u.volume = opts.volume != null ? opts.volume : announcer.volume;
+  speechSynthesis.speak(u);
+  return true;
+}
+
+function announce(key, text, opts) {
+  return announcerSay(text, Object.assign({ key: key }, opts || {}));
+}
+
+function announcerCancelAll() {
+  if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+}
+
+// =====================================================================
+// v8VR: Line library — keys mapped to ship-AI flavored text
+// =====================================================================
+// Cooldowns intentionally generous; an AI that yells every 2 seconds is
+// noise. Priority flags reserved for genuinely important moments (death,
+// round transitions, victory) so they don't get held back by the gap.
+// =====================================================================
+const ANN = {
+  // ---- Match flow ----
+  systemsOnline:    () => announce('systemsOnline',    'All systems online. Combat ready.',           { cooldown: 60 }),
+  warmupOver:       () => announce('warmupOver',       'Warmup complete. Engage.',                    { cooldown: 5,  priority: true }),
+  roundStart:       () => announce('roundStart',       'Round commencing. Engage hostiles.',          { cooldown: 0,  priority: true }),
+  victory:          () => announce('victory',          'Victory. All hostiles eliminated.',            { cooldown: 0,  priority: true }),
+  defeat:           () => announce('defeat',           'Mission failed.',                              { cooldown: 0,  priority: true }),
+  championDeclared: () => announce('championDeclared', 'Champion field active. Hold to capture.',     { cooldown: 0 }),
+
+  // ---- Damage tiers (called from playerTakeDamage health checks) ----
+  shieldDown:       () => announce('shieldDown',       'Shields offline.',                             { cooldown: 12 }),
+  hullDamage:       () => announce('hullDamage',       'Hull integrity compromised.',                  { cooldown: 18 }),
+  criticalDamage:   () => announce('criticalDamage',   'Warning. Critical damage.',                    { cooldown: 8,  priority: true }),
+  doomed:           () => announce('doomed',           'Critical hull breach. Last ship sailing.',     { cooldown: 30, priority: true }),
+
+  // ---- Combat awareness ----
+  multipleHostiles: () => announce('multipleHostiles', 'Warning. Multiple ships engaging.',           { cooldown: 15 }),
+  enemyLock:        () => announce('enemyLock',        'Lock detected. Evasive maneuvers.',           { cooldown: 8 }),
+  ramming:          () => announce('ramming',          'Brace for impact.',                            { cooldown: 6 }),
+  stasisActive:     () => announce('stasisActive',     'Stasis field engaged.',                        { cooldown: 10 }),
+
+  // ---- Kill confirmations + multikill ramp ----
+  enemyDown:        () => announce('enemyDown',        'Target eliminated.',                           { cooldown: 4 }),
+  doubleKill:       () => announce('doubleKill',       'Double kill.',                                 { cooldown: 3, priority: true }),
+  tripleKill:       () => announce('tripleKill',       'Triple kill.',                                 { cooldown: 3, priority: true }),
+  rampage:          () => announce('rampage',          'Rampage.',                                     { cooldown: 3, priority: true }),
+  unstoppable:      () => announce('unstoppable',      'Unstoppable.',                                 { cooldown: 3, priority: true }),
+  godlike:          () => announce('godlike',          'Godlike.',                                     { cooldown: 3, priority: true }),
+
+  // ---- Abilities + core ----
+  abilityReady:     () => announce('abilityReady',     'Ability online.',                              { cooldown: 6 }),
+  coreReady:        () => announce('coreReady',        'Core charged. Authorization granted.',         { cooldown: 12 }),
+  dashReady:        () => announce('dashReady',        'Dash drive ready.',                            { cooldown: 10 }),
+
+  // ---- Map / arena ----
+  enteringArena:    () => announce('enteringArena',    'Entering combat zone.',                        { cooldown: 60, priority: true }),
+  lowAmmo:          () => announce('lowAmmo',          'Ammunition low.',                              { cooldown: 15 }),
+
+  // ---- Ship select (parameterized by chosen chassis) ----
+  welcomeAboard: (shipName) => announce('welcomeAboard',
+    'Welcome aboard, ' + (shipName || 'pilot') + '. All systems online.',
+    { cooldown: 8, priority: true }),
+
+  // ---- Boot / lobby intro (one-shot per session) ----
+  introBoot: () => announce('introBoot',
+    'Welcome to Last Ship Sailing, pilot! Choose your adventure, climb in a ship, and come join the battle.',
+    { cooldown: 600, priority: true }),
+};
+
+// Try to init now. If voices are not yet enumerated the voiceschanged
+// event handler inside announcerInit will pick the voice when ready.
+try { announcerInit(); } catch (e) { console.warn('[v8VR Announcer] init failed:', e); }
+
+// Helper: pick the right multikill line from streak count.
+function announceMultikill(streak) {
+  if (streak === 2) return ANN.doubleKill();
+  if (streak === 3) return ANN.tripleKill();
+  if (streak === 4) return ANN.rampage();
+  if (streak === 5) return ANN.unstoppable();
+  if (streak >= 6)  return ANN.godlike();
+  return false;
+}
+
+window.announcer             = announcer;
+window.announcerSay          = announcerSay;
+window.announce              = announce;
+window.announcerCancelAll    = announcerCancelAll;
+window.announcerListVoices   = announcerListVoices;
+window.announcerSetVoiceByName = announcerSetVoiceByName;
+window.announcerAudition     = announcerAudition;
+window.ANN                   = ANN;
+window.announceMultikill     = announceMultikill;
 
 function updateScreenShake(dt) {
   if (game.shakeIntensity > 0.1) {
@@ -29072,6 +29640,22 @@ _setupCustomMapLoader();
 // Hook audio init on first user interaction
 document.addEventListener('click', initAudio, { once: false });
 document.addEventListener('keydown', initAudio, { once: false });
+
+// v8VR: one-shot ship-AI boot intro. SpeechSynthesis is gated by browsers
+// until a user gesture, so we trigger on the first click / keydown of the
+// session. Once is enough; subsequent clicks just go to the existing
+// initAudio handler. Tiny delay so the speech engine has settled.
+(function() {
+  const fireIntro = function() {
+    setTimeout(() => {
+      try { if (typeof ANN !== 'undefined' && ANN.introBoot) ANN.introBoot(); } catch (_) {}
+    }, 250);
+    document.removeEventListener('click',   fireIntro, true);
+    document.removeEventListener('keydown', fireIntro, true);
+  };
+  document.addEventListener('click',   fireIntro, true);
+  document.addEventListener('keydown', fireIntro, true);
+})();
 
 // VR fork: use renderer.setAnimationLoop instead of raw requestAnimationFrame
 // so the same loop drives both flat-screen frames (browser RAF) and immersive
