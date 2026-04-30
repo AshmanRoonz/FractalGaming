@@ -1530,8 +1530,13 @@ const input = {
     moveDown: 11,  // R3 (right stick click)
     scoreboard: 8, // Back
     menu: 9,       // Start
-    openSettings:     -1, // unbound by default; configurable
-    cycleWallPattern: -1, // unbound by default; configurable
+    // App-control actions live on synthetic indices 16 / 17, outside the
+    // 0-15 range used by real Xbox-style controllers. The synthetic VR
+    // gamepad has 18 button slots so XR mappings to these actions actually
+    // route through pollGamepad; on a real controller these slots are
+    // simply absent and pressing real buttons can't trigger them.
+    openSettings:     17,
+    cycleWallPattern: 16,
   },
   // (VR fork) Action -> XR controller button name. The action keys here
   // mirror gpBindings (fire / altFire / dash / ...); each value is one of
@@ -6023,6 +6028,125 @@ function _xrUpdateMenuMirror() {
   }
 }
 
+// 3D enemy health bars. The flat-screen HUD uses #enemy-healthbars (DOM
+// overlays projected per frame), which is screen-space and therefore not
+// visible in stereoscopic VR. Instead we attach a Sprite per enemy ship,
+// floating above its hull, with a CanvasTexture redrawn only when the
+// bar values change. Sprites auto-billboard toward the camera, so they
+// always face the player without us computing lookAt each frame.
+
+function _vrEnsureBotHealthBar(bot) {
+  if (bot._vrHealthSprite) return bot._vrHealthSprite;
+  if (!bot || !bot.mesh) return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+  const sprite = new THREE.Sprite(mat);
+  // Scale in world units. Tune relative to ship hull size so bars stay
+  // readable on small frigates and don't overwhelm large titans.
+  const hullR = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 60;
+  sprite.scale.set(hullR * 1.6, hullR * 0.4, 1);
+  sprite.position.set(0, hullR * 1.2, 0);
+  sprite.renderOrder = 999;
+  sprite.frustumCulled = false;
+  sprite.visible = false;
+  sprite.userData = { canvas: canvas, tex: tex, lastH: -1, lastS: -1, lastD: false };
+  bot.mesh.add(sprite);
+  bot._vrHealthSprite = sprite;
+  return sprite;
+}
+
+function _vrUpdateBotHealthBar(bot, isVR, isEnemy) {
+  const existing = bot && bot._vrHealthSprite;
+  if (!isVR || !bot || !bot.alive || !isEnemy) {
+    if (existing) existing.visible = false;
+    return;
+  }
+  const sprite = _vrEnsureBotHealthBar(bot);
+  if (!sprite) return;
+  sprite.visible = true;
+
+  const maxH = bot.maxHealth || 100;
+  const h = Math.max(0, Math.min(1, (bot.health || 0) / maxH));
+  const sMax = bot.maxShield || 0;
+  const s = sMax > 0 ? Math.max(0, Math.min(1, (bot.shield || 0) / sMax)) : 0;
+  const doomed = !!bot.doomed;
+  const ud = sprite.userData;
+  if (h === ud.lastH && s === ud.lastS && doomed === ud.lastD) return;
+  ud.lastH = h; ud.lastS = s; ud.lastD = doomed;
+  const ctx = ud.canvas.getContext('2d');
+  const cw = ud.canvas.width;
+  const ch = ud.canvas.height;
+  ctx.clearRect(0, 0, cw, ch);
+  // Drop-shadow rim for legibility against bright walls.
+  ctx.fillStyle = 'rgba(10,10,16,0.55)';
+  ctx.fillRect(0, 0, cw, ch);
+  // Health bar
+  const healthY = 28, healthH = 26;
+  ctx.fillStyle = 'rgba(60,70,80,0.55)';
+  ctx.fillRect(8, healthY, cw - 16, healthH);
+  let healthColor = '#60dd80';
+  if (h < 0.3) healthColor = '#ff5040';
+  else if (h < 0.6) healthColor = '#ffaa30';
+  if (doomed) healthColor = '#ff2020';
+  ctx.fillStyle = healthColor;
+  ctx.fillRect(8, healthY, (cw - 16) * h, healthH);
+  // Shield bar (if applicable)
+  if (sMax > 0) {
+    const shieldY = 6, shieldH = 14;
+    ctx.fillStyle = 'rgba(40,80,110,0.55)';
+    ctx.fillRect(8, shieldY, cw - 16, shieldH);
+    ctx.fillStyle = 'rgba(120,200,255,0.95)';
+    ctx.fillRect(8, shieldY, (cw - 16) * s, shieldH);
+  }
+  ud.tex.needsUpdate = true;
+}
+
+// Iterate every entity each VR frame; create / refresh / hide its health
+// sprite. Only enemies (different team from local player) get bars, to
+// match the existing flat-mode behavior in updateEnemyHealthBars.
+function _vrUpdateAllHealthBars() {
+  const isVR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+  if (!isVR) {
+    // Hide any sprites that were left visible.
+    if (typeof game !== 'undefined' && game.entities) {
+      for (const bot of game.entities) {
+        if (bot && bot._vrHealthSprite) bot._vrHealthSprite.visible = false;
+      }
+    }
+    if (typeof net !== 'undefined' && net && net.networkPlayers) {
+      for (const np of net.networkPlayers) {
+        if (np && np._vrHealthSprite) np._vrHealthSprite.visible = false;
+      }
+    }
+    return;
+  }
+  const playerTeam = (typeof player !== 'undefined' && player && player.team) || null;
+  if (typeof game !== 'undefined' && game.entities) {
+    for (const bot of game.entities) {
+      const isEnemy = (playerTeam == null) || (bot && bot.team !== playerTeam);
+      _vrUpdateBotHealthBar(bot, isVR, isEnemy);
+    }
+  }
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) {
+      const isEnemy = (playerTeam == null) || (np && np.team !== playerTeam);
+      _vrUpdateBotHealthBar(np, isVR, isEnemy);
+    }
+  }
+}
+
 // Toggle HUD plane visibility from session events so it does not sit in
 // the world during flat-screen play.
 
@@ -6566,6 +6690,10 @@ function renderFrame() {
     // Menu mirror: rasterize whichever overlay is open (settings / ship-
     // select) and put it on the menu plane. Internally throttled to ~4Hz.
     _xrUpdateMenuMirror();
+    // Refresh enemy health bars (sprites attached to each bot.mesh).
+    // Cheap when nothing changed (the per-bot canvas redraw is gated on
+    // health/shield deltas).
+    _vrUpdateAllHealthBars();
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
     return;
@@ -17291,19 +17419,22 @@ function _xrSynthGamepad() {
   const right = xrControllers.rightSrc && xrControllers.rightSrc.gamepad;
   if (!left && !right) return null;
 
-  // Pre-allocate 17 inert buttons; fill the ones we map.
-  const buttons = new Array(17);
-  for (let i = 0; i < 17; i++) buttons[i] = { pressed: false, touched: false, value: 0 };
+  // Pre-allocate 18 inert buttons; indices 0-15 are the standard layout,
+  // 16 / 17 are reserved for VR-fork app-control actions (cycleWallPattern,
+  // openSettings) so XR button bindings to those actions can route through
+  // gpBindings + pollGamepad without a special-case path.
+  const buttons = new Array(18);
+  for (let i = 0; i < 18; i++) buttons[i] = { pressed: false, touched: false, value: 0 };
   const axes = [0, 0, 0, 0];
 
   function copyBtn(srcBtns, srcIdx, dstIdx) {
-    if (dstIdx == null || dstIdx < 0 || dstIdx > 16) return;
+    if (dstIdx == null || dstIdx < 0 || dstIdx > 17) return;
     const b = srcBtns && srcBtns[srcIdx];
     if (!b) return;
     buttons[dstIdx] = { pressed: !!b.pressed, touched: !!b.touched, value: b.value || (b.pressed ? 1 : 0) };
   }
   function setBtn(dstIdx, pressed) {
-    if (dstIdx == null || dstIdx < 0 || dstIdx > 16) return;
+    if (dstIdx == null || dstIdx < 0 || dstIdx > 17) return;
     const p = !!pressed;
     buttons[dstIdx] = { pressed: p, touched: p, value: p ? 1 : 0 };
   }
@@ -17570,10 +17701,18 @@ function pollGamepad() {
   }
 
   // Open Settings: toggle settings overlay regardless of current state.
-  // Useful as a dedicated VR button without doubling on Back/scoreboard.
+  // VR fork: when triggered while presenting, end the XR session first so
+  // the user lands in the flat-screen settings (where every interaction
+  // works). The user can re-enter VR via the Enter VR button when done.
   if (input.gpOpenSettings && !input.gpOpenSettingsPrev) {
     if (settingsOpen) {
       closeSettings();
+    } else if (renderer.xr && renderer.xr.isPresenting) {
+      const _xrSess = renderer.xr.getSession();
+      if (_xrSess) { try { _xrSess.end(); } catch (_) {} }
+      // Defer until after the session-end teardown completes so the
+      // overlay isn't competing with the XR cleanup.
+      setTimeout(() => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, 120);
     } else {
       buildSettingsPage();
       openSettings();
