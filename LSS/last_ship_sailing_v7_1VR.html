@@ -1557,7 +1557,7 @@ const input = {
     moveDown:   'rightStickClick',
     scoreboard: '',                // unbound by default; user can assign
     menu:       'rightB',          // press right B to confirm / open menu
-    openSettings:     '',          // unbound; user can assign in Settings
+    openSettings:     'leftMenu', // hamburger button auto-exits VR + opens settings
     cycleWallPattern: '',          // unbound; user can assign in Settings
   },
   // Synthetic-helpers config. The only knob worth keeping is the stick-
@@ -1581,6 +1581,9 @@ const input = {
   // next time the user enters VR. 0.5 is a reasonable battery-saver target
   // on Quest 2 / Quest 3; bump to 1.0+ if your GPU has headroom.
   vrRenderScale: 0.7,
+  // Camera field-of-view in flat-screen mode, degrees. Has no visible
+  // effect in VR (the headset's native per-eye FOV applies). 60-120.
+  fovDeg: 90,
   // (v6.9) Keyboard mappings. Values are KeyboardEvent.key values normalized
   // to lowercase (' ' for Space, 'control' for Ctrl, etc.). Empty string =
   // unbound (no key triggers this action). Defaults match the keys this game
@@ -5475,7 +5478,7 @@ try {
 }
 scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); // Light fog; low density so indoor walls stay visible
 
-const camera = new THREE.PerspectiveCamera(90, window.innerWidth / window.innerHeight, 1, 25000);
+const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -5705,6 +5708,7 @@ renderer.xr.addEventListener('sessionend', () => {
 // countdown overlay so they have time to put the headset back on.
 let _xrPendingResume = false;
 let _xrResumeIntervalId = null;
+let _xrLastSeenState = null;
 function _xrCancelResumeCountdown() {
   if (_xrResumeIntervalId) {
     clearInterval(_xrResumeIntervalId);
@@ -19840,6 +19844,14 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">If the framerate dips during heavy fights, drop to Medium or Low. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out.</label>
       </div>
+      <div class="setting-row">
+        <label>Field of View</label>
+        <input type="range" id="set-fov" min="60" max="120" step="1" value="${(typeof input.fovDeg === 'number') ? input.fovDeg : 90}">
+        <div class="value-display" id="val-fov">${(typeof input.fovDeg === 'number') ? input.fovDeg : 90}&deg;</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">FOV applies to flat-screen rendering. The headset's native FOV is used in VR (slider has no visible effect there).</label>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -20034,6 +20046,19 @@ function buildSettingsPage() {
       setWallPattern(parseInt(e.target.value, 10) | 0);
     });
   }
+  // FOV slider.
+  const fovSel = overlay.querySelector('#set-fov');
+  const fovVal = overlay.querySelector('#val-fov');
+  if (fovSel) fovSel.addEventListener('input', () => {
+    const v = parseInt(fovSel.value, 10) | 0;
+    input.fovDeg = v;
+    if (fovVal) fovVal.textContent = v + '\u00B0';
+    if (typeof camera !== 'undefined' && camera) {
+      camera.fov = v;
+      camera.updateProjectionMatrix();
+    }
+    saveSettings();
+  });
   // (v6.9) Quality preset dropdown.
   const qSel = overlay.querySelector('#set-quality');
   if (qSel) {
@@ -20202,7 +20227,7 @@ function buildSettingsPage() {
     moveDown:   'rightStickClick',
     scoreboard: '',
     menu:       'rightB',
-    openSettings:     '',
+    openSettings:     'leftMenu',
     cycleWallPattern: '',
   };
   const xrBindContainer = overlay.querySelector('#xr-bind-rows');
@@ -20701,6 +20726,7 @@ function saveSettings() {
       xrSynth:    input.xrSynth,
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
+      fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
@@ -20876,6 +20902,13 @@ function loadSettings() {
     if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
+    if (typeof data.fovDeg === 'number') {
+      input.fovDeg = data.fovDeg;
+      if (typeof camera !== 'undefined' && camera) {
+        camera.fov = input.fovDeg;
+        camera.updateProjectionMatrix();
+      }
+    }
     // Audio volumes (applied later when initAudio creates the gain nodes)
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
     if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
@@ -23834,6 +23867,26 @@ function gameLoop(timestamp) {
   // produces correct world-space camera placement. _xrSyncDollyBeforeRender
   // (just before render) will lift that pose up to the dolly.
   _xrResetDollyAtFrameStart();
+
+  // (VR fork) Watch game.state transitions: if a non-VR menu (ship-select,
+  // matchEnd) appears while presenting, exit VR so the user can use the
+  // proper flat-screen UI; flag for auto-resume when combat starts again.
+  // When game.state goes back to play, kick the resume countdown.
+  if (typeof _xrLastSeenState === 'undefined') _xrLastSeenState = null;
+  if (game.state !== _xrLastSeenState) {
+    const wasMenu  = (_xrLastSeenState === 'select' || _xrLastSeenState === 'matchEnd');
+    const nowMenu  = (game.state === 'select' || game.state === 'matchEnd');
+    if (nowMenu && !wasMenu && renderer.xr && renderer.xr.isPresenting) {
+      // Entered a menu while in VR -> exit and request auto-resume later.
+      const _xs = renderer.xr.getSession();
+      if (_xs) { try { _xs.end(); } catch (_) {} }
+      _xrPendingResume = true;
+    } else if (!nowMenu && wasMenu && _xrPendingResume) {
+      // Left the menu (combat resumed). Trigger the 5 s countdown.
+      try { _xrStartResumeCountdown(5); _xrPendingResume = false; } catch (_) {}
+    }
+    _xrLastSeenState = game.state;
+  }
 
   if (!game.lastTime) game.lastTime = timestamp;
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
@@ -27922,6 +27975,13 @@ loadSettings();
 // (post-v6.9 patch, 2026-04-28) Restore previously-loaded custom maps from
 // localStorage and wire the loader button. Must run before buildShipSelect
 // so custom maps appear in the carousel on first open.
+// (VR fork) Built-in custom map: Center Cube. Embedded JSON injected
+// once at startup so users don't need an external map file to load it.
+// installCustomMap is idempotent against re-installs; persist=false avoids
+// writing it to localStorage (it's already part of the page).
+try {
+  installCustomMap(JSON.parse(`{"name":"Center Cube","key":"custom","description":"A cube in the center","palette":[4487167,16729224,4521847,16755268,11158783,4521983,16729258,16777028],"rooms":[{"id":"room_3","team":"B","x":2543,"y":0,"z":-2273,"r":270},{"id":"room_6","team":null,"x":-253,"y":2,"z":251,"r":150},{"id":"room_7","team":null,"x":-265,"y":1,"z":-262,"r":150},{"id":"room_8","team":null,"x":251,"y":4,"z":-244,"r":150},{"id":"room_9","team":null,"x":262,"y":0,"z":253,"r":150},{"id":"room_10","team":null,"x":-248,"y":500,"z":256,"r":150},{"id":"room_11","team":null,"x":-249,"y":500,"z":-260,"r":150},{"id":"room_12","team":null,"champion":true,"x":265,"y":500,"z":255,"r":150},{"id":"room_13","team":null,"x":272,"y":500,"z":-245,"r":150},{"id":"room_16","team":null,"x":-545,"y":261,"z":557,"r":270},{"id":"room_17","team":null,"x":564,"y":261,"z":-545,"r":270},{"id":"room_18","team":"A","x":-2399,"y":0,"z":2218,"r":270},{"id":"room_19","team":null,"x":896,"y":230,"z":895,"r":270},{"id":"room_20","team":null,"x":-940,"y":230,"z":-904,"r":270}],"tunnels":[{"path":[{"x":272,"y":500,"z":-245},{"x":265,"y":500,"z":255}],"r":150},{"path":[{"x":265,"y":500,"z":255},{"x":-248,"y":500,"z":256}],"r":150},{"path":[{"x":-248,"y":500,"z":256},{"x":-249,"y":500,"z":-260}],"r":150},{"path":[{"x":-249,"y":500,"z":-260},{"x":272,"y":500,"z":-245}],"r":150},{"path":[{"x":272,"y":500,"z":-245},{"x":251,"y":4,"z":-244}],"r":150},{"path":[{"x":251,"y":4,"z":-244},{"x":-265,"y":1,"z":-262}],"r":150},{"path":[{"x":-265,"y":1,"z":-262},{"x":-249,"y":500,"z":-260}],"r":150},{"path":[{"x":-265,"y":1,"z":-262},{"x":-253,"y":2,"z":251}],"r":150},{"path":[{"x":-253,"y":2,"z":251},{"x":262,"y":0,"z":253}],"r":150},{"path":[{"x":265,"y":500,"z":255},{"x":262,"y":0,"z":253}],"r":150},{"path":[{"x":-248,"y":500,"z":256},{"x":-253,"y":2,"z":251}],"r":150},{"path":[{"x":262,"y":0,"z":253},{"x":251,"y":4,"z":-244}],"r":150},{"path":[{"x":272,"y":500,"z":-245},{"x":564,"y":261,"z":-545}],"r":150},{"path":[{"x":251,"y":4,"z":-244},{"x":564,"y":261,"z":-545}],"r":150},{"path":[{"x":-248,"y":500,"z":256},{"x":-545,"y":261,"z":557}],"r":150},{"path":[{"x":-253,"y":2,"z":251},{"x":-545,"y":261,"z":557}],"r":150},{"path":[{"x":-2399,"y":0,"z":2218},{"x":-545,"y":261,"z":557}],"r":180},{"path":[{"x":564,"y":261,"z":-545},{"x":2543,"y":0,"z":-2273}],"r":180},{"path":[{"x":-545,"y":261,"z":557},{"x":-940,"y":230,"z":-904}],"r":100},{"path":[{"x":564,"y":261,"z":-545},{"x":-940,"y":230,"z":-904}],"r":100},{"path":[{"x":-545,"y":261,"z":557},{"x":896,"y":230,"z":895}],"r":100},{"path":[{"x":896,"y":230,"z":895},{"x":564,"y":261,"z":-545}],"r":100}]}`), { silent: true, persist: false });
+} catch (e) { console.warn('[bake] cubecenter install failed:', e); }
 _loadCustomMapsFromLocalStorage();
 buildShipSelect();
 buildSettingsPage();
