@@ -10412,7 +10412,10 @@ class Projectile {
           if (this.isCluster) this.spawnClusterChildren();
           if (this.splash > 0) this.splashDamage();
           spawnImpactSparks(hitPoint, 8);
-          playSound('damage');
+          // v8VR: route impact through the spatial path so wall hits
+          // pan + occlude + reverb correctly relative to the player.
+          if (typeof playSpatialSound === 'function') playSpatialSound('damage', hitPoint.clone(), { refDistance: 220, maxDistance: 4000 });
+          else playSound('damage');
           this.destroy();
           return;
         } else {
@@ -11540,6 +11543,21 @@ function spawnExplosion(pos, size) {
     const _qm = (typeof QUALITY !== 'undefined' && QUALITY.particleRate) ? QUALITY.particleRate() : 1.0;
     const count = Math.min(48, Math.max(6, Math.round(size * 0.6 * _qm)));
     v8SpawnDebris(pos, count, Math.max(0.6, size * 0.05), Math.max(60, size * 6));
+  }
+
+  // v8VR: spatial explosion audio. Routes through the existing HRTF panner
+  // + occlusion lowpass + multi-convolver reverb (wide/tight/long) so the
+  // boom pans correctly, gets eaten by walls between you and it, and tails
+  // off into the room tone. Larger blasts carry farther via refDistance.
+  if (typeof playSpatialSound === 'function') {
+    const _far = Math.max(300, size * 18);
+    try { playSpatialSound('explosion', pos.clone(), { refDistance: Math.max(180, size * 10), maxDistance: _far, rolloffFactor: 0.85 }); } catch (_) {}
+  }
+
+  // v8VR: ambient sidechain duck. Big explosions briefly drop the ambient
+  // bed so the impact reads. Tied to size so small spark pops don't duck.
+  if (size >= 18 && typeof v8DuckAmbient === 'function') {
+    v8DuckAmbient(Math.min(0.85, size / 100), 0.25, 0.6);
   }
 
 
@@ -18171,6 +18189,16 @@ function updateRoundSystem(dt) {
         }
         Overlays.banner(title, winnerLabel + '  |  FLEET A: ' + game.scoreA + '  FLEET B: ' + game.scoreB);
       }
+      // v8VR: ship-AI personal callout on round end. Mirrors the banner
+      // logic above (only fires for assigned players, not spectators).
+      // Skipped on the round that triggers matchEnd so the announcer
+      // doesn't double up with ANN.victory() / ANN.defeat() one beat later.
+      if (typeof ANN !== 'undefined' && player &&
+          (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B) &&
+          game.scoreA < LSS.ROUNDS_TO_WIN && game.scoreB < LSS.ROUNDS_TO_WIN) {
+        if (player.team === winnerTeam) ANN.roundWon();
+        else                            ANN.roundLost();
+      }
     }
   } else if (game.state === 'roundEnd') {
     game.roundEndTimer -= dt;
@@ -20906,6 +20934,25 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="sound-import-status">${audio.labRecipes ? Object.keys(audio.labRecipes).length + ' recipes active' : 'using built-in synth for all sounds'}</div>
     </div>
 
+    <!-- v8VR: Spatial audio — reverb wet level + impact ambient duck.
+         The existing system has a wide/tight/long convolver chain; this
+         slider controls the master reverbGain that all three feed into. -->
+    <div class="settings-section">
+      <h3>Spatial Audio</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Wet reverb tail on every spatial SFX (explosions, hits, ability bursts). Lower for dry / arcade feel; higher for cinematic / cathedral. The convolver chain itself adapts to the room you're in (open arena vs. tight tunnel).</label>
+      </div>
+      <div class="setting-row">
+        <label>Reverb wet</label>
+        <input type="range" id="set-reverb-wet" min="0" max="1" step="0.05" value="${(audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value.toFixed(2) : '0.40'}">
+        <div class="value-display" id="val-reverb-wet">${(audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value.toFixed(2) : '0.40'}</div>
+      </div>
+      <div class="setting-row">
+        <label>Ambient duck on impacts</label>
+        <input type="checkbox" id="set-ambient-duck" ${(typeof audio !== 'undefined' && audio.ambientDuckEnabled !== false) ? 'checked' : ''}>
+      </div>
+    </div>
+
     <!-- v8VR: Ship AI announcer (Web Speech) settings. Voice list is filled
          dynamically in the post-render hook because speechSynthesis voices
          load asynchronously on most browsers. -->
@@ -21209,6 +21256,28 @@ function buildSettingsPage() {
         soundImportStat.style.color = result.ok ? '#9af' : '#f88';
         soundImportStat.textContent = 'LSS_SOUND.json: ' + result.message;
       }
+    });
+  }
+
+  // v8VR: Spatial audio settings wiring (reverb wet + ambient duck toggle).
+  const reverbWetEl = overlay.querySelector('#set-reverb-wet');
+  const reverbWetVal = overlay.querySelector('#val-reverb-wet');
+  if (reverbWetEl) {
+    reverbWetEl.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(1, parseFloat(reverbWetEl.value)));
+      if (audio.reverbGain && audio.reverbGain.gain) {
+        try { audio.reverbGain.gain.value = v; } catch (_) {}
+      }
+      audio.reverbWet = v;
+      if (reverbWetVal) reverbWetVal.textContent = v.toFixed(2);
+      if (typeof saveSettings === 'function') saveSettings();
+    });
+  }
+  const ambientDuckEl = overlay.querySelector('#set-ambient-duck');
+  if (ambientDuckEl) {
+    ambientDuckEl.addEventListener('change', () => {
+      audio.ambientDuckEnabled = !!ambientDuckEl.checked;
+      if (typeof saveSettings === 'function') saveSettings();
     });
   }
 
@@ -21828,6 +21897,9 @@ function saveSettings() {
       annPitch:   announcer.pitch,
       annRate:    announcer.rate,
       annVolume:  announcer.volume,
+      // v8VR: spatial audio prefs.
+      reverbWet: (audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value : (audio.reverbWet != null ? audio.reverbWet : 0.40),
+      ambientDuckEnabled: audio.ambientDuckEnabled !== false,
       wallPattern: (typeof game.wallPattern === 'number') ? game.wallPattern : 0,
       wallBlackBase: !!game.wallBlackBase,
       // (post-v6.9 patch, 2026-04-28) Per-pattern wallParams. Each slot
@@ -22031,6 +22103,16 @@ function loadSettings() {
         }
       }
     }
+    // v8VR: spatial audio prefs. reverbGain.gain may not exist yet at load
+    // time (initAudio runs later), so we stash on `audio.reverbWet` and
+    // the post-init pass below copies it onto the live gain node.
+    if (typeof data.reverbWet === 'number') {
+      audio.reverbWet = data.reverbWet;
+      if (audio.reverbGain && audio.reverbGain.gain) {
+        try { audio.reverbGain.gain.value = data.reverbWet; } catch (_) {}
+      }
+    }
+    if (data.ambientDuckEnabled !== undefined) audio.ambientDuckEnabled = !!data.ambientDuckEnabled;
     // Wall pattern (0..7 = lab cosmic patterns, 8 = Soul Array). Stored on
     // game so createMeshFromPositions can read it when the shader is built.
     if (data.wallPattern !== undefined) game.wallPattern = data.wallPattern | 0;
@@ -24981,6 +25063,39 @@ window.triggerHitFeedback = triggerHitFeedback;
 window.hitFX              = hitFX;
 
 // =====================================================================
+// v8VR: Sidechain duck on the existing ambient bus
+// =====================================================================
+// On a big impact (explosion, doomed transition, score banner) we briefly
+// pull the `audio.ambientGain` down so the punch reads. The existing
+// audio system fades ambient up/down via a slow lerp in updateAmbientBed,
+// so we cancel the slow ramp and write a short envelope: drop fast, hold
+// briefly, restore. The lerp picks up again on the next tick.
+//
+// duckAmount: 0..1 fraction to subtract from current ambient gain
+// attack:     seconds to drop
+// release:    seconds to restore
+// =====================================================================
+function v8DuckAmbient(duckAmount, attack, release) {
+  if (typeof audio === 'undefined' || !audio.ctx || !audio.ambientGain) return;
+  // Respect the user's "Ambient duck on impacts" toggle (default on).
+  if (audio.ambientDuckEnabled === false) return;
+  duckAmount = Math.max(0, Math.min(1, duckAmount || 0.5));
+  attack     = attack  != null ? attack  : 0.05;
+  release    = release != null ? release : 0.5;
+  const g   = audio.ambientGain.gain;
+  const now = audio.ctx.currentTime;
+  const cur = g.value;
+  const target = Math.max(0, cur * (1 - duckAmount));
+  try {
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(cur, now);
+    g.linearRampToValueAtTime(target, now + attack);
+    g.linearRampToValueAtTime(cur,    now + attack + release);
+  } catch (_) {}
+}
+window.v8DuckAmbient = v8DuckAmbient;
+
+// =====================================================================
 // v8VR: Ship AI announcer (Web Speech API)
 // =====================================================================
 // Procedural in-game voice line system. Uses the browser's built-in
@@ -24996,8 +25111,8 @@ const announcer = {
   enabled: true,
   voice: null,             // resolved SpeechSynthesisVoice object
   voiceName: null,         // persisted voice name (resolves to .voice on init)
-  rate: 1.0,               // natural cadence; 0.9-1.15 reads well
-  pitch: 1.0,              // natural pitch; lower the slider for ship-AI feel
+  rate: 1.5,               // ship-AI cadence (Ashman's pick: 1.5 reads as alert + composed)
+  pitch: 1.0,              // natural pitch; lower the slider for more robotic feel
   volume: 0.9,
   globalGap: 600,          // ms between any two lines (anti-chain)
   cooldowns: {},
@@ -25009,7 +25124,10 @@ const announcer = {
   // Speech API defaults are deliberately near the bottom; they only get
   // picked when nothing better is available.
   voicePrefs: [
-    // Microsoft Edge / Windows 11 neural voices (newest, most natural):
+    // Default pick: Microsoft Imani Online (Natural). Warm, composed, reads
+    // as a calm ship AI rather than a generic news anchor.
+    'Microsoft Imani Online (Natural)',
+    // Other Microsoft Edge / Windows 11 neural voices (newest, most natural):
     'Microsoft Andrew Online (Natural)',
     'Microsoft Brandon Online (Natural)',
     'Microsoft Brian Online (Natural)',
@@ -25202,6 +25320,10 @@ const ANN = {
   introBoot: () => announce('introBoot',
     'Welcome to Last Ship Sailing, pilot! Choose your adventure, climb in a ship, and come join the battle.',
     { cooldown: 600, priority: true }),
+
+  // ---- Round-end personal callouts (vs. match-end victory/defeat above) ----
+  roundWon:  () => announce('roundWon',  'Round won. Great job.',     { cooldown: 0, priority: true }),
+  roundLost: () => announce('roundLost', 'Round lost. Try again.',    { cooldown: 0, priority: true }),
 };
 
 // Try to init now. If voices are not yet enumerated the voiceschanged
@@ -25813,7 +25935,8 @@ function initAudio() {
     audio.dryGain.connect(audio.sfxBus);
 
     audio.reverbGain = audio.ctx.createGain();
-    audio.reverbGain.gain.value = 0.40; // reverb for futuristic echo (tamed to avoid ringing)
+    // v8VR: honor any reverb wet level loaded from settings; default 0.40.
+    audio.reverbGain.gain.value = (typeof audio.reverbWet === 'number') ? audio.reverbWet : 0.40;
     audio.reverbGain.connect(audio.sfxBus);
 
     // Dual convolvers with environment crossfade:
