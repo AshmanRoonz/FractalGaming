@@ -379,6 +379,20 @@ function rebuildAllRoomMeshes() {
   }
 }
 
+// Resolve a tunnel's endpoints from the rooms it connects (by ID).
+// Returns null if either room is missing. Endpoints are LIVE: derived from
+// current room positions so tunnels stretch with their rooms automatically.
+function getTunnelPath(t) {
+  if (!t) return null;
+  const a = state.level.rooms.find(r => r.id === t.fromRoomId);
+  const b = state.level.rooms.find(r => r.id === t.toRoomId);
+  if (!a || !b) return null;
+  return [
+    { x: a.x, y: a.y, z: a.z },
+    { x: b.x, y: b.y, z: b.z }
+  ];
+}
+
 function rebuildTunnelMeshes() {
   for (const m of tunnelMeshes) {
     scene.remove(m);
@@ -387,7 +401,7 @@ function rebuildTunnelMeshes() {
   }
   tunnelMeshes.length = 0;
   state.level.tunnels.forEach((t, ti) => {
-    const path = t.path;
+    const path = getTunnelPath(t);
     if (!path || path.length < 2) return;
     const tunR = t.r || DEFAULT_TUNNEL_RADIUS;
     for (let i = 0; i < path.length - 1; i++) {
@@ -547,9 +561,10 @@ function addRoom(x, y, z) {
 function deleteRoom(idx) {
   const room = state.level.rooms[idx];
   if (!room) return;
-  // Remove tunnels whose endpoints touch this room's position.
+  // Remove tunnels that reference this room by ID; surviving tunnels keep
+  // their other endpoint linked to its room and stay live.
   state.level.tunnels = state.level.tunnels.filter(t =>
-    !t.path.some(p => p.x === room.x && p.y === room.y && p.z === room.z)
+    t.fromRoomId !== room.id && t.toRoomId !== room.id
   );
   state.level.rooms.splice(idx, 1);
   rebuildAllRoomMeshes();
@@ -560,19 +575,19 @@ function deleteRoom(idx) {
 function addTunnel(roomA, roomB) {
   const a = state.level.rooms[roomA], b = state.level.rooms[roomB];
   if (!a || !b) return;
-  // Avoid duplicate (A↔B already exists).
-  const dup = state.level.tunnels.some(t => {
-    if (t.path.length < 2) return false;
-    const p0 = t.path[0], p1 = t.path[t.path.length - 1];
-    const eq = (p, r) => p.x === r.x && p.y === r.y && p.z === r.z;
-    return (eq(p0, a) && eq(p1, b)) || (eq(p0, b) && eq(p1, a));
-  });
+  // Avoid duplicate (A↔B already exists). Match by room ID rather than
+  // position so a duplicate doesn't sneak in just because two rooms share
+  // coords briefly during a drag.
+  const dup = state.level.tunnels.some(t =>
+    (t.fromRoomId === a.id && t.toRoomId === b.id) ||
+    (t.fromRoomId === b.id && t.toRoomId === a.id)
+  );
   if (dup) return;
+  // Store room IDs (not coordinates) so tunnel endpoints follow the rooms
+  // as they move; rebuildTunnelMeshes() resolves IDs to current positions.
   state.level.tunnels.push({
-    path: [
-      { x: a.x, y: a.y, z: a.z },
-      { x: b.x, y: b.y, z: b.z }
-    ],
+    fromRoomId: a.id,
+    toRoomId: b.id,
     r: DEFAULT_TUNNEL_RADIUS
   });
   rebuildTunnelMeshes();
@@ -692,11 +707,10 @@ function refreshSidebarSelection() {
     ui.selectedEmpty.style.display = 'none';
     ui.selectedRoom.style.display = 'none';
     ui.selectedTunnel.style.display = '';
-    const a = t.path[0], b = t.path[t.path.length - 1];
-    const fromR = state.level.rooms.find(r => r.x === a.x && r.y === a.y && r.z === a.z);
-    const toR = state.level.rooms.find(r => r.x === b.x && r.y === b.y && r.z === b.z);
+    const fromR = state.level.rooms.find(r => r.id === t.fromRoomId);
+    const toR = state.level.rooms.find(r => r.id === t.toRoomId);
     ui.selTunnelInfo.textContent =
-      `${fromR ? fromR.id : '?'} ↔ ${toR ? toR.id : '?'}, ${t.path.length} waypoints`;
+      `${fromR ? fromR.id : '?'} ↔ ${toR ? toR.id : '?'}`;
     ui.selTunnelR.value = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
   } else {
     ui.selectedEmpty.style.display = '';
@@ -709,7 +723,17 @@ function refreshSidebarSelection() {
 ui.selId.addEventListener('input', () => {
   if (state.selectedKind !== 'room') return;
   const r = state.level.rooms[state.selectedIndex];
-  if (r) { r.id = ui.selId.value; refreshLists(); }
+  if (!r) return;
+  // Renaming a room must also rewrite any tunnel that referenced its old
+  // ID, otherwise tunnels would silently detach from the room.
+  const oldId = r.id;
+  const newId = ui.selId.value;
+  r.id = newId;
+  for (const t of state.level.tunnels) {
+    if (t.fromRoomId === oldId) t.fromRoomId = newId;
+    if (t.toRoomId === oldId) t.toRoomId = newId;
+  }
+  refreshLists();
 });
 ui.selTeam.addEventListener('change', () => {
   if (state.selectedKind !== 'room') return;
@@ -804,9 +828,8 @@ function refreshLists() {
   state.level.tunnels.forEach((t, i) => {
     const div = document.createElement('div');
     div.className = 'tunnel-item' + (state.selectedKind === 'tunnel' && state.selectedIndex === i ? ' selected' : '');
-    const a = t.path[0], b = t.path[t.path.length - 1];
-    const fromR = state.level.rooms.find(r => r.x === a.x && r.y === a.y && r.z === a.z);
-    const toR = state.level.rooms.find(r => r.x === b.x && r.y === b.y && r.z === b.z);
+    const fromR = state.level.rooms.find(r => r.id === t.fromRoomId);
+    const toR = state.level.rooms.find(r => r.id === t.toRoomId);
     const tunR = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
     div.innerHTML = `<span>${escapeHtml(fromR ? fromR.id : '?')} → ${escapeHtml(toR ? toR.id : '?')}</span><span class="stat">r=${tunR}</span>`;
     div.addEventListener('click', () => selectTunnel(i));
@@ -850,14 +873,23 @@ function buildLevelExport() {
       ...(r.champion ? { champion: true } : {}),
       x: r.x, y: r.y, z: r.z, r: r.r
     })),
-    tunnels: state.level.tunnels.map(t => ({
-      path: t.path.map(p => ({ x: p.x, y: p.y, z: p.z })),
-      // Always emit r explicitly so authored tunnels are unambiguous and
-      // round-trip through export/import without silently reverting to the
-      // game default (180). The game still accepts tunnels without r and
-      // falls back to TR; this is just author hygiene.
-      r: (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS
-    }))
+    tunnels: state.level.tunnels.map(t => {
+      // The on-disk format stores explicit endpoint coordinates so the game
+      // (which doesn't carry our editor's room-ID concept) can consume the
+      // file directly. We resolve IDs to current room positions at export
+      // time, which means tunnels always reflect the latest move.
+      const path = getTunnelPath(t);
+      return {
+        path: path
+          ? path.map(p => ({ x: p.x, y: p.y, z: p.z }))
+          : [],
+        // Always emit r explicitly so authored tunnels are unambiguous and
+        // round-trip through export/import without silently reverting to the
+        // game default (180). The game still accepts tunnels without r and
+        // falls back to TR; this is just author hygiene.
+        r: (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS
+      };
+    }).filter(t => t.path.length >= 2)
   };
 }
 
@@ -889,14 +921,31 @@ function loadLevelImport(data) {
       else _seenChampion = true;
     }
   }
-  state.level.tunnels = (data.tunnels || []).map(t => ({
-    path: (t.path || []).map(p => ({ x: +p.x || 0, y: +p.y || 0, z: +p.z || 0 })),
-    // Default to game's TR (180) if the imported tunnel has no explicit
-    // radius; game does the same fallback in buildRoomGraphLevel.
-    r: (typeof t.r === 'number')
-      ? Math.max(MIN_TUNNEL_RADIUS, Math.min(MAX_TUNNEL_RADIUS, +t.r))
-      : DEFAULT_TUNNEL_RADIUS
-  }));
+  // Resolve imported path-based tunnels to room-ID references so they stay
+  // locked to their rooms after import. A tunnel's first/last waypoint must
+  // sit at a room's coordinates (rooms are stored as integers); we find that
+  // room and store its ID. Tunnels whose endpoints don't match any room are
+  // dropped: they'd be visually orphaned anyway.
+  const findRoomAt = (p) => {
+    const px = +p.x | 0, py = +p.y | 0, pz = +p.z | 0;
+    return state.level.rooms.find(r => r.x === px && r.y === py && r.z === pz);
+  };
+  state.level.tunnels = (data.tunnels || []).map(t => {
+    const path = (t.path || []);
+    if (path.length < 2) return null;
+    const fromR = findRoomAt(path[0]);
+    const toR = findRoomAt(path[path.length - 1]);
+    if (!fromR || !toR) return null;
+    return {
+      fromRoomId: fromR.id,
+      toRoomId: toR.id,
+      // Default to game's TR (180) if the imported tunnel has no explicit
+      // radius; game does the same fallback in buildRoomGraphLevel.
+      r: (typeof t.r === 'number')
+        ? Math.max(MIN_TUNNEL_RADIUS, Math.min(MAX_TUNNEL_RADIUS, +t.r))
+        : DEFAULT_TUNNEL_RADIUS
+    };
+  }).filter(Boolean);
   state.nextRoomId = state.level.rooms.length + 1;
   ui.lvlName.value = state.level.name;
   ui.lvlKey.value = state.level.key;
