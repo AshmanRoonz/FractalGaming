@@ -228,6 +228,35 @@
       <button id="new-map-btn">New (clear all)</button>
     </div>
 
+    <h2>Sync with Game HTML</h2>
+    <div class="hint" style="line-height: 1.5;">
+      Opens last_ship_sailing_v8VR.html and lists every baked-in map (each
+      installCustomMap call). Pick one to edit, then save changes straight
+      back to the file. Uses File System Access (Chrome / Edge) for direct
+      writes; other browsers fall back to a download of the modified file.
+    </div>
+    <div class="toolbar" style="margin-top: 6px; gap:6px; flex-wrap:wrap;">
+      <button id="game-open-btn">Open Game HTML...</button>
+      <span id="game-html-status" class="hint" style="align-self:center; flex:1;">No game file open.</span>
+    </div>
+    <div id="baked-maps-section" style="display:none; margin-top:8px;">
+      <div class="row">
+        <label>Baked map</label>
+        <select id="baked-map-select" style="flex:1;"></select>
+      </div>
+      <div class="toolbar" style="margin-top:6px; gap:6px; flex-wrap:wrap;">
+        <button id="game-load-btn">Load to editor</button>
+        <button id="game-save-btn">Save current to game</button>
+        <button id="game-add-btn">Add as new baked map</button>
+      </div>
+      <div class="hint" style="margin-top:6px;">
+        "Save current to game" writes the editor's current map back to the
+        baked map whose <code>key</code> matches the current map's key.
+        "Add as new baked map" appends a new installCustomMap call (use a
+        fresh key to avoid stomping an existing one).
+      </div>
+    </div>
+
     <h2>Help</h2>
     <div class="hint" style="line-height: 1.5;">
       <strong>+ Room:</strong> click in viewport to place a sphere on the Y=0 plane (radius 200; edit after).<br>
@@ -886,6 +915,14 @@ const ui = {
   importText: document.getElementById('import-text'),
   importTextBtn: document.getElementById('import-text-btn'),
   newMapBtn: document.getElementById('new-map-btn'),
+  // v2: Sync with Game HTML
+  gameOpenBtn: document.getElementById('game-open-btn'),
+  gameStatus: document.getElementById('game-html-status'),
+  bakedMapsSection: document.getElementById('baked-maps-section'),
+  bakedMapSelect: document.getElementById('baked-map-select'),
+  gameLoadBtn: document.getElementById('game-load-btn'),
+  gameSaveBtn: document.getElementById('game-save-btn'),
+  gameAddBtn: document.getElementById('game-add-btn'),
   hudTool: document.getElementById('hud-tool'),
   hudInfo: document.getElementById('hud-info')
 };
@@ -1503,6 +1540,216 @@ ui.newMapBtn.addEventListener('click', () => {
   rebuildAllRoomMeshes();
   rebuildTunnelMeshes();
   clearSelection();
+});
+
+// ============================================================
+// Sync with Game HTML (v2)
+// Open last_ship_sailing_v8VR.html, parse out every
+//   installCustomMap(JSON.parse(`{...}`), { silent: true, persist: false });
+// block, surface them in a dropdown, allow load + save back.
+//
+// Save path uses the File System Access API when available (Chrome / Edge)
+// for in-place writes; otherwise falls back to a download of the modified
+// HTML so the user can drop it back over the original.
+// ============================================================
+const gameSync = {
+  fileHandle: null,     // FileSystemFileHandle when FSA succeeded
+  fileName: null,       // for download fallback
+  htmlText: null,       // current full HTML contents in memory
+  bakedMaps: [],        // [{ json, rawJson, key, name }]
+};
+
+function _setGameStatus(msg, color) {
+  if (!ui.gameStatus) return;
+  ui.gameStatus.textContent = msg;
+  ui.gameStatus.style.color = color || '';
+}
+
+// Match every `installCustomMap(JSON.parse(`{...}`)` literal. The JSON is
+// inside a backtick template, may contain newlines, no nested backticks.
+const _BAKED_RE = /installCustomMap\(JSON\.parse\(`(\{[\s\S]*?\})`\)/g;
+
+function _parseBakedMaps() {
+  gameSync.bakedMaps = [];
+  if (!gameSync.htmlText) return;
+  _BAKED_RE.lastIndex = 0;
+  let m;
+  while ((m = _BAKED_RE.exec(gameSync.htmlText)) !== null) {
+    const raw = m[1];
+    try {
+      const json = JSON.parse(raw);
+      gameSync.bakedMaps.push({
+        json,
+        rawJson: raw,
+        matchIndex: m.index,
+        matchEnd: m.index + m[0].length,
+        key:  json.key  || '',
+        name: json.name || '(unnamed)',
+      });
+    } catch (e) {
+      console.warn('[mapsync] failed to parse a baked map:', e, raw.slice(0, 80));
+    }
+  }
+  _refreshBakedMapDropdown();
+}
+
+function _refreshBakedMapDropdown() {
+  if (!ui.bakedMapSelect) return;
+  ui.bakedMapSelect.innerHTML = '';
+  gameSync.bakedMaps.forEach((m, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = m.name + '  [' + (m.key || '?') + ']';
+    ui.bakedMapSelect.appendChild(opt);
+  });
+  ui.bakedMapsSection.style.display = gameSync.bakedMaps.length ? 'block' : 'none';
+}
+
+async function _gameOpen() {
+  // Try the modern File System Access API first; falls back to a regular
+  // file input when the browser can't grant a write handle.
+  if (typeof window.showOpenFilePicker === 'function') {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'Game HTML', accept: { 'text/html': ['.html'] } }],
+        excludeAcceptAllOption: false, multiple: false,
+      });
+      const file = await handle.getFile();
+      gameSync.fileHandle = handle;
+      gameSync.fileName   = file.name;
+      gameSync.htmlText   = await file.text();
+      _parseBakedMaps();
+      _setGameStatus(file.name + '  /  ' + gameSync.bakedMaps.length + ' baked maps  /  writable', '#9af');
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;          // user cancelled picker
+      console.warn('[mapsync] FSA open failed, falling back to file input:', e);
+    }
+  }
+  // Fallback path
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.html,text/html';
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      gameSync.fileHandle = null;
+      gameSync.fileName   = f.name;
+      gameSync.htmlText   = reader.result;
+      _parseBakedMaps();
+      _setGameStatus(f.name + '  /  ' + gameSync.bakedMaps.length + ' baked maps  /  download-only', '#fc6');
+    };
+    reader.readAsText(f);
+  });
+  input.click();
+}
+
+async function _gameWriteOut() {
+  if (!gameSync.htmlText) { alert('Open the game HTML first.'); return; }
+  if (gameSync.fileHandle) {
+    try {
+      const writable = await gameSync.fileHandle.createWritable();
+      await writable.write(gameSync.htmlText);
+      await writable.close();
+      _setGameStatus('Saved to ' + gameSync.fileName + '  /  ' + gameSync.bakedMaps.length + ' baked maps', '#9f9');
+      return;
+    } catch (e) {
+      console.warn('[mapsync] FSA write failed, downloading instead:', e);
+    }
+  }
+  // Download fallback
+  const blob = new Blob([gameSync.htmlText], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = gameSync.fileName || 'last_ship_sailing_v8VR.html';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  _setGameStatus('Downloaded modified ' + a.download + '. Replace the original to apply.', '#fc6');
+}
+
+ui.gameOpenBtn.addEventListener('click', _gameOpen);
+
+ui.gameLoadBtn.addEventListener('click', () => {
+  const i = parseInt(ui.bakedMapSelect.value, 10);
+  if (!gameSync.bakedMaps[i]) { alert('Pick a baked map first.'); return; }
+  loadLevelImport(gameSync.bakedMaps[i].json);
+  setHud(toolLabel[state.tool].name, 'Loaded "' + gameSync.bakedMaps[i].name + '" from game HTML.');
+});
+
+ui.gameSaveBtn.addEventListener('click', async () => {
+  if (!gameSync.htmlText) { alert('Open the game HTML first.'); return; }
+  const data = buildLevelExport();
+  const newRaw = JSON.stringify(data);
+  const idx = gameSync.bakedMaps.findIndex(m => m.key === data.key);
+  if (idx === -1) {
+    alert('No baked map with key "' + data.key + '" exists in the game HTML. Use "Add as new baked map" instead.');
+    return;
+  }
+  const oldRaw = gameSync.bakedMaps[idx].rawJson;
+  const at = gameSync.htmlText.indexOf(oldRaw);
+  if (at < 0) {
+    alert('Could not relocate the baked map in the file. Re-open the HTML and try again.');
+    return;
+  }
+  gameSync.htmlText = gameSync.htmlText.slice(0, at) + newRaw + gameSync.htmlText.slice(at + oldRaw.length);
+  // Update in-memory copy so a follow-up save sees the new bytes.
+  gameSync.bakedMaps[idx].rawJson = newRaw;
+  gameSync.bakedMaps[idx].json    = data;
+  gameSync.bakedMaps[idx].name    = data.name;
+  _refreshBakedMapDropdown();
+  ui.bakedMapSelect.value = String(idx);
+  await _gameWriteOut();
+});
+
+ui.gameAddBtn.addEventListener('click', async () => {
+  if (!gameSync.htmlText) { alert('Open the game HTML first.'); return; }
+  const data = buildLevelExport();
+  const newRaw = JSON.stringify(data);
+  // Reject if a baked map already has this key (would silently stomp on install).
+  if (gameSync.bakedMaps.some(m => m.key === data.key)) {
+    alert('A baked map with key "' + data.key + '" already exists. Change the current map\'s key first.');
+    return;
+  }
+  // Insert a new try/catch block right after the LAST existing one. We
+  // identify the last existing block by finding the last occurrence of
+  // its `} catch (e) { console.warn('[bake] ... }` line. If no baked
+  // installs exist yet, fall back to inserting before the first
+  // _loadCustomMapsFromLocalStorage() call.
+  const insertion = '\ntry {\n  installCustomMap(JSON.parse(`' + newRaw +
+    '`), { silent: true, persist: false });\n} catch (e) { console.warn(\'[bake] ' +
+    (data.key || 'newmap') + ' install failed:\', e); }';
+  let where = -1;
+  // Search for last existing bake catch line.
+  const catchRe = /\} catch \(e\) \{ console\.warn\('\[bake\][^}]*\}/g;
+  let lastEnd = -1;
+  let mm;
+  while ((mm = catchRe.exec(gameSync.htmlText)) !== null) {
+    lastEnd = mm.index + mm[0].length;
+  }
+  if (lastEnd >= 0) {
+    where = lastEnd;
+  } else {
+    // No existing baked installs; put it just before the first
+    // _loadCustomMapsFromLocalStorage() call.
+    where = gameSync.htmlText.indexOf('_loadCustomMapsFromLocalStorage()');
+    if (where < 0) {
+      alert('Could not find a safe insertion point in the HTML.');
+      return;
+    }
+  }
+  gameSync.htmlText = gameSync.htmlText.slice(0, where) + insertion + gameSync.htmlText.slice(where);
+  // Re-parse so the dropdown picks up the new entry and we keep
+  // matchIndex / rawJson references in sync.
+  _parseBakedMaps();
+  // Select the newly added map (last one with this key).
+  const newIdx = gameSync.bakedMaps.findIndex(m => m.key === data.key);
+  if (newIdx >= 0) ui.bakedMapSelect.value = String(newIdx);
+  await _gameWriteOut();
 });
 
 // ============================================================
