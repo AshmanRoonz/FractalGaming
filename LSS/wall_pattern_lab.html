@@ -216,6 +216,28 @@
       Auto-saves to localStorage on every change ; survives reload.
     </div>
 
+    <h2>Sync with Game HTML</h2>
+    <div class="hint" style="line-height: 1.5; margin-bottom:6px;">
+      Opens last_ship_sailing_v8VR.html and surfaces the baked-in
+      <code>const DEFAULT_WALL_CONFIG = {...}</code> block. Edit the JSON in
+      the textarea below, then save back. The lab's multi-layer bg/fg/fg2
+      shader is a different schema than the game's flat single-layer
+      wallParams; sync here is the raw JSON for the game's seed config.
+      Uses File System Access (Chrome / Edge) for direct writes; other
+      browsers fall back to a download.
+    </div>
+    <div class="toolbar" style="gap:6px; flex-wrap:wrap;">
+      <button id="game-open-btn">Open Game HTML...</button>
+      <span id="game-html-status" class="hint" style="align-self:center; flex:1;">No game file open.</span>
+    </div>
+    <div id="game-config-section" style="display:none; margin-top:6px;">
+      <textarea id="game-config-io" style="width:100%; min-height:180px; background:#08080f; color:#ddd; border:1px solid #2a2a3a; padding:6px; font-family:'Courier New', monospace; font-size:11px;" placeholder="DEFAULT_WALL_CONFIG JSON appears here on Open."></textarea>
+      <div class="toolbar" style="margin-top:6px; gap:6px; flex-wrap:wrap;">
+        <button id="game-save-btn">Save to game HTML</button>
+        <button id="game-reload-btn">Reload from game</button>
+      </div>
+    </div>
+
     <h2>Stats</h2>
     <div class="stat" id="stats">FPS: --</div>
   </div>
@@ -971,6 +993,165 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   if (!confirm('Reset all controls to defaults? Current config will be lost.')) return;
   try { localStorage.removeItem(LS_KEY); } catch (e) {}
   location.reload();
+});
+
+// ============================================================
+// Sync with Game HTML (v2)
+// Reads/writes the const DEFAULT_WALL_CONFIG = {...}; block in
+// last_ship_sailing_v8VR.html. Lab schema (multi-layer bg/fg/fg2) does
+// not match the game's flat single-layer wallParams, so this exposes the
+// raw JSON for manual editing rather than wiring through importConfig().
+// ============================================================
+const gameSync = { fileHandle: null, fileName: null, htmlText: null, blockStart: -1, blockEnd: -1 };
+
+function _setGameStatus(msg, color) {
+  const el = document.getElementById('game-html-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = color || '';
+}
+
+// Brace-balanced extraction of a JS object literal starting at the first
+// `{` at-or-after `from`. Skips string literals (single, double, backtick)
+// while counting braces. Returns { start, end, text } where end is the
+// index AFTER the closing `}`. Null on failure.
+function _extractObjectLiteral(src, from) {
+  let i = src.indexOf('{', from);
+  if (i < 0) return null;
+  let depth = 0;
+  let inStr = null;     // current string-quote char or null
+  let escape = false;
+  for (let k = i; k < src.length; k++) {
+    const c = src[k];
+    if (escape) { escape = false; continue; }
+    if (inStr) {
+      if (c === '\\') { escape = true; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return { start: i, end: k + 1, text: src.slice(i, k + 1) }; }
+  }
+  return null;
+}
+
+function _parseDefaultWallConfig() {
+  const text = gameSync.htmlText;
+  if (!text) return false;
+  const constStart = text.indexOf('const DEFAULT_WALL_CONFIG');
+  if (constStart < 0) return false;
+  const obj = _extractObjectLiteral(text, constStart);
+  if (!obj) return false;
+  // Use Function() to parse; tolerates JS-style object literals (single
+  // quotes, trailing commas) better than JSON.parse. The current v8VR
+  // baked config happens to be JSON-compatible, but this stays robust if
+  // it ever shifts to a JS-flavored literal.
+  let parsed;
+  try { parsed = (new Function('return (' + obj.text + ')'))(); }
+  catch (e) { console.warn('[wallsync] parse failed:', e); return false; }
+  gameSync.blockStart = obj.start;
+  gameSync.blockEnd   = obj.end;
+  document.getElementById('game-config-io').value = JSON.stringify(parsed, null, 2);
+  document.getElementById('game-config-section').style.display = 'block';
+  return true;
+}
+
+async function _gameOpen() {
+  if (typeof window.showOpenFilePicker === 'function') {
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'Game HTML', accept: { 'text/html': ['.html'] } }],
+        excludeAcceptAllOption: false, multiple: false,
+      });
+      const file = await handle.getFile();
+      gameSync.fileHandle = handle;
+      gameSync.fileName   = file.name;
+      gameSync.htmlText   = await file.text();
+      if (_parseDefaultWallConfig()) {
+        _setGameStatus(file.name + '  /  DEFAULT_WALL_CONFIG loaded  /  writable', '#9af');
+      } else {
+        _setGameStatus(file.name + '  /  could not locate DEFAULT_WALL_CONFIG', '#f88');
+      }
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      console.warn('[wallsync] FSA open failed, falling back:', e);
+    }
+  }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.html,text/html';
+  input.addEventListener('change', () => {
+    const f = input.files && input.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      gameSync.fileHandle = null;
+      gameSync.fileName   = f.name;
+      gameSync.htmlText   = reader.result;
+      if (_parseDefaultWallConfig()) {
+        _setGameStatus(f.name + '  /  DEFAULT_WALL_CONFIG loaded  /  download-only', '#fc6');
+      } else {
+        _setGameStatus(f.name + '  /  could not locate DEFAULT_WALL_CONFIG', '#f88');
+      }
+    };
+    reader.readAsText(f);
+  });
+  input.click();
+}
+
+async function _gameWriteOut() {
+  if (!gameSync.htmlText) return;
+  if (gameSync.fileHandle) {
+    try {
+      const writable = await gameSync.fileHandle.createWritable();
+      await writable.write(gameSync.htmlText);
+      await writable.close();
+      _setGameStatus('Saved to ' + gameSync.fileName, '#9f9');
+      return;
+    } catch (e) {
+      console.warn('[wallsync] FSA write failed, downloading:', e);
+    }
+  }
+  const blob = new Blob([gameSync.htmlText], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = gameSync.fileName || 'last_ship_sailing_v8VR.html';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  _setGameStatus('Downloaded modified ' + a.download, '#fc6');
+}
+
+document.getElementById('game-open-btn').addEventListener('click', _gameOpen);
+
+document.getElementById('game-save-btn').addEventListener('click', async () => {
+  if (!gameSync.htmlText || gameSync.blockStart < 0) {
+    alert('Open the game HTML first.');
+    return;
+  }
+  const txt = document.getElementById('game-config-io').value.trim();
+  let cfg;
+  try { cfg = JSON.parse(txt); }
+  catch (e) { alert('JSON parse failed: ' + e.message); return; }
+  // Pretty-print with 2-space indent so the inline literal stays readable.
+  const newLiteral = JSON.stringify(cfg, null, 2);
+  gameSync.htmlText = gameSync.htmlText.slice(0, gameSync.blockStart) +
+                      newLiteral +
+                      gameSync.htmlText.slice(gameSync.blockEnd);
+  // Re-locate the (possibly shifted) block end for next save.
+  gameSync.blockEnd = gameSync.blockStart + newLiteral.length;
+  await _gameWriteOut();
+});
+
+document.getElementById('game-reload-btn').addEventListener('click', () => {
+  if (!gameSync.htmlText) { alert('Open the game HTML first.'); return; }
+  if (_parseDefaultWallConfig()) {
+    _setGameStatus(gameSync.fileName + '  /  reloaded from in-memory copy', '#9af');
+  }
 });
 
 // Auto-save: any input or change on the document body persists current

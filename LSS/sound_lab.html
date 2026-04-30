@@ -255,6 +255,23 @@ hr.split { border: none; border-top: 1px solid #2a2a40; margin: 8px 0; }
     </div>
     <p class="tip">single-recipe JSON = the schema below. "Export all" dumps {recipes: [...]} for bulk back-up. paste either form into the textarea and Apply.</p>
   </div>
+
+  <!-- Sync with Game HTML -->
+  <div class="section">
+    <h2>Sync with Game HTML</h2>
+    <p class="tip">opens last_ship_sailing_v8VR.html and surfaces the baked-in <code>const DEFAULT_SOUND_LIBRARY = {...}</code> block. "Load to editor" replaces the active recipe library with the baked one. "Save current to game" writes the current <code>state.recipes</code> back into v8VR. uses File System Access (Chrome / Edge) for direct writes; other browsers fall back to a download.</p>
+    <div class="btn-row">
+      <button id="game-open-btn">Open Game HTML...</button>
+      <span id="game-html-status" class="tip" style="align-self:center; flex:1;">No game file open.</span>
+    </div>
+    <div id="game-sync-section" style="display:none; margin-top:6px;">
+      <div class="btn-row">
+        <button id="game-load-btn">Load to editor</button>
+        <button id="game-save-btn" class="primary">Save current to game</button>
+      </div>
+      <p class="tip" id="game-sync-info"></p>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -2296,6 +2313,169 @@ function init() {
     state.currentIndex = 0;
     rebuildPresetDropdown();
     setCurrentRecipe(0);
+  });
+
+  // ============================================================
+  // Sync with Game HTML (v2)
+  // Reads/writes the const DEFAULT_SOUND_LIBRARY = {...}; block in
+  // last_ship_sailing_v8VR.html. The library shape is { recipes: [...] }
+  // which is compatible with the sound lab's state.recipes (modulo
+  // _normalizeRecipe). Direct write via File System Access API in
+  // Chrome / Edge; falls back to a download in other browsers.
+  // ============================================================
+  const gameSync = { fileHandle: null, fileName: null, htmlText: null, blockStart: -1, blockEnd: -1, parsed: null };
+
+  function _setGameStatus(msg, color) {
+    const el = document.getElementById('game-html-status');
+    if (!el) return;
+    el.textContent = msg;
+    el.style.color = color || '';
+  }
+  function _setSyncInfo(msg) {
+    const el = document.getElementById('game-sync-info');
+    if (el) el.textContent = msg || '';
+  }
+
+  // Brace-balanced extraction; same helper as wall_lab + map_lab. Skips
+  // string literals while counting braces.
+  function _extractObjectLiteral(src, from) {
+    let i = src.indexOf('{', from);
+    if (i < 0) return null;
+    let depth = 0, inStr = null, escape = false;
+    for (let k = i; k < src.length; k++) {
+      const c = src[k];
+      if (escape) { escape = false; continue; }
+      if (inStr) {
+        if (c === '\\') { escape = true; continue; }
+        if (c === inStr) inStr = null;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+      if (c === '{') depth++;
+      else if (c === '}') { depth--; if (depth === 0) return { start: i, end: k + 1, text: src.slice(i, k + 1) }; }
+    }
+    return null;
+  }
+
+  function _parseDefaultSoundLibrary() {
+    const text = gameSync.htmlText;
+    if (!text) return false;
+    const constStart = text.indexOf('const DEFAULT_SOUND_LIBRARY');
+    if (constStart < 0) return false;
+    const obj = _extractObjectLiteral(text, constStart);
+    if (!obj) return false;
+    let parsed;
+    try { parsed = (new Function('return (' + obj.text + ')'))(); }
+    catch (e) { console.warn('[soundsync] parse failed:', e); return false; }
+    if (!parsed || !Array.isArray(parsed.recipes)) return false;
+    gameSync.blockStart = obj.start;
+    gameSync.blockEnd   = obj.end;
+    gameSync.parsed     = parsed;
+    document.getElementById('game-sync-section').style.display = 'block';
+    _setSyncInfo('Game library has ' + parsed.recipes.length + ' recipes. Editor currently has ' + state.recipes.length + '.');
+    return true;
+  }
+
+  async function _gameOpen() {
+    if (typeof window.showOpenFilePicker === 'function') {
+      try {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: 'Game HTML', accept: { 'text/html': ['.html'] } }],
+          excludeAcceptAllOption: false, multiple: false,
+        });
+        const file = await handle.getFile();
+        gameSync.fileHandle = handle;
+        gameSync.fileName   = file.name;
+        gameSync.htmlText   = await file.text();
+        if (_parseDefaultSoundLibrary()) {
+          _setGameStatus(file.name + '  /  DEFAULT_SOUND_LIBRARY loaded  /  writable', '#9af');
+        } else {
+          _setGameStatus(file.name + '  /  could not locate DEFAULT_SOUND_LIBRARY', '#f88');
+        }
+        return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        console.warn('[soundsync] FSA open failed, falling back:', e);
+      }
+    }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.html,text/html';
+    input.addEventListener('change', () => {
+      const f = input.files && input.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        gameSync.fileHandle = null;
+        gameSync.fileName   = f.name;
+        gameSync.htmlText   = reader.result;
+        if (_parseDefaultSoundLibrary()) {
+          _setGameStatus(f.name + '  /  DEFAULT_SOUND_LIBRARY loaded  /  download-only', '#fc6');
+        } else {
+          _setGameStatus(f.name + '  /  could not locate DEFAULT_SOUND_LIBRARY', '#f88');
+        }
+      };
+      reader.readAsText(f);
+    });
+    input.click();
+  }
+
+  async function _gameWriteOut() {
+    if (!gameSync.htmlText) return;
+    if (gameSync.fileHandle) {
+      try {
+        const writable = await gameSync.fileHandle.createWritable();
+        await writable.write(gameSync.htmlText);
+        await writable.close();
+        _setGameStatus('Saved to ' + gameSync.fileName, '#9f9');
+        return;
+      } catch (e) {
+        console.warn('[soundsync] FSA write failed, downloading:', e);
+      }
+    }
+    const blob = new Blob([gameSync.htmlText], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = gameSync.fileName || 'last_ship_sailing_v8VR.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    _setGameStatus('Downloaded modified ' + a.download, '#fc6');
+  }
+
+  document.getElementById('game-open-btn').addEventListener('click', _gameOpen);
+
+  document.getElementById('game-load-btn').addEventListener('click', () => {
+    if (!gameSync.parsed) { alert('Open the game HTML first.'); return; }
+    if (!confirm('Replace the editor library (' + state.recipes.length + ' recipes) with the game\'s baked library (' + gameSync.parsed.recipes.length + ' recipes)? Unsaved edits will be lost.')) return;
+    // Normalize on load so old/new recipe schema additions still surface.
+    state.recipes = gameSync.parsed.recipes.map(_normalizeRecipe);
+    state.currentIndex = 0;
+    rebuildPresetDropdown();
+    setCurrentRecipe(0);
+    _setSyncInfo('Loaded ' + state.recipes.length + ' recipes from game.');
+  });
+
+  document.getElementById('game-save-btn').addEventListener('click', async () => {
+    if (!gameSync.htmlText || gameSync.blockStart < 0) {
+      alert('Open the game HTML first.');
+      return;
+    }
+    if (!confirm('Write the current editor library (' + state.recipes.length + ' recipes) back into the game HTML, replacing DEFAULT_SOUND_LIBRARY?')) return;
+    // Build the new payload with the same envelope shape the existing
+    // baked block uses ({ recipes: [...] }). Pretty-print so the inline
+    // literal stays diffable.
+    const payload = { recipes: state.recipes };
+    const newLiteral = JSON.stringify(payload, null, 2);
+    gameSync.htmlText = gameSync.htmlText.slice(0, gameSync.blockStart) +
+                        newLiteral +
+                        gameSync.htmlText.slice(gameSync.blockEnd);
+    gameSync.blockEnd = gameSync.blockStart + newLiteral.length;
+    gameSync.parsed   = payload;
+    _setSyncInfo('Saved ' + state.recipes.length + ' recipes to game.');
+    await _gameWriteOut();
   });
 
   // Keyboard shortcuts. We deliberately let hotkeys fire while range sliders
