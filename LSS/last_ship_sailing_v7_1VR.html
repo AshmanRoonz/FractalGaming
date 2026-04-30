@@ -17595,13 +17595,56 @@ function pollGamepad() {
   // VR fork: prefer a synthesized gamepad assembled from the active XR
   // controllers; falls through to native gamepads when not in VR or when
   // both controllers are missing/disconnected.
+  //
+  // Bluetooth/USB gamepad path: navigator.getGamepads() is also queried
+  // every frame. In flat mode it's the only source. In VR mode most
+  // Chromium browsers (Quest browser included) gate it to an empty list
+  // during an immersive-vr session, so this is a no-op there today; on
+  // browsers that DO expose external pads in-session, the gamepad's
+  // button/axis state is merged on top of the XR controller state so the
+  // user can use a Bluetooth pad alongside (or instead of) the Touch
+  // controllers without changing any settings.
   const xrGP = _xrSynthGamepad();
-  const gamepads = (!xrGP && navigator.getGamepads) ? navigator.getGamepads() : [];
-  let gp = xrGP;
-  if (!gp) {
-    for (let i = 0; i < gamepads.length; i++) {
-      if (gamepads[i]) { gp = gamepads[i]; break; }
+  const realGamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let realGP = null;
+  for (let i = 0; i < realGamepads.length; i++) {
+    const g = realGamepads[i];
+    if (!g || g.connected === false) continue;
+    // Skip our own synthetic XR gamepad if it ever surfaced through
+    // getGamepads (it normally doesn't, but defensive).
+    if (g.id && g.id.indexOf('XR Virtual Gamepad') === 0) continue;
+    realGP = g;
+    break;
+  }
+  let gp;
+  if (xrGP && realGP) {
+    // Merge: 18-slot virtual gamepad, OR on buttons, max-magnitude on axes.
+    const buttons = new Array(Math.max(xrGP.buttons.length, realGP.buttons.length, 18));
+    for (let i = 0; i < buttons.length; i++) {
+      const a = xrGP.buttons[i] || { pressed: false, touched: false, value: 0 };
+      const b = realGP.buttons[i] || { pressed: false, touched: false, value: 0 };
+      buttons[i] = {
+        pressed: !!(a.pressed || b.pressed),
+        touched: !!(a.touched || b.touched),
+        value: Math.max(a.value || 0, b.value || 0),
+      };
     }
+    const axes = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+      const ax = xrGP.axes[i] || 0;
+      const bx = (realGP.axes && realGP.axes[i]) || 0;
+      // Take whichever has the larger absolute magnitude. Stick at rest is
+      // ~0 from both sources, so this naturally prefers the active source.
+      axes[i] = (Math.abs(ax) >= Math.abs(bx)) ? ax : bx;
+    }
+    gp = {
+      id: 'Merged (XR + ' + (realGP.id || 'gamepad') + ')',
+      index: -1, connected: true, mapping: 'standard',
+      timestamp: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+      buttons: buttons, axes: axes,
+    };
+  } else {
+    gp = xrGP || realGP;
   }
 
   if (!gp) {
