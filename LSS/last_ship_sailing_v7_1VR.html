@@ -8958,6 +8958,11 @@ class Bot {
         const closest = this.position.clone().add(aim.clone().multiplyScalar(along));
         if (closest.distanceTo(player.position) < player.chassis.hullLength * 1.0) {
           playerTakeDamage(900 * 0.6, this, null);
+          // Energy Siphon stuns the target ; play the stun cue so the player
+          // hears the disable in addition to seeing/feeling the damage. Plays
+          // even when the player's shields fully absorbed the hit because the
+          // ability still applies the slow, just like the player-vs-bot path.
+          try { playSound('stun'); } catch (e) {}
         }
       }
     } else if (ability.name === 'Firewall') {
@@ -9909,6 +9914,13 @@ class Projectile {
           if (this.isArcWave && bot.velocity) {
             bot.velocity.multiplyScalar(0.3); // 70% speed reduction
             bot.arcSlowTimer = 2.0; // slowed for 2 seconds
+            // Audio confirm for the stun being applied. Positioned at the
+            // bot so the player hears it in 3D space ; falls back to a flat
+            // playSound if positional audio isn't wired up.
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('stun', bot.position);
+              else playSound('stun');
+            } catch (e) {}
           }
           // Arc Wave counters: destroy Particle Walls and Gun Shields it passes near
           if (this.isArcWave) {
@@ -13597,6 +13609,10 @@ function playerTakeDamage(amount, attacker, projectile) {
   // Arc Wave counter: instantly destroys Particle Wall and Gun Shield (TF2 interaction)
   const isArcWaveHit = projectile && projectile.isArcWave;
   if (isArcWaveHit) {
+    // Audio cue for getting stunned by an Arc Wave. Fires once per hit,
+    // before the damage / damage_shield sounds in playerTakeDamage proper, so
+    // the ear reads the stun first and the damage as its consequence.
+    try { playSound('stun'); } catch (e) {}
     // Destroy player's Particle Wall
     for (let we = game.worldEffects.length - 1; we >= 0; we--) {
       const eff = game.worldEffects[we];
@@ -14972,6 +14988,12 @@ function executeAbility(slot, ability) {
         // Slow the target (per wiki: Energy Siphon slows enemies)
         if (bestBot.velocity) bestBot.velocity.multiplyScalar(0.4);
         bestBot.arcSlowTimer = Math.max(bestBot.arcSlowTimer || 0, 2.0); // 2s slow
+        // Stun audio cue at the target so the slow lands with an ear-confirm.
+        // Positional so it pans to the bot's direction relative to the player.
+        try {
+          if (typeof playSpatialSound === 'function') playSpatialSound('stun', bestBot.position);
+          else playSound('stun');
+        } catch (e) {}
         // Heal player
         player.shield = Math.min(player.maxShield, player.shield + 800);
 
@@ -27277,6 +27299,48 @@ function playSound(type) {
     triChord([ri(300*p,0), ri(378*p,0), ri(450*p,0)], 'sine',
       rr(0.15, 0.10), 0.6, null, null, dur - 0.1,
       { attack: 0.02, hold: 0.15, decay: 0.43 });
+  }
+  else if (type === 'stun') {
+    // Electric stun hit: Arc Wave / Energy Siphon land a slowing zap on the
+    // target. The sound has to read instantly as "you got disabled" without
+    // stepping on the existing damage / damage_shield events that fire on the
+    // same frame ; so we keep it short (~0.4 s) and lean into electric
+    // character (sawtooth + bandpassed crackle) instead of low-end weight.
+    //
+    // Layered as: (1) crackle noise burst for the contact transient,
+    // (2) a high sawtooth dyad that wobbles down a fifth to feel like the
+    // target's flight system is being yanked, (3) a brief sub thump so the
+    // hit has body, (4) a very short descending sine "blip" to sell the
+    // disorientation.
+    const p = rr(1, 0.10);
+    // (1) Bright electric crackle: narrow bandpass at ~2.4 kHz, short.
+    playNoiseBurst(rr(0.18, 0.20), rr(0.18, 0.20), now, ri(2400, 0.20), rr(2.2, 0.25));
+    // Secondary mid-band sizzle for body of the zap.
+    playNoiseBurst(rr(0.14, 0.25), rr(0.10, 0.25), now + 0.01, ri(900, 0.25), rr(1.2, 0.25));
+    // (2) Wobbling sawtooth dyad: starts ~440 Hz, drops to ~290 Hz over 0.30 s.
+    // Modeled as a triChord with explicit end frequencies so it slides; the
+    // perfect-fifth → fourth interval keeps it musical but uneasy.
+    triChord(
+      [ri(440 * p, 0), ri(660 * p, 0)],
+      'sawtooth',
+      rr(0.18, 0.15), rr(0.30, 0.15),
+      [ri(290 * p, 0), ri(435 * p, 0)],
+      rr(0.28, 0.15), 0,
+      { attack: 0.002, hold: 0.02, decay: rr(0.27, 0.15) }
+    );
+    // (3) Sub thump so the contact has weight without competing with damage.
+    playNoiseBurst(rr(0.06, 0.25), rr(0.22, 0.20), now, ri(70, 0.30), rr(0.8, 0.25));
+    // (4) Disorientation blip: short descending sine, lands a beat after the
+    // crackle so the ear reads "hit, then you go woozy" rather than a single
+    // mass of noise.
+    triChord(
+      [ri(880 * p, 0)],
+      'sine',
+      rr(0.10, 0.20), 0.10,
+      [ri(330 * p, 0)],
+      0.09, 0.05,
+      { attack: 0.003, hold: 0.01, decay: 0.08 }
+    );
   }
   else if (type === 'reload') {
     const p = rr(1, 0.08);
