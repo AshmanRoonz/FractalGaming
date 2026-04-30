@@ -7091,7 +7091,7 @@ function checkBoxCollision(pos, radius) {
 const _rcNormal = new THREE.Vector3();   // collision normal (current box or SDF inward)
 const _rcTmp = new THREE.Vector3();      // scratch for `normal * k` combined ops
 
-function resolveCollision(pos, velocity, radius) {
+function resolveCollision(pos, velocity, radius, entity) {
   // 1) Obstacle repulsion: push AWAY from obstacle boxes (pillars, platforms, etc.)
   const REPULSE_RANGE = radius * 2.5;
   const REPULSE_STRENGTH = 8000;
@@ -7211,9 +7211,10 @@ function resolveCollision(pos, velocity, radius) {
     }
   }
 
-  // 4) Destructible obstacle collision (solid bounce until broken)
+  // 4) Destructible obstacle collision: ramming ships explode the obstacle and
+  // take damage from the impact. Broken fragments still detonate on contact.
   for (const obj of game.dynamicObjects) {
-    if (obj.collideEntity) obj.collideEntity(pos, velocity, radius);
+    if (obj.collideEntity) obj.collideEntity(pos, velocity, radius, entity);
   }
 }
 
@@ -7419,7 +7420,13 @@ function getWallNormal(point) {
 // (collisionRadius reads chassis.hullLength directly, never the model scale).
 // Tunnel fit is therefore preserved exactly. Tweak this single knob to
 // globally grow/shrink ship bodies relative to their collision sphere.
-const VISUAL_SCALE_BOOST = 1.30;
+//
+// Bumped from 1.30 to 1.55 so the GLB bodies (which have body widths around
+// 40% of their length axis) more closely fill the collision sphere across all
+// axes. Previously the visual width was noticeably thinner than the hit
+// sphere ; ships looked smaller than they actually were collision-wise, so
+// pilots would aim for a tunnel that "looked" big enough and bounce off.
+const VISUAL_SCALE_BOOST = 1.55;
 const SHIP_MODELS = {
   PUNCTURE: { url: 'ships/puncture.glb', faceRotY: -Math.PI / 2, scaleMult: 1.10 },
   SLAYER:   { url: 'ships/slayer.glb',   faceRotY: -Math.PI / 2, scaleMult: 1.10 },
@@ -8831,7 +8838,7 @@ class Bot {
     const botSubDt = dt / botSubs;
     for (let ss = 0; ss < botSubs; ss++) {
       this.position.add(this._botStep.copy(this.velocity).multiplyScalar(botSubDt));
-      resolveCollision(this.position, this.velocity, botCollR);
+      resolveCollision(this.position, this.velocity, botCollR, this);
     }
 
     // Boundary clamp
@@ -9843,7 +9850,9 @@ class Projectile {
       if (wallDist < moveDist) {
         // Hit a wall; determine bounce vs explode
         const hitPoint = _projHitPoint.copy(prevPos).addScaledVector(moveDir, Math.max(0, wallDist - 2));
-        const shouldExplode = this.isCluster || this.isArcWave || this.tracking || this.salvoGuided || (this.splash > 0 && !this.isFireSource);
+        // Pyro thermite is a fire source AND should explode on wall impact
+        // (instead of the usual fire-source bounce); other fire sources still bounce.
+        const shouldExplode = this.isCluster || this.isArcWave || this.tracking || this.salvoGuided || this.isPyroThermite || (this.splash > 0 && !this.isFireSource);
 
         if (shouldExplode) {
           this.position.copy(hitPoint);
@@ -10042,7 +10051,47 @@ class Projectile {
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
       if (this.trailRibbon.material) this.trailRibbon.material.dispose();
     }
-    spawnExplosion(this.position, 15);
+    spawnExplosion(this.position, this.isPyroThermite ? 22 : 15);
+    // Pyro thermite leaves a small lingering flame at the impact point.
+    if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
+      spawnPyroFlame(this.position);
+    }
+  }
+}
+
+// Spawn a small lingering pyro flame at the given position. Lasts 2 seconds,
+// emits fire particles each frame, and pops a brief impact light + fire burst
+// on creation. Pure visual; no damage. Used by Pyro main-weapon impacts.
+function spawnPyroFlame(pos) {
+  const eff = {
+    type: 'pyro_flame',
+    position: pos.clone(),
+    timer: 2.0,
+    duration: 2.0,
+    fxTimer: 0,
+    radius: 60,
+  };
+  game.worldEffects.push(eff);
+  // Initial impact light + fire burst so the explosion reads instantly.
+  if (typeof spawnDynamicLight === 'function') {
+    spawnDynamicLight(pos, 0xff5520, 2.5, 350, 0.3);
+  }
+  const fireColors = [0xff3300, 0xff5520, 0xff7733, 0xffaa44];
+  for (let i = 0; i < 14; i++) {
+    const dir = new THREE.Vector3(
+      (Math.random() - 0.5),
+      (Math.random() - 0.5) + 0.3,
+      (Math.random() - 0.5)
+    ).normalize();
+    const speed = 100 + Math.random() * 180;
+    game.particles.push({
+      position: pos.clone(),
+      velocity: dir.multiplyScalar(speed),
+      life: 0.30 + Math.random() * 0.20,
+      maxLife: 0.5,
+      color: fireColors[Math.floor(Math.random() * fireColors.length)],
+      size: 4 + Math.random() * 4,
+    });
   }
 }
 
@@ -11082,6 +11131,9 @@ class DestructibleObstacle {
     this.fragmentLife = 0;         // countdown after breaking, if nothing is hit
     this.fragmentMaxLife = 14;     // debris dissolves after this many seconds
     this.contactDmgCooldown = 0;   // per-target throttle would require a map; use global throttle instead
+    // pushVel: drift applied while INTACT after a slow ship bump (below the
+    // ram-destroy speed). Decays over time so the obstacle eventually halts.
+    this.pushVel = new THREE.Vector3();
 
     // Random slow rotation
     this.rotSpeed = new THREE.Vector3(
@@ -11158,11 +11210,8 @@ class DestructibleObstacle {
 
   update(dt) {
     if (!this.alive) {
-      // Standalone obstacles self-respawn; cluster children do NOT (ClusterObstacle manages rebirth)
-      if (!this.cluster) {
-        this.respawnTimer -= dt;
-        if (this.respawnTimer <= 0) this.respawn();
-      }
+      // Respawn disabled: once destroyed an obstacle stays gone for the rest
+      // of the match. Standalone and cluster children alike just stop here.
       return;
     }
 
@@ -11183,6 +11232,16 @@ class DestructibleObstacle {
       // Fragment-vs-entity contact: explode and damage
       if (this.contactDmgCooldown > 0) this.contactDmgCooldown -= dt;
       this._checkFragmentImpacts();
+    }
+
+    // Push drift: a slow ship bump transfers velocity into pushVel ; the
+    // obstacle drifts in that direction and decays back to rest. Cluster
+    // children are positioned by the cluster each frame, so skip them here.
+    if (!this.broken && !this.cluster && this.pushVel.lengthSq() > 0.0001) {
+      this.position.addScaledVector(this.pushVel, dt);
+      this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
+      if (this.mesh) this.mesh.position.copy(this.position);
+      if (this.edgeMesh) this.edgeMesh.position.copy(this.position);
     }
 
     // Rotation (both intact and broken states get a spin)
@@ -11249,8 +11308,11 @@ class DestructibleObstacle {
     }
   }
 
-  // Sphere-based collision: push entity away from center
-  collideEntity(pos, velocity, radius) {
+  // Sphere-based collision: ships ramming intact obstacles detonate them on
+  // contact and take ram damage from the impact. Broken fragments still
+  // detonate on contact. The `entity` arg (player object or Bot instance) is
+  // optional ; when present, ram damage is applied to the colliding ship.
+  collideEntity(pos, velocity, radius, entity) {
     if (!this.alive) return;
     const dx = pos.x - this.position.x;
     const dy = pos.y - this.position.y;
@@ -11276,25 +11338,88 @@ class DestructibleObstacle {
         return;
       }
 
-      // Push out
+      // Push the ship out enough to clear the surface ; we'll either bounce
+      // it (slow bump) or let it plow through (fast ram + obstacle gone).
       const pen = minDist - dist;
       pos.x += nx * (pen + 1);
       pos.y += ny * (pen + 1);
       pos.z += nz * (pen + 1);
-      // Reflect velocity
+
+      // Compute impact speed: velocity component INTO the obstacle.
       const vDotN = velocity.x * nx + velocity.y * ny + velocity.z * nz;
-      if (vDotN < 0) {
-        // Ram damage: proportional to impact speed
-        const impactSpeed = Math.abs(vDotN);
-        if (impactSpeed > 50) {
-          this.takeDamage(impactSpeed * 0.4, new THREE.Vector3(-nx, -ny, -nz));
+      const impactSpeed = Math.max(60, Math.abs(vDotN));
+
+      // Speed gate: above this, the obstacle detonates and the ship plows
+      // through ; below it, the obstacle gets pushed (drifts) and the ship
+      // bounces off. Either way the ship takes ram damage.
+      const RAM_DESTROY_SPEED = 220;
+      const willDestroy = impactSpeed >= RAM_DESTROY_SPEED;
+
+      // Ram damage to whichever ship hit this obstacle. Scales with impact
+      // speed but capped so a perfect head-on isn't an instant-kill on a
+      // healthy ship. Player and Bot share the same shape via takeDamage.
+      const ramDmg = 60 + Math.min(220, impactSpeed * 0.5);
+      if (entity) {
+        if (typeof player !== 'undefined' && entity === player) {
+          if (typeof playerTakeDamage === 'function') {
+            playerTakeDamage(ramDmg, 'collision', null);
+          }
+        } else if (typeof entity.takeDamage === 'function') {
+          entity.takeDamage(ramDmg, 'collision', null);
         }
-        velocity.x -= nx * vDotN * 1.3;
-        velocity.y -= ny * vDotN * 1.3;
-        velocity.z -= nz * vDotN * 1.3;
-        // Significant bump on an intact cluster child triggers cluster shatter
-        if (this.cluster && !this.cluster.broken && impactSpeed > 80) {
-          this.cluster.breakApart(this.position.clone(), new THREE.Vector3(-nx, -ny, -nz));
+      }
+
+      const contactPt = new THREE.Vector3(
+        this.position.x + nx * this.collisionRadius,
+        this.position.y + ny * this.collisionRadius,
+        this.position.z + nz * this.collisionRadius
+      );
+      const impactDir = new THREE.Vector3(-nx, -ny, -nz);
+
+      if (willDestroy) {
+        // High-speed ram: fire explosion + dynamic light, then detonate.
+        if (typeof spawnExplosion === 'function') {
+          spawnExplosion(contactPt, Math.max(8, Math.ceil(this.scale / 8)));
+        }
+        if (typeof spawnDynamicLight === 'function') {
+          spawnDynamicLight(contactPt, 0xffaa55, 2.0, 280, 0.25);
+        }
+        // Lethal damage routes through takeDamage so the standard destroy
+        // path runs (mesh cleanup, debris scatter, cluster bookkeeping stay
+        // correct).
+        if (this.cluster && !this.cluster.broken) {
+          this.cluster.breakApart(this.position.clone(), impactDir);
+        } else {
+          this.takeDamage(this.hp + 1, impactDir);
+        }
+        // Mild damping so the ship plows forward through the gap.
+        if (vDotN < 0) {
+          velocity.x -= nx * vDotN * 0.4;
+          velocity.y -= ny * vDotN * 0.4;
+          velocity.z -= nz * vDotN * 0.4;
+        }
+      } else {
+        // Slow bump: push the obstacle, scrape sparks, bounce the ship.
+        // Lighter scale objects get shoved harder (mass proxy = scale^3 feels
+        // overdone for our purposes ; a flat 0.6 transfer reads well).
+        const pushFactor = 0.6;
+        if (this.cluster && !this.cluster.broken) {
+          this.cluster.pushVel.x += -nx * impactSpeed * pushFactor;
+          this.cluster.pushVel.y += -ny * impactSpeed * pushFactor;
+          this.cluster.pushVel.z += -nz * impactSpeed * pushFactor;
+        } else {
+          this.pushVel.x += -nx * impactSpeed * pushFactor;
+          this.pushVel.y += -ny * impactSpeed * pushFactor;
+          this.pushVel.z += -nz * impactSpeed * pushFactor;
+        }
+        if (typeof spawnImpactSparks === 'function') {
+          spawnImpactSparks(contactPt, 4);
+        }
+        // Reflect ship velocity off the obstacle (springy bounce).
+        if (vDotN < 0) {
+          velocity.x -= nx * vDotN * 1.3;
+          velocity.y -= ny * vDotN * 1.3;
+          velocity.z -= nz * vDotN * 1.3;
         }
       }
     }
@@ -11349,6 +11474,10 @@ class ClusterObstacle {
     this.broken = false;
     this.respawnTimer = 0;
     this.respawnTime = 30;
+    // pushVel: drift applied to the whole cluster after a slow ship bump on a
+    // child (below ram-destroy speed). Cluster children inherit it implicitly
+    // because their world position is computed from this.position each tick.
+    this.pushVel = new THREE.Vector3();
     // (v6.7) Optional config from the world-owner's broadcast manifest.
     // When present, every random value (rotation, color, child placement) is
     // taken from the manifest so the receiver's cluster matches the owner's
@@ -11442,11 +11571,16 @@ class ClusterObstacle {
 
   update(dt) {
     if (!this.alive) {
-      this.respawnTimer -= dt;
-      if (this.respawnTimer <= 0) this.respawn();
+      // Respawn disabled: once a cluster has been fully shattered it stays
+      // gone for the rest of the match.
       return;
     }
     if (!this.broken) {
+      // Apply slow-bump drift from ship pushes, with mild damping.
+      if (this.pushVel.lengthSq() > 0.0001) {
+        this.position.addScaledVector(this.pushVel, dt);
+        this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
+      }
       // Rotate cluster as a rigid group; each child follows its rotated offset
       this.rotation.x += this.rotSpeed.x * dt;
       this.rotation.y += this.rotSpeed.y * dt;
@@ -14047,7 +14181,11 @@ function updatePlayerMovement(dt) {
   // Multi-iteration collision loop (Descent 3 style: detect, resolve, continue with remaining time)
   // Up to 9 iterations for players; each resolves one collision and continues simulating.
   {
-    const collRadius = ch.hullLength * 0.4;
+    // Tightened from 0.4 to 0.32 of hullLength. The wider sphere was forcing
+    // pilots to give angled tunnels a lot of slack (e.g. a 100-radius level
+    // tunnel fit Pyro fine, but a 150-radius angled tunnel pinched at the
+    // entry/exit smoothK junction because the sphere had no length-axis play).
+    const collRadius = ch.hullLength * 0.32;
     const MAX_PLAYER_SIM_LOOPS = 9;
     let simTimeRemaining = dt;
     let loopCount = 0;
@@ -14067,7 +14205,7 @@ function updatePlayerMovement(dt) {
 
         // Check if collision occurred
         const prevVelLen = player.velocity.length();
-        resolveCollision(player.position, player.velocity, collRadius);
+        resolveCollision(player.position, player.velocity, collRadius, player);
         const postVelLen = player.velocity.length();
 
         // Detect if velocity changed significantly (collision response happened)
@@ -14449,7 +14587,12 @@ function fireProjectile(origin, dir, w) {
   const vel = dir.clone().multiplyScalar(w.projSpeed);
   const proj = new Projectile(origin, vel, w.damage, w.splash, 'player', 0xff8800);
   // Pyro projectiles are fire sources (ignite gas clouds on pass-through)
-  if (player.loadoutKey === 'PYRO') proj.isFireSource = true;
+  if (player.loadoutKey === 'PYRO') {
+    proj.isFireSource = true;
+    // Tag main-weapon thermite so the projectile explodes fire on impact
+    // and leaves a small lingering flame at the hit point for 2 seconds.
+    proj.isPyroThermite = true;
+  }
   game.projectiles.push(proj);
   // (v6.7) Broadcast a visual-only twin of this projectile so peers see
   // the shot fly at them. Damage authority stays with the hit-claim path
@@ -16523,6 +16666,38 @@ function updateAbilities(dt) {
           });
         }
         eff.fxTimer = 0.15; // faster refresh for denser flames
+      }
+    }
+
+    else if (eff.type === 'pyro_flame') {
+      // Small lingering flame from a Pyro main-weapon impact. 2 second life,
+      // pure visual: emits fire particles each tick, fading toward end-of-life.
+      eff.fxTimer -= dt;
+      if (eff.fxTimer <= 0) {
+        const fireColors = [0xff3300, 0xff5520, 0xff7733, 0xffaa44];
+        const fadeT = Math.max(0, eff.timer / (eff.duration || 2.0));
+        const count = 1 + Math.floor(2 * fadeT);
+        for (let i = 0; i < count; i++) {
+          const offset = new THREE.Vector3(
+            (Math.random() - 0.5) * eff.radius * 0.6,
+            Math.random() * 10,
+            (Math.random() - 0.5) * eff.radius * 0.6
+          );
+          const pVel = new THREE.Vector3(
+            (Math.random() - 0.5) * 30,
+            40 + Math.random() * 80,
+            (Math.random() - 0.5) * 30
+          );
+          game.particles.push({
+            position: eff.position.clone().add(offset),
+            velocity: pVel,
+            life: 0.30 + Math.random() * 0.25,
+            maxLife: 0.55,
+            color: fireColors[Math.floor(Math.random() * fireColors.length)],
+            size: 3 + Math.random() * 3,
+          });
+        }
+        eff.fxTimer = 0.06;
       }
     }
 
