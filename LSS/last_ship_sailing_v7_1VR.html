@@ -1674,6 +1674,20 @@ const net = {
   // Owner-broadcast spawn carries the netId; receivers tag their local copy
   // with the same id so destroy events line up.
   effectIdCounter: 0,
+
+  // ---- AUTHORITATIVE GAME SYNC (3+ peer fix) ----
+  // Each peer used to tick game.warmupTimer / game.roundTimer / scores /
+  // currentRound on their own clock. With 2 peers the drift is invisible ;
+  // with 3+ frame-rate jitter accumulates and the round-end transition
+  // triggers at noticeably different moments on each screen, breaking
+  // scoreboards and respawn timing. Fix: the lowest-peerId owner (same
+  // pattern as world-objects / stasis ownership) broadcasts the
+  // authoritative game state at gameSyncHz. Non-owners snap their values to
+  // the broadcast so all peers stay in lockstep, and local state transitions
+  // (timer hits 0 → roundEnd) still fire on each peer at roughly the same
+  // moment because they're now reading the same timer.
+  gameSyncHz: 5,
+  gameSyncAccum: 0,
 };
 
 // Generate a short random ID
@@ -2891,6 +2905,39 @@ function broadcastPlayerState(dt) {
   net.sendState(state);
 }
 
+// (3+ peer time/round sync) Owner-only authoritative broadcast.
+// The lowest-peerId peer (same predicate as amStasisOwner) is the round
+// timekeeper. They broadcast the canonical game state at net.gameSyncHz.
+// Non-owners snap their game.warmupTimer / roundTimer / currentRound /
+// scoreA / scoreB / time to the broadcast values so every screen sees the
+// same countdown and round transitions land together.
+//
+// Local non-owner code still ticks timers between snaps (so the HUD reads
+// smoothly), but the snap re-anchors them ~5 times per second. Round-state
+// transitions (warmup→playing, playing→roundEnd, etc.) remain driven by
+// each peer's local updateRoundSystem detecting timer<=0 ; because everyone
+// is now reading the same timer values, those transitions fire at roughly
+// the same wall-clock moment across the mesh.
+function broadcastGameSync(dt) {
+  if (!net.active || !net.sendEvent) return;
+  if (typeof amStasisOwner !== 'function' || !amStasisOwner()) return;
+  net.gameSyncAccum += dt;
+  if (net.gameSyncAccum < 1 / net.gameSyncHz) return;
+  net.gameSyncAccum = 0;
+  net.sendEvent({
+    type: 'game_sync',
+    s:  game.state,
+    cr: game.currentRound | 0,
+    sa: game.scoreA | 0,
+    sb: game.scoreB | 0,
+    rt: Math.round((game.roundTimer || 0) * 100) / 100,
+    wt: Math.round((game.warmupTimer || 0) * 100) / 100,
+    et: Math.round((game.roundEndTimer || 0) * 100) / 100,
+    mt: Math.round((game.matchEndTimer || 0) * 100) / 100,
+    gt: Math.round((game.time || 0) * 100) / 100,
+  });
+}
+
 // ---- HIT CONSENSUS ----
 // Shooter claims a hit. Nearest peers validate against their spatial data.
 // Majority confirms. If only 2 players, victim authority (victim confirms).
@@ -3107,6 +3154,30 @@ function handleNetEvent(evt, fromPeerId) {
   // doesn't deliver our own broadcasts, so we never see our own world_objects.
   if (evt.type === 'world_objects' && Array.isArray(evt.clusters)) {
     applyWorldObjectsManifest(evt.clusters);
+    return;
+  }
+  // (3+ peer time/round sync) Owner-broadcast game state. We snap our
+  // timers / round / scores / clock to the owner's values. Sanity-check the
+  // sender is the actual lowest-peerId owner so a misbehaving peer can't
+  // hijack the round clock.
+  if (evt.type === 'game_sync') {
+    const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+    const expectedOwner = allIds[0];
+    if (fromPeerId !== expectedOwner) return;
+    // We are the owner ourselves: ignore (shouldn't happen — trystero filters
+    // self-broadcasts — but the guard keeps drift impossible if it ever does).
+    if (typeof amStasisOwner === 'function' && amStasisOwner()) return;
+    if (typeof evt.rt === 'number') game.roundTimer    = evt.rt;
+    if (typeof evt.wt === 'number') game.warmupTimer   = evt.wt;
+    if (typeof evt.et === 'number') game.roundEndTimer = evt.et;
+    if (typeof evt.mt === 'number') game.matchEndTimer = evt.mt;
+    if (typeof evt.cr === 'number') game.currentRound  = evt.cr;
+    if (typeof evt.sa === 'number') game.scoreA        = evt.sa;
+    if (typeof evt.sb === 'number') game.scoreB        = evt.sb;
+    if (typeof evt.gt === 'number') game.time          = evt.gt;
+    // Note: we don't snap evt.s (state) directly. Local updateRoundSystem
+    // detects state transitions when its timer hits 0, and because the timer
+    // value is now authoritative every peer triggers at the same moment.
     return;
   }
   // (v6.7) Hitscan / spread tracer from a peer's shot. Render with the local
@@ -24323,6 +24394,10 @@ function gameLoop(timestamp) {
 
   // Network: broadcast our state to all peers
   broadcastPlayerState(dt);
+  // Network: owner peer also broadcasts authoritative round/time state so
+  // every peer's clock stays in lockstep. Crucial for 3+ peer matches where
+  // independent local timers visibly diverge over the course of a round.
+  broadcastGameSync(dt);
   // Network: clean up stale hit claims
   if (net.active && game.time % 1 < dt) cleanupPendingHits();
 
