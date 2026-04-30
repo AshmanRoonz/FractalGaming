@@ -1576,6 +1576,11 @@ const input = {
     sensitivity: 2.0,   // rad-per-sec per radian of head offset
     invertPitch: false,
   },
+  // (VR fork) Headset framebuffer scale. Lower = better battery / framerate
+  // at the cost of pixel sharpness. Applies on session start; takes effect
+  // next time the user enters VR. 0.5 is a reasonable battery-saver target
+  // on Quest 2 / Quest 3; bump to 1.0+ if your GPU has headroom.
+  vrRenderScale: 0.7,
   // (v6.9) Keyboard mappings. Values are KeyboardEvent.key values normalized
   // to lowercase (' ' for Space, 'control' for Ctrl, etc.). Empty string =
   // unbound (no key triggers this action). Defaults match the keys this game
@@ -5540,6 +5545,10 @@ function _xrUpdateInputSources() {
 
 renderer.xr.addEventListener('sessionstart', () => {
   document.body.classList.add('vr-active');
+  // Pending auto-resume already fired (user manually clicked Enter VR);
+  // suppress the countdown so it doesn't double-fire on session end.
+  _xrPendingResume = false;
+  if (typeof _xrCancelResumeCountdown === 'function') _xrCancelResumeCountdown();
   // Re-parent camera under dolly so head pose composes with ship pose.
   if (camera.parent !== xrDolly) xrDolly.add(camera);
   // Make both HUD planes visible (created lazily on first use).
@@ -5634,9 +5643,11 @@ renderer.xr.addEventListener('sessionend', () => {
       // never has these flags flipped on.
       try { renderer.xr.setReferenceSpaceType('local'); } catch (_) {}
       // Lower-than-native render scale; the wall shader is the dominant
-      // GPU cost and in stereo it tanks framerate at 1.0+. Bump back up
-      // here once if your headset has headroom to spare.
-      try { renderer.xr.setFramebufferScaleFactor(0.7); } catch (_) {}
+      // GPU cost and in stereo it tanks framerate at 1.0+. The user-tunable
+      // input.vrRenderScale (Settings > VR > Render Scale) overrides the
+      // default 0.7.
+      const _vrScale = (input && typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7;
+      try { renderer.xr.setFramebufferScaleFactor(_vrScale); } catch (_) {}
       renderer.xr.enabled = true;
       // setSession is async (it await s requestReferenceSpace internally).
       // If that rejects, three.js never flips isPresenting=true and the
@@ -5688,6 +5699,60 @@ renderer.xr.addEventListener('sessionend', () => {
     console.warn('XR support probe failed:', e);
   });
 })();
+
+// (VR fork) Track when the user left VR by pressing the Open Settings
+// button so closeSettings can auto-resume the session 5 s later, with a
+// countdown overlay so they have time to put the headset back on.
+let _xrPendingResume = false;
+let _xrResumeIntervalId = null;
+function _xrCancelResumeCountdown() {
+  if (_xrResumeIntervalId) {
+    clearInterval(_xrResumeIntervalId);
+    _xrResumeIntervalId = null;
+  }
+  const ov = document.getElementById('xr-resume-countdown-overlay');
+  if (ov) ov.remove();
+}
+function _xrStartResumeCountdown(seconds) {
+  _xrCancelResumeCountdown();
+  let remaining = seconds | 0;
+  const overlay = document.createElement('div');
+  overlay.id = 'xr-resume-countdown-overlay';
+  overlay.style.cssText = (
+    'position:fixed; top:24%; left:50%; transform:translate(-50%, 0);' +
+    'z-index:10000; padding:18px 28px;' +
+    'background:rgba(18,10,38,0.92); color:#ffe8b0;' +
+    "font-family:'Orbitron',sans-serif; font-weight:700; font-size:22px;" +
+    'letter-spacing:0.10em; text-align:center;' +
+    'border:2px solid #ffaa44; border-radius:10px;' +
+    'box-shadow:0 0 24px rgba(255,170,68,0.45);'
+  );
+  overlay.innerHTML =
+    'RESUMING VR IN <span id="xr-resume-num" style="color:#fff;">' + remaining + '</span>s' +
+    '<br><span style="font-size:13px; opacity:0.78; letter-spacing:0.18em;">PUT ON HEADSET</span>' +
+    '<br><button id="xr-resume-cancel" style="margin-top:10px; padding:6px 14px; font-family:Orbitron, sans-serif; font-size:11px; letter-spacing:0.18em; background:rgba(80,40,40,0.85); color:#ffcccc; border:1px solid #cc6644; border-radius:4px; cursor:pointer;">CANCEL</button>';
+  document.body.appendChild(overlay);
+  const cancelBtn = document.getElementById('xr-resume-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', () => {
+    _xrPendingResume = false;
+    _xrCancelResumeCountdown();
+  });
+  _xrResumeIntervalId = setInterval(() => {
+    remaining--;
+    const numEl = document.getElementById('xr-resume-num');
+    if (numEl) numEl.textContent = remaining;
+    if (remaining <= 0) {
+      _xrCancelResumeCountdown();
+      const vbtn = document.getElementById('vr-enter-btn');
+      if (vbtn && !vbtn.disabled) try { vbtn.click(); } catch (_) {}
+    }
+  }, 1000);
+}
+function _xrMaybeAutoResumeAfterSettings() {
+  if (!_xrPendingResume) return;
+  _xrPendingResume = false;
+  _xrStartResumeCountdown(5);
+}
 
 // Reset BOTH dolly and camera-local transform at the top of every frame.
 // At the end of each render three.js writes the headset pose into
@@ -17710,6 +17775,7 @@ function pollGamepad() {
     } else if (renderer.xr && renderer.xr.isPresenting) {
       const _xrSess = renderer.xr.getSession();
       if (_xrSess) { try { _xrSess.end(); } catch (_) {} }
+      _xrPendingResume = true; // closeSettings will start a 5s auto-resume
       // Defer until after the session-end teardown completes so the
       // overlay isn't competing with the XR cleanup.
       setTimeout(() => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, 120);
@@ -19737,6 +19803,18 @@ function buildSettingsPage() {
     </div>
 
     <div class="settings-section">
+      <h3>VR - Performance</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Render Scale controls the headset framebuffer resolution. Lower = better battery life and framerate at the cost of sharpness. 0.5 is a good battery-saver default on Quest; takes effect the next time you enter VR. Also drop the Quality preset below to "Low" for additional savings (skips bloom, simpler smoke, fewer particles).</label>
+      </div>
+      <div class="setting-row">
+        <label>VR Render Scale</label>
+        <input type="range" id="set-vr-scale" min="0.4" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
+        <div class="value-display" id="val-vr-scale">${((typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7).toFixed(2)}</div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3>Keyboard - Mapping</h3>
       <div id="kb-bind-rows"></div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em; margin-top:6px;">
@@ -20192,6 +20270,24 @@ function buildSettingsPage() {
     input.vrHeadAim.invertPitch = !!vrhaInv.checked; saveSettings();
   });
 
+  // VR render scale slider.
+  const vrScaleSel = overlay.querySelector('#set-vr-scale');
+  const vrScaleVal = overlay.querySelector('#val-vr-scale');
+  if (vrScaleSel) vrScaleSel.addEventListener('input', () => {
+    const v = parseFloat(vrScaleSel.value);
+    input.vrRenderScale = v;
+    if (vrScaleVal) vrScaleVal.textContent = v.toFixed(2);
+    saveSettings();
+    // If a session is already presenting, apply immediately. r128 logs a
+    // warning when changing scale mid-session but the change still takes
+    // effect on the next swapchain creation.
+    try {
+      if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+        renderer.xr.setFramebufferScaleFactor(v);
+      }
+    } catch (_) {}
+  });
+
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
 
@@ -20225,6 +20321,9 @@ function closeSettings() {
   // doesn't drop the user back into capture mode.
   _kbRebindAction = null;
   if (game.state !== 'select') _safeRequestPointerLock();
+  // (VR fork) If we previously ended an XR session to show this settings
+  // overlay, schedule auto-resume now that the user is done with settings.
+  try { _xrMaybeAutoResumeAfterSettings(); } catch (_) {}
 }
 
 // ---- Gamepad navigation helpers for the settings overlay ----
@@ -20601,6 +20700,7 @@ function saveSettings() {
       xrBindings: input.xrBindings,
       xrSynth:    input.xrSynth,
       vrHeadAim:  input.vrHeadAim,
+      vrRenderScale: input.vrRenderScale,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
@@ -20754,6 +20854,16 @@ function loadSettings() {
     if (data.triggerThreshold !== undefined) input.triggerThreshold = data.triggerThreshold;
     if (data.gpBindings) Object.assign(input.gpBindings, data.gpBindings);
     if (data.kbBindings) Object.assign(input.kbBindings, data.kbBindings);
+    // (VR fork migration) cycleWallPattern + openSettings used to default
+    // to -1 (unbound) before standard btn indices 16 / 17 were assigned;
+    // older saves overwrite the new defaults. Force-fix here so XR
+    // mappings actually fire (gpBtn returns false when stdBtn = -1).
+    if (input.gpBindings.cycleWallPattern == null || input.gpBindings.cycleWallPattern === -1) {
+      input.gpBindings.cycleWallPattern = 16;
+    }
+    if (input.gpBindings.openSettings == null || input.gpBindings.openSettings === -1) {
+      input.gpBindings.openSettings = 17;
+    }
     // VR controller mapping migration: v1 stored {xrButton: stdBtnIdx} (numbers),
     // v2 stores {action: xrButtonName} (strings). If we see v1, drop it and let
     // the in-code defaults stand.
@@ -20765,6 +20875,7 @@ function loadSettings() {
     }
     if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
+    if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     // Audio volumes (applied later when initAudio creates the gain nodes)
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
     if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
