@@ -1,134 +1,114 @@
-# Last Ship Sailing: AAA-feel uplift plan
+# Last Ship Sailing v8VR: followup sprint plan
 
-**Date:** 2026-04-30
-**Baseline:** `last_ship_sailing_v7_1VR.html` (frozen as known-good)
-**Target build:** `last_ship_sailing_v8VR.html` (fork; all work below lands here)
-**Format constraint:** stays a single self-contained HTML; no Electron / Capacitor / Tauri wrappers
-**Scope philosophy:** at least one game mode (Cinematic Arena / Showcase) reaches AAA presentation; other modes inherit improvements opportunistically
-
----
-
-## What v7.1VR already has
-
-- 7 ship classes: BLASTER, PUNCTURE, PYRO, SLAYER, SYPHON, TRACKER, VORTEX
-- FFA + Team modes; custom maps; loadouts
-- Bot AI with collision, pathfinding, targeting
-- Mouse, keyboard, gamepad, WebXR (VR) input
-- Procedural Web Audio synthesis (oscillators, gain, buffers; 21 createGain, 7 createOscillator)
-- 44 custom ShaderMaterials, envMap usage, custom "glow" shader tricks
-- Companion lab tools: `map_lab.html`, `sound_lab.html`, `wall_pattern_lab.html`
-- Cockpit PNG frame art per ship in `./frames/`
-
-## What v7.1VR is missing (perceptual gap to AAA)
-
-- No post-processing pipeline (no EffectComposer, no real bloom; one toneMapping reference)
-- 41 MeshBasicMaterial usages; hero ships are not PBR
-- envMap referenced but no PMREM / HDRI pipeline
-- Zero InstancedMesh; particles are 28 Sprites + 4 Points (draw-call bound)
-- No real shadows, no SSAO, no SMAA/FXAA/TAA
-- No hit-stop, no chromatic aberration, no rumble chain on damage
-- Procedural SFX, no spatialization (PannerNode), no reverb (ConvolverNode)
-- Three.js r128 (Dec 2021); behind ~5 years of engine improvements
+**Date opened:** 2026-04-30 (original plan: AAA-feel uplift, all 12 tasks closed)
+**Date updated:** 2026-04-30 (replaced with this focused followup list)
+**Baseline:** `last_ship_sailing_v8VR.html` (the AAA-uplift fork; v7.1VR remains frozen)
+**Target build:** still `last_ship_sailing_v8VR.html`; this sprint extends it in place
+**Format constraint:** stays a single self-contained HTML file
+**Scope philosophy:** finish the polish loop on the systems already shipped; do not start new top-level systems
 
 ---
 
-## The five force multipliers (priority order)
+## What's already in v8VR
 
-### 1. Real post-processing pipeline (biggest perceptual jump per hour)
-`EffectComposer -> RenderPass -> UnrealBloomPass -> SMAAPass -> OutputPass`
-+ `renderer.toneMapping = ACESFilmicToneMapping`
-+ `renderer.outputColorSpace = SRGBColorSpace`
-Existing emissive materials, tracers, explosions, shield rims start reading correctly.
+For reference, the previous sprint landed: Three.js r128 -> r0.165 upgrade, EffectComposer post-pipeline (bloom + ACES + SMAA), HDRI / PBR helpers, InstancedMesh debris pool, hit-feedback chain (shake + chromatic + vignette + rumble + hitstop + white-flash), Showcase mode wrapper, Web Speech ship-AI announcer with voice picker, spatial audio (HRTF panning + occlusion + multi-convolver reverb + sidechain ambient duck). All 12 original tasks completed.
 
-### 2. InstancedMesh particle conversion
-28 Sprites + 4 Points -> InstancedMesh pools. Convert `_EXPL_POOL`, `_TRACER_*_GEO`, smoke, sparks, debris. Unlocks 10,000+ instance counts at ~1 draw call per type. Crank debris 10x; add weather (embers, ash) at scale.
-
-### 3. HDRI + IBL + PBR for hero ships
-Load 2K HDRI (Polyhaven), run `PMREMGenerator`, assign `scene.environment`. Promote ship hulls from `MeshBasicMaterial` / `MeshPhongMaterial` to `MeshStandardMaterial` with metalness, roughness, clearcoat, and emissive accents.
-
-### 4. Hit-feedback density chain
-Per damage event, stack: camera shake (damage-scaled) + chromatic aberration pulse + vignette pulse + gamepad dual-rumble + white-flash material override (60ms) + audio sidechain duck + hitstop time dilation (`dt *= 0.1` for 80ms on kills). The "juice" that separates indie from Doom Eternal.
-
-### 5. Three.js engine upgrade (r128 -> current)
-Unlocks:
-- WebGPURenderer (compute shaders, ~2-3x particle headroom)
-- TSL (Three.js Shading Language): JS-side shader authoring
-- BatchedMesh (better than InstancedMesh for varied meshes)
-- proper transmission / refraction / clearcoat / sheen / iridescence
-- improved shadow maps
-
-Breaking changes to fix:
-- `outputEncoding` -> `outputColorSpace`
-- `sRGBEncoding` -> `SRGBColorSpace`
-- `physicallyCorrectLights` removed (units default-correct now)
-- `useLegacyLights` flag handling
-- GLTFLoader now in `examples/jsm/loaders/`
-- some material property defaults changed
+The work below is the followup polish loop on top of that foundation.
 
 ---
 
-## Showcase / Cinematic Arena mode
+## Sprint backlog
 
-A single mode that turns every dial up. One ship, one map, one game type. Other modes stay on the existing v7.1 visual budget so we do not regress competitive play.
+### 1. Convert remaining particle paths to InstancedMesh
 
-For Showcase only:
-- post-processing: bloom + ACES + SMAA + optional SSAO + optional motion blur
-- HDRI sky + IBL + real shadows (PCFSoftShadowMap, cascaded if budget allows)
-- one signature volumetric god-ray (port of Three.js Volumetric Light Scattering example)
-- hero ship: high-poly GLTF with PBR + clearcoat + dirt/scratch normal map
-- ocean: FFT/Gerstner shader with foam (or paid Three.js ocean shader, ~$20)
-- particles: all instanced, debris budget 10x
-- audio: recorded SFX (or synth output baked) routed through ConvolverNode reverb (arena IR) + PannerNode 3D positional
-- announcer: ~50 voice lines (round start, kills, multikills, ship destroyed, victory) via TTS or recorded
-- cinematic round-start camera flyover with `DepthOfFieldPass` and FOV ease
-- kill-cam: 1.5s slow-mo orbit on round-winning kill
-- HUD micro-animations (telemetry tick-up, ability ready pulse, lock-on pip chase)
+Only the v8VR debris pool is instanced today. The legacy sprite-based smoke, impact sparks, and tracer trails still allocate per-spawn meshes / sprites. Converting them collapses dozens of draw calls per fight into single instanced calls and makes effect counts scale 5-10x without GPU cost.
+
+Targets:
+- Smoke plumes (currently per-spawn `THREE.Mesh(_SMOKE_GEO, smokeMat)` with custom shader; harder, since the shader needs to honor instance time/seed)
+- Impact sparks (`spawnImpactSparks`; currently sprite-based)
+- Tracer trail beads (`_TRACER_*_GEO` chain in tracer construction)
+- Heat-haze sprites (`getHeatHazeSpriteMat`)
+
+Smoke is the hardest because the existing shader uses per-mesh uniforms; sparks and tracer trails are the easy wins to do first. Pattern follows `v8Debris` from the previous sprint (single InstancedMesh, parallel `Float32Array` per attribute, round-robin allocation, scale to 0 for hide).
+
+### 2. Cinematic round-start camera flyover
+
+When a round transitions from warmup to play, swap the player camera onto a scripted spline path for ~2.5 seconds: pull back, orbit the arena center, push in over the player's ship, settle into normal first-person view. While on the flyover, push the EffectComposer with a `BokehPass` (depth of field) so distant ship silhouettes go soft. Hand control back the moment the FIGHT banner clears.
+
+Touch points:
+- New `cinemaCam` system parallel to `deathCam`; same lifecycle pattern
+- Hook into the warmup -> playing transition (the spot where `ANN.roundStart()` fires)
+- Add `BokehPass` to the cineFX composer with focus driven by the camera-to-player distance
+- Restore camera and disable BokehPass when flyover ends
+- Skip entirely when in VR (XR pose owns the camera)
+
+### 3. Kill-cam slow-mo orbit on round-winning kills
+
+When the kill that ends a round is the player's, lock the camera into a 1.5 second slow-motion orbit around the dying enemy, tracking the kill direction. Reuses `hitFX` hitstop infrastructure: hold time-dilation at ~0.25 instead of releasing after 140ms. Perfect time for `ANN.roundWon()` to land cleanly over the slow-mo.
+
+Touch points:
+- Detect "round-winning kill" inside the existing kill registration block (the one that already does multikill)
+- Repurpose deathCam orbit logic with a slower angular rate and a fixed target (the dying ship) instead of a teammate
+- Tie into `setShowcaseMode` so it's gated to Showcase mode only (otherwise stock matches stay snappy)
+
+### 4. Wire the unhooked announcer lines
+
+These are already defined in the `ANN` library but no gameplay code calls them yet. Each is a simple hook into an existing event:
+
+- `ANN.coreReady()`: when `player.coreMeter` first crosses 100 (core ability charged)
+- `ANN.dashReady()`: when `player.dashCharges` refills back to max from 0 (after a full deplete)
+- `ANN.enemyLock()`: when the existing TRACKER lock-on system flags an enemy targeting the player (`player.enemyToneLockMax` rising edge)
+- `ANN.ramming()`: when an enemy ship's velocity vector points at the player and is closing fast inside ~600 units
+- `ANN.stasisActive()`: when `updatePlayerStasis` flips player into a stasis field
+- `ANN.lowAmmo()`: when `player.clipAmmo / player.maxClip <= 0.2` and reload hasn't started
+
+Each is two to four lines of code; the cooldowns on the lines themselves prevent spam.
+
+### 5. Drop a real HDRI file
+
+The HDRI loader (`setHdrEnvironment`) already wired in v8VR points at `LSS/skybox/cinematic_2k.hdr`, which doesn't exist. As long as the file is missing, Showcase mode keeps falling back to the procedural starfield envMap — meaning IBL on PBR-promoted hero ships looks identical to before. Drop a 2K equirectangular HDR (1-3MB) at that path and the next call to `setHdrEnvironment()` flips IBL on for real.
+
+Recommended sources:
+- polyhaven.com (free, CC0)
+- Search terms that match the LSS aesthetic: "satara_night", "moonless_golf", "spruit_sunrise", or any sci-fi / spaceship interior HDRI
+- Save as `LSS/skybox/cinematic_2k.hdr` (override path with `setHdrEnvironment('./skybox/other.hdr')`)
+
+This is a 5-minute task that unlocks the visible-PBR difference Showcase mode is supposed to deliver.
 
 ---
 
-## Work breakdown (sequenced)
+## Work order recommendation
 
-| # | Task | Est | Risk | Unblocks |
+| # | Task | Est | Risk | Why this order |
 |---|---|---|---|---|
-| 1 | Fork v7.1VR -> v8VR | 5 min | none | everything |
-| 2 | Three.js r128 -> current upgrade | 1-2 days | medium (API breaks) | post-pipeline, PBR, future WebGPU |
-| 3 | EffectComposer + bloom + ACES + SMAA | 1 day | low | the visible AAA jump |
-| 4 | HDRI + PMREM + PBR hero ships | 1 day | low | cinematic lighting |
-| 5 | Particles -> InstancedMesh | 2 days | medium (refactor surface) | scale-up effects |
-| 6 | Hit-feedback chain (shake, chroma, hitstop, rumble) | 1 day | low | game feel |
-| 7 | PannerNode 3D audio + ConvolverNode reverb | 0.5 day | low | aural depth |
-| 8 | Announcer voice lines + voice queue | open-ended | low | mode polish |
-| 9 | Showcase Mode wrapper (one ship + one map) | 0.5 day | low | the showpiece |
-| 10 | Smoke test v8VR (lobby, match, no console errors) | ongoing | n/a | release confidence |
+| 5 | Drop HDRI file | 5 min | none | Cheapest unlock; no code change |
+| 4 | Wire unhooked announcer lines | 1-2 hrs | low | Self-contained; no rendering risk |
+| 3 | Kill-cam slow-mo orbit | 0.5 day | low | Reuses deathCam + hitFX; small surface |
+| 2 | Cinematic round-start flyover | 1 day | medium | New camera system + BokehPass tuning |
+| 1 | Smoke / sparks / tracer to InstancedMesh | 2-3 days | medium-high | Largest refactor; touches custom shaders |
 
-Realistic clock: ~8 working days for a Cinematic Arena that surprises people.
+Realistic clock for the whole list: ~4 working days plus the 5-minute HDRI drop.
 
-## Explicitly out of scope
+---
+
+## Out of scope (still)
 
 - Native wrappers (Electron / Capacitor / Tauri); HTML stays the deliverable
-- Realtime multiplayer netcode (multi-month project, doesn't change feel)
-- Wholesale replacement of procedural audio synth (route through reverb instead; keep the labs)
-- Custom WebGPU shaders before the Three.js upgrade lands
+- Realtime multiplayer netcode beyond what trystero already provides
+- Wholesale audio replacement; spatial path is in, more line wiring is open
+
+## Followups (post-this-sprint)
+
+- WebGPURenderer trial (compute shaders for crowd particle sims)
+- Photo Mode (free camera + post-pipeline overrides + frame export)
+- Replay system (deterministic input log + camera retake)
+- TWA APK for Quest sideload distribution
+- `v8VR-lite.html` that strips post-pipeline for low-end devices
 
 ## Success criteria
 
-- v8VR opens in modern Chrome / Edge / Quest Browser without console errors
-- Showcase mode renders with bloom + ACES + IBL + instanced particles
-- Hit on enemy produces: visual flash + camera shake + chroma pulse + rumble + 3D-positioned impact sound + reverb tail + hitstop on kill
-- VR mode still works (WebXR session start in Quest Browser)
-- v7.1VR untouched and remains playable as the baseline
-
-## Notes on backwards compatibility
-
-- v7.1VR `localStorage` keys can be re-used by v8VR; settings carry over
-- `./frames/` cockpit PNGs are unchanged
-- Maps from `maps/` and walls from `walls/` should still load
-- Custom map JSON schema must remain compatible; if extended, add an optional version field
-
-## Followups (post-Showcase)
-
-- WebGPURenderer trial path
-- Photo Mode (free camera + post-pipeline overrides + frame export)
-- Replay system (deterministic input log + camera retake)
-- TWA APK packaging for Quest sideload distribution
-- A `v8VR-lite.html` build that strips post-pipeline for low-end devices
+- All five sprint items shippable independently (no inter-task dependencies)
+- v8VR continues to boot cleanly and v7.1VR remains frozen / playable as the rollback baseline
+- Showcase mode visibly improves with the HDRI drop
+- Round-end and ability events feel announcer-supported rather than silent
+- Effect counts scale up under sustained combat without FPS regression
