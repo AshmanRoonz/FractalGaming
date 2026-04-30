@@ -154,8 +154,27 @@
       <button id="tool-delete">Delete</button>
     </div>
 
-    <h2>Selected</h2>
+    <h2>Group <span class="stat">(Shift/Ctrl click)</span></h2>
+    <div class="toolbar">
+      <button id="grp-copy" title="Copy selection (Ctrl+C)">Copy</button>
+      <button id="grp-paste" title="Paste at offset (Ctrl+V)">Paste</button>
+      <button id="grp-select-all" title="Select everything (Ctrl+A)">All</button>
+      <button id="grp-clear" title="Clear selection (Esc)">None</button>
+    </div>
+    <div class="hint">Shift/Ctrl-click to add/remove items. Drag the gizmo on a multi-room selection to move them as a group; tunnels stretch with their endpoints.</div>
+
+    <h2>Preset Shapes</h2>
+    <div class="toolbar">
+      <button id="preset-tri" title="3 rooms + 3 tunnels (triangle)">Triangle 3+3</button>
+      <button id="preset-quad" title="4 rooms + 4 tunnels (square)">Square 4+4</button>
+    </div>
+    <div class="hint">Inserts at the orbit center, auto-selects the new pieces so you can drag them as a group with the gizmo.</div>
+
+    <h2>Selected <span id="sel-count" class="stat"></span></h2>
     <div id="selected-empty" class="hint">Nothing selected. Click a room or tunnel.</div>
+    <div id="selected-multi" style="display:none;">
+      <div class="hint" id="selected-multi-info">Multiple items selected. Drag the gizmo to move them; press Delete to remove all; Ctrl+C to copy.</div>
+    </div>
     <div id="selected-room" style="display:none;">
       <div class="row"><label>ID</label><input id="sel-id" type="text" /></div>
       <div class="row"><label>Team</label>
@@ -213,9 +232,12 @@
     <div class="hint" style="line-height: 1.5;">
       <strong>+ Room:</strong> click in viewport to place a sphere on the Y=0 plane (radius 200; edit after).<br>
       <strong>+ Tunnel:</strong> click two rooms in sequence to connect them.<br>
-      <strong>Select:</strong> click any room (or list entry) to edit its position, radius, team.<br>
-      <strong>Drag the gizmo</strong> on the selected room to move it in 3D.<br>
-      <strong>Delete</strong> tool removes whatever you click; or press Del/Backspace with something selected.<br>
+      <strong>Select:</strong> click any room or tunnel (or list entry) to edit it.<br>
+      <strong>Shift/Ctrl-click</strong> to add or remove from the selection. Selected items glow brighter.<br>
+      <strong>Group move:</strong> with multiple rooms selected, drag the gizmo to move them all together; tunnels between them stretch with the rooms.<br>
+      <strong>Copy/Paste:</strong> Ctrl+C copies selection, Ctrl+V pastes at an offset. Tunnels are included only when both endpoint rooms are also selected.<br>
+      <strong>Preset Shapes:</strong> drop a 3+3 triangle or 4+4 square at the origin, pre-selected so you can immediately drag it into place.<br>
+      <strong>Delete</strong> tool removes whatever you click; or press Del/Backspace to remove the current selection.<br>
       <strong>Esc</strong> returns to Select tool / clears selection.
     </div>
   </div>
@@ -246,12 +268,29 @@ const state = {
     rooms: [],
     tunnels: []
   },
-  selectedKind: null,    // 'room' | 'tunnel' | null
-  selectedIndex: -1,
+  // Multi-selection: rooms and tunnels are each a Set of indices into the
+  // level arrays. The "primary" pointer marks the most recently clicked item
+  // and is what the per-item editor in the sidebar binds to. Group move,
+  // delete, copy, and visual highlight all key off the Sets ; primary only
+  // matters when a single-item editor is showing.
+  selection: {
+    rooms: new Set(),
+    tunnels: new Set()
+  },
+  primary: null,         // { kind: 'room' | 'tunnel', index: number } | null
+  // In-memory clipboard for copy/paste. Stores deep-cloned room and tunnel
+  // data; pasting offsets positions and remints IDs so the original
+  // selection is preserved.
+  clipboard: null,
   tool: 'select',        // 'select' | 'place_room' | 'connect_tunnel' | 'delete'
   pendingTunnelFirst: -1,// while in connect_tunnel mode, the first-clicked room index
   nextRoomId: 1
 };
+// Selection helpers. Centralized so selection invariants (primary belongs to
+// the active set, gizmo follows the right object) are maintained in one place.
+function isRoomSelected(idx) { return state.selection.rooms.has(idx); }
+function isTunnelSelected(idx) { return state.selection.tunnels.has(idx); }
+function selectionSize() { return state.selection.rooms.size + state.selection.tunnels.size; }
 
 // ============================================================
 // Three.js scene
@@ -277,23 +316,82 @@ const transform = new TransformControls(camera, renderer.domElement);
 transform.size = 0.8;
 scene.add(transform);
 
+// Group anchor used as the gizmo target when 2+ rooms are selected. It's an
+// invisible Object3D positioned at the centroid of the selection ; the gizmo
+// drags this anchor and on every change we re-derive each selected room's
+// position from a per-drag offset snapshot. Per-drag (not per-frame)
+// offsets are critical: re-deriving offsets each frame would let rounding
+// drift the rooms apart over a long drag.
+const groupAnchor = new THREE.Object3D();
+groupAnchor.name = 'group-anchor';
+scene.add(groupAnchor);
+
+let _groupDragSnapshot = null;
+// { offsets: Vector3[], roomIndices: number[] } - captured at drag start
+
 transform.addEventListener('dragging-changed', (e) => {
   // Disable orbit while dragging the gizmo so clicks don't spin the camera.
   orbit.enabled = !e.value;
+  if (e.value && transform.object === groupAnchor && state.selection.rooms.size >= 2) {
+    // Snapshot offsets at drag start so rooms move rigidly with the anchor
+    // even after rounding to integers.
+    const indices = [...state.selection.rooms];
+    const offsets = indices.map(idx => {
+      const r = state.level.rooms[idx];
+      return new THREE.Vector3(r.x, r.y, r.z).sub(groupAnchor.position);
+    });
+    _groupDragSnapshot = { roomIndices: indices, offsets };
+  } else if (!e.value) {
+    _groupDragSnapshot = null;
+  }
 });
 
 transform.addEventListener('change', () => {
-  if (state.selectedKind !== 'room' || state.selectedIndex < 0) return;
-  const room = state.level.rooms[state.selectedIndex];
-  const mesh = roomMeshes[state.selectedIndex];
-  if (!room || !mesh) return;
-  room.x = Math.round(mesh.position.x);
-  room.y = Math.round(mesh.position.y);
-  room.z = Math.round(mesh.position.z);
-  // Push to sidebar inputs
-  ui.selX.value = room.x;
-  ui.selY.value = room.y;
-  ui.selZ.value = room.z;
+  if (transform.object === groupAnchor && _groupDragSnapshot) {
+    // Group drag: move every selected room by the same delta.
+    for (let i = 0; i < _groupDragSnapshot.roomIndices.length; i++) {
+      const idx = _groupDragSnapshot.roomIndices[i];
+      const room = state.level.rooms[idx];
+      const mesh = roomMeshes[idx];
+      if (!room || !mesh) continue;
+      const off = _groupDragSnapshot.offsets[i];
+      room.x = Math.round(groupAnchor.position.x + off.x);
+      room.y = Math.round(groupAnchor.position.y + off.y);
+      room.z = Math.round(groupAnchor.position.z + off.z);
+      mesh.position.set(room.x, room.y, room.z);
+    }
+    // Sync sidebar X/Y/Z if the primary is one of the moved rooms
+    if (state.primary && state.primary.kind === 'room') {
+      const r = state.level.rooms[state.primary.index];
+      if (r) {
+        ui.selX.value = r.x;
+        ui.selY.value = r.y;
+        ui.selZ.value = r.z;
+      }
+    }
+    rebuildTunnelMeshes();
+    return;
+  }
+  // Single-room drag: derive the moved room from the attached object so we
+  // update the right room even if primary points elsewhere (e.g. user has
+  // 1 room + 1 tunnel selected ; primary is the tunnel but the gizmo is on
+  // the lone room).
+  const obj = transform.object;
+  if (!obj) return;
+  const idx = roomMeshes.indexOf(obj);
+  if (idx < 0) return;
+  const room = state.level.rooms[idx];
+  if (!room) return;
+  room.x = Math.round(obj.position.x);
+  room.y = Math.round(obj.position.y);
+  room.z = Math.round(obj.position.z);
+  // Only push to sidebar if the moved room IS the primary ; otherwise the
+  // sidebar inputs are showing a different item and we shouldn't clobber them.
+  if (state.primary && state.primary.kind === 'room' && state.primary.index === idx) {
+    ui.selX.value = room.x;
+    ui.selY.value = room.y;
+    ui.selZ.value = room.z;
+  }
   rebuildTunnelMeshes();
 });
 
@@ -377,6 +475,9 @@ function rebuildAllRoomMeshes() {
     scene.add(m);
     roomMeshes.push(m);
   }
+  // Re-apply selection emissive after rebuild ; otherwise selection visuals
+  // would silently drop after every group drag tick (which rebuilds meshes).
+  if (typeof refreshHighlights === 'function') refreshHighlights();
 }
 
 // Resolve a tunnel's endpoints from the rooms it connects (by ID).
@@ -436,37 +537,169 @@ function rebuildTunnelMeshes() {
       tunnelMeshes.push(mesh);
     }
   });
+  if (typeof refreshHighlights === 'function') refreshHighlights();
 }
 
 // ============================================================
 // Selection
 // ============================================================
-function selectRoom(idx) {
-  state.selectedKind = 'room';
-  state.selectedIndex = idx;
-  if (idx >= 0 && roomMeshes[idx]) {
-    transform.attach(roomMeshes[idx]);
+// Highlight selected meshes by swapping in an emissive accent + bumping
+// opacity so they stand out from unselected ones. Called after every
+// selection change. Cheap: just touches material.emissive / .opacity.
+function refreshHighlights() {
+  for (let i = 0; i < roomMeshes.length; i++) {
+    const m = roomMeshes[i];
+    const r = state.level.rooms[i];
+    if (!m || !r) continue;
+    const sel = isRoomSelected(i);
+    m.material.emissive = m.material.emissive || new THREE.Color(0x000000);
+    if (sel) {
+      m.material.emissive.setHex(0xffaa33);
+      m.material.emissiveIntensity = 0.55;
+      m.material.opacity = r.champion ? 0.55 : 0.50;
+    } else {
+      m.material.emissive.setHex(0x000000);
+      m.material.emissiveIntensity = 0;
+      m.material.opacity = r.champion ? 0.42 : 0.32;
+    }
+  }
+  for (const tm of tunnelMeshes) {
+    const ti = tm.userData && tm.userData.tunnelIndex;
+    const sel = (typeof ti === 'number') && isTunnelSelected(ti);
+    if (sel) {
+      tm.material.emissive = tm.material.emissive || new THREE.Color(0x000000);
+      tm.material.emissive.setHex(0xffaa33);
+      tm.material.emissiveIntensity = 0.6;
+      tm.material.opacity = 0.45;
+    } else {
+      if (tm.material.emissive) tm.material.emissive.setHex(0x000000);
+      tm.material.emissiveIntensity = 0;
+      tm.material.opacity = 0.22;
+    }
+  }
+}
+
+// Update the gizmo target based on current selection:
+//   1 room  → attach to that room's mesh (single-mesh edit, like before)
+//   N rooms → position groupAnchor at centroid, attach to anchor
+//   tunnel-only or empty → detach
+function refreshGizmo() {
+  const nR = state.selection.rooms.size;
+  if (nR === 1) {
+    const idx = [...state.selection.rooms][0];
+    const m = roomMeshes[idx];
+    if (m) transform.attach(m);
+    else transform.detach();
+  } else if (nR >= 2) {
+    // Centroid of selected room positions
+    let cx = 0, cy = 0, cz = 0, n = 0;
+    for (const idx of state.selection.rooms) {
+      const r = state.level.rooms[idx];
+      if (!r) continue;
+      cx += r.x; cy += r.y; cz += r.z; n++;
+    }
+    if (n > 0) {
+      groupAnchor.position.set(cx / n, cy / n, cz / n);
+      transform.attach(groupAnchor);
+    } else {
+      transform.detach();
+    }
   } else {
     transform.detach();
   }
+}
+
+// Apply a selection update + all the side-effects (sidebar, lists, gizmo,
+// highlights). Centralized so callers don't have to remember to refresh
+// all four whenever they mutate state.selection.
+function applySelectionChange() {
+  refreshGizmo();
+  refreshHighlights();
   refreshSidebarSelection();
   refreshLists();
 }
 
-function selectTunnel(idx) {
-  state.selectedKind = 'tunnel';
-  state.selectedIndex = idx;
-  transform.detach();
-  refreshSidebarSelection();
-  refreshLists();
+// Plain (non-additive) selection: clears existing selection and selects
+// just this one item. Matches the old single-select behavior used by list
+// clicks and unmodified viewport clicks.
+function selectRoom(idx, additive = false) {
+  if (idx < 0) return;
+  if (!additive) {
+    state.selection.rooms.clear();
+    state.selection.tunnels.clear();
+  }
+  state.selection.rooms.add(idx);
+  state.primary = { kind: 'room', index: idx };
+  applySelectionChange();
+}
+
+function selectTunnel(idx, additive = false) {
+  if (idx < 0) return;
+  if (!additive) {
+    state.selection.rooms.clear();
+    state.selection.tunnels.clear();
+  }
+  state.selection.tunnels.add(idx);
+  state.primary = { kind: 'tunnel', index: idx };
+  applySelectionChange();
+}
+
+// Toggle behavior for shift/ctrl-click. Adds if not present, removes if
+// already selected. When removing the primary, the primary falls back to
+// any remaining selected item so the sidebar editor doesn't go blank
+// while items are still selected.
+function toggleRoomSelection(idx) {
+  if (state.selection.rooms.has(idx)) {
+    state.selection.rooms.delete(idx);
+    if (state.primary && state.primary.kind === 'room' && state.primary.index === idx) {
+      _reassignPrimaryAfterRemoval();
+    }
+  } else {
+    state.selection.rooms.add(idx);
+    state.primary = { kind: 'room', index: idx };
+  }
+  applySelectionChange();
+}
+
+function toggleTunnelSelection(idx) {
+  if (state.selection.tunnels.has(idx)) {
+    state.selection.tunnels.delete(idx);
+    if (state.primary && state.primary.kind === 'tunnel' && state.primary.index === idx) {
+      _reassignPrimaryAfterRemoval();
+    }
+  } else {
+    state.selection.tunnels.add(idx);
+    state.primary = { kind: 'tunnel', index: idx };
+  }
+  applySelectionChange();
+}
+
+function _reassignPrimaryAfterRemoval() {
+  if (state.selection.rooms.size > 0) {
+    state.primary = { kind: 'room', index: state.selection.rooms.values().next().value };
+  } else if (state.selection.tunnels.size > 0) {
+    state.primary = { kind: 'tunnel', index: state.selection.tunnels.values().next().value };
+  } else {
+    state.primary = null;
+  }
 }
 
 function clearSelection() {
-  state.selectedKind = null;
-  state.selectedIndex = -1;
-  transform.detach();
-  refreshSidebarSelection();
-  refreshLists();
+  state.selection.rooms.clear();
+  state.selection.tunnels.clear();
+  state.primary = null;
+  applySelectionChange();
+}
+
+function selectAll() {
+  state.selection.rooms.clear();
+  state.selection.tunnels.clear();
+  for (let i = 0; i < state.level.rooms.length; i++) state.selection.rooms.add(i);
+  for (let i = 0; i < state.level.tunnels.length; i++) state.selection.tunnels.add(i);
+  if (state.level.rooms.length > 0) state.primary = { kind: 'room', index: 0 };
+  else if (state.level.tunnels.length > 0) state.primary = { kind: 'tunnel', index: 0 };
+  else state.primary = null;
+  applySelectionChange();
 }
 
 // ============================================================
@@ -499,14 +732,25 @@ renderer.domElement.addEventListener('pointerup', (ev) => {
   const roomHits = raycaster.intersectObjects(roomMeshes, false);
   const tunnelHits = raycaster.intersectObjects(tunnelMeshes, false);
 
+  // Shift or Ctrl/Cmd toggles the clicked item in/out of selection without
+  // disturbing the rest. Plain click clears + selects, matching standard
+  // multi-select UX in editors like Figma / Blender.
+  const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+
   if (state.tool === 'select') {
     if (roomHits.length) {
       const idx = roomMeshes.indexOf(roomHits[0].object);
-      if (idx >= 0) selectRoom(idx);
+      if (idx < 0) return;
+      if (additive) toggleRoomSelection(idx);
+      else selectRoom(idx);
     } else if (tunnelHits.length) {
       const ti = tunnelHits[0].object.userData.tunnelIndex;
-      if (typeof ti === 'number') selectTunnel(ti);
-    } else {
+      if (typeof ti !== 'number') return;
+      if (additive) toggleTunnelSelection(ti);
+      else selectTunnel(ti);
+    } else if (!additive) {
+      // Empty-space click without modifier = clear; with modifier = preserve
+      // (so users can shift-click between items without losing what they had).
       clearSelection();
     }
   } else if (state.tool === 'place_room') {
@@ -615,6 +859,15 @@ const ui = {
   selectedEmpty: document.getElementById('selected-empty'),
   selectedRoom: document.getElementById('selected-room'),
   selectedTunnel: document.getElementById('selected-tunnel'),
+  selectedMulti: document.getElementById('selected-multi'),
+  selectedMultiInfo: document.getElementById('selected-multi-info'),
+  selCount: document.getElementById('sel-count'),
+  grpCopy: document.getElementById('grp-copy'),
+  grpPaste: document.getElementById('grp-paste'),
+  grpSelectAll: document.getElementById('grp-select-all'),
+  grpClear: document.getElementById('grp-clear'),
+  presetTri: document.getElementById('preset-tri'),
+  presetQuad: document.getElementById('preset-quad'),
   selTunnelInfo: document.getElementById('sel-tunnel-info'),
   selTunnelR: document.getElementById('sel-tunnel-r'),
   selId: document.getElementById('sel-id'),
@@ -688,8 +941,35 @@ function setHud(toolName, infoText) {
 }
 
 function refreshSidebarSelection() {
-  if (state.selectedKind === 'room' && state.selectedIndex >= 0) {
-    const r = state.level.rooms[state.selectedIndex];
+  const total = selectionSize();
+  // Header count: "(3)" when multi, blank when 0/1 (the per-item editor or
+  // empty state already conveys the count for those cases).
+  if (ui.selCount) ui.selCount.textContent = total >= 2 ? `(${total})` : '';
+
+  if (total === 0) {
+    ui.selectedEmpty.style.display = '';
+    ui.selectedRoom.style.display = 'none';
+    ui.selectedTunnel.style.display = 'none';
+    ui.selectedMulti.style.display = 'none';
+    return;
+  }
+  if (total >= 2) {
+    // Multi-select: hide per-item editors, show summary so the user knows
+    // editing is suspended (X/Y/Z would be ambiguous across many items).
+    ui.selectedEmpty.style.display = 'none';
+    ui.selectedRoom.style.display = 'none';
+    ui.selectedTunnel.style.display = 'none';
+    ui.selectedMulti.style.display = '';
+    const nR = state.selection.rooms.size, nT = state.selection.tunnels.size;
+    ui.selectedMultiInfo.textContent =
+      `${nR} room${nR === 1 ? '' : 's'} + ${nT} tunnel${nT === 1 ? '' : 's'} selected. ` +
+      `Drag the gizmo to move rooms together, Ctrl+C to copy, Delete to remove all.`;
+    return;
+  }
+  // Exactly one item ; show the appropriate per-item editor based on primary.
+  ui.selectedMulti.style.display = 'none';
+  if (state.primary && state.primary.kind === 'room') {
+    const r = state.level.rooms[state.primary.index];
     if (!r) return;
     ui.selectedEmpty.style.display = 'none';
     ui.selectedRoom.style.display = '';
@@ -701,8 +981,8 @@ function refreshSidebarSelection() {
     ui.selY.value = r.y;
     ui.selZ.value = r.z;
     ui.selR.value = r.r;
-  } else if (state.selectedKind === 'tunnel' && state.selectedIndex >= 0) {
-    const t = state.level.tunnels[state.selectedIndex];
+  } else if (state.primary && state.primary.kind === 'tunnel') {
+    const t = state.level.tunnels[state.primary.index];
     if (!t) return;
     ui.selectedEmpty.style.display = 'none';
     ui.selectedRoom.style.display = 'none';
@@ -712,17 +992,23 @@ function refreshSidebarSelection() {
     ui.selTunnelInfo.textContent =
       `${fromR ? fromR.id : '?'} ↔ ${toR ? toR.id : '?'}`;
     ui.selTunnelR.value = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
-  } else {
-    ui.selectedEmpty.style.display = '';
-    ui.selectedRoom.style.display = 'none';
-    ui.selectedTunnel.style.display = 'none';
   }
 }
 
-// Sidebar inputs → state + mesh
+// Sidebar inputs → state + mesh. All single-item editors operate on the
+// primary item ; multi-select hides the per-item editor entirely so these
+// handlers are only reachable when exactly one item is selected.
+function _primaryRoom() {
+  if (!state.primary || state.primary.kind !== 'room') return null;
+  return state.level.rooms[state.primary.index] || null;
+}
+function _primaryTunnel() {
+  if (!state.primary || state.primary.kind !== 'tunnel') return null;
+  return state.level.tunnels[state.primary.index] || null;
+}
+
 ui.selId.addEventListener('input', () => {
-  if (state.selectedKind !== 'room') return;
-  const r = state.level.rooms[state.selectedIndex];
+  const r = _primaryRoom();
   if (!r) return;
   // Renaming a room must also rewrite any tunnel that referenced its old
   // ID, otherwise tunnels would silently detach from the room.
@@ -736,11 +1022,10 @@ ui.selId.addEventListener('input', () => {
   refreshLists();
 });
 ui.selTeam.addEventListener('change', () => {
-  if (state.selectedKind !== 'room') return;
-  const r = state.level.rooms[state.selectedIndex];
+  const r = _primaryRoom();
   if (!r) return;
   r.team = ui.selTeam.value || null;
-  const mesh = roomMeshes[state.selectedIndex];
+  const mesh = roomMeshes[state.primary.index];
   if (mesh) mesh.material.color.setHex(roomDisplayColor(r));
   refreshLists();
 });
@@ -749,14 +1034,14 @@ ui.selTeam.addEventListener('change', () => {
 // that had it set) and update the visual treatment.
 ui.selChampion = document.getElementById('sel-champion');
 ui.selChampion.addEventListener('change', () => {
-  if (state.selectedKind !== 'room') return;
-  const r = state.level.rooms[state.selectedIndex];
+  const r = _primaryRoom();
   if (!r) return;
+  const myIndex = state.primary.index;
   const becomingChampion = !!ui.selChampion.checked;
   if (becomingChampion) {
     // Clear champion flag from all other rooms; only one champion per map.
     state.level.rooms.forEach((other, i) => {
-      if (i !== state.selectedIndex && other.champion) {
+      if (i !== myIndex && other.champion) {
         other.champion = false;
         const m = roomMeshes[i];
         if (m) {
@@ -767,43 +1052,42 @@ ui.selChampion.addEventListener('change', () => {
     });
   }
   r.champion = becomingChampion;
-  const mesh = roomMeshes[state.selectedIndex];
+  const mesh = roomMeshes[myIndex];
   if (mesh) {
     mesh.material.color.setHex(roomDisplayColor(r));
     mesh.material.opacity = r.champion ? 0.42 : 0.32;
   }
+  refreshHighlights(); // re-apply selection emissive on top of new opacity
   refreshLists();
 });
 for (const [key, inp] of [['x', ui.selX], ['y', ui.selY], ['z', ui.selZ]]) {
   inp.addEventListener('input', () => {
-    if (state.selectedKind !== 'room') return;
-    const r = state.level.rooms[state.selectedIndex];
+    const r = _primaryRoom();
     if (!r) return;
     r[key] = +inp.value || 0;
-    const mesh = roomMeshes[state.selectedIndex];
+    const mesh = roomMeshes[state.primary.index];
     if (mesh) mesh.position[key] = r[key];
     rebuildTunnelMeshes();
   });
 }
 ui.selR.addEventListener('input', () => {
-  if (state.selectedKind !== 'room') return;
-  const r = state.level.rooms[state.selectedIndex];
+  const r = _primaryRoom();
   if (!r) return;
   r.r = Math.max(50, +ui.selR.value || 270);
-  const mesh = roomMeshes[state.selectedIndex];
+  const mesh = roomMeshes[state.primary.index];
   if (mesh) mesh.scale.setScalar(r.r);
 });
 
 // Selected-tunnel radius input. Mutates state.level.tunnels[i].r and rebuilds
 // the tunnel cylinder mesh so the visualization tracks the change live.
 ui.selTunnelR.addEventListener('input', () => {
-  if (state.selectedKind !== 'tunnel') return;
-  const t = state.level.tunnels[state.selectedIndex];
+  const t = _primaryTunnel();
   if (!t) return;
   const v = +ui.selTunnelR.value;
   if (!Number.isFinite(v)) return;
   t.r = Math.max(MIN_TUNNEL_RADIUS, Math.min(MAX_TUNNEL_RADIUS, v));
   rebuildTunnelMeshes();
+  refreshHighlights();
   refreshLists();
 });
 
@@ -817,22 +1101,29 @@ function refreshLists() {
   ui.roomsList.innerHTML = '';
   state.level.rooms.forEach((r, i) => {
     const div = document.createElement('div');
-    div.className = 'room-item' + (state.selectedKind === 'room' && state.selectedIndex === i ? ' selected' : '') + (r.team ? ' team-' + r.team : '');
+    div.className = 'room-item' + (isRoomSelected(i) ? ' selected' : '') + (r.team ? ' team-' + r.team : '');
     const champBadge = r.champion ? ' <span style="color:#bb77ff">★</span>' : '';
     div.innerHTML = `<span>${escapeHtml(r.id)}${r.team ? ' [' + r.team + ']' : ''}${champBadge}</span><span class="stat">r=${r.r}</span>`;
-    div.addEventListener('click', () => selectRoom(i));
+    // Shift/Ctrl on a list-row click toggles, mirroring viewport behavior.
+    div.addEventListener('click', (ev) => {
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey) toggleRoomSelection(i);
+      else selectRoom(i);
+    });
     ui.roomsList.appendChild(div);
   });
 
   ui.tunnelsList.innerHTML = '';
   state.level.tunnels.forEach((t, i) => {
     const div = document.createElement('div');
-    div.className = 'tunnel-item' + (state.selectedKind === 'tunnel' && state.selectedIndex === i ? ' selected' : '');
+    div.className = 'tunnel-item' + (isTunnelSelected(i) ? ' selected' : '');
     const fromR = state.level.rooms.find(r => r.id === t.fromRoomId);
     const toR = state.level.rooms.find(r => r.id === t.toRoomId);
     const tunR = (typeof t.r === 'number') ? t.r : DEFAULT_TUNNEL_RADIUS;
     div.innerHTML = `<span>${escapeHtml(fromR ? fromR.id : '?')} → ${escapeHtml(toR ? toR.id : '?')}</span><span class="stat">r=${tunR}</span>`;
-    div.addEventListener('click', () => selectTunnel(i));
+    div.addEventListener('click', (ev) => {
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey) toggleTunnelSelection(i);
+      else selectTunnel(i);
+    });
     ui.tunnelsList.appendChild(div);
   });
 }
@@ -842,13 +1133,197 @@ function escapeHtml(s) {
 }
 
 // ============================================================
+// Multi-delete, copy / paste, preset shapes
+// ============================================================
+// Delete every selected room and tunnel. Resolves to room IDs first so
+// later index splices don't invalidate the selection set.
+function deleteSelection() {
+  if (selectionSize() === 0) return;
+  const roomIds = new Set();
+  for (const idx of state.selection.rooms) {
+    const r = state.level.rooms[idx];
+    if (r) roomIds.add(r.id);
+  }
+  // Sort tunnel indices descending so splicing earlier ones doesn't shift
+  // the indices of later ones.
+  const tunnelIdx = [...state.selection.tunnels].sort((a, b) => b - a);
+  for (const ti of tunnelIdx) state.level.tunnels.splice(ti, 1);
+  if (roomIds.size > 0) {
+    state.level.tunnels = state.level.tunnels.filter(t =>
+      !roomIds.has(t.fromRoomId) && !roomIds.has(t.toRoomId)
+    );
+    state.level.rooms = state.level.rooms.filter(r => !roomIds.has(r.id));
+  }
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  clearSelection();
+}
+
+// Copy: snapshot the current selection into state.clipboard. Tunnels are
+// only included when BOTH endpoint rooms are also in the selection ; a
+// pasted tunnel with one endpoint outside the clipboard would otherwise
+// dangle (or, worse, attach to an unrelated existing room with the same id).
+// Reset on every fresh copy so paste streaks reset their offset stagger.
+let _pastesSinceCopy = 0;
+
+function copySelection() {
+  if (selectionSize() === 0) {
+    setHud(toolLabel[state.tool].name, 'Nothing to copy.');
+    return;
+  }
+  _pastesSinceCopy = 0;
+  const selectedRoomIds = new Set();
+  const rooms = [];
+  for (const idx of state.selection.rooms) {
+    const r = state.level.rooms[idx];
+    if (!r) continue;
+    selectedRoomIds.add(r.id);
+    rooms.push(JSON.parse(JSON.stringify(r)));
+  }
+  const tunnels = [];
+  for (const idx of state.selection.tunnels) {
+    const t = state.level.tunnels[idx];
+    if (!t) continue;
+    if (!selectedRoomIds.has(t.fromRoomId) || !selectedRoomIds.has(t.toRoomId)) continue;
+    tunnels.push(JSON.parse(JSON.stringify(t)));
+  }
+  state.clipboard = { rooms, tunnels };
+  setHud(toolLabel[state.tool].name,
+    `Copied ${rooms.length} room${rooms.length === 1 ? '' : 's'} + ${tunnels.length} tunnel${tunnels.length === 1 ? '' : 's'}. Ctrl+V to paste.`);
+}
+
+// Paste: re-introduce clipboard rooms with fresh IDs and a small offset so
+// they don't sit exactly on top of the originals. Tunnels remap their
+// fromRoomId/toRoomId to the freshly minted IDs.
+function pasteClipboard() {
+  if (!state.clipboard || (!state.clipboard.rooms.length && !state.clipboard.tunnels.length)) {
+    setHud(toolLabel[state.tool].name, 'Nothing in clipboard. Ctrl+C to copy first.');
+    return;
+  }
+  // Stagger successive pastes so streaks of Ctrl+V don't all stack on the
+  // same spot. _pastesSinceCopy is bumped per paste, reset on each copy.
+  _pastesSinceCopy++;
+  const PASTE_OFFSET = 200 * _pastesSinceCopy;
+  const idMap = {}; // old id -> new id
+  const newRoomIndices = [];
+  for (const r of state.clipboard.rooms) {
+    const newId = `room_${state.nextRoomId++}`;
+    idMap[r.id] = newId;
+    state.level.rooms.push({
+      id: newId,
+      team: r.team || null,
+      champion: false, // never duplicate the champion flag (single-room invariant)
+      x: Math.round((r.x || 0) + PASTE_OFFSET),
+      y: Math.round((r.y || 0) + PASTE_OFFSET),
+      z: Math.round((r.z || 0) + PASTE_OFFSET),
+      r: Math.max(50, +r.r || 270),
+    });
+    newRoomIndices.push(state.level.rooms.length - 1);
+  }
+  const newTunnelIndices = [];
+  for (const t of state.clipboard.tunnels) {
+    const fromId = idMap[t.fromRoomId];
+    const toId = idMap[t.toRoomId];
+    if (!fromId || !toId) continue;
+    state.level.tunnels.push({
+      fromRoomId: fromId,
+      toRoomId: toId,
+      r: (typeof t.r === 'number')
+        ? Math.max(MIN_TUNNEL_RADIUS, Math.min(MAX_TUNNEL_RADIUS, +t.r))
+        : DEFAULT_TUNNEL_RADIUS,
+    });
+    newTunnelIndices.push(state.level.tunnels.length - 1);
+  }
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  // Auto-select the pasted pieces so the user can immediately drag them as a
+  // group with the gizmo. Bypass the public select* helpers because they
+  // clear-and-set ; we want exactly this set.
+  state.selection.rooms.clear();
+  state.selection.tunnels.clear();
+  for (const i of newRoomIndices) state.selection.rooms.add(i);
+  for (const i of newTunnelIndices) state.selection.tunnels.add(i);
+  if (newRoomIndices.length > 0) state.primary = { kind: 'room', index: newRoomIndices[0] };
+  else if (newTunnelIndices.length > 0) state.primary = { kind: 'tunnel', index: newTunnelIndices[0] };
+  else state.primary = null;
+  applySelectionChange();
+  setHud(toolLabel[state.tool].name,
+    `Pasted ${newRoomIndices.length} room${newRoomIndices.length === 1 ? '' : 's'} + ${newTunnelIndices.length} tunnel${newTunnelIndices.length === 1 ? '' : 's'} ; drag the gizmo to position.`);
+}
+
+// Preset shape factory. Inserts N rooms and N tunnels arranged on a regular
+// polygon centered at `center`, then auto-selects them so the user can drag
+// the whole shape into final position. Tunnel radius defaults to DEFAULT_TUNNEL_RADIUS.
+function insertPolygonShape(n, opts = {}) {
+  const radius = opts.radius || 600;       // distance from center to each room
+  const roomR = opts.roomR || 270;         // sphere radius (matches "mid / connector" reference)
+  const tunR = opts.tunR || DEFAULT_TUNNEL_RADIUS;
+  const center = opts.center || (orbit && orbit.target ? orbit.target.clone() : new THREE.Vector3());
+  const yPlane = (typeof opts.y === 'number') ? opts.y : center.y;
+
+  const startIdx = state.level.rooms.length;
+  const newRoomIds = [];
+  for (let i = 0; i < n; i++) {
+    // Lay rooms out on a circle in the XZ plane (standard for editor's Y=0
+    // placement plane). Slight phase offset so the first room sits on +X
+    // for triangle and at NE corner for square (visually intuitive).
+    const angle = (i / n) * Math.PI * 2 - Math.PI / 2; // first vertex at top
+    const id = `room_${state.nextRoomId++}`;
+    newRoomIds.push(id);
+    state.level.rooms.push({
+      id,
+      team: null,
+      champion: false,
+      x: Math.round(center.x + Math.cos(angle) * radius),
+      y: Math.round(yPlane),
+      z: Math.round(center.z + Math.sin(angle) * radius),
+      r: roomR,
+    });
+  }
+  // Connect each room to the next, wrapping back to the first to close the loop.
+  const startTunnelIdx = state.level.tunnels.length;
+  for (let i = 0; i < n; i++) {
+    state.level.tunnels.push({
+      fromRoomId: newRoomIds[i],
+      toRoomId: newRoomIds[(i + 1) % n],
+      r: tunR,
+    });
+  }
+  rebuildAllRoomMeshes();
+  rebuildTunnelMeshes();
+  // Select the freshly inserted shape.
+  state.selection.rooms.clear();
+  state.selection.tunnels.clear();
+  for (let i = 0; i < n; i++) state.selection.rooms.add(startIdx + i);
+  for (let i = 0; i < n; i++) state.selection.tunnels.add(startTunnelIdx + i);
+  state.primary = { kind: 'room', index: startIdx };
+  applySelectionChange();
+  setHud(toolLabel[state.tool].name,
+    `Inserted ${n}-room shape ; drag the gizmo to position, or shift-click to refine the selection.`);
+}
+
+ui.grpCopy.addEventListener('click', copySelection);
+ui.grpPaste.addEventListener('click', pasteClipboard);
+ui.grpSelectAll.addEventListener('click', selectAll);
+ui.grpClear.addEventListener('click', clearSelection);
+ui.presetTri.addEventListener('click', () => insertPolygonShape(3));
+ui.presetQuad.addEventListener('click', () => insertPolygonShape(4));
+
+// ============================================================
 // Keyboard
 // ============================================================
 window.addEventListener('keydown', (ev) => {
   if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA' || ev.target.tagName === 'SELECT') return;
+  // Modifier shortcuts first (so plain '1'..'4' don't fire when ctrl/cmd is held).
+  if (ev.ctrlKey || ev.metaKey) {
+    const k = ev.key.toLowerCase();
+    if (k === 'c') { copySelection(); ev.preventDefault(); return; }
+    if (k === 'v') { pasteClipboard(); ev.preventDefault(); return; }
+    if (k === 'a') { selectAll(); ev.preventDefault(); return; }
+    if (k === 'd') { clearSelection(); ev.preventDefault(); return; } // "deselect"
+  }
   if (ev.key === 'Delete' || ev.key === 'Backspace') {
-    if (state.selectedKind === 'room' && state.selectedIndex >= 0) deleteRoom(state.selectedIndex);
-    else if (state.selectedKind === 'tunnel' && state.selectedIndex >= 0) deleteTunnel(state.selectedIndex);
+    if (selectionSize() > 0) deleteSelection();
   } else if (ev.key === 'Escape') {
     if (state.tool !== 'select') setTool('select');
     else clearSelection();
