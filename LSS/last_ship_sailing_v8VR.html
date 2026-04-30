@@ -1276,6 +1276,7 @@ body.vr-active .hit-marker {
   import { UnrealBloomPass }   from 'three/addons/postprocessing/UnrealBloomPass.js';
   import { SMAAPass }          from 'three/addons/postprocessing/SMAAPass.js';
   import { OutputPass }        from 'three/addons/postprocessing/OutputPass.js';
+  import { BokehPass }         from 'three/addons/postprocessing/BokehPass.js';
 
   // ES module namespace objects are sealed in modern browsers, so we cannot
   // attach addons directly to the imported `THREE` namespace. Build a plain
@@ -1292,6 +1293,7 @@ body.vr-active .hit-marker {
   THREEx.UnrealBloomPass = UnrealBloomPass;
   THREEx.SMAAPass        = SMAAPass;
   THREEx.OutputPass      = OutputPass;
+  THREEx.BokehPass       = BokehPass;
   window.THREE = THREEx;
 
   // Tell the rest of the app it can boot.
@@ -5708,7 +5710,18 @@ try {
 scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); // Light fog; low density so indoor walls stay visible
 
 const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// v8VR: powerPreference: 'high-performance' is a standard WebGL hint that
+// asks the OS / browser to pick the discrete GPU on hybrid-graphics
+// laptops (Intel iGPU + NVIDIA/AMD dGPU). Without it the browser commonly
+// defaults to the iGPU for "power saving" and the game runs at half the
+// frame rate it should. failIfMajorPerformanceCaveat=false prevents the
+// context from outright refusing on systems where the high-perf path is
+// unavailable; we'd rather render on the iGPU than not render at all.
+const renderer = new THREE.WebGLRenderer({
+  antialias: true,
+  powerPreference: 'high-performance',
+  failIfMajorPerformanceCaveat: false,
+});
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setClearColor(0x0a0520); // Dark purple-black (cartoon space)
@@ -5728,6 +5741,41 @@ if ('outputColorSpace' in renderer) {
 if ('physicallyCorrectLights' in renderer) renderer.physicallyCorrectLights = true;
 if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
 document.body.appendChild(renderer.domElement);
+
+// v8VR: GPU diagnostic. Logs the actual GL renderer + vendor string so you
+// can verify whether the OS handed us the discrete GPU (e.g. "NVIDIA GeForce
+// RTX 3070") or the integrated one ("Intel(R) UHD Graphics"). Stored on
+// window so the settings page / HUD can display it. The unmasked strings
+// require WEBGL_debug_renderer_info; in privacy-conscious browsers (Firefox
+// with resistFingerprinting) the unmasked version is hidden and we fall
+// back to the spoofed values.
+(function() {
+  try {
+    const gl = renderer.getContext();
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const vendor   = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)   : gl.getParameter(gl.VENDOR);
+    const rendererStr = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    const version  = gl.getParameter(gl.VERSION);
+    window.__v8GPU = { vendor, renderer: rendererStr, version };
+    console.log('[v8VR GPU] vendor:   ', vendor);
+    console.log('[v8VR GPU] renderer: ', rendererStr);
+    console.log('[v8VR GPU] webgl:    ', version);
+    // Heuristic warning when the iGPU appears to have been picked despite
+    // our powerPreference hint. Common iGPU markers: Intel UHD/HD/Iris,
+    // Radeon RX Vega APU strings, AMD Vega Mobile.
+    const looksIntegrated = /Intel\b.*(UHD|HD|Iris)|AMD.*Vega.*Mobile|Microsoft Basic|SwiftShader|llvmpipe/i.test(rendererStr || '');
+    if (looksIntegrated) {
+      console.warn('[v8VR GPU] Looks like an integrated / software adapter; ' +
+                   'the discrete GPU did not engage. On Windows: open ' +
+                   'Settings -> System -> Display -> Graphics, find your ' +
+                   'browser, set "High performance". On NVIDIA Optimus laptops: ' +
+                   'NVIDIA Control Panel -> Manage 3D settings -> Program Settings, ' +
+                   'add the browser, set "High-performance NVIDIA processor".');
+    }
+  } catch (e) {
+    console.warn('[v8VR GPU] diagnostic failed:', e);
+  }
+})();
 
 // =====================================================================
 // ---- VR / WebXR SUPPORT (v7.1 VR fork) -----------------------------
@@ -6720,6 +6768,171 @@ try {
 window.setShowcaseMode = setShowcaseMode;
 window.showcase        = showcase;
 
+// =====================================================================
+// v8VR: Round-winning kill cam (Showcase mode only)
+// =====================================================================
+// When the player lands the kill that empties the opposing team, lock
+// the camera into a 1.5s slow-motion orbit around the dying ship.
+// Reuses hitFX hitstop infrastructure for the time-dilation; the orbit
+// path is independent of deathCam (which only runs when YOU die). Cam
+// timer ticks on real (wall-clock) dt so it lasts 1.5s wall time even
+// while gameplay slows to ~25%. Auto-deactivates; the round-end banner
+// + ANN.roundWon() lands cleanly inside the slow-mo window.
+// Gated to showcase.active so stock matches stay snappy.
+// =====================================================================
+const roundKillCam = {
+  active: false,
+  pos: null,         // dying enemy world position (THREE.Vector3 clone)
+  angle: 0,
+  radius: 240,
+  height: 80,
+  timer: 0,
+  duration: 1.5,
+  angularRate: 1.6,  // radians per real-time second
+};
+
+function _v8tryStartRoundKillCam(dyingMesh, dyingPos) {
+  if (typeof showcase === 'undefined' || !showcase.active) return;
+  if (roundKillCam.active) return;
+  if (typeof deathCam !== 'undefined' && deathCam.active) return;
+  if (typeof player === 'undefined' || !player) return;
+  // Alive-count check on opposing team. The kill that triggered this
+  // call already flipped this.alive = false on the dying bot.
+  const otherTeam = (player.team === LSS.TEAM_FLEET_A) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
+  let aliveOpposing = 0;
+  for (let i = 0, n = game.entities.length; i < n; i++) {
+    const e = game.entities[i];
+    if (e && e.alive && e.team === otherTeam) aliveOpposing++;
+  }
+  if (aliveOpposing > 0) return;
+  // Round-ending kill confirmed. Engage cinematic.
+  roundKillCam.active = true;
+  roundKillCam.pos = (dyingPos && dyingPos.clone) ? dyingPos.clone() :
+                    (dyingMesh && dyingMesh.position) ? dyingMesh.position.clone() :
+                    new THREE.Vector3();
+  roundKillCam.angle = 0;
+  roundKillCam.timer = roundKillCam.duration;
+  // Hard hitstop at ~25% real-time for the duration of the cam.
+  if (typeof hitFX !== 'undefined') {
+    hitFX.hitstopRemaining = Math.max(hitFX.hitstopRemaining, roundKillCam.duration);
+    hitFX.hitstopScale     = 0.25;
+  }
+  console.log('[v8VR] Round-winning kill cam engaged.');
+}
+
+function _v8updateRoundKillCam(realDt) {
+  if (!roundKillCam.active) return;
+  if (renderer.xr && renderer.xr.isPresenting) { roundKillCam.active = false; return; }
+  roundKillCam.timer -= realDt;
+  if (roundKillCam.timer <= 0) {
+    roundKillCam.active = false;
+    roundKillCam.pos = null;
+    return;
+  }
+  roundKillCam.angle += realDt * roundKillCam.angularRate;
+  const r = roundKillCam.radius, h = roundKillCam.height;
+  camera.position.set(
+    roundKillCam.pos.x + Math.cos(roundKillCam.angle) * r,
+    roundKillCam.pos.y + h,
+    roundKillCam.pos.z + Math.sin(roundKillCam.angle) * r
+  );
+  camera.lookAt(roundKillCam.pos);
+}
+
+window.roundKillCam        = roundKillCam;
+window._v8updateRoundKillCam = _v8updateRoundKillCam;
+
+// =====================================================================
+// v8VR: Cinematic round-start flyover (Showcase mode only)
+// =====================================================================
+// 2.5s scripted camera path on the warmup -> playing transition: pull
+// back, orbit the arena center, push in over the player's ship, settle
+// into normal first-person view. While active, an ease-in-out aperture
+// envelope on a BokehPass paints DOF over the scene; on completion the
+// pass disables itself so the cineFX pipeline returns to its normal
+// bloom + ACES + SMAA stack at zero extra GPU cost.
+//
+// The pass is lazily created on first activation so we only pay the
+// material-compile cost when Showcase actually fires the flyover.
+// Skipped in VR (the headset's pose owns the camera).
+// =====================================================================
+const cinemaCam = {
+  active: false,
+  timer: 0,
+  duration: 2.5,
+  bokehPass: null,
+};
+
+function _v8ensureBokehPass() {
+  if (!cineFX.composer) setupCineFX();
+  if (!cineFX.composer || !THREE.BokehPass || cinemaCam.bokehPass) return;
+  const pass = new THREE.BokehPass(scene, camera, {
+    focus: 800, aperture: 0, maxblur: 0.012,
+  });
+  pass.enabled = false;
+  // Insert before SMAA + Output so the DOF lands in linear space and the
+  // antialias / output stages sit on top.
+  const passes = cineFX.composer.passes;
+  let insertIdx = passes.length;
+  for (let i = 0; i < passes.length; i++) {
+    if (passes[i] === cineFX.smaa || passes[i] === cineFX.output) { insertIdx = i; break; }
+  }
+  passes.splice(insertIdx, 0, pass);
+  cinemaCam.bokehPass = pass;
+}
+
+function _v8tryStartCinemaFlyover() {
+  if (typeof showcase === 'undefined' || !showcase.active) return;
+  if (renderer.xr && renderer.xr.isPresenting) return;
+  if (cinemaCam.active) return;
+  if (typeof roundKillCam !== 'undefined' && roundKillCam.active) return;
+  if (typeof player === 'undefined' || !player || !player.position) return;
+  _v8ensureBokehPass();
+  cinemaCam.active = true;
+  cinemaCam.timer = cinemaCam.duration;
+  if (cinemaCam.bokehPass) cinemaCam.bokehPass.enabled = true;
+  console.log('[v8VR] Cinematic flyover engaged.');
+}
+
+function _v8updateCinemaFlyover(realDt) {
+  if (!cinemaCam.active) return;
+  if (renderer.xr && renderer.xr.isPresenting) {
+    cinemaCam.active = false;
+    if (cinemaCam.bokehPass) cinemaCam.bokehPass.enabled = false;
+    return;
+  }
+  cinemaCam.timer -= realDt;
+  const elapsed = cinemaCam.duration - cinemaCam.timer;
+  const t = Math.max(0, Math.min(1, elapsed / cinemaCam.duration));
+  if (t >= 1) {
+    cinemaCam.active = false;
+    if (cinemaCam.bokehPass) cinemaCam.bokehPass.enabled = false;
+    return;
+  }
+  // Pose: ease-out cubic from a high-far orbit down to a tight near-shot.
+  const eased = 1 - Math.pow(1 - t, 3);
+  const pp = player.position;
+  const dist = 900 + (80 - 900) * eased;     // 900 -> 80
+  const h    = 600 + (120 - 600) * eased;    // 600 -> 120
+  const angle = t * Math.PI * 3;             // 1.5 revolutions
+  camera.position.set(
+    pp.x + Math.cos(angle) * dist,
+    pp.y + h,
+    pp.z + Math.sin(angle) * dist
+  );
+  camera.lookAt(pp);
+  // BokehPass: focus on the player, aperture envelope blooms then settles
+  // so the DOF feels like a manual rack rather than a constant blur.
+  if (cinemaCam.bokehPass && cinemaCam.bokehPass.uniforms) {
+    const u = cinemaCam.bokehPass.uniforms;
+    if (u['focus']) u['focus'].value = camera.position.distanceTo(pp);
+    if (u['aperture']) u['aperture'].value = Math.sin(t * Math.PI) * 0.025;
+  }
+}
+
+window.cinemaCam            = cinemaCam;
+window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
+
 // ---- POST-PROCESSING PIPELINE ----
 // Bloom + Vignette + Chromatic Aberration (on damage) via custom shader passes.
 // Uses render targets and fullscreen quads; no external postprocessing library needed.
@@ -7086,11 +7299,16 @@ function setupCineFX() {
   const composer  = new THREE.EffectComposer(renderer);
   const renderPass = new THREE.RenderPass(scene, camera);
   // UnrealBloom params: (resolution, strength, radius, threshold).
-  // Threshold 0.18 catches emissive tracers/shields without blooming dim hull
-  // panels. Strength 0.85 reads cinematic without crushing whites.
+  // (v8VR retune, 2026-04-30) Earlier (0.85 / 0.4 / 0.18) read as washed-out
+  // because the scene's existing directional + point lights are tuned bright
+  // for the legacy custom ACES path; threshold 0.18 had nearly every lit
+  // surface contributing bloom. Tightened so only genuinely emissive
+  // material (tracers, shield rims, explosion cores, engine plumes) blooms.
   const bloomPass = new THREE.UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.85, 0.4, 0.18
+    0.55,   // strength: was 0.85 — softer overall lift
+    0.55,   // radius:   was 0.4  — slightly wider falloff so the bloom that DOES land reads cinematic
+    0.65    // threshold: was 0.18 — only HDR-bright pixels bloom
   );
   const smaaPass  = new THREE.SMAAPass(window.innerWidth, window.innerHeight);
   const outputPass = new THREE.OutputPass();
@@ -7118,7 +7336,12 @@ function setCineFXEnabled(on) {
       cineFX._savedExposure    = renderer.toneMappingExposure;
     }
     renderer.toneMapping         = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    // (v8VR retune, 2026-04-30) Exposure dropped from 1.05 to 0.78. The
+    // existing scene lights were tuned against the legacy custom ACES
+    // shader; Three.js's built-in ACES is ~25% brighter at the same
+    // luminance, so 1.05 pushes highlights past the comfortable
+    // compression range and reads washed-out. 0.78 brings contrast back.
+    renderer.toneMappingExposure = 0.78;
     document.body.classList.add('cine-fx');
     console.log('[v8VR cineFX] Cinematic post-processing ENABLED');
   } else {
@@ -7138,9 +7361,36 @@ function resizeCineFX(w, h) {
   if (cineFX.smaa)  cineFX.smaa.setSize(w, h);
 }
 
+// Live-tuning helper for the dev console. Pass any subset of:
+//   { strength, radius, threshold, exposure }
+// and the post-pipeline updates immediately without reloading.
+//
+// Examples:
+//   tuneCineFX({ exposure: 0.65 })          // dimmer overall
+//   tuneCineFX({ strength: 0.35, threshold: 0.8 })  // less bloom, only on bright stuff
+//   tuneCineFX({ strength: 1.0, radius: 0.7, threshold: 0.4 })  // dreamy / heavy
+function tuneCineFX(opts) {
+  opts = opts || {};
+  if (cineFX.bloom) {
+    if (typeof opts.strength  === 'number') cineFX.bloom.strength  = opts.strength;
+    if (typeof opts.radius    === 'number') cineFX.bloom.radius    = opts.radius;
+    if (typeof opts.threshold === 'number') cineFX.bloom.threshold = opts.threshold;
+  }
+  if (typeof opts.exposure === 'number') {
+    renderer.toneMappingExposure = opts.exposure;
+  }
+  return {
+    strength:  cineFX.bloom ? cineFX.bloom.strength  : null,
+    radius:    cineFX.bloom ? cineFX.bloom.radius    : null,
+    threshold: cineFX.bloom ? cineFX.bloom.threshold : null,
+    exposure:  renderer.toneMappingExposure,
+  };
+}
+
 // Expose for the Showcase mode toggle, settings page, and dev console.
 window.setCineFXEnabled = setCineFXEnabled;
-window.cineFX = cineFX;
+window.cineFX           = cineFX;
+window.tuneCineFX       = tuneCineFX;
 
 function renderPostFX() {
   // Low-quality gate: skip the three bloom passes (bright-extract + horizontal
@@ -8055,7 +8305,10 @@ function _initShipPreview3D() {
   const canvas = document.getElementById('ship-preview-canvas');
   if (!canvas) return null; // canvas not in DOM yet; don't latch the failure
   try {
-    const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({
+      canvas: canvas, antialias: true, alpha: true,
+      powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false,
+    });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     // v8VR: feature-checked PBR + colorSpace setup matches the main renderer.
     if ('physicallyCorrectLights' in renderer) renderer.physicallyCorrectLights = true;
@@ -9857,6 +10110,11 @@ class Bot {
         if (_annNext >= 2 && typeof announceMultikill === 'function') announceMultikill(_annNext);
         else ANN.enemyDown();
       }
+      // v8VR: round-winning kill cam (Showcase mode only). No-op unless
+      // showcase.active and this kill emptied the opposing team.
+      if (typeof _v8tryStartRoundKillCam === 'function') {
+        _v8tryStartRoundKillCam(this.mesh, this.position);
+      }
       // Cinematic: multi-kill streak window + medals.
       if (window.Overlays) {
         if (!player._streakCount) player._streakCount = 0;
@@ -11533,6 +11791,126 @@ function v8UpdateDebris(dt) {
 window.v8Debris        = v8Debris;
 window.v8SpawnDebris   = v8SpawnDebris;
 
+// =====================================================================
+// v8VR: InstancedMesh spark / ember pool
+// =====================================================================
+// Sister to v8Debris but tuned for tiny bright fast emissive points.
+// 512 instances, single draw call, per-instance color (so we can mix
+// warm yellows and oranges in one batch). Material is MeshBasic so the
+// sparks bloom hard through UnrealBloomPass without needing IBL.
+//
+// Layered alongside the legacy spawnImpactSparks (existing pooled
+// sphere meshes stay) so the impact reads as denser without changing
+// the original effect's behavior.
+// =====================================================================
+const v8Sparks = {
+  capacity: 512,
+  mesh: null,
+  active: null, age: null, life: null, size: null,
+  vx: null, vy: null, vz: null,
+  px: null, py: null, pz: null,
+  cursor: 0,
+  _m: null, _qIdent: null, _s: null, _p: null,
+  _color: null,
+};
+
+function v8SparksInit() {
+  if (v8Sparks.mesh) return;
+  if (typeof scene === 'undefined' || !THREE.InstancedMesh) return;
+  const geo = new THREE.OctahedronGeometry(1, 0);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 1, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const mesh = new THREE.InstancedMesh(geo, mat, v8Sparks.capacity);
+  mesh.frustumCulled = false;
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(v8Sparks.capacity * 3), 3);
+  mesh.count = v8Sparks.capacity;
+  const m0 = new THREE.Matrix4(); m0.makeScale(0, 0, 0);
+  for (let i = 0; i < v8Sparks.capacity; i++) mesh.setMatrixAt(i, m0);
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  v8Sparks.mesh = mesh;
+  const C = v8Sparks.capacity;
+  v8Sparks.active = new Uint8Array(C);
+  v8Sparks.age   = new Float32Array(C);
+  v8Sparks.life  = new Float32Array(C);
+  v8Sparks.size  = new Float32Array(C);
+  v8Sparks.vx = new Float32Array(C); v8Sparks.vy = new Float32Array(C); v8Sparks.vz = new Float32Array(C);
+  v8Sparks.px = new Float32Array(C); v8Sparks.py = new Float32Array(C); v8Sparks.pz = new Float32Array(C);
+  v8Sparks._m = new THREE.Matrix4();
+  v8Sparks._qIdent = new THREE.Quaternion(0, 0, 0, 1);
+  v8Sparks._s = new THREE.Vector3();
+  v8Sparks._p = new THREE.Vector3();
+  v8Sparks._color = new THREE.Color();
+}
+
+function v8SpawnSparks(pos, count, baseSize, vScale, color1, color2) {
+  if (!v8Sparks.mesh) v8SparksInit();
+  if (!v8Sparks.mesh) return;
+  // Default warm palette: orange-amber to bright yellow-white.
+  color1 = color1 != null ? color1 : 0xffaa44;
+  color2 = color2 != null ? color2 : 0xfff0c0;
+  const tmp = v8Sparks._color;
+  const c1 = tmp.setHex(color1); const r1 = c1.r, g1 = c1.g, b1 = c1.b;
+  const c2 = tmp.setHex(color2); const r2 = c2.r, g2 = c2.g, b2 = c2.b;
+  for (let i = 0; i < count; i++) {
+    const idx = v8Sparks.cursor;
+    v8Sparks.cursor = (v8Sparks.cursor + 1) % v8Sparks.capacity;
+    v8Sparks.active[idx] = 1;
+    v8Sparks.px[idx] = pos.x; v8Sparks.py[idx] = pos.y; v8Sparks.pz[idx] = pos.z;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const speed = (0.6 + Math.random() * 1.0) * vScale;
+    const sinP  = Math.sin(phi);
+    v8Sparks.vx[idx] = sinP * Math.cos(theta) * speed;
+    v8Sparks.vy[idx] = sinP * Math.sin(theta) * speed;
+    v8Sparks.vz[idx] = Math.cos(phi)            * speed;
+    v8Sparks.age[idx]  = 0;
+    v8Sparks.life[idx] = 0.22 + Math.random() * 0.45;
+    v8Sparks.size[idx] = baseSize * (0.6 + Math.random() * 0.7);
+    // Random lerp between the two colors so a batch reads as a mix.
+    const tt = Math.random();
+    v8Sparks.mesh.instanceColor.setXYZ(idx,
+      r1 * (1 - tt) + r2 * tt,
+      g1 * (1 - tt) + g2 * tt,
+      b1 * (1 - tt) + b2 * tt);
+  }
+  v8Sparks.mesh.instanceColor.needsUpdate = true;
+}
+
+function v8UpdateSparks(dt) {
+  if (!v8Sparks.mesh) return;
+  let dirty = false;
+  const drag = Math.pow(0.4, dt); // sparks slow faster than debris
+  for (let i = 0; i < v8Sparks.capacity; i++) {
+    if (!v8Sparks.active[i]) continue;
+    dirty = true;
+    v8Sparks.age[i] += dt;
+    if (v8Sparks.age[i] >= v8Sparks.life[i]) {
+      v8Sparks.active[i] = 0;
+      v8Sparks._m.makeScale(0, 0, 0);
+      v8Sparks.mesh.setMatrixAt(i, v8Sparks._m);
+      continue;
+    }
+    v8Sparks.vx[i] *= drag; v8Sparks.vy[i] *= drag; v8Sparks.vz[i] *= drag;
+    v8Sparks.px[i] += v8Sparks.vx[i] * dt;
+    v8Sparks.py[i] += v8Sparks.vy[i] * dt;
+    v8Sparks.pz[i] += v8Sparks.vz[i] * dt;
+    const t = v8Sparks.age[i] / v8Sparks.life[i];
+    const fade = 1 - t;
+    const s = v8Sparks.size[i] * fade;
+    v8Sparks._p.set(v8Sparks.px[i], v8Sparks.py[i], v8Sparks.pz[i]);
+    v8Sparks._s.set(s, s, s);
+    v8Sparks._m.compose(v8Sparks._p, v8Sparks._qIdent, v8Sparks._s);
+    v8Sparks.mesh.setMatrixAt(i, v8Sparks._m);
+  }
+  if (dirty) v8Sparks.mesh.instanceMatrix.needsUpdate = true;
+}
+
+window.v8Sparks      = v8Sparks;
+window.v8SpawnSparks = v8SpawnSparks;
+
 function spawnExplosion(pos, size) {
   size = size || 20;
 
@@ -11543,6 +11921,14 @@ function spawnExplosion(pos, size) {
     const _qm = (typeof QUALITY !== 'undefined' && QUALITY.particleRate) ? QUALITY.particleRate() : 1.0;
     const count = Math.min(48, Math.max(6, Math.round(size * 0.6 * _qm)));
     v8SpawnDebris(pos, count, Math.max(0.6, size * 0.05), Math.max(60, size * 6));
+  }
+  // v8VR: instanced bright sparks at the heart of every explosion. Brighter
+  // than the warm orange sparks at impact sites, faster, more numerous.
+  // The bloom pass picks them up hard so the blast core reads as glowing.
+  if (typeof v8SpawnSparks === 'function') {
+    const _qm = (typeof QUALITY !== 'undefined' && QUALITY.particleRate) ? QUALITY.particleRate() : 1.0;
+    const sparkCount = Math.min(64, Math.max(8, Math.round(size * 1.2 * _qm)));
+    v8SpawnSparks(pos, sparkCount, Math.max(0.8, size * 0.07), Math.max(140, size * 14), 0xff8822, 0xfff8a0);
   }
 
   // v8VR: spatial explosion audio. Routes through the existing HRTF panner
@@ -13341,10 +13727,11 @@ function _disposeOrReleaseEffect(e) {
   if (e.mesh.material) e.mesh.material.dispose();
 }
 function updateEffects(dt) {
-  // v8VR: drive the InstancedMesh debris pool from inside the same per-frame
-  // effects update so debris ages on the same hitstop-respecting dt and
-  // freezes when the game pauses (settings, lobby).
+  // v8VR: drive the InstancedMesh particle pools from inside the same
+  // per-frame effects update so they age on the same hitstop-respecting
+  // dt and freeze when the game pauses (settings, lobby).
   if (typeof v8UpdateDebris === 'function') v8UpdateDebris(dt);
+  if (typeof v8UpdateSparks === 'function') v8UpdateSparks(dt);
 
   // Cap effects: cull excess when over budget. Was using array.shift()
   // which is O(n) — moves up to 349 elements every cull, which during
@@ -13909,6 +14296,16 @@ function showDirectionalDamage(attacker, projectile) {
 // Spawn impact sparks at a hit location (small fast-moving particles)
 function spawnImpactSparks(pos, count) {
   count = count || 6;
+
+  // v8VR: instanced bright spark layer alongside the legacy pooled meshes.
+  // One draw call regardless of how many impact events fire this frame, so
+  // we can crank density without budget pain. QUALITY scales the count.
+  if (typeof v8SpawnSparks === 'function') {
+    const _qm = (typeof QUALITY !== 'undefined' && QUALITY.particleRate) ? QUALITY.particleRate() : 1.0;
+    const sparkCount = Math.min(36, Math.max(4, Math.round(count * 2.2 * _qm)));
+    v8SpawnSparks(pos, sparkCount, 0.9, 240);
+  }
+
 
   // --- Bright impact flash (white-hot center) ---
   // Pooled 'sparkFlash' = unit sphere radius 1 at segments (6,4); scale 3 recovers
@@ -18086,6 +18483,8 @@ function updateRoundSystem(dt) {
       }
       // v8VR: ship-AI announces the round transition.
       if (typeof ANN !== 'undefined') ANN.roundStart();
+      // v8VR: cinematic flyover with BokehPass (Showcase mode only).
+      if (typeof _v8tryStartCinemaFlyover === 'function') _v8tryStartCinemaFlyover();
     }
   } else if (game.state === 'playing') {
     game.roundTimer -= dt;
@@ -20848,6 +21247,16 @@ function buildSettingsPage() {
     </div>
 
     <h2>GRAPHICS</h2>
+
+    <div class="settings-section">
+      <h3>Active GPU</h3>
+      <div class="setting-row" style="opacity:0.85; font-size:0.85em;">
+        <label style="flex:1; line-height:1.5;" id="set-gpu-info">${(window.__v8GPU && window.__v8GPU.renderer) ? (window.__v8GPU.renderer + '<br><span style="opacity:0.6">' + (window.__v8GPU.vendor || '') + '</span>') : 'detecting...'}</label>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.8em;">
+        <label style="flex:1; line-height:1.5;">v8VR requests <code>powerPreference: 'high-performance'</code> when creating its WebGL context, which on hybrid-graphics laptops asks the OS to pick the discrete GPU. If the renderer above still reads <code>Intel UHD/HD/Iris</code> after a hard reload, the OS overrode the hint. Fix on Windows: <em>Settings &rarr; System &rarr; Display &rarr; Graphics</em>, find your browser, click <em>Options</em>, set <em>High performance</em>, restart the browser. NVIDIA laptops: also check <em>NVIDIA Control Panel &rarr; Manage 3D settings &rarr; Program Settings</em>, add the browser, set <em>High-performance NVIDIA processor</em>.</label>
+      </div>
+    </div>
 
     <div class="settings-section">
       <h3>Quality</h3>
@@ -25709,6 +26118,13 @@ function gameLoop(timestamp) {
     updateWeapon(dt);
     updateAbilities(dt);
   }
+  // v8VR: cinematic camera overrides run AFTER updatePlayerMovement so
+  // their poses win. Both tick on real (wall-clock) dt so durations stay
+  // wall-time consistent regardless of hitstop. Round-start flyover
+  // first; round-winning kill cam second (later wins if both somehow
+  // coincide, though they're at opposite ends of a round by design).
+  if (typeof _v8updateCinemaFlyover === 'function') _v8updateCinemaFlyover(_wallDt);
+  if (typeof _v8updateRoundKillCam === 'function')   _v8updateRoundKillCam(_wallDt);
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
