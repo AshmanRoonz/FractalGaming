@@ -27141,9 +27141,10 @@ const audio = {
   ambientNodes: [],     // oscillator nodes for ambient bed
   initialized: false,
   // User-facing volume multipliers (0..1.5), stacked on top of internal gain staging.
-  // (v8_1VR) `music` is the Tier 3 reactive band slider; defaults to 0.55 so
-  // the band sits roughly -8 dB under SFX out of the box.
-  userVol: { master: 1.0, sfx: 1.0, ambient: 1.0, music: 0.55 },
+  // (v8_1VR) `music` is the Tier 3 reactive band slider. Default 0.45 ; the bus
+  // multiplier below is 0.30, giving ~0.135 effective gain so the band sits
+  // well under SFX out of the box. Slider goes up to 1.5 if the user wants it louder.
+  userVol: { master: 1.0, sfx: 1.0, ambient: 1.0, music: 0.45 },
   // (v8_1VR) Music bus + glue. Parallel to ambientGain ; both bypass the
   // SFX-bus voice budget so combat fire never starves the drums.
   musicGain: null,
@@ -27291,7 +27292,7 @@ function initAudio() {
     audio.musicComp.connect(audio.hiCut);
 
     audio.musicGain = audio.ctx.createGain();
-    audio.musicGain.gain.value = 0.55 * (audio.userVol.music != null ? audio.userVol.music : 0.55);
+    audio.musicGain.gain.value = 0.30 * (audio.userVol.music != null ? audio.userVol.music : 0.45);
     audio.musicGain.connect(audio.musicComp);
 
     audio.initialized = true;
@@ -30874,6 +30875,87 @@ function _musicVoicePad(chord) {
   });
 }
 
+// === RIFF BUILDER ===
+// Picks scale-degree notes from music.scale and weaves them into rhythmic
+// patterns on a 16th-note grid. Each bar combines one rhythm (when the
+// notes hit) with one contour (which scale degrees they walk through).
+// The riff config attaches to a pattern via PATTERN_RIFFS below.
+
+// Scale-degree to semitone (auto-wraps octaves so contours can climb past 7).
+function _musicScaleSemitone(degree) {
+  const scale = music.scale; // length 7
+  const oct = Math.floor(degree / 7);
+  const d = ((degree % 7) + 7) % 7;
+  return scale[d] + oct * 12;
+}
+
+// 16-step rhythm grids (one bar of 16th notes). 0 = rest, 1 = note, 2 = accent.
+const RIFF_RHYTHMS = {
+  hover_quarters: [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0],   // sparse, two notes per bar
+  pulse_8ths:     [1,0,2,0, 1,0,2,0, 1,0,2,0, 1,0,2,0],   // steady 8th pulse, accents on the and
+  driving:        [2,0,1,0, 1,0,2,0, 0,1,1,0, 2,0,1,1],   // syncopated combat riff
+  galloping:      [2,0,1,1, 0,1,0,0, 2,0,1,1, 0,1,1,0],   // triplet-feel push
+  call_response:  [2,0,1,0, 0,1,0,0, 2,0,1,0, 0,1,2,0],   // call on bar 1, answer on bar 2 of pair
+  doomed_pulse:   [2,0,0,0, 1,0,0,1, 0,0,1,0, 0,1,0,0],   // unsteady, off-beat
+};
+
+// Scale-degree contours. 0 = root, 7 = next octave root, negative = below.
+// The riff builder walks through these in order, wrapping when notes run out.
+const RIFF_CONTOURS = {
+  hover_root:     [0, 4, 0, 4],                    // tonic/fifth alternation
+  rising:         [0, 2, 4, 5, 7, 9, 11, 12],      // diatonic ascent over 2 octaves
+  falling:        [12, 11, 9, 7, 5, 4, 2, 0],      // diatonic descent
+  zigzag:         [0, 4, 2, 5, 4, 7, 5, 9],        // up-down weave
+  riff_minor:     [0, 0, 2, 4, 7, 4, 2, 0],        // tonic-anchored minor riff
+  riff_blues:     [0, 2, 3, 4, 7, 4, 3, 2],        // blue-note flavor (uses scale degree 3 for b5-ish)
+  pentatonic_a:   [0, 2, 4, 7, 9, 7, 4, 2],        // ascending then descending pentatonic
+  doomed_creep:   [0, 1, 0, -2, 0, 1, 3, 1],       // crawls around the b2 (Phrygian sting)
+};
+
+// Pattern → riff config. Octave is added on top of keyMidi+24 (lead register).
+// barsPerCycle lets a riff span more than one bar before repeating (e.g. 2 bars
+// of "call" then "response").
+const PATTERN_RIFFS = {
+  lobby:    { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
+  warmup:   { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
+  combat:   { rhythm: 'driving',        contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
+  doomed:   { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
+  // Round-end and match-end patterns keep their scripted lead phrases ; no
+  // overlay riff so the cadence reads cleanly.
+};
+
+// Generate a list of {sub16, semi, vel} notes for the given bar+pattern. The
+// rhythm grid + contour combine to lay notes onto the 16th grid; cycling
+// through the contour as we hit each note slot.
+function _musicGenerateRiffBar(patternId, barInCycle) {
+  const cfg = PATTERN_RIFFS[patternId];
+  if (!cfg) return null;
+  const rhythm = RIFF_RHYTHMS[cfg.rhythm];
+  const contour = RIFF_CONTOURS[cfg.contour];
+  if (!rhythm || !contour) return null;
+  // Walk through every step in the bar, advancing contour index on each note.
+  // For multi-bar cycles, the contour offset starts where the previous bar
+  // left off so the line keeps developing (rather than restarting on every bar).
+  const stepsPerBar = 16;
+  const startContourIdx = (barInCycle % cfg.barsPerCycle) *
+    rhythm.filter(x => x > 0).length;
+  const notes = [];
+  let cIdx = startContourIdx;
+  for (let s = 0; s < stepsPerBar; s++) {
+    const v = rhythm[s];
+    if (v === 0) continue;
+    const deg = contour[cIdx % contour.length];
+    const semi = _musicScaleSemitone(deg) + (cfg.octaveAdd || 0);
+    notes.push({
+      sub16: s,
+      semi,
+      vel: v === 2 ? 0.85 : 0.55,
+    });
+    cIdx++;
+  }
+  return notes;
+}
+
 // === SCHEDULER ===
 
 function musicEnsureCtx() {
@@ -30893,15 +30975,58 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   const out = music.out;
   const secPerBeat = 60 / music.bpm;
 
-  // Drums: walk the 16th-note grid for this beat.
+  // Drums + riff: walk the 16th-note grid for this beat. Drums always fire
+  // at bar-relative steps 0..15. Riff notes are pre-generated for the bar at
+  // beat 0 and triggered as we walk the grid.
+  const beatInBarLocal = beatIdx % 4;
+
+  // Generate this bar's riff notes once (on the first beat of the bar). The
+  // contour cycles via `_riffCycleBar` so multi-bar contours keep developing.
+  if (beatInBarLocal === 0) {
+    if (!music._riffCycleBar) music._riffCycleBar = 0;
+    music._barRiffNotes = _musicGenerateRiffBar(music.patternId, music._riffCycleBar);
+    const cfg = PATTERN_RIFFS[music.patternId];
+    if (cfg) {
+      music._riffCycleBar = (music._riffCycleBar + 1) % cfg.barsPerCycle;
+    } else {
+      music._riffCycleBar = 0;
+      music._barRiffNotes = null;
+    }
+  }
+
   if (!music.drumsSuspended && ptn.drum) {
     for (let s = 0; s < 4; s++) {
       const sub = beatIdx * 4 + s;
       const subTime = beatTime + (s * secPerBeat / 4);
+      const stepInBar = beatInBarLocal * 4 + s;
+      // Drum hit for this 16th.
       const hit = ptn.drum(sub, beatIdx, music.intensity);
       if (hit) {
         for (const h of hit) {
           _musicSynthDrum(h.note, h.g != null ? h.g : 1.0, subTime, out);
+        }
+      }
+      // Riff lead note for this 16th (if any).
+      if (music._barRiffNotes) {
+        for (const n of music._barRiffNotes) {
+          if (n.sub16 === stepInBar) {
+            const dur = secPerBeat * 0.45;  // tight 16th-ish lead, fades fast
+            _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + n.semi),
+                            n.vel, subTime, out, dur);
+          }
+        }
+      }
+    }
+  } else if (music._barRiffNotes) {
+    // Drums suspended (e.g. inside stasis field) but riff still plays at half volume.
+    for (let s = 0; s < 4; s++) {
+      const subTime = beatTime + (s * secPerBeat / 4);
+      const stepInBar = beatInBarLocal * 4 + s;
+      for (const n of music._barRiffNotes) {
+        if (n.sub16 === stepInBar) {
+          const dur = secPerBeat * 0.45;
+          _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + n.semi),
+                          n.vel * 0.5, subTime, out, dur);
         }
       }
     }
@@ -30917,7 +31042,10 @@ function _musicScheduleBeat(beatIdx, beatTime) {
     }
   }
 
-  // Pad: chord progression. Trigger on bar boundaries for each new chord.
+  // Pad: chord progression. Stabs on each BAR boundary (beat 0) with a
+  // short ~1.5-beat sustain so chords don't drone across the riff. The pad
+  // becomes a rhythmic instrument that breathes with the beat instead of a
+  // wash. Voice-leading still picks the closest voicing for smooth changes.
   if (ptn.chords && ptn.chordsBars) {
     const totalBars = ptn.chordsBars.reduce((a, b) => a + b, 0);
     const barInLoop = (Math.floor(beatIdx / 4)) % totalBars;
@@ -30929,19 +31057,16 @@ function _musicScheduleBeat(beatIdx, beatTime) {
         if (barInLoop < acc + ptn.chordsBars[i]) { chordIdx = i; break; }
         acc += ptn.chordsBars[i];
       }
-      const isFirstBarOfChord = (barInLoop === acc);
-      const chordKey = ptn.id + ':' + chordIdx + ':' + barInLoop;
-      if (isFirstBarOfChord && music.lastChordKey !== chordKey) {
-        music.lastChordKey = chordKey;
-        const [degree, quality] = ptn.chords[chordIdx];
-        const chordOffsets = _musicChord(degree, quality);
-        const voicing = _musicVoicePad(chordOffsets);
-        const dur = secPerBeat * 4 * ptn.chordsBars[chordIdx];
-        for (const m of voicing) {
-          _musicSynthPad(_musicMidiHz(m), 1.0, beatTime, out, dur);
-        }
-        music.lastPadVoicing = voicing;
+      const [degree, quality] = ptn.chords[chordIdx];
+      const chordOffsets = _musicChord(degree, quality);
+      const voicing = _musicVoicePad(chordOffsets);
+      // Short stab : 1.5 beats sustain, fades through beat 2 of the bar so the
+      // riff has space. Each bar retriggers (rhythm), even on repeated chords.
+      const dur = secPerBeat * 1.5;
+      for (const m of voicing) {
+        _musicSynthPad(_musicMidiHz(m), 0.7, beatTime, out, dur);
       }
+      music.lastPadVoicing = voicing;
     }
   }
 
@@ -31011,7 +31136,7 @@ function musicSetEnabled(on) {
   } else {
     if (audio.musicGain && audio.ctx) {
       try {
-        const target = 0.55 * (audio.userVol.music != null ? audio.userVol.music : 0.55);
+        const target = 0.30 * (audio.userVol.music != null ? audio.userVol.music : 0.45);
         audio.musicGain.gain.cancelScheduledValues(audio.ctx.currentTime);
         audio.musicGain.gain.linearRampToValueAtTime(target, audio.ctx.currentTime + 0.4);
       } catch (_) {}
@@ -31023,7 +31148,7 @@ function musicSetEnabled(on) {
 function musicSetVolume(v) {
   audio.userVol.music = Math.max(0, Math.min(1.5, v));
   if (audio.musicGain) {
-    audio.musicGain.gain.value = 0.55 * audio.userVol.music;
+    audio.musicGain.gain.value = 0.30 * audio.userVol.music;
   }
 }
 
@@ -31034,6 +31159,9 @@ function musicSetPattern(id, opts) {
   }
   music.patternId = id;
   music.lastChordKey = null;
+  // Reset riff cycle bar so each pattern starts at its first phrase.
+  music._riffCycleBar = 0;
+  music._barRiffNotes = null;
   // Clear any pending lead notes from a prior pattern (kills don't echo across rounds).
   music.pendingLeadNotes = [];
   if (opts && typeof opts.intensity === 'number') {
@@ -31073,7 +31201,10 @@ function musicSetMode(mode) {
 function musicEnterMode(name) {
   if (name === 'doomed') {
     music.doomedMode = true;
+    music._patternBeforeDoomed = music.patternId;
     musicSetMode('phrygian');
+    // Switch to the doomed pattern (sparse drums, b2 chords, doomed_creep riff).
+    musicSetPattern('doomed', { intensity: music.intensity });
   }
 }
 
@@ -31081,6 +31212,11 @@ function musicExitMode(name) {
   if (name === 'doomed') {
     music.doomedMode = false;
     musicSetMode('aeolian');
+    // Restore the previous pattern (combat in normal play). Falls back to combat
+    // if we somehow lost the prior pattern reference.
+    const restore = music._patternBeforeDoomed || 'combat';
+    music._patternBeforeDoomed = null;
+    musicSetPattern(restore, { intensity: music.intensity });
   }
 }
 
@@ -31367,6 +31503,10 @@ try {
   window.musicSyncToGameState = musicSyncToGameState;
   window.musicStart = musicStart;
   window.musicStop = musicStop;
+  // Riff diagnostics: peek/poke from console.
+  window.RIFF_RHYTHMS = RIFF_RHYTHMS;
+  window.RIFF_CONTOURS = RIFF_CONTOURS;
+  window.PATTERN_RIFFS = PATTERN_RIFFS;
 } catch (_) {}
 
 // ---- HOOK AUDIO INTO EXISTING FUNCTIONS ----
@@ -31907,7 +32047,7 @@ try {
     if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling || 'normal');
     if (typeof musicSetEnabled === 'function') musicSetEnabled(audio.musicEnabled !== false);
     if (audio.musicGain && audio.userVol && typeof audio.userVol.music === 'number') {
-      audio.musicGain.gain.value = 0.55 * audio.userVol.music;
+      audio.musicGain.gain.value = 0.30 * audio.userVol.music;
     }
   }
 } catch (_) {}
