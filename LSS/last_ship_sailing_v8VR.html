@@ -27039,7 +27039,14 @@ function generateImpulseResponse(ctx, duration, decay, preDelay) {
 function initAudio() {
   if (audio.initialized) return;
   try {
-    audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    // (v8VR 2026-05-01) latencyHint 'playback' gives the audio thread a
+    // bigger buffer (~50-100ms instead of ~10-20ms) so heavy combat with
+    // many simultaneous oscillators / noise bursts doesn't underrun and
+    // cause audible dropouts. Trade-off is a small added latency between
+    // event and sound, imperceptible for game SFX.
+    const _AC = (window.AudioContext || window.webkitAudioContext);
+    try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
+    catch (_) { audio.ctx = new _AC(); }
 
     // High-frequency rolloff: gentle lowpass to tame harsh highs across all sounds
     audio.hiCut = audio.ctx.createBiquadFilter();
@@ -29772,9 +29779,37 @@ const _SOUND_MIN_GAP = {
 };
 const _lastSoundTime = {};
 
+// (v8VR 2026-05-01) Global active-voice budget. Each playSound call is
+// estimated at ~5-10 oscillator/buffer-source nodes; under heavy combat
+// (multi-ship gunfights + Pyro flames + impact sparks) the audio thread
+// can underrun and cause audible dropouts. Track active voices by
+// counting recent playSound dispatches in a sliding window; skip the
+// cheapest sounds when over budget.
+const _AUDIO_VOICE_BUDGET = 24;          // max sounds per ~0.6s window
+const _AUDIO_VOICE_WINDOW = 0.6;         // seconds
+const _audioRecentVoices = [];           // ctx-time stamps of recent plays
+// Sounds that are OK to skip when over budget (cosmetic, replaceable).
+// Critical sounds (death, round_start, ability) always pass through.
+const _AUDIO_SKIPPABLE = {
+  fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
+  fire_railgun: 1, fire_salvo: 1,
+  hit: 1, damage: 1, damage_shield: 1,
+  fire_burn: 1, shield_hum: 1, fire_shield_hum: 1,
+};
+
 function playSound(type) {
   if (!audio.initialized || !audio.ctx) return;
   resumeAudio();
+  const _ctxT = audio.ctx.currentTime;
+  // Sliding-window voice budget: drop oldest stamps that fell out the back.
+  while (_audioRecentVoices.length && (_ctxT - _audioRecentVoices[0]) > _AUDIO_VOICE_WINDOW) {
+    _audioRecentVoices.shift();
+  }
+  // Over-budget skip for cosmetic sounds. Critical SFX always play.
+  if (_audioRecentVoices.length >= _AUDIO_VOICE_BUDGET && _AUDIO_SKIPPABLE[type]) {
+    return;
+  }
+  _audioRecentVoices.push(_ctxT);
   // Rate-limit per type. ctx.currentTime is monotonic and tracks audio-thread
   // time, which is what we actually want here (real time can drift if the
   // tab loses focus).
