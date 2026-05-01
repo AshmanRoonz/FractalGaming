@@ -21931,6 +21931,17 @@ function buildSettingsPage() {
         <div class="value-display" id="val-vol-music">${audio.userVol.music.toFixed(2)}</div>
       </div>
       <div class="setting-row">
+        <label>Style</label>
+        <select id="set-music-style" style="flex:1; min-width:0; max-width:60%;">
+          <option value="cosmic" ${(audio.musicStyle || 'cosmic') === 'cosmic' ? 'selected' : ''}>Cosmic (default, C#2 Aeolian, triangle lead)</option>
+          <option value="cyber"  ${audio.musicStyle === 'cyber'  ? 'selected' : ''}>Cyber (synthwave, faster, saw lead)</option>
+          <option value="doom"   ${audio.musicStyle === 'doom'   ? 'selected' : ''}>Doom (Phrygian, slower, dark)</option>
+          <option value="drift"  ${audio.musicStyle === 'drift'  ? 'selected' : ''}>Drift (ambient, sine, sparse)</option>
+          <option value="battle" ${audio.musicStyle === 'battle' ? 'selected' : ''}>Battle (cinematic, driving)</option>
+          <option value="jazz"   ${audio.musicStyle === 'jazz'   ? 'selected' : ''}>Jazz (laid back, swung)</option>
+        </select>
+      </div>
+      <div class="setting-row">
         <label>Intensity ceiling</label>
         <select id="set-music-ceiling" style="flex:1; min-width:0; max-width:60%;">
           <option value="chill"  ${audio.musicCeiling === 'chill' ? 'selected' : ''}>Chill (cap at 1)</option>
@@ -22155,6 +22166,20 @@ function buildSettingsPage() {
     musicCeilingSel.addEventListener('change', e => {
       audio.musicCeiling = e.target.value;
       if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling);
+      saveSettings();
+    });
+  }
+  const musicStyleSel = overlay.querySelector('#set-music-style');
+  if (musicStyleSel) {
+    musicStyleSel.addEventListener('change', e => {
+      audio.musicStyle = e.target.value;
+      if (typeof musicSetStyle === 'function') musicSetStyle(audio.musicStyle);
+      // Re-apply current pattern so the new style's BPM scale + riff override
+      // takes effect immediately rather than on the next pattern transition.
+      if (typeof music !== 'undefined' && music.patternId && typeof musicSetPattern === 'function') {
+        const cur = music.patternId;
+        try { musicSetPattern(cur, { intensity: music.intensity }); } catch (_) {}
+      }
       saveSettings();
     });
   }
@@ -22985,10 +23010,11 @@ function saveSettings() {
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
       // (v8_1VR) Reactive band settings.
-      audioMusic: audio.userVol.music != null ? audio.userVol.music : 0.55,
+      audioMusic: audio.userVol.music != null ? audio.userVol.music : 0.45,
       musicEnabled: audio.musicEnabled !== false,
       musicCeiling: audio.musicCeiling || 'normal',
       musicMuteLobby: !!audio.musicMuteLobby,
+      musicStyle: audio.musicStyle || 'cosmic',
       // v8VR: ship-AI announcer prefs.
       annEnabled: announcer.enabled,
       annVoice:   announcer.voice ? announcer.voice.name : (announcer.voiceName || ''),
@@ -23190,6 +23216,7 @@ function loadSettings() {
     if (data.musicEnabled !== undefined) audio.musicEnabled = !!data.musicEnabled;
     if (typeof data.musicCeiling === 'string') audio.musicCeiling = data.musicCeiling;
     if (data.musicMuteLobby !== undefined) audio.musicMuteLobby = !!data.musicMuteLobby;
+    if (typeof data.musicStyle === 'string') audio.musicStyle = data.musicStyle;
     // v8VR: ship-AI announcer prefs. The voice itself is resolved later
     // by announcerInit / pickVoice once the SpeechSynthesis voice list
     // is ready; we stash the saved name on `announcer.voiceName` and the
@@ -27152,6 +27179,7 @@ const audio = {
   musicEnabled: true,           // user toggle (settings UI)
   musicCeiling: 'normal',       // 'chill' | 'normal' | 'wild' ; intensity cap
   musicMuteLobby: false,
+  musicStyle: 'cosmic',         // 'cosmic' | 'cyber' | 'doom' | 'drift' | 'battle' | 'jazz'
   // Side-chain duck factor for ambient bed: 1.0 = full, drops on loud SFX, ramps back.
   duckFactor: 1.0,
   duckTarget: 1.0,
@@ -30664,6 +30692,12 @@ const music = {
   keyMidi: MUSIC_DEFAULT_KEY_MIDI,
   mode: 'aeolian',              // 'aeolian' | 'phrygian'
   scale: MUSIC_SCALE_AEOLIAN,   // active scale array
+  // Style: shapes BPM, key, mode, waveforms, and per-pattern riff overrides.
+  styleId: 'cosmic',
+  leadWave: 'triangle',
+  bassWave: 'sawtooth',
+  padWave: 'sawtooth',
+  bpmScale: 1.0,                // multiplier on top of pattern bpmTarget
   // Pattern + dynamic state
   patternId: 'silent',
   intensity: 1,                 // 0..3 (capped by musicCeiling)
@@ -30754,7 +30788,7 @@ function _musicSynthBass(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
   const osc = ctx.createOscillator();
-  osc.type = 'sawtooth'; osc.frequency.value = freq;
+  osc.type = music.bassWave || 'sawtooth'; osc.frequency.value = freq;
   const lp = ctx.createBiquadFilter();
   lp.type = 'lowpass'; lp.frequency.value = 450; lp.Q.value = 1;
   const amp = ctx.createGain();
@@ -30787,7 +30821,8 @@ function _musicSynthPad(freq, g, when, out, durSec) {
   if (!ctx) return null;
   const o1 = ctx.createOscillator();
   const o2 = ctx.createOscillator();
-  o1.type = 'sawtooth'; o2.type = 'sawtooth';
+  const padWave = music.padWave || 'sawtooth';
+  o1.type = padWave; o2.type = padWave;
   o1.frequency.value = freq;
   o2.frequency.value = freq * 1.005;
   const lp = ctx.createBiquadFilter();
@@ -30820,7 +30855,7 @@ function _musicSynthLead(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
   const osc = ctx.createOscillator();
-  osc.type = 'triangle'; osc.frequency.value = freq;
+  osc.type = music.leadWave || 'triangle'; osc.frequency.value = freq;
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
   amp.gain.linearRampToValueAtTime(0.28 * g, when + 0.015);
@@ -30924,11 +30959,153 @@ const PATTERN_RIFFS = {
   // overlay riff so the cadence reads cleanly.
 };
 
+// === STYLES ===
+// A style is a complete musical aesthetic: it overrides the key, mode,
+// tempo scaling, oscillator waveforms, and per-pattern riff combo. Default
+// is 'cosmic' (the original LSS sound, C#2 Aeolian, triangle lead).
+//
+// Each style entry:
+//   keyMidi     : root note as MIDI number (37 = C#2)
+//   mode        : 'aeolian' | 'phrygian'
+//   bpmScale    : multiplier on top of each pattern's bpmTarget
+//   leadWave    : oscillator type for the lead synth ('sine'|'triangle'|'sawtooth'|'square')
+//   bassWave    : oscillator type for the bass
+//   padWave     : oscillator type for the pad
+//   riff        : per-pattern { rhythm, contour, barsPerCycle, octaveAdd } overrides
+const MUSIC_STYLES = {
+  cosmic: {
+    label: 'Cosmic',
+    keyMidi: 37,                  // C#2 ; matches PHI_REST_BASE on the ambient bed
+    mode: 'aeolian',
+    bpmScale: 1.0,
+    leadWave: 'triangle',
+    bassWave: 'sawtooth',
+    padWave: 'sawtooth',
+    riff: {
+      lobby:  { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
+      warmup: { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
+      combat: { rhythm: 'driving',        contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
+      doomed: { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
+    },
+  },
+  cyber: {
+    label: 'Cyber',                // 80s-synthwave vibe ; bright saw lead, fast 8ths
+    keyMidi: 38,                  // D2
+    mode: 'aeolian',
+    bpmScale: 1.15,
+    leadWave: 'sawtooth',
+    bassWave: 'square',
+    padWave: 'sawtooth',
+    riff: {
+      lobby:  { rhythm: 'pulse_8ths',     contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 0 },
+      warmup: { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
+      combat: { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 2, octaveAdd: 12 },
+      doomed: { rhythm: 'galloping',      contour: 'zigzag',       barsPerCycle: 2, octaveAdd: 0 },
+    },
+  },
+  doom: {
+    label: 'Doom',                 // metal-influenced ; lower key, darker contour, heavy
+    keyMidi: 33,                  // A1
+    mode: 'phrygian',
+    bpmScale: 0.85,
+    leadWave: 'sawtooth',
+    bassWave: 'sawtooth',
+    padWave: 'sawtooth',
+    riff: {
+      lobby:  { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: 0 },
+      warmup: { rhythm: 'galloping',      contour: 'doomed_creep', barsPerCycle: 1, octaveAdd: 0 },
+      combat: { rhythm: 'galloping',      contour: 'riff_blues',   barsPerCycle: 2, octaveAdd: -12 },
+      doomed: { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
+    },
+  },
+  drift: {
+    label: 'Drift',                // ambient ; sine lead, slow tempo, sparse
+    keyMidi: 37,                  // C#2
+    mode: 'aeolian',
+    bpmScale: 0.7,
+    leadWave: 'sine',
+    bassWave: 'triangle',
+    padWave: 'triangle',
+    riff: {
+      lobby:  { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 12 },
+      warmup: { rhythm: 'hover_quarters', contour: 'rising',       barsPerCycle: 2, octaveAdd: 12 },
+      combat: { rhythm: 'hover_quarters', contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 12 },
+      doomed: { rhythm: 'hover_quarters', contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: 0 },
+    },
+  },
+  battle: {
+    label: 'Battle',               // cinematic / orchestral feel ; driving and grand
+    keyMidi: 35,                  // B1
+    mode: 'aeolian',
+    bpmScale: 1.25,
+    leadWave: 'sawtooth',
+    bassWave: 'sawtooth',
+    padWave: 'sawtooth',
+    riff: {
+      lobby:  { rhythm: 'driving',        contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
+      warmup: { rhythm: 'galloping',      contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
+      combat: { rhythm: 'galloping',      contour: 'rising',       barsPerCycle: 2, octaveAdd: 0 },
+      doomed: { rhythm: 'doomed_pulse',   contour: 'falling',      barsPerCycle: 2, octaveAdd: -12 },
+    },
+  },
+  jazz: {
+    label: 'Jazz',                 // laid-back lounge vibe ; triangle lead, swing-leaning
+    keyMidi: 37,
+    mode: 'aeolian',
+    bpmScale: 0.95,
+    leadWave: 'triangle',
+    bassWave: 'sine',
+    padWave: 'triangle',
+    riff: {
+      lobby:  { rhythm: 'call_response',  contour: 'zigzag',       barsPerCycle: 2, octaveAdd: 0 },
+      warmup: { rhythm: 'call_response',  contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 0 },
+      combat: { rhythm: 'syncopated',     contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 0 },
+      doomed: { rhythm: 'syncopated',     contour: 'riff_blues',   barsPerCycle: 2, octaveAdd: -12 },
+    },
+  },
+};
+
+// Read the riff config for the given pattern, honoring the active style's
+// override if present. Falls back to PATTERN_RIFFS if the style doesn't
+// override that pattern.
+function _musicGetRiffCfg(patternId) {
+  const styleId = music.styleId || 'cosmic';
+  const style = MUSIC_STYLES[styleId];
+  if (style && style.riff && style.riff[patternId]) return style.riff[patternId];
+  return PATTERN_RIFFS[patternId];
+}
+
+// Apply a style: switches key, mode, waveforms, and BPM scaling. The current
+// pattern keeps playing ; only its sonic palette changes. Idempotent.
+function musicSetStyle(name) {
+  const style = MUSIC_STYLES[name];
+  if (!style) {
+    console.warn('[music] unknown style', name, '; staying on', music.styleId);
+    return;
+  }
+  music.styleId = name;
+  music.keyMidi = style.keyMidi;
+  music.leadWave = style.leadWave || 'triangle';
+  music.bassWave = style.bassWave || 'sawtooth';
+  music.padWave = style.padWave || 'sawtooth';
+  music.bpmScale = style.bpmScale || 1.0;
+  // Mode change updates the active scale (riffs + chords adapt automatically).
+  if (style.mode === 'phrygian') music.scale = MUSIC_SCALE_PHRYGIAN;
+  else                            music.scale = MUSIC_SCALE_AEOLIAN;
+  music.mode = style.mode || 'aeolian';
+  // Force pad voicing reset so the next chord change picks the right octave
+  // around the new tonic instead of sliding far away.
+  music.lastPadVoicing = null;
+  // Bump bpmTarget by the new scale so the tempo follows the style.
+  music.bpmTarget = music.bpmTarget * music.bpmScale / (music._lastBpmScale || 1.0);
+  music._lastBpmScale = music.bpmScale;
+}
+
 // Generate a list of {sub16, semi, vel} notes for the given bar+pattern. The
 // rhythm grid + contour combine to lay notes onto the 16th grid; cycling
 // through the contour as we hit each note slot.
 function _musicGenerateRiffBar(patternId, barInCycle) {
-  const cfg = PATTERN_RIFFS[patternId];
+  const cfg = _musicGetRiffCfg(patternId);
   if (!cfg) return null;
   const rhythm = RIFF_RHYTHMS[cfg.rhythm];
   const contour = RIFF_CONTOURS[cfg.contour];
@@ -30985,7 +31162,7 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   if (beatInBarLocal === 0) {
     if (!music._riffCycleBar) music._riffCycleBar = 0;
     music._barRiffNotes = _musicGenerateRiffBar(music.patternId, music._riffCycleBar);
-    const cfg = PATTERN_RIFFS[music.patternId];
+    const cfg = _musicGetRiffCfg(music.patternId);
     if (cfg) {
       music._riffCycleBar = (music._riffCycleBar + 1) % cfg.barsPerCycle;
     } else {
@@ -31167,19 +31344,24 @@ function musicSetPattern(id, opts) {
   if (opts && typeof opts.intensity === 'number') {
     music.intensity = Math.max(0, Math.min(music.ceiling, opts.intensity));
   }
+  // Style's bpmScale multiplies whatever the pattern asks for.
+  const scale = music.bpmScale || 1.0;
   if (opts && typeof opts.bpm === 'number') {
-    music.bpm = opts.bpm;
-    music.bpmTarget = opts.bpm;
+    music.bpm = opts.bpm * scale;
+    music.bpmTarget = opts.bpm * scale;
   }
   if (opts && typeof opts.bpmTarget === 'number') {
-    music.bpmTarget = opts.bpmTarget;
+    music.bpmTarget = opts.bpmTarget * scale;
   }
   // Start the scheduler if not running.
   musicStart();
 }
 
 function musicSetBpmTarget(bpm) {
-  music.bpmTarget = Math.max(40, Math.min(220, bpm));
+  // Honor the active style's bpmScale here too so the in-round ramp
+  // (96→128 BPM in cosmic) lands at the style-appropriate range.
+  const scale = music.bpmScale || 1.0;
+  music.bpmTarget = Math.max(40, Math.min(220, bpm * scale));
 }
 
 function musicSetIntensity(level) {
@@ -31503,10 +31685,12 @@ try {
   window.musicSyncToGameState = musicSyncToGameState;
   window.musicStart = musicStart;
   window.musicStop = musicStop;
-  // Riff diagnostics: peek/poke from console.
+  window.musicSetStyle = musicSetStyle;
+  // Riff + style diagnostics: peek/poke from console.
   window.RIFF_RHYTHMS = RIFF_RHYTHMS;
   window.RIFF_CONTOURS = RIFF_CONTOURS;
   window.PATTERN_RIFFS = PATTERN_RIFFS;
+  window.MUSIC_STYLES = MUSIC_STYLES;
 } catch (_) {}
 
 // ---- HOOK AUDIO INTO EXISTING FUNCTIONS ----
@@ -32045,6 +32229,7 @@ try {
   if (typeof music !== 'undefined' && audio) {
     music.musicMuteLobby = !!audio.musicMuteLobby;
     if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling || 'normal');
+    if (typeof musicSetStyle === 'function') musicSetStyle(audio.musicStyle || 'cosmic');
     if (typeof musicSetEnabled === 'function') musicSetEnabled(audio.musicEnabled !== false);
     if (audio.musicGain && audio.userVol && typeof audio.userVol.music === 'number') {
       audio.musicGain.gain.value = 0.30 * audio.userVol.music;
