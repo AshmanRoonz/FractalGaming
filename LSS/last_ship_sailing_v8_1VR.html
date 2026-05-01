@@ -1120,7 +1120,7 @@ body.vr-active .hit-marker {
 <div id="ov-respawn">
   <div class="rs-destroyed">DESTROYED</div>
   <div class="rs-killer" style="display:none">by <b></b></div>
-  <div class="rs-wait">WAITING FOR NEXT ROUND</div>
+  <div class="rs-wait">GHOST MODE ; WASD + MOUSE TO FLY</div>
 </div>
 
 <div id="ov-banner">
@@ -10254,6 +10254,18 @@ class Bot {
     this.health = 0;
     scene.remove(this.mesh);
     spawnExplosion(this.position, this.chassis.hullLength);
+    // (v8_2a) Last-ship-sailing trigger: if this dying bot was on the
+    // player's team and now there are zero living teammates AND the player
+    // is still alive, the player just became the last ship on their team.
+    // Cooldown on the announcer line keeps it from re-firing if it was
+    // already said this round.
+    try {
+      if (this.team === player.team && player && player.shipState !== 'dead' &&
+          typeof _livingTeammates === 'function' && _livingTeammates().length === 0 &&
+          typeof ANN !== 'undefined' && ANN.lastShipSailing) {
+        ANN.lastShipSailing();
+      }
+    } catch (_) {}
     // Clean up TRACKER lock marks for this bot
     delete player.trackerLocks[this.id];
     if (player.trackerLockedTarget === this) player.trackerLockedTarget = null;
@@ -15861,10 +15873,13 @@ function updatePlayerMovement(dt) {
 
   // Shield does NOT regen naturally; only via stasis fields and executions
 
-  // Doomed timer
+  // (v8_2a) Doomed timer: counts down for visual / audio cues but no
+  // longer auto-kills the player. Per the v8_2a rule "objects can't
+  // execute a doomed ship" the doomed state is a warning state ; only
+  // HP-to-zero from real damage or a ship-source ram execution can finish
+  // a doomed ship. Stasis fields lift the doomed flag (see updatePlayerStasis).
   if (player.doomed && player.shipState !== 'dead') {
-    player.doomTimer -= dt;
-    if (player.doomTimer <= 0) playerDie(null);
+    player.doomTimer = Math.max(0, player.doomTimer - dt);
   }
 
   // Multi-iteration collision loop (Descent 3 style: detect, resolve, continue with remaining time)
@@ -19832,13 +19847,8 @@ function pollGamepad() {
     if (_aBtn && !input.gpAPrev) _settingsActivateFocused();
     input.gpAPrev = _aBtn;
   } else if (typeof deathCam !== 'undefined' && deathCam.active) {
-    // Spectator mode: d-pad left/right cycles the teammate we're watching.
-    // (stick-horizontal fallback is already folded into gpDpadLeft/Right above)
-    if (input.gpDpadLeft && !input.gpDpadLeftPrev) {
-      if (typeof cycleSpectateTarget === 'function') cycleSpectateTarget(-1);
-    } else if (input.gpDpadRight && !input.gpDpadRightPrev) {
-      if (typeof cycleSpectateTarget === 'function') cycleSpectateTarget(1);
-    }
+    // (v8_2a) Ghost free-fly while dead. Spectate cycling removed; movement
+    // is handled inside updateDeathCam itself (WASD + mouse / gamepad).
   }
 
   // ---- Gameplay edge-triggered actions (suppressed while a menu is active) ----
@@ -21954,9 +21964,9 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Style</label>
         <select id="set-music-style" style="flex:1; min-width:0; max-width:60%;">
-          <option value="cosmic" ${(audio.musicStyle || 'cosmic') === 'cosmic' ? 'selected' : ''}>Cosmic (default, C#2 Aeolian, triangle lead)</option>
+          <option value="cosmic" ${(audio.musicStyle || 'techno') === 'cosmic' ? 'selected' : ''}>Cosmic (C#2 Aeolian, triangle lead)</option>
           <option value="cyber"  ${audio.musicStyle === 'cyber'  ? 'selected' : ''}>Cyber (synthwave, faster, saw lead)</option>
-          <option value="techno" ${audio.musicStyle === 'techno' ? 'selected' : ''}>Techno (hard 4-on-floor, A1 phrygian, square bass, ~140 BPM)</option>
+          <option value="techno" ${audio.musicStyle === 'techno' ? 'selected' : ''}>Techno (default, hard 4-on-floor, A1 phrygian, square bass, ~140 BPM)</option>
           <option value="doom"   ${audio.musicStyle === 'doom'   ? 'selected' : ''}>Doom (Phrygian, slower, dark)</option>
           <option value="drift"  ${audio.musicStyle === 'drift'  ? 'selected' : ''}>Drift (ambient, sine, sparse)</option>
           <option value="battle" ${audio.musicStyle === 'battle' ? 'selected' : ''}>Battle (cinematic, driving)</option>
@@ -24163,6 +24173,18 @@ function updatePlayerStasis(dt) {
     player.shield = player.maxShield; // ensure full
     document.getElementById('stasis-warning').style.display = 'none';
     document.getElementById('stasis-vignette').style.display = 'none';
+    // (v8_2a) Stasis fields un-doom the player. Health ramps to just above
+    // the doom threshold so the player exits the doomed state safely; the
+    // shield is already at max above. Without this, the doomed flag would
+    // persist forever since doom is set on entry but never cleared except
+    // on death. Shipstate flips back to 'flying' so HUD / FX clear too.
+    if (player.doomed && typeof LSS !== 'undefined' && LSS.DOOMED_HEALTH_PCT) {
+      const safeFrac = Math.min(1.0, LSS.DOOMED_HEALTH_PCT * 1.10);
+      player.health = Math.max(player.health, player.maxHealth * safeFrac);
+      player.doomed = false;
+      player.doomTimer = 0;
+      if (player.shipState === 'doomed') player.shipState = 'flying';
+    }
   }
 }
 
@@ -26713,7 +26735,11 @@ const ANN = {
   shieldDown:       () => announce('shieldDown',       'Shields offline.',                             { cooldown: 12 }),
   hullDamage:       () => announce('hullDamage',       'Hull integrity compromised.',                  { cooldown: 18 }),
   criticalDamage:   () => announce('criticalDamage',   'Warning. Critical damage.',                    { cooldown: 8,  priority: true }),
-  doomed:           () => announce('doomed',           'Critical hull breach. Last ship sailing.',     { cooldown: 30, priority: true }),
+  doomed:           () => announce('doomed',           'Warning. Hull compromised. Find shields immediately.', { cooldown: 30, priority: true }),
+  // (v8_2a) Reserved for the moment the player is the last alive ship on
+  // their team (all teammates dead). Long cooldown so it doesn't repeat
+  // if the team disposition flickers via stasis / respawn.
+  lastShipSailing:  () => announce('lastShipSailing',  'You are the last ship sailing. The fleet is yours.', { cooldown: 60, priority: true }),
 
   // ---- Combat awareness ----
   multipleHostiles: () => announce('multipleHostiles', 'Warning. Multiple ships engaging.',           { cooldown: 15 }),
@@ -27312,7 +27338,7 @@ const audio = {
   musicEnabled: true,           // user toggle (settings UI)
   musicCeiling: 'normal',       // 'chill' | 'normal' | 'wild' ; intensity cap
   musicMuteLobby: false,
-  musicStyle: 'doom',           // 'cosmic' | 'cyber' | 'doom' | 'drift' | 'battle' | 'jazz' | 'techno'
+  musicStyle: 'techno',         // 'cosmic' | 'cyber' | 'doom' | 'drift' | 'battle' | 'jazz' | 'techno'
   // Side-chain duck factor for ambient bed: 1.0 = full, drops on loud SFX, ramps back.
   duckFactor: 1.0,
   duckTarget: 1.0,
@@ -32567,6 +32593,11 @@ function startDeathCam(attacker) {
   deathCam.target   = player.position.clone();
   deathCam.killerName = (attacker && attacker.loadout && attacker.loadout.name) ? attacker.loadout.name : '';
   deathCam.overlayShown = false;
+  // (v8_2a) Reset ghost free-fly state so each death starts at the death
+  // position, not wherever the last ghost flight ended.
+  deathCam._ghostInit = false;
+  deathCam._ghostPos = null;
+  deathCam._ghostVel = null;
   return;
   deathCam.active = true;
   deathCam.target = player.position.clone();
@@ -32621,16 +32652,22 @@ function startDeathCam(attacker) {
 function updateDeathCam(dt) {
   if (!deathCam.active) return;
 
-  // (v8VR 2026-04-30) Ghost free-look. Camera holds at the death position
-  // (deathCam.target) and the mouse / gamepad rotate the view. Respawn
-  // overlay shows on the first tick. The legacy logic below this return
-  // is preserved unreachable so it's easy to bring kill-cam dolly +
-  // teammate spectate back if we want them later; just delete the
-  // ghost-mode block + the early return.
-  if (deathCam.target) {
-    camera.position.copy(deathCam.target);
+  // (v8_2a 2026-05-01) Ghost free-fly. Replaces the v8VR position-locked
+  // free-look. WASD + Q/E (or gamepad sticks) move the camera in 6DOF;
+  // mouse / gamepad right-stick rotate the view. No collision check, so
+  // the ghost can pass through walls and explore the map. The respawn
+  // overlay still shows once on the first tick; its rs-wait line was
+  // changed to GHOST MODE in v8_2a (legacy "WAITING FOR NEXT ROUND" /
+  // spectate text removed). On respawn, deathCam.active flips false and
+  // updatePlayerMovement takes over again from the spawn position.
+  if (!deathCam._ghostInit) {
+    // Initialize ghost cam on first tick. Lazy-create a velocity vector
+    // and capture the death position as the starting point.
+    deathCam._ghostInit = true;
+    deathCam._ghostPos = deathCam.target ? deathCam.target.clone() : new THREE.Vector3();
+    deathCam._ghostVel = new THREE.Vector3();
   }
-  // Free look: same input pattern as updatePlayerMovement.
+  // Look (mouse + gamepad). Same conventions as updatePlayerMovement.
   if (typeof input !== 'undefined') {
     if (input.locked) {
       player.euler.y -= input.mouseDX * input.sensitivity;
@@ -32644,8 +32681,30 @@ function updateDeathCam(dt) {
     input.mouseDX = 0; input.mouseDY = 0;
   }
   camera.quaternion.setFromEuler(player.euler);
-  // Respawn overlay first-tick (replaces the legacy kill-cam-completion
-  // hand-off). Skipped silently if Overlays.respawn is unavailable.
+  // Movement input (kb + gamepad left stick + triggers/bumpers for vertical).
+  let mvF = 0, mvR = 0, mvU = 0;
+  if (typeof input !== 'undefined' && input.keys) {
+    if (input.keys['w'] || input.keys['arrowup'])    mvF -= 1;
+    if (input.keys['s'] || input.keys['arrowdown'])  mvF += 1;
+    if (input.keys['a'] || input.keys['arrowleft'])  mvR -= 1;
+    if (input.keys['d'] || input.keys['arrowright']) mvR += 1;
+    if (input.keys[' '] || input.keys['e'])          mvU += 1;   // up
+    if (input.keys['shift'] || input.keys['q'] || input.keys['c']) mvU -= 1; // down
+  }
+  if (typeof input !== 'undefined' && input.gpConnected) {
+    mvF += (input.gpMoveY || 0);
+    mvR += (input.gpMoveX || 0);
+    // Map gamepad bumpers / triggers to vertical if available.
+    if (typeof input.gpThrust === 'number') mvU += input.gpThrust;
+    if (typeof input.gpBrake  === 'number') mvU -= input.gpBrake;
+  }
+  // Build a camera-local move vector and apply it. No collision = pass through walls.
+  const _ghostSpeed = 800; // units / sec ; brisk enough to cover the map
+  const _moveLocal = new THREE.Vector3(mvR, mvU, mvF).clampLength(0, 1).multiplyScalar(_ghostSpeed * dt);
+  _moveLocal.applyQuaternion(camera.quaternion);
+  deathCam._ghostPos.add(_moveLocal);
+  camera.position.copy(deathCam._ghostPos);
+  // Respawn overlay first-tick (DESTROYED text + ghost-mode hint).
   if (!deathCam.overlayShown) {
     deathCam.overlayShown = true;
     if (window.Overlays && Overlays.respawn) Overlays.respawn(deathCam.killerName || '');
