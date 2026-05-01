@@ -27385,6 +27385,17 @@ function initAudio() {
     audio.subCut.frequency.value = 45;
     audio.subCut.Q.value = 0.7;
 
+    // (v8_1VR) Bass low-shelf attenuation. Cuts the 45-150 Hz band by ~7 dB
+    // BEFORE the comp's detector sees it, so a flurry of bassy shots (cluster
+    // missiles, explosions, railgun thumps) doesn't sum into a giant low-band
+    // spike that pushes the comp into pumping. The bass character is still
+    // there for kicks and explosions, just brought down a notch so the wide-
+    // band comp doesn't have to do as much work.
+    audio.bassShelf = audio.ctx.createBiquadFilter();
+    audio.bassShelf.type = 'lowshelf';
+    audio.bassShelf.frequency.value = 140;
+    audio.bassShelf.gain.value = -7;
+
     // Master bus compressor (glue): keeps simultaneous SFX legible without clipping.
     // (v8_1VR) Threshold raised -14 → -10 dB and release slowed 120 → 280 ms
     // so transient bursts (gunfire chains) don't push the comp into audible
@@ -27396,7 +27407,9 @@ function initAudio() {
     audio.masterComp.ratio.value = 3;
     audio.masterComp.attack.value = 0.005;
     audio.masterComp.release.value = 0.280;
-    audio.subCut.connect(audio.masterComp);
+    // Chain: subCut (HPF 45) → bassShelf (lowshelf -7 dB @ 140) → masterComp → hiCut
+    audio.subCut.connect(audio.bassShelf);
+    audio.bassShelf.connect(audio.masterComp);
     audio.masterComp.connect(audio.hiCut);
 
     // Master output. Base 0.85 multiplied by userVol.master so the user
@@ -30716,7 +30729,11 @@ _spatialRaycaster.firstHitOnly = true;
 // release (cancelScheduledValues + disconnect) so they come back to acquire()
 // in a known-clean state. Keeps GC steady under rapid fire (minigun, salvos).
 const _spatialPool = [];
-const _SPATIAL_POOL_MAX = 32;
+// (v8_1VR) Reduced from 32 → 16. HRTF PannerNodes are one of the most
+// CPU-expensive Web Audio operations (full HRTF convolution per voice). On
+// desktops with 5.1+sub running heavy combat, 32 simultaneous HRTF voices
+// can starve the audio thread; capping at 16 leaves headroom.
+const _SPATIAL_POOL_MAX = 16;
 function _acquireSpatialTriple(ctx) {
   if (_spatialPool.length) return _spatialPool.pop();
   return {
