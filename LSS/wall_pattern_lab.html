@@ -238,8 +238,13 @@
         <select id="game-preset-select" style="flex:1;"><option value="">(open game HTML first)</option></select>
         <button id="game-preset-load" style="margin-left:6px;">Load</button>
       </div>
+      <div class="row" style="margin-bottom:6px;">
+        <label>Always load overlays</label>
+        <input type="checkbox" id="game-preset-always-overlays">
+        <span class="hint" style="flex:1; margin-left:6px;">When on, even single-pattern presets pull FG1 + FG2 from the game's wall material. Off = lab preview matches how game renders single patterns (no overlay).</span>
+      </div>
       <div class="hint" style="margin-bottom:6px; line-height:1.5;">
-        Pick a pattern from WALL_PATTERN_NAMES and click Load to preview it in the lab. <strong>Lab Composite</strong> (index 20) loads the multi-layer bg/fg/fg2 setup from the game's wall material. Single-pattern presets (0-19) load into the lab's BG layer with FG1/FG2 disabled.
+        Pick a pattern from WALL_PATTERN_NAMES and click Load to preview it in the lab. <strong>Lab Composite</strong> always loads the multi-layer bg/fg/fg2 setup. Single-pattern presets honor the "Always load overlays" toggle above.
       </div>
       <textarea id="game-config-io" style="width:100%; min-height:180px; background:#08080f; color:#ddd; border:1px solid #2a2a3a; padding:6px; font-family:'Courier New', monospace; font-size:11px;" placeholder="DEFAULT_WALL_CONFIG JSON appears here on Open."></textarea>
       <div class="toolbar" style="margin-top:6px; gap:6px; flex-wrap:wrap;">
@@ -1207,6 +1212,79 @@ function _refreshPresetDropdown() {
   // Default-select Lab Composite if it exists (typically index 20).
   const labCompIdx = gameSync.patternNames.findIndex(n => /Lab Composite/i.test(n));
   if (labCompIdx >= 0) sel.value = String(labCompIdx);
+  // Build the game-id -> lab-id translation table now that we have both
+  // sides' pattern names (lab's are read from its own <select> options).
+  _buildPatternIdMap();
+}
+
+// Build a game-pattern-id -> lab-pattern-id mapping by name. The lab's
+// pattern <select> options carry the lab's pattern names directly, so
+// we read them from the DOM. Match by normalized name (lowercase, strip
+// non-letters); patterns the lab doesn't have (Soul Array, Lab Composite)
+// map to -1 so fallback logic in _applyGamePresetToLab can handle them.
+function _buildPatternIdMap() {
+  gameSync.gameToLabId = {};
+  if (!gameSync.patternNames || gameSync.patternNames.length === 0) return;
+  // Read the lab's BG pattern dropdown for its name<->index mapping.
+  const sel = document.getElementById('pattern');
+  if (!sel) return;
+  const labNameToId = {};
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z]+/g, '');
+  for (let i = 0; i < sel.options.length; i++) {
+    const v = parseInt(sel.options[i].value, 10);
+    if (!isFinite(v)) continue;
+    labNameToId[norm(sel.options[i].text)] = v;
+  }
+  // Walk game names; for each, try to find a lab match by normalized
+  // name. Substring matching helps with "Layered Cube" vs "Layered Cube
+  // (transparent)" and "Domain-Warped Streaks" vs "Warped Streaks".
+  const labKeys = Object.keys(labNameToId);
+  for (let g = 0; g < gameSync.patternNames.length; g++) {
+    const gn = norm(gameSync.patternNames[g]);
+    let labId = -1;
+    if (gn in labNameToId) {
+      labId = labNameToId[gn];
+    } else {
+      // Substring match either direction; pick the longest-overlap option.
+      let bestKey = null, bestOverlap = 0;
+      for (const lk of labKeys) {
+        if (lk.length < 3) continue;
+        if (gn.indexOf(lk) >= 0 || lk.indexOf(gn) >= 0) {
+          const overlap = Math.min(gn.length, lk.length);
+          if (overlap > bestOverlap) { bestOverlap = overlap; bestKey = lk; }
+        }
+      }
+      if (bestKey) labId = labNameToId[bestKey];
+    }
+    gameSync.gameToLabId[g] = labId;
+  }
+  console.log('[wallsync] game->lab pattern map:', gameSync.gameToLabId);
+}
+
+function _toLabPatternId(gameId) {
+  if (gameId == null || gameId < 0) return -1;
+  const m = gameSync.gameToLabId;
+  if (!m) return gameId;     // fallback: assume identity
+  const v = m[gameId];
+  return (v != null && v >= 0) ? v : -1;
+}
+
+// Inverse: lab pattern id -> game pattern id, by walking gameToLabId
+// looking for the entry whose value matches. Builds a reverse cache on
+// first use so we don't re-walk for each save.
+function _toGamePatternId(labId) {
+  if (labId == null || labId < 0) return -1;
+  const m = gameSync.gameToLabId;
+  if (!m) return labId;     // fallback: assume identity
+  if (!gameSync._labToGameId) {
+    gameSync._labToGameId = {};
+    for (const g of Object.keys(m)) {
+      const l = m[g];
+      if (l != null && l >= 0) gameSync._labToGameId[l] = parseInt(g, 10);
+    }
+  }
+  const v = gameSync._labToGameId[labId];
+  return (v != null) ? v : labId;   // last-resort identity if no match
 }
 
 // Apply the selected game preset to the lab's wallMat. For pattern 20
@@ -1225,9 +1303,11 @@ function _applyGamePresetToLab(presetIndex) {
   const isLabComp = /Lab Composite/i.test(gameSync.patternNames[presetIndex] || '');
   if (isLabComp) {
     // Multi-layer: pull bg/fg/fg2 settings from game's wall material.
-    u.patternId.value    = G('bgPatternId',  u.patternId.value)|0;
-    u.fgPatternId.value  = G('fgPatternId',  -1)|0;
-    u.fg2PatternId.value = G('fg2PatternId', -1)|0;
+    // Game and lab use different pattern indices for the same patterns;
+    // translate game id -> lab id by name match.
+    u.patternId.value    = _toLabPatternId(G('bgPatternId',  -1));
+    u.fgPatternId.value  = _toLabPatternId(G('fgPatternId',  -1));
+    u.fg2PatternId.value = _toLabPatternId(G('fg2PatternId', -1));
     u.fgAlpha.value      = G('fgAlpha',      u.fgAlpha.value);
     u.fg2Alpha.value     = G('fg2Alpha',     u.fg2Alpha ? u.fg2Alpha.value : 0.75);
     u.fgBlend.value      = G('fgBlend',      u.fgBlend.value)|0;
@@ -1247,10 +1327,46 @@ function _applyGamePresetToLab(presetIndex) {
       u['K_COSMIC_' + L].value = G('K_COSMIC_' + L, u['K_COSMIC_' + L].value);
     }
   } else {
-    // Single-pattern: set BG to this pattern, disable FG1 + FG2.
-    u.patternId.value    = presetIndex|0;
-    u.fgPatternId.value  = -1;
-    u.fg2PatternId.value = -1;
+    // Single-pattern: set BG to this pattern. By default disable FG1 + FG2
+    // so the lab preview matches how the game actually renders this
+    // preset (game's uPattern 0-19 path doesn't composite overlays).
+    // The "Always load overlays" checkbox flips this to always pull FG1
+    // + FG2 from the game's wall material defaults, useful for inspecting
+    // what the game's overlay tuning would look like over different BGs.
+    const labId = _toLabPatternId(presetIndex);
+    if (labId < 0) {
+      alert('"' + (gameSync.patternNames[presetIndex] || ('preset ' + presetIndex)) +
+            '" has no equivalent pattern in the lab (e.g. Soul Array uses a custom shader path). Pick another preset.');
+      return;
+    }
+    u.patternId.value = labId;
+    const alwaysOverlays = !!(document.getElementById('game-preset-always-overlays') &&
+                              document.getElementById('game-preset-always-overlays').checked);
+    if (alwaysOverlays) {
+      // Pull all overlay-related uniforms from the game's wall material.
+      u.fgPatternId.value  = _toLabPatternId(G('fgPatternId',  -1));
+      u.fg2PatternId.value = _toLabPatternId(G('fg2PatternId', -1));
+      u.fgAlpha.value      = G('fgAlpha',  u.fgAlpha.value);
+      u.fg2Alpha.value     = G('fg2Alpha', u.fg2Alpha ? u.fg2Alpha.value : 0.75);
+      u.fgBlend.value      = G('fgBlend',  u.fgBlend.value)|0;
+      u.fg2Blend.value     = G('fg2Blend', u.fg2Blend ? u.fg2Blend.value : 1)|0;
+      u.fgHue.value        = G('fgHue',    u.fgHue.value);
+      u.fg2Hue.value       = G('fg2Hue',   u.fg2Hue ? u.fg2Hue.value : 0);
+      u.fgTime.value       = G('fgTime',   u.fgTime.value);
+      u.fg2Time.value      = G('fg2Time',  u.fg2Time ? u.fg2Time.value : 1);
+      for (const L of ['fg', 'fg2']) {
+        const k = (n) => 'u_' + n + '_' + L;
+        u[k('iters')].value   = G(k('iters'),   u[k('iters')].value)|0;
+        u[k('scale')].value   = G(k('scale'),   u[k('scale')].value);
+        u[k('invBase')].value = G(k('invBase'), u[k('invBase')].value);
+        u[k('hueSpin')].value = G(k('hueSpin'), u[k('hueSpin')].value);
+        u[k('satBase')].value = G(k('satBase'), u[k('satBase')].value);
+        u['K_COSMIC_' + L].value = G('K_COSMIC_' + L, u['K_COSMIC_' + L].value);
+      }
+    } else {
+      u.fgPatternId.value  = -1;
+      u.fg2PatternId.value = -1;
+    }
   }
   // Push every uniform value back to the corresponding HTML control so
   // the sidebar sliders / dropdowns reflect the loaded preset.
@@ -1439,10 +1555,17 @@ function _writeLabUniformsToGameHtml() {
   if (!gameSync.htmlText) return { modified: 0, missing: [] };
   let modified = 0;
   const missing = [];
+  // Pattern id fields need lab->game translation (different index spaces).
+  const PATTERN_ID_KEYS = { patternId: 1, fgPatternId: 1, fg2PatternId: 1 };
   for (const m of _LAB_TO_GAME_UNIFORMS) {
     const u = wallMat.uniforms[m.labUni];
     if (!u) { missing.push(m.labUni + ' (no lab uniform)'); continue; }
-    const formatted = _formatUniformValue(u.value, m.kind);
+    let writeValue = u.value;
+    // Translate lab pattern indices to game's WALL_PATTERN_NAMES index.
+    if (PATTERN_ID_KEYS[m.labUni]) {
+      writeValue = _toGamePatternId(u.value);
+    }
+    const formatted = _formatUniformValue(writeValue, m.kind);
     // Match: `gameUni:    { value: 4.75 }` with arbitrary inner whitespace.
     // [^}]+? is lazy so we don't run past the closing brace.
     const re = new RegExp('(\\b' + m.gameUni + '\\b\\s*:\\s*\\{\\s*value:\\s*)([^}]+?)(\\s*\\})', 'g');
