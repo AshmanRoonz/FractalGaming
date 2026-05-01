@@ -27337,21 +27337,16 @@ function generateImpulseResponse(ctx, duration, decay, preDelay) {
 function initAudio() {
   if (audio.initialized) return;
   try {
-    // (v8_1VR) Numeric latencyHint of 0.20 sec asks the browser for a much
-    // bigger audio thread buffer than the 'playback' enum (which is
-    // ~50-100ms). On desktops with USB DACs / discrete sound cards / weird
-    // driver paths, the default buffer can starve under heavy combat load
-    // (lots of simultaneous oscillator + filter + convolver nodes), causing
-    // 0.5-1s audible dropouts. 200ms gives the audio thread far more
-    // headroom at the cost of slightly more event-to-sound delay (still
-    // imperceptible for game SFX). Falls back to 'playback' string then to
-    // default if the browser doesn't accept the numeric form.
+    // (v8VR 2026-05-01) latencyHint 'playback' gives the audio thread the
+    // largest enumerated buffer (~50-100 ms) so heavy combat with many
+    // simultaneous oscillators / noise bursts doesn't underrun and cause
+    // audible dropouts. Numeric forms (e.g. 0.20) sometimes work but some
+    // Windows + Edge audio paths reject them silently and the context
+    // ends up in a bad state under load (full audio drop, not just crackle),
+    // so we stick with the string preset which is universally honored.
     const _AC = (window.AudioContext || window.webkitAudioContext);
-    try { audio.ctx = new _AC({ latencyHint: 0.20 }); }
-    catch (_) {
-      try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
-      catch (__) { audio.ctx = new _AC(); }
-    }
+    try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
+    catch (_) { audio.ctx = new _AC(); }
 
     // (v8_1VR) Final output subsonic safety HPF. Sits between hiCut and the
     // actual audio destination so EVERYTHING (master/SFX, ambient, music)
@@ -27496,6 +27491,20 @@ function initAudio() {
     audio.musicGain.connect(audio.musicComp);
 
     audio.initialized = true;
+
+    // (v8_1VR) Audio context watchdog. Some browser+driver combos (e.g. Edge
+    // on Windows with 5.1+sub) push the audio thread into 'suspended' or
+    // 'interrupted' state under heavy combat load and never recover on their
+    // own. Poll every 500ms and force-resume if we detect a non-running
+    // state. The 'statechange' listener also handles the immediate event.
+    const _audioWatchdog = () => {
+      if (!audio.ctx) return;
+      if (audio.ctx.state === 'suspended' || audio.ctx.state === 'interrupted') {
+        try { audio.ctx.resume(); } catch (_) {}
+      }
+    };
+    audio.ctx.addEventListener('statechange', _audioWatchdog);
+    setInterval(_audioWatchdog, 500);
 
     // (v8_1VR) Kick off the reactive band scheduler on first audio init.
     // musicSyncToGameState is fine to call before the engine has run a tick;
