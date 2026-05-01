@@ -8,6 +8,17 @@
      HDRI/IBL/PBR hero ships, InstancedMesh particles, hit-feedback chain,
      spatial audio + reverb, announcer, Showcase / Cinematic Arena mode.
      v7.1VR is the frozen known-good baseline; do NOT edit it. -->
+<!-- v8VR: inline Web App Manifest. Declares this page as a game so Edge /
+     Chrome can categorize the tab accordingly. Doesn't directly engage
+     the dGPU but stacks with the powerPreference + xrCompatible + WebGPU
+     pre-flight + wake lock hints; the more "this tab is performance-
+     sensitive" signals the browser sees, the less likely Efficiency Mode
+     is to throttle it. data: URL keeps the single-file architecture. -->
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v8VR","short_name":"LSS%20v8VR","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"landscape","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<meta name="theme-color" content="#0a0520">
+<meta name="application-name" content="Last Ship Sailing">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <!-- Modern technical typography (v6.7 modernization). Orbitron for titles
      (geometric, sci-fi), Rajdhani for body (condensed humanist sans). Courier
      New stays as fallback for the canvas HUD readouts that are pixel-aligned. -->
@@ -5710,16 +5721,40 @@ try {
 scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); // Light fog; low density so indoor walls stay visible
 
 const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
-// v8VR: powerPreference: 'high-performance' is a standard WebGL hint that
-// asks the OS / browser to pick the discrete GPU on hybrid-graphics
-// laptops (Intel iGPU + NVIDIA/AMD dGPU). Without it the browser commonly
-// defaults to the iGPU for "power saving" and the game runs at half the
-// frame rate it should. failIfMajorPerformanceCaveat=false prevents the
-// context from outright refusing on systems where the high-perf path is
-// unavailable; we'd rather render on the iGPU than not render at all.
+// v8VR: dGPU engagement stack for hybrid-graphics laptops. Single hints
+// often get ignored by Edge / Chrome under battery-saver, so we stack:
+//
+//   1. powerPreference: 'high-performance' (standard WebGL hint).
+//   2. xrCompatible: true (says "this context may drive WebXR" — true
+//      for v8VR — which routes hybrid systems toward the dGPU since
+//      WebXR needs the perf headroom).
+//   3. failIfMajorPerformanceCaveat: false so we still render on the
+//      iGPU rather than refusing the context.
+//   4. (Above) WebGPU pre-flight adapter probe: kicked off before the
+//      WebGL context is created. Even though we don't use WebGPU, the
+//      act of asking for a high-performance adapter promotes the dGPU
+//      in the browser process; subsequent WebGL contexts inherit that
+//      promotion.
+//
+// The Windows / NVIDIA Control Panel per-app preference is still the
+// only fully-reliable lever; this is a best-effort nudge.
+//
+// (The promise from the WebGPU probe is intentionally unawaited; we don't
+//  block renderer creation on it because dGPU promotion at OS level is
+//  fast and the WebGL context creation happening "soon after" is enough.)
+if (typeof navigator !== 'undefined' && navigator.gpu && navigator.gpu.requestAdapter) {
+  try {
+    navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
+      .then(a => {
+        if (a) console.log('[v8VR GPU] WebGPU adapter probe ok:', a.info ? (a.info.vendor + ' / ' + a.info.architecture) : '(no info)');
+      })
+      .catch(() => {});
+  } catch (e) { /* WebGPU may be locked behind a flag; that's fine */ }
+}
 const renderer = new THREE.WebGLRenderer({
   antialias: true,
   powerPreference: 'high-performance',
+  xrCompatible: true,
   failIfMajorPerformanceCaveat: false,
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -6792,6 +6827,13 @@ const roundKillCam = {
 };
 
 function _v8tryStartRoundKillCam(dyingMesh, dyingPos) {
+  // (v8VR 2026-04-30 hot-fix) Disabled at user request: round-winning kill
+  // cam interfering with playerDie / respawn flow. Keep the rest of the
+  // function in place behind this early return so re-enabling is one
+  // line later. See also _v8tryStartCinemaFlyover and startDeathCam below
+  // for the matching disables on the round-start flyover + legacy death
+  // cam respectively.
+  return;
   if (typeof showcase === 'undefined' || !showcase.active) return;
   if (roundKillCam.active) return;
   if (typeof deathCam !== 'undefined' && deathCam.active) return;
@@ -6882,6 +6924,10 @@ function _v8ensureBokehPass() {
 }
 
 function _v8tryStartCinemaFlyover() {
+  // (v8VR 2026-04-30 hot-fix) Disabled at user request: round-start
+  // flyover broken. Early return short-circuits the BokehPass insertion
+  // and the camera takeover. Re-enable by deleting this return.
+  return;
   if (typeof showcase === 'undefined' || !showcase.active) return;
   if (renderer.xr && renderer.xr.isPresenting) return;
   if (cinemaCam.active) return;
@@ -29995,6 +30041,16 @@ function _updateSpectateOverlay() {
 }
 
 function startDeathCam(attacker) {
+  // (v8VR 2026-04-30) Ghost free-look on death. Replaces the legacy
+  // kill-cam dolly + orbit-around-wreck + teammate spectate. Camera holds
+  // at the death position; mouse / gamepad rotate the view (free look).
+  // Respawn flow runs unchanged; respawnPlayer clears deathCam.active.
+  // The legacy body below is preserved unreachable for re-enable later.
+  deathCam.active   = true;
+  deathCam.target   = player.position.clone();
+  deathCam.killerName = (attacker && attacker.loadout && attacker.loadout.name) ? attacker.loadout.name : '';
+  deathCam.overlayShown = false;
+  return;
   deathCam.active = true;
   deathCam.target = player.position.clone();
   deathCam.angle = player.euler.y;
@@ -30047,6 +30103,37 @@ function startDeathCam(attacker) {
 
 function updateDeathCam(dt) {
   if (!deathCam.active) return;
+
+  // (v8VR 2026-04-30) Ghost free-look. Camera holds at the death position
+  // (deathCam.target) and the mouse / gamepad rotate the view. Respawn
+  // overlay shows on the first tick. The legacy logic below this return
+  // is preserved unreachable so it's easy to bring kill-cam dolly +
+  // teammate spectate back if we want them later; just delete the
+  // ghost-mode block + the early return.
+  if (deathCam.target) {
+    camera.position.copy(deathCam.target);
+  }
+  // Free look: same input pattern as updatePlayerMovement.
+  if (typeof input !== 'undefined') {
+    if (input.locked) {
+      player.euler.y -= input.mouseDX * input.sensitivity;
+      player.euler.x -= input.mouseDY * input.sensitivity;
+    }
+    if (input.gpConnected) {
+      player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
+      player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
+    }
+    player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
+    input.mouseDX = 0; input.mouseDY = 0;
+  }
+  camera.quaternion.setFromEuler(player.euler);
+  // Respawn overlay first-tick (replaces the legacy kill-cam-completion
+  // hand-off). Skipped silently if Overlays.respawn is unavailable.
+  if (!deathCam.overlayShown) {
+    deathCam.overlayShown = true;
+    if (window.Overlays && Overlays.respawn) Overlays.respawn(deathCam.killerName || '');
+  }
+  return;
 
   // (v6.9) Kill-cam phase: hold + dolly the camera from the killer's
   // shoulder to the wreck, looking at the corpse the whole time. Skips
@@ -30224,6 +30311,45 @@ document.addEventListener('keydown', initAudio, { once: false });
   };
   document.addEventListener('click',   fireIntro, true);
   document.addEventListener('keydown', fireIntro, true);
+})();
+
+// v8VR: Wake Lock acquisition on first user gesture. Tells the browser /
+// OS the page is performance-sensitive and shouldn't be put to sleep,
+// throttled, or have its tab put on the back-burner. On Edge specifically,
+// holding a screen wake lock is one signal that Efficiency Mode honors
+// when deciding whether to throttle this tab. Wake locks require a user
+// gesture to acquire (security rule), and they're released automatically
+// if the page becomes hidden; we re-acquire on visibility change.
+(function() {
+  if (typeof navigator === 'undefined' || !navigator.wakeLock) return;
+  let _wakeLock = null;
+  async function acquire() {
+    try {
+      _wakeLock = await navigator.wakeLock.request('screen');
+      _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+      console.log('[v8VR] Screen wake lock acquired (no sleep / efficiency throttle).');
+    } catch (e) {
+      console.warn('[v8VR] Wake lock request failed:', e && e.message);
+    }
+  }
+  function onFirstGesture() {
+    document.removeEventListener('click',   onFirstGesture, true);
+    document.removeEventListener('keydown', onFirstGesture, true);
+    acquire();
+  }
+  document.addEventListener('click',   onFirstGesture, true);
+  document.addEventListener('keydown', onFirstGesture, true);
+  // Re-acquire when the tab becomes visible again. Wake locks auto-release
+  // on visibility change; without this the second time the user comes back
+  // to the tab they'd silently lose the throttling protection.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _wakeLock === null) {
+      // requestWakeLock outside a user gesture works as long as we had
+      // one earlier in the session, which the onFirstGesture handler
+      // guarantees by the time we reach a visibilitychange.
+      acquire();
+    }
+  });
 })();
 
 // VR fork: use renderer.setAnimationLoop instead of raw requestAnimationFrame
