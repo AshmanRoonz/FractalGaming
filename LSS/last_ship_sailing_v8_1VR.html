@@ -27353,23 +27353,40 @@ function initAudio() {
     audio.hiCut.Q.value = 0.7; // gentle slope (no resonance peak)
     audio.hiCut.connect(audio.ctx.destination);
 
+    // (v8_1VR) Subsonic high-pass : rolls off everything below ~45 Hz BEFORE
+    // the master compressor sees it. Heavy combat stacks lots of low-end
+    // energy (kick rumble, ambient phi-cascade 16/26/43 Hz layers, weapon
+    // bass) that the human ear barely registers as pitch but that DRIVES THE
+    // COMPRESSOR HARD, causing the 0.5-1s pumping crackle on desktops with
+    // real subwoofers. Filtering it pre-comp keeps the comp's detector
+    // looking at audible-band content only, so it doesn't slam the bus on
+    // subsonic transients.
+    audio.subCut = audio.ctx.createBiquadFilter();
+    audio.subCut.type = 'highpass';
+    audio.subCut.frequency.value = 45;
+    audio.subCut.Q.value = 0.7;
+
     // Master bus compressor (glue): keeps simultaneous SFX legible without clipping.
-    // Threshold -14 dB lets typical SFX pass un-compressed ; only loud peaks
-    // get tamed. Ratio 3:1 is gentler than the prior 4:1 so sustained heavy
-    // fire doesn't pump the mix down hard enough to read as a "cutout".
+    // (v8_1VR) Threshold raised -14 → -10 dB and release slowed 120 → 280 ms
+    // so transient bursts (gunfire chains) don't push the comp into audible
+    // pumping. The subsonic HPF feeds INTO the comp so low-frequency content
+    // never drives the gain reduction stage.
     audio.masterComp = audio.ctx.createDynamicsCompressor();
-    audio.masterComp.threshold.value = -14;
+    audio.masterComp.threshold.value = -10;
     audio.masterComp.knee.value = 8;
     audio.masterComp.ratio.value = 3;
     audio.masterComp.attack.value = 0.005;
-    audio.masterComp.release.value = 0.120;
+    audio.masterComp.release.value = 0.280;
+    audio.subCut.connect(audio.masterComp);
     audio.masterComp.connect(audio.hiCut);
 
-    // Master output (routes into compressor, then hi-cut). Base 0.85 multiplied
-    // by userVol.master so the user slider scales the bus cleanly.
+    // Master output. Base 0.85 multiplied by userVol.master so the user
+    // slider scales the bus cleanly. (v8_1VR) Routed through subCut FIRST
+    // so subsonic energy never reaches the compressor's detector ; then
+    // through masterComp + hiCut to destination.
     audio.masterGain = audio.ctx.createGain();
     audio.masterGain.gain.value = 0.85 * audio.userVol.master;
-    audio.masterGain.connect(audio.masterComp);
+    audio.masterGain.connect(audio.subCut);
 
     // SFX bus: groups all gameplay SFX (dry + reverb rails) under a single user-facing
     // "SFX" slider, separate from the ambient bed. Lives between dry/reverb and master.
@@ -27432,13 +27449,14 @@ function initAudio() {
     // downstream of its own glue compressor so the band has its own dynamic
     // shape and doesn't fight the SFX limiter. Routes through hiCut for the
     // shared top-end roll-off so the music sits in the same tonal space as
-    // everything else.
+    // everything else. Release lengthened to 350 ms to match the master comp's
+    // anti-pumping easing on desktops.
     audio.musicComp = audio.ctx.createDynamicsCompressor();
-    audio.musicComp.threshold.value = -10;
+    audio.musicComp.threshold.value = -8;
     audio.musicComp.knee.value = 8;
     audio.musicComp.ratio.value = 2.5;
     audio.musicComp.attack.value = 0.010;
-    audio.musicComp.release.value = 0.250;
+    audio.musicComp.release.value = 0.350;
     audio.musicComp.connect(audio.hiCut);
 
     audio.musicGain = audio.ctx.createGain();
