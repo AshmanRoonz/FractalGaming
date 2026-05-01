@@ -21956,6 +21956,7 @@ function buildSettingsPage() {
         <select id="set-music-style" style="flex:1; min-width:0; max-width:60%;">
           <option value="cosmic" ${(audio.musicStyle || 'cosmic') === 'cosmic' ? 'selected' : ''}>Cosmic (default, C#2 Aeolian, triangle lead)</option>
           <option value="cyber"  ${audio.musicStyle === 'cyber'  ? 'selected' : ''}>Cyber (synthwave, faster, saw lead)</option>
+          <option value="techno" ${audio.musicStyle === 'techno' ? 'selected' : ''}>Techno (hard 4-on-floor, A1 phrygian, square bass, ~140 BPM)</option>
           <option value="doom"   ${audio.musicStyle === 'doom'   ? 'selected' : ''}>Doom (Phrygian, slower, dark)</option>
           <option value="drift"  ${audio.musicStyle === 'drift'  ? 'selected' : ''}>Drift (ambient, sine, sparse)</option>
           <option value="battle" ${audio.musicStyle === 'battle' ? 'selected' : ''}>Battle (cinematic, driving)</option>
@@ -27311,7 +27312,7 @@ const audio = {
   musicEnabled: true,           // user toggle (settings UI)
   musicCeiling: 'normal',       // 'chill' | 'normal' | 'wild' ; intensity cap
   musicMuteLobby: false,
-  musicStyle: 'doom',           // 'cosmic' | 'cyber' | 'doom' | 'drift' | 'battle' | 'jazz'
+  musicStyle: 'doom',           // 'cosmic' | 'cyber' | 'doom' | 'drift' | 'battle' | 'jazz' | 'techno'
   // Side-chain duck factor for ambient bed: 1.0 = full, drops on loud SFX, ramps back.
   duckFactor: 1.0,
   duckTarget: 1.0,
@@ -31496,6 +31497,119 @@ const MUSIC_STYLES = {
       doomed: { rhythm: 'syncopated',     contour: 'riff_blues',   barsPerCycle: 2, octaveAdd: -12 },
     },
   },
+
+  // (v8_2a 2026-05-01) Hard / fast techno. 4-on-the-floor kick, off-beat
+  // closed hats, claps on 2+4, square-wave acid bass, sawtooth lead.
+  // A1 Phrygian gives the menacing flat-2 sting that carries the genre.
+  // bpmScale 1.4 puts warmup at ~129 BPM and combat at ~140 BPM.
+  // patternOverrides supply per-state drum + bass; chord progressions
+  // come from the base MUSIC_PATTERNS entries unchanged.
+  techno: {
+    label: 'Techno',
+    keyMidi: 33,                    // A1
+    mode: 'phrygian',
+    bpmScale: 1.4,
+    leadWave: 'sawtooth',
+    bassWave: 'square',
+    padWave: 'sawtooth',
+    riff: {
+      lobby:  { rhythm: 'pulse_8ths', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
+      warmup: { rhythm: 'pulse_8ths', contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
+      combat: { rhythm: 'driving',    contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
+      doomed: { rhythm: 'galloping',  contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
+    },
+    patternOverrides: {
+      lobby: {
+        // Sparse 4-on-2/4 kick + off-beat hats + claps on 2+4. Lobby techno
+        // is "yes we're here" without pushing.
+        drum: (sub, beat) => {
+          const beatInBar = beat % 4;
+          const subInBeat = sub % 4;
+          const out = [];
+          if (subInBeat === 0 && (beatInBar === 0 || beatInBar === 2)) out.push({ note: 36, g: 0.85 });
+          if (subInBeat === 2) out.push({ note: 42, g: 0.50 });
+          if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.55 });
+          return out.length ? out : null;
+        },
+        bass: (beat) => {
+          const beatInBar = beat % 4;
+          if (beatInBar === 0 || beatInBar === 2) return 0;
+          return null;
+        },
+        bassDurBeats: 2,
+      },
+      warmup: {
+        // 4-on-the-floor warmup. Kick every beat, off-beat hats, claps on
+        // 2+4 to lock the groove before combat. Hat ducked when kick fires.
+        drum: (sub, beat) => {
+          const beatInBar = beat % 4;
+          const subInBeat = sub % 4;
+          const out = [];
+          if (subInBeat === 0) out.push({ note: 36, g: 1.0 });
+          if (subInBeat === 0) out.push({ note: 42, g: 0.30 });
+          if (subInBeat === 2) out.push({ note: 42, g: 0.65 });
+          if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.85 });
+          return out.length ? out : null;
+        },
+        bass: (beat) => 0,
+        bassDurBeats: 1,
+      },
+      combat: {
+        // The main event. 4-on-the-floor with intensity-driven busyness:
+        //   int 1: basic kick + off-beat hat + claps on 2+4
+        //   int 2: add 16th hat ghosts + open-hat push every other bar
+        //   int 3: add pushed kick on the "and" of 4 + snare ruff bar pickup
+        drum: (sub, beat, intensity) => {
+          const beatInBar = beat % 4;
+          const subInBeat = sub % 4;
+          const out = [];
+          if (subInBeat === 0) out.push({ note: 36, g: 1.15 });
+          if (subInBeat === 0) out.push({ note: 42, g: 0.30 });
+          if (subInBeat === 2) out.push({ note: 42, g: 0.75 });
+          if (intensity >= 2 && (subInBeat === 1 || subInBeat === 3)) out.push({ note: 42, g: 0.30 });
+          if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.95 });
+          if (intensity >= 2 && beatInBar === 3 && subInBeat === 2 && (Math.floor(beat / 4) % 2 === 1)) {
+            out.push({ note: 49, g: 0.45 });
+          }
+          if (intensity >= 3 && beatInBar === 3 && subInBeat === 2) out.push({ note: 36, g: 0.7 });
+          if (intensity >= 3 && beat % 16 === 15 && subInBeat >= 2) out.push({ note: 38, g: 0.55 });
+          return out.length ? out : null;
+        },
+        bass: (beat, intensity) => {
+          const beatInBar = beat % 4;
+          const barInLoop = Math.floor(beat / 4) % 4;
+          // Bar 4 walks down for the descent; otherwise root pulse with a
+          // 5th rotation at int 2+ to widen the harmonic motion.
+          if (barInLoop === 3) {
+            const seq = [0, -2, -3, -5];
+            return seq[beatInBar];
+          }
+          if (intensity >= 2) {
+            if (beatInBar === 0 || beatInBar === 2) return 0;
+            if (beatInBar === 1) return 7;
+            return 0;
+          }
+          return 0;
+        },
+        bassDurBeats: 1,
+      },
+      doomed: {
+        // Hollow / industrial: kick only on 1, fast hats, no snare. Carries
+        // the "tunnel" feel of the original doomed pattern with a techno
+        // pulse underneath.
+        drum: (sub, beat) => {
+          const beatInBar = beat % 4;
+          const subInBeat = sub % 4;
+          const out = [];
+          if (subInBeat === 0 && beatInBar === 0) out.push({ note: 36, g: 0.9 });
+          if (subInBeat === 2) out.push({ note: 42, g: 0.40 });
+          return out.length ? out : null;
+        },
+        bass: (beat) => 0,
+        bassDurBeats: 1,
+      },
+    },
+  },
 };
 
 // Read the riff config for the given pattern, honoring the active style's
@@ -31580,8 +31694,17 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   if (music.drumsSuspended && music.patternId !== 'lobby' && music.patternId !== 'silent') {
     // Drums only suspended; still let pad/bass play at strong beats below.
   }
-  const ptn = MUSIC_PATTERNS[music.patternId];
+  let ptn = MUSIC_PATTERNS[music.patternId];
   if (!ptn) return;
+  // (v8_2a 2026-05-01) Style-level pattern override. A style can supply a
+  // patternOverrides[patternId] containing { drum, bass, bassDurBeats } that
+  // gets merged on top of the base pattern so chord progression and other
+  // fields stay intact. Used by the 'techno' style for a hard 4-on-the-floor
+  // kit + acid square bass per gameplay state.
+  const _styleIdSch = (typeof audio !== 'undefined') ? audio.musicStyle : null;
+  const _styleDefSch = (_styleIdSch && typeof MUSIC_STYLES !== 'undefined') ? MUSIC_STYLES[_styleIdSch] : null;
+  const _styleOvrSch = (_styleDefSch && _styleDefSch.patternOverrides) ? _styleDefSch.patternOverrides[music.patternId] : null;
+  if (_styleOvrSch) ptn = Object.assign({}, ptn, _styleOvrSch);
   const out = music.out;
   const secPerBeat = 60 / music.bpm;
 
