@@ -10269,6 +10269,14 @@ class Bot {
         if (_annNext >= 2 && typeof announceMultikill === 'function') announceMultikill(_annNext);
         else ANN.enemyDown();
       }
+      // (v8_1VR) Reactive band: queue a lead phrase quantized to the next 8th.
+      // Streak hint is the (current + 1 if inside window) projection above.
+      if (typeof musicOnKill === 'function') {
+        const _mkNow = (typeof game !== 'undefined') ? game.time : 0;
+        const _mkInside = player._lastKillTime != null && (_mkNow - player._lastKillTime) <= 4.0;
+        const _mkStreak = (player._streakCount || 0) + (_mkInside ? 1 : 0);
+        try { musicOnKill('player', _mkStreak); } catch (_) {}
+      }
       // v8VR: round-winning kill cam (Showcase mode only). No-op unless
       // showcase.active and this kill emptied the opposing team.
       if (typeof _v8tryStartRoundKillCam === 'function') {
@@ -15255,6 +15263,10 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
+    // (v8_1VR) Reactive band: fresh match start, kick off warmup pattern.
+    if (typeof musicSetPattern === 'function') {
+      try { musicSetPattern('warmup', { bpmTarget: 92, intensity: 1 }); } catch (_) {}
+    }
     game.roundTimer = LSS.ROUND_TIME;
     game.scoreA = 0;
     game.scoreB = 0;
@@ -15537,10 +15549,14 @@ function playerDie(attacker) {
   // (v6.7) Stronger shake when YOU die ; sells the moment more than a
   // generic peer kill. Same trigger function; bigger amplitude.
   if (typeof triggerScreenShake === 'function') triggerScreenShake(12);
-  // v8VR: AAA-tier death feedback — long rumble + red vignette pulse +
+  // v8VR: AAA-tier death feedback ; long rumble + red vignette pulse +
   // brief hitstop so the moment of death registers with weight.
   if (typeof triggerHitFeedback === 'function') {
     triggerHitFeedback({ weight: 'kill', onPlayer: true });
+  }
+  // (v8_1VR) Reactive band: pad sour-stab on player death.
+  if (typeof musicOnKill === 'function') {
+    try { musicOnKill('bot'); } catch (_) {}
   }
   // (v6.7) Broadcast the kill to peers so their feed gets the entry too.
   // The receive side already routes evt.type === 'kill' to addKillFeed in
@@ -18985,6 +19001,10 @@ function updateRoundSystem(dt) {
     if (game.warmupTimer <= 0) {
       game.state = 'playing';
       game.roundTimer = LSS.ROUND_TIME;
+      // (v8_1VR) Reactive band: round start ; combat pattern at intensity 1.
+      if (typeof musicSetPattern === 'function') {
+        try { musicSetPattern('combat', { bpmTarget: 100, intensity: 1 }); } catch (_) {}
+      }
       // round_start tone: already played by launchCountdown when selectActive was true,
       // but not when selectActive is false (between-round mid-air transitions). Guard so
       // we don't stack two of them when the ship-select path is driving the countdown.
@@ -19111,6 +19131,21 @@ function updateRoundSystem(dt) {
         if (player.team === winnerTeam) ANN.roundWon();
         else                            ANN.roundLost();
       }
+      // (v8_1VR) Reactive band: round end pattern + scripted phrase.
+      if (typeof musicSetPattern === 'function' && player) {
+        try {
+          const playerWonRound = (player.team === winnerTeam);
+          const willTriggerMatchEnd =
+            (game.scoreA >= LSS.ROUNDS_TO_WIN || game.scoreB >= LSS.ROUNDS_TO_WIN);
+          if (!willTriggerMatchEnd) {
+            musicSetPattern(playerWonRound ? 'roundEndVictory' : 'roundEndDefeat',
+                            { bpmTarget: 84, intensity: 1 });
+            if (typeof musicPlayRoundEndPhrase === 'function') {
+              musicPlayRoundEndPhrase(playerWonRound);
+            }
+          }
+        } catch (_) {}
+      }
     }
   } else if (game.state === 'roundEnd') {
     game.roundEndTimer -= dt;
@@ -19128,10 +19163,21 @@ function updateRoundSystem(dt) {
           Overlays.banner('VICTORY', winner + ' WINS');
         }
         // v8VR: ship-AI declares victory or defeat depending on the player's team.
+        // Same `playerWon` value drives the (v8_1VR) reactive-band match-end pattern.
+        const _playerWonMatch = (game.scoreA >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_A) ||
+                                (game.scoreB >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_B);
         if (typeof ANN !== 'undefined') {
-          const playerWon = (game.scoreA >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_A) ||
-                            (game.scoreB >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_B);
-          if (playerWon) ANN.victory(); else ANN.defeat();
+          if (_playerWonMatch) ANN.victory(); else ANN.defeat();
+        }
+        // (v8_1VR) Reactive band: match-end pattern.
+        if (typeof musicSetPattern === 'function') {
+          try {
+            musicSetPattern(_playerWonMatch ? 'matchEndVictory' : 'matchEndDefeat',
+                            { bpmTarget: 76, intensity: 1 });
+            if (typeof musicPlayRoundEndPhrase === 'function') {
+              musicPlayRoundEndPhrase(_playerWonMatch);
+            }
+          } catch (_) {}
         }
         // Release pointer lock so the user can see the scoreboard without
         // being stuck in mouselook.
@@ -19141,6 +19187,10 @@ function updateRoundSystem(dt) {
       } else {
         game.currentRound++;
         game.state = 'warmup';
+        // (v8_1VR) Reactive band: rolling between rounds, warmup pattern.
+        if (typeof musicSetPattern === 'function') {
+          try { musicSetPattern('warmup', { bpmTarget: 92, intensity: 1 }); } catch (_) {}
+        }
         // Round warmup runs through the ship-select screen so the player can
         // swap ships between rounds; matches the visible launch countdown so
         // bots stay holstered until LAUNCH.
@@ -21852,12 +21902,45 @@ function buildSettingsPage() {
         <div class="value-display" id="val-vol-sfx">${audio.userVol.sfx.toFixed(2)}</div>
       </div>
       <div class="setting-row">
-        <label>Music / Ambient</label>
+        <label>Ambient bed</label>
         <input type="range" id="set-vol-ambient" min="0" max="1.5" step="0.05" value="${audio.userVol.ambient}">
         <div class="value-display" id="val-vol-ambient">${audio.userVol.ambient.toFixed(2)}</div>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Headphones recommended: ambient bed is a phi-cascade binaural layer; speakers collapse the stereo beat.</label>
+      </div>
+    </div>
+
+    <!-- (v8_1VR) Tier 3 reactive band ; the procedural in-game music system.
+         Drums / bass / pad / lead synthesized from oscillators, scheduled to
+         a steady beat that reacts to round timer, kills, doomed state, and
+         stasis fields. The default key (C#2) is tuned to the ambient bed's
+         PHI_REST_BASE so the pad shares the drone fundamental. -->
+    <div class="settings-section">
+      <h3>Music (Reactive Band)</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Procedural soundtrack that scores the match in real time. Tempo rises with the round timer; lead phrases trigger on kills; pad shifts to Phrygian when you're doomed; drums cut out inside stasis fields. Tuned to C#2 to share the ambient drone's fundamental.</label>
+      </div>
+      <div class="setting-row">
+        <label>Enabled</label>
+        <input type="checkbox" id="set-music-enabled" ${audio.musicEnabled ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Volume</label>
+        <input type="range" id="set-vol-music" min="0" max="1.5" step="0.05" value="${audio.userVol.music}">
+        <div class="value-display" id="val-vol-music">${audio.userVol.music.toFixed(2)}</div>
+      </div>
+      <div class="setting-row">
+        <label>Intensity ceiling</label>
+        <select id="set-music-ceiling" style="flex:1; min-width:0; max-width:60%;">
+          <option value="chill"  ${audio.musicCeiling === 'chill' ? 'selected' : ''}>Chill (cap at 1)</option>
+          <option value="normal" ${audio.musicCeiling === 'normal' ? 'selected' : ''}>Normal (cap at 2)</option>
+          <option value="wild"   ${audio.musicCeiling === 'wild' ? 'selected' : ''}>Wild (cap at 3)</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <label>Mute in lobby</label>
+        <input type="checkbox" id="set-music-mute-lobby" ${audio.musicMuteLobby ? 'checked' : ''}>
       </div>
     </div>
 
@@ -22037,6 +22120,11 @@ function buildSettingsPage() {
       audio.userVol.ambient = v;
       // updateAmbientBed() reads audio.userVol.ambient every frame, so no immediate wire needed.
     }, 2],
+    // (v8_1VR) Reactive band volume slider.
+    ['set-vol-music', 'val-vol-music', v => {
+      if (typeof musicSetVolume === 'function') musicSetVolume(v);
+      else audio.userVol.music = v;
+    }, 2],
   ];
   sliders.forEach(([id, valId, setter, decimals]) => {
     const slider = overlay.querySelector('#' + id);
@@ -22052,6 +22140,33 @@ function buildSettingsPage() {
   // Checkboxes
   overlay.querySelector('#set-gp-invert-y').addEventListener('change', e => { input.invertLookY = e.target.checked; saveSettings(); });
   overlay.querySelector('#set-gp-swap').addEventListener('change', e => { input.swapSticks = e.target.checked; saveSettings(); });
+
+  // (v8_1VR) Reactive band controls.
+  const musicEnabledChk = overlay.querySelector('#set-music-enabled');
+  if (musicEnabledChk) {
+    musicEnabledChk.addEventListener('change', e => {
+      audio.musicEnabled = !!e.target.checked;
+      if (typeof musicSetEnabled === 'function') musicSetEnabled(audio.musicEnabled);
+      saveSettings();
+    });
+  }
+  const musicCeilingSel = overlay.querySelector('#set-music-ceiling');
+  if (musicCeilingSel) {
+    musicCeilingSel.addEventListener('change', e => {
+      audio.musicCeiling = e.target.value;
+      if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling);
+      saveSettings();
+    });
+  }
+  const musicMuteLobbyChk = overlay.querySelector('#set-music-mute-lobby');
+  if (musicMuteLobbyChk) {
+    musicMuteLobbyChk.addEventListener('change', e => {
+      audio.musicMuteLobby = !!e.target.checked;
+      if (typeof music !== 'undefined') music.musicMuteLobby = audio.musicMuteLobby;
+      if (typeof musicSyncToGameState === 'function') musicSyncToGameState();
+      saveSettings();
+    });
+  }
 
   // Wall pattern dropdown (9 options)
   const wpSel = overlay.querySelector('#set-wall-pattern');
@@ -22869,6 +22984,11 @@ function saveSettings() {
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
       audioAmbient: audio.userVol.ambient,
+      // (v8_1VR) Reactive band settings.
+      audioMusic: audio.userVol.music != null ? audio.userVol.music : 0.55,
+      musicEnabled: audio.musicEnabled !== false,
+      musicCeiling: audio.musicCeiling || 'normal',
+      musicMuteLobby: !!audio.musicMuteLobby,
       // v8VR: ship-AI announcer prefs.
       annEnabled: announcer.enabled,
       annVoice:   announcer.voice ? announcer.voice.name : (announcer.voiceName || ''),
@@ -23062,6 +23182,14 @@ function loadSettings() {
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
     if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
     if (data.audioAmbient !== undefined) audio.userVol.ambient = data.audioAmbient;
+    // (v8_1VR) Reactive band: music slider + on/off + ceiling + lobby mute.
+    // The audio.musicGain node may not exist yet on first load (initAudio
+    // runs later); the slider value lands on audio.userVol.music and the
+    // post-init pass applies it onto the live gain. Same pattern as reverbWet.
+    if (typeof data.audioMusic === 'number') audio.userVol.music = data.audioMusic;
+    if (data.musicEnabled !== undefined) audio.musicEnabled = !!data.musicEnabled;
+    if (typeof data.musicCeiling === 'string') audio.musicCeiling = data.musicCeiling;
+    if (data.musicMuteLobby !== undefined) audio.musicMuteLobby = !!data.musicMuteLobby;
     // v8VR: ship-AI announcer prefs. The voice itself is resolved later
     // by announcerInit / pickVoice once the SpeechSynthesis voice list
     // is ready; we stash the saved name on `announcer.voiceName` and the
@@ -26981,6 +27109,12 @@ function gameLoop(timestamp) {
   // Update ambient sound bed (speed-reactive)
   updateAmbientBed();
 
+  // (v8_1VR) Reactive band: per-frame state-driven updates (BPM ramp,
+  // intensity tier, doomed/stasis mode tracking).
+  if (typeof musicTickFromMain === 'function') {
+    try { musicTickFromMain(dt); } catch (_) {}
+  }
+
   renderFrame();
 }
 
@@ -27007,7 +27141,16 @@ const audio = {
   ambientNodes: [],     // oscillator nodes for ambient bed
   initialized: false,
   // User-facing volume multipliers (0..1.5), stacked on top of internal gain staging.
-  userVol: { master: 1.0, sfx: 1.0, ambient: 1.0 },
+  // (v8_1VR) `music` is the Tier 3 reactive band slider; defaults to 0.55 so
+  // the band sits roughly -8 dB under SFX out of the box.
+  userVol: { master: 1.0, sfx: 1.0, ambient: 1.0, music: 0.55 },
+  // (v8_1VR) Music bus + glue. Parallel to ambientGain ; both bypass the
+  // SFX-bus voice budget so combat fire never starves the drums.
+  musicGain: null,
+  musicComp: null,
+  musicEnabled: true,           // user toggle (settings UI)
+  musicCeiling: 'normal',       // 'chill' | 'normal' | 'wild' ; intensity cap
+  musicMuteLobby: false,
   // Side-chain duck factor for ambient bed: 1.0 = full, drops on loud SFX, ramps back.
   duckFactor: 1.0,
   duckTarget: 1.0,
@@ -27134,13 +27277,47 @@ function initAudio() {
     audio.ambientGain.gain.value = 0; // starts silent, fades in when playing
     audio.ambientGain.connect(audio.hiCut);
 
+    // (v8_1VR) Music bus: Tier 3 reactive band. Sits parallel to ambient,
+    // downstream of its own glue compressor so the band has its own dynamic
+    // shape and doesn't fight the SFX limiter. Routes through hiCut for the
+    // shared top-end roll-off so the music sits in the same tonal space as
+    // everything else.
+    audio.musicComp = audio.ctx.createDynamicsCompressor();
+    audio.musicComp.threshold.value = -10;
+    audio.musicComp.knee.value = 8;
+    audio.musicComp.ratio.value = 2.5;
+    audio.musicComp.attack.value = 0.010;
+    audio.musicComp.release.value = 0.250;
+    audio.musicComp.connect(audio.hiCut);
+
+    audio.musicGain = audio.ctx.createGain();
+    audio.musicGain.gain.value = 0.55 * (audio.userVol.music != null ? audio.userVol.music : 0.55);
+    audio.musicGain.connect(audio.musicComp);
+
     audio.initialized = true;
+
+    // (v8_1VR) Kick off the reactive band scheduler on first audio init.
+    // musicSyncToGameState is fine to call before the engine has run a tick;
+    // it just sets the pattern state. musicStart spins up the 50ms setInterval.
+    try {
+      if (typeof musicSyncToGameState === 'function') musicSyncToGameState();
+      if (typeof musicStart === 'function') musicStart();
+    } catch (_) {}
   } catch(e) { console.warn('Audio init failed:', e); }
 }
 
 // Resume audio context on user interaction (browser autoplay policy)
 function resumeAudio() {
   if (audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume();
+  // (v8_1VR) Reactive band: kick off the music scheduler on first user
+  // interaction (autoplay policy gate). Idempotent ; musicStart no-ops if
+  // already running. Sync the pattern to whatever state the game is in.
+  if (typeof musicSyncToGameState === 'function') {
+    try { musicSyncToGameState(); } catch (_) {}
+  }
+  if (typeof musicStart === 'function') {
+    try { musicStart(); } catch (_) {}
+  }
 }
 
 // ---- AMBIENT SOUND BED ----
@@ -30437,6 +30614,761 @@ function playSpatialSound(type, worldPos, opts) {
   }
 }
 
+// ============================================================
+// === LSS BAND v1 (Tier 3 reactive music) ====================
+// ============================================================
+// Procedural in-game band that scores the match in real time.
+// Synth recipes lifted from framework_dancing_cosmos_band.html
+// (drums, bass, pad, lead). The scheduler is a tiny lookahead
+// clock; reactive hooks below feed it gameplay events.
+//
+// First principles (LSS_music_tier3_plan-may01-2026.md, sec. 0):
+//   1. A steady beat is the most important part.
+//   2. Rhythms are built on beats, not wall-clock.
+//   3. Chords have to fit together (voice leading).
+//   4. Chords are tuned to important game frequencies. Default
+//      tonic is C#2 (~69.3 Hz), matching PHI_REST_BASE so the
+//      pad shares its root with the ambient bed.
+// ============================================================
+
+// Default tonic: 69 Hz = ~C#2, same as PHI_REST_BASE on the
+// ambient bed. The band's pad root sits ON the drone fundamental.
+const MUSIC_DEFAULT_KEY_HZ = 69; // C#2 (69.30 Hz exact)
+
+// MIDI note for C#2 = 37. We store keys as MIDI numbers so the
+// synth helpers can convert to Hz cleanly.
+const MUSIC_DEFAULT_KEY_MIDI = 37; // C#2
+
+// Scale degree tables (semitone offsets from root).
+const MUSIC_SCALE_AEOLIAN  = [0, 2, 3, 5, 7, 8, 10];  // natural minor
+const MUSIC_SCALE_PHRYGIAN = [0, 1, 3, 5, 7, 8, 10];  // b2 unease (LSS aesthetic)
+const MUSIC_PENTATONIC_MIN = [0, 3, 5, 7, 10];        // safe-over-anything lead palette
+
+// Music engine state. Separate from `audio` so hot-reloads of the
+// band code don't blow away the audio bus, and vice versa.
+const music = {
+  enabled: true,                // master on/off (settings + autoplay gate)
+  volume: 0.55,                 // userVol.music mirror, drives audio.musicGain
+  ctx: null,                    // resolved in musicEnsureCtx()
+  out: null,                    // audio.musicGain
+  // Clock
+  bpm: 96,
+  bpmTarget: 96,
+  beat: 0,
+  bar: 0,
+  nextBeatAt: 0,                // ctx.currentTime of next scheduled beat
+  lookaheadSec: 0.18,           // schedule this far ahead
+  schedTimer: null,             // setInterval handle
+  // Key + mode
+  keyMidi: MUSIC_DEFAULT_KEY_MIDI,
+  mode: 'aeolian',              // 'aeolian' | 'phrygian'
+  scale: MUSIC_SCALE_AEOLIAN,   // active scale array
+  // Pattern + dynamic state
+  patternId: 'silent',
+  intensity: 1,                 // 0..3 (capped by musicCeiling)
+  ceiling: 3,
+  // Reactive state
+  drumsSuspended: false,        // stasis-field silence
+  doomedMode: false,            // Phrygian drone overlay
+  lastKillBeat: -999,
+  multikillCount: 0,
+  // Active voices for cleanup on pattern change.
+  activeVoices: [],
+  // Pad chord memory for voice leading.
+  lastPadVoicing: null,
+  // Anti-redundant: don't reschedule pad chord on every beat.
+  lastChordKey: null,
+  // Bookkeeping for the lead phrase queue (kill-triggered notes).
+  pendingLeadNotes: [],         // [{atBeat, note, dur, vel}]
+};
+
+// Convert MIDI note number to Hz.
+function _musicMidiHz(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
+
+// === SYNTH RECIPES (lifted from framework_dancing_cosmos_band.html) ===
+
+// Drum: kick (note 35/36), snare (38/40), crash (49/57), default = hat.
+function _musicSynthDrum(note, g, when, out) {
+  const ctx = music.ctx;
+  if (!ctx) return null;
+  if (note === 35 || note === 36) {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(150, when);
+    osc.frequency.exponentialRampToValueAtTime(45, when + 0.1);
+    const amp = ctx.createGain();
+    amp.gain.setValueAtTime(0.9 * g, when);
+    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.28);
+    osc.connect(amp).connect(out);
+    osc.start(when); osc.stop(when + 0.35);
+    return { stop: (t) => { try { osc.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+  }
+  if (note === 38 || note === 40) {
+    const buf = ctx.createBuffer(1, 4096, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.8;
+    const amp = ctx.createGain();
+    amp.gain.setValueAtTime(0.7 * g, when);
+    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.15);
+    src.connect(bp).connect(amp).connect(out);
+    src.start(when); src.stop(when + 0.18);
+    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+  }
+  if (note === 49 || note === 57) {
+    const buf = ctx.createBuffer(1, 8192, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass'; hp.frequency.value = 5000;
+    const amp = ctx.createGain();
+    amp.gain.setValueAtTime(0.35 * g, when);
+    amp.gain.exponentialRampToValueAtTime(0.005, when + 1.2);
+    src.connect(hp).connect(amp).connect(out);
+    src.start(when); src.stop(when + 1.3);
+    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+  }
+  // Default = hat (closed).
+  const buf = ctx.createBuffer(1, 1024, ctx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  const hp = ctx.createBiquadFilter();
+  hp.type = 'highpass'; hp.frequency.value = 7000;
+  const amp = ctx.createGain();
+  amp.gain.setValueAtTime(0.35 * g, when);
+  amp.gain.exponentialRampToValueAtTime(0.005, when + 0.06);
+  src.connect(hp).connect(amp).connect(out);
+  src.start(when); src.stop(when + 0.08);
+  return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+}
+
+function _musicSynthBass(freq, g, when, out, durSec) {
+  const ctx = music.ctx;
+  if (!ctx) return null;
+  const osc = ctx.createOscillator();
+  osc.type = 'sawtooth'; osc.frequency.value = freq;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = 450; lp.Q.value = 1;
+  const amp = ctx.createGain();
+  amp.gain.setValueAtTime(0, when);
+  amp.gain.linearRampToValueAtTime(0.48 * g, when + 0.008);
+  amp.gain.linearRampToValueAtTime(0.30 * g, when + 0.15);
+  osc.connect(lp).connect(amp).connect(out);
+  osc.start(when);
+  // Auto-stop on duration. Caller can also stop early via the returned handle.
+  const stopAt = when + (durSec != null ? durSec : 0.5);
+  amp.gain.setValueAtTime(0.30 * g, stopAt);
+  amp.gain.linearRampToValueAtTime(0, stopAt + 0.05);
+  try { osc.stop(stopAt + 0.1); } catch (_) {}
+  let stopped = false;
+  return {
+    stop: (t) => {
+      if (stopped) return; stopped = true;
+      try {
+        amp.gain.cancelScheduledValues(t);
+        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.linearRampToValueAtTime(0, t + 0.05);
+        osc.stop(t + 0.1);
+      } catch (_) {}
+    }
+  };
+}
+
+function _musicSynthPad(freq, g, when, out, durSec) {
+  const ctx = music.ctx;
+  if (!ctx) return null;
+  const o1 = ctx.createOscillator();
+  const o2 = ctx.createOscillator();
+  o1.type = 'sawtooth'; o2.type = 'sawtooth';
+  o1.frequency.value = freq;
+  o2.frequency.value = freq * 1.005;
+  const lp = ctx.createBiquadFilter();
+  lp.type = 'lowpass'; lp.frequency.value = 1400; lp.Q.value = 0.7;
+  const amp = ctx.createGain();
+  amp.gain.setValueAtTime(0, when);
+  amp.gain.linearRampToValueAtTime(0.18 * g, when + 0.35);
+  o1.connect(lp); o2.connect(lp);
+  lp.connect(amp).connect(out);
+  o1.start(when); o2.start(when);
+  const stopAt = when + (durSec != null ? durSec : 2.0);
+  amp.gain.setValueAtTime(0.18 * g, stopAt);
+  amp.gain.linearRampToValueAtTime(0, stopAt + 0.35);
+  try { o1.stop(stopAt + 0.4); o2.stop(stopAt + 0.4); } catch (_) {}
+  let stopped = false;
+  return {
+    stop: (t) => {
+      if (stopped) return; stopped = true;
+      try {
+        amp.gain.cancelScheduledValues(t);
+        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.linearRampToValueAtTime(0, t + 0.35);
+        o1.stop(t + 0.4); o2.stop(t + 0.4);
+      } catch (_) {}
+    }
+  };
+}
+
+function _musicSynthLead(freq, g, when, out, durSec) {
+  const ctx = music.ctx;
+  if (!ctx) return null;
+  const osc = ctx.createOscillator();
+  osc.type = 'triangle'; osc.frequency.value = freq;
+  const amp = ctx.createGain();
+  amp.gain.setValueAtTime(0, when);
+  amp.gain.linearRampToValueAtTime(0.28 * g, when + 0.015);
+  amp.gain.linearRampToValueAtTime(0.14 * g, when + 0.12);
+  osc.connect(amp).connect(out);
+  osc.start(when);
+  const stopAt = when + (durSec != null ? durSec : 0.35);
+  amp.gain.setValueAtTime(0.14 * g, stopAt);
+  amp.gain.linearRampToValueAtTime(0, stopAt + 0.08);
+  try { osc.stop(stopAt + 0.12); } catch (_) {}
+  let stopped = false;
+  return {
+    stop: (t) => {
+      if (stopped) return; stopped = true;
+      try {
+        amp.gain.cancelScheduledValues(t);
+        amp.gain.setValueAtTime(amp.gain.value, t);
+        amp.gain.linearRampToValueAtTime(0, t + 0.08);
+        osc.stop(t + 0.12);
+      } catch (_) {}
+    }
+  };
+}
+
+// === CHORD HELPERS ===
+
+// Build a chord from scale degree (0..6) + quality.
+// Returns array of MIDI offsets from keyMidi.
+function _musicChord(degree, quality) {
+  const scale = music.scale;
+  const root = scale[degree % 7];
+  if (quality === 'maj') return [root, root + 4, root + 7];
+  if (quality === 'dim') return [root, root + 3, root + 6];
+  return [root, root + 3, root + 7]; // 'min' default
+}
+
+// Voice-leading: pick the closest octave for each pad note relative to the
+// previous voicing. Pad sits ~24 semitones above keyMidi (mid-low pad register).
+function _musicVoicePad(chord) {
+  const baseMidi = music.keyMidi + 24;
+  if (!music.lastPadVoicing) {
+    return chord.map(n => baseMidi + n);
+  }
+  const prev = music.lastPadVoicing;
+  return chord.map((n, i) => {
+    let target = baseMidi + n;
+    const reference = prev[i] != null ? prev[i] : baseMidi + n;
+    // Move target by octaves to minimize distance from reference.
+    while (target - reference > 6)  target -= 12;
+    while (reference - target > 6)  target += 12;
+    return target;
+  });
+}
+
+// === SCHEDULER ===
+
+function musicEnsureCtx() {
+  if (!audio || !audio.ctx) return false;
+  if (!audio.musicGain) return false;
+  music.ctx = audio.ctx;
+  music.out = audio.musicGain;
+  return true;
+}
+
+function _musicScheduleBeat(beatIdx, beatTime) {
+  if (music.drumsSuspended && music.patternId !== 'lobby' && music.patternId !== 'silent') {
+    // Drums only suspended; still let pad/bass play at strong beats below.
+  }
+  const ptn = MUSIC_PATTERNS[music.patternId];
+  if (!ptn) return;
+  const out = music.out;
+  const secPerBeat = 60 / music.bpm;
+
+  // Drums: walk the 16th-note grid for this beat.
+  if (!music.drumsSuspended && ptn.drum) {
+    for (let s = 0; s < 4; s++) {
+      const sub = beatIdx * 4 + s;
+      const subTime = beatTime + (s * secPerBeat / 4);
+      const hit = ptn.drum(sub, beatIdx, music.intensity);
+      if (hit) {
+        for (const h of hit) {
+          _musicSynthDrum(h.note, h.g != null ? h.g : 1.0, subTime, out);
+        }
+      }
+    }
+  }
+
+  // Bass + pad + chord changes happen on beat boundaries.
+  if (ptn.bass) {
+    const bassNote = ptn.bass(beatIdx, music.intensity);
+    if (bassNote != null) {
+      const freq = _musicMidiHz(music.keyMidi - 12 + bassNote);
+      const dur = secPerBeat * (ptn.bassDurBeats || 1);
+      _musicSynthBass(freq, 0.9, beatTime, out, dur);
+    }
+  }
+
+  // Pad: chord progression. Trigger on bar boundaries for each new chord.
+  if (ptn.chords && ptn.chordsBars) {
+    const totalBars = ptn.chordsBars.reduce((a, b) => a + b, 0);
+    const barInLoop = (Math.floor(beatIdx / 4)) % totalBars;
+    const beatInBar = beatIdx % 4;
+    if (beatInBar === 0) {
+      // Find which chord index we're in for this bar.
+      let acc = 0, chordIdx = 0;
+      for (let i = 0; i < ptn.chordsBars.length; i++) {
+        if (barInLoop < acc + ptn.chordsBars[i]) { chordIdx = i; break; }
+        acc += ptn.chordsBars[i];
+      }
+      const isFirstBarOfChord = (barInLoop === acc);
+      const chordKey = ptn.id + ':' + chordIdx + ':' + barInLoop;
+      if (isFirstBarOfChord && music.lastChordKey !== chordKey) {
+        music.lastChordKey = chordKey;
+        const [degree, quality] = ptn.chords[chordIdx];
+        const chordOffsets = _musicChord(degree, quality);
+        const voicing = _musicVoicePad(chordOffsets);
+        const dur = secPerBeat * 4 * ptn.chordsBars[chordIdx];
+        for (const m of voicing) {
+          _musicSynthPad(_musicMidiHz(m), 1.0, beatTime, out, dur);
+        }
+        music.lastPadVoicing = voicing;
+      }
+    }
+  }
+
+  // Lead: scheduled phrase notes from kill events.
+  if (music.pendingLeadNotes.length) {
+    const drained = [];
+    const remaining = [];
+    for (const n of music.pendingLeadNotes) {
+      if (n.atBeat <= beatIdx + 0.001) drained.push(n);
+      else remaining.push(n);
+    }
+    music.pendingLeadNotes = remaining;
+    for (const n of drained) {
+      const offset = (n.atBeat - beatIdx) * secPerBeat;
+      const t = beatTime + Math.max(0, offset);
+      _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + n.note), n.vel || 0.9, t, out, n.dur || 0.25);
+    }
+  }
+}
+
+function _musicTick() {
+  if (!music.enabled) return;
+  if (!musicEnsureCtx()) return;
+  const ctx = music.ctx;
+  // BPM smoothing toward target (one-pole).
+  music.bpm = music.bpm * 0.92 + music.bpmTarget * 0.08;
+  // Schedule beats up to lookahead.
+  const horizon = ctx.currentTime + music.lookaheadSec;
+  // Boot: first beat lines up to "now".
+  if (music.nextBeatAt < ctx.currentTime - 0.5) {
+    music.nextBeatAt = ctx.currentTime + 0.05;
+    music.beat = 0;
+    music.bar = 0;
+  }
+  while (music.nextBeatAt <= horizon) {
+    _musicScheduleBeat(music.beat, music.nextBeatAt);
+    music.beat++;
+    if (music.beat % 4 === 0) music.bar++;
+    music.nextBeatAt += 60 / music.bpm;
+  }
+}
+
+function musicStart() {
+  if (music.schedTimer) return;
+  if (!musicEnsureCtx()) return;
+  music.schedTimer = setInterval(_musicTick, 50);
+}
+
+function musicStop() {
+  if (music.schedTimer) clearInterval(music.schedTimer);
+  music.schedTimer = null;
+}
+
+// === PUBLIC API ===
+
+function musicSetEnabled(on) {
+  music.enabled = !!on;
+  if (!music.enabled) {
+    musicStop();
+    // Mute the bus immediately (avoid lingering pad tails).
+    if (audio.musicGain && audio.ctx) {
+      try {
+        audio.musicGain.gain.cancelScheduledValues(audio.ctx.currentTime);
+        audio.musicGain.gain.linearRampToValueAtTime(0, audio.ctx.currentTime + 0.1);
+      } catch (_) {}
+    }
+  } else {
+    if (audio.musicGain && audio.ctx) {
+      try {
+        const target = 0.55 * (audio.userVol.music != null ? audio.userVol.music : 0.55);
+        audio.musicGain.gain.cancelScheduledValues(audio.ctx.currentTime);
+        audio.musicGain.gain.linearRampToValueAtTime(target, audio.ctx.currentTime + 0.4);
+      } catch (_) {}
+    }
+    musicStart();
+  }
+}
+
+function musicSetVolume(v) {
+  audio.userVol.music = Math.max(0, Math.min(1.5, v));
+  if (audio.musicGain) {
+    audio.musicGain.gain.value = 0.55 * audio.userVol.music;
+  }
+}
+
+function musicSetPattern(id, opts) {
+  if (!MUSIC_PATTERNS[id]) {
+    console.warn('[music] unknown pattern', id);
+    return;
+  }
+  music.patternId = id;
+  music.lastChordKey = null;
+  // Clear any pending lead notes from a prior pattern (kills don't echo across rounds).
+  music.pendingLeadNotes = [];
+  if (opts && typeof opts.intensity === 'number') {
+    music.intensity = Math.max(0, Math.min(music.ceiling, opts.intensity));
+  }
+  if (opts && typeof opts.bpm === 'number') {
+    music.bpm = opts.bpm;
+    music.bpmTarget = opts.bpm;
+  }
+  if (opts && typeof opts.bpmTarget === 'number') {
+    music.bpmTarget = opts.bpmTarget;
+  }
+  // Start the scheduler if not running.
+  musicStart();
+}
+
+function musicSetBpmTarget(bpm) {
+  music.bpmTarget = Math.max(40, Math.min(220, bpm));
+}
+
+function musicSetIntensity(level) {
+  music.intensity = Math.max(0, Math.min(music.ceiling, level | 0));
+}
+
+function musicSetCeiling(label) {
+  if (label === 'chill') music.ceiling = 1;
+  else if (label === 'wild') music.ceiling = 3;
+  else music.ceiling = 2;
+  if (music.intensity > music.ceiling) music.intensity = music.ceiling;
+}
+
+function musicSetMode(mode) {
+  music.mode = mode;
+  music.scale = (mode === 'phrygian') ? MUSIC_SCALE_PHRYGIAN : MUSIC_SCALE_AEOLIAN;
+}
+
+function musicEnterMode(name) {
+  if (name === 'doomed') {
+    music.doomedMode = true;
+    musicSetMode('phrygian');
+  }
+}
+
+function musicExitMode(name) {
+  if (name === 'doomed') {
+    music.doomedMode = false;
+    musicSetMode('aeolian');
+  }
+}
+
+function musicSuspendDrums(on) {
+  music.drumsSuspended = !!on;
+}
+
+// onKill: queue a lead phrase quantized to the next 8th note. who = 'player' | 'bot'.
+function musicOnKill(who, streakHint) {
+  if (!musicEnsureCtx()) return;
+  if (who === 'bot') {
+    // Player just died from a bot's kill ; pad sour-stab + skip next snare.
+    // (Quick way: schedule a quick lead bend down a semitone and back.)
+    const t0 = music.ctx.currentTime;
+    _musicSynthLead(_musicMidiHz(music.keyMidi + 12), 0.6, t0, music.out, 0.20);
+    _musicSynthLead(_musicMidiHz(music.keyMidi + 11), 0.5, t0 + 0.18, music.out, 0.20);
+    _musicSynthLead(_musicMidiHz(music.keyMidi + 12), 0.5, t0 + 0.36, music.out, 0.30);
+    return;
+  }
+  // Player kill: quantize to next 8th note ; queue a phrase length based on streak.
+  const beatNow = music.beat + Math.max(0, (music.nextBeatAt - music.ctx.currentTime) / (60 / music.bpm));
+  const startBeat = Math.ceil(beatNow * 2) / 2;  // next 8th note boundary
+  let phraseLen = 1;
+  const inWindow = (music.beat - music.lastKillBeat) <= 8;  // 8 beats = ~5s @ 96 BPM
+  if (inWindow) music.multikillCount++;
+  else music.multikillCount = 1;
+  music.lastKillBeat = music.beat;
+  if (streakHint != null) music.multikillCount = Math.max(music.multikillCount, streakHint | 0);
+  phraseLen = Math.min(5, music.multikillCount);
+  // Phrase: ascending pentatonic from root, eighth notes.
+  for (let i = 0; i < phraseLen; i++) {
+    const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
+    const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
+    music.pendingLeadNotes.push({
+      atBeat: startBeat + i * 0.5,
+      note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
+      dur: 0.30,
+      vel: 0.85,
+    });
+  }
+}
+
+// Round-end victory/defeat phrase (longer scripted lead figure).
+function musicPlayRoundEndPhrase(victory) {
+  if (!musicEnsureCtx()) return;
+  // 4-note phrase quantized to the next beat.
+  const startBeat = Math.ceil(music.beat + 0.5);
+  const seq = victory
+    ? [0, 4, 7, 12]   // ascending major triad
+    : [12, 8, 5, 3];  // descending minor figure (lands on b3)
+  for (let i = 0; i < seq.length; i++) {
+    music.pendingLeadNotes.push({
+      atBeat: startBeat + i * 0.5,
+      note: seq[i],
+      dur: 0.40,
+      vel: 0.95,
+    });
+  }
+}
+
+// === PATTERNS ===
+// Each pattern: { id, drum(sub16, beat, intensity)->[hits]|null, bass(beat, intensity)->offset|null,
+//                 chords:[[degree,quality],...], chordsBars:[bars,...], bassDurBeats }
+
+const MUSIC_PATTERNS = {
+  silent: {
+    id: 'silent',
+    drum: () => null,
+    bass: () => null,
+    chords: null, chordsBars: null,
+  },
+
+  lobby: {
+    id: 'lobby',
+    drum: (sub, beat, intensity) => {
+      const beatInBar = beat % 4;
+      const subInBeat = sub % 4;
+      const out = [];
+      // Hat on every other 16th (8th notes).
+      if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.5 });
+      // Kick on 1.
+      if (subInBeat === 0 && beatInBar === 0) out.push({ note: 36, g: 0.9 });
+      // Soft snare on 3.
+      if (subInBeat === 0 && beatInBar === 2) out.push({ note: 38, g: 0.5 });
+      return out.length ? out : null;
+    },
+    bass: (beat) => {
+      const beatInBar = beat % 4;
+      if (beatInBar === 0) return 0;       // root
+      if (beatInBar === 2) return 0;       // root again (calm)
+      return null;
+    },
+    bassDurBeats: 2,
+    // i - VI - i - i loop (Aeolian)
+    chords: [[0, 'min'], [5, 'maj'], [0, 'min'], [0, 'min']],
+    chordsBars: [2, 2, 2, 2],
+  },
+
+  warmup: {
+    id: 'warmup',
+    drum: (sub, beat) => {
+      const beatInBar = beat % 4;
+      const subInBeat = sub % 4;
+      const out = [];
+      if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.6 });        // 8th hats
+      if (subInBeat === 0 && beatInBar % 2 === 0) out.push({ note: 36, g: 0.95 }); // kick on 1+3
+      if (subInBeat === 0 && beatInBar % 2 === 1) out.push({ note: 38, g: 0.7 });  // snare on 2+4
+      return out.length ? out : null;
+    },
+    bass: (beat) => beat % 1 === 0 ? 0 : null, // root pulse every beat
+    bassDurBeats: 1,
+    chords: [[0, 'min']],
+    chordsBars: [4],
+  },
+
+  combat: {
+    id: 'combat',
+    drum: (sub, beat, intensity) => {
+      const beatInBar = beat % 4;
+      const subInBeat = sub % 4;
+      const out = [];
+      // Hats: 8ths at int 1, 16ths at int 2+, ghost-16ths at int 3.
+      if (intensity >= 2) out.push({ note: 42, g: subInBeat % 2 === 0 ? 0.6 : 0.35 });
+      else if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.55 });
+      // Kick on 1+3 always; +"and of 4" at int 3.
+      if (subInBeat === 0 && (beatInBar === 0 || beatInBar === 2)) out.push({ note: 36, g: 1.0 });
+      if (intensity >= 3 && subInBeat === 2 && beatInBar === 3) out.push({ note: 36, g: 0.7 });
+      // Snare on 2+4.
+      if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.85 });
+      // Snare ruff on bar pickup at int 2+.
+      if (intensity >= 2 && beat % 16 === 15 && subInBeat >= 1) out.push({ note: 38, g: 0.5 });
+      return out.length ? out : null;
+    },
+    bass: (beat, intensity) => {
+      const beatInBar = beat % 4;
+      const barInLoop = Math.floor(beat / 4) % 4;
+      // 8th-pulse on root + fifth alternation. Bar 4 walks down.
+      if (barInLoop === 3) {
+        const seq = [0, -2, -3, -5];
+        return seq[beatInBar];
+      }
+      if (beatInBar === 0 || beatInBar === 2) return 0;     // root
+      if (beatInBar === 1 || beatInBar === 3) return 7;     // fifth above
+      return null;
+    },
+    bassDurBeats: 1,
+    // i - VI - VII - i (Aeolian standard)
+    chords: [[0, 'min'], [5, 'maj'], [6, 'maj'], [0, 'min']],
+    chordsBars: [2, 1, 1, 2],
+  },
+
+  doomed: {
+    id: 'doomed',
+    drum: (sub, beat) => {
+      const beatInBar = beat % 4;
+      const subInBeat = sub % 4;
+      const out = [];
+      // Just kick + hat. No snare. The "tunnel".
+      if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.45 });
+      if (subInBeat === 0 && (beatInBar === 0 || beatInBar === 2)) out.push({ note: 36, g: 0.9 });
+      return out.length ? out : null;
+    },
+    bass: (beat) => 0, // pedal on root, every beat
+    bassDurBeats: 1,
+    chords: [[0, 'min'], [1, 'min']], // i then b2 minor (Phrygian sting)
+    chordsBars: [2, 2],
+  },
+
+  roundEndVictory: {
+    id: 'roundEndVictory',
+    drum: (sub, beat) => {
+      const subInBeat = sub % 4;
+      if (beat === 0 && subInBeat === 0) return [{ note: 49, g: 1.0 }, { note: 36, g: 1.0 }];
+      if (beat === 1 && subInBeat === 0) return [{ note: 38, g: 0.7 }];
+      if (beat === 1 && subInBeat === 2) return [{ note: 38, g: 0.5 }];
+      if (beat === 2 && subInBeat === 0) return [{ note: 38, g: 0.4 }];
+      return null;
+    },
+    bass: (beat) => beat === 0 ? 0 : null,
+    bassDurBeats: 4,
+    chords: [[0, 'maj']],  // Picardy lift
+    chordsBars: [2],
+  },
+
+  roundEndDefeat: {
+    id: 'roundEndDefeat',
+    drum: (sub, beat) => {
+      const subInBeat = sub % 4;
+      if (beat === 0 && subInBeat === 0) return [{ note: 36, g: 0.7 }];
+      return null;
+    },
+    bass: (beat) => beat === 0 ? 0 : null,
+    bassDurBeats: 4,
+    chords: [[0, 'min'], [3, 'min'], [0, 'min']],
+    chordsBars: [1, 1, 2],
+  },
+
+  matchEndVictory: {
+    id: 'matchEndVictory',
+    drum: () => null,
+    bass: (beat) => (beat % 8 === 0) ? 0 : null,
+    bassDurBeats: 8,
+    chords: [[0, 'maj'], [4, 'maj'], [0, 'maj']],
+    chordsBars: [2, 2, 4],
+  },
+
+  matchEndDefeat: {
+    id: 'matchEndDefeat',
+    drum: () => null,
+    bass: (beat) => (beat % 4 === 0) ? 0 : null,
+    bassDurBeats: 4,
+    chords: [[0, 'min'], [6, 'maj'], [5, 'maj'], [4, 'maj']],
+    chordsBars: [2, 2, 2, 2],
+  },
+};
+
+// === RUNTIME HOOKS (called from existing game functions) ===
+
+// Pattern dispatcher driven by game.state. Called from updateAmbientBed-adjacent
+// tick or directly from state-change sites. We expose it so the round system
+// can flip patterns on transition.
+function musicSyncToGameState() {
+  if (!music.enabled) return;
+  if (typeof game === 'undefined') return;
+  const s = game.state;
+  // 'select' is the ship-select / lobby screen ; treat as lobby music.
+  if (s === 'select' || s === 'lobby' || s === 'menu' || s === 'connecting') {
+    if (music.musicMuteLobby) { musicSetPattern('silent'); return; }
+    musicSetPattern('lobby', { bpmTarget: 78, intensity: 1 });
+    return;
+  }
+  if (s === 'warmup') { musicSetPattern('warmup', { bpmTarget: 92, intensity: 1 }); return; }
+  if (s === 'playing') {
+    musicSetPattern('combat', { bpmTarget: 100, intensity: 1 });
+    return;
+  }
+  // roundEnd / matchEnd handled by direct calls from the round system since
+  // they need victor info.
+}
+
+// Per-frame updater called from updateAmbientBed (already runs every frame).
+// Handles BPM ramp during 'playing' and end-of-round timer-tied phrases.
+function musicTickFromMain(dt) {
+  if (!music.enabled) return;
+  if (typeof game === 'undefined') return;
+  if (game.state === 'playing' && typeof game.roundTimer === 'number') {
+    const total = (typeof LSS !== 'undefined' && LSS.ROUND_TIME) ? LSS.ROUND_TIME : 180;
+    const elapsed = Math.max(0, total - game.roundTimer);
+    const f = Math.max(0, Math.min(1, elapsed / total));
+    const bpm = 96 + f * 32; // 96 -> 128 across the round
+    musicSetBpmTarget(bpm);
+    // Intensity ramp.
+    if (game.roundTimer < 10) musicSetIntensity(3);
+    else if (game.roundTimer < 30) musicSetIntensity(2);
+    else musicSetIntensity(1);
+  }
+  // Doomed mode tracking off the local player's flag (so the music engine
+  // doesn't need its own listener for state changes).
+  if (typeof player !== 'undefined' && player) {
+    const isDoomed = !!player.doomed && player.shipState !== 'dead';
+    if (isDoomed && !music.doomedMode) musicEnterMode('doomed');
+    else if (!isDoomed && music.doomedMode) musicExitMode('doomed');
+    // Stasis suspend.
+    const inStasis = !!(typeof game !== 'undefined' && game.playerInStasis);
+    if (inStasis !== music.drumsSuspended) musicSuspendDrums(inStasis);
+  }
+}
+
+// Expose to console + window for diagnostics.
+try {
+  window.music = music;
+  window.musicSetEnabled = musicSetEnabled;
+  window.musicSetVolume = musicSetVolume;
+  window.musicSetPattern = musicSetPattern;
+  window.musicSetBpmTarget = musicSetBpmTarget;
+  window.musicSetIntensity = musicSetIntensity;
+  window.musicSetCeiling = musicSetCeiling;
+  window.musicSetMode = musicSetMode;
+  window.musicEnterMode = musicEnterMode;
+  window.musicExitMode = musicExitMode;
+  window.musicSuspendDrums = musicSuspendDrums;
+  window.musicOnKill = musicOnKill;
+  window.musicPlayRoundEndPhrase = musicPlayRoundEndPhrase;
+  window.musicSyncToGameState = musicSyncToGameState;
+  window.musicStart = musicStart;
+  window.musicStop = musicStop;
+} catch (_) {}
+
 // ---- HOOK AUDIO INTO EXISTING FUNCTIONS ----
 // Override key functions to add sound triggers
 
@@ -30968,6 +31900,17 @@ respawnPlayer = function() {
 
 initAudio();
 loadSettings();
+// (v8_1VR) Push loaded music settings onto the live engine.
+try {
+  if (typeof music !== 'undefined' && audio) {
+    music.musicMuteLobby = !!audio.musicMuteLobby;
+    if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling || 'normal');
+    if (typeof musicSetEnabled === 'function') musicSetEnabled(audio.musicEnabled !== false);
+    if (audio.musicGain && audio.userVol && typeof audio.userVol.music === 'number') {
+      audio.musicGain.gain.value = 0.55 * audio.userVol.music;
+    }
+  }
+} catch (_) {}
 // (post-v6.9 patch, 2026-04-28) Restore previously-loaded custom maps from
 // localStorage and wire the loader button. Must run before buildShipSelect
 // so custom maps appear in the carousel on first open.
@@ -30995,6 +31938,24 @@ _setupCustomMapLoader();
 // Hook audio init on first user interaction
 document.addEventListener('click', initAudio, { once: false });
 document.addEventListener('keydown', initAudio, { once: false });
+
+// (v8_1VR) Resume the suspended AudioContext on first user gesture so the
+// reactive band can actually be heard without waiting for a sound effect to
+// play first. initAudio itself is idempotent ; this is just the resume.
+(function() {
+  const fireResume = function() {
+    try { if (typeof initAudio === 'function') initAudio(); } catch (_) {}
+    try { if (audio && audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume(); } catch (_) {}
+    try {
+      if (typeof musicSyncToGameState === 'function') musicSyncToGameState();
+      if (typeof musicStart === 'function') musicStart();
+    } catch (_) {}
+    document.removeEventListener('click',   fireResume, true);
+    document.removeEventListener('keydown', fireResume, true);
+  };
+  document.addEventListener('click',   fireResume, true);
+  document.addEventListener('keydown', fireResume, true);
+})();
 
 // v8VR: one-shot ship-AI boot intro. SpeechSynthesis is gated by browsers
 // until a user gesture, so we trigger on the first click / keydown of the

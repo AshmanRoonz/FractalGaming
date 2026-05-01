@@ -4,6 +4,20 @@ Goal: a procedural in-game band that scores the match in real time. Drums set th
 
 This file is the design doc; the code lives in `last_ship_sailing_v8_1VR.html` once we fork.
 
+## 0. First principles (read this before touching code)
+
+Order of priority, top-down. Earlier rules outrank later ones; if a fancy reactive feature would compromise rule 1, drop the feature.
+
+1. **A steady beat is the most important part.** The kick + hat must be rock-solid before anything else gets layered. If the scheduler ever skips, drops, or jitters a beat, the whole illusion dies. Step 1 of the build order is a clock that ticks reliably under combat load. We test the metronome alone for as long as it takes to trust it.
+
+2. **Rhythms are built on beats.** Snare, bass-line variation, lead phrases, all of them are scheduled relative to the beat counter, never to wall-clock time. A pattern is a list of `(beatOffset, voice, note)` tuples. The scheduler reads them; nothing is fired with `setTimeout` from gameplay code. This means kills, doomed-state entry, etc. can *queue* a phrase but the phrase only plays on the next beat (or the next musically-correct subdivision).
+
+3. **Chords have to fit together.** Voice leading: pad chord changes move the smallest distance possible. A chord progression is a list of `(degree, quality, bars)` tuples and the pad picks the closest voicing to the previous chord. Bass roots align to the pad. Lead is constrained to chord-tones on strong beats and scale-tones on weak beats. No accidentals unless we explicitly want a sting.
+
+4. **Chords are tuned to important frequencies in the game.** This is the LSS-specific piece. The game already emits sounds at characteristic frequencies (the cluster hum, the engine drone, the impact transient pitch, etc). Pick the match key so the pad's tonic sits inside the same harmonic series as the loudest sustained game sound. First pass: pick A as the default (440 Hz family) because the existing ambient drone is already in that neighborhood; verify by scoping `audio.ambientGain` output spectrum once we instrument it. Phrygian mode (b2) gives the unease that fits the cluster sound. If a sound effect has a strong tonal center (e.g. the warning tone before a doomed-state pop), we tune the pad's chord at that moment to share the root or fifth so the warning tone *is* part of the music, not on top of it.
+
+This is the LSS aesthetic: music isn't a backdrop, it's the resonance of the arena. Beat is the heartbeat, chords are the room's standing wave, lead is the player's voice.
+
 ## 1. Why Tier 3 (and not Tier 2)
 
 Tier 2 would just give us "a drum loop during fights". Tier 3 is the version where the music *follows the round*: tempo creeps up as the timer drains, lead trills on a kill, pad slumps to minor when you're doomed, drums cut out inside a stasis field. The player feels the round through the soundtrack. This is what the dancing cosmos band already knows how to do for an external mic input; we just feed it gameplay events instead of audio.
@@ -257,18 +271,20 @@ Hooks the game already has (where we'll insert one-line calls):
 
 ## 13. Build order
 
-When we start coding in v8_1VR:
-1. Lift the four synth functions, route to `audio.musicGain`. Test with manual `_synthDrum(36, 1, audio.ctx.currentTime, audio.musicGain)` from console.
-2. Build the scheduler skeleton. Verify a kick-snare-hat loop at 100 BPM in lobby.
-3. Add bass + pad. Verify Aeolian pad chords sound right.
-4. Wire `setPattern('combat')` and connect to round start. Test round-start → round-end transitions.
-5. Wire BPM ramp to round timer. Test that the music speeds up.
-6. Wire `onKill` lead phrases. Test pentatonic runs.
-7. Wire doomed mode. Test entering / exiting low health.
-8. Wire stasis suspend. Test field interaction.
-9. Wire roundEnd / matchEnd victory + defeat phrases.
-10. Add settings UI bindings, persistence.
-11. Final mix pass: balance music vs sfx vs ambient. Probably sit music at -8 dB under sfx.
+Aligned with the first principles in section 0: beat → rhythm → chords → chords tuned to game.
+
+1. **The beat alone.** Lift `_synthDrum`, route to `audio.musicGain`. Build the scheduler skeleton. Schedule a kick on every beat at 100 BPM, nothing else. Run it in lobby for 60 seconds while the game is at idle and again during a hot combat scene. Verify zero jitter, zero drops. Don't move on until this is boring.
+2. **Rhythm on the beat.** Add hat (16ths) and snare (2 + 4). Verify the rhythm survives heavy combat audio. This is still just drums.
+3. **Chord changes that fit.** Add `_synthBass` and `_synthPad`. Implement voice-leading rule (pad picks closest voicing to previous chord). Hard-code an i-VI-VII-i loop in A minor. Listen for clicks, pumping, mud.
+4. **Chords tuned to the game.** Instrument `audio.ambientGain`'s spectrum: capture the dominant peaks from the cluster hum, engine drone, doomed warning tone. Pick the match key so the pad's tonic + fifth sit on those peaks. Verify the music feels like it's emerging from the arena instead of layered over it.
+5. Wire `setPattern('combat')` to round start. Test round-start to round-end transitions.
+6. Wire BPM ramp to round timer. Test that the music speeds up.
+7. Add `_synthLead` and the `onKill` pentatonic phrases. Quantize to next 8th note (rule 2). Test multikill arpeggios.
+8. Wire doomed mode (Phrygian drone). Test entering / exiting low health.
+9. Wire stasis suspend (drums fade out). Test field interaction.
+10. Wire roundEnd / matchEnd victory + defeat phrases.
+11. Add settings UI bindings, persistence.
+12. Final mix pass: balance music vs sfx vs ambient. Music sits at roughly -8 dB under sfx so kills still pop above the band.
 
 ## 14. Open questions for later
 
