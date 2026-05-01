@@ -27337,14 +27337,21 @@ function generateImpulseResponse(ctx, duration, decay, preDelay) {
 function initAudio() {
   if (audio.initialized) return;
   try {
-    // (v8VR 2026-05-01) latencyHint 'playback' gives the audio thread a
-    // bigger buffer (~50-100ms instead of ~10-20ms) so heavy combat with
-    // many simultaneous oscillators / noise bursts doesn't underrun and
-    // cause audible dropouts. Trade-off is a small added latency between
-    // event and sound, imperceptible for game SFX.
+    // (v8_1VR) Numeric latencyHint of 0.20 sec asks the browser for a much
+    // bigger audio thread buffer than the 'playback' enum (which is
+    // ~50-100ms). On desktops with USB DACs / discrete sound cards / weird
+    // driver paths, the default buffer can starve under heavy combat load
+    // (lots of simultaneous oscillator + filter + convolver nodes), causing
+    // 0.5-1s audible dropouts. 200ms gives the audio thread far more
+    // headroom at the cost of slightly more event-to-sound delay (still
+    // imperceptible for game SFX). Falls back to 'playback' string then to
+    // default if the browser doesn't accept the numeric form.
     const _AC = (window.AudioContext || window.webkitAudioContext);
-    try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
-    catch (_) { audio.ctx = new _AC(); }
+    try { audio.ctx = new _AC({ latencyHint: 0.20 }); }
+    catch (_) {
+      try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
+      catch (__) { audio.ctx = new _AC(); }
+    }
 
     // High-frequency rolloff: gentle lowpass to tame harsh highs across all sounds
     audio.hiCut = audio.ctx.createBiquadFilter();
@@ -30135,16 +30142,22 @@ const _lastSoundTime = {};
 // can underrun and cause audible dropouts. Track active voices by
 // counting recent playSound dispatches in a sliding window; skip the
 // cheapest sounds when over budget.
-const _AUDIO_VOICE_BUDGET = 24;          // max sounds per ~0.6s window
+// (v8_1VR) Tightened from 24 → 16 because desktops with bigger audio paths
+// were still underrunning at the higher cap. Soft-skip kicks in earlier so
+// the comp + audio thread have headroom on hot fights.
+const _AUDIO_VOICE_BUDGET = 16;          // max sounds per ~0.6s window
 const _AUDIO_VOICE_WINDOW = 0.6;         // seconds
 const _audioRecentVoices = [];           // ctx-time stamps of recent plays
 // Sounds that are OK to skip when over budget (cosmetic, replaceable).
 // Critical sounds (death, round_start, ability) always pass through.
+// (v8_1VR) Added more on-hit / fire-loop SFX to the skip list ; under heavy
+// fire these are the ones piling onto the audio thread.
 const _AUDIO_SKIPPABLE = {
   fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
   fire_railgun: 1, fire_salvo: 1,
   hit: 1, damage: 1, damage_shield: 1,
   fire_burn: 1, shield_hum: 1, fire_shield_hum: 1,
+  shield_hit: 1, ricochet: 1, impact: 1,
 };
 
 function playSound(type) {
