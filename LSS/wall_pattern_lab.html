@@ -199,6 +199,8 @@
 
     <h2>Display</h2>
     <div class="row"><label>Tint color</label><input type="color" id="color-b" value="#88ccff"><span class="hint" style="flex:1;">zone color seed for patterns</span></div>
+    <div class="row"><label>Wall opacity</label><input type="range" id="uOpacity" min="0" max="1" step="0.02" value="1.0"><span class="val" id="uOpacity-val">1.00</span></div>
+    <div class="hint" style="margin-top:2px;">Multiplies final wall alpha. 1.0 = solid (default), 0.0 = invisible. Drop to ~0.5 to see through walls while inspecting interior pattern math.</div>
 
     <h2>Controls</h2>
     <div class="toolbar">
@@ -231,6 +233,14 @@
       <span id="game-html-status" class="hint" style="align-self:center; flex:1;">No game file open.</span>
     </div>
     <div id="game-config-section" style="display:none; margin-top:6px;">
+      <div class="row" style="margin-bottom:6px;">
+        <label>Preset</label>
+        <select id="game-preset-select" style="flex:1;"><option value="">(open game HTML first)</option></select>
+        <button id="game-preset-load" style="margin-left:6px;">Load</button>
+      </div>
+      <div class="hint" style="margin-bottom:6px; line-height:1.5;">
+        Pick a pattern from WALL_PATTERN_NAMES and click Load to preview it in the lab. <strong>Lab Composite</strong> (index 20) loads the multi-layer bg/fg/fg2 setup from the game's wall material. Single-pattern presets (0-19) load into the lab's BG layer with FG1/FG2 disabled.
+      </div>
       <textarea id="game-config-io" style="width:100%; min-height:180px; background:#08080f; color:#ddd; border:1px solid #2a2a3a; padding:6px; font-family:'Courier New', monospace; font-size:11px;" placeholder="DEFAULT_WALL_CONFIG JSON appears here on Open."></textarea>
       <div class="toolbar" style="margin-top:6px; gap:6px; flex-wrap:wrap;">
         <button id="game-save-btn">Save to game HTML</button>
@@ -244,6 +254,17 @@
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<!-- (v8VR sync, 2026-04-30) UnrealBloomPass + EffectComposer matched to
+     the game's Showcase / cineFX pipeline. Without these, wall tuning in
+     the lab reads at raw shader output (dark moody) while the game runs
+     it through bloom (bright bloomed). Adding them here so the lab
+     preview reflects what the player will actually see. -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
 <script>
 const viewport = document.getElementById('viewport');
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -331,6 +352,11 @@ const wallFS = `
   uniform float u_hueSpin_bg, u_hueSpin_fg, u_hueSpin_fg2;
   uniform float u_satBase_bg, u_satBase_fg, u_satBase_fg2;
   uniform float K_COSMIC_bg,  K_COSMIC_fg,  K_COSMIC_fg2;
+  // (v8VR 2026-04-30) Wall transparency. 1.0 = fully opaque, 0.0 = invisible.
+  // Multiplies the final fragment alpha so the wall fades uniformly without
+  // changing pattern math. Material below has transparent: true so this
+  // alpha actually composites against the scene.
+  uniform float uOpacity;
   uniform vec3 tintColor;
   uniform vec3 roomCenters[2];
   uniform float roomRadii[2];
@@ -789,14 +815,20 @@ const wallFS = `
     // Soft tone-map so any pattern outputting big values doesn't blow out.
     final = final / (1.0 + final * 0.35);
     final *= 1.35;
-    gl_FragColor = vec4(final, 1.0);
+    gl_FragColor = vec4(final, uOpacity);
   }
 `;
 const wallMat = new THREE.ShaderMaterial({
   vertexShader: wallVS,
   fragmentShader: wallFS,
   side: THREE.BackSide,
+  // (v8VR 2026-04-30) transparent: true so the new uOpacity uniform
+  // actually composites against the scene. depthWrite stays true so the
+  // wall still occludes geometry behind it (transparency without z-fight).
+  transparent: true,
+  depthWrite: true,
   uniforms: {
+    uOpacity:      { value: 1.0 },
     patternId:     { value: 6 },
     fgPatternId:   { value: -1 },
     fgAlpha:       { value: 1.0 },
@@ -864,6 +896,9 @@ function bindSlider(id, valId, target, fixedDigits) {
   slider.addEventListener('input', refresh);
   refresh();
 }
+// (v8VR 2026-04-30) Wall transparency / opacity slider.
+bindSlider('uOpacity', 'uOpacity-val', v => wallMat.uniforms.uOpacity.value = v, 2);
+
 // Per-layer pattern controls. Three sets: bg / fg / fg2.
 ['bg', 'fg', 'fg2'].forEach(L => {
   bindSlider(`u_iters_${L}`,   `u_iters_${L}-val`,   v => wallMat.uniforms[`u_iters_${L}`].value   = v|0, 0);
@@ -1070,7 +1105,197 @@ function _parseDefaultWallConfig() {
   gameSync.blockEnd   = obj.end;
   document.getElementById('game-config-io').value = JSON.stringify(parsed, null, 2);
   document.getElementById('game-config-section').style.display = 'block';
+
+  // (v8VR 2026-04-30) Also parse WALL_PATTERN_NAMES + the wall material's
+  // initial uniforms so the lab can offer a Preset dropdown that loads
+  // game presets into the lab preview.
+  _parseGamePatternNames();
+  _parseGameWallUniforms();
+  _refreshPresetDropdown();
+
   return true;
+}
+
+// Parse the game's WALL_PATTERN_NAMES array into gameSync.patternNames.
+function _parseGamePatternNames() {
+  gameSync.patternNames = [];
+  if (!gameSync.htmlText) return;
+  const start = gameSync.htmlText.indexOf('const WALL_PATTERN_NAMES');
+  if (start < 0) return;
+  // Find the opening [ of the array.
+  const lb = gameSync.htmlText.indexOf('[', start);
+  if (lb < 0) return;
+  // Brace-balanced (well, bracket-balanced) extraction; reuses the same
+  // string-skipping logic as _extractObjectLiteral but for [].
+  let depth = 0, inStr = null, escape = false;
+  let rb = -1;
+  for (let k = lb; k < gameSync.htmlText.length; k++) {
+    const c = gameSync.htmlText[k];
+    if (escape) { escape = false; continue; }
+    if (inStr) {
+      if (c === '\\') { escape = true; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) { rb = k; break; } }
+  }
+  if (rb < 0) return;
+  try {
+    const arr = (new Function('return (' + gameSync.htmlText.slice(lb, rb + 1) + ')'))();
+    if (Array.isArray(arr)) gameSync.patternNames = arr;
+  } catch (e) { console.warn('[wallsync] WALL_PATTERN_NAMES parse failed:', e); }
+}
+
+// Parse the wall material's `uniforms: { ... }` block by finding the
+// first occurrence after the `const sdfMat = new THREE.ShaderMaterial({`
+// site so we don't accidentally pick up another material's uniforms.
+function _parseGameWallUniforms() {
+  gameSync.wallUniforms = {};
+  if (!gameSync.htmlText) return;
+  // Anchor the search to the wall material declaration. Looking for
+  // `K_COSMIC_bg:` + ` { value:` is a high-confidence heuristic.
+  const anchor = gameSync.htmlText.indexOf('K_COSMIC_bg:');
+  if (anchor < 0) return;
+  // Walk backward to find the start of this uniforms object's `{`.
+  // Walk forward to find the matching `}`.
+  let i = anchor;
+  let depth = 0;
+  // Find the enclosing `{` by walking back.
+  while (i > 0 && depth >= 0) {
+    const c = gameSync.htmlText[i];
+    if (c === '}') depth++;
+    if (c === '{') { depth--; if (depth < 0) break; }
+    i--;
+  }
+  if (i <= 0) return;
+  const obj = _extractObjectLiteral(gameSync.htmlText, i);
+  if (!obj) return;
+  try {
+    const u = (new Function('return (' + obj.text + ')'))();
+    // The shader-material literal references THREE.* values (Color, Vector3, etc.)
+    // for some uniforms — those will throw when evaluated outside the game.
+    // Try a softer parse: just grab the simple `key: { value: number }` shapes.
+    if (u && typeof u === 'object') gameSync.wallUniforms = u;
+  } catch (e) {
+    // Fallback: regex-extract only `key: { value: <number> }` lines.
+    const out = {};
+    const re = /\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\{\s*value:\s*(-?\d+(?:\.\d+)?(?:e-?\d+)?)\s*\}/g;
+    let m;
+    while ((m = re.exec(obj.text)) !== null) {
+      out[m[1]] = { value: parseFloat(m[2]) };
+    }
+    gameSync.wallUniforms = out;
+  }
+}
+
+function _refreshPresetDropdown() {
+  const sel = document.getElementById('game-preset-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!gameSync.patternNames || gameSync.patternNames.length === 0) {
+    sel.innerHTML = '<option value="">(no WALL_PATTERN_NAMES found)</option>';
+    return;
+  }
+  for (let i = 0; i < gameSync.patternNames.length; i++) {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = i + ': ' + gameSync.patternNames[i];
+    sel.appendChild(opt);
+  }
+  // Default-select Lab Composite if it exists (typically index 20).
+  const labCompIdx = gameSync.patternNames.findIndex(n => /Lab Composite/i.test(n));
+  if (labCompIdx >= 0) sel.value = String(labCompIdx);
+}
+
+// Apply the selected game preset to the lab's wallMat. For pattern 20
+// (Lab Composite), use the parsed bg/fg/fg2 multi-layer values. For
+// any other pattern, set BG to that pattern, disable FG1 and FG2 so
+// the preview shows the single pattern only.
+function _applyGamePresetToLab(presetIndex) {
+  const u = wallMat.uniforms;
+  const gu = gameSync.wallUniforms || {};
+  // Helper: read a parsed game uniform value, or fall back to the lab's
+  // current value if the game side didn't define / didn't parse it.
+  const G = (name, fallback) => {
+    if (gu[name] && typeof gu[name].value === 'number') return gu[name].value;
+    return fallback;
+  };
+  const isLabComp = /Lab Composite/i.test(gameSync.patternNames[presetIndex] || '');
+  if (isLabComp) {
+    // Multi-layer: pull bg/fg/fg2 settings from game's wall material.
+    u.patternId.value    = G('bgPatternId',  u.patternId.value)|0;
+    u.fgPatternId.value  = G('fgPatternId',  -1)|0;
+    u.fg2PatternId.value = G('fg2PatternId', -1)|0;
+    u.fgAlpha.value      = G('fgAlpha',      u.fgAlpha.value);
+    u.fg2Alpha.value     = G('fg2Alpha',     u.fg2Alpha ? u.fg2Alpha.value : 0.75);
+    u.fgBlend.value      = G('fgBlend',      u.fgBlend.value)|0;
+    u.fg2Blend.value     = G('fg2Blend',     u.fg2Blend ? u.fg2Blend.value : 1)|0;
+    u.fgHue.value        = G('fgHue',        u.fgHue.value);
+    u.fg2Hue.value       = G('fg2Hue',       u.fg2Hue ? u.fg2Hue.value : 0);
+    u.fgTime.value       = G('fgTime',       u.fgTime.value);
+    u.fg2Time.value      = G('fg2Time',      u.fg2Time ? u.fg2Time.value : 1);
+    u.bgTime.value       = G('bgTime',       u.bgTime.value);
+    for (const L of ['bg', 'fg', 'fg2']) {
+      const k = (n) => 'u_' + n + '_' + L;
+      u[k('iters')].value   = G(k('iters'),   u[k('iters')].value)|0;
+      u[k('scale')].value   = G(k('scale'),   u[k('scale')].value);
+      u[k('invBase')].value = G(k('invBase'), u[k('invBase')].value);
+      u[k('hueSpin')].value = G(k('hueSpin'), u[k('hueSpin')].value);
+      u[k('satBase')].value = G(k('satBase'), u[k('satBase')].value);
+      u['K_COSMIC_' + L].value = G('K_COSMIC_' + L, u['K_COSMIC_' + L].value);
+    }
+  } else {
+    // Single-pattern: set BG to this pattern, disable FG1 + FG2.
+    u.patternId.value    = presetIndex|0;
+    u.fgPatternId.value  = -1;
+    u.fg2PatternId.value = -1;
+  }
+  // Push every uniform value back to the corresponding HTML control so
+  // the sidebar sliders / dropdowns reflect the loaded preset.
+  _syncSlidersFromUniforms();
+}
+
+// After we mutate uniforms programmatically, push the values into the
+// HTML sliders / selects so the UI matches and saveToLocalStorage will
+// persist them. Reads from wallMat.uniforms; writes to slider values
+// AND fires the input/change event so the existing bindSlider handlers
+// update their valSpans.
+function _syncSlidersFromUniforms() {
+  const u = wallMat.uniforms;
+  const setSlider = (id, val) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = String(val);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const setSelect = (id, val) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = String(val);
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+  setSelect('pattern',    u.patternId.value);
+  setSelect('fgPattern',  u.fgPatternId.value);
+  setSelect('fg2Pattern', u.fg2PatternId.value);
+  setSelect('fgBlend',    u.fgBlend.value);
+  setSelect('fg2Blend',   u.fg2Blend.value);
+  setSlider('fgAlpha',    u.fgAlpha.value);
+  setSlider('fg2Alpha',   u.fg2Alpha ? u.fg2Alpha.value : 0.75);
+  setSlider('fgHue',      u.fgHue.value);
+  setSlider('fg2Hue',     u.fg2Hue ? u.fg2Hue.value : 0);
+  setSlider('fgTime',     u.fgTime.value);
+  setSlider('fg2Time',    u.fg2Time ? u.fg2Time.value : 1);
+  setSlider('bgTime',     u.bgTime.value);
+  for (const L of ['bg', 'fg', 'fg2']) {
+    setSlider('u_iters_'   + L, u['u_iters_' + L].value);
+    setSlider('u_scale_'   + L, u['u_scale_' + L].value);
+    setSlider('u_invBase_' + L, u['u_invBase_' + L].value);
+    setSlider('u_hueSpin_' + L, u['u_hueSpin_' + L].value);
+    setSlider('u_satBase_' + L, u['u_satBase_' + L].value);
+    setSlider('K_COSMIC_'  + L, u['K_COSMIC_' + L].value);
+  }
 }
 
 async function _gameOpen() {
@@ -1144,22 +1369,119 @@ async function _gameWriteOut() {
 
 document.getElementById('game-open-btn').addEventListener('click', _gameOpen);
 
+document.getElementById('game-preset-load').addEventListener('click', () => {
+  const sel = document.getElementById('game-preset-select');
+  if (!sel || !sel.value) { alert('Open the game HTML first.'); return; }
+  const idx = parseInt(sel.value, 10);
+  if (!isFinite(idx)) return;
+  _applyGamePresetToLab(idx);
+});
+
+// (v8VR 2026-04-30) Lab → game per-layer uniform sync. The wall material's
+// inline `uniforms: { ... }` declaration in the game HTML hardcodes initial
+// values for every per-layer Lab Composite parameter (K_COSMIC_bg/_fg/_fg2,
+// u_iters_*, u_scale_*, u_invBase_*, u_hueSpin_*, u_satBase_*, blend modes,
+// pattern ids, etc.). Without rewriting those, anything tuned in the lab
+// has no effect in-game even after Save to game HTML (which only rewrote
+// the DEFAULT_WALL_CONFIG seed). This table maps each lab uniform to its
+// game-side counterpart and how to format the value into the JS literal.
+const _LAB_TO_GAME_UNIFORMS = [
+  // Background pattern (lab "patternId" -> game "bgPatternId").
+  { labUni: 'patternId',     gameUni: 'bgPatternId',  kind: 'int' },
+  { labUni: 'bgTime',        gameUni: 'bgTime',       kind: 'float' },
+  { labUni: 'u_iters_bg',    gameUni: 'u_iters_bg',   kind: 'int' },
+  { labUni: 'u_scale_bg',    gameUni: 'u_scale_bg',   kind: 'float' },
+  { labUni: 'u_invBase_bg',  gameUni: 'u_invBase_bg', kind: 'float' },
+  { labUni: 'u_hueSpin_bg',  gameUni: 'u_hueSpin_bg', kind: 'float' },
+  { labUni: 'u_satBase_bg',  gameUni: 'u_satBase_bg', kind: 'float' },
+  { labUni: 'K_COSMIC_bg',   gameUni: 'K_COSMIC_bg',  kind: 'float' },
+  // Foreground 1
+  { labUni: 'fgPatternId',   gameUni: 'fgPatternId',  kind: 'int' },
+  { labUni: 'fgAlpha',       gameUni: 'fgAlpha',      kind: 'float' },
+  { labUni: 'fgBlend',       gameUni: 'fgBlend',      kind: 'int' },
+  { labUni: 'fgHue',         gameUni: 'fgHue',        kind: 'float' },
+  { labUni: 'fgTime',        gameUni: 'fgTime',       kind: 'float' },
+  { labUni: 'u_iters_fg',    gameUni: 'u_iters_fg',   kind: 'int' },
+  { labUni: 'u_scale_fg',    gameUni: 'u_scale_fg',   kind: 'float' },
+  { labUni: 'u_invBase_fg',  gameUni: 'u_invBase_fg', kind: 'float' },
+  { labUni: 'u_hueSpin_fg',  gameUni: 'u_hueSpin_fg', kind: 'float' },
+  { labUni: 'u_satBase_fg',  gameUni: 'u_satBase_fg', kind: 'float' },
+  { labUni: 'K_COSMIC_fg',   gameUni: 'K_COSMIC_fg',  kind: 'float' },
+  // Foreground 2
+  { labUni: 'fg2PatternId',  gameUni: 'fg2PatternId', kind: 'int' },
+  { labUni: 'fg2Alpha',      gameUni: 'fg2Alpha',     kind: 'float' },
+  { labUni: 'fg2Blend',      gameUni: 'fg2Blend',     kind: 'int' },
+  { labUni: 'fg2Hue',        gameUni: 'fg2Hue',       kind: 'float' },
+  { labUni: 'fg2Time',       gameUni: 'fg2Time',      kind: 'float' },
+  { labUni: 'u_iters_fg2',   gameUni: 'u_iters_fg2',  kind: 'int' },
+  { labUni: 'u_scale_fg2',   gameUni: 'u_scale_fg2',  kind: 'float' },
+  { labUni: 'u_invBase_fg2', gameUni: 'u_invBase_fg2',kind: 'float' },
+  { labUni: 'u_hueSpin_fg2', gameUni: 'u_hueSpin_fg2',kind: 'float' },
+  { labUni: 'u_satBase_fg2', gameUni: 'u_satBase_fg2',kind: 'float' },
+  { labUni: 'K_COSMIC_fg2',  gameUni: 'K_COSMIC_fg2', kind: 'float' },
+];
+
+function _formatUniformValue(v, kind) {
+  if (kind === 'int') return ((v|0)).toString();
+  // Float: trim trailing zeros so the inline literal stays clean.
+  // 4-digit precision is more than enough for shader uniforms.
+  if (typeof v !== 'number' || !isFinite(v)) return '0';
+  let s = v.toFixed(4);
+  if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+  return s;
+}
+
+// Walks _LAB_TO_GAME_UNIFORMS and rewrites each `gameUni: { value: X }`
+// occurrence in the game HTML with the lab's current live value. Only
+// targets the JS literal (the regex requires `: { value:` after the
+// identifier), so shader source uses of the same identifier are safe.
+function _writeLabUniformsToGameHtml() {
+  if (!gameSync.htmlText) return { modified: 0, missing: [] };
+  let modified = 0;
+  const missing = [];
+  for (const m of _LAB_TO_GAME_UNIFORMS) {
+    const u = wallMat.uniforms[m.labUni];
+    if (!u) { missing.push(m.labUni + ' (no lab uniform)'); continue; }
+    const formatted = _formatUniformValue(u.value, m.kind);
+    // Match: `gameUni:    { value: 4.75 }` with arbitrary inner whitespace.
+    // [^}]+? is lazy so we don't run past the closing brace.
+    const re = new RegExp('(\\b' + m.gameUni + '\\b\\s*:\\s*\\{\\s*value:\\s*)([^}]+?)(\\s*\\})', 'g');
+    let count = 0;
+    gameSync.htmlText = gameSync.htmlText.replace(re, (_, pre, oldVal, post) => {
+      count++;
+      return pre + formatted + post;
+    });
+    if (count === 0) missing.push(m.gameUni);
+  }
+  return { modified, missing };
+}
+
 document.getElementById('game-save-btn').addEventListener('click', async () => {
   if (!gameSync.htmlText || gameSync.blockStart < 0) {
     alert('Open the game HTML first.');
     return;
   }
+  // 1) Rewrite the DEFAULT_WALL_CONFIG block from the textarea (existing).
   const txt = document.getElementById('game-config-io').value.trim();
   let cfg;
   try { cfg = JSON.parse(txt); }
   catch (e) { alert('JSON parse failed: ' + e.message); return; }
-  // Pretty-print with 2-space indent so the inline literal stays readable.
   const newLiteral = JSON.stringify(cfg, null, 2);
   gameSync.htmlText = gameSync.htmlText.slice(0, gameSync.blockStart) +
                       newLiteral +
                       gameSync.htmlText.slice(gameSync.blockEnd);
-  // Re-locate the (possibly shifted) block end for next save.
   gameSync.blockEnd = gameSync.blockStart + newLiteral.length;
+
+  // 2) Rewrite the wall material's per-layer uniform initial values to
+  // match what the lab is showing right now. This is what makes the
+  // game's Lab Composite path actually pick up your lab tuning.
+  const uniRes = _writeLabUniformsToGameHtml();
+  let extra = '';
+  if (uniRes && uniRes.missing && uniRes.missing.length) {
+    extra = ' (skipped: ' + uniRes.missing.join(', ') + ')';
+  }
+  console.log('[wallsync] DEFAULT_WALL_CONFIG rewritten + per-layer uniforms updated' + extra);
+
   await _gameWriteOut();
 });
 
@@ -1185,6 +1507,44 @@ document.body.addEventListener('change', debouncedSave);
 loadFromLocalStorage();
 
 // ============================================================
+// (v8VR sync, 2026-04-30) Post-processing chain that mirrors the game's
+// Showcase / cineFX bloom defaults. Without bloom in the lab, walls with
+// K_COSMIC_BRIGHTNESS = 4.2 read at raw shader output; the game then
+// runs them through UnrealBloomPass and the result looks brighter and
+// blooms wherever values exceed 1.0. Keeping the lab in sync means
+// what you tune is what you'll see in-game.
+// ============================================================
+const _composer = new THREE.EffectComposer(renderer);
+const _renderPass = new THREE.RenderPass(scene, camera);
+_composer.addPass(_renderPass);
+const _bloomPass = new THREE.UnrealBloomPass(
+  new THREE.Vector2(viewport.clientWidth, viewport.clientHeight),
+  0.35,   // strength: matches v8VR cineFX default
+  0.55,   // radius
+  1.00    // threshold (only HDR pixels >1.0 bloom)
+);
+_composer.addPass(_bloomPass);
+// Sync composer size to viewport on resize.
+const _origFit = fitRenderer;
+fitRenderer = function() {
+  _origFit();
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  _composer.setSize(w, h);
+  if (_bloomPass.setSize) _bloomPass.setSize(w, h);
+};
+fitRenderer();
+window.addEventListener('resize', fitRenderer);
+
+// Live-tunable from console: tuneBloom({ strength, radius, threshold })
+window.tuneBloom = function(opts) {
+  opts = opts || {};
+  if (typeof opts.strength  === 'number') _bloomPass.strength  = opts.strength;
+  if (typeof opts.radius    === 'number') _bloomPass.radius    = opts.radius;
+  if (typeof opts.threshold === 'number') _bloomPass.threshold = opts.threshold;
+  return { strength: _bloomPass.strength, radius: _bloomPass.radius, threshold: _bloomPass.threshold };
+};
+
+// ============================================================
 // Render loop
 // ============================================================
 let frameCount = 0, lastFpsT = performance.now(), startT = performance.now();
@@ -1198,8 +1558,9 @@ function frame() {
   if (!paused) frozenTime += dt;
   wallMat.uniforms.time.value = frozenTime;
   orbit.update();
-  renderer.setRenderTarget(null);
-  renderer.render(scene, camera);
+  // (v8VR sync) Render via EffectComposer instead of renderer.render so
+  // bloom matches the game.
+  _composer.render();
   frameCount++;
   if (now - lastFpsT >= 500) {
     const fps = (frameCount * 1000 / (now - lastFpsT)) | 0;

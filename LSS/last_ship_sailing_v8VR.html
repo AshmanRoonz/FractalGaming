@@ -6676,10 +6676,15 @@ function restoreProceduralEnvironment() {
 // =====================================================================
 function promoteMeshToPBR(root, opts) {
   opts = opts || {};
-  const metalness  = opts.metalness  != null ? opts.metalness  : 0.7;
-  const roughness  = opts.roughness  != null ? opts.roughness  : 0.35;
-  const clearcoat  = opts.clearcoat  != null ? opts.clearcoat  : 0.6;
-  const ccRough    = opts.clearcoatRoughness != null ? opts.clearcoatRoughness : 0.2;
+  // (v8VR retune 2026-04-30) Defaults pulled toward "painted hull" instead
+  // of "chrome mirror." Earlier 0.7 / 0.35 was making ships read as pure
+  // white because every bright IBL pixel + bloom + ACES tonemap combined
+  // to blow out the highlights. Painted-metal feel is closer to what
+  // looks right against a dark space background.
+  const metalness  = opts.metalness  != null ? opts.metalness  : 0.25;
+  const roughness  = opts.roughness  != null ? opts.roughness  : 0.55;
+  const clearcoat  = opts.clearcoat  != null ? opts.clearcoat  : 0.35;
+  const ccRough    = opts.clearcoatRoughness != null ? opts.clearcoatRoughness : 0.45;
   if (!root) return 0;
   let count = 0;
   root.traverse((obj) => {
@@ -7354,16 +7359,19 @@ function setupCineFX() {
   const composer  = new THREE.EffectComposer(renderer);
   const renderPass = new THREE.RenderPass(scene, camera);
   // UnrealBloom params: (resolution, strength, radius, threshold).
-  // (v8VR retune, 2026-04-30) Earlier (0.85 / 0.4 / 0.18) read as washed-out
-  // because the scene's existing directional + point lights are tuned bright
-  // for the legacy custom ACES path; threshold 0.18 had nearly every lit
-  // surface contributing bloom. Tightened so only genuinely emissive
-  // material (tracers, shield rims, explosion cores, engine plumes) blooms.
+  // (v8VR retune 2, 2026-04-30) Pulled even tighter after a screenshot
+  // showed ships rendering pure white with the previous defaults
+  // (0.55 / 0.55 / 0.65). The combination of PBR-promoted hulls
+  // (metalness 0.7) + the procedural envMap + bloom threshold 0.65 was
+  // pushing hull panels into the bloom contribution region. Now only
+  // pixels above linear 1.0 (genuinely HDR / emissive) bloom; this
+  // typically means tracer cores, shield rims, engine plumes, explosion
+  // cores. Hull / wall surfaces stay sharp.
   const bloomPass = new THREE.UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.55,   // strength: was 0.85 — softer overall lift
-    0.55,   // radius:   was 0.4  — slightly wider falloff so the bloom that DOES land reads cinematic
-    0.65    // threshold: was 0.18 — only HDR-bright pixels bloom
+    0.35,   // strength: was 0.55 — subtle
+    0.55,   // radius:   unchanged
+    1.00    // threshold: was 0.65 — only HDR pixels (>1.0 linear) bloom
   );
   const smaaPass  = new THREE.SMAAPass(window.innerWidth, window.innerHeight);
   const outputPass = new THREE.OutputPass();
@@ -9183,36 +9191,62 @@ function getHeatHazeSpriteMat() {
   return _heatHazeSpriteMat;
 }
 
-// Shared electric-smoke texture: soft bluish puff with a few arc streaks inside.
-// Each emitted sprite clones this into its own material so opacity can flicker
+// Shared electric-smoke texture: soft bluish puff with branching arcs inside.
+// (v8VR 2026-04-30) Boosted: hotter core (whiter, more opaque), broader
+// halo, more arcs (8 instead of 5), brighter arc color, plus a second pass
+// of thicker arcs for high-luminance highlights so the texture pushes
+// values past 1.0 in linear space and bloom catches them. Each emitted
+// sprite clones this into its own material so opacity can flicker
 // independently. Generated once, cached on first use.
 let _electricSmokeTexture = null;
 function getElectricSmokeTexture() {
   if (_electricSmokeTexture) return _electricSmokeTexture;
   const c = document.createElement('canvas');
-  c.width = 128; c.height = 128;
+  c.width = 256; c.height = 256;     // doubled resolution for the detail
   const ctx2d = c.getContext('2d');
-  // Soft puff base (warm-blue, fades to transparent)
-  const grad = ctx2d.createRadialGradient(64, 64, 4, 64, 64, 62);
-  grad.addColorStop(0.00, 'rgba(200, 230, 255, 0.55)');
-  grad.addColorStop(0.30, 'rgba(140, 200, 255, 0.32)');
-  grad.addColorStop(0.65, 'rgba(90, 140, 220, 0.10)');
-  grad.addColorStop(1.00, 'rgba(60, 80, 140, 0.00)');
+  // Soft puff base, hotter core. Pre-multiplied colors land brighter
+  // through the additive sprite material the cluster spawner uses.
+  const grad = ctx2d.createRadialGradient(128, 128, 6, 128, 128, 124);
+  grad.addColorStop(0.00, 'rgba(230, 245, 255, 0.85)');  // hot near-white core
+  grad.addColorStop(0.18, 'rgba(180, 220, 255, 0.55)');
+  grad.addColorStop(0.50, 'rgba(100, 160, 240, 0.22)');
+  grad.addColorStop(0.85, 'rgba(60,  90, 180, 0.06)');
+  grad.addColorStop(1.00, 'rgba(40,  60, 130, 0.00)');
   ctx2d.fillStyle = grad;
-  ctx2d.fillRect(0, 0, 128, 128);
-  // A handful of thin branching arcs for texture
+  ctx2d.fillRect(0, 0, 256, 256);
+  // Branching electric arcs. Two passes: thin bright primary + thicker
+  // hotspot trails so bloom has clear targets.
   ctx2d.globalCompositeOperation = 'lighter';
-  ctx2d.strokeStyle = 'rgba(220, 240, 255, 0.75)';
-  ctx2d.lineWidth = 1.2;
-  for (let a = 0; a < 5; a++) {
-    let x = 64 + (Math.random() - 0.5) * 10;
-    let y = 64 + (Math.random() - 0.5) * 10;
+  // Pass 1: thin bright primary arcs (8 of them)
+  ctx2d.strokeStyle = 'rgba(220, 240, 255, 0.95)';
+  ctx2d.lineWidth = 1.6;
+  for (let a = 0; a < 8; a++) {
+    let x = 128 + (Math.random() - 0.5) * 16;
+    let y = 128 + (Math.random() - 0.5) * 16;
     ctx2d.beginPath();
     ctx2d.moveTo(x, y);
-    const segs = 5 + Math.floor(Math.random() * 4);
+    const segs = 6 + Math.floor(Math.random() * 5);
     for (let s = 0; s < segs; s++) {
-      x += (Math.random() - 0.5) * 22;
-      y += (Math.random() - 0.5) * 22;
+      x += (Math.random() - 0.5) * 40;
+      y += (Math.random() - 0.5) * 40;
+      ctx2d.lineTo(x, y);
+    }
+    ctx2d.stroke();
+  }
+  // Pass 2: thicker pure-white hotspot strokes overlaid on a few of them.
+  // Pushes the brightest pixels above 1.0 in linear space so the bloom
+  // pass actually grabs them and they read as electrical pop.
+  ctx2d.strokeStyle = 'rgba(255, 255, 255, 1.0)';
+  ctx2d.lineWidth = 3.0;
+  for (let a = 0; a < 4; a++) {
+    let x = 128 + (Math.random() - 0.5) * 20;
+    let y = 128 + (Math.random() - 0.5) * 20;
+    ctx2d.beginPath();
+    ctx2d.moveTo(x, y);
+    const segs = 3 + Math.floor(Math.random() * 3);
+    for (let s = 0; s < segs; s++) {
+      x += (Math.random() - 0.5) * 28;
+      y += (Math.random() - 0.5) * 28;
       ctx2d.lineTo(x, y);
     }
     ctx2d.stroke();
@@ -12753,30 +12787,112 @@ class ClusterObstacle {
           c.mesh.material.emissiveIntensity = stressEmissive;
         }
       }
-      // Electric-smoke haze inside the packing sphere. Emit slowly so a given
-      // cluster has two to three puffs alive at a time. Only run emitter when
-      // the player is close enough that the haze would be visible; skipping
-      // far clusters keeps the effect pool for near clusters.
-      if (!this._smokeTimer) this._smokeTimer = 0.25 + Math.random() * 0.35;
-      this._smokeTimer -= dt;
-      if (this._smokeTimer <= 0) {
-        this._smokeTimer = 0.6 + Math.random() * 0.9;
-        const camDist2 = player && player.position
-          ? this.position.distanceToSquared(player.position)
-          : 0;
-        const visibleR = 2200;
-        if (camDist2 < visibleR * visibleR && typeof spawnElectricSmoke === 'function') {
-          spawnElectricSmoke(this.position, this.clusterScale * 0.95, {
-            size: this.clusterScale * 1.4,
-            color: 0x88c0ff,
-          });
-          // Occasional second puff for denser clusters, with a warmer tint
-          if (this.clusterScale > 90 && Math.random() < 0.35) {
-            spawnElectricSmoke(this.position, this.clusterScale * 0.85, {
-              size: this.clusterScale * 1.15,
-              color: 0xa090ff,
-            });
+      // Cluster cloud: volumetric occluding smoke + electric accents.
+      // (v8VR 2026-04-30 retune 3) Earlier additive sprite haze was bright
+      // but couldn't hide what was behind it (additive blend = adds light,
+      // never subtracts). Body cloud now uses the same volumetric shader
+      // smoke that explosions use (NormalBlending via THREE.transparent),
+      // which actually occludes the cluster pieces underneath. Electric
+      // sprites stay as flicker accents on top, but at lower opacity peak
+      // so they read as energy threading through the smoke, not as the
+      // smoke itself. Visibility-gated to skip far clusters.
+      const camDist2 = player && player.position
+        ? this.position.distanceToSquared(player.position)
+        : 0;
+      const visibleR = 2200;
+      const inRange = camDist2 < visibleR * visibleR;
+
+      // ---- Body cloud: volumetric occluding shader smoke ----
+      // Two staggered emitters keep at least one big plume alive at all
+      // times. Each plume is the same _SMOKE_GEO + _makeSmokeMaterial setup
+      // explosions use, just bigger and slower. Caps against SMOKE_MAX so
+      // a fight with many clusters can't starve explosion smoke.
+      if (!this._cloudTimerA) this._cloudTimerA = 0.0;
+      if (!this._cloudTimerB) this._cloudTimerB = 1.0;  // staggered start
+      this._cloudTimerA -= dt;
+      this._cloudTimerB -= dt;
+
+      const _spawnClusterPlume = (sizeMul) => {
+        if (!inRange) return;
+        // Cap-check (mirrors spawnExplosion).
+        const SMOKE_MAX = (typeof QUALITY !== 'undefined') ? QUALITY.smokeMax() : 12;
+        let smokeAlive = 0, oldestIdx = -1, oldestAge = -1;
+        for (let i = 0; i < game.effects.length; i++) {
+          if (game.effects[i].type === 'shaderSmoke') {
+            smokeAlive++;
+            if (game.effects[i].age > oldestAge) { oldestAge = game.effects[i].age; oldestIdx = i; }
           }
+        }
+        if (smokeAlive >= SMOKE_MAX && oldestIdx >= 0) {
+          const old = game.effects[oldestIdx];
+          if (old.mesh && old.mesh.parent) scene.remove(old.mesh);
+          if (old.mesh && old.mesh.material && old.mesh.material.dispose) old.mesh.material.dispose();
+          game.effects.splice(oldestIdx, 1);
+        }
+        // Cool-blue dirty smoke for the cluster storm. Slightly darker than
+        // explosion plumes (0x222018) since these need to read as cool
+        // electrical haze, not warm combustion.
+        const smokeMat = _makeSmokeMaterial(0x1a2030, 0.85);
+        if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
+          smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
+        }
+        const smokeMesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
+        smokeMesh.position.copy(this.position);
+        const baseScale = this.clusterScale * sizeMul;
+        smokeMesh.scale.setScalar(baseScale);
+        smokeMesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+        smokeMesh.frustumCulled = true;
+        smokeMesh.renderOrder = 1;
+        scene.add(smokeMesh);
+        // Long lifetime (2.5-3s) plus 2x slow expansion paints a continuous
+        // mass without re-spawn churn.
+        game.effects.push({
+          mesh: smokeMesh, lifetime: 2.5 + Math.random() * 0.5, age: 0,
+          type: 'shaderSmoke',
+          maxSize: 2.0,            // smokeExpand = baseScale * (1 + t * 1.0) -> ends at ~2x baseScale
+          baseScale: baseScale,
+          alphaMul: 0.7,           // dense enough to occlude, not opaque-black
+          rotVel: new THREE.Vector3(
+            (Math.random() - 0.5) * 0.6,
+            (Math.random() - 0.5) * 0.6,
+            (Math.random() - 0.5) * 0.6
+          ),
+        });
+      };
+
+      if (this._cloudTimerA <= 0) {
+        this._cloudTimerA = 1.6 + Math.random() * 0.4;
+        _spawnClusterPlume(2.2 + Math.random() * 0.4);
+      }
+      if (this._cloudTimerB <= 0) {
+        this._cloudTimerB = 1.6 + Math.random() * 0.4;
+        _spawnClusterPlume(2.0 + Math.random() * 0.4);
+      }
+
+      // ---- Electric accents on top of the body cloud ----
+      // Same additive electric sprites as before but FEWER, smaller, less
+      // bright. They read as energy threading through the occluding smoke,
+      // not as the smoke itself.
+      if (!this._smokeTimer) this._smokeTimer = 0.20 + Math.random() * 0.25;
+      this._smokeTimer -= dt;
+      if (this._smokeTimer <= 0 && inRange && typeof spawnElectricSmoke === 'function') {
+        this._smokeTimer = 0.30 + Math.random() * 0.35;
+        // 1 puff usually, occasionally 2.
+        const detailCount = 1 + (Math.random() < 0.30 ? 1 : 0);
+        for (let p = 0; p < detailCount; p++) {
+          spawnElectricSmoke(this.position, this.clusterScale, {
+            size: this.clusterScale * (1.2 + Math.random() * 0.6),
+            color: (Math.random() < 0.7) ? 0xb8dcff : 0xc0a0ff,
+            offsetMul: 0.2 + Math.random() * 0.2,    // tight spread inside cloud
+          });
+        }
+        // Rare big-cluster discharge flash.
+        if (this.clusterScale > 90 && Math.random() < 0.15) {
+          spawnElectricSmoke(this.position, this.clusterScale, {
+            size: this.clusterScale * 1.4,
+            color: 0xd0a8ff,
+            offsetMul: 0.1,
+          });
         }
       }
     }
@@ -13985,10 +14101,12 @@ function updateEffects(dt) {
     else if (e.type === 'electricSmoke') {
       const swell = 1 + t * (e.grow || 1.6);
       e.mesh.scale.set(e.baseScale * swell, e.baseScale * swell, 1);
-      // Slow attack, then fade. Flicker on top via a high-freq sine.
+      // (v8VR 2026-04-30 retune 3) Peak opacity dropped 0.85 -> 0.45 so
+      // electric sprites read as accent flickers on top of the volumetric
+      // body cloud, not as the dominant visual. Flicker envelope unchanged.
       const envelope = Math.sin(Math.min(1, t * 1.2) * Math.PI); // 0 -> 1 -> 0
-      const flicker = 0.75 + 0.25 * Math.sin(game.time * 32 + (e.flickerSeed || 0) * 7.3);
-      e.mesh.material.opacity = 0.5 * envelope * flicker;
+      const flicker = 0.65 + 0.35 * Math.sin(game.time * 32 + (e.flickerSeed || 0) * 7.3);
+      e.mesh.material.opacity = 0.45 * envelope * flicker;
       if (e.drift) e.mesh.position.addScaledVector(e.drift, dt);
     }
     // --- Heat-trail blur behind ships: rapid fade, slight grow ---
@@ -14202,8 +14320,12 @@ function spawnElectricSmoke(pos, radius, opts) {
     depthWrite: false,
   });
   const sprite = new THREE.Sprite(mat);
-  // Slight randomized offset within the cluster's bounding sphere
-  const r = radius * (0.4 + Math.random() * 0.7);
+  // (v8VR 2026-04-30) opts.offsetMul scales the random offset multiplier
+  // (default 0.4-1.1 of radius for backwards-compatibility). Pass a small
+  // value (e.g. 0.0-0.3) when you want the puffs to stack tightly near
+  // pos so they read as one coherent cloud instead of separate sprites.
+  const offsetMul = (typeof opts.offsetMul === 'number') ? opts.offsetMul : 1.0;
+  const r = radius * offsetMul * (0.4 + Math.random() * 0.7);
   const theta = Math.random() * Math.PI * 2;
   const phi = Math.acos(2 * Math.random() - 1);
   sprite.position.set(
@@ -21414,6 +21536,14 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Pure Black Base hides the map's wall geometry (no zone-color tint, no AO/diffuse, no fresnel rim) so only the active pattern reads against pure black. Press P in-game to cycle patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
       </div>
+      <div class="setting-row">
+        <label>Wall opacity</label>
+        <input type="range" id="set-wall-opacity" min="0" max="1" step="0.02" value="${(typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0}">
+        <div class="value-display" id="val-wall-opacity">${((typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0).toFixed(2)}</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Multiplies final wall alpha. 1.0 = solid (default), 0.0 = invisible. Drop to ~0.5 to see ships through walls (useful in tight maps; persists across rounds).</label>
+      </div>
       <div class="setting-row" style="margin-top:6px; gap:6px; flex-wrap:wrap;">
         <button id="wall-import-btn">Import Lab Config</button>
         <button id="wall-reload-defaults">Reload LSS_WALLS.json</button>
@@ -21681,6 +21811,20 @@ function buildSettingsPage() {
   if (blackBaseChk) {
     blackBaseChk.addEventListener('change', e => {
       setWallBlackBase(!!e.target.checked);
+    });
+  }
+  // (v8VR 2026-04-30) Wall opacity slider. Pushes uOpacity uniform live.
+  const wallOpEl = overlay.querySelector('#set-wall-opacity');
+  const wallOpVal = overlay.querySelector('#val-wall-opacity');
+  if (wallOpEl) {
+    wallOpEl.addEventListener('input', e => {
+      const v = Math.max(0, Math.min(1, parseFloat(e.target.value)));
+      game.wallOpacity = v;
+      if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uOpacity) {
+        game.levelMaterial.uniforms.uOpacity.value = v;
+      }
+      if (wallOpVal) wallOpVal.textContent = v.toFixed(2);
+      if (typeof saveSettings === 'function') saveSettings();
     });
   }
 
@@ -22439,6 +22583,7 @@ function saveSettings() {
       ambientDuckEnabled: audio.ambientDuckEnabled !== false,
       wallPattern: (typeof game.wallPattern === 'number') ? game.wallPattern : 0,
       wallBlackBase: !!game.wallBlackBase,
+      wallOpacity: (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0,
       // (post-v6.9 patch, 2026-04-28) Per-pattern wallParams. Each slot
       // saves under its pattern index. Legacy `wallParams` is still emitted
       // for compatibility with older code paths that read it (and as a
@@ -22654,6 +22799,16 @@ function loadSettings() {
     // game so createMeshFromPositions can read it when the shader is built.
     if (data.wallPattern !== undefined) game.wallPattern = data.wallPattern | 0;
     if (data.wallBlackBase !== undefined) game.wallBlackBase = !!data.wallBlackBase;
+    // (v8VR 2026-04-30) Wall opacity slider. Stash on game.wallOpacity;
+    // the shader's uOpacity uniform is pushed when the material is built
+    // (see createMeshFromPositions / wall material init), and the live
+    // settings handler pushes it again on slider change.
+    if (typeof data.wallOpacity === 'number') {
+      game.wallOpacity = Math.max(0, Math.min(1, data.wallOpacity));
+      if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uOpacity) {
+        game.levelMaterial.uniforms.uOpacity.value = game.wallOpacity;
+      }
+    }
     // (post-v6.9 patch, 2026-04-28) Wall lab parameters now live per-pattern.
     // Migration: if persisted data has wallParamsByPattern (new shape), use
     // it directly; else if it has the legacy flat wallParams, copy that blob
@@ -24072,6 +24227,10 @@ function buildRoomGraphLevel(level) {
       // geometry to disappear and only the pattern to read. Pattern 8
       // (Soul Array) also zeroes its SA_ZONE_FLOOR contribution.
       'uniform int uBlackBase;',
+      // (v8VR 2026-04-30) Wall opacity multiplier. 1.0 = fully solid
+      // (legacy), 0.0 = invisible. Bound to Settings -> Wall Pattern ->
+      // Wall opacity slider; defaults preserve v7.1VR rendering.
+      'uniform float uOpacity;',
       // ---- Wall constants (live-tweakable) ----
       'uniform vec3  K_DARK_BASE;',
       'uniform float K_ZONE_TINT;',
@@ -24999,7 +25158,10 @@ function buildRoomGraphLevel(level) {
       // up in the uBlackBase==1 branch above (matching the lab's main()
       // exactly). Final clamp here only catches truly runaway HDR.
       '  c = min(c, vec3(4.0));',
-      '  gl_FragColor = vec4(c, alpha);',
+      // (v8VR 2026-04-30) uOpacity multiplies the final alpha so the
+      // Settings -> Wall Pattern transparency slider actually fades the
+      // wall. Defaults to 1.0 (legacy fully-opaque behavior).
+      '  gl_FragColor = vec4(c, alpha * uOpacity);',
       '}'
     ].join('\n');
 
@@ -25104,6 +25266,11 @@ function buildRoomGraphLevel(level) {
         // = 1.0 since per-layer K_COSMIC_bg/_fg/_fg2 already provide brightness.
         uPattern:   { value: 20 },
         uBlackBase: { value: 1 },
+        // (v8VR 2026-04-30) Wall opacity. 1.0 = solid (legacy default).
+        // Settings -> Wall Pattern -> Wall opacity slider drives this.
+        // Honor any value already loaded from settings before the
+        // material is built (e.g. saved-as-translucent across reloads).
+        uOpacity:   { value: (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0 },
         // ---- Wall constants ----
         K_DARK_BASE:         { value: new THREE.Vector3(wp.K_DARK_BASE_R, wp.K_DARK_BASE_G, wp.K_DARK_BASE_B) },
         K_ZONE_TINT:         { value: wp.K_ZONE_TINT },
@@ -25133,7 +25300,12 @@ function buildRoomGraphLevel(level) {
         u_invBase_bg:  { value: 3.0 },
         u_hueSpin_bg:  { value: 0.115 },
         u_satBase_bg:  { value: 0.0 },
-        K_COSMIC_bg:   { value: 4.75 },
+        // (v8VR 2026-04-30) Was 4.75. Matched the legacy custom-ACES
+        // postFX path which compressed HDR aggressively; under Three.js
+        // ACES (cineFX / Showcase Mode) the same value blows the bg
+        // pattern into saturated chromatic blocks. 0.65 mirrors the
+        // lab's typical Mixed Lab v2 K_COSMIC_bg slider value.
+        K_COSMIC_bg:   { value: 0.65 },
         fgPatternId:   { value: 19 }, // lab 18 Layered Cube
         fgAlpha:       { value: 2.0 },
         fgBlend:       { value: 4 },  // Mix
