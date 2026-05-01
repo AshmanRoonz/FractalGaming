@@ -27348,72 +27348,32 @@ function initAudio() {
     try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
     catch (_) { audio.ctx = new _AC(); }
 
-    // (v8_1VR) Final output subsonic safety HPF. Sits between hiCut and the
-    // actual audio destination so EVERYTHING (master/SFX, ambient, music)
-    // gets its sub-bass below 40 Hz rolled off before it hits the speakers.
-    // 5.1 systems with subwoofers reproduce that range fast enough to pump
-    // the whole speaker array into crackling/distortion under load. Stereo
-    // laptop speakers don't reproduce it at all so they were unaffected.
-    audio.outputSubCut = audio.ctx.createBiquadFilter();
-    audio.outputSubCut.type = 'highpass';
-    audio.outputSubCut.frequency.value = 40;
-    audio.outputSubCut.Q.value = 0.7;
-    audio.outputSubCut.connect(audio.ctx.destination);
-
     // High-frequency rolloff: gentle lowpass to tame harsh highs across all sounds
     audio.hiCut = audio.ctx.createBiquadFilter();
     audio.hiCut.type = 'lowpass';
     audio.hiCut.frequency.value = 3500; // roll off above 3.5kHz
     audio.hiCut.Q.value = 0.7; // gentle slope (no resonance peak)
-    audio.hiCut.connect(audio.outputSubCut);
-
-    // (v8_1VR) Subsonic high-pass : rolls off everything below ~45 Hz BEFORE
-    // the master compressor sees it. Heavy combat stacks lots of low-end
-    // energy (kick rumble, ambient phi-cascade 16/26/43 Hz layers, weapon
-    // bass) that the human ear barely registers as pitch but that DRIVES THE
-    // COMPRESSOR HARD, causing the 0.5-1s pumping crackle on desktops with
-    // real subwoofers. Filtering it pre-comp keeps the comp's detector
-    // looking at audible-band content only, so it doesn't slam the bus on
-    // subsonic transients.
-    audio.subCut = audio.ctx.createBiquadFilter();
-    audio.subCut.type = 'highpass';
-    audio.subCut.frequency.value = 45;
-    audio.subCut.Q.value = 0.7;
-
-    // (v8_1VR) Bass low-shelf attenuation. Cuts the 45-150 Hz band by ~7 dB
-    // BEFORE the comp's detector sees it, so a flurry of bassy shots (cluster
-    // missiles, explosions, railgun thumps) doesn't sum into a giant low-band
-    // spike that pushes the comp into pumping. The bass character is still
-    // there for kicks and explosions, just brought down a notch so the wide-
-    // band comp doesn't have to do as much work.
-    audio.bassShelf = audio.ctx.createBiquadFilter();
-    audio.bassShelf.type = 'lowshelf';
-    audio.bassShelf.frequency.value = 140;
-    audio.bassShelf.gain.value = -7;
+    audio.hiCut.connect(audio.ctx.destination);
 
     // Master bus compressor (glue): keeps simultaneous SFX legible without clipping.
     // (v8_1VR) Threshold raised -14 → -10 dB and release slowed 120 → 280 ms
     // so transient bursts (gunfire chains) don't push the comp into audible
-    // pumping. The subsonic HPF feeds INTO the comp so low-frequency content
-    // never drives the gain reduction stage.
+    // pumping. No EQ filters in the chain ; sound recipes pass through with
+    // their full original spectrum so the user's lab-tuned sounds aren't colored.
     audio.masterComp = audio.ctx.createDynamicsCompressor();
     audio.masterComp.threshold.value = -10;
     audio.masterComp.knee.value = 8;
     audio.masterComp.ratio.value = 3;
     audio.masterComp.attack.value = 0.005;
     audio.masterComp.release.value = 0.280;
-    // Chain: subCut (HPF 45) → bassShelf (lowshelf -7 dB @ 140) → masterComp → hiCut
-    audio.subCut.connect(audio.bassShelf);
-    audio.bassShelf.connect(audio.masterComp);
     audio.masterComp.connect(audio.hiCut);
 
-    // Master output. Base 0.85 multiplied by userVol.master so the user
-    // slider scales the bus cleanly. (v8_1VR) Routed through subCut FIRST
-    // so subsonic energy never reaches the compressor's detector ; then
-    // through masterComp + hiCut to destination.
+    // Master output. Base 0.75 multiplied by userVol.master so the user
+    // slider scales the bus cleanly. Direct path into the compressor ; no
+    // EQ filters between user sound recipes and the comp.
     audio.masterGain = audio.ctx.createGain();
     audio.masterGain.gain.value = 0.75 * audio.userVol.master;
-    audio.masterGain.connect(audio.subCut);
+    audio.masterGain.connect(audio.masterComp);
 
     // SFX bus: groups all gameplay SFX (dry + reverb rails) under a single user-facing
     // "SFX" slider, separate from the ambient bed. Lives between dry/reverb and master.
@@ -30158,20 +30118,25 @@ _loadPersistedSoundRecipes();
 // audible event. Gaps are picked per-type so the rate-limit is invisible
 // during normal play.
 const _SOUND_MIN_GAP = {
-  // Weapon fire: cap a hair below each weapon's natural fire rate so the
-  // local player's stream always passes ; concurrent enemy streams get
-  // folded into the same audible burst instead of doubling the load.
-  fire_minigun:    0.040, // 25 Hz cap (Predator fires 20 Hz)
-  fire_hitscan:    0.045, // 22 Hz cap (Blaster long mode 12.5 Hz, Syphon 11 Hz)
-  fire_spread:     0.080, // 12 Hz cap (shotgun-class)
-  fire_projectile: 0.080,
-  fire_railgun:    0.060,
-  fire_salvo:      0.080,
+  // Weapon fire: cap WELL below the weapon's natural fire rate so the audio
+  // thread doesn't have to keep up with the ballistics / visual shot rate.
+  // (v8_1VR audio fix) Heavily tightened from the prior 25 / 22 Hz caps : on
+  // a 5.1 desktop those rates were creating 100+ audio nodes per second per
+  // weapon under sustained fire, causing the audio thread to underrun and
+  // the context to fully cut out. 10-12 Hz audible cadence still feels
+  // rapid (the visual tracers/hit feedback fire at the real ballistics
+  // rate) without thrashing the audio thread.
+  fire_minigun:    0.085, // ~12 Hz cap (Predator visually fires 20 Hz)
+  fire_hitscan:    0.085, // ~12 Hz cap (Syphon, Blaster long mode)
+  fire_spread:     0.100, // 10 Hz cap (shotgun-class)
+  fire_projectile: 0.100,
+  fire_railgun:    0.080,
+  fire_salvo:      0.100,
   // Hits / damage / shields can pile up when pellets land or shields chip;
-  // 25-40 Hz is plenty to feel responsive without thrashing.
-  hit:             0.025,
-  damage:          0.040,
-  damage_shield:   0.040,
+  // 16-25 Hz is plenty to feel responsive without thrashing.
+  hit:             0.040,
+  damage:          0.060,
+  damage_shield:   0.060,
 };
 const _lastSoundTime = {};
 
@@ -30210,6 +30175,17 @@ function playSound(type) {
   // Over-budget skip for cosmetic sounds. Critical SFX always play.
   if (_audioRecentVoices.length >= _AUDIO_VOICE_BUDGET && _AUDIO_SKIPPABLE[type]) {
     return;
+  }
+  // (v8_1VR) Pressure-aware skip : when the audio thread is at 60%+ load,
+  // probabilistically drop cosmetic sounds. The skip rate ramps with
+  // pressure so by the time we hit budget cap we're already culling half
+  // the SFX, giving the audio thread headroom BEFORE it underruns and
+  // cuts out entirely. Only applies to skippable types ; critical sounds
+  // (death, ability, round_start) always pass through.
+  if (_AUDIO_SKIPPABLE[type] && _audioRecentVoices.length > _AUDIO_VOICE_BUDGET * 0.6) {
+    const pressure = (_audioRecentVoices.length - _AUDIO_VOICE_BUDGET * 0.6) /
+                     (_AUDIO_VOICE_BUDGET * 0.4);  // 0..1 ramp
+    if (Math.random() < pressure) return;
   }
   _audioRecentVoices.push(_ctxT);
   // Rate-limit per type. ctx.currentTime is monotonic and tracks audio-thread
