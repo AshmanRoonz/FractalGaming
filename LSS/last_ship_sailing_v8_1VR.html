@@ -32005,4 +32005,50 @@ document.addEventListener('keydown', initAudio, { once: false });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && _wakeLock === null) {
       // requestWakeLock outside a user gesture works as long as we had
-      // one earlier in the session,
+      // one earlier in the session, which the onFirstGesture handler
+      // guarantees by the time we reach a visibilitychange.
+      acquire();
+    }
+  });
+})();
+
+// VR fork: use renderer.setAnimationLoop instead of raw requestAnimationFrame
+// so the same loop drives both flat-screen frames (browser RAF) and immersive
+// frames (XR device rAF cadence). Three.js handles the dispatch internally.
+renderer.setAnimationLoop(gameLoop);
+
+// v8VR: HTML onclick="joinRoom()" and onclick="startSolo()" carry inline
+// handlers that fire from page-parse onward. The early stub script (above
+// the <script type="module">) installed wrappers on window.joinRoom /
+// window.startSolo that queue calls until the real implementations exist.
+// Stash the real ones under `__real_X` and replay any pending click.
+if (typeof joinRoom  === 'function') window.__real_joinRoom  = joinRoom;
+if (typeof startSolo === 'function') window.__real_startSolo = startSolo;
+if (typeof window.__lssReplayPending === 'function') window.__lssReplayPending();
+
+// v8VR: dev-console handles. The whole inline script is wrapped in
+// _bootLSS() for the THREE module-import bootstrap, which means top-level
+// `const`s like `game` / `player` / `scene` / `camera` / `renderer` are
+// function-scoped, not global. Expose them on window so DevTools console
+// can poke at runtime state for debugging + tuning.
+window.game     = game;
+window.player   = player;
+window.scene    = scene;
+window.camera   = camera;
+window.renderer = renderer;
+window.input    = input;
+window.audio    = audio;
+
+} // end _bootLSS
+
+// v8VR: kick off the game once the THREE module bootstrap has run.
+// If the event already fired before this listener was added (race), boot now.
+if (window.LSS_ENGINE_READY) {
+  _bootLSS();
+} else {
+  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
+}
+
+</script>
+</body>
+</html>
