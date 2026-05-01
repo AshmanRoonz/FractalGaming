@@ -2,12 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v8.2a (WebXR) ; desktop 5.1 routing</title>
-<!-- v8_2a fork started 2026-05-01. Branched off v8_1VR.
-     Real per-speaker routing for spatial sounds on 5.1+ desktops via
-     a parallel 6-channel sub-bus + VBAP, bypassing HRTF on surround.
-     v8_1VR remains the stable baseline; do NOT edit it.
-     v8_1VR fork started 2026-05-01. Plan: LSS_music_tier3_plan-may01-2026.md
+<title>Last Ship Sailing v8.1 VR (WebXR) ; reactive band music branch</title>
+<!-- v8_1VR fork started 2026-05-01. Plan: LSS_music_tier3_plan-may01-2026.md
      Branched off v8VR (which itself forked from v7.1VR on 2026-04-30).
      v8_1VR adds the Tier 3 reactive band: a procedural in-game music
      engine that scores the match in real time. Drums, bass, pad, lead
@@ -22146,12 +22142,10 @@ function buildSettingsPage() {
     ['set-vol-master', 'val-vol-master', v => {
       audio.userVol.master = v;
       if (audio.masterGain) audio.masterGain.gain.value = 0.85 * v;
-      if (audio.spatial51Master) audio.spatial51Master.gain.value = 0.85 * v;
     }, 2],
     ['set-vol-sfx', 'val-vol-sfx', v => {
       audio.userVol.sfx = v;
       if (audio.sfxBus) audio.sfxBus.gain.value = v;
-      if (audio.spatial51Bus) audio.spatial51Bus.gain.value = v;
     }, 2],
     ['set-vol-ambient', 'val-vol-ambient', v => {
       audio.userVol.ambient = v;
@@ -22688,8 +22682,6 @@ function buildSettingsPage() {
           try {
             if (audio.masterGain) audio.masterGain.gain.value = 0.85 * audio.userVol.master;
             if (audio.sfxBus)     audio.sfxBus.gain.value = audio.userVol.sfx;
-            if (audio.spatial51Master) audio.spatial51Master.gain.value = 0.85 * audio.userVol.master;
-            if (audio.spatial51Bus)    audio.spatial51Bus.gain.value = audio.userVol.sfx;
           } catch (_) {}
           // Rebuild the settings panel so sliders/dropdowns reflect new values.
           if (typeof buildSettingsPage === 'function') buildSettingsPage();
@@ -22862,8 +22854,6 @@ function resetSettingsToDefaults() {
   audio.userVol.ambient = 1.0;
   if (audio.masterGain) audio.masterGain.gain.value = 0.85;
   if (audio.sfxBus) audio.sfxBus.gain.value = 1.0;
-  if (audio.spatial51Master) audio.spatial51Master.gain.value = 0.85;
-  if (audio.spatial51Bus)    audio.spatial51Bus.gain.value = 1.0;
   saveSettings();
 }
 
@@ -27355,21 +27345,8 @@ function initAudio() {
     // ends up in a bad state under load (full audio drop, not just crackle),
     // so we stick with the string preset which is universally honored.
     const _AC = (window.AudioContext || window.webkitAudioContext);
-    // (v8_2a 2026-05-01 followup) Request sampleRate=48000 explicitly.
-    // Some audiophile / gamer audio devices run at 96k or 192k, and Chrome
-    // matches whatever the device exposes when no hint is passed. The
-    // entire audio graph then runs at that rate, doing 2x-4x the DSP work
-    // per quantum. Pin to 48k so oscillators / gain / filters / panners /
-    // merger / compressor process at a sane rate; Chrome resamples once
-    // at the device boundary (cheap) instead of every node working at the
-    // higher rate. Three-tier fallback: 48k+playback, then playback only,
-    // then bare default. The middle tier handles browsers that reject
-    // explicit sampleRate but accept latencyHint.
-    try { audio.ctx = new _AC({ latencyHint: 'playback', sampleRate: 48000 }); }
-    catch (_) {
-      try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
-      catch (__) { audio.ctx = new _AC(); }
-    }
+    try { audio.ctx = new _AC({ latencyHint: 'playback' }); }
+    catch (_) { audio.ctx = new _AC(); }
 
     // High-frequency rolloff: gentle lowpass to tame harsh highs across all sounds
     audio.hiCut = audio.ctx.createBiquadFilter();
@@ -27471,83 +27448,6 @@ function initAudio() {
     audio.musicGain = audio.ctx.createGain();
     audio.musicGain.gain.value = 0.30 * (audio.userVol.music != null ? audio.userVol.music : 0.45);
     audio.musicGain.connect(audio.musicComp);
-
-    // (v8_2a) Surround output detection + 5.1 spatial sub-bus.
-    // The existing chain is stereo end-to-end; on 5.1 the destination
-    // upmixes 2 -> 6 with FL/FR carrying the signal and C/LFE/SL/SR
-    // silent, so the surround speakers get nothing meaningful and HRTF
-    // pays full convolution cost for no audible benefit. v8_2a adds a
-    // parallel 6-channel sub-bus for spatial sounds: per-voice the
-    // source splits into 6 GainNodes (one per speaker), feeds a
-    // ChannelMerger(6), and runs through its own gain stages and glue
-    // compressor to destination. Stereo systems are unaffected.
-    audio._is51 = false;
-    try {
-      const dst = audio.ctx.destination;
-      const _maxCh = (dst && typeof dst.maxChannelCount === 'number') ? dst.maxChannelCount : 2;
-      audio._destMaxCh = _maxCh;
-      console.log('[v8_2a audio] AudioContext: sampleRate=' + audio.ctx.sampleRate +
-        ' Hz, destination.channelCount=' + dst.channelCount +
-        ', maxChannelCount=' + _maxCh +
-        ', baseLatency=' + (audio.ctx.baseLatency != null ? audio.ctx.baseLatency.toFixed(4) : '?') + ' s' +
-        ', outputLatency=' + (audio.ctx.outputLatency != null ? audio.ctx.outputLatency.toFixed(4) : '?') + ' s');
-      if (_maxCh >= 6) {
-        audio._is51 = true;
-        // (v8_2a 2026-05-01 followup) Pin destination.channelCount = 6.
-        // Web Audio default is 2, even when the device exposes 6. Without
-        // this, our ChannelMerger(6) output gets downmixed back to stereo
-        // at the destination via the 5.1->stereo matrix, so the rear /
-        // center / sub speakers receive nothing meaningful. Setting
-        // explicit + speakers + 6 makes the 6-channel signal reach the
-        // hardware unmodified.
-        try {
-          dst.channelCount = 6;
-          dst.channelCountMode = 'explicit';
-          dst.channelInterpretation = 'speakers';
-          console.log('[v8_2a audio] destination.channelCount pinned to 6 ' +
-            '(was ' + dst.channelCount + ' by default).');
-        } catch (e) {
-          console.warn('[v8_2a audio] Could not pin destination to 6 channels (non-fatal):', e && e.message);
-        }
-        audio.spatial51Bus = audio.ctx.createGain();
-        audio.spatial51Bus.channelCount = 6;
-        audio.spatial51Bus.channelCountMode = 'explicit';
-        audio.spatial51Bus.channelInterpretation = 'speakers';
-        audio.spatial51Bus.gain.value = audio.userVol.sfx;
-
-        audio.spatial51Master = audio.ctx.createGain();
-        audio.spatial51Master.channelCount = 6;
-        audio.spatial51Master.channelCountMode = 'explicit';
-        audio.spatial51Master.channelInterpretation = 'speakers';
-        audio.spatial51Master.gain.value = 0.85 * audio.userVol.master;
-
-        audio.spatial51Comp = audio.ctx.createDynamicsCompressor();
-        audio.spatial51Comp.threshold.value = -14;
-        audio.spatial51Comp.knee.value = 8;
-        audio.spatial51Comp.ratio.value = 3;
-        audio.spatial51Comp.attack.value = 0.005;
-        audio.spatial51Comp.release.value = 0.120;
-        try {
-          audio.spatial51Comp.channelCount = 6;
-          audio.spatial51Comp.channelCountMode = 'explicit';
-          audio.spatial51Comp.channelInterpretation = 'speakers';
-        } catch (_) { /* fall back to default channel count if rejected */ }
-
-        audio.spatial51Bus.connect(audio.spatial51Master);
-        audio.spatial51Master.connect(audio.spatial51Comp);
-        audio.spatial51Comp.connect(audio.ctx.destination);
-
-        console.log('[v8_2a audio] 5.1 surround output detected. Spatial sounds ' +
-          'will route per-speaker via VBAP instead of HRTF. Non-spatial sounds ' +
-          'and reverb stay on the stereo chain.');
-      } else {
-        console.log('[v8_2a audio] Stereo output (maxChannelCount=' + _maxCh +
-          '). Keeping HRTF spatial path; no behavior change vs v8_1VR.');
-      }
-    } catch (e) {
-      console.warn('[v8_2a audio] 5.1 sub-bus setup failed (non-fatal):', e && e.message);
-      audio._is51 = false;
-    }
 
     audio.initialized = true;
 
@@ -30816,10 +30716,7 @@ function _releaseSpatialTriple(triple) {
   try { occlGain.gain.cancelScheduledValues(now); } catch (e) {}
   if (_spatialPool.length < _SPATIAL_POOL_MAX) _spatialPool.push(triple);
 }
-// (v8_2a) HRTF body renamed to _playSpatialSoundHRTF; the public
-// playSpatialSound below dispatches between this (stereo / headphones)
-// and _playSpatialSound51 (real 5.1 surround output).
-function _playSpatialSoundHRTF(type, worldPos, opts) {
+function playSpatialSound(type, worldPos, opts) {
   if (!audio.initialized || !audio.ctx) return;
   if (!worldPos || !camera) return playSound(type);
   const triple = _acquireSpatialTriple(audio.ctx);
@@ -30884,196 +30781,6 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     _releaseSpatialTriple(triple);
     playSound(type);
   }
-}
-
-// ============================================================
-// === v8_2a: 5.1 surround spatial path (real per-speaker) ====
-// ============================================================
-// On systems with maxChannelCount >= 6 the public playSpatialSound
-// dispatches into _playSpatialSound51 below. VBAP (vector base
-// amplitude panning) computes per-speaker gains from listener-local
-// azimuth, sums them via ChannelMerger(6), and feeds the parallel
-// spatial51Bus chain set up in initAudio. Cheaper per-voice than
-// HRTF and actually drives the rear/center/sub speakers.
-
-// 5.1 'speakers' channel index map (Web Audio):
-//   0 FL, 1 FR, 2 C, 3 LFE, 4 SL, 5 SR
-const _SPK51_FL  = 0;
-const _SPK51_FR  = 1;
-const _SPK51_C   = 2;
-const _SPK51_LFE = 3;
-const _SPK51_SL  = 4;
-const _SPK51_SR  = 5;
-
-// Speaker azimuth in radians (counter-clockwise from forward, left positive).
-const _SPK51_AZ_FL = ( 30 * Math.PI) / 180;
-const _SPK51_AZ_FR = (-30 * Math.PI) / 180;
-const _SPK51_AZ_SL = (110 * Math.PI) / 180;
-const _SPK51_AZ_SR = (-110 * Math.PI) / 180;
-
-// Pool of 5.1 panner triples: 9 nodes per voice (occl filter, LFE
-// crossover, 6 per-speaker gains, 1 channel merger).
-const _spatial51Pool = [];
-const _SPATIAL51_POOL_MAX = 32;
-function _acquireSpatial51(ctx) {
-  if (_spatial51Pool.length) return _spatial51Pool.pop();
-  return {
-    occl:   ctx.createBiquadFilter(),
-    lpfLFE: ctx.createBiquadFilter(),
-    gFL:    ctx.createGain(),
-    gFR:    ctx.createGain(),
-    gC:     ctx.createGain(),
-    gLFE:   ctx.createGain(),
-    gSL:    ctx.createGain(),
-    gSR:    ctx.createGain(),
-    merger: ctx.createChannelMerger(6),
-  };
-}
-function _releaseSpatial51(triple) {
-  if (!triple) return;
-  const now = (audio && audio.ctx) ? audio.ctx.currentTime : 0;
-  for (const k in triple) {
-    const n = triple[k];
-    try { n.disconnect(); } catch (_) {}
-    if (n && n.gain && n.gain.cancelScheduledValues) {
-      try { n.gain.cancelScheduledValues(now); } catch (_) {}
-    }
-    if (n && n.frequency && n.frequency.cancelScheduledValues) {
-      try { n.frequency.cancelScheduledValues(now); } catch (_) {}
-    }
-    if (n && n.Q && n.Q.cancelScheduledValues) {
-      try { n.Q.cancelScheduledValues(now); } catch (_) {}
-    }
-  }
-  if (_spatial51Pool.length < _SPATIAL51_POOL_MAX) _spatial51Pool.push(triple);
-}
-
-// Constant-power VBAP for 5.1. Source azimuth in radians (counter-
-// clockwise from forward). Returns { fl, fr, c, sl, sr } in [0, 1].
-// No rear-center speaker; back zone splits between SL and SR at half
-// power so directly behind the listener reads as a wide rear pair.
-function _vbap51(azRad) {
-  let az = azRad;
-  while (az >  Math.PI) az -= 2 * Math.PI;
-  while (az < -Math.PI) az += 2 * Math.PI;
-  let fl = 0, fr = 0, c = 0, sl = 0, sr = 0;
-  if (az >= 0) {
-    if (az <= _SPK51_AZ_FL) {
-      const t = az / _SPK51_AZ_FL;
-      c  = Math.cos(t * Math.PI / 2);
-      fl = Math.sin(t * Math.PI / 2);
-    } else if (az <= _SPK51_AZ_SL) {
-      const t = (az - _SPK51_AZ_FL) / (_SPK51_AZ_SL - _SPK51_AZ_FL);
-      fl = Math.cos(t * Math.PI / 2);
-      sl = Math.sin(t * Math.PI / 2);
-    } else {
-      const t = (az - _SPK51_AZ_SL) / (Math.PI - _SPK51_AZ_SL);
-      sl = Math.cos(t * Math.PI / 4);
-      sr = Math.sin(t * Math.PI / 4);
-    }
-  } else {
-    if (az >= _SPK51_AZ_FR) {
-      const t = az / _SPK51_AZ_FR;
-      c  = Math.cos(t * Math.PI / 2);
-      fr = Math.sin(t * Math.PI / 2);
-    } else if (az >= _SPK51_AZ_SR) {
-      const t = (az - _SPK51_AZ_FR) / (_SPK51_AZ_SR - _SPK51_AZ_FR);
-      fr = Math.cos(t * Math.PI / 2);
-      sr = Math.sin(t * Math.PI / 2);
-    } else {
-      const t = (az - _SPK51_AZ_SR) / (-Math.PI - _SPK51_AZ_SR);
-      sr = Math.cos(t * Math.PI / 4);
-      sl = Math.sin(t * Math.PI / 4);
-    }
-  }
-  return { fl, fr, c, sl, sr };
-}
-
-function _playSpatialSound51(type, worldPos, opts) {
-  if (!audio.initialized || !audio.ctx) return;
-  if (!worldPos || !camera) return playSound(type);
-  if (!audio.spatial51Bus) return _playSpatialSoundHRTF(type, worldPos, opts);
-  const triple = _acquireSpatial51(audio.ctx);
-  const { occl, lpfLFE, gFL, gFR, gC, gLFE, gSL, gSR, merger } = triple;
-  try {
-    camera.getWorldPosition(_spatialCamPos);
-    _spatialRelPos.subVectors(worldPos, _spatialCamPos);
-    const distToSource = _spatialRelPos.length();
-    _spatialInvQuat.copy(camera.quaternion).invert();
-    _spatialRelPos.applyQuaternion(_spatialInvQuat);
-    // camera-local: -Z forward, +X right; az = atan2(-x, -z) so left is positive.
-    const az = Math.atan2(-_spatialRelPos.x, -_spatialRelPos.z);
-
-    const refDist = (opts && opts.refDistance)  || 250;
-    const maxDist = (opts && opts.maxDistance)  || 8000;
-    const rolloff = (opts && opts.rolloffFactor) || 1.0;
-    let distGain;
-    if (distToSource <= refDist) distGain = 1.0;
-    else if (distToSource >= maxDist) distGain = 0.0;
-    else distGain = refDist / (refDist + rolloff * (distToSource - refDist));
-
-    const pan = _vbap51(az);
-    const _cScale = 0.85;
-    const _lfeScale = 0.35;
-
-    occl.type = 'lowpass';
-    let cutoff = 18000;
-    let occludedGain = 1.0;
-    if (distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
-      _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
-      _spatialRaycaster.set(_spatialCamPos, _spatialDir);
-      _spatialRaycaster.near = 0;
-      _spatialRaycaster.far = distToSource * 0.99;
-      const hits = _spatialRaycaster.intersectObjects(game.mapMeshes, false);
-      if (hits && hits.length) {
-        const h = hits[0];
-        const penetration = distToSource - h.distance;
-        const wallDepth = Math.min(1.0, penetration / 600);
-        cutoff = 2400 - 1500 * wallDepth;
-        occludedGain = 0.55 - 0.20 * wallDepth;
-      }
-    }
-    const t = audio.ctx.currentTime;
-    occl.frequency.setValueAtTime(cutoff, t);
-    occl.Q.setValueAtTime(0.707, t);
-
-    const g = distGain * occludedGain;
-    gFL.gain.setValueAtTime(pan.fl * g,           t);
-    gFR.gain.setValueAtTime(pan.fr * g,           t);
-    gC .gain.setValueAtTime(pan.c  * g * _cScale, t);
-    gSL.gain.setValueAtTime(pan.sl * g,           t);
-    gSR.gain.setValueAtTime(pan.sr * g,           t);
-    gLFE.gain.setValueAtTime(g * _lfeScale,       t);
-
-    lpfLFE.type = 'lowpass';
-    lpfLFE.frequency.setValueAtTime(80, t);
-    lpfLFE.Q.setValueAtTime(0.707, t);
-
-    occl.connect(gFL);    gFL .connect(merger, 0, _SPK51_FL);
-    occl.connect(gFR);    gFR .connect(merger, 0, _SPK51_FR);
-    occl.connect(gC);     gC  .connect(merger, 0, _SPK51_C);
-    occl.connect(lpfLFE); lpfLFE.connect(gLFE); gLFE.connect(merger, 0, _SPK51_LFE);
-    occl.connect(gSL);    gSL .connect(merger, 0, _SPK51_SL);
-    occl.connect(gSR);    gSR .connect(merger, 0, _SPK51_SR);
-    merger.connect(audio.spatial51Bus);
-
-    audio._spatialSink = occl;
-    playSound(type);
-    audio._spatialSink = null;
-
-    setTimeout(() => { _releaseSpatial51(triple); }, 4000);
-  } catch (e) {
-    audio._spatialSink = null;
-    _releaseSpatial51(triple);
-    playSound(type);
-  }
-}
-
-// (v8_2a) Public spatial-sound entry. Dispatches to the 5.1 path when
-// the system has a multi-channel destination, otherwise the HRTF path.
-function playSpatialSound(type, worldPos, opts) {
-  if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
-  return _playSpatialSoundHRTF(type, worldPos, opts);
 }
 
 // ============================================================
