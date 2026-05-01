@@ -13886,14 +13886,17 @@ function updateEffects(dt) {
     // --- Volumetric shader smoke: same expansion + drift + rotation as the
     // legacy smoke type but advances the shader's time uniform and fades
     // alpha through uBaseAlpha (ShaderMaterial has no plain .opacity). ---
+    // (v8VR 2026-04-30) Honor e.alphaMul so impact-scale smoke can be
+    // dimmer than explosion-scale smoke. Defaults to 0.85 (legacy value).
     else if (e.type === 'shaderSmoke') {
       const base = e.baseScale || 1;
       const smokeExpand = (1 + t * ((e.maxSize || 4) - 1)) * base;
       e.mesh.scale.set(smokeExpand, smokeExpand, smokeExpand);
       const fadeCurve = (1 - t) * (1 - t); // quadratic ease-out
+      const alphaBase = (typeof e.alphaMul === 'number') ? e.alphaMul : 0.85;
       if (e.mesh.material && e.mesh.material.uniforms) {
         e.mesh.material.uniforms.time.value = game.time;
-        e.mesh.material.uniforms.uBaseAlpha.value = 0.85 * fadeCurve;
+        e.mesh.material.uniforms.uBaseAlpha.value = alphaBase * fadeCurve;
       }
       if (e.rotVel) {
         e.mesh.rotation.x += e.rotVel.x * dt;
@@ -14407,17 +14410,66 @@ function spawnImpactSparks(pos, count) {
     });
   }
 
-  // --- Small scorch puff (dark smoke wisp) ---
-  // Pooled 'puff' = unit icosahedron; scaling by 4 recovers the old radius-4 call.
+  // --- Volumetric scorch smoke (real turbulent shader) ---
+  // (v8VR 2026-04-30) Upgraded from icosahedron + flat material to the
+  // same churning shader smoke that explosions use. Reads as proper
+  // turbulent volume under ACES tonemap. Costs one fresh ShaderMaterial
+  // per spawn (Three.js caches the compiled program; per-instance cost
+  // is just JS object creation, ~tens of microseconds).
+  //
+  // Cap-check against the existing SMOKE_MAX so impact spam can't
+  // starve explosion smoke. Oldest shaderSmoke gets force-expired when
+  // the cap is full, exactly matching the spawnExplosion behavior.
   if (count > 3) {
-    const puff = _acquireExplosionMesh('puff');
-    puff.position.copy(pos);
-    puff.scale.setScalar(4);
-    puff.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-    puff.material.color.setHex(0x111111);
-    puff.material.opacity = 0.3;
-    game.effects.push({ mesh: puff, lifetime: 0.6, age: 0, type: 'smoke', pooled: true, maxSize: 12, baseScale: 4,
-      rotVel: new THREE.Vector3((Math.random()-0.5)*3, (Math.random()-0.5)*3, (Math.random()-0.5)*3) });
+    const SMOKE_MAX = (typeof QUALITY !== 'undefined') ? QUALITY.smokeMax() : 12;
+    // Spawn 1 or 2 puffs depending on impact size; each goes through
+    // the cap check independently so a heavy impact still respects the
+    // budget on a low-end machine.
+    const puffCount = (count > 6) ? 2 : 1;
+    for (let p = 0; p < puffCount; p++) {
+      // Cap check: count current shaderSmoke effects, force-expire oldest if full.
+      let smokeAlive = 0, oldestIdx = -1, oldestAge = -1;
+      for (let i = 0; i < game.effects.length; i++) {
+        if (game.effects[i].type === 'shaderSmoke') {
+          smokeAlive++;
+          if (game.effects[i].age > oldestAge) { oldestAge = game.effects[i].age; oldestIdx = i; }
+        }
+      }
+      if (smokeAlive >= SMOKE_MAX && oldestIdx >= 0) {
+        const old = game.effects[oldestIdx];
+        if (old.mesh && old.mesh.parent) scene.remove(old.mesh);
+        if (old.mesh && old.mesh.material && old.mesh.material.dispose) old.mesh.material.dispose();
+        game.effects.splice(oldestIdx, 1);
+      }
+      // Warm dirty-gray smoke; still readable as smoke through ACES.
+      const smokeMat = _makeSmokeMaterial(0x554a3a, 0.55);
+      if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
+        smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
+      }
+      const smokeMesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
+      const ox = (Math.random() - 0.5) * 5;
+      const oy = (Math.random() - 0.5) * 5;
+      const oz = (Math.random() - 0.5) * 5;
+      smokeMesh.position.set(pos.x + ox, pos.y + oy, pos.z + oz);
+      const baseScale = 3 + Math.random() * 2;
+      smokeMesh.scale.setScalar(baseScale);
+      smokeMesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+      smokeMesh.frustumCulled = true;
+      smokeMesh.renderOrder = 1;
+      scene.add(smokeMesh);
+      game.effects.push({
+        mesh: smokeMesh, lifetime: 0.55 + Math.random() * 0.35, age: 0,
+        type: 'shaderSmoke',
+        maxSize: 4,           // smokeExpand = baseScale * (1 + t*3) -> ends at ~baseScale*4
+        baseScale: baseScale,
+        alphaMul: 0.55,       // dimmer than explosion plumes (0.85)
+        rotVel: new THREE.Vector3(
+          (Math.random() - 0.5) * 2.5,
+          (Math.random() - 0.5) * 2.5,
+          (Math.random() - 0.5) * 2.5
+        ),
+      });
+    }
   }
 
   // --- Dynamic lights: impact flash + warm glow ---
