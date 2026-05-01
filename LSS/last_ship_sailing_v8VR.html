@@ -7648,41 +7648,50 @@ function renderFrame() {
 }
 
 // Cartoon-style lighting (bright, high-contrast, minimal shadow).
-// (v8VR 2026-05-01) Intensities pulled down ~50% across the board.
-// The pre-Showcase legacy postFX path crushed highlights via custom
-// ACES inside its composite shader, so the original numbers were
-// tuned for that compression. Under cineFX (Showcase Mode default)
-// using Three.js's built-in ACES, those same values pushed
-// MeshStandardMaterials past white. New numbers preserve the
-// directional-key + opposite-fill + cool-under structure but at
-// half the magnitude. Walls (ShaderMaterial) are unaffected; this
-// only changes how ships read.
-//   ambient:   3.9 -> 1.6     (key fill)
-//   dir1 key:  5.0 -> 2.4
-//   dir2 fill: 3.1 -> 1.5
-//   dir3 cool: 1.8 -> 0.85
-//   point:     2.5 -> 1.1
-//   hemi:      3.1 -> 1.4
-const ambientLight = new THREE.AmbientLight(0x445577, 1.6);
+// (v8VR 2026-05-01 retune) Switched to the ship-preview's three-point
+// lighting character — that look is what the user actually likes.
+// Three changes vs prior:
+//   1) Color roles swapped: cool blue KEY (was warm), warm orange FILL
+//      (was cool). The cool/warm contrast is what makes the preview
+//      shot look cinematic.
+//   2) Added a true RIM light from behind / above so hull silhouettes
+//      catch a bright orange edge (read against dark space).
+//   3) Removed the center point light + dimmed hemi sharply; the
+//      preview uses pure ambient + 3-point and looks great. The point
+//      light was muddying mid-tones in combat shots.
+// Intensities scaled ~3x the preview's (0.25 / 0.65 / 0.28 / 0.18) since
+// the game scene is much larger and ships are typically further away
+// from the listener than in the preview head-shot framing.
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
 scene.add(ambientLight);
-const dirLight = new THREE.DirectionalLight(0xffeedd, 2.4);
+// Cool-blue KEY from upper-front. Bumped slightly (2.0 -> 2.3) to
+// reinforce the cool side after the warm fill+rim were toning ships
+// red.
+const dirLight = new THREE.DirectionalLight(0xbfd9ff, 2.3);
 dirLight.position.set(1000, 3000, 1500);
 scene.add(dirLight);
-// Second key light from a near-opposite direction so ships have light
-// on BOTH sides instead of one shadowed half.
-const dirLight2 = new THREE.DirectionalLight(0xb0c8e0, 1.5);
+// Warm FILL from below-back. (v8VR 2026-05-01 retune 3) Pulled even
+// closer to white. Was 0xffd6b0 (peach) — was tinting white hulls
+// pink. Now 0xffece0: very subtle warm bias, white hulls stay white.
+const dirLight2 = new THREE.DirectionalLight(0xffece0, 0.50);
 dirLight2.position.set(-1500, 2000, -1200);
 scene.add(dirLight2);
-// Cool under-fill stays for ground-up bounce-light feel.
-const dirLight3 = new THREE.DirectionalLight(0x8888ff, 0.85);
-dirLight3.position.set(-500, -1000, -500);
+// RIM from behind. (v8VR 2026-05-01 retune 3) Was 0xffd070 (yellow-
+// orange). Pulled closer to neutral cream 0xffeed0 so rim reads as
+// soft edge highlight without painting hulls warm.
+const dirLight3 = new THREE.DirectionalLight(0xffeed0, 0.28);
+dirLight3.position.set(-500, 1500, -2500);
 scene.add(dirLight3);
-const pointLight = new THREE.PointLight(0x6699ff, 1.1, 12000);
-pointLight.position.set(0, 500, 0);
-scene.add(pointLight);
+// (v8VR 2026-05-01) Center point light removed — was muddying mid-tones
+// against the cool/warm 3-point. Preview doesn't have one. Re-enable
+// here if combat shots feel too directional / lack ambient bounce.
+// const pointLight = new THREE.PointLight(0x6699ff, 1.1, 12000);
+// pointLight.position.set(0, 500, 0);
+// scene.add(pointLight);
 
-// Hemisphere light for cartoon-style ambient (sky/ground color split)
-const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 1.4);
+// Hemisphere light: kept very subtle. Sky/ground split adds gentle
+// vertical gradient to ship hulls that the directionals miss.
+const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
 scene.add(hemiLight);
 
 // ---- STARFIELD ----
@@ -8691,12 +8700,20 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     if (child.isMesh) {
       const mats = Array.isArray(child.material) ? child.material : [child.material];
       const newMats = mats.map(m => {
+        // (v8VR 2026-05-01 retune 2) Black ship parts (Slayer's hull)
+        // were reading as full-team-green because the team-color emissive
+        // dominated. White ship parts (Blaster) were reading as pink
+        // because warm fill+rim lights tinted them. Dropped emissive
+        // 0.10 -> 0.04, env 0.40 -> 0.20, metalness 0.30 -> 0.20 so the
+        // model's actual albedo colors (black, white, blue accents)
+        // come through and the team-color identification stays a faint
+        // glow rather than a hull-wide tint.
         const params = {
-          metalness: 0.72,
-          roughness: 0.45,
-          emissive: teamCol.clone().multiplyScalar(0.08),
+          metalness: 0.20,
+          roughness: 0.60,
+          emissive: teamCol.clone().multiplyScalar(0.04),
           emissiveIntensity: 1.0,
-          envMapIntensity: 0.90,
+          envMapIntensity: 0.20,
           transparent: !!(m && m.transparent),
           opacity: (m && m.opacity != null) ? m.opacity : 1.0,
         };
@@ -8883,15 +8900,20 @@ function createShipMesh(chassisData, teamColor, loadoutKey) {
   // Fresnel rim-shader injection survives the Phong->Standard switch because
   // <common> and <dithering_fragment> are present in both shader chunk sets.
   const teamCol = new THREE.Color(teamColor);
+  // (v8VR 2026-05-01 retune 3) Procedural ships use teamColor as their
+  // hull base — they're SUPPOSED to read as full team color. Different
+  // from GLTF model ships which have varied albedo. Keep these slightly
+  // more emissive so team identity stays clear, but pull metalness/env
+  // down to match the matte feel of the lighting retune.
   const hullMat = new THREE.MeshStandardMaterial({
     color: teamColor,
-    metalness: 0.78,
-    roughness: 0.42,
+    metalness: 0.30,
+    roughness: 0.60,
     normalMap: _hullNormalMap,
     normalScale: new THREE.Vector2(0.55, 0.55),
-    emissive: teamCol.clone().multiplyScalar(0.12),
+    emissive: teamCol.clone().multiplyScalar(0.10),
     emissiveIntensity: 1.0,
-    envMapIntensity: 0.85
+    envMapIntensity: 0.25
   });
   // Restored to original team-colored fresnel rim. Procedural ships are
   // already entirely team-colored (color: teamColor + normalMap detail),
@@ -13042,43 +13064,62 @@ class ClusterObstacle {
           smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
         }
         const smokeMesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
-        smokeMesh.position.copy(this.position);
+        // (v8VR 2026-05-01) Slow radial plume. Each emission picks a
+        // random unit direction, spawns the plume offset slightly along
+        // it, then drifts the plume outward at slow speed for its
+        // lifetime. Multiple emissions over time = star-burst pattern
+        // radiating from the cluster center.
+        const _theta = Math.random() * Math.PI * 2;
+        const _phi   = Math.acos(2 * Math.random() - 1);
+        const _sinP  = Math.sin(_phi);
+        const _dir = new THREE.Vector3(
+          _sinP * Math.cos(_theta),
+          Math.cos(_phi),
+          _sinP * Math.sin(_theta)
+        );
+        const _startOffset = this.clusterScale * 0.3;
+        smokeMesh.position.copy(this.position).addScaledVector(_dir, _startOffset);
         const baseScale = this.clusterScale * sizeMul;
         smokeMesh.scale.setScalar(baseScale);
         smokeMesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
         smokeMesh.frustumCulled = true;
         smokeMesh.renderOrder = 1;
         scene.add(smokeMesh);
-        // (v8VR 2026-04-30 retune) Thicker + slower:
-        //   - alphaMul 0.7 -> 0.92 (much more occlusion, hides cluster pieces)
-        //   - maxSize 2.0 -> 1.25 (less ballooning during lifetime)
-        //   - rotVel ±0.6 -> ±0.18 (gentle drift, not visible swirl)
-        //   - lifetime kept long (2.5-3s) so the cloud lingers as one mass
+        // Drift speed: slow radial. Combined with longer lifetime
+        // (3-4s) the plume reaches ~1.5x clusterScale outward by end
+        // of life, expanding as it goes. Multiple plumes in different
+        // directions = visible star-burst.
+        const _driftSpeed = this.clusterScale * 0.45;
+        const _drift = _dir.clone().multiplyScalar(_driftSpeed);
         game.effects.push({
-          mesh: smokeMesh, lifetime: 2.5 + Math.random() * 0.5, age: 0,
+          mesh: smokeMesh, lifetime: 3.0 + Math.random() * 1.0, age: 0,
           type: 'shaderSmoke',
-          maxSize: 1.25,           // smokeExpand = baseScale * (1 + t * 0.25) -> ends at ~1.25x
+          maxSize: 2.2,            // expand more as it drifts (was 1.25)
           baseScale: baseScale,
-          alphaMul: 0.92,          // much closer to opaque
+          alphaMul: 0.85,          // slightly less opaque so overlapping plumes blend
           rotVel: new THREE.Vector3(
-            (Math.random() - 0.5) * 0.18,
-            (Math.random() - 0.5) * 0.18,
-            (Math.random() - 0.5) * 0.18
+            (Math.random() - 0.5) * 0.12,
+            (Math.random() - 0.5) * 0.12,
+            (Math.random() - 0.5) * 0.12
           ),
+          drift: _drift,
         });
       };
 
-      // (v8VR 2026-05-01) Global body cloud RE-ENABLED — molecule look
-      // reverted; we're back to the global black-smoke + lightning combo
-      // that worked best. Two staggered emitters keep at least one plume
-      // alive so the silhouette stays continuous.
+      // (v8VR 2026-05-01) Radial plumes: spawn cadence accelerated so
+      // multiple plumes are alive simultaneously in different outward
+      // directions, painting a star-burst pattern. Was 1.6-2.0s/emitter
+      // when the cloud was static; now ~0.5-0.8s so 4-6 plumes are alive
+      // at any moment. Plume size pulled in too (was 0.85-1.15x; now
+      // 0.5-0.7x clusterScale) since plumes drift outward and EXPAND on
+      // their own — no need to start big.
       if (this._cloudTimerA <= 0) {
-        this._cloudTimerA = 1.6 + Math.random() * 0.4;
-        _spawnClusterPlume(0.95 + Math.random() * 0.20);
+        this._cloudTimerA = 0.50 + Math.random() * 0.30;
+        _spawnClusterPlume(0.55 + Math.random() * 0.15);
       }
       if (this._cloudTimerB <= 0) {
-        this._cloudTimerB = 1.6 + Math.random() * 0.4;
-        _spawnClusterPlume(0.85 + Math.random() * 0.20);
+        this._cloudTimerB = 0.55 + Math.random() * 0.30;
+        _spawnClusterPlume(0.50 + Math.random() * 0.15);
       }
 
       // ---- Electric accents on top of the body cloud ----
@@ -14249,6 +14290,14 @@ function updateEffects(dt) {
         e.mesh.rotation.x += e.rotVel.x * dt;
         e.mesh.rotation.y += e.rotVel.y * dt;
         e.mesh.rotation.z += e.rotVel.z * dt;
+      }
+      // (v8VR 2026-05-01) Optional drift vector for radial plumes:
+      // shaderSmoke spawns can pass `e.drift` (Vector3 in world units/sec)
+      // to make a plume slowly travel outward from its origin. Used by
+      // the cluster radial-plume emitter; legacy callers without drift
+      // remain stationary as before.
+      if (e.drift) {
+        e.mesh.position.addScaledVector(e.drift, dt);
       }
     }
     // --- Vortex Laser Shot beam: a one-shot volumetric cylinder using the
