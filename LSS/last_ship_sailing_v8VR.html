@@ -12682,6 +12682,85 @@ class ClusterObstacle {
     } else {
       this._buildChildren();
     }
+    // (v8VR 2026-05-01) Distortion / heat-shimmer shell. A sphere mesh
+    // wrapping the cluster, rendered with a custom shader that uses
+    // fresnel + 3D noise to suggest energy-field warping. Pure visual;
+    // no collision. The smoke inside (black) carries the occluding mass;
+    // this shell carries the "alive electrical entity" feel.
+    this._buildDistortionShell();
+  }
+
+  _buildDistortionShell() {
+    if (typeof scene === 'undefined' || !THREE.ShaderMaterial) return;
+    const r = this.clusterScale * 1.05;     // hugs the cluster bounds + ~5% margin
+    const geo = new THREE.IcosahedronGeometry(r, 3);
+    const mat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      uniforms: {
+        time:      { value: Math.random() * 100 },   // randomize per-cluster phase
+        intensity: { value: 1.0 },
+      },
+      vertexShader: [
+        'varying vec3 vWorldPos;',
+        'varying vec3 vNormal;',
+        'varying vec3 vViewDir;',
+        'void main() {',
+        '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+        '  vWorldPos = wp.xyz;',
+        '  vNormal = normalize(normalMatrix * normal);',
+        '  vViewDir = normalize(cameraPosition - wp.xyz);',
+        '  gl_Position = projectionMatrix * viewMatrix * wp;',
+        '}'
+      ].join('\n'),
+      fragmentShader: [
+        'uniform float time;',
+        'uniform float intensity;',
+        'varying vec3 vWorldPos;',
+        'varying vec3 vNormal;',
+        'varying vec3 vViewDir;',
+        'float hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }',
+        'float noise3(vec3 p) {',
+        '  vec3 i = floor(p); vec3 f = fract(p); f = f*f*(3.0-2.0*f);',
+        '  return mix(mix(mix(hash(i+vec3(0,0,0)), hash(i+vec3(1,0,0)), f.x),',
+        '                 mix(hash(i+vec3(0,1,0)), hash(i+vec3(1,1,0)), f.x), f.y),',
+        '             mix(mix(hash(i+vec3(0,0,1)), hash(i+vec3(1,0,1)), f.x),',
+        '                 mix(hash(i+vec3(0,1,1)), hash(i+vec3(1,1,1)), f.x), f.y), f.z);',
+        '}',
+        'void main() {',
+        // Fresnel: strongest at glancing angles -> rim glow.
+        '  float fres = pow(1.0 - abs(dot(vNormal, vViewDir)), 1.8);',
+        // 3D noise sampled at world position, animated. Two streams crossing.
+        '  vec3 nPos = vWorldPos * 0.012;',
+        '  float n1 = noise3(nPos + vec3(time * 0.4, time * 0.3, 0.0));',
+        '  float n2 = noise3(nPos * 2.1 + vec3(0.0, time * 0.5, time * 0.2));',
+        '  float shimmer = smoothstep(0.35, 0.75, mix(n1, n2, 0.5));',
+        // Color: cool cyan to magenta-purple, biased by shimmer noise.
+        // Fits the existing electric-arc accent palette.
+        '  vec3 baseCol = mix(vec3(0.25, 0.55, 1.05), vec3(0.95, 0.30, 1.10), shimmer);',
+        // Final intensity: rim * intensity * (low base + shimmer pop).
+        '  float a = fres * intensity * (0.30 + shimmer * 0.55);',
+        '  a = clamp(a, 0.0, 0.92);',
+        // Color also boosted by fresnel so the rim glows brighter than core.
+        '  gl_FragColor = vec4(baseCol * fres * 1.3, a);',
+        '}'
+      ].join('\n'),
+    });
+    this.distortionMesh = new THREE.Mesh(geo, mat);
+    this.distortionMesh.position.copy(this.position);
+    this.distortionMesh.frustumCulled = true;
+    this.distortionMesh.renderOrder = 2;     // after walls + smoke, before HUD
+    scene.add(this.distortionMesh);
+  }
+
+  _disposeDistortionShell() {
+    if (!this.distortionMesh) return;
+    if (this.distortionMesh.parent) this.distortionMesh.parent.remove(this.distortionMesh);
+    if (this.distortionMesh.geometry) this.distortionMesh.geometry.dispose();
+    if (this.distortionMesh.material) this.distortionMesh.material.dispose();
+    this.distortionMesh = null;
   }
 
   _buildChildren() {
@@ -12756,6 +12835,14 @@ class ClusterObstacle {
         this.position.addScaledVector(this.pushVel, dt);
         this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
       }
+      // (v8VR 2026-05-01) Distortion shell follows the cluster + animates.
+      // Time uniform driven by game.time for a session-stable phase per cluster.
+      if (this.distortionMesh) {
+        this.distortionMesh.position.copy(this.position);
+        if (this.distortionMesh.material && this.distortionMesh.material.uniforms) {
+          this.distortionMesh.material.uniforms.time.value = (typeof game !== 'undefined') ? game.time : 0;
+        }
+      }
       // Rotate cluster as a rigid group; each child follows its rotated offset
       this.rotation.x += this.rotSpeed.x * dt;
       this.rotation.y += this.rotSpeed.y * dt;
@@ -12829,10 +12916,12 @@ class ClusterObstacle {
           if (old.mesh && old.mesh.material && old.mesh.material.dispose) old.mesh.material.dispose();
           game.effects.splice(oldestIdx, 1);
         }
-        // Cool-blue dirty smoke for the cluster storm. Slightly darker than
-        // explosion plumes (0x222018) since these need to read as cool
-        // electrical haze, not warm combustion.
-        const smokeMat = _makeSmokeMaterial(0x1a2030, 0.85);
+        // (v8VR 2026-04-30 retune) Black smoke (was 0xb030ff bright purple).
+        // The bright color competed with the bloom + made the cloud feel
+        // ambient. Pure-black-ish smoke reads as a hard occluding silhouette
+        // and lets the new distortion shell (added below) carry the energy
+        // / sci-fi feel via chromatic shimmer at the boundary.
+        const smokeMat = _makeSmokeMaterial(0x080812, 1.0);
         if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
           smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
         }
@@ -12844,29 +12933,37 @@ class ClusterObstacle {
         smokeMesh.frustumCulled = true;
         smokeMesh.renderOrder = 1;
         scene.add(smokeMesh);
-        // Long lifetime (2.5-3s) plus 2x slow expansion paints a continuous
-        // mass without re-spawn churn.
+        // (v8VR 2026-04-30 retune) Thicker + slower:
+        //   - alphaMul 0.7 -> 0.92 (much more occlusion, hides cluster pieces)
+        //   - maxSize 2.0 -> 1.25 (less ballooning during lifetime)
+        //   - rotVel ±0.6 -> ±0.18 (gentle drift, not visible swirl)
+        //   - lifetime kept long (2.5-3s) so the cloud lingers as one mass
         game.effects.push({
           mesh: smokeMesh, lifetime: 2.5 + Math.random() * 0.5, age: 0,
           type: 'shaderSmoke',
-          maxSize: 2.0,            // smokeExpand = baseScale * (1 + t * 1.0) -> ends at ~2x baseScale
+          maxSize: 1.25,           // smokeExpand = baseScale * (1 + t * 0.25) -> ends at ~1.25x
           baseScale: baseScale,
-          alphaMul: 0.7,           // dense enough to occlude, not opaque-black
+          alphaMul: 0.92,          // much closer to opaque
           rotVel: new THREE.Vector3(
-            (Math.random() - 0.5) * 0.6,
-            (Math.random() - 0.5) * 0.6,
-            (Math.random() - 0.5) * 0.6
+            (Math.random() - 0.5) * 0.18,
+            (Math.random() - 0.5) * 0.18,
+            (Math.random() - 0.5) * 0.18
           ),
         });
       };
 
+      // (v8VR 2026-04-30 retune 2) Sizes pulled in further (~0.85x
+      // clusterScale) so the cloud snugs the cluster's bounding sphere
+      // instead of overflowing it. Combined with the alphaMul 0.92 +
+      // maxSize 1.25 in _spawnClusterPlume, this reads as a thick
+      // pinned-on cloud, not a wandering mist.
       if (this._cloudTimerA <= 0) {
         this._cloudTimerA = 1.6 + Math.random() * 0.4;
-        _spawnClusterPlume(2.2 + Math.random() * 0.4);
+        _spawnClusterPlume(0.95 + Math.random() * 0.20);
       }
       if (this._cloudTimerB <= 0) {
         this._cloudTimerB = 1.6 + Math.random() * 0.4;
-        _spawnClusterPlume(2.0 + Math.random() * 0.4);
+        _spawnClusterPlume(0.85 + Math.random() * 0.20);
       }
 
       // ---- Electric accents on top of the body cloud ----
@@ -12901,12 +12998,21 @@ class ClusterObstacle {
     if (!anyAlive) {
       this.alive = false;
       this.respawnTimer = this.respawnTime;
+      // (v8VR 2026-05-01) Tear down the distortion shell when the cluster
+      // is fully destroyed. Recreated on respawn (if ever; respawn is
+      // currently disabled in the alive===false branch above).
+      this._disposeDistortionShell();
     }
   }
 
   breakApart(hitPos, hitDir) {
     if (this.broken) return;
     this.broken = true;
+    // (v8VR 2026-05-01) The distortion shell signals "single contained
+    // entity"; once the cluster breaks apart, that signal stops being
+    // true. Tear it down immediately so flying pieces aren't surrounded
+    // by an enclosing shimmer.
+    this._disposeDistortionShell();
     const src = hitPos || this.position;
     for (const c of this.children) {
       if (!c.alive) continue;
@@ -22354,7 +22460,13 @@ const WALL_PATTERN_NAMES = [
   // uPattern via `(game.wallPattern | 0) % WALL_PATTERN_NAMES.length`,
   // which means index 20 in this array maps to a uPattern of 20 ; the
   // shader-side code maps that into the composite branch below.
-  'Lab Composite (3-layer)'
+  'Lab Composite (3-layer)',
+  // (v8VR 2026-05-01) "Digital" preset: another multi-layer composite,
+  // routed through the same cosmicField() shader path as Lab Composite.
+  // BG = Layered Cube (game 19), FG1 = Cyber Datamosh (game 15) Multiply,
+  // FG2 = Plasma FBM (game 6) Multiply. Per-layer values lifted from
+  // Mixed Lab v2 export and baked into MULTI_LAYER_PRESETS below.
+  'Digital'
 ];
 
 const WALL_PARAM_DEFS = [
@@ -22428,6 +22540,13 @@ function pushWallParamsToUniforms() {
   }
   // Pattern selector also lives on game.wallPattern
   if (mat.uniforms.uPattern) mat.uniforms.uPattern.value = (game.wallPattern | 0) % WALL_PATTERN_NAMES.length;
+  // (v8VR 2026-05-01) If the active wallPattern is a multi-layer preset
+  // (Lab Composite 20 or Digital 21), swap the per-layer bg/fg/fg2
+  // uniforms to its baked values. Single-pattern presets ignore this.
+  // Covers the boot path where setWallPattern isn't necessarily called.
+  if (typeof applyMultiLayerPreset === 'function') {
+    applyMultiLayerPreset((game.wallPattern | 0) % WALL_PATTERN_NAMES.length);
+  }
 }
 
 // Update one wall param and live-push it into the active shader.
@@ -22858,6 +22977,71 @@ function _switchToPatternSlot(patternIdx) {
 // ShaderMaterial uniform if a level is loaded, persists the choice, refreshes
 // the settings panel if open (so the lab dropdown stays in sync), and shows
 // a brief HUD toast. Safe to call before a level exists.
+// (v8VR 2026-05-01) Multi-layer composite presets. Both Lab Composite (20)
+// and Digital (21) route through the cosmicField() shader path with the
+// per-layer bg/fg/fg2 uniforms; this table defines what those uniforms
+// should be set to when each preset is selected. Pattern IDs are GAME-side
+// indices (translated from the lab's pattern numbering by name match).
+//
+// Adding more presets later: append to this table, append a name to
+// WALL_PATTERN_NAMES, and add the new index to the shader's lab-composite
+// branch ('uPattern == 20 || uPattern == 21 || uPattern == 22 ...').
+const MULTI_LAYER_PRESETS = {
+  // Index 20: Lab Composite. Mirrors the wall material's hardcoded init.
+  20: {
+    bgPatternId: 17,                                  // Panel Maze (game id)
+    bgTime: 1.0,
+    u_iters_bg: 3, u_scale_bg: 0.0012, u_invBase_bg: 3.0,
+    u_hueSpin_bg: 0.115, u_satBase_bg: 0.0,
+    K_COSMIC_bg: 0.65,
+    fgPatternId: 19,                                  // Layered Cube (game id)
+    fgAlpha: 2.0, fgBlend: 4 /* Mix */, fgHue: 0.06, fgTime: 0.3,
+    u_iters_fg: 12, u_scale_fg: 0.02, u_invBase_fg: 2.0,
+    u_hueSpin_fg: 0.09, u_satBase_fg: 0.92,
+    K_COSMIC_fg: 0.65,
+    fg2PatternId: 3,                                  // Wave Interference (game id)
+    fg2Alpha: 0.75, fg2Blend: 1 /* Multiply */, fg2Hue: 0.3, fg2Time: 0.95,
+    u_iters_fg2: 7, u_scale_fg2: 0.0012, u_invBase_fg2: 16.7,
+    u_hueSpin_fg2: 0.115, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 1.5,
+  },
+  // Index 21: Digital. User-authored preset; lab ids translated to game ids:
+  //   lab 18 (Layered Cube) -> game 19
+  //   lab 15 (Cyber Datamosh) -> game 15
+  //   lab 6  (Panel Maze)   -> game 17
+  21: {
+    bgPatternId: 19,                                  // Layered Cube
+    bgTime: 0.1,
+    u_iters_bg: 12, u_scale_bg: 0.0005, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    K_COSMIC_bg: 0.3,
+    fgPatternId: 15,                                  // Cyber Datamosh
+    fgAlpha: 0.45, fgBlend: 1 /* Multiply */, fgHue: 0.06, fgTime: 0.1,
+    u_iters_fg: 7, u_scale_fg: 0.0016, u_invBase_fg: 3.7,
+    u_hueSpin_fg: 0.07, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 2.2,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.5,
+  },
+};
+
+// Apply a multi-layer preset's per-layer values to the wall material's
+// shader uniforms. No-op for presets the table doesn't cover (single
+// patterns); callers should check before relying on it.
+function applyMultiLayerPreset(idx) {
+  const preset = MULTI_LAYER_PRESETS[idx];
+  if (!preset) return false;
+  const u = game.levelMaterial && game.levelMaterial.uniforms;
+  if (!u) return false;
+  for (const k of Object.keys(preset)) {
+    if (u[k]) u[k].value = preset[k];
+  }
+  return true;
+}
+
 function setWallPattern(idx) {
   const N = WALL_PATTERN_NAMES.length;
   idx = (idx | 0) % N;
@@ -22868,6 +23052,11 @@ function setWallPattern(idx) {
   // the visible rendering matches the new slot's tuned values.
   _switchToPatternSlot(idx);
   pushWallParamsToUniforms();
+  // (v8VR 2026-05-01) Multi-layer composite presets (20 = Lab Composite,
+  // 21 = Digital): swap the per-layer bg/fg/fg2 uniforms to this preset's
+  // values. Single-pattern presets (0-19) ignore this and use the solo
+  // pattern path instead.
+  applyMultiLayerPreset(idx);
   if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uPattern) {
     game.levelMaterial.uniforms.uPattern.value = idx;
   }
@@ -25091,7 +25280,12 @@ function buildRoomGraphLevel(level) {
       //     Array) is handled by its own branch above this code path.
       // Pattern cycling (P key) cycles uPattern through 0-20.
       '    vec3 cosmic;',
-      '    if (uPattern == 20) {',
+      // (v8VR 2026-05-01) Multi-layer composite presets: Lab Composite (20)
+      // and Digital (21). Both route through cosmicField() with the per-
+      // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
+      // those uniforms to the correct preset's values when wallPattern
+      // changes.
+      '    if (uPattern == 20 || uPattern == 21) {',
       '      cosmic = cosmicField(vWorldPos, zoneColor, time);',
       '    } else {',
       // Solo mode: use the solo uniforms (managed by the wallParams per-
@@ -25105,20 +25299,16 @@ function buildRoomGraphLevel(level) {
       // Pure Black Base: render only the pattern over black. No dark floor,
       // no zone-color tint, no fresnel rim, no diffuse/AO shaping, no
       // zone-color floor. The geometry disappears and only the pattern reads.
-      // (v7.1 lab-match) Drop fracPulse * shimmer and K_COSMIC_BRIGHTNESS.
-      // The lab pipeline outputs the cosmic composite directly; matching that
-      // here keeps in-game walls sharp instead of breath-modulated.
-      // (v7.1 lab-match, 2026-04-29 attempt 2) Replicate the lab's full
-      // post-cosmic pipeline so layer interactions look the same:
-      //   fresnel rim added in zoneC * 0.15
-      //   then soft Reinhard tonemap c/(1+c*0.35) * 1.35
-      // The lab does this BEFORE handing to a no-post-process canvas. Game
-      // hands to ACES + bloom afterward, so this matched lab pre-compression
-      // gets further compressed downstream (the wall ends up slightly darker
-      // than the lab) but layer-relative blends now read like the lab.
-      '      vec3 vd_lab = normalize(cameraPosition - vWorldPos);',
-      '      float fres_lab = pow(1.0 - abs(dot(vNormal, vd_lab)), 2.0);',
-      '      c = cosmic + zoneColor * fres_lab * 0.15;',
+      // (v8VR 2026-04-30) Earlier attempts added a zone-color fresnel rim
+      // here at * 0.15 to match the lab's pipeline. But the lab uses one
+      // tint color across the whole tunnel; the game has up to 8 different
+      // room zone colors, so the same * 0.15 fresnel paints the walls in a
+      // chromatic quilt that diverges from the lab look. With Pure Black
+      // Base ON we now render ONLY the cosmic composite (no zone tint at
+      // all), then the same Reinhard pre-tonemap so highlight rolloff
+      // matches the lab. Game and lab now look identical when both are
+      // showing the same pattern.
+      '      c = cosmic;',
       '      c = c / (1.0 + c * 0.35);',
       '      c *= 1.35;',
       '    } else {',
@@ -30598,6 +30788,19 @@ renderer.setAnimationLoop(gameLoop);
 if (typeof joinRoom  === 'function') window.__real_joinRoom  = joinRoom;
 if (typeof startSolo === 'function') window.__real_startSolo = startSolo;
 if (typeof window.__lssReplayPending === 'function') window.__lssReplayPending();
+
+// v8VR: dev-console handles. The whole inline script is wrapped in
+// _bootLSS() for the THREE module-import bootstrap, which means top-level
+// `const`s like `game` / `player` / `scene` / `camera` / `renderer` are
+// function-scoped, not global. Expose them on window so DevTools console
+// can poke at runtime state for debugging + tuning.
+window.game     = game;
+window.player   = player;
+window.scene    = scene;
+window.camera   = camera;
+window.renderer = renderer;
+window.input    = input;
+window.audio    = audio;
 
 } // end _bootLSS
 
