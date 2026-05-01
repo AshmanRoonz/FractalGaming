@@ -643,6 +643,12 @@ body.vr-active .hit-marker {
   font-size: 11px; cursor: pointer; letter-spacing: 1px;
 }
 #settings-reset:hover { background: rgba(255,60,60,0.15); }
+#settings-export, #settings-import {
+  margin-top: 8px; margin-right: 6px; padding: 6px 18px; background: rgba(120,200,255,0.10);
+  border: 1px solid rgba(120,200,255,0.5); color: #88ccff; font-family: 'Courier New', monospace;
+  font-size: 11px; cursor: pointer; letter-spacing: 1px;
+}
+#settings-export:hover, #settings-import:hover { background: rgba(120,200,255,0.22); }
 
 /* Damage direction indicators */
 .damage-indicator {
@@ -22027,6 +22033,9 @@ function buildSettingsPage() {
     </div>
 
     <button id="settings-close">CLOSE</button>
+    <button id="settings-export">EXPORT SETTINGS</button>
+    <button id="settings-import">IMPORT SETTINGS</button>
+    <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none;">
     <button id="settings-reset">RESET TO DEFAULTS</button>
   `;
 
@@ -22583,6 +22592,102 @@ function buildSettingsPage() {
 
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
+
+  // (v8_1VR) Export Settings : flushes current saved settings to localStorage
+  // (so anything not yet persisted gets included), then downloads the JSON
+  // blob as `lss_settings_<date>.json`. Anyone you share the file with can
+  // import it via the IMPORT SETTINGS button to clone your config.
+  overlay.querySelector('#settings-export').addEventListener('click', () => {
+    try {
+      // Make sure the latest UI state is persisted before we read it back.
+      if (typeof saveSettings === 'function') saveSettings();
+      const raw = localStorage.getItem('lss_settings') || '{}';
+      // Pretty-print so the JSON is human-readable if someone wants to peek
+      // before importing.
+      let pretty = raw;
+      try { pretty = JSON.stringify(JSON.parse(raw), null, 2); } catch (_) {}
+      const blob = new Blob([pretty], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      a.href = url;
+      a.download = 'lss_settings_' + stamp + '.json';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 200);
+    } catch (e) {
+      console.warn('[settings] export failed:', e);
+      alert('Export failed: ' + (e && e.message ? e.message : e));
+    }
+  });
+
+  // (v8_1VR) Import Settings : reads a previously-exported JSON file, writes
+  // it to localStorage as `lss_settings`, then re-runs loadSettings() and
+  // rebuilds the panel so changes show immediately. Some settings (audio
+  // volumes, key/style, pattern) apply live ; a few (e.g. wall pattern
+  // presets) update the next time the level material rebuilds.
+  const importBtn  = overlay.querySelector('#settings-import');
+  const importFile = overlay.querySelector('#settings-import-file');
+  if (importBtn && importFile) {
+    importBtn.addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = function() {
+        try {
+          const text = reader.result;
+          // Validate it parses before we write anything.
+          const parsed = JSON.parse(text);
+          if (!parsed || typeof parsed !== 'object') {
+            throw new Error('not a settings object');
+          }
+          localStorage.setItem('lss_settings', JSON.stringify(parsed));
+          // Re-apply settings to the live engine.
+          if (typeof loadSettings === 'function') loadSettings();
+          // Re-apply music style + volume + ceiling now that audio.* fields
+          // have been refreshed by loadSettings.
+          try {
+            if (typeof musicSetStyle    === 'function' && audio && audio.musicStyle)   musicSetStyle(audio.musicStyle);
+            if (typeof musicSetCeiling  === 'function' && audio)                       musicSetCeiling(audio.musicCeiling || 'normal');
+            if (typeof musicSetEnabled  === 'function' && audio)                       musicSetEnabled(audio.musicEnabled !== false);
+            if (typeof musicSetVolume   === 'function' && audio && audio.userVol && typeof audio.userVol.music === 'number') musicSetVolume(audio.userVol.music);
+          } catch (_) {}
+          // Re-apply wall opacity onto the live shader uniform if present.
+          try {
+            if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uOpacity) {
+              game.levelMaterial.uniforms.uOpacity.value = (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0;
+            }
+          } catch (_) {}
+          // Re-apply FOV.
+          try {
+            if (typeof camera !== 'undefined' && camera && typeof input.fovDeg === 'number') {
+              camera.fov = input.fovDeg;
+              camera.updateProjectionMatrix();
+            }
+          } catch (_) {}
+          // Re-apply master / sfx / ambient volumes onto the live nodes.
+          try {
+            if (audio.masterGain) audio.masterGain.gain.value = 0.85 * audio.userVol.master;
+            if (audio.sfxBus)     audio.sfxBus.gain.value = audio.userVol.sfx;
+          } catch (_) {}
+          // Rebuild the settings panel so sliders/dropdowns reflect new values.
+          if (typeof buildSettingsPage === 'function') buildSettingsPage();
+          openSettings();
+        } catch (e) {
+          console.warn('[settings] import failed:', e);
+          alert('Import failed: ' + (e && e.message ? e.message : e) + '\n\nMake sure the file is a valid LSS settings JSON.');
+        }
+      };
+      reader.onerror = function() { alert('Couldn\'t read the file.'); };
+      reader.readAsText(f);
+      // Clear so picking the same file twice still triggers a change event.
+      importFile.value = '';
+    });
+  }
 
   // Reset button
   overlay.querySelector('#settings-reset').addEventListener('click', () => {
