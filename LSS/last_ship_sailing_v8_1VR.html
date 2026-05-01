@@ -27353,12 +27353,24 @@ function initAudio() {
       catch (__) { audio.ctx = new _AC(); }
     }
 
+    // (v8_1VR) Final output subsonic safety HPF. Sits between hiCut and the
+    // actual audio destination so EVERYTHING (master/SFX, ambient, music)
+    // gets its sub-bass below 40 Hz rolled off before it hits the speakers.
+    // 5.1 systems with subwoofers reproduce that range fast enough to pump
+    // the whole speaker array into crackling/distortion under load. Stereo
+    // laptop speakers don't reproduce it at all so they were unaffected.
+    audio.outputSubCut = audio.ctx.createBiquadFilter();
+    audio.outputSubCut.type = 'highpass';
+    audio.outputSubCut.frequency.value = 40;
+    audio.outputSubCut.Q.value = 0.7;
+    audio.outputSubCut.connect(audio.ctx.destination);
+
     // High-frequency rolloff: gentle lowpass to tame harsh highs across all sounds
     audio.hiCut = audio.ctx.createBiquadFilter();
     audio.hiCut.type = 'lowpass';
     audio.hiCut.frequency.value = 3500; // roll off above 3.5kHz
     audio.hiCut.Q.value = 0.7; // gentle slope (no resonance peak)
-    audio.hiCut.connect(audio.ctx.destination);
+    audio.hiCut.connect(audio.outputSubCut);
 
     // (v8_1VR) Subsonic high-pass : rolls off everything below ~45 Hz BEFORE
     // the master compressor sees it. Heavy combat stacks lots of low-end
@@ -31363,10 +31375,16 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   }
 
   // Bass + pad + chord changes happen on beat boundaries.
+  // (v8_1VR audio fix) Bass register changed from `keyMidi - 12` (one octave
+  // BELOW the tonic, 27-37 Hz on most styles) to `keyMidi` (the tonic
+  // itself, 55-73 Hz). The sub-octave bass was driving subwoofers into
+  // crackling on desktops with real low-end response. The tonic-octave
+  // bass still reads as bass against the pad (24 semitones above) and
+  // sits cleanly above the 45 Hz output HPF below.
   if (ptn.bass) {
     const bassNote = ptn.bass(beatIdx, music.intensity);
     if (bassNote != null) {
-      const freq = _musicMidiHz(music.keyMidi - 12 + bassNote);
+      const freq = _musicMidiHz(music.keyMidi + bassNote);
       const dur = secPerBeat * (ptn.bassDurBeats || 1);
       _musicSynthBass(freq, 0.9, beatTime, out, dur);
     }
