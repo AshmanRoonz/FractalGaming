@@ -2144,14 +2144,13 @@ function buildMapSelector() {
 // the checkmark. Safe to call directly (used by click handlers and cycleMap).
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
-  // (v9a) Lock once the match has been confirmed. applyWorldSync sets
-  // net.worldMap when match_start is broadcast/received ; from that point
-  // on, the map is committed and a stray selectMap() call (e.g. from a
-  // ship-select UI side-effect) must NOT change it locally OR broadcast.
-  // Without this guard, one peer changing ships could re-fire selectMap
-  // with a different key, mutating their local map and then sending a
-  // map_change to peers, leaving each player on a different arena.
-  if (net.active && net.worldMap) return;
+  // (v9a) Lock only while the launch countdown is actively ticking.
+  // net.startScheduledAt holds the wall-clock ms when match_start fires ;
+  // it's set the moment both peers are ready (the countdown begins) and
+  // cleared when the timer fires or someone un-readies. This is the
+  // narrowest possible window: editable until the countdown starts,
+  // editable again if the countdown gets cancelled.
+  if (net.active && net.startScheduledAt) return;
   // (v6.7) Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
   // already selected stops the storm without needing a per-call suppress flag.
@@ -20827,11 +20826,16 @@ function returnToRootMenu() {
   player.damageDealt = 0;
 
   // (v9a) Release the map lock so the next match can pick a new arena.
-  // selectMap() short-circuits while net.worldMap is set ; clearing it here
-  // re-opens the picker for both peers when they're back at the root menu.
+  // selectMap() short-circuits while net.worldMap or net.myReady is set ;
+  // clear both so the picker is fully editable again. Peer.ready flags
+  // also reset so the start handshake doesn't fire stale.
   if (typeof net !== 'undefined') {
     net.worldMap = null;
     net.worldSeed = null;
+    net.myReady = false;
+    if (net.peers) {
+      for (const peer of net.peers.values()) peer.ready = false;
+    }
   }
 
   // Flip state first; _menuActive / Tab-intercept / gamepad hold all gate on
