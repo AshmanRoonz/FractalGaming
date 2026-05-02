@@ -13148,13 +13148,25 @@ class ClusterObstacle {
             (Math.random() - 0.5) * 0.12
           ),
           drift: _drift,
-          // (v8_2a) These plumes drift outward from the cluster and end up
-          // floating "alone" away from the source object. Tag them so the
-          // updateEffects shaderSmoke tick fires periodic lightning bolts
-          // inside the plume volume; "standalone clouds get lightning".
+          // (v8_2a) Cluster plumes that drift away from the source object
+          // get three behaviors handled in updateEffects shaderSmoke:
+          //   ; lightning: periodic blue/violet bolts inside the plume
+          //   ; hueCycle: dark-leaning HSL color animated over time
+          //   ; playerWake: pushes the plume away when the player flies near
           lightning: true,
           _arcTimer: 0.10 + Math.random() * 0.40,
           _arcRadius: baseScale * 0.6,
+          // Hue-cycle: random phase per plume so they're all at different
+          // points in the spectrum at any given moment. Speed ~0.10-0.18
+          // cycles/sec (full rainbow takes 5-10s).
+          hueCycle: true,
+          _huePhase: Math.random(),
+          _hueSpeed: 0.10 + Math.random() * 0.08,
+          // Player-wake reaction. wakeVel accumulates push impulses each
+          // tick and decays so flying past gives a momentary shove.
+          playerWake: true,
+          wakeVel: new THREE.Vector3(),
+          _wakeRadius: baseScale * 1.6,
         });
       };
 
@@ -13165,15 +13177,17 @@ class ClusterObstacle {
       // at any moment. Plume size pulled in too (was 0.85-1.15x; now
       // 0.5-0.7x clusterScale) since plumes drift outward and EXPAND on
       // their own — no need to start big.
-      // (v8_2a) Slowed ~3x ; was 0.50-0.80s and 0.55-0.85s producing 4-6
-      // alive plumes per cluster which read as a constant smoke field.
-      // 1.5-2.5s cadence keeps 1-2 alive at a time (with the 3-4s lifetime).
+      // (v8_2a followup) Cadence between original (0.50-0.80) and the
+      // trim (1.50-2.50). Lands at ~1 plume per second per timer; plenty
+      // of drifters alive at any moment without the constant smoke field
+      // of the original. Each plume cycles its hue and reacts to the
+      // player's wake (see updateEffects shaderSmoke branch).
       if (this._cloudTimerA <= 0) {
-        this._cloudTimerA = 1.50 + Math.random() * 1.00;
+        this._cloudTimerA = 0.80 + Math.random() * 0.60;
         _spawnClusterPlume(0.55 + Math.random() * 0.15);
       }
       if (this._cloudTimerB <= 0) {
-        this._cloudTimerB = 1.55 + Math.random() * 1.00;
+        this._cloudTimerB = 0.85 + Math.random() * 0.60;
         _spawnClusterPlume(0.50 + Math.random() * 0.15);
       }
 
@@ -14386,6 +14400,57 @@ function updateEffects(dt) {
           spawnLightningBolt(_from, _to, _col, 0.10 + Math.random() * 0.06,
                              1 + Math.floor(Math.random() * 3), 1.0 + Math.random() * 0.6);
         }
+      }
+      // (v8_2a) Hue-cycle on the drifting cluster plumes. uColor is a
+      // THREE.Color in HSL terms ; we keep lightness very low (0.05-0.07)
+      // so the smoke stays "almost black" with just a hint of color, and
+      // saturation high so the hint is detectable. Hue advances at the
+      // plume's own rate from its randomized phase, so neighbors aren't
+      // lockstep. Skipped if uColor isn't available.
+      if (e.hueCycle && e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uColor) {
+        const _h = (e._huePhase + game.time * (e._hueSpeed || 0.12)) % 1;
+        // Lightness dips slightly mid-hue so cool colors read a touch dimmer
+        // than warms; keeps the cycle from feeling robotic.
+        const _l = 0.055 + 0.020 * Math.sin(_h * Math.PI * 2);
+        const _s = 0.85;
+        try { e.mesh.material.uniforms.uColor.value.setHSL(_h, _s, _l); } catch (_) {}
+      }
+      // (v8_2a) Player wake: plumes get pushed away when the player ship
+      // flies near. Force scales with player speed (slipstream) and inverse
+      // distance. wakeVel accumulates with damping so the push has momentum;
+      // a fast pass produces a visible shove that decays over a second or two.
+      // Skipped while the player is dead or pre-spawn (no ship to displace
+      // anything).
+      if (e.playerWake && e.wakeVel && typeof player !== 'undefined' && player &&
+          player.position && player.shipState !== 'dead' && player.shipState !== 'spawning') {
+        const _dx = e.mesh.position.x - player.position.x;
+        const _dy = e.mesh.position.y - player.position.y;
+        const _dz = e.mesh.position.z - player.position.z;
+        const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
+        // Scale wake radius by the cloud's current expanded size so larger
+        // mid-life plumes catch the wake from farther out.
+        const _expandFactor = 1 + t * ((e.maxSize || 2.2) - 1);
+        const _wakeR = (e._wakeRadius || e.baseScale * 1.6) * _expandFactor + 220;
+        if (_d2 < _wakeR * _wakeR && _d2 > 1) {
+          const _d = Math.sqrt(_d2);
+          const _falloff = 1 - (_d / _wakeR);
+          const _pSpd = (player.velocity ? player.velocity.length() : 0);
+          // Baseline shove + slipstream. 60 baseline so even a hovering
+          // player nudges the cloud; slipstream coefficient 0.35 multiplies
+          // by player speed so a fast pass produces a strong push.
+          const _impulse = _falloff * (60 + _pSpd * 0.35);
+          const _inv = 1 / _d;
+          e.wakeVel.x += _dx * _inv * _impulse * dt;
+          e.wakeVel.y += _dy * _inv * _impulse * dt;
+          e.wakeVel.z += _dz * _inv * _impulse * dt;
+        }
+        // Apply accumulated wake velocity with strong damping so the push
+        // dissipates over ~1.5s (visible momentum, not eternal drift).
+        e.mesh.position.x += e.wakeVel.x * dt;
+        e.mesh.position.y += e.wakeVel.y * dt;
+        e.mesh.position.z += e.wakeVel.z * dt;
+        const _damp = Math.exp(-dt * 1.6);
+        e.wakeVel.x *= _damp; e.wakeVel.y *= _damp; e.wakeVel.z *= _damp;
       }
     }
     // --- Vortex Laser Shot beam: a one-shot volumetric cylinder using the
