@@ -14436,17 +14436,19 @@ function updateEffects(dt) {
           spawnLightningBolt(_from, _to, _col, 0.10 + Math.random() * 0.06,
                              1 + Math.floor(Math.random() * 3), 1.0 + Math.random() * 0.6);
         }
-        // (v8_2a) Inter-cloud arcs ; "smoke cluster" lightning. When two
-        // smoke clouds tagged with lightning are within INTER_ARC_RANGE
+        // (v8_2a) Inter-cloud arcs ; "smoke cluster" lightning. When
+        // two smoke clouds tagged with lightning are within INTER_ARC_RANGE
         // they form a smoke cluster and arc between each other, mirroring
-        // how object clusters arc atom-to-atom. Per-cloud timer fires a
-        // beefier bolt (more branches, thicker) from this cloud's center
-        // to the nearest neighbor's center every 0.6-1.8s. Skipped if no
-        // neighbor is in range, so isolated clouds just have their internal
-        // crackle and quiet otherwise.
+        // how object clusters arc atom-to-atom. Two safeguards prevent the
+        // "lightning from cloud that doesn't exist" bug:
+        //   1. Don't fire if THIS cloud has < 0.8s remaining.
+        //   2. Skip target partners with < 0.8s remaining.
+        // Bolt life capped at 0.16s, well under the 0.8s buffer, so even
+        // if a cloud expires unexpectedly the bolt is gone first.
+        const _selfRemaining = (e.lifetime || 0) - (e.age || 0);
         if (e._interArcTimer == null) e._interArcTimer = 0.4 + Math.random() * 1.2;
         e._interArcTimer -= dt;
-        if (e._interArcTimer <= 0) {
+        if (e._interArcTimer <= 0 && _selfRemaining > 0.8) {
           e._interArcTimer = 0.6 + Math.random() * 1.2;
           const _interR = 900;
           const _interR2 = _interR * _interR;
@@ -14456,6 +14458,8 @@ function updateEffects(dt) {
             const _ef = game.effects[_j];
             if (_ef === e) continue;
             if (!_ef || _ef.type !== 'shaderSmoke' || !_ef.lightning || !_ef.mesh) continue;
+            const _efRem = (_ef.lifetime || 0) - (_ef.age || 0);
+            if (_efRem < 0.8) continue;
             const _dx = _ef.mesh.position.x - e.mesh.position.x;
             const _dy = _ef.mesh.position.y - e.mesh.position.y;
             const _dz = _ef.mesh.position.z - e.mesh.position.z;
@@ -14467,14 +14471,11 @@ function updateEffects(dt) {
           }
           if (_bestEf) {
             const _icCol = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
-            // Cloud-to-cloud bolt: longer life, more branches, thicker so
-            // it reads as a real connection between the two clouds, not
-            // just internal crackle.
             spawnLightningBolt(
               e.mesh.position.clone(),
               _bestEf.mesh.position.clone(),
               _icCol,
-              0.18 + Math.random() * 0.12,
+              0.10 + Math.random() * 0.06,
               3 + Math.floor(Math.random() * 3),
               1.5 + Math.random() * 0.8
             );
@@ -14489,7 +14490,9 @@ function updateEffects(dt) {
       // even though it's no longer cycling hue.
       if (e.hueCycle && e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uColor) {
         const _phase = (e._huePhase + game.time * (e._hueSpeed || 0.12)) % 1;
-        const _l = 0.02 + 0.08 * (0.5 + 0.5 * Math.sin(_phase * Math.PI * 2));
+        // (v8_2a fix) Min lightness raised from 0.02 to 0.05 so clouds
+        // never go near-invisible at the dim phase.
+        const _l = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(_phase * Math.PI * 2));
         try { e.mesh.material.uniforms.uColor.value.setHSL(0, 0, _l); } catch (_) {}
       }
       // (v8_2a) Player wake: plumes get pushed away when the player ship
@@ -14860,6 +14863,61 @@ function spawnElectricSmoke(pos, radius, opts) {
       (Math.random() - 0.5) * 6
     ),
   });
+}
+
+// (v8_2a) Dot-dot collisions for ambient cloud "dots". Each ambient cloud
+// is conceptually a dot of gas; they bounce off each other elastically on
+// their drift vector but pass through walls / level geometry (gas behavior).
+// Cluster radial plumes (e.ambient = false) are excluded ; only orphan
+// ambient clouds participate. O(n^2) over the small ambient population
+// (capped at _AMBIENT_CLOUD_MAX = 5), so under 25 pair-tests per frame.
+function updateCloudCollisions(dt) {
+  if (typeof game === 'undefined' || !game || !game.effects) return;
+  const dots = [];
+  for (let i = 0; i < game.effects.length; i++) {
+    const e = game.effects[i];
+    if (e && e.type === 'shaderSmoke' && e.ambient && e.mesh && e.drift) dots.push(e);
+  }
+  if (dots.length < 2) return;
+  for (let i = 0; i < dots.length; i++) {
+    const a = dots[i];
+    const at = (a.age || 0) / (a.lifetime || 1);
+    const aR = (a.baseScale || 1) * (1 + at * ((a.maxSize || 1.6) - 1));
+    for (let j = i + 1; j < dots.length; j++) {
+      const b = dots[j];
+      const bt = (b.age || 0) / (b.lifetime || 1);
+      const bR = (b.baseScale || 1) * (1 + bt * ((b.maxSize || 1.6) - 1));
+      const dx = b.mesh.position.x - a.mesh.position.x;
+      const dy = b.mesh.position.y - a.mesh.position.y;
+      const dz = b.mesh.position.z - a.mesh.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const minD = aR + bR;
+      if (d2 < minD * minD && d2 > 0.001) {
+        const d = Math.sqrt(d2);
+        const overlap = minD - d;
+        const nx = dx / d, ny = dy / d, nz = dz / d;
+        // Separate the two by half of the overlap each.
+        const pushH = overlap * 0.5;
+        a.mesh.position.x -= nx * pushH;
+        a.mesh.position.y -= ny * pushH;
+        a.mesh.position.z -= nz * pushH;
+        b.mesh.position.x += nx * pushH;
+        b.mesh.position.y += ny * pushH;
+        b.mesh.position.z += nz * pushH;
+        // Elastic bounce on the drift component along the contact normal.
+        // 1D elastic collision with equal masses: exchange normal velocities.
+        const va = a.drift.x * nx + a.drift.y * ny + a.drift.z * nz;
+        const vb = b.drift.x * nx + b.drift.y * ny + b.drift.z * nz;
+        const dV = vb - va;
+        a.drift.x += dV * nx;
+        a.drift.y += dV * ny;
+        a.drift.z += dV * nz;
+        b.drift.x -= dV * nx;
+        b.drift.y -= dV * ny;
+        b.drift.z -= dV * nz;
+      }
+    }
+  }
 }
 
 // (v8_2a) Ambient drifting clouds. Independent of any cluster / explosion /
@@ -27587,6 +27645,7 @@ function gameLoop(timestamp) {
 
   updateParticles(dt);
   updateEffects(dt);
+  updateCloudCollisions(dt);   // (v8_2a) ambient cloud "dots" bounce off each other (pass through walls)
   updateScreenShake(dt);
   updateDamageIndicators(dt);
   updateHUD();
