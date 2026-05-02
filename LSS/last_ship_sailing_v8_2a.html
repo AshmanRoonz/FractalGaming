@@ -13259,6 +13259,75 @@ class ClusterObstacle {
     if (!anyAlive) {
       this.alive = false;
       this.respawnTimer = this.respawnTime;
+      // (v8_2a chemistry) When a cluster dies, promote some of its energy
+      // into independent ambient cloud dots so the smoke survives the
+      // destruction. 2-4 dots spawn at random offsets from the cluster
+      // center, drifting outward, with phases inherited from the cluster
+      // (so they tend to bond with each other, forming a "memory" of the
+      // dead cluster's location). They live in the dot system, fully
+      // independent of this cluster object.
+      try {
+        if (typeof spawnDot === 'function' &&
+            typeof _SMOKE_GEO !== 'undefined' &&
+            typeof _makeSmokeMaterial === 'function') {
+          // Cluster's signature phase: derived from the cluster's id-ish
+          // identity (its initial position) so all dots from this cluster
+          // share an inheritance.
+          const _clusterPhase = ((this.position.x + this.position.y * 7 + this.position.z * 13) * 0.001) % (Math.PI * 2);
+          const _spawnN = 2 + Math.floor(Math.random() * 3); // 2..4
+          for (let _k = 0; _k < _spawnN; _k++) {
+            const _theta = Math.random() * Math.PI * 2;
+            const _phi   = Math.acos(2 * Math.random() - 1);
+            const _sinP  = Math.sin(_phi);
+            const _off   = (this.clusterScale || 80) * (0.6 + Math.random() * 0.6);
+            const _pos = new THREE.Vector3(
+              this.position.x + _off * _sinP * Math.cos(_theta),
+              this.position.y + _off * Math.cos(_phi),
+              this.position.z + _off * _sinP * Math.sin(_theta),
+            );
+            const _size = (this.clusterScale || 80) * (0.5 + Math.random() * 0.5);
+            const _drift = new THREE.Vector3(
+              _sinP * Math.cos(_theta),
+              Math.cos(_phi) * 0.4,
+              _sinP * Math.sin(_theta),
+            ).multiplyScalar(20 + Math.random() * 30);
+            const _mat = _makeSmokeMaterial(0x080812, 1.0);
+            if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
+              _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
+            }
+            const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
+            _mesh.scale.setScalar(_size);
+            _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+            _mesh.frustumCulled = true;
+            _mesh.renderOrder = 1;
+            // Inherit the cluster phase with a small random offset so they
+            // bond strongly to each other but not lockstep.
+            const _phaseJitter = (Math.random() - 0.5) * 0.6;
+            const _dot = spawnDot(_pos, {
+              lifetime: 12.0 + Math.random() * 6.0,
+              radius: _size,
+              velocity: _drift,
+              collidable: true,
+              playerWake: true,
+              emitsLightning: true,
+              arcRadius: _size * 0.5,
+              interArcRange: 900,
+              hueCycleMaterial: _mat,
+              hueSpeed: 0.08 + Math.random() * 0.06,
+              scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
+              fadeOut: { alphaMul: 0.4 },
+              clusterAttraction: true,
+              attractStrength: 35,
+              attractRange: 1800,
+              orbitBoost: 0.4,
+              phase: _clusterPhase + _phaseJitter,
+            });
+            _dot._isAmbientCloud = true;
+            _dot._fromDeadCluster = true;       // marker (potential later use)
+            _dot.attachMesh(_mesh);
+          }
+        }
+      } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
       // (v8VR 2026-05-01) Tear down the distortion shell when the cluster
       // is fully destroyed. Recreated on respawn (if ever; respawn is
       // currently disabled in the alive===false branch above).
@@ -14865,92 +14934,350 @@ function spawnElectricSmoke(pos, radius, opts) {
   });
 }
 
-// (v8_2a) Dot-dot collisions for ambient cloud "dots". Each ambient cloud
-// is conceptually a dot of gas; they bounce off each other elastically on
-// their drift vector but pass through walls / level geometry (gas behavior).
-// Cluster radial plumes (e.ambient = false) are excluded ; only orphan
-// ambient clouds participate. O(n^2) over the small ambient population
-// (capped at _AMBIENT_CLOUD_MAX = 5), so under 25 pair-tests per frame.
-function updateCloudCollisions(dt) {
-  if (typeof game === 'undefined' || !game || !game.effects) return;
-  const dots = [];
-  for (let i = 0; i < game.effects.length; i++) {
-    const e = game.effects[i];
-    if (e && e.type === 'shaderSmoke' && e.ambient && e.mesh && e.drift) dots.push(e);
+// ============================================================
+// === v8_2a: Generic Dot system ==============================
+// ============================================================
+// A "dot" is an invisible Object3D anchor with optional behaviors. It owns
+// a position + velocity + lifetime, holds attached visual meshes as
+// children, and supports collidable / playerWake / emitsLightning /
+// hueCycle behaviors via flags. Designed as a reusable primitive; ambient
+// cloud "gas dots" are the first user but the same system can host any
+// transient drawing effect that wants physics + lifetime in one place.
+//
+// Public API:
+//   spawnDot(position, opts) -> dot
+//     opts: {
+//       lifetime, radius, velocity (Vector3), wakeStrength,
+//       collidable, playerWake, emitsLightning,
+//       arcRadius, arcColor, interArcRange,
+//       hueCycleMaterial, hueSpeed,
+//       scaleGrowth: { baseScale, maxFactor },
+//       fadeOut: { alphaMul },
+//       clusterAttraction, attractStrength, attractRange, orbitBoost,
+//     }
+//   dot.attachMesh(mesh) ; adds to anchor, tracked for auto-cleanup
+//   dot.applyImpulse(vec3)
+//   dot.dispose()
+//   dot.position is the world position (mirror of dot.anchor.position)
+//
+// updateDots(dt) is called once per frame from the main update loop.
+
+function spawnDot(position, opts) {
+  opts = opts || {};
+  if (!game.dots) game.dots = [];
+  const anchor = new THREE.Group();
+  anchor.position.copy(position);
+  scene.add(anchor);
+  const dot = {
+    anchor: anchor,
+    position: anchor.position,                                // alias
+    velocity: opts.velocity ? opts.velocity.clone() : new THREE.Vector3(),
+    age: 0,
+    lifetime: (typeof opts.lifetime === 'number') ? opts.lifetime : 5.0,
+    radius: opts.radius || 50,
+    collidable: opts.collidable !== false,
+    playerWake: opts.playerWake !== false,
+    wakeStrength: (typeof opts.wakeStrength === 'number') ? opts.wakeStrength : 1.0,
+    emitsLightning: !!opts.emitsLightning,
+    arcRadius: opts.arcRadius || 30,
+    arcColor: opts.arcColor || 0x88aaff,
+    interArcRange: opts.interArcRange || 900,
+    _internalArcTimer: opts.emitsLightning ? (0.10 + Math.random() * 0.40) : 0,
+    _interArcTimer:    opts.emitsLightning ? (0.40 + Math.random() * 1.20) : 0,
+    hueCycleMaterial: opts.hueCycleMaterial || null,
+    huePhase: Math.random(),
+    hueSpeed: (typeof opts.hueSpeed === 'number') ? opts.hueSpeed : 0.10,
+    scaleGrowth: opts.scaleGrowth || null,
+    fadeOut: opts.fadeOut || null,
+    clusterAttraction: !!opts.clusterAttraction,
+    attractStrength: (typeof opts.attractStrength === 'number') ? opts.attractStrength : 35,
+    attractRange:    (typeof opts.attractRange === 'number')    ? opts.attractRange    : 1800,
+    orbitBoost:      (typeof opts.orbitBoost === 'number')      ? opts.orbitBoost      : 0.4,
+    // (v8_2a chemistry seed) Phase in [0, 2*pi). Dots with similar phases
+    // bond strongly via T(dphi) = cos((phi_a - phi_b)/2)^2 in the
+    // attraction pass below. Borrowed from the tree_that_dreams field
+    // dynamics: T peaks at 1 when phases match, drops to 0 at opposite
+    // phases. Acts as an emergent "element" type without explicit
+    // categories ; clouds self-sort into phase-coherent clusters.
+    phase: (typeof opts.phase === 'number') ? opts.phase : (Math.random() * Math.PI * 2),
+    meshes: [],
+    alive: true,
+    _disposed: false,
+    attachMesh(mesh) {
+      this.anchor.add(mesh);
+      this.meshes.push(mesh);
+    },
+    applyImpulse(v) {
+      this.velocity.x += v.x; this.velocity.y += v.y; this.velocity.z += v.z;
+    },
+    dispose() {
+      if (this._disposed) return;
+      this._disposed = true; this.alive = false;
+      if (this.anchor.parent) scene.remove(this.anchor);
+      for (const m of this.meshes) {
+        if (m.geometry && m.geometry.dispose) m.geometry.dispose();
+        if (m.material && m.material.dispose) m.material.dispose();
+      }
+    },
+  };
+  game.dots.push(dot);
+  return dot;
+}
+
+function disposeAllDots() {
+  if (!game.dots) return;
+  for (const d of game.dots) d.dispose();
+  game.dots = [];
+}
+
+function updateDots(dt) {
+  if (!game.dots || !game.dots.length) return;
+  const _gameTime = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+  // ---- Per-dot update (physics, age, hue, internal lightning, growth) ----
+  for (let i = game.dots.length - 1; i >= 0; i--) {
+    const d = game.dots[i];
+    d.age += dt;
+    if (d.age >= d.lifetime) {
+      d.dispose();
+      game.dots.splice(i, 1);
+      continue;
+    }
+    // Move (gas: no wall checks, pass through everything)
+    d.anchor.position.x += d.velocity.x * dt;
+    d.anchor.position.y += d.velocity.y * dt;
+    d.anchor.position.z += d.velocity.z * dt;
+    // Time uniform tick + scale growth + fade for attached meshes
+    const tNorm = d.age / d.lifetime;
+    let scale = 1;
+    if (d.scaleGrowth) {
+      scale = d.scaleGrowth.baseScale * (1 + tNorm * (d.scaleGrowth.maxFactor - 1));
+    }
+    const fadeCurve = d.fadeOut ? ((1 - tNorm) * (1 - tNorm)) : 1;
+    for (const m of d.meshes) {
+      if (d.scaleGrowth) m.scale.setScalar(scale);
+      if (m.material && m.material.uniforms) {
+        if (m.material.uniforms.time) m.material.uniforms.time.value = _gameTime;
+        if (d.fadeOut && m.material.uniforms.uBaseAlpha) {
+          m.material.uniforms.uBaseAlpha.value = (d.fadeOut.alphaMul || 0.5) * fadeCurve;
+        }
+      }
+    }
+    // Hue cycle (greyscale shade pulse)
+    if (d.hueCycleMaterial && d.hueCycleMaterial.uniforms && d.hueCycleMaterial.uniforms.uColor) {
+      const ph = (d.huePhase + _gameTime * d.hueSpeed) % 1;
+      const _l = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(ph * Math.PI * 2));
+      try { d.hueCycleMaterial.uniforms.uColor.value.setHSL(0, 0, _l); } catch (_) {}
+    }
+    // Internal lightning (within the arcRadius sphere)
+    if (d.emitsLightning && tNorm < 0.7 && typeof spawnLightningBolt === 'function') {
+      d._internalArcTimer -= dt;
+      if (d._internalArcTimer <= 0) {
+        d._internalArcTimer = 0.18 + Math.random() * 0.25;
+        const r = d.arcRadius;
+        const _t1 = Math.random() * Math.PI * 2, _p1 = Math.acos(2*Math.random() - 1);
+        const _t2 = Math.random() * Math.PI * 2, _p2 = Math.acos(2*Math.random() - 1);
+        const _from = d.anchor.position.clone().add(new THREE.Vector3(
+          r * Math.sin(_p1) * Math.cos(_t1),
+          r * Math.cos(_p1),
+          r * Math.sin(_p1) * Math.sin(_t1),
+        ));
+        const _to = d.anchor.position.clone().add(new THREE.Vector3(
+          r * Math.sin(_p2) * Math.cos(_t2),
+          r * Math.cos(_p2),
+          r * Math.sin(_p2) * Math.sin(_t2),
+        ));
+        const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+        spawnLightningBolt(_from, _to, _col, 0.08 + Math.random() * 0.05,
+                           1 + Math.floor(Math.random() * 3), 1.0 + Math.random() * 0.6);
+      }
+    }
   }
-  if (dots.length < 2) return;
-  for (let i = 0; i < dots.length; i++) {
-    const a = dots[i];
-    const at = (a.age || 0) / (a.lifetime || 1);
-    const aR = (a.baseScale || 1) * (1 + at * ((a.maxSize || 1.6) - 1));
-    for (let j = i + 1; j < dots.length; j++) {
-      const b = dots[j];
-      const bt = (b.age || 0) / (b.lifetime || 1);
-      const bR = (b.baseScale || 1) * (1 + bt * ((b.maxSize || 1.6) - 1));
-      const dx = b.mesh.position.x - a.mesh.position.x;
-      const dy = b.mesh.position.y - a.mesh.position.y;
-      const dz = b.mesh.position.z - a.mesh.position.z;
+  // ---- Player wake (push dots away from player flying near) ----
+  if (typeof player !== 'undefined' && player && player.position &&
+      player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    const _pSpd = (player.velocity ? player.velocity.length() : 0);
+    for (const d of game.dots) {
+      if (!d.playerWake) continue;
+      const dx = d.anchor.position.x - player.position.x;
+      const dy = d.anchor.position.y - player.position.y;
+      const dz = d.anchor.position.z - player.position.z;
       const d2 = dx*dx + dy*dy + dz*dz;
-      const minD = aR + bR;
+      const wakeR = d.radius * 1.4 + 220;
+      if (d2 < wakeR * wakeR && d2 > 1) {
+        const dist = Math.sqrt(d2);
+        const falloff = 1 - dist / wakeR;
+        const impulse = falloff * (60 + _pSpd * 0.35) * d.wakeStrength;
+        const inv = 1 / dist;
+        d.velocity.x += dx * inv * impulse * dt;
+        d.velocity.y += dy * inv * impulse * dt;
+        d.velocity.z += dz * inv * impulse * dt;
+      }
+    }
+  }
+  // ---- Velocity damping (so wake impulses dissipate, not accumulate forever) ----
+  const _damp = Math.exp(-dt * 0.4);
+  for (const d of game.dots) {
+    if (d.playerWake) {
+      d.velocity.x *= _damp; d.velocity.y *= _damp; d.velocity.z *= _damp;
+    }
+  }
+  // ---- Dot-dot collisions (collidable + collidable, walls ignored) ----
+  for (let i = 0; i < game.dots.length; i++) {
+    const a = game.dots[i];
+    if (!a.collidable) continue;
+    for (let j = i + 1; j < game.dots.length; j++) {
+      const b = game.dots[j];
+      if (!b.collidable) continue;
+      const dx = b.anchor.position.x - a.anchor.position.x;
+      const dy = b.anchor.position.y - a.anchor.position.y;
+      const dz = b.anchor.position.z - a.anchor.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const minD = a.radius + b.radius;
       if (d2 < minD * minD && d2 > 0.001) {
         const d = Math.sqrt(d2);
         const overlap = minD - d;
         const nx = dx / d, ny = dy / d, nz = dz / d;
-        // Separate the two by half of the overlap each.
         const pushH = overlap * 0.5;
-        a.mesh.position.x -= nx * pushH;
-        a.mesh.position.y -= ny * pushH;
-        a.mesh.position.z -= nz * pushH;
-        b.mesh.position.x += nx * pushH;
-        b.mesh.position.y += ny * pushH;
-        b.mesh.position.z += nz * pushH;
-        // Elastic bounce on the drift component along the contact normal.
-        // 1D elastic collision with equal masses: exchange normal velocities.
-        const va = a.drift.x * nx + a.drift.y * ny + a.drift.z * nz;
-        const vb = b.drift.x * nx + b.drift.y * ny + b.drift.z * nz;
+        a.anchor.position.x -= nx * pushH;
+        a.anchor.position.y -= ny * pushH;
+        a.anchor.position.z -= nz * pushH;
+        b.anchor.position.x += nx * pushH;
+        b.anchor.position.y += ny * pushH;
+        b.anchor.position.z += nz * pushH;
+        const va = a.velocity.x * nx + a.velocity.y * ny + a.velocity.z * nz;
+        const vb = b.velocity.x * nx + b.velocity.y * ny + b.velocity.z * nz;
         const dV = vb - va;
-        a.drift.x += dV * nx;
-        a.drift.y += dV * ny;
-        a.drift.z += dV * nz;
-        b.drift.x -= dV * nx;
-        b.drift.y -= dV * ny;
-        b.drift.z -= dV * nz;
+        a.velocity.x += dV * nx; a.velocity.y += dV * ny; a.velocity.z += dV * nz;
+        b.velocity.x -= dV * nx; b.velocity.y -= dV * ny; b.velocity.z -= dV * nz;
       }
+    }
+  }
+  // ---- Cluster attraction + tangential orbit boost ----
+  // Dots tagged clusterAttraction pull on each other gravitationally and
+  // get a small tangential velocity bump to encourage orbiting instead of
+  // collapsing straight together. Combined with the elastic-bounce in the
+  // collision pass above, this makes dots clump up, swirl around each
+  // other, then rebound when too close ; "smoke clusters that orbit".
+  for (let i = 0; i < game.dots.length; i++) {
+    const a = game.dots[i];
+    if (!a.clusterAttraction) continue;
+    for (let j = i + 1; j < game.dots.length; j++) {
+      const b = game.dots[j];
+      if (!b.clusterAttraction) continue;
+      const dx = b.anchor.position.x - a.anchor.position.x;
+      const dy = b.anchor.position.y - a.anchor.position.y;
+      const dz = b.anchor.position.z - a.anchor.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const minD = a.radius + b.radius;
+      if (d2 < minD * minD) continue;       // already touching ; collision pass handles
+      const range = Math.min(a.attractRange, b.attractRange);
+      if (d2 > range * range) continue;     // out of attraction range
+      const dist = Math.sqrt(d2);
+      // Falloff peaks at mid-range so dots don't slingshot from far away
+      // and don't accelerate infinitely up close.
+      const _u = (dist - minD) / (range - minD);    // 0 touching, 1 at edge
+      const pull = 4 * _u * (1 - _u);                // peaks at 0.5
+      // (v8_2a chemistry) T(dphi) phase coupling. Same phase = full
+      // attraction; orthogonal phase = half; opposite = zero. Clouds
+      // self-sort into phase-coherent clusters over time.
+      const _dphi = a.phase - b.phase;
+      const _T = Math.cos(_dphi * 0.5); const _Tcoup = _T * _T;
+      const force = ((a.attractStrength + b.attractStrength) * 0.5) * pull * _Tcoup;
+      const inv = 1 / dist;
+      const fx = dx * inv * force * dt;
+      const fy = dy * inv * force * dt;
+      const fz = dz * inv * force * dt;
+      a.velocity.x += fx; a.velocity.y += fy; a.velocity.z += fz;
+      b.velocity.x -= fx; b.velocity.y -= fy; b.velocity.z -= fz;
+      // Tangential nudge: cross the radial vector with the relative
+      // velocity to find a perpendicular direction, then add a small
+      // velocity component along it. This biases the pair toward orbit
+      // rather than head-on collapse.
+      const orbitMag = ((a.orbitBoost + b.orbitBoost) * 0.5) * pull;
+      if (orbitMag > 0.001) {
+        // Build a perpendicular axis from rel velocity x radial.
+        const rvx = b.velocity.x - a.velocity.x;
+        const rvy = b.velocity.y - a.velocity.y;
+        const rvz = b.velocity.z - a.velocity.z;
+        const ax = (rvy * dz - rvz * dy);
+        const ay = (rvz * dx - rvx * dz);
+        const az = (rvx * dy - rvy * dx);
+        const axLen2 = ax*ax + ay*ay + az*az;
+        if (axLen2 > 0.001) {
+          // Perpendicular tangent = axis x radial (normalized).
+          const axLen = Math.sqrt(axLen2);
+          const axn = ax / axLen, ayn = ay / axLen, azn = az / axLen;
+          const tx = (ayn * dz - azn * dy);
+          const ty = (azn * dx - axn * dz);
+          const tz = (axn * dy - ayn * dx);
+          const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz);
+          if (tLen > 0.001) {
+            const tInv = orbitMag * dt / tLen;
+            a.velocity.x += tx * tInv; a.velocity.y += ty * tInv; a.velocity.z += tz * tInv;
+            b.velocity.x -= tx * tInv; b.velocity.y -= ty * tInv; b.velocity.z -= tz * tInv;
+          }
+        }
+      }
+    }
+  }
+  // ---- Inter-dot lightning (smoke cluster arcs between emitsLightning dots) ----
+  for (const a of game.dots) {
+    if (!a.emitsLightning || typeof spawnLightningBolt !== 'function') continue;
+    a._interArcTimer -= dt;
+    if (a._interArcTimer > 0) continue;
+    const aRem = a.lifetime - a.age;
+    if (aRem < 0.8) { a._interArcTimer = 0.6 + Math.random(); continue; }
+    a._interArcTimer = 0.6 + Math.random() * 1.2;
+    let bestB = null, bestD2 = Infinity;
+    const r2 = a.interArcRange * a.interArcRange;
+    for (const b of game.dots) {
+      if (b === a || !b.emitsLightning) continue;
+      const bRem = b.lifetime - b.age;
+      if (bRem < 0.8) continue;
+      const dx = b.anchor.position.x - a.anchor.position.x;
+      const dy = b.anchor.position.y - a.anchor.position.y;
+      const dz = b.anchor.position.z - a.anchor.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < r2 && d2 < bestD2) { bestD2 = d2; bestB = b; }
+    }
+    if (bestB) {
+      const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+      spawnLightningBolt(
+        a.anchor.position.clone(), bestB.anchor.position.clone(), _col,
+        0.10 + Math.random() * 0.06,
+        3 + Math.floor(Math.random() * 3),
+        1.5 + Math.random() * 0.8,
+      );
     }
   }
 }
 
-// (v8_2a) Ambient drifting clouds. Independent of any cluster / explosion /
-// damage source ; periodically a fresh cloud spawns at a random distance
-// from the player and drifts slowly through the map. Each one carries the
-// same lightning + hueCycle + playerWake tags as cluster plumes, so the
-// existing updateEffects shaderSmoke branches drive the visuals (greyscale
-// shade pulse + electric arcs + push-on-flyby). Lifetime 8-13s with a
-// 2.5-4.5s spawn cadence so a few are alive at any moment.
+// (v8_2a) Ambient drifting clouds, now built on the generic Dot system.
+// Each ambient cloud is a Dot with a smoke mesh attached as a child of
+// the Dot's anchor Object3D. The Dot system handles all behavior:
+// physics + collisions + player wake + lifetime + hue cycle + internal
+// lightning + inter-dot lightning. When the Dot expires, its anchor is
+// removed from the scene and the smoke mesh + material are auto-disposed.
 let _ambientCloudTimer = 1.5;          // first ambient cloud appears ~1.5s in
 const _AMBIENT_CLOUD_MAX = 5;          // cap so we don't drown the scene
 function updateAmbientClouds(dt) {
-  if (typeof game === 'undefined' || !game || !game.effects) return;
+  if (typeof game === 'undefined' || !game) return;
   if (typeof scene === 'undefined' || !scene) return;
   if (typeof _SMOKE_GEO === 'undefined') return;
   if (typeof _makeSmokeMaterial !== 'function') return;
+  if (typeof spawnDot !== 'function') return;
   _ambientCloudTimer -= dt;
   if (_ambientCloudTimer > 0) return;
   _ambientCloudTimer = 2.5 + Math.random() * 2.0;
+  // Cap on alive ambient cloud dots.
   let ambientAlive = 0;
-  let totalSmokeAlive = 0;
-  for (let i = 0; i < game.effects.length; i++) {
-    const ef = game.effects[i];
-    if (ef.type === 'shaderSmoke') {
-      totalSmokeAlive++;
-      if (ef.ambient) ambientAlive++;
+  if (game.dots) {
+    for (const d of game.dots) {
+      if (d && d._isAmbientCloud) ambientAlive++;
     }
   }
   if (ambientAlive >= _AMBIENT_CLOUD_MAX) return;
-  const SMOKE_MAX = (typeof QUALITY !== 'undefined') ? QUALITY.smokeMax() : 12;
-  if (totalSmokeAlive >= SMOKE_MAX) return;
-  // Spawn position: torus around the player, 800-2200 units out, Y squashed
-  // by 0.4 so most clouds sit roughly on the playing plane.
+  // Spawn position: torus around the player, 800-2200 units out.
   const _center = (typeof player !== 'undefined' && player && player.position)
                   ? player.position
                   : new THREE.Vector3();
@@ -14970,43 +15297,38 @@ function updateAmbientClouds(dt) {
     Math.random() - 0.5,
   ).normalize();
   const _driftSpeed = 12 + Math.random() * 22;
-  const _drift = _driftDir.clone().multiplyScalar(_driftSpeed);
+  // Build the smoke material + mesh ; mesh is the visual, anchored at
+  // local origin so the Dot's anchor.position drives where it draws.
   const _mat = _makeSmokeMaterial(0x080812, 1.0);
   if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
     _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
   }
   const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
-  _mesh.position.copy(_spawnPos);
   _mesh.scale.setScalar(_size);
   _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
   _mesh.frustumCulled = true;
   _mesh.renderOrder = 1;
-  scene.add(_mesh);
-  game.effects.push({
-    mesh: _mesh,
+  // Spawn the Dot and attach the smoke mesh.
+  const _dot = spawnDot(_spawnPos, {
     lifetime: 8.0 + Math.random() * 5.0,
-    age: 0,
-    type: 'shaderSmoke',
-    maxSize: 1.6,
-    baseScale: _size,
-    alphaMul: 0.35,                     // (v8_2a) more transparent ambient clouds
-    rotVel: new THREE.Vector3(
-      (Math.random() - 0.5) * 0.08,
-      (Math.random() - 0.5) * 0.08,
-      (Math.random() - 0.5) * 0.08,
-    ),
-    drift: _drift,
-    lightning: true,
-    _arcTimer: 0.30 + Math.random() * 0.60,
-    _arcRadius: _size * 0.5,
-    hueCycle: true,                     // tag triggers the greyscale shade pulse
-    _huePhase: Math.random(),
-    _hueSpeed: 0.08 + Math.random() * 0.06,
+    radius: _size,
+    velocity: _driftDir.clone().multiplyScalar(_driftSpeed),
+    collidable: true,
     playerWake: true,
-    wakeVel: new THREE.Vector3(),
-    _wakeRadius: _size * 1.4,
-    ambient: true,                      // marker so the cap counter excludes other smoke
+    emitsLightning: true,
+    arcRadius: _size * 0.5,
+    interArcRange: 900,
+    hueCycleMaterial: _mat,
+    hueSpeed: 0.08 + Math.random() * 0.06,
+    scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
+    fadeOut: { alphaMul: 0.35 },
+    clusterAttraction: true,             // (v8_2a) ambient clouds cluster + orbit each other
+    attractStrength: 35,
+    attractRange: 1800,
+    orbitBoost: 0.4,
   });
+  _dot._isAmbientCloud = true;          // marker for the cap counter
+  _dot.attachMesh(_mesh);
 }
 
 // Heat-trail sprite + material pool. Ships emit up to ~12 heat trails/sec each
@@ -19630,6 +19952,9 @@ function updateRoundSystem(dt) {
         if (typeof _ambientCloudTimer !== 'undefined') {
           _ambientCloudTimer = 2.5 + Math.random() * 1.5;
         }
+        // (v8_2a) Wipe all live Dots (ambient cloud anchors and any other
+        // dot-system effects) so the next round starts clean.
+        if (typeof disposeAllDots === 'function') disposeAllDots();
         // (v6.9) Reset champion-mode state for the new round.
         game.championField = null;
         game.championSpawned = false;
@@ -27545,7 +27870,8 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  updateAmbientClouds(dt); // (v8_2a) drifting orphan clouds w/ greyscale pulse + lightning + wake
+  updateAmbientClouds(dt); // (v8_2a) ambient cloud spawner (uses Dot system below)
+  updateDots(dt);          // (v8_2a) generic Dot system: physics + collisions + lightning + hue
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
@@ -27645,7 +27971,6 @@ function gameLoop(timestamp) {
 
   updateParticles(dt);
   updateEffects(dt);
-  updateCloudCollisions(dt);   // (v8_2a) ambient cloud "dots" bounce off each other (pass through walls)
   updateScreenShake(dt);
   updateDamageIndicators(dt);
   updateHUD();
