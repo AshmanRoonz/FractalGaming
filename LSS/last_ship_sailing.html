@@ -1480,11 +1480,21 @@ const LOADOUTS = {
   },
   TRACKER: {
     name: 'TRACKER', className: 'Corvette Tracker', chassis: 'CORVETTE',
-    weapon: { name: '40mm Tracker', mode: 'projectile', damage: 660, fireRate: 0.6, clipSize: 20, range: 3500, splash: 0, projSpeed: 900, pellets: 1, spinup: 0 },
+    // (v9) Slower fire rate (0.6 -> 0.85 sec/shot) and tighter clip (20 -> 12)
+    // so the main gun is paced more like a sniper-spotter instead of a chaingun.
+    // Each main-gun hit still adds +1 lock to its target (capped at 3).
+    weapon: { name: '40mm Tracker', mode: 'projectile', damage: 660, fireRate: 0.85, clipSize: 12, range: 3500, splash: 0, projSpeed: 900, pellets: 1, spinup: 0 },
     abilities: [
-      { name: 'Tracker Rockets', cooldown: 6, duration: 0.5, desc: 'Lock-on: 5 rockets (3 locks)', type: 'offensive', dmg: 5000 },
-      { name: 'Particle Wall', cooldown: 14, duration: 0.1, desc: 'Deploy one-way shield (5000 HP, 10s)', type: 'defensive' },
-      { name: 'Sonar Lock', cooldown: 12, duration: 8, desc: 'Reveal + partial lock (1 mark)', type: 'utility' },
+      // (v9) Tracker Rockets: no real cooldown. The gating is the lock state:
+      // pressing the ability does NOTHING unless at least one ship has a full
+      // 3/3 lock, in which case it fires a 5-rocket volley at every fully
+      // locked target and consumes only those full locks (partial 1/3 or 2/3
+      // locks on other ships are preserved). The 0.25s cooldown below is just
+      // there to dodge the cooldown===0 toggle path in activateAbility ; it
+      // is effectively instant from the player's perspective.
+      { name: 'Tracker Rockets', cooldown: 0.25, duration: 0.5, desc: 'Volley at every 3/3-locked ship; partial locks preserved', type: 'offensive', dmg: 5000 },
+      { name: 'Particle Wall', cooldown: 14, duration: 0.1, desc: 'Deploy one-way shield (10000 HP, 10s)', type: 'defensive' },
+      { name: 'Sonar Lock', cooldown: 12, duration: 8, desc: 'Fire beacon; sphere of detection grants +1 lock per ship in radius', type: 'utility' },
     ],
     core: { name: 'Salvo Core', desc: 'Massive missile barrage', duration: 3, damage: 11000, cooldown: 60 },
   },
@@ -3823,7 +3833,11 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   scene.add(edgeMesh);
   game.worldEffects.push({
     type: 'particle_wall', position: pos.clone(), direction: dir.clone(),
-    hp: 5000, maxHp: 5000, timer: 10, owner, team,
+    // (v9) HP doubled 5000 -> 10000. Heavy weapons (Tracker Rocket volleys,
+    // Power Shot, Plasma Railgun) used to chew through 5000 in 1-3 hits, so
+    // the wall popped before it felt tactical. 10000 lets it sponge a full
+    // multikill volley while still expiring on the 10s timer or to Arc Wave.
+    hp: 10000, maxHp: 10000, timer: 10, owner, team,
     mesh: wallMesh, edgeMesh, spawnTime: game.time,
     ownerPeerId, netId,
   });
@@ -10075,7 +10089,14 @@ class Bot {
     }
     if (used) {
       // 1.5x to 2x the listed cooldown so bots don't spam abilities perfectly.
-      this.abilityCooldowns[0] = ability.cooldown * (1.4 + Math.random() * 0.6);
+      // (v9 fix) Tracker Rockets has its real cooldown set to 0.25 because the
+      // PLAYER-side gate is the lock requirement (no full lock = no fire).
+      // Bots have no lock gate ; they'd fire rockets every 0.35 sec without
+      // an override. Force the bot's effective cooldown back up so they
+      // simulate the time it takes to build a full lock through chip damage.
+      let _baseCd = ability.cooldown;
+      if (ability.name === 'Tracker Rockets') _baseCd = 7;
+      this.abilityCooldowns[0] = _baseCd * (1.4 + Math.random() * 0.6);
     }
   }
 
@@ -10681,7 +10702,14 @@ class Projectile {
   update(dt) {
     if (!this.alive) return;
     this.age += dt;
-    if (this.age > this.lifetime) { this.destroy(); return; }
+    if (this.age > this.lifetime) {
+      // (v9) Sonar beacon at end-of-life: detonate the pulse where it is
+      // so it doesn't just silently vanish in mid-air.
+      if (this.isSonar && typeof _spawnSonarPulse === 'function') {
+        _spawnSonarPulse(this.position, this.owner);
+      }
+      this.destroy(); return;
+    }
 
     // Homing missiles (Descent 3 style two-tier tracking)
     // Close range: aggressive tracking (loose FOV constraint)
@@ -10977,6 +11005,14 @@ class Projectile {
       if (wallDist < moveDist) {
         // Hit a wall; determine bounce vs explode
         const hitPoint = _projHitPoint.copy(prevPos).addScaledVector(moveDir, Math.max(0, wallDist - 2));
+        // (v9) Sonar beacon: lands on the wall, spawns a sonar pulse, gone.
+        if (this.isSonar) {
+          this.position.copy(hitPoint);
+          this.mesh.position.copy(hitPoint);
+          if (typeof _spawnSonarPulse === 'function') _spawnSonarPulse(hitPoint, this.owner);
+          this.destroy();
+          return;
+        }
         // Pyro thermite is a fire source AND should explode on wall impact
         // (instead of the usual fire-source bounce); other fire sources still bounce.
         const shouldExplode = this.isCluster || this.isArcWave || this.tracking || this.salvoGuided || this.isPyroThermite || (this.splash > 0 && !this.isFireSource);
@@ -11016,11 +11052,73 @@ class Projectile {
       return;
     }
 
+    // (v9) Particle Wall: a literal breakable wall to projectiles, one-way.
+    // ANY hostile projectile (anything not owned by the local player ; the
+    // Sonar beacon is also exempt so the player can paint locks through
+    // their own gear) that crosses the wall plane within the wall's extent
+    // gets caught at the wall surface, drains damage from the wall HP, and
+    // is destroyed. Direction of crossing doesn't matter ; whether the shot
+    // came from outside-in or was somehow firing from inside-out, the wall
+    // intercepts it. Ships still pass through unimpeded (no physical
+    // collision against ship hulls). The player's OWN projectiles bypass
+    // the wall via the owner gate so they can fire OUT through their own
+    // shield without self-blocking.
+    if (this.owner !== 'player' && !this.isSonar) {
+      for (const eff of game.worldEffects) {
+        if (eff.type !== 'particle_wall' || eff.owner !== 'player' || eff.hp <= 0) continue;
+        const wallNormal = eff.direction;
+        // Signed distance from each end of this frame's movement step to the wall plane.
+        const dx1 = prevPos.x - eff.position.x;
+        const dy1 = prevPos.y - eff.position.y;
+        const dz1 = prevPos.z - eff.position.z;
+        const prevSide = dx1 * wallNormal.x + dy1 * wallNormal.y + dz1 * wallNormal.z;
+        const dx2 = this.position.x - eff.position.x;
+        const dy2 = this.position.y - eff.position.y;
+        const dz2 = this.position.z - eff.position.z;
+        const currSide = dx2 * wallNormal.x + dy2 * wallNormal.y + dz2 * wallNormal.z;
+        // (v9 update) Loosened from the old "outside-in only" check.
+        // ANY plane crossing this frame counts as a hit. Same-side is when
+        // prevSide and currSide have the same sign, i.e. their product > 0.
+        if (prevSide * currSide > 0) continue;
+        const denom = prevSide - currSide;
+        if (Math.abs(denom) < 1e-6) continue;     // moving parallel to plane (no crossing)
+        const tParam = prevSide / denom;
+        if (tParam < 0 || tParam > 1) continue;   // numerical edge case ; only count THIS step
+        const intersect = new THREE.Vector3().lerpVectors(prevPos, this.position, tParam);
+        // Inside wall extent? Project onto the wall plane and bound-check.
+        const offCenter = new THREE.Vector3().subVectors(intersect, eff.position);
+        offCenter.sub(wallNormal.clone().multiplyScalar(offCenter.dot(wallNormal)));
+        const wallRadius = 240;     // catches the BoxGeometry(400, 300, 25) silhouette + small halo
+        if (offCenter.lengthSq() > wallRadius * wallRadius) continue;
+        // Caught. Drain damage from wall HP, sparks at the surface, destroy.
+        const absorbed = Math.min(this.damage, eff.hp);
+        eff.hp -= absorbed;
+        if (eff.hp <= 0) {
+          if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+          if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+          eff.timer = 0;
+        }
+        spawnImpactSparks(intersect, 6);
+        this.position.copy(intersect);
+        this.mesh.position.copy(intersect);
+        this.destroy();
+        return;
+      }
+    }
+
     if (this.owner === 'player') {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
         const hitRadius = bot.chassis.hullLength * 1.2;
         if (this.position.distanceToSquared(bot.position) < hitRadius * hitRadius) {
+          // (v9) Sonar beacon: lands on ship, spawns the pulse around it
+          // (so the ship that ate the beacon and any ship near them get
+          // locked together). No damage is dealt.
+          if (this.isSonar) {
+            if (typeof _spawnSonarPulse === 'function') _spawnSonarPulse(bot.position, this.owner);
+            this.destroy();
+            return;
+          }
           // Capture pre-hit shield state so we can pick the right visual:
           // - if the shot hits a shielded enemy, the shield ripple shader
           //   handles the visual (no sprite particles)
@@ -11040,8 +11138,14 @@ class Projectile {
             // pushing too many particles into the pool and tanking framerate.)
             if (!hadShield) spawnImpactSparks(this.position, 5);
           }
-          // TRACKER 40mm Tracker Cannon: weapon hits build lock marks
-          if (player.loadoutKey === 'TRACKER' && !this.isArcWave && !this.isCluster && !this.tracking) {
+          // TRACKER 40mm Tracker Cannon: weapon hits build lock marks.
+          // Only DIRECT main-gun shots add locks ; ability projectiles
+          // (Tracker Rockets, Salvo Core missiles, Cluster, Arc Wave,
+          // Sonar beacons) all skip this. Locks come from main-gun hits
+          // and from Sonar pulse spheres only.
+          if (player.loadoutKey === 'TRACKER' &&
+              !this.isArcWave && !this.isCluster &&
+              !this.tracking && !this.salvoGuided && !this.isSonar) {
             const prevLocks = player.trackerLocks[bot.id] || 0;
             player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
             if (player.trackerLocks[bot.id] > prevLocks) {
@@ -16605,11 +16709,18 @@ function playerTakeDamage(amount, attacker, projectile) {
     amount *= swordCoreActive ? 0.15 : 0.30;
   }
   // Gun Shield (BLASTER): frontal shield with HP pool; absorbs damage until depleted (destroyed by Arc Wave above)
+  // (v9 fix) Use the projectile's actual impact position when available, not
+  // the attacker's CURRENT position. Homing missiles can curve around so the
+  // bot may have moved by the time the missile lands ; what matters is which
+  // direction the missile itself came from.
   if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Gun Shield') {
-    if (attacker && attacker.position) {
+    const incomingPos = (projectile && projectile.position) ? projectile.position
+                      : (attacker && attacker.position)     ? attacker.position
+                      : null;
+    if (incomingPos) {
       const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      const toAttacker = new THREE.Vector3().subVectors(attacker.position, player.position).normalize();
-      if (forward.dot(toAttacker) > 0.3 && player.gunShieldHP > 0) {
+      const toIncoming = new THREE.Vector3().subVectors(incomingPos, player.position).normalize();
+      if (forward.dot(toIncoming) > 0.3 && player.gunShieldHP > 0) {
         const absorbed = Math.min(amount, player.gunShieldHP);
         player.gunShieldHP -= absorbed;
         amount -= absorbed;
@@ -16645,33 +16756,60 @@ function playerTakeDamage(amount, attacker, projectile) {
     amount -= stored;
     if (amount <= 0) return; // fully absorbed
   }
-  // Particle Wall (TRACKER): deployed one-way shield with HP; check if attacker shot hits the wall
-  // The wall is a world effect, damage absorption is handled here for simplicity
+  // Particle Wall (TRACKER): deployed one-way shield with HP; absorbs ANY
+  // incoming damage when the projectile (or attacker, fallback) is on the
+  // outside of the wall plane and the player is on the inside.
+  // (v9 fix) Three changes from the previous logic:
+  //   1. Use projectile.position over attacker.position when both are avail.
+  //      Homing missiles curve, so the bot's CURRENT position is unreliable;
+  //      what matters is where the missile actually approached from.
+  //   2. Replace the loose distance-to-wall test with a real two-sided check:
+  //      the player must be on one side of the wall plane and the incoming
+  //      must be on the other side. That's what "one-way" actually means.
+  //   3. Add a perpendicular-radius gate so projectiles passing the EDGE of
+  //      the wall (above, below, far to the side) aren't absorbed by it.
+  //   This now blocks every incoming projectile / hitscan / missile that
+  //   actually crosses the wall, including tracker missiles, until the wall's
+  //   HP is depleted or its lifetime expires.
   if (player.loadoutKey === 'TRACKER') {
     for (const eff of game.worldEffects) {
-      if (eff.type === 'particle_wall' && eff.owner === 'player' && eff.hp > 0) {
-        // Check if the attacker is on the far side of the wall (wall blocks incoming)
-        if (attacker && attacker.position) {
-          const toAttacker = new THREE.Vector3().subVectors(attacker.position, eff.position);
-          const wallFacing = eff.direction.clone();
-          // Wall blocks shots from the front (positive dot product with wall normal)
-          if (toAttacker.dot(wallFacing) > 0) {
-            // Check if player is behind the wall (within range)
-            const playerToWall = new THREE.Vector3().subVectors(eff.position, player.position);
-            if (playerToWall.dot(wallFacing) > 0 && player.position.distanceTo(eff.position) < 600) {
-              const absorbed = Math.min(amount, eff.hp);
-              eff.hp -= absorbed;
-              amount -= absorbed;
-              if (eff.hp <= 0) {
-                // Wall destroyed
-                if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-                eff.timer = 0;
-              }
-              if (amount <= 0) return;
-            }
-          }
-        }
+      if (eff.type !== 'particle_wall' || eff.owner !== 'player' || eff.hp <= 0) continue;
+      const incomingPos = (projectile && projectile.position) ? projectile.position
+                        : (attacker && attacker.position)     ? attacker.position
+                        : null;
+      if (!incomingPos) continue;
+      const wallFacing = eff.direction.clone();   // outward normal of the wall
+      const playerSide   = new THREE.Vector3().subVectors(player.position, eff.position).dot(wallFacing);
+      const incomingSide = new THREE.Vector3().subVectors(incomingPos,    eff.position).dot(wallFacing);
+      // Both must be on opposite sides of the wall plane (player inside, incoming outside).
+      if (!(playerSide < 0 && incomingSide > 0)) continue;
+      // (v9 fix) Compute where the actual SHOT LINE (incoming -> player)
+      // crosses the wall plane, then check that intersection point against
+      // the wall's extent. Previously we tested whether the BOT was in front
+      // of the wall, which falsely rejected shots from bots that were off to
+      // the side of the wall but whose beams still passed through it.
+      const denom = playerSide - incomingSide;     // negative (incoming > 0, player < 0)
+      const tParam = -incomingSide / denom;        // in (0,1) given the side check above
+      const intersect = new THREE.Vector3().lerpVectors(incomingPos, player.position, tParam);
+      // Project the intersection's offset from wall center onto the wall plane.
+      const offCenter = new THREE.Vector3().subVectors(intersect, eff.position);
+      offCenter.sub(wallFacing.clone().multiplyScalar(offCenter.dot(wallFacing)));
+      // The Particle Wall mesh is BoxGeometry(400, 300, 25). Use 220 as a
+      // circular approx that catches the box silhouette (half-width 200,
+      // half-height 150 ; 220 leaves a small extra-margin halo so glancing
+      // shots on the edge still count as caught).
+      const wallRadius = 220;
+      if (offCenter.lengthSq() > wallRadius * wallRadius) continue;
+      // Absorb damage into the wall's HP.
+      const absorbed = Math.min(amount, eff.hp);
+      eff.hp -= absorbed;
+      amount -= absorbed;
+      if (eff.hp <= 0) {
+        if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+        if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+        eff.timer = 0;
       }
+      if (amount <= 0) return;
     }
   }
 
@@ -17919,8 +18057,14 @@ function executeAbility(slot, ability) {
       broadcastAbilityProjectile(proj);
     }
     // TRACKER: Tracker Rockets (fire homing salvo at fully-locked targets; partial locks preserved)
+    // (v9 rework) Strict full-lock-only: if no target has 3/3 locks the ability
+    // is a no-op (no unguided salvo, no projectiles spawned). Each fully locked
+    // target gets its own 5-rocket volley, and ONLY those full locks are
+    // consumed ; partial 1/3 and 2/3 locks on other ships persist for the
+    // next press. Lock-building paths: every main-gun shot that hits a target
+    // adds +1 to that target's lock count (see Projectile.update), and a
+    // Sonar Lock pulse adds +1 to every ship in its cone (see Sonar Lock case).
     else if (ability.name === 'Tracker Rockets') {
-      // Gather only targets with full 3 locks
       const lockedTargets = [];
       for (const [botId, locks] of Object.entries(player.trackerLocks)) {
         if (locks >= 3) {
@@ -17928,35 +18072,30 @@ function executeAbility(slot, ability) {
           if (bot) lockedTargets.push(bot);
         }
       }
-      if (lockedTargets.length > 0) {
-        // Fire 5 tracking missiles at each fully-locked target
-        for (const target of lockedTargets) {
-          for (let m = 0; m < 5; m++) {
-            const spread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
-            const vel = forward.clone().add(spread).normalize().multiplyScalar(900);
-            const proj = new Projectile(player.position.clone(), vel, 1000, 80, 'player', 0xffaa00);
-            proj.tracking = true;
-            proj.trackTarget = target;
-            game.projectiles.push(proj);
-            // (v6.7) Receivers see straight-line missiles (no homing client-side);
-            // damage still flows via hit-claim. Future: broadcast trackTarget.peerId
-            // so receivers can render homing too.
-            broadcastAbilityProjectile(proj);
-          }
-          // Only consume full locks; partial locks on other targets stay
-          delete player.trackerLocks[target.id];
-        }
-        player.trackerLockedTarget = null;
-      } else {
-        // No full locks: fire unguided salvo (partial locks preserved for next volley)
+      if (lockedTargets.length === 0) {
+        // No full locks => the ability does nothing. The player gets no
+        // projectiles, the partial locks they already have stay intact, and
+        // they can press the key again the moment another lock saturates.
+        return;
+      }
+      // Fire 5 tracking missiles at each fully-locked target.
+      for (const target of lockedTargets) {
         for (let m = 0; m < 5; m++) {
-          const spread = new THREE.Vector3((Math.random()-0.5)*0.15, (Math.random()-0.5)*0.15, 0);
+          const spread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
           const vel = forward.clone().add(spread).normalize().multiplyScalar(900);
-          const proj = new Projectile(player.position.clone(), vel, 500, 60, 'player', 0xffaa00);
+          const proj = new Projectile(player.position.clone(), vel, 1000, 80, 'player', 0xffaa00);
+          proj.tracking = true;
+          proj.trackTarget = target;
           game.projectiles.push(proj);
+          // (v6.7) Receivers see straight-line missiles (no homing client-side);
+          // damage still flows via hit-claim. Future: broadcast trackTarget.peerId
+          // so receivers can render homing too.
           broadcastAbilityProjectile(proj);
         }
+        // Only consume full locks ; partial locks on other targets stay.
+        delete player.trackerLocks[target.id];
       }
+      player.trackerLockedTarget = null;
     }
     // BLASTER: Power Shot (1s charge, then fires; mode-dependent)
     else if (ability.name === 'Power Shot') {
@@ -18212,37 +18351,30 @@ function executeAbility(slot, ability) {
       const trapPos = player.position.clone().add(forward.clone().multiplyScalar(300));
       spawnTetherTrap(trapPos, 'player', player.team, net.myPeerId, ++net.effectIdCounter, true);
     }
-    // TRACKER: Sonar Lock (reveal enemies + build lock stacks for Tracker Rockets)
+    // TRACKER: Sonar Lock
+    // (v9 rework) Fire a sonar BEACON projectile that flies forward at high
+    // speed. Where the beacon lands (on a wall, on a ship, or at end-of-life),
+    // it spawns a sonar pulse: a sphere of detection that radiates outward
+    // from the impact point and grants +1 lock to every enemy ship caught
+    // in its expanding wave (capped at 3/3 per ship).
+    //
+    // Tactics: aim past the ship you want locked so the beacon plants near
+    // them and the sphere sweeps over multiple targets at once. Or skip the
+    // beacon off a wall behind enemies to wash a whole pocket with locks.
+    // The beacon does no damage on impact ; it's purely a sensor.
     else if (ability.name === 'Sonar Lock') {
-      // Pulse that reveals and locks enemies in a cone
-      const lockRange = 2000;
-      for (const bot of game.entities) {
-        if (!bot.alive || bot.team === player.team) continue;
-        const dist = player.position.distanceTo(bot.position);
-        if (dist > lockRange) continue;
-        const toBot = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
-        if (forward.dot(toBot) > 0.3) {
-          // Add lock stack (max 3)
-          const id = bot.id;
-          const prevLocks = player.trackerLocks[id] || 0;
-          player.trackerLocks[id] = Math.min(3, prevLocks + 1);
-          if (player.trackerLocks[id] > prevLocks) {
-            playSound('sonar_ping_' + player.trackerLocks[id]);
-          }
-          if (player.trackerLocks[id] >= 3) player.trackerLockedTarget = bot;
-          // Visual lock indicator
-          spawnTracer(player.position, bot.position, 0xffaa00);
-          // (v6.7) Broadcast the lock pulse so peers see the indicator.
-          if (net.active && net.sendEvent) {
-            net.sendEvent({
-              type: 'fire_tracer',
-              ox: player.position.x, oy: player.position.y, oz: player.position.z,
-              ex: bot.position.x, ey: bot.position.y, ez: bot.position.z,
-              color: 0xffaa00,
-            });
-          }
-        }
-      }
+      // (v9 tune) Beacon smaller (sizeMult 1.6 -> 0.5) and faster
+      // (1500 -> 2400) so it reads as a quick painted ping rather than a
+      // slow lobbed sphere. Lifetime kept at 4s so a missed long-range
+      // beacon still ends with a pulse where it stopped.
+      const beaconSpeed = 2400;
+      const vel = forward.clone().multiplyScalar(beaconSpeed);
+      const proj = new Projectile(player.position.clone(), vel, 0, 0, 'player', 0x44ddff);
+      proj.isSonar = true;
+      proj.lifetime = 4.0;
+      proj.sizeMult = 0.5;
+      game.projectiles.push(proj);
+      broadcastAbilityProjectile(proj);
     }
     // BLASTER: Mode Switch (toggle close/long range, 1s transition delay)
     else if (ability.name === 'Mode Switch') {
@@ -19066,6 +19198,47 @@ function updateShieldVisuals(dt) {
 }
 
 const _holdAbilityNames = ['Vortex Shield', 'Sword Block', 'Thermal Shield'];
+
+// (v9) Sonar pulse: spawned where the Sonar Lock beacon lands. Radiates a
+// sphere of detection outward from `pos` over SONAR_PULSE_DURATION seconds,
+// granting +1 lock to every enemy ship the sphere first touches (capped at
+// 3/3 per ship by the lock-build code that consumes this). Visual: a
+// wireframe sphere that scales up + fades out as it expands. The world-
+// effects updater (inside updateAbilities) ticks `radius` and grants locks.
+const SONAR_PULSE_DURATION = 1.2;        // seconds to expand 0 -> max
+const SONAR_PULSE_MAX_RADIUS = 1500;     // world units of detection radius
+function _spawnSonarPulse(pos, owner) {
+  const geo = new THREE.SphereGeometry(1, 24, 16);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x44ddff,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.45,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(pos);
+  mesh.scale.setScalar(0.01);
+  mesh.renderOrder = 2;
+  scene.add(mesh);
+  game.worldEffects.push({
+    type: 'sonar_pulse',
+    position: pos.clone(),
+    owner: owner,
+    radius: 0,
+    maxRadius: SONAR_PULSE_MAX_RADIUS,
+    duration: SONAR_PULSE_DURATION,
+    elapsed: 0,
+    timer: SONAR_PULSE_DURATION + 0.2,    // a tiny tail so the fade-out is visible
+    locked: new Set(),                    // bot ids already granted a lock by THIS pulse
+    mesh: mesh,
+  });
+  // Tactile audio: a single ping at the impact point so the player hears the
+  // detonation regardless of whether anything was in range. Per-ship lock
+  // grants below play their own ping at the appropriate stack count.
+  try { playSound('sonar_ping_1'); } catch (e) {}
+}
 
 function updateAbilities(dt) {
   // Update shield visuals each frame
@@ -19942,6 +20115,42 @@ function updateAbilities(dt) {
           spawnLightningBolt(eff.position, eff.rootTarget.position, 0xaaeeff, 0.10, 2, 1.4);
         }
         eff.arcTimer = 0.05 + Math.random() * 0.05;
+      }
+    }
+
+    // (v9) Sonar pulse: expanding sphere of detection. Each frame grow the
+    // radius linearly from 0 to maxRadius over `duration` seconds, scale the
+    // wireframe mesh with it, and grant +1 lock to every fresh enemy whose
+    // hull center is now inside the sphere. Each bot gets at most one lock
+    // grant per pulse (tracked via the per-effect `locked` Set), and the
+    // global lock counter caps at 3/3.
+    else if (eff.type === 'sonar_pulse') {
+      eff.elapsed = (eff.elapsed || 0) + dt;
+      const t = Math.min(1, eff.elapsed / eff.duration);
+      eff.radius = t * eff.maxRadius;
+      if (eff.mesh) {
+        eff.mesh.scale.setScalar(Math.max(0.01, eff.radius));
+        if (eff.mesh.material) {
+          // Fade the wireframe out as the sphere reaches full size so the
+          // edge of the wave reads cleanly without leaving a hollow lingering.
+          eff.mesh.material.opacity = 0.45 * (1 - t * t);
+        }
+      }
+      // Lock-grant: only the player who fired the beacon receives locks.
+      if (eff.owner === 'player' && player && player.shipState !== 'dead') {
+        const r2 = eff.radius * eff.radius;
+        for (const bot of game.entities) {
+          if (!bot.alive || bot.team === player.team) continue;
+          if (eff.locked.has(bot.id)) continue;
+          if (eff.position.distanceToSquared(bot.position) >= r2) continue;
+          const prevLocks = player.trackerLocks[bot.id] || 0;
+          player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
+          eff.locked.add(bot.id);
+          if (player.trackerLocks[bot.id] > prevLocks) {
+            try { playSound('sonar_ping_' + player.trackerLocks[bot.id]); } catch (_) {}
+          }
+          if (player.trackerLocks[bot.id] >= 3) player.trackerLockedTarget = bot;
+        }
       }
     }
 
