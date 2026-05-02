@@ -12985,6 +12985,42 @@ class ClusterObstacle {
 
   update(dt) {
     if (!this.alive) {
+      // (v8_2a) Empty cluster sites (all children destroyed) keep
+      // crackling with lightning at the original cluster position. The
+      // mesh body and smoke spawning are gone, but the energy that held
+      // the cluster together visibly persists. Bolts fire ~1-2 per second
+      // and are colored bluish-violet to match the in-cluster electric
+      // accents. Skipped if player too far so distant sites stay quiet.
+      if (typeof spawnLightningBolt === 'function' &&
+          typeof player !== 'undefined' && player && player.position) {
+        const _d2 = this.position.distanceToSquared(player.position);
+        const _maxR = 2400;
+        if (_d2 < _maxR * _maxR) {
+          if (this._ghostArcTimer == null) this._ghostArcTimer = Math.random() * 0.8;
+          this._ghostArcTimer -= dt;
+          if (this._ghostArcTimer <= 0) {
+            this._ghostArcTimer = 0.50 + Math.random() * 0.80;
+            const _r = (this.clusterScale || 80) * 0.7;
+            const _t1 = Math.random() * Math.PI * 2, _p1 = Math.acos(2*Math.random() - 1);
+            const _t2 = Math.random() * Math.PI * 2, _p2 = Math.acos(2*Math.random() - 1);
+            const _from = this.position.clone().add(new THREE.Vector3(
+              _r * Math.sin(_p1) * Math.cos(_t1),
+              _r * Math.cos(_p1),
+              _r * Math.sin(_p1) * Math.sin(_t1),
+            ));
+            const _to = this.position.clone().add(new THREE.Vector3(
+              _r * Math.sin(_p2) * Math.cos(_t2),
+              _r * Math.cos(_p2),
+              _r * Math.sin(_p2) * Math.sin(_t2),
+            ));
+            const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+            spawnLightningBolt(_from, _to, _col,
+                               0.12 + Math.random() * 0.10,
+                               1 + Math.floor(Math.random() * 3),
+                               1.2 + Math.random() * 0.7);
+          }
+        }
+      }
       // Respawn disabled: once a cluster has been fully shattered it stays
       // gone for the rest of the match.
       return;
@@ -13141,7 +13177,7 @@ class ClusterObstacle {
           type: 'shaderSmoke',
           maxSize: 2.2,            // expand more as it drifts (was 1.25)
           baseScale: baseScale,
-          alphaMul: 0.85,          // slightly less opaque so overlapping plumes blend
+          alphaMul: 0.55,          // (v8_2a) more transparent so clouds feel airy
           rotVel: new THREE.Vector3(
             (Math.random() - 0.5) * 0.12,
             (Math.random() - 0.5) * 0.12,
@@ -14851,7 +14887,7 @@ function updateAmbientClouds(dt) {
     type: 'shaderSmoke',
     maxSize: 1.6,
     baseScale: _size,
-    alphaMul: 0.55,                     // ambient clouds slightly more sheer
+    alphaMul: 0.35,                     // (v8_2a) more transparent ambient clouds
     rotVel: new THREE.Vector3(
       (Math.random() - 0.5) * 0.08,
       (Math.random() - 0.5) * 0.08,
@@ -19467,6 +19503,31 @@ function updateRoundSystem(dt) {
         game.stasisSpawnTimer = 30;
         game.stasisFirstBatch = true;
         game.playerInStasis = false;
+        // (v8_2a) Clear all transient effects + particles from the prior
+        // round so smoke clouds / lightning bolts / debris / ambient clouds
+        // don't accumulate across the match. Without this, plumes from
+        // round 1 are still drifting through round 5. Same disposal
+        // pattern as match-end cleanup ; remove from scene + dispose
+        // material when present so GPU memory doesn't leak either.
+        for (const eff of game.effects) {
+          if (!eff) continue;
+          if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+          if (eff.mesh && eff.mesh.material && eff.mesh.material.dispose) {
+            try { eff.mesh.material.dispose(); } catch (_) {}
+          }
+        }
+        game.effects = [];
+        for (const p of game.particles) {
+          if (p && p.poolSlot && typeof _releaseParticleSlot === 'function') {
+            try { _releaseParticleSlot(p.poolSlot); } catch (_) {}
+          }
+        }
+        game.particles = [];
+        // Reset the ambient-cloud cadence so a new wave doesn't immediately
+        // re-spawn on top of the freshly-built map.
+        if (typeof _ambientCloudTimer !== 'undefined') {
+          _ambientCloudTimer = 2.5 + Math.random() * 1.5;
+        }
         // (v6.9) Reset champion-mode state for the new round.
         game.championField = null;
         game.championSpawned = false;
