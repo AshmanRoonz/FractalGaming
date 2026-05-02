@@ -15463,8 +15463,8 @@ class FractalPlant {
     const lineArr = new Float32Array(linePoints);
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute('position', new THREE.BufferAttribute(lineArr, 3));
-    // (v9) Lower saturation + lightness so plants read as soft
-    // atmospheric growth, not bright vector art.
+    // (v9 revert) Back to Additive blending with dim color. Plants
+    // glow softly without taking over the environment.
     this.lineMaterial = new THREE.LineBasicMaterial({
       color: new THREE.Color().setHSL(this.huePhase, 0.40, 0.40),
       transparent: true,
@@ -15479,8 +15479,8 @@ class FractalPlant {
     const tipArr = new Float32Array(tipPoints);
     const tipGeo = new THREE.BufferGeometry();
     tipGeo.setAttribute('position', new THREE.BufferAttribute(tipArr, 3));
-    // (v9) Same toned-down palette as the line. Tip slightly more
-    // saturated so it still has presence without screaming.
+    // (v9 revert) Back to NormalBlending + dim color so tips read
+    // as colored cells, not bright glares.
     this.tipMaterial = new THREE.PointsMaterial({
       color: new THREE.Color().setHSL((this.huePhase + 0.04) % 1, 0.45, 0.38),
       size: 3 + Math.random() * 3,
@@ -15558,7 +15558,54 @@ class FractalPlant {
     // point cloud are children so they grow as one.
     const easeOut = 1 - (1 - t) * (1 - t);
     const growth = this._MIN_GROWTH + easeOut * (1 - this._MIN_GROWTH);
-    this.group.scale.setScalar(growth);
+    // (v9) Shy plants. Compute the proximity factor (0 = ship on top of
+    // me, 1 = no ship within FAR units) using squared distances against
+    // player + alive bots. Smooth via a one-pole filter (~0.5s time
+    // constant) so the shrink/regrow eases organically. Final scale is
+    // growth * smoothed_proximity, floored at MIN_GROWTH so the plant
+    // doesn't fully vanish when a ship parks on it.
+    const _PROX_NEAR2 = 200 * 200;          // ship inside this = full shrink
+    const _PROX_FAR2  = 900 * 900;          // ship outside this = no effect
+    let _minD2 = Infinity;
+    if (typeof player !== 'undefined' && player && player.position &&
+        player.shipState !== 'dead' && player.shipState !== 'spawning') {
+      const dx = player.position.x - this.worldPos.x;
+      const dy = player.position.y - this.worldPos.y;
+      const dz = player.position.z - this.worldPos.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < _minD2) _minD2 = d2;
+    }
+    if (typeof game !== 'undefined' && game.entities) {
+      for (let _bi = 0; _bi < game.entities.length; _bi++) {
+        const _bot = game.entities[_bi];
+        if (!_bot || !_bot.alive || !_bot.position) continue;
+        const dx = _bot.position.x - this.worldPos.x;
+        const dy = _bot.position.y - this.worldPos.y;
+        const dz = _bot.position.z - this.worldPos.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < _minD2) _minD2 = d2;
+      }
+    }
+    let prox;
+    if (_minD2 >= _PROX_FAR2) {
+      prox = 1.0;
+    } else if (_minD2 <= _PROX_NEAR2) {
+      prox = 0.0;
+    } else {
+      const _u = (Math.sqrt(_minD2) - Math.sqrt(_PROX_NEAR2)) /
+                 (Math.sqrt(_PROX_FAR2) - Math.sqrt(_PROX_NEAR2));
+      prox = _u * _u * (3 - 2 * _u);          // smoothstep
+    }
+    if (this._proxSmoothed == null) this._proxSmoothed = prox;
+    // One-pole smoother. Half-life ~0.35s so a fast pass shrinks visibly
+    // but the plant takes a moment to regrow once the ship leaves.
+    const _lerp = Math.min(1, dt * 2.0);
+    this._proxSmoothed += (prox - this._proxSmoothed) * _lerp;
+    // (v9) Max plant size doubled. At prox=1 (no ship near) scale =
+    // growth * 2.0 ; at prox=0 (ship on top) scale floors to MIN_GROWTH.
+    // The midpoint (prox=0.5) lands on the original "full size" of growth.
+    const _finalScale = Math.max(this._MIN_GROWTH, growth * this._proxSmoothed * 2.0);
+    this.group.scale.setScalar(_finalScale);
     // Opacity ramps in faster than scale so the plant is visible while
     // it's still tiny.
     const fadeT = Math.min(1, t / 0.60);
@@ -15578,9 +15625,8 @@ class FractalPlant {
     // and brighter so they pop against the dim line skeleton.
     const hue = (this.huePhase + this.age * this.hueSpeed) % 1;
     const breath = 0.48 + 0.06 * Math.sin(_t * 0.6 + this.huePhase * 6.28);
-    // (v9) Toned-down per-frame color: same hue drift but lower
-    // saturation + lightness so plants stay atmospheric. breath is a
-    // tiny lightness wobble around 0.40 instead of 0.50.
+    // (v9 revert) Back to the dim atmospheric range. breath is a tiny
+    // lightness wobble around 0.40 instead of the multiply-era 0.70.
     this.lineMaterial.color.setHSL(hue, 0.40, breath - 0.10);
     this.tipMaterial.color.setHSL((hue + 0.04) % 1, 0.45, 0.38);
   }
@@ -15613,7 +15659,7 @@ function spawnFractalPlants(rooms) {
       // ~5 per typical 250-radius room ; bump by a constant factor for
       // visible coverage. Capped to avoid extreme densities on huge rooms.
       const surfA = 4 * Math.PI * R * R;
-      const N = Math.min(120, Math.max(30, Math.round(surfA / 1500)));
+      const N = Math.min(240, Math.max(60, Math.round(surfA / 750)));   // (v9) doubled
       for (let i = 0; i < N; i++) {
         const theta = Math.random() * Math.PI * 2;
         const phi   = Math.acos(2 * Math.random() - 1);
@@ -15659,7 +15705,7 @@ function spawnFractalPlants(rooms) {
     // Density: surface area ~ 2*pi*R*length. Scale per-unit so long
     // tunnels get more, short ones fewer. Cap to keep frame-time sane.
     const surfA = 2 * Math.PI * R * lenAxis;
-    const N = Math.min(180, Math.max(15, Math.round(surfA / 1500)));
+    const N = Math.min(360, Math.max(30, Math.round(surfA / 750)));   // (v9) doubled
     for (let i = 0; i < N; i++) {
       const t = Math.random();
       const center = a.clone().addScaledVector(axis, t * lenAxis);
@@ -15746,10 +15792,10 @@ function _spawnOneFractalPlant(wallPos, normalIn, exSphere, exCyl) {
   const angle   = Math.PI / (4 + Math.random() * 4);
   const lenMul  = 0.58 + Math.random() * 0.10;
   const opacityBoost = 1 - Math.min(1, scale * 1.5);
-  // (v9) Constrain plant hue to 0.50-0.92 (cyan -> blue -> purple ->
-  // magenta) so they belong to the LSS palette ; was random across the
-  // full spectrum which produced jarring greens/yellows. Opacity halved
-  // so they sit behind the action as atmosphere, not stickers on the wall.
+  // (v9) Reverted from multiply blending. Back to additive line + normal
+  // tip with dim colors, opacity dropped to 0.10-0.20 (was 0.18-0.30 pre
+  // -multiply) so plants are more transparent ; further into the
+  // background atmosphere.
   const plant = new FractalPlant(wallPos, normalIn, {
     scale: scale,
     maxDepth: depth,
@@ -15758,7 +15804,7 @@ function _spawnOneFractalPlant(wallPos, normalIn, exSphere, exCyl) {
     lengthMultiplier: lenMul,
     hue: 0.50 + Math.random() * 0.42,
     growthDuration: 1.5 + Math.random() * 3.0,
-    maxOpacity: 0.18 + opacityBoost * 0.12,
+    maxOpacity: 0.10 + opacityBoost * 0.10,
   });
   game.fractalPlants.push(plant);
 }
@@ -20379,15 +20425,21 @@ function updateRoundSystem(dt) {
         game.playerInStasis = false;
         // (v8_2a) Clear all transient effects + particles from the prior
         // round so smoke clouds / lightning bolts / debris / ambient clouds
-        // don't accumulate across the match. Without this, plumes from
-        // round 1 are still drifting through round 5. Same disposal
-        // pattern as match-end cleanup ; remove from scene + dispose
-        // material when present so GPU memory doesn't leak either.
+        // don't accumulate across the match.
+        // (v9 fix) Use _disposeOrReleaseEffect for each entry so pooled
+        // types release correctly. lightningSeg in particular needs its
+        // pool slot released + the pooled mesh hidden ; the prior raw
+        // mesh-remove loop missed both, leaving in-flight bolts visible
+        // for the rest of the match across a round transition.
         for (const eff of game.effects) {
           if (!eff) continue;
-          if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-          if (eff.mesh && eff.mesh.material && eff.mesh.material.dispose) {
-            try { eff.mesh.material.dispose(); } catch (_) {}
+          if (typeof _disposeOrReleaseEffect === 'function') {
+            try { _disposeOrReleaseEffect(eff); } catch (_) {}
+          } else if (eff.mesh && eff.mesh.parent) {
+            scene.remove(eff.mesh);
+            if (eff.mesh.material && eff.mesh.material.dispose) {
+              try { eff.mesh.material.dispose(); } catch (_) {}
+            }
           }
         }
         game.effects = [];
