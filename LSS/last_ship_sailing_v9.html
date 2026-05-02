@@ -15461,7 +15461,15 @@ function spawnFractalPlants(rooms) {
         );
         if (normalIn.lengthSq() < 0.001) continue;
         normalIn.normalize();
-        _spawnOneFractalPlant(wallPos, normalIn);
+        // Look up the levelSpheres entry that corresponds to this room
+        // so the carve check excludes it. levelSpheres uses cx/cy/cz.
+        let _exSp = null;
+        if (game.levelSpheres) {
+          for (const sp of game.levelSpheres) {
+            if (sp && sp.cx === rm.x && sp.cy === rm.y && sp.cz === rm.z) { _exSp = sp; break; }
+          }
+        }
+        _spawnOneFractalPlant(wallPos, normalIn, _exSp, null);
       }
     }
   }
@@ -15493,15 +15501,73 @@ function spawnFractalPlants(rooms) {
                           .add(up.clone().multiplyScalar(Math.sin(ang) * R));
       const wallPos = center.clone().add(offset);
       const normalIn = offset.clone().multiplyScalar(-1).normalize();
-      _spawnOneFractalPlant(wallPos, normalIn);
+      _spawnOneFractalPlant(wallPos, normalIn, null, cyl);
     }
   }
 }
 
+// (v9 followup, fixed) "Is this point inside another carved volume?"
+// The map carves space by subtracting spheres + cylinders ; at junctions
+// where two carved volumes overlap, the wall is gone. A plant spawned on
+// sphere A's wall at a point that's also inside sphere B (or cylinder C)
+// would visually float in the open air of B, not on a wall. This helper
+// rejects those candidates.
+//
+// IMPORTANT: the source volume MUST be passed in so it's skipped during
+// the check. Without exclusion, the carve-pad multiplier makes the source
+// look "bigger than r" and the candidate (which sits exactly on r) self-
+// rejects. exSphere / exCyl are the source references to skip.
+const _PLANT_CARVE_PAD = 1.04;     // 4% buffer so candidates very near
+                                    // a different boundary are also
+                                    // rejected ("lip" between two
+                                    // overlapping carved volumes).
+function _isInsideOtherCarvedVolume(pos, exSphere, exCyl) {
+  // Spheres (rooms)
+  const sps = (typeof game !== 'undefined' && game.levelSpheres) || null;
+  if (sps) {
+    for (let i = 0; i < sps.length; i++) {
+      const sp = sps[i];
+      if (!sp || sp === exSphere) continue;
+      const dx = pos.x - sp.cx;
+      const dy = pos.y - sp.cy;
+      const dz = pos.z - sp.cz;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const r  = sp.r * _PLANT_CARVE_PAD;
+      if (d2 < r * r) return true;
+    }
+  }
+  // Cylinders (tunnels)
+  const cys = (typeof game !== 'undefined' && game.levelCylinders) || null;
+  if (cys) {
+    for (let i = 0; i < cys.length; i++) {
+      const cy = cys[i];
+      if (!cy || cy === exCyl) continue;
+      const ax = cy.bx - cy.ax, ay = cy.by - cy.ay, az = cy.bz - cy.az;
+      const lenSq = ax*ax + ay*ay + az*az;
+      if (lenSq < 0.001) continue;
+      const px = pos.x - cy.ax, py = pos.y - cy.ay, pz = pos.z - cy.az;
+      const t = (px*ax + py*ay + pz*az) / lenSq;
+      if (t < 0 || t > 1) continue;        // outside axial range of this cylinder
+      const cx = cy.ax + ax * t;
+      const cyy = cy.ay + ay * t;
+      const cz = cy.az + az * t;
+      const ddx = pos.x - cx;
+      const ddy = pos.y - cyy;
+      const ddz = pos.z - cz;
+      const r2  = cy.r * _PLANT_CARVE_PAD;
+      if (ddx*ddx + ddy*ddy + ddz*ddz < r2 * r2) return true;
+    }
+  }
+  return false;
+}
+
 // Internal helper: pick scale + depth + branching params, build the plant.
 // Shared between sphere and cylinder paths so the visual aesthetic stays
-// consistent across all wall types.
-function _spawnOneFractalPlant(wallPos, normalIn) {
+// consistent across all wall types. Rejects candidates that fall inside
+// another carved volume (the wall doesn't exist there). exSphere/exCyl
+// is the source ; pass whichever your caller is iterating.
+function _spawnOneFractalPlant(wallPos, normalIn, exSphere, exCyl) {
+  if (_isInsideOtherCarvedVolume(wallPos, exSphere, exCyl)) return;
   // Tiny scales: 0.05 .. 0.40 with pow(u, 2.5) bias toward the small end.
   const u = Math.random();
   const scale = 0.05 + Math.pow(u, 2.5) * 0.35;
