@@ -4294,16 +4294,34 @@ function _makeVortexShieldMaterial(baseAlpha) {
 //   uColor    smoke tint (darker for explosion vs lighter for sustained gas)
 //   uBaseAlpha density gate ; modulated by updateEffects for fade-out
 //   uOctaves  FBM detail levels
+// (v9) Smoke materials register here so the per-frame light update can
+// find every live smoke material. WeakRef so the GC can reap disposed
+// materials without us tracking dispose() calls.
+const _smokeMatRegistry = [];
+const _MAX_SMOKE_LIGHTS = 4;
 function _makeSmokeMaterial(initialColor, baseAlpha) {
-  return new THREE.ShaderMaterial({
+  // Initialize light slots: zero positions, black colors, zero strength.
+  // Per-frame update (see updateSmokeLights) writes active flashes into
+  // these slots. Each material gets its own array so the uniforms stay
+  // per-material (Three.js requirement).
+  const _lightPos = [];
+  const _lightCol = [];
+  const _lightStr = [];
+  for (let i = 0; i < _MAX_SMOKE_LIGHTS; i++) {
+    _lightPos.push(new THREE.Vector3());
+    _lightCol.push(new THREE.Color(0, 0, 0));
+    _lightStr.push(0);
+  }
+  const mat = new THREE.ShaderMaterial({
     uniforms: {
       time:       { value: 0 },
       uColor:     { value: new THREE.Color(initialColor) },
       uBaseAlpha: { value: baseAlpha },
-      // (v6.9) Octaves dropped 6 -> 3. Smoke at radial scale doesn't need
-      // sub-pixel detail; 3 octaves still reads as turbulent volume and
-      // every dropped octave halves per-pixel noise cost.
       uOctaves:   { value: 3 },
+      // (v9) Dynamic light contribution slots ; populated by updateSmokeLights.
+      uLightPos:      { value: _lightPos },
+      uLightColor:    { value: _lightCol },
+      uLightStrength: { value: _lightStr },
     },
     vertexShader: [
       'varying vec3 vWorldPos;',
@@ -4321,6 +4339,13 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
       'uniform vec3 uColor;',
       'uniform float uBaseAlpha;',
       'uniform int uOctaves;',
+      // (v9) Dynamic light slots. Pos in world space, color RGB, strength
+      // controls intensity (0 = inactive). All 4 always evaluated ; cheap
+      // because the strength gate skips the math when zero.
+      '#define MAX_SMOKE_LIGHTS 4',
+      'uniform vec3 uLightPos[MAX_SMOKE_LIGHTS];',
+      'uniform vec3 uLightColor[MAX_SMOKE_LIGHTS];',
+      'uniform float uLightStrength[MAX_SMOKE_LIGHTS];',
       'varying vec3 vWorldPos;',
       'varying vec3 vLocalPos;',
       'varying vec3 vNormal;',
@@ -4371,6 +4396,21 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
       // Smoke is darker (color is dimmer overall). Slight brightness boost
       // in dense pockets so the smoke isn't pure black.
       '  vec3 col = uColor * (0.50 + density * 1.20);',
+      '  // (v9) Dynamic light contribution. Each active flash adds color',
+      '  // weighted by inverse-square falloff. Multiplied by density so',
+      '  // the lighting reads as smoke catching the light, not as a glow',
+      '  // floating in space.',
+      '  vec3 lightAdd = vec3(0.0);',
+      '  for (int i = 0; i < MAX_SMOKE_LIGHTS; i++) {',
+      '    float s = uLightStrength[i];',
+      '    if (s > 0.0) {',
+      '      vec3 d = vWorldPos - uLightPos[i];',
+      '      float dist2 = dot(d, d);',
+      '      float att = 1.0 / (1.0 + 0.0008 * dist2);',
+      '      lightAdd += uLightColor[i] * (att * s);',
+      '    }',
+      '  }',
+      '  col += lightAdd * density * 1.6;',
       '  float alpha = density * uBaseAlpha;',
       '  if (alpha < 0.04) discard;',
       '  gl_FragColor = vec4(col, alpha);',
@@ -4381,7 +4421,14 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
     depthWrite: false,
     side: THREE.FrontSide,
   });
+  // (v9) Track this material so the per-frame light update can find it.
+  try { _smokeMatRegistry.push(new WeakRef(mat)); } catch (_) {}
+  return mat;
 }
+
+// (v9) Re-export to allow the original `return new THREE.ShaderMaterial(...)`
+// idiom not to break anything ; the function above already returns mat.
+function __smoke_mat_factory_close() {}
 
 // (v6.9) Vortex Laser Core volumetric beam material. A thick open-ended
 // cylinder gets oriented along the firing direction each frame ; this
@@ -11209,6 +11256,64 @@ function spawnDynamicLight(pos, color, intensity, range, duration) {
   light.position.copy(pos);
   // light.visible stays true forever; see NUM_POINT_LIGHTS PINNING note above.
   dynamicLights.active.push({ light, intensity, duration, age: 0 });
+  // (v9) Also track this flash so the smoke shader can pick it up.
+  // updateSmokeLights ages it out and writes the top-K into smoke uniforms.
+  if (typeof _smokeLightFlashes !== 'undefined') {
+    _smokeLightFlashes.push({
+      pos: pos.clone(),
+      color: new THREE.Color(color),
+      intensity: intensity,
+      duration: duration,
+      age: 0,
+    });
+    while (_smokeLightFlashes.length > _SMOKE_FLASH_MAX) _smokeLightFlashes.shift();
+  }
+}
+
+// (v9) Smoke-flash queue. Capped at twice the per-shader slot count so we
+// always have enough recent flashes to fill the slots when many shots fire.
+const _smokeLightFlashes = [];
+const _SMOKE_FLASH_MAX = 12;
+
+function updateSmokeLights(dt) {
+  // Age out and remove finished flashes.
+  for (let i = _smokeLightFlashes.length - 1; i >= 0; i--) {
+    const f = _smokeLightFlashes[i];
+    f.age += dt;
+    if (f.age >= f.duration) _smokeLightFlashes.splice(i, 1);
+  }
+  // Build up to 4 strongest active flashes (intensity * fadeOut).
+  const top = [];
+  for (const f of _smokeLightFlashes) {
+    const t = f.age / f.duration;
+    const fadeOut = Math.max(0, 1 - t * t);
+    const eff = f.intensity * fadeOut;
+    top.push({ f, eff });
+  }
+  top.sort((a, b) => b.eff - a.eff);
+  // Walk the smoke material registry. Drop dead WeakRefs.
+  for (let i = _smokeMatRegistry.length - 1; i >= 0; i--) {
+    const ref = _smokeMatRegistry[i];
+    const mat = (ref && typeof ref.deref === 'function') ? ref.deref() : null;
+    if (!mat || !mat.uniforms || !mat.uniforms.uLightStrength) {
+      _smokeMatRegistry.splice(i, 1);
+      continue;
+    }
+    const lp = mat.uniforms.uLightPos.value;
+    const lc = mat.uniforms.uLightColor.value;
+    const ls = mat.uniforms.uLightStrength.value;
+    for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
+      const e = top[k];
+      if (e) {
+        lp[k].copy(e.f.pos);
+        lc[k].copy(e.f.color);
+        ls[k] = e.eff;
+      } else {
+        ls[k] = 0;
+      }
+    }
+    mat.uniforms.uLightStrength.needsUpdate = true;
+  }
 }
 
 function updateDynamicLights() {
@@ -12839,6 +12944,33 @@ function _makeAtomFractalMaterial(baseColor) {
       '    o*ax.z*ax.x - ax.y*s, o*ax.y*ax.z + ax.x*s, o*ax.z*ax.z + c',
       '  );',
       '}',
+      // Hash-based 3D value noise + FBM for rock surface texture.
+      'float hash3(vec3 p){',
+      '  p = fract(p * 0.3183099 + 0.1);',
+      '  p *= 17.0;',
+      '  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));',
+      '}',
+      'float vnoise3(vec3 p){',
+      '  vec3 i = floor(p);',
+      '  vec3 f = fract(p);',
+      '  f = f * f * (3.0 - 2.0 * f);',
+      '  return mix(',
+      '    mix(mix(hash3(i + vec3(0,0,0)), hash3(i + vec3(1,0,0)), f.x),',
+      '        mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),',
+      '    mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x),',
+      '        mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y),',
+      '    f.z);',
+      '}',
+      'float fbm3(vec3 p){',
+      '  float v = 0.0;',
+      '  float a = 0.5;',
+      '  for(int i = 0; i < 3; i++){',
+      '    v += a * vnoise3(p);',
+      '    p *= 2.1;',
+      '    a *= 0.5;',
+      '  }',
+      '  return v;',
+      '}',
       'void main(){',
       '  // Use surface position as the fractal coordinate. Scale + slow',
       '  // breathing so the fractal pattern drifts visibly over time.',
@@ -12861,7 +12993,16 @@ function _makeAtomFractalMaterial(baseColor) {
       '  vec3 V = normalize(cameraPosition - vWorldPos);',
       '  float fres = pow(1.0 - max(0.0, dot(normalize(vNormal), V)), 2.5);',
       '  vec3 rim = uBaseColor * fres * 0.8;',
-      '  gl_FragColor = vec4(base + rim, uOpacity);',
+      '  // Rock texture modulation. Two scales of FBM:',
+      '  //   lowFreq darkens crevices (large irregular zones)',
+      '  //   highFreq adds fine surface grain',
+      '  // Combined into texMod which multiplies the final rock color.',
+      '  float lowFreq  = fbm3(vLocalPos * 3.5);',
+      '  float highFreq = fbm3(vLocalPos * 22.0 + 13.7);',
+      '  float texMod = 0.45 + 0.55 * lowFreq;',
+      '  texMod *= (0.86 + 0.14 * highFreq);',
+      '  vec3 colorOut = (base + rim) * texMod;',
+      '  gl_FragColor = vec4(colorOut, uOpacity);',
       '}',
     ].join('\n'),
     transparent: true,
@@ -28589,6 +28730,7 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
+  if (typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
   updateAmbientClouds(dt); // (v8_2a) ambient cloud spawner (uses Dot system below)
   updateDots(dt);          // (v8_2a) generic Dot system: physics + collisions + lightning + hue
   updateFractalPlants(dt); // (v9) tree_that_dreams plants on walls
