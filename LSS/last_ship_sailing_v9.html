@@ -12737,6 +12737,10 @@ class DestructibleObstacle {
 
   destroy() {
     this.alive = false;
+    // (v9) Cluster atoms crumble into rock chunks instead of just popping.
+    if (this.cluster && typeof spawnRockChunks === 'function') {
+      try { spawnRockChunks(this.position.clone(), this.cluster.baseColor || 0xffffff, this.scale); } catch (_) {}
+    }
     if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
     if (this.edgeMesh && this.edgeMesh.parent) scene.remove(this.edgeMesh);
     spawnExplosion(this.position, Math.ceil(this.scale / 8));
@@ -12757,6 +12761,160 @@ class DestructibleObstacle {
 // A cluster spawns 5-10 small destructible sub-shapes that orbit together until hit,
 // then shatter into loose debris. Each child is a DestructibleObstacle registered
 // in game.dynamicObjects so existing collision/damage iteration still works.
+// (v9) Fractal atom shader. Adapted from framework_shader.html ; the
+// 8-iteration Mandelbox-like fold with the (2.618, 4.0, 3.0) golden-ratio
+// constants applied to the surface-local position so each atom shows
+// flowing fractal patterns on its skin. Time-animated per frame; tinted
+// per cluster via uBaseColor.
+//
+// Rock geometry factory ; deforms an icosahedron by hash-displacing each
+// vertex along its normal. The hash is keyed by quantized position +
+// per-atom seed, so:
+//   - shared vertices on adjacent faces get identical displacement
+//     (no spiky cracks along edges ; the rock surface stays coherent)
+//   - each atom gets its own unique rock shape via the seed
+function _hashDisplace(x, y, z) {
+  // Quantize to 3 decimals so floating-point noise on shared verts
+  // doesn't desync the displacement amount across adjacent faces.
+  const qx = Math.round(x * 1000) / 1000;
+  const qy = Math.round(y * 1000) / 1000;
+  const qz = Math.round(z * 1000) / 1000;
+  const h = Math.sin(qx * 127.1 + qy * 311.7 + qz * 74.7) * 43758.5453;
+  return h - Math.floor(h);                         // 0..1
+}
+function _makeRockGeometry(detail, seed) {
+  const geo = new THREE.IcosahedronGeometry(1, detail || 1);
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  const s = (typeof seed === 'number') ? seed : 0;
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    // Radial displacement 0.55x to 1.35x. Wide range so rocks read as
+    // properly irregular, not just lightly bumpy spheres.
+    const factor = 0.55 + _hashDisplace(v.x + s * 13.7, v.y + s * 7.3, v.z + s * 19.1) * 0.80;
+    v.multiplyScalar(factor);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+const _atomFractalMaterials = [];        // list of all live fractal mats so we can tick `time`
+function _makeAtomFractalMaterial(baseColor) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      time:       { value: 0 },
+      uBaseColor: { value: new THREE.Color(baseColor) },
+      uOpacity:   { value: 1.0 },
+    },
+    vertexShader: [
+      'varying vec3 vLocalPos;',
+      'varying vec3 vWorldPos;',
+      'varying vec3 vNormal;',
+      'void main() {',
+      '  vLocalPos = position;',
+      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
+      '  vNormal   = normalize(normalMatrix * normal);',
+      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'varying vec3 vLocalPos;',
+      'varying vec3 vWorldPos;',
+      'varying vec3 vNormal;',
+      'uniform float time;',
+      'uniform vec3 uBaseColor;',
+      'uniform float uOpacity;',
+      'vec3 hsv(float h, float s, float v){',
+      '  vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);',
+      '  return v - v * s * clamp(min(k, 4.0 - k), 0.0, 1.0);',
+      '}',
+      'mat3 rotate3D(float a, vec3 ax){',
+      '  ax = normalize(ax);',
+      '  float s = sin(a), c = cos(a), o = 1.0 - c;',
+      '  return mat3(',
+      '    o*ax.x*ax.x + c,      o*ax.x*ax.y - ax.z*s, o*ax.z*ax.x + ax.y*s,',
+      '    o*ax.x*ax.y + ax.z*s, o*ax.y*ax.y + c,      o*ax.y*ax.z - ax.x*s,',
+      '    o*ax.z*ax.x - ax.y*s, o*ax.y*ax.z + ax.x*s, o*ax.z*ax.z + c',
+      '  );',
+      '}',
+      'void main(){',
+      '  // Use surface position as the fractal coordinate. Scale + slow',
+      '  // breathing so the fractal pattern drifts visibly over time.',
+      '  vec3 p = vLocalPos * (3.0 + cos(time * 0.4) * 1.0);',
+      '  p = p * rotate3D(time * 0.25, vec3(-4.0, sin(time) + 7.0, 0.0));',
+      '  float s = 1.0;',
+      '  float e = 0.0;',
+      '  for(int k = 0; k < 8; k++){',
+      '    e = max(0.95, 9.0 / dot(p, p));',
+      '    s *= e;',
+      '    p = vec3(2.618, 4.0, 3.0) - abs(abs(p) * e - vec3(1.0, 1.5, 1.618));',
+      '  }',
+      '  float q = 0.5 + 0.5 * sin(atan(p.x, p.y) + time * 0.3);',
+      '  // Density-driven HSV: hue tracks uBaseColor via the q phase, low',
+      '  // saturation, brightness from accumulated s. Tint the result by',
+      '  // uBaseColor so each cluster keeps its identity.',
+      '  vec3 base = hsv(0.59 - q * 0.1, 0.45 - q * 0.05, s / 4000.0 * (0.31 + q * 0.69));',
+      '  base = base * (uBaseColor + vec3(0.5));',     // multiplicative tint, baseline 0.5 so darker base colors don't crush
+      '  // Fresnel rim glow so the atom edges read against dark bgs.',
+      '  vec3 V = normalize(cameraPosition - vWorldPos);',
+      '  float fres = pow(1.0 - max(0.0, dot(normalize(vNormal), V)), 2.5);',
+      '  vec3 rim = uBaseColor * fres * 0.8;',
+      '  gl_FragColor = vec4(base + rim, uOpacity);',
+      '}',
+    ].join('\n'),
+    transparent: true,
+    depthWrite: true,
+    side: THREE.FrontSide,
+  });
+  _atomFractalMaterials.push(mat);
+  return mat;
+}
+
+// (v9) Spawn N small rock chunks at pos, exploding outward. Each chunk
+// reuses the fractal material so it visually belongs to the parent atom.
+// Chunks live in game.effects with type 'rockChunk' ; updateEffects ticks
+// them and they auto-dispose on lifetime expiry.
+function spawnRockChunks(pos, baseColor, parentScale) {
+  if (typeof game === 'undefined' || !game || !game.effects) return;
+  if (typeof scene === 'undefined' || !scene) return;
+  const N = 4 + Math.floor(Math.random() * 5);                // 4..8 chunks
+  for (let i = 0; i < N; i++) {
+    const seed = Math.random() * 1000;
+    const geo = _makeRockGeometry(0, seed);                    // detail=0 ; cheaper for chunks
+    const mat = _makeAtomFractalMaterial(baseColor);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pos);
+    const chunkScale = parentScale * (0.20 + Math.random() * 0.25);
+    mesh.scale.setScalar(chunkScale);
+    mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+    mesh.renderOrder = 1;
+    mesh.frustumCulled = true;
+    scene.add(mesh);
+    const speed = 80 + Math.random() * 140;
+    const dir = new THREE.Vector3(
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2,
+    ).normalize();
+    game.effects.push({
+      mesh: mesh,
+      age: 0,
+      lifetime: 1.4 + Math.random() * 1.2,
+      type: 'rockChunk',
+      vel: dir.multiplyScalar(speed),
+      rotVel: new THREE.Vector3(
+        (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 6,
+      ),
+      _initScale: chunkScale,
+      _ownsGeo: true,                                          // dispose on cleanup
+    });
+  }
+}
+
 class ClusterObstacle {
   constructor(pos, clusterScale, config) {
     this.position = pos.clone();
@@ -12950,10 +13108,25 @@ class ClusterObstacle {
       const childPos = this.position.clone().add(rotatedOffset);
       const childScale = avgChildScale * (0.75 + Math.random() * 0.55);
       const child = new DestructibleObstacle(childPos, null, childScale);
-      // Unify color within a cluster for visual cohesion
-      if (child.mesh && child.mesh.material) {
-        child.mesh.material.color.setHex(this.baseColor);
-        child.mesh.material.emissive.setHex(this.baseColor);
+      // (v9) Replace the child's geometry + material with a per-atom
+      // unique rock geometry plus the fractal shader material.
+      if (child.mesh) {
+        try {
+          if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+        } catch (_) {}
+        const _rockSeed = Math.random() * 1000;
+        child._rockSeed = _rockSeed;
+        child.mesh.geometry = _makeRockGeometry(1, _rockSeed);
+        child.mesh.material = _makeAtomFractalMaterial(this.baseColor);
+        child.mesh.scale.setScalar(childScale);
+        // Remove the edgeMesh ; the fractal pattern is busy enough.
+        if (child.edgeMesh) {
+          if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
+          if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          child.edgeMesh = null;
+        }
       }
       child.baseColor = this.baseColor;
       child.cluster = this;
@@ -12975,9 +13148,23 @@ class ClusterObstacle {
       const rotatedOffset = offset.clone().applyQuaternion(q);
       const childPos = this.position.clone().add(rotatedOffset);
       const child = new DestructibleObstacle(childPos, null, cc.scale);
-      if (child.mesh && child.mesh.material) {
-        child.mesh.material.color.setHex(this.baseColor);
-        child.mesh.material.emissive.setHex(this.baseColor);
+      // (v9) Same fractal-atom replacement as the non-config path.
+      if (child.mesh) {
+        try {
+          if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+        } catch (_) {}
+        const _rockSeed = (cc.seed != null) ? cc.seed : Math.random() * 1000;
+        child._rockSeed = _rockSeed;
+        child.mesh.geometry = _makeRockGeometry(1, _rockSeed);
+        child.mesh.material = _makeAtomFractalMaterial(this.baseColor);
+        child.mesh.scale.setScalar(cc.scale);
+        if (child.edgeMesh) {
+          if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
+          if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          child.edgeMesh = null;
+        }
       }
       child.baseColor = this.baseColor;
       child.cluster = this;
@@ -14372,6 +14559,15 @@ function _disposeOrReleaseEffect(e) {
   if (e.mesh.material) e.mesh.material.dispose();
 }
 function updateEffects(dt) {
+  // (v9) Tick the fractal atom shaders so they animate. Single shared
+  // time value across all live atom mats (one uniform write per mat).
+  if (_atomFractalMaterials.length) {
+    const _gameT = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+    for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
+      const _am = _atomFractalMaterials[_mi];
+      if (_am && _am.uniforms && _am.uniforms.time) _am.uniforms.time.value = _gameT;
+    }
+  }
   // v8VR: drive the InstancedMesh particle pools from inside the same
   // per-frame effects update so they age on the same hitstop-respecting
   // dt and freeze when the game pauses (settings, lobby).
@@ -14659,6 +14855,24 @@ function updateEffects(dt) {
       e.mesh.material.opacity = 0.8 * (1 - t);
       const shrink = (1 - t * 0.3) * base;
       e.mesh.scale.set(shrink, shrink, shrink);
+    }
+    // --- Rock chunks (v9 cluster crumble): drift outward, spin, fade. ---
+    else if (e.type === 'rockChunk') {
+      const tt = e.age / e.lifetime;
+      e.mesh.position.x += e.vel.x * dt;
+      e.mesh.position.y += e.vel.y * dt;
+      e.mesh.position.z += e.vel.z * dt;
+      e.vel.x *= 0.96; e.vel.y *= 0.96; e.vel.z *= 0.96;       // mild drag
+      e.mesh.rotation.x += e.rotVel.x * dt;
+      e.mesh.rotation.y += e.rotVel.y * dt;
+      e.mesh.rotation.z += e.rotVel.z * dt;
+      // Shrink to about 50% over the lifetime.
+      const shrink = e._initScale * (1 - 0.5 * tt);
+      e.mesh.scale.setScalar(shrink);
+      // Opacity fade via the shared fractal shader's uOpacity uniform.
+      if (e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uOpacity) {
+        e.mesh.material.uniforms.uOpacity.value = Math.max(0, 1 - tt);
+      }
     }
     // --- Tracers: fade ---
     else if (e.type === 'tracer') {
