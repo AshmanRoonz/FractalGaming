@@ -2,12 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v9 (WebXR) ; fractal plants on the walls</title>
+<title>Last Ship Sailing v9 (WebXR)</title>
 <!-- v9 fork started 2026-05-01. Branched off v8_2a.
-     v9 introduces a fractal plant ecosystem: tree_that_dreams.html
-     ported to 3D, recursive branching, instances scattered across
-     the inner walls of every non-spawn room at varied scales/hues.
-     First step toward in-world chemistry / growth feedback loops.
+     (2026-05-02) Fractal plant ecosystem moved out of v9 into v8_3 ;
+     v9 is now plant-free and available for other experiments.
      v8_2a remains the stable baseline; do NOT edit it.
      v8_2a fork started 2026-05-01. Branched off v8_1VR.
      Real per-speaker routing for spatial sounds on 5.1+ desktops via
@@ -15345,26 +15343,6 @@ function spawnElectricSmoke(pos, radius, opts) {
 //
 // updateDots(dt) is called once per frame from the main update loop.
 
-// (v9) Distance fade helper for world FX (currently used by fractal
-// plants only ; smoke + lightning are unaffected per user). Single
-// helper so the same curve can be reused for other things later.
-const _WORLDFX_NEAR = 1500;     // full alpha inside this distance
-const _WORLDFX_FAR  = 4000;     // zero alpha past this distance
-function worldFxDistanceFade(pos) {
-  if (typeof player === 'undefined' || !player || !player.position) return 1;
-  const dx = pos.x - player.position.x;
-  const dy = pos.y - player.position.y;
-  const dz = pos.z - player.position.z;
-  const d2 = dx*dx + dy*dy + dz*dz;
-  if (d2 <= _WORLDFX_NEAR * _WORLDFX_NEAR) return 1;
-  if (d2 >= _WORLDFX_FAR  * _WORLDFX_FAR ) return 0;
-  const t = (Math.sqrt(d2) - _WORLDFX_NEAR) / (_WORLDFX_FAR - _WORLDFX_NEAR);
-  // Quadratic ease-out so close things stay clear longer; falloff
-  // accelerates near the far edge.
-  const u = 1 - t;
-  return u * u;
-}
-
 function spawnDot(position, opts) {
   opts = opts || {};
   if (!game.dots) game.dots = [];
@@ -15774,406 +15752,6 @@ function updateAmbientClouds(dt) {
   });
   _dot._isAmbientCloud = true;          // marker for the cap counter
   _dot.attachMesh(_mesh);
-}
-
-// ============================================================
-// === v9: Fractal plant ecosystem ============================
-// ============================================================
-// Ported from Fractal_Reality/docs/simulations/tree_that_dreams.html.
-// Each plant grows recursively from a wall point along the inward normal.
-// Branches split into two children at offset angles, each child's length
-// scaled by lengthMultiplier (~0.62 for the golden-ratio aesthetic). 3D
-// variation comes from a random twist around the growth axis at each
-// split. Built once at spawn; per-frame update fades in opacity, drifts
-// hue, and pulses brightness ; cheap because there's no geometry rebuild.
-//
-// Many plants per room at varied scales = self-similar fractal coverage.
-
-class FractalPlant {
-  constructor(position, normal, opts) {
-    opts = opts || {};
-    this.worldPos = position.clone();
-    this.normal   = normal.clone().normalize();
-    this.scale    = opts.scale || 1.0;
-    this.maxDepth = opts.maxDepth || 5;
-    this.baseLength = (opts.baseLength || 80) * this.scale;
-    this.branchAngle = opts.branchAngle || (Math.PI / 6);
-    this.lengthMultiplier = opts.lengthMultiplier || 0.62;
-    this.huePhase = (opts.hue != null) ? opts.hue : Math.random();
-    this.hueSpeed = 0.01 + Math.random() * 0.03;
-    this.startPhase = (opts.startPhase != null) ? opts.startPhase : (Math.random() * 0.9);
-    this.growthDuration = opts.growthDuration || (4.0 + Math.random() * 6.0);
-    this.age = this.startPhase * this.growthDuration;
-    this.maxOpacity = (opts.maxOpacity != null) ? opts.maxOpacity : 0.55;
-    this.alive = true;
-    // (v9 Pet Fractal) Build branches AND collect tip positions in local
-    // space. Tips become a glowing point cloud rendered alongside the
-    // line skeleton, mirroring My_Pet_Fractal.tsx's drawBody-at-branch-tip
-    // visual ; each tip pulses + breathes as a living "cell" / fruit.
-    const linePoints = [];
-    const tipPoints  = [];
-    const localStart = new THREE.Vector3(0, 0, 0);
-    this._growBranch(localStart, this.normal, this.baseLength, this.maxDepth, linePoints, tipPoints);
-    // Line skeleton
-    const lineArr = new Float32Array(linePoints);
-    const lineGeo = new THREE.BufferGeometry();
-    lineGeo.setAttribute('position', new THREE.BufferAttribute(lineArr, 3));
-    // (v9 revert) Back to Additive blending with dim color. Plants
-    // glow softly without taking over the environment.
-    this.lineMaterial = new THREE.LineBasicMaterial({
-      color: new THREE.Color().setHSL(this.huePhase, 0.40, 0.40),
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.lineMesh = new THREE.LineSegments(lineGeo, this.lineMaterial);
-    this.lineMesh.renderOrder = 1;
-    this.lineMesh.frustumCulled = true;
-    // Tip "cells" : glowing points at every branch endpoint.
-    const tipArr = new Float32Array(tipPoints);
-    const tipGeo = new THREE.BufferGeometry();
-    tipGeo.setAttribute('position', new THREE.BufferAttribute(tipArr, 3));
-    // (v9 revert) Back to NormalBlending + dim color so tips read
-    // as colored cells, not bright glares.
-    this.tipMaterial = new THREE.PointsMaterial({
-      color: new THREE.Color().setHSL((this.huePhase + 0.04) % 1, 0.45, 0.38),
-      size: 3 + Math.random() * 3,
-      sizeAttenuation: true,
-      transparent: true,
-      opacity: 0,
-      blending: THREE.NormalBlending,
-      depthWrite: false,
-    });
-    this._tipBaseSize = this.tipMaterial.size;
-    this.tipMesh = new THREE.Points(tipGeo, this.tipMaterial);
-    this.tipMesh.renderOrder = 2;
-    this.tipMesh.frustumCulled = true;
-    // Group container ; both meshes share scale + position.
-    this.group = new THREE.Group();
-    this.group.position.copy(this.worldPos);
-    this._MIN_GROWTH = 0.06;
-    this.group.scale.setScalar(this._MIN_GROWTH);
-    this.group.add(this.lineMesh);
-    this.group.add(this.tipMesh);
-    scene.add(this.group);
-    // Back-compat alias so any external reference to `.mesh` still works.
-    this.mesh = this.group;
-    this.material = this.lineMaterial;
-  }
-  // Lazy-init shared glow sprite texture (one across all plants).
-  static _getGlowTex() {
-    if (FractalPlant._glowTex) return FractalPlant._glowTex;
-    const size = 64;
-    const cv = document.createElement('canvas');
-    cv.width = size; cv.height = size;
-    const ctx = cv.getContext('2d');
-    const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
-    grad.addColorStop(0.0, 'rgba(255,255,255,1.0)');
-    grad.addColorStop(0.3, 'rgba(255,255,255,0.55)');
-    grad.addColorStop(0.7, 'rgba(255,255,255,0.10)');
-    grad.addColorStop(1.0, 'rgba(255,255,255,0.00)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, size, size);
-    const tex = new THREE.CanvasTexture(cv);
-    tex.needsUpdate = true;
-    FractalPlant._glowTex = tex;
-    return tex;
-  }
-  _growBranch(start, dir, length, depth, linePoints, tipPoints) {
-    if (depth <= 0 || length < 2) return;
-    const end = start.clone().addScaledVector(dir, length);
-    linePoints.push(start.x, start.y, start.z, end.x, end.y, end.z);
-    if (depth > 1) {
-      const ortho = (Math.abs(dir.y) > 0.9) ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
-      const right = new THREE.Vector3().crossVectors(dir, ortho).normalize();
-      const up    = new THREE.Vector3().crossVectors(right, dir).normalize();
-      const angVar = (Math.random() - 0.5) * 0.30;
-      const angA =  this.branchAngle + angVar;
-      const angB = -this.branchAngle + angVar * 0.6;
-      const dirA = dir.clone().applyAxisAngle(up, angA).normalize();
-      const dirB = dir.clone().applyAxisAngle(up, angB).normalize();
-      dirA.applyAxisAngle(dir, Math.random() * Math.PI * 2);
-      dirB.applyAxisAngle(dir, Math.random() * Math.PI * 2);
-      const lenA = length * (this.lengthMultiplier + (Math.random() - 0.5) * 0.06);
-      const lenB = length * (this.lengthMultiplier + (Math.random() - 0.5) * 0.06);
-      this._growBranch(end, dirA, lenA, depth - 1, linePoints, tipPoints);
-      this._growBranch(end, dirB, lenB, depth - 1, linePoints, tipPoints);
-    } else {
-      // Leaf branch ; the end is a tip "cell" for the glowing point cloud.
-      if (tipPoints) tipPoints.push(end.x, end.y, end.z);
-    }
-  }
-  update(dt, time) {
-    if (!this.alive) return;
-    this.age += dt;
-    const t = Math.min(1, this.age / this.growthDuration);
-    // Group scale grows from MIN_GROWTH to 1.0 over growthDuration with
-    // an ease-out so sprout is visibly fast then settles. Both line +
-    // point cloud are children so they grow as one.
-    const easeOut = 1 - (1 - t) * (1 - t);
-    const growth = this._MIN_GROWTH + easeOut * (1 - this._MIN_GROWTH);
-    // (v9) Shy plants. Compute the proximity factor (0 = ship on top of
-    // me, 1 = no ship within FAR units) using squared distances against
-    // player + alive bots. Smooth via a one-pole filter (~0.5s time
-    // constant) so the shrink/regrow eases organically. Final scale is
-    // growth * smoothed_proximity, floored at MIN_GROWTH so the plant
-    // doesn't fully vanish when a ship parks on it.
-    const _PROX_NEAR2 = 200 * 200;          // ship inside this = full shrink
-    const _PROX_FAR2  = 900 * 900;          // ship outside this = no effect
-    let _minD2 = Infinity;
-    if (typeof player !== 'undefined' && player && player.position &&
-        player.shipState !== 'dead' && player.shipState !== 'spawning') {
-      const dx = player.position.x - this.worldPos.x;
-      const dy = player.position.y - this.worldPos.y;
-      const dz = player.position.z - this.worldPos.z;
-      const d2 = dx*dx + dy*dy + dz*dz;
-      if (d2 < _minD2) _minD2 = d2;
-    }
-    if (typeof game !== 'undefined' && game.entities) {
-      for (let _bi = 0; _bi < game.entities.length; _bi++) {
-        const _bot = game.entities[_bi];
-        if (!_bot || !_bot.alive || !_bot.position) continue;
-        const dx = _bot.position.x - this.worldPos.x;
-        const dy = _bot.position.y - this.worldPos.y;
-        const dz = _bot.position.z - this.worldPos.z;
-        const d2 = dx*dx + dy*dy + dz*dz;
-        if (d2 < _minD2) _minD2 = d2;
-      }
-    }
-    let prox;
-    if (_minD2 >= _PROX_FAR2) {
-      prox = 1.0;
-    } else if (_minD2 <= _PROX_NEAR2) {
-      prox = 0.0;
-    } else {
-      const _u = (Math.sqrt(_minD2) - Math.sqrt(_PROX_NEAR2)) /
-                 (Math.sqrt(_PROX_FAR2) - Math.sqrt(_PROX_NEAR2));
-      prox = _u * _u * (3 - 2 * _u);          // smoothstep
-    }
-    if (this._proxSmoothed == null) this._proxSmoothed = prox;
-    // One-pole smoother. Half-life ~0.35s so a fast pass shrinks visibly
-    // but the plant takes a moment to regrow once the ship leaves.
-    const _lerp = Math.min(1, dt * 2.0);
-    this._proxSmoothed += (prox - this._proxSmoothed) * _lerp;
-    // (v9) Max plant size doubled. At prox=1 (no ship near) scale =
-    // growth * 2.0 ; at prox=0 (ship on top) scale floors to MIN_GROWTH.
-    // The midpoint (prox=0.5) lands on the original "full size" of growth.
-    const _finalScale = Math.max(this._MIN_GROWTH, growth * this._proxSmoothed * 2.0);
-    this.group.scale.setScalar(_finalScale);
-    // Opacity ramps in faster than scale so the plant is visible while
-    // it's still tiny.
-    const fadeT = Math.min(1, t / 0.60);
-    const fadeIn = fadeT * fadeT;
-    // (v9) Plant fades with distance from player so the dense planted
-    // walls don't overwhelm the visible field. Smoke + lightning are
-    // unaffected (user spec). Plant rooted at worldPos.
-    const _distFade = (typeof worldFxDistanceFade === 'function')
-                      ? worldFxDistanceFade(this.worldPos) : 1;
-    this.lineMaterial.opacity = fadeIn * this.maxOpacity * _distFade;
-    // Tips pulse independently with a fast breath so they read as alive.
-    const _t = time || 0;
-    const tipPulse = 0.55 + 0.30 * Math.sin(_t * 1.6 + this.huePhase * 6.28);
-    this.tipMaterial.opacity = fadeIn * this.maxOpacity * tipPulse * _distFade;
-    this.tipMaterial.size = this._tipBaseSize * (0.90 + 0.20 * tipPulse);
-    // Slow hue drift on both materials ; tips are slightly hue-shifted
-    // and brighter so they pop against the dim line skeleton.
-    const hue = (this.huePhase + this.age * this.hueSpeed) % 1;
-    const breath = 0.48 + 0.06 * Math.sin(_t * 0.6 + this.huePhase * 6.28);
-    // (v9 revert) Back to the dim atmospheric range. breath is a tiny
-    // lightness wobble around 0.40 instead of the multiply-era 0.70.
-    this.lineMaterial.color.setHSL(hue, 0.40, breath - 0.10);
-    this.tipMaterial.color.setHSL((hue + 0.04) % 1, 0.45, 0.38);
-  }
-  dispose() {
-    if (!this.alive) return;
-    this.alive = false;
-    if (this.group && this.group.parent) scene.remove(this.group);
-    if (this.lineMesh && this.lineMesh.geometry) this.lineMesh.geometry.dispose();
-    if (this.tipMesh && this.tipMesh.geometry) this.tipMesh.geometry.dispose();
-    if (this.lineMaterial) this.lineMaterial.dispose();
-    if (this.tipMaterial) this.tipMaterial.dispose();
-  }
-}
-
-// (v9 followup) Dense, small fractal plants growing inward from EVERY
-// room sphere AND every tunnel cylinder. Tiny scales (0.05-0.40) so they
-// read as moss / lichen rather than bushes; many per surface so the walls
-// feel alive. pow(u, 2) bias keeps the largest specimens rare. Cylinders
-// (tunnels) sample a random axial position + angle around the cylinder
-// axis; the inward normal points toward the cylinder centerline.
-function spawnFractalPlants(rooms) {
-  if (!game.fractalPlants) game.fractalPlants = [];
-
-  // ---- 1. Plants on room sphere walls ----
-  if (Array.isArray(rooms)) {
-    for (const rm of rooms) {
-      if (!rm) continue;
-      const R = rm.r || 200;
-      // Density scales with surface area (4pi r^2). 4pi r^2 / 6000 gives
-      // ~5 per typical 250-radius room ; bump by a constant factor for
-      // visible coverage. Capped to avoid extreme densities on huge rooms.
-      const surfA = 4 * Math.PI * R * R;
-      const N = Math.min(240, Math.max(60, Math.round(surfA / 750)));   // (v9) doubled
-      for (let i = 0; i < N; i++) {
-        const theta = Math.random() * Math.PI * 2;
-        const phi   = Math.acos(2 * Math.random() - 1);
-        const sinP  = Math.sin(phi);
-        const wallPos = new THREE.Vector3(
-          rm.x + R * sinP * Math.cos(theta),
-          rm.y + R * Math.cos(phi),
-          rm.z + R * sinP * Math.sin(theta),
-        );
-        const normalIn = new THREE.Vector3(
-          rm.x - wallPos.x, rm.y - wallPos.y, rm.z - wallPos.z
-        );
-        if (normalIn.lengthSq() < 0.001) continue;
-        normalIn.normalize();
-        // Look up the levelSpheres entry that corresponds to this room
-        // so the carve check excludes it. levelSpheres uses cx/cy/cz.
-        let _exSp = null;
-        if (game.levelSpheres) {
-          for (const sp of game.levelSpheres) {
-            if (sp && sp.cx === rm.x && sp.cy === rm.y && sp.cz === rm.z) { _exSp = sp; break; }
-          }
-        }
-        _spawnOneFractalPlant(wallPos, normalIn, _exSp, null);
-      }
-    }
-  }
-
-  // ---- 2. Plants on tunnel cylinder walls ----
-  const cyls = game.levelCylinders || [];
-  for (const cyl of cyls) {
-    if (!cyl) continue;
-    const a = new THREE.Vector3(cyl.ax, cyl.ay, cyl.az);
-    const b = new THREE.Vector3(cyl.bx, cyl.by, cyl.bz);
-    const axis = new THREE.Vector3().subVectors(b, a);
-    const lenAxis = axis.length();
-    if (lenAxis < 1) continue;
-    axis.divideScalar(lenAxis);
-    const R = cyl.r || 100;
-    // Build two perpendicular vectors to the axis for cylindrical sampling.
-    const ortho = (Math.abs(axis.y) > 0.9) ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
-    const right = new THREE.Vector3().crossVectors(axis, ortho).normalize();
-    const up    = new THREE.Vector3().crossVectors(right, axis).normalize();
-    // Density: surface area ~ 2*pi*R*length. Scale per-unit so long
-    // tunnels get more, short ones fewer. Cap to keep frame-time sane.
-    const surfA = 2 * Math.PI * R * lenAxis;
-    const N = Math.min(360, Math.max(30, Math.round(surfA / 750)));   // (v9) doubled
-    for (let i = 0; i < N; i++) {
-      const t = Math.random();
-      const center = a.clone().addScaledVector(axis, t * lenAxis);
-      const ang = Math.random() * Math.PI * 2;
-      const offset = right.clone().multiplyScalar(Math.cos(ang) * R)
-                          .add(up.clone().multiplyScalar(Math.sin(ang) * R));
-      const wallPos = center.clone().add(offset);
-      const normalIn = offset.clone().multiplyScalar(-1).normalize();
-      _spawnOneFractalPlant(wallPos, normalIn, null, cyl);
-    }
-  }
-}
-
-// (v9 followup, fixed) "Is this point inside another carved volume?"
-// The map carves space by subtracting spheres + cylinders ; at junctions
-// where two carved volumes overlap, the wall is gone. A plant spawned on
-// sphere A's wall at a point that's also inside sphere B (or cylinder C)
-// would visually float in the open air of B, not on a wall. This helper
-// rejects those candidates.
-//
-// IMPORTANT: the source volume MUST be passed in so it's skipped during
-// the check. Without exclusion, the carve-pad multiplier makes the source
-// look "bigger than r" and the candidate (which sits exactly on r) self-
-// rejects. exSphere / exCyl are the source references to skip.
-const _PLANT_CARVE_PAD = 1.04;     // 4% buffer so candidates very near
-                                    // a different boundary are also
-                                    // rejected ("lip" between two
-                                    // overlapping carved volumes).
-function _isInsideOtherCarvedVolume(pos, exSphere, exCyl) {
-  // Spheres (rooms)
-  const sps = (typeof game !== 'undefined' && game.levelSpheres) || null;
-  if (sps) {
-    for (let i = 0; i < sps.length; i++) {
-      const sp = sps[i];
-      if (!sp || sp === exSphere) continue;
-      const dx = pos.x - sp.cx;
-      const dy = pos.y - sp.cy;
-      const dz = pos.z - sp.cz;
-      const d2 = dx*dx + dy*dy + dz*dz;
-      const r  = sp.r * _PLANT_CARVE_PAD;
-      if (d2 < r * r) return true;
-    }
-  }
-  // Cylinders (tunnels)
-  const cys = (typeof game !== 'undefined' && game.levelCylinders) || null;
-  if (cys) {
-    for (let i = 0; i < cys.length; i++) {
-      const cy = cys[i];
-      if (!cy || cy === exCyl) continue;
-      const ax = cy.bx - cy.ax, ay = cy.by - cy.ay, az = cy.bz - cy.az;
-      const lenSq = ax*ax + ay*ay + az*az;
-      if (lenSq < 0.001) continue;
-      const px = pos.x - cy.ax, py = pos.y - cy.ay, pz = pos.z - cy.az;
-      const t = (px*ax + py*ay + pz*az) / lenSq;
-      if (t < 0 || t > 1) continue;        // outside axial range of this cylinder
-      const cx = cy.ax + ax * t;
-      const cyy = cy.ay + ay * t;
-      const cz = cy.az + az * t;
-      const ddx = pos.x - cx;
-      const ddy = pos.y - cyy;
-      const ddz = pos.z - cz;
-      const r2  = cy.r * _PLANT_CARVE_PAD;
-      if (ddx*ddx + ddy*ddy + ddz*ddz < r2 * r2) return true;
-    }
-  }
-  return false;
-}
-
-// Internal helper: pick scale + depth + branching params, build the plant.
-// Shared between sphere and cylinder paths so the visual aesthetic stays
-// consistent across all wall types. Rejects candidates that fall inside
-// another carved volume (the wall doesn't exist there). exSphere/exCyl
-// is the source ; pass whichever your caller is iterating.
-function _spawnOneFractalPlant(wallPos, normalIn, exSphere, exCyl) {
-  if (_isInsideOtherCarvedVolume(wallPos, exSphere, exCyl)) return;
-  // Tiny scales: 0.05 .. 0.40 with pow(u, 2.5) bias toward the small end.
-  const u = Math.random();
-  const scale = 0.05 + Math.pow(u, 2.5) * 0.35;
-  // Depth: small plants shallow (2-3), larger ones a bit deeper (3-4).
-  const depth = (scale < 0.15) ? 2 + (Math.random() < 0.5 ? 0 : 1)
-              : (scale < 0.28) ? 3 + (Math.random() < 0.5 ? 0 : 1)
-              : 4 + (Math.random() < 0.5 ? 0 : 1);
-  const baseLen = 30 + Math.random() * 30;            // shorter base
-  const angle   = Math.PI / (4 + Math.random() * 4);
-  const lenMul  = 0.58 + Math.random() * 0.10;
-  const opacityBoost = 1 - Math.min(1, scale * 1.5);
-  // (v9) Reverted from multiply blending. Back to additive line + normal
-  // tip with dim colors, opacity dropped to 0.10-0.20 (was 0.18-0.30 pre
-  // -multiply) so plants are more transparent ; further into the
-  // background atmosphere.
-  const plant = new FractalPlant(wallPos, normalIn, {
-    scale: scale,
-    maxDepth: depth,
-    baseLength: baseLen,
-    branchAngle: angle,
-    lengthMultiplier: lenMul,
-    hue: 0.50 + Math.random() * 0.42,
-    growthDuration: 1.5 + Math.random() * 3.0,
-    maxOpacity: 0.10 + opacityBoost * 0.10,
-  });
-  game.fractalPlants.push(plant);
-}
-
-function updateFractalPlants(dt) {
-  if (!game.fractalPlants || !game.fractalPlants.length) return;
-  const _t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
-  for (const p of game.fractalPlants) p.update(dt, _t);
-}
-
-function disposeAllFractalPlants() {
-  if (!game.fractalPlants) return;
-  for (const p of game.fractalPlants) p.dispose();
-  game.fractalPlants = [];
 }
 
 // Heat-trail sprite + material pool. Ships emit up to ~12 heat trails/sec each
@@ -16771,9 +16349,6 @@ function commitLoadout(key) {
       buildRoomGraphLevel(level);
       spawnDynamicObjects(game.sdfRoomData);
       spawnOrganics(game.sdfRoomData);
-      // (v9) Fractal plants on the walls of every non-spawn room.
-      try { if (typeof disposeAllFractalPlants === 'function') disposeAllFractalPlants(); } catch (_) {}
-      try { if (typeof spawnFractalPlants === 'function') spawnFractalPlants(game.sdfRoomData); } catch (_) {}
 
       // (v6.7) Spawn at the player's assigned team pool. assignTeamFromPeerOrder
       // (called by applyWorldSync via the match_start handshake) splits peers
@@ -20759,9 +20334,6 @@ function updateRoundSystem(dt) {
           buildRoomGraphLevel(level);
           spawnDynamicObjects(game.sdfRoomData);
           spawnOrganics(game.sdfRoomData);
-          // (v9) Re-spawn fractal plants for the new round.
-          try { if (typeof disposeAllFractalPlants === 'function') disposeAllFractalPlants(); } catch (_) {}
-          try { if (typeof spawnFractalPlants === 'function') spawnFractalPlants(game.sdfRoomData); } catch (_) {}
         };
         if (net.active && typeof net.worldSeed === 'number') {
           const roundSeed = getRoundSeed(game.currentRound);
@@ -28733,7 +28305,6 @@ function gameLoop(timestamp) {
   if (typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
   updateAmbientClouds(dt); // (v8_2a) ambient cloud spawner (uses Dot system below)
   updateDots(dt);          // (v8_2a) generic Dot system: physics + collisions + lightning + hue
-  updateFractalPlants(dt); // (v9) tree_that_dreams plants on walls
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
@@ -34560,3 +34131,4 @@ if (window.LSS_ENGINE_READY) {
 </script>
 </body>
 </html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
