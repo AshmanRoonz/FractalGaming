@@ -14990,6 +14990,26 @@ function spawnElectricSmoke(pos, radius, opts) {
 //
 // updateDots(dt) is called once per frame from the main update loop.
 
+// (v9) Distance fade helper for world FX (currently used by fractal
+// plants only ; smoke + lightning are unaffected per user). Single
+// helper so the same curve can be reused for other things later.
+const _WORLDFX_NEAR = 1500;     // full alpha inside this distance
+const _WORLDFX_FAR  = 4000;     // zero alpha past this distance
+function worldFxDistanceFade(pos) {
+  if (typeof player === 'undefined' || !player || !player.position) return 1;
+  const dx = pos.x - player.position.x;
+  const dy = pos.y - player.position.y;
+  const dz = pos.z - player.position.z;
+  const d2 = dx*dx + dy*dy + dz*dz;
+  if (d2 <= _WORLDFX_NEAR * _WORLDFX_NEAR) return 1;
+  if (d2 >= _WORLDFX_FAR  * _WORLDFX_FAR ) return 0;
+  const t = (Math.sqrt(d2) - _WORLDFX_NEAR) / (_WORLDFX_FAR - _WORLDFX_NEAR);
+  // Quadratic ease-out so close things stay clear longer; falloff
+  // accelerates near the far edge.
+  const u = 1 - t;
+  return u * u;
+}
+
 function spawnDot(position, opts) {
   opts = opts || {};
   if (!game.dots) game.dots = [];
@@ -15443,8 +15463,10 @@ class FractalPlant {
     const lineArr = new Float32Array(linePoints);
     const lineGeo = new THREE.BufferGeometry();
     lineGeo.setAttribute('position', new THREE.BufferAttribute(lineArr, 3));
+    // (v9) Lower saturation + lightness so plants read as soft
+    // atmospheric growth, not bright vector art.
     this.lineMaterial = new THREE.LineBasicMaterial({
-      color: new THREE.Color().setHSL(this.huePhase, 0.65, 0.55),
+      color: new THREE.Color().setHSL(this.huePhase, 0.40, 0.40),
       transparent: true,
       opacity: 0,
       blending: THREE.AdditiveBlending,
@@ -15457,12 +15479,10 @@ class FractalPlant {
     const tipArr = new Float32Array(tipPoints);
     const tipGeo = new THREE.BufferGeometry();
     tipGeo.setAttribute('position', new THREE.BufferAttribute(tipArr, 3));
-    // (v9 fix) Tips no longer use a glow sprite + Additive blending,
-    // which together pushed overlapping tips to pure white. Now plain
-    // colored points with NormalBlending so the material's HSL color
-    // is what you see. Smaller default size too.
+    // (v9) Same toned-down palette as the line. Tip slightly more
+    // saturated so it still has presence without screaming.
     this.tipMaterial = new THREE.PointsMaterial({
-      color: new THREE.Color().setHSL((this.huePhase + 0.05) % 1, 0.55, 0.45),
+      color: new THREE.Color().setHSL((this.huePhase + 0.04) % 1, 0.45, 0.38),
       size: 3 + Math.random() * 3,
       sizeAttenuation: true,
       transparent: true,
@@ -15543,23 +15563,26 @@ class FractalPlant {
     // it's still tiny.
     const fadeT = Math.min(1, t / 0.60);
     const fadeIn = fadeT * fadeT;
-    this.lineMaterial.opacity = fadeIn * this.maxOpacity;
+    // (v9) Plant fades with distance from player so the dense planted
+    // walls don't overwhelm the visible field. Smoke + lightning are
+    // unaffected (user spec). Plant rooted at worldPos.
+    const _distFade = (typeof worldFxDistanceFade === 'function')
+                      ? worldFxDistanceFade(this.worldPos) : 1;
+    this.lineMaterial.opacity = fadeIn * this.maxOpacity * _distFade;
     // Tips pulse independently with a fast breath so they read as alive.
     const _t = time || 0;
     const tipPulse = 0.55 + 0.30 * Math.sin(_t * 1.6 + this.huePhase * 6.28);
-    // (v9 fix) Tip opacity capped at maxOpacity (no 1.6x boost) so they
-    // don't overdrive. Size pulse softer too.
-    this.tipMaterial.opacity = fadeIn * this.maxOpacity * tipPulse;
+    this.tipMaterial.opacity = fadeIn * this.maxOpacity * tipPulse * _distFade;
     this.tipMaterial.size = this._tipBaseSize * (0.90 + 0.20 * tipPulse);
     // Slow hue drift on both materials ; tips are slightly hue-shifted
     // and brighter so they pop against the dim line skeleton.
     const hue = (this.huePhase + this.age * this.hueSpeed) % 1;
     const breath = 0.48 + 0.06 * Math.sin(_t * 0.6 + this.huePhase * 6.28);
-    this.lineMaterial.color.setHSL(hue, 0.55, breath);
-    // (v9 fix) Tip color stays in the colored range (lightness 0.40-0.55)
-    // and saturation moderate (0.55) so tips never read as white. The
-    // tipPulse modulates only opacity + size now, not lightness.
-    this.tipMaterial.color.setHSL((hue + 0.05) % 1, 0.55, 0.45);
+    // (v9) Toned-down per-frame color: same hue drift but lower
+    // saturation + lightness so plants stay atmospheric. breath is a
+    // tiny lightness wobble around 0.40 instead of 0.50.
+    this.lineMaterial.color.setHSL(hue, 0.40, breath - 0.10);
+    this.tipMaterial.color.setHSL((hue + 0.04) % 1, 0.45, 0.38);
   }
   dispose() {
     if (!this.alive) return;
@@ -15722,18 +15745,20 @@ function _spawnOneFractalPlant(wallPos, normalIn, exSphere, exCyl) {
   const baseLen = 30 + Math.random() * 30;            // shorter base
   const angle   = Math.PI / (4 + Math.random() * 4);
   const lenMul  = 0.58 + Math.random() * 0.10;
-  // Smaller plants get slightly higher max-opacity so they're readable
-  // against the wall texture.
-  const opacityBoost = 1 - Math.min(1, scale * 1.5);  // 1 at scale 0, 0 at scale 0.66+
+  const opacityBoost = 1 - Math.min(1, scale * 1.5);
+  // (v9) Constrain plant hue to 0.50-0.92 (cyan -> blue -> purple ->
+  // magenta) so they belong to the LSS palette ; was random across the
+  // full spectrum which produced jarring greens/yellows. Opacity halved
+  // so they sit behind the action as atmosphere, not stickers on the wall.
   const plant = new FractalPlant(wallPos, normalIn, {
     scale: scale,
     maxDepth: depth,
     baseLength: baseLen,
     branchAngle: angle,
     lengthMultiplier: lenMul,
-    hue: Math.random(),
+    hue: 0.50 + Math.random() * 0.42,
     growthDuration: 1.5 + Math.random() * 3.0,
-    maxOpacity: 0.50 + opacityBoost * 0.25,
+    maxOpacity: 0.18 + opacityBoost * 0.12,
   });
   game.fractalPlants.push(plant);
 }
