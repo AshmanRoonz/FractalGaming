@@ -8748,6 +8748,53 @@ const _hullNormalMap = (function() {
   return tex;
 })();
 
+// (v9) Ship running light : a single half-red, half-green sphere floating
+// just below the tail of every ship. Tells you which way a ship is facing
+// at any range (red on port, green on starboard ; aviation/marine convention).
+// Uniform radius = pi (~3.14), same on every chassis from corvette to
+// dreadnought. Two hemisphere meshes (a SphereGeometry with phiStart +
+// phiLength of pi) so the color split is crisp at x=0 with no vertex-color
+// interpolation slop. Emissive-only color via MeshBasicMaterial ; no real
+// PointLight, so adding this to every ship costs essentially nothing
+// (8 ships * 2 draw calls = 16 draw calls, sub-pixel cost). The bloom pass
+// already in the post-FX pipeline smears the dot into a glow halo at distance.
+const _SHIP_RUNNING_LIGHT_RADIUS = Math.PI;          // ~3.14159
+const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff1818;       // saturated red, port (left, -X)
+const _SHIP_RUNNING_LIGHT_STAR_COL = 0x18ff18;       // saturated green, starboard (right, +X)
+function _addShipRunningLight(group, hullW, hullH, hullL) {
+  const r = _SHIP_RUNNING_LIGHT_RADIUS;
+  // Three.js SphereGeometry phi convention (verified in source):
+  //   x = -r * cos(phi) * sin(theta)  ; phi=0 -> -X, phi=pi -> +X
+  // So a hemisphere with phiStart=PI/2, phiLength=PI covers x>=0 (starboard);
+  //    a hemisphere with phiStart=-PI/2, phiLength=PI covers x<=0 (port).
+  // Both seams sit exactly on the YZ plane (x=0) ; the two halves meet flush.
+  const segs = 16;
+  const hSegs = 10;
+  const portGeo = new THREE.SphereGeometry(r, segs, hSegs, -Math.PI/2, Math.PI);
+  const starGeo = new THREE.SphereGeometry(r, segs, hSegs,  Math.PI/2, Math.PI);
+  const portMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_PORT_COL });
+  const starMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_STAR_COL });
+  const portMesh = new THREE.Mesh(portGeo, portMat);
+  const starMesh = new THREE.Mesh(starGeo, starMat);
+  // Wrap in a sub-group so animateShipMesh can bob the whole light without
+  // moving the ship Group (and so the tag is centralized for lookup).
+  const lightGroup = new THREE.Group();
+  lightGroup.add(portMesh);
+  lightGroup.add(starMesh);
+  // Tail-bottom position : just behind the engine line, ~12 units below
+  // the hull's underside so it reads as floating instead of welded on.
+  lightGroup.position.set(0, -hullH * 0.5 - 12, hullL * 0.45);
+  lightGroup.userData.isRunningLight = true;
+  lightGroup.userData.baseY = lightGroup.position.y;
+  group.add(lightGroup);
+  // Stash on the ship group so animateShipMesh can find it for the
+  // optional bob + doomed-state dimming.
+  group.userData.runningLight = lightGroup;
+  group.userData.runningLightPortMat = portMat;
+  group.userData.runningLightStarMat = starMat;
+  return lightGroup;
+}
+
 function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const group = new THREE.Group();
   const proto = shipModelCache.loaded[loadoutKey];
@@ -8902,6 +8949,8 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   // state (see animateShipMesh), so "ship looks dark" reads as "executable."
   const prevUD = group.userData || {};
   group.userData = Object.assign(prevUD, { engineMesh, shieldMesh: shield, engineGlows, enginePlumes, barrelMeshes, panelGlowMat, engineGlowMat, isModelShip: true });
+  // (v9) Half-red half-green tail running light, fixed pi-radius across all ships.
+  _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
   return group;
 }
 
@@ -9275,6 +9324,8 @@ function createShipMesh(chassisData, teamColor, loadoutKey) {
   // model-backed ones. Collision math uses chassis.hullLength directly,
   // unaffected by this scale.
   group.scale.setScalar(VISUAL_SCALE_BOOST);
+  // (v9) Half-red half-green tail running light, fixed pi-radius across all ships.
+  _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
   return group;
 }
 
@@ -9506,6 +9557,30 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (mesh.userData.hullMat) dimHullMat(mesh.userData.hullMat, nextDim);
   if (mesh.userData.hullMats) {
     for (const hm of mesh.userData.hullMats) dimHullMat(hm, nextDim);
+  }
+  // (v9) Running-light bob + doomed dim. The half-red/half-green tail
+  // ball gets a tiny vertical wobble so it reads as floating, plus a
+  // dimming pass while doomed so doomed ships look like they've lost
+  // backup power on their nav lights.
+  const rl = mesh.userData.runningLight;
+  if (rl) {
+    const bobBaseY = (rl.userData && rl.userData.baseY != null) ? rl.userData.baseY : rl.position.y;
+    rl.position.y = bobBaseY + Math.sin(time * Math.PI) * 0.6;  // 0.5 Hz bob, ±0.6 unit
+    const targetA = doomed ? 0.30 : 1.0;
+    const portM = mesh.userData.runningLightPortMat;
+    const starM = mesh.userData.runningLightStarMat;
+    if (portM && starM) {
+      const prev = (portM.userData._rlAlpha != null) ? portM.userData._rlAlpha : 1.0;
+      const next = prev + (targetA - prev) * 0.08;
+      portM.userData._rlAlpha = next; starM.userData._rlAlpha = next;
+      // MeshBasicMaterial doesn't read emissive ; we modulate color directly.
+      // Cache the original color the first time we touch the material so we
+      // can scale it without losing the saturated red/green.
+      if (!portM.userData._baseHex) portM.userData._baseHex = portM.color.getHex();
+      if (!starM.userData._baseHex) starM.userData._baseHex = starM.color.getHex();
+      portM.color.setHex(portM.userData._baseHex).multiplyScalar(next);
+      starM.color.setHex(starM.userData._baseHex).multiplyScalar(next);
+    }
   }
   // Cockpit heartbeat: slow 1 Hz emissive modulation (±10%) so idle ships read as alive.
   // Speeds up toward ~1.6 Hz at full throttle so the pulse tracks energy output.
