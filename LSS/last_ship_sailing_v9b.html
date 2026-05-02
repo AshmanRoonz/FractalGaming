@@ -2220,12 +2220,25 @@ function buildMapSelector() {
 
   // Rebind prev/next arrows (clone to drop any old handlers if buildMapSelector
   // is called multiple times in one session).
+  // (v9b) Blur the button immediately after click so the SPACE key (which
+  // doubles as "move up" in flight) doesn't get intercepted as a re-click on
+  // the focused button after the match starts. The buttons are also marked
+  // tabindex=-1 so Tab navigation never lands on them.
   const rebindArrow = (id, dir) => {
     const btn = document.getElementById(id);
     if (!btn) return;
     const fresh = btn.cloneNode(true);
+    fresh.setAttribute('tabindex', '-1');
     btn.parentNode.replaceChild(fresh, btn);
-    fresh.addEventListener('click', () => cycleMap(dir));
+    fresh.addEventListener('click', () => {
+      cycleMap(dir);
+      try { fresh.blur(); } catch (_) {}
+    });
+    // mousedown blur catches the click before SPACE/ENTER can re-fire it
+    // even within the same gesture.
+    fresh.addEventListener('mousedown', () => {
+      try { fresh.blur(); } catch (_) {}
+    });
   };
   rebindArrow('map-prev', -1);
   rebindArrow('map-next',  1);
@@ -20607,6 +20620,25 @@ function updateRoundSystem(dt) {
     if (game.warmupTimer <= 0) {
       game.state = 'playing';
       game.roundTimer = LSS.ROUND_TIME;
+      // (v9b) Hard-reset stuck input state at the warmup -> playing edge.
+      // Bug repro: clicking a ship-select button (e.g. the map > arrow)
+      // during the launch countdown left that button with keyboard focus ;
+      // SPACE then registered as a re-click instead of "move up", and
+      // any held mouse button could leak through into a phantom fire on
+      // the first frame of gameplay. Blur the focused element and zero
+      // out the input snapshot so the player starts the round clean.
+      try {
+        if (document.activeElement && typeof document.activeElement.blur === 'function') {
+          document.activeElement.blur();
+        }
+      } catch (_) {}
+      if (input) {
+        if (input.keys) for (const k in input.keys) input.keys[k] = false;
+        input.mouseDown = false;
+        input.rightMouseDown = false;
+        input.mouseDX = 0;
+        input.mouseDY = 0;
+      }
       // (v8_1VR) Reactive band: round start ; combat pattern at intensity 1.
       if (typeof musicSetPattern === 'function') {
         try { musicSetPattern('combat', { bpmTarget: 100, intensity: 1 }); } catch (_) {}
@@ -23335,8 +23367,23 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('keyup', e => { input.keys[e.key.toLowerCase()] = false; });
 
 document.addEventListener('mousedown', e => {
-  if (e.button === 0) input.mouseDown = true;
-  if (e.button === 2) input.rightMouseDown = true;
+  // (v9b) Suppress fire/alt-fire intent when the click is on a UI button or
+  // inside a menu panel. Without this guard, clicking the map > arrow during
+  // the launch countdown latched input.mouseDown=true, which leaked into a
+  // phantom muzzle flash on the first frame of the round.
+  const isUI = !!(e.target && e.target.closest && (
+    e.target.closest('button') ||
+    e.target.closest('input') ||
+    e.target.closest('select') ||
+    e.target.closest('textarea') ||
+    e.target.closest('#ship-select') ||
+    e.target.closest('#settings-panel') ||
+    e.target.closest('#lobby')
+  ));
+  if (!isUI) {
+    if (e.button === 0) input.mouseDown = true;
+    if (e.button === 2) input.rightMouseDown = true;
+  }
   // Don't grab pointer lock while ship-select is showing (between-rounds swap
   // path leaves game.state='warmup' with ship-select visible; we need clicks to
   // reach the ship list and confirm button).
