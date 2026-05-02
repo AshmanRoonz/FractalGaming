@@ -34685,6 +34685,63 @@ document.addEventListener('keydown', initAudio, { once: false });
 // frames (XR device rAF cadence). Three.js handles the dispatch internally.
 renderer.setAnimationLoop(gameLoop);
 
+// (v9b) Background-tab keep-alive. Browsers pause requestAnimationFrame when
+// the tab is hidden (alt-tab, minimized, switched to another window). That
+// freezes the entire game loop ; for multiplayer it means YOU stop sending
+// snapshots and your peer sees you frozen, for solo it means the world
+// pauses on alt-tab. We work around it by spinning up a tiny Web Worker
+// that posts tick messages at ~30 Hz when the tab is hidden ; Web-Worker
+// timers are NOT throttled the way main-thread setTimeout is. On each
+// worker tick we call gameLoop directly with a synthesized timestamp.
+// We disable the rAF-driven setAnimationLoop while hidden so the two
+// drivers don't fight when the tab partially un-throttles. Skips entirely
+// in WebXR ; XR has its own visibility/session model.
+(function setupBackgroundTick() {
+  let bgWorker = null;
+  let bgActive = false;          // true while we're driving the loop ourselves
+  const TICK_HZ = 30;            // 30 Hz is enough to keep sim + net moving
+  function _ensureWorker() {
+    if (bgWorker) return bgWorker;
+    try {
+      const src = `let id=null;self.onmessage=(e)=>{if(e.data&&e.data.cmd==='start'){if(id)return;const ms=e.data.ms||33;id=setInterval(()=>self.postMessage('t'),ms);}else if(e.data&&e.data.cmd==='stop'){if(id){clearInterval(id);id=null;}}};`;
+      const blob = new Blob([src], { type: 'application/javascript' });
+      const url  = URL.createObjectURL(blob);
+      bgWorker = new Worker(url);
+      bgWorker.onmessage = () => {
+        if (!bgActive) return;
+        if (!document.hidden) return;
+        // Skip if we're in an XR session ; XR drives its own loop.
+        if (renderer && renderer.xr && renderer.xr.isPresenting) return;
+        try {
+          const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          gameLoop(t);
+        } catch (err) {
+          // Silent ; the next tick will try again. Logging here would spam.
+        }
+      };
+    } catch (err) {
+      console.warn('[v9b] bg-tick worker failed to spawn:', err && err.message);
+    }
+    return bgWorker;
+  }
+  document.addEventListener('visibilitychange', () => {
+    const inXR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+    if (inXR) return;            // XR overrides visibility ; leave it alone
+    if (document.hidden) {
+      // Hand off from rAF to the worker tick.
+      try { renderer.setAnimationLoop(null); } catch (_) {}
+      bgActive = true;
+      const w = _ensureWorker();
+      if (w) w.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) });
+    } else {
+      // Hand back to rAF ; gameLoop will run at refresh rate again.
+      bgActive = false;
+      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+    }
+  });
+})();
+
 // v8VR: HTML onclick="joinRoom()" and onclick="startSolo()" carry inline
 // handlers that fire from page-parse onward. The early stub script (above
 // the <script type="module">) installed wrappers on window.joinRoom /
