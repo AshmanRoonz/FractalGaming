@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v8.2a (WebXR) ; desktop 5.1 routing</title>
-<!-- v8_2a fork started 2026-05-01. Branched off v8_1VR.
+<title>Last Ship Sailing v9 (WebXR)</title>
+<!-- v9 fork started 2026-05-01. Branched off v8_2a.
+     (2026-05-02) Fractal plant ecosystem moved out of v9 into v8_3 ;
+     v9 is now plant-free and available for other experiments.
+     v8_2a remains the stable baseline; do NOT edit it.
+     v8_2a fork started 2026-05-01. Branched off v8_1VR.
      Real per-speaker routing for spatial sounds on 5.1+ desktops via
      a parallel 6-channel sub-bus + VBAP, bypassing HRTF on surround.
      v8_1VR remains the stable baseline; do NOT edit it.
@@ -4288,16 +4292,34 @@ function _makeVortexShieldMaterial(baseAlpha) {
 //   uColor    smoke tint (darker for explosion vs lighter for sustained gas)
 //   uBaseAlpha density gate ; modulated by updateEffects for fade-out
 //   uOctaves  FBM detail levels
+// (v9) Smoke materials register here so the per-frame light update can
+// find every live smoke material. WeakRef so the GC can reap disposed
+// materials without us tracking dispose() calls.
+const _smokeMatRegistry = [];
+const _MAX_SMOKE_LIGHTS = 4;
 function _makeSmokeMaterial(initialColor, baseAlpha) {
-  return new THREE.ShaderMaterial({
+  // Initialize light slots: zero positions, black colors, zero strength.
+  // Per-frame update (see updateSmokeLights) writes active flashes into
+  // these slots. Each material gets its own array so the uniforms stay
+  // per-material (Three.js requirement).
+  const _lightPos = [];
+  const _lightCol = [];
+  const _lightStr = [];
+  for (let i = 0; i < _MAX_SMOKE_LIGHTS; i++) {
+    _lightPos.push(new THREE.Vector3());
+    _lightCol.push(new THREE.Color(0, 0, 0));
+    _lightStr.push(0);
+  }
+  const mat = new THREE.ShaderMaterial({
     uniforms: {
       time:       { value: 0 },
       uColor:     { value: new THREE.Color(initialColor) },
       uBaseAlpha: { value: baseAlpha },
-      // (v6.9) Octaves dropped 6 -> 3. Smoke at radial scale doesn't need
-      // sub-pixel detail; 3 octaves still reads as turbulent volume and
-      // every dropped octave halves per-pixel noise cost.
       uOctaves:   { value: 3 },
+      // (v9) Dynamic light contribution slots ; populated by updateSmokeLights.
+      uLightPos:      { value: _lightPos },
+      uLightColor:    { value: _lightCol },
+      uLightStrength: { value: _lightStr },
     },
     vertexShader: [
       'varying vec3 vWorldPos;',
@@ -4315,6 +4337,13 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
       'uniform vec3 uColor;',
       'uniform float uBaseAlpha;',
       'uniform int uOctaves;',
+      // (v9) Dynamic light slots. Pos in world space, color RGB, strength
+      // controls intensity (0 = inactive). All 4 always evaluated ; cheap
+      // because the strength gate skips the math when zero.
+      '#define MAX_SMOKE_LIGHTS 4',
+      'uniform vec3 uLightPos[MAX_SMOKE_LIGHTS];',
+      'uniform vec3 uLightColor[MAX_SMOKE_LIGHTS];',
+      'uniform float uLightStrength[MAX_SMOKE_LIGHTS];',
       'varying vec3 vWorldPos;',
       'varying vec3 vLocalPos;',
       'varying vec3 vNormal;',
@@ -4365,6 +4394,21 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
       // Smoke is darker (color is dimmer overall). Slight brightness boost
       // in dense pockets so the smoke isn't pure black.
       '  vec3 col = uColor * (0.50 + density * 1.20);',
+      '  // (v9) Dynamic light contribution. Each active flash adds color',
+      '  // weighted by inverse-square falloff. Multiplied by density so',
+      '  // the lighting reads as smoke catching the light, not as a glow',
+      '  // floating in space.',
+      '  vec3 lightAdd = vec3(0.0);',
+      '  for (int i = 0; i < MAX_SMOKE_LIGHTS; i++) {',
+      '    float s = uLightStrength[i];',
+      '    if (s > 0.0) {',
+      '      vec3 d = vWorldPos - uLightPos[i];',
+      '      float dist2 = dot(d, d);',
+      '      float att = 1.0 / (1.0 + 0.0008 * dist2);',
+      '      lightAdd += uLightColor[i] * (att * s);',
+      '    }',
+      '  }',
+      '  col += lightAdd * density * 1.6;',
       '  float alpha = density * uBaseAlpha;',
       '  if (alpha < 0.04) discard;',
       '  gl_FragColor = vec4(col, alpha);',
@@ -4375,7 +4419,14 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
     depthWrite: false,
     side: THREE.FrontSide,
   });
+  // (v9) Track this material so the per-frame light update can find it.
+  try { _smokeMatRegistry.push(new WeakRef(mat)); } catch (_) {}
+  return mat;
 }
+
+// (v9) Re-export to allow the original `return new THREE.ShaderMaterial(...)`
+// idiom not to break anything ; the function above already returns mat.
+function __smoke_mat_factory_close() {}
 
 // (v6.9) Vortex Laser Core volumetric beam material. A thick open-ended
 // cylinder gets oriented along the firing direction each frame ; this
@@ -8697,6 +8748,53 @@ const _hullNormalMap = (function() {
   return tex;
 })();
 
+// (v9) Ship running light : a single half-red, half-green sphere floating
+// just below the tail of every ship. Tells you which way a ship is facing
+// at any range (red on port, green on starboard ; aviation/marine convention).
+// Uniform radius = pi (~3.14), same on every chassis from corvette to
+// dreadnought. Two hemisphere meshes (a SphereGeometry with phiStart +
+// phiLength of pi) so the color split is crisp at x=0 with no vertex-color
+// interpolation slop. Emissive-only color via MeshBasicMaterial ; no real
+// PointLight, so adding this to every ship costs essentially nothing
+// (8 ships * 2 draw calls = 16 draw calls, sub-pixel cost). The bloom pass
+// already in the post-FX pipeline smears the dot into a glow halo at distance.
+const _SHIP_RUNNING_LIGHT_RADIUS = Math.PI;          // ~3.14159
+const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff1818;       // saturated red, port (left, -X)
+const _SHIP_RUNNING_LIGHT_STAR_COL = 0x18ff18;       // saturated green, starboard (right, +X)
+function _addShipRunningLight(group, hullW, hullH, hullL) {
+  const r = _SHIP_RUNNING_LIGHT_RADIUS;
+  // Three.js SphereGeometry phi convention (verified in source):
+  //   x = -r * cos(phi) * sin(theta)  ; phi=0 -> -X, phi=pi -> +X
+  // So a hemisphere with phiStart=PI/2, phiLength=PI covers x>=0 (starboard);
+  //    a hemisphere with phiStart=-PI/2, phiLength=PI covers x<=0 (port).
+  // Both seams sit exactly on the YZ plane (x=0) ; the two halves meet flush.
+  const segs = 16;
+  const hSegs = 10;
+  const portGeo = new THREE.SphereGeometry(r, segs, hSegs, -Math.PI/2, Math.PI);
+  const starGeo = new THREE.SphereGeometry(r, segs, hSegs,  Math.PI/2, Math.PI);
+  const portMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_PORT_COL });
+  const starMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_STAR_COL });
+  const portMesh = new THREE.Mesh(portGeo, portMat);
+  const starMesh = new THREE.Mesh(starGeo, starMat);
+  // Wrap in a sub-group so animateShipMesh can bob the whole light without
+  // moving the ship Group (and so the tag is centralized for lookup).
+  const lightGroup = new THREE.Group();
+  lightGroup.add(portMesh);
+  lightGroup.add(starMesh);
+  // Tail-bottom position : just behind the engine line, ~12 units below
+  // the hull's underside so it reads as floating instead of welded on.
+  lightGroup.position.set(0, -hullH * 0.5 - 12, hullL * 0.45);
+  lightGroup.userData.isRunningLight = true;
+  lightGroup.userData.baseY = lightGroup.position.y;
+  group.add(lightGroup);
+  // Stash on the ship group so animateShipMesh can find it for the
+  // optional bob + doomed-state dimming.
+  group.userData.runningLight = lightGroup;
+  group.userData.runningLightPortMat = portMat;
+  group.userData.runningLightStarMat = starMat;
+  return lightGroup;
+}
+
 function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const group = new THREE.Group();
   const proto = shipModelCache.loaded[loadoutKey];
@@ -8851,6 +8949,8 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   // state (see animateShipMesh), so "ship looks dark" reads as "executable."
   const prevUD = group.userData || {};
   group.userData = Object.assign(prevUD, { engineMesh, shieldMesh: shield, engineGlows, enginePlumes, barrelMeshes, panelGlowMat, engineGlowMat, isModelShip: true });
+  // (v9) Half-red half-green tail running light, fixed pi-radius across all ships.
+  _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
   return group;
 }
 
@@ -9224,6 +9324,8 @@ function createShipMesh(chassisData, teamColor, loadoutKey) {
   // model-backed ones. Collision math uses chassis.hullLength directly,
   // unaffected by this scale.
   group.scale.setScalar(VISUAL_SCALE_BOOST);
+  // (v9) Half-red half-green tail running light, fixed pi-radius across all ships.
+  _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
   return group;
 }
 
@@ -9455,6 +9557,30 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (mesh.userData.hullMat) dimHullMat(mesh.userData.hullMat, nextDim);
   if (mesh.userData.hullMats) {
     for (const hm of mesh.userData.hullMats) dimHullMat(hm, nextDim);
+  }
+  // (v9) Running-light bob + doomed dim. The half-red/half-green tail
+  // ball gets a tiny vertical wobble so it reads as floating, plus a
+  // dimming pass while doomed so doomed ships look like they've lost
+  // backup power on their nav lights.
+  const rl = mesh.userData.runningLight;
+  if (rl) {
+    const bobBaseY = (rl.userData && rl.userData.baseY != null) ? rl.userData.baseY : rl.position.y;
+    rl.position.y = bobBaseY + Math.sin(time * Math.PI) * 0.6;  // 0.5 Hz bob, ±0.6 unit
+    const targetA = doomed ? 0.30 : 1.0;
+    const portM = mesh.userData.runningLightPortMat;
+    const starM = mesh.userData.runningLightStarMat;
+    if (portM && starM) {
+      const prev = (portM.userData._rlAlpha != null) ? portM.userData._rlAlpha : 1.0;
+      const next = prev + (targetA - prev) * 0.08;
+      portM.userData._rlAlpha = next; starM.userData._rlAlpha = next;
+      // MeshBasicMaterial doesn't read emissive ; we modulate color directly.
+      // Cache the original color the first time we touch the material so we
+      // can scale it without losing the saturated red/green.
+      if (!portM.userData._baseHex) portM.userData._baseHex = portM.color.getHex();
+      if (!starM.userData._baseHex) starM.userData._baseHex = starM.color.getHex();
+      portM.color.setHex(portM.userData._baseHex).multiplyScalar(next);
+      starM.color.setHex(starM.userData._baseHex).multiplyScalar(next);
+    }
   }
   // Cockpit heartbeat: slow 1 Hz emissive modulation (±10%) so idle ships read as alive.
   // Speeds up toward ~1.6 Hz at full throttle so the pulse tracks energy output.
@@ -11203,6 +11329,64 @@ function spawnDynamicLight(pos, color, intensity, range, duration) {
   light.position.copy(pos);
   // light.visible stays true forever; see NUM_POINT_LIGHTS PINNING note above.
   dynamicLights.active.push({ light, intensity, duration, age: 0 });
+  // (v9) Also track this flash so the smoke shader can pick it up.
+  // updateSmokeLights ages it out and writes the top-K into smoke uniforms.
+  if (typeof _smokeLightFlashes !== 'undefined') {
+    _smokeLightFlashes.push({
+      pos: pos.clone(),
+      color: new THREE.Color(color),
+      intensity: intensity,
+      duration: duration,
+      age: 0,
+    });
+    while (_smokeLightFlashes.length > _SMOKE_FLASH_MAX) _smokeLightFlashes.shift();
+  }
+}
+
+// (v9) Smoke-flash queue. Capped at twice the per-shader slot count so we
+// always have enough recent flashes to fill the slots when many shots fire.
+const _smokeLightFlashes = [];
+const _SMOKE_FLASH_MAX = 12;
+
+function updateSmokeLights(dt) {
+  // Age out and remove finished flashes.
+  for (let i = _smokeLightFlashes.length - 1; i >= 0; i--) {
+    const f = _smokeLightFlashes[i];
+    f.age += dt;
+    if (f.age >= f.duration) _smokeLightFlashes.splice(i, 1);
+  }
+  // Build up to 4 strongest active flashes (intensity * fadeOut).
+  const top = [];
+  for (const f of _smokeLightFlashes) {
+    const t = f.age / f.duration;
+    const fadeOut = Math.max(0, 1 - t * t);
+    const eff = f.intensity * fadeOut;
+    top.push({ f, eff });
+  }
+  top.sort((a, b) => b.eff - a.eff);
+  // Walk the smoke material registry. Drop dead WeakRefs.
+  for (let i = _smokeMatRegistry.length - 1; i >= 0; i--) {
+    const ref = _smokeMatRegistry[i];
+    const mat = (ref && typeof ref.deref === 'function') ? ref.deref() : null;
+    if (!mat || !mat.uniforms || !mat.uniforms.uLightStrength) {
+      _smokeMatRegistry.splice(i, 1);
+      continue;
+    }
+    const lp = mat.uniforms.uLightPos.value;
+    const lc = mat.uniforms.uLightColor.value;
+    const ls = mat.uniforms.uLightStrength.value;
+    for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
+      const e = top[k];
+      if (e) {
+        lp[k].copy(e.f.pos);
+        lc[k].copy(e.f.color);
+        ls[k] = e.eff;
+      } else {
+        ls[k] = 0;
+      }
+    }
+    mat.uniforms.uLightStrength.needsUpdate = true;
+  }
 }
 
 function updateDynamicLights() {
@@ -12731,6 +12915,10 @@ class DestructibleObstacle {
 
   destroy() {
     this.alive = false;
+    // (v9) Cluster atoms crumble into rock chunks instead of just popping.
+    if (this.cluster && typeof spawnRockChunks === 'function') {
+      try { spawnRockChunks(this.position.clone(), this.cluster.baseColor || 0xffffff, this.scale); } catch (_) {}
+    }
     if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
     if (this.edgeMesh && this.edgeMesh.parent) scene.remove(this.edgeMesh);
     spawnExplosion(this.position, Math.ceil(this.scale / 8));
@@ -12751,6 +12939,196 @@ class DestructibleObstacle {
 // A cluster spawns 5-10 small destructible sub-shapes that orbit together until hit,
 // then shatter into loose debris. Each child is a DestructibleObstacle registered
 // in game.dynamicObjects so existing collision/damage iteration still works.
+// (v9) Fractal atom shader. Adapted from framework_shader.html ; the
+// 8-iteration Mandelbox-like fold with the (2.618, 4.0, 3.0) golden-ratio
+// constants applied to the surface-local position so each atom shows
+// flowing fractal patterns on its skin. Time-animated per frame; tinted
+// per cluster via uBaseColor.
+//
+// Rock geometry factory ; deforms an icosahedron by hash-displacing each
+// vertex along its normal. The hash is keyed by quantized position +
+// per-atom seed, so:
+//   - shared vertices on adjacent faces get identical displacement
+//     (no spiky cracks along edges ; the rock surface stays coherent)
+//   - each atom gets its own unique rock shape via the seed
+function _hashDisplace(x, y, z) {
+  // Quantize to 3 decimals so floating-point noise on shared verts
+  // doesn't desync the displacement amount across adjacent faces.
+  const qx = Math.round(x * 1000) / 1000;
+  const qy = Math.round(y * 1000) / 1000;
+  const qz = Math.round(z * 1000) / 1000;
+  const h = Math.sin(qx * 127.1 + qy * 311.7 + qz * 74.7) * 43758.5453;
+  return h - Math.floor(h);                         // 0..1
+}
+function _makeRockGeometry(detail, seed) {
+  const geo = new THREE.IcosahedronGeometry(1, detail || 1);
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  const s = (typeof seed === 'number') ? seed : 0;
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    // Radial displacement 0.55x to 1.35x. Wide range so rocks read as
+    // properly irregular, not just lightly bumpy spheres.
+    const factor = 0.55 + _hashDisplace(v.x + s * 13.7, v.y + s * 7.3, v.z + s * 19.1) * 0.80;
+    v.multiplyScalar(factor);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+const _atomFractalMaterials = [];        // list of all live fractal mats so we can tick `time`
+function _makeAtomFractalMaterial(baseColor) {
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      time:       { value: 0 },
+      uBaseColor: { value: new THREE.Color(baseColor) },
+      uOpacity:   { value: 1.0 },
+    },
+    vertexShader: [
+      'varying vec3 vLocalPos;',
+      'varying vec3 vWorldPos;',
+      'varying vec3 vNormal;',
+      'void main() {',
+      '  vLocalPos = position;',
+      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
+      '  vNormal   = normalize(normalMatrix * normal);',
+      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'varying vec3 vLocalPos;',
+      'varying vec3 vWorldPos;',
+      'varying vec3 vNormal;',
+      'uniform float time;',
+      'uniform vec3 uBaseColor;',
+      'uniform float uOpacity;',
+      'vec3 hsv(float h, float s, float v){',
+      '  vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);',
+      '  return v - v * s * clamp(min(k, 4.0 - k), 0.0, 1.0);',
+      '}',
+      'mat3 rotate3D(float a, vec3 ax){',
+      '  ax = normalize(ax);',
+      '  float s = sin(a), c = cos(a), o = 1.0 - c;',
+      '  return mat3(',
+      '    o*ax.x*ax.x + c,      o*ax.x*ax.y - ax.z*s, o*ax.z*ax.x + ax.y*s,',
+      '    o*ax.x*ax.y + ax.z*s, o*ax.y*ax.y + c,      o*ax.y*ax.z - ax.x*s,',
+      '    o*ax.z*ax.x - ax.y*s, o*ax.y*ax.z + ax.x*s, o*ax.z*ax.z + c',
+      '  );',
+      '}',
+      // Hash-based 3D value noise + FBM for rock surface texture.
+      'float hash3(vec3 p){',
+      '  p = fract(p * 0.3183099 + 0.1);',
+      '  p *= 17.0;',
+      '  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));',
+      '}',
+      'float vnoise3(vec3 p){',
+      '  vec3 i = floor(p);',
+      '  vec3 f = fract(p);',
+      '  f = f * f * (3.0 - 2.0 * f);',
+      '  return mix(',
+      '    mix(mix(hash3(i + vec3(0,0,0)), hash3(i + vec3(1,0,0)), f.x),',
+      '        mix(hash3(i + vec3(0,1,0)), hash3(i + vec3(1,1,0)), f.x), f.y),',
+      '    mix(mix(hash3(i + vec3(0,0,1)), hash3(i + vec3(1,0,1)), f.x),',
+      '        mix(hash3(i + vec3(0,1,1)), hash3(i + vec3(1,1,1)), f.x), f.y),',
+      '    f.z);',
+      '}',
+      'float fbm3(vec3 p){',
+      '  float v = 0.0;',
+      '  float a = 0.5;',
+      '  for(int i = 0; i < 3; i++){',
+      '    v += a * vnoise3(p);',
+      '    p *= 2.1;',
+      '    a *= 0.5;',
+      '  }',
+      '  return v;',
+      '}',
+      'void main(){',
+      '  // Use surface position as the fractal coordinate. Scale + slow',
+      '  // breathing so the fractal pattern drifts visibly over time.',
+      '  vec3 p = vLocalPos * (3.0 + cos(time * 0.4) * 1.0);',
+      '  p = p * rotate3D(time * 0.25, vec3(-4.0, sin(time) + 7.0, 0.0));',
+      '  float s = 1.0;',
+      '  float e = 0.0;',
+      '  for(int k = 0; k < 8; k++){',
+      '    e = max(0.95, 9.0 / dot(p, p));',
+      '    s *= e;',
+      '    p = vec3(2.618, 4.0, 3.0) - abs(abs(p) * e - vec3(1.0, 1.5, 1.618));',
+      '  }',
+      '  float q = 0.5 + 0.5 * sin(atan(p.x, p.y) + time * 0.3);',
+      '  // Density-driven HSV: hue tracks uBaseColor via the q phase, low',
+      '  // saturation, brightness from accumulated s. Tint the result by',
+      '  // uBaseColor so each cluster keeps its identity.',
+      '  vec3 base = hsv(0.59 - q * 0.1, 0.45 - q * 0.05, s / 4000.0 * (0.31 + q * 0.69));',
+      '  base = base * (uBaseColor + vec3(0.5));',     // multiplicative tint, baseline 0.5 so darker base colors don't crush
+      '  // Fresnel rim glow so the atom edges read against dark bgs.',
+      '  vec3 V = normalize(cameraPosition - vWorldPos);',
+      '  float fres = pow(1.0 - max(0.0, dot(normalize(vNormal), V)), 2.5);',
+      '  vec3 rim = uBaseColor * fres * 0.8;',
+      '  // Rock texture modulation. Two scales of FBM:',
+      '  //   lowFreq darkens crevices (large irregular zones)',
+      '  //   highFreq adds fine surface grain',
+      '  // Combined into texMod which multiplies the final rock color.',
+      '  float lowFreq  = fbm3(vLocalPos * 3.5);',
+      '  float highFreq = fbm3(vLocalPos * 22.0 + 13.7);',
+      '  float texMod = 0.45 + 0.55 * lowFreq;',
+      '  texMod *= (0.86 + 0.14 * highFreq);',
+      '  vec3 colorOut = (base + rim) * texMod;',
+      '  gl_FragColor = vec4(colorOut, uOpacity);',
+      '}',
+    ].join('\n'),
+    transparent: true,
+    depthWrite: true,
+    side: THREE.FrontSide,
+  });
+  _atomFractalMaterials.push(mat);
+  return mat;
+}
+
+// (v9) Spawn N small rock chunks at pos, exploding outward. Each chunk
+// reuses the fractal material so it visually belongs to the parent atom.
+// Chunks live in game.effects with type 'rockChunk' ; updateEffects ticks
+// them and they auto-dispose on lifetime expiry.
+function spawnRockChunks(pos, baseColor, parentScale) {
+  if (typeof game === 'undefined' || !game || !game.effects) return;
+  if (typeof scene === 'undefined' || !scene) return;
+  const N = 4 + Math.floor(Math.random() * 5);                // 4..8 chunks
+  for (let i = 0; i < N; i++) {
+    const seed = Math.random() * 1000;
+    const geo = _makeRockGeometry(0, seed);                    // detail=0 ; cheaper for chunks
+    const mat = _makeAtomFractalMaterial(baseColor);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(pos);
+    const chunkScale = parentScale * (0.20 + Math.random() * 0.25);
+    mesh.scale.setScalar(chunkScale);
+    mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+    mesh.renderOrder = 1;
+    mesh.frustumCulled = true;
+    scene.add(mesh);
+    const speed = 80 + Math.random() * 140;
+    const dir = new THREE.Vector3(
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2,
+    ).normalize();
+    game.effects.push({
+      mesh: mesh,
+      age: 0,
+      lifetime: 1.4 + Math.random() * 1.2,
+      type: 'rockChunk',
+      vel: dir.multiplyScalar(speed),
+      rotVel: new THREE.Vector3(
+        (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 6,
+        (Math.random() - 0.5) * 6,
+      ),
+      _initScale: chunkScale,
+      _ownsGeo: true,                                          // dispose on cleanup
+    });
+  }
+}
+
 class ClusterObstacle {
   constructor(pos, clusterScale, config) {
     this.position = pos.clone();
@@ -12944,10 +13322,25 @@ class ClusterObstacle {
       const childPos = this.position.clone().add(rotatedOffset);
       const childScale = avgChildScale * (0.75 + Math.random() * 0.55);
       const child = new DestructibleObstacle(childPos, null, childScale);
-      // Unify color within a cluster for visual cohesion
-      if (child.mesh && child.mesh.material) {
-        child.mesh.material.color.setHex(this.baseColor);
-        child.mesh.material.emissive.setHex(this.baseColor);
+      // (v9) Replace the child's geometry + material with a per-atom
+      // unique rock geometry plus the fractal shader material.
+      if (child.mesh) {
+        try {
+          if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+        } catch (_) {}
+        const _rockSeed = Math.random() * 1000;
+        child._rockSeed = _rockSeed;
+        child.mesh.geometry = _makeRockGeometry(1, _rockSeed);
+        child.mesh.material = _makeAtomFractalMaterial(this.baseColor);
+        child.mesh.scale.setScalar(childScale);
+        // Remove the edgeMesh ; the fractal pattern is busy enough.
+        if (child.edgeMesh) {
+          if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
+          if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          child.edgeMesh = null;
+        }
       }
       child.baseColor = this.baseColor;
       child.cluster = this;
@@ -12969,9 +13362,23 @@ class ClusterObstacle {
       const rotatedOffset = offset.clone().applyQuaternion(q);
       const childPos = this.position.clone().add(rotatedOffset);
       const child = new DestructibleObstacle(childPos, null, cc.scale);
-      if (child.mesh && child.mesh.material) {
-        child.mesh.material.color.setHex(this.baseColor);
-        child.mesh.material.emissive.setHex(this.baseColor);
+      // (v9) Same fractal-atom replacement as the non-config path.
+      if (child.mesh) {
+        try {
+          if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+        } catch (_) {}
+        const _rockSeed = (cc.seed != null) ? cc.seed : Math.random() * 1000;
+        child._rockSeed = _rockSeed;
+        child.mesh.geometry = _makeRockGeometry(1, _rockSeed);
+        child.mesh.material = _makeAtomFractalMaterial(this.baseColor);
+        child.mesh.scale.setScalar(cc.scale);
+        if (child.edgeMesh) {
+          if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
+          if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          child.edgeMesh = null;
+        }
       }
       child.baseColor = this.baseColor;
       child.cluster = this;
@@ -12985,6 +13392,42 @@ class ClusterObstacle {
 
   update(dt) {
     if (!this.alive) {
+      // (v8_2a) Empty cluster sites (all children destroyed) keep
+      // crackling with lightning at the original cluster position. The
+      // mesh body and smoke spawning are gone, but the energy that held
+      // the cluster together visibly persists. Bolts fire ~1-2 per second
+      // and are colored bluish-violet to match the in-cluster electric
+      // accents. Skipped if player too far so distant sites stay quiet.
+      if (typeof spawnLightningBolt === 'function' &&
+          typeof player !== 'undefined' && player && player.position) {
+        const _d2 = this.position.distanceToSquared(player.position);
+        const _maxR = 2400;
+        if (_d2 < _maxR * _maxR) {
+          if (this._ghostArcTimer == null) this._ghostArcTimer = Math.random() * 0.8;
+          this._ghostArcTimer -= dt;
+          if (this._ghostArcTimer <= 0) {
+            this._ghostArcTimer = 0.50 + Math.random() * 0.80;
+            const _r = (this.clusterScale || 80) * 0.7;
+            const _t1 = Math.random() * Math.PI * 2, _p1 = Math.acos(2*Math.random() - 1);
+            const _t2 = Math.random() * Math.PI * 2, _p2 = Math.acos(2*Math.random() - 1);
+            const _from = this.position.clone().add(new THREE.Vector3(
+              _r * Math.sin(_p1) * Math.cos(_t1),
+              _r * Math.cos(_p1),
+              _r * Math.sin(_p1) * Math.sin(_t1),
+            ));
+            const _to = this.position.clone().add(new THREE.Vector3(
+              _r * Math.sin(_p2) * Math.cos(_t2),
+              _r * Math.cos(_p2),
+              _r * Math.sin(_p2) * Math.sin(_t2),
+            ));
+            const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+            spawnLightningBolt(_from, _to, _col,
+                               0.12 + Math.random() * 0.10,
+                               1 + Math.floor(Math.random() * 3),
+                               1.2 + Math.random() * 0.7);
+          }
+        }
+      }
       // Respawn disabled: once a cluster has been fully shattered it stays
       // gone for the rest of the match.
       return;
@@ -13139,15 +13582,19 @@ class ClusterObstacle {
         game.effects.push({
           mesh: smokeMesh, lifetime: 3.0 + Math.random() * 1.0, age: 0,
           type: 'shaderSmoke',
-          maxSize: 2.2,            // expand more as it drifts (was 1.25)
+          maxSize: 2.2,
           baseScale: baseScale,
-          alphaMul: 0.85,          // slightly less opaque so overlapping plumes blend
+          alphaMul: 0.55,
           rotVel: new THREE.Vector3(
             (Math.random() - 0.5) * 0.12,
             (Math.random() - 0.5) * 0.12,
             (Math.random() - 0.5) * 0.12
           ),
           drift: _drift,
+          // (v9) Tagged with the cluster that spawned it so when the
+          // cluster dies, this plume can be force-disposed instead of
+          // drifting on independently.
+          parentCluster: this,
           // (v8_2a) Cluster plumes that drift away from the source object
           // get three behaviors handled in updateEffects shaderSmoke:
           //   ; lightning: periodic blue/violet bolts inside the plume
@@ -13223,6 +13670,93 @@ class ClusterObstacle {
     if (!anyAlive) {
       this.alive = false;
       this.respawnTimer = this.respawnTime;
+      // (v9) Dispose every shaderSmoke effect that was spawned by this
+      // cluster. Cluster smoke is "tied to the object" ; when the object
+      // dies, its smoke goes with it. The independent dots spawned below
+      // (chemistry seed) are what carries this cluster's "memory" forward.
+      try {
+        if (game && game.effects) {
+          for (let _ei = game.effects.length - 1; _ei >= 0; _ei--) {
+            const _ef = game.effects[_ei];
+            if (_ef && _ef.type === 'shaderSmoke' && _ef.parentCluster === this) {
+              if (_ef.mesh && _ef.mesh.parent) scene.remove(_ef.mesh);
+              if (_ef.mesh && _ef.mesh.material && _ef.mesh.material.dispose) _ef.mesh.material.dispose();
+              game.effects.splice(_ei, 1);
+            }
+          }
+        }
+      } catch (_e) {}
+      // (v8_2a chemistry) When a cluster dies, promote some of its energy
+      // into independent ambient cloud dots so the smoke survives the
+      // destruction. 2-4 dots spawn at random offsets from the cluster
+      // center, drifting outward, with phases inherited from the cluster
+      // (so they tend to bond with each other, forming a "memory" of the
+      // dead cluster's location). They live in the dot system, fully
+      // independent of this cluster object.
+      try {
+        if (typeof spawnDot === 'function' &&
+            typeof _SMOKE_GEO !== 'undefined' &&
+            typeof _makeSmokeMaterial === 'function') {
+          // Cluster's signature phase: derived from the cluster's id-ish
+          // identity (its initial position) so all dots from this cluster
+          // share an inheritance.
+          const _clusterPhase = ((this.position.x + this.position.y * 7 + this.position.z * 13) * 0.001) % (Math.PI * 2);
+          const _spawnN = 2 + Math.floor(Math.random() * 3); // 2..4
+          for (let _k = 0; _k < _spawnN; _k++) {
+            const _theta = Math.random() * Math.PI * 2;
+            const _phi   = Math.acos(2 * Math.random() - 1);
+            const _sinP  = Math.sin(_phi);
+            const _off   = (this.clusterScale || 80) * (0.6 + Math.random() * 0.6);
+            const _pos = new THREE.Vector3(
+              this.position.x + _off * _sinP * Math.cos(_theta),
+              this.position.y + _off * Math.cos(_phi),
+              this.position.z + _off * _sinP * Math.sin(_theta),
+            );
+            const _size = (this.clusterScale || 80) * (0.5 + Math.random() * 0.5);
+            const _drift = new THREE.Vector3(
+              _sinP * Math.cos(_theta),
+              Math.cos(_phi) * 0.4,
+              _sinP * Math.sin(_theta),
+            ).multiplyScalar(20 + Math.random() * 30);
+            const _mat = _makeSmokeMaterial(0x080812, 1.0);
+            if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
+              _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
+            }
+            const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
+            _mesh.scale.setScalar(_size);
+            _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+            _mesh.frustumCulled = true;
+            _mesh.renderOrder = 1;
+            // Inherit the cluster phase with a small random offset so they
+            // bond strongly to each other but not lockstep.
+            const _phaseJitter = (Math.random() - 0.5) * 0.6;
+            const _dot = spawnDot(_pos, {
+              // (v9) Indestructible ; the cluster's smoke memory lives on.
+              lifetime: Infinity,
+              growthDuration: 3.0 + Math.random() * 3.0,
+              radius: _size,
+              velocity: _drift,
+              collidable: true,
+              playerWake: true,
+              emitsLightning: true,
+              arcRadius: _size * 0.5,
+              interArcRange: 900,
+              hueCycleMaterial: _mat,
+              hueSpeed: 0.08 + Math.random() * 0.06,
+              scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
+              fadeOut: { alphaMul: 0.4 },
+              clusterAttraction: true,
+              attractStrength: 35,
+              attractRange: 1800,
+              orbitBoost: 0.4,
+              phase: _clusterPhase + _phaseJitter,
+            });
+            _dot._isAmbientCloud = true;
+            _dot._fromDeadCluster = true;       // marker (potential later use)
+            _dot.attachMesh(_mesh);
+          }
+        }
+      } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
       // (v8VR 2026-05-01) Tear down the distortion shell when the cluster
       // is fully destroyed. Recreated on respawn (if ever; respawn is
       // currently disabled in the alive===false branch above).
@@ -14239,6 +14773,15 @@ function _disposeOrReleaseEffect(e) {
   if (e.mesh.material) e.mesh.material.dispose();
 }
 function updateEffects(dt) {
+  // (v9) Tick the fractal atom shaders so they animate. Single shared
+  // time value across all live atom mats (one uniform write per mat).
+  if (_atomFractalMaterials.length) {
+    const _gameT = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+    for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
+      const _am = _atomFractalMaterials[_mi];
+      if (_am && _am.uniforms && _am.uniforms.time) _am.uniforms.time.value = _gameT;
+    }
+  }
   // v8VR: drive the InstancedMesh particle pools from inside the same
   // per-frame effects update so they age on the same hitstop-respecting
   // dt and freeze when the game pauses (settings, lobby).
@@ -14400,6 +14943,51 @@ function updateEffects(dt) {
           spawnLightningBolt(_from, _to, _col, 0.10 + Math.random() * 0.06,
                              1 + Math.floor(Math.random() * 3), 1.0 + Math.random() * 0.6);
         }
+        // (v8_2a) Inter-cloud arcs ; "smoke cluster" lightning. When
+        // two smoke clouds tagged with lightning are within INTER_ARC_RANGE
+        // they form a smoke cluster and arc between each other, mirroring
+        // how object clusters arc atom-to-atom. Two safeguards prevent the
+        // "lightning from cloud that doesn't exist" bug:
+        //   1. Don't fire if THIS cloud has < 0.8s remaining.
+        //   2. Skip target partners with < 0.8s remaining.
+        // Bolt life capped at 0.16s, well under the 0.8s buffer, so even
+        // if a cloud expires unexpectedly the bolt is gone first.
+        const _selfRemaining = (e.lifetime || 0) - (e.age || 0);
+        if (e._interArcTimer == null) e._interArcTimer = 0.4 + Math.random() * 1.2;
+        e._interArcTimer -= dt;
+        if (e._interArcTimer <= 0 && _selfRemaining > 0.8) {
+          e._interArcTimer = 0.6 + Math.random() * 1.2;
+          const _interR = 900;
+          const _interR2 = _interR * _interR;
+          let _bestEf = null;
+          let _bestD2 = Infinity;
+          for (let _j = 0; _j < game.effects.length; _j++) {
+            const _ef = game.effects[_j];
+            if (_ef === e) continue;
+            if (!_ef || _ef.type !== 'shaderSmoke' || !_ef.lightning || !_ef.mesh) continue;
+            const _efRem = (_ef.lifetime || 0) - (_ef.age || 0);
+            if (_efRem < 0.8) continue;
+            const _dx = _ef.mesh.position.x - e.mesh.position.x;
+            const _dy = _ef.mesh.position.y - e.mesh.position.y;
+            const _dz = _ef.mesh.position.z - e.mesh.position.z;
+            const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
+            if (_d2 < _interR2 && _d2 < _bestD2) {
+              _bestD2 = _d2;
+              _bestEf = _ef;
+            }
+          }
+          if (_bestEf) {
+            const _icCol = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+            spawnLightningBolt(
+              e.mesh.position.clone(),
+              _bestEf.mesh.position.clone(),
+              _icCol,
+              0.10 + Math.random() * 0.06,
+              3 + Math.floor(Math.random() * 3),
+              1.5 + Math.random() * 0.8
+            );
+          }
+        }
       }
       // (v8_2a followup) Greyscale shade pulse. setHSL(0, 0, L) gives a
       // pure grey at lightness L ; oscillating L between 0.02 (near black)
@@ -14409,7 +14997,9 @@ function updateEffects(dt) {
       // even though it's no longer cycling hue.
       if (e.hueCycle && e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uColor) {
         const _phase = (e._huePhase + game.time * (e._hueSpeed || 0.12)) % 1;
-        const _l = 0.02 + 0.08 * (0.5 + 0.5 * Math.sin(_phase * Math.PI * 2));
+        // (v8_2a fix) Min lightness raised from 0.02 to 0.05 so clouds
+        // never go near-invisible at the dim phase.
+        const _l = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(_phase * Math.PI * 2));
         try { e.mesh.material.uniforms.uColor.value.setHSL(0, 0, _l); } catch (_) {}
       }
       // (v8_2a) Player wake: plumes get pushed away when the player ship
@@ -14479,6 +15069,24 @@ function updateEffects(dt) {
       e.mesh.material.opacity = 0.8 * (1 - t);
       const shrink = (1 - t * 0.3) * base;
       e.mesh.scale.set(shrink, shrink, shrink);
+    }
+    // --- Rock chunks (v9 cluster crumble): drift outward, spin, fade. ---
+    else if (e.type === 'rockChunk') {
+      const tt = e.age / e.lifetime;
+      e.mesh.position.x += e.vel.x * dt;
+      e.mesh.position.y += e.vel.y * dt;
+      e.mesh.position.z += e.vel.z * dt;
+      e.vel.x *= 0.96; e.vel.y *= 0.96; e.vel.z *= 0.96;       // mild drag
+      e.mesh.rotation.x += e.rotVel.x * dt;
+      e.mesh.rotation.y += e.rotVel.y * dt;
+      e.mesh.rotation.z += e.rotVel.z * dt;
+      // Shrink to about 50% over the lifetime.
+      const shrink = e._initScale * (1 - 0.5 * tt);
+      e.mesh.scale.setScalar(shrink);
+      // Opacity fade via the shared fractal shader's uOpacity uniform.
+      if (e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uOpacity) {
+        e.mesh.material.uniforms.uOpacity.value = Math.max(0, 1 - tt);
+      }
     }
     // --- Tracers: fade ---
     else if (e.type === 'tracer') {
@@ -14782,37 +15390,390 @@ function spawnElectricSmoke(pos, radius, opts) {
   });
 }
 
-// (v8_2a) Ambient drifting clouds. Independent of any cluster / explosion /
-// damage source ; periodically a fresh cloud spawns at a random distance
-// from the player and drifts slowly through the map. Each one carries the
-// same lightning + hueCycle + playerWake tags as cluster plumes, so the
-// existing updateEffects shaderSmoke branches drive the visuals (greyscale
-// shade pulse + electric arcs + push-on-flyby). Lifetime 8-13s with a
-// 2.5-4.5s spawn cadence so a few are alive at any moment.
+// ============================================================
+// === v8_2a: Generic Dot system ==============================
+// ============================================================
+// A "dot" is an invisible Object3D anchor with optional behaviors. It owns
+// a position + velocity + lifetime, holds attached visual meshes as
+// children, and supports collidable / playerWake / emitsLightning /
+// hueCycle behaviors via flags. Designed as a reusable primitive; ambient
+// cloud "gas dots" are the first user but the same system can host any
+// transient drawing effect that wants physics + lifetime in one place.
+//
+// Public API:
+//   spawnDot(position, opts) -> dot
+//     opts: {
+//       lifetime, radius, velocity (Vector3), wakeStrength,
+//       collidable, playerWake, emitsLightning,
+//       arcRadius, arcColor, interArcRange,
+//       hueCycleMaterial, hueSpeed,
+//       scaleGrowth: { baseScale, maxFactor },
+//       fadeOut: { alphaMul },
+//       clusterAttraction, attractStrength, attractRange, orbitBoost,
+//     }
+//   dot.attachMesh(mesh) ; adds to anchor, tracked for auto-cleanup
+//   dot.applyImpulse(vec3)
+//   dot.dispose()
+//   dot.position is the world position (mirror of dot.anchor.position)
+//
+// updateDots(dt) is called once per frame from the main update loop.
+
+function spawnDot(position, opts) {
+  opts = opts || {};
+  if (!game.dots) game.dots = [];
+  const anchor = new THREE.Group();
+  anchor.position.copy(position);
+  scene.add(anchor);
+  const dot = {
+    anchor: anchor,
+    position: anchor.position,                                // alias
+    velocity: opts.velocity ? opts.velocity.clone() : new THREE.Vector3(),
+    age: 0,
+    // (v9) Lifetime can be Infinity for indestructible dots ; growthDuration
+    // is the time-to-full-size animation, separate from lifetime so dots
+    // can sprout over a few seconds and then live forever.
+    lifetime: (typeof opts.lifetime === 'number') ? opts.lifetime : 5.0,
+    growthDuration: (typeof opts.growthDuration === 'number')
+                    ? opts.growthDuration
+                    : ((typeof opts.lifetime === 'number' && isFinite(opts.lifetime)) ? opts.lifetime : 5.0),
+    radius: opts.radius || 50,
+    collidable: opts.collidable !== false,
+    playerWake: opts.playerWake !== false,
+    wakeStrength: (typeof opts.wakeStrength === 'number') ? opts.wakeStrength : 1.0,
+    emitsLightning: !!opts.emitsLightning,
+    arcRadius: opts.arcRadius || 30,
+    arcColor: opts.arcColor || 0x88aaff,
+    interArcRange: opts.interArcRange || 900,
+    _internalArcTimer: opts.emitsLightning ? (0.10 + Math.random() * 0.40) : 0,
+    _interArcTimer:    opts.emitsLightning ? (0.40 + Math.random() * 1.20) : 0,
+    hueCycleMaterial: opts.hueCycleMaterial || null,
+    huePhase: Math.random(),
+    hueSpeed: (typeof opts.hueSpeed === 'number') ? opts.hueSpeed : 0.10,
+    scaleGrowth: opts.scaleGrowth || null,
+    fadeOut: opts.fadeOut || null,
+    clusterAttraction: !!opts.clusterAttraction,
+    attractStrength: (typeof opts.attractStrength === 'number') ? opts.attractStrength : 35,
+    attractRange:    (typeof opts.attractRange === 'number')    ? opts.attractRange    : 1800,
+    orbitBoost:      (typeof opts.orbitBoost === 'number')      ? opts.orbitBoost      : 0.4,
+    // (v8_2a chemistry seed) Phase in [0, 2*pi). Dots with similar phases
+    // bond strongly via T(dphi) = cos((phi_a - phi_b)/2)^2 in the
+    // attraction pass below. Borrowed from the tree_that_dreams field
+    // dynamics: T peaks at 1 when phases match, drops to 0 at opposite
+    // phases. Acts as an emergent "element" type without explicit
+    // categories ; clouds self-sort into phase-coherent clusters.
+    phase: (typeof opts.phase === 'number') ? opts.phase : (Math.random() * Math.PI * 2),
+    meshes: [],
+    alive: true,
+    _disposed: false,
+    attachMesh(mesh) {
+      this.anchor.add(mesh);
+      this.meshes.push(mesh);
+    },
+    applyImpulse(v) {
+      this.velocity.x += v.x; this.velocity.y += v.y; this.velocity.z += v.z;
+    },
+    dispose() {
+      if (this._disposed) return;
+      this._disposed = true; this.alive = false;
+      if (this.anchor.parent) scene.remove(this.anchor);
+      for (const m of this.meshes) {
+        if (m.geometry && m.geometry.dispose) m.geometry.dispose();
+        if (m.material && m.material.dispose) m.material.dispose();
+      }
+    },
+  };
+  game.dots.push(dot);
+  return dot;
+}
+
+function disposeAllDots() {
+  if (!game.dots) return;
+  for (const d of game.dots) d.dispose();
+  game.dots = [];
+}
+
+function updateDots(dt) {
+  if (!game.dots || !game.dots.length) return;
+  const _gameTime = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+  // ---- Per-dot update (physics, age, hue, internal lightning, growth) ----
+  for (let i = game.dots.length - 1; i >= 0; i--) {
+    const d = game.dots[i];
+    d.age += dt;
+    if (d.age >= d.lifetime) {
+      d.dispose();
+      game.dots.splice(i, 1);
+      continue;
+    }
+    // Move (gas: no wall checks, pass through everything)
+    d.anchor.position.x += d.velocity.x * dt;
+    d.anchor.position.y += d.velocity.y * dt;
+    d.anchor.position.z += d.velocity.z * dt;
+    // Time uniform tick + scale growth + fade for attached meshes.
+    // (v9) tNorm uses growthDuration (capped at 1.0) so an infinite-
+    // lifetime dot still grows over a finite time then sits at full size.
+    const tNorm = Math.min(1, d.age / Math.max(0.001, d.growthDuration));
+    let scale = 1;
+    if (d.scaleGrowth) {
+      scale = d.scaleGrowth.baseScale * (1 + tNorm * (d.scaleGrowth.maxFactor - 1));
+    }
+    // fadeOut only kicks in for finite-lifetime dots (the cloud is
+    // expected to die). Indestructible dots (lifetime = Infinity) stay
+    // at full alpha forever.
+    const fadeCurve = (d.fadeOut && isFinite(d.lifetime)) ? ((1 - tNorm) * (1 - tNorm)) : 1;
+    for (const m of d.meshes) {
+      if (d.scaleGrowth) m.scale.setScalar(scale);
+      if (m.material && m.material.uniforms) {
+        if (m.material.uniforms.time) m.material.uniforms.time.value = _gameTime;
+        if (d.fadeOut && m.material.uniforms.uBaseAlpha) {
+          m.material.uniforms.uBaseAlpha.value = (d.fadeOut.alphaMul || 0.5) * fadeCurve;
+        }
+      }
+    }
+    // Hue cycle (greyscale shade pulse)
+    if (d.hueCycleMaterial && d.hueCycleMaterial.uniforms && d.hueCycleMaterial.uniforms.uColor) {
+      const ph = (d.huePhase + _gameTime * d.hueSpeed) % 1;
+      const _l = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(ph * Math.PI * 2));
+      try { d.hueCycleMaterial.uniforms.uColor.value.setHSL(0, 0, _l); } catch (_) {}
+    }
+    // Internal lightning (within the arcRadius sphere)
+    if (d.emitsLightning && tNorm < 0.7 && typeof spawnLightningBolt === 'function') {
+      d._internalArcTimer -= dt;
+      if (d._internalArcTimer <= 0) {
+        d._internalArcTimer = 0.18 + Math.random() * 0.25;
+        const r = d.arcRadius;
+        const _t1 = Math.random() * Math.PI * 2, _p1 = Math.acos(2*Math.random() - 1);
+        const _t2 = Math.random() * Math.PI * 2, _p2 = Math.acos(2*Math.random() - 1);
+        const _from = d.anchor.position.clone().add(new THREE.Vector3(
+          r * Math.sin(_p1) * Math.cos(_t1),
+          r * Math.cos(_p1),
+          r * Math.sin(_p1) * Math.sin(_t1),
+        ));
+        const _to = d.anchor.position.clone().add(new THREE.Vector3(
+          r * Math.sin(_p2) * Math.cos(_t2),
+          r * Math.cos(_p2),
+          r * Math.sin(_p2) * Math.sin(_t2),
+        ));
+        const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+        spawnLightningBolt(_from, _to, _col, 0.08 + Math.random() * 0.05,
+                           1 + Math.floor(Math.random() * 3), 1.0 + Math.random() * 0.6);
+      }
+    }
+  }
+  // ---- Ship wake (push dots away from any flying ship; player + bots) ----
+  // (v9) Build a list of all alive ships, then apply wake from each. Dots
+  // pass through ships physically (they're gas) but accept momentum from
+  // the displacement of air/space the ship's hull creates.
+  const _ships = [];
+  if (typeof player !== 'undefined' && player && player.position &&
+      player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    _ships.push(player);
+  }
+  if (game.entities) {
+    for (let i = 0; i < game.entities.length; i++) {
+      const bot = game.entities[i];
+      if (bot && bot.alive && bot.position) _ships.push(bot);
+    }
+  }
+  if (_ships.length) {
+    for (const d of game.dots) {
+      if (!d.playerWake) continue;
+      for (let s = 0; s < _ships.length; s++) {
+        const ship = _ships[s];
+        const dx = d.anchor.position.x - ship.position.x;
+        const dy = d.anchor.position.y - ship.position.y;
+        const dz = d.anchor.position.z - ship.position.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        const wakeR = d.radius * 1.4 + 220;
+        if (d2 < wakeR * wakeR && d2 > 1) {
+          const dist = Math.sqrt(d2);
+          const falloff = 1 - dist / wakeR;
+          const sSpd = (ship.velocity ? ship.velocity.length() : 0);
+          const impulse = falloff * (60 + sSpd * 0.35) * d.wakeStrength;
+          const inv = 1 / dist;
+          d.velocity.x += dx * inv * impulse * dt;
+          d.velocity.y += dy * inv * impulse * dt;
+          d.velocity.z += dz * inv * impulse * dt;
+          // (v9) Direct momentum transfer when the ship is closing on the
+          // dot ; the dot picks up some of the ship's velocity vector so
+          // a ramming pass shoves the dot in the ship's direction of
+          // travel (not just away from its position).
+          const closing = (ship.velocity)
+            ? -(ship.velocity.x * dx + ship.velocity.y * dy + ship.velocity.z * dz) * inv
+            : 0;
+          if (closing > 0 && falloff > 0.5) {
+            const k = falloff * 0.30 * dt;
+            d.velocity.x += ship.velocity.x * k;
+            d.velocity.y += ship.velocity.y * k;
+            d.velocity.z += ship.velocity.z * k;
+          }
+        }
+      }
+    }
+  }
+  // ---- Velocity damping (so wake impulses dissipate, not accumulate forever) ----
+  const _damp = Math.exp(-dt * 0.4);
+  for (const d of game.dots) {
+    if (d.playerWake) {
+      d.velocity.x *= _damp; d.velocity.y *= _damp; d.velocity.z *= _damp;
+    }
+  }
+  // ---- Dot-dot collisions (collidable + collidable, walls ignored) ----
+  for (let i = 0; i < game.dots.length; i++) {
+    const a = game.dots[i];
+    if (!a.collidable) continue;
+    for (let j = i + 1; j < game.dots.length; j++) {
+      const b = game.dots[j];
+      if (!b.collidable) continue;
+      const dx = b.anchor.position.x - a.anchor.position.x;
+      const dy = b.anchor.position.y - a.anchor.position.y;
+      const dz = b.anchor.position.z - a.anchor.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const minD = a.radius + b.radius;
+      if (d2 < minD * minD && d2 > 0.001) {
+        const d = Math.sqrt(d2);
+        const overlap = minD - d;
+        const nx = dx / d, ny = dy / d, nz = dz / d;
+        const pushH = overlap * 0.5;
+        a.anchor.position.x -= nx * pushH;
+        a.anchor.position.y -= ny * pushH;
+        a.anchor.position.z -= nz * pushH;
+        b.anchor.position.x += nx * pushH;
+        b.anchor.position.y += ny * pushH;
+        b.anchor.position.z += nz * pushH;
+        const va = a.velocity.x * nx + a.velocity.y * ny + a.velocity.z * nz;
+        const vb = b.velocity.x * nx + b.velocity.y * ny + b.velocity.z * nz;
+        const dV = vb - va;
+        a.velocity.x += dV * nx; a.velocity.y += dV * ny; a.velocity.z += dV * nz;
+        b.velocity.x -= dV * nx; b.velocity.y -= dV * ny; b.velocity.z -= dV * nz;
+      }
+    }
+  }
+  // ---- Cluster attraction + tangential orbit boost ----
+  // Dots tagged clusterAttraction pull on each other gravitationally and
+  // get a small tangential velocity bump to encourage orbiting instead of
+  // collapsing straight together. Combined with the elastic-bounce in the
+  // collision pass above, this makes dots clump up, swirl around each
+  // other, then rebound when too close ; "smoke clusters that orbit".
+  for (let i = 0; i < game.dots.length; i++) {
+    const a = game.dots[i];
+    if (!a.clusterAttraction) continue;
+    for (let j = i + 1; j < game.dots.length; j++) {
+      const b = game.dots[j];
+      if (!b.clusterAttraction) continue;
+      const dx = b.anchor.position.x - a.anchor.position.x;
+      const dy = b.anchor.position.y - a.anchor.position.y;
+      const dz = b.anchor.position.z - a.anchor.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      const minD = a.radius + b.radius;
+      if (d2 < minD * minD) continue;       // already touching ; collision pass handles
+      const range = Math.min(a.attractRange, b.attractRange);
+      if (d2 > range * range) continue;     // out of attraction range
+      const dist = Math.sqrt(d2);
+      // Falloff peaks at mid-range so dots don't slingshot from far away
+      // and don't accelerate infinitely up close.
+      const _u = (dist - minD) / (range - minD);    // 0 touching, 1 at edge
+      const pull = 4 * _u * (1 - _u);                // peaks at 0.5
+      // (v8_2a chemistry) T(dphi) phase coupling. Same phase = full
+      // attraction; orthogonal phase = half; opposite = zero. Clouds
+      // self-sort into phase-coherent clusters over time.
+      const _dphi = a.phase - b.phase;
+      const _T = Math.cos(_dphi * 0.5); const _Tcoup = _T * _T;
+      const force = ((a.attractStrength + b.attractStrength) * 0.5) * pull * _Tcoup;
+      const inv = 1 / dist;
+      const fx = dx * inv * force * dt;
+      const fy = dy * inv * force * dt;
+      const fz = dz * inv * force * dt;
+      a.velocity.x += fx; a.velocity.y += fy; a.velocity.z += fz;
+      b.velocity.x -= fx; b.velocity.y -= fy; b.velocity.z -= fz;
+      // Tangential nudge: cross the radial vector with the relative
+      // velocity to find a perpendicular direction, then add a small
+      // velocity component along it. This biases the pair toward orbit
+      // rather than head-on collapse.
+      const orbitMag = ((a.orbitBoost + b.orbitBoost) * 0.5) * pull;
+      if (orbitMag > 0.001) {
+        // Build a perpendicular axis from rel velocity x radial.
+        const rvx = b.velocity.x - a.velocity.x;
+        const rvy = b.velocity.y - a.velocity.y;
+        const rvz = b.velocity.z - a.velocity.z;
+        const ax = (rvy * dz - rvz * dy);
+        const ay = (rvz * dx - rvx * dz);
+        const az = (rvx * dy - rvy * dx);
+        const axLen2 = ax*ax + ay*ay + az*az;
+        if (axLen2 > 0.001) {
+          // Perpendicular tangent = axis x radial (normalized).
+          const axLen = Math.sqrt(axLen2);
+          const axn = ax / axLen, ayn = ay / axLen, azn = az / axLen;
+          const tx = (ayn * dz - azn * dy);
+          const ty = (azn * dx - axn * dz);
+          const tz = (axn * dy - ayn * dx);
+          const tLen = Math.sqrt(tx*tx + ty*ty + tz*tz);
+          if (tLen > 0.001) {
+            const tInv = orbitMag * dt / tLen;
+            a.velocity.x += tx * tInv; a.velocity.y += ty * tInv; a.velocity.z += tz * tInv;
+            b.velocity.x -= tx * tInv; b.velocity.y -= ty * tInv; b.velocity.z -= tz * tInv;
+          }
+        }
+      }
+    }
+  }
+  // ---- Inter-dot lightning (smoke cluster arcs between emitsLightning dots) ----
+  for (const a of game.dots) {
+    if (!a.emitsLightning || typeof spawnLightningBolt !== 'function') continue;
+    a._interArcTimer -= dt;
+    if (a._interArcTimer > 0) continue;
+    const aRem = a.lifetime - a.age;
+    if (aRem < 0.8) { a._interArcTimer = 0.6 + Math.random(); continue; }
+    a._interArcTimer = 0.6 + Math.random() * 1.2;
+    let bestB = null, bestD2 = Infinity;
+    const r2 = a.interArcRange * a.interArcRange;
+    for (const b of game.dots) {
+      if (b === a || !b.emitsLightning) continue;
+      const bRem = b.lifetime - b.age;
+      if (bRem < 0.8) continue;
+      const dx = b.anchor.position.x - a.anchor.position.x;
+      const dy = b.anchor.position.y - a.anchor.position.y;
+      const dz = b.anchor.position.z - a.anchor.position.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < r2 && d2 < bestD2) { bestD2 = d2; bestB = b; }
+    }
+    if (bestB) {
+      const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
+      spawnLightningBolt(
+        a.anchor.position.clone(), bestB.anchor.position.clone(), _col,
+        0.10 + Math.random() * 0.06,
+        3 + Math.floor(Math.random() * 3),
+        1.5 + Math.random() * 0.8,
+      );
+    }
+  }
+}
+
+// (v8_2a) Ambient drifting clouds, now built on the generic Dot system.
+// Each ambient cloud is a Dot with a smoke mesh attached as a child of
+// the Dot's anchor Object3D. The Dot system handles all behavior:
+// physics + collisions + player wake + lifetime + hue cycle + internal
+// lightning + inter-dot lightning. When the Dot expires, its anchor is
+// removed from the scene and the smoke mesh + material are auto-disposed.
 let _ambientCloudTimer = 1.5;          // first ambient cloud appears ~1.5s in
 const _AMBIENT_CLOUD_MAX = 5;          // cap so we don't drown the scene
 function updateAmbientClouds(dt) {
-  if (typeof game === 'undefined' || !game || !game.effects) return;
+  if (typeof game === 'undefined' || !game) return;
   if (typeof scene === 'undefined' || !scene) return;
   if (typeof _SMOKE_GEO === 'undefined') return;
   if (typeof _makeSmokeMaterial !== 'function') return;
+  if (typeof spawnDot !== 'function') return;
   _ambientCloudTimer -= dt;
   if (_ambientCloudTimer > 0) return;
   _ambientCloudTimer = 2.5 + Math.random() * 2.0;
+  // Cap on alive ambient cloud dots.
   let ambientAlive = 0;
-  let totalSmokeAlive = 0;
-  for (let i = 0; i < game.effects.length; i++) {
-    const ef = game.effects[i];
-    if (ef.type === 'shaderSmoke') {
-      totalSmokeAlive++;
-      if (ef.ambient) ambientAlive++;
+  if (game.dots) {
+    for (const d of game.dots) {
+      if (d && d._isAmbientCloud) ambientAlive++;
     }
   }
   if (ambientAlive >= _AMBIENT_CLOUD_MAX) return;
-  const SMOKE_MAX = (typeof QUALITY !== 'undefined') ? QUALITY.smokeMax() : 12;
-  if (totalSmokeAlive >= SMOKE_MAX) return;
-  // Spawn position: torus around the player, 800-2200 units out, Y squashed
-  // by 0.4 so most clouds sit roughly on the playing plane.
+  // Spawn position: torus around the player, 800-2200 units out.
   const _center = (typeof player !== 'undefined' && player && player.position)
                   ? player.position
                   : new THREE.Vector3();
@@ -14832,43 +15793,40 @@ function updateAmbientClouds(dt) {
     Math.random() - 0.5,
   ).normalize();
   const _driftSpeed = 12 + Math.random() * 22;
-  const _drift = _driftDir.clone().multiplyScalar(_driftSpeed);
+  // Build the smoke material + mesh ; mesh is the visual, anchored at
+  // local origin so the Dot's anchor.position drives where it draws.
   const _mat = _makeSmokeMaterial(0x080812, 1.0);
   if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
     _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
   }
   const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
-  _mesh.position.copy(_spawnPos);
   _mesh.scale.setScalar(_size);
   _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
   _mesh.frustumCulled = true;
   _mesh.renderOrder = 1;
-  scene.add(_mesh);
-  game.effects.push({
-    mesh: _mesh,
-    lifetime: 8.0 + Math.random() * 5.0,
-    age: 0,
-    type: 'shaderSmoke',
-    maxSize: 1.6,
-    baseScale: _size,
-    alphaMul: 0.55,                     // ambient clouds slightly more sheer
-    rotVel: new THREE.Vector3(
-      (Math.random() - 0.5) * 0.08,
-      (Math.random() - 0.5) * 0.08,
-      (Math.random() - 0.5) * 0.08,
-    ),
-    drift: _drift,
-    lightning: true,
-    _arcTimer: 0.30 + Math.random() * 0.60,
-    _arcRadius: _size * 0.5,
-    hueCycle: true,                     // tag triggers the greyscale shade pulse
-    _huePhase: Math.random(),
-    _hueSpeed: 0.08 + Math.random() * 0.06,
+  // Spawn the Dot and attach the smoke mesh.
+  const _dot = spawnDot(_spawnPos, {
+    // (v9) Indestructible. Sprout over 5s then live forever.
+    lifetime: Infinity,
+    growthDuration: 4.0 + Math.random() * 3.0,
+    radius: _size,
+    velocity: _driftDir.clone().multiplyScalar(_driftSpeed),
+    collidable: true,
     playerWake: true,
-    wakeVel: new THREE.Vector3(),
-    _wakeRadius: _size * 1.4,
-    ambient: true,                      // marker so the cap counter excludes other smoke
+    emitsLightning: true,
+    arcRadius: _size * 0.5,
+    interArcRange: 900,
+    hueCycleMaterial: _mat,
+    hueSpeed: 0.08 + Math.random() * 0.06,
+    scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
+    fadeOut: { alphaMul: 0.35 },
+    clusterAttraction: true,
+    attractStrength: 35,
+    attractRange: 1800,
+    orbitBoost: 0.4,
   });
+  _dot._isAmbientCloud = true;          // marker for the cap counter
+  _dot.attachMesh(_mesh);
 }
 
 // Heat-trail sprite + material pool. Ships emit up to ~12 heat trails/sec each
@@ -19467,6 +20425,43 @@ function updateRoundSystem(dt) {
         game.stasisSpawnTimer = 30;
         game.stasisFirstBatch = true;
         game.playerInStasis = false;
+        // (v8_2a) Clear all transient effects + particles from the prior
+        // round so smoke clouds / lightning bolts / debris / ambient clouds
+        // don't accumulate across the match.
+        // (v9 fix) Use _disposeOrReleaseEffect for each entry so pooled
+        // types release correctly. lightningSeg in particular needs its
+        // pool slot released + the pooled mesh hidden ; the prior raw
+        // mesh-remove loop missed both, leaving in-flight bolts visible
+        // for the rest of the match across a round transition.
+        for (const eff of game.effects) {
+          if (!eff) continue;
+          if (typeof _disposeOrReleaseEffect === 'function') {
+            try { _disposeOrReleaseEffect(eff); } catch (_) {}
+          } else if (eff.mesh && eff.mesh.parent) {
+            scene.remove(eff.mesh);
+            if (eff.mesh.material && eff.mesh.material.dispose) {
+              try { eff.mesh.material.dispose(); } catch (_) {}
+            }
+          }
+        }
+        game.effects = [];
+        for (const p of game.particles) {
+          if (p && p.poolSlot && typeof _releaseParticleSlot === 'function') {
+            try { _releaseParticleSlot(p.poolSlot); } catch (_) {}
+          }
+        }
+        game.particles = [];
+        // Reset the ambient-cloud cadence so a new wave doesn't immediately
+        // re-spawn on top of the freshly-built map.
+        if (typeof _ambientCloudTimer !== 'undefined') {
+          _ambientCloudTimer = 2.5 + Math.random() * 1.5;
+        }
+        // (v8_2a) Wipe all live Dots (ambient cloud anchors and any other
+        // dot-system effects) so the next round starts clean.
+        if (typeof disposeAllDots === 'function') disposeAllDots();
+        // (v9 fix) Fractal plants are disposed + respawned INSIDE
+        // buildNextRound above. Disposing again here (post-spawn) was
+        // wiping the freshly-spawned plants ; removed.
         // (v6.9) Reset champion-mode state for the new round.
         game.championField = null;
         game.championSpawned = false;
@@ -27382,7 +28377,9 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  updateAmbientClouds(dt); // (v8_2a) drifting orphan clouds w/ greyscale pulse + lightning + wake
+  if (typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
+  updateAmbientClouds(dt); // (v8_2a) ambient cloud spawner (uses Dot system below)
+  updateDots(dt);          // (v8_2a) generic Dot system: physics + collisions + lightning + hue
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
@@ -33209,3 +34206,4 @@ if (window.LSS_ENGINE_READY) {
 </script>
 </body>
 </html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               
