@@ -14401,19 +14401,16 @@ function updateEffects(dt) {
                              1 + Math.floor(Math.random() * 3), 1.0 + Math.random() * 0.6);
         }
       }
-      // (v8_2a) Hue-cycle on the drifting cluster plumes. uColor is a
-      // THREE.Color in HSL terms ; we keep lightness very low (0.05-0.07)
-      // so the smoke stays "almost black" with just a hint of color, and
-      // saturation high so the hint is detectable. Hue advances at the
-      // plume's own rate from its randomized phase, so neighbors aren't
-      // lockstep. Skipped if uColor isn't available.
+      // (v8_2a followup) Greyscale shade pulse. setHSL(0, 0, L) gives a
+      // pure grey at lightness L ; oscillating L between 0.02 (near black)
+      // and 0.10 (dark grey) makes the cloud subtly shift between shades
+      // of black/dark grey. Each plume has its own phase + speed so they
+      // pulse independently. Field name `hueCycle` retained for the tag
+      // even though it's no longer cycling hue.
       if (e.hueCycle && e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uColor) {
-        const _h = (e._huePhase + game.time * (e._hueSpeed || 0.12)) % 1;
-        // Lightness dips slightly mid-hue so cool colors read a touch dimmer
-        // than warms; keeps the cycle from feeling robotic.
-        const _l = 0.055 + 0.020 * Math.sin(_h * Math.PI * 2);
-        const _s = 0.85;
-        try { e.mesh.material.uniforms.uColor.value.setHSL(_h, _s, _l); } catch (_) {}
+        const _phase = (e._huePhase + game.time * (e._hueSpeed || 0.12)) % 1;
+        const _l = 0.02 + 0.08 * (0.5 + 0.5 * Math.sin(_phase * Math.PI * 2));
+        try { e.mesh.material.uniforms.uColor.value.setHSL(0, 0, _l); } catch (_) {}
       }
       // (v8_2a) Player wake: plumes get pushed away when the player ship
       // flies near. Force scales with player speed (slipstream) and inverse
@@ -14782,6 +14779,95 @@ function spawnElectricSmoke(pos, radius, opts) {
       (Math.random() - 0.5) * 4,
       (Math.random() - 0.5) * 6
     ),
+  });
+}
+
+// (v8_2a) Ambient drifting clouds. Independent of any cluster / explosion /
+// damage source ; periodically a fresh cloud spawns at a random distance
+// from the player and drifts slowly through the map. Each one carries the
+// same lightning + hueCycle + playerWake tags as cluster plumes, so the
+// existing updateEffects shaderSmoke branches drive the visuals (greyscale
+// shade pulse + electric arcs + push-on-flyby). Lifetime 8-13s with a
+// 2.5-4.5s spawn cadence so a few are alive at any moment.
+let _ambientCloudTimer = 1.5;          // first ambient cloud appears ~1.5s in
+const _AMBIENT_CLOUD_MAX = 5;          // cap so we don't drown the scene
+function updateAmbientClouds(dt) {
+  if (typeof game === 'undefined' || !game || !game.effects) return;
+  if (typeof scene === 'undefined' || !scene) return;
+  if (typeof _SMOKE_GEO === 'undefined') return;
+  if (typeof _makeSmokeMaterial !== 'function') return;
+  _ambientCloudTimer -= dt;
+  if (_ambientCloudTimer > 0) return;
+  _ambientCloudTimer = 2.5 + Math.random() * 2.0;
+  let ambientAlive = 0;
+  let totalSmokeAlive = 0;
+  for (let i = 0; i < game.effects.length; i++) {
+    const ef = game.effects[i];
+    if (ef.type === 'shaderSmoke') {
+      totalSmokeAlive++;
+      if (ef.ambient) ambientAlive++;
+    }
+  }
+  if (ambientAlive >= _AMBIENT_CLOUD_MAX) return;
+  const SMOKE_MAX = (typeof QUALITY !== 'undefined') ? QUALITY.smokeMax() : 12;
+  if (totalSmokeAlive >= SMOKE_MAX) return;
+  // Spawn position: torus around the player, 800-2200 units out, Y squashed
+  // by 0.4 so most clouds sit roughly on the playing plane.
+  const _center = (typeof player !== 'undefined' && player && player.position)
+                  ? player.position
+                  : new THREE.Vector3();
+  const _theta = Math.random() * Math.PI * 2;
+  const _phi   = Math.acos(2 * Math.random() - 1);
+  const _sinP  = Math.sin(_phi);
+  const _dist  = 800 + Math.random() * 1400;
+  const _spawnPos = new THREE.Vector3(
+    _center.x + _dist * _sinP * Math.cos(_theta),
+    _center.y + _dist * Math.cos(_phi) * 0.4,
+    _center.z + _dist * _sinP * Math.sin(_theta),
+  );
+  const _size = 80 + Math.random() * 120;
+  const _driftDir = new THREE.Vector3(
+    Math.random() - 0.5,
+    (Math.random() - 0.5) * 0.4,
+    Math.random() - 0.5,
+  ).normalize();
+  const _driftSpeed = 12 + Math.random() * 22;
+  const _drift = _driftDir.clone().multiplyScalar(_driftSpeed);
+  const _mat = _makeSmokeMaterial(0x080812, 1.0);
+  if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
+    _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
+  }
+  const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
+  _mesh.position.copy(_spawnPos);
+  _mesh.scale.setScalar(_size);
+  _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+  _mesh.frustumCulled = true;
+  _mesh.renderOrder = 1;
+  scene.add(_mesh);
+  game.effects.push({
+    mesh: _mesh,
+    lifetime: 8.0 + Math.random() * 5.0,
+    age: 0,
+    type: 'shaderSmoke',
+    maxSize: 1.6,
+    baseScale: _size,
+    alphaMul: 0.55,                     // ambient clouds slightly more sheer
+    rotVel: new THREE.Vector3(
+      (Math.random() - 0.5) * 0.08,
+      (Math.random() - 0.5) * 0.08,
+      (Math.random() - 0.5) * 0.08,
+    ),
+    drift: _drift,
+    lightning: true,
+    _arcTimer: 0.30 + Math.random() * 0.60,
+    _arcRadius: _size * 0.5,
+    hueCycle: true,                     // tag triggers the greyscale shade pulse
+    _huePhase: Math.random(),
+    _hueSpeed: 0.08 + Math.random() * 0.06,
+    playerWake: true,
+    wakeVel: new THREE.Vector3(),
+    _wakeRadius: _size * 1.4,
+    ambient: true,                      // marker so the cap counter excludes other smoke
   });
 }
 
@@ -27296,6 +27382,7 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
+  updateAmbientClouds(dt); // (v8_2a) drifting orphan clouds w/ greyscale pulse + lightning + wake
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
