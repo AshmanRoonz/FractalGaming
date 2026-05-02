@@ -2142,21 +2142,19 @@ function buildMapSelector() {
 
 // Set the current map by key; update the window contents, the active dot, and
 // the checkmark. Safe to call directly (used by click handlers and cycleMap).
-function selectMap(mapKey, fromBroadcast) {
+function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
-  // (v9a) Lock the LOCAL map button once THIS player has hit
-  // "Confirm & Launch" (net.myReady = true). Pickers / ship-select
-  // side-effects route through here without fromBroadcast set, so they
-  // get blocked once committed. INCOMING peer broadcasts pass
-  // fromBroadcast=true (see the map_change handler) so the other player
-  // can still change the map while you're already ready ; you just see
-  // their pick rather than being able to fight them on it. The world
-  // still syncs cleanly because both peers settle on the most recent
-  // map before match_start.
-  if (!fromBroadcast && net.active && net.myReady) return;
-  // Backstop: once the world has actually been built (match_start has
-  // fired), nothing changes the map any more, regardless of source.
-  if (net.active && net.worldMap) return;
+  // (v9a) Two locks, both clear at returnToRootMenu so the next match starts editable:
+  //   1. Launch countdown is ticking. net.startScheduledAt holds the wall-clock ms
+  //      when match_start fires ; it's set the moment both peers are ready and
+  //      cleared when the timer fires or someone un-readies. Stops a last-second
+  //      map swap during the 5-second LAUNCH countdown.
+  //   2. Match is active. net.worldMap is set inside applyWorldSync (right after
+  //      match_start) and stays set across rounds. Between-round ship-swaps go
+  //      through the same lobby UI but the picker shouldn't change the map mid-
+  //      match ; only a fresh game (after the full scoreboard pause + return to
+  //      root menu) re-opens map selection.
+  if (net.active && (net.startScheduledAt || net.worldMap)) return;
   // (v6.7) Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
   // already selected stops the storm without needing a per-call suppress flag.
@@ -2177,9 +2175,7 @@ function selectMap(mapKey, fromBroadcast) {
   // ship-select; once the world is built (commitLoadout runs), changes affect
   // the next round only. The picker is hidden during gameplay, so no explicit
   // lock is needed beyond the existing UI gating.
-  // (v9a) Only re-broadcast if the call was user-initiated. Without this
-  // gate, an incoming peer broadcast would echo back out and ping-pong.
-  if (!fromBroadcast && net.active && net.sendEvent) {
+  if (net.active && net.sendEvent) {
     net.sendEvent({ type: 'map_change', mapKey });
   }
 }
@@ -3363,11 +3359,8 @@ function handleNetEvent(evt, fromPeerId) {
   }
   // (v6.7) Pre-match map sync. selectMap's "no-op if already selected"
   // early-return prevents the receiver re-broadcasting and creating a storm.
-  // (v9a) Pass fromBroadcast=true so the local myReady-lock is bypassed
-  // (a peer changing the map should still sync to us even if we've
-  // already confirmed our loadout) and so the broadcast is not re-emitted.
   if (evt.type === 'map_change' && typeof evt.mapKey === 'string') {
-    if (typeof selectMap === 'function') selectMap(evt.mapKey, true);
+    if (typeof selectMap === 'function') selectMap(evt.mapKey);
     return;
   }
   // (v6.7) Stasis owner spawned a field; mirror it at the broadcast position
