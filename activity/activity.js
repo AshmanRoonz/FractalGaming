@@ -6,86 +6,123 @@
 //
 // Discord's iframe enforces a strict CSP that blocks inline scripts,
 // inline event handlers (onclick=), external CDN fonts/scripts, and
-// several browser APIs (WebXR, Wake Lock, full-screen). Rather than
-// fight all of that to host the full game inside the iframe, this
-// stub exists only to hand off into a regular browser window where
-// LSS can run with all features intact (VR support, full screen, the
-// actual lobby).
+// several browser APIs (WebXR, Wake Lock, full-screen). It also strips
+// the iframe sandbox's allow-popups permission, so plain window.open()
+// is hard-blocked. The official escape hatch is the Discord Embedded
+// App SDK's commands.openExternalLink() method, which routes the
+// navigation through Discord's parent window instead.
 //
 // What this file does:
-//   1. Wires up the ENGAGE button to open lss.fractalreality.ca in a
-//      new browser window when clicked.
-//   2. Forwards the Discord iframe's URL parameters (instance_id,
-//      channel_id, etc.) to the new window as ?discord_* params, so
-//      the game can later use them to coordinate with this Activity.
-//   3. Reports popup-blocked / popup-success state to the user.
+//   1. Loads the Discord Embedded App SDK (locally hosted in this
+//      folder so it satisfies the script-src 'self' CSP rule).
+//   2. Initializes the SDK with our Application ID, awaits ready().
+//   3. Wires the ENGAGE button to open the full game in a new browser
+//      window via discordSdk.commands.openExternalLink(). Forwards the
+//      Discord iframe context (instance_id, channel_id, etc.) as
+//      ?discord_* URL params so the game can use them later.
+//   4. Falls back to plain window.open() if loaded outside Discord
+//      (so direct-browser testing of /activity/ still works).
 
-(function () {
-  'use strict';
+import { DiscordSDK } from './discord-sdk.js';
 
-  // The full-game URL we open. Always lss.fractalreality.ca ; the
-  // browser window is a regular tab, not the Discord iframe, so it
-  // gets the unmodified game with no CSP / permission constraints.
-  var GAME_URL = 'https://lss.fractalreality.ca/';
+const APPLICATION_ID = '1500305353210855615';
+const GAME_URL       = 'https://lss.fractalreality.ca/';
 
-  // Discord injects context as URL params on the iframe's URL. We
-  // forward whatever we received so the game window can act on it
-  // later (e.g. pre-fill the lobby with voice-channel members).
-  var FORWARD_PARAMS = [
-    'instance_id', 'channel_id', 'location_id', 'launch_id',
-    'guild_id', 'frame_id', 'platform', 'referrer_id',
-  ];
+// Discord forwards context as URL params on the iframe URL. We pass
+// these through to the popup so the game can act on them later
+// (e.g. pre-populate the lobby with voice-channel members).
+const FORWARD_PARAMS = [
+  'instance_id', 'channel_id', 'location_id', 'launch_id',
+  'guild_id', 'frame_id', 'platform', 'referrer_id',
+];
 
-  function buildGameUrl() {
-    var src = new URLSearchParams(window.location.search);
-    var url = new URL(GAME_URL);
-    url.searchParams.set('source', 'discord_activity');
-    for (var i = 0; i < FORWARD_PARAMS.length; i++) {
-      var k = FORWARD_PARAMS[i];
-      var v = src.get(k);
-      if (v) url.searchParams.set('discord_' + k, v);
-    }
-    return url.toString();
+// Built once on boot; null while pending, the SDK once ready, or false
+// if init failed (we fall back to window.open in that case).
+let _sdk = null;
+
+function buildGameUrl() {
+  const src = new URLSearchParams(window.location.search);
+  const url = new URL(GAME_URL);
+  url.searchParams.set('source', 'discord_activity');
+  for (const k of FORWARD_PARAMS) {
+    const v = src.get(k);
+    if (v && v !== 'undefined') url.searchParams.set('discord_' + k, v);
   }
+  return url.toString();
+}
 
-  function setStatus(text, kind) {
-    var el = document.getElementById('status');
-    if (!el) return;
-    el.textContent = text || '';
-    el.className = 'status' + (kind ? ' ' + kind : '');
+function setStatus(text, kind) {
+  const el = document.getElementById('status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'status' + (kind ? ' ' + kind : '');
+}
+
+function inDiscordIframe() {
+  // Heuristic: we're inside Discord's iframe if the URL has frame_id
+  // or instance_id (Discord injects these on launch). Outside Discord
+  // (e.g. testing /activity/ directly in a browser tab), neither is
+  // present and we use window.open instead of the SDK.
+  const p = new URLSearchParams(window.location.search);
+  return !!(p.get('frame_id') || p.get('instance_id'));
+}
+
+async function initSdk() {
+  if (!inDiscordIframe()) {
+    // Not in a Discord context ; skip SDK init, use plain popup.
+    _sdk = false;
+    return;
   }
+  try {
+    const sdk = new DiscordSDK(APPLICATION_ID);
+    await sdk.ready();
+    _sdk = sdk;
+  } catch (err) {
+    console.warn('[lss-activity] Discord SDK init failed:', err);
+    _sdk = false;
+    setStatus('Discord SDK unavailable ; falling back to direct popup.', 'warn');
+  }
+}
 
-  function onEngage() {
-    var url = buildGameUrl();
-    // Use a named target so a second click reuses the same tab.
-    // No 'noopener' here ; we may want postMessage between windows
-    // in a later iteration. Discord's iframe does not block window.open
-    // when triggered by a real user gesture (button click).
-    var win = window.open(url, 'lss_game');
-    if (!win) {
-      setStatus(
-        'Pop-up blocked. Allow pop-ups for Discord, then click ENGAGE again.',
-        'error'
-      );
+async function onEngage() {
+  const url = buildGameUrl();
+  // Prefer the SDK route when available ; it bypasses the iframe
+  // popup-block by handing the URL to Discord's parent window.
+  if (_sdk) {
+    try {
+      await _sdk.commands.openExternalLink({ url });
+      setStatus('Game opened in your default browser.', 'ok');
       return;
+    } catch (err) {
+      console.warn('[lss-activity] openExternalLink failed:', err);
+      setStatus('Discord blocked the open. Trying direct popup...', 'warn');
     }
+  }
+  // Fallback: plain window.open. Works when /activity/ is loaded
+  // outside Discord (regular browser tab); blocked inside Discord's
+  // sandboxed iframe but worth trying as a last resort.
+  const win = window.open(url, 'lss_game');
+  if (!win) {
     setStatus(
-      'Game opened in a new window. You can close this Activity panel.',
-      'ok'
+      'Pop-up blocked. Allow pop-ups for this site, then click ENGAGE again.',
+      'error'
     );
-    // Best-effort: focus the new window if the browser allows.
-    try { win.focus(); } catch (_) {}
+    return;
   }
+  setStatus('Game opened in a new window. You can close this Activity panel.', 'ok');
+  try { win.focus(); } catch (_) {}
+}
 
-  function init() {
-    var btn = document.getElementById('engage-btn');
-    if (!btn) return;
-    btn.addEventListener('click', onEngage);
-  }
+function init() {
+  const btn = document.getElementById('engage-btn');
+  if (btn) btn.addEventListener('click', onEngage);
+  // Kick off SDK init in parallel ; it usually finishes well before the
+  // user clicks ENGAGE, so onEngage rarely waits.
+  initSdk();
+}
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
-    init();
-  }
-})();
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
