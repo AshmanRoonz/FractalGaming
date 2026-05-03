@@ -1433,9 +1433,9 @@ body.vr-active .hit-marker {
     </div>
 
     <div style="margin-top:30px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
-      Multiplayer uses WebTorrent trackers for peer discovery.<br>
-      No servers. No accounts. Just a room code.<br>
-      Share the code; anyone who enters it joins your mesh.
+      Multiplayer is peer-to-peer via Trystero ; just a room code, no game server.<br>
+      Share the code; anyone who enters it joins your mesh.<br>
+      Sign in with Discord (optional) to track stats on the leaderboard.
     </div>
   </div>
 </div>
@@ -3510,6 +3510,13 @@ class NetworkPlayer {
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
         }
+        // Hit-glow radius scaled to dome ; hit color matches gun shield amber.
+        if (mat.uniforms && mat.uniforms.uHitRadius) {
+          mat.uniforms.uHitRadius.value = gDomeR * 0.35;
+        }
+        if (mat.uniforms && mat.uniforms.uHitColor) {
+          mat.uniforms.uHitColor.value.setHex(0xffe0a0);
+        }
         this._gunShieldMesh = new THREE.Mesh(geo, mat);
         this._gunShieldMesh.renderOrder = 1;
         scene.add(this._gunShieldMesh);
@@ -3576,6 +3583,13 @@ class NetworkPlayer {
         // (v11 fix) uPosScale = 1/radius so noise patterns scale to the dome.
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, tDomeR);
+        }
+        // Hit-glow tuning for thermal shield ; warmer hue.
+        if (mat.uniforms && mat.uniforms.uHitRadius) {
+          mat.uniforms.uHitRadius.value = tDomeR * 0.35;
+        }
+        if (mat.uniforms && mat.uniforms.uHitColor) {
+          mat.uniforms.uHitColor.value.setHex(0xffd07a);
         }
         this._thermalShieldMesh = new THREE.Mesh(geo, mat);
         this._thermalShieldMesh.renderOrder = 1;
@@ -5890,6 +5904,14 @@ const _LAYERED_FX_FRAG = [
   // Walls keep the default of 1.0 (their built-in BoxGeometry-scale sampling
   // is already what they want).
   'uniform float uPosScale;',
+  // (v11) Hit-impact ripples. Up to 4 simultaneous hits per material; each
+  // hit is (x, y, z, t) where t is uTime when the hit landed. Hits older
+  // than 0.45s contribute zero. Used by shields ; flashShieldHit() pushes
+  // a hit into the next slot in a ring buffer and stamps t = uTime. Default
+  // value (t = -999) ensures untouched slots add nothing.
+  'uniform vec4 uHits[4];',
+  'uniform float uHitRadius;',     // size of the glow patch in world units
+  'uniform vec3 uHitColor;',       // color of the impact glow
   'uniform int   uLayerPattern[3];',
   'uniform float uLayerScale[3];',
   'uniform float uLayerTimeRate[3];',
@@ -6033,7 +6055,29 @@ const _LAYERED_FX_FRAG = [
   '  }',
   '  float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vViewDir)), 0.0), 2.0);',
   '  acc.rgb += uBaseColor * fres * uFresnel;',
-  '  acc.a = clamp(acc.a, 0.0, 1.0);',
+  // (v11) Hit-impact glow accumulator. Each active hit adds a gaussian
+  // brightness blob centered on its world position, fading over ~0.45s.
+  // The glow boosts both color and alpha so it punches through transparent
+  // bases (shields are mostly transparent until hit). Iterates the fixed-
+  // size ring buffer ; idle slots have uTime - hit.w >> 1.0 → contribution 0.
+  '  float hitR2 = max(1.0, uHitRadius * uHitRadius);',
+  '  vec3 hitGlow = vec3(0.0);',
+  '  float hitAlpha = 0.0;',
+  '  for (int hi = 0; hi < 4; hi++) {',
+  '    vec4 h = uHits[hi];',
+  '    float age = uTime - h.w;',
+  '    if (age < 0.0 || age > 0.45) continue;',
+  '    float fade = 1.0 - age / 0.45;',
+  '    fade = fade * fade;',
+  '    vec3 dHit = vWorldPos - h.xyz;',
+  '    float d2 = dot(dHit, dHit);',
+  '    float bell = exp(-d2 / hitR2 * 4.0);',
+  '    float intensity = bell * fade;',
+  '    hitGlow += uHitColor * intensity * 4.0;',
+  '    hitAlpha = max(hitAlpha, intensity);',
+  '  }',
+  '  acc.rgb += hitGlow;',
+  '  acc.a = clamp(acc.a + hitAlpha * 0.85, 0.0, 1.0);',
   '  gl_FragColor = acc;',
   '}',
 ].join('\n');
@@ -6086,6 +6130,17 @@ function _makeLayeredFXMaterial(preset) {
       uFresnel:       { value: +cfg.fresnel },
       uBrightness:    { value: +cfg.brightness },
       uPosScale:      { value: +cfg.posScale },
+      // (v11) Hit-impact ring buffer ; 4 slots of (x,y,z,t). Initialized
+      // with t = -999 so they contribute zero until flashFXMaterialHit()
+      // pushes a real impact in.
+      uHits:          { value: [
+        new THREE.Vector4(0, 0, 0, -999),
+        new THREE.Vector4(0, 0, 0, -999),
+        new THREE.Vector4(0, 0, 0, -999),
+        new THREE.Vector4(0, 0, 0, -999),
+      ] },
+      uHitRadius:     { value: 80.0 },
+      uHitColor:      { value: new THREE.Color(0xffffff) },
       uLayerPattern:  { value: layers.map(l => l.pattern) },
       uLayerScale:    { value: layers.map(l => l.scale) },
       uLayerTimeRate: { value: layers.map(l => l.timeRate) },
@@ -6095,6 +6150,9 @@ function _makeLayeredFXMaterial(preset) {
       uLayerSat:      { value: layers.map(l => l.sat) },
     },
   });
+  // Per-material ring-buffer cursor for hit slots ; flashFXMaterialHit
+  // increments this and writes into uHits[(cursor) % 4].
+  mat.userData._hitCursor = 0;
   mat.userData.isLayeredFX = true;
   mat.userData.presetName = cfg.name || null;
   _ACTIVE_LAYERED_FX.add(mat);
@@ -6113,6 +6171,29 @@ function _layeredFXTick(tSec) {
   _ACTIVE_LAYERED_FX.forEach(mat => {
     if (mat && mat.uniforms && mat.uniforms.uTime) mat.uniforms.uTime.value = tSec;
   });
+}
+
+// (v11) Push a hit-impact glow into a layered FX material's ring buffer.
+// `worldPos` is the impact point in world coordinates; the shader's
+// gaussian falloff brightens the patch around it for ~0.45s.
+// `hitColor` is optional (defaults to the material's base color brightened);
+// `radius` is optional (defaults to the existing uHitRadius). Used by the
+// shield-impact wiring in playerTakeDamage / bot.takeDamage.
+function flashFXMaterialHit(mat, worldPos, hitColor, radius) {
+  if (!mat || !mat.uniforms || !mat.uniforms.uHits) return;
+  const u = mat.uniforms;
+  const t = u.uTime ? u.uTime.value : 0;
+  const cursor = (mat.userData._hitCursor || 0) % 4;
+  const slot = u.uHits.value[cursor];
+  if (slot && slot.set) {
+    slot.set(worldPos.x, worldPos.y, worldPos.z, t);
+  }
+  mat.userData._hitCursor = (cursor + 1) % 4;
+  if (radius != null && u.uHitRadius) u.uHitRadius.value = radius;
+  if (hitColor != null && u.uHitColor) {
+    if (typeof hitColor === 'number') u.uHitColor.value.setHex(hitColor);
+    else if (hitColor.isColor)        u.uHitColor.value.copy(hitColor);
+  }
 }
 
 // ---- EFFECT_PRESETS ; user-authored, baked 2026-05-03 -----------------
@@ -6258,6 +6339,7 @@ if (typeof window !== 'undefined') {
   window._layeredFXTick         = _layeredFXTick;
   window._ACTIVE_LAYERED_FX     = _ACTIVE_LAYERED_FX;
   window.spawnFXBurst           = spawnFXBurst;
+  window.flashFXMaterialHit     = flashFXMaterialHit;
 }
 
 // ---- Hex hologram (plane / shape) -------------------------------------
@@ -6816,65 +6898,119 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
 // per-frame loop, using the existing particle system so no new shader work
 // is needed. Per-entity emit timer self-throttles so particle counts stay
 // reasonable even at full burn.
+// (v11) Damage state effects ; replaces the HP/shield bars with in-world
+// progressive ship damage. Shield up = no hull effects (the shield itself
+// is the visible "I'm protected" reading). Once shield depletes, the hull
+// progresses through 4 escalating tiers based on remaining HP:
+//   tier 0 (75-100%): sparking      ; bright hot sparks pop off the hull
+//   tier 1 (50-75%):  electric arcs ; cyan lightning chases across the hull
+//   tier 2 (25-50%):  smoke         ; dark gray smoke plumes rise off
+//   tier 3 (0-25%):   fire          ; orange/red flames + heavy smoke
+// Each tier's emit cadence speeds up as HP falls within the band, and the
+// emit position randomizes around the hull so the effect reads as
+// distributed damage, not a single point.
 function emitDamageState(entity, dt) {
   if (!entity || !entity.alive || !entity.position) return;
+  // (v11) Shield up = hide all hull damage. Threshold > 0.5 (not == 0)
+  // so flickering low-shield ticks don't strobe the effects on/off.
+  if ((entity.shield || 0) > 0.5) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
-  const hpFrac = (entity.health || 0) / maxHp;
-  // Healthy + not doomed = nothing to show
-  if (hpFrac > 0.5 && !entity.doomed) return;
+  const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
+  if (hpFrac >= 1.0) return; // pristine ; no effect
+  // Tier selection by HP band.
+  let tier = 0;
+  if (hpFrac < 0.75) tier = 1;
+  if (hpFrac < 0.50) tier = 2;
+  if (hpFrac < 0.25) tier = 3;
+  // Emit cadence: faster as damage worsens. tier 0 = 110ms, tier 3 = 45ms.
   if (entity._dmgEmitTimer == null) entity._dmgEmitTimer = 0;
   entity._dmgEmitTimer -= dt;
   if (entity._dmgEmitTimer > 0) return;
-  const intensity = entity.doomed ? 1 : Math.max(0, 1 - hpFrac * 2);
-  entity._dmgEmitTimer = 0.07 - intensity * 0.05; // 70ms healthy -> 20ms doomed
-  const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.4 : 40;
+  entity._dmgEmitTimer = 0.11 - tier * 0.022;
+  // Pick a random point on the hull as the emit anchor.
+  const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.45 : 45;
   const offset = new THREE.Vector3(
-    (Math.random() - 0.5) * hullR,
-    (Math.random() - 0.5) * hullR * 0.6,
-    (Math.random() - 0.5) * hullR
+    (Math.random() - 0.5) * hullR * 2,
+    (Math.random() - 0.5) * hullR * 0.8,
+    (Math.random() - 0.5) * hullR * 2
   );
   const pos = entity.position.clone().add(offset);
-  // Smoke layer (always at <=50% HP)
-  game.particles.push({
-    position: pos.clone(),
-    velocity: new THREE.Vector3(
-      (Math.random() - 0.5) * 30,
-      30 + Math.random() * 50,
-      (Math.random() - 0.5) * 30
-    ),
-    life: 0.6 + Math.random() * 0.5,
-    maxLife: 1.1,
-    color: 0x333333,
-    size: 4 + intensity * 6,
-  });
-  // Hot sparks at low HP
-  if (hpFrac < 0.25 || entity.doomed) {
+  if (tier === 0) {
+    // SPARKING: a few hot bright sparks pop off the hull. Bloom catches
+    // them into glints at distance ; reads as "this ship just took a hit
+    // and there's exposed circuitry sparking."
+    if (typeof v8SpawnSparks === 'function') {
+      v8SpawnSparks(pos, 3, 0.7, 200, 0xffe070, 0xffffff);
+    } else {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 140,
+          (Math.random() - 0.5) * 140,
+          (Math.random() - 0.5) * 140
+        ),
+        life: 0.18, maxLife: 0.18, color: 0xffe070, size: 2,
+      });
+    }
+  } else if (tier === 1) {
+    // ELECTRIC: short cyan arcs jump across the hull surface. Reads as
+    // "internal systems shorting out."
+    if (typeof spawnLightningBolt === 'function') {
+      const a = pos.clone();
+      const b = pos.clone().add(new THREE.Vector3(
+        (Math.random() - 0.5) * hullR * 1.4,
+        (Math.random() - 0.5) * hullR * 0.9,
+        (Math.random() - 0.5) * hullR * 1.4
+      ));
+      spawnLightningBolt(a, b, 0x88ddff, 0.14, 0, 1);
+    }
+    // Accent spark so the arc has a punctuation point.
     game.particles.push({
       position: pos.clone(),
       velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 100,
-        (Math.random() - 0.5) * 100,
-        (Math.random() - 0.5) * 100
+        (Math.random() - 0.5) * 80,
+        (Math.random() - 0.5) * 80,
+        (Math.random() - 0.5) * 80
       ),
-      life: 0.15,
-      maxLife: 0.15,
-      color: 0xffaa44,
-      size: 2,
+      life: 0.16, maxLife: 0.16, color: 0xaaeeff, size: 1.6,
     });
-  }
-  // Electric arcs at doomed (signature of the irreversible 30% threshold)
-  if (entity.doomed) {
+  } else if (tier === 2) {
+    // SMOKE: dark plumes rising off the hull. Reads as "the ship is
+    // burning underneath, venting smoke through hull breaches."
     game.particles.push({
       position: pos.clone(),
       velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 200,
-        (Math.random() - 0.5) * 200,
-        (Math.random() - 0.5) * 200
+        (Math.random() - 0.5) * 30,
+        30 + Math.random() * 45,
+        (Math.random() - 0.5) * 30
       ),
-      life: 0.1,
-      maxLife: 0.1,
-      color: 0x44ddff,
-      size: 1.5,
+      life: 0.9 + Math.random() * 0.6, maxLife: 1.5,
+      color: 0x2a2a2a, size: 6 + Math.random() * 4,
+    });
+  } else {
+    // tier 3 ; FIRE: orange/red flames erupt off the hull + heavy smoke
+    // trailing above. Reads as "this ship is burning and about to die."
+    game.particles.push({
+      position: pos.clone(),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 35,
+        20 + Math.random() * 70,
+        (Math.random() - 0.5) * 35
+      ),
+      life: 0.45 + Math.random() * 0.35, maxLife: 0.8,
+      color: Math.random() < 0.5 ? 0xff4422 : 0xff8833,
+      size: 5 + Math.random() * 4,
+    });
+    // Trailing smoke above the flames.
+    game.particles.push({
+      position: pos.clone().add(new THREE.Vector3(0, 15, 0)),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 22,
+        40 + Math.random() * 40,
+        (Math.random() - 0.5) * 22
+      ),
+      life: 0.8 + Math.random() * 0.5, maxLife: 1.3,
+      color: 0x1c1c1c, size: 7 + Math.random() * 4,
     });
   }
 }
@@ -10068,9 +10204,13 @@ const _hullNormalMap = (function() {
 // PointLight, so adding this to every ship costs essentially nothing
 // (8 ships * 2 draw calls = 16 draw calls, sub-pixel cost). The bloom pass
 // already in the post-FX pipeline smears the dot into a glow halo at distance.
-const _SHIP_RUNNING_LIGHT_RADIUS = Math.PI;          // ~3.14159
-const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff1818;       // saturated red, port (left, -X)
-const _SHIP_RUNNING_LIGHT_STAR_COL = 0x18ff18;       // saturated green, starboard (right, +X)
+// (v11) Bumped from PI (~3.14) to ~6 so the running lights read as alive
+// nav-lights from a distance, not faint dots ; with the HP bar gone they
+// now help carry the "this ship is alive" reading. Color values pushed
+// into the HDR range (1.5x) so the bloom pass smears them into a halo.
+const _SHIP_RUNNING_LIGHT_RADIUS = 6.0;
+const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff3030;       // saturated red, port (left, -X)
+const _SHIP_RUNNING_LIGHT_STAR_COL = 0x30ff30;       // saturated green, starboard (right, +X)
 function _addShipRunningLight(group, hullW, hullH, hullL) {
   const r = _SHIP_RUNNING_LIGHT_RADIUS;
   // Three.js SphereGeometry phi convention (verified in source):
@@ -10082,8 +10222,11 @@ function _addShipRunningLight(group, hullW, hullH, hullL) {
   const hSegs = 10;
   const portGeo = new THREE.SphereGeometry(r, segs, hSegs, -Math.PI/2, Math.PI);
   const starGeo = new THREE.SphereGeometry(r, segs, hSegs,  Math.PI/2, Math.PI);
-  const portMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_PORT_COL });
-  const starMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_STAR_COL });
+  // (v11) MeshBasicMaterial with toneMapped:false so the color value passes
+  // through the renderer's tone-mapping unaltered ; combined with the
+  // brighter base hex, the bloom pass picks them up hard at any distance.
+  const portMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_PORT_COL, toneMapped: false });
+  const starMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_STAR_COL, toneMapped: false });
   const portMesh = new THREE.Mesh(portGeo, portMat);
   const starMesh = new THREE.Mesh(starGeo, starMat);
   // Wrap in a sub-group so animateShipMesh can bob the whole light without
@@ -18187,6 +18330,12 @@ function playerTakeDamage(amount, attacker, projectile) {
         const absorbed = Math.min(amount, player.gunShieldHP);
         player.gunShieldHP -= absorbed;
         amount -= absorbed;
+        // (v11) Localized shield-impact glow: light up the patch where
+        // the projectile hit. Anchor the glow at incomingPos (the
+        // projectile's last-known position, very close to the dome).
+        if (typeof flashFXMaterialHit === 'function' && player.gunShieldMesh) {
+          flashFXMaterialHit(player.gunShieldMesh.material, incomingPos);
+        }
         if (player.gunShieldHP <= 0) {
           // Shield destroyed: auto-deactivate
           player.abilityActive[1] = false;
@@ -18203,6 +18352,13 @@ function playerTakeDamage(amount, attacker, projectile) {
       const absorbed = Math.min(amount, player.thermalShieldHP);
       player.thermalShieldHP -= absorbed;
       amount -= absorbed;
+      // (v11) Localized impact glow on the thermal shield dome.
+      if (typeof flashFXMaterialHit === 'function' && player.thermalShieldMesh) {
+        const _hitPos = (projectile && projectile.position) ? projectile.position
+                      : (attacker && attacker.position)     ? attacker.position
+                      : player.position;
+        flashFXMaterialHit(player.thermalShieldMesh.material, _hitPos);
+      }
       if (player.thermalShieldHP <= 0) {
         // Power depleted: auto-deactivate; recharge begins automatically.
         player.thermalShieldHP = 0;
@@ -20484,7 +20640,19 @@ function updateShieldVisuals(dt) {
     const gBaseOffset = gHull * 0.40;       // matches Pyro forward offset
     if (!player.gunShieldMesh) {
       const geo = new THREE.SphereGeometry(gDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-      const mat = _makeHexHologramMaterial(0xff8a55);
+      // (v11) Layered plasma-amber shield with hit-impact glow support.
+      const mat = (typeof _makeFXMaterial === 'function')
+        ? _makeFXMaterial('plasma_amber')
+        : _makeHexHologramMaterial(0xff8a55);
+      if (mat.uniforms && mat.uniforms.uPosScale) {
+        mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
+      }
+      if (mat.uniforms && mat.uniforms.uHitRadius) {
+        mat.uniforms.uHitRadius.value = gDomeR * 0.35;
+      }
+      if (mat.uniforms && mat.uniforms.uHitColor) {
+        mat.uniforms.uHitColor.value.setHex(0xffe0a0);
+      }
       player.gunShieldMesh = new THREE.Mesh(geo, mat);
       player.gunShieldMesh.renderOrder = 1;
       scene.add(player.gunShieldMesh);
@@ -20556,9 +20724,19 @@ function updateShieldVisuals(dt) {
       // Apex at +Y in geometry-local space ; we orient +Y along forward so
       // the dome bows out in front of the player.
       const geo = new THREE.SphereGeometry(tDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-      // Fire base color: hot yellow-orange. uColor is rewritten per frame
-      // along a fire palette anyway ; this is just the initial value.
-      const mat = _makeHexHologramMaterial(0xffaa33);
+      // (v11) Layered plasma-amber shield with hit-impact glow support.
+      const mat = (typeof _makeFXMaterial === 'function')
+        ? _makeFXMaterial('plasma_amber')
+        : _makeHexHologramMaterial(0xffaa33);
+      if (mat.uniforms && mat.uniforms.uPosScale) {
+        mat.uniforms.uPosScale.value = 1.0 / Math.max(1, tDomeR);
+      }
+      if (mat.uniforms && mat.uniforms.uHitRadius) {
+        mat.uniforms.uHitRadius.value = tDomeR * 0.35;
+      }
+      if (mat.uniforms && mat.uniforms.uHitColor) {
+        mat.uniforms.uHitColor.value.setHex(0xffd07a);
+      }
       player.thermalShieldMesh = new THREE.Mesh(geo, mat);
       player.thermalShieldMesh.renderOrder = 1;
       scene.add(player.thermalShieldMesh);
@@ -23066,112 +23244,15 @@ function drawCircumpunctHUD() {
     }
   }
 
-  // ---- LAYER 1: INNER RING (Health) ----
-  // Segmented arc, bottom half (from 7 o'clock to 5 o'clock)
+  // (v11) HP + shield bars removed from HUD. Damage feedback is now
+  // entirely in-world: hull damage progresses through 4 visible tiers
+  // (sparking → electric → smoke → fire) on the ship hull when shields
+  // are down. Shields up = no hull effects visible. The bars cluttered
+  // the HUD and the in-world version reads from any angle (including in
+  // VR), not just the cockpit center. Kept the constants the speed/ammo
+  // arcs reference (r1/r2) so their layout doesn't shift.
   const r1 = 150;
-  const healthArcStart = Math.PI * 0.65;   // ~117 degrees (lower left)
-  const healthArcEnd = Math.PI * 2.35;     // ~423 degrees (lower right, wrapping)
-  const healthArcSpan = healthArcEnd - healthArcStart;
-  const segments = player.chassis.healthSegments;
-  const segGap = 0.04; // radians gap between segments
-
-  // Background ring (faint)
-  ctx.strokeStyle = white + '0.1)';
-  ctx.lineWidth = 8;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r1, healthArcStart, healthArcEnd);
-  ctx.stroke();
-
-  // Health segments
-  for (let i = 0; i < segments; i++) {
-    const segStart = healthArcStart + (healthArcSpan / segments) * i + segGap / 2;
-    const segEnd = healthArcStart + (healthArcSpan / segments) * (i + 1) - segGap / 2;
-    const segStartPct = i / segments;
-
-    if (healthPct > segStartPct) {
-      const fillPct = Math.min(1, (healthPct - segStartPct) / (1 / segments));
-      const fillEnd = segStart + (segEnd - segStart) * fillPct;
-
-      // Cinematic glow: blur rises as health falls (gets more desperate looking near empty).
-      ctx.save();
-      ctx.shadowColor = hCol;
-      ctx.shadowBlur = 6 + (1 - healthPct) * 10;
-      ctx.strokeStyle = hCol;
-      ctx.lineWidth = 8;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r1, segStart, fillEnd);
-      ctx.stroke();
-      ctx.restore();
-
-      // Brighter inner edge
-      ctx.strokeStyle = white + '0.15)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r1 - 5, segStart, fillEnd);
-      ctx.stroke();
-    }
-
-    // Segment boundary tick
-    if (i > 0) {
-      const tickAngle = healthArcStart + (healthArcSpan / segments) * i;
-      const tx1 = cx + Math.cos(tickAngle) * (r1 - 14);
-      const ty1 = cy + Math.sin(tickAngle) * (r1 - 14);
-      const tx2 = cx + Math.cos(tickAngle) * (r1 + 14);
-      const ty2 = cy + Math.sin(tickAngle) * (r1 + 14);
-      ctx.strokeStyle = white + '0.12)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(tx1, ty1); ctx.lineTo(tx2, ty2);
-      ctx.stroke();
-    }
-  }
-
-  // Health text (below ring)
-  ctx.fillStyle = white + '0.6)';
-  hudFont('13px Courier New');
-  ctx.textAlign = 'center';
-  ctx.fillText(Math.ceil(player.health) + '', cx, cy + r1 + 24);
-
-  // ---- LAYER 2: SHIELD RING ----
-  // Thinner ring, upper half (from 11 o'clock to 1 o'clock)
   const r2 = 190;
-  const shieldArcStart = -Math.PI * 0.85;
-  const shieldArcEnd = -Math.PI * 0.15;
-  const shieldArcSpan = shieldArcEnd - shieldArcStart;
-
-  // Background
-  ctx.strokeStyle = cyan + '0.1)';
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r2, shieldArcStart, shieldArcEnd);
-  ctx.stroke();
-
-  // Shield fill
-  if (shieldPct > 0) {
-    const fillEnd = shieldArcStart + shieldArcSpan * shieldPct;
-    ctx.save();
-    ctx.shadowColor = cyan + '0.85)';
-    ctx.shadowBlur = 10;
-    ctx.strokeStyle = cyan + '0.6)';
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r2, shieldArcStart, fillEnd);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // Tick marks along shield arc (every 10%)
-  for (let i = 0; i <= 10; i++) {
-    const angle = shieldArcStart + shieldArcSpan * (i / 10);
-    const inner = i % 5 === 0 ? r2 - 12 : r2 - 6;
-    const outer = i % 5 === 0 ? r2 + 12 : r2 + 6;
-    ctx.strokeStyle = cyan + (i % 5 === 0 ? '0.15)' : '0.08)');
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
-    ctx.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
-    ctx.stroke();
-  }
 
   // ---- LAYER 3: SPEED ARC (left side) ----
   const r3 = 240;
