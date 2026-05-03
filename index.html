@@ -549,6 +549,37 @@ body.vr-active .hit-marker {
   object-fit: cover;
   image-rendering: -webkit-optimize-contrast;
 }
+/* (v10) Discord avatar in the chip's thumb area. Same height envelope
+   as .chip-thumb but rendered as a centered circle so it reads as a
+   profile pic, not a cropped rectangle. Used when the player (YOU or
+   a peer) has signed in with Discord ; bots and unsigned players
+   still use the GLB ship thumb above. */
+.fleet-chip .chip-avatar-wrap {
+  width: 100%; height: 78px;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center,
+    rgba(88,101,242,0.18), rgba(0,0,0,0.0) 65%);
+  position: relative;
+}
+.fleet-chip .chip-avatar {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid #5865F2;
+  background: #1a1a30;
+  box-shadow: 0 0 12px rgba(88,101,242,0.35);
+}
+/* Tiny ship-loadout marker in the bottom-right corner of the chip's
+   avatar area, so even when we show the player's face we still hint
+   at which ship they picked. */
+.fleet-chip .chip-ship-mini {
+  position: absolute; bottom: 4px; right: 6px;
+  font-size: 8px; letter-spacing: 1px; font-weight: bold;
+  color: #ffaa00; text-shadow: 0 0 4px rgba(0,0,0,0.9);
+  background: rgba(0,0,0,0.55);
+  padding: 1px 4px; border-radius: 2px;
+  pointer-events: none;
+}
 .fleet-chip .chip-thumb-empty {
   width: 100%; height: 78px;
   display: flex; align-items: center; justify-content: center;
@@ -1541,6 +1572,10 @@ const LSS = {
   LAUNCH_COUNTDOWN: 10,
 };
 
+// (v10) Cloudflare Worker base URL ; the API behind lss.fractalreality.ca's
+// match posting + leaderboard + lobby browser. See LSS_backend-plan.md.
+const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
+
 // (v10) Discord integration constants. PKCE OAuth + Worker-proxied
 // posting. Application ID is public ; Worker URL is public ; the only
 // real secrets (channel webhook URLs) live as encrypted Cloudflare
@@ -2191,6 +2226,21 @@ function discordCurrentToken() {
   return localStorage.getItem(LSS_DISCORD.STORAGE_TOKEN) || null;
 }
 
+// Compute a Discord CDN avatar URL for a user-shaped object (id +
+// avatar). Falls back to Discord's default-avatar image based on the
+// user-id-derived index. Used by the lobby chips + leaderboard renders.
+function _discordAvatarUrlFor(user, size) {
+  if (!user || !user.id) return null;
+  const sz = size || 64;
+  if (user.avatar) {
+    return 'https://cdn.discordapp.com/avatars/' + user.id + '/' + user.avatar + '.png?size=' + sz;
+  }
+  let idx;
+  try { idx = (BigInt(user.id) >> 22n) % 6n; }
+  catch (_) { idx = (parseInt(user.id, 10) >> 22) % 6; }
+  return 'https://cdn.discordapp.com/embed/avatars/' + idx + '.png';
+}
+
 function _discordRenderIdentity() {
   // Toggle the lobby UI between "SIGN IN WITH DISCORD" and the signed-in
   // identity panel (avatar + name + sign out). Safe to call any time ;
@@ -2223,6 +2273,141 @@ function _discordRenderIdentity() {
   await _handleDiscordCallback();
   _discordRenderIdentity();
 })();
+
+// ---- LSS BACKEND POSTING (v10 Phase 2) ----
+// Posts a completed match's result to api.lss.fractalreality.ca/match.
+// Each participant's browser fires this independently ; the Worker waits
+// for all reports + agreement before validating and rolling up to player
+// career totals. Skipped silently if the user isn't signed in (game still
+// works, no leaderboard contribution). Bots-only matches still post:
+// the local player IS a participant, so their report counts ; bot
+// participants don't have Discord IDs and are reported with synthetic
+// "bot:<loadout>:<index>" identifiers so they don't collide with real
+// player IDs but still appear in the match scoreboard.
+//
+// Match ID is deterministic per match instance:
+//   net.matchSeed (when in multiplayer) ; or a stable string per
+//   solo match (so re-posts of the same match are idempotent).
+
+let _lastPostedMatchId = null;
+
+function _buildMatchIdForCurrentMatch() {
+  // Multiplayer: use the synced world seed + match start time.
+  if (net.active && net.worldSeed != null && net.matchStartedAt != null) {
+    return 'mp_' + net.worldSeed + '_' + net.matchStartedAt;
+  }
+  // Solo: use a session-local timestamp + a random salt set at match start.
+  if (game._soloMatchId) return game._soloMatchId;
+  game._soloMatchId = 'solo_' + Date.now() + '_' + Math.floor(Math.random() * 1e6).toString(36);
+  return game._soloMatchId;
+}
+
+function _gatherMatchParticipants(winningTeam) {
+  const out = [];
+  // Local player.
+  if (player && player.loadoutKey) {
+    const me = discordCurrentUser();
+    out.push({
+      discord_id:   me ? me.id : ('local:' + (player.loadoutKey || 'unknown')),
+      team:         player.team || LSS.TEAM_FLEET_A,
+      loadout_key:  player.loadoutKey,
+      kills:        player.kills        || 0,
+      deaths:       player.deaths       || 0,
+      damage_dealt: Math.floor(player.damageDealt || 0),
+      damage_taken: Math.floor(player.damageTaken || 0),
+      is_mvp:       0,    // computed below
+      is_winner:    (player.team === winningTeam) ? 1 : 0,
+    });
+  }
+  // Bots.
+  let botIdx = 0;
+  for (const b of (game.entities || [])) {
+    if (!b || !b.loadoutKey) continue;
+    out.push({
+      discord_id:   'bot:' + b.loadoutKey + ':' + (botIdx++),
+      team:         b.team || LSS.TEAM_FLEET_A,
+      loadout_key:  b.loadoutKey,
+      kills:        b.kills        || 0,
+      deaths:       b.deaths       || 0,
+      damage_dealt: Math.floor(b.damageDealt || 0),
+      damage_taken: Math.floor(b.damageTaken || 0),
+      is_mvp:       0,
+      is_winner:    (b.team === winningTeam) ? 1 : 0,
+    });
+  }
+  // Network players (peers).
+  for (const np of (net.networkPlayers || [])) {
+    if (!np || !np.loadoutKey) continue;
+    const peer = net.peers && net.peers.get(np.peerId);
+    out.push({
+      discord_id:   (peer && peer.discord_id) || ('peer:' + np.peerId),
+      team:         np.team || LSS.TEAM_FLEET_A,
+      loadout_key:  np.loadoutKey,
+      kills:        np.kills        || 0,
+      deaths:       np.deaths       || 0,
+      damage_dealt: Math.floor(np.damageDealt || 0),
+      damage_taken: Math.floor(np.damageTaken || 0),
+      is_mvp:       0,
+      is_winner:    (np.team === winningTeam) ? 1 : 0,
+    });
+  }
+  // MVP: highest kills on the winning team.
+  let mvp = null;
+  for (const p of out) {
+    if (!p.is_winner) continue;
+    if (!mvp || p.kills > mvp.kills) mvp = p;
+  }
+  if (mvp) mvp.is_mvp = 1;
+  return out;
+}
+
+async function postMatchResultToBackend() {
+  const token = discordCurrentToken();
+  if (!token) {
+    console.log('[lss-backend] not signed in to Discord ; skipping match post');
+    return;
+  }
+  const matchId = _buildMatchIdForCurrentMatch();
+  if (matchId === _lastPostedMatchId) {
+    console.log('[lss-backend] match', matchId, 'already posted ; skipping');
+    return;
+  }
+  _lastPostedMatchId = matchId;
+
+  const winningTeam = (game.scoreA >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_A
+                    : (game.scoreB >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_B
+                    : null;
+  const participants = _gatherMatchParticipants(winningTeam);
+
+  const payload = {
+    match_id:     matchId,
+    started_at:   game._matchStartedAtMs || (Date.now() - Math.floor((game.matchEndTimer || 0) * 1000)),
+    ended_at:     Date.now(),
+    map_key:      game.selectedMap || 'unknown',
+    winning_team: winningTeam,
+    duration_sec: game._matchDurationSec || null,
+    participants,
+  };
+
+  try {
+    const res = await fetch(LSS_API_BASE + '/match', {
+      method:  'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      console.warn('[lss-backend] match POST failed', res.status, json);
+    } else {
+      console.log('[lss-backend] match posted ; id=' + matchId);
+    }
+  } catch (err) {
+    console.warn('[lss-backend] match POST threw', err);
+  }
+}
 
 // ---- LOBBY FUNCTIONS ----
 
@@ -2305,6 +2490,15 @@ async function joinRoom() {
       if (peer) {
         peer.loadoutKey = data.loadoutKey;
         peer.team = data.team;
+        // (v10) Capture peer's Discord identity if they sent it ; lets
+        // the lobby chips show their avatar + display name instead of
+        // generic "PEER" text. May be undefined if the peer isn't
+        // signed in with Discord.
+        if (data.discord_id) {
+          peer.discord_id     = data.discord_id;
+          peer.discord_name   = data.discord_name;
+          peer.discord_avatar = data.discord_avatar;
+        }
         // Create or update their NetworkPlayer
         updateNetworkPlayer(peerId, data);
         // (v6.7) A peer just committed in ship-select; if everyone now has a
@@ -2339,12 +2533,18 @@ async function joinRoom() {
       // (v9b) Refresh the fleet strip so the new peer's chip appears.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 
-      // If we already have a loadout, announce it
+      // If we already have a loadout, announce it. (v10) Bundle our
+      // Discord identity into the same payload so the new peer can
+      // render our avatar + handle in their lobby chips.
       if (player.loadoutKey && net.sendLoadout) {
+        const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
         net.sendLoadout({
           loadoutKey: player.loadoutKey,
           team: player.team,
           peerId: net.myPeerId,
+          discord_id:     _du ? _du.id : undefined,
+          discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+          discord_avatar: _du ? _du.avatar : undefined,
         });
       }
 
@@ -17045,6 +17245,12 @@ function commitLoadout(key) {
     game.scoreA = 0;
     game.scoreB = 0;
     game.currentRound = 1;
+    // (v10 Phase 2) Stamp match-start time + clear last-posted-id so a
+    // new match's results post fresh to the backend. Also reset the
+    // solo match id so single-player matches get unique D1 entries.
+    game._matchStartedAtMs = Date.now();
+    game._soloMatchId      = null;
+    _lastPostedMatchId     = null;
     // (v6.9) Champion-mode reset for fresh-match start.
     game.championField = null;
     game.championSpawned = false;
@@ -17058,12 +17264,17 @@ function commitLoadout(key) {
     player.position.copy(getValidSpawnPoint(player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   }
 
-  // Announce our loadout to peers
+  // Announce our loadout to peers. (v10) Include Discord identity
+  // so peers can render our avatar in their lobby chips.
   if (net.active && net.sendLoadout) {
+    const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
     net.sendLoadout({
       loadoutKey: player.loadoutKey,
       team: player.team,
       peerId: net.myPeerId,
+      discord_id:     _du ? _du.id : undefined,
+      discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+      discord_avatar: _du ? _du.avatar : undefined,
     });
   }
 
@@ -21045,6 +21256,15 @@ function updateRoundSystem(dt) {
         // brings the scoreboard up with the final totals.
         game.matchEndTimer = 10;
         if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility();
+        // (v10 Phase 2) Post the match result to the LSS backend (D1 via
+        // Worker). Fires once per match ; idempotent across re-renders.
+        // Skipped silently if not signed in to Discord. Async, fire and
+        // forget ; doesn't block the matchEnd cinematic.
+        try {
+          if (typeof postMatchResultToBackend === 'function') {
+            postMatchResultToBackend();
+          }
+        } catch (_) {}
         if (window.Overlays) {
           const winner = game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A' : 'FLEET B';
           Overlays.banner('VICTORY', winner + ' WINS');
@@ -23296,7 +23516,8 @@ function updateTeammatesStrip() {
 
   // ---- Helper: build a single chip element ----
   function makeChip(opts) {
-    // opts: { name, ship, isYou, isEnemy, isEmpty, showPip, isReady }
+    // opts: { name, ship, isYou, isEnemy, isEmpty, showPip, isReady,
+    //         discordAvatarUrl }
     const chip = document.createElement('div');
     chip.className = 'fleet-chip';
     if (opts.isYou) chip.classList.add('you');
@@ -23305,17 +23526,32 @@ function updateTeammatesStrip() {
     if (!opts.showPip) chip.classList.add('no-pip');
     if (opts.isReady) chip.classList.add('is-ready');
 
-    // Thumbnail: baked GLB render, or dashed placeholder.
+    // Thumb area: prefer the player's Discord avatar (signed-in
+    // humans), fall back to the baked GLB ship thumbnail (bots,
+    // unsigned players), fall back to a dashed empty placeholder.
     let thumbHTML;
-    const thumbSrc = (!opts.isEmpty && opts.ship && _shipThumbCache[opts.ship])
-      ? _shipThumbCache[opts.ship] : null;
-    if (thumbSrc) {
-      thumbHTML = `<img class="chip-thumb" src="${thumbSrc}" alt="${opts.ship}">`;
-    } else if (opts.isEmpty) {
-      thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
+    if (!opts.isEmpty && opts.discordAvatarUrl) {
+      // Discord avatar as a centered circle ; tiny ship-loadout
+      // marker overlaid in the corner so we still see what they
+      // picked at a glance.
+      const shipMini = opts.ship && opts.ship !== '---'
+        ? `<span class="chip-ship-mini">${opts.ship}</span>`
+        : '';
+      thumbHTML = `<div class="chip-avatar-wrap">` +
+        `<img class="chip-avatar" src="${opts.discordAvatarUrl}" alt="${opts.name || ''}">` +
+        shipMini +
+      `</div>`;
     } else {
-      // Ship picked but thumb not yet baked ; show its key as a fallback.
-      thumbHTML = `<div class="chip-thumb-empty">${opts.ship || '---'}</div>`;
+      const thumbSrc = (!opts.isEmpty && opts.ship && _shipThumbCache[opts.ship])
+        ? _shipThumbCache[opts.ship] : null;
+      if (thumbSrc) {
+        thumbHTML = `<img class="chip-thumb" src="${thumbSrc}" alt="${opts.ship}">`;
+      } else if (opts.isEmpty) {
+        thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
+      } else {
+        // Ship picked but thumb not yet baked ; show its key as a fallback.
+        thumbHTML = `<div class="chip-thumb-empty">${opts.ship || '---'}</div>`;
+      }
     }
 
     const nameTxt = opts.name || '---';
@@ -23337,25 +23573,38 @@ function updateTeammatesStrip() {
   // ship-select "ready" signal is the loadout broadcast.
   const yourShip = (player && player.loadoutKey) ? player.loadoutKey : '---';
   const youCommitted = !!(player && player.loadoutKey);
+  // (v10) Use the signed-in Discord identity for YOU's chip:
+  //   - Display name replaces "YOU"
+  //   - Avatar shows in the chip's thumb area
+  // Falls back to "YOU" + ship thumb if the player isn't signed in.
+  const _meDc = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+  const _meAvatar = _meDc ? _discordAvatarUrlFor(_meDc, 64) : null;
+  const _meName = _meDc ? (_meDc.global_name || _meDc.username) : 'YOU';
   yourList.appendChild(makeChip({
-    name: 'YOU', ship: yourShip, isYou: true,
+    name: _meName, ship: yourShip, isYou: true,
     showPip: inMultiplayer,
     isReady: youCommitted,
+    discordAvatarUrl: _meAvatar,
   }));
 
   // 2) Friendly net peers (peers whose .team matches player.team). Their
   // pip flips green when peer.loadoutKey is set ; that's the commit-and-
   // launch broadcast, which is the ship-select equivalent of "ready".
+  // (v10) Use the peer's broadcast Discord identity for chip name + avatar.
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
       if (peer.team === undefined) continue;
       if (peer.team !== myTeam) continue;
+      const peerAvatar = peer.discord_id
+        ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
+        : null;
       yourList.appendChild(makeChip({
-        name: 'PEER',
+        name: peer.discord_name || 'PEER',
         ship: peer.loadoutKey || '---',
         isEmpty: !peer.loadoutKey,
         showPip: true,
         isReady: !!peer.loadoutKey,
+        discordAvatarUrl: peerAvatar,
       }));
     }
   }
@@ -23379,18 +23628,22 @@ function updateTeammatesStrip() {
 
   // ---- ENEMY FLEET ----
   // 1) Net peers on the other team. Pip semantics match the friendly side:
-  // green = ship committed for this round.
+  // green = ship committed for this round. (v10) Discord avatars too.
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
       if (peer.team === undefined) continue;
       if (peer.team !== otherTeam) continue;
+      const peerAvatar = peer.discord_id
+        ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
+        : null;
       enemyList.appendChild(makeChip({
-        name: 'PEER',
+        name: peer.discord_name || 'PEER',
         ship: peer.loadoutKey || '---',
         isEnemy: true,
         isEmpty: !peer.loadoutKey,
         showPip: true,
         isReady: !!peer.loadoutKey,
+        discordAvatarUrl: peerAvatar,
       }));
     }
   }
