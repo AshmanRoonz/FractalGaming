@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>Last Ship Sailing v11 (WebXR) ; LayeredFXMaterial + bake-in FX presets</title>
-<!-- v11 fork started 2026-05-03. Branched off the canonical v10 line.
+<!-- v11 fork started 2026-05-03. Branched off v10.
      v11 introduces the LayeredFXMaterial ; a generalized 3-layer composite
      shader (FBM / plasma / turbulence / voronoi / wave / ridges / caustic /
      stars patterns, 7 blend modes, per-layer hue/sat/alpha/scale/timeRate)
@@ -12,12 +12,24 @@
      authoring pipeline. See fx_lab.html for the live editor and
      graphics_update_plan.md for the rollout plan.
      v11 also bakes in three user-authored presets exported from fx_lab:
-       - EFFECT_PRESETS.fireball     (target: Pyro fire trap, fireball impacts)
-       - EFFECT_PRESETS.cloud        (target: smoke plumes, gas trails, nebula puffs)
-       - EFFECT_PRESETS.plasma_wall  (target: Tracker particle wall, Vortex dome, gun shield)
+       * EFFECT_PRESETS.fireball     (target: Pyro fire trap, fireball impacts)
+       * EFFECT_PRESETS.cloud        (target: smoke plumes, gas trails, nebula puffs)
+       * EFFECT_PRESETS.plasma_wall  (target: Tracker particle wall, Vortex dome, gun shield)
      The class + presets ship in v11 but are NOT yet wired to specific in-game
-     effects ; Phase 2 of graphics_update_plan.md will perform the swaps.
+     effects ; Phase 2 of graphics_update_plan.md will perform the swaps. v11
+     should boot and play identically to v10 today.
      v10 remains the stable baseline; do NOT edit it.
+     v10 fork started 2026-05-02. Branched off v9b.
+     v10 wires Discord identity into the lobby:
+       * PKCE OAuth signin from the game HTML (no Client Secret needed).
+       * On signin: localStorage holds the Discord access token, the lobby
+         renders the player's Discord avatar + display name in place of
+         the anonymous handle field.
+       * On match-end: posts a signed match-result JSON via the
+         Cloudflare Worker proxy at lss-discord-proxy.ashroney.workers.dev
+         (which holds the real channel webhook URLs as encrypted secrets
+         and impersonates the user identity in the rendered Discord embed).
+     v9b remains the stable baseline; do NOT edit it.
      v9b fork started 2026-05-02. Branched off v9a.
      v9b redesigns the bottom ship-select strip into a two-fleet layout:
      left half = your fleet, right half = enemy fleet. Each chip shows a
@@ -552,6 +564,37 @@ body.vr-active .hit-marker {
     rgba(60,80,140,0.18), rgba(0,0,0,0.0) 65%);
   object-fit: cover;
   image-rendering: -webkit-optimize-contrast;
+}
+/* (v10) Discord avatar in the chip's thumb area. Same height envelope
+   as .chip-thumb but rendered as a centered circle so it reads as a
+   profile pic, not a cropped rectangle. Used when the player (YOU or
+   a peer) has signed in with Discord ; bots and unsigned players
+   still use the GLB ship thumb above. */
+.fleet-chip .chip-avatar-wrap {
+  width: 100%; height: 78px;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(ellipse at center,
+    rgba(88,101,242,0.18), rgba(0,0,0,0.0) 65%);
+  position: relative;
+}
+.fleet-chip .chip-avatar {
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid #5865F2;
+  background: #1a1a30;
+  box-shadow: 0 0 12px rgba(88,101,242,0.35);
+}
+/* Tiny ship-loadout marker in the bottom-right corner of the chip's
+   avatar area, so even when we show the player's face we still hint
+   at which ship they picked. */
+.fleet-chip .chip-ship-mini {
+  position: absolute; bottom: 4px; right: 6px;
+  font-size: 8px; letter-spacing: 1px; font-weight: bold;
+  color: #ffaa00; text-shadow: 0 0 4px rgba(0,0,0,0.9);
+  background: rgba(0,0,0,0.55);
+  padding: 1px 4px; border-radius: 2px;
+  pointer-events: none;
 }
 .fleet-chip .chip-thumb-empty {
   width: 100%; height: 78px;
@@ -1282,6 +1325,32 @@ body.vr-active .hit-marker {
     padding:24px;min-width:0;">
     <h2 style="font-size:13px;color:#888;letter-spacing:3px;margin:0 0 30px 0;text-align:center;">ZERO-GRAVITY SHIP COMBAT</h2>
 
+    <!-- (v10) Discord identity section. Hidden until either signed in or
+         the user clicks SIGN IN WITH DISCORD. PKCE flow ; no Client Secret
+         needed, no backend touched for the auth itself. -->
+    <div id="discord-identity" style="margin-bottom:24px;display:flex;flex-direction:column;align-items:center;gap:8px;">
+      <button id="btn-discord-signin" onclick="discordSignin()" style="
+        background:#5865F2;border:1px solid #5865F2;color:#fff;
+        padding:9px 22px;font-family:'Courier New',monospace;font-size:13px;
+        cursor:pointer;letter-spacing:2px;transition:all 0.2s;
+        display:flex;align-items:center;gap:10px;border-radius:3px;"
+        onmouseover="this.style.background='#4752c4'"
+        onmouseout="this.style.background='#5865F2'">
+        SIGN IN WITH DISCORD
+      </button>
+      <div id="discord-signed-in" style="display:none;align-items:center;gap:10px;">
+        <img id="discord-avatar" src="" alt=""
+             style="width:36px;height:36px;border-radius:50%;border:1px solid #5865F2;">
+        <span id="discord-name" style="color:#ddd;font-size:13px;letter-spacing:1px;"></span>
+        <button onclick="discordSignout()" style="
+          background:transparent;border:none;color:#666;
+          font-family:'Courier New',monospace;font-size:10px;
+          cursor:pointer;letter-spacing:1px;padding:4px 8px;"
+          onmouseover="this.style.color='#aaa'"
+          onmouseout="this.style.color='#666'">sign out</button>
+      </div>
+    </div>
+
     <div style="display:flex;flex-direction:column;gap:12px;align-items:center;">
       <div style="font-size:11px;color:#aaa;letter-spacing:1px;margin-bottom:4px;">MULTIPLAYER (P2P MESH NETWORK)</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;">
@@ -1310,7 +1379,60 @@ body.vr-active .hit-marker {
         onmouseout="this.style.borderColor='rgba(100,100,120,0.4)';this.style.color='#888'">SOLO + BOTS</button>
     </div>
 
-    <div style="margin-top:40px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
+    <!-- (v10 Phase 3) External pages: leaderboard + live rooms browser.
+         Both render the D1 backend's data via the Worker API.
+         (v10 Phase 6 fix) Plus a SETTINGS button on the main menu so
+         the user can tune controls / volume / etc. without entering a
+         match first. -->
+    <div style="margin-top:30px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap;">
+      <a href="leaderboard.html" target="_blank" rel="noopener"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        LEADERBOARD
+      </a>
+      <a href="rooms.html" target="_blank" rel="noopener"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        LIVE ROOMS
+      </a>
+      <button id="lobby-stats-btn" type="button"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;cursor:pointer;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        MY STATS
+      </button>
+      <button id="lobby-settings-btn-main" type="button"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;cursor:pointer;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        SETTINGS
+      </button>
+      <a href="about.html" target="_blank" rel="noopener"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        ABOUT
+      </a>
+    </div>
+
+    <div style="margin-top:30px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
       Multiplayer uses WebTorrent trackers for peer discovery.<br>
       No servers. No accounts. Just a room code.<br>
       Share the code; anyone who enters it joins your mesh.
@@ -1333,7 +1455,10 @@ body.vr-active .hit-marker {
       <h1>LAST SHIP SAILING</h1>
       <h2>CHOOSE YOUR SHIP</h2>
     </div>
-    <button id="lobby-settings-btn" title="Open settings (Esc)" style="background:#2a3040;color:#ddd;border:1px solid #557;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">SETTINGS</button>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <button id="lobby-back-btn" title="Return to main menu" style="background:rgba(255,68,68,0.18);color:#ff8080;border:1px solid rgba(255,100,100,0.6);padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">MAIN MENU</button>
+      <button id="lobby-settings-btn" title="Open settings (Esc)" style="background:#2a3040;color:#ddd;border:1px solid #557;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">SETTINGS</button>
+    </div>
   </div>
   <div id="ship-select-body">
     <div id="ship-list"></div>
@@ -1431,8 +1556,11 @@ body.vr-active .hit-marker {
     const note = document.getElementById('lss-loading-note');
     if (note) note.style.opacity = '1';
   }
-  window.joinRoom  = function() { return queueOrCall('joinRoom',  arguments); };
-  window.startSolo = function() { return queueOrCall('startSolo', arguments); };
+  window.joinRoom       = function() { return queueOrCall('joinRoom',       arguments); };
+  window.startSolo      = function() { return queueOrCall('startSolo',      arguments); };
+  // (v10) Discord signin/signout buttons share the same stub pattern.
+  window.discordSignin  = function() { return queueOrCall('discordSignin',  arguments); };
+  window.discordSignout = function() { return queueOrCall('discordSignout', arguments); };
   // _bootLSS calls window.__lssReplayPending() at the end of its setup so
   // any click that arrived during boot is acted on once everything's wired.
   window.__lssReplayPending = function() {
@@ -1514,6 +1642,34 @@ const LSS = {
   // warmupTimer is kept in lockstep with this so bots stay in 'warmup' (no
   // firing, no movement) for the full duration of the visible countdown.
   LAUNCH_COUNTDOWN: 10,
+};
+
+// (v10) Cloudflare Worker base URL ; the API behind lss.fractalreality.ca's
+// match posting + leaderboard + lobby browser. See LSS_backend-plan.md.
+const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
+
+// (v10) Discord integration constants. PKCE OAuth + Worker-proxied
+// posting. Application ID is public ; Worker URL is public ; the only
+// real secrets (channel webhook URLs) live as encrypted Cloudflare
+// Worker secrets and never reach the browser.
+const LSS_DISCORD = {
+  // Discord developer app for "Last Ship Sailing"
+  APPLICATION_ID:  '1500305353210855615',
+  // Cloudflare Worker that validates user OAuth tokens, sets per-message
+  // identity from the verified user, and relays to the real channel
+  // webhook URLs (which it holds as encrypted secrets).
+  WORKER_BASE_URL: 'https://lss-discord-proxy.ashroney.workers.dev',
+  // Scopes the OAuth flow requests. identify = user id/avatar/handle ;
+  // guilds = membership list (used later for "are you in the LSS server"
+  // gating, deferred for v10).
+  SCOPES:          'identify',
+  // Storage keys for the user's session.
+  STORAGE_TOKEN:   'lss_discord_token',
+  STORAGE_USER:    'lss_discord_user',
+  // PKCE verifier is one-shot per signin attempt ; sessionStorage is
+  // appropriate (cleared on tab close) so a stale verifier from a
+  // previous attempt doesn't get reused.
+  STORAGE_VERIFIER:'lss_discord_pkce_verifier',
 };
 
 // ---- CHASSIS DEFINITIONS ----
@@ -1990,6 +2146,398 @@ function generatePeerId() {
   return 'p' + Math.random().toString(36).substring(2, 8);
 }
 
+// ---- DISCORD PKCE OAUTH (v10) ----
+// PKCE = "Proof Key for Code Exchange," the OAuth flow designed for
+// browser-only apps that can't keep a Client Secret. Each signin attempt
+// generates a one-shot random verifier ; we send only its SHA-256 hash
+// (the "challenge") to Discord. Discord remembers the challenge ; when we
+// later exchange the auth code for a token, we send the original verifier
+// and Discord checks that SHA-256(verifier) matches the saved challenge.
+// Result: even if someone intercepts the auth code, they can't redeem it
+// without the verifier we kept private. No backend, no Client Secret, no
+// trust assumption beyond "the browser running this code is the player."
+//
+// Live Discord identity (avatar + handle) is stored in localStorage so
+// signin persists across reloads. Token expires in 7 days (Discord's
+// default for identify scope) ; on expiry we re-prompt signin.
+
+function _pkceRandomString(length) {
+  // base64url alphabet ; suitable as both a code_verifier and as fallback
+  // PKCE is happy with anything 43-128 chars from [A-Za-z0-9-._~].
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+  const arr = new Uint8Array(length);
+  crypto.getRandomValues(arr);
+  let out = '';
+  for (let i = 0; i < length; i++) out += chars[arr[i] % chars.length];
+  return out;
+}
+
+async function _pkceChallengeFromVerifier(verifier) {
+  // SHA-256 the verifier, then base64url-encode (no padding, +/ -> -_).
+  const enc = new TextEncoder().encode(verifier);
+  const hashBuf = await crypto.subtle.digest('SHA-256', enc);
+  const bytes = new Uint8Array(hashBuf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function _discordRedirectUri() {
+  // The redirect URI must match exactly what's registered in the Discord
+  // developer portal. We register: https://lss.fractalreality.ca/ and
+  // http://localhost:8000/ (for dev). At runtime, we send back to wherever
+  // we currently are, so both prod and local-server testing work without
+  // code changes. Strip query+hash so a re-signin doesn't accumulate them.
+  const url = new URL(window.location.href);
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
+async function discordSignin() {
+  // Build a fresh PKCE verifier+challenge for this attempt and stash the
+  // verifier in sessionStorage (cleared on tab close ; also overwritten
+  // on the next signin attempt). Then redirect to Discord's authorize URL.
+  try {
+    const verifier  = _pkceRandomString(64);
+    const challenge = await _pkceChallengeFromVerifier(verifier);
+    sessionStorage.setItem(LSS_DISCORD.STORAGE_VERIFIER, verifier);
+    const params = new URLSearchParams({
+      client_id:             LSS_DISCORD.APPLICATION_ID,
+      response_type:         'code',
+      redirect_uri:          _discordRedirectUri(),
+      scope:                 LSS_DISCORD.SCOPES,
+      code_challenge:        challenge,
+      code_challenge_method: 'S256',
+      // prompt=none would skip the consent screen for users who already
+      // authorized ; we omit it so the user always sees what they're
+      // approving (more honest UX).
+    });
+    window.location = 'https://discord.com/oauth2/authorize?' + params.toString();
+  } catch (e) {
+    console.error('[v10 discord] signin start failed:', e);
+    alert('Discord signin failed to start. See console for details.');
+  }
+}
+
+async function _discordExchangeCodeForToken(code) {
+  // Discord's token endpoint accepts the auth code + the original PKCE
+  // verifier. No Client Secret is sent (PKCE replaces it). Returns
+  // { access_token, token_type, expires_in, refresh_token, scope }.
+  const verifier = sessionStorage.getItem(LSS_DISCORD.STORAGE_VERIFIER);
+  if (!verifier) throw new Error('PKCE verifier missing ; cannot exchange code');
+  const body = new URLSearchParams({
+    client_id:     LSS_DISCORD.APPLICATION_ID,
+    grant_type:    'authorization_code',
+    code:          code,
+    redirect_uri:  _discordRedirectUri(),
+    code_verifier: verifier,
+  });
+  const res = await fetch('https://discord.com/api/v10/oauth2/token', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body:    body.toString(),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error('token exchange failed: ' + res.status + ' ' + errText);
+  }
+  return await res.json();
+}
+
+async function _discordFetchUser(accessToken) {
+  const res = await fetch('https://discord.com/api/v10/users/@me', {
+    headers: { Authorization: 'Bearer ' + accessToken },
+  });
+  if (!res.ok) throw new Error('users/@me failed: ' + res.status);
+  return await res.json();
+  // returns: { id, username, global_name, avatar, ... }
+}
+
+async function _handleDiscordCallback() {
+  // Called once at boot. If the URL contains ?code=... we just came back
+  // from Discord ; exchange the code, fetch the user, persist, render.
+  const url   = new URL(window.location.href);
+  const code  = url.searchParams.get('code');
+  const state = url.searchParams.get('state'); // (unused for now)
+  if (!code) return false;
+  try {
+    const tokenRes = await _discordExchangeCodeForToken(code);
+    const user     = await _discordFetchUser(tokenRes.access_token);
+    localStorage.setItem(LSS_DISCORD.STORAGE_TOKEN, tokenRes.access_token);
+    localStorage.setItem(LSS_DISCORD.STORAGE_USER,  JSON.stringify(user));
+    sessionStorage.removeItem(LSS_DISCORD.STORAGE_VERIFIER);
+    // Strip ?code= from the URL so a refresh doesn't re-attempt the
+    // exchange (which would fail because Discord one-shots auth codes).
+    const cleanUrl = window.location.origin + window.location.pathname;
+    window.history.replaceState({}, document.title, cleanUrl);
+    _discordRenderIdentity();
+    return true;
+  } catch (e) {
+    console.error('[v10 discord] callback failed:', e);
+    sessionStorage.removeItem(LSS_DISCORD.STORAGE_VERIFIER);
+    return false;
+  }
+}
+
+function discordSignout() {
+  localStorage.removeItem(LSS_DISCORD.STORAGE_TOKEN);
+  localStorage.removeItem(LSS_DISCORD.STORAGE_USER);
+  _discordRenderIdentity();
+}
+
+function discordCurrentUser() {
+  // Returns the cached user object or null if not signed in.
+  try {
+    const raw = localStorage.getItem(LSS_DISCORD.STORAGE_USER);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) { return null; }
+}
+
+function discordCurrentToken() {
+  return localStorage.getItem(LSS_DISCORD.STORAGE_TOKEN) || null;
+}
+
+// Compute a Discord CDN avatar URL for a user-shaped object (id +
+// avatar). Falls back to Discord's default-avatar image based on the
+// user-id-derived index. Used by the lobby chips + leaderboard renders.
+function _discordAvatarUrlFor(user, size) {
+  if (!user || !user.id) return null;
+  const sz = size || 64;
+  if (user.avatar) {
+    return 'https://cdn.discordapp.com/avatars/' + user.id + '/' + user.avatar + '.png?size=' + sz;
+  }
+  let idx;
+  try { idx = (BigInt(user.id) >> 22n) % 6n; }
+  catch (_) { idx = (parseInt(user.id, 10) >> 22) % 6; }
+  return 'https://cdn.discordapp.com/embed/avatars/' + idx + '.png';
+}
+
+function _discordRenderIdentity() {
+  // Toggle the lobby UI between "SIGN IN WITH DISCORD" and the signed-in
+  // identity panel (avatar + name + sign out). Safe to call any time ;
+  // also runs on boot after the callback handler resolves.
+  const user      = discordCurrentUser();
+  const signinBtn = document.getElementById('btn-discord-signin');
+  const signedIn  = document.getElementById('discord-signed-in');
+  const avatarEl  = document.getElementById('discord-avatar');
+  const nameEl    = document.getElementById('discord-name');
+  if (!signinBtn || !signedIn) return;
+  if (user) {
+    signinBtn.style.display = 'none';
+    signedIn.style.display  = 'flex';
+    if (avatarEl) {
+      avatarEl.src = user.avatar
+        ? ('https://cdn.discordapp.com/avatars/' + user.id + '/' + user.avatar + '.png?size=64')
+        : ('https://cdn.discordapp.com/embed/avatars/' + ((parseInt(user.id) >> 22) % 6) + '.png');
+      avatarEl.alt = user.global_name || user.username;
+    }
+    if (nameEl) nameEl.textContent = user.global_name || user.username;
+  } else {
+    signinBtn.style.display = 'flex';
+    signedIn.style.display  = 'none';
+  }
+}
+
+// Boot-time hook: handle the OAuth callback if we just bounced back from
+// Discord, then render the identity panel either way.
+(async function _discordBootInit() {
+  await _handleDiscordCallback();
+  _discordRenderIdentity();
+})();
+
+// ---- LSS BACKEND POSTING (v10 Phase 2) ----
+// Posts a completed match's result to api.lss.fractalreality.ca/match.
+// Each participant's browser fires this independently ; the Worker waits
+// for all reports + agreement before validating and rolling up to player
+// career totals. Skipped silently if the user isn't signed in (game still
+// works, no leaderboard contribution). Bots-only matches still post:
+// the local player IS a participant, so their report counts ; bot
+// participants don't have Discord IDs and are reported with synthetic
+// "bot:<loadout>:<index>" identifiers so they don't collide with real
+// player IDs but still appear in the match scoreboard.
+//
+// Match ID is deterministic per match instance:
+//   net.matchSeed (when in multiplayer) ; or a stable string per
+//   solo match (so re-posts of the same match are idempotent).
+
+let _lastPostedMatchId = null;
+
+function _buildMatchIdForCurrentMatch() {
+  // Multiplayer: use the synced world seed + match start time.
+  if (net.active && net.worldSeed != null && net.matchStartedAt != null) {
+    return 'mp_' + net.worldSeed + '_' + net.matchStartedAt;
+  }
+  // Solo: use a session-local timestamp + a random salt set at match start.
+  if (game._soloMatchId) return game._soloMatchId;
+  game._soloMatchId = 'solo_' + Date.now() + '_' + Math.floor(Math.random() * 1e6).toString(36);
+  return game._soloMatchId;
+}
+
+function _gatherMatchParticipants(winningTeam) {
+  const out = [];
+  // Local player.
+  if (player && player.loadoutKey) {
+    const me = discordCurrentUser();
+    out.push({
+      discord_id:   me ? me.id : ('local:' + (player.loadoutKey || 'unknown')),
+      team:         player.team || LSS.TEAM_FLEET_A,
+      loadout_key:  player.loadoutKey,
+      kills:        player.kills        || 0,
+      deaths:       player.deaths       || 0,
+      damage_dealt: Math.floor(player.damageDealt || 0),
+      damage_taken: Math.floor(player.damageTaken || 0),
+      is_mvp:       0,    // computed below
+      is_winner:    (player.team === winningTeam) ? 1 : 0,
+    });
+  }
+  // Bots.
+  let botIdx = 0;
+  for (const b of (game.entities || [])) {
+    if (!b || !b.loadoutKey) continue;
+    out.push({
+      discord_id:   'bot:' + b.loadoutKey + ':' + (botIdx++),
+      team:         b.team || LSS.TEAM_FLEET_A,
+      loadout_key:  b.loadoutKey,
+      kills:        b.kills        || 0,
+      deaths:       b.deaths       || 0,
+      damage_dealt: Math.floor(b.damageDealt || 0),
+      damage_taken: Math.floor(b.damageTaken || 0),
+      is_mvp:       0,
+      is_winner:    (b.team === winningTeam) ? 1 : 0,
+    });
+  }
+  // Network players (peers).
+  for (const np of (net.networkPlayers || [])) {
+    if (!np || !np.loadoutKey) continue;
+    const peer = net.peers && net.peers.get(np.peerId);
+    out.push({
+      discord_id:   (peer && peer.discord_id) || ('peer:' + np.peerId),
+      team:         np.team || LSS.TEAM_FLEET_A,
+      loadout_key:  np.loadoutKey,
+      kills:        np.kills        || 0,
+      deaths:       np.deaths       || 0,
+      damage_dealt: Math.floor(np.damageDealt || 0),
+      damage_taken: Math.floor(np.damageTaken || 0),
+      is_mvp:       0,
+      is_winner:    (np.team === winningTeam) ? 1 : 0,
+    });
+  }
+  // MVP: highest kills on the winning team.
+  let mvp = null;
+  for (const p of out) {
+    if (!p.is_winner) continue;
+    if (!mvp || p.kills > mvp.kills) mvp = p;
+  }
+  if (mvp) mvp.is_mvp = 1;
+  return out;
+}
+
+// ---- LOBBY HEARTBEAT (v10 Phase 6) ----
+// While a multiplayer room is active, post /heartbeat to the Worker
+// every ~30s so the room shows up on lss.fractalreality.ca/rooms.html.
+// The KV entry has a 90s TTL ; missing two heartbeats drops the room
+// from the public list. Skipped if the user isn't signed in to Discord.
+
+let _roomHeartbeatTimer = null;
+
+async function _fireRoomHeartbeat() {
+  if (!net || !net.active || !net.roomCode) return;
+  const token = discordCurrentToken();
+  if (!token) return;
+  try {
+    const peerCount = (net.peers && net.peers.size) || 0;
+    await fetch(LSS_API_BASE + '/heartbeat', {
+      method:  'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({
+        room_code:    net.roomCode,
+        map_key:      game.selectedMap || 'unknown',
+        player_count: peerCount + 1,
+        version:      'v10',
+      }),
+    });
+  } catch (err) {
+    console.warn('[lss-backend] heartbeat failed:', err);
+  }
+}
+
+function startRoomHeartbeat() {
+  stopRoomHeartbeat();
+  _fireRoomHeartbeat();                            // immediate first tick
+  _roomHeartbeatTimer = setInterval(_fireRoomHeartbeat, 30000);
+}
+
+function stopRoomHeartbeat() {
+  if (_roomHeartbeatTimer) {
+    clearInterval(_roomHeartbeatTimer);
+    _roomHeartbeatTimer = null;
+  }
+  // Best-effort: tell the Worker to immediately drop our room from KV
+  // so /rooms.html doesn't show a stale entry until the TTL expires.
+  if (net && net.roomCode) {
+    const token = discordCurrentToken();
+    const code  = net.roomCode;
+    if (token) {
+      fetch(LSS_API_BASE + '/room/' + encodeURIComponent(code), {
+        method:  'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token },
+      }).catch(() => {});
+    }
+  }
+}
+
+async function postMatchResultToBackend() {
+  const token = discordCurrentToken();
+  if (!token) {
+    console.log('[lss-backend] not signed in to Discord ; skipping match post');
+    return;
+  }
+  const matchId = _buildMatchIdForCurrentMatch();
+  if (matchId === _lastPostedMatchId) {
+    console.log('[lss-backend] match', matchId, 'already posted ; skipping');
+    return;
+  }
+  _lastPostedMatchId = matchId;
+
+  const winningTeam = (game.scoreA >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_A
+                    : (game.scoreB >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_B
+                    : null;
+  const participants = _gatherMatchParticipants(winningTeam);
+
+  const payload = {
+    match_id:     matchId,
+    started_at:   game._matchStartedAtMs || (Date.now() - Math.floor((game.matchEndTimer || 0) * 1000)),
+    ended_at:     Date.now(),
+    map_key:      game.selectedMap || 'unknown',
+    winning_team: winningTeam,
+    duration_sec: game._matchDurationSec || null,
+    participants,
+  };
+
+  try {
+    const res = await fetch(LSS_API_BASE + '/match', {
+      method:  'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      console.warn('[lss-backend] match POST failed', res.status, json);
+    } else {
+      console.log('[lss-backend] match posted ; id=' + matchId);
+    }
+  } catch (err) {
+    console.warn('[lss-backend] match POST threw', err);
+  }
+}
+
 // ---- LOBBY FUNCTIONS ----
 
 async function joinRoom() {
@@ -2022,6 +2570,15 @@ async function joinRoom() {
 
     // Join the room via BitTorrent trackers
     net.room = trysteroJoin({ appId: 'last-ship-sailing-v1' }, code);
+    // (v10 Phase 6) Stash the room code so the heartbeat ticker can
+    // include it in /heartbeat posts and so returnToRootMenu can DELETE
+    // the room when we leave.
+    net.roomCode = code;
+    // (v10 Phase 6) Start heartbeat ticker (~30s) so this room shows up
+    // in lss.fractalreality.ca/rooms.html. Skipped silently if user not
+    // signed in (the API requires a Discord OAuth token). Idempotent ;
+    // calling again replaces the previous interval.
+    if (typeof startRoomHeartbeat === 'function') startRoomHeartbeat();
 
     // Set up data channels
     const [sendState, onState] = net.room.makeAction('state');
@@ -2071,6 +2628,15 @@ async function joinRoom() {
       if (peer) {
         peer.loadoutKey = data.loadoutKey;
         peer.team = data.team;
+        // (v10) Capture peer's Discord identity if they sent it ; lets
+        // the lobby chips show their avatar + display name instead of
+        // generic "PEER" text. May be undefined if the peer isn't
+        // signed in with Discord.
+        if (data.discord_id) {
+          peer.discord_id     = data.discord_id;
+          peer.discord_name   = data.discord_name;
+          peer.discord_avatar = data.discord_avatar;
+        }
         // Create or update their NetworkPlayer
         updateNetworkPlayer(peerId, data);
         // (v6.7) A peer just committed in ship-select; if everyone now has a
@@ -2105,12 +2671,18 @@ async function joinRoom() {
       // (v9b) Refresh the fleet strip so the new peer's chip appears.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 
-      // If we already have a loadout, announce it
+      // If we already have a loadout, announce it. (v10) Bundle our
+      // Discord identity into the same payload so the new peer can
+      // render our avatar + handle in their lobby chips.
       if (player.loadoutKey && net.sendLoadout) {
+        const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
         net.sendLoadout({
           loadoutKey: player.loadoutKey,
           team: player.team,
           peerId: net.myPeerId,
+          discord_id:     _du ? _du.id : undefined,
+          discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+          discord_avatar: _du ? _du.avatar : undefined,
         });
       }
 
@@ -3425,6 +3997,32 @@ function handleNetEvent(evt, fromPeerId) {
     if (typeof triggerScreenShake === 'function') triggerScreenShake(6);
     return;
   }
+  // (v10 fix) Authoritative round-end resolution from the stasis owner.
+  // Non-owner peers skip the local round-end branch (gated on
+  // amStasisOwner above) and apply the owner's verdict here. This is
+  // what keeps both screens agreeing on who won when the round timer
+  // expires (the previous code had each peer running its own HP
+  // tiebreaker against stale NetworkPlayer.health values).
+  if (evt.type === 'round_end') {
+    if (game.state === 'playing') {
+      game.scoreA      = Math.max(game.scoreA | 0, (evt.scoreA | 0));
+      game.scoreB      = Math.max(game.scoreB | 0, (evt.scoreB | 0));
+      game.state       = 'roundEnd';
+      game.roundEndTimer = 5;
+      if (window.Overlays) {
+        const playerWonRound = (player && evt.winnerTeam === player.team);
+        const title = playerWonRound ? 'Round Won!' : 'Round Lost';
+        Overlays.banner(title, evt.winnerLabel || '');
+      }
+      try {
+        if (typeof ANN !== 'undefined') {
+          if (player && evt.winnerTeam === player.team) ANN.roundWon();
+          else ANN.roundLost();
+        }
+      } catch (_) {}
+    }
+    return;
+  }
   // (v6.7) Lobby ready toggle from a peer.
   if (evt.type === 'ready') {
     const peer = net.peers.get(fromPeerId);
@@ -3503,6 +4101,14 @@ function handleNetEvent(evt, fromPeerId) {
       if (evt.champion) {
         game.championField = field;
         game.championSpawned = true;
+        // (v10 fix) The stasis-owner peer shows the CHAMPION OBJECTIVE
+        // banner inline in spawnChampionField, but non-owner peers
+        // arrive here via stasis_spawn and never run that path. Show
+        // the same banner on receivers so both sides see it.
+        try {
+          if (window.Overlays) Overlays.banner('CHAMPION OBJECTIVE', 'Charge in the field to win the round');
+          if (typeof spawnDynamicLight === 'function') spawnDynamicLight(pos, 0xaa55ff, 6.0, 1500, 0.8);
+        } catch (_) {}
       }
       if (evt.fieldId > net.stasisIdCounter) net.stasisIdCounter = evt.fieldId;
     }
@@ -5198,7 +5804,7 @@ function _makeProjGlowMaterial(baseColor) {
 // off the base color, and is composited via one of 7 blend modes onto
 // the previous layers. Up to 3 layers per material.
 //
-// Authoring: see fx_lab.html for the interactive editor (export → JSON).
+// Authoring: see fx_lab.html for the interactive editor (export to JSON).
 // On-disk presets live in effects/*.json. The presets baked into
 // EFFECT_PRESETS below (fireball / cloud / plasma_wall) were authored
 // 2026-05-03 in fx_lab.
@@ -5239,94 +5845,94 @@ const _LAYERED_FX_FRAG = [
   'uniform int   uLayerBlend[3];',
   'uniform float uLayerSat[3];',
   // ---- noise primitives ----
-  'float hash(vec3 p) {',
+  'float hashLFX(vec3 p) {',
   '  p = fract(p * 0.3183099 + .1);',
   '  p *= 17.0;',
   '  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));',
   '}',
-  'float noise3(vec3 x) {',
+  'float noiseLFX(vec3 x) {',
   '  vec3 p = floor(x);',
   '  vec3 f = fract(x);',
   '  f = f * f * (3.0 - 2.0 * f);',
-  '  return mix(mix(mix(hash(p + vec3(0,0,0)), hash(p + vec3(1,0,0)), f.x),',
-  '                 mix(hash(p + vec3(0,1,0)), hash(p + vec3(1,1,0)), f.x), f.y),',
-  '             mix(mix(hash(p + vec3(0,0,1)), hash(p + vec3(1,0,1)), f.x),',
-  '                 mix(hash(p + vec3(0,1,1)), hash(p + vec3(1,1,1)), f.x), f.y),',
+  '  return mix(mix(mix(hashLFX(p + vec3(0,0,0)), hashLFX(p + vec3(1,0,0)), f.x),',
+  '                 mix(hashLFX(p + vec3(0,1,0)), hashLFX(p + vec3(1,1,0)), f.x), f.y),',
+  '             mix(mix(hashLFX(p + vec3(0,0,1)), hashLFX(p + vec3(1,0,1)), f.x),',
+  '                 mix(hashLFX(p + vec3(0,1,1)), hashLFX(p + vec3(1,1,1)), f.x), f.y),',
   '             f.z);',
   '}',
-  'float fbm(vec3 p) {',
+  'float fbmLFX(vec3 p) {',
   '  float a = 0.5, v = 0.0;',
   '  for (int i = 0; i < 5; i++) {',
-  '    v += a * noise3(p);',
+  '    v += a * noiseLFX(p);',
   '    p *= 2.0; a *= 0.5;',
   '  }',
   '  return v;',
   '}',
-  'float plasma(vec3 p, float t) {',
+  'float plasmaLFX(vec3 p, float t) {',
   '  float v = sin(p.x * 1.3 + t) + sin(p.y * 1.7 + t * 1.2) + sin(p.z * 1.1 + t * 0.7);',
   '  v += sin(length(p.xy) * 2.0 + t * 0.5) + sin(length(p.yz) * 1.5 + t);',
   '  return 0.5 + 0.1 * v;',
   '}',
-  'float turbulence(vec3 p) {',
+  'float turbulenceLFX(vec3 p) {',
   '  float a = 0.5, v = 0.0;',
   '  for (int i = 0; i < 5; i++) {',
-  '    v += a * abs(noise3(p) - 0.5) * 2.0;',
+  '    v += a * abs(noiseLFX(p) - 0.5) * 2.0;',
   '    p *= 2.0; a *= 0.5;',
   '  }',
   '  return v;',
   '}',
-  'float voronoi(vec3 p) {',
+  'float voronoiLFX(vec3 p) {',
   '  vec3 g = floor(p);',
   '  vec3 f = fract(p);',
   '  float minDist = 1.0;',
   '  for (int z = -1; z <= 1; z++) for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {',
   '    vec3 o = vec3(float(x), float(y), float(z));',
-  '    vec3 r = o + vec3(hash(g + o), hash(g + o + 1.7), hash(g + o + 3.1)) - f;',
+  '    vec3 r = o + vec3(hashLFX(g + o), hashLFX(g + o + 1.7), hashLFX(g + o + 3.1)) - f;',
   '    minDist = min(minDist, dot(r, r));',
   '  }',
   '  return sqrt(minDist);',
   '}',
-  'float wave(vec3 p, float t) {',
+  'float waveLFX(vec3 p, float t) {',
   '  float r = length(p) * 4.0 - t * 1.5;',
   '  return 0.5 + 0.5 * sin(r);',
   '}',
-  'float ridges(vec3 p) {',
+  'float ridgesLFX(vec3 p) {',
   '  float v = 0.0;',
   '  float a = 0.5;',
   '  for (int i = 0; i < 4; i++) {',
-  '    v += a * (1.0 - abs(noise3(p) - 0.5) * 2.0);',
+  '    v += a * (1.0 - abs(noiseLFX(p) - 0.5) * 2.0);',
   '    p *= 2.2; a *= 0.5;',
   '  }',
   '  return v * v;',
   '}',
-  'float caustic(vec3 p, float t) {',
+  'float causticLFX(vec3 p, float t) {',
   '  p.xy += t * 0.2;',
   '  float v = sin(p.x * 3.0 + sin(p.y * 2.0 + t)) + sin(p.y * 2.7 + sin(p.z * 1.5 + t));',
   '  v += sin(length(p.xy) * 5.0 - t);',
   '  return abs(v) * 0.3;',
   '}',
-  'float starsP(vec3 p) {',
-  '  float n = noise3(p * 6.0);',
+  'float starsLFX(vec3 p) {',
+  '  float n = noiseLFX(p * 6.0);',
   '  return smoothstep(0.85, 0.95, n);',
   '}',
-  'float samplePattern(int id, vec3 p, float t) {',
-  '  if (id == 0) return fbm(p);',
-  '  if (id == 1) return plasma(p, t);',
-  '  if (id == 2) return turbulence(p);',
-  '  if (id == 3) return 1.0 - voronoi(p);',
-  '  if (id == 4) return wave(p, t);',
-  '  if (id == 5) return ridges(p);',
-  '  if (id == 6) return caustic(p, t);',
-  '  if (id == 7) return starsP(p);',
+  'float samplePatternLFX(int id, vec3 p, float t) {',
+  '  if (id == 0) return fbmLFX(p);',
+  '  if (id == 1) return plasmaLFX(p, t);',
+  '  if (id == 2) return turbulenceLFX(p);',
+  '  if (id == 3) return 1.0 - voronoiLFX(p);',
+  '  if (id == 4) return waveLFX(p, t);',
+  '  if (id == 5) return ridgesLFX(p);',
+  '  if (id == 6) return causticLFX(p, t);',
+  '  if (id == 7) return starsLFX(p);',
   '  return 0.5;',
   '}',
   // ---- HSV helpers ----
-  'vec3 hsv2rgb(vec3 c) {',
+  'vec3 hsv2rgbLFX(vec3 c) {',
   '  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);',
   '  vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);',
   '  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);',
   '}',
-  'vec3 rgb2hsv(vec3 c) {',
+  'vec3 rgb2hsvLFX(vec3 c) {',
   '  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);',
   '  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));',
   '  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));',
@@ -5335,7 +5941,7 @@ const _LAYERED_FX_FRAG = [
   '  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);',
   '}',
   // ---- blend modes (0=replace, 1=multiply, 2=add, 3=screen, 4=mix, 5=overlay, 6=subtract) ----
-  'vec4 applyBlend(vec4 base, vec4 top, int mode) {',
+  'vec4 applyBlendLFX(vec4 base, vec4 top, int mode) {',
   '  if (mode == 0) return mix(base, top, top.a);',
   '  if (mode == 1) return vec4(base.rgb * top.rgb, max(base.a, top.a));',
   '  if (mode == 2) return vec4(base.rgb + top.rgb * top.a, max(base.a, top.a));',
@@ -5352,16 +5958,16 @@ const _LAYERED_FX_FRAG = [
   '}',
   'void main() {',
   '  vec3 p = vWorldPos;',
-  '  vec3 baseHSV = rgb2hsv(uBaseColor);',
+  '  vec3 baseHSV = rgb2hsvLFX(uBaseColor);',
   '  vec4 acc = vec4(0.0, 0.0, 0.0, 0.0);',
   '  for (int i = 0; i < 3; i++) {',
   '    vec3 q = p * uLayerScale[i];',
   '    float t = uTime * uLayerTimeRate[i];',
-  '    float v = samplePattern(uLayerPattern[i], q + vec3(t * 0.1), t);',
+  '    float v = samplePatternLFX(uLayerPattern[i], q + vec3(t * 0.1), t);',
   '    vec3 layerHSV = vec3(fract(baseHSV.x + uLayerHue[i]), uLayerSat[i] * baseHSV.y, v * uBrightness);',
-  '    vec3 layerRGB = hsv2rgb(layerHSV);',
+  '    vec3 layerRGB = hsv2rgbLFX(layerHSV);',
   '    vec4 layer = vec4(layerRGB, clamp(v * uLayerAlpha[i], 0.0, 1.0));',
-  '    acc = applyBlend(acc, layer, uLayerBlend[i]);',
+  '    acc = applyBlendLFX(acc, layer, uLayerBlend[i]);',
   '  }',
   '  float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vViewDir)), 0.0), 2.0);',
   '  acc.rgb += uBaseColor * fres * uFresnel;',
@@ -5378,7 +5984,6 @@ const _ACTIVE_LAYERED_FX = new Set();
 // Pad layers array out to exactly 3 (the shader's fixed loop count).
 // Missing layers default to fully transparent / no contribution.
 function _layeredFXNormalizeLayers(layers) {
-  const blank = { pattern: 0, scale: 1, timeRate: 0, hue: 0, alpha: 0, blend: 0, sat: 0 };
   const out = [];
   for (let i = 0; i < 3; i++) {
     const src = (layers && layers[i]) || {};
@@ -5508,7 +6113,7 @@ function _makeFXMaterial(presetName) {
 
 // Expose on window for DevTools access during Phase 2 wiring.
 if (typeof window !== 'undefined') {
-  window.EFFECT_PRESETS       = EFFECT_PRESETS;
+  window.EFFECT_PRESETS         = EFFECT_PRESETS;
   window._makeLayeredFXMaterial = _makeLayeredFXMaterial;
   window._makeFXMaterial        = _makeFXMaterial;
   window._layeredFXTick         = _layeredFXTick;
@@ -10992,20 +11597,27 @@ class Bot {
       }
       // v8VR: ship-AI announcer on kill. Multikill announcer reads the
       // streak count that the existing system bumps right after this point;
-      // we peek at what it WILL be (current + 1 if inside window).
+      // we peek at what it WILL be. (v10 fix) Mirror the streak block's
+      // logic exactly: if the new kill is inside the window, the projection
+      // is current+1 ; if it's outside the window the streak RESETS to 1
+      // regardless of the previous count. The old code naively added the
+      // window flag to _streakCount, which left a stale ≥2 streak in
+      // place after an out-of-window kill and falsely announced a multikill.
       if (typeof ANN !== 'undefined') {
         const _annNow = (typeof game !== 'undefined') ? game.time : 0;
         const _annInside = player._lastKillTime != null && (_annNow - player._lastKillTime) <= 4.0;
-        const _annNext   = (player._streakCount || 0) + (_annInside ? 1 : 0);
+        const _annNext   = _annInside ? ((player._streakCount || 0) + 1) : 1;
         if (_annNext >= 2 && typeof announceMultikill === 'function') announceMultikill(_annNext);
         else ANN.enemyDown();
       }
       // (v8_1VR) Reactive band: queue a lead phrase quantized to the next 8th.
-      // Streak hint is the (current + 1 if inside window) projection above.
+      // (v10 fix) Same streak-projection fix as the announcer block above ;
+      // out-of-window kill resets the streak hint to 1 instead of carrying
+      // forward the stale count.
       if (typeof musicOnKill === 'function') {
         const _mkNow = (typeof game !== 'undefined') ? game.time : 0;
         const _mkInside = player._lastKillTime != null && (_mkNow - player._lastKillTime) <= 4.0;
-        const _mkStreak = (player._streakCount || 0) + (_mkInside ? 1 : 0);
+        const _mkStreak = _mkInside ? ((player._streakCount || 0) + 1) : 1;
         try { musicOnKill('player', _mkStreak); } catch (_) {}
       }
       // v8VR: round-winning kill cam (Showcase mode only). No-op unless
@@ -17136,6 +17748,12 @@ function commitLoadout(key) {
     game.scoreA = 0;
     game.scoreB = 0;
     game.currentRound = 1;
+    // (v10 Phase 2) Stamp match-start time + clear last-posted-id so a
+    // new match's results post fresh to the backend. Also reset the
+    // solo match id so single-player matches get unique D1 entries.
+    game._matchStartedAtMs = Date.now();
+    game._soloMatchId      = null;
+    _lastPostedMatchId     = null;
     // (v6.9) Champion-mode reset for fresh-match start.
     game.championField = null;
     game.championSpawned = false;
@@ -17149,12 +17767,17 @@ function commitLoadout(key) {
     player.position.copy(getValidSpawnPoint(player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   }
 
-  // Announce our loadout to peers
+  // Announce our loadout to peers. (v10) Include Discord identity
+  // so peers can render our avatar in their lobby chips.
   if (net.active && net.sendLoadout) {
+    const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
     net.sendLoadout({
       loadoutKey: player.loadoutKey,
       team: player.team,
       peerId: net.myPeerId,
+      discord_id:     _du ? _du.id : undefined,
+      discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+      discord_avatar: _du ? _du.avatar : undefined,
     });
   }
 
@@ -21042,7 +21665,14 @@ function updateRoundSystem(dt) {
     // (all-dead on one side still ends the round immediately as before).
     const endByChampion = game.championResult === 'A' || game.championResult === 'B';
     const endByTimer = game.roundTimer <= 0;
-    if (endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) {
+    // (v10 fix) In multiplayer, only the stasis owner peer is allowed to
+    // RESOLVE the round (compute winner + bump score + transition to
+    // roundEnd). Other peers wait for the broadcast 'round_end' event
+    // (handled in handleNetEvent) to apply the same change. This avoids
+    // the per-peer tiebreaker computing different winners due to stale
+    // NetworkPlayer.health values around the timer-out moment.
+    const isResolutionAuthority = !net.active || amStasisOwner();
+    if ((endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) && isResolutionAuthority) {
       let winnerLabel = '';
       // (post-v6.9) Track which fleet won so the round-end banner can read
       // personally to the local player ("Round Won!" / "Round Lost") instead
@@ -21089,6 +21719,21 @@ function updateRoundSystem(dt) {
       }
       game.state = 'roundEnd';
       game.roundEndTimer = 5;
+      // (v10 fix) Broadcast the authoritative round resolution to non-owner
+      // peers so they apply the same score + state transition. Without this,
+      // peers would each compute their own tiebreaker (against potentially
+      // stale NetworkPlayer.health values) and reach different conclusions.
+      if (net.active && net.sendEvent) {
+        try {
+          net.sendEvent({
+            type: 'round_end',
+            winnerTeam: winnerTeam,
+            winnerLabel: winnerLabel,
+            scoreA: game.scoreA,
+            scoreB: game.scoreB,
+          });
+        } catch (_) {}
+      }
       if (window.Overlays) {
         // Personalize the banner title: if the local player\'s team won,
         // "Round Won!" ; otherwise "Round Lost". Spectators or players
@@ -21136,6 +21781,15 @@ function updateRoundSystem(dt) {
         // brings the scoreboard up with the final totals.
         game.matchEndTimer = 10;
         if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility();
+        // (v10 Phase 2) Post the match result to the LSS backend (D1 via
+        // Worker). Fires once per match ; idempotent across re-renders.
+        // Skipped silently if not signed in to Discord. Async, fire and
+        // forget ; doesn't block the matchEnd cinematic.
+        try {
+          if (typeof postMatchResultToBackend === 'function') {
+            postMatchResultToBackend();
+          }
+        } catch (_) {}
         if (window.Overlays) {
           const winner = game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A' : 'FLEET B';
           Overlays.banner('VICTORY', winner + ' WINS');
@@ -21323,6 +21977,11 @@ function updateRoundSystem(dt) {
 // shape as a cold start so the very next commitLoadout sees midMatch === false
 // and runs the full fresh-match branch (map build, bot spawn, score reset).
 function returnToRootMenu() {
+  // (v10 Phase 6) Stop posting room heartbeats and DELETE our room
+  // entry from KV so it disappears from rooms.html immediately.
+  if (typeof stopRoomHeartbeat === 'function') stopRoomHeartbeat();
+  if (net) { net.roomCode = null; }
+
   // Tear down the scoreboard first so it doesn't bleed into the menu.
   _scoreboardKeyHeld = false;
   _scoreboardGpHeld = false;
@@ -21424,6 +22083,72 @@ function returnToRootMenu() {
   if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
   buildShipSelect();
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
+}
+
+// (v10 Phase 6 fix) returnToMainMenu: go ALL the way back to the
+// pre-match landing page (#lobby), not just the ship-select screen.
+// Tear down the multiplayer mesh entirely (Trystero room close +
+// net.active flip) so the user can pick a different room or go solo
+// fresh. Used by the MAIN MENU and EXIT TO MAIN MENU buttons.
+function returnToMainMenu() {
+  // (1) Run the full root-menu reset (kills entities, resets scores,
+  // stops heartbeats, hides countdown, etc.). This already shows the
+  // ship-select overlay ; we hide it again on the way to the lobby.
+  try { returnToRootMenu(); } catch (e) { console.warn('[main-menu] root reset failed:', e); }
+
+  // (2) Tear down the multiplayer mesh. Trystero rooms expose .leave()
+  // on most builds ; older builds expose nothing and we just drop the
+  // reference and let GC clean up the WebRTC peers.
+  if (net && net.active) {
+    try { if (net.room && typeof net.room.leave === 'function') net.room.leave(); } catch (_) {}
+    net.room = null;
+    net.active = false;
+    net.solo = false;
+    net.sendState = null;
+    net.sendHitClaim = null;
+    net.sendHitVote = null;
+    net.sendEvent = null;
+    net.sendLoadout = null;
+    net.sendProjectile = null;
+    // Drop NetworkPlayers and peer state.
+    try {
+      for (const np of (net.networkPlayers || [])) { try { np.destroy(); } catch (_) {} }
+    } catch (_) {}
+    net.networkPlayers = [];
+    if (net.peers) net.peers.clear();
+    if (net.peerGameSync) net.peerGameSync.clear();
+    net.myPeerId = null;
+  }
+
+  // (3) Hide the ship-select overlay and show the lobby (#lobby) again.
+  const sel = document.getElementById('ship-select');
+  if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
+  const lobby = document.getElementById('lobby');
+  if (lobby) lobby.style.display = '';
+
+  // (4) Reset the lobby UI to its pre-connect state. The READY button
+  // (which the JOIN button morphs into after connect) flips back to
+  // JOIN, status / peer text clears, room-code input is left as-is so
+  // the user can re-join the same room with one click if they want.
+  const joinBtn = document.getElementById('btn-join');
+  if (joinBtn) {
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'JOIN';
+    joinBtn.style.background = 'rgba(255,170,0,0.15)';
+    joinBtn.style.borderColor = '#ffaa00';
+    joinBtn.style.color = '#ffaa00';
+    joinBtn.onclick = () => joinRoom();
+  }
+  const soloBtn = document.getElementById('btn-solo');
+  if (soloBtn) soloBtn.disabled = false;
+  const status = document.getElementById('lobby-status');
+  if (status) { status.textContent = ''; status.style.color = '#555'; }
+  const peers = document.getElementById('lobby-peers');
+  if (peers) peers.textContent = '';
+
+  // (5) Re-render the Discord identity panel in case the user has
+  // signed in or out since the lobby was last visible.
+  if (typeof _discordRenderIdentity === 'function') _discordRenderIdentity();
 }
 
 // ---- GAMEPAD POLLING ----
@@ -23387,7 +24112,8 @@ function updateTeammatesStrip() {
 
   // ---- Helper: build a single chip element ----
   function makeChip(opts) {
-    // opts: { name, ship, isYou, isEnemy, isEmpty, showPip, isReady }
+    // opts: { name, ship, isYou, isEnemy, isEmpty, showPip, isReady,
+    //         discordAvatarUrl }
     const chip = document.createElement('div');
     chip.className = 'fleet-chip';
     if (opts.isYou) chip.classList.add('you');
@@ -23396,17 +24122,32 @@ function updateTeammatesStrip() {
     if (!opts.showPip) chip.classList.add('no-pip');
     if (opts.isReady) chip.classList.add('is-ready');
 
-    // Thumbnail: baked GLB render, or dashed placeholder.
+    // Thumb area: prefer the player's Discord avatar (signed-in
+    // humans), fall back to the baked GLB ship thumbnail (bots,
+    // unsigned players), fall back to a dashed empty placeholder.
     let thumbHTML;
-    const thumbSrc = (!opts.isEmpty && opts.ship && _shipThumbCache[opts.ship])
-      ? _shipThumbCache[opts.ship] : null;
-    if (thumbSrc) {
-      thumbHTML = `<img class="chip-thumb" src="${thumbSrc}" alt="${opts.ship}">`;
-    } else if (opts.isEmpty) {
-      thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
+    if (!opts.isEmpty && opts.discordAvatarUrl) {
+      // Discord avatar as a centered circle ; tiny ship-loadout
+      // marker overlaid in the corner so we still see what they
+      // picked at a glance.
+      const shipMini = opts.ship && opts.ship !== '---'
+        ? `<span class="chip-ship-mini">${opts.ship}</span>`
+        : '';
+      thumbHTML = `<div class="chip-avatar-wrap">` +
+        `<img class="chip-avatar" src="${opts.discordAvatarUrl}" alt="${opts.name || ''}">` +
+        shipMini +
+      `</div>`;
     } else {
-      // Ship picked but thumb not yet baked ; show its key as a fallback.
-      thumbHTML = `<div class="chip-thumb-empty">${opts.ship || '---'}</div>`;
+      const thumbSrc = (!opts.isEmpty && opts.ship && _shipThumbCache[opts.ship])
+        ? _shipThumbCache[opts.ship] : null;
+      if (thumbSrc) {
+        thumbHTML = `<img class="chip-thumb" src="${thumbSrc}" alt="${opts.ship}">`;
+      } else if (opts.isEmpty) {
+        thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
+      } else {
+        // Ship picked but thumb not yet baked ; show its key as a fallback.
+        thumbHTML = `<div class="chip-thumb-empty">${opts.ship || '---'}</div>`;
+      }
     }
 
     const nameTxt = opts.name || '---';
@@ -23428,25 +24169,38 @@ function updateTeammatesStrip() {
   // ship-select "ready" signal is the loadout broadcast.
   const yourShip = (player && player.loadoutKey) ? player.loadoutKey : '---';
   const youCommitted = !!(player && player.loadoutKey);
+  // (v10) Use the signed-in Discord identity for YOU's chip:
+  //   - Display name replaces "YOU"
+  //   - Avatar shows in the chip's thumb area
+  // Falls back to "YOU" + ship thumb if the player isn't signed in.
+  const _meDc = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+  const _meAvatar = _meDc ? _discordAvatarUrlFor(_meDc, 64) : null;
+  const _meName = _meDc ? (_meDc.global_name || _meDc.username) : 'YOU';
   yourList.appendChild(makeChip({
-    name: 'YOU', ship: yourShip, isYou: true,
+    name: _meName, ship: yourShip, isYou: true,
     showPip: inMultiplayer,
     isReady: youCommitted,
+    discordAvatarUrl: _meAvatar,
   }));
 
   // 2) Friendly net peers (peers whose .team matches player.team). Their
   // pip flips green when peer.loadoutKey is set ; that's the commit-and-
   // launch broadcast, which is the ship-select equivalent of "ready".
+  // (v10) Use the peer's broadcast Discord identity for chip name + avatar.
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
       if (peer.team === undefined) continue;
       if (peer.team !== myTeam) continue;
+      const peerAvatar = peer.discord_id
+        ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
+        : null;
       yourList.appendChild(makeChip({
-        name: 'PEER',
+        name: peer.discord_name || 'PEER',
         ship: peer.loadoutKey || '---',
         isEmpty: !peer.loadoutKey,
         showPip: true,
         isReady: !!peer.loadoutKey,
+        discordAvatarUrl: peerAvatar,
       }));
     }
   }
@@ -23470,18 +24224,22 @@ function updateTeammatesStrip() {
 
   // ---- ENEMY FLEET ----
   // 1) Net peers on the other team. Pip semantics match the friendly side:
-  // green = ship committed for this round.
+  // green = ship committed for this round. (v10) Discord avatars too.
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
       if (peer.team === undefined) continue;
       if (peer.team !== otherTeam) continue;
+      const peerAvatar = peer.discord_id
+        ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
+        : null;
       enemyList.appendChild(makeChip({
-        name: 'PEER',
+        name: peer.discord_name || 'PEER',
         ship: peer.loadoutKey || '---',
         isEnemy: true,
         isEmpty: !peer.loadoutKey,
         showPip: true,
         isReady: !!peer.loadoutKey,
+        discordAvatarUrl: peerAvatar,
       }));
     }
   }
@@ -23696,12 +24454,76 @@ document.addEventListener('keydown', e => {
 // (v6.9) Lobby Settings button: same behavior as Esc when ship-select
 // is the visible screen. Bound once at load ; the button is in the
 // ship-select header HTML at the top of <body>.
+// (v10 Phase 6) Same DOMContentLoaded hook now also wires the
+// MAIN MENU button next to SETTINGS in the ship-select header, and
+// handles the ?room=<code> URL parameter (used by rooms.html JOIN
+// links) by pre-filling the lobby's room-code input and auto-firing
+// the JOIN button.
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('lobby-settings-btn');
   if (btn) btn.addEventListener('click', () => {
     buildSettingsPage();
     openSettings();
   });
+  const backBtn = document.getElementById('lobby-back-btn');
+  if (backBtn) backBtn.addEventListener('click', () => {
+    const ok = window.confirm('Return to the main menu? Your current room will close.');
+    if (!ok) return;
+    try { returnToMainMenu(); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
+  });
+  // (v10 Phase 6 fix) Settings button on the main menu (#lobby).
+  // Opens the same settings overlay as the in-match Esc key.
+  const mainMenuSettingsBtn = document.getElementById('lobby-settings-btn-main');
+  if (mainMenuSettingsBtn) mainMenuSettingsBtn.addEventListener('click', () => {
+    try { buildSettingsPage(); openSettings(); } catch (e) { console.warn('[main-menu] open settings failed', e); }
+  });
+  // (v10) MY STATS button: opens the signed-in player's profile page.
+  // Falls back to the leaderboard page if the user isn't signed in.
+  const myStatsBtn = document.getElementById('lobby-stats-btn');
+  if (myStatsBtn) myStatsBtn.addEventListener('click', () => {
+    try {
+      const u = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+      if (u && u.id) {
+        window.open('profile.html?id=' + encodeURIComponent(u.id), '_blank', 'noopener');
+      } else {
+        const proceed = window.confirm('Sign in with Discord to see your career stats. Open the leaderboard instead?');
+        if (proceed) window.open('leaderboard.html', '_blank', 'noopener');
+      }
+    } catch (e) { console.warn('[main-menu] my-stats failed', e); }
+  });
+
+  // (v10 Phase 6) Auto-join from ?room=<code> URL params (deep links
+  // from rooms.html or shared by friends). Wait for the OAuth callback
+  // handler to settle first so we don't race with its URL-strip ; if
+  // there's a ?code= still present, that's the OAuth bounce, defer
+  // until next tick.
+  function _tryAutoJoin() {
+    try {
+      const url = new URL(window.location.href);
+      const code = url.searchParams.get('room');
+      if (!code) return;
+      // Skip if OAuth callback is still in the URL ; let it process first.
+      if (url.searchParams.get('code')) {
+        setTimeout(_tryAutoJoin, 250);
+        return;
+      }
+      const input = document.getElementById('room-code');
+      if (input) input.value = code.toUpperCase();
+      // Strip the ?room= from the URL so refreshes don't re-trigger.
+      url.searchParams.delete('room');
+      const cleaned = url.pathname + (url.search ? url.search : '') + url.hash;
+      window.history.replaceState({}, document.title, cleaned);
+      // joinRoom may not be defined yet ; the early stub queues it.
+      // Fire it on a slight delay so any animations/intro have a moment
+      // to settle and the lobby visibly registers the pre-filled code.
+      setTimeout(() => {
+        try {
+          if (typeof window.joinRoom === 'function') window.joinRoom();
+        } catch (e) { console.warn('[auto-join] joinRoom threw:', e); }
+      }, 350);
+    } catch (e) { console.warn('[auto-join] failed:', e); }
+  }
+  _tryAutoJoin();
 });
 
 document.addEventListener('keyup', e => { input.keys[e.key.toLowerCase()] = false; });
@@ -24167,6 +24989,10 @@ function buildSettingsPage() {
     <button id="settings-import">IMPORT SETTINGS</button>
     <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none;">
     <button id="settings-reset">RESET TO DEFAULTS</button>
+    <!-- (v10 Phase 6) Exit-to-main-menu. Hidden when already on the
+         main menu / lobby. Cleans up the active multiplayer room
+         and returns to the lobby screen. -->
+    <button id="settings-exit-to-menu" style="background:rgba(255,68,68,0.18);border-color:rgba(255,100,100,0.6);color:#ff8080;">EXIT TO MAIN MENU</button>
   `;
 
   // Build bind rows with dropdown selects
@@ -24725,6 +25551,26 @@ function buildSettingsPage() {
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
 
+  // (v10 Phase 6) Exit to main menu. Visible only when in a match
+  // (or ship-select) ; hidden when already on the lobby screen.
+  // Confirms first so a stray click doesn't yank players out of an
+  // active match.
+  const exitBtn = overlay.querySelector('#settings-exit-to-menu');
+  if (exitBtn) {
+    const lobbyVisible = (document.getElementById('lobby') &&
+                         document.getElementById('lobby').style.display !== 'none');
+    if (lobbyVisible) {
+      exitBtn.style.display = 'none';
+    } else {
+      exitBtn.addEventListener('click', () => {
+        const ok = window.confirm('Exit to the main menu? Your current match will end.');
+        if (!ok) return;
+        try { closeSettings(); } catch (_) {}
+        try { returnToMainMenu(); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
+      });
+    }
+  }
+
   // (v8_1VR) Export Settings : flushes current saved settings to localStorage
   // (so anything not yet persisted gets included), then downloads the JSON
   // blob as `lss_settings_<date>.json`. Anyone you share the file with can
@@ -25027,7 +25873,15 @@ const WALL_PATTERN_NAMES = [
   // BG = Layered Cube (game 19), FG1 = Cyber Datamosh (game 15) Multiply,
   // FG2 = Plasma FBM (game 6) Multiply. Per-layer values lifted from
   // Mixed Lab v2 export and baked into MULTI_LAYER_PRESETS below.
-  'Digital'
+  'Digital',
+  // (v10) Three new user-authored multi-layer composites, exported from
+  // wall_pattern_lab.html and translated lab pattern IDs -> game IDs:
+  //   lab 0 (Kali) -> game 0  ;  lab 2 (Mandelbox) -> game 4
+  //   lab 6 (Panel Maze) -> game 17  ;  lab 9 (Plasma FBM) -> game 6
+  //   lab 15 (Cyber Datamosh) -> game 15  ;  lab 18 (Layered Cube) -> game 19
+  'Datamosh Cube',  // 22 ; bg=Datamosh + fg=Layered Cube + fg2=Panel Maze
+  'Mandelbox Plasma',  // 23 ; bg=Mandelbox + fg=Plasma FBM + fg2=Panel Maze
+  'Mandelbox Kali'  // 24 ; bg=Mandelbox + fg=Kali + fg2=Panel Maze
 ];
 
 const WALL_PARAM_DEFS = [
@@ -25606,6 +26460,69 @@ const MULTI_LAYER_PRESETS = {
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.5,
+  },
+  // Index 22: Datamosh Cube. User export ; lab ids translated:
+  //   bg lab 15 (Cyber Datamosh) -> game 15
+  //   fg lab 18 (Layered Cube)   -> game 19
+  //   fg2 lab 6 (Panel Maze)     -> game 17
+  22: {
+    bgPatternId: 15,                                  // Cyber Datamosh
+    bgTime: 0.05,
+    u_iters_bg: 12, u_scale_bg: 0.0005, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    K_COSMIC_bg: 0.15,
+    fgPatternId: 19,                                  // Layered Cube
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.845, fgTime: 0.1,
+    u_iters_fg: 7, u_scale_fg: 0.0016, u_invBase_fg: 3.7,
+    u_hueSpin_fg: 0.07, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 3.1,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.05, fg2Blend: 2, fg2Hue: 1.0, fg2Time: 0.0,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.41, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
+  },
+  // Index 23: Mandelbox Plasma. User export ; lab ids translated:
+  //   bg lab 2 (Mandelbox)     -> game 4
+  //   fg lab 9 (Plasma FBM)    -> game 6
+  //   fg2 lab 6 (Panel Maze)   -> game 17
+  23: {
+    bgPatternId: 4,                                   // Mandelbox
+    bgTime: 3.0,
+    u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 6.0,
+    fgPatternId: 6,                                   // Plasma FBM
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.845, fgTime: 2.5,
+    u_iters_fg: 7, u_scale_fg: 0.002, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 6.0,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.41, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
+  },
+  // Index 24: Mandelbox Kali. User export ; lab ids translated:
+  //   bg lab 2 (Mandelbox)   -> game 4
+  //   fg lab 0 (Kali IFS)    -> game 0
+  //   fg2 lab 6 (Panel Maze) -> game 17
+  24: {
+    bgPatternId: 4,                                   // Mandelbox
+    bgTime: 3.0,
+    u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 6.0,
+    fgPatternId: 0,                                   // Kali IFS
+    fgAlpha: 1.05, fgBlend: 1 /* Multiply */, fgHue: 0.585, fgTime: 3.0,
+    u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 6.0,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
   },
 };
 
@@ -27878,7 +28795,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24) {',
       // (v8VR 2026-05-01) Pass a neutral tint to cosmicField for multi-
       // layer composite presets so per-room zoneColor doesn't leak into
       // pattern sampling. The lab uses a single tintColor across the
@@ -35136,6 +36053,9 @@ renderer.setAnimationLoop(gameLoop);
 // Stash the real ones under `__real_X` and replay any pending click.
 if (typeof joinRoom  === 'function') window.__real_joinRoom  = joinRoom;
 if (typeof startSolo === 'function') window.__real_startSolo = startSolo;
+// (v10) Discord signin/signout exports for the early stub pattern.
+if (typeof discordSignin  === 'function') window.__real_discordSignin  = discordSignin;
+if (typeof discordSignout === 'function') window.__real_discordSignout = discordSignout;
 if (typeof window.__lssReplayPending === 'function') window.__lssReplayPending();
 
 // v8VR: dev-console handles. The whole inline script is wrapped in
