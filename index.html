@@ -1363,7 +1363,30 @@ body.vr-active .hit-marker {
         onmouseout="this.style.borderColor='rgba(100,100,120,0.4)';this.style.color='#888'">SOLO + BOTS</button>
     </div>
 
-    <div style="margin-top:40px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
+    <!-- (v10 Phase 3) External pages: leaderboard + live rooms browser.
+         Both render the D1 backend's data via the Worker API. -->
+    <div style="margin-top:30px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap;">
+      <a href="leaderboard.html" target="_blank" rel="noopener"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        LEADERBOARD
+      </a>
+      <a href="rooms.html" target="_blank" rel="noopener"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        LIVE ROOMS
+      </a>
+    </div>
+
+    <div style="margin-top:30px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
       Multiplayer uses WebTorrent trackers for peer discovery.<br>
       No servers. No accounts. Just a room code.<br>
       Share the code; anyone who enters it joins your mesh.
@@ -1386,7 +1409,10 @@ body.vr-active .hit-marker {
       <h1>LAST SHIP SAILING</h1>
       <h2>CHOOSE YOUR SHIP</h2>
     </div>
-    <button id="lobby-settings-btn" title="Open settings (Esc)" style="background:#2a3040;color:#ddd;border:1px solid #557;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">SETTINGS</button>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <button id="lobby-back-btn" title="Return to main menu" style="background:rgba(255,68,68,0.18);color:#ff8080;border:1px solid rgba(255,100,100,0.6);padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">MAIN MENU</button>
+      <button id="lobby-settings-btn" title="Open settings (Esc)" style="background:#2a3040;color:#ddd;border:1px solid #557;padding:8px 16px;cursor:pointer;border-radius:3px;font-family:'Orbitron',sans-serif;font-size:11px;letter-spacing:2px;text-transform:uppercase;">SETTINGS</button>
+    </div>
   </div>
   <div id="ship-select-body">
     <div id="ship-list"></div>
@@ -2361,6 +2387,63 @@ function _gatherMatchParticipants(winningTeam) {
   return out;
 }
 
+// ---- LOBBY HEARTBEAT (v10 Phase 6) ----
+// While a multiplayer room is active, post /heartbeat to the Worker
+// every ~30s so the room shows up on lss.fractalreality.ca/rooms.html.
+// The KV entry has a 90s TTL ; missing two heartbeats drops the room
+// from the public list. Skipped if the user isn't signed in to Discord.
+
+let _roomHeartbeatTimer = null;
+
+async function _fireRoomHeartbeat() {
+  if (!net || !net.active || !net.roomCode) return;
+  const token = discordCurrentToken();
+  if (!token) return;
+  try {
+    const peerCount = (net.peers && net.peers.size) || 0;
+    await fetch(LSS_API_BASE + '/heartbeat', {
+      method:  'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type':  'application/json',
+      },
+      body: JSON.stringify({
+        room_code:    net.roomCode,
+        map_key:      game.selectedMap || 'unknown',
+        player_count: peerCount + 1,
+        version:      'v10',
+      }),
+    });
+  } catch (err) {
+    console.warn('[lss-backend] heartbeat failed:', err);
+  }
+}
+
+function startRoomHeartbeat() {
+  stopRoomHeartbeat();
+  _fireRoomHeartbeat();                            // immediate first tick
+  _roomHeartbeatTimer = setInterval(_fireRoomHeartbeat, 30000);
+}
+
+function stopRoomHeartbeat() {
+  if (_roomHeartbeatTimer) {
+    clearInterval(_roomHeartbeatTimer);
+    _roomHeartbeatTimer = null;
+  }
+  // Best-effort: tell the Worker to immediately drop our room from KV
+  // so /rooms.html doesn't show a stale entry until the TTL expires.
+  if (net && net.roomCode) {
+    const token = discordCurrentToken();
+    const code  = net.roomCode;
+    if (token) {
+      fetch(LSS_API_BASE + '/room/' + encodeURIComponent(code), {
+        method:  'DELETE',
+        headers: { 'Authorization': 'Bearer ' + token },
+      }).catch(() => {});
+    }
+  }
+}
+
 async function postMatchResultToBackend() {
   const token = discordCurrentToken();
   if (!token) {
@@ -2441,6 +2524,15 @@ async function joinRoom() {
 
     // Join the room via BitTorrent trackers
     net.room = trysteroJoin({ appId: 'last-ship-sailing-v1' }, code);
+    // (v10 Phase 6) Stash the room code so the heartbeat ticker can
+    // include it in /heartbeat posts and so returnToRootMenu can DELETE
+    // the room when we leave.
+    net.roomCode = code;
+    // (v10 Phase 6) Start heartbeat ticker (~30s) so this room shows up
+    // in lss.fractalreality.ca/rooms.html. Skipped silently if user not
+    // signed in (the API requires a Discord OAuth token). Idempotent ;
+    // calling again replaces the previous interval.
+    if (typeof startRoomHeartbeat === 'function') startRoomHeartbeat();
 
     // Set up data channels
     const [sendState, onState] = net.room.makeAction('state');
@@ -21452,6 +21544,11 @@ function updateRoundSystem(dt) {
 // shape as a cold start so the very next commitLoadout sees midMatch === false
 // and runs the full fresh-match branch (map build, bot spawn, score reset).
 function returnToRootMenu() {
+  // (v10 Phase 6) Stop posting room heartbeats and DELETE our room
+  // entry from KV so it disappears from rooms.html immediately.
+  if (typeof stopRoomHeartbeat === 'function') stopRoomHeartbeat();
+  if (net) { net.roomCode = null; }
+
   // Tear down the scoreboard first so it doesn't bleed into the menu.
   _scoreboardKeyHeld = false;
   _scoreboardGpHeld = false;
@@ -23858,11 +23955,19 @@ document.addEventListener('keydown', e => {
 // (v6.9) Lobby Settings button: same behavior as Esc when ship-select
 // is the visible screen. Bound once at load ; the button is in the
 // ship-select header HTML at the top of <body>.
+// (v10 Phase 6) Same DOMContentLoaded hook now also wires the
+// MAIN MENU button next to SETTINGS in the ship-select header.
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('lobby-settings-btn');
   if (btn) btn.addEventListener('click', () => {
     buildSettingsPage();
     openSettings();
+  });
+  const backBtn = document.getElementById('lobby-back-btn');
+  if (backBtn) backBtn.addEventListener('click', () => {
+    const ok = window.confirm('Return to the main menu? Your current room will close.');
+    if (!ok) return;
+    try { returnToRootMenu(); } catch (e) { console.warn('[main-menu] returnToRootMenu failed', e); }
   });
 });
 
@@ -24329,6 +24434,10 @@ function buildSettingsPage() {
     <button id="settings-import">IMPORT SETTINGS</button>
     <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none;">
     <button id="settings-reset">RESET TO DEFAULTS</button>
+    <!-- (v10 Phase 6) Exit-to-main-menu. Hidden when already on the
+         main menu / lobby. Cleans up the active multiplayer room
+         and returns to the lobby screen. -->
+    <button id="settings-exit-to-menu" style="background:rgba(255,68,68,0.18);border-color:rgba(255,100,100,0.6);color:#ff8080;">EXIT TO MAIN MENU</button>
   `;
 
   // Build bind rows with dropdown selects
@@ -24886,6 +24995,26 @@ function buildSettingsPage() {
 
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
+
+  // (v10 Phase 6) Exit to main menu. Visible only when in a match
+  // (or ship-select) ; hidden when already on the lobby screen.
+  // Confirms first so a stray click doesn't yank players out of an
+  // active match.
+  const exitBtn = overlay.querySelector('#settings-exit-to-menu');
+  if (exitBtn) {
+    const lobbyVisible = (document.getElementById('lobby') &&
+                         document.getElementById('lobby').style.display !== 'none');
+    if (lobbyVisible) {
+      exitBtn.style.display = 'none';
+    } else {
+      exitBtn.addEventListener('click', () => {
+        const ok = window.confirm('Exit to the main menu? Your current match will end.');
+        if (!ok) return;
+        try { closeSettings(); } catch (_) {}
+        try { returnToRootMenu(); } catch (e) { console.warn('[exit] returnToRootMenu failed', e); }
+      });
+    }
+  }
 
   // (v8_1VR) Export Settings : flushes current saved settings to localStorage
   // (so anything not yet persisted gets included), then downloads the JSON
