@@ -1,7 +1,47 @@
 # LSS x Discord Integration Plan
 
 Last updated: 2026-05-02
-Status: planning / brainstorm
+Status: SUPERSEDED by LSS_backend-plan.md ; see note below
+
+> **Note (2026-05-02 evening):** The architecture in this document
+> (Discord channels as the data store, with Tier 0 = no infrastructure)
+> has been superseded. The new plan moves persistence to a Cloudflare D1
+> database accessed via a Worker API, with a real stats website on
+> lss.fractalreality.ca. Discord stays as the OAuth identity provider
+> and the community hub ; channels are no longer used as a database.
+>
+> Reasons for the pivot:
+> 1. The "no infrastructure" constraint was already broken when we
+>    accepted the Cloudflare Worker proxy ; once any Worker exists,
+>    a real database is strictly better than parsing channel history.
+> 2. Discord Activities turned out to fight against the popup pattern
+>    (sandboxed iframe, no allow-popups), and refactoring the game to
+>    live inside the iframe would mean losing WebXR / fullscreen / etc.
+> 3. SQL queries beat channel parsing for everything we want to do
+>    (top-N, filtering by time period, per-loadout breakdowns,
+>    permanent shareable URLs).
+>
+> See **LSS_backend-plan.md** for the current architecture and roadmap.
+>
+> What survives from this document:
+> - PKCE OAuth signin (shipped in v10, see lobby button).
+> - The Cloudflare Worker scaffolding (repurposed for the D1 API).
+> - Optional Discord webhook notifications for big moments
+>   (#highlights as one-way notifications).
+> - The Discord developer app, OAuth scopes, ToS / Privacy URLs.
+>
+> What is dead:
+> - Channels-as-database for stats / leaderboards.
+> - Lobby browser via #rooms heartbeat channel.
+> - Discord Activities (popup pattern doesn't fit Discord's design).
+> - Slash commands as primary stats interface (deferred indefinitely).
+
+The original brainstorm + plan that drove the early Discord integration
+work follows below. Kept for historical context.
+
+---
+
+
 
 ## Why Discord, why now
 
