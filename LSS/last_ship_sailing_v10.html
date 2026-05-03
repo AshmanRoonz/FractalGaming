@@ -3951,6 +3951,32 @@ function handleNetEvent(evt, fromPeerId) {
     if (typeof triggerScreenShake === 'function') triggerScreenShake(6);
     return;
   }
+  // (v10 fix) Authoritative round-end resolution from the stasis owner.
+  // Non-owner peers skip the local round-end branch (gated on
+  // amStasisOwner above) and apply the owner's verdict here. This is
+  // what keeps both screens agreeing on who won when the round timer
+  // expires (the previous code had each peer running its own HP
+  // tiebreaker against stale NetworkPlayer.health values).
+  if (evt.type === 'round_end') {
+    if (game.state === 'playing') {
+      game.scoreA      = Math.max(game.scoreA | 0, (evt.scoreA | 0));
+      game.scoreB      = Math.max(game.scoreB | 0, (evt.scoreB | 0));
+      game.state       = 'roundEnd';
+      game.roundEndTimer = 5;
+      if (window.Overlays) {
+        const playerWonRound = (player && evt.winnerTeam === player.team);
+        const title = playerWonRound ? 'Round Won!' : 'Round Lost';
+        Overlays.banner(title, evt.winnerLabel || '');
+      }
+      try {
+        if (typeof ANN !== 'undefined') {
+          if (player && evt.winnerTeam === player.team) ANN.roundWon();
+          else ANN.roundLost();
+        }
+      } catch (_) {}
+    }
+    return;
+  }
   // (v6.7) Lobby ready toggle from a peer.
   if (evt.type === 'ready') {
     const peer = net.peers.get(fromPeerId);
@@ -4029,6 +4055,14 @@ function handleNetEvent(evt, fromPeerId) {
       if (evt.champion) {
         game.championField = field;
         game.championSpawned = true;
+        // (v10 fix) The stasis-owner peer shows the CHAMPION OBJECTIVE
+        // banner inline in spawnChampionField, but non-owner peers
+        // arrive here via stasis_spawn and never run that path. Show
+        // the same banner on receivers so both sides see it.
+        try {
+          if (window.Overlays) Overlays.banner('CHAMPION OBJECTIVE', 'Charge in the field to win the round');
+          if (typeof spawnDynamicLight === 'function') spawnDynamicLight(pos, 0xaa55ff, 6.0, 1500, 0.8);
+        } catch (_) {}
       }
       if (evt.fieldId > net.stasisIdCounter) net.stasisIdCounter = evt.fieldId;
     }
@@ -21254,7 +21288,14 @@ function updateRoundSystem(dt) {
     // (all-dead on one side still ends the round immediately as before).
     const endByChampion = game.championResult === 'A' || game.championResult === 'B';
     const endByTimer = game.roundTimer <= 0;
-    if (endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) {
+    // (v10 fix) In multiplayer, only the stasis owner peer is allowed to
+    // RESOLVE the round (compute winner + bump score + transition to
+    // roundEnd). Other peers wait for the broadcast 'round_end' event
+    // (handled in handleNetEvent) to apply the same change. This avoids
+    // the per-peer tiebreaker computing different winners due to stale
+    // NetworkPlayer.health values around the timer-out moment.
+    const isResolutionAuthority = !net.active || amStasisOwner();
+    if ((endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) && isResolutionAuthority) {
       let winnerLabel = '';
       // (post-v6.9) Track which fleet won so the round-end banner can read
       // personally to the local player ("Round Won!" / "Round Lost") instead
@@ -21301,6 +21342,21 @@ function updateRoundSystem(dt) {
       }
       game.state = 'roundEnd';
       game.roundEndTimer = 5;
+      // (v10 fix) Broadcast the authoritative round resolution to non-owner
+      // peers so they apply the same score + state transition. Without this,
+      // peers would each compute their own tiebreaker (against potentially
+      // stale NetworkPlayer.health values) and reach different conclusions.
+      if (net.active && net.sendEvent) {
+        try {
+          net.sendEvent({
+            type: 'round_end',
+            winnerTeam: winnerTeam,
+            winnerLabel: winnerLabel,
+            scoreA: game.scoreA,
+            scoreB: game.scoreB,
+          });
+        } catch (_) {}
+      }
       if (window.Overlays) {
         // Personalize the banner title: if the local player\'s team won,
         // "Round Won!" ; otherwise "Round Lost". Spectators or players
