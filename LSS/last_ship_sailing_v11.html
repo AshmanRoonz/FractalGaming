@@ -3491,13 +3491,25 @@ class NetworkPlayer {
       const gBaseOffset = hLen * 0.40;
       if (!this._gunShieldMesh) {
         const geo = new THREE.SphereGeometry(gDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-        const mat = (typeof _makeHexHologramMaterial === 'function')
-          ? _makeHexHologramMaterial(0xff8a55)
-          : new THREE.MeshBasicMaterial({
-              color: 0xff8a55, transparent: true, opacity: 0.55,
-              side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
-              depthWrite: false,
-            });
+        // (v11 Phase 5) Swap from hex-hologram to layered amber-plasma
+        // material so the dome reads as living energy instead of a static
+        // hex grid. _makeFXMaterial returns a ShaderMaterial whose uTime is
+        // driven by _layeredFXTick from gameLoop ; nothing else to update.
+        const mat = (typeof _makeFXMaterial === 'function')
+          ? _makeFXMaterial('plasma_amber')
+          : (typeof _makeHexHologramMaterial === 'function')
+            ? _makeHexHologramMaterial(0xff8a55)
+            : new THREE.MeshBasicMaterial({
+                color: 0xff8a55, transparent: true, opacity: 0.55,
+                side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+                depthWrite: false,
+              });
+        // (v11 fix) uPosScale = 1/radius so noise patterns map to the dome
+        // surface at lab-equivalent scale. Without this the 200+ unit dome
+        // reads as static instead of flowing plasma.
+        if (mat.uniforms && mat.uniforms.uPosScale) {
+          mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
+        }
         this._gunShieldMesh = new THREE.Mesh(geo, mat);
         this._gunShieldMesh.renderOrder = 1;
         scene.add(this._gunShieldMesh);
@@ -3553,9 +3565,18 @@ class NetworkPlayer {
       if (!this._thermalShieldMesh) {
         // Hemisphere: full phi sweep, theta 0..PI/2. Apex at +Y in local space.
         const geo = new THREE.SphereGeometry(tDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-        const mat = (typeof _makeHexHologramMaterial === 'function')
-          ? _makeHexHologramMaterial(0xffaa33)
-          : _makeFireShieldMaterial(0.85);
+        // (v11 Phase 5) Swap to layered amber-plasma so the Pyro thermal
+        // shield reads as a living fire dome instead of a static hex grid.
+        // uTime is driven by _layeredFXTick from gameLoop.
+        const mat = (typeof _makeFXMaterial === 'function')
+          ? _makeFXMaterial('plasma_amber')
+          : (typeof _makeHexHologramMaterial === 'function')
+            ? _makeHexHologramMaterial(0xffaa33)
+            : _makeFireShieldMaterial(0.85);
+        // (v11 fix) uPosScale = 1/radius so noise patterns scale to the dome.
+        if (mat.uniforms && mat.uniforms.uPosScale) {
+          mat.uniforms.uPosScale.value = 1.0 / Math.max(1, tDomeR);
+        }
         this._thermalShieldMesh = new THREE.Mesh(geo, mat);
         this._thermalShieldMesh.renderOrder = 1;
         scene.add(this._thermalShieldMesh);
@@ -4568,6 +4589,27 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
   scene.add(wallMesh);
+  // (v11 Phase 5) Inner plasma layer ; sits behind the hex grid and gives
+  // the wall a sense of volume + flowing energy. The hex hologram still
+  // owns the damage-cracks tell via uHp ; this is purely atmospheric depth.
+  // Slightly smaller scale so the hex grid reads as the front surface and
+  // the plasma reads as content inside the wall membrane.
+  let plasmaMesh = null;
+  if (typeof _makeFXMaterial === 'function') {
+    const plasmaGeo = new THREE.BoxGeometry(390, 290, 18);
+    const plasmaMat = _makeFXMaterial('plasma_wall');
+    // (v11 fix) The wall is 400×300×25 in world units ; sample at 1/200
+    // so a few large plasma features arc across the wall instead of
+    // hundreds of fine-grain noise cells reading as static.
+    if (plasmaMat.uniforms && plasmaMat.uniforms.uPosScale) {
+      plasmaMat.uniforms.uPosScale.value = 1.0 / 200.0;
+    }
+    plasmaMesh = new THREE.Mesh(plasmaGeo, plasmaMat);
+    plasmaMesh.position.copy(pos);
+    plasmaMesh.lookAt(pos.clone().add(dir));
+    plasmaMesh.renderOrder = 0;  // behind the hex hologram (renderOrder default 1)
+    scene.add(plasmaMesh);
+  }
   const edgeGeo = new THREE.EdgesGeometry(wallGeo);
   const edgeMat = new THREE.LineBasicMaterial({ color: 0x66ddff, transparent: true, opacity: 0.6 });
   const edgeMesh = new THREE.LineSegments(edgeGeo, edgeMat);
@@ -4581,7 +4623,10 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
     // the wall popped before it felt tactical. 10000 lets it sponge a full
     // multikill volley while still expiring on the 10s timer or to Arc Wave.
     hp: 10000, maxHp: 10000, timer: 10, owner, team,
-    mesh: wallMesh, edgeMesh, spawnTime: game.time,
+    // (v11) plasmaMesh is a sibling layered-FX backing mesh. Stashed here
+    // so the destroy paths (timer, hp depletion, Arc Wave breakage,
+    // returnToRootMenu cleanup) can dispose it alongside the main wall.
+    mesh: wallMesh, edgeMesh, plasmaMesh, spawnTime: game.time,
     ownerPeerId, netId,
   });
   if (broadcast && net.active && net.sendEvent) {
@@ -5837,6 +5882,14 @@ const _LAYERED_FX_FRAG = [
   'uniform vec3  uBaseColor;',
   'uniform float uFresnel;',
   'uniform float uBrightness;',
+  // (v11 fix) uPosScale multiplies vWorldPos before the noise sample. The
+  // fx_lab uses a unit-radius preview sphere ; in-game effects are tens to
+  // hundreds of units across, so the same per-layer `scale` setting maps
+  // to dozens of noise cycles and reads as static. spawnFXBurst sets this
+  // to ~1/radius so a 40-unit sphere samples like fx_lab's radius-1 sphere.
+  // Walls keep the default of 1.0 (their built-in BoxGeometry-scale sampling
+  // is already what they want).
+  'uniform float uPosScale;',
   'uniform int   uLayerPattern[3];',
   'uniform float uLayerScale[3];',
   'uniform float uLayerTimeRate[3];',
@@ -5957,7 +6010,7 @@ const _LAYERED_FX_FRAG = [
   '  return base;',
   '}',
   'void main() {',
-  '  vec3 p = vWorldPos;',
+  '  vec3 p = vWorldPos * uPosScale;',
   '  vec3 baseHSV = rgb2hsvLFX(uBaseColor);',
   '  vec4 acc = vec4(0.0, 0.0, 0.0, 0.0);',
   '  for (int i = 0; i < 3; i++) {',
@@ -6008,6 +6061,7 @@ function _makeLayeredFXMaterial(preset) {
     baseColor: '#ffffff',
     fresnel: 0.3,
     brightness: 1.0,
+    posScale: 1.0,   // (v11 fix) world-space sample-scale ; default keeps wall behavior
     layers: [],
   }, preset || {});
   const layers = _layeredFXNormalizeLayers(cfg.layers);
@@ -6022,6 +6076,7 @@ function _makeLayeredFXMaterial(preset) {
       uBaseColor:     { value: new THREE.Color(cfg.baseColor) },
       uFresnel:       { value: +cfg.fresnel },
       uBrightness:    { value: +cfg.brightness },
+      uPosScale:      { value: +cfg.posScale },
       uLayerPattern:  { value: layers.map(l => l.pattern) },
       uLayerScale:    { value: layers.map(l => l.scale) },
       uLayerTimeRate: { value: layers.map(l => l.timeRate) },
@@ -6098,6 +6153,35 @@ const EFFECT_PRESETS = {
       { pattern: 2, scale: 0.4, timeRate: 1.78, hue: 0.0,   alpha: 0.4,  blend: 6, sat: 0.7  },
     ],
   },
+  // (v11 Phase 4) Purple champion-field variant of plasma_wall. Same layer
+  // pattern + blend recipe; just rotated to the violet end of the wheel
+  // so champion stasis fields read as singular / valuable.
+  plasma_purple: {
+    name: 'Plasma (Purple)',
+    baseColor: '#aa55ff',
+    fresnel: 0.15,
+    brightness: 2.3,
+    layers: [
+      { pattern: 1, scale: 0.7, timeRate: 1.1,  hue: 0.0,   alpha: 1.19, blend: 0, sat: 0.95 },
+      { pattern: 5, scale: 1.5, timeRate: 2.32, hue: 0.045, alpha: 1.0,  blend: 1, sat: 0.85 },
+      { pattern: 2, scale: 0.4, timeRate: 1.78, hue: 0.0,   alpha: 0.4,  blend: 6, sat: 0.7  },
+    ],
+  },
+  // (v11 Phase 5) Amber / fire variant of plasma_wall for the Pyro thermal
+  // shield dome and Blaster gun shield. Reuses the plasma layer recipe but
+  // tinted into the warm hot-metal range so the shields read as fire-themed
+  // rather than the cyan energy field theme.
+  plasma_amber: {
+    name: 'Plasma (Amber)',
+    baseColor: '#ffaa33',
+    fresnel: 0.15,
+    brightness: 2.0,
+    layers: [
+      { pattern: 1, scale: 0.7, timeRate: 1.1,  hue: 0.0,   alpha: 1.05, blend: 0, sat: 0.92 },
+      { pattern: 5, scale: 1.5, timeRate: 2.32, hue: 0.04,  alpha: 0.85, blend: 1, sat: 0.85 },
+      { pattern: 2, scale: 0.4, timeRate: 1.78, hue: 0.0,   alpha: 0.4,  blend: 6, sat: 0.7  },
+    ],
+  },
 };
 
 // Convenience: clone a named preset into a fresh material instance.
@@ -6111,6 +6195,52 @@ function _makeFXMaterial(presetName) {
   return _makeLayeredFXMaterial(preset);
 }
 
+// (v11 Phase 2/3/5/6) Burst helper. Spawns a sphere mesh with a layered FX
+// material at `pos`, scales it from `0` to `radius` over `life` seconds,
+// fades out the alpha as it ages, and disposes itself when done. Used by
+// explosions (fireball preset), fire-trap puffs (fireball), gas plumes
+// (cloud), shock fronts, etc. The mesh joins game.effects so it gets the
+// same per-frame age tick the rest of the world effects get.
+//
+// Returns the mesh in case the caller wants to attach it to a parent or
+// stash a reference (e.g. for trail-style effects that move it each frame).
+function spawnFXBurst(presetName, pos, radius, life, opts) {
+  if (!pos || !scene) return null;
+  opts = opts || {};
+  const startScale = (opts.startScale != null) ? opts.startScale : 0.15;
+  const endScale   = (opts.endScale   != null) ? opts.endScale   : 1.0;
+  const segs       = (opts.segs       != null) ? opts.segs       : 24;
+  const mat = _makeFXMaterial(presetName);
+  // (v11 fix) Match fx_lab's radius-1 preview sphere sampling: divide world
+  // position by `radius` so the per-layer scale settings cover the same
+  // visual range regardless of how big the explosion is. Without this the
+  // patterns alias into noise grain on small bursts and read as static.
+  if (mat && mat.uniforms && mat.uniforms.uPosScale) {
+    mat.uniforms.uPosScale.value = 1.0 / Math.max(1, radius);
+  }
+  const geo = new THREE.SphereGeometry(radius, segs, Math.max(8, Math.floor(segs / 2)));
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(pos);
+  mesh.scale.setScalar(startScale * radius / radius);
+  mesh.renderOrder = 1;
+  scene.add(mesh);
+  // game.effects entries get age incremented each frame in updateEffects;
+  // pieces tagged 'fx_burst' here run their scale + alpha lerp themselves.
+  if (game && game.effects) {
+    game.effects.push({
+      mesh,
+      lifetime: life,
+      age: 0,
+      type: 'fx_burst',
+      _fxStartScale: startScale,
+      _fxEndScale: endScale,
+      _fxStartAlpha: 1.0,
+      _fxEndAlpha: 0.0,
+    });
+  }
+  return mesh;
+}
+
 // Expose on window for DevTools access during Phase 2 wiring.
 if (typeof window !== 'undefined') {
   window.EFFECT_PRESETS         = EFFECT_PRESETS;
@@ -6118,6 +6248,7 @@ if (typeof window !== 'undefined') {
   window._makeFXMaterial        = _makeFXMaterial;
   window._layeredFXTick         = _layeredFXTick;
   window._ACTIVE_LAYERED_FX     = _ACTIVE_LAYERED_FX;
+  window.spawnFXBurst           = spawnFXBurst;
 }
 
 // ---- Hex hologram (plane / shape) -------------------------------------
@@ -12268,6 +12399,11 @@ class Projectile {
         if (eff.hp <= 0) {
           if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
           if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+          // (v11) Tear down the plasma backing mesh too on HP depletion.
+          if (eff.plasmaMesh && eff.plasmaMesh.parent) {
+            scene.remove(eff.plasmaMesh);
+            if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+          }
           eff.timer = 0;
         }
         spawnImpactSparks(intersect, 6);
@@ -12345,6 +12481,11 @@ class Projectile {
                 eff.hp = 0; eff.timer = 0;
                 if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
                 if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+                // (v11) Tear down the plasma backing mesh too on Arc Wave kill.
+                if (eff.plasmaMesh && eff.plasmaMesh.parent) {
+                  scene.remove(eff.plasmaMesh);
+                  if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+                }
                 spawnExplosion(eff.position, 20);
               }
             }
@@ -13565,6 +13706,17 @@ window.v8SpawnSparks = v8SpawnSparks;
 function spawnExplosion(pos, size) {
   size = size || 20;
 
+  // (v11 Phase 5) Layered fireball burst at the explosion epicenter. Sits
+  // behind the existing flash + flare + fire billboards and adds a
+  // volumetric hot core that reads in 3D regardless of viewing angle (the
+  // camera-facing billboards alone read as flat from the side at speed).
+  // Radius scales with explosion size; brightness fades over ~0.45s.
+  if (typeof spawnFXBurst === 'function' && size >= 8) {
+    spawnFXBurst('fireball', pos, Math.max(40, size * 1.5), 0.45, {
+      startScale: 0.25, endScale: 1.0,
+    });
+  }
+
   // v8VR: instanced debris cloud accompanies every explosion. Count scales
   // with size and QUALITY preset; capped per-explosion so a chain of huge
   // blasts doesn't stomp the entire pool in one frame.
@@ -13739,6 +13891,15 @@ function spawnExplosion(pos, size) {
       maxSize: size * 4, baseScale: size * 0.7,
       rotVel: new THREE.Vector3((Math.random()-0.5)*2, (Math.random()-0.5)*2, (Math.random()-0.5)*2),
     });
+    // (v11 Phase 3) Layered cloud burst paired with the icosahedron smoke
+    // plume. Adds a longer-lived volumetric cloud that drifts after the
+    // initial smoke dissipates, so explosion residue reads with depth at a
+    // distance. Larger than the ico smoke so the haze surrounds it.
+    if (typeof spawnFXBurst === 'function' && size >= 12) {
+      spawnFXBurst('cloud', pos, size * 2.2, 1.6, {
+        startScale: 0.4, endScale: 1.0,
+      });
+    }
   }
 
   // --- Phase 5: Ember/debris particles (many small, fast, varied colors) ---
@@ -16099,6 +16260,31 @@ function updateEffects(dt) {
       if (u.uAge) u.uAge.value = t;
     }
 
+    // --- (v11) Layered FX burst: scale up + alpha fade across lifetime ---
+    // Used by spawnFXBurst() ; applies the ease-out scale ramp and fade
+    // for any preset (fireball / cloud / plasma_wall / etc.). The material's
+    // uTime uniform is driven by _layeredFXTick from the main gameLoop, so
+    // the per-layer pattern animations advance independently of age.
+    if (e.type === 'fx_burst') {
+      const s0 = (e._fxStartScale != null) ? e._fxStartScale : 0.15;
+      const s1 = (e._fxEndScale   != null) ? e._fxEndScale   : 1.0;
+      const a0 = (e._fxStartAlpha != null) ? e._fxStartAlpha : 1.0;
+      const a1 = (e._fxEndAlpha   != null) ? e._fxEndAlpha   : 0.0;
+      // Ease-out cubic for scale (snaps fast, settles slow).
+      const eased = 1 - Math.pow(1 - t, 3);
+      const s = s0 + (s1 - s0) * eased;
+      e.mesh.scale.set(s, s, s);
+      // Fade alpha by scaling down each layer's contribution. The shader
+      // composites layers and emits an alpha; multiplying brightness here
+      // gives a uniform fade without per-layer uniform shuffling.
+      const fade = a0 + (a1 - a0) * t;
+      if (e.mesh.material && e.mesh.material.uniforms && e.mesh.material.uniforms.uBrightness) {
+        const u = e.mesh.material.uniforms;
+        if (u._fxBaseBrightness == null) u._fxBaseBrightness = u.uBrightness.value;
+        u.uBrightness.value = u._fxBaseBrightness * fade;
+      }
+      continue;
+    }
     // --- Legacy explosion (keep for any old callers) ---
     if (e.type === 'explosion') {
       const s = 1 + t * 2;
@@ -21413,6 +21599,12 @@ function updateAbilities(dt) {
       if (eff.coreMesh && eff.coreMesh.parent) { scene.remove(eff.coreMesh); eff.coreMesh.geometry.dispose(); eff.coreMesh.material.dispose(); }
       if (eff.glow && eff.glow.parent) { scene.remove(eff.glow); eff.glow.geometry.dispose(); eff.glow.material.dispose(); }
       if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+      // (v11) Particle Wall plasma backing layer ; tear it down too.
+      if (eff.plasmaMesh && eff.plasmaMesh.parent) {
+        scene.remove(eff.plasmaMesh);
+        if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+        if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+      }
       // Clean up firewall line meshes / sprites
       if (eff.meshes) {
         for (const m of eff.meshes) {
@@ -21553,6 +21745,14 @@ function dash() {
   }
   const dashColor = 0xaaeeff;
   spawnDashBoosters(player.mesh, dashDir, dashColor);
+  // (v11 Phase 6) Brief layered plasma puff at the dash origin so the
+  // trail leading edge reads as charged energy. Anchored at player.position
+  // (the dash origin) and dispersed outward via the burst's scale ramp.
+  if (typeof spawnFXBurst === 'function') {
+    spawnFXBurst('plasma_wall', player.position, 60, 0.32, {
+      startScale: 0.3, endScale: 1.4,
+    });
+  }
   if (net.active && net.sendEvent) {
     net.sendEvent({
       type: 'dash_burst',
@@ -22008,6 +22208,13 @@ function returnToRootMenu() {
       scene.remove(eff.mesh);
       if (eff.mesh.geometry) eff.mesh.geometry.dispose();
       if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
+    }
+    // (v11) Particle Wall now ships a sibling plasma backing mesh ; clean
+    // it up alongside the main wall so it doesn't leak across match-end.
+    if (eff.plasmaMesh && eff.plasmaMesh.parent) {
+      scene.remove(eff.plasmaMesh);
+      if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+      if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
     }
     if (eff.coreMesh && eff.coreMesh.parent) {
       scene.remove(eff.coreMesh);
@@ -26617,7 +26824,30 @@ class StasisField {
     const ringRadius = this.championMode ? 90 : 40;
     this.group = new THREE.Group();
     const coreGeo = new THREE.SphereGeometry(coreRadius, 32, 20);
-    const coreMat = _makeStasisCoreMaterial(coreColor);
+    // (v11 Phase 4) Layered plasma core. Champion field uses the purple
+    // variant for the "singular prize" reading, regular fields use cyan
+    // plasma_wall. uTime is driven globally by _layeredFXTick from
+    // gameLoop, so we no longer need to write to uniforms.time here ; the
+    // proximity boost still drives uPulse via core.material.uniforms.uPulse
+    // in update(dt) ; that uniform is added below as a custom field.
+    let coreMat;
+    if (typeof _makeFXMaterial === 'function') {
+      coreMat = _makeFXMaterial(this.championMode ? 'plasma_purple' : 'plasma_wall');
+      // (v11 fix) Sample the noise patterns at lab-equivalent scale: divide
+      // world position by core radius so the same per-layer scale settings
+      // produce the same visual feature density regardless of how big the
+      // field is. Without this the small (22-unit) regular field reads as
+      // noise grain instead of the flowing plasma seen in the lab.
+      if (coreMat.uniforms && coreMat.uniforms.uPosScale) {
+        coreMat.uniforms.uPosScale.value = 1.0 / Math.max(1, coreRadius);
+      }
+      // Proximity-pulse is a per-instance gameplay tell ; we layer it on top
+      // of the layered material's uBrightness so the field reads more
+      // intense when the player is close. Cache the base brightness.
+      coreMat.userData._stasisBaseBrightness = coreMat.uniforms.uBrightness.value;
+    } else {
+      coreMat = _makeStasisCoreMaterial(coreColor);
+    }
     this.core = new THREE.Mesh(coreGeo, coreMat);
     this.core.renderOrder = 1;
     this.group.add(this.core);
@@ -26693,9 +26923,21 @@ class StasisField {
     // Drive shader uniforms on the energy core: time advances regardless of
     // proximity; uPulse boosts band rotation speed and brightness when the
     // player approaches. Scale still pulses so the field reads as breathing.
-    if (this.core.material.uniforms) {
-      this.core.material.uniforms.time.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
-      this.core.material.uniforms.uPulse.value = Math.min(2.0, proximityBoost);
+    // (v11) Layered FX material has uTime + uBrightness ; legacy stasis
+    // shader has time + uPulse. Branch by what's present so we keep the
+    // proximity tell on either path.
+    const _coreUni = this.core.material && this.core.material.uniforms;
+    if (_coreUni) {
+      if (_coreUni.uTime && _coreUni.uBrightness) {
+        // Layered FX path. uTime is ticked globally from gameLoop ; just
+        // boost uBrightness on top of the cached base for the proximity tell.
+        const baseB = (this.core.material.userData && this.core.material.userData._stasisBaseBrightness) || _coreUni.uBrightness.value;
+        _coreUni.uBrightness.value = baseB * Math.min(2.0, proximityBoost);
+      } else {
+        // Legacy _makeStasisCoreMaterial path.
+        if (_coreUni.time)   _coreUni.time.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
+        if (_coreUni.uPulse) _coreUni.uPulse.value = Math.min(2.0, proximityBoost);
+      }
     }
     const s = (1 + Math.sin(this.pulseTime * 2 * proximityBoost) * 0.1) * Math.min(1.4, 0.85 + proximityBoost * 0.18);
     this.core.scale.set(s, s, s);
@@ -30093,6 +30335,12 @@ function gameLoop(timestamp) {
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
   game.lastTime = timestamp;
   game.time += game.deltaTime;
+
+  // (v11) Tick all active LayeredFXMaterial instances. Each material's uTime
+  // uniform drives per-layer time-rate animation (turbulence flow, plasma
+  // pulse, sine-wave ripples). One pass over a Set is cheap; the materials
+  // self-register on construction and self-deregister on dispose.
+  if (typeof _layeredFXTick === 'function') _layeredFXTick(game.time);
 
   // Update level shader time for vein animations
   if (game.levelMaterial) {
