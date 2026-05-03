@@ -22276,6 +22276,28 @@ function returnToRootMenu() {
   if (typeof stopRoomHeartbeat === 'function') stopRoomHeartbeat();
   if (net) { net.roomCode = null; }
 
+  // (v11 fix) Cancel ALL pending launch / countdown timers. Without this,
+  // a launch-handshake setTimeout queued before the user clicked Main Menu
+  // can fire later (when the user is back in the lobby or solo flow) and
+  // trigger launchCountdown() ; that skips ship-select and starts the
+  // match before the map / bots have been built. Three layers of pending
+  // state to clear: the visible UI countdown timers, the net launch
+  // scheduling, and the warmup timer if a match was already counting down.
+  if (typeof _clearLaunchCountdown === 'function') {
+    try { _clearLaunchCountdown(); } catch (_) {}
+  }
+  if (typeof net !== 'undefined' && net) {
+    if (net.launchTimer) {
+      try { clearTimeout(net.launchTimer); } catch (_) {}
+      net.launchTimer = null;
+    }
+    net.launchScheduledAt = null;
+    net.startScheduledAt = null;
+  }
+  // Hide the countdown overlay if it was showing.
+  const _cdEarly = document.getElementById('ship-select-countdown');
+  if (_cdEarly) _cdEarly.classList.remove('active');
+
   // Tear down the scoreboard first so it doesn't bleed into the menu.
   _scoreboardKeyHeld = false;
   _scoreboardGpHeld = false;
@@ -22347,6 +22369,13 @@ function returnToRootMenu() {
   game.scoreB = 0;
   game.currentRound = 1;
   game.matchEndTimer = 0;
+  // (v11 fix) Reset warmup + round timers too. If the user clicked Main
+  // Menu during a warmup countdown, game.warmupTimer was already partway
+  // through ; commitLoadout would re-enter 'warmup' from this stale value
+  // and the countdown would tick wrong / immediately complete.
+  game.warmupTimer = (typeof LSS !== 'undefined' && LSS.WARMUP_TIME) ? LSS.WARMUP_TIME : 5;
+  game.roundTimer = (typeof LSS !== 'undefined' && LSS.ROUND_TIME) ? LSS.ROUND_TIME : 180;
+  game.roundEndTimer = 0;
 
   // Reset player match stats so the root menu starts clean.
   player.kills = 0;
