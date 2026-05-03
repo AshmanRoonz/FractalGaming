@@ -1364,7 +1364,10 @@ body.vr-active .hit-marker {
     </div>
 
     <!-- (v10 Phase 3) External pages: leaderboard + live rooms browser.
-         Both render the D1 backend's data via the Worker API. -->
+         Both render the D1 backend's data via the Worker API.
+         (v10 Phase 6 fix) Plus a SETTINGS button on the main menu so
+         the user can tune controls / volume / etc. without entering a
+         match first. -->
     <div style="margin-top:30px;display:flex;gap:14px;justify-content:center;flex-wrap:wrap;">
       <a href="leaderboard.html" target="_blank" rel="noopener"
          style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
@@ -1384,6 +1387,15 @@ body.vr-active .hit-marker {
          onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
         LIVE ROOMS
       </a>
+      <button id="lobby-settings-btn-main" type="button"
+         style="background:rgba(20,20,40,0.6);border:1px solid rgba(100,100,120,0.5);
+                color:#aaa;padding:8px 18px;font-family:'Courier New',monospace;
+                font-size:11px;letter-spacing:2px;cursor:pointer;
+                transition:all 0.2s;border-radius:2px;"
+         onmouseover="this.style.borderColor='#ffaa00';this.style.color='#ffaa00'"
+         onmouseout="this.style.borderColor='rgba(100,100,120,0.5)';this.style.color='#aaa'">
+        SETTINGS
+      </button>
     </div>
 
     <div style="margin-top:30px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
@@ -21715,6 +21727,72 @@ function returnToRootMenu() {
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
 
+// (v10 Phase 6 fix) returnToMainMenu: go ALL the way back to the
+// pre-match landing page (#lobby), not just the ship-select screen.
+// Tear down the multiplayer mesh entirely (Trystero room close +
+// net.active flip) so the user can pick a different room or go solo
+// fresh. Used by the MAIN MENU and EXIT TO MAIN MENU buttons.
+function returnToMainMenu() {
+  // (1) Run the full root-menu reset (kills entities, resets scores,
+  // stops heartbeats, hides countdown, etc.). This already shows the
+  // ship-select overlay ; we hide it again on the way to the lobby.
+  try { returnToRootMenu(); } catch (e) { console.warn('[main-menu] root reset failed:', e); }
+
+  // (2) Tear down the multiplayer mesh. Trystero rooms expose .leave()
+  // on most builds ; older builds expose nothing and we just drop the
+  // reference and let GC clean up the WebRTC peers.
+  if (net && net.active) {
+    try { if (net.room && typeof net.room.leave === 'function') net.room.leave(); } catch (_) {}
+    net.room = null;
+    net.active = false;
+    net.solo = false;
+    net.sendState = null;
+    net.sendHitClaim = null;
+    net.sendHitVote = null;
+    net.sendEvent = null;
+    net.sendLoadout = null;
+    net.sendProjectile = null;
+    // Drop NetworkPlayers and peer state.
+    try {
+      for (const np of (net.networkPlayers || [])) { try { np.destroy(); } catch (_) {} }
+    } catch (_) {}
+    net.networkPlayers = [];
+    if (net.peers) net.peers.clear();
+    if (net.peerGameSync) net.peerGameSync.clear();
+    net.myPeerId = null;
+  }
+
+  // (3) Hide the ship-select overlay and show the lobby (#lobby) again.
+  const sel = document.getElementById('ship-select');
+  if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
+  const lobby = document.getElementById('lobby');
+  if (lobby) lobby.style.display = '';
+
+  // (4) Reset the lobby UI to its pre-connect state. The READY button
+  // (which the JOIN button morphs into after connect) flips back to
+  // JOIN, status / peer text clears, room-code input is left as-is so
+  // the user can re-join the same room with one click if they want.
+  const joinBtn = document.getElementById('btn-join');
+  if (joinBtn) {
+    joinBtn.disabled = false;
+    joinBtn.textContent = 'JOIN';
+    joinBtn.style.background = 'rgba(255,170,0,0.15)';
+    joinBtn.style.borderColor = '#ffaa00';
+    joinBtn.style.color = '#ffaa00';
+    joinBtn.onclick = () => joinRoom();
+  }
+  const soloBtn = document.getElementById('btn-solo');
+  if (soloBtn) soloBtn.disabled = false;
+  const status = document.getElementById('lobby-status');
+  if (status) { status.textContent = ''; status.style.color = '#555'; }
+  const peers = document.getElementById('lobby-peers');
+  if (peers) peers.textContent = '';
+
+  // (5) Re-render the Discord identity panel in case the user has
+  // signed in or out since the lobby was last visible.
+  if (typeof _discordRenderIdentity === 'function') _discordRenderIdentity();
+}
+
 // ---- GAMEPAD POLLING ----
 
 // VR fork: synthesize an Xbox-layout (mapping="standard") Gamepad from the
@@ -24033,7 +24111,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (backBtn) backBtn.addEventListener('click', () => {
     const ok = window.confirm('Return to the main menu? Your current room will close.');
     if (!ok) return;
-    try { returnToRootMenu(); } catch (e) { console.warn('[main-menu] returnToRootMenu failed', e); }
+    try { returnToMainMenu(); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
+  });
+  // (v10 Phase 6 fix) Settings button on the main menu (#lobby).
+  // Opens the same settings overlay as the in-match Esc key.
+  const mainMenuSettingsBtn = document.getElementById('lobby-settings-btn-main');
+  if (mainMenuSettingsBtn) mainMenuSettingsBtn.addEventListener('click', () => {
+    try { buildSettingsPage(); openSettings(); } catch (e) { console.warn('[main-menu] open settings failed', e); }
   });
 
   // (v10 Phase 6) Auto-join from ?room=<code> URL params (deep links
@@ -25110,7 +25194,7 @@ function buildSettingsPage() {
         const ok = window.confirm('Exit to the main menu? Your current match will end.');
         if (!ok) return;
         try { closeSettings(); } catch (_) {}
-        try { returnToRootMenu(); } catch (e) { console.warn('[exit] returnToRootMenu failed', e); }
+        try { returnToMainMenu(); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
       });
     }
   }
