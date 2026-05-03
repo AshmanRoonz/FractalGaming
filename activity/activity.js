@@ -39,6 +39,7 @@ const FORWARD_PARAMS = [
 // Built once on boot; null while pending, the SDK once ready, or false
 // if init failed (we fall back to window.open in that case).
 let _sdk = null;
+let _sdkPromise = null; // resolves once init has settled (success or fail)
 
 function buildGameUrl() {
   const src = new URLSearchParams(window.location.search);
@@ -69,35 +70,51 @@ function inDiscordIframe() {
 
 async function initSdk() {
   if (!inDiscordIframe()) {
-    // Not in a Discord context ; skip SDK init, use plain popup.
+    console.log('[lss-activity] Not in Discord iframe; skipping SDK init.');
     _sdk = false;
     return;
   }
+  console.log('[lss-activity] Initializing Discord SDK with appId', APPLICATION_ID);
   try {
     const sdk = new DiscordSDK(APPLICATION_ID);
     await sdk.ready();
     _sdk = sdk;
+    console.log('[lss-activity] Discord SDK ready.');
   } catch (err) {
-    console.warn('[lss-activity] Discord SDK init failed:', err);
+    console.error('[lss-activity] Discord SDK init failed:', err);
     _sdk = false;
-    setStatus('Discord SDK unavailable ; falling back to direct popup.', 'warn');
+    setStatus('Discord SDK unavailable ; will try direct popup.', 'warn');
   }
 }
 
 async function onEngage() {
   const url = buildGameUrl();
+  console.log('[lss-activity] ENGAGE clicked ; target url:', url);
+
+  // Wait for SDK init to settle before deciding which path to take.
+  // Without this, an early click would fall through to window.open
+  // even though the SDK was about to be ready.
+  if (_sdkPromise) {
+    setStatus('Connecting to Discord...', 'warn');
+    try { await _sdkPromise; } catch (_) {}
+  }
+
   // Prefer the SDK route when available ; it bypasses the iframe
   // popup-block by handing the URL to Discord's parent window.
   if (_sdk) {
     try {
+      console.log('[lss-activity] calling openExternalLink via SDK...');
       await _sdk.commands.openExternalLink({ url });
       setStatus('Game opened in your default browser.', 'ok');
       return;
     } catch (err) {
-      console.warn('[lss-activity] openExternalLink failed:', err);
+      console.error('[lss-activity] openExternalLink failed:', err);
       setStatus('Discord blocked the open. Trying direct popup...', 'warn');
     }
+  } else {
+    console.warn('[lss-activity] SDK not available ; using window.open fallback.');
   }
+
   // Fallback: plain window.open. Works when /activity/ is loaded
   // outside Discord (regular browser tab); blocked inside Discord's
   // sandboxed iframe but worth trying as a last resort.
@@ -116,9 +133,10 @@ async function onEngage() {
 function init() {
   const btn = document.getElementById('engage-btn');
   if (btn) btn.addEventListener('click', onEngage);
-  // Kick off SDK init in parallel ; it usually finishes well before the
-  // user clicks ENGAGE, so onEngage rarely waits.
-  initSdk();
+  // Kick off SDK init in parallel ; onEngage will await this promise
+  // so an early click doesn't fall through to the fallback before the
+  // SDK has had a chance to load.
+  _sdkPromise = initSdk();
 }
 
 if (document.readyState === 'loading') {
