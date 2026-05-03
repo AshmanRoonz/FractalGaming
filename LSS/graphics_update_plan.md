@@ -200,7 +200,17 @@ For now, profile-driven optimization. Start naive; tune what shows up in the GPU
 
 `fx_lab.html` (this session). Self-contained editor like wall_pattern_lab. Three.js preview canvas, three layer controls in a sidebar, pattern selector, blend mode selector, base color picker, JSON export. Uses the `LayeredFXMaterial` class internally (which gets extracted into the game later when we convert Pyro fire).
 
-The lab will ship a few starter presets that demonstrate what's possible (fire, smoke, plasma, stasis) and serve as the template for authoring per-effect presets later.
+The lab ships a few starter presets that demonstrate what's possible (fire, smoke, plasma, stasis) and serves as the template for authoring per-effect presets later.
+
+## Authored presets (Phase 2 inputs)
+
+Source-of-truth JSON files live in `LSS/effects/`. As of 2026-05-03 the user has authored three presets ready for in-game integration:
+
+- **`fireball.json`** ; bright orange-red fireball with turbulence base + ridge accents + dark FBM subtract for charred edges. Bright (3.0). Target effects: Pyro fire trap puff, fireball impact, explosion bloom hot core.
+- **`cloud.json`** ; drifting volumetric cloud. Dark base color, turbulence-mix front + soft FBM screen overlay + dark FBM multiply core. Target effects: smoke plumes, gas trails, ambient nebula puffs, Pyro gas cloud.
+- **`plasma_wall.json`** ; cyan plasma energy with sine-flow base + ridge multiply + turbulence subtract for dynamic edges. Target effects: Tracker particle wall, Vortex thermal shield dome, Blaster gun shield, generic energy barriers.
+
+Phase 2 work picks these up and wires them into the corresponding game-side materials. The lab also keeps inline copies under the same names so any of them can be reloaded with one click for further tuning.
 
 ---
 
