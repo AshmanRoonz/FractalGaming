@@ -13101,7 +13101,64 @@ function warmupCombatShaders() {
       if (typeof _warmupExplosionPool === 'function') _warmupExplosionPool();
     } catch (_) { /* pool warmup is non-fatal; game still runs, just takes one stall */ }
 
+    // (v11) Pre-compile all LayeredFXMaterial preset shaders. Each preset
+    // is a different uniform-set, but the program variants are keyed by the
+    // pattern + blend-mode constants, so all four presets share at least
+    // some compiled programs. We add a hidden sphere with each preset's
+    // material so renderer.compile(scene, camera) walks them all and hands
+    // them to the driver for link + warmup BEFORE any in-game burst spawns.
+    // Without this, the first shield/stasis/explosion the player sees
+    // hitches a frame while the driver compiles the shader.
+    try {
+      if (typeof EFFECT_PRESETS !== 'undefined' && typeof _makeLayeredFXMaterial === 'function') {
+        const _layeredFXWarmupMeshes = [];
+        const _warmGeo = new THREE.SphereGeometry(0.5, 8, 6);
+        for (const presetName in EFFECT_PRESETS) {
+          const preset = EFFECT_PRESETS[presetName];
+          if (!preset) continue;
+          const m = _makeLayeredFXMaterial(preset);
+          const mesh = new THREE.Mesh(_warmGeo, m);
+          // Park them WAY off-screen so they render as a single fragment
+          // (driver still has to compile + link the program for the first
+          // visible frame; this is enough to do that work pre-game).
+          mesh.position.set(0, -1e6, 0);
+          mesh.frustumCulled = false;  // force inclusion in the compile pass
+          mesh.userData._layeredFXWarmup = true;
+          scene.add(mesh);
+          _layeredFXWarmupMeshes.push(mesh);
+        }
+        // Stash the meshes on a global so we can remove them after the
+        // initial compile + first-frame render. Cleaned up in _bootLSS's
+        // post-compile hook below (see _layeredFXWarmupCleanup).
+        window._layeredFXWarmupMeshes = _layeredFXWarmupMeshes;
+      }
+    } catch (_) { /* non-fatal: first burst will just have its usual hitch */ }
+
     renderer.compile(scene, camera);
+
+    // (v11) Force a one-shot off-screen render so the driver actually
+    // uploads + links each LayeredFX program. compile() does the link but
+    // some drivers defer the actual GPU work until the first draw call.
+    try {
+      if (renderer && scene && camera) {
+        const _prevAutoClear = renderer.autoClear;
+        renderer.autoClear = false;
+        renderer.render(scene, camera);
+        renderer.autoClear = _prevAutoClear;
+      }
+    } catch (_) {}
+
+    // Now strip the warmup meshes ; their job is done. Materials get
+    // disposed (the registry self-deregisters in mat.dispose()).
+    try {
+      if (window._layeredFXWarmupMeshes && window._layeredFXWarmupMeshes.length) {
+        for (const m of window._layeredFXWarmupMeshes) {
+          if (m.parent) scene.remove(m);
+          if (m.material && m.material.dispose) m.material.dispose();
+        }
+        window._layeredFXWarmupMeshes.length = 0;
+      }
+    } catch (_) {}
 
     // --- GPU texture upload: the 473ms idle-dominated hitch at t+20s in the
     // 121949 trace was NOT shader compile (only 4 getProgramInfoLog ticks vs
