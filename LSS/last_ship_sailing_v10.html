@@ -23956,7 +23956,10 @@ document.addEventListener('keydown', e => {
 // is the visible screen. Bound once at load ; the button is in the
 // ship-select header HTML at the top of <body>.
 // (v10 Phase 6) Same DOMContentLoaded hook now also wires the
-// MAIN MENU button next to SETTINGS in the ship-select header.
+// MAIN MENU button next to SETTINGS in the ship-select header, and
+// handles the ?room=<code> URL parameter (used by rooms.html JOIN
+// links) by pre-filling the lobby's room-code input and auto-firing
+// the JOIN button.
 document.addEventListener('DOMContentLoaded', () => {
   const btn = document.getElementById('lobby-settings-btn');
   if (btn) btn.addEventListener('click', () => {
@@ -23969,6 +23972,39 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!ok) return;
     try { returnToRootMenu(); } catch (e) { console.warn('[main-menu] returnToRootMenu failed', e); }
   });
+
+  // (v10 Phase 6) Auto-join from ?room=<code> URL params (deep links
+  // from rooms.html or shared by friends). Wait for the OAuth callback
+  // handler to settle first so we don't race with its URL-strip ; if
+  // there's a ?code= still present, that's the OAuth bounce, defer
+  // until next tick.
+  function _tryAutoJoin() {
+    try {
+      const url = new URL(window.location.href);
+      const code = url.searchParams.get('room');
+      if (!code) return;
+      // Skip if OAuth callback is still in the URL ; let it process first.
+      if (url.searchParams.get('code')) {
+        setTimeout(_tryAutoJoin, 250);
+        return;
+      }
+      const input = document.getElementById('room-code');
+      if (input) input.value = code.toUpperCase();
+      // Strip the ?room= from the URL so refreshes don't re-trigger.
+      url.searchParams.delete('room');
+      const cleaned = url.pathname + (url.search ? url.search : '') + url.hash;
+      window.history.replaceState({}, document.title, cleaned);
+      // joinRoom may not be defined yet ; the early stub queues it.
+      // Fire it on a slight delay so any animations/intro have a moment
+      // to settle and the lobby visibly registers the pre-filled code.
+      setTimeout(() => {
+        try {
+          if (typeof window.joinRoom === 'function') window.joinRoom();
+        } catch (e) { console.warn('[auto-join] joinRoom threw:', e); }
+      }, 350);
+    } catch (e) { console.warn('[auto-join] failed:', e); }
+  }
+  _tryAutoJoin();
 });
 
 document.addEventListener('keyup', e => { input.keys[e.key.toLowerCase()] = false; });
@@ -25318,7 +25354,15 @@ const WALL_PATTERN_NAMES = [
   // BG = Layered Cube (game 19), FG1 = Cyber Datamosh (game 15) Multiply,
   // FG2 = Plasma FBM (game 6) Multiply. Per-layer values lifted from
   // Mixed Lab v2 export and baked into MULTI_LAYER_PRESETS below.
-  'Digital'
+  'Digital',
+  // (v10) Three new user-authored multi-layer composites, exported from
+  // wall_pattern_lab.html and translated lab pattern IDs -> game IDs:
+  //   lab 0 (Kali) -> game 0  ;  lab 2 (Mandelbox) -> game 4
+  //   lab 6 (Panel Maze) -> game 17  ;  lab 9 (Plasma FBM) -> game 6
+  //   lab 15 (Cyber Datamosh) -> game 15  ;  lab 18 (Layered Cube) -> game 19
+  'Datamosh Cube',  // 22 ; bg=Datamosh + fg=Layered Cube + fg2=Panel Maze
+  'Mandelbox Plasma',  // 23 ; bg=Mandelbox + fg=Plasma FBM + fg2=Panel Maze
+  'Mandelbox Kali'  // 24 ; bg=Mandelbox + fg=Kali + fg2=Panel Maze
 ];
 
 const WALL_PARAM_DEFS = [
@@ -25897,6 +25941,69 @@ const MULTI_LAYER_PRESETS = {
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.5,
+  },
+  // Index 22: Datamosh Cube. User export ; lab ids translated:
+  //   bg lab 15 (Cyber Datamosh) -> game 15
+  //   fg lab 18 (Layered Cube)   -> game 19
+  //   fg2 lab 6 (Panel Maze)     -> game 17
+  22: {
+    bgPatternId: 15,                                  // Cyber Datamosh
+    bgTime: 0.05,
+    u_iters_bg: 12, u_scale_bg: 0.0005, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    K_COSMIC_bg: 0.15,
+    fgPatternId: 19,                                  // Layered Cube
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.845, fgTime: 0.1,
+    u_iters_fg: 7, u_scale_fg: 0.0016, u_invBase_fg: 3.7,
+    u_hueSpin_fg: 0.07, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 3.1,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.05, fg2Blend: 2, fg2Hue: 1.0, fg2Time: 0.0,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.41, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
+  },
+  // Index 23: Mandelbox Plasma. User export ; lab ids translated:
+  //   bg lab 2 (Mandelbox)     -> game 4
+  //   fg lab 9 (Plasma FBM)    -> game 6
+  //   fg2 lab 6 (Panel Maze)   -> game 17
+  23: {
+    bgPatternId: 4,                                   // Mandelbox
+    bgTime: 3.0,
+    u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 6.0,
+    fgPatternId: 6,                                   // Plasma FBM
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.845, fgTime: 2.5,
+    u_iters_fg: 7, u_scale_fg: 0.002, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 6.0,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.41, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
+  },
+  // Index 24: Mandelbox Kali. User export ; lab ids translated:
+  //   bg lab 2 (Mandelbox)   -> game 4
+  //   fg lab 0 (Kali IFS)    -> game 0
+  //   fg2 lab 6 (Panel Maze) -> game 17
+  24: {
+    bgPatternId: 4,                                   // Mandelbox
+    bgTime: 3.0,
+    u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 6.0,
+    fgPatternId: 0,                                   // Kali IFS
+    fgAlpha: 1.05, fgBlend: 1 /* Multiply */, fgHue: 0.585, fgTime: 3.0,
+    u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 6.0,
+    fg2PatternId: 17,                                 // Panel Maze
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
   },
 };
 
@@ -28169,7 +28276,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24) {',
       // (v8VR 2026-05-01) Pass a neutral tint to cosmicField for multi-
       // layer composite presets so per-room zoneColor doesn't leak into
       // pattern sampling. The lab uses a single tintColor across the
