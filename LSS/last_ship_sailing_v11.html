@@ -22532,6 +22532,54 @@ function returnToRootMenu() {
   // Same exhaustive cleanup as round-end (see updateAbilities for context).
   // Without this, firewall sprites / trap halos / gas puffs leak across
   // match-end → root-menu transitions.
+  // (v11) Drain in-flight visual effects (explosion debris, smoke plumes,
+  // tracer trails, lightning segs). Without this, a match that ended with
+  // an explosion mid-air leaves the smoke / fireball burst rendering for
+  // up to 2s after the player has returned to the menu, so the next match
+  // visibly inherits "old" visual debris. _disposeOrReleaseEffect is the
+  // same per-type teardown updateEffects uses on natural lifetime expiry.
+  if (game.effects && game.effects.length) {
+    for (const e of game.effects) { try { _disposeOrReleaseEffect(e); } catch (_) {} }
+    game.effects = [];
+  }
+  // Drain Dot anchors (ambient clouds, beacons, stasis-link anchors).
+  if (game.dots && game.dots.length) {
+    for (const d of game.dots) {
+      if (!d) continue;
+      if (d.anchor && d.anchor.parent) scene.remove(d.anchor);
+      if (d.smokeMesh && d.smokeMesh.parent) {
+        scene.remove(d.smokeMesh);
+        if (d.smokeMesh.material && d.smokeMesh.material.dispose) d.smokeMesh.material.dispose();
+      }
+    }
+    game.dots = [];
+  }
+  // Tear down clusters / dynamic objects ; spawnDynamicObjects rebuilds
+  // them in the next match's fresh-build branch.
+  if (game.dynamicObjects && game.dynamicObjects.length) {
+    for (const obj of game.dynamicObjects) {
+      if (!obj) continue;
+      if (obj.mesh && obj.mesh.parent) scene.remove(obj.mesh);
+      if (obj.edgeMesh && obj.edgeMesh.parent) scene.remove(obj.edgeMesh);
+    }
+    game.dynamicObjects = [];
+  }
+  if (game.clusters) game.clusters = [];
+  // Champion field bookkeeping ; otherwise the next match might inherit
+  // a stale champion claim or banner state.
+  game.championField = null;
+  game.championSpawned = false;
+  game.championResult = null;
+  game._championPlayerChargingTeam = null;
+  // Reset player position + velocity. commitLoadout will assign a real
+  // spawn point after the new map builds, but until then we want no
+  // residual movement / position-based effects (camera, dashes, etc.)
+  // tied to the previous match's death location.
+  if (typeof player !== 'undefined' && player) {
+    if (player.position && player.position.set) player.position.set(0, 0, 0);
+    if (player.velocity && player.velocity.set) player.velocity.set(0, 0, 0);
+  }
+
   for (const eff of game.worldEffects) {
     if (eff.mesh && eff.mesh.parent) {
       scene.remove(eff.mesh);

@@ -3510,6 +3510,13 @@ class NetworkPlayer {
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
         }
+        // Hit-glow radius scaled to dome ; hit color matches gun shield amber.
+        if (mat.uniforms && mat.uniforms.uHitRadius) {
+          mat.uniforms.uHitRadius.value = gDomeR * 0.35;
+        }
+        if (mat.uniforms && mat.uniforms.uHitColor) {
+          mat.uniforms.uHitColor.value.setHex(0xffe0a0);
+        }
         this._gunShieldMesh = new THREE.Mesh(geo, mat);
         this._gunShieldMesh.renderOrder = 1;
         scene.add(this._gunShieldMesh);
@@ -3576,6 +3583,13 @@ class NetworkPlayer {
         // (v11 fix) uPosScale = 1/radius so noise patterns scale to the dome.
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, tDomeR);
+        }
+        // Hit-glow tuning for thermal shield ; warmer hue.
+        if (mat.uniforms && mat.uniforms.uHitRadius) {
+          mat.uniforms.uHitRadius.value = tDomeR * 0.35;
+        }
+        if (mat.uniforms && mat.uniforms.uHitColor) {
+          mat.uniforms.uHitColor.value.setHex(0xffd07a);
         }
         this._thermalShieldMesh = new THREE.Mesh(geo, mat);
         this._thermalShieldMesh.renderOrder = 1;
@@ -5890,6 +5904,14 @@ const _LAYERED_FX_FRAG = [
   // Walls keep the default of 1.0 (their built-in BoxGeometry-scale sampling
   // is already what they want).
   'uniform float uPosScale;',
+  // (v11) Hit-impact ripples. Up to 4 simultaneous hits per material; each
+  // hit is (x, y, z, t) where t is uTime when the hit landed. Hits older
+  // than 0.45s contribute zero. Used by shields ; flashShieldHit() pushes
+  // a hit into the next slot in a ring buffer and stamps t = uTime. Default
+  // value (t = -999) ensures untouched slots add nothing.
+  'uniform vec4 uHits[4];',
+  'uniform float uHitRadius;',     // size of the glow patch in world units
+  'uniform vec3 uHitColor;',       // color of the impact glow
   'uniform int   uLayerPattern[3];',
   'uniform float uLayerScale[3];',
   'uniform float uLayerTimeRate[3];',
@@ -6033,7 +6055,29 @@ const _LAYERED_FX_FRAG = [
   '  }',
   '  float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vViewDir)), 0.0), 2.0);',
   '  acc.rgb += uBaseColor * fres * uFresnel;',
-  '  acc.a = clamp(acc.a, 0.0, 1.0);',
+  // (v11) Hit-impact glow accumulator. Each active hit adds a gaussian
+  // brightness blob centered on its world position, fading over ~0.45s.
+  // The glow boosts both color and alpha so it punches through transparent
+  // bases (shields are mostly transparent until hit). Iterates the fixed-
+  // size ring buffer ; idle slots have uTime - hit.w >> 1.0 → contribution 0.
+  '  float hitR2 = max(1.0, uHitRadius * uHitRadius);',
+  '  vec3 hitGlow = vec3(0.0);',
+  '  float hitAlpha = 0.0;',
+  '  for (int hi = 0; hi < 4; hi++) {',
+  '    vec4 h = uHits[hi];',
+  '    float age = uTime - h.w;',
+  '    if (age < 0.0 || age > 0.45) continue;',
+  '    float fade = 1.0 - age / 0.45;',
+  '    fade = fade * fade;',
+  '    vec3 dHit = vWorldPos - h.xyz;',
+  '    float d2 = dot(dHit, dHit);',
+  '    float bell = exp(-d2 / hitR2 * 4.0);',
+  '    float intensity = bell * fade;',
+  '    hitGlow += uHitColor * intensity * 4.0;',
+  '    hitAlpha = max(hitAlpha, intensity);',
+  '  }',
+  '  acc.rgb += hitGlow;',
+  '  acc.a = clamp(acc.a + hitAlpha * 0.85, 0.0, 1.0);',
   '  gl_FragColor = acc;',
   '}',
 ].join('\n');
@@ -6086,6 +6130,17 @@ function _makeLayeredFXMaterial(preset) {
       uFresnel:       { value: +cfg.fresnel },
       uBrightness:    { value: +cfg.brightness },
       uPosScale:      { value: +cfg.posScale },
+      // (v11) Hit-impact ring buffer ; 4 slots of (x,y,z,t). Initialized
+      // with t = -999 so they contribute zero until flashFXMaterialHit()
+      // pushes a real impact in.
+      uHits:          { value: [
+        new THREE.Vector4(0, 0, 0, -999),
+        new THREE.Vector4(0, 0, 0, -999),
+        new THREE.Vector4(0, 0, 0, -999),
+        new THREE.Vector4(0, 0, 0, -999),
+      ] },
+      uHitRadius:     { value: 80.0 },
+      uHitColor:      { value: new THREE.Color(0xffffff) },
       uLayerPattern:  { value: layers.map(l => l.pattern) },
       uLayerScale:    { value: layers.map(l => l.scale) },
       uLayerTimeRate: { value: layers.map(l => l.timeRate) },
@@ -6095,6 +6150,9 @@ function _makeLayeredFXMaterial(preset) {
       uLayerSat:      { value: layers.map(l => l.sat) },
     },
   });
+  // Per-material ring-buffer cursor for hit slots ; flashFXMaterialHit
+  // increments this and writes into uHits[(cursor) % 4].
+  mat.userData._hitCursor = 0;
   mat.userData.isLayeredFX = true;
   mat.userData.presetName = cfg.name || null;
   _ACTIVE_LAYERED_FX.add(mat);
@@ -6113,6 +6171,29 @@ function _layeredFXTick(tSec) {
   _ACTIVE_LAYERED_FX.forEach(mat => {
     if (mat && mat.uniforms && mat.uniforms.uTime) mat.uniforms.uTime.value = tSec;
   });
+}
+
+// (v11) Push a hit-impact glow into a layered FX material's ring buffer.
+// `worldPos` is the impact point in world coordinates; the shader's
+// gaussian falloff brightens the patch around it for ~0.45s.
+// `hitColor` is optional (defaults to the material's base color brightened);
+// `radius` is optional (defaults to the existing uHitRadius). Used by the
+// shield-impact wiring in playerTakeDamage / bot.takeDamage.
+function flashFXMaterialHit(mat, worldPos, hitColor, radius) {
+  if (!mat || !mat.uniforms || !mat.uniforms.uHits) return;
+  const u = mat.uniforms;
+  const t = u.uTime ? u.uTime.value : 0;
+  const cursor = (mat.userData._hitCursor || 0) % 4;
+  const slot = u.uHits.value[cursor];
+  if (slot && slot.set) {
+    slot.set(worldPos.x, worldPos.y, worldPos.z, t);
+  }
+  mat.userData._hitCursor = (cursor + 1) % 4;
+  if (radius != null && u.uHitRadius) u.uHitRadius.value = radius;
+  if (hitColor != null && u.uHitColor) {
+    if (typeof hitColor === 'number') u.uHitColor.value.setHex(hitColor);
+    else if (hitColor.isColor)        u.uHitColor.value.copy(hitColor);
+  }
 }
 
 // ---- EFFECT_PRESETS ; user-authored, baked 2026-05-03 -----------------
@@ -6258,6 +6339,7 @@ if (typeof window !== 'undefined') {
   window._layeredFXTick         = _layeredFXTick;
   window._ACTIVE_LAYERED_FX     = _ACTIVE_LAYERED_FX;
   window.spawnFXBurst           = spawnFXBurst;
+  window.flashFXMaterialHit     = flashFXMaterialHit;
 }
 
 // ---- Hex hologram (plane / shape) -------------------------------------
@@ -6816,65 +6898,119 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
 // per-frame loop, using the existing particle system so no new shader work
 // is needed. Per-entity emit timer self-throttles so particle counts stay
 // reasonable even at full burn.
+// (v11) Damage state effects ; replaces the HP/shield bars with in-world
+// progressive ship damage. Shield up = no hull effects (the shield itself
+// is the visible "I'm protected" reading). Once shield depletes, the hull
+// progresses through 4 escalating tiers based on remaining HP:
+//   tier 0 (75-100%): sparking      ; bright hot sparks pop off the hull
+//   tier 1 (50-75%):  electric arcs ; cyan lightning chases across the hull
+//   tier 2 (25-50%):  smoke         ; dark gray smoke plumes rise off
+//   tier 3 (0-25%):   fire          ; orange/red flames + heavy smoke
+// Each tier's emit cadence speeds up as HP falls within the band, and the
+// emit position randomizes around the hull so the effect reads as
+// distributed damage, not a single point.
 function emitDamageState(entity, dt) {
   if (!entity || !entity.alive || !entity.position) return;
+  // (v11) Shield up = hide all hull damage. Threshold > 0.5 (not == 0)
+  // so flickering low-shield ticks don't strobe the effects on/off.
+  if ((entity.shield || 0) > 0.5) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
-  const hpFrac = (entity.health || 0) / maxHp;
-  // Healthy + not doomed = nothing to show
-  if (hpFrac > 0.5 && !entity.doomed) return;
+  const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
+  if (hpFrac >= 1.0) return; // pristine ; no effect
+  // Tier selection by HP band.
+  let tier = 0;
+  if (hpFrac < 0.75) tier = 1;
+  if (hpFrac < 0.50) tier = 2;
+  if (hpFrac < 0.25) tier = 3;
+  // Emit cadence: faster as damage worsens. tier 0 = 110ms, tier 3 = 45ms.
   if (entity._dmgEmitTimer == null) entity._dmgEmitTimer = 0;
   entity._dmgEmitTimer -= dt;
   if (entity._dmgEmitTimer > 0) return;
-  const intensity = entity.doomed ? 1 : Math.max(0, 1 - hpFrac * 2);
-  entity._dmgEmitTimer = 0.07 - intensity * 0.05; // 70ms healthy -> 20ms doomed
-  const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.4 : 40;
+  entity._dmgEmitTimer = 0.11 - tier * 0.022;
+  // Pick a random point on the hull as the emit anchor.
+  const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.45 : 45;
   const offset = new THREE.Vector3(
-    (Math.random() - 0.5) * hullR,
-    (Math.random() - 0.5) * hullR * 0.6,
-    (Math.random() - 0.5) * hullR
+    (Math.random() - 0.5) * hullR * 2,
+    (Math.random() - 0.5) * hullR * 0.8,
+    (Math.random() - 0.5) * hullR * 2
   );
   const pos = entity.position.clone().add(offset);
-  // Smoke layer (always at <=50% HP)
-  game.particles.push({
-    position: pos.clone(),
-    velocity: new THREE.Vector3(
-      (Math.random() - 0.5) * 30,
-      30 + Math.random() * 50,
-      (Math.random() - 0.5) * 30
-    ),
-    life: 0.6 + Math.random() * 0.5,
-    maxLife: 1.1,
-    color: 0x333333,
-    size: 4 + intensity * 6,
-  });
-  // Hot sparks at low HP
-  if (hpFrac < 0.25 || entity.doomed) {
+  if (tier === 0) {
+    // SPARKING: a few hot bright sparks pop off the hull. Bloom catches
+    // them into glints at distance ; reads as "this ship just took a hit
+    // and there's exposed circuitry sparking."
+    if (typeof v8SpawnSparks === 'function') {
+      v8SpawnSparks(pos, 3, 0.7, 200, 0xffe070, 0xffffff);
+    } else {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 140,
+          (Math.random() - 0.5) * 140,
+          (Math.random() - 0.5) * 140
+        ),
+        life: 0.18, maxLife: 0.18, color: 0xffe070, size: 2,
+      });
+    }
+  } else if (tier === 1) {
+    // ELECTRIC: short cyan arcs jump across the hull surface. Reads as
+    // "internal systems shorting out."
+    if (typeof spawnLightningBolt === 'function') {
+      const a = pos.clone();
+      const b = pos.clone().add(new THREE.Vector3(
+        (Math.random() - 0.5) * hullR * 1.4,
+        (Math.random() - 0.5) * hullR * 0.9,
+        (Math.random() - 0.5) * hullR * 1.4
+      ));
+      spawnLightningBolt(a, b, 0x88ddff, 0.14, 0, 1);
+    }
+    // Accent spark so the arc has a punctuation point.
     game.particles.push({
       position: pos.clone(),
       velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 100,
-        (Math.random() - 0.5) * 100,
-        (Math.random() - 0.5) * 100
+        (Math.random() - 0.5) * 80,
+        (Math.random() - 0.5) * 80,
+        (Math.random() - 0.5) * 80
       ),
-      life: 0.15,
-      maxLife: 0.15,
-      color: 0xffaa44,
-      size: 2,
+      life: 0.16, maxLife: 0.16, color: 0xaaeeff, size: 1.6,
     });
-  }
-  // Electric arcs at doomed (signature of the irreversible 30% threshold)
-  if (entity.doomed) {
+  } else if (tier === 2) {
+    // SMOKE: dark plumes rising off the hull. Reads as "the ship is
+    // burning underneath, venting smoke through hull breaches."
     game.particles.push({
       position: pos.clone(),
       velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 200,
-        (Math.random() - 0.5) * 200,
-        (Math.random() - 0.5) * 200
+        (Math.random() - 0.5) * 30,
+        30 + Math.random() * 45,
+        (Math.random() - 0.5) * 30
       ),
-      life: 0.1,
-      maxLife: 0.1,
-      color: 0x44ddff,
-      size: 1.5,
+      life: 0.9 + Math.random() * 0.6, maxLife: 1.5,
+      color: 0x2a2a2a, size: 6 + Math.random() * 4,
+    });
+  } else {
+    // tier 3 ; FIRE: orange/red flames erupt off the hull + heavy smoke
+    // trailing above. Reads as "this ship is burning and about to die."
+    game.particles.push({
+      position: pos.clone(),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 35,
+        20 + Math.random() * 70,
+        (Math.random() - 0.5) * 35
+      ),
+      life: 0.45 + Math.random() * 0.35, maxLife: 0.8,
+      color: Math.random() < 0.5 ? 0xff4422 : 0xff8833,
+      size: 5 + Math.random() * 4,
+    });
+    // Trailing smoke above the flames.
+    game.particles.push({
+      position: pos.clone().add(new THREE.Vector3(0, 15, 0)),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 22,
+        40 + Math.random() * 40,
+        (Math.random() - 0.5) * 22
+      ),
+      life: 0.8 + Math.random() * 0.5, maxLife: 1.3,
+      color: 0x1c1c1c, size: 7 + Math.random() * 4,
     });
   }
 }
@@ -10068,9 +10204,13 @@ const _hullNormalMap = (function() {
 // PointLight, so adding this to every ship costs essentially nothing
 // (8 ships * 2 draw calls = 16 draw calls, sub-pixel cost). The bloom pass
 // already in the post-FX pipeline smears the dot into a glow halo at distance.
-const _SHIP_RUNNING_LIGHT_RADIUS = Math.PI;          // ~3.14159
-const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff1818;       // saturated red, port (left, -X)
-const _SHIP_RUNNING_LIGHT_STAR_COL = 0x18ff18;       // saturated green, starboard (right, +X)
+// (v11) Bumped from PI (~3.14) to ~6 so the running lights read as alive
+// nav-lights from a distance, not faint dots ; with the HP bar gone they
+// now help carry the "this ship is alive" reading. Color values pushed
+// into the HDR range (1.5x) so the bloom pass smears them into a halo.
+const _SHIP_RUNNING_LIGHT_RADIUS = 6.0;
+const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff3030;       // saturated red, port (left, -X)
+const _SHIP_RUNNING_LIGHT_STAR_COL = 0x30ff30;       // saturated green, starboard (right, +X)
 function _addShipRunningLight(group, hullW, hullH, hullL) {
   const r = _SHIP_RUNNING_LIGHT_RADIUS;
   // Three.js SphereGeometry phi convention (verified in source):
@@ -10082,8 +10222,11 @@ function _addShipRunningLight(group, hullW, hullH, hullL) {
   const hSegs = 10;
   const portGeo = new THREE.SphereGeometry(r, segs, hSegs, -Math.PI/2, Math.PI);
   const starGeo = new THREE.SphereGeometry(r, segs, hSegs,  Math.PI/2, Math.PI);
-  const portMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_PORT_COL });
-  const starMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_STAR_COL });
+  // (v11) MeshBasicMaterial with toneMapped:false so the color value passes
+  // through the renderer's tone-mapping unaltered ; combined with the
+  // brighter base hex, the bloom pass picks them up hard at any distance.
+  const portMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_PORT_COL, toneMapped: false });
+  const starMat = new THREE.MeshBasicMaterial({ color: _SHIP_RUNNING_LIGHT_STAR_COL, toneMapped: false });
   const portMesh = new THREE.Mesh(portGeo, portMat);
   const starMesh = new THREE.Mesh(starGeo, starMat);
   // Wrap in a sub-group so animateShipMesh can bob the whole light without
@@ -18187,6 +18330,12 @@ function playerTakeDamage(amount, attacker, projectile) {
         const absorbed = Math.min(amount, player.gunShieldHP);
         player.gunShieldHP -= absorbed;
         amount -= absorbed;
+        // (v11) Localized shield-impact glow: light up the patch where
+        // the projectile hit. Anchor the glow at incomingPos (the
+        // projectile's last-known position, very close to the dome).
+        if (typeof flashFXMaterialHit === 'function' && player.gunShieldMesh) {
+          flashFXMaterialHit(player.gunShieldMesh.material, incomingPos);
+        }
         if (player.gunShieldHP <= 0) {
           // Shield destroyed: auto-deactivate
           player.abilityActive[1] = false;
@@ -18203,6 +18352,13 @@ function playerTakeDamage(amount, attacker, projectile) {
       const absorbed = Math.min(amount, player.thermalShieldHP);
       player.thermalShieldHP -= absorbed;
       amount -= absorbed;
+      // (v11) Localized impact glow on the thermal shield dome.
+      if (typeof flashFXMaterialHit === 'function' && player.thermalShieldMesh) {
+        const _hitPos = (projectile && projectile.position) ? projectile.position
+                      : (attacker && attacker.position)     ? attacker.position
+                      : player.position;
+        flashFXMaterialHit(player.thermalShieldMesh.material, _hitPos);
+      }
       if (player.thermalShieldHP <= 0) {
         // Power depleted: auto-deactivate; recharge begins automatically.
         player.thermalShieldHP = 0;
@@ -20484,7 +20640,19 @@ function updateShieldVisuals(dt) {
     const gBaseOffset = gHull * 0.40;       // matches Pyro forward offset
     if (!player.gunShieldMesh) {
       const geo = new THREE.SphereGeometry(gDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-      const mat = _makeHexHologramMaterial(0xff8a55);
+      // (v11) Layered plasma-amber shield with hit-impact glow support.
+      const mat = (typeof _makeFXMaterial === 'function')
+        ? _makeFXMaterial('plasma_amber')
+        : _makeHexHologramMaterial(0xff8a55);
+      if (mat.uniforms && mat.uniforms.uPosScale) {
+        mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
+      }
+      if (mat.uniforms && mat.uniforms.uHitRadius) {
+        mat.uniforms.uHitRadius.value = gDomeR * 0.35;
+      }
+      if (mat.uniforms && mat.uniforms.uHitColor) {
+        mat.uniforms.uHitColor.value.setHex(0xffe0a0);
+      }
       player.gunShieldMesh = new THREE.Mesh(geo, mat);
       player.gunShieldMesh.renderOrder = 1;
       scene.add(player.gunShieldMesh);
@@ -20556,9 +20724,19 @@ function updateShieldVisuals(dt) {
       // Apex at +Y in geometry-local space ; we orient +Y along forward so
       // the dome bows out in front of the player.
       const geo = new THREE.SphereGeometry(tDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-      // Fire base color: hot yellow-orange. uColor is rewritten per frame
-      // along a fire palette anyway ; this is just the initial value.
-      const mat = _makeHexHologramMaterial(0xffaa33);
+      // (v11) Layered plasma-amber shield with hit-impact glow support.
+      const mat = (typeof _makeFXMaterial === 'function')
+        ? _makeFXMaterial('plasma_amber')
+        : _makeHexHologramMaterial(0xffaa33);
+      if (mat.uniforms && mat.uniforms.uPosScale) {
+        mat.uniforms.uPosScale.value = 1.0 / Math.max(1, tDomeR);
+      }
+      if (mat.uniforms && mat.uniforms.uHitRadius) {
+        mat.uniforms.uHitRadius.value = tDomeR * 0.35;
+      }
+      if (mat.uniforms && mat.uniforms.uHitColor) {
+        mat.uniforms.uHitColor.value.setHex(0xffd07a);
+      }
       player.thermalShieldMesh = new THREE.Mesh(geo, mat);
       player.thermalShieldMesh.renderOrder = 1;
       scene.add(player.thermalShieldMesh);
@@ -22354,6 +22532,54 @@ function returnToRootMenu() {
   // Same exhaustive cleanup as round-end (see updateAbilities for context).
   // Without this, firewall sprites / trap halos / gas puffs leak across
   // match-end → root-menu transitions.
+  // (v11) Drain in-flight visual effects (explosion debris, smoke plumes,
+  // tracer trails, lightning segs). Without this, a match that ended with
+  // an explosion mid-air leaves the smoke / fireball burst rendering for
+  // up to 2s after the player has returned to the menu, so the next match
+  // visibly inherits "old" visual debris. _disposeOrReleaseEffect is the
+  // same per-type teardown updateEffects uses on natural lifetime expiry.
+  if (game.effects && game.effects.length) {
+    for (const e of game.effects) { try { _disposeOrReleaseEffect(e); } catch (_) {} }
+    game.effects = [];
+  }
+  // Drain Dot anchors (ambient clouds, beacons, stasis-link anchors).
+  if (game.dots && game.dots.length) {
+    for (const d of game.dots) {
+      if (!d) continue;
+      if (d.anchor && d.anchor.parent) scene.remove(d.anchor);
+      if (d.smokeMesh && d.smokeMesh.parent) {
+        scene.remove(d.smokeMesh);
+        if (d.smokeMesh.material && d.smokeMesh.material.dispose) d.smokeMesh.material.dispose();
+      }
+    }
+    game.dots = [];
+  }
+  // Tear down clusters / dynamic objects ; spawnDynamicObjects rebuilds
+  // them in the next match's fresh-build branch.
+  if (game.dynamicObjects && game.dynamicObjects.length) {
+    for (const obj of game.dynamicObjects) {
+      if (!obj) continue;
+      if (obj.mesh && obj.mesh.parent) scene.remove(obj.mesh);
+      if (obj.edgeMesh && obj.edgeMesh.parent) scene.remove(obj.edgeMesh);
+    }
+    game.dynamicObjects = [];
+  }
+  if (game.clusters) game.clusters = [];
+  // Champion field bookkeeping ; otherwise the next match might inherit
+  // a stale champion claim or banner state.
+  game.championField = null;
+  game.championSpawned = false;
+  game.championResult = null;
+  game._championPlayerChargingTeam = null;
+  // Reset player position + velocity. commitLoadout will assign a real
+  // spawn point after the new map builds, but until then we want no
+  // residual movement / position-based effects (camera, dashes, etc.)
+  // tied to the previous match's death location.
+  if (typeof player !== 'undefined' && player) {
+    if (player.position && player.position.set) player.position.set(0, 0, 0);
+    if (player.velocity && player.velocity.set) player.velocity.set(0, 0, 0);
+  }
+
   for (const eff of game.worldEffects) {
     if (eff.mesh && eff.mesh.parent) {
       scene.remove(eff.mesh);
@@ -23066,112 +23292,15 @@ function drawCircumpunctHUD() {
     }
   }
 
-  // ---- LAYER 1: INNER RING (Health) ----
-  // Segmented arc, bottom half (from 7 o'clock to 5 o'clock)
+  // (v11) HP + shield bars removed from HUD. Damage feedback is now
+  // entirely in-world: hull damage progresses through 4 visible tiers
+  // (sparking → electric → smoke → fire) on the ship hull when shields
+  // are down. Shields up = no hull effects visible. The bars cluttered
+  // the HUD and the in-world version reads from any angle (including in
+  // VR), not just the cockpit center. Kept the constants the speed/ammo
+  // arcs reference (r1/r2) so their layout doesn't shift.
   const r1 = 150;
-  const healthArcStart = Math.PI * 0.65;   // ~117 degrees (lower left)
-  const healthArcEnd = Math.PI * 2.35;     // ~423 degrees (lower right, wrapping)
-  const healthArcSpan = healthArcEnd - healthArcStart;
-  const segments = player.chassis.healthSegments;
-  const segGap = 0.04; // radians gap between segments
-
-  // Background ring (faint)
-  ctx.strokeStyle = white + '0.1)';
-  ctx.lineWidth = 8;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r1, healthArcStart, healthArcEnd);
-  ctx.stroke();
-
-  // Health segments
-  for (let i = 0; i < segments; i++) {
-    const segStart = healthArcStart + (healthArcSpan / segments) * i + segGap / 2;
-    const segEnd = healthArcStart + (healthArcSpan / segments) * (i + 1) - segGap / 2;
-    const segStartPct = i / segments;
-
-    if (healthPct > segStartPct) {
-      const fillPct = Math.min(1, (healthPct - segStartPct) / (1 / segments));
-      const fillEnd = segStart + (segEnd - segStart) * fillPct;
-
-      // Cinematic glow: blur rises as health falls (gets more desperate looking near empty).
-      ctx.save();
-      ctx.shadowColor = hCol;
-      ctx.shadowBlur = 6 + (1 - healthPct) * 10;
-      ctx.strokeStyle = hCol;
-      ctx.lineWidth = 8;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r1, segStart, fillEnd);
-      ctx.stroke();
-      ctx.restore();
-
-      // Brighter inner edge
-      ctx.strokeStyle = white + '0.15)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r1 - 5, segStart, fillEnd);
-      ctx.stroke();
-    }
-
-    // Segment boundary tick
-    if (i > 0) {
-      const tickAngle = healthArcStart + (healthArcSpan / segments) * i;
-      const tx1 = cx + Math.cos(tickAngle) * (r1 - 14);
-      const ty1 = cy + Math.sin(tickAngle) * (r1 - 14);
-      const tx2 = cx + Math.cos(tickAngle) * (r1 + 14);
-      const ty2 = cy + Math.sin(tickAngle) * (r1 + 14);
-      ctx.strokeStyle = white + '0.12)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(tx1, ty1); ctx.lineTo(tx2, ty2);
-      ctx.stroke();
-    }
-  }
-
-  // Health text (below ring)
-  ctx.fillStyle = white + '0.6)';
-  hudFont('13px Courier New');
-  ctx.textAlign = 'center';
-  ctx.fillText(Math.ceil(player.health) + '', cx, cy + r1 + 24);
-
-  // ---- LAYER 2: SHIELD RING ----
-  // Thinner ring, upper half (from 11 o'clock to 1 o'clock)
   const r2 = 190;
-  const shieldArcStart = -Math.PI * 0.85;
-  const shieldArcEnd = -Math.PI * 0.15;
-  const shieldArcSpan = shieldArcEnd - shieldArcStart;
-
-  // Background
-  ctx.strokeStyle = cyan + '0.1)';
-  ctx.lineWidth = 5;
-  ctx.beginPath();
-  ctx.arc(cx, cy, r2, shieldArcStart, shieldArcEnd);
-  ctx.stroke();
-
-  // Shield fill
-  if (shieldPct > 0) {
-    const fillEnd = shieldArcStart + shieldArcSpan * shieldPct;
-    ctx.save();
-    ctx.shadowColor = cyan + '0.85)';
-    ctx.shadowBlur = 10;
-    ctx.strokeStyle = cyan + '0.6)';
-    ctx.lineWidth = 5;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r2, shieldArcStart, fillEnd);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  // Tick marks along shield arc (every 10%)
-  for (let i = 0; i <= 10; i++) {
-    const angle = shieldArcStart + shieldArcSpan * (i / 10);
-    const inner = i % 5 === 0 ? r2 - 12 : r2 - 6;
-    const outer = i % 5 === 0 ? r2 + 12 : r2 + 6;
-    ctx.strokeStyle = cyan + (i % 5 === 0 ? '0.15)' : '0.08)');
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
-    ctx.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
-    ctx.stroke();
-  }
 
   // ---- LAYER 3: SPEED ARC (left side) ----
   const r3 = 240;
@@ -33874,2623 +34003,4 @@ function playSound(type) {
     bp.type = 'bandpass';
     bp.frequency.value = ri(500 * p, 0.12);
     bp.Q.value = 1.1;
-    const ring = ctx.createBiquadFilter();
-    ring.type = 'peaking';
-    ring.frequency.value = ri(1100 * p, 0.12);
-    ring.Q.value = rr(3, 0.2);
-    ring.gain.value = 6;
-    const thudGain = ctx.createGain();
-    thudGain.gain.setValueAtTime(rr(0.26, 0.2), now);
-    thudGain.gain.exponentialRampToValueAtTime(0.001, now + rr(0.14, 0.2));
-    thudNoise.connect(bp); bp.connect(ring); ring.connect(thudGain);
-    if (audio.dryGain) thudGain.connect(audio.dryGain);
-    else thudGain.connect(audio.masterGain);
-    if (audio.convolver) thudGain.connect(audio.convolver);
-    thudNoise.start(now);
-    // Warm harmonic overtone, octave lower than the old chime so it reads as
-    // "impact on a dense plate" rather than "tap on glass."
-    triChord(
-      [ri(220 * p, 0.05), ri(330 * p, 0.05), ri(440 * p, 0.05)],
-      'triangle',
-      rr(0.09, 0.2), rr(0.14, 0.2), null, null, 0.003,
-      { attack: 0.001, hold: 0, decay: rr(0.11, 0.2) }
-    );
-  }
-  else if (type === 'damage') {
-    // Rapid-fire dissonant pulses: 3-5 short staccato hits with clashing intervals
-    const pulses = 3 + Math.floor(r() * 3);
-    const baseP = rr(1, 0.20);
-    // Dissonant intervals: minor 2nds, tritones, minor 7ths
-    const dissonant = [1.0, 1.059, 1.122, 1.414, 1.498, 1.682, 1.888];
-    for (let i = 0; i < pulses; i++) {
-      const offset = i * rr(0.025, 0.3); // ~25ms between pulses, slightly irregular
-      const d1 = dissonant[Math.floor(r() * dissonant.length)];
-      const d2 = dissonant[Math.floor(r() * dissonant.length)];
-      const d3 = dissonant[Math.floor(r() * dissonant.length)];
-      const vol = rr(0.14, 0.25) * (1 - i * 0.12); // each pulse slightly quieter
-      triChord(
-        [ri(50*baseP*d1,0), ri(63*baseP*d2,0), ri(78*baseP*d3,0)],
-        rWave(['sawtooth','square','square']),
-        vol, rr(0.04, 0.3), // very short duration per pulse
-        [ri(25*baseP*d1,0), ri(32*baseP*d2,0), ri(40*baseP*d3,0)],
-        rr(0.03, 0.3), offset,
-        { attack: 0.001, hold: 0.005, decay: rr(0.035, 0.3) }
-      );
-      playNoiseBurst(rr(0.025, 0.3), rr(0.04, 0.3), now + offset, ri(300 + r() * 600, 0.3), rr(0.7, 0.3));
-    }
-  }
-  else if (type === 'dash') {
-    const p = rr(1, 0.10);
-    triChord([ri(55*p,0), ri(69*p,0), ri(82*p,0)], 'sine',
-      rr(0.15, 0.15), rr(0.30, 0.15), [ri(110*p,0), ri(138*p,0), ri(165*p,0)], rr(0.25, 0.15), 0,
-      { attack: 0.005, hold: rr(0.03, 0.3), decay: rr(0.27, 0.15) });
-    playNoiseBurst(rr(0.20, 0.2), rr(0.10, 0.2), now, ri(1500, 0.2), rr(0.8, 0.3));
-  }
-  else if (type === 'ability') {
-    const p = rr(1, 0.08);
-    triChord([ri(82*p,0), ri(103*p,0), ri(123*p,0)], 'sine',
-      rr(0.18, 0.12), rr(0.15, 0.15), null, null, 0,
-      { attack: 0.003, hold: rr(0.03, 0.2), decay: rr(0.12, 0.15) });
-    triChord([ri(98*p,0), ri(123*p,0), ri(147*p,0)], 'sine',
-      rr(0.15, 0.12), rr(0.18, 0.15), null, null, rr(0.08, 0.15),
-      { attack: 0.003, hold: rr(0.03, 0.2), decay: rr(0.15, 0.15) });
-  }
-  else if (type === 'core') {
-    const p = rr(1, 0.06);
-    triChord([ri(40*p,0), ri(50*p,0), ri(60*p,0)], 'sawtooth',
-      rr(0.30, 0.12), rr(0.70, 0.10), [ri(110*p,0), ri(138*p,0), ri(165*p,0)], rr(0.55, 0.10), 0,
-      { attack: rr(0.05, 0.2), hold: rr(0.10, 0.2), decay: rr(0.55, 0.10) });
-    triChord([ri(55*p,0), ri(69*p,0), ri(82*p,0)], 'sine',
-      rr(0.20, 0.12), rr(0.60, 0.10), [ri(130*p,0), ri(164*p,0), ri(196*p,0)], rr(0.50, 0.10), rr(0.15, 0.15),
-      { attack: rr(0.04, 0.2), hold: rr(0.08, 0.2), decay: rr(0.48, 0.10) });
-    playNoiseBurst(rr(0.50, 0.15), rr(0.12, 0.15), now, ri(600, 0.2), rr(0.5, 0.3));
-  }
-  else if (type === 'core_titan') {
-    // Titan core activation: heavy announcement stinger. Audible across the arena so
-    // every pilot in range knows a titan just went critical. Four-layer structure:
-    //  (1) sub-bass swell (pressure rise before impact)
-    //  (2) impact thud (body hit at t = 0.05s)
-    //  (3) stacked fifth-and-octave power chord on saw/tri (the declaration)
-    //  (4) metallic shimmer transient (high brass warning, rides the chord)
-    duckAmbient(0.45); // strong duck so the stinger punches through
-    const p = rr(1, 0.04); // very little variation; this is a signature sound
-    // Layer 1: sub-bass swell (slow attack, long decay, low freq)
-    triChord([ri(32*p,0), ri(40*p,0), ri(48*p,0)], 'sine',
-      rr(0.45, 0.08), rr(1.20, 0.08), null, null, 0,
-      { attack: rr(0.12, 0.15), hold: rr(0.20, 0.15), decay: rr(0.90, 0.08) });
-    // Layer 2: impact thud (fast attack, short decay, low noise burst)
-    playNoiseBurst(rr(0.55, 0.10), rr(0.18, 0.12), now + 0.04, ri(90, 0.2), rr(0.35, 0.2));
-    playNoiseBurst(rr(0.22, 0.12), rr(0.10, 0.15), now + 0.06, ri(180, 0.2), rr(0.5, 0.2));
-    // Layer 3: stacked power chord (saw + tri, tonic + fifth + octave + 2-octave)
-    triChord([ri(65*p,0), ri(98*p,0), ri(130*p,0)], 'sawtooth',
-      rr(0.38, 0.10), rr(1.00, 0.08), [ri(82*p,0), ri(123*p,0), ri(164*p,0)], rr(0.75, 0.10), rr(0.06, 0.2),
-      { attack: rr(0.02, 0.2), hold: rr(0.18, 0.15), decay: rr(0.85, 0.10) });
-    triChord([ri(98*p,0), ri(147*p,0), ri(196*p,0)], 'triangle',
-      rr(0.26, 0.10), rr(0.85, 0.08), [ri(123*p,0), ri(185*p,0), ri(247*p,0)], rr(0.65, 0.10), rr(0.10, 0.2),
-      { attack: rr(0.02, 0.2), hold: rr(0.15, 0.15), decay: rr(0.75, 0.10) });
-    // Layer 4: metallic shimmer (high brass/horn; square for harmonic richness, narrow, rides on top)
-    triChord([ri(392*p,0), ri(523*p,0), ri(659*p,0)], 'square',
-      rr(0.08, 0.12), rr(0.70, 0.10), null, null, rr(0.18, 0.15),
-      { attack: rr(0.03, 0.2), hold: rr(0.10, 0.2), decay: rr(0.55, 0.10) });
-    // High crash noise accent (subtle, gives the stinger "air")
-    playNoiseBurst(rr(0.10, 0.20), rr(0.45, 0.10), now + 0.08, ri(4800, 0.15), rr(0.9, 0.2));
-  }
-  else if (type === 'explosion') {
-    // Rapid-fire destruction: 5-8 dissonant staccato pulses layered with noise blasts
-    duckAmbient(0.35); // strong duck for explosions
-    // Long lush send: during this synchronous block, every triChord/playNoiseBurst
-    // also taps the 5 s convolver for the distant-explosion halo. Cleared at the end.
-    const _prevExtra = audio._extraReverbSend;
-    if (audio.convolverLong) audio._extraReverbSend = audio.convolverLong;
-    const size = rr(1, 0.25);
-    const pulses = 5 + Math.floor(r() * 4);
-    const baseP = rr(1, 0.25);
-    const dissonant = [1.0, 1.059, 1.122, 1.335, 1.414, 1.498, 1.682, 1.888];
-
-    // Initial sub-bass pressure hit (the "thud" before the rapid fire)
-    playNoiseBurst(rr(0.08, 0.3) * size, rr(0.40, 0.2), now, ri(60, 0.3), rr(0.3, 0.3));
-
-    // Rapid-fire dissonant chord pulses
-    for (let i = 0; i < pulses; i++) {
-      const offset = 0.01 + i * rr(0.022, 0.35); // ~22ms spacing, irregular
-      const d1 = dissonant[Math.floor(r() * dissonant.length)];
-      const d2 = dissonant[Math.floor(r() * dissonant.length)];
-      const d3 = dissonant[Math.floor(r() * dissonant.length)];
-      const vol = rr(0.12, 0.3) * size * (1 - i * 0.08);
-      const wave = rWave(['sawtooth','square','square','sawtooth']);
-
-      // Each pulse: a dissonant chord (clashing tritones, minor 2nds)
-      triChord(
-        [ri(30*baseP*d1,0), ri(42*baseP*d2,0), ri(55*baseP*d3,0)],
-        wave, vol, rr(0.04, 0.3),
-        [ri(15*baseP*d1,0), ri(21*baseP*d2,0), ri(28*baseP*d3,0)],
-        rr(0.03, 0.3), offset,
-        { attack: 0.001, hold: 0.003, decay: rr(0.04, 0.3) }
-      );
-      // Paired noise burst per pulse (crackle/debris)
-      playNoiseBurst(rr(0.03, 0.3), rr(0.06, 0.3) * size, now + offset,
-        ri(200 + r() * 1200, 0.3), rr(0.6, 0.4));
-    }
-
-    // High-frequency shrapnel rattle (rapid tiny hits)
-    const shrapnelCount = 3 + Math.floor(r() * 4);
-    for (let i = 0; i < shrapnelCount; i++) {
-      const offset = r() * 0.15;
-      const sp = rr(1, 0.30);
-      triChord(
-        [ri(180*sp,0), ri(240*sp * dissonant[Math.floor(r()*dissonant.length)],0)],
-        rWave(['triangle','square']),
-        rr(0.03, 0.4), rr(0.02, 0.3),
-        [ri(90*sp,0), ri(120*sp,0)],
-        rr(0.015, 0.3), offset,
-        { attack: 0.001, hold: 0, decay: rr(0.02, 0.3) }
-      );
-    }
-
-    // Sub-rumble tail (fading low growl after the burst)
-    playNoiseBurst(rr(0.25, 0.3) * size, rr(0.20, 0.2), now + 0.12, ri(45, 0.3), rr(0.2, 0.3));
-    // Restore prior extra reverb send (long send was active only for this explosion).
-    audio._extraReverbSend = _prevExtra;
-  }
-  else if (type === 'stasis') {
-    // Full 3-second charging sound: rising harmonic sweep that builds to release
-    const dur = game.playerStasisDuration || 3.0;
-    const p = rr(1, 0.04);
-    // Layer 1: deep foundation sweep (sine, rises from 50Hz to 200Hz)
-    triChord([ri(50*p,0), ri(63*p,0), ri(75*p,0)], 'sine',
-      rr(0.20, 0.10), dur, [ri(200*p,0), ri(250*p,0), ri(300*p,0)], dur * 0.95, 0,
-      { attack: 0.3, hold: dur * 0.5, decay: dur * 0.2 });
-    // Layer 2: mid harmonic sweep (triangle, rises from 100Hz to 400Hz, starts 0.3s in)
-    triChord([ri(100*p,0), ri(126*p,0), ri(150*p,0)], 'triangle',
-      rr(0.12, 0.10), dur * 0.85, [ri(400*p,0), ri(500*p,0), ri(600*p,0)], dur * 0.8, 0.3,
-      { attack: 0.5, hold: dur * 0.35, decay: dur * 0.15 });
-    // Layer 3: bright upper sweep (sine, rises from 200Hz to 800Hz, fades in slowly)
-    triChord([ri(200*p,0), ri(252*p,0), ri(300*p,0)], 'sine',
-      rr(0.06, 0.10), dur * 0.7, [ri(800*p,0), ri(1000*p,0), ri(1200*p,0)], dur * 0.65, 0.6,
-      { attack: 0.8, hold: dur * 0.15, decay: dur * 0.1 });
-    // Layer 4: shimmer (soft filtered noise that rises in pitch with the charge)
-    playNoiseBurst(dur * 0.8, rr(0.04, 0.2), now, ri(200, 0.15), rr(0.5, 0.2));
-    playNoiseBurst(dur * 0.5, rr(0.03, 0.2), now + 0.8, ri(600, 0.2), rr(0.6, 0.2));
-    playNoiseBurst(dur * 0.3, rr(0.02, 0.2), now + 1.6, ri(1200, 0.2), rr(0.5, 0.2));
-    // Release tone: bright chord at the end when fully charged
-    triChord([ri(300*p,0), ri(378*p,0), ri(450*p,0)], 'sine',
-      rr(0.15, 0.10), 0.6, null, null, dur - 0.1,
-      { attack: 0.02, hold: 0.15, decay: 0.43 });
-  }
-  else if (type === 'stun') {
-    // Electric stun hit: Arc Wave / Energy Siphon land a slowing zap on the
-    // target. The sound has to read instantly as "you got disabled" without
-    // stepping on the existing damage / damage_shield events that fire on the
-    // same frame ; so we keep it short (~0.4 s) and lean into electric
-    // character (sawtooth + bandpassed crackle) instead of low-end weight.
-    //
-    // Layered as: (1) crackle noise burst for the contact transient,
-    // (2) a high sawtooth dyad that wobbles down a fifth to feel like the
-    // target's flight system is being yanked, (3) a brief sub thump so the
-    // hit has body, (4) a very short descending sine "blip" to sell the
-    // disorientation.
-    const p = rr(1, 0.10);
-    // (1) Bright electric crackle: narrow bandpass at ~2.4 kHz, short.
-    playNoiseBurst(rr(0.18, 0.20), rr(0.18, 0.20), now, ri(2400, 0.20), rr(2.2, 0.25));
-    // Secondary mid-band sizzle for body of the zap.
-    playNoiseBurst(rr(0.14, 0.25), rr(0.10, 0.25), now + 0.01, ri(900, 0.25), rr(1.2, 0.25));
-    // (2) Wobbling sawtooth dyad: starts ~440 Hz, drops to ~290 Hz over 0.30 s.
-    // Modeled as a triChord with explicit end frequencies so it slides; the
-    // perfect-fifth → fourth interval keeps it musical but uneasy.
-    triChord(
-      [ri(440 * p, 0), ri(660 * p, 0)],
-      'sawtooth',
-      rr(0.18, 0.15), rr(0.30, 0.15),
-      [ri(290 * p, 0), ri(435 * p, 0)],
-      rr(0.28, 0.15), 0,
-      { attack: 0.002, hold: 0.02, decay: rr(0.27, 0.15) }
-    );
-    // (3) Sub thump so the contact has weight without competing with damage.
-    playNoiseBurst(rr(0.06, 0.25), rr(0.22, 0.20), now, ri(70, 0.30), rr(0.8, 0.25));
-    // (4) Disorientation blip: short descending sine, lands a beat after the
-    // crackle so the ear reads "hit, then you go woozy" rather than a single
-    // mass of noise.
-    triChord(
-      [ri(880 * p, 0)],
-      'sine',
-      rr(0.10, 0.20), 0.10,
-      [ri(330 * p, 0)],
-      0.09, 0.05,
-      { attack: 0.003, hold: 0.01, decay: 0.08 }
-    );
-  }
-  else if (type === 'reload') {
-    const p = rr(1, 0.08);
-    triChord([ri(110*p,0), ri(138*p,0), ri(165*p,0)], 'square',
-      rr(0.10, 0.15), rr(0.06, 0.2), null, null, 0,
-      { attack: 0.001, hold: 0, decay: rr(0.06, 0.2) });
-    triChord([ri(82*p,0), ri(103*p,0), ri(123*p,0)], 'square',
-      rr(0.10, 0.15), rr(0.06, 0.2), null, null, rr(0.07, 0.15),
-      { attack: 0.001, hold: 0, decay: rr(0.06, 0.2) });
-    playNoiseBurst(rr(0.02, 0.2), rr(0.06, 0.2), now, ri(2800, 0.15), rr(3.0, 0.2));
-  }
-  else if (type === 'death') {
-    // Ship death: dramatic descending drone with heavy randomization.
-    // Multiple overlapping layers, random metallic debris, and a bass drop.
-    duckAmbient(0.30); // deep duck; death is the loudest event in the mix
-    const p = rr(1, 0.15); // large pitch variation per death
-    const size = rr(1, 0.2);
-    // Sub-bass impulse at death onset: 35 Hz pure sine, ADSR 5/100/600 ms.
-    // Routes through dry only (no reverb, keeps it physical not ringing). Lands the
-    // concussion in the chest before the descending drone even starts.
-    {
-      const subOsc = ctx.createOscillator();
-      const subGain = ctx.createGain();
-      subOsc.type = 'sine';
-      subOsc.frequency.setValueAtTime(35 * p, now);
-      // Drop to 25 Hz over the decay for a felt "thud-hum"
-      subOsc.frequency.exponentialRampToValueAtTime(25 * p, now + 0.70);
-      const subPeak = rr(0.45, 0.15) * size;
-      subGain.gain.setValueAtTime(0.001, now);
-      subGain.gain.linearRampToValueAtTime(subPeak, now + 0.005); // 5 ms attack
-      subGain.gain.setValueAtTime(subPeak, now + 0.005 + 0.100);  // 100 ms hold
-      subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.005 + 0.100 + 0.600); // 600 ms decay
-      subOsc.connect(subGain);
-      // Dry only: sub-bass through reverb smears the transient
-      if (audio.dryGain) subGain.connect(audio.dryGain);
-      else subGain.connect(audio.masterGain);
-      subOsc.start(now); subOsc.stop(now + 0.72);
-    }
-    // Primary descending drone (sawtooth for grit)
-    triChord([ri(82*p,0), ri(98*p,0), ri(123*p,0)], rWave(['sawtooth','square']),
-      rr(0.25, 0.15), rr(1.30, 0.15) * size, [ri(20*p,0), ri(25*p,0), ri(30*p,0)], rr(1.10, 0.15), 0,
-      { attack: rr(0.03, 0.3), hold: rr(0.10, 0.3), decay: rr(1.17, 0.12) });
-    // Secondary descending layer (sine for depth)
-    triChord([ri(55*p,0), ri(65*p,0), ri(82*p,0)], 'sine',
-      rr(0.15, 0.15), rr(1.00, 0.15) * size, [ri(15*p,0), ri(18*p,0), ri(22*p,0)], rr(0.90, 0.15), rr(0.20, 0.2),
-      { attack: rr(0.03, 0.3), hold: rr(0.08, 0.3), decay: rr(0.89, 0.12) });
-    // Debris noise (randomized filter)
-    playNoiseBurst(rr(0.80, 0.25) * size, rr(0.15, 0.2), now, ri(200, 0.35), rr(0.6, 0.3));
-    // Heavy sub-bass drop (the hull crunching)
-    playNoiseBurst(rr(0.60, 0.2) * size, rr(0.25, 0.2), now + r() * 0.05, ri(50, 0.3), rr(0.3, 0.3));
-    // Delayed secondary explosion (reactor breach)
-    const delay2 = 0.15 + r() * 0.25;
-    playNoiseBurst(rr(0.40, 0.3), rr(0.20, 0.2), now + delay2, ri(400, 0.4), rr(0.5, 0.3));
-    playNoiseBurst(rr(0.25, 0.3), rr(0.08, 0.3), now + delay2 + 0.01, ri(1000, 0.3), rr(0.8, 0.3));
-    // Random metallic shrapnel (0 to 3 pieces)
-    const shrapnel = Math.floor(r() * 4);
-    for (let i = 0; i < shrapnel; i++) {
-      const sp = rr(1, 0.3);
-      const t = 0.1 + r() * 0.5;
-      triChord([ri(180*sp,0), ri(260*sp,0)], rWave(['triangle','square','sawtooth']),
-        rr(0.03, 0.3), rr(0.15, 0.3), [ri(80*sp,0), ri(120*sp,0)], rr(0.12, 0.3), t,
-        { attack: 0.001, hold: 0, decay: rr(0.15, 0.3) });
-    }
-    // Occasional deep groan (structural failure)
-    if (r() > 0.4) {
-      const gp = rr(1, 0.25);
-      triChord([ri(30*gp,0), ri(38*gp,0), ri(45*gp,0)], 'sawtooth',
-        rr(0.08, 0.3), rr(0.80, 0.2), [ri(10*gp,0), ri(13*gp,0), ri(15*gp,0)], rr(0.70, 0.2), rr(0.30, 0.3),
-        { attack: rr(0.05, 0.3), hold: rr(0.05, 0.3), decay: rr(0.70, 0.15) });
-    }
-  }
-  else if (type === 'sonar_ping' || type === 'sonar_ping_1' || type === 'sonar_ping_2' || type === 'sonar_ping_3') {
-    // Lock-on sonar ping: pitch + rate scale with lock level (1..3).
-    // Level 1: one pip at ~880 Hz. Level 2: two pips at ~1100 Hz. Level 3: four pips at ~1480 Hz (full-lock).
-    const level = (type === 'sonar_ping_3') ? 3 : (type === 'sonar_ping_2') ? 2 : 1;
-    const basePitches = [0, 880, 1100, 1480];
-    const basePitch = basePitches[level];
-    const pipCount = level === 3 ? 4 : level * 2; // lvl 1 → 2, lvl 2 → 2, lvl 3 → 4 (per plan "2 pip cycles at half-lock, 4 at full-lock")
-    const pips = level === 1 ? 1 : pipCount; // level 1: single soft pip
-    const pipSpacing = level === 3 ? 0.055 : 0.090; // faster at full lock
-    for (let i = 0; i < pips; i++) {
-      const pipP = rr(1, 0.03);
-      const pipFreq = basePitch * pipP;
-      triChord(
-        [pipFreq, pipFreq * 1.5], // ping + fifth harmonic
-        'sine',
-        rr(0.08, 0.2), 0.055, null, null, i * pipSpacing,
-        { attack: 0.002, hold: 0, decay: 0.050 }
-      );
-    }
-    // Low sub-blip at full lock: signals threat
-    if (level >= 3) {
-      triChord([70, 90], 'sine', 0.06, 0.12, null, null, 0,
-        { attack: 0.003, hold: 0, decay: 0.10 });
-    }
-  }
-  else if (type === 'round_start') {
-    // Three rising chords, but the third resolves up a fifth (E major base jumps
-    // to B major, the dominant) rather than continuing the sequence linearly. A
-    // reverse-cymbal swell rides under chord 2 and peaks exactly on the resolve.
-    triChord([65, 82, 98], 'sine', 0.18, 0.35, null, null, 0,
-      { attack: 0.01, hold: 0.08, decay: 0.26 });
-    triChord([73, 92, 110], 'sine', 0.18, 0.35, null, null, 0.18,
-      { attack: 0.01, hold: 0.08, decay: 0.26 });
-    // Reverse cymbal: white/high noise with inverted envelope (silent → full)
-    // ramping over 0.36 s to land on the resolve chord. Built inline because
-    // playNoiseBurst has a fixed decaying envelope.
-    try {
-      const ctx = audio.ctx;
-      const swellDur = 0.36;
-      const swellStart = now;
-      const bufSize = Math.floor(ctx.sampleRate * swellDur);
-      const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      const sGain = ctx.createGain();
-      sGain.gain.setValueAtTime(0.001, swellStart);
-      sGain.gain.exponentialRampToValueAtTime(0.18, swellStart + swellDur);
-      const sFilter = ctx.createBiquadFilter();
-      sFilter.type = 'highpass';
-      sFilter.frequency.value = 1800;
-      sFilter.Q.value = 0.7;
-      src.connect(sFilter);
-      sFilter.connect(sGain);
-      const drySink = audio.dryGain || audio.masterGain;
-      sGain.connect(drySink);
-      if (audio.convolver) sGain.connect(audio.convolver);
-      src.start(swellStart);
-      src.stop(swellStart + swellDur + 0.01);
-    } catch (e) {}
-    // The resolve: chord rooted a fifth above the first (C → G). B major feel at
-    // the top of the voicing, played slightly longer/louder so the climax lands.
-    triChord([98, 123, 147], 'sine', 0.24, 0.50, null, null, 0.36,
-      { attack: 0.005, hold: 0.18, decay: 0.31 });
-  }
-}
-
-// ---- HRTF spatial playback wrapper ----
-// Wraps playSound so its dry tap is routed through a per-call PannerNode positioned
-// relative to the camera. Ambient bed stays unspatialized (bypasses sfxBus entirely).
-// Reverb tap goes to the shared convolver so every spatial source shares room tone.
-// A BiquadFilter sits between panner and sfxBus: if the line from camera to source
-// passes through level geometry, cutoff drops so high frequencies attenuate (occlusion).
-const _spatialRelPos = new THREE.Vector3();
-const _spatialInvQuat = new THREE.Quaternion();
-const _spatialCamPos = new THREE.Vector3();
-const _spatialDir = new THREE.Vector3();
-const _spatialRaycaster = new THREE.Raycaster();
-_spatialRaycaster.firstHitOnly = true;
-// Pool of { panner, occl, occlGain } triples. Each call to playSpatialSound
-// acquires a triple, uses it for ~4s, then releases it back. Nodes are reset on
-// release (cancelScheduledValues + disconnect) so they come back to acquire()
-// in a known-clean state. Keeps GC steady under rapid fire (minigun, salvos).
-const _spatialPool = [];
-const _SPATIAL_POOL_MAX = 32;
-function _acquireSpatialTriple(ctx) {
-  if (_spatialPool.length) return _spatialPool.pop();
-  return {
-    panner: ctx.createPanner(),
-    occl: ctx.createBiquadFilter(),
-    occlGain: ctx.createGain(),
-  };
-}
-function _releaseSpatialTriple(triple) {
-  if (!triple) return;
-  const { panner, occl, occlGain } = triple;
-  try { panner.disconnect(); } catch (e) {}
-  try { occl.disconnect(); } catch (e) {}
-  try { occlGain.disconnect(); } catch (e) {}
-  // Clear any pending automation so a reused node doesn't inherit stale values.
-  const now = (audio && audio.ctx) ? audio.ctx.currentTime : 0;
-  try { panner.positionX.cancelScheduledValues(now); } catch (e) {}
-  try { panner.positionY.cancelScheduledValues(now); } catch (e) {}
-  try { panner.positionZ.cancelScheduledValues(now); } catch (e) {}
-  try { occl.frequency.cancelScheduledValues(now); } catch (e) {}
-  try { occl.Q.cancelScheduledValues(now); } catch (e) {}
-  try { occlGain.gain.cancelScheduledValues(now); } catch (e) {}
-  if (_spatialPool.length < _SPATIAL_POOL_MAX) _spatialPool.push(triple);
-}
-// (v8_2a) HRTF body renamed to _playSpatialSoundHRTF; the public
-// playSpatialSound below dispatches between this (stereo / headphones)
-// and _playSpatialSound51 (real 5.1 surround output).
-function _playSpatialSoundHRTF(type, worldPos, opts) {
-  if (!audio.initialized || !audio.ctx) return;
-  if (!worldPos || !camera) return playSound(type);
-  const triple = _acquireSpatialTriple(audio.ctx);
-  const { panner, occl, occlGain } = triple;
-  try {
-    panner.panningModel = 'HRTF';
-    panner.distanceModel = 'inverse';
-    // Optional range override: some sounds (titan core activation) should carry farther.
-    // refDistance = how close before attenuation begins; higher = louder at distance.
-    // rolloffFactor < 1 = slower falloff with distance.
-    panner.refDistance = (opts && opts.refDistance) || 250;
-    panner.maxDistance = (opts && opts.maxDistance) || 8000;
-    panner.rolloffFactor = (opts && opts.rolloffFactor) || 1.0;
-    // Compute listener-relative position (camera at origin, looking -Z in local space).
-    camera.getWorldPosition(_spatialCamPos);
-    _spatialRelPos.subVectors(worldPos, _spatialCamPos);
-    const distToSource = _spatialRelPos.length();
-    _spatialInvQuat.copy(camera.quaternion).invert();
-    _spatialRelPos.applyQuaternion(_spatialInvQuat);
-    const t = audio.ctx.currentTime;
-    // Web Audio listener looks down -Z by default; Three.js camera looks down -Z; after
-    // inverse-camera-rotation our local -Z matches the listener's forward.
-    panner.positionX.setValueAtTime(_spatialRelPos.x, t);
-    panner.positionY.setValueAtTime(_spatialRelPos.y, t);
-    panner.positionZ.setValueAtTime(_spatialRelPos.z, t);
-    // Occlusion lowpass: raycast camera -> source against level meshes. If occluded,
-    // drop cutoff so high freqs get eaten by the wall. Also drop gain slightly.
-    occl.type = 'lowpass';
-    let cutoff = 18000;
-    let occludedGain = 1.0;
-    if (distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
-      _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
-      _spatialRaycaster.set(_spatialCamPos, _spatialDir);
-      _spatialRaycaster.near = 0;
-      _spatialRaycaster.far = distToSource * 0.99;
-      const hits = _spatialRaycaster.intersectObjects(game.mapMeshes, false);
-      if (hits && hits.length) {
-        // A hit between listener and source = occluded. Shorter path inside geometry
-        // = thinner wall = less attenuation. Use ray distance ratio as a rough proxy.
-        const h = hits[0];
-        const penetration = distToSource - h.distance;
-        // 100 u = thin wall, 1000+ u = deep occlusion
-        const wallDepth = Math.min(1.0, penetration / 600);
-        cutoff = 2400 - 1500 * wallDepth; // 2400 Hz thin, ~900 Hz deep
-        occludedGain = 0.55 - 0.20 * wallDepth; // -5 dB thin, -9 dB deep
-      }
-    }
-    occl.frequency.setValueAtTime(cutoff, t);
-    occl.Q.setValueAtTime(0.707, t);
-    occlGain.gain.setValueAtTime(occludedGain, t);
-    panner.connect(occl);
-    occl.connect(occlGain);
-    occlGain.connect(audio.sfxBus || audio.masterGain);
-    audio._spatialSink = panner;
-    playSound(type);
-    audio._spatialSink = null;
-    // Return to pool after the sound tail has played out. 4s is well past the
-    // longest sfx envelope; keeps the pool saturated under rapid fire.
-    setTimeout(() => { _releaseSpatialTriple(triple); }, 4000);
-  } catch (e) {
-    audio._spatialSink = null;
-    _releaseSpatialTriple(triple);
-    playSound(type);
-  }
-}
-
-// ============================================================
-// === v8_2a: 5.1 surround spatial path (real per-speaker) ====
-// ============================================================
-// On systems with maxChannelCount >= 6 the public playSpatialSound
-// dispatches into _playSpatialSound51 below. VBAP (vector base
-// amplitude panning) computes per-speaker gains from listener-local
-// azimuth, sums them via ChannelMerger(6), and feeds the parallel
-// spatial51Bus chain set up in initAudio. Cheaper per-voice than
-// HRTF and actually drives the rear/center/sub speakers.
-
-// 5.1 'speakers' channel index map (Web Audio):
-//   0 FL, 1 FR, 2 C, 3 LFE, 4 SL, 5 SR
-const _SPK51_FL  = 0;
-const _SPK51_FR  = 1;
-const _SPK51_C   = 2;
-const _SPK51_LFE = 3;
-const _SPK51_SL  = 4;
-const _SPK51_SR  = 5;
-
-// Speaker azimuth in radians (counter-clockwise from forward, left positive).
-const _SPK51_AZ_FL = ( 30 * Math.PI) / 180;
-const _SPK51_AZ_FR = (-30 * Math.PI) / 180;
-const _SPK51_AZ_SL = (110 * Math.PI) / 180;
-const _SPK51_AZ_SR = (-110 * Math.PI) / 180;
-
-// Pool of 5.1 panner triples: 9 nodes per voice (occl filter, LFE
-// crossover, 6 per-speaker gains, 1 channel merger).
-const _spatial51Pool = [];
-const _SPATIAL51_POOL_MAX = 32;
-function _acquireSpatial51(ctx) {
-  if (_spatial51Pool.length) return _spatial51Pool.pop();
-  return {
-    occl:   ctx.createBiquadFilter(),
-    lpfLFE: ctx.createBiquadFilter(),
-    gFL:    ctx.createGain(),
-    gFR:    ctx.createGain(),
-    gC:     ctx.createGain(),
-    gLFE:   ctx.createGain(),
-    gSL:    ctx.createGain(),
-    gSR:    ctx.createGain(),
-    merger: ctx.createChannelMerger(6),
-  };
-}
-function _releaseSpatial51(triple) {
-  if (!triple) return;
-  const now = (audio && audio.ctx) ? audio.ctx.currentTime : 0;
-  for (const k in triple) {
-    const n = triple[k];
-    try { n.disconnect(); } catch (_) {}
-    if (n && n.gain && n.gain.cancelScheduledValues) {
-      try { n.gain.cancelScheduledValues(now); } catch (_) {}
-    }
-    if (n && n.frequency && n.frequency.cancelScheduledValues) {
-      try { n.frequency.cancelScheduledValues(now); } catch (_) {}
-    }
-    if (n && n.Q && n.Q.cancelScheduledValues) {
-      try { n.Q.cancelScheduledValues(now); } catch (_) {}
-    }
-  }
-  if (_spatial51Pool.length < _SPATIAL51_POOL_MAX) _spatial51Pool.push(triple);
-}
-
-// Constant-power VBAP for 5.1. Source azimuth in radians (counter-
-// clockwise from forward). Returns { fl, fr, c, sl, sr } in [0, 1].
-// No rear-center speaker; back zone splits between SL and SR at half
-// power so directly behind the listener reads as a wide rear pair.
-function _vbap51(azRad) {
-  let az = azRad;
-  while (az >  Math.PI) az -= 2 * Math.PI;
-  while (az < -Math.PI) az += 2 * Math.PI;
-  let fl = 0, fr = 0, c = 0, sl = 0, sr = 0;
-  if (az >= 0) {
-    if (az <= _SPK51_AZ_FL) {
-      const t = az / _SPK51_AZ_FL;
-      c  = Math.cos(t * Math.PI / 2);
-      fl = Math.sin(t * Math.PI / 2);
-    } else if (az <= _SPK51_AZ_SL) {
-      const t = (az - _SPK51_AZ_FL) / (_SPK51_AZ_SL - _SPK51_AZ_FL);
-      fl = Math.cos(t * Math.PI / 2);
-      sl = Math.sin(t * Math.PI / 2);
-    } else {
-      const t = (az - _SPK51_AZ_SL) / (Math.PI - _SPK51_AZ_SL);
-      sl = Math.cos(t * Math.PI / 4);
-      sr = Math.sin(t * Math.PI / 4);
-    }
-  } else {
-    if (az >= _SPK51_AZ_FR) {
-      const t = az / _SPK51_AZ_FR;
-      c  = Math.cos(t * Math.PI / 2);
-      fr = Math.sin(t * Math.PI / 2);
-    } else if (az >= _SPK51_AZ_SR) {
-      const t = (az - _SPK51_AZ_FR) / (_SPK51_AZ_SR - _SPK51_AZ_FR);
-      fr = Math.cos(t * Math.PI / 2);
-      sr = Math.sin(t * Math.PI / 2);
-    } else {
-      const t = (az - _SPK51_AZ_SR) / (-Math.PI - _SPK51_AZ_SR);
-      sr = Math.cos(t * Math.PI / 4);
-      sl = Math.sin(t * Math.PI / 4);
-    }
-  }
-  return { fl, fr, c, sl, sr };
-}
-
-function _playSpatialSound51(type, worldPos, opts) {
-  if (!audio.initialized || !audio.ctx) return;
-  if (!worldPos || !camera) return playSound(type);
-  if (!audio.spatial51Bus) return _playSpatialSoundHRTF(type, worldPos, opts);
-  const triple = _acquireSpatial51(audio.ctx);
-  const { occl, lpfLFE, gFL, gFR, gC, gLFE, gSL, gSR, merger } = triple;
-  try {
-    camera.getWorldPosition(_spatialCamPos);
-    _spatialRelPos.subVectors(worldPos, _spatialCamPos);
-    const distToSource = _spatialRelPos.length();
-    _spatialInvQuat.copy(camera.quaternion).invert();
-    _spatialRelPos.applyQuaternion(_spatialInvQuat);
-    // camera-local: -Z forward, +X right; az = atan2(-x, -z) so left is positive.
-    const az = Math.atan2(-_spatialRelPos.x, -_spatialRelPos.z);
-
-    const refDist = (opts && opts.refDistance)  || 250;
-    const maxDist = (opts && opts.maxDistance)  || 8000;
-    const rolloff = (opts && opts.rolloffFactor) || 1.0;
-    let distGain;
-    if (distToSource <= refDist) distGain = 1.0;
-    else if (distToSource >= maxDist) distGain = 0.0;
-    else distGain = refDist / (refDist + rolloff * (distToSource - refDist));
-
-    const pan = _vbap51(az);
-    const _cScale = 0.85;
-    const _lfeScale = 0.35;
-
-    occl.type = 'lowpass';
-    let cutoff = 18000;
-    let occludedGain = 1.0;
-    if (distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
-      _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
-      _spatialRaycaster.set(_spatialCamPos, _spatialDir);
-      _spatialRaycaster.near = 0;
-      _spatialRaycaster.far = distToSource * 0.99;
-      const hits = _spatialRaycaster.intersectObjects(game.mapMeshes, false);
-      if (hits && hits.length) {
-        const h = hits[0];
-        const penetration = distToSource - h.distance;
-        const wallDepth = Math.min(1.0, penetration / 600);
-        cutoff = 2400 - 1500 * wallDepth;
-        occludedGain = 0.55 - 0.20 * wallDepth;
-      }
-    }
-    const t = audio.ctx.currentTime;
-    occl.frequency.setValueAtTime(cutoff, t);
-    occl.Q.setValueAtTime(0.707, t);
-
-    const g = distGain * occludedGain;
-    gFL.gain.setValueAtTime(pan.fl * g,           t);
-    gFR.gain.setValueAtTime(pan.fr * g,           t);
-    gC .gain.setValueAtTime(pan.c  * g * _cScale, t);
-    gSL.gain.setValueAtTime(pan.sl * g,           t);
-    gSR.gain.setValueAtTime(pan.sr * g,           t);
-    gLFE.gain.setValueAtTime(g * _lfeScale,       t);
-
-    lpfLFE.type = 'lowpass';
-    lpfLFE.frequency.setValueAtTime(80, t);
-    lpfLFE.Q.setValueAtTime(0.707, t);
-
-    occl.connect(gFL);    gFL .connect(merger, 0, _SPK51_FL);
-    occl.connect(gFR);    gFR .connect(merger, 0, _SPK51_FR);
-    occl.connect(gC);     gC  .connect(merger, 0, _SPK51_C);
-    occl.connect(lpfLFE); lpfLFE.connect(gLFE); gLFE.connect(merger, 0, _SPK51_LFE);
-    occl.connect(gSL);    gSL .connect(merger, 0, _SPK51_SL);
-    occl.connect(gSR);    gSR .connect(merger, 0, _SPK51_SR);
-    merger.connect(audio.spatial51Bus);
-
-    audio._spatialSink = occl;
-    playSound(type);
-    audio._spatialSink = null;
-
-    setTimeout(() => { _releaseSpatial51(triple); }, 4000);
-  } catch (e) {
-    audio._spatialSink = null;
-    _releaseSpatial51(triple);
-    playSound(type);
-  }
-}
-
-// (v8_2a) Public spatial-sound entry. Dispatches to the 5.1 path when
-// the system has a multi-channel destination, otherwise the HRTF path.
-function playSpatialSound(type, worldPos, opts) {
-  if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
-  return _playSpatialSoundHRTF(type, worldPos, opts);
-}
-
-// ============================================================
-// === LSS BAND v1 (Tier 3 reactive music) ====================
-// ============================================================
-// Procedural in-game band that scores the match in real time.
-// Synth recipes lifted from framework_dancing_cosmos_band.html
-// (drums, bass, pad, lead). The scheduler is a tiny lookahead
-// clock; reactive hooks below feed it gameplay events.
-//
-// First principles (LSS_music_tier3_plan-may01-2026.md, sec. 0):
-//   1. A steady beat is the most important part.
-//   2. Rhythms are built on beats, not wall-clock.
-//   3. Chords have to fit together (voice leading).
-//   4. Chords are tuned to important game frequencies. Default
-//      tonic is C#2 (~69.3 Hz), matching PHI_REST_BASE so the
-//      pad shares its root with the ambient bed.
-// ============================================================
-
-// Default tonic: 69 Hz = ~C#2, same as PHI_REST_BASE on the
-// ambient bed. The band's pad root sits ON the drone fundamental.
-const MUSIC_DEFAULT_KEY_HZ = 69; // C#2 (69.30 Hz exact)
-
-// MIDI note for C#2 = 37. We store keys as MIDI numbers so the
-// synth helpers can convert to Hz cleanly.
-const MUSIC_DEFAULT_KEY_MIDI = 37; // C#2
-
-// Scale degree tables (semitone offsets from root).
-const MUSIC_SCALE_AEOLIAN  = [0, 2, 3, 5, 7, 8, 10];  // natural minor
-const MUSIC_SCALE_PHRYGIAN = [0, 1, 3, 5, 7, 8, 10];  // b2 unease (LSS aesthetic)
-const MUSIC_PENTATONIC_MIN = [0, 3, 5, 7, 10];        // safe-over-anything lead palette
-
-// Music engine state. Separate from `audio` so hot-reloads of the
-// band code don't blow away the audio bus, and vice versa.
-const music = {
-  enabled: true,                // master on/off (settings + autoplay gate)
-  volume: 0.55,                 // userVol.music mirror, drives audio.musicGain
-  ctx: null,                    // resolved in musicEnsureCtx()
-  out: null,                    // audio.musicGain
-  // Clock
-  bpm: 96,
-  bpmTarget: 96,
-  beat: 0,
-  bar: 0,
-  nextBeatAt: 0,                // ctx.currentTime of next scheduled beat
-  lookaheadSec: 0.18,           // schedule this far ahead
-  schedTimer: null,             // setInterval handle
-  // Key + mode
-  keyMidi: MUSIC_DEFAULT_KEY_MIDI,
-  mode: 'aeolian',              // 'aeolian' | 'phrygian'
-  scale: MUSIC_SCALE_AEOLIAN,   // active scale array
-  // Style: shapes BPM, key, mode, waveforms, and per-pattern riff overrides.
-  styleId: 'cosmic',
-  leadWave: 'triangle',
-  bassWave: 'sawtooth',
-  padWave: 'sawtooth',
-  bpmScale: 1.0,                // multiplier on top of pattern bpmTarget
-  // Pattern + dynamic state
-  patternId: 'silent',
-  intensity: 1,                 // 0..3 (capped by musicCeiling)
-  ceiling: 3,
-  // Reactive state
-  drumsSuspended: false,        // stasis-field silence
-  doomedMode: false,            // Phrygian drone overlay
-  lastKillBeat: -999,
-  multikillCount: 0,
-  // Active voices for cleanup on pattern change.
-  activeVoices: [],
-  // Pad chord memory for voice leading.
-  lastPadVoicing: null,
-  // Anti-redundant: don't reschedule pad chord on every beat.
-  lastChordKey: null,
-  // Bookkeeping for the lead phrase queue (kill-triggered notes).
-  pendingLeadNotes: [],         // [{atBeat, note, dur, vel}]
-};
-
-// Convert MIDI note number to Hz.
-function _musicMidiHz(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
-
-// === SYNTH RECIPES (lifted from framework_dancing_cosmos_band.html) ===
-
-// Drum: kick (note 35/36), snare (38/40), crash (49/57), default = hat.
-function _musicSynthDrum(note, g, when, out) {
-  const ctx = music.ctx;
-  if (!ctx) return null;
-  if (note === 35 || note === 36) {
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(150, when);
-    osc.frequency.exponentialRampToValueAtTime(45, when + 0.1);
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.9 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.28);
-    osc.connect(amp).connect(out);
-    osc.start(when); osc.stop(when + 0.35);
-    return { stop: (t) => { try { osc.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
-  }
-  if (note === 38 || note === 40) {
-    const buf = ctx.createBuffer(1, 4096, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.loop = true;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.8;
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.7 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.15);
-    src.connect(bp).connect(amp).connect(out);
-    src.start(when); src.stop(when + 0.18);
-    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
-  }
-  if (note === 49 || note === 57) {
-    const buf = ctx.createBuffer(1, 8192, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.loop = true;
-    const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 5000;
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.35 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.005, when + 1.2);
-    src.connect(hp).connect(amp).connect(out);
-    src.start(when); src.stop(when + 1.3);
-    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
-  }
-  // Default = hat (closed).
-  const buf = ctx.createBuffer(1, 1024, ctx.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-  const src = ctx.createBufferSource();
-  src.buffer = buf;
-  const hp = ctx.createBiquadFilter();
-  hp.type = 'highpass'; hp.frequency.value = 7000;
-  const amp = ctx.createGain();
-  amp.gain.setValueAtTime(0.35 * g, when);
-  amp.gain.exponentialRampToValueAtTime(0.005, when + 0.06);
-  src.connect(hp).connect(amp).connect(out);
-  src.start(when); src.stop(when + 0.08);
-  return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
-}
-
-function _musicSynthBass(freq, g, when, out, durSec) {
-  const ctx = music.ctx;
-  if (!ctx) return null;
-  const osc = ctx.createOscillator();
-  osc.type = music.bassWave || 'sawtooth'; osc.frequency.value = freq;
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 450; lp.Q.value = 1;
-  const amp = ctx.createGain();
-  amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.48 * g, when + 0.008);
-  amp.gain.linearRampToValueAtTime(0.30 * g, when + 0.15);
-  osc.connect(lp).connect(amp).connect(out);
-  osc.start(when);
-  // Auto-stop on duration. Caller can also stop early via the returned handle.
-  const stopAt = when + (durSec != null ? durSec : 0.5);
-  amp.gain.setValueAtTime(0.30 * g, stopAt);
-  amp.gain.linearRampToValueAtTime(0, stopAt + 0.05);
-  try { osc.stop(stopAt + 0.1); } catch (_) {}
-  let stopped = false;
-  return {
-    stop: (t) => {
-      if (stopped) return; stopped = true;
-      try {
-        amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
-        amp.gain.linearRampToValueAtTime(0, t + 0.05);
-        osc.stop(t + 0.1);
-      } catch (_) {}
-    }
-  };
-}
-
-function _musicSynthPad(freq, g, when, out, durSec) {
-  const ctx = music.ctx;
-  if (!ctx) return null;
-  const o1 = ctx.createOscillator();
-  const o2 = ctx.createOscillator();
-  const padWave = music.padWave || 'sawtooth';
-  o1.type = padWave; o2.type = padWave;
-  o1.frequency.value = freq;
-  o2.frequency.value = freq * 1.005;
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 1400; lp.Q.value = 0.7;
-  const amp = ctx.createGain();
-  amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.18 * g, when + 0.35);
-  o1.connect(lp); o2.connect(lp);
-  lp.connect(amp).connect(out);
-  o1.start(when); o2.start(when);
-  const stopAt = when + (durSec != null ? durSec : 2.0);
-  amp.gain.setValueAtTime(0.18 * g, stopAt);
-  amp.gain.linearRampToValueAtTime(0, stopAt + 0.35);
-  try { o1.stop(stopAt + 0.4); o2.stop(stopAt + 0.4); } catch (_) {}
-  let stopped = false;
-  return {
-    stop: (t) => {
-      if (stopped) return; stopped = true;
-      try {
-        amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
-        amp.gain.linearRampToValueAtTime(0, t + 0.35);
-        o1.stop(t + 0.4); o2.stop(t + 0.4);
-      } catch (_) {}
-    }
-  };
-}
-
-function _musicSynthLead(freq, g, when, out, durSec) {
-  const ctx = music.ctx;
-  if (!ctx) return null;
-  const osc = ctx.createOscillator();
-  osc.type = music.leadWave || 'triangle'; osc.frequency.value = freq;
-  const amp = ctx.createGain();
-  amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.28 * g, when + 0.015);
-  amp.gain.linearRampToValueAtTime(0.14 * g, when + 0.12);
-  osc.connect(amp).connect(out);
-  osc.start(when);
-  const stopAt = when + (durSec != null ? durSec : 0.35);
-  amp.gain.setValueAtTime(0.14 * g, stopAt);
-  amp.gain.linearRampToValueAtTime(0, stopAt + 0.08);
-  try { osc.stop(stopAt + 0.12); } catch (_) {}
-  let stopped = false;
-  return {
-    stop: (t) => {
-      if (stopped) return; stopped = true;
-      try {
-        amp.gain.cancelScheduledValues(t);
-        amp.gain.setValueAtTime(amp.gain.value, t);
-        amp.gain.linearRampToValueAtTime(0, t + 0.08);
-        osc.stop(t + 0.12);
-      } catch (_) {}
-    }
-  };
-}
-
-// === CHORD HELPERS ===
-
-// Build a chord from scale degree (0..6) + quality.
-// Returns array of MIDI offsets from keyMidi.
-function _musicChord(degree, quality) {
-  const scale = music.scale;
-  const root = scale[degree % 7];
-  if (quality === 'maj') return [root, root + 4, root + 7];
-  if (quality === 'dim') return [root, root + 3, root + 6];
-  return [root, root + 3, root + 7]; // 'min' default
-}
-
-// Voice-leading: pick the closest octave for each pad note relative to the
-// previous voicing. Pad sits ~24 semitones above keyMidi (mid-low pad register).
-function _musicVoicePad(chord) {
-  const baseMidi = music.keyMidi + 24;
-  if (!music.lastPadVoicing) {
-    return chord.map(n => baseMidi + n);
-  }
-  const prev = music.lastPadVoicing;
-  return chord.map((n, i) => {
-    let target = baseMidi + n;
-    const reference = prev[i] != null ? prev[i] : baseMidi + n;
-    // Move target by octaves to minimize distance from reference.
-    while (target - reference > 6)  target -= 12;
-    while (reference - target > 6)  target += 12;
-    return target;
-  });
-}
-
-// === RIFF BUILDER ===
-// Picks scale-degree notes from music.scale and weaves them into rhythmic
-// patterns on a 16th-note grid. Each bar combines one rhythm (when the
-// notes hit) with one contour (which scale degrees they walk through).
-// The riff config attaches to a pattern via PATTERN_RIFFS below.
-
-// Scale-degree to semitone (auto-wraps octaves so contours can climb past 7).
-function _musicScaleSemitone(degree) {
-  const scale = music.scale; // length 7
-  const oct = Math.floor(degree / 7);
-  const d = ((degree % 7) + 7) % 7;
-  return scale[d] + oct * 12;
-}
-
-// 16-step rhythm grids (one bar of 16th notes). 0 = rest, 1 = note, 2 = accent.
-const RIFF_RHYTHMS = {
-  hover_quarters: [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0],   // sparse, two notes per bar
-  pulse_8ths:     [1,0,2,0, 1,0,2,0, 1,0,2,0, 1,0,2,0],   // steady 8th pulse, accents on the and
-  driving:        [2,0,1,0, 1,0,2,0, 0,1,1,0, 2,0,1,1],   // syncopated combat riff
-  galloping:      [2,0,1,1, 0,1,0,0, 2,0,1,1, 0,1,1,0],   // triplet-feel push
-  call_response:  [2,0,1,0, 0,1,0,0, 2,0,1,0, 0,1,2,0],   // call on bar 1, answer on bar 2 of pair
-  doomed_pulse:   [2,0,0,0, 1,0,0,1, 0,0,1,0, 0,1,0,0],   // unsteady, off-beat
-};
-
-// Scale-degree contours. 0 = root, 7 = next octave root, negative = below.
-// The riff builder walks through these in order, wrapping when notes run out.
-const RIFF_CONTOURS = {
-  hover_root:     [0, 4, 0, 4],                    // tonic/fifth alternation
-  rising:         [0, 2, 4, 5, 7, 9, 11, 12],      // diatonic ascent over 2 octaves
-  falling:        [12, 11, 9, 7, 5, 4, 2, 0],      // diatonic descent
-  zigzag:         [0, 4, 2, 5, 4, 7, 5, 9],        // up-down weave
-  riff_minor:     [0, 0, 2, 4, 7, 4, 2, 0],        // tonic-anchored minor riff
-  riff_blues:     [0, 2, 3, 4, 7, 4, 3, 2],        // blue-note flavor (uses scale degree 3 for b5-ish)
-  pentatonic_a:   [0, 2, 4, 7, 9, 7, 4, 2],        // ascending then descending pentatonic
-  doomed_creep:   [0, 1, 0, -2, 0, 1, 3, 1],       // crawls around the b2 (Phrygian sting)
-};
-
-// Pattern → riff config. Octave is added on top of keyMidi+24 (lead register).
-// barsPerCycle lets a riff span more than one bar before repeating (e.g. 2 bars
-// of "call" then "response").
-const PATTERN_RIFFS = {
-  lobby:    { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
-  warmup:   { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
-  combat:   { rhythm: 'driving',        contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
-  doomed:   { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
-  // Round-end and match-end patterns keep their scripted lead phrases ; no
-  // overlay riff so the cadence reads cleanly.
-};
-
-// === STYLES ===
-// A style is a complete musical aesthetic: it overrides the key, mode,
-// tempo scaling, oscillator waveforms, and per-pattern riff combo. Default
-// is 'cosmic' (the original LSS sound, C#2 Aeolian, triangle lead).
-//
-// Each style entry:
-//   keyMidi     : root note as MIDI number (37 = C#2)
-//   mode        : 'aeolian' | 'phrygian'
-//   bpmScale    : multiplier on top of each pattern's bpmTarget
-//   leadWave    : oscillator type for the lead synth ('sine'|'triangle'|'sawtooth'|'square')
-//   bassWave    : oscillator type for the bass
-//   padWave     : oscillator type for the pad
-//   riff        : per-pattern { rhythm, contour, barsPerCycle, octaveAdd } overrides
-const MUSIC_STYLES = {
-  cosmic: {
-    label: 'Cosmic',
-    keyMidi: 37,                  // C#2 ; matches PHI_REST_BASE on the ambient bed
-    mode: 'aeolian',
-    bpmScale: 1.0,
-    leadWave: 'triangle',
-    bassWave: 'sawtooth',
-    padWave: 'sawtooth',
-    riff: {
-      lobby:  { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
-      warmup: { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
-      combat: { rhythm: 'driving',        contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
-      doomed: { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
-    },
-  },
-  cyber: {
-    label: 'Cyber',                // 80s-synthwave vibe ; bright saw lead, fast 8ths
-    keyMidi: 38,                  // D2
-    mode: 'aeolian',
-    bpmScale: 1.15,
-    leadWave: 'sawtooth',
-    bassWave: 'square',
-    padWave: 'sawtooth',
-    riff: {
-      lobby:  { rhythm: 'pulse_8ths',     contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 0 },
-      warmup: { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
-      combat: { rhythm: 'pulse_8ths',     contour: 'rising',       barsPerCycle: 2, octaveAdd: 12 },
-      doomed: { rhythm: 'galloping',      contour: 'zigzag',       barsPerCycle: 2, octaveAdd: 0 },
-    },
-  },
-  doom: {
-    label: 'Doom',                 // metal-influenced ; lower key, darker contour, heavy
-    keyMidi: 33,                  // A1
-    mode: 'phrygian',
-    bpmScale: 0.85,
-    leadWave: 'sawtooth',
-    bassWave: 'sawtooth',
-    padWave: 'sawtooth',
-    riff: {
-      lobby:  { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: 0 },
-      warmup: { rhythm: 'galloping',      contour: 'doomed_creep', barsPerCycle: 1, octaveAdd: 0 },
-      combat: { rhythm: 'galloping',      contour: 'riff_blues',   barsPerCycle: 2, octaveAdd: -12 },
-      doomed: { rhythm: 'doomed_pulse',   contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
-    },
-  },
-  drift: {
-    label: 'Drift',                // ambient ; sine lead, slow tempo, sparse
-    keyMidi: 37,                  // C#2
-    mode: 'aeolian',
-    bpmScale: 0.7,
-    leadWave: 'sine',
-    bassWave: 'triangle',
-    padWave: 'triangle',
-    riff: {
-      lobby:  { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 12 },
-      warmup: { rhythm: 'hover_quarters', contour: 'rising',       barsPerCycle: 2, octaveAdd: 12 },
-      combat: { rhythm: 'hover_quarters', contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 12 },
-      doomed: { rhythm: 'hover_quarters', contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: 0 },
-    },
-  },
-  battle: {
-    label: 'Battle',               // cinematic / orchestral feel ; driving and grand
-    keyMidi: 35,                  // B1
-    mode: 'aeolian',
-    bpmScale: 1.25,
-    leadWave: 'sawtooth',
-    bassWave: 'sawtooth',
-    padWave: 'sawtooth',
-    riff: {
-      lobby:  { rhythm: 'driving',        contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
-      warmup: { rhythm: 'galloping',      contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
-      combat: { rhythm: 'galloping',      contour: 'rising',       barsPerCycle: 2, octaveAdd: 0 },
-      doomed: { rhythm: 'doomed_pulse',   contour: 'falling',      barsPerCycle: 2, octaveAdd: -12 },
-    },
-  },
-  jazz: {
-    label: 'Jazz',                 // laid-back lounge vibe ; triangle lead, swing-leaning
-    keyMidi: 37,
-    mode: 'aeolian',
-    bpmScale: 0.95,
-    leadWave: 'triangle',
-    bassWave: 'sine',
-    padWave: 'triangle',
-    riff: {
-      lobby:  { rhythm: 'call_response',  contour: 'zigzag',       barsPerCycle: 2, octaveAdd: 0 },
-      warmup: { rhythm: 'call_response',  contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 0 },
-      combat: { rhythm: 'syncopated',     contour: 'pentatonic_a', barsPerCycle: 2, octaveAdd: 0 },
-      doomed: { rhythm: 'syncopated',     contour: 'riff_blues',   barsPerCycle: 2, octaveAdd: -12 },
-    },
-  },
-
-  // (v8_2a 2026-05-01) Hard / fast techno. 4-on-the-floor kick, off-beat
-  // closed hats, claps on 2+4, square-wave acid bass, sawtooth lead.
-  // A1 Phrygian gives the menacing flat-2 sting that carries the genre.
-  // bpmScale 1.4 puts warmup at ~129 BPM and combat at ~140 BPM.
-  // patternOverrides supply per-state drum + bass; chord progressions
-  // come from the base MUSIC_PATTERNS entries unchanged.
-  techno: {
-    label: 'Techno',
-    keyMidi: 33,                    // A1
-    mode: 'phrygian',
-    bpmScale: 1.4,
-    leadWave: 'sawtooth',
-    bassWave: 'square',
-    padWave: 'sawtooth',
-    riff: {
-      lobby:  { rhythm: 'pulse_8ths', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
-      warmup: { rhythm: 'pulse_8ths', contour: 'rising',       barsPerCycle: 1, octaveAdd: 0 },
-      combat: { rhythm: 'driving',    contour: 'riff_minor',   barsPerCycle: 2, octaveAdd: 0 },
-      doomed: { rhythm: 'galloping',  contour: 'doomed_creep', barsPerCycle: 2, octaveAdd: -12 },
-    },
-    patternOverrides: {
-      lobby: {
-        // Sparse 4-on-2/4 kick + off-beat hats + claps on 2+4. Lobby techno
-        // is "yes we're here" without pushing.
-        drum: (sub, beat) => {
-          const beatInBar = beat % 4;
-          const subInBeat = sub % 4;
-          const out = [];
-          if (subInBeat === 0 && (beatInBar === 0 || beatInBar === 2)) out.push({ note: 36, g: 0.85 });
-          if (subInBeat === 2) out.push({ note: 42, g: 0.50 });
-          if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.55 });
-          return out.length ? out : null;
-        },
-        bass: (beat) => {
-          const beatInBar = beat % 4;
-          if (beatInBar === 0 || beatInBar === 2) return 0;
-          return null;
-        },
-        bassDurBeats: 2,
-      },
-      warmup: {
-        // 4-on-the-floor warmup. Kick every beat, off-beat hats, claps on
-        // 2+4 to lock the groove before combat. Hat ducked when kick fires.
-        drum: (sub, beat) => {
-          const beatInBar = beat % 4;
-          const subInBeat = sub % 4;
-          const out = [];
-          if (subInBeat === 0) out.push({ note: 36, g: 1.0 });
-          if (subInBeat === 0) out.push({ note: 42, g: 0.30 });
-          if (subInBeat === 2) out.push({ note: 42, g: 0.65 });
-          if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.85 });
-          return out.length ? out : null;
-        },
-        bass: (beat) => 0,
-        bassDurBeats: 1,
-      },
-      combat: {
-        // The main event. 4-on-the-floor with intensity-driven busyness:
-        //   int 1: basic kick + off-beat hat + claps on 2+4
-        //   int 2: add 16th hat ghosts + open-hat push every other bar
-        //   int 3: add pushed kick on the "and" of 4 + snare ruff bar pickup
-        drum: (sub, beat, intensity) => {
-          const beatInBar = beat % 4;
-          const subInBeat = sub % 4;
-          const out = [];
-          if (subInBeat === 0) out.push({ note: 36, g: 1.15 });
-          if (subInBeat === 0) out.push({ note: 42, g: 0.30 });
-          if (subInBeat === 2) out.push({ note: 42, g: 0.75 });
-          if (intensity >= 2 && (subInBeat === 1 || subInBeat === 3)) out.push({ note: 42, g: 0.30 });
-          if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.95 });
-          if (intensity >= 2 && beatInBar === 3 && subInBeat === 2 && (Math.floor(beat / 4) % 2 === 1)) {
-            out.push({ note: 49, g: 0.45 });
-          }
-          if (intensity >= 3 && beatInBar === 3 && subInBeat === 2) out.push({ note: 36, g: 0.7 });
-          if (intensity >= 3 && beat % 16 === 15 && subInBeat >= 2) out.push({ note: 38, g: 0.55 });
-          return out.length ? out : null;
-        },
-        bass: (beat, intensity) => {
-          const beatInBar = beat % 4;
-          const barInLoop = Math.floor(beat / 4) % 4;
-          // Bar 4 walks down for the descent; otherwise root pulse with a
-          // 5th rotation at int 2+ to widen the harmonic motion.
-          if (barInLoop === 3) {
-            const seq = [0, -2, -3, -5];
-            return seq[beatInBar];
-          }
-          if (intensity >= 2) {
-            if (beatInBar === 0 || beatInBar === 2) return 0;
-            if (beatInBar === 1) return 7;
-            return 0;
-          }
-          return 0;
-        },
-        bassDurBeats: 1,
-      },
-      doomed: {
-        // Hollow / industrial: kick only on 1, fast hats, no snare. Carries
-        // the "tunnel" feel of the original doomed pattern with a techno
-        // pulse underneath.
-        drum: (sub, beat) => {
-          const beatInBar = beat % 4;
-          const subInBeat = sub % 4;
-          const out = [];
-          if (subInBeat === 0 && beatInBar === 0) out.push({ note: 36, g: 0.9 });
-          if (subInBeat === 2) out.push({ note: 42, g: 0.40 });
-          return out.length ? out : null;
-        },
-        bass: (beat) => 0,
-        bassDurBeats: 1,
-      },
-    },
-  },
-};
-
-// Read the riff config for the given pattern, honoring the active style's
-// override if present. Falls back to PATTERN_RIFFS if the style doesn't
-// override that pattern.
-function _musicGetRiffCfg(patternId) {
-  const styleId = music.styleId || 'cosmic';
-  const style = MUSIC_STYLES[styleId];
-  if (style && style.riff && style.riff[patternId]) return style.riff[patternId];
-  return PATTERN_RIFFS[patternId];
-}
-
-// Apply a style: switches key, mode, waveforms, and BPM scaling. The current
-// pattern keeps playing ; only its sonic palette changes. Idempotent.
-function musicSetStyle(name) {
-  const style = MUSIC_STYLES[name];
-  if (!style) {
-    console.warn('[music] unknown style', name, '; staying on', music.styleId);
-    return;
-  }
-  music.styleId = name;
-  music.keyMidi = style.keyMidi;
-  music.leadWave = style.leadWave || 'triangle';
-  music.bassWave = style.bassWave || 'sawtooth';
-  music.padWave = style.padWave || 'sawtooth';
-  music.bpmScale = style.bpmScale || 1.0;
-  // Mode change updates the active scale (riffs + chords adapt automatically).
-  if (style.mode === 'phrygian') music.scale = MUSIC_SCALE_PHRYGIAN;
-  else                            music.scale = MUSIC_SCALE_AEOLIAN;
-  music.mode = style.mode || 'aeolian';
-  // Force pad voicing reset so the next chord change picks the right octave
-  // around the new tonic instead of sliding far away.
-  music.lastPadVoicing = null;
-  // Bump bpmTarget by the new scale so the tempo follows the style.
-  music.bpmTarget = music.bpmTarget * music.bpmScale / (music._lastBpmScale || 1.0);
-  music._lastBpmScale = music.bpmScale;
-}
-
-// Generate a list of {sub16, semi, vel} notes for the given bar+pattern. The
-// rhythm grid + contour combine to lay notes onto the 16th grid; cycling
-// through the contour as we hit each note slot.
-function _musicGenerateRiffBar(patternId, barInCycle) {
-  const cfg = _musicGetRiffCfg(patternId);
-  if (!cfg) return null;
-  const rhythm = RIFF_RHYTHMS[cfg.rhythm];
-  const contour = RIFF_CONTOURS[cfg.contour];
-  if (!rhythm || !contour) return null;
-  // Walk through every step in the bar, advancing contour index on each note.
-  // For multi-bar cycles, the contour offset starts where the previous bar
-  // left off so the line keeps developing (rather than restarting on every bar).
-  const stepsPerBar = 16;
-  const startContourIdx = (barInCycle % cfg.barsPerCycle) *
-    rhythm.filter(x => x > 0).length;
-  const notes = [];
-  let cIdx = startContourIdx;
-  for (let s = 0; s < stepsPerBar; s++) {
-    const v = rhythm[s];
-    if (v === 0) continue;
-    const deg = contour[cIdx % contour.length];
-    const semi = _musicScaleSemitone(deg) + (cfg.octaveAdd || 0);
-    notes.push({
-      sub16: s,
-      semi,
-      vel: v === 2 ? 0.85 : 0.55,
-    });
-    cIdx++;
-  }
-  return notes;
-}
-
-// === SCHEDULER ===
-
-function musicEnsureCtx() {
-  if (!audio || !audio.ctx) return false;
-  if (!audio.musicGain) return false;
-  music.ctx = audio.ctx;
-  music.out = audio.musicGain;
-  return true;
-}
-
-function _musicScheduleBeat(beatIdx, beatTime) {
-  if (music.drumsSuspended && music.patternId !== 'lobby' && music.patternId !== 'silent') {
-    // Drums only suspended; still let pad/bass play at strong beats below.
-  }
-  let ptn = MUSIC_PATTERNS[music.patternId];
-  if (!ptn) return;
-  // (v8_2a 2026-05-01) Style-level pattern override. A style can supply a
-  // patternOverrides[patternId] containing { drum, bass, bassDurBeats } that
-  // gets merged on top of the base pattern so chord progression and other
-  // fields stay intact. Used by the 'techno' style for a hard 4-on-the-floor
-  // kit + acid square bass per gameplay state.
-  const _styleIdSch = (typeof audio !== 'undefined') ? audio.musicStyle : null;
-  const _styleDefSch = (_styleIdSch && typeof MUSIC_STYLES !== 'undefined') ? MUSIC_STYLES[_styleIdSch] : null;
-  const _styleOvrSch = (_styleDefSch && _styleDefSch.patternOverrides) ? _styleDefSch.patternOverrides[music.patternId] : null;
-  if (_styleOvrSch) ptn = Object.assign({}, ptn, _styleOvrSch);
-  const out = music.out;
-  const secPerBeat = 60 / music.bpm;
-
-  // Drums + riff: walk the 16th-note grid for this beat. Drums always fire
-  // at bar-relative steps 0..15. Riff notes are pre-generated for the bar at
-  // beat 0 and triggered as we walk the grid.
-  const beatInBarLocal = beatIdx % 4;
-
-  // Generate this bar's riff notes once (on the first beat of the bar). The
-  // contour cycles via `_riffCycleBar` so multi-bar contours keep developing.
-  if (beatInBarLocal === 0) {
-    if (!music._riffCycleBar) music._riffCycleBar = 0;
-    music._barRiffNotes = _musicGenerateRiffBar(music.patternId, music._riffCycleBar);
-    const cfg = _musicGetRiffCfg(music.patternId);
-    if (cfg) {
-      music._riffCycleBar = (music._riffCycleBar + 1) % cfg.barsPerCycle;
-    } else {
-      music._riffCycleBar = 0;
-      music._barRiffNotes = null;
-    }
-  }
-
-  if (!music.drumsSuspended && ptn.drum) {
-    for (let s = 0; s < 4; s++) {
-      const sub = beatIdx * 4 + s;
-      const subTime = beatTime + (s * secPerBeat / 4);
-      const stepInBar = beatInBarLocal * 4 + s;
-      // Drum hit for this 16th.
-      const hit = ptn.drum(sub, beatIdx, music.intensity);
-      if (hit) {
-        for (const h of hit) {
-          _musicSynthDrum(h.note, h.g != null ? h.g : 1.0, subTime, out);
-        }
-      }
-      // Riff lead note for this 16th (if any).
-      if (music._barRiffNotes) {
-        for (const n of music._barRiffNotes) {
-          if (n.sub16 === stepInBar) {
-            const dur = secPerBeat * 0.45;  // tight 16th-ish lead, fades fast
-            _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + n.semi),
-                            n.vel, subTime, out, dur);
-          }
-        }
-      }
-    }
-  } else if (music._barRiffNotes) {
-    // Drums suspended (e.g. inside stasis field) but riff still plays at half volume.
-    for (let s = 0; s < 4; s++) {
-      const subTime = beatTime + (s * secPerBeat / 4);
-      const stepInBar = beatInBarLocal * 4 + s;
-      for (const n of music._barRiffNotes) {
-        if (n.sub16 === stepInBar) {
-          const dur = secPerBeat * 0.45;
-          _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + n.semi),
-                          n.vel * 0.5, subTime, out, dur);
-        }
-      }
-    }
-  }
-
-  // Bass + pad + chord changes happen on beat boundaries.
-  // (v8_1VR audio fix) Bass register changed from `keyMidi - 12` (one octave
-  // BELOW the tonic, 27-37 Hz on most styles) to `keyMidi` (the tonic
-  // itself, 55-73 Hz). The sub-octave bass was driving subwoofers into
-  // crackling on desktops with real low-end response. The tonic-octave
-  // bass still reads as bass against the pad (24 semitones above) and
-  // sits cleanly above the 45 Hz output HPF below.
-  if (ptn.bass) {
-    const bassNote = ptn.bass(beatIdx, music.intensity);
-    if (bassNote != null) {
-      const freq = _musicMidiHz(music.keyMidi + bassNote);
-      const dur = secPerBeat * (ptn.bassDurBeats || 1);
-      _musicSynthBass(freq, 0.9, beatTime, out, dur);
-    }
-  }
-
-  // Pad: chord progression. Stabs on each BAR boundary (beat 0) with a
-  // short ~1.5-beat sustain so chords don't drone across the riff. The pad
-  // becomes a rhythmic instrument that breathes with the beat instead of a
-  // wash. Voice-leading still picks the closest voicing for smooth changes.
-  if (ptn.chords && ptn.chordsBars) {
-    const totalBars = ptn.chordsBars.reduce((a, b) => a + b, 0);
-    const barInLoop = (Math.floor(beatIdx / 4)) % totalBars;
-    const beatInBar = beatIdx % 4;
-    if (beatInBar === 0) {
-      // Find which chord index we're in for this bar.
-      let acc = 0, chordIdx = 0;
-      for (let i = 0; i < ptn.chordsBars.length; i++) {
-        if (barInLoop < acc + ptn.chordsBars[i]) { chordIdx = i; break; }
-        acc += ptn.chordsBars[i];
-      }
-      const [degree, quality] = ptn.chords[chordIdx];
-      const chordOffsets = _musicChord(degree, quality);
-      const voicing = _musicVoicePad(chordOffsets);
-      // Short stab : 1.5 beats sustain, fades through beat 2 of the bar so the
-      // riff has space. Each bar retriggers (rhythm), even on repeated chords.
-      const dur = secPerBeat * 1.5;
-      for (const m of voicing) {
-        _musicSynthPad(_musicMidiHz(m), 0.7, beatTime, out, dur);
-      }
-      music.lastPadVoicing = voicing;
-    }
-  }
-
-  // Lead: scheduled phrase notes from kill events.
-  if (music.pendingLeadNotes.length) {
-    const drained = [];
-    const remaining = [];
-    for (const n of music.pendingLeadNotes) {
-      if (n.atBeat <= beatIdx + 0.001) drained.push(n);
-      else remaining.push(n);
-    }
-    music.pendingLeadNotes = remaining;
-    for (const n of drained) {
-      const offset = (n.atBeat - beatIdx) * secPerBeat;
-      const t = beatTime + Math.max(0, offset);
-      _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + n.note), n.vel || 0.9, t, out, n.dur || 0.25);
-    }
-  }
-}
-
-function _musicTick() {
-  if (!music.enabled) return;
-  if (!musicEnsureCtx()) return;
-  const ctx = music.ctx;
-  // BPM smoothing toward target (one-pole).
-  music.bpm = music.bpm * 0.92 + music.bpmTarget * 0.08;
-  // Schedule beats up to lookahead.
-  const horizon = ctx.currentTime + music.lookaheadSec;
-  // Boot: first beat lines up to "now".
-  if (music.nextBeatAt < ctx.currentTime - 0.5) {
-    music.nextBeatAt = ctx.currentTime + 0.05;
-    music.beat = 0;
-    music.bar = 0;
-  }
-  while (music.nextBeatAt <= horizon) {
-    _musicScheduleBeat(music.beat, music.nextBeatAt);
-    music.beat++;
-    if (music.beat % 4 === 0) music.bar++;
-    music.nextBeatAt += 60 / music.bpm;
-  }
-}
-
-function musicStart() {
-  if (music.schedTimer) return;
-  if (!musicEnsureCtx()) return;
-  music.schedTimer = setInterval(_musicTick, 50);
-}
-
-function musicStop() {
-  if (music.schedTimer) clearInterval(music.schedTimer);
-  music.schedTimer = null;
-}
-
-// === PUBLIC API ===
-
-function musicSetEnabled(on) {
-  music.enabled = !!on;
-  if (!music.enabled) {
-    musicStop();
-    // Mute the bus immediately (avoid lingering pad tails).
-    if (audio.musicGain && audio.ctx) {
-      try {
-        audio.musicGain.gain.cancelScheduledValues(audio.ctx.currentTime);
-        audio.musicGain.gain.linearRampToValueAtTime(0, audio.ctx.currentTime + 0.1);
-      } catch (_) {}
-    }
-  } else {
-    if (audio.musicGain && audio.ctx) {
-      try {
-        const target = 0.30 * (audio.userVol.music != null ? audio.userVol.music : 0.45);
-        audio.musicGain.gain.cancelScheduledValues(audio.ctx.currentTime);
-        audio.musicGain.gain.linearRampToValueAtTime(target, audio.ctx.currentTime + 0.4);
-      } catch (_) {}
-    }
-    musicStart();
-  }
-}
-
-function musicSetVolume(v) {
-  audio.userVol.music = Math.max(0, Math.min(1.5, v));
-  if (audio.musicGain) {
-    audio.musicGain.gain.value = 0.30 * audio.userVol.music;
-  }
-}
-
-function musicSetPattern(id, opts) {
-  if (!MUSIC_PATTERNS[id]) {
-    console.warn('[music] unknown pattern', id);
-    return;
-  }
-  music.patternId = id;
-  music.lastChordKey = null;
-  // Reset riff cycle bar so each pattern starts at its first phrase.
-  music._riffCycleBar = 0;
-  music._barRiffNotes = null;
-  // Clear any pending lead notes from a prior pattern (kills don't echo across rounds).
-  music.pendingLeadNotes = [];
-  if (opts && typeof opts.intensity === 'number') {
-    music.intensity = Math.max(0, Math.min(music.ceiling, opts.intensity));
-  }
-  // Style's bpmScale multiplies whatever the pattern asks for.
-  const scale = music.bpmScale || 1.0;
-  if (opts && typeof opts.bpm === 'number') {
-    music.bpm = opts.bpm * scale;
-    music.bpmTarget = opts.bpm * scale;
-  }
-  if (opts && typeof opts.bpmTarget === 'number') {
-    music.bpmTarget = opts.bpmTarget * scale;
-  }
-  // Start the scheduler if not running.
-  musicStart();
-}
-
-function musicSetBpmTarget(bpm) {
-  // Honor the active style's bpmScale here too so the in-round ramp
-  // (96→128 BPM in cosmic) lands at the style-appropriate range.
-  const scale = music.bpmScale || 1.0;
-  music.bpmTarget = Math.max(40, Math.min(220, bpm * scale));
-}
-
-function musicSetIntensity(level) {
-  music.intensity = Math.max(0, Math.min(music.ceiling, level | 0));
-}
-
-function musicSetCeiling(label) {
-  if (label === 'chill') music.ceiling = 1;
-  else if (label === 'wild') music.ceiling = 3;
-  else music.ceiling = 2;
-  if (music.intensity > music.ceiling) music.intensity = music.ceiling;
-}
-
-function musicSetMode(mode) {
-  music.mode = mode;
-  music.scale = (mode === 'phrygian') ? MUSIC_SCALE_PHRYGIAN : MUSIC_SCALE_AEOLIAN;
-}
-
-function musicEnterMode(name) {
-  if (name === 'doomed') {
-    music.doomedMode = true;
-    music._patternBeforeDoomed = music.patternId;
-    musicSetMode('phrygian');
-    // Switch to the doomed pattern (sparse drums, b2 chords, doomed_creep riff).
-    musicSetPattern('doomed', { intensity: music.intensity });
-  }
-}
-
-function musicExitMode(name) {
-  if (name === 'doomed') {
-    music.doomedMode = false;
-    musicSetMode('aeolian');
-    // Restore the previous pattern (combat in normal play). Falls back to combat
-    // if we somehow lost the prior pattern reference.
-    const restore = music._patternBeforeDoomed || 'combat';
-    music._patternBeforeDoomed = null;
-    musicSetPattern(restore, { intensity: music.intensity });
-  }
-}
-
-function musicSuspendDrums(on) {
-  music.drumsSuspended = !!on;
-}
-
-// onKill: queue a lead phrase quantized to the next 8th note. who = 'player' | 'bot'.
-function musicOnKill(who, streakHint) {
-  if (!musicEnsureCtx()) return;
-  if (who === 'bot') {
-    // Player just died from a bot's kill ; pad sour-stab + skip next snare.
-    // (Quick way: schedule a quick lead bend down a semitone and back.)
-    const t0 = music.ctx.currentTime;
-    _musicSynthLead(_musicMidiHz(music.keyMidi + 12), 0.6, t0, music.out, 0.20);
-    _musicSynthLead(_musicMidiHz(music.keyMidi + 11), 0.5, t0 + 0.18, music.out, 0.20);
-    _musicSynthLead(_musicMidiHz(music.keyMidi + 12), 0.5, t0 + 0.36, music.out, 0.30);
-    return;
-  }
-  // Player kill: quantize to next 8th note ; queue a phrase length based on streak.
-  const beatNow = music.beat + Math.max(0, (music.nextBeatAt - music.ctx.currentTime) / (60 / music.bpm));
-  const startBeat = Math.ceil(beatNow * 2) / 2;  // next 8th note boundary
-  let phraseLen = 1;
-  const inWindow = (music.beat - music.lastKillBeat) <= 8;  // 8 beats = ~5s @ 96 BPM
-  if (inWindow) music.multikillCount++;
-  else music.multikillCount = 1;
-  music.lastKillBeat = music.beat;
-  if (streakHint != null) music.multikillCount = Math.max(music.multikillCount, streakHint | 0);
-  phraseLen = Math.min(5, music.multikillCount);
-  // Phrase: ascending pentatonic from root, eighth notes.
-  for (let i = 0; i < phraseLen; i++) {
-    const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
-    const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
-    music.pendingLeadNotes.push({
-      atBeat: startBeat + i * 0.5,
-      note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
-      dur: 0.30,
-      vel: 0.85,
-    });
-  }
-}
-
-// Round-end victory/defeat phrase (longer scripted lead figure).
-function musicPlayRoundEndPhrase(victory) {
-  if (!musicEnsureCtx()) return;
-  // 4-note phrase quantized to the next beat.
-  const startBeat = Math.ceil(music.beat + 0.5);
-  const seq = victory
-    ? [0, 4, 7, 12]   // ascending major triad
-    : [12, 8, 5, 3];  // descending minor figure (lands on b3)
-  for (let i = 0; i < seq.length; i++) {
-    music.pendingLeadNotes.push({
-      atBeat: startBeat + i * 0.5,
-      note: seq[i],
-      dur: 0.40,
-      vel: 0.95,
-    });
-  }
-}
-
-// === PATTERNS ===
-// Each pattern: { id, drum(sub16, beat, intensity)->[hits]|null, bass(beat, intensity)->offset|null,
-//                 chords:[[degree,quality],...], chordsBars:[bars,...], bassDurBeats }
-
-const MUSIC_PATTERNS = {
-  silent: {
-    id: 'silent',
-    drum: () => null,
-    bass: () => null,
-    chords: null, chordsBars: null,
-  },
-
-  lobby: {
-    id: 'lobby',
-    drum: (sub, beat, intensity) => {
-      const beatInBar = beat % 4;
-      const subInBeat = sub % 4;
-      const out = [];
-      // Hat on every other 16th (8th notes).
-      if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.5 });
-      // Kick on 1.
-      if (subInBeat === 0 && beatInBar === 0) out.push({ note: 36, g: 0.9 });
-      // Soft snare on 3.
-      if (subInBeat === 0 && beatInBar === 2) out.push({ note: 38, g: 0.5 });
-      return out.length ? out : null;
-    },
-    bass: (beat) => {
-      const beatInBar = beat % 4;
-      if (beatInBar === 0) return 0;       // root
-      if (beatInBar === 2) return 0;       // root again (calm)
-      return null;
-    },
-    bassDurBeats: 2,
-    // i - VI - i - i loop (Aeolian)
-    chords: [[0, 'min'], [5, 'maj'], [0, 'min'], [0, 'min']],
-    chordsBars: [2, 2, 2, 2],
-  },
-
-  warmup: {
-    id: 'warmup',
-    drum: (sub, beat) => {
-      const beatInBar = beat % 4;
-      const subInBeat = sub % 4;
-      const out = [];
-      if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.6 });        // 8th hats
-      if (subInBeat === 0 && beatInBar % 2 === 0) out.push({ note: 36, g: 0.95 }); // kick on 1+3
-      if (subInBeat === 0 && beatInBar % 2 === 1) out.push({ note: 38, g: 0.7 });  // snare on 2+4
-      return out.length ? out : null;
-    },
-    bass: (beat) => beat % 1 === 0 ? 0 : null, // root pulse every beat
-    bassDurBeats: 1,
-    chords: [[0, 'min']],
-    chordsBars: [4],
-  },
-
-  combat: {
-    id: 'combat',
-    drum: (sub, beat, intensity) => {
-      const beatInBar = beat % 4;
-      const subInBeat = sub % 4;
-      const out = [];
-      // Hats: 8ths at int 1, 16ths at int 2+, ghost-16ths at int 3.
-      if (intensity >= 2) out.push({ note: 42, g: subInBeat % 2 === 0 ? 0.6 : 0.35 });
-      else if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.55 });
-      // Kick on 1+3 always; +"and of 4" at int 3.
-      if (subInBeat === 0 && (beatInBar === 0 || beatInBar === 2)) out.push({ note: 36, g: 1.0 });
-      if (intensity >= 3 && subInBeat === 2 && beatInBar === 3) out.push({ note: 36, g: 0.7 });
-      // Snare on 2+4.
-      if (subInBeat === 0 && (beatInBar === 1 || beatInBar === 3)) out.push({ note: 38, g: 0.85 });
-      // Snare ruff on bar pickup at int 2+.
-      if (intensity >= 2 && beat % 16 === 15 && subInBeat >= 1) out.push({ note: 38, g: 0.5 });
-      return out.length ? out : null;
-    },
-    bass: (beat, intensity) => {
-      const beatInBar = beat % 4;
-      const barInLoop = Math.floor(beat / 4) % 4;
-      // 8th-pulse on root + fifth alternation. Bar 4 walks down.
-      if (barInLoop === 3) {
-        const seq = [0, -2, -3, -5];
-        return seq[beatInBar];
-      }
-      if (beatInBar === 0 || beatInBar === 2) return 0;     // root
-      if (beatInBar === 1 || beatInBar === 3) return 7;     // fifth above
-      return null;
-    },
-    bassDurBeats: 1,
-    // i - VI - VII - i (Aeolian standard)
-    chords: [[0, 'min'], [5, 'maj'], [6, 'maj'], [0, 'min']],
-    chordsBars: [2, 1, 1, 2],
-  },
-
-  doomed: {
-    id: 'doomed',
-    drum: (sub, beat) => {
-      const beatInBar = beat % 4;
-      const subInBeat = sub % 4;
-      const out = [];
-      // Just kick + hat. No snare. The "tunnel".
-      if (subInBeat % 2 === 0) out.push({ note: 42, g: 0.45 });
-      if (subInBeat === 0 && (beatInBar === 0 || beatInBar === 2)) out.push({ note: 36, g: 0.9 });
-      return out.length ? out : null;
-    },
-    bass: (beat) => 0, // pedal on root, every beat
-    bassDurBeats: 1,
-    chords: [[0, 'min'], [1, 'min']], // i then b2 minor (Phrygian sting)
-    chordsBars: [2, 2],
-  },
-
-  roundEndVictory: {
-    id: 'roundEndVictory',
-    drum: (sub, beat) => {
-      const subInBeat = sub % 4;
-      if (beat === 0 && subInBeat === 0) return [{ note: 49, g: 1.0 }, { note: 36, g: 1.0 }];
-      if (beat === 1 && subInBeat === 0) return [{ note: 38, g: 0.7 }];
-      if (beat === 1 && subInBeat === 2) return [{ note: 38, g: 0.5 }];
-      if (beat === 2 && subInBeat === 0) return [{ note: 38, g: 0.4 }];
-      return null;
-    },
-    bass: (beat) => beat === 0 ? 0 : null,
-    bassDurBeats: 4,
-    chords: [[0, 'maj']],  // Picardy lift
-    chordsBars: [2],
-  },
-
-  roundEndDefeat: {
-    id: 'roundEndDefeat',
-    drum: (sub, beat) => {
-      const subInBeat = sub % 4;
-      if (beat === 0 && subInBeat === 0) return [{ note: 36, g: 0.7 }];
-      return null;
-    },
-    bass: (beat) => beat === 0 ? 0 : null,
-    bassDurBeats: 4,
-    chords: [[0, 'min'], [3, 'min'], [0, 'min']],
-    chordsBars: [1, 1, 2],
-  },
-
-  matchEndVictory: {
-    id: 'matchEndVictory',
-    drum: () => null,
-    bass: (beat) => (beat % 8 === 0) ? 0 : null,
-    bassDurBeats: 8,
-    chords: [[0, 'maj'], [4, 'maj'], [0, 'maj']],
-    chordsBars: [2, 2, 4],
-  },
-
-  matchEndDefeat: {
-    id: 'matchEndDefeat',
-    drum: () => null,
-    bass: (beat) => (beat % 4 === 0) ? 0 : null,
-    bassDurBeats: 4,
-    chords: [[0, 'min'], [6, 'maj'], [5, 'maj'], [4, 'maj']],
-    chordsBars: [2, 2, 2, 2],
-  },
-};
-
-// === RUNTIME HOOKS (called from existing game functions) ===
-
-// Pattern dispatcher driven by game.state. Called from updateAmbientBed-adjacent
-// tick or directly from state-change sites. We expose it so the round system
-// can flip patterns on transition.
-function musicSyncToGameState() {
-  if (!music.enabled) return;
-  if (typeof game === 'undefined') return;
-  const s = game.state;
-  // 'select' is the ship-select / lobby screen ; treat as lobby music.
-  if (s === 'select' || s === 'lobby' || s === 'menu' || s === 'connecting') {
-    if (music.musicMuteLobby) { musicSetPattern('silent'); return; }
-    musicSetPattern('lobby', { bpmTarget: 78, intensity: 1 });
-    return;
-  }
-  if (s === 'warmup') { musicSetPattern('warmup', { bpmTarget: 92, intensity: 1 }); return; }
-  if (s === 'playing') {
-    musicSetPattern('combat', { bpmTarget: 100, intensity: 1 });
-    return;
-  }
-  // roundEnd / matchEnd handled by direct calls from the round system since
-  // they need victor info.
-}
-
-// Per-frame updater called from updateAmbientBed (already runs every frame).
-// Handles BPM ramp during 'playing' and end-of-round timer-tied phrases.
-function musicTickFromMain(dt) {
-  if (!music.enabled) return;
-  if (typeof game === 'undefined') return;
-  if (game.state === 'playing' && typeof game.roundTimer === 'number') {
-    const total = (typeof LSS !== 'undefined' && LSS.ROUND_TIME) ? LSS.ROUND_TIME : 180;
-    const elapsed = Math.max(0, total - game.roundTimer);
-    const f = Math.max(0, Math.min(1, elapsed / total));
-    const bpm = 96 + f * 32; // 96 -> 128 across the round
-    musicSetBpmTarget(bpm);
-    // Intensity ramp.
-    if (game.roundTimer < 10) musicSetIntensity(3);
-    else if (game.roundTimer < 30) musicSetIntensity(2);
-    else musicSetIntensity(1);
-  }
-  // Doomed mode tracking off the local player's flag (so the music engine
-  // doesn't need its own listener for state changes).
-  if (typeof player !== 'undefined' && player) {
-    const isDoomed = !!player.doomed && player.shipState !== 'dead';
-    if (isDoomed && !music.doomedMode) musicEnterMode('doomed');
-    else if (!isDoomed && music.doomedMode) musicExitMode('doomed');
-    // Stasis suspend.
-    const inStasis = !!(typeof game !== 'undefined' && game.playerInStasis);
-    if (inStasis !== music.drumsSuspended) musicSuspendDrums(inStasis);
-  }
-}
-
-// Expose to console + window for diagnostics.
-try {
-  window.music = music;
-  window.musicSetEnabled = musicSetEnabled;
-  window.musicSetVolume = musicSetVolume;
-  window.musicSetPattern = musicSetPattern;
-  window.musicSetBpmTarget = musicSetBpmTarget;
-  window.musicSetIntensity = musicSetIntensity;
-  window.musicSetCeiling = musicSetCeiling;
-  window.musicSetMode = musicSetMode;
-  window.musicEnterMode = musicEnterMode;
-  window.musicExitMode = musicExitMode;
-  window.musicSuspendDrums = musicSuspendDrums;
-  window.musicOnKill = musicOnKill;
-  window.musicPlayRoundEndPhrase = musicPlayRoundEndPhrase;
-  window.musicSyncToGameState = musicSyncToGameState;
-  window.musicStart = musicStart;
-  window.musicStop = musicStop;
-  window.musicSetStyle = musicSetStyle;
-  // Riff + style diagnostics: peek/poke from console.
-  window.RIFF_RHYTHMS = RIFF_RHYTHMS;
-  window.RIFF_CONTOURS = RIFF_CONTOURS;
-  window.PATTERN_RIFFS = PATTERN_RIFFS;
-  window.MUSIC_STYLES = MUSIC_STYLES;
-} catch (_) {}
-
-// ---- HOOK AUDIO INTO EXISTING FUNCTIONS ----
-// Override key functions to add sound triggers
-
-const _origFireWeapon = fireWeapon;
-fireWeapon = function() {
-  _origFireWeapon();
-  const w = player.weapon;
-  if (!w) return;
-  // Identify weapon character for distinct sound selection
-  const isRailgun = w.mode === 'hitscan' && w.fireRate >= 0.8; // slow charged hitscan (PUNCTURE Plasma Railgun)
-  const isMinigun = w.mode === 'hitscan' && w.fireRate < 0.08; // rapid fire (BLASTER Predator Cannon)
-  const isMissile = w.mode === 'projectile' && (w.homing || w.salvo); // homing or guided missiles
-  if (isMinigun) playSound('fire_minigun');
-  else if (isRailgun) playSound('fire_railgun');
-  else if (isMissile) playSound('fire_salvo');
-  else if (w.mode === 'hitscan') playSound('fire_hitscan');
-  else if (w.mode === 'projectile') playSound('fire_projectile');
-  else if (w.mode === 'spread') playSound('fire_spread');
-};
-
-const _origShowHitMarker = showHitMarker;
-showHitMarker = function() {
-  _origShowHitMarker();
-  playSound('hit');
-};
-
-const _origShowKillMarker = showKillMarker;
-showKillMarker = function() {
-  _origShowKillMarker();
-  playSound('kill');
-  // Inverse-bloom shutter flash: instant peak, renderPostFX decays it to near-zero in ~120 ms.
-  if (typeof postFX !== 'undefined' && postFX.compositeMat && postFX.compositeMat.uniforms.killFlash) {
-    postFX.compositeMat.uniforms.killFlash.value = 1.0;
-  }
-};
-
-const _origPlayerTakeDamage = playerTakeDamage;
-playerTakeDamage = function(amount, attacker, projectile) {
-  // Snapshot shield before damage resolves so we can pick shield vs armor SFX.
-  const shieldBefore = player.shield || 0;
-  _origPlayerTakeDamage(amount, attacker, projectile);
-  const shieldAfter = player.shield || 0;
-  // Shield absorbed all or part of this hit => crystalline crack
-  if (shieldBefore > 0) playSound('damage_shield');
-  // Shield ran out (or was already out) and armor took the overflow => dissonance
-  if (shieldAfter <= 0 && shieldBefore < amount + 0.001) playSound('damage');
-};
-
-const _origPlayerDie = playerDie;
-playerDie = function(attacker) {
-  _origPlayerDie(attacker);
-  playSound('death');
-};
-
-const _origDash = dash;
-dash = function() {
-  const hadCharges = player.dashCharges > 0;
-  _origDash();
-  if (hadCharges) playSound('dash');
-};
-
-const _origActivateAbility = activateAbility;
-activateAbility = function(slot) {
-  const wasCd = player.abilityCooldowns[slot];
-  _origActivateAbility(slot);
-  if (wasCd <= 0) playSound('ability');
-};
-
-const _origActivateCore = activateCore;
-activateCore = function() {
-  const wasMeter = player.coreMeter;
-  const wasActive = player.coreActive;
-  _origActivateCore();
-  // Successful activation = had full meter and now coreActive is true.
-  if (wasMeter >= 100 && !wasActive && player.coreActive) {
-    // Heavy announcement stinger from the player's position. Wide spatial range so the
-    // sound carries across the arena: every titan in the area should know a core just
-    // went hot. The player is the listener AND the source, so HRTF places it close
-    // and loud; if other titans ever activate cores, the same call positions them
-    // correctly relative to the listener.
-    playSpatialSound('core_titan', player.position.clone(), {
-      refDistance: 800, maxDistance: 12000, rolloffFactor: 0.6
-    });
-    // Layer the original 'core' sound on top so the activator gets both the personal
-    // power-up cue and the broadcast stinger; the two readings reinforce each other.
-    playSound('core');
-  }
-};
-
-const _origStartReload = startReload;
-startReload = function() {
-  _origStartReload();
-  playSound('reload');
-};
-
-const _origEnterStasis = enterStasis;
-enterStasis = function(field) {
-  _origEnterStasis(field);
-  playSound('stasis');
-};
-
-const _origSpawnExplosion = spawnExplosion;
-spawnExplosion = function(pos, size) {
-  _origSpawnExplosion(pos, size);
-  // HRTF-positioned boom so you hear it in 3D; falls back to flat routing if anything fails.
-  if (size > 30) playSpatialSound('explosion', pos);
-};
-
-// ---- SCOREBOARD OVERLAY (Tab key) ----
-
-const scoreboardCSS = document.createElement('style');
-scoreboardCSS.textContent = `
-#scoreboard {
-  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: 600px; background: rgba(5,8,18,0.92); border: 1px solid rgba(100,180,255,0.2);
-  z-index: 50; pointer-events: none; display: none; color: #fff;
-  font-family: 'Courier New', monospace; padding: 20px;
-}
-#scoreboard.visible { display: block; }
-#scoreboard h2 { text-align: center; color: #ffaa00; font-size: 16px; letter-spacing: 3px; margin-bottom: 12px; }
-.sb-team-header { font-size: 12px; letter-spacing: 2px; padding: 4px 8px; margin-top: 10px; }
-.sb-team-a { color: #ff6666; border-bottom: 1px solid rgba(255,100,100,0.3); }
-.sb-team-b { color: #66bb66; border-bottom: 1px solid rgba(100,200,100,0.3); }
-.sb-row { display: flex; justify-content: space-between; padding: 3px 12px; font-size: 11px; }
-.sb-row.player-row { color: #ffcc00; }
-.sb-row .sb-name { flex: 2; }
-.sb-row .sb-stat { flex: 1; text-align: center; color: #aaa; }
-.sb-row .sb-stat-header { flex: 1; text-align: center; color: #666; font-size: 9px; text-transform: uppercase; }
-.sb-header-row { display: flex; justify-content: space-between; padding: 2px 12px; margin-bottom: 4px; }
-`;
-document.head.appendChild(scoreboardCSS);
-
-const scoreboardDiv = document.createElement('div');
-scoreboardDiv.id = 'scoreboard';
-document.body.appendChild(scoreboardDiv);
-
-let scoreboardVisible = false;
-// Track keyboard-hold and gamepad-hold independently; the scoreboard is shown
-// while EITHER is held. This lets Tab (keyboard) and Start (gamepad) both work
-// without fighting over the visibility flag.
-let _scoreboardKeyHeld = false;
-let _scoreboardGpHeld = false;
-function _refreshScoreboardVisibility() {
-  // Force scoreboard visible during the match-end pause so players can see the
-  // final kills/damage totals before the root menu returns.
-  const forced = (game.state === 'matchEnd');
-  const want = forced || _scoreboardKeyHeld || _scoreboardGpHeld;
-  if (want !== scoreboardVisible) {
-    scoreboardVisible = want;
-    updateScoreboard();
-  }
-}
-
-function updateScoreboard() {
-  const sb = scoreboardDiv;
-  if (!scoreboardVisible || !player.loadout) { sb.classList.remove('visible'); return; }
-  sb.classList.add('visible');
-
-  const teamA = game.entities.filter(b => b.team === LSS.TEAM_FLEET_A);
-  const teamB = game.entities.filter(b => b.team === LSS.TEAM_FLEET_B);
-
-  // Sort each team by kills descending (player pinned at the top of their own team).
-  teamA.sort((a, b) => (b.kills || 0) - (a.kills || 0));
-  teamB.sort((a, b) => (b.kills || 0) - (a.kills || 0));
-
-  const statusOf = (e) => !e.alive ? 'DEAD' : e.doomed ? 'DOOMED' : 'ALIVE';
-  const row = (name, status, kills, dmg, isPlayer) => (
-    '<div class="sb-row' + (isPlayer ? ' player-row' : '') + '">' +
-    '<div class="sb-name">' + name + '</div>' +
-    '<div class="sb-stat">' + status + '</div>' +
-    '<div class="sb-stat">' + (kills || 0) + '</div>' +
-    '<div class="sb-stat">' + Math.floor(dmg || 0) + '</div>' +
-    '</div>'
-  );
-
-  let html = '<h2>SCOREBOARD</h2>';
-  html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div><div class="sb-stat-header">DAMAGE</div></div>';
-
-  // FLEET A (player's team)
-  html += '<div class="sb-team-header sb-team-a">FLEET A (' + game.scoreA + ' rounds)</div>';
-  const pStatus = player.shipState === 'dead' ? 'DEAD' : player.doomed ? 'DOOMED' : 'ALIVE';
-  html += row('YOU (' + (player.loadout ? player.loadout.name : '?') + ')', pStatus, player.kills, player.damageDealt, true);
-  for (const bot of teamA) {
-    html += row(bot.loadout.name, statusOf(bot), bot.kills, bot.damageDealt, false);
-  }
-
-  // FLEET B (enemy team)
-  html += '<div class="sb-team-header sb-team-b">FLEET B (' + game.scoreB + ' rounds)</div>';
-  for (const bot of teamB) {
-    html += row(bot.loadout.name, statusOf(bot), bot.kills, bot.damageDealt, false);
-  }
-
-  // Network players (stats track through their own Bot-like objects if present)
-  for (const np of net.networkPlayers) {
-    html += row('[NET] ' + (np.loadout ? np.loadout.name : '?'), statusOf(np), np.kills, np.damageDealt, false);
-  }
-
-  // Personal summary footer
-  html += '<div style="text-align:center;color:#888;font-size:10px;margin-top:12px;letter-spacing:2px;">KILLS ' + (player.kills || 0) + '  &middot;  DEATHS ' + (player.deaths || 0) + '  &middot;  DAMAGE ' + Math.floor(player.damageDealt || 0) + '</div>';
-  sb.innerHTML = html;
-}
-
-// Tab key handler for scoreboard. Only intercept Tab when we're actually in
-// combat (not select, not settings, not ship select); otherwise let the
-// browser's native Tab behavior move focus through form fields.
-function _scoreboardTabShouldIntercept() {
-  if (game.state === 'select') return false;
-  if (settingsOpen) return false;
-  const sel = document.getElementById('ship-select');
-  if (sel && sel.classList.contains('active')) return false;
-  return true;
-}
-// (v6.9) Scoreboard hold-key reads from kbBindings.scoreboard so users can
-// rebind from Tab. preventDefault still applies (we don't want browser tab
-// navigation while in match) and the intercept gate keeps it out of menus.
-document.addEventListener('keydown', e => {
-  const sbKey = (input.kbBindings && input.kbBindings.scoreboard) || 'tab';
-  if (e.key.toLowerCase() === sbKey && _scoreboardTabShouldIntercept()) {
-    e.preventDefault();
-    _scoreboardKeyHeld = true;
-    _refreshScoreboardVisibility();
-  }
-});
-document.addEventListener('keyup', e => {
-  const sbKey = (input.kbBindings && input.kbBindings.scoreboard) || 'tab';
-  if (e.key.toLowerCase() === sbKey) {
-    _scoreboardKeyHeld = false;
-    _refreshScoreboardVisibility();
-  }
-});
-
-// ---- DEATH CAMERA (teammate spectator with orbit fallback) ----
-// You get one life per round. On death, the camera detaches from your wreck
-// and follows a living teammate as a chase-cam. Cycle teammates with A/D,
-// arrow left/right, left-click, or gamepad d-pad left/right. If every
-// teammate is also dead we fall back to a slow orbit around your wreck.
-
-const deathCam = {
-  active: false,
-  // (v6.9) Kill-cam phase: brief cinematic before the spectate cam takes
-  // over. Holds the camera at (or near) the killer's POV looking at the
-  // wreck so the player sees how they died. Attacker is the Bot / 'world'
-  // tag passed in from playerDie ; null fallback uses a high pan above
-  // the death point.
-  killCamTimer: 0,
-  killCamDuration: 2.5,
-  killCamAttacker: null,
-  killCamStartCam: null,   // THREE.Vector3 cached at kill-cam start
-  killCamEndCam: null,     // THREE.Vector3 cached at kill-cam start
-  killCamDeathPos: null,
-  // Orbit-mode state (fallback when no living teammates remain)
-  angle: 0,
-  radius: 400,
-  height: 150,
-  target: null,            // THREE.Vector3 of the death location
-  // Spectator-mode state (chase a living teammate)
-  spectateTarget: null,    // entity reference (bot or player-like) we're chasing
-  // Local edge-detection for cycle-spectate input (scoped to deathCam so we
-  // don't stomp on the main input system's prev-state tracking)
-  _kbPrevLeft: false,
-  _kbPrevRight: false,
-  _kbPrevClick: false,
-};
-
-function _livingTeammates() {
-  const out = [];
-  for (const b of game.entities) {
-    if (b && b.alive && b.team === player.team) out.push(b);
-  }
-  return out;
-}
-
-function cycleSpectateTarget(dir) {
-  const mates = _livingTeammates();
-  if (mates.length === 0) { deathCam.spectateTarget = null; return; }
-  let startIdx = 0;
-  if (deathCam.spectateTarget) {
-    const curIdx = mates.indexOf(deathCam.spectateTarget);
-    if (curIdx >= 0) startIdx = curIdx;
-    else startIdx = -dir; // fell off the list (target died); step to first entry
-  }
-  const nextIdx = ((startIdx + dir) % mates.length + mates.length) % mates.length;
-  deathCam.spectateTarget = mates[nextIdx];
-  _updateSpectateOverlay();
-}
-
-function _updateSpectateOverlay() {
-  // Repurpose the existing ov-respawn overlay's wait row to show who we're
-  // watching. Keeps the overlay's "DESTROYED" headline intact while making
-  // the spectate state legible.
-  const el = document.getElementById('ov-respawn');
-  if (!el) return;
-  const wait = el.querySelector('.rs-wait');
-  if (!wait) return;
-  if (deathCam.spectateTarget && deathCam.spectateTarget.loadout) {
-    const name = deathCam.spectateTarget.loadout.name || 'ALLY';
-    wait.textContent = 'SPECTATING ' + name.toUpperCase() + '  (A/D OR D-PAD TO CYCLE)';
-  } else {
-    wait.textContent = 'WAITING FOR NEXT ROUND';
-  }
-}
-
-function startDeathCam(attacker) {
-  // (v8VR 2026-04-30) Ghost free-look on death. Replaces the legacy
-  // kill-cam dolly + orbit-around-wreck + teammate spectate. Camera holds
-  // at the death position; mouse / gamepad rotate the view (free look).
-  // Respawn flow runs unchanged; respawnPlayer clears deathCam.active.
-  // The legacy body below is preserved unreachable for re-enable later.
-  deathCam.active   = true;
-  deathCam.target   = player.position.clone();
-  deathCam.killerName = (attacker && attacker.loadout && attacker.loadout.name) ? attacker.loadout.name : '';
-  deathCam.overlayShown = false;
-  // (v8_2a) Reset ghost free-fly state so each death starts at the death
-  // position, not wherever the last ghost flight ended.
-  deathCam._ghostInit = false;
-  deathCam._ghostPos = null;
-  deathCam._ghostVel = null;
-  return;
-  deathCam.active = true;
-  deathCam.target = player.position.clone();
-  deathCam.angle = player.euler.y;
-  deathCam.radius = player.chassis ? player.chassis.hullLength * 4 : 400;
-  deathCam.spectateTarget = null;
-  // (post-v6.9 patch, 2026-04-28) Pre-arm edge-detect prev flags from the
-  // CURRENT input state, not false. Otherwise a player who was firing or
-  // strafing at the moment of death would register held inputs as fresh
-  // presses on the first death-cam tick, instantly skipping the kill-cam
-  // cinematic and/or cycling the spectate target.
-  deathCam._kbPrevLeft  = !!(input.keys && (input.keys['a'] || input.keys['arrowleft']));
-  deathCam._kbPrevRight = !!(input.keys && (input.keys['d'] || input.keys['arrowright']));
-  deathCam._kbPrevClick = !!input.mouseDown;
-  // (post-v6.9 patch) Capture the killer name so we can defer the respawn
-  // overlay until AFTER the kill-cam, then re-show it for the spectate
-  // phase. Hide it now so the cinematic isn't obscured by the 60%-black
-  // scrim that the original playerDie just enabled.
-  deathCam.killerName = (attacker && attacker.loadout && attacker.loadout.name) ? attacker.loadout.name : '';
-  deathCam.overlayShown = false;
-  if (window.Overlays && Overlays.hideRespawn) Overlays.hideRespawn();
-  // (v6.9) Kill-cam: capture start + end positions so updateDeathCam can
-  // smoothly slerp between them across killCamDuration. Start point sits
-  // a bit behind the killer's hull looking at the wreck ; if there's no
-  // killer (suicide / world damage) we fall back to a high external pan.
-  deathCam.killCamAttacker = (attacker && attacker.position) ? attacker : null;
-  deathCam.killCamTimer = deathCam.killCamDuration;
-  deathCam.killCamDeathPos = deathCam.target.clone();
-  if (deathCam.killCamAttacker) {
-    // Start point: behind the killer over their shoulder, looking at the
-    // wreck. End point: closer to the wreck for the dolly-in.
-    const att = deathCam.killCamAttacker;
-    const toWreck = new THREE.Vector3().subVectors(deathCam.target, att.position);
-    const dist = Math.max(60, toWreck.length());
-    const back = toWreck.clone().normalize().multiplyScalar(-(att.chassis ? att.chassis.hullLength * 1.6 : 120));
-    const up = new THREE.Vector3(0, (att.chassis ? att.chassis.hullLength * 0.5 : 50), 0);
-    deathCam.killCamStartCam = att.position.clone().add(back).add(up);
-    // Dolly endpoint: 60% of the way toward the wreck, slightly elevated.
-    const dolly = att.position.clone().add(toWreck.clone().multiplyScalar(0.6)).add(new THREE.Vector3(0, 60, 0));
-    deathCam.killCamEndCam = dolly;
-  } else {
-    // No attacker: high pan above the death point.
-    const aboveOff = new THREE.Vector3(180, 320, 180);
-    deathCam.killCamStartCam = deathCam.target.clone().add(aboveOff);
-    deathCam.killCamEndCam = deathCam.target.clone().add(new THREE.Vector3(60, 120, 60));
-  }
-  // Auto-pick first living teammate if one exists, but the kill-cam still
-  // takes priority for its duration so the player sees the killing blow.
-  cycleSpectateTarget(1);
-}
-
-function updateDeathCam(dt) {
-  if (!deathCam.active) return;
-
-  // (v8_2a 2026-05-01) Ghost free-fly. Replaces the v8VR position-locked
-  // free-look. WASD + Q/E (or gamepad sticks) move the camera in 6DOF;
-  // mouse / gamepad right-stick rotate the view. No collision check, so
-  // the ghost can pass through walls and explore the map. The respawn
-  // overlay still shows once on the first tick; its rs-wait line was
-  // changed to GHOST MODE in v8_2a (legacy "WAITING FOR NEXT ROUND" /
-  // spectate text removed). On respawn, deathCam.active flips false and
-  // updatePlayerMovement takes over again from the spawn position.
-  if (!deathCam._ghostInit) {
-    // Initialize ghost cam on first tick. Lazy-create a velocity vector
-    // and capture the death position as the starting point.
-    deathCam._ghostInit = true;
-    deathCam._ghostPos = deathCam.target ? deathCam.target.clone() : new THREE.Vector3();
-    deathCam._ghostVel = new THREE.Vector3();
-  }
-  // Look (mouse + gamepad). Same conventions as updatePlayerMovement.
-  if (typeof input !== 'undefined') {
-    if (input.locked) {
-      player.euler.y -= input.mouseDX * input.sensitivity;
-      player.euler.x -= input.mouseDY * input.sensitivity;
-    }
-    if (input.gpConnected) {
-      player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
-      player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
-    }
-    player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
-    input.mouseDX = 0; input.mouseDY = 0;
-  }
-  camera.quaternion.setFromEuler(player.euler);
-  // Movement input (kb + gamepad left stick + triggers/bumpers for vertical).
-  let mvF = 0, mvR = 0, mvU = 0;
-  if (typeof input !== 'undefined' && input.keys) {
-    if (input.keys['w'] || input.keys['arrowup'])    mvF -= 1;
-    if (input.keys['s'] || input.keys['arrowdown'])  mvF += 1;
-    if (input.keys['a'] || input.keys['arrowleft'])  mvR -= 1;
-    if (input.keys['d'] || input.keys['arrowright']) mvR += 1;
-    if (input.keys[' '] || input.keys['e'])          mvU += 1;   // up
-    if (input.keys['shift'] || input.keys['q'] || input.keys['c']) mvU -= 1; // down
-  }
-  if (typeof input !== 'undefined' && input.gpConnected) {
-    mvF += (input.gpMoveY || 0);
-    mvR += (input.gpMoveX || 0);
-    // Map gamepad bumpers / triggers to vertical if available.
-    if (typeof input.gpThrust === 'number') mvU += input.gpThrust;
-    if (typeof input.gpBrake  === 'number') mvU -= input.gpBrake;
-  }
-  // Build a camera-local move vector and apply it. No collision = pass through walls.
-  const _ghostSpeed = 800; // units / sec ; brisk enough to cover the map
-  const _moveLocal = new THREE.Vector3(mvR, mvU, mvF).clampLength(0, 1).multiplyScalar(_ghostSpeed * dt);
-  _moveLocal.applyQuaternion(camera.quaternion);
-  deathCam._ghostPos.add(_moveLocal);
-  camera.position.copy(deathCam._ghostPos);
-  // Respawn overlay first-tick (DESTROYED text + ghost-mode hint).
-  if (!deathCam.overlayShown) {
-    deathCam.overlayShown = true;
-    if (window.Overlays && Overlays.respawn) Overlays.respawn(deathCam.killerName || '');
-  }
-  return;
-
-  // (v6.9) Kill-cam phase: hold + dolly the camera from the killer's
-  // shoulder to the wreck, looking at the corpse the whole time. Skips
-  // spectate input until the kill cam finishes so the player can't
-  // accidentally cycle past the cinematic. Mouse-click during kill cam
-  // skips it (impatient players).
-  if (deathCam.killCamTimer > 0) {
-    deathCam.killCamTimer -= dt;
-    // (post-v6.9 patch, 2026-04-28) Skip on a FRESH mouse click during the
-    // kill-cam (rising-edge detection), not on a held click left over from
-    // firing at the moment of death. _kbPrevClick is pre-armed in
-    // startDeathCam from the current input state for exactly this reason.
-    const _md = !!input.mouseDown;
-    const skipKill = _md && !deathCam._kbPrevClick;
-    deathCam._kbPrevClick = _md;
-    if (skipKill) deathCam.killCamTimer = 0;
-    if (deathCam.killCamStartCam && deathCam.killCamEndCam && deathCam.killCamDeathPos) {
-      // Ease-out interpolation 0..1 across the duration.
-      const t = 1 - Math.max(0, deathCam.killCamTimer / deathCam.killCamDuration);
-      const eased = 1 - (1 - t) * (1 - t);
-      camera.position.lerpVectors(deathCam.killCamStartCam, deathCam.killCamEndCam, eased);
-      camera.lookAt(deathCam.killCamDeathPos);
-    }
-    if (deathCam.killCamTimer > 0) return;
-    // _kbPrevClick was already updated above; no extra arm needed.
-  }
-
-  // (post-v6.9 patch, 2026-04-28) Kill-cam has ended ; show the respawn
-  // overlay once for the spectate phase. Suppressed during the cinematic so
-  // the 60%-black scrim doesn't obscure the dolly. Fires exactly once on
-  // the transition; spectate updates after this run normally.
-  if (!deathCam.overlayShown) {
-    deathCam.overlayShown = true;
-    if (window.Overlays && Overlays.respawn) Overlays.respawn(deathCam.killerName || '');
-    if (typeof _updateSpectateOverlay === 'function') _updateSpectateOverlay();
-  }
-
-  // Input: cycle spectate target (keyboard + mouse; gamepad handled in the
-  // main input pass so it shares the existing edge-tracking state).
-  const kbLeft  = !!(input.keys && (input.keys['a'] || input.keys['arrowleft']));
-  const kbRight = !!(input.keys && (input.keys['d'] || input.keys['arrowright']));
-  const kbClick = !!input.mouseDown;
-  if (kbLeft  && !deathCam._kbPrevLeft)  cycleSpectateTarget(-1);
-  if (kbRight && !deathCam._kbPrevRight) cycleSpectateTarget( 1);
-  if (kbClick && !deathCam._kbPrevClick) cycleSpectateTarget( 1);
-  deathCam._kbPrevLeft  = kbLeft;
-  deathCam._kbPrevRight = kbRight;
-  deathCam._kbPrevClick = kbClick;
-
-  // If the spectate target died since last frame, advance to the next alive one.
-  if (deathCam.spectateTarget && !deathCam.spectateTarget.alive) {
-    cycleSpectateTarget(1);
-  } else if (!deathCam.spectateTarget) {
-    cycleSpectateTarget(1); // maybe one is back up (e.g., if ever mid-round respawns return)
-  }
-
-  if (deathCam.spectateTarget) {
-    // (post-v6.9 patch, 2026-04-28) Chase cam: sit just behind and slightly
-    // above the teammate's ship, looking along their heading. Previous
-    // chaseDist was hull*4 (320 for Frigate, 560 for Dreadnought), which
-    // routinely placed the camera outside the host room (rooms are 270-375
-    // radius), so the spectator saw their target through walls or against
-    // the void outside the map. hull*1.5 keeps the camera inside the room
-    // for typical layouts; targetDir is unit-length (normalized in the bot's
-    // movement step) so the offset is well-defined.
-    const t = deathCam.spectateTarget;
-    const tgt = t.position;
-    // (post-v6.9 patch, 2026-04-28) Track ACTUAL velocity direction instead
-    // of targetDir (the AI's intended movement). At close chase distances
-    // the difference reads as "ship flying backwards" because the mesh's
-    // nose follows targetDir (set by mesh.lookAt during AI tick) while the
-    // ship physically drifts along velocity, which can lag or oppose intent
-    // during decel / dodge / strafe / bank. Camera trailing the velocity
-    // vector keeps the spectated ship pointing roughly toward the screen
-    // edge regardless of intent. Fallback chain: velocity (when moving) →
-    // targetDir (locked-in-stasis or initial frames) → -Z (deep fallback).
-    const _spDir = new THREE.Vector3();
-    if (t.velocity && t.velocity.lengthSq() > 0.0001) {
-      _spDir.copy(t.velocity).normalize();
-    } else if (t.targetDir && t.targetDir.lengthSq() > 0.001) {
-      _spDir.copy(t.targetDir);
-    } else {
-      _spDir.set(0, 0, -1);
-    }
-    const dir = _spDir;
-    const hull = (t.chassis && t.chassis.hullLength) ? t.chassis.hullLength : 80;
-    const chaseDist = hull * 1.5;
-    const heightOff = hull * 0.45;
-    camera.position.set(
-      tgt.x - dir.x * chaseDist,
-      tgt.y - dir.y * chaseDist + heightOff,
-      tgt.z - dir.z * chaseDist
-    );
-    // Look slightly ahead of the ship so their nose is centered, not their tail.
-    const lookAhead = new THREE.Vector3(
-      tgt.x + dir.x * hull * 0.5,
-      tgt.y + dir.y * hull * 0.5,
-      tgt.z + dir.z * hull * 0.5
-    );
-    camera.lookAt(lookAhead);
-  } else if (deathCam.target) {
-    // No living teammates: slow orbit around the wreck.
-    deathCam.angle += dt * 0.4;
-    const camX = deathCam.target.x + Math.cos(deathCam.angle) * deathCam.radius;
-    const camY = deathCam.target.y + deathCam.height;
-    const camZ = deathCam.target.z + Math.sin(deathCam.angle) * deathCam.radius;
-    camera.position.set(camX, camY, camZ);
-    camera.lookAt(deathCam.target);
-  }
-}
-
-// Hook death camera into playerDie and respawnPlayer
-const _origPlayerDie2 = playerDie;
-playerDie = function(attacker) {
-  _origPlayerDie2(attacker);
-  // (v6.9) Pass attacker into startDeathCam so the kill-cam phase can
-  // anchor to the killer's POV. attacker is null for world / suicide
-  // damage, in which case startDeathCam falls back to a high pan.
-  startDeathCam(attacker);
-};
-
-const _origRespawnPlayer = respawnPlayer;
-respawnPlayer = function() {
-  deathCam.active = false;
-  deathCam.spectateTarget = null;
-  // (v6.9) Cancel any in-flight kill cam.
-  deathCam.killCamTimer = 0;
-  deathCam.killCamAttacker = null;
-  _origRespawnPlayer();
-};
-
-// ---- INIT ----
-
-initAudio();
-loadSettings();
-// (v8_1VR) Push loaded music settings onto the live engine.
-try {
-  if (typeof music !== 'undefined' && audio) {
-    music.musicMuteLobby = !!audio.musicMuteLobby;
-    if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling || 'normal');
-    if (typeof musicSetStyle === 'function') musicSetStyle(audio.musicStyle || 'cosmic');
-    if (typeof musicSetEnabled === 'function') musicSetEnabled(audio.musicEnabled !== false);
-    if (audio.musicGain && audio.userVol && typeof audio.userVol.music === 'number') {
-      audio.musicGain.gain.value = 0.30 * audio.userVol.music;
-    }
-  }
-} catch (_) {}
-// (post-v6.9 patch, 2026-04-28) Restore previously-loaded custom maps from
-// localStorage and wire the loader button. Must run before buildShipSelect
-// so custom maps appear in the carousel on first open.
-// (VR fork) Built-in custom maps: Center Cube + Center Cube 2. Embedded
-// JSON injected once at startup so users don't need an external map file.
-// (v8VR fix, 2026-04-30) Center Cube tunnels widened from r=150 to r=180
-// across the inner-cube paths so larger ships have room to maneuver
-// without scraping. Center Cube 2 added as a sister variant; key was
-// remapped from "custom" to "center_cube_2" to avoid stomping the first
-// map (installCustomMap overwrites previously-loaded keys).
-// Source files: LSS/maps/map_cubecenter.json + map_center_cube_v2.json.
-// installCustomMap is idempotent against re-installs; persist=false avoids
-// writing them to localStorage (they're already part of the page).
-try {
-  installCustomMap(JSON.parse(`{"name":"Center Cube","key":"custom","description":"A cube in the center","palette":[4487167,16729224,4521847,16755268,11158783,4521983,16729258,16777028],"rooms":[{"id":"room_3","team":"B","x":2543,"y":0,"z":-2273,"r":270},{"id":"room_6","team":null,"x":-253,"y":2,"z":251,"r":180},{"id":"room_7","team":null,"x":-265,"y":1,"z":-262,"r":180},{"id":"room_8","team":null,"x":251,"y":4,"z":-244,"r":180},{"id":"room_9","team":null,"x":262,"y":0,"z":253,"r":180},{"id":"room_10","team":null,"x":-248,"y":500,"z":256,"r":180},{"id":"room_11","team":null,"x":-249,"y":500,"z":-260,"r":180},{"id":"room_12","team":null,"champion":true,"x":265,"y":500,"z":255,"r":180},{"id":"room_13","team":null,"x":272,"y":500,"z":-245,"r":180},{"id":"room_16","team":null,"x":-545,"y":261,"z":557,"r":270},{"id":"room_17","team":null,"x":564,"y":261,"z":-545,"r":270},{"id":"room_18","team":"A","x":-2399,"y":0,"z":2218,"r":270},{"id":"room_19","team":null,"x":896,"y":230,"z":895,"r":270},{"id":"room_20","team":null,"x":-940,"y":230,"z":-904,"r":270}],"tunnels":[{"path":[{"x":272,"y":500,"z":-245},{"x":265,"y":500,"z":255}],"r":180},{"path":[{"x":265,"y":500,"z":255},{"x":-248,"y":500,"z":256}],"r":180},{"path":[{"x":-248,"y":500,"z":256},{"x":-249,"y":500,"z":-260}],"r":180},{"path":[{"x":-249,"y":500,"z":-260},{"x":272,"y":500,"z":-245}],"r":180},{"path":[{"x":272,"y":500,"z":-245},{"x":251,"y":4,"z":-244}],"r":180},{"path":[{"x":251,"y":4,"z":-244},{"x":-265,"y":1,"z":-262}],"r":180},{"path":[{"x":-265,"y":1,"z":-262},{"x":-249,"y":500,"z":-260}],"r":180},{"path":[{"x":-265,"y":1,"z":-262},{"x":-253,"y":2,"z":251}],"r":180},{"path":[{"x":-253,"y":2,"z":251},{"x":262,"y":0,"z":253}],"r":180},{"path":[{"x":265,"y":500,"z":255},{"x":262,"y":0,"z":253}],"r":180},{"path":[{"x":-248,"y":500,"z":256},{"x":-253,"y":2,"z":251}],"r":180},{"path":[{"x":262,"y":0,"z":253},{"x":251,"y":4,"z":-244}],"r":180},{"path":[{"x":272,"y":500,"z":-245},{"x":564,"y":261,"z":-545}],"r":180},{"path":[{"x":251,"y":4,"z":-244},{"x":564,"y":261,"z":-545}],"r":180},{"path":[{"x":-248,"y":500,"z":256},{"x":-545,"y":261,"z":557}],"r":180},{"path":[{"x":-253,"y":2,"z":251},{"x":-545,"y":261,"z":557}],"r":180},{"path":[{"x":-2399,"y":0,"z":2218},{"x":-545,"y":261,"z":557}],"r":180},{"path":[{"x":564,"y":261,"z":-545},{"x":2543,"y":0,"z":-2273}],"r":180},{"path":[{"x":-545,"y":261,"z":557},{"x":-940,"y":230,"z":-904}],"r":100},{"path":[{"x":564,"y":261,"z":-545},{"x":-940,"y":230,"z":-904}],"r":100},{"path":[{"x":-545,"y":261,"z":557},{"x":896,"y":230,"z":895}],"r":100},{"path":[{"x":896,"y":230,"z":895},{"x":564,"y":261,"z":-545}],"r":100}]}`), { silent: true, persist: false });
-} catch (e) { console.warn('[bake] cubecenter install failed:', e); }
-try {
-  installCustomMap(JSON.parse(`{"name":"Center Cube 2","key":"center_cube_2","description":"A cube in the center, part 2","palette":[4487167,16729224,4521847,16755268,11158783,4521983,16729258,16777028],"rooms":[{"id":"room_3","team":"B","x":1466,"y":250,"z":-1688,"r":270},{"id":"room_6","team":null,"x":-253,"y":2,"z":251,"r":180},{"id":"room_7","team":null,"x":-265,"y":1,"z":-262,"r":180},{"id":"room_8","team":null,"x":251,"y":4,"z":-244,"r":180},{"id":"room_9","team":null,"x":262,"y":0,"z":253,"r":180},{"id":"room_10","team":null,"x":-248,"y":420,"z":256,"r":180},{"id":"room_11","team":null,"x":-249,"y":420,"z":-260,"r":180},{"id":"room_12","team":null,"champion":true,"x":265,"y":420,"z":259,"r":180},{"id":"room_13","team":null,"x":272,"y":420,"z":-245,"r":180},{"id":"room_16","team":null,"x":-453,"y":253,"z":499,"r":270},{"id":"room_17","team":null,"x":507,"y":253,"z":-480,"r":270},{"id":"room_18","team":"A","x":-1560,"y":250,"z":1633,"r":270},{"id":"room_19","team":null,"x":1012,"y":253,"z":462,"r":270},{"id":"room_20","team":null,"x":-778,"y":250,"z":-563,"r":270}],"tunnels":[{"path":[{"x":272,"y":420,"z":-245},{"x":265,"y":420,"z":259}],"r":180},{"path":[{"x":265,"y":420,"z":259},{"x":-248,"y":420,"z":256}],"r":180},{"path":[{"x":-248,"y":420,"z":256},{"x":-249,"y":420,"z":-260}],"r":180},{"path":[{"x":-249,"y":420,"z":-260},{"x":272,"y":420,"z":-245}],"r":180},{"path":[{"x":272,"y":420,"z":-245},{"x":251,"y":4,"z":-244}],"r":180},{"path":[{"x":251,"y":4,"z":-244},{"x":-265,"y":1,"z":-262}],"r":180},{"path":[{"x":-265,"y":1,"z":-262},{"x":-249,"y":420,"z":-260}],"r":180},{"path":[{"x":-265,"y":1,"z":-262},{"x":-253,"y":2,"z":251}],"r":180},{"path":[{"x":-253,"y":2,"z":251},{"x":262,"y":0,"z":253}],"r":180},{"path":[{"x":265,"y":420,"z":259},{"x":262,"y":0,"z":253}],"r":180},{"path":[{"x":-248,"y":420,"z":256},{"x":-253,"y":2,"z":251}],"r":150},{"path":[{"x":262,"y":0,"z":253},{"x":251,"y":4,"z":-244}],"r":180},{"path":[{"x":272,"y":420,"z":-245},{"x":507,"y":253,"z":-480}],"r":150},{"path":[{"x":251,"y":4,"z":-244},{"x":507,"y":253,"z":-480}],"r":150},{"path":[{"x":-248,"y":420,"z":256},{"x":-453,"y":253,"z":499}],"r":150},{"path":[{"x":-253,"y":2,"z":251},{"x":-453,"y":253,"z":499}],"r":150},{"path":[{"x":-453,"y":253,"z":499},{"x":-778,"y":250,"z":-563}],"r":100},{"path":[{"x":1012,"y":253,"z":462},{"x":507,"y":253,"z":-480}],"r":100},{"path":[{"x":1466,"y":250,"z":-1688},{"x":-778,"y":250,"z":-563}],"r":180},{"path":[{"x":-1560,"y":250,"z":1633},{"x":1012,"y":253,"z":462}],"r":180},{"path":[{"x":-1560,"y":250,"z":1633},{"x":-453,"y":253,"z":499}],"r":180},{"path":[{"x":1466,"y":250,"z":-1688},{"x":507,"y":253,"z":-480}],"r":180}]}`), { silent: true, persist: false });
-} catch (e) { console.warn('[bake] center_cube_2 install failed:', e); }
-_loadCustomMapsFromLocalStorage();
-buildShipSelect();
-buildSettingsPage();
-_setupCustomMapLoader();
-
-// Hook audio init on first user interaction
-document.addEventListener('click', initAudio, { once: false });
-document.addEventListener('keydown', initAudio, { once: false });
-
-// (v8_1VR) Resume the suspended AudioContext on first user gesture so the
-// reactive band can actually be heard without waiting for a sound effect to
-// play first. initAudio itself is idempotent ; this is just the resume.
-(function() {
-  const fireResume = function() {
-    try { if (typeof initAudio === 'function') initAudio(); } catch (_) {}
-    try { if (audio && audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume(); } catch (_) {}
-    try {
-      if (typeof musicSyncToGameState === 'function') musicSyncToGameState();
-      if (typeof musicStart === 'function') musicStart();
-    } catch (_) {}
-    document.removeEventListener('click',   fireResume, true);
-    document.removeEventListener('keydown', fireResume, true);
-  };
-  document.addEventListener('click',   fireResume, true);
-  document.addEventListener('keydown', fireResume, true);
-})();
-
-// v8VR: one-shot ship-AI boot intro. SpeechSynthesis is gated by browsers
-// until a user gesture, so we trigger on the first click / keydown of the
-// session. Once is enough; subsequent clicks just go to the existing
-// initAudio handler. Tiny delay so the speech engine has settled.
-(function() {
-  const fireIntro = function() {
-    setTimeout(() => {
-      try { if (typeof ANN !== 'undefined' && ANN.introBoot) ANN.introBoot(); } catch (_) {}
-    }, 250);
-    document.removeEventListener('click',   fireIntro, true);
-    document.removeEventListener('keydown', fireIntro, true);
-  };
-  document.addEventListener('click',   fireIntro, true);
-  document.addEventListener('keydown', fireIntro, true);
-})();
-
-// v8VR: Wake Lock acquisition on first user gesture. Tells the browser /
-// OS the page is performance-sensitive and shouldn't be put to sleep,
-// throttled, or have its tab put on the back-burner. On Edge specifically,
-// holding a screen wake lock is one signal that Efficiency Mode honors
-// when deciding whether to throttle this tab. Wake locks require a user
-// gesture to acquire (security rule), and they're released automatically
-// if the page becomes hidden; we re-acquire on visibility change.
-(function() {
-  if (typeof navigator === 'undefined' || !navigator.wakeLock) return;
-  let _wakeLock = null;
-  async function acquire() {
-    try {
-      _wakeLock = await navigator.wakeLock.request('screen');
-      _wakeLock.addEventListener('release', () => { _wakeLock = null; });
-      console.log('[v8VR] Screen wake lock acquired (no sleep / efficiency throttle).');
-    } catch (e) {
-      console.warn('[v8VR] Wake lock request failed:', e && e.message);
-    }
-  }
-  function onFirstGesture() {
-    document.removeEventListener('click',   onFirstGesture, true);
-    document.removeEventListener('keydown', onFirstGesture, true);
-    acquire();
-  }
-  document.addEventListener('click',   onFirstGesture, true);
-  document.addEventListener('keydown', onFirstGesture, true);
-  // Re-acquire when the tab becomes visible again. Wake locks auto-release
-  // on visibility change; without this the second time the user comes back
-  // to the tab they'd silently lose the throttling protection.
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && _wakeLock === null) {
-      // requestWakeLock outside a user gesture works as long as we had
-      // one earlier in the session, which the onFirstGesture handler
-      // guarantees by the time we reach a visibilitychange.
-      acquire();
-    }
-  });
-})();
-
-// VR fork: use renderer.setAnimationLoop instead of raw requestAnimationFrame
-// so the same loop drives both flat-screen frames (browser RAF) and immersive
-// frames (XR device rAF cadence). Three.js handles the dispatch internally.
-renderer.setAnimationLoop(gameLoop);
-
-// (v9b) Background-tab keep-alive. Browsers pause requestAnimationFrame when
-// the tab is hidden (alt-tab, minimized, switched to another window). That
-// freezes the entire game loop ; for multiplayer it means YOU stop sending
-// snapshots and your peer sees you frozen, for solo it means the world
-// pauses on alt-tab. We work around it by spinning up a tiny Web Worker
-// that posts tick messages at ~30 Hz when the tab is hidden ; Web-Worker
-// timers are NOT throttled the way main-thread setTimeout is. On each
-// worker tick we call gameLoop directly with a synthesized timestamp.
-// We disable the rAF-driven setAnimationLoop while hidden so the two
-// drivers don't fight when the tab partially un-throttles. Skips entirely
-// in WebXR ; XR has its own visibility/session model.
-(function setupBackgroundTick() {
-  let bgWorker = null;
-  let bgActive = false;          // true while we're driving the loop ourselves
-  const TICK_HZ = 30;            // 30 Hz is enough to keep sim + net moving
-  function _ensureWorker() {
-    if (bgWorker) return bgWorker;
-    try {
-      const src = `let id=null;self.onmessage=(e)=>{if(e.data&&e.data.cmd==='start'){if(id)return;const ms=e.data.ms||33;id=setInterval(()=>self.postMessage('t'),ms);}else if(e.data&&e.data.cmd==='stop'){if(id){clearInterval(id);id=null;}}};`;
-      const blob = new Blob([src], { type: 'application/javascript' });
-      const url  = URL.createObjectURL(blob);
-      bgWorker = new Worker(url);
-      bgWorker.onmessage = () => {
-        if (!bgActive) return;
-        if (!document.hidden) return;
-        // Skip if we're in an XR session ; XR drives its own loop.
-        if (renderer && renderer.xr && renderer.xr.isPresenting) return;
-        try {
-          const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-          gameLoop(t);
-        } catch (err) {
-          // Silent ; the next tick will try again. Logging here would spam.
-        }
-      };
-    } catch (err) {
-      console.warn('[v9b] bg-tick worker failed to spawn:', err && err.message);
-    }
-    return bgWorker;
-  }
-  document.addEventListener('visibilitychange', () => {
-    const inXR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
-    if (inXR) return;            // XR overrides visibility ; leave it alone
-    if (document.hidden) {
-      // Hand off from rAF to the worker tick.
-      try { renderer.setAnimationLoop(null); } catch (_) {}
-      bgActive = true;
-      const w = _ensureWorker();
-      if (w) w.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) });
-    } else {
-      // Hand back to rAF ; gameLoop will run at refresh rate again.
-      bgActive = false;
-      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
-      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
-    }
-  });
-})();
-
-// v8VR: HTML onclick="joinRoom()" and onclick="startSolo()" carry inline
-// handlers that fire from page-parse onward. The early stub script (above
-// the <script type="module">) installed wrappers on window.joinRoom /
-// window.startSolo that queue calls until the real implementations exist.
-// Stash the real ones under `__real_X` and replay any pending click.
-if (typeof joinRoom  === 'function') window.__real_joinRoom  = joinRoom;
-if (typeof startSolo === 'function') window.__real_startSolo = startSolo;
-// (v10) Discord signin/signout exports for the early stub pattern.
-if (typeof discordSignin  === 'function') window.__real_discordSignin  = discordSignin;
-if (typeof discordSignout === 'function') window.__real_discordSignout = discordSignout;
-if (typeof window.__lssReplayPending === 'function') window.__lssReplayPending();
-
-// v8VR: dev-console handles. The whole inline script is wrapped in
-// _bootLSS() for the THREE module-import bootstrap, which means top-level
-// `const`s like `game` / `player` / `scene` / `camera` / `renderer` are
-// function-scoped, not global. Expose them on window so DevTools console
-// can poke at runtime state for debugging + tuning.
-window.game     = game;
-window.player   = player;
-window.scene    = scene;
-window.camera   = camera;
-window.renderer = renderer;
-window.input    = input;
-window.audio    = audio;
-
-} // end _bootLSS
-
-// v8VR: kick off the game once the THREE module bootstrap has run.
-// If the event already fired before this listener was added (race), boot now.
-if (window.LSS_ENGINE_READY) {
-  _bootLSS();
-} else {
-  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
-}
-
-</script>
-</body>
-</html>
+    const ring = ctx.cr
