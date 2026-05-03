@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LSS FX Lab ; layered effect material editor</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /*
+    LSS FX Lab. Companion to wall_pattern_lab and map_lab. Preview a
+    LayeredFXMaterial in real time, tune the three layers' parameters,
+    export the result as a JSON preset that drops into the game's
+    EFFECT_PRESETS table.
+
+    Architecture: three FBM-based pattern layers composited with
+    independent scale, time-rate, hue offset, alpha, blend mode, and
+    saturation. Background tint, fresnel, and alpha falloff applied
+    after composition. See graphics_update_plan.md for the full plan.
+  */
+  :root {
+    --bg: #050510;
+    --bg-elev: #0d0d1c;
+    --bg-row: #0a0a1a;
+    --text: #d8d8e0;
+    --text-dim: #888899;
+    --text-faint: #555566;
+    --accent: #ffaa00;
+    --accent-dim: rgba(255,170,0,0.35);
+    --rule: rgba(80,80,120,0.3);
+    --good: #66cc66;
+    --bad: #ff6644;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    height: 100%;
+  }
+  #app {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    height: 100vh;
+  }
+  #stage {
+    background: var(--bg);
+    position: relative;
+    overflow: hidden;
+  }
+  #stage canvas { display: block; width: 100% !important; height: 100% !important; }
+  #stage .stage-label {
+    position: absolute; top: 14px; left: 14px;
+    font-family: 'Orbitron', sans-serif;
+    color: var(--accent);
+    font-size: 14px;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    text-shadow: 0 0 12px rgba(0,0,0,0.7), 0 0 24px var(--accent-dim);
+    pointer-events: none;
+  }
+  #stage .stage-tag {
+    position: absolute; top: 36px; left: 14px;
+    color: var(--text-dim);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    pointer-events: none;
+  }
+  #stage .geom-toggle {
+    position: absolute; bottom: 14px; left: 14px;
+    display: flex; gap: 8px;
+  }
+  #stage .geom-toggle button {
+    background: rgba(20,20,40,0.8);
+    border: 1px solid var(--rule);
+    color: var(--text-dim);
+    padding: 6px 14px;
+    font-family: inherit; font-size: 10px;
+    letter-spacing: 2px; text-transform: uppercase;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+  }
+  #stage .geom-toggle button.active {
+    background: var(--accent); color: #050510; font-weight: 700;
+    border-color: var(--accent);
+  }
+  #stage .stage-bg-toggle {
+    position: absolute; bottom: 14px; right: 14px;
+    background: rgba(20,20,40,0.8);
+    border: 1px solid var(--rule);
+    color: var(--text-dim);
+    padding: 6px 14px;
+    font-family: inherit; font-size: 10px;
+    letter-spacing: 2px; text-transform: uppercase;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+  }
+  #panel {
+    background: var(--bg-elev);
+    border-left: 1px solid var(--rule);
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  #panel h2 {
+    font-family: 'Orbitron', sans-serif;
+    color: var(--accent);
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    margin: 18px 16px 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+  }
+  #panel h2:first-child { margin-top: 12px; }
+  #panel h3 {
+    font-family: 'Orbitron', sans-serif;
+    color: var(--text);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin: 12px 16px 6px;
+  }
+  .section { padding: 0 16px 8px; }
+  .row {
+    display: grid;
+    grid-template-columns: 100px 1fr 50px;
+    gap: 8px;
+    align-items: center;
+    margin: 5px 0;
+  }
+  .row label {
+    color: var(--text-dim);
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  .row input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    background: transparent;
+  }
+  .row .val {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    font-size: 11px;
+  }
+  .row select, .row input[type="color"] {
+    grid-column: 2 / 4;
+    background: var(--bg-row);
+    color: var(--text);
+    border: 1px solid var(--rule);
+    padding: 4px 6px;
+    font-family: inherit;
+    font-size: 11px;
+    border-radius: 2px;
+  }
+  .layer-card {
+    background: var(--bg-row);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+    padding: 10px 12px;
+    margin: 6px 16px 14px;
+    border-radius: 2px;
+  }
+  .layer-card h3 {
+    margin: 0 0 8px 0;
+    color: var(--accent);
+    font-size: 10px;
+  }
+  .layer-card .row label { font-size: 9px; }
+  .preset-row {
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 0 16px 8px;
+  }
+  .preset-row button {
+    background: var(--bg-row);
+    border: 1px solid var(--rule);
+    color: var(--text-dim);
+    padding: 6px 12px;
+    font-family: inherit;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: color 120ms, border-color 120ms;
+  }
+  .preset-row button:hover {
+    color: var(--accent);
+    border-color: var(--accent-dim);
+  }
+  .actions {
+    padding: 12px 16px 18px;
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
+  .actions button {
+    flex: 1; min-width: 100px;
+    background: var(--accent); color: #050510;
+    border: none; padding: 10px 14px;
+    font-family: inherit; font-size: 11px;
+    font-weight: 700; letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+  }
+  .actions button:hover { background: #ffc640; }
+  .actions button.secondary {
+    background: var(--bg-row); color: var(--text-dim);
+    border: 1px solid var(--rule);
+  }
+  .actions button.secondary:hover { color: var(--accent); border-color: var(--accent); }
+  textarea#json-out {
+    width: calc(100% - 32px);
+    margin: 0 16px 16px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--rule);
+    padding: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    line-height: 1.4;
+    border-radius: 2px;
+    resize: vertical;
+    min-height: 200px;
+  }
+  .hint {
+    color: var(--text-faint);
+    font-size: 9px;
+    letter-spacing: 1px;
+    padding: 0 16px 12px;
+    line-height: 1.5;
+  }
+  /* Hide scrollbar in WebKit but keep functionality */
+  #panel::-webkit-scrollbar { width: 8px; }
+  #panel::-webkit-scrollbar-track { background: var(--bg); }
+  #panel::-webkit-scrollbar-thumb { background: var(--rule); border-radius: 2px; }
+  #panel::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div id="app">
+  <div id="stage">
+    <div class="stage-label">FX Lab</div>
+    <div class="stage-tag">Layered procedural effect editor</div>
+    <div class="geom-toggle">
+      <button data-geom="sphere" class="active">Sphere</button>
+      <button data-geom="quad">Quad</button>
+      <button data-geom="cylinder">Cylinder</button>
+    </div>
+    <button class="stage-bg-toggle" id="bg-toggle">BG: void</button>
+  </div>
+
+  <div id="panel">
+    <h2>Presets</h2>
+    <div class="preset-row" id="preset-row"></div>
+
+    <h2>Base</h2>
+    <div class="section">
+      <div class="row">
+        <label>Color</label>
+        <input type="color" id="base-color" value="#ff8800">
+        <div class="val">_</div>
+      </div>
+      <div class="row">
+        <label>Fresnel</label>
+        <input type="range" id="fresnel-strength" min="0" max="3" step="0.05" value="0.6">
+        <div class="val" id="v-fresnel">0.60</div>
+      </div>
+      <div class="row">
+        <label>Bright</label>
+        <input type="range" id="brightness" min="0" max="3" step="0.05" value="1">
+        <div class="val" id="v-bright">1.00</div>
+      </div>
+      <div class="row">
+        <label>Time scale</label>
+        <input type="range" id="time-scale" min="0" max="3" step="0.05" value="1">
+        <div class="val" id="v-tscale">1.00</div>
+      </div>
+    </div>
+
+    <!-- Layer 1, 2, 3 cards built dynamically -->
+    <div id="layers"></div>
+
+    <h2>Export</h2>
+    <div class="actions">
+      <button id="copy-json">Copy JSON</button>
+      <button id="download-json" class="secondary">Download</button>
+      <button id="reset" class="secondary">Reset</button>
+    </div>
+    <textarea id="json-out" readonly></textarea>
+    <div class="hint">
+      Paste exported JSON into the game's EFFECT_PRESETS table (game side ; coming with Phase 2 of graphics_update_plan.md). The preview canvas auto-updates on every slider change. "Sphere" geometry preview is the most representative for volumetric effects (smoke, fire) ; "Quad" is good for screen-space billboards ; "Cylinder" is good for trails / firewalls.
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ---- Pattern library ----------------------------------------------
+// Numeric IDs match what the game's pattern table will use later.
+// These are the GLSL functions sampled by each layer.
+const PATTERN_NAMES = [
+  'FBM',          // 0  ; classic fractal Brownian motion
+  'Plasma',       // 1  ; flowing-energy sine-based
+  'Turbulence',   // 2  ; abs(fbm) ; sharp fire-like edges
+  'Voronoi',      // 3  ; cellular
+  'Wave',         // 4  ; concentric wave interference
+  'Ridges',       // 5  ; sharp ridged turbulence
+  'Caustic',      // 6  ; water-caustic shimmer
+  'Stars',        // 7  ; high-detail pinpoints
+];
+
+const BLEND_NAMES = [
+  'Replace',      // 0
+  'Multiply',     // 1
+  'Add',          // 2
+  'Screen',       // 3
+  'Mix',          // 4
+  'Overlay',      // 5
+  'Subtract',     // 6
+];
+
+// ---- Default state ------------------------------------------------
+function defaultParams() {
+  return {
+    baseColor: '#ff8800',
+    fresnel: 0.6,
+    brightness: 1.0,
+    timeScale: 1.0,
+    layers: [
+      { pattern: 0, scale: 0.6,  timeRate: 1.0, hue: 0.05, alpha: 1.0, blend: 2, sat: 0.95 },
+      { pattern: 2, scale: 1.4,  timeRate: 0.6, hue: 0.10, alpha: 0.7, blend: 4, sat: 0.90 },
+      { pattern: 0, scale: 0.25, timeRate: 0.2, hue: 0.0,  alpha: 0.4, blend: 1, sat: 0.7  },
+    ],
+  };
+}
+
+// ---- Built-in presets ---------------------------------------------
+const PRESETS = {
+  'Generic Fire': {
+    baseColor: '#ff7722', fresnel: 0.5, brightness: 1.2, timeScale: 1.4,
+    layers: [
+      { pattern: 2, scale: 0.8,  timeRate: 1.6, hue: 0.05, alpha: 1.0, blend: 2, sat: 0.95 },
+      { pattern: 2, scale: 1.6,  timeRate: 0.9, hue: 0.10, alpha: 0.65, blend: 4, sat: 0.85 },
+      { pattern: 0, scale: 0.35, timeRate: 0.3, hue: 0.00, alpha: 0.45, blend: 1, sat: 0.55 },
+    ],
+  },
+  'Generic Smoke': {
+    baseColor: '#1a1a26', fresnel: 0.2, brightness: 0.9, timeScale: 0.5,
+    layers: [
+      { pattern: 0, scale: 0.4,  timeRate: 0.6, hue: 0.0,  alpha: 0.85, blend: 4, sat: 0.10 },
+      { pattern: 0, scale: 1.1,  timeRate: 0.3, hue: 0.0,  alpha: 0.55, blend: 4, sat: 0.05 },
+      { pattern: 0, scale: 0.18, timeRate: 0.1, hue: 0.0,  alpha: 0.35, blend: 1, sat: 0.0  },
+    ],
+  },
+  'Cold Stasis': {
+    baseColor: '#3388ff', fresnel: 1.0, brightness: 1.5, timeScale: 0.7,
+    layers: [
+      { pattern: 1, scale: 0.5,  timeRate: 0.8, hue: 0.0,  alpha: 1.0, blend: 2, sat: 0.85 },
+      { pattern: 4, scale: 1.2,  timeRate: 0.4, hue: 0.05, alpha: 0.5, blend: 4, sat: 0.7 },
+      { pattern: 7, scale: 2.5,  timeRate: 1.5, hue: 0.0,  alpha: 0.6, blend: 2, sat: 0.9 },
+    ],
+  },
+  'Champion Aura': {
+    baseColor: '#aa44ff', fresnel: 1.2, brightness: 1.4, timeScale: 0.9,
+    layers: [
+      { pattern: 1, scale: 0.6,  timeRate: 1.0, hue: 0.05, alpha: 1.0, blend: 2, sat: 0.9 },
+      { pattern: 5, scale: 1.4,  timeRate: 0.5, hue: 0.0,  alpha: 0.55, blend: 4, sat: 0.85 },
+      { pattern: 0, scale: 0.3,  timeRate: 0.3, hue: 0.0,  alpha: 0.4, blend: 1, sat: 0.6 },
+    ],
+  },
+  'Plasma Energy': {
+    baseColor: '#22ddff', fresnel: 0.8, brightness: 1.3, timeScale: 1.2,
+    layers: [
+      { pattern: 1, scale: 0.7,  timeRate: 1.1, hue: 0.0,  alpha: 1.0, blend: 2, sat: 0.95 },
+      { pattern: 5, scale: 1.5,  timeRate: 0.7, hue: 0.05, alpha: 0.7, blend: 4, sat: 0.85 },
+      { pattern: 6, scale: 0.4,  timeRate: 0.3, hue: 0.0,  alpha: 0.4, blend: 3, sat: 0.7 },
+    ],
+  },
+  'Caustic Shimmer': {
+    baseColor: '#88ddff', fresnel: 0.4, brightness: 1.0, timeScale: 0.6,
+    layers: [
+      { pattern: 6, scale: 0.5,  timeRate: 0.5, hue: 0.0,  alpha: 0.9, blend: 4, sat: 0.85 },
+      { pattern: 6, scale: 1.5,  timeRate: 0.3, hue: 0.05, alpha: 0.6, blend: 2, sat: 0.8 },
+      { pattern: 4, scale: 2.5,  timeRate: 0.2, hue: 0.0,  alpha: 0.4, blend: 1, sat: 0.7 },
+    ],
+  },
+  'Datamosh Glitch': {
+    baseColor: '#ff44aa', fresnel: 0.3, brightness: 1.1, timeScale: 1.5,
+    layers: [
+      { pattern: 7, scale: 1.5,  timeRate: 2.0, hue: 0.0,  alpha: 1.0, blend: 2, sat: 0.95 },
+      { pattern: 2, scale: 0.6,  timeRate: 0.8, hue: 0.30, alpha: 0.65, blend: 4, sat: 0.85 },
+      { pattern: 5, scale: 0.3,  timeRate: 0.4, hue: 0.15, alpha: 0.5, blend: 1, sat: 0.7 },
+    ],
+  },
+};
+
+let state = defaultParams();
+
+// ---- Three.js scene -----------------------------------------------
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x050510, 1);
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+camera.position.set(0, 0, 4);
+camera.lookAt(0, 0, 0);
+
+// Subtle starfield background option
+const starGeo = new THREE.SphereGeometry(40, 32, 16);
+const starMat = new THREE.MeshBasicMaterial({
+  side: THREE.BackSide, color: 0x080814,
+});
+const starMesh = new THREE.Mesh(starGeo, starMat);
+scene.add(starMesh);
+
+// ---- LayeredFXMaterial --------------------------------------------
+// The shader builds a normalized sample position from world or local
+// coords, samples each of the three pattern layers, applies the
+// per-layer hue/sat/alpha/blend, then accumulates and modulates by
+// base color + fresnel. Time uniform drives all per-layer timeRates.
+const VERT = `
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
+  varying vec3 vViewDir;
+  void main() {
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    vNormal = normalize(normalMatrix * normal);
+    vec4 mvp = viewMatrix * wp;
+    vViewDir = normalize(-mvp.xyz);
+    gl_Position = projectionMatrix * mvp;
+  }
+`;
+
+const FRAG = `
+  precision highp float;
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
+  varying vec3 vViewDir;
+  uniform float uTime;
+  uniform vec3  uBaseColor;
+  uniform float uFresnel;
+  uniform float uBrightness;
+  // Per layer: pattern, scale, timeRate, hue, alpha, blend, sat
+  uniform int   uLayerPattern[3];
+  uniform float uLayerScale[3];
+  uniform float uLayerTimeRate[3];
+  uniform float uLayerHue[3];
+  uniform float uLayerAlpha[3];
+  uniform int   uLayerBlend[3];
+  uniform float uLayerSat[3];
+
+  // ---- noise primitives ----
+  float hash(vec3 p) {
+    p = fract(p * 0.3183099 + .1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  }
+  float noise3(vec3 x) {
+    vec3 p = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash(p + vec3(0,0,0)), hash(p + vec3(1,0,0)), f.x),
+                   mix(hash(p + vec3(0,1,0)), hash(p + vec3(1,1,0)), f.x), f.y),
+               mix(mix(hash(p + vec3(0,0,1)), hash(p + vec3(1,0,1)), f.x),
+                   mix(hash(p + vec3(0,1,1)), hash(p + vec3(1,1,1)), f.x), f.y),
+               f.z);
+  }
+  float fbm(vec3 p) {
+    float a = 0.5, v = 0.0;
+    for (int i = 0; i < 5; i++) {
+      v += a * noise3(p);
+      p *= 2.0; a *= 0.5;
+    }
+    return v;
+  }
+  float plasma(vec3 p, float t) {
+    float v = sin(p.x * 1.3 + t) + sin(p.y * 1.7 + t * 1.2) + sin(p.z * 1.1 + t * 0.7);
+    v += sin(length(p.xy) * 2.0 + t * 0.5) + sin(length(p.yz) * 1.5 + t);
+    return 0.5 + 0.1 * v;
+  }
+  float turbulence(vec3 p) {
+    float a = 0.5, v = 0.0;
+    for (int i = 0; i < 5; i++) {
+      v += a * abs(noise3(p) - 0.5) * 2.0;
+      p *= 2.0; a *= 0.5;
+    }
+    return v;
+  }
+  float voronoi(vec3 p) {
+    vec3 g = floor(p);
+    vec3 f = fract(p);
+    float minDist = 1.0;
+    for (int z = -1; z <= 1; z++) for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+      vec3 o = vec3(float(x), float(y), float(z));
+      vec3 r = o + vec3(hash(g + o), hash(g + o + 1.7), hash(g + o + 3.1)) - f;
+      minDist = min(minDist, dot(r, r));
+    }
+    return sqrt(minDist);
+  }
+  float wave(vec3 p, float t) {
+    float r = length(p) * 4.0 - t * 1.5;
+    return 0.5 + 0.5 * sin(r);
+  }
+  float ridges(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+      v += a * (1.0 - abs(noise3(p) - 0.5) * 2.0);
+      p *= 2.2; a *= 0.5;
+    }
+    return v * v;
+  }
+  float caustic(vec3 p, float t) {
+    p.xy += t * 0.2;
+    float v = sin(p.x * 3.0 + sin(p.y * 2.0 + t)) + sin(p.y * 2.7 + sin(p.z * 1.5 + t));
+    v += sin(length(p.xy) * 5.0 - t);
+    return abs(v) * 0.3;
+  }
+  float stars(vec3 p) {
+    float n = noise3(p * 6.0);
+    return smoothstep(0.85, 0.95, n);
+  }
+  float samplePattern(int id, vec3 p, float t) {
+    if (id == 0) return fbm(p);
+    if (id == 1) return plasma(p, t);
+    if (id == 2) return turbulence(p);
+    if (id == 3) return 1.0 - voronoi(p);
+    if (id == 4) return wave(p, t);
+    if (id == 5) return ridges(p);
+    if (id == 6) return caustic(p, t);
+    if (id == 7) return stars(p);
+    return 0.5;
+  }
+
+  // HSV->RGB
+  vec3 hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+  }
+  vec3 rgb2hsv(vec3 c) {
+    vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+  }
+
+  vec4 applyBlend(vec4 base, vec4 top, int mode) {
+    if (mode == 0) return mix(base, top, top.a);                    // replace
+    if (mode == 1) return vec4(base.rgb * top.rgb, max(base.a, top.a)); // multiply
+    if (mode == 2) return vec4(base.rgb + top.rgb * top.a, max(base.a, top.a)); // add
+    if (mode == 3) return vec4(1.0 - (1.0 - base.rgb) * (1.0 - top.rgb * top.a), max(base.a, top.a)); // screen
+    if (mode == 4) return mix(base, top, top.a);                    // mix (== replace by alpha)
+    if (mode == 5) {                                                // overlay
+      vec3 b = base.rgb;
+      vec3 t = top.rgb;
+      vec3 res = mix(2.0 * b * t, 1.0 - 2.0 * (1.0 - b) * (1.0 - t), step(0.5, b));
+      return vec4(mix(b, res, top.a), max(base.a, top.a));
+    }
+    if (mode == 6) return vec4(max(base.rgb - top.rgb * top.a, vec3(0.0)), max(base.a, top.a));
+    return base;
+  }
+
+  void main() {
+    // Sample position. World position normalized to a fairly large
+    // range so per-layer scale slider feels intuitive (~0..2 = small
+    // to medium pattern).
+    vec3 p = vWorldPos;
+
+    // Start with a near-transparent base in HSV-tinted base color.
+    vec3 baseHSV = rgb2hsv(uBaseColor);
+    vec4 acc = vec4(0.0, 0.0, 0.0, 0.0);
+
+    for (int i = 0; i < 3; i++) {
+      vec3 q = p * uLayerScale[i];
+      float t = uTime * uLayerTimeRate[i];
+      float v = samplePattern(uLayerPattern[i], q + vec3(t * 0.1), t);
+      // Layer color: rotate hue from base color, retain saturation control.
+      vec3 layerHSV = vec3(fract(baseHSV.x + uLayerHue[i]), uLayerSat[i] * baseHSV.y, v * uBrightness);
+      vec3 layerRGB = hsv2rgb(layerHSV);
+      vec4 layer = vec4(layerRGB, clamp(v * uLayerAlpha[i], 0.0, 1.0));
+      acc = applyBlend(acc, layer, uLayerBlend[i]);
+    }
+
+    // Fresnel rim (looks at view direction vs normal).
+    float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vViewDir)), 0.0), 2.0);
+    acc.rgb += uBaseColor * fres * uFresnel;
+
+    // Final alpha. Don't go above 1.
+    acc.a = clamp(acc.a, 0.0, 1.0);
+
+    gl_FragColor = acc;
+  }
+`;
+
+function makeMaterial() {
+  return new THREE.ShaderMaterial({
+    vertexShader: VERT,
+    fragmentShader: FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+    uniforms: {
+      uTime:        { value: 0 },
+      uBaseColor:   { value: new THREE.Color(state.baseColor) },
+      uFresnel:     { value: state.fresnel },
+      uBrightness:  { value: state.brightness },
+      uLayerPattern:  { value: state.layers.map(l => l.pattern) },
+      uLayerScale:    { value: state.layers.map(l => l.scale) },
+      uLayerTimeRate: { value: state.layers.map(l => l.timeRate) },
+      uLayerHue:      { value: state.layers.map(l => l.hue) },
+      uLayerAlpha:    { value: state.layers.map(l => l.alpha) },
+      uLayerBlend:    { value: state.layers.map(l => l.blend) },
+      uLayerSat:      { value: state.layers.map(l => l.sat) },
+    },
+  });
+}
+
+let mat = makeMaterial();
+let mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 32), mat);
+scene.add(mesh);
+
+function setGeometry(name) {
+  let geo;
+  if (name === 'quad')      geo = new THREE.PlaneGeometry(2, 2, 1, 1);
+  else if (name === 'cylinder') geo = new THREE.CylinderGeometry(0.6, 0.6, 2.4, 48, 1, true);
+  else                      geo = new THREE.SphereGeometry(1, 64, 32);
+  scene.remove(mesh);
+  mesh.geometry.dispose();
+  mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh);
+}
+
+// ---- Sync state -> uniforms ---------------------------------------
+function syncUniforms() {
+  mat.uniforms.uBaseColor.value.set(state.baseColor);
+  mat.uniforms.uFresnel.value = state.fresnel;
+  mat.uniforms.uBrightness.value = state.brightness;
+  for (let i = 0; i < 3; i++) {
+    mat.uniforms.uLayerPattern.value[i]  = state.layers[i].pattern;
+    mat.uniforms.uLayerScale.value[i]    = state.layers[i].scale;
+    mat.uniforms.uLayerTimeRate.value[i] = state.layers[i].timeRate;
+    mat.uniforms.uLayerHue.value[i]      = state.layers[i].hue;
+    mat.uniforms.uLayerAlpha.value[i]    = state.layers[i].alpha;
+    mat.uniforms.uLayerBlend.value[i]    = state.layers[i].blend;
+    mat.uniforms.uLayerSat.value[i]      = state.layers[i].sat;
+  }
+  refreshJsonOut();
+}
+
+// ---- Sidebar UI ---------------------------------------------------
+function buildPresetButtons() {
+  const row = document.getElementById('preset-row');
+  row.innerHTML = '';
+  for (const name of Object.keys(PRESETS)) {
+    const btn = document.createElement('button');
+    btn.textContent = name;
+    btn.addEventListener('click', () => {
+      state = JSON.parse(JSON.stringify(PRESETS[name]));
+      buildLayers();
+      buildBaseControls();
+      syncUniforms();
+    });
+    row.appendChild(btn);
+  }
+}
+
+function buildBaseControls() {
+  document.getElementById('base-color').value = state.baseColor;
+  document.getElementById('fresnel-strength').value = state.fresnel;
+  document.getElementById('brightness').value = state.brightness;
+  document.getElementById('time-scale').value = state.timeScale;
+  document.getElementById('v-fresnel').textContent = Number(state.fresnel).toFixed(2);
+  document.getElementById('v-bright').textContent  = Number(state.brightness).toFixed(2);
+  document.getElementById('v-tscale').textContent  = Number(state.timeScale).toFixed(2);
+}
+
+function buildLayers() {
+  const container = document.getElementById('layers');
+  container.innerHTML = '<h2>Layers</h2>';
+  for (let i = 0; i < 3; i++) {
+    const card = document.createElement('div');
+    card.className = 'layer-card';
+    card.innerHTML = `
+      <h3>Layer ${i + 1}</h3>
+      <div class="row">
+        <label>Pattern</label>
+        <select data-l="${i}" data-k="pattern">
+          ${PATTERN_NAMES.map((n, idx) => `<option value="${idx}"${state.layers[i].pattern === idx ? ' selected' : ''}>${n}</option>`).join('')}
+        </select>
+        <div class="val">_</div>
+      </div>
+      <div class="row">
+        <label>Scale</label>
+        <input type="range" min="0.05" max="3" step="0.01" data-l="${i}" data-k="scale" value="${state.layers[i].scale}">
+        <div class="val" data-v="${i}-scale">${state.layers[i].scale.toFixed(2)}</div>
+      </div>
+      <div class="row">
+        <label>Time</label>
+        <input type="range" min="0" max="3" step="0.01" data-l="${i}" data-k="timeRate" value="${state.layers[i].timeRate}">
+        <div class="val" data-v="${i}-timeRate">${state.layers[i].timeRate.toFixed(2)}</div>
+      </div>
+      <div class="row">
+        <label>Hue</label>
+        <input type="range" min="0" max="1" step="0.005" data-l="${i}" data-k="hue" value="${state.layers[i].hue}">
+        <div class="val" data-v="${i}-hue">${state.layers[i].hue.toFixed(2)}</div>
+      </div>
+      <div class="row">
+        <label>Sat</label>
+        <input type="range" min="0" max="1" step="0.01" data-l="${i}" data-k="sat" value="${state.layers[i].sat}">
+        <div class="val" data-v="${i}-sat">${state.layers[i].sat.toFixed(2)}</div>
+      </div>
+      <div class="row">
+        <label>Alpha</label>
+        <input type="range" min="0" max="1.5" step="0.01" data-l="${i}" data-k="alpha" value="${state.layers[i].alpha}">
+        <div class="val" data-v="${i}-alpha">${state.layers[i].alpha.toFixed(2)}</div>
+      </div>
+      <div class="row">
+        <label>Blend</label>
+        <select data-l="${i}" data-k="blend">
+          ${BLEND_NAMES.map((n, idx) => `<option value="${idx}"${state.layers[i].blend === idx ? ' selected' : ''}>${n}</option>`).join('')}
+        </select>
+        <div class="val">_</div>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+
+  // Bind events
+  container.querySelectorAll('input[type="range"], select').forEach(el => {
+    const evt = el.tagName === 'SELECT' ? 'change' : 'input';
+    el.addEventListener(evt, (e) => {
+      const layerIdx = parseInt(e.target.dataset.l, 10);
+      const key = e.target.dataset.k;
+      let val = e.target.value;
+      if (e.target.tagName === 'SELECT') val = parseInt(val, 10);
+      else val = parseFloat(val);
+      state.layers[layerIdx][key] = val;
+      const valEl = container.querySelector(`[data-v="${layerIdx}-${key}"]`);
+      if (valEl && typeof val === 'number' && !Number.isInteger(val)) valEl.textContent = val.toFixed(2);
+      else if (valEl) valEl.textContent = val;
+      syncUniforms();
+    });
+  });
+}
+
+function bindBaseControls() {
+  document.getElementById('base-color').addEventListener('input', (e) => {
+    state.baseColor = e.target.value;
+    syncUniforms();
+  });
+  document.getElementById('fresnel-strength').addEventListener('input', (e) => {
+    state.fresnel = parseFloat(e.target.value);
+    document.getElementById('v-fresnel').textContent = state.fresnel.toFixed(2);
+    syncUniforms();
+  });
+  document.getElementById('brightness').addEventListener('input', (e) => {
+    state.brightness = parseFloat(e.target.value);
+    document.getElementById('v-bright').textContent = state.brightness.toFixed(2);
+    syncUniforms();
+  });
+  document.getElementById('time-scale').addEventListener('input', (e) => {
+    state.timeScale = parseFloat(e.target.value);
+    document.getElementById('v-tscale').textContent = state.timeScale.toFixed(2);
+  });
+}
+
+function bindGeomToggle() {
+  document.querySelectorAll('.geom-toggle button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.geom-toggle button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      setGeometry(btn.dataset.geom);
+    });
+  });
+}
+
+function bindBgToggle() {
+  let modes = [
+    { name: 'void',     color: 0x050510, dim: 0x080814 },
+    { name: 'space',    color: 0x000a14, dim: 0x0a1428 },
+    { name: 'gray',     color: 0x404048, dim: 0x60606c },
+    { name: 'white',    color: 0xe8e8f0, dim: 0xc0c0d0 },
+  ];
+  let idx = 0;
+  const btn = document.getElementById('bg-toggle');
+  btn.addEventListener('click', () => {
+    idx = (idx + 1) % modes.length;
+    const m = modes[idx];
+    renderer.setClearColor(m.color, 1);
+    starMesh.material.color.setHex(m.dim);
+    btn.textContent = 'BG: ' + m.name;
+  });
+}
+
+function bindActions() {
+  document.getElementById('copy-json').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(buildJsonString());
+      document.getElementById('copy-json').textContent = 'COPIED';
+      setTimeout(() => { document.getElementById('copy-json').textContent = 'Copy JSON'; }, 1500);
+    } catch (e) { alert('Clipboard failed ; copy from the textarea instead.'); }
+  });
+  document.getElementById('download-json').addEventListener('click', () => {
+    const blob = new Blob([buildJsonString()], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'lss_fx_preset_' + Date.now() + '.json';
+    a.click();
+  });
+  document.getElementById('reset').addEventListener('click', () => {
+    state = defaultParams();
+    buildLayers();
+    buildBaseControls();
+    syncUniforms();
+  });
+}
+
+function buildJsonString() {
+  return JSON.stringify({
+    version: 1,
+    geometryHint: 'volume',
+    baseColor:    state.baseColor,
+    fresnel:      state.fresnel,
+    brightness:   state.brightness,
+    layers: state.layers.map(l => ({
+      pattern:  l.pattern,
+      scale:    +l.scale.toFixed(3),
+      timeRate: +l.timeRate.toFixed(3),
+      hue:      +l.hue.toFixed(3),
+      alpha:    +l.alpha.toFixed(3),
+      blend:    l.blend,
+      sat:      +l.sat.toFixed(3),
+    })),
+  }, null, 2);
+}
+
+function refreshJsonOut() {
+  document.getElementById('json-out').value = buildJsonString();
+}
+
+// ---- Resize -------------------------------------------------------
+function onResize() {
+  const w = stage.clientWidth;
+  const h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', onResize);
+
+// ---- Animate ------------------------------------------------------
+const clock = new THREE.Clock();
+function loop() {
+  const dt = clock.getDelta();
+  mat.uniforms.uTime.value += dt * state.timeScale;
+  // Slow auto-rotate so we can see the surface from multiple angles.
+  mesh.rotation.y += dt * 0.18;
+  mesh.rotation.x += dt * 0.07;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// ---- Boot ---------------------------------------------------------
+buildPresetButtons();
+buildBaseControls();
+bindBaseControls();
+buildLayers();
+bindGeomToggle();
+bindBgToggle();
+bindActions();
+syncUniforms();
+onResize();
+loop();
+</script>
+
+</body>
+</html>
