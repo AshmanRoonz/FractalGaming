@@ -15,16 +15,54 @@ CREATE TABLE IF NOT EXISTS players (
   avatar_hash    TEXT,
   created_at     INTEGER NOT NULL,
   last_seen      INTEGER NOT NULL,
+  -- Combined career totals (solo + multiplayer). Useful for the
+  -- "lifetime stats" view on profile pages.
   total_matches  INTEGER NOT NULL DEFAULT 0,
   total_wins     INTEGER NOT NULL DEFAULT 0,
   total_kills    INTEGER NOT NULL DEFAULT 0,
   total_deaths   INTEGER NOT NULL DEFAULT 0,
-  total_damage   INTEGER NOT NULL DEFAULT 0
+  total_damage   INTEGER NOT NULL DEFAULT 0,
+  -- Solo-mode totals (matches with exactly 1 human participant).
+  solo_matches   INTEGER NOT NULL DEFAULT 0,
+  solo_wins      INTEGER NOT NULL DEFAULT 0,
+  solo_kills     INTEGER NOT NULL DEFAULT 0,
+  solo_deaths    INTEGER NOT NULL DEFAULT 0,
+  solo_damage    INTEGER NOT NULL DEFAULT 0,
+  -- Multiplayer totals (matches with 2+ human participants).
+  mp_matches     INTEGER NOT NULL DEFAULT 0,
+  mp_wins        INTEGER NOT NULL DEFAULT 0,
+  mp_kills       INTEGER NOT NULL DEFAULT 0,
+  mp_deaths      INTEGER NOT NULL DEFAULT 0,
+  mp_damage      INTEGER NOT NULL DEFAULT 0,
+  -- Per-match peaks (highest single-match values). Combined / solo / mp.
+  -- Min stats are NULLABLE until the first match so we can distinguish
+  -- "never played" from "had a 0-stat match." Averages are derived at
+  -- query time as totals / matches.
+  max_kills_match  INTEGER NOT NULL DEFAULT 0,
+  min_kills_match  INTEGER,
+  max_deaths_match INTEGER NOT NULL DEFAULT 0,
+  min_deaths_match INTEGER,
+  max_damage_match INTEGER NOT NULL DEFAULT 0,
+  min_damage_match INTEGER,
+  solo_max_kills_match  INTEGER NOT NULL DEFAULT 0,
+  solo_min_kills_match  INTEGER,
+  solo_max_deaths_match INTEGER NOT NULL DEFAULT 0,
+  solo_min_deaths_match INTEGER,
+  solo_max_damage_match INTEGER NOT NULL DEFAULT 0,
+  solo_min_damage_match INTEGER,
+  mp_max_kills_match    INTEGER NOT NULL DEFAULT 0,
+  mp_min_kills_match    INTEGER,
+  mp_max_deaths_match   INTEGER NOT NULL DEFAULT 0,
+  mp_min_deaths_match   INTEGER,
+  mp_max_damage_match   INTEGER NOT NULL DEFAULT 0,
+  mp_min_damage_match   INTEGER
 );
 
-CREATE INDEX IF NOT EXISTS idx_players_last_seen ON players(last_seen);
-CREATE INDEX IF NOT EXISTS idx_players_total_wins ON players(total_wins DESC);
+CREATE INDEX IF NOT EXISTS idx_players_last_seen   ON players(last_seen);
+CREATE INDEX IF NOT EXISTS idx_players_total_wins  ON players(total_wins DESC);
 CREATE INDEX IF NOT EXISTS idx_players_total_kills ON players(total_kills DESC);
+CREATE INDEX IF NOT EXISTS idx_players_mp_wins     ON players(mp_wins   DESC);
+CREATE INDEX IF NOT EXISTS idx_players_solo_wins   ON players(solo_wins DESC);
 
 -- ----------------------------------------------------------------------
 -- Matches: one row per completed match.
@@ -42,12 +80,18 @@ CREATE TABLE IF NOT EXISTS matches (
   duration_sec      REAL,
   validated         INTEGER NOT NULL DEFAULT 0,
   participant_count INTEGER NOT NULL,
-  validated_at      INTEGER
+  validated_at      INTEGER,
+  -- mode = 'solo' (1 human) | 'multiplayer' (2+ humans). Computed at
+  -- insert time from the participants list (humans = real Discord IDs;
+  -- bots/peers without identities use synthetic prefixes).
+  mode              TEXT    NOT NULL DEFAULT 'solo',
+  human_count       INTEGER NOT NULL DEFAULT 1
 );
 
-CREATE INDEX IF NOT EXISTS idx_matches_started ON matches(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_matches_started   ON matches(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_validated ON matches(validated);
-CREATE INDEX IF NOT EXISTS idx_matches_map ON matches(map_key);
+CREATE INDEX IF NOT EXISTS idx_matches_map       ON matches(map_key);
+CREATE INDEX IF NOT EXISTS idx_matches_mode      ON matches(mode);
 
 -- ----------------------------------------------------------------------
 -- Match participants: one row per (match, participant, reporter).

@@ -87,9 +87,19 @@ async function upsertPlayer(env, user) {
 
 // ---------- Match consensus ------------------------------------------
 
-// After every match POST we check: have all expected participants
+// True if a discord_id looks like a real Discord snowflake (humans),
+// false for synthetic IDs we generate for bots / unsigned peers.
+// Synthetic prefixes: bot:, peer:, local:.
+function isHumanDiscordId(id) {
+  if (!id) return false;
+  return !id.includes(':');
+}
+
+// After every match POST we check: have all expected human participants
 // reported, AND do their reports agree? If yes, validate + roll up.
-// If reports are in but disagree, mark disputed.
+// If reports are in but disagree, mark disputed. Bots / unsigned peers
+// don't report (no token), so consensus uses human_count, not the
+// total participant_count.
 async function tryValidateMatch(env, matchId) {
   const matchRow = await env.DB.prepare('SELECT * FROM matches WHERE id = ?').bind(matchId).first();
   if (!matchRow) return;
@@ -100,15 +110,18 @@ async function tryValidateMatch(env, matchId) {
   `).bind(matchId).all();
   if (!reports.results) return;
 
-  // Group by reporter ; need (participant_count) reports each covering
-  // (participant_count) participants for full consensus.
+  // Group by reporter. Only HUMAN reporters count toward consensus ;
+  // bots / unsigned peers can't post, so we expect exactly
+  // matchRow.human_count reports each covering all participant_count
+  // participants.
   const byReporter = new Map();
   for (const r of reports.results) {
+    if (!isHumanDiscordId(r.reported_by)) continue; // shouldn't happen ; defensive
     if (!byReporter.has(r.reported_by)) byReporter.set(r.reported_by, []);
     byReporter.get(r.reported_by).push(r);
   }
 
-  if (byReporter.size < matchRow.participant_count) return; // still waiting
+  if (byReporter.size < matchRow.human_count) return; // still waiting
   for (const list of byReporter.values()) {
     if (list.length !== matchRow.participant_count) return; // partial report
   }
@@ -144,31 +157,102 @@ async function tryValidateMatch(env, matchId) {
 
   // All reports agreed. Roll up to player career totals (one statement
   // per participant ; D1 doesn't expose multi-statement transactions yet
-  // for non-batch APIs, but each upsert is atomic).
+  // for non-batch APIs, but each upsert is atomic). Career totals are
+  // tracked three ways: combined (total_*) + solo-mode + multiplayer-
+  // mode. The mode-specific columns drive separate solo / mp leaderboards.
   const now = Date.now();
   await env.DB.prepare(`
     UPDATE matches SET validated = 1, validated_at = ? WHERE id = ?
   `).bind(now, matchId).run();
 
+  const isMp = (matchRow.mode === 'multiplayer');
+
   for (const [discordId, snap] of canonical) {
-    // Bump player career totals.
+    // Skip non-human participants ; they don't have player rows and
+    // their stats live only in match_participants for the historical
+    // record (so the match scoreboard renders correctly).
+    if (!isHumanDiscordId(discordId)) continue;
+
+    // Bump player career totals (combined + mode-specific).
+    if (isMp) {
+      await env.DB.prepare(`
+        UPDATE players
+        SET total_matches = total_matches + 1,
+            total_wins    = total_wins    + ?,
+            total_kills   = total_kills   + ?,
+            total_deaths  = total_deaths  + ?,
+            total_damage  = total_damage  + ?,
+            mp_matches    = mp_matches    + 1,
+            mp_wins       = mp_wins       + ?,
+            mp_kills      = mp_kills      + ?,
+            mp_deaths     = mp_deaths     + ?,
+            mp_damage     = mp_damage     + ?
+        WHERE discord_id = ?
+      `).bind(
+        snap.is_winner ? 1 : 0,
+        snap.kills, snap.deaths, snap.damage_dealt,
+        snap.is_winner ? 1 : 0,
+        snap.kills, snap.deaths, snap.damage_dealt,
+        discordId,
+      ).run();
+    } else {
+      await env.DB.prepare(`
+        UPDATE players
+        SET total_matches = total_matches + 1,
+            total_wins    = total_wins    + ?,
+            total_kills   = total_kills   + ?,
+            total_deaths  = total_deaths  + ?,
+            total_damage  = total_damage  + ?,
+            solo_matches  = solo_matches  + 1,
+            solo_wins     = solo_wins     + ?,
+            solo_kills    = solo_kills    + ?,
+            solo_deaths   = solo_deaths   + ?,
+            solo_damage   = solo_damage   + ?
+        WHERE discord_id = ?
+      `).bind(
+        snap.is_winner ? 1 : 0,
+        snap.kills, snap.deaths, snap.damage_dealt,
+        snap.is_winner ? 1 : 0,
+        snap.kills, snap.deaths, snap.damage_dealt,
+        discordId,
+      ).run();
+    }
+
+    // Per-match peaks + floors (combined + mode-specific). Splits the
+    // SET list across two prefixes ; the mode column-prefix gets the
+    // same value as the combined columns, since this match is one or
+    // the other (never both).
+    const modePrefix = isMp ? 'mp_' : 'solo_';
     await env.DB.prepare(`
-      UPDATE players
-      SET total_matches = total_matches + 1,
-          total_wins    = total_wins    + ?,
-          total_kills   = total_kills   + ?,
-          total_deaths  = total_deaths  + ?,
-          total_damage  = total_damage  + ?
+      UPDATE players SET
+        max_kills_match  = max(max_kills_match,  ?),
+        min_kills_match  = min(coalesce(min_kills_match, ?),  ?),
+        max_deaths_match = max(max_deaths_match, ?),
+        min_deaths_match = min(coalesce(min_deaths_match, ?), ?),
+        max_damage_match = max(max_damage_match, ?),
+        min_damage_match = min(coalesce(min_damage_match, ?), ?),
+        ${modePrefix}max_kills_match  = max(${modePrefix}max_kills_match,  ?),
+        ${modePrefix}min_kills_match  = min(coalesce(${modePrefix}min_kills_match, ?),  ?),
+        ${modePrefix}max_deaths_match = max(${modePrefix}max_deaths_match, ?),
+        ${modePrefix}min_deaths_match = min(coalesce(${modePrefix}min_deaths_match, ?), ?),
+        ${modePrefix}max_damage_match = max(${modePrefix}max_damage_match, ?),
+        ${modePrefix}min_damage_match = min(coalesce(${modePrefix}min_damage_match, ?), ?)
       WHERE discord_id = ?
     `).bind(
-      snap.is_winner ? 1 : 0,
-      snap.kills,
-      snap.deaths,
-      snap.damage_dealt,
+      // combined
+      snap.kills,        snap.kills,        snap.kills,
+      snap.deaths,       snap.deaths,       snap.deaths,
+      snap.damage_dealt, snap.damage_dealt, snap.damage_dealt,
+      // mode-specific
+      snap.kills,        snap.kills,        snap.kills,
+      snap.deaths,       snap.deaths,       snap.deaths,
+      snap.damage_dealt, snap.damage_dealt, snap.damage_dealt,
+      // WHERE
       discordId,
     ).run();
 
-    // Bump per-loadout aggregates.
+    // Bump per-loadout aggregates (combined across modes for now ;
+    // could split solo/mp here later if useful).
     await env.DB.prepare(`
       INSERT INTO player_loadout_stats (
         discord_id, loadout_key, matches, wins, kills, deaths,
@@ -246,10 +330,15 @@ async function handlePostMatch(request, env, origin) {
   const isReporterParticipant = body.participants.some(p => p.discord_id === user.id);
   if (!isReporterParticipant) throw new ApiError(403, 'reporter_not_in_match');
 
+  // Compute mode + human_count from participants. Humans are real
+  // Discord IDs without our synthetic prefixes (bot:, peer:, local:).
+  const humanCount = body.participants.filter(p => isHumanDiscordId(p.discord_id)).length;
+  const mode = humanCount >= 2 ? 'multiplayer' : 'solo';
+
   // Insert / update the match row (idempotent on match_id).
   await env.DB.prepare(`
-    INSERT INTO matches (id, started_at, ended_at, map_key, winning_team, duration_sec, participant_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO matches (id, started_at, ended_at, map_key, winning_team, duration_sec, participant_count, mode, human_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).bind(
     String(body.match_id),
@@ -259,6 +348,8 @@ async function handlePostMatch(request, env, origin) {
     body.winning_team == null ? null : Number(body.winning_team),
     body.duration_sec == null ? null : Number(body.duration_sec),
     body.participants.length,
+    mode,
+    humanCount,
   ).run();
 
   // Insert / replace this reporter's view of every participant.
@@ -342,46 +433,58 @@ async function handleGetLeaderboard(request, env, origin) {
   const loadout  = url.searchParams.get('loadout') || '';
   const map      = url.searchParams.get('map')     || '';
   const limit    = Math.min(Number(url.searchParams.get('limit') || 100), 500);
+  // mode = multiplayer (default) | solo | combined.
+  const modeRaw  = (url.searchParams.get('mode') || 'multiplayer').toLowerCase();
+  const mode     = (modeRaw === 'solo' || modeRaw === 'combined') ? modeRaw : 'multiplayer';
 
-  const cacheKey = `leaderboard:${slice}:${sort}:${loadout}:${map}:${limit}`;
+  const cacheKey = `leaderboard:${mode}:${slice}:${sort}:${loadout}:${map}:${limit}`;
   const cached   = await env.CACHE.get(cacheKey, 'json');
-  if (cached) return jsonResponse(200, { entries: cached, cached: true }, env, origin);
+  if (cached) return jsonResponse(200, { mode, entries: cached, cached: true }, env, origin);
+
+  // Pick the column-prefix that matches the requested mode.
+  // mode=multiplayer (default): mp_*  , mode=solo: solo_*, mode=combined: total_*.
+  const colPrefix  = mode === 'solo' ? 'solo_' : mode === 'combined' ? 'total_' : 'mp_';
+  const matchesCol = colPrefix + 'matches';
+  const winsCol    = colPrefix + 'wins';
+  const killsCol   = colPrefix + 'kills';
+  const deathsCol  = colPrefix + 'deaths';
+  const damageCol  = colPrefix + 'damage';
 
   // Sort column whitelist (avoid SQL injection via untrusted ORDER BY).
   const sortColumn = ({
-    wins:     'total_wins',
-    kills:    'total_kills',
-    matches:  'total_matches',
-    damage:   'total_damage',
-  })[sort] || 'total_wins';
+    wins:     winsCol,
+    kills:    killsCol,
+    matches:  matchesCol,
+    damage:   damageCol,
+  })[sort] || winsCol;
 
-  // For now, the per-loadout / per-map / time-slice filters are not yet
-  // wired ; v1 returns global all-time top-N. Filters layer on later
-  // (would need to query match_participants joined to players, with
-  // matches.started_at filter for time slices).
+  // Per-match peak / floor column names mirror the mode prefix.
+  const maxKillsCol  = colPrefix + 'max_kills_match';
+  const minKillsCol  = colPrefix + 'min_kills_match';
+  const maxDeathsCol = colPrefix + 'max_deaths_match';
+  const minDeathsCol = colPrefix + 'min_deaths_match';
+  const maxDamageCol = colPrefix + 'max_damage_match';
+  const minDamageCol = colPrefix + 'min_damage_match';
+
+  // Per-loadout / per-map / time-slice filters not yet wired ; v1
+  // returns global all-time top-N for the chosen mode.
   const result = await env.DB.prepare(`
     SELECT discord_id, username, display_name, avatar_hash,
-           total_matches, total_wins, total_kills, total_deaths, total_damage
+           ${matchesCol} AS matches_, ${winsCol} AS wins_,
+           ${killsCol} AS kills_, ${deathsCol} AS deaths_, ${damageCol} AS damage_,
+           ${maxKillsCol}  AS max_kills_,  ${minKillsCol}  AS min_kills_,
+           ${maxDeathsCol} AS max_deaths_, ${minDeathsCol} AS min_deaths_,
+           ${maxDamageCol} AS max_damage_, ${minDamageCol} AS min_damage_
     FROM players
-    WHERE total_matches > 0
-    ORDER BY ${sortColumn} DESC, total_kills DESC
+    WHERE ${matchesCol} > 0
+    ORDER BY ${sortColumn} DESC, ${killsCol} DESC
     LIMIT ?
   `).bind(limit).all();
 
-  const entries = (result.results || []).map(p => ({
-    discord_id:   p.discord_id,
-    display_name: p.display_name || p.username,
-    avatar_url:   avatarUrlFor(p),
-    matches:      p.total_matches,
-    wins:         p.total_wins,
-    kills:        p.total_kills,
-    deaths:       p.total_deaths,
-    damage:       p.total_damage,
-    kd:           p.total_deaths > 0 ? +(p.total_kills / p.total_deaths).toFixed(2) : p.total_kills,
-  }));
+  const entries = (result.results || []).map(p => decoratePlayerStats(p));
 
   await env.CACHE.put(cacheKey, JSON.stringify(entries), { expirationTtl: LEADERBOARD_TTL_SEC });
-  return jsonResponse(200, { entries, cached: false }, env, origin);
+  return jsonResponse(200, { mode, entries, cached: false }, env, origin);
 }
 
 // ---------- Route: GET /player/:id -----------------------------------
@@ -411,11 +514,40 @@ async function handleGetPlayer(env, origin, discordId) {
     WHERE discord_id = ? ORDER BY achieved_at DESC
   `).bind(discordId).all();
 
+  // Build per-mode decorated stat blocks so the profile page can render
+  // separate Solo / Multiplayer / Combined cards without doing the math
+  // client-side. For 'combined' mode, kills/wins/etc. live under
+  // total_*, but max/min peaks live under unprefixed names ; for solo
+  // and mp, all columns share the prefix.
+  const modeStats = {};
+  for (const m of ['combined', 'solo', 'mp']) {
+    const aggPre  = m === 'combined' ? 'total_' : (m + '_');
+    const peakPre = m === 'combined' ? ''       : (m + '_');
+    modeStats[m] = decoratePlayerStats({
+      discord_id:    player.discord_id,
+      username:      player.username,
+      display_name:  player.display_name,
+      avatar_hash:   player.avatar_hash,
+      matches_:      player[aggPre  + 'matches'],
+      wins_:         player[aggPre  + 'wins'],
+      kills_:        player[aggPre  + 'kills'],
+      deaths_:       player[aggPre  + 'deaths'],
+      damage_:       player[aggPre  + 'damage'],
+      max_kills_:    player[peakPre + 'max_kills_match'],
+      min_kills_:    player[peakPre + 'min_kills_match'],
+      max_deaths_:   player[peakPre + 'max_deaths_match'],
+      min_deaths_:   player[peakPre + 'min_deaths_match'],
+      max_damage_:   player[peakPre + 'max_damage_match'],
+      min_damage_:   player[peakPre + 'min_damage_match'],
+    });
+  }
+
   return jsonResponse(200, {
     player: {
       ...player,
       avatar_url: avatarUrlFor(player),
     },
+    stats: modeStats,
     loadout_stats: loadoutStats.results || [],
     recent_matches: recentMatches.results || [],
     achievements: achievements.results || [],
@@ -504,6 +636,43 @@ function avatarUrlFor(player) {
   // Default avatar based on Discord's modulo system.
   const idx = (BigInt(player.discord_id || '0') >> 22n) % 6n;
   return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
+}
+
+// Build the public leaderboard / player API response for a player row.
+// Expects the SQL alias columns: matches_, wins_, kills_, deaths_,
+// damage_, max_/min_ peaks. Computes derived fields (avg, kd, win_rate,
+// losses) so callers don't have to. Safe against zero matches.
+function decoratePlayerStats(p) {
+  const matches = p.matches_ || 0;
+  const wins    = p.wins_    || 0;
+  const losses  = Math.max(0, matches - wins);
+  const kills   = p.kills_   || 0;
+  const deaths  = p.deaths_  || 0;
+  const damage  = p.damage_  || 0;
+  const round1  = (n) => Math.round(n * 10) / 10;
+  const round2  = (n) => Math.round(n * 100) / 100;
+  return {
+    discord_id:   p.discord_id,
+    display_name: p.display_name || p.username,
+    avatar_url:   avatarUrlFor(p),
+    matches,
+    wins,
+    losses,
+    win_rate:    matches > 0 ? round2(wins / matches) : 0,
+    kills,
+    deaths,
+    damage,
+    kd:          deaths > 0 ? round2(kills / deaths) : kills,
+    avg_kills:   matches > 0 ? round1(kills  / matches) : 0,
+    avg_deaths:  matches > 0 ? round1(deaths / matches) : 0,
+    avg_damage:  matches > 0 ? Math.round(damage / matches) : 0,
+    max_kills:   p.max_kills_  || 0,
+    min_kills:   p.min_kills_  == null ? null : p.min_kills_,
+    max_deaths:  p.max_deaths_ || 0,
+    min_deaths:  p.min_deaths_ == null ? null : p.min_deaths_,
+    max_damage:  p.max_damage_ || 0,
+    min_damage:  p.min_damage_ == null ? null : p.min_damage_,
+  };
 }
 
 // ---------- Router ---------------------------------------------------
