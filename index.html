@@ -22682,68 +22682,37 @@ function returnToRootMenu() {
 // net.active flip) so the user can pick a different room or go solo
 // fresh. Used by the MAIN MENU and EXIT TO MAIN MENU buttons.
 function returnToMainMenu() {
-  // (1) Run the full root-menu reset (kills entities, resets scores,
-  // stops heartbeats, hides countdown, etc.). This already shows the
-  // ship-select overlay ; we hide it again on the way to the lobby.
-  try { returnToRootMenu(); } catch (e) { console.warn('[main-menu] root reset failed:', e); }
-
-  // (2) Tear down the multiplayer mesh. Trystero rooms expose .leave()
-  // on most builds ; older builds expose nothing and we just drop the
-  // reference and let GC clean up the WebRTC peers.
-  if (net && net.active) {
-    try { if (net.room && typeof net.room.leave === 'function') net.room.leave(); } catch (_) {}
-    net.room = null;
-    net.active = false;
-    net.solo = false;
-    net.sendState = null;
-    net.sendHitClaim = null;
-    net.sendHitVote = null;
-    net.sendEvent = null;
-    net.sendLoadout = null;
-    net.sendProjectile = null;
-    // Drop NetworkPlayers and peer state.
-    try {
-      for (const np of (net.networkPlayers || [])) { try { np.destroy(); } catch (_) {} }
-    } catch (_) {}
-    net.networkPlayers = [];
-    if (net.peers) net.peers.clear();
-    if (net.peerGameSync) net.peerGameSync.clear();
-    net.myPeerId = null;
-  }
-
-  // (3) Hide the ship-select overlay and show the lobby (#lobby) again.
-  // (v11 fix) Restore display EXPLICITLY to 'flex' instead of '' (empty
-  // clears the inline style, dropping the lobby back to default `block`,
-  // which collapses the left-half-PNG / right-half-controls row layout
-  // and pushes the controls below the fold. Users saw only the PNG art.)
-  const sel = document.getElementById('ship-select');
-  if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
-  const lobby = document.getElementById('lobby');
-  if (lobby) lobby.style.display = 'flex';
-
-  // (4) Reset the lobby UI to its pre-connect state. The READY button
-  // (which the JOIN button morphs into after connect) flips back to
-  // JOIN, status / peer text clears, room-code input is left as-is so
-  // the user can re-join the same room with one click if they want.
-  const joinBtn = document.getElementById('btn-join');
-  if (joinBtn) {
-    joinBtn.disabled = false;
-    joinBtn.textContent = 'JOIN';
-    joinBtn.style.background = 'rgba(255,170,0,0.15)';
-    joinBtn.style.borderColor = '#ffaa00';
-    joinBtn.style.color = '#ffaa00';
-    joinBtn.onclick = () => joinRoom();
-  }
-  const soloBtn = document.getElementById('btn-solo');
-  if (soloBtn) soloBtn.disabled = false;
-  const status = document.getElementById('lobby-status');
-  if (status) { status.textContent = ''; status.style.color = '#555'; }
-  const peers = document.getElementById('lobby-peers');
-  if (peers) peers.textContent = '';
-
-  // (5) Re-render the Discord identity panel in case the user has
-  // signed in or out since the lobby was last visible.
-  if (typeof _discordRenderIdentity === 'function') _discordRenderIdentity();
+  // (v11 simplified) Just reload the page. The previous in-place teardown
+  // chased an ever-growing list of state-leak bugs (launch timers, deathCam
+  // overrides, residual visual debris in game.effects/dots/dynamicObjects,
+  // pointer lock, ambient cloud Dots, etc.) and the next match would still
+  // ship looking like the prior one. A page reload guarantees a 100% clean
+  // boot every time. Cheap on this single-HTML-file architecture: no
+  // assets are re-fetched (browser cache catches the GLBs / HDRI / sounds),
+  // and the Trystero room handle drops naturally with the page.
+  // Both Main Menu paths route here:
+  //   * Ship-select header "MAIN MENU" button (lobby-back-btn)
+  //   * Settings overlay "EXIT TO MAIN MENU" button (settings-exit-to-menu)
+  // The confirm() dialog is in the button click handler, not here, so the
+  // user has already approved the reload by the time we get called.
+  try {
+    // Best-effort: leave the Trystero room cleanly so peers see us drop
+    // immediately rather than waiting for WebRTC timeout. The reload
+    // would tear it down anyway, but a clean leave is friendlier.
+    if (typeof net !== 'undefined' && net && net.room && typeof net.room.leave === 'function') {
+      net.room.leave();
+    }
+  } catch (_) {}
+  // Drop the ?room= deep-link param if present so the reload doesn't
+  // immediately re-join the room we just exited.
+  try {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('room')) {
+      url.searchParams.delete('room');
+      window.history.replaceState({}, document.title, url.pathname + (url.search || '') + url.hash);
+    }
+  } catch (_) {}
+  window.location.reload();
 }
 
 // ---- GAMEPAD POLLING ----
