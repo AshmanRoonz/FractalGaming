@@ -827,6 +827,86 @@ body.vr-active .hit-marker {
 .enemy-hbar-fill { height: 100%; transition: width 0.1s; }
 .enemy-hbar-shield { height: 2px; background: rgba(60,160,255,0.7); margin-top: 1px; }
 
+/* (v11) Ship name label that floats below each ship next to its red/green
+   running light. Friendly = blue glow, enemy = red glow. The text fades
+   in over ~0.5s the first time the ship enters the player's view; the
+   character-by-character reveal is driven from JS by trimming the label
+   string while a per-ship timer counts up. Sits at 55% opacity so it
+   reads as a faint scanner readout, not a heavy nameplate. */
+.ship-name-label {
+  position: absolute; pointer-events: none; text-align: center;
+  font-family: 'Orbitron', 'Courier New', monospace;
+  font-size: 11px; letter-spacing: 2px; font-weight: 700;
+  white-space: nowrap;
+  opacity: 0.7;
+  /* Chromatic-aberration text-shadow: small red offset to the left,
+     cyan offset to the right, plus the colored glow halo. The two
+     offset colors give a permanent glitchy split-color edge to every
+     character ; the glow halo behind keeps the label readable. */
+  text-shadow:
+    -1px 0 0 rgba(255, 64, 96, 0.85),
+     1px 0 0 rgba(64, 220, 255, 0.85),
+     0 0 4px currentColor,
+     0 0 9px currentColor,
+     0 0 18px currentColor;
+  /* Slight scrim so the glow is readable on bright walls. */
+  background: rgba(5, 8, 18, 0.25);
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  /* Layered glitch animations: a subtle continuous jitter for "digital
+     instability" reading, plus a sharp infrequent clip-shift for the
+     classic CRT slice glitch. Different durations + non-rational ratios
+     so the two never sync into a predictable rhythm. */
+  animation:
+    shipLabelJitter 0.18s steps(2) infinite,
+    shipLabelGlitch 4.7s steps(1) infinite;
+  /* Inherit color from inline style ; .ship-name-label--friendly /
+     --enemy classes set the actual hue. */
+}
+.ship-name-label--friendly { color: #4fb6ff; }
+.ship-name-label--enemy    { color: #ff4040; }
+
+/* Continuous tiny jitter ; ±0.5px shift on a 6-frame stutter cycle. Reads
+   as the label being a noisy digital readout, not a static nameplate. */
+@keyframes shipLabelJitter {
+  0%,100% { transform: translate(0, 0); }
+  16%     { transform: translate(0.5px, -0.5px); }
+  33%     { transform: translate(-0.5px, 0); }
+  50%     { transform: translate(0, 0.5px); }
+  66%     { transform: translate(0.5px, 0); }
+  83%     { transform: translate(-0.5px, -0.5px); }
+}
+
+/* Sharp slice-shift glitch ; happens for ~150ms every 4.7s, simulating a
+   transient signal hiccup. Uses clip-path to chop the label into two
+   horizontal slices that briefly slide apart, plus a saturated chromatic
+   split via a stronger text-shadow override. Most of the cycle is "off"
+   so the effect surprises rather than annoys. */
+@keyframes shipLabelGlitch {
+  0%, 96%, 100% {
+    clip-path: none;
+    filter: none;
+  }
+  96.5% {
+    clip-path: polygon(0 0, 100% 0, 100% 45%, 0 45%);
+    transform: translate(2px, 0);
+  }
+  97.0% {
+    clip-path: polygon(0 55%, 100% 55%, 100% 100%, 0 100%);
+    transform: translate(-2px, 0);
+  }
+  97.5% {
+    clip-path: polygon(0 20%, 100% 20%, 100% 80%, 0 80%);
+    transform: translate(1px, 0);
+    filter: hue-rotate(45deg);
+  }
+  98.0% {
+    clip-path: none;
+    transform: translate(-1px, 0);
+  }
+}
+
 /* Stasis field HUD indicator */
 #stasis-warning {
   position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%);
@@ -6936,81 +7016,117 @@ function emitDamageState(entity, dt) {
   );
   const pos = entity.position.clone().add(offset);
   if (tier === 0) {
-    // SPARKING: a few hot bright sparks pop off the hull. Bloom catches
-    // them into glints at distance ; reads as "this ship just took a hit
-    // and there's exposed circuitry sparking."
+    // SPARKING: a fountain of hot bright sparks pops off the hull. Bigger
+    // count + faster outward velocity than v10 so the bloom pass reliably
+    // smears them into a visible cluster of glints at any range. Reads as
+    // "circuitry exposed and shorting out."
     if (typeof v8SpawnSparks === 'function') {
-      v8SpawnSparks(pos, 3, 0.7, 200, 0xffe070, 0xffffff);
-    } else {
+      // 8 sparks per emit (was 3), wider spread, brighter outer color.
+      v8SpawnSparks(pos, 8, 1.1, 320, 0xffd060, 0xffffff);
+    }
+    // Plus a couple of accent particles via the legacy pool so the spawn
+    // reads as "many sparks at once" even if v8SpawnSparks is throttled.
+    for (let k = 0; k < 4; k++) {
       game.particles.push({
         position: pos.clone(),
         velocity: new THREE.Vector3(
-          (Math.random() - 0.5) * 140,
-          (Math.random() - 0.5) * 140,
-          (Math.random() - 0.5) * 140
+          (Math.random() - 0.5) * 220,
+          (Math.random() - 0.5) * 220,
+          (Math.random() - 0.5) * 220
         ),
-        life: 0.18, maxLife: 0.18, color: 0xffe070, size: 2,
+        life: 0.22, maxLife: 0.22, color: 0xffe070, size: 3,
       });
     }
   } else if (tier === 1) {
-    // ELECTRIC: short cyan arcs jump across the hull surface. Reads as
-    // "internal systems shorting out."
+    // ELECTRIC: 2-3 simultaneous cyan arcs jump across the hull surface
+    // each emit. Bigger reach + thicker bolts so the player reads "this
+    // ship is shorting out hard" from any angle. Reads as "internal
+    // systems shorting out."
     if (typeof spawnLightningBolt === 'function') {
-      const a = pos.clone();
-      const b = pos.clone().add(new THREE.Vector3(
-        (Math.random() - 0.5) * hullR * 1.4,
-        (Math.random() - 0.5) * hullR * 0.9,
-        (Math.random() - 0.5) * hullR * 1.4
-      ));
-      spawnLightningBolt(a, b, 0x88ddff, 0.14, 0, 1);
+      const arcs = 3;
+      for (let k = 0; k < arcs; k++) {
+        const a = pos.clone().add(new THREE.Vector3(
+          (Math.random() - 0.5) * hullR * 0.5,
+          (Math.random() - 0.5) * hullR * 0.4,
+          (Math.random() - 0.5) * hullR * 0.5
+        ));
+        const b = pos.clone().add(new THREE.Vector3(
+          (Math.random() - 0.5) * hullR * 1.8,
+          (Math.random() - 0.5) * hullR * 1.2,
+          (Math.random() - 0.5) * hullR * 1.8
+        ));
+        // Brighter cyan, doubled lifetime (0.28s), thicker (3) so each
+        // arc is unmistakably visible.
+        spawnLightningBolt(a, b, 0x66e0ff, 0.28, 1, 3);
+      }
     }
-    // Accent spark so the arc has a punctuation point.
-    game.particles.push({
-      position: pos.clone(),
-      velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 80,
-        (Math.random() - 0.5) * 80,
-        (Math.random() - 0.5) * 80
-      ),
-      life: 0.16, maxLife: 0.16, color: 0xaaeeff, size: 1.6,
-    });
+    // Hot punctuation sparks at the arc origin so each emit reads as a
+    // discharge event, not just a faint streak.
+    for (let k = 0; k < 5; k++) {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 130,
+          (Math.random() - 0.5) * 130,
+          (Math.random() - 0.5) * 130
+        ),
+        life: 0.22, maxLife: 0.22, color: 0xbbeeff, size: 2.4,
+      });
+    }
   } else if (tier === 2) {
-    // SMOKE: dark plumes rising off the hull. Reads as "the ship is
-    // burning underneath, venting smoke through hull breaches."
-    game.particles.push({
-      position: pos.clone(),
-      velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 30,
-        30 + Math.random() * 45,
-        (Math.random() - 0.5) * 30
-      ),
-      life: 0.9 + Math.random() * 0.6, maxLife: 1.5,
-      color: 0x2a2a2a, size: 6 + Math.random() * 4,
-    });
-  } else {
-    // tier 3 ; FIRE: orange/red flames erupt off the hull + heavy smoke
-    // trailing above. Reads as "this ship is burning and about to die."
+    // SMOKE: thicker plumes rising off the hull, with an orange ember
+    // accent so the smoke reads as "fire venting through the breach"
+    // rather than ambient haze. Bigger size + lighter base color so the
+    // plume catches some bloom.
     game.particles.push({
       position: pos.clone(),
       velocity: new THREE.Vector3(
         (Math.random() - 0.5) * 35,
-        20 + Math.random() * 70,
+        35 + Math.random() * 55,
         (Math.random() - 0.5) * 35
       ),
-      life: 0.45 + Math.random() * 0.35, maxLife: 0.8,
-      color: Math.random() < 0.5 ? 0xff4422 : 0xff8833,
-      size: 5 + Math.random() * 4,
+      life: 1.0 + Math.random() * 0.7, maxLife: 1.7,
+      color: 0x4a3a30, size: 9 + Math.random() * 5,
     });
-    // Trailing smoke above the flames.
+    // Hot ember inside the plume base ; bright accent that reads at distance.
     game.particles.push({
-      position: pos.clone().add(new THREE.Vector3(0, 15, 0)),
+      position: pos.clone(),
       velocity: new THREE.Vector3(
-        (Math.random() - 0.5) * 22,
-        40 + Math.random() * 40,
-        (Math.random() - 0.5) * 22
+        (Math.random() - 0.5) * 60,
+        20 + Math.random() * 50,
+        (Math.random() - 0.5) * 60
       ),
-      life: 0.8 + Math.random() * 0.5, maxLife: 1.3,
-      color: 0x1c1c1c, size: 7 + Math.random() * 4,
+      life: 0.35 + Math.random() * 0.25, maxLife: 0.6,
+      color: 0xff8833, size: 3 + Math.random() * 2,
+    });
+  } else {
+    // tier 3 ; FIRE: bigger, brighter flame fountain + dense smoke trail.
+    // Multiple flame particles per emit so the fire reads as a sustained
+    // body of flame engulfing the hull, not single popping sparks.
+    for (let k = 0; k < 3; k++) {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: new THREE.Vector3(
+          (Math.random() - 0.5) * 50,
+          30 + Math.random() * 90,
+          (Math.random() - 0.5) * 50
+        ),
+        life: 0.5 + Math.random() * 0.4, maxLife: 0.9,
+        // Mix of hot orange and yellow so the flames have bloom variation.
+        color: Math.random() < 0.4 ? 0xff5022 : (Math.random() < 0.5 ? 0xffaa44 : 0xffd070),
+        size: 7 + Math.random() * 5,
+      });
+    }
+    // Heavier trailing smoke above the flames.
+    game.particles.push({
+      position: pos.clone().add(new THREE.Vector3(0, 18, 0)),
+      velocity: new THREE.Vector3(
+        (Math.random() - 0.5) * 28,
+        50 + Math.random() * 50,
+        (Math.random() - 0.5) * 28
+      ),
+      life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
+      color: 0x252525, size: 10 + Math.random() * 5,
     });
   }
 }
@@ -7913,7 +8029,15 @@ function _vrEnsureBotHealthBar(bot) {
 }
 
 function _vrUpdateBotHealthBar(bot, isVR, isEnemy) {
+  // (v11) Enemy HP/shield bars removed. Damage state on enemy ships is read
+  // entirely from in-world hull effects (sparks → electric → smoke → fire)
+  // via emitDamageState. The bar sprite is kept hidden in VR for the same
+  // reason. Hide any sprite that already exists (carry-over from prior
+  // builds where VR bars were rendered) and bail.
   const existing = bot && bot._vrHealthSprite;
+  if (existing) existing.visible = false;
+  return;
+  // ----- legacy code below kept unreachable so the system can be re-enabled -----
   if (!isVR || !bot || !bot.alive || !isEnemy) {
     if (existing) existing.visible = false;
     return;
@@ -23261,15 +23385,112 @@ function drawCircumpunctHUD() {
     }
   }
 
-  // (v11) HP + shield bars removed from HUD. Damage feedback is now
-  // entirely in-world: hull damage progresses through 4 visible tiers
-  // (sparking → electric → smoke → fire) on the ship hull when shields
-  // are down. Shields up = no hull effects visible. The bars cluttered
-  // the HUD and the in-world version reads from any angle (including in
-  // VR), not just the cockpit center. Kept the constants the speed/ammo
-  // arcs reference (r1/r2) so their layout doesn't shift.
+  // ---- LAYER 1: INNER RING (Health) ----
+  // Segmented arc, bottom half (from 7 o'clock to 5 o'clock)
   const r1 = 150;
+  const healthArcStart = Math.PI * 0.65;   // ~117 degrees (lower left)
+  const healthArcEnd = Math.PI * 2.35;     // ~423 degrees (lower right, wrapping)
+  const healthArcSpan = healthArcEnd - healthArcStart;
+  const segments = player.chassis.healthSegments;
+  const segGap = 0.04; // radians gap between segments
+
+  // Background ring (faint)
+  ctx.strokeStyle = white + '0.1)';
+  ctx.lineWidth = 8;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r1, healthArcStart, healthArcEnd);
+  ctx.stroke();
+
+  // Health segments
+  for (let i = 0; i < segments; i++) {
+    const segStart = healthArcStart + (healthArcSpan / segments) * i + segGap / 2;
+    const segEnd = healthArcStart + (healthArcSpan / segments) * (i + 1) - segGap / 2;
+    const segStartPct = i / segments;
+
+    if (healthPct > segStartPct) {
+      const fillPct = Math.min(1, (healthPct - segStartPct) / (1 / segments));
+      const fillEnd = segStart + (segEnd - segStart) * fillPct;
+
+      // Cinematic glow: blur rises as health falls (gets more desperate looking near empty).
+      ctx.save();
+      ctx.shadowColor = hCol;
+      ctx.shadowBlur = 6 + (1 - healthPct) * 10;
+      ctx.strokeStyle = hCol;
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r1, segStart, fillEnd);
+      ctx.stroke();
+      ctx.restore();
+
+      // Brighter inner edge
+      ctx.strokeStyle = white + '0.15)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r1 - 5, segStart, fillEnd);
+      ctx.stroke();
+    }
+
+    // Segment boundary tick
+    if (i > 0) {
+      const tickAngle = healthArcStart + (healthArcSpan / segments) * i;
+      const tx1 = cx + Math.cos(tickAngle) * (r1 - 14);
+      const ty1 = cy + Math.sin(tickAngle) * (r1 - 14);
+      const tx2 = cx + Math.cos(tickAngle) * (r1 + 14);
+      const ty2 = cy + Math.sin(tickAngle) * (r1 + 14);
+      ctx.strokeStyle = white + '0.12)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(tx1, ty1); ctx.lineTo(tx2, ty2);
+      ctx.stroke();
+    }
+  }
+
+  // Health text (below ring)
+  ctx.fillStyle = white + '0.6)';
+  hudFont('13px Courier New');
+  ctx.textAlign = 'center';
+  ctx.fillText(Math.ceil(player.health) + '', cx, cy + r1 + 24);
+
+  // ---- LAYER 2: SHIELD RING ----
+  // Thinner ring, upper half (from 11 o'clock to 1 o'clock)
   const r2 = 190;
+  const shieldArcStart = -Math.PI * 0.85;
+  const shieldArcEnd = -Math.PI * 0.15;
+  const shieldArcSpan = shieldArcEnd - shieldArcStart;
+
+  // Background
+  ctx.strokeStyle = cyan + '0.1)';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r2, shieldArcStart, shieldArcEnd);
+  ctx.stroke();
+
+  // Shield fill
+  if (shieldPct > 0) {
+    const fillEnd = shieldArcStart + shieldArcSpan * shieldPct;
+    ctx.save();
+    ctx.shadowColor = cyan + '0.85)';
+    ctx.shadowBlur = 10;
+    ctx.strokeStyle = cyan + '0.6)';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r2, shieldArcStart, fillEnd);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Tick marks along shield arc (every 10%)
+  for (let i = 0; i <= 10; i++) {
+    const angle = shieldArcStart + shieldArcSpan * (i / 10);
+    const inner = i % 5 === 0 ? r2 - 12 : r2 - 6;
+    const outer = i % 5 === 0 ? r2 + 12 : r2 + 6;
+    ctx.strokeStyle = cyan + (i % 5 === 0 ? '0.15)' : '0.08)');
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
+    ctx.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
+    ctx.stroke();
+  }
 
   // ---- LAYER 3: SPEED ARC (left side) ----
   const r3 = 240;
@@ -23941,6 +24162,20 @@ function updateHUD() {
   const teamB = _hudLast['team-b:el'] || (_hudLast['team-b:el'] = document.querySelector('.team-b'));
   _hudText(teamA, 'team-a:t', 'FLEET A: ' + game.scoreA);
   _hudText(teamB, 'team-b:t', 'FLEET B: ' + game.scoreB);
+  // (v11) Player-relative score colors: own team blue, enemy team red.
+  // Override the static red/green from CSS so the score line matches the
+  // minimap and the in-world ship name labels. Cache last applied palette
+  // so we don't write to .style every frame.
+  const _palKey = (player && player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+  if (_hudLast['team:pal'] !== _palKey) {
+    _hudLast['team:pal'] = _palKey;
+    const FRIEND_HEX = '#4fb6ff';
+    const ENEMY_HEX  = '#ff4040';
+    const aColor = (_palKey === 'A') ? FRIEND_HEX : ENEMY_HEX;
+    const bColor = (_palKey === 'B') ? FRIEND_HEX : ENEMY_HEX;
+    if (teamA) { teamA.style.color = aColor; teamA.style.borderBottomColor = aColor; }
+    if (teamB) { teamB.style.color = bColor; teamB.style.borderBottomColor = bColor; }
+  }
 
   // Update ability bar
   updateAbilityHUD();
@@ -24052,20 +24287,37 @@ function updateMinimap() {
   ctx.lineTo(px + _mm.forward.x * 15, py + _mm.forward.z * 15);
   ctx.stroke();
 
-  // Bots
+  // (v11) Bots: friendly = blue, enemy = red ; relative to local player
+  // team. Same palette as the in-world ship name labels and the score
+  // banner, so the player learns one consistent friend/enemy color cue.
+  const _localTeam = (typeof player !== 'undefined' && player && player.team) || null;
+  const FRIEND_COL = '#4fb6ff';
+  const ENEMY_COL  = '#ff4040';
   for (const bot of game.entities) {
     if (!bot.alive) continue;
     const bx = cx + bot.position.x * scale;
     const by = cy + bot.position.z * scale;
-    ctx.fillStyle = bot.team === LSS.TEAM_FLEET_A ? '#ff4444' : '#44bb44';
+    const isEnemy = (_localTeam == null) || (bot.team !== _localTeam);
+    ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
     ctx.fillRect(bx - 2, by - 2, 3, 3);
     // Doomed indicator on minimap
     if (bot.doomed) {
-      ctx.strokeStyle = '#ff2200';
+      ctx.strokeStyle = ENEMY_COL;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.arc(bx, by, 4, 0, Math.PI * 2);
       ctx.stroke();
+    }
+  }
+  // Network players too.
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) {
+      if (!np || !np.alive || !np.position) continue;
+      const bx = cx + np.position.x * scale;
+      const by = cy + np.position.z * scale;
+      const isEnemy = (_localTeam == null) || (np.team !== _localTeam);
+      ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
+      ctx.fillRect(bx - 2, by - 2, 3, 3);
     }
   }
 
@@ -30389,12 +30641,13 @@ function updateDamageIndicators(dt) {
 
 // ---- ENEMY HEALTH BARS (Pooled DOM elements) ----
 
-const hbarPool = { bars: [], markers: [], initialized: false };
+const hbarPool = { bars: [], markers: [], labels: [], initialized: false };
 
 function initHbarPool(maxBars, maxMarkers) {
   const container = document.getElementById('enemy-healthbars');
   hbarPool.bars = [];
   hbarPool.markers = [];
+  hbarPool.labels = [];
   for (let i = 0; i < maxBars; i++) {
     const div = document.createElement('div');
     div.className = 'enemy-hbar';
@@ -30414,6 +30667,17 @@ function initHbarPool(maxBars, maxMarkers) {
     div._fill = div._bg.children[0];
     div._shield = div.children[2];
     hbarPool.bars.push(div);
+  }
+  // (v11) Separate pool for friendly/enemy ship name labels. Same container,
+  // different element class so the styling and the ship-relative position
+  // (anchored below the running light) stay independent of the legacy bar
+  // pool. 24 slots covers 7 friendlies + 7 enemies + headroom.
+  for (let i = 0; i < maxBars; i++) {
+    const div = document.createElement('div');
+    div.className = 'ship-name-label';
+    div.style.display = 'none';
+    container.appendChild(div);
+    hbarPool.labels.push(div);
   }
   for (let i = 0; i < maxMarkers; i++) {
     const div = document.createElement('div');
@@ -30457,64 +30721,87 @@ function updateEnemyHealthBars() {
   const halfH = winH / 2;
   const now = game.time || 0;
 
-  let barIdx = 0;
-  for (const bot of game.entities) {
-    if (!bot.alive || bot.team === player.team) continue;
-    const dist = player.position.distanceTo(bot.position);
-    if (dist > 3000) continue;
+  // (v11) Over-enemy floating HP/shield bars removed. Damage state on enemy
+  // ships is now read entirely in-world via the 4-tier hull effects (sparks
+  // → electric → smoke → fire) emitted by emitDamageState ; the floating
+  // bars cluttered the screen and broke immersion. Hide the legacy bar pool
+  // entries that were left visible from before this code path was disabled.
+  for (let i = 0; i < hbarPool.bars.length; i++) hbarPool.bars[i].style.display = 'none';
 
-    // Project first (cheap) and early-out for off-screen / behind-camera
-    // bots before running the expensive line-of-sight raycast.
-    const worldPos = _hbTmpA.copy(bot.position);
-    worldPos.y += bot.chassis.hullHeight + 30;
-    const projected = _hbTmpB.copy(worldPos).project(camera);
-
-    if (projected.z > 1) continue;
-
-    const sx = (projected.x * halfW) + halfW;
-    const sy = -(projected.y * halfH) + halfH;
-
-    if (sx < -60 || sx > winW + 60 || sy < -30 || sy > winH + 30) continue;
-    if (barIdx >= hbarPool.bars.length) break;
-
-    // Line-of-sight check (SDF raycast) only after on-screen cull passes.
-    // Throttle to ~15 Hz and cache the last result so the hot path costs one
-    // raycast every ~4 frames per bot instead of every frame.
-    if (bot._hbLosTime == null || now - bot._hbLosTime >= HBAR_LOS_INTERVAL) {
-      const toBot = _hbTmpA.subVectors(bot.position, player.position).normalize();
-      const wallDist = raycastLevel(player.position, toBot, dist + 50);
-      bot._hbLosBlocked = (wallDist < dist - 30);
-      bot._hbLosTime = now;
+  // (v11) Ship name labels: render "Friendly: <NAME>" or "Enemy: <NAME>"
+  // below every visible ship near its running-light. Color-coded blue for
+  // friendly, red for enemy ; the in-screen color matches the minimap dot
+  // and the score banner so the player learns one consistent palette.
+  // Labels digitize-in over ~0.45s the first time a ship enters view, then
+  // hold steady. Each entity tracks its own _labelSpotTime ; the timer
+  // resets whenever the ship leaves view (off-screen or LOS-blocked).
+  let labelIdx = 0;
+  const _labels = hbarPool.labels;
+  const _localTeam = (player && player.team) ? player.team : null;
+  // Helper: walk one entity. Reused for bots and network players so the
+  // friendly/enemy branch stays in one place.
+  const _processShipForLabel = (ent) => {
+    if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
+    if (labelIdx >= _labels.length) return;
+    const dist = player.position.distanceTo(ent.position);
+    if (dist > 3500) { ent._labelSpotTime = null; return; }
+    // Project the anchor (slightly below the hull, near the running light).
+    const hullH = (ent.chassis && ent.chassis.hullHeight) ? ent.chassis.hullHeight : 30;
+    const wp = _hbTmpA.copy(ent.position);
+    wp.y -= hullH * 0.5 + 24;
+    const proj = _hbTmpB.copy(wp).project(camera);
+    if (proj.z > 1) { ent._labelSpotTime = null; return; }
+    const sx = (proj.x * halfW) + halfW;
+    const sy = -(proj.y * halfH) + halfH;
+    if (sx < -80 || sx > winW + 80 || sy < -20 || sy > winH + 30) {
+      ent._labelSpotTime = null; return;
     }
-    if (bot._hbLosBlocked) continue;
-
-    const healthPct = Math.max(0, bot.health / bot.maxHealth);
-    const shieldPct = Math.max(0, bot.shield / bot.maxShield);
-
-    const scale = Math.max(0.5, Math.min(1.2, 800 / dist));
-    const barW = Math.round(80 * scale);
-
-    let hColor = '#00c850';
-    if (healthPct < 0.33) hColor = '#ff5000';
-    else if (healthPct < 0.6) hColor = '#ddc800';
-    if (bot.doomed) hColor = '#ff2200';
-
-    const div = hbarPool.bars[barIdx];
+    // LOS gate (cached at ~15 Hz, same as the legacy bar code).
+    if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
+      const toEnt = _hbTmpA.subVectors(ent.position, player.position).normalize();
+      const wallDist = raycastLevel(player.position, toEnt, dist + 50);
+      ent._hbLosBlocked = (wallDist < dist - 30);
+      ent._hbLosTime = now;
+    }
+    if (ent._hbLosBlocked) { ent._labelSpotTime = null; return; }
+    // Spotted ; start the digitize-in clock.
+    if (ent._labelSpotTime == null) ent._labelSpotTime = now;
+    const isEnemy = _localTeam == null || ent.team !== _localTeam;
+    // Color carries the friend/enemy reading ; show just the chassis name.
+    const fullText = (ent.loadout.name || '?').toUpperCase();
+    // Digitize-in: reveal characters over 0.45s, then hold full string.
+    const age = now - ent._labelSpotTime;
+    let visText;
+    if (age < 0.45) {
+      const reveal = Math.max(1, Math.floor(fullText.length * (age / 0.45)));
+      visText = fullText.substring(0, reveal);
+      // While revealing, scramble the not-yet-revealed character with a
+      // random glyph for a brief glitch effect.
+      if (reveal < fullText.length) {
+        const glyphs = '!@#$%^&*<>?/{}[]+=';
+        visText += glyphs[(Math.floor(now * 30) + reveal) % glyphs.length];
+      }
+    } else {
+      visText = fullText;
+    }
+    const div = _labels[labelIdx++];
     div.style.display = '';
-    div.style.left = (sx - barW / 2) + 'px';
-    div.style.top = (sy - 20) + 'px';
-    // Use cached child refs (populated in initHbarPool).
-    const nameEl = div._name;
-    nameEl.style.fontSize = Math.round(9 * scale) + 'px';
-    nameEl.textContent = bot.loadout.name;
-    div._bg.style.width = barW + 'px';
-    div._fill.style.width = (healthPct * 100) + '%';
-    div._fill.style.background = hColor;
-    div._shield.style.width = (barW * shieldPct) + 'px';
-    barIdx++;
+    div.className = 'ship-name-label ' + (isEnemy ? 'ship-name-label--enemy' : 'ship-name-label--friendly');
+    // Estimate width to center it against the screen point. Roughly 7px
+    // per char at 11px font + 2px letter-spacing + 12px box padding.
+    const approxW = visText.length * 7 + 16;
+    div.style.left = (sx - approxW / 2) + 'px';
+    div.style.top  = (sy - 4) + 'px';
+    div.textContent = visText;
+  };
+  if (game.entities) {
+    for (const bot of game.entities) _processShipForLabel(bot);
   }
-  // Hide unused bar pool elements
-  for (let i = barIdx; i < hbarPool.bars.length; i++) hbarPool.bars[i].style.display = 'none';
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) _processShipForLabel(np);
+  }
+  // Hide unused label slots.
+  for (let i = labelIdx; i < _labels.length; i++) _labels[i].style.display = 'none';
 
   // Stasis field world markers
   let mkIdx = 0;
