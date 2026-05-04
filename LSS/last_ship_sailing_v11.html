@@ -6399,6 +6399,22 @@ const EFFECT_PRESETS = {
       { pattern: 2, scale: 0.4, timeRate: 1.78, hue: 0.0,   alpha: 0.4,  blend: 6, sat: 0.7  },
     ],
   },
+  // (v11) Cosmic anomaly preset ; magenta/violet base with hot ridge
+  // accents and dark turbulence inside. Used by the per-round morphing
+  // Gielis supershape that drifts through the arena. High brightness so
+  // the bloom pass picks it up at extreme distance ; reads as "something
+  // alive and dangerous is moving through the map."
+  cosmic_anomaly: {
+    name: 'Cosmic Anomaly',
+    baseColor: '#cc66ff',
+    fresnel: 0.7,
+    brightness: 2.6,
+    layers: [
+      { pattern: 1, scale: 0.6, timeRate: 1.4,  hue: 0.0,   alpha: 1.10, blend: 0, sat: 0.9  },
+      { pattern: 5, scale: 1.8, timeRate: 2.10, hue: 0.92,  alpha: 0.95, blend: 2, sat: 0.95 },
+      { pattern: 2, scale: 1.1, timeRate: 1.65, hue: 0.55,  alpha: 0.55, blend: 6, sat: 0.7  },
+    ],
+  },
 };
 
 // Convenience: clone a named preset into a fresh material instance.
@@ -22226,6 +22242,10 @@ function updateRoundSystem(dt) {
     if (game.warmupTimer <= 0) {
       game.state = 'playing';
       game.roundTimer = LSS.ROUND_TIME;
+      // (v11) Spawn the round's cosmic anomaly. Drifts from outside the
+      // map through the play volume and back out over ~75s ; one pass
+      // per round, no collision, pure visual flavor.
+      try { if (typeof spawnCosmicAnomaly === 'function') spawnCosmicAnomaly(); } catch (_) {}
       // (v9b) Hard-reset stuck input state at the warmup -> playing edge.
       // Bug repro: clicking a ship-select button (e.g. the map > arrow)
       // during the launch countdown left that button with keyboard focus ;
@@ -22496,6 +22516,13 @@ function updateRoundSystem(dt) {
         game.stasisSpawnTimer = 30;
         game.stasisFirstBatch = true;
         game.playerInStasis = false;
+        // (v11) Tear down the cosmic anomaly between rounds. spawnCosmicAnomaly
+        // fires again at the next warmup -> playing transition for a fresh
+        // entrance trajectory.
+        if (game.cosmicAnomaly) {
+          try { game.cosmicAnomaly.destroy(); } catch (_) {}
+          game.cosmicAnomaly = null;
+        }
         // (v8_2a) Clear all transient effects + particles from the prior
         // round so smoke clouds / lightning bolts / debris / ambient clouds
         // don't accumulate across the match.
@@ -22700,6 +22727,11 @@ function returnToRootMenu() {
   game.particles = [];
   for (const sf of game.stasisFields) { try { sf.destroy(); } catch (e) {} }
   game.stasisFields = [];
+  // (v11) Tear down the cosmic anomaly if one was crossing the map.
+  if (game.cosmicAnomaly) {
+    try { game.cosmicAnomaly.destroy(); } catch (_) {}
+    game.cosmicAnomaly = null;
+  }
   // Same exhaustive cleanup as round-end (see updateAbilities for context).
   // Without this, firewall sprites / trap halos / gas puffs leak across
   // match-end → root-menu transitions.
@@ -27350,6 +27382,244 @@ function setWallPattern(idx) {
   } catch(e) {}
 }
 
+// ---- COSMIC ANOMALY (v11) ----
+// A morphing 3D Gielis supershape that drifts slowly through the arena
+// once per round. Enters from a random point outside the map's bounding
+// sphere, passes through the center, exits the opposite side. No
+// collision ; phases through walls and ships like a cosmic phenomenon.
+// Looks dangerous (bright magenta/violet plasma material with rim glow,
+// slow tumble, internal lightning arcs) but is actually harmless ; pure
+// visual flavor that says "the arena is part of something larger."
+//
+// The supershape is the 3D extension of Gielis's superformula:
+//   r1(theta) = ( |cos(m1·theta/4)/a|^n21 + |sin(m1·theta/4)/b|^n31 )^(-1/n11)
+//   r2(phi)   = ( |cos(m2·phi/4)/a|^n22  + |sin(m2·phi/4)/b|^n32  )^(-1/n12)
+//   x = r1·r2·cos(theta)·cos(phi)
+//   y =     r2          ·sin(phi)
+//   z = r1·r2·sin(theta)·cos(phi)
+// Each parameter is animated as base + amp·sin(t·2pi/period) with mutually
+// non-rational periods so the morph never repeats.
+
+function _supershapeR(angle, m, n1, n2, n3) {
+  // Gielis 1D superformula. a = b = 1 ; the m parameter controls
+  // rotational symmetry (integers give clean N-fold shapes ; non-integers
+  // give the asymmetric morphs we want for an alien anomaly).
+  const t = m * angle * 0.25;
+  const c = Math.pow(Math.abs(Math.cos(t)), n2);
+  const s = Math.pow(Math.abs(Math.sin(t)), n3);
+  // Avoid division-by-zero when n1 is small or radius spikes ; clamp.
+  const sum = c + s;
+  if (sum < 1e-6) return 1e-3;
+  return Math.pow(sum, -1.0 / n1);
+}
+
+class CosmicAnomaly {
+  constructor() {
+    this.alive = true;
+    this.elapsed = 0;
+    // Whole pass takes ~75 seconds ; gives the player most of a 3-minute
+    // round to notice it, react, and watch it cross. Slow drift reads as
+    // "ancient / inevitable" rather than "incoming attack."
+    this.duration = 75;
+    // Mesh resolution. 64 longitude * 32 latitude = 2048 verts ; cheap
+    // to recompute every frame at 60 FPS (~120k float writes / sec).
+    this.resTheta = 64;
+    this.resPhi   = 32;
+    // Base scale ; world-units radius before per-axis supershape
+    // modulation. Tuned so the anomaly reads as "huge object far away,
+    // moderate object up close" against the corridor scale (~600u).
+    this.scale = 220;
+    // Compute map bounding radius from level geometry. Anomaly enters
+    // from outside this sphere so the player sees it approach across
+    // the void rather than popping in mid-arena.
+    let mapR = 1500;
+    if (typeof game !== 'undefined' && game.levelSpheres) {
+      for (const s of game.levelSpheres) {
+        const d = Math.sqrt(s.cx*s.cx + s.cy*s.cy + s.cz*s.cz) + s.r;
+        if (d > mapR) mapR = d;
+      }
+    }
+    const outsideR = mapR + this.scale + 600;
+    // Pick a random axis through the map center ; the anomaly travels
+    // along that axis from the outside-sphere intersection on one side
+    // to the other. Random direction so consecutive rounds feel fresh.
+    const phi = Math.random() * Math.PI * 2;
+    const cosTheta = 2 * Math.random() - 1;
+    const sinTheta = Math.sqrt(1 - cosTheta * cosTheta);
+    const dir = new THREE.Vector3(
+      sinTheta * Math.cos(phi),
+      cosTheta * 0.5,                 // bias slightly horizontal so it crosses the play volume
+      sinTheta * Math.sin(phi)
+    ).normalize();
+    this.startPos = dir.clone().multiplyScalar(-outsideR);
+    this.endPos   = dir.clone().multiplyScalar( outsideR);
+    // Random tumble axis ; the supershape rotates slowly during transit
+    // so the morph + rotation combine into "something living, not just
+    // a shape moving past the camera."
+    this.tumbleAxis = new THREE.Vector3(
+      Math.random() - 0.5,
+      Math.random() - 0.5,
+      Math.random() - 0.5
+    ).normalize();
+    this.tumbleRate = 0.18 + Math.random() * 0.14;  // rad/sec
+
+    // Morphing parameters ; each cycles base + amp * sin(t·2pi/period).
+    // Periods are intentionally non-rational so the full shape never
+    // exactly repeats during the 75s pass.
+    this.params = [
+      { key: 'm1',  base: 6.0, amp: 4.0, period: 12.7 },
+      { key: 'n11', base: 1.0, amp: 0.6, period:  9.3 },
+      { key: 'n21', base: 1.0, amp: 0.4, period: 11.1 },
+      { key: 'n31', base: 1.0, amp: 0.4, period: 13.7 },
+      { key: 'm2',  base: 4.0, amp: 3.0, period: 14.5 },
+      { key: 'n12', base: 1.0, amp: 0.5, period: 10.7 },
+      { key: 'n22', base: 1.0, amp: 0.4, period: 12.3 },
+      { key: 'n32', base: 1.0, amp: 0.4, period: 15.9 },
+    ];
+
+    // BufferGeometry with positions we'll rewrite each frame. Triangles
+    // are computed once in the constructor (topology doesn't change).
+    this.geometry = new THREE.BufferGeometry();
+    this._positions = new Float32Array(this.resTheta * this.resPhi * 3);
+    this.geometry.setAttribute('position', new THREE.BufferAttribute(this._positions, 3));
+    const indices = [];
+    for (let i = 0; i < this.resPhi - 1; i++) {
+      for (let j = 0; j < this.resTheta - 1; j++) {
+        const a = i * this.resTheta + j;
+        const b = a + 1;
+        const c = a + this.resTheta;
+        const d = c + 1;
+        indices.push(a, b, c, b, d, c);
+      }
+    }
+    this.geometry.setIndex(indices);
+
+    // Layered FX material ; cosmic_anomaly preset baked above.
+    if (typeof _makeFXMaterial === 'function') {
+      this.material = _makeFXMaterial('cosmic_anomaly');
+      // Sample noise relative to a unit sphere so the patterns stay
+      // coherent across the morphing radius. uPosScale = 1/scale.
+      if (this.material.uniforms && this.material.uniforms.uPosScale) {
+        this.material.uniforms.uPosScale.value = 1.0 / this.scale;
+      }
+    } else {
+      this.material = new THREE.MeshBasicMaterial({
+        color: 0xcc66ff, transparent: true, opacity: 0.7,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+      });
+    }
+    this.mesh = new THREE.Mesh(this.geometry, this.material);
+    this.mesh.position.copy(this.startPos);
+    this.mesh.frustumCulled = false;  // huge object, BVH-cull manually if needed
+    this.mesh.renderOrder = 1;
+    scene.add(this.mesh);
+
+    // Ambient drone audio cue while the anomaly is in range. Tracks the
+    // anomaly mesh position so the spatial panner pans correctly. Wired
+    // up in update() each frame ; quiet by default, swells when close.
+    this._audioStarted = false;
+    this._lightningTimer = 0;
+  }
+
+  update(dt) {
+    if (!this.alive) return;
+    this.elapsed += dt;
+    const t = Math.min(1, this.elapsed / this.duration);
+    // Position: lerp start → end. Slight ease so it feels weighty.
+    const eased = 0.5 - 0.5 * Math.cos(t * Math.PI);
+    this.mesh.position.lerpVectors(this.startPos, this.endPos, eased);
+
+    // Tumble slowly around the random axis.
+    this.mesh.rotateOnWorldAxis(this.tumbleAxis, this.tumbleRate * dt);
+
+    // Rebuild the supershape vertices.
+    this._rebuildGeometry();
+
+    // Occasional internal lightning arcs ; reuse the existing lightning
+    // pool for the punctuation cracks across the anomaly's body.
+    this._lightningTimer -= dt;
+    if (this._lightningTimer <= 0 && typeof spawnLightningBolt === 'function') {
+      const r = this.scale * 1.4;
+      const a = this.mesh.position.clone().add(new THREE.Vector3(
+        (Math.random() - 0.5) * r,
+        (Math.random() - 0.5) * r,
+        (Math.random() - 0.5) * r,
+      ));
+      const b = this.mesh.position.clone().add(new THREE.Vector3(
+        (Math.random() - 0.5) * r,
+        (Math.random() - 0.5) * r,
+        (Math.random() - 0.5) * r,
+      ));
+      // Hot magenta arcs. Long-ish lifetime so they ring through the body.
+      spawnLightningBolt(a, b, 0xff66ff, 0.32, 1, 4);
+      this._lightningTimer = 0.18 + Math.random() * 0.25;
+    }
+
+    // Pass complete ; tear down.
+    if (t >= 1) this.destroy();
+  }
+
+  _rebuildGeometry() {
+    // Sample the morphing parameters for this frame.
+    const tSec = this.elapsed;
+    const p = {};
+    for (const { key, base, amp, period } of this.params) {
+      p[key] = base + amp * Math.sin(tSec * 2 * Math.PI / period);
+    }
+    // Clamp exponents so the shape stays sane (very low n* explodes the
+    // radius via the -1/n1 term). Real n1 ∈ [0.2, ∞) is well-behaved.
+    const clampN = (v) => Math.max(0.3, v);
+    const n11 = clampN(p.n11), n21 = clampN(p.n21), n31 = clampN(p.n31);
+    const n12 = clampN(p.n12), n22 = clampN(p.n22), n32 = clampN(p.n32);
+    const m1 = p.m1, m2 = p.m2;
+
+    const positions = this._positions;
+    const resTheta = this.resTheta;
+    const resPhi   = this.resPhi;
+    const scale = this.scale;
+    let idx = 0;
+    for (let i = 0; i < resPhi; i++) {
+      // phi ∈ [-pi/2, pi/2] (latitude, pole to pole)
+      const phi = -Math.PI / 2 + (i / (resPhi - 1)) * Math.PI;
+      const r2 = _supershapeR(phi, m2, n12, n22, n32);
+      const cosPhi = Math.cos(phi);
+      const sinPhi = Math.sin(phi);
+      for (let j = 0; j < resTheta; j++) {
+        // theta ∈ [-pi, pi] (longitude)
+        const theta = -Math.PI + (j / (resTheta - 1)) * 2 * Math.PI;
+        const r1 = _supershapeR(theta, m1, n11, n21, n31);
+        const cosTheta = Math.cos(theta);
+        const sinTheta = Math.sin(theta);
+        // Final radius is product of the two 1D supershapes ; clamp so a
+        // pole at very small n exponent doesn't shoot a vertex to
+        // infinity and explode the bounding box.
+        const rad = Math.min(3.5, r1 * r2);
+        positions[idx++] = scale * rad * cosTheta * cosPhi;
+        positions[idx++] = scale * r2  * sinPhi;
+        positions[idx++] = scale * rad * sinTheta * cosPhi;
+      }
+    }
+    this.geometry.attributes.position.needsUpdate = true;
+    this.geometry.computeVertexNormals();
+  }
+
+  destroy() {
+    this.alive = false;
+    if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
+    if (this.geometry) this.geometry.dispose();
+    if (this.material && this.material.dispose) this.material.dispose();
+  }
+}
+
+// Spawn helper called once per round. Replaces any prior anomaly.
+function spawnCosmicAnomaly() {
+  if (typeof game === 'undefined') return;
+  if (game.cosmicAnomaly && game.cosmicAnomaly.alive) {
+    try { game.cosmicAnomaly.destroy(); } catch (_) {}
+  }
+  game.cosmicAnomaly = new CosmicAnomaly();
+}
+
 // ---- STASIS FIELD SYSTEM ----
 
 class StasisField {
@@ -27762,6 +28032,17 @@ function updateStasisFields(dt) {
   if (game.state === 'playing' && !game.championSpawned && game.roundTimer <= LSS.CHAMPION_TIME) {
     spawnChampionField();
     game.championSpawned = true;
+  }
+
+  // (v11) Update the cosmic anomaly if one's active. Self-destroys when
+  // its 75s pass completes ; clear the reference after destroy.
+  if (game.cosmicAnomaly) {
+    if (game.cosmicAnomaly.alive) {
+      try { game.cosmicAnomaly.update(dt); } catch (_) {}
+      if (!game.cosmicAnomaly.alive) game.cosmicAnomaly = null;
+    } else {
+      game.cosmicAnomaly = null;
+    }
   }
 
   // Update existing fields
