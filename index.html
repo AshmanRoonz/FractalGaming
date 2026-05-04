@@ -12925,6 +12925,12 @@ class Projectile {
     // light shooting outward in all directions plus drifting embers — on
     // top of the standard explosion. The sustained 'cluster' zone updater
     // also fires smaller fireworks bursts every 0.3s while the zone lives.
+    // (v11) Distinct sub-munitions split sound that reads under the main
+    // explosion (which fires alongside) ; tighter, brighter, shorter.
+    try {
+      if (typeof playSpatialSound === 'function') playSpatialSound('cluster_split', this.position.clone());
+      else playSound('cluster_split');
+    } catch (_) {}
     const dmgPerSec = this.clusterDmg || 80;
     const duration = this.clusterDuration || 3;
     game.worldEffects.push({
@@ -18607,6 +18613,10 @@ function playerTakeDamage(amount, attacker, projectile) {
     const stored = Math.min(amount, 500 - (player.vortexStored || 0));
     player.vortexStored = (player.vortexStored || 0) + stored;
     amount -= stored;
+    // (v11) Schwoop sound on absorb. Skip if nothing was actually
+    // absorbed (e.g. shield already at 500 cap) ; otherwise it'd fire
+    // every frame the shield is up under fire.
+    if (stored > 0) { try { playSound('vortex_absorb'); } catch (_) {} }
     if (amount <= 0) return; // fully absorbed
   }
   // Particle Wall (TRACKER): deployed one-way shield with HP; absorbs ANY
@@ -19978,6 +19988,11 @@ function executeAbility(slot, ability) {
     // Most defensive abilities are handled passively in playerTakeDamage
     // Energy Siphon (SYPHON): actively drains enemy shields and heals player
     if (ability.name === 'Energy Siphon') {
+      // (v11) Continuous shimmery drain loop while siphon is active.
+      // 0.20s tick = ~5 Hz so consecutive sounds overlap into a stream.
+      // Independent of whether a target is hit ; the player gets an
+      // audible "siphon is on" feedback even before the conduit lands.
+      _tickSoundLoop(player, '_siphonDrainTimer', dt, 0.20, 'siphon_drain');
       let bestBot = null, bestDist = Infinity;
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
@@ -19992,6 +20007,12 @@ function executeAbility(slot, ability) {
         if (drainAmt > 0 && bestBot.takeDamage) {
           bestBot.shield = Math.max(0, (bestBot.shield || 0) - drainAmt);
         }
+        // (v11) Siphon hit stinger: descending shimmery blip at the
+        // target position so the ear confirms the drain landed.
+        try {
+          if (typeof playSpatialSound === 'function') playSpatialSound('siphon_hit', bestBot.position.clone());
+          else playSound('siphon_hit');
+        } catch (_) {}
         // Slow the target (per wiki: Energy Siphon slows enemies)
         if (bestBot.velocity) bestBot.velocity.multiplyScalar(0.4);
         bestBot.arcSlowTimer = Math.max(bestBot.arcSlowTimer || 0, 2.0); // 2s slow
@@ -20173,6 +20194,9 @@ function executeAbility(slot, ability) {
       // Also resets dash charges (per wiki)
       player.dashCharges = player.maxDashes;
       player.dashCooldownTimer = 0;
+      // (v11) Three rising beeps + resolve chord so the player hears
+      // their cooldowns rack back up.
+      try { playSound('rearm_reset'); } catch (_) {}
     }
     // VORTEX: Trip Wire (deploy 3 proximity orbs in a wide spread for area coverage)
     else if (ability.name === 'Trip Wire') {
@@ -20198,6 +20222,12 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Incendiary Trap') {
       const trapPos = player.position.clone().add(forward.clone().multiplyScalar(400));
       spawnIncendiaryGas(trapPos, 'player', player.team, net.myPeerId, ++net.effectIdCounter, true);
+      // (v11) Whoosh ignition stinger so the trap deployment reads
+      // distinct from ordinary projectile fire.
+      try {
+        if (typeof playSpatialSound === 'function') playSpatialSound('incendiary_ignite', trapPos.clone());
+        else playSound('incendiary_ignite');
+      } catch (_) {}
     }
     // PUNCTURE: Tether Trap (slow + root enemies for 4s)
     else if (ability.name === 'Tether Trap') {
@@ -21125,6 +21155,8 @@ function updateAbilities(dt) {
       }
     }
     spawnExplosion(player.position.clone().add(fwd.multiplyScalar(100)), 30);
+    // (v11) Cracking schwoop on the reflect burst.
+    try { playSound('vortex_reflect'); } catch (_) {}
     player.vortexStored = 0;
   };
   for (let i = 0; i < 3; i++) {
@@ -21243,7 +21275,22 @@ function updateAbilities(dt) {
         const lateralFall = 1 - (perpLen / coneR);
         const dmgPerSec = maxDPS * forwardFall * (0.5 + 0.5 * lateralFall);
         const dealt = bot.takeDamage(dmgPerSec * dt, 'player');
-        if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
+        if (dealt > 0) {
+          player.damageDealt += dealt;
+          player.coreMeter = Math.min(100, player.coreMeter + dealt / 200);
+          // (v11) Burn-bite stinger throttled per-bot so a continuous
+          // hold doesn't fire it 60 times a second. ~3 Hz cap = once
+          // every 0.33s while the bot is in the cone.
+          if (bot._thermalBurnSfxTimer == null) bot._thermalBurnSfxTimer = 0;
+          bot._thermalBurnSfxTimer -= dt;
+          if (bot._thermalBurnSfxTimer <= 0) {
+            bot._thermalBurnSfxTimer = 0.33;
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('thermal_burn', bot.position.clone());
+              else playSound('thermal_burn');
+            } catch (_) {}
+          }
+        }
       }
       // Thermal Shield is a fire source: ignite Incendiary Traps anywhere
       // inside the burn cone (probe at mid-cone with a generous radius so a
@@ -21624,6 +21671,12 @@ function updateAbilities(dt) {
             const dealt = bot.takeDamage(eff.dmg, eff.owner);
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; showHitMarker(); }
             spawnExplosion(eff.position, 20);
+            // (v11) Trip wire detonation crack so the trigger reads in
+            // 3D before the explosion sound lands.
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', eff.position.clone());
+              else playSound('tripwire_detonate');
+            } catch (_) {}
             eff.timer = 0; // remove
             break;
           }
@@ -21920,6 +21973,11 @@ function updateAbilities(dt) {
             eff.triggered = true;
             eff.rootTarget = bot;
             eff.rootTimer = eff.rootDuration;
+            // (v11) Tether snap stinger ; rubber-band twang at the trap.
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('tether_caught', eff.position.clone());
+              else playSound('tether_caught');
+            } catch (_) {}
             break;
           }
         }
@@ -22183,7 +22241,15 @@ function updateAbilities(dt) {
   // Freeze core meter while core is active, and cap at 0 for maxed Syphon
   if (player.coreActive) player.coreMeter = 0;
   if (player.loadout && player.loadout.core.name === 'Upgrade Core' && player.syphonTier >= 3) player.coreMeter = 0;
-  player.coreReady = player.coreMeter >= 100;
+  // (v11) Edge-detect on core readiness so the ship-AI announcer fires
+  // exactly once when the meter hits 100, not every frame thereafter.
+  // _wasCoreReady tracks last-frame state so the next true-edge triggers.
+  const _nowCoreReady = player.coreMeter >= 100;
+  if (_nowCoreReady && !player._wasCoreReady) {
+    try { if (typeof ANN !== 'undefined' && ANN.coreReady) ANN.coreReady(); } catch (_) {}
+  }
+  player._wasCoreReady = _nowCoreReady;
+  player.coreReady = _nowCoreReady;
 }
 
 // ---- DASH ----
@@ -30909,7 +30975,7 @@ const ANN = {
 
   // ---- Abilities + core ----
   abilityReady:     () => announce('abilityReady',     'Ability online.',                              { cooldown: 6 }),
-  coreReady:        () => announce('coreReady',        'Core charged. Authorization granted.',         { cooldown: 12 }),
+  coreReady:        () => announce('coreReady',        'Core charged and ready.',                      { cooldown: 12, priority: true }),
   dashReady:        () => announce('dashReady',        'Dash drive ready.',                            { cooldown: 10 }),
 
   // ---- Map / arena ----
@@ -35017,6 +35083,171 @@ function playSound(type) {
     // the top of the voicing, played slightly longer/louder so the climax lands.
     triChord([98, 123, 147], 'sine', 0.24, 0.50, null, null, 0.36,
       { attack: 0.005, hold: 0.18, decay: 0.31 });
+  }
+  // ================================================================
+  // (v11) Per-ability sound flavor. Most abilities used to share the
+  // generic 'ability' beep ; these add per-ability character. Each is
+  // designed to read distinct from the others without piling onto the
+  // mid-band where weapon SFX live ; shields breathe in low/sub, traps
+  // pop in mid, energy effects whine in upper-mid.
+  // ----------------------------------------------------------------
+  else if (type === 'vortex_shield_hum') {
+    // Continuous low organ-drone tick ; called on a 0.95s cadence by
+    // _tickSoundLoop while the Vortex Shield is held. Two stacked
+    // sines a perfect fifth apart, gentle vibrato baked into the ramp,
+    // long fade so consecutive ticks blend into a sustained bed.
+    const p = rr(1, 0.04);
+    triChord([ri(110*p,0), ri(165*p,0)], 'sine',
+      rr(0.08, 0.15), rr(0.95, 0.05),
+      [ri(108*p,0), ri(162*p,0)], rr(0.92, 0.05), 0,
+      { attack: rr(0.18, 0.2), hold: rr(0.20, 0.2), decay: rr(0.55, 0.15) });
+    // Faint upper-octave sparkle so the bed has air, not just thump.
+    triChord([ri(440*p,0)], 'triangle',
+      rr(0.025, 0.3), 0.45, null, null, rr(0.10, 0.3),
+      { attack: 0.05, hold: 0, decay: 0.40 });
+  }
+  else if (type === 'vortex_absorb') {
+    // Bright cyan "schwoop" when a projectile hits the Vortex shield and
+    // gets sucked in. Inverted pitch arc (rising) signals capture.
+    const p = rr(1, 0.10);
+    triChord([ri(220*p,0), ri(330*p,0), ri(440*p,0)], 'sine',
+      rr(0.18, 0.15), 0.16,
+      [ri(660*p,0), ri(880*p,0), ri(1320*p,0)], 0.14, 0,
+      { attack: 0.001, hold: 0.01, decay: 0.13 });
+    playNoiseBurst(rr(0.05, 0.3), rr(0.07, 0.3), now, ri(2200, 0.2), rr(2.5, 0.25));
+  }
+  else if (type === 'vortex_reflect') {
+    // Punchier, falling pitch ; the shield hurled the projectile back.
+    const p = rr(1, 0.10);
+    triChord([ri(880*p,0), ri(660*p,0)], 'sawtooth',
+      rr(0.22, 0.15), 0.20,
+      [ri(330*p,0), ri(248*p,0)], 0.18, 0,
+      { attack: 0.001, hold: 0.005, decay: 0.18 });
+    playNoiseBurst(rr(0.06, 0.25), rr(0.10, 0.25), now, ri(1400, 0.25), rr(1.4, 0.3));
+    // Sub thump for the reflection's impact weight.
+    playNoiseBurst(rr(0.04, 0.25), rr(0.10, 0.25), now, ri(80, 0.3), rr(0.8, 0.25));
+  }
+  else if (type === 'thermal_shield_hum') {
+    // Pyro thermal shield: warm crackling roar bed. Looped on 0.90s
+    // cadence. Bandpass-filtered noise + soft sub-roar.
+    playNoiseBurst(rr(0.85, 0.10), rr(0.10, 0.20), now, ri(220, 0.20), rr(0.7, 0.20));
+    playNoiseBurst(rr(0.85, 0.10), rr(0.06, 0.25), now + 0.02, ri(1100, 0.25), rr(1.1, 0.25));
+    // Low warm tonal underneath so it reads as "contained fire" not just hiss.
+    triChord([ri(82, 0.05), ri(110, 0.05)], 'sine',
+      rr(0.06, 0.20), rr(0.85, 0.05), null, null, 0,
+      { attack: rr(0.20, 0.2), hold: rr(0.30, 0.2), decay: rr(0.40, 0.2) });
+  }
+  else if (type === 'thermal_burn') {
+    // Quick incendiary bite when the thermal shield burns a nearby
+    // enemy. Short crackling sting, no sub ; doesn't compete with the
+    // hum loop or the enemy's damage_shield reaction.
+    playNoiseBurst(rr(0.12, 0.25), rr(0.16, 0.25), now, ri(2400, 0.20), rr(2.4, 0.25));
+    triChord([ri(440, 0.10), ri(660, 0.10)], 'sawtooth',
+      rr(0.10, 0.20), 0.10,
+      [ri(220, 0.10), ri(330, 0.10)], 0.08, 0,
+      { attack: 0.002, hold: 0, decay: 0.08 });
+  }
+  else if (type === 'firewall_roar') {
+    // Sustained fire roar while a Pyro firewall is alive. Looped on
+    // 0.55s cadence so consecutive bursts overlap into a continuous
+    // jet-engine bed. Layered: low rumble + bandpass crackle + bright air.
+    playNoiseBurst(rr(0.55, 0.10), rr(0.18, 0.20), now, ri(160, 0.20), rr(0.6, 0.20));
+    playNoiseBurst(rr(0.50, 0.10), rr(0.08, 0.25), now + 0.02, ri(900, 0.25), rr(1.4, 0.25));
+    playNoiseBurst(rr(0.30, 0.20), rr(0.04, 0.30), now + 0.05, ri(2800, 0.20), rr(2.0, 0.30));
+  }
+  else if (type === 'tripwire_detonate') {
+    // Sharp electric snap when something trips a Vortex Trip Wire.
+    // Two-stage: first the trigger crack, then the detonation thud.
+    const p = rr(1, 0.10);
+    playNoiseBurst(rr(0.04, 0.25), rr(0.20, 0.25), now, ri(3200, 0.20), rr(3.0, 0.25));
+    triChord([ri(660*p,0), ri(990*p,0)], 'sawtooth',
+      rr(0.18, 0.15), 0.12,
+      [ri(165*p,0), ri(248*p,0)], 0.10, 0,
+      { attack: 0.001, hold: 0, decay: 0.10 });
+    // Detonation thud follows immediately.
+    playNoiseBurst(rr(0.18, 0.15), rr(0.30, 0.20), now + 0.04, ri(80, 0.30), rr(0.7, 0.20));
+    playNoiseBurst(rr(0.10, 0.20), rr(0.10, 0.25), now + 0.05, ri(450, 0.30), rr(0.9, 0.25));
+  }
+  else if (type === 'incendiary_ignite') {
+    // Pyro Incendiary Trap kicks off ; deep WHOOSH with a rising flame
+    // tail. Reads as "the air just caught fire" rather than a single bang.
+    playNoiseBurst(rr(0.30, 0.15), rr(0.25, 0.20), now, ri(180, 0.25), rr(0.6, 0.20));
+    playNoiseBurst(rr(0.40, 0.15), rr(0.15, 0.25), now + 0.04, ri(700, 0.25), rr(1.2, 0.25));
+    playNoiseBurst(rr(0.30, 0.20), rr(0.08, 0.30), now + 0.10, ri(2400, 0.20), rr(1.8, 0.30));
+    // Low whoosh tonal sweep from sub to mid for the ignition front.
+    triChord([55, 82], 'sawtooth', rr(0.10, 0.20), 0.40,
+      [180, 270], 0.35, 0,
+      { attack: rr(0.04, 0.3), hold: 0, decay: 0.35 });
+  }
+  else if (type === 'cluster_split') {
+    // Slayer Cluster Missile sub-munitions burst apart at impact ; metal-on-
+    // metal pop with a brief shrapnel scatter. Different signature from a
+    // regular explosion (which fires alongside) : tighter, brighter, shorter.
+    const p = rr(1, 0.10);
+    triChord([ri(330*p,0), ri(495*p,0), ri(660*p,0)], rWave(['triangle','sawtooth']),
+      rr(0.15, 0.15), 0.10,
+      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.08, 0,
+      { attack: 0.001, hold: 0, decay: 0.08 });
+    playNoiseBurst(rr(0.06, 0.25), rr(0.18, 0.20), now, ri(1800, 0.25), rr(1.8, 0.30));
+    // 2-3 micro shrapnel pops staggered after the main burst.
+    const shards = 2 + Math.floor(r() * 2);
+    for (let i = 0; i < shards; i++) {
+      playNoiseBurst(rr(0.03, 0.3), rr(0.06, 0.3), now + 0.03 + r() * 0.10, ri(2400, 0.30), rr(2.5, 0.30));
+    }
+  }
+  else if (type === 'tether_caught') {
+    // Slayer Tether Trap snares a ship ; rubber-band-twang slap then
+    // a low captured groan as the tether tightens.
+    const p = rr(1, 0.10);
+    triChord([ri(220*p,0), ri(330*p,0)], 'triangle',
+      rr(0.20, 0.15), 0.18,
+      [ri(110*p,0), ri(165*p,0)], 0.16, 0,
+      { attack: 0.002, hold: 0.01, decay: 0.15 });
+    playNoiseBurst(rr(0.06, 0.25), rr(0.12, 0.25), now, ri(900, 0.25), rr(1.2, 0.25));
+    // Low captured drone follows for ~0.4s.
+    triChord([ri(82*p,0), ri(110*p,0)], 'sawtooth',
+      rr(0.08, 0.20), 0.40,
+      [ri(70*p,0), ri(95*p,0)], 0.36, 0.10,
+      { attack: rr(0.04, 0.3), hold: 0, decay: 0.34 });
+  }
+  else if (type === 'siphon_drain') {
+    // Syphon Energy Siphon drain loop ; called on 0.18s cadence while
+    // siphoning. Quick shimmery upper-mid pluck so it reads as "stream
+    // of energy being pulled in" without competing with siphon_hit.
+    const p = rr(1, 0.06);
+    triChord([ri(880*p,0), ri(1320*p,0)], 'sine',
+      rr(0.04, 0.20), 0.16,
+      [ri(660*p,0), ri(990*p,0)], 0.14, 0,
+      { attack: 0.001, hold: 0, decay: 0.14 });
+  }
+  else if (type === 'siphon_hit') {
+    // The "drain landed on a target" punctuation ; descending blip + a
+    // brief reverse-cymbal swell so the player feels they pulled life
+    // out of someone.
+    const p = rr(1, 0.10);
+    triChord([ri(660*p,0), ri(880*p,0), ri(1100*p,0)], 'sine',
+      rr(0.18, 0.15), 0.20,
+      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.18, 0,
+      { attack: 0.002, hold: 0, decay: 0.18 });
+    playNoiseBurst(rr(0.10, 0.25), rr(0.08, 0.25), now, ri(2200, 0.25), rr(2.0, 0.25));
+  }
+  else if (type === 'rearm_reset') {
+    // Syphon Rearm zeroes all ability cooldowns ; sounds like a reactor
+    // hard-reset / capacitor dump. Three rapid rising beeps then a
+    // confident downbeat to signal "you're loaded back up."
+    const p = rr(1, 0.06);
+    triChord([ri(440*p,0)], 'square', rr(0.08, 0.20), 0.06, null, null, 0.00,
+      { attack: 0.001, hold: 0, decay: 0.05 });
+    triChord([ri(660*p,0)], 'square', rr(0.08, 0.20), 0.06, null, null, 0.06,
+      { attack: 0.001, hold: 0, decay: 0.05 });
+    triChord([ri(880*p,0)], 'square', rr(0.10, 0.20), 0.06, null, null, 0.12,
+      { attack: 0.001, hold: 0, decay: 0.05 });
+    // Resolve chord ; major triad up an octave from the third beep.
+    triChord([ri(440*p,0), ri(660*p,0), ri(880*p,0)], 'sine',
+      rr(0.18, 0.15), 0.30, null, null, 0.20,
+      { attack: 0.005, hold: 0.05, decay: 0.25 });
+    // Bright brassy scraper underneath the chord for confidence.
+    playNoiseBurst(rr(0.18, 0.20), rr(0.06, 0.25), now + 0.20, ri(1800, 0.25), rr(2.0, 0.25));
   }
 }
 
