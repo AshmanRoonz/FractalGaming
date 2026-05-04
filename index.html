@@ -2,8 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v11 (WebXR) ; LayeredFXMaterial + bake-in FX presets</title>
-<!-- v11 fork started 2026-05-03. Branched off v10.
+<title>Last Ship Sailing v11a (WebXR) ; live ambient clouds (internal pluming)</title>
+<!-- v11a fork started 2026-05-04. Branched off v11.
+     v11a makes the drifting ambient clouds around the map come alive.
+     Each cloud now has internal motion: a handful of mini-cluster smoke
+     puffs billow + orbit + scale inside the parent cloud's volume so the
+     cloud reads as a living weather system rather than a static blob.
+     Per-cloud parameter randomization (cluster count, orbit radii,
+     pulse phases) so no two clouds animate the same way.
+     v11 remains the stable baseline; do NOT edit it.
+     v11 fork started 2026-05-03. Branched off v10.
      v11 introduces the LayeredFXMaterial ; a generalized 3-layer composite
      shader (FBM / plasma / turbulence / voronoi / wave / ridges / caustic /
      stars patterns, 7 blend modes, per-layer hue/sat/alpha/scale/timeRate)
@@ -17499,6 +17507,34 @@ function updateDots(dt) {
         }
       }
     }
+    // (v11a) Internal pluming for ambient clouds: animate each puff's
+    // drift + pulse + shader time so the cloud reads as a living
+    // weather system. Each puff's offset position oscillates around
+    // its base via sine on three independent axes (non-rational
+    // ratios so the path never exactly repeats), and its scale pulses
+    // ±pulseAmp around its base. Multiplied by tNorm so the puffs
+    // grow in alongside the parent cloud's growth phase.
+    if (d._puffs && d._puffs.length) {
+      for (const p of d._puffs) {
+        const dt1 = _gameTime * p.driftSpeed + p.pulsePhase;
+        const dx = Math.sin(dt1)              * p.driftRadius;
+        const dy = Math.sin(dt1 * 0.73 + 1.3) * p.driftRadius * 0.6;
+        const dz = Math.cos(dt1 * 0.91 + 2.7) * p.driftRadius;
+        p.mesh.position.set(p.basePos.x + dx, p.basePos.y + dy, p.basePos.z + dz);
+        const pt = _gameTime * p.pulseSpeed + p.pulsePhase;
+        const pulse = 1 + Math.sin(pt) * p.pulseAmp;
+        p.mesh.scale.setScalar(p.baseScale * pulse * tNorm);
+        if (p.mesh.material && p.mesh.material.uniforms && p.mesh.material.uniforms.time) {
+          // Per-puff time offset so each puff samples a different point in
+          // the noise field and they don't all evolve identically.
+          p.mesh.material.uniforms.time.value = _gameTime + p.pulsePhase * 2;
+        }
+        if (p.mesh.material && p.mesh.material.uniforms && p.mesh.material.uniforms.uBaseAlpha) {
+          // Puffs fade with the parent cloud if it has fadeOut.
+          p.mesh.material.uniforms.uBaseAlpha.value = 0.55 * fadeCurve;
+        }
+      }
+    }
     // Hue cycle (greyscale shade pulse)
     if (d.hueCycleMaterial && d.hueCycleMaterial.uniforms && d.hueCycleMaterial.uniforms.uColor) {
       const ph = (d.huePhase + _gameTime * d.hueSpeed) % 1;
@@ -17797,6 +17833,76 @@ function updateAmbientClouds(dt) {
   });
   _dot._isAmbientCloud = true;          // marker for the cap counter
   _dot.attachMesh(_mesh);
+
+  // (v11a) Internal pluming: spawn 4-7 mini-cluster puffs that orbit +
+  // pulse inside the parent cloud's volume so the cloud reads as a
+  // living weather system rather than a static blob. Each puff has its
+  // own random orbit axis, orbit speed, pulse phase + pulse speed, and
+  // base offset within the cloud, so no two puffs (or two clouds)
+  // animate the same way. Attached to d.anchor directly (not via
+  // attachMesh) so the existing per-mesh shader-time tick in updateDots
+  // doesn't interfere with our custom animation. Cleanup is handled by
+  // the wrapped dispose() below ; the parent cloud's geometry is the
+  // shared _SMOKE_GEO so we don't dispose it.
+  const _puffCount = 4 + Math.floor(Math.random() * 4);
+  _dot._puffs = [];
+  for (let _pi = 0; _pi < _puffCount; _pi++) {
+    const _puffMat = _makeSmokeMaterial(0x080812, 0.55);
+    if (_puffMat.uniforms && _puffMat.uniforms.uOctaves) {
+      // Cheaper octaves on the smaller puffs ; the parent cloud carries
+      // the high-detail shader work, the puffs add silhouette motion.
+      _puffMat.uniforms.uOctaves.value = 1;
+    }
+    const _puffMesh = new THREE.Mesh(_SMOKE_GEO, _puffMat);
+    // Random base offset inside the cloud volume. Bias toward middle
+    // radius (0.25..0.55 of cloud size) and flatten Y so the puffs
+    // don't poke noticeably above/below the parent silhouette.
+    const _bp1 = Math.random() * Math.PI * 2;
+    const _bp2 = Math.acos(2 * Math.random() - 1);
+    const _br = _size * (0.20 + Math.random() * 0.40);
+    const _bx = _br * Math.sin(_bp2) * Math.cos(_bp1);
+    const _by = _br * Math.cos(_bp2) * 0.55;     // flatten vertical
+    const _bz = _br * Math.sin(_bp2) * Math.sin(_bp1);
+    const _baseScale = _size * (0.16 + Math.random() * 0.20);
+    _puffMesh.position.set(_bx, _by, _bz);
+    _puffMesh.scale.setScalar(_baseScale);
+    _puffMesh.renderOrder = 1;
+    _puffMesh.frustumCulled = true;
+    _dot.anchor.add(_puffMesh);
+    _dot._puffs.push({
+      mesh: _puffMesh,
+      basePos: new THREE.Vector3(_bx, _by, _bz),
+      baseScale: _baseScale,
+      // Drift radius: how far the puff wanders from its base position.
+      driftRadius: _size * (0.04 + Math.random() * 0.10),
+      // Drift speed: cycles per second. Slow ; cloud weather pace.
+      driftSpeed: 0.06 + Math.random() * 0.14,
+      // (v11a tune) Pulse scale modulation. Was ±20-35% over 0.4-1.2 Hz
+      // ; the big clouds visibly expanded/contracted from across the
+      // map, which read as breathing rather than weather. Now ±6-12%
+      // over 0.10-0.30 Hz so the throb is subliminal motion that just
+      // keeps the silhouette alive.
+      pulseSpeed: 0.10 + Math.random() * 0.20,
+      pulseAmp: 0.06 + Math.random() * 0.06,
+      pulsePhase: Math.random() * Math.PI * 2,
+    });
+  }
+  // Wrap dispose so puff materials get freed too. The parent cloud is
+  // indestructible (lifetime: Infinity) for ambient clouds, so this
+  // only fires on round-end / Main Menu via disposeAllDots ; matters
+  // for memory pressure across long sessions.
+  const _origDispose = _dot.dispose.bind(_dot);
+  _dot.dispose = function () {
+    if (this._puffs) {
+      for (const p of this._puffs) {
+        if (p.mesh && p.mesh.parent) p.mesh.parent.remove(p.mesh);
+        // Don't dispose geometry ; it's the shared _SMOKE_GEO.
+        if (p.mesh && p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
+      }
+      this._puffs = null;
+    }
+    _origDispose();
+  };
 }
 
 // Heat-trail sprite + material pool. Ships emit up to ~12 heat trails/sec each
