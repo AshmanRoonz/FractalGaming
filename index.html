@@ -3618,35 +3618,13 @@ class NetworkPlayer {
       const gBaseOffset = hLen * 0.40;
       if (!this._gunShieldMesh) {
         const geo = new THREE.SphereGeometry(gDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-        // (v11 Phase 5) Swap from hex-hologram to layered cyan-plasma
-        // material so the dome reads as living energy instead of a static
-        // hex grid. Blaster's gun shield is "plasma" by name + visual
-        // convention (cyan / electric field) rather than fire-themed.
-        // _makeFXMaterial returns a ShaderMaterial whose uTime is driven
-        // by _layeredFXTick from gameLoop ; nothing else to update.
-        const mat = (typeof _makeFXMaterial === 'function')
-          ? _makeFXMaterial('plasma_wall')
-          : (typeof _makeHexHologramMaterial === 'function')
-            ? _makeHexHologramMaterial(0xff8a55)
-            : new THREE.MeshBasicMaterial({
-                color: 0xff8a55, transparent: true, opacity: 0.55,
-                side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
-                depthWrite: false,
-              });
-        // (v11 fix) uPosScale = 1/radius so noise patterns map to the dome
-        // surface at lab-equivalent scale. Without this the 200+ unit dome
-        // reads as static instead of flowing plasma.
-        if (mat.uniforms && mat.uniforms.uPosScale) {
-          mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
-        }
-        // Hit-glow radius scaled to dome ; hit color is light cyan to
-        // match the cyan plasma_wall preset palette.
-        if (mat.uniforms && mat.uniforms.uHitRadius) {
-          mat.uniforms.uHitRadius.value = gDomeR * 0.35;
-        }
-        if (mat.uniforms && mat.uniforms.uHitColor) {
-          mat.uniforms.uHitColor.value.setHex(0xa0e0ff);
-        }
+        // (v11) Particle-wall style: hex hologram (front, with damage-
+        // crack feedback via uHp) + plasma_wall backing hemisphere
+        // behind it for the volumetric glow. Same recipe Tracker's
+        // particle wall uses. Peer-side stays at full opacity ; the
+        // local player path dials its opacity down so the pilot can
+        // see through their own dome.
+        const mat = _makeHexHologramMaterial(0x66ddff);
         this._gunShieldMesh = new THREE.Mesh(geo, mat);
         this._gunShieldMesh.renderOrder = 1;
         scene.add(this._gunShieldMesh);
@@ -3662,6 +3640,27 @@ class NetworkPlayer {
         this._gunShieldEdge.renderOrder = 1;
         scene.add(this._gunShieldEdge);
         if (!this._gunShieldUp) this._gunShieldUp = new THREE.Vector3(0, 1, 0);
+        // (v11) Plasma backing hemisphere ; sits inside the hex hologram
+        // and gives the dome the same flowing energy-glow look as the
+        // particle wall. Slightly smaller radius so the hex grid reads
+        // as the front surface from the outside.
+        if (typeof _makeFXMaterial === 'function') {
+          const backR = gDomeR * 0.96;
+          const backGeo = new THREE.SphereGeometry(backR, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+          const backMat = _makeFXMaterial('plasma_wall');
+          if (backMat.uniforms && backMat.uniforms.uPosScale) {
+            backMat.uniforms.uPosScale.value = 1.0 / Math.max(1, backR);
+          }
+          if (backMat.uniforms && backMat.uniforms.uHitRadius) {
+            backMat.uniforms.uHitRadius.value = backR * 0.35;
+          }
+          if (backMat.uniforms && backMat.uniforms.uHitColor) {
+            backMat.uniforms.uHitColor.value.setHex(0xa0e0ff);
+          }
+          this._gunShieldBack = new THREE.Mesh(backGeo, backMat);
+          this._gunShieldBack.renderOrder = 0;  // behind the hex hologram
+          scene.add(this._gunShieldBack);
+        }
       }
       const fwd = getForward();
       const shieldPos = this._shieldPos.copy(this.position).addScaledVector(fwd, gBaseOffset);
@@ -3671,6 +3670,11 @@ class NetworkPlayer {
       if (this._gunShieldMesh.material && this._gunShieldMesh.material.uniforms) {
         const u = this._gunShieldMesh.material.uniforms;
         if (u.time) u.time.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
+      }
+      if (this._gunShieldBack) {
+        this._gunShieldBack.position.copy(shieldPos);
+        this._gunShieldBack.quaternion.copy(this._gunShieldMesh.quaternion);
+        this._gunShieldBack.visible = true;
       }
       if (this._gunShieldEdge) {
         this._gunShieldEdge.position.copy(shieldPos);
@@ -3683,6 +3687,12 @@ class NetworkPlayer {
         if (this._gunShieldMesh.geometry) this._gunShieldMesh.geometry.dispose();
         if (this._gunShieldMesh.material) this._gunShieldMesh.material.dispose();
         this._gunShieldMesh = null;
+      }
+      if (this._gunShieldBack) {
+        if (this._gunShieldBack.parent) scene.remove(this._gunShieldBack);
+        if (this._gunShieldBack.geometry) this._gunShieldBack.geometry.dispose();
+        if (this._gunShieldBack.material) this._gunShieldBack.material.dispose();
+        this._gunShieldBack = null;
       }
       if (this._gunShieldEdge) {
         if (this._gunShieldEdge.parent) scene.remove(this._gunShieldEdge);
@@ -3781,7 +3791,21 @@ class NetworkPlayer {
         // Top hemisphere: phi 0..2π, theta 0..π/2. Apex at +Y in geometry-local
         // space ; quaternion rotates so +Y aligns with the peer's forward.
         const geo = new THREE.SphereGeometry(domeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-        const mat = _makeHexHologramMaterial(0x66aaff);
+        // (v11) Peer-side outside view uses cyan layered plasma_wall ;
+        // looks like a flowing energy field from the outside. The local
+        // pilot still sees the inside as hex hologram (unchanged).
+        const mat = (typeof _makeFXMaterial === 'function')
+          ? _makeFXMaterial('plasma_wall')
+          : _makeHexHologramMaterial(0x66aaff);
+        if (mat.uniforms && mat.uniforms.uPosScale) {
+          mat.uniforms.uPosScale.value = 1.0 / Math.max(1, domeR);
+        }
+        if (mat.uniforms && mat.uniforms.uHitRadius) {
+          mat.uniforms.uHitRadius.value = domeR * 0.35;
+        }
+        if (mat.uniforms && mat.uniforms.uHitColor) {
+          mat.uniforms.uHitColor.value.setHex(0xa0e0ff);
+        }
         this._vortexShieldMesh = new THREE.Mesh(geo, mat);
         this._vortexShieldMesh.renderOrder = 1;
         scene.add(this._vortexShieldMesh);
@@ -3880,6 +3904,7 @@ class NetworkPlayer {
     dispose(this._vortexShieldMesh);  this._vortexShieldMesh = null;
     dispose(this._vortexShieldRing);  this._vortexShieldRing = null;
     dispose(this._gunShieldMesh);     this._gunShieldMesh = null;
+    dispose(this._gunShieldBack);     this._gunShieldBack = null;
     dispose(this._gunShieldEdge);     this._gunShieldEdge = null;
     dispose(this._thermalShieldMesh); this._thermalShieldMesh = null;
     dispose(this._thermalShieldRing); this._thermalShieldRing = null;
@@ -20931,25 +20956,33 @@ function updateShieldVisuals(dt) {
     const gBaseOffset = gHull * 0.40;       // matches Pyro forward offset
     if (!player.gunShieldMesh) {
       const geo = new THREE.SphereGeometry(gDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-      // (v11) Layered cyan-plasma shield with hit-impact glow support.
-      // Blaster's gun shield is "plasma" by name and visual convention
-      // (electric/energy field), not fire ; reads as cyan even though
-      // Blaster's chassis accents are amber.
-      const mat = (typeof _makeFXMaterial === 'function')
-        ? _makeFXMaterial('plasma_wall')
-        : _makeHexHologramMaterial(0xff8a55);
-      if (mat.uniforms && mat.uniforms.uPosScale) {
-        mat.uniforms.uPosScale.value = 1.0 / Math.max(1, gDomeR);
-      }
-      if (mat.uniforms && mat.uniforms.uHitRadius) {
-        mat.uniforms.uHitRadius.value = gDomeR * 0.35;
-      }
-      if (mat.uniforms && mat.uniforms.uHitColor) {
-        mat.uniforms.uHitColor.value.setHex(0xa0e0ff);
-      }
+      // (v11) Particle-wall style: hex hologram (front surface, with
+      // damage-crack feedback via uHp) + a cyan plasma_wall backing
+      // hemisphere behind it for the volumetric glow. Same recipe the
+      // Tracker particle wall uses, just on a hemisphere instead of a
+      // box. The hex hologram color matches the particle wall (0x66ddff).
+      // Inside view: alpha is dialed down a touch via opacity so the
+      // pilot can see through their own dome.
+      const mat = _makeHexHologramMaterial(0x66ddff);
+      mat.transparent = true;
+      mat.opacity = 0.55;  // (v11) more transparent inside vs the peer-side default
       player.gunShieldMesh = new THREE.Mesh(geo, mat);
       player.gunShieldMesh.renderOrder = 1;
       scene.add(player.gunShieldMesh);
+      // Plasma backing hemisphere ; sits inside the hex hologram and
+      // gives the dome the same flowing energy-glow look the particle
+      // wall has from the outside.
+      if (typeof _makeFXMaterial === 'function') {
+        const backR = gDomeR * 0.96;
+        const backGeo = new THREE.SphereGeometry(backR, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+        const backMat = _makeFXMaterial('plasma_wall');
+        if (backMat.uniforms && backMat.uniforms.uPosScale) {
+          backMat.uniforms.uPosScale.value = 1.0 / Math.max(1, backR);
+        }
+        player.gunShieldBack = new THREE.Mesh(backGeo, backMat);
+        player.gunShieldBack.renderOrder = 0;  // behind the hex foreground
+        scene.add(player.gunShieldBack);
+      }
       // (v11) Equator ring in pale cyan to match the cyan plasma_wall
       // dome. Was warm amber back when the dome was amber-plasma ;
       // Blaster's shield is "plasma" by name + visual convention.
@@ -20984,6 +21017,13 @@ function updateShieldVisuals(dt) {
       if (u.uTime) u.uTime.value = game.time;   // layered FX path (also driven globally by _layeredFXTick)
       if (u.uHp)   u.uHp.value   = hpPct;       // hex hologram path only
     }
+    // (v11) Plasma backing hemisphere follows the dome ; same orientation
+    // and position so it reads as the particle-wall's inner glow layer.
+    if (player.gunShieldBack) {
+      player.gunShieldBack.position.copy(shieldPos);
+      player.gunShieldBack.quaternion.copy(player.gunShieldMesh.quaternion);
+      player.gunShieldBack.visible = true;
+    }
     // Continuous low-hum loop while the shield is up (kept).
     _tickSoundLoop(player, '_gunShieldHumTimer', dt, 0.95, 'shield_hum');
   } else {
@@ -20993,6 +21033,12 @@ function updateShieldVisuals(dt) {
       if (player.gunShieldMesh.geometry) player.gunShieldMesh.geometry.dispose();
       if (player.gunShieldMesh.material) player.gunShieldMesh.material.dispose();
       player.gunShieldMesh = null;
+    }
+    if (player.gunShieldBack) {
+      scene.remove(player.gunShieldBack);
+      if (player.gunShieldBack.geometry) player.gunShieldBack.geometry.dispose();
+      if (player.gunShieldBack.material) player.gunShieldBack.material.dispose();
+      player.gunShieldBack = null;
     }
     if (player.gunShieldEdge) {
       scene.remove(player.gunShieldEdge);
