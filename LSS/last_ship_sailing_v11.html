@@ -11231,6 +11231,53 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       starM.color.setHex(starM.userData._baseHex).multiplyScalar(next);
     }
   }
+  // (v11) Doomed-state red glow. While the ship is doomed (sub-15% HP,
+  // irreversible final phase) a soft red halo pulses around the hull so
+  // attackers can spot the executable target from any angle even past
+  // the running-light dim. Heartbeat-style pulse (1.5 Hz) mirrors the
+  // cockpit heartbeat below for visual consistency. Lazy-created on first
+  // doomed frame ; intensity lerps to 0 once the ship recovers / respawns
+  // so the halo fades out cleanly rather than popping off.
+  {
+    const wantsHalo = !!doomed;
+    if (wantsHalo && !mesh.userData.doomedHalo) {
+      const hullL = mesh.userData.hullLength || 80;
+      // Translucent red sphere larger than the hull so it haloes out past
+      // the silhouette. Additive blending makes the bloom pass smear it
+      // into a glow envelope at any distance.
+      const haloGeo = new THREE.SphereGeometry(hullL * 1.25, 18, 12);
+      const haloMat = new THREE.MeshBasicMaterial({
+        color: 0xff2020,
+        transparent: true,
+        opacity: 0.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.BackSide,  // render the inside so the halo reads as a rim from outside
+        toneMapped: false,
+      });
+      const halo = new THREE.Mesh(haloGeo, haloMat);
+      halo.userData.isDoomedHalo = true;
+      mesh.add(halo);
+      mesh.userData.doomedHalo = halo;
+    }
+    const halo = mesh.userData.doomedHalo;
+    if (halo) {
+      // Target alpha: full pulse while doomed, zero otherwise.
+      const targetAlpha = wantsHalo ? 1.0 : 0.0;
+      const prevAlpha = (halo.userData._haloA != null) ? halo.userData._haloA : 0.0;
+      const nextAlpha = prevAlpha + (targetAlpha - prevAlpha) * 0.10;
+      halo.userData._haloA = nextAlpha;
+      // Heartbeat pulse (1.5 Hz). Two-beat envelope so it reads as "this
+      // ship is on its last heartbeats" rather than a steady glow.
+      const phase = (time * 1.5) % 1;
+      const lub = Math.exp(-Math.pow((phase - 0.20) * 5.0, 2));
+      const dub = Math.exp(-Math.pow((phase - 0.45) * 5.5, 2)) * 0.55;
+      const beat = 0.45 + (lub + dub) * 0.55;
+      halo.material.opacity = nextAlpha * beat * 0.55;  // cap below 1 so the additive bloom doesn't blow out
+      halo.visible = nextAlpha > 0.005;
+    }
+  }
+
   // Cockpit heartbeat: slow 1 Hz emissive modulation (±10%) so idle ships read as alive.
   // Speeds up toward ~1.6 Hz at full throttle so the pulse tracks energy output.
   if (mesh.userData.cockpitMat) {
@@ -31360,6 +31407,29 @@ function gameLoop(timestamp) {
     // (v6.7) Damage-state particles for bots and network players. Healthy
     // ships emit nothing (early-return inside emitDamageState).
     emitDamageState(bot, dt);
+  }
+  // (v11) Animate network players too so they get the doomed-state red
+  // glow halo, the running-light bob, and the cockpit heartbeat. Bots
+  // already get this via the loop above ; the local player gets it from
+  // the third-person/death-cam path below. NetworkPlayers were the
+  // missing branch.
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) {
+      if (!np || !np.mesh || !np.alive) continue;
+      const npSpeed = np.velocity ? np.velocity.length() : 0;
+      const npMaxSpeed = np.chassis ? np.chassis.maxSpeed : 400;
+      animateShipMesh(np.mesh, npSpeed, npMaxSpeed, !!np.isFiring, dt, !!np.doomed);
+    }
+  }
+  // Re-enter the bot loop body for the legacy heat-trail path that still
+  // needs to run per-bot. (Refactored into its own loop because adding
+  // the network-player anim above between bot.update() and the heat-trail
+  // emit kept it physically separated, but the heat-trail must still run
+  // for every bot.)
+  for (const bot of game.entities) {
+    if (!bot.alive) continue;
+    const botSpeed = bot.velocity ? bot.velocity.length() : 0;
+    const botMaxSpeed = bot.chassis ? bot.chassis.maxSpeed : 400;
     // Heat-trail blur: throttled emitter, scales rate with speed so cruising
     // bots get a steady wake and parked bots get nothing.
     if (bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
