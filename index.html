@@ -8000,6 +8000,15 @@ function _xrUpdateInputSources() {
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
+  // (v11b VR diag) Log session lifecycle so we can correlate "no video"
+  // reports with the actual sequence of events. Lands in the Quest
+  // browser's chrome://inspect console.
+  try {
+    console.log('[v11b VR] sessionstart fired',
+      'enabled=' + renderer.xr.enabled,
+      'presenting=' + renderer.xr.isPresenting,
+      'gameState=' + (typeof game !== 'undefined' ? game.state : 'n/a'));
+  } catch (_) {}
   document.body.classList.add('vr-active');
   // Pending auto-resume already fired (user manually clicked Enter VR);
   // suppress the countdown so it doesn't double-fire on session end.
@@ -8045,6 +8054,7 @@ renderer.xr.addEventListener('sessionstart', () => {
 });
 
 renderer.xr.addEventListener('sessionend', () => {
+  try { console.log('[v11b VR] sessionend fired'); } catch (_) {}
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
@@ -9716,33 +9726,61 @@ let _xrHudUploadCounter = 0;
 let _xrAuxUploadCounter = 0;
 function renderFrame() {
   if (renderer.xr.isPresenting) {
-    _xrSyncDollyBeforeRender();
-    // Refresh the mirrored HUD texture, but throttled.
-    if (_xrHudTex) {
-      _xrHudUploadCounter++;
-      if (_xrHudUploadCounter >= _xrHudUpdateEveryN) {
-        _xrHudTex.needsUpdate = true;
-        _xrHudUploadCounter = 0;
+    // (v11b VR diag) One-time first-frame log so we can verify the XR
+    // render path is being reached at all when the user tests on Quest.
+    // Reports the renderer.xr state, scene/camera handles, and pixel
+    // ratio so a "no video in headset" report surfaces actionable info
+    // in the browser console. Auto-disables itself after first frame.
+    if (!renderFrame._xrLogged) {
+      renderFrame._xrLogged = true;
+      try {
+        console.log('[v11b VR] first XR frame:',
+          'enabled=' + renderer.xr.enabled,
+          'presenting=' + renderer.xr.isPresenting,
+          'sceneChildren=' + scene.children.length,
+          'camera.isCamera=' + !!(camera && camera.isCamera),
+          'pixelRatio=' + renderer.getPixelRatio(),
+          'baseLayer=' + (renderer.xr.getBaseLayer ? !!renderer.xr.getBaseLayer() : 'n/a'));
+      } catch (e) { console.warn('[v11b VR] log failed:', e); }
+    }
+    // (v11b VR) Wrap the per-frame XR work in try/catch so a thrown
+    // exception inside the HUD / menu mirror updates doesn't silently
+    // skip the render call. If anything throws, log it and still try
+    // to render the scene so the headset isn't black.
+    try {
+      _xrSyncDollyBeforeRender();
+      if (_xrHudTex) {
+        _xrHudUploadCounter++;
+        if (_xrHudUploadCounter >= _xrHudUpdateEveryN) {
+          _xrHudTex.needsUpdate = true;
+          _xrHudUploadCounter = 0;
+        }
+      }
+      if (xrAuxMesh && _xrAuxTex) {
+        _xrAuxUploadCounter++;
+        if (_xrAuxUploadCounter >= _xrHudUpdateEveryN) {
+          _xrDrawAuxHud();
+          _xrAuxTex.needsUpdate = true;
+          _xrAuxUploadCounter = 0;
+        }
+      }
+      _xrUpdateMenuMirror();
+      _vrUpdateAllHealthBars();
+    } catch (preErr) {
+      if (!renderFrame._xrPreErrLogged) {
+        renderFrame._xrPreErrLogged = true;
+        console.error('[v11b VR] XR pre-render hook threw:', preErr);
       }
     }
-    // Aux HUD: throttled draw + upload (ability pie + score + timer).
-    if (xrAuxMesh && _xrAuxTex) {
-      _xrAuxUploadCounter++;
-      if (_xrAuxUploadCounter >= _xrHudUpdateEveryN) {
-        _xrDrawAuxHud();
-        _xrAuxTex.needsUpdate = true;
-        _xrAuxUploadCounter = 0;
+    try {
+      renderer.setRenderTarget(null);
+      renderer.render(scene, camera);
+    } catch (renderErr) {
+      if (!renderFrame._xrRenderErrLogged) {
+        renderFrame._xrRenderErrLogged = true;
+        console.error('[v11b VR] renderer.render threw:', renderErr);
       }
     }
-    // Menu mirror: rasterize whichever overlay is open (settings / ship-
-    // select) and put it on the menu plane. Internally throttled to ~4Hz.
-    _xrUpdateMenuMirror();
-    // Refresh enemy health bars (sprites attached to each bot.mesh).
-    // Cheap when nothing changed (the per-bot canvas redraw is gated on
-    // health/shield deltas).
-    _vrUpdateAllHealthBars();
-    renderer.setRenderTarget(null);
-    renderer.render(scene, camera);
     return;
   }
   // v8VR: Cinematic post-pipeline (EffectComposer) takes priority over the
