@@ -2207,7 +2207,6 @@ const input = {
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
-  vrEnvironmentMode: 'auto',
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
   fovDeg: 120,
@@ -9171,35 +9170,6 @@ function getVRPerfTier() {
   if (mode === 'fast') return 2;
   if (mode === 'lite') return 1;
   return 0;
-}
-
-function getVREnvironmentMode() {
-  return (typeof input !== 'undefined' && input && input.vrEnvironmentMode) ? input.vrEnvironmentMode : 'auto';
-}
-
-function getVREnvironmentTier() {
-  if (!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting)) return 0;
-  const mode = getVREnvironmentMode();
-  if (mode === 'black') return 2;
-  if (mode === 'flat') return 1;
-  if (mode === 'normal') return 0;
-  const perfTier = getVRPerfTier();
-  if (perfTier >= 2) return 2;
-  if (perfTier >= 1) return 1;
-  return 0;
-}
-
-function isVRMapSmokeDisabled() {
-  const mode = getVREnvironmentMode();
-  if (mode === 'normal') return false;
-  if (mode === 'flat' || mode === 'black') return getVREnvironmentTier() >= 1;
-  return getVREnvironmentTier() >= 1 || getVRPerfTier() >= 1;
-}
-
-function applyVRWallPerformanceMode() {
-  if (!(typeof game !== 'undefined' && game && game.levelMaterial && game.levelMaterial.uniforms)) return;
-  const u = game.levelMaterial.uniforms.uVrEnvMode;
-  if (u) u.value = getVREnvironmentTier();
 }
 
 function getEffectiveVRRenderScale() {
@@ -16436,8 +16406,7 @@ class ClusterObstacle {
       // dead cluster's location). They live in the dot system, fully
       // independent of this cluster object.
       try {
-        if (!(typeof isVRMapSmokeDisabled === 'function' && isVRMapSmokeDisabled()) &&
-            typeof spawnDot === 'function' &&
+        if (typeof spawnDot === 'function' &&
             typeof _SMOKE_GEO !== 'undefined' &&
             typeof _makeSmokeMaterial === 'function') {
           // Cluster's signature phase: derived from the cluster's id-ish
@@ -18666,7 +18635,7 @@ function updateDots(dt) {
 let _ambientCloudTimer = 1.5;          // first ambient cloud appears ~1.5s in
 const _AMBIENT_CLOUD_MAX = 5;          // cap so we don't drown the scene
 function updateAmbientClouds(dt) {
-  if (typeof isVRMapSmokeDisabled === 'function' && isVRMapSmokeDisabled()) { clearAmbientCloudDots(); return; }
+  if (getVRPerfTier() >= 1) { clearAmbientCloudDots(); return; }
   if (typeof game === 'undefined' || !game) return;
   if (typeof scene === 'undefined' || !scene) return;
   if (typeof _SMOKE_GEO === 'undefined') return;
@@ -26875,7 +26844,7 @@ function buildSettingsPage() {
     <div class="settings-section">
       <h3>VR - Performance</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, simpler walls, no map smoke, tighter effect caps, and reduced particles.</label>
+        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
       </div>
       <div class="setting-row">
         <label>Performance Mode</label>
@@ -26884,15 +26853,6 @@ function buildSettingsPage() {
           <option value="lite" ${input.vrPerfMode === 'lite' ? 'selected' : ''}>Quest Lite (cuts ambient extras)</option>
           <option value="fast" ${input.vrPerfMode === 'fast' ? 'selected' : ''}>Quest Fast (smoke and particles heavily reduced)</option>
           <option value="max" ${input.vrPerfMode === 'max' ? 'selected' : ''}>Max FPS (minimal effects)</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <label>Environment Detail</label>
-        <select id="set-vr-env" style="flex:1;">
-          <option value="auto" ${input.vrEnvironmentMode === 'auto' || !input.vrEnvironmentMode ? 'selected' : ''}>Auto by Performance</option>
-          <option value="normal" ${input.vrEnvironmentMode === 'normal' ? 'selected' : ''}>Normal Walls + Map Smoke</option>
-          <option value="flat" ${input.vrEnvironmentMode === 'flat' ? 'selected' : ''}>Flat Walls, No Map Smoke</option>
-          <option value="black" ${input.vrEnvironmentMode === 'black' ? 'selected' : ''}>Black Walls, No Map Smoke</option>
         </select>
       </div>
       <div class="setting-row">
@@ -27680,7 +27640,6 @@ function buildSettingsPage() {
   if (vrPerfSel) vrPerfSel.addEventListener('change', () => {
     input.vrPerfMode = vrPerfSel.value || 'standard';
     if (input.vrPerfMode !== 'standard') clearAmbientCloudDots();
-    applyVRWallPerformanceMode();
     saveSettings();
     const vrScaleVal = overlay.querySelector('#val-vr-scale');
     if (vrScaleVal) vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2);
@@ -27689,16 +27648,6 @@ function buildSettingsPage() {
         renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
       }
     } catch (_) {}
-  });
-
-  const vrEnvSel = overlay.querySelector('#set-vr-env');
-  if (vrEnvSel) vrEnvSel.addEventListener('change', () => {
-    input.vrEnvironmentMode = vrEnvSel.value || 'auto';
-    if (input.vrEnvironmentMode === 'flat' || input.vrEnvironmentMode === 'black' || input.vrPerfMode !== 'standard') {
-      clearAmbientCloudDots();
-    }
-    applyVRWallPerformanceMode();
-    saveSettings();
   });
 
   // VR render scale slider.
@@ -28274,7 +28223,6 @@ function saveSettings() {
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
       vrPerfMode: input.vrPerfMode || 'standard',
-      vrEnvironmentMode: input.vrEnvironmentMode || 'auto',
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
@@ -28473,7 +28421,6 @@ function loadSettings() {
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
-    if (typeof data.vrEnvironmentMode === 'string') input.vrEnvironmentMode = data.vrEnvironmentMode;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
       if (typeof camera !== 'undefined' && camera) {
@@ -29747,10 +29694,6 @@ const _FOG_CENTRAL_MULT = 2.6;  // central rooms: hazy
 const _FOG_TUNNEL_MULT = 1.4;   // tunnels: in-between
 function updateRoomFog(dt) {
   if (!scene.fog || !player || !player.position) return;
-  if (typeof isVRMapSmokeDisabled === 'function' && isVRMapSmokeDisabled()) {
-    scene.fog.density += (0 - scene.fog.density) * Math.min(1, dt * 4.0);
-    return;
-  }
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
   // Find the room the player is inside (closest center within radius).
   let inRoom = null;
@@ -30559,7 +30502,6 @@ function buildRoomGraphLevel(level) {
       // (legacy), 0.0 = invisible. Bound to Settings -> Wall Pattern ->
       // Wall opacity slider; defaults preserve v7.1VR rendering.
       'uniform float uOpacity;',
-      'uniform int uVrEnvMode;',
       // ---- Wall constants (live-tweakable) ----
       'uniform vec3  K_DARK_BASE;',
       'uniform float K_ZONE_TINT;',
@@ -31355,20 +31297,6 @@ function buildRoomGraphLevel(level) {
       '  }',
       // Fraction along the nearest room's vertical extent: 0 at floor, 1 at ceiling.
       '  float heightFrac = clamp((vWorldPos.y - (nearC.y - nearR)) / (2.0 * nearR), 0.0, 1.0);',
-      '  if (uVrEnvMode == 1) {',
-      '    vec3 vdSimple = normalize(cameraPosition - vWorldPos);',
-      '    float diffSimple = 0.35 + 0.65 * max(dot(vNormal, vdSimple), 0.0);',
-      '    float rimSimple = pow(1.0 - abs(dot(vNormal, vdSimple)), 2.0);',
-      '    vec3 cSimple = (K_DARK_BASE + zoneColor * 0.28) * diffSimple + zoneColor * rimSimple * 0.10;',
-      '    cSimple = max(cSimple, zoneColor * 0.04);',
-      '    gl_FragColor = vec4(min(cSimple, vec3(0.8)), uOpacity);',
-      '    return;',
-      '  }',
-      '  if (uVrEnvMode >= 2) {',
-      '    vec3 cBlack = vec3(0.004, 0.006, 0.009) + zoneColor * 0.025;',
-      '    gl_FragColor = vec4(cBlack, min(uOpacity, 0.75));',
-      '    return;',
-      '  }',
       // (v7.1 lab-match) Set the room-local world position global so
       // patterns using lab-coordinate-range math (patternLayeredCube and
       // anything else hardcoded for vWorldPos magnitudes ~270) can read
@@ -31637,7 +31565,6 @@ function buildRoomGraphLevel(level) {
         // Honor any value already loaded from settings before the
         // material is built (e.g. saved-as-translucent across reloads).
         uOpacity:   { value: (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0 },
-        uVrEnvMode: { value: 0 },
         // ---- Wall constants ----
         K_DARK_BASE:         { value: new THREE.Vector3(wp.K_DARK_BASE_R, wp.K_DARK_BASE_G, wp.K_DARK_BASE_B) },
         K_ZONE_TINT:         { value: wp.K_ZONE_TINT },
@@ -31721,7 +31648,6 @@ function buildRoomGraphLevel(level) {
     });
 
     game.levelMaterial = sdfMat;
-    if (typeof applyVRWallPerformanceMode === 'function') applyVRWallPerformanceMode();
 
     // (v8VR 2026-05-01 fix) The wall material's per-layer uniforms are
     // initialized as Lab Composite (Panel Maze + Layered Cube + Wave
@@ -32791,9 +32717,7 @@ function gameLoop(timestamp) {
 
   // Update level shader time for vein animations
   if (game.levelMaterial) {
-    if (typeof applyVRWallPerformanceMode === 'function') applyVRWallPerformanceMode();
-    const _vrEnvTier = getVREnvironmentTier();
-    game.levelMaterial.uniforms.time.value = _vrEnvTier >= 1 ? 0 : game.time;
+    game.levelMaterial.uniforms.time.value = game.time;
 
     // (post-v6.9 patch, 2026-04-28) Drift each room's palette hue around the
     // color wheel so the whole map slowly rotates through the spectrum as the
@@ -32803,7 +32727,7 @@ function gameLoop(timestamp) {
     // together while staying differentiated. HUE_PERIOD = full cycle in
     // seconds; longer = more subtle drift.
     const HUE_PERIOD = 240; // 4 minutes per full rotation
-    if (_vrEnvTier < 1 && game.wallRoomBaseHues && game.levelMaterial.uniforms.roomColorsU) {
+    if (game.wallRoomBaseHues && game.levelMaterial.uniforms.roomColorsU) {
       const driftOffset = game.time / HUE_PERIOD;
       const boost = game.wallPaletteBoost || 1.0;
       const colors = game.levelMaterial.uniforms.roomColorsU.value;
@@ -32894,7 +32818,6 @@ function gameLoop(timestamp) {
   const _wallDt = game.deltaTime;
   const dt = (typeof updateHitstop === 'function') ? updateHitstop(_wallDt) : _wallDt;
   const _vrPerfTier = getVRPerfTier();
-  const _vrEnvTier = getVREnvironmentTier();
 
   // Update systems
   updatePlayerStasis(dt);
@@ -32914,10 +32837,9 @@ function gameLoop(timestamp) {
   if (typeof _v8updateRoundKillCam === 'function')   _v8updateRoundKillCam(_wallDt);
   updateRoundSystem(dt);
   updateStasisFields(dt);
-  if (_vrEnvTier < 1) updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  else if (scene.fog) scene.fog.density += (0 - scene.fog.density) * Math.min(1, dt * 4.0);
-  if (_vrPerfTier < 2 && _vrEnvTier < 1 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
-  if (!isVRMapSmokeDisabled()) updateAmbientClouds(dt); else clearAmbientCloudDots(); // (v8_2a) ambient cloud spawner
+  updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
+  if (_vrPerfTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
+  if (_vrPerfTier < 1) updateAmbientClouds(dt); else clearAmbientCloudDots(); // (v8_2a) ambient cloud spawner
   if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
