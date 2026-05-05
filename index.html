@@ -4584,31 +4584,31 @@ function spawnTripWireOrb(pos, owner, team, ownerPeerId, netId, broadcast, group
     sparkTimer: 0,
     pulsePhase: Math.random() * Math.PI * 2,
   });
-  // Inner core sphere â€” shader-driven energy bead with internal crackle and
-  // fresnel rim. Reads as a live electrical charge instead of a static
-  // colored marker. The shader's time uniform is bumped in the per-frame
-  // tripwire updater alongside the existing pulse logic.
-  const mineGeo = new THREE.SphereGeometry(7, 16, 12);
-  const mineMat = _makeOrbCoreMaterial(0x88eeff);
+  // (v11c) Inner core uses the purple fireball preset ; layered FX
+  // shader gives the orb billowing volumetric energy with displacement
+  // so it reads as a mini fireball, not a smooth bead. Slightly bigger
+  // (10 instead of 7) so the fireball silhouette has room to billow.
+  // _makeFXMaterial registers the material with _layeredFXTick so its
+  // uTime uniform animates automatically.
+  const mineGeo = new THREE.SphereGeometry(10, 24, 16);
+  const mineMat = (typeof _makeFXMaterial === 'function')
+                  ? _makeFXMaterial('fireball_purple')
+                  : _makeOrbCoreMaterial(0xaa55ff);
+  // Match the displacement scale to the orb radius so the layered FX
+  // patterns sample at the right frequency for this size.
+  if (mineMat && mineMat.uniforms && mineMat.uniforms.uPosScale) {
+    mineMat.uniforms.uPosScale.value = 1.0 / 10;
+  }
   const mineMesh = new THREE.Mesh(mineGeo, mineMat);
   mineMesh.position.copy(pos);
   mineMesh.renderOrder = 1;
+  mineMesh.frustumCulled = false;       // displacement can spike past sphere bounds
   scene.add(mineMesh);
-  // Glow halo around the core â€” kept as a simple additive sphere so the
-  // orb has visible mass at a distance. Inner core's shader does the
-  // close-range visual work; this halo just paints the bloom rim.
-  const glowGeo = new THREE.SphereGeometry(22, 12, 8);
-  const glowMat = new THREE.MeshBasicMaterial({
-    color: 0x44ccff, transparent: true, opacity: 0.35,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  const glowMesh = new THREE.Mesh(glowGeo, glowMat);
-  glowMesh.position.copy(pos);
-  glowMesh.renderOrder = 1;
-  scene.add(glowMesh);
+  // (v11c) Halo sphere removed ; the fireball core is the whole visual.
+  // Per-frame halo pulse code in updateAbilities is already gated by
+  // `if (eff.glow)` so leaving eff.glow undefined here is safe.
   const eff = game.worldEffects[game.worldEffects.length - 1];
   eff.mesh = mineMesh;
-  eff.glow = glowMesh;
   if (broadcast && net.active && net.sendEvent) {
     net.sendEvent({
       type: 'effect_spawn', kind: 'tripwire',
@@ -6660,6 +6660,25 @@ const EFFECT_PRESETS = {
       { pattern: 2, scale: 0.8,  timeRate: 1.6,  hue: 0.05,  alpha: 1.0,  blend: 2, sat: 0.95 },
       { pattern: 5, scale: 2.38, timeRate: 1.97, hue: 0.085, alpha: 0.73, blend: 2, sat: 0.99 },
       { pattern: 0, scale: 2.33, timeRate: 2.76, hue: 0.245, alpha: 0.44, blend: 6, sat: 0.89 },
+    ],
+  },
+  // (v11c) Purple fireball variant for Vortex Trip Wire orbs. Same
+  // recipe as `fireball` but tinted into the violet end of the spectrum
+  // and brightness pulled down a touch so the orbs don't blow out at
+  // close range. Per-layer hue offsets are also shifted so the warm
+  // accents become magenta accents.
+  fireball_purple: {
+    name: 'Fireball (Purple)',
+    baseColor: '#aa44ff',
+    fresnel: 0.3,
+    brightness: 2.4,
+    displaceAmount: 0.32,
+    displaceFreq:   1.8,
+    softEdge:       0.55,
+    layers: [
+      { pattern: 2, scale: 0.8,  timeRate: 1.6,  hue: 0.78,  alpha: 1.0,  blend: 2, sat: 0.95 },
+      { pattern: 5, scale: 2.38, timeRate: 1.97, hue: 0.82,  alpha: 0.73, blend: 2, sat: 0.99 },
+      { pattern: 0, scale: 2.33, timeRate: 2.76, hue: 0.65,  alpha: 0.44, blend: 6, sat: 0.89 },
     ],
   },
   // Drifting volumetric cloud with turbulence-mix front + soft FBM
@@ -21245,19 +21264,59 @@ function executeAbility(slot, ability) {
       // their cooldowns rack back up.
       try { playSound('rearm_reset'); } catch (_) {}
     }
-    // VORTEX: Trip Wire (deploy 3 proximity orbs in a wide spread for area coverage)
+    // VORTEX: Trip Wire (deploy 5 proximity orbs in a + pattern: center
+    // plus four arms (right, left, up, down) for area coverage).
+    // (v11c) Each orb's placement is a 2-segment bend: cast a ray from
+    // the player toward the target offset; if a wall is in the way, the
+    // ray bends off the wall normal and travels the remaining distance
+    // back into the room. Orbs always end up inside the map regardless
+    // of where the player aimed when triggering.
     else if (ability.name === 'Trip Wire') {
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-      const offsets = [-180, 0, 180]; // lateral spread
-      // Single shared groupId so the three siblings can arc lightning to each
-      // other in the per-frame tick (see updateWorldEffects -> tripwire).
+      const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+      // [rightOffset, upOffset] per orb. Center + 4 arms = +.
+      const armLen = 180;
+      const offsets = [
+        [0, 0],            // center
+        [ armLen, 0],      // right arm
+        [-armLen, 0],      // left arm
+        [0,  armLen],      // top arm
+        [0, -armLen],      // bottom arm
+      ];
       const tripGroupId = ++net.effectIdCounter;
-      for (let ti = 0; ti < 3; ti++) {
-        const minePos = player.position.clone()
-          .add(forward.clone().multiplyScalar(250))
-          .add(right.clone().multiplyScalar(offsets[ti]));
-        // (v6.7) Single helper handles local spawn + mesh sync; receivers
-        // call it with broadcast=false to avoid re-broadcast storms.
+      for (let ti = 0; ti < offsets.length; ti++) {
+        const [rOff, uOff] = offsets[ti];
+        // Target offset from the player.
+        const target = forward.clone().multiplyScalar(250)
+                         .add(right.clone().multiplyScalar(rOff))
+                         .add(up.clone().multiplyScalar(uOff));
+        const distTo = target.length();
+        const dirTo  = target.clone().normalize();
+        let minePos;
+        // Raycast from player toward target. If a wall is hit before we
+        // get there, bend the remainder along the reflected direction.
+        const wallDist = (typeof raycastLevel === 'function')
+                         ? raycastLevel(player.position, dirTo, distTo)
+                         : Infinity;
+        if (wallDist < distTo) {
+          const hitPoint = player.position.clone().addScaledVector(dirTo, Math.max(0, wallDist - 6));
+          const remaining = distTo - wallDist;
+          const normal = (typeof getWallNormal === 'function')
+                         ? getWallNormal(hitPoint)
+                         : dirTo.clone().multiplyScalar(-1);
+          // Reflect dirTo off the wall normal.
+          const vn = dirTo.dot(normal);
+          const reflected = dirTo.clone().addScaledVector(normal, -2 * vn).normalize();
+          // Travel the remaining distance along the reflected direction,
+          // but cap it so we don't punch through a second wall on the way.
+          const secondDist = (typeof raycastLevel === 'function')
+                             ? Math.min(remaining, raycastLevel(hitPoint, reflected, remaining + 4) - 6)
+                             : remaining;
+          const useDist = Math.max(0, secondDist);
+          minePos = hitPoint.clone().addScaledVector(reflected, useDist);
+        } else {
+          minePos = player.position.clone().add(target);
+        }
         spawnTripWireOrb(minePos, 'player', player.team, net.myPeerId, ++net.effectIdCounter, true, tripGroupId);
       }
     }
@@ -22894,11 +22953,14 @@ function updateAbilities(dt) {
       const corePulse = 1 + Math.sin(phase) * 0.18 + (Math.random() - 0.5) * 0.10;
       if (eff.mesh) {
         eff.mesh.scale.setScalar(corePulse);
-        // Drive shader: time advances normally, uPulse spikes a bit when
-        // armed so the crackle reads as charged.
+        // Drive shader: time + uPulse on the legacy orb-core material.
+        // (v11c) The new fireball_purple layered-FX material has no `time`
+        // or `uPulse` uniforms (uTime is driven globally by _layeredFXTick),
+        // so guard each write before touching .value.
         if (eff.mesh.material && eff.mesh.material.uniforms) {
-          eff.mesh.material.uniforms.time.value = game.time;
-          eff.mesh.material.uniforms.uPulse.value = eff.armed ? 1.5 : 1.0;
+          const _u = eff.mesh.material.uniforms;
+          if (_u.time)   _u.time.value   = game.time;
+          if (_u.uPulse) _u.uPulse.value = eff.armed ? 1.5 : 1.0;
         }
       }
       if (eff.glow) {
