@@ -28533,11 +28533,17 @@ const MULTI_LAYER_PRESETS = {
   //   fg  lab 6  (Panel Maze)     -> game 17
   //   fg2 lab 6  (Panel Maze)     -> game 17
   // Two stacked Panel Maze layers at different scales over Cyber
-  // Datamosh background reads as cascading glyph rain. Earlier baking
-  // assumed the export was already in game-space and routed fg/fg2
-  // through Plasma FBM (game 6), which made the walls render dark
-  // and noisy instead of the structured maze look in the lab preview.
+  // Datamosh background reads as cascading glyph rain.
+  // (v11b) The lab export's "color-b": "#1eff00" doesn't map to any
+  // wall-shader uniform ; the game's wall colors come from the loaded
+  // map's per-room palette + a global hue drift. To match the lab
+  // preview, this preset carries a `paletteOverride` (read by the
+  // per-frame palette tick below) that locks all 8 room slots to the
+  // bright green and disables the hue drift while it's active. Without
+  // that, the walls inherited the map's blue/magenta scheme and read
+  // as navy.
   25: {
+    paletteOverride: 0x1eff00,                        // lock walls to Matrix green
     bgPatternId: 15,                                  // Cyber Datamosh
     bgTime: 0.1,
     u_iters_bg: 1, u_scale_bg: 0.0019, u_invBase_bg: 2.0,
@@ -32571,6 +32577,22 @@ function gameLoop(timestamp) {
       const driftOffset = game.time / HUE_PERIOD;
       const boost = game.wallPaletteBoost || 1.0;
       const colors = game.levelMaterial.uniforms.roomColorsU.value;
+      // (v11b) Some multi-layer presets (Matrix) want a fixed wall color
+      // and to opt out of the hue drift. paletteOverride locks all 8
+      // room slots to the same hex and skips the drift loop ; the lab
+      // preview for these presets uses a single tint, so the in-game
+      // walls should match.
+      const _activePreset = (typeof MULTI_LAYER_PRESETS !== 'undefined')
+        ? MULTI_LAYER_PRESETS[game.wallPattern | 0] : null;
+      const _paletteOverride = (_activePreset && typeof _activePreset.paletteOverride === 'number')
+        ? _activePreset.paletteOverride : null;
+      if (_paletteOverride !== null) {
+        // Lock all 8 room slots to the override hex. The hue-drift loop
+        // below is skipped while this preset is active.
+        for (let i = 0; i < colors.length; i++) {
+          colors[i].setHex(_paletteOverride);
+        }
+      } else {
       // Mutating each THREE.Color is fine because Three.js samples the
       // uniform array each draw; no needsUpdate flag is required for
       // value-mutation on uniform arrays.
