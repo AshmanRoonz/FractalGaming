@@ -2204,6 +2204,9 @@ const input = {
   // next time the user enters VR. 0.5 is a reasonable battery-saver target
   // on Quest 2 / Quest 3; bump to 1.0+ if your GPU has headroom.
   vrRenderScale: 0.7,
+  // Additional VR-only load shedding. Standard preserves the normal render;
+  // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
+  vrPerfMode: 'standard',
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
   fovDeg: 120,
@@ -8118,7 +8121,7 @@ renderer.xr.addEventListener('sessionend', () => {
       // GPU cost and in stereo it tanks framerate at 1.0+. The user-tunable
       // input.vrRenderScale (Settings > VR > Render Scale) overrides the
       // default 0.7.
-      const _vrScale = (input && typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7;
+      const _vrScale = getEffectiveVRRenderScale();
       try { renderer.xr.setFramebufferScaleFactor(_vrScale); } catch (_) {}
       renderer.xr.enabled = true;
       // setSession is async (it await s requestReferenceSpace internally).
@@ -9156,6 +9159,47 @@ window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
 
 const postFX = { enabled: true };
 
+function getVRPerfMode() {
+  return (typeof input !== 'undefined' && input && input.vrPerfMode) ? input.vrPerfMode : 'standard';
+}
+
+function getVRPerfTier() {
+  if (!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting)) return 0;
+  const mode = getVRPerfMode();
+  if (mode === 'max') return 3;
+  if (mode === 'fast') return 2;
+  if (mode === 'lite') return 1;
+  return 0;
+}
+
+function getEffectiveVRRenderScale() {
+  const base = (typeof input !== 'undefined' && input && typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7;
+  const mode = getVRPerfMode();
+  if (mode === 'max') return Math.min(base, 0.42);
+  if (mode === 'fast') return Math.min(base, 0.50);
+  if (mode === 'lite') return Math.min(base, 0.60);
+  return base;
+}
+
+function getEffectBudget() {
+  const tier = getVRPerfTier();
+  if (tier >= 3) return 80;
+  if (tier >= 2) return 140;
+  if (tier >= 1) return 220;
+  return MAX_EFFECTS;
+}
+
+function clearAmbientCloudDots() {
+  if (!game || !game.dots || !game.dots.length) return;
+  for (let i = game.dots.length - 1; i >= 0; i--) {
+    const d = game.dots[i];
+    if (d && d._isAmbientCloud) {
+      try { d.dispose(); } catch (_) {}
+      game.dots.splice(i, 1);
+    }
+  }
+}
+
 // (v6.9) Graphics quality preset. Read by various render paths to lower
 // detail (smoke octaves, smoke cap, particle rates, bloom). Default 'high'
 // matches pre-v6.9 behavior ; 'medium' / 'low' shed cost progressively.
@@ -9164,10 +9208,29 @@ const QUALITY = {
   level: 'high',
   // Multipliers applied where they're read each frame.
   bloomEnabled() { return this.level === 'high'; },
-  smokeOctaves() { return this.level === 'high' ? 3 : (this.level === 'medium' ? 2 : 1); },
-  smokeMax()      { return this.level === 'high' ? 12 : (this.level === 'medium' ? 8 : 5); },
-  particleRate()  { return this.level === 'high' ? 1.0 : (this.level === 'medium' ? 0.7 : 0.4); },
-  heatTrails()    { return this.level === 'high' ? 1.0 : (this.level === 'medium' ? 0.6 : 0.0); },
+  smokeOctaves() {
+    const tier = getVRPerfTier();
+    if (tier >= 1) return 1;
+    return this.level === 'high' ? 3 : (this.level === 'medium' ? 2 : 1);
+  },
+  smokeMax() {
+    const tier = getVRPerfTier();
+    if (tier >= 3) return 0;
+    if (tier >= 2) return 2;
+    if (tier >= 1) return 3;
+    return this.level === 'high' ? 12 : (this.level === 'medium' ? 8 : 5);
+  },
+  particleRate() {
+    const tier = getVRPerfTier();
+    if (tier >= 3) return 0.08;
+    if (tier >= 2) return 0.16;
+    if (tier >= 1) return 0.25;
+    return this.level === 'high' ? 1.0 : (this.level === 'medium' ? 0.7 : 0.4);
+  },
+  heatTrails() {
+    if (getVRPerfTier() >= 1) return 0.0;
+    return this.level === 'high' ? 1.0 : (this.level === 'medium' ? 0.6 : 0.0);
+  },
 };
 function applyQualityPreset(level) {
   QUALITY.level = (level === 'low' || level === 'medium' || level === 'high') ? level : 'high';
@@ -9730,6 +9793,13 @@ function renderPostFX() {
 const _xrHudUpdateEveryN = 2;
 let _xrHudUploadCounter = 0;
 let _xrAuxUploadCounter = 0;
+function _xrHudUpdateCadence() {
+  const tier = getVRPerfTier();
+  if (tier >= 3) return 6;
+  if (tier >= 2) return 4;
+  if (tier >= 1) return 3;
+  return _xrHudUpdateEveryN;
+}
 function renderFrame() {
   if (renderer.xr.isPresenting) {
     // (v11b VR diag) One-time first-frame log so we can verify the XR
@@ -9757,14 +9827,14 @@ function renderFrame() {
       _xrSyncDollyBeforeRender();
       if (_xrHudTex) {
         _xrHudUploadCounter++;
-        if (_xrHudUploadCounter >= _xrHudUpdateEveryN) {
+        if (_xrHudUploadCounter >= _xrHudUpdateCadence()) {
           _xrHudTex.needsUpdate = true;
           _xrHudUploadCounter = 0;
         }
       }
       if (xrAuxMesh && _xrAuxTex) {
         _xrAuxUploadCounter++;
-        if (_xrAuxUploadCounter >= _xrHudUpdateEveryN) {
+        if (_xrAuxUploadCounter >= _xrHudUpdateCadence()) {
           _xrDrawAuxHud();
           _xrAuxTex.needsUpdate = true;
           _xrAuxUploadCounter = 0;
@@ -13764,6 +13834,13 @@ const dynamicLights = {
 })();
 
 function spawnDynamicLight(pos, color, intensity, range, duration) {
+  const tier = getVRPerfTier();
+  if (tier >= 3) return;
+  if (tier >= 2 && (intensity || 0) < 3.0) return;
+  if (tier >= 1) {
+    intensity *= 0.6;
+    range *= 0.75;
+  }
   let light;
   if (dynamicLights.pool.length > 0) {
     light = dynamicLights.pool.pop();
@@ -14868,7 +14945,7 @@ function spawnExplosion(pos, size) {
   // 3-7 randomly-offset secondary bursts mixing fireball and cloud presets,
   // each at a random size and lifetime. Reads as a chaotic mix of fire +
   // smoke instead of a single sphere ; size + bloom scale with damage.
-  if (typeof spawnFXBurst === 'function' && size >= 8) {
+  if (typeof spawnFXBurst === 'function' && size >= 8 && getVRPerfTier() < 2) {
     // Primary hot core ; biggest, fastest, fireball preset, centered.
     const coreR = Math.max(40, size * 1.4);
     // (v11b) Big bursts (death blooms, Salvo Core hits, large clusters)
@@ -15039,7 +15116,7 @@ function spawnExplosion(pos, size) {
   // 50+ overlapping plumes; oldest is culled when over cap. Lifetime cut
   // from 1.4s to 1.0s â€” the eye doesn't notice a tighter fade and the
   // typical alive count drops by ~30%.
-  if (size > 12) {
+  if (size > 12 && getVRPerfTier() < 3) {
     // (v6.9) Cap is dynamic now: graphics quality preset trims it for
     // medium / low so a busy fight doesn't pile up FBM cost. High = 12,
     // Medium = 8, Low = 5. Octaves on the per-spawn material below are
@@ -17404,6 +17481,14 @@ function cullOldestParticle() {
 }
 
 function updateParticles(dt) {
+  if (getVRPerfTier() >= 3) {
+    for (let i = game.particles.length - 1; i >= 0; i--) {
+      const p = game.particles[i];
+      if (p && p.poolSlot) _releaseParticleSlot(p.poolSlot);
+    }
+    game.particles.length = 0;
+    return;
+  }
   // Cap particle count: cull oldest when over budget
   while (game.particles.length > MAX_PARTICLES) cullOldestParticle();
 
@@ -17529,7 +17614,7 @@ function updateEffects(dt) {
   // the array as the cull target, but move the newest into its slot so
   // the pop is constant-time. Strict insertion order isn't preserved
   // but visuals don't care which old effect gets culled.
-  while (game.effects.length > MAX_EFFECTS) {
+  while (game.effects.length > getEffectBudget()) {
     const e = game.effects[0];
     const last = game.effects.length - 1;
     if (last > 0) game.effects[0] = game.effects[last];
@@ -18550,6 +18635,7 @@ function updateDots(dt) {
 let _ambientCloudTimer = 1.5;          // first ambient cloud appears ~1.5s in
 const _AMBIENT_CLOUD_MAX = 5;          // cap so we don't drown the scene
 function updateAmbientClouds(dt) {
+  if (getVRPerfTier() >= 1) { clearAmbientCloudDots(); return; }
   if (typeof game === 'undefined' || !game) return;
   if (typeof scene === 'undefined' || !scene) return;
   if (typeof _SMOKE_GEO === 'undefined') return;
@@ -18726,6 +18812,7 @@ function _releaseHeatTrail(sprite) {
 // just aft of the hull, oriented along the velocity direction. Intensity
 // scales with speed/maxSpeed so parked ships emit nothing.
 function spawnHeatTrail(pos, velocity, maxSpeed, hullRadius) {
+  if (getVRPerfTier() >= 1) return;
   const speed = velocity.length();
   if (speed < 30) return;
   const t = Math.min(1, speed / Math.max(1, maxSpeed));
@@ -26757,12 +26844,21 @@ function buildSettingsPage() {
     <div class="settings-section">
       <h3>VR - Performance</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Render Scale controls the headset framebuffer resolution. Lower = better battery life and framerate at the cost of sharpness. 0.5 is a good battery-saver default on Quest; takes effect the next time you enter VR. Also drop the Quality preset below to "Low" for additional savings (skips bloom, simpler smoke, fewer particles).</label>
+        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
+      </div>
+      <div class="setting-row">
+        <label>Performance Mode</label>
+        <select id="set-vr-perf" style="flex:1;">
+          <option value="standard" ${input.vrPerfMode === 'standard' || !input.vrPerfMode ? 'selected' : ''}>Standard (normal VR visuals)</option>
+          <option value="lite" ${input.vrPerfMode === 'lite' ? 'selected' : ''}>Quest Lite (cuts ambient extras)</option>
+          <option value="fast" ${input.vrPerfMode === 'fast' ? 'selected' : ''}>Quest Fast (smoke and particles heavily reduced)</option>
+          <option value="max" ${input.vrPerfMode === 'max' ? 'selected' : ''}>Max FPS (minimal effects)</option>
+        </select>
       </div>
       <div class="setting-row">
         <label>VR Render Scale</label>
-        <input type="range" id="set-vr-scale" min="0.4" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
-        <div class="value-display" id="val-vr-scale">${((typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7).toFixed(2)}</div>
+        <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
+        <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
       </div>
     </div>
 
@@ -27539,20 +27635,34 @@ function buildSettingsPage() {
     input.vrHeadAim.invertPitch = !!vrhaInv.checked; saveSettings();
   });
 
+  // VR performance mode.
+  const vrPerfSel = overlay.querySelector('#set-vr-perf');
+  if (vrPerfSel) vrPerfSel.addEventListener('change', () => {
+    input.vrPerfMode = vrPerfSel.value || 'standard';
+    if (input.vrPerfMode !== 'standard') clearAmbientCloudDots();
+    saveSettings();
+    const vrScaleVal = overlay.querySelector('#val-vr-scale');
+    if (vrScaleVal) vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2);
+    try {
+      if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+        renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
+      }
+    } catch (_) {}
+  });
+
   // VR render scale slider.
   const vrScaleSel = overlay.querySelector('#set-vr-scale');
   const vrScaleVal = overlay.querySelector('#val-vr-scale');
   if (vrScaleSel) vrScaleSel.addEventListener('input', () => {
     const v = parseFloat(vrScaleSel.value);
     input.vrRenderScale = v;
-    if (vrScaleVal) vrScaleVal.textContent = v.toFixed(2);
+    const effective = getEffectiveVRRenderScale();
+    if (vrScaleVal) vrScaleVal.textContent = effective.toFixed(2);
     saveSettings();
-    // If a session is already presenting, apply immediately. r128 logs a
-    // warning when changing scale mid-session but the change still takes
-    // effect on the next swapchain creation.
+    // If a session is already presenting, apply the effective capped scale.
     try {
       if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
-        renderer.xr.setFramebufferScaleFactor(v);
+        renderer.xr.setFramebufferScaleFactor(effective);
       }
     } catch (_) {}
   });
@@ -28112,6 +28222,7 @@ function saveSettings() {
       xrSynth:    input.xrSynth,
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
+      vrPerfMode: input.vrPerfMode || 'standard',
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
@@ -28309,6 +28420,7 @@ function loadSettings() {
     if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
+    if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
       if (typeof camera !== 'undefined' && camera) {
@@ -32705,6 +32817,7 @@ function gameLoop(timestamp) {
   // so v7.1VR behavior is preserved.
   const _wallDt = game.deltaTime;
   const dt = (typeof updateHitstop === 'function') ? updateHitstop(_wallDt) : _wallDt;
+  const _vrPerfTier = getVRPerfTier();
 
   // Update systems
   updatePlayerStasis(dt);
@@ -32725,9 +32838,9 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  if (typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
-  updateAmbientClouds(dt); // (v8_2a) ambient cloud spawner (uses Dot system below)
-  updateDots(dt);          // (v8_2a) generic Dot system: physics + collisions + lightning + hue
+  if (_vrPerfTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
+  if (_vrPerfTier < 1) updateAmbientClouds(dt); else clearAmbientCloudDots(); // (v8_2a) ambient cloud spawner
+  if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
@@ -32766,7 +32879,7 @@ function gameLoop(timestamp) {
     animateShipMesh(bot.mesh, botSpeed, botMaxSpeed, bot.isFiring, dt, !!bot.doomed);
     // (v6.7) Damage-state particles for bots and network players. Healthy
     // ships emit nothing (early-return inside emitDamageState).
-    emitDamageState(bot, dt);
+    if (_vrPerfTier < 2) emitDamageState(bot, dt);
   }
   // (v11) Animate network players too so they get the doomed-state red
   // glow halo, the running-light bob, and the cockpit heartbeat. Bots
@@ -32792,7 +32905,7 @@ function gameLoop(timestamp) {
     const botMaxSpeed = bot.chassis ? bot.chassis.maxSpeed : 400;
     // Heat-trail blur: throttled emitter, scales rate with speed so cruising
     // bots get a steady wake and parked bots get nothing.
-    if (bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
+    if (_vrPerfTier < 1 && bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
       if (bot._heatTrailTimer == null) bot._heatTrailTimer = Math.random() * 0.05;
       bot._heatTrailTimer -= dt;
       if (bot._heatTrailTimer <= 0) {
@@ -32813,7 +32926,7 @@ function gameLoop(timestamp) {
     // (v6.7) Damage-state particles on the local player too (visible from
     // third-person / death cam, and other peers see them on our broadcast
     // position via their NetworkPlayer iteration).
-    emitDamageState(player, dt);
+    if (_vrPerfTier < 2) emitDamageState(player, dt);
     // (v6.7) Spawn-protection bubble on the local player too (visible in
     // death cam / third-person). Same fade curve as the broadcast version.
     if (player.mesh && player.mesh.userData && player.mesh.userData.shieldMesh && player.spawnProtection > 0) {
@@ -32828,7 +32941,7 @@ function gameLoop(timestamp) {
       }
     }
     // Heat-trail blur on the player too (visible in third-person / death cam)
-    if (!player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
+    if (_vrPerfTier < 1 && !player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
       if (player._heatTrailTimer == null) player._heatTrailTimer = 0;
       player._heatTrailTimer -= dt;
       if (player._heatTrailTimer <= 0) {
@@ -32853,8 +32966,8 @@ function gameLoop(timestamp) {
   updateScreenShake(dt);
   updateDamageIndicators(dt);
   updateHUD();
-  updateMinimap();
-  updateEnemyHealthBars();
+  if (_vrPerfTier < 2) updateMinimap();
+  if (_vrPerfTier < 1) updateEnemyHealthBars();
 
   // Apply screen shake offset to camera (skip during death cam)
   if (!deathCam.active) {
