@@ -1223,21 +1223,23 @@ body.vr-active .hit-marker {
 }
 
 /* (v11b) Slayer Sword Block screen-edge indicator. Inset radial-gradient
-   vignette + jagged dark mask layered around the viewport edges. Only
-   shown while the ability is held. The layered conic-gradient masks
-   build the "thin black lightning crawling around the rim" look without
-   needing animated SVGs ; pure CSS so it costs nothing. */
+   vignette + jagged glow mask layered around the viewport edges. Only
+   shown while the ability is held. Mask pushes the effect to the outer
+   ~28% of the screen so the center stays clear (block-mode is a
+   defensive stance, the pilot still needs to see). Tinted bright green
+   to match the dome's glow, so the inside-the-cockpit signal reads as
+   "energy field engaged" rather than "ominous suppression". */
 #ov-sword-block {
   position: fixed; inset: 0; z-index: 60; pointer-events: none;
   opacity: 0; transition: opacity 0.18s ease-out;
   background:
-    radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.55) 100%),
+    radial-gradient(ellipse at center, transparent 75%, rgba(40,200,80,0.45) 100%),
     repeating-conic-gradient(from 0deg at 50% 50%,
-      rgba(0,0,0,0) 0deg, rgba(0,0,0,0) 6deg,
-      rgba(0,0,0,0.30) 7deg, rgba(0,0,0,0) 8deg,
-      rgba(0,0,0,0) 14deg, rgba(0,0,0,0.20) 15deg, rgba(0,0,0,0) 16deg);
-  mask-image: radial-gradient(ellipse at center, transparent 50%, black 90%);
-  -webkit-mask-image: radial-gradient(ellipse at center, transparent 50%, black 90%);
+      rgba(40,200,80,0) 0deg, rgba(40,200,80,0) 6deg,
+      rgba(80,255,120,0.35) 7deg, rgba(40,200,80,0) 8deg,
+      rgba(40,200,80,0) 14deg, rgba(80,255,120,0.25) 15deg, rgba(40,200,80,0) 16deg);
+  mask-image: radial-gradient(ellipse at center, transparent 72%, black 100%);
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 72%, black 100%);
   animation: swordBlockFlicker 0.35s ease-in-out infinite alternate;
 }
 #ov-sword-block.show { opacity: 1; }
@@ -3841,12 +3843,15 @@ class NetworkPlayer {
         // Top hemisphere: phi 0..2π, theta 0..π/2. Apex at +Y in geometry-local
         // space ; quaternion rotates so +Y aligns with the peer's forward.
         const geo = new THREE.SphereGeometry(domeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-        // (v11) Peer-side outside view uses cyan layered plasma_wall ;
-        // looks like a flowing energy field from the outside. The local
-        // pilot still sees the inside as hex hologram (unchanged).
+        // (v11b) Peer-side outside view tinted purple ; was cyan
+        // 'plasma_wall' which clashed with the local pilot's purple
+        // dome and read as a different ship's shield from outside.
+        // Switching to the layered 'plasma_purple' preset matches the
+        // pilot's inside view so observers + casters see the same
+        // shield identity.
         const mat = (typeof _makeFXMaterial === 'function')
-          ? _makeFXMaterial('plasma_wall')
-          : _makeHexHologramMaterial(0x66aaff);
+          ? _makeFXMaterial('plasma_purple')
+          : _makeHexHologramMaterial(0xaa55ff);
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, domeR);
         }
@@ -3854,7 +3859,7 @@ class NetworkPlayer {
           mat.uniforms.uHitRadius.value = domeR * 0.35;
         }
         if (mat.uniforms && mat.uniforms.uHitColor) {
-          mat.uniforms.uHitColor.value.setHex(0xa0e0ff);
+          mat.uniforms.uHitColor.value.setHex(0xddaaff);
         }
         this._vortexShieldMesh = new THREE.Mesh(geo, mat);
         this._vortexShieldMesh.renderOrder = 1;
@@ -3905,6 +3910,70 @@ class NetworkPlayer {
         if (this._vortexShieldRing.geometry) this._vortexShieldRing.geometry.dispose();
         if (this._vortexShieldRing.material) this._vortexShieldRing.material.dispose();
         this._vortexShieldRing = null;
+      }
+    }
+
+    // ---- SLAYER: Sword Block aura (peer view) ----
+    // (v11b) Mirrors the local pilot's dome from updateShieldVisuals so
+    // peers see the dark sphere when an enemy / teammate Slayer holds
+    // block. Full sphere (not hemisphere) since Sword Block is a 360°
+    // damage reduction. Dark hex hologram + equator torus + dark rim
+    // particles via _emitVortexShieldArcs with the _darkPalette flag.
+    if (this.loadoutKey === 'SLAYER' && active) {
+      const sHull = (this.chassis && this.chassis.hullLength) ? this.chassis.hullLength : 100;
+      const sbR = sHull * 1.5;
+      if (!this._swordBlockMesh) {
+        const geo = new THREE.SphereGeometry(sbR, 36, 24);
+        // (v11b retune) Same flip as the local pilot path: back to the
+        // additive hex hologram, bright green, glowing rather than dark.
+        const mat = _makeHexHologramMaterial(0x44ff66);
+        this._swordBlockMesh = new THREE.Mesh(geo, mat);
+        this._swordBlockMesh.renderOrder = 1;
+        scene.add(this._swordBlockMesh);
+        const ringGeo = new THREE.TorusGeometry(sbR * 0.99, 2.2, 8, 64);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: 0x77ff99, transparent: true, opacity: 0.32,
+          side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
+        });
+        this._swordBlockRing = new THREE.Mesh(ringGeo, ringMat);
+        this._swordBlockRing.renderOrder = 1;
+        scene.add(this._swordBlockRing);
+      }
+      this._swordBlockMesh.position.copy(this.position);
+      this._swordBlockMesh.visible = true;
+      if (this._swordBlockMesh.material && this._swordBlockMesh.material.uniforms) {
+        const u = this._swordBlockMesh.material.uniforms;
+        if (u.time) u.time.value = t;
+        if (u.uTime) u.uTime.value = t;
+        if (u.uHp) u.uHp.value = 1.0;
+        if (u.uColor) u.uColor.value.setHex(0x44ff66);
+        // (v11b) Match local pilot's lower opacity so the peer-side
+        // dome doesn't read as a heavier energy field than what the
+        // caster sees from inside.
+        if (u.uAlphaMul) u.uAlphaMul.value = 0.55;
+      }
+      if (this._swordBlockRing) {
+        const fwd = getForward();
+        this._swordBlockRing.position.copy(this.position);
+        this._swordBlockRing.lookAt(this._shieldLook.copy(this.position).add(fwd));
+        this._swordBlockRing.visible = true;
+      }
+      if (typeof _emitVortexShieldArcs === 'function') {
+        const fwdRim = getForward();
+        _emitVortexShieldArcs(this.position, sbR, fwdRim, (typeof dt === 'number' ? dt : 1/60), 1.0, null, 0.33);
+      }
+    } else {
+      if (this._swordBlockMesh) {
+        if (this._swordBlockMesh.parent) scene.remove(this._swordBlockMesh);
+        if (this._swordBlockMesh.geometry) this._swordBlockMesh.geometry.dispose();
+        if (this._swordBlockMesh.material) this._swordBlockMesh.material.dispose();
+        this._swordBlockMesh = null;
+      }
+      if (this._swordBlockRing) {
+        if (this._swordBlockRing.parent) scene.remove(this._swordBlockRing);
+        if (this._swordBlockRing.geometry) this._swordBlockRing.geometry.dispose();
+        if (this._swordBlockRing.material) this._swordBlockRing.material.dispose();
+        this._swordBlockRing = null;
       }
     }
   }
@@ -3958,6 +4027,9 @@ class NetworkPlayer {
     dispose(this._gunShieldEdge);     this._gunShieldEdge = null;
     dispose(this._thermalShieldMesh); this._thermalShieldMesh = null;
     dispose(this._thermalShieldRing); this._thermalShieldRing = null;
+    // (v11b) Slayer Sword Block dome / ring ; same dispose pattern.
+    dispose(this._swordBlockMesh);    this._swordBlockMesh = null;
+    dispose(this._swordBlockRing);    this._swordBlockRing = null;
   }
 }
 
@@ -4806,23 +4878,21 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   // reads as a live energy field with damage cracks revealed as hp drops.
   // The original scanline material is kept as wallMat and the geometry is
   // unchanged so existing depth-test / sort behavior is preserved.
-  const hexHologramMat = _makeHexHologramMaterial(0x66ddff);
+  // (v11b) Tracker's particle wall is now tinted orange ; the cyan was
+  // visually conflated with Blaster/Vortex's blue energy fields. Hex
+  // hologram + amber plasma backing give the wall a hot-membrane read.
+  const hexHologramMat = _makeHexHologramMaterial(0xffaa44);
   const wallMesh = new THREE.Mesh(wallGeo, hexHologramMat);
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
   scene.add(wallMesh);
-  // (v11 Phase 5) Inner plasma layer ; sits behind the hex grid and gives
-  // the wall a sense of volume + flowing energy. The hex hologram still
-  // owns the damage-cracks tell via uHp ; this is purely atmospheric depth.
-  // Slightly smaller scale so the hex grid reads as the front surface and
-  // the plasma reads as content inside the wall membrane.
+  // (v11 Phase 5 / v11b) Inner plasma layer behind the hex grid. Switched
+  // from 'plasma_wall' (cyan) to 'plasma_amber' (orange) to match the
+  // wall's new color identity.
   let plasmaMesh = null;
   if (typeof _makeFXMaterial === 'function') {
     const plasmaGeo = new THREE.BoxGeometry(390, 290, 18);
-    const plasmaMat = _makeFXMaterial('plasma_wall');
-    // (v11 fix) The wall is 400×300×25 in world units ; sample at 1/200
-    // so a few large plasma features arc across the wall instead of
-    // hundreds of fine-grain noise cells reading as static.
+    const plasmaMat = _makeFXMaterial('plasma_amber');
     if (plasmaMat.uniforms && plasmaMat.uniforms.uPosScale) {
       plasmaMat.uniforms.uPosScale.value = 1.0 / 200.0;
     }
@@ -4833,7 +4903,7 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
     scene.add(plasmaMesh);
   }
   const edgeGeo = new THREE.EdgesGeometry(wallGeo);
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x66ddff, transparent: true, opacity: 0.6 });
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0xffcc77, transparent: true, opacity: 0.6 });
   const edgeMesh = new THREE.LineSegments(edgeGeo, edgeMat);
   edgeMesh.position.copy(pos);
   edgeMesh.lookAt(pos.clone().add(dir));
@@ -6776,7 +6846,15 @@ if (typeof window !== 'undefined') {
 // Hex grid pattern with damage cracks, used for Tracker's particle wall.
 // uHp 1.0 = pristine hex grid, 0.0 = many cracks revealed. The hex
 // pattern moves slowly so the wall reads as live, not a static decal.
-function _makeHexHologramMaterial(baseColor) {
+// (v11b) Dark variant of the hex hologram material. Same pattern + drift
+// + cracks logic, but routed through NormalBlending + an opaque dark
+// fragment so the shield actually paints dark hexes onto the framebuffer.
+// AdditiveBlending was making Slayer's Sword Block dome invisible (col *
+// alpha is near-zero RGB, so adding it to the scene = no-op). This shader
+// inverts: uColor sets the tinted dark fragment color, alpha tracks the
+// hex-edge mask, and the final composite reads as a translucent dark
+// dome with visible hex grid + fresnel rim.
+function _makeDarkHexHologramMaterial(baseColor) {
   return new THREE.ShaderMaterial({
     uniforms: {
       time:   { value: 0 },
@@ -6799,6 +6877,86 @@ function _makeHexHologramMaterial(baseColor) {
       'uniform float time;',
       'uniform vec3 uColor;',
       'uniform float uHp;',
+      'varying vec2 vUv;',
+      'varying vec3 vNormal;',
+      'varying vec3 vWorldPos;',
+      'float hex2Dd(vec2 q, float cell) {',
+      '  q /= cell;',
+      '  vec2 r = vec2(1.0, 1.7320508);',
+      '  vec2 h = r * 0.5;',
+      '  vec2 a = mod(q, r) - h;',
+      '  vec2 b = mod(q + h, r) - h;',
+      '  vec2 d = (dot(a, a) < dot(b, b)) ? a : b;',
+      '  return max(abs(d.x), abs(d.y * 0.86603 + d.x * 0.5));',
+      '}',
+      'float hash21d(vec2 p) {',
+      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
+      '}',
+      'void main() {',
+      '  vec2 p = vUv - 0.5;',
+      '  vec2 q = p + vec2(time * 0.012, time * 0.020);',
+      '  float h = hex2Dd(q, 0.07);',
+      '  float edge = 1.0 - smoothstep(0.42, 0.50, h);',
+      '  vec2 cell = floor(q / 0.07);',
+      '  float r1 = hash21d(cell);',
+      '  float crack = step(uHp, r1) * (1.0 - smoothstep(0.30, 0.55, h));',
+      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
+      '  float fres = pow(1.0 - abs(dot(vNormal, viewDir)), 2.0);',
+      // Body fill: subtle dark-purple wash that thickens toward the rim
+      // (fresnel bias) so the silhouette reads as a closed surface even
+      // where the hex pattern is sparse.
+      '  float bodyAlpha = 0.18 + fres * 0.40;',
+      // Hex edges + cracks add to alpha so the grid + damage tells punch
+      // through. The whole alpha is capped under 0.85 so the pilot can
+      // still see through.
+      '  float alpha = bodyAlpha + edge * 0.45 + crack * 0.35;',
+      '  alpha = clamp(alpha, 0.0, 0.85);',
+      // Color: uColor lightly modulated by edge/fres so the hex pattern
+      // is a slightly brighter shade of the same dark tint (visible
+      // against deep black space, still ominous against bright bloom).
+      '  vec3 col = uColor * (0.6 + edge * 0.7 + fres * 0.5 + crack * 0.4);',
+      '  gl_FragColor = vec4(col, alpha);',
+      '}'
+    ].join('\n'),
+    transparent: true,
+    // (v11b) NormalBlending so dark fragments actually paint, not add to
+    // zero. Other hex shields use Additive because their bright tint
+    // shows up against dark space ; this one inverts that contract.
+    blending: THREE.NormalBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+}
+
+function _makeHexHologramMaterial(baseColor) {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      time:    { value: 0 },
+      uColor:  { value: new THREE.Color(baseColor) },
+      uHp:     { value: 1.0 },
+      // (v11b) Final alpha multiplier ; default 1.0 keeps existing
+      // shield transparency unchanged. Slayer Sword Block sets this to
+      // ~0.55 so the dome reads as more see-through both inside and
+      // outside without cluttering the cockpit / blocking sightlines.
+      uAlphaMul: { value: 1.0 },
+    },
+    vertexShader: [
+      'varying vec2 vUv;',
+      'varying vec3 vNormal;',
+      'varying vec3 vWorldPos;',
+      'void main() {',
+      '  vUv = uv;',
+      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
+      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+      '  vWorldPos = wp.xyz;',
+      '  gl_Position = projectionMatrix * viewMatrix * wp;',
+      '}'
+    ].join('\n'),
+    fragmentShader: [
+      'uniform float time;',
+      'uniform vec3 uColor;',
+      'uniform float uHp;',
+      'uniform float uAlphaMul;',
       'varying vec2 vUv;',
       'varying vec3 vNormal;',
       'varying vec3 vWorldPos;',
@@ -6839,6 +6997,9 @@ function _makeHexHologramMaterial(baseColor) {
       '  float alpha = edge * 0.28 + fres * 0.16 + crack * 0.45;',
       '  alpha *= (0.45 + 0.55 * uHp);',
       '  alpha = clamp(alpha, 0.0, 0.55);',
+      // (v11b) Per-instance alpha multiplier (default 1.0). Slayer's
+      // sword block sets this lower so its dome stays unobtrusive.
+      '  alpha *= uAlphaMul;',
       '  gl_FragColor = vec4(col * bright, alpha);',
       '}'
     ].join('\n'),
@@ -7001,11 +7162,39 @@ function spawnIncendiaryGas(pos, owner, team, ownerPeerId, netId, broadcast) {
   // occludes it where it's behind (cross-room visibility).
   gasMesh.renderOrder = 1;
   scene.add(gasMesh);
-  const coreGeo = new THREE.SphereGeometry(1, 8, 6);
-  const coreMat = new THREE.MeshBasicMaterial({ color: 0xc8e870, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false });
+  // (v11b) Inner core was a flat additive sphere (8x6 segs, scaled 200,
+  // 0xc8e870 / opacity 0.18). Replaced with a displaced-fireball
+  // LayeredFX sphere so the trap shows a live 3D volume at its heart.
+  // Two color states drive uBaseColor : green (matches outer gas) while
+  // unignited, fire-orange after ignite. The fireball preset shader does
+  // the displacement, breathing, and noise animation regardless of base
+  // color ; recoloring just shifts the palette through the HSL ramp.
+  const coreSize = 160;                         // larger heart of the trap
+  const GAS_CORE_GREEN  = 0xaecc55;             // matches outer gas hull tint
+  const GAS_CORE_ORANGE = 0xff7722;             // fireball preset default
+  const coreGeo = new THREE.SphereGeometry(1, 24, 14);
+  const coreMat = (typeof _makeFXMaterial === 'function')
+    ? _makeFXMaterial('fireball')
+    : new THREE.MeshBasicMaterial({ color: GAS_CORE_GREEN, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false });
+  if (coreMat.uniforms && coreMat.uniforms.uPosScale) {
+    coreMat.uniforms.uPosScale.value = 1.0 / coreSize;
+  }
+  // Start the core in the unignited green palette ; the ignite path
+  // below swaps uBaseColor (or .color on the legacy fallback) to orange.
+  if (coreMat.uniforms && coreMat.uniforms.uBaseColor) {
+    coreMat.uniforms.uBaseColor.value.setHex(GAS_CORE_GREEN);
+  } else if (coreMat.color && coreMat.color.setHex) {
+    coreMat.color.setHex(GAS_CORE_GREEN);
+  }
+  if (coreMat.userData) coreMat.userData._timeOffset = Math.random() * 10;
   const coreMesh = new THREE.Mesh(coreGeo, coreMat);
   coreMesh.position.copy(pos);
-  coreMesh.scale.setScalar(200);
+  coreMesh.scale.setScalar(coreSize);
+  coreMesh.rotation.set(
+    Math.random() * Math.PI * 2,
+    Math.random() * Math.PI * 2,
+    Math.random() * Math.PI * 2
+  );
   coreMesh.renderOrder = 1;
   scene.add(coreMesh);
   const effRef = game.worldEffects[game.worldEffects.length - 1];
@@ -13462,9 +13651,19 @@ function igniteNearbyGas(pos, radius) {
           eff.mesh.material.opacity = 0.18;
         }
       }
-      if (eff.coreMesh && eff.coreMesh.material && eff.coreMesh.material.color) {
-        eff.coreMesh.material.color.setHex(0xff6600);
-        eff.coreMesh.material.opacity = 0.36;
+      // (v11b) Two paths : LayeredFX core (uBaseColor uniform) and the
+      // legacy MeshBasicMaterial fallback (.color + .opacity). Without
+      // the LayeredFX branch the new ShaderMaterial-backed core stayed
+      // green even after the gas lit ; this was the second ignite site
+      // I missed when first wiring the green→orange swap.
+      if (eff.coreMesh && eff.coreMesh.material) {
+        const cm = eff.coreMesh.material;
+        if (cm.uniforms && cm.uniforms.uBaseColor) {
+          cm.uniforms.uBaseColor.value.setHex(0xff7722);
+        } else if (cm.color && cm.color.setHex) {
+          cm.color.setHex(0xff6600);
+          cm.opacity = 0.36;
+        }
       }
       // Recolor any legacy puff meshes (PUFF_COUNT is 0 in v6.7, but a
       // mid-game state might still have older clouds with puffs).
@@ -16905,15 +17104,20 @@ function spawnTracer(from, to, color, widthScale) {
 // The main lightning pool uses AdditiveBlending which makes black /
 // near-black colors invisible (adding 0 to the framebuffer). This pool
 // uses NormalBlending + opaque dark fragments so the bolts actually
-// paint dark pixels on top of bright scene content. Pool is sized to a
-// modest 96 segments since at most one player is sword-blocking at a
-// time and bolts are short-lived.
-const _DARK_LIGHTNING_POOL_SIZE = 96;
+// paint dark pixels on top of bright scene content. Pool sized to 256
+// segments to support ~55 bolts/sec * 4-5 segs each * 0.22s lifetime
+// (~60 alive average, ~80 peak), with headroom so a long block stance
+// doesn't run dry.
+const _DARK_LIGHTNING_POOL_SIZE = 256;
 const _darkLightningPool = [];
 function _initDarkLightningPool() {
   for (let i = 0; i < _DARK_LIGHTNING_POOL_SIZE; i++) {
     const mat = new THREE.MeshBasicMaterial({
-      color: 0x000000, transparent: true, opacity: 0.85,
+      // (v11b) Pure black was hard to see against the dark space scene ;
+      // dark-purple reads as visible-but-ominous and matches the
+      // sword-block vignette tint. Opacity stays high so the bolts
+      // actually paint over bright bloom-y backgrounds.
+      color: 0x2a0a40, transparent: true, opacity: 0.90,
       blending: THREE.NormalBlending, depthTest: true, depthWrite: false,
       side: THREE.DoubleSide, toneMapped: false,
     });
@@ -21272,19 +21476,25 @@ function _emitVortexShieldArcs(shieldPos, radius, fwd, dt, energyPct, convergenc
   let glowPalette;
   if (typeof hueBase === 'number') {
     const _tintScratch = new THREE.Color();
-    const _tintToHex = (h, l) => {
-      _tintScratch.setHSL(h, 1.0, l);
+    const _tintToHex = (h, s, l) => {
+      _tintScratch.setHSL(h, s, l);
       return (Math.round(_tintScratch.r * 255) << 16) |
              (Math.round(_tintScratch.g * 255) << 8)  |
               Math.round(_tintScratch.b * 255);
     };
-    const lFloor = 0.30 + 0.20 * energyPct;   // dimmer at low HP
-    const lCeil  = 0.65 + 0.25 * energyPct;
+    // (v11b) Optional `_swordBlockDark` flag (set on the call) shifts the
+    // palette into the dark-purple range used by Slayer's Sword Block.
+    // The default branch keeps the saturated team-color glow used by
+    // Vortex / Pyro / Blaster.
+    const isDark = !!_emitVortexShieldArcs._darkPalette;
+    const sat = isDark ? 0.55 : 1.0;
+    const lFloor = isDark ? 0.06 : (0.30 + 0.20 * energyPct);
+    const lCeil  = isDark ? 0.20 : (0.65 + 0.25 * energyPct);
     glowPalette = [
-      _tintToHex(hueBase, lFloor + (lCeil - lFloor) * 0.10),
-      _tintToHex(hueBase, lFloor + (lCeil - lFloor) * 0.40),
-      _tintToHex(hueBase, lFloor + (lCeil - lFloor) * 0.70),
-      _tintToHex(hueBase, lFloor + (lCeil - lFloor) * 0.95),
+      _tintToHex(hueBase, sat, lFloor + (lCeil - lFloor) * 0.10),
+      _tintToHex(hueBase, sat, lFloor + (lCeil - lFloor) * 0.40),
+      _tintToHex(hueBase, sat, lFloor + (lCeil - lFloor) * 0.70),
+      _tintToHex(hueBase, sat, lFloor + (lCeil - lFloor) * 0.95),
     ];
   } else {
     glowPalette = [
@@ -21734,15 +21944,16 @@ function updateShieldVisuals(dt) {
   }
 
   // ---- SLAYER: Sword Block aura ----
-  // (v11b) Slayer's Sword Block had no visual signal in v11a ; pilots
-  // couldn't tell from inside the cockpit whether they were blocking. Two
-  // additive cues now play together while the ability is held:
-  //   1. A sphere of thin, near-black lightning crawling on the surface
-  //      around the ship (3D, visible to peers and to the local pilot).
-  //   2. A dark vignette + jagged-rim CSS overlay on the screen (local
-  //      pilot only) so the inside-the-cockpit read of "you are blocking"
-  //      is unmissable even when the player isn't looking at their hull.
-  // The aura ramps off when the ability releases ; we just stop spawning.
+  // (v11b redo) Replaces the dark-bolts-on-a-sphere prototype. Sword
+  // Block now wears the same hex hologram dome the Vortex / Pyro /
+  // Blaster pilot shields use, just tinted dark purple-black so it
+  // reads as ominous suppression rather than a team-energy field. Full
+  // sphere geometry (not a hemisphere) since Sword Block reduces damage
+  // from every direction. Equator torus + rim-glow particles round it
+  // off ; the rim emitter runs through _emitVortexShieldArcs with a
+  // _darkPalette flag that drops the lightness range to keep things
+  // black even at full HP. The CSS screen-edge vignette is kept so the
+  // pilot still has a strong inside-the-cockpit signal.
   const swordBlockOn = player.loadoutKey === 'SLAYER' &&
     player.abilityActive[1] && player.abilities[1] &&
     player.abilities[1].name === 'Sword Block';
@@ -21754,31 +21965,72 @@ function updateShieldVisuals(dt) {
       else              ovSb.classList.remove('show');
     }
   } catch (_) {}
-  if (swordBlockOn && typeof spawnDarkLightningBolt === 'function') {
+  if (swordBlockOn) {
     const sbHull = (player.chassis && player.chassis.hullLength) ? player.chassis.hullLength : 100;
-    const sbR = sbHull * 1.45;
-    // Spawn rate 18 bolts/sec ; each bolt arcs along the sphere surface
-    // between two close points so the curtain reads as crawling
-    // electricity rather than radial spokes off a center.
-    const expected = 18 * dt;
-    let toSpawn = Math.floor(expected);
-    if (Math.random() < (expected - toSpawn)) toSpawn += 1;
-    for (let i = 0; i < toSpawn; i++) {
-      const a1 = Math.random() * Math.PI * 2;
-      const e1 = Math.random() * Math.PI - Math.PI / 2;
-      const a2 = a1 + (Math.random() - 0.5) * 0.7;
-      const e2 = e1 + (Math.random() - 0.5) * 0.7;
-      const p1 = _shieldPos.set(
-        Math.cos(e1) * Math.cos(a1) * sbR,
-        Math.sin(e1) * sbR,
-        Math.cos(e1) * Math.sin(a1) * sbR
-      ).add(player.position).clone();
-      const p2 = _shieldPos.set(
-        Math.cos(e2) * Math.cos(a2) * sbR,
-        Math.sin(e2) * sbR,
-        Math.cos(e2) * Math.sin(a2) * sbR
-      ).add(player.position).clone();
-      spawnDarkLightningBolt(p1, p2, 0.22, 1.2);
+    const sbR = sbHull * 1.5;
+    if (!player.swordBlockMesh) {
+      // Full sphere (NOT a hemisphere) so the field reads as 360° block.
+      const geo = new THREE.SphereGeometry(sbR, 36, 24);
+      // (v11b retune) Switched from the dark NormalBlending variant
+      // back to the additive hex hologram every other shield uses, just
+      // tinted bright green ; the user wanted the block dome to "glow
+      // green" rather than read as ominous black, so we're back on the
+      // same shader the team-color shields use.
+      const mat = _makeHexHologramMaterial(0x44ff66);
+      player.swordBlockMesh = new THREE.Mesh(geo, mat);
+      player.swordBlockMesh.renderOrder = 1;
+      scene.add(player.swordBlockMesh);
+      // Equator torus matches the other shields' silhouette ring weight,
+      // bright green so the band reads from any angle. (v11b) Opacity
+      // 0.55 -> 0.32 so the rim is visible but not opaque.
+      const ringGeo = new THREE.TorusGeometry(sbR * 0.99, 2.2, 8, 64);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: 0x77ff99, transparent: true, opacity: 0.32,
+        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      player.swordBlockRing = new THREE.Mesh(ringGeo, ringMat);
+      player.swordBlockRing.renderOrder = 1;
+      scene.add(player.swordBlockRing);
+    }
+    player.swordBlockMesh.position.copy(player.position);
+    player.swordBlockMesh.visible = true;
+    if (player.swordBlockRing) {
+      player.swordBlockRing.position.copy(player.position);
+      // Lay the torus in the camera-forward plane so the dark ring
+      // outlines the dome's silhouette from the pilot's POV.
+      player.swordBlockRing.lookAt(_shieldLook.copy(player.position).add(forward));
+      player.swordBlockRing.visible = true;
+    }
+    if (player.swordBlockMesh.material && player.swordBlockMesh.material.uniforms) {
+      const u = player.swordBlockMesh.material.uniforms;
+      if (u.time)  u.time.value  = game.time;
+      if (u.uTime) u.uTime.value = game.time;
+      if (u.uHp)   u.uHp.value   = 1.0;       // sword block has no HP pool
+      // Bright green energy-field tint ; matches the team-color hue of
+      // the other Vortex/Pyro/Blaster shields, just shifted to green.
+      if (u.uColor) u.uColor.value.setHex(0x44ff66);
+      // (v11b) Sword Block dome reads more transparent than the others
+      // since the player keeps it up for long stretches and a
+      // dense-opaque green dome obscures combat sightlines.
+      if (u.uAlphaMul) u.uAlphaMul.value = 0.55;
+    }
+    // Rim glow tinted bright green (HSL hue 0.33). Default lightness
+    // curve (no _darkPalette) so the particles glow rather than skulk.
+    _emitVortexShieldArcs(player.position, sbR, forward, dt, 1.0, null, 0.33);
+    _tickSoundLoop(player, '_swordBlockHumTimer', dt, 0.95, 'shield_hum');
+  } else {
+    player._swordBlockHumTimer = 0;
+    if (player.swordBlockMesh) {
+      scene.remove(player.swordBlockMesh);
+      if (player.swordBlockMesh.geometry) player.swordBlockMesh.geometry.dispose();
+      if (player.swordBlockMesh.material) player.swordBlockMesh.material.dispose();
+      player.swordBlockMesh = null;
+    }
+    if (player.swordBlockRing) {
+      scene.remove(player.swordBlockRing);
+      if (player.swordBlockRing.geometry) player.swordBlockRing.geometry.dispose();
+      if (player.swordBlockRing.material) player.swordBlockRing.material.dispose();
+      player.swordBlockRing = null;
     }
   }
 
@@ -22518,7 +22770,18 @@ function updateAbilities(dt) {
                   eff.mesh.material.uniforms.uColor.value.setHex(0xff5520);
                   eff.mesh.material.uniforms.uBaseAlpha.value = 0.75;
                 }
-                if (eff.coreMesh) { eff.coreMesh.material.color.setHex(0xff8a30); eff.coreMesh.material.opacity = 0.36; }
+                // (v11b) Core swapped from green-gas to fire-orange on
+                // ignite. Two paths : LayeredFX (uBaseColor uniform) and
+                // legacy MeshBasicMaterial (.color + .opacity).
+                if (eff.coreMesh && eff.coreMesh.material) {
+                  const cm = eff.coreMesh.material;
+                  if (cm.uniforms && cm.uniforms.uBaseColor) {
+                    cm.uniforms.uBaseColor.value.setHex(0xff7722);
+                  } else if (cm.color && cm.color.setHex) {
+                    cm.color.setHex(0xff8a30);
+                    cm.opacity = 0.36;
+                  }
+                }
                 // Recolor every puff to the burning palette AND bump its
                 // base opacity so the whole cluster lights up, not just the
                 // inner sphere. Three flame hues mixed so the cluster has
@@ -22554,7 +22817,8 @@ function updateAbilities(dt) {
           }
         }
         if (eff.coreMesh) {
-          const corePulse = 200 + Math.sin(game.time * 2.0 + 1.0) * 15;
+          // (v11b) Pulse baseline tracks the larger 160-unit core.
+          const corePulse = 160 + Math.sin(game.time * 2.0 + 1.0) * 12;
           eff.coreMesh.scale.setScalar(corePulse);
         }
         // Periodic gas drift particles (not ignited)
@@ -22626,7 +22890,14 @@ function updateAbilities(dt) {
           eff.mesh.scale.setScalar(350 + Math.sin(game.time * 3) * 30);
         }
         if (eff.coreMesh) {
-          eff.coreMesh.material.opacity = 0.36 + Math.sin(game.time * 6) * 0.05;
+          // (v11b) Fireball-preset ShaderMaterial has no .opacity ; its
+          // animation comes from uTime (driven globally by _layeredFXTick)
+          // and the per-frame scale pulse above. Legacy MeshBasic path
+          // still gets the sinusoidal opacity nudge.
+          if (eff.coreMesh.material && typeof eff.coreMesh.material.opacity === 'number'
+              && !(eff.coreMesh.material.uniforms && eff.coreMesh.material.uniforms.uBaseColor)) {
+            eff.coreMesh.material.opacity = 0.36 + Math.sin(game.time * 6) * 0.05;
+          }
         }
         // Spawn fire particles throughout the burning volume
         eff.fxTimer -= dt;
@@ -22786,23 +23057,27 @@ function updateAbilities(dt) {
       if (eff.mesh && eff.hp > 0) {
         const hpPct = eff.hp / eff.maxHp;
         const age = game.time - (eff.spawnTime || 0);
-        const hue = (age * 0.2) % 1;
+        // (v11b) Hue drifts in a tight orange band (red-orange ↔ amber)
+        // instead of cycling the full spectrum, so Tracker's wall reads
+        // as a hot membrane rather than a rainbow energy field.
+        const hue = 0.04 + 0.04 * (0.5 + 0.5 * Math.sin(age * 0.6));
         // Hex hologram shader path: drive uniforms instead of color/opacity.
         if (eff.mesh.material && eff.mesh.material.uniforms) {
           eff.mesh.material.uniforms.time.value = game.time;
           eff.mesh.material.uniforms.uHp.value = hpPct;
-          // Color cycles slowly through the spectrum as before; the shader
-          // mixes this with a red dying-tint based on uHp.
           if (eff.mesh.material.uniforms.uColor) {
-            eff.mesh.material.uniforms.uColor.value.setHSL(hue, 0.6, 0.55);
+            eff.mesh.material.uniforms.uColor.value.setHSL(hue, 0.85, 0.55);
           }
         } else {
           // Legacy MeshBasicMaterial fallback (if shader factory was unavailable)
-          eff.mesh.material.color.setHSL(hue, 0.6, 0.55);
+          eff.mesh.material.color.setHSL(hue, 0.85, 0.55);
           eff.mesh.material.opacity = 0.12 + 0.2 * hpPct + Math.sin(age * 3) * 0.04;
         }
         if (eff.edgeMesh) {
-          eff.edgeMesh.material.color.setHSL((hue + 0.3) % 1, 0.5, 0.7);
+          // Edge ring stays in the warm range too (slightly lighter
+          // amber) ; the previous +0.3 hue offset would push it into
+          // green and break the orange identity.
+          eff.edgeMesh.material.color.setHSL(0.10, 0.7, 0.7);
           eff.edgeMesh.material.opacity = 0.3 + 0.4 * hpPct;
         }
       }
