@@ -28573,6 +28573,23 @@ function applyMultiLayerPreset(idx) {
   for (const k of Object.keys(preset)) {
     if (u[k]) u[k].value = preset[k];
   }
+  // (v11b) paletteOverride drives both the per-room palette (locked in
+  // the gameLoop palette tick) AND the composite shader's uCompositeTint
+  // so the multi-layer cosmicField path picks up the per-preset color.
+  // Without this, the composite shader still rendered the legacy bluish
+  // tint regardless of paletteOverride. Falls back to the default
+  // (0.5, 0.6, 0.85) when the active preset has no override.
+  if (u.uCompositeTint) {
+    if (typeof preset.paletteOverride === 'number') {
+      const hex = preset.paletteOverride;
+      const r = ((hex >> 16) & 0xff) / 255;
+      const g = ((hex >>  8) & 0xff) / 255;
+      const b = ( hex        & 0xff) / 255;
+      u.uCompositeTint.value.set(r, g, b);
+    } else {
+      u.uCompositeTint.value.set(0.5, 0.6, 0.85);
+    }
+  }
   return true;
 }
 
@@ -30343,6 +30360,12 @@ function buildRoomGraphLevel(level) {
       'varying float vAO;',
       'uniform vec3 roomCenters[8];',
       'uniform vec3 roomColorsU[8];',
+      // (v11b) Composite tint passed to cosmicField for multi-layer
+      // composite presets (uPattern 20-25). Default is the legacy bluish
+      // (0.5, 0.6, 0.85) ; presets with a paletteOverride (e.g. Matrix)
+      // get their hex written here so the composite path actually picks
+      // up per-preset color identity.
+      'uniform vec3 uCompositeTint;',
       'uniform float roomRadii[8];',
       'uniform int roomCount;',
       // Pattern dispatch (0..8). 0..7 are lab patterns dispatched in
@@ -31225,14 +31248,20 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24) {',
-      // (v8VR 2026-05-01) Pass a neutral tint to cosmicField for multi-
-      // layer composite presets so per-room zoneColor doesn't leak into
-      // pattern sampling. The lab uses a single tintColor across the
-      // whole tunnel; this matches that behavior. Single-pattern presets
-      // (the else branch below) keep their per-room tinting since some
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25) {',
+      // (v8VR 2026-05-01) Pass a tint to cosmicField for multi-layer
+      // composite presets so per-room zoneColor doesn't leak into pattern
+      // sampling. The lab uses a single tintColor across the whole
+      // tunnel ; this matches that behavior. Single-pattern presets (the
+      // else branch below) keep their per-room tinting since some
       // (Soul Array, etc.) read room palette as a feature.
-      '      cosmic = cosmicField(vWorldPos, vec3(0.5, 0.6, 0.85), time);',
+      // (v11b) The tint is now driven by the uCompositeTint uniform so
+      // per-preset color overrides (e.g. Matrix's bright green) work
+      // through the composite shader path. Default uCompositeTint is the
+      // legacy bluish (0.5, 0.6, 0.85) so existing presets render
+      // unchanged ; applyMultiLayerPreset writes a different value when
+      // the active preset has paletteOverride set.
+      '      cosmic = cosmicField(vWorldPos, uCompositeTint, time);',
       '    } else {',
       // Solo mode: use the solo uniforms (managed by the wallParams per-
       // pattern slot system) so each pattern keeps its own tuning instead
@@ -31392,6 +31421,12 @@ function buildRoomGraphLevel(level) {
         roomColorsU: { value: roomColorsArr },
         roomRadii: { value: roomRadiiArr },
         roomCount: { value: numRooms },
+        // (v11b) Composite-branch tint for multi-layer presets ; default
+        // matches the legacy hardcoded (0.5, 0.6, 0.85) bluish that was
+        // baked into the shader before this uniform existed. Presets with
+        // a `paletteOverride` field write their hex here through
+        // applyMultiLayerPreset so per-preset color identity propagates.
+        uCompositeTint: { value: new THREE.Vector3(0.5, 0.6, 0.85) },
         // (v7.1 attempt 3) Default to the Lab Composite (uPattern == 20),
         // the multi-layer Panel Maze + Layered Cube + Wave Interference
         // preset baked from the user's mixed_lab_v2 export. P-cycling
