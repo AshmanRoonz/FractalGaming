@@ -19238,6 +19238,13 @@ function commitLoadout(key) {
   player.afterburnerActive = false;
   player.afterburnerSpeedMult = 1.0;
   player.railgunCharge = 0;
+  // (v11b) Loadout swap can happen mid-charge ; kill the synth so a stale
+  // sound doesn't ride into the new loadout.
+  if (player._railgunChargeAudio) {
+    try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+    player._railgunChargeAudio = null;
+  }
+  player._railgunChargingPrev = false;
   // Clean up shield visual meshes from previous loadout
   if (player.vortexShieldMesh) { scene.remove(player.vortexShieldMesh); player.vortexShieldMesh = null; }
   if (player.vortexShieldRing) { scene.remove(player.vortexShieldRing); player.vortexShieldRing = null; }
@@ -19755,6 +19762,14 @@ function respawnPlayer() {
   player.afterburnerActive = false;
   player.afterburnerSpeedMult = 1.0;
   player.railgunCharge = 0;
+  // (v11b) Death/respawn cuts the charging sound too ; otherwise a player
+  // who dies mid-charge would leave the rising-pitch sound playing into
+  // the respawn / ghost-cam moment.
+  if (player._railgunChargeAudio) {
+    try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+    player._railgunChargeAudio = null;
+  }
+  player._railgunChargingPrev = false;
   player.vortexStored = 0;
   player.vortexEnergy = player.vortexMaxEnergy;
   player.vortexAdsActive = false;
@@ -20088,14 +20103,26 @@ function updateWeapon(dt) {
     }
   }
 
-  // Puncture Railgun charge: hold alt-fire to charge over 3s, boosted damage
+  // Puncture Railgun charge: hold alt-fire to charge over 2.5s, boosted damage
   if (player.loadoutKey === 'PUNCTURE') {
-    // (v6.9) Play charge spool sound on the rising edge of aim. Recipe
-    // duration matches the 2.5 s charge time, so the sound naturally
-    // tapers as the charge tops out. Tracked on player so loadout swaps
-    // reset the edge state cleanly.
+    // (v11b) Charge spool audio is now a stoppable synth that we start on
+    // the rising edge of aim and stop on the falling edge ; previously the
+    // lab-recipe path fired-and-forgot the 2.5 s rising sound, so a
+    // tap-release would leave the audio ramping up while the charge meter
+    // had already stopped. Stop on death + loadout swap is handled in the
+    // existing player.railgunCharge resets (with a small helper guard).
     if (aiming && !player._railgunChargingPrev) {
-      try { playSound('railgun_charge'); } catch (e) {}
+      try {
+        if (player._railgunChargeAudio) _stopRailgunChargeSound(player._railgunChargeAudio);
+        player._railgunChargeAudio = _startRailgunChargeSound();
+      } catch (e) {}
+    } else if (!aiming && player._railgunChargingPrev) {
+      // Released alt-fire ; cut the rising sound at whatever pitch it was
+      // so the audio matches the actual charge level the player held to.
+      try {
+        if (player._railgunChargeAudio) _stopRailgunChargeSound(player._railgunChargeAudio);
+        player._railgunChargeAudio = null;
+      } catch (e) {}
     }
     player._railgunChargingPrev = aiming;
     if (aiming) {
@@ -20107,6 +20134,11 @@ function updateWeapon(dt) {
     if (!aiming) player.railgunCharge = Math.max(0, player.railgunCharge - dt * 0.2);
   } else {
     player._railgunChargingPrev = false;
+    // Loadout no longer Puncture ; kill any leftover charge audio.
+    if (player._railgunChargeAudio) {
+      try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+      player._railgunChargeAudio = null;
+    }
   }
 
   // ADS zoom (FOV change)
@@ -20315,6 +20347,12 @@ function fireHitscan(origin, dir, w) {
     if (player.loadoutKey === 'PUNCTURE' && player.railgunCharge > 0) {
       finalDmg *= 1.0 + player.railgunCharge * 3.0;
       player.railgunCharge = 0;
+      // (v11b) Charge consumed ; cut the rising-pitch sound so it doesn't
+      // keep ramping after the shot lands.
+      if (player._railgunChargeAudio) {
+        try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+        player._railgunChargeAudio = null;
+      }
     }
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
     const dealt = bestObstacle.takeDamage(finalDmg);
@@ -20342,6 +20380,13 @@ function fireHitscan(origin, dir, w) {
     if (player.loadoutKey === 'PUNCTURE' && player.railgunCharge > 0) {
       finalDmg *= 1.0 + player.railgunCharge * 3.0; // 1x at 0 charge, 4x at full
       player.railgunCharge = 0; // consume charge on hit
+      // (v11b) Cut the charging sound the same instant the charge is
+      // consumed, otherwise the rising-pitch tail keeps ramping after
+      // the shot has already landed.
+      if (player._railgunChargeAudio) {
+        try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+        player._railgunChargeAudio = null;
+      }
     }
     // Syphon upgrade tier damage multiplier (Tier 3 XO-16 Accelerator: +25%)
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
@@ -27838,7 +27883,8 @@ const WALL_PATTERN_NAMES = [
   //   lab 15 (Cyber Datamosh) -> game 15  ;  lab 18 (Layered Cube) -> game 19
   'Datamosh Cube',  // 22 ; bg=Datamosh + fg=Layered Cube + fg2=Panel Maze
   'Mandelbox Plasma',  // 23 ; bg=Mandelbox + fg=Plasma FBM + fg2=Panel Maze
-  'Mandelbox Kali'  // 24 ; bg=Mandelbox + fg=Kali + fg2=Panel Maze
+  'Mandelbox Kali',  // 24 ; bg=Mandelbox + fg=Kali + fg2=Panel Maze
+  'Matrix'  // 25 ; bg=Cyber Datamosh + fg=Plasma FBM x2 (digital-rain green)
 ];
 
 const WALL_PARAM_DEFS = [
@@ -28480,6 +28526,30 @@ const MULTI_LAYER_PRESETS = {
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.9,
+  },
+  // Index 25: Matrix. User export ; bright green digital-rain feel.
+  // bg = Cyber Datamosh (game 15), fg + fg2 = Plasma FBM (game 6) at
+  // different scales for the cascading-glyph layered look. Pattern IDs
+  // came in already game-space ; no translation needed. The lab export's
+  // "color-b": "#1eff00" hint is a per-room palette tint that the
+  // running-hue drift already cycles through ; not applied per-uniform
+  // here, just informs the visual identity.
+  25: {
+    bgPatternId: 15,                                  // Cyber Datamosh
+    bgTime: 0.1,
+    u_iters_bg: 1, u_scale_bg: 0.0019, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    K_COSMIC_bg: 0.2,
+    fgPatternId: 6,                                   // Plasma FBM
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.0, fgTime: 1.0,
+    u_iters_fg: 3, u_scale_fg: 0.0011, u_invBase_fg: 9.0,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.0,
+    K_COSMIC_fg: 6.0,
+    fg2PatternId: 6,                                  // Plasma FBM (second layer)
+    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
+    u_iters_fg2: 8, u_scale_fg2: 0.0035, u_invBase_fg2: 9.0,
+    u_hueSpin_fg2: 0.12, u_satBase_fg2: 0.7,
+    K_COSMIC_fg2: 6.0,
   },
 };
 
@@ -35582,6 +35652,75 @@ function reloadDefaultSoundLibrary() {
 }
 if (typeof window !== 'undefined') window.reloadDefaultSoundLibrary = reloadDefaultSoundLibrary;
 
+// (v11b) Puncture railgun charge synth. The lab-recipe path plays the
+// charge as a fire-and-forget 2.5 s sound, so when a player tap-released
+// the alt-fire the audio kept ramping up to peak pitch while the charge
+// meter was already decaying — the sound and the visual charge fell out
+// of sync. This synth builds the same recipe (3 sine voices, 69/63/60 Hz
+// ramping to 690/630/600 Hz over 2.495 s, attack 0.228 / hold 2.0 / decay
+// 2.235) directly with oscillator nodes so we can hold a stop handle and
+// cut it off when the player releases the trigger or fires.
+function _startRailgunChargeSound() {
+  if (!audio || !audio.initialized || !audio.ctx) return null;
+  resumeAudio();
+  const ctx = audio.ctx;
+  const now = ctx.currentTime;
+  const dur      = 2.5;
+  const rampTime = 2.495;
+  const attack   = 0.228;
+  const hold     = 2.0;
+  const decay    = 2.235;
+  const finalVol = 0.415 * 0.39;          // recipe vol * recipeGain
+  const freqStart = [69, 63, 60];
+  const freqEnd   = [690, 630, 600];
+  const spacing   = 0.035;
+  const oscs  = [];
+  const gains = [];
+  const dest = audio.sfxBus || audio.masterGain || ctx.destination;
+  for (let i = 0; i < 3; i++) {
+    const t0 = now + i * spacing;
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freqStart[i], t0);
+    osc.frequency.linearRampToValueAtTime(freqEnd[i], t0 + rampTime);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(finalVol, t0 + attack);
+    g.gain.setValueAtTime(finalVol, t0 + attack + hold);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + attack + hold + decay);
+    osc.connect(g);
+    g.connect(dest);
+    osc.start(t0);
+    osc.stop(t0 + attack + hold + decay + 0.05);
+    oscs.push(osc);
+    gains.push(g);
+  }
+  return { oscs, gains, startTime: now };
+}
+
+function _stopRailgunChargeSound(handle) {
+  if (!handle || !audio || !audio.ctx) return;
+  const ctx = audio.ctx;
+  const now = ctx.currentTime;
+  // Quick fade to zero so the cutoff doesn't click. Then hard-stop the
+  // oscillators ~80 ms later.
+  for (const g of handle.gains) {
+    try {
+      g.gain.cancelScheduledValues(now);
+      g.gain.setValueAtTime(g.gain.value, now);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+    } catch (_) {}
+  }
+  for (const o of handle.oscs) {
+    try { o.stop(now + 0.10); } catch (_) {}
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window._startRailgunChargeSound = _startRailgunChargeSound;
+  window._stopRailgunChargeSound  = _stopRailgunChargeSound;
+}
+
 // (v6.9) Sound loop ticker. Re-triggers a sound at a fixed interval as
 // long as it's called every frame. Used by held shields (Vortex / Gun /
 // Particle Wall / Thermal) and persistent fire effects (firewall /
@@ -38482,6 +38621,14 @@ try {
 try {
   installCustomMap(JSON.parse(`{"name":"Center Cube 2","key":"center_cube_2","description":"A cube in the center, part 2","palette":[4487167,16729224,4521847,16755268,11158783,4521983,16729258,16777028],"rooms":[{"id":"room_3","team":"B","x":1466,"y":250,"z":-1688,"r":270},{"id":"room_6","team":null,"x":-253,"y":2,"z":251,"r":180},{"id":"room_7","team":null,"x":-265,"y":1,"z":-262,"r":180},{"id":"room_8","team":null,"x":251,"y":4,"z":-244,"r":180},{"id":"room_9","team":null,"x":262,"y":0,"z":253,"r":180},{"id":"room_10","team":null,"x":-248,"y":420,"z":256,"r":180},{"id":"room_11","team":null,"x":-249,"y":420,"z":-260,"r":180},{"id":"room_12","team":null,"champion":true,"x":265,"y":420,"z":259,"r":180},{"id":"room_13","team":null,"x":272,"y":420,"z":-245,"r":180},{"id":"room_16","team":null,"x":-453,"y":253,"z":499,"r":270},{"id":"room_17","team":null,"x":507,"y":253,"z":-480,"r":270},{"id":"room_18","team":"A","x":-1560,"y":250,"z":1633,"r":270},{"id":"room_19","team":null,"x":1012,"y":253,"z":462,"r":270},{"id":"room_20","team":null,"x":-778,"y":250,"z":-563,"r":270}],"tunnels":[{"path":[{"x":272,"y":420,"z":-245},{"x":265,"y":420,"z":259}],"r":180},{"path":[{"x":265,"y":420,"z":259},{"x":-248,"y":420,"z":256}],"r":180},{"path":[{"x":-248,"y":420,"z":256},{"x":-249,"y":420,"z":-260}],"r":180},{"path":[{"x":-249,"y":420,"z":-260},{"x":272,"y":420,"z":-245}],"r":180},{"path":[{"x":272,"y":420,"z":-245},{"x":251,"y":4,"z":-244}],"r":180},{"path":[{"x":251,"y":4,"z":-244},{"x":-265,"y":1,"z":-262}],"r":180},{"path":[{"x":-265,"y":1,"z":-262},{"x":-249,"y":420,"z":-260}],"r":180},{"path":[{"x":-265,"y":1,"z":-262},{"x":-253,"y":2,"z":251}],"r":180},{"path":[{"x":-253,"y":2,"z":251},{"x":262,"y":0,"z":253}],"r":180},{"path":[{"x":265,"y":420,"z":259},{"x":262,"y":0,"z":253}],"r":180},{"path":[{"x":-248,"y":420,"z":256},{"x":-253,"y":2,"z":251}],"r":150},{"path":[{"x":262,"y":0,"z":253},{"x":251,"y":4,"z":-244}],"r":180},{"path":[{"x":272,"y":420,"z":-245},{"x":507,"y":253,"z":-480}],"r":150},{"path":[{"x":251,"y":4,"z":-244},{"x":507,"y":253,"z":-480}],"r":150},{"path":[{"x":-248,"y":420,"z":256},{"x":-453,"y":253,"z":499}],"r":150},{"path":[{"x":-253,"y":2,"z":251},{"x":-453,"y":253,"z":499}],"r":150},{"path":[{"x":-453,"y":253,"z":499},{"x":-778,"y":250,"z":-563}],"r":100},{"path":[{"x":1012,"y":253,"z":462},{"x":507,"y":253,"z":-480}],"r":100},{"path":[{"x":1466,"y":250,"z":-1688},{"x":-778,"y":250,"z":-563}],"r":180},{"path":[{"x":-1560,"y":250,"z":1633},{"x":1012,"y":253,"z":462}],"r":180},{"path":[{"x":-1560,"y":250,"z":1633},{"x":-453,"y":253,"z":499}],"r":180},{"path":[{"x":1466,"y":250,"z":-1688},{"x":507,"y":253,"z":-480}],"r":180}]}`), { silent: true, persist: false });
 } catch (e) { console.warn('[bake] center_cube_2 install failed:', e); }
+// (v11b) v8engine2 ; user-authored map, source: LSS/maps/v8engine2.json.
+// Two stacked engine-block lattices (one near floor, one near ceiling)
+// connected by vertical struts, with team spawns at the ends and a
+// champion field below center. Same install pattern as the cube maps ;
+// silent + persist:false because it ships with the page.
+try {
+  installCustomMap(JSON.parse(`{"name":"v8engine2","key":"v8engine2","description":"looks like a v8 part 2","palette":[4487167,16729224,4521847,16755268,11158783,4521983,16729258,16777028],"rooms":[{"id":"room_1","team":null,"x":-490,"y":224,"z":390,"r":270},{"id":"room_2","team":null,"x":510,"y":224,"z":390,"r":270},{"id":"room_3","team":null,"x":-490,"y":224,"z":15,"r":270},{"id":"room_4","team":null,"x":510,"y":224,"z":15,"r":270},{"id":"room_5","team":null,"x":498,"y":513,"z":30,"r":270},{"id":"room_6","team":null,"x":498,"y":513,"z":405,"r":270},{"id":"room_7","team":null,"x":-502,"y":513,"z":30,"r":270},{"id":"room_8","team":null,"x":-502,"y":513,"z":405,"r":270},{"id":"room_9","team":null,"x":-462,"y":232,"z":-358,"r":270},{"id":"room_10","team":null,"x":538,"y":232,"z":-358,"r":270},{"id":"room_11","team":null,"x":-462,"y":232,"z":-733,"r":270},{"id":"room_12","team":null,"x":538,"y":232,"z":-733,"r":270},{"id":"room_13","team":null,"x":526,"y":521,"z":-718,"r":270},{"id":"room_14","team":null,"x":526,"y":521,"z":-343,"r":270},{"id":"room_15","team":null,"x":-474,"y":521,"z":-718,"r":270},{"id":"room_16","team":null,"x":-474,"y":521,"z":-343,"r":270},{"id":"room_20","team":"A","x":11,"y":0,"z":-1839,"r":300},{"id":"room_21","team":"B","x":-5,"y":0,"z":1801,"r":300},{"id":"room_22","team":null,"champion":true,"x":1,"y":-569,"z":-167,"r":300}],"tunnels":[{"path":[{"x":-490,"y":224,"z":390},{"x":510,"y":224,"z":390}],"r":100},{"path":[{"x":-490,"y":224,"z":15},{"x":510,"y":224,"z":15}],"r":100},{"path":[{"x":-502,"y":513,"z":405},{"x":498,"y":513,"z":405}],"r":100},{"path":[{"x":-502,"y":513,"z":30},{"x":498,"y":513,"z":30}],"r":100},{"path":[{"x":-462,"y":232,"z":-358},{"x":538,"y":232,"z":-358}],"r":100},{"path":[{"x":-462,"y":232,"z":-733},{"x":538,"y":232,"z":-733}],"r":100},{"path":[{"x":-474,"y":521,"z":-343},{"x":526,"y":521,"z":-343}],"r":100},{"path":[{"x":-474,"y":521,"z":-718},{"x":526,"y":521,"z":-718}],"r":100},{"path":[{"x":-502,"y":513,"z":405},{"x":-502,"y":513,"z":30}],"r":180},{"path":[{"x":-502,"y":513,"z":30},{"x":-474,"y":521,"z":-343}],"r":180},{"path":[{"x":-474,"y":521,"z":-718},{"x":-474,"y":521,"z":-343}],"r":180},{"path":[{"x":-462,"y":232,"z":-733},{"x":-462,"y":232,"z":-358}],"r":180},{"path":[{"x":-462,"y":232,"z":-358},{"x":-490,"y":224,"z":15}],"r":180},{"path":[{"x":-490,"y":224,"z":15},{"x":-490,"y":224,"z":390}],"r":180},{"path":[{"x":-462,"y":232,"z":-733},{"x":-474,"y":521,"z":-718}],"r":180},{"path":[{"x":-462,"y":232,"z":-358},{"x":-474,"y":521,"z":-343}],"r":180},{"path":[{"x":-490,"y":224,"z":15},{"x":-502,"y":513,"z":30}],"r":180},{"path":[{"x":-490,"y":224,"z":390},{"x":-502,"y":513,"z":405}],"r":180},{"path":[{"x":498,"y":513,"z":405},{"x":510,"y":224,"z":390}],"r":180},{"path":[{"x":498,"y":513,"z":30},{"x":510,"y":224,"z":15}],"r":180},{"path":[{"x":526,"y":521,"z":-343},{"x":538,"y":232,"z":-358}],"r":180},{"path":[{"x":526,"y":521,"z":-718},{"x":538,"y":232,"z":-733}],"r":180},{"path":[{"x":526,"y":521,"z":-718},{"x":526,"y":521,"z":-343}],"r":180},{"path":[{"x":526,"y":521,"z":-343},{"x":498,"y":513,"z":30}],"r":180},{"path":[{"x":498,"y":513,"z":30},{"x":498,"y":513,"z":405}],"r":180},{"path":[{"x":510,"y":224,"z":390},{"x":510,"y":224,"z":15}],"r":180},{"path":[{"x":510,"y":224,"z":15},{"x":538,"y":232,"z":-358}],"r":180},{"path":[{"x":538,"y":232,"z":-358},{"x":538,"y":232,"z":-733}],"r":180},{"path":[{"x":11,"y":0,"z":-1839},{"x":-474,"y":521,"z":-718}],"r":180},{"path":[{"x":11,"y":0,"z":-1839},{"x":526,"y":521,"z":-718}],"r":180},{"path":[{"x":-5,"y":0,"z":1801},{"x":-502,"y":513,"z":405}],"r":180},{"path":[{"x":-5,"y":0,"z":1801},{"x":498,"y":513,"z":405}],"r":180},{"path":[{"x":11,"y":0,"z":-1839},{"x":538,"y":232,"z":-733}],"r":180},{"path":[{"x":11,"y":0,"z":-1839},{"x":-462,"y":232,"z":-733}],"r":180},{"path":[{"x":-5,"y":0,"z":1801},{"x":-490,"y":224,"z":390}],"r":180},{"path":[{"x":-5,"y":0,"z":1801},{"x":510,"y":224,"z":390}],"r":180},{"path":[{"x":-462,"y":232,"z":-358},{"x":1,"y":-569,"z":-167}],"r":180},{"path":[{"x":-490,"y":224,"z":15},{"x":1,"y":-569,"z":-167}],"r":180},{"path":[{"x":510,"y":224,"z":15},{"x":1,"y":-569,"z":-167}],"r":180},{"path":[{"x":538,"y":232,"z":-358},{"x":1,"y":-569,"z":-167}],"r":180},{"path":[{"x":11,"y":0,"z":-1839},{"x":1,"y":-569,"z":-167}],"r":180},{"path":[{"x":1,"y":-569,"z":-167},{"x":-5,"y":0,"z":1801}],"r":180}]}`), { silent: true, persist: false });
+} catch (e) { console.warn('[bake] v8engine2 install failed:', e); }
 _loadCustomMapsFromLocalStorage();
 buildShipSelect();
 buildSettingsPage();
