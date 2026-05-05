@@ -12419,7 +12419,7 @@ class Bot {
       game.projectiles.push(proj);
     } else if (ability.name === 'Arc Wave') {
       const vel = aim.clone().multiplyScalar(800);
-      const proj = new Projectile(this.position.clone(), vel, 1200, 150, 'bot', 0x44aaff);
+      const proj = new Projectile(this.position.clone(), vel, 1200, 150, 'bot', 0x44ff66);
       proj.isArcWave = true;
       game.projectiles.push(proj);
     } else if (ability.name === 'Power Shot') {
@@ -13353,34 +13353,54 @@ class Projectile {
       });
     }
 
-    // Arc Wave: lightning arcing forward from the projectile
+    // Arc Wave: green lightning arcing forward + sparks + persistent
+    // chain along the projectile path (the chain lingers as a trail).
     if (this.isArcWave) {
       if (!this.arcLightTimer) this.arcLightTimer = 0;
       this.arcLightTimer -= dt;
       if (this.arcLightTimer <= 0) {
-        // Spawn a short lightning bolt arcing ahead of the projectile
         const ahead = this.velocity.clone().normalize().multiplyScalar(120 + Math.random() * 80);
         const boltEnd = this.position.clone().add(ahead).add(
           new THREE.Vector3((Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*80)
         );
-        spawnLightningBolt(this.position, boltEnd, 0x44aaff, 0.10, 1, 1.5);
-        // Occasional wall arc (30% chance, reduced from 50%)
+        spawnLightningBolt(this.position, boltEnd, 0x44ff66, 0.10, 1, 1.5);
         if (Math.random() > 0.7) {
           const wallArc = this.position.clone().add(
             new THREE.Vector3((Math.random()-0.5)*200, (Math.random()-0.5)*200, (Math.random()-0.5)*200)
           );
-          spawnLightningBolt(this.position, wallArc, 0x2288cc, 0.08, 0, 0.8);
+          spawnLightningBolt(this.position, wallArc, 0x22cc44, 0.08, 0, 0.8);
         }
-        this.arcLightTimer = 0.14 + Math.random() * 0.08; // ~4-7 bolts/sec
+        this.arcLightTimer = 0.14 + Math.random() * 0.08;
       }
-      // Spark particles along the path
+      // (v11c) Persistent chain along the path. Track the last anchor and
+      // every ~70 units of travel, drop a fat green bolt from the previous
+      // anchor to the current position. ~0.5s lifetime so the chain reads
+      // as a lingering wake the projectile leaves behind, not a flash.
+      if (!this._arcTrailAnchor) this._arcTrailAnchor = this.position.clone();
+      const _trailDist2 = this.position.distanceToSquared(this._arcTrailAnchor);
+      if (_trailDist2 > 70 * 70) {
+        spawnLightningBolt(this._arcTrailAnchor, this.position, 0x44ff66,
+                           0.50 + Math.random() * 0.20, 3 + Math.floor(Math.random() * 3), 2.0 + Math.random() * 1.0);
+        // Sometimes a side-branch off the chain for organic crackle.
+        if (Math.random() > 0.55) {
+          const _side = this.position.clone().add(new THREE.Vector3(
+            (Math.random() - 0.5) * 220,
+            (Math.random() - 0.5) * 220,
+            (Math.random() - 0.5) * 220,
+          ));
+          spawnLightningBolt(this.position, _side, 0x22cc44,
+                             0.30 + Math.random() * 0.15, 1 + Math.floor(Math.random() * 2), 1.0);
+        }
+        this._arcTrailAnchor = this.position.clone();
+      }
+      // Spark particles along the path (recolored green).
       for (let sp = 0; sp < 2; sp++) {
         game.particles.push({
           position: this.position.clone(),
           velocity: new THREE.Vector3((Math.random()-0.5)*200, (Math.random()-0.5)*200, (Math.random()-0.5)*200),
           life: 0.08 + Math.random() * 0.06,
           maxLife: 0.14,
-          color: Math.random() > 0.5 ? 0x44aaff : 0xaaddff,
+          color: Math.random() > 0.5 ? 0x44ff66 : 0xaaffaa,
           size: 1 + Math.random() * 1.5
         });
       }
@@ -13504,6 +13524,8 @@ class Projectile {
     if (this.owner === 'player') {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
+        // (v11c) Arc Wave already hit this bot ; skip so it pierces past.
+        if (this.isArcWave && this._arcHitBots && this._arcHitBots.has(bot.id)) continue;
         const hitRadius = bot.chassis.hullLength * 1.2;
         if (this.position.distanceToSquared(bot.position) < hitRadius * hitRadius) {
           // (v9) Sonar beacon: lands on ship, spawns the pulse around it
@@ -13581,6 +13603,16 @@ class Projectile {
           // Cluster Missile: spawn child projectiles on impact
           if (this.isCluster) this.spawnClusterChildren();
           if (this.splash > 0) this.splashDamage();
+          // (v11c) Arc Wave pierces ships ; track hit bots in a Set so
+          // we don't re-damage the same one every frame, and skip the
+          // destroy so the projectile keeps flying through the next
+          // target. Splash + cluster paths above are no-ops for Arc Wave
+          // (it has neither flag), so there's no spawn duplication risk.
+          if (this.isArcWave) {
+            if (!this._arcHitBots) this._arcHitBots = new Set();
+            this._arcHitBots.add(bot.id);
+            continue;
+          }
           this.destroy();
           return;
         }
@@ -20671,6 +20703,15 @@ function activateAbility(slot) {
   if (ability.cooldown === 0 && player.abilityActive[slot]) {
     if (isHoldAbility) return; // hold abilities deactivate on key release, not re-press
     player.abilityActive[slot] = false; // toggle abilities (Gun Shield, Mode Switch)
+    // (v11c fix) Manual toggle-off of the Gun Shield needs to clear the
+    // shield state too. The network broadcast at sendPlayerState checks
+    // `player.gunShieldHP > 0` for `abilityShield`, while the local view
+    // checks abilityActive[1]. Without resetting HP/timer here, peers
+    // kept seeing the dome up after the pilot toggled it off.
+    if (ability.name === 'Gun Shield') {
+      player.gunShieldHP = 0;
+      player.gunShieldTimer = 0;
+    }
     return;
   }
 
@@ -20912,15 +20953,14 @@ function executeAbility(slot, ability) {
       // visual zone effect, which is the effect_spawn follow-up).
       broadcastAbilityProjectile(proj);
     }
-    // SLAYER: Arc Wave (electric projectile, 1000 dmg, slows enemies hit; 1500 in Sword Core)
+    // SLAYER: Arc Wave (electric projectile, pierces ships, drops green
+    // lightning chain along its path. Sword Core boost applies as before.)
     else if (ability.name === 'Arc Wave') {
       const arcDmg = player.coreActive && player.loadout.core.name === 'Sword Core' ? 3000 : 2000;
       const vel = forward.clone().multiplyScalar(800);
-      const proj = new Projectile(player.position.clone(), vel, arcDmg, 150, 'player', 0x44aaff);
-      proj.isArcWave = true; // applies slow on hit
+      const proj = new Projectile(player.position.clone(), vel, arcDmg, 150, 'player', 0x44ff66);
+      proj.isArcWave = true; // applies slow on hit + pierces + leaves trail
       game.projectiles.push(proj);
-      // (v6.7) Broadcast with isArcWave so receivers spawn the lightning-bolt
-      // trail visuals locally (visual only; damage flows via hit-claim path).
       broadcastAbilityProjectile(proj);
     }
     // TRACKER: Tracker Rockets (fire homing salvo at fully-locked targets; partial locks preserved)
@@ -23481,14 +23521,14 @@ function dash() {
   }
   const dashColor = 0xaaeeff;
   spawnDashBoosters(player.mesh, dashDir, dashColor);
-  // (v11 Phase 6) Brief layered plasma puff at the dash origin so the
-  // trail leading edge reads as charged energy. Anchored at player.position
-  // (the dash origin) and dispersed outward via the burst's scale ramp.
-  if (typeof spawnFXBurst === 'function') {
-    spawnFXBurst('plasma_wall', player.position, 60, 0.32, {
-      startScale: 0.3, endScale: 1.4,
-    });
-  }
+  // (v11c) Removed the plasma_wall puff that fired on dash. It was
+  // anchored at the dash origin and grew from 18 -> 84 units over 0.32s,
+  // which read fine on forward dashes (you fly away from it) but on a
+  // backward dash the camera kept looking forward while the player flew
+  // away ; the burst sat in front of the view and grew, looking like a
+  // cyan sphere lagging behind and catching up. The dash boosters above
+  // already provide the jet-line visual feedback ; the sphere added
+  // nothing on top of that, only confusion when dashing non-forward.
   if (net.active && net.sendEvent) {
     net.sendEvent({
       type: 'dash_burst',
