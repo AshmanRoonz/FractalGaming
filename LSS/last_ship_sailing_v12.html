@@ -6777,6 +6777,25 @@ const EFFECT_PRESETS = {
       { pattern: 2, scale: 1.1, timeRate: 1.65, hue: 0.55,  alpha: 0.55, blend: 6, sat: 0.7  },
     ],
   },
+  // (v12) User-authored preset for per-cluster-atom smoke spheres ; the
+  // little volumetric puffs that surround each piece of a cluster. Mixes
+  // turbulence + FBM + caustic so the smoke reads as flowing/luminous
+  // rather than static grey wool. Brightness intentionally low so the
+  // clouds don't blow out adjacent geometry.
+  cloud_atom: {
+    name: 'Cloud (Atom)',
+    baseColor: '#ffffff',
+    fresnel: 0.0,
+    brightness: 0.45,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.5,
+    layers: [
+      { pattern: 2, scale: 3.0,  timeRate: 2.98, hue: 0.12,  alpha: 1.5,  blend: 4, sat: 0.35 },
+      { pattern: 0, scale: 3.0,  timeRate: 0.47, hue: 0.0,   alpha: 0.87, blend: 3, sat: 0.05 },
+      { pattern: 6, scale: 2.23, timeRate: 1.39, hue: 0.515, alpha: 1.1,  blend: 4, sat: 0.55 },
+    ],
+  },
 };
 
 // Convenience: clone a named preset into a fresh material instance.
@@ -13173,6 +13192,11 @@ class Projectile {
     const prevPos = _projPrev.copy(this.position);
     this.position.add(_projStep.copy(this.velocity).multiplyScalar(dt));
     this.mesh.position.copy(this.position);
+    // (v12) Wake on cloud dots: push them in the bullet's travel direction
+    // and tint with the weapon color. Cheap (early-out distance check).
+    if (typeof applyDotBulletWake === 'function') {
+      applyDotBulletWake(prevPos, this.position, this.trailColor);
+    }
 
     // Fire projectiles ignite gas clouds as they fly through (not just on splash).
     // Radius 150 ensures a fast-moving round passing near the cloud edge reliably
@@ -14987,6 +15011,12 @@ if (typeof window !== 'undefined') {
 
 function spawnExplosion(pos, size) {
   size = size || 20;
+  // (v12) Push + tint nearby cloud dots with an outward shockwave so
+  // explosions visibly disturb the smoke field. Color picked to feel
+  // "explosive" : warm white-orange ; matches the fireball preset.
+  if (typeof applyDotExplosionShockwave === 'function') {
+    applyDotExplosionShockwave(pos, size, 0xffaa55);
+  }
   // (v11b) Dynamic point light at every explosion â‰¥ 8 units. Lights up
   // walls / ships / other FX so the blast actually illuminates the scene
   // instead of being a self-glowing decal.
@@ -15746,7 +15776,9 @@ function _makeAtomFractalMaterial(baseColor) {
     uniforms: {
       time:       { value: 0 },
       uBaseColor: { value: new THREE.Color(baseColor) },
-      uOpacity:   { value: 1.0 },
+      // (v12) Rocks ~93% opaque ; storm clouds behind are still
+      // hinted through but the rock silhouette stays solid-looking.
+      uOpacity:   { value: 0.93 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -15842,7 +15874,9 @@ function _makeAtomFractalMaterial(baseColor) {
       '}',
     ].join('\n'),
     transparent: true,
-    depthWrite: true,
+    // (v12) depthWrite OFF since rocks are now 80% opaque ; otherwise
+    // the rock would block clouds + atoms behind it from being drawn.
+    depthWrite: false,
     side: THREE.FrontSide,
   });
   _atomFractalMaterials.push(mat);
@@ -15950,45 +15984,59 @@ class ClusterObstacle {
   }
 
   _buildChildSmokeSphere(child) {
-    if (!child || typeof scene === 'undefined' || !THREE.ShaderMaterial) return;
-    if (typeof _SMOKE_GEO === 'undefined' || typeof _makeSmokeMaterial !== 'function') return;
-    // (v8VR 2026-05-01 retune) Black per-child smoke clouds. Tiny random
-    // value variation so adjacent atoms aren't pixel-perfect identical
-    // black, but all read as black to the eye.
-    const v = 0.02 + Math.random() * 0.04;        // 0.02-0.06 luminance
-    const colorObj = new THREE.Color(v, v, v);
-    const smokeMat = _makeSmokeMaterial(colorObj.getHex(), 0.95);
-    if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
-      smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
-    }
-    const mesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
-    // Sphere envelope ~1.8x child scale: hugs the piece + a little margin.
+    if (!child || typeof scene === 'undefined') return;
+    if (typeof _spawnCloudVolume !== 'function') return;
+    // (v12) Per-rock smoke is now a CloudVolume (drei-style instanced
+    // billboard puffs ; one shared draw call across every cluster's
+    // atom smoke in the scene). Anchor lives in scene root and gets its
+    // position copied from the child's world position each frame in the
+    // cluster update loop (mirrors the legacy mesh-position pattern).
     const radius = (child.scale || child.radius || 20) * 1.8;
-    mesh.scale.setScalar(radius);
-    mesh.position.copy(child.position);
-    mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-    mesh.frustumCulled = true;
-    mesh.renderOrder = 1;
-    scene.add(mesh);
-    child._atomSmoke = mesh;
-    // Per-child phase offset for the time uniform so adjacent atoms
-    // don't churn in sync.
-    child._atomSmokePhase = Math.random() * 100;
-    // Per-child rotation drift for subtle independent motion.
-    child._atomSmokeRotVel = new THREE.Vector3(
-      (Math.random() - 0.5) * 0.20,
-      (Math.random() - 0.5) * 0.20,
-      (Math.random() - 0.5) * 0.20
-    );
+    const _cv = _spawnCloudVolume({
+      // Fewer segments per rock than the ambient drifters since each
+      // cluster typically has 4-7 children, so the totals add up fast.
+      // (v12 visibility-tune) More + bigger puffs per rock so the
+      // cloud halo around each piece reads as substantial.
+      segments: 10 + Math.floor(Math.random() * 5),    // 10-14 puffs per rock
+      bounds: new THREE.Vector3(radius * 2.0, radius * 1.2, radius * 2.0),
+      // (v12) Dark + stormy with per-cluster shade variation. Lambert
+      // shading on top means the puff still picks up scene light
+      // direction, so two same-color clouds in different lighting read
+      // differently anyway.
+      color: _pickStormyCloudColor(),
+      opacity: 1.0,                                    // (v12) full opacity ; texture alpha still gives soft edges
+      fade: 0,
+      concentrate: 'inside',
+      volume: radius * 0.85,                            // (v12 tune) bigger base sprite scale
+      growth: radius * 0.18,                            // sin-pulse amplitude
+      speed: 0.30 + Math.random() * 0.25,
+      smallestVolume: 0.20,
+    });
+    if (!_cv) return;
+    if (_cv._anchor) {
+      // World-space anchor ; cluster update loop copies child world
+      // position into _cv._anchor.position each frame.
+      _cv._anchor.position.copy(child.position);
+      scene.add(_cv._anchor);
+    }
+    child._atomCloud = _cv;
   }
 
   _disposeChildSmokeSphere(child) {
-    if (!child || !child._atomSmoke) return;
-    const m = child._atomSmoke;
-    if (m.parent) m.parent.remove(m);
-    if (m.material && m.material.dispose) m.material.dispose();
-    // Don't dispose _SMOKE_GEO; it's shared.
-    child._atomSmoke = null;
+    if (!child) return;
+    // (v12) New CloudVolume path.
+    if (child._atomCloud) {
+      try { child._atomCloud.dispose(); } catch (_) {}
+      child._atomCloud = null;
+    }
+    // Legacy shader-mesh path (kept defensive in case any code still
+    // populates _atomSmoke during a transition / fallback).
+    if (child._atomSmoke) {
+      const m = child._atomSmoke;
+      if (m.parent) m.parent.remove(m);
+      if (m.material && m.material.dispose) m.material.dispose();
+      child._atomSmoke = null;
+    }
   }
 
   _buildDistortionShell() {
@@ -16209,27 +16257,23 @@ class ClusterObstacle {
           this.distortionMesh.material.uniforms.time.value = (typeof game !== 'undefined') ? game.time : 0;
         }
       }
-      // (v8VR 2026-05-01) Per-child smoke spheres (atoms in the molecule).
-      // Each atom-smoke follows its child's position + ticks its own time
-      // phase so adjacent atoms churn out of sync. Tear down silently if
-      // the child died this frame.
-      const _t = (typeof game !== 'undefined') ? game.time : 0;
+      // (v12) Per-child smoke is now a CloudVolume. Copy each child's
+      // world position into the cloud's anchor so the puffs follow
+      // their rock's tumble. Tear down on child death. The drei-style
+      // sin-pulse + Z spin animation is auto-driven by the global
+      // _CLOUDS.update() in the gameLoop; no per-frame uniform write.
       for (let i = 0; i < this.children.length; i++) {
         const c = this.children[i];
         if (!c) continue;
         if (!c.alive) {
-          if (c._atomSmoke) this._disposeChildSmokeSphere(c);
+          if (c._atomCloud || c._atomSmoke) this._disposeChildSmokeSphere(c);
           continue;
         }
-        if (!c._atomSmoke) continue;
-        c._atomSmoke.position.copy(c.position);
-        if (c._atomSmokeRotVel) {
-          c._atomSmoke.rotation.x += c._atomSmokeRotVel.x * dt;
-          c._atomSmoke.rotation.y += c._atomSmokeRotVel.y * dt;
-          c._atomSmoke.rotation.z += c._atomSmokeRotVel.z * dt;
-        }
-        if (c._atomSmoke.material && c._atomSmoke.material.uniforms) {
-          c._atomSmoke.material.uniforms.time.value = _t + (c._atomSmokePhase || 0);
+        if (c._atomCloud && c._atomCloud._anchor) {
+          c._atomCloud._anchor.position.copy(c.position);
+        } else if (c._atomSmoke) {
+          // Legacy fallback (shouldn't normally fire after v12).
+          c._atomSmoke.position.copy(c.position);
         }
       }
       // Rotate cluster as a rigid group; each child follows its rotated offset
@@ -16457,9 +16501,7 @@ class ClusterObstacle {
       // dead cluster's location). They live in the dot system, fully
       // independent of this cluster object.
       try {
-        if (typeof spawnDot === 'function' &&
-            typeof _SMOKE_GEO !== 'undefined' &&
-            typeof _makeSmokeMaterial === 'function') {
+        if (typeof spawnDot === 'function' && typeof _spawnCloudVolume === 'function') {
           // Cluster's signature phase: derived from the cluster's id-ish
           // identity (its initial position) so all dots from this cluster
           // share an inheritance.
@@ -16481,17 +16523,6 @@ class ClusterObstacle {
               Math.cos(_phi) * 0.4,
               _sinP * Math.sin(_theta),
             ).multiplyScalar(20 + Math.random() * 30);
-            const _mat = _makeSmokeMaterial(0x080812, 1.0);
-            if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
-              _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
-            }
-            const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
-            _mesh.scale.setScalar(_size);
-            _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-            _mesh.frustumCulled = true;
-            _mesh.renderOrder = 1;
-            // Inherit the cluster phase with a small random offset so they
-            // bond strongly to each other but not lockstep.
             const _phaseJitter = (Math.random() - 0.5) * 0.6;
             const _dot = spawnDot(_pos, {
               // (v9) Indestructible ; the cluster's smoke memory lives on.
@@ -16504,9 +16535,9 @@ class ClusterObstacle {
               emitsLightning: true,
               arcRadius: _size * 0.5,
               interArcRange: 900,
-              hueCycleMaterial: _mat,
-              hueSpeed: 0.08 + Math.random() * 0.06,
-              scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
+              // (v12) No hueCycleMaterial ; the new CloudVolume uses
+              // MeshLambertMaterial without uniforms. Color comes from
+              // the per-frame host-dot bridge (combat tint memory).
               fadeOut: { alphaMul: 0.4 },
               clusterAttraction: true,
               attractStrength: 35,
@@ -16516,7 +16547,41 @@ class ClusterObstacle {
             });
             _dot._isAmbientCloud = true;
             _dot._fromDeadCluster = true;       // marker (potential later use)
-            _dot.attachMesh(_mesh);
+            // (v12) Drei-style CloudVolume parented under the dot anchor.
+            // Same dark + transparent palette as the ambient drifters so
+            // all 'memory dots' read consistently. Combat reactivity
+            // (bullet wake + explosion shockwave + tint) flows through
+            // the dot anchor and the per-frame bridge in gameLoop.
+            const _cv = _spawnCloudVolume({
+              // (v12 visibility-tune) More + bigger puffs per memory dot.
+              segments: 24 + Math.floor(Math.random() * 8),  // 24-31 puffs
+              bounds: new THREE.Vector3(_size * 1.7, _size * 0.7, _size * 1.7),
+              // (v12) Dark stormy shade per cluster-death dot.
+              color: _pickStormyCloudColor(),
+              opacity: 1.0,                                   // (v12) full opacity ; texture alpha still gives soft edges
+              fade: 0,
+              concentrate: 'inside',
+              volume: _size * 0.50,                          // (v12 tune) bigger base sprite scale
+              growth: _size * 0.22,
+              speed: 0.30 + Math.random() * 0.25,
+              smallestVolume: 0.18,
+            });
+            if (_cv) {
+              _dot.anchor.add(_cv._anchor);
+              _cv._hostDot = _dot;
+              _dot._cloudVol = _cv;
+              _cv._scaleMul = 0.001;     // ramps in via host-dot bridge
+            }
+            // Wrap dispose so the CloudVolume cleans up when the dot dies
+            // (round-end / disposeAllDots).
+            const _origDispose = _dot.dispose.bind(_dot);
+            _dot.dispose = function () {
+              if (this._cloudVol && typeof this._cloudVol.dispose === 'function') {
+                this._cloudVol.dispose();
+                this._cloudVol = null;
+              }
+              _origDispose();
+            };
           }
         }
       } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
@@ -17018,6 +17083,395 @@ function updateOrganics(dt) {
 // want it popping out at the edges of the screen).
 const _SMOKE_GEO = new THREE.SphereGeometry(1, 12, 8);
 
+// =====================================================================
+// =====================================================================
+// (v12) Volumetric raymarched clouds (FarazzShaikh-inspired port)
+// ---------------------------------------------------------------------
+// Each cloud is a BoxMesh with a custom GLSL3 ShaderMaterial that
+// raymarches a shared 64^3 FBM noise Data3DTexture. The fragment shader
+// computes ray-box intersection in object space, marches 32 steps
+// front-to-back, applies Beer's law transmittance, samples sun light
+// via 4-step light-march, and uses Henyey-Greenstein forward scattering.
+//
+// Outer API (_spawnCloudVolume / _CloudVolume._anchor / pushTint /
+// tick / dispose) matches the prior billboard module so existing
+// integration sites work unchanged.
+// =====================================================================
+
+// ---- 3D noise texture (generated once on first cloud spawn) ----------
+let _CLOUD_NOISE_3D = null;
+function _hashFloat3(x, y, z) {
+  // Cheap hash to stable [0,1) value at integer corners.
+  let h = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791);
+  h = (h ^ (h >>> 13)) * 1274126177;
+  return ((h ^ (h >>> 16)) >>> 0) / 0x100000000;
+}
+function _smoothstep(t) { return t * t * (3 - 2 * t); }
+function _trilinearValueNoise(x, y, z) {
+  // Trilinear interpolation between 8 hashed corner values.
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const c000 = _hashFloat3(xi,   yi,   zi  );
+  const c001 = _hashFloat3(xi,   yi,   zi+1);
+  const c010 = _hashFloat3(xi,   yi+1, zi  );
+  const c011 = _hashFloat3(xi,   yi+1, zi+1);
+  const c100 = _hashFloat3(xi+1, yi,   zi  );
+  const c101 = _hashFloat3(xi+1, yi,   zi+1);
+  const c110 = _hashFloat3(xi+1, yi+1, zi  );
+  const c111 = _hashFloat3(xi+1, yi+1, zi+1);
+  const sx = _smoothstep(xf), sy = _smoothstep(yf), sz = _smoothstep(zf);
+  const c00 = c000 * (1 - sx) + c100 * sx;
+  const c01 = c001 * (1 - sx) + c101 * sx;
+  const c10 = c010 * (1 - sx) + c110 * sx;
+  const c11 = c011 * (1 - sx) + c111 * sx;
+  const c0 = c00 * (1 - sy) + c10 * sy;
+  const c1 = c01 * (1 - sy) + c11 * sy;
+  return c0 * (1 - sz) + c1 * sz;
+}
+function _ensureCloudNoise3D() {
+  if (_CLOUD_NOISE_3D) return _CLOUD_NOISE_3D;
+  if (!THREE.Data3DTexture) {
+    console.warn('[Clouds] Data3DTexture not available ; volumetric clouds disabled');
+    return null;
+  }
+  const W = 64;
+  const data = new Uint8Array(W * W * W);
+  // FBM: sum of value-noise octaves with decreasing amplitude.
+  // Subtract a soft sphere-shaped envelope so the puff is densest at
+  // the center and tapers to zero at the box edges (so the box
+  // silhouette doesn't show as a hard rectangle).
+  for (let z = 0; z < W; z++) {
+    for (let y = 0; y < W; y++) {
+      for (let x = 0; x < W; x++) {
+        const fx = x / W, fy = y / W, fz = z / W;
+        let n = 0, amp = 0.5, freq = 4;
+        for (let o = 0; o < 4; o++) {
+          n += amp * _trilinearValueNoise(fx * freq, fy * freq, fz * freq);
+          amp *= 0.5; freq *= 2;
+        }
+        // Sphere envelope
+        const cx = fx - 0.5, cy = fy - 0.5, cz = fz - 0.5;
+        const r = Math.sqrt(cx*cx + cy*cy + cz*cz) * 2;   // 0 at center, 1 at face center
+        const env = Math.max(0, 1 - r * 1.15);
+        const v = Math.max(0, n * env);
+        data[z*W*W + y*W + x] = Math.floor(Math.min(1, v * 1.6) * 255);
+      }
+    }
+  }
+  const tex = new THREE.Data3DTexture(data, W, W, W);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.wrapR = THREE.RepeatWrapping;
+  tex.unpackAlignment = 1;
+  tex.needsUpdate = true;
+  _CLOUD_NOISE_3D = tex;
+  return tex;
+}
+
+// ---- Volumetric cloud material ---------------------------------------
+const _CLOUD_BOX_GEO = new THREE.BoxGeometry(1, 1, 1);
+function _makeVolumetricCloudMaterial(opts) {
+  opts = opts || {};
+  const tex = _ensureCloudNoise3D();
+  if (!tex) {
+    // No 3D-tex support ; fallback to a transparent invisible material.
+    return new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 });
+  }
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uNoise:        { value: tex },
+      uColor:        { value: new THREE.Color(opts.color || 0xddddee) },
+      uOpacity:      { value: (opts.opacity != null) ? +opts.opacity : 1.0 },
+      uDensity:      { value: (opts.density != null) ? +opts.density : 7.0 },
+      uSunDir:       { value: new THREE.Vector3(0.55, 0.78, 0.30).normalize() },
+      // (v12 tune) Lifted ambient so dark grey clouds register
+      // against the dark scene background. Goal: cloud silhouette
+      // reads at ~30-40% brightness vs 5-10% scene background.
+      uSunColor:     { value: new THREE.Color(0xe0e4ee) },
+      uAmbient:      { value: new THREE.Color(0x808898) },
+      uEmissive:     { value: new THREE.Color(opts.emissive || 0x10141e) },
+      uTime:         { value: 0 },
+      uNoiseScale:   { value: (opts.noiseScale != null) ? +opts.noiseScale : 1.0 },
+    },
+    vertexShader: [
+      'out vec3 vObjectPos;',
+      // (v12 fix3) Compute camera position in object space here ;
+      // modelMatrix is only auto-prefixed into the vertex shader,
+      // not the fragment. Pass as varying for the raymarcher.
+      'out vec3 vCameraObjectPos;',
+      'void main() {',
+      '  vObjectPos = position;',
+      '  vCameraObjectPos = (inverse(modelMatrix) * vec4(cameraPosition, 1.0)).xyz;',
+      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'precision highp sampler3D;',
+      'in vec3 vObjectPos;',
+      'in vec3 vCameraObjectPos;',
+      'uniform sampler3D uNoise;',
+      'uniform vec3 uColor;',
+      'uniform float uOpacity;',
+      'uniform float uDensity;',
+      'uniform vec3 uSunDir;',
+      'uniform vec3 uSunColor;',
+      'uniform vec3 uAmbient;',
+      'uniform vec3 uEmissive;',
+      'uniform float uTime;',
+      'uniform float uNoiseScale;',
+      // (v12 fix2) ShaderMaterial with glslVersion:GLSL3 does NOT
+      // auto-inject pc_fragColor ; we have to declare our own
+      // `out vec4` and write to it. gl_FragColor is undefined in
+      // GLSL ES 3.00.
+      'out vec4 outColor;',
+      '',
+      '// 3D noise sample at object-local position (-0.5..0.5).',
+      '// (v12 tune) Wispier ; raised contrast (subtract floor),',
+      '// stronger detail octave for shred / tendril shapes, plus a',
+      '// soft sphere falloff that tapers density to zero before the',
+      '// box edges so the silhouette never reads as a cube.',
+      'float sampleDensity(vec3 p) {',
+      '  vec3 uvw = (p + 0.5) * uNoiseScale;',
+      '  uvw.x += uTime * 0.012;',
+      '  uvw.z -= uTime * 0.008;',
+      '  float lo = texture(uNoise, uvw).r;',
+      '  float hi = texture(uNoise, uvw * 3.5 + vec3(0.31, 0.57, 0.13)).r;',
+      '  // Raise contrast ; subtract a floor so wisps form tendrils',
+      '  // instead of a continuous mass.',
+      '  float n = clamp(lo + hi * 0.40 - 0.18, 0.0, 1.0);',
+      '  // In-shader sphere envelope. p is in (-0.5..0.5) ; length',
+      '  // up to ~0.866 at corners. smoothstep tapers from 0.32 to',
+      '  // 0.5 so density falls smoothly to zero before the cube',
+      '  // faces, hiding the box silhouette.',
+      '  float r = length(p) * 1.732;',
+      '  float env = 1.0 - smoothstep(0.55, 0.95, r);',
+      '  return n * env;',
+      '}',
+      '',
+      '// Ray vs unit cube centered at origin.',
+      'vec2 rayBoxIntersect(vec3 ro, vec3 rd) {',
+      '  vec3 invD = 1.0 / rd;',
+      '  vec3 t0 = (vec3(-0.5) - ro) * invD;',
+      '  vec3 t1 = (vec3( 0.5) - ro) * invD;',
+      '  vec3 tmin = min(t0, t1);',
+      '  vec3 tmax = max(t0, t1);',
+      '  float tNear = max(max(tmin.x, tmin.y), tmin.z);',
+      '  float tFar  = min(min(tmax.x, tmax.y), tmax.z);',
+      '  return vec2(tNear, tFar);',
+      '}',
+      '',
+      'void main() {',
+      '  vec3 ro = vCameraObjectPos;',
+      '  vec3 rd = normalize(vObjectPos - ro);',
+      '  vec2 hit = rayBoxIntersect(ro, rd);',
+      '  float tNear = max(hit.x, 0.0);',
+      '  float tFar  = hit.y;',
+      '  if (tFar <= tNear) discard;',
+      '',
+      '  const int STEPS = 32;',
+      '  float stepLen = (tFar - tNear) / float(STEPS);',
+      '  vec3 p = ro + rd * tNear;',
+      '  vec3 stepVec = rd * stepLen;',
+      '',
+      '  // (v12 fix) Simple non-normalized forward-scatter weight ;',
+      '  // bright when looking toward the sun, dim away from it. The',
+      '  // physically correct HG returns 0.05 values which made accum',
+      '  // effectively zero ; this returns 0.3..2.5.',
+      '  vec3 sunDir = normalize(uSunDir);',
+      '  float cosSun = dot(rd, sunDir);',
+      '  float scatter = 0.25 + pow(max(0.0, cosSun), 4.0) * 1.0;',
+      '',
+      '  vec3 accum = vec3(0.0);',
+      '  float transmittance = 1.0;',
+      '',
+      '  for (int i = 0; i < STEPS; i++) {',
+      '    float d = sampleDensity(p);',
+      '    if (d > 0.02) {',
+      '      // Light march: how much sun reaches this point.',
+      '      float sunOpt = 0.0;',
+      '      vec3 sp = p + sunDir * 0.05;',
+      '      for (int j = 0; j < 4; j++) {',
+      '        if (any(greaterThan(abs(sp), vec3(0.5)))) break;',
+      '        sunOpt += sampleDensity(sp);',
+      '        sp += sunDir * 0.07;',
+      '      }',
+      '      float sunVis = exp(-sunOpt * 1.4);',
+      '      vec3 light = uSunColor * sunVis * scatter + uAmbient;',
+      '      vec3 segment = uColor * light + uEmissive;',
+      '      // (v12 fix) High effective extinction so dense regions ',
+      '      // actually go opaque. uDensity is on the order of 8.',
+      '      float opt = d * uDensity * stepLen;',
+      '      float t = exp(-opt);',
+      '      accum += transmittance * (1.0 - t) * segment;',
+      '      transmittance *= t;',
+      '      if (transmittance < 0.01) break;',
+      '    }',
+      '    p += stepVec;',
+      '  }',
+      '',
+      '  float alpha = (1.0 - transmittance) * uOpacity;',
+      '  if (alpha < 0.005) discard;',
+      '  // (v12 fix2) Write to outColor (the GLSL3 user-declared output).',
+      '  outColor = vec4(accum, alpha);',
+      '}',
+    ].join('\n'),
+    glslVersion: THREE.GLSL3,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.BackSide,    // standard for raymarched volumes
+  });
+  return mat;
+}
+
+// ---- CloudVolume + manager (same outer API as the prior module) ------
+class _CloudVolume {
+  constructor(opts) {
+    opts = opts || {};
+    this.bounds = opts.bounds || new THREE.Vector3(120, 60, 120);
+    this.opacity = (opts.opacity != null) ? +opts.opacity : 1.0;
+    this.color = opts.color ? new THREE.Color(opts.color) : new THREE.Color(0xddddee);
+    this._baseColor = this.color.clone();
+    // Combat color memory (set by host-dot bridge in gameLoop).
+    this._tintColor = new THREE.Color(1, 1, 1);
+    this._tintStrength = 0;
+    this._scaleMul = 1.0;        // ramps via host-dot growth bridge
+    this._anchor = new THREE.Object3D();
+    this._anchor.userData.isCloudVolumeAnchor = true;
+    // Material + mesh (BoxMesh sized to bounds).
+    this._mat = _makeVolumetricCloudMaterial({
+      color: this.color,
+      opacity: this.opacity,
+      density: opts.density,
+      absorption: opts.absorption,
+      noiseScale: opts.noiseScale,
+      emissive: opts.emissive,
+    });
+    this._mesh = new THREE.Mesh(_CLOUD_BOX_GEO, this._mat);
+    this._mesh.scale.copy(this.bounds);
+    this._mesh.frustumCulled = false;
+    this._mesh.renderOrder = 1;
+    this._anchor.add(this._mesh);
+    this._alive = true;
+    this._manager = null;
+  }
+  pushTint(colorHex, strength) {
+    if (this._tintColor && colorHex != null) this._tintColor.setHex(colorHex);
+    this._tintStrength = Math.max(this._tintStrength, strength);
+  }
+  tick(dt) {
+    if (this._tintStrength > 0) {
+      this._tintStrength *= Math.exp(-dt * 1.5);
+      if (this._tintStrength < 0.01) this._tintStrength = 0;
+    }
+  }
+  dispose() {
+    this._alive = false;
+    if (this._manager) this._manager.remove(this);
+    if (this._mesh) {
+      if (this._mesh.parent) this._mesh.parent.remove(this._mesh);
+    }
+    if (this._mat && this._mat.dispose) this._mat.dispose();
+    if (this._anchor.parent) this._anchor.parent.remove(this._anchor);
+  }
+}
+
+class _CloudManager {
+  constructor() {
+    this.volumes = [];
+  }
+  add(v) {
+    if (v._manager) return v;
+    v._manager = this;
+    this.volumes.push(v);
+    return v;
+  }
+  remove(v) {
+    const i = this.volumes.indexOf(v);
+    if (i >= 0) this.volumes.splice(i, 1);
+    v._manager = null;
+  }
+  update(camera, t, dt) {
+    // Per-volume per-frame: tint blend + scale-mul + uTime stamp.
+    for (let i = 0; i < this.volumes.length; i++) {
+      const v = this.volumes[i];
+      if (!v || !v._alive) continue;
+      // Resolved color = base lerped toward tint by tint strength.
+      const u = v._mat && v._mat.uniforms;
+      if (!u) continue;
+      if (u.uColor) {
+        if (v._tintStrength > 0) {
+          const k = Math.min(1, v._tintStrength);
+          // Lerp diffuse color toward tint.
+          u.uColor.value.copy(v._baseColor).lerp(v._tintColor, k);
+          // Also pump emissive proportional to tint so the cloud
+          // clearly *glows* when hit, not just diffuse-lit.
+          if (u.uEmissive) {
+            u.uEmissive.value.copy(v._tintColor).multiplyScalar(k * 0.85);
+          }
+        } else {
+          u.uColor.value.copy(v._baseColor);
+          if (u.uEmissive) {
+            // Restore the dark default emissive when not tinted.
+            u.uEmissive.value.setHex(0x080a10);
+          }
+        }
+      }
+      if (u.uTime) u.uTime.value = t;
+      // Scale ramp: apply _scaleMul on top of the configured bounds.
+      const sm = (v._scaleMul != null) ? Math.max(0.001, v._scaleMul) : 1.0;
+      if (v._mesh) {
+        v._mesh.scale.set(v.bounds.x * sm, v.bounds.y * sm, v.bounds.z * sm);
+      }
+    }
+  }
+  dispose() {
+    for (let i = this.volumes.length - 1; i >= 0; i--) {
+      const v = this.volumes[i];
+      if (v && typeof v.dispose === 'function') v.dispose();
+    }
+    this.volumes.length = 0;
+  }
+}
+
+let _CLOUDS = null;
+function _getCloudsManager() {
+  if (_CLOUDS) return _CLOUDS;
+  if (typeof scene === 'undefined') return null;
+  _CLOUDS = new _CloudManager();
+  // No top-level mesh to add ; each volume's anchor is added by the
+  // caller (so it can be parented to a Dot anchor for combat reactivity).
+  return _CLOUDS;
+}
+function _spawnCloudVolume(opts) {
+  const mgr = _getCloudsManager();
+  if (!mgr) return null;
+  const v = new _CloudVolume(opts);
+  mgr.add(v);
+  return v;
+}
+
+// (v12) Pick a dark stormy shade for a cloud. Base color is dark
+// grey almost black, but lifted enough that cloud silhouette
+// reads against the dark scene. Tint bridge from the host dot
+// lights it up brightly when bullets / explosions / lightning hit.
+function _pickStormyCloudColor() {
+  const hue = 0.58 + Math.random() * 0.20;     // teal-blue ; deep violet
+  const sat = 0.04 + Math.random() * 0.08;     // very desaturated
+  const lit = 0.22 + Math.random() * 0.12;     // 0.22..0.34 dark grey
+  return new THREE.Color().setHSL(hue, sat, lit);
+}
+function _disposeAllCloudVolumes() {
+  if (!_CLOUDS) return;
+  for (let i = _CLOUDS.volumes.length - 1; i >= 0; i--) {
+    const v = _CLOUDS.volumes[i];
+    if (v && typeof v.dispose === 'function') v.dispose();
+  }
+}
 const _TRACER_CORE_GEO = new THREE.CylinderGeometry(0.55, 0.55, 1, 4, 1);
 _TRACER_CORE_GEO.rotateX(Math.PI / 2);
 const _TRACER_BEAM_GEO = new THREE.CylinderGeometry(1.30, 0.95, 1, 6, 1);
@@ -17365,6 +17819,14 @@ _initDarkLightningPool();
 function spawnLightningBolt(from, to, color, lifetime, branches, thickness) {
   color = color || 0x44aaff;
   lifetime = lifetime || 0.2;
+  // (v12) Push the bolt color into nearby cloud dots so the cloud
+  // visibly lights up when lightning passes through it. Reuses the
+  // Phase 1 bullet-wake helper since it already does the right thing
+  // (line-segment proximity + tint stamp) ; cheap early-out distance
+  // check makes it a no-op when no clouds are near the bolt.
+  if (typeof applyDotBulletWake === 'function') {
+    try { applyDotBulletWake(from, to, color); } catch (_) {}
+  }
   branches = Math.min(branches || 3, 2); // cap branches for perf
   thickness = thickness || 2;
   const dir = new THREE.Vector3().subVectors(to, from);
@@ -18348,6 +18810,10 @@ function spawnDot(position, opts) {
     _internalArcTimer: opts.emitsLightning ? (0.10 + Math.random() * 0.40) : 0,
     _interArcTimer:    opts.emitsLightning ? (0.40 + Math.random() * 1.20) : 0,
     hueCycleMaterial: opts.hueCycleMaterial || null,
+    // (v12) Color memory ; weapons/explosions briefly tint the cloud
+    // toward their color, decays back to neutral over ~1.2s.
+    _tintColor: new THREE.Color(1, 1, 1),
+    _tintStrength: 0,
     huePhase: Math.random(),
     hueSpeed: (typeof opts.hueSpeed === 'number') ? opts.hueSpeed : 0.10,
     scaleGrowth: opts.scaleGrowth || null,
@@ -18385,6 +18851,84 @@ function spawnDot(position, opts) {
   };
   game.dots.push(dot);
   return dot;
+}
+
+// (v12) Apply a bullet's wake to nearby cloud dots. `from` and `to` are
+// the projectile's previous and current positions this frame; `color`
+// is a hex weapon color for the brief tint. Pushes nearby clouds in the
+// direction of bullet travel and stamps a color flash.
+const _BULLET_WAKE_RANGE = 200;            // distance from line to qualify
+const _BULLET_WAKE_RANGE2 = _BULLET_WAKE_RANGE * _BULLET_WAKE_RANGE;
+function applyDotBulletWake(from, to, colorHex) {
+  if (!game.dots || !game.dots.length) return;
+  const sx = from.x, sy = from.y, sz = from.z;
+  const dx = to.x - sx, dy = to.y - sy, dz = to.z - sz;
+  const len2 = dx*dx + dy*dy + dz*dz;
+  if (len2 < 0.0001) return;
+  const _tintC = (colorHex != null) ? new THREE.Color(colorHex) : null;
+  for (let i = 0; i < game.dots.length; i++) {
+    const d = game.dots[i];
+    if (!d || !d.anchor) continue;
+    // Distance-squared from the dot to the bullet's line segment.
+    const px = d.anchor.position.x - sx;
+    const py = d.anchor.position.y - sy;
+    const pz = d.anchor.position.z - sz;
+    let t = (px*dx + py*dy + pz*dz) / len2;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const cx = sx + dx*t, cy = sy + dy*t, cz = sz + dz*t;
+    const ex = d.anchor.position.x - cx;
+    const ey = d.anchor.position.y - cy;
+    const ez = d.anchor.position.z - cz;
+    const d2 = ex*ex + ey*ey + ez*ez;
+    if (d2 > _BULLET_WAKE_RANGE2) continue;
+    const dist = Math.sqrt(d2);
+    const falloff = 1 - dist / _BULLET_WAKE_RANGE;
+    // Push along bullet travel direction (the parting / tunnel effect).
+    const invL = 1 / Math.sqrt(len2);
+    const impulse = falloff * 30;
+    if (d.velocity) {
+      d.velocity.x += dx * invL * impulse;
+      d.velocity.y += dy * invL * impulse;
+      d.velocity.z += dz * invL * impulse;
+    }
+    // Color memory ; stronger flash for closer hits.
+    if (_tintC && d._tintColor) {
+      d._tintColor.copy(_tintC);
+      d._tintStrength = Math.max(d._tintStrength, falloff * 0.85);
+    }
+  }
+}
+
+// (v12) Apply an explosion shockwave to nearby cloud dots. Radial impulse
+// + color tint, falls off with distance. `size` controls the blast radius.
+function applyDotExplosionShockwave(pos, size, colorHex) {
+  if (!game.dots || !game.dots.length) return;
+  const range = Math.max(120, size * 6);
+  const range2 = range * range;
+  const _tintC = (colorHex != null) ? new THREE.Color(colorHex) : null;
+  for (let i = 0; i < game.dots.length; i++) {
+    const d = game.dots[i];
+    if (!d || !d.anchor) continue;
+    const dx = d.anchor.position.x - pos.x;
+    const dy = d.anchor.position.y - pos.y;
+    const dz = d.anchor.position.z - pos.z;
+    const d2 = dx*dx + dy*dy + dz*dz;
+    if (d2 > range2 || d2 < 0.001) continue;
+    const dist = Math.sqrt(d2);
+    const falloff = 1 - dist / range;
+    const inv = 1 / dist;
+    // Radial impulse outward. Big explosions hit harder.
+    const impulse = falloff * (40 + size * 1.2);
+    if (d.velocity) {
+      d.velocity.x += dx * inv * impulse;
+      d.velocity.y += dy * inv * impulse;
+      d.velocity.z += dz * inv * impulse;
+    }
+    if (_tintC && d._tintColor) {
+      d._tintColor.copy(_tintC);
+      d._tintStrength = Math.max(d._tintStrength, falloff);
+    }
+  }
 }
 
 function disposeAllDots() {
@@ -18458,11 +19002,30 @@ function updateDots(dt) {
         }
       }
     }
-    // Hue cycle (greyscale shade pulse)
+    // (v12) Color-memory tint decay. Strength fades exponentially so a
+    // hit reads as a brief flash that lingers ~1.2s before returning
+    // fully to greyscale.
+    if (d._tintStrength > 0) {
+      d._tintStrength *= Math.exp(-dt * 1.5);
+      if (d._tintStrength < 0.01) d._tintStrength = 0;
+    }
+    // Hue cycle (greyscale shade pulse) blended with tint.
     if (d.hueCycleMaterial && d.hueCycleMaterial.uniforms && d.hueCycleMaterial.uniforms.uColor) {
       const ph = (d.huePhase + _gameTime * d.hueSpeed) % 1;
       const _l = 0.05 + 0.05 * (0.5 + 0.5 * Math.sin(ph * Math.PI * 2));
-      try { d.hueCycleMaterial.uniforms.uColor.value.setHSL(0, 0, _l); } catch (_) {}
+      try {
+        const _u = d.hueCycleMaterial.uniforms.uColor.value;
+        _u.setHSL(0, 0, _l);
+        if (d._tintStrength > 0) {
+          // Lerp toward the tint color by tint strength. Brightness of
+          // the tint is bumped above the baseline lightness so the flash
+          // actually pops rather than getting crushed back to grey.
+          const k = Math.min(1, d._tintStrength);
+          _u.r = _u.r * (1 - k) + d._tintColor.r * 0.55 * k;
+          _u.g = _u.g * (1 - k) + d._tintColor.g * 0.55 * k;
+          _u.b = _u.b * (1 - k) + d._tintColor.b * 0.55 * k;
+        }
+      } catch (_) {}
     }
     // Internal lightning (within the arcRadius sphere)
     if (d.emitsLightning && tNorm < 0.7 && typeof spawnLightningBolt === 'function') {
@@ -18646,15 +19209,20 @@ function updateDots(dt) {
     }
   }
   // ---- Inter-dot lightning (smoke cluster arcs between emitsLightning dots) ----
+  // (v12 tune) When dots cluster, fire to up to 2 nearest neighbors
+  // per burst. Earlier 4-arc burst per dot was overwhelming when
+  // many dots had clustered together.
   for (const a of game.dots) {
     if (!a.emitsLightning || typeof spawnLightningBolt !== 'function') continue;
     a._interArcTimer -= dt;
     if (a._interArcTimer > 0) continue;
     const aRem = a.lifetime - a.age;
     if (aRem < 0.8) { a._interArcTimer = 0.6 + Math.random(); continue; }
-    a._interArcTimer = 0.6 + Math.random() * 1.2;
-    let bestB = null, bestD2 = Infinity;
+    // Slower cadence so cluster activity isn't a constant strobe.
+    a._interArcTimer = 0.7 + Math.random() * 0.9;
+    // Gather all qualifying neighbors within range.
     const r2 = a.interArcRange * a.interArcRange;
+    const _neighbors = [];
     for (const b of game.dots) {
       if (b === a || !b.emitsLightning) continue;
       const bRem = b.lifetime - b.age;
@@ -18663,12 +19231,18 @@ function updateDots(dt) {
       const dy = b.anchor.position.y - a.anchor.position.y;
       const dz = b.anchor.position.z - a.anchor.position.z;
       const d2 = dx*dx + dy*dy + dz*dz;
-      if (d2 < r2 && d2 < bestD2) { bestD2 = d2; bestB = b; }
+      if (d2 < r2) _neighbors.push({ dot: b, d2: d2 });
     }
-    if (bestB) {
+    if (!_neighbors.length) continue;
+    _neighbors.sort((x, y) => x.d2 - y.d2);
+    // Cap at 2 arcs per burst (was 4) ; cluster lightning was way
+    // too dense when many dots clustered together.
+    const _arcCount = Math.min(_neighbors.length, 2);
+    for (let _ni = 0; _ni < _arcCount; _ni++) {
+      const _b = _neighbors[_ni].dot;
       const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
       spawnLightningBolt(
-        a.anchor.position.clone(), bestB.anchor.position.clone(), _col,
+        a.anchor.position.clone(), _b.anchor.position.clone(), _col,
         0.10 + Math.random() * 0.06,
         3 + Math.floor(Math.random() * 3),
         1.5 + Math.random() * 0.8,
@@ -18723,18 +19297,11 @@ function updateAmbientClouds(dt) {
     Math.random() - 0.5,
   ).normalize();
   const _driftSpeed = 12 + Math.random() * 22;
-  // Build the smoke material + mesh ; mesh is the visual, anchored at
-  // local origin so the Dot's anchor.position drives where it draws.
-  const _mat = _makeSmokeMaterial(0x080812, 1.0);
-  if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
-    _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
-  }
-  const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
-  _mesh.scale.setScalar(_size);
-  _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-  _mesh.frustumCulled = true;
-  _mesh.renderOrder = 1;
-  // Spawn the Dot and attach the smoke mesh.
+  // (v12) Spawn the Dot ; this still owns lifetime, drift physics,
+  // collisions, lightning emission, player-wake impulse, and the Phase 1
+  // bullet-wake / explosion-shockwave color memory. The visual is a
+  // CloudVolume (drei-style instanced billboard puffs) attached under
+  // the dot's anchor so all motion + tint flows through naturally.
   const _dot = spawnDot(_spawnPos, {
     // (v9) Indestructible. Sprout over 5s then live forever.
     lifetime: Infinity,
@@ -18746,9 +19313,8 @@ function updateAmbientClouds(dt) {
     emitsLightning: true,
     arcRadius: _size * 0.5,
     interArcRange: 900,
-    hueCycleMaterial: _mat,
-    hueSpeed: 0.08 + Math.random() * 0.06,
-    scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
+    // No hueCycleMaterial ; the new billboard cloud uses MeshBasicMaterial
+    // and pulls its color from the dot's _tintStrength (Phase 1).
     fadeOut: { alphaMul: 0.35 },
     clusterAttraction: true,
     attractStrength: 35,
@@ -18756,74 +19322,47 @@ function updateAmbientClouds(dt) {
     orbitBoost: 0.4,
   });
   _dot._isAmbientCloud = true;          // marker for the cap counter
-  _dot.attachMesh(_mesh);
 
-  // (v11a) Internal pluming: spawn 4-7 mini-cluster puffs that orbit +
-  // pulse inside the parent cloud's volume so the cloud reads as a
-  // living weather system rather than a static blob. Each puff has its
-  // own random orbit axis, orbit speed, pulse phase + pulse speed, and
-  // base offset within the cloud, so no two puffs (or two clouds)
-  // animate the same way. Attached to d.anchor directly (not via
-  // attachMesh) so the existing per-mesh shader-time tick in updateDots
-  // doesn't interfere with our custom animation. Cleanup is handled by
-  // the wrapped dispose() below ; the parent cloud's geometry is the
-  // shared _SMOKE_GEO so we don't dispose it.
-  const _puffCount = 4 + Math.floor(Math.random() * 4);
-  _dot._puffs = [];
-  for (let _pi = 0; _pi < _puffCount; _pi++) {
-    const _puffMat = _makeSmokeMaterial(0x080812, 0.55);
-    if (_puffMat.uniforms && _puffMat.uniforms.uOctaves) {
-      // Cheaper octaves on the smaller puffs ; the parent cloud carries
-      // the high-detail shader work, the puffs add silhouette motion.
-      _puffMat.uniforms.uOctaves.value = 1;
-    }
-    const _puffMesh = new THREE.Mesh(_SMOKE_GEO, _puffMat);
-    // Random base offset inside the cloud volume. Bias toward middle
-    // radius (0.25..0.55 of cloud size) and flatten Y so the puffs
-    // don't poke noticeably above/below the parent silhouette.
-    const _bp1 = Math.random() * Math.PI * 2;
-    const _bp2 = Math.acos(2 * Math.random() - 1);
-    const _br = _size * (0.20 + Math.random() * 0.40);
-    const _bx = _br * Math.sin(_bp2) * Math.cos(_bp1);
-    const _by = _br * Math.cos(_bp2) * 0.55;     // flatten vertical
-    const _bz = _br * Math.sin(_bp2) * Math.sin(_bp1);
-    const _baseScale = _size * (0.16 + Math.random() * 0.20);
-    _puffMesh.position.set(_bx, _by, _bz);
-    _puffMesh.scale.setScalar(_baseScale);
-    _puffMesh.renderOrder = 1;
-    _puffMesh.frustumCulled = true;
-    _dot.anchor.add(_puffMesh);
-    _dot._puffs.push({
-      mesh: _puffMesh,
-      basePos: new THREE.Vector3(_bx, _by, _bz),
-      baseScale: _baseScale,
-      // Drift radius: how far the puff wanders from its base position.
-      driftRadius: _size * (0.04 + Math.random() * 0.10),
-      // Drift speed: cycles per second. Slow ; cloud weather pace.
-      driftSpeed: 0.06 + Math.random() * 0.14,
-      // (v11a tune) Pulse scale modulation. Was Â±20-35% over 0.4-1.2 Hz
-      // ; the big clouds visibly expanded/contracted from across the
-      // map, which read as breathing rather than weather. Now Â±6-12%
-      // over 0.10-0.30 Hz so the throb is subliminal motion that just
-      // keeps the silhouette alive.
-      pulseSpeed: 0.10 + Math.random() * 0.20,
-      pulseAmp: 0.06 + Math.random() * 0.06,
-      pulsePhase: Math.random() * Math.PI * 2,
-    });
+  // CloudVolume sized proportional to the cloud's overall size. Bounds
+  // are wider than tall so the cloud reads as a fluffy stratus puff
+  // rather than a perfect sphere. Segments distributed inside-biased
+  // so density falls off toward the edges.
+  // (v12 drei-faithful) Bigger segments, more of them, and the sin-pulse
+  // growth animation that drei's storybook has. `volume` is the base
+  // sprite scale ; `growth` is the pulse amplitude ; the segments
+  // collectively form the cloud silhouette while individually drifting
+  // and pulsing.
+  const _cv = (typeof _spawnCloudVolume === 'function') ? _spawnCloudVolume({
+    // (v12 visibility-tune) More + bigger puffs per drifter.
+    segments: 30 + Math.floor(Math.random() * 10),   // 30-39 puffs per cloud
+    bounds: new THREE.Vector3(_size * 1.7, _size * 0.7, _size * 1.7),
+    // (v12) Dark stormy color with per-drifter shade variation.
+    color: _pickStormyCloudColor(),
+    opacity: 1.0,                                    // (v12) full opacity ; texture alpha still gives soft edges
+    fade: 0,
+    concentrate: 'inside',
+    volume: _size * 0.50,                            // (v12 tune) bigger base sprite scale
+    growth: _size * 0.22,
+    speed: 0.35 + Math.random() * 0.25,
+    smallestVolume: 0.18,
+  }) : null;
+  if (_cv) {
+    _dot.anchor.add(_cv._anchor);
+    _cv._hostDot = _dot;
+    _dot._cloudVol = _cv;
+    // Bridge the dot's growth ramp into the volume's per-segment scale
+    // multiplier so the cloud blooms in over growthDuration the same
+    // way the legacy shader sphere used to.
+    _cv._scaleMul = 0.001;   // start tiny ; the per-frame bridge below ramps it up
   }
-  // Wrap dispose so puff materials get freed too. The parent cloud is
-  // indestructible (lifetime: Infinity) for ambient clouds, so this
-  // only fires on round-end / Main Menu via disposeAllDots ; matters
-  // for memory pressure across long sessions.
+
+  // Wrap dispose so the CloudVolume is removed from the manager when
+  // the dot dies (round-end, disposeAllDots, etc.).
   const _origDispose = _dot.dispose.bind(_dot);
   _dot.dispose = function () {
-    if (this._puffs) {
-      for (const p of this._puffs) {
-        if (p.mesh && p.mesh.parent) p.mesh.parent.remove(p.mesh);
-        // Don't dispose geometry ; it's the shared _SMOKE_GEO.
-        if (p.mesh && p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
-      }
-      this._puffs = null;
+    if (this._cloudVol && typeof this._cloudVol.dispose === 'function') {
+      this._cloudVol.dispose();
+      this._cloudVol = null;
     }
     _origDispose();
   };
@@ -33079,6 +33618,40 @@ function gameLoop(timestamp) {
   // self-register on construction and self-deregister on dispose.
   if (typeof _layeredFXTick === 'function') _layeredFXTick(game.time);
 
+  // (v12) Tick cloud volume tints + write the InstancedMesh buffer for
+  // all live billboard clouds. CloudManager pulls each volume's anchor
+  // world transform, sorts far-to-near, and writes one transform + color
+  // per segment. One draw call covers every CloudVolume in the scene.
+  if (_CLOUDS) {
+    const _dtCld = game.deltaTime || 0;
+    for (let i = 0; i < _CLOUDS.volumes.length; i++) {
+      const v = _CLOUDS.volumes[i];
+      if (!v || !v._alive) continue;
+      v.tick(_dtCld);
+      // (v12) Bridge host-dot signals into the volume.
+      const _hd = v._hostDot;
+      if (_hd) {
+        // Combat color memory: when a bullet whizzes past or an explosion
+        // pops nearby, the dot's _tintStrength gets stamped (Phase 1).
+        // Lift those values onto the volume so the puffs flash colorwise.
+        if (_hd._tintStrength > v._tintStrength) {
+          v._tintColor.copy(_hd._tintColor);
+          v._tintStrength = _hd._tintStrength;
+        }
+        // Growth ramp: scale segments from ~0 to 1 over the dot's
+        // growthDuration so clouds bloom in instead of popping into
+        // existence at full size.
+        if (_hd.growthDuration && _hd.growthDuration > 0.001) {
+          const _g = Math.min(1, (_hd.age || 0) / _hd.growthDuration);
+          v._scaleMul = 0.05 + 0.95 * _g;
+        }
+      }
+    }
+    if (typeof camera !== 'undefined') {
+      _CLOUDS.update(camera, game.time, _dtCld);
+    }
+  }
+
   // (v12) Reaction-Diffusion ping-pong tick. _rdTick() short-circuits
   // when wallPattern !== 26, so the cost when this preset isn't active
   // is one cheap conditional. When active, it runs 8 Gray-Scott
@@ -39357,7 +39930,6 @@ window.input    = input;
 window.audio    = audio;
 
 } // end _bootLSS
-
 // v8VR: kick off the game once the THREE module bootstrap has run.
 // If the event already fired before this listener was added (race), boot now.
 if (window.LSS_ENGINE_READY) {
