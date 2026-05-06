@@ -4112,6 +4112,39 @@ function broadcastPlayerState(dt) {
   net.sendState(state);
 }
 
+// (v11d) Wall-clock-anchored game timers. Each of the four state-phase
+// timers (warmupTimer, roundTimer, roundEndTimer, matchEndTimer) is now
+// derived from `Date.now()` rather than integrated from `dt` each frame.
+// This is alt-tab safe: even if the rAF/Worker keep-alive stalls (Chrome's
+// intensive throttling kicks in after ~5 min of being hidden, lid-close
+// can pause everything), when the user returns the timer instantly
+// reflects real elapsed wall time. Without this, the dt-cap of 50ms
+// would silently swallow every second of stalled time, leaving the
+// alt-tabbed peer with a clock far ahead of real time and poisoning
+// the multiplayer consensus average.
+//
+// Usage: when starting a phase, call _anchorTimer('roundTimer', LSS.ROUND_TIME).
+// In the per-frame state branch, call _tickTimer('roundTimer') instead of
+// `roundTimer -= dt`. Result: timer counts down at real wall-clock rate.
+// In multiplayer, each peer's timer is independently wall-clock-anchored
+// to their own Date.now() ; the consensus averaging continues to handle
+// inter-peer clock skew (~10-50ms typical NTP drift, irrelevant to gameplay).
+function _anchorTimer(name, durationSec) {
+  game[name] = durationSec;
+  game[name + 'AnchorMs'] = Date.now();
+  game[name + 'Total']    = durationSec;
+}
+function _tickTimer(name) {
+  const anchor = game[name + 'AnchorMs'];
+  const total  = game[name + 'Total'];
+  if (typeof anchor !== 'number' || typeof total !== 'number') {
+    // Anchor missing (legacy code path) ; leave the existing value alone.
+    return;
+  }
+  const elapsed = (Date.now() - anchor) / 1000;
+  game[name] = Math.max(0, total - elapsed);
+}
+
 // (3+ peer time/round sync) Consensus broadcast (owner-free).
 // Every peer ticks its own game state locally and broadcasts a snapshot at
 // net.gameSyncHz. Every peer also receives every other peer's snapshot and
@@ -4196,6 +4229,25 @@ function applyGameSyncConsensus() {
   game.currentRound  = crMax;
   game.scoreA        = saMax;
   game.scoreB        = sbMax;
+  // (v11d) Re-anchor the wall-clock totals so the next _tickTimer call
+  // picks up where consensus left us. Without this, the next per-frame
+  // tick would re-compute from the original anchor and wipe out the
+  // consensus correction. The anchor is set to "right now", and the
+  // total to the consensus value, so subsequent frames count down from
+  // the consensus value at real wall-clock rate.
+  const _nowMs = Date.now();
+  if (typeof game.roundTimerAnchorMs === 'number') {
+    game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
+  }
+  if (typeof game.warmupTimerAnchorMs === 'number') {
+    game.warmupTimerAnchorMs = _nowMs; game.warmupTimerTotal = game.warmupTimer;
+  }
+  if (typeof game.roundEndTimerAnchorMs === 'number') {
+    game.roundEndTimerAnchorMs = _nowMs; game.roundEndTimerTotal = game.roundEndTimer;
+  }
+  if (typeof game.matchEndTimerAnchorMs === 'number') {
+    game.matchEndTimerAnchorMs = _nowMs; game.matchEndTimerTotal = game.matchEndTimer;
+  }
 }
 
 // ---- HIT CONSENSUS ----
@@ -4326,7 +4378,11 @@ function handleNetEvent(evt, fromPeerId) {
       game.scoreA      = Math.max(game.scoreA | 0, (evt.scoreA | 0));
       game.scoreB      = Math.max(game.scoreB | 0, (evt.scoreB | 0));
       game.state       = 'roundEnd';
-      game.roundEndTimer = 5;
+      // (v11d) Anchor to wall-clock for the broadcast-driven roundEnd path
+      // (non-owner peers receive this when the stasis owner resolves the
+      // round). Each peer's anchor uses its own Date.now() ; minor inter-
+      // peer skew is handled by the consensus averager.
+      _anchorTimer('roundEndTimer', 5);
       if (window.Overlays) {
         const playerWonRound = (player && evt.winnerTeam === player.team);
         const title = playerWonRound ? 'Round Won!' : 'Round Lost';
@@ -15901,7 +15957,13 @@ function _makeAtomFractalMaterial(baseColor) {
     uniforms: {
       time:       { value: 0 },
       uBaseColor: { value: new THREE.Color(baseColor) },
-      uOpacity:   { value: 1.0 },
+      // (v11d) 0.95 = 5% transparency on cluster rocks ; lets the player
+      // see what's behind a rock when ducking around it without losing
+      // the silhouette. The fragment shader writes gl_FragColor.a = uOpacity
+      // directly, and the material is already transparent: true below.
+      // Override per-instance later (e.g. impact fade, doomed dim) by
+      // poking mesh.material.uniforms.uOpacity.value.
+      uOpacity:   { value: 0.95 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -19742,7 +19804,9 @@ function commitLoadout(key) {
   // down to LAUNCH. Only seed the warmup timer when no countdown is already
   // running; swapping ships mid-countdown must not reset either clock.
   if (!_countdownActive) {
-    game.warmupTimer = LSS.LAUNCH_COUNTDOWN;
+    // (v11d) Anchor to wall-clock so the launch countdown ticks at real
+    // rate even if the user alt-tabs during ship-select.
+    _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
   }
   // Refresh the teammates strip so the newly committed ship shows up as YOU's pick.
   updateTeammatesStrip();
@@ -23827,7 +23891,8 @@ function dash() {
 function updateRoundSystem(dt) {
   if (game.state === 'warmup') {
     const prev = game.warmupTimer;
-    game.warmupTimer -= dt;
+    // (v11d) Wall-clock-anchored ; alt-tab safe.
+    _tickTimer('warmupTimer');
     // Suppress the overlay 3-2-1 if the ship-select screen is still handling the
     // countdown (launchCountdown draws its own giant digits inside ship-select).
     const selectActive = document.getElementById('ship-select') &&
@@ -23842,7 +23907,8 @@ function updateRoundSystem(dt) {
     }
     if (game.warmupTimer <= 0) {
       game.state = 'playing';
-      game.roundTimer = LSS.ROUND_TIME;
+      // (v11d) Anchor to wall-clock at the warmup→playing transition.
+      _anchorTimer('roundTimer', LSS.ROUND_TIME);
       // (v11) Spawn the round's cosmic anomaly. Drifts from outside the
       // map through the play volume and back out over ~75s ; one pass
       // per round, no collision, pure visual flavor.
@@ -23885,7 +23951,8 @@ function updateRoundSystem(dt) {
       if (typeof _v8tryStartCinemaFlyover === 'function') _v8tryStartCinemaFlyover();
     }
   } else if (game.state === 'playing') {
-    game.roundTimer -= dt;
+    // (v11d) Wall-clock-anchored ; alt-tab safe.
+    _tickTimer('roundTimer');
     // Single pass over the entity list to count alive on each team; previously
     // we walked the array twice via .filter, which is double the work for a
     // hot per-tick check.
@@ -23989,7 +24056,9 @@ function updateRoundSystem(dt) {
         game.scoreA++; winnerTeam = LSS.TEAM_FLEET_A;
       }
       game.state = 'roundEnd';
-      game.roundEndTimer = 5;
+      // (v11d) Anchor to wall-clock so alt-tab during the 5s round-end
+      // banner still ticks down at real time.
+      _anchorTimer('roundEndTimer', 5);
       // (v10 fix) Broadcast the authoritative round resolution to non-owner
       // peers so they apply the same score + state transition. Without this,
       // peers would each compute their own tiebreaker (against potentially
@@ -24042,7 +24111,8 @@ function updateRoundSystem(dt) {
       }
     }
   } else if (game.state === 'roundEnd') {
-    game.roundEndTimer -= dt;
+    // (v11d) Wall-clock-anchored ; alt-tab safe.
+    _tickTimer('roundEndTimer');
     if (game.roundEndTimer <= 0) {
       if (game.scoreA >= LSS.ROUNDS_TO_WIN || game.scoreB >= LSS.ROUNDS_TO_WIN) {
         game.state = 'matchEnd';
@@ -24050,7 +24120,9 @@ function updateRoundSystem(dt) {
         // _refreshScoreboardVisibility honors game.state === 'matchEnd' as a
         // force-show condition, so just flipping the state and calling refresh
         // brings the scoreboard up with the final totals.
-        game.matchEndTimer = 10;
+        // (v11d) Anchor to wall-clock so the matchEnd 10s scoreboard ticks
+        // down accurately even if the user alt-tabs during it.
+        _anchorTimer('matchEndTimer', 10);
         if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility();
         // (v10 Phase 2) Post the match result to the LSS backend (D1 via
         // Worker). Fires once per match ; idempotent across re-renders.
@@ -24097,7 +24169,8 @@ function updateRoundSystem(dt) {
         // Round warmup runs through the ship-select screen so the player can
         // swap ships between rounds; matches the visible launch countdown so
         // bots stay holstered until LAUNCH.
-        game.warmupTimer = LSS.LAUNCH_COUNTDOWN;
+        // (v11d) Wall-clock-anchored.
+        _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
         // Next map from rotation each round
         const level = getNextMap();
         // (v6.7) Wrap the round-restart world build with the seeded RNG too;
@@ -24255,7 +24328,15 @@ function updateRoundSystem(dt) {
     // Hold the scoreboard up for ~10s, then fall back to the root menu (a fresh
     // 'select' state with ship-select open and all match stats cleared, exactly
     // like a cold boot).
-    game.matchEndTimer = (game.matchEndTimer === undefined) ? 10 : game.matchEndTimer - dt;
+    // (v11d) Wall-clock-anchored. The legacy fallback `=== undefined` path
+    // is preserved for the rare case where matchEnd is entered without
+    // going through the roundEnd → matchEnd transition that anchors the
+    // timer (e.g. legacy save-state restore). In that case, anchor here.
+    if (game.matchEndTimer === undefined || game.matchEndTimerAnchorMs === undefined) {
+      _anchorTimer('matchEndTimer', 10);
+    } else {
+      _tickTimer('matchEndTimer');
+    }
     if (game.matchEndTimer <= 0) {
       returnToRootMenu();
     }
@@ -24459,9 +24540,15 @@ function returnToRootMenu() {
   // Menu during a warmup countdown, game.warmupTimer was already partway
   // through ; commitLoadout would re-enter 'warmup' from this stale value
   // and the countdown would tick wrong / immediately complete.
+  // (v11d) Wipe the wall-clock anchors too so the next warmup re-anchors
+  // cleanly when commitLoadout runs.
   game.warmupTimer = (typeof LSS !== 'undefined' && LSS.WARMUP_TIME) ? LSS.WARMUP_TIME : 5;
   game.roundTimer = (typeof LSS !== 'undefined' && LSS.ROUND_TIME) ? LSS.ROUND_TIME : 180;
   game.roundEndTimer = 0;
+  game.warmupTimerAnchorMs   = undefined; game.warmupTimerTotal   = undefined;
+  game.roundTimerAnchorMs    = undefined; game.roundTimerTotal    = undefined;
+  game.roundEndTimerAnchorMs = undefined; game.roundEndTimerTotal = undefined;
+  game.matchEndTimerAnchorMs = undefined; game.matchEndTimerTotal = undefined;
 
   // Reset player match stats so the root menu starts clean.
   player.kills = 0;
@@ -28325,7 +28412,11 @@ const WALL_PATTERN_NAMES = [
   'Datamosh Cube',  // 22 ; bg=Datamosh + fg=Layered Cube + fg2=Panel Maze
   'Mandelbox Plasma',  // 23 ; bg=Mandelbox + fg=Plasma FBM + fg2=Panel Maze
   'Mandelbox Kali',  // 24 ; bg=Mandelbox + fg=Kali + fg2=Panel Maze
-  'Matrix'  // 25 ; bg=Cyber Datamosh + fg=Panel Maze x2 (digital-rain green)
+  'Matrix',  // 25 ; bg=Cyber Datamosh + fg=Panel Maze x2 (digital-rain green)
+  // (v11d) Three more user-authored multi-layer composites:
+  'Hue-Shifting Grid',  // 26 ; bg=Panel Maze + fg=Kali + fg2=Panel Maze (blue tint)
+  'Hexeizure',          // 27 ; bg=Panel Maze + fg=Mandelbox + fg2=Hex Pulse (black tint)
+  'Starfield'           // 28 ; bg=Panel Maze + fg=Cyber Datamosh + fg2=Apollonian (dark-green)
 ];
 
 const WALL_PARAM_DEFS = [
@@ -29001,6 +29092,79 @@ const MULTI_LAYER_PRESETS = {
     fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
     u_iters_fg2: 8, u_scale_fg2: 0.0035, u_invBase_fg2: 9.0,
     u_hueSpin_fg2: 0.12, u_satBase_fg2: 0.7,
+    K_COSMIC_fg2: 6.0,
+  },
+  // Index 26: Hue-Shifting Grid. User export ; lab IDs translated:
+  //   bg  lab 6  (Panel Maze)   -> game 17
+  //   fg  lab 0  (Kali IFS)     -> game 0
+  //   fg2 lab 6  (Panel Maze)   -> game 17
+  // Two stacked Panel Maze layers with a Kali tint between, locked to a
+  // soft blue paletteOverride (#197fcc) so the grid reads as cyan-tinted
+  // rather than picking up the map's per-room palette.
+  26: {
+    paletteOverride: 0x197fcc,                        // soft cyan-blue
+    bgPatternId: 17,                                  // Panel Maze
+    bgTime: 3.0,
+    u_iters_bg: 11, u_scale_bg: 0.0155, u_invBase_bg: 4.5,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 0.25,
+    fgPatternId: 0,                                   // Kali IFS
+    fgAlpha: 1.1, fgBlend: 1 /* Multiply */, fgHue: 0.585, fgTime: 3.0,
+    u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 6.0,
+    fg2PatternId: 17,                                 // Panel Maze (second layer)
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.5, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 2.9,
+  },
+  // Index 27: Hexeizure. User export ; lab IDs translated:
+  //   bg  lab 6  (Panel Maze)   -> game 17
+  //   fg  lab 2  (Mandelbox)    -> game 4
+  //   fg2 lab 14 (Hex Pulse Radar) -> game 14
+  // Black paletteOverride pushes the wall to pure black ; the layered
+  // hex pulse over Mandelbox folds reads as strobing geometric seizure.
+  27: {
+    paletteOverride: 0x000000,                        // pure black
+    bgPatternId: 17,                                  // Panel Maze
+    bgTime: 0.25,
+    u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 0.05,
+    fgPatternId: 4,                                   // Mandelbox
+    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 1.0, fgTime: 3.0,
+    u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 3.6,
+    fg2PatternId: 14,                                 // Hex Pulse Radar
+    fg2Alpha: 0.5, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.5,
+    u_iters_fg2: 12, u_scale_fg2: 0.001, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.31, u_satBase_fg2: 0.94,
+    K_COSMIC_fg2: 3.1,
+  },
+  // Index 28: Starfield. User export ; lab IDs translated:
+  //   bg  lab 6  (Panel Maze)      -> game 17
+  //   fg  lab 15 (Cyber Datamosh)  -> game 15
+  //   fg2 lab 7  (Apollonian Gasket) -> game 1
+  // Dark green paletteOverride (#142400) tints the deep field ; the
+  // bright Datamosh + Apollonian fractals over it read as scattered stars.
+  28: {
+    paletteOverride: 0x142400,                        // dark green/black
+    bgPatternId: 17,                                  // Panel Maze
+    bgTime: 0.25,
+    u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    K_COSMIC_bg: 0.05,
+    fgPatternId: 15,                                  // Cyber Datamosh
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 1.0, fgTime: 3.0,
+    u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 4.95,
+    fg2PatternId: 1,                                  // Apollonian Gasket
+    fg2Alpha: 2.0, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.5,
+    u_iters_fg2: 12, u_scale_fg2: 0.0099, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.31, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 6.0,
   },
 };
@@ -31691,7 +31855,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28) {',
       // (v8VR 2026-05-01) Pass a tint to cosmicField for multi-layer
       // composite presets so per-room zoneColor doesn't leak into pattern
       // sampling. The lab uses a single tintColor across the whole
@@ -33314,6 +33478,18 @@ function gameLoop(timestamp) {
   // intensity tier, doomed/stasis mode tracking).
   if (typeof musicTickFromMain === 'function') {
     try { musicTickFromMain(dt); } catch (_) {}
+  }
+
+  // (v11d) Skip the render when the tab is hidden. The Web Worker keep-
+  // alive (setupBackgroundTick) keeps the gameLoop running so timers,
+  // physics, and net sync continue, but actual rendering is wasted GPU
+  // when nobody can see the canvas. Visibility flips back on resume.
+  // VR sessions get a pass: WebXR's compositor manages its own
+  // visibility, and renderer.xr.isPresenting still implies an active
+  // headset display we shouldn't skip.
+  const _xrActive = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+  if (typeof document !== 'undefined' && document.hidden && !_xrActive) {
+    return;
   }
 
   renderFrame();
