@@ -28103,7 +28103,13 @@ const WALL_PATTERN_NAMES = [
   'Datamosh Cube',  // 22 ; bg=Datamosh + fg=Layered Cube + fg2=Panel Maze
   'Mandelbox Plasma',  // 23 ; bg=Mandelbox + fg=Plasma FBM + fg2=Panel Maze
   'Mandelbox Kali',  // 24 ; bg=Mandelbox + fg=Kali + fg2=Panel Maze
-  'Matrix'  // 25 ; bg=Cyber Datamosh + fg=Panel Maze x2 (digital-rain green)
+  'Matrix',  // 25 ; bg=Cyber Datamosh + fg=Panel Maze x2 (digital-rain green)
+  // (v12) "Growing machines" — Gray-Scott reaction-diffusion sim baked into
+  // a 256x256 ping-pong FBO, sampled triplanar onto wall geometry. Looks
+  // alive (Turing patterns) and cybertronic (sharp edges from B-channel
+  // gradient detection). Tunable presets: coral, maze, spots, waves,
+  // spirals (window._rdReseed('maze') etc. in DevTools).
+  'Reaction-Diffusion'  // 26 ; growing-machines reaction-diffusion sim
 ];
 
 const WALL_PARAM_DEFS = [
@@ -28782,6 +28788,184 @@ const MULTI_LAYER_PRESETS = {
     K_COSMIC_fg2: 6.0,
   },
 };
+
+// (v12) Reaction-Diffusion "growing machines" simulation. Gray-Scott model
+// running as a ping-pong shader pass on two RGBA half-float render
+// targets. The simulation produces organic-machine maze/branching/coral
+// patterns ; the wall fragment shader samples the resulting texture as
+// pattern 26 ("Reaction-Diffusion"). Tunable presets shape the look:
+//   coral   : feed 0.039 / kill 0.058 (default ; branching networks)
+//   maze    : feed 0.014 / kill 0.054 (slow-growing labyrinth)
+//   spots   : feed 0.055 / kill 0.062 (cellular dots that divide)
+//   waves   : feed 0.022 / kill 0.061 (concentric rings)
+//   spirals : feed 0.029 / kill 0.057 (rotating spirals)
+// One RT is read-from each frame, the other is written-to, then they
+// swap. The simulation lives at 256x256 ; ~250kB texture memory total
+// at HalfFloatType. One extra draw call per frame (a 2-tri quad to a
+// tiny RT) ; cheaper than any of the cosmic patterns that run inside
+// the wall fragment shader at full screen resolution.
+const _RD_SIZE = 256;
+let _rdRTRead   = null;
+let _rdRTWrite  = null;
+let _rdScene    = null;
+let _rdCamera   = null;
+let _rdMat      = null;
+let _rdInited   = false;
+let _rdLastTick = 0;
+
+function _rdInit() {
+  if (_rdInited) return;
+  if (typeof THREE === 'undefined' || typeof renderer === 'undefined' || !renderer) return;
+  const rtOpts = {
+    type: THREE.HalfFloatType,
+    format: THREE.RGBAFormat,
+    minFilter: THREE.LinearFilter,
+    magFilter: THREE.LinearFilter,
+    wrapS: THREE.RepeatWrapping,
+    wrapT: THREE.RepeatWrapping,
+    depthBuffer: false,
+    stencilBuffer: false,
+  };
+  _rdRTRead  = new THREE.WebGLRenderTarget(_RD_SIZE, _RD_SIZE, rtOpts);
+  _rdRTWrite = new THREE.WebGLRenderTarget(_RD_SIZE, _RD_SIZE, rtOpts);
+  _rdMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uPrev:        { value: null },
+      uTexel:       { value: new THREE.Vector2(1.0 / _RD_SIZE, 1.0 / _RD_SIZE) },
+      // Coral preset by default ; matches the "growing machines / branching"
+      // visual identity goal. Override via _rdReseed('mazes') etc.
+      uFeed:        { value: 0.039 },
+      uKill:        { value: 0.058 },
+      uDA:          { value: 1.0 },
+      uDB:          { value: 0.5 },
+      uDt:          { value: 1.0 },
+      uTime:        { value: 0.0 },
+      uSeedRequest: { value: 0 },
+    },
+    vertexShader: [
+      'varying vec2 vUv;',
+      'void main() { vUv = uv; gl_Position = vec4(position, 1.0); }',
+    ].join('\n'),
+    fragmentShader: [
+      'precision highp float;',
+      'uniform sampler2D uPrev;',
+      'uniform vec2  uTexel;',
+      'uniform float uFeed;',
+      'uniform float uKill;',
+      'uniform float uDA;',
+      'uniform float uDB;',
+      'uniform float uDt;',
+      'uniform float uTime;',
+      'uniform int   uSeedRequest;',
+      'varying vec2 vUv;',
+      'float hashRD(vec2 p) {',
+      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
+      '}',
+      'void main() {',
+      '  if (uSeedRequest == 1) {',
+      // Initial seed: A=1 everywhere, sparse B spots. The B spots are
+      // the seeds that grow into the pattern. Spot density ~0.8% gives
+      // good coverage while leaving room for organic spread.
+      '    float n  = hashRD(vUv * 91.0 + uTime);',
+      '    float n2 = hashRD(vUv * 53.0 - uTime * 0.7);',
+      '    float spot = step(0.992, n) + step(0.997, n2);',
+      '    spot = clamp(spot, 0.0, 1.0);',
+      '    gl_FragColor = vec4(1.0 - spot * 0.5, spot, 0.0, 1.0);',
+      '    return;',
+      '  }',
+      // Read current cell + 4 neighbours for the laplacian.
+      '  vec2 ab = texture2D(uPrev, vUv).rg;',
+      '  vec2 lap = texture2D(uPrev, vUv + vec2(-uTexel.x, 0.0)).rg',
+      '           + texture2D(uPrev, vUv + vec2( uTexel.x, 0.0)).rg',
+      '           + texture2D(uPrev, vUv + vec2(0.0, -uTexel.y)).rg',
+      '           + texture2D(uPrev, vUv + vec2(0.0,  uTexel.y)).rg',
+      '           - 4.0 * ab;',
+      '  float a = ab.x;',
+      '  float b = ab.y;',
+      '  float reaction = a * b * b;',
+      '  float dA = uDA * lap.x - reaction + uFeed * (1.0 - a);',
+      '  float dB = uDB * lap.y + reaction - (uKill + uFeed) * b;',
+      '  vec2 next = clamp(ab + vec2(dA, dB) * uDt, 0.0, 1.0);',
+      '  gl_FragColor = vec4(next, 0.0, 1.0);',
+      '}',
+    ].join('\n'),
+    depthTest: false,
+    depthWrite: false,
+  });
+  _rdScene = new THREE.Scene();
+  _rdCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const _rdQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _rdMat);
+  _rdScene.add(_rdQuad);
+  _rdInited = true;
+  // Render the seed pass once into the read RT so the simulation has
+  // something to evolve from on the very first tick.
+  _rdSeed();
+}
+
+function _rdSeed() {
+  if (!_rdInited) return;
+  _rdMat.uniforms.uSeedRequest.value = 1;
+  _rdMat.uniforms.uTime.value = Math.random() * 1000;
+  const prev = renderer.getRenderTarget();
+  renderer.setRenderTarget(_rdRTWrite);
+  renderer.render(_rdScene, _rdCamera);
+  renderer.setRenderTarget(prev);
+  // Swap so the seeded state is the next read.
+  const tmp = _rdRTRead; _rdRTRead = _rdRTWrite; _rdRTWrite = tmp;
+  _rdMat.uniforms.uSeedRequest.value = 0;
+}
+
+// Apply a named preset (changes feed/kill, optionally re-seeds).
+function _rdReseed(presetName, opts) {
+  if (!_rdInited) _rdInit();
+  if (!_rdInited) return;
+  const presets = {
+    coral:   { feed: 0.039, kill: 0.058 },
+    maze:    { feed: 0.014, kill: 0.054 },
+    spots:   { feed: 0.055, kill: 0.062 },
+    waves:   { feed: 0.022, kill: 0.061 },
+    spirals: { feed: 0.029, kill: 0.057 },
+  };
+  const p = presets[presetName] || presets.coral;
+  _rdMat.uniforms.uFeed.value = p.feed;
+  _rdMat.uniforms.uKill.value = p.kill;
+  if (!opts || opts.reseed !== false) _rdSeed();
+}
+
+// Per-frame update. The simulation needs many sub-steps to evolve at a
+// reasonable rate ; running ~8 steps per visible frame matches the
+// "alive but not racing" feel. Throttled to skip when wall pattern is
+// not 26 (no point simulating if nobody's looking).
+function _rdTick() {
+  if (!_rdInited) _rdInit();
+  if (!_rdInited) return;
+  if (typeof game === 'undefined') return;
+  // Skip simulation while the active wall pattern doesn't sample RD.
+  if (game.wallPattern !== 26) return;
+  const STEPS_PER_FRAME = 8;
+  for (let i = 0; i < STEPS_PER_FRAME; i++) {
+    _rdMat.uniforms.uPrev.value = _rdRTRead.texture;
+    _rdMat.uniforms.uTime.value = game.time || 0;
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(_rdRTWrite);
+    renderer.render(_rdScene, _rdCamera);
+    renderer.setRenderTarget(prev);
+    const tmp = _rdRTRead; _rdRTRead = _rdRTWrite; _rdRTWrite = tmp;
+  }
+}
+
+function _rdGetTexture() {
+  if (!_rdInited) _rdInit();
+  return _rdInited ? _rdRTRead.texture : null;
+}
+
+if (typeof window !== 'undefined') {
+  window._rdInit       = _rdInit;
+  window._rdTick       = _rdTick;
+  window._rdSeed       = _rdSeed;
+  window._rdReseed     = _rdReseed;
+  window._rdGetTexture = _rdGetTexture;
+}
 
 // Apply a multi-layer preset's per-layer values to the wall material's
 // shader uniforms. No-op for presets the table doesn't cover (single
@@ -30587,6 +30771,14 @@ function buildRoomGraphLevel(level) {
       // get their hex written here so the composite path actually picks
       // up per-preset color identity.
       'uniform vec3 uCompositeTint;',
+      // (v12) Reaction-Diffusion texture (256x256 RGBA HalfFloat). Channel
+      // R = chemical A concentration, G = chemical B concentration. Updated
+      // each frame by _rdTick() in the game loop running a Gray-Scott
+      // simulation in a ping-pong FBO. Sampled triplanar onto wall geometry
+      // so the pattern wraps the level seamlessly. uRDScale controls the
+      // density of the wrap (smaller = larger features).
+      'uniform sampler2D uReactionDiffusion;',
+      'uniform float uRDScale;',
       'uniform float roomRadii[8];',
       'uniform int roomCount;',
       // Pattern dispatch (0..8). 0..7 are lab patterns dispatched in
@@ -31305,6 +31497,53 @@ function buildRoomGraphLevel(level) {
       '  return col * 1.5;',
       '}',
       // ============================================================
+      // (v12) Reaction-Diffusion "growing machines" — Gray-Scott Turing
+      // patterns baked into a 256x256 ping-pong FBO updated per-frame
+      // by _rdTick() in JS. This shader function does the rendering side:
+      //   - Triplanar UV mapping so the pattern wraps the wall geometry
+      //     without seams or distortion (critical for arbitrary SDF rooms).
+      //   - Sample G channel (chemical B concentration) which holds the
+      //     stripe / spot / spiral pattern.
+      //   - Edge detection on B via 4-tap gradient gives "machine-like"
+      //     sharp boundaries between the chemical and the substrate, so
+      //     the wall reads as growing circuitry rather than soft blobs.
+      //   - Mix the soft body color with the sharp edge highlight to get
+      //     both the alive-membrane look and the cybertronic detail.
+      // ============================================================
+      'vec3 patternRD(vec3 p, vec3 zoneC, float tt) {',
+      '  vec3 wp = g_localWp * uRDScale;',
+      '  vec3 n = abs(normalize(vNormal));',
+      '  n = n / (n.x + n.y + n.z + 1e-5);',
+      // Triplanar sample: project onto each axis pair, weight by normal.
+      '  vec2 uvX = wp.yz;',
+      '  vec2 uvY = wp.zx;',
+      '  vec2 uvZ = wp.xy;',
+      '  float bx = texture2D(uReactionDiffusion, fract(uvX)).g;',
+      '  float by = texture2D(uReactionDiffusion, fract(uvY)).g;',
+      '  float bz = texture2D(uReactionDiffusion, fract(uvZ)).g;',
+      '  float bVal = bx * n.x + by * n.y + bz * n.z;',
+      // Edge detection: 4-tap gradient on the dominant projection plane.
+      '  vec2 uv = (n.z >= n.x && n.z >= n.y) ? uvZ : ((n.x >= n.y) ? uvX : uvY);',
+      '  float e = 1.0 / 256.0;',
+      '  float bL = texture2D(uReactionDiffusion, fract(uv + vec2(-e, 0.0))).g;',
+      '  float bR = texture2D(uReactionDiffusion, fract(uv + vec2( e, 0.0))).g;',
+      '  float bU = texture2D(uReactionDiffusion, fract(uv + vec2(0.0,  e))).g;',
+      '  float bD = texture2D(uReactionDiffusion, fract(uv + vec2(0.0, -e))).g;',
+      '  float edge = length(vec2(bR - bL, bU - bD)) * 6.0;',
+      '  edge = clamp(edge, 0.0, 1.0);',
+      // Soft body fill: mid-range B values pulse, outer reads dark.
+      '  float body = smoothstep(0.18, 0.42, bVal);',
+      // Slow chromatic shimmer through the zone hue family.
+      '  float shimmer = 0.85 + 0.15 * sin(tt * 0.8 + bVal * 12.0);',
+      // Combine: dark substrate + bright cyan-tinted edges + zone-tinted body.
+      '  vec3 substrate = zoneC * 0.06;',
+      '  vec3 bodyCol   = zoneC * body * 1.4 * shimmer;',
+      // Edge highlights toward zone-complementary ; gives "circuit on hull"
+      // look rather than monochrome wash. Using zoneC * 1.6 + cyan accent.
+      '  vec3 edgeCol   = mix(zoneC * 1.4, vec3(0.45, 0.85, 1.05), 0.55) * edge * 2.2;',
+      '  return substrate + bodyCol + edgeCol;',
+      '}',
+      // ============================================================
       // (v7.1 multi-layer rework) Pattern dispatcher takes a pattern ID
       // and per-layer parameters, sets the active globals, then routes.
       // Pattern functions don't need to change because they read u_iters
@@ -31348,6 +31587,10 @@ function buildRoomGraphLevel(level) {
       '  if (pid == 17) return patternPanelMaze(p, zoneC, tt);',
       '  if (pid == 18) return patternRingTunnel(p, zoneC, tt);',
       '  if (pid == 19) return patternLayeredCube(p, zoneC, tt);',
+      // (v12) Reaction-Diffusion. Note this slot is also exposed as
+      // wall preset 26 directly (single-pattern path). Per-frame texture
+      // is uploaded by _rdTick() in JS so no extra uniforms here.
+      '  if (pid == 26) return patternRD(p, zoneC, tt);',
       '  return vec3(0.0);',
       '}',
       // Hue shift via Rodrigues rotation around the gray axis.
@@ -31745,11 +31988,30 @@ function buildRoomGraphLevel(level) {
         SA_BREATH_AMP:     { value: wp.SA_BREATH_AMP },
         SA_BREATH_RATE:    { value: wp.SA_BREATH_RATE },
         SA_DOT_SAT:        { value: wp.SA_DOT_SAT },
-        SA_ZONE_FLOOR:     { value: wp.SA_ZONE_FLOOR }
+        SA_ZONE_FLOOR:     { value: wp.SA_ZONE_FLOOR },
+        // (v12) Reaction-Diffusion ; texture is updated each frame by
+        // _rdTick() in the game loop. uRDScale controls triplanar UV
+        // density (smaller = larger features wrapping the wall geometry).
+        uReactionDiffusion: { value: null },
+        uRDScale:           { value: 0.0008 }
       }
     });
 
     game.levelMaterial = sdfMat;
+
+    // (v12) Bind the RD texture on the wall material the moment it's
+    // built so the sampler has a valid 256x256 texture from frame 1.
+    // _rdInit is idempotent ; if RD has already been booted (e.g. after
+    // a map reload) the existing RTs are reused.
+    if (typeof _rdInit === 'function') {
+      try { _rdInit(); } catch (e) { /* RD init can fail if renderer not ready ; per-frame hook will retry */ }
+      if (typeof _rdGetTexture === 'function') {
+        const rdTex0 = _rdGetTexture();
+        if (rdTex0 && sdfMat.uniforms.uReactionDiffusion) {
+          sdfMat.uniforms.uReactionDiffusion.value = rdTex0;
+        }
+      }
+    }
 
     // (v8VR 2026-05-01 fix) The wall material's per-layer uniforms are
     // initialized as Lab Composite (Panel Maze + Layered Cube + Wave
@@ -32816,6 +33078,19 @@ function gameLoop(timestamp) {
   // pulse, sine-wave ripples). One pass over a Set is cheap; the materials
   // self-register on construction and self-deregister on dispose.
   if (typeof _layeredFXTick === 'function') _layeredFXTick(game.time);
+
+  // (v12) Reaction-Diffusion ping-pong tick. _rdTick() short-circuits
+  // when wallPattern !== 26, so the cost when this preset isn't active
+  // is one cheap conditional. When active, it runs 8 Gray-Scott
+  // sub-steps then writes the latest texture into the wall material's
+  // uReactionDiffusion uniform.
+  if (typeof _rdTick === 'function') {
+    _rdTick();
+    if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uReactionDiffusion) {
+      const rdTex = (typeof _rdGetTexture === 'function') ? _rdGetTexture() : null;
+      if (rdTex) game.levelMaterial.uniforms.uReactionDiffusion.value = rdTex;
+    }
+  }
 
   // Update level shader time for vein animations
   if (game.levelMaterial) {
