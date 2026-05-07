@@ -10625,6 +10625,25 @@ function pointInAnySphere(px, py, pz) {
 function raycastLevel(origin, dir, maxDist) {
   // SDF ray march: no CSG awareness needed, the SDF handles junctions naturally
   let nearest = maxDist;
+  // (v12) Google Maps mode: SDF is short-circuited (always interior),
+  // so sdfRaycast can't find walls. Replace with a raycast against the
+  // photoreal tile leaf meshes ; that's what makes projectiles, hitscan,
+  // and AI line-of-sight respect real city geometry.
+  if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) {
+    const grp = _lssGmaps.tiles && _lssGmaps.tiles.group;
+    if (grp && grp.children && grp.children.length > 0) {
+      const meshes = _lssGmapsCollectLeaves(grp);
+      if (meshes.length > 0) {
+        _lssGmapsRaycaster.set(origin, dir);
+        _lssGmapsRaycaster.far = maxDist;
+        try {
+          const hits = _lssGmapsRaycaster.intersectObjects(meshes, false);
+          if (hits.length && hits[0].distance < nearest) nearest = hits[0].distance;
+        } catch (_) {}
+      }
+    }
+    return nearest;
+  }
 
   // Still check obstacle boxes (if any exist in future)
   const idx = 1/dir.x, idy = 1/dir.y, idz = 1/dir.z;
@@ -40022,20 +40041,42 @@ const _lssGmapsPrevPos = new WeakMap();
 // Optional debug counters (toggle window.lssGmaps.debug = true).
 const _lssGmapsDebug = { hitsDown: 0, hitsFwd: 0, casts: 0, lastReport: 0 };
 
+// Cache of leaf mesh objects under tiles.group. Refreshed every frame ;
+// the cost (a single traverse() over ~125 tile wrappers) is far cheaper
+// than the per-ray intersection tests, and traversing is the only way
+// to keep the cache live as tiles stream in and out.
+const _lssGmapsLeaves = [];
+function _lssGmapsCollectLeaves(root) {
+  _lssGmapsLeaves.length = 0;
+  root.traverse((child) => {
+    if (child && child.isMesh && child.geometry && child.visible !== false) {
+      _lssGmapsLeaves.push(child);
+    }
+  });
+  return _lssGmapsLeaves;
+}
+
 function _lssGmapsCollideEntity(pos, vel) {
   const grp = _lssGmaps.tiles && _lssGmaps.tiles.group;
   if (!grp || !grp.children || grp.children.length === 0) return;
-  // Tile transforms updated lazily by the renderer ; our tick runs first,
-  // so force a recursive matrix update before raycasting.
+  // Force fresh world matrices ; tiles update lazily and our tick runs
+  // before the render pass.
   grp.updateMatrixWorld(true);
+  // Collect leaf meshes ourselves and raycast against THEM, not the
+  // TilesGroup. TilesGroup's overridden raycast in 3d-tiles-renderer
+  // 0.3.36 throws on Three 0.165 (OBB code missing a target Vector3).
+  const meshes = _lssGmapsCollectLeaves(grp);
+  if (meshes.length === 0) return;
 
   // -- Down: terrain follow. 8 km far ensures we always find ground.
   _lssGmapsRayDown.set(0, -1, 0);
   _lssGmapsRaycaster.set(pos, _lssGmapsRayDown);
   _lssGmapsRaycaster.far = 8000;
-  const downHits = _lssGmapsRaycaster.intersectObject(grp, true);
+  let downHits;
+  try { downHits = _lssGmapsRaycaster.intersectObjects(meshes, false); }
+  catch (_) { downHits = null; }
   _lssGmapsDebug.casts++;
-  if (downHits.length) {
+  if (downHits && downHits.length) {
     _lssGmapsDebug.hitsDown++;
     if (downHits[0].distance < _lssGmapsHoverPad) {
       pos.y += (_lssGmapsHoverPad - downHits[0].distance);
@@ -40043,16 +40084,16 @@ function _lssGmapsCollideEntity(pos, vel) {
     }
   }
 
-  // -- Stuck-inside recovery. Cast a short UP ray ; if we hit a ceiling
-  // -- within ESCAPE_HEIGHT, we are inside a building (or under terrain).
-  // -- Pop the entity above the ceiling so the down-ray on the next
-  // -- frame can place it cleanly on the roof.
+  // -- Stuck-inside recovery: cast UP. If hit close, we're inside ;
+  // -- pop above the ceiling and let the down-ray reseat next frame.
   const ESCAPE_HEIGHT = 600;
   _lssGmapsRayDown.set(0, 1, 0);
   _lssGmapsRaycaster.set(pos, _lssGmapsRayDown);
   _lssGmapsRaycaster.far = ESCAPE_HEIGHT;
-  const upHits = _lssGmapsRaycaster.intersectObject(grp, true);
-  if (upHits.length) {
+  let upHits;
+  try { upHits = _lssGmapsRaycaster.intersectObjects(meshes, false); }
+  catch (_) { upHits = null; }
+  if (upHits && upHits.length) {
     pos.y += upHits[0].distance + _lssGmapsHoverPad + 10;
     if (vel) { vel.y = Math.max(0, vel.y); }
     _lssGmapsDebug.hitsFwd++;
@@ -40070,8 +40111,10 @@ function _lssGmapsCollideEntity(pos, vel) {
         _lssGmapsRayFwd.set(dx / segLen, dy / segLen, dz / segLen);
         _lssGmapsRaycaster.set(prev, _lssGmapsRayFwd);
         _lssGmapsRaycaster.far = segLen + _lssGmapsForwardPad;
-        const fwdHits = _lssGmapsRaycaster.intersectObject(grp, true);
-        if (fwdHits.length) {
+        let fwdHits;
+        try { fwdHits = _lssGmapsRaycaster.intersectObjects(meshes, false); }
+        catch (_) { fwdHits = null; }
+        if (fwdHits && fwdHits.length) {
           _lssGmapsDebug.hitsFwd++;
           const safe = Math.max(0, fwdHits[0].distance - _lssGmapsForwardPad);
           pos.x = prev.x + _lssGmapsRayFwd.x * safe;
