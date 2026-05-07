@@ -2,8 +2,33 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v12m (WebXR) ; Google Maps + Multiplayer</title>
-<!-- v12m fork started 2026-05-07. Branched off v12.
+<title>Last Ship Sailing v13r (WebXR) ; Race Mode</title>
+<!-- v13r fork started 2026-05-07. Branched off v12m.
+     v13r adds a "Race" game mode alongside the classic team-deathmatch.
+     Three minimal-surface-area changes drive the whole mode:
+       (1) LSS.MODE flag ('classic' | 'race') with a Race toggle in the
+           lobby. The selected mode rides the existing map_change net
+           event so every peer enters the round in the same mode.
+       (2) Race-speed clamp at the maxSpeed resolve site. When MODE ===
+           'race', flightSpeed/strafeSpeed/verticalSpeed/dashSpeed are
+           normalized to LSS.RACE_SPEED across all chassis (currently
+           900 / dash 1400) so frigate/corvette/dreadnought race even.
+       (3) Champion field spawns at round start in race mode (skipping
+           the CHAMPION_TIME=10s remaining gate). The map's room flagged
+           champion:true is the finish line ; whoever holds it claims
+           the round through the existing championResult / 5s grace /
+           round_end broadcast pipeline. No new win condition added.
+     Bot AI gains a race-mode steering layer: BFS the rooms+tunnels
+     graph from the bot's current room to the champion-flagged room
+     and steer toward the next tunnel midpoint. Combat (fire while
+     racing) stays on so kill-or-finish both still win.
+     Race maps live alongside the existing maps in fractalgaming/lss/maps/
+     using the same JSON schema (rooms + tunnels + champion:true room).
+     Two adjacent spawn rooms (team A and B) sit at the start so this
+     reads as team racing. Existing gmaps overlay continues to work, so
+     racing through Vancouver / NYC / Tokyo Shibuya is a free byproduct.
+     v12m remains the stable baseline; do NOT edit it.
+     v12m fork started 2026-05-07. Branched off v12.
      v12m adds multiplayer synchronization of the typed Google Maps
      location AND a lobby validation guard that prevents launching
      into an unplayable state (no map AND no location). Sync uses
@@ -1062,6 +1087,11 @@ body.vr-active .hit-marker {
 }
 .map-load-btn:hover { border-color: #ffaa00; background: rgba(40,40,60,0.9); }
 .map-load-btn:active { background: rgba(60,50,15,0.9); }
+/* (v13r) Race-mode toggle. Active state uses a vivid magenta so the
+   toggle reads at a glance as a fundamentally different mode. */
+#race-mode-panel { margin-top: 6px; }
+#race-mode-toggle.active { color: #ff66cc; border-color: #ff66cc; background: rgba(60,15,55,0.85); }
+#race-mode-toggle.active:hover { border-color: #ffaaee; background: rgba(80,25,75,0.95); }
 #map-load-status {
   font-size: 10px; color: #88a; line-height: 1.3;
   text-align: center; min-height: 12px;
@@ -1761,11 +1791,24 @@ body.vr-active .hit-marker {
       <button class="map-load-btn" id="map-load-btn" title="Load a level JSON exported from Map Lab">+ LOAD CUSTOM MAP</button>
       <input id="map-load-input" type="file" accept=".json,application/json" hidden />
       <div id="map-load-status"></div>
+      <!-- (v13r) Race-mode toggle. When ON, ship speeds normalize to
+           LSS.RACE_SPEED, the champion field spawns at round start
+           (the room flagged champion:true is the finish line), and
+           bots steer toward that finish through the rooms+tunnels
+           graph. Selection rides the existing map_change net event
+           so peers enter the round in the same mode. -->
+      <div id="race-mode-panel">
+        <button class="map-load-btn" id="race-mode-toggle" data-on="0" title="Toggle Race Mode">RACE MODE: OFF</button>
+      </div>
       <!-- (v12 patch13) Google Maps overlay: drop the selected map onto any
-           real-world location. Geocodes via Nominatim. -->
+           real-world location. Geocodes via Nominatim.
+           (v13r) In race mode the panel shows TWO inputs ; entering both
+           and clicking GO procgens a race route from start to finish in
+           the chosen city. -->
       <div id="gmaps-overlay-panel">
         <div id="gmaps-overlay-label">DROP ON LOCATION</div>
         <input id="gmaps-loc-input" type="text" placeholder="Empire State Building" autocomplete="off" />
+        <input id="gmaps-loc-finish-input" type="text" placeholder="Finish location (race mode)" autocomplete="off" style="display:none;" />
         <div id="gmaps-overlay-row">
           <button class="map-load-btn" id="gmaps-loc-go">GO</button>
           <button class="map-load-btn" id="gmaps-loc-detach" title="Remove the city overlay">DETACH</button>
@@ -1918,6 +1961,19 @@ const LSS = {
   // warmupTimer is kept in lockstep with this so bots stay in 'warmup' (no
   // firing, no movement) for the full duration of the visible countdown.
   LAUNCH_COUNTDOWN: 10,
+  // (v13r) Race mode. MODE drives a few targeted divergences from classic:
+  //   * All chassis get clamped to RACE_SPEED (and RACE_DASH_SPEED) so the
+  //     race is fair regardless of which ship the player picked.
+  //   * spawnChampionField() fires at round start instead of at
+  //     CHAMPION_TIME seconds remaining ; the champion-flagged room IS
+  //     the finish line.
+  //   * Bot AI gains a "seek champion room" steering layer that walks the
+  //     rooms+tunnels graph (BFS) toward the finish.
+  // Combat stays on, so kill-or-finish both still resolve the round
+  // through the existing championResult / round_end pipeline.
+  MODE: 'classic',           // 'classic' | 'race'
+  RACE_SPEED: 900,           // baseline race velocity for all chassis
+  RACE_DASH_SPEED: 1400,     // dash/afterburner velocity in race mode
 };
 
 // (v10) Cloudflare Worker base URL ; the API behind lss.fractalreality.ca's
@@ -3063,13 +3119,29 @@ function enterShipSelect() {
 // Build (or rebuild) the single-window map selector. Runs each time ship-select
 // opens. The window always shows exactly one map; the dots indicate position in
 // the list; prev/next arrows (and gamepad d-pad LEFT/RIGHT) cycle through.
+// (v13r) Filter the map list by the active mode. Race mode shows only
+// race_* maps. Classic mode hides race_* maps. The gmaps_user slot is
+// mode-agnostic. Toggling the race-mode button rebuilds the carousel so
+// the selection set matches.
+function _visibleMapKeys() {
+  const all = Object.keys(MAP_DATA);
+  const isRace = (LSS.MODE === 'race');
+  return all.filter(k => {
+    const isRaceMap = k.startsWith('race_');
+    const isGmapsSlot = k === 'gmaps_user';
+    if (isGmapsSlot) return true;
+    return isRace ? isRaceMap : !isRaceMap;
+  });
+}
+
 function buildMapSelector() {
-  const keys = Object.keys(MAP_DATA);
+  const keys = _visibleMapKeys();
   if (keys.length === 0) return;
 
-  // Default selection on first entry; otherwise keep the player's last choice,
-  // so returning between rounds preserves their pick.
-  if (!game.selectedMap || !MAP_DATA[game.selectedMap]) {
+  // Default selection on first entry; otherwise keep the player's last choice
+  // IF it's still valid for the current mode. If not, snap to the first
+  // visible map so race mode doesn't keep a classic map selected.
+  if (!game.selectedMap || !MAP_DATA[game.selectedMap] || keys.indexOf(game.selectedMap) === -1) {
     game.selectedMap = keys[0];
   }
 
@@ -3162,16 +3234,19 @@ function selectMap(mapKey) {
     net.sendEvent({
       type: 'map_change',
       mapKey,
-      gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null
+      gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
+      // (v13r) Tag along the current race-mode flag so peers stay in sync.
+      mode: LSS.MODE || 'classic'
     });
   }
 }
 
 // Cycle to the prev (-1) or next (+1) map, wrapping at either end.
 function cycleMap(dir) {
-  const keys = Object.keys(MAP_DATA);
+  // (v13r) Cycle only through maps eligible for the active mode.
+  const keys = _visibleMapKeys();
   if (keys.length === 0) return;
-  if (!game.selectedMap || !MAP_DATA[game.selectedMap]) {
+  if (!game.selectedMap || !MAP_DATA[game.selectedMap] || keys.indexOf(game.selectedMap) === -1) {
     selectMap(keys[0]);
     return;
   }
@@ -4618,6 +4693,21 @@ function handleNetEvent(evt, fromPeerId) {
       } catch(_) {}
     }
     if (typeof selectMap === 'function') selectMap(evt.mapKey);
+    // (v13r) Apply the broadcast race-mode flag, if present. Falls back to
+    // 'classic' so a peer running a stale (no-mode) v12m client doesn't
+    // accidentally drag race-mode peers into classic mid-race.
+    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race')) {
+      LSS.MODE = evt.mode;
+      try {
+        const btn = document.getElementById('race-mode-toggle');
+        if (btn) {
+          const on = (LSS.MODE === 'race');
+          btn.dataset.on = on ? '1' : '0';
+          btn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
+          btn.classList.toggle('active', on);
+        }
+      } catch (_) {}
+    }
     return;
   }
   // (v6.7) Stasis owner spawned a field; mirror it at the broadcast position
@@ -12633,6 +12723,85 @@ class Bot {
     }
   }
 
+  // (v13r) Pick the next race-mode steering target. Sticky current-room
+  // tracking + room-center preference. Returns the next room's CENTER as
+  // the steering target whenever the bot is outside the current room
+  // sphere (in a corridor), and only falls back to the tunnel midpoint
+  // when the bot is fully inside the current room and needs help finding
+  // the corridor mouth. The current room is sticky so transient gaps
+  // between sphere coverage don't cause the BFS to flip-flop.
+  chooseRaceWaypoint() {
+    const graph = game.raceGraph;
+    if (!graph || !graph.finishId) return null;
+    const nodes = graph.nodes;
+    const finish = nodes[graph.finishId];
+    if (!finish) return null;
+
+    // Containing-room test (which sphere are we INSIDE right now).
+    let insideId = null, insideD2 = Infinity;
+    let nearestId = null, nearestD2 = Infinity;
+    for (const id in nodes) {
+      const n = nodes[id];
+      const dx = this.position.x - n.x, dy = this.position.y - n.y, dz = this.position.z - n.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 <= n.r * n.r && d2 < insideD2) { insideId = id; insideD2 = d2; }
+      if (d2 < nearestD2) { nearestId = id; nearestD2 = d2; }
+    }
+
+    // Sticky current-room: only advance when we ENTER a new room sphere.
+    // Outside any sphere, keep the last known so the BFS doesn't oscillate
+    // at corridor seams. First call (no sticky yet) bootstraps from the
+    // nearest room.
+    if (insideId) this._raceCurRoomId = insideId;
+    if (!this._raceCurRoomId) this._raceCurRoomId = nearestId;
+    let curId = this._raceCurRoomId;
+    if (!curId) return null;
+    if (curId === graph.finishId) return finish;
+
+    // BFS from current room to finish ; record predecessor to reconstruct
+    // the next-step neighbor. Edges carry the tunnel midpoint as the
+    // helper-waypoint for inside-room steering.
+    const prev = {};
+    const queue = [curId];
+    const visited = { [curId]: true };
+    let found = false;
+    while (queue.length) {
+      const id = queue.shift();
+      if (id === graph.finishId) { found = true; break; }
+      const n = nodes[id];
+      for (const nb of n.neighbors) {
+        if (visited[nb.id]) continue;
+        visited[nb.id] = true;
+        prev[nb.id] = { fromId: id, mid: nb.mid };
+        queue.push(nb.id);
+      }
+    }
+    if (!found) return finish;
+
+    // Walk back from finish to the immediate-next room after curId.
+    let stepId = graph.finishId;
+    let stepEdge = prev[stepId];
+    while (stepEdge && stepEdge.fromId !== curId) {
+      stepId = stepEdge.fromId;
+      stepEdge = prev[stepId];
+    }
+    const nextRoom = nodes[stepId];
+    if (!nextRoom) return finish;
+
+    // Steering choice:
+    //   * Inside the current room sphere : aim at the corridor MIDPOINT to
+    //     thread the corridor mouth (the room sphere is wide enough that
+    //     aiming at the next-room center can leave the bot scraping a
+    //     wall on its way out).
+    //   * Outside the current room sphere (we've left through the mouth
+    //     and are now in the corridor or near the next room) : aim
+    //     DIRECTLY at the next room's CENTER. A room is a guaranteed-clear
+    //     sphere ; the line from anywhere on or near the corridor axis to
+    //     the room center is clear of geometry.
+    if (insideId === curId && stepEdge) return stepEdge.mid;
+    return nextRoom;
+  }
+
   update(dt) {
     if (!this.alive) return;
     // Bots are locked in place during pre-round warmup.
@@ -12672,6 +12841,54 @@ class Bot {
       this.aiWanderDir.set(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
     }
 
+    // (v13r) Race-mode movement override. Combat targeting + firing logic
+    // above is preserved (fireAtPlayer below uses player.position directly,
+    // not aiTarget), so bots still shoot ; we just steer their movement
+    // toward the next room along the BFS path to the champion-flagged
+    // finish room. The override is a noop if the level has no race graph
+    // or no champion room, so race mode degrades gracefully on classic maps.
+    let _raceWaypoint = null;
+    if (LSS.MODE === 'race' && game.state === 'playing' && game.raceGraph && game.raceGraph.finishId) {
+      _raceWaypoint = this.chooseRaceWaypoint();
+      if (_raceWaypoint) {
+        if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
+        this.aiTarget.set(_raceWaypoint.x, _raceWaypoint.y, _raceWaypoint.z);
+        this.aiRetreating = false;
+        this.aiRole = 'engage';
+
+        // Stuck detector: if the bot has been near the same position for
+        // more than 1.5s while racing, perturb aiTarget by a random vertical
+        // and lateral offset for the next ~0.8s. This dislodges bots wedged
+        // against a wall or stuck in a corner where pure target-seeking
+        // can't escape. Tracked via _stuckPos / _stuckT scratches.
+        const _now = (game && typeof game.time === 'number') ? game.time : 0;
+        if (!this._stuckPos) {
+          this._stuckPos = new THREE.Vector3().copy(this.position);
+          this._stuckT = _now;
+        } else {
+          const dx = this.position.x - this._stuckPos.x;
+          const dy = this.position.y - this._stuckPos.y;
+          const dz = this.position.z - this._stuckPos.z;
+          if (dx*dx + dy*dy + dz*dz > 60 * 60) {
+            // Moved enough ; reset.
+            this._stuckPos.copy(this.position);
+            this._stuckT = _now;
+            this._stuckNudgeUntil = 0;
+          } else if ((_now - this._stuckT) > 1.5) {
+            // Been stuck. Apply (or extend) a nudge for ~0.8s.
+            if (!this._stuckNudgeUntil || _now > this._stuckNudgeUntil) {
+              this._stuckNudgeUntil = _now + 0.8;
+              const ang = Math.random() * Math.PI * 2;
+              const r   = 400 + Math.random() * 400;
+              this.aiTarget.x += Math.cos(ang) * r;
+              this.aiTarget.y += (Math.random() - 0.3) * 600;
+              this.aiTarget.z += Math.sin(ang) * r;
+            }
+          }
+        }
+      }
+    }
+
     // Strafe timer for combat movement
     this.aiStrafeTimer -= dt;
     if (this.aiStrafeTimer <= 0) {
@@ -12684,7 +12901,19 @@ class Bot {
     // which allocated per frame per bot (every bot, every frame). Copy into
     // _tempVec3c and reuse; any reassignments below also point into scratches.
     let moveDir = this._tempVec3c.copy(this.aiWanderDir);
-    if (this.aiTarget) {
+    // (v13r) Race-mode short-circuit. When racing, point straight at the
+    // race waypoint and skip the flank/strafe combat overlays below. Those
+    // overlays bias movement toward the player's position, which in race
+    // mode reads as 'bot abandons the corridor to chase the player' and
+    // is the main reason bots used to get stuck on walls. Combat firing
+    // (the fireAtPlayer block below) still runs unmodified.
+    if (_raceWaypoint && this.aiTarget) {
+      moveDir = this._tempVec3a.subVectors(this.aiTarget, this.position);
+      const _rd = moveDir.length();
+      if (_rd > 0.001) moveDir.multiplyScalar(1 / _rd);
+      this.targetDir.lerp(moveDir, dt * 2);
+      this.targetDir.normalize();
+    } else if (this.aiTarget) {
       const toTarget = this._tempVec3a.subVectors(this.aiTarget, this.position);
       const dist = toTarget.length();
 
@@ -12736,8 +12965,10 @@ class Bot {
       }
     }
 
-    this.targetDir.lerp(moveDir, dt * 2);
-    this.targetDir.normalize();
+    if (!_raceWaypoint) {
+      this.targetDir.lerp(moveDir, dt * 2);
+      this.targetDir.normalize();
+    }
 
     // Arc slow effect (from SLAYER Arc Wave). Avoid cloning targetDir just to
     // scale-and-add; apply component-wise to velocity.
@@ -12750,7 +12981,12 @@ class Bot {
     this.velocity.z += this.targetDir.z * accelK;
 
     const speed = this.velocity.length();
-    const maxSpd = this.arcSlowTimer > 0 ? this.chassis.flightSpeed * 0.3 : this.chassis.flightSpeed;
+    // (v13r) Race mode normalizes bot top speed to LSS.RACE_SPEED across
+    // all chassis so the field stays bunched together regardless of
+    // ship choice. Arc-slow debuff still applies (debuffs aren't removed
+    // by mode), just to the race speed instead of the chassis speed.
+    const _baseSpd = (LSS.MODE === 'race') ? LSS.RACE_SPEED : this.chassis.flightSpeed;
+    const maxSpd = this.arcSlowTimer > 0 ? _baseSpd * 0.3 : _baseSpd;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
     }
@@ -20623,7 +20859,21 @@ function updatePlayerMovement(dt) {
     return;
   }
 
-  const ch = player.chassis;
+  // (v13r) In race mode, all chassis race at the same speed. Wrap the
+  // player.chassis with a shadow object that overrides the four speed
+  // fields ; everything else (acceleration, turn rate, hull dimensions,
+  // dash duration, mass) inherits from the real chassis so movement
+  // feel is preserved. Acceleration also bumps so the higher race
+  // speed actually gets reached in a usable amount of time.
+  const ch = (LSS.MODE === 'race')
+    ? Object.assign({}, player.chassis, {
+        flightSpeed:    LSS.RACE_SPEED,
+        strafeSpeed:    LSS.RACE_SPEED * 0.85,
+        verticalSpeed:  LSS.RACE_SPEED * 0.7,
+        dashSpeed:      LSS.RACE_DASH_SPEED,
+        acceleration:   Math.max(player.chassis.acceleration, LSS.RACE_SPEED * 2),
+      })
+    : player.chassis;
 
   // Mouse look + gamepad look
   if (input.locked) {
@@ -20743,7 +20993,11 @@ function updatePlayerMovement(dt) {
   }
 
   // Speed cap (afterburner raises the cap to 600 ; sword block clamps to 40%)
-  let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? 600 : ch.flightSpeed);
+  // (v13r) In race mode the afterburner cap rises to RACE_DASH_SPEED so
+  // afterburner-equipped ships can lean on it without dropping below
+  // base race velocity.
+  const _ab = (LSS.MODE === 'race') ? LSS.RACE_DASH_SPEED : 600;
+  let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? _ab : ch.flightSpeed);
   if (swordBlockActive) maxSpeed = ch.flightSpeed * 0.4;
   if (player.velocity.length() > maxSpeed) {
     player.velocity.normalize().multiplyScalar(maxSpeed);
@@ -24412,7 +24666,7 @@ function updateRoundSystem(dt) {
     }
     const endByChampion = (game.championResult === 'A' || game.championResult === 'B')
       && (!game.championEndTimer || game.championEndTimer <= 0);
-    const endByTimer = game.roundTimer <= 0;
+    const endByTimer = !game.raceNoTimer && game.roundTimer <= 0;
     // (v10 fix) In multiplayer, only the stasis owner peer is allowed to
     // RESOLVE the round (compute winner + bump score + transition to
     // roundEnd). Other peers wait for the broadcast 'round_end' event
@@ -26347,7 +26601,11 @@ function updateHUD() {
   let timerValue = game.state === 'warmup' ? game.warmupTimer : game.roundTimer;
   const minutes = Math.floor(Math.max(0, timerValue) / 60);
   const seconds = Math.floor(Math.max(0, timerValue) % 60);
-  _hudText(_hudEl('round-timer'), 'round-timer:t', minutes + ':' + String(seconds).padStart(2, '0'));
+  // (v13r-2) Custom-Location race mode hides the round timer ; race ends
+  // at finish only (or team-wipe). Warmup countdown still shows.
+  const _hideTimer = !!game.raceNoTimer && game.state !== 'warmup';
+  _hudText(_hudEl('round-timer'), 'round-timer:t',
+    _hideTimer ? '--' : (minutes + ':' + String(seconds).padStart(2, '0')));
 
   const stateText = game.state === 'warmup' ? 'WARMUP' :
     game.state === 'playing' ? 'ROUND ' + game.currentRound :
@@ -28834,7 +29092,8 @@ const WALL_PATTERN_NAMES = [
   // (v11d) Three more user-authored multi-layer composites:
   'Hue-Shifting Grid',  // 26 ; bg=Panel Maze + fg=Kali + fg2=Panel Maze (blue tint)
   'Hexeizure',          // 27 ; bg=Panel Maze + fg=Mandelbox + fg2=Hex Pulse (black tint)
-  'Starfield'           // 28 ; bg=Panel Maze + fg=Cyber Datamosh + fg2=Apollonian (dark-green)
+  'Starfield',          // 28 ; bg=Panel Maze + fg=Cyber Datamosh + fg2=Apollonian (dark-green)
+  'Race Glow'           // 29 ; (v13r) triple Plasma FBM tinted neon green ; auto-flips Pure Black Base OFF for the glow look
 ];
 
 const WALL_PARAM_DEFS = [
@@ -29585,6 +29844,32 @@ const MULTI_LAYER_PRESETS = {
     u_hueSpin_fg2: 0.31, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 6.0,
   },
+  // Index 29: Race Glow. (v13r) User-authored from the wall lab. Three
+  // Plasma FBM layers stacked with multiply blends and a bright neon-
+  // green tint (#00ff55). The glow effect only reads when Pure Black
+  // Base is OFF (the multiply layers crush to near-black against the
+  // BlackBase=ON path). The _blackBase hint flips it off automatically
+  // when this preset is selected so the cool look is one-cycle-away
+  // instead of requiring a settings dive.
+  29: {
+    _blackBase: 0,
+    paletteOverride: 0x00ff55,
+    bgPatternId: 6,                                   // Plasma FBM
+    bgTime: 0.0,
+    u_iters_bg: 1, u_scale_bg: 0.0013, u_invBase_bg: 9.0,
+    u_hueSpin_bg: 0.12, u_satBase_bg: 0.7,
+    K_COSMIC_bg: 0.1,
+    fgPatternId: 6,                                   // Plasma FBM
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.0, fgTime: 0.0,
+    u_iters_fg: 1, u_scale_fg: 0.0013, u_invBase_fg: 20.0,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 1.2,
+    fg2PatternId: 6,                                  // Plasma FBM
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
+    u_iters_fg2: 1, u_scale_fg2: 0.0013, u_invBase_fg2: 9.0,
+    u_hueSpin_fg2: 0.5, u_satBase_fg2: 1.0,
+    K_COSMIC_fg2: 0.4,
+  },
 };
 
 // Apply a multi-layer preset's per-layer values to the wall material's
@@ -29606,7 +29891,13 @@ function applyMultiLayerPreset(idx) {
     // solo pattern, which read as 'first pattern stuck under all the
     // others'. Solo path uses uPattern (set in setWallPattern) so
     // disabling patternId here is safe.
-    if (u.patternId)    u.patternId.value    = -1;
+    // (v13r fix) Was 'u.patternId' — that uniform doesn't exist on this
+    // shader (the BG layer's id is named bgPatternId). Typo meant the BG
+    // slot was never cleared when transitioning composite -> solo, so a
+    // stale BG pattern stayed bound. Solo path doesn't read BG today, but
+    // any future shader path that does would inherit the bug ; clearing
+    // here keeps state hygienic.
+    if (u.bgPatternId)  u.bgPatternId.value  = -1;
     if (u.fgPatternId)  u.fgPatternId.value  = -1;
     if (u.fg2PatternId) u.fg2PatternId.value = -1;
     return false;
@@ -29630,6 +29921,15 @@ function applyMultiLayerPreset(idx) {
     } else {
       u.uCompositeTint.value.set(0.5, 0.6, 0.85);
     }
+  }
+  // (v13r) Optional _blackBase preset hint. Some presets (Race Glow at 29)
+  // only read correctly when Pure Black Base is OFF ; flipping it here as
+  // part of selecting the preset means the user doesn't have to dive into
+  // settings to see the intended look. Presets without this hint leave
+  // the user's BlackBase preference untouched, so cycling from a hinted
+  // preset to a non-hinted one keeps the BlackBase=OFF state.
+  if (typeof preset._blackBase === 'number' && typeof setWallBlackBase === 'function') {
+    try { setWallBlackBase(!!preset._blackBase); } catch (_) {}
   }
   return true;
 }
@@ -30105,6 +30405,30 @@ class StasisField {
       this.claimRing.rotation.x = Math.PI / 2;
       this.claimRing.renderOrder = 1;
       this.group.add(this.claimRing);
+
+      // (v13r-3) Tall vertical beacon column so the finish is visible
+      // from any distance, including across-province races. The column
+      // is purely visual : 8000 units tall (covers any sane race scale),
+      // additive-blended purple so it reads against both sky and city.
+      // Width scales per-frame in update(dt) so far-away distances still
+      // subtend a readable angle on screen.
+      const beaconGeo = new THREE.CylinderGeometry(1, 1, 8000, 16, 1, true);
+      const beaconMat = new THREE.MeshBasicMaterial({
+        color: 0xff66ff, transparent: true, opacity: 0.55,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      });
+      this.beacon = new THREE.Mesh(beaconGeo, beaconMat);
+      this.beacon.renderOrder = 1;
+      this.group.add(this.beacon);
+      // A second, tighter inner core for the beacon to give it a hot center.
+      const beaconCoreGeo = new THREE.CylinderGeometry(0.4, 0.4, 8000, 12, 1, true);
+      const beaconCoreMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.45,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      });
+      this.beaconCore = new THREE.Mesh(beaconCoreGeo, beaconCoreMat);
+      this.beaconCore.renderOrder = 2;
+      this.group.add(this.beaconCore);
     }
 
     // No per-field PointLight: adding lights post-init forces Three.js to
@@ -30144,6 +30468,18 @@ class StasisField {
     }
     if (this.claimRing) {
       this.claimRing.rotation.z += dt * 0.4 * proximityBoost;
+    }
+    // (v13r-3) Beacon distance-scale. Width keeps the column at
+    // >= ~0.3 deg subtended angle. Height also scales for very long
+    // races so the 8000-unit baseline doesn't disappear at scale ;
+    // the column always stretches at least 5% of distance vertically
+    // so it punches through any horizon haze.
+    if (this.beacon && typeof camera !== 'undefined') {
+      const d = camera.position.distanceTo(this.position);
+      const w = Math.max(20, d * 0.005);
+      const hScale = Math.max(1, (d * 0.05) / 8000);
+      this.beacon.scale.set(w, hScale, w);
+      if (this.beaconCore) this.beaconCore.scale.set(w, hScale, w);
     }
     // Drive shader uniforms on the energy core: time advances regardless of
     // proximity; uPulse boosts band rotation speed and brightness when the
@@ -30336,7 +30672,15 @@ function spawnChampionField() {
   game.stasisFields.push(field);
   game.championField = field;
   // Cinematic announce: banner + a fat dynamic light pulse at the field.
-  if (window.Overlays) Overlays.banner('CHAMPION OBJECTIVE', 'Charge in the field to win the round');
+  if (window.Overlays) {
+    if (LSS.MODE === 'race') {
+      // (v13r) In race mode the champion field is the finish line. Banner
+      // copy reads as a finish-line callout instead of a mid-match objective.
+      Overlays.banner('FINISH LINE', 'First team to capture the field wins the race');
+    } else {
+      Overlays.banner('CHAMPION OBJECTIVE', 'Charge in the field to win the round');
+    }
+  }
   if (typeof spawnDynamicLight === 'function') {
     spawnDynamicLight(pos, 0xaa55ff, 6.0, 1500, 0.8);
   }
@@ -30429,7 +30773,14 @@ function updateStasisFields(dt) {
   // CHAMPION_TIME, drop a single big purple stasis at map center. game.
   // championSpawned guards against re-spawning if this peer's logic
   // re-enters the branch.
-  if (game.state === 'playing' && !game.championSpawned && game.roundTimer <= LSS.CHAMPION_TIME) {
+  // (v13r) In race mode the champion field IS the finish line ; spawn it
+  // immediately on the first 'playing' tick instead of waiting for the
+  // CHAMPION_TIME gate. Same spawn function, same broadcast, same
+  // capture/charge model ; just earlier.
+  const _championDue = (LSS.MODE === 'race')
+    ? (game.state === 'playing')
+    : (game.state === 'playing' && game.roundTimer <= LSS.CHAMPION_TIME);
+  if (_championDue && !game.championSpawned) {
     spawnChampionField();
     game.championSpawned = true;
   }
@@ -31238,6 +31589,68 @@ const MAP_DATA = {
   },
 
   // ============================================================
+  // (v13r) Race-mode maps. Two adjacent spawn rooms (Fleet A + Fleet B)
+  // sit side-by-side at the start so the lobby reads as team racing ;
+  // a single room flagged champion:true sits at the far end as the
+  // finish line. Tunnels run wider than classic combat maps (TR ~2.0)
+  // so 7 ships per fleet can flow through without constant clipping.
+  // These are still valid CLASSIC maps too ; in classic mode they
+  // play as deathmatch with the champion field appearing in the
+  // finish room at CHAMPION_TIME remaining as usual.
+  // ============================================================
+
+  // Pole Position: hand-authored in map_lab.html (race1.json export).
+  // 16 rooms, 15 tunnels. Spawns at the eastern start (Fleet A + Fleet B
+  // adjacent, sharing room_1 as the gate-room), climb to the cathedral
+  // roof at room_4, sweep west through room_5 / room_9 / room_6, descend
+  // along the southern spine (rooms 10-13), curl up through room_15,
+  // then dive into the central finish (room_17, flagged champion:true).
+  // Coordinates are absolute (not SU-multiplied) since map_lab exports
+  // in world units already.
+  race_pole_position: {
+    name: 'Race ; Pole Position',
+    description: 'Hand-built sweep ; spawns at the eastern start, climb to the cathedral roof, descend through the western spine, dive into the central finish.',
+    palette: [
+      0x4487ff, 0xff4488, 0x44ddff, 0xff8844, 0xaaaaff, 0x44ddff, 0xff4488, 0xffffaa
+    ],
+    rooms: [
+      { id: 'room_1',  team: null, x:   274, y:  150, z:  2714, r: 300 },
+      { id: 'room_2',  team: 'A',  x:  2798, y:  150, z:  2852, r: 300 },
+      { id: 'room_3',  team: 'B',  x:  2820, y:  150, z:  2487, r: 300 },
+      { id: 'room_4',  team: null, x:  -835, y: 1183, z:  2463, r: 350 },
+      { id: 'room_5',  team: null, x: -1342, y:  524, z:  1112, r: 300 },
+      { id: 'room_6',  team: null, x: -2700, y:  219, z:  2331, r: 500 },
+      { id: 'room_7',  team: null, x: -2860, y:  175, z:   742, r: 500 },
+      { id: 'room_8',  team: null, x: -2234, y:  270, z: -2673, r: 400 },
+      { id: 'room_9',  team: null, x:  2572, y:  359, z: -2632, r: 380 },
+      { id: 'room_10', team: null, x:  2701, y:  284, z:  -927, r: 330 },
+      { id: 'room_11', team: null, x:  2537, y:  532, z:   572, r: 270 },
+      { id: 'room_12', team: null, x:  1548, y:  305, z:  1492, r: 270 },
+      { id: 'room_13', team: null, x:   324, y:  463, z:  1078, r: 270 },
+      { id: 'room_14', team: null, x:  -501, y:  546, z:   917, r: 350 },
+      { id: 'room_15', team: null, x: -1226, y:  466, z:  -967, r: 400 },
+      { id: 'room_17', team: null, champion: true, x: 1172, y: 466, z: -1544, r: 500 },
+    ],
+    tunnels: [
+      { path: [{x:   274, y:  150, z:  2714}, {x:  2798, y:  150, z:  2852}], r: 250 },
+      { path: [{x:  2820, y:  150, z:  2487}, {x:   274, y:  150, z:  2714}], r: 250 },
+      { path: [{x:   274, y:  150, z:  2714}, {x:  -835, y: 1183, z:  2463}], r: 300 },
+      { path: [{x: -1342, y:  524, z:  1112}, {x:  -835, y: 1183, z:  2463}], r: 300 },
+      { path: [{x: -1342, y:  524, z:  1112}, {x: -2700, y:  219, z:  2331}], r: 290 },
+      { path: [{x: -2860, y:  175, z:   742}, {x: -2700, y:  219, z:  2331}], r: 250 },
+      { path: [{x: -2860, y:  175, z:   742}, {x: -2234, y:  270, z: -2673}], r: 300 },
+      { path: [{x:  2572, y:  359, z: -2632}, {x: -2234, y:  270, z: -2673}], r: 300 },
+      { path: [{x:  2572, y:  359, z: -2632}, {x:  2701, y:  284, z:  -927}], r: 280 },
+      { path: [{x:  2701, y:  284, z:  -927}, {x:  2537, y:  532, z:   572}], r: 250 },
+      { path: [{x:  2537, y:  532, z:   572}, {x:  1548, y:  305, z:  1492}], r: 220 },
+      { path: [{x:  1548, y:  305, z:  1492}, {x:   324, y:  463, z:  1078}], r: 180 },
+      { path: [{x:   324, y:  463, z:  1078}, {x:  -501, y:  546, z:   917}], r: 180 },
+      { path: [{x: -1226, y:  466, z:  -967}, {x:  -501, y:  546, z:   917}], r: 250 },
+      { path: [{x:  1172, y:  466, z: -1544}, {x: -1226, y:  466, z:  -967}], r: 350 },
+    ],
+  },
+
+  // ============================================================
   // (v12 patch20) Google Maps overlay slot. Type any location into
   // the lobby DROP panel to either:
   //   - rewrite this slot and select it (pure-city flight, no walls), OR
@@ -31386,6 +31799,36 @@ function buildRoomGraphLevel(level) {
         if (m) m.renderOrder = 2;
       }
       game.mapMeshes = _saveMeshes;
+      // (v13r fix) The worker callback can fire DURING the await above
+      // (it's a setTimeout-style postMessage). When it does, createMeshFromPositions
+      // both adds a new mesh to the scene and overwrites game.levelMaterial.
+      // Restoring _saveMeshes alone leaves that orphan mesh in the scene,
+      // overlapping the snapshot meshes and rendering with a STALE material
+      // reference. setWallPattern updates only game.levelMaterial (the new
+      // one), so the orphan stays frozen on whatever pattern was bound when
+      // it was built ; the user sees two patterns interleaved when they
+      // press P. Fix: walk anything added during the await window and
+      // remove it from the scene + dispose. _saveMeshes (re-attached above)
+      // is the source of truth.
+      try {
+        const _orphans = (game.mapMeshes || []).filter(m => m && _saveMeshes.indexOf(m) === -1);
+        for (const om of _orphans) {
+          try { if (om.parent) scene.remove(om); } catch(_) {}
+          try { if (om.geometry) om.geometry.dispose(); } catch(_) {}
+          // material is shared with potentially-still-live game.levelMaterial,
+          // don't dispose it here.
+        }
+        if (_orphans.length) {
+          console.log('[lss-gmaps] removed', _orphans.length, 'orphan wall meshes added by worker during overlay build.');
+        }
+        // Re-point game.levelMaterial at the snapshot's material so
+        // setWallPattern updates the visible walls.
+        const liveMat = (_saveMeshes[0] && _saveMeshes[0].material) || null;
+        if (liveMat && game.levelMaterial !== liveMat) {
+          game.levelMaterial = liveMat;
+          console.log('[lss-gmaps] re-pointed game.levelMaterial at snapshot mesh material.');
+        }
+      } catch(e) { console.warn('[lss-gmaps] orphan-mesh cleanup failed:', e); }
       console.log('[lss-gmaps] re-attached', _saveMeshes.length, 'wall meshes after overlay build.');
       // Flip overlay flag so SDF / raycastLevel use the tunnel walls
       // instead of the gmaps short-circuit. Combat continues to behave
@@ -31461,6 +31904,54 @@ function buildRoomGraphLevel(level) {
     game.levelCylinders.push({ ax: seg.a.x, ay: seg.a.y, az: seg.a.z, bx: seg.b.x, by: seg.b.y, bz: seg.b.z, r: seg.r });
   }
   game.sdfRoomData = rooms;
+
+  // --- (v13r) BUILD RACE GRAPH ---
+  // Each room becomes a node. Each tunnel becomes an edge between the two
+  // rooms that contain its endpoints (start of path and end of path), if any.
+  // Used by race-mode bot navigation to BFS toward the champion-flagged room.
+  // Rebuilt every level load so a fresh map yields a fresh graph.
+  (function _buildRaceGraph() {
+    const nodes = {};
+    for (const rm of rooms) {
+      nodes[rm.id] = {
+        id: rm.id, x: rm.x, y: rm.y, z: rm.z, r: rm.r,
+        team: rm.team || null,
+        champion: !!rm.champion,
+        neighbors: []
+      };
+    }
+    function roomContaining(pt) {
+      let best = null, bestD = Infinity;
+      for (const rm of rooms) {
+        const dx = pt.x - rm.x, dy = pt.y - rm.y, dz = pt.z - rm.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 <= rm.r * rm.r && d2 < bestD) { best = rm; bestD = d2; }
+      }
+      return best;
+    }
+    for (const tun of tunnels) {
+      const path = tun.path;
+      if (!path || path.length < 2) continue;
+      const startPt = path[0], endPt = path[path.length - 1];
+      const a = roomContaining(startPt);
+      const b = roomContaining(endPt);
+      if (!a || !b || a.id === b.id) continue;
+      // Midpoint as a steering hint (the geometric heart of the corridor).
+      const midIdx = Math.floor(path.length / 2);
+      const mid = path[midIdx];
+      const na = nodes[a.id], nb = nodes[b.id];
+      if (!na.neighbors.find(n => n.id === b.id)) {
+        na.neighbors.push({ id: b.id, mid: { x: mid.x, y: mid.y, z: mid.z } });
+      }
+      if (!nb.neighbors.find(n => n.id === a.id)) {
+        nb.neighbors.push({ id: a.id, mid: { x: mid.x, y: mid.y, z: mid.z } });
+      }
+    }
+    // Find the champion-flagged room as the BFS target.
+    let finishId = null;
+    for (const id in nodes) { if (nodes[id].champion) { finishId = id; break; } }
+    game.raceGraph = { nodes, finishId };
+  })();
 
   // --- GENERATE CORRIDOR POINTS (for spawning, bot navigation, dynamic object placement) ---
   // Sample points inside rooms (tagged with team)
@@ -32459,7 +32950,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29) {',
       // (v8VR 2026-05-01) Pass a tint to cosmicField for multi-layer
       // composite presets so per-room zoneColor doesn't leak into pattern
       // sampling. The lab uses a single tintColor across the whole
@@ -33730,7 +34221,10 @@ function updateEnemyHealthBars() {
   for (const field of game.stasisFields) {
     if (!field.alive) continue;
     const dist = player.position.distanceTo(field.position);
-    if (dist > 4000) continue;
+    // (v13r-3) Champion fields (race finish) bypass the 4 km marker cap
+    // so cross-province races still get an on-screen waypoint. Regular
+    // stasis fields keep the original cap.
+    if (dist > 4000 && !field.championMode) continue;
 
     const worldPos = _hbTmpA.copy(field.position);
     worldPos.y += 60;
@@ -40291,6 +40785,102 @@ async function _lssGmapsBuildLevel(level) {
     game.corridorPoints.push({ x: Math.cos(a) * rad, y: ALT + Math.random() * SU * 4, z: Math.sin(a) * rad, team: null });
   }
 
+  // (v13r-2) Race-mode override : if a race route is armed, replace the
+  // dogfight spawn dome with race-specific spawn clusters at the start
+  // and place a finish marker at the destination. Bots navigate via the
+  // race graph ; champion field auto-spawns at the finish marker.
+  if (game.pendingRaceRoute && LSS.MODE === 'race') {
+    const rr = game.pendingRaceRoute;
+    const fin = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    const dist = Math.sqrt(fin.x * fin.x + fin.z * fin.z);
+    const len = Math.max(1, dist);
+    const ux = fin.x / len, uz = fin.z / len;
+    const perpX = -uz, perpZ = ux;
+    const SPAWN_OFFSET = 220;
+    const STARTLINE_BACK = 100;        // tuck spawns slightly behind the line
+    const ax =  perpX * SPAWN_OFFSET - ux * STARTLINE_BACK;
+    const az =  perpZ * SPAWN_OFFSET - uz * STARTLINE_BACK;
+    const bx = -perpX * SPAWN_OFFSET - ux * STARTLINE_BACK;
+    const bz = -perpZ * SPAWN_OFFSET - uz * STARTLINE_BACK;
+
+    // Wipe the dogfight dome and rebuild spawn clusters at the start line.
+    game.corridorPoints = [];
+    for (let i = 0; i < 16; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = SU * 1.2 + Math.random() * SU * 1.5;
+      game.corridorPoints.push({ x: ax + Math.cos(a) * r, y: ALT + Math.random() * SU * 1.2, z: az + Math.sin(a) * r, team: 'A' });
+      game.corridorPoints.push({ x: bx + Math.cos(a) * r, y: ALT + Math.random() * SU * 1.2, z: bz + Math.sin(a) * r, team: 'B' });
+    }
+
+    // Populate sdfRoomData with phantom rooms : two team spawns + a
+    // champion-flagged finish. spawnChampionField looks for the
+    // champion:true room and lands the field there.
+    const FINISH_R = 480;
+    game.sdfRoomData = [
+      { id: 'spawn_a', team: 'A', x: ax, y: ALT, z: az, r: 280 },
+      { id: 'spawn_b', team: 'B', x: bx, y: ALT, z: bz, r: 280 },
+      { id: 'finish',  team: null, champion: true, x: fin.x, y: ALT, z: fin.z, r: FINISH_R },
+    ];
+
+    // Tiny race graph : start node + finish node connected. Bots BFS
+    // start -> finish and steer at the midpoint.
+    const midX = fin.x * 0.5, midZ = fin.z * 0.5;
+    const startNode = {
+      id: 'race_start', x: (ax + bx) * 0.5, y: ALT, z: (az + bz) * 0.5, r: 280, team: null, champion: false,
+      neighbors: [{ id: 'race_finish', mid: { x: midX, y: ALT, z: midZ } }],
+    };
+    const finishNode = {
+      id: 'race_finish', x: fin.x, y: ALT, z: fin.z, r: FINISH_R, team: null, champion: true,
+      neighbors: [{ id: 'race_start', mid: { x: midX, y: ALT, z: midZ } }],
+    };
+    game.raceGraph = {
+      nodes: { race_start: startNode, race_finish: finishNode },
+      finishId: 'race_finish',
+    };
+    // (v13r-3) Province-scale races easily exceed the default 25,000-unit
+    // arena clamp ; players were hitting an invisible wall mid-route.
+    // Bump ARENA_SIZE to 2.5x the race distance (or keep the default,
+    // whichever is larger). Stash the original once so DETACH can
+    // restore it for classic-mode matches that follow.
+    if (typeof LSS._origArenaSize !== 'number') LSS._origArenaSize = LSS.ARENA_SIZE;
+    const _raceArena = Math.max(LSS._origArenaSize, dist * 2.5);
+    if (_raceArena > LSS.ARENA_SIZE) {
+      LSS.ARENA_SIZE = _raceArena;
+      console.log('[lss-gmaps] race ARENA_SIZE expanded to', _raceArena.toFixed(0),
+        '(orig', LSS._origArenaSize, ', race dist', dist.toFixed(0) + ')');
+    }
+    // (v13r-3) Long races also need the camera far plane and fog density
+    // bumped, otherwise the finish beacon + HUD waypoint clip out before
+    // the user can see them. Default far is 25000 ; race far covers the
+    // full distance plus a healthy margin so the beacon is reachable
+    // while looking from the start. Default fog density 0.000015 fades
+    // out around 67km ; race density scales inversely with distance so
+    // the same 'haze at horizon' feel persists at any scale.
+    if (typeof LSS._origCameraFar !== 'number') LSS._origCameraFar = camera.far;
+    const _raceFar = Math.max(LSS._origCameraFar, dist * 1.6);
+    if (_raceFar > camera.far) {
+      camera.far = _raceFar;
+      camera.updateProjectionMatrix();
+      console.log('[lss-gmaps] race camera.far expanded to', _raceFar.toFixed(0));
+    }
+    if (scene.fog && typeof LSS._origFogDensity !== 'number' && typeof scene.fog.density === 'number') {
+      LSS._origFogDensity = scene.fog.density;
+    }
+    if (scene.fog && typeof scene.fog.density === 'number') {
+      // Target : fog factor stays around 0.5 at the finish distance, so
+      // the goal is hazy but still seen. e^(-(density*d)^2) = 0.5
+      // -> density = sqrt(ln 2) / d ~= 0.833 / d.
+      const _raceFogDensity = Math.min(LSS._origFogDensity, 0.833 / Math.max(1, dist));
+      if (_raceFogDensity < scene.fog.density) {
+        scene.fog.density = _raceFogDensity;
+        console.log('[lss-gmaps] race fog density relaxed to', _raceFogDensity.toExponential(2));
+      }
+    }
+    console.log('[lss-gmaps] race route armed :',
+      rr.start.name || 'start', '->', rr.finish.name || 'finish',
+      '(' + (dist).toFixed(0) + ' world units)');
+  }
+
   // Get API key (prompt if missing). Cancelling falls back to the default
   // tunnel map so the player isn't stuck on a blank scene.
   let key = _lssGmapsGetKey();
@@ -40590,6 +41180,79 @@ function _lssGmapsLevelExtentY() {
 // at sample points around origin to find the highest building, then shift
 // the tile group so that highest point sits below the level's min room
 // minus a safety margin. Result: tunnels never get clipped by buildings.
+// (v13r-3) Shift every piece of level state by dy in lockstep.
+// Touches: visual mesh positions, SDF source data (spheres/cylinders),
+// room data (sdfRoomData), corridor points (spawn picker / AI nav),
+// race graph nodes + neighbor midpoints, the live champion field,
+// and any spawned ships (player + bots + network players). Cumulative
+// shift is tracked on game._raceLevelShiftY so callers can be idempotent.
+function _lssGmapsShiftLevelY(dy) {
+  if (!isFinite(dy) || Math.abs(dy) < 0.01) return;
+  for (const m of (game.mapMeshes || [])) { if (m && m.position) m.position.y += dy; }
+  for (const sp of (game.levelSpheres || [])) { sp.cy += dy; }
+  for (const cy of (game.levelCylinders || [])) { cy.ay += dy; cy.by += dy; }
+  for (const r of (game.sdfRoomData || [])) { r.y += dy; }
+  for (const p of (game.corridorPoints || [])) { p.y += dy; }
+  if (game.raceGraph && game.raceGraph.nodes) {
+    for (const id in game.raceGraph.nodes) {
+      const n = game.raceGraph.nodes[id];
+      n.y += dy;
+      for (const nb of (n.neighbors || [])) { if (nb && nb.mid) nb.mid.y += dy; }
+    }
+  }
+  if (game.championField && game.championField.position) game.championField.position.y += dy;
+  if (typeof player !== 'undefined' && player && player.position) player.position.y += dy;
+  for (const b of (game.entities || [])) { if (b && b.position) b.position.y += dy; }
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) { if (np && np.position) np.position.y += dy; }
+  }
+  game._raceLevelShiftY = (game._raceLevelShiftY || 0) + dy;
+}
+
+// (v13r-3) Race-mode level-to-terrain follow. Raycast straight down at
+// each room's xz to find local terrain, take the max so the level's
+// floor clears the highest hit by a fixed clearance, then apply the
+// delta. Re-runs idempotently as more tiles stream in.
+function _lssGmapsApplyTerrainFollow() {
+  if (LSS.MODE !== 'race') return;
+  if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return;
+  _lssGmaps.tiles.group.updateMatrixWorld(true);
+  const meshes = _lssGmapsCollectLeaves(_lssGmaps.tiles.group);
+  if (meshes.length === 0) return;
+  // Cumulative shift already applied. Sample terrain in CURRENT (shifted)
+  // world coords ; we'll rebase the desired offset on top of the existing
+  // shift so the result converges without compounding.
+  const rc = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  let maxTerrainY = -Infinity;
+  for (const r of game.sdfRoomData) {
+    const o = new THREE.Vector3(r.x, 8000, r.z);
+    rc.set(o, dir);
+    rc.far = 14000;
+    try {
+      const hits = rc.intersectObjects(meshes, false);
+      if (hits.length && hits[0].point.y > maxTerrainY) maxTerrainY = hits[0].point.y;
+    } catch (_) {}
+  }
+  if (maxTerrainY === -Infinity) return;
+  // Lowest current room bottom (post-shift).
+  let curLow = Infinity;
+  for (const r of game.sdfRoomData) {
+    const lo = r.y - r.r;
+    if (lo < curLow) curLow = lo;
+  }
+  if (!isFinite(curLow)) return;
+  // Park the level's floor 50 world units above the highest terrain hit.
+  const desiredLow = maxTerrainY + 50;
+  const dy = desiredLow - curLow;
+  if (Math.abs(dy) < 1) return;
+  _lssGmapsShiftLevelY(dy);
+  console.log('[lss-gmaps] race terrain-follow : maxTerrainY', maxTerrainY.toFixed(0),
+              '; curLow', curLow.toFixed(0), '; shifted by', dy.toFixed(0),
+              '; cumulative', (game._raceLevelShiftY || 0).toFixed(0));
+}
+
 function _lssGmapsRefinePivot() {
   if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
   // (v12m patch3) In overlay mode, refining without populated SDF
@@ -40621,6 +41284,18 @@ function _lssGmapsRefinePivot() {
     } catch (_) {}
   }
   if (maxHitY === -Infinity) return;
+  // (v13r-3) Race-mode terrain-follow. Instead of moving the city to fit
+  // the level (which leaves the level deep in cliffs / floating over
+  // valleys depending on the chosen city), keep the city at its lat/lng
+  // pivot and shift the LEVEL up to sit just above the highest local
+  // terrain under the level's footprint. Idempotent: cumulative shift is
+  // stashed on game and re-applied as a delta so re-running on tile
+  // updates doesn't compound. Buildings still poke up where the terrain
+  // dips between rooms ; the room locations themselves stay clear.
+  if (LSS.MODE === 'race') {
+    if (typeof _lssGmapsApplyTerrainFollow === 'function') _lssGmapsApplyTerrainFollow();
+    return;
+  }
   // (v12 patch28) City sits just below the lowest tunnel/room point,
   // with minimal clearance so it reads as 'right under you' instead
   // of 'distant landscape far below'. Patch27's 100 + 5% was too
@@ -40852,6 +41527,46 @@ function _lssGmapsSetScaleLive(n) {
   }
   console.log('[lss-gmaps] world scale ->', n);
 }
+// (v13r-2) Procgen a race-custom map from two geocoded points. Great-
+// circle is approximated by flat-earth (good to <1% at city scale).
+// Spawn rooms sit at the start (gmaps pivot), finish room flagged
+// champion:true sits at the delta XZ, 1-5 intermediate rooms along
+// the line. Y values are seeded at zero ; terrain-follow shifts the
+// whole level up to fit once tiles load.
+// (v13r-2 revised) Custom Location race emits a wall-less gmaps stub
+// (type:'gmaps' so _lssGmapsBuildLevel handles the build path). The
+// actual race geometry — spawn clusters at the start, finish marker
+// at the destination — is wired up inside _lssGmapsBuildLevel by
+// reading game.pendingRaceRoute. No tunnels, no rooms, no walls ;
+// just open-air free-flight from A to B over the photoreal city.
+function _buildRaceCustomMap(startGeo, finishGeo) {
+  return {
+    type: 'gmaps',
+    name: 'Race ; ' + (startGeo.name || 'Start') + ' to ' + (finishGeo.name || 'Finish'),
+    description: 'Free-flight race between two real-world locations. No walls ; just sky and city.',
+    lat: startGeo.lat,
+    lng: startGeo.lng,
+    scale: 1,
+    palette: [0x102030, 0x122838, 0x143040, 0x163848, 0x184050, 0x1a4858, 0x1c5060, 0x1e5868],
+    rooms: [],
+    tunnels: [],
+  };
+}
+
+// Convert a finish lat/lng (relative to a start lat/lng) into world XZ.
+// Flat-earth approximation, accurate to <1% at city scale. Output matches
+// the post-setLatLonToYUp convention : X = east, Z = south (north = -Z).
+function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
+  const M_PER_DEG_LAT = 111320;
+  const sLat = startLat * Math.PI / 180;
+  const dLng = finishLng - startLng;
+  const dLat = finishLat - startLat;
+  return {
+    x: dLng * Math.cos(sLat) * M_PER_DEG_LAT,
+    z: -dLat * M_PER_DEG_LAT,
+  };
+}
+
 // (v12 patch13) Wire the lobby's DROP / DETACH buttons + Enter key on
 // the location input to the gmaps overlay path. Bound once at boot ;
 // the elements are static lobby DOM that exists from page load.
@@ -40897,6 +41612,54 @@ function _lssGmapsSetScaleLive(n) {
     // Store the typed location ; LAUNCH will use it.
     game.pendingGmapsOverlay = { lat, lng, name: displayName };
     const shortName = displayName.length > 60 ? displayName.slice(0, 57) + '...' : displayName;
+
+    // (v13r-2) Race-mode branch : if the FINISH input is also filled,
+    // geocode it and procgen a race route.
+    const finInp = document.getElementById('gmaps-loc-finish-input');
+    if (LSS.MODE === 'race' && finInp && (finInp.value || '').trim()) {
+      const fq = finInp.value.trim();
+      let flat, flng, fname;
+      const fcm = fq.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+      if (fcm) {
+        flat = parseFloat(fcm[1]); flng = parseFloat(fcm[2]);
+        fname = 'Custom (' + flat.toFixed(4) + ', ' + flng.toFixed(4) + ')';
+      } else {
+        try {
+          const furl = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(fq);
+          const fresp = await fetch(furl, { headers: { 'Accept': 'application/json' } });
+          if (!fresp.ok) throw new Error('Geocoder HTTP ' + fresp.status);
+          const farr = await fresp.json();
+          if (!Array.isArray(farr) || farr.length === 0) {
+            setStatus('No match for finish: ' + fq, 'err'); return;
+          }
+          flat = parseFloat(farr[0].lat); flng = parseFloat(farr[0].lon);
+          fname = farr[0].display_name || fq;
+        } catch (e) {
+          setStatus('Finish geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
+          return;
+        }
+      }
+      const raceFinish = { lat: flat, lng: flng, name: fname };
+      const procgen = _buildRaceCustomMap({ lat, lng, name: displayName }, raceFinish);
+      MAP_DATA.race_custom = procgen;
+      game.pendingRaceRoute = {
+        start: { lat, lng, name: displayName },
+        finish: raceFinish,
+      };
+      // No round timer for custom-location races.
+      game.raceNoTimer = true;
+      setStatus('Race route armed : ' + shortName + ' -> ' + (fname.length > 40 ? fname.slice(0, 37) + '...' : fname), 'ok');
+      // Force-select race_custom (bypassing the echo guard).
+      try {
+        if (typeof selectMap === 'function') {
+          game.selectedMap = '__force_race_custom__';
+          selectMap('race_custom');
+        }
+      } catch(_) {}
+      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
+      return;
+    }
+
     // (v12m) Broadcast to peers so they apply the same overlay. We re-send
     // map_change with the current selectedMap so the existing receiver path
     // handles both the map AND the overlay in one shot.
@@ -40904,7 +41667,9 @@ function _lssGmapsSetScaleLive(n) {
       net.sendEvent({
         type: 'map_change',
         mapKey: game.selectedMap,
-        gmapsOverlay: { lat, lng, name: displayName }
+        gmapsOverlay: { lat, lng, name: displayName },
+        // (v13r) Tag the active mode along with the overlay broadcast.
+        mode: LSS.MODE || 'classic'
       });
     }
     const sel = game.selectedMap;
@@ -40930,14 +41695,96 @@ function _lssGmapsSetScaleLive(n) {
     stopPulse();
     _lssGmapsDetachCity();
     game.pendingGmapsOverlay = null;
+    // (v13r-2) Also clear race-custom route on DETACH.
+    game.pendingRaceRoute = null;
+    game.raceNoTimer = false;
+    if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
+    // (v13r-3) Restore the default arena clamp.
+    if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
+    if (typeof LSS._origCameraFar === 'number') {
+      camera.far = LSS._origCameraFar;
+      camera.updateProjectionMatrix();
+    }
+    if (scene.fog && typeof LSS._origFogDensity === 'number') {
+      scene.fog.density = LSS._origFogDensity;
+    }
+    if (game.selectedMap === 'race_custom') {
+      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
+    }
+    // Also blank the FINISH input so the next race lobby starts fresh.
+    try {
+      const fin = document.getElementById('gmaps-loc-finish-input');
+      if (fin) fin.value = '';
+    } catch (_) {}
     setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
     // Re-enable the input that may have been locked by a peer's set.
     try { const inp = document.getElementById('gmaps-loc-input'); if (inp) inp.disabled = false; } catch(_) {}
     // (v12m) Broadcast detach so peers also clear and unlock.
     if (net && net.active && net.sendEvent) {
-      net.sendEvent({ type: 'map_change', mapKey: game.selectedMap, gmapsOverlay: null });
+      net.sendEvent({ type: 'map_change', mapKey: game.selectedMap, gmapsOverlay: null, mode: LSS.MODE || 'classic' });
     }
   });
+
+  // (v13r) Race-mode toggle: flip LSS.MODE and rebroadcast the current
+  // map_change so peers stay in sync. When flipping ON, if the current
+  // map isn't a race_* map, auto-select Pole Position so race mode is
+  // a one-click experience.
+  const raceBtn = document.getElementById('race-mode-toggle');
+  if (raceBtn) {
+    raceBtn.addEventListener('click', () => {
+      const on = raceBtn.dataset.on !== '1';
+      raceBtn.dataset.on = on ? '1' : '0';
+      raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
+      raceBtn.classList.toggle('active', on);
+      LSS.MODE = on ? 'race' : 'classic';
+      // (v13r) Rebuild the carousel so the dots / arrows reflect the new
+      // mode's filtered map list. buildMapSelector also re-snaps the
+      // selection if the previous map is no longer eligible.
+      if (typeof buildMapSelector === 'function') {
+        try { buildMapSelector(); } catch (_) {}
+      }
+      // (v13r-2) Toggle the FINISH input + relabel the panel for race mode.
+      try {
+        const lbl = document.getElementById('gmaps-overlay-label');
+        const fin = document.getElementById('gmaps-loc-finish-input');
+        const startInp = document.getElementById('gmaps-loc-input');
+        if (on) {
+          if (lbl) lbl.textContent = 'RACE: START -> FINISH';
+          if (fin) fin.style.display = '';
+          if (startInp) startInp.placeholder = 'Start location (e.g. Stanley Park)';
+        } else {
+          if (lbl) lbl.textContent = 'DROP ON LOCATION';
+          if (fin) fin.style.display = 'none';
+          if (startInp) startInp.placeholder = 'Empire State Building';
+        }
+      } catch (_) {}
+      // Convenience: when flipping ON, also set the race-default walls
+      // to Datamosh Cube (preset 22). User-tested choice ; reads well
+      // through the gmaps city overlay and doesn't glitch on cycle.
+      // User can still cycle off with P.
+      if (on && typeof setWallPattern === 'function') {
+        try { setWallPattern(22); } catch (_) {}
+      }
+      // Convenience: when flipping ON, force-select Pole Position
+      // (currently the only race map). selectMap broadcasts map_change
+      // with the mode tagged along.
+      if (on && typeof selectMap === 'function' && MAP_DATA && MAP_DATA.race_pole_position) {
+        if (game.selectedMap !== 'race_pole_position') {
+          selectMap('race_pole_position');
+          return;
+        }
+      }
+      if (net && net.active && net.sendEvent && game.selectedMap) {
+        const ov = game.pendingGmapsOverlay;
+        net.sendEvent({
+          type: 'map_change',
+          mapKey: game.selectedMap,
+          gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
+          mode: LSS.MODE
+        });
+      }
+    });
+  }
 })();
 
 window.lssGmaps = {
