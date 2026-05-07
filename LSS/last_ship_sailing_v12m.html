@@ -4562,6 +4562,18 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  // (v12m patch2) Energy Siphon conduit visual replay.
+  if (evt.type === 'siphon_beam') {
+    const a = new THREE.Vector3(evt.ax, evt.ay, evt.az);
+    const b = new THREE.Vector3(evt.bx, evt.by, evt.bz);
+    if (typeof spawnLightningBolt === 'function') {
+      try {
+        spawnLightningBolt(a, b, 0xccffe0, 0.32, 8, 9.0);
+        spawnLightningBolt(a, b, 0xffffff, 0.28, 6, 7.0);
+      } catch (e) { console.warn('[v12m] siphon_beam replay failed:', e); }
+    }
+    return;
+  }
   // (v6.7) Pre-match map sync. selectMap's "no-op if already selected"
   // early-return prevents the receiver re-broadcasting and creating a storm.
   if (evt.type === 'map_change' && typeof evt.mapKey === 'string') {
@@ -7974,6 +7986,13 @@ function spawnNetworkProjectile(data, fromPeerId) {
   if (typeof data.sizeMult === 'number' && data.sizeMult > 0) {
     proj.sizeMult = data.sizeMult;
   }
+  // (v12m patch2) Mirror explode-vs-bounce flags so peers see the
+  // same impact behaviour as the shooter.
+  if (typeof data.splash === 'number') proj.splash = data.splash;
+  if (data.tracking)       proj.tracking       = true;
+  if (data.salvoGuided)    proj.salvoGuided    = true;
+  if (data.isPyroThermite) proj.isPyroThermite = true;
+  if (data.isSonar)        proj.isSonar        = true;
   game.projectiles.push(proj);
   // (v6.7) Chassis-specific muzzle flash for peers viewing a projectile-mode
   // weapon firing (Pyro thermite, Tracker 40mm, etc.). Reuse loadoutKey from
@@ -8009,6 +8028,14 @@ function broadcastAbilityProjectile(proj) {
     // visual-only flags.
     isCluster: !!proj.isCluster,
     sizeMult: (typeof proj.sizeMult === 'number') ? proj.sizeMult : 1.0,
+    // (v12m patch2) Without these, peers spawn projectiles with
+    // splash=0 / no tracking flags, so the shouldExplode test in
+    // Projectile.update fails and rockets bounce instead of explode.
+    splash:         (typeof proj.splash === 'number') ? proj.splash : 0,
+    tracking:       !!proj.tracking,
+    salvoGuided:    !!proj.salvoGuided,
+    isPyroThermite: !!proj.isPyroThermite,
+    isSonar:        !!proj.isSonar,
   });
 }
 
@@ -21718,6 +21745,16 @@ function executeAbility(slot, ability) {
         // conduit, not a thin lightning thread.
         spawnLightningBolt(player.position, bestBot.position, 0xccffe0, 0.32, 8, 9.0);
         spawnLightningBolt(player.position, bestBot.position, 0xffffff, 0.28, 6, 7.0);
+        // (v12m patch2) Broadcast the siphon beam so peers see the
+        // conduit too (not just the local shooter). Receivers spawn
+        // matching lightning bolts via the event handler.
+        if (net && net.active && net.sendEvent) {
+          net.sendEvent({
+            type: 'siphon_beam',
+            ax: player.position.x, ay: player.position.y, az: player.position.z,
+            bx: bestBot.position.x, by: bestBot.position.y, bz: bestBot.position.z
+          });
+        }
         // Wide blue-tinted halo bolt for the soft glow read.
         spawnLightningBolt(player.position, bestBot.position, 0x66ccff, 0.32, 8, 14.0);
         // Five parallel offset bolts give the conduit visible thickness
@@ -27263,6 +27300,14 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeSettings();
     return;
   }
+  // (v12m patch2) Don't fire gameplay shortcuts while the user is
+  // typing in a text field (lobby DROP input, settings textboxes, etc).
+  // Allow Esc to still bubble through so menus close, but every other
+  // keystroke goes to the input only.
+  const _tg = e.target;
+  if (_tg && (_tg.tagName === 'INPUT' || _tg.tagName === 'TEXTAREA' || _tg.isContentEditable)) {
+    if (e.key !== 'Escape') return;
+  }
 
   input.keys[e.key.toLowerCase()] = true;
   if (e.repeat) return; // prevent key repeat from double-firing abilities
@@ -29517,6 +29562,12 @@ function applyMultiLayerPreset(idx) {
   // single pattern) left fgPatternId / fg2PatternId untouched and
   // the shader kept compositing the old FG layers on top of the new BG.
   if (!preset) {
+    // (v12m patch2) Also clear the multi-layer BG slot. The composite
+    // path was rendering the previous preset's BG underneath the new
+    // solo pattern, which read as 'first pattern stuck under all the
+    // others'. Solo path uses uPattern (set in setWallPattern) so
+    // disabling patternId here is safe.
+    if (u.patternId)    u.patternId.value    = -1;
     if (u.fgPatternId)  u.fgPatternId.value  = -1;
     if (u.fg2PatternId) u.fg2PatternId.value = -1;
     return false;
