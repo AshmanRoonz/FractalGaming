@@ -1010,6 +1010,8 @@ body.vr-active .hit-marker {
 #map-indicator {
   display: flex; flex-direction: row; gap: 6px;
   flex: 1; justify-content: center;
+  flex-wrap: wrap; align-content: center; align-items: center;
+  max-width: calc(100% - 96px);  /* leave room for both arrows */
 }
 .map-dot {
   width: 8px; height: 8px; border-radius: 50%;
@@ -1018,6 +1020,27 @@ body.vr-active .hit-marker {
 .map-dot.active {
   background: #ffaa00; box-shadow: 0 0 6px rgba(255,170,0,0.7);
 }
+/* (v12 patch13) Google Maps overlay panel. Same yellow-accent palette */
+#gmaps-overlay-panel {
+  display: flex; flex-direction: column; gap: 6px;
+  width: 100%; margin-top: 4px;
+  padding: 10px 0 0 0; border-top: 1px solid rgba(80,80,120,0.25);
+}
+#gmaps-overlay-label {
+  font-size: 10px; color: #888; letter-spacing: 2px; text-align: center;
+}
+#gmaps-loc-input {
+  width: 100%; padding: 6px 8px;
+  background: rgba(20,20,40,0.6); color: #ffd97a;
+  border: 1px solid rgba(80,80,120,0.4); border-radius: 2px;
+  font-family: inherit; font-size: 12px; letter-spacing: 0.04em;
+}
+#gmaps-loc-input:focus { outline: none; border-color: #ffaa00; }
+#gmaps-overlay-row { display: flex; gap: 6px; }
+#gmaps-overlay-row .map-load-btn { flex: 1; padding: 6px 0; font-size: 11px; }
+#gmaps-loc-status { font-size: 11px; color: #888; min-height: 14px; text-align: center; line-height: 1.3; }
+#gmaps-loc-status.err { color: #ff8866; }
+#gmaps-loc-status.ok  { color: #88cc88; }
 /* (post-v6.9 patch, 2026-04-28) Custom-map loader controls in the map-select
    panel. Match the existing yellow-accent map UI aesthetic. */
 .map-load-btn {
@@ -1730,6 +1753,17 @@ body.vr-active .hit-marker {
       <button class="map-load-btn" id="map-load-btn" title="Load a level JSON exported from Map Lab">+ LOAD CUSTOM MAP</button>
       <input id="map-load-input" type="file" accept=".json,application/json" hidden />
       <div id="map-load-status"></div>
+      <!-- (v12 patch13) Google Maps overlay: drop the selected map onto any
+           real-world location. Geocodes via Nominatim. -->
+      <div id="gmaps-overlay-panel">
+        <div id="gmaps-overlay-label">DROP ON LOCATION</div>
+        <input id="gmaps-loc-input" type="text" placeholder="Empire State Building" autocomplete="off" />
+        <div id="gmaps-overlay-row">
+          <button class="map-load-btn" id="gmaps-loc-go">GO</button>
+          <button class="map-load-btn" id="gmaps-loc-detach" title="Remove the city overlay">DETACH</button>
+        </div>
+        <div id="gmaps-loc-status"></div>
+      </div>
     </div>
   </div>
   <div id="teammates-strip">
@@ -2035,7 +2069,12 @@ const game = {
   scoreA: 0, scoreB: 0,
   currentRound: 1,
   // (v8_1VR) Wall opacity default ; can be overridden by saved settings.
-  wallOpacity: 0.80,
+  // (v12 patch12) Lowered to 0.30 so a Google Maps overlay shows
+  // through the wall pattern when an overlay is attached.
+  wallOpacity: 0.30,
+  // (v12 patch20) Typed-location for gmaps overlay on tunnel maps.
+  // Set by the lobby DROP panel ; consumed by buildRoomGraphLevel.
+  pendingGmapsOverlay: null,
   entities: [],
   projectiles: [],
   particles: [],  // muzzle flash particles, sparks, etc.
@@ -3026,6 +3065,9 @@ function buildMapSelector() {
     game.selectedMap = keys[0];
   }
 
+  // (v12 patch18) Restored gmaps_* entries to the carousel ; the old
+  // direct-select path (pick gmaps_tokyo, click LAUNCH) reliably works,
+  // unlike the lobby-side overlay which I haven't yet fixed.
   // Build the indicator dots (one per map).
   const indicator = document.getElementById('map-indicator');
   if (indicator) {
@@ -3034,7 +3076,6 @@ function buildMapSelector() {
       const dot = document.createElement('div');
       dot.className = 'map-dot';
       dot.dataset.key = k;
-      // Clicking a dot jumps directly to that map
       dot.addEventListener('click', () => selectMap(k));
       dot.style.cursor = 'pointer';
       dot.style.pointerEvents = 'all';
@@ -28906,7 +28947,7 @@ const DEFAULT_WALL_CONFIG = {
   "wallPattern": 21,
   "patternName": "Soul Array",
   "wallBlackBase": false,
-  "wallOpacity": 0.8,
+  "wallOpacity": 0.3,
   "palette": [
     5111552,
     8388863,
@@ -31023,55 +31064,20 @@ const MAP_DATA = {
   },
 
   // ============================================================
-  // (v12) Google Maps Photorealistic 3D Tiles entries.
-  // Each gmaps entry has type: 'gmaps' so buildRoomGraphLevel takes
-  // the open-air branch (no rooms / no tunnels / no SDF). lat/lng
-  // pivots the photoreal tile pyramid so the city center sits at the
-  // local origin in scene units. Player supplies their own API key
-  // on first selection (stored in localStorage).
+  // (v12 patch20) Google Maps overlay slot. Type any location into
+  // the lobby DROP panel to either:
+  //   - rewrite this slot and select it (pure-city flight, no walls), OR
+  //   - leave the current tunnel map selected and overlay the city
+  //     under it on LAUNCH (rooms over real geography).
+  // The four hardcoded city entries (Tokyo / NYC / Vancouver / Hong
+  // Kong) were removed in this patch ; type the name in DROP instead.
   // ============================================================
-  gmaps_vancouver: {
+  gmaps_user: {
     type: 'gmaps',
-    name: 'Vancouver, BC',
-    description: 'Photorealistic Vancouver. Open-air arena. Bring your own Google Maps API key.',
-    lat: 49.2827,
-    lng: -123.1207,
-    scale: 1,   // tile scale ; raise via lssGmaps.setScale(N) at runtime
-    palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
-    rooms: [],
-    tunnels: [],
-  },
-
-  gmaps_nyc: {
-    type: 'gmaps',
-    name: 'New York City',
-    description: 'Photorealistic Manhattan. Open-air arena. Bring your own Google Maps API key.',
+    name: 'Custom Location',
+    description: 'Type a location in the DROP panel and click GO, then LAUNCH.',
     lat: 40.7484,
     lng: -73.9857,
-    scale: 1,   // tile scale ; raise via lssGmaps.setScale(N) at runtime
-    palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
-    rooms: [],
-    tunnels: [],
-  },
-
-  gmaps_tokyo: {
-    type: 'gmaps',
-    name: 'Tokyo (Shibuya)',
-    description: 'Photorealistic Shibuya. Open-air arena. Bring your own Google Maps API key.',
-    lat: 35.6595,
-    lng: 139.7005,
-    scale: 1,   // tile scale ; raise via lssGmaps.setScale(N) at runtime
-    palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
-    rooms: [],
-    tunnels: [],
-  },
-
-  gmaps_hongkong: {
-    type: 'gmaps',
-    name: 'Hong Kong (Central)',
-    description: 'Photorealistic Hong Kong Central. The densest skyscraper cluster on Earth ; perfect canyon dogfight terrain.',
-    lat: 22.2855,
-    lng: 114.1577,
     scale: 1,
     palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
     rooms: [],
@@ -31095,7 +31101,108 @@ function buildRoomGraphLevel(level) {
   // produce zero geometry given empty rooms[]/tunnels[] arrays anyway,
   // but bailing here is faster and keeps that path readable.
   if (level && level.type === 'gmaps') {
+    // (v12 patch20) If the user typed a location into DROP, override
+    // the level's stored lat/lng with the freshly-typed one. Lets the
+    // gmaps_user slot pick up new typed coords without needing to
+    // regenerate the MAP_DATA entry every time.
+    if (game.pendingGmapsOverlay) {
+      level.lat = game.pendingGmapsOverlay.lat;
+      level.lng = game.pendingGmapsOverlay.lng;
+      if (game.pendingGmapsOverlay.name) level.name = game.pendingGmapsOverlay.name;
+    }
     return _lssGmapsBuildLevel(level);
+  }
+  // (v12 patch22) Tunnel-map + typed-location = overlay. The standalone
+  // overlay path (_lssGmapsAttachAtLatLng) silently failed to load tiles
+  // even with the tile loader probe + always-on pulse. The build path
+  // (_lssGmapsBuildLevel, used by Custom Location maps) DID load tiles.
+  // So we route the overlay through the proven build path, wrapped in
+  // save/restore of the tunnel SDF / corridor state that _lssGmapsBuildLevel
+  // would otherwise clear. After the call we flip overlayOnly=true so
+  // worldSDF / raycastLevel defer to the tunnel walls (SDF stays active
+  // for combat collision).
+  if (game.pendingGmapsOverlay) {
+    const ov = game.pendingGmapsOverlay;
+    // (v12 patch25) Wait for the marching-cubes worker to finish
+    // building tunnel walls before snapshotting / overlay-building.
+    // setTimeout(0) was firing before the worker callback ; mapMeshes
+    // was empty when we saved it, the worker callback later added
+    // walls but they were orphaned by the gmaps build's cleanup pass.
+    (async () => {
+      const start = Date.now();
+      while ((!game.mapMeshes || game.mapMeshes.length === 0) && (Date.now() - start) < 5000) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      const wallCount = (game.mapMeshes && game.mapMeshes.length) || 0;
+      console.log('[lss-gmaps] worker wait done : ' + wallCount + ' wall meshes after ' + (Date.now() - start) + 'ms');
+      // Snapshot tunnel state.
+      const _saveSpheres = game.levelSpheres;
+      const _saveCyls    = game.levelCylinders;
+      const _saveCPts    = game.corridorPoints;
+      const _saveCurr    = game.currentLevel;
+      const _saveWord    = game.mapWord;
+      const _saveSdf     = game.sdfRoomData;
+      const _saveBoxes   = game.levelBoxes;
+      // (v12 patch24) Snapshot the wall meshes too. _lssGmapsBuildLevel
+      // does scene.remove(m); game.mapMeshes = [] at the top, so without
+      // this the tunnel walls would vanish from the scene and never
+      // come back even though their SDF arrays were restored.
+      const _saveMeshes = game.mapMeshes ? game.mapMeshes.slice() : [];
+      try {
+        await _lssGmapsBuildLevel({
+          type: 'gmaps',
+          name: ov.name || ('lat ' + ov.lat + ',' + ov.lng),
+          lat:  ov.lat,
+          lng:  ov.lng,
+          scale: 1,
+          rooms: [], tunnels: [],
+        });
+      } catch (e) {
+        console.warn('[lss-gmaps] overlay (via build) failed:', e);
+      }
+      // Restore tunnel state ; the build path cleared it.
+      game.levelSpheres   = _saveSpheres;
+      game.levelCylinders = _saveCyls;
+      game.corridorPoints = _saveCPts;
+      game.currentLevel   = _saveCurr;
+      game.mapWord        = _saveWord;
+      game.sdfRoomData    = _saveSdf;
+      game.levelBoxes     = _saveBoxes;
+      // (v12 patch24) Re-attach the saved wall meshes to the scene
+      // and restore the array. They were detached during the build
+      // path's cleanup ; the meshes themselves and their material
+      // are still alive (we kept the references), they just need
+      // to be parented to the scene again.
+      for (const m of _saveMeshes) {
+        if (m && !m.parent) {
+          try { scene.add(m); } catch(_) {}
+        }
+        // (v12 patch26) Higher renderOrder so walls draw AFTER tile
+        // meshes (default renderOrder 0). At the floor where city
+        // geometry and wall surface meet, this stops the per-pixel
+        // z-fight that was making the inside read as 'torn up'.
+        if (m) m.renderOrder = 2;
+      }
+      game.mapMeshes = _saveMeshes;
+      console.log('[lss-gmaps] re-attached', _saveMeshes.length, 'wall meshes after overlay build.');
+      // Flip overlay flag so SDF / raycastLevel use the tunnel walls
+      // instead of the gmaps short-circuit. Combat continues to behave
+      // like a normal tunnel match ; tiles are scenery only.
+      _lssGmaps.overlayOnly = true;
+      console.log('[lss-gmaps] overlay attached via build path ; tunnel SDF preserved.');
+      // (v12 patch23) Position the tile group so the highest building
+      // sits at levelMinY + 10% of (levelMaxY - levelMinY) ; this is
+      // the 'bottom 10% of the map can overlap the city' rule the user
+      // asked for. First pass at 3.5s catches initial tile load ;
+      // second at 9s catches additional tiles streaming in as LOD
+      // refines.
+      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch(e){ console.warn('[lss-gmaps] refine 1 failed:', e); } }, 3500);
+      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch(e){ console.warn('[lss-gmaps] refine 2 failed:', e); } }, 9000);
+    })();
+  } else if (_lssGmaps && _lssGmaps.cleanup) {
+    // No pending overlay ; tear down any leftover from a previous match.
+    try { _lssGmaps.cleanup(); } catch (_) {}
+    _lssGmaps.cleanup = null; _lssGmaps.active = false;
   }
   // Nuke old geometry
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
@@ -40228,57 +40335,258 @@ const _lssGmapsCities = {
 //   y      vertical offset for the tile pivot (default 0). Negative
 //          values sink the city below the rooms.
 //   scale  tile group scale (default 1). Bigger = ships read smaller.
-async function _lssGmapsAttachCity(cityKey, opts) {
-  opts = opts || {};
-  const c = _lssGmapsCities[cityKey];
-  if (!c) {
-    console.warn('[lss-gmaps] unknown city:', cityKey, '. Try one of:', Object.keys(_lssGmapsCities));
-    return;
+// (v12 patch13) Min/max Y of any room or tunnel ; used to compute a
+// 'building-poke-in' target so tiles slot just under the lowest 10%
+// of the active map's vertical extent.
+function _lssGmapsLevelExtentY() {
+  let lo =  Infinity, hi = -Infinity;
+  if (Array.isArray(game.levelSpheres)) {
+    for (const s of game.levelSpheres) {
+      lo = Math.min(lo, s.cy - s.r); hi = Math.max(hi, s.cy + s.r);
+    }
   }
+  if (Array.isArray(game.levelCylinders)) {
+    for (const c of game.levelCylinders) {
+      const r = c.r || 180;
+      lo = Math.min(lo, Math.min(c.ay, c.by) - r);
+      hi = Math.max(hi, Math.max(c.ay, c.by) + r);
+    }
+  }
+  if (!isFinite(lo)) lo = 0;
+  if (!isFinite(hi)) hi = 500;
+  return { lo, hi };
+}
+
+// Height-probe pass: after tiles have streamed in, raycast straight down
+// at sample points around origin to find the highest building, then shift
+// the tile group so that highest point sits below the level's min room
+// minus a safety margin. Result: tunnels never get clipped by buildings.
+function _lssGmapsRefinePivot() {
+  if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  const grp = _lssGmaps.tiles.group;
+  grp.updateMatrixWorld(true);
+  const meshes = _lssGmapsCollectLeaves(grp);
+  if (meshes.length === 0) return;
+  const samples = 12;
+  const ringR = 400;
+  let maxHitY = -Infinity;
+  const rc = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  for (let i = 0; i < samples; i++) {
+    const ang = (i / samples) * Math.PI * 2;
+    const o = new THREE.Vector3(Math.cos(ang) * ringR, 8000, Math.sin(ang) * ringR);
+    rc.set(o, dir);
+    rc.far = 12000;
+    try {
+      const hits = rc.intersectObjects(meshes, false);
+      if (hits.length && hits[0].point.y > maxHitY) maxHitY = hits[0].point.y;
+    } catch (_) {}
+  }
+  if (maxHitY === -Infinity) return;
+  // (v12 patch27) City sits fully BELOW the tunnel/room geometry,
+  // with a clearance gap. Previous patches had the sign of the
+  // intrusion backwards (tile tops above levelMinY = inside rooms),
+  // which both visually blocked tunnels and z-fought the walls.
+  //
+  // New target : highest tile top sits at levelMinY - clearance.
+  // clearance = max(100, 5% of map height) so small maps still get
+  // a reasonable gap and big maps scale up.
+  const ext = _lssGmapsLevelExtentY();
+  const clearance = Math.max(100, (ext.hi - ext.lo) * 0.05);
+  const targetMaxY = ext.lo - clearance;
+  const levelMinY = ext.lo;
+  const shift = targetMaxY - maxHitY;
+  grp.position.y += shift;
+  console.log('[lss-gmaps] auto-positioned tiles : highest building was at world Y',
+              maxHitY.toFixed(0), '; level min Y', levelMinY.toFixed(0),
+              '; shifted tiles by', shift.toFixed(0),
+              '; new pivot Y', grp.position.y.toFixed(0));
+}
+
+// (v12 patch17) Direct probe of the tile API root manifest. The 3d-
+// tiles-renderer library swallows fetch errors ; this surfaces the
+// actual HTTP status so we can tell the user exactly what's wrong.
+// Returns { ok, status, body, error } ; logs to console either way.
+async function _lssGmapsTestKey(key) {
+  key = key || _lssGmapsGetKey();
+  if (!key) { console.warn('[lss-gmaps] testKey: no key set.'); return { ok: false, error: 'no key' }; }
+  const url = 'https://tile.googleapis.com/v1/3dtiles/root.json?key=' + encodeURIComponent(key);
+  try {
+    const r = await fetch(url);
+    const status = r.status;
+    let body = '';
+    try { body = await r.text(); } catch (_) {}
+    if (status === 200) {
+      console.log('[lss-gmaps] testKey OK : root.json fetched, ' + body.length + ' bytes.');
+      return { ok: true, status: 200, body };
+    }
+    console.warn('[lss-gmaps] testKey FAILED : HTTP ' + status, body.slice(0, 500));
+    return { ok: false, status, body };
+  } catch (e) {
+    console.error('[lss-gmaps] testKey fetch threw : ' + (e && e.message), e);
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+// Translate a probe result into a human-readable diagnosis.
+function _lssGmapsDiagnoseProbe(probe) {
+  if (!probe) return 'Unknown error.';
+  if (probe.ok) return 'Tile API reachable, key valid.';
+  if (probe.error && !probe.status) {
+    return 'Network or CORS error : ' + probe.error +
+           '\n(Try serving the page over http://localhost rather than file:// ; some setups block fetches from local files.)';
+  }
+  const s = probe.status;
+  if (s === 401) {
+    return 'HTTP 401 Unauthorized.\nYour API key is invalid or has been revoked. Re-issue a key in Google Cloud Console.';
+  }
+  if (s === 403) {
+    return 'HTTP 403 Forbidden.\nMost likely:\n' +
+           '1) Map Tiles API not enabled on this project\n' +
+           '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
+           '2) Billing not active on the project\n' +
+           '3) HTTP-referrer restriction blocks this origin (try setting key restriction to None for testing).';
+  }
+  if (s === 429) return 'HTTP 429 Rate-limited. Wait a moment and try again.';
+  if (s >= 500) return 'HTTP ' + s + ' from Google. Server-side issue ; try again in a minute.';
+  return 'HTTP ' + s + ' from tile.googleapis.com.\nResponse: ' + (probe.body || '').slice(0, 200);
+}
+
+// Core attach worker. Takes raw lat/lng; the named-city and geocoded
+// flavors below both call this.
+async function _lssGmapsAttachAtLatLng(lat, lng, label, opts) {
+  opts = opts || {};
   let key = _lssGmapsGetKey();
   if (!key) {
     key = await _lssGmapsPromptKey();
     if (!key) { console.warn('[lss-gmaps] attach cancelled (no key).'); return; }
   }
-  // Tear down any existing overlay/active tiles first ; one tile group
-  // at a time keeps cleanup simple and bandwidth predictable.
   if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch (_) {} _lssGmaps.cleanup = null; }
   _lssGmaps.active = false;
   _lssGmaps.tiles = null;
+  // (v12 patch17) Probe the tile API directly first. The lib swallows
+  // fetch errors so we wouldn't otherwise know whether the request
+  // succeeded. If the probe fails we surface the actual cause and
+  // bail without constructing the renderer.
+  const probe = await _lssGmapsTestKey(key);
+  if (!probe.ok) {
+    const diag = _lssGmapsDiagnoseProbe(probe);
+    console.error('[lss-gmaps] tile API probe failed:\n' + diag);
+    alert('Tile API probe failed.\n\n' + diag);
+    return;
+  }
+  console.log('[lss-gmaps] tile API probe OK ; constructing renderer.');
   try {
     const mod = await _lssGmapsLoadModule();
     const GTR = mod.GoogleTilesRenderer || (mod.default && mod.default.GoogleTilesRenderer);
     if (!GTR) throw new Error('GoogleTilesRenderer not found.');
     const tiles = new GTR(key);
     if (typeof tiles.setLatLonToYUp === 'function') {
-      tiles.setLatLonToYUp(c.lat * Math.PI/180, c.lng * Math.PI/180);
+      tiles.setLatLonToYUp(lat * Math.PI/180, lng * Math.PI/180);
     }
     const sc = (typeof opts.scale === 'number' && opts.scale > 0) ? opts.scale : 1;
     tiles.group.scale.setScalar(sc);
-    if (typeof opts.y === 'number') tiles.group.position.y += opts.y;
+    // (v12 patch21) Start at Y=0 like the build path. The refine pass
+    // below drops the city under the tunnel rooms once tiles have
+    // actually loaded ; doing it before causes the LOD math to think
+    // every tile is far from the camera and skip loading.
+    const initialY = (typeof opts.y === 'number') ? opts.y : 0;
+    tiles.group.position.y = initialY;
     const eb = Math.max(8, 8 * sc);
     if (tiles.errorTarget !== undefined) tiles.errorTarget = eb;
     if (tiles.errorThreshold !== undefined) tiles.errorThreshold = eb;
     scene.add(tiles.group);
+    // (v12 patch21) Pre-set resolution + camera + first update so the
+    // tile loader's bootstrap has its inputs before any other code
+    // calls update(). Mirrors the build path which already does this.
+    try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
+    try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
+    try { if (typeof tiles.update === 'function') tiles.update(); } catch(_) {}
     _lssGmaps.tiles = tiles;
     _lssGmaps.scale = sc;
-    // active = true makes _lssGmapsTick drive tile.update() per frame.
-    // BUT: it would also short-circuit worldSDF and raycastLevel, which
-    // would break the active tunnel-map's combat. So we register a
-    // 'overlay only' flag the SDF guards check, instead of the active
-    // flag. That keeps tile streaming alive while leaving combat in
-    // the tunnel-map's existing SDF.
     _lssGmaps.overlayOnly = true;
     _lssGmaps.active = true;
+    // (v12 patch21) Always-on 500ms pulse to drive update() regardless
+    // of whether the gameLoop tile-tick is firing for the current state.
+    // This was the missing piece : when the gameLoop didn't tick the
+    // gmaps hook (lobby state, paused state, etc) the loader never got
+    // its update() called and silently sat idle. The pulse runs in any
+    // game state and stops on detach.
+    let _streamPulseCount = 0;
+    const _streamPulse = setInterval(() => {
+      if (!_lssGmaps.tiles) { clearInterval(_streamPulse); return; }
+      const t = _lssGmaps.tiles;
+      try {
+        if (typeof t.setResolutionFromRenderer === 'function') t.setResolutionFromRenderer(camera, renderer);
+        if (typeof t.setCamera === 'function') t.setCamera(camera);
+        if (typeof t.update === 'function') t.update();
+      } catch (e) { /* swallow per-pulse */ }
+      _streamPulseCount++;
+      // First-second probe so the user can see whether anything is
+      // actually loading without enabling debug mode.
+      if (_streamPulseCount === 6 || _streamPulseCount === 20) {
+        let leaves = 0;
+        if (t.group) t.group.traverse((c) => { if (c && c.isMesh) leaves++; });
+        console.log('[lss-gmaps] stream pulse @ ' + (_streamPulseCount * 0.5).toFixed(1) + 's : ' + leaves + ' leaf meshes loaded.');
+      }
+    }, 500);
     _lssGmaps.cleanup = () => {
+      try { clearInterval(_streamPulse); } catch (_) {}
       try { scene.remove(tiles.group); } catch (_) {}
       try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch (_) {}
       _lssGmaps.tiles = null;
       _lssGmaps.overlayOnly = false;
     };
-    console.log('[lss-gmaps] overlay attached:', c.name, 'scale:', sc, 'yOffset:', opts.y || 0);
+    console.log('[lss-gmaps] overlay attached:', label || (lat + ',' + lng), 'scale:', sc, 'initial yOffset:', initialY);
+    // Auto-refine after a delay so tiles have time to load. Skip if the
+    // user passed an explicit opts.y (they want manual control).
+    if (typeof opts.y !== 'number') {
+      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch (e) { console.warn('[lss-gmaps] refine failed:', e); } }, 3500);
+      // Second pass a little later catches additional tile loads ; usually
+      // tightens the position by another few hundred units.
+      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch (_) {} }, 9000);
+    }
   } catch (e) {
-    console.error('[lss-gmaps] attachCity failed:', e);
+    console.error('[lss-gmaps] attach failed:', e);
+  }
+}
+
+// Named-city attach (uses the cities table set up earlier in this file).
+async function _lssGmapsAttachCity(cityKey, opts) {
+  const c = _lssGmapsCities[cityKey];
+  if (!c) {
+    console.warn('[lss-gmaps] unknown city:', cityKey, '. Try one of:', Object.keys(_lssGmapsCities));
+    return;
+  }
+  return _lssGmapsAttachAtLatLng(c.lat, c.lng, c.name, opts);
+}
+
+// Geocoded attach. Takes any human-readable place string ('Empire State
+// Building', '1600 Pennsylvania Ave', 'Mount Fuji', or just 'Hong Kong')
+// and resolves it via Nominatim (free OSM geocoder, no key required).
+async function _lssGmapsLocation(query, opts) {
+  if (!query || typeof query !== 'string') {
+    console.warn('[lss-gmaps] location: pass a place name string.');
+    return;
+  }
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(query);
+  try {
+    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!resp.ok) throw new Error('Geocoder HTTP ' + resp.status);
+    const arr = await resp.json();
+    if (!Array.isArray(arr) || arr.length === 0) {
+      console.warn('[lss-gmaps] no match for:', query);
+      alert('Location not found: ' + query);
+      return;
+    }
+    const lat = parseFloat(arr[0].lat);
+    const lng = parseFloat(arr[0].lon);
+    const name = arr[0].display_name || query;
+    console.log('[lss-gmaps] geocoded "' + query + '" ->', lat, lng, '(' + name + ')');
+    return _lssGmapsAttachAtLatLng(lat, lng, name, opts);
+  } catch (e) {
+    console.error('[lss-gmaps] location() failed:', e);
+    alert('Geocoder failed: ' + e.message);
   }
 }
 
@@ -40302,6 +40610,78 @@ function _lssGmapsSetScaleLive(n) {
   }
   console.log('[lss-gmaps] world scale ->', n);
 }
+// (v12 patch13) Wire the lobby's DROP / DETACH buttons + Enter key on
+// the location input to the gmaps overlay path. Bound once at boot ;
+// the elements are static lobby DOM that exists from page load.
+(function _lssGmapsLobbyBindings() {
+  const goBtn  = document.getElementById('gmaps-loc-go');
+  const detBtn = document.getElementById('gmaps-loc-detach');
+  const inp    = document.getElementById('gmaps-loc-input');
+  const stat   = document.getElementById('gmaps-loc-status');
+  if (!goBtn || !detBtn || !inp || !stat) return;
+  function setStatus(msg, kind) {
+    stat.textContent = msg || '';
+    stat.classList.remove('err','ok');
+    if (kind) stat.classList.add(kind);
+  }
+  // Cancel any running pulse before starting a new one.
+  let _pulseTimer = null;
+  function stopPulse() { if (_pulseTimer) { clearInterval(_pulseTimer); _pulseTimer = null; } }
+  async function doDrop() {
+    const q = (inp.value || '').trim();
+    if (!q) { setStatus('Type a location first.', 'err'); inp.focus(); return; }
+    setStatus('Looking up ' + q + '...');
+    let lat, lng, displayName;
+    const coordMatch = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (coordMatch) {
+      lat = parseFloat(coordMatch[1]); lng = parseFloat(coordMatch[2]);
+      displayName = 'Custom (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+    } else {
+      try {
+        const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (!resp.ok) throw new Error('Geocoder HTTP ' + resp.status);
+        const arr = await resp.json();
+        if (!Array.isArray(arr) || arr.length === 0) {
+          setStatus('No match for: ' + q, 'err'); return;
+        }
+        lat = parseFloat(arr[0].lat); lng = parseFloat(arr[0].lon);
+        displayName = arr[0].display_name || q;
+      } catch (e) {
+        setStatus('Geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
+        return;
+      }
+    }
+    // Store the typed location ; LAUNCH will use it.
+    game.pendingGmapsOverlay = { lat, lng, name: displayName };
+    const shortName = displayName.length > 60 ? displayName.slice(0, 57) + '...' : displayName;
+    const sel = game.selectedMap;
+    const isGmaps = sel && MAP_DATA[sel] && MAP_DATA[sel].type === 'gmaps';
+    if (isGmaps) {
+      // gmaps_user is selected ; rewrite its lat/lng so the carousel
+      // shows the right name now too.
+      const e = MAP_DATA[sel];
+      e.lat = lat; e.lng = lng;
+      e.name = shortName;
+      e.description = 'Pure city flight. Lat ' + lat.toFixed(4) + ', Lng ' + lng.toFixed(4) + '.';
+      // Force re-render of the map name in the lobby card.
+      const wasKey = sel; game.selectedMap = null; selectMap(wasKey);
+      setStatus('Pure-city map selected: ' + shortName + '. LAUNCH to drop in.', 'ok');
+    } else {
+      const tunnelName = (MAP_DATA[sel] && MAP_DATA[sel].name) || sel;
+      setStatus('Will overlay ' + shortName + ' under "' + tunnelName + '" on LAUNCH.', 'ok');
+    }
+  }
+    goBtn.addEventListener('click', doDrop);
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); doDrop(); } });
+  detBtn.addEventListener('click', () => {
+    stopPulse();
+    _lssGmapsDetachCity();
+    game.pendingGmapsOverlay = null;
+    setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
+  });
+})();
+
 window.lssGmaps = {
   state: _lssGmaps,
   cities: _lssGmapsCities,
@@ -40311,6 +40691,10 @@ window.lssGmaps = {
   prompt: _lssGmapsPromptKey,
   setScale: _lssGmapsSetScaleLive,
   attachCity: _lssGmapsAttachCity,
+  attachLatLng: _lssGmapsAttachAtLatLng,
+  location: _lssGmapsLocation,
+  refinePivot: _lssGmapsRefinePivot,
+  testKey: _lssGmapsTestKey,
   detachCity: _lssGmapsDetachCity
 };
 
