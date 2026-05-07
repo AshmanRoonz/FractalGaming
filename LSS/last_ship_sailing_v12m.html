@@ -4562,6 +4562,18 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  // (v12m patch5) Tile-pivot Y sync. The setter (or last refiner)
+  // broadcasts ; everyone applies. Keeps the city at the same height
+  // for all peers even when their own refine pass would've come up
+  // with a different number due to load timing.
+  if (evt.type === 'gmaps_pivot_y' && typeof evt.y === 'number') {
+    try {
+      if (_lssGmaps && _lssGmaps.tiles && _lssGmaps.tiles.group) {
+        _lssGmaps.tiles.group.position.y = evt.y;
+      }
+    } catch (e) { console.warn('[v12m] pivot_y apply failed:', e); }
+    return;
+  }
   // (v12m patch2) Energy Siphon conduit visual replay.
   if (evt.type === 'siphon_beam') {
     const a = new THREE.Vector3(evt.ax, evt.ay, evt.az);
@@ -4577,24 +4589,26 @@ function handleNetEvent(evt, fromPeerId) {
   // (v6.7) Pre-match map sync. selectMap's "no-op if already selected"
   // early-return prevents the receiver re-broadcasting and creating a storm.
   if (evt.type === 'map_change' && typeof evt.mapKey === 'string') {
-    if (typeof selectMap === 'function') selectMap(evt.mapKey);
-    // (v12m) Apply the optional gmaps overlay too. null = clear.
+    // (v12m patch4) Update overlay state BEFORE calling selectMap.
+    // selectMap's broadcast-back uses the current pendingGmapsOverlay ;
+    // updating after meant the broadcast carried the PRE-update state
+    // and could re-apply the old overlay right after a peer cleared it.
     if (evt.gmapsOverlay && typeof evt.gmapsOverlay.lat === 'number' && typeof evt.gmapsOverlay.lng === 'number') {
       const ov = evt.gmapsOverlay;
       game.pendingGmapsOverlay = { lat: ov.lat, lng: ov.lng, name: ov.name || ('lat ' + ov.lat + ',' + ov.lng) };
-      // Update the lobby DROP status if visible so the receiver sees
-      // the same locked-in state the sender does.
+      // Show what the peer set, but DON'T disable the input ;
+      // anyone can still change it. Last setter wins.
       try {
         const stat = document.getElementById('gmaps-loc-status');
         if (stat) {
-          stat.textContent = 'Locked by peer : ' + (ov.name || ('lat ' + ov.lat + ',' + ov.lng));
+          stat.textContent = 'Set by peer : ' + (ov.name || ('lat ' + ov.lat + ',' + ov.lng)) + ' (you can change it)';
           stat.classList.remove('err'); stat.classList.add('ok');
         }
         const inp = document.getElementById('gmaps-loc-input');
-        if (inp) { inp.value = ov.name || ''; inp.disabled = true; }
+        if (inp) { inp.value = ov.name || ''; inp.disabled = false; }
       } catch(_) {}
     } else if ('gmapsOverlay' in evt && evt.gmapsOverlay === null) {
-      // Explicit null = peer detached.
+      // Explicit null = peer detached. Clear locally.
       game.pendingGmapsOverlay = null;
       try {
         const stat = document.getElementById('gmaps-loc-status');
@@ -4603,6 +4617,7 @@ function handleNetEvent(evt, fromPeerId) {
         if (inp) { inp.disabled = false; }
       } catch(_) {}
     }
+    if (typeof selectMap === 'function') selectMap(evt.mapKey);
     return;
   }
   // (v6.7) Stasis owner spawned a field; mirror it at the broadcast position
@@ -21240,11 +21255,23 @@ function fireProjectile(origin, dir, w) {
   // (NetworkPlayer.takeDamage), so spawnNetworkProjectile keeps damage = 0
   // and the visual carries no extra hp impact ; no double-counting.
   if (net.active && net.sendProjectile) {
+    // (v12m patch6) Send the same flags as broadcastAbilityProjectile
+    // so peers' shouldExplode test matches local behaviour. Without
+    // splash + isPyroThermite, a Pyro thermite round bounces instead
+    // of exploding on remote views.
     net.sendProjectile({
       ox: origin.x, oy: origin.y, oz: origin.z,
       vx: vel.x,   vy: vel.y,   vz: vel.z,
       color: 0xff8800,
-      isFireSource: !!proj.isFireSource,
+      isFireSource:   !!proj.isFireSource,
+      isPyroThermite: !!proj.isPyroThermite,
+      splash:         (typeof proj.splash === 'number') ? proj.splash : 0,
+      tracking:       !!proj.tracking,
+      salvoGuided:    !!proj.salvoGuided,
+      isCluster:      !!proj.isCluster,
+      isArcWave:      !!proj.isArcWave,
+      isSonar:        !!proj.isSonar,
+      sizeMult:       (typeof proj.sizeMult === 'number') ? proj.sizeMult : 1.0,
     });
   }
 }
@@ -23597,6 +23624,18 @@ function updateAbilities(dt) {
           if (siblings.length > 0) {
             const target = siblings[Math.floor(Math.random() * siblings.length)];
             spawnLightningBolt(eff.position, target.position, 0x44ccff, 0.10, 1, 1.4);
+            // (v12m patch6) Broadcast so peers see the same arc. The
+            // existing 'lightning' net event handles this exact replay.
+            // Only the wire owner (isMyWire above) should broadcast,
+            // otherwise we'd send N copies of every arc.
+            if (isMyWire && net && net.active && net.sendEvent) {
+              net.sendEvent({
+                type: 'lightning',
+                ox: eff.position.x, oy: eff.position.y, oz: eff.position.z,
+                ex: target.position.x, ey: target.position.y, ez: target.position.z,
+                color: 0x44ccff, lifetime: 0.10, branches: 1, thickness: 1.4
+              });
+            }
           }
           eff.arcTimer = 0.06 + Math.random() * 0.10; // ~6-12 arcs/sec across the trio
         }
@@ -31233,6 +31272,18 @@ function buildRoomGraphLevel(level) {
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
   game._buildSeq = (game._buildSeq | 0) + 1;
+  // (v12m patch3) Stop any in-flight pivot-refine interval before we
+  // start mutating level state. The previous round's refine ticks
+  // would otherwise see momentarily-empty levelSpheres and shift
+  // the tile group based on the default-extent fallback (0, 500),
+  // sliding the city to the wrong place. New round's IIFE starts
+  // its own refine interval at end of build with correct state.
+  try {
+    if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._refineInterval) {
+      clearInterval(_lssGmaps._refineInterval);
+      _lssGmaps._refineInterval = null;
+    }
+  } catch (_) {}
   // (v12) Google Maps levels skip the room / tunnel / SDF pipeline and
   // hand off to the gmaps build path, which streams Photorealistic 3D
   // Tiles from Google's Map Tiles API and spawns ships in open air.
@@ -40541,6 +40592,15 @@ function _lssGmapsLevelExtentY() {
 // minus a safety margin. Result: tunnels never get clipped by buildings.
 function _lssGmapsRefinePivot() {
   if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  // (v12m patch3) In overlay mode, refining without populated SDF
+  // arrays would target the default extent (0, 500) and visibly
+  // shift the city to the wrong place. Bail until the build
+  // completes ; the next interval tick (1 s later) will pick it up.
+  if (_lssGmaps.overlayOnly) {
+    const haveSpheres = Array.isArray(game.levelSpheres) && game.levelSpheres.length > 0;
+    const haveCyls    = Array.isArray(game.levelCylinders) && game.levelCylinders.length > 0;
+    if (!haveSpheres && !haveCyls) return;
+  }
   const grp = _lssGmaps.tiles.group;
   grp.updateMatrixWorld(true);
   const meshes = _lssGmapsCollectLeaves(grp);
@@ -40575,6 +40635,14 @@ function _lssGmapsRefinePivot() {
               maxHitY.toFixed(0), '; level min Y', levelMinY.toFixed(0),
               '; shifted tiles by', shift.toFixed(0),
               '; new pivot Y', grp.position.y.toFixed(0));
+  // (v12m patch5) Broadcast the new pivot Y so peers converge on the
+  // same vertical position. Without this, each peer's refine probes
+  // its own tile state and they diverge.
+  try {
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'gmaps_pivot_y', y: grp.position.y });
+    }
+  } catch (_) {}
 }
 
 // (v12 patch17) Direct probe of the tile API root manifest. The 3d-
