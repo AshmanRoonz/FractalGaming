@@ -1801,10 +1801,14 @@ body.vr-active .hit-marker {
         <button class="map-load-btn" id="race-mode-toggle" data-on="0" title="Toggle Race Mode">RACE MODE: OFF</button>
       </div>
       <!-- (v12 patch13) Google Maps overlay: drop the selected map onto any
-           real-world location. Geocodes via Nominatim. -->
+           real-world location. Geocodes via Nominatim.
+           (v13r) In race mode the panel shows TWO inputs ; entering both
+           and clicking GO procgens a race route from start to finish in
+           the chosen city. -->
       <div id="gmaps-overlay-panel">
         <div id="gmaps-overlay-label">DROP ON LOCATION</div>
         <input id="gmaps-loc-input" type="text" placeholder="Empire State Building" autocomplete="off" />
+        <input id="gmaps-loc-finish-input" type="text" placeholder="Finish location (race mode)" autocomplete="off" style="display:none;" />
         <div id="gmaps-overlay-row">
           <button class="map-load-btn" id="gmaps-loc-go">GO</button>
           <button class="map-load-btn" id="gmaps-loc-detach" title="Remove the city overlay">DETACH</button>
@@ -24662,7 +24666,7 @@ function updateRoundSystem(dt) {
     }
     const endByChampion = (game.championResult === 'A' || game.championResult === 'B')
       && (!game.championEndTimer || game.championEndTimer <= 0);
-    const endByTimer = game.roundTimer <= 0;
+    const endByTimer = !game.raceNoTimer && game.roundTimer <= 0;
     // (v10 fix) In multiplayer, only the stasis owner peer is allowed to
     // RESOLVE the round (compute winner + bump score + transition to
     // roundEnd). Other peers wait for the broadcast 'round_end' event
@@ -26597,7 +26601,11 @@ function updateHUD() {
   let timerValue = game.state === 'warmup' ? game.warmupTimer : game.roundTimer;
   const minutes = Math.floor(Math.max(0, timerValue) / 60);
   const seconds = Math.floor(Math.max(0, timerValue) % 60);
-  _hudText(_hudEl('round-timer'), 'round-timer:t', minutes + ':' + String(seconds).padStart(2, '0'));
+  // (v13r-2) Custom-Location race mode hides the round timer ; race ends
+  // at finish only (or team-wipe). Warmup countdown still shows.
+  const _hideTimer = !!game.raceNoTimer && game.state !== 'warmup';
+  _hudText(_hudEl('round-timer'), 'round-timer:t',
+    _hideTimer ? '--' : (minutes + ':' + String(seconds).padStart(2, '0')));
 
   const stateText = game.state === 'warmup' ? 'WARMUP' :
     game.state === 'playing' ? 'ROUND ' + game.currentRound :
@@ -41037,6 +41045,79 @@ function _lssGmapsLevelExtentY() {
 // at sample points around origin to find the highest building, then shift
 // the tile group so that highest point sits below the level's min room
 // minus a safety margin. Result: tunnels never get clipped by buildings.
+// (v13r-3) Shift every piece of level state by dy in lockstep.
+// Touches: visual mesh positions, SDF source data (spheres/cylinders),
+// room data (sdfRoomData), corridor points (spawn picker / AI nav),
+// race graph nodes + neighbor midpoints, the live champion field,
+// and any spawned ships (player + bots + network players). Cumulative
+// shift is tracked on game._raceLevelShiftY so callers can be idempotent.
+function _lssGmapsShiftLevelY(dy) {
+  if (!isFinite(dy) || Math.abs(dy) < 0.01) return;
+  for (const m of (game.mapMeshes || [])) { if (m && m.position) m.position.y += dy; }
+  for (const sp of (game.levelSpheres || [])) { sp.cy += dy; }
+  for (const cy of (game.levelCylinders || [])) { cy.ay += dy; cy.by += dy; }
+  for (const r of (game.sdfRoomData || [])) { r.y += dy; }
+  for (const p of (game.corridorPoints || [])) { p.y += dy; }
+  if (game.raceGraph && game.raceGraph.nodes) {
+    for (const id in game.raceGraph.nodes) {
+      const n = game.raceGraph.nodes[id];
+      n.y += dy;
+      for (const nb of (n.neighbors || [])) { if (nb && nb.mid) nb.mid.y += dy; }
+    }
+  }
+  if (game.championField && game.championField.position) game.championField.position.y += dy;
+  if (typeof player !== 'undefined' && player && player.position) player.position.y += dy;
+  for (const b of (game.entities || [])) { if (b && b.position) b.position.y += dy; }
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) { if (np && np.position) np.position.y += dy; }
+  }
+  game._raceLevelShiftY = (game._raceLevelShiftY || 0) + dy;
+}
+
+// (v13r-3) Race-mode level-to-terrain follow. Raycast straight down at
+// each room's xz to find local terrain, take the max so the level's
+// floor clears the highest hit by a fixed clearance, then apply the
+// delta. Re-runs idempotently as more tiles stream in.
+function _lssGmapsApplyTerrainFollow() {
+  if (LSS.MODE !== 'race') return;
+  if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return;
+  _lssGmaps.tiles.group.updateMatrixWorld(true);
+  const meshes = _lssGmapsCollectLeaves(_lssGmaps.tiles.group);
+  if (meshes.length === 0) return;
+  // Cumulative shift already applied. Sample terrain in CURRENT (shifted)
+  // world coords ; we'll rebase the desired offset on top of the existing
+  // shift so the result converges without compounding.
+  const rc = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  let maxTerrainY = -Infinity;
+  for (const r of game.sdfRoomData) {
+    const o = new THREE.Vector3(r.x, 8000, r.z);
+    rc.set(o, dir);
+    rc.far = 14000;
+    try {
+      const hits = rc.intersectObjects(meshes, false);
+      if (hits.length && hits[0].point.y > maxTerrainY) maxTerrainY = hits[0].point.y;
+    } catch (_) {}
+  }
+  if (maxTerrainY === -Infinity) return;
+  // Lowest current room bottom (post-shift).
+  let curLow = Infinity;
+  for (const r of game.sdfRoomData) {
+    const lo = r.y - r.r;
+    if (lo < curLow) curLow = lo;
+  }
+  if (!isFinite(curLow)) return;
+  // Park the level's floor 50 world units above the highest terrain hit.
+  const desiredLow = maxTerrainY + 50;
+  const dy = desiredLow - curLow;
+  if (Math.abs(dy) < 1) return;
+  _lssGmapsShiftLevelY(dy);
+  console.log('[lss-gmaps] race terrain-follow : maxTerrainY', maxTerrainY.toFixed(0),
+              '; curLow', curLow.toFixed(0), '; shifted by', dy.toFixed(0),
+              '; cumulative', (game._raceLevelShiftY || 0).toFixed(0));
+}
+
 function _lssGmapsRefinePivot() {
   if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
   // (v12m patch3) In overlay mode, refining without populated SDF
@@ -41068,27 +41149,25 @@ function _lssGmapsRefinePivot() {
     } catch (_) {}
   }
   if (maxHitY === -Infinity) return;
+  // (v13r-3) Race-mode terrain-follow. Instead of moving the city to fit
+  // the level (which leaves the level deep in cliffs / floating over
+  // valleys depending on the chosen city), keep the city at its lat/lng
+  // pivot and shift the LEVEL up to sit just above the highest local
+  // terrain under the level's footprint. Idempotent: cumulative shift is
+  // stashed on game and re-applied as a delta so re-running on tile
+  // updates doesn't compound. Buildings still poke up where the terrain
+  // dips between rooms ; the room locations themselves stay clear.
+  if (LSS.MODE === 'race') {
+    if (typeof _lssGmapsApplyTerrainFollow === 'function') _lssGmapsApplyTerrainFollow();
+    return;
+  }
   // (v12 patch28) City sits just below the lowest tunnel/room point,
   // with minimal clearance so it reads as 'right under you' instead
   // of 'distant landscape far below'. Patch27's 100 + 5% was too
   // much ; now max(30, 1%) which is ~30 units for typical maps.
-  // (v13r) In race mode the user wants buildings to actually POKE UP
-  // through the map's lower rooms instead of sitting under it. Target
-  // the tallest building at ~35% of map height so most of the racing
-  // air stays clear and only skyscrapers protrude into the lower rooms.
-  // (v13r-2) RACE_LIFT pushes the tile group an additional ~75 world
-  // units down on top of the 35% formula, equivalent to "raise the
-  // map ~50-100 ft" relative to the gmaps city. Bump the constant up
-  // to lift more, down (or negative) to drop the map closer.
   const ext = _lssGmapsLevelExtentY();
-  let targetMaxY;
-  if (LSS.MODE === 'race') {
-    const RACE_LIFT = 75;
-    targetMaxY = ext.lo + (ext.hi - ext.lo) * 0.35 - RACE_LIFT;
-  } else {
-    const clearance = Math.max(30, (ext.hi - ext.lo) * 0.01);
-    targetMaxY = ext.lo - clearance;
-  }
+  const clearance = Math.max(30, (ext.hi - ext.lo) * 0.01);
+  const targetMaxY = ext.lo - clearance;
   const levelMinY = ext.lo;
   const shift = targetMaxY - maxHitY;
   grp.position.y += shift;
@@ -41313,6 +41392,59 @@ function _lssGmapsSetScaleLive(n) {
   }
   console.log('[lss-gmaps] world scale ->', n);
 }
+// (v13r-2) Procgen a race-custom map from two geocoded points. Great-
+// circle is approximated by flat-earth (good to <1% at city scale).
+// Spawn rooms sit at the start (gmaps pivot), finish room flagged
+// champion:true sits at the delta XZ, 1-5 intermediate rooms along
+// the line. Y values are seeded at zero ; terrain-follow shifts the
+// whole level up to fit once tiles load.
+function _buildRaceCustomMap(startGeo, finishGeo) {
+  const M_PER_DEG_LAT = 111320;
+  const startLat = startGeo.lat * Math.PI / 180;
+  const dLng = finishGeo.lng - startGeo.lng;
+  const dLat = finishGeo.lat - startGeo.lat;
+  // Three-tile post-setLatLonToYUp axes : X = east, Z = south (north = -Z).
+  const dxWorld = dLng * Math.cos(startLat) * M_PER_DEG_LAT;
+  const dzWorld = -dLat * M_PER_DEG_LAT;
+  const dist = Math.sqrt(dxWorld * dxWorld + dzWorld * dzWorld);
+
+  const intermediates = Math.max(1, Math.min(5, Math.round(dist / 800)));
+  const len = Math.max(1, dist);
+  const ux = dxWorld / len, uz = dzWorld / len;
+  const perpX = -uz, perpZ = ux;
+  const SPAWN_OFFSET = 220;
+
+  const rooms = [];
+  rooms.push({ id: 'spawn_a', team: 'A', x:  perpX * SPAWN_OFFSET, y: 0, z:  perpZ * SPAWN_OFFSET, r: 320 });
+  rooms.push({ id: 'spawn_b', team: 'B', x: -perpX * SPAWN_OFFSET, y: 0, z: -perpZ * SPAWN_OFFSET, r: 320 });
+
+  const tunnels = [];
+  let prevX = 0, prevZ = 0;
+  for (let i = 1; i <= intermediates; i++) {
+    const t = i / (intermediates + 1);
+    const rx = dxWorld * t;
+    const rz = dzWorld * t;
+    rooms.push({ id: 'mid_' + i, team: null, x: rx, y: 0, z: rz, r: 360 });
+    if (i === 1) {
+      tunnels.push({ path: [{x:  perpX * SPAWN_OFFSET, y: 0, z:  perpZ * SPAWN_OFFSET}, {x: rx, y: 0, z: rz}], r: 280 });
+      tunnels.push({ path: [{x: -perpX * SPAWN_OFFSET, y: 0, z: -perpZ * SPAWN_OFFSET}, {x: rx, y: 0, z: rz}], r: 280 });
+    } else {
+      tunnels.push({ path: [{x: prevX, y: 0, z: prevZ}, {x: rx, y: 0, z: rz}], r: 280 });
+    }
+    prevX = rx; prevZ = rz;
+  }
+  rooms.push({ id: 'finish', team: null, champion: true, x: dxWorld, y: 0, z: dzWorld, r: 480 });
+  tunnels.push({ path: [{x: prevX, y: 0, z: prevZ}, {x: dxWorld, y: 0, z: dzWorld}], r: 320 });
+
+  return {
+    name: 'Race ; ' + (startGeo.name || 'Start') + ' to ' + (finishGeo.name || 'Finish'),
+    description: 'Procedurally generated race route between two real-world locations.',
+    palette: [0x102030, 0x122838, 0x143040, 0x163848, 0x184050, 0x1a4858, 0x1c5060, 0x1e5868],
+    rooms,
+    tunnels,
+  };
+}
+
 // (v12 patch13) Wire the lobby's DROP / DETACH buttons + Enter key on
 // the location input to the gmaps overlay path. Bound once at boot ;
 // the elements are static lobby DOM that exists from page load.
@@ -41358,6 +41490,54 @@ function _lssGmapsSetScaleLive(n) {
     // Store the typed location ; LAUNCH will use it.
     game.pendingGmapsOverlay = { lat, lng, name: displayName };
     const shortName = displayName.length > 60 ? displayName.slice(0, 57) + '...' : displayName;
+
+    // (v13r-2) Race-mode branch : if the FINISH input is also filled,
+    // geocode it and procgen a race route.
+    const finInp = document.getElementById('gmaps-loc-finish-input');
+    if (LSS.MODE === 'race' && finInp && (finInp.value || '').trim()) {
+      const fq = finInp.value.trim();
+      let flat, flng, fname;
+      const fcm = fq.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+      if (fcm) {
+        flat = parseFloat(fcm[1]); flng = parseFloat(fcm[2]);
+        fname = 'Custom (' + flat.toFixed(4) + ', ' + flng.toFixed(4) + ')';
+      } else {
+        try {
+          const furl = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(fq);
+          const fresp = await fetch(furl, { headers: { 'Accept': 'application/json' } });
+          if (!fresp.ok) throw new Error('Geocoder HTTP ' + fresp.status);
+          const farr = await fresp.json();
+          if (!Array.isArray(farr) || farr.length === 0) {
+            setStatus('No match for finish: ' + fq, 'err'); return;
+          }
+          flat = parseFloat(farr[0].lat); flng = parseFloat(farr[0].lon);
+          fname = farr[0].display_name || fq;
+        } catch (e) {
+          setStatus('Finish geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
+          return;
+        }
+      }
+      const raceFinish = { lat: flat, lng: flng, name: fname };
+      const procgen = _buildRaceCustomMap({ lat, lng, name: displayName }, raceFinish);
+      MAP_DATA.race_custom = procgen;
+      game.pendingRaceRoute = {
+        start: { lat, lng, name: displayName },
+        finish: raceFinish,
+      };
+      // No round timer for custom-location races.
+      game.raceNoTimer = true;
+      setStatus('Race route armed : ' + shortName + ' -> ' + (fname.length > 40 ? fname.slice(0, 37) + '...' : fname), 'ok');
+      // Force-select race_custom (bypassing the echo guard).
+      try {
+        if (typeof selectMap === 'function') {
+          game.selectedMap = '__force_race_custom__';
+          selectMap('race_custom');
+        }
+      } catch(_) {}
+      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
+      return;
+    }
+
     // (v12m) Broadcast to peers so they apply the same overlay. We re-send
     // map_change with the current selectedMap so the existing receiver path
     // handles both the map AND the overlay in one shot.
@@ -41393,6 +41573,18 @@ function _lssGmapsSetScaleLive(n) {
     stopPulse();
     _lssGmapsDetachCity();
     game.pendingGmapsOverlay = null;
+    // (v13r-2) Also clear race-custom route on DETACH.
+    game.pendingRaceRoute = null;
+    game.raceNoTimer = false;
+    if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
+    if (game.selectedMap === 'race_custom') {
+      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
+    }
+    // Also blank the FINISH input so the next race lobby starts fresh.
+    try {
+      const fin = document.getElementById('gmaps-loc-finish-input');
+      if (fin) fin.value = '';
+    } catch (_) {}
     setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
     // Re-enable the input that may have been locked by a peer's set.
     try { const inp = document.getElementById('gmaps-loc-input'); if (inp) inp.disabled = false; } catch(_) {}
@@ -41420,6 +41612,21 @@ function _lssGmapsSetScaleLive(n) {
       if (typeof buildMapSelector === 'function') {
         try { buildMapSelector(); } catch (_) {}
       }
+      // (v13r-2) Toggle the FINISH input + relabel the panel for race mode.
+      try {
+        const lbl = document.getElementById('gmaps-overlay-label');
+        const fin = document.getElementById('gmaps-loc-finish-input');
+        const startInp = document.getElementById('gmaps-loc-input');
+        if (on) {
+          if (lbl) lbl.textContent = 'RACE: START -> FINISH';
+          if (fin) fin.style.display = '';
+          if (startInp) startInp.placeholder = 'Start location (e.g. Stanley Park)';
+        } else {
+          if (lbl) lbl.textContent = 'DROP ON LOCATION';
+          if (fin) fin.style.display = 'none';
+          if (startInp) startInp.placeholder = 'Empire State Building';
+        }
+      } catch (_) {}
       // Convenience: when flipping ON, also set the race-default walls
       // to Datamosh Cube (preset 22). User-tested choice ; reads well
       // through the gmaps city overlay and doesn't glitch on cycle.
