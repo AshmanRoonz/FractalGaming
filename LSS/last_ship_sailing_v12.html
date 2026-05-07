@@ -10280,6 +10280,14 @@ function sdfSmin(a,b,k) {
 // Rooms blend smoothly with each other and with tunnels (smin),
 // but tunnels use hard union (min) between each other so parallel tunnels stay separate.
 function worldSDF(px,py,pz) {
+  // (v12) Google Maps levels have no rooms/tunnels in the SDF arrays.
+  // Returning the default 99999 reads as 'solid wall everywhere' which
+  // (a) instantly kills every projectile and (b) pushes ships toward
+  // some imaginary interior. Short-circuit to a large negative ('deeply
+  // interior') so the whole world reads as open air. Tile-vs-entity
+  // collision is handled separately by _lssGmapsTick raycasting against
+  // the photoreal tile group.
+  if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) return -10000;
   const sk = game.sdfSmoothK || 45;
   // 1) Room-only SDF (smooth blend between rooms)
   let roomD = 99999;
@@ -39978,6 +39986,56 @@ async function _lssGmapsBuildLevel(level) {
 // LOD to fetch for the current camera; update() advances the load/dispose
 // queue. Wrapped in try/catch so a transient tile error doesn't kill the
 // whole game loop.
+// Per-frame tick. Three jobs:
+//   1) Drive the photoreal tile streamer (LOD pyramid + load/dispose).
+//   2) Raycast each entity DOWN against tiles.group so ships sit on
+//      buildings/terrain instead of falling through them.
+//   3) Raycast each entity along its velocity FORWARD so ships don't
+//      pierce walls. Ray hits push the entity back and zero the velocity
+//      component going INTO the surface (slide-along-wall behavior).
+// Wrapped in try/catch so a transient tile error doesn't kill the loop.
+const _lssGmapsRayDown = new THREE.Vector3(0, -1, 0);
+const _lssGmapsRayFwd = new THREE.Vector3();
+const _lssGmapsRaycaster = new THREE.Raycaster();
+const _lssGmapsHoverPad = 80;        // keep this far above geometry
+const _lssGmapsForwardPad = 100;     // and this far along the move direction
+
+function _lssGmapsCollideEntity(pos, vel) {
+  if (!pos || !_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  const grp = _lssGmaps.tiles.group;
+  // Downward: stop free-fall through terrain / building tops.
+  _lssGmapsRaycaster.set(pos, _lssGmapsRayDown);
+  _lssGmapsRaycaster.far = _lssGmapsHoverPad * 2;
+  const downHits = _lssGmapsRaycaster.intersectObject(grp, true);
+  if (downHits.length && downHits[0].distance < _lssGmapsHoverPad) {
+    pos.y += (_lssGmapsHoverPad - downHits[0].distance);
+    if (vel && vel.y < 0) vel.y = 0;
+  }
+  // Forward along velocity: stop flying through walls. Skip if barely moving
+  // (avoids divide-by-zero and saves a raycast for hovering ships).
+  if (!vel) return;
+  const speed2 = vel.x * vel.x + vel.y * vel.y + vel.z * vel.z;
+  if (speed2 < 1) return;
+  const inv = 1.0 / Math.sqrt(speed2);
+  _lssGmapsRayFwd.set(vel.x * inv, vel.y * inv, vel.z * inv);
+  _lssGmapsRaycaster.set(pos, _lssGmapsRayFwd);
+  _lssGmapsRaycaster.far = _lssGmapsForwardPad * 1.5;
+  const fwdHits = _lssGmapsRaycaster.intersectObject(grp, true);
+  if (fwdHits.length && fwdHits[0].distance < _lssGmapsForwardPad) {
+    const back = (_lssGmapsForwardPad - fwdHits[0].distance);
+    pos.x -= _lssGmapsRayFwd.x * back;
+    pos.y -= _lssGmapsRayFwd.y * back;
+    pos.z -= _lssGmapsRayFwd.z * back;
+    // Strip the velocity component along the ray (into the wall).
+    const dotV = vel.x * _lssGmapsRayFwd.x + vel.y * _lssGmapsRayFwd.y + vel.z * _lssGmapsRayFwd.z;
+    if (dotV > 0) {
+      vel.x -= _lssGmapsRayFwd.x * dotV;
+      vel.y -= _lssGmapsRayFwd.y * dotV;
+      vel.z -= _lssGmapsRayFwd.z * dotV;
+    }
+  }
+}
+
 function _lssGmapsTick(dt) {
   if (!_lssGmaps.active || !_lssGmaps.tiles) return;
   const t = _lssGmaps.tiles;
@@ -39985,6 +40043,17 @@ function _lssGmapsTick(dt) {
     if (typeof t.setResolutionFromRenderer === 'function') t.setResolutionFromRenderer(camera, renderer);
     if (typeof t.setCamera === 'function') t.setCamera(camera);
     if (typeof t.update === 'function') t.update();
+  } catch (_) { /* swallow per-frame */ }
+  // Terrain + building collision for player and AI ships.
+  try {
+    if (typeof player !== 'undefined' && player && player.position && player.velocity) {
+      _lssGmapsCollideEntity(player.position, player.velocity);
+    }
+    if (game && Array.isArray(game.entities)) {
+      for (const e of game.entities) {
+        if (e && e.position && e.velocity) _lssGmapsCollideEntity(e.position, e.velocity);
+      }
+    }
   } catch (_) { /* swallow per-frame */ }
 }
 
