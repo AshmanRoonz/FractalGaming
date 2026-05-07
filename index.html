@@ -2,8 +2,21 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v13r (WebXR) ; Race Mode</title>
-<!-- v13r fork started 2026-05-07. Branched off v12m.
+<title>Last Ship Sailing v14 (WebXR) ; Wall Texturing</title>
+<!-- v14 fork started 2026-05-07. Branched off v13r.
+     v14 introduces a wall-texturing system: triplanar texture sampling
+     in the SDF wall shader plus a 4th compositing layer (texture) on
+     top of the existing 3-layer pattern composite (BG/FG1/FG2). The
+     intuition (per the user) : wall pattern math is already a great
+     "where to draw" mask. Mandelbox encodes geometric depth, Apollonian
+     encodes nested rings, Voronoi encodes cell boundaries. Pairing
+     those patterns with photographic-or-baked textures via the
+     existing applyBlend modes (Add/Multiply/Screen/Max/Mix) gives
+     materials that read as "energy on a real surface" instead of
+     "noise on noise". The pattern math is the mask ; the texture
+     is the matter.
+     v13r remains the stable baseline; do NOT edit it.
+     v13r fork started 2026-05-07. Branched off v12m.
      v13r adds a "Race" game mode alongside the classic team-deathmatch.
      Three minimal-surface-area changes drive the whole mode:
        (1) LSS.MODE flag ('classic' | 'race') with a Race toggle in the
@@ -29093,7 +29106,10 @@ const WALL_PATTERN_NAMES = [
   'Hue-Shifting Grid',  // 26 ; bg=Panel Maze + fg=Kali + fg2=Panel Maze (blue tint)
   'Hexeizure',          // 27 ; bg=Panel Maze + fg=Mandelbox + fg2=Hex Pulse (black tint)
   'Starfield',          // 28 ; bg=Panel Maze + fg=Cyber Datamosh + fg2=Apollonian (dark-green)
-  'Race Glow'           // 29 ; (v13r) triple Plasma FBM tinted neon green ; auto-flips Pure Black Base OFF for the glow look
+  'Race Glow',          // 29 ; (v13r) triple Plasma FBM tinted neon green ; auto-flips Pure Black Base OFF for the glow look
+  'Stone Folds',        // 30 ; (v14) Mandelbox depth-folds * stone texture
+  'Tile Track',         // 31 ; (v14) Voronoi cells * brick tile texture
+  'Sheet Metal'         // 32 ; (v14) Kali IFS structure * brushed metal texture
 ];
 
 const WALL_PARAM_DEFS = [
@@ -29632,6 +29648,222 @@ function _switchToPatternSlot(patternIdx) {
 // should be set to when each preset is selected. Pattern IDs are GAME-side
 // indices (translated from the lab's pattern numbering by name match).
 //
+// (v14) Wall texture library. Each entry is a THREE.CanvasTexture baked
+// from a small JS draw function so the game ships with a starter set of
+// material textures and zero asset weight. Indexed by string id ; preset
+// entries reference textures via texId : 'stone' / 'metal' / etc.
+// Drop seamless tile PNGs into fractalgaming/lss/walls/textures/ and add
+// entries to WALL_TEXTURE_PNG_LIST below to register them under their id.
+const WALL_TEXTURES = {};
+const WALL_TEXTURE_PNG_LIST = [];
+
+function _bakeCanvasTexture(id, drawFn, size) {
+  size = size || 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  drawFn(ctx, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  WALL_TEXTURES[id] = tex;
+  return tex;
+}
+
+function _texRng(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s & 0xffffffff) / 0x100000000;
+  };
+}
+
+function _drawStone(ctx, size) {
+  const rng = _texRng(101);
+  const oct = 4;
+  const grids = [];
+  for (let o = 0; o < oct; o++) {
+    const n = 4 << o;
+    const g = new Float32Array((n + 1) * (n + 1));
+    for (let i = 0; i < g.length; i++) g[i] = rng();
+    grids.push({ n, g });
+  }
+  const sstep = (t) => t * t * (3 - 2 * t);
+  function sg(grid, n, u, v) {
+    const x = u * n, y = v * n;
+    const ix = x | 0, iy = y | 0;
+    const fx = sstep(x - ix), fy = sstep(y - iy);
+    const a = grid[ix + iy * (n + 1)];
+    const b = grid[(ix + 1) + iy * (n + 1)];
+    const c = grid[ix + (iy + 1) * (n + 1)];
+    const dd = grid[(ix + 1) + (iy + 1) * (n + 1)];
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + dd) * fx * fy;
+  }
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = x / size, v = y / size;
+      let val = 0, amp = 1, sum = 0;
+      for (let o = 0; o < oct; o++) {
+        val += sg(grids[o].g, grids[o].n, u, v) * amp;
+        sum += amp; amp *= 0.5;
+      }
+      val /= sum;
+      const crack = Math.abs(sg(grids[2].g, grids[2].n, u, v) - sg(grids[3].g, grids[3].n, u, v));
+      const crackMask = 1 - Math.exp(-crack * 18) * 0.7;
+      const gray = (90 + val * 110) * crackMask;
+      const i = (y * size + x) * 4;
+      d[i] = gray; d[i + 1] = gray * 0.97; d[i + 2] = gray * 0.93; d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function _drawBrushedMetal(ctx, size) {
+  ctx.fillStyle = '#7a8088';
+  ctx.fillRect(0, 0, size, size);
+  const rng = _texRng(202);
+  for (let i = 0; i < size * 6; i++) {
+    const y = (rng() * size) | 0;
+    const x = (rng() * size) | 0;
+    const w = 30 + rng() * 220;
+    const sh = 70 + rng() * 130;
+    ctx.fillStyle = 'rgba(' + (sh | 0) + ',' + ((sh * 1.02) | 0) + ',' + ((sh * 1.06) | 0) + ',0.16)';
+    ctx.fillRect(x, y, w, 1);
+  }
+  for (let i = 0; i < 12; i++) {
+    const y = (rng() * size) | 0;
+    const sh = 90 + rng() * 60;
+    ctx.fillStyle = 'rgba(' + (sh | 0) + ',' + (sh | 0) + ',' + ((sh * 1.05) | 0) + ',0.10)';
+    ctx.fillRect(0, y, size, 2);
+  }
+}
+
+function _drawFabric(ctx, size) {
+  ctx.fillStyle = '#202830';
+  ctx.fillRect(0, 0, size, size);
+  const cell = 32;
+  for (let y = 0; y < size; y += cell) {
+    for (let x = 0; x < size; x += cell) {
+      const g1 = ctx.createLinearGradient(x, y, x + cell, y + cell);
+      g1.addColorStop(0, '#3a4250'); g1.addColorStop(0.5, '#525a68'); g1.addColorStop(1, '#3a4250');
+      ctx.fillStyle = g1;
+      ctx.fillRect(x, y, cell / 2, cell);
+      const g2 = ctx.createLinearGradient(x, y + cell, x + cell, y);
+      g2.addColorStop(0, '#3a4250'); g2.addColorStop(0.5, '#525a68'); g2.addColorStop(1, '#3a4250');
+      ctx.fillStyle = g2;
+      ctx.fillRect(x + cell / 2, y, cell / 2, cell);
+    }
+  }
+}
+
+function _drawOrganic(ctx, size) {
+  const rng = _texRng(303);
+  const seeds = [];
+  const N = 80;
+  for (let i = 0; i < N; i++) seeds.push({ x: rng() * size, y: rng() * size, h: rng() });
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let bestD = 1e9, bestH = 0, secondD = 1e9;
+      for (let i = 0; i < N; i++) {
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const sx = seeds[i].x + dx * size, sy = seeds[i].y + dy * size;
+          const dd = (sx - x) * (sx - x) + (sy - y) * (sy - y);
+          if (dd < bestD) { secondD = bestD; bestD = dd; bestH = seeds[i].h; }
+          else if (dd < secondD) secondD = dd;
+        }
+      }
+      const edge = Math.sqrt(secondD) - Math.sqrt(bestD);
+      const edgeMask = Math.max(0, 1 - edge / 16);
+      const i = (y * size + x) * 4;
+      const base = 50 + bestH * 100;
+      const dark = base * (1 - edgeMask * 0.6);
+      d[i] = dark * 0.7; d[i + 1] = dark * 0.95; d[i + 2] = dark * 0.6; d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function _drawTechPanel(ctx, size) {
+  const rng = _texRng(404);
+  ctx.fillStyle = '#1a1f28';
+  ctx.fillRect(0, 0, size, size);
+  const grid = 8;
+  const cell = size / grid;
+  for (let i = 0; i < grid; i++) {
+    for (let j = 0; j < grid; j++) {
+      const x = i * cell, y = j * cell;
+      ctx.fillStyle = '#2a3242';
+      ctx.fillRect(x + 4, y + 4, cell - 8, cell - 8);
+      ctx.fillStyle = '#3a4456';
+      ctx.fillRect(x + 6, y + 6, cell - 12, 1);
+      ctx.fillRect(x + 6, y + 6, 1, cell - 12);
+      if (rng() < 0.45) {
+        const gw = 4 + ((rng() * (cell - 24)) | 0);
+        const gh = 4 + ((rng() * 10) | 0);
+        const gx = x + 8 + rng() * (cell - 16 - gw);
+        const gy = y + 8 + rng() * (cell - 16 - gh);
+        ctx.fillStyle = rng() < 0.3 ? '#88ccff' : '#1a1f28';
+        ctx.fillRect(gx | 0, gy | 0, gw, gh);
+      }
+    }
+  }
+}
+
+function _drawTile(ctx, size) {
+  const rng = _texRng(505);
+  ctx.fillStyle = '#3a3530';
+  ctx.fillRect(0, 0, size, size);
+  const rowH = 32, brickW = 64;
+  for (let y = 0; y < size; y += rowH) {
+    const rowOff = ((y / rowH) | 0) % 2 ? brickW / 2 : 0;
+    for (let x = -brickW; x < size + brickW; x += brickW) {
+      const bx = x + rowOff;
+      const shade = 100 + ((rng() * 60) | 0);
+      ctx.fillStyle = 'rgb(' + shade + ',' + ((shade * 0.85) | 0) + ',' + ((shade * 0.7) | 0) + ')';
+      ctx.fillRect(bx + 2, y + 2, brickW - 4, rowH - 4);
+    }
+  }
+}
+
+function _initWallTextures() {
+  if (WALL_TEXTURES._initialized) return;
+  try {
+    _bakeCanvasTexture('stone', _drawStone);
+    _bakeCanvasTexture('metal', _drawBrushedMetal);
+    _bakeCanvasTexture('fabric', _drawFabric);
+    _bakeCanvasTexture('organic', _drawOrganic);
+    _bakeCanvasTexture('tech', _drawTechPanel);
+    _bakeCanvasTexture('tile', _drawTile);
+    if (WALL_TEXTURE_PNG_LIST.length && THREE.TextureLoader) {
+      const loader = new THREE.TextureLoader();
+      for (const entry of WALL_TEXTURE_PNG_LIST) {
+        loader.load(entry.url, (tex) => {
+          tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+          tex.minFilter = THREE.LinearMipMapLinearFilter;
+          tex.magFilter = THREE.LinearFilter;
+          if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+          tex.needsUpdate = true;
+          WALL_TEXTURES[entry.id] = tex;
+          console.log('[v14-tex] PNG loaded:', entry.id);
+        }, undefined, (err) => {
+          console.warn('[v14-tex] PNG load failed for', entry.id, err);
+        });
+      }
+    }
+    WALL_TEXTURES._initialized = true;
+    console.log('[v14-tex] baked', Object.keys(WALL_TEXTURES).filter(k => k !== '_initialized').length, 'wall textures');
+  } catch (e) {
+    console.warn('[v14-tex] init failed:', e);
+  }
+}
+
 // Adding more presets later: append to this table, append a name to
 // WALL_PATTERN_NAMES, and add the new index to the shader's lab-composite
 // branch ('uPattern == 20 || uPattern == 21 || uPattern == 22 ...').
@@ -29870,6 +30102,73 @@ const MULTI_LAYER_PRESETS = {
     u_hueSpin_fg2: 0.5, u_satBase_fg2: 1.0,
     K_COSMIC_fg2: 0.4,
   },
+  // Index 30: Stone Folds. (v14) Mandelbox carries the where-to-darken
+  // mask (folds = recess), Plasma FBM adds a flowing energy hint,
+  // stone texture in multiply gives the surface its weight.
+  30: {
+    bgPatternId: 4,                                   // Mandelbox
+    bgTime: 1.5,
+    u_iters_bg: 8, u_scale_bg: 0.0048, u_invBase_bg: 4.5,
+    u_hueSpin_bg: 0.05, u_satBase_bg: 0.6,
+    K_COSMIC_bg: 1.6,
+    fgPatternId: 6,                                   // Plasma FBM
+    fgAlpha: 0.6, fgBlend: 0 /* Add */, fgHue: 0.0, fgTime: 0.6,
+    u_iters_fg: 4, u_scale_fg: 0.0018, u_invBase_fg: 9.0,
+    u_hueSpin_fg: 0.05, u_satBase_fg: 0.4,
+    K_COSMIC_fg: 0.5,
+    fg2PatternId: -1,                                  // unused
+    fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
+    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0,
+    K_COSMIC_fg2: 0,
+    texId: 'stone',                                    // (v14) 4th layer
+    texBlend: 1, texAlpha: 0.85, texHue: 0.0, texScale: 0.005, texBrightness: 1.0,
+  },
+  // Index 31: Tile Track. (v14) Voronoi gives sharp cell breaks ;
+  // tile texture grouted across them reads as a cracked-tile floor.
+  // Hex Pulse Radar fg adds a subtle shimmer at cell centers.
+  31: {
+    bgPatternId: 2,                                   // Voronoi
+    bgTime: 0.4,
+    u_iters_bg: 6, u_scale_bg: 0.0024, u_invBase_bg: 9.0,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 14,                                  // Hex Pulse Radar
+    fgAlpha: 0.4, fgBlend: 0 /* Add */, fgHue: 0.5, fgTime: 0.7,
+    u_iters_fg: 4, u_scale_fg: 0.0012, u_invBase_fg: 9.0,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.3,
+    K_COSMIC_fg: 0.4,
+    fg2PatternId: -1,
+    fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
+    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0,
+    K_COSMIC_fg2: 0,
+    texId: 'tile',
+    texBlend: 1, texAlpha: 0.95, texHue: 0.0, texScale: 0.004, texBrightness: 1.0,
+  },
+  // Index 32: Sheet Metal. (v14) Kali IFS provides angular celestial
+  // bands ; brushed metal multiplied through gives the bands a real
+  // surface to sit on. Plasma FBM fg adds gentle hue motion.
+  32: {
+    paletteOverride: 0xb0bec8,                         // cool steel base tint
+    bgPatternId: 0,                                   // Kali IFS
+    bgTime: 0.6,
+    u_iters_bg: 9, u_scale_bg: 0.003, u_invBase_bg: 8.0,
+    u_hueSpin_bg: 0.55, u_satBase_bg: 0.3,
+    K_COSMIC_bg: 1.1,
+    fgPatternId: 6,                                   // Plasma FBM
+    fgAlpha: 0.35, fgBlend: 0 /* Add */, fgHue: 0.0, fgTime: 0.8,
+    u_iters_fg: 4, u_scale_fg: 0.0014, u_invBase_fg: 9.0,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.4,
+    K_COSMIC_fg: 0.4,
+    fg2PatternId: -1,
+    fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
+    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0,
+    K_COSMIC_fg2: 0,
+    texId: 'metal',
+    texBlend: 1, texAlpha: 0.9, texHue: 0.0, texScale: 0.0035, texBrightness: 1.05,
+  },
 };
 
 // Apply a multi-layer preset's per-layer values to the wall material's
@@ -29900,6 +30199,9 @@ function applyMultiLayerPreset(idx) {
     if (u.bgPatternId)  u.bgPatternId.value  = -1;
     if (u.fgPatternId)  u.fgPatternId.value  = -1;
     if (u.fg2PatternId) u.fg2PatternId.value = -1;
+    // (v14) Also disable the 4th texture layer for solo patterns. Composite
+    // presets that want a texture set texBlend >= 0 in their preset.
+    if (u.texBlend) u.texBlend.value = -1;
     return false;
   }
   for (const k of Object.keys(preset)) {
@@ -29930,6 +30232,18 @@ function applyMultiLayerPreset(idx) {
   // preset to a non-hinted one keeps the BlackBase=OFF state.
   if (typeof preset._blackBase === 'number' && typeof setWallBlackBase === 'function') {
     try { setWallBlackBase(!!preset._blackBase); } catch (_) {}
+  }
+  // (v14) Bind the requested texture to the 4th composite layer.
+  // texId is a string key into WALL_TEXTURES (initialized lazily here
+  // so any boot order works). If the id resolves, the texture is bound
+  // and texBlend defaults to Multiply (1) if the preset didn't set one.
+  // If texId is absent, force texBlend = -1 to disable the tex layer.
+  if (typeof _initWallTextures === 'function') _initWallTextures();
+  if (typeof preset.texId === 'string' && WALL_TEXTURES[preset.texId]) {
+    if (u.uWallTex) u.uWallTex.value = WALL_TEXTURES[preset.texId];
+    if (u.texBlend && typeof preset.texBlend !== 'number') u.texBlend.value = 1;
+  } else if (u.texBlend) {
+    u.texBlend.value = -1;
   }
   return true;
 }
@@ -32139,6 +32453,14 @@ function buildRoomGraphLevel(level) {
       'uniform float fgAlpha, fg2Alpha;',
       'uniform float fgHue,   fg2Hue;',
       'uniform float fgTime,  fg2Time;',
+      // (v14) 4th composite layer : texture sampled triplanar.
+      // texBlend < 0 disables the layer (default).
+      'uniform sampler2D uWallTex;',
+      'uniform int   texBlend;',
+      'uniform float texAlpha;',
+      'uniform float texHue;',
+      'uniform float texScale;',
+      'uniform float texBrightness;',
       // ---- Soul Array tunables (live-tweakable) ----
       'uniform float SA_CELL_SIZE;',
       'uniform float SA_DOT_RADIUS;',
@@ -32848,7 +33170,22 @@ function buildRoomGraphLevel(level) {
       '  if (mode == 4) return mix(base, layer, alpha);',
       '  return base;',
       '}',
-      // Composite three layers into the final cosmic contribution.
+      // (v14) Triplanar texture sampling for SDF-meshed surfaces.
+      // Marching-cubes geometry has no useful UVs ; sample the texture
+      // on the YZ / XZ / XY world-axis planes and blend by abs(normal)
+      // so any surface orientation gets a clean projection. Scale is
+      // a frequency knob (smaller = larger features in world units).
+      'vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {',
+      '  vec3 nAbs = abs(n);',
+      '  float sum = nAbs.x + nAbs.y + nAbs.z;',
+      '  nAbs /= max(0.0001, sum);',
+      '  vec3 cx = texture2D(tex, wp.yz * scale).rgb;',
+      '  vec3 cy = texture2D(tex, wp.xz * scale).rgb;',
+      '  vec3 cz = texture2D(tex, wp.xy * scale).rgb;',
+      '  return cx * nAbs.x + cy * nAbs.y + cz * nAbs.z;',
+      '}',
+      // Composite three pattern layers + one texture layer into the
+      // final cosmic contribution.
       'vec3 cosmicField(vec3 wp, vec3 zoneC, float tt) {',
       '  vec3 col = sampleWallPattern(bgPatternId, wp, zoneC, tt,',
       '    u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;',
@@ -32863,6 +33200,14 @@ function buildRoomGraphLevel(level) {
       '      u_iters_fg2, u_scale_fg2, u_invBase_fg2, u_hueSpin_fg2, u_satBase_fg2) * K_COSMIC_fg2;',
       '    fg2 = hueShift(fg2, fg2Hue);',
       '    col = applyBlend(col, fg2, fg2Blend, fg2Alpha);',
+      '  }',
+      // (v14) 4th layer : texture. texBlend < 0 disables the slot. The
+      // pattern math from bg/fg/fg2 above is the "where" mask ; this
+      // layer carries the surface identity (stone, metal, fabric...).
+      '  if (texBlend >= 0) {',
+      '    vec3 texCol = triplanar(uWallTex, wp, vNormal, texScale) * texBrightness;',
+      '    texCol = hueShift(texCol, texHue);',
+      '    col = applyBlend(col, texCol, texBlend, texAlpha);',
       '  }',
       '  return col;',
       '}',
@@ -32950,7 +33295,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29 || uPattern == 30 || uPattern == 31 || uPattern == 32) {',
       // (v8VR 2026-05-01) Pass a tint to cosmicField for multi-layer
       // composite presets so per-room zoneColor doesn't leak into pattern
       // sampling. The lab uses a single tintColor across the whole
@@ -33205,6 +33550,27 @@ function buildRoomGraphLevel(level) {
         u_hueSpin_fg2: { value: 0.12 },
         u_satBase_fg2: { value: 0.7 },
         K_COSMIC_fg2:  { value: 6 },
+        // (v14) 4th composite layer : texture. uWallTex is bound to a
+        // 1x1 white default at init ; applyMultiLayerPreset rebinds it
+        // to a real WALL_TEXTURES entry when a preset specifies texId.
+        // texBlend = -1 disables the layer (default for presets without
+        // a texId), so the shader's 'if (texBlend >= 0)' branch is skipped.
+        uWallTex:      { value: (function(){
+          // 1x1 white CanvasTexture as the always-bound default so the
+          // sampler2D is valid before any preset binds a real texture.
+          if (typeof THREE === 'undefined') return null;
+          const c = document.createElement('canvas'); c.width = c.height = 1;
+          const cx = c.getContext('2d'); cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, 1, 1);
+          const t = new THREE.CanvasTexture(c);
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          if (THREE.SRGBColorSpace) t.colorSpace = THREE.SRGBColorSpace;
+          return t;
+        })() },
+        texBlend:      { value: -1 },
+        texAlpha:      { value: 1.0 },
+        texHue:        { value: 0.0 },
+        texScale:      { value: 0.005 },
+        texBrightness: { value: 1.0 },
         // (v7.1 attempt 4) Solo-mode initial values. Overwritten by
         // pushWallParamsToUniforms as soon as the wallParams system runs.
         // These defaults match WALL_PARAM_DEFS so single patterns render
