@@ -30405,6 +30405,30 @@ class StasisField {
       this.claimRing.rotation.x = Math.PI / 2;
       this.claimRing.renderOrder = 1;
       this.group.add(this.claimRing);
+
+      // (v13r-3) Tall vertical beacon column so the finish is visible
+      // from any distance, including across-province races. The column
+      // is purely visual : 8000 units tall (covers any sane race scale),
+      // additive-blended purple so it reads against both sky and city.
+      // Width scales per-frame in update(dt) so far-away distances still
+      // subtend a readable angle on screen.
+      const beaconGeo = new THREE.CylinderGeometry(1, 1, 8000, 16, 1, true);
+      const beaconMat = new THREE.MeshBasicMaterial({
+        color: 0xff66ff, transparent: true, opacity: 0.55,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      });
+      this.beacon = new THREE.Mesh(beaconGeo, beaconMat);
+      this.beacon.renderOrder = 1;
+      this.group.add(this.beacon);
+      // A second, tighter inner core for the beacon to give it a hot center.
+      const beaconCoreGeo = new THREE.CylinderGeometry(0.4, 0.4, 8000, 12, 1, true);
+      const beaconCoreMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0.45,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+      });
+      this.beaconCore = new THREE.Mesh(beaconCoreGeo, beaconCoreMat);
+      this.beaconCore.renderOrder = 2;
+      this.group.add(this.beaconCore);
     }
 
     // No per-field PointLight: adding lights post-init forces Three.js to
@@ -30444,6 +30468,18 @@ class StasisField {
     }
     if (this.claimRing) {
       this.claimRing.rotation.z += dt * 0.4 * proximityBoost;
+    }
+    // (v13r-3) Beacon distance-scale. Width keeps the column at
+    // >= ~0.3 deg subtended angle. Height also scales for very long
+    // races so the 8000-unit baseline doesn't disappear at scale ;
+    // the column always stretches at least 5% of distance vertically
+    // so it punches through any horizon haze.
+    if (this.beacon && typeof camera !== 'undefined') {
+      const d = camera.position.distanceTo(this.position);
+      const w = Math.max(20, d * 0.005);
+      const hScale = Math.max(1, (d * 0.05) / 8000);
+      this.beacon.scale.set(w, hScale, w);
+      if (this.beaconCore) this.beaconCore.scale.set(w, hScale, w);
     }
     // Drive shader uniforms on the energy core: time advances regardless of
     // proximity; uPulse boosts band rotation speed and brightness when the
@@ -34185,7 +34221,10 @@ function updateEnemyHealthBars() {
   for (const field of game.stasisFields) {
     if (!field.alive) continue;
     const dist = player.position.distanceTo(field.position);
-    if (dist > 4000) continue;
+    // (v13r-3) Champion fields (race finish) bypass the 4 km marker cap
+    // so cross-province races still get an on-screen waypoint. Regular
+    // stasis fields keep the original cap.
+    if (dist > 4000 && !field.championMode) continue;
 
     const worldPos = _hbTmpA.copy(field.position);
     worldPos.y += 60;
@@ -40746,6 +40785,102 @@ async function _lssGmapsBuildLevel(level) {
     game.corridorPoints.push({ x: Math.cos(a) * rad, y: ALT + Math.random() * SU * 4, z: Math.sin(a) * rad, team: null });
   }
 
+  // (v13r-2) Race-mode override : if a race route is armed, replace the
+  // dogfight spawn dome with race-specific spawn clusters at the start
+  // and place a finish marker at the destination. Bots navigate via the
+  // race graph ; champion field auto-spawns at the finish marker.
+  if (game.pendingRaceRoute && LSS.MODE === 'race') {
+    const rr = game.pendingRaceRoute;
+    const fin = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    const dist = Math.sqrt(fin.x * fin.x + fin.z * fin.z);
+    const len = Math.max(1, dist);
+    const ux = fin.x / len, uz = fin.z / len;
+    const perpX = -uz, perpZ = ux;
+    const SPAWN_OFFSET = 220;
+    const STARTLINE_BACK = 100;        // tuck spawns slightly behind the line
+    const ax =  perpX * SPAWN_OFFSET - ux * STARTLINE_BACK;
+    const az =  perpZ * SPAWN_OFFSET - uz * STARTLINE_BACK;
+    const bx = -perpX * SPAWN_OFFSET - ux * STARTLINE_BACK;
+    const bz = -perpZ * SPAWN_OFFSET - uz * STARTLINE_BACK;
+
+    // Wipe the dogfight dome and rebuild spawn clusters at the start line.
+    game.corridorPoints = [];
+    for (let i = 0; i < 16; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = SU * 1.2 + Math.random() * SU * 1.5;
+      game.corridorPoints.push({ x: ax + Math.cos(a) * r, y: ALT + Math.random() * SU * 1.2, z: az + Math.sin(a) * r, team: 'A' });
+      game.corridorPoints.push({ x: bx + Math.cos(a) * r, y: ALT + Math.random() * SU * 1.2, z: bz + Math.sin(a) * r, team: 'B' });
+    }
+
+    // Populate sdfRoomData with phantom rooms : two team spawns + a
+    // champion-flagged finish. spawnChampionField looks for the
+    // champion:true room and lands the field there.
+    const FINISH_R = 480;
+    game.sdfRoomData = [
+      { id: 'spawn_a', team: 'A', x: ax, y: ALT, z: az, r: 280 },
+      { id: 'spawn_b', team: 'B', x: bx, y: ALT, z: bz, r: 280 },
+      { id: 'finish',  team: null, champion: true, x: fin.x, y: ALT, z: fin.z, r: FINISH_R },
+    ];
+
+    // Tiny race graph : start node + finish node connected. Bots BFS
+    // start -> finish and steer at the midpoint.
+    const midX = fin.x * 0.5, midZ = fin.z * 0.5;
+    const startNode = {
+      id: 'race_start', x: (ax + bx) * 0.5, y: ALT, z: (az + bz) * 0.5, r: 280, team: null, champion: false,
+      neighbors: [{ id: 'race_finish', mid: { x: midX, y: ALT, z: midZ } }],
+    };
+    const finishNode = {
+      id: 'race_finish', x: fin.x, y: ALT, z: fin.z, r: FINISH_R, team: null, champion: true,
+      neighbors: [{ id: 'race_start', mid: { x: midX, y: ALT, z: midZ } }],
+    };
+    game.raceGraph = {
+      nodes: { race_start: startNode, race_finish: finishNode },
+      finishId: 'race_finish',
+    };
+    // (v13r-3) Province-scale races easily exceed the default 25,000-unit
+    // arena clamp ; players were hitting an invisible wall mid-route.
+    // Bump ARENA_SIZE to 2.5x the race distance (or keep the default,
+    // whichever is larger). Stash the original once so DETACH can
+    // restore it for classic-mode matches that follow.
+    if (typeof LSS._origArenaSize !== 'number') LSS._origArenaSize = LSS.ARENA_SIZE;
+    const _raceArena = Math.max(LSS._origArenaSize, dist * 2.5);
+    if (_raceArena > LSS.ARENA_SIZE) {
+      LSS.ARENA_SIZE = _raceArena;
+      console.log('[lss-gmaps] race ARENA_SIZE expanded to', _raceArena.toFixed(0),
+        '(orig', LSS._origArenaSize, ', race dist', dist.toFixed(0) + ')');
+    }
+    // (v13r-3) Long races also need the camera far plane and fog density
+    // bumped, otherwise the finish beacon + HUD waypoint clip out before
+    // the user can see them. Default far is 25000 ; race far covers the
+    // full distance plus a healthy margin so the beacon is reachable
+    // while looking from the start. Default fog density 0.000015 fades
+    // out around 67km ; race density scales inversely with distance so
+    // the same 'haze at horizon' feel persists at any scale.
+    if (typeof LSS._origCameraFar !== 'number') LSS._origCameraFar = camera.far;
+    const _raceFar = Math.max(LSS._origCameraFar, dist * 1.6);
+    if (_raceFar > camera.far) {
+      camera.far = _raceFar;
+      camera.updateProjectionMatrix();
+      console.log('[lss-gmaps] race camera.far expanded to', _raceFar.toFixed(0));
+    }
+    if (scene.fog && typeof LSS._origFogDensity !== 'number' && typeof scene.fog.density === 'number') {
+      LSS._origFogDensity = scene.fog.density;
+    }
+    if (scene.fog && typeof scene.fog.density === 'number') {
+      // Target : fog factor stays around 0.5 at the finish distance, so
+      // the goal is hazy but still seen. e^(-(density*d)^2) = 0.5
+      // -> density = sqrt(ln 2) / d ~= 0.833 / d.
+      const _raceFogDensity = Math.min(LSS._origFogDensity, 0.833 / Math.max(1, dist));
+      if (_raceFogDensity < scene.fog.density) {
+        scene.fog.density = _raceFogDensity;
+        console.log('[lss-gmaps] race fog density relaxed to', _raceFogDensity.toExponential(2));
+      }
+    }
+    console.log('[lss-gmaps] race route armed :',
+      rr.start.name || 'start', '->', rr.finish.name || 'finish',
+      '(' + (dist).toFixed(0) + ' world units)');
+  }
+
   // Get API key (prompt if missing). Cancelling falls back to the default
   // tunnel map so the player isn't stuck on a blank scene.
   let key = _lssGmapsGetKey();
@@ -41398,50 +41533,37 @@ function _lssGmapsSetScaleLive(n) {
 // champion:true sits at the delta XZ, 1-5 intermediate rooms along
 // the line. Y values are seeded at zero ; terrain-follow shifts the
 // whole level up to fit once tiles load.
+// (v13r-2 revised) Custom Location race emits a wall-less gmaps stub
+// (type:'gmaps' so _lssGmapsBuildLevel handles the build path). The
+// actual race geometry — spawn clusters at the start, finish marker
+// at the destination — is wired up inside _lssGmapsBuildLevel by
+// reading game.pendingRaceRoute. No tunnels, no rooms, no walls ;
+// just open-air free-flight from A to B over the photoreal city.
 function _buildRaceCustomMap(startGeo, finishGeo) {
-  const M_PER_DEG_LAT = 111320;
-  const startLat = startGeo.lat * Math.PI / 180;
-  const dLng = finishGeo.lng - startGeo.lng;
-  const dLat = finishGeo.lat - startGeo.lat;
-  // Three-tile post-setLatLonToYUp axes : X = east, Z = south (north = -Z).
-  const dxWorld = dLng * Math.cos(startLat) * M_PER_DEG_LAT;
-  const dzWorld = -dLat * M_PER_DEG_LAT;
-  const dist = Math.sqrt(dxWorld * dxWorld + dzWorld * dzWorld);
-
-  const intermediates = Math.max(1, Math.min(5, Math.round(dist / 800)));
-  const len = Math.max(1, dist);
-  const ux = dxWorld / len, uz = dzWorld / len;
-  const perpX = -uz, perpZ = ux;
-  const SPAWN_OFFSET = 220;
-
-  const rooms = [];
-  rooms.push({ id: 'spawn_a', team: 'A', x:  perpX * SPAWN_OFFSET, y: 0, z:  perpZ * SPAWN_OFFSET, r: 320 });
-  rooms.push({ id: 'spawn_b', team: 'B', x: -perpX * SPAWN_OFFSET, y: 0, z: -perpZ * SPAWN_OFFSET, r: 320 });
-
-  const tunnels = [];
-  let prevX = 0, prevZ = 0;
-  for (let i = 1; i <= intermediates; i++) {
-    const t = i / (intermediates + 1);
-    const rx = dxWorld * t;
-    const rz = dzWorld * t;
-    rooms.push({ id: 'mid_' + i, team: null, x: rx, y: 0, z: rz, r: 360 });
-    if (i === 1) {
-      tunnels.push({ path: [{x:  perpX * SPAWN_OFFSET, y: 0, z:  perpZ * SPAWN_OFFSET}, {x: rx, y: 0, z: rz}], r: 280 });
-      tunnels.push({ path: [{x: -perpX * SPAWN_OFFSET, y: 0, z: -perpZ * SPAWN_OFFSET}, {x: rx, y: 0, z: rz}], r: 280 });
-    } else {
-      tunnels.push({ path: [{x: prevX, y: 0, z: prevZ}, {x: rx, y: 0, z: rz}], r: 280 });
-    }
-    prevX = rx; prevZ = rz;
-  }
-  rooms.push({ id: 'finish', team: null, champion: true, x: dxWorld, y: 0, z: dzWorld, r: 480 });
-  tunnels.push({ path: [{x: prevX, y: 0, z: prevZ}, {x: dxWorld, y: 0, z: dzWorld}], r: 320 });
-
   return {
+    type: 'gmaps',
     name: 'Race ; ' + (startGeo.name || 'Start') + ' to ' + (finishGeo.name || 'Finish'),
-    description: 'Procedurally generated race route between two real-world locations.',
+    description: 'Free-flight race between two real-world locations. No walls ; just sky and city.',
+    lat: startGeo.lat,
+    lng: startGeo.lng,
+    scale: 1,
     palette: [0x102030, 0x122838, 0x143040, 0x163848, 0x184050, 0x1a4858, 0x1c5060, 0x1e5868],
-    rooms,
-    tunnels,
+    rooms: [],
+    tunnels: [],
+  };
+}
+
+// Convert a finish lat/lng (relative to a start lat/lng) into world XZ.
+// Flat-earth approximation, accurate to <1% at city scale. Output matches
+// the post-setLatLonToYUp convention : X = east, Z = south (north = -Z).
+function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
+  const M_PER_DEG_LAT = 111320;
+  const sLat = startLat * Math.PI / 180;
+  const dLng = finishLng - startLng;
+  const dLat = finishLat - startLat;
+  return {
+    x: dLng * Math.cos(sLat) * M_PER_DEG_LAT,
+    z: -dLat * M_PER_DEG_LAT,
   };
 }
 
@@ -41577,6 +41699,15 @@ function _buildRaceCustomMap(startGeo, finishGeo) {
     game.pendingRaceRoute = null;
     game.raceNoTimer = false;
     if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
+    // (v13r-3) Restore the default arena clamp.
+    if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
+    if (typeof LSS._origCameraFar === 'number') {
+      camera.far = LSS._origCameraFar;
+      camera.updateProjectionMatrix();
+    }
+    if (scene.fog && typeof LSS._origFogDensity === 'number') {
+      scene.fog.density = LSS._origFogDensity;
+    }
     if (game.selectedMap === 'race_custom') {
       if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
     }
