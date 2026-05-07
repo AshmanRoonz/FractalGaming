@@ -31104,6 +31104,10 @@ function getNextMap() {
 function shuffleMapRotation() {}
 
 function buildRoomGraphLevel(level) {
+  // (v12 patch31) Bump the build sequence so any in-flight overlay
+  // IIFE from a prior call knows its captured state is stale and
+  // can bail out instead of re-adding old wall meshes to the scene.
+  game._buildSeq = (game._buildSeq | 0) + 1;
   // (v12) Google Maps levels skip the room / tunnel / SDF pipeline and
   // hand off to the gmaps build path, which streams Photorealistic 3D
   // Tiles from Google's Map Tiles API and spawns ships in open air.
@@ -31139,6 +31143,10 @@ function buildRoomGraphLevel(level) {
     // was empty when we saved it, the worker callback later added
     // walls but they were orphaned by the gmaps build's cleanup pass.
     (async () => {
+      // Capture the build sequence at IIFE start. If it changes
+      // before we get to the restore, we know a newer buildRoomGraphLevel
+      // call has run and our save is stale ; abort instead of reattaching.
+      const _mySeq = game._buildSeq | 0;
       const start = Date.now();
       while ((!game.mapMeshes || game.mapMeshes.length === 0) && (Date.now() - start) < 5000) {
         await new Promise(r => setTimeout(r, 100));
@@ -31169,6 +31177,14 @@ function buildRoomGraphLevel(level) {
         });
       } catch (e) {
         console.warn('[lss-gmaps] overlay (via build) failed:', e);
+      }
+      // (v12 patch31) Stale-seq check : if a newer build started while
+      // we were awaiting _lssGmapsBuildLevel, the saved snapshot belongs
+      // to the OLD map. Restoring would overwrite the new map's state
+      // and re-add the old walls to the scene as a 'ghost'. Bail clean.
+      if ((game._buildSeq | 0) !== _mySeq) {
+        console.log('[lss-gmaps] overlay IIFE stale (seq ' + _mySeq + ' -> ' + (game._buildSeq|0) + ') ; abandoning restore.');
+        return;
       }
       // Restore tunnel state ; the build path cleared it.
       game.levelSpheres   = _saveSpheres;
