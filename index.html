@@ -10288,7 +10288,7 @@ function worldSDF(px,py,pz) {
   // interior') so the whole world reads as open air. Tile-vs-entity
   // collision is handled separately by _lssGmapsTick raycasting against
   // the photoreal tile group.
-  if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) return -10000;
+  if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return -10000;
   const sk = game.sdfSmoothK || 45;
   // 1) Room-only SDF (smooth blend between rooms)
   let roomD = 99999;
@@ -10630,7 +10630,7 @@ function raycastLevel(origin, dir, maxDist) {
   // so sdfRaycast can't find walls. Replace with a raycast against the
   // photoreal tile leaf meshes ; that's what makes projectiles, hitscan,
   // and AI line-of-sight respect real city geometry.
-  if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) {
+  if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) {
     const grp = _lssGmaps.tiles && _lssGmaps.tiles.group;
     if (grp && grp.children && grp.children.length > 0) {
       const meshes = _lssGmapsCollectLeaves(grp);
@@ -40211,6 +40211,85 @@ function _lssGmapsTick(dt) {
 //   window.lssGmaps.setScale(20)      bigger world ; ships feel tinier.
 //   window.lssGmaps.clearKey()        forget the saved API key.
 //   window.lssGmaps.debug = true      log per-second collision counters.
+// (v12 patch11) Named city catalog for the overlay helpers below. Same
+// lat/lng pivots used by the dedicated gmaps_* level entries, exposed
+// here as a console-friendly key->coord map.
+const _lssGmapsCities = {
+  vancouver: { lat: 49.2827, lng: -123.1207, name: 'Vancouver, BC' },
+  nyc:       { lat: 40.7484, lng:  -73.9857, name: 'New York City' },
+  tokyo:     { lat: 35.6595, lng:  139.7005, name: 'Tokyo (Shibuya)' },
+  hongkong:  { lat: 22.2855, lng:  114.1577, name: 'Hong Kong (Central)' }
+};
+
+// Overlay: load a city's photoreal tiles into the current scene as
+// scenery, regardless of what map type is active. Existing room/tunnel
+// SDF + walls + AI continue to function ; the city appears around them
+// and depth-sorts naturally where it intersects room geometry. opts:
+//   y      vertical offset for the tile pivot (default 0). Negative
+//          values sink the city below the rooms.
+//   scale  tile group scale (default 1). Bigger = ships read smaller.
+async function _lssGmapsAttachCity(cityKey, opts) {
+  opts = opts || {};
+  const c = _lssGmapsCities[cityKey];
+  if (!c) {
+    console.warn('[lss-gmaps] unknown city:', cityKey, '. Try one of:', Object.keys(_lssGmapsCities));
+    return;
+  }
+  let key = _lssGmapsGetKey();
+  if (!key) {
+    key = await _lssGmapsPromptKey();
+    if (!key) { console.warn('[lss-gmaps] attach cancelled (no key).'); return; }
+  }
+  // Tear down any existing overlay/active tiles first ; one tile group
+  // at a time keeps cleanup simple and bandwidth predictable.
+  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch (_) {} _lssGmaps.cleanup = null; }
+  _lssGmaps.active = false;
+  _lssGmaps.tiles = null;
+  try {
+    const mod = await _lssGmapsLoadModule();
+    const GTR = mod.GoogleTilesRenderer || (mod.default && mod.default.GoogleTilesRenderer);
+    if (!GTR) throw new Error('GoogleTilesRenderer not found.');
+    const tiles = new GTR(key);
+    if (typeof tiles.setLatLonToYUp === 'function') {
+      tiles.setLatLonToYUp(c.lat * Math.PI/180, c.lng * Math.PI/180);
+    }
+    const sc = (typeof opts.scale === 'number' && opts.scale > 0) ? opts.scale : 1;
+    tiles.group.scale.setScalar(sc);
+    if (typeof opts.y === 'number') tiles.group.position.y += opts.y;
+    const eb = Math.max(8, 8 * sc);
+    if (tiles.errorTarget !== undefined) tiles.errorTarget = eb;
+    if (tiles.errorThreshold !== undefined) tiles.errorThreshold = eb;
+    scene.add(tiles.group);
+    _lssGmaps.tiles = tiles;
+    _lssGmaps.scale = sc;
+    // active = true makes _lssGmapsTick drive tile.update() per frame.
+    // BUT: it would also short-circuit worldSDF and raycastLevel, which
+    // would break the active tunnel-map's combat. So we register a
+    // 'overlay only' flag the SDF guards check, instead of the active
+    // flag. That keeps tile streaming alive while leaving combat in
+    // the tunnel-map's existing SDF.
+    _lssGmaps.overlayOnly = true;
+    _lssGmaps.active = true;
+    _lssGmaps.cleanup = () => {
+      try { scene.remove(tiles.group); } catch (_) {}
+      try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch (_) {}
+      _lssGmaps.tiles = null;
+      _lssGmaps.overlayOnly = false;
+    };
+    console.log('[lss-gmaps] overlay attached:', c.name, 'scale:', sc, 'yOffset:', opts.y || 0);
+  } catch (e) {
+    console.error('[lss-gmaps] attachCity failed:', e);
+  }
+}
+
+function _lssGmapsDetachCity() {
+  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch (_) {} _lssGmaps.cleanup = null; }
+  _lssGmaps.active = false;
+  _lssGmaps.tiles = null;
+  _lssGmaps.overlayOnly = false;
+  console.log('[lss-gmaps] overlay detached.');
+}
+
 function _lssGmapsSetScaleLive(n) {
   if (typeof n !== 'number' || n <= 0) return;
   _lssGmaps.scale = n;
@@ -40225,11 +40304,14 @@ function _lssGmapsSetScaleLive(n) {
 }
 window.lssGmaps = {
   state: _lssGmaps,
+  cities: _lssGmapsCities,
   setKey: _lssGmapsSetKey,
   getKey: _lssGmapsGetKey,
   clearKey: _lssGmapsClearKey,
   prompt: _lssGmapsPromptKey,
-  setScale: _lssGmapsSetScaleLive
+  setScale: _lssGmapsSetScaleLive,
+  attachCity: _lssGmapsAttachCity,
+  detachCity: _lssGmapsDetachCity
 };
 
 
