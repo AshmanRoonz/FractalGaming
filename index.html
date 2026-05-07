@@ -40184,6 +40184,22 @@ async function _lssGmapsBuildLevel(level) {
       _lssGmaps.tiles = null;
     };
     console.log('[lss-gmaps] active over', level.name, '@', level.lat, level.lng);
+    // (v12 patch32) Continuous refine for ~20 s after build path
+    // attach. Catches high-elevation locations where ground sits well
+    // above world Y=0 ; shifts the tile group so ground lands at the
+    // level's expected min-Y region and the player's spawn at Y=200
+    // ends up above ground.
+    try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+    let _bldRefineCount = 0;
+    _lssGmaps._refineInterval = setInterval(() => {
+      try { _lssGmapsRefinePivot(); } catch(_) {}
+      _bldRefineCount++;
+      if (_bldRefineCount >= 20) {
+        try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+        _lssGmaps._refineInterval = null;
+      }
+    }, 1000);
+    try { _lssGmapsRefinePivot(); } catch(_) {}
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
@@ -40261,7 +40277,7 @@ function _lssGmapsCollideEntity(pos, vel) {
 
   // -- Stuck-inside recovery: cast UP. If hit close, we're inside ;
   // -- pop above the ceiling and let the down-ray reseat next frame.
-  const ESCAPE_HEIGHT = 600;
+  const ESCAPE_HEIGHT = 20000;  // (v12 patch32) up to ~20 km so high-elevation underground recovers
   _lssGmapsRayDown.set(0, 1, 0);
   _lssGmapsRaycaster.set(pos, _lssGmapsRayDown);
   _lssGmapsRaycaster.far = ESCAPE_HEIGHT;
