@@ -1564,6 +1564,31 @@ body.vr-active .hit-marker {
       </a>
     </div>
 
+    <!-- (v11d) Community row. Discord invite + Reddit subreddit. Links
+         open in a new tab so the lobby stays put. Discord button uses
+         the brand purple (#5865F2) ; Reddit uses its brand orange. -->
+    <div style="margin-top:18px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;align-items:center;">
+      <span style="color:#555;font-family:'Courier New',monospace;font-size:9px;letter-spacing:2px;">COMMUNITY:</span>
+      <a href="https://discord.gg/JSPnSTu7" target="_blank" rel="noopener"
+         style="background:rgba(88,101,242,0.18);border:1px solid rgba(88,101,242,0.7);
+                color:#a5b0ff;padding:6px 14px;font-family:'Courier New',monospace;
+                font-size:10px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;display:flex;align-items:center;gap:6px;"
+         onmouseover="this.style.borderColor='#5865F2';this.style.color='#fff';this.style.background='rgba(88,101,242,0.35)'"
+         onmouseout="this.style.borderColor='rgba(88,101,242,0.7)';this.style.color='#a5b0ff';this.style.background='rgba(88,101,242,0.18)'">
+        DISCORD
+      </a>
+      <a href="https://www.reddit.com/r/LastShipSailing/" target="_blank" rel="noopener"
+         style="background:rgba(255,69,0,0.18);border:1px solid rgba(255,69,0,0.7);
+                color:#ffb088;padding:6px 14px;font-family:'Courier New',monospace;
+                font-size:10px;letter-spacing:2px;text-decoration:none;
+                transition:all 0.2s;border-radius:2px;display:flex;align-items:center;gap:6px;"
+         onmouseover="this.style.borderColor='#ff4500';this.style.color='#fff';this.style.background='rgba(255,69,0,0.35)'"
+         onmouseout="this.style.borderColor='rgba(255,69,0,0.7)';this.style.color='#ffb088';this.style.background='rgba(255,69,0,0.18)'">
+        r/LastShipSailing
+      </a>
+    </div>
+
     <!-- (v11) Authoring tools row. Each lab is a self-contained HTML file
          that lets the player tune assets and export JSON ; the game itself
          doesn't depend on them, but exposing them on the main menu makes
@@ -1611,7 +1636,23 @@ body.vr-active .hit-marker {
       </a>
     </div>
 
-    <div style="margin-top:30px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
+    <!-- (v11d) GPU requirement disclaimer. The shader-heavy walls + post-FX
+         pipeline (raymarched cube layers, FBM smoke, EffectComposer bloom)
+         tank on integrated graphics. Surfacing this up front spares users
+         a sub-10fps first impression on a laptop with no dGPU. -->
+    <div style="margin-top:24px;padding:10px 18px;border:1px solid rgba(255,170,0,0.4);
+                background:rgba(255,170,0,0.08);border-radius:3px;
+                color:#ffaa00;font-size:10px;letter-spacing:1px;
+                text-align:center;max-width:420px;line-height:1.6;
+                font-family:'Courier New',monospace;">
+      <strong style="letter-spacing:2px;">⚠ DEDICATED GPU RECOMMENDED</strong><br>
+      <span style="color:#bb8800;font-size:9px;">
+        This game is shader-heavy (volumetric smoke, raymarched walls, post-FX bloom).
+        Integrated graphics (Intel UHD, AMD Radeon Vega) will run sub-10fps.
+      </span>
+    </div>
+
+    <div style="margin-top:18px;color:#333;font-size:9px;letter-spacing:1px;text-align:center;max-width:400px;line-height:1.6;">
       Multiplayer is peer-to-peer via Trystero ; just a room code, no game server.<br>
       Share the code; anyone who enters it joins your mesh.<br>
       Sign in with Discord (optional) to track stats on the leaderboard.
@@ -4542,7 +4583,18 @@ function handleNetEvent(evt, fromPeerId) {
     const peerLoadout  = peerForWidth && peerForWidth.loadoutKey ? LOADOUTS[peerForWidth.loadoutKey] : null;
     const peerFireRate = peerLoadout && peerLoadout.weapon ? peerLoadout.weapon.fireRate : 0.5;
     const peerWScale   = (peerFireRate <= 0.10) ? 0.55 : 1.0;
-    spawnTracer(from, to, evt.color || 0xffff44, peerWScale);
+    // (v11d) Dispatch Puncture peer shots through the railgun spiral
+    // spawner so the visual matches what the firing player sees. Read
+    // the loadout from the broadcast event first (added in v11d) and
+    // fall back to net.peers registry for older clients.
+    const _shooterLoadout = (typeof evt.lo === 'string' && evt.lo)
+      ? evt.lo
+      : (peerForWidth && peerForWidth.loadoutKey);
+    if (_shooterLoadout === 'PUNCTURE') {
+      _spawnRailgunSpiral(from, to, evt.color || 0xeeff66);
+    } else {
+      spawnTracer(from, to, evt.color || 0xffff44, peerWScale);
+    }
     // (v6.7) Chassis-specific muzzle flash for peers viewing this shot.
     // Loadout key is looked up from the broadcasting peer's stored state.
     const peer = net.peers.get(fromPeerId);
@@ -17417,6 +17469,96 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale) {
   }
 }
 
+// (v11d) Puncture's railgun spiral. Replaces the regular tracer for this
+// loadout. A helical TubeGeometry winds from the muzzle to the impact
+// point, tapered to 0 radius at both ends so it doesn't pop around the
+// camera (inside view) or overshoot the hit point (outside view). Stays
+// in game.effects with type 'tracerSpiral' ; cubic ease-out opacity fade
+// over ~0.6s so the spiral lingers as a visible trail before vanishing.
+//
+// The helix axis is the from->to direction. Two perpendicular axes are
+// derived stably (avoids a degenerate cross-product when the shot is
+// perfectly vertical). Per-instance geometry + material because every
+// shot's path is unique ; the disposal case below frees both.
+function _spawnRailgunSpiral(from, to, color) {
+  if (typeof scene === 'undefined' || typeof THREE === 'undefined') return;
+  color = (color != null) ? color : 0xeeff66;
+  const dir = new THREE.Vector3().subVectors(to, from);
+  const len = dir.length();
+  if (len < 8) return;
+  const fwd = dir.clone().multiplyScalar(1 / len);
+  // Stable perpendicular basis. Pick world-up unless the shot is itself
+  // near-vertical, in which case fall back to world-X to avoid a tiny
+  // cross-product producing NaN-axis basis vectors.
+  const upHint = (Math.abs(fwd.y) < 0.92) ? new THREE.Vector3(0, 1, 0)
+                                          : new THREE.Vector3(1, 0, 0);
+  const right  = new THREE.Vector3().crossVectors(fwd, upHint).normalize();
+  const realUp = new THREE.Vector3().crossVectors(right, fwd).normalize();
+  // Helix parameters. helixR = radius from beam axis ; coilsPerUnit
+  // controls how tight the spiral is (smaller = looser turns). Total
+  // coils scales with len so a long sniper shot has more visible turns
+  // than a close-range one.
+  const helixR = 9.0;
+  const coilsPerUnit = 0.012;
+  const totalCoils = Math.max(2, len * coilsPerUnit);
+  // Two control points per coil + endpoints. ~24 points for a 1500-unit
+  // shot (12 coils). CatmullRomCurve3 smooths between them ; TubeGeometry
+  // tubularSegments = 4x that for a smooth helix curve.
+  const ptsPerCoil = 6;
+  const numPoints  = Math.max(8, Math.round(totalCoils * ptsPerCoil));
+  const pts = [];
+  for (let i = 0; i <= numPoints; i++) {
+    const t = i / numPoints;
+    // Sine taper: radius is 0 at both ends, helixR at midpoint. Keeps
+    // the spiral visually "anchored" at the muzzle and the hit point.
+    const r = helixR * Math.sin(t * Math.PI);
+    const angle = t * totalCoils * Math.PI * 2;
+    const center = from.clone().add(fwd.clone().multiplyScalar(t * len));
+    const offset = right.clone().multiplyScalar(Math.cos(angle) * r)
+              .add(realUp.clone().multiplyScalar(Math.sin(angle) * r));
+    pts.push(center.add(offset));
+  }
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.5);
+  const tubularSegments = Math.min(160, numPoints * 3);
+  const tubeRadius      = 0.7;
+  const radialSegments  = 5;
+  const geo = new THREE.TubeGeometry(curve, tubularSegments, tubeRadius, radialSegments, false);
+  const mat = new THREE.MeshBasicMaterial({
+    color: color,
+    transparent: true,
+    opacity: 1.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1;
+  mesh.frustumCulled = false;       // helix can extend off-camera ; don't cull
+  scene.add(mesh);
+  // Lifetime ~0.6s gives a clearly visible trail that persists past the
+  // muzzle flash. Per-frame fade case in updateEffects (cubic ease-out)
+  // handles the dimming ; disposal case frees both geometry and material.
+  game.effects.push({ mesh, lifetime: 0.6, age: 0, type: 'tracerSpiral' });
+  // Pair with a small white-hot core sliver at the muzzle for the
+  // "shot just left the barrel" punch. Reuse the existing tracer core
+  // geometry/material proto so this is essentially free.
+  if (typeof _TRACER_CORE_GEO !== 'undefined' && typeof _TRACER_CORE_MAT_PROTO !== 'undefined') {
+    const coreLen = Math.min(220, len * 0.25);
+    const coreEnd = from.clone().add(fwd.clone().multiplyScalar(coreLen));
+    const coreMid = from.clone().add(fwd.clone().multiplyScalar(coreLen * 0.5));
+    const cm = _TRACER_CORE_MAT_PROTO.clone();
+    cm.color = new THREE.Color(0xffffff);
+    cm.opacity = 1.0;
+    const coreMesh = new THREE.Mesh(_TRACER_CORE_GEO, cm);
+    coreMesh.position.copy(coreMid);
+    coreMesh.lookAt(coreEnd);
+    coreMesh.scale.set(1.2, 1.2, coreLen);
+    coreMesh.renderOrder = 1;
+    scene.add(coreMesh);
+    game.effects.push({ mesh: coreMesh, lifetime: 0.10, age: 0, type: 'tracer' });
+  }
+}
+
 function spawnTracer(from, to, color, widthScale) {
   color = color || 0xffff00;
   // Per-call width multiplier so rapid-fire weapons (chaingun, Predator
@@ -17810,6 +17952,14 @@ function _disposeOrReleaseEffect(e) {
   if (e.type === 'tracer' || e.type === 'tracerTail') {
     scene.remove(e.mesh);
     if (e.mesh.material) e.mesh.material.dispose();
+    return;
+  }
+  // (v11d) Puncture railgun spiral: per-instance geometry AND material
+  // (every shot's helix path is unique). Free both on dispose.
+  if (e.type === 'tracerSpiral') {
+    scene.remove(e.mesh);
+    if (e.mesh.geometry && e.mesh.geometry.dispose) e.mesh.geometry.dispose();
+    if (e.mesh.material && e.mesh.material.dispose) e.mesh.material.dispose();
     return;
   }
   // Shader-smoke meshes (explosion plumes) share the global _SMOKE_GEO so
@@ -18237,6 +18387,15 @@ function updateEffects(dt) {
       const swell = 1 + t * 0.8;
       e.mesh.scale.x = swell;
       e.mesh.scale.y = swell;
+    }
+    // (v11d) Puncture railgun spiral: cubic ease-out fade so the helix
+    // holds bright for the first ~0.15s then dims smoothly to invisible
+    // by the lifetime end. No scale/swell ; the helix shape itself is
+    // the visible "this just got fired" cue.
+    else if (e.type === 'tracerSpiral') {
+      if (e.initialOpacity == null) e.initialOpacity = e.mesh.material.opacity;
+      const fade = 1 - t * t * t;
+      e.mesh.material.opacity = e.initialOpacity * fade;
     }
     // --- Sparks: fly, drag, shrink, fade ---
     else if (e.type === 'spark' && e.vel) {
@@ -20730,16 +20889,27 @@ function fireHitscan(origin, dir, w) {
   // makes the long-lived haze layers stack into a thick 2D streak.
   const tracerColor = chassisFlashColor(player.loadoutKey);
   const isChaingun = (w.fireRate <= 0.10);
-  spawnTracer(origin, end, tracerColor, isChaingun ? 0.55 : 1.0);
+  // (v11d) Puncture's railgun replaces the regular tracer with a helical
+  // spiral trail that's the same from inside (cockpit) and outside (peer)
+  // views. Every other loadout still uses the dual-barrel V tracer.
+  if (player.loadoutKey === 'PUNCTURE') {
+    _spawnRailgunSpiral(origin, end, tracerColor);
+  } else {
+    spawnTracer(origin, end, tracerColor, isChaingun ? 0.55 : 1.0);
+  }
   // (v6.7) Hitscan has no flying projectile to broadcast; ship the tracer line
   // so peers see where the shot came from. Damage already flows via the
   // hit-claim path (NetworkPlayer.takeDamage), so this is purely visual.
+  // (v11d) Carry the loadout so the peer-side dispatcher can choose
+  // _spawnRailgunSpiral vs spawnTracer ; falls back to the existing
+  // peer-loadout lookup if `lo` is missing on older builds.
   if (net.active && net.sendEvent) {
     net.sendEvent({
       type: 'fire_tracer',
       ox: origin.x, oy: origin.y, oz: origin.z,
       ex: end.x,    ey: end.y,    ez: end.z,
       color: tracerColor,
+      lo: player.loadoutKey,
     });
   }
 
