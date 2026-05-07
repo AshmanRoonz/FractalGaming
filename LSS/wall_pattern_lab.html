@@ -1116,9 +1116,41 @@ function _parseDefaultWallConfig() {
   // game presets into the lab preview.
   _parseGamePatternNames();
   _parseGameWallUniforms();
+  // (v11d patch 2026-05-06) Parse the per-preset MULTI_LAYER_PRESETS table
+  // so we can preview every multi-layer composite (Digital, Datamosh Cube,
+  // Mandelbox Plasma, Mandelbox Kali, Matrix, Hue-Shifting Grid, Hexeizure,
+  // Starfield, ...) and not just the default Lab Composite (index 20).
+  _parseMultiLayerPresets();
   _refreshPresetDropdown();
 
   return true;
+}
+
+// Parse the game's MULTI_LAYER_PRESETS object literal (the per-index table
+// of bg/fg/fg2 settings used by the game's multi-layer composite presets)
+// into gameSync.multiLayerPresets, keyed by numeric preset index.
+function _parseMultiLayerPresets() {
+  gameSync.multiLayerPresets = {};
+  if (!gameSync.htmlText) return;
+  const start = gameSync.htmlText.indexOf('const MULTI_LAYER_PRESETS');
+  if (start < 0) return;
+  const obj = _extractObjectLiteral(gameSync.htmlText, start);
+  if (!obj) return;
+  try {
+    const parsed = (new Function('return (' + obj.text + ')'))();
+    if (parsed && typeof parsed === 'object') {
+      // Re-key with numeric indices so callers can do mlp[presetIndex]
+      // without worrying about string-vs-number key types.
+      const out = {};
+      for (const k of Object.keys(parsed)) {
+        const n = parseInt(k, 10);
+        if (isFinite(n)) out[n] = parsed[k];
+      }
+      gameSync.multiLayerPresets = out;
+    }
+  } catch (e) {
+    console.warn('[wallsync] MULTI_LAYER_PRESETS parse failed:', e);
+  }
 }
 
 // Parse the game's WALL_PATTERN_NAMES array into gameSync.patternNames.
@@ -1287,44 +1319,63 @@ function _toGamePatternId(labId) {
   return (v != null) ? v : labId;   // last-resort identity if no match
 }
 
-// Apply the selected game preset to the lab's wallMat. For pattern 20
-// (Lab Composite), use the parsed bg/fg/fg2 multi-layer values. For
-// any other pattern, set BG to that pattern, disable FG1 and FG2 so
-// the preview shows the single pattern only.
+// Apply the selected game preset to the lab's wallMat. For multi-layer
+// composite presets (any index listed in MULTI_LAYER_PRESETS, plus the
+// default Lab Composite which lives in the wall material's inline
+// uniforms), pull each layer's bg/fg/fg2 values from the per-preset
+// table (or the material defaults as a fallback). For single-pattern
+// presets (0-19, ignoring Soul Array), set BG to that pattern and
+// disable FG1/FG2 so the preview matches the game's solo-pattern path.
 function _applyGamePresetToLab(presetIndex) {
   const u = wallMat.uniforms;
   const gu = gameSync.wallUniforms || {};
-  // Helper: read a parsed game uniform value, or fall back to the lab's
-  // current value if the game side didn't define / didn't parse it.
+  const mlp = (gameSync.multiLayerPresets || {})[presetIndex];
+  // Helper: read a parsed game wall-material uniform value, or fall back
+  // to the lab's current value if the game side didn't define / didn't
+  // parse it. Used as the second-tier fallback after the per-preset table.
   const G = (name, fallback) => {
     if (gu[name] && typeof gu[name].value === 'number') return gu[name].value;
     return fallback;
   };
-  const isLabComp = /Lab Composite/i.test(gameSync.patternNames[presetIndex] || '');
-  if (isLabComp) {
-    // Multi-layer: pull bg/fg/fg2 settings from game's wall material.
+  // (v11d patch 2026-05-06) "Lab Composite" by name keeps the legacy
+  // wallUniforms-only behaviour for older game HTML versions that don't
+  // ship a MULTI_LAYER_PRESETS table; everything else goes by the table.
+  const isLabCompName = /Lab Composite/i.test(gameSync.patternNames[presetIndex] || '');
+  const isMultiLayer  = !!mlp || isLabCompName;
+  if (isMultiLayer) {
+    // Per-preset value lookup. Resolution order:
+    //   1. MULTI_LAYER_PRESETS[idx][name]   (per-preset table)
+    //   2. gameSync.wallUniforms[name].value (wall material defaults)
+    //   3. provided fallback                 (lab's current value)
+    // This means a per-preset entry always wins, but if a preset omits a
+    // field (or no table exists yet) we still get sensible material
+    // defaults, then the lab's current slider value.
+    const M = (name, fallback) => {
+      if (mlp && typeof mlp[name] === 'number') return mlp[name];
+      return G(name, fallback);
+    };
     // Game and lab use different pattern indices for the same patterns;
     // translate game id -> lab id by name match.
-    u.patternId.value    = _toLabPatternId(G('bgPatternId',  -1));
-    u.fgPatternId.value  = _toLabPatternId(G('fgPatternId',  -1));
-    u.fg2PatternId.value = _toLabPatternId(G('fg2PatternId', -1));
-    u.fgAlpha.value      = G('fgAlpha',      u.fgAlpha.value);
-    u.fg2Alpha.value     = G('fg2Alpha',     u.fg2Alpha ? u.fg2Alpha.value : 0.75);
-    u.fgBlend.value      = G('fgBlend',      u.fgBlend.value)|0;
-    u.fg2Blend.value     = G('fg2Blend',     u.fg2Blend ? u.fg2Blend.value : 1)|0;
-    u.fgHue.value        = G('fgHue',        u.fgHue.value);
-    u.fg2Hue.value       = G('fg2Hue',       u.fg2Hue ? u.fg2Hue.value : 0);
-    u.fgTime.value       = G('fgTime',       u.fgTime.value);
-    u.fg2Time.value      = G('fg2Time',      u.fg2Time ? u.fg2Time.value : 1);
-    u.bgTime.value       = G('bgTime',       u.bgTime.value);
+    u.patternId.value    = _toLabPatternId(M('bgPatternId',  -1));
+    u.fgPatternId.value  = _toLabPatternId(M('fgPatternId',  -1));
+    u.fg2PatternId.value = _toLabPatternId(M('fg2PatternId', -1));
+    u.fgAlpha.value      = M('fgAlpha',      u.fgAlpha.value);
+    u.fg2Alpha.value     = M('fg2Alpha',     u.fg2Alpha ? u.fg2Alpha.value : 0.75);
+    u.fgBlend.value      = M('fgBlend',      u.fgBlend.value)|0;
+    u.fg2Blend.value     = M('fg2Blend',     u.fg2Blend ? u.fg2Blend.value : 1)|0;
+    u.fgHue.value        = M('fgHue',        u.fgHue.value);
+    u.fg2Hue.value       = M('fg2Hue',       u.fg2Hue ? u.fg2Hue.value : 0);
+    u.fgTime.value       = M('fgTime',       u.fgTime.value);
+    u.fg2Time.value      = M('fg2Time',      u.fg2Time ? u.fg2Time.value : 1);
+    u.bgTime.value       = M('bgTime',       u.bgTime.value);
     for (const L of ['bg', 'fg', 'fg2']) {
       const k = (n) => 'u_' + n + '_' + L;
-      u[k('iters')].value   = G(k('iters'),   u[k('iters')].value)|0;
-      u[k('scale')].value   = G(k('scale'),   u[k('scale')].value);
-      u[k('invBase')].value = G(k('invBase'), u[k('invBase')].value);
-      u[k('hueSpin')].value = G(k('hueSpin'), u[k('hueSpin')].value);
-      u[k('satBase')].value = G(k('satBase'), u[k('satBase')].value);
-      u['K_COSMIC_' + L].value = G('K_COSMIC_' + L, u['K_COSMIC_' + L].value);
+      u[k('iters')].value   = M(k('iters'),   u[k('iters')].value)|0;
+      u[k('scale')].value   = M(k('scale'),   u[k('scale')].value);
+      u[k('invBase')].value = M(k('invBase'), u[k('invBase')].value);
+      u[k('hueSpin')].value = M(k('hueSpin'), u[k('hueSpin')].value);
+      u[k('satBase')].value = M(k('satBase'), u[k('satBase')].value);
+      u['K_COSMIC_' + L].value = M('K_COSMIC_' + L, u['K_COSMIC_' + L].value);
     }
   } else {
     // Single-pattern: set BG to this pattern. By default disable FG1 + FG2
