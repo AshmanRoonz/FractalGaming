@@ -39849,9 +39849,18 @@ async function _lssGmapsLoadModule() {
   if (_lssGmaps.loadingPromise) return _lssGmaps.loadingPromise;
   _lssGmaps.loadingPromise = (async () => {
     try {
-      return await import('https://esm.sh/3d-tiles-renderer@0.3.36');
+      // ?external=three tells esm.sh to NOT bundle its own copy of Three.
+      // Without it the host page (importmap-loaded Three 0.165) and the
+      // tile lib (its bundled Three) coexist as two distinct modules,
+      // and the renderer crashes the moment it tries to draw a tile
+      // mesh (Three's onBuild material hook differs across versions).
+      return await import('https://esm.sh/3d-tiles-renderer@0.3.36?external=three');
     } catch (e1) {
       console.warn('[lss-gmaps] esm.sh failed, trying jsdelivr:', e1);
+      // jsdelivr's +esm flag bundles deps; without an external-three
+      // option this branch will reintroduce the duplicate-Three bug.
+      // Kept as a network fallback only ; if this path runs the user
+      // will see a console warning + likely render error.
       return await import('https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.3.36/+esm');
     }
   })();
@@ -39923,6 +39932,31 @@ async function _lssGmapsBuildLevel(level) {
     }
     scene.add(tiles.group);
     if (tiles.errorThreshold !== undefined) tiles.errorThreshold = 8;
+    // Pre-set resolution so the first update() pass has the camera-error
+    // baseline ready ; otherwise the renderer logs a one-time warning.
+    try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
+    try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
+    // Surface tile-load errors clearly. 403 from tile.googleapis.com is
+    // the most common first-run failure ; the alert text walks the user
+    // through enabling Map Tiles API + billing + key referrer settings.
+    if (typeof tiles.addEventListener === 'function') {
+      let _alerted = false;
+      tiles.addEventListener('load-error', (ev) => {
+        const err = ev && (ev.error || ev.message || '');
+        const isAuth = String(err).match(/40[13]/);
+        console.warn('[lss-gmaps] tile load error:', err);
+        if (isAuth && !_alerted) {
+          _alerted = true;
+          alert('Google Maps tile server returned ' + (String(err).match(/40[13]/) || ['403']) + ' for your API key.\n\nFix on Google Cloud Console:\n' +
+                '1) Enable the Map Tiles API on your project\n' +
+                '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
+                '2) Make sure billing is active on that project\n' +
+                '3) If your key has HTTP-referrer restrictions, add this page\'s origin\n' +
+                '   (or set restriction to None temporarily for testing)\n\n' +
+                'You can clear the saved key with window.lssGmaps.clearKey() in DevTools.');
+        }
+      });
+    }
     _lssGmaps.tiles = tiles;
     _lssGmaps.active = true;
     _lssGmaps.lat = level.lat;
