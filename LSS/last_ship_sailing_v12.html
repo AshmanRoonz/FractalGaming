@@ -29433,10 +29433,20 @@ const MULTI_LAYER_PRESETS = {
 // shader uniforms. No-op for presets the table doesn't cover (single
 // patterns); callers should check before relying on it.
 function applyMultiLayerPreset(idx) {
-  const preset = MULTI_LAYER_PRESETS[idx];
-  if (!preset) return false;
   const u = game.levelMaterial && game.levelMaterial.uniforms;
   if (!u) return false;
+  const preset = MULTI_LAYER_PRESETS[idx];
+  // (v12 patch30) Single-pattern preset (no MULTI_LAYER_PRESETS entry) :
+  // explicitly disable fg1 / fg2 so the previously-active preset's
+  // foreground layers don't bleed into the new solo pattern. Without
+  // this, cycling from preset 20 (Lab Composite) to pattern 5 (a
+  // single pattern) left fgPatternId / fg2PatternId untouched and
+  // the shader kept compositing the old FG layers on top of the new BG.
+  if (!preset) {
+    if (u.fgPatternId)  u.fgPatternId.value  = -1;
+    if (u.fg2PatternId) u.fg2PatternId.value = -1;
+    return false;
+  }
   for (const k of Object.keys(preset)) {
     if (u[k]) u[k].value = preset[k];
   }
@@ -31190,14 +31200,25 @@ function buildRoomGraphLevel(level) {
       // like a normal tunnel match ; tiles are scenery only.
       _lssGmaps.overlayOnly = true;
       console.log('[lss-gmaps] overlay attached via build path ; tunnel SDF preserved.');
-      // (v12 patch23) Position the tile group so the highest building
-      // sits at levelMinY + 10% of (levelMaxY - levelMinY) ; this is
-      // the 'bottom 10% of the map can overlap the city' rule the user
-      // asked for. First pass at 3.5s catches initial tile load ;
-      // second at 9s catches additional tiles streaming in as LOD
-      // refines.
-      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch(e){ console.warn('[lss-gmaps] refine 1 failed:', e); } }, 3500);
-      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch(e){ console.warn('[lss-gmaps] refine 2 failed:', e); } }, 9000);
+      // (v12 patch29) Continuous refine for ~20 s after attach. Two
+      // fixed setTimeouts (3.5 s + 9 s) missed cases where round-2
+      // tile loads were either nearly-instant (cache hit ; refine
+      // fired before transform settled) or slow (refine fired
+      // before tiles loaded). 1 Hz polling for 20 s covers both.
+      // Stored on _lssGmaps so detach/cleanup can stop it.
+      try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+      let _refineCount = 0;
+      _lssGmaps._refineInterval = setInterval(() => {
+        try { _lssGmapsRefinePivot(); } catch(_) {}
+        _refineCount++;
+        if (_refineCount >= 20) {
+          try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+          _lssGmaps._refineInterval = null;
+        }
+      }, 1000);
+      // Also try an immediate refine in case tiles came from cache
+      // and are already populated by the time we got here.
+      try { _lssGmapsRefinePivot(); } catch(_) {}
     })();
   } else if (_lssGmaps && _lssGmaps.cleanup) {
     // No pending overlay ; tear down any leftover from a previous match.
@@ -40383,16 +40404,12 @@ function _lssGmapsRefinePivot() {
     } catch (_) {}
   }
   if (maxHitY === -Infinity) return;
-  // (v12 patch27) City sits fully BELOW the tunnel/room geometry,
-  // with a clearance gap. Previous patches had the sign of the
-  // intrusion backwards (tile tops above levelMinY = inside rooms),
-  // which both visually blocked tunnels and z-fought the walls.
-  //
-  // New target : highest tile top sits at levelMinY - clearance.
-  // clearance = max(100, 5% of map height) so small maps still get
-  // a reasonable gap and big maps scale up.
+  // (v12 patch28) City sits just below the lowest tunnel/room point,
+  // with minimal clearance so it reads as 'right under you' instead
+  // of 'distant landscape far below'. Patch27's 100 + 5% was too
+  // much ; now max(30, 1%) which is ~30 units for typical maps.
   const ext = _lssGmapsLevelExtentY();
-  const clearance = Math.max(100, (ext.hi - ext.lo) * 0.05);
+  const clearance = Math.max(30, (ext.hi - ext.lo) * 0.01);
   const targetMaxY = ext.lo - clearance;
   const levelMinY = ext.lo;
   const shift = targetMaxY - maxHitY;
