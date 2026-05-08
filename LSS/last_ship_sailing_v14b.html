@@ -5,18 +5,33 @@
 <title>Last Ship Sailing v14a (WebXR) ; Cleanup Fork</title>
 <!-- v14a fork started 2026-05-08. Branched off v14.
      v14a is a maintenance + first-tranche-consolidation pass. Three changes:
-       (3) FIRST PORT from bespoke_shader_consolidation_plan.md Tranche 3:
-           projectile inner glow halo. _makeProjGlowMaterial deleted ; the
-           glow mesh on every Projectile now uses _makeFXMaterial('proj_glow')
-           with the new proj_glow preset (plasma flow + white-hot screen
-           highlight + FBM detail, fresnel rim, brightness 1.8). baseColor and
-           uPosScale are written per-instance from Projectile.trailColor and
-           1/radius. Fade-in now scales uBrightness instead of uOpacity,
-           matching spawnFXBurst's convention. Engine plume was the original
-           plan's first port but its uThrottle dynamic-modulation has no
-           LayeredFX equivalent yet ; it's deferred behind a small uIntensity
-           feature add (see bespoke_shader_consolidation_plan.md Tranche 1.5
-           ; to be added).
+       (3) PORTS from bespoke_shader_consolidation_plan.md Tranche 3 +
+           Tranche 1.5 feature add. In order:
+           (a) Tranche 3 ; projectile inner glow halo. _makeProjGlowMaterial
+               deleted ; the glow mesh on every Projectile now uses
+               _makeFXMaterial('proj_glow') with the new proj_glow preset
+               (plasma flow + white-hot screen highlight + FBM detail,
+               fresnel rim, brightness 1.8). baseColor and uPosScale are
+               written per-instance from Projectile.trailColor and 1/radius.
+               Fade-in now scales uBrightness instead of uOpacity, matching
+               spawnFXBurst's convention.
+           (b) Tranche 1.5 ; LayeredFXMaterial gains a per-instance uIntensity
+               uniform (default 1.0). One uniform decl, one cfg field, one
+               uniform table entry, and one line in the layer time-rate
+               calculation. Effects with gameplay-meaningful state (engine
+               throttle, tether-trap pulse rate, beam spool-up/down) write
+               this uniform each frame to scale animation tempo proportionally.
+               Default 1.0 leaves all existing presets unchanged. Unblocks
+               the orb, engine plume, engine glow disc, and Vortex core beam
+               ports.
+           (c) Tranche 3 ; tether trap orb core. _makeOrbCoreMaterial deleted ;
+               the central node now uses _makeFXMaterial('orb_core') with
+               the new orb_core preset (ridges crackle base + stars high-freq
+               pinpoints + plasma slow breath, intensity-driven tempo). The
+               per-frame state cue (faster pulse when triggered) is preserved
+               via uIntensity = 1.7 (triggered) vs 1.0 (armed). The dead-code
+               fallback at the Vortex Trip Wire mine site (which was already
+               on fireball_purple via v11c) is collapsed at the same time.
        (1) Delete six dead-code factory functions that were left behind by
            earlier graphics iterations and have no live callsites in v14:
              * _makeFireShieldMaterial    (replaced by plasma_amber preset)
@@ -4968,10 +4983,11 @@ function spawnTripWireOrb(pos, owner, team, ownerPeerId, netId, broadcast, group
   // (10 instead of 7) so the fireball silhouette has room to billow.
   // _makeFXMaterial registers the material with _layeredFXTick so its
   // uTime uniform animates automatically.
+  // (v14a) _makeOrbCoreMaterial fallback collapsed ; _makeFXMaterial is
+  // always defined at this point (top-level function in the same script),
+  // and the factory is being deleted in this fork.
   const mineGeo = new THREE.SphereGeometry(10, 24, 16);
-  const mineMat = (typeof _makeFXMaterial === 'function')
-                  ? _makeFXMaterial('fireball_purple')
-                  : _makeOrbCoreMaterial(0xaa55ff);
+  const mineMat = _makeFXMaterial('fireball_purple');
   // Match the displacement scale to the orb radius so the layered FX
   // patterns sample at the right frequency for this size.
   if (mineMat && mineMat.uniforms && mineMat.uniforms.uPosScale) {
@@ -5971,61 +5987,6 @@ function _makeStasisCoreMaterial(baseColor) {
   });
 }
 
-// ---- Orb core (sphere) ------------------------------------------------
-// Energy bead for trip-wire mines and similar small "armed" markers.
-// Tighter spirals than stasis core, stronger pulse, brighter center
-// so the orb reads as a charged-up node from any distance.
-function _makeOrbCoreMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-      uPulse: { value: 1.0 },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uPulse;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      '  float phi = atan(n.z, n.x);',
-      '  float theta = acos(clamp(n.y, -1.0, 1.0));',
-      // High-frequency crackle pattern.
-      '  float c1 = 0.5 + 0.5 * sin(theta * 18.0 + phi * 7.0 + time * 6.0);',
-      '  float c2 = 0.5 + 0.5 * sin(theta * 11.0 - phi * 13.0 - time * 4.5);',
-      '  float crackle = pow(c1 * c2, 0.6);',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.0);',
-      '  float pulse = 0.7 + 0.5 * sin(time * 3.5 * uPulse);',
-      '  vec3 hot = vec3(1.0, 1.0, 1.0);',
-      '  vec3 col = mix(uColor, hot, crackle * 0.6 + fres * 0.3);',
-      '  float bright = (0.6 + crackle * 0.8) * pulse + fres * 1.4;',
-      '  float alpha = clamp(0.6 + fres * 0.6, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
 // ---- Gravity halo (sphere) --------------------------------------------
 // Concentric inward-collapsing rings on a sphere shell. Used for the
 // Tether Trap halo so the trap reads as a gravitational ensnare instead
@@ -6166,6 +6127,13 @@ const _LAYERED_FX_FRAG = [
   'uniform vec3  uBaseColor;',
   'uniform float uFresnel;',
   'uniform float uBrightness;',
+  // (v14a Tranche 1.5) Per-instance intensity scalar. Defaults to 1.0 (preset
+  // unchanged). Effects with gameplay-meaningful state (engine throttle,
+  // tether-trap pulse rate, beam spool-up/down, etc.) write to this uniform
+  // each frame to scale the animation rate proportionally. uIntensity = 0
+  // means "effect is dormant" (frozen patterns); = 1 is the preset's natural
+  // tempo; > 1 speeds up. The shader multiplies it into per-layer time rates.
+  'uniform float uIntensity;',
   // (v11 fix) uPosScale multiplies vWorldPos before the noise sample. The
   // fx_lab uses a unit-radius preview sphere ; in-game effects are tens to
   // hundreds of units across, so the same per-layer `scale` setting maps
@@ -6313,7 +6281,10 @@ const _LAYERED_FX_FRAG = [
   '  vec4 acc = vec4(0.0, 0.0, 0.0, 0.0);',
   '  for (int i = 0; i < 3; i++) {',
   '    vec3 q = p * uLayerScale[i];',
-  '    float t = uTime * uLayerTimeRate[i];',
+  // (v14a Tranche 1.5) Multiply by uIntensity so per-instance state cues
+  // (engine throttle, tether-trap pulse rate, beam spool) scale animation
+  // tempo proportionally. Default uIntensity = 1.0 leaves preset as-is.
+  '    float t = uTime * uLayerTimeRate[i] * uIntensity;',
   '    float v = samplePatternLFX(uLayerPattern[i], q + vec3(t * 0.1), t);',
   // (v11 fix) Clamp the V channel before hsv2rgb. Without the clamp,
   // brightness=3 layers push V to 3, which makes hsv2rgb output RGB
@@ -6396,6 +6367,7 @@ function _makeLayeredFXMaterial(preset) {
     baseColor: '#ffffff',
     fresnel: 0.3,
     brightness: 1.0,
+    intensity:  1.0, // (v14a) per-instance time-rate multiplier ; presets default to 1, callers override per frame for state-driven effects (engine throttle, tether pulse, beam spool)
     posScale: 1.0,   // (v11 fix) world-space sample-scale ; default keeps wall behavior
     // (v11b) Vertex displacement + soft-edge defaults. Off by default so
     // legacy materials (anything that doesn't opt in) stay byte-identical
@@ -6417,6 +6389,7 @@ function _makeLayeredFXMaterial(preset) {
       uBaseColor:     { value: new THREE.Color(cfg.baseColor) },
       uFresnel:       { value: +cfg.fresnel },
       uBrightness:    { value: +cfg.brightness },
+      uIntensity:     { value: +cfg.intensity },
       uPosScale:      { value: +cfg.posScale },
       // (v11b) New surface-shape uniforms. uTime is reused from above ;
       // these augment it.
@@ -6631,6 +6604,33 @@ const EFFECT_PRESETS = {
       { pattern: 1, scale: 0.6, timeRate: 1.4,  hue: 0.0,   alpha: 1.10, blend: 0, sat: 0.9  },
       { pattern: 5, scale: 1.8, timeRate: 2.10, hue: 0.92,  alpha: 0.95, blend: 2, sat: 0.95 },
       { pattern: 2, scale: 1.1, timeRate: 1.65, hue: 0.55,  alpha: 0.55, blend: 6, sat: 0.7  },
+    ],
+  },
+  // (v14a) Orb core. Replaces _makeOrbCoreMaterial. Used by Tether Trap
+  // central node (octahedron). The bespoke shader produced: high-freq
+  // sin-crackle in spherical (theta, phi) coords + fresnel rim + uPulse-
+  // modulated overall brightness pulse. Translated as ridges crackle
+  // base + stars high-freq pinpoints + plasma slow underlying breath.
+  // baseColor overridden per-instance from the spawn color; uIntensity
+  // is written each frame to 1.7 when the trap is triggered (faster
+  // crackle/pulse) and 1.0 when armed and waiting. Tranche 1.5's new
+  // uIntensity uniform is what makes the triggered/armed split possible.
+  orb_core: {
+    name: 'Orb Core',
+    baseColor: '#88ddff',
+    fresnel: 0.5,
+    brightness: 2.2,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.15,
+    layers: [
+      // Layer 1: ridges crackle base, ship-color-tinted (replace blend).
+      { pattern: 5, scale: 3.0, timeRate: 1.2, hue: 0.0, alpha: 1.0, blend: 0, sat: 0.85 },
+      // Layer 2: stars high-freq pinpoints screen-blended for static sparkle.
+      { pattern: 7, scale: 5.0, timeRate: 2.0, hue: 0.0, alpha: 0.6, blend: 3, sat: 0.00 },
+      // Layer 3: plasma slow underlying breath, multiplied for color glow.
+      { pattern: 1, scale: 1.5, timeRate: 0.8, hue: 0.0, alpha: 0.5, blend: 1, sat: 0.70 },
     ],
   },
   // (v14a) Projectile inner glow halo. Replaces _makeProjGlowMaterial.
@@ -7109,10 +7109,15 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
     timer: 15, rootDuration: 4, radius: 250, owner, team, triggered: false,
     ownerPeerId, netId,
   });
-  // Center: orb-core shader on an octahedron so the central node reads as
-  // a charged-up node (matches the rest of the visual vocabulary).
+  // (v14a) Center: orb_core LayeredFX preset on an octahedron so the
+  // central node reads as a charged-up node (matches the rest of the
+  // visual vocabulary). Replaces _makeOrbCoreMaterial. baseColor and
+  // uPosScale are written per-instance to match the spawn tint and
+  // the octahedron's circumradius. uTime is auto-ticked by _layeredFXTick.
   const tetherGeo = new THREE.OctahedronGeometry(14, 0);
-  const tetherMat = _makeOrbCoreMaterial(0x88ddff);
+  const tetherMat = _makeFXMaterial('orb_core');
+  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(0x88ddff);
+  if (tetherMat.uniforms.uPosScale)  tetherMat.uniforms.uPosScale.value = 1.0 / 14;
   const tetherMesh = new THREE.Mesh(tetherGeo, tetherMat);
   tetherMesh.position.copy(pos);
   tetherMesh.renderOrder = 1;
@@ -23723,10 +23728,13 @@ function updateAbilities(dt) {
       if (eff.mesh) {
         eff.mesh.rotation.x += dt * 1.4;
         eff.mesh.rotation.y += dt * 2.1;
-        // Tick the orb-core shader on the central node.
-        if (eff.mesh.material && eff.mesh.material.uniforms) {
-          eff.mesh.material.uniforms.time.value = game.time;
-          eff.mesh.material.uniforms.uPulse.value = eff.triggered ? 1.7 : 1.0;
+        // (v14a) orb_core LayeredFX preset ; uTime is auto-ticked by
+        // _layeredFXTick so no time write is needed here. uIntensity is
+        // the new (Tranche 1.5) per-instance time-rate scalar: 1.0 when
+        // the trap is armed and idle, 1.7 when it's triggered (faster
+        // crackle + pulse). Same numeric values the bespoke uPulse used.
+        if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
+          eff.mesh.material.uniforms.uIntensity.value = eff.triggered ? 1.7 : 1.0;
         }
         const ph = (eff.pulsePhase || 0) + game.time * 5.0;
         if (eff.glow) {

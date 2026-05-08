@@ -1,8 +1,34 @@
 # LSS Bespoke Shader Consolidation Plan
 
-Last updated: 2026-05-08
-Status: planning, ready to execute in tranches
+Last updated: 2026-05-08 (Tranche 3 fully closed)
+Status: Tranche 3 done in v14c. Tranche 1.5 + 1.5b done. Tranche 1 (smoke), Tranche 2 (ship shield), Tranche 4 (sprites) remain open.
 Supersedes: the unfinished tail of `graphics_update_plan.md` (now in `old_plans/`)
+
+## Progress log
+
+- **2026-05-08:** Projectile inner glow halo (Tranche 3) ported. New `proj_glow` preset added; `_makeProjGlowMaterial` deleted; fade-in switched from `uOpacity` to `uBrightness` scaling. Post-port: a forgotten per-frame `uniforms.time.value` write tripped at runtime ; defensive guard added. Lesson: every port must grep all per-frame uniform writes on the swapped material before declaring done, since the new uniforms have different names.
+- **2026-05-08:** Tranche 1.5 (uIntensity feature add) shipped. LayeredFXMaterial gained a per-instance `uIntensity` uniform (default 1.0) that scales the layer time-rate calculation. Four small edits: uniform decl + cfg field + uniform table entry + one line in the layer loop. All existing presets default to 1.0 so no visual change to anything wired before this point.
+- **2026-05-08:** Engine plume (Tranche 3) deferred. Audit found its `uThrottle` per-frame modulation drives scroll speed + brightness + alpha together, plus the visual identity needs an axial gradient on cone geometry. uIntensity (Tranche 1.5) addresses the scroll-speed half but the axial-gradient half still requires a `geometryHint: 'cone'` mode (not yet built).
+- **2026-05-08:** Tether trap orb core (Tranche 3) ported. New `orb_core` preset (ridges + stars + plasma); `_makeOrbCoreMaterial` deleted; uIntensity carries the triggered/armed state cue at 1.7 vs 1.0. The dead-code fallback at the Vortex Trip Wire mine site (already on fireball_purple) was collapsed at the same time.
+- **2026-05-08:** Tranche 1.5b shipped on v14c. LayeredFXMaterial gained an axial-gradient post-pass: `vUv` varying + four uniforms (`uAxialFalloff`, `uAxialCoreColor`, `uAxialCoreStrength`, `uAxialCoreFalloff`) + cfg defaults all 0 = identity (legacy presets byte-identical) + a short post-composite block that darkens linearly along the cone/cylinder axis and blends toward a hot-core color near the base. Unblocked the engine plume + Vortex Core Beam ports.
+- **2026-05-08:** Tranche 3 closed out on v14c. Eight remaining bespoke factories ported in one pass:
+  * engine glow disc (`_makeEngineDiscMaterial` -> `engine_disc`), throttle modulation via uIntensity
+  * Pyro gas cloud (`_makeGasCloudMaterial` -> `gas_green`), per-instance recolor on ignite preserved
+  * tether trap halo (`_makeGravityHaloMaterial` -> `gravity_halo`), trigger state via uIntensity
+  * stasis pickup shockwave (`_makeShockwaveMaterial` -> `shockwave_ring`), age-based fade via uIntensity + uBrightness
+  * atom-fractal rocks (`_makeAtomFractalMaterial` -> `atom_surface`), surface variant ; lifetime fade via uBrightness
+  * cluster distortion shell (anonymous ShaderMaterial -> `distortion_shell`); callsite is currently disabled but ported for re-enable
+  * engine plume cone (`_makePlumeShaderMaterial` -> `engine_plume`); uses Tranche 1.5b axial gradient (axialFalloff 0.85, axialCoreColor white, axialCoreStrength 0.6); throttle via uIntensity
+  * Vortex Core Beam (`_makeVortexCoreBeamMaterial` -> `core_beam`); uIntensity already matched LayeredFX semantics, swap was clean
+  Net file size change: -308 lines. v14c is 42,659 lines.
+- **2026-05-08 (post-port fix):** Three gas-cloud sites that the porting agent missed updating were writing to `uColor` / `uBaseAlpha` / `time` on the now-LayeredFX `gas_green` material and crashing at runtime. Fixed by routing recolor through `uBaseColor` (with `uColor` fallback retained), brightness modulation through `uBrightness` (with `uBaseAlpha` fallback), and dropping `time.value` writes (auto-ticked). A targeted sweep across the whole file confirmed no other unguarded writes to deleted-bespoke uniform names remain on ported materials. Lesson refined: when delegating a multi-port pass, the verification step must include grepping ALL uniform-write sites in update/tick loops for ALL ported materials, not just the construction sites ; the agent grepped for factory definitions and callsites but missed update-loop branches that referenced deleted uniforms.
+- **2026-05-08 (rollback ; user feedback):** Two ports rolled back after the user reported "looks worse" on play-test. Both have visual identities that LayeredFX's current pattern library cannot reproduce:
+  * **Atom-fractal cluster rocks** ; the bespoke shader uses an iterative Mandelbox fractal (8-step escape-time loop with magic-number folding) for the surface texture. The voronoi+ridges+FBM substitute the porting agent picked produces cellular noise, which reads to the player as "static TV / sand." LayeredFX has no escape-time fractal pattern. Restored `_makeAtomFractalMaterial` verbatim from v14b ; deleted `atom_surface` preset.
+  * **Pyro gas cloud (outer hull)** ; the bespoke shader's identity is a hard alpha-threshold discard (`if (alpha < 0.05) discard`) plus sparse-pattern wispy-plume vertex displacement. The discard creates the characteristic "cloud has holes / silhouette breakup" look that no smooth-blend LayeredFX preset can match. Restored `_makeGasCloudMaterial` verbatim ; deleted `gas_green` preset. The gas cloud's INNER core mesh remains on the `fireball` LayeredFX preset (was already on it since v11, not part of this rollback).
+- **Framework limitation captured:** LayeredFXMaterial's pattern library is noise-based + smooth-blend. Two future feature additions would unlock these two ports cleanly:
+  * **Escape-time fractal pattern** (Mandelbox / Mandelbulb). Adds a `pattern: 8` to the dispatch with the bespoke 8-iteration loop. Modest shader cost ; expressive enough to handle the atom rocks plus future "alien geometry" effects.
+  * **Hard alpha-discard config field** (`alphaThreshold: 0.05` or similar). Adds a `discard` after the layer composite when alpha falls below the threshold. Unblocks the gas cloud's silhouette breakup and any other "this isn't a sphere" volumetric effect.
+  Both are scoped as future work, not in v14c. The consolidation plan is reaching its honest end ; ports that don't fit the framework should be acknowledged as outside its current scope rather than forced through with regressions.
 
 ## Why this plan exists
 
@@ -52,6 +78,20 @@ Ship energy shield (`makeEnergyShieldMaterial`, line 4971) carries `uHitDirs`, `
 
 **Acceptance:** a `shield_dome` preset that produces shield-bubble visuals within the same comparison bar as 1A.
 
+## Tranche 1.5 ; Small LayeredFX feature add for engine effects
+
+Discovered while attempting the engine plume port (2026-05-08). The plume's bespoke `uThrottle` uniform is heavily modulated per frame (scroll speed 1.5x→5.5x, brightness 0.55x→1.0x, alpha 0.85x→1.0x, capped at 1.5 for boost). LayeredFX has no equivalent, and the engine glow disc has the same pattern.
+
+**Work:**
+- Add a `uIntensity` uniform to LayeredFX (default 1.0). When != 1.0, it scales each layer's effective time rate (so animation slows at low intensity, speeds up at high) and post-multiplies the final color and alpha.
+- Optional: add a `geometryHint: 'cone'` mode that exposes a UV.y-derived axial coordinate to the patterns, so axial gradients (hot core at base fading toward tip) can be authored as preset features rather than custom shader code. This is the second blocker for engine plume specifically; engine glow disc doesn't need it.
+
+**Risk:** low. The uniform is a single float. Time-rate scaling is one multiplier line in the layer loop. Color/alpha post-multiply is two lines after the fragment composite. The cone-axial sampling is more work but isolated.
+
+**Acceptance:** engine plume preset with idle-vs-burning visual difference within "could be the same artist" range of the bespoke shader. Side-by-side in `fx_lab.html` before swap.
+
+After Tranche 1.5 ships, engine plume + engine glow disc become the natural next ports in Tranche 3.
+
 ## Tranche 2 ; The big port (after Tranche 1 ships)
 
 ### 2A. Smoke
@@ -75,20 +115,20 @@ Delete `makeEnergyShieldMaterial`.
 
 These are independent. Each is roughly an evening's work: author a preset in `fx_lab.html`, swap the callsite, side-by-side check, ship.
 
-| Effect | Current factory | Suggested preset | Notes |
-|---|---|---|---|
-| Engine plume cone | `_makePlumeShaderMaterial` (6158) | new: `engine_plume` | Per-ship axial scroll; preset needs a `axisScrollDir` config |
-| Engine glow disc | `_makeEngineDiscMaterial` (6240) | reuse: `fireball` with thin disc geometry | Test if existing preset is close enough |
-| Projectile inner glow halo | `_makeProjGlowMaterial` (6512) | new: `proj_halo` | One preset, hue-tinted per ship class (uniform override) |
-| Pyro gas cloud (unignited) | `_makeGasCloudMaterial` (5282) | new: `gas_green` | Sibling preset to `cloud_lit`, swaps to `fireball` on ignite |
-| Vortex Core Beam | `_makeVortexCoreBeamMaterial` (5964) | new: `core_beam` | Cylinder geo; needs axial pulse pattern |
-| Tether Trap orb | `_makeOrbCoreMaterial` (7620) | reuse: `fireball_purple` | Octahedron; preset likely fits as-is |
-| Tether Trap halo | `_makeGravityHaloMaterial` (7630) | new: `gravity_halo` | Outer ring with inward pull pattern |
-| Stasis pickup shockwave | `_makeShockwaveMaterial` (~32093) | new: `shockwave_ring` | Expanding ring; very simple preset |
-| Atom-fractal cluster rocks | `_makeAtomFractalMaterial` (16420) | new: `atom_surface` | Surface (not volume) shader; geometryHint='surface' |
-| Cluster distortion shell | anon ShaderMaterial (16680) | new: `distortion_shell` | Chromatic shimmer; may need a chromatic-aberration preset feature |
+| Effect | Current factory | Suggested preset | Notes | Status |
+|---|---|---|---|---|
+| Projectile inner glow halo | `_makeProjGlowMaterial` | `proj_glow` | Per-instance baseColor override from Projectile.trailColor; uPosScale = 1/radius. | **Done v14a/b 2026-05-08** |
+| Tether Trap orb | `_makeOrbCoreMaterial` | `orb_core` | New preset (ridges + stars + plasma) ; uIntensity carries the triggered/armed state. | **Done v14a/b 2026-05-08** |
+| Engine plume cone | `_makePlumeShaderMaterial` | `engine_plume` | Throttle modulation via uIntensity. Hot core + axial fade via Tranche 1.5b axial-gradient feature. | **Done v14c 2026-05-08** |
+| Engine glow disc | `_makeEngineDiscMaterial` | `engine_disc` | Throttle modulation via uIntensity. Per-instance baseColor for team tint vs cyan thruster. | **Done v14c 2026-05-08** |
+| Pyro gas cloud (unignited) | `_makeGasCloudMaterial` | (rolled back) | Bespoke alpha-discard + sparse-pattern wispy plume not reproducible with current LayeredFX pattern library. Needs a hard alpha-threshold config field added to LayeredFX. | **Rolled back v14c 2026-05-08** |
+| Vortex Core Beam | `_makeVortexCoreBeamMaterial` | `core_beam` | Cylinder geo; uIntensity write at the existing call sites already matched LayeredFX semantics, clean swap. | **Done v14c 2026-05-08** |
+| Tether Trap halo | `_makeGravityHaloMaterial` | `gravity_halo` | wave + ridges layers ; trigger state via uIntensity. Visual delta accepted (rings approximation, not pixel-perfect). | **Done v14c 2026-05-08** |
+| Stasis pickup shockwave | `_makeShockwaveMaterial` | `shockwave_ring` | wave base + ridges accent + stars sparkle ; lifetime fade via uIntensity + uBrightness. | **Done v14c 2026-05-08** |
+| Atom-fractal cluster rocks | `_makeAtomFractalMaterial` | (rolled back) | Bespoke uses iterative Mandelbox fractal ; LayeredFX pattern library has no escape-time fractal equivalent. Substitution read as "static TV / sand" on play-test. Needs a Mandelbox pattern function added to LayeredFX. | **Rolled back v14c 2026-05-08** |
+| Cluster distortion shell | anon ShaderMaterial | `distortion_shell` | caustic + plasma layers ; per-cluster phase via _timeOffset. Callsite currently disabled, ported for future re-enable. | **Done v14c 2026-05-08** |
 
-Suggested order: engine plume → projectile glow → gas cloud → tether trap → core beam → shockwave → atom rocks → distortion shell. Engine effects first because they're on every ship every frame; consolidating them is the biggest "code health" win even if visual delta is small.
+Suggested order (revised after the engine-plume deferral): **projectile glow [done]** → tether trap orb (cleanest fit, reuses existing preset) → stasis shockwave (very small) → gas cloud → tether trap halo → atom rocks → distortion shell, then come back to engine plume + glow disc + core beam after Tranche 1.5 ships the `uIntensity` feature.
 
 ## Tranche 4 ; The sprite layer (open architectural question)
 

@@ -2,21 +2,78 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v14a (WebXR) ; Cleanup Fork</title>
-<!-- v14a fork started 2026-05-08. Branched off v14.
+<title>Last Ship Sailing v14c (WebXR) ; Tranche 3 Closeout</title>
+<!-- v14c fork started 2026-05-08. Branched off v14b.
+     v14c closes out Tranche 3 of bespoke_shader_consolidation_plan.md plus
+     ships Tranche 1.5b (cone axial-gradient feature). Two prior forks
+     (v14a, v14b) did a cleanup pass + the first two ports (proj_glow, orb_core)
+     and Tranche 1.5 (uIntensity uniform). v14c is the wide port pass that
+     drains the rest of Tranche 3.
+
+     v14c changes:
+       (A) Tranche 1.5b ; LayeredFXMaterial gains an axial-gradient post-pass
+           for cone/cylinder geometries. Six edits: vUv varying added to
+           vert + frag; four uniforms (uAxialFalloff, uAxialCoreColor,
+           uAxialCoreStrength, uAxialCoreFalloff); cfg defaults all = 0
+           (legacy presets unchanged); short post-composite block in main()
+           that darkens linearly along vUv.y and blends toward a hot-core
+           color near vUv.y = 0. Zero-cost when controlling scalars are 0.
+       (B) Eight ports from Tranche 3:
+           * engine glow disc       _makeEngineDiscMaterial    -> 'engine_disc'
+           * Pyro gas cloud         _makeGasCloudMaterial      -> attempted 'gas_green' port, rolled back (LayeredFX pattern lib has no hard alpha-threshold discard and no sparse-pattern wispy plume vertex displacement equivalent)
+           * tether trap halo       _makeGravityHaloMaterial   -> 'gravity_halo'
+           * stasis pickup ring     _makeShockwaveMaterial     -> 'shockwave_ring'
+           * atom-fractal rocks     _makeAtomFractalMaterial   -> attempted 'atom_surface' port, rolled back (LayeredFX pattern lib has no escape-time fractal ; Mandelbox iterations are bespoke-only)
+           * cluster distortion     anonymous ShaderMaterial   -> 'distortion_shell'
+           * engine plume cone      _makePlumeShaderMaterial   -> 'engine_plume'
+                                    (uses Tranche 1.5b axial-gradient: hot
+                                     white core at base, fade to tip)
+           * Vortex Core Beam       _makeVortexCoreBeamMaterial -> 'core_beam'
+           Per-frame runtime modulation (engine throttle, plume throttle,
+           tether trigger state, shockwave fade, beam spool) all routed
+           through uIntensity. Per-frame time writes removed (LayeredFX is
+           auto-ticked by _layeredFXTick). Defensive guards on every uniform
+           write so future material swaps don't crash.
+       (C) Net file size change: -308 lines (factories removed > presets added).
+           File is now 42,659 lines (was 43,000 in v14b).
+
+     After v14c, Tranche 3 is fully closed. The remaining bespoke shaders
+     are Tranche 1 (smoke ; gated on dynamic-light support in LayeredFX) +
+     Tranche 2 (ship energy shield ; gated on ripple uniforms) + the
+     sprite-based effects (open architectural question for Tranche 4).
+
+     v14b remains the stable baseline for the prior state; do NOT edit it.
+     v14b was forked off v14a (rename) and held the Tranche 1.5 + first two
+     ports work. v14a is the original cleanup fork content (kept as backup).
+
      v14a is a maintenance + first-tranche-consolidation pass. Three changes:
-       (3) FIRST PORT from bespoke_shader_consolidation_plan.md Tranche 3:
-           projectile inner glow halo. _makeProjGlowMaterial deleted ; the
-           glow mesh on every Projectile now uses _makeFXMaterial('proj_glow')
-           with the new proj_glow preset (plasma flow + white-hot screen
-           highlight + FBM detail, fresnel rim, brightness 1.8). baseColor and
-           uPosScale are written per-instance from Projectile.trailColor and
-           1/radius. Fade-in now scales uBrightness instead of uOpacity,
-           matching spawnFXBurst's convention. Engine plume was the original
-           plan's first port but its uThrottle dynamic-modulation has no
-           LayeredFX equivalent yet ; it's deferred behind a small uIntensity
-           feature add (see bespoke_shader_consolidation_plan.md Tranche 1.5
-           ; to be added).
+       (3) PORTS from bespoke_shader_consolidation_plan.md Tranche 3 +
+           Tranche 1.5 feature add. In order:
+           (a) Tranche 3 ; projectile inner glow halo. _makeProjGlowMaterial
+               deleted ; the glow mesh on every Projectile now uses
+               _makeFXMaterial('proj_glow') with the new proj_glow preset
+               (plasma flow + white-hot screen highlight + FBM detail,
+               fresnel rim, brightness 1.8). baseColor and uPosScale are
+               written per-instance from Projectile.trailColor and 1/radius.
+               Fade-in now scales uBrightness instead of uOpacity, matching
+               spawnFXBurst's convention.
+           (b) Tranche 1.5 ; LayeredFXMaterial gains a per-instance uIntensity
+               uniform (default 1.0). One uniform decl, one cfg field, one
+               uniform table entry, and one line in the layer time-rate
+               calculation. Effects with gameplay-meaningful state (engine
+               throttle, tether-trap pulse rate, beam spool-up/down) write
+               this uniform each frame to scale animation tempo proportionally.
+               Default 1.0 leaves all existing presets unchanged. Unblocks
+               the orb, engine plume, engine glow disc, and Vortex core beam
+               ports.
+           (c) Tranche 3 ; tether trap orb core. _makeOrbCoreMaterial deleted ;
+               the central node now uses _makeFXMaterial('orb_core') with
+               the new orb_core preset (ridges crackle base + stars high-freq
+               pinpoints + plasma slow breath, intensity-driven tempo). The
+               per-frame state cue (faster pulse when triggered) is preserved
+               via uIntensity = 1.7 (triggered) vs 1.0 (armed). The dead-code
+               fallback at the Vortex Trip Wire mine site (which was already
+               on fireball_purple via v11c) is collapsed at the same time.
        (1) Delete six dead-code factory functions that were left behind by
            earlier graphics iterations and have no live callsites in v14:
              * _makeFireShieldMaterial    (replaced by plasma_amber preset)
@@ -3245,23 +3302,16 @@ function buildMapSelector() {
 
   // Render the window contents for the currently-selected map.
   selectMap(game.selectedMap);
+  // (v14c) Sync disabled state after rebinding ; buildMapSelector can run
+  // mid-countdown (e.g. race-mode toggle) and the freshly-cloned buttons
+  // would otherwise render fully clickable.
+  _syncMapButtonsDisabled();
 }
 
 // Set the current map by key; update the window contents, the active dot, and
 // the checkmark. Safe to call directly (used by click handlers and cycleMap).
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
-  // (v9a) Two locks, both clear at returnToRootMenu so the next match starts editable:
-  //   1. Launch countdown is ticking. net.startScheduledAt holds the wall-clock ms
-  //      when match_start fires ; it's set the moment both peers are ready and
-  //      cleared when the timer fires or someone un-readies. Stops a last-second
-  //      map swap during the 5-second LAUNCH countdown.
-  //   2. Match is active. net.worldMap is set inside applyWorldSync (right after
-  //      match_start) and stays set across rounds. Between-round ship-swaps go
-  //      through the same lobby UI but the picker shouldn't change the map mid-
-  //      match ; only a fresh game (after the full scoreboard pause + return to
-  //      root menu) re-opens map selection.
-  if (net.active && (net.startScheduledAt || net.worldMap)) return;
   // (v6.7) Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
   // already selected stops the storm without needing a per-call suppress flag.
@@ -3593,6 +3643,20 @@ function scheduleMatchStart(startAt) {
   tickStartCountdown();
 }
 
+// (v14c) Disable the two map-prev / map-next arrow buttons in the ship-
+// select screen once everyone has clicked CONFIRM & LAUNCH (i.e. all peers
+// have committed a loadout and the launch countdown is ticking). This
+// stops a last-second arrow click from racing the world build and having
+// the two peers spawn into different maps. Re-enabled when the countdown
+// is canceled (un-confirm) or when buildMapSelector rebuilds the picker.
+function _syncMapButtonsDisabled() {
+  const locked = !!(typeof net !== 'undefined' && net.active && net.launchScheduledAt);
+  const prev = document.getElementById('map-prev');
+  const next = document.getElementById('map-next');
+  if (prev) prev.disabled = locked;
+  if (next) next.disabled = locked;
+}
+
 function tickStartCountdown() {
   const status = document.getElementById('lobby-status');
   if (!status || !net.startScheduledAt) return;
@@ -3638,6 +3702,8 @@ function checkAllLoadoutsReady() {
       clearTimeout(net.launchTimer);
       net.launchTimer = null;
       net.launchScheduledAt = null;
+      // (v14c) Launch is canceled ; re-enable the map arrows.
+      _syncMapButtonsDisabled();
     }
     return;
   }
@@ -3660,10 +3726,13 @@ function checkAllLoadoutsReady() {
 function scheduleLaunch(launchAt) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   net.launchScheduledAt = launchAt;
+  // (v14c) Everyone has confirmed ; disable the map arrows.
+  _syncMapButtonsDisabled();
   const delay = Math.max(0, launchAt - Date.now());
   net.launchTimer = setTimeout(() => {
     net.launchTimer = null;
     net.launchScheduledAt = null;
+    _syncMapButtonsDisabled();
     launchCountdown();
   }, delay);
 }
@@ -4968,10 +5037,11 @@ function spawnTripWireOrb(pos, owner, team, ownerPeerId, netId, broadcast, group
   // (10 instead of 7) so the fireball silhouette has room to billow.
   // _makeFXMaterial registers the material with _layeredFXTick so its
   // uTime uniform animates automatically.
+  // (v14a) _makeOrbCoreMaterial fallback collapsed ; _makeFXMaterial is
+  // always defined at this point (top-level function in the same script),
+  // and the factory is being deleted in this fork.
   const mineGeo = new THREE.SphereGeometry(10, 24, 16);
-  const mineMat = (typeof _makeFXMaterial === 'function')
-                  ? _makeFXMaterial('fireball_purple')
-                  : _makeOrbCoreMaterial(0xaa55ff);
+  const mineMat = _makeFXMaterial('fireball_purple');
   // Match the displacement scale to the orb radius so the layered FX
   // patterns sample at the right frequency for this size.
   if (mineMat && mineMat.uniforms && mineMat.uniforms.uPosScale) {
@@ -5667,14 +5737,11 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
 // idiom not to break anything ; the function above already returns mat.
 function __smoke_mat_factory_close() {}
 
-// (v6.9) Vortex Laser Core volumetric beam material. A thick open-ended
-// cylinder gets oriented along the firing direction each frame ; this
-// shader paints it with a white-hot inner band, a hot-orange halo, a
-// traveling longitudinal pulse, and crackling noise so it reads as a
-// continuous high-power energy beam rather than a stack of thin tracers.
-// Uniforms:
-//   time       drives crackle + traveling pulse
-//   uIntensity overall alpha gate (1.0 while firing, faded for spool-up/down)
+// (v6.9 / v14c) Vortex Laser Core beam geometry helper. The bespoke
+// _makeVortexCoreBeamMaterial factory was ported to LayeredFX 'core_beam'
+// preset (see EFFECT_PRESETS). The geometry helper below is preserved
+// because both the Laser Shot and Laser Core ability paths still share
+// it as a unit cylinder that they scale + orient per-frame.
 let _VORTEX_CORE_BEAM_GEO = null;
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
@@ -5684,84 +5751,6 @@ function _getVortexCoreBeamGeometry() {
   // like flat discs floating in space.
   _VORTEX_CORE_BEAM_GEO = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_GEO;
-}
-function _makeVortexCoreBeamMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uIntensity: { value: 1.0 },
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vNormal;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
-      '  vNormal = normalize(normalMatrix * normal);',
-      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform float uIntensity;',
-      'varying vec2 vUv;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vNormal;',
-      'float hash21(vec2 p) {',
-      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
-      '}',
-      'float noise2(vec2 p) {',
-      '  vec2 i = floor(p);',
-      '  vec2 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  return mix(mix(hash21(i + vec2(0.0,0.0)), hash21(i + vec2(1.0,0.0)), f.x),',
-      '             mix(hash21(i + vec2(0.0,1.0)), hash21(i + vec2(1.0,1.0)), f.x), f.y);',
-      '}',
-      'void main() {',
-      // Two view-relative quantities drive the beam look:
-      //   facing = how face-on the cylinder surface is to the camera. 1.0
-      //            when the surface normal points directly at the camera
-      //            (we are looking through the diameter), 0.0 at the
-      //            silhouette edge.
-      //   With AdditiveBlending: face-on pixels stack many cylinder slabs
-      //   so the perceived center is brightest, and the silhouette edge
-      //   is where the fresnel halo sits.
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float facing = abs(dot(normalize(vNormal), viewDir));',
-      '  float core = pow(facing, 1.4);',
-      '  float halo = pow(1.0 - facing, 2.2);',
-      // Longitudinal crackle. vUv.y goes 0..1 along the cylinder length ;
-      // vUv.x wraps around the circumference. Two octaves of cheap value
-      // noise advected along the beam axis give a continuous energy churn
-      // without paying for a real FBM.
-      '  float n1 = noise2(vec2(vUv.y * 14.0 - time * 4.5, vUv.x * 7.0));',
-      '  float n2 = noise2(vec2(vUv.y * 32.0 - time * 9.0, vUv.x * 5.0 + 12.3));',
-      '  float crackle = n1 * 0.6 + n2 * 0.4;',
-      // Traveling pulse: a sin wave moving along the beam axis biases the
-      // alpha so the eye reads "energy pumping toward the target" rather
-      // than a static tube.
-      '  float pulse = 0.5 + 0.5 * sin(vUv.y * 26.0 - time * 16.0);',
-      // Color stack: white-hot innermost, hot orange halo, deep red rim.
-      '  vec3 coreCol = vec3(1.00, 0.96, 0.78) * 3.4;',
-      '  vec3 hotCol  = vec3(1.00, 0.55, 0.18) * 2.4;',
-      '  vec3 redCol  = vec3(0.95, 0.18, 0.04) * 1.5;',
-      '  vec3 col = coreCol * core',
-      '           + hotCol  * (halo + crackle * 0.45) * (0.85 + pulse * 0.30)',
-      '           + redCol  * halo * 0.55;',
-      // Soft fade at the very ends of the cylinder so the beam doesn't
-      // terminate in a hard rectangle.
-      '  float endFade = smoothstep(0.0, 0.05, vUv.y) * smoothstep(1.0, 0.93, vUv.y);',
-      '  float alpha = (core * 0.85 + halo * 0.70 + crackle * 0.25) * endFade * uIntensity;',
-      '  alpha = clamp(alpha, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col, alpha);',
-      '}',
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide, // visible from inside too if camera ever clips into it
-  });
 }
 
 // ============================================================
@@ -5776,141 +5765,11 @@ function _makeVortexCoreBeamMaterial() {
 // inlined per factory (no #include / no chunk system since Three.js r128
 // doesn't expose them cleanly for ShaderMaterial without ONBeforeCompile).
 
-// ---- Engine plume (cone) ----------------------------------------------
-// Animated plasma exhaust along the cone's axis. Bright hot core at the
-// engine end fades along the cone toward the tip; FBM noise scrolls
-// along the axis at uThrottle-modulated speed. uColor sets the warm
-// outer tint; hot core stays white-blue. UV.y goes 0 (cone tip /
-// far end) â†’ 1 (cone base / engine end) for ConeGeometry rotated so its
-// axis is +Z.
-function _makePlumeShaderMaterial(baseColor, baseAlpha) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uColor:     { value: new THREE.Color(baseColor) },
-      uBaseAlpha: { value: (typeof baseAlpha === 'number') ? baseAlpha : 0.55 },
-      uThrottle:  { value: 0.0 },
-    },
-    vertexShader: [
-      'varying vec3 vLocal;',
-      'varying vec2 vUv;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vUv = uv;',
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uBaseAlpha;',
-      'uniform float uThrottle;',
-      'varying vec3 vLocal;',
-      'varying vec2 vUv;',
-      // Cheap value noise + 3-octave FBM. Just enough for plume turbulence.
-      'float hash21(vec2 p) {',
-      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
-      '}',
-      'float vnoise(vec2 p) {',
-      '  vec2 i = floor(p); vec2 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  float a = hash21(i + vec2(0,0));',
-      '  float b = hash21(i + vec2(1,0));',
-      '  float c = hash21(i + vec2(0,1));',
-      '  float d = hash21(i + vec2(1,1));',
-      '  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);',
-      '}',
-      'float fbm(vec2 p) {',
-      '  float v = 0.0; float a = 0.5;',
-      '  for (int i = 0; i < 3; i++) { v += a * vnoise(p); p *= 2.1; a *= 0.5; }',
-      '  return v;',
-      '}',
-      'void main() {',
-      // For the cone geometry (radius 1 at base, 0 at tip, axis +Z), the
-      // local XY plane gives the radial position; local Z gives axis.
-      // We work in a reconstructed (axisFrac, theta) space.
-      '  float r = length(vLocal.xy);',
-      '  float axisFrac = clamp(vUv.y, 0.0, 1.0);', // 0 = base (engine), 1 = tip
-      '  float theta = atan(vLocal.y, vLocal.x);',
-      // Scrolling FBM along axis. Speed scales with throttle so a stationary
-      // ship has subtle bubbling, full throttle has fast streaks.
-      '  float scroll = time * (1.5 + uThrottle * 4.0);',
-      '  float n1 = fbm(vec2(theta * 1.8, axisFrac * 4.0 - scroll));',
-      '  float n2 = fbm(vec2(theta * 3.2 + 1.7, axisFrac * 6.5 - scroll * 1.6));',
-      '  float turbulence = mix(n1, n2, 0.55);',
-      // Core hotness: bright white-blue at the base center, fading along axis.
-      '  float coreHot = pow(1.0 - axisFrac, 1.8) * (1.0 - r);',
-      '  vec3 hotCore = vec3(1.0, 1.0, 1.05);',
-      '  vec3 plasma  = mix(uColor, hotCore, coreHot);',
-      // Brightness: turbulence-modulated, fades along axis.
-      '  float bright = (0.40 + turbulence * 0.85) * (1.0 - axisFrac * 0.85);',
-      '  bright *= (0.55 + 0.45 * uThrottle);',
-      // Radial falloff so the cone edge fades softly instead of hard cutting.
-      '  float radial = 1.0 - smoothstep(0.65, 1.0, r);',
-      '  bright *= radial;',
-      '  vec3 col = plasma * bright * 1.4;',
-      '  float alpha = bright * uBaseAlpha * (0.85 + 0.15 * uThrottle);',
-      '  if (alpha < 0.02) discard;',
-      '  gl_FragColor = vec4(col, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Engine glow disc (circle) ----------------------------------------
-// Pulsing radial disc with internal swirl. Used for the engine "back of
-// nozzle" glow. Bright hot center, colored outer ring, slow rotating
-// spiral pattern, throttle-driven brightness.
-function _makeEngineDiscMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:      { value: 0 },
-      uColor:    { value: new THREE.Color(baseColor) },
-      uThrottle: { value: 0.0 },
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'void main() {',
-      '  vUv = uv;',
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uThrottle;',
-      'varying vec2 vUv;',
-      'void main() {',
-      '  vec2 p = vUv * 2.0 - 1.0;',
-      '  float r = length(p);',
-      '  if (r > 1.0) discard;',
-      '  float theta = atan(p.y, p.x);',
-      // Hot center â†’ colored ring â†’ fade out at edge.
-      '  float center = 1.0 - smoothstep(0.0, 0.45, r);',
-      '  float ring   = exp(-pow((r - 0.55) * 4.0, 2.0));',
-      '  float edgeFade = 1.0 - smoothstep(0.85, 1.0, r);',
-      // Slow rotating spiral pattern: brightness modulated by a function
-      // of theta and r so we get a 3-arm pinwheel look.
-      '  float spiral = 0.5 + 0.5 * sin(theta * 3.0 + r * 8.0 - time * 2.0);',
-      '  spiral = mix(0.65, 1.0, spiral); // never fully dark',
-      '  float pulse = 0.85 + 0.15 * sin(time * 4.0);',
-      '  vec3 hot   = vec3(1.0, 1.0, 1.05);',
-      '  vec3 col = mix(uColor * 1.4, hot, center * 0.85);',
-      '  float bright = (center * 1.6 + ring * 1.2) * spiral * pulse * edgeFade;',
-      '  bright *= (0.6 + 0.4 * uThrottle);',
-      '  gl_FragColor = vec4(col * bright, bright);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
+// (v14c) _makePlumeShaderMaterial and _makeEngineDiscMaterial were ported
+// to the LayeredFX 'engine_plume' / 'engine_disc' presets. See
+// EFFECT_PRESETS below and the buildModelShipMesh / procedural-fallback
+// callsites that use _makeFXMaterial(...). Throttle modulation is now
+// driven by uIntensity from animateShipMesh.
 
 // ---- Stasis field core (sphere) ---------------------------------------
 // Vortex/time-distortion energy. Concentric spiraling bands rotating
@@ -5971,111 +5830,8 @@ function _makeStasisCoreMaterial(baseColor) {
   });
 }
 
-// ---- Orb core (sphere) ------------------------------------------------
-// Energy bead for trip-wire mines and similar small "armed" markers.
-// Tighter spirals than stasis core, stronger pulse, brighter center
-// so the orb reads as a charged-up node from any distance.
-function _makeOrbCoreMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-      uPulse: { value: 1.0 },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uPulse;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      '  float phi = atan(n.z, n.x);',
-      '  float theta = acos(clamp(n.y, -1.0, 1.0));',
-      // High-frequency crackle pattern.
-      '  float c1 = 0.5 + 0.5 * sin(theta * 18.0 + phi * 7.0 + time * 6.0);',
-      '  float c2 = 0.5 + 0.5 * sin(theta * 11.0 - phi * 13.0 - time * 4.5);',
-      '  float crackle = pow(c1 * c2, 0.6);',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.0);',
-      '  float pulse = 0.7 + 0.5 * sin(time * 3.5 * uPulse);',
-      '  vec3 hot = vec3(1.0, 1.0, 1.0);',
-      '  vec3 col = mix(uColor, hot, crackle * 0.6 + fres * 0.3);',
-      '  float bright = (0.6 + crackle * 0.8) * pulse + fres * 1.4;',
-      '  float alpha = clamp(0.6 + fres * 0.6, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Gravity halo (sphere) --------------------------------------------
-// Concentric inward-collapsing rings on a sphere shell. Used for the
-// Tether Trap halo so the trap reads as a gravitational ensnare instead
-// of a flat blue ball. Rings march inward over time.
-function _makeGravityHaloMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      // Distance from "polar axis" (we use Y) drives concentric bands.
-      // Bands march inward (toward y=Â±1, the poles) over time so they read
-      // as gravitational lensing pulling matter toward the trap center.
-      '  float lat = abs(n.y);', // 0 at equator â†’ 1 at poles
-      '  float bands = 0.5 + 0.5 * sin(lat * 14.0 - time * 3.0);',
-      '  bands = pow(bands, 2.5);',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 1.8);',
-      '  vec3 col = uColor * (0.6 + bands * 1.5);',
-      '  float bright = bands * 0.9 + fres * 1.2;',
-      '  float alpha = clamp(0.3 + fres * 0.5 + bands * 0.25, 0.0, 0.95);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
+// (v14c) _makeGravityHaloMaterial removed ; ported to LayeredFX
+// 'gravity_halo' preset. See spawnTetherTrap callsite below.
 
 // ---- LayeredFXMaterial (v11) ------------------------------------------
 // Generalized 3-layer composite shader for volumetric / surface FX
@@ -6099,6 +5855,11 @@ const _LAYERED_FX_VERT = [
   'varying vec3 vWorldPos;',
   'varying vec3 vNormal;',
   'varying vec3 vViewDir;',
+  // (v14c Tranche 1.5b) UV varying for axial-gradient effects on cone /
+  // cylinder geometries. ConeGeometry side UVs: vUv.y = 0 at the base,
+  // 1 at the apex. CylinderGeometry side UVs: same convention. Used by
+  // the fragment shader's axial-falloff and axial-core-color logic.
+  'varying vec2 vUv;',
   // (v11b) Vertex displacement: each surface point pushes outward along its
   // normal by a noise-driven amount, giving the FX sphere an organic /
   // billowy / flame-tongue silhouette instead of a smooth perfect ball.
@@ -6153,6 +5914,7 @@ const _LAYERED_FX_VERT = [
   '  vNormal = normalize(normalMatrix * n);',
   '  vec4 mvp = viewMatrix * wp;',
   '  vViewDir = normalize(-mvp.xyz);',
+  '  vUv = uv;',
   '  gl_Position = projectionMatrix * mvp;',
   '}',
 ].join('\n');
@@ -6162,10 +5924,32 @@ const _LAYERED_FX_FRAG = [
   'varying vec3 vWorldPos;',
   'varying vec3 vNormal;',
   'varying vec3 vViewDir;',
+  // (v14c Tranche 1.5b) UV from vertex shader for axial-gradient effects.
+  'varying vec2 vUv;',
   'uniform float uTime;',
   'uniform vec3  uBaseColor;',
   'uniform float uFresnel;',
   'uniform float uBrightness;',
+  // (v14c Tranche 1.5b) Axial-gradient uniforms for cone/cylinder geometries.
+  // uAxialFalloff scales output color by (1 - vUv.y * uAxialFalloff) so the
+  // fragment darkens linearly along the axis (vUv.y=0 -> full bright at base,
+  // vUv.y=1 -> multiplied by (1 - uAxialFalloff) at apex). Default 0 = off,
+  // legacy behavior. uAxialCoreColor / uAxialCoreStrength / uAxialCoreFalloff
+  // blend the output toward a hot-core color at the base (vUv.y near 0):
+  //   axialT = pow(1 - vUv.y, uAxialCoreFalloff) * uAxialCoreStrength
+  //   color = mix(color, uAxialCoreColor, axialT)
+  // Both effects are zero-cost when their controlling scalars are 0.
+  'uniform float uAxialFalloff;',
+  'uniform vec3  uAxialCoreColor;',
+  'uniform float uAxialCoreStrength;',
+  'uniform float uAxialCoreFalloff;',
+  // (v14a Tranche 1.5) Per-instance intensity scalar. Defaults to 1.0 (preset
+  // unchanged). Effects with gameplay-meaningful state (engine throttle,
+  // tether-trap pulse rate, beam spool-up/down, etc.) write to this uniform
+  // each frame to scale the animation rate proportionally. uIntensity = 0
+  // means "effect is dormant" (frozen patterns); = 1 is the preset's natural
+  // tempo; > 1 speeds up. The shader multiplies it into per-layer time rates.
+  'uniform float uIntensity;',
   // (v11 fix) uPosScale multiplies vWorldPos before the noise sample. The
   // fx_lab uses a unit-radius preview sphere ; in-game effects are tens to
   // hundreds of units across, so the same per-layer `scale` setting maps
@@ -6313,7 +6097,10 @@ const _LAYERED_FX_FRAG = [
   '  vec4 acc = vec4(0.0, 0.0, 0.0, 0.0);',
   '  for (int i = 0; i < 3; i++) {',
   '    vec3 q = p * uLayerScale[i];',
-  '    float t = uTime * uLayerTimeRate[i];',
+  // (v14a Tranche 1.5) Multiply by uIntensity so per-instance state cues
+  // (engine throttle, tether-trap pulse rate, beam spool) scale animation
+  // tempo proportionally. Default uIntensity = 1.0 leaves preset as-is.
+  '    float t = uTime * uLayerTimeRate[i] * uIntensity;',
   '    float v = samplePatternLFX(uLayerPattern[i], q + vec3(t * 0.1), t);',
   // (v11 fix) Clamp the V channel before hsv2rgb. Without the clamp,
   // brightness=3 layers push V to 3, which makes hsv2rgb output RGB
@@ -6360,6 +6147,13 @@ const _LAYERED_FX_FRAG = [
   '  }',
   '  acc.rgb += hitGlow;',
   '  acc.a = clamp(acc.a + hitAlpha * 0.85, 0.0, 1.0);',
+  // (v14c Tranche 1.5b) Axial-gradient post-pass for cone/cylinder presets.
+  // Cheap branch-free math ; both effects collapse to identity when their
+  // controlling scalars are 0 (default cfg), so legacy presets are byte-
+  // identical to pre-1.5b.
+  '  acc.rgb *= max(0.0, 1.0 - vUv.y * uAxialFalloff);',
+  '  float axialT = pow(max(0.0, 1.0 - vUv.y), uAxialCoreFalloff) * uAxialCoreStrength;',
+  '  acc.rgb = mix(acc.rgb, uAxialCoreColor, axialT);',
   '  gl_FragColor = acc;',
   '}',
 ].join('\n');
@@ -6396,7 +6190,14 @@ function _makeLayeredFXMaterial(preset) {
     baseColor: '#ffffff',
     fresnel: 0.3,
     brightness: 1.0,
+    intensity:  1.0, // (v14a) per-instance time-rate multiplier ; presets default to 1, callers override per frame for state-driven effects (engine throttle, tether pulse, beam spool)
     posScale: 1.0,   // (v11 fix) world-space sample-scale ; default keeps wall behavior
+    // (v14c Tranche 1.5b) Axial-gradient defaults. All zero = effect disabled,
+    // legacy presets unchanged. Cone/cylinder presets opt in by setting these.
+    axialFalloff:       0.0,        // 0 = off ; 0.85 = strong fade tip-ward (engine plume)
+    axialCoreColor:     '#ffffff',  // hot-core blend target at base
+    axialCoreStrength:  0.0,        // 0 = off ; 0.6 = moderate hot-core blend
+    axialCoreFalloff:   1.8,        // exponent on (1 - vUv.y) for core falloff
     // (v11b) Vertex displacement + soft-edge defaults. Off by default so
     // legacy materials (anything that doesn't opt in) stay byte-identical
     // to v11a's output. New EFFECT_PRESETS entries override these.
@@ -6417,7 +6218,12 @@ function _makeLayeredFXMaterial(preset) {
       uBaseColor:     { value: new THREE.Color(cfg.baseColor) },
       uFresnel:       { value: +cfg.fresnel },
       uBrightness:    { value: +cfg.brightness },
+      uIntensity:     { value: +cfg.intensity },
       uPosScale:      { value: +cfg.posScale },
+      uAxialFalloff:      { value: +cfg.axialFalloff },
+      uAxialCoreColor:    { value: new THREE.Color(cfg.axialCoreColor) },
+      uAxialCoreStrength: { value: +cfg.axialCoreStrength },
+      uAxialCoreFalloff:  { value: +cfg.axialCoreFalloff },
       // (v11b) New surface-shape uniforms. uTime is reused from above ;
       // these augment it.
       uDisplaceAmount: { value: +cfg.displaceAmount },
@@ -6633,6 +6439,33 @@ const EFFECT_PRESETS = {
       { pattern: 2, scale: 1.1, timeRate: 1.65, hue: 0.55,  alpha: 0.55, blend: 6, sat: 0.7  },
     ],
   },
+  // (v14a) Orb core. Replaces _makeOrbCoreMaterial. Used by Tether Trap
+  // central node (octahedron). The bespoke shader produced: high-freq
+  // sin-crackle in spherical (theta, phi) coords + fresnel rim + uPulse-
+  // modulated overall brightness pulse. Translated as ridges crackle
+  // base + stars high-freq pinpoints + plasma slow underlying breath.
+  // baseColor overridden per-instance from the spawn color; uIntensity
+  // is written each frame to 1.7 when the trap is triggered (faster
+  // crackle/pulse) and 1.0 when armed and waiting. Tranche 1.5's new
+  // uIntensity uniform is what makes the triggered/armed split possible.
+  orb_core: {
+    name: 'Orb Core',
+    baseColor: '#88ddff',
+    fresnel: 0.5,
+    brightness: 2.2,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.15,
+    layers: [
+      // Layer 1: ridges crackle base, ship-color-tinted (replace blend).
+      { pattern: 5, scale: 3.0, timeRate: 1.2, hue: 0.0, alpha: 1.0, blend: 0, sat: 0.85 },
+      // Layer 2: stars high-freq pinpoints screen-blended for static sparkle.
+      { pattern: 7, scale: 5.0, timeRate: 2.0, hue: 0.0, alpha: 0.6, blend: 3, sat: 0.00 },
+      // Layer 3: plasma slow underlying breath, multiplied for color glow.
+      { pattern: 1, scale: 1.5, timeRate: 0.8, hue: 0.0, alpha: 0.5, blend: 1, sat: 0.70 },
+    ],
+  },
   // (v14a) Projectile inner glow halo. Replaces _makeProjGlowMaterial.
   // Sphere geometry of radius ~7 around every projectile core ; one of the
   // most-spawned LayeredFX materials in the game (every shot from every
@@ -6659,6 +6492,161 @@ const EFFECT_PRESETS = {
       { pattern: 1, scale: 1.4, timeRate: 1.1, hue: 0.0, alpha: 0.45, blend: 3, sat: 0.00 },
       // Layer 3: micro-FBM detail, mild multiply darken to texture the sphere.
       { pattern: 0, scale: 4.0, timeRate: 0.5, hue: 0.0, alpha: 0.20, blend: 1, sat: 0.70 },
+    ],
+  },
+  // (v14c) Engine glow disc. Replaces _makeEngineDiscMaterial. Bright
+  // pulsing disc at the engine bell ; bespoke had hot center + colored
+  // ring + 3-arm pinwheel spiral + uThrottle modulation. Translated as
+  // plasma base for the spiral flow, ridges for the ring/arm structure,
+  // stars accents for the hot pinpoints. baseColor overridden per-instance
+  // (teamColor for main glow vs 0x66eeff cyan for thrusters). uIntensity
+  // is written each frame from throttle (0..1.5+) to scale tempo.
+  engine_disc: {
+    name: 'Engine Disc',
+    baseColor: '#ffffff',
+    fresnel: 0.0,
+    brightness: 2.4,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.10,
+    layers: [
+      // Layer 1: plasma flow base, ship-tinted.
+      { pattern: 1, scale: 1.6, timeRate: 1.4, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.85 },
+      // Layer 2: ridges for spiral arms / ring structure.
+      { pattern: 5, scale: 2.4, timeRate: 1.8, hue: 0.04, alpha: 0.85, blend: 2, sat: 0.70 },
+      // Layer 3: stars highlight for hot pinpoint accents (sat=0 -> white).
+      { pattern: 7, scale: 4.0, timeRate: 1.0, hue: 0.0,  alpha: 0.45, blend: 3, sat: 0.00 },
+    ],
+  },
+  // (v14c) Engine plume cone. Replaces _makePlumeShaderMaterial. Bespoke
+  // featured a hot-white core at the cone base center, brightness fade
+  // toward the tip, throttle-modulated turbulence streaks. Uses the new
+  // (Tranche 1.5b) axial-gradient feature for the base->tip darkening AND
+  // hot-core blend at base. baseColor overridden per-instance per ship.
+  // uIntensity is written each frame from uThrottle so animation tempo
+  // tracks engine power.
+  engine_plume: {
+    name: 'Engine Plume',
+    baseColor: '#ff8844',
+    fresnel: 0.0,
+    brightness: 2.2,
+    intensity: 1.0,
+    // Tranche 1.5b: bright hot-white core at cone base (vUv.y=0), darkens
+    // toward apex (vUv.y=1).
+    axialFalloff:      0.85,
+    axialCoreColor:    '#ffffff',
+    axialCoreStrength: 0.6,
+    axialCoreFalloff:  1.8,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.30,
+    layers: [
+      // Layer 1: turbulence base ; the streaky plume flow.
+      { pattern: 2, scale: 1.4, timeRate: 2.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.85 },
+      // Layer 2: fbm broad churn, screen blended for soft hot pockets.
+      { pattern: 0, scale: 1.8, timeRate: 1.4, hue: 0.05, alpha: 0.55, blend: 3, sat: 0.50 },
+      // Layer 3: turbulence at higher freq, additive accents.
+      { pattern: 2, scale: 3.0, timeRate: 2.6, hue: 0.0,  alpha: 0.40, blend: 2, sat: 0.70 },
+    ],
+  },
+  // (v14c) Tether trap halo. Replaces _makeGravityHaloMaterial. Bespoke
+  // had concentric inward-collapsing rings reading as gravitational
+  // lensing on a sphere. Approximated with wave (concentric pattern) +
+  // ridges accents. Visual change is tolerated per spec ; consolidation,
+  // not pixel-perfect.
+  gravity_halo: {
+    name: 'Gravity Halo',
+    baseColor: '#55aadd',
+    fresnel: 0.7,
+    brightness: 1.8,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.30,
+    layers: [
+      // Layer 1: wave for the concentric collapsing-ring pattern.
+      { pattern: 4, scale: 3.5, timeRate: 1.5, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.85 },
+      // Layer 2: ridges for sharper band accents.
+      { pattern: 5, scale: 2.8, timeRate: 1.2, hue: 0.05, alpha: 0.65, blend: 2, sat: 0.80 },
+      // Layer 3: subtle plasma underbreath for energy depth.
+      { pattern: 1, scale: 1.0, timeRate: 0.6, hue: 0.0,  alpha: 0.35, blend: 1, sat: 0.70 },
+    ],
+  },
+  // (v14c) Stasis pickup shockwave ring. Replaces _makeShockwaveMaterial.
+  // Expanding chromatic-edge ring on torus. Bespoke had R/G/B channels
+  // offset for chromatic aberration + uAge fade. Approximated with wave
+  // pattern + uIntensity scaled from 1.0 (start) to 0.0 (end) by caller.
+  shockwave_ring: {
+    name: 'Shockwave Ring',
+    baseColor: '#00ddff',
+    fresnel: 0.8,
+    brightness: 2.6,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.25,
+    layers: [
+      // Layer 1: wave for the concentric ring look.
+      { pattern: 4, scale: 2.0, timeRate: 1.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.75 },
+      // Layer 2: ridges accent for chromatic-edge feel.
+      { pattern: 5, scale: 3.5, timeRate: 1.4, hue: 0.06, alpha: 0.65, blend: 3, sat: 0.85 },
+      // Layer 3: stars for sparkle highlights at peaks.
+      { pattern: 7, scale: 5.0, timeRate: 0.8, hue: 0.0,  alpha: 0.35, blend: 3, sat: 0.0  },
+    ],
+  },
+  // (v14c) Cluster distortion shell. Replaces the anonymous ShaderMaterial
+  // inside _buildDistortionShell. Chromatic shimmer hugging cluster bounds.
+  // Bespoke had cyan->magenta noise mix + fresnel rim. Approximated with
+  // caustic and plasma layers at different scales. Note: the shell is
+  // currently disabled at the call site (commented out); ported for
+  // consistency / future re-enable.
+  distortion_shell: {
+    name: 'Distortion Shell',
+    baseColor: '#4488ff',
+    fresnel: 0.85,
+    brightness: 1.6,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.45,
+    layers: [
+      // Layer 1: caustic for the shimmer / chromatic feel.
+      { pattern: 6, scale: 1.2, timeRate: 1.2, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.80 },
+      // Layer 2: plasma cross-flow for the cyan->magenta drift.
+      { pattern: 1, scale: 2.1, timeRate: 0.9, hue: 0.55, alpha: 0.75, blend: 5, sat: 0.85 },
+      // Layer 3: caustic at higher freq for finer detail.
+      { pattern: 6, scale: 3.5, timeRate: 1.5, hue: 0.10, alpha: 0.50, blend: 2, sat: 0.70 },
+    ],
+  },
+  // (v14c) Vortex Core Beam. Replaces _makeVortexCoreBeamMaterial. Cylinder
+  // geometry oriented along firing direction ; volumetric crackle/pulse
+  // for the Vortex Laser Core ability and the one-shot Laser Shot beam.
+  // Bespoke had white-hot core + orange halo + red rim + traveling pulse +
+  // crackle noise + uIntensity alpha gate. Translated as ridges (energy
+  // beam striations) + plasma (traveling pulse). uIntensity is the alpha
+  // gate written by both callsites (already matches LayeredFX semantics).
+  // Bright at one end via axialFalloff: very mild so the cylinder reads
+  // as a beam rather than a uniform tube.
+  core_beam: {
+    name: 'Vortex Core Beam',
+    baseColor: '#ffaa44',
+    fresnel: 0.4,
+    brightness: 3.0,
+    intensity: 1.0,
+    // Subtle taper from base to tip so the beam reads directional.
+    axialFalloff:      0.25,
+    axialCoreColor:    '#ffffff',
+    axialCoreStrength: 0.5,
+    axialCoreFalloff:  1.4,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.20,
+    layers: [
+      // Layer 1: ridges for the longitudinal energy striations.
+      { pattern: 5, scale: 2.4, timeRate: 4.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.80 },
+      // Layer 2: plasma cross-flow as the traveling-pulse stand-in.
+      { pattern: 1, scale: 1.6, timeRate: 3.2, hue: 0.06, alpha: 0.75, blend: 2, sat: 0.85 },
+      // Layer 3: ridges high-freq, screen blend for white-hot crackle.
+      { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.0,  alpha: 0.55, blend: 3, sat: 0.0  },
     ],
   },
 };
@@ -6916,59 +6904,10 @@ function _makeHexHologramMaterial(baseColor) {
   });
 }
 
-// ---- Shockwave ring (torus / ring geometry) ---------------------------
-// Expanding shockwave with chromatic edge for stasis pickup and similar
-// "I just collected this" rings. uAge 0..1 drives the expansion; the ring
-// brightens at the leading edge.
-function _makeShockwaveMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-      uAge:   { value: 0.0 }, // 0 fresh, 1 fully expanded
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uAge;',
-      'varying vec2 vUv;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'void main() {',
-      // Torus UV.x wraps around the ring tube cross-section.
-      '  float r = abs(vUv.x - 0.5) * 2.0;', // 0 inside, 1 at edge
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - abs(dot(vNormal, viewDir)), 1.8);',
-      // Chromatic edge: separate R/G/B channels at slight UV offsets.
-      '  float chR = 1.0 - smoothstep(0.0, 0.85, r + 0.12);',
-      '  float chG = 1.0 - smoothstep(0.0, 0.85, r);',
-      '  float chB = 1.0 - smoothstep(0.0, 0.85, r - 0.12);',
-      '  vec3 chroma = vec3(chR, chG, chB);',
-      '  vec3 col = uColor * 0.7 + chroma * 1.4 + vec3(fres);',
-      '  float fade = 1.0 - uAge;',
-      '  float bright = (chG * 1.4 + fres * 0.8) * fade;',
-      '  float alpha = clamp(bright * 0.85, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
+// (v14c) _makeShockwaveMaterial removed ; ported to LayeredFX
+// 'shockwave_ring' preset. See StasisField.destroy callsite for the
+// per-instance overrides ; the stasis_pickup tick fades uIntensity +
+// uBrightness across lifetime.
 
 // (v6.7) Incendiary Gas spawn helper. Same broadcast=true/false pattern as
 // Trip Wire / Particle Wall.
@@ -7109,20 +7048,28 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
     timer: 15, rootDuration: 4, radius: 250, owner, team, triggered: false,
     ownerPeerId, netId,
   });
-  // Center: orb-core shader on an octahedron so the central node reads as
-  // a charged-up node (matches the rest of the visual vocabulary).
+  // (v14a) Center: orb_core LayeredFX preset on an octahedron so the
+  // central node reads as a charged-up node (matches the rest of the
+  // visual vocabulary). Replaces _makeOrbCoreMaterial. baseColor and
+  // uPosScale are written per-instance to match the spawn tint and
+  // the octahedron's circumradius. uTime is auto-ticked by _layeredFXTick.
   const tetherGeo = new THREE.OctahedronGeometry(14, 0);
-  const tetherMat = _makeOrbCoreMaterial(0x88ddff);
+  const tetherMat = _makeFXMaterial('orb_core');
+  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(0x88ddff);
+  if (tetherMat.uniforms.uPosScale)  tetherMat.uniforms.uPosScale.value = 1.0 / 14;
   const tetherMesh = new THREE.Mesh(tetherGeo, tetherMat);
   tetherMesh.position.copy(pos);
   tetherMesh.renderOrder = 1;
   scene.add(tetherMesh);
-  // Halo around the trap: gravity-distortion shader (concentric rings
-  // marching inward toward the poles). Reads as gravitational lensing
-  // pulling matter toward the trap's center, which is what the trap
-  // mechanically does. Per-frame tether tick drives time uniform.
-  const haloGeo = new THREE.SphereGeometry(36, 24, 16);
-  const haloMat = _makeGravityHaloMaterial(0x55aadd);
+  // (v14c) Halo around the trap: LayeredFX 'gravity_halo' preset reads as
+  // gravitational lensing on a sphere shell. uBaseColor + uPosScale
+  // overridden per-instance ; uTime is auto-ticked by _layeredFXTick so
+  // no per-frame time write is needed.
+  const haloRadius = 36;
+  const haloGeo = new THREE.SphereGeometry(haloRadius, 24, 16);
+  const haloMat = _makeFXMaterial('gravity_halo');
+  if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(0x55aadd);
+  if (haloMat.uniforms.uPosScale)  haloMat.uniforms.uPosScale.value = 1.0 / haloRadius;
   const haloMesh = new THREE.Mesh(haloGeo, haloMat);
   haloMesh.position.copy(pos);
   haloMesh.renderOrder = 1;
@@ -11087,22 +11034,25 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   group.add(model);
   group.userData.hullMats = hullMats;
 
-  // Engine + plume materials. Engine glow disc + plume cones now use
-  // ShaderMaterial factories with internal animation (radial pulse,
-  // scrolling exhaust noise) so engines read as live combustion instead
-  // of flat additive shapes. Time + uThrottle are bumped per frame in
-  // animateShipMesh from each ship's accelerating/coasting state.
-  const engineGlowMat = _makeEngineDiscMaterial(teamColor);
-  const thrusterMat   = _makeEngineDiscMaterial(0x66eeff);
+  // Engine + plume materials. (v14c) Engine glow disc + plume cones now
+  // use the LayeredFX 'engine_disc' / 'engine_plume' presets ; per-instance
+  // uBaseColor overrides give each ship its team tint vs cyan thruster.
+  // animateShipMesh writes uIntensity per-frame from the throttle ramp.
+  const engineGlowMat = _makeFXMaterial('engine_disc');
+  if (engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
+  const thrusterMat   = _makeFXMaterial('engine_disc');
+  if (thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
   // Panel glow stays as a flat additive material â€” small surface area,
   // close to the hull, doesn't benefit much from internal animation.
   const panelGlowMat = new THREE.MeshBasicMaterial({
     color: teamColor, transparent: true, opacity: 0.85,
     blending: THREE.AdditiveBlending, depthWrite: false
   });
-  const plumeMat     = _makePlumeShaderMaterial(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.55);
-  const plumeMatCool = _makePlumeShaderMaterial(0xaaeeff, 0.55);
-  // Track these so animateShipMesh can bump time + throttle each frame.
+  const plumeMat     = _makeFXMaterial('engine_plume');
+  if (plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
+  const plumeMatCool = _makeFXMaterial('engine_plume');
+  if (plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
+  // Track these so animateShipMesh can bump uIntensity each frame.
   group.userData.shaderEngineMats = [engineGlowMat, thrusterMat, plumeMat, plumeMatCool];
 
   // Engine layout per chassis. Anchor tail to the model's +Z bbox edge so
@@ -11335,17 +11285,22 @@ function createShipMesh(chassisData, teamColor, loadoutKey) {
   group.userData.cockpitBaseEmissiveIntensity = 1.4;
   // Register hull material so doomed-state darkening can dim the silhouette.
   group.userData.hullMat = hullMat;
-  // Procedural-fallback engine + plume materials. Same shader treatment
-  // as the GLB path (see buildModelShipMesh) so the two paths look
-  // identical from outside.
-  const engineGlowMat = _makeEngineDiscMaterial(teamColor);
-  const thrusterMat   = _makeEngineDiscMaterial(0x66eeff);
+  // Procedural-fallback engine + plume materials. (v14c) Same LayeredFX
+  // 'engine_disc' / 'engine_plume' presets as the GLB path (see
+  // buildModelShipMesh) so the two render paths look identical from
+  // outside. Per-instance uBaseColor overrides give each ship its tint.
+  const engineGlowMat = _makeFXMaterial('engine_disc');
+  if (engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
+  const thrusterMat   = _makeFXMaterial('engine_disc');
+  if (thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
   const panelGlowMat = new THREE.MeshBasicMaterial({
     color: teamColor, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending,
     depthWrite: false
   });
-  const plumeMat     = _makePlumeShaderMaterial(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.55);
-  const plumeMatCool = _makePlumeShaderMaterial(0xaaeeff, 0.55);
+  const plumeMat     = _makeFXMaterial('engine_plume');
+  if (plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
+  const plumeMatCool = _makeFXMaterial('engine_plume');
+  if (plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
   group.userData.shaderEngineMats = [engineGlowMat, thrusterMat, plumeMat, plumeMatCool];
 
   // Helper: build a tapered engine plume cone at (x,y,z) extending +z (out the back).
@@ -12036,16 +11991,19 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
     mesh.userData.cockpitMat.emissiveIntensity = base * (1 + pulse - 0.05);
   }
   // Engines: drive shader uniforms (or opacity for legacy basic mat) plus
-  // scale with speed. Shader path uses uThrottle to ramp internal
-  // brightness; legacy path mutates material.opacity directly.
+  // scale with speed. (v14c) LayeredFX path uses uIntensity to scale
+  // animation tempo (replaces bespoke uThrottle) ; uTime is auto-ticked
+  // by _layeredFXTick so no time write needed here. Legacy fallback path
+  // mutates material.opacity directly.
   if (mesh.userData.engineGlows) {
     for (const glow of mesh.userData.engineGlows) {
       if (glow.material && glow.material.uniforms) {
-        glow.material.uniforms.time.value = time;
-        if (glow.material.uniforms.uThrottle) {
-          // Smooth throttle write so the disc doesn't snap when t jitters.
-          const prev = glow.material.uniforms.uThrottle.value;
-          glow.material.uniforms.uThrottle.value = prev + (t - prev) * 0.15;
+        if (glow.material.uniforms.uIntensity) {
+          // Smooth intensity write so the disc doesn't snap when t jitters.
+          // 0.5..1.5 range so idle reads dim and full throttle reads vivid.
+          const prev = glow.material.uniforms.uIntensity.value;
+          const target = 0.5 + t * 1.0;
+          glow.material.uniforms.uIntensity.value = prev + (target - prev) * 0.15;
         }
       } else if (glow.material && typeof glow.material.opacity === 'number') {
         const baseOp = 0.45 + t * 0.55;
@@ -12065,15 +12023,14 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       const flicker = 1 + Math.sin(time * 22 + plume.position.x * 0.5) * 0.12;
       const opCurve = Math.max(0, t * t * 1.15 + (t > 0.02 ? 0.05 : 0));
       if (plume.material && plume.material.uniforms) {
-        // Shader plume: drive time + uThrottle (which the fragment uses to
-        // scale internal brightness, scroll speed, alpha). The opCurve and
-        // flicker still feed in via uThrottle so the perceived brightness
-        // matches the legacy path.
-        plume.material.uniforms.time.value = time;
-        if (plume.material.uniforms.uThrottle) {
-          const prev = plume.material.uniforms.uThrottle.value;
+        // (v14c) LayeredFX plume: drive uIntensity (replaces bespoke
+        // uThrottle). The opCurve and flicker still feed in so the
+        // perceived brightness matches the legacy path. uTime is
+        // auto-ticked by _layeredFXTick.
+        if (plume.material.uniforms.uIntensity) {
+          const prev = plume.material.uniforms.uIntensity.value;
           const target = Math.min(1.5, opCurve * flicker * 1.5);
-          plume.material.uniforms.uThrottle.value = prev + (target - prev) * 0.15;
+          plume.material.uniforms.uIntensity.value = prev + (target - prev) * 0.15;
         }
       } else if (plume.material && typeof plume.material.opacity === 'number') {
         const baseOp = (plume.userData.basePlumeOpacity || 0.55);
@@ -16183,63 +16140,16 @@ class ClusterObstacle {
   }
 
   _buildDistortionShell() {
-    if (typeof scene === 'undefined' || !THREE.ShaderMaterial) return;
+    if (typeof scene === 'undefined') return;
+    if (typeof _makeFXMaterial !== 'function') return;
     const r = this.clusterScale * 1.05;     // hugs the cluster bounds + ~5% margin
     const geo = new THREE.IcosahedronGeometry(r, 3);
-    const mat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        time:      { value: Math.random() * 100 },   // randomize per-cluster phase
-        intensity: { value: 1.0 },
-      },
-      vertexShader: [
-        'varying vec3 vWorldPos;',
-        'varying vec3 vNormal;',
-        'varying vec3 vViewDir;',
-        'void main() {',
-        '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-        '  vWorldPos = wp.xyz;',
-        '  vNormal = normalize(normalMatrix * normal);',
-        '  vViewDir = normalize(cameraPosition - wp.xyz);',
-        '  gl_Position = projectionMatrix * viewMatrix * wp;',
-        '}'
-      ].join('\n'),
-      fragmentShader: [
-        'uniform float time;',
-        'uniform float intensity;',
-        'varying vec3 vWorldPos;',
-        'varying vec3 vNormal;',
-        'varying vec3 vViewDir;',
-        'float hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }',
-        'float noise3(vec3 p) {',
-        '  vec3 i = floor(p); vec3 f = fract(p); f = f*f*(3.0-2.0*f);',
-        '  return mix(mix(mix(hash(i+vec3(0,0,0)), hash(i+vec3(1,0,0)), f.x),',
-        '                 mix(hash(i+vec3(0,1,0)), hash(i+vec3(1,1,0)), f.x), f.y),',
-        '             mix(mix(hash(i+vec3(0,0,1)), hash(i+vec3(1,0,1)), f.x),',
-        '                 mix(hash(i+vec3(0,1,1)), hash(i+vec3(1,1,1)), f.x), f.y), f.z);',
-        '}',
-        'void main() {',
-        // Fresnel: strongest at glancing angles -> rim glow.
-        '  float fres = pow(1.0 - abs(dot(vNormal, vViewDir)), 1.8);',
-        // 3D noise sampled at world position, animated. Two streams crossing.
-        '  vec3 nPos = vWorldPos * 0.012;',
-        '  float n1 = noise3(nPos + vec3(time * 0.4, time * 0.3, 0.0));',
-        '  float n2 = noise3(nPos * 2.1 + vec3(0.0, time * 0.5, time * 0.2));',
-        '  float shimmer = smoothstep(0.35, 0.75, mix(n1, n2, 0.5));',
-        // Color: cool cyan to magenta-purple, biased by shimmer noise.
-        // Fits the existing electric-arc accent palette.
-        '  vec3 baseCol = mix(vec3(0.25, 0.55, 1.05), vec3(0.95, 0.30, 1.10), shimmer);',
-        // Final intensity: rim * intensity * (low base + shimmer pop).
-        '  float a = fres * intensity * (0.30 + shimmer * 0.55);',
-        '  a = clamp(a, 0.0, 0.92);',
-        // Color also boosted by fresnel so the rim glows brighter than core.
-        '  gl_FragColor = vec4(baseCol * fres * 1.3, a);',
-        '}'
-      ].join('\n'),
-    });
+    // (v14c) LayeredFX 'distortion_shell' preset (replaces the anonymous
+    // ShaderMaterial). Per-cluster phase via _timeOffset so adjacent shells
+    // don't shimmer in lockstep.
+    const mat = _makeFXMaterial('distortion_shell');
+    if (mat.uniforms.uPosScale) mat.uniforms.uPosScale.value = 1.0 / Math.max(1, r);
+    if (mat.userData) mat.userData._timeOffset = Math.random() * 100;
     this.distortionMesh = new THREE.Mesh(geo, mat);
     this.distortionMesh.position.copy(this.position);
     this.distortionMesh.frustumCulled = true;
@@ -16393,12 +16303,11 @@ class ClusterObstacle {
         this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
       }
       // (v8VR 2026-05-01) Distortion shell follows the cluster + animates.
-      // Time uniform driven by game.time for a session-stable phase per cluster.
+      // (v14c) LayeredFX 'distortion_shell' preset ; uTime is auto-ticked
+      // by _layeredFXTick (with the per-mat _timeOffset preserved for the
+      // session-stable phase per cluster), so no time write is needed.
       if (this.distortionMesh) {
         this.distortionMesh.position.copy(this.position);
-        if (this.distortionMesh.material && this.distortionMesh.material.uniforms) {
-          this.distortionMesh.material.uniforms.time.value = (typeof game !== 'undefined') ? game.time : 0;
-        }
       }
       // (v8VR 2026-05-01) Per-child smoke spheres (atoms in the molecule).
       // Each atom-smoke follows its child's position + ticks its own time
@@ -18239,12 +18148,13 @@ function updateEffects(dt) {
     // The beam transform is fixed at spawn time, so we just step time and
     // fade the alpha gate. ---
     else if (e.type === 'vortexLaserBeam') {
-      if (e.mesh.material && e.mesh.material.uniforms) {
-        e.mesh.material.uniforms.time.value = game.time;
-        // Snappy attack (full bright early), then quadratic ease-out so the
-        // beam visibly snaps in at fire and dissolves smoothly.
+      // (v14c) LayeredFX 'core_beam' preset ; uTime is auto-ticked by
+      // _layeredFXTick. Quadratic ease-out keeps the snappy attack +
+      // smooth dissolve via uIntensity.
+      const u = e.mesh.material && e.mesh.material.uniforms;
+      if (u && u.uIntensity) {
         const fade = (1 - t) * (1 - t);
-        e.mesh.material.uniforms.uIntensity.value = fade * 1.15;
+        u.uIntensity.value = fade * 1.15;
       }
     }
     // --- Debris chunks: fly outward, spin, fade ---
@@ -21246,13 +21156,14 @@ function executeAbility(slot, ability) {
       // a short lifetime that matches the ability's burst window. The
       // mesh's transform is fixed at spawn time (laser leaves a snapshot
       // of where the player was aiming when they pulled the trigger,
-      // which feels more like a "shot" than a moving beam). Reuses the
-      // _makeVortexCoreBeamMaterial shader factory so the same crackle /
-      // pulse / fresnel look applies.
+      // which feels more like a "shot" than a moving beam). (v14c) Now
+      // uses the LayeredFX 'core_beam' preset so the crackle / pulse look
+      // composes through the shared shader.
       const BEAM_RADIUS = 80;
       const beamLife = 0.45;
       const beamMid = player.position.clone().add(forward.clone().multiplyScalar(range * 0.5));
-      const beamMat = _makeVortexCoreBeamMaterial();
+      const beamMat = _makeFXMaterial('core_beam');
+      if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
       const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
       beamMesh.position.copy(beamMid);
       beamMesh.quaternion.setFromUnitVectors(_mvUp, forward);
@@ -23063,7 +22974,10 @@ function updateAbilities(dt) {
       // we orient it explicitly via setFromUnitVectors against the camera
       // forward, which already accounts for player position.
       if (!player._vortexCoreBeam) {
-        const beamMat = _makeVortexCoreBeamMaterial();
+        // (v14c) LayeredFX 'core_beam' preset replaces the bespoke vortex
+        // core beam shader. uIntensity is written per frame below.
+        const beamMat = _makeFXMaterial('core_beam');
+        if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / 95;
         const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
         beamMesh.frustumCulled = false; // we rebuild its transform every frame
         beamMesh.renderOrder = 2;       // composite over walls + smoke
@@ -23081,9 +22995,9 @@ function updateAbilities(dt) {
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
       beam.visible = true;
-      if (beam.material && beam.material.uniforms) {
-        beam.material.uniforms.time.value = game.time;
-        // Slight breath in/out on intensity so even a held core pulses.
+      // (v14c) LayeredFX 'core_beam' preset ; uTime is auto-ticked by
+      // _layeredFXTick. Drive uIntensity for the breathing pulse.
+      if (beam.material && beam.material.uniforms && beam.material.uniforms.uIntensity) {
         const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
         beam.material.uniforms.uIntensity.value = breath;
       }
@@ -23723,19 +23637,23 @@ function updateAbilities(dt) {
       if (eff.mesh) {
         eff.mesh.rotation.x += dt * 1.4;
         eff.mesh.rotation.y += dt * 2.1;
-        // Tick the orb-core shader on the central node.
-        if (eff.mesh.material && eff.mesh.material.uniforms) {
-          eff.mesh.material.uniforms.time.value = game.time;
-          eff.mesh.material.uniforms.uPulse.value = eff.triggered ? 1.7 : 1.0;
+        // (v14a) orb_core LayeredFX preset ; uTime is auto-ticked by
+        // _layeredFXTick so no time write is needed here. uIntensity is
+        // the new (Tranche 1.5) per-instance time-rate scalar: 1.0 when
+        // the trap is armed and idle, 1.7 when it's triggered (faster
+        // crackle + pulse). Same numeric values the bespoke uPulse used.
+        if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
+          eff.mesh.material.uniforms.uIntensity.value = eff.triggered ? 1.7 : 1.0;
         }
         const ph = (eff.pulsePhase || 0) + game.time * 5.0;
         if (eff.glow) {
           const haloPulse = 1 + Math.sin(ph * 0.7) * 0.25 + (Math.random() - 0.5) * 0.10;
           eff.glow.scale.setScalar(haloPulse);
-          // Gravity-halo shader: just bump time. Uniform-driven brightness
-          // already pulses; opacity is computed inside the fragment.
-          if (eff.glow.material && eff.glow.material.uniforms) {
-            eff.glow.material.uniforms.time.value = game.time;
+          // (v14c) gravity_halo LayeredFX preset ; uTime is auto-ticked by
+          // _layeredFXTick. Push uIntensity from the trap state so the
+          // halo collapses faster when triggered.
+          if (eff.glow.material && eff.glow.material.uniforms && eff.glow.material.uniforms.uIntensity) {
+            eff.glow.material.uniforms.uIntensity.value = eff.triggered ? 1.6 : 1.0;
           }
         }
       }
@@ -31596,12 +31514,14 @@ class StasisField {
   destroy() {
     this.alive = false;
     if (this.group.parent) scene.remove(this.group);
-    // Pickup effect: expanding ring
-    const ringGeo = new THREE.TorusGeometry(20, 3, 8, 32);
-    // Shader-driven shockwave: chromatic edge that fades as it expands.
-    // updateEffects bumps time/uAge each frame so the ring brightens at
-    // the leading edge then fades out cleanly.
-    const ringMat = _makeShockwaveMaterial(0x00ddff);
+    // Pickup effect: expanding ring. (v14c) LayeredFX 'shockwave_ring'
+    // preset. The stasis_pickup effect tick scales uIntensity from 1.0
+    // (start) to 0.0 (end) so the patterns fade with the expanding ring.
+    const ringRadius = 20;
+    const ringGeo = new THREE.TorusGeometry(ringRadius, 3, 8, 32);
+    const ringMat = _makeFXMaterial('shockwave_ring');
+    if (ringMat.uniforms.uBaseColor) ringMat.uniforms.uBaseColor.value.set(0x00ddff);
+    if (ringMat.uniforms.uPosScale)  ringMat.uniforms.uPosScale.value = 1.0 / ringRadius;
     const ring = new THREE.Mesh(ringGeo, ringMat);
     ring.position.copy(this.position);
     ring.renderOrder = 1;
@@ -32031,7 +31951,20 @@ function updateStasisFields(dt) {
       const t = e.age / e.lifetime;
       const s = 1 + t * 6;
       e.mesh.scale.set(s, s, s);
-      e.mesh.material.opacity = 0.8 * (1 - t);
+      // (v14c) LayeredFX shockwave_ring preset ; fade via uIntensity (slows
+      // the patterns and dims their contribution as the ring expands) +
+      // uBrightness (mirrors the legacy opacity ramp). uTime is auto-ticked
+      // by _layeredFXTick.
+      const u = e.mesh.material && e.mesh.material.uniforms;
+      if (u) {
+        if (u.uIntensity) u.uIntensity.value = Math.max(0, 1 - t);
+        if (u.uBrightness) {
+          if (u._fxBaseBrightness == null) u._fxBaseBrightness = u.uBrightness.value;
+          u.uBrightness.value = u._fxBaseBrightness * (1 - t);
+        }
+      } else if (e.mesh.material && typeof e.mesh.material.opacity === 'number') {
+        e.mesh.material.opacity = 0.8 * (1 - t);
+      }
     }
   }
 }
@@ -42990,3 +42923,4 @@ if (window.LSS_ENGINE_READY) {
 </script>
 </body>
 </html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
