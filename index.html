@@ -2,8 +2,107 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v14 (WebXR) ; Wall Texturing</title>
-<!-- v14 fork started 2026-05-07. Branched off v13r.
+<title>Last Ship Sailing v14c (WebXR) ; Tranche 3 Closeout</title>
+<!-- v14c fork started 2026-05-08. Branched off v14b.
+     v14c closes out Tranche 3 of bespoke_shader_consolidation_plan.md plus
+     ships Tranche 1.5b (cone axial-gradient feature). Two prior forks
+     (v14a, v14b) did a cleanup pass + the first two ports (proj_glow, orb_core)
+     and Tranche 1.5 (uIntensity uniform). v14c is the wide port pass that
+     drains the rest of Tranche 3.
+
+     v14c changes:
+       (A) Tranche 1.5b ; LayeredFXMaterial gains an axial-gradient post-pass
+           for cone/cylinder geometries. Six edits: vUv varying added to
+           vert + frag; four uniforms (uAxialFalloff, uAxialCoreColor,
+           uAxialCoreStrength, uAxialCoreFalloff); cfg defaults all = 0
+           (legacy presets unchanged); short post-composite block in main()
+           that darkens linearly along vUv.y and blends toward a hot-core
+           color near vUv.y = 0. Zero-cost when controlling scalars are 0.
+       (B) Eight ports from Tranche 3:
+           * engine glow disc       _makeEngineDiscMaterial    -> 'engine_disc'
+           * Pyro gas cloud         _makeGasCloudMaterial      -> attempted 'gas_green' port, rolled back (LayeredFX pattern lib has no hard alpha-threshold discard and no sparse-pattern wispy plume vertex displacement equivalent)
+           * tether trap halo       _makeGravityHaloMaterial   -> 'gravity_halo'
+           * stasis pickup ring     _makeShockwaveMaterial     -> 'shockwave_ring'
+           * atom-fractal rocks     _makeAtomFractalMaterial   -> attempted 'atom_surface' port, rolled back (LayeredFX pattern lib has no escape-time fractal ; Mandelbox iterations are bespoke-only)
+           * cluster distortion     anonymous ShaderMaterial   -> 'distortion_shell'
+           * engine plume cone      _makePlumeShaderMaterial   -> 'engine_plume'
+                                    (uses Tranche 1.5b axial-gradient: hot
+                                     white core at base, fade to tip)
+           * Vortex Core Beam       _makeVortexCoreBeamMaterial -> 'core_beam'
+           Per-frame runtime modulation (engine throttle, plume throttle,
+           tether trigger state, shockwave fade, beam spool) all routed
+           through uIntensity. Per-frame time writes removed (LayeredFX is
+           auto-ticked by _layeredFXTick). Defensive guards on every uniform
+           write so future material swaps don't crash.
+       (C) Net file size change: -308 lines (factories removed > presets added).
+           File is now 42,659 lines (was 43,000 in v14b).
+
+     After v14c, Tranche 3 is fully closed. The remaining bespoke shaders
+     are Tranche 1 (smoke ; gated on dynamic-light support in LayeredFX) +
+     Tranche 2 (ship energy shield ; gated on ripple uniforms) + the
+     sprite-based effects (open architectural question for Tranche 4).
+
+     v14b remains the stable baseline for the prior state; do NOT edit it.
+     v14b was forked off v14a (rename) and held the Tranche 1.5 + first two
+     ports work. v14a is the original cleanup fork content (kept as backup).
+
+     v14a is a maintenance + first-tranche-consolidation pass. Three changes:
+       (3) PORTS from bespoke_shader_consolidation_plan.md Tranche 3 +
+           Tranche 1.5 feature add. In order:
+           (a) Tranche 3 ; projectile inner glow halo. _makeProjGlowMaterial
+               deleted ; the glow mesh on every Projectile now uses
+               _makeFXMaterial('proj_glow') with the new proj_glow preset
+               (plasma flow + white-hot screen highlight + FBM detail,
+               fresnel rim, brightness 1.8). baseColor and uPosScale are
+               written per-instance from Projectile.trailColor and 1/radius.
+               Fade-in now scales uBrightness instead of uOpacity, matching
+               spawnFXBurst's convention.
+           (b) Tranche 1.5 ; LayeredFXMaterial gains a per-instance uIntensity
+               uniform (default 1.0). One uniform decl, one cfg field, one
+               uniform table entry, and one line in the layer time-rate
+               calculation. Effects with gameplay-meaningful state (engine
+               throttle, tether-trap pulse rate, beam spool-up/down) write
+               this uniform each frame to scale animation tempo proportionally.
+               Default 1.0 leaves all existing presets unchanged. Unblocks
+               the orb, engine plume, engine glow disc, and Vortex core beam
+               ports.
+           (c) Tranche 3 ; tether trap orb core. _makeOrbCoreMaterial deleted ;
+               the central node now uses _makeFXMaterial('orb_core') with
+               the new orb_core preset (ridges crackle base + stars high-freq
+               pinpoints + plasma slow breath, intensity-driven tempo). The
+               per-frame state cue (faster pulse when triggered) is preserved
+               via uIntensity = 1.7 (triggered) vs 1.0 (armed). The dead-code
+               fallback at the Vortex Trip Wire mine site (which was already
+               on fireball_purple via v11c) is collapsed at the same time.
+       (1) Delete six dead-code factory functions that were left behind by
+           earlier graphics iterations and have no live callsites in v14:
+             * _makeFireShieldMaterial    (replaced by plasma_amber preset)
+             * _makeFlamethrowerJetMaterial (effect was retired)
+             * _makeVortexShieldMaterial  (replaced by plasma_wall / plasma_purple)
+             * _makeSpiralConeMaterial    (effect was retired)
+             * _makeRibbonFlowMaterial    (never reached production use)
+             * _makeMissileBodyMaterial   (effect was retired)
+           Total ~600 lines of unreachable shader source removed. The only
+           surviving reference (a defensive ternary fallback at the Pyro
+           thermal shield material site) is collapsed at the same time.
+       (2) Header comment correction. The v14 header (preserved below) carried
+           forward stale claims from earlier forks that the LayeredFX rollout
+           was incomplete. Audit done 2026-05-08 confirmed Phase 2/3/4/5/6 of
+           graphics_update_plan.md are all shipped: Pyro fire trap + flame
+           licks (fireball preset), Vortex Trip Wire orbs (fireball_purple),
+           Vortex/champion/Pyro thermal shield domes (plasma_wall variants),
+           cluster explosions, Tracker particle wall plasma backing, cosmic
+           anomaly are all on _makeFXMaterial. The unconverted tail (smoke,
+           ship energy shield, engine plume/disc, projectile glow halo,
+           vortex core beam, tether trap orb, gas cloud, atom-fractal rocks,
+           shockwave ring, sprite-based particles) is documented in a new
+           plan: bespoke_shader_consolidation_plan.md.
+     graphics_update_plan.md was moved to old_plans/ on 2026-05-08 ; the
+     unfinished work it described is now superseded by the consolidation
+     plan above. design_lobby_invite.md (the SSE invite system) remains the
+     single largest open arc in the active plans folder.
+     v14 remains the stable baseline; do NOT edit it.
+     v14 fork started 2026-05-07. Branched off v13r.
      v14 introduces a wall-texturing system: triplanar texture sampling
      in the SDF wall shader plus a 4th compositing layer (texture) on
      top of the existing 3-layer pattern composite (BG/FG1/FG2). The
@@ -2054,6 +2153,19 @@ const CHASSIS = {
 
 // ---- LOADOUT DEFINITIONS (ported from SDK lss_loadout_data.cpp) ----
 
+// Class identity colors used for weapons / abilities / cores / shields / class-tied effects.
+// Reference these everywhere a class-tied tint is needed (projectiles, beams, particles,
+// tracers, shields, lightning, traps, core abilities) instead of repeating literals.
+LSS.CLASS_COLORS = {
+  BLASTER:  0x44eeff, // cyan
+  PYRO:     0xff3322, // red
+  PUNCTURE: 0xffee44, // yellow
+  TRACKER:  0xff8800, // orange
+  SLAYER:   0x44ff66, // green
+  VORTEX:   0xaa55ff, // purple
+  SYPHON:   0x4488ff, // blue
+};
+
 const LOADOUTS = {
   VORTEX: {
     name: 'VORTEX', className: 'Corvette MkII', chassis: 'CORVETTE',
@@ -3203,23 +3315,16 @@ function buildMapSelector() {
 
   // Render the window contents for the currently-selected map.
   selectMap(game.selectedMap);
+  // (v14c) Sync disabled state after rebinding ; buildMapSelector can run
+  // mid-countdown (e.g. race-mode toggle) and the freshly-cloned buttons
+  // would otherwise render fully clickable.
+  _syncMapButtonsDisabled();
 }
 
 // Set the current map by key; update the window contents, the active dot, and
 // the checkmark. Safe to call directly (used by click handlers and cycleMap).
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
-  // (v9a) Two locks, both clear at returnToRootMenu so the next match starts editable:
-  //   1. Launch countdown is ticking. net.startScheduledAt holds the wall-clock ms
-  //      when match_start fires ; it's set the moment both peers are ready and
-  //      cleared when the timer fires or someone un-readies. Stops a last-second
-  //      map swap during the 5-second LAUNCH countdown.
-  //   2. Match is active. net.worldMap is set inside applyWorldSync (right after
-  //      match_start) and stays set across rounds. Between-round ship-swaps go
-  //      through the same lobby UI but the picker shouldn't change the map mid-
-  //      match ; only a fresh game (after the full scoreboard pause + return to
-  //      root menu) re-opens map selection.
-  if (net.active && (net.startScheduledAt || net.worldMap)) return;
   // (v6.7) Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
   // already selected stops the storm without needing a per-call suppress flag.
@@ -3551,6 +3656,20 @@ function scheduleMatchStart(startAt) {
   tickStartCountdown();
 }
 
+// (v14c) Disable the two map-prev / map-next arrow buttons in the ship-
+// select screen once everyone has clicked CONFIRM & LAUNCH (i.e. all peers
+// have committed a loadout and the launch countdown is ticking). This
+// stops a last-second arrow click from racing the world build and having
+// the two peers spawn into different maps. Re-enabled when the countdown
+// is canceled (un-confirm) or when buildMapSelector rebuilds the picker.
+function _syncMapButtonsDisabled() {
+  const locked = !!(typeof net !== 'undefined' && net.active && net.launchScheduledAt);
+  const prev = document.getElementById('map-prev');
+  const next = document.getElementById('map-next');
+  if (prev) prev.disabled = locked;
+  if (next) next.disabled = locked;
+}
+
 function tickStartCountdown() {
   const status = document.getElementById('lobby-status');
   if (!status || !net.startScheduledAt) return;
@@ -3596,6 +3715,8 @@ function checkAllLoadoutsReady() {
       clearTimeout(net.launchTimer);
       net.launchTimer = null;
       net.launchScheduledAt = null;
+      // (v14c) Launch is canceled ; re-enable the map arrows.
+      _syncMapButtonsDisabled();
     }
     return;
   }
@@ -3618,10 +3739,13 @@ function checkAllLoadoutsReady() {
 function scheduleLaunch(launchAt) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   net.launchScheduledAt = launchAt;
+  // (v14c) Everyone has confirmed ; disable the map arrows.
+  _syncMapButtonsDisabled();
   const delay = Math.max(0, launchAt - Date.now());
   net.launchTimer = setTimeout(() => {
     net.launchTimer = null;
     net.launchScheduledAt = null;
+    _syncMapButtonsDisabled();
     launchCountdown();
   }, delay);
 }
@@ -3878,7 +4002,7 @@ class NetworkPlayer {
         // particle wall uses. Peer-side stays at full opacity ; the
         // local player path dials its opacity down so the pilot can
         // see through their own dome.
-        const mat = _makeHexHologramMaterial(0x66ddff);
+        const mat = _makeHexHologramMaterial(LSS.CLASS_COLORS.BLASTER);
         this._gunShieldMesh = new THREE.Mesh(geo, mat);
         this._gunShieldMesh.renderOrder = 1;
         scene.add(this._gunShieldMesh);
@@ -3972,11 +4096,14 @@ class NetworkPlayer {
         // (v11 Phase 5) Swap to layered amber-plasma so the Pyro thermal
         // shield reads as a living fire dome instead of a static hex grid.
         // uTime is driven by _layeredFXTick from gameLoop.
+        // (v14a cleanup) Triple fallback collapsed to two ; the original
+        // third branch (_makeFireShieldMaterial) is being deleted in v14a
+        // along with five other dead-code factories. _makeHexHologramMaterial
+        // remains shipped (used by Slayer Sword Block dome) so it's a safe
+        // last-resort if the LayeredFX path ever fails.
         const mat = (typeof _makeFXMaterial === 'function')
           ? _makeFXMaterial('plasma_amber')
-          : (typeof _makeHexHologramMaterial === 'function')
-            ? _makeHexHologramMaterial(0xffaa33)
-            : _makeFireShieldMaterial(0.85);
+          : _makeHexHologramMaterial(LSS.CLASS_COLORS.PYRO);
         // (v11 fix) uPosScale = 1/radius so noise patterns scale to the dome.
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, tDomeR);
@@ -4053,7 +4180,7 @@ class NetworkPlayer {
         // shield identity.
         const mat = (typeof _makeFXMaterial === 'function')
           ? _makeFXMaterial('plasma_purple')
-          : _makeHexHologramMaterial(0xaa55ff);
+          : _makeHexHologramMaterial(LSS.CLASS_COLORS.VORTEX);
         if (mat.uniforms && mat.uniforms.uPosScale) {
           mat.uniforms.uPosScale.value = 1.0 / Math.max(1, domeR);
         }
@@ -4128,7 +4255,7 @@ class NetworkPlayer {
         const geo = new THREE.SphereGeometry(sbR, 36, 24);
         // (v11b retune) Same flip as the local pilot path: back to the
         // additive hex hologram, bright green, glowing rather than dark.
-        const mat = _makeHexHologramMaterial(0x44ff66);
+        const mat = _makeHexHologramMaterial(LSS.CLASS_COLORS.SLAYER);
         this._swordBlockMesh = new THREE.Mesh(geo, mat);
         this._swordBlockMesh.renderOrder = 1;
         scene.add(this._swordBlockMesh);
@@ -4148,7 +4275,7 @@ class NetworkPlayer {
         if (u.time) u.time.value = t;
         if (u.uTime) u.uTime.value = t;
         if (u.uHp) u.uHp.value = 1.0;
-        if (u.uColor) u.uColor.value.setHex(0x44ff66);
+        if (u.uColor) u.uColor.value.setHex(LSS.CLASS_COLORS.SLAYER);
         // (v11b) Match local pilot's lower opacity so the peer-side
         // dome doesn't read as a heavier energy field than what the
         // caster sees from inside.
@@ -4923,10 +5050,11 @@ function spawnTripWireOrb(pos, owner, team, ownerPeerId, netId, broadcast, group
   // (10 instead of 7) so the fireball silhouette has room to billow.
   // _makeFXMaterial registers the material with _layeredFXTick so its
   // uTime uniform animates automatically.
+  // (v14a) _makeOrbCoreMaterial fallback collapsed ; _makeFXMaterial is
+  // always defined at this point (top-level function in the same script),
+  // and the factory is being deleted in this fork.
   const mineGeo = new THREE.SphereGeometry(10, 24, 16);
-  const mineMat = (typeof _makeFXMaterial === 'function')
-                  ? _makeFXMaterial('fireball_purple')
-                  : _makeOrbCoreMaterial(0xaa55ff);
+  const mineMat = _makeFXMaterial('fireball_purple');
   // Match the displacement scale to the orb radius so the layered FX
   // patterns sample at the right frequency for this size.
   if (mineMat && mineMat.uniforms && mineMat.uniforms.uPosScale) {
@@ -5217,7 +5345,7 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   // (v11b) Tracker's particle wall is now tinted orange ; the cyan was
   // visually conflated with Blaster/Vortex's blue energy fields. Hex
   // hologram + amber plasma backing give the wall a hot-membrane read.
-  const hexHologramMat = _makeHexHologramMaterial(0xffaa44);
+  const hexHologramMat = _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER);
   const wallMesh = new THREE.Mesh(wallGeo, hexHologramMat);
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
@@ -5431,327 +5559,6 @@ function _makeGasCloudMaterial(initialColor, baseAlpha, radius) {
   });
 }
 
-// Fire shader for Pyro's Thermal Shield. Animated FBM noise mapped to a
-// fire-color gradient (red -> orange -> white-hot). Pattern scrolls upward
-// in world Y so the disc reads as flames rising. Uniforms:
-//   time      animates the noise scroll
-//   uBaseAlpha density gate, modulated for shield-power fade
-//   uOctaves  detail level
-function _makeFireShieldMaterial(baseAlpha) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uBaseAlpha: { value: baseAlpha },
-      uOctaves:   { value: 6 },
-    },
-    vertexShader: [
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocalPos;',
-      'varying vec3 vNormal;',
-      'void main() {',
-      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
-      '  vLocalPos = position;',
-      '  vNormal = normalize(normalMatrix * normal);',
-      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform float uBaseAlpha;',
-      'uniform int uOctaves;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocalPos;',
-      'varying vec3 vNormal;',
-      'float hash13(vec3 p) {',
-      '  p = fract(p * 0.1031);',
-      '  p += dot(p, p.yzx + 33.33);',
-      '  return fract((p.x + p.y) * p.z);',
-      '}',
-      'float noise3(vec3 p) {',
-      '  vec3 i = floor(p);',
-      '  vec3 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  return mix(',
-      '    mix(mix(hash13(i + vec3(0,0,0)), hash13(i + vec3(1,0,0)), f.x),',
-      '        mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y),',
-      '    mix(mix(hash13(i + vec3(0,0,1)), hash13(i + vec3(1,0,1)), f.x),',
-      '        mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y),',
-      '    f.z);',
-      '}',
-      'float fbm(vec3 p) {',
-      '  float v = 0.0; float a = 0.5;',
-      '  for (int k = 0; k < 8; k++) {',
-      '    if (k >= uOctaves) break;',
-      '    v += a * noise3(p);',
-      '    p *= 2.0;',
-      '    a *= 0.5;',
-      '  }',
-      '  return v;',
-      '}',
-      'void main() {',
-      // Sample FBM at world position, with time-driven negative-Y scroll so
-      // patterns visually RISE on the disc (subtract time from q.y inside
-      // the FBM input).
-      '  vec3 q = vWorldPos * 0.045;',
-      '  q.y -= time * 0.7;',
-      '  q.x += time * 0.20;',
-      '  q.z += time * 0.10;',
-      '  float v = fbm(q);',
-      // Add a faster, finer detail layer so the flames have crackling
-      // high-frequency texture in addition to the slow main turbulence.
-      '  vec3 q2 = vWorldPos * 0.13;',
-      '  q2.y -= time * 1.4;',
-      '  float v2 = fbm(q2);',
-      '  v = smoothstep(0.25, 0.78, v) * 0.75 + smoothstep(0.30, 0.78, v2) * 0.40;',
-      // Disc edge falloff: vLocalPos lives in unit-cylinder space (disc
-      // radius 1 in local XY because the geometry was rotated so the
-      // circular face is on XY). Soft fade at the rim so the shield's
-      // outline is feathered fire, not a hard circle.
-      '  float r = length(vLocalPos.xy);',
-      '  float edgeFall = 1.0 - smoothstep(0.78, 1.02, r);',
-      // Inner core is denser (more fire) ; rim is wispier. Combined with
-      // edgeFall this gives a center-bright disc that fades to nothing.
-      '  float coreBoost = 1.0 - smoothstep(0.0, 0.55, r);',
-      '  float density = clamp(v * 1.4 - 0.18 + coreBoost * 0.10, 0.0, 1.0) * edgeFall;',
-      // Fire color gradient: dark red at low density, orange in mid,
-      // white-hot at peak. HDR brightness in dense pockets so the fire
-      // reads bright enough against the bright walls.
-      '  vec3 coolC = vec3(0.95, 0.18, 0.04);',
-      '  vec3 midC  = vec3(1.55, 0.60, 0.10);',
-      '  vec3 hotC  = vec3(1.95, 1.55, 0.80);',
-      '  vec3 col = mix(coolC, midC, smoothstep(0.15, 0.55, density));',
-      '  col = mix(col, hotC, smoothstep(0.55, 0.92, density));',
-      '  float alpha = density * uBaseAlpha;',
-      '  if (alpha < 0.04) discard;',
-      '  gl_FragColor = vec4(col, alpha);',
-      '}',
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// Flamethrower-jet shader for Pyro's Thermal Shield. Designed for a
-// ConeGeometry with apex at the muzzle and base flared forward (the same
-// cones the spiral shader used to drive). FBM noise scrolls along the
-// cone axis from apex outward so the flame visibly *pours* away from the
-// ship; brightness peaks at the muzzle (white-yellow core) and fades
-// through orange to red at the tip; radial falloff softens the silhouette
-// so the cone reads as flame, not a solid colored shell.
-//
-// Cone UV convention (Three.js ConeGeometry side faces): vUv.x wraps
-// around the circumference (0..1), vUv.y runs from base (0) to apex (1).
-// We define axisT = vUv.y so axisT=1 sits at the muzzle and axisT=0 at
-// the forward tip, matching the placement in updateShieldVisuals where
-// the cone's +Y (apex) is aligned to -forward.
-//
-// Uniforms:
-//   time        animates the noise scroll
-//   uIntensity  alpha gate (driven by HP fraction outside the shader)
-//   uOctaves    detail level for FBM
-function _makeFlamethrowerJetMaterial(opts) {
-  opts = opts || {};
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uIntensity: { value: 1.0 },
-      uOctaves:   { value: 6 },
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocalPos;',
-      'varying vec3 vNormal;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  vLocalPos = position;',
-      '  vNormal = normalize(normalMatrix * normal);',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform float uIntensity;',
-      'uniform int uOctaves;',
-      'varying vec2 vUv;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocalPos;',
-      'varying vec3 vNormal;',
-      'float hash13(vec3 p) {',
-      '  p = fract(p * 0.1031);',
-      '  p += dot(p, p.yzx + 33.33);',
-      '  return fract((p.x + p.y) * p.z);',
-      '}',
-      'float noise3(vec3 p) {',
-      '  vec3 i = floor(p);',
-      '  vec3 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  return mix(',
-      '    mix(mix(hash13(i + vec3(0,0,0)), hash13(i + vec3(1,0,0)), f.x),',
-      '        mix(hash13(i + vec3(0,1,0)), hash13(i + vec3(1,1,0)), f.x), f.y),',
-      '    mix(mix(hash13(i + vec3(0,0,1)), hash13(i + vec3(1,0,1)), f.x),',
-      '        mix(hash13(i + vec3(0,1,1)), hash13(i + vec3(1,1,1)), f.x), f.y),',
-      '    f.z);',
-      '}',
-      'float fbm(vec3 p) {',
-      '  float v = 0.0; float a = 0.5;',
-      '  for (int k = 0; k < 8; k++) {',
-      '    if (k >= uOctaves) break;',
-      '    v += a * noise3(p);',
-      '    p *= 2.0;',
-      '    a *= 0.5;',
-      '  }',
-      '  return v;',
-      '}',
-      'void main() {',
-      // axisT: 1 at muzzle (apex), 0 at forward tip.
-      '  float axisT = vUv.y;',
-      // Sample FBM in cone-local space so the pattern stays attached to
-      // the jet regardless of ship orientation. Scroll the noise along
-      // -axis (so flame moves *outward* from the muzzle as time advances).
-      // Two layers ; slow large-scale turbulence + fast crackling detail.
-      '  vec3 q = vec3(vLocalPos.x * 0.18, vLocalPos.y * 0.06, vLocalPos.z * 0.18);',
-      '  q.y -= time * 1.3;',
-      '  float v = fbm(q);',
-      '  vec3 q2 = vec3(vLocalPos.x * 0.55, vLocalPos.y * 0.18, vLocalPos.z * 0.55);',
-      '  q2.y -= time * 2.6;',
-      '  float v2 = fbm(q2);',
-      '  float turbo = smoothstep(0.30, 0.80, v) * 0.85 + smoothstep(0.32, 0.82, v2) * 0.45;',
-      // Axial profile: dense near the muzzle, thinning toward the tip.
-      // smoothstep gives a soft taper instead of a hard cutoff.
-      '  float axisDensity = mix(0.30, 1.10, smoothstep(-0.05, 0.85, axisT));',
-      // Radial falloff inside the cone slice: stronger fire near the cone
-      // axis, wispy at the silhouette edge. ConeGeometry side verts share
-      // a circular cross-section at each axisT ; vLocalPos.xz length
-      // approximates the radial coordinate (Y is the cone axis after the
-      // standard orientation).
-      '  float r = length(vLocalPos.xz);',
-      // Cone radius at this axisT in local space: cone is unit (radius 1
-      // at base, 0 at apex). axisT=1 (apex) -> r=0, axisT=0 (base) -> r=1.
-      '  float coneR = max(1.0 - axisT, 0.04);',
-      '  float radialT = clamp(r / coneR, 0.0, 1.0);',
-      '  float radialFall = 1.0 - smoothstep(0.55, 1.05, radialT);',
-      // Combine: turbulence Ã— axial Ã— radial. Slight constant lift so the
-      // muzzle core never goes pitch black.
-      '  float density = clamp((turbo * axisDensity + 0.05) * radialFall, 0.0, 1.0);',
-      // Color gradient: deep red wisps at low density, hot orange in mid,
-      // white-yellow core at peak. Push HDR brightness so bloom catches
-      // the muzzle white-hot point.
-      '  vec3 coolC = vec3(0.85, 0.10, 0.02);',
-      '  vec3 midC  = vec3(1.70, 0.65, 0.10);',
-      '  vec3 hotC  = vec3(2.20, 1.85, 1.10);',
-      '  vec3 col = mix(coolC, midC, smoothstep(0.18, 0.55, density));',
-      '  col = mix(col, hotC, smoothstep(0.55, 0.92, density));',
-      // Extra muzzle bias: near the apex (axisT high) the core stays
-      // bright even where density is moderate, so the jet has a clear
-      // white-hot ignition point.
-      '  float muzzleCore = smoothstep(0.78, 0.98, axisT) * (1.0 - radialT);',
-      '  col += hotC * muzzleCore * 0.45;',
-      '  float alpha = clamp(density * uIntensity, 0.0, 0.95);',
-      '  if (alpha < 0.04) discard;',
-      '  gl_FragColor = vec4(col, alpha);',
-      '}',
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// Energy-field shader for Vortex's Shield. Disc geometry, so we use
-// disc-radial coords (vLocalPos.xy after rotateX) for the pattern instead
-// of the sphere-shaped helper above. Layers: concentric ripples animated
-// outward + hex shimmer + fresnel rim + rainbow hue cycle + edge falloff.
-// Reads as an active energy field rather than a flat translucent disc.
-function _makeVortexShieldMaterial(baseAlpha) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uBaseAlpha: { value: baseAlpha },
-      uHueShift:  { value: 0 },
-    },
-    vertexShader: [
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocalPos;',
-      'varying vec3 vNormal;',
-      'void main() {',
-      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
-      '  vLocalPos = position;',
-      '  vNormal = normalize(normalMatrix * normal);',
-      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform float uBaseAlpha;',
-      'uniform float uHueShift;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocalPos;',
-      'varying vec3 vNormal;',
-      // HSV->RGB (single-pixel rainbow shaping)
-      'vec3 hsv(float h, float s, float v) {',
-      '  vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);',
-      '  return v - v * s * clamp(min(k, 4.0 - k), 0.0, 1.0);',
-      '}',
-      // Honeycomb pattern (sci-fi shield staple)
-      'float hexPattern(vec2 p) {',
-      '  p *= 5.0;',
-      '  vec2 q = vec2(p.x * 1.1547, p.y + p.x * 0.5);',
-      '  vec2 f = fract(q);',
-      '  vec2 d = abs(f - 0.5);',
-      '  return smoothstep(0.42, 0.5, max(d.x, d.y * 0.866 + d.x * 0.5));',
-      '}',
-      'void main() {',
-      // Disc-plane radial + angular coords. vLocalPos.xy ranges -1..1 on
-      // the disc face after the rotateX(PI/2) flip applied to the
-      // CylinderGeometry, so length(xy) gives radius 0..1 across the
-      // shield surface and atan(y, x) gives angle around the disc.
-      '  vec2 disc = vLocalPos.xy;',
-      '  float r = length(disc);',
-      '  float theta = atan(disc.y, disc.x);',
-      // Soft fade at the disc rim so the silhouette is feathered energy
-      // instead of a hard circle.
-      '  float edgeFall = 1.0 - smoothstep(0.82, 1.02, r);',
-      // Concentric ripples expanding outward over time. Sharpened with
-      // pow() so each wavefront reads as a distinct ring rather than a
-      // soft sine wave.
-      '  float ripple = 0.5 + 0.5 * sin(r * 22.0 - time * 4.0);',
-      '  ripple = pow(ripple, 2.0);',
-      // Hex shimmer in disc-uv space (theta-vs-radius), scrolled in
-      // theta over time so the cells visibly drift around the disc.
-      '  vec2 hexUV = vec2(theta * 1.6 + time * 0.30, r * 4.0 - time * 0.45);',
-      '  float hex = hexPattern(hexUV);',
-      // Fresnel: glow brighter at the disc rim. abs() so DoubleSide
-      // back-faces also light up correctly when viewed from behind.
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fr = pow(1.0 - abs(dot(vNormal, viewDir)), 2.0);',
-      // Combine layers into a single intensity value gated by edge fall.
-      '  float intensity = (hex * 0.45 + ripple * 0.50 + fr * 0.65) * edgeFall;',
-      // Rainbow hue cycling: drifts around the disc by angle and
-      // advances slowly with time. uHueShift lets the JS side bias it.
-      '  float hue = fract(uHueShift + time * 0.12 + theta * 0.16 + r * 0.08);',
-      '  vec3 col = hsv(hue, 0.65, 1.0);',
-      // White-hot accent in dense pockets so the shield reads bright
-      // against the wall fractal background.
-      '  vec3 hot = vec3(1.50, 1.50, 1.55);',
-      '  col = mix(col, hot, smoothstep(0.65, 1.20, intensity));',
-      '  float alpha = clamp(intensity, 0.0, 1.0) * uBaseAlpha;',
-      '  if (alpha < 0.03) discard;',
-      '  gl_FragColor = vec4(col * (1.0 + intensity * 0.55), alpha);',
-      '}',
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
 // Volumetric smoke shader for explosion plumes. Same Plasma-FBM language as
 // the gas cloud but tuned for smaller-radius churning smoke: shorter sample
 // scale, dark-grey palette, faster animation. Reused per-spawn (cloned) by
@@ -5943,14 +5750,11 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
 // idiom not to break anything ; the function above already returns mat.
 function __smoke_mat_factory_close() {}
 
-// (v6.9) Vortex Laser Core volumetric beam material. A thick open-ended
-// cylinder gets oriented along the firing direction each frame ; this
-// shader paints it with a white-hot inner band, a hot-orange halo, a
-// traveling longitudinal pulse, and crackling noise so it reads as a
-// continuous high-power energy beam rather than a stack of thin tracers.
-// Uniforms:
-//   time       drives crackle + traveling pulse
-//   uIntensity overall alpha gate (1.0 while firing, faded for spool-up/down)
+// (v6.9 / v14c) Vortex Laser Core beam geometry helper. The bespoke
+// _makeVortexCoreBeamMaterial factory was ported to LayeredFX 'core_beam'
+// preset (see EFFECT_PRESETS). The geometry helper below is preserved
+// because both the Laser Shot and Laser Core ability paths still share
+// it as a unit cylinder that they scale + orient per-frame.
 let _VORTEX_CORE_BEAM_GEO = null;
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
@@ -5960,180 +5764,6 @@ function _getVortexCoreBeamGeometry() {
   // like flat discs floating in space.
   _VORTEX_CORE_BEAM_GEO = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_GEO;
-}
-function _makeVortexCoreBeamMaterial() {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uIntensity: { value: 1.0 },
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vNormal;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;',
-      '  vNormal = normalize(normalMatrix * normal);',
-      '  gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform float uIntensity;',
-      'varying vec2 vUv;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vNormal;',
-      'float hash21(vec2 p) {',
-      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
-      '}',
-      'float noise2(vec2 p) {',
-      '  vec2 i = floor(p);',
-      '  vec2 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  return mix(mix(hash21(i + vec2(0.0,0.0)), hash21(i + vec2(1.0,0.0)), f.x),',
-      '             mix(hash21(i + vec2(0.0,1.0)), hash21(i + vec2(1.0,1.0)), f.x), f.y);',
-      '}',
-      'void main() {',
-      // Two view-relative quantities drive the beam look:
-      //   facing = how face-on the cylinder surface is to the camera. 1.0
-      //            when the surface normal points directly at the camera
-      //            (we are looking through the diameter), 0.0 at the
-      //            silhouette edge.
-      //   With AdditiveBlending: face-on pixels stack many cylinder slabs
-      //   so the perceived center is brightest, and the silhouette edge
-      //   is where the fresnel halo sits.
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float facing = abs(dot(normalize(vNormal), viewDir));',
-      '  float core = pow(facing, 1.4);',
-      '  float halo = pow(1.0 - facing, 2.2);',
-      // Longitudinal crackle. vUv.y goes 0..1 along the cylinder length ;
-      // vUv.x wraps around the circumference. Two octaves of cheap value
-      // noise advected along the beam axis give a continuous energy churn
-      // without paying for a real FBM.
-      '  float n1 = noise2(vec2(vUv.y * 14.0 - time * 4.5, vUv.x * 7.0));',
-      '  float n2 = noise2(vec2(vUv.y * 32.0 - time * 9.0, vUv.x * 5.0 + 12.3));',
-      '  float crackle = n1 * 0.6 + n2 * 0.4;',
-      // Traveling pulse: a sin wave moving along the beam axis biases the
-      // alpha so the eye reads "energy pumping toward the target" rather
-      // than a static tube.
-      '  float pulse = 0.5 + 0.5 * sin(vUv.y * 26.0 - time * 16.0);',
-      // Color stack: white-hot innermost, hot orange halo, deep red rim.
-      '  vec3 coreCol = vec3(1.00, 0.96, 0.78) * 3.4;',
-      '  vec3 hotCol  = vec3(1.00, 0.55, 0.18) * 2.4;',
-      '  vec3 redCol  = vec3(0.95, 0.18, 0.04) * 1.5;',
-      '  vec3 col = coreCol * core',
-      '           + hotCol  * (halo + crackle * 0.45) * (0.85 + pulse * 0.30)',
-      '           + redCol  * halo * 0.55;',
-      // Soft fade at the very ends of the cylinder so the beam doesn't
-      // terminate in a hard rectangle.
-      '  float endFade = smoothstep(0.0, 0.05, vUv.y) * smoothstep(1.0, 0.93, vUv.y);',
-      '  float alpha = (core * 0.85 + halo * 0.70 + crackle * 0.25) * endFade * uIntensity;',
-      '  alpha = clamp(alpha, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col, alpha);',
-      '}',
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide, // visible from inside too if camera ever clips into it
-  });
-}
-
-// (v6.9) Unified spiral cone shader, used by BOTH Pyro Thermal Shield
-// (fire spiraling outward) and Vortex Shield (electric energy spiraling
-// inward). Same geometry (ConeGeometry, apex at ship, base flared
-// forward) ; the only differences are the direction of spiral animation
-// and the color stack. Sits invisible itself except for the painted
-// spiral arms so the cone shape is implied by the rotating bands.
-//
-// Key uniform: uDirection. +1 = arms travel apex -> base over time
-// (outward, Pyro). -1 = arms travel base -> apex over time (inward,
-// Vortex). Phase math: phase = arms*theta - twist*axisT*direction +
-// spin*time ; flipping the direction flips the apparent travel.
-//
-// Brightness boost lives at the matching end of the cone:
-//   outward: bright at the wide tip (where fire blasts out)
-//   inward:  bright at the apex (where energy converges at the ship)
-//
-// Other uniforms: uHotColor / uMidColor / uCoolColor pick the palette
-// (fire = white-yellow / orange / deep red ; electric = white-cyan /
-// purple / deep blue). uIntensity is the alpha gate driven by HP.
-function _makeSpiralConeMaterial(opts) {
-  opts = opts || {};
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uIntensity: { value: 1.0 },
-      uHotColor:  { value: new THREE.Color(opts.hotColor || 0xffffcc) },
-      uMidColor:  { value: new THREE.Color(opts.midColor || 0xff8833) },
-      uCoolColor: { value: new THREE.Color(opts.coolColor || 0x882200) },
-      uDirection: { value: (typeof opts.direction === 'number') ? opts.direction : 1.0 },
-      uArms:      { value: opts.arms || 5.0 },
-      uTwist:     { value: opts.twist || 6.0 },
-      uSpinSpeed: { value: opts.spinSpeed || 2.2 },
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  vNormal = normalize(normalMatrix * normal);',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform float uIntensity;',
-      'uniform vec3 uHotColor;',
-      'uniform vec3 uMidColor;',
-      'uniform vec3 uCoolColor;',
-      'uniform float uDirection;',
-      'uniform float uArms;',
-      'uniform float uTwist;',
-      'uniform float uSpinSpeed;',
-      'varying vec2 vUv;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'void main() {',
-      // ConeGeometry default UVs: vUv.x wraps around the circumference
-      // (0..1), vUv.y runs from base (0) to apex (1). Convert to:
-      // axisT = 0 at apex (ship-side), 1 at base (forward tip).
-      '  float axisT = 1.0 - vUv.y;',
-      '  float theta = vUv.x * 6.28318530718;',
-      // Spiral phase. uDirection sign flips outward / inward animation.
-      '  float phase = uArms * theta - uTwist * axisT * uDirection + uSpinSpeed * time;',
-      '  float armWave = 0.5 + 0.5 * sin(phase);',
-      '  armWave = pow(armWave, 2.4);',
-      // End-brightness: bright at the *destination* end of the spiral.
-      // Outward: tip is bright (fire blasting out). Inward: apex is
-      // bright (energy converging at ship).
-      '  float endBrightness = (uDirection > 0.0)',
-      '    ? smoothstep(0.85, 1.00, axisT)',
-      '    : smoothstep(0.15, 0.00, axisT);',
-      // Color blend by arm intensity. Cool->mid->hot as the arm peaks.
-      '  vec3 col = mix(uCoolColor, uMidColor, armWave);',
-      '  col = mix(col, uHotColor, armWave * armWave * 0.65);',
-      // Fresnel rim for volumetric read on the cone silhouette.
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - clamp(dot(normalize(vNormal), viewDir), 0.0, 1.0), 2.0);',
-      '  float intensity = armWave * 0.85 + endBrightness * 0.55 + fres * 0.30 + 0.04;',
-      '  intensity *= uIntensity;',
-      // Alpha: spiral arms are the visible bands ; valleys are nearly
-      // see-through, so the cone reads as the moving spiral and the
-      // geometry itself stays invisible.
-      '  float alpha = clamp(armWave * 0.85 + fres * 0.25 + endBrightness * 0.35, 0.0, 0.92);',
-      '  gl_FragColor = vec4(col * intensity * 1.4, alpha);',
-      '}',
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
 }
 
 // ============================================================
@@ -6148,141 +5778,11 @@ function _makeSpiralConeMaterial(opts) {
 // inlined per factory (no #include / no chunk system since Three.js r128
 // doesn't expose them cleanly for ShaderMaterial without ONBeforeCompile).
 
-// ---- Engine plume (cone) ----------------------------------------------
-// Animated plasma exhaust along the cone's axis. Bright hot core at the
-// engine end fades along the cone toward the tip; FBM noise scrolls
-// along the axis at uThrottle-modulated speed. uColor sets the warm
-// outer tint; hot core stays white-blue. UV.y goes 0 (cone tip /
-// far end) â†’ 1 (cone base / engine end) for ConeGeometry rotated so its
-// axis is +Z.
-function _makePlumeShaderMaterial(baseColor, baseAlpha) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:       { value: 0 },
-      uColor:     { value: new THREE.Color(baseColor) },
-      uBaseAlpha: { value: (typeof baseAlpha === 'number') ? baseAlpha : 0.55 },
-      uThrottle:  { value: 0.0 },
-    },
-    vertexShader: [
-      'varying vec3 vLocal;',
-      'varying vec2 vUv;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vUv = uv;',
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uBaseAlpha;',
-      'uniform float uThrottle;',
-      'varying vec3 vLocal;',
-      'varying vec2 vUv;',
-      // Cheap value noise + 3-octave FBM. Just enough for plume turbulence.
-      'float hash21(vec2 p) {',
-      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
-      '}',
-      'float vnoise(vec2 p) {',
-      '  vec2 i = floor(p); vec2 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  float a = hash21(i + vec2(0,0));',
-      '  float b = hash21(i + vec2(1,0));',
-      '  float c = hash21(i + vec2(0,1));',
-      '  float d = hash21(i + vec2(1,1));',
-      '  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);',
-      '}',
-      'float fbm(vec2 p) {',
-      '  float v = 0.0; float a = 0.5;',
-      '  for (int i = 0; i < 3; i++) { v += a * vnoise(p); p *= 2.1; a *= 0.5; }',
-      '  return v;',
-      '}',
-      'void main() {',
-      // For the cone geometry (radius 1 at base, 0 at tip, axis +Z), the
-      // local XY plane gives the radial position; local Z gives axis.
-      // We work in a reconstructed (axisFrac, theta) space.
-      '  float r = length(vLocal.xy);',
-      '  float axisFrac = clamp(vUv.y, 0.0, 1.0);', // 0 = base (engine), 1 = tip
-      '  float theta = atan(vLocal.y, vLocal.x);',
-      // Scrolling FBM along axis. Speed scales with throttle so a stationary
-      // ship has subtle bubbling, full throttle has fast streaks.
-      '  float scroll = time * (1.5 + uThrottle * 4.0);',
-      '  float n1 = fbm(vec2(theta * 1.8, axisFrac * 4.0 - scroll));',
-      '  float n2 = fbm(vec2(theta * 3.2 + 1.7, axisFrac * 6.5 - scroll * 1.6));',
-      '  float turbulence = mix(n1, n2, 0.55);',
-      // Core hotness: bright white-blue at the base center, fading along axis.
-      '  float coreHot = pow(1.0 - axisFrac, 1.8) * (1.0 - r);',
-      '  vec3 hotCore = vec3(1.0, 1.0, 1.05);',
-      '  vec3 plasma  = mix(uColor, hotCore, coreHot);',
-      // Brightness: turbulence-modulated, fades along axis.
-      '  float bright = (0.40 + turbulence * 0.85) * (1.0 - axisFrac * 0.85);',
-      '  bright *= (0.55 + 0.45 * uThrottle);',
-      // Radial falloff so the cone edge fades softly instead of hard cutting.
-      '  float radial = 1.0 - smoothstep(0.65, 1.0, r);',
-      '  bright *= radial;',
-      '  vec3 col = plasma * bright * 1.4;',
-      '  float alpha = bright * uBaseAlpha * (0.85 + 0.15 * uThrottle);',
-      '  if (alpha < 0.02) discard;',
-      '  gl_FragColor = vec4(col, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Engine glow disc (circle) ----------------------------------------
-// Pulsing radial disc with internal swirl. Used for the engine "back of
-// nozzle" glow. Bright hot center, colored outer ring, slow rotating
-// spiral pattern, throttle-driven brightness.
-function _makeEngineDiscMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:      { value: 0 },
-      uColor:    { value: new THREE.Color(baseColor) },
-      uThrottle: { value: 0.0 },
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'void main() {',
-      '  vUv = uv;',
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uThrottle;',
-      'varying vec2 vUv;',
-      'void main() {',
-      '  vec2 p = vUv * 2.0 - 1.0;',
-      '  float r = length(p);',
-      '  if (r > 1.0) discard;',
-      '  float theta = atan(p.y, p.x);',
-      // Hot center â†’ colored ring â†’ fade out at edge.
-      '  float center = 1.0 - smoothstep(0.0, 0.45, r);',
-      '  float ring   = exp(-pow((r - 0.55) * 4.0, 2.0));',
-      '  float edgeFade = 1.0 - smoothstep(0.85, 1.0, r);',
-      // Slow rotating spiral pattern: brightness modulated by a function
-      // of theta and r so we get a 3-arm pinwheel look.
-      '  float spiral = 0.5 + 0.5 * sin(theta * 3.0 + r * 8.0 - time * 2.0);',
-      '  spiral = mix(0.65, 1.0, spiral); // never fully dark',
-      '  float pulse = 0.85 + 0.15 * sin(time * 4.0);',
-      '  vec3 hot   = vec3(1.0, 1.0, 1.05);',
-      '  vec3 col = mix(uColor * 1.4, hot, center * 0.85);',
-      '  float bright = (center * 1.6 + ring * 1.2) * spiral * pulse * edgeFade;',
-      '  bright *= (0.6 + 0.4 * uThrottle);',
-      '  gl_FragColor = vec4(col * bright, bright);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
+// (v14c) _makePlumeShaderMaterial and _makeEngineDiscMaterial were ported
+// to the LayeredFX 'engine_plume' / 'engine_disc' presets. See
+// EFFECT_PRESETS below and the buildModelShipMesh / procedural-fallback
+// callsites that use _makeFXMaterial(...). Throttle modulation is now
+// driven by uIntensity from animateShipMesh.
 
 // ---- Stasis field core (sphere) ---------------------------------------
 // Vortex/time-distortion energy. Concentric spiraling bands rotating
@@ -6343,216 +5843,8 @@ function _makeStasisCoreMaterial(baseColor) {
   });
 }
 
-// ---- Orb core (sphere) ------------------------------------------------
-// Energy bead for trip-wire mines and similar small "armed" markers.
-// Tighter spirals than stasis core, stronger pulse, brighter center
-// so the orb reads as a charged-up node from any distance.
-function _makeOrbCoreMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-      uPulse: { value: 1.0 },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uPulse;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      '  float phi = atan(n.z, n.x);',
-      '  float theta = acos(clamp(n.y, -1.0, 1.0));',
-      // High-frequency crackle pattern.
-      '  float c1 = 0.5 + 0.5 * sin(theta * 18.0 + phi * 7.0 + time * 6.0);',
-      '  float c2 = 0.5 + 0.5 * sin(theta * 11.0 - phi * 13.0 - time * 4.5);',
-      '  float crackle = pow(c1 * c2, 0.6);',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.0);',
-      '  float pulse = 0.7 + 0.5 * sin(time * 3.5 * uPulse);',
-      '  vec3 hot = vec3(1.0, 1.0, 1.0);',
-      '  vec3 col = mix(uColor, hot, crackle * 0.6 + fres * 0.3);',
-      '  float bright = (0.6 + crackle * 0.8) * pulse + fres * 1.4;',
-      '  float alpha = clamp(0.6 + fres * 0.6, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Gravity halo (sphere) --------------------------------------------
-// Concentric inward-collapsing rings on a sphere shell. Used for the
-// Tether Trap halo so the trap reads as a gravitational ensnare instead
-// of a flat blue ball. Rings march inward over time.
-function _makeGravityHaloMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      // Distance from "polar axis" (we use Y) drives concentric bands.
-      // Bands march inward (toward y=Â±1, the poles) over time so they read
-      // as gravitational lensing pulling matter toward the trap center.
-      '  float lat = abs(n.y);', // 0 at equator â†’ 1 at poles
-      '  float bands = 0.5 + 0.5 * sin(lat * 14.0 - time * 3.0);',
-      '  bands = pow(bands, 2.5);',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 1.8);',
-      '  vec3 col = uColor * (0.6 + bands * 1.5);',
-      '  float bright = bands * 0.9 + fres * 1.2;',
-      '  float alpha = clamp(0.3 + fres * 0.5 + bands * 0.25, 0.0, 0.95);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Missile body (sphere/icosa) --------------------------------------
-// Internal energy churn for the cluster missile body. Surface seams glow
-// brighter as it nears detonation (uChargeUp 0..1 driven externally).
-function _makeMissileBodyMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:      { value: 0 },
-      uColor:    { value: new THREE.Color(baseColor) },
-      uChargeUp: { value: 0.0 },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uChargeUp;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      '  float phi = atan(n.z, n.x);',
-      '  float theta = acos(clamp(n.y, -1.0, 1.0));',
-      // Seam pattern: high-frequency stripes around the body, plus
-      // turbulent noise that strengthens with chargeUp.
-      '  float seams = 0.5 + 0.5 * sin(theta * 22.0 + phi * 4.0 + time * 1.5);',
-      '  seams = smoothstep(0.78, 1.0, seams);',
-      '  float churn = 0.5 + 0.5 * sin(theta * 6.0 - phi * 5.0 + time * (3.0 + uChargeUp * 4.0));',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.0);',
-      '  vec3 hot = vec3(1.0, 0.92, 0.85);',
-      '  vec3 surface = mix(uColor * 0.5, uColor * 1.5, churn);',
-      '  vec3 col = mix(surface, hot, seams * (0.4 + uChargeUp * 0.6));',
-      '  float bright = 0.55 + churn * 0.4 + seams * (0.6 + uChargeUp * 1.2) + fres * 0.6;',
-      '  float alpha = clamp(0.85 + fres * 0.15, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Projectile glow (sphere) -----------------------------------------
-// Soft internal flow + radial fresnel for the inner glow halo around
-// projectiles. Replaces the flat additive sphere with a sphere that
-// has internal motion (subtle plasma flow) so projectiles read as
-// energy balls rather than lit billiard balls.
-function _makeProjGlowMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-      uOpacity: { value: 0.65 },
-    },
-    vertexShader: [
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vLocal = position;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uOpacity;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'varying vec3 vLocal;',
-      'void main() {',
-      '  vec3 n = normalize(vLocal);',
-      '  float flow = 0.5 + 0.5 * sin(n.x * 8.0 + n.y * 7.0 + n.z * 6.0 + time * 4.0);',
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - max(dot(vNormal, viewDir), 0.0), 2.5);',
-      '  vec3 hot = vec3(1.0, 1.0, 1.0);',
-      '  vec3 col = mix(uColor, hot, flow * 0.35 + fres * 0.4);',
-      '  float bright = 0.7 + flow * 0.5 + fres * 1.0;',
-      '  float alpha = clamp(uOpacity + fres * 0.3, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
+// (v14c) _makeGravityHaloMaterial removed ; ported to LayeredFX
+// 'gravity_halo' preset. See spawnTetherTrap callsite below.
 
 // ---- LayeredFXMaterial (v11) ------------------------------------------
 // Generalized 3-layer composite shader for volumetric / surface FX
@@ -6576,6 +5868,11 @@ const _LAYERED_FX_VERT = [
   'varying vec3 vWorldPos;',
   'varying vec3 vNormal;',
   'varying vec3 vViewDir;',
+  // (v14c Tranche 1.5b) UV varying for axial-gradient effects on cone /
+  // cylinder geometries. ConeGeometry side UVs: vUv.y = 0 at the base,
+  // 1 at the apex. CylinderGeometry side UVs: same convention. Used by
+  // the fragment shader's axial-falloff and axial-core-color logic.
+  'varying vec2 vUv;',
   // (v11b) Vertex displacement: each surface point pushes outward along its
   // normal by a noise-driven amount, giving the FX sphere an organic /
   // billowy / flame-tongue silhouette instead of a smooth perfect ball.
@@ -6630,6 +5927,7 @@ const _LAYERED_FX_VERT = [
   '  vNormal = normalize(normalMatrix * n);',
   '  vec4 mvp = viewMatrix * wp;',
   '  vViewDir = normalize(-mvp.xyz);',
+  '  vUv = uv;',
   '  gl_Position = projectionMatrix * mvp;',
   '}',
 ].join('\n');
@@ -6639,10 +5937,32 @@ const _LAYERED_FX_FRAG = [
   'varying vec3 vWorldPos;',
   'varying vec3 vNormal;',
   'varying vec3 vViewDir;',
+  // (v14c Tranche 1.5b) UV from vertex shader for axial-gradient effects.
+  'varying vec2 vUv;',
   'uniform float uTime;',
   'uniform vec3  uBaseColor;',
   'uniform float uFresnel;',
   'uniform float uBrightness;',
+  // (v14c Tranche 1.5b) Axial-gradient uniforms for cone/cylinder geometries.
+  // uAxialFalloff scales output color by (1 - vUv.y * uAxialFalloff) so the
+  // fragment darkens linearly along the axis (vUv.y=0 -> full bright at base,
+  // vUv.y=1 -> multiplied by (1 - uAxialFalloff) at apex). Default 0 = off,
+  // legacy behavior. uAxialCoreColor / uAxialCoreStrength / uAxialCoreFalloff
+  // blend the output toward a hot-core color at the base (vUv.y near 0):
+  //   axialT = pow(1 - vUv.y, uAxialCoreFalloff) * uAxialCoreStrength
+  //   color = mix(color, uAxialCoreColor, axialT)
+  // Both effects are zero-cost when their controlling scalars are 0.
+  'uniform float uAxialFalloff;',
+  'uniform vec3  uAxialCoreColor;',
+  'uniform float uAxialCoreStrength;',
+  'uniform float uAxialCoreFalloff;',
+  // (v14a Tranche 1.5) Per-instance intensity scalar. Defaults to 1.0 (preset
+  // unchanged). Effects with gameplay-meaningful state (engine throttle,
+  // tether-trap pulse rate, beam spool-up/down, etc.) write to this uniform
+  // each frame to scale the animation rate proportionally. uIntensity = 0
+  // means "effect is dormant" (frozen patterns); = 1 is the preset's natural
+  // tempo; > 1 speeds up. The shader multiplies it into per-layer time rates.
+  'uniform float uIntensity;',
   // (v11 fix) uPosScale multiplies vWorldPos before the noise sample. The
   // fx_lab uses a unit-radius preview sphere ; in-game effects are tens to
   // hundreds of units across, so the same per-layer `scale` setting maps
@@ -6790,7 +6110,10 @@ const _LAYERED_FX_FRAG = [
   '  vec4 acc = vec4(0.0, 0.0, 0.0, 0.0);',
   '  for (int i = 0; i < 3; i++) {',
   '    vec3 q = p * uLayerScale[i];',
-  '    float t = uTime * uLayerTimeRate[i];',
+  // (v14a Tranche 1.5) Multiply by uIntensity so per-instance state cues
+  // (engine throttle, tether-trap pulse rate, beam spool) scale animation
+  // tempo proportionally. Default uIntensity = 1.0 leaves preset as-is.
+  '    float t = uTime * uLayerTimeRate[i] * uIntensity;',
   '    float v = samplePatternLFX(uLayerPattern[i], q + vec3(t * 0.1), t);',
   // (v11 fix) Clamp the V channel before hsv2rgb. Without the clamp,
   // brightness=3 layers push V to 3, which makes hsv2rgb output RGB
@@ -6837,6 +6160,13 @@ const _LAYERED_FX_FRAG = [
   '  }',
   '  acc.rgb += hitGlow;',
   '  acc.a = clamp(acc.a + hitAlpha * 0.85, 0.0, 1.0);',
+  // (v14c Tranche 1.5b) Axial-gradient post-pass for cone/cylinder presets.
+  // Cheap branch-free math ; both effects collapse to identity when their
+  // controlling scalars are 0 (default cfg), so legacy presets are byte-
+  // identical to pre-1.5b.
+  '  acc.rgb *= max(0.0, 1.0 - vUv.y * uAxialFalloff);',
+  '  float axialT = pow(max(0.0, 1.0 - vUv.y), uAxialCoreFalloff) * uAxialCoreStrength;',
+  '  acc.rgb = mix(acc.rgb, uAxialCoreColor, axialT);',
   '  gl_FragColor = acc;',
   '}',
 ].join('\n');
@@ -6873,7 +6203,14 @@ function _makeLayeredFXMaterial(preset) {
     baseColor: '#ffffff',
     fresnel: 0.3,
     brightness: 1.0,
+    intensity:  1.0, // (v14a) per-instance time-rate multiplier ; presets default to 1, callers override per frame for state-driven effects (engine throttle, tether pulse, beam spool)
     posScale: 1.0,   // (v11 fix) world-space sample-scale ; default keeps wall behavior
+    // (v14c Tranche 1.5b) Axial-gradient defaults. All zero = effect disabled,
+    // legacy presets unchanged. Cone/cylinder presets opt in by setting these.
+    axialFalloff:       0.0,        // 0 = off ; 0.85 = strong fade tip-ward (engine plume)
+    axialCoreColor:     '#ffffff',  // hot-core blend target at base
+    axialCoreStrength:  0.0,        // 0 = off ; 0.6 = moderate hot-core blend
+    axialCoreFalloff:   1.8,        // exponent on (1 - vUv.y) for core falloff
     // (v11b) Vertex displacement + soft-edge defaults. Off by default so
     // legacy materials (anything that doesn't opt in) stay byte-identical
     // to v11a's output. New EFFECT_PRESETS entries override these.
@@ -6894,7 +6231,12 @@ function _makeLayeredFXMaterial(preset) {
       uBaseColor:     { value: new THREE.Color(cfg.baseColor) },
       uFresnel:       { value: +cfg.fresnel },
       uBrightness:    { value: +cfg.brightness },
+      uIntensity:     { value: +cfg.intensity },
       uPosScale:      { value: +cfg.posScale },
+      uAxialFalloff:      { value: +cfg.axialFalloff },
+      uAxialCoreColor:    { value: new THREE.Color(cfg.axialCoreColor) },
+      uAxialCoreStrength: { value: +cfg.axialCoreStrength },
+      uAxialCoreFalloff:  { value: +cfg.axialCoreFalloff },
       // (v11b) New surface-shape uniforms. uTime is reused from above ;
       // these augment it.
       uDisplaceAmount: { value: +cfg.displaceAmount },
@@ -7008,10 +6350,20 @@ const EFFECT_PRESETS = {
     displaceAmount: 0.32,
     displaceFreq:   1.8,
     softEdge:       0.55,
+    // (v14c fix) Layer hue offsets reset to match `fireball` (0.05, 0.085,
+    // 0.245). The original 0.78/0.82/0.65 values were authored as if they
+    // would give "magenta accents" relative to the purple base, but the
+    // shader applies them as ADDITIVE offsets ; combined with the purple
+    // base hue (~0.83) they wrapped past 1.0 back into the blue-cyan range
+    // (0.61, 0.65, 0.48 after fract()), making the Vortex Trip Wire orbs
+    // read as blue. Using the same small warm-side offsets as `fireball`
+    // gives a true purple→magenta→pink palette : layers land at hues 0.88,
+    // 0.915, 0.075 ; magenta + pink + a small orange-subtract accent ;
+    // matches the original "warm fireball" recipe but anchored in purple.
     layers: [
-      { pattern: 2, scale: 0.8,  timeRate: 1.6,  hue: 0.78,  alpha: 1.0,  blend: 2, sat: 0.95 },
-      { pattern: 5, scale: 2.38, timeRate: 1.97, hue: 0.82,  alpha: 0.73, blend: 2, sat: 0.99 },
-      { pattern: 0, scale: 2.33, timeRate: 2.76, hue: 0.65,  alpha: 0.44, blend: 6, sat: 0.89 },
+      { pattern: 2, scale: 0.8,  timeRate: 1.6,  hue: 0.05,  alpha: 1.0,  blend: 2, sat: 0.95 },
+      { pattern: 5, scale: 2.38, timeRate: 1.97, hue: 0.085, alpha: 0.73, blend: 2, sat: 0.99 },
+      { pattern: 0, scale: 2.33, timeRate: 2.76, hue: 0.245, alpha: 0.44, blend: 6, sat: 0.89 },
     ],
   },
   // Drifting volumetric cloud with turbulence-mix front + soft FBM
@@ -7108,6 +6460,219 @@ const EFFECT_PRESETS = {
       { pattern: 1, scale: 0.6, timeRate: 1.4,  hue: 0.0,   alpha: 1.10, blend: 0, sat: 0.9  },
       { pattern: 5, scale: 1.8, timeRate: 2.10, hue: 0.92,  alpha: 0.95, blend: 2, sat: 0.95 },
       { pattern: 2, scale: 1.1, timeRate: 1.65, hue: 0.55,  alpha: 0.55, blend: 6, sat: 0.7  },
+    ],
+  },
+  // (v14a) Orb core. Replaces _makeOrbCoreMaterial. Used by Tether Trap
+  // central node (octahedron). The bespoke shader produced: high-freq
+  // sin-crackle in spherical (theta, phi) coords + fresnel rim + uPulse-
+  // modulated overall brightness pulse. Translated as ridges crackle
+  // base + stars high-freq pinpoints + plasma slow underlying breath.
+  // baseColor overridden per-instance from the spawn color; uIntensity
+  // is written each frame to 1.7 when the trap is triggered (faster
+  // crackle/pulse) and 1.0 when armed and waiting. Tranche 1.5's new
+  // uIntensity uniform is what makes the triggered/armed split possible.
+  orb_core: {
+    name: 'Orb Core',
+    baseColor: '#88ddff',
+    fresnel: 0.5,
+    brightness: 2.2,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.15,
+    layers: [
+      // Layer 1: ridges crackle base, ship-color-tinted (replace blend).
+      { pattern: 5, scale: 3.0, timeRate: 1.2, hue: 0.0, alpha: 1.0, blend: 0, sat: 0.85 },
+      // Layer 2: stars high-freq pinpoints screen-blended for static sparkle.
+      { pattern: 7, scale: 5.0, timeRate: 2.0, hue: 0.0, alpha: 0.6, blend: 3, sat: 0.00 },
+      // Layer 3: plasma slow underlying breath, multiplied for color glow.
+      { pattern: 1, scale: 1.5, timeRate: 0.8, hue: 0.0, alpha: 0.5, blend: 1, sat: 0.70 },
+    ],
+  },
+  // (v14a) Projectile inner glow halo. Replaces _makeProjGlowMaterial.
+  // Sphere geometry of radius ~7 around every projectile core ; one of the
+  // most-spawned LayeredFX materials in the game (every shot from every
+  // ship). The bespoke shader did: plasma sine flow + sharp fresnel rim +
+  // mix-to-white-hot at flow + fresnel peaks. Translated here as plasma
+  // base + a screen-blended desaturated highlight layer + a subtle FBM
+  // detail layer to break up the smooth sine. baseColor is overridden
+  // per-instance from Projectile.trailColor (per ship class). uPosScale
+  // is overridden per-instance to ~1/radius at construction so the noise
+  // patterns sample at the same visual frequency for any glow size.
+  proj_glow: {
+    name: 'Projectile Glow',
+    baseColor: '#ffffff',
+    fresnel: 0.9,
+    brightness: 1.8,
+    // Projectiles fly fast; displacement would alias into jitter, so off.
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.20,
+    layers: [
+      // Layer 1: ship-colored plasma flow (base, replace blend).
+      { pattern: 1, scale: 1.4, timeRate: 1.1, hue: 0.0, alpha: 1.0,  blend: 0, sat: 0.90 },
+      // Layer 2: white-hot screen highlight on flow peaks (sat=0 -> white).
+      { pattern: 1, scale: 1.4, timeRate: 1.1, hue: 0.0, alpha: 0.45, blend: 3, sat: 0.00 },
+      // Layer 3: micro-FBM detail, mild multiply darken to texture the sphere.
+      { pattern: 0, scale: 4.0, timeRate: 0.5, hue: 0.0, alpha: 0.20, blend: 1, sat: 0.70 },
+    ],
+  },
+  // (v14c) Engine glow disc. Replaces _makeEngineDiscMaterial. Bright
+  // pulsing disc at the engine bell ; bespoke had hot center + colored
+  // ring + 3-arm pinwheel spiral + uThrottle modulation. Translated as
+  // plasma base for the spiral flow, ridges for the ring/arm structure,
+  // stars accents for the hot pinpoints. baseColor overridden per-instance
+  // (teamColor for main glow vs 0x66eeff cyan for thrusters). uIntensity
+  // is written each frame from throttle (0..1.5+) to scale tempo.
+  engine_disc: {
+    name: 'Engine Disc',
+    baseColor: '#ffffff',
+    fresnel: 0.0,
+    brightness: 2.4,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.10,
+    layers: [
+      // Layer 1: plasma flow base, ship-tinted.
+      { pattern: 1, scale: 1.6, timeRate: 1.4, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.85 },
+      // Layer 2: ridges for spiral arms / ring structure.
+      { pattern: 5, scale: 2.4, timeRate: 1.8, hue: 0.04, alpha: 0.85, blend: 2, sat: 0.70 },
+      // Layer 3: stars highlight for hot pinpoint accents (sat=0 -> white).
+      { pattern: 7, scale: 4.0, timeRate: 1.0, hue: 0.0,  alpha: 0.45, blend: 3, sat: 0.00 },
+    ],
+  },
+  // (v14c) Engine plume cone. Replaces _makePlumeShaderMaterial. Bespoke
+  // featured a hot-white core at the cone base center, brightness fade
+  // toward the tip, throttle-modulated turbulence streaks. Uses the new
+  // (Tranche 1.5b) axial-gradient feature for the base->tip darkening AND
+  // hot-core blend at base. baseColor overridden per-instance per ship.
+  // uIntensity is written each frame from uThrottle so animation tempo
+  // tracks engine power.
+  engine_plume: {
+    name: 'Engine Plume',
+    baseColor: '#ff8844',
+    fresnel: 0.0,
+    brightness: 2.2,
+    intensity: 1.0,
+    // Tranche 1.5b: bright hot-white core at cone base (vUv.y=0), darkens
+    // toward apex (vUv.y=1).
+    axialFalloff:      0.85,
+    axialCoreColor:    '#ffffff',
+    axialCoreStrength: 0.6,
+    axialCoreFalloff:  1.8,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.30,
+    layers: [
+      // Layer 1: turbulence base ; the streaky plume flow.
+      { pattern: 2, scale: 1.4, timeRate: 2.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.85 },
+      // Layer 2: fbm broad churn, screen blended for soft hot pockets.
+      { pattern: 0, scale: 1.8, timeRate: 1.4, hue: 0.05, alpha: 0.55, blend: 3, sat: 0.50 },
+      // Layer 3: turbulence at higher freq, additive accents.
+      { pattern: 2, scale: 3.0, timeRate: 2.6, hue: 0.0,  alpha: 0.40, blend: 2, sat: 0.70 },
+    ],
+  },
+  // (v14c) Tether trap halo. Replaces _makeGravityHaloMaterial. Bespoke
+  // had concentric inward-collapsing rings reading as gravitational
+  // lensing on a sphere. Approximated with wave (concentric pattern) +
+  // ridges accents. Visual change is tolerated per spec ; consolidation,
+  // not pixel-perfect.
+  gravity_halo: {
+    name: 'Gravity Halo',
+    baseColor: '#55aadd',
+    fresnel: 0.7,
+    brightness: 1.8,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.30,
+    layers: [
+      // Layer 1: wave for the concentric collapsing-ring pattern.
+      { pattern: 4, scale: 3.5, timeRate: 1.5, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.85 },
+      // Layer 2: ridges for sharper band accents.
+      { pattern: 5, scale: 2.8, timeRate: 1.2, hue: 0.05, alpha: 0.65, blend: 2, sat: 0.80 },
+      // Layer 3: subtle plasma underbreath for energy depth.
+      { pattern: 1, scale: 1.0, timeRate: 0.6, hue: 0.0,  alpha: 0.35, blend: 1, sat: 0.70 },
+    ],
+  },
+  // (v14c) Stasis pickup shockwave ring. Replaces _makeShockwaveMaterial.
+  // Expanding chromatic-edge ring on torus. Bespoke had R/G/B channels
+  // offset for chromatic aberration + uAge fade. Approximated with wave
+  // pattern + uIntensity scaled from 1.0 (start) to 0.0 (end) by caller.
+  shockwave_ring: {
+    name: 'Shockwave Ring',
+    baseColor: '#00ddff',
+    fresnel: 0.8,
+    brightness: 2.6,
+    intensity: 1.0,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.25,
+    layers: [
+      // Layer 1: wave for the concentric ring look.
+      { pattern: 4, scale: 2.0, timeRate: 1.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.75 },
+      // Layer 2: ridges accent for chromatic-edge feel.
+      { pattern: 5, scale: 3.5, timeRate: 1.4, hue: 0.06, alpha: 0.65, blend: 3, sat: 0.85 },
+      // Layer 3: stars for sparkle highlights at peaks.
+      { pattern: 7, scale: 5.0, timeRate: 0.8, hue: 0.0,  alpha: 0.35, blend: 3, sat: 0.0  },
+    ],
+  },
+  // (v14c) Cluster distortion shell. Replaces the anonymous ShaderMaterial
+  // inside _buildDistortionShell. Chromatic shimmer hugging cluster bounds.
+  // Bespoke had cyan->magenta noise mix + fresnel rim. Approximated with
+  // caustic and plasma layers at different scales. Note: the shell is
+  // currently disabled at the call site (commented out); ported for
+  // consistency / future re-enable.
+  distortion_shell: {
+    name: 'Distortion Shell',
+    baseColor: '#4488ff',
+    fresnel: 0.85,
+    brightness: 1.6,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.45,
+    layers: [
+      // Layer 1: caustic for the shimmer / chromatic feel.
+      { pattern: 6, scale: 1.2, timeRate: 1.2, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.80 },
+      // Layer 2: plasma cross-flow for the cyan->magenta drift.
+      { pattern: 1, scale: 2.1, timeRate: 0.9, hue: 0.55, alpha: 0.75, blend: 5, sat: 0.85 },
+      // Layer 3: caustic at higher freq for finer detail.
+      { pattern: 6, scale: 3.5, timeRate: 1.5, hue: 0.10, alpha: 0.50, blend: 2, sat: 0.70 },
+    ],
+  },
+  // (v14c) Vortex Core Beam. Replaces _makeVortexCoreBeamMaterial. Cylinder
+  // geometry oriented along firing direction ; volumetric crackle/pulse
+  // for the Vortex Laser Core ability and the one-shot Laser Shot beam.
+  // Bespoke had white-hot core + orange halo + red rim + traveling pulse +
+  // crackle noise + uIntensity alpha gate. Translated as ridges (energy
+  // beam striations) + plasma (traveling pulse). uIntensity is the alpha
+  // gate written by both callsites (already matches LayeredFX semantics).
+  // Bright at one end via axialFalloff: very mild so the cylinder reads
+  // as a beam rather than a uniform tube.
+  core_beam: {
+    name: 'Vortex Core Beam',
+    // (v14c) Purple base tint to match LSS.CLASS_COLORS.VORTEX so the
+    // Vortex Laser Shot ability and Laser Core ability beams both read
+    // as purple energy beams instead of orange flame plumes.
+    baseColor: '#aa55ff',
+    fresnel: 0.4,
+    brightness: 3.0,
+    intensity: 1.0,
+    // Subtle taper from base to tip so the beam reads directional.
+    axialFalloff:      0.25,
+    axialCoreColor:    '#ffffff',
+    axialCoreStrength: 0.5,
+    axialCoreFalloff:  1.4,
+    displaceAmount: 0.0,
+    displaceFreq:   1.0,
+    softEdge:       0.20,
+    layers: [
+      // Layer 1: ridges for the longitudinal energy striations.
+      { pattern: 5, scale: 2.4, timeRate: 4.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.80 },
+      // Layer 2: plasma cross-flow as the traveling-pulse stand-in.
+      { pattern: 1, scale: 1.6, timeRate: 3.2, hue: 0.06, alpha: 0.75, blend: 2, sat: 0.85 },
+      // Layer 3: ridges high-freq, screen blend for white-hot crackle.
+      { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.0,  alpha: 0.55, blend: 3, sat: 0.0  },
     ],
   },
 };
@@ -7365,115 +6930,10 @@ function _makeHexHologramMaterial(baseColor) {
   });
 }
 
-// ---- Shockwave ring (torus / ring geometry) ---------------------------
-// Expanding shockwave with chromatic edge for stasis pickup and similar
-// "I just collected this" rings. uAge 0..1 drives the expansion; the ring
-// brightens at the leading edge.
-function _makeShockwaveMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-      uAge:   { value: 0.0 }, // 0 fresh, 1 fully expanded
-    },
-    vertexShader: [
-      'varying vec2 vUv;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vWorldPos = wp.xyz;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'uniform float uAge;',
-      'varying vec2 vUv;',
-      'varying vec3 vNormal;',
-      'varying vec3 vWorldPos;',
-      'void main() {',
-      // Torus UV.x wraps around the ring tube cross-section.
-      '  float r = abs(vUv.x - 0.5) * 2.0;', // 0 inside, 1 at edge
-      '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
-      '  float fres = pow(1.0 - abs(dot(vNormal, viewDir)), 1.8);',
-      // Chromatic edge: separate R/G/B channels at slight UV offsets.
-      '  float chR = 1.0 - smoothstep(0.0, 0.85, r + 0.12);',
-      '  float chG = 1.0 - smoothstep(0.0, 0.85, r);',
-      '  float chB = 1.0 - smoothstep(0.0, 0.85, r - 0.12);',
-      '  vec3 chroma = vec3(chR, chG, chB);',
-      '  vec3 col = uColor * 0.7 + chroma * 1.4 + vec3(fres);',
-      '  float fade = 1.0 - uAge;',
-      '  float bright = (chG * 1.4 + fres * 0.8) * fade;',
-      '  float alpha = clamp(bright * 0.85, 0.0, 1.0);',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-  });
-}
-
-// ---- Ribbon flow (plane / strip geometry) -----------------------------
-// UV-scrolling noise + brightness gradient for projectile trail ribbons.
-// Vertex colors (already on the existing ribbon geometry) act as the
-// fade-toward-tail; this shader adds internal motion so the trail reads
-// as a streaming energy filament instead of a stretched cylinder.
-function _makeRibbonFlowMaterial(baseColor) {
-  return new THREE.ShaderMaterial({
-    uniforms: {
-      time:   { value: 0 },
-      uColor: { value: new THREE.Color(baseColor) },
-    },
-    vertexShader: [
-      'attribute vec3 color;',
-      'varying vec2 vUv;',
-      'varying vec3 vColor;',
-      'void main() {',
-      '  vUv = uv;',
-      '  vColor = color;',
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);',
-      '}'
-    ].join('\n'),
-    fragmentShader: [
-      'uniform float time;',
-      'uniform vec3 uColor;',
-      'varying vec2 vUv;',
-      'varying vec3 vColor;',
-      'float hash21(vec2 p) {',
-      '  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);',
-      '}',
-      'float vnoise(vec2 p) {',
-      '  vec2 i = floor(p); vec2 f = fract(p);',
-      '  f = f * f * (3.0 - 2.0 * f);',
-      '  return mix(mix(hash21(i), hash21(i + vec2(1,0)), f.x),',
-      '             mix(hash21(i + vec2(0,1)), hash21(i + vec2(1,1)), f.x), f.y);',
-      '}',
-      'void main() {',
-      // Scroll along V (length axis of ribbon) so the trail visibly flows.
-      '  float scroll = time * 1.5;',
-      '  float n = vnoise(vec2(vUv.x * 6.0, vUv.y * 14.0 - scroll));',
-      // Cross-section soft falloff so the ribbon doesn\'t hard-edge.
-      '  float crossFade = 1.0 - pow(abs(vUv.x - 0.5) * 2.0, 2.0);',
-      '  vec3 col = uColor * (0.6 + n * 0.7) * vColor * 1.5;',
-      '  float bright = (0.5 + n * 0.7) * crossFade;',
-      '  float alpha = bright * 0.85;',
-      '  if (alpha < 0.02) discard;',
-      '  gl_FragColor = vec4(col * bright, alpha);',
-      '}'
-    ].join('\n'),
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    vertexColors: true,
-  });
-}
+// (v14c) _makeShockwaveMaterial removed ; ported to LayeredFX
+// 'shockwave_ring' preset. See StasisField.destroy callsite for the
+// per-instance overrides ; the stasis_pickup tick fades uIntensity +
+// uBrightness across lifetime.
 
 // (v6.7) Incendiary Gas spawn helper. Same broadcast=true/false pattern as
 // Trip Wire / Particle Wall.
@@ -7614,20 +7074,28 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
     timer: 15, rootDuration: 4, radius: 250, owner, team, triggered: false,
     ownerPeerId, netId,
   });
-  // Center: orb-core shader on an octahedron so the central node reads as
-  // a charged-up node (matches the rest of the visual vocabulary).
+  // (v14a) Center: orb_core LayeredFX preset on an octahedron so the
+  // central node reads as a charged-up node (matches the rest of the
+  // visual vocabulary). Replaces _makeOrbCoreMaterial. baseColor and
+  // uPosScale are written per-instance to match the spawn tint and
+  // the octahedron's circumradius. uTime is auto-ticked by _layeredFXTick.
   const tetherGeo = new THREE.OctahedronGeometry(14, 0);
-  const tetherMat = _makeOrbCoreMaterial(0x88ddff);
+  const tetherMat = _makeFXMaterial('orb_core');
+  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(LSS.CLASS_COLORS.PUNCTURE);
+  if (tetherMat.uniforms.uPosScale)  tetherMat.uniforms.uPosScale.value = 1.0 / 14;
   const tetherMesh = new THREE.Mesh(tetherGeo, tetherMat);
   tetherMesh.position.copy(pos);
   tetherMesh.renderOrder = 1;
   scene.add(tetherMesh);
-  // Halo around the trap: gravity-distortion shader (concentric rings
-  // marching inward toward the poles). Reads as gravitational lensing
-  // pulling matter toward the trap's center, which is what the trap
-  // mechanically does. Per-frame tether tick drives time uniform.
-  const haloGeo = new THREE.SphereGeometry(36, 24, 16);
-  const haloMat = _makeGravityHaloMaterial(0x55aadd);
+  // (v14c) Halo around the trap: LayeredFX 'gravity_halo' preset reads as
+  // gravitational lensing on a sphere shell. uBaseColor + uPosScale
+  // overridden per-instance ; uTime is auto-ticked by _layeredFXTick so
+  // no per-frame time write is needed.
+  const haloRadius = 36;
+  const haloGeo = new THREE.SphereGeometry(haloRadius, 24, 16);
+  const haloMat = _makeFXMaterial('gravity_halo');
+  if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(LSS.CLASS_COLORS.PUNCTURE);
+  if (haloMat.uniforms.uPosScale)  haloMat.uniforms.uPosScale.value = 1.0 / haloRadius;
   const haloMesh = new THREE.Mesh(haloGeo, haloMat);
   haloMesh.position.copy(pos);
   haloMesh.renderOrder = 1;
@@ -7716,17 +7184,20 @@ function spawnFirewallVisual(pos, dir, length, team, ownerPeerId, netId) {
   } catch (e) { /* visual best-effort */ }
 }
 
-// (v6.7) Particle burst for shotgun-style spread weapons (Puncture Leadwall
+// (v6.7) Particle burst for shotgun-style spread weapons (Slayer Leadwall
 // and any future spread mode). Each pellet calls this with its origin,
-// direction, and traveled-distance. Spawns ~12 fast-moving warm sparks that
+// direction, and traveled-distance. Spawns ~12 fast-moving sparks that
 // follow the pellet path with slight wobble, plus a brief flash at the
 // muzzle. Reads as a shotgun blast instead of a laser. The particles ride
 // the existing game.particles array (camera-facing sprites with the soft
 // ember falloff texture).
+// (v14c) Palette retoned to Slayer-green variants so the pellets read as
+// the class's identity color instead of the original mixed-warm look. If
+// another class ever uses spread mode, lift this into a parameter.
 function spawnPelletBurst(origin, dir, distance) {
   if (!origin || !dir) return;
   const partCount = 12;
-  const palette = [0xffaa44, 0xffcc66, 0xffeebb, 0xff7733];
+  const palette = [0x44ff66, 0x88ffaa, 0xccffdd, 0x22cc44];
   const baseSpeed = Math.min(1400, Math.max(600, (distance || 600) * 1.6));
   for (let p = 0; p < partCount; p++) {
     const wobble = new THREE.Vector3(
@@ -7751,9 +7222,9 @@ function spawnPelletBurst(origin, dir, distance) {
       size: 2.4 + Math.random() * 2.2,
     });
   }
-  // Warm muzzle flash so the gun reads as firing.
+  // (v14c) Slayer-green muzzle flash so the gun reads as firing in class color.
   if (typeof spawnDynamicLight === 'function') {
-    spawnDynamicLight(origin, 0xffaa44, 1.6, 110, 0.2);
+    spawnDynamicLight(origin, LSS.CLASS_COLORS.SLAYER, 1.6, 110, 0.2);
   }
 }
 
@@ -7762,14 +7233,17 @@ function spawnPelletBurst(origin, dir, distance) {
 // reuse existing helpers (spawnDynamicLight, spawnTracer, spawnLightningBolt,
 // game.particles) to keep the visual vocabulary consistent.
 function chassisFlashColor(key) {
+  // (v14c) Per-class muzzle / tracer identity tints sourced from
+  // LSS.CLASS_COLORS so weapons / abilities / cores all read with the
+  // same class-themed palette.
   switch (key) {
-    case 'VORTEX':   return 0x44ddff;  // cyan, Splitter Rifle
-    case 'PYRO':     return 0xff7733;  // orange, T-203 Thermite
-    case 'SLAYER':   return 0xffaa44;  // amber, Leadwall (shotgun)
-    case 'PUNCTURE': return 0xeeff66;  // yellow-white, Plasma Railgun
-    case 'TRACKER':  return 0xff9944;  // amber-orange, 40mm Tracker
-    case 'BLASTER':  return 0xffcc44;  // gold, Predator Cannon
-    case 'SYPHON':   return 0x44ffaa;  // cyan-green, XO-16 Chaingun
+    case 'VORTEX':   return LSS.CLASS_COLORS.VORTEX;   // purple, Splitter Rifle
+    case 'PYRO':     return LSS.CLASS_COLORS.PYRO;     // red,    T-203 Thermite
+    case 'SLAYER':   return LSS.CLASS_COLORS.SLAYER;   // green,  Leadwall (shotgun)
+    case 'PUNCTURE': return LSS.CLASS_COLORS.PUNCTURE; // yellow, Plasma Railgun
+    case 'TRACKER':  return LSS.CLASS_COLORS.TRACKER;  // orange, 40mm Tracker
+    case 'BLASTER':  return LSS.CLASS_COLORS.BLASTER;  // cyan,   Predator Cannon
+    case 'SYPHON':   return LSS.CLASS_COLORS.SYPHON;   // blue,   XO-16 Chaingun
     default:         return 0xffffaa;
   }
 }
@@ -7826,7 +7300,7 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
     // heavy 1000-damage hitscan shot. Reads as a charged-up shot.
     if (typeof spawnLightningBolt === 'function') {
       const tip = pos.clone().add(dir.clone().multiplyScalar(140));
-      spawnLightningBolt(pos, tip, 0xeeff66, 0.18, 2, 1.8);
+      spawnLightningBolt(pos, tip, LSS.CLASS_COLORS.PUNCTURE, 0.18, 2, 1.8);
     }
   } else if (loadoutKey === 'SLAYER') {
     // Leadwall (shotgun): wide quick burst of warm sparks. The per-pellet
@@ -7884,7 +7358,7 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
       });
     }
   }
-  // VORTEX uses just the universal flash; the cyan tracer beam already
+  // VORTEX uses just the universal flash; the purple tracer beam already
   // carries the weapon's identity downrange.
 }
 
@@ -8111,6 +7585,41 @@ function spawnNetworkProjectile(data, fromPeerId) {
   if (data.salvoGuided)    proj.salvoGuided    = true;
   if (data.isPyroThermite) proj.isPyroThermite = true;
   if (data.isSonar)        proj.isSonar        = true;
+  // Apply smoke trail / haze removal to mirror the heavy projectile
+  // weapons + cores on receiver views. Branching uses the replicated flags
+  // carried by the broadcaster (see broadcastAbilityProjectile /
+  // fireProjectile). Skipped on Sonar beacon and Arc Wave only.
+  if (!data.isSonar && !data.isArcWave) {
+    if (data.isPyroThermite) {
+      // Pyro main (T-203 Thermite)
+      proj.smokeTrail = true;
+      proj.removeHaze();
+    } else if (data.isCluster) {
+      // Puncture Cluster Missile ability
+      proj.smokeTrail = true;
+      proj.removeHaze();
+    } else if (data.tracking) {
+      // Tracker Rockets ability
+      proj.smokeTrail = true;
+      proj.removeHaze();
+    } else if (data.salvoGuided) {
+      // Tracker Salvo Core (remote-guided missile volley)
+      proj.smokeTrail = true;
+      proj.removeHaze();
+    } else if (color === LSS.CLASS_COLORS.SYPHON) {
+      // Syphon Rocket Salvo (no flag, distinctive class-blue color) ; keep haze.
+      proj.smokeTrail = true;
+    } else if (color === LSS.CLASS_COLORS.PUNCTURE) {
+      // Puncture Barrage Core periodic rockets (no flag, class-yellow color).
+      proj.smokeTrail = true;
+      proj.removeHaze();
+    } else if (color === LSS.CLASS_COLORS.TRACKER) {
+      // Tracker 40mm main / fallback for plain heavy projectiles ; the
+      // Pyro main path with isPyroThermite already branched above.
+      proj.smokeTrail = true;
+      proj.removeHaze();
+    }
+  }
   game.projectiles.push(proj);
   // (v6.7) Chassis-specific muzzle flash for peers viewing a projectile-mode
   // weapon firing (Pyro thermite, Tracker 40mm, etc.). Reuse loadoutKey from
@@ -11592,22 +11101,25 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   group.add(model);
   group.userData.hullMats = hullMats;
 
-  // Engine + plume materials. Engine glow disc + plume cones now use
-  // ShaderMaterial factories with internal animation (radial pulse,
-  // scrolling exhaust noise) so engines read as live combustion instead
-  // of flat additive shapes. Time + uThrottle are bumped per frame in
-  // animateShipMesh from each ship's accelerating/coasting state.
-  const engineGlowMat = _makeEngineDiscMaterial(teamColor);
-  const thrusterMat   = _makeEngineDiscMaterial(0x66eeff);
+  // Engine + plume materials. (v14c) Engine glow disc + plume cones now
+  // use the LayeredFX 'engine_disc' / 'engine_plume' presets ; per-instance
+  // uBaseColor overrides give each ship its team tint vs cyan thruster.
+  // animateShipMesh writes uIntensity per-frame from the throttle ramp.
+  const engineGlowMat = _makeFXMaterial('engine_disc');
+  if (engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
+  const thrusterMat   = _makeFXMaterial('engine_disc');
+  if (thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
   // Panel glow stays as a flat additive material â€” small surface area,
   // close to the hull, doesn't benefit much from internal animation.
   const panelGlowMat = new THREE.MeshBasicMaterial({
     color: teamColor, transparent: true, opacity: 0.85,
     blending: THREE.AdditiveBlending, depthWrite: false
   });
-  const plumeMat     = _makePlumeShaderMaterial(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.55);
-  const plumeMatCool = _makePlumeShaderMaterial(0xaaeeff, 0.55);
-  // Track these so animateShipMesh can bump time + throttle each frame.
+  const plumeMat     = _makeFXMaterial('engine_plume');
+  if (plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
+  const plumeMatCool = _makeFXMaterial('engine_plume');
+  if (plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
+  // Track these so animateShipMesh can bump uIntensity each frame.
   group.userData.shaderEngineMats = [engineGlowMat, thrusterMat, plumeMat, plumeMatCool];
 
   // Engine layout per chassis. Anchor tail to the model's +Z bbox edge so
@@ -11840,17 +11352,22 @@ function createShipMesh(chassisData, teamColor, loadoutKey) {
   group.userData.cockpitBaseEmissiveIntensity = 1.4;
   // Register hull material so doomed-state darkening can dim the silhouette.
   group.userData.hullMat = hullMat;
-  // Procedural-fallback engine + plume materials. Same shader treatment
-  // as the GLB path (see buildModelShipMesh) so the two paths look
-  // identical from outside.
-  const engineGlowMat = _makeEngineDiscMaterial(teamColor);
-  const thrusterMat   = _makeEngineDiscMaterial(0x66eeff);
+  // Procedural-fallback engine + plume materials. (v14c) Same LayeredFX
+  // 'engine_disc' / 'engine_plume' presets as the GLB path (see
+  // buildModelShipMesh) so the two render paths look identical from
+  // outside. Per-instance uBaseColor overrides give each ship its tint.
+  const engineGlowMat = _makeFXMaterial('engine_disc');
+  if (engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
+  const thrusterMat   = _makeFXMaterial('engine_disc');
+  if (thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
   const panelGlowMat = new THREE.MeshBasicMaterial({
     color: teamColor, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending,
     depthWrite: false
   });
-  const plumeMat     = _makePlumeShaderMaterial(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35), 0.55);
-  const plumeMatCool = _makePlumeShaderMaterial(0xaaeeff, 0.55);
+  const plumeMat     = _makeFXMaterial('engine_plume');
+  if (plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
+  const plumeMatCool = _makeFXMaterial('engine_plume');
+  if (plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
   group.userData.shaderEngineMats = [engineGlowMat, thrusterMat, plumeMat, plumeMatCool];
 
   // Helper: build a tapered engine plume cone at (x,y,z) extending +z (out the back).
@@ -12541,16 +12058,19 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
     mesh.userData.cockpitMat.emissiveIntensity = base * (1 + pulse - 0.05);
   }
   // Engines: drive shader uniforms (or opacity for legacy basic mat) plus
-  // scale with speed. Shader path uses uThrottle to ramp internal
-  // brightness; legacy path mutates material.opacity directly.
+  // scale with speed. (v14c) LayeredFX path uses uIntensity to scale
+  // animation tempo (replaces bespoke uThrottle) ; uTime is auto-ticked
+  // by _layeredFXTick so no time write needed here. Legacy fallback path
+  // mutates material.opacity directly.
   if (mesh.userData.engineGlows) {
     for (const glow of mesh.userData.engineGlows) {
       if (glow.material && glow.material.uniforms) {
-        glow.material.uniforms.time.value = time;
-        if (glow.material.uniforms.uThrottle) {
-          // Smooth throttle write so the disc doesn't snap when t jitters.
-          const prev = glow.material.uniforms.uThrottle.value;
-          glow.material.uniforms.uThrottle.value = prev + (t - prev) * 0.15;
+        if (glow.material.uniforms.uIntensity) {
+          // Smooth intensity write so the disc doesn't snap when t jitters.
+          // 0.5..1.5 range so idle reads dim and full throttle reads vivid.
+          const prev = glow.material.uniforms.uIntensity.value;
+          const target = 0.5 + t * 1.0;
+          glow.material.uniforms.uIntensity.value = prev + (target - prev) * 0.15;
         }
       } else if (glow.material && typeof glow.material.opacity === 'number') {
         const baseOp = 0.45 + t * 0.55;
@@ -12570,15 +12090,14 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       const flicker = 1 + Math.sin(time * 22 + plume.position.x * 0.5) * 0.12;
       const opCurve = Math.max(0, t * t * 1.15 + (t > 0.02 ? 0.05 : 0));
       if (plume.material && plume.material.uniforms) {
-        // Shader plume: drive time + uThrottle (which the fragment uses to
-        // scale internal brightness, scroll speed, alpha). The opCurve and
-        // flicker still feed in via uThrottle so the perceived brightness
-        // matches the legacy path.
-        plume.material.uniforms.time.value = time;
-        if (plume.material.uniforms.uThrottle) {
-          const prev = plume.material.uniforms.uThrottle.value;
+        // (v14c) LayeredFX plume: drive uIntensity (replaces bespoke
+        // uThrottle). The opCurve and flicker still feed in so the
+        // perceived brightness matches the legacy path. uTime is
+        // auto-ticked by _layeredFXTick.
+        if (plume.material.uniforms.uIntensity) {
+          const prev = plume.material.uniforms.uIntensity.value;
           const target = Math.min(1.5, opCurve * flicker * 1.5);
-          plume.material.uniforms.uThrottle.value = prev + (target - prev) * 0.15;
+          plume.material.uniforms.uIntensity.value = prev + (target - prev) * 0.15;
         }
       } else if (plume.material && typeof plume.material.opacity === 'number') {
         const baseOp = (plume.userData.basePlumeOpacity || 0.55);
@@ -13108,18 +12627,20 @@ class Bot {
       }
     } else if (ability.name === 'Cluster Missile') {
       const vel = aim.clone().multiplyScalar(900);
-      const proj = new Projectile(this.position.clone(), vel, 800, 200, 'bot', 0xff8800);
+      const proj = new Projectile(this.position.clone(), vel, 800, 200, 'bot', LSS.CLASS_COLORS.PUNCTURE);
       proj.cluster = true;
       proj.sizeMult = 2.4;
+      proj.smokeTrail = true;
+      proj.removeHaze();
       game.projectiles.push(proj);
     } else if (ability.name === 'Arc Wave') {
       const vel = aim.clone().multiplyScalar(800);
-      const proj = new Projectile(this.position.clone(), vel, 1200, 150, 'bot', 0x44ff66);
+      const proj = new Projectile(this.position.clone(), vel, 1200, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
       proj.isArcWave = true;
       game.projectiles.push(proj);
     } else if (ability.name === 'Power Shot') {
       const vel = aim.clone().multiplyScalar(1200);
-      const proj = new Projectile(this.position.clone(), vel, 1900, 100, 'bot', 0xffaa00);
+      const proj = new Projectile(this.position.clone(), vel, 1900, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
       proj.sizeMult = 1.8;
       game.projectiles.push(proj);
     } else if (ability.name === 'Tracker Rockets') {
@@ -13128,7 +12649,9 @@ class Bot {
         const spread = new THREE.Vector3((Math.random()-0.5)*0.10, (Math.random()-0.5)*0.10, 0);
         const rDir = aim.clone().add(spread).normalize();
         const vel = rDir.multiplyScalar(700);
-        const proj = new Projectile(this.position.clone(), vel, 1100, 100, 'bot', 0xffcc00);
+        const proj = new Projectile(this.position.clone(), vel, 1100, 100, 'bot', LSS.CLASS_COLORS.TRACKER);
+        proj.smokeTrail = true;
+        proj.removeHaze();
         game.projectiles.push(proj);
       }
     } else if (ability.name === 'Energy Siphon') {
@@ -13607,6 +13130,14 @@ class Projectile {
     this.lifetime = 5;
     this.age = 0;
     this.bounceCount = 0;
+    // (v14c) Visual flags ; defaults preserve legacy look. Spawn sites for
+    // specific weapons can flip these post-construction:
+    //   smokeTrail = true ; emit fading smoke puffs along the flight path.
+    //                       Used by Pyro/Tracker/Puncture/Syphon heavy shots.
+    //   _smokeTrailTimer is the per-frame emission accumulator.
+    this.smokeTrail = false;
+    this._smokeTrailTimer = 0;
+    this._smokeTrailInterval = 0.045; // ~22 puffs/sec
     // Fade-in: projectile is invisible at the muzzle and ramps to full
     // opacity over the first FADE_IN_DIST world units. Hides the harsh
     // "geometry pops in at the gun" look. Per-frame the update loop
@@ -13680,12 +13211,15 @@ class Projectile {
     this.trailTimer = 0;
 
     // --- Inner glow halo (wider, softer; post-bloom catches it) ---
-    // Shader-driven energy ball: internal plasma flow + fresnel rim so it
-    // reads as charged energy rather than a lit billiard ball. time
-    // uniform is bumped in this.update() each frame.
+    // (v14a) LayeredFX-driven energy ball using the proj_glow preset:
+    // plasma flow + fresnel rim + white-hot screen highlight + FBM detail.
+    // Replaces _makeProjGlowMaterial. uTime is driven by _layeredFXTick
+    // from gameLoop, not bumped here. baseColor and posScale are written
+    // per-instance to match this projectile's ship-class tint and radius.
     const glowGeo = new THREE.SphereGeometry(7, 16, 12);
-    const glowMat = _makeProjGlowMaterial(this.trailColor);
-    glowMat.uniforms.uOpacity.value = 0.65;
+    const glowMat = _makeFXMaterial('proj_glow');
+    if (glowMat.uniforms.uBaseColor) glowMat.uniforms.uBaseColor.value.set(this.trailColor);
+    if (glowMat.uniforms.uPosScale)  glowMat.uniforms.uPosScale.value = 1.0 / 7.0;
     this.glowMesh = new THREE.Mesh(glowGeo, glowMat);
     this.glowMesh.position.copy(origin);
     this.glowMesh.renderOrder = 1;
@@ -13796,6 +13330,29 @@ class Projectile {
       this.destroy(); return;
     }
 
+    // (v14c) Smoke-trail emission. Heavy projectiles (Pyro main, Tracker
+    // main + tracking missiles, Puncture cluster missile, Syphon rocket
+    // salvo) opt in via this.smokeTrail = true. Each puff is a short-lived
+    // LayeredFX cloud sphere tinted to the projectile's trailColor that
+    // expands and fades on its own (spawnFXBurst handles the lifecycle).
+    // Spawned BEFORE the per-frame position move so puffs sit at the
+    // projectile's current position and read as a wake of past locations.
+    if (this.smokeTrail && typeof spawnFXBurst === 'function') {
+      this._smokeTrailTimer -= dt;
+      if (this._smokeTrailTimer <= 0) {
+        this._smokeTrailTimer = this._smokeTrailInterval;
+        const _szM = this.sizeMult || 1.0;
+        const puff = spawnFXBurst('cloud', this.position, 5 * _szM, 0.65, {
+          startScale: 0.4,
+          endScale: 1.6,
+          segs: 12,
+        });
+        if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) {
+          puff.material.uniforms.uBaseColor.value.set(this.trailColor);
+        }
+      }
+    }
+
     // Homing missiles (Descent 3 style two-tier tracking)
     // Close range: aggressive tracking (loose FOV constraint)
     // Far range: tighter FOV, gentler turns (can be dodged at distance)
@@ -13889,12 +13446,17 @@ class Projectile {
         _fadeIn = Math.sqrt(distFromSpawnSq) / this.fadeInDist;
       }
       if (this.mesh)        this.mesh.material.opacity        = this._baseOpacityCore   * _fadeIn;
-      // glowMesh now uses the shader-driven _makeProjGlowMaterial; write
-      // the fade through its uOpacity uniform so the fragment respects it.
+      // (v14a) glowMesh is now a LayeredFX material (proj_glow preset). It
+      // has no uOpacity uniform ; instead we scale uBrightness through the
+      // fade-in. Same convention spawnFXBurst uses for its fade-out: stash
+      // the baked-in brightness once on first touch, then multiply by fade.
+      // When _fadeIn hits 1.0, brightness is restored to the preset value.
       if (this.glowMesh) {
-        if (this.glowMesh.material.uniforms && this.glowMesh.material.uniforms.uOpacity) {
-          this.glowMesh.material.uniforms.uOpacity.value = this._baseOpacityGlow * _fadeIn;
-        } else {
+        const gu = this.glowMesh.material.uniforms;
+        if (gu && gu.uBrightness) {
+          if (gu._fxBaseBrightness == null) gu._fxBaseBrightness = gu.uBrightness.value;
+          gu.uBrightness.value = gu._fxBaseBrightness * _fadeIn;
+        } else if (typeof this.glowMesh.material.opacity === 'number') {
           this.glowMesh.material.opacity = this._baseOpacityGlow * _fadeIn;
         }
       }
@@ -13919,8 +13481,14 @@ class Projectile {
       this.glowMesh.position.copy(this.position);
       const haloFlicker = 1 + Math.sin(this.age * 22) * 0.18 + (Math.random() - 0.5) * 0.18;
       this.glowMesh.scale.setScalar(haloFlicker * _szM);
-      // Tick the projectile-glow shader's time uniform.
-      if (this.glowMesh.material && this.glowMesh.material.uniforms) {
+      // (v14a) glowMesh material is now LayeredFX (proj_glow preset). Its
+      // uTime uniform is driven globally by _layeredFXTick in gameLoop, so
+      // no per-projectile time write is needed here. The old bespoke
+      // _makeProjGlowMaterial had a `time` uniform we wrote each frame ;
+      // that uniform doesn't exist on LayeredFX materials. The defensive
+      // guard below only writes if a `time` uniform happens to be present
+      // (e.g. if the material is ever swapped back to a non-LayeredFX one).
+      if (this.glowMesh.material && this.glowMesh.material.uniforms && this.glowMesh.material.uniforms.time) {
         this.glowMesh.material.uniforms.time.value = (typeof game !== 'undefined' && game.time) ? game.time : this.age;
       }
     }
@@ -14058,7 +13626,7 @@ class Projectile {
         const boltEnd = this.position.clone().add(ahead).add(
           new THREE.Vector3((Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*80)
         );
-        spawnLightningBolt(this.position, boltEnd, 0x44ff66, 0.10, 1, 1.5);
+        spawnLightningBolt(this.position, boltEnd, LSS.CLASS_COLORS.SLAYER, 0.10, 1, 1.5);
         if (Math.random() > 0.7) {
           const wallArc = this.position.clone().add(
             new THREE.Vector3((Math.random()-0.5)*200, (Math.random()-0.5)*200, (Math.random()-0.5)*200)
@@ -14074,7 +13642,7 @@ class Projectile {
       if (!this._arcTrailAnchor) this._arcTrailAnchor = this.position.clone();
       const _trailDist2 = this.position.distanceToSquared(this._arcTrailAnchor);
       if (_trailDist2 > 70 * 70) {
-        spawnLightningBolt(this._arcTrailAnchor, this.position, 0x44ff66,
+        spawnLightningBolt(this._arcTrailAnchor, this.position, LSS.CLASS_COLORS.SLAYER,
                            0.50 + Math.random() * 0.20, 3 + Math.floor(Math.random() * 3), 2.0 + Math.random() * 1.0);
         // Sometimes a side-branch off the chain for organic crackle.
         if (Math.random() > 0.55) {
@@ -14095,7 +13663,7 @@ class Projectile {
           velocity: new THREE.Vector3((Math.random()-0.5)*200, (Math.random()-0.5)*200, (Math.random()-0.5)*200),
           life: 0.08 + Math.random() * 0.06,
           maxLife: 0.14,
-          color: Math.random() > 0.5 ? 0x44ff66 : 0xaaffaa,
+          color: Math.random() > 0.5 ? LSS.CLASS_COLORS.SLAYER : 0xaaffaa,
           size: 1 + Math.random() * 1.5
         });
       }
@@ -14389,6 +13957,20 @@ class Projectile {
     }
     // Fire ignites Incendiary Traps: thermite splash, firewalls, any fire source
     igniteNearbyGas(this.position, this.splash);
+  }
+
+  // (v14c) Dispose of the outer haze sphere on demand. Spawn sites for the
+  // heavy projectiles (Pyro main, Tracker main + tracking missiles, Puncture
+  // cluster missile) call this right after construction since the haze read
+  // as an "ugly solid sphere" on those sizes. Syphon's rocket salvo keeps
+  // its haze; the smaller radius reads fine.
+  removeHaze() {
+    if (this.hazeMesh) {
+      if (this.hazeMesh.parent) scene.remove(this.hazeMesh);
+      if (this.hazeMesh.geometry) this.hazeMesh.geometry.dispose();
+      if (this.hazeMesh.material) this.hazeMesh.material.dispose();
+      this.hazeMesh = null;
+    }
   }
 
   destroy() {
@@ -16674,63 +16256,16 @@ class ClusterObstacle {
   }
 
   _buildDistortionShell() {
-    if (typeof scene === 'undefined' || !THREE.ShaderMaterial) return;
+    if (typeof scene === 'undefined') return;
+    if (typeof _makeFXMaterial !== 'function') return;
     const r = this.clusterScale * 1.05;     // hugs the cluster bounds + ~5% margin
     const geo = new THREE.IcosahedronGeometry(r, 3);
-    const mat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        time:      { value: Math.random() * 100 },   // randomize per-cluster phase
-        intensity: { value: 1.0 },
-      },
-      vertexShader: [
-        'varying vec3 vWorldPos;',
-        'varying vec3 vNormal;',
-        'varying vec3 vViewDir;',
-        'void main() {',
-        '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-        '  vWorldPos = wp.xyz;',
-        '  vNormal = normalize(normalMatrix * normal);',
-        '  vViewDir = normalize(cameraPosition - wp.xyz);',
-        '  gl_Position = projectionMatrix * viewMatrix * wp;',
-        '}'
-      ].join('\n'),
-      fragmentShader: [
-        'uniform float time;',
-        'uniform float intensity;',
-        'varying vec3 vWorldPos;',
-        'varying vec3 vNormal;',
-        'varying vec3 vViewDir;',
-        'float hash(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }',
-        'float noise3(vec3 p) {',
-        '  vec3 i = floor(p); vec3 f = fract(p); f = f*f*(3.0-2.0*f);',
-        '  return mix(mix(mix(hash(i+vec3(0,0,0)), hash(i+vec3(1,0,0)), f.x),',
-        '                 mix(hash(i+vec3(0,1,0)), hash(i+vec3(1,1,0)), f.x), f.y),',
-        '             mix(mix(hash(i+vec3(0,0,1)), hash(i+vec3(1,0,1)), f.x),',
-        '                 mix(hash(i+vec3(0,1,1)), hash(i+vec3(1,1,1)), f.x), f.y), f.z);',
-        '}',
-        'void main() {',
-        // Fresnel: strongest at glancing angles -> rim glow.
-        '  float fres = pow(1.0 - abs(dot(vNormal, vViewDir)), 1.8);',
-        // 3D noise sampled at world position, animated. Two streams crossing.
-        '  vec3 nPos = vWorldPos * 0.012;',
-        '  float n1 = noise3(nPos + vec3(time * 0.4, time * 0.3, 0.0));',
-        '  float n2 = noise3(nPos * 2.1 + vec3(0.0, time * 0.5, time * 0.2));',
-        '  float shimmer = smoothstep(0.35, 0.75, mix(n1, n2, 0.5));',
-        // Color: cool cyan to magenta-purple, biased by shimmer noise.
-        // Fits the existing electric-arc accent palette.
-        '  vec3 baseCol = mix(vec3(0.25, 0.55, 1.05), vec3(0.95, 0.30, 1.10), shimmer);',
-        // Final intensity: rim * intensity * (low base + shimmer pop).
-        '  float a = fres * intensity * (0.30 + shimmer * 0.55);',
-        '  a = clamp(a, 0.0, 0.92);',
-        // Color also boosted by fresnel so the rim glows brighter than core.
-        '  gl_FragColor = vec4(baseCol * fres * 1.3, a);',
-        '}'
-      ].join('\n'),
-    });
+    // (v14c) LayeredFX 'distortion_shell' preset (replaces the anonymous
+    // ShaderMaterial). Per-cluster phase via _timeOffset so adjacent shells
+    // don't shimmer in lockstep.
+    const mat = _makeFXMaterial('distortion_shell');
+    if (mat.uniforms.uPosScale) mat.uniforms.uPosScale.value = 1.0 / Math.max(1, r);
+    if (mat.userData) mat.userData._timeOffset = Math.random() * 100;
     this.distortionMesh = new THREE.Mesh(geo, mat);
     this.distortionMesh.position.copy(this.position);
     this.distortionMesh.frustumCulled = true;
@@ -16884,12 +16419,11 @@ class ClusterObstacle {
         this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
       }
       // (v8VR 2026-05-01) Distortion shell follows the cluster + animates.
-      // Time uniform driven by game.time for a session-stable phase per cluster.
+      // (v14c) LayeredFX 'distortion_shell' preset ; uTime is auto-ticked
+      // by _layeredFXTick (with the per-mat _timeOffset preserved for the
+      // session-stable phase per cluster), so no time write is needed.
       if (this.distortionMesh) {
         this.distortionMesh.position.copy(this.position);
-        if (this.distortionMesh.material && this.distortionMesh.material.uniforms) {
-          this.distortionMesh.material.uniforms.time.value = (typeof game !== 'undefined') ? game.time : 0;
-        }
       }
       // (v8VR 2026-05-01) Per-child smoke spheres (atoms in the molecule).
       // Each atom-smoke follows its child's position + ticks its own time
@@ -18470,10 +18004,12 @@ function updateEffects(dt) {
     }
     const t = e.age / e.lifetime;
     // Generic time + age uniform tick for any effect whose material is a
-    // ShaderMaterial. Lets the shader factories (_makeShockwaveMaterial,
-    // _makeProjGlowMaterial, etc.) drive their animations off game.time and
+    // ShaderMaterial. Lets the bespoke shader factories (_makeShockwaveMaterial,
+    // _makeAtomFractalMaterial, etc.) drive their animations off game.time and
     // their own age-fraction without each effect type writing the bump
     // explicitly. Cheap: just two property writes per ticked effect.
+    // (v14a) _makeProjGlowMaterial removed ; projectile glow is now LayeredFX
+    // and gets its uTime from _layeredFXTick, not from this generic loop.
     if (e.mesh && e.mesh.material && e.mesh.material.uniforms) {
       const u = e.mesh.material.uniforms;
       if (u.time) u.time.value = game.time;
@@ -18728,12 +18264,13 @@ function updateEffects(dt) {
     // The beam transform is fixed at spawn time, so we just step time and
     // fade the alpha gate. ---
     else if (e.type === 'vortexLaserBeam') {
-      if (e.mesh.material && e.mesh.material.uniforms) {
-        e.mesh.material.uniforms.time.value = game.time;
-        // Snappy attack (full bright early), then quadratic ease-out so the
-        // beam visibly snaps in at fire and dissolves smoothly.
+      // (v14c) LayeredFX 'core_beam' preset ; uTime is auto-ticked by
+      // _layeredFXTick. Quadratic ease-out keeps the snappy attack +
+      // smooth dissolve via uIntensity.
+      const u = e.mesh.material && e.mesh.material.uniforms;
+      if (u && u.uIntensity) {
         const fade = (1 - t) * (1 - t);
-        e.mesh.material.uniforms.uIntensity.value = fade * 1.15;
+        u.uIntensity.value = fade * 1.15;
       }
     }
     // --- Debris chunks: fly outward, spin, fade ---
@@ -21356,10 +20893,11 @@ function fireHitscan(origin, dir, w) {
   const levelDist = raycastLevel(origin, aimDir, w.range);
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
   // Color follows each loadout's chassis flash color so muzzle flash and
-  // tracer share one palette (Syphon cyan-green, Blaster gold, Puncture
-  // yellow-white, Vortex cyan, etc.). Chaingun-class weapons (Syphon's
-  // XO-16, Blaster's Predator) get a thinner tracer because rapid fire
-  // makes the long-lived haze layers stack into a thick 2D streak.
+  // tracer share one palette (sourced from LSS.CLASS_COLORS so weapons,
+  // abilities, and cores all read with the same class-themed identity).
+  // Chaingun-class weapons (Syphon's XO-16, Blaster's Predator) get a
+  // thinner tracer because rapid fire makes the long-lived haze layers
+  // stack into a thick 2D streak.
   const tracerColor = chassisFlashColor(player.loadoutKey);
   const isChaingun = (w.fireRate <= 0.10);
   // (v11d) Puncture's railgun replaces the regular tracer with a helical
@@ -21508,7 +21046,12 @@ function fireHitscan(origin, dir, w) {
 
 function fireProjectile(origin, dir, w) {
   const vel = dir.clone().multiplyScalar(w.projSpeed);
-  const proj = new Projectile(origin, vel, w.damage, w.splash, 'player', 0xff8800);
+  // Class-tied tint: Pyro = red, Tracker = orange. Anyone else falls back
+  // to TRACKER orange since 40mm-style projectile is the historical default.
+  const projColor = (player.loadoutKey === 'PYRO')    ? LSS.CLASS_COLORS.PYRO
+                  : (player.loadoutKey === 'TRACKER') ? LSS.CLASS_COLORS.TRACKER
+                  : LSS.CLASS_COLORS.TRACKER;
+  const proj = new Projectile(origin, vel, w.damage, w.splash, 'player', projColor);
   // Pyro projectiles are fire sources (ignite gas clouds on pass-through)
   if (player.loadoutKey === 'PYRO') {
     proj.isFireSource = true;
@@ -21516,6 +21059,10 @@ function fireProjectile(origin, dir, w) {
     // and leaves a small lingering flame at the hit point for 2 seconds.
     proj.isPyroThermite = true;
   }
+  // Both projectile-mode mains (Pyro T-203 Thermite, Tracker 40mm) get the
+  // fading smoke-puff trail and lose the outer haze sphere.
+  proj.smokeTrail = true;
+  proj.removeHaze();
   game.projectiles.push(proj);
   // (v6.7) Broadcast a visual-only twin of this projectile so peers see
   // the shot fly at them. Damage authority stays with the hit-claim path
@@ -21529,7 +21076,7 @@ function fireProjectile(origin, dir, w) {
     net.sendProjectile({
       ox: origin.x, oy: origin.y, oz: origin.z,
       vx: vel.x,   vy: vel.y,   vz: vel.z,
-      color: 0xff8800,
+      color: projColor,
       isFireSource:   !!proj.isFireSource,
       isPyroThermite: !!proj.isPyroThermite,
       splash:         (typeof proj.splash === 'number') ? proj.splash : 0,
@@ -21735,13 +21282,14 @@ function executeAbility(slot, ability) {
       // a short lifetime that matches the ability's burst window. The
       // mesh's transform is fixed at spawn time (laser leaves a snapshot
       // of where the player was aiming when they pulled the trigger,
-      // which feels more like a "shot" than a moving beam). Reuses the
-      // _makeVortexCoreBeamMaterial shader factory so the same crackle /
-      // pulse / fresnel look applies.
+      // which feels more like a "shot" than a moving beam). (v14c) Now
+      // uses the LayeredFX 'core_beam' preset so the crackle / pulse look
+      // composes through the shared shader.
       const BEAM_RADIUS = 80;
       const beamLife = 0.45;
       const beamMid = player.position.clone().add(forward.clone().multiplyScalar(range * 0.5));
-      const beamMat = _makeVortexCoreBeamMaterial();
+      const beamMat = _makeFXMaterial('core_beam');
+      if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
       const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
       beamMesh.position.copy(beamMid);
       beamMesh.quaternion.setFromUnitVectors(_mvUp, forward);
@@ -21758,10 +21306,13 @@ function executeAbility(slot, ability) {
       // Stacked thick tracers. spawnTracer splits each call into two
       // muzzle-tip-anchored streaks that converge on beamEnd, so 5 calls
       // give 10 visible streaks fanning into the beam.
-      spawnTracer(player.position, beamEnd, 0xff2200, 1.7);
-      spawnTracer(player.position, beamEnd, 0xff5520, 1.6);
-      spawnTracer(player.position, beamEnd, 0xffaa44, 1.5);
-      spawnTracer(player.position, beamEnd, 0xffeeaa, 1.4);
+      // (v14c) Vortex purple identity palette: deep violet -> magenta ->
+      // lavender -> white core. Replaces the old orange-flame stack so
+      // the ability reads as a Vortex laser, not a flame burst.
+      spawnTracer(player.position, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.7);
+      spawnTracer(player.position, beamEnd, 0xcc77ff, 1.6);
+      spawnTracer(player.position, beamEnd, 0xddaaff, 1.5);
+      spawnTracer(player.position, beamEnd, 0xeeccff, 1.4);
       spawnTracer(player.position, beamEnd, 0xffffff, 1.3);
       // Network: ride the existing fire_tracer channel for the lead pair
       // so peers see at least the converging streaks. The volumetric beam
@@ -21772,13 +21323,13 @@ function executeAbility(slot, ability) {
           type: 'fire_tracer',
           ox: player.position.x, oy: player.position.y, oz: player.position.z,
           ex: beamEnd.x, ey: beamEnd.y, ez: beamEnd.z,
-          color: 0xff2200,
+          color: LSS.CLASS_COLORS.VORTEX,
         });
         net.sendEvent({
           type: 'fire_tracer',
           ox: player.position.x, oy: player.position.y + 3, oz: player.position.z,
           ex: beamEnd.x, ey: beamEnd.y + 3, ez: beamEnd.z,
-          color: 0xffeeaa,
+          color: 0xeeccff,
         });
       }
       // Lightning crackle along the beam path. Six arcs at staggered
@@ -21795,7 +21346,7 @@ function executeAbility(slot, ability) {
             (Math.random() - 0.5) * reach
           );
           const tip = along.clone().add(jit);
-          spawnLightningBolt(along, tip, 0xffeeaa, 0.18, 1, 2.2);
+          spawnLightningBolt(along, tip, 0xeeccff, 0.18, 1, 2.2);
         }
       }
       // Muzzle flash: bright warm dynamic light at the player position so
@@ -21885,14 +21436,16 @@ function executeAbility(slot, ability) {
         const pt = start.clone().add(forward.clone().multiplyScalar(t));
         spawnExplosion(pt, 12);
       }
-      // Warm dynamic light at center
+      // Warm dynamic light at center (Pyro red identity)
       const wallCenter = start.clone().add(forward.clone().multiplyScalar(wallLen * 0.5));
-      spawnDynamicLight(wallCenter, 0xff6600, 2.5, 800, 0.5);
+      spawnDynamicLight(wallCenter, LSS.CLASS_COLORS.PYRO, 2.5, 800, 0.5);
     }
     // PUNCTURE: Cluster Missile (impact + sustained explosions in area for 3s)
     else if (ability.name === 'Cluster Missile') {
       const vel = forward.clone().multiplyScalar(1000);
-      const proj = new Projectile(player.position.clone(), vel, 800, 250, 'player', 0xff5520);
+      const proj = new Projectile(player.position.clone(), vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
+      proj.smokeTrail = true;
+      proj.removeHaze();
       proj.isCluster = true; // on impact, creates sustained explosion zone
       proj.clusterDmg = 500; // DPS of the sustained cluster area
       proj.clusterDuration = 5; // seconds of sustained explosions
@@ -21918,7 +21471,7 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Arc Wave') {
       const arcDmg = player.coreActive && player.loadout.core.name === 'Sword Core' ? 3000 : 2000;
       const vel = forward.clone().multiplyScalar(800);
-      const proj = new Projectile(player.position.clone(), vel, arcDmg, 150, 'player', 0x44ff66);
+      const proj = new Projectile(player.position.clone(), vel, arcDmg, 150, 'player', LSS.CLASS_COLORS.SLAYER);
       proj.isArcWave = true; // applies slow on hit + pierces + leaves trail
       game.projectiles.push(proj);
       broadcastAbilityProjectile(proj);
@@ -21950,7 +21503,9 @@ function executeAbility(slot, ability) {
         for (let m = 0; m < 5; m++) {
           const spread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
           const vel = forward.clone().add(spread).normalize().multiplyScalar(900);
-          const proj = new Projectile(player.position.clone(), vel, 1000, 80, 'player', 0xffaa00);
+          const proj = new Projectile(player.position.clone(), vel, 1000, 80, 'player', LSS.CLASS_COLORS.TRACKER);
+          proj.smokeTrail = true;
+          proj.removeHaze();
           proj.tracking = true;
           proj.trackTarget = target;
           game.projectiles.push(proj);
@@ -21979,7 +21534,8 @@ function executeAbility(slot, ability) {
       for (let r = 0; r < rocketCount; r++) {
         const spread = new THREE.Vector3((Math.random()-0.5)*0.12, (Math.random()-0.5)*0.12, 0);
         const vel = forward.clone().add(spread).normalize().multiplyScalar(800);
-        const proj = new Projectile(player.position.clone(), vel, 700, 100, 'player', 0xff4400);
+        const proj = new Projectile(player.position.clone(), vel, 700, 100, 'player', LSS.CLASS_COLORS.SYPHON);
+        proj.smokeTrail = true; // Syphon Rocket Salvo keeps haze ; smoke only.
         game.projectiles.push(proj);
         // (v6.7) Broadcast each rocket so peers see the salvo.
         broadcastAbilityProjectile(proj);
@@ -22049,15 +21605,15 @@ function executeAbility(slot, ability) {
             bx: bestBot.position.x, by: bestBot.position.y, bz: bestBot.position.z
           });
         }
-        // Wide blue-tinted halo bolt for the soft glow read.
-        spawnLightningBolt(player.position, bestBot.position, 0x66ccff, 0.32, 8, 14.0);
+        // Wide blue-tinted halo bolt for the soft glow read (Syphon class blue).
+        spawnLightningBolt(player.position, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.32, 8, 14.0);
         // Five parallel offset bolts give the conduit visible thickness
-        // around the central core. Mix of green/blue tints so the conduit
-        // pulses between life-energy green and electric blue.
+        // around the central core. Mix of paler-blue / class-blue tints so the
+        // conduit pulses between bright energy white-blue and Syphon blue.
         for (let oi = 0; oi < 5; oi++) {
           const offset = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
             .normalize().multiplyScalar(40 + Math.random() * 30);
-          const tint = (oi % 2 === 0) ? 0x66ffaa : 0x88ccff;
+          const tint = (oi % 2 === 0) ? 0x88ccff : LSS.CLASS_COLORS.SYPHON;
           spawnLightningBolt(
             player.position.clone().add(offset),
             bestBot.position.clone().add(offset),
@@ -22104,7 +21660,7 @@ function executeAbility(slot, ability) {
             type: 'lightning',
             ox: player.position.x, oy: player.position.y, oz: player.position.z,
             ex: bestBot.position.x, ey: bestBot.position.y, ez: bestBot.position.z,
-            color: 0x66ccff, lifetime: 0.32, branches: 8, thickness: 14.0,
+            color: LSS.CLASS_COLORS.SYPHON, lifetime: 0.32, branches: 8, thickness: 14.0,
           });
         }
 
@@ -22311,7 +21867,7 @@ function executeAbility(slot, ability) {
       // a single sensor/lock visual family.
       const beaconSpeed = 2400;
       const vel = forward.clone().multiplyScalar(beaconSpeed);
-      const proj = new Projectile(player.position.clone(), vel, 0, 0, 'player', 0xffaa00);
+      const proj = new Projectile(player.position.clone(), vel, 0, 0, 'player', LSS.CLASS_COLORS.TRACKER);
       proj.isSonar = true;
       proj.lifetime = 4.0;
       proj.sizeMult = 0.5;
@@ -22343,14 +21899,14 @@ function firePowerShot() {
       pelletDir.z += (Math.random() - 0.5) * spreadAngle;
       pelletDir.normalize();
       const pelletEnd = player.position.clone().add(pelletDir.clone().multiplyScalar(range));
-      spawnTracer(player.position, pelletEnd, 0xff8800);
+      spawnTracer(player.position, pelletEnd, LSS.CLASS_COLORS.BLASTER);
       // (v6.7) Broadcast each pellet on the fire_tracer channel.
       if (net.active && net.sendEvent) {
         net.sendEvent({
           type: 'fire_tracer',
           ox: player.position.x, oy: player.position.y, oz: player.position.z,
           ex: pelletEnd.x, ey: pelletEnd.y, ez: pelletEnd.z,
-          color: 0xff8800,
+          color: LSS.CLASS_COLORS.BLASTER,
         });
       }
       for (const bot of game.entities) {
@@ -22372,21 +21928,21 @@ function firePowerShot() {
     // Long-range Power Shot: precision piercing shot (travels through all enemies)
     const range = 3500;
     const end = player.position.clone().add(forward.clone().multiplyScalar(range));
-    spawnTracer(player.position, end, 0xff8800);
-    spawnTracer(player.position.clone().add(new THREE.Vector3(0,2,0)), end.clone().add(new THREE.Vector3(0,2,0)), 0xffaa44);
+    spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
+    spawnTracer(player.position.clone().add(new THREE.Vector3(0,2,0)), end.clone().add(new THREE.Vector3(0,2,0)), 0xaaeeff);
     // (v6.7) Broadcast both beams on the fire_tracer channel.
     if (net.active && net.sendEvent) {
       net.sendEvent({
         type: 'fire_tracer',
         ox: player.position.x, oy: player.position.y, oz: player.position.z,
         ex: end.x, ey: end.y, ez: end.z,
-        color: 0xff8800,
+        color: LSS.CLASS_COLORS.BLASTER,
       });
       net.sendEvent({
         type: 'fire_tracer',
         ox: player.position.x, oy: player.position.y + 2, oz: player.position.z,
         ex: end.x, ey: end.y + 2, ez: end.z,
-        color: 0xffaa44,
+        color: 0xaaeeff,
       });
     }
     for (const bot of game.entities) {
@@ -22421,8 +21977,8 @@ function activateCore() {
 
   // VORTEX: Laser Core (continuous high-power laser, 4500 dmg over 3s; dealt per tick in updateAbilities)
   if (coreName === 'Laser Core') {
-    // Initial burst visual
-    spawnTracer(player.position, player.position.clone().add(forward.clone().multiplyScalar(3000)), 0xff0000);
+    // Initial burst visual (Vortex purple identity)
+    spawnTracer(player.position, player.position.clone().add(forward.clone().multiplyScalar(3000)), LSS.CLASS_COLORS.VORTEX);
   }
   // PYRO: Flame Core (massive AoE incendiary, 4500 dmg instant around player; TF2)
   else if (coreName === 'Flame Core') {
@@ -22500,6 +22056,8 @@ function activateCore() {
       const vel = forward.clone().add(spread).normalize().multiplyScalar(700);
       const proj = new Projectile(player.position.clone(), vel, 250, 120, 'player', 0xffcc00);
       proj.salvoGuided = true; // remote-guided: follows player crosshair
+      proj.smokeTrail = true;
+      proj.removeHaze();
       game.projectiles.push(proj);
     }
   }
@@ -23094,7 +22652,7 @@ function updateShieldVisuals(dt) {
       // 'plasma_amber')` so the inside view reads as the same energy
       // field the other two ships see, just per-team-tinted.
       const geo = new THREE.SphereGeometry(tDomeR, 36, 18, 0, Math.PI * 2, 0, Math.PI / 2);
-      const mat = _makeHexHologramMaterial(0xff8844);
+      const mat = _makeHexHologramMaterial(LSS.CLASS_COLORS.PYRO);
       player.thermalShieldMesh = new THREE.Mesh(geo, mat);
       player.thermalShieldMesh.renderOrder = 1;
       scene.add(player.thermalShieldMesh);
@@ -23203,7 +22761,7 @@ function updateShieldVisuals(dt) {
       // tinted bright green ; the user wanted the block dome to "glow
       // green" rather than read as ominous black, so we're back on the
       // same shader the team-color shields use.
-      const mat = _makeHexHologramMaterial(0x44ff66);
+      const mat = _makeHexHologramMaterial(LSS.CLASS_COLORS.SLAYER);
       player.swordBlockMesh = new THREE.Mesh(geo, mat);
       player.swordBlockMesh.renderOrder = 1;
       scene.add(player.swordBlockMesh);
@@ -23235,7 +22793,7 @@ function updateShieldVisuals(dt) {
       if (u.uHp)   u.uHp.value   = 1.0;       // sword block has no HP pool
       // Bright green energy-field tint ; matches the team-color hue of
       // the other Vortex/Pyro/Blaster shields, just shifted to green.
-      if (u.uColor) u.uColor.value.setHex(0x44ff66);
+      if (u.uColor) u.uColor.value.setHex(LSS.CLASS_COLORS.SLAYER);
       // (v11b) Sword Block dome reads more transparent than the others
       // since the player keeps it up for long stretches and a
       // dense-opaque green dome obscures combat sightlines.
@@ -23282,7 +22840,7 @@ function _spawnSonarPulse(pos, owner) {
     // (v9) Orange to match Tracker's signature tracer/lock-marker color
     // instead of the prior cyan, which blended too easily with shield /
     // ambient blues. Also reads as "sensor / lock" iconography in-game.
-    color: 0xffaa00,
+    color: LSS.CLASS_COLORS.TRACKER,
     wireframe: true,
     transparent: true,
     opacity: 0.45,
@@ -23552,7 +23110,10 @@ function updateAbilities(dt) {
       // we orient it explicitly via setFromUnitVectors against the camera
       // forward, which already accounts for player position.
       if (!player._vortexCoreBeam) {
-        const beamMat = _makeVortexCoreBeamMaterial();
+        // (v14c) LayeredFX 'core_beam' preset replaces the bespoke vortex
+        // core beam shader. uIntensity is written per frame below.
+        const beamMat = _makeFXMaterial('core_beam');
+        if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / 95;
         const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
         beamMesh.frustumCulled = false; // we rebuild its transform every frame
         beamMesh.renderOrder = 2;       // composite over walls + smoke
@@ -23570,9 +23131,9 @@ function updateAbilities(dt) {
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
       beam.visible = true;
-      if (beam.material && beam.material.uniforms) {
-        beam.material.uniforms.time.value = game.time;
-        // Slight breath in/out on intensity so even a held core pulses.
+      // (v14c) LayeredFX 'core_beam' preset ; uTime is auto-ticked by
+      // _layeredFXTick. Drive uIntensity for the breathing pulse.
+      if (beam.material && beam.material.uniforms && beam.material.uniforms.uIntensity) {
         const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
         beam.material.uniforms.uIntensity.value = breath;
       }
@@ -23580,13 +23141,15 @@ function updateAbilities(dt) {
       // converging streaks read as visibly thick funnels feeding the beam,
       // not as hairline lines floating beside it. spawnTracer already
       // splits each call into two muzzle-tip-anchored streaks.
-      spawnTracer(player.position, end, 0xff2200, 1.8);
-      spawnTracer(player.position, end, 0xff5520, 1.7);
-      spawnTracer(player.position, end, 0xffaa44, 1.6);
-      spawnTracer(player.position, end, 0xffeeaa, 1.5);
+      // (v14c) Purple-themed stack so the Laser Core reads as a Vortex
+      // identity beam instead of orange flame.
+      spawnTracer(player.position, end, LSS.CLASS_COLORS.VORTEX, 1.8);
+      spawnTracer(player.position, end, 0xbb66ff, 1.7);
+      spawnTracer(player.position, end, 0xcc99ff, 1.6);
+      spawnTracer(player.position, end, 0xeeccff, 1.5);
       spawnTracer(player.position, end, 0xffffff, 1.4);
-      // Extra hot-pink stack at the center for the "white-hot" overload look.
-      spawnTracer(player.position, end, 0xffd0a0, 1.3);
+      // Extra hot-pink-violet stack at the center for the "white-hot" overload look.
+      spawnTracer(player.position, end, 0xeebbff, 1.3);
       // Electric crackle along the beam length. Boosted: more arcs per pulse,
       // wider lateral jitter, slightly longer reach so the beam feels alive
       // with discharge ; thicker tube radius for fatter bolts.
@@ -23605,7 +23168,7 @@ function updateAbilities(dt) {
               (Math.random() - 0.5) * reach
             );
             const tip = along.clone().add(jit);
-            spawnLightningBolt(along, tip, 0xffeeaa, 0.12, 1, 2.4);
+            spawnLightningBolt(along, tip, 0xeeccff, 0.12, 1, 2.4);
           }
           player._laserCoreArcTimer = 0.025 + Math.random() * 0.03;
         }
@@ -23631,11 +23194,14 @@ function updateAbilities(dt) {
       if (curSpeed < player.chassis.flightSpeed * 2) {
         player.velocity.add(forward.clone().multiplyScalar(200 * dt));
       }
-      // Fire rockets periodically
+      // Fire rockets periodically (Puncture Barrage Core)
       if (Math.random() < dt * 3) {
         const spread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
         const vel = forward.clone().add(spread).normalize().multiplyScalar(1200);
-        game.projectiles.push(new Projectile(player.position.clone(), vel, 200, 100, 'player', 0xff6600));
+        const proj = new Projectile(player.position.clone(), vel, 200, 100, 'player', LSS.CLASS_COLORS.PUNCTURE);
+        proj.smokeTrail = true;
+        proj.removeHaze();
+        game.projectiles.push(proj);
       }
     }
     // SLAYER Sword Core: melee damage aura + periodic arc waves
@@ -23649,10 +23215,10 @@ function updateAbilities(dt) {
           if (dealt > 0) player.damageDealt += dealt;
         }
       }
-      // Periodic arc wave
+      // Periodic arc wave (Slayer Sword Core)
       if (Math.random() < dt * 2) {
         const vel = forward.clone().multiplyScalar(800);
-        const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', 0x44aaff);
+        const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
         proj.isArcWave = true;
         game.projectiles.push(proj);
       }
@@ -23663,8 +23229,10 @@ function updateAbilities(dt) {
         const spread = new THREE.Vector3((Math.random()-0.5)*0.25, (Math.random()-0.5)*0.25, 0);
         const aimDir = forward.clone().add(spread).normalize();
         const vel = aimDir.multiplyScalar(700);
-        const missile = new Projectile(player.position.clone(), vel, 200, 120, 'player', 0xffcc00);
+        const missile = new Projectile(player.position.clone(), vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
         missile.salvoGuided = true;
+        missile.smokeTrail = true;
+        missile.removeHaze();
         game.projectiles.push(missile);
       }
     }
@@ -23699,13 +23267,14 @@ function updateAbilities(dt) {
           // visibly stops at the wall and deals no damage).
           const wallDist = raycastLevel(player.position, toTarget, 3000);
           const end = player.position.clone().add(toTarget.clone().multiplyScalar(wallDist));
-          spawnTracer(player.position, end, 0xffaa00);
+          // Blaster Smart Core auto-aim shot uses class cyan tint.
+          spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
           if (net.active && net.sendEvent) {
             net.sendEvent({
               type: 'fire_tracer',
               ox: player.position.x, oy: player.position.y, oz: player.position.z,
               ex: end.x, ey: end.y, ez: end.z,
-              color: 0xffaa00,
+              color: LSS.CLASS_COLORS.BLASTER,
             });
           }
           // Only damage if the target is in front of the wall.
@@ -24212,19 +23781,23 @@ function updateAbilities(dt) {
       if (eff.mesh) {
         eff.mesh.rotation.x += dt * 1.4;
         eff.mesh.rotation.y += dt * 2.1;
-        // Tick the orb-core shader on the central node.
-        if (eff.mesh.material && eff.mesh.material.uniforms) {
-          eff.mesh.material.uniforms.time.value = game.time;
-          eff.mesh.material.uniforms.uPulse.value = eff.triggered ? 1.7 : 1.0;
+        // (v14a) orb_core LayeredFX preset ; uTime is auto-ticked by
+        // _layeredFXTick so no time write is needed here. uIntensity is
+        // the new (Tranche 1.5) per-instance time-rate scalar: 1.0 when
+        // the trap is armed and idle, 1.7 when it's triggered (faster
+        // crackle + pulse). Same numeric values the bespoke uPulse used.
+        if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
+          eff.mesh.material.uniforms.uIntensity.value = eff.triggered ? 1.7 : 1.0;
         }
         const ph = (eff.pulsePhase || 0) + game.time * 5.0;
         if (eff.glow) {
           const haloPulse = 1 + Math.sin(ph * 0.7) * 0.25 + (Math.random() - 0.5) * 0.10;
           eff.glow.scale.setScalar(haloPulse);
-          // Gravity-halo shader: just bump time. Uniform-driven brightness
-          // already pulses; opacity is computed inside the fragment.
-          if (eff.glow.material && eff.glow.material.uniforms) {
-            eff.glow.material.uniforms.time.value = game.time;
+          // (v14c) gravity_halo LayeredFX preset ; uTime is auto-ticked by
+          // _layeredFXTick. Push uIntensity from the trap state so the
+          // halo collapses faster when triggered.
+          if (eff.glow.material && eff.glow.material.uniforms && eff.glow.material.uniforms.uIntensity) {
+            eff.glow.material.uniforms.uIntensity.value = eff.triggered ? 1.6 : 1.0;
           }
         }
       }
@@ -24243,10 +23816,10 @@ function updateAbilities(dt) {
         dir.normalize();
         const reach = 80 + Math.random() * 100;
         const arcEnd = eff.position.clone().add(dir.multiplyScalar(reach));
-        spawnLightningBolt(eff.position, arcEnd, 0x66bbff, 0.08, 1, 1.0);
+        spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, 1.0);
         // Tether arc to the rooted target, if any (longer, brighter, branched)
         if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
-          spawnLightningBolt(eff.position, eff.rootTarget.position, 0xaaeeff, 0.10, 2, 1.4);
+          spawnLightningBolt(eff.position, eff.rootTarget.position, LSS.CLASS_COLORS.PUNCTURE, 0.10, 2, 1.4);
         }
         eff.arcTimer = 0.05 + Math.random() * 0.05;
       }
@@ -32085,12 +31658,14 @@ class StasisField {
   destroy() {
     this.alive = false;
     if (this.group.parent) scene.remove(this.group);
-    // Pickup effect: expanding ring
-    const ringGeo = new THREE.TorusGeometry(20, 3, 8, 32);
-    // Shader-driven shockwave: chromatic edge that fades as it expands.
-    // updateEffects bumps time/uAge each frame so the ring brightens at
-    // the leading edge then fades out cleanly.
-    const ringMat = _makeShockwaveMaterial(0x00ddff);
+    // Pickup effect: expanding ring. (v14c) LayeredFX 'shockwave_ring'
+    // preset. The stasis_pickup effect tick scales uIntensity from 1.0
+    // (start) to 0.0 (end) so the patterns fade with the expanding ring.
+    const ringRadius = 20;
+    const ringGeo = new THREE.TorusGeometry(ringRadius, 3, 8, 32);
+    const ringMat = _makeFXMaterial('shockwave_ring');
+    if (ringMat.uniforms.uBaseColor) ringMat.uniforms.uBaseColor.value.set(0x00ddff);
+    if (ringMat.uniforms.uPosScale)  ringMat.uniforms.uPosScale.value = 1.0 / ringRadius;
     const ring = new THREE.Mesh(ringGeo, ringMat);
     ring.position.copy(this.position);
     ring.renderOrder = 1;
@@ -32520,7 +32095,20 @@ function updateStasisFields(dt) {
       const t = e.age / e.lifetime;
       const s = 1 + t * 6;
       e.mesh.scale.set(s, s, s);
-      e.mesh.material.opacity = 0.8 * (1 - t);
+      // (v14c) LayeredFX shockwave_ring preset ; fade via uIntensity (slows
+      // the patterns and dims their contribution as the ring expands) +
+      // uBrightness (mirrors the legacy opacity ramp). uTime is auto-ticked
+      // by _layeredFXTick.
+      const u = e.mesh.material && e.mesh.material.uniforms;
+      if (u) {
+        if (u.uIntensity) u.uIntensity.value = Math.max(0, 1 - t);
+        if (u.uBrightness) {
+          if (u._fxBaseBrightness == null) u._fxBaseBrightness = u.uBrightness.value;
+          u.uBrightness.value = u._fxBaseBrightness * (1 - t);
+        }
+      } else if (e.mesh.material && typeof e.mesh.material.opacity === 'number') {
+        e.mesh.material.opacity = 0.8 * (1 - t);
+      }
     }
   }
 }
@@ -43479,3 +43067,4 @@ if (window.LSS_ENGINE_READY) {
 </script>
 </body>
 </html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
