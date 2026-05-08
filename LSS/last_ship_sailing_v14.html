@@ -33273,13 +33273,23 @@ function _cleanupOrphanWallMeshes(keepList) {
 }
 
 function buildRoomGraphLevel(level) {
-  // (v14) Pre-clean : any wall mesh still in the scene that's NOT in
-  // the current game.mapMeshes is stale (from a previous round, or from
-  // a worker race). Scrub them now so the new round starts with a clean
-  // wall-mesh scene graph. The line 33437 cleanup that follows handles
-  // game.mapMeshes itself ; this catches the orphans the round 2 IIFE
-  // can't see.
-  try { _cleanupOrphanWallMeshes(game.mapMeshes || []); } catch (_) {}
+  // (v14 round-2 fix) Pre-clean : nuke every wall mesh in the scene
+  // AND clear game.mapMeshes BEFORE the gmaps-overlay IIFE has a chance
+  // to capture a snapshot. The bug was that the IIFE's first sync check
+  // sees the previous round's mesh still in mapMeshes, exits the wait
+  // loop immediately, and snapshots that stale mesh as the 'thing to
+  // preserve'. Then _lssGmapsBuildLevel clears the round-2 worker's new
+  // mesh, the IIFE restores the round-1 leftover, and the user races
+  // round 2 with round-1's mesh + a stale material that won't update on
+  // P presses.
+  // Clearing mapMeshes here means the IIFE's wait loop will block until
+  // the new round's worker actually populates a mesh, then it'll
+  // snapshot the correct one.
+  try {
+    _cleanupOrphanWallMeshes([]);
+    if (Array.isArray(game.mapMeshes)) game.mapMeshes.length = 0;
+    else game.mapMeshes = [];
+  } catch (_) {}
   // (v12 patch31) Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
