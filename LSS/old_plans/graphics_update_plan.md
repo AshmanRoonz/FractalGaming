@@ -1,7 +1,26 @@
 # LSS Graphics Update Plan ; Layered FX Materials
 
 Last updated: 2026-05-03
-Status: planning, prototype starting on fx_lab.html
+Status: SHIPPED 2026-05-08 (substantially), tail moved to `bespoke_shader_consolidation_plan.md`
+
+> **Archive note (2026-05-08):** A code audit on `last_ship_sailing_v14.html`
+> confirmed Phase 2/3/4/5/6 of this plan are all live. The unified
+> `LayeredFXMaterial` system + the `fireball`, `fireball_purple`, `cloud`,
+> `plasma_wall`, `plasma_purple`, `plasma_amber` presets are wired into:
+> Pyro fire trap core + flame licks, Vortex Trip Wire orbs, Vortex shield
+> dome (backing hemisphere + alt path), champion field, Pyro thermal shield,
+> Tracker particle wall plasma backing, cluster explosion bursts, cosmic
+> anomaly. v14a deleted six fully-dead factory functions left over from
+> earlier iterations of these effects (~528 lines).
+>
+> The unfinished tail (smoke, ship energy shield, engine plume/disc, projectile
+> glow halo, Vortex core beam, tether trap orb + halo, Pyro gas cloud,
+> atom-fractal rocks, distortion shell, sprite-based particles) is now
+> tracked in `bespoke_shader_consolidation_plan.md` ; that plan also calls
+> out the two LayeredFX feature additions (dynamic-light support, ripple
+> uniforms) that gate the smoke and ship-shield ports.
+>
+> Original plan content preserved below for historical reference.
 
 ## Vision
 

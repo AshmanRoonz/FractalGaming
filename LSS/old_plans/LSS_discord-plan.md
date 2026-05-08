@@ -1,7 +1,7 @@
 # LSS x Discord Integration Plan
 
 Last updated: 2026-05-02
-Status: SUPERSEDED by LSS_backend-plan.md ; see note below
+Status: SUPERSEDED + ARCHIVED 2026-05-08 (the successor plan, LSS_backend-plan.md, has also shipped ; both are now in old_plans/)
 
 > **Note (2026-05-02 evening):** The architecture in this document
 > (Discord channels as the data store, with Tier 0 = no infrastructure)

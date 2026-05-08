@@ -1,8 +1,20 @@
 # LSS Backend Plan ; Discord Identity + Cloudflare D1
 
 Last updated: 2026-05-02
-Status: planning / committed to direction
+Status: SHIPPED (verified 2026-05-08)
 Supersedes: most of LSS_discord-plan.md (Discord channels are no longer the data store ; this plan is the new architectural truth)
+
+> **Archive note (2026-05-08):** A code audit confirmed every route in this
+> plan is implemented in `backend/src/worker.js`: `/auth/verify`, `/match`
+> POST + `/match/:id`, `/leaderboard` (with slice/sort/loadout/map filters),
+> `/player/:id` career, `/heartbeat`, `/room/:code` DELETE, `/rooms` list,
+> `/me` scrub. `last_ship_sailing_v14.html` calls `/heartbeat` every 30s and
+> POSTs match results on round end. The static stats site
+> (`leaderboard.html`, `profile.html`, `rooms.html`) exists on disk. D1
+> schema + three migrations are in place. Discord OAuth identity is wired
+> into the lobby (v10).
+>
+> Original plan content preserved below for historical reference.
 
 ## Why this plan exists
 
