@@ -8123,7 +8123,7 @@ class BillboardCloudSystem {
         // Bias the noise so most pixels start below threshold ; combined
         // with the radial mask, this carves the sprite into a wispy
         // irregular patch instead of a solid circle.
-        '  float maskedNoise = clamp((n - 0.30) * 1.6, 0.0, 1.0);',
+        '  float maskedNoise = clamp((n - 0.22) * 1.6, 0.0, 1.0);',
         '  float a = maskedNoise * radial * vAlpha;',
         '  if (a < 0.005) discard;',
         // (v14e Phase 3 v2) Dynamic projectile lighting. Loop with no
@@ -8264,7 +8264,10 @@ class GasCloud {
       const sr = Math.max(0, Math.min(1, this.color.r + jitter));
       const sg = Math.max(0, Math.min(1, this.color.g + jitter));
       const sb = Math.max(0, Math.min(1, this.color.b + jitter));
-      this.slots.push({ idx, off, scale, alpha });
+      // (v14e wakes) Each slot owns a wakeOff Vector3 that wake sources
+      // (ships, projectiles) push around. updateBCSWakes() decays it back
+      // to zero over ~1 second so the gas settles when the source leaves.
+      this.slots.push({ idx, off, scale, alpha, wakeOff: new THREE.Vector3() });
       bcs.setSlot(idx,
         this.position.x + off.x,
         this.position.y + off.y,
@@ -8276,16 +8279,16 @@ class GasCloud {
     }
   }
 
-  // Move all owned slots so they sit at this.position + offset. Cheap :
-  // only writes the position attribute, not scale/color/alpha.
+  // Move all owned slots so they sit at this.position + offset + wakeOff.
+  // Cheap : only writes the position attribute, not scale/color/alpha.
   setPosition(x, y, z) {
     this.position.set(x, y, z);
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       this.bcs.setSlotPosition(s.idx,
-        x + s.off.x,
-        y + s.off.y,
-        z + s.off.z);
+        x + s.off.x + s.wakeOff.x,
+        y + s.off.y + s.wakeOff.y,
+        z + s.off.z + s.wakeOff.z);
     }
   }
 
@@ -8295,9 +8298,149 @@ class GasCloud {
     }
     this.slots.length = 0;
   }
+
+  // (v14e wakes v2) Magnetic wake : combines a pull-toward-source impulse
+  // (gas wants to hug the source) with a smaller velocity-drag impulse
+  // (gas inherits some of the source's motion, so it trails along behind
+  // moving sources). Both attenuate linearly with distance to the source.
+  // tickWake(dt) decays wakeOff back toward zero so the gas settles after
+  // the source leaves.
+  applyWake(srcX, srcY, srcZ, velX, velY, velZ, strength, radius, dt) {
+    const r2 = radius * radius;
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      const sx = this.position.x + s.off.x + s.wakeOff.x;
+      const sy = this.position.y + s.off.y + s.wakeOff.y;
+      const sz = this.position.z + s.off.z + s.wakeOff.z;
+      const dx = sx - srcX, dy = sy - srcY, dz = sz - srcZ;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > r2) continue;
+      const d = Math.sqrt(d2);
+      // Linear falloff : 1 at center, 0 at radius edge.
+      const atten = 1.0 - d / radius;
+      // (1) Magnetic pull is now the dominant component. The previous
+      // velocity-drag mix was pushing sprites AHEAD of the source (in
+      // its flight direction), which read as "gas shoved away" instead
+      // of "gas trailing behind." Pure pull means sprites chase the
+      // source's CURRENT position : as the source moves through and
+      // past, sprites track it for a moment, then settle. Net effect :
+      // gas trails behind moving objects.
+      if (d > 0.001) {
+        const pullSpeed = 95.0 * atten * strength * dt;
+        const invD = 1.0 / d;
+        s.wakeOff.x -= dx * invD * pullSpeed;
+        s.wakeOff.y -= dy * invD * pullSpeed;
+        s.wakeOff.z -= dz * invD * pullSpeed;
+      }
+      // (2) Velocity drag : tiny weight, just a subtle nudge in source
+      // flight direction. Mostly off ; pull does the heavy lifting.
+      const dragK = 0.015 * atten * strength * dt;
+      s.wakeOff.x += velX * dragK;
+      s.wakeOff.y += velY * dragK;
+      s.wakeOff.z += velZ * dragK;
+    }
+  }
+
+  // (v14e wakes) Decay wakeOffs back toward zero each frame and re-write
+  // slot positions to BCS so the gas visibly settles after a wake passes.
+  // exp(-3*dt) per frame settles a wake in roughly 1 second.
+  tickWake(dt) {
+    const decay = Math.exp(-3.0 * dt);
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      s.wakeOff.x *= decay;
+      s.wakeOff.y *= decay;
+      s.wakeOff.z *= decay;
+      this.bcs.setSlotPosition(s.idx,
+        this.position.x + s.off.x + s.wakeOff.x,
+        this.position.y + s.off.y + s.wakeOff.y,
+        this.position.z + s.off.z + s.wakeOff.z);
+    }
+  }
 }
 
 const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 4096 });
+
+// (v14e wakes) Push wake impulses from active wake sources (player +
+// other ships + projectiles) into nearby gas clouds, then decay each
+// cloud's wakeOffs back toward zero. Sources contribute proportional
+// to their distance + own velocity. Gas drifts with the source briefly,
+// settles when the source leaves. Performance : O(sources × clouds ×
+// slots). With ~6 sources × 30 clouds × 9 slots = ~1620 distance checks
+// per frame, well under 1ms.
+function updateBCSWakes(dt) {
+  if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
+  if (!game) return;
+
+  // Gather wake sources : player + nearby ships + nearby projectiles.
+  // Each source : { x, y, z, vx, vy, vz, str, radius }.
+  const sources = [];
+  if (typeof player !== 'undefined' && player && player.alive && player.position && player.velocity) {
+    sources.push({
+      x: player.position.x, y: player.position.y, z: player.position.z,
+      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
+      str: 0.05, radius: 220,
+    });
+  }
+  if (game.entities) {
+    for (let i = 0; i < game.entities.length; i++) {
+      const e = game.entities[i];
+      if (!e || e === player || !e.alive || !e.position) continue;
+      const v = e.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: e.position.x, y: e.position.y, z: e.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.04, radius: 180,
+      });
+    }
+  }
+  if (game.projectiles) {
+    // Cap projectile sources at 12 to avoid blowing the budget when a
+    // missile salvo is in flight.
+    let pCount = 0;
+    for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
+      const p = game.projectiles[i];
+      if (!p || !p.alive || !p.position) continue;
+      const v = p.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: p.position.x, y: p.position.y, z: p.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.06, radius: 140,
+      });
+      pCount++;
+    }
+  }
+
+  // Apply wakes + tick decay on every gas cloud (attached + detached).
+  if (game.clusters) {
+    for (let cli = 0; cli < game.clusters.length; cli++) {
+      const cl = game.clusters[cli];
+      if (!cl || !cl.children) continue;
+      for (let ci = 0; ci < cl.children.length; ci++) {
+        const c = cl.children[ci];
+        const cloud = c && c._atomSmoke;
+        if (!cloud || !cloud.applyWake) continue;
+        for (let si = 0; si < sources.length; si++) {
+          const s = sources[si];
+          cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
+        }
+        cloud.tickWake(dt);
+      }
+    }
+  }
+  if (game.detachedGasPockets) {
+    for (let di = 0; di < game.detachedGasPockets.length; di++) {
+      const p = game.detachedGasPockets[di];
+      const cloud = p && p.gasCloud;
+      if (!cloud || !cloud.applyWake) continue;
+      for (let si = 0; si < sources.length; si++) {
+        const s = sources[si];
+        cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str * dt, s.radius);
+      }
+      cloud.tickWake(dt);
+    }
+  }
+}
 
 // (v14e Phase 3) Populate the BCS material's dynamic-light uniforms from
 // active projectiles each frame. Each gas sprite samples up to 8 lights
@@ -16617,7 +16760,7 @@ function _makeAtomFractalMaterial(baseColor) {
       // directly, and the material is already transparent: true below.
       // Override per-instance later (e.g. impact fade, doomed dim) by
       // poking mesh.material.uniforms.uOpacity.value.
-      uOpacity:   { value: 0.95 },
+      uOpacity:   { value: 0.78 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -16694,12 +16837,18 @@ function _makeAtomFractalMaterial(baseColor) {
       '  // Density-driven HSV: hue tracks uBaseColor via the q phase, low',
       '  // saturation, brightness from accumulated s. Tint the result by',
       '  // uBaseColor so each cluster keeps its identity.',
-      '  vec3 base = hsv(0.59 - q * 0.1, 0.45 - q * 0.05, s / 4000.0 * (0.31 + q * 0.69));',
-      '  base = base * (uBaseColor + vec3(0.5));',     // multiplicative tint, baseline 0.5 so darker base colors don't crush
+      // (v14e tune) Rocks pulled toward muted greys. HSV saturation cut
+      // from 0.45 to 0.28, and the per-cluster baseColor multiplier
+      // shifted to (uBaseColor*0.55 + 0.65) so the gray baseline dominates
+      // and the cluster tint just nudges the hue rather than washing it.
+      '  vec3 base = hsv(0.59 - q * 0.1, 0.28 - q * 0.05, s / 4000.0 * (0.31 + q * 0.69));',
+      '  base = base * (uBaseColor * 0.55 + vec3(0.65));',
       '  // Fresnel rim glow so the atom edges read against dark bgs.',
       '  vec3 V = normalize(cameraPosition - vWorldPos);',
       '  float fres = pow(1.0 - max(0.0, dot(normalize(vNormal), V)), 2.5);',
-      '  vec3 rim = uBaseColor * fres * 0.8;',
+      // (v14e tune) Subtler rim ; was 0.8, now 0.5 so cluster color
+      // doesn't dominate the silhouette.
+      '  vec3 rim = uBaseColor * fres * 0.5;',
       '  // Rock texture modulation. Two scales of FBM:',
       '  //   lowFreq darkens crevices (large irregular zones)',
       '  //   highFreq adds fine surface grain',
@@ -16830,13 +16979,11 @@ class ClusterObstacle {
     // to arrange that way. Per-child luminance variation 0.32-0.58 (gray
     // shades) so adjacent atoms aren't identical. Phase 3 (dynamic
     // lighting) will add projectile-color pickup ; until then, gray.
-    // (v14e tune 8) Tune 7 went too far on darkening + sprite count cut ;
-    // clouds disappeared. Backed off to a midpoint between "looked awesome"
-    // (tune 2 : 0.32-0.58 grays, 0.85 alpha, 10 sprites) and "too white"
-    // (tune 6 : 0.22-0.52 grays, 0.85 alpha, 11 sprites). Now : 0.20-0.50
-    // grays so per-sprite isn't blindingly bright, alpha 0.65 to keep
-    // additive accumulation in a moderate range, 9 segments for medium
-    // density coverage.
+    // (v14e tune 9) Thicker gas. segments 9 -> 13 (more sprites for
+    // denser coverage), alpha 0.65 -> 0.75 (more solid per-sprite). Gray
+    // range unchanged so it doesn't blow out white. Combined with the
+    // shader's noise-threshold drop (0.30 -> 0.22) more pixels survive
+    // per sprite, making the gas read as substance instead of wisps.
     const v = 0.20 + Math.random() * 0.30;
     const cloudColor = new THREE.Color(v, v, v);
     const radius = (child.scale || child.radius || 20) * 2.8;
@@ -16844,10 +16991,10 @@ class ClusterObstacle {
       boundsRadius:   radius,
       spriteScale:    radius * 1.55,
       spriteScaleVar: 0.50,
-      alpha:          0.65,
+      alpha:          0.75,
       color:          cloudColor,
       colorJitter:    0.14,
-      segments:       9,
+      segments:       13,
     });
     child._atomSmoke = cloud;
   }
@@ -36370,6 +36517,13 @@ function gameLoop(timestamp) {
   // (v14e Phase 3) Push projectile lights into the BCS gas-cloud material
   // so the gas absorbs the projectile's class color when shots fly close.
   if (typeof updateBCSLighting === 'function') updateBCSLighting();
+  // (v14e wakes) Push wake impulses from ships + projectiles into nearby
+  // gas sprites and decay existing wake offsets back toward zero. Gas
+  // visibly drifts when something moves through it, settles when the
+  // motion source leaves. Uses game.deltaTime directly because the gameLoop's
+  // local `dt` (which factors in hitstop time-dilation) isn't computed
+  // until later in the frame.
+  if (typeof updateBCSWakes === 'function') updateBCSWakes(game.deltaTime || 0.016);
 
   // (v12) Google Maps Photorealistic 3D Tiles per-frame update. The tile
   // renderer streams tiles in / disposes far ones based on camera
