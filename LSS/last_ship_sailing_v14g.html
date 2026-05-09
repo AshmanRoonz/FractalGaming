@@ -22554,6 +22554,10 @@ function executeAbility(slot, ability) {
     // adds +1 to that target's lock count (see Projectile.update), and a
     // Sonar Lock pulse adds +1 to every ship in its cone (see Sonar Lock case).
     else if (ability.name === 'Tracker Rockets') {
+      // Dedicated homing-volley stinger so the launch reads distinct from
+      // the main 40mm cannon and from Salvo Core. Tunable in the lab via
+      // the tracker_rockets recipe.
+      try { playSound('tracker_rockets'); } catch (_) {}
       const lockedTargets = [];
       for (const [botId, locks] of Object.entries(player.trackerLocks)) {
         if (locks >= 3) {
@@ -24137,10 +24141,12 @@ function _spawnSonarPulse(pos, owner) {
     locked: new Set(),                    // bot ids already granted a lock by THIS pulse
     mesh: mesh,
   });
-  // Tactile audio: a single ping at the impact point so the player hears the
-  // detonation regardless of whether anything was in range. Per-ship lock
-  // grants below play their own ping at the appropriate stack count.
-  try { playSound('sonar_ping_1'); } catch (e) {}
+  // Tactile audio: dedicated beacon-detonation cue at the impact point so
+  // the player hears the pulse fire even when nothing is in range. Distinct
+  // from sonar_ping_1/2/3 (those are reserved for per-target lock grants
+  // below, so the beacon impact and the lock pips no longer overlap as the
+  // same pip).
+  try { playSound('sonar_pulse'); } catch (e) {}
 }
 
 function updateAbilities(dt) {
@@ -37705,7 +37711,13 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     const gain = ctx.createGain();
     osc.type = safeWave;
     osc.frequency.setValueAtTime(freq, now);
-    if (rampFreqs && rampFreqs[i] !== undefined) {
+    // (v14g) Match the lab's triChord: treat a 0 / null rampFreq as "no
+    // ramp" instead of ramping the pitch down to 1 Hz. Lab recipes encode
+    // rampFreqs:[0,0] to mean "hold the start frequency" (e.g., sonar pings),
+    // and the old behavior was sliding pings from 880 Hz to 1 Hz over 55 ms,
+    // making them inaudible. This was the cause of "lab sounds don't match
+    // in-game" for any recipe that used 0 to mean no ramp.
+    if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
       osc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
     }
     const peakVol = vol / 3;
@@ -37724,7 +37736,8 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     chorusOsc.type = safeWave;
     chorusOsc.frequency.setValueAtTime(freq, now);
     chorusOsc.detune.setValueAtTime((i % 2 === 0 ? 1 : -1) * CHORUS_DETUNE_CENTS, now);
-    if (rampFreqs && rampFreqs[i] !== undefined) {
+    // (v14g) Same "0 means no ramp" fix as the main osc above.
+    if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
       chorusOsc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
     }
     chorusGain.gain.value = CHORUS_MIX;
@@ -41413,6 +41426,131 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 1
     },
     {
+      "name": "tracker_rockets",
+      "description": "Tracker Rockets : same shape as Syphon Rocket Salvo (5 launches + sub dive)",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [70, 85],
+          "rampFreqs": [200, 240],
+          "vol": 0.7,
+          "dur": 0.22,
+          "rampTime": 0.18,
+          "startOffset": 0,
+          "envelope": { "attack": 0.006, "hold": 0.04, "decay": 0.2 },
+          "pitchVar": 0.08,
+          "durVar": 0.15,
+          "volVar": 0.18,
+          "count": 5,
+          "spacing": 0.07,
+          "spacingVar": 0.02,
+          "countDecay": 0,
+          "chance": 1,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.16,
+          "volume": 1,
+          "startOffset": 0,
+          "filterFreq": 95,
+          "filterQ": 0.7,
+          "filterType": "bandpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "count": 5,
+          "spacing": 0.07,
+          "spacingVar": 0.02,
+          "chance": 1,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [0, 0, 453],
+          "rampFreqs": [0, 0, 32],
+          "vol": 0.195,
+          "dur": 1.455,
+          "rampTime": 1.8,
+          "startOffset": 0.175,
+          "envelope": { "attack": 0.284, "hold": 0.367, "decay": 0.2 },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 5,
+          "spacing": 0.025
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "sonar_pulse",
+      "description": "Sonar Beacon detonation : wide pulse + sub thump + shimmer",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [60, 90, 140],
+          "rampFreqs": [30, 45, 70],
+          "vol": 0.6,
+          "dur": 0.5,
+          "rampTime": 0.45,
+          "startOffset": 0,
+          "envelope": { "attack": 0.01, "hold": 0.08, "decay": 0.45 },
+          "pitchVar": 0.05,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "count": 1,
+          "spacing": 0,
+          "chance": 1
+        },
+        {
+          "kind": "noise",
+          "duration": 0.4,
+          "volume": 0.45,
+          "startOffset": 0,
+          "filterFreq": 1800,
+          "filterQ": 2.0,
+          "filterType": "bandpass",
+          "varDur": 0.1,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "count": 1,
+          "spacing": 0,
+          "chance": 1,
+          "peakGain": 0,
+          "reverseEnvelope": true
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [880, 1320],
+          "rampFreqs": [440, 660],
+          "vol": 0.18,
+          "dur": 0.35,
+          "rampTime": 0.3,
+          "startOffset": 0.05,
+          "envelope": { "attack": 0.02, "hold": 0.04, "decay": 0.3 },
+          "pitchVar": 0.08,
+          "durVar": 0.1,
+          "volVar": 0.15,
+          "count": 1,
+          "spacing": 0,
+          "chance": 1
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
       "name": "fire_salvo",
       "description": "missile launch, whoosh + rise",
       "category": "TRACKER",
@@ -42016,7 +42154,7 @@ const DEFAULT_SOUND_LIBRARY = {
       "layers": [
         {
           "kind": "tri",
-          "wave": "sawtooth",
+          "wave": "sine",
           "freqs": [70, 85],
           "rampFreqs": [200, 240],
           "vol": 0.7,
@@ -42039,11 +42177,11 @@ const DEFAULT_SOUND_LIBRARY = {
         {
           "kind": "noise",
           "duration": 0.16,
-          "volume": 0.65,
+          "volume": 1,
           "startOffset": 0,
-          "filterFreq": 850,
+          "filterFreq": 95,
           "filterQ": 0.7,
-          "filterType": "lowpass",
+          "filterType": "bandpass",
           "varDur": 0.2,
           "varVol": 0.25,
           "varFreq": 0.25,
@@ -42054,6 +42192,23 @@ const DEFAULT_SOUND_LIBRARY = {
           "countDecay": 0,
           "peakGain": 0,
           "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [0, 0, 453],
+          "rampFreqs": [0, 0, 32],
+          "vol": 0.195,
+          "dur": 1.455,
+          "rampTime": 1.8,
+          "startOffset": 0.175,
+          "envelope": { "attack": 0.284, "hold": 0.367, "decay": 0.2 },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 5,
+          "spacing": 0.025
         }
       ],
       "recipeGain": 1
