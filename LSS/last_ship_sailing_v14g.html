@@ -6923,6 +6923,18 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
       _fxEndScale: endScale,
       _fxStartAlpha: 1.0,
       _fxEndAlpha: 0.0,
+      // (v14g) Make every FX burst (explosion residue clouds, fireball
+      // bursts, projectile cloud_split puffs, etc.) wake-aware. Without
+      // this the post-explosion residue clouds left by spawnExplosion hung
+      // perfectly still in the air for their full lifetime, even when ships
+      // flew through them or another explosion went off next door. The
+      // fx_burst tick applies wakeVel to mesh position + decays it, and
+      // applyExplosionPush already scans game.effects for any wakeVel.
+      playerWake: true,
+      wakeVel: new THREE.Vector3(),
+      _wakeRadius: radius * 1.5 + 120,
+      baseScale: 1.0,
+      maxSize: 1.0 + (endScale - startScale),
     });
   }
   return mesh;
@@ -19336,6 +19348,66 @@ function updateEffects(dt) {
         const u = e.mesh.material.uniforms;
         if (u._fxBaseBrightness == null) u._fxBaseBrightness = u.uBrightness.value;
         u.uBrightness.value = u._fxBaseBrightness * fade;
+      }
+      // (v14g) Wake integration. Per-frame accumulators (wakeVel) are
+      // pushed by ships / projectiles / explosions via the same source
+      // pattern as the shaderSmoke wake handler ; here we just integrate
+      // velocity into mesh position and decay it. Without this, fx_burst
+      // residue clouds were dead in space for their full lifetime.
+      if (e.wakeVel && e.mesh) {
+        // Source-collection : reuse player + bots + projectiles like the
+        // shaderSmoke branch does. Mid-life bursts catch wake from farther
+        // out as they expand (matches the cluster-plume behavior).
+        const _expandFactor = 1 + t * ((e.maxSize || 1.6) - 1);
+        const _wakeR = (e._wakeRadius || 200) * _expandFactor;
+        const _wakeR2 = _wakeR * _wakeR;
+        const _applyOne = (sx, sy, sz, sSpd) => {
+          const _dx = e.mesh.position.x - sx;
+          const _dy = e.mesh.position.y - sy;
+          const _dz = e.mesh.position.z - sz;
+          const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
+          if (_d2 >= _wakeR2 || _d2 <= 1) return;
+          const _d = Math.sqrt(_d2);
+          const _falloff = 1 - (_d / _wakeR);
+          const _impulse = _falloff * (50 + sSpd * 0.30);
+          const _inv = 1 / _d;
+          e.wakeVel.x += _dx * _inv * _impulse * dt;
+          e.wakeVel.y += _dy * _inv * _impulse * dt;
+          e.wakeVel.z += _dz * _inv * _impulse * dt;
+        };
+        if (typeof player !== 'undefined' && player && player.position
+            && player.shipState !== 'dead' && player.shipState !== 'spawning') {
+          const sSpd = (player.velocity ? player.velocity.length() : 0);
+          _applyOne(player.position.x, player.position.y, player.position.z, sSpd);
+        }
+        if (game && game.entities) {
+          for (let bi = 0; bi < game.entities.length; bi++) {
+            const bot = game.entities[bi];
+            if (!bot || bot === player || !bot.alive || !bot.position) continue;
+            const sSpd = (bot.velocity)
+              ? Math.sqrt(bot.velocity.x*bot.velocity.x + bot.velocity.y*bot.velocity.y + bot.velocity.z*bot.velocity.z)
+              : 0;
+            _applyOne(bot.position.x, bot.position.y, bot.position.z, sSpd);
+          }
+        }
+        if (game && game.projectiles) {
+          let pCount = 0;
+          for (let pi = 0; pi < game.projectiles.length && pCount < 12; pi++) {
+            const proj = game.projectiles[pi];
+            if (!proj || !proj.alive || !proj.position) continue;
+            const sSpd = (proj.velocity)
+              ? Math.sqrt(proj.velocity.x*proj.velocity.x + proj.velocity.y*proj.velocity.y + proj.velocity.z*proj.velocity.z)
+              : 0;
+            _applyOne(proj.position.x, proj.position.y, proj.position.z, sSpd);
+            pCount++;
+          }
+        }
+        // Integrate accumulated velocity into position and decay.
+        e.mesh.position.x += e.wakeVel.x * dt;
+        e.mesh.position.y += e.wakeVel.y * dt;
+        e.mesh.position.z += e.wakeVel.z * dt;
+        const _damp = Math.exp(-dt * 1.4);
+        e.wakeVel.x *= _damp; e.wakeVel.y *= _damp; e.wakeVel.z *= _damp;
       }
       continue;
     }
@@ -32915,6 +32987,18 @@ function spawnSupershapeBurst(presetName, pos, radius, life, opts) {
       _fxEndScale: endScale,
       _fxStartAlpha: 1.0,
       _fxEndAlpha: 0.0,
+      // (v14g) Make every FX burst (explosion residue clouds, fireball
+      // bursts, projectile cloud_split puffs, etc.) wake-aware. Without
+      // this the post-explosion residue clouds left by spawnExplosion hung
+      // perfectly still in the air for their full lifetime, even when ships
+      // flew through them or another explosion went off next door. The
+      // fx_burst tick applies wakeVel to mesh position + decays it, and
+      // applyExplosionPush already scans game.effects for any wakeVel.
+      playerWake: true,
+      wakeVel: new THREE.Vector3(),
+      _wakeRadius: radius * 1.5 + 120,
+      baseScale: 1.0,
+      maxSize: 1.0 + (endScale - startScale),
     });
   }
   return mesh;
