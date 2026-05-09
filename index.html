@@ -22554,6 +22554,10 @@ function executeAbility(slot, ability) {
     // adds +1 to that target's lock count (see Projectile.update), and a
     // Sonar Lock pulse adds +1 to every ship in its cone (see Sonar Lock case).
     else if (ability.name === 'Tracker Rockets') {
+      // Dedicated homing-volley stinger so the launch reads distinct from
+      // the main 40mm cannon and from Salvo Core. Tunable in the lab via
+      // the tracker_rockets recipe.
+      try { playSound('tracker_rockets'); } catch (_) {}
       const lockedTargets = [];
       for (const [botId, locks] of Object.entries(player.trackerLocks)) {
         if (locks >= 3) {
@@ -22599,6 +22603,10 @@ function executeAbility(slot, ability) {
     }
     // SYPHON: Rocket Salvo (5 rockets, 350 dmg each; doubled with Missile Racks upgrade)
     else if (ability.name === 'Rocket Salvo') {
+      // Dedicated launch stinger so the ability has its own sonic identity
+      // (separate from cluster_missile_fire / salvo_core_burst). Tunable via
+      // the rocket_salvo recipe in DEFAULT_SOUND_LIBRARY.
+      try { playSound('rocket_salvo'); } catch (_) {}
       const rocketCount = player.syphonMissileRacks ? 10 : 5;
       for (let r = 0; r < rocketCount; r++) {
         const spread = new THREE.Vector3((Math.random()-0.5)*0.12, (Math.random()-0.5)*0.12, 0);
@@ -24133,10 +24141,12 @@ function _spawnSonarPulse(pos, owner) {
     locked: new Set(),                    // bot ids already granted a lock by THIS pulse
     mesh: mesh,
   });
-  // Tactile audio: a single ping at the impact point so the player hears the
-  // detonation regardless of whether anything was in range. Per-ship lock
-  // grants below play their own ping at the appropriate stack count.
-  try { playSound('sonar_ping_1'); } catch (e) {}
+  // Tactile audio: dedicated beacon-detonation cue at the impact point so
+  // the player hears the pulse fire even when nothing is in range. Distinct
+  // from sonar_ping_1/2/3 (those are reserved for per-target lock grants
+  // below, so the beacon impact and the lock pips no longer overlap as the
+  // same pip).
+  try { playSound('sonar_pulse'); } catch (e) {}
 }
 
 function updateAbilities(dt) {
@@ -28977,8 +28987,7 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="margin-top:6px; gap:6px; flex-wrap:wrap;">
         <button id="sound-import-btn">Import Sound Library</button>
-        <button id="sound-reload-defaults">Reload LSS_SOUND.json</button>
-        <button id="sound-lab-reset">Reset to Built-in</button>
+        <button id="sound-reload-defaults">Reload Factory Sounds</button>
         <input type="file" id="sound-import-file" accept="application/json,.json" style="display:none;">
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="sound-import-status">${audio.labRecipes ? Object.keys(audio.labRecipes).length + ' recipes active' : 'using built-in synth for all sounds'}</div>
@@ -29367,23 +29376,13 @@ function buildSettingsPage() {
       reader.readAsText(f);
     });
   }
-  const soundResetBtn = overlay.querySelector('#sound-lab-reset');
-  if (soundResetBtn) {
-    soundResetBtn.addEventListener('click', () => {
-      clearSoundLabLibrary();
-      if (soundImportStat) {
-        soundImportStat.style.color = '#9af';
-        soundImportStat.textContent = 'Cleared. Using built-in synth for all sounds.';
-      }
-    });
-  }
   const soundReloadBtn = overlay.querySelector('#sound-reload-defaults');
   if (soundReloadBtn) {
     soundReloadBtn.addEventListener('click', () => {
       const result = reloadDefaultSoundLibrary();
       if (soundImportStat) {
         soundImportStat.style.color = result.ok ? '#9af' : '#f88';
-        soundImportStat.textContent = 'LSS_SOUND.json: ' + result.message;
+        soundImportStat.textContent = 'Factory sounds: ' + result.message;
       }
     });
   }
@@ -37701,7 +37700,13 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     const gain = ctx.createGain();
     osc.type = safeWave;
     osc.frequency.setValueAtTime(freq, now);
-    if (rampFreqs && rampFreqs[i] !== undefined) {
+    // (v14g) Match the lab's triChord: treat a 0 / null rampFreq as "no
+    // ramp" instead of ramping the pitch down to 1 Hz. Lab recipes encode
+    // rampFreqs:[0,0] to mean "hold the start frequency" (e.g., sonar pings),
+    // and the old behavior was sliding pings from 880 Hz to 1 Hz over 55 ms,
+    // making them inaudible. This was the cause of "lab sounds don't match
+    // in-game" for any recipe that used 0 to mean no ramp.
+    if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
       osc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
     }
     const peakVol = vol / 3;
@@ -37720,7 +37725,8 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     chorusOsc.type = safeWave;
     chorusOsc.frequency.setValueAtTime(freq, now);
     chorusOsc.detune.setValueAtTime((i % 2 === 0 ? 1 : -1) * CHORUS_DETUNE_CENTS, now);
-    if (rampFreqs && rampFreqs[i] !== undefined) {
+    // (v14g) Same "0 means no ramp" fix as the main osc above.
+    if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
       chorusOsc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
     }
     chorusGain.gain.value = CHORUS_MIX;
@@ -37795,12 +37801,15 @@ audio.labRecipes = null; // map of type -> recipe object once a library is loade
 // without a fetch step.
 const DEFAULT_SOUND_LIBRARY = {
   "version": 1,
-  "exportedAt": "2026-04-28T06:36:11.942Z",
+  "exportedAt": "2026-05-09T07:24:07.897Z",
   "recipes": [
     {
       "name": "fire_hitscan",
-      "description": "sharp transient crack, mid laser",
-      "category": "Weapon fire",
+      "description": "sharp transient crack, mid laser (Vortex Splitter Rifle, Syphon XO-16)",
+      "ships": [
+        "VORTEX",
+        "SYPHON"
+      ],
       "layers": [
         {
           "kind": "tri",
@@ -37840,12 +37849,16 @@ const DEFAULT_SOUND_LIBRARY = {
           "pitchPick": "perVoice"
         }
       ],
-      "recipeGain": 1
+      "recipeGain": 1,
+      "category": "Other"
     },
     {
       "name": "fire_projectile",
-      "description": "thump + launch with smoky body",
-      "category": "Weapon fire",
+      "description": "thump + launch (Pyro T-203 Thermite, Tracker 40mm)",
+      "ships": [
+        "PYRO",
+        "TRACKER"
+      ],
       "layers": [
         {
           "kind": "tri",
@@ -37922,252 +37935,13 @@ const DEFAULT_SOUND_LIBRARY = {
           "reverseEnvelope": false
         }
       ],
-      "recipeGain": 1
-    },
-    {
-      "name": "fire_spread",
-      "description": "shotgun pellet scatter (1-3 random pops)",
-      "category": "Weapon fire",
-      "layers": [
-        {
-          "kind": "tri",
-          "wave": "sawtooth",
-          "freqs": [
-            78,
-            544,
-            768
-          ],
-          "rampFreqs": [
-            95,
-            75,
-            43
-          ],
-          "vol": 0.35,
-          "dur": 0.905,
-          "rampTime": 0.19,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0,
-            "hold": 0.229,
-            "decay": 0.685
-          },
-          "pitchVar": 0.06,
-          "durVar": 0.12,
-          "volVar": 0.15,
-          "chance": 1,
-          "wavePool": [],
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
-      "name": "fire_minigun",
-      "description": "rapid-fire chatter grain (per-tick)",
-      "category": "Weapon fire",
-      "layers": [
-        {
-          "kind": "noise",
-          "duration": 0.04,
-          "volume": 0.055,
-          "startOffset": 0,
-          "filterFreq": 2545,
-          "filterQ": 0.9,
-          "filterType": "peaking",
-          "varDur": 0.25,
-          "varVol": 0.3,
-          "varFreq": 0.35,
-          "count": 3,
-          "spacing": 0.012,
-          "spacingVar": 0.4,
-          "countDecay": 0.1,
-          "chance": 1,
-          "peakGain": 0,
-          "reverseEnvelope": false
-        },
-        {
-          "kind": "tri",
-          "wave": "triangle",
-          "freqs": [
-            33,
-            43,
-            66
-          ],
-          "rampFreqs": [
-            220,
-            164,
-            147
-          ],
-          "vol": 0.2,
-          "dur": 0.2,
-          "rampTime": 0.15,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.003,
-            "hold": 0,
-            "decay": 0.2
-          },
-          "pitchVar": 0.1,
-          "durVar": 0.1,
-          "volVar": 0.1,
-          "chance": 1,
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
-      "name": "fire_railgun",
-      "description": "charged swell + metallic ring",
-      "category": "Weapon fire",
-      "layers": [
-        {
-          "kind": "tri",
-          "wave": "sine",
-          "freqs": [
-            74,
-            35,
-            82
-          ],
-          "rampFreqs": [
-            20,
-            25,
-            30
-          ],
-          "vol": 0.2,
-          "dur": 0.61,
-          "rampTime": 0.99,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.003,
-            "hold": 0.306,
-            "decay": 0.32
-          },
-          "pitchVar": 0.1,
-          "durVar": 0.1,
-          "volVar": 0.1,
-          "chance": 1,
-          "wavePool": [],
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        },
-        {
-          "kind": "tri",
-          "wave": "triangle",
-          "freqs": [
-            4000,
-            2063,
-            354
-          ],
-          "rampFreqs": [
-            40,
-            30,
-            20
-          ],
-          "vol": 0.065,
-          "dur": 1.295,
-          "rampTime": 0.5,
-          "startOffset": 0.175,
-          "envelope": {
-            "attack": 0.093,
-            "hold": 0.203,
-            "decay": 0.785
-          },
-          "pitchVar": 0.1,
-          "durVar": 0.1,
-          "volVar": 0.1,
-          "chance": 1,
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
-      "name": "fire_salvo",
-      "description": "missile launch, whoosh + rise",
-      "category": "Weapon fire",
-      "layers": [
-        {
-          "kind": "tri",
-          "wavePool": [],
-          "freqs": [
-            260,
-            258,
-            248
-          ],
-          "rampFreqs": [
-            55,
-            53,
-            51
-          ],
-          "vol": 0.22,
-          "dur": 0.43,
-          "rampTime": 0.085,
-          "startOffset": 0.045,
-          "envelope": {
-            "attack": 0.008,
-            "hold": 0.211,
-            "decay": 0.44
-          },
-          "pitchVar": 0.15,
-          "durVar": 0.15,
-          "volVar": 0.15,
-          "chance": 1,
-          "wave": "sine",
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        },
-        {
-          "kind": "noise",
-          "duration": 3,
-          "volume": 0.1,
-          "startOffset": 0,
-          "filterFreq": 480,
-          "filterQ": 2.29,
-          "varDur": 0.2,
-          "varVol": 0.2,
-          "varFreq": 0.2,
-          "chance": 1,
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "filterType": "lowpass",
-          "peakGain": 0,
-          "reverseEnvelope": false
-        }
-      ],
-      "recipeGain": 1
+      "recipeGain": 1,
+      "category": "Other"
     },
     {
       "name": "hit",
       "description": "enemy hit confirm, soft chord pop",
-      "category": "Impact",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38211,7 +37985,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "kill",
       "description": "kill confirm, double-stack chord with duck",
-      "category": "Impact",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38287,7 +38061,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "damage_shield",
       "description": "shield absorbed, metal-on-plate thud + warm overtone",
-      "category": "Impact",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38329,7 +38103,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "damage",
       "description": "hull damage, dissonant 3-5 pulse cluster",
-      "category": "Impact",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38402,7 +38176,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "dash",
       "description": "thruster burst, rising whoosh",
-      "category": "Player actions",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38463,7 +38237,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "reload",
       "description": "mechanical click + clip seat",
-      "category": "Player actions",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38558,7 +38332,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "ability",
       "description": "generic ability fire, two-stack chord",
-      "category": "Player actions",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38653,7 +38427,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "core",
       "description": "core ready, low rising swell",
-      "category": "Player actions",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38695,7 +38469,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "core_titan",
       "description": "titan core stinger, sub + chord + shimmer",
-      "category": "Player actions",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -38877,7 +38651,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "explosion",
       "description": "destruction, dissonant pulse cluster + shrapnel + tail",
-      "category": "Lifecycle",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "noise",
@@ -38970,7 +38744,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "stasis",
       "description": "stasis charge, 3 s rising harmonic sweep + release",
-      "category": "Lifecycle",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -39171,7 +38945,7 @@ const DEFAULT_SOUND_LIBRARY = {
     {
       "name": "death",
       "description": "ship death, descending drone + shrapnel + groan",
-      "category": "Lifecycle",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -39282,161 +39056,9 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 1
     },
     {
-      "name": "sonar_ping_1",
-      "description": "tracker lock level 1, single soft pip",
-      "category": "UI / system",
-      "layers": [
-        {
-          "kind": "tri",
-          "wave": "sine",
-          "freqs": [
-            880,
-            1320
-          ],
-          "rampFreqs": [
-            0,
-            0
-          ],
-          "vol": 0.08,
-          "dur": 0.055,
-          "rampTime": 0.055,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.002,
-            "hold": 0,
-            "decay": 0.05
-          },
-          "pitchVar": 0.03,
-          "durVar": 0.05,
-          "volVar": 0.2,
-          "chance": 1,
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
-      "name": "sonar_ping_2",
-      "description": "tracker lock level 2, double pip",
-      "category": "UI / system",
-      "layers": [
-        {
-          "kind": "tri",
-          "wave": "sine",
-          "freqs": [
-            1100,
-            1650
-          ],
-          "rampFreqs": [
-            0,
-            0
-          ],
-          "vol": 0.08,
-          "dur": 0.055,
-          "rampTime": 0.055,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.002,
-            "hold": 0,
-            "decay": 0.05
-          },
-          "pitchVar": 0.03,
-          "durVar": 0.05,
-          "volVar": 0.2,
-          "count": 2,
-          "spacing": 0.09,
-          "spacingVar": 0.05,
-          "countDecay": 0,
-          "chance": 1,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
-      "name": "sonar_ping_3",
-      "description": "tracker lock level 3, full lock 4-pip + sub",
-      "category": "UI / system",
-      "layers": [
-        {
-          "kind": "tri",
-          "wave": "sine",
-          "freqs": [
-            1480,
-            2220
-          ],
-          "rampFreqs": [
-            0,
-            0
-          ],
-          "vol": 0.08,
-          "dur": 0.055,
-          "rampTime": 0.055,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.002,
-            "hold": 0,
-            "decay": 0.05
-          },
-          "pitchVar": 0.03,
-          "durVar": 0.05,
-          "volVar": 0.2,
-          "count": 4,
-          "spacing": 0.055,
-          "spacingVar": 0.05,
-          "countDecay": 0,
-          "chance": 1,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        },
-        {
-          "kind": "tri",
-          "wave": "sine",
-          "freqs": [
-            70,
-            90
-          ],
-          "rampFreqs": [
-            0,
-            0
-          ],
-          "vol": 0.06,
-          "dur": 0.12,
-          "rampTime": 0.12,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.003,
-            "hold": 0,
-            "decay": 0.1
-          },
-          "pitchVar": 0,
-          "durVar": 0,
-          "volVar": 0,
-          "chance": 1,
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
       "name": "round_start",
       "description": "rising chord progression with reverse-cymbal swell + resolve",
-      "category": "UI / system",
+      "category": "GENERIC",
       "layers": [
         {
           "kind": "tri",
@@ -39563,9 +39185,1266 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 1
     },
     {
+      "name": "shield_hum",
+      "description": "low electrical hum loop (Vortex Shield, Gun Shield, Sword Block, Particle Wall)",
+      "ships": [
+        "VORTEX",
+        "BLASTER",
+        "SLAYER",
+        "TRACKER"
+      ],
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            55,
+            82,
+            110
+          ],
+          "rampFreqs": [
+            55,
+            82,
+            110
+          ],
+          "vol": 0.1,
+          "dur": 3,
+          "rampTime": 2.03,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.1,
+            "hold": 2,
+            "decay": 0.005
+          },
+          "pitchVar": 0,
+          "durVar": 0,
+          "volVar": 0,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [
+            1,
+            3
+          ],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 0.55,
+      "category": "Other"
+    },
+    {
+      "name": "vortex_shield_hum",
+      "description": "continuous low organ-drone tick (loops on 0.95 s cadence)",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            110,
+            165
+          ],
+          "rampFreqs": [
+            108,
+            162
+          ],
+          "vol": 0.08,
+          "dur": 0.95,
+          "rampTime": 0.92,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.18,
+            "hold": 0.2,
+            "decay": 0.55
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.05,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            440
+          ],
+          "rampFreqs": [
+            0
+          ],
+          "vol": 0.025,
+          "dur": 0.45,
+          "rampTime": 0,
+          "startOffset": 0.1,
+          "envelope": {
+            "attack": 0.05,
+            "hold": 0,
+            "decay": 0.4
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.2,
+          "volVar": 0.3,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "vortex_absorb",
+      "description": "rising schwoop : projectile sucked into Vortex Shield",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            220,
+            330,
+            440
+          ],
+          "rampFreqs": [
+            660,
+            880,
+            1320
+          ],
+          "vol": 0.18,
+          "dur": 0.16,
+          "rampTime": 0.14,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.01,
+            "decay": 0.13
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.05,
+          "volume": 0.07,
+          "startOffset": 0,
+          "filterFreq": 2200,
+          "filterQ": 2.5,
+          "filterType": "lowpass",
+          "varDur": 0.3,
+          "varVol": 0.3,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "vortex_reflect",
+      "description": "falling sawtooth + sub thump : Vortex Shield burst release",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            880,
+            660
+          ],
+          "rampFreqs": [
+            330,
+            248
+          ],
+          "vol": 0.22,
+          "dur": 0.2,
+          "rampTime": 0.18,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.005,
+            "decay": 0.18
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.06,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 1400,
+          "filterQ": 1.4,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.04,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 80,
+          "filterQ": 0.8,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.3,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "tripwire_detonate",
+      "description": "electric snap + detonation thud : Trip Wire orb triggered",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.93,
+          "volume": 0.2,
+          "startOffset": 0,
+          "filterFreq": 3200,
+          "filterQ": 1.88,
+          "filterType": "bandpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            660,
+            990
+          ],
+          "rampFreqs": [
+            165,
+            248
+          ],
+          "vol": 0.18,
+          "dur": 0.12,
+          "rampTime": 0.1,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.1
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.18,
+          "volume": 0.3,
+          "startOffset": 0.04,
+          "filterFreq": 80,
+          "filterQ": 0.7,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.2,
+          "varFreq": 0.3,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.1,
+          "volume": 0.1,
+          "startOffset": 0.05,
+          "filterFreq": 450,
+          "filterQ": 0.9,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.3,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "trip_wire_deploy",
+      "description": "capacitor thunk + electric snap : Trip Wire (laser trap) deployment",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            110,
+            165,
+            220
+          ],
+          "rampFreqs": [
+            330,
+            495,
+            660
+          ],
+          "vol": 0.4,
+          "dur": 0.3,
+          "rampTime": 0.28,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.02,
+            "hold": 0.06,
+            "decay": 0.25
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.25,
+          "volume": 0.35,
+          "startOffset": 0,
+          "filterFreq": 75,
+          "filterQ": 0.5,
+          "filterType": "lowpass",
+          "varDur": 0.12,
+          "varVol": 0.12,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.1,
+          "volume": 0.3,
+          "startOffset": 0.04,
+          "filterFreq": 2800,
+          "filterQ": 3,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            660,
+            990,
+            1320
+          ],
+          "rampFreqs": [
+            0,
+            0,
+            0
+          ],
+          "vol": 0.18,
+          "dur": 0.3,
+          "rampTime": 0,
+          "startOffset": 0.08,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.04,
+            "decay": 0.26
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 0.7
+    },
+    {
+      "name": "laser_shot",
+      "description": "sharp piercing zap (Vortex Laser Shot ability)",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            1320,
+            1980,
+            2640
+          ],
+          "rampFreqs": [
+            330,
+            495,
+            660
+          ],
+          "vol": 0.3,
+          "dur": 0.18,
+          "rampTime": 0.16,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.16
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.08,
+          "volume": 0.2,
+          "startOffset": 0,
+          "filterFreq": 3200,
+          "filterQ": 3.5,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.06,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 75,
+          "filterQ": 0.6,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            220
+          ],
+          "rampFreqs": [
+            0
+          ],
+          "vol": 0.1,
+          "dur": 0.22,
+          "rampTime": 0,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.02,
+            "decay": 0.2
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "laser_core_beam",
+      "description": "4 s sustained energy beam (Vortex Laser Core)",
+      "category": "VORTEX",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            55,
+            82
+          ],
+          "rampFreqs": [
+            55,
+            82
+          ],
+          "vol": 0.32,
+          "dur": 4,
+          "rampTime": 4,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.12,
+            "hold": 3.4,
+            "decay": 0.45
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.08,
+          "volVar": 0.08,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            165,
+            247,
+            330
+          ],
+          "rampFreqs": [
+            220,
+            330,
+            440
+          ],
+          "vol": 0.24,
+          "dur": 4,
+          "rampTime": 3.95,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.1,
+            "hold": 3.45,
+            "decay": 0.4
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.08,
+          "volVar": 0.08,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 3.95,
+          "volume": 0.1,
+          "startOffset": 0.05,
+          "filterFreq": 2400,
+          "filterQ": 2.8,
+          "filterType": "lowpass",
+          "varDur": 0.05,
+          "varVol": 0.1,
+          "varFreq": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 3.95,
+          "volume": 0.18,
+          "startOffset": 0.02,
+          "filterFreq": 110,
+          "filterQ": 0.55,
+          "filterType": "lowpass",
+          "varDur": 0.05,
+          "varVol": 0.1,
+          "varFreq": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "fire_burn",
+      "description": "firewall / gas cloud / incendiary trap / Flame Core (loops)",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 3,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 435,
+          "filterQ": 0.8,
+          "varDur": 0,
+          "varVol": 0,
+          "varFreq": 0.15,
+          "chance": 1,
+          "reverseEnvelope": true,
+          "count": 6,
+          "spacing": 0.175,
+          "spacingVar": 0.85,
+          "countDecay": 0,
+          "filterType": "lowpass",
+          "peakGain": 0
+        }
+      ],
+      "recipeGain": 0.7
+    },
+    {
+      "name": "fire_shield_hum",
+      "description": "Pyro Thermal Shield fiery roar (loops)",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 1,
+          "volume": 0.22,
+          "startOffset": 0,
+          "filterFreq": 70,
+          "filterQ": 0.55,
+          "filterType": "bandpass",
+          "varDur": 0.05,
+          "varVol": 0.1,
+          "varFreq": 0.16,
+          "chance": 1,
+          "count": 6,
+          "spacing": 0.245,
+          "spacingVar": 1,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": true
+        }
+      ],
+      "recipeGain": 0.65
+    },
+    {
+      "name": "thermal_shield_hum",
+      "description": "warm crackling roar bed : Thermal Shield held (loops 0.90 s)",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.85,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 220,
+          "filterQ": 0.7,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.85,
+          "volume": 0.06,
+          "startOffset": 0.02,
+          "filterFreq": 1100,
+          "filterQ": 1.1,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            82,
+            110
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.06,
+          "dur": 0.85,
+          "rampTime": 0,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.2,
+            "hold": 0.3,
+            "decay": 0.4
+          },
+          "pitchVar": 0.05,
+          "durVar": 0.05,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "thermal_burn",
+      "description": "short crackling sting : Thermal Shield burn-on-contact",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.12,
+          "volume": 0.16,
+          "startOffset": 0,
+          "filterFreq": 2400,
+          "filterQ": 2.4,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            440,
+            660
+          ],
+          "rampFreqs": [
+            220,
+            330
+          ],
+          "vol": 0.1,
+          "dur": 0.1,
+          "rampTime": 0.08,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0,
+            "decay": 0.08
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.69,
+          "volume": 0.845,
+          "startOffset": 0,
+          "filterFreq": 340,
+          "filterQ": 2.2,
+          "varDur": 0,
+          "varVol": 0.02,
+          "varFreq": 0,
+          "chance": 1,
+          "count": 5,
+          "spacing": 0.05
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "firewall_roar",
+      "description": "sustained jet-engine fire bed : Firewall ability (loops 0.55 s)",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.55,
+          "volume": 0.18,
+          "startOffset": 0,
+          "filterFreq": 160,
+          "filterQ": 0.6,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.5,
+          "volume": 0.08,
+          "startOffset": 0.02,
+          "filterFreq": 900,
+          "filterQ": 1.4,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.3,
+          "volume": 0.04,
+          "startOffset": 0.05,
+          "filterFreq": 2800,
+          "filterQ": 2,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.3,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "incendiary_ignite",
+      "description": "deep WHOOSH + rising flame tail : Incendiary Trap ignites",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.3,
+          "volume": 0.25,
+          "startOffset": 0,
+          "filterFreq": 180,
+          "filterQ": 0.6,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.2,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.4,
+          "volume": 0.15,
+          "startOffset": 0.04,
+          "filterFreq": 700,
+          "filterQ": 1.2,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.3,
+          "volume": 0.08,
+          "startOffset": 0.1,
+          "filterFreq": 2400,
+          "filterQ": 1.8,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.3,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            55,
+            82
+          ],
+          "rampFreqs": [
+            180,
+            270
+          ],
+          "vol": 0.1,
+          "dur": 0.4,
+          "rampTime": 0.35,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.04,
+            "hold": 0,
+            "decay": 0.35
+          },
+          "pitchVar": 0,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "flame_core_blast",
+      "description": "massive ignition front + rising whoosh (Flame Core, with duck)",
+      "category": "PYRO",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 2.75,
+          "volume": 0.97,
+          "startOffset": 0,
+          "filterFreq": 110,
+          "filterQ": 0.5,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.1,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 5,
+          "spacing": 0.19,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 14.5,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 3,
+          "volume": 1,
+          "startOffset": 0.04,
+          "filterFreq": 280,
+          "filterQ": 3.72,
+          "filterType": "lowpass",
+          "varDur": 0.12,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 2.83,
+          "volume": 0.775,
+          "startOffset": 0.1,
+          "filterFreq": 280,
+          "filterQ": 0.57,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 14.5,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            80,
+            141,
+            80
+          ],
+          "rampFreqs": [
+            60,
+            39,
+            100
+          ],
+          "vol": 0.41,
+          "dur": 1.26,
+          "rampTime": 0.15,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.003,
+            "hold": 0,
+            "decay": 0.2
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 4,
+          "spacing": 0.065
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            100,
+            100,
+            120
+          ],
+          "rampFreqs": [
+            60,
+            60,
+            39
+          ],
+          "vol": 0.84,
+          "dur": 2.4,
+          "rampTime": 0.84,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.229,
+            "hold": 0.285,
+            "decay": 0.2
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "fire_railgun",
+      "description": "charged swell + metallic ring",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            74,
+            35,
+            82
+          ],
+          "rampFreqs": [
+            20,
+            25,
+            30
+          ],
+          "vol": 0.2,
+          "dur": 0.61,
+          "rampTime": 0.99,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.003,
+            "hold": 0.306,
+            "decay": 0.32
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "wavePool": [],
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            4000,
+            2063,
+            354
+          ],
+          "rampFreqs": [
+            40,
+            30,
+            20
+          ],
+          "vol": 0.065,
+          "dur": 1.295,
+          "rampTime": 0.5,
+          "startOffset": 0.175,
+          "envelope": {
+            "attack": 0.093,
+            "hold": 0.203,
+            "decay": 0.785
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
       "name": "railgun_charge",
       "description": "Puncture railgun spool, 2.5 s rising hum + electrical bed",
-      "category": "Charge-up",
+      "category": "PUNCTURE",
       "layers": [
         {
           "kind": "tri",
@@ -39608,51 +40487,9 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 0.39
     },
     {
-      "name": "powershot_charge",
-      "description": "Blaster Power Shot, 1 s aggressive build to auto-fire",
-      "category": "Charge-up",
-      "layers": [
-        {
-          "kind": "tri",
-          "wave": "triangle",
-          "freqs": [
-            47,
-            50,
-            53
-          ],
-          "rampFreqs": [
-            316,
-            320,
-            324
-          ],
-          "vol": 0.2,
-          "dur": 1.07,
-          "rampTime": 0.985,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.04,
-            "hold": 0.635,
-            "decay": 0.005
-          },
-          "pitchVar": 0,
-          "durVar": 0,
-          "volVar": 0,
-          "chance": 1,
-          "count": 1,
-          "spacing": 0,
-          "spacingVar": 0,
-          "countDecay": 0,
-          "wavePool": [],
-          "pitchPool": [],
-          "pitchPick": "perVoice"
-        }
-      ],
-      "recipeGain": 1
-    },
-    {
       "name": "firework_pop",
       "description": "cluster missile firework crackle, bright + short",
-      "category": "Effects",
+      "category": "PUNCTURE",
       "layers": [
         {
           "kind": "tri",
@@ -39695,30 +40532,1371 @@ const DEFAULT_SOUND_LIBRARY = {
       "recipeGain": 0.8
     },
     {
-      "name": "shield_hum",
-      "description": "Vortex / Gun Shield / Particle Wall low electrical hum (loops)",
-      "category": "Shield / fire loops",
+      "name": "cluster_split",
+      "description": "metal pop + shrapnel scatter : Cluster Missile sub-munitions",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "tri",
+          "wavePool": [
+            "triangle",
+            "sawtooth"
+          ],
+          "freqs": [
+            330,
+            495,
+            660
+          ],
+          "rampFreqs": [
+            220,
+            330,
+            440
+          ],
+          "vol": 0.15,
+          "dur": 0.1,
+          "rampTime": 0.08,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.08
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wave": "sine",
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.06,
+          "volume": 0.18,
+          "startOffset": 0,
+          "filterFreq": 1800,
+          "filterQ": 1.8,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.2,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.03,
+          "volume": 0.06,
+          "startOffset": 0.05,
+          "filterFreq": 2400,
+          "filterQ": 2.5,
+          "filterType": "lowpass",
+          "varDur": 0.3,
+          "varVol": 0.3,
+          "varFreq": 0.3,
+          "count": 3,
+          "spacing": 0.04,
+          "spacingVar": 0.6,
+          "chance": 1,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "tether_caught",
+      "description": "rubber-band twang + low captured drone : Tether Trap snare",
+      "category": "PUNCTURE",
       "layers": [
         {
           "kind": "tri",
           "wave": "triangle",
           "freqs": [
-            55,
+            220,
+            330
+          ],
+          "rampFreqs": [
+            110,
+            165
+          ],
+          "vol": 0.2,
+          "dur": 0.18,
+          "rampTime": 0.16,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0.01,
+            "decay": 0.15
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.06,
+          "volume": 0.12,
+          "startOffset": 0,
+          "filterFreq": 900,
+          "filterQ": 1.2,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
             82,
             110
           ],
           "rampFreqs": [
-            55,
-            82,
-            110
+            70,
+            95
           ],
-          "vol": 0.1,
-          "dur": 3,
-          "rampTime": 2.03,
+          "vol": 0.08,
+          "dur": 0.4,
+          "rampTime": 0.36,
+          "startOffset": 0.1,
+          "envelope": {
+            "attack": 0.04,
+            "hold": 0,
+            "decay": 0.34
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 3,
+          "spacing": 0.095,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "tether_trap_deploy",
+      "description": "magnetic-coil thunk + radial pulse : Tether Trap deployment",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.3,
+          "volume": 0.4,
+          "startOffset": 0,
+          "filterFreq": 70,
+          "filterQ": 0.45,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.1,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            110,
+            165,
+            247
+          ],
+          "rampFreqs": [
+            220,
+            330,
+            495
+          ],
+          "vol": 0.4,
+          "dur": 0.35,
+          "rampTime": 0.32,
           "startOffset": 0,
           "envelope": {
-            "attack": 0.1,
-            "hold": 2,
+            "attack": 0.02,
+            "hold": 0.05,
+            "decay": 0.3
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            440,
+            660,
+            880
+          ],
+          "rampFreqs": [
+            220,
+            330,
+            440
+          ],
+          "vol": 0.25,
+          "dur": 0.25,
+          "rampTime": 0.22,
+          "startOffset": 0.1,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.04,
+            "decay": 0.2
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.18,
+          "volume": 0.18,
+          "startOffset": 0.04,
+          "filterFreq": 900,
+          "filterQ": 1.6,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 0.62
+    },
+    {
+      "name": "cluster_missile_fire",
+      "description": "heavy missile launch : sub kick + body whoosh + thrust roar",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.3,
+          "volume": 0.45,
+          "startOffset": 0,
+          "filterFreq": 60,
+          "filterQ": 0.4,
+          "filterType": "lowpass",
+          "varDur": 0.12,
+          "varVol": 0.1,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            82,
+            110,
+            165
+          ],
+          "rampFreqs": [
+            220,
+            330,
+            440
+          ],
+          "vol": 0.4,
+          "dur": 0.4,
+          "rampTime": 0.35,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.01,
+            "hold": 0.05,
+            "decay": 0.35
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.4,
+          "volume": 0.2,
+          "startOffset": 0.05,
+          "filterFreq": 550,
+          "filterQ": 1,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.1,
+          "volume": 0.2,
+          "startOffset": 0,
+          "filterFreq": 2400,
+          "filterQ": 2.4,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "afterburner",
+      "description": "sub-kick whoosh + rising engine spool : Afterburner ignition",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.3,
+          "volume": 0.25,
+          "startOffset": 0,
+          "filterFreq": 85,
+          "filterQ": 0.55,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.4,
+          "volume": 0.18,
+          "startOffset": 0.02,
+          "filterFreq": 900,
+          "filterQ": 1.3,
+          "filterType": "lowpass",
+          "varDur": 0.12,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            82,
+            110,
+            165
+          ],
+          "rampFreqs": [
+            220,
+            290,
+            440
+          ],
+          "vol": 0.22,
+          "dur": 0.4,
+          "rampTime": 0.36,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.04,
+            "hold": 0,
+            "decay": 0.36
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "barrage_core_thrust",
+      "description": "sustained thrust roar + rising power tone (Barrage Core, with duck)",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.55,
+          "volume": 0.35,
+          "startOffset": 0,
+          "filterFreq": 140,
+          "filterQ": 0.6,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.1,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.5,
+          "volume": 0.18,
+          "startOffset": 0.02,
+          "filterFreq": 1100,
+          "filterQ": 1.4,
+          "filterType": "lowpass",
+          "varDur": 0.1,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            82,
+            110,
+            165
+          ],
+          "rampFreqs": [
+            220,
+            290,
+            440
+          ],
+          "vol": 0.3,
+          "dur": 0.5,
+          "rampTime": 0.45,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.05,
+            "hold": 0,
+            "decay": 0.45
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "fire_spread",
+      "description": "shotgun pellet scatter (1-3 random pops)",
+      "category": "SLAYER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            78,
+            544,
+            768
+          ],
+          "rampFreqs": [
+            95,
+            75,
+            43
+          ],
+          "vol": 0.35,
+          "dur": 0.905,
+          "rampTime": 0.19,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0,
+            "hold": 0.229,
+            "decay": 0.685
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.12,
+          "volVar": 0.15,
+          "chance": 1,
+          "wavePool": [],
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "stun",
+      "description": "electric crackle + wobbling sawtooth + sub thump + disorient blip",
+      "category": "SLAYER",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.265,
+          "volume": 0.18,
+          "startOffset": 0,
+          "filterFreq": 2400,
+          "filterQ": 2.2,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.14,
+          "volume": 0.1,
+          "startOffset": 0.01,
+          "filterFreq": 900,
+          "filterQ": 1.2,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            440,
+            660
+          ],
+          "rampFreqs": [
+            290,
+            435
+          ],
+          "vol": 0.18,
+          "dur": 0.815,
+          "rampTime": 1.205,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.086,
+            "hold": 0.02,
+            "decay": 0.27
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            880
+          ],
+          "rampFreqs": [
+            330
+          ],
+          "vol": 0.1,
+          "dur": 0.1,
+          "rampTime": 0.09,
+          "startOffset": 0.05,
+          "envelope": {
+            "attack": 0.003,
+            "hold": 0.01,
+            "decay": 0.08
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "phase_dash",
+      "description": "phasing whoosh + sub doppler tail : Slayer Phase Dash",
+      "category": "SLAYER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            220,
+            440
+          ],
+          "rampFreqs": [
+            660,
+            330
+          ],
+          "vol": 0.25,
+          "dur": 0.3,
+          "rampTime": 0.25,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.005,
+            "hold": 0,
+            "decay": 0.25
+          },
+          "pitchVar": 0.08,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.2,
+          "volume": 0.2,
+          "startOffset": 0,
+          "filterFreq": 1600,
+          "filterQ": 1,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.3,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            120,
+            180
+          ],
+          "rampFreqs": [
+            60,
+            90
+          ],
+          "vol": 0.18,
+          "dur": 0.35,
+          "rampTime": 0.3,
+          "startOffset": 0.04,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.3
+          },
+          "pitchVar": 0.08,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "sword_core_swing",
+      "description": "rapid descending chord + metallic ring : Sword Core activation",
+      "category": "SLAYER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            222,
+            345,
+            488
+          ],
+          "rampFreqs": [
+            220,
+            275,
+            330
+          ],
+          "vol": 0.3,
+          "dur": 0.785,
+          "rampTime": 0.35,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.117,
+            "hold": 0.193,
+            "decay": 0.25
+          },
+          "pitchVar": 0.05,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.415,
+          "volume": 0.025,
+          "startOffset": 0.06,
+          "filterFreq": 3200,
+          "filterQ": 2.8,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.15,
+          "chance": 1,
+          "count": 3,
+          "spacing": 0.06,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            120,
+            162,
+            182
+          ],
+          "rampFreqs": [
+            0,
+            0,
+            0
+          ],
+          "vol": 0.2,
+          "dur": 0.59,
+          "rampTime": 0.075,
+          "startOffset": 0.2,
+          "envelope": {
+            "attack": 0,
+            "hold": 0.234,
+            "decay": 0.4
+          },
+          "pitchVar": 0.05,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "tracker_rockets",
+      "description": "Tracker Rockets : same shape as Syphon Rocket Salvo (5 launches + sub dive)",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [70, 85],
+          "rampFreqs": [200, 240],
+          "vol": 0.7,
+          "dur": 0.22,
+          "rampTime": 0.18,
+          "startOffset": 0,
+          "envelope": { "attack": 0.006, "hold": 0.04, "decay": 0.2 },
+          "pitchVar": 0.08,
+          "durVar": 0.15,
+          "volVar": 0.18,
+          "count": 5,
+          "spacing": 0.07,
+          "spacingVar": 0.02,
+          "countDecay": 0,
+          "chance": 1,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.16,
+          "volume": 1,
+          "startOffset": 0,
+          "filterFreq": 95,
+          "filterQ": 0.7,
+          "filterType": "bandpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "count": 5,
+          "spacing": 0.07,
+          "spacingVar": 0.02,
+          "chance": 1,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [0, 0, 453],
+          "rampFreqs": [0, 0, 32],
+          "vol": 0.195,
+          "dur": 1.455,
+          "rampTime": 1.8,
+          "startOffset": 0.175,
+          "envelope": { "attack": 0.284, "hold": 0.367, "decay": 0.2 },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 5,
+          "spacing": 0.025
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "sonar_pulse",
+      "description": "Sonar Beacon detonation : wide pulse + sub thump + shimmer",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [60, 90, 140],
+          "rampFreqs": [30, 45, 70],
+          "vol": 0.6,
+          "dur": 0.5,
+          "rampTime": 0.45,
+          "startOffset": 0,
+          "envelope": { "attack": 0.01, "hold": 0.08, "decay": 0.45 },
+          "pitchVar": 0.05,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "count": 1,
+          "spacing": 0,
+          "chance": 1
+        },
+        {
+          "kind": "noise",
+          "duration": 0.4,
+          "volume": 0.45,
+          "startOffset": 0,
+          "filterFreq": 1800,
+          "filterQ": 2.0,
+          "filterType": "bandpass",
+          "varDur": 0.1,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "count": 1,
+          "spacing": 0,
+          "chance": 1,
+          "peakGain": 0,
+          "reverseEnvelope": true
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [880, 1320],
+          "rampFreqs": [440, 660],
+          "vol": 0.18,
+          "dur": 0.35,
+          "rampTime": 0.3,
+          "startOffset": 0.05,
+          "envelope": { "attack": 0.02, "hold": 0.04, "decay": 0.3 },
+          "pitchVar": 0.08,
+          "durVar": 0.1,
+          "volVar": 0.15,
+          "count": 1,
+          "spacing": 0,
+          "chance": 1
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "fire_salvo",
+      "description": "missile launch, whoosh + rise",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wavePool": [],
+          "freqs": [
+            260,
+            258,
+            248
+          ],
+          "rampFreqs": [
+            55,
+            53,
+            51
+          ],
+          "vol": 0.22,
+          "dur": 0.43,
+          "rampTime": 0.085,
+          "startOffset": 0.045,
+          "envelope": {
+            "attack": 0.008,
+            "hold": 0.211,
+            "decay": 0.44
+          },
+          "pitchVar": 0.15,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "wave": "sine",
+          "count": 4,
+          "spacing": 0.08,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 3,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 480,
+          "filterQ": 2.29,
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "filterType": "lowpass",
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "sonar_ping_1",
+      "description": "Sonar Beacon / Pulse impact + lock level 1 (single soft pip)",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            880,
+            1320
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.08,
+          "dur": 0.055,
+          "rampTime": 0.055,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.03,
+          "durVar": 0.05,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "sonar_ping_2",
+      "description": "Sonar Pulse lock level 2 (double pip)",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            1100,
+            1650
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.08,
+          "dur": 0.055,
+          "rampTime": 0.055,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.03,
+          "durVar": 0.05,
+          "volVar": 0.2,
+          "count": 2,
+          "spacing": 0.09,
+          "spacingVar": 0.05,
+          "countDecay": 0,
+          "chance": 1,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "sonar_ping_3",
+      "description": "Sonar Pulse lock level 3 / full lock (4-pip + sub)",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            1480,
+            2220
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.08,
+          "dur": 0.055,
+          "rampTime": 0.055,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.03,
+          "durVar": 0.05,
+          "volVar": 0.2,
+          "count": 4,
+          "spacing": 0.055,
+          "spacingVar": 0.05,
+          "countDecay": 0,
+          "chance": 1,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            70,
+            90
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.06,
+          "dur": 0.12,
+          "rampTime": 0.12,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.003,
+            "hold": 0,
+            "decay": 0.1
+          },
+          "pitchVar": 0,
+          "durVar": 0,
+          "volVar": 0,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "salvo_core_burst",
+      "description": "four staggered missile launches over 0.3 s (Salvo Core, with duck)",
+      "category": "TRACKER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            50,
+            63
+          ],
+          "rampFreqs": [
+            150,
+            190
+          ],
+          "vol": 0.785,
+          "dur": 0.25,
+          "rampTime": 0.22,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.008,
+            "hold": 0.05,
+            "decay": 0.22
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "count": 4,
+          "spacing": 0.06,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "chance": 1,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.18,
+          "volume": 0.72,
+          "startOffset": 0,
+          "filterFreq": 700,
+          "filterQ": 0.8,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "count": 4,
+          "spacing": 0.06,
+          "spacingVar": 0,
+          "chance": 1,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "fire_minigun",
+      "description": "rapid-fire chatter grain (per-tick)",
+      "category": "BLASTER",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.04,
+          "volume": 0.055,
+          "startOffset": 0,
+          "filterFreq": 2545,
+          "filterQ": 0.9,
+          "filterType": "peaking",
+          "varDur": 0.25,
+          "varVol": 0.3,
+          "varFreq": 0.35,
+          "count": 3,
+          "spacing": 0.012,
+          "spacingVar": 0.4,
+          "countDecay": 0.1,
+          "chance": 1,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            33,
+            43,
+            66
+          ],
+          "rampFreqs": [
+            220,
+            164,
+            147
+          ],
+          "vol": 0.2,
+          "dur": 0.2,
+          "rampTime": 0.15,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.003,
+            "hold": 0,
+            "decay": 0.2
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "powershot_charge",
+      "description": "Blaster Power Shot, 1 s aggressive build to auto-fire",
+      "category": "BLASTER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            47,
+            50,
+            53
+          ],
+          "rampFreqs": [
+            316,
+            320,
+            324
+          ],
+          "vol": 0.2,
+          "dur": 1.07,
+          "rampTime": 0.985,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.04,
+            "hold": 0.635,
             "decay": 0.005
           },
           "pitchVar": 0,
@@ -39730,72 +41908,711 @@ const DEFAULT_SOUND_LIBRARY = {
           "spacingVar": 0,
           "countDecay": 0,
           "wavePool": [],
-          "pitchPool": [
-            1,
-            3
-          ],
+          "pitchPool": [],
           "pitchPick": "perVoice"
         }
       ],
-      "recipeGain": 0.55
+      "recipeGain": 1
     },
     {
-      "name": "fire_burn",
-      "description": "firewall / gas cloud / incendiary trap / Flame Core (loops)",
-      "category": "Shield / fire loops",
+      "name": "power_shot_release",
+      "description": "meaty cannon BOOM after the charge (Power Shot release, with duck)",
+      "category": "BLASTER",
       "layers": [
         {
           "kind": "noise",
-          "duration": 3,
-          "volume": 0.1,
+          "duration": 0.06,
+          "volume": 0.3,
           "startOffset": 0,
-          "filterFreq": 435,
-          "filterQ": 0.8,
-          "varDur": 0,
-          "varVol": 0,
-          "varFreq": 0.15,
-          "chance": 1,
-          "reverseEnvelope": true,
-          "count": 6,
-          "spacing": 0.175,
-          "spacingVar": 0.85,
-          "countDecay": 0,
+          "filterFreq": 2400,
+          "filterQ": 3,
           "filterType": "lowpass",
-          "peakGain": 0
-        }
-      ],
-      "recipeGain": 0.7
-    },
-    {
-      "name": "fire_shield_hum",
-      "description": "Pyro Thermal Shield fiery roar (loops)",
-      "category": "Shield / fire loops",
-      "layers": [
-        {
-          "kind": "noise",
-          "duration": 1,
-          "volume": 0.22,
-          "startOffset": 0,
-          "filterFreq": 70,
-          "filterQ": 0.55,
-          "filterType": "bandpass",
-          "varDur": 0.05,
-          "varVol": 0.1,
-          "varFreq": 0.16,
+          "varDur": 0.2,
+          "varVol": 0.15,
+          "varFreq": 0.2,
           "chance": 1,
-          "count": 6,
-          "spacing": 0.245,
-          "spacingVar": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
           "countDecay": 0,
           "peakGain": 0,
-          "reverseEnvelope": true
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            100,
+            243
+          ],
+          "rampFreqs": [
+            110,
+            165
+          ],
+          "vol": 0.625,
+          "dur": 0.635,
+          "rampTime": 0.215,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.14
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.12,
+          "volVar": 0.12,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.905,
+          "volume": 1,
+          "startOffset": 0.02,
+          "filterFreq": 60,
+          "filterQ": 0.4,
+          "filterType": "lowpass",
+          "varDur": 0.15,
+          "varVol": 0.1,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            45,
+            67,
+            90
+          ],
+          "rampFreqs": [
+            35,
+            55,
+            75
+          ],
+          "vol": 0.865,
+          "dur": 0.45,
+          "rampTime": 0.4,
+          "startOffset": 0.04,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.05,
+            "decay": 0.4
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.15,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
         }
       ],
-      "recipeGain": 0.65
+      "recipeGain": 1
+    },
+    {
+      "name": "mode_switch",
+      "description": "two clean mechanical clicks : Blaster cannon close/long flip",
+      "category": "BLASTER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "square",
+          "freqs": [
+            880,
+            1320
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.1,
+          "dur": 0.04,
+          "rampTime": 0,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.04
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.03,
+          "volume": 0.1,
+          "startOffset": 0,
+          "filterFreq": 2400,
+          "filterQ": 2.5,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "square",
+          "freqs": [
+            660,
+            990
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.1,
+          "dur": 0.05,
+          "rampTime": 0,
+          "startOffset": 0.1,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.03,
+          "volume": 0.08,
+          "startOffset": 0.1,
+          "filterFreq": 1800,
+          "filterQ": 2,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "rocket_salvo",
+      "description": "Syphon Rocket Salvo : 5 staggered rocket launches over 0.35 s",
+      "category": "SYPHON",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [70, 85],
+          "rampFreqs": [200, 240],
+          "vol": 0.7,
+          "dur": 0.22,
+          "rampTime": 0.18,
+          "startOffset": 0,
+          "envelope": { "attack": 0.006, "hold": 0.04, "decay": 0.2 },
+          "pitchVar": 0.08,
+          "durVar": 0.15,
+          "volVar": 0.18,
+          "count": 5,
+          "spacing": 0.07,
+          "spacingVar": 0.02,
+          "countDecay": 0,
+          "chance": 1,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.16,
+          "volume": 1,
+          "startOffset": 0,
+          "filterFreq": 95,
+          "filterQ": 0.7,
+          "filterType": "bandpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "count": 5,
+          "spacing": 0.07,
+          "spacingVar": 0.02,
+          "chance": 1,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [0, 0, 453],
+          "rampFreqs": [0, 0, 32],
+          "vol": 0.195,
+          "dur": 1.455,
+          "rampTime": 1.8,
+          "startOffset": 0.175,
+          "envelope": { "attack": 0.284, "hold": 0.367, "decay": 0.2 },
+          "pitchVar": 0.1,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 5,
+          "spacing": 0.025
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "siphon_drain",
+      "description": "shimmery upper-mid pluck : Energy Siphon drain (loops 0.18 s)",
+      "category": "SYPHON",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            727,
+            447
+          ],
+          "rampFreqs": [
+            538,
+            727
+          ],
+          "vol": 0.04,
+          "dur": 1.24,
+          "rampTime": 0.805,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.14
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.2,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1.24
+    },
+    {
+      "name": "siphon_hit",
+      "description": "descending blip + reverse-cymbal swell : Energy Siphon lands",
+      "category": "SYPHON",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            660,
+            880,
+            1100
+          ],
+          "rampFreqs": [
+            220,
+            330,
+            440
+          ],
+          "vol": 0.18,
+          "dur": 0.2,
+          "rampTime": 0.18,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0,
+            "decay": 0.18
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.1,
+          "volume": 0.08,
+          "startOffset": 0,
+          "filterFreq": 2200,
+          "filterQ": 2,
+          "filterType": "lowpass",
+          "varDur": 0.25,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "rearm_reset",
+      "description": "three rapid rising beeps + resolve chord : Rearm capacitor dump",
+      "category": "SYPHON",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "square",
+          "freqs": [
+            440
+          ],
+          "rampFreqs": [
+            0
+          ],
+          "vol": 0.08,
+          "dur": 0.06,
+          "rampTime": 0,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.06,
+          "durVar": 0,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "square",
+          "freqs": [
+            660
+          ],
+          "rampFreqs": [
+            0
+          ],
+          "vol": 0.08,
+          "dur": 0.06,
+          "rampTime": 0,
+          "startOffset": 0.06,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.06,
+          "durVar": 0,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "square",
+          "freqs": [
+            880
+          ],
+          "rampFreqs": [
+            0
+          ],
+          "vol": 0.1,
+          "dur": 0.06,
+          "rampTime": 0,
+          "startOffset": 0.12,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0,
+            "decay": 0.05
+          },
+          "pitchVar": 0.06,
+          "durVar": 0,
+          "volVar": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            440,
+            660,
+            880
+          ],
+          "rampFreqs": [
+            0,
+            0,
+            0
+          ],
+          "vol": 0.18,
+          "dur": 0.3,
+          "rampTime": 0,
+          "startOffset": 0.2,
+          "envelope": {
+            "attack": 0.005,
+            "hold": 0.05,
+            "decay": 0.25
+          },
+          "pitchVar": 0.06,
+          "durVar": 0,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.18,
+          "volume": 0.06,
+          "startOffset": 0.2,
+          "filterFreq": 1800,
+          "filterQ": 2,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.25,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "upgrade_core",
+      "description": "three rising chimes + confident downbeat (Syphon tier acquired)",
+      "category": "SYPHON",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            440,
+            660
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.18,
+          "dur": 0.1,
+          "rampTime": 0,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.01,
+            "decay": 0.1
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.12,
+          "volVar": 0.12,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            587,
+            880
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.18,
+          "dur": 0.1,
+          "rampTime": 0,
+          "startOffset": 0.1,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.01,
+            "decay": 0.1
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.12,
+          "volVar": 0.12,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            784,
+            1100
+          ],
+          "rampFreqs": [
+            0,
+            0
+          ],
+          "vol": 0.2,
+          "dur": 0.12,
+          "rampTime": 0,
+          "startOffset": 0.2,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.01,
+            "decay": 0.12
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.12,
+          "volVar": 0.12,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            165,
+            220,
+            330
+          ],
+          "rampFreqs": [
+            365,
+            427,
+            549
+          ],
+          "vol": 0.3,
+          "dur": 0.45,
+          "rampTime": 0.4,
+          "startOffset": 0.32,
+          "envelope": {
+            "attack": 0.005,
+            "hold": 0.08,
+            "decay": 0.4
+          },
+          "pitchVar": 0.04,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 0.12,
+          "volume": 0.1,
+          "startOffset": 0.32,
+          "filterFreq": 2400,
+          "filterQ": 2,
+          "filterType": "lowpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.25,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        }
+      ],
+      "recipeGain": 1
     }
   ]
 };
-
 function _jitterLabLayer(layer) {
   const out = Object.assign({}, layer);
   if (layer.kind === 'tri') {
@@ -39974,12 +42791,7 @@ function importSoundLabLibrary(cfg, opts) {
   return { ok: true, message: 'Loaded ' + count + ' recipe' + (count === 1 ? '' : 's') + ' (' + Object.keys(baseMap).length + ' total active).' };
 }
 
-function clearSoundLabLibrary() {
-  audio.labRecipes = null;
-  try { localStorage.removeItem('lss_sound_recipes'); } catch(e) {}
-}
-
-// Force-reapply the embedded LSS_SOUND.json (DEFAULT_SOUND_LIBRARY) to
+// Force-reapply the embedded DEFAULT_SOUND_LIBRARY to
 // localStorage and active recipes, wiping any stale or broken entries. Use
 // this when the user wants a one-click factory reset to ship-sound defaults
 // without going into DevTools to clear localStorage. Wired to a button in
@@ -40217,914 +43029,12 @@ function playSound(type) {
     if (t - last < gap) return;
     _lastSoundTime[type] = t;
   }
-  // (v6.9) Sound lab integration: if a recipe is loaded for this type, run
-  // it instead of the baked-in branch below. Returns false when no recipe
-  // is registered, and we fall through to legacy synthesis.
-  if (_playSoundFromLabRecipe(type)) return;
-  const ctx = audio.ctx;
-  const now = ctx.currentTime;
-
-  // Randomization helpers: every shot, explosion, death sounds unique
-  const r = () => Math.random(); // 0 to 1
-  const rr = (base, spread) => base * (1 + (r() - 0.5) * spread); // base +/- spread%
-  const ri = (base, spread) => Math.round(rr(base, spread)); // integer version
-  const rWave = (options) => options[Math.floor(r() * options.length)]; // random waveform pick
-
-  if (type === 'fire_hitscan') {
-    // Sharp transient crack with per-shot variation
-    const p = rr(1, 0.15); // pitch multiplier (+/-7.5%)
-    triChord([ri(55*p,0), ri(82*p,0), ri(110*p,0)], rWave(['sawtooth','triangle']),
-      rr(0.30, 0.2), rr(0.10, 0.2), [ri(30*p,0), ri(45*p,0), ri(55*p,0)], 0.08, 0,
-      { attack: 0.001, hold: 0, decay: rr(0.10, 0.2) });
-    playNoiseBurst(rr(0.04, 0.3), rr(0.14, 0.2), now, ri(1800, 0.25), rr(0.8, 0.3));
-    // Random chance of an extra sub-thump for weight
-    if (r() > 0.6) playNoiseBurst(rr(0.03, 0.2), 0.06, now, ri(300, 0.3), 0.5);
-  }
-  else if (type === 'fire_projectile') {
-    // Thump + launch with randomized body
-    const p = rr(1, 0.12);
-    triChord([ri(80*p,0), ri(100*p,0), ri(130*p,0)], rWave(['sine','triangle']),
-      rr(0.35, 0.15), rr(0.28, 0.15), [ri(25*p,0), ri(35*p,0), ri(45*p,0)], rr(0.22, 0.15), 0,
-      { attack: rr(0.015, 0.3), hold: rr(0.04, 0.3), decay: rr(0.22, 0.15) });
-    playNoiseBurst(rr(0.08, 0.3), rr(0.06, 0.3), now + 0.01, ri(600, 0.3), rr(1.2, 0.3));
-    // Occasional secondary ignition pop
-    if (r() > 0.5) {
-      playNoiseBurst(rr(0.05, 0.2), 0.04, now + rr(0.03, 0.3), ri(900, 0.3), 1.0);
-    }
-  }
-  else if (type === 'fire_spread') {
-    // Shotgun: random pellet scatter sound
-    const p = rr(1, 0.12);
-    triChord([ri(45*p,0), ri(67*p,0), ri(90*p,0)], 'sawtooth',
-      rr(0.35, 0.15), rr(0.14, 0.2), [ri(20*p,0), ri(30*p,0), ri(40*p,0)], rr(0.11, 0.2), 0,
-      { attack: 0.001, hold: rr(0.01, 0.3), decay: rr(0.13, 0.2) });
-    playNoiseBurst(rr(0.10, 0.25), rr(0.28, 0.15), now, ri(1200, 0.2), rr(0.5, 0.3));
-    // Random extra scatter pops (1 to 3)
-    const pops = 1 + Math.floor(r() * 3);
-    for (let i = 0; i < pops; i++) {
-      playNoiseBurst(rr(0.02, 0.3), rr(0.05, 0.3), now + r() * 0.04, ri(1500, 0.4), rr(1.5, 0.3));
-    }
-  }
-  else if (type === 'fire_minigun') {
-    // Granular noise sub-bed: short bandpassed grains (30-50 ms) stack across the
-    // rapid-fire stream for meatier, cheaper chatter than per-tick triChord. Each
-    // call drops 2-3 grains at slightly offset times/bands so the bursts are never
-    // identical but never alias either. A low 40 Hz sub grain lands the body hit;
-    // a bright 2 kHz snap carries attack. The pitched triChord tick only fires
-    // occasionally so the spectrum stays dense without becoming tonal.
-    const grainCount = 2 + Math.floor(r() * 2); // 2 or 3 grains
-    for (let i = 0; i < grainCount; i++) {
-      const grainDur = rr(0.040, 0.25); // 30-50 ms
-      const grainOff = i * rr(0.012, 0.4); // staggered
-      const grainBand = ri(500 + r() * 1200, 0.15); // 500-1700 Hz random center
-      const grainQ = rr(1.8, 0.25);
-      playNoiseBurst(grainDur, rr(0.055, 0.3), now + grainOff, grainBand, grainQ);
-    }
-    // Sub-bass body grain: 40 Hz thump per tick (additive, not tonal)
-    playNoiseBurst(rr(0.035, 0.2), rr(0.07, 0.25), now, ri(40, 0.3), rr(0.9, 0.2));
-    // Bright snap: very short high-band grain carries attack transient
-    playNoiseBurst(rr(0.012, 0.3), rr(0.045, 0.3), now, ri(2200, 0.15), rr(1.8, 0.25));
-    // Occasional pitched tick (only ~1 in 3 shots) for readability in rapid fire
-    if (r() > 0.67) {
-      const p = rr(1, 0.08);
-      triChord([ri(90*p,0), ri(113*p,0)], rWave(['square','sawtooth']),
-        rr(0.09, 0.2), rr(0.03, 0.15), [ri(60*p,0), ri(75*p,0)], 0.025, 0,
-        { attack: 0.001, hold: 0, decay: rr(0.03, 0.2) });
-    }
-  }
-  else if (type === 'fire_railgun') {
-    // Charged weapon: randomized swell + metallic ring
-    const p = rr(1, 0.08);
-    triChord([ri(40*p,0), ri(60*p,0), ri(80*p,0)], 'sine',
-      rr(0.25, 0.15), rr(0.15, 0.15), [ri(120*p,0), ri(180*p,0), ri(240*p,0)], rr(0.12, 0.2), 0,
-      { attack: rr(0.02, 0.3), hold: rr(0.03, 0.3), decay: rr(0.10, 0.2) });
-    // Metallic ring tail: randomized harmonics
-    const ringP = rr(1, 0.10);
-    triChord([ri(165*ringP,0), ri(247*ringP,0), ri(330*ringP,0)], rWave(['triangle','sine']),
-      rr(0.07, 0.2), rr(0.45, 0.15), [ri(135*ringP,0), ri(200*ringP,0), ri(270*ringP,0)], rr(0.40, 0.15), rr(0.05, 0.3),
-      { attack: 0.001, hold: 0, decay: rr(0.45, 0.15) });
-    playNoiseBurst(rr(0.12, 0.2), rr(0.08, 0.2), now, ri(1600, 0.2), rr(3.0, 0.2));
-    // Random electric zap overtone
-    if (r() > 0.4) triChord([ri(400,0.2)], 'sine', 0.03, rr(0.08, 0.3), [ri(200,0.2)], 0.06, rr(0.02, 0.3),
-      { attack: 0.001, hold: 0, decay: rr(0.08, 0.3) });
-  }
-  else if (type === 'fire_salvo') {
-    // Missile launch: whoosh with random pitch rise
-    const p = rr(1, 0.15);
-    const riseP = rr(1, 0.15);
-    triChord([ri(50*p,0), ri(63*p,0), ri(75*p,0)], rWave(['sine','triangle']),
-      rr(0.22, 0.15), rr(0.35, 0.15), [ri(150*riseP,0), ri(190*riseP,0), ri(225*riseP,0)], rr(0.30, 0.15), 0,
-      { attack: rr(0.008, 0.3), hold: rr(0.05, 0.3), decay: rr(0.30, 0.15) });
-    playNoiseBurst(rr(0.20, 0.2), rr(0.12, 0.2), now + 0.01, ri(800, 0.25), rr(0.6, 0.3));
-    // Occasional secondary thruster ignition
-    if (r() > 0.5) triChord([ri(100,0.2), ri(130,0.2)], 'sawtooth', 0.04, rr(0.15, 0.2), null, null, rr(0.08, 0.3),
-      { attack: 0.005, hold: 0.02, decay: rr(0.12, 0.2) });
-  }
-  else if (type === 'hit') {
-    const p = rr(1, 0.10);
-    triChord([ri(130*p,0), ri(164*p,0), ri(196*p,0)], rWave(['triangle','sine']),
-      rr(0.18, 0.15), rr(0.12, 0.2), [ri(80*p,0), ri(100*p,0), ri(120*p,0)], rr(0.10, 0.2), 0,
-      { attack: 0.001, hold: 0, decay: rr(0.12, 0.2) });
-  }
-  else if (type === 'kill') {
-    duckAmbient(0.45); // moderate duck for kill confirm
-    const p = rr(1, 0.08);
-    triChord([ri(130*p,0), ri(156*p,0), ri(196*p,0)], 'sine',
-      rr(0.18, 0.12), rr(0.35, 0.12), null, null, 0,
-      { attack: 0.005, hold: rr(0.05, 0.2), decay: rr(0.30, 0.15) });
-    triChord([ri(65*p,0), ri(78*p,0), ri(98*p,0)], 'sine',
-      rr(0.15, 0.12), rr(0.40, 0.12), null, null, rr(0.12, 0.15),
-      { attack: 0.005, hold: rr(0.05, 0.2), decay: rr(0.35, 0.15) });
-  }
-  else if (type === 'damage_shield') {
-    // Shield hit: a tempered "metal-on-plate" thud with a short metallic ring,
-    // NOT a high glass chime. Previous version lived at 2.4-3.2 kHz with a
-    // +12 dB peak, which read as "tin can." This version centers in the
-    // 400-900 Hz band where armor and ferrous impact sounds actually sit:
-    //   - Bandpass noise thump at ~500 Hz (the body / heft of the hit).
-    //   - Short metal ring: low-Q peak at ~1.1 kHz, modest +6 dB (suggests
-    //     the plate resonates briefly without ringing like a tuning fork).
-    //   - A pitched tri-chord an octave lower than before (220/330/440) for
-    //     a warm harmonic overtone; decays fast so it reads as attack, not
-    //     pitched instrument.
-    const p = rr(1, 0.10);
-    const thudNoise = ctx.createBufferSource();
-    const bufLen = Math.floor(ctx.sampleRate * 0.09);
-    const thudBuf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
-    const thudData = thudBuf.getChannelData(0);
-    for (let i = 0; i < bufLen; i++) thudData[i] = (Math.random() * 2 - 1) * Math.exp(-i / bufLen * 5);
-    thudNoise.buffer = thudBuf;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.value = ri(500 * p, 0.12);
-    bp.Q.value = 1.1;
-    const ring = ctx.createBiquadFilter();
-    ring.type = 'peaking';
-    ring.frequency.value = ri(1100 * p, 0.12);
-    ring.Q.value = rr(3, 0.2);
-    ring.gain.value = 6;
-    const thudGain = ctx.createGain();
-    thudGain.gain.setValueAtTime(rr(0.26, 0.2), now);
-    thudGain.gain.exponentialRampToValueAtTime(0.001, now + rr(0.14, 0.2));
-    thudNoise.connect(bp); bp.connect(ring); ring.connect(thudGain);
-    if (audio.dryGain) thudGain.connect(audio.dryGain);
-    else thudGain.connect(audio.masterGain);
-    if (audio.convolver) thudGain.connect(audio.convolver);
-    thudNoise.start(now);
-    // Warm harmonic overtone, octave lower than the old chime so it reads as
-    // "impact on a dense plate" rather than "tap on glass."
-    triChord(
-      [ri(220 * p, 0.05), ri(330 * p, 0.05), ri(440 * p, 0.05)],
-      'triangle',
-      rr(0.09, 0.2), rr(0.14, 0.2), null, null, 0.003,
-      { attack: 0.001, hold: 0, decay: rr(0.11, 0.2) }
-    );
-  }
-  else if (type === 'damage') {
-    // Rapid-fire dissonant pulses: 3-5 short staccato hits with clashing intervals
-    const pulses = 3 + Math.floor(r() * 3);
-    const baseP = rr(1, 0.20);
-    // Dissonant intervals: minor 2nds, tritones, minor 7ths
-    const dissonant = [1.0, 1.059, 1.122, 1.414, 1.498, 1.682, 1.888];
-    for (let i = 0; i < pulses; i++) {
-      const offset = i * rr(0.025, 0.3); // ~25ms between pulses, slightly irregular
-      const d1 = dissonant[Math.floor(r() * dissonant.length)];
-      const d2 = dissonant[Math.floor(r() * dissonant.length)];
-      const d3 = dissonant[Math.floor(r() * dissonant.length)];
-      const vol = rr(0.14, 0.25) * (1 - i * 0.12); // each pulse slightly quieter
-      triChord(
-        [ri(50*baseP*d1,0), ri(63*baseP*d2,0), ri(78*baseP*d3,0)],
-        rWave(['sawtooth','square','square']),
-        vol, rr(0.04, 0.3), // very short duration per pulse
-        [ri(25*baseP*d1,0), ri(32*baseP*d2,0), ri(40*baseP*d3,0)],
-        rr(0.03, 0.3), offset,
-        { attack: 0.001, hold: 0.005, decay: rr(0.035, 0.3) }
-      );
-      playNoiseBurst(rr(0.025, 0.3), rr(0.04, 0.3), now + offset, ri(300 + r() * 600, 0.3), rr(0.7, 0.3));
-    }
-  }
-  else if (type === 'dash') {
-    const p = rr(1, 0.10);
-    triChord([ri(55*p,0), ri(69*p,0), ri(82*p,0)], 'sine',
-      rr(0.15, 0.15), rr(0.30, 0.15), [ri(110*p,0), ri(138*p,0), ri(165*p,0)], rr(0.25, 0.15), 0,
-      { attack: 0.005, hold: rr(0.03, 0.3), decay: rr(0.27, 0.15) });
-    playNoiseBurst(rr(0.20, 0.2), rr(0.10, 0.2), now, ri(1500, 0.2), rr(0.8, 0.3));
-  }
-  else if (type === 'ability') {
-    const p = rr(1, 0.08);
-    triChord([ri(82*p,0), ri(103*p,0), ri(123*p,0)], 'sine',
-      rr(0.18, 0.12), rr(0.15, 0.15), null, null, 0,
-      { attack: 0.003, hold: rr(0.03, 0.2), decay: rr(0.12, 0.15) });
-    triChord([ri(98*p,0), ri(123*p,0), ri(147*p,0)], 'sine',
-      rr(0.15, 0.12), rr(0.18, 0.15), null, null, rr(0.08, 0.15),
-      { attack: 0.003, hold: rr(0.03, 0.2), decay: rr(0.15, 0.15) });
-  }
-  else if (type === 'core') {
-    const p = rr(1, 0.06);
-    triChord([ri(40*p,0), ri(50*p,0), ri(60*p,0)], 'sawtooth',
-      rr(0.30, 0.12), rr(0.70, 0.10), [ri(110*p,0), ri(138*p,0), ri(165*p,0)], rr(0.55, 0.10), 0,
-      { attack: rr(0.05, 0.2), hold: rr(0.10, 0.2), decay: rr(0.55, 0.10) });
-    triChord([ri(55*p,0), ri(69*p,0), ri(82*p,0)], 'sine',
-      rr(0.20, 0.12), rr(0.60, 0.10), [ri(130*p,0), ri(164*p,0), ri(196*p,0)], rr(0.50, 0.10), rr(0.15, 0.15),
-      { attack: rr(0.04, 0.2), hold: rr(0.08, 0.2), decay: rr(0.48, 0.10) });
-    playNoiseBurst(rr(0.50, 0.15), rr(0.12, 0.15), now, ri(600, 0.2), rr(0.5, 0.3));
-  }
-  else if (type === 'core_titan') {
-    // Titan core activation: heavy announcement stinger. Audible across the arena so
-    // every pilot in range knows a titan just went critical. Four-layer structure:
-    //  (1) sub-bass swell (pressure rise before impact)
-    //  (2) impact thud (body hit at t = 0.05s)
-    //  (3) stacked fifth-and-octave power chord on saw/tri (the declaration)
-    //  (4) metallic shimmer transient (high brass warning, rides the chord)
-    duckAmbient(0.45); // strong duck so the stinger punches through
-    const p = rr(1, 0.04); // very little variation; this is a signature sound
-    // Layer 1: sub-bass swell (slow attack, long decay, low freq)
-    triChord([ri(32*p,0), ri(40*p,0), ri(48*p,0)], 'sine',
-      rr(0.45, 0.08), rr(1.20, 0.08), null, null, 0,
-      { attack: rr(0.12, 0.15), hold: rr(0.20, 0.15), decay: rr(0.90, 0.08) });
-    // Layer 2: impact thud (fast attack, short decay, low noise burst)
-    playNoiseBurst(rr(0.55, 0.10), rr(0.18, 0.12), now + 0.04, ri(90, 0.2), rr(0.35, 0.2));
-    playNoiseBurst(rr(0.22, 0.12), rr(0.10, 0.15), now + 0.06, ri(180, 0.2), rr(0.5, 0.2));
-    // Layer 3: stacked power chord (saw + tri, tonic + fifth + octave + 2-octave)
-    triChord([ri(65*p,0), ri(98*p,0), ri(130*p,0)], 'sawtooth',
-      rr(0.38, 0.10), rr(1.00, 0.08), [ri(82*p,0), ri(123*p,0), ri(164*p,0)], rr(0.75, 0.10), rr(0.06, 0.2),
-      { attack: rr(0.02, 0.2), hold: rr(0.18, 0.15), decay: rr(0.85, 0.10) });
-    triChord([ri(98*p,0), ri(147*p,0), ri(196*p,0)], 'triangle',
-      rr(0.26, 0.10), rr(0.85, 0.08), [ri(123*p,0), ri(185*p,0), ri(247*p,0)], rr(0.65, 0.10), rr(0.10, 0.2),
-      { attack: rr(0.02, 0.2), hold: rr(0.15, 0.15), decay: rr(0.75, 0.10) });
-    // Layer 4: metallic shimmer (high brass/horn; square for harmonic richness, narrow, rides on top)
-    triChord([ri(392*p,0), ri(523*p,0), ri(659*p,0)], 'square',
-      rr(0.08, 0.12), rr(0.70, 0.10), null, null, rr(0.18, 0.15),
-      { attack: rr(0.03, 0.2), hold: rr(0.10, 0.2), decay: rr(0.55, 0.10) });
-    // High crash noise accent (subtle, gives the stinger "air")
-    playNoiseBurst(rr(0.10, 0.20), rr(0.45, 0.10), now + 0.08, ri(4800, 0.15), rr(0.9, 0.2));
-  }
-  else if (type === 'explosion') {
-    // Rapid-fire destruction: 5-8 dissonant staccato pulses layered with noise blasts
-    duckAmbient(0.35); // strong duck for explosions
-    // Long lush send: during this synchronous block, every triChord/playNoiseBurst
-    // also taps the 5 s convolver for the distant-explosion halo. Cleared at the end.
-    const _prevExtra = audio._extraReverbSend;
-    if (audio.convolverLong) audio._extraReverbSend = audio.convolverLong;
-    const size = rr(1, 0.25);
-    const pulses = 5 + Math.floor(r() * 4);
-    const baseP = rr(1, 0.25);
-    const dissonant = [1.0, 1.059, 1.122, 1.335, 1.414, 1.498, 1.682, 1.888];
-
-    // Initial sub-bass pressure hit (the "thud" before the rapid fire)
-    playNoiseBurst(rr(0.08, 0.3) * size, rr(0.40, 0.2), now, ri(60, 0.3), rr(0.3, 0.3));
-
-    // Rapid-fire dissonant chord pulses
-    for (let i = 0; i < pulses; i++) {
-      const offset = 0.01 + i * rr(0.022, 0.35); // ~22ms spacing, irregular
-      const d1 = dissonant[Math.floor(r() * dissonant.length)];
-      const d2 = dissonant[Math.floor(r() * dissonant.length)];
-      const d3 = dissonant[Math.floor(r() * dissonant.length)];
-      const vol = rr(0.12, 0.3) * size * (1 - i * 0.08);
-      const wave = rWave(['sawtooth','square','square','sawtooth']);
-
-      // Each pulse: a dissonant chord (clashing tritones, minor 2nds)
-      triChord(
-        [ri(30*baseP*d1,0), ri(42*baseP*d2,0), ri(55*baseP*d3,0)],
-        wave, vol, rr(0.04, 0.3),
-        [ri(15*baseP*d1,0), ri(21*baseP*d2,0), ri(28*baseP*d3,0)],
-        rr(0.03, 0.3), offset,
-        { attack: 0.001, hold: 0.003, decay: rr(0.04, 0.3) }
-      );
-      // Paired noise burst per pulse (crackle/debris)
-      playNoiseBurst(rr(0.03, 0.3), rr(0.06, 0.3) * size, now + offset,
-        ri(200 + r() * 1200, 0.3), rr(0.6, 0.4));
-    }
-
-    // High-frequency shrapnel rattle (rapid tiny hits)
-    const shrapnelCount = 3 + Math.floor(r() * 4);
-    for (let i = 0; i < shrapnelCount; i++) {
-      const offset = r() * 0.15;
-      const sp = rr(1, 0.30);
-      triChord(
-        [ri(180*sp,0), ri(240*sp * dissonant[Math.floor(r()*dissonant.length)],0)],
-        rWave(['triangle','square']),
-        rr(0.03, 0.4), rr(0.02, 0.3),
-        [ri(90*sp,0), ri(120*sp,0)],
-        rr(0.015, 0.3), offset,
-        { attack: 0.001, hold: 0, decay: rr(0.02, 0.3) }
-      );
-    }
-
-    // Sub-rumble tail (fading low growl after the burst)
-    playNoiseBurst(rr(0.25, 0.3) * size, rr(0.20, 0.2), now + 0.12, ri(45, 0.3), rr(0.2, 0.3));
-    // Restore prior extra reverb send (long send was active only for this explosion).
-    audio._extraReverbSend = _prevExtra;
-  }
-  else if (type === 'stasis') {
-    // Full 3-second charging sound: rising harmonic sweep that builds to release
-    const dur = game.playerStasisDuration || 3.0;
-    const p = rr(1, 0.04);
-    // Layer 1: deep foundation sweep (sine, rises from 50Hz to 200Hz)
-    triChord([ri(50*p,0), ri(63*p,0), ri(75*p,0)], 'sine',
-      rr(0.20, 0.10), dur, [ri(200*p,0), ri(250*p,0), ri(300*p,0)], dur * 0.95, 0,
-      { attack: 0.3, hold: dur * 0.5, decay: dur * 0.2 });
-    // Layer 2: mid harmonic sweep (triangle, rises from 100Hz to 400Hz, starts 0.3s in)
-    triChord([ri(100*p,0), ri(126*p,0), ri(150*p,0)], 'triangle',
-      rr(0.12, 0.10), dur * 0.85, [ri(400*p,0), ri(500*p,0), ri(600*p,0)], dur * 0.8, 0.3,
-      { attack: 0.5, hold: dur * 0.35, decay: dur * 0.15 });
-    // Layer 3: bright upper sweep (sine, rises from 200Hz to 800Hz, fades in slowly)
-    triChord([ri(200*p,0), ri(252*p,0), ri(300*p,0)], 'sine',
-      rr(0.06, 0.10), dur * 0.7, [ri(800*p,0), ri(1000*p,0), ri(1200*p,0)], dur * 0.65, 0.6,
-      { attack: 0.8, hold: dur * 0.15, decay: dur * 0.1 });
-    // Layer 4: shimmer (soft filtered noise that rises in pitch with the charge)
-    playNoiseBurst(dur * 0.8, rr(0.04, 0.2), now, ri(200, 0.15), rr(0.5, 0.2));
-    playNoiseBurst(dur * 0.5, rr(0.03, 0.2), now + 0.8, ri(600, 0.2), rr(0.6, 0.2));
-    playNoiseBurst(dur * 0.3, rr(0.02, 0.2), now + 1.6, ri(1200, 0.2), rr(0.5, 0.2));
-    // Release tone: bright chord at the end when fully charged
-    triChord([ri(300*p,0), ri(378*p,0), ri(450*p,0)], 'sine',
-      rr(0.15, 0.10), 0.6, null, null, dur - 0.1,
-      { attack: 0.02, hold: 0.15, decay: 0.43 });
-  }
-  else if (type === 'stun') {
-    // Electric stun hit: Arc Wave / Energy Siphon land a slowing zap on the
-    // target. The sound has to read instantly as "you got disabled" without
-    // stepping on the existing damage / damage_shield events that fire on the
-    // same frame ; so we keep it short (~0.4 s) and lean into electric
-    // character (sawtooth + bandpassed crackle) instead of low-end weight.
-    //
-    // Layered as: (1) crackle noise burst for the contact transient,
-    // (2) a high sawtooth dyad that wobbles down a fifth to feel like the
-    // target's flight system is being yanked, (3) a brief sub thump so the
-    // hit has body, (4) a very short descending sine "blip" to sell the
-    // disorientation.
-    const p = rr(1, 0.10);
-    // (1) Bright electric crackle: narrow bandpass at ~2.4 kHz, short.
-    playNoiseBurst(rr(0.18, 0.20), rr(0.18, 0.20), now, ri(2400, 0.20), rr(2.2, 0.25));
-    // Secondary mid-band sizzle for body of the zap.
-    playNoiseBurst(rr(0.14, 0.25), rr(0.10, 0.25), now + 0.01, ri(900, 0.25), rr(1.2, 0.25));
-    // (2) Wobbling sawtooth dyad: starts ~440 Hz, drops to ~290 Hz over 0.30 s.
-    // Modeled as a triChord with explicit end frequencies so it slides; the
-    // perfect-fifth â†’ fourth interval keeps it musical but uneasy.
-    triChord(
-      [ri(440 * p, 0), ri(660 * p, 0)],
-      'sawtooth',
-      rr(0.18, 0.15), rr(0.30, 0.15),
-      [ri(290 * p, 0), ri(435 * p, 0)],
-      rr(0.28, 0.15), 0,
-      { attack: 0.002, hold: 0.02, decay: rr(0.27, 0.15) }
-    );
-    // (3) Sub thump so the contact has weight without competing with damage.
-    playNoiseBurst(rr(0.06, 0.25), rr(0.22, 0.20), now, ri(70, 0.30), rr(0.8, 0.25));
-    // (4) Disorientation blip: short descending sine, lands a beat after the
-    // crackle so the ear reads "hit, then you go woozy" rather than a single
-    // mass of noise.
-    triChord(
-      [ri(880 * p, 0)],
-      'sine',
-      rr(0.10, 0.20), 0.10,
-      [ri(330 * p, 0)],
-      0.09, 0.05,
-      { attack: 0.003, hold: 0.01, decay: 0.08 }
-    );
-  }
-  else if (type === 'reload') {
-    const p = rr(1, 0.08);
-    triChord([ri(110*p,0), ri(138*p,0), ri(165*p,0)], 'square',
-      rr(0.10, 0.15), rr(0.06, 0.2), null, null, 0,
-      { attack: 0.001, hold: 0, decay: rr(0.06, 0.2) });
-    triChord([ri(82*p,0), ri(103*p,0), ri(123*p,0)], 'square',
-      rr(0.10, 0.15), rr(0.06, 0.2), null, null, rr(0.07, 0.15),
-      { attack: 0.001, hold: 0, decay: rr(0.06, 0.2) });
-    playNoiseBurst(rr(0.02, 0.2), rr(0.06, 0.2), now, ri(2800, 0.15), rr(3.0, 0.2));
-  }
-  else if (type === 'death') {
-    // Ship death: dramatic descending drone with heavy randomization.
-    // Multiple overlapping layers, random metallic debris, and a bass drop.
-    duckAmbient(0.30); // deep duck; death is the loudest event in the mix
-    const p = rr(1, 0.15); // large pitch variation per death
-    const size = rr(1, 0.2);
-    // Sub-bass impulse at death onset: 35 Hz pure sine, ADSR 5/100/600 ms.
-    // Routes through dry only (no reverb, keeps it physical not ringing). Lands the
-    // concussion in the chest before the descending drone even starts.
-    {
-      const subOsc = ctx.createOscillator();
-      const subGain = ctx.createGain();
-      subOsc.type = 'sine';
-      subOsc.frequency.setValueAtTime(35 * p, now);
-      // Drop to 25 Hz over the decay for a felt "thud-hum"
-      subOsc.frequency.exponentialRampToValueAtTime(25 * p, now + 0.70);
-      const subPeak = rr(0.45, 0.15) * size;
-      subGain.gain.setValueAtTime(0.001, now);
-      subGain.gain.linearRampToValueAtTime(subPeak, now + 0.005); // 5 ms attack
-      subGain.gain.setValueAtTime(subPeak, now + 0.005 + 0.100);  // 100 ms hold
-      subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.005 + 0.100 + 0.600); // 600 ms decay
-      subOsc.connect(subGain);
-      // Dry only: sub-bass through reverb smears the transient
-      if (audio.dryGain) subGain.connect(audio.dryGain);
-      else subGain.connect(audio.masterGain);
-      subOsc.start(now); subOsc.stop(now + 0.72);
-    }
-    // Primary descending drone (sawtooth for grit)
-    triChord([ri(82*p,0), ri(98*p,0), ri(123*p,0)], rWave(['sawtooth','square']),
-      rr(0.25, 0.15), rr(1.30, 0.15) * size, [ri(20*p,0), ri(25*p,0), ri(30*p,0)], rr(1.10, 0.15), 0,
-      { attack: rr(0.03, 0.3), hold: rr(0.10, 0.3), decay: rr(1.17, 0.12) });
-    // Secondary descending layer (sine for depth)
-    triChord([ri(55*p,0), ri(65*p,0), ri(82*p,0)], 'sine',
-      rr(0.15, 0.15), rr(1.00, 0.15) * size, [ri(15*p,0), ri(18*p,0), ri(22*p,0)], rr(0.90, 0.15), rr(0.20, 0.2),
-      { attack: rr(0.03, 0.3), hold: rr(0.08, 0.3), decay: rr(0.89, 0.12) });
-    // Debris noise (randomized filter)
-    playNoiseBurst(rr(0.80, 0.25) * size, rr(0.15, 0.2), now, ri(200, 0.35), rr(0.6, 0.3));
-    // Heavy sub-bass drop (the hull crunching)
-    playNoiseBurst(rr(0.60, 0.2) * size, rr(0.25, 0.2), now + r() * 0.05, ri(50, 0.3), rr(0.3, 0.3));
-    // Delayed secondary explosion (reactor breach)
-    const delay2 = 0.15 + r() * 0.25;
-    playNoiseBurst(rr(0.40, 0.3), rr(0.20, 0.2), now + delay2, ri(400, 0.4), rr(0.5, 0.3));
-    playNoiseBurst(rr(0.25, 0.3), rr(0.08, 0.3), now + delay2 + 0.01, ri(1000, 0.3), rr(0.8, 0.3));
-    // Random metallic shrapnel (0 to 3 pieces)
-    const shrapnel = Math.floor(r() * 4);
-    for (let i = 0; i < shrapnel; i++) {
-      const sp = rr(1, 0.3);
-      const t = 0.1 + r() * 0.5;
-      triChord([ri(180*sp,0), ri(260*sp,0)], rWave(['triangle','square','sawtooth']),
-        rr(0.03, 0.3), rr(0.15, 0.3), [ri(80*sp,0), ri(120*sp,0)], rr(0.12, 0.3), t,
-        { attack: 0.001, hold: 0, decay: rr(0.15, 0.3) });
-    }
-    // Occasional deep groan (structural failure)
-    if (r() > 0.4) {
-      const gp = rr(1, 0.25);
-      triChord([ri(30*gp,0), ri(38*gp,0), ri(45*gp,0)], 'sawtooth',
-        rr(0.08, 0.3), rr(0.80, 0.2), [ri(10*gp,0), ri(13*gp,0), ri(15*gp,0)], rr(0.70, 0.2), rr(0.30, 0.3),
-        { attack: rr(0.05, 0.3), hold: rr(0.05, 0.3), decay: rr(0.70, 0.15) });
-    }
-  }
-  else if (type === 'sonar_ping' || type === 'sonar_ping_1' || type === 'sonar_ping_2' || type === 'sonar_ping_3') {
-    // Lock-on sonar ping: pitch + rate scale with lock level (1..3).
-    // Level 1: one pip at ~880 Hz. Level 2: two pips at ~1100 Hz. Level 3: four pips at ~1480 Hz (full-lock).
-    const level = (type === 'sonar_ping_3') ? 3 : (type === 'sonar_ping_2') ? 2 : 1;
-    const basePitches = [0, 880, 1100, 1480];
-    const basePitch = basePitches[level];
-    const pipCount = level === 3 ? 4 : level * 2; // lvl 1 â†’ 2, lvl 2 â†’ 2, lvl 3 â†’ 4 (per plan "2 pip cycles at half-lock, 4 at full-lock")
-    const pips = level === 1 ? 1 : pipCount; // level 1: single soft pip
-    const pipSpacing = level === 3 ? 0.055 : 0.090; // faster at full lock
-    for (let i = 0; i < pips; i++) {
-      const pipP = rr(1, 0.03);
-      const pipFreq = basePitch * pipP;
-      triChord(
-        [pipFreq, pipFreq * 1.5], // ping + fifth harmonic
-        'sine',
-        rr(0.08, 0.2), 0.055, null, null, i * pipSpacing,
-        { attack: 0.002, hold: 0, decay: 0.050 }
-      );
-    }
-    // Low sub-blip at full lock: signals threat
-    if (level >= 3) {
-      triChord([70, 90], 'sine', 0.06, 0.12, null, null, 0,
-        { attack: 0.003, hold: 0, decay: 0.10 });
-    }
-  }
-  else if (type === 'round_start') {
-    // Three rising chords, but the third resolves up a fifth (E major base jumps
-    // to B major, the dominant) rather than continuing the sequence linearly. A
-    // reverse-cymbal swell rides under chord 2 and peaks exactly on the resolve.
-    triChord([65, 82, 98], 'sine', 0.18, 0.35, null, null, 0,
-      { attack: 0.01, hold: 0.08, decay: 0.26 });
-    triChord([73, 92, 110], 'sine', 0.18, 0.35, null, null, 0.18,
-      { attack: 0.01, hold: 0.08, decay: 0.26 });
-    // Reverse cymbal: white/high noise with inverted envelope (silent â†’ full)
-    // ramping over 0.36 s to land on the resolve chord. Built inline because
-    // playNoiseBurst has a fixed decaying envelope.
-    try {
-      const ctx = audio.ctx;
-      const swellDur = 0.36;
-      const swellStart = now;
-      const bufSize = Math.floor(ctx.sampleRate * swellDur);
-      const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-      const data = buf.getChannelData(0);
-      for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      const sGain = ctx.createGain();
-      sGain.gain.setValueAtTime(0.001, swellStart);
-      sGain.gain.exponentialRampToValueAtTime(0.18, swellStart + swellDur);
-      const sFilter = ctx.createBiquadFilter();
-      sFilter.type = 'highpass';
-      sFilter.frequency.value = 1800;
-      sFilter.Q.value = 0.7;
-      src.connect(sFilter);
-      sFilter.connect(sGain);
-      const drySink = audio.dryGain || audio.masterGain;
-      sGain.connect(drySink);
-      if (audio.convolver) sGain.connect(audio.convolver);
-      src.start(swellStart);
-      src.stop(swellStart + swellDur + 0.01);
-    } catch (e) {}
-    // The resolve: chord rooted a fifth above the first (C â†’ G). B major feel at
-    // the top of the voicing, played slightly longer/louder so the climax lands.
-    triChord([98, 123, 147], 'sine', 0.24, 0.50, null, null, 0.36,
-      { attack: 0.005, hold: 0.18, decay: 0.31 });
-  }
-  // ================================================================
-  // (v11) Per-ability sound flavor. Most abilities used to share the
-  // generic 'ability' beep ; these add per-ability character. Each is
-  // designed to read distinct from the others without piling onto the
-  // mid-band where weapon SFX live ; shields breathe in low/sub, traps
-  // pop in mid, energy effects whine in upper-mid.
-  // ----------------------------------------------------------------
-  else if (type === 'vortex_shield_hum') {
-    // Continuous low organ-drone tick ; called on a 0.95s cadence by
-    // _tickSoundLoop while the Vortex Shield is held. Two stacked
-    // sines a perfect fifth apart, gentle vibrato baked into the ramp,
-    // long fade so consecutive ticks blend into a sustained bed.
-    const p = rr(1, 0.04);
-    triChord([ri(110*p,0), ri(165*p,0)], 'sine',
-      rr(0.08, 0.15), rr(0.95, 0.05),
-      [ri(108*p,0), ri(162*p,0)], rr(0.92, 0.05), 0,
-      { attack: rr(0.18, 0.2), hold: rr(0.20, 0.2), decay: rr(0.55, 0.15) });
-    // Faint upper-octave sparkle so the bed has air, not just thump.
-    triChord([ri(440*p,0)], 'triangle',
-      rr(0.025, 0.3), 0.45, null, null, rr(0.10, 0.3),
-      { attack: 0.05, hold: 0, decay: 0.40 });
-  }
-  else if (type === 'vortex_absorb') {
-    // Bright cyan "schwoop" when a projectile hits the Vortex shield and
-    // gets sucked in. Inverted pitch arc (rising) signals capture.
-    const p = rr(1, 0.10);
-    triChord([ri(220*p,0), ri(330*p,0), ri(440*p,0)], 'sine',
-      rr(0.18, 0.15), 0.16,
-      [ri(660*p,0), ri(880*p,0), ri(1320*p,0)], 0.14, 0,
-      { attack: 0.001, hold: 0.01, decay: 0.13 });
-    playNoiseBurst(rr(0.05, 0.3), rr(0.07, 0.3), now, ri(2200, 0.2), rr(2.5, 0.25));
-  }
-  else if (type === 'vortex_reflect') {
-    // Punchier, falling pitch ; the shield hurled the projectile back.
-    const p = rr(1, 0.10);
-    triChord([ri(880*p,0), ri(660*p,0)], 'sawtooth',
-      rr(0.22, 0.15), 0.20,
-      [ri(330*p,0), ri(248*p,0)], 0.18, 0,
-      { attack: 0.001, hold: 0.005, decay: 0.18 });
-    playNoiseBurst(rr(0.06, 0.25), rr(0.10, 0.25), now, ri(1400, 0.25), rr(1.4, 0.3));
-    // Sub thump for the reflection's impact weight.
-    playNoiseBurst(rr(0.04, 0.25), rr(0.10, 0.25), now, ri(80, 0.3), rr(0.8, 0.25));
-  }
-  else if (type === 'thermal_shield_hum') {
-    // Pyro thermal shield: warm crackling roar bed. Looped on 0.90s
-    // cadence. Bandpass-filtered noise + soft sub-roar.
-    playNoiseBurst(rr(0.85, 0.10), rr(0.10, 0.20), now, ri(220, 0.20), rr(0.7, 0.20));
-    playNoiseBurst(rr(0.85, 0.10), rr(0.06, 0.25), now + 0.02, ri(1100, 0.25), rr(1.1, 0.25));
-    // Low warm tonal underneath so it reads as "contained fire" not just hiss.
-    triChord([ri(82, 0.05), ri(110, 0.05)], 'sine',
-      rr(0.06, 0.20), rr(0.85, 0.05), null, null, 0,
-      { attack: rr(0.20, 0.2), hold: rr(0.30, 0.2), decay: rr(0.40, 0.2) });
-  }
-  else if (type === 'thermal_burn') {
-    // Quick incendiary bite when the thermal shield burns a nearby
-    // enemy. Short crackling sting, no sub ; doesn't compete with the
-    // hum loop or the enemy's damage_shield reaction.
-    playNoiseBurst(rr(0.12, 0.25), rr(0.16, 0.25), now, ri(2400, 0.20), rr(2.4, 0.25));
-    triChord([ri(440, 0.10), ri(660, 0.10)], 'sawtooth',
-      rr(0.10, 0.20), 0.10,
-      [ri(220, 0.10), ri(330, 0.10)], 0.08, 0,
-      { attack: 0.002, hold: 0, decay: 0.08 });
-  }
-  else if (type === 'firewall_roar') {
-    // Sustained fire roar while a Pyro firewall is alive. Looped on
-    // 0.55s cadence so consecutive bursts overlap into a continuous
-    // jet-engine bed. Layered: low rumble + bandpass crackle + bright air.
-    playNoiseBurst(rr(0.55, 0.10), rr(0.18, 0.20), now, ri(160, 0.20), rr(0.6, 0.20));
-    playNoiseBurst(rr(0.50, 0.10), rr(0.08, 0.25), now + 0.02, ri(900, 0.25), rr(1.4, 0.25));
-    playNoiseBurst(rr(0.30, 0.20), rr(0.04, 0.30), now + 0.05, ri(2800, 0.20), rr(2.0, 0.30));
-  }
-  else if (type === 'tripwire_detonate') {
-    // Sharp electric snap when something trips a Vortex Trip Wire.
-    // Two-stage: first the trigger crack, then the detonation thud.
-    const p = rr(1, 0.10);
-    playNoiseBurst(rr(0.04, 0.25), rr(0.20, 0.25), now, ri(3200, 0.20), rr(3.0, 0.25));
-    triChord([ri(660*p,0), ri(990*p,0)], 'sawtooth',
-      rr(0.18, 0.15), 0.12,
-      [ri(165*p,0), ri(248*p,0)], 0.10, 0,
-      { attack: 0.001, hold: 0, decay: 0.10 });
-    // Detonation thud follows immediately.
-    playNoiseBurst(rr(0.18, 0.15), rr(0.30, 0.20), now + 0.04, ri(80, 0.30), rr(0.7, 0.20));
-    playNoiseBurst(rr(0.10, 0.20), rr(0.10, 0.25), now + 0.05, ri(450, 0.30), rr(0.9, 0.25));
-  }
-  else if (type === 'incendiary_ignite') {
-    // Pyro Incendiary Trap kicks off ; deep WHOOSH with a rising flame
-    // tail. Reads as "the air just caught fire" rather than a single bang.
-    playNoiseBurst(rr(0.30, 0.15), rr(0.25, 0.20), now, ri(180, 0.25), rr(0.6, 0.20));
-    playNoiseBurst(rr(0.40, 0.15), rr(0.15, 0.25), now + 0.04, ri(700, 0.25), rr(1.2, 0.25));
-    playNoiseBurst(rr(0.30, 0.20), rr(0.08, 0.30), now + 0.10, ri(2400, 0.20), rr(1.8, 0.30));
-    // Low whoosh tonal sweep from sub to mid for the ignition front.
-    triChord([55, 82], 'sawtooth', rr(0.10, 0.20), 0.40,
-      [180, 270], 0.35, 0,
-      { attack: rr(0.04, 0.3), hold: 0, decay: 0.35 });
-  }
-  else if (type === 'cluster_split') {
-    // Slayer Cluster Missile sub-munitions burst apart at impact ; metal-on-
-    // metal pop with a brief shrapnel scatter. Different signature from a
-    // regular explosion (which fires alongside) : tighter, brighter, shorter.
-    const p = rr(1, 0.10);
-    triChord([ri(330*p,0), ri(495*p,0), ri(660*p,0)], rWave(['triangle','sawtooth']),
-      rr(0.15, 0.15), 0.10,
-      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.08, 0,
-      { attack: 0.001, hold: 0, decay: 0.08 });
-    playNoiseBurst(rr(0.06, 0.25), rr(0.18, 0.20), now, ri(1800, 0.25), rr(1.8, 0.30));
-    // 2-3 micro shrapnel pops staggered after the main burst.
-    const shards = 2 + Math.floor(r() * 2);
-    for (let i = 0; i < shards; i++) {
-      playNoiseBurst(rr(0.03, 0.3), rr(0.06, 0.3), now + 0.03 + r() * 0.10, ri(2400, 0.30), rr(2.5, 0.30));
-    }
-  }
-  else if (type === 'tether_caught') {
-    // Slayer Tether Trap snares a ship ; rubber-band-twang slap then
-    // a low captured groan as the tether tightens.
-    const p = rr(1, 0.10);
-    triChord([ri(220*p,0), ri(330*p,0)], 'triangle',
-      rr(0.20, 0.15), 0.18,
-      [ri(110*p,0), ri(165*p,0)], 0.16, 0,
-      { attack: 0.002, hold: 0.01, decay: 0.15 });
-    playNoiseBurst(rr(0.06, 0.25), rr(0.12, 0.25), now, ri(900, 0.25), rr(1.2, 0.25));
-    // Low captured drone follows for ~0.4s.
-    triChord([ri(82*p,0), ri(110*p,0)], 'sawtooth',
-      rr(0.08, 0.20), 0.40,
-      [ri(70*p,0), ri(95*p,0)], 0.36, 0.10,
-      { attack: rr(0.04, 0.3), hold: 0, decay: 0.34 });
-  }
-  else if (type === 'siphon_drain') {
-    // Syphon Energy Siphon drain loop ; called on 0.18s cadence while
-    // siphoning. Quick shimmery upper-mid pluck so it reads as "stream
-    // of energy being pulled in" without competing with siphon_hit.
-    const p = rr(1, 0.06);
-    triChord([ri(880*p,0), ri(1320*p,0)], 'sine',
-      rr(0.04, 0.20), 0.16,
-      [ri(660*p,0), ri(990*p,0)], 0.14, 0,
-      { attack: 0.001, hold: 0, decay: 0.14 });
-  }
-  else if (type === 'siphon_hit') {
-    // The "drain landed on a target" punctuation ; descending blip + a
-    // brief reverse-cymbal swell so the player feels they pulled life
-    // out of someone.
-    const p = rr(1, 0.10);
-    triChord([ri(660*p,0), ri(880*p,0), ri(1100*p,0)], 'sine',
-      rr(0.18, 0.15), 0.20,
-      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.18, 0,
-      { attack: 0.002, hold: 0, decay: 0.18 });
-    playNoiseBurst(rr(0.10, 0.25), rr(0.08, 0.25), now, ri(2200, 0.25), rr(2.0, 0.25));
-  }
-  // (v14g) Vortex Laser Shot : sharp piercing zap. Descending high-band
-  // sweep + crackling noise + sub thump = "PEW" with weight.
-  else if (type === 'laser_shot') {
-    const p = rr(1, 0.06);
-    triChord([ri(1320*p,0), ri(1980*p,0), ri(2640*p,0)], 'sawtooth',
-      rr(0.30, 0.10), 0.18,
-      [ri(330*p,0), ri(495*p,0), ri(660*p,0)], 0.16, 0,
-      { attack: 0.001, hold: 0, decay: 0.16 });
-    playNoiseBurst(rr(0.08, 0.20), rr(0.20, 0.20), now, ri(3200, 0.20), rr(3.5, 0.25));
-    playNoiseBurst(rr(0.06, 0.20), rr(0.10, 0.25), now, ri(75, 0.25), rr(0.6, 0.25));
-    triChord([ri(220*p,0)], 'sine', rr(0.10, 0.20), 0.22, null, null, 0,
-      { attack: 0.001, hold: 0.02, decay: 0.20 });
-  }
-  // (v14g) Vortex Laser Core sustained beam. ONE long sound that holds
-  // for the full 4s core duration ; no looping, no alarm-pulsing. Sub
-  // bass drone + mid harmonic body + high shimmer band, all with a
-  // quick attack into a long sustained hold and a slow tail decay so
-  // the beam reads as a continuous energy stream from start to finish.
-  else if (type === 'laser_core_beam') {
-    duckAmbient(0.25);
-    const p = rr(1, 0.04);
-    // Sub-bass drone (the body of the beam)
-    triChord([ri(55*p,0), ri(82*p,0)], 'sawtooth',
-      rr(0.32, 0.08), 4.0,
-      null, null, 0,
-      { attack: rr(0.12, 0.15), hold: 3.40, decay: 0.45 });
-    // Mid harmonic (gives the beam its "energy" character)
-    triChord([ri(165*p,0), ri(247*p,0), ri(330*p,0)], 'sawtooth',
-      rr(0.24, 0.08), 4.0,
-      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 3.95, 0,
-      { attack: rr(0.10, 0.15), hold: 3.45, decay: 0.40 });
-    // Bright shimmer (high-band noise, sustained)
-    playNoiseBurst(3.95, rr(0.10, 0.10), now + 0.05, ri(2400, 0.15), rr(2.8, 0.20));
-    // Sub air-rumble undercurrent
-    playNoiseBurst(3.95, rr(0.18, 0.10), now + 0.02, ri(110, 0.15), rr(0.55, 0.20));
-  }
-  // (v14g) Blaster Power Shot release : the meaty BOOM after the charge
-  // hum. Two-stage : ignition crack into a cannon-style sub thump.
-  else if (type === 'power_shot_release') {
-    duckAmbient(0.30);
-    const p = rr(1, 0.06);
-    // Ignition crack
-    playNoiseBurst(rr(0.06, 0.20), rr(0.30, 0.15), now, ri(2400, 0.20), rr(3.0, 0.25));
-    triChord([ri(330*p,0), ri(495*p,0)], 'sawtooth',
-      rr(0.25, 0.12), 0.18,
-      [ri(110*p,0), ri(165*p,0)], 0.14, 0,
-      { attack: 0.001, hold: 0, decay: 0.14 });
-    // Cannon body thump
-    playNoiseBurst(rr(0.40, 0.15), rr(0.45, 0.10), now + 0.02, ri(60, 0.25), rr(0.4, 0.20));
-    triChord([ri(45*p,0), ri(67*p,0), ri(90*p,0)], 'sine',
-      rr(0.45, 0.10), 0.45,
-      [ri(35*p,0), ri(55*p,0), ri(75*p,0)], 0.40, 0.04,
-      { attack: 0.001, hold: rr(0.05, 0.2), decay: rr(0.40, 0.15) });
-  }
-  // (v14g) Blaster Mode Switch : two clean mechanical clicks indicating
-  // a config change between close- and long-range modes.
-  else if (type === 'mode_switch') {
-    const p = rr(1, 0.06);
-    // First click
-    triChord([ri(880*p,0), ri(1320*p,0)], 'square',
-      rr(0.10, 0.20), 0.04, null, null, 0,
-      { attack: 0.001, hold: 0, decay: 0.04 });
-    playNoiseBurst(rr(0.03, 0.25), rr(0.10, 0.25), now, ri(2400, 0.20), rr(2.5, 0.25));
-    // Second click 0.10s later, lower pitch confirming new state
-    triChord([ri(660*p,0), ri(990*p,0)], 'square',
-      rr(0.10, 0.20), 0.05, null, null, 0.10,
-      { attack: 0.001, hold: 0, decay: 0.05 });
-    playNoiseBurst(rr(0.03, 0.25), rr(0.08, 0.25), now + 0.10, ri(1800, 0.20), rr(2.0, 0.25));
-  }
-  // (v14g) Slayer Phase Dash : reality-warp whoosh as the ship phases
-  // through space. Rising-then-falling phasing tone + a sub doppler.
-  else if (type === 'phase_dash') {
-    const p = rr(1, 0.08);
-    // Phasing whoosh
-    triChord([ri(220*p,0), ri(440*p,0)], 'sine',
-      rr(0.25, 0.10), 0.30,
-      [ri(660*p,0), ri(330*p,0)], 0.25, 0,
-      { attack: 0.005, hold: 0, decay: 0.25 });
-    playNoiseBurst(rr(0.20, 0.20), rr(0.20, 0.20), now, ri(1600, 0.30), rr(1.0, 0.30));
-    // Sub doppler tail (downsweep)
-    triChord([ri(120*p,0), ri(180*p,0)], 'triangle',
-      rr(0.18, 0.15), 0.35,
-      [ri(60*p,0), ri(90*p,0)], 0.30, 0.04,
-      { attack: 0.001, hold: 0, decay: 0.30 });
-  }
-  // (v14g) Sword Core activation : a rapid descending chord and metallic
-  // ring like a sword being unsheathed and ringing.
-  else if (type === 'sword_core_swing') {
-    const p = rr(1, 0.05);
-    triChord([ri(880*p,0), ri(1100*p,0), ri(1320*p,0)], 'sawtooth',
-      rr(0.30, 0.10), 0.30,
-      [ri(220*p,0), ri(275*p,0), ri(330*p,0)], 0.25, 0,
-      { attack: 0.001, hold: 0, decay: 0.25 });
-    playNoiseBurst(rr(0.10, 0.20), rr(0.18, 0.20), now, ri(3200, 0.15), rr(2.8, 0.20));
-    // Metallic ring tail
-    triChord([ri(440*p,0), ri(660*p,0), ri(880*p,0)], 'triangle',
-      rr(0.20, 0.10), 0.55,
-      null, null, 0.10,
-      { attack: 0.001, hold: 0, decay: 0.50 });
-  }
-  // (v14g) Flame Core activation : massive fire whoosh ignition.
-  else if (type === 'flame_core_blast') {
-    duckAmbient(0.40);
-    const p = rr(1, 0.05);
-    // Ignition front (sub + mid + bright)
-    playNoiseBurst(rr(0.50, 0.10), rr(0.45, 0.10), now, ri(110, 0.20), rr(0.5, 0.20));
-    playNoiseBurst(rr(0.45, 0.12), rr(0.30, 0.15), now + 0.04, ri(800, 0.20), rr(1.4, 0.20));
-    playNoiseBurst(rr(0.35, 0.15), rr(0.18, 0.20), now + 0.10, ri(2800, 0.20), rr(2.0, 0.25));
-    // Rising whoosh sweep
-    triChord([ri(55*p,0), ri(82*p,0)], 'sawtooth',
-      rr(0.30, 0.10), 0.55,
-      [ri(220*p,0), ri(330*p,0)], 0.50, 0,
-      { attack: rr(0.06, 0.2), hold: 0, decay: 0.50 });
-  }
-  // (v14g) Salvo Core activation : massive missile launch volley.
-  else if (type === 'salvo_core_burst') {
-    duckAmbient(0.30);
-    const p = rr(1, 0.06);
-    // Stacked launches over 0.3s
-    for (let i = 0; i < 4; i++) {
-      const off = i * 0.06;
-      const launchP = p * (0.95 + Math.random() * 0.10);
-      triChord([ri(50*launchP,0), ri(63*launchP,0)], 'sawtooth',
-        rr(0.20, 0.15), 0.25,
-        [ri(150*launchP,0), ri(190*launchP,0)], 0.22, off,
-        { attack: rr(0.008, 0.3), hold: rr(0.05, 0.3), decay: 0.22 });
-      playNoiseBurst(rr(0.18, 0.20), rr(0.10, 0.25), now + off, ri(700, 0.25), rr(0.8, 0.25));
-    }
-  }
-  // (v14g) Puncture Tether Trap deployment : magnetic-coil charging
-  // thunk + radial pulse, loud enough to feel deployed (the prior
-  // 'ability' chime was easy to miss in combat). Sub kick + capacitor
-  // body + bright sweep tail.
-  else if (type === 'tether_trap_deploy') {
-    duckAmbient(0.30);
-    const p = rr(1, 0.06);
-    // Sub kick (magnetic coil engaging)
-    playNoiseBurst(rr(0.30, 0.15), rr(0.40, 0.10), now, ri(70, 0.20), rr(0.45, 0.20));
-    // Capacitor body (the trap going live)
-    triChord([ri(110*p,0), ri(165*p,0), ri(247*p,0)], 'sawtooth',
-      rr(0.40, 0.10), 0.35,
-      [ri(220*p,0), ri(330*p,0), ri(495*p,0)], 0.32, 0,
-      { attack: rr(0.02, 0.2), hold: rr(0.05, 0.2), decay: 0.30 });
-    // Bright sweep tail (radial pulse)
-    triChord([ri(440*p,0), ri(660*p,0), ri(880*p,0)], 'sine',
-      rr(0.25, 0.10), 0.25,
-      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.22, 0.10,
-      { attack: 0.001, hold: 0.04, decay: 0.20 });
-    // Mid noise wash for body
-    playNoiseBurst(rr(0.18, 0.15), rr(0.18, 0.15), now + 0.04, ri(900, 0.20), rr(1.6, 0.25));
-  }
-  // (v14g) Puncture Cluster Missile launch : the missile leaves the
-  // tube hard. Sub thrust kick + saw whoosh + thrust roar tail so
-  // there's no doubt a heavy ordnance just fired.
-  else if (type === 'cluster_missile_fire') {
-    duckAmbient(0.32);
-    const p = rr(1, 0.06);
-    // Launch kick (sub thump)
-    playNoiseBurst(rr(0.30, 0.12), rr(0.45, 0.10), now, ri(60, 0.20), rr(0.40, 0.20));
-    // Body whoosh (sawtooth swell)
-    triChord([ri(82*p,0), ri(110*p,0), ri(165*p,0)], 'sawtooth',
-      rr(0.40, 0.10), 0.40,
-      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.35, 0,
-      { attack: rr(0.01, 0.2), hold: rr(0.05, 0.2), decay: 0.35 });
-    // Thrust roar tail (sustained mid noise)
-    playNoiseBurst(rr(0.40, 0.10), rr(0.20, 0.15), now + 0.05, ri(550, 0.20), rr(1.0, 0.25));
-    // High air-cut snap on top
-    playNoiseBurst(rr(0.10, 0.20), rr(0.20, 0.20), now, ri(2400, 0.20), rr(2.4, 0.25));
-  }
-  // (v14g) Vortex Trip Wire (laser trap) deployment : a meaty
-  // capacitor-charge thunk + electric snap so the 5 orbs read as a
-  // dangerous trap going live. Louder than the generic 'ability' chime.
-  else if (type === 'trip_wire_deploy') {
-    duckAmbient(0.30);
-    const p = rr(1, 0.06);
-    // Capacitor charge thunk (low-mid swell)
-    triChord([ri(110*p,0), ri(165*p,0), ri(220*p,0)], 'sawtooth',
-      rr(0.40, 0.10), 0.30,
-      [ri(330*p,0), ri(495*p,0), ri(660*p,0)], 0.28, 0,
-      { attack: rr(0.02, 0.2), hold: rr(0.06, 0.2), decay: 0.25 });
-    // Sub thump for weight
-    playNoiseBurst(rr(0.25, 0.12), rr(0.35, 0.12), now, ri(75, 0.20), rr(0.50, 0.20));
-    // Electric snap on top so orbs read as charged / live
-    playNoiseBurst(rr(0.10, 0.20), rr(0.30, 0.15), now + 0.04, ri(2800, 0.20), rr(3.0, 0.25));
-    // High shimmer tail
-    triChord([ri(660*p,0), ri(990*p,0), ri(1320*p,0)], 'sine',
-      rr(0.18, 0.10), 0.30,
-      null, null, 0.08,
-      { attack: 0.001, hold: 0.04, decay: 0.26 });
-  }
-  // (v14g) Puncture Afterburner : speed-boost ignition. Quick whoosh
-  // with a sub thrust kick + rising mid-tone for the engine spool-up.
-  else if (type === 'afterburner') {
-    const p = rr(1, 0.06);
-    // Sub kick
-    playNoiseBurst(rr(0.30, 0.15), rr(0.25, 0.15), now, ri(85, 0.20), rr(0.55, 0.20));
-    // Whoosh body
-    playNoiseBurst(rr(0.40, 0.12), rr(0.18, 0.20), now + 0.02, ri(900, 0.20), rr(1.3, 0.25));
-    // Rising engine-spool tone
-    triChord([ri(82*p,0), ri(110*p,0), ri(165*p,0)], 'sawtooth',
-      rr(0.22, 0.10), 0.40,
-      [ri(220*p,0), ri(290*p,0), ri(440*p,0)], 0.36, 0,
-      { attack: rr(0.04, 0.2), hold: 0, decay: 0.36 });
-  }
-  // (v14g) Syphon Upgrade Core : 3-step permanent power-up sound.
-  // Three rising chimes + a confident downbeat = "tier acquired."
-  else if (type === 'upgrade_core') {
-    duckAmbient(0.25);
-    const p = rr(1, 0.04);
-    // Three rising chimes
-    triChord([ri(440*p,0), ri(660*p,0)], 'sine',
-      rr(0.18, 0.12), 0.10, null, null, 0.00,
-      { attack: 0.001, hold: 0.01, decay: 0.10 });
-    triChord([ri(587*p,0), ri(880*p,0)], 'sine',
-      rr(0.18, 0.12), 0.10, null, null, 0.10,
-      { attack: 0.001, hold: 0.01, decay: 0.10 });
-    triChord([ri(784*p,0), ri(1100*p,0)], 'sine',
-      rr(0.20, 0.12), 0.12, null, null, 0.20,
-      { attack: 0.001, hold: 0.01, decay: 0.12 });
-    // Confident downbeat (tier locked in)
-    triChord([ri(165*p,0), ri(220*p,0), ri(330*p,0)], 'triangle',
-      rr(0.30, 0.10), 0.45,
-      [ri(110*p,0), ri(165*p,0), ri(247*p,0)], 0.40, 0.32,
-      { attack: 0.005, hold: rr(0.08, 0.2), decay: 0.40 });
-    // Brief noise sparkle on the downbeat for "system upgraded" sheen
-    playNoiseBurst(rr(0.12, 0.20), rr(0.10, 0.20), now + 0.32, ri(2400, 0.20), rr(2.0, 0.25));
-  }
-  // (v14g) Barrage Core activation : speed-boost ignition + rocket
-  // ignition layer.
-  else if (type === 'barrage_core_thrust') {
-    duckAmbient(0.30);
-    const p = rr(1, 0.06);
-    // Thrust roar (sustained noise bed)
-    playNoiseBurst(rr(0.55, 0.10), rr(0.35, 0.10), now, ri(140, 0.20), rr(0.6, 0.20));
-    playNoiseBurst(rr(0.50, 0.10), rr(0.18, 0.15), now + 0.02, ri(1100, 0.20), rr(1.4, 0.25));
-    // Rising power tone
-    triChord([ri(82*p,0), ri(110*p,0), ri(165*p,0)], 'sawtooth',
-      rr(0.30, 0.10), 0.50,
-      [ri(220*p,0), ri(290*p,0), ri(440*p,0)], 0.45, 0,
-      { attack: rr(0.05, 0.2), hold: 0, decay: 0.45 });
-  }
-  else if (type === 'rearm_reset') {
-    // Syphon Rearm zeroes all ability cooldowns ; sounds like a reactor
-    // hard-reset / capacitor dump. Three rapid rising beeps then a
-    // confident downbeat to signal "you're loaded back up."
-    const p = rr(1, 0.06);
-    triChord([ri(440*p,0)], 'square', rr(0.08, 0.20), 0.06, null, null, 0.00,
-      { attack: 0.001, hold: 0, decay: 0.05 });
-    triChord([ri(660*p,0)], 'square', rr(0.08, 0.20), 0.06, null, null, 0.06,
-      { attack: 0.001, hold: 0, decay: 0.05 });
-    triChord([ri(880*p,0)], 'square', rr(0.10, 0.20), 0.06, null, null, 0.12,
-      { attack: 0.001, hold: 0, decay: 0.05 });
-    // Resolve chord ; major triad up an octave from the third beep.
-    triChord([ri(440*p,0), ri(660*p,0), ri(880*p,0)], 'sine',
-      rr(0.18, 0.15), 0.30, null, null, 0.20,
-      { attack: 0.005, hold: 0.05, decay: 0.25 });
-    // Bright brassy scraper underneath the chord for confidence.
-    playNoiseBurst(rr(0.18, 0.20), rr(0.06, 0.25), now + 0.20, ri(1800, 0.25), rr(2.0, 0.25));
-  }
+  // (v14g) Recipe lookup is the sole audio path. DEFAULT_SOUND_LIBRARY is
+  // always seeded into audio.labRecipes on boot ; if a recipe lookup somehow
+  // misses, the call is a silent no-op (the legacy hardcoded synth fallback
+  // that lived here through v14f was deleted in v14g once the lab covered
+  // every type).
+  _playSoundFromLabRecipe(type);
 }
 
 // ---- HRTF spatial playback wrapper ----
