@@ -12580,6 +12580,11 @@ function _spawnCloudHalo(bounds, count, color, alpha, sizeMul) {
       pulseSpeed:  0.10 + Math.random() * 0.20,
       pulseAmp:    0.0,
       phase:       Math.random() * Math.PI * 2,
+      // (v14g) Per-sprite wake offset, pushed by ships / projectiles in
+      // updateAmbientCloudWakes() and decayed back to zero in _tickCloudHalo.
+      // Mirrors GasCloud.slots[].wakeOff so ambient drifting clouds react
+      // to passing objects instead of standing perfectly still.
+      wakeOff: new THREE.Vector3(),
     });
   }
   return { anchor, sprites, _baseAlpha: alpha };
@@ -12588,19 +12593,181 @@ function _spawnCloudHalo(bounds, count, color, alpha, sizeMul) {
 // (v11d) Tick one cloud halo's sprites: wander each around its base
 // position with an irrational-frequency Lissajous so the path never
 // repeats and pulse-scale them subtly. Call once per frame.
-function _tickCloudHalo(halo, t, alphaMul) {
+function _tickCloudHalo(halo, t, alphaMul, dt) {
   if (!halo || !halo.sprites) return;
   if (alphaMul == null) alphaMul = 1.0;
+  // (v14g) Decay rate for wake offsets. Matches GasCloud's settle behavior :
+  // sprites tugged by a passing ship return to their drift basepos in ~1 s
+  // after the ship leaves their wake radius. Default dt=1/60 if caller
+  // didn't pass one (legacy callers).
+  const _dt = (typeof dt === 'number' && dt > 0) ? dt : 1 / 60;
+  const wakeDecay = Math.max(0, 1 - _dt * 2.0);
   for (const s of halo.sprites) {
     const u = t * s.driftSpeed + s.phase;
     const dx = Math.sin(u)              * s.driftRadius;
     const dy = Math.sin(u * 0.73 + 1.3) * s.driftRadius * 0.6;
     const dz = Math.cos(u * 0.91 + 2.7) * s.driftRadius;
-    s.sprite.position.set(s.basePos.x + dx, s.basePos.y + dy, s.basePos.z + dz);
+    if (s.wakeOff) {
+      s.sprite.position.set(
+        s.basePos.x + dx + s.wakeOff.x,
+        s.basePos.y + dy + s.wakeOff.y,
+        s.basePos.z + dz + s.wakeOff.z,
+      );
+      s.wakeOff.multiplyScalar(wakeDecay);
+    } else {
+      s.sprite.position.set(s.basePos.x + dx, s.basePos.y + dy, s.basePos.z + dz);
+    }
     const pp = t * s.pulseSpeed + s.phase;
     const pulse = 1 + Math.sin(pp) * s.pulseAmp;
     s.sprite.scale.setScalar(s.baseScale * pulse);
     if (s.mat) s.mat.opacity = halo._baseAlpha * alphaMul;
+  }
+}
+
+// (v14g) Apply a wake source to a cloud halo's sprites. Called from
+// updateAmbientCloudWakes() once per source per halo. anchorWorld is the
+// halo's anchor world position (game.dots[i].anchor.position) ; we use it
+// to convert the world-space source into the halo's local space so the
+// distance check matches the local-space basePos / wakeOff math. Anchor
+// rotation is small (per-cloud y-spin only) so we approximate by treating
+// world delta as local delta ; visible error is negligible at the cloud
+// silhouette scale.
+function _applyCloudHaloWake(halo, anchorWX, anchorWY, anchorWZ,
+                             srcWX, srcWY, srcWZ, velX, velY, velZ,
+                             strength, radius, dt) {
+  if (!halo || !halo.sprites) return;
+  const lsx = srcWX - anchorWX;
+  const lsy = srcWY - anchorWY;
+  const lsz = srcWZ - anchorWZ;
+  const r2 = radius * radius;
+  for (const s of halo.sprites) {
+    if (!s.wakeOff) continue;
+    // Sprite's effective local center = basePos + current wakeOff (drift
+    // term is fast-cycling and small, ignored for the wake gate).
+    const sx = s.basePos.x + s.wakeOff.x;
+    const sy = s.basePos.y + s.wakeOff.y;
+    const sz = s.basePos.z + s.wakeOff.z;
+    const dx = sx - lsx, dy = sy - lsy, dz = sz - lsz;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > r2) continue;
+    const d = Math.sqrt(d2);
+    const atten = 1.0 - d / radius;
+    if (d > 0.001) {
+      // Magnetic pull : sprites trail the moving source through the cloud
+      // volume (matches the GasCloud wake feel).
+      const pullSpeed = 70.0 * atten * strength * dt;
+      const invD = 1.0 / d;
+      s.wakeOff.x -= dx * invD * pullSpeed;
+      s.wakeOff.y -= dy * invD * pullSpeed;
+      s.wakeOff.z -= dz * invD * pullSpeed;
+    }
+    // Subtle velocity drag : sprites get a small nudge in the source's
+    // flight direction so a fast ship cuts a thin tunnel through the cloud
+    // ahead of itself.
+    const dragK = 0.012 * atten * strength * dt;
+    s.wakeOff.x += velX * dragK;
+    s.wakeOff.y += velY * dragK;
+    s.wakeOff.z += velZ * dragK;
+  }
+}
+
+// (v14g) Per-frame ambient-cloud wake update. Mirrors updateBCSWakes but
+// targets the sprite-based cloud halos on game.dots[] (the drifting nebula
+// puffs that give the arena its atmosphere). Without this, the halos drift
+// internally via Lissajous but never react to ships or projectiles passing
+// through, which reads as "the gas just stays in place."
+function updateAmbientCloudWakes(dt) {
+  if (!game || !game.dots || !game.dots.length) return;
+  // Gather sources : reuse the same pattern as updateBCSWakes.
+  const sources = [];
+  if (typeof player !== 'undefined' && player && player.shipState !== 'dead'
+      && player.position && player.velocity) {
+    sources.push({
+      x: player.position.x, y: player.position.y, z: player.position.z,
+      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
+      str: 0.30, radius: 260,
+    });
+  }
+  if (game.entities) {
+    for (let i = 0; i < game.entities.length; i++) {
+      const e = game.entities[i];
+      if (!e || e === player || !e.alive || !e.position) continue;
+      const v = e.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: e.position.x, y: e.position.y, z: e.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.24, radius: 220,
+      });
+    }
+  }
+  if (game.projectiles) {
+    let pCount = 0;
+    for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
+      const p = game.projectiles[i];
+      if (!p || !p.alive || !p.position) continue;
+      const v = p.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: p.position.x, y: p.position.y, z: p.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.32, radius: 150,
+      });
+      pCount++;
+    }
+  }
+  if (sources.length === 0) return;
+  for (let di = 0; di < game.dots.length; di++) {
+    const d = game.dots[di];
+    if (!d) continue;
+    const a = d.anchor;
+    if (!a) continue;
+    const ax = a.position.x, ay = a.position.y, az = a.position.z;
+    // Halo sprites (wispy outer silhouette).
+    if (d._cloudHalo) {
+      for (let si = 0; si < sources.length; si++) {
+        const s = sources[si];
+        _applyCloudHaloWake(d._cloudHalo, ax, ay, az,
+          s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
+      }
+    }
+    // (v14g) Shader-smoke puffs (the dense inner mesh-based core of each
+    // ambient cloud). Without this loop the puffs stayed locked to their
+    // basePos while only the outer halo sprites tugged, so the cloud's
+    // visible body still looked frozen as ships flew through.
+    if (d._puffs && d._puffs.length) {
+      for (let pi = 0; pi < d._puffs.length; pi++) {
+        const p = d._puffs[pi];
+        if (!p || !p.wakeOff) continue;
+        for (let si = 0; si < sources.length; si++) {
+          const s = sources[si];
+          // World-to-local source delta (anchor rotation is small/none for
+          // ambient dots, so we treat the world delta as the local delta).
+          const lsx = s.x - ax, lsy = s.y - ay, lsz = s.z - az;
+          const px = p.basePos.x + p.wakeOff.x;
+          const py = p.basePos.y + p.wakeOff.y;
+          const pz = p.basePos.z + p.wakeOff.z;
+          const dx = px - lsx, dy = py - lsy, dz = pz - lsz;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          const r2 = s.radius * s.radius;
+          if (d2 > r2) continue;
+          const dist = Math.sqrt(d2);
+          const atten = 1.0 - dist / s.radius;
+          if (dist > 0.001) {
+            // Slightly stronger pull than the halo because puffs are the
+            // visible body and we want a more obvious deformation when a
+            // ship punches through the dense core.
+            const pullSpeed = 90.0 * atten * s.str * dt;
+            const invD = 1.0 / dist;
+            p.wakeOff.x -= dx * invD * pullSpeed;
+            p.wakeOff.y -= dy * invD * pullSpeed;
+            p.wakeOff.z -= dz * invD * pullSpeed;
+          }
+          const dragK = 0.014 * atten * s.str * dt;
+          p.wakeOff.x += s.vx * dragK;
+          p.wakeOff.y += s.vy * dragK;
+          p.wakeOff.z += s.vz * dragK;
+        }
+      }
+    }
   }
 }
 
@@ -16037,8 +16204,150 @@ if (typeof window !== 'undefined') {
   window._spawnExplosionLight = _spawnExplosionLight;
 }
 
+// (v14g) Apply an isotropic outward push from an explosion origin to every
+// nearby cloud / smoke system. Each layer (ambient dot velocity, parent shell,
+// inner puffs, outer halo sprites, GasCloud slots, detached gas pockets,
+// cluster-plume shaderSmoke wakeVel) gets a one-shot impulse scaled by the
+// explosion size. Force falls off linearly with distance to the source's
+// radius. Called from spawnExplosion ; safe to call independently for any
+// non-explosion shockwave that should also blow gas outward.
+function applyExplosionPush(pos, force, radius) {
+  if (!pos || !game) return;
+  const r = radius || force * 8;
+  const r2 = r * r;
+  // Ambient cloud dots : push the dot's anchor velocity (parent shell moves
+  // with it) PLUS the inner puffs / halo sprites individually so the cloud
+  // visibly bursts outward and the silhouette deforms in the same instant.
+  if (game.dots) {
+    for (const d of game.dots) {
+      if (!d || !d.alive || !d.anchor) continue;
+      const dx = d.anchor.position.x - pos.x;
+      const dy = d.anchor.position.y - pos.y;
+      const dz = d.anchor.position.z - pos.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > r2 || d2 < 1) continue;
+      const dist = Math.sqrt(d2);
+      const atten = 1 - dist / r;
+      const inv = 1 / dist;
+      const v = force * atten;
+      if (d.velocity) {
+        d.velocity.x += dx * inv * v;
+        d.velocity.y += dy * inv * v;
+        d.velocity.z += dz * inv * v;
+      }
+      const ax = d.anchor.position.x, ay = d.anchor.position.y, az = d.anchor.position.z;
+      const lsx = pos.x - ax, lsy = pos.y - ay, lsz = pos.z - az;
+      if (d._puffs) {
+        for (let pi = 0; pi < d._puffs.length; pi++) {
+          const p = d._puffs[pi];
+          if (!p || !p.wakeOff) continue;
+          const pdx = (p.basePos.x + p.wakeOff.x) - lsx;
+          const pdy = (p.basePos.y + p.wakeOff.y) - lsy;
+          const pdz = (p.basePos.z + p.wakeOff.z) - lsz;
+          const pd2 = pdx*pdx + pdy*pdy + pdz*pdz;
+          if (pd2 > r2 || pd2 < 1) continue;
+          const pdist = Math.sqrt(pd2);
+          const patten = 1 - pdist / r;
+          const pinv = 1 / pdist;
+          const pv = force * 0.45 * patten;
+          p.wakeOff.x += pdx * pinv * pv;
+          p.wakeOff.y += pdy * pinv * pv;
+          p.wakeOff.z += pdz * pinv * pv;
+        }
+      }
+      if (d._cloudHalo && d._cloudHalo.sprites) {
+        for (let si = 0; si < d._cloudHalo.sprites.length; si++) {
+          const s = d._cloudHalo.sprites[si];
+          if (!s || !s.wakeOff) continue;
+          const sdx = (s.basePos.x + s.wakeOff.x) - lsx;
+          const sdy = (s.basePos.y + s.wakeOff.y) - lsy;
+          const sdz = (s.basePos.z + s.wakeOff.z) - lsz;
+          const sd2 = sdx*sdx + sdy*sdy + sdz*sdz;
+          if (sd2 > r2 || sd2 < 1) continue;
+          const sdist = Math.sqrt(sd2);
+          const satten = 1 - sdist / r;
+          const sinv = 1 / sdist;
+          const sv = force * 0.35 * satten;
+          s.wakeOff.x += sdx * sinv * sv;
+          s.wakeOff.y += sdy * sinv * sv;
+          s.wakeOff.z += sdz * sinv * sv;
+        }
+      }
+    }
+  }
+  // Detached gas pockets (GasCloud-based) : whole-pocket velocity + per-slot
+  // wakeOff so the swarm fans outward without immediately scattering apart.
+  if (game.detachedGasPockets) {
+    for (const p of game.detachedGasPockets) {
+      const cloud = p && p.gasCloud;
+      if (!cloud) continue;
+      const dx = cloud.position.x - pos.x;
+      const dy = cloud.position.y - pos.y;
+      const dz = cloud.position.z - pos.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > r2 || d2 < 1) continue;
+      const dist = Math.sqrt(d2);
+      const atten = 1 - dist / r;
+      const inv = 1 / dist;
+      const v = force * atten;
+      if (p.velocity) {
+        p.velocity.x += dx * inv * v;
+        p.velocity.y += dy * inv * v;
+        p.velocity.z += dz * inv * v;
+      }
+      if (cloud.slots) {
+        for (let si = 0; si < cloud.slots.length; si++) {
+          const s = cloud.slots[si];
+          if (!s || !s.wakeOff) continue;
+          const sx = cloud.position.x + s.off.x + s.wakeOff.x;
+          const sy = cloud.position.y + s.off.y + s.wakeOff.y;
+          const sz = cloud.position.z + s.off.z + s.wakeOff.z;
+          const sdx = sx - pos.x, sdy = sy - pos.y, sdz = sz - pos.z;
+          const sd2 = sdx*sdx + sdy*sdy + sdz*sdz;
+          if (sd2 > r2 || sd2 < 1) continue;
+          const sdist = Math.sqrt(sd2);
+          const satten = 1 - sdist / r;
+          const sinv = 1 / sdist;
+          const sv = force * 0.30 * satten;
+          s.wakeOff.x += sdx * sinv * sv;
+          s.wakeOff.y += sdy * sinv * sv;
+          s.wakeOff.z += sdz * sinv * sv;
+        }
+      }
+    }
+  }
+  // Cluster plume shaderSmoke (game.effects with wakeVel) : outward push on
+  // the mesh's own wakeVel so they tumble away from the blast.
+  if (game.effects) {
+    for (const e of game.effects) {
+      if (!e || !e.wakeVel || !e.mesh) continue;
+      const dx = e.mesh.position.x - pos.x;
+      const dy = e.mesh.position.y - pos.y;
+      const dz = e.mesh.position.z - pos.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 > r2 || d2 < 1) continue;
+      const dist = Math.sqrt(d2);
+      const atten = 1 - dist / r;
+      const inv = 1 / dist;
+      const v = force * atten;
+      e.wakeVel.x += dx * inv * v;
+      e.wakeVel.y += dy * inv * v;
+      e.wakeVel.z += dz * inv * v;
+    }
+  }
+}
+if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPush;
+
 function spawnExplosion(pos, size) {
   size = size || 20;
+  // (v14g) Isotropic cloud push : every cloud / smoke system within radius
+  // gets an outward velocity impulse. Force scales with explosion size so a
+  // small hit barely ripples the gas while a death bloom or Salvo Core
+  // visibly blows clouds away from the blast site. Radius generous so
+  // off-center bystander clouds still pulse outward.
+  if (typeof applyExplosionPush === 'function') {
+    applyExplosionPush(pos, 40 + size * 2.5, 200 + size * 12);
+  }
   // (v11b) Dynamic point light at every explosion â‰¥ 8 units. Lights up
   // walls / ships / other FX so the blast actually illuminates the scene
   // instead of being a self-glowing decal.
@@ -19215,28 +19524,59 @@ function updateEffects(dt) {
       // a fast pass produces a visible shove that decays over a second or two.
       // Skipped while the player is dead or pre-spawn (no ship to displace
       // anything).
-      if (e.playerWake && e.wakeVel && typeof player !== 'undefined' && player &&
-          player.position && player.shipState !== 'dead' && player.shipState !== 'spawning') {
-        const _dx = e.mesh.position.x - player.position.x;
-        const _dy = e.mesh.position.y - player.position.y;
-        const _dz = e.mesh.position.z - player.position.z;
-        const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
-        // Scale wake radius by the cloud's current expanded size so larger
-        // mid-life plumes catch the wake from farther out.
+      if (e.playerWake && e.wakeVel && e.mesh) {
+        // (v14g) Wake from EVERY moving source, not just the local player.
+        // The original branch only checked `player`, so bot ships and
+        // projectiles flew through cluster plumes without disturbing them.
+        // Now we walk player + bots + a projectile cap, exactly like
+        // updateAmbientCloudWakes / updateBCSWakes, so plumes react no
+        // matter who's punching through.
         const _expandFactor = 1 + t * ((e.maxSize || 2.2) - 1);
         const _wakeR = (e._wakeRadius || e.baseScale * 1.6) * _expandFactor + 220;
-        if (_d2 < _wakeR * _wakeR && _d2 > 1) {
+        const _wakeR2 = _wakeR * _wakeR;
+        const _applyOne = (sx, sy, sz, sSpd) => {
+          const _dx = e.mesh.position.x - sx;
+          const _dy = e.mesh.position.y - sy;
+          const _dz = e.mesh.position.z - sz;
+          const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
+          if (_d2 >= _wakeR2 || _d2 <= 1) return;
           const _d = Math.sqrt(_d2);
           const _falloff = 1 - (_d / _wakeR);
-          const _pSpd = (player.velocity ? player.velocity.length() : 0);
-          // Baseline shove + slipstream. 60 baseline so even a hovering
-          // player nudges the cloud; slipstream coefficient 0.35 multiplies
-          // by player speed so a fast pass produces a strong push.
-          const _impulse = _falloff * (60 + _pSpd * 0.35);
+          const _impulse = _falloff * (60 + sSpd * 0.35);
           const _inv = 1 / _d;
           e.wakeVel.x += _dx * _inv * _impulse * dt;
           e.wakeVel.y += _dy * _inv * _impulse * dt;
           e.wakeVel.z += _dz * _inv * _impulse * dt;
+        };
+        // Player.
+        if (typeof player !== 'undefined' && player && player.position
+            && player.shipState !== 'dead' && player.shipState !== 'spawning') {
+          const sSpd = (player.velocity ? player.velocity.length() : 0);
+          _applyOne(player.position.x, player.position.y, player.position.z, sSpd);
+        }
+        // Bots / remote ships.
+        if (game && game.entities) {
+          for (let bi = 0; bi < game.entities.length; bi++) {
+            const bot = game.entities[bi];
+            if (!bot || bot === player || !bot.alive || !bot.position) continue;
+            const sSpd = (bot.velocity)
+              ? Math.sqrt(bot.velocity.x*bot.velocity.x + bot.velocity.y*bot.velocity.y + bot.velocity.z*bot.velocity.z)
+              : 0;
+            _applyOne(bot.position.x, bot.position.y, bot.position.z, sSpd);
+          }
+        }
+        // Up to 12 in-flight projectiles (cap so a salvo can't blow the budget).
+        if (game && game.projectiles) {
+          let pCount = 0;
+          for (let pi = 0; pi < game.projectiles.length && pCount < 12; pi++) {
+            const proj = game.projectiles[pi];
+            if (!proj || !proj.alive || !proj.position) continue;
+            const sSpd = (proj.velocity)
+              ? Math.sqrt(proj.velocity.x*proj.velocity.x + proj.velocity.y*proj.velocity.y + proj.velocity.z*proj.velocity.z)
+              : 0;
+            _applyOne(proj.position.x, proj.position.y, proj.position.z, sSpd);
+            pCount++;
+          }
         }
         // Apply accumulated wake velocity with strong damping so the push
         // dissipates over ~1.5s (visible momentum, not eternal drift).
@@ -19783,12 +20123,25 @@ function updateDots(dt) {
     // Â±pulseAmp around its base. Multiplied by tNorm so the puffs
     // grow in alongside the parent cloud's growth phase.
     if (d._puffs && d._puffs.length) {
+      // (v14g) Wake-offset decay rate. Sprites and shader-puffs share the
+      // ~1 s settle behavior so a passing ship's tug fades cleanly. dt may
+      // not exist in this scope on the legacy code path; fall back to 1/60.
+      const _puffWakeDecay = Math.max(0, 1 - (typeof dt === 'number' ? dt : 1/60) * 2.0);
       for (const p of d._puffs) {
         const dt1 = _gameTime * p.driftSpeed + p.pulsePhase;
         const dx = Math.sin(dt1)              * p.driftRadius;
         const dy = Math.sin(dt1 * 0.73 + 1.3) * p.driftRadius * 0.6;
         const dz = Math.cos(dt1 * 0.91 + 2.7) * p.driftRadius;
-        p.mesh.position.set(p.basePos.x + dx, p.basePos.y + dy, p.basePos.z + dz);
+        if (p.wakeOff) {
+          p.mesh.position.set(
+            p.basePos.x + dx + p.wakeOff.x,
+            p.basePos.y + dy + p.wakeOff.y,
+            p.basePos.z + dz + p.wakeOff.z,
+          );
+          p.wakeOff.multiplyScalar(_puffWakeDecay);
+        } else {
+          p.mesh.position.set(p.basePos.x + dx, p.basePos.y + dy, p.basePos.z + dz);
+        }
         const pt = _gameTime * p.pulseSpeed + p.pulsePhase;
         const pulse = 1 + Math.sin(pt) * p.pulseAmp;
         // (v11d) Drop the tNorm multiplier on scale ; with pulseAmp = 0
@@ -19814,7 +20167,7 @@ function updateDots(dt) {
     // throb. fadeCurve carries the bloom-in alpha smoothly, so we don't
     // need to scale the anchor up during growth.
     if (d._cloudHalo) {
-      _tickCloudHalo(d._cloudHalo, _gameTime, fadeCurve);
+      _tickCloudHalo(d._cloudHalo, _gameTime, fadeCurve, dt);
     }
     // Hue cycle (greyscale shade pulse)
     if (d.hueCycleMaterial && d.hueCycleMaterial.uniforms && d.hueCycleMaterial.uniforms.uColor) {
@@ -20173,6 +20526,11 @@ function updateAmbientClouds(dt) {
       pulseSpeed: 0.10 + Math.random() * 0.20,
       pulseAmp: 0.0,
       pulsePhase: Math.random() * Math.PI * 2,
+      // (v14g) Per-puff wake offset, mirrors the halo sprites' wakeOff and
+      // GasCloud slot wakeOff. Pushed by ships / projectiles passing through
+      // the cloud volume in updateAmbientCloudWakes(), decayed back to zero
+      // in the per-frame tick below.
+      wakeOff: new THREE.Vector3(),
     });
   }
   // (v11d) Hybrid cloud halo. Drei-style billboard sprites distributed in
@@ -20797,6 +21155,10 @@ function commitLoadout(key) {
   player.vortexShieldLockout = false;
   player.trackerLocks = {};
   player.trackerLockedTarget = null;
+  // (v14g) Arc Wave slow timer for the player (mirrors bot.arcSlowTimer).
+  // While > 0, movement input scales to 0.3x and max speed clamps to 0.3x,
+  // matching what bots experience when hit by the player's Arc Wave.
+  player.arcSlowTimer = 0;
   player.enemyToneLocks = {};
   player.enemyToneLockMax = 0;
   player.blasterMode = 'close';
@@ -21038,6 +21400,12 @@ function playerTakeDamage(amount, attacker, projectile) {
     // before the damage / damage_shield sounds in playerTakeDamage proper, so
     // the ear reads the stun first and the damage as its consequence.
     try { playSound('stun'); } catch (e) {}
+    // (v14g) Apply the same arc-slow that bots get when the player hits
+    // them with Arc Wave: shock-decelerate to 30% velocity instantly and
+    // start a 2 s slow window during which input + max speed are clamped
+    // (see updatePlayerMovement for the per-frame application).
+    if (player.velocity) player.velocity.multiplyScalar(0.3);
+    player.arcSlowTimer = Math.max(player.arcSlowTimer || 0, 2.0);
     // Destroy player's Particle Wall
     for (let we = game.worldEffects.length - 1; we >= 0; we--) {
       const eff = game.worldEffects[we];
@@ -21320,6 +21688,7 @@ function respawnPlayer() {
   // Reset ability state
   player.trackerLocks = {};
   player.trackerLockedTarget = null;
+  player.arcSlowTimer = 0;
   player.enemyToneLocks = {};
   player.enemyToneLockMax = 0;
   player.blasterMode = 'close';
@@ -21504,6 +21873,15 @@ function updatePlayerMovement(dt) {
   // Puncture Afterburner speed boost
   if (player.afterburnerActive) moveDir.multiplyScalar(player.afterburnerSpeedMult);
 
+  // (v14g) Arc Wave slow: when the player has been hit by an Arc Wave,
+  // input thrust drops to 30% and speed cap also drops to 30% for the
+  // remainder of arcSlowTimer. Mirrors the bot version at line ~13289.
+  const arcSlowed = (player.arcSlowTimer || 0) > 0;
+  if (arcSlowed) {
+    moveDir.multiplyScalar(0.3);
+    player.arcSlowTimer -= dt;
+  }
+
   // (v6.9) Slayer Sword Block locks the ship into a heavy guarding stance:
   // 60% slower movement and a matching speed cap. The block is the
   // defensive trade ; mobility loss is what makes it a real choice vs
@@ -21535,6 +21913,9 @@ function updatePlayerMovement(dt) {
   const _ab = (LSS.MODE === 'race') ? LSS.RACE_DASH_SPEED : 600;
   let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? _ab : ch.flightSpeed);
   if (swordBlockActive) maxSpeed = ch.flightSpeed * 0.4;
+  // (v14g) Arc Wave slow caps top speed too, so the player can't outrun
+  // the slow window with afterburner / dash.
+  if (arcSlowed) maxSpeed *= 0.3;
   if (player.velocity.length() > maxSpeed) {
     player.velocity.normalize().multiplyScalar(maxSpeed);
   }
@@ -36857,6 +37238,7 @@ function gameLoop(timestamp) {
   // local `dt` (which factors in hitstop time-dilation) isn't computed
   // until later in the frame.
   if (typeof updateBCSWakes === 'function') updateBCSWakes(game.deltaTime || 0.016);
+  if (typeof updateAmbientCloudWakes === 'function') updateAmbientCloudWakes(game.deltaTime || 0.016);
 
   // (v12) Google Maps Photorealistic 3D Tiles per-frame update. The tile
   // renderer streams tiles in / disposes far ones based on camera
