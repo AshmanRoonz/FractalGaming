@@ -22458,6 +22458,8 @@ function executeAbility(slot, ability) {
           spawnDynamicLight(bot.position, 0xccddff, 2.5, 500, 0.3);
         }
       }
+      // (v14g) Sharp piercing zap so the laser beam reads sonically.
+      try { playSound('laser_shot'); } catch (_) {}
     }
     // PYRO: Firewall (path of fire laid forward from player, 5s duration)
     else if (ability.name === 'Firewall') {
@@ -22506,6 +22508,9 @@ function executeAbility(slot, ability) {
     }
     // PUNCTURE: Cluster Missile (impact + sustained explosions in area for 3s)
     else if (ability.name === 'Cluster Missile') {
+      // (v14g) Loud heavy-ordnance launch sound : sub kick + body
+      // whoosh + thrust roar so it's clearly audible above combat.
+      try { playSound('cluster_missile_fire'); } catch (_) {}
       const vel = forward.clone().multiplyScalar(1000);
       const proj = new Projectile(player.position.clone(), vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
       proj.smokeTrail = true;
@@ -22775,6 +22780,8 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Afterburner') {
       player.afterburnerActive = true;
       player.afterburnerSpeedMult = 1.5; // 50% speed boost
+      // (v14g) Sub-kick whoosh + rising engine-spool tone for the boost.
+      try { playSound('afterburner'); } catch (_) {}
     }
     // Gun Shield (BLASTER): activate with full HP, 10s duration
     else if (ability.name === 'Gun Shield') {
@@ -22811,6 +22818,8 @@ function executeAbility(slot, ability) {
     // (v14e) Any enemy ship the dash sweeps through is stunned for 1.5s.
     if (ability.name === 'Phase Dash') {
       player.phaseInvuln = true;
+      // (v14g) Phasing whoosh + sub doppler for the reality-warp.
+      try { playSound('phase_dash'); } catch (_) {}
       const speed = player.velocity ? player.velocity.length() : 0;
       if (speed > 5) {
         // Dash in movement direction
@@ -22885,6 +22894,10 @@ function executeAbility(slot, ability) {
     // back into the room. Orbs always end up inside the map regardless
     // of where the player aimed when triggering.
     else if (ability.name === 'Trip Wire') {
+      // (v14g) Louder, distinctive deployment sound : capacitor thunk
+      // + sub thump + electric snap. Reads as 5 orbs going LIVE rather
+      // than the generic ability chime.
+      try { playSound('trip_wire_deploy'); } catch (_) {}
       const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
       const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
       // [rightOffset, upOffset] per orb. Center + 4 arms = +.
@@ -22949,8 +22962,39 @@ function executeAbility(slot, ability) {
       } catch (_) {}
     }
     // PUNCTURE: Tether Trap (slow + root enemies for 4s)
+    // (v14g) Wall-bend deployment, copied from Trip Wire : raycast from
+    // the player toward the deploy point ; if a wall is in the way,
+    // bend the remaining distance off the wall normal so the trap lands
+    // INSIDE the map instead of inside the wall. Without this you could
+    // plant the tether through a wall where nothing could ever trip it.
     else if (ability.name === 'Tether Trap') {
-      const trapPos = player.position.clone().add(forward.clone().multiplyScalar(300));
+      const TETHER_TARGET_DIST = 300;
+      const target = forward.clone().multiplyScalar(TETHER_TARGET_DIST);
+      const distTo = target.length();
+      const dirTo  = target.clone().normalize();
+      let trapPos;
+      const wallDist = (typeof raycastLevel === 'function')
+                       ? raycastLevel(player.position, dirTo, distTo)
+                       : Infinity;
+      if (wallDist < distTo) {
+        const hitPoint = player.position.clone().addScaledVector(dirTo, Math.max(0, wallDist - 6));
+        const remaining = distTo - wallDist;
+        const normal = (typeof getWallNormal === 'function')
+                       ? getWallNormal(hitPoint)
+                       : dirTo.clone().multiplyScalar(-1);
+        const vn = dirTo.dot(normal);
+        const reflected = dirTo.clone().addScaledVector(normal, -2 * vn).normalize();
+        const secondDist = (typeof raycastLevel === 'function')
+                           ? Math.min(remaining, raycastLevel(hitPoint, reflected, remaining + 4) - 6)
+                           : remaining;
+        const useDist = Math.max(0, secondDist);
+        trapPos = hitPoint.clone().addScaledVector(reflected, useDist);
+      } else {
+        trapPos = player.position.clone().add(target);
+      }
+      // (v14g) Loud distinctive deployment sound (sub kick + capacitor
+      // body + radial pulse) so the trap going live is clearly audible.
+      try { playSound('tether_trap_deploy'); } catch (_) {}
       spawnTetherTrap(trapPos, 'player', player.team, net.myPeerId, ++net.effectIdCounter, true);
     }
     // TRACKER: Sonar Lock
@@ -22984,6 +23028,8 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Mode Switch') {
       player.blasterSwitchTimer = 1.0; // 1s delay before mode activates
       player.blasterPendingMode = player.blasterMode === 'close' ? 'long' : 'close';
+      // (v14g) Two mechanical clicks confirming the cannon's config flip.
+      try { playSound('mode_switch'); } catch (_) {}
     }
   }
 
@@ -23079,6 +23125,9 @@ function firePowerShot() {
     }
     triggerScreenShake(3);
   }
+  // (v14g) Heavy cannon-style boom on release ; pairs with the existing
+  // powershot_charge hum so the player feels the build-up + release.
+  try { playSound('power_shot_release'); } catch (_) {}
   player.powerShotCharging = false;
   player.powerShotCharge = 0;
   player.abilityCooldowns[0] = 8; // Power Shot is slot 0 (offensive)
@@ -23099,9 +23148,13 @@ function activateCore() {
   if (coreName === 'Laser Core') {
     // Initial burst visual (Vortex purple identity)
     spawnTracer(player.position, player.position.clone().add(forward.clone().multiplyScalar(3000)), LSS.CLASS_COLORS.VORTEX);
+    // (v14g) Single sustained 4s beam sound. Plays once at activation
+    // and holds for the entire core duration ; no looping / pulsing.
+    try { playSound('laser_core_beam'); } catch (_) {}
   }
   // PYRO: Flame Core (massive AoE incendiary, 4500 dmg instant around player; TF2)
   else if (coreName === 'Flame Core') {
+    try { playSound('flame_core_blast'); } catch (_) {}
     const radius = 1200;
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
@@ -23154,6 +23207,7 @@ function activateCore() {
   else if (coreName === 'Barrage Core') {
     // Speed boost is handled in updateAbilities; initial rocket volley
     player.velocity.add(forward.clone().multiplyScalar(600));
+    try { playSound('barrage_core_thrust'); } catch (_) {}
   }
   // SLAYER: Sword Core (empowered melee + rapid arc waves over 4s)
   else if (coreName === 'Sword Core') {
@@ -23167,9 +23221,11 @@ function activateCore() {
       }
     }
     spawnExplosion(player.position, 40);
+    try { playSound('sword_core_swing'); } catch (_) {}
   }
   // TRACKER: Salvo Core (remote-guided missile volley; all missiles steer toward crosshair in real time)
   else if (coreName === 'Salvo Core') {
+    try { playSound('salvo_core_burst'); } catch (_) {}
     // Fire initial burst; more spawn per tick in updateAbilities
     for (let m = 0; m < 8; m++) {
       const spread = new THREE.Vector3((Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3, 0);
@@ -23187,6 +23243,8 @@ function activateCore() {
   }
   // SYPHON: Upgrade Core (permanent tier upgrade, 3 tiers; TF2-style choices auto-applied)
   else if (coreName === 'Upgrade Core') {
+    // (v14g) Three rising chimes + downbeat = "tier acquired."
+    try { playSound('upgrade_core'); } catch (_) {}
     player.syphonTier = Math.min(3, player.syphonTier + 1);
     switch (player.syphonTier) {
       case 1: // Tier 1: Arc Rounds (+50% vs shields/walls/Gun Shield, +10 ammo)
@@ -24348,6 +24406,9 @@ function updateAbilities(dt) {
         const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
         beam.material.uniforms.uIntensity.value = breath;
       }
+      // (v14g) Continuous beam audio is the single sustained 4s
+      // 'laser_core_beam' triggered once at core activation ; no
+      // per-frame loop here so it doesn't read as an alarm pulse.
       // Stack 6 tracer calls (boosted from 5) with widthScale > 1 so the
       // converging streaks read as visibly thick funnels feeding the beam,
       // not as hairline lines floating beside it. spawnTracer already
@@ -40804,6 +40865,247 @@ function playSound(type) {
       [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.18, 0,
       { attack: 0.002, hold: 0, decay: 0.18 });
     playNoiseBurst(rr(0.10, 0.25), rr(0.08, 0.25), now, ri(2200, 0.25), rr(2.0, 0.25));
+  }
+  // (v14g) Vortex Laser Shot : sharp piercing zap. Descending high-band
+  // sweep + crackling noise + sub thump = "PEW" with weight.
+  else if (type === 'laser_shot') {
+    const p = rr(1, 0.06);
+    triChord([ri(1320*p,0), ri(1980*p,0), ri(2640*p,0)], 'sawtooth',
+      rr(0.30, 0.10), 0.18,
+      [ri(330*p,0), ri(495*p,0), ri(660*p,0)], 0.16, 0,
+      { attack: 0.001, hold: 0, decay: 0.16 });
+    playNoiseBurst(rr(0.08, 0.20), rr(0.20, 0.20), now, ri(3200, 0.20), rr(3.5, 0.25));
+    playNoiseBurst(rr(0.06, 0.20), rr(0.10, 0.25), now, ri(75, 0.25), rr(0.6, 0.25));
+    triChord([ri(220*p,0)], 'sine', rr(0.10, 0.20), 0.22, null, null, 0,
+      { attack: 0.001, hold: 0.02, decay: 0.20 });
+  }
+  // (v14g) Vortex Laser Core sustained beam. ONE long sound that holds
+  // for the full 4s core duration ; no looping, no alarm-pulsing. Sub
+  // bass drone + mid harmonic body + high shimmer band, all with a
+  // quick attack into a long sustained hold and a slow tail decay so
+  // the beam reads as a continuous energy stream from start to finish.
+  else if (type === 'laser_core_beam') {
+    duckAmbient(0.25);
+    const p = rr(1, 0.04);
+    // Sub-bass drone (the body of the beam)
+    triChord([ri(55*p,0), ri(82*p,0)], 'sawtooth',
+      rr(0.32, 0.08), 4.0,
+      null, null, 0,
+      { attack: rr(0.12, 0.15), hold: 3.40, decay: 0.45 });
+    // Mid harmonic (gives the beam its "energy" character)
+    triChord([ri(165*p,0), ri(247*p,0), ri(330*p,0)], 'sawtooth',
+      rr(0.24, 0.08), 4.0,
+      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 3.95, 0,
+      { attack: rr(0.10, 0.15), hold: 3.45, decay: 0.40 });
+    // Bright shimmer (high-band noise, sustained)
+    playNoiseBurst(3.95, rr(0.10, 0.10), now + 0.05, ri(2400, 0.15), rr(2.8, 0.20));
+    // Sub air-rumble undercurrent
+    playNoiseBurst(3.95, rr(0.18, 0.10), now + 0.02, ri(110, 0.15), rr(0.55, 0.20));
+  }
+  // (v14g) Blaster Power Shot release : the meaty BOOM after the charge
+  // hum. Two-stage : ignition crack into a cannon-style sub thump.
+  else if (type === 'power_shot_release') {
+    duckAmbient(0.30);
+    const p = rr(1, 0.06);
+    // Ignition crack
+    playNoiseBurst(rr(0.06, 0.20), rr(0.30, 0.15), now, ri(2400, 0.20), rr(3.0, 0.25));
+    triChord([ri(330*p,0), ri(495*p,0)], 'sawtooth',
+      rr(0.25, 0.12), 0.18,
+      [ri(110*p,0), ri(165*p,0)], 0.14, 0,
+      { attack: 0.001, hold: 0, decay: 0.14 });
+    // Cannon body thump
+    playNoiseBurst(rr(0.40, 0.15), rr(0.45, 0.10), now + 0.02, ri(60, 0.25), rr(0.4, 0.20));
+    triChord([ri(45*p,0), ri(67*p,0), ri(90*p,0)], 'sine',
+      rr(0.45, 0.10), 0.45,
+      [ri(35*p,0), ri(55*p,0), ri(75*p,0)], 0.40, 0.04,
+      { attack: 0.001, hold: rr(0.05, 0.2), decay: rr(0.40, 0.15) });
+  }
+  // (v14g) Blaster Mode Switch : two clean mechanical clicks indicating
+  // a config change between close- and long-range modes.
+  else if (type === 'mode_switch') {
+    const p = rr(1, 0.06);
+    // First click
+    triChord([ri(880*p,0), ri(1320*p,0)], 'square',
+      rr(0.10, 0.20), 0.04, null, null, 0,
+      { attack: 0.001, hold: 0, decay: 0.04 });
+    playNoiseBurst(rr(0.03, 0.25), rr(0.10, 0.25), now, ri(2400, 0.20), rr(2.5, 0.25));
+    // Second click 0.10s later, lower pitch confirming new state
+    triChord([ri(660*p,0), ri(990*p,0)], 'square',
+      rr(0.10, 0.20), 0.05, null, null, 0.10,
+      { attack: 0.001, hold: 0, decay: 0.05 });
+    playNoiseBurst(rr(0.03, 0.25), rr(0.08, 0.25), now + 0.10, ri(1800, 0.20), rr(2.0, 0.25));
+  }
+  // (v14g) Slayer Phase Dash : reality-warp whoosh as the ship phases
+  // through space. Rising-then-falling phasing tone + a sub doppler.
+  else if (type === 'phase_dash') {
+    const p = rr(1, 0.08);
+    // Phasing whoosh
+    triChord([ri(220*p,0), ri(440*p,0)], 'sine',
+      rr(0.25, 0.10), 0.30,
+      [ri(660*p,0), ri(330*p,0)], 0.25, 0,
+      { attack: 0.005, hold: 0, decay: 0.25 });
+    playNoiseBurst(rr(0.20, 0.20), rr(0.20, 0.20), now, ri(1600, 0.30), rr(1.0, 0.30));
+    // Sub doppler tail (downsweep)
+    triChord([ri(120*p,0), ri(180*p,0)], 'triangle',
+      rr(0.18, 0.15), 0.35,
+      [ri(60*p,0), ri(90*p,0)], 0.30, 0.04,
+      { attack: 0.001, hold: 0, decay: 0.30 });
+  }
+  // (v14g) Sword Core activation : a rapid descending chord and metallic
+  // ring like a sword being unsheathed and ringing.
+  else if (type === 'sword_core_swing') {
+    const p = rr(1, 0.05);
+    triChord([ri(880*p,0), ri(1100*p,0), ri(1320*p,0)], 'sawtooth',
+      rr(0.30, 0.10), 0.30,
+      [ri(220*p,0), ri(275*p,0), ri(330*p,0)], 0.25, 0,
+      { attack: 0.001, hold: 0, decay: 0.25 });
+    playNoiseBurst(rr(0.10, 0.20), rr(0.18, 0.20), now, ri(3200, 0.15), rr(2.8, 0.20));
+    // Metallic ring tail
+    triChord([ri(440*p,0), ri(660*p,0), ri(880*p,0)], 'triangle',
+      rr(0.20, 0.10), 0.55,
+      null, null, 0.10,
+      { attack: 0.001, hold: 0, decay: 0.50 });
+  }
+  // (v14g) Flame Core activation : massive fire whoosh ignition.
+  else if (type === 'flame_core_blast') {
+    duckAmbient(0.40);
+    const p = rr(1, 0.05);
+    // Ignition front (sub + mid + bright)
+    playNoiseBurst(rr(0.50, 0.10), rr(0.45, 0.10), now, ri(110, 0.20), rr(0.5, 0.20));
+    playNoiseBurst(rr(0.45, 0.12), rr(0.30, 0.15), now + 0.04, ri(800, 0.20), rr(1.4, 0.20));
+    playNoiseBurst(rr(0.35, 0.15), rr(0.18, 0.20), now + 0.10, ri(2800, 0.20), rr(2.0, 0.25));
+    // Rising whoosh sweep
+    triChord([ri(55*p,0), ri(82*p,0)], 'sawtooth',
+      rr(0.30, 0.10), 0.55,
+      [ri(220*p,0), ri(330*p,0)], 0.50, 0,
+      { attack: rr(0.06, 0.2), hold: 0, decay: 0.50 });
+  }
+  // (v14g) Salvo Core activation : massive missile launch volley.
+  else if (type === 'salvo_core_burst') {
+    duckAmbient(0.30);
+    const p = rr(1, 0.06);
+    // Stacked launches over 0.3s
+    for (let i = 0; i < 4; i++) {
+      const off = i * 0.06;
+      const launchP = p * (0.95 + Math.random() * 0.10);
+      triChord([ri(50*launchP,0), ri(63*launchP,0)], 'sawtooth',
+        rr(0.20, 0.15), 0.25,
+        [ri(150*launchP,0), ri(190*launchP,0)], 0.22, off,
+        { attack: rr(0.008, 0.3), hold: rr(0.05, 0.3), decay: 0.22 });
+      playNoiseBurst(rr(0.18, 0.20), rr(0.10, 0.25), now + off, ri(700, 0.25), rr(0.8, 0.25));
+    }
+  }
+  // (v14g) Puncture Tether Trap deployment : magnetic-coil charging
+  // thunk + radial pulse, loud enough to feel deployed (the prior
+  // 'ability' chime was easy to miss in combat). Sub kick + capacitor
+  // body + bright sweep tail.
+  else if (type === 'tether_trap_deploy') {
+    duckAmbient(0.30);
+    const p = rr(1, 0.06);
+    // Sub kick (magnetic coil engaging)
+    playNoiseBurst(rr(0.30, 0.15), rr(0.40, 0.10), now, ri(70, 0.20), rr(0.45, 0.20));
+    // Capacitor body (the trap going live)
+    triChord([ri(110*p,0), ri(165*p,0), ri(247*p,0)], 'sawtooth',
+      rr(0.40, 0.10), 0.35,
+      [ri(220*p,0), ri(330*p,0), ri(495*p,0)], 0.32, 0,
+      { attack: rr(0.02, 0.2), hold: rr(0.05, 0.2), decay: 0.30 });
+    // Bright sweep tail (radial pulse)
+    triChord([ri(440*p,0), ri(660*p,0), ri(880*p,0)], 'sine',
+      rr(0.25, 0.10), 0.25,
+      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.22, 0.10,
+      { attack: 0.001, hold: 0.04, decay: 0.20 });
+    // Mid noise wash for body
+    playNoiseBurst(rr(0.18, 0.15), rr(0.18, 0.15), now + 0.04, ri(900, 0.20), rr(1.6, 0.25));
+  }
+  // (v14g) Puncture Cluster Missile launch : the missile leaves the
+  // tube hard. Sub thrust kick + saw whoosh + thrust roar tail so
+  // there's no doubt a heavy ordnance just fired.
+  else if (type === 'cluster_missile_fire') {
+    duckAmbient(0.32);
+    const p = rr(1, 0.06);
+    // Launch kick (sub thump)
+    playNoiseBurst(rr(0.30, 0.12), rr(0.45, 0.10), now, ri(60, 0.20), rr(0.40, 0.20));
+    // Body whoosh (sawtooth swell)
+    triChord([ri(82*p,0), ri(110*p,0), ri(165*p,0)], 'sawtooth',
+      rr(0.40, 0.10), 0.40,
+      [ri(220*p,0), ri(330*p,0), ri(440*p,0)], 0.35, 0,
+      { attack: rr(0.01, 0.2), hold: rr(0.05, 0.2), decay: 0.35 });
+    // Thrust roar tail (sustained mid noise)
+    playNoiseBurst(rr(0.40, 0.10), rr(0.20, 0.15), now + 0.05, ri(550, 0.20), rr(1.0, 0.25));
+    // High air-cut snap on top
+    playNoiseBurst(rr(0.10, 0.20), rr(0.20, 0.20), now, ri(2400, 0.20), rr(2.4, 0.25));
+  }
+  // (v14g) Vortex Trip Wire (laser trap) deployment : a meaty
+  // capacitor-charge thunk + electric snap so the 5 orbs read as a
+  // dangerous trap going live. Louder than the generic 'ability' chime.
+  else if (type === 'trip_wire_deploy') {
+    duckAmbient(0.30);
+    const p = rr(1, 0.06);
+    // Capacitor charge thunk (low-mid swell)
+    triChord([ri(110*p,0), ri(165*p,0), ri(220*p,0)], 'sawtooth',
+      rr(0.40, 0.10), 0.30,
+      [ri(330*p,0), ri(495*p,0), ri(660*p,0)], 0.28, 0,
+      { attack: rr(0.02, 0.2), hold: rr(0.06, 0.2), decay: 0.25 });
+    // Sub thump for weight
+    playNoiseBurst(rr(0.25, 0.12), rr(0.35, 0.12), now, ri(75, 0.20), rr(0.50, 0.20));
+    // Electric snap on top so orbs read as charged / live
+    playNoiseBurst(rr(0.10, 0.20), rr(0.30, 0.15), now + 0.04, ri(2800, 0.20), rr(3.0, 0.25));
+    // High shimmer tail
+    triChord([ri(660*p,0), ri(990*p,0), ri(1320*p,0)], 'sine',
+      rr(0.18, 0.10), 0.30,
+      null, null, 0.08,
+      { attack: 0.001, hold: 0.04, decay: 0.26 });
+  }
+  // (v14g) Puncture Afterburner : speed-boost ignition. Quick whoosh
+  // with a sub thrust kick + rising mid-tone for the engine spool-up.
+  else if (type === 'afterburner') {
+    const p = rr(1, 0.06);
+    // Sub kick
+    playNoiseBurst(rr(0.30, 0.15), rr(0.25, 0.15), now, ri(85, 0.20), rr(0.55, 0.20));
+    // Whoosh body
+    playNoiseBurst(rr(0.40, 0.12), rr(0.18, 0.20), now + 0.02, ri(900, 0.20), rr(1.3, 0.25));
+    // Rising engine-spool tone
+    triChord([ri(82*p,0), ri(110*p,0), ri(165*p,0)], 'sawtooth',
+      rr(0.22, 0.10), 0.40,
+      [ri(220*p,0), ri(290*p,0), ri(440*p,0)], 0.36, 0,
+      { attack: rr(0.04, 0.2), hold: 0, decay: 0.36 });
+  }
+  // (v14g) Syphon Upgrade Core : 3-step permanent power-up sound.
+  // Three rising chimes + a confident downbeat = "tier acquired."
+  else if (type === 'upgrade_core') {
+    duckAmbient(0.25);
+    const p = rr(1, 0.04);
+    // Three rising chimes
+    triChord([ri(440*p,0), ri(660*p,0)], 'sine',
+      rr(0.18, 0.12), 0.10, null, null, 0.00,
+      { attack: 0.001, hold: 0.01, decay: 0.10 });
+    triChord([ri(587*p,0), ri(880*p,0)], 'sine',
+      rr(0.18, 0.12), 0.10, null, null, 0.10,
+      { attack: 0.001, hold: 0.01, decay: 0.10 });
+    triChord([ri(784*p,0), ri(1100*p,0)], 'sine',
+      rr(0.20, 0.12), 0.12, null, null, 0.20,
+      { attack: 0.001, hold: 0.01, decay: 0.12 });
+    // Confident downbeat (tier locked in)
+    triChord([ri(165*p,0), ri(220*p,0), ri(330*p,0)], 'triangle',
+      rr(0.30, 0.10), 0.45,
+      [ri(110*p,0), ri(165*p,0), ri(247*p,0)], 0.40, 0.32,
+      { attack: 0.005, hold: rr(0.08, 0.2), decay: 0.40 });
+    // Brief noise sparkle on the downbeat for "system upgraded" sheen
+    playNoiseBurst(rr(0.12, 0.20), rr(0.10, 0.20), now + 0.32, ri(2400, 0.20), rr(2.0, 0.25));
+  }
+  // (v14g) Barrage Core activation : speed-boost ignition + rocket
+  // ignition layer.
+  else if (type === 'barrage_core_thrust') {
+    duckAmbient(0.30);
+    const p = rr(1, 0.06);
+    // Thrust roar (sustained noise bed)
+    playNoiseBurst(rr(0.55, 0.10), rr(0.35, 0.10), now, ri(140, 0.20), rr(0.6, 0.20));
+    playNoiseBurst(rr(0.50, 0.10), rr(0.18, 0.15), now + 0.02, ri(1100, 0.20), rr(1.4, 0.25));
+    // Rising power tone
+    triChord([ri(82*p,0), ri(110*p,0), ri(165*p,0)], 'sawtooth',
+      rr(0.30, 0.10), 0.50,
+      [ri(220*p,0), ri(290*p,0), ri(440*p,0)], 0.45, 0,
+      { attack: rr(0.05, 0.2), hold: 0, decay: 0.45 });
   }
   else if (type === 'rearm_reset') {
     // Syphon Rearm zeroes all ability cooldowns ; sounds like a reactor
