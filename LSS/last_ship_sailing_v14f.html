@@ -1473,25 +1473,21 @@ body.vr-active .hit-marker {
   50%      { opacity: 1; }
 }
 
-/* (v11b) Slayer Sword Block screen-edge indicator. Inset radial-gradient
-   vignette + jagged glow mask layered around the viewport edges. Only
-   shown while the ability is held. Mask pushes the effect to the outer
-   ~28% of the screen so the center stays clear (block-mode is a
-   defensive stance, the pilot still needs to see). Tinted bright green
-   to match the dome's glow, so the inside-the-cockpit signal reads as
-   "energy field engaged" rather than "ominous suppression". */
+/* (v14f) Slayer Sword Block screen-edge indicator. Same hex-grid + edge
+   wash recipe as the other three shields, tinted bright green. Replaces
+   the v11b conic-stripe vignette so all four shields read as one
+   coherent visual family from inside the cockpit. */
 #ov-sword-block {
   position: fixed; inset: 0; z-index: 60; pointer-events: none;
   opacity: 0; transition: opacity 0.18s ease-out;
-  background:
-    radial-gradient(ellipse at center, transparent 75%, rgba(40,200,80,0.45) 100%),
-    repeating-conic-gradient(from 0deg at 50% 50%,
-      rgba(40,200,80,0) 0deg, rgba(40,200,80,0) 6deg,
-      rgba(80,255,120,0.35) 7deg, rgba(40,200,80,0) 8deg,
-      rgba(40,200,80,0) 14deg, rgba(80,255,120,0.25) 15deg, rgba(40,200,80,0) 16deg);
-  mask-image: radial-gradient(ellipse at center, transparent 72%, black 100%);
-  -webkit-mask-image: radial-gradient(ellipse at center, transparent 72%, black 100%);
-  animation: swordBlockFlicker 0.35s ease-in-out infinite alternate;
+  background-repeat: no-repeat, repeat;
+  background-size: 100% 100%, 64px 56px;
+  background-image:
+    radial-gradient(ellipse at center, transparent 70%, rgba(60,220,100,0.55) 100%),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='56' viewBox='0 0 64 56'><polygon points='32,2 60,16.5 60,39.5 32,54 4,39.5 4,16.5' fill='none' stroke='%2390ffaa' stroke-width='1.4' opacity='0.55'/></svg>");
+  mask-image: radial-gradient(ellipse at center, transparent 65%, black 100%);
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 65%, black 100%);
+  animation: shieldHexFlicker 0.5s ease-in-out infinite alternate;
 }
 #ov-sword-block.show { opacity: 1; }
 @keyframes swordBlockFlicker {
@@ -4168,6 +4164,10 @@ class NetworkPlayer {
       if (typeof _setShipShieldEmissive === 'function') {
         _setShipShieldEmissive(this.mesh, 0xff3322, 1.1);
       }
+      // (v14f) Red fire particles around the peer's hull while shield is up.
+      if (typeof _spawnThermalShieldFire === 'function') {
+        _spawnThermalShieldFire(this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
+      }
     } else {
       if (this._thermalShieldMesh) {
         if (typeof _clearShipShieldEmissive === 'function') _clearShipShieldEmissive(this.mesh);
@@ -4216,60 +4216,32 @@ class NetworkPlayer {
       }
     }
 
-    // ---- SLAYER: Sword Block aura (peer view) ----
-    // (v11b) Mirrors the local pilot's dome from updateShieldVisuals so
-    // peers see the dark sphere when an enemy / teammate Slayer holds
-    // block. Full sphere (not hemisphere) since Sword Block is a 360Â°
-    // damage reduction. Dark hex hologram + equator torus + dark rim
-    // particles via _emitVortexShieldArcs with the _darkPalette flag.
+    // ---- SLAYER: Sword Block aura (peer view : green plasma hull-hug) ----
+    // (v14f) Same recipe : clone this peer's ship mesh, plasma_green,
+    // body emissive boost. Damage absorption (70% / 85% reduction) is
+    // handled in playerTakeDamage on the target peer's machine ; this is
+    // visual only.
     if (this.loadoutKey === 'SLAYER' && active) {
-      const sHull = (this.chassis && this.chassis.hullLength) ? this.chassis.hullLength : 100;
-      const sbR = sHull * 1.5;
-      if (!this._swordBlockMesh) {
-        const geo = new THREE.SphereGeometry(sbR, 36, 24);
-        // (v11b retune) Same flip as the local pilot path: back to the
-        // additive hex hologram, bright green, glowing rather than dark.
-        const mat = _makeHexHologramMaterial(LSS.CLASS_COLORS.SLAYER);
-        this._swordBlockMesh = new THREE.Mesh(geo, mat);
-        this._swordBlockMesh.renderOrder = 1;
-        scene.add(this._swordBlockMesh);
-        const ringGeo = new THREE.TorusGeometry(sbR * 0.99, 2.2, 8, 64);
-        const ringMat = new THREE.MeshBasicMaterial({
-          color: 0x77ff99, transparent: true, opacity: 0.32,
-          side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
-        });
-        this._swordBlockRing = new THREE.Mesh(ringGeo, ringMat);
-        this._swordBlockRing.renderOrder = 1;
-        scene.add(this._swordBlockRing);
+      if (!this._swordBlockMesh && this.mesh && typeof _makeHullHugShield === 'function') {
+        const m = _makeHullHugShield(this, 'plasma_green');
+        if (m) {
+          this._swordBlockMesh = m;
+          this.mesh.add(m);
+        }
       }
-      this._swordBlockMesh.position.copy(this.position);
-      this._swordBlockMesh.visible = true;
-      if (this._swordBlockMesh.material && this._swordBlockMesh.material.uniforms) {
-        const u = this._swordBlockMesh.material.uniforms;
-        if (u.time) u.time.value = t;
-        if (u.uTime) u.uTime.value = t;
-        if (u.uHp) u.uHp.value = 1.0;
-        if (u.uColor) u.uColor.value.setHex(LSS.CLASS_COLORS.SLAYER);
-        // (v11b) Match local pilot's lower opacity so the peer-side
-        // dome doesn't read as a heavier energy field than what the
-        // caster sees from inside.
-        if (u.uAlphaMul) u.uAlphaMul.value = 0.55;
+      if (this._swordBlockMesh && this._swordBlockMesh.userData && this._swordBlockMesh.userData._shieldMat) {
+        const u = this._swordBlockMesh.userData._shieldMat.uniforms;
+        if (u && u.time)  u.time.value  = t;
+        if (u && u.uTime) u.uTime.value = t;
+        if (u && u.uIntensity) u.uIntensity.value = 1.2;
       }
-      if (this._swordBlockRing) {
-        const fwd = getForward();
-        this._swordBlockRing.position.copy(this.position);
-        this._swordBlockRing.lookAt(this._shieldLook.copy(this.position).add(fwd));
-        this._swordBlockRing.visible = true;
-      }
-      if (typeof _emitVortexShieldArcs === 'function') {
-        const fwdRim = getForward();
-        _emitVortexShieldArcs(this.position, sbR, fwdRim, (typeof dt === 'number' ? dt : 1/60), 1.0, null, 0.33);
+      if (typeof _setShipShieldEmissive === 'function') {
+        _setShipShieldEmissive(this.mesh, 0x33ff66, 1.1);
       }
     } else {
       if (this._swordBlockMesh) {
-        if (this._swordBlockMesh.parent) scene.remove(this._swordBlockMesh);
-        if (this._swordBlockMesh.geometry) this._swordBlockMesh.geometry.dispose();
-        if (this._swordBlockMesh.material) this._swordBlockMesh.material.dispose();
+        if (typeof _clearShipShieldEmissive === 'function') _clearShipShieldEmissive(this.mesh);
+        if (typeof _disposeShieldClone === 'function') _disposeShieldClone(this._swordBlockMesh);
         this._swordBlockMesh = null;
       }
       if (this._swordBlockRing) {
@@ -6554,6 +6526,23 @@ const EFFECT_PRESETS = {
       { pattern: 1, scale: 0.7, timeRate: 1.45, hue: 0.0,   alpha: 1.15, blend: 0, sat: 1.00 },
       { pattern: 5, scale: 1.5, timeRate: 2.65, hue: 0.02,  alpha: 0.95, blend: 1, sat: 0.92 },
       { pattern: 2, scale: 0.4, timeRate: 2.10, hue: 0.0,   alpha: 0.45, blend: 6, sat: 0.85 },
+    ],
+  },
+  // (v14f) Green plasma variant for the Slayer Sword Block aura. Same
+  // recipe as plasma_purple/plasma_cyan/plasma_red, retuned into the
+  // saturated bright-green range (matches LSS.CLASS_COLORS.SLAYER).
+  plasma_green: {
+    name: 'Plasma (Green)',
+    baseColor: '#33ff66',
+    fresnel: 0.18,
+    brightness: 2.4,
+    displaceAmount: 0.09,
+    displaceFreq:   2.5,
+    softEdge:       0.24,
+    layers: [
+      { pattern: 1, scale: 0.7, timeRate: 1.25, hue: 0.0,   alpha: 1.18, blend: 0, sat: 0.95 },
+      { pattern: 5, scale: 1.5, timeRate: 2.45, hue: 0.04,  alpha: 0.95, blend: 1, sat: 0.85 },
+      { pattern: 2, scale: 0.4, timeRate: 1.95, hue: 0.0,   alpha: 0.45, blend: 6, sat: 0.78 },
     ],
   },
   // (v14f) Cyan flame variant for the Blaster Gun Shield. Same recipe as
@@ -21027,65 +21016,49 @@ function playerTakeDamage(amount, attacker, projectile) {
   // the attacker's CURRENT position. Homing missiles can curve around so the
   // bot may have moved by the time the missile lands ; what matters is which
   // direction the missile itself came from.
-  if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Gun Shield') {
+  // (v14f) FULL DAMAGE IMMUNITY while any of the three energy shields
+  // is active. Each shield drains via its own mechanic (Gun Shield's
+  // 10s timer, Thermal Shield's HP / drain rate, Vortex Shield's energy
+  // pool), not via incoming damage absorption ; while up, nothing gets
+  // through. The shield-impact visual flashes still play so the shooter
+  // gets feedback that their shot connected.
+  if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Gun Shield' && player.gunShieldHP > 0) {
     const incomingPos = (projectile && projectile.position) ? projectile.position
                       : (attacker && attacker.position)     ? attacker.position
-                      : null;
-    if (incomingPos) {
-      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      const toIncoming = new THREE.Vector3().subVectors(incomingPos, player.position).normalize();
-      if (forward.dot(toIncoming) > 0.3 && player.gunShieldHP > 0) {
-        const absorbed = Math.min(amount, player.gunShieldHP);
-        player.gunShieldHP -= absorbed;
-        amount -= absorbed;
-        // (v11) Localized shield-impact glow: light up the patch where
-        // the projectile hit. Anchor the glow at incomingPos (the
-        // projectile's last-known position, very close to the dome).
-        if (typeof flashFXMaterialHit === 'function' && player.gunShieldMesh) {
-          flashFXMaterialHit(player.gunShieldMesh.material, incomingPos);
-        }
-        if (player.gunShieldHP <= 0) {
-          // Shield destroyed: auto-deactivate
-          player.abilityActive[1] = false;
-          player.abilityCooldowns[1] = 15; // cooldown on destruction
-        }
-        if (amount <= 0) return;
-      }
-    }
-  }
-  // Thermal Shield (PYRO): absorbs damage with power pool; burns nearby enemies (handled in tick).
-  // No fixed cooldown on depletion; the 10s recharge to max IS the cooldown.
-  if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Thermal Shield') {
-    if (player.thermalShieldHP > 0) {
-      const absorbed = Math.min(amount, player.thermalShieldHP);
-      player.thermalShieldHP -= absorbed;
-      amount -= absorbed;
-      // (v11) Localized impact glow on the thermal shield dome.
-      if (typeof flashFXMaterialHit === 'function' && player.thermalShieldMesh) {
-        const _hitPos = (projectile && projectile.position) ? projectile.position
-                      : (attacker && attacker.position)     ? attacker.position
                       : player.position;
-        flashFXMaterialHit(player.thermalShieldMesh.material, _hitPos);
-      }
-      if (player.thermalShieldHP <= 0) {
-        // Power depleted: auto-deactivate; recharge begins automatically.
-        player.thermalShieldHP = 0;
-        player.abilityActive[1] = false;
-        player.abilityTimers[1] = 0;
-      }
-      if (amount <= 0) return;
+    if (typeof flashFXMaterialHit === 'function' && player.gunShieldMesh && player.gunShieldMesh.userData && player.gunShieldMesh.userData._shieldMat) {
+      flashFXMaterialHit(player.gunShieldMesh.userData._shieldMat, incomingPos);
     }
+    // (v14f) HP drains from damage so the shield can break under sustained
+    // fire BEFORE the 10s duration timer expires. Damage is still 100%
+    // blocked while HP > 0 ; the shield doesn't leak partial damage when
+    // HP would underflow on a single big hit ; it just cracks open.
+    player.gunShieldHP -= amount;
+    if (player.gunShieldHP <= 0) {
+      player.gunShieldHP = 0;
+      player.gunShieldTimer = 0;
+      player.abilityActive[1] = false;
+      player.abilityCooldowns[1] = 15;
+    }
+    return; // fully blocked
   }
-  // Vortex Shield (VORTEX): absorbs projectile damage, stores it for burst release
+  if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Thermal Shield' && player.thermalShieldHP > 0) {
+    const _hitPos = (projectile && projectile.position) ? projectile.position
+                  : (attacker && attacker.position)     ? attacker.position
+                  : player.position;
+    if (typeof flashFXMaterialHit === 'function' && player.thermalShieldMesh && player.thermalShieldMesh.userData && player.thermalShieldMesh.userData._shieldMat) {
+      flashFXMaterialHit(player.thermalShieldMesh.userData._shieldMat, _hitPos);
+    }
+    return; // fully blocked
+  }
   if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Vortex Shield') {
-    const stored = Math.min(amount, 500 - (player.vortexStored || 0));
-    player.vortexStored = (player.vortexStored || 0) + stored;
-    amount -= stored;
-    // (v11) Schwoop sound on absorb. Skip if nothing was actually
-    // absorbed (e.g. shield already at 500 cap) ; otherwise it'd fire
-    // every frame the shield is up under fire.
-    if (stored > 0) { try { playSound('vortex_absorb'); } catch (_) {} }
-    if (amount <= 0) return; // fully absorbed
+    // Vortex still tracks absorbed damage for the on-release burst, but
+    // the cap is dropped now that the shield blocks 100% : the longer
+    // you hold under fire, the bigger the reflected burst when you let
+    // go. Energy pool drain (250/s) caps how long this can be sustained.
+    player.vortexStored = (player.vortexStored || 0) + amount;
+    if (amount > 0) { try { playSound('vortex_absorb'); } catch (_) {} }
+    return; // fully blocked
   }
   // Particle Wall (TRACKER): deployed one-way shield with HP; absorbs ANY
   // incoming damage when the projectile (or attacker, fallback) is on the
@@ -21894,18 +21867,80 @@ function fireHitscan(origin, dir, w) {
     }
   }
 
+  // (v14f) PUNCTURE Plasma Railgun pierces : damage every ship along the
+  // line, not just the closest. The beam still stops at obstacles / level
+  // walls / the obstacle picked above. All other classes keep the
+  // single-target "closest in line" behavior.
+  const isPiercing = (player.loadoutKey === 'PUNCTURE');
+
   let bestHit = null, bestDist = Infinity;
+  const pierceHits = []; // { bot, proj } for piercing mode
+  const lineMax = Math.min(w.range, levelDist, bestObstacle ? bestObstDist : Infinity);
   for (const bot of game.entities) {
     if (!bot.alive || bot.team === player.team) continue;
     const toBot = new THREE.Vector3().subVectors(bot.position, origin);
     const proj = toBot.dot(aimDir);
-    if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+    if (proj < 0 || proj > lineMax) continue;
     const closest = origin.clone().add(aimDir.clone().multiplyScalar(proj));
     const dist = closest.distanceTo(bot.position);
-    if (dist < bot.chassis.hullLength * 0.7 && proj < bestDist) {
-      bestHit = bot;
-      bestDist = proj;
+    if (dist < bot.chassis.hullLength * 0.7) {
+      if (isPiercing) {
+        pierceHits.push({ bot, proj });
+      } else if (proj < bestDist) {
+        bestHit = bot;
+        bestDist = proj;
+      }
     }
+  }
+
+  // (v14f) Pierce branch : damage every ship in line, then continue past
+  // them. Obstacle still blocks at its distance (lineMax already capped).
+  if (isPiercing && pierceHits.length > 0) {
+    pierceHits.sort((a, b) => a.proj - b.proj);
+    // Railgun charge applies to every pierced target (one beam, one shot).
+    let chargeMul = 1.0;
+    if (player.railgunCharge > 0) {
+      chargeMul = 1.0 + player.railgunCharge * 3.0;
+      player.railgunCharge = 0;
+      if (player._railgunChargeAudio) {
+        try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+        player._railgunChargeAudio = null;
+      }
+    }
+    for (let i = 0; i < pierceHits.length; i++) {
+      const h = pierceHits[i];
+      const bot = h.bot;
+      const hitDist = h.proj;
+      const rangeFalloff = 0.7 + 0.3 * Math.max(0, 1 - hitDist / w.range);
+      let finalDmg = w.damage * rangeFalloff * chargeMul;
+      if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
+      if (player.syphonArcRounds && bot.shield > 0) finalDmg *= 1.5;
+      const hadShield = bot.shield > 0;
+      const hitPoint = bot.position.clone().add(aimDir.clone().multiplyScalar(-20));
+      const dealt = bot.takeDamage(finalDmg, 'player', hitPoint);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+        showHitMarker();
+      }
+      spawnExplosion(hitPoint, 8);
+      if (!hadShield) spawnImpactSparks(hitPoint, 4);
+      if (!bot.alive) showKillMarker();
+    }
+    // After piercing, still strike the obstacle if any was in the way.
+    if (bestObstacle) {
+      let finalDmg = w.damage * chargeMul;
+      if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
+      const dealt = bestObstacle.takeDamage(finalDmg);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+      }
+      const hitPt = origin.clone().add(aimDir.clone().multiplyScalar(bestObstDist));
+      spawnExplosion(hitPt, 8);
+      spawnImpactSparks(hitPt, 4);
+    }
+    return;
   }
 
   // If obstacle is closer than any bot, hit the obstacle instead
@@ -23588,6 +23623,58 @@ function _disposeShieldClone(clone) {
   if (clone.userData) clone.userData._shieldMat = null;
 }
 
+// (v14f) Spawn fire particles around a ship while the Thermal Shield is
+// active. Particles seed at random points on / near the hull bounding
+// box, rotated into world space by the ship's quaternion, drift outward
+// + slowly upward, and fade through a fire palette. Called each frame
+// for both the local pilot and any networked Pyro peer.
+const _thermalFireScratchA = new THREE.Vector3();
+const _thermalFireScratchB = new THREE.Vector3();
+function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
+  if (!shipPos || !chassis || !game || !game.particles) return;
+  const w = chassis.hullWidth || 80;
+  const h = chassis.hullHeight || 30;
+  const l = chassis.hullLength || 100;
+  // 90 particles/sec at full frame rate ; with dt=1/60 that's 1.5 per
+  // frame, so use the fractional-spawn pattern to land an integer count.
+  const expected = 90 * dt;
+  let toSpawn = Math.floor(expected);
+  if (Math.random() < (expected - toSpawn)) toSpawn += 1;
+  const palette = [0xff2211, 0xff5522, 0xff8833, 0xffbb55, 0xff3322];
+  for (let i = 0; i < toSpawn; i++) {
+    // Sample a point on / near the hull bounding ellipsoid so flames
+    // wrap the actual silhouette rather than spawning at one center.
+    const u = Math.random() * Math.PI * 2;
+    const v = Math.acos(2 * Math.random() - 1);
+    const sinV = Math.sin(v);
+    const r = 0.85 + Math.random() * 0.25;
+    _thermalFireScratchA.set(
+      w * 0.55 * sinV * Math.cos(u) * r,
+      h * 0.55 * Math.cos(v) * r,
+      l * 0.55 * sinV * Math.sin(u) * r
+    );
+    if (shipQuat) _thermalFireScratchA.applyQuaternion(shipQuat);
+    const pos = shipPos.clone().add(_thermalFireScratchA);
+    // Outward drift from the surface point + a touch of vertical lift
+    // so flames feel buoyant. Speed scaled to chassis size.
+    _thermalFireScratchB.copy(_thermalFireScratchA).normalize();
+    const speed = 40 + Math.random() * 50;
+    const vel = new THREE.Vector3(
+      _thermalFireScratchB.x * speed + (Math.random() - 0.5) * 20,
+      _thermalFireScratchB.y * speed + 25 + Math.random() * 20,
+      _thermalFireScratchB.z * speed + (Math.random() - 0.5) * 20
+    );
+    game.particles.push({
+      position: pos,
+      velocity: vel,
+      life: 0.35 + Math.random() * 0.30,
+      maxLife: 0.65,
+      color: palette[Math.floor(Math.random() * palette.length)],
+      size: 5 + Math.random() * 5,
+    });
+  }
+}
+
 // Toggle a CSS edge overlay on/off. Idempotent and tolerant of missing
 // elements so we don't have to guard every callsite.
 function _setShieldOverlay(id, on) {
@@ -23754,6 +23841,8 @@ function updateShieldVisuals(dt) {
       const flick = 0.85 + 0.15 * Math.sin(game.time * 14);
       _setShipShieldEmissive(player.mesh, 0xff3322, (0.7 + 0.6 * hpFrac) * flick);
     }
+    // (v14f) Red fire particles wrapping the hull while the shield is up.
+    _spawnThermalShieldFire(player.position, player.mesh && player.mesh.quaternion, player.chassis, dt);
     _setShieldOverlay('ov-thermal-shield', true);
     _tickSoundLoop(player, '_thermalShieldHumTimer', dt, 0.95, 'fire_shield_hum');
   } else {
@@ -23781,91 +23870,42 @@ function updateShieldVisuals(dt) {
     }
   }
 
-  // ---- SLAYER: Sword Block aura ----
-  // (v11b redo) Replaces the dark-bolts-on-a-sphere prototype. Sword
-  // Block now wears the same hex hologram dome the Vortex / Pyro /
-  // Blaster pilot shields use, just tinted dark purple-black so it
-  // reads as ominous suppression rather than a team-energy field. Full
-  // sphere geometry (not a hemisphere) since Sword Block reduces damage
-  // from every direction. Equator torus + rim-glow particles round it
-  // off ; the rim emitter runs through _emitVortexShieldArcs with a
-  // _darkPalette flag that drops the lightness range to keep things
-  // black even at full HP. The CSS screen-edge vignette is kept so the
-  // pilot still has a strong inside-the-cockpit signal.
+  // ---- SLAYER: Sword Block aura (green plasma hull-hug) ----
+  // (v14f) Same recipe as Vortex / Gun / Thermal : hull-hugging clone of
+  // the ship mesh with a green plasma material, body emissive boost in
+  // green, CSS hex-grid edge overlay. Damage absorption (70% reduction
+  // / 85% under Sword Core) is intact in playerTakeDamage ; this is a
+  // visual-only change.
   const swordBlockOn = player.loadoutKey === 'SLAYER' &&
     player.abilityActive[1] && player.abilities[1] &&
     player.abilities[1].name === 'Sword Block';
-  // CSS overlay toggle ; cheap, idempotent.
-  try {
-    const ovSb = document.getElementById('ov-sword-block');
-    if (ovSb) {
-      if (swordBlockOn) ovSb.classList.add('show');
-      else              ovSb.classList.remove('show');
-    }
-  } catch (_) {}
+  _setShieldOverlay('ov-sword-block', !!swordBlockOn);
   if (swordBlockOn) {
-    const sbHull = (player.chassis && player.chassis.hullLength) ? player.chassis.hullLength : 100;
-    const sbR = sbHull * 1.5;
-    if (!player.swordBlockMesh) {
-      // Full sphere (NOT a hemisphere) so the field reads as 360Â° block.
-      const geo = new THREE.SphereGeometry(sbR, 36, 24);
-      // (v11b retune) Switched from the dark NormalBlending variant
-      // back to the additive hex hologram every other shield uses, just
-      // tinted bright green ; the user wanted the block dome to "glow
-      // green" rather than read as ominous black, so we're back on the
-      // same shader the team-color shields use.
-      const mat = _makeHexHologramMaterial(LSS.CLASS_COLORS.SLAYER);
-      player.swordBlockMesh = new THREE.Mesh(geo, mat);
-      player.swordBlockMesh.renderOrder = 1;
-      scene.add(player.swordBlockMesh);
-      // Equator torus matches the other shields' silhouette ring weight,
-      // bright green so the band reads from any angle. (v11b) Opacity
-      // 0.55 -> 0.32 so the rim is visible but not opaque.
-      const ringGeo = new THREE.TorusGeometry(sbR * 0.99, 2.2, 8, 64);
-      const ringMat = new THREE.MeshBasicMaterial({
-        color: 0x77ff99, transparent: true, opacity: 0.32,
-        side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
-      });
-      player.swordBlockRing = new THREE.Mesh(ringGeo, ringMat);
-      player.swordBlockRing.renderOrder = 1;
-      scene.add(player.swordBlockRing);
+    if (!player.swordBlockMesh && player.mesh) {
+      const m = _makeHullHugShield(player, 'plasma_green');
+      if (m) {
+        player.swordBlockMesh = m;
+        player.mesh.add(m);
+      }
     }
-    player.swordBlockMesh.position.copy(player.position);
-    player.swordBlockMesh.visible = true;
-    if (player.swordBlockRing) {
-      player.swordBlockRing.position.copy(player.position);
-      // Lay the torus in the camera-forward plane so the dark ring
-      // outlines the dome's silhouette from the pilot's POV.
-      player.swordBlockRing.lookAt(_shieldLook.copy(player.position).add(forward));
-      player.swordBlockRing.visible = true;
+    if (player.swordBlockMesh && player.swordBlockMesh.userData && player.swordBlockMesh.userData._shieldMat) {
+      const u = player.swordBlockMesh.userData._shieldMat.uniforms;
+      if (u && u.time)  u.time.value  = game.time;
+      if (u && u.uTime) u.uTime.value = game.time;
+      if (u && u.uIntensity) u.uIntensity.value = 1.2;
     }
-    if (player.swordBlockMesh.material && player.swordBlockMesh.material.uniforms) {
-      const u = player.swordBlockMesh.material.uniforms;
-      if (u.time)  u.time.value  = game.time;
-      if (u.uTime) u.uTime.value = game.time;
-      if (u.uHp)   u.uHp.value   = 1.0;       // sword block has no HP pool
-      // Bright green energy-field tint ; matches the team-color hue of
-      // the other Vortex/Pyro/Blaster shields, just shifted to green.
-      if (u.uColor) u.uColor.value.setHex(LSS.CLASS_COLORS.SLAYER);
-      // (v11b) Sword Block dome reads more transparent than the others
-      // since the player keeps it up for long stretches and a
-      // dense-opaque green dome obscures combat sightlines.
-      if (u.uAlphaMul) u.uAlphaMul.value = 0.55;
-    }
-    // Rim glow tinted bright green (HSL hue 0.33). Default lightness
-    // curve (no _darkPalette) so the particles glow rather than skulk.
-    _emitVortexShieldArcs(player.position, sbR, forward, dt, 1.0, null, 0.33);
+    _setShipShieldEmissive(player.mesh, 0x33ff66, 1.1);
     _tickSoundLoop(player, '_swordBlockHumTimer', dt, 0.95, 'shield_hum');
   } else {
     player._swordBlockHumTimer = 0;
     if (player.swordBlockMesh) {
-      scene.remove(player.swordBlockMesh);
-      if (player.swordBlockMesh.geometry) player.swordBlockMesh.geometry.dispose();
-      if (player.swordBlockMesh.material) player.swordBlockMesh.material.dispose();
+      _clearShipShieldEmissive(player.mesh);
+      _disposeShieldClone(player.swordBlockMesh);
       player.swordBlockMesh = null;
     }
+    // Legacy ring cleanup (older saved sessions).
     if (player.swordBlockRing) {
-      scene.remove(player.swordBlockRing);
+      if (player.swordBlockRing.parent) player.swordBlockRing.parent.remove(player.swordBlockRing);
       if (player.swordBlockRing.geometry) player.swordBlockRing.geometry.dispose();
       if (player.swordBlockRing.material) player.swordBlockRing.material.dispose();
       player.swordBlockRing = null;
