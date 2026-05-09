@@ -8041,11 +8041,16 @@ class BillboardCloudSystem {
         'varying vec3  vColor;',
         'varying float vAlpha;',
         'varying float vSeed;',
+        // (v14e Phase 3) Pass the sprite's world-space center to the
+        // fragment shader so lighting can attenuate by distance from
+        // each light source. All fragments of one sprite share this.
+        'varying vec3  vSpritePos;',
         'void main() {',
         '  vUv = uv;',
         '  vColor = iColor;',
         '  vAlpha = iAlpha;',
         '  vSeed = iSeed;',
+        '  vSpritePos = iPosition;',
         '  if (iAlpha < 0.001 || iScale < 0.001) {',
         // Cull dead slots: project to a degenerate position behind the camera.
         '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
@@ -8066,6 +8071,14 @@ class BillboardCloudSystem {
         'varying vec3  vColor;',
         'varying float vAlpha;',
         'varying float vSeed;',
+        'varying vec3  vSpritePos;',
+        // (v14e Phase 3) Dynamic-light slots. Per-frame `updateBCSLighting`
+        // populates these from nearby projectiles ; the cloud picks up
+        // the projectile's class color when shots fly close. Strength 0
+        // means inactive slot (loop adds 0).
+        'uniform vec3  uLightPos[8];',
+        'uniform vec3  uLightColor[8];',
+        'uniform float uLightStrength[8];',
         // (v14e tune 1) FBM noise inside each sprite. Each instance offsets
         // the noise field by its iSeed so adjacent sprites read as distinct
         // wispy patches rather than identical soft circles. Combined with
@@ -8113,9 +8126,36 @@ class BillboardCloudSystem {
         '  float maskedNoise = clamp((n - 0.30) * 1.6, 0.0, 1.0);',
         '  float a = maskedNoise * radial * vAlpha;',
         '  if (a < 0.005) discard;',
-        '  gl_FragColor = vec4(vColor * a, a);',
+        // (v14e Phase 3 v2) Dynamic projectile lighting. Loop with no
+        // `continue` (which broke WebGL 1 compile on the previous attempt) ;
+        // instead, inactive slots multiply by strength=0 and contribute
+        // nothing. The cloud's natural color (vColor) is augmented by the
+        // sum of light contributions, each attenuated by inverse-square
+        // distance from the sprite's world center.
+        '  vec3 lit = vColor;',
+        '  for (int li = 0; li < 8; li++) {',
+        '    vec3 toL = uLightPos[li] - vSpritePos;',
+        '    float d2 = dot(toL, toL);',
+        '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
+        '    lit += uLightColor[li] * atten * uLightStrength[li];',
+        '  }',
+        '  gl_FragColor = vec4(lit * a, a);',
         '}',
       ].join('\n'),
+      uniforms: {
+        // (v14e Phase 3) Dynamic-light uniforms ; 8 inactive slots by
+        // default. updateBCSLighting() populates these per frame from
+        // nearby projectiles. Strength 0 = inactive, contributes 0.
+        uLightPos:      { value: [
+          new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+          new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+        ] },
+        uLightColor:    { value: [
+          new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color(),
+          new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color(),
+        ] },
+        uLightStrength: { value: [0, 0, 0, 0, 0, 0, 0, 0] },
+      },
       transparent: true,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
@@ -8258,6 +8298,37 @@ class GasCloud {
 }
 
 const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 4096 });
+
+// (v14e Phase 3) Populate the BCS material's dynamic-light uniforms from
+// active projectiles each frame. Each gas sprite samples up to 8 lights
+// in its fragment shader and adds an emissive contribution attenuated by
+// inverse-square distance from the sprite's world center. Result : when
+// a shot flies through gas, the gas glows in the projectile's class color
+// locally. Cheap : one Float32 + Vector3 + Color update per slot per
+// frame, 8 slots total.
+const _bcsLightTmpColor = new THREE.Color();
+function updateBCSLighting() {
+  if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
+  if (!game || !game.projectiles) return;
+  const u = billboardCloudSystem.material.uniforms;
+  if (!u || !u.uLightPos) return;
+  // Gather up to 8 active projectiles. First-N for now ; could improve
+  // to "closest to camera" or "highest visual impact" later.
+  let count = 0;
+  for (let i = 0; i < game.projectiles.length && count < 8; i++) {
+    const p = game.projectiles[i];
+    if (!p || !p.alive || !p.position) continue;
+    u.uLightPos.value[count].copy(p.position);
+    _bcsLightTmpColor.setHex(p.trailColor || 0xffaa00);
+    u.uLightColor.value[count].copy(_bcsLightTmpColor);
+    u.uLightStrength.value[count] = 1.0;
+    count++;
+  }
+  // Zero out remaining slots so they don't contribute stale lighting.
+  for (let i = count; i < 8; i++) {
+    u.uLightStrength.value[i] = 0;
+  }
+}
 
 // Initialize marching cubes worker
 try {
@@ -16759,23 +16830,24 @@ class ClusterObstacle {
     // to arrange that way. Per-child luminance variation 0.32-0.58 (gray
     // shades) so adjacent atoms aren't identical. Phase 3 (dynamic
     // lighting) will add projectile-color pickup ; until then, gray.
-    // (v14e tune 7) Grays + alpha + segment count cut to fight the
-    // additive-blending pile-up. Previous values (0.22-0.52 base, 0.85
-    // alpha, 11 sprites) accumulated to white in dense overlap because
-    // each sprite ADDS to the framebuffer. Now : darker base (0.10-0.32),
-    // half alpha (0.45), 7 sprites instead of 11. Total overlap brightness
-    // drops to roughly 1/3 of tune 3-4 levels.
-    const v = 0.10 + Math.random() * 0.22;
+    // (v14e tune 8) Tune 7 went too far on darkening + sprite count cut ;
+    // clouds disappeared. Backed off to a midpoint between "looked awesome"
+    // (tune 2 : 0.32-0.58 grays, 0.85 alpha, 10 sprites) and "too white"
+    // (tune 6 : 0.22-0.52 grays, 0.85 alpha, 11 sprites). Now : 0.20-0.50
+    // grays so per-sprite isn't blindingly bright, alpha 0.65 to keep
+    // additive accumulation in a moderate range, 9 segments for medium
+    // density coverage.
+    const v = 0.20 + Math.random() * 0.30;
     const cloudColor = new THREE.Color(v, v, v);
     const radius = (child.scale || child.radius || 20) * 2.8;
     const cloud = new GasCloud(billboardCloudSystem, child.position, {
       boundsRadius:   radius,
       spriteScale:    radius * 1.55,
       spriteScaleVar: 0.50,
-      alpha:          0.45,
+      alpha:          0.65,
       color:          cloudColor,
-      colorJitter:    0.10,
-      segments:       7,
+      colorJitter:    0.14,
+      segments:       9,
     });
     child._atomSmoke = cloud;
   }
@@ -17159,14 +17231,13 @@ class ClusterObstacle {
       // of drifters alive at any moment without the constant smoke field
       // of the original. Each plume cycles its hue and reacts to the
       // player's wake (see updateEffects shaderSmoke branch).
-      if (this._cloudTimerA <= 0) {
-        this._cloudTimerA = 0.80 + Math.random() * 0.60;
-        _spawnClusterPlume(0.55 + Math.random() * 0.15);
-      }
-      if (this._cloudTimerB <= 0) {
-        this._cloudTimerB = 0.85 + Math.random() * 0.60;
-        _spawnClusterPlume(0.50 + Math.random() * 0.15);
-      }
+      // (v14e) Cluster plumes disabled. The BCS gas cloud system around
+      // each atom now provides the wrap-the-cluster smoke read ; the old
+      // _spawnClusterPlume sprites read as competing spherical clouds and
+      // the user wants only the BCS gas visible. Timers still tick down
+      // as before in case we re-enable conditionally.
+      if (this._cloudTimerA <= 0) this._cloudTimerA = 0.80 + Math.random() * 0.60;
+      if (this._cloudTimerB <= 0) this._cloudTimerB = 0.85 + Math.random() * 0.60;
 
       // ---- Electric accents on top of the body cloud ----
       // (v14e tune 6) Per-cluster electric-sprite spawn rate dialed WAY
@@ -36296,6 +36367,9 @@ function gameLoop(timestamp) {
   // tick so the shader sees current uTime + current light positions in
   // the same frame.
   if (typeof updateGasLighting === 'function') updateGasLighting();
+  // (v14e Phase 3) Push projectile lights into the BCS gas-cloud material
+  // so the gas absorbs the projectile's class color when shots fly close.
+  if (typeof updateBCSLighting === 'function') updateBCSLighting();
 
   // (v12) Google Maps Photorealistic 3D Tiles per-frame update. The tile
   // renderer streams tiles in / disposes far ones based on camera
