@@ -2131,7 +2131,7 @@ const LSS = {
   // charging ship that dies in the field loses the round. If the timer
   // runs out with no champion declared, total team HP breaks the tie.
   CHAMPION_TIME: 10,
-  CHAMPION_CHARGE_TIME: 5, // (post-v6.9 patch, 2026-04-28) capture takes a full 5s of uninterrupted hold
+  CHAMPION_CHARGE_TIME: 2, // (v14e) capture takes 2s ; if the capturer dies, the field is freed and any other ship can try again. Win regardless of HP.
   SPAWN_PROTECTION: 3, DOOMED_HEALTH_PCT: 0.15, DOOMED_TIMER: 10,
   GRAVITY: 0, ARENA_SIZE: 25000, TICK_RATE: 60,
   // Seconds shown on the in-screen 3-2-1-LAUNCH ticker. The round-system
@@ -8374,12 +8374,17 @@ function updateBCSWakes(dt) {
 
   // Gather wake sources : player + nearby ships + nearby projectiles.
   // Each source : { x, y, z, vx, vy, vz, str, radius }.
+  // (v14e bump) Strength values were too low for visible deformation
+  // (~1.6 unit equilibrium offset on 80-unit clouds = ~2% wiggle). Bumped
+  // ~6x so ships and projectiles produce a clearly visible "tugged" look
+  // on nearby gas. Combined with the new center-pull below for detached
+  // pockets, gas now both deforms locally AND drifts after passing ships.
   const sources = [];
   if (typeof player !== 'undefined' && player && player.alive && player.position && player.velocity) {
     sources.push({
       x: player.position.x, y: player.position.y, z: player.position.z,
       vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
-      str: 0.05, radius: 220,
+      str: 0.30, radius: 260,
     });
   }
   if (game.entities) {
@@ -8390,7 +8395,7 @@ function updateBCSWakes(dt) {
       sources.push({
         x: e.position.x, y: e.position.y, z: e.position.z,
         vx: v.x, vy: v.y, vz: v.z,
-        str: 0.04, radius: 180,
+        str: 0.24, radius: 220,
       });
     }
   }
@@ -8405,7 +8410,7 @@ function updateBCSWakes(dt) {
       sources.push({
         x: p.position.x, y: p.position.y, z: p.position.z,
         vx: v.x, vy: v.y, vz: v.z,
-        str: 0.06, radius: 140,
+        str: 0.36, radius: 170,
       });
       pCount++;
     }
@@ -8435,7 +8440,34 @@ function updateBCSWakes(dt) {
       if (!cloud || !cloud.applyWake) continue;
       for (let si = 0; si < sources.length; si++) {
         const s = sources[si];
-        cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str * dt, s.radius);
+        // Per-sprite deformation (sprites within the cloud get tugged).
+        cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
+        // (v14e fix #2) Per-cloud center pull. Without this, a detached
+        // pocket's velocity drags down to ~0 in a few seconds and the
+        // whole cloud parks in place ; sprite-level wakeOff alone is
+        // too subtle to look like motion. Adding to p.velocity makes
+        // the entire pocket drift toward passing wake sources, so gas
+        // visibly "follows" ships through the map. Drag in the drift
+        // updater (0.97/s) bleeds the velocity off after the source
+        // leaves, so gas eventually settles instead of careening forever.
+        if (p.velocity) {
+          const cdx = s.x - cloud.position.x;
+          const cdy = s.y - cloud.position.y;
+          const cdz = s.z - cloud.position.z;
+          const cd2 = cdx * cdx + cdy * cdy + cdz * cdz;
+          const cR2 = s.radius * s.radius;
+          if (cd2 < cR2 && cd2 > 1) {
+            const cd = Math.sqrt(cd2);
+            const cAtten = 1.0 - cd / s.radius;
+            // 320 units/s² peak pull at source center, scales by source
+            // strength + linear distance falloff + dt.
+            const accel = 320 * cAtten * s.str * dt;
+            const inv = 1.0 / cd;
+            p.velocity.x += cdx * inv * accel;
+            p.velocity.y += cdy * inv * accel;
+            p.velocity.z += cdz * inv * accel;
+          }
+        }
       }
       cloud.tickWake(dt);
     }
@@ -12952,6 +12984,9 @@ class Bot {
     this.doomed = false;
     this.doomTimer = 0;
     this.coreMeter = 0;
+    // (v14e) Stun timer ; set by Slayer Phase Dash sweep when the dashing
+    // ship passes through this bot. While > 0 the bot can't move or fire.
+    this.stunTimer = 0;
     // Stats (for scoreboard): kills this match, damage dealt this match
     this.kills = 0;
     this.damageDealt = 0;
@@ -13097,6 +13132,23 @@ class Bot {
 
     this.spawnProtection = Math.max(0, this.spawnProtection - dt);
 
+    // (v14e) Slayer Phase Dash stun. While stunned, the bot can't steer
+    // or fire ; velocity bleeds off so it floats helplessly. Doomed timer
+    // and shieldRegenDelay still tick down (handled below) so the stun
+    // doesn't accidentally extend other state.
+    if (this.stunTimer > 0) {
+      this.stunTimer -= dt;
+      if (this.velocity) this.velocity.multiplyScalar(Math.max(0, 1 - dt * 4));
+      // Spawn a brief crackle arc on the bot every ~0.2s so the stun is
+      // visually obvious. Cheap fallback if spawnLightningBolt is missing.
+      if (typeof spawnLightningBolt === 'function' && Math.random() < dt * 5) {
+        const _o1 = new THREE.Vector3((Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30).add(this.position);
+        const _o2 = new THREE.Vector3((Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30).add(this.position);
+        try { spawnLightningBolt(_o1, _o2, 0xaaccff, 0.08, 1, 0.8); } catch (_e) {}
+      }
+      return;
+    }
+
     // Damage smoke/fire when hull is damaged
     if (this.health < this.maxHealth * 0.5) {
       spawnDamageSmoke(this.position, this.health / this.maxHealth);
@@ -13130,6 +13182,23 @@ class Bot {
     // finish room. The override is a noop if the level has no race graph
     // or no champion room, so race mode degrades gracefully on classic maps.
     let _raceWaypoint = null;
+    // (v14e) Classic-mode champion seek. Once the champion field is alive,
+    // steer every bot toward it so they actually try to capture. Combat
+    // firing logic below still runs independently, so bots will engage
+    // enemies they pass on the way without abandoning the objective.
+    // Race mode has its own waypoint logic (below) ; only classic uses
+    // this hook.
+    if (LSS.MODE !== 'race' && game.state === 'playing' &&
+        game.championField && game.championField.alive && game.championField.position) {
+      // If THIS bot is the one currently capturing, freeze in the field.
+      if (game.championField.claimedBy !== this) {
+        if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
+        this.aiTarget.copy(game.championField.position);
+        this.aiRetreating = false;
+        this.aiRole = 'engage';
+        _raceWaypoint = this.aiTarget; // reuse the race-mode steering shortcut
+      }
+    }
     if (LSS.MODE === 'race' && game.state === 'playing' && game.raceGraph && game.raceGraph.finishId) {
       _raceWaypoint = this.chooseRaceWaypoint();
       if (_raceWaypoint) {
@@ -17436,21 +17505,17 @@ class ClusterObstacle {
           }
         }
       } catch (_e) {}
-      // (v8_2a chemistry) When a cluster dies, promote some of its energy
-      // into independent ambient cloud dots so the smoke survives the
-      // destruction. 2-4 dots spawn at random offsets from the cluster
-      // center, drifting outward, with phases inherited from the cluster
-      // (so they tend to bond with each other, forming a "memory" of the
-      // dead cluster's location). They live in the dot system, fully
-      // independent of this cluster object.
+      // (v14e tune) Re-enabled the v8_2a "cluster memory" spawn block but
+      // RE-WIRED to spawn new BCS GasCloud objects instead of the old
+      // v8_2a Dot+smokeMesh pairs. Each spawn pushes the GasCloud into
+      // game.detachedGasPockets so the existing drift/wake/wall-collision/
+      // chemistry/lighting systems all pick it up automatically. Gas thus
+      // lingers at the dead cluster's position and drifts outward,
+      // continuing to react to ships and projectiles until round-end.
       try {
-        if (typeof spawnDot === 'function' &&
-            typeof _SMOKE_GEO !== 'undefined' &&
-            typeof _makeSmokeMaterial === 'function') {
-          // Cluster's signature phase: derived from the cluster's id-ish
-          // identity (its initial position) so all dots from this cluster
-          // share an inheritance.
-          const _clusterPhase = ((this.position.x + this.position.y * 7 + this.position.z * 13) * 0.001) % (Math.PI * 2);
+        if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem &&
+            typeof GasCloud === 'function' &&
+            game && game.detachedGasPockets) {
           const _spawnN = 2 + Math.floor(Math.random() * 3); // 2..4
           for (let _k = 0; _k < _spawnN; _k++) {
             const _theta = Math.random() * Math.PI * 2;
@@ -17468,42 +17533,25 @@ class ClusterObstacle {
               Math.cos(_phi) * 0.4,
               _sinP * Math.sin(_theta),
             ).multiplyScalar(20 + Math.random() * 30);
-            const _mat = _makeSmokeMaterial(0x080812, 1.0);
-            if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
-              _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
-            }
-            const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
-            _mesh.scale.setScalar(_size);
-            _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-            _mesh.frustumCulled = true;
-            _mesh.renderOrder = 1;
-            // Inherit the cluster phase with a small random offset so they
-            // bond strongly to each other but not lockstep.
-            const _phaseJitter = (Math.random() - 0.5) * 0.6;
-            const _dot = spawnDot(_pos, {
-              // (v9) Indestructible ; the cluster's smoke memory lives on.
-              lifetime: Infinity,
-              growthDuration: 3.0 + Math.random() * 3.0,
-              radius: _size,
-              velocity: _drift,
-              collidable: true,
-              playerWake: true,
-              emitsLightning: true,
-              arcRadius: _size * 0.5,
-              interArcRange: 900,
-              hueCycleMaterial: _mat,
-              hueSpeed: 0.08 + Math.random() * 0.06,
-              scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
-              fadeOut: { alphaMul: 0.4 },
-              clusterAttraction: true,
-              attractStrength: 35,
-              attractRange: 1800,
-              orbitBoost: 0.4,
-              phase: _clusterPhase + _phaseJitter,
+            // (v14e Phase 6) Build a BCS GasCloud with the same per-atom
+            // preset (gray with diversity, soft alpha, FBM-noise sprites).
+            // Detach immediately into game.detachedGasPockets so the
+            // existing drift / wake / wall-collision / chemistry-lightning /
+            // projectile-lighting / round-rebuild systems all pick it up
+            // without further wiring. The cluster phase is no longer used
+            // since BCS clouds bond via spatial chemistry, not phase tags.
+            const _v = 0.20 + Math.random() * 0.30;
+            const _cloudColor = new THREE.Color(_v, _v, _v);
+            const _cloud = new GasCloud(billboardCloudSystem, _pos, {
+              boundsRadius:   _size,
+              spriteScale:    _size * 1.55,
+              spriteScaleVar: 0.50,
+              alpha:          0.75,
+              color:          _cloudColor,
+              colorJitter:    0.14,
+              segments:       13,
             });
-            _dot._isAmbientCloud = true;
-            _dot._fromDeadCluster = true;       // marker (potential later use)
-            _dot.attachMesh(_mesh);
+            game.detachedGasPockets.push({ gasCloud: _cloud, velocity: _drift });
           }
         }
       } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
@@ -17744,7 +17792,13 @@ const GAS_ARC_COLOR            = 0xddddee; // soft white-blue
 // world center regardless of whether it's a GasCloud or a legacy mesh.
 function _gasPocketCenter(p) {
   if (!p) return null;
-  if (p.gasCloud) return p.gasCloud.position;
+  if (p.gasCloud) {
+    // (v14e fix) Skip clouds whose slots have been released ; their
+    // position field still exists but they render nothing, so firing
+    // arcs at them produces "lightning with nothing there."
+    if (!p.gasCloud.slots || p.gasCloud.slots.length === 0) return null;
+    return p.gasCloud.position;
+  }
   if (p.mesh && p.mesh.position) return p.mesh.position;
   return null;
 }
@@ -17795,6 +17849,12 @@ function updateGasChemistry(dt) {
       for (let k = 0; k < game.clusters.length; k++) {
         const cl = game.clusters[k];
         if (!cl || !cl.position) continue;
+        // (v14e fix) Skip dead clusters. The cluster object lingers in the
+        // array (alive=false, awaiting respawn or permanently retired) but
+        // its position no longer corresponds to anything visible in world.
+        // Without this check, detached gas pockets fire arcs to ghost
+        // cluster centers where there is "nothing there but lightning."
+        if (cl.alive === false || cl.broken) continue;
         const dx = pp.x - cl.position.x, dy = pp.y - cl.position.y, dz = pp.z - cl.position.z;
         const d2 = dx * dx + dy * dy + dz * dz;
         if (d2 > GAS_CLUSTER_REACT_RADIUS_SQ) continue;
@@ -22693,7 +22753,8 @@ function executeAbility(slot, ability) {
   // ---- UTILITY ABILITIES ----
   else if (ability.type === 'utility') {
     // SLAYER: Phase Dash (movement direction + brief invulnerability)
-    // Goes in the direction you're moving; if stationary, phase in place
+    // Goes in the direction you're moving; if stationary, phase in place.
+    // (v14e) Any enemy ship the dash sweeps through is stunned for 1.5s.
     if (ability.name === 'Phase Dash') {
       player.phaseInvuln = true;
       const speed = player.velocity ? player.velocity.length() : 0;
@@ -22701,8 +22762,49 @@ function executeAbility(slot, ability) {
         // Dash in movement direction
         const moveDir = player.velocity.clone().normalize();
         player.phaseInvulnTimer = 0.3; // 0.3s i-frames
-        player.position.add(moveDir.multiplyScalar(400));
+        const dashStart = player.position.clone();
+        const dashLen   = 400;
+        player.position.add(moveDir.clone().multiplyScalar(dashLen));
         spawnExplosion(player.position.clone().add(moveDir.clone().multiplyScalar(-200)), 15);
+        // (v14e) Sweep enemy bots whose center lies within DASH_SWEEP_R of
+        // the dash segment. Closest-point-on-segment vs bot.position.
+        try {
+          const DASH_SWEEP_R = 90;
+          const DASH_SWEEP_R2 = DASH_SWEEP_R * DASH_SWEEP_R;
+          if (game && game.entities) {
+            for (let _ei = 0; _ei < game.entities.length; _ei++) {
+              const _b = game.entities[_ei];
+              if (!_b || !_b.alive || !_b.position) continue;
+              if (_b.team === player.team) continue;       // friendly fire safe
+              if (_b.spawnProtection > 0) continue;        // can't grief just-spawned
+              // Project bot.position onto the dash segment.
+              const _vx = _b.position.x - dashStart.x;
+              const _vy = _b.position.y - dashStart.y;
+              const _vz = _b.position.z - dashStart.z;
+              let _t = (_vx * moveDir.x + _vy * moveDir.y + _vz * moveDir.z) / dashLen;
+              _t = Math.max(0, Math.min(1, _t));
+              const _cx = dashStart.x + moveDir.x * dashLen * _t;
+              const _cy = dashStart.y + moveDir.y * dashLen * _t;
+              const _cz = dashStart.z + moveDir.z * dashLen * _t;
+              const _dx = _b.position.x - _cx;
+              const _dy = _b.position.y - _cy;
+              const _dz = _b.position.z - _cz;
+              const _d2 = _dx * _dx + _dy * _dy + _dz * _dz;
+              if (_d2 <= DASH_SWEEP_R2) {
+                _b.stunTimer = Math.max(_b.stunTimer || 0, 1.5);
+                if (_b.velocity) _b.velocity.multiplyScalar(0.2);
+                // Audio + small spark to confirm the stun.
+                try {
+                  if (typeof playSpatialSound === 'function') playSpatialSound('stun', _b.position);
+                  else if (typeof playSound === 'function') playSound('stun');
+                } catch (_e) {}
+                if (typeof spawnImpactSparks === 'function') {
+                  try { spawnImpactSparks(_b.position, 6); } catch (_e) {}
+                }
+              }
+            }
+          }
+        } catch (_dashErr) { /* non-fatal ; dash itself already happened */ }
       } else {
         // Stationary: phase in place (longer invulnerability, no movement)
         player.phaseInvulnTimer = 1.0; // 1s phase-out in place
@@ -29905,8 +30007,8 @@ function saveSettings() {
 // Soul Array configuration without going to the wall lab. User changes
 // persist via saveSettings() and override these on subsequent loads.
 const DEFAULT_WALL_CONFIG = {
-  "wallPattern": 32,
-  "patternName": "Sheet Metal",
+  "wallPattern": 31,
+  "patternName": "Tile Track",
   "wallBlackBase": false,
   "wallOpacity": 0.7,
   "palette": [
@@ -35282,7 +35384,9 @@ function buildRoomGraphLevel(level) {
     // Wall pattern: 0..7 are lab cosmic patterns, 8 is the Soul Array.
     // game.wallPattern is loaded from localStorage by loadSettings(); seed it
     // here in case the shader is built before settings have been read.
-    if (typeof game.wallPattern !== 'number') game.wallPattern = 0;
+    // (v14e) Default to Tile Track (31) instead of pattern 0 so the curated
+    // look is what new players see on first load.
+    if (typeof game.wallPattern !== 'number') game.wallPattern = 31;
     // Pure Black Base is on by default: wall geometry hides, only the active
     // pattern reads against pure black. User can toggle off in Settings.
     if (typeof game.wallBlackBase !== 'boolean') game.wallBlackBase = true;

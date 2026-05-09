@@ -2,8 +2,73 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v14c (WebXR) ; Tranche 3 Closeout</title>
-<!-- v14c fork started 2026-05-08. Branched off v14b.
+<title>Last Ship Sailing v14e (WebXR) ; Billboard Gas Clouds</title>
+<!-- v14e fork started 2026-05-08. Branched off v14d.
+     v14e replaces the displaced-sphere gas approach (v14d) with a custom
+     billboard-cloud system. The user's feedback on v14d : even with
+     fractal multi-octave displacement + domain warping, the gas still
+     read as "deformed sphere / jellyfish bell" because every pocket was
+     a single closed-surface mesh. The fix is to break out of the single-
+     mesh paradigm entirely, taking the same shape that drei-vanilla's
+     Cloud uses : many small camera-facing billboard sprites with soft
+     procedural alpha, instanced into a single InstancedMesh, scattered
+     within a bounds volume per gas pocket. The aggregate silhouette is
+     whatever shape the swarm of sprites collectively forms ; never a
+     sphere unless we specifically arrange them that way.
+     Earlier in v14e I tried importing @pmndrs/vanilla via esm.sh ; that
+     route caused engine boot to break for reasons I couldn't pin down,
+     so this fork ships our own minimal billboard system inline (~150
+     lines of JS + GLSL). No CDN dependency, no peer-dep dance, full
+     control over the material so dynamic projectile lighting + bloom
+     integration stay clean.
+     Architecture :
+       - BillboardCloudSystem : singleton scene-level InstancedMesh of
+         unit quads. Custom ShaderMaterial with per-instance position +
+         scale + color + alpha attributes. Vertex shader does camera-
+         facing billboard rotation. Fragment shader does procedural
+         soft-circle alpha (smoothstep on radial distance from center)
+         so each sprite reads as a fuzzy puff without needing a PNG.
+         Additive blending so it plays nice with the bloom pass.
+       - GasCloud : owns N (~8) BCS slot indices at random offsets in a
+         bounds volume. Has a world position ; moving the cloud moves
+         all owned sprites. Disposes by releasing slots back to BCS.
+       - One GasCloud per rock chunk, replaces v14d's displaced-sphere
+         per-child gas mesh.
+     Same five-phase scope as v14d ; persistence + wall collision +
+     dynamic projectile lighting + chemistry are re-ported on top of
+     the cloud transforms.
+     v14d remains the stable baseline for the displaced-sphere gas
+     system; do NOT edit it. v14e is the experimental billboard
+     direction. If v14e doesn't read better, fall back to v14d.
+     v14d remains the stable baseline; do NOT edit it.
+     v14d fork started 2026-05-08. Branched off v14c.
+     v14d builds a custom fractal gas-pocket system around the cluster rocks
+     to replace the uniform-gray atom-smoke that read as visual fog. The
+     locked design (per user, this fork):
+       - Each rock chunk has its own flowing fractal gas atmosphere ; not
+         spherical, displaced into an organic amorphous silhouette by
+         multi-octave noise. From far away, both the rock and its gas are
+         visible (gas is subtle, rock is the dominant silhouette).
+       - Gas color is shades of gray (no class identity tint). Phase 3 adds
+         dynamic projectile-light pickup so the gas glows in the projectile's
+         color as weapons fly through.
+       - Gas is BLOCKED by walls. Phase 2 adds SDF collision so gas drift
+         can't escape the playable space.
+       - Gas is PERSISTENT until the round ends. When a rock is destroyed,
+         the attached gas pocket detaches with explosion-inherited velocity
+         and continues drifting + participating in chemistry until the world
+         is rebuilt at round_end. (Phase 4)
+       - Pairwise gas-pocket chemistry: when two pockets get close, they
+         intensify (faster internal animation) and periodically arc lightning
+         between each other. White/gray arcs by default; future polish could
+         pull color from any nearby weapon. (Phase 5)
+       - Same rock budget as v14c. No change to cluster spawn rate.
+     Phasing: Phase 1 (foundation) replaces _makeSmokeMaterial with a new
+     LayeredFX 'gas_pocket' preset on the per-child atom smokes. Phases 2-5
+     layer in collision, dynamic lighting, persistence, and chemistry as
+     incremental shippable steps.
+     v14c remains the stable baseline; do NOT edit it.
+     v14c fork started 2026-05-08. Branched off v14b.
      v14c closes out Tranche 3 of bespoke_shader_consolidation_plan.md plus
      ships Tranche 1.5b (cone axial-gradient feature). Two prior forks
      (v14a, v14b) did a cleanup pass + the first two ports (proj_glow, orb_core)
@@ -2314,6 +2379,10 @@ const game = {
   dynamicObjects: [],
   // Cluster obstacles (hold groups of dynamicObjects as their children)
   clusters: [],
+  // (v14d Phase 4) Detached gas pockets ; when an atom is destroyed its
+  // attached gas mesh transfers here and drifts via inherited velocity.
+  // Each entry: { mesh, velocity, drag } ; cleared at round-rebuild.
+  detachedGasPockets: [],
   // Web Worker for marching cubes
   levelWorker: null,
   levelWorkerCallbacks: [],
@@ -5881,6 +5950,12 @@ const _LAYERED_FX_VERT = [
   'uniform float uTime;',
   'uniform float uDisplaceAmount;',  // 0 = none ; 0.3 = ~30% of local radius
   'uniform float uDisplaceFreq;',    // noise frequency in object-space units
+  // (v14d Phase 5+) Fractal displacement uniforms. Octaves stacks multiple
+  // noise frequencies for self-similar fractal surfaces ; warp distorts
+  // the noise field by a second noise field for "ink in water" organic
+  // flow that doesn't read as bell-pulsing jellyfish.
+  'uniform int   uDisplaceOctaves;',
+  'uniform float uDisplaceWarp;',
   // ---- vertex-side noise primitives (mirrored from fragment for a single
   // shared library ; cheap because the vert shader runs once per vertex).
   'float hashLFXv(vec3 p) {',
@@ -5910,11 +5985,39 @@ const _LAYERED_FX_VERT = [
   '  vec3 n = normalize(normal);',
   '  vec3 displaced = position;',
   '  if (uDisplaceAmount > 0.0001) {',
-  // Object-space noise sample, animated by time. Time scrolls the
-  // pattern so the surface "boils" at low frequency.
-  '    vec3 nP = position * uDisplaceFreq + vec3(uTime * 0.45, uTime * 0.31, uTime * -0.22);',
-  // Recenter to ~[-1, 1]; FBM returns ~[0, 1] (biased toward 0.5).
-  '    float disp = (fbmLFXv(nP) - 0.5) * 2.0;',
+  // (v14d Phase 5+) Optional domain warping: distort the noise field by a
+  // second noise field so the displacement reads as "ink in water" swirl
+  // instead of clean spherical lobes. Cheap when uDisplaceWarp = 0
+  // (warpField stays zero-vector). Adds 3 noise samples when active.
+  '    vec3 warpField = vec3(0.0);',
+  '    if (uDisplaceWarp > 0.001) {',
+  '      vec3 wP = position * uDisplaceFreq * 2.0 + vec3(uTime * 0.20, uTime * -0.15, uTime * 0.12);',
+  '      warpField = vec3(',
+  '        fbmLFXv(wP),',
+  '        fbmLFXv(wP + vec3(7.3, 2.1, 5.7)),',
+  '        fbmLFXv(wP + vec3(13.1, 11.5, 3.9))',
+  '      ) * 2.0 - 1.0;',
+  '      warpField *= uDisplaceWarp;',
+  '    }',
+  // (v14d Phase 5+) Multi-octave displacement: stack up to 4 frequency
+  // octaves with decreasing amplitude (each octave halves amplitude and
+  // doubles frequency). Normalized by total amplitude so multi-octave
+  // doesn't blow out absolute displacement. uDisplaceOctaves = 1 reduces
+  // exactly to legacy single-pass FBM behavior, byte-identical for older
+  // presets that don't opt in.
+  '    float disp = 0.0;',
+  '    float aOct = 1.0;',
+  '    float fOct = 1.0;',
+  '    float ampSum = 0.0;',
+  '    for (int oct = 0; oct < 4; oct++) {',
+  '      if (oct >= uDisplaceOctaves) break;',
+  '      vec3 nP = position * uDisplaceFreq * fOct + warpField + vec3(uTime * 0.45 * fOct, uTime * 0.31 * fOct, uTime * -0.22 * fOct);',
+  '      disp += aOct * (fbmLFXv(nP) - 0.5) * 2.0;',
+  '      ampSum += aOct;',
+  '      aOct *= 0.5;',
+  '      fOct *= 2.0;',
+  '    }',
+  '    disp /= max(ampSum, 0.001);',
   // Scale displacement by local radius so a 40-unit sphere displaces by
   // 40 * uDisplaceAmount * disp (in world units), and a 200-unit sphere
   // by 200 * uDisplaceAmount * disp. Keeps the silhouette bumpiness
@@ -5979,6 +6082,15 @@ const _LAYERED_FX_FRAG = [
   'uniform vec4 uHits[4];',
   'uniform float uHitRadius;',     // size of the glow patch in world units
   'uniform vec3 uHitColor;',       // color of the impact glow
+  // (v14d Phase 3) Dynamic projectile lights. Up to 4 simultaneous lights
+  // per material ; world-space position, RGB color, strength scalar.
+  // Strength 0 = inactive slot. Per-frame `updateGasLighting()` populates
+  // these on materials tagged with userData.acceptsDynamicLights = true
+  // (gas pockets) by picking the closest projectiles. Inactive slots
+  // contribute zero light; loop runs unconditionally for branch-free perf.
+  'uniform vec3  uDynLightPos[4];',
+  'uniform vec3  uDynLightColor[4];',
+  'uniform float uDynLightStrength[4];',
   'uniform int   uLayerPattern[3];',
   'uniform float uLayerScale[3];',
   'uniform float uLayerTimeRate[3];',
@@ -6167,6 +6279,18 @@ const _LAYERED_FX_FRAG = [
   '  acc.rgb *= max(0.0, 1.0 - vUv.y * uAxialFalloff);',
   '  float axialT = pow(max(0.0, 1.0 - vUv.y), uAxialCoreFalloff) * uAxialCoreStrength;',
   '  acc.rgb = mix(acc.rgb, uAxialCoreColor, axialT);',
+  // (v14d Phase 3) Dynamic projectile light contribution. Soft inverse-
+  // square falloff per light slot ; multiplied by acc.a so the lighting
+  // only shows where the volume is dense. When all strengths are zero
+  // (no projectiles nearby) the loop accumulates 0 and adds nothing.
+  '  vec3 dynLighting = vec3(0.0);',
+  '  for (int li = 0; li < 4; li++) {',
+  '    vec3 toLight = uDynLightPos[li] - vWorldPos;',
+  '    float d2 = dot(toLight, toLight);',
+  '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
+  '    dynLighting += uDynLightColor[li] * atten * uDynLightStrength[li];',
+  '  }',
+  '  acc.rgb += dynLighting * acc.a;',
   '  gl_FragColor = acc;',
   '}',
 ].join('\n');
@@ -6216,6 +6340,12 @@ function _makeLayeredFXMaterial(preset) {
     // to v11a's output. New EFFECT_PRESETS entries override these.
     displaceAmount: 0.0,   // 0 = perfect sphere ; 0.3 = ~30% radius bumps
     displaceFreq:   1.5,   // noise frequency in object-space units
+    // (v14d Phase 5+) Fractal-displacement controls. Defaults preserve
+    // legacy behavior: 1 octave + 0 warp = byte-identical to single-pass
+    // FBM displacement. Gas pockets opt in to multi-octave + domain
+    // warping for organic non-jellyfish silhouettes.
+    displaceOctaves: 1,    // 1 = single FBM ; 3 = self-similar fractal stack
+    displaceWarp:    0.0,  // 0 = off ; 1.0 = strong "ink in water" swirl
     softEdge:       0.0,   // 0 = hard edge ; 1 = full grazing-angle fade
     layers: [],
   }, preset || {});
@@ -6241,6 +6371,8 @@ function _makeLayeredFXMaterial(preset) {
       // these augment it.
       uDisplaceAmount: { value: +cfg.displaceAmount },
       uDisplaceFreq:   { value: +cfg.displaceFreq },
+      uDisplaceOctaves: { value: cfg.displaceOctaves | 0 || 1 },
+      uDisplaceWarp:    { value: +cfg.displaceWarp },
       uSoftEdge:       { value: +cfg.softEdge },
       // (v11) Hit-impact ring buffer ; 4 slots of (x,y,z,t). Initialized
       // with t = -999 so they contribute zero until flashFXMaterialHit()
@@ -6253,6 +6385,22 @@ function _makeLayeredFXMaterial(preset) {
       ] },
       uHitRadius:     { value: 80.0 },
       uHitColor:      { value: new THREE.Color(0xffffff) },
+      // (v14d Phase 3) Dynamic projectile lights ; 4 inactive slots by
+      // default. Strength 0 = inactive, contributes nothing. Per-frame
+      // updateGasLighting() populates these on materials that opted in.
+      uDynLightPos: { value: [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+      ] },
+      uDynLightColor: { value: [
+        new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
+      ] },
+      uDynLightStrength: { value: [0, 0, 0, 0] },
       uLayerPattern:  { value: layers.map(l => l.pattern) },
       uLayerScale:    { value: layers.map(l => l.scale) },
       uLayerTimeRate: { value: layers.map(l => l.timeRate) },
@@ -6286,6 +6434,52 @@ function _layeredFXTick(tSec) {
     if (!mat || !mat.uniforms || !mat.uniforms.uTime) return;
     const offset = (mat.userData && mat.userData._timeOffset) || 0;
     mat.uniforms.uTime.value = tSec + offset;
+  });
+}
+
+// (v14d Phase 3) Populate the dynamic-light uniforms on every LayeredFX
+// material flagged with userData.acceptsDynamicLights = true (currently
+// just the cluster gas pockets). Picks up to 4 active projectiles and
+// writes their world position + trail color into each material's light
+// slots ; inactive slots write strength 0 (zero contribution). The shader
+// adds emissive lighting per-fragment with inverse-square falloff so
+// projectiles only illuminate gas they fly close to. Cheap when no gas
+// materials exist (early-out check). One global light selection per
+// frame ; all gas materials share the same 4 lights so far-away gas
+// pockets simply contribute zero from their own world position.
+const _gasLightTmpColor = new THREE.Color(); // scratch, no per-frame alloc
+function updateGasLighting() {
+  if (!game || !game.projectiles || _ACTIVE_LAYERED_FX.size === 0) return;
+  // Gather up to 4 active projectiles (first-N ; could be improved later
+  // by picking strongest / closest to camera). Skip projectiles still in
+  // their fade-in window so the gas doesn't pre-light at the muzzle.
+  const lights = [];
+  for (let i = 0; i < game.projectiles.length && lights.length < 4; i++) {
+    const proj = game.projectiles[i];
+    if (!proj || !proj.alive || !proj.position) continue;
+    lights.push({
+      pos: proj.position,
+      color: proj.trailColor || 0xffaa00,
+      strength: 1.0,
+    });
+  }
+  // Push the 4 lights into every gas-flagged material. Scratch reused so
+  // we don't allocate Color objects per material per frame.
+  _ACTIVE_LAYERED_FX.forEach(mat => {
+    if (!mat || !mat.userData || !mat.userData.acceptsDynamicLights) return;
+    const u = mat.uniforms;
+    if (!u || !u.uDynLightPos) return;
+    for (let i = 0; i < 4; i++) {
+      if (i < lights.length) {
+        const l = lights[i];
+        u.uDynLightPos.value[i].copy(l.pos);
+        _gasLightTmpColor.setHex(l.color);
+        u.uDynLightColor.value[i].copy(_gasLightTmpColor);
+        u.uDynLightStrength.value[i] = l.strength;
+      } else {
+        u.uDynLightStrength.value[i] = 0;
+      }
+    }
   });
 }
 
@@ -6673,6 +6867,49 @@ const EFFECT_PRESETS = {
       { pattern: 1, scale: 1.6, timeRate: 3.2, hue: 0.06, alpha: 0.75, blend: 2, sat: 0.85 },
       // Layer 3: ridges high-freq, screen blend for white-hot crackle.
       { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.0,  alpha: 0.55, blend: 3, sat: 0.0  },
+    ],
+  },
+  // (v14d) Cluster gas pocket. Per-rock-chunk fractal gas atmosphere ; this
+  // is what wraps each atom-fractal child rock and makes the cluster read as
+  // a living gas-soaked formation rather than naked geometry. Replaces the
+  // _makeSmokeMaterial-based atom smoke from earlier forks. Design points:
+  //   - Pure gray (sat 0.0 on every layer, hue 0.0). Phase 3 will add a
+  //     dynamic-light uniform array so the gas glows in projectile colors
+  //     when shots fly through ; until then, gray base with subtle luminance
+  //     variation per-instance via uBaseColor override at spawn.
+  //   - Heavy displacement (0.78) + low displaceFreq (0.9) so the silhouette
+  //     reads as flowing amorphous shapes, NOT spheres. Each chunk gets a
+  //     unique per-instance _timeOffset so adjacent atoms don't churn in
+  //     sync.
+  //   - High softEdge (0.85) so the volume fades to nothing at grazing
+  //     angles ; gas should look nebulous, not have a hard rim.
+  //   - Three FBM/turbulence layers at different scales for multi-octave
+  //     fractal richness. The layer choice matches the bespoke smoke's
+  //     character (chunky base + finer detail accents) but in pure gray.
+  //   - Brightness 0.9 keeps the gas subtle so the rock silhouette stays
+  //     dominant. The user wants both visible from far away.
+  gas_pocket: {
+    name: 'Gas Pocket',
+    baseColor: '#888888',  // overridden per-instance with a luminance variation
+    fresnel: 0.35,
+    brightness: 0.75,
+    intensity: 1.0,        // boosted by chemistry pass when reactive
+    // (v14d tune 2) Fractal displacement: 3 octaves of self-similar FBM
+    // stacked with halving amplitude + doubling frequency, plus domain
+    // warping that distorts the noise field by another noise field. This
+    // replaces the old "single-pass FBM on a sphere" silhouette (which
+    // read as jellyfish bell pulsing) with multi-scale tendrils + organic
+    // ink-in-water swirl. Same uDisplaceAmount range but the shape per
+    // unit amount is much more complex.
+    displaceAmount:  0.70,
+    displaceFreq:    1.6,
+    displaceOctaves: 3,    // multi-scale fractal stack
+    displaceWarp:    1.2,  // strong "ink in water" swirl
+    softEdge:        0.92,
+    layers: [
+      { pattern: 0, scale: 1.20, timeRate: 0.45, hue: 0.0, alpha: 0.85, blend: 0, sat: 0.0 },
+      { pattern: 2, scale: 2.80, timeRate: 0.70, hue: 0.0, alpha: 0.50, blend: 4, sat: 0.0 },
+      { pattern: 5, scale: 4.50, timeRate: 0.30, hue: 0.0, alpha: 0.35, blend: 6, sat: 0.0 },
     ],
   },
 };
@@ -7722,6 +7959,524 @@ function cleanupPendingHits() {
 // ---- THREE.JS SETUP ----
 
 const scene = new THREE.Scene();
+
+// ================================================================
+// (v14e) BillboardCloudSystem ; custom instanced billboard cloud
+// ================================================================
+// One InstancedBufferGeometry of unit quads. Custom ShaderMaterial does
+// camera-facing billboard rotation in the vertex shader (no per-frame CPU
+// work) and procedural soft-circle alpha in the fragment shader (no PNG
+// asset). Per-instance attributes : iPosition, iScale, iColor, iAlpha.
+//
+// GasCloud objects (one per atom) claim N slots at random offsets within
+// a bounds volume. Moving the GasCloud moves all owned slots together.
+// Disposed GasClouds release their slots back to the system.
+//
+// Capacity is pre-allocated (maxSlots) ; the per-instance buffers are
+// fixed-size Float32Arrays. Free slots are tracked via a stack ; claim/
+// release is O(1). The whole system renders in one draw call.
+class BillboardCloudSystem {
+  constructor(scn, options) {
+    options = options || {};
+    this.maxSlots = options.maxSlots || 4096;
+    this.scene = scn;
+
+    // Per-instance attribute buffers (one big InstancedBufferGeometry).
+    this._positions = new Float32Array(this.maxSlots * 3);
+    this._scales    = new Float32Array(this.maxSlots);
+    this._colors    = new Float32Array(this.maxSlots * 3);
+    this._alphas    = new Float32Array(this.maxSlots);
+    // (v14e tune 1) Per-slot random seed in [0, 1] that the fragment
+    // shader uses to offset its noise field. Without this every sprite
+    // reads as identical circles ; with this each sprite is a unique
+    // wispy patch even at the same scale + position.
+    this._seeds     = new Float32Array(this.maxSlots);
+    // Initialize all slots to fully transparent so claimed-but-unset slots
+    // don't render a stray quad at the origin.
+    for (let i = 0; i < this.maxSlots; i++) {
+      this._scales[i] = 0; // zero-scale is also a safety net
+    }
+
+    this._free = [];
+    for (let i = this.maxSlots - 1; i >= 0; i--) this._free.push(i);
+
+    // Build instanced geometry from a unit quad.
+    const baseGeo = new THREE.PlaneGeometry(1, 1);
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.index = baseGeo.index;
+    geo.setAttribute('position', baseGeo.attributes.position);
+    geo.setAttribute('uv',       baseGeo.attributes.uv);
+    geo.instanceCount = this.maxSlots;
+    const iPos = new THREE.InstancedBufferAttribute(this._positions, 3);
+    iPos.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('iPosition', iPos);
+    const iSca = new THREE.InstancedBufferAttribute(this._scales, 1);
+    iSca.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('iScale', iSca);
+    const iCol = new THREE.InstancedBufferAttribute(this._colors, 3);
+    iCol.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('iColor', iCol);
+    const iAlp = new THREE.InstancedBufferAttribute(this._alphas, 1);
+    iAlp.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('iAlpha', iAlp);
+    const iSeed = new THREE.InstancedBufferAttribute(this._seeds, 1);
+    iSeed.setUsage(THREE.StaticDrawUsage); // set once at claim
+    geo.setAttribute('iSeed', iSeed);
+    this._iPos = iPos;
+    this._iSca = iSca;
+    this._iCol = iCol;
+    this._iAlp = iAlp;
+    this._iSeed = iSeed;
+
+    // Custom ShaderMaterial. Camera-facing billboard via viewMatrix basis
+    // columns ; soft-circle alpha via smoothstep on radial distance.
+    this.material = new THREE.ShaderMaterial({
+      vertexShader: [
+        'attribute vec3  iPosition;',
+        'attribute float iScale;',
+        'attribute vec3  iColor;',
+        'attribute float iAlpha;',
+        'attribute float iSeed;',
+        'varying vec2  vUv;',
+        'varying vec3  vColor;',
+        'varying float vAlpha;',
+        'varying float vSeed;',
+        // (v14e Phase 3) Pass the sprite's world-space center to the
+        // fragment shader so lighting can attenuate by distance from
+        // each light source. All fragments of one sprite share this.
+        'varying vec3  vSpritePos;',
+        'void main() {',
+        '  vUv = uv;',
+        '  vColor = iColor;',
+        '  vAlpha = iAlpha;',
+        '  vSeed = iSeed;',
+        '  vSpritePos = iPosition;',
+        '  if (iAlpha < 0.001 || iScale < 0.001) {',
+        // Cull dead slots: project to a degenerate position behind the camera.
+        '    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);',
+        '    return;',
+        '  }',
+        // Camera basis from view matrix : columns 0,1 are right and up.
+        // (viewMatrix is the inverse of camera world matrix ; transposing
+        //  the upper-left 3x3 gives camera-space basis in world coords.)
+        '  vec3 cameraRight = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);',
+        '  vec3 cameraUp    = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);',
+        '  vec3 worldPos = iPosition + (position.x * cameraRight + position.y * cameraUp) * iScale;',
+        '  gl_Position = projectionMatrix * viewMatrix * vec4(worldPos, 1.0);',
+        '}',
+      ].join('\n'),
+      fragmentShader: [
+        'precision highp float;',
+        'varying vec2  vUv;',
+        'varying vec3  vColor;',
+        'varying float vAlpha;',
+        'varying float vSeed;',
+        'varying vec3  vSpritePos;',
+        // (v14e Phase 3) Dynamic-light slots. Per-frame `updateBCSLighting`
+        // populates these from nearby projectiles ; the cloud picks up
+        // the projectile's class color when shots fly close. Strength 0
+        // means inactive slot (loop adds 0).
+        'uniform vec3  uLightPos[8];',
+        'uniform vec3  uLightColor[8];',
+        'uniform float uLightStrength[8];',
+        // (v14e tune 1) FBM noise inside each sprite. Each instance offsets
+        // the noise field by its iSeed so adjacent sprites read as distinct
+        // wispy patches rather than identical soft circles. Combined with
+        // a radial falloff for soft outer edges, sprites become irregular
+        // fog patches that blend into a continuous volume when overlapping.
+        'float bcsHash(vec2 p) {',
+        '  p = fract(p * vec2(123.34, 456.21));',
+        '  p += dot(p, p + 45.32);',
+        '  return fract(p.x * p.y);',
+        '}',
+        'float bcsNoise(vec2 p) {',
+        '  vec2 i = floor(p);',
+        '  vec2 f = fract(p);',
+        '  f = f * f * (3.0 - 2.0 * f);',
+        '  float a = bcsHash(i);',
+        '  float b = bcsHash(i + vec2(1.0, 0.0));',
+        '  float c = bcsHash(i + vec2(0.0, 1.0));',
+        '  float d = bcsHash(i + vec2(1.0, 1.0));',
+        '  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);',
+        '}',
+        'float bcsFbm(vec2 p) {',
+        '  float v = 0.0; float a = 0.5;',
+        '  for (int k = 0; k < 4; k++) {',
+        '    v += a * bcsNoise(p);',
+        '    p *= 2.0;',
+        '    a *= 0.5;',
+        '  }',
+        '  return v;',
+        '}',
+        'void main() {',
+        // Radial position from sprite center, normalized so r=0 at center
+        // and r=1 at the quad edge.
+        '  float r = distance(vUv, vec2(0.5)) * 2.0;',
+        // Outer radial falloff : alpha rolls smoothly from 1 to 0 across
+        // the whole quad, no defined inner disc to read as a "bubble".
+        '  float radial = 1.0 - smoothstep(0.0, 1.0, r);',
+        // FBM noise mask. Per-instance seed shifts the noise into a
+        // unique region for each sprite (47.3 / 19.7 just decorrelate
+        // the x/y axes so seed steps don't repeat patterns).
+        '  vec2 noisePos = vUv * 3.5 + vec2(vSeed * 47.3, vSeed * 19.7);',
+        '  float n = bcsFbm(noisePos);',
+        // Bias the noise so most pixels start below threshold ; combined
+        // with the radial mask, this carves the sprite into a wispy
+        // irregular patch instead of a solid circle.
+        '  float maskedNoise = clamp((n - 0.22) * 1.6, 0.0, 1.0);',
+        '  float a = maskedNoise * radial * vAlpha;',
+        '  if (a < 0.005) discard;',
+        // (v14e Phase 3 v2) Dynamic projectile lighting. Loop with no
+        // `continue` (which broke WebGL 1 compile on the previous attempt) ;
+        // instead, inactive slots multiply by strength=0 and contribute
+        // nothing. The cloud's natural color (vColor) is augmented by the
+        // sum of light contributions, each attenuated by inverse-square
+        // distance from the sprite's world center.
+        '  vec3 lit = vColor;',
+        '  for (int li = 0; li < 8; li++) {',
+        '    vec3 toL = uLightPos[li] - vSpritePos;',
+        '    float d2 = dot(toL, toL);',
+        '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
+        '    lit += uLightColor[li] * atten * uLightStrength[li];',
+        '  }',
+        '  gl_FragColor = vec4(lit * a, a);',
+        '}',
+      ].join('\n'),
+      uniforms: {
+        // (v14e Phase 3) Dynamic-light uniforms ; 8 inactive slots by
+        // default. updateBCSLighting() populates these per frame from
+        // nearby projectiles. Strength 0 = inactive, contributes 0.
+        uLightPos:      { value: [
+          new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+          new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(),
+        ] },
+        uLightColor:    { value: [
+          new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color(),
+          new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color(),
+        ] },
+        uLightStrength: { value: [0, 0, 0, 0, 0, 0, 0, 0] },
+      },
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+
+    this.mesh = new THREE.Mesh(geo, this.material);
+    this.mesh.frustumCulled = false; // billboards can be anywhere
+    this.mesh.renderOrder = 1;
+    scn.add(this.mesh);
+  }
+
+  claimSlot() {
+    if (this._free.length === 0) return -1;
+    const idx = this._free.pop();
+    // (v14e tune 1) Assign a unique random seed per slot. The fragment
+    // shader uses iSeed to offset its FBM noise field so adjacent sprites
+    // read as distinct wispy patches rather than identical circles. Set
+    // once at claim and persists for the slot's lifetime.
+    this._seeds[idx] = Math.random();
+    this._iSeed.needsUpdate = true;
+    return idx;
+  }
+
+  releaseSlot(idx) {
+    if (idx < 0 || idx >= this.maxSlots) return;
+    this._scales[idx] = 0;
+    this._alphas[idx] = 0;
+    this._iSca.needsUpdate = true;
+    this._iAlp.needsUpdate = true;
+    this._free.push(idx);
+  }
+
+  setSlot(idx, x, y, z, scale, r, g, b, alpha) {
+    if (idx < 0 || idx >= this.maxSlots) return;
+    const i3 = idx * 3;
+    this._positions[i3]     = x;
+    this._positions[i3 + 1] = y;
+    this._positions[i3 + 2] = z;
+    this._scales[idx]       = scale;
+    this._colors[i3]        = r;
+    this._colors[i3 + 1]    = g;
+    this._colors[i3 + 2]    = b;
+    this._alphas[idx]       = alpha;
+    this._iPos.needsUpdate = true;
+    this._iSca.needsUpdate = true;
+    this._iCol.needsUpdate = true;
+    this._iAlp.needsUpdate = true;
+  }
+
+  // Lighter-weight: just update position (most common per-frame call when
+  // following a moving atom). Other attributes don't need re-uploading.
+  setSlotPosition(idx, x, y, z) {
+    if (idx < 0 || idx >= this.maxSlots) return;
+    const i3 = idx * 3;
+    this._positions[i3]     = x;
+    this._positions[i3 + 1] = y;
+    this._positions[i3 + 2] = z;
+    this._iPos.needsUpdate = true;
+  }
+}
+
+// (v14e) GasCloud ; one cluster of N billboard sprites attached to an atom
+// or free-floating after detachment. N slot indices in BCS, each at a
+// random offset within a bounds volume centered on this.position.
+class GasCloud {
+  constructor(bcs, position, options) {
+    options = options || {};
+    this.bcs = bcs;
+    this.position = position.clone();
+    this.boundsRadius = options.boundsRadius || 40;
+    this.spriteScale  = options.spriteScale  || 26;
+    this.spriteScaleVar = options.spriteScaleVar || 0.5; // +/- variation
+    this.alpha        = (options.alpha != null) ? options.alpha : 0.55;
+    this.color = new THREE.Color(options.color != null ? options.color : 0x808080);
+    // (v14e tune 3) Per-sprite gray jitter. Each sprite within this cloud
+    // shifts its color by +/- this much (in [0..1] luminance space) so
+    // adjacent sprites read as different shades of gray, not identical
+    // tinted copies of the cloud's average color.
+    this.colorJitter = (options.colorJitter != null) ? options.colorJitter : 0.0;
+    const segCount = options.segments || 8;
+    // Each slot owns: { idx, offset (Vector3 in local space), scale, alpha }
+    this.slots = [];
+    for (let i = 0; i < segCount; i++) {
+      const idx = bcs.claimSlot();
+      if (idx < 0) break; // BCS full, ship with what we got
+      // Random offset within bounds volume. Bias to inside (cube root) so
+      // the distribution is roughly uniform in volume rather than radius.
+      const u = Math.random();
+      const v = Math.random();
+      const phi = Math.acos(2 * v - 1);
+      const theta = u * Math.PI * 2;
+      const r = Math.cbrt(Math.random()) * this.boundsRadius;
+      const off = new THREE.Vector3(
+        r * Math.sin(phi) * Math.cos(theta),
+        r * Math.sin(phi) * Math.sin(theta),
+        r * Math.cos(phi)
+      );
+      const scale = this.spriteScale * (1.0 - this.spriteScaleVar + Math.random() * 2 * this.spriteScaleVar);
+      const alpha = this.alpha * (0.7 + Math.random() * 0.5);
+      // (v14e tune 3) Apply per-sprite gray jitter so individual sprites
+      // diverge from each other in luminance, not just the cloud as a
+      // whole diverging from other clouds. Clamped to [0, 1] so we don't
+      // wrap around to negatives or exceed full white.
+      const jitter = (Math.random() - 0.5) * 2.0 * this.colorJitter;
+      const sr = Math.max(0, Math.min(1, this.color.r + jitter));
+      const sg = Math.max(0, Math.min(1, this.color.g + jitter));
+      const sb = Math.max(0, Math.min(1, this.color.b + jitter));
+      // (v14e wakes) Each slot owns a wakeOff Vector3 that wake sources
+      // (ships, projectiles) push around. updateBCSWakes() decays it back
+      // to zero over ~1 second so the gas settles when the source leaves.
+      this.slots.push({ idx, off, scale, alpha, wakeOff: new THREE.Vector3() });
+      bcs.setSlot(idx,
+        this.position.x + off.x,
+        this.position.y + off.y,
+        this.position.z + off.z,
+        scale,
+        sr, sg, sb,
+        alpha
+      );
+    }
+  }
+
+  // Move all owned slots so they sit at this.position + offset + wakeOff.
+  // Cheap : only writes the position attribute, not scale/color/alpha.
+  setPosition(x, y, z) {
+    this.position.set(x, y, z);
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      this.bcs.setSlotPosition(s.idx,
+        x + s.off.x + s.wakeOff.x,
+        y + s.off.y + s.wakeOff.y,
+        z + s.off.z + s.wakeOff.z);
+    }
+  }
+
+  dispose() {
+    for (let i = 0; i < this.slots.length; i++) {
+      this.bcs.releaseSlot(this.slots[i].idx);
+    }
+    this.slots.length = 0;
+  }
+
+  // (v14e wakes v2) Magnetic wake : combines a pull-toward-source impulse
+  // (gas wants to hug the source) with a smaller velocity-drag impulse
+  // (gas inherits some of the source's motion, so it trails along behind
+  // moving sources). Both attenuate linearly with distance to the source.
+  // tickWake(dt) decays wakeOff back toward zero so the gas settles after
+  // the source leaves.
+  applyWake(srcX, srcY, srcZ, velX, velY, velZ, strength, radius, dt) {
+    const r2 = radius * radius;
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      const sx = this.position.x + s.off.x + s.wakeOff.x;
+      const sy = this.position.y + s.off.y + s.wakeOff.y;
+      const sz = this.position.z + s.off.z + s.wakeOff.z;
+      const dx = sx - srcX, dy = sy - srcY, dz = sz - srcZ;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > r2) continue;
+      const d = Math.sqrt(d2);
+      // Linear falloff : 1 at center, 0 at radius edge.
+      const atten = 1.0 - d / radius;
+      // (1) Magnetic pull is now the dominant component. The previous
+      // velocity-drag mix was pushing sprites AHEAD of the source (in
+      // its flight direction), which read as "gas shoved away" instead
+      // of "gas trailing behind." Pure pull means sprites chase the
+      // source's CURRENT position : as the source moves through and
+      // past, sprites track it for a moment, then settle. Net effect :
+      // gas trails behind moving objects.
+      if (d > 0.001) {
+        const pullSpeed = 95.0 * atten * strength * dt;
+        const invD = 1.0 / d;
+        s.wakeOff.x -= dx * invD * pullSpeed;
+        s.wakeOff.y -= dy * invD * pullSpeed;
+        s.wakeOff.z -= dz * invD * pullSpeed;
+      }
+      // (2) Velocity drag : tiny weight, just a subtle nudge in source
+      // flight direction. Mostly off ; pull does the heavy lifting.
+      const dragK = 0.015 * atten * strength * dt;
+      s.wakeOff.x += velX * dragK;
+      s.wakeOff.y += velY * dragK;
+      s.wakeOff.z += velZ * dragK;
+    }
+  }
+
+  // (v14e wakes) Decay wakeOffs back toward zero each frame and re-write
+  // slot positions to BCS so the gas visibly settles after a wake passes.
+  // exp(-3*dt) per frame settles a wake in roughly 1 second.
+  tickWake(dt) {
+    const decay = Math.exp(-3.0 * dt);
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      s.wakeOff.x *= decay;
+      s.wakeOff.y *= decay;
+      s.wakeOff.z *= decay;
+      this.bcs.setSlotPosition(s.idx,
+        this.position.x + s.off.x + s.wakeOff.x,
+        this.position.y + s.off.y + s.wakeOff.y,
+        this.position.z + s.off.z + s.wakeOff.z);
+    }
+  }
+}
+
+const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 4096 });
+
+// (v14e wakes) Push wake impulses from active wake sources (player +
+// other ships + projectiles) into nearby gas clouds, then decay each
+// cloud's wakeOffs back toward zero. Sources contribute proportional
+// to their distance + own velocity. Gas drifts with the source briefly,
+// settles when the source leaves. Performance : O(sources × clouds ×
+// slots). With ~6 sources × 30 clouds × 9 slots = ~1620 distance checks
+// per frame, well under 1ms.
+function updateBCSWakes(dt) {
+  if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
+  if (!game) return;
+
+  // Gather wake sources : player + nearby ships + nearby projectiles.
+  // Each source : { x, y, z, vx, vy, vz, str, radius }.
+  const sources = [];
+  if (typeof player !== 'undefined' && player && player.alive && player.position && player.velocity) {
+    sources.push({
+      x: player.position.x, y: player.position.y, z: player.position.z,
+      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
+      str: 0.05, radius: 220,
+    });
+  }
+  if (game.entities) {
+    for (let i = 0; i < game.entities.length; i++) {
+      const e = game.entities[i];
+      if (!e || e === player || !e.alive || !e.position) continue;
+      const v = e.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: e.position.x, y: e.position.y, z: e.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.04, radius: 180,
+      });
+    }
+  }
+  if (game.projectiles) {
+    // Cap projectile sources at 12 to avoid blowing the budget when a
+    // missile salvo is in flight.
+    let pCount = 0;
+    for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
+      const p = game.projectiles[i];
+      if (!p || !p.alive || !p.position) continue;
+      const v = p.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: p.position.x, y: p.position.y, z: p.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.06, radius: 140,
+      });
+      pCount++;
+    }
+  }
+
+  // Apply wakes + tick decay on every gas cloud (attached + detached).
+  if (game.clusters) {
+    for (let cli = 0; cli < game.clusters.length; cli++) {
+      const cl = game.clusters[cli];
+      if (!cl || !cl.children) continue;
+      for (let ci = 0; ci < cl.children.length; ci++) {
+        const c = cl.children[ci];
+        const cloud = c && c._atomSmoke;
+        if (!cloud || !cloud.applyWake) continue;
+        for (let si = 0; si < sources.length; si++) {
+          const s = sources[si];
+          cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
+        }
+        cloud.tickWake(dt);
+      }
+    }
+  }
+  if (game.detachedGasPockets) {
+    for (let di = 0; di < game.detachedGasPockets.length; di++) {
+      const p = game.detachedGasPockets[di];
+      const cloud = p && p.gasCloud;
+      if (!cloud || !cloud.applyWake) continue;
+      for (let si = 0; si < sources.length; si++) {
+        const s = sources[si];
+        // (v14e fix) Pass dt as the 9th arg ; the previous call was
+        // missing it, which made `pullSpeed = ... * undefined` resolve
+        // to NaN inside applyWake. The result was wakeOff fields stuck
+        // at NaN, so detached gas pockets never reacted to wakes while
+        // per-atom clouds (which passed dt correctly) did.
+        cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
+      }
+      cloud.tickWake(dt);
+    }
+  }
+}
+
+// (v14e Phase 3) Populate the BCS material's dynamic-light uniforms from
+// active projectiles each frame. Each gas sprite samples up to 8 lights
+// in its fragment shader and adds an emissive contribution attenuated by
+// inverse-square distance from the sprite's world center. Result : when
+// a shot flies through gas, the gas glows in the projectile's class color
+// locally. Cheap : one Float32 + Vector3 + Color update per slot per
+// frame, 8 slots total.
+const _bcsLightTmpColor = new THREE.Color();
+function updateBCSLighting() {
+  if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
+  if (!game || !game.projectiles) return;
+  const u = billboardCloudSystem.material.uniforms;
+  if (!u || !u.uLightPos) return;
+  // Gather up to 8 active projectiles. First-N for now ; could improve
+  // to "closest to camera" or "highest visual impact" later.
+  let count = 0;
+  for (let i = 0; i < game.projectiles.length && count < 8; i++) {
+    const p = game.projectiles[i];
+    if (!p || !p.alive || !p.position) continue;
+    u.uLightPos.value[count].copy(p.position);
+    _bcsLightTmpColor.setHex(p.trailColor || 0xffaa00);
+    u.uLightColor.value[count].copy(_bcsLightTmpColor);
+    u.uLightStrength.value[count] = 1.0;
+    count++;
+  }
+  // Zero out remaining slots so they don't contribute stale lighting.
+  for (let i = count; i < 8; i++) {
+    u.uLightStrength.value[i] = 0;
+  }
+}
 
 // Initialize marching cubes worker
 try {
@@ -16010,7 +16765,7 @@ function _makeAtomFractalMaterial(baseColor) {
       // directly, and the material is already transparent: true below.
       // Override per-instance later (e.g. impact fade, doomed dim) by
       // poking mesh.material.uniforms.uOpacity.value.
-      uOpacity:   { value: 0.95 },
+      uOpacity:   { value: 0.78 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -16087,12 +16842,18 @@ function _makeAtomFractalMaterial(baseColor) {
       '  // Density-driven HSV: hue tracks uBaseColor via the q phase, low',
       '  // saturation, brightness from accumulated s. Tint the result by',
       '  // uBaseColor so each cluster keeps its identity.',
-      '  vec3 base = hsv(0.59 - q * 0.1, 0.45 - q * 0.05, s / 4000.0 * (0.31 + q * 0.69));',
-      '  base = base * (uBaseColor + vec3(0.5));',     // multiplicative tint, baseline 0.5 so darker base colors don't crush
+      // (v14e tune) Rocks pulled toward muted greys. HSV saturation cut
+      // from 0.45 to 0.28, and the per-cluster baseColor multiplier
+      // shifted to (uBaseColor*0.55 + 0.65) so the gray baseline dominates
+      // and the cluster tint just nudges the hue rather than washing it.
+      '  vec3 base = hsv(0.59 - q * 0.1, 0.28 - q * 0.05, s / 4000.0 * (0.31 + q * 0.69));',
+      '  base = base * (uBaseColor * 0.55 + vec3(0.65));',
       '  // Fresnel rim glow so the atom edges read against dark bgs.',
       '  vec3 V = normalize(cameraPosition - vWorldPos);',
       '  float fres = pow(1.0 - max(0.0, dot(normalize(vNormal), V)), 2.5);',
-      '  vec3 rim = uBaseColor * fres * 0.8;',
+      // (v14e tune) Subtler rim ; was 0.8, now 0.5 so cluster color
+      // doesn't dominate the silhouette.
+      '  vec3 rim = uBaseColor * fres * 0.5;',
       '  // Rock texture modulation. Two scales of FBM:',
       '  //   lowFreq darkens crevices (large irregular zones)',
       '  //   highFreq adds fine surface grain',
@@ -16214,43 +16975,59 @@ class ClusterObstacle {
   }
 
   _buildChildSmokeSphere(child) {
-    if (!child || typeof scene === 'undefined' || !THREE.ShaderMaterial) return;
-    if (typeof _SMOKE_GEO === 'undefined' || typeof _makeSmokeMaterial !== 'function') return;
-    // (v8VR 2026-05-01 retune) Black per-child smoke clouds. Tiny random
-    // value variation so adjacent atoms aren't pixel-perfect identical
-    // black, but all read as black to the eye.
-    const v = 0.02 + Math.random() * 0.04;        // 0.02-0.06 luminance
-    const colorObj = new THREE.Color(v, v, v);
-    const smokeMat = _makeSmokeMaterial(colorObj.getHex(), 0.95);
-    if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
-      smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
-    }
-    const mesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
-    // Sphere envelope ~1.8x child scale: hugs the piece + a little margin.
-    const radius = (child.scale || child.radius || 20) * 1.8;
-    mesh.scale.setScalar(radius);
-    mesh.position.copy(child.position);
-    mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-    mesh.frustumCulled = true;
-    mesh.renderOrder = 1;
-    scene.add(mesh);
-    child._atomSmoke = mesh;
-    // Per-child phase offset for the time uniform so adjacent atoms
-    // don't churn in sync.
-    child._atomSmokePhase = Math.random() * 100;
-    // Per-child rotation drift for subtle independent motion.
-    child._atomSmokeRotVel = new THREE.Vector3(
-      (Math.random() - 0.5) * 0.20,
-      (Math.random() - 0.5) * 0.20,
-      (Math.random() - 0.5) * 0.20
-    );
+    if (!child || typeof scene === 'undefined') return;
+    if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
+    // (v14e) GasCloud per child. Replaces the v14d displaced-sphere mesh
+    // with a swarm of camera-facing billboard sprites instanced through
+    // billboardCloudSystem. The aggregate silhouette is whatever shape
+    // the swarm forms ; never a sphere unless the random offsets happen
+    // to arrange that way. Per-child luminance variation 0.32-0.58 (gray
+    // shades) so adjacent atoms aren't identical. Phase 3 (dynamic
+    // lighting) will add projectile-color pickup ; until then, gray.
+    // (v14e tune 9) Thicker gas. segments 9 -> 13 (more sprites for
+    // denser coverage), alpha 0.65 -> 0.75 (more solid per-sprite). Gray
+    // range unchanged so it doesn't blow out white. Combined with the
+    // shader's noise-threshold drop (0.30 -> 0.22) more pixels survive
+    // per sprite, making the gas read as substance instead of wisps.
+    const v = 0.20 + Math.random() * 0.30;
+    const cloudColor = new THREE.Color(v, v, v);
+    const radius = (child.scale || child.radius || 20) * 2.8;
+    const cloud = new GasCloud(billboardCloudSystem, child.position, {
+      boundsRadius:   radius,
+      spriteScale:    radius * 1.55,
+      spriteScaleVar: 0.50,
+      alpha:          0.75,
+      color:          cloudColor,
+      colorJitter:    0.14,
+      segments:       13,
+    });
+    child._atomSmoke = cloud;
   }
 
   _disposeChildSmokeSphere(child) {
     if (!child || !child._atomSmoke) return;
-    const m = child._atomSmoke;
-    if (m.parent) m.parent.remove(m);
-    if (m.material && m.material.dispose) m.material.dispose();
+    const cloud = child._atomSmoke;
+    // (v14e Phase 4) DETACH instead of dispose. Atom died ; its GasCloud
+    // survives until round-rebuild. Inherited velocity is a small random
+    // outward impulse. game.detachedGasPockets owns the cloud from here
+    // on ; the per-frame drift tick + round-rebuild cleanup take it from
+    // there. Falls back to immediate dispose if game state is unavailable
+    // (e.g. teardown during page reload).
+    if (typeof game !== 'undefined' && game.detachedGasPockets && cloud && typeof cloud.setPosition === 'function') {
+      const vel = new THREE.Vector3(
+        (Math.random() - 0.5) * 80,
+        (Math.random() - 0.5) * 80,
+        (Math.random() - 0.5) * 80
+      );
+      game.detachedGasPockets.push({ gasCloud: cloud, velocity: vel });
+    } else if (cloud && typeof cloud.dispose === 'function') {
+      cloud.dispose();
+    } else {
+      // Legacy mesh fallback (v14d-style entry on game.detachedGasPockets).
+      const m = cloud;
+      if (m.parent) m.parent.remove(m);
+      if (m.material && m.material.dispose) m.material.dispose();
+    }
     // Don't dispose _SMOKE_GEO; it's shared.
     child._atomSmoke = null;
   }
@@ -16438,14 +17215,12 @@ class ClusterObstacle {
           continue;
         }
         if (!c._atomSmoke) continue;
-        c._atomSmoke.position.copy(c.position);
-        if (c._atomSmokeRotVel) {
-          c._atomSmoke.rotation.x += c._atomSmokeRotVel.x * dt;
-          c._atomSmoke.rotation.y += c._atomSmokeRotVel.y * dt;
-          c._atomSmoke.rotation.z += c._atomSmokeRotVel.z * dt;
-        }
-        if (c._atomSmoke.material && c._atomSmoke.material.uniforms) {
-          c._atomSmoke.material.uniforms.time.value = _t + (c._atomSmokePhase || 0);
+        // (v14e) child._atomSmoke is now a GasCloud (swarm of billboards),
+        // not a mesh. Move all owned billboards by setPosition. The
+        // billboards face the camera automatically via the vertex shader,
+        // so no per-frame rotation/material updates needed here.
+        if (typeof c._atomSmoke.setPosition === 'function') {
+          c._atomSmoke.setPosition(c.position.x, c.position.y, c.position.z);
         }
       }
       // Rotate cluster as a rigid group; each child follows its rotated offset
@@ -16608,34 +17383,35 @@ class ClusterObstacle {
       // of drifters alive at any moment without the constant smoke field
       // of the original. Each plume cycles its hue and reacts to the
       // player's wake (see updateEffects shaderSmoke branch).
-      if (this._cloudTimerA <= 0) {
-        this._cloudTimerA = 0.80 + Math.random() * 0.60;
-        _spawnClusterPlume(0.55 + Math.random() * 0.15);
-      }
-      if (this._cloudTimerB <= 0) {
-        this._cloudTimerB = 0.85 + Math.random() * 0.60;
-        _spawnClusterPlume(0.50 + Math.random() * 0.15);
-      }
+      // (v14e) Cluster plumes disabled. The BCS gas cloud system around
+      // each atom now provides the wrap-the-cluster smoke read ; the old
+      // _spawnClusterPlume sprites read as competing spherical clouds and
+      // the user wants only the BCS gas visible. Timers still tick down
+      // as before in case we re-enable conditionally.
+      if (this._cloudTimerA <= 0) this._cloudTimerA = 0.80 + Math.random() * 0.60;
+      if (this._cloudTimerB <= 0) this._cloudTimerB = 0.85 + Math.random() * 0.60;
 
       // ---- Electric accents on top of the body cloud ----
-      // Same additive electric sprites as before but FEWER, smaller, less
-      // bright. They read as energy threading through the occluding smoke,
-      // not as the smoke itself.
-      if (!this._smokeTimer) this._smokeTimer = 0.20 + Math.random() * 0.25;
+      // (v14e tune 6) Per-cluster electric-sprite spawn rate dialed WAY
+      // down. Was 0.30-0.65s = 1-3 sprites/sec per cluster ; with multiple
+      // intact clusters in view the whole arena read as constantly
+      // electrically active. Bumped to 4-10s so each cluster only pops
+      // every several seconds. Detail count + big-discharge gate also
+      // tightened so when sprites do appear they're sparser.
+      if (!this._smokeTimer) this._smokeTimer = 1.5 + Math.random() * 2.0;
       this._smokeTimer -= dt;
       if (this._smokeTimer <= 0 && inRange && typeof spawnElectricSmoke === 'function') {
-        this._smokeTimer = 0.30 + Math.random() * 0.35;
-        // 1 puff usually, occasionally 2.
-        const detailCount = 1 + (Math.random() < 0.30 ? 1 : 0);
-        for (let p = 0; p < detailCount; p++) {
-          spawnElectricSmoke(this.position, this.clusterScale, {
-            size: this.clusterScale * (1.2 + Math.random() * 0.6),
-            color: (Math.random() < 0.7) ? 0xb8dcff : 0xc0a0ff,
-            offsetMul: 0.2 + Math.random() * 0.2,    // tight spread inside cloud
-          });
-        }
+        this._smokeTimer = 4.0 + Math.random() * 6.0;
+        // (v14e tune 6) Single puff per spawn ; the 30%-chance second puff
+        // doubled the visible activity rate.
+        spawnElectricSmoke(this.position, this.clusterScale, {
+          size: this.clusterScale * (1.2 + Math.random() * 0.6),
+          color: (Math.random() < 0.7) ? 0xb8dcff : 0xc0a0ff,
+          offsetMul: 0.2 + Math.random() * 0.2,
+        });
         // Rare big-cluster discharge flash.
-        if (this.clusterScale > 90 && Math.random() < 0.15) {
+        // (v14e tune 6) Probability halved (0.15 -> 0.06).
+        if (this.clusterScale > 90 && Math.random() < 0.06) {
           spawnElectricSmoke(this.position, this.clusterScale, {
             size: this.clusterScale * 1.4,
             color: 0xd0a8ff,
@@ -16665,21 +17441,17 @@ class ClusterObstacle {
           }
         }
       } catch (_e) {}
-      // (v8_2a chemistry) When a cluster dies, promote some of its energy
-      // into independent ambient cloud dots so the smoke survives the
-      // destruction. 2-4 dots spawn at random offsets from the cluster
-      // center, drifting outward, with phases inherited from the cluster
-      // (so they tend to bond with each other, forming a "memory" of the
-      // dead cluster's location). They live in the dot system, fully
-      // independent of this cluster object.
+      // (v14e tune) Re-enabled the v8_2a "cluster memory" spawn block but
+      // RE-WIRED to spawn new BCS GasCloud objects instead of the old
+      // v8_2a Dot+smokeMesh pairs. Each spawn pushes the GasCloud into
+      // game.detachedGasPockets so the existing drift/wake/wall-collision/
+      // chemistry/lighting systems all pick it up automatically. Gas thus
+      // lingers at the dead cluster's position and drifts outward,
+      // continuing to react to ships and projectiles until round-end.
       try {
-        if (typeof spawnDot === 'function' &&
-            typeof _SMOKE_GEO !== 'undefined' &&
-            typeof _makeSmokeMaterial === 'function') {
-          // Cluster's signature phase: derived from the cluster's id-ish
-          // identity (its initial position) so all dots from this cluster
-          // share an inheritance.
-          const _clusterPhase = ((this.position.x + this.position.y * 7 + this.position.z * 13) * 0.001) % (Math.PI * 2);
+        if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem &&
+            typeof GasCloud === 'function' &&
+            game && game.detachedGasPockets) {
           const _spawnN = 2 + Math.floor(Math.random() * 3); // 2..4
           for (let _k = 0; _k < _spawnN; _k++) {
             const _theta = Math.random() * Math.PI * 2;
@@ -16697,42 +17469,25 @@ class ClusterObstacle {
               Math.cos(_phi) * 0.4,
               _sinP * Math.sin(_theta),
             ).multiplyScalar(20 + Math.random() * 30);
-            const _mat = _makeSmokeMaterial(0x080812, 1.0);
-            if (_mat.uniforms && _mat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
-              _mat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
-            }
-            const _mesh = new THREE.Mesh(_SMOKE_GEO, _mat);
-            _mesh.scale.setScalar(_size);
-            _mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
-            _mesh.frustumCulled = true;
-            _mesh.renderOrder = 1;
-            // Inherit the cluster phase with a small random offset so they
-            // bond strongly to each other but not lockstep.
-            const _phaseJitter = (Math.random() - 0.5) * 0.6;
-            const _dot = spawnDot(_pos, {
-              // (v9) Indestructible ; the cluster's smoke memory lives on.
-              lifetime: Infinity,
-              growthDuration: 3.0 + Math.random() * 3.0,
-              radius: _size,
-              velocity: _drift,
-              collidable: true,
-              playerWake: true,
-              emitsLightning: true,
-              arcRadius: _size * 0.5,
-              interArcRange: 900,
-              hueCycleMaterial: _mat,
-              hueSpeed: 0.08 + Math.random() * 0.06,
-              scaleGrowth: { baseScale: _size, maxFactor: 1.6 },
-              fadeOut: { alphaMul: 0.4 },
-              clusterAttraction: true,
-              attractStrength: 35,
-              attractRange: 1800,
-              orbitBoost: 0.4,
-              phase: _clusterPhase + _phaseJitter,
+            // (v14e Phase 6) Build a BCS GasCloud with the same per-atom
+            // preset (gray with diversity, soft alpha, FBM-noise sprites).
+            // Detach immediately into game.detachedGasPockets so the
+            // existing drift / wake / wall-collision / chemistry-lightning /
+            // projectile-lighting / round-rebuild systems all pick it up
+            // without further wiring. The cluster phase is no longer used
+            // since BCS clouds bond via spatial chemistry, not phase tags.
+            const _v = 0.20 + Math.random() * 0.30;
+            const _cloudColor = new THREE.Color(_v, _v, _v);
+            const _cloud = new GasCloud(billboardCloudSystem, _pos, {
+              boundsRadius:   _size,
+              spriteScale:    _size * 1.55,
+              spriteScaleVar: 0.50,
+              alpha:          0.75,
+              color:          _cloudColor,
+              colorJitter:    0.14,
+              segments:       13,
             });
-            _dot._isAmbientCloud = true;
-            _dot._fromDeadCluster = true;       // marker (potential later use)
-            _dot.attachMesh(_mesh);
+            game.detachedGasPockets.push({ gasCloud: _cloud, velocity: _drift });
           }
         }
       } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
@@ -16845,6 +17600,8 @@ function spawnDynamicObjects(rooms) {
   }
   game.dynamicObjects = [];
   game.clusters = [];
+  // (v14d Phase 4) Wipe detached gas pockets when the world is rebuilt.
+  if (typeof disposeAllDetachedGasPockets === 'function') disposeAllDetachedGasPockets();
 
   // Place cluster obstacles in non-spawn rooms (center, flanking, etc.)
   const nonSpawnRooms = rooms.filter(r => !r.team);
@@ -16883,10 +17640,199 @@ function spawnDynamicObjects(rooms) {
   }
 }
 
+// (v14d Phase 4) Drift detached gas pockets. Each frame, advance their
+// position by their velocity and apply a slight drag so they slow over
+// time without coming to a hard stop. (Phase 2) Wall collision: query the
+// world SDF at each pocket's position ; if too close to a wall, push the
+// pocket inward along the SDF gradient and damp velocity component going
+// into the wall, so gas can't escape playable space.
+const _gasSDFNormal = new THREE.Vector3(); // scratch for sdfNormal
+function updateDetachedGasPockets(dt) {
+  if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
+  for (const p of game.detachedGasPockets) {
+    if (!p) continue;
+    // (v14e) p.gasCloud stores a GasCloud (swarm of billboards). Drift the
+    // cloud's center, then push that center to all owned billboards via
+    // setPosition. Legacy entries that still have p.mesh (mesh-based
+    // detached pockets from a hot-reload) drift the mesh directly.
+    const center = p.gasCloud ? p.gasCloud.position : (p.mesh && p.mesh.position);
+    if (!center) continue;
+    center.addScaledVector(p.velocity, dt);
+    // Drag: damp velocity by ~3% per second. Gas slows but never quite
+    // settles, which keeps the map alive without ping-ponging.
+    p.velocity.multiplyScalar(Math.pow(0.97, dt));
+
+    // (Phase 2) Wall repulsion via worldSDF. SDF semantics: negative =
+    // inside playable space, positive = inside wall / outside playable.
+    // sdfNormal returns the outward gradient. Soft buffer = ~40% of the
+    // cloud's bounds radius, so gas stops a comfortable distance before
+    // clipping the wall.
+    if (typeof worldSDF !== 'function' || typeof sdfNormal !== 'function') {
+      // Even without SDF, push the GasCloud's billboards to the new center.
+      if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
+      continue;
+    }
+    const d = worldSDF(center.x, center.y, center.z);
+    const radius = p.gasCloud ? p.gasCloud.boundsRadius : (p.mesh ? p.mesh.scale.x : 30) || 30;
+    const buffer = radius * 0.4;
+    if (d > -buffer) {
+      sdfNormal(center.x, center.y, center.z, _gasSDFNormal);
+      if (d > 0) {
+        center.addScaledVector(_gasSDFNormal, -(d + buffer));
+      } else {
+        const proximity = (d + buffer) / buffer;
+        center.addScaledVector(_gasSDFNormal, -proximity * dt * 60);
+      }
+      const vDotN = p.velocity.x * _gasSDFNormal.x +
+                    p.velocity.y * _gasSDFNormal.y +
+                    p.velocity.z * _gasSDFNormal.z;
+      if (vDotN > 0) {
+        p.velocity.addScaledVector(_gasSDFNormal, -vDotN * 1.3);
+      }
+    }
+    // Now push the (possibly corrected) center to the owned billboards.
+    if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
+  }
+}
+
+// (v14d Phase 5) Chemistry between gas pockets. Pairwise distance check
+// among detached pockets + each detached pocket against every cluster
+// center. When two participants are within reaction radius:
+//   - Both have their LayeredFX uIntensity boosted, which scales layer
+//     time-rates via the Tranche 1.5 feature ; the gas visibly churns
+//     faster as a "this is reactive" cue.
+//   - Periodically (per-pocket spark timer), a white/gray lightning arc
+//     fires between them via spawnLightningBolt.
+// Reaction radii are generous so the chemistry triggers when pockets
+// approach each other / a cluster, not just on direct overlap.
+// Performance: O(D^2 + D*C) where D is detached pockets and C is
+// clusters. With typical D <= 50 and C <= 15, that's ~2000 pair checks
+// per frame ; cheap.
+// (v14e tune 5) Reaction radii dialed down. Detached pockets only react
+// with neighbors that are very close ; cluster reaction radius shrunk
+// hard from 350 to 200 because clusters are many + stationary, so they
+// were the dominant source of constant arcs even at sparse spark rates.
+const GAS_REACT_RADIUS         = 200;   // detached vs detached
+const GAS_REACT_RADIUS_SQ      = GAS_REACT_RADIUS * GAS_REACT_RADIUS;
+const GAS_CLUSTER_REACT_RADIUS = 200;   // detached vs cluster center
+const GAS_CLUSTER_REACT_RADIUS_SQ = GAS_CLUSTER_REACT_RADIUS * GAS_CLUSTER_REACT_RADIUS;
+// (v14e tune 5) Spark intervals dialed up further (was 3-8s). With many
+// detached pockets accumulating over a round, even 5s avg looks constant
+// on screen because pockets stagger out of phase. 12-30s puts the spark
+// rate down to one arc every couple of seconds across the whole map.
+const GAS_SPARK_INTERVAL_MIN   = 12.0;
+const GAS_SPARK_INTERVAL_MAX   = 30.0;
+const GAS_ARC_COLOR            = 0xddddee; // soft white-blue
+
+// (v14e) Per-pocket position helper. Returns Vector3 of the pocket's
+// world center regardless of whether it's a GasCloud or a legacy mesh.
+function _gasPocketCenter(p) {
+  if (!p) return null;
+  if (p.gasCloud) {
+    // (v14e fix) Skip clouds whose slots have been released ; their
+    // position field still exists but they render nothing, so firing
+    // arcs at them produces "lightning with nothing there."
+    if (!p.gasCloud.slots || p.gasCloud.slots.length === 0) return null;
+    return p.gasCloud.position;
+  }
+  if (p.mesh && p.mesh.position) return p.mesh.position;
+  return null;
+}
+
+function updateGasChemistry(dt) {
+  if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
+  const pockets = game.detachedGasPockets;
+
+  // Decrement each pocket's spark cooldown. (v14e: GasCloud has no
+  // intensity uniform like the v14d sphere shader did ; intensity boost
+  // for billboards would mean alpha pulse or similar, ship without it
+  // for Phase 1 and revisit if needed.)
+  for (let i = 0; i < pockets.length; i++) {
+    const p = pockets[i];
+    if (!p) continue;
+    if (p._sparkTimer === undefined) p._sparkTimer = Math.random() * GAS_SPARK_INTERVAL_MAX;
+    p._sparkTimer -= dt;
+  }
+
+  // Detached x detached pairs.
+  for (let i = 0; i < pockets.length; i++) {
+    const a = pockets[i];
+    const ap = _gasPocketCenter(a);
+    if (!ap) continue;
+    for (let j = i + 1; j < pockets.length; j++) {
+      const b = pockets[j];
+      const bp = _gasPocketCenter(b);
+      if (!bp) continue;
+      const dx = ap.x - bp.x, dy = ap.y - bp.y, dz = ap.z - bp.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > GAS_REACT_RADIUS_SQ) continue;
+      const dist = Math.sqrt(d2);
+      const intensity = 1.0 + (1.0 - dist / GAS_REACT_RADIUS) * 1.6;
+      // Spark fires only off pocket A's timer (one spark per pair attempt).
+      if (a._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
+        spawnLightningBolt(ap, bp, GAS_ARC_COLOR, 0.10, 1, 1.0);
+        a._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
+      }
+    }
+  }
+
+  // Detached x cluster pairs (free-floating gas reacts to nearby rocks).
+  if (game.clusters && game.clusters.length > 0) {
+    for (let i = 0; i < pockets.length; i++) {
+      const p = pockets[i];
+      const pp = _gasPocketCenter(p);
+      if (!pp) continue;
+      for (let k = 0; k < game.clusters.length; k++) {
+        const cl = game.clusters[k];
+        if (!cl || !cl.position) continue;
+        // (v14e fix) Skip dead clusters. The cluster object lingers in the
+        // array (alive=false, awaiting respawn or permanently retired) but
+        // its position no longer corresponds to anything visible in world.
+        // Without this check, detached gas pockets fire arcs to ghost
+        // cluster centers where there is "nothing there but lightning."
+        if (cl.alive === false || cl.broken) continue;
+        const dx = pp.x - cl.position.x, dy = pp.y - cl.position.y, dz = pp.z - cl.position.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > GAS_CLUSTER_REACT_RADIUS_SQ) continue;
+        const dist = Math.sqrt(d2);
+        const intensity = 1.0 + (1.0 - dist / GAS_CLUSTER_REACT_RADIUS) * 1.0;
+        if (p._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
+          spawnLightningBolt(pp, cl.position, GAS_ARC_COLOR, 0.10, 1, 1.0);
+          p._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
+        }
+      }
+    }
+  }
+}
+
+// (v14d Phase 4) Dispose all detached gas pockets ; called from the
+// round-rebuild path when game.clusters is reset to empty.
+function disposeAllDetachedGasPockets() {
+  if (!game.detachedGasPockets) return;
+  for (const p of game.detachedGasPockets) {
+    if (!p) continue;
+    // (v14e) GasCloud entries dispose via their own method (releases BCS
+    // slots). Legacy mesh entries dispose the old way.
+    if (p.gasCloud && typeof p.gasCloud.dispose === 'function') {
+      p.gasCloud.dispose();
+    } else if (p.mesh) {
+      if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+      if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
+    }
+  }
+  game.detachedGasPockets.length = 0;
+}
+
 function updateDynamicObjects(dt) {
   // Tick clusters first so intact children's positions follow the cluster rotation,
   // then tick individual pieces (broken fragments drift + check impacts)
   for (const cl of game.clusters) cl.update(dt);
+  // (v14d Phase 4) Drift any free-floating gas pockets after clusters tick.
+  updateDetachedGasPockets(dt);
+  // (v14d Phase 5) Pairwise chemistry between gas pockets (and pockets vs
+  // cluster centers). Boosts uIntensity on participants ; spawns lightning
+  // arcs at random intervals.
+  if (typeof updateGasChemistry === 'function') updateGasChemistry(dt);
   // Prune dead cluster children out of game.dynamicObjects
   for (let i = game.dynamicObjects.length - 1; i >= 0; i--) {
     const obj = game.dynamicObjects[i];
@@ -24720,6 +25666,11 @@ function returnToRootMenu() {
     game.dynamicObjects = [];
   }
   if (game.clusters) game.clusters = [];
+  // (v14d Phase 4) Detached gas pockets accumulated during the round are
+  // anchored to no-longer-existing rocks ; clear them at world rebuild
+  // alongside the cluster reset. Per the user spec, gas persists "until
+  // all rocks and gas are redrawn in the next round" ; this is that.
+  if (typeof disposeAllDetachedGasPockets === 'function') disposeAllDetachedGasPockets();
   // Champion field bookkeeping ; otherwise the next match might inherit
   // a stale champion claim or banner state.
   game.championField = null;
@@ -31760,6 +32711,9 @@ function applyWorldObjectsManifest(clusterEntries) {
   }
   game.clusters = [];
   game.dynamicObjects = [];
+  // (v14d Phase 4) MP receiver world-rebuild ; clear any detached gas
+  // pockets from the previous round on this side of the mesh too.
+  if (typeof disposeAllDetachedGasPockets === 'function') disposeAllDetachedGasPockets();
 
   // Rebuild from the manifest. ClusterObstacle's config-aware constructor
   // takes the entry directly; child layouts come from entry.children.
@@ -35551,6 +36505,22 @@ function gameLoop(timestamp) {
   // self-register on construction and self-deregister on dispose.
   if (typeof _layeredFXTick === 'function') _layeredFXTick(game.time);
 
+  // (v14d Phase 3) Populate dynamic-light uniforms on gas materials so
+  // projectiles paint their color into nearby gas. Runs after the FX
+  // tick so the shader sees current uTime + current light positions in
+  // the same frame.
+  if (typeof updateGasLighting === 'function') updateGasLighting();
+  // (v14e Phase 3) Push projectile lights into the BCS gas-cloud material
+  // so the gas absorbs the projectile's class color when shots fly close.
+  if (typeof updateBCSLighting === 'function') updateBCSLighting();
+  // (v14e wakes) Push wake impulses from ships + projectiles into nearby
+  // gas sprites and decay existing wake offsets back toward zero. Gas
+  // visibly drifts when something moves through it, settles when the
+  // motion source leaves. Uses game.deltaTime directly because the gameLoop's
+  // local `dt` (which factors in hitstop time-dilation) isn't computed
+  // until later in the frame.
+  if (typeof updateBCSWakes === 'function') updateBCSWakes(game.deltaTime || 0.016);
+
   // (v12) Google Maps Photorealistic 3D Tiles per-frame update. The tile
   // renderer streams tiles in / disposes far ones based on camera
   // position; calling update() each frame keeps the LOD pyramid current.
@@ -35681,7 +36651,14 @@ function gameLoop(timestamp) {
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
   if (_vrPerfTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
-  if (_vrPerfTier < 1) updateAmbientClouds(dt); else clearAmbientCloudDots(); // (v8_2a) ambient cloud spawner
+  // (v14e) v8_2a's ambient-cloud Dot system is disabled in this fork.
+  // The user identified its drifting "dots with spheres" as a previous
+  // cloud experiment that's now visually competing with the new
+  // BillboardCloudSystem-based gas. clearAmbientCloudDots() runs every
+  // frame so any existing ambient cloud dots get disposed and no new
+  // ones spawn. If we want the ambient drifters back, swap this back to
+  // the conditional updateAmbientClouds(dt) call.
+  clearAmbientCloudDots();
   if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
