@@ -23,6 +23,13 @@ const DISCORD_API = 'https://discord.com/api/v10';
 const LEADERBOARD_TTL_SEC = 60;       // KV cache TTL for top-N
 const ROOM_TTL_SEC        = 90;       // KV TTL for room heartbeats
 const RECENT_ROOM_WINDOW_MS = 75_000; // older rooms filtered out of /rooms
+// (v15 lobby) Presence TTL = 2x heartbeat interval, so a single missed beat
+// doesn't drop the player. Heartbeat-rate limit gives 5s of slack vs the
+// 30s client cadence ; rejects calls < 25s apart per user with 429.
+const PRESENCE_TTL_SEC      = 60;
+const HEARTBEAT_MIN_GAP_MS  = 25_000;
+const LOBBY_LIST_DEFAULT_CAP = 100;
+const LOBBY_LIST_MAX_CAP     = 250;   // hard ceiling for ?limit param
 
 // ---------- CORS / response helpers ----------------------------------
 
@@ -688,24 +695,101 @@ function decoratePlayerStats(p) {
 // object. Stubs echo identity back so the client can verify "yes, the
 // worker saw me as the right Discord user."
 
+// Compute server-side `available` + `scoopable` flags from a presence
+// record. Centralized so /lobby/list and any future fan-out reuse the
+// same logic. v15 rule: solo players are invitable (available:true) but
+// NOT scoopable. Multi players with an open lobby seat are both available
+// and scoopable. Anyone in warmup/playing/round_end/match_end is busy.
+function computeLobbyFlags(p) {
+  const status = p && p.status;
+  const mode   = p && p.mode;
+  const roomFull = !!(p && p.roomFull);
+  if (mode === 'solo') {
+    return { available: true, scoopable: false };
+  }
+  if (mode === 'multi' && !roomFull && (status === 'lobby' || status === 'idle' || !status)) {
+    return { available: true, scoopable: true };
+  }
+  return { available: false, scoopable: false };
+}
+
 async function handleLobbyHeartbeat(request, env, origin) {
   const user = await requireAuth(request);
-  return jsonResponse(200, { ok: true, stub: true, you: user.id }, env, origin);
+  let body = {};
+  try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
+
+  // Rate limit : reject calls less than HEARTBEAT_MIN_GAP_MS apart per user
+  // so a buggy or malicious client can't inflate the bill. 5s slack vs the
+  // 30s client cadence handles legitimate jitter.
+  const key = 'presence:' + user.id;
+  const existing = await env.ROOMS.get(key, 'json');
+  const now = Date.now();
+  if (existing && existing.lastSeen && (now - existing.lastSeen) < HEARTBEAT_MIN_GAP_MS) {
+    return jsonResponse(429, {
+      error: 'too_many_heartbeats',
+      retryAfter: Math.ceil((HEARTBEAT_MIN_GAP_MS - (now - existing.lastSeen)) / 1000),
+    }, env, origin);
+  }
+
+  // Avatar URL : same shape as the leaderboard / room heartbeat already use.
+  const avatarUrl = user.avatar
+    ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`
+    : null;
+
+  const presence = {
+    id:        user.id,
+    username:  user.global_name || user.username,
+    avatar:    avatarUrl,
+    ship:      typeof body.ship === 'string' ? body.ship : null,
+    team:      (body.team === 'A' || body.team === 'B') ? body.team : null,
+    status:    typeof body.status === 'string' ? body.status : 'lobby',
+    mode:      (body.mode === 'multi') ? 'multi' : 'solo',
+    roomId:    typeof body.roomId === 'string' ? body.roomId : null,
+    roomFull:  !!body.roomFull,
+    matchSize: (body.matchSize && typeof body.matchSize === 'object')
+                 ? { current: Number(body.matchSize.current || 1), max: Number(body.matchSize.max || 6) }
+                 : { current: 1, max: 6 },
+    lastSeen:  now,
+  };
+  await env.ROOMS.put(key, JSON.stringify(presence), { expirationTtl: PRESENCE_TTL_SEC });
+  return jsonResponse(200, { ok: true }, env, origin);
 }
 
 async function handleLobbyList(request, env, origin) {
-  const user = await requireAuth(request);
-  return jsonResponse(200, {
-    stub: true,
-    you: user.id,
-    players: [],
-    total: 0,
-  }, env, origin);
+  await requireAuth(request);
+  const url = new URL(request.url);
+  const limit = Math.min(
+    Math.max(1, parseInt(url.searchParams.get('limit') || String(LOBBY_LIST_DEFAULT_CAP), 10) || LOBBY_LIST_DEFAULT_CAP),
+    LOBBY_LIST_MAX_CAP,
+  );
+  const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+
+  const list = await env.ROOMS.list({ prefix: 'presence:' });
+  const players = [];
+  // KV.list returns key metadata only ; one .get per key for the full
+  // record. Worker free tier handles a few hundred keys per request fine.
+  for (const k of list.keys) {
+    const p = await env.ROOMS.get(k.name, 'json');
+    if (!p) continue;
+    const flags = computeLobbyFlags(p);
+    players.push({ ...p, ...flags });
+  }
+  // Sort: available first, then alpha by username for stable display.
+  players.sort((a, b) => {
+    if (a.available !== b.available) return a.available ? -1 : 1;
+    const an = (a.username || '').toLowerCase();
+    const bn = (b.username || '').toLowerCase();
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  });
+  const total = players.length;
+  const page  = players.slice(offset, offset + limit);
+  return jsonResponse(200, { players: page, total, limit, offset }, env, origin);
 }
 
 async function handleLobbyLeave(request, env, origin) {
   const user = await requireAuth(request);
-  return jsonResponse(200, { ok: true, stub: true, you: user.id }, env, origin);
+  await env.ROOMS.delete('presence:' + user.id);
+  return jsonResponse(200, { ok: true }, env, origin);
 }
 
 async function handleLobbyInvite(request, env, origin) {
