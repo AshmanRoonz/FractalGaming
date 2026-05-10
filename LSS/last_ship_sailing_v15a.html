@@ -33858,6 +33858,14 @@ function applyMultiLayerPreset(idx) {
     if (u.texBlend) u.texBlend.value = -1;
     return false;
   }
+  // (v15 backport 2026-05-10) Reset per-layer time multipliers to 1.0 before
+  // applying the preset, so cycling from a preset that froze a layer
+  // (e.g. bgTime=0) to one that doesn't specify bgTime doesn't leave
+  // the new preset's BG frozen. fgTime/fg2Time get the same treatment
+  // for symmetry. Presets that DO specify these override below.
+  if (u.bgTime)  u.bgTime.value  = 1.0;
+  if (u.fgTime)  u.fgTime.value  = 1.0;
+  if (u.fg2Time) u.fg2Time.value = 1.0;
   for (const k of Object.keys(preset)) {
     if (u[k]) u[k].value = preset[k];
   }
@@ -33878,16 +33886,15 @@ function applyMultiLayerPreset(idx) {
       u.uCompositeTint.value.set(0.5, 0.6, 0.85);
     }
   }
-  // (v13r) Optional _blackBase preset hint. Some presets (Race Glow at 29
-  // in the v15 lineage, since removed in v15a) only read correctly when
-  // Pure Black Base is OFF ; flipping it here as part of selecting the
-  // preset means the user doesn't have to dive into settings to see the
-  // intended look.
-  // (v15a fix 2026-05-10) Presets WITHOUT the hint now force BlackBase
-  // back to the default (ON / 1) so cycling out of a hinted preset doesn't
-  // leave the rest of the lineup stuck in the wrong rendering mode.
-  // Previously the hint was sticky : once flipped OFF, every following
-  // preset inherited that state and read wrong.
+  // (v13r) Optional _blackBase preset hint. Some presets (Race Glow at 29)
+  // only read correctly when Pure Black Base is OFF ; flipping it here as
+  // part of selecting the preset means the user doesn't have to dive into
+  // settings to see the intended look.
+  // (v15 fix 2026-05-10) Presets WITHOUT the hint now force BlackBase back
+  // to the default (ON / 1) so cycling out of Race Glow doesn't leave the
+  // rest of the lineup stuck in the wrong rendering mode. Previously the
+  // hint was sticky : once Race Glow flipped it OFF, every following preset
+  // inherited that state and read wrong.
   if (typeof setWallBlackBase === 'function') {
     try {
       const want = (typeof preset._blackBase === 'number') ? !!preset._blackBase : true;
@@ -36177,7 +36184,7 @@ function buildRoomGraphLevel(level) {
       'uniform int   fgBlend, fg2Blend;',
       'uniform float fgAlpha, fg2Alpha;',
       'uniform float fgHue,   fg2Hue;',
-      'uniform float fgTime,  fg2Time;',
+      'uniform float fgTime,  fg2Time, bgTime;',
       // (v14) 4th composite layer : texture sampled triplanar.
       // texBlend < 0 disables the layer (default).
       'uniform sampler2D uWallTex;',
@@ -36911,8 +36918,13 @@ function buildRoomGraphLevel(level) {
       '}',
       // Composite three pattern layers + one texture layer into the
       // final cosmic contribution.
+      // (v15 backport 2026-05-10) BG layer multiplies tt by bgTime, matching
+      // the lab. Previously BG was passed raw tt while FG1/FG2 used
+      // tt * fgTime / tt * fg2Time, so a preset designed in the lab with
+      // bgTime != 1.0 (especially bgTime = 0 to freeze the BG) animated
+      // differently in-game than in the editor.
       'vec3 cosmicField(vec3 wp, vec3 zoneC, float tt) {',
-      '  vec3 col = sampleWallPattern(bgPatternId, wp, zoneC, tt,',
+      '  vec3 col = sampleWallPattern(bgPatternId, wp, zoneC, tt * bgTime,',
       '    u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;',
       '  if (fgPatternId >= 0) {',
       '    vec3 fg1 = sampleWallPattern(fgPatternId, wp, zoneC, tt * fgTime,',
@@ -37260,6 +37272,11 @@ function buildRoomGraphLevel(level) {
         fgBlend:       { value: 1 },  // Mix
         fgHue:         { value: 0 },
         fgTime:        { value: 1 },
+        // (v15 backport 2026-05-10) bgTime uniform added so MULTI_LAYER_PRESETS
+        // bgTime values actually take effect in-game (previously dropped
+        // silently because the uniform didn't exist). Default 1.0 keeps
+        // legacy behavior for presets that don't specify bgTime.
+        bgTime:        { value: 1 },
         u_iters_fg:    { value: 3 },
         u_scale_fg:    { value: 0.0011 },
         u_invBase_fg:  { value: 9 },
