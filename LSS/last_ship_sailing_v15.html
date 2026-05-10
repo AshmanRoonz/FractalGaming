@@ -38956,7 +38956,13 @@ function initAudio() {
     // set on the explosion case. Output mixes into the shared reverb bus so the long
     // tail carries the same mix/duck/compression path as the rest of the wet signal.
     audio.convolverLong = audio.ctx.createConvolver();
-    audio.convolverLong.buffer = generateImpulseResponse(audio.ctx, 5.0, 2.2, 0.030);
+    // (v15 2026-05-10 cost reduction) Long reverb IR shortened from 5.0 s
+    // to 2.5 s. WebAudio convolution cost scales with IR length ; the 5 s
+    // tail was the most expensive node in the whole audio graph and a
+    // significant contributor to underruns during heavy SFX while
+    // recording. 2.5 s still gives a noticeable halo on explosions ; the
+    // long-tail character isn't worth the CPU under combat load.
+    audio.convolverLong.buffer = generateImpulseResponse(audio.ctx, 2.5, 2.2, 0.030);
     audio.reverbLongGain = audio.ctx.createGain();
     audio.reverbLongGain.gain.value = 0.18; // low wet level; noticeable as halo, not splash
     audio.convolverLong.connect(audio.reverbLongGain);
@@ -39358,6 +39364,11 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
   const CHORUS_DETUNE_CENTS = 5;
   const CHORUS_MIX = 0.30;
   const safeWave = _safeOscType(wave);
+  // (v15 2026-05-10 stress) Snapshot stress state once at call time so all
+  // voices in this chord share the same simplified routing. Skips chorus
+  // (halves oscillator count) and reverb sends (removes convolution input)
+  // when the audio thread is under sustained load.
+  const stressed = _audioStressed;
   freqs.forEach((freq, i) => {
     // Main oscillator and shared envelope gain
     const osc = ctx.createOscillator();
@@ -39383,28 +39394,33 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
     osc.connect(gain);
 
-    // Chorus partner: same envelope, detuned Â±5 cents (alternating sign per i for stereo spread)
-    const chorusOsc = ctx.createOscillator();
-    const chorusGain = ctx.createGain();
-    chorusOsc.type = safeWave;
-    chorusOsc.frequency.setValueAtTime(freq, now);
-    chorusOsc.detune.setValueAtTime((i % 2 === 0 ? 1 : -1) * CHORUS_DETUNE_CENTS, now);
-    // (v14g) Same "0 means no ramp" fix as the main osc above.
-    if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
-      chorusOsc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
+    // Chorus partner: same envelope, detuned ±5 cents (alternating sign per i for stereo spread).
+    // (v15 stress) Skip chorus under load.
+    let chorusOsc = null;
+    if (!stressed) {
+      chorusOsc = ctx.createOscillator();
+      const chorusGain = ctx.createGain();
+      chorusOsc.type = safeWave;
+      chorusOsc.frequency.setValueAtTime(freq, now);
+      chorusOsc.detune.setValueAtTime((i % 2 === 0 ? 1 : -1) * CHORUS_DETUNE_CENTS, now);
+      if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
+        chorusOsc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
+      }
+      chorusGain.gain.value = CHORUS_MIX;
+      chorusOsc.connect(chorusGain);
+      chorusGain.connect(gain); // routes through the same ADSR envelope as main
     }
-    chorusGain.gain.value = CHORUS_MIX;
-    chorusOsc.connect(chorusGain);
-    chorusGain.connect(gain); // routes through the same ADSR envelope as main
 
     // Route to dry + reverb for spatial presence. If a spatial panner is active,
     // the dry tap goes through it so the source is HRTF-positioned in world space.
+    // (v15 stress) Skip reverb sends under load ; the existing reverb tail
+    // from prior shots covers the gap so it's not perceptually missing.
     const drySink = audio._spatialSink || audio.dryGain || audio.masterGain;
     gain.connect(drySink);
-    if (audio.convolver) gain.connect(audio.convolver);
-    if (audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+    if (!stressed && audio.convolver) gain.connect(audio.convolver);
+    if (!stressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
     osc.start(now); osc.stop(now + dur + 0.01);
-    chorusOsc.start(now); chorusOsc.stop(now + dur + 0.01);
+    if (chorusOsc) { chorusOsc.start(now); chorusOsc.stop(now + dur + 0.01); }
   });
 }
 
@@ -44384,8 +44400,9 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
   head.connect(gain);
   const drySink = audio._spatialSink || audio.dryGain || audio.masterGain;
   gain.connect(drySink);
-  if (audio.convolver) gain.connect(audio.convolver);
-  if (audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  // (v15 stress) Skip reverb sends under load to recover audio thread CPU.
+  if (!_audioStressed && audio.convolver) gain.connect(audio.convolver);
+  if (!_audioStressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
   src.start(startTime);
 }
 
@@ -44665,6 +44682,15 @@ const _lastSoundTime = {};
 const _AUDIO_VOICE_BUDGET = 16;
 const _AUDIO_VOICE_WINDOW = 0.4;
 const _audioRecentVoices = [];           // ctx-time stamps of recent plays
+// (v15 2026-05-10 stress system) When the budget is 70%+ full, the audio
+// thread is under sustained load. Downstream synth code (triChord,
+// _runLabNoiseLayer) checks this flag and degrades gracefully : skip
+// chorus oscillator (halves voice oscillator count), skip reverb send
+// (removes convolution input). The sound still plays ; it just doesn't
+// add expensive partners. This recovers headroom during peaks so the
+// audio thread doesn't underrun under recording CPU load.
+let _audioStressed = false;
+const _AUDIO_STRESS_RATIO = 0.7;
 // Sounds that are OK to skip when over budget (cosmetic, replaceable).
 // Critical sounds (death, round_start, ability) always pass through.
 // (v15 backport 2026-05-10) Expanded skippable list so the budget has
@@ -44692,6 +44718,15 @@ function playSound(type) {
     return;
   }
   _audioRecentVoices.push(_ctxT);
+  // (v15 stress system) Update the stress flag for downstream synth code
+  // to read. Sticky : once we cross the threshold, stays on until budget
+  // drops well below. Hysteresis avoids rapid flapping during borderline
+  // load. Threshold set so normal combat (~10 voices/0.4s) stays unstressed
+  // while sustained heavy fire (~12+/0.4s) triggers degradation.
+  const stressOn  = _AUDIO_VOICE_BUDGET * _AUDIO_STRESS_RATIO;       // ~11
+  const stressOff = _AUDIO_VOICE_BUDGET * (_AUDIO_STRESS_RATIO - 0.2); // ~8
+  if (!_audioStressed && _audioRecentVoices.length >= stressOn) _audioStressed = true;
+  else if (_audioStressed && _audioRecentVoices.length <= stressOff) _audioStressed = false;
   // Rate-limit per type. ctx.currentTime is monotonic and tracks audio-thread
   // time, which is what we actually want here (real time can drift if the
   // tab loses focus).
