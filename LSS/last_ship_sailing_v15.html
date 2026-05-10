@@ -1804,6 +1804,20 @@ body.vr-active .hit-marker {
                  cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
           onmouseover="this.style.background='rgba(255,170,0,0.30)'"
           onmouseout="this.style.background='rgba(255,170,0,0.15)'">CREATE ROOM</button>
+        <!-- (v15 step 6) In-room actions ; rendered hidden, swapped in by
+             _lobbyRenderInRoom when the worker says we're in a room. -->
+        <button id="btn-scoop-all" type="button" style="display:none;
+                 background:rgba(255,170,0,0.15);border:1px solid #ffaa00;color:#ffaa00;
+                 padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
+                 cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
+          onmouseover="this.style.background='rgba(255,170,0,0.30)'"
+          onmouseout="this.style.background='rgba(255,170,0,0.15)'">SCOOP ALL</button>
+        <button id="btn-leave-room" type="button" style="display:none;
+                 background:transparent;border:1px solid #666;color:#888;
+                 padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
+                 cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
+          onmouseover="this.style.borderColor='#aaa';this.style.color='#ddd'"
+          onmouseout="this.style.borderColor='#666';this.style.color='#888'">LEAVE ROOM</button>
       </div>
       <div id="lobby-players" style="font-size:11px;color:#ccc;display:flex;flex-direction:column;gap:4px;
            max-height:220px;overflow-y:auto;padding:4px 0;border-top:1px solid rgba(100,100,120,0.2);
@@ -3024,22 +3038,132 @@ function _lobbyEscapeText(s) {
 function _lobbyRender(data, selfId) {
   const players = (data && Array.isArray(data.players)) ? data.players : [];
   const total   = (data && typeof data.total === 'number') ? data.total : players.length;
+  // (v15 step 6) Sync server-side room state into local cache + trigger
+  // Trystero handoff if needed. Done here (not just in tick) so optimistic
+  // updates from button clicks render immediately without waiting 5s.
+  const newRoom = (data && data.me && data.me.room) ? data.me.room : null;
+  const prevRoom = _lobbyState.myRoom || null;
+  _lobbyState.myRoom = newRoom;
+  if (newRoom && (!prevRoom || prevRoom.code !== newRoom.code)) {
+    _lobbyTrysteroJoinIfNeeded(newRoom.code);
+  }
+
   if (_lobbyState.countEl) {
     _lobbyState.countEl.textContent = total + (total === 1 ? ' player online' : ' players online');
   }
+
+  // Two views : in-room (server-driven) and browsing.
+  if (newRoom) {
+    _lobbyRenderInRoom(newRoom, selfId);
+  } else {
+    _lobbyRenderBrowsing(players, selfId);
+  }
+  _lobbySetStatus('updated ' + new Date().toLocaleTimeString());
+}
+
+function _lobbyRenderBrowsing(players, selfId) {
+  // Show Quick Match + Create Room ; hide in-room controls.
+  const qm = document.getElementById('btn-quick-match');
+  const cr = document.getElementById('btn-create-room');
+  const lr = document.getElementById('btn-leave-room');
+  const sc = document.getElementById('btn-scoop-all');
+  if (qm) qm.style.display = '';
+  if (cr) cr.style.display = '';
+  if (lr) lr.style.display = 'none';
+  if (sc) sc.style.display = 'none';
+
   if (!_lobbyState.playersEl) return;
   if (players.length === 0) {
     _lobbyState.playersEl.innerHTML = '<div style="color:#666;font-style:italic;padding:6px 4px;">no other players visible right now</div>';
-  } else {
-    const rows = [];
-    // Always pin self at top if present.
-    const self  = players.find(p => p.id === selfId);
-    const other = players.filter(p => p.id !== selfId);
-    if (self) rows.push(_lobbyRowHTML(self, true));
-    for (const p of other) rows.push(_lobbyRowHTML(p, false));
-    _lobbyState.playersEl.innerHTML = rows.join('');
+    return;
   }
-  _lobbySetStatus('updated ' + new Date().toLocaleTimeString());
+  const rows = [];
+  const self  = players.find(p => p.id === selfId);
+  const other = players.filter(p => p.id !== selfId);
+  if (self) rows.push(_lobbyRowHTML(self, true));
+  for (const p of other) rows.push(_lobbyRowHTML(p, false));
+  _lobbyState.playersEl.innerHTML = rows.join('');
+}
+
+function _lobbyRenderInRoom(room, selfId) {
+  // In-room view : code prominent, player list, Scoop / Leave actions.
+  const qm = document.getElementById('btn-quick-match');
+  const cr = document.getElementById('btn-create-room');
+  const lr = document.getElementById('btn-leave-room');
+  const sc = document.getElementById('btn-scoop-all');
+  if (qm) qm.style.display = 'none';
+  if (cr) cr.style.display = 'none';
+  if (lr) lr.style.display = '';
+  if (sc) sc.style.display = (room.hostId === selfId && room.players.length < room.maxSize) ? '' : 'none';
+
+  if (!_lobbyState.playersEl) return;
+  const seats = room.players.length + ' / ' + room.maxSize;
+  const visibility = room.isPublic ? 'public' : 'private';
+  let html = ''
+    + '<div style="display:flex;align-items:center;justify-content:space-between;'
+    + '            background:rgba(255,170,0,0.10);border:1px solid rgba(255,170,0,0.35);'
+    + '            border-radius:3px;padding:8px 10px;margin-bottom:6px;">'
+    + '  <div style="font-size:10px;color:#aaa;letter-spacing:2px;">ROOM CODE</div>'
+    + '  <div style="font-size:18px;color:#ffaa00;letter-spacing:6px;font-weight:bold;cursor:pointer;"'
+    + '       title="click to copy"'
+    + '       onclick="navigator.clipboard&&navigator.clipboard.writeText(\'' + _lobbyEscapeText(room.code) + '\');this.style.color=\'#66bb66\';setTimeout(()=>this.style.color=\'#ffaa00\',600);">'
+    +     _lobbyEscapeText(room.code)
+    + '  </div>'
+    + '  <div style="font-size:10px;color:#888;letter-spacing:1px;">' + seats + ' &middot; ' + visibility + '</div>'
+    + '</div>';
+  for (const p of room.players) {
+    const isSelf = (p.id === selfId);
+    const isHost = (p.id === room.hostId);
+    const avatar = p.avatar
+      ? '<img src="' + _lobbyEscapeText(p.avatar) + '" style="width:24px;height:24px;border-radius:50%;flex-shrink:0;">'
+      : '<div style="width:24px;height:24px;border-radius:50%;background:#333;flex-shrink:0;"></div>';
+    html += ''
+      + '<div style="display:flex;align-items:center;gap:8px;padding:4px 4px;'
+        + (isSelf ? 'background:rgba(255,170,0,0.06);border-radius:2px;' : '')
+        + '">'
+      + avatar
+      + '<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+        + '<span style="color:#ddd;">' + _lobbyEscapeText(p.username || 'unknown') + '</span>'
+        + (isSelf ? '<span style="color:#ffaa00;font-size:9px;letter-spacing:1px;margin-left:6px;">YOU</span>' : '')
+        + (isHost ? '<span style="color:#66bb66;font-size:9px;letter-spacing:1px;margin-left:6px;">HOST</span>' : '')
+      + '</div>'
+      + '</div>';
+  }
+  // Empty seats placeholder.
+  for (let i = room.players.length; i < room.maxSize; i++) {
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 4px;color:#444;font-style:italic;font-size:11px;">'
+         + '<div style="width:24px;height:24px;border-radius:50%;border:1px dashed #333;flex-shrink:0;"></div>'
+         + '<span>open seat</span>'
+         + '</div>';
+  }
+  _lobbyState.playersEl.innerHTML = html;
+}
+
+// (v15 step 6) Trystero handoff. The lobby UI is server-driven (we render
+// rooms purely from the worker's state) ; the underlying Trystero mesh is
+// what the actual game uses for P2P. When the server says "you're in
+// room X", we Trystero-join X if we aren't already, so by the time the
+// match starts everyone's already meshed.
+async function _lobbyTrysteroJoinIfNeeded(code) {
+  if (!code) return;
+  const target = String(code).toUpperCase();
+  const currentRoom = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId.toUpperCase() : null;
+  if (currentRoom === target) return;
+  // Skip if a join is already in flight ; flag prevents back-to-back polls
+  // from each spawning a parallel join while the first is still handshaking.
+  if (_lobbyState.trysteroJoining) return;
+  _lobbyState.trysteroJoining = true;
+  try {
+    const codeInput = document.getElementById('room-code');
+    if (codeInput) codeInput.value = target;
+    if (typeof window.joinRoom === 'function') {
+      await window.joinRoom();
+    }
+  } catch (e) {
+    console.warn('[v15 lobby] trystero join failed:', e);
+  } finally {
+    _lobbyState.trysteroJoining = false;
+  }
 }
 
 function _lobbyRowHTML(p, isSelf) {
@@ -3243,12 +3367,41 @@ async function _lobbyAcceptInvite(inviteId) {
       _lobbySetStatus('accept failed: ' + (data.error || res.status));
       return;
     }
-    _lobbySetStatus('accepted ; joining ' + (data.roomId || '') + ' (room handoff in step 6)');
-    // (Step 6 will wire) leaveTrysteroIfActive() then joinRoom(data.roomId).
+    // (v15 step 6) Worker has already added us to the room server-side
+    // and returns the full room ; apply optimistically + handoff to
+    // Trystero so the P2P mesh comes up before the next list poll.
+    if (data.room) {
+      _lobbyApplyRoom(data.room, 'joined ' + (data.room.code || ''));
+    } else {
+      _lobbySetStatus('accepted ; joining ' + (data.roomId || ''));
+      if (data.roomId) _lobbyTrysteroJoinIfNeeded(data.roomId);
+    }
   } catch (e) {
     _lobbySetStatus('accept error');
     console.warn('[v15 lobby] accept failed:', e);
   }
+}
+
+// (v15 step 6) Optimistic local state update for "we just entered a room".
+// Stamps _lobbyState.myRoom, re-renders the panel into in-room view, and
+// kicks the Trystero join. Called from Quick Match / Create Room / Scoop /
+// Accept flows so the UI reflects the change immediately, before the next
+// scheduled /lobby/list poll catches up.
+function _lobbyApplyRoom(room, statusText) {
+  if (!room) return;
+  _lobbyState.myRoom = room;
+  if (statusText) _lobbySetStatus(statusText);
+  const id = _lobbyState.identity;
+  if (id) {
+    // Re-render against the most recent list data so the in-room view
+    // shows immediately. If we don't have list data yet, build a minimal
+    // shape so the renderer has something to work with.
+    const data = _lobbyState.lastListData
+      ? Object.assign({}, _lobbyState.lastListData, { me: { id: id.id, room } })
+      : { players: [], total: 0, invites: [], me: { id: id.id, room } };
+    _lobbyRender(data, id.id);
+  }
+  _lobbyTrysteroJoinIfNeeded(room.code);
 }
 
 async function _lobbyIgnoreInvite(inviteId) {
@@ -3315,10 +3468,14 @@ function _lobbyInit() {
   _lobbyState.playersEl = document.getElementById('lobby-players');
   _lobbyState.statusEl  = document.getElementById('lobby-status-line');
   if (!_lobbyState.panelEl) return;
-  // Stub buttons : hit the matching worker stubs so we can verify the chain
-  // works end-to-end. Real flows land in step 5 (invites) + step 6 (rooms).
+  // (v15 step 6) Real button flows. Each click hits the worker, takes the
+  // returned room as authoritative, optimistically updates state.myRoom so
+  // the panel re-renders into the in-room view immediately, and triggers
+  // the Trystero handoff. The next /lobby/list poll confirms / corrects.
   const qm = document.getElementById('btn-quick-match');
   const cr = document.getElementById('btn-create-room');
+  const sc = document.getElementById('btn-scoop-all');
+  const lr = document.getElementById('btn-leave-room');
   if (qm) qm.addEventListener('click', async () => {
     const id = _lobbyState.identity;
     if (!id) return;
@@ -3329,8 +3486,12 @@ function _lobbyInit() {
         headers: { Authorization: 'Bearer ' + id.accessToken },
       });
       const data = await res.json();
-      _lobbySetStatus('quick match: code=' + (data.code || '?') + ' (stub)');
-    } catch (e) { _lobbySetStatus('quick match failed'); }
+      if (!res.ok || !data.room) {
+        _lobbySetStatus('quick match failed: ' + (data.error || res.status));
+        return;
+      }
+      _lobbyApplyRoom(data.room, data.created ? 'room created ' + data.room.code : 'joined ' + data.room.code);
+    } catch (e) { _lobbySetStatus('quick match error'); console.warn('[v15 lobby] quickmatch failed:', e); }
   });
   if (cr) cr.addEventListener('click', async () => {
     const id = _lobbyState.identity;
@@ -3339,11 +3500,66 @@ function _lobbyInit() {
     try {
       const res = await fetch(LSS_API_BASE + '/rooms/create', {
         method: 'POST',
+        headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isPublic: true }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.room) {
+        _lobbySetStatus('create failed: ' + (data.error || res.status));
+        return;
+      }
+      _lobbyApplyRoom(data.room, 'room created ' + data.room.code);
+    } catch (e) { _lobbySetStatus('create error'); console.warn('[v15 lobby] create failed:', e); }
+  });
+  if (sc) sc.addEventListener('click', async () => {
+    const id = _lobbyState.identity;
+    const myRoom = _lobbyState.myRoom;
+    if (!id || !myRoom) return;
+    _lobbySetStatus('scooping...');
+    try {
+      const res = await fetch(LSS_API_BASE + '/rooms/' + encodeURIComponent(myRoom.code) + '/scoop', {
+        method: 'POST',
         headers: { Authorization: 'Bearer ' + id.accessToken },
       });
       const data = await res.json();
-      _lobbySetStatus('room created: ' + (data.code || '?') + ' (stub)');
-    } catch (e) { _lobbySetStatus('create failed'); }
+      if (!res.ok) {
+        _lobbySetStatus('scoop failed: ' + (data.error || res.status));
+        return;
+      }
+      const n = Number(data.scooped || 0);
+      _lobbySetStatus('scooped ' + n + (n === 1 ? ' player' : ' players'));
+      if (data.room) _lobbyApplyRoom(data.room, null);
+    } catch (e) { _lobbySetStatus('scoop error'); console.warn('[v15 lobby] scoop failed:', e); }
+  });
+  if (lr) lr.addEventListener('click', async () => {
+    const id = _lobbyState.identity;
+    const myRoom = _lobbyState.myRoom;
+    if (!id || !myRoom) return;
+    _lobbySetStatus('leaving room...');
+    try {
+      await fetch(LSS_API_BASE + '/rooms/leave', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: myRoom.code }),
+      });
+    } catch (_) {}
+    // Tear down Trystero too so peers see us drop ; reload returns to a
+    // clean main menu state without inheriting any net.* flags.
+    try {
+      if (typeof net !== 'undefined' && net && net.room && typeof net.room.leave === 'function') {
+        net.room.leave();
+      }
+    } catch (_) {}
+    _lobbyState.myRoom = null;
+    // Strip any ?room= deep-link so the reload doesn't bounce back in.
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('room')) {
+        url.searchParams.delete('room');
+        window.history.replaceState({}, document.title, url.pathname + (url.search || '') + url.hash);
+      }
+    } catch (_) {}
+    window.location.reload();
   });
   // Subscribe to auth changes ; sync to current state immediately.
   if (window.LSS_AUTH) {
