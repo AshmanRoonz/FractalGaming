@@ -39014,9 +39014,28 @@ function initAudio() {
           audio.spatial51Comp.channelInterpretation = 'speakers';
         } catch (_) { /* fall back to default channel count if rejected */ }
 
+        // (v15 backport 2026-05-10 fix) Parallel brick-wall limiter for the
+        // 5.1 chain. The stereo path has its own masterLimiter ; on 5.1
+        // systems the spatial sounds use this entirely separate chain that
+        // bypassed the stereo limiter, so without this peaks past 0 dBFS
+        // still got recorded as digital clip. Same -1 dB / 20:1 / 1 ms /
+        // 50 ms config as the stereo limiter but configured for 6-channel
+        // speakers.
+        audio.spatial51Limiter = audio.ctx.createDynamicsCompressor();
+        audio.spatial51Limiter.threshold.value = -1.0;
+        audio.spatial51Limiter.knee.value = 0;
+        audio.spatial51Limiter.ratio.value = 20;
+        audio.spatial51Limiter.attack.value = 0.001;
+        audio.spatial51Limiter.release.value = 0.050;
+        try {
+          audio.spatial51Limiter.channelCount = 6;
+          audio.spatial51Limiter.channelCountMode = 'explicit';
+          audio.spatial51Limiter.channelInterpretation = 'speakers';
+        } catch (_) { /* fall back to default if rejected */ }
         audio.spatial51Bus.connect(audio.spatial51Master);
         audio.spatial51Master.connect(audio.spatial51Comp);
-        audio.spatial51Comp.connect(audio.ctx.destination);
+        audio.spatial51Comp.connect(audio.spatial51Limiter);
+        audio.spatial51Limiter.connect(audio.ctx.destination);
 
         console.log('[v8_2a audio] 5.1 surround output detected. Spatial sounds ' +
           'will route per-speaker via VBAP instead of HRTF. Non-spatial sounds ' +
