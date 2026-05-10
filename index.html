@@ -38888,15 +38888,20 @@ function initAudio() {
     audio.postLimiterGain.connect(audio.ctx.destination);
 
     // Master bus compressor (glue): keeps simultaneous SFX legible without clipping.
-    // Threshold -14 dB lets typical SFX pass un-compressed ; only loud peaks
-    // get tamed. Ratio 3:1 is gentler than the prior 4:1 so sustained heavy
-    // fire doesn't pump the mix down hard enough to read as a "cutout".
+    // (v15 backport 2026-05-10) Softer settings to reduce pumping when many
+    // sounds fire at once. Previous threshold -14 / ratio 3 / release
+    // 120 ms compressed the mix down by 3-4 dB on every loud transient
+    // and took 120 ms to recover, so sustained heavy fire read as
+    // "audio cuts" during recording. New settings only engage on
+    // genuinely-loud peaks (-9 dB), reduce by less per dB over threshold
+    // (2.5:1), and recover smoothly (280 ms release). Brick-wall safety
+    // still comes from the WaveShaper soft-clip downstream.
     audio.masterComp = audio.ctx.createDynamicsCompressor();
-    audio.masterComp.threshold.value = -14;
-    audio.masterComp.knee.value = 8;
-    audio.masterComp.ratio.value = 3;
+    audio.masterComp.threshold.value = -9;
+    audio.masterComp.knee.value = 6;
+    audio.masterComp.ratio.value = 2.5;
     audio.masterComp.attack.value = 0.005;
-    audio.masterComp.release.value = 0.120;
+    audio.masterComp.release.value = 0.280;
     audio.masterComp.connect(audio.hiCut);
 
     // Master output. Base 0.75 multiplied by userVol.master so the user
@@ -44653,16 +44658,25 @@ const _lastSoundTime = {};
 // can underrun and cause audible dropouts. Track active voices by
 // counting recent playSound dispatches in a sliding window; skip the
 // cheapest sounds when over budget.
-const _AUDIO_VOICE_BUDGET = 24;          // max sounds per ~0.6s window
-const _AUDIO_VOICE_WINDOW = 0.6;         // seconds
+// (v15 backport 2026-05-10) Tighter voice budget : the previous 24/0.6s
+// allowed up to 40 voices/sec, and combined with chorus + 3 convolution
+// reverbs, audio thread CPU could run out during heavy combat while
+// recording. Drop to 16 voices per 0.4s window.
+const _AUDIO_VOICE_BUDGET = 16;
+const _AUDIO_VOICE_WINDOW = 0.4;
 const _audioRecentVoices = [];           // ctx-time stamps of recent plays
 // Sounds that are OK to skip when over budget (cosmetic, replaceable).
 // Critical sounds (death, round_start, ability) always pass through.
+// (v15 backport 2026-05-10) Expanded skippable list so the budget has
+// more to drop without killing critical feedback.
 const _AUDIO_SKIPPABLE = {
   fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
-  fire_railgun: 1, fire_salvo: 1,
+  fire_railgun: 1, fire_salvo: 1, fire_burn: 1,
   hit: 1, damage: 1, damage_shield: 1,
-  fire_burn: 1, shield_hum: 1, fire_shield_hum: 1,
+  shield_hum: 1, fire_shield_hum: 1,
+  rocket_salvo: 1, tracker_rockets: 1, sonar_pulse: 1,
+  fire_arc_wave: 1, fire_buckshot: 1, fire_leadwall: 1,
+  laser_core: 1, blaster_power: 1, plasma_railgun: 1,
 };
 
 function playSound(type) {
