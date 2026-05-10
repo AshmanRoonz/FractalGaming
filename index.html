@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v14e (WebXR) ; Billboard Gas Clouds</title>
+<title>Last Ship Sailing v15</title>
 <!-- v14e fork started 2026-05-08. Branched off v14d.
      v14e replaces the displaced-sphere gas approach (v14d) with a custom
      billboard-cloud system. The user's feedback on v14d : even with
@@ -3496,7 +3496,63 @@ function _lobbyToastContainer() {
   return host;
 }
 
+// (v15) Background-tab affordances : if the user isn't looking at the v15
+// tab when an invite arrives, flash the tab title with an unread count
+// and (with permission) pop a desktop notification. Both clear when the
+// tab becomes visible again or the invite is acted on.
+const _LOBBY_TITLE_BASE = (typeof document !== 'undefined' && document.title) || 'Last Ship Sailing';
+let _lobbyOriginalTitle = _LOBBY_TITLE_BASE;
+let _lobbyTitleFlashTimer = null;
+
+function _lobbyUnreadCount() {
+  return (_lobbyState && _lobbyState.toasts) ? _lobbyState.toasts.size : 0;
+}
+
+function _lobbyUpdateTabTitle() {
+  if (typeof document === 'undefined') return;
+  const n = _lobbyUnreadCount();
+  if (n > 0 && document.hidden) {
+    document.title = '(' + n + ') invite from ' + (_lobbyState._lastInviteFrom || 'someone') + ' — ' + _lobbyOriginalTitle;
+  } else {
+    document.title = _lobbyOriginalTitle;
+  }
+}
+
+if (typeof document !== 'undefined') {
+  // Restore title when the tab regains focus.
+  document.addEventListener('visibilitychange', _lobbyUpdateTabTitle);
+}
+
+function _lobbyMaybeShowNotification(inv) {
+  if (typeof Notification === 'undefined') return;
+  if (typeof document !== 'undefined' && !document.hidden) return; // visible tab : skip
+  const fire = () => {
+    try {
+      const n = new Notification('Last Ship Sailing — invite from ' + (inv.fromUsername || 'someone'), {
+        body: 'Click to focus the game and respond.',
+        icon: inv.fromAvatar || undefined,
+        tag:  'lss-invite-' + inv.id,
+      });
+      n.onclick = () => { try { window.focus(); n.close(); } catch (_) {} };
+      // Auto-close after 30s in case the OS doesn't.
+      setTimeout(() => { try { n.close(); } catch (_) {} }, 30000);
+    } catch (_) {}
+  };
+  if (Notification.permission === 'granted') {
+    fire();
+  } else if (Notification.permission !== 'denied') {
+    // Lazy request : only ask the first time we'd want to show one. Browsers
+    // suppress repeat prompts within a session, so this won't spam.
+    Notification.requestPermission().then(p => { if (p === 'granted') fire(); }).catch(() => {});
+  }
+}
+
 function _lobbySpawnToast(inv) {
+  // Track the latest sender for the tab-title flash + trigger background
+  // affordances (title flash, desktop notification) before rendering DOM.
+  _lobbyState._lastInviteFrom = inv.fromUsername || 'someone';
+  _lobbyMaybeShowNotification(inv);
+
   const host = _lobbyToastContainer();
   const wrap = document.createElement('div');
   wrap.dataset.inviteId = inv.id;
@@ -3543,6 +3599,7 @@ function _lobbySpawnToast(inv) {
     if (bar) bar.style.width = (Math.max(0, remain) / totalMs * 100) + '%';
   }, 250);
   _lobbyState.toasts.set(inv.id, { el: wrap, expiresAt, intervalId });
+  _lobbyUpdateTabTitle();
 }
 
 function _lobbyCloseToast(id, animate) {
@@ -3559,6 +3616,7 @@ function _lobbyCloseToast(id, animate) {
     }
   }
   _lobbyState.toasts.delete(id);
+  _lobbyUpdateTabTitle();
 }
 
 // (v15 P2P) Accept an incoming invite. Builds a local room (host=inviter,
