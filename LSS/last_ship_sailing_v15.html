@@ -2201,6 +2201,10 @@ const LSS = {
 // (v10) Cloudflare Worker base URL ; the API behind lss.fractalreality.ca's
 // match posting + leaderboard + lobby browser. See LSS_backend-plan.md.
 const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
+// (v15 lobby) Expose on window for devtools-driven smoke tests of new
+// endpoints. Doesn't change game behavior ; the in-page fetches still
+// reference the const directly.
+if (typeof window !== 'undefined') window.LSS_API_BASE = LSS_API_BASE;
 
 // (v10) Discord integration constants. PKCE OAuth + Worker-proxied
 // posting. Application ID is public ; Worker URL is public ; the only
@@ -2851,6 +2855,7 @@ async function _handleDiscordCallback() {
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, document.title, cleanUrl);
     _discordRenderIdentity();
+    if (typeof _lssAuthNotifyChange === 'function') _lssAuthNotifyChange();
     return true;
   } catch (e) {
     console.error('[v10 discord] callback failed:', e);
@@ -2863,7 +2868,55 @@ function discordSignout() {
   localStorage.removeItem(LSS_DISCORD.STORAGE_TOKEN);
   localStorage.removeItem(LSS_DISCORD.STORAGE_USER);
   _discordRenderIdentity();
+  _lssAuthNotifyChange();
 }
+
+// (v15 lobby) Auth-change callback registry. The lobby module subscribes
+// here to know when the user signs in / out, so it can start or stop the
+// presence heartbeat + close the SSE invite stream cleanly. The leaderboard
+// UI continues to use _discordRenderIdentity directly ; this is parallel.
+const _lssAuthListeners = new Set();
+function _lssAuthNotifyChange() {
+  const id = window.LSS_AUTH ? window.LSS_AUTH.getDiscordIdentity() : null;
+  for (const cb of _lssAuthListeners) {
+    try { cb(id); } catch (e) { console.warn('[LSS_AUTH onChange]', e); }
+  }
+}
+
+// (v15 lobby) Public auth interface specified in design_lobby_invite.md.
+// Wraps the existing PKCE-based discordSignin/_handleDiscordCallback flow
+// so the lobby + matchmaking modules have a single contract to depend on.
+// Kept on window so any in-page module (lobby panel, future MP browser)
+// can use it without import wiring in this single-file build.
+window.LSS_AUTH = {
+  isSignedIn() {
+    return !!(discordCurrentUser() && discordCurrentToken());
+  },
+  getDiscordIdentity() {
+    const u = discordCurrentUser();
+    const t = discordCurrentToken();
+    if (!u || !t) return null;
+    return {
+      id:          u.id,
+      username:    u.global_name || u.username,
+      avatar:      _discordAvatarUrlFor(u, 64),
+      accessToken: t,
+    };
+  },
+  signIn() {
+    // discordSignin redirects ; resolves only on the post-callback page.
+    // Caller should treat this as fire-and-forget for the redirect leg.
+    return discordSignin();
+  },
+  signOut() {
+    discordSignout();
+  },
+  onChange(callback) {
+    if (typeof callback !== 'function') return () => {};
+    _lssAuthListeners.add(callback);
+    return () => _lssAuthListeners.delete(callback);
+  },
+};
 
 function discordCurrentUser() {
   // Returns the cached user object or null if not signed in.
