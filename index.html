@@ -1779,6 +1779,41 @@ body.vr-active .hit-marker {
       </div>
     </div>
 
+    <!-- (v15 lobby) Live presence + matchmaking panel. Hidden until signed
+         in via Discord. Renders /lobby/list every 5s, sends /lobby/heartbeat
+         every 30s while the main menu is visible. Quick Match + Create Room
+         buttons are stubs in step 4 ; wired in step 6 (rooms backend). -->
+    <div id="lobby-panel" style="display:none;flex-direction:column;gap:10px;align-items:stretch;
+         margin-bottom:18px;width:min(100%, 480px);
+         background:rgba(20,20,40,0.4);border:1px solid rgba(255,170,0,0.25);border-radius:3px;
+         padding:14px 16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:11px;color:#ffaa00;letter-spacing:2px;">LOBBY</div>
+        <div id="lobby-count" style="font-size:10px;color:#888;letter-spacing:1px;">— online</div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+        <button id="btn-quick-match" type="button"
+          style="background:rgba(102,187,102,0.18);border:1px solid #66bb66;color:#66bb66;
+                 padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
+                 cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
+          onmouseover="this.style.background='rgba(102,187,102,0.32)'"
+          onmouseout="this.style.background='rgba(102,187,102,0.18)'">QUICK MATCH</button>
+        <button id="btn-create-room" type="button"
+          style="background:rgba(255,170,0,0.15);border:1px solid #ffaa00;color:#ffaa00;
+                 padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
+                 cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
+          onmouseover="this.style.background='rgba(255,170,0,0.30)'"
+          onmouseout="this.style.background='rgba(255,170,0,0.15)'">CREATE ROOM</button>
+      </div>
+      <div id="lobby-players" style="font-size:11px;color:#ccc;display:flex;flex-direction:column;gap:4px;
+           max-height:220px;overflow-y:auto;padding:4px 0;border-top:1px solid rgba(100,100,120,0.2);
+           border-bottom:1px solid rgba(100,100,120,0.2);"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:9px;color:#555;letter-spacing:1px;">
+        <span id="lobby-status-line">connecting...</span>
+        <span>auto-refresh 5s</span>
+      </div>
+    </div>
+
     <div style="display:flex;flex-direction:column;gap:12px;align-items:center;">
       <div style="font-size:11px;color:#aaa;letter-spacing:1px;margin-bottom:4px;">MULTIPLAYER (P2P MESH NETWORK)</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;">
@@ -2201,6 +2236,10 @@ const LSS = {
 // (v10) Cloudflare Worker base URL ; the API behind lss.fractalreality.ca's
 // match posting + leaderboard + lobby browser. See LSS_backend-plan.md.
 const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
+// (v15 lobby) Expose on window for devtools-driven smoke tests of new
+// endpoints. Doesn't change game behavior ; the in-page fetches still
+// reference the const directly.
+if (typeof window !== 'undefined') window.LSS_API_BASE = LSS_API_BASE;
 
 // (v10) Discord integration constants. PKCE OAuth + Worker-proxied
 // posting. Application ID is public ; Worker URL is public ; the only
@@ -2851,6 +2890,7 @@ async function _handleDiscordCallback() {
     const cleanUrl = window.location.origin + window.location.pathname;
     window.history.replaceState({}, document.title, cleanUrl);
     _discordRenderIdentity();
+    if (typeof _lssAuthNotifyChange === 'function') _lssAuthNotifyChange();
     return true;
   } catch (e) {
     console.error('[v10 discord] callback failed:', e);
@@ -2863,7 +2903,500 @@ function discordSignout() {
   localStorage.removeItem(LSS_DISCORD.STORAGE_TOKEN);
   localStorage.removeItem(LSS_DISCORD.STORAGE_USER);
   _discordRenderIdentity();
+  _lssAuthNotifyChange();
 }
+
+// (v15 lobby) Auth-change callback registry. The lobby module subscribes
+// here to know when the user signs in / out, so it can start or stop the
+// presence heartbeat + close the SSE invite stream cleanly. The leaderboard
+// UI continues to use _discordRenderIdentity directly ; this is parallel.
+const _lssAuthListeners = new Set();
+function _lssAuthNotifyChange() {
+  const id = window.LSS_AUTH ? window.LSS_AUTH.getDiscordIdentity() : null;
+  for (const cb of _lssAuthListeners) {
+    try { cb(id); } catch (e) { console.warn('[LSS_AUTH onChange]', e); }
+  }
+}
+
+// (v15 lobby) Lobby controller. Sends /lobby/heartbeat every 30 s while
+// signed in, polls /lobby/list every 5 s while the main menu is visible,
+// posts /lobby/leave on signout + beforeunload. Stub buttons (Quick Match,
+// Create Room) hit the corresponding stub worker endpoints to confirm the
+// chain ; real handlers land in step 6.
+const _lobbyState = {
+  heartbeatTimer: null,
+  listTimer:      null,
+  panelEl:        null,
+  countEl:        null,
+  playersEl:      null,
+  statusEl:       null,
+  // Cached identity from the most recent onChange call ; used so the
+  // tickers don't have to re-read LSS_AUTH every iteration.
+  identity:       null,
+  // Last visibility state to know when to start/stop the list poll.
+  lastListPolling: false,
+};
+
+function _lobbyHeartbeatBody() {
+  // Compose the presence payload from current game state. Values that don't
+  // exist yet (game not booted ; no player ; etc.) safely fall back to
+  // sensible defaults so a heartbeat can fire from the main menu before any
+  // match infra has spun up.
+  const inMatch     = (typeof net !== 'undefined' && net && net.active === true);
+  const gameState   = (typeof game !== 'undefined' && game && typeof game.state === 'string') ? game.state : 'select';
+  // (v15) On the main menu (game.state === 'select') the player is sitting
+  // on the multiplayer surface but hasn't opted into matchmaking yet. They
+  // might be tweaking settings, browsing leaderboards, etc. Report status
+  // 'browsing' so the worker marks them available (invitable) but NOT
+  // scoopable. Becoming scoopable requires an explicit Quick Match / Create
+  // Room click ; that path is wired in step 6.
+  const stateMap    = { select: 'browsing', warmup: 'warmup', playing: 'playing', roundEnd: 'round_end', matchEnd: 'match_end' };
+  const status      = stateMap[gameState] || 'browsing';
+  const ship        = (typeof player !== 'undefined' && player && typeof player.loadoutKey === 'string') ? player.loadoutKey : null;
+  const team        = (typeof player !== 'undefined' && player && (player.team === 'A' || player.team === 'B')) ? player.team : null;
+  const roomId      = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId : null;
+  const roomFull    = !!(typeof net !== 'undefined' && net && net.roomFull);
+  const matchSize   = {
+    current: (typeof net !== 'undefined' && net && Array.isArray(net.peers)) ? (net.peers.length + 1) : 1,
+    max: 6,
+  };
+  // (v15) Mode reflects player intent, not just net.active:
+  //   - In a Trystero room (net.active true) → 'multi'
+  //   - On main menu (game.state === 'select', no net) → 'multi' (sitting on
+  //     the multiplayer surface waiting to matchmake)
+  //   - SOLO + BOTS match running (net.active false, mid-match state) → 'solo'
+  // The 'solo' tag means "in a bots-only match" ; per spec, solo players are
+  // invitable but never scoopable.
+  let mode;
+  if (inMatch) mode = 'multi';
+  else if (gameState === 'select') mode = 'multi';
+  else mode = 'solo';
+  return { mode, status, ship, team, roomId, roomFull, matchSize };
+}
+
+async function _lobbyTickHeartbeat() {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    await fetch(LSS_API_BASE + '/lobby/heartbeat', {
+      method:  'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
+      body:    JSON.stringify(_lobbyHeartbeatBody()),
+    });
+  } catch (e) {
+    console.warn('[v15 lobby] heartbeat failed:', e);
+  }
+}
+
+async function _lobbyTickList() {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    const res = await fetch(LSS_API_BASE + '/lobby/list', {
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+    });
+    if (!res.ok) {
+      _lobbySetStatus('list ' + res.status);
+      return;
+    }
+    const data = await res.json();
+    _lobbyState.lastListData = data;
+    _lobbyRender(data, id.id);
+    // (v15 step 5) Inbox is bundled into the list response. Reconcile
+    // toasts so new invites pop and resolved/expired ones close.
+    _lobbyHandleInvites(Array.isArray(data.invites) ? data.invites : []);
+  } catch (e) {
+    _lobbySetStatus('list error');
+    console.warn('[v15 lobby] list failed:', e);
+  }
+}
+
+function _lobbySetStatus(text) {
+  if (_lobbyState.statusEl) _lobbyState.statusEl.textContent = text;
+}
+
+function _lobbyEscapeText(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
+  ));
+}
+
+function _lobbyRender(data, selfId) {
+  const players = (data && Array.isArray(data.players)) ? data.players : [];
+  const total   = (data && typeof data.total === 'number') ? data.total : players.length;
+  if (_lobbyState.countEl) {
+    _lobbyState.countEl.textContent = total + (total === 1 ? ' player online' : ' players online');
+  }
+  if (!_lobbyState.playersEl) return;
+  if (players.length === 0) {
+    _lobbyState.playersEl.innerHTML = '<div style="color:#666;font-style:italic;padding:6px 4px;">no other players visible right now</div>';
+  } else {
+    const rows = [];
+    // Always pin self at top if present.
+    const self  = players.find(p => p.id === selfId);
+    const other = players.filter(p => p.id !== selfId);
+    if (self) rows.push(_lobbyRowHTML(self, true));
+    for (const p of other) rows.push(_lobbyRowHTML(p, false));
+    _lobbyState.playersEl.innerHTML = rows.join('');
+  }
+  _lobbySetStatus('updated ' + new Date().toLocaleTimeString());
+}
+
+function _lobbyRowHTML(p, isSelf) {
+  const name      = _lobbyEscapeText(p.username || 'unknown');
+  const ship      = _lobbyEscapeText(p.ship || '—');
+  const modeLabel = (p.mode === 'multi') ? 'MP' : 'Solo';
+  const statusTxt = p.available
+    ? (p.scoopable ? 'open' : 'invite-only')
+    : 'busy';
+  const statusColor = p.available ? (p.scoopable ? '#66bb66' : '#aaccff') : '#888';
+  const avatar    = p.avatar
+    ? '<img src="' + _lobbyEscapeText(p.avatar) + '" style="width:24px;height:24px;border-radius:50%;flex-shrink:0;">'
+    : '<div style="width:24px;height:24px;border-radius:50%;background:#333;flex-shrink:0;"></div>';
+  const selfTag   = isSelf ? '<span style="color:#ffaa00;font-size:9px;letter-spacing:1px;margin-left:6px;">YOU</span>' : '';
+
+  // (v15 step 5) Invite button on every non-self available row. Cooldown
+  // state is reflected client-side after a 429 response by stashing the
+  // retryAfter expiry in _lobbyState.cooldowns ; the button reads from
+  // that map at render time.
+  let inviteBtn = '';
+  if (!isSelf && p.available) {
+    const now = Date.now();
+    const cdExpires = (_lobbyState.cooldowns && _lobbyState.cooldowns[p.id]) || 0;
+    const onCooldown = cdExpires > now;
+    if (onCooldown) {
+      const secs = Math.ceil((cdExpires - now) / 1000);
+      inviteBtn = '<button type="button" disabled data-invite-id="' + _lobbyEscapeText(p.id)
+        + '" style="background:transparent;border:1px solid #444;color:#666;'
+        + 'padding:2px 8px;font-family:\'Courier New\',monospace;font-size:10px;'
+        + 'letter-spacing:1px;cursor:not-allowed;border-radius:2px;">'
+        + secs + 's</button>';
+    } else {
+      inviteBtn = '<button type="button" data-invite-id="' + _lobbyEscapeText(p.id)
+        + '" onclick="_lobbySendInvite(this.dataset.inviteId)"'
+        + ' style="background:rgba(255,170,0,0.10);border:1px solid rgba(255,170,0,0.5);color:#ffaa00;'
+        + 'padding:2px 8px;font-family:\'Courier New\',monospace;font-size:10px;'
+        + 'letter-spacing:1px;cursor:pointer;border-radius:2px;transition:all 0.2s;"'
+        + ' onmouseover="this.style.background=\'rgba(255,170,0,0.25)\'"'
+        + ' onmouseout="this.style.background=\'rgba(255,170,0,0.10)\'">INVITE</button>';
+    }
+  }
+
+  return ''
+    + '<div style="display:flex;align-items:center;gap:8px;padding:4px 4px;'
+      + (isSelf ? 'background:rgba(255,170,0,0.06);border-radius:2px;' : '')
+      + '">'
+    + avatar
+    + '<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+      + '<span style="color:#ddd;">' + name + '</span>' + selfTag
+    + '</div>'
+    + '<span style="color:#888;font-size:10px;letter-spacing:1px;">' + ship + ' &middot; ' + modeLabel + '</span>'
+    + '<span style="color:' + statusColor + ';font-size:10px;letter-spacing:1px;width:60px;text-align:right;">' + statusTxt + '</span>'
+    + inviteBtn
+    + '</div>';
+}
+
+// (v15 step 5) Send an invite to the given target Discord id. Hits the
+// worker /lobby/invite endpoint ; on 429 cooldown, stash the retryAfter
+// expiry so the button shows a countdown until the cooldown lapses.
+async function _lobbySendInvite(toId) {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken || !toId) return;
+  if (!_lobbyState.cooldowns) _lobbyState.cooldowns = {};
+  _lobbySetStatus('inviting ' + toId.slice(-4) + '...');
+  try {
+    const res = await fetch(LSS_API_BASE + '/lobby/invite', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 429) {
+      const secs = Number(data.retryAfter || 30);
+      _lobbyState.cooldowns[toId] = Date.now() + secs * 1000;
+      _lobbySetStatus('on cooldown (' + secs + 's)');
+      // Immediate re-render so the button flips to disabled state.
+      if (_lobbyState.lastListData) _lobbyRender(_lobbyState.lastListData, id.id);
+    } else if (res.ok) {
+      _lobbySetStatus('invite sent');
+    } else {
+      _lobbySetStatus('invite failed: ' + (data.error || res.status));
+    }
+  } catch (e) {
+    _lobbySetStatus('invite error');
+    console.warn('[v15 lobby] invite failed:', e);
+  }
+}
+window._lobbySendInvite = _lobbySendInvite;
+
+// (v15 step 5) Invite-toast reconciliation. Each list-poll passes the
+// current pending invite array ; we open toasts for new IDs, leave open
+// toasts for still-present IDs alone, and close toasts for IDs that
+// vanished (server-side accepted/ignored/expired).
+function _lobbyHandleInvites(invites) {
+  if (!_lobbyState.toasts) _lobbyState.toasts = new Map(); // inviteId -> { el, expiresAt, intervalId }
+  const seen = new Set(invites.map(i => i.id));
+  // Spawn toasts for new invites.
+  for (const inv of invites) {
+    if (!_lobbyState.toasts.has(inv.id)) {
+      _lobbySpawnToast(inv);
+    }
+  }
+  // Close toasts whose ID is gone from the inbox.
+  for (const [id, rec] of _lobbyState.toasts.entries()) {
+    if (!seen.has(id)) _lobbyCloseToast(id, true);
+  }
+}
+
+function _lobbyToastContainer() {
+  let host = document.getElementById('lobby-toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'lobby-toast-host';
+    host.style.cssText = 'position:fixed;top:16px;right:16px;display:flex;flex-direction:column;'
+      + 'gap:8px;z-index:9999;pointer-events:none;font-family:\'Courier New\',monospace;';
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+function _lobbySpawnToast(inv) {
+  const host = _lobbyToastContainer();
+  const wrap = document.createElement('div');
+  wrap.dataset.inviteId = inv.id;
+  wrap.style.cssText = 'pointer-events:auto;background:rgba(20,20,40,0.95);'
+    + 'border:1px solid #ffaa00;border-radius:3px;padding:10px 12px;color:#ddd;'
+    + 'min-width:280px;max-width:320px;box-shadow:0 4px 16px rgba(0,0,0,0.6);'
+    + 'transform:translateX(0);transition:transform 0.25s, opacity 0.25s;';
+  const avatar = inv.fromAvatar
+    ? '<img src="' + _lobbyEscapeText(inv.fromAvatar) + '" style="width:32px;height:32px;border-radius:50%;flex-shrink:0;">'
+    : '<div style="width:32px;height:32px;border-radius:50%;background:#333;flex-shrink:0;"></div>';
+  wrap.innerHTML = ''
+    + '<div style="height:3px;background:#444;margin-bottom:8px;border-radius:2px;overflow:hidden;">'
+    + '  <div class="toast-bar" style="height:100%;width:100%;background:#ffaa00;transition:width 1s linear;"></div>'
+    + '</div>'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+    + avatar
+    + '  <div style="flex:1;font-size:12px;letter-spacing:1px;line-height:1.3;">'
+    + '    <div style="color:#ffaa00;">' + _lobbyEscapeText(inv.fromUsername || 'someone') + '</div>'
+    + '    <div style="color:#aaa;font-size:11px;">is inviting you to a match</div>'
+    + '  </div>'
+    + '</div>'
+    + '<div style="display:flex;gap:6px;justify-content:flex-end;">'
+    + '  <button data-action="ignore" style="background:transparent;border:1px solid #444;color:#888;'
+    + '    padding:5px 12px;font-family:\'Courier New\',monospace;font-size:11px;letter-spacing:1px;'
+    + '    cursor:pointer;border-radius:2px;">IGNORE</button>'
+    + '  <button data-action="accept" style="background:rgba(102,187,102,0.18);border:1px solid #66bb66;'
+    + '    color:#66bb66;padding:5px 14px;font-family:\'Courier New\',monospace;font-size:11px;'
+    + '    letter-spacing:1px;cursor:pointer;border-radius:2px;">ACCEPT</button>'
+    + '</div>';
+  host.appendChild(wrap);
+  // Wire button actions.
+  wrap.querySelector('[data-action="accept"]').addEventListener('click', () => _lobbyAcceptInvite(inv.id));
+  wrap.querySelector('[data-action="ignore"]').addEventListener('click', () => _lobbyIgnoreInvite(inv.id));
+  // Countdown bar : drains from 100% to 0% over the remaining lifetime.
+  const expiresAt = inv.expiresAt || (Date.now() + 90_000);
+  const totalMs   = Math.max(1, expiresAt - inv.createdAt);
+  const bar = wrap.querySelector('.toast-bar');
+  let intervalId = setInterval(() => {
+    const remain = expiresAt - Date.now();
+    if (remain <= 0) {
+      _lobbyCloseToast(inv.id, true);
+      return;
+    }
+    if (bar) bar.style.width = (Math.max(0, remain) / totalMs * 100) + '%';
+  }, 250);
+  _lobbyState.toasts.set(inv.id, { el: wrap, expiresAt, intervalId });
+}
+
+function _lobbyCloseToast(id, animate) {
+  const rec = _lobbyState.toasts && _lobbyState.toasts.get(id);
+  if (!rec) return;
+  if (rec.intervalId) clearInterval(rec.intervalId);
+  if (rec.el) {
+    if (animate) {
+      rec.el.style.opacity = '0';
+      rec.el.style.transform = 'translateX(20px)';
+      setTimeout(() => { if (rec.el && rec.el.parentNode) rec.el.parentNode.removeChild(rec.el); }, 260);
+    } else if (rec.el.parentNode) {
+      rec.el.parentNode.removeChild(rec.el);
+    }
+  }
+  _lobbyState.toasts.delete(id);
+}
+
+async function _lobbyAcceptInvite(inviteId) {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    const res = await fetch(LSS_API_BASE + '/lobby/invite/' + encodeURIComponent(inviteId) + '/accept', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+    });
+    const data = await res.json().catch(() => ({}));
+    _lobbyCloseToast(inviteId, true);
+    if (res.status === 410) {
+      _lobbySetStatus('invite expired (' + (data.message || 'gone') + ')');
+      return;
+    }
+    if (!res.ok) {
+      _lobbySetStatus('accept failed: ' + (data.error || res.status));
+      return;
+    }
+    _lobbySetStatus('accepted ; joining ' + (data.roomId || '') + ' (room handoff in step 6)');
+    // (Step 6 will wire) leaveTrysteroIfActive() then joinRoom(data.roomId).
+  } catch (e) {
+    _lobbySetStatus('accept error');
+    console.warn('[v15 lobby] accept failed:', e);
+  }
+}
+
+async function _lobbyIgnoreInvite(inviteId) {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  _lobbyCloseToast(inviteId, true);
+  try {
+    await fetch(LSS_API_BASE + '/lobby/invite/' + encodeURIComponent(inviteId) + '/ignore', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+    });
+  } catch (_) {}
+}
+
+async function _lobbySendLeave() {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    // Use keepalive so the request survives a tab close.
+    await fetch(LSS_API_BASE + '/lobby/leave', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+      keepalive: true,
+    });
+  } catch (_) {}
+}
+
+function _lobbyStart() {
+  if (_lobbyState.heartbeatTimer) return;          // already running
+  // Fire one immediately so the player appears in lists right away.
+  _lobbyTickHeartbeat();
+  _lobbyTickList();
+  _lobbyState.heartbeatTimer = setInterval(_lobbyTickHeartbeat, 30_000);
+  _lobbyState.listTimer      = setInterval(_lobbyTickList,       5_000);
+  _lobbyState.lastListPolling = true;
+}
+
+function _lobbyStop() {
+  if (_lobbyState.heartbeatTimer) clearInterval(_lobbyState.heartbeatTimer);
+  if (_lobbyState.listTimer)      clearInterval(_lobbyState.listTimer);
+  _lobbyState.heartbeatTimer = null;
+  _lobbyState.listTimer      = null;
+  _lobbyState.lastListPolling = false;
+}
+
+function _lobbyOnAuthChange(identity) {
+  _lobbyState.identity = identity || null;
+  const panel = _lobbyState.panelEl;
+  if (identity) {
+    if (panel) panel.style.display = 'flex';
+    _lobbyStart();
+  } else {
+    if (panel) panel.style.display = 'none';
+    _lobbyStop();
+    // Best-effort leave so we vanish from other peoples' lists faster
+    // than the 60s TTL ; ok if it fails (TTL handles it eventually).
+    _lobbySendLeave();
+  }
+}
+
+function _lobbyInit() {
+  _lobbyState.panelEl   = document.getElementById('lobby-panel');
+  _lobbyState.countEl   = document.getElementById('lobby-count');
+  _lobbyState.playersEl = document.getElementById('lobby-players');
+  _lobbyState.statusEl  = document.getElementById('lobby-status-line');
+  if (!_lobbyState.panelEl) return;
+  // Stub buttons : hit the matching worker stubs so we can verify the chain
+  // works end-to-end. Real flows land in step 5 (invites) + step 6 (rooms).
+  const qm = document.getElementById('btn-quick-match');
+  const cr = document.getElementById('btn-create-room');
+  if (qm) qm.addEventListener('click', async () => {
+    const id = _lobbyState.identity;
+    if (!id) return;
+    _lobbySetStatus('quick match...');
+    try {
+      const res = await fetch(LSS_API_BASE + '/rooms/quickmatch', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + id.accessToken },
+      });
+      const data = await res.json();
+      _lobbySetStatus('quick match: code=' + (data.code || '?') + ' (stub)');
+    } catch (e) { _lobbySetStatus('quick match failed'); }
+  });
+  if (cr) cr.addEventListener('click', async () => {
+    const id = _lobbyState.identity;
+    if (!id) return;
+    _lobbySetStatus('creating room...');
+    try {
+      const res = await fetch(LSS_API_BASE + '/rooms/create', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + id.accessToken },
+      });
+      const data = await res.json();
+      _lobbySetStatus('room created: ' + (data.code || '?') + ' (stub)');
+    } catch (e) { _lobbySetStatus('create failed'); }
+  });
+  // Subscribe to auth changes ; sync to current state immediately.
+  if (window.LSS_AUTH) {
+    window.LSS_AUTH.onChange(_lobbyOnAuthChange);
+    _lobbyOnAuthChange(window.LSS_AUTH.getDiscordIdentity());
+  }
+  // beforeunload : tell the server we're leaving so we vanish from lists
+  // faster than the 60s TTL.
+  window.addEventListener('beforeunload', _lobbySendLeave);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _lobbyInit);
+} else {
+  // Already past DOMContentLoaded ; init synchronously on next tick so the
+  // panel element is definitely in the DOM.
+  setTimeout(_lobbyInit, 0);
+}
+
+// (v15 lobby) Public auth interface specified in design_lobby_invite.md.
+// Wraps the existing PKCE-based discordSignin/_handleDiscordCallback flow
+// so the lobby + matchmaking modules have a single contract to depend on.
+// Kept on window so any in-page module (lobby panel, future MP browser)
+// can use it without import wiring in this single-file build.
+window.LSS_AUTH = {
+  isSignedIn() {
+    return !!(discordCurrentUser() && discordCurrentToken());
+  },
+  getDiscordIdentity() {
+    const u = discordCurrentUser();
+    const t = discordCurrentToken();
+    if (!u || !t) return null;
+    return {
+      id:          u.id,
+      username:    u.global_name || u.username,
+      avatar:      _discordAvatarUrlFor(u, 64),
+      accessToken: t,
+    };
+  },
+  signIn() {
+    // discordSignin redirects ; resolves only on the post-callback page.
+    // Caller should treat this as fire-and-forget for the redirect leg.
+    return discordSignin();
+  },
+  signOut() {
+    discordSignout();
+  },
+  onChange(callback) {
+    if (typeof callback !== 'function') return () => {};
+    _lssAuthListeners.add(callback);
+    return () => _lssAuthListeners.delete(callback);
+  },
+};
 
 function discordCurrentUser() {
   // Returns the cached user object or null if not signed in.
@@ -20074,7 +20607,17 @@ function spawnDot(position, opts) {
   const dot = {
     anchor: anchor,
     position: anchor.position,                                // alias
-    velocity: opts.velocity ? opts.velocity.clone() : new THREE.Vector3(),
+    // (v14g) Split into a permanent drift component + a transient wake
+    // component. Position is integrated from (drift + wake) per frame ;
+    // ONLY the wake portion gets damped. Without this, the wake-impulse
+    // damping at the bottom of updateDots was also eating the ambient
+    // cloud's spawn-time drift velocity, so clouds parked at their spawn
+    // position after a few seconds and looked stuck. Existing wake-push
+    // code that mutates d.velocity continues to work unchanged ; those
+    // impulses go into the transient velocity (and decay) while drift
+    // stays at its initial value forever.
+    driftVelocity: opts.velocity ? opts.velocity.clone() : new THREE.Vector3(),
+    velocity: new THREE.Vector3(),
     age: 0,
     // (v9) Lifetime can be Infinity for indestructible dots ; growthDuration
     // is the time-to-full-size animation, separate from lifetime so dots
@@ -20152,9 +20695,17 @@ function updateDots(dt) {
       continue;
     }
     // Move (gas: no wall checks, pass through everything)
-    d.anchor.position.x += d.velocity.x * dt;
-    d.anchor.position.y += d.velocity.y * dt;
-    d.anchor.position.z += d.velocity.z * dt;
+    // (v14g) Position uses sum of drift + wake. Drift is the spawn-time
+    // velocity that never decays ; wake is the transient impulse from
+    // ships / projectiles / explosions and gets damped below. Falls back
+    // to plain d.velocity for any old dot that didn't go through the new
+    // spawnDot path (defensive ; spawnDot always provides driftVelocity).
+    const _dvx = d.driftVelocity ? d.driftVelocity.x : 0;
+    const _dvy = d.driftVelocity ? d.driftVelocity.y : 0;
+    const _dvz = d.driftVelocity ? d.driftVelocity.z : 0;
+    d.anchor.position.x += (_dvx + d.velocity.x) * dt;
+    d.anchor.position.y += (_dvy + d.velocity.y) * dt;
+    d.anchor.position.z += (_dvz + d.velocity.z) * dt;
     // Time uniform tick + scale growth + fade for attached meshes.
     // (v9) tNorm uses growthDuration (capped at 1.0) so an infinite-
     // lifetime dot still grows over a finite time then sits at full size.
