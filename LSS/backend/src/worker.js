@@ -704,11 +704,24 @@ function computeLobbyFlags(p) {
   const status = p && p.status;
   const mode   = p && p.mode;
   const roomFull = !!(p && p.roomFull);
+  // Solo (in a bots match) : invitable, never scoopable.
   if (mode === 'solo') {
     return { available: true, scoopable: false };
   }
-  if (mode === 'multi' && !roomFull && (status === 'lobby' || status === 'idle' || !status)) {
-    return { available: true, scoopable: true };
+  // Multi mode rules :
+  //   - 'browsing' : sitting on the main menu, hasn't opted into matchmaking
+  //     yet (might be tweaking settings / leaderboards). Invitable, NOT
+  //     scoopable. Becomes scoopable when they explicitly Quick Match or
+  //     enter a public room with open seats.
+  //   - 'lobby' / 'looking' / 'idle' : actively waiting for a match ; both
+  //     invitable AND scoopable (open to be filled into a partial room).
+  //   - any 'in-match' status (warmup / playing / round_end / match_end) or
+  //     a full room : not available.
+  if (mode === 'multi') {
+    if (status === 'browsing') return { available: true, scoopable: false };
+    if (!roomFull && (status === 'lobby' || status === 'looking' || status === 'idle' || !status)) {
+      return { available: true, scoopable: true };
+    }
   }
   return { available: false, scoopable: false };
 }

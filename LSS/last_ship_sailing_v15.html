@@ -2944,8 +2944,14 @@ function _lobbyHeartbeatBody() {
   // match infra has spun up.
   const inMatch     = (typeof net !== 'undefined' && net && net.active === true);
   const gameState   = (typeof game !== 'undefined' && game && typeof game.state === 'string') ? game.state : 'select';
-  const stateMap    = { select: 'lobby', warmup: 'warmup', playing: 'playing', roundEnd: 'round_end', matchEnd: 'match_end' };
-  const status      = stateMap[gameState] || 'lobby';
+  // (v15) On the main menu (game.state === 'select') the player is sitting
+  // on the multiplayer surface but hasn't opted into matchmaking yet. They
+  // might be tweaking settings, browsing leaderboards, etc. Report status
+  // 'browsing' so the worker marks them available (invitable) but NOT
+  // scoopable. Becoming scoopable requires an explicit Quick Match / Create
+  // Room click ; that path is wired in step 6.
+  const stateMap    = { select: 'browsing', warmup: 'warmup', playing: 'playing', roundEnd: 'round_end', matchEnd: 'match_end' };
+  const status      = stateMap[gameState] || 'browsing';
   const ship        = (typeof player !== 'undefined' && player && typeof player.loadoutKey === 'string') ? player.loadoutKey : null;
   const team        = (typeof player !== 'undefined' && player && (player.team === 'A' || player.team === 'B')) ? player.team : null;
   const roomId      = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId : null;
@@ -2954,7 +2960,18 @@ function _lobbyHeartbeatBody() {
     current: (typeof net !== 'undefined' && net && Array.isArray(net.peers)) ? (net.peers.length + 1) : 1,
     max: 6,
   };
-  return { mode: inMatch ? 'multi' : 'solo', status, ship, team, roomId, roomFull, matchSize };
+  // (v15) Mode reflects player intent, not just net.active:
+  //   - In a Trystero room (net.active true) → 'multi'
+  //   - On main menu (game.state === 'select', no net) → 'multi' (sitting on
+  //     the multiplayer surface waiting to matchmake)
+  //   - SOLO + BOTS match running (net.active false, mid-match state) → 'solo'
+  // The 'solo' tag means "in a bots-only match" ; per spec, solo players are
+  // invitable but never scoopable.
+  let mode;
+  if (inMatch) mode = 'multi';
+  else if (gameState === 'select') mode = 'multi';
+  else mode = 'solo';
+  return { mode, status, ship, team, roomId, roomFull, matchSize };
 }
 
 async function _lobbyTickHeartbeat() {
