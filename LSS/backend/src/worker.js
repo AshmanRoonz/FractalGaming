@@ -32,8 +32,18 @@ const LOBBY_LIST_DEFAULT_CAP = 100;
 const LOBBY_LIST_MAX_CAP     = 250;   // hard ceiling for ?limit param
 // (v15 lobby) Invite + cooldown constants per design_lobby_invite.md.
 const INVITE_TTL_SEC         = 90;            // invite expires if no action
-const COOLDOWN_LADDER_SEC    = [30, 60, 120, 180]; // per-pair throttle ramp
+// Cloudflare KV requires expirationTtl >= 60 ; the original spec started
+// the ladder at 30s which threw a 500 on KV.put. Rounded up to 60s for the
+// first level ; the rest stay on the design doc curve.
+const COOLDOWN_LADDER_SEC    = [60, 90, 150, 240];
 const COOLDOWN_AGE_TTL_SEC   = 604800;        // 7-day memory of repeat spammers
+// (v15 step 6) Lobby room (separate from the legacy `room:` heartbeat
+// rooms used by the live-rooms browser). 30 min TTL covers any normal
+// match length ; touch on every room write (join / leave / scoop /
+// state change) so active rooms never expire mid-match.
+const LOBBY_ROOM_TTL_SEC     = 1800;
+const LOBBY_ROOM_MAX_SIZE    = 6;
+const LOBBY_ROOM_CODE_LEN    = 4;
 
 // ---------- CORS / response helpers ----------------------------------
 
@@ -813,7 +823,17 @@ async function handleLobbyList(request, env, origin) {
   }
   invites.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 
-  return jsonResponse(200, { players: page, total, limit, offset, invites }, env, origin);
+  // (v15 step 6) Also tell the caller which room they're in (server side).
+  // Client compares to its current Trystero state on each poll ; if the
+  // server says they're in a room they aren't yet connected to (e.g.,
+  // they got scooped), the client auto-joins via Trystero. Up to 5 s
+  // latency, no SSE / push needed.
+  const myRoom = await _roomFindForUser(env, user.id);
+
+  return jsonResponse(200, {
+    players: page, total, limit, offset, invites,
+    me: { id: user.id, room: myRoom },
+  }, env, origin);
 }
 
 async function handleLobbyLeave(request, env, origin) {
@@ -924,15 +944,49 @@ async function handleLobbyInviteAccept(request, env, origin, inviteId) {
     await env.ROOMS.delete(key);
     return jsonResponse(410, { error: 'gone', message: 'The inviter has gone offline.' }, env, origin);
   }
-  const liveRoomId = inviterPresence.roomId || ('lss-' + inv.fromId);
 
-  // Atomic-ish cleanup : delete invite + reset the 1:1 cooldown so a future
-  // invite from the same person starts fresh at level 1.
+  // (v15 step 6) Resolve the inviter's room server-side. Three cases :
+  //   A) Inviter already has a lobby room  → join it (or create if missing)
+  //   B) Inviter has no roomId             → mint a fresh private room with
+  //                                           both of us as the initial pair
+  let room = null;
+  if (inviterPresence.roomId) {
+    room = await env.ROOMS.get('lobbyroom:' + inviterPresence.roomId, 'json');
+  }
+  if (!room) {
+    // Either no roomId, or the cached room expired ; mint a private one
+    // with the inviter as host + the invitee both seeded as players.
+    const code = await _roomFreshCode(env);
+    room = {
+      code,
+      hostId:    inv.fromId,
+      isPublic:  false,
+      players: [
+        { id: inv.fromId, username: inv.fromUsername, avatar: inv.fromAvatar },
+        _roomPlayerSnapshot(user),
+      ],
+      maxSize:    LOBBY_ROOM_MAX_SIZE,
+      createdAt:  Date.now(),
+      lastActive: Date.now(),
+    };
+    await _roomWrite(env, room);
+  } else {
+    if (room.players.length >= room.maxSize) {
+      return jsonResponse(409, { error: 'room_full' }, env, origin);
+    }
+    if (!room.players.some(p => p.id === user.id)) {
+      room.players.push(_roomPlayerSnapshot(user));
+      await _roomWrite(env, room);
+    }
+  }
+
+  // Cleanup : delete invite + reset the 1:1 cooldown so a future invite
+  // from the same person starts fresh at level 1.
   await env.ROOMS.delete(key);
   await env.ROOMS.delete('cooldown:'    + inv.fromId + ':' + user.id);
   await env.ROOMS.delete('cooldownAge:' + inv.fromId + ':' + user.id);
 
-  return jsonResponse(200, { ok: true, roomId: liveRoomId, fromId: inv.fromId }, env, origin);
+  return jsonResponse(200, { ok: true, roomId: room.code, fromId: inv.fromId, room }, env, origin);
 }
 
 async function handleLobbyInviteIgnore(request, env, origin, inviteId) {
@@ -944,47 +998,178 @@ async function handleLobbyInviteIgnore(request, env, origin, inviteId) {
   return jsonResponse(200, { ok: true }, env, origin);
 }
 
-async function handleRoomsQuickmatch(request, env, origin) {
-  const user = await requireAuth(request);
-  return jsonResponse(200, {
-    stub: true,
-    you: user.id,
-    code: 'STUB',
-    created: false,   // real impl will indicate join vs create
-  }, env, origin);
+// ---------- (v15 step 6) Lobby rooms ---------------------------------
+//
+// Room shape stored at `lobbyroom:<code>` with TTL LOBBY_ROOM_TTL_SEC :
+//   { code, hostId, isPublic, players: [{ id, username, avatar }, ...],
+//     maxSize, createdAt, lastActive }
+//
+// Codes are 4 chars from a non-confusable alphabet so they're easy to
+// share over Discord ("CFRX" not "Q0OO"). Collision-checked at create.
+
+const _ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+function _newRoomCode() {
+  const a = new Uint8Array(LOBBY_ROOM_CODE_LEN);
+  crypto.getRandomValues(a);
+  let s = '';
+  for (let i = 0; i < LOBBY_ROOM_CODE_LEN; i++) s += _ROOM_CODE_ALPHABET[a[i] % _ROOM_CODE_ALPHABET.length];
+  return s;
+}
+
+async function _roomFreshCode(env) {
+  // Up to 20 attempts ; collision rate at 4 chars / 32 alphabet is ~1e-6
+  // until we have ~1000 active rooms. Plenty of headroom.
+  for (let i = 0; i < 20; i++) {
+    const c = _newRoomCode();
+    const existing = await env.ROOMS.get('lobbyroom:' + c, 'json');
+    if (!existing) return c;
+  }
+  throw new ApiError(503, 'no_room_code_available');
+}
+
+function _roomPlayerSnapshot(user) {
+  return {
+    id:       user.id,
+    username: user.global_name || user.username,
+    avatar:   user.avatar
+      ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`
+      : null,
+  };
+}
+
+async function _roomWrite(env, room) {
+  room.lastActive = Date.now();
+  await env.ROOMS.put('lobbyroom:' + room.code, JSON.stringify(room),
+    { expirationTtl: LOBBY_ROOM_TTL_SEC });
+}
+
+async function _roomCreateNew(env, host, isPublic) {
+  const code = await _roomFreshCode(env);
+  const room = {
+    code,
+    hostId:    host.id,
+    isPublic:  !!isPublic,
+    players:   [_roomPlayerSnapshot(host)],
+    maxSize:   LOBBY_ROOM_MAX_SIZE,
+    createdAt: Date.now(),
+    lastActive: Date.now(),
+  };
+  await _roomWrite(env, room);
+  return room;
+}
+
+async function _roomFindForUser(env, userId) {
+  // Linear scan ; rooms count is small (matches in flight). KV.list returns
+  // metadata only, one .get per match. Same shape as the legacy
+  // handleGetRooms scan, so we stay consistent.
+  const list = await env.ROOMS.list({ prefix: 'lobbyroom:' });
+  for (const k of list.keys) {
+    const r = await env.ROOMS.get(k.name, 'json');
+    if (!r) continue;
+    if (r.players && r.players.some(p => p.id === userId)) return r;
+  }
+  return null;
 }
 
 async function handleRoomsCreate(request, env, origin) {
   const user = await requireAuth(request);
-  return jsonResponse(200, {
-    stub: true,
-    you: user.id,
-    code: 'STUB',
-    hostId: user.id,
-    isPublic: true,
-  }, env, origin);
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const isPublic = body.isPublic !== false; // default public
+  const room = await _roomCreateNew(env, user, isPublic);
+  return jsonResponse(200, { room }, env, origin);
 }
 
 async function handleRoomsJoin(request, env, origin) {
   const user = await requireAuth(request);
   let body = {};
+  try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
+  const code = String(body.code || '').toUpperCase();
+  if (!code) throw new ApiError(400, 'missing_code');
+  const room = await env.ROOMS.get('lobbyroom:' + code, 'json');
+  if (!room) return jsonResponse(404, { error: 'room_not_found' }, env, origin);
+  if (room.players.length >= room.maxSize) return jsonResponse(409, { error: 'room_full' }, env, origin);
+  if (!room.players.some(p => p.id === user.id)) {
+    room.players.push(_roomPlayerSnapshot(user));
+    await _roomWrite(env, room);
+  }
+  return jsonResponse(200, { room }, env, origin);
+}
+
+async function handleRoomsQuickmatch(request, env, origin) {
+  const user = await requireAuth(request);
+  // Find an open public room with seats. Skip rooms the caller is already in.
+  const list = await env.ROOMS.list({ prefix: 'lobbyroom:' });
+  for (const k of list.keys) {
+    const r = await env.ROOMS.get(k.name, 'json');
+    if (!r) continue;
+    if (!r.isPublic) continue;
+    if (r.players.length >= r.maxSize) continue;
+    if (r.players.some(p => p.id === user.id)) continue;
+    r.players.push(_roomPlayerSnapshot(user));
+    await _roomWrite(env, r);
+    return jsonResponse(200, { room: r, joined: true, created: false }, env, origin);
+  }
+  // No open public rooms ; create one and we're the host waiting for fillers.
+  const room = await _roomCreateNew(env, user, true);
+  return jsonResponse(200, { room, joined: false, created: true }, env, origin);
+}
+
+async function handleRoomsLeave(request, env, origin) {
+  const user = await requireAuth(request);
+  let body = {};
   try { body = await request.json(); } catch (_) {}
-  return jsonResponse(200, {
-    stub: true,
-    you: user.id,
-    code: body.code || 'STUB',
-    seats: { current: 1, max: 6 },
-  }, env, origin);
+  const code = String(body.code || '').toUpperCase();
+  if (!code) throw new ApiError(400, 'missing_code');
+  const room = await env.ROOMS.get('lobbyroom:' + code, 'json');
+  if (!room) return jsonResponse(200, { ok: true, room: null }, env, origin);
+  const idx = room.players.findIndex(p => p.id === user.id);
+  if (idx >= 0) room.players.splice(idx, 1);
+  if (room.players.length === 0) {
+    await env.ROOMS.delete('lobbyroom:' + code);
+    return jsonResponse(200, { ok: true, room: null }, env, origin);
+  }
+  if (room.hostId === user.id) {
+    // Transfer host to next player so the room stays alive.
+    room.hostId = room.players[0].id;
+  }
+  await _roomWrite(env, room);
+  return jsonResponse(200, { ok: true, room }, env, origin);
 }
 
 async function handleRoomsScoop(request, env, origin, code) {
   const user = await requireAuth(request);
-  return jsonResponse(200, {
-    stub: true,
-    you: user.id,
-    code,
-    scooped: 0,
-  }, env, origin);
+  const room = await env.ROOMS.get('lobbyroom:' + code, 'json');
+  if (!room) throw new ApiError(404, 'room_not_found');
+  if (room.hostId !== user.id) throw new ApiError(403, 'not_host');
+  if (room.players.length >= room.maxSize) {
+    return jsonResponse(200, { room, scooped: 0 }, env, origin);
+  }
+  // Walk presence : pull MULTI-mode players who are on the multiplayer
+  // surface and not already in a room. Per the v15 rule, this is the
+  // explicit aggressive path : the host is choosing to recruit, and
+  // browsing players are fair game (they're sitting on multiplayer).
+  // Auto-fill via /rooms/quickmatch is the passive path that does NOT
+  // touch browsing players ; that one only joins existing partial rooms.
+  const list = await env.ROOMS.list({ prefix: 'presence:' });
+  let scooped = 0;
+  for (const k of list.keys) {
+    if (room.players.length >= room.maxSize) break;
+    const p = await env.ROOMS.get(k.name, 'json');
+    if (!p) continue;
+    if (p.id === user.id) continue;
+    if (p.mode !== 'multi') continue;
+    if (p.roomId) continue;                                  // already in some room
+    // Only browsing / lobby / looking / idle multi players are scoopable.
+    // Anyone in warmup / playing / round_end / match_end is busy.
+    if (!(p.status === 'browsing' || p.status === 'lobby' || p.status === 'looking' || p.status === 'idle' || !p.status)) continue;
+    if (room.players.some(rp => rp.id === p.id)) continue;
+    room.players.push({ id: p.id, username: p.username, avatar: p.avatar });
+    scooped++;
+  }
+  if (scooped > 0) await _roomWrite(env, room);
+  return jsonResponse(200, { room, scooped }, env, origin);
 }
 
 // ---------- Router ---------------------------------------------------
@@ -1038,6 +1223,7 @@ export default {
       if (request.method === 'POST' && path === '/rooms/quickmatch') return await handleRoomsQuickmatch(request, env, origin);
       if (request.method === 'POST' && path === '/rooms/create')     return await handleRoomsCreate(request, env, origin);
       if (request.method === 'POST' && path === '/rooms/join')       return await handleRoomsJoin(request, env, origin);
+      if (request.method === 'POST' && path === '/rooms/leave')      return await handleRoomsLeave(request, env, origin);
       if (request.method === 'POST' && path.startsWith('/rooms/') && path.endsWith('/scoop')) {
         const code = decodeURIComponent(path.slice('/rooms/'.length, path.length - '/scoop'.length));
         return await handleRoomsScoop(request, env, origin, code);
