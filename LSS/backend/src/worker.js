@@ -30,6 +30,10 @@ const PRESENCE_TTL_SEC      = 60;
 const HEARTBEAT_MIN_GAP_MS  = 25_000;
 const LOBBY_LIST_DEFAULT_CAP = 100;
 const LOBBY_LIST_MAX_CAP     = 250;   // hard ceiling for ?limit param
+// (v15 lobby) Invite + cooldown constants per design_lobby_invite.md.
+const INVITE_TTL_SEC         = 90;            // invite expires if no action
+const COOLDOWN_LADDER_SEC    = [30, 60, 120, 180]; // per-pair throttle ramp
+const COOLDOWN_AGE_TTL_SEC   = 604800;        // 7-day memory of repeat spammers
 
 // ---------- CORS / response helpers ----------------------------------
 
@@ -769,7 +773,7 @@ async function handleLobbyHeartbeat(request, env, origin) {
 }
 
 async function handleLobbyList(request, env, origin) {
-  await requireAuth(request);
+  const user = await requireAuth(request);
   const url = new URL(request.url);
   const limit = Math.min(
     Math.max(1, parseInt(url.searchParams.get('limit') || String(LOBBY_LIST_DEFAULT_CAP), 10) || LOBBY_LIST_DEFAULT_CAP),
@@ -796,7 +800,20 @@ async function handleLobbyList(request, env, origin) {
   });
   const total = players.length;
   const page  = players.slice(offset, offset + limit);
-  return jsonResponse(200, { players: page, total, limit, offset }, env, origin);
+
+  // (v15) Bundle this user's pending invites into the same response so the
+  // client's existing 5s list poll handles invite delivery. Replaces the
+  // SSE-stream design from the v12 doc ; works without Durable Objects.
+  // Worst-case latency : 5s (one poll cycle).
+  const inviteList = await env.ROOMS.list({ prefix: 'invite:' + user.id + ':' });
+  const invites = [];
+  for (const k of inviteList.keys) {
+    const inv = await env.ROOMS.get(k.name, 'json');
+    if (inv) invites.push(inv);
+  }
+  invites.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+  return jsonResponse(200, { players: page, total, limit, offset, invites }, env, origin);
 }
 
 async function handleLobbyLeave(request, env, origin) {
@@ -805,55 +822,126 @@ async function handleLobbyLeave(request, env, origin) {
   return jsonResponse(200, { ok: true }, env, origin);
 }
 
+// ---------- Invite flow (v15 lobby) ----------------------------------
+
+// Generate a short random invite ID.
+function _newInviteId() {
+  // 12 random hex chars ≈ 48 bits ; collision-resistant for transient invites.
+  const a = new Uint8Array(6);
+  crypto.getRandomValues(a);
+  return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function handleLobbyInvite(request, env, origin) {
   const user = await requireAuth(request);
-  return jsonResponse(200, {
-    stub: true,
-    from: user.id,
-    id: 'stub-invite-id',
-    expiresAt: Date.now() + 90_000,
-  }, env, origin);
+  let body = {};
+  try { body = await request.json(); } catch (_) { throw new ApiError(400, 'invalid_json'); }
+  const toId = String(body.toId || '');
+  if (!toId) throw new ApiError(400, 'missing_to_id');
+  if (toId === user.id) throw new ApiError(400, 'self_invite');
+
+  // Confirm the recipient is actually online + available so we don't waste
+  // a slot on a phantom invite. Their roomFull / status may have changed
+  // between client-side render and the click ; the client will hide the
+  // button if they go busy, but we double-check here.
+  const targetPresence = await env.ROOMS.get('presence:' + toId, 'json');
+  if (!targetPresence) {
+    return jsonResponse(404, { error: 'recipient_offline' }, env, origin);
+  }
+  const targetFlags = computeLobbyFlags(targetPresence);
+  if (!targetFlags.available) {
+    return jsonResponse(409, { error: 'recipient_busy' }, env, origin);
+  }
+
+  // Cooldown ladder check : same inviter -> same target.
+  const cdKey  = 'cooldown:' + user.id + ':' + toId;
+  const ageKey = 'cooldownAge:' + user.id + ':' + toId;
+  const now    = Date.now();
+  const active = await env.ROOMS.get(cdKey, 'json');
+  if (active) {
+    // Worker KV doesn't expose remaining TTL ; store expiresAt on the
+    // record itself and compute retryAfter from there.
+    const remainingMs = Math.max(0, (active.expiresAt || 0) - now);
+    return jsonResponse(429, {
+      error: 'cooldown',
+      retryAfter: Math.ceil(remainingMs / 1000),
+    }, env, origin);
+  }
+  // Look up persistent ladder level (7-day memory).
+  const ageRec = await env.ROOMS.get(ageKey, 'json');
+  const level  = ageRec ? Math.min((ageRec.level || 0) + 1, COOLDOWN_LADDER_SEC.length) : 1;
+  const ttlSec = COOLDOWN_LADDER_SEC[Math.min(level, COOLDOWN_LADDER_SEC.length) - 1];
+  const cdExpiresAt = now + ttlSec * 1000;
+  await env.ROOMS.put(cdKey, JSON.stringify({ level, lastInviteAt: now, expiresAt: cdExpiresAt }),
+    { expirationTtl: ttlSec });
+  await env.ROOMS.put(ageKey, JSON.stringify({ level, lastInviteAt: now }),
+    { expirationTtl: COOLDOWN_AGE_TTL_SEC });
+
+  // Resolve the inviter's current roomId from THEIR presence ; if the
+  // client passed one we trust it as a hint, but the source of truth is
+  // their presence record. Solo inviters use a deterministic room name
+  // built from their discord id.
+  const myPresence = await env.ROOMS.get('presence:' + user.id, 'json');
+  const myRoomId   = (myPresence && myPresence.roomId)
+    ? myPresence.roomId
+    : (typeof body.roomId === 'string' && body.roomId)
+      ? body.roomId
+      : 'lss-' + user.id;
+
+  const id = _newInviteId();
+  const expiresAt = now + INVITE_TTL_SEC * 1000;
+  const avatarUrl = user.avatar
+    ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`
+    : null;
+  const invite = {
+    id,
+    fromId:        user.id,
+    fromUsername:  user.global_name || user.username,
+    fromAvatar:    avatarUrl,
+    toId,
+    roomId:        myRoomId,
+    createdAt:     now,
+    expiresAt,
+  };
+  // Key prefixed by recipient so /lobby/list can KV.list({ prefix: 'invite:'+self+':'}) cheaply.
+  await env.ROOMS.put('invite:' + toId + ':' + id, JSON.stringify(invite), { expirationTtl: INVITE_TTL_SEC });
+
+  return jsonResponse(200, { id, expiresAt }, env, origin);
 }
 
 async function handleLobbyInviteAccept(request, env, origin, inviteId) {
   const user = await requireAuth(request);
-  return jsonResponse(200, {
-    stub: true,
-    you: user.id,
-    inviteId,
-    roomId: 'stub-room',
-  }, env, origin);
+  const key  = 'invite:' + user.id + ':' + inviteId;
+  const inv  = await env.ROOMS.get(key, 'json');
+  if (!inv) {
+    return jsonResponse(410, { error: 'gone', message: 'Invite expired or already handled.' }, env, origin);
+  }
+  // Re-read inviter's CURRENT presence ; if they've moved rooms or
+  // disappeared, return 410 so the recipient knows the invite is stale
+  // rather than landing in an empty Trystero room.
+  const inviterPresence = await env.ROOMS.get('presence:' + inv.fromId, 'json');
+  if (!inviterPresence) {
+    await env.ROOMS.delete(key);
+    return jsonResponse(410, { error: 'gone', message: 'The inviter has gone offline.' }, env, origin);
+  }
+  const liveRoomId = inviterPresence.roomId || ('lss-' + inv.fromId);
+
+  // Atomic-ish cleanup : delete invite + reset the 1:1 cooldown so a future
+  // invite from the same person starts fresh at level 1.
+  await env.ROOMS.delete(key);
+  await env.ROOMS.delete('cooldown:'    + inv.fromId + ':' + user.id);
+  await env.ROOMS.delete('cooldownAge:' + inv.fromId + ':' + user.id);
+
+  return jsonResponse(200, { ok: true, roomId: liveRoomId, fromId: inv.fromId }, env, origin);
 }
 
 async function handleLobbyInviteIgnore(request, env, origin, inviteId) {
   const user = await requireAuth(request);
-  return jsonResponse(200, { ok: true, stub: true, you: user.id, inviteId }, env, origin);
-}
-
-async function handleLobbyInvitesStream(request, env, origin) {
-  // Stub SSE response. Real implementation will hold the connection open
-  // and push invite events from a per-user controller registry. For now we
-  // open the stream, send one heartbeat, and close so devtools can see the
-  // event-stream content type and the connection works.
-  const user = await requireAuth(request);
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode('event: heartbeat\ndata: {"stub":true,"you":"' + user.id + '"}\n\n'));
-      // Real impl will keep this open ; stub closes immediately so the
-      // devtools fetch resolves cleanly.
-      controller.close();
-    },
-  });
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      ...corsHeaders(env, origin),
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-    },
-  });
+  const key  = 'invite:' + user.id + ':' + inviteId;
+  // Ignore : delete the invite but DO NOT reset the cooldown. Repeat
+  // spammers ramp themselves up the ladder.
+  await env.ROOMS.delete(key);
+  return jsonResponse(200, { ok: true }, env, origin);
 }
 
 async function handleRoomsQuickmatch(request, env, origin) {
@@ -939,7 +1027,6 @@ export default {
       if (request.method === 'GET'  && path === '/lobby/list')      return await handleLobbyList(request, env, origin);
       if (request.method === 'POST' && path === '/lobby/leave')     return await handleLobbyLeave(request, env, origin);
       if (request.method === 'POST' && path === '/lobby/invite')    return await handleLobbyInvite(request, env, origin);
-      if (request.method === 'GET'  && path === '/lobby/invites/stream') return await handleLobbyInvitesStream(request, env, origin);
       if (request.method === 'POST' && path.startsWith('/lobby/invite/') && path.endsWith('/accept')) {
         const id = decodeURIComponent(path.slice('/lobby/invite/'.length, path.length - '/accept'.length));
         return await handleLobbyInviteAccept(request, env, origin, id);

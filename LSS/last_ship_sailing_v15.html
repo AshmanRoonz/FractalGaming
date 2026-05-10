@@ -3000,7 +3000,11 @@ async function _lobbyTickList() {
       return;
     }
     const data = await res.json();
+    _lobbyState.lastListData = data;
     _lobbyRender(data, id.id);
+    // (v15 step 5) Inbox is bundled into the list response. Reconcile
+    // toasts so new invites pop and resolved/expired ones close.
+    _lobbyHandleInvites(Array.isArray(data.invites) ? data.invites : []);
   } catch (e) {
     _lobbySetStatus('list error');
     console.warn('[v15 lobby] list failed:', e);
@@ -3050,6 +3054,34 @@ function _lobbyRowHTML(p, isSelf) {
     ? '<img src="' + _lobbyEscapeText(p.avatar) + '" style="width:24px;height:24px;border-radius:50%;flex-shrink:0;">'
     : '<div style="width:24px;height:24px;border-radius:50%;background:#333;flex-shrink:0;"></div>';
   const selfTag   = isSelf ? '<span style="color:#ffaa00;font-size:9px;letter-spacing:1px;margin-left:6px;">YOU</span>' : '';
+
+  // (v15 step 5) Invite button on every non-self available row. Cooldown
+  // state is reflected client-side after a 429 response by stashing the
+  // retryAfter expiry in _lobbyState.cooldowns ; the button reads from
+  // that map at render time.
+  let inviteBtn = '';
+  if (!isSelf && p.available) {
+    const now = Date.now();
+    const cdExpires = (_lobbyState.cooldowns && _lobbyState.cooldowns[p.id]) || 0;
+    const onCooldown = cdExpires > now;
+    if (onCooldown) {
+      const secs = Math.ceil((cdExpires - now) / 1000);
+      inviteBtn = '<button type="button" disabled data-invite-id="' + _lobbyEscapeText(p.id)
+        + '" style="background:transparent;border:1px solid #444;color:#666;'
+        + 'padding:2px 8px;font-family:\'Courier New\',monospace;font-size:10px;'
+        + 'letter-spacing:1px;cursor:not-allowed;border-radius:2px;">'
+        + secs + 's</button>';
+    } else {
+      inviteBtn = '<button type="button" data-invite-id="' + _lobbyEscapeText(p.id)
+        + '" onclick="_lobbySendInvite(this.dataset.inviteId)"'
+        + ' style="background:rgba(255,170,0,0.10);border:1px solid rgba(255,170,0,0.5);color:#ffaa00;'
+        + 'padding:2px 8px;font-family:\'Courier New\',monospace;font-size:10px;'
+        + 'letter-spacing:1px;cursor:pointer;border-radius:2px;transition:all 0.2s;"'
+        + ' onmouseover="this.style.background=\'rgba(255,170,0,0.25)\'"'
+        + ' onmouseout="this.style.background=\'rgba(255,170,0,0.10)\'">INVITE</button>';
+    }
+  }
+
   return ''
     + '<div style="display:flex;align-items:center;gap:8px;padding:4px 4px;'
       + (isSelf ? 'background:rgba(255,170,0,0.06);border-radius:2px;' : '')
@@ -3060,7 +3092,175 @@ function _lobbyRowHTML(p, isSelf) {
     + '</div>'
     + '<span style="color:#888;font-size:10px;letter-spacing:1px;">' + ship + ' &middot; ' + modeLabel + '</span>'
     + '<span style="color:' + statusColor + ';font-size:10px;letter-spacing:1px;width:60px;text-align:right;">' + statusTxt + '</span>'
+    + inviteBtn
     + '</div>';
+}
+
+// (v15 step 5) Send an invite to the given target Discord id. Hits the
+// worker /lobby/invite endpoint ; on 429 cooldown, stash the retryAfter
+// expiry so the button shows a countdown until the cooldown lapses.
+async function _lobbySendInvite(toId) {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken || !toId) return;
+  if (!_lobbyState.cooldowns) _lobbyState.cooldowns = {};
+  _lobbySetStatus('inviting ' + toId.slice(-4) + '...');
+  try {
+    const res = await fetch(LSS_API_BASE + '/lobby/invite', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 429) {
+      const secs = Number(data.retryAfter || 30);
+      _lobbyState.cooldowns[toId] = Date.now() + secs * 1000;
+      _lobbySetStatus('on cooldown (' + secs + 's)');
+      // Immediate re-render so the button flips to disabled state.
+      if (_lobbyState.lastListData) _lobbyRender(_lobbyState.lastListData, id.id);
+    } else if (res.ok) {
+      _lobbySetStatus('invite sent');
+    } else {
+      _lobbySetStatus('invite failed: ' + (data.error || res.status));
+    }
+  } catch (e) {
+    _lobbySetStatus('invite error');
+    console.warn('[v15 lobby] invite failed:', e);
+  }
+}
+window._lobbySendInvite = _lobbySendInvite;
+
+// (v15 step 5) Invite-toast reconciliation. Each list-poll passes the
+// current pending invite array ; we open toasts for new IDs, leave open
+// toasts for still-present IDs alone, and close toasts for IDs that
+// vanished (server-side accepted/ignored/expired).
+function _lobbyHandleInvites(invites) {
+  if (!_lobbyState.toasts) _lobbyState.toasts = new Map(); // inviteId -> { el, expiresAt, intervalId }
+  const seen = new Set(invites.map(i => i.id));
+  // Spawn toasts for new invites.
+  for (const inv of invites) {
+    if (!_lobbyState.toasts.has(inv.id)) {
+      _lobbySpawnToast(inv);
+    }
+  }
+  // Close toasts whose ID is gone from the inbox.
+  for (const [id, rec] of _lobbyState.toasts.entries()) {
+    if (!seen.has(id)) _lobbyCloseToast(id, true);
+  }
+}
+
+function _lobbyToastContainer() {
+  let host = document.getElementById('lobby-toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'lobby-toast-host';
+    host.style.cssText = 'position:fixed;top:16px;right:16px;display:flex;flex-direction:column;'
+      + 'gap:8px;z-index:9999;pointer-events:none;font-family:\'Courier New\',monospace;';
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+function _lobbySpawnToast(inv) {
+  const host = _lobbyToastContainer();
+  const wrap = document.createElement('div');
+  wrap.dataset.inviteId = inv.id;
+  wrap.style.cssText = 'pointer-events:auto;background:rgba(20,20,40,0.95);'
+    + 'border:1px solid #ffaa00;border-radius:3px;padding:10px 12px;color:#ddd;'
+    + 'min-width:280px;max-width:320px;box-shadow:0 4px 16px rgba(0,0,0,0.6);'
+    + 'transform:translateX(0);transition:transform 0.25s, opacity 0.25s;';
+  const avatar = inv.fromAvatar
+    ? '<img src="' + _lobbyEscapeText(inv.fromAvatar) + '" style="width:32px;height:32px;border-radius:50%;flex-shrink:0;">'
+    : '<div style="width:32px;height:32px;border-radius:50%;background:#333;flex-shrink:0;"></div>';
+  wrap.innerHTML = ''
+    + '<div style="height:3px;background:#444;margin-bottom:8px;border-radius:2px;overflow:hidden;">'
+    + '  <div class="toast-bar" style="height:100%;width:100%;background:#ffaa00;transition:width 1s linear;"></div>'
+    + '</div>'
+    + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+    + avatar
+    + '  <div style="flex:1;font-size:12px;letter-spacing:1px;line-height:1.3;">'
+    + '    <div style="color:#ffaa00;">' + _lobbyEscapeText(inv.fromUsername || 'someone') + '</div>'
+    + '    <div style="color:#aaa;font-size:11px;">is inviting you to a match</div>'
+    + '  </div>'
+    + '</div>'
+    + '<div style="display:flex;gap:6px;justify-content:flex-end;">'
+    + '  <button data-action="ignore" style="background:transparent;border:1px solid #444;color:#888;'
+    + '    padding:5px 12px;font-family:\'Courier New\',monospace;font-size:11px;letter-spacing:1px;'
+    + '    cursor:pointer;border-radius:2px;">IGNORE</button>'
+    + '  <button data-action="accept" style="background:rgba(102,187,102,0.18);border:1px solid #66bb66;'
+    + '    color:#66bb66;padding:5px 14px;font-family:\'Courier New\',monospace;font-size:11px;'
+    + '    letter-spacing:1px;cursor:pointer;border-radius:2px;">ACCEPT</button>'
+    + '</div>';
+  host.appendChild(wrap);
+  // Wire button actions.
+  wrap.querySelector('[data-action="accept"]').addEventListener('click', () => _lobbyAcceptInvite(inv.id));
+  wrap.querySelector('[data-action="ignore"]').addEventListener('click', () => _lobbyIgnoreInvite(inv.id));
+  // Countdown bar : drains from 100% to 0% over the remaining lifetime.
+  const expiresAt = inv.expiresAt || (Date.now() + 90_000);
+  const totalMs   = Math.max(1, expiresAt - inv.createdAt);
+  const bar = wrap.querySelector('.toast-bar');
+  let intervalId = setInterval(() => {
+    const remain = expiresAt - Date.now();
+    if (remain <= 0) {
+      _lobbyCloseToast(inv.id, true);
+      return;
+    }
+    if (bar) bar.style.width = (Math.max(0, remain) / totalMs * 100) + '%';
+  }, 250);
+  _lobbyState.toasts.set(inv.id, { el: wrap, expiresAt, intervalId });
+}
+
+function _lobbyCloseToast(id, animate) {
+  const rec = _lobbyState.toasts && _lobbyState.toasts.get(id);
+  if (!rec) return;
+  if (rec.intervalId) clearInterval(rec.intervalId);
+  if (rec.el) {
+    if (animate) {
+      rec.el.style.opacity = '0';
+      rec.el.style.transform = 'translateX(20px)';
+      setTimeout(() => { if (rec.el && rec.el.parentNode) rec.el.parentNode.removeChild(rec.el); }, 260);
+    } else if (rec.el.parentNode) {
+      rec.el.parentNode.removeChild(rec.el);
+    }
+  }
+  _lobbyState.toasts.delete(id);
+}
+
+async function _lobbyAcceptInvite(inviteId) {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    const res = await fetch(LSS_API_BASE + '/lobby/invite/' + encodeURIComponent(inviteId) + '/accept', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+    });
+    const data = await res.json().catch(() => ({}));
+    _lobbyCloseToast(inviteId, true);
+    if (res.status === 410) {
+      _lobbySetStatus('invite expired (' + (data.message || 'gone') + ')');
+      return;
+    }
+    if (!res.ok) {
+      _lobbySetStatus('accept failed: ' + (data.error || res.status));
+      return;
+    }
+    _lobbySetStatus('accepted ; joining ' + (data.roomId || '') + ' (room handoff in step 6)');
+    // (Step 6 will wire) leaveTrysteroIfActive() then joinRoom(data.roomId).
+  } catch (e) {
+    _lobbySetStatus('accept error');
+    console.warn('[v15 lobby] accept failed:', e);
+  }
+}
+
+async function _lobbyIgnoreInvite(inviteId) {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  _lobbyCloseToast(inviteId, true);
+  try {
+    await fetch(LSS_API_BASE + '/lobby/invite/' + encodeURIComponent(inviteId) + '/ignore', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+    });
+  } catch (_) {}
 }
 
 async function _lobbySendLeave() {
