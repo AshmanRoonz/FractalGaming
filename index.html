@@ -2951,78 +2951,252 @@ const _lobbyState = {
   lastListPolling: false,
 };
 
-function _lobbyHeartbeatBody() {
-  // Compose the presence payload from current game state. Values that don't
-  // exist yet (game not booted ; no player ; etc.) safely fall back to
-  // sensible defaults so a heartbeat can fire from the main menu before any
-  // match infra has spun up.
-  const inMatch     = (typeof net !== 'undefined' && net && net.active === true);
-  const gameState   = (typeof game !== 'undefined' && game && typeof game.state === 'string') ? game.state : 'select';
-  // (v15) On the main menu (game.state === 'select') the player is sitting
-  // on the multiplayer surface but hasn't opted into matchmaking yet. They
-  // might be tweaking settings, browsing leaderboards, etc. Report status
-  // 'browsing' so the worker marks them available (invitable) but NOT
-  // scoopable. Becoming scoopable requires an explicit Quick Match / Create
-  // Room click ; that path is wired in step 6.
-  const stateMap    = { select: 'browsing', warmup: 'warmup', playing: 'playing', roundEnd: 'round_end', matchEnd: 'match_end' };
-  const status      = stateMap[gameState] || 'browsing';
-  const ship        = (typeof player !== 'undefined' && player && typeof player.loadoutKey === 'string') ? player.loadoutKey : null;
-  const team        = (typeof player !== 'undefined' && player && (player.team === 'A' || player.team === 'B')) ? player.team : null;
-  const roomId      = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId : null;
-  const roomFull    = !!(typeof net !== 'undefined' && net && net.roomFull);
-  const matchSize   = {
-    current: (typeof net !== 'undefined' && net && Array.isArray(net.peers)) ? (net.peers.length + 1) : 1,
-    max: 6,
-  };
-  // (v15) Mode reflects player intent, not just net.active:
-  //   - In a Trystero room (net.active true) → 'multi'
-  //   - On main menu (game.state === 'select', no net) → 'multi' (sitting on
-  //     the multiplayer surface waiting to matchmake)
-  //   - SOLO + BOTS match running (net.active false, mid-match state) → 'solo'
-  // The 'solo' tag means "in a bots-only match" ; per spec, solo players are
-  // invitable but never scoopable.
+// (v15 P2P lobby) Backend is gone ; lobby state is now pure peer-to-peer
+// over Trystero. Every signed-in player joins LSS_LOBBY_GLOBAL_v1 and
+// broadcasts their presence to the mesh ; everyone else's presence comes
+// in via the same channel. No KV, no quotas, no cost. Match rooms are
+// separate Trystero rooms (the existing v15 multiplayer uses these).
+
+const LOBBY_P2P_ROOM_ID = 'LSS_LOBBY_GLOBAL_v1';
+const LOBBY_P2P_APP_ID  = 'last-ship-sailing';
+const LOBBY_PRESENCE_BROADCAST_MS = 30_000;
+const LOBBY_INVITE_TTL_MS         = 90_000;
+const LOBBY_COOLDOWN_LADDER_SEC   = [60, 90, 150, 240];
+const LOBBY_COOLDOWN_AGE_MS       = 7 * 24 * 3600 * 1000; // 7 days
+
+const _lobbyP2P = {
+  room:     null,             // Trystero room handle for the global lobby
+  actions:  null,             // { sendPresence, sendPresReq, sendInvite, ... }
+  presence: new Map(),        // peerId -> presence record
+  d2p:      new Map(),        // discordId -> peerId (latest seen)
+  pendingInvites: new Map(),  // inviteId -> invite record (incoming)
+  presenceTimer: null,
+  connecting: false,
+};
+
+// Compose the local player's presence record. Drives both /lobby/list
+// projection and what we broadcast to other peers.
+function _lobbyMyPresence() {
+  const id = _lobbyState.identity;
+  if (!id) return null;
+  const inMatch   = (typeof net !== 'undefined' && net && net.active === true);
+  const gameState = (typeof game !== 'undefined' && game && typeof game.state === 'string') ? game.state : 'select';
+  const stateMap  = { select: 'browsing', warmup: 'warmup', playing: 'playing', roundEnd: 'round_end', matchEnd: 'match_end' };
   let mode;
   if (inMatch) mode = 'multi';
   else if (gameState === 'select') mode = 'multi';
   else mode = 'solo';
-  return { mode, status, ship, team, roomId, roomFull, matchSize };
+  const myRoom = _lobbyState.myRoom;
+  return {
+    id:        id.id,
+    username:  id.username,
+    avatar:    id.avatar,
+    mode,
+    status:    stateMap[gameState] || 'browsing',
+    ship:      (typeof player !== 'undefined' && player && typeof player.loadoutKey === 'string') ? player.loadoutKey : null,
+    team:      (typeof player !== 'undefined' && player && (player.team === 'A' || player.team === 'B')) ? player.team : null,
+    roomId:    myRoom ? myRoom.code : null,
+    roomFull:  myRoom ? (myRoom.players && myRoom.players.length >= myRoom.maxSize) : false,
+    matchSize: myRoom
+      ? { current: myRoom.players.length, max: myRoom.maxSize }
+      : { current: 1, max: 6 },
+    lastSeen:  Date.now(),
+  };
 }
 
-async function _lobbyTickHeartbeat() {
-  const id = _lobbyState.identity;
-  if (!id || !id.accessToken) return;
-  try {
-    await fetch(LSS_API_BASE + '/lobby/heartbeat', {
-      method:  'POST',
-      headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
-      body:    JSON.stringify(_lobbyHeartbeatBody()),
-    });
-  } catch (e) {
-    console.warn('[v15 lobby] heartbeat failed:', e);
-  }
-}
-
-async function _lobbyTickList() {
-  const id = _lobbyState.identity;
-  if (!id || !id.accessToken) return;
-  try {
-    const res = await fetch(LSS_API_BASE + '/lobby/list', {
-      headers: { Authorization: 'Bearer ' + id.accessToken },
-    });
-    if (!res.ok) {
-      _lobbySetStatus('list ' + res.status);
-      return;
+// Compute the available + scoopable flags from a presence record. Mirrors
+// the worker version from step 3 ; we run it client-side now so the
+// lobby UI can sort + status-tag rows the same way.
+function _lobbyComputeFlags(p) {
+  if (!p) return { available: false, scoopable: false };
+  if (p.mode === 'solo') return { available: true, scoopable: false };
+  if (p.mode === 'multi') {
+    if (p.roomFull) return { available: false, scoopable: false };
+    if (p.status === 'browsing') return { available: true, scoopable: false };
+    if (p.status === 'lobby' || p.status === 'looking' || p.status === 'idle' || !p.status) {
+      return { available: true, scoopable: true };
     }
-    const data = await res.json();
-    _lobbyState.lastListData = data;
-    _lobbyRender(data, id.id);
-    // (v15 step 5) Inbox is bundled into the list response. Reconcile
-    // toasts so new invites pop and resolved/expired ones close.
-    _lobbyHandleInvites(Array.isArray(data.invites) ? data.invites : []);
-  } catch (e) {
-    _lobbySetStatus('list error');
-    console.warn('[v15 lobby] list failed:', e);
   }
+  return { available: false, scoopable: false };
+}
+
+// Build the same data shape the existing _lobbyRender expects. Source is
+// the local P2P presence map instead of a /lobby/list response.
+function _lobbyBuildListData() {
+  const me = _lobbyMyPresence();
+  if (!me) return null;
+  const meFlags = _lobbyComputeFlags(me);
+  const players = [{ ...me, ...meFlags }];
+  for (const [, p] of _lobbyP2P.presence) {
+    if (!p || !p.id) continue;
+    if (p.id === me.id) continue;     // dedupe — also fixes self-multi-tab quirks
+    const flags = _lobbyComputeFlags(p);
+    players.push({ ...p, ...flags });
+  }
+  players.sort((a, b) => {
+    if (a.available !== b.available) return a.available ? -1 : 1;
+    const an = (a.username || '').toLowerCase();
+    const bn = (b.username || '').toLowerCase();
+    return an < bn ? -1 : an > bn ? 1 : 0;
+  });
+  // Active (non-expired) incoming invites.
+  const now = Date.now();
+  const invites = [];
+  for (const [, inv] of _lobbyP2P.pendingInvites) {
+    if (inv && inv.expiresAt > now) invites.push(inv);
+  }
+  invites.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  return {
+    players,
+    total:   players.length,
+    invites,
+    me:      { id: me.id, room: _lobbyState.myRoom || null },
+  };
+}
+
+// Re-render lobby panel from current P2P state. Cheap : called on any
+// state change (presence in/out, invite arrived, room changed).
+function _lobbyRefresh() {
+  const id = _lobbyState.identity;
+  if (!id) return;
+  const data = _lobbyBuildListData();
+  if (!data) return;
+  _lobbyState.lastListData = data;
+  _lobbyRender(data, id.id);
+  _lobbyHandleInvites(data.invites);
+}
+
+// Generate a 4-char room code from a non-confusable alphabet.
+function _lobbyMakeRoomCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < 4; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+  return s;
+}
+
+// Broadcast our current presence to the lobby mesh. Called whenever our
+// state changes (joined a room, left a room, ship picked, etc.) so peers
+// see the update without waiting for the periodic re-broadcast.
+function _lobbyBroadcastPresence() {
+  if (!_lobbyP2P.actions || !_lobbyP2P.actions.sendPresence) return;
+  const me = _lobbyMyPresence();
+  if (me) {
+    try { _lobbyP2P.actions.sendPresence(me); } catch (_) {}
+  }
+}
+
+async function _p2pInit() {
+  if (_lobbyP2P.room || _lobbyP2P.connecting) return;
+  _lobbyP2P.connecting = true;
+  _lobbySetStatus('connecting to lobby...');
+  try {
+    const trystero = await import('https://esm.sh/@trystero-p2p/torrent');
+    _lobbyP2P.room = trystero.joinRoom({ appId: LOBBY_P2P_APP_ID }, LOBBY_P2P_ROOM_ID);
+    const room = _lobbyP2P.room;
+    // Action names are 6-char tags Trystero hashes for efficient routing.
+    const [sendPresence, receivePresence] = room.makeAction('pres');
+    const [sendPresReq,  receivePresReq]  = room.makeAction('pres_q');
+    const [sendInvite,   receiveInvite]   = room.makeAction('inv');
+    const [sendIAccept,  receiveIAccept]  = room.makeAction('inv_a');
+    const [sendIIgnore,  receiveIIgnore]  = room.makeAction('inv_i');
+    const [sendScoop,    receiveScoop]    = room.makeAction('scoop');
+    _lobbyP2P.actions = { sendPresence, sendPresReq, sendInvite, sendIAccept, sendIIgnore, sendScoop };
+
+    // Presence : a peer's heartbeat. Update map + re-render.
+    receivePresence((data, peerId) => {
+      if (!data || !data.id) return;
+      _lobbyP2P.presence.set(peerId, data);
+      _lobbyP2P.d2p.set(data.id, peerId);
+      _lobbyRefresh();
+    });
+    // Presence-request : new peers ping us so we send our state immediately
+    // instead of making them wait for the next periodic broadcast.
+    receivePresReq((_data, peerId) => {
+      const me = _lobbyMyPresence();
+      if (me && _lobbyP2P.actions && _lobbyP2P.actions.sendPresence) {
+        try { _lobbyP2P.actions.sendPresence(me, peerId); } catch (_) {}
+      }
+    });
+    // Targeted invite from another peer.
+    receiveInvite((data, peerId) => {
+      const myId = _lobbyState.identity && _lobbyState.identity.id;
+      if (!myId || !data || data.toId !== myId) return;       // not for us
+      _lobbyP2P.pendingInvites.set(data.id, data);
+      _lobbyRefresh();
+    });
+    // Recipient accepted/ignored a previous invite of ours.
+    receiveIAccept((data, peerId) => {
+      const pres = _lobbyP2P.presence.get(peerId);
+      const targetId = pres && pres.id;
+      _lobbySetStatus('invite accepted by ' + (pres && pres.username || peerId.slice(-4)));
+      if (targetId && _lobbyState.cooldowns) delete _lobbyState.cooldowns[targetId];
+      if (targetId) {
+        try { localStorage.removeItem('lobby_cd_age:' + targetId); } catch (_) {}
+      }
+      _lobbyRefresh();
+    });
+    receiveIIgnore((_data, peerId) => {
+      const pres = _lobbyP2P.presence.get(peerId);
+      _lobbySetStatus((pres && pres.username || 'someone') + ' ignored your invite');
+    });
+    // Got scooped into a room by a host.
+    receiveScoop((data, peerId) => {
+      const myId = _lobbyState.identity && _lobbyState.identity.id;
+      if (!myId || !data || data.targetId !== myId) return;
+      const room = {
+        code:     data.roomCode,
+        hostId:   data.hostId,
+        isPublic: !!data.isPublic,
+        players:  Array.isArray(data.players) ? data.players : [],
+        maxSize:  6,
+      };
+      _lobbyApplyRoom(room, 'scooped into ' + data.roomCode);
+    });
+
+    room.onPeerJoin((peerId) => {
+      // Tell the new peer who we are and ask for their presence.
+      const me = _lobbyMyPresence();
+      if (me) {
+        try { _lobbyP2P.actions.sendPresence(me, peerId); } catch (_) {}
+      }
+      try { _lobbyP2P.actions.sendPresReq({}, peerId); } catch (_) {}
+    });
+    room.onPeerLeave((peerId) => {
+      const pres = _lobbyP2P.presence.get(peerId);
+      if (pres && pres.id) _lobbyP2P.d2p.delete(pres.id);
+      _lobbyP2P.presence.delete(peerId);
+      _lobbyRefresh();
+    });
+
+    // Fire a first broadcast immediately + start the periodic loop so
+    // peers who joined just before us learn about us as soon as we're up.
+    _lobbyBroadcastPresence();
+    if (_lobbyP2P.presenceTimer) clearInterval(_lobbyP2P.presenceTimer);
+    _lobbyP2P.presenceTimer = setInterval(_lobbyBroadcastPresence, LOBBY_PRESENCE_BROADCAST_MS);
+
+    _lobbySetStatus('connected to lobby');
+    _lobbyRefresh();
+  } catch (e) {
+    console.warn('[v15 lobby p2p] init failed:', e);
+    _lobbySetStatus('lobby connection failed');
+  } finally {
+    _lobbyP2P.connecting = false;
+  }
+}
+
+function _p2pTeardown() {
+  if (_lobbyP2P.presenceTimer) {
+    clearInterval(_lobbyP2P.presenceTimer);
+    _lobbyP2P.presenceTimer = null;
+  }
+  if (_lobbyP2P.room) {
+    try { _lobbyP2P.room.leave(); } catch (_) {}
+  }
+  _lobbyP2P.room = null;
+  _lobbyP2P.actions = null;
+  _lobbyP2P.presence.clear();
+  _lobbyP2P.d2p.clear();
+  _lobbyP2P.pendingInvites.clear();
 }
 
 function _lobbySetStatus(text) {
@@ -3139,18 +3313,16 @@ function _lobbyRenderInRoom(room, selfId) {
   _lobbyState.playersEl.innerHTML = html;
 }
 
-// (v15 step 6) Trystero handoff. The lobby UI is server-driven (we render
-// rooms purely from the worker's state) ; the underlying Trystero mesh is
-// what the actual game uses for P2P. When the server says "you're in
-// room X", we Trystero-join X if we aren't already, so by the time the
-// match starts everyone's already meshed.
+// (v15 P2P) Old worker-driven handoff replaced by _lobbyTrysteroJoinMatchRoom
+// further down. Kept as an alias so any leftover call site doesn't 500.
 async function _lobbyTrysteroJoinIfNeeded(code) {
+  return _lobbyTrysteroJoinMatchRoom(code);
+}
+async function _lobbyTrysteroJoinIfNeeded_dead(code) {
   if (!code) return;
   const target = String(code).toUpperCase();
   const currentRoom = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId.toUpperCase() : null;
   if (currentRoom === target) return;
-  // Skip if a join is already in flight ; flag prevents back-to-back polls
-  // from each spawning a parallel join while the first is still handshaking.
   if (_lobbyState.trysteroJoining) return;
   _lobbyState.trysteroJoining = true;
   try {
@@ -3220,36 +3392,62 @@ function _lobbyRowHTML(p, isSelf) {
     + '</div>';
 }
 
-// (v15 step 5) Send an invite to the given target Discord id. Hits the
-// worker /lobby/invite endpoint ; on 429 cooldown, stash the retryAfter
-// expiry so the button shows a countdown until the cooldown lapses.
+// (v15 P2P) Send an invite to the given target Discord id via Trystero.
+// Cooldown ladder is enforced locally + persisted in localStorage so a
+// repeat spammer ramps up across page reloads (7-day memory like the
+// worker version had).
 async function _lobbySendInvite(toId) {
   const id = _lobbyState.identity;
-  if (!id || !id.accessToken || !toId) return;
+  if (!id || !toId || !_lobbyP2P.actions) return;
   if (!_lobbyState.cooldowns) _lobbyState.cooldowns = {};
-  _lobbySetStatus('inviting ' + toId.slice(-4) + '...');
-  try {
-    const res = await fetch(LSS_API_BASE + '/lobby/invite', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ toId }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 429) {
-      const secs = Number(data.retryAfter || 30);
-      _lobbyState.cooldowns[toId] = Date.now() + secs * 1000;
-      _lobbySetStatus('on cooldown (' + secs + 's)');
-      // Immediate re-render so the button flips to disabled state.
-      if (_lobbyState.lastListData) _lobbyRender(_lobbyState.lastListData, id.id);
-    } else if (res.ok) {
-      _lobbySetStatus('invite sent');
-    } else {
-      _lobbySetStatus('invite failed: ' + (data.error || res.status));
-    }
-  } catch (e) {
-    _lobbySetStatus('invite error');
-    console.warn('[v15 lobby] invite failed:', e);
+  // Active cooldown ?
+  if ((_lobbyState.cooldowns[toId] || 0) > Date.now()) {
+    const secs = Math.ceil((_lobbyState.cooldowns[toId] - Date.now()) / 1000);
+    _lobbySetStatus('on cooldown (' + secs + 's)');
+    return;
   }
+  // Resolve target peer via the discord -> peer map populated by presence
+  // broadcasts. If target isn't in the lobby right now, bail.
+  const peerId = _lobbyP2P.d2p.get(toId);
+  if (!peerId) {
+    _lobbySetStatus('target not in lobby');
+    return;
+  }
+  // Bump persistent cooldown ladder (local, per-pair).
+  const ageKey = 'lobby_cd_age:' + toId;
+  let level = 1;
+  try {
+    const stored = localStorage.getItem(ageKey);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (parsed && Date.now() - (parsed.lastInviteAt || 0) < LOBBY_COOLDOWN_AGE_MS) {
+        level = Math.min((parsed.level || 0) + 1, LOBBY_COOLDOWN_LADDER_SEC.length);
+      }
+    }
+  } catch (_) {}
+  const ttlSec = LOBBY_COOLDOWN_LADDER_SEC[Math.min(level, LOBBY_COOLDOWN_LADDER_SEC.length) - 1];
+  _lobbyState.cooldowns[toId] = Date.now() + ttlSec * 1000;
+  try { localStorage.setItem(ageKey, JSON.stringify({ level, lastInviteAt: Date.now() })); } catch (_) {}
+  // Compose + send.
+  const inviteId = (Math.random().toString(36) + Math.random().toString(36)).replace(/[^a-z0-9]/g, '').slice(0, 12);
+  const invite = {
+    id:           inviteId,
+    fromId:       id.id,
+    fromUsername: id.username,
+    fromAvatar:   id.avatar,
+    toId,
+    roomId:       _lobbyState.myRoom ? _lobbyState.myRoom.code : null,
+    createdAt:    Date.now(),
+    expiresAt:    Date.now() + LOBBY_INVITE_TTL_MS,
+  };
+  try {
+    _lobbyP2P.actions.sendInvite(invite, peerId);
+    _lobbySetStatus('invite sent');
+  } catch (e) {
+    _lobbySetStatus('invite send failed');
+    console.warn('[v15 lobby p2p] invite send failed:', e);
+  }
+  _lobbyRefresh();
 }
 window._lobbySendInvite = _lobbySendInvite;
 
@@ -3349,102 +3547,106 @@ function _lobbyCloseToast(id, animate) {
   _lobbyState.toasts.delete(id);
 }
 
+// (v15 P2P) Accept an incoming invite. Builds a local room (host=inviter,
+// invitee=us) and joins the Trystero match room. Notifies the inviter
+// via inv_a so their cooldown clears.
 async function _lobbyAcceptInvite(inviteId) {
-  const id = _lobbyState.identity;
-  if (!id || !id.accessToken) return;
-  try {
-    const res = await fetch(LSS_API_BASE + '/lobby/invite/' + encodeURIComponent(inviteId) + '/accept', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + id.accessToken },
-    });
-    const data = await res.json().catch(() => ({}));
+  const id  = _lobbyState.identity;
+  const inv = _lobbyP2P.pendingInvites && _lobbyP2P.pendingInvites.get(inviteId);
+  if (!id || !inv) {
     _lobbyCloseToast(inviteId, true);
-    if (res.status === 410) {
-      _lobbySetStatus('invite expired (' + (data.message || 'gone') + ')');
-      return;
-    }
-    if (!res.ok) {
-      _lobbySetStatus('accept failed: ' + (data.error || res.status));
-      return;
-    }
-    // (v15 step 6) Worker has already added us to the room server-side
-    // and returns the full room ; apply optimistically + handoff to
-    // Trystero so the P2P mesh comes up before the next list poll.
-    if (data.room) {
-      _lobbyApplyRoom(data.room, 'joined ' + (data.room.code || ''));
-    } else {
-      _lobbySetStatus('accepted ; joining ' + (data.roomId || ''));
-      if (data.roomId) _lobbyTrysteroJoinIfNeeded(data.roomId);
-    }
-  } catch (e) {
-    _lobbySetStatus('accept error');
-    console.warn('[v15 lobby] accept failed:', e);
+    return;
   }
+  _lobbyP2P.pendingInvites.delete(inviteId);
+  _lobbyCloseToast(inviteId, true);
+
+  // Notify the inviter so their cooldown for us clears (they accepted us;
+  // future invites between us start fresh at level 1).
+  const inviterPeerId = _lobbyP2P.d2p.get(inv.fromId);
+  if (inviterPeerId && _lobbyP2P.actions) {
+    try { _lobbyP2P.actions.sendIAccept({ inviteId }, inviterPeerId); } catch (_) {}
+  }
+  // Clear our outbound cooldown for them too (mirrors worker design).
+  if (_lobbyState.cooldowns) delete _lobbyState.cooldowns[inv.fromId];
+  try { localStorage.removeItem('lobby_cd_age:' + inv.fromId); } catch (_) {}
+
+  // Build the room from invite + inviter's latest broadcast (their roomId
+  // may have changed since they sent the invite ; live state wins).
+  const inviterPres = inviterPeerId ? _lobbyP2P.presence.get(inviterPeerId) : null;
+  const roomCode = (inviterPres && inviterPres.roomId) || inv.roomId || _lobbyMakeRoomCode();
+  const room = {
+    code:     roomCode,
+    hostId:   inv.fromId,
+    isPublic: false,
+    players: [
+      { id: inv.fromId, username: inv.fromUsername, avatar: inv.fromAvatar },
+      { id: id.id,      username: id.username,      avatar: id.avatar },
+    ],
+    maxSize: 6,
+  };
+  _lobbyApplyRoom(room, 'joined ' + roomCode);
 }
 
-// (v15 step 6) Optimistic local state update for "we just entered a room".
-// Stamps _lobbyState.myRoom, re-renders the panel into in-room view, and
-// kicks the Trystero join. Called from Quick Match / Create Room / Scoop /
-// Accept flows so the UI reflects the change immediately, before the next
-// scheduled /lobby/list poll catches up.
+// Optimistic local state update for "we just entered a room". Updates
+// _lobbyState.myRoom, broadcasts our updated presence so other peers see
+// us as roomed, re-renders the panel into in-room view, and joins the
+// Trystero match room (separate from the global lobby room).
 function _lobbyApplyRoom(room, statusText) {
   if (!room) return;
   _lobbyState.myRoom = room;
   if (statusText) _lobbySetStatus(statusText);
-  const id = _lobbyState.identity;
-  if (id) {
-    // Re-render against the most recent list data so the in-room view
-    // shows immediately. If we don't have list data yet, build a minimal
-    // shape so the renderer has something to work with.
-    const data = _lobbyState.lastListData
-      ? Object.assign({}, _lobbyState.lastListData, { me: { id: id.id, room } })
-      : { players: [], total: 0, invites: [], me: { id: id.id, room } };
-    _lobbyRender(data, id.id);
+  // Refresh UI immediately, before the Trystero match-room handshake.
+  _lobbyRefresh();
+  // Tell the lobby mesh about our new room state.
+  _lobbyBroadcastPresence();
+  // Kick the Trystero match-room join so the P2P mesh for the actual
+  // game comes up. Existing v15 joinRoom() reads from #room-code input.
+  _lobbyTrysteroJoinMatchRoom(room.code);
+}
+
+async function _lobbyTrysteroJoinMatchRoom(code) {
+  if (!code) return;
+  const target = String(code).toUpperCase();
+  const currentRoom = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId.toUpperCase() : null;
+  if (currentRoom === target) return;
+  if (_lobbyState.trysteroJoining) return;
+  _lobbyState.trysteroJoining = true;
+  try {
+    const codeInput = document.getElementById('room-code');
+    if (codeInput) codeInput.value = target;
+    if (typeof window.joinRoom === 'function') await window.joinRoom();
+  } catch (e) {
+    console.warn('[v15 lobby p2p] match room join failed:', e);
+  } finally {
+    _lobbyState.trysteroJoining = false;
   }
-  _lobbyTrysteroJoinIfNeeded(room.code);
 }
 
 async function _lobbyIgnoreInvite(inviteId) {
-  const id = _lobbyState.identity;
-  if (!id || !id.accessToken) return;
+  const inv = _lobbyP2P.pendingInvites && _lobbyP2P.pendingInvites.get(inviteId);
+  if (inv) _lobbyP2P.pendingInvites.delete(inviteId);
   _lobbyCloseToast(inviteId, true);
-  try {
-    await fetch(LSS_API_BASE + '/lobby/invite/' + encodeURIComponent(inviteId) + '/ignore', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + id.accessToken },
-    });
-  } catch (_) {}
+  // Tell the inviter so their cooldown ladder keeps ramping (we did NOT
+  // accept). Worker version: ignore = keep cooldown ; accept = reset.
+  if (inv) {
+    const inviterPeerId = _lobbyP2P.d2p.get(inv.fromId);
+    if (inviterPeerId && _lobbyP2P.actions) {
+      try { _lobbyP2P.actions.sendIIgnore({ inviteId }, inviterPeerId); } catch (_) {}
+    }
+  }
 }
 
-async function _lobbySendLeave() {
-  const id = _lobbyState.identity;
-  if (!id || !id.accessToken) return;
-  try {
-    // Use keepalive so the request survives a tab close.
-    await fetch(LSS_API_BASE + '/lobby/leave', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + id.accessToken },
-      keepalive: true,
-    });
-  } catch (_) {}
-}
+// (v15 P2P) No-op stub. Old worker-leave is replaced by _p2pTeardown below.
+async function _lobbySendLeave() { /* P2P : Trystero leave handled by _p2pTeardown */ }
 
 function _lobbyStart() {
-  if (_lobbyState.heartbeatTimer) return;          // already running
-  // Fire one immediately so the player appears in lists right away.
-  _lobbyTickHeartbeat();
-  _lobbyTickList();
-  _lobbyState.heartbeatTimer = setInterval(_lobbyTickHeartbeat, 30_000);
-  _lobbyState.listTimer      = setInterval(_lobbyTickList,       5_000);
-  _lobbyState.lastListPolling = true;
+  // Defer init to next tick so the auth state has time to settle if signin
+  // just landed via the OAuth redirect.
+  setTimeout(_p2pInit, 0);
 }
 
 function _lobbyStop() {
-  if (_lobbyState.heartbeatTimer) clearInterval(_lobbyState.heartbeatTimer);
-  if (_lobbyState.listTimer)      clearInterval(_lobbyState.listTimer);
-  _lobbyState.heartbeatTimer = null;
-  _lobbyState.listTimer      = null;
-  _lobbyState.lastListPolling = false;
+  _p2pTeardown();
 }
 
 function _lobbyOnAuthChange(identity) {
@@ -3476,82 +3678,104 @@ function _lobbyInit() {
   const cr = document.getElementById('btn-create-room');
   const sc = document.getElementById('btn-scoop-all');
   const lr = document.getElementById('btn-leave-room');
-  if (qm) qm.addEventListener('click', async () => {
+  // (v15 P2P) Quick Match : look at peer presences for any open public room
+  // and join it ; if none exist, create a fresh one with us as host.
+  if (qm) qm.addEventListener('click', () => {
     const id = _lobbyState.identity;
     if (!id) return;
     _lobbySetStatus('quick match...');
-    try {
-      const res = await fetch(LSS_API_BASE + '/rooms/quickmatch', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + id.accessToken },
-      });
-      const data = await res.json();
-      if (!res.ok || !data.room) {
-        _lobbySetStatus('quick match failed: ' + (data.error || res.status));
-        return;
-      }
-      _lobbyApplyRoom(data.room, data.created ? 'room created ' + data.room.code : 'joined ' + data.room.code);
-    } catch (e) { _lobbySetStatus('quick match error'); console.warn('[v15 lobby] quickmatch failed:', e); }
+    let chosen = null;
+    for (const [, p] of _lobbyP2P.presence) {
+      if (!p || p.id === id.id) continue;
+      if (p.mode !== 'multi') continue;
+      if (!p.roomId) continue;
+      if (p.roomFull) continue;
+      // (Honor system : we don't know if a peer's room is public from
+      // their broadcast. If they want privacy they wouldn't broadcast a
+      // roomId, or we add an isPublic flag to presence. For now any
+      // multi-mode peer with a non-full roomId is fair game.)
+      chosen = p;
+      break;
+    }
+    if (chosen) {
+      const room = {
+        code:     chosen.roomId,
+        hostId:   chosen.id,
+        isPublic: true,
+        players: [
+          { id: chosen.id, username: chosen.username, avatar: chosen.avatar },
+          { id: id.id,     username: id.username,     avatar: id.avatar },
+        ],
+        maxSize: 6,
+      };
+      _lobbyApplyRoom(room, 'joined ' + chosen.roomId);
+    } else {
+      const code = _lobbyMakeRoomCode();
+      const room = {
+        code, hostId: id.id, isPublic: true,
+        players: [{ id: id.id, username: id.username, avatar: id.avatar }],
+        maxSize: 6,
+      };
+      _lobbyApplyRoom(room, 'room created ' + code);
+    }
   });
-  if (cr) cr.addEventListener('click', async () => {
+  if (cr) cr.addEventListener('click', () => {
     const id = _lobbyState.identity;
     if (!id) return;
-    _lobbySetStatus('creating room...');
-    try {
-      const res = await fetch(LSS_API_BASE + '/rooms/create', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isPublic: true }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.room) {
-        _lobbySetStatus('create failed: ' + (data.error || res.status));
-        return;
-      }
-      _lobbyApplyRoom(data.room, 'room created ' + data.room.code);
-    } catch (e) { _lobbySetStatus('create error'); console.warn('[v15 lobby] create failed:', e); }
+    const code = _lobbyMakeRoomCode();
+    const room = {
+      code, hostId: id.id, isPublic: true,
+      players: [{ id: id.id, username: id.username, avatar: id.avatar }],
+      maxSize: 6,
+    };
+    _lobbyApplyRoom(room, 'room created ' + code);
   });
-  if (sc) sc.addEventListener('click', async () => {
+  // (v15 P2P) Scoop : host walks the local presence map for browsing /
+  // looking multi-mode peers, adds them to the room, and sends each one
+  // a targeted scoop message so their client auto-joins the match room.
+  if (sc) sc.addEventListener('click', () => {
+    const id = _lobbyState.identity;
+    const myRoom = _lobbyState.myRoom;
+    if (!id || !myRoom || !_lobbyP2P.actions) return;
+    if (myRoom.hostId !== id.id) return;
+    let scoopedCount = 0;
+    for (const [peerId, p] of _lobbyP2P.presence) {
+      if (myRoom.players.length >= myRoom.maxSize) break;
+      if (!p || p.id === id.id) continue;
+      if (p.mode !== 'multi') continue;
+      if (p.roomId) continue;
+      if (!(p.status === 'browsing' || p.status === 'lobby' || p.status === 'looking' || p.status === 'idle' || !p.status)) continue;
+      if (myRoom.players.some(pl => pl.id === p.id)) continue;
+      myRoom.players.push({ id: p.id, username: p.username, avatar: p.avatar });
+      try {
+        _lobbyP2P.actions.sendScoop({
+          targetId: p.id,
+          roomCode: myRoom.code,
+          hostId:   myRoom.hostId,
+          isPublic: !!myRoom.isPublic,
+          players:  myRoom.players,
+        }, peerId);
+        scoopedCount++;
+      } catch (_) {}
+    }
+    _lobbyState.myRoom = myRoom;
+    _lobbySetStatus('scooped ' + scoopedCount + (scoopedCount === 1 ? ' player' : ' players'));
+    _lobbyBroadcastPresence();
+    _lobbyRefresh();
+  });
+  if (lr) lr.addEventListener('click', () => {
     const id = _lobbyState.identity;
     const myRoom = _lobbyState.myRoom;
     if (!id || !myRoom) return;
-    _lobbySetStatus('scooping...');
-    try {
-      const res = await fetch(LSS_API_BASE + '/rooms/' + encodeURIComponent(myRoom.code) + '/scoop', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + id.accessToken },
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        _lobbySetStatus('scoop failed: ' + (data.error || res.status));
-        return;
-      }
-      const n = Number(data.scooped || 0);
-      _lobbySetStatus('scooped ' + n + (n === 1 ? ' player' : ' players'));
-      if (data.room) _lobbyApplyRoom(data.room, null);
-    } catch (e) { _lobbySetStatus('scoop error'); console.warn('[v15 lobby] scoop failed:', e); }
-  });
-  if (lr) lr.addEventListener('click', async () => {
-    const id = _lobbyState.identity;
-    const myRoom = _lobbyState.myRoom;
-    if (!id || !myRoom) return;
-    _lobbySetStatus('leaving room...');
-    try {
-      await fetch(LSS_API_BASE + '/rooms/leave', {
-        method: 'POST',
-        headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: myRoom.code }),
-      });
-    } catch (_) {}
-    // Tear down Trystero too so peers see us drop ; reload returns to a
-    // clean main menu state without inheriting any net.* flags.
+    // Tear down Trystero match room so peers see us drop. Reload returns
+    // to a clean main menu state without inheriting net.* flags.
     try {
       if (typeof net !== 'undefined' && net && net.room && typeof net.room.leave === 'function') {
         net.room.leave();
       }
     } catch (_) {}
     _lobbyState.myRoom = null;
-    // Strip any ?room= deep-link so the reload doesn't bounce back in.
+    _lobbyBroadcastPresence();
     try {
       const url = new URL(window.location.href);
       if (url.searchParams.has('room')) {
