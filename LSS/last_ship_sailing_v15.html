@@ -1779,6 +1779,41 @@ body.vr-active .hit-marker {
       </div>
     </div>
 
+    <!-- (v15 lobby) Live presence + matchmaking panel. Hidden until signed
+         in via Discord. Renders /lobby/list every 5s, sends /lobby/heartbeat
+         every 30s while the main menu is visible. Quick Match + Create Room
+         buttons are stubs in step 4 ; wired in step 6 (rooms backend). -->
+    <div id="lobby-panel" style="display:none;flex-direction:column;gap:10px;align-items:stretch;
+         margin-bottom:18px;width:min(100%, 480px);
+         background:rgba(20,20,40,0.4);border:1px solid rgba(255,170,0,0.25);border-radius:3px;
+         padding:14px 16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="font-size:11px;color:#ffaa00;letter-spacing:2px;">LOBBY</div>
+        <div id="lobby-count" style="font-size:10px;color:#888;letter-spacing:1px;">— online</div>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+        <button id="btn-quick-match" type="button"
+          style="background:rgba(102,187,102,0.18);border:1px solid #66bb66;color:#66bb66;
+                 padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
+                 cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
+          onmouseover="this.style.background='rgba(102,187,102,0.32)'"
+          onmouseout="this.style.background='rgba(102,187,102,0.18)'">QUICK MATCH</button>
+        <button id="btn-create-room" type="button"
+          style="background:rgba(255,170,0,0.15);border:1px solid #ffaa00;color:#ffaa00;
+                 padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
+                 cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
+          onmouseover="this.style.background='rgba(255,170,0,0.30)'"
+          onmouseout="this.style.background='rgba(255,170,0,0.15)'">CREATE ROOM</button>
+      </div>
+      <div id="lobby-players" style="font-size:11px;color:#ccc;display:flex;flex-direction:column;gap:4px;
+           max-height:220px;overflow-y:auto;padding:4px 0;border-top:1px solid rgba(100,100,120,0.2);
+           border-bottom:1px solid rgba(100,100,120,0.2);"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:9px;color:#555;letter-spacing:1px;">
+        <span id="lobby-status-line">connecting...</span>
+        <span>auto-refresh 5s</span>
+      </div>
+    </div>
+
     <div style="display:flex;flex-direction:column;gap:12px;align-items:center;">
       <div style="font-size:11px;color:#aaa;letter-spacing:1px;margin-bottom:4px;">MULTIPLAYER (P2P MESH NETWORK)</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center;">
@@ -2881,6 +2916,234 @@ function _lssAuthNotifyChange() {
   for (const cb of _lssAuthListeners) {
     try { cb(id); } catch (e) { console.warn('[LSS_AUTH onChange]', e); }
   }
+}
+
+// (v15 lobby) Lobby controller. Sends /lobby/heartbeat every 30 s while
+// signed in, polls /lobby/list every 5 s while the main menu is visible,
+// posts /lobby/leave on signout + beforeunload. Stub buttons (Quick Match,
+// Create Room) hit the corresponding stub worker endpoints to confirm the
+// chain ; real handlers land in step 6.
+const _lobbyState = {
+  heartbeatTimer: null,
+  listTimer:      null,
+  panelEl:        null,
+  countEl:        null,
+  playersEl:      null,
+  statusEl:       null,
+  // Cached identity from the most recent onChange call ; used so the
+  // tickers don't have to re-read LSS_AUTH every iteration.
+  identity:       null,
+  // Last visibility state to know when to start/stop the list poll.
+  lastListPolling: false,
+};
+
+function _lobbyHeartbeatBody() {
+  // Compose the presence payload from current game state. Values that don't
+  // exist yet (game not booted ; no player ; etc.) safely fall back to
+  // sensible defaults so a heartbeat can fire from the main menu before any
+  // match infra has spun up.
+  const inMatch     = (typeof net !== 'undefined' && net && net.active === true);
+  const gameState   = (typeof game !== 'undefined' && game && typeof game.state === 'string') ? game.state : 'select';
+  const stateMap    = { select: 'lobby', warmup: 'warmup', playing: 'playing', roundEnd: 'round_end', matchEnd: 'match_end' };
+  const status      = stateMap[gameState] || 'lobby';
+  const ship        = (typeof player !== 'undefined' && player && typeof player.loadoutKey === 'string') ? player.loadoutKey : null;
+  const team        = (typeof player !== 'undefined' && player && (player.team === 'A' || player.team === 'B')) ? player.team : null;
+  const roomId      = (typeof net !== 'undefined' && net && typeof net.roomId === 'string') ? net.roomId : null;
+  const roomFull    = !!(typeof net !== 'undefined' && net && net.roomFull);
+  const matchSize   = {
+    current: (typeof net !== 'undefined' && net && Array.isArray(net.peers)) ? (net.peers.length + 1) : 1,
+    max: 6,
+  };
+  return { mode: inMatch ? 'multi' : 'solo', status, ship, team, roomId, roomFull, matchSize };
+}
+
+async function _lobbyTickHeartbeat() {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    await fetch(LSS_API_BASE + '/lobby/heartbeat', {
+      method:  'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken, 'Content-Type': 'application/json' },
+      body:    JSON.stringify(_lobbyHeartbeatBody()),
+    });
+  } catch (e) {
+    console.warn('[v15 lobby] heartbeat failed:', e);
+  }
+}
+
+async function _lobbyTickList() {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    const res = await fetch(LSS_API_BASE + '/lobby/list', {
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+    });
+    if (!res.ok) {
+      _lobbySetStatus('list ' + res.status);
+      return;
+    }
+    const data = await res.json();
+    _lobbyRender(data, id.id);
+  } catch (e) {
+    _lobbySetStatus('list error');
+    console.warn('[v15 lobby] list failed:', e);
+  }
+}
+
+function _lobbySetStatus(text) {
+  if (_lobbyState.statusEl) _lobbyState.statusEl.textContent = text;
+}
+
+function _lobbyEscapeText(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;'
+  ));
+}
+
+function _lobbyRender(data, selfId) {
+  const players = (data && Array.isArray(data.players)) ? data.players : [];
+  const total   = (data && typeof data.total === 'number') ? data.total : players.length;
+  if (_lobbyState.countEl) {
+    _lobbyState.countEl.textContent = total + (total === 1 ? ' player online' : ' players online');
+  }
+  if (!_lobbyState.playersEl) return;
+  if (players.length === 0) {
+    _lobbyState.playersEl.innerHTML = '<div style="color:#666;font-style:italic;padding:6px 4px;">no other players visible right now</div>';
+  } else {
+    const rows = [];
+    // Always pin self at top if present.
+    const self  = players.find(p => p.id === selfId);
+    const other = players.filter(p => p.id !== selfId);
+    if (self) rows.push(_lobbyRowHTML(self, true));
+    for (const p of other) rows.push(_lobbyRowHTML(p, false));
+    _lobbyState.playersEl.innerHTML = rows.join('');
+  }
+  _lobbySetStatus('updated ' + new Date().toLocaleTimeString());
+}
+
+function _lobbyRowHTML(p, isSelf) {
+  const name      = _lobbyEscapeText(p.username || 'unknown');
+  const ship      = _lobbyEscapeText(p.ship || '—');
+  const modeLabel = (p.mode === 'multi') ? 'MP' : 'Solo';
+  const statusTxt = p.available
+    ? (p.scoopable ? 'open' : 'invite-only')
+    : 'busy';
+  const statusColor = p.available ? (p.scoopable ? '#66bb66' : '#aaccff') : '#888';
+  const avatar    = p.avatar
+    ? '<img src="' + _lobbyEscapeText(p.avatar) + '" style="width:24px;height:24px;border-radius:50%;flex-shrink:0;">'
+    : '<div style="width:24px;height:24px;border-radius:50%;background:#333;flex-shrink:0;"></div>';
+  const selfTag   = isSelf ? '<span style="color:#ffaa00;font-size:9px;letter-spacing:1px;margin-left:6px;">YOU</span>' : '';
+  return ''
+    + '<div style="display:flex;align-items:center;gap:8px;padding:4px 4px;'
+      + (isSelf ? 'background:rgba(255,170,0,0.06);border-radius:2px;' : '')
+      + '">'
+    + avatar
+    + '<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+      + '<span style="color:#ddd;">' + name + '</span>' + selfTag
+    + '</div>'
+    + '<span style="color:#888;font-size:10px;letter-spacing:1px;">' + ship + ' &middot; ' + modeLabel + '</span>'
+    + '<span style="color:' + statusColor + ';font-size:10px;letter-spacing:1px;width:60px;text-align:right;">' + statusTxt + '</span>'
+    + '</div>';
+}
+
+async function _lobbySendLeave() {
+  const id = _lobbyState.identity;
+  if (!id || !id.accessToken) return;
+  try {
+    // Use keepalive so the request survives a tab close.
+    await fetch(LSS_API_BASE + '/lobby/leave', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + id.accessToken },
+      keepalive: true,
+    });
+  } catch (_) {}
+}
+
+function _lobbyStart() {
+  if (_lobbyState.heartbeatTimer) return;          // already running
+  // Fire one immediately so the player appears in lists right away.
+  _lobbyTickHeartbeat();
+  _lobbyTickList();
+  _lobbyState.heartbeatTimer = setInterval(_lobbyTickHeartbeat, 30_000);
+  _lobbyState.listTimer      = setInterval(_lobbyTickList,       5_000);
+  _lobbyState.lastListPolling = true;
+}
+
+function _lobbyStop() {
+  if (_lobbyState.heartbeatTimer) clearInterval(_lobbyState.heartbeatTimer);
+  if (_lobbyState.listTimer)      clearInterval(_lobbyState.listTimer);
+  _lobbyState.heartbeatTimer = null;
+  _lobbyState.listTimer      = null;
+  _lobbyState.lastListPolling = false;
+}
+
+function _lobbyOnAuthChange(identity) {
+  _lobbyState.identity = identity || null;
+  const panel = _lobbyState.panelEl;
+  if (identity) {
+    if (panel) panel.style.display = 'flex';
+    _lobbyStart();
+  } else {
+    if (panel) panel.style.display = 'none';
+    _lobbyStop();
+    // Best-effort leave so we vanish from other peoples' lists faster
+    // than the 60s TTL ; ok if it fails (TTL handles it eventually).
+    _lobbySendLeave();
+  }
+}
+
+function _lobbyInit() {
+  _lobbyState.panelEl   = document.getElementById('lobby-panel');
+  _lobbyState.countEl   = document.getElementById('lobby-count');
+  _lobbyState.playersEl = document.getElementById('lobby-players');
+  _lobbyState.statusEl  = document.getElementById('lobby-status-line');
+  if (!_lobbyState.panelEl) return;
+  // Stub buttons : hit the matching worker stubs so we can verify the chain
+  // works end-to-end. Real flows land in step 5 (invites) + step 6 (rooms).
+  const qm = document.getElementById('btn-quick-match');
+  const cr = document.getElementById('btn-create-room');
+  if (qm) qm.addEventListener('click', async () => {
+    const id = _lobbyState.identity;
+    if (!id) return;
+    _lobbySetStatus('quick match...');
+    try {
+      const res = await fetch(LSS_API_BASE + '/rooms/quickmatch', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + id.accessToken },
+      });
+      const data = await res.json();
+      _lobbySetStatus('quick match: code=' + (data.code || '?') + ' (stub)');
+    } catch (e) { _lobbySetStatus('quick match failed'); }
+  });
+  if (cr) cr.addEventListener('click', async () => {
+    const id = _lobbyState.identity;
+    if (!id) return;
+    _lobbySetStatus('creating room...');
+    try {
+      const res = await fetch(LSS_API_BASE + '/rooms/create', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + id.accessToken },
+      });
+      const data = await res.json();
+      _lobbySetStatus('room created: ' + (data.code || '?') + ' (stub)');
+    } catch (e) { _lobbySetStatus('create failed'); }
+  });
+  // Subscribe to auth changes ; sync to current state immediately.
+  if (window.LSS_AUTH) {
+    window.LSS_AUTH.onChange(_lobbyOnAuthChange);
+    _lobbyOnAuthChange(window.LSS_AUTH.getDiscordIdentity());
+  }
+  // beforeunload : tell the server we're leaving so we vanish from lists
+  // faster than the 60s TTL.
+  window.addEventListener('beforeunload', _lobbySendLeave);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _lobbyInit);
+} else {
+  // Already past DOMContentLoaded ; init synchronously on next tick so the
+  // panel element is definitely in the DOM.
+  setTimeout(_lobbyInit, 0);
 }
 
 // (v15 lobby) Public auth interface specified in design_lobby_invite.md.
