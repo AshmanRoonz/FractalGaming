@@ -38839,25 +38839,59 @@ function initAudio() {
     audio.hiCut.type = 'lowpass';
     audio.hiCut.frequency.value = 3500; // roll off above 3.5kHz
     audio.hiCut.Q.value = 0.7; // gentle slope (no resonance peak)
-    // (v15a 2026-05-10 fix) Master brick-wall limiter sits at the END of
+    // (v15a 2026-05-10 fix, revised) Master clip-stop sits at the END of
     // the chain (after hiCut, before destination) so EVERY output path
-    // (SFX, music, ambient, all of which sum at hiCut) gets limited.
+    // (SFX, music, ambient, all of which sum at hiCut) gets caught.
     // Stops digital clipping at the AudioContext destination, which is
     // what recording / streaming software captures. The master slider
     // goes up to 1.5x and SFX sum together, so without this the peaks
     // routinely exceed 0 dBFS ; live speakers' analog stage masks the
     // clip but the captured WAV/MP4 preserves it as harsh distortion.
-    // Threshold -1.0 dB leaves a touch of headroom under 0 dBFS. Ratio
-    // 20:1 + knee 0 + 1 ms attack = brick wall. Release 50 ms is fast
-    // enough that quick-decay SFX don't get a long dip after a peak.
-    audio.masterLimiter = audio.ctx.createDynamicsCompressor();
-    audio.masterLimiter.threshold.value = -1.0;
-    audio.masterLimiter.knee.value = 0;
-    audio.masterLimiter.ratio.value = 20;
-    audio.masterLimiter.attack.value = 0.001;
-    audio.masterLimiter.release.value = 0.050;
-    audio.hiCut.connect(audio.masterLimiter);
-    audio.masterLimiter.connect(audio.ctx.destination);
+    //
+    // First attempt used a DynamicsCompressor with brick-wall settings
+    // (-1 dB, 20:1, 1 ms attack). It worked for the captured stream but
+    // the 1 ms attack at 48 kHz is expensive enough that recording-app
+    // CPU load caused WebAudio buffer underruns ; the user heard those
+    // as crackles in live monitoring even though the recording stayed
+    // clean. WaveShaper is a sample-by-sample table lookup with zero
+    // time-domain processing, no attack/release artifacts, and
+    // dramatically cheaper CPU-wise. Soft-clip curve : transparent up to
+    // ~-1.4 dBFS (0.85 linear, well above typical SFX), smooth saturation
+    // above that, hard ceiling at ~-0.45 dBFS (0.95 linear).
+    //
+    // Pre/post gains let the curve handle inputs up to ~2x unity (the
+    // master slider max of 1.5x plus SFX summing headroom). preGain
+    // 0.5 -> shaper in [-1,1] -> postGain 2.0 restores scale.
+    audio.preLimiterGain = audio.ctx.createGain();
+    audio.preLimiterGain.gain.value = 0.5;
+    audio.masterShaper = audio.ctx.createWaveShaper();
+    audio.masterShaper.curve = (function makeSoftClipCurve() {
+      const samples = 8192;
+      const curve = new Float32Array(samples);
+      // Threshold and ceiling expressed in pre-gain (half-scale) space.
+      const thresh  = 0.425;  // 0.85 / 2.0 ; transparent below this
+      const ceiling = 0.475;  // 0.95 / 2.0 ; max output
+      for (let i = 0; i < samples; i++) {
+        const x = (i / (samples - 1)) * 2 - 1;
+        const sign = x < 0 ? -1 : 1;
+        const absX = Math.abs(x);
+        if (absX <= thresh) {
+          curve[i] = x;
+        } else {
+          const u = Math.min(1, (absX - thresh) / (1 - thresh));
+          const uSmooth = 1 - (1 - u) * (1 - u);  // quadratic ease-out
+          curve[i] = sign * (thresh + (ceiling - thresh) * uSmooth);
+        }
+      }
+      return curve;
+    })();
+    audio.masterShaper.oversample = '4x';  // reduces aliasing on saturated peaks
+    audio.postLimiterGain = audio.ctx.createGain();
+    audio.postLimiterGain.gain.value = 2.0;
+    audio.hiCut.connect(audio.preLimiterGain);
+    audio.preLimiterGain.connect(audio.masterShaper);
+    audio.masterShaper.connect(audio.postLimiterGain);
+    audio.postLimiterGain.connect(audio.ctx.destination);
 
     // Master bus compressor (glue): keeps simultaneous SFX legible without clipping.
     // Threshold -14 dB lets typical SFX pass un-compressed ; only loud peaks
@@ -39014,27 +39048,38 @@ function initAudio() {
           audio.spatial51Comp.channelInterpretation = 'speakers';
         } catch (_) { /* fall back to default channel count if rejected */ }
 
-        // (v15a 2026-05-10 fix) Parallel brick-wall limiter for the 5.1
-        // chain. The stereo path has its own masterLimiter ; on 5.1 systems
-        // the spatial sounds use this entirely separate chain that bypassed
-        // the stereo limiter, so without this peaks past 0 dBFS still got
-        // recorded as digital clip. Same -1 dB / 20:1 / 1 ms / 50 ms config
-        // as the stereo limiter but configured for 6-channel speakers.
-        audio.spatial51Limiter = audio.ctx.createDynamicsCompressor();
-        audio.spatial51Limiter.threshold.value = -1.0;
-        audio.spatial51Limiter.knee.value = 0;
-        audio.spatial51Limiter.ratio.value = 20;
-        audio.spatial51Limiter.attack.value = 0.001;
-        audio.spatial51Limiter.release.value = 0.050;
+        // (v15a 2026-05-10 fix, revised) Parallel WaveShaper soft-clip for
+        // the 5.1 chain. Same rationale as the stereo masterShaper above :
+        // brick-wall DynamicsCompressor with 1 ms attack caused live
+        // crackles under recording CPU load while keeping recordings
+        // clean. WaveShaper is sample-by-sample, no time-domain cost.
+        // Reuses the same curve as the stereo path (saved on audio so the
+        // table only allocates once) ; pre/post gains scale for the 6
+        // channels' summed-content range.
+        audio.spatial51PreGain = audio.ctx.createGain();
+        audio.spatial51PreGain.gain.value = 0.5;
+        audio.spatial51Shaper = audio.ctx.createWaveShaper();
+        audio.spatial51Shaper.curve = audio.masterShaper.curve;
+        audio.spatial51Shaper.oversample = '4x';
+        audio.spatial51PostGain = audio.ctx.createGain();
+        audio.spatial51PostGain.gain.value = 2.0;
         try {
-          audio.spatial51Limiter.channelCount = 6;
-          audio.spatial51Limiter.channelCountMode = 'explicit';
-          audio.spatial51Limiter.channelInterpretation = 'speakers';
+          audio.spatial51PreGain.channelCount = 6;
+          audio.spatial51PreGain.channelCountMode = 'explicit';
+          audio.spatial51PreGain.channelInterpretation = 'speakers';
+          audio.spatial51Shaper.channelCount = 6;
+          audio.spatial51Shaper.channelCountMode = 'explicit';
+          audio.spatial51Shaper.channelInterpretation = 'speakers';
+          audio.spatial51PostGain.channelCount = 6;
+          audio.spatial51PostGain.channelCountMode = 'explicit';
+          audio.spatial51PostGain.channelInterpretation = 'speakers';
         } catch (_) { /* fall back to default if rejected */ }
         audio.spatial51Bus.connect(audio.spatial51Master);
         audio.spatial51Master.connect(audio.spatial51Comp);
-        audio.spatial51Comp.connect(audio.spatial51Limiter);
-        audio.spatial51Limiter.connect(audio.ctx.destination);
+        audio.spatial51Comp.connect(audio.spatial51PreGain);
+        audio.spatial51PreGain.connect(audio.spatial51Shaper);
+        audio.spatial51Shaper.connect(audio.spatial51PostGain);
+        audio.spatial51PostGain.connect(audio.ctx.destination);
 
         console.log('[v8_2a audio] 5.1 surround output detected. Spatial sounds ' +
           'will route per-speaker via VBAP instead of HRTF. Non-spatial sounds ' +
