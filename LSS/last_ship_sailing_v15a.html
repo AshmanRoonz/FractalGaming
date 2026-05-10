@@ -38839,7 +38839,25 @@ function initAudio() {
     audio.hiCut.type = 'lowpass';
     audio.hiCut.frequency.value = 3500; // roll off above 3.5kHz
     audio.hiCut.Q.value = 0.7; // gentle slope (no resonance peak)
-    audio.hiCut.connect(audio.ctx.destination);
+    // (v15a 2026-05-10 fix) Master brick-wall limiter sits at the END of
+    // the chain (after hiCut, before destination) so EVERY output path
+    // (SFX, music, ambient, all of which sum at hiCut) gets limited.
+    // Stops digital clipping at the AudioContext destination, which is
+    // what recording / streaming software captures. The master slider
+    // goes up to 1.5x and SFX sum together, so without this the peaks
+    // routinely exceed 0 dBFS ; live speakers' analog stage masks the
+    // clip but the captured WAV/MP4 preserves it as harsh distortion.
+    // Threshold -1.0 dB leaves a touch of headroom under 0 dBFS. Ratio
+    // 20:1 + knee 0 + 1 ms attack = brick wall. Release 50 ms is fast
+    // enough that quick-decay SFX don't get a long dip after a peak.
+    audio.masterLimiter = audio.ctx.createDynamicsCompressor();
+    audio.masterLimiter.threshold.value = -1.0;
+    audio.masterLimiter.knee.value = 0;
+    audio.masterLimiter.ratio.value = 20;
+    audio.masterLimiter.attack.value = 0.001;
+    audio.masterLimiter.release.value = 0.050;
+    audio.hiCut.connect(audio.masterLimiter);
+    audio.masterLimiter.connect(audio.ctx.destination);
 
     // Master bus compressor (glue): keeps simultaneous SFX legible without clipping.
     // Threshold -14 dB lets typical SFX pass un-compressed ; only loud peaks
