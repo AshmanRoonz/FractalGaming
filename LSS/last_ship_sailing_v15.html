@@ -3124,16 +3124,25 @@ async function _p2pInit() {
       _lobbyP2P.pendingInvites.set(data.id, data);
       _lobbyRefresh();
     });
-    // Recipient accepted/ignored a previous invite of ours.
+    // Recipient accepted a previous invite of ours. They also pass the
+    // full room shape they constructed ; we apply it locally so we flip
+    // into the in-room view at the same moment they do.
     receiveIAccept((data, peerId) => {
       const pres = _lobbyP2P.presence.get(peerId);
       const targetId = pres && pres.id;
-      _lobbySetStatus('invite accepted by ' + (pres && pres.username || peerId.slice(-4)));
+      _lobbySetStatus('invite accepted by ' + ((pres && pres.username) || peerId.slice(-4)));
       if (targetId && _lobbyState.cooldowns) delete _lobbyState.cooldowns[targetId];
       if (targetId) {
         try { localStorage.removeItem('lobby_cd_age:' + targetId); } catch (_) {}
       }
-      _lobbyRefresh();
+      // (v15 P2P fix) Apply the room they sent so we transition to the
+      // in-room view alongside them. Without this we stayed on the
+      // browsing view while they were already seeing the room.
+      if (data && data.room && data.room.code) {
+        _lobbyApplyRoom(data.room, 'joined ' + data.room.code);
+      } else {
+        _lobbyRefresh();
+      }
     });
     receiveIIgnore((_data, peerId) => {
       const pres = _lobbyP2P.presence.get(peerId);
@@ -3560,19 +3569,13 @@ async function _lobbyAcceptInvite(inviteId) {
   _lobbyP2P.pendingInvites.delete(inviteId);
   _lobbyCloseToast(inviteId, true);
 
-  // Notify the inviter so their cooldown for us clears (they accepted us;
-  // future invites between us start fresh at level 1).
-  const inviterPeerId = _lobbyP2P.d2p.get(inv.fromId);
-  if (inviterPeerId && _lobbyP2P.actions) {
-    try { _lobbyP2P.actions.sendIAccept({ inviteId }, inviterPeerId); } catch (_) {}
-  }
-  // Clear our outbound cooldown for them too (mirrors worker design).
-  if (_lobbyState.cooldowns) delete _lobbyState.cooldowns[inv.fromId];
-  try { localStorage.removeItem('lobby_cd_age:' + inv.fromId); } catch (_) {}
-
   // Build the room from invite + inviter's latest broadcast (their roomId
-  // may have changed since they sent the invite ; live state wins).
-  const inviterPres = inviterPeerId ? _lobbyP2P.presence.get(inviterPeerId) : null;
+  // may have changed since they sent the invite ; live state wins). Build
+  // BEFORE sending the accept so we can include the full room shape in
+  // the payload — that way the inviter applies the same room locally and
+  // both clients flip to the in-room view together.
+  const inviterPeerId = _lobbyP2P.d2p.get(inv.fromId);
+  const inviterPres   = inviterPeerId ? _lobbyP2P.presence.get(inviterPeerId) : null;
   const roomCode = (inviterPres && inviterPres.roomId) || inv.roomId || _lobbyMakeRoomCode();
   const room = {
     code:     roomCode,
@@ -3584,6 +3587,17 @@ async function _lobbyAcceptInvite(inviteId) {
     ],
     maxSize: 6,
   };
+
+  // Notify the inviter : pass the full room so they apply it on their end
+  // and also flip into the in-room view. Clears their cooldown for us.
+  if (inviterPeerId && _lobbyP2P.actions) {
+    try { _lobbyP2P.actions.sendIAccept({ inviteId, room }, inviterPeerId); } catch (_) {}
+  }
+  // Clear our outbound cooldown for them too (mirrors worker design ;
+  // future invites between us start fresh at level 1).
+  if (_lobbyState.cooldowns) delete _lobbyState.cooldowns[inv.fromId];
+  try { localStorage.removeItem('lobby_cd_age:' + inv.fromId); } catch (_) {}
+
   _lobbyApplyRoom(room, 'joined ' + roomCode);
 }
 
