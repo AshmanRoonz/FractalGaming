@@ -1,0 +1,1494 @@
+<!DOCTYPE html>
+<!--
+  LSS Wall Lab v2 (in-tunnel preview, 4-layer composite + texture)
+  Created: 2026-05-10
+  Version: 2.0
+
+  Successor to wall_pattern_lab.html. Built for v15a's trimmed pattern set.
+  Adds the texture layer (uWallTex, texBlend, texAlpha, texHue, texScale,
+  texBrightness) so the keeper presets (Tile Track, Sheet Metal) can be
+  previewed faithfully ; that was the gap that motivated the rewrite. The
+  six procedural textures (stone, metal, fabric, organic, tech, tile) are
+  baked in JS at boot, mirroring _initWallTextures in the game.
+
+  Export format matches the game's MULTI_LAYER_PRESETS shape ; copy the
+  output, paste it as a new index in the game's MULTI_LAYER_PRESETS table,
+  add the friendly name to WALL_PATTERN_NAMES, and the preset is live.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LSS Wall Lab v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0a0a14; color: #ddd; font-family: 'Rajdhani', system-ui, sans-serif; overflow: hidden; }
+  #app { display: flex; width: 100vw; height: 100vh; }
+  #viewport { flex: 1; position: relative; min-width: 0; overflow: hidden; }
+  #viewport canvas { display: block; max-width: 100%; max-height: 100%; }
+  #hud { position: absolute; top: 12px; left: 12px; background: rgba(8, 10, 20, 0.78); padding: 8px 12px; border: 1px solid #2a3a55; border-radius: 4px; font-size: 12px; pointer-events: none; max-width: 360px; }
+  #hud .ttl { font-family: 'Orbitron', sans-serif; font-weight: 700; color: #88aaff; text-transform: uppercase; letter-spacing: 0.12em; font-size: 11px; margin-bottom: 4px; }
+  #hud .info { color: #889; font-size: 11px; line-height: 1.4; }
+  #sidebar { width: 360px; flex: 0 0 360px; background: #0e0e18; border-left: 1px solid #2a2a3a; padding: 14px; overflow-y: auto; font-size: 13px; }
+  h1 { font-family: 'Orbitron', sans-serif; font-size: 18px; font-weight: 700; margin: 0 0 4px 0; color: #88aaff; }
+  .subtitle { color: #667; font-size: 11px; margin-bottom: 12px; }
+  h2 { font-family: 'Orbitron', sans-serif; font-size: 11px; font-weight: 600; margin: 14px 0 6px 0; color: #99a; text-transform: uppercase; letter-spacing: 0.14em; border-bottom: 1px solid #1f1f2c; padding-bottom: 3px; }
+  h2.tex { color: #b8c; border-bottom-color: #3a2540; }
+  button { background: #1c1c28; color: #ccc; border: 1px solid #2e2e40; padding: 6px 10px; cursor: pointer; font-family: inherit; font-size: 12px; border-radius: 3px; }
+  button:hover { background: #262638; }
+  button.active { background: #2e4f7a; border-color: #5588cc; color: #cfe6ff; }
+  button.preset { background: #1a2030; border-color: #3a4a60; color: #aac; }
+  button.preset:hover { background: #243048; color: #cdf; }
+  .toolbar { display: flex; gap: 4px; flex-wrap: wrap; }
+  .toolbar button { flex: 1 0 auto; min-width: 60px; }
+  input, select { background: #14141e; color: #ddd; border: 1px solid #2a2a3a; padding: 4px 6px; font-family: inherit; font-size: 12px; border-radius: 2px; }
+  input[type=text], input[type=number], select { width: 100%; }
+  input[type=range] { width: 100%; }
+  input[type=color] { width: 32px; height: 24px; padding: 0; cursor: pointer; border: 1px solid #2a2a3a; }
+  .row { display: flex; gap: 6px; margin: 5px 0; align-items: center; }
+  .row label { flex: 0 0 88px; color: #889; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .row input, .row select { flex: 1; }
+  .row .val { flex: 0 0 52px; text-align: right; font-family: 'Courier New', monospace; font-size: 11px; color: #ccc; }
+  .hint { color: #667; font-size: 11px; font-style: italic; line-height: 1.45; }
+  .stat { color: #889; font-family: 'Courier New', monospace; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="viewport">
+    <div id="hud">
+      <div class="ttl">Wall Lab v2 · in-tunnel</div>
+      <div class="info">
+        Drag to orbit, wheel to zoom, right-click drag to pan.<br>
+        4-layer composite: BG + FG1 + FG2 + Texture. Click a Preset Template to load Tile Track / Sheet Metal / Hexeizure.
+      </div>
+    </div>
+  </div>
+  <div id="sidebar">
+    <h1>Wall Lab v2</h1>
+    <div class="subtitle">4-layer composite (BG + FG1 + FG2 + Texture). Exports MULTI_LAYER_PRESETS-shaped JSON.</div>
+
+    <h2>Preset Templates</h2>
+    <div class="toolbar">
+      <button class="preset" data-preset="hexeizure">Hexeizure</button>
+      <button class="preset" data-preset="tile_track">Tile Track</button>
+      <button class="preset" data-preset="sheet_metal">Sheet Metal</button>
+    </div>
+    <div class="hint" style="margin-top:4px;">Loads the 3 keeper presets as starting points. Tweak then export.</div>
+
+    <h2>Background (BG)</h2>
+    <div class="row">
+      <select id="pattern">
+        <option value="0">Kali IFS</option>
+        <option value="1">Voronoi Cells</option>
+        <option value="2">Mandelbox Folds</option>
+        <option value="3">Hex Lattice</option>
+        <option value="4">Circuit Traces</option>
+        <option value="5">Caustic Shimmer</option>
+        <option value="6" selected>Panel Maze</option>
+        <option value="7">Apollonian Gasket</option>
+        <option value="8">Wave Interference</option>
+        <option value="9">Plasma FBM</option>
+        <option value="10">Circumpunct Lattice</option>
+        <option value="11">Holographic Glitch</option>
+        <option value="12">Cellular Membrane</option>
+        <option value="13">Domain-Warped Streaks</option>
+        <option value="14">Hex Pulse Radar</option>
+        <option value="15">Cyber Datamosh</option>
+        <option value="16">Ring Tunnel</option>
+        <option value="17">Neon Cube</option>
+        <option value="18">Layered Cube</option>
+      </select>
+    </div>
+    <div class="row"><label>Time ×</label><input type="range" id="bgTime" min="0" max="3" step="0.05" value="1.0"><span class="val" id="bgTime-val">1.00</span></div>
+    <div class="row"><label>Iterations</label><input type="range" id="u_iters_bg" min="1" max="12" step="1" value="8"><span class="val" id="u_iters_bg-val">8</span></div>
+    <div class="row"><label>Scale</label><input type="range" id="u_scale_bg" min="0.0005" max="0.02" step="0.0001" value="0.0035"><span class="val" id="u_scale_bg-val">0.0035</span></div>
+    <div class="row"><label>Inv base</label><input type="range" id="u_invBase_bg" min="2" max="20" step="0.1" value="9"><span class="val" id="u_invBase_bg-val">9.0</span></div>
+    <div class="row"><label>Hue spin</label><input type="range" id="u_hueSpin_bg" min="0" max="0.5" step="0.005" value="0.12"><span class="val" id="u_hueSpin_bg-val">0.12</span></div>
+    <div class="row"><label>Sat base</label><input type="range" id="u_satBase_bg" min="0" max="1" step="0.01" value="0.7"><span class="val" id="u_satBase_bg-val">0.70</span></div>
+    <div class="row"><label>Cosmic</label><input type="range" id="K_COSMIC_bg" min="0" max="6" step="0.05" value="1.5"><span class="val" id="K_COSMIC_bg-val">1.50</span></div>
+
+    <h2>Foreground 1 (FG1)</h2>
+    <div class="row">
+      <select id="fgPattern">
+        <option value="-1" selected>None</option>
+        <option value="0">Kali IFS</option>
+        <option value="1">Voronoi</option>
+        <option value="2">Mandelbox</option>
+        <option value="3">Hex Lattice</option>
+        <option value="4">Circuit Traces</option>
+        <option value="5">Caustic Shimmer</option>
+        <option value="6">Panel Maze</option>
+        <option value="7">Apollonian</option>
+        <option value="8">Wave Interference</option>
+        <option value="9">Plasma FBM</option>
+        <option value="10">Circumpunct</option>
+        <option value="11">Holographic Glitch</option>
+        <option value="12">Cellular Membrane</option>
+        <option value="13">Domain-Warped Streaks</option>
+        <option value="14">Hex Pulse Radar</option>
+        <option value="15">Cyber Datamosh</option>
+        <option value="16">Ring Tunnel</option>
+        <option value="17">Neon Cube</option>
+        <option value="18">Layered Cube</option>
+      </select>
+    </div>
+    <div class="row"><label>Opacity</label><input type="range" id="fgAlpha" min="0" max="2" step="0.05" value="1.0"><span class="val" id="fgAlpha-val">1.00</span></div>
+    <div class="row">
+      <label>Blend</label>
+      <select id="fgBlend">
+        <option value="0" selected>Add</option>
+        <option value="1">Multiply</option>
+        <option value="2">Screen</option>
+        <option value="3">Max</option>
+        <option value="4">Mix (alpha)</option>
+      </select>
+    </div>
+    <div class="row"><label>Hue shift</label><input type="range" id="fgHue" min="0" max="1" step="0.005" value="0.0"><span class="val" id="fgHue-val">0.000</span></div>
+    <div class="row"><label>Time ×</label><input type="range" id="fgTime" min="0" max="3" step="0.05" value="1.0"><span class="val" id="fgTime-val">1.00</span></div>
+    <div class="row"><label>Iterations</label><input type="range" id="u_iters_fg" min="1" max="12" step="1" value="8"><span class="val" id="u_iters_fg-val">8</span></div>
+    <div class="row"><label>Scale</label><input type="range" id="u_scale_fg" min="0.0005" max="0.02" step="0.0001" value="0.0035"><span class="val" id="u_scale_fg-val">0.0035</span></div>
+    <div class="row"><label>Inv base</label><input type="range" id="u_invBase_fg" min="2" max="20" step="0.1" value="9"><span class="val" id="u_invBase_fg-val">9.0</span></div>
+    <div class="row"><label>Hue spin</label><input type="range" id="u_hueSpin_fg" min="0" max="0.5" step="0.005" value="0.12"><span class="val" id="u_hueSpin_fg-val">0.12</span></div>
+    <div class="row"><label>Sat base</label><input type="range" id="u_satBase_fg" min="0" max="1" step="0.01" value="0.7"><span class="val" id="u_satBase_fg-val">0.70</span></div>
+    <div class="row"><label>Cosmic</label><input type="range" id="K_COSMIC_fg" min="0" max="6" step="0.05" value="1.5"><span class="val" id="K_COSMIC_fg-val">1.50</span></div>
+
+    <h2>Foreground 2 (FG2)</h2>
+    <div class="row">
+      <select id="fg2Pattern">
+        <option value="-1" selected>None</option>
+        <option value="0">Kali IFS</option>
+        <option value="1">Voronoi</option>
+        <option value="2">Mandelbox</option>
+        <option value="3">Hex Lattice</option>
+        <option value="4">Circuit Traces</option>
+        <option value="5">Caustic Shimmer</option>
+        <option value="6">Panel Maze</option>
+        <option value="7">Apollonian</option>
+        <option value="8">Wave Interference</option>
+        <option value="9">Plasma FBM</option>
+        <option value="10">Circumpunct</option>
+        <option value="11">Holographic Glitch</option>
+        <option value="12">Cellular Membrane</option>
+        <option value="13">Domain-Warped Streaks</option>
+        <option value="14">Hex Pulse Radar</option>
+        <option value="15">Cyber Datamosh</option>
+        <option value="16">Ring Tunnel</option>
+        <option value="17">Neon Cube</option>
+        <option value="18">Layered Cube</option>
+      </select>
+    </div>
+    <div class="row"><label>Opacity</label><input type="range" id="fg2Alpha" min="0" max="2" step="0.05" value="1.0"><span class="val" id="fg2Alpha-val">1.00</span></div>
+    <div class="row">
+      <label>Blend</label>
+      <select id="fg2Blend">
+        <option value="0" selected>Add</option>
+        <option value="1">Multiply</option>
+        <option value="2">Screen</option>
+        <option value="3">Max</option>
+        <option value="4">Mix (alpha)</option>
+      </select>
+    </div>
+    <div class="row"><label>Hue shift</label><input type="range" id="fg2Hue" min="0" max="1" step="0.005" value="0.0"><span class="val" id="fg2Hue-val">0.000</span></div>
+    <div class="row"><label>Time ×</label><input type="range" id="fg2Time" min="0" max="3" step="0.05" value="1.0"><span class="val" id="fg2Time-val">1.00</span></div>
+    <div class="row"><label>Iterations</label><input type="range" id="u_iters_fg2" min="1" max="12" step="1" value="8"><span class="val" id="u_iters_fg2-val">8</span></div>
+    <div class="row"><label>Scale</label><input type="range" id="u_scale_fg2" min="0.0005" max="0.02" step="0.0001" value="0.0035"><span class="val" id="u_scale_fg2-val">0.0035</span></div>
+    <div class="row"><label>Inv base</label><input type="range" id="u_invBase_fg2" min="2" max="20" step="0.1" value="9"><span class="val" id="u_invBase_fg2-val">9.0</span></div>
+    <div class="row"><label>Hue spin</label><input type="range" id="u_hueSpin_fg2" min="0" max="0.5" step="0.005" value="0.12"><span class="val" id="u_hueSpin_fg2-val">0.12</span></div>
+    <div class="row"><label>Sat base</label><input type="range" id="u_satBase_fg2" min="0" max="1" step="0.01" value="0.7"><span class="val" id="u_satBase_fg2-val">0.70</span></div>
+    <div class="row"><label>Cosmic</label><input type="range" id="K_COSMIC_fg2" min="0" max="6" step="0.05" value="1.5"><span class="val" id="K_COSMIC_fg2-val">1.50</span></div>
+
+    <h2 class="tex">Texture Layer (4th composite)</h2>
+    <div class="row">
+      <label>Texture</label>
+      <select id="texId">
+        <option value="" selected>None (disabled)</option>
+        <option value="stone">Stone</option>
+        <option value="metal">Brushed Metal</option>
+        <option value="fabric">Fabric Weave</option>
+        <option value="organic">Organic Cells</option>
+        <option value="tech">Tech Panel</option>
+        <option value="tile">Brick Tile</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Blend</label>
+      <select id="texBlend">
+        <option value="0">Add</option>
+        <option value="1" selected>Multiply</option>
+        <option value="2">Screen</option>
+        <option value="3">Max</option>
+        <option value="4">Mix (alpha)</option>
+      </select>
+    </div>
+    <div class="row"><label>Opacity</label><input type="range" id="texAlpha" min="0" max="1" step="0.01" value="0.95"><span class="val" id="texAlpha-val">0.95</span></div>
+    <div class="row"><label>Hue shift</label><input type="range" id="texHue" min="0" max="1" step="0.005" value="0.0"><span class="val" id="texHue-val">0.000</span></div>
+    <div class="row"><label>Scale</label><input type="range" id="texScale" min="0.0005" max="0.02" step="0.0001" value="0.004"><span class="val" id="texScale-val">0.0040</span></div>
+    <div class="row"><label>Brightness</label><input type="range" id="texBrightness" min="0" max="2" step="0.01" value="1.0"><span class="val" id="texBrightness-val">1.00</span></div>
+    <div class="hint">Triplanar mapping ; texture wraps onto curved geometry by sampling along world-axis planes and blending by surface normal.</div>
+
+    <h2>Display</h2>
+    <div class="row"><label>Tint color</label><input type="color" id="color-b" value="#88aacc"><span class="hint" style="flex:1;">zone color seed for patterns ; matches uCompositeTint in game</span></div>
+    <div class="row"><label>Wall opacity</label><input type="range" id="uOpacity" min="0" max="1" step="0.02" value="1.0"><span class="val" id="uOpacity-val">1.00</span></div>
+
+    <h2>Controls</h2>
+    <div class="toolbar">
+      <button id="pause">Pause animation</button>
+      <button id="resetBtn">Defaults</button>
+    </div>
+
+    <h2>Export Preset</h2>
+    <div class="hint" style="margin-bottom:6px;">Output is in MULTI_LAYER_PRESETS shape ; copy into the game's table as a new index.</div>
+    <div class="row" style="margin-bottom:6px;">
+      <label>Name</label>
+      <input type="text" id="presetName" value="My Preset" placeholder="Friendly name for WALL_PATTERN_NAMES">
+    </div>
+    <div class="toolbar">
+      <button id="exportBtn">Export to Box</button>
+      <button id="copyBtn">Copy</button>
+      <button id="importBtn">Import</button>
+    </div>
+    <textarea id="configIO" style="width:100%; min-height:160px; margin-top:6px; background:#08080f; color:#ddd; border:1px solid #2a2a3a; padding:6px; font-family:'Courier New', monospace; font-size:11px;" placeholder="Click Export to dump current preset here. Paste a preset and click Import to load it."></textarea>
+
+    <h2>Stats</h2>
+    <div class="stat" id="stats">FPS: --</div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+const viewport = document.getElementById('viewport');
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Match the game's Showcase / cineFX color pipeline so wall tuning in
+// the lab reads like in-game.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.78;
+if ('outputColorSpace' in renderer) {
+  renderer.outputColorSpace = THREE.SRGBColorSpace || 'srgb';
+} else {
+  renderer.outputEncoding = THREE.sRGBEncoding || 3001;
+}
+if ('physicallyCorrectLights' in renderer) renderer.physicallyCorrectLights = true;
+if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
+viewport.appendChild(renderer.domElement);
+
+// ============================================================
+// Scene: tunnel geometry (two spheres + cylinder, all inside-out)
+// ============================================================
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000005);
+const camera = new THREE.PerspectiveCamera(75, 1, 1, 6000);
+camera.position.set(0, 50, 0);
+
+const orbit = new THREE.OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.08;
+orbit.target.set(0, 0, 0);
+
+const ROOM_R = 270, TUN_R = 180, SEP = 800;
+
+function fitRenderer() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  renderer.setSize(w, h, true);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+
+// ============================================================
+// Procedural texture generation (mirrors game's _initWallTextures)
+// ============================================================
+const WALL_TEXTURES = {};
+function _bakeCanvasTexture(id, drawFn, size) {
+  size = size || 512;
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  drawFn(ctx, size);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.minFilter = THREE.LinearMipMapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+  tex.needsUpdate = true;
+  WALL_TEXTURES[id] = tex;
+  return tex;
+}
+function _texRng(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s & 0xffffffff) / 0x100000000;
+  };
+}
+function _drawStone(ctx, size) {
+  const rng = _texRng(101);
+  const oct = 4;
+  const grids = [];
+  for (let o = 0; o < oct; o++) {
+    const n = 4 << o;
+    const g = new Float32Array((n + 1) * (n + 1));
+    for (let i = 0; i < g.length; i++) g[i] = rng();
+    grids.push({ n, g });
+  }
+  const sstep = (t) => t * t * (3 - 2 * t);
+  function sg(grid, n, u, v) {
+    const x = u * n, y = v * n;
+    const ix = x | 0, iy = y | 0;
+    const fx = sstep(x - ix), fy = sstep(y - iy);
+    const a = grid[ix + iy * (n + 1)];
+    const b = grid[(ix + 1) + iy * (n + 1)];
+    const c = grid[ix + (iy + 1) * (n + 1)];
+    const dd = grid[(ix + 1) + (iy + 1) * (n + 1)];
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + dd) * fx * fy;
+  }
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const u = x / size, v = y / size;
+      let val = 0, amp = 1, sum = 0;
+      for (let o = 0; o < oct; o++) {
+        val += sg(grids[o].g, grids[o].n, u, v) * amp;
+        sum += amp; amp *= 0.5;
+      }
+      val /= sum;
+      const crack = Math.abs(sg(grids[2].g, grids[2].n, u, v) - sg(grids[3].g, grids[3].n, u, v));
+      const crackMask = 1 - Math.exp(-crack * 18) * 0.7;
+      const gray = (90 + val * 110) * crackMask;
+      const i = (y * size + x) * 4;
+      d[i] = gray; d[i + 1] = gray * 0.97; d[i + 2] = gray * 0.93; d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function _drawBrushedMetal(ctx, size) {
+  ctx.fillStyle = '#7a8088'; ctx.fillRect(0, 0, size, size);
+  const rng = _texRng(202);
+  for (let i = 0; i < size * 6; i++) {
+    const y = (rng() * size) | 0, x = (rng() * size) | 0;
+    const w = 30 + rng() * 220, sh = 70 + rng() * 130;
+    ctx.fillStyle = 'rgba(' + (sh | 0) + ',' + ((sh * 1.02) | 0) + ',' + ((sh * 1.06) | 0) + ',0.16)';
+    ctx.fillRect(x, y, w, 1);
+  }
+  for (let i = 0; i < 12; i++) {
+    const y = (rng() * size) | 0, sh = 90 + rng() * 60;
+    ctx.fillStyle = 'rgba(' + (sh | 0) + ',' + (sh | 0) + ',' + ((sh * 1.05) | 0) + ',0.10)';
+    ctx.fillRect(0, y, size, 2);
+  }
+}
+function _drawFabric(ctx, size) {
+  ctx.fillStyle = '#202830'; ctx.fillRect(0, 0, size, size);
+  const cell = 32;
+  for (let y = 0; y < size; y += cell) {
+    for (let x = 0; x < size; x += cell) {
+      const g1 = ctx.createLinearGradient(x, y, x + cell, y + cell);
+      g1.addColorStop(0, '#3a4250'); g1.addColorStop(0.5, '#525a68'); g1.addColorStop(1, '#3a4250');
+      ctx.fillStyle = g1; ctx.fillRect(x, y, cell / 2, cell);
+      const g2 = ctx.createLinearGradient(x, y + cell, x + cell, y);
+      g2.addColorStop(0, '#3a4250'); g2.addColorStop(0.5, '#525a68'); g2.addColorStop(1, '#3a4250');
+      ctx.fillStyle = g2; ctx.fillRect(x + cell / 2, y, cell / 2, cell);
+    }
+  }
+}
+function _drawOrganic(ctx, size) {
+  const rng = _texRng(303);
+  const seeds = [], N = 80;
+  for (let i = 0; i < N; i++) seeds.push({ x: rng() * size, y: rng() * size, h: rng() });
+  const img = ctx.createImageData(size, size);
+  const d = img.data;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let bestD = 1e9, bestH = 0, secondD = 1e9;
+      for (let i = 0; i < N; i++) {
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const sx = seeds[i].x + dx * size, sy = seeds[i].y + dy * size;
+          const dd = (sx - x) * (sx - x) + (sy - y) * (sy - y);
+          if (dd < bestD) { secondD = bestD; bestD = dd; bestH = seeds[i].h; }
+          else if (dd < secondD) secondD = dd;
+        }
+      }
+      const edge = Math.sqrt(secondD) - Math.sqrt(bestD);
+      const edgeMask = Math.max(0, 1 - edge / 16);
+      const i = (y * size + x) * 4;
+      const base = 50 + bestH * 100;
+      const dark = base * (1 - edgeMask * 0.6);
+      d[i] = dark * 0.7; d[i + 1] = dark * 0.95; d[i + 2] = dark * 0.6; d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function _drawTechPanel(ctx, size) {
+  const rng = _texRng(404);
+  ctx.fillStyle = '#1a1f28'; ctx.fillRect(0, 0, size, size);
+  const grid = 8, cell = size / grid;
+  for (let i = 0; i < grid; i++) {
+    for (let j = 0; j < grid; j++) {
+      const x = i * cell, y = j * cell;
+      ctx.fillStyle = '#2a3242'; ctx.fillRect(x + 4, y + 4, cell - 8, cell - 8);
+      ctx.fillStyle = '#3a4456';
+      ctx.fillRect(x + 6, y + 6, cell - 12, 1);
+      ctx.fillRect(x + 6, y + 6, 1, cell - 12);
+      if (rng() < 0.45) {
+        const gw = 4 + ((rng() * (cell - 24)) | 0);
+        const gh = 4 + ((rng() * 10) | 0);
+        const gx = x + 8 + rng() * (cell - 16 - gw);
+        const gy = y + 8 + rng() * (cell - 16 - gh);
+        ctx.fillStyle = rng() < 0.3 ? '#88ccff' : '#1a1f28';
+        ctx.fillRect(gx | 0, gy | 0, gw, gh);
+      }
+    }
+  }
+}
+function _drawTile(ctx, size) {
+  const rng = _texRng(505);
+  ctx.fillStyle = '#3a3530'; ctx.fillRect(0, 0, size, size);
+  const rowH = 32, brickW = 64;
+  for (let y = 0; y < size; y += rowH) {
+    const rowOff = ((y / rowH) | 0) % 2 ? brickW / 2 : 0;
+    for (let x = -brickW; x < size + brickW; x += brickW) {
+      const bx = x + rowOff;
+      const shade = 100 + ((rng() * 60) | 0);
+      ctx.fillStyle = 'rgb(' + shade + ',' + ((shade * 0.85) | 0) + ',' + ((shade * 0.7) | 0) + ')';
+      ctx.fillRect(bx + 2, y + 2, brickW - 4, rowH - 4);
+    }
+  }
+}
+_bakeCanvasTexture('stone',   _drawStone);
+_bakeCanvasTexture('metal',   _drawBrushedMetal);
+_bakeCanvasTexture('fabric',  _drawFabric);
+_bakeCanvasTexture('organic', _drawOrganic);
+_bakeCanvasTexture('tech',    _drawTechPanel);
+_bakeCanvasTexture('tile',    _drawTile);
+// Default 1x1 white texture for when no tex is selected ; shader code
+// always samples uWallTex (texBlend < 0 just gates the result), so we
+// need *something* bound to avoid invalid-binding warnings.
+const _whiteCanvas = document.createElement('canvas'); _whiteCanvas.width = _whiteCanvas.height = 1;
+const _whiteCtx = _whiteCanvas.getContext('2d'); _whiteCtx.fillStyle = '#fff'; _whiteCtx.fillRect(0,0,1,1);
+const _whiteTex = new THREE.CanvasTexture(_whiteCanvas);
+_whiteTex.wrapS = _whiteTex.wrapT = THREE.RepeatWrapping; _whiteTex.needsUpdate = true;
+
+// ============================================================
+// Wall shader (BG + FG1 + FG2 + Texture, matching v15a game shader)
+// ============================================================
+const wallVS = `
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    vec4 wp = modelMatrix * vec4(position, 1.0);
+    vWorldPos = wp.xyz;
+    vNormal = normalize((modelMatrix * vec4(normal, 0.0)).xyz);
+    gl_Position = projectionMatrix * viewMatrix * wp;
+  }
+`;
+const wallFS = `
+  precision highp float;
+  uniform int patternId, fgPatternId, fg2PatternId;
+  uniform int fgBlend, fg2Blend;
+  uniform float fgAlpha, fg2Alpha;
+  uniform float fgHue,   fg2Hue;
+  uniform float fgTime,  fg2Time, bgTime;
+  uniform float time;
+  int u_iters;
+  float u_scale, u_invBase, u_hueSpin, u_satBase;
+  uniform int   u_iters_bg,   u_iters_fg,   u_iters_fg2;
+  uniform float u_scale_bg,   u_scale_fg,   u_scale_fg2;
+  uniform float u_invBase_bg, u_invBase_fg, u_invBase_fg2;
+  uniform float u_hueSpin_bg, u_hueSpin_fg, u_hueSpin_fg2;
+  uniform float u_satBase_bg, u_satBase_fg, u_satBase_fg2;
+  uniform float K_COSMIC_bg,  K_COSMIC_fg,  K_COSMIC_fg2;
+  uniform float uOpacity;
+  uniform vec3 tintColor;
+  uniform vec3 roomCenters[2];
+  uniform float roomRadii[2];
+  // Texture layer (4th composite)
+  uniform sampler2D uWallTex;
+  uniform int   texBlend;
+  uniform float texAlpha;
+  uniform float texHue;
+  uniform float texScale;
+  uniform float texBrightness;
+  varying vec3 vWorldPos;
+  varying vec3 vNormal;
+  varying vec2 vUv;
+  vec3 hsv(float h, float s, float v) {
+    vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);
+    return v - v * s * clamp(min(k, 4.0 - k), 0.0, 1.0);
+  }
+  float rgbHue(vec3 c) {
+    float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));
+    float d = mx - mn;
+    if (d < 0.001) return 0.0;
+    float h;
+    if (mx == c.r) h = mod((c.g - c.b) / d + 6.0, 6.0) / 6.0;
+    else if (mx == c.g) h = ((c.b - c.r) / d + 2.0) / 6.0;
+    else h = ((c.r - c.g) / d + 4.0) / 6.0;
+    return h;
+  }
+  float hash13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+  vec3 hash33(vec3 p) { p = fract(p * vec3(443.897, 441.423, 437.195)); p += dot(p, p.yxz + 19.19); return fract(vec3(p.x*p.y, p.x*p.z, p.y*p.z)); }
+  float kaliIFS(vec3 p, vec3 off, float inv) { float s = 1.0;
+    for (int k = 0; k < 12; k++) { if (k >= u_iters) break;
+      if (p.x + p.y < 0.0) p.xy = -p.yx; if (p.x + p.z < 0.0) p.xz = -p.zx; if (p.y + p.z < 0.0) p.yz = -p.zy;
+      float e = max(0.95, inv / dot(p, p)); s *= e; p = p * e - off; } return s;
+  }
+  vec3 patternKali(vec3 p, vec3 zoneC, float tt) {
+    float baseHue = rgbHue(zoneC);
+    float s = kaliIFS(p, vec3(1.5, 1.62, 1.0), u_invBase);
+    float val = clamp(s / 600.0, 0.0, 4.5);
+    float hue = fract(baseHue + tt * 0.02 + atan(p.x, p.z) * 0.05);
+    return hsv(hue, u_satBase, val);
+  }
+  vec3 patternVoronoi(vec3 p, vec3 zoneC, float tt) {
+    vec3 ip = floor(p), fp = fract(p); float minD = 99.0; vec3 nr = vec3(0.0);
+    for (int dz=-1; dz<=1; dz++) for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++) {
+      vec3 nid = ip + vec3(float(dx), float(dy), float(dz));
+      vec3 jit = hash33(nid);
+      vec3 f = vec3(float(dx), float(dy), float(dz)) + jit - fp;
+      float d = dot(f, f); if (d < minD) { minD = d; nr = nid; }
+    }
+    float baseHue = rgbHue(zoneC);
+    return hsv(fract(baseHue + hash13(nr) * u_hueSpin + tt * 0.02), u_satBase, 1.0 - sqrt(minD));
+  }
+  vec3 patternMandelbox(vec3 p, vec3 zoneC, float tt) {
+    vec3 cv = p, q = p; float dr = 1.0;
+    float scaleP = clamp(u_invBase * 0.18, 1.5, 2.6);
+    for (int k = 0; k < 8; k++) { if (k >= u_iters) break;
+      q = clamp(q, -1.0, 1.0) * 2.0 - q;
+      float r2 = dot(q, q);
+      if (r2 < 0.5) { float t = 2.0; q *= t; dr *= t; } else if (r2 < 1.0) { float t = 1.0/r2; q *= t; dr *= t; }
+      q = scaleP * q + cv; dr = dr * abs(scaleP) + 1.0;
+    }
+    float lum = length(q) / max(0.001, abs(dr));
+    float val = clamp(lum * 80.0 / 600.0, 0.0, 4.5);
+    return hsv(fract(rgbHue(zoneC) + length(q) * u_hueSpin * 0.1 + tt * 0.02), u_satBase, val);
+  }
+  float hex2D(vec2 q, float cell) {
+    q /= cell; vec2 r = vec2(1.0, 1.7320508), h = r * 0.5;
+    vec2 a = mod(q, r) - h, b = mod(q + h, r) - h;
+    vec2 d = (dot(a, a) < dot(b, b)) ? a : b;
+    return max(abs(d.x), abs(d.y * 0.86603 + d.x * 0.5));
+  }
+  vec3 patternHex(vec3 p, vec3 zoneC, float tt) {
+    float cell = 1.0 / max(0.5, u_invBase * 0.1);
+    float h = hex2D(p.xz, cell);
+    float edge = smoothstep(0.46, 0.5, h);
+    float val = edge * 0.9 + (1.0 - edge) * 0.15;
+    return hsv(fract(rgbHue(zoneC) + h * u_hueSpin + tt * 0.03), u_satBase, val);
+  }
+  vec3 patternCircuit(vec3 p, vec3 zoneC, float tt) {
+    vec3 ap = abs(p); vec2 uv2; float seedAxis;
+    if (ap.x > ap.y && ap.x > ap.z) { uv2 = p.yz; seedAxis = p.x; }
+    else if (ap.y > ap.z)             { uv2 = p.xz; seedAxis = p.y; }
+    else                              { uv2 = p.xy; seedAxis = p.z; }
+    uv2 *= 6.0 + float(u_iters) * 0.4;
+    vec2 cellId = floor(uv2), cellUv = fract(uv2) - 0.5;
+    float h = hash13(vec3(cellId, floor(seedAxis * 5.0)));
+    float ang = floor(h * 4.0) * 1.5707963;
+    float ca = cos(ang), sa = sin(ang);
+    vec2 rUv = vec2(ca*cellUv.x - sa*cellUv.y, sa*cellUv.x + ca*cellUv.y);
+    float d1 = abs(length(rUv - vec2(-0.5, -0.5)) - 0.5);
+    float d2 = abs(length(rUv - vec2( 0.5,  0.5)) - 0.5);
+    float trace = max(smoothstep(0.06, 0.0, d1), smoothstep(0.06, 0.0, d2));
+    vec2 cFrom1 = rUv - vec2(-0.5, -0.5), cFrom2 = rUv - vec2(0.5, 0.5);
+    float p1 = 0.5 + 0.5 * sin(atan(cFrom1.y, cFrom1.x) * 4.0 + tt * 1.5 + h * 6.28);
+    float p2 = 0.5 + 0.5 * sin(atan(cFrom2.y, cFrom2.x) * 4.0 - tt * 1.5 + h * 6.28);
+    trace *= 0.4 + 0.6 * max(p1, p2);
+    float nodeD = min(min(length(cellUv - vec2(-0.5,-0.5)), length(cellUv - vec2(0.5,-0.5))),
+                      min(length(cellUv - vec2(-0.5, 0.5)), length(cellUv - vec2(0.5, 0.5))));
+    float node = smoothstep(0.10, 0.04, nodeD);
+    float val = max(trace, node * 1.8);
+    return hsv(fract(rgbHue(zoneC) + h * u_hueSpin + tt * 0.02), u_satBase, val * 1.2);
+  }
+  vec3 patternCaustic(vec3 p, vec3 zoneC, float tt) {
+    vec3 q = p * 1.5;
+    float a1 = sin(q.x*1.7 + q.y*0.6 + tt*0.7);
+    float a2 = sin(q.y*1.3 - q.z*0.9 + tt*0.9);
+    float a3 = sin(q.z*1.1 + q.x*0.4 + tt*0.5);
+    float caustic = pow(0.5 + 0.5 * (a1*a2 + a2*a3 + a3*a1), 6.0);
+    float hum = 0.10 + 0.05 * sin(q.x + q.y + q.z + tt*0.4);
+    float val = caustic * 1.6 + hum;
+    return hsv(fract(rgbHue(zoneC) + caustic*0.08 + tt*0.01), u_satBase * 0.7, val);
+  }
+  vec3 patternPanelMaze(vec3 p, vec3 zoneC, float tt) {
+    vec3 ap = abs(p); vec2 uv2; float seedAxis;
+    if (ap.x > ap.y && ap.x > ap.z) { uv2 = p.yz; seedAxis = p.x; }
+    else if (ap.y > ap.z)             { uv2 = p.xz; seedAxis = p.y; }
+    else                              { uv2 = p.xy; seedAxis = p.z; }
+    uv2 *= 4.0 + float(u_iters) * 0.3;
+    float lineSum = 0.0; float thickBase = 0.025;
+    for (int level = 0; level < 4; level++) {
+      if (level >= u_iters) break;
+      float s = pow(2.0, float(level));
+      vec2 g = uv2 * s;
+      vec2 cellId = floor(g), cellUv = fract(g);
+      float threshold = 0.42 + 0.12 * float(level);
+      float seedZ = float(level) + seedAxis * 0.1;
+      float onL = step(threshold, hash13(vec3(cellId.x,       cellId.y,       seedZ)));
+      float onR = step(threshold, hash13(vec3(cellId.x + 1.0, cellId.y,       seedZ)));
+      float onB = step(threshold, hash13(vec3(cellId.x,       cellId.y,       seedZ + 0.5)));
+      float onT = step(threshold, hash13(vec3(cellId.x,       cellId.y + 1.0, seedZ + 0.5)));
+      float lineHere = max(max(
+        onL * smoothstep(thickBase, 0.0, cellUv.x),
+        onR * smoothstep(thickBase, 0.0, 1.0 - cellUv.x)),
+        max(
+        onB * smoothstep(thickBase, 0.0, cellUv.y),
+        onT * smoothstep(thickBase, 0.0, 1.0 - cellUv.y)));
+      lineSum = max(lineSum, lineHere * (1.0 - float(level) * 0.18));
+    }
+    vec3 edgeCol = mix(vec3(1.0, 0.95, 0.82), zoneC, u_hueSpin);
+    vec3 baseCol = mix(vec3(0.04, 0.035, 0.030), zoneC * 0.18, 0.55);
+    return baseCol + edgeCol * lineSum * 1.7;
+  }
+  vec3 patternApollonian(vec3 p, vec3 zoneC, float tt) {
+    float baseHue = rgbHue(zoneC);
+    float scale = 1.0; vec3 q = p;
+    for (int k = 0; k < 12; k++) { if (k >= u_iters) break;
+      q = -1.0 + 2.0 * fract(0.5 * q + 0.5 * vec3(1.5, 1.62, 1.0));
+      float r2 = max(0.001, dot(q, q));
+      float kk = max(0.5, u_invBase * 0.13 / r2);
+      q *= kk; scale *= kk;
+    }
+    float lum = abs(0.25 * q.y / scale) * 100.0;
+    float val = clamp(lum / 600.0 * 60.0, 0.0, 4.5);
+    return hsv(fract(baseHue + atan(q.x, q.z) * 0.10 + tt * 0.02), u_satBase, val);
+  }
+  vec3 patternWaves(vec3 p, vec3 zoneC, float tt) {
+    vec3 s1 = vec3( 2.0,  0.0,  0.0);
+    vec3 s2 = vec3(-1.0,  1.732, 0.0);
+    vec3 s3 = vec3(-1.0, -1.732, 0.0);
+    float k = u_invBase * 0.5;
+    float w1 = sin(length(p - s1) * k - tt * 2.0);
+    float w2 = sin(length(p - s2) * k - tt * 2.0);
+    float w3 = sin(length(p - s3) * k - tt * 2.0);
+    float sum = (w1 + w2 + w3) / 3.0;
+    float val = pow(0.5 + 0.5 * sum, 4.0);
+    return hsv(fract(rgbHue(zoneC) + sum * u_hueSpin + tt * 0.02), u_satBase, val * 1.5);
+  }
+  float fbm3(vec3 p) { float v = 0.0, a = 0.5;
+    for (int i = 0; i < 5; i++) { v += a * sin(p.x) * cos(p.y) * sin(p.z); p *= 2.0; a *= 0.5; }
+    return v;
+  }
+  vec3 patternPlasma(vec3 p, vec3 zoneC, float tt) {
+    float n = fbm3(p * 2.0 + vec3(tt * 0.2, 0.0, tt * 0.1));
+    float val = pow(0.5 + 0.5 * n, 2.0);
+    return hsv(fract(rgbHue(zoneC) + n * u_hueSpin + tt * 0.02), u_satBase, val * 1.4);
+  }
+  vec3 patternCircumpunct(vec3 p, vec3 zoneC, float tt) {
+    vec3 cell = floor(p);
+    vec3 cellUv = fract(p) - 0.5;
+    float h = hash13(cell);
+    float d = length(cellUv);
+    float dotMask = smoothstep(0.20, 0.16, d);
+    float ringMask = smoothstep(0.04, 0.0, abs(d - 0.36));
+    float val = max(dotMask, ringMask) * (0.6 + 0.4 * sin(tt + h * 6.28));
+    return hsv(fract(rgbHue(zoneC) + h * u_hueSpin + tt * 0.02), u_satBase, val);
+  }
+  vec3 patternGlitch(vec3 p, vec3 zoneC, float tt) {
+    float scan = 0.5 + 0.5 * sin(p.y * (40.0 + float(u_iters) * 5.0) + tt * 8.0);
+    scan = pow(scan, 2.0);
+    float bandY = floor(p.y * 12.0 + tt * 3.0);
+    float bandHash = hash13(vec3(bandY, 0.0, floor(tt * 4.0)));
+    float jitter = (bandHash > 0.85) ? (bandHash - 0.85) * 6.0 : 0.0;
+    vec3 pj = p + vec3(jitter * 0.3, 0.0, 0.0);
+    float n0 = hash13(pj * 8.0);
+    float n1 = hash13(pj * 8.0 + vec3(0.05, 0.0, 0.0));
+    float n2 = hash13(pj * 8.0 - vec3(0.05, 0.0, 0.0));
+    float wave = 0.5 + 0.5 * sin(p.x * 2.0 + tt * 0.6);
+    float baseHue = fract(rgbHue(zoneC) + u_hueSpin * 0.5);
+    vec3 col = hsv(baseHue, u_satBase, scan * wave);
+    col.r *= 0.9 + n1 * 0.6;
+    col.g *= 0.9 + n0 * 0.4;
+    col.b *= 0.9 + n2 * 0.7;
+    if (jitter > 0.0) col = mix(col, vec3(1.0, 0.9, 0.8), 0.6);
+    return col;
+  }
+  vec3 patternCellular(vec3 p, vec3 zoneC, float tt) {
+    vec3 pid = floor(p), pf = fract(p);
+    float minD = 99.0, secondD = 99.0; vec3 nr = vec3(0.0);
+    for (int dz=-1; dz<=1; dz++) for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++) {
+      vec3 nid = pid + vec3(float(dx), float(dy), float(dz));
+      vec3 jit = hash33(nid);
+      jit = 0.5 + 0.5 * sin(jit * 6.28 + tt * 0.4);
+      vec3 f = vec3(float(dx), float(dy), float(dz)) + jit - pf;
+      float d = dot(f, f);
+      if (d < minD) { secondD = minD; minD = d; nr = nid; }
+      else if (d < secondD) { secondD = d; }
+    }
+    float edge = sqrt(secondD) - sqrt(minD);
+    float edgeMask = smoothstep(0.04, 0.0, edge);
+    float pulse = 0.5 + 0.5 * sin(hash13(nr) * 6.28 + tt * 1.2);
+    float val = edgeMask * (0.6 + 0.4 * pulse);
+    return hsv(fract(rgbHue(zoneC) + hash13(nr) * u_hueSpin), u_satBase, val);
+  }
+  vec3 patternStreaks(vec3 p, vec3 zoneC, float tt) {
+    vec3 q = p, warp = vec3(0.0);
+    for (int k = 0; k < 6; k++) { if (k >= u_iters) break;
+      warp.x = sin(q.y * 1.3 + tt * 0.3 + warp.z * 2.0);
+      warp.y = sin(q.z * 1.7 + tt * 0.4 + warp.x * 2.0);
+      warp.z = sin(q.x * 1.1 + tt * 0.2 + warp.y * 2.0);
+      q = p + warp * (0.6 + float(k) * 0.2);
+    }
+    float field = warp.x + warp.y * 0.5 + warp.z * 0.3;
+    float streaks = abs(fract(field * 2.0) - 0.5) * 2.0;
+    streaks = smoothstep(0.85, 0.95, 1.0 - streaks);
+    float glow = 0.15 + 0.15 * sin(field * 3.0 + tt * 0.5);
+    return hsv(fract(rgbHue(zoneC) + field * 0.05 + tt * 0.01), u_satBase, max(streaks * 1.5, glow));
+  }
+  vec3 patternHexPulse(vec3 p, vec3 zoneC, float tt) {
+    vec3 ap = abs(p);
+    vec2 uv2;
+    if (ap.x > ap.y && ap.x > ap.z) uv2 = p.yz;
+    else if (ap.y > ap.z)            uv2 = p.xz;
+    else                             uv2 = p.xy;
+    uv2 *= 5.0 + float(u_iters) * 0.4;
+    vec2 r = vec2(1.0, 1.7320508);
+    vec2 a = mod(uv2, r) - r * 0.5;
+    vec2 b = mod(uv2 - r * 0.5, r) - r * 0.5;
+    vec2 hcell = (dot(a, a) < dot(b, b)) ? a : b;
+    vec2 hid = uv2 - hcell;
+    float hexDist = max(abs(hcell.x) * 0.866 + abs(hcell.y) * 0.5, abs(hcell.y));
+    float edge = smoothstep(0.46, 0.5, hexDist);
+    float pulseVal = 0.0;
+    for (int i = 0; i < 2; i++) {
+      float d = length(vWorldPos - roomCenters[i]);
+      float wave = sin(d * 0.012 - tt * 2.0);
+      float front = smoothstep(0.7, 1.0, wave);
+      float fade = smoothstep(roomRadii[i] * 4.0, 0.0, d);
+      pulseVal = max(pulseVal, front * fade);
+    }
+    float cellLight = hash13(vec3(hid, 0.0)) * 0.30 + pulseVal * 1.6;
+    float val = edge * 0.8 + cellLight * (1.0 - edge * 0.5);
+    return hsv(fract(rgbHue(zoneC) + pulseVal * u_hueSpin + tt * 0.01), u_satBase, val);
+  }
+  vec3 patternCyberMosh(vec3 p, vec3 zoneC, float tt) {
+    vec3 ap = abs(p);
+    vec2 uv2; float driftAxis;
+    if (ap.x > ap.y && ap.x > ap.z) { uv2 = p.yz; driftAxis = p.x; }
+    else if (ap.y > ap.z)             { uv2 = p.xz; driftAxis = p.y; }
+    else                              { uv2 = p.xy; driftAxis = p.z; }
+    uv2 *= 4.0;
+    uv2.x += driftAxis * 0.05;
+    float vScan = sin(uv2.x * (50.0 + float(u_iters) * 6.0) + tt * 4.0);
+    vScan = pow(0.5 + 0.5 * vScan, 6.0);
+    vec2 pix = floor(uv2 * 14.0);
+    float blockHash = hash13(vec3(pix, floor(tt * 6.0)));
+    float pixCorrupt = step(0.78, blockHash);
+    float bandY = floor(uv2.y * 9.0 + tt * 2.5);
+    float bandH = hash13(vec3(bandY, 0.0, floor(tt * 4.0)));
+    float band = step(0.88, bandH) * 1.6;
+    vec3 magenta = vec3(1.00, 0.10, 0.85);
+    vec3 cyan    = vec3(0.20, 0.95, 1.00);
+    float colorMix = 0.5 + 0.5 * sin(uv2.x * 0.6 + tt * 0.7);
+    vec3 baseCol = mix(cyan, magenta, colorMix);
+    float val = vScan * 0.55 + pixCorrupt * 0.85 + band;
+    vec3 col = baseCol * val;
+    col = mix(col, hsv(rgbHue(zoneC), u_satBase, val * 0.6), 0.18);
+    return col;
+  }
+  vec3 patternRingTunnel(vec3 p, vec3 zoneC, float tt) {
+    vec3 nearestC = roomCenters[0];
+    float minD = length(vWorldPos - roomCenters[0]);
+    for (int i = 1; i < 2; i++) {
+      float d = length(vWorldPos - roomCenters[i]);
+      if (d < minD) { minD = d; nearestC = roomCenters[i]; }
+    }
+    vec3 toCenter = vWorldPos - nearestC;
+    vec3 ap = abs(vNormal);
+    vec2 uv2; float axisAlong;
+    if (ap.x > ap.y && ap.x > ap.z) { uv2 = toCenter.yz; axisAlong = toCenter.x; }
+    else if (ap.y > ap.z)             { uv2 = toCenter.xz; axisAlong = toCenter.y; }
+    else                              { uv2 = toCenter.xy; axisAlong = toCenter.z; }
+    float r = length(uv2);
+    float ringSpacing = max(40.0, 280.0 / max(2.0, float(u_iters)));
+    float ringIdx = floor(r / ringSpacing);
+    float ringR = (ringIdx + 0.5) * ringSpacing;
+    float ringMask = smoothstep(ringSpacing * 0.10, 0.0, abs(r - ringR));
+    float isWarm = mod(ringIdx + step(0.5, u_hueSpin), 2.0);
+    vec3 ringCol = mix(vec3(0.30, 0.95, 1.00), vec3(1.0, 0.85, 0.40), isWarm);
+    float angle = atan(uv2.y, uv2.x);
+    float sliceMark = pow(0.5 + 0.5 * sin(angle * 16.0), 4.0);
+    float pulse = 0.7 + 0.3 * sin(tt * 0.6 + ringIdx * 0.4 + axisAlong * 0.005);
+    vec3 baseCol = mix(vec3(0.04, 0.05, 0.06), zoneC * 0.15, 0.4);
+    vec3 col = baseCol + ringCol * ringMask * pulse * 1.6 + ringCol * sliceMark * (1.0 - ringMask) * 0.25;
+    col += vec3(1.0, 0.95, 0.85) * smoothstep(ringSpacing * 0.4, 0.0, r) * 1.4;
+    return col;
+  }
+  float sdBoxFrame(vec3 p, vec3 b, float e) {
+    p = abs(p) - b; vec3 q = abs(p + e) - e;
+    float a = length(max(vec3(p.x, q.y, q.z), 0.0)) + min(max(p.x, max(q.y, q.z)), 0.0);
+    float b1 = length(max(vec3(q.x, p.y, q.z), 0.0)) + min(max(q.x, max(p.y, q.z)), 0.0);
+    float c = length(max(vec3(q.x, q.y, p.z), 0.0)) + min(max(q.x, max(q.y, p.z)), 0.0);
+    return min(min(a, b1), c);
+  }
+  float neonSDF(vec3 wp, out vec3 cellId) { float CELL=1.4; cellId=floor(wp/CELL);
+    return sdBoxFrame(mod(wp, CELL) - CELL*0.5, vec3(CELL*0.42), 0.05);
+  }
+  vec3 patternNeonCube(vec3 p, vec3 zoneC, float tt) {
+    vec3 ro = vWorldPos * 0.003 + vec3(tt*0.05, 0.0, 0.0);
+    vec3 rd = normalize(vWorldPos - cameraPosition);
+    float t = 0.0; bool hit = false; vec3 hitId = vec3(0.0); float hitT = 0.0;
+    for (int i = 0; i < 32; i++) { if (i >= u_iters * 3) break;
+      vec3 cid; float d = neonSDF(ro + rd * t, cid);
+      if (d < 0.006) { hit=true; hitId=cid; hitT=t; break; }
+      if (t > 9.0) break;
+      t += max(d * 0.85, 0.01);
+    }
+    vec3 col = vec3(0.0);
+    if (hit) { float h = hash13(hitId);
+      vec3 cubeCol = (h > 0.5) ? vec3(0.20, 0.95, 1.00) : vec3(1.00, 0.15, 0.85);
+      float pulse = 0.55 + 0.45 * sin(hash13(hitId + vec3(7.0)) * 6.28 + tt*1.5);
+      col = cubeCol * pulse * exp(-hitT * 0.28) * 1.8;
+    }
+    return col + hsv(rgbHue(zoneC), u_satBase * 0.4, 0.06);
+  }
+  vec3 patternLayeredCube(vec3 p, vec3 zoneC, float tt) {
+    vec3 ro = vWorldPos * 0.003 + vec3(tt*0.05, 0.0, 0.0);
+    vec3 rd = normalize(vWorldPos - cameraPosition);
+    float t = 0.0; vec3 col = vec3(0.0); float totalA = 0.0;
+    for (int i = 0; i < 40; i++) { if (i >= u_iters * 4) break;
+      vec3 cid; float d = neonSDF(ro + rd * t, cid);
+      if (d < 0.012) { float h = hash13(cid);
+        vec3 cubeCol = (h > 0.5) ? vec3(0.20, 0.95, 1.00) : vec3(1.00, 0.15, 0.85);
+        float pulse = 0.55 + 0.45 * sin(hash13(cid + vec3(7.0)) * 6.28 + tt*1.5);
+        float layerA = 0.45 * exp(-t * 0.30) * pulse;
+        col += cubeCol * layerA * (1.0 - totalA);
+        totalA += layerA * (1.0 - totalA);
+        if (totalA > 0.95) break;
+        t += 0.12;
+      }
+      if (t > 9.0) break;
+      t += max(d * 0.85, 0.01);
+    }
+    return col * 1.5 + hsv(rgbHue(zoneC), u_satBase * 0.4, 0.06);
+  }
+  vec3 sampleWallPattern(int pid, vec3 zoneC, float tt,
+                         int   itersIn, float scaleIn, float invBaseIn,
+                         float hueSpinIn, float satBaseIn) {
+    if (pid < 0) return vec3(0.0);
+    u_iters   = itersIn;
+    u_scale   = scaleIn;
+    u_invBase = invBaseIn;
+    u_hueSpin = hueSpinIn;
+    u_satBase = satBaseIn;
+    vec3 p = vWorldPos * u_scale;
+    if (pid == 0)  return patternKali(p, zoneC, tt);
+    if (pid == 1)  return patternVoronoi(p, zoneC, tt);
+    if (pid == 2)  return patternMandelbox(p, zoneC, tt);
+    if (pid == 3)  return patternHex(p, zoneC, tt);
+    if (pid == 4)  return patternCircuit(p, zoneC, tt);
+    if (pid == 5)  return patternCaustic(p, zoneC, tt);
+    if (pid == 6)  return patternPanelMaze(p, zoneC, tt);
+    if (pid == 7)  return patternApollonian(p, zoneC, tt);
+    if (pid == 8)  return patternWaves(p, zoneC, tt);
+    if (pid == 9)  return patternPlasma(p, zoneC, tt);
+    if (pid == 10) return patternCircumpunct(p, zoneC, tt);
+    if (pid == 11) return patternGlitch(p, zoneC, tt);
+    if (pid == 12) return patternCellular(p, zoneC, tt);
+    if (pid == 13) return patternStreaks(p, zoneC, tt);
+    if (pid == 14) return patternHexPulse(p, zoneC, tt);
+    if (pid == 15) return patternCyberMosh(p, zoneC, tt);
+    if (pid == 16) return patternRingTunnel(p, zoneC, tt);
+    if (pid == 17) return patternNeonCube(p, zoneC, tt);
+    if (pid == 18) return patternLayeredCube(p, zoneC, tt);
+    return vec3(0.0);
+  }
+  vec3 hueShift(vec3 col, float shift) {
+    const vec3 k = vec3(0.57735, 0.57735, 0.57735);
+    float angle = shift * 6.28318;
+    float c = cos(angle), s = sin(angle);
+    return col * c + cross(k, col) * s + k * dot(k, col) * (1.0 - c);
+  }
+  vec3 applyBlend(vec3 base, vec3 layer, int mode, float alpha) {
+    if (alpha <= 0.0) return base;
+    if (mode == 0) return base + layer * alpha;
+    if (mode == 1) return mix(base, base * (layer + 0.001), alpha);
+    if (mode == 2) return mix(base, 1.0 - (1.0 - base) * (1.0 - layer), alpha);
+    if (mode == 3) return mix(base, max(base, layer), alpha);
+    if (mode == 4) return mix(base, layer, alpha);
+    return base;
+  }
+  // Triplanar texture sampling: project world position onto 3 axis-aligned
+  // planes, blend by surface normal so curved geometry doesn't stretch.
+  vec3 triplanar(sampler2D tex, vec3 wp, vec3 n, float scale) {
+    vec3 absN = abs(n);
+    absN = pow(absN, vec3(4.0));
+    absN /= max(0.001, absN.x + absN.y + absN.z);
+    vec2 uvX = wp.zy * scale;
+    vec2 uvY = wp.xz * scale;
+    vec2 uvZ = wp.xy * scale;
+    vec3 cX = texture2D(tex, uvX).rgb;
+    vec3 cY = texture2D(tex, uvY).rgb;
+    vec3 cZ = texture2D(tex, uvZ).rgb;
+    return cX * absN.x + cY * absN.y + cZ * absN.z;
+  }
+  void main() {
+    vec3 zoneC = tintColor;
+    vec3 final = sampleWallPattern(patternId, zoneC, time * bgTime,
+      u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;
+    if (fgPatternId >= 0) {
+      vec3 fg1 = sampleWallPattern(fgPatternId, zoneC, time * fgTime,
+        u_iters_fg, u_scale_fg, u_invBase_fg, u_hueSpin_fg, u_satBase_fg) * K_COSMIC_fg;
+      fg1 = hueShift(fg1, fgHue);
+      final = applyBlend(final, fg1, fgBlend, fgAlpha);
+    }
+    if (fg2PatternId >= 0) {
+      vec3 fg2 = sampleWallPattern(fg2PatternId, zoneC, time * fg2Time,
+        u_iters_fg2, u_scale_fg2, u_invBase_fg2, u_hueSpin_fg2, u_satBase_fg2) * K_COSMIC_fg2;
+      fg2 = hueShift(fg2, fg2Hue);
+      final = applyBlend(final, fg2, fg2Blend, fg2Alpha);
+    }
+    // Texture layer (4th composite). texBlend < 0 disables.
+    if (texBlend >= 0) {
+      vec3 texCol = triplanar(uWallTex, vWorldPos, vNormal, texScale) * texBrightness;
+      texCol = hueShift(texCol, texHue);
+      final = applyBlend(final, texCol, texBlend, texAlpha);
+    }
+    vec3 vd = normalize(cameraPosition - vWorldPos);
+    float fres = pow(1.0 - abs(dot(vNormal, vd)), 2.0);
+    final += zoneC * fres * 0.15;
+    final = final / (1.0 + final * 0.35);
+    final *= 1.35;
+    gl_FragColor = vec4(final, uOpacity);
+  }
+`;
+const wallMat = new THREE.ShaderMaterial({
+  vertexShader: wallVS,
+  fragmentShader: wallFS,
+  side: THREE.BackSide,
+  transparent: true,
+  depthWrite: true,
+  uniforms: {
+    uOpacity:      { value: 1.0 },
+    patternId:     { value: 6 },
+    fgPatternId:   { value: -1 },
+    fgAlpha:       { value: 1.0 },
+    fgBlend:       { value: 0 },
+    fgHue:         { value: 0.0 },
+    fgTime:        { value: 1.0 },
+    bgTime:        { value: 1.0 },
+    fg2PatternId:  { value: -1 },
+    fg2Alpha:      { value: 1.0 },
+    fg2Blend:      { value: 0 },
+    fg2Hue:        { value: 0.0 },
+    fg2Time:       { value: 1.0 },
+    time:          { value: 0 },
+    u_iters_bg:    { value: 8 }, u_iters_fg:    { value: 8 }, u_iters_fg2:    { value: 8 },
+    u_scale_bg:    { value: 0.0035 }, u_scale_fg:    { value: 0.0035 }, u_scale_fg2:    { value: 0.0035 },
+    u_invBase_bg:  { value: 9.0 }, u_invBase_fg:  { value: 9.0 }, u_invBase_fg2:  { value: 9.0 },
+    u_hueSpin_bg:  { value: 0.12 }, u_hueSpin_fg:  { value: 0.12 }, u_hueSpin_fg2:  { value: 0.12 },
+    u_satBase_bg:  { value: 0.70 }, u_satBase_fg:  { value: 0.70 }, u_satBase_fg2:  { value: 0.70 },
+    K_COSMIC_bg:   { value: 1.5 }, K_COSMIC_fg:   { value: 1.5 }, K_COSMIC_fg2:   { value: 1.5 },
+    tintColor:     { value: new THREE.Color(0x88aacc) },
+    roomCenters:   { value: [new THREE.Vector3(-SEP*0.5, 0, 0), new THREE.Vector3(SEP*0.5, 0, 0)] },
+    roomRadii:     { value: [ROOM_R, ROOM_R] },
+    // Texture layer
+    uWallTex:      { value: _whiteTex },
+    texBlend:      { value: -1 },
+    texAlpha:      { value: 0.95 },
+    texHue:        { value: 0.0 },
+    texScale:      { value: 0.004 },
+    texBrightness: { value: 1.0 }
+  }
+});
+
+// Geometry: tunnel
+const sphGeo = new THREE.SphereGeometry(ROOM_R, 64, 48);
+const sphereA = new THREE.Mesh(sphGeo, wallMat);
+sphereA.position.set(-SEP*0.5, 0, 0);
+scene.add(sphereA);
+const sphereB = new THREE.Mesh(sphGeo, wallMat);
+sphereB.position.set(SEP*0.5, 0, 0);
+scene.add(sphereB);
+const cylGeo = new THREE.CylinderGeometry(TUN_R, TUN_R, SEP, 32, 1, true);
+const cylMesh = new THREE.Mesh(cylGeo, wallMat);
+cylMesh.rotation.z = Math.PI * 0.5;
+scene.add(cylMesh);
+scene.add(new THREE.AmbientLight(0x445577, 1.0));
+const ptA = new THREE.PointLight(0x88ccff, 1.5, 1500, 1.0);
+ptA.position.set(-SEP*0.5, 50, 0); scene.add(ptA);
+const ptB = new THREE.PointLight(0xff88aa, 1.5, 1500, 1.0);
+ptB.position.set(SEP*0.5, 50, 0); scene.add(ptB);
+
+fitRenderer();
+window.addEventListener('resize', fitRenderer);
+new ResizeObserver(fitRenderer).observe(viewport);
+
+// ============================================================
+// UI bindings
+// ============================================================
+function bindSlider(id, valId, target, fixedDigits) {
+  const slider = document.getElementById(id);
+  const valSpan = document.getElementById(valId);
+  function refresh() {
+    const v = parseFloat(slider.value);
+    valSpan.textContent = (fixedDigits === undefined) ? v : v.toFixed(fixedDigits);
+    target(v);
+  }
+  slider.addEventListener('input', refresh);
+  refresh();
+}
+bindSlider('uOpacity', 'uOpacity-val', v => wallMat.uniforms.uOpacity.value = v, 2);
+['bg', 'fg', 'fg2'].forEach(L => {
+  bindSlider(`u_iters_${L}`,   `u_iters_${L}-val`,   v => wallMat.uniforms[`u_iters_${L}`].value   = v|0, 0);
+  bindSlider(`u_scale_${L}`,   `u_scale_${L}-val`,   v => wallMat.uniforms[`u_scale_${L}`].value   = v, 4);
+  bindSlider(`u_invBase_${L}`, `u_invBase_${L}-val`, v => wallMat.uniforms[`u_invBase_${L}`].value = v, 1);
+  bindSlider(`u_hueSpin_${L}`, `u_hueSpin_${L}-val`, v => wallMat.uniforms[`u_hueSpin_${L}`].value = v, 3);
+  bindSlider(`u_satBase_${L}`, `u_satBase_${L}-val`, v => wallMat.uniforms[`u_satBase_${L}`].value = v, 2);
+  bindSlider(`K_COSMIC_${L}`,  `K_COSMIC_${L}-val`,  v => wallMat.uniforms[`K_COSMIC_${L}`].value  = v, 2);
+});
+bindSlider('fgAlpha',   'fgAlpha-val',   v => wallMat.uniforms.fgAlpha.value   = v, 2);
+bindSlider('fgHue',     'fgHue-val',     v => wallMat.uniforms.fgHue.value     = v, 3);
+bindSlider('fgTime',    'fgTime-val',    v => wallMat.uniforms.fgTime.value    = v, 2);
+bindSlider('bgTime',    'bgTime-val',    v => wallMat.uniforms.bgTime.value    = v, 2);
+bindSlider('fg2Alpha',  'fg2Alpha-val',  v => wallMat.uniforms.fg2Alpha.value  = v, 2);
+bindSlider('fg2Hue',    'fg2Hue-val',    v => wallMat.uniforms.fg2Hue.value    = v, 3);
+bindSlider('fg2Time',   'fg2Time-val',   v => wallMat.uniforms.fg2Time.value   = v, 2);
+// Texture layer
+bindSlider('texAlpha',      'texAlpha-val',      v => wallMat.uniforms.texAlpha.value      = v, 2);
+bindSlider('texHue',        'texHue-val',        v => wallMat.uniforms.texHue.value        = v, 3);
+bindSlider('texScale',      'texScale-val',      v => wallMat.uniforms.texScale.value      = v, 4);
+bindSlider('texBrightness', 'texBrightness-val', v => wallMat.uniforms.texBrightness.value = v, 2);
+
+document.getElementById('pattern').addEventListener('change', e => {
+  wallMat.uniforms.patternId.value = parseInt(e.target.value, 10) | 0;
+});
+document.getElementById('fgPattern').addEventListener('change', e => {
+  wallMat.uniforms.fgPatternId.value = parseInt(e.target.value, 10);
+});
+document.getElementById('fgBlend').addEventListener('change', e => {
+  wallMat.uniforms.fgBlend.value = parseInt(e.target.value, 10) | 0;
+});
+document.getElementById('fg2Pattern').addEventListener('change', e => {
+  wallMat.uniforms.fg2PatternId.value = parseInt(e.target.value, 10);
+});
+document.getElementById('fg2Blend').addEventListener('change', e => {
+  wallMat.uniforms.fg2Blend.value = parseInt(e.target.value, 10) | 0;
+});
+document.getElementById('texId').addEventListener('change', e => {
+  const id = e.target.value;
+  if (id && WALL_TEXTURES[id]) {
+    wallMat.uniforms.uWallTex.value = WALL_TEXTURES[id];
+    // If texBlend is currently -1 (disabled), flip on with current dropdown value.
+    if (wallMat.uniforms.texBlend.value < 0) {
+      wallMat.uniforms.texBlend.value = parseInt(document.getElementById('texBlend').value, 10) | 0;
+    }
+  } else {
+    // None selected ; disable the layer.
+    wallMat.uniforms.uWallTex.value = _whiteTex;
+    wallMat.uniforms.texBlend.value = -1;
+  }
+});
+document.getElementById('texBlend').addEventListener('change', e => {
+  // Only honor blend changes if a texture is selected ; if the dropdown is
+  // None, leave texBlend at -1 so the layer stays disabled.
+  const id = document.getElementById('texId').value;
+  if (id) {
+    wallMat.uniforms.texBlend.value = parseInt(e.target.value, 10) | 0;
+  }
+});
+document.getElementById('color-b').addEventListener('input', e => wallMat.uniforms.tintColor.value.set(e.target.value));
+
+let paused = false;
+const pauseBtn = document.getElementById('pause');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? 'Resume animation' : 'Pause animation';
+  pauseBtn.classList.toggle('active', paused);
+});
+
+// ============================================================
+// Preset templates (the 3 keepers from v15a, baked here as starting points)
+// ============================================================
+const PRESET_TEMPLATES = {
+  hexeizure: {
+    name: 'Hexeizure',
+    tint: '#000000', paletteOverride: 0x000000,
+    pattern: 17, bgTime: 0.25,
+    u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
+    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99, K_COSMIC_bg: 0.05,
+    fgPattern: 4, fgAlpha: 2.0, fgBlend: 0, fgHue: 1.0, fgTime: 3.0,
+    u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0, K_COSMIC_fg: 3.6,
+    fg2Pattern: 14, fg2Alpha: 0.5, fg2Blend: 1, fg2Hue: 1.0, fg2Time: 0.5,
+    u_iters_fg2: 12, u_scale_fg2: 0.001, u_invBase_fg2: 20.0,
+    u_hueSpin_fg2: 0.31, u_satBase_fg2: 0.94, K_COSMIC_fg2: 3.1,
+    texId: '', texBlend: -1, texAlpha: 0.95, texHue: 0.0, texScale: 0.004, texBrightness: 1.0,
+  },
+  tile_track: {
+    name: 'Tile Track',
+    tint: '#88aacc',
+    pattern: 2, bgTime: 0.4,
+    u_iters_bg: 6, u_scale_bg: 0.0024, u_invBase_bg: 9.0,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55, K_COSMIC_bg: 0.9,
+    fgPattern: 14, fgAlpha: 0.4, fgBlend: 0, fgHue: 0.5, fgTime: 0.7,
+    u_iters_fg: 4, u_scale_fg: 0.0012, u_invBase_fg: 9.0,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.3, K_COSMIC_fg: 0.4,
+    fg2Pattern: -1, fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
+    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0, K_COSMIC_fg2: 0,
+    texId: 'tile', texBlend: 1, texAlpha: 0.95, texHue: 0.0, texScale: 0.004, texBrightness: 1.0,
+  },
+  sheet_metal: {
+    name: 'Sheet Metal',
+    tint: '#b0bec8', paletteOverride: 0xb0bec8,
+    pattern: 0, bgTime: 0.6,
+    u_iters_bg: 9, u_scale_bg: 0.003, u_invBase_bg: 8.0,
+    u_hueSpin_bg: 0.55, u_satBase_bg: 0.3, K_COSMIC_bg: 1.1,
+    fgPattern: 6, fgAlpha: 0.35, fgBlend: 0, fgHue: 0.0, fgTime: 0.8,
+    u_iters_fg: 4, u_scale_fg: 0.0014, u_invBase_fg: 9.0,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.4, K_COSMIC_fg: 0.4,
+    fg2Pattern: -1, fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
+    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0, K_COSMIC_fg2: 0,
+    texId: 'metal', texBlend: 1, texAlpha: 0.9, texHue: 0.0, texScale: 0.0035, texBrightness: 1.05,
+  },
+};
+
+// Map a preset object (lab-shape) onto the DOM elements. After setting
+// .value, we dispatch input/change events so the bound handlers update
+// the value-display spans AND wallMat uniforms.
+function applyPreset(p) {
+  function setEl(id, val) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = val;
+    const evtType = (el.tagName === 'SELECT') ? 'change' : 'input';
+    el.dispatchEvent(new Event(evtType, { bubbles: true }));
+  }
+  setEl('pattern', p.pattern);
+  setEl('bgTime', p.bgTime);
+  setEl('u_iters_bg', p.u_iters_bg);
+  setEl('u_scale_bg', p.u_scale_bg);
+  setEl('u_invBase_bg', p.u_invBase_bg);
+  setEl('u_hueSpin_bg', p.u_hueSpin_bg);
+  setEl('u_satBase_bg', p.u_satBase_bg);
+  setEl('K_COSMIC_bg', p.K_COSMIC_bg);
+  setEl('fgPattern', p.fgPattern);
+  setEl('fgAlpha', p.fgAlpha);
+  setEl('fgBlend', p.fgBlend);
+  setEl('fgHue', p.fgHue);
+  setEl('fgTime', p.fgTime);
+  setEl('u_iters_fg', p.u_iters_fg);
+  setEl('u_scale_fg', p.u_scale_fg);
+  setEl('u_invBase_fg', p.u_invBase_fg);
+  setEl('u_hueSpin_fg', p.u_hueSpin_fg);
+  setEl('u_satBase_fg', p.u_satBase_fg);
+  setEl('K_COSMIC_fg', p.K_COSMIC_fg);
+  setEl('fg2Pattern', p.fg2Pattern);
+  setEl('fg2Alpha', p.fg2Alpha);
+  setEl('fg2Blend', p.fg2Blend);
+  setEl('fg2Hue', p.fg2Hue);
+  setEl('fg2Time', p.fg2Time);
+  setEl('u_iters_fg2', p.u_iters_fg2);
+  setEl('u_scale_fg2', p.u_scale_fg2);
+  setEl('u_invBase_fg2', p.u_invBase_fg2);
+  setEl('u_hueSpin_fg2', p.u_hueSpin_fg2);
+  setEl('u_satBase_fg2', p.u_satBase_fg2);
+  setEl('K_COSMIC_fg2', p.K_COSMIC_fg2);
+  // Texture: tex layer needs special handling because texBlend depends on
+  // the texId being set first.
+  setEl('texId', p.texId || '');
+  if (p.texId) {
+    setEl('texBlend', String(p.texBlend));
+  }
+  setEl('texAlpha', p.texAlpha);
+  setEl('texHue', p.texHue);
+  setEl('texScale', p.texScale);
+  setEl('texBrightness', p.texBrightness);
+  setEl('color-b', p.tint || '#88aacc');
+  if (p.name) document.getElementById('presetName').value = p.name;
+}
+
+document.querySelectorAll('button.preset').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.preset;
+    if (PRESET_TEMPLATES[key]) applyPreset(PRESET_TEMPLATES[key]);
+  });
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  if (!confirm('Reset all controls to defaults? Current state will be lost.')) return;
+  try { localStorage.removeItem(LS_KEY); } catch (e) {}
+  location.reload();
+});
+
+// ============================================================
+// Export / Import : MULTI_LAYER_PRESETS shape
+// ============================================================
+// Build a JSON object matching the game's MULTI_LAYER_PRESETS entry shape
+// so the preset can be pasted directly into the game's table. Only writes
+// keys that are meaningful for the active layer config (skips fg2 fields
+// when fg2 is None, skips tex fields when tex is None, etc).
+function exportPreset() {
+  const p = {};
+  const tintHex = document.getElementById('color-b').value;
+  // paletteOverride: set only if tint differs from default light-blue.
+  // Always emit when the active preset uses a non-default tint, since
+  // the game's composite shader needs uCompositeTint to honor the tint.
+  const tintInt = parseInt(tintHex.slice(1), 16);
+  if (tintInt !== 0x88aacc) p.paletteOverride = tintInt;
+  // BG layer (always emitted)
+  p.bgPatternId   = parseInt(document.getElementById('pattern').value, 10) | 0;
+  p.bgTime        = parseFloat(document.getElementById('bgTime').value);
+  p.u_iters_bg    = parseInt(document.getElementById('u_iters_bg').value, 10) | 0;
+  p.u_scale_bg    = parseFloat(document.getElementById('u_scale_bg').value);
+  p.u_invBase_bg  = parseFloat(document.getElementById('u_invBase_bg').value);
+  p.u_hueSpin_bg  = parseFloat(document.getElementById('u_hueSpin_bg').value);
+  p.u_satBase_bg  = parseFloat(document.getElementById('u_satBase_bg').value);
+  p.K_COSMIC_bg   = parseFloat(document.getElementById('K_COSMIC_bg').value);
+  // FG1 layer
+  const fg1Id = parseInt(document.getElementById('fgPattern').value, 10);
+  p.fgPatternId = fg1Id;
+  if (fg1Id >= 0) {
+    p.fgAlpha = parseFloat(document.getElementById('fgAlpha').value);
+    p.fgBlend = parseInt(document.getElementById('fgBlend').value, 10) | 0;
+    p.fgHue   = parseFloat(document.getElementById('fgHue').value);
+    p.fgTime  = parseFloat(document.getElementById('fgTime').value);
+    p.u_iters_fg    = parseInt(document.getElementById('u_iters_fg').value, 10) | 0;
+    p.u_scale_fg    = parseFloat(document.getElementById('u_scale_fg').value);
+    p.u_invBase_fg  = parseFloat(document.getElementById('u_invBase_fg').value);
+    p.u_hueSpin_fg  = parseFloat(document.getElementById('u_hueSpin_fg').value);
+    p.u_satBase_fg  = parseFloat(document.getElementById('u_satBase_fg').value);
+    p.K_COSMIC_fg   = parseFloat(document.getElementById('K_COSMIC_fg').value);
+  }
+  // FG2 layer
+  const fg2Id = parseInt(document.getElementById('fg2Pattern').value, 10);
+  p.fg2PatternId = fg2Id;
+  if (fg2Id >= 0) {
+    p.fg2Alpha = parseFloat(document.getElementById('fg2Alpha').value);
+    p.fg2Blend = parseInt(document.getElementById('fg2Blend').value, 10) | 0;
+    p.fg2Hue   = parseFloat(document.getElementById('fg2Hue').value);
+    p.fg2Time  = parseFloat(document.getElementById('fg2Time').value);
+    p.u_iters_fg2    = parseInt(document.getElementById('u_iters_fg2').value, 10) | 0;
+    p.u_scale_fg2    = parseFloat(document.getElementById('u_scale_fg2').value);
+    p.u_invBase_fg2  = parseFloat(document.getElementById('u_invBase_fg2').value);
+    p.u_hueSpin_fg2  = parseFloat(document.getElementById('u_hueSpin_fg2').value);
+    p.u_satBase_fg2  = parseFloat(document.getElementById('u_satBase_fg2').value);
+    p.K_COSMIC_fg2   = parseFloat(document.getElementById('K_COSMIC_fg2').value);
+  } else {
+    // Emit explicit zeros so the game's preset switch doesn't inherit
+    // stale fg2 values from a previously-active preset.
+    p.fg2Alpha = 0; p.fg2Blend = 0; p.fg2Hue = 0; p.fg2Time = 0;
+    p.u_iters_fg2 = 1; p.u_scale_fg2 = 0.001; p.u_invBase_fg2 = 2;
+    p.u_hueSpin_fg2 = 0; p.u_satBase_fg2 = 0; p.K_COSMIC_fg2 = 0;
+  }
+  // Texture layer
+  const texId = document.getElementById('texId').value;
+  if (texId) {
+    p.texId = texId;
+    p.texBlend      = parseInt(document.getElementById('texBlend').value, 10) | 0;
+    p.texAlpha      = parseFloat(document.getElementById('texAlpha').value);
+    p.texHue        = parseFloat(document.getElementById('texHue').value);
+    p.texScale      = parseFloat(document.getElementById('texScale').value);
+    p.texBrightness = parseFloat(document.getElementById('texBrightness').value);
+  }
+  return p;
+}
+
+function formatPreset(p, name) {
+  // Emit as a JS object literal (the game's MULTI_LAYER_PRESETS entry
+  // shape), with a leading comment carrying the friendly name. This is
+  // what the user pastes into the game's table.
+  const lines = [];
+  lines.push('// ' + (name || 'Preset') + ' (paste as next index in MULTI_LAYER_PRESETS)');
+  lines.push('{');
+  if ('paletteOverride' in p) {
+    lines.push('  paletteOverride: 0x' + p.paletteOverride.toString(16).padStart(6, '0') + ',');
+  }
+  lines.push('  bgPatternId: ' + p.bgPatternId + ',');
+  lines.push('  bgTime: ' + p.bgTime + ',');
+  lines.push('  u_iters_bg: ' + p.u_iters_bg + ', u_scale_bg: ' + p.u_scale_bg + ', u_invBase_bg: ' + p.u_invBase_bg + ',');
+  lines.push('  u_hueSpin_bg: ' + p.u_hueSpin_bg + ', u_satBase_bg: ' + p.u_satBase_bg + ',');
+  lines.push('  K_COSMIC_bg: ' + p.K_COSMIC_bg + ',');
+  lines.push('  fgPatternId: ' + p.fgPatternId + ',');
+  if (p.fgPatternId >= 0) {
+    lines.push('  fgAlpha: ' + p.fgAlpha + ', fgBlend: ' + p.fgBlend + ', fgHue: ' + p.fgHue + ', fgTime: ' + p.fgTime + ',');
+    lines.push('  u_iters_fg: ' + p.u_iters_fg + ', u_scale_fg: ' + p.u_scale_fg + ', u_invBase_fg: ' + p.u_invBase_fg + ',');
+    lines.push('  u_hueSpin_fg: ' + p.u_hueSpin_fg + ', u_satBase_fg: ' + p.u_satBase_fg + ',');
+    lines.push('  K_COSMIC_fg: ' + p.K_COSMIC_fg + ',');
+  }
+  lines.push('  fg2PatternId: ' + p.fg2PatternId + ',');
+  if (p.fg2PatternId >= 0) {
+    lines.push('  fg2Alpha: ' + p.fg2Alpha + ', fg2Blend: ' + p.fg2Blend + ', fg2Hue: ' + p.fg2Hue + ', fg2Time: ' + p.fg2Time + ',');
+    lines.push('  u_iters_fg2: ' + p.u_iters_fg2 + ', u_scale_fg2: ' + p.u_scale_fg2 + ', u_invBase_fg2: ' + p.u_invBase_fg2 + ',');
+    lines.push('  u_hueSpin_fg2: ' + p.u_hueSpin_fg2 + ', u_satBase_fg2: ' + p.u_satBase_fg2 + ',');
+    lines.push('  K_COSMIC_fg2: ' + p.K_COSMIC_fg2 + ',');
+  } else {
+    lines.push('  fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,');
+    lines.push('  u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,');
+    lines.push('  u_hueSpin_fg2: 0, u_satBase_fg2: 0, K_COSMIC_fg2: 0,');
+  }
+  if (p.texId) {
+    lines.push("  texId: '" + p.texId + "',");
+    lines.push('  texBlend: ' + p.texBlend + ', texAlpha: ' + p.texAlpha + ', texHue: ' + p.texHue + ', texScale: ' + p.texScale + ', texBrightness: ' + p.texBrightness + ',');
+  }
+  lines.push('},');
+  return lines.join('\n');
+}
+
+// Convert a MULTI_LAYER_PRESETS-shape object back into the lab UI shape
+// so import can reuse applyPreset(). Pattern IDs in the game are
+// bgPatternId / fgPatternId / fg2PatternId ; the lab DOM ids are
+// pattern / fgPattern / fg2Pattern.
+function gameShapeToLab(g) {
+  const out = {
+    pattern: g.bgPatternId | 0, bgTime: g.bgTime,
+    u_iters_bg: g.u_iters_bg, u_scale_bg: g.u_scale_bg, u_invBase_bg: g.u_invBase_bg,
+    u_hueSpin_bg: g.u_hueSpin_bg, u_satBase_bg: g.u_satBase_bg, K_COSMIC_bg: g.K_COSMIC_bg,
+    fgPattern: g.fgPatternId, fgAlpha: g.fgAlpha || 0, fgBlend: g.fgBlend || 0,
+    fgHue: g.fgHue || 0, fgTime: g.fgTime || 1.0,
+    u_iters_fg: g.u_iters_fg || 8, u_scale_fg: g.u_scale_fg || 0.0035,
+    u_invBase_fg: g.u_invBase_fg || 9.0, u_hueSpin_fg: g.u_hueSpin_fg || 0.12,
+    u_satBase_fg: g.u_satBase_fg || 0.7, K_COSMIC_fg: g.K_COSMIC_fg || 1.5,
+    fg2Pattern: (g.fg2PatternId === undefined) ? -1 : g.fg2PatternId,
+    fg2Alpha: g.fg2Alpha || 0, fg2Blend: g.fg2Blend || 0,
+    fg2Hue: g.fg2Hue || 0, fg2Time: g.fg2Time || 1.0,
+    u_iters_fg2: g.u_iters_fg2 || 8, u_scale_fg2: g.u_scale_fg2 || 0.0035,
+    u_invBase_fg2: g.u_invBase_fg2 || 9.0, u_hueSpin_fg2: g.u_hueSpin_fg2 || 0.12,
+    u_satBase_fg2: g.u_satBase_fg2 || 0.7, K_COSMIC_fg2: g.K_COSMIC_fg2 || 1.5,
+    texId: g.texId || '', texBlend: (g.texBlend === undefined) ? -1 : g.texBlend,
+    texAlpha: g.texAlpha || 0.95, texHue: g.texHue || 0,
+    texScale: g.texScale || 0.004, texBrightness: g.texBrightness || 1.0,
+  };
+  if ('paletteOverride' in g) {
+    out.tint = '#' + (g.paletteOverride | 0).toString(16).padStart(6, '0');
+    out.paletteOverride = g.paletteOverride;
+  }
+  return out;
+}
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  const p = exportPreset();
+  const name = document.getElementById('presetName').value || 'Preset';
+  document.getElementById('configIO').value = formatPreset(p, name);
+});
+document.getElementById('copyBtn').addEventListener('click', () => {
+  const p = exportPreset();
+  const name = document.getElementById('presetName').value || 'Preset';
+  const txt = formatPreset(p, name);
+  document.getElementById('configIO').value = txt;
+  try { navigator.clipboard.writeText(txt); } catch (e) {}
+});
+document.getElementById('importBtn').addEventListener('click', () => {
+  const txt = document.getElementById('configIO').value.trim();
+  if (!txt) return;
+  try {
+    // Tolerate both pure-JSON and JS-object-literal input. Strip the leading
+    // comment (// ... ) and any trailing comma after the close brace, then
+    // wrap in 'return ()' so Function() can eval it as an expression.
+    let body = txt.replace(/^\s*\/\/[^\n]*\n/, '').trim();
+    body = body.replace(/,\s*$/, '');  // strip trailing comma if pasted from preset table
+    const obj = (new Function('return (' + body + ')'))();
+    if (obj && typeof obj === 'object') {
+      applyPreset(gameShapeToLab(obj));
+    }
+  }
+  catch (e) { alert('Import failed: ' + e.message); }
+});
+
+// ============================================================
+// LocalStorage persistence
+// ============================================================
+const LS_KEY = 'lss_wall_lab_v2_state';
+function saveState() {
+  // Save the current preset shape so reload restores tweaks.
+  try {
+    const state = exportPreset();
+    state._tint = document.getElementById('color-b').value;
+    state._presetName = document.getElementById('presetName').value;
+    localStorage.setItem(LS_KEY, JSON.stringify(state));
+  } catch (e) {}
+}
+function loadState() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return false;
+    const g = JSON.parse(raw);
+    if (g && typeof g === 'object') {
+      const lab = gameShapeToLab(g);
+      if (g._tint) lab.tint = g._tint;
+      if (g._presetName) lab.name = g._presetName;
+      applyPreset(lab);
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+let _saveTimer = null;
+function debouncedSave() {
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(saveState, 300);
+}
+document.body.addEventListener('input', debouncedSave);
+document.body.addEventListener('change', debouncedSave);
+
+// Initial state: try localStorage, fall back to Tile Track template.
+if (!loadState()) {
+  applyPreset(PRESET_TEMPLATES.tile_track);
+}
+
+// ============================================================
+// Post-processing (bloom matched to game's cineFX)
+// ============================================================
+const _composer = new THREE.EffectComposer(renderer);
+const _renderPass = new THREE.RenderPass(scene, camera);
+_composer.addPass(_renderPass);
+const _bloomPass = new THREE.UnrealBloomPass(
+  new THREE.Vector2(viewport.clientWidth, viewport.clientHeight),
+  0.35, 0.55, 1.00
+);
+_composer.addPass(_bloomPass);
+const _origFit = fitRenderer;
+fitRenderer = function() {
+  _origFit();
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  _composer.setSize(w, h);
+  if (_bloomPass.setSize) _bloomPass.setSize(w, h);
+};
+fitRenderer();
+window.addEventListener('resize', fitRenderer);
+
+window.tuneBloom = function(opts) {
+  opts = opts || {};
+  if (typeof opts.strength  === 'number') _bloomPass.strength  = opts.strength;
+  if (typeof opts.radius    === 'number') _bloomPass.radius    = opts.radius;
+  if (typeof opts.threshold === 'number') _bloomPass.threshold = opts.threshold;
+  return { strength: _bloomPass.strength, radius: _bloomPass.radius, threshold: _bloomPass.threshold };
+};
+
+// ============================================================
+// Render loop
+// ============================================================
+let frameCount = 0, lastFpsT = performance.now();
+let frozenTime = 0;
+let lastFrameT = performance.now();
+function frame() {
+  requestAnimationFrame(frame);
+  const now = performance.now();
+  const dt = (now - lastFrameT) * 0.001;
+  lastFrameT = now;
+  if (!paused) frozenTime += dt;
+  wallMat.uniforms.time.value = frozenTime;
+  orbit.update();
+  _composer.render();
+  frameCount++;
+  if (now - lastFpsT >= 500) {
+    const fps = (frameCount * 1000 / (now - lastFpsT)) | 0;
+    frameCount = 0; lastFpsT = now;
+    document.getElementById('stats').textContent = 'FPS: ' + fps;
+  }
+}
+frame();
+</script>
+</body>
+</html>
