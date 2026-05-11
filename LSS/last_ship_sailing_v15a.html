@@ -9425,14 +9425,17 @@ class GasCloud {
   // so the wake lingers ~2 sec after the source passes.
   applyWake(srcX, srcY, srcZ, velX, velY, velZ, strength, radius, dt) {
     const r2 = radius * radius;
-    // Precompute source motion magnitude + unit direction for tube push.
     const vMag2 = velX*velX + velY*velY + velZ*velZ;
     const vMag = vMag2 > 1 ? Math.sqrt(vMag2) : 0;
     const idirX = vMag > 0 ? velX / vMag : 0;
     const idirY = vMag > 0 ? velY / vMag : 0;
     const idirZ = vMag > 0 ? velZ / vMag : 0;
-    const maxOff = radius * 0.6;  // sprite can't drift past 60% of wake radius
+    // (v15a 2026-05-10 turbulence) Cap raised from 0.6× to 1.0× radius so
+    // sprites can swirl out further before clamping — wake reads as
+    // turbulent dispersion instead of a tight push.
+    const maxOff = radius * 1.0;
     const maxOff2 = maxOff * maxOff;
+    const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       const sx = this.position.x + s.off.x + s.wakeOff.x;
@@ -9442,25 +9445,27 @@ class GasCloud {
       const d2 = dx * dx + dy * dy + dz * dz;
       if (d2 > r2) continue;
       const d = d2 > 0.0001 ? Math.sqrt(d2) : 0.0001;
-      // Linear falloff : 1 at center, 0 at radius edge.
       const atten = 1.0 - d / radius;
-      // (1) Velocity drag : sprite gets carried along in source's motion.
-      // 20x stronger than v14e so the "trail behind" effect is actually
-      // visible. At str=0.6, vel=400, atten=0.5, dt=0.016 :
-      //   drag = 0.30 * 0.5 * 0.6 * 0.016 = 1.4e-3 per frame
-      //   ⇒ wakeOff += vel * 1.4e-3 = 0.58 units/frame in source direction
-      //   ⇒ over 0.5 s sustained = ~17 units. Settled equilibrium with
-      //   1.5/s decay is ~40 units. Visible.
+      // (1) Velocity drag : sprite gets carried in source's motion.
       const dragK = 0.30 * atten * strength * dt;
       s.wakeOff.x += velX * dragK;
       s.wakeOff.y += velY * dragK;
       s.wakeOff.z += velZ * dragK;
-      // (2) Tube push : if source has significant velocity, shove the
-      // sprite perpendicular to the source's flight path. This is what
-      // makes the wake visible as a "tube" carved through the cloud.
+      // (2) Bow-wave / wake-closure relative to MOTION DIRECTION (not
+      // ship orientation). The wake math projects sprite position onto
+      // the source's velocity vector (idir = velocity-normalized), so
+      // it's always correct regardless of how the ship is rotated :
+      //   - Forward flight : bow wave at the nose, wake closes at tail
+      //   - Strafing right : bow wave on right side, wake closes on left
+      //   - Flying backwards : bow wave at tail, wake closes at nose
+      //   - Spinning in place : zero motion, neither effect fires (gated
+      //     by vMag > 1 below, plus the speedScale gate on the magnet)
+      // Sprites in the half-space the source is moving TOWARD get pushed
+      // outward (the gas parts) ; sprites in the half-space the source
+      // has passed get pulled inward (the wake closes).
+      //   dot > 0 = sprite is along the motion direction → push out
+      //   dot < 0 = sprite is opposite to motion direction → pull in
       if (vMag > 1) {
-        // Project (sprite - source) onto unit velocity, subtract to get
-        // the perpendicular component — points from source's path to sprite.
         const dot = dx * idirX + dy * idirY + dz * idirZ;
         const perpX = dx - dot * idirX;
         const perpY = dy - dot * idirY;
@@ -9468,27 +9473,55 @@ class GasCloud {
         const perp2 = perpX*perpX + perpY*perpY + perpZ*perpZ;
         if (perp2 > 0.01) {
           const invPerp = 1.0 / Math.sqrt(perp2);
-          // Scale with source speed so faster projectiles cut sharper wakes.
-          // Cap velMag contribution so a hyperspeed projectile doesn't
-          // blow up the wake. At vMag=400, str=0.6, atten=0.5, dt=0.016 :
-          //   tubeStr = 0.04 * 0.5 * 0.6 * 400 * 0.016 = 0.077 per frame
-          //   ⇒ ~1.3 units/frame outward in perp direction. Over 0.3 s
-          //   close-approach = ~12 units lateral. Visible as a tube.
           const tubeStr = 0.04 * atten * strength * Math.min(vMag, 1200) * dt;
-          s.wakeOff.x += perpX * invPerp * tubeStr;
-          s.wakeOff.y += perpY * invPerp * tubeStr;
-          s.wakeOff.z += perpZ * invPerp * tubeStr;
+          const flowSign = dot >= 0 ? 1 : -1;
+          s.wakeOff.x += perpX * invPerp * tubeStr * flowSign;
+          s.wakeOff.y += perpY * invPerp * tubeStr * flowSign;
+          s.wakeOff.z += perpZ * invPerp * tubeStr * flowSign;
         }
       }
-      // (3) Weak magnetic pull (reduced from v14e's 95 → 25). Keeps
-      // stationary sources subtly tugging gas. Won't dominate the drag +
-      // tube effects above.
-      const pullSpeed = 25.0 * atten * strength * dt;
-      const invD = 1.0 / d;
-      s.wakeOff.x -= dx * invD * pullSpeed;
-      s.wakeOff.y -= dy * invD * pullSpeed;
-      s.wakeOff.z -= dz * invD * pullSpeed;
-      // Clamp total wake offset so a sprite can't escape its cloud.
+      // (3) Turbulence : chaotic per-sprite swirl when the sprite is in
+      // the wake region (BEHIND a fast-moving source). Each sprite uses
+      // its driftPhase values as random direction seeds and sin(time)
+      // multiplied frequencies as time variation, so individual sprites
+      // move in completely different directions and the directions
+      // shift over time. This is what makes the wake read as turbulent
+      // smoke rather than a uniform push. Only fires behind the source
+      // (relDotV > 0 means "source has moved past this sprite").
+      //
+      // relDotV = -dot(rel_to_source, source_vel_dir). Positive if the
+      // sprite is BEHIND the source along its flight direction.
+      const relDotV = -(dx * idirX + dy * idirY + dz * idirZ);
+      if (vMag > 50 && relDotV > 0) {
+        // Three independent direction components, each with two frequencies
+        // mixed in so the pattern doesn't loop visibly.
+        const turbX = Math.sin(t * 3.1 + s.driftPhaseX) + Math.sin(t * 1.7 + s.driftPhaseY * 1.4);
+        const turbY = Math.sin(t * 2.3 + s.driftPhaseY * 0.9) + Math.sin(t * 4.1 + s.driftPhaseZ * 0.7);
+        const turbZ = Math.sin(t * 1.9 + s.driftPhaseZ * 1.2) + Math.sin(t * 3.7 + s.driftPhaseX * 1.1);
+        // Wake-region intensity : stronger right behind the source (large
+        // relDotV), fades to nothing at the edge. Caps source vMag so a
+        // hyperspeed projectile doesn't fling sprites away.
+        const wakeFrac = Math.min(1, relDotV / (radius * 0.7));
+        const turbStr = 0.022 * atten * strength * wakeFrac * Math.min(vMag, 900) * dt;
+        s.wakeOff.x += turbX * turbStr;
+        s.wakeOff.y += turbY * turbStr;
+        s.wakeOff.z += turbZ * turbStr;
+      }
+      // (4) Magnetic pull, gated by source speed. Originally this was a
+      // constant pull, but that made stationary / slow ships act like
+      // gas magnets — clouds visibly drifted toward parked ships, which
+      // looked funny. Now the pull only fires above ~100 u/s, ramping
+      // to full at 250 u/s. At ship speed it contributes to turbulence
+      // (sprites pulled into the wake area) ; at standstill it's zero.
+      const speedScale = vMag <= 100 ? 0 : Math.min(1, (vMag - 100) / 150);
+      if (speedScale > 0) {
+        const pullSpeed = 18.0 * atten * strength * dt * speedScale;
+        const invD = 1.0 / d;
+        s.wakeOff.x -= dx * invD * pullSpeed;
+        s.wakeOff.y -= dy * invD * pullSpeed;
+        s.wakeOff.z -= dz * invD * pullSpeed;
+      }
+      // Clamp.
       const woMag2 = s.wakeOff.x * s.wakeOff.x + s.wakeOff.y * s.wakeOff.y + s.wakeOff.z * s.wakeOff.z;
       if (woMag2 > maxOff2) {
         const scale = maxOff / Math.sqrt(woMag2);
@@ -9505,7 +9538,11 @@ class GasCloud {
   // after the source leaves, instead of settling in ~1 sec. Lets the
   // trail-behind effect actually read.
   tickWake(dt) {
-    const decay = Math.exp(-1.5 * dt);
+    // (v15a 2026-05-10 turbulence) Slower decay (1.0/s vs 1.5/s) so the
+    // turbulent wake trail lingers longer behind a passing ship — looking
+    // back along your flight path, you see the disturbed gas still
+    // swirling for ~3 seconds before settling.
+    const decay = Math.exp(-1.0 * dt);
     const churn = (typeof QUALITY === 'undefined' || QUALITY.cloudChurn());
     const t = churn && typeof game !== 'undefined' && typeof game.time === 'number' ? game.time : 0;
     for (let i = 0; i < this.slots.length; i++) {
@@ -9690,18 +9727,16 @@ function updateBCSWakes(dt) {
   // previous `player.alive` check was always false (undefined), which
   // meant the local ship was NEVER pushed as a wake source ; clouds
   // followed missiles fine but never reacted to the player flying past.
-  // (v15a 2026-05-10) Source strengths + radii bumped to feed the new
-  // wake math (drag + tube push) with bigger impulses. Ships and
-  // projectiles now carve a visible wake through gas instead of a
-  // subtle wiggle. Radii grown so the wake "reaches" more of the cloud
-  // around a passing object — same wake intensity at distance, just
-  // wider coverage.
+  // (v15a 2026-05-10 v2) Boosted wake strengths and radii so ships /
+  // projectiles physically shove the clouds around more visibly. The
+  // sprite-level wake (drag + tube push + magnetic pull) all scale with
+  // `str` so bumping the source value here flows through everywhere.
   if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
       player.position && player.velocity) {
     sources.push({
       x: player.position.x, y: player.position.y, z: player.position.z,
       vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
-      str: 0.60, radius: 320,
+      str: 0.95, radius: 400,
     });
   }
   if (game.entities) {
@@ -9712,7 +9747,7 @@ function updateBCSWakes(dt) {
       sources.push({
         x: e.position.x, y: e.position.y, z: e.position.z,
         vx: v.x, vy: v.y, vz: v.z,
-        str: 0.50, radius: 280,
+        str: 0.78, radius: 360,
       });
     }
   }
@@ -9727,7 +9762,7 @@ function updateBCSWakes(dt) {
       sources.push({
         x: p.position.x, y: p.position.y, z: p.position.z,
         vx: v.x, vy: v.y, vz: v.z,
-        str: 0.75, radius: 220,
+        str: 0.90, radius: 260,
       });
       pCount++;
     }
@@ -9784,9 +9819,14 @@ function updateBCSWakes(dt) {
           if (cd2 < cR2 && cd2 > 1) {
             const cd = Math.sqrt(cd2);
             const cAtten = 1.0 - cd / cR;
-            // 320 units/s² peak pull at source center, scales by source
-            // strength + linear distance falloff + dt.
-            const accel = 320 * cAtten * s.str * dt;
+            // (v15a 2026-05-10 speed-gated) Cloud-center pull only fires
+            // when the source is moving fast enough to create a wake.
+            // Stationary / slow ships no longer magnetize clouds toward
+            // them ; only ships at-speed drag clouds along.
+            const _sVMag = Math.sqrt(s.vx * s.vx + s.vy * s.vy + s.vz * s.vz);
+            const _speedScale = _sVMag <= 100 ? 0 : Math.min(1, (_sVMag - 100) / 150);
+            if (_speedScale <= 0) continue;
+            const accel = 480 * cAtten * s.str * dt * _speedScale;
             const inv = 1.0 / cd;
             p.velocity.x += cdx * inv * accel;
             p.velocity.y += cdy * inv * accel;
@@ -18676,9 +18716,10 @@ function _makeAtomFractalMaterial(baseColor) {
       '  // Fresnel rim glow so the atom edges read against dark bgs.',
       '  vec3 V = normalize(cameraPosition - vWorldPos);',
       '  float fres = pow(1.0 - max(0.0, dot(normalize(vNormal), V)), 2.5);',
-      // (v14e tune) Subtler rim ; was 0.8, now 0.5 so cluster color
-      // doesn't dominate the silhouette.
-      '  vec3 rim = uBaseColor * fres * 0.5;',
+      // (v15a 2026-05-10) Rim glow halved from 0.5 to 0.22 — less bloom
+      // contribution from rock silhouettes so the clouds and weapon FX
+      // can stand out without competing with the rock's edge glow.
+      '  vec3 rim = uBaseColor * fres * 0.22;',
       '  // Rock texture modulation. Two scales of FBM:',
       '  //   lowFreq darkens crevices (large irregular zones)',
       '  //   highFreq adds fine surface grain',
@@ -18808,15 +18849,18 @@ class ClusterObstacle {
     // rock, lightness lifted toward smoke. Slight per-cloud jitter on
     // both axes so adjacent atoms don't look uniform.
     const cloudColor = _smokeColorFromRock(this.baseColor);
-    const radius = (child.scale || child.radius || 20) * 2.8;
+    // (v15a 2026-05-10) Denser cluster smoke. Radius bumped 2.8 → 3.2 so
+    // gas envelops the atom more visibly, sprite count 13 → 17 so the
+    // body of the cloud reads thicker, alpha up from 0.75 to 0.80.
+    const radius = (child.scale || child.radius || 20) * 3.2;
     const cloud = new GasCloud(billboardCloudSystem, child.position, {
       boundsRadius:   radius,
       spriteScale:    radius * 1.55,
       spriteScaleVar: 0.50,
-      alpha:          0.75,
+      alpha:          0.80,
       color:          cloudColor,
       colorJitter:    0.14,
-      segments:       13,
+      segments:       17,
     });
     child._atomSmoke = cloud;
   }
@@ -18966,21 +19010,19 @@ class ClusterObstacle {
 
   update(dt) {
     if (!this.alive) {
-      // (v8_2a) Empty cluster sites (all children destroyed) keep crackling
-      // with lightning at the original cluster position — the energy that
-      // held the cluster together visibly persists for a few seconds, then
-      // dissipates.
-      // (v15a 2026-05-10 fix) Added a hard 6-second timeout from cluster
-      // death. Without this, every destroyed cluster permanently fired
-      // arcs at its old position for the rest of the match ; after several
-      // rocks were blown up the map looked like a maze of "stuck"
-      // lightning. Now arcs taper off via _ghostArcAge ramping the recharge
-      // interval up, then stop entirely.
+      // (v15a 2026-05-10) Ghost arcs DISABLED. Rocks don't make lightning
+      // on their own — only clouds do. The chemistry between drifting
+      // clouds and nearby clusters still produces sparse crackles (handled
+      // in updateGasChemistry), so destroyed cluster sites with leftover
+      // cloud activity still get a little flicker ; bare rock fields
+      // stay silent. Old ghost-arc code preserved below the early-return
+      // for reference but never runs.
+      return;
+      // ---- unreachable (kept for reference) ----
       if (this._ghostArcAge == null) this._ghostArcAge = 0;
       this._ghostArcAge += dt;
       const GHOST_ARC_DURATION = 6.0;
       if (this._ghostArcAge >= GHOST_ARC_DURATION) {
-        // Done crackling ; cluster site is now silent.
         return;
       }
       if (typeof spawnLightningBolt === 'function' &&
@@ -18991,9 +19033,6 @@ class ClusterObstacle {
           if (this._ghostArcTimer == null) this._ghostArcTimer = Math.random() * 0.8;
           this._ghostArcTimer -= dt;
           if (this._ghostArcTimer <= 0) {
-            // Recharge gradually slows over the 6-second window so arcs
-            // taper off naturally instead of cutting out abruptly. At age 0
-            // : ~0.5-1.3 s recharge ; at age 6 : ~1.5-3 s recharge.
             const _ageFrac = this._ghostArcAge / GHOST_ARC_DURATION;
             const _rechargeScale = 1 + _ageFrac * 1.5;
             this._ghostArcTimer = (0.50 + Math.random() * 0.80) * _rechargeScale;
@@ -19285,7 +19324,8 @@ class ClusterObstacle {
         if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem &&
             typeof GasCloud === 'function' &&
             game && game.detachedGasPockets) {
-          const _spawnN = 2 + Math.floor(Math.random() * 3); // 2..4
+          // (v15a 2026-05-10) Denser shatter spawn : 4..6 instead of 2..4.
+          const _spawnN = 4 + Math.floor(Math.random() * 3); // 4..6
           for (let _k = 0; _k < _spawnN; _k++) {
             const _theta = Math.random() * Math.PI * 2;
             const _phi   = Math.acos(2 * Math.random() - 1);
@@ -19316,10 +19356,10 @@ class ClusterObstacle {
               boundsRadius:   _size,
               spriteScale:    _size * 1.55,
               spriteScaleVar: 0.50,
-              alpha:          0.75,
+              alpha:          0.80,
               color:          _cloudColor,
               colorJitter:    0.14,
-              segments:       13,
+              segments:       16,
             });
             game.detachedGasPockets.push({ gasCloud: _cloud, velocity: _drift });
           }
@@ -19593,7 +19633,8 @@ function _spawnBasinClouds() {
     // sink ~10% more from wall gravity, sprite radius ≈ boundsRadius.
     const maxSize = sphere.r * (1 - poolDepth - 0.18);
     const minSize = Math.min(40, maxSize * 0.6);
-    const numClouds = 8 + Math.floor(Math.random() * 4);  // 8-11 per basin
+    // (v15a 2026-05-10) Denser basin : 12-16 clouds (was 8-11).
+    const numClouds = 12 + Math.floor(Math.random() * 5);  // 12-16 per basin
     for (let i = 0; i < numClouds; i++) {
       const ang = Math.random() * Math.PI * 2;
       const rho = Math.sqrt(Math.random()) * poolR;
@@ -19620,7 +19661,8 @@ function _spawnBasinClouds() {
         alpha:          0.85,
         color:          color,
         colorJitter:    0.20,
-        segments:       10,
+        // (v15a 2026-05-10) Denser basin clouds : 12 sprites (was 10).
+        segments:       12,
       });
       const vel = new THREE.Vector3(
         (Math.random() - 0.5) * 10,
@@ -19802,10 +19844,17 @@ function _applyCloudAttraction(dt) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato()) return;
   const pockets = game.detachedGasPockets;
   if (!pockets || pockets.length < 2) return;
-  const ATTRACT_STRENGTH   = 10;   // peak attraction (units/sec²) — gentle
-  const REPULSION_STRENGTH = 38;   // close-range push — stronger so clouds don't overlap
-  const TANGENT_DAMP_RATE  = 3.0;  // per-second tangential damping factor
-  const MAX_DAMP_PER_FRAME = 0.35; // clamp so low-FPS frames don't over-damp
+  const ATTRACT_STRENGTH   = 10;
+  const REPULSION_STRENGTH = 38;
+  const TANGENT_DAMP_RATE  = 3.0;
+  const MAX_DAMP_PER_FRAME = 0.35;
+  // (v15a 2026-05-10) Reset lattice-neighbor counts. Each pocket counts
+  // how many in-range neighbors it has this frame ; the gas chemistry
+  // pass uses this to decide between sparse single-bolt lightning
+  // (isolated / pair) and dense bigger lightning (3+ neighbors = lattice).
+  for (let i = 0; i < pockets.length; i++) {
+    if (pockets[i]) pockets[i]._latticeNeighbors = 0;
+  }
   for (let i = 0; i < pockets.length; i++) {
     const a = pockets[i];
     if (!a || !a.gasCloud || !a.velocity) continue;
@@ -19829,10 +19878,14 @@ function _applyCloudAttraction(dt) {
       // clouds seeking each other from across rooms ; that produced a
       // single dense super-cluster instead of natural local lattices.
       const equilibriumD = minD * 2.0;
-      const range = minD * 3.0;
+      const range = minD * 2.5;
       if (d2 > range * range) continue;
       const d = Math.sqrt(d2);
       const inv = 1 / d;
+      // Both clouds in mutual lattice range — bump each other's neighbor
+      // count for the chemistry-pass decision below.
+      a._latticeNeighbors = (a._latticeNeighbors || 0) + 1;
+      b._latticeNeighbors = (b._latticeNeighbors || 0) + 1;
       // (v15a 2026-05-10) Speed-based force reduction. When either cloud
       // is moving fast (e.g. caught in a projectile / ship wake), reduce
       // the attractive force and tangential damping so the wake can break
@@ -20131,7 +20184,27 @@ function updateGasChemistry(dt) {
       const intensity = 1.0 + (1.0 - dist / GAS_REACT_RADIUS) * 1.6;
       // Spark fires only off pocket A's timer (one spark per pair attempt).
       if (a._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
-        spawnLightningBolt(ap, bp, GAS_ARC_COLOR, 0.10, 1, 1.0);
+        // (v15a 2026-05-10) Big-lattice lightning. When both members of
+        // the pair are part of a dense lattice (each has 2+ in-range
+        // neighbors counted by _applyCloudAttraction), spawn a thicker,
+        // brighter, multi-branch bolt — the kind of lightning you'd
+        // expect when many charged clouds are crammed together. Sparse
+        // pairs (drifting alone) still get the original tiny crackle.
+        const aN = a._latticeNeighbors || 0;
+        const bN = b._latticeNeighbors || 0;
+        const isLattice = (aN >= 2 && bN >= 2);
+        if (isLattice) {
+          // Scale lightning intensity with how dense the lattice is.
+          const denseFrac = Math.min(1, (Math.min(aN, bN) - 1) / 4);  // 0 at 2, 1 at 6+
+          const life      = 0.18 + denseFrac * 0.22;            // 0.18 - 0.40 s
+          const branches  = 1 + Math.floor(denseFrac * 3);      // 1 - 4
+          const thickness = 1.4 + denseFrac * 1.8;              // 1.4 - 3.2
+          // Whiter / brighter as density grows.
+          const col = denseFrac > 0.5 ? 0xeef0ff : 0xc8d4ee;
+          spawnLightningBolt(ap, bp, col, life, branches, thickness);
+        } else {
+          spawnLightningBolt(ap, bp, GAS_ARC_COLOR, 0.10, 1, 1.0);
+        }
         a._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
       }
     }
