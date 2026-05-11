@@ -9257,6 +9257,15 @@ class BillboardCloudSystem {
     this._positions[i3 + 2] = z;
     this._iPos.needsUpdate = true;
   }
+
+  // (v15a 2026-05-10) Per-slot alpha update only. Used by GasCloud
+  // fade-out when a fragment cloud is dying. Cheaper than setSlot
+  // because it only marks the alpha buffer dirty.
+  setSlotAlpha(idx, alpha) {
+    if (idx < 0 || idx >= this.maxSlots) return;
+    this._alphas[idx] = alpha;
+    this._iAlp.needsUpdate = true;
+  }
 }
 
 // (v14e) GasCloud ; one cluster of N billboard sprites attached to an atom
@@ -9340,14 +9349,32 @@ class GasCloud {
     this.slots.length = 0;
   }
 
-  // (v14e wakes v2) Magnetic wake : combines a pull-toward-source impulse
-  // (gas wants to hug the source) with a smaller velocity-drag impulse
-  // (gas inherits some of the source's motion, so it trails along behind
-  // moving sources). Both attenuate linearly with distance to the source.
-  // tickWake(dt) decays wakeOff back toward zero so the gas settles after
-  // the source leaves.
+  // (v15a 2026-05-10 wake rework) Three-component fluid-like wake :
+  //   (1) Tube push : sprites NEAR the source's flight path get shoved
+  //       PERPENDICULAR to that path (outward). This is what creates the
+  //       visible "tube cut through gas" wake when a ship flies through.
+  //       Scales with source speed so fast projectiles cut a sharper wake
+  //       than a stationary one.
+  //   (2) Velocity drag : sprites inherit some of the source's motion
+  //       and get carried along behind it. This is what makes gas "follow"
+  //       the trajectory of passing objects.
+  //   (3) Weak magnetic pull : small "tug" toward the source, mostly
+  //       cosmetic so stationary sources still nudge nearby gas.
+  // Previous v14e version had pull=95 dominant + drag=0.015 negligible
+  // + decay=3/s aggressive, which read as ~10 units of deflection on
+  // 80-unit clouds — barely visible. New numbers push the visible
+  // deflection up to ~30-50 units (visible trail) with 1.5/s decay
+  // so the wake lingers ~2 sec after the source passes.
   applyWake(srcX, srcY, srcZ, velX, velY, velZ, strength, radius, dt) {
     const r2 = radius * radius;
+    // Precompute source motion magnitude + unit direction for tube push.
+    const vMag2 = velX*velX + velY*velY + velZ*velZ;
+    const vMag = vMag2 > 1 ? Math.sqrt(vMag2) : 0;
+    const idirX = vMag > 0 ? velX / vMag : 0;
+    const idirY = vMag > 0 ? velY / vMag : 0;
+    const idirZ = vMag > 0 ? velZ / vMag : 0;
+    const maxOff = radius * 0.6;  // sprite can't drift past 60% of wake radius
+    const maxOff2 = maxOff * maxOff;
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       const sx = this.position.x + s.off.x + s.wakeOff.x;
@@ -9356,37 +9383,71 @@ class GasCloud {
       const dx = sx - srcX, dy = sy - srcY, dz = sz - srcZ;
       const d2 = dx * dx + dy * dy + dz * dz;
       if (d2 > r2) continue;
-      const d = Math.sqrt(d2);
+      const d = d2 > 0.0001 ? Math.sqrt(d2) : 0.0001;
       // Linear falloff : 1 at center, 0 at radius edge.
       const atten = 1.0 - d / radius;
-      // (1) Magnetic pull is now the dominant component. The previous
-      // velocity-drag mix was pushing sprites AHEAD of the source (in
-      // its flight direction), which read as "gas shoved away" instead
-      // of "gas trailing behind." Pure pull means sprites chase the
-      // source's CURRENT position : as the source moves through and
-      // past, sprites track it for a moment, then settle. Net effect :
-      // gas trails behind moving objects.
-      if (d > 0.001) {
-        const pullSpeed = 95.0 * atten * strength * dt;
-        const invD = 1.0 / d;
-        s.wakeOff.x -= dx * invD * pullSpeed;
-        s.wakeOff.y -= dy * invD * pullSpeed;
-        s.wakeOff.z -= dz * invD * pullSpeed;
-      }
-      // (2) Velocity drag : tiny weight, just a subtle nudge in source
-      // flight direction. Mostly off ; pull does the heavy lifting.
-      const dragK = 0.015 * atten * strength * dt;
+      // (1) Velocity drag : sprite gets carried along in source's motion.
+      // 20x stronger than v14e so the "trail behind" effect is actually
+      // visible. At str=0.6, vel=400, atten=0.5, dt=0.016 :
+      //   drag = 0.30 * 0.5 * 0.6 * 0.016 = 1.4e-3 per frame
+      //   ⇒ wakeOff += vel * 1.4e-3 = 0.58 units/frame in source direction
+      //   ⇒ over 0.5 s sustained = ~17 units. Settled equilibrium with
+      //   1.5/s decay is ~40 units. Visible.
+      const dragK = 0.30 * atten * strength * dt;
       s.wakeOff.x += velX * dragK;
       s.wakeOff.y += velY * dragK;
       s.wakeOff.z += velZ * dragK;
+      // (2) Tube push : if source has significant velocity, shove the
+      // sprite perpendicular to the source's flight path. This is what
+      // makes the wake visible as a "tube" carved through the cloud.
+      if (vMag > 1) {
+        // Project (sprite - source) onto unit velocity, subtract to get
+        // the perpendicular component — points from source's path to sprite.
+        const dot = dx * idirX + dy * idirY + dz * idirZ;
+        const perpX = dx - dot * idirX;
+        const perpY = dy - dot * idirY;
+        const perpZ = dz - dot * idirZ;
+        const perp2 = perpX*perpX + perpY*perpY + perpZ*perpZ;
+        if (perp2 > 0.01) {
+          const invPerp = 1.0 / Math.sqrt(perp2);
+          // Scale with source speed so faster projectiles cut sharper wakes.
+          // Cap velMag contribution so a hyperspeed projectile doesn't
+          // blow up the wake. At vMag=400, str=0.6, atten=0.5, dt=0.016 :
+          //   tubeStr = 0.04 * 0.5 * 0.6 * 400 * 0.016 = 0.077 per frame
+          //   ⇒ ~1.3 units/frame outward in perp direction. Over 0.3 s
+          //   close-approach = ~12 units lateral. Visible as a tube.
+          const tubeStr = 0.04 * atten * strength * Math.min(vMag, 1200) * dt;
+          s.wakeOff.x += perpX * invPerp * tubeStr;
+          s.wakeOff.y += perpY * invPerp * tubeStr;
+          s.wakeOff.z += perpZ * invPerp * tubeStr;
+        }
+      }
+      // (3) Weak magnetic pull (reduced from v14e's 95 → 25). Keeps
+      // stationary sources subtly tugging gas. Won't dominate the drag +
+      // tube effects above.
+      const pullSpeed = 25.0 * atten * strength * dt;
+      const invD = 1.0 / d;
+      s.wakeOff.x -= dx * invD * pullSpeed;
+      s.wakeOff.y -= dy * invD * pullSpeed;
+      s.wakeOff.z -= dz * invD * pullSpeed;
+      // Clamp total wake offset so a sprite can't escape its cloud.
+      const woMag2 = s.wakeOff.x * s.wakeOff.x + s.wakeOff.y * s.wakeOff.y + s.wakeOff.z * s.wakeOff.z;
+      if (woMag2 > maxOff2) {
+        const scale = maxOff / Math.sqrt(woMag2);
+        s.wakeOff.x *= scale;
+        s.wakeOff.y *= scale;
+        s.wakeOff.z *= scale;
+      }
     }
   }
 
-  // (v14e wakes) Decay wakeOffs back toward zero each frame and re-write
-  // slot positions to BCS so the gas visibly settles after a wake passes.
-  // exp(-3*dt) per frame settles a wake in roughly 1 second.
+  // (v15a) Decay wakeOffs back toward zero each frame and re-write slot
+  // positions to BCS so the gas visibly settles after a wake passes.
+  // Slower decay (1.5/s vs v14e's 3.0/s) means the wake lingers ~2 sec
+  // after the source leaves, instead of settling in ~1 sec. Lets the
+  // trail-behind effect actually read.
   tickWake(dt) {
-    const decay = Math.exp(-3.0 * dt);
+    const decay = Math.exp(-1.5 * dt);
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       s.wakeOff.x *= decay;
@@ -9396,6 +9457,106 @@ class GasCloud {
         this.position.x + s.off.x + s.wakeOff.x,
         this.position.y + s.off.y + s.wakeOff.y,
         this.position.z + s.off.z + s.wakeOff.z);
+    }
+  }
+
+  // (v15a 2026-05-10) Fade the cloud uniformly by multiplying every slot's
+  // stored alpha by `opacityScale`. Used by the fragmentation system to
+  // fade dying fragment clouds before disposal. Cheap : per-slot setSlotAlpha
+  // only marks the alpha buffer dirty (not position/scale/color).
+  setOpacity(opacityScale) {
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      this.bcs.setSlotAlpha(s.idx, s.alpha * opacityScale);
+    }
+  }
+
+  // (v15a 2026-05-10 wall-spread, retained as utility) Apply continuous
+  // per-sprite dispersion along the wall surface. Currently unused (the
+  // wall-collision path now fragments clouds via spawnFragmentClouds
+  // instead of dispersing) but kept available for callers that want a
+  // softer "squish against wall" effect.
+  spreadAgainstWall(nx, ny, nz, dt) {
+    const spread = 50 * dt;  // base lateral push per second
+    const maxOff = this.boundsRadius * 1.4;
+    const maxOff2 = maxOff * maxOff;
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      // Sprite's offset relative to cloud center.
+      const ox = s.off.x + s.wakeOff.x;
+      const oy = s.off.y + s.wakeOff.y;
+      const oz = s.off.z + s.wakeOff.z;
+      // How far is the sprite along the wall normal (positive = wall side).
+      const dot = ox * nx + oy * ny + oz * nz;
+      // Sprites on the wall-side of the cloud center spread harder.
+      // Bias : 0 at far side, 1 at center, 1.5 at wall side.
+      const sideBias = 1.0 + Math.max(-1, Math.min(0.5, dot / this.boundsRadius));
+      // Tangent component of offset (in the plane of the wall).
+      const tx = ox - dot * nx;
+      const ty = oy - dot * ny;
+      const tz = oz - dot * nz;
+      const tLen2 = tx * tx + ty * ty + tz * tz;
+      if (tLen2 > 0.04) {
+        const invT = 1.0 / Math.sqrt(tLen2);
+        s.wakeOff.x += tx * invT * spread * sideBias;
+        s.wakeOff.y += ty * invT * spread * sideBias;
+        s.wakeOff.z += tz * invT * spread * sideBias;
+      }
+      // Push sprites away from the wall surface a touch so they stack
+      // ON the cloud body side, not piled into the wall.
+      s.wakeOff.x -= nx * spread * 0.2 * sideBias;
+      s.wakeOff.y -= ny * spread * 0.2 * sideBias;
+      s.wakeOff.z -= nz * spread * 0.2 * sideBias;
+      // Clamp so sprites don't fly arbitrarily far.
+      const woMag2 = s.wakeOff.x * s.wakeOff.x + s.wakeOff.y * s.wakeOff.y + s.wakeOff.z * s.wakeOff.z;
+      if (woMag2 > maxOff2) {
+        const scale = maxOff / Math.sqrt(woMag2);
+        s.wakeOff.x *= scale;
+        s.wakeOff.y *= scale;
+        s.wakeOff.z *= scale;
+      }
+    }
+  }
+
+  // (v15a 2026-05-10) One-shot splat impulse fired the moment the cloud
+  // first impacts a wall. Bigger lateral push than spreadAgainstWall,
+  // plus per-sprite random jitter so the splat has chaotic spray instead
+  // of a coherent flop. impactVel is the cloud's velocity component into
+  // the wall (units/sec) ; harder impact → bigger splash.
+  splatAgainstWall(nx, ny, nz, impactVel) {
+    // Cap so a hyperspeed gas pocket doesn't fly apart.
+    const impulse = Math.min(impactVel, 600) * 0.35;
+    const jitter = impulse * 0.25;
+    const maxOff = this.boundsRadius * 1.4;
+    const maxOff2 = maxOff * maxOff;
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      const ox = s.off.x + s.wakeOff.x;
+      const oy = s.off.y + s.wakeOff.y;
+      const oz = s.off.z + s.wakeOff.z;
+      const dot = ox * nx + oy * ny + oz * nz;
+      const tx = ox - dot * nx;
+      const ty = oy - dot * ny;
+      const tz = oz - dot * nz;
+      const tLen2 = tx * tx + ty * ty + tz * tz;
+      if (tLen2 > 0.04) {
+        const invT = 1.0 / Math.sqrt(tLen2);
+        s.wakeOff.x += tx * invT * impulse;
+        s.wakeOff.y += ty * invT * impulse;
+        s.wakeOff.z += tz * invT * impulse;
+      }
+      // Per-sprite random kicker in any direction — turns the splat into
+      // a chaotic spray instead of a coordinated flower opening.
+      s.wakeOff.x += (Math.random() - 0.5) * jitter;
+      s.wakeOff.y += (Math.random() - 0.5) * jitter;
+      s.wakeOff.z += (Math.random() - 0.5) * jitter;
+      const woMag2 = s.wakeOff.x * s.wakeOff.x + s.wakeOff.y * s.wakeOff.y + s.wakeOff.z * s.wakeOff.z;
+      if (woMag2 > maxOff2) {
+        const scale = maxOff / Math.sqrt(woMag2);
+        s.wakeOff.x *= scale;
+        s.wakeOff.y *= scale;
+        s.wakeOff.z *= scale;
+      }
     }
   }
 }
@@ -9425,12 +9586,18 @@ function updateBCSWakes(dt) {
   // previous `player.alive` check was always false (undefined), which
   // meant the local ship was NEVER pushed as a wake source ; clouds
   // followed missiles fine but never reacted to the player flying past.
+  // (v15a 2026-05-10) Source strengths + radii bumped to feed the new
+  // wake math (drag + tube push) with bigger impulses. Ships and
+  // projectiles now carve a visible wake through gas instead of a
+  // subtle wiggle. Radii grown so the wake "reaches" more of the cloud
+  // around a passing object — same wake intensity at distance, just
+  // wider coverage.
   if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
       player.position && player.velocity) {
     sources.push({
       x: player.position.x, y: player.position.y, z: player.position.z,
       vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
-      str: 0.30, radius: 260,
+      str: 0.60, radius: 320,
     });
   }
   if (game.entities) {
@@ -9441,7 +9608,7 @@ function updateBCSWakes(dt) {
       sources.push({
         x: e.position.x, y: e.position.y, z: e.position.z,
         vx: v.x, vy: v.y, vz: v.z,
-        str: 0.24, radius: 220,
+        str: 0.50, radius: 280,
       });
     }
   }
@@ -9456,7 +9623,7 @@ function updateBCSWakes(dt) {
       sources.push({
         x: p.position.x, y: p.position.y, z: p.position.z,
         vx: v.x, vy: v.y, vz: v.z,
-        str: 0.36, radius: 170,
+        str: 0.75, radius: 220,
       });
       pCount++;
     }
@@ -19136,14 +19303,125 @@ function spawnDynamicObjects(rooms) {
 // (v14d Phase 4) Drift detached gas pockets. Each frame, advance their
 // position by their velocity and apply a slight drag so they slow over
 // time without coming to a hard stop. (Phase 2) Wall collision: query the
-// world SDF at each pocket's position ; if too close to a wall, push the
-// pocket inward along the SDF gradient and damp velocity component going
-// into the wall, so gas can't escape playable space.
+// world SDF at each pocket's position ; if too close to a wall, fragment
+// the pocket into 6 mini-clouds that spread in the wall's tangent plane.
+// 5 fragments fade and dispose ; 1 survives so the global cloud count
+// stays constant (we replace 1 with 6, then 5 vanish, leaving 1).
 const _gasSDFNormal = new THREE.Vector3(); // scratch for sdfNormal
+
+// (v15a 2026-05-10 fragmentation) Replace a pocket that just hit a wall
+// with 6 mini-clouds that spread radially in the wall's tangent plane,
+// with a slight back-bounce along the inward normal. Inherits the parent's
+// color so the visual identity reads as "shattered piece of the same gas".
+// The first 5 are flagged with _fadeLife so they die over ~1.5 seconds ;
+// the 6th has no fade so it persists as the surviving fragment. Pushes
+// new children to game.detachedGasPockets ; caller is responsible for
+// removing the parent and disposing its GasCloud.
+function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
+  if (!parentCloud || typeof billboardCloudSystem === 'undefined') return;
+  const cx = parentCloud.position.x;
+  const cy = parentCloud.position.y;
+  const cz = parentCloud.position.z;
+  const parentR = parentCloud.boundsRadius || 40;
+  const parentColor = parentCloud.color || new THREE.Color(0.4, 0.4, 0.4);
+  // Build an orthonormal basis (U, V) for the wall's tangent plane.
+  // U starts as any axis not parallel to N, then Gram-Schmidted against N.
+  // V = N × U.
+  let ux = (Math.abs(nx) > 0.9) ? 0 : 1;
+  let uy = (Math.abs(nx) > 0.9) ? 1 : 0;
+  let uz = 0;
+  const ud = ux * nx + uy * ny + uz * nz;
+  ux -= ud * nx; uy -= ud * ny; uz -= ud * nz;
+  const ul = 1.0 / Math.max(1e-4, Math.sqrt(ux*ux + uy*uy + uz*uz));
+  ux *= ul; uy *= ul; uz *= ul;
+  const vx = ny * uz - nz * uy;
+  const vy = nz * ux - nx * uz;
+  const vz = nx * uy - ny * ux;
+  const NUM_FRAGS = 6;
+  const childR = parentR * 0.50;
+  // Spread speed scales with impact (faster wall hit → faster splash) but
+  // capped so a hyperspeed pocket doesn't fling fragments across the map.
+  const spreadSpeed = Math.min(Math.max(impactVel * 0.7, 60), 220);
+  // Push children slightly off the wall surface so they don't immediately
+  // re-collide and trigger cascade fragmentation. _isFragment flag also
+  // disables fragmenting for these children — they bounce normally if
+  // they hit a wall.
+  const startOffset = parentR * 1.1;
+  const startAngle = Math.random() * 6.28318;
+  for (let i = 0; i < NUM_FRAGS; i++) {
+    const angle = startAngle + i * (6.28318 / NUM_FRAGS) + (Math.random() - 0.5) * 0.5;
+    const ca = Math.cos(angle), sa = Math.sin(angle);
+    // Tangent direction in the wall plane.
+    const tdx = ca * ux + sa * vx;
+    const tdy = ca * uy + sa * vy;
+    const tdz = ca * uz + sa * vz;
+    // Mix in inward normal for slight back-bounce (-N points into playable
+    // space, since N points outward from playable).
+    const mix = 0.7;  // 70% tangent + 30% inward bounce
+    const fdx = tdx * mix - nx * (1 - mix);
+    const fdy = tdy * mix - ny * (1 - mix);
+    const fdz = tdz * mix - nz * (1 - mix);
+    const flen = 1.0 / Math.max(1e-4, Math.sqrt(fdx*fdx + fdy*fdy + fdz*fdz));
+    const ndx = fdx * flen, ndy = fdy * flen, ndz = fdz * flen;
+    // Spawn position : parent center, kicked back into playable along the
+    // inward normal, plus a small offset in the fragment's spread direction
+    // so they don't all stack on top of each other.
+    const pos = new THREE.Vector3(
+      cx - nx * startOffset + ndx * (parentR * 0.35),
+      cy - ny * startOffset + ndy * (parentR * 0.35),
+      cz - nz * startOffset + ndz * (parentR * 0.35)
+    );
+    const vmag = spreadSpeed * (0.7 + Math.random() * 0.6);
+    const vel = new THREE.Vector3(ndx * vmag, ndy * vmag, ndz * vmag);
+    const child = new GasCloud(billboardCloudSystem, pos, {
+      boundsRadius:   childR,
+      spriteScale:    childR * 1.55,
+      spriteScaleVar: 0.50,
+      alpha:          0.70,
+      color:          parentColor,
+      colorJitter:    0.14,
+      segments:       7,  // fewer sprites for "mini" feel
+    });
+    const pocket = {
+      gasCloud: child,
+      velocity: vel,
+      _isFragment: true,  // prevents recursive fragmentation
+    };
+    // First 5 fragments fade and dispose ; 6th (last) survives so the
+    // total live-cloud count returns to its pre-impact value.
+    if (i < NUM_FRAGS - 1) {
+      pocket._fadeLife = 1.3 + Math.random() * 0.5;
+      pocket._fadeAge = 0;
+    }
+    game.detachedGasPockets.push(pocket);
+  }
+}
+
 function updateDetachedGasPockets(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
-  for (const p of game.detachedGasPockets) {
+  // Reverse iteration so we can splice fading or fragmented pockets out
+  // during the loop without skipping any siblings. New fragment children
+  // are pushed to the end of the array, past our current index, and get
+  // picked up next frame.
+  for (let i = game.detachedGasPockets.length - 1; i >= 0; i--) {
+    const p = game.detachedGasPockets[i];
     if (!p) continue;
+
+    // (v15a) Fade-out aging for fragment clouds with _fadeLife. Cloud
+    // opacity ramps 1 → 0 over the life ; disposed + removed at end.
+    if (p._fadeLife) {
+      p._fadeAge += dt;
+      if (p._fadeAge >= p._fadeLife) {
+        if (p.gasCloud && typeof p.gasCloud.dispose === 'function') p.gasCloud.dispose();
+        game.detachedGasPockets.splice(i, 1);
+        continue;
+      }
+      const fadeFrac = 1 - p._fadeAge / p._fadeLife;
+      if (p.gasCloud && typeof p.gasCloud.setOpacity === 'function') {
+        p.gasCloud.setOpacity(fadeFrac);
+      }
+    }
+
     // (v14e) p.gasCloud stores a GasCloud (swarm of billboards). Drift the
     // cloud's center, then push that center to all owned billboards via
     // setPosition. Legacy entries that still have p.mesh (mesh-based
@@ -19155,13 +19433,14 @@ function updateDetachedGasPockets(dt) {
     // settles, which keeps the map alive without ping-ponging.
     p.velocity.multiplyScalar(Math.pow(0.97, dt));
 
-    // (Phase 2) Wall repulsion via worldSDF. SDF semantics: negative =
-    // inside playable space, positive = inside wall / outside playable.
+    // (Phase 2 / v15a fragmentation) Wall repulsion via worldSDF. SDF
+    // semantics: negative = inside playable space, positive = inside wall.
     // sdfNormal returns the outward gradient. Soft buffer = ~40% of the
-    // cloud's bounds radius, so gas stops a comfortable distance before
-    // clipping the wall.
+    // cloud's bounds radius. On meaningful impact (vDotN > threshold), a
+    // non-fragment pocket fragments into 6 mini-clouds and is removed.
+    // Fragments (_isFragment=true) bounce normally without fragmenting,
+    // to prevent cascade explosions.
     if (typeof worldSDF !== 'function' || typeof sdfNormal !== 'function') {
-      // Even without SDF, push the GasCloud's billboards to the new center.
       if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
       continue;
     }
@@ -19170,15 +19449,27 @@ function updateDetachedGasPockets(dt) {
     const buffer = radius * 0.4;
     if (d > -buffer) {
       sdfNormal(center.x, center.y, center.z, _gasSDFNormal);
+      const vDotN = p.velocity.x * _gasSDFNormal.x +
+                    p.velocity.y * _gasSDFNormal.y +
+                    p.velocity.z * _gasSDFNormal.z;
+      // Real impact: non-fragment pocket moving fast into the wall →
+      // fragment it. Threshold prevents fragmenting on slow drifts /
+      // grazes (which would generate noise).
+      const IMPACT_VEL_THRESHOLD = 80;
+      if (!p._isFragment && vDotN > IMPACT_VEL_THRESHOLD) {
+        _spawnWallFragments(p.gasCloud, _gasSDFNormal.x, _gasSDFNormal.y, _gasSDFNormal.z, vDotN);
+        if (p.gasCloud && typeof p.gasCloud.dispose === 'function') p.gasCloud.dispose();
+        game.detachedGasPockets.splice(i, 1);
+        continue;
+      }
+      // Otherwise (fragment hitting wall, or slow drift contact) : rigid
+      // bounce. Same behavior as before.
       if (d > 0) {
         center.addScaledVector(_gasSDFNormal, -(d + buffer));
       } else {
         const proximity = (d + buffer) / buffer;
         center.addScaledVector(_gasSDFNormal, -proximity * dt * 60);
       }
-      const vDotN = p.velocity.x * _gasSDFNormal.x +
-                    p.velocity.y * _gasSDFNormal.y +
-                    p.velocity.z * _gasSDFNormal.z;
       if (vDotN > 0) {
         p.velocity.addScaledVector(_gasSDFNormal, -vDotN * 1.3);
       }
