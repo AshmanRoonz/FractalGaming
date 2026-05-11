@@ -50077,41 +50077,6 @@ function _lssGmapsRefinePivot() {
   grp.updateMatrixWorld(true);
   const meshes = _lssGmapsCollectLeaves(grp);
   if (meshes.length === 0) return;
-  // (v16a) Track BOTH min and max first-hit Y. min ≈ street / ground
-  // level (since a downward ray hits the first surface, low hits are
-  // streets between buildings) ; max ≈ tallest building roof. We want
-  // the level to *touch the ground at its lowest points*, so we line
-  // ext.lo up with the ground (low hits) rather than parking the
-  // tallest building just under the level (the old behavior, which
-  // pushed the city way down in dense cities and made the level feel
-  // like a flyover). Multiple concentric rings give us a robust ground
-  // estimate even if a single ray lands on a roof.
-  const rc = new THREE.Raycaster();
-  const dir = new THREE.Vector3(0, -1, 0);
-  const rings = [200, 500, 900, 1400];
-  const samplesPerRing = 12;
-  const hitYs = [];
-  let maxHitY = -Infinity;
-  for (const ringR of rings) {
-    for (let i = 0; i < samplesPerRing; i++) {
-      // Tiny per-ring phase offset so rings don't all sample the same
-      // angular slice (which can systematically miss streets if the
-      // city block grid lines up with the cardinal directions).
-      const ang = (i / samplesPerRing) * Math.PI * 2 + ringR * 0.001;
-      const o = new THREE.Vector3(Math.cos(ang) * ringR, 8000, Math.sin(ang) * ringR);
-      rc.set(o, dir);
-      rc.far = 12000;
-      try {
-        const hits = rc.intersectObjects(meshes, false);
-        if (hits.length) {
-          const y = hits[0].point.y;
-          hitYs.push(y);
-          if (y > maxHitY) maxHitY = y;
-        }
-      } catch (_) {}
-    }
-  }
-  if (hitYs.length === 0) return;
   // (v13r-3) Race-mode terrain-follow. Instead of moving the city to fit
   // the level (which leaves the level deep in cliffs / floating over
   // valleys depending on the chosen city), keep the city at its lat/lng
@@ -50124,29 +50089,79 @@ function _lssGmapsRefinePivot() {
     if (typeof _lssGmapsApplyTerrainFollow === 'function') _lssGmapsApplyTerrainFollow();
     return;
   }
-  // (v16a) Use the 10th percentile of hits as a "ground" estimate. Pure
-  // min is too aggressive (a single outlier ray that pierced into an
-  // open atrium or a low geometry seam could put the city below the
-  // ground), so we trim the bottom slightly. Tall buildings (top end of
-  // hitYs) are intentionally ignored here ; they're allowed to poke up
-  // into the level, which is the look we want.
-  hitYs.sort((a, b) => a - b);
-  const groundIdx = Math.min(hitYs.length - 1, Math.max(0, Math.floor(hitYs.length * 0.10)));
-  const groundY = hitYs[groundIdx];
-  // (v16a) Touch the ground at the level's lowest point. 5 unit pad
-  // keeps us a hair above the surface so we don't z-fight or read as
-  // submerged. Negative pad would put the level underground, which is
-  // exactly what we're trying to avoid.
-  const ext = _lssGmapsLevelExtentY();
+  // (v16a fix2) Sample terrain DIRECTLY UNDER each room and each
+  // cylinder endpoint, not in a ring around origin. The ring approach
+  // missed off-axis terrain : in mountainous areas (Switzerland test),
+  // a room ~2000 units from origin could sit over a slope hundreds of
+  // units higher than anything sampled near (0,0), and the player
+  // spawned inside the mountain. For each probe we compute "the
+  // maximum amount I can shift the city downward and still keep this
+  // room above the local ground". The MIN of those is the binding
+  // constraint ; apply it as the shift so the tightest room just
+  // grazes the ground while all others sit a bit higher.
+  const rc = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  const probes = [];
+  if (Array.isArray(game.levelSpheres)) {
+    for (const s of game.levelSpheres) {
+      probes.push({ x: s.cx, z: s.cz, bottomY: s.cy - s.r });
+    }
+  }
+  if (Array.isArray(game.levelCylinders)) {
+    for (const c of game.levelCylinders) {
+      const r = c.r || 180;
+      const loSegY = Math.min(c.ay, c.by) - r;
+      // Both endpoints + midpoint so long tunnels don't get sliced
+      // through by a ridge they happen to cross between endpoints.
+      probes.push({ x: c.ax, z: c.az, bottomY: loSegY });
+      probes.push({ x: c.bx, z: c.bz, bottomY: loSegY });
+      probes.push({ x: (c.ax + c.bx) * 0.5, z: (c.az + c.bz) * 0.5, bottomY: loSegY });
+    }
+  }
+  if (probes.length === 0) return;
+  // For each probe, find ground Y directly under it. Compute
+  // "allowedShift" = how much we can drop the city before this probe's
+  // bottom dips below local ground. The smallest allowedShift wins :
+  // applying it makes the most constrained room/tunnel touch the
+  // ground exactly, with everything else sitting higher above terrain.
+  let bindingShift = Infinity;
+  let bindingGroundY = -Infinity;
+  let bindingBottomY = 0;
+  let bindingX = 0, bindingZ = 0;
+  let nHits = 0;
+  for (const p of probes) {
+    rc.set(new THREE.Vector3(p.x, 8000, p.z), dir);
+    rc.far = 14000;
+    try {
+      const hits = rc.intersectObjects(meshes, false);
+      if (hits.length) {
+        const groundY = hits[0].point.y;
+        const allowedShift = p.bottomY - groundY;
+        if (allowedShift < bindingShift) {
+          bindingShift = allowedShift;
+          bindingGroundY = groundY;
+          bindingBottomY = p.bottomY;
+          bindingX = p.x; bindingZ = p.z;
+        }
+        nHits++;
+      }
+    } catch (_) {}
+  }
+  if (nHits === 0) return;
+  // 5 unit clearance so the lowest room hovers a hair above the
+  // ground rather than touching it (no z-fighting, no "wading"
+  // feel). Increase if the binding probe still ends up clipping
+  // into terrain after this pass.
   const clearance = 5;
-  const targetGroundY = ext.lo - clearance;
-  const shift = targetGroundY - groundY;
+  const shift = bindingShift - clearance;
   grp.position.y += shift;
-  console.log('[lss-gmaps] auto-positioned tiles : ground (p10) at world Y',
-              groundY.toFixed(0), '; tallest sample', maxHitY.toFixed(0),
-              '; level min Y', ext.lo.toFixed(0),
-              '; shifted tiles by', shift.toFixed(0),
-              '; new pivot Y', grp.position.y.toFixed(0));
+  console.log('[lss-gmaps] auto-positioned tiles : binding probe @ ('
+              + bindingX.toFixed(0) + ',' + bindingZ.toFixed(0) + ')',
+              '; terrain Y', bindingGroundY.toFixed(0),
+              '; level bottom Y', bindingBottomY.toFixed(0),
+              '; shifted by', shift.toFixed(0),
+              '; new pivot Y', grp.position.y.toFixed(0),
+              '; probes hit', nHits + '/' + probes.length);
   // (v12m patch5) Broadcast the new pivot Y so peers converge on the
   // same vertical position. Without this, each peer's refine probes
   // its own tile state and they diverge.
