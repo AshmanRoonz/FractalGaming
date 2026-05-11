@@ -11083,6 +11083,91 @@ function restoreProceduralEnvironment() {
 }
 
 // =====================================================================
+// v16a: Equirectangular skybox loader (PNG / JPG backdrops)
+// =====================================================================
+// Loads a 2:1 equirectangular image and assigns it to scene.background.
+// This is the visible backdrop that will show through 3D transparent
+// walls, distinct from setHdrEnvironment() which drives scene.environment
+// (PBR lighting on ship hulls). The two can coexist : an HDR can light
+// the scene while a PNG provides the look. Keeping them split also means
+// swapping skybox themes doesn't disturb ship reflections.
+//
+// PNGs/JPGs are LDR (low dynamic range) and use sRGB color space ; we
+// guard against the r152 colorSpace -> encoding rename like the rest of
+// the file does.
+//
+// Usage from dev console (or wire up to map themes later):
+//   setSky('green')                  // shorthand for ./skybox/green.png
+//   setSky('purple') / setSky('red')
+//   setSky('./skybox/anything.png')  // any path
+//   clearSky()                       // remove backdrop ; starfield visible alone
+//   hideStarfield() / showStarfield()
+// =====================================================================
+const _equirectSky = { texture: null, url: null, loading: false };
+
+const _skyboxPresets = {
+  green:  './skybox/green.png',
+  purple: './skybox/purple.png',
+  red:    './skybox/red.png',
+};
+
+function setEquirectangularSky(url) {
+  if (_equirectSky.loading) return;
+  _equirectSky.loading = true;
+  const loader = new THREE.TextureLoader();
+  loader.load(url, (tex) => {
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    // (v16a) match the file's existing colorSpace / encoding fallback
+    // pattern (r152 renamed encoding -> colorSpace). PNG/JPG sources
+    // are sRGB ; without this the backdrop reads dim or oversaturated
+    // depending on the renderer's outputColorSpace.
+    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace || 'srgb';
+    else tex.encoding = THREE.sRGBEncoding || 3001;
+    if (_equirectSky.texture) { try { _equirectSky.texture.dispose(); } catch (_) {} }
+    _equirectSky.texture = tex;
+    _equirectSky.url = url;
+    scene.background = tex;
+    _equirectSky.loading = false;
+    console.log('[v16a sky] equirectangular background loaded:', url);
+  }, undefined, (err) => {
+    _equirectSky.loading = false;
+    console.warn('[v16a sky] load failed (', url, ')', err && err.message);
+  });
+}
+
+function setSky(which) {
+  const url = _skyboxPresets[which] || which;
+  setEquirectangularSky(url);
+}
+
+function clearSky() {
+  if (_equirectSky.texture) { try { _equirectSky.texture.dispose(); } catch (_) {} }
+  _equirectSky.texture = null;
+  _equirectSky.url = null;
+  scene.background = null;
+}
+
+// (v16a) Toggle the procedural starfield. Useful for A/B comparing a
+// skybox alone vs a skybox + foreground stars. _starfieldPoints is set
+// inside the starfield IIFE further down in this file.
+function hideStarfield() {
+  if (typeof _starfieldPoints !== 'undefined' && _starfieldPoints) {
+    _starfieldPoints.visible = false;
+  }
+}
+function showStarfield() {
+  if (typeof _starfieldPoints !== 'undefined' && _starfieldPoints) {
+    _starfieldPoints.visible = true;
+  }
+}
+
+window.setEquirectangularSky = setEquirectangularSky;
+window.setSky                 = setSky;
+window.clearSky               = clearSky;
+window.hideStarfield          = hideStarfield;
+window.showStarfield          = showStarfield;
+
+// =====================================================================
 // v8VR: PBR uplift helper for hero ships
 // =====================================================================
 // Walks a mesh tree and promotes legacy materials (MeshBasic / MeshPhong /
@@ -12302,6 +12387,10 @@ scene.add(hemiLight);
 
 // ---- STARFIELD ----
 
+// (v16a) Module-scope handle so hideStarfield() / showStarfield() in the
+// skybox loader above can toggle visibility without walking the scene.
+let _starfieldPoints = null;
+
 (function createStarfield() {
   const geo = new THREE.BufferGeometry();
   const count = 4000;
@@ -12345,7 +12434,8 @@ scene.add(hemiLight);
     size: 6, vertexColors: true, transparent: true, opacity: 0.9,
     map: _starPointTex, alphaTest: 0.05, depthWrite: false,
   });
-  scene.add(new THREE.Points(geo, mat));
+  _starfieldPoints = new THREE.Points(geo, mat);
+  scene.add(_starfieldPoints);
 })();
 
 // ---- ARENA BOUNDARY GRID ----
