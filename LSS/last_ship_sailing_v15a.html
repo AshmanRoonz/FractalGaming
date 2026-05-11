@@ -9317,7 +9317,23 @@ class GasCloud {
       // (v14e wakes) Each slot owns a wakeOff Vector3 that wake sources
       // (ships, projectiles) push around. updateBCSWakes() decays it back
       // to zero over ~1 second so the gas settles when the source leaves.
-      this.slots.push({ idx, off, scale, alpha, wakeOff: new THREE.Vector3() });
+      // (v15a per-sprite churn) Each slot gets unique drift phase/speed/amp
+      // so individual sprites slowly oscillate within the cloud volume.
+      // Without this, the cloud read as a rigid translating blob — the
+      // shape never changed, only the position. The churn makes the cloud
+      // look ALIVE even when the cloud center is stationary, and stops
+      // it from looking "the same" frame to frame as it drifts.
+      this.slots.push({
+        idx, off, scale, alpha,
+        wakeOff: new THREE.Vector3(),
+        // Drift parameters per-axis (different phases / rates per axis so
+        // each sprite traces a wandering Lissajous path within the cloud).
+        driftPhaseX: Math.random() * 6.28318,
+        driftPhaseY: Math.random() * 6.28318,
+        driftPhaseZ: Math.random() * 6.28318,
+        driftSpeed:  0.15 + Math.random() * 0.30,
+        driftAmp:    this.boundsRadius * (0.10 + Math.random() * 0.18),
+      });
       bcs.setSlot(idx,
         this.position.x + off.x,
         this.position.y + off.y,
@@ -9329,16 +9345,25 @@ class GasCloud {
     }
   }
 
-  // Move all owned slots so they sit at this.position + offset + wakeOff.
-  // Cheap : only writes the position attribute, not scale/color/alpha.
+  // Move all owned slots so they sit at this.position + offset + wakeOff +
+  // per-sprite drift offset. Cheap : only writes the position attribute.
+  // (v15a per-sprite churn) Drift offset is a slow oscillation derived from
+  // game.time and the sprite's stored phase/speed/amp. Each sprite traces
+  // an independent wandering path within the cloud volume, so the cloud
+  // looks alive instead of like a rigid blob translating through space.
   setPosition(x, y, z) {
     this.position.set(x, y, z);
+    const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
+      const sp = s.driftSpeed;
+      const dx = Math.sin(t * sp + s.driftPhaseX) * s.driftAmp;
+      const dy = Math.sin(t * sp * 1.3 + s.driftPhaseY) * s.driftAmp * 0.55;
+      const dz = Math.sin(t * sp * 0.85 + s.driftPhaseZ) * s.driftAmp;
       this.bcs.setSlotPosition(s.idx,
-        x + s.off.x + s.wakeOff.x,
-        y + s.off.y + s.wakeOff.y,
-        z + s.off.z + s.wakeOff.z);
+        x + s.off.x + s.wakeOff.x + dx,
+        y + s.off.y + s.wakeOff.y + dy,
+        z + s.off.z + s.wakeOff.z + dz);
     }
   }
 
@@ -9448,15 +9473,22 @@ class GasCloud {
   // trail-behind effect actually read.
   tickWake(dt) {
     const decay = Math.exp(-1.5 * dt);
+    // (v15a per-sprite churn) Apply drift offset here too so wake-driven
+    // updates include the same animation as setPosition.
+    const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       s.wakeOff.x *= decay;
       s.wakeOff.y *= decay;
       s.wakeOff.z *= decay;
+      const sp = s.driftSpeed;
+      const dx = Math.sin(t * sp + s.driftPhaseX) * s.driftAmp;
+      const dy = Math.sin(t * sp * 1.3 + s.driftPhaseY) * s.driftAmp * 0.55;
+      const dz = Math.sin(t * sp * 0.85 + s.driftPhaseZ) * s.driftAmp;
       this.bcs.setSlotPosition(s.idx,
-        this.position.x + s.off.x + s.wakeOff.x,
-        this.position.y + s.off.y + s.wakeOff.y,
-        this.position.z + s.off.z + s.wakeOff.z);
+        this.position.x + s.off.x + s.wakeOff.x + dx,
+        this.position.y + s.off.y + s.wakeOff.y + dy,
+        this.position.z + s.off.z + s.wakeOff.z + dz);
     }
   }
 
@@ -9705,10 +9737,18 @@ function updateBCSWakes(dt) {
           const cdy = s.y - cloud.position.y;
           const cdz = s.z - cloud.position.z;
           const cd2 = cdx * cdx + cdy * cdy + cdz * cdz;
-          const cR2 = s.radius * s.radius;
+          // (v15a stuck-cloud fix) Effective wake range = max(source radius,
+          // cloud bounds × 0.8). Without this, a wake source had to be
+          // within its own radius (220 for projectiles) of the cloud
+          // CENTER to push it. Big clouds (radius 200+) often had projectiles
+          // flying THROUGH their sprite volume but more than 220 units
+          // from the center, so the cloud's center never got pushed —
+          // sprites would tug visually but the cloud body parked.
+          const cR = Math.max(s.radius, (cloud.boundsRadius || 40) * 0.8);
+          const cR2 = cR * cR;
           if (cd2 < cR2 && cd2 > 1) {
             const cd = Math.sqrt(cd2);
-            const cAtten = 1.0 - cd / s.radius;
+            const cAtten = 1.0 - cd / cR;
             // 320 units/s² peak pull at source center, scales by source
             // strength + linear distance falloff + dt.
             const accel = 320 * cAtten * s.str * dt;
@@ -19290,6 +19330,24 @@ class ClusterObstacle {
 }
 
 function spawnDynamicObjects(rooms) {
+  // (v15a 2026-05-10 BCS slot leak fix) Dispose every cluster child's
+  // _atomSmoke GasCloud before we drop the cluster references. Previously
+  // we only removed the scene mesh ; the gasCloud object got orphaned
+  // with its BCS slots still marked "in use". After a couple of rounds
+  // the slot pool (4096 slots) leaked enough that new clouds couldn't
+  // acquire slots → new gas clouds had no visible sprites and looked
+  // completely unreactive even though their physics still ran.
+  if (game.clusters) {
+    for (const cluster of game.clusters) {
+      if (!cluster || !cluster.children) continue;
+      for (const ch of cluster.children) {
+        if (ch && ch._atomSmoke && typeof ch._atomSmoke.dispose === 'function') {
+          ch._atomSmoke.dispose();
+          ch._atomSmoke = null;
+        }
+      }
+    }
+  }
   // Tear down existing cluster children and any standalone debris
   for (const obj of game.dynamicObjects) {
     if (obj.mesh && obj.mesh.parent) scene.remove(obj.mesh);
@@ -19335,6 +19393,129 @@ function spawnDynamicObjects(rooms) {
   for (let i = 0; i < game.clusters.length; i++) {
     game.clusters[i].netId = i;
   }
+  // (v15a basin clouds) Spawn pooled gas in spheres that don't have a
+  // tunnel draining downward from them — gas would naturally settle at
+  // the bottom of those "basin" rooms.
+  if (typeof _spawnBasinClouds === 'function') _spawnBasinClouds();
+}
+
+// (v15a 2026-05-10) Spawn pooled gas in the lower hemisphere of any sphere
+// that has no tunnel exiting downward from it. Forms a flat-ish gas layer
+// near the sphere floor (a "pool" rather than scattered puffs) by placing
+// many small clouds across the lower-curve disc area.
+//
+// Drain detection : for each cylinder, find which endpoint is closer to
+// the sphere center. If that endpoint is INSIDE the sphere AND the far
+// endpoint is below the sphere center by more than DOWN_THRESHOLD, the
+// tunnel drains downward and the sphere is skipped.
+function _spawnBasinClouds() {
+  if (!game.levelSpheres || !game.levelSpheres.length) return;
+  if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
+  if (typeof GasCloud !== 'function') return;
+  if (!game.detachedGasPockets) game.detachedGasPockets = [];
+  const cylinders = game.levelCylinders || [];
+  // (v15a revised) Angle-based drain detection : a tunnel drains the
+  // sphere only if it EXITS the sphere through the lower hemisphere at
+  // more than 30° below horizontal. Previous threshold-based check
+  // marked 18 of 19 spheres as drained on a typical level (basically
+  // any sphere with a neighbor 40+ units lower in Y). The angle check
+  // matches physical intuition : a tunnel sloping gently downward to a
+  // lower room exits through the sphere's SIDE (not bottom), so gas
+  // pooled at the very bottom can't drain through it.
+  const DRAIN_Y_FRAC = -0.5;  // -0.5 = 30° below horizontal
+  let basinCount = 0, drainCount = 0;
+  for (const sphere of game.levelSpheres) {
+    const r2 = sphere.r * sphere.r;
+    let hasDrain = false;
+    for (const cyl of cylinders) {
+      const dax = cyl.ax - sphere.cx, day = cyl.ay - sphere.cy, daz = cyl.az - sphere.cz;
+      const dbx = cyl.bx - sphere.cx, dby = cyl.by - sphere.cy, dbz = cyl.bz - sphere.cz;
+      const distA2 = dax*dax + day*day + daz*daz;
+      const distB2 = dbx*dbx + dby*dby + dbz*dbz;
+      // Pick the endpoint closer to the sphere center as the "attached" end.
+      // The exit direction is from sphere center toward the far endpoint.
+      let farDX, farDY, farDZ;
+      if (distA2 <= r2 || distA2 < distB2) {
+        // A is the closer / attached end ; B is the far end
+        farDX = dbx; farDY = dby; farDZ = dbz;
+      } else if (distB2 <= r2 || distB2 < distA2) {
+        // B is the closer / attached end ; A is the far end
+        farDX = dax; farDY = day; farDZ = daz;
+      } else {
+        continue;
+      }
+      const farLen = Math.sqrt(farDX*farDX + farDY*farDY + farDZ*farDZ);
+      if (farLen < 0.01) continue;
+      // yFrac = -1 (straight down), 0 (horizontal), +1 (straight up).
+      const yFrac = farDY / farLen;
+      if (yFrac < DRAIN_Y_FRAC) { hasDrain = true; break; }
+    }
+    if (hasDrain) { drainCount++; continue; }
+    basinCount++;
+    // Basin sphere : spawn a POOL of clouds along the lower curve. Pool
+    // is held high enough that cloud bodies (sprite radius up to ~size)
+    // stay inside the sphere — previously cloud bottoms clipped through
+    // the floor, sprites rendered inside wall geometry, invisible.
+    //
+    // Size is now CLAMPED relative to sphere radius so big spheres get
+    // bigger pools and small spheres get smaller ones. maxSize ensures
+    // sprite radius never exceeds (sphere.r - |poolY|) so the body stays
+    // contained even after wall gravity pulls the pool slightly lower.
+    const poolDepth = 0.30;                          // 30% down from center
+    const poolY = sphere.cy - sphere.r * poolDepth;
+    const poolR = sphere.r * 0.55;
+    // Cap cloud size so sprites stay inside the sphere. Cloud center can
+    // sink ~10% more from wall gravity, sprite radius ≈ boundsRadius.
+    const maxSize = sphere.r * (1 - poolDepth - 0.18);
+    const minSize = Math.min(40, maxSize * 0.6);
+    const numClouds = 8 + Math.floor(Math.random() * 4);  // 8-11 per basin
+    for (let i = 0; i < numClouds; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const rho = Math.sqrt(Math.random()) * poolR;
+      const yJitter = (Math.random() - 0.5) * sphere.r * 0.12;
+      const pos = new THREE.Vector3(
+        sphere.cx + rho * Math.cos(ang),
+        poolY + yJitter,
+        sphere.cz + rho * Math.sin(ang)
+      );
+      const size = minSize + Math.random() * (maxSize - minSize);
+      // (v15a 2026-05-10 debug brightness) Bright off-white pools so they
+      // visibly stand out against the dark wall pattern. Slight color
+      // jitter per cloud + bigger per-sprite jitter for variety.
+      const v = 0.55 + Math.random() * 0.25;
+      const color = new THREE.Color(v, v * 0.97, v * 0.92);  // very subtly warm
+      const cloud = new GasCloud(billboardCloudSystem, pos, {
+        boundsRadius:   size,
+        spriteScale:    size * 1.7,
+        spriteScaleVar: 0.50,
+        alpha:          0.85,
+        color:          color,
+        colorJitter:    0.20,
+        segments:       10,
+      });
+      const vel = new THREE.Vector3(
+        (Math.random() - 0.5) * 10,
+        (Math.random() - 0.5) * 3,
+        (Math.random() - 0.5) * 10
+      );
+      game.detachedGasPockets.push({ gasCloud: cloud, velocity: vel });
+    }
+  }
+  // Debug : log basin/drain counts so we can tell if the detection is
+  // matching the level's geometry as expected. Remove later if too noisy.
+  try {
+    console.log('[v15a basin] spheres=' + game.levelSpheres.length + ' basins=' + basinCount + ' drains=' + drainCount + ' pockets=' + game.detachedGasPockets.length);
+    // Also log first basin's first pool position for sanity-check : if it
+    // says (NaN, NaN, NaN) or somewhere way outside any sphere, we know
+    // the spawn math is broken. Should be inside a sphere's lower hemisphere.
+    if (game.detachedGasPockets.length > 0) {
+      const p = game.detachedGasPockets[0];
+      if (p && p.gasCloud && p.gasCloud.position) {
+        const pp = p.gasCloud.position;
+        console.log('[v15a basin] first pool at (' + pp.x.toFixed(0) + ', ' + pp.y.toFixed(0) + ', ' + pp.z.toFixed(0) + ') r=' + (p.gasCloud.boundsRadius|0));
+      }
+    }
+  } catch (_) {}
 }
 
 // (v14d Phase 4) Drift detached gas pockets. Each frame, advance their
@@ -19602,7 +19783,25 @@ function updateDetachedGasPockets(dt) {
                        p._driftVelocity.y * _gasSDFNormal.y +
                        p._driftVelocity.z * _gasSDFNormal.z;
         if (dvDotN > 0) {
+          // (v15a stuck-cloud fix) Preserve drift magnitude when reflecting
+          // off the wall : kill the normal component, then renormalize so
+          // the tangent component carries the full original speed. Without
+          // this, every wall contact bleeds a chunk of magnitude (e.g. drift
+          // (10,10,10) → (0,10,10) loses ~18%) ; after several contacts in
+          // different orientations a big cloud's drift decays to zero and
+          // the cloud parks. Keeping magnitude constant means the cloud
+          // always has some forward motion.
+          const origMag2 = p._driftVelocity.x * p._driftVelocity.x +
+                           p._driftVelocity.y * p._driftVelocity.y +
+                           p._driftVelocity.z * p._driftVelocity.z;
           p._driftVelocity.addScaledVector(_gasSDFNormal, -dvDotN);
+          const newMag2 = p._driftVelocity.x * p._driftVelocity.x +
+                          p._driftVelocity.y * p._driftVelocity.y +
+                          p._driftVelocity.z * p._driftVelocity.z;
+          if (newMag2 > 0.0001 && origMag2 > newMag2) {
+            const scale = Math.sqrt(origMag2 / newMag2);
+            p._driftVelocity.multiplyScalar(scale);
+          }
         }
         // (v15a stronger friction) Wall friction : when in contact, the
         // remaining tangent velocity bleeds off fast. Real particles
@@ -35124,6 +35323,15 @@ function applyWorldObjectsManifest(clusterEntries) {
     for (const ch of c.children || []) {
       if (ch.mesh && ch.mesh.parent) scene.remove(ch.mesh);
       if (ch.edgeMesh && ch.edgeMesh.parent) scene.remove(ch.edgeMesh);
+      // (v15a 2026-05-10 BCS slot leak fix) Dispose the child's atomSmoke
+      // GasCloud so its BCS slots are returned to the pool. Without this,
+      // round 2+ slowly leaked the 4096-slot pool ; new clouds couldn't
+      // get slots and looked completely unreactive on the mesh-rebuilt
+      // (MP receiver) side of the connection.
+      if (ch._atomSmoke && typeof ch._atomSmoke.dispose === 'function') {
+        ch._atomSmoke.dispose();
+        ch._atomSmoke = null;
+      }
     }
   }
   game.clusters = [];
