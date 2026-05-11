@@ -35825,6 +35825,11 @@ function updateStasisFields(dt) {
   if (_championDue && !game.championSpawned) {
     spawnChampionField();
     game.championSpawned = true;
+    // (v15m music upgrade) Champion-field appearance cue : low rumble +
+    // ascending pad swell to signal "the field is open, last 10 seconds".
+    if (typeof musicPlayChampionCue === 'function') {
+      try { musicPlayChampionCue(); } catch (_) {}
+    }
   }
 
   // (v11) Update the cosmic anomaly if one's active. Self-destroys when
@@ -46170,85 +46175,162 @@ function _musicMidiHz(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
 // === SYNTH RECIPES (lifted from framework_dancing_cosmos_band.html) ===
 
 // Drum: kick (note 35/36), snare (38/40), crash (49/57), default = hat.
+// (v15m music upgrade) Improved drum kit.
+//   Kick : pitched body sweep + click transient (the "thump + tick").
+//   Snare : tuned body tone + noise crack, both shaped (the "ka-snap").
+//   Crash : longer noise sweep with darker tail (not just bright sizzle).
+//   Hat : tightened transient + tiny pitched accent.
 function _musicSynthDrum(note, g, when, out) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  // ----- KICK (note 35 / 36) -----
   if (note === 35 || note === 36) {
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(150, when);
-    osc.frequency.exponentialRampToValueAtTime(45, when + 0.1);
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.9 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.28);
-    osc.connect(amp).connect(out);
-    osc.start(when); osc.stop(when + 0.35);
-    return { stop: (t) => { try { osc.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+    // Body : pitched sine sweep (the thump)
+    const body = ctx.createOscillator();
+    body.type = 'sine';
+    body.frequency.setValueAtTime(180, when);
+    body.frequency.exponentialRampToValueAtTime(42, when + 0.10);
+    const bodyAmp = ctx.createGain();
+    bodyAmp.gain.setValueAtTime(0.95 * g, when);
+    bodyAmp.gain.exponentialRampToValueAtTime(0.01, when + 0.32);
+    body.connect(bodyAmp).connect(out);
+    // Click transient : short triangle blip for the attack pop
+    const click = ctx.createOscillator();
+    click.type = 'triangle';
+    click.frequency.setValueAtTime(1200, when);
+    click.frequency.exponentialRampToValueAtTime(200, when + 0.008);
+    const clickAmp = ctx.createGain();
+    clickAmp.gain.setValueAtTime(0.30 * g, when);
+    clickAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.012);
+    click.connect(clickAmp).connect(out);
+    body.start(when); body.stop(when + 0.40);
+    click.start(when); click.stop(when + 0.015);
+    return { stop: (t) => { try { body.stop(Math.max(when + 0.01, t)); click.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
+  // ----- SNARE (note 38 / 40) -----
   if (note === 38 || note === 40) {
+    // Body tone : 200 Hz triangle quickly fading (the "ka")
+    const body = ctx.createOscillator();
+    body.type = 'triangle';
+    body.frequency.value = 200;
+    const bodyAmp = ctx.createGain();
+    bodyAmp.gain.setValueAtTime(0.45 * g, when);
+    bodyAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.06);
+    body.connect(bodyAmp).connect(out);
+    // Noise crack (the "snap") through a bandpass
     const buf = ctx.createBuffer(1, 4096, ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     const src = ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
     const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.8;
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.7 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.15);
-    src.connect(bp).connect(amp).connect(out);
-    src.start(when); src.stop(when + 0.18);
-    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+    bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 1.0;
+    const noiseAmp = ctx.createGain();
+    noiseAmp.gain.setValueAtTime(0.75 * g, when);
+    noiseAmp.gain.exponentialRampToValueAtTime(0.01, when + 0.16);
+    src.connect(bp).connect(noiseAmp).connect(out);
+    body.start(when); body.stop(when + 0.08);
+    src.start(when); src.stop(when + 0.20);
+    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); body.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
+  // ----- CRASH (note 49 / 57) -----
   if (note === 49 || note === 57) {
     const buf = ctx.createBuffer(1, 8192, ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     const src = ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
+    // Sweeping highpass : starts bright, drops over time for darker tail.
     const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 5000;
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(7000, when);
+    hp.frequency.exponentialRampToValueAtTime(2500, when + 0.8);
     const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.35 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.005, when + 1.2);
+    amp.gain.setValueAtTime(0.38 * g, when);
+    amp.gain.exponentialRampToValueAtTime(0.005, when + 1.3);
     src.connect(hp).connect(amp).connect(out);
-    src.start(when); src.stop(when + 1.3);
+    src.start(when); src.stop(when + 1.4);
     return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
-  // Default = hat (closed).
+  // ----- HAT (default, closed) -----
   const buf = ctx.createBuffer(1, 1024, ctx.sampleRate);
   const d = buf.getChannelData(0);
   for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
   const src = ctx.createBufferSource();
   src.buffer = buf;
+  // Tight highpass + bandpass mix : pitched hat with crisp transient.
   const hp = ctx.createBiquadFilter();
-  hp.type = 'highpass'; hp.frequency.value = 7000;
+  hp.type = 'highpass'; hp.frequency.value = 7500;
   const amp = ctx.createGain();
-  amp.gain.setValueAtTime(0.35 * g, when);
-  amp.gain.exponentialRampToValueAtTime(0.005, when + 0.06);
+  amp.gain.setValueAtTime(0.40 * g, when);
+  amp.gain.exponentialRampToValueAtTime(0.005, when + 0.05);
   src.connect(hp).connect(amp).connect(out);
-  src.start(when); src.stop(when + 0.08);
-  return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+  // Pitched accent : tiny triangle ping for hat tonality
+  const ping = ctx.createOscillator();
+  ping.type = 'triangle';
+  ping.frequency.value = 9000;
+  const pingAmp = ctx.createGain();
+  pingAmp.gain.setValueAtTime(0.06 * g, when);
+  pingAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.02);
+  ping.connect(pingAmp).connect(out);
+  src.start(when); src.stop(when + 0.07);
+  ping.start(when); ping.stop(when + 0.025);
+  return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); ping.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
 }
 
+// (v15m music upgrade) Fattened bass voice. Main saw + sub-octave sine
+// for low-end weight, tanh saturation for harmonic content (the "growl"),
+// and a filter envelope that opens for transient punch then closes for
+// sustained body. Much more present than the previous single-sawtooth
+// version.
+// _bassSatCurve : computed once at module-load, reused per note.
+const _bassSatCurve = (function() {
+  const curve = new Float32Array(512);
+  for (let i = 0; i < 512; i++) {
+    const x = (i / 255.5) - 1;
+    curve[i] = Math.tanh(x * 1.7);   // soft saturation
+  }
+  return curve;
+})();
 function _musicSynthBass(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  // Main oscillator (saw — the timbral body)
   const osc = ctx.createOscillator();
-  osc.type = music.bassWave || 'sawtooth'; osc.frequency.value = freq;
+  osc.type = music.bassWave || 'sawtooth';
+  osc.frequency.value = freq;
+  // Sub-octave sine for low-end foundation
+  const sub = ctx.createOscillator();
+  sub.type = 'sine';
+  sub.frequency.value = freq * 0.5;
+  // Saturation on the main oscillator path for harmonic richness
+  const sat = ctx.createWaveShaper();
+  sat.curve = _bassSatCurve;
+  // Lowpass filter with envelope :
+  //   - At note-on : opens to 1800 Hz briefly (transient punch — bright click)
+  //   - Closes to 400 Hz over 80 ms (sustained body — round low end)
   const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 450; lp.Q.value = 1;
+  lp.type = 'lowpass';
+  lp.Q.value = 2.5;
+  lp.frequency.setValueAtTime(1800, when);
+  lp.frequency.exponentialRampToValueAtTime(400, when + 0.08);
+  // Per-layer gain (sub balanced against main)
+  const subGain = ctx.createGain();
+  subGain.gain.value = 0.55;
+  // Master amp envelope (fast attack, hold, then release)
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.48 * g, when + 0.008);
-  amp.gain.linearRampToValueAtTime(0.30 * g, when + 0.15);
-  osc.connect(lp).connect(amp).connect(out);
-  osc.start(when);
-  // Auto-stop on duration. Caller can also stop early via the returned handle.
+  amp.gain.linearRampToValueAtTime(0.50 * g, when + 0.008);
+  amp.gain.linearRampToValueAtTime(0.32 * g, when + 0.15);
+  // Routing
+  osc.connect(sat).connect(lp);
+  sub.connect(subGain).connect(lp);
+  lp.connect(amp).connect(out);
+  osc.start(when); sub.start(when);
   const stopAt = when + (durSec != null ? durSec : 0.5);
-  amp.gain.setValueAtTime(0.30 * g, stopAt);
+  amp.gain.setValueAtTime(0.32 * g, stopAt);
   amp.gain.linearRampToValueAtTime(0, stopAt + 0.05);
-  try { osc.stop(stopAt + 0.1); } catch (_) {}
+  try { osc.stop(stopAt + 0.1); sub.stop(stopAt + 0.1); } catch (_) {}
   let stopped = false;
   return {
     stop: (t) => {
@@ -46257,33 +46339,80 @@ function _musicSynthBass(freq, g, when, out, durSec) {
         amp.gain.cancelScheduledValues(t);
         amp.gain.setValueAtTime(amp.gain.value, t);
         amp.gain.linearRampToValueAtTime(0, t + 0.05);
-        osc.stop(t + 0.1);
+        osc.stop(t + 0.1); sub.stop(t + 0.1);
       } catch (_) {}
     }
   };
 }
 
+// (v15m music upgrade) Fattened pad voice. Four oscillators (unison saw
+// pair detuned ±~9 cents for chorus-like width + sub-octave sine for
+// foundation + fifth-up sine for upper shimmer), slow LFO modulating the
+// lowpass cutoff for evolving movement, filter envelope that "blooms in"
+// over the attack. Way more bed-of-sound than the previous 2-oscillator
+// thin pad.
 function _musicSynthPad(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  const padWave = music.padWave || 'sawtooth';
+  // Main detuned unison pair (the body of the pad)
   const o1 = ctx.createOscillator();
   const o2 = ctx.createOscillator();
-  const padWave = music.padWave || 'sawtooth';
   o1.type = padWave; o2.type = padWave;
-  o1.frequency.value = freq;
-  o2.frequency.value = freq * 1.005;
+  o1.frequency.value = freq * 0.997;       // ~-5 cents
+  o2.frequency.value = freq * 1.005;       // ~+9 cents
+  // Sub-octave sine for low-end weight
+  const oSub = ctx.createOscillator();
+  oSub.type = 'sine';
+  oSub.frequency.value = freq * 0.5;
+  // Fifth-up sine for harmonic shimmer (very subtle)
+  const oFifth = ctx.createOscillator();
+  oFifth.type = 'sine';
+  oFifth.frequency.value = freq * 1.5;
+  // Filter — base 1200 Hz lowpass, modulated by LFO for breathing motion.
   const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 1400; lp.Q.value = 0.7;
+  lp.type = 'lowpass';
+  lp.frequency.value = 1200;
+  lp.Q.value = 0.85;
+  // Filter envelope : pad "blooms in" — cutoff opens from 700 → 1500
+  // over the attack, giving the pad warmth-into-air motion.
+  lp.frequency.setValueAtTime(700, when);
+  lp.frequency.linearRampToValueAtTime(1500, when + 0.8);
+  // Slow LFO modulating cutoff for evolving movement (0.3–0.7 Hz, ±300 Hz).
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = 0.30 + Math.random() * 0.40;
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 300;
+  lfo.connect(lfoGain);
+  lfoGain.connect(lp.frequency);
+  // Per-voice gain stages so we can balance the layers
+  const subGain = ctx.createGain();
+  subGain.gain.value = 0.42;
+  oSub.connect(subGain).connect(lp);
+  const fifthGain = ctx.createGain();
+  fifthGain.gain.value = 0.14;
+  oFifth.connect(fifthGain).connect(lp);
+  o1.connect(lp);
+  o2.connect(lp);
+  // Master amp envelope : slow attack, slow release (pad behavior).
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.18 * g, when + 0.35);
-  o1.connect(lp); o2.connect(lp);
+  amp.gain.linearRampToValueAtTime(0.15 * g, when + 0.5);
   lp.connect(amp).connect(out);
   o1.start(when); o2.start(when);
+  oSub.start(when); oFifth.start(when);
+  lfo.start(when);
   const stopAt = when + (durSec != null ? durSec : 2.0);
-  amp.gain.setValueAtTime(0.18 * g, stopAt);
-  amp.gain.linearRampToValueAtTime(0, stopAt + 0.35);
-  try { o1.stop(stopAt + 0.4); o2.stop(stopAt + 0.4); } catch (_) {}
+  amp.gain.setValueAtTime(0.15 * g, stopAt);
+  amp.gain.linearRampToValueAtTime(0, stopAt + 0.5);
+  try {
+    o1.stop(stopAt + 0.55);
+    o2.stop(stopAt + 0.55);
+    oSub.stop(stopAt + 0.55);
+    oFifth.stop(stopAt + 0.55);
+    lfo.stop(stopAt + 0.55);
+  } catch (_) {}
   let stopped = false;
   return {
     stop: (t) => {
@@ -46291,28 +46420,63 @@ function _musicSynthPad(freq, g, when, out, durSec) {
       try {
         amp.gain.cancelScheduledValues(t);
         amp.gain.setValueAtTime(amp.gain.value, t);
-        amp.gain.linearRampToValueAtTime(0, t + 0.35);
-        o1.stop(t + 0.4); o2.stop(t + 0.4);
+        amp.gain.linearRampToValueAtTime(0, t + 0.5);
+        o1.stop(t + 0.55); o2.stop(t + 0.55);
+        oSub.stop(t + 0.55); oFifth.stop(t + 0.55);
+        lfo.stop(t + 0.55);
       } catch (_) {}
     }
   };
 }
 
+// (v15m music upgrade) Lead voice now has a soft octave-up sine layer
+// for shimmer + delayed vibrato (LFO ramps in after the attack so the
+// note's onset is pure, then warms with vibrato as it sustains). The
+// result is a more vocal / expressive lead instead of a sterile single
+// oscillator.
 function _musicSynthLead(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  // Main oscillator
   const osc = ctx.createOscillator();
-  osc.type = music.leadWave || 'triangle'; osc.frequency.value = freq;
+  osc.type = music.leadWave || 'triangle';
+  osc.frequency.value = freq;
+  // Octave-up sine (subtle harmonic shimmer)
+  const oct = ctx.createOscillator();
+  oct.type = 'sine';
+  oct.frequency.value = freq * 2;
+  // Vibrato LFO : 5.5 Hz, ±0.5% (~9 cents). Gain starts at 0 and ramps
+  // up after the attack so the note's onset is clean.
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = 5.5;
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 0;
+  lfoGain.gain.setValueAtTime(0, when);
+  lfoGain.gain.linearRampToValueAtTime(freq * 0.005, when + 0.12);  // vibrato grows in
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc.frequency);
+  // Octave layer gain (subtle harmonic enrichment)
+  const octGain = ctx.createGain();
+  octGain.gain.value = 0.18;
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.28 * g, when + 0.015);
-  amp.gain.linearRampToValueAtTime(0.14 * g, when + 0.12);
-  osc.connect(amp).connect(out);
-  osc.start(when);
+  amp.gain.linearRampToValueAtTime(0.30 * g, when + 0.015);
+  amp.gain.linearRampToValueAtTime(0.16 * g, when + 0.12);
+  osc.connect(amp);
+  oct.connect(octGain).connect(amp);
+  amp.connect(out);
+  // (v15m music upgrade) Reverb send : a tap off the amp goes to the lead
+  // send (predelay → convolver → wet gain → out). Wet level is controlled
+  // by the send chain's internal gain, so this just feeds it.
+  if (music.leadSend) {
+    try { amp.connect(music.leadSend); } catch (_) {}
+  }
+  osc.start(when); oct.start(when); lfo.start(when);
   const stopAt = when + (durSec != null ? durSec : 0.35);
-  amp.gain.setValueAtTime(0.14 * g, stopAt);
+  amp.gain.setValueAtTime(0.16 * g, stopAt);
   amp.gain.linearRampToValueAtTime(0, stopAt + 0.08);
-  try { osc.stop(stopAt + 0.12); } catch (_) {}
+  try { osc.stop(stopAt + 0.12); oct.stop(stopAt + 0.12); lfo.stop(stopAt + 0.12); } catch (_) {}
   let stopped = false;
   return {
     stop: (t) => {
@@ -46322,6 +46486,8 @@ function _musicSynthLead(freq, g, when, out, durSec) {
         amp.gain.setValueAtTime(amp.gain.value, t);
         amp.gain.linearRampToValueAtTime(0, t + 0.08);
         osc.stop(t + 0.12);
+        oct.stop(t + 0.12);
+        lfo.stop(t + 0.12);
       } catch (_) {}
     }
   };
@@ -46331,11 +46497,24 @@ function _musicSynthLead(freq, g, when, out, durSec) {
 
 // Build a chord from scale degree (0..6) + quality.
 // Returns array of MIDI offsets from keyMidi.
+// (v15m music upgrade) Expanded chord qualities :
+//   - min7, maj7 : sevenths add harmonic depth, modern jazzy color
+//   - sus2, sus4 : suspended chords for tension/anticipation
+//   - dim7 : darker than plain dim, used sparingly for unease
+//   - add9 : minor with added 9th, dreamier than plain minor
+//   - maj9 : full 9th chord, lush
 function _musicChord(degree, quality) {
   const scale = music.scale;
   const root = scale[degree % 7];
-  if (quality === 'maj') return [root, root + 4, root + 7];
-  if (quality === 'dim') return [root, root + 3, root + 6];
+  if (quality === 'maj')   return [root, root + 4, root + 7];
+  if (quality === 'maj7')  return [root, root + 4, root + 7, root + 11];
+  if (quality === 'maj9')  return [root, root + 4, root + 7, root + 11, root + 14];
+  if (quality === 'min7')  return [root, root + 3, root + 7, root + 10];
+  if (quality === 'dim')   return [root, root + 3, root + 6];
+  if (quality === 'dim7')  return [root, root + 3, root + 6, root + 9];
+  if (quality === 'sus2')  return [root, root + 2, root + 7];
+  if (quality === 'sus4')  return [root, root + 5, root + 7];
+  if (quality === 'add9')  return [root, root + 3, root + 7, root + 14];
   return [root, root + 3, root + 7]; // 'min' default
 }
 
@@ -46700,6 +46879,37 @@ function musicEnsureCtx() {
   if (!audio.musicGain) return false;
   music.ctx = audio.ctx;
   music.out = audio.musicGain;
+  // (v15m music upgrade) Build a dedicated reverb send for the lead voice
+  // so kill-triggered phrases and lead lines have spatial presence —
+  // sustained tail + slight predelay, sits underneath the dry signal.
+  // Built once and reused for every lead note via music.leadSend.
+  if (!music.leadSend) {
+    try {
+      const ctx = music.ctx;
+      const leadReverb = ctx.createConvolver();
+      // Generate a small impulse response : 1.2s decay, soft attack.
+      const irLen = Math.floor(ctx.sampleRate * 1.2);
+      const ir = ctx.createBuffer(2, irLen, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const d = ir.getChannelData(ch);
+        for (let i = 0; i < irLen; i++) {
+          // Exponential decay, randomized for stereo difference.
+          const t = i / irLen;
+          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.8) * 0.6;
+        }
+      }
+      leadReverb.buffer = ir;
+      // 35 ms predelay so the wet signal sits behind the dry, not on top.
+      const predelay = ctx.createDelay(0.1);
+      predelay.delayTime.value = 0.035;
+      // Wet level — subtle, just enough to give the lead air.
+      const wetGain = ctx.createGain();
+      wetGain.gain.value = 0.42;
+      predelay.connect(leadReverb).connect(wetGain).connect(music.out);
+      // The send node : lead voices connect to this AND directly to music.out.
+      music.leadSend = predelay;
+    } catch (_) { music.leadSend = null; }
+  }
   return true;
 }
 
@@ -46904,12 +47114,67 @@ function musicSetVolume(v) {
   }
 }
 
+// (v15m music upgrade) Fire a short transition fill when the pattern
+// changes, so the soundtrack doesn't snap to a new mood instantly. Fill
+// shape varies with the destination :
+//   combat       → snare roll + crash (escalating into action)
+//   doomed       → low tom + reverse-swell (dread)
+//   roundEndVictory / matchEndVictory → big crash (celebration)
+//   roundEndDefeat / matchEndDefeat   → kick + tomb (collapse)
+//   warmup / lobby → soft hat sweep (calm reset)
+// Fills run at ~0.4 sec duration so they fit before the next bar starts.
+function _musicFireTransitionFill(fromId, toId) {
+  if (!music.ctx || !music.out) return;
+  if (fromId === toId) return;
+  if (fromId === 'silent' || toId === 'silent') return; // no fill on silence
+  const ctx = music.ctx;
+  const t = ctx.currentTime + 0.02;
+  const secPerBeat = 60 / (music.bpm || 96);
+  const out = music.out;
+  try {
+    if (toId === 'combat') {
+      // Snare 16ths building intensity + crash on downbeat.
+      for (let i = 0; i < 5; i++) {
+        const dt = i * secPerBeat * 0.20;        // 20ths of a beat apart
+        const vol = 0.45 + i * 0.12;             // crescendo
+        _musicSynthDrum(38, vol, t + dt, out);
+      }
+      _musicSynthDrum(49, 0.95, t + secPerBeat * 1.0, out);
+      _musicSynthDrum(36, 1.00, t + secPerBeat * 1.0, out);
+    } else if (toId === 'doomed') {
+      // Low ominous tom + delayed crash for dread.
+      _musicSynthDrum(36, 1.10, t, out);                  // pitched kick = tom-ish
+      _musicSynthDrum(36, 0.70, t + secPerBeat * 0.35, out);
+      _musicSynthDrum(49, 0.40, t + secPerBeat * 0.5, out);
+    } else if (toId === 'roundEndVictory' || toId === 'matchEndVictory') {
+      // Big crash + open hat for triumph.
+      _musicSynthDrum(49, 1.10, t, out);
+      _musicSynthDrum(36, 1.00, t, out);
+      _musicSynthDrum(38, 0.50, t + secPerBeat * 0.25, out);
+      _musicSynthDrum(38, 0.50, t + secPerBeat * 0.5, out);
+    } else if (toId === 'roundEndDefeat' || toId === 'matchEndDefeat') {
+      // Hollow kick + tomb-fall snare for "we lost".
+      _musicSynthDrum(36, 0.95, t, out);
+      _musicSynthDrum(38, 0.45, t + secPerBeat * 0.5, out);
+      _musicSynthDrum(36, 0.70, t + secPerBeat * 1.0, out);
+    } else if (toId === 'warmup' || toId === 'lobby') {
+      // Calm reset : soft hat triplet.
+      _musicSynthDrum(42, 0.30, t, out);
+      _musicSynthDrum(42, 0.30, t + secPerBeat * 0.33, out);
+      _musicSynthDrum(42, 0.30, t + secPerBeat * 0.66, out);
+    }
+  } catch (_) {}
+}
+
 function musicSetPattern(id, opts) {
   if (!MUSIC_PATTERNS[id]) {
     console.warn('[music] unknown pattern', id);
     return;
   }
+  const prevId = music.patternId;
   music.patternId = id;
+  // (v15m music upgrade) Fire the transition fill on every pattern change.
+  if (prevId !== id) _musicFireTransitionFill(prevId, id);
   music.lastChordKey = null;
   // Reset riff cycle bar so each pattern starts at its first phrase.
   music._riffCycleBar = 0;
@@ -47003,17 +47268,91 @@ function musicOnKill(who, streakHint) {
   music.lastKillBeat = music.beat;
   if (streakHint != null) music.multikillCount = Math.max(music.multikillCount, streakHint | 0);
   phraseLen = Math.min(5, music.multikillCount);
-  // Phrase: ascending pentatonic from root, eighth notes.
-  for (let i = 0; i < phraseLen; i++) {
-    const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
-    const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
-    music.pendingLeadNotes.push({
-      atBeat: startBeat + i * 0.5,
-      note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
-      dur: 0.30,
-      vel: 0.85,
-    });
+  // (v15m music upgrade) Phrase character escalates with multikill count :
+  //   1 kill     : single root note (existing behavior)
+  //   2 kills    : pentatonic ascending pair
+  //   3 kills    : pentatonic ascending triple (existing extended)
+  //   4+ kills   : CHROMATIC RISER — semitones climbing, the "you're on a tear" cue
+  // Plus a crash on multikill ≥ 3 to punctuate.
+  const useChromatic = music.multikillCount >= 4;
+  if (useChromatic) {
+    // 6-note chromatic riser from root up an octave.
+    phraseLen = 6;
+    for (let i = 0; i < phraseLen; i++) {
+      music.pendingLeadNotes.push({
+        atBeat: startBeat + i * 0.33,           // 8th-triplet feel for urgency
+        note: i * 2,                            // whole-tone climb gives chromatic feel without dissonance
+        dur: 0.18,
+        vel: 0.9 + i * 0.02,
+      });
+    }
+    // Crash on the final note for punctuation.
+    try {
+      const crashT = music.ctx.currentTime + (startBeat - music.beat) * (60 / music.bpm);
+      _musicSynthDrum(49, 0.95, crashT, music.out);
+    } catch (_) {}
+  } else if (music.multikillCount >= 3) {
+    // Pentatonic phrase + small crash hit.
+    for (let i = 0; i < phraseLen; i++) {
+      const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
+      const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
+      music.pendingLeadNotes.push({
+        atBeat: startBeat + i * 0.5,
+        note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
+        dur: 0.30,
+        vel: 0.90,
+      });
+    }
+    try {
+      const crashT = music.ctx.currentTime + (startBeat - music.beat) * (60 / music.bpm);
+      _musicSynthDrum(49, 0.55, crashT, music.out);
+    } catch (_) {}
+  } else {
+    // Standard pentatonic phrase, eighth notes.
+    for (let i = 0; i < phraseLen; i++) {
+      const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
+      const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
+      music.pendingLeadNotes.push({
+        atBeat: startBeat + i * 0.5,
+        note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
+        dur: 0.30,
+        vel: 0.85,
+      });
+    }
   }
+}
+
+// (v15m music upgrade) Champion-field cue : low rumble + crash + ascending
+// pad-like swell. Fires when the champion field spawns (last 10 seconds of
+// round). Tells the player "endgame is here" without a HUD prompt.
+function musicPlayChampionCue() {
+  if (!musicEnsureCtx()) return;
+  const ctx = music.ctx;
+  const t = ctx.currentTime + 0.02;
+  const out = music.out;
+  // Big low rumble : pitched-down kick + sustained sub sine.
+  try {
+    _musicSynthDrum(36, 1.20, t, out);
+    // Sustained low rumble : 50 Hz sine for ~1.2s.
+    const rumble = ctx.createOscillator();
+    rumble.type = 'sine';
+    rumble.frequency.setValueAtTime(60, t);
+    rumble.frequency.exponentialRampToValueAtTime(40, t + 1.2);
+    const rumAmp = ctx.createGain();
+    rumAmp.gain.setValueAtTime(0, t);
+    rumAmp.gain.linearRampToValueAtTime(0.45, t + 0.4);
+    rumAmp.gain.linearRampToValueAtTime(0, t + 1.4);
+    rumble.connect(rumAmp).connect(out);
+    rumble.start(t); rumble.stop(t + 1.5);
+    // Cymbal swell : two delayed crashes for big sustained shimmer.
+    _musicSynthDrum(49, 0.40, t + 0.10, out);
+    _musicSynthDrum(49, 0.30, t + 0.65, out);
+    // Ascending lead phrase : root, fifth, octave — "the field calls".
+    const startBeat = Math.ceil(music.beat + 0.5);
+    music.pendingLeadNotes.push({ atBeat: startBeat,       note: 0,  dur: 0.45, vel: 0.95 });
+    music.pendingLeadNotes.push({ atBeat: startBeat + 1,   note: 7,  dur: 0.45, vel: 0.95 });
+    music.pendingLeadNotes.push({ atBeat: startBeat + 2,   note: 12, dur: 0.65, vel: 1.00 });
+  } catch (_) {}
 }
 
 // Round-end victory/defeat phrase (longer scripted lead figure).
@@ -47067,8 +47406,9 @@ const MUSIC_PATTERNS = {
       return null;
     },
     bassDurBeats: 2,
-    // i - VI - i - i loop (Aeolian)
-    chords: [[0, 'min'], [5, 'maj'], [0, 'min'], [0, 'min']],
+    // (v15m music upgrade) Calmer, dreamier lobby with min7 + maj7 colors.
+    // i7 - VImaj7 - i(add9) - i7
+    chords: [[0, 'min7'], [5, 'maj7'], [0, 'add9'], [0, 'min7']],
     chordsBars: [2, 2, 2, 2],
   },
 
@@ -47120,8 +47460,9 @@ const MUSIC_PATTERNS = {
       return null;
     },
     bassDurBeats: 1,
-    // i - VI - VII - i (Aeolian standard)
-    chords: [[0, 'min'], [5, 'maj'], [6, 'maj'], [0, 'min']],
+    // (v15m music upgrade) Combat now mixes a sus4 build-up before the
+    // i7 resolution — adds anticipation. i - VI - sus4_i - i7.
+    chords: [[0, 'min'], [5, 'maj'], [0, 'sus4'], [0, 'min7']],
     chordsBars: [2, 1, 1, 2],
   },
 
@@ -47138,7 +47479,9 @@ const MUSIC_PATTERNS = {
     },
     bass: (beat) => 0, // pedal on root, every beat
     bassDurBeats: 1,
-    chords: [[0, 'min'], [1, 'min']], // i then b2 minor (Phrygian sting)
+    // (v15m music upgrade) Doomed pattern : dim7 root + b2 min7 = darker, more
+    // unstable. The dim7 is famously "I'm in trouble" jazz/horror chord.
+    chords: [[0, 'dim7'], [1, 'min7']],
     chordsBars: [2, 2],
   },
 
@@ -47154,7 +47497,7 @@ const MUSIC_PATTERNS = {
     },
     bass: (beat) => beat === 0 ? 0 : null,
     bassDurBeats: 4,
-    chords: [[0, 'maj']],  // Picardy lift
+    chords: [[0, 'maj9']],  // (v15m) Picardy lift → maj9 for lush victory
     chordsBars: [2],
   },
 
@@ -47176,7 +47519,8 @@ const MUSIC_PATTERNS = {
     drum: () => null,
     bass: (beat) => (beat % 8 === 0) ? 0 : null,
     bassDurBeats: 8,
-    chords: [[0, 'maj'], [4, 'maj'], [0, 'maj']],
+    // (v15m) Cinematic resolution : Imaj7 - Vsus4 - Imaj9.
+    chords: [[0, 'maj7'], [4, 'sus4'], [0, 'maj9']],
     chordsBars: [2, 2, 4],
   },
 
@@ -47185,7 +47529,9 @@ const MUSIC_PATTERNS = {
     drum: () => null,
     bass: (beat) => (beat % 4 === 0) ? 0 : null,
     bassDurBeats: 4,
-    chords: [[0, 'min'], [6, 'maj'], [5, 'maj'], [4, 'maj']],
+    // (v15m) Match-end defeat : all-min7 progression for melancholic
+    // mood — "Round Midnight"-style harmonic color.
+    chords: [[0, 'min7'], [6, 'min7'], [5, 'min7'], [4, 'min7']],
     chordsBars: [2, 2, 2, 2],
   },
 };
@@ -48137,4 +48483,1140 @@ function _lssGmapsPromptKey() {
           '<h2>Google Maps API Key</h2>' +
           '<p>This level streams Photorealistic 3D Tiles from Google Maps. Paste a Maps API key below ; it stays in your browser only (localStorage on this device, never sent anywhere except Google\'s tile servers).</p>' +
           '<p>Need a key? Visit <a href="https://developers.google.com/maps/documentation/tile/get-api-key" target="_blank" rel="noopener">developers.google.com/maps</a> and enable the <strong>Map Tiles API</strong> on your project.</p>' +
-          '<input type="password" id="lss-gmaps-key-input" placeholder="AIzaSy..." autocomplete="off" />' 
+          '<input type="password" id="lss-gmaps-key-input" placeholder="AIzaSy..." autocomplete="off" />' +
+          '<div class="err" id="lss-gmaps-key-err"></div>' +
+          '<div class="row">' +
+            '<button id="lss-gmaps-key-ok">Save and load</button>' +
+            '<button class="secondary" id="lss-gmaps-key-cancel">Cancel</button>' +
+            '<button class="secondary" id="lss-gmaps-key-clear" style="margin-left:auto;">Clear stored key</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(modal);
+    }
+    modal.style.display = 'flex';
+    const inp = modal.querySelector('#lss-gmaps-key-input');
+    const err = modal.querySelector('#lss-gmaps-key-err');
+    const ok = modal.querySelector('#lss-gmaps-key-ok');
+    const cancel = modal.querySelector('#lss-gmaps-key-cancel');
+    const clr = modal.querySelector('#lss-gmaps-key-clear');
+    err.textContent = '';
+    inp.value = _lssGmapsGetKey() || '';
+    setTimeout(() => inp.focus(), 0);
+    const close = () => { modal.style.display = 'none'; };
+    ok.onclick = () => {
+      const v = (inp.value || '').trim();
+      if (!v || v.length < 20) { err.textContent = 'Please paste a valid Google API key (looks like AIzaSy... about 39 chars).'; return; }
+      _lssGmapsSetKey(v);
+      close(); resolve(v);
+    };
+    cancel.onclick = () => { close(); resolve(null); };
+    clr.onclick = () => { _lssGmapsClearKey(); inp.value = ''; err.textContent = 'Cleared. Paste a new key, or Cancel.'; };
+    inp.onkeydown = (e) => { if (e.key === 'Enter') ok.onclick(); else if (e.key === 'Escape') cancel.onclick(); };
+  });
+}
+
+// Lazy import of the 3d-tiles-renderer ESM build. Pinned to 0.3.36 because
+// that version exposes GoogleTilesRenderer directly; later 0.4+ moved to a
+// plugin-based API (TilesRenderer + GoogleCloudAuthPlugin) that requires a
+// deeper integration. Falls back from esm.sh to jsdelivr if one CDN is
+// unreachable for the user's network.
+async function _lssGmapsLoadModule() {
+  if (_lssGmaps.loadingPromise) return _lssGmaps.loadingPromise;
+  _lssGmaps.loadingPromise = (async () => {
+    try {
+      // ?external=three tells esm.sh to NOT bundle its own copy of Three.
+      // Without it the host page (importmap-loaded Three 0.165) and the
+      // tile lib (its bundled Three) coexist as two distinct modules,
+      // and the renderer crashes the moment it tries to draw a tile
+      // mesh (Three's onBuild material hook differs across versions).
+      return await import('https://esm.sh/3d-tiles-renderer@0.3.36?external=three');
+    } catch (e1) {
+      console.warn('[lss-gmaps] esm.sh failed, trying jsdelivr:', e1);
+      // jsdelivr's +esm flag bundles deps; without an external-three
+      // option this branch will reintroduce the duplicate-Three bug.
+      // Kept as a network fallback only ; if this path runs the user
+      // will see a console warning + likely render error.
+      return await import('https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.3.36/+esm');
+    }
+  })();
+  return _lssGmaps.loadingPromise;
+}
+
+// Build path for gmaps levels. Mirrors buildRoomGraphLevel's bookkeeping
+// (clearing previous map state, resetting level pointers, regenerating
+// corridor points used by getValidSpawnPoint and AI nav) but routes geometry
+// through the photoreal tile renderer instead of marching cubes.
+async function _lssGmapsBuildLevel(level) {
+  // Clear previous map state. Ships / projectiles persist (they'll respawn
+  // on the new round per existing match flow).
+  for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
+  game.mapMeshes = [];
+  game.levelBoxes = [];
+  game.levelSpheres = [];
+  game.levelCylinders = [];
+  game.corridorPoints = [];
+  game.currentLevel = level;
+  game.mapWord = level.name;
+  if (typeof invalidateMinimapExtent === 'function') invalidateMinimapExtent();
+  game.sdfRoomData = [];
+
+  // Tear down any prior tile renderer (e.g. switching gmaps level to gmaps
+  // level). Without this we'd accumulate tile groups and double the draw
+  // cost on every map swap.
+  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch(_) {} _lssGmaps.cleanup = null; }
+  _lssGmaps.active = false;
+  _lssGmaps.tiles = null;
+
+  // Open-air spawn dome. corridorPoints feeds getValidSpawnPoint() and AI
+  // nav. Two team pools at +X / -X with vertical spread give dogfights some
+  // separation; neutral midfield points cover free-roam fallbacks.
+  // (v12 patch8) Street-level spawn ; the down-ray collision will
+  // immediately lift the ship to hoverPad above the actual surface
+  // (rooftop, plaza, river, whatever's under it). Teams kept close so
+  // the dogfight starts in the canyon rather than miles apart.
+  const ALT  = 200;          // initial Y above tile pivot ; collision reseats us
+  const TEAM_X = SU * 4;     // ~600 world units between team pools
+  for (let i = 0; i < 24; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = SU * 2 + Math.random() * SU * 4;
+    game.corridorPoints.push({ x:  TEAM_X + Math.cos(a) * r, y: ALT + Math.random() * SU * 2, z: Math.sin(a) * r, team: 'A' });
+    game.corridorPoints.push({ x: -TEAM_X + Math.cos(a) * r, y: ALT + Math.random() * SU * 2, z: Math.sin(a) * r, team: 'B' });
+  }
+  for (let i = 0; i < 30; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const rad = SU * 3 + Math.random() * SU * 9;
+    game.corridorPoints.push({ x: Math.cos(a) * rad, y: ALT + Math.random() * SU * 4, z: Math.sin(a) * rad, team: null });
+  }
+
+  // (v13r-2) Race-mode override : if a race route is armed, replace the
+  // dogfight spawn dome with race-specific spawn clusters at the start
+  // and place a finish marker at the destination. Bots navigate via the
+  // race graph ; champion field auto-spawns at the finish marker.
+  if (game.pendingRaceRoute && LSS.MODE === 'race') {
+    const rr = game.pendingRaceRoute;
+    const fin = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    const dist = Math.sqrt(fin.x * fin.x + fin.z * fin.z);
+    const len = Math.max(1, dist);
+    const ux = fin.x / len, uz = fin.z / len;
+    const perpX = -uz, perpZ = ux;
+    const SPAWN_OFFSET = 220;
+    const STARTLINE_BACK = 100;        // tuck spawns slightly behind the line
+    const ax =  perpX * SPAWN_OFFSET - ux * STARTLINE_BACK;
+    const az =  perpZ * SPAWN_OFFSET - uz * STARTLINE_BACK;
+    const bx = -perpX * SPAWN_OFFSET - ux * STARTLINE_BACK;
+    const bz = -perpZ * SPAWN_OFFSET - uz * STARTLINE_BACK;
+
+    // Wipe the dogfight dome and rebuild spawn clusters at the start line.
+    game.corridorPoints = [];
+    for (let i = 0; i < 16; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const r = SU * 1.2 + Math.random() * SU * 1.5;
+      game.corridorPoints.push({ x: ax + Math.cos(a) * r, y: ALT + Math.random() * SU * 1.2, z: az + Math.sin(a) * r, team: 'A' });
+      game.corridorPoints.push({ x: bx + Math.cos(a) * r, y: ALT + Math.random() * SU * 1.2, z: bz + Math.sin(a) * r, team: 'B' });
+    }
+
+    // Populate sdfRoomData with phantom rooms : two team spawns + a
+    // champion-flagged finish. spawnChampionField looks for the
+    // champion:true room and lands the field there.
+    const FINISH_R = 480;
+    game.sdfRoomData = [
+      { id: 'spawn_a', team: 'A', x: ax, y: ALT, z: az, r: 280 },
+      { id: 'spawn_b', team: 'B', x: bx, y: ALT, z: bz, r: 280 },
+      { id: 'finish',  team: null, champion: true, x: fin.x, y: ALT, z: fin.z, r: FINISH_R },
+    ];
+
+    // Tiny race graph : start node + finish node connected. Bots BFS
+    // start -> finish and steer at the midpoint.
+    const midX = fin.x * 0.5, midZ = fin.z * 0.5;
+    const startNode = {
+      id: 'race_start', x: (ax + bx) * 0.5, y: ALT, z: (az + bz) * 0.5, r: 280, team: null, champion: false,
+      neighbors: [{ id: 'race_finish', mid: { x: midX, y: ALT, z: midZ } }],
+    };
+    const finishNode = {
+      id: 'race_finish', x: fin.x, y: ALT, z: fin.z, r: FINISH_R, team: null, champion: true,
+      neighbors: [{ id: 'race_start', mid: { x: midX, y: ALT, z: midZ } }],
+    };
+    game.raceGraph = {
+      nodes: { race_start: startNode, race_finish: finishNode },
+      finishId: 'race_finish',
+    };
+    // (v13r-3) Province-scale races easily exceed the default 25,000-unit
+    // arena clamp ; players were hitting an invisible wall mid-route.
+    // Bump ARENA_SIZE to 2.5x the race distance (or keep the default,
+    // whichever is larger). Stash the original once so DETACH can
+    // restore it for classic-mode matches that follow.
+    if (typeof LSS._origArenaSize !== 'number') LSS._origArenaSize = LSS.ARENA_SIZE;
+    const _raceArena = Math.max(LSS._origArenaSize, dist * 2.5);
+    if (_raceArena > LSS.ARENA_SIZE) {
+      LSS.ARENA_SIZE = _raceArena;
+      console.log('[lss-gmaps] race ARENA_SIZE expanded to', _raceArena.toFixed(0),
+        '(orig', LSS._origArenaSize, ', race dist', dist.toFixed(0) + ')');
+    }
+    // (v13r-3) Long races also need the camera far plane and fog density
+    // bumped, otherwise the finish beacon + HUD waypoint clip out before
+    // the user can see them. Default far is 25000 ; race far covers the
+    // full distance plus a healthy margin so the beacon is reachable
+    // while looking from the start. Default fog density 0.000015 fades
+    // out around 67km ; race density scales inversely with distance so
+    // the same 'haze at horizon' feel persists at any scale.
+    if (typeof LSS._origCameraFar !== 'number') LSS._origCameraFar = camera.far;
+    const _raceFar = Math.max(LSS._origCameraFar, dist * 1.6);
+    if (_raceFar > camera.far) {
+      camera.far = _raceFar;
+      camera.updateProjectionMatrix();
+      console.log('[lss-gmaps] race camera.far expanded to', _raceFar.toFixed(0));
+    }
+    if (scene.fog && typeof LSS._origFogDensity !== 'number' && typeof scene.fog.density === 'number') {
+      LSS._origFogDensity = scene.fog.density;
+    }
+    if (scene.fog && typeof scene.fog.density === 'number') {
+      // Target : fog factor stays around 0.5 at the finish distance, so
+      // the goal is hazy but still seen. e^(-(density*d)^2) = 0.5
+      // -> density = sqrt(ln 2) / d ~= 0.833 / d.
+      const _raceFogDensity = Math.min(LSS._origFogDensity, 0.833 / Math.max(1, dist));
+      if (_raceFogDensity < scene.fog.density) {
+        scene.fog.density = _raceFogDensity;
+        console.log('[lss-gmaps] race fog density relaxed to', _raceFogDensity.toExponential(2));
+      }
+    }
+    console.log('[lss-gmaps] race route armed :',
+      rr.start.name || 'start', '->', rr.finish.name || 'finish',
+      '(' + (dist).toFixed(0) + ' world units)');
+  }
+
+  // Get API key (prompt if missing). Cancelling falls back to the default
+  // tunnel map so the player isn't stuck on a blank scene.
+  let key = _lssGmapsGetKey();
+  if (!key) {
+    key = await _lssGmapsPromptKey();
+    if (!key) {
+      console.warn('[lss-gmaps] no key supplied; falling back to default tunnel map.');
+      if (typeof selectMap === 'function') selectMap('hourglass');
+      return;
+    }
+  }
+
+  try {
+    const mod = await _lssGmapsLoadModule();
+    const GTR = mod.GoogleTilesRenderer || (mod.default && mod.default.GoogleTilesRenderer);
+    if (!GTR) throw new Error('GoogleTilesRenderer class not found in the 3d-tiles-renderer module.');
+    const tiles = new GTR(key);
+    // Pivot tiles so the requested lat/lng sits at the local origin (Y up).
+    if (typeof tiles.setLatLonToYUp === 'function') {
+      tiles.setLatLonToYUp(level.lat * Math.PI / 180, level.lng * Math.PI / 180);
+    }
+    // (v12 patch8) Apply per-level world scale. Default 1 = ships at
+    // capital-ship scale relative to real city. Scale 12 = ships at
+    // ~8% of skyscraper height ; small-plane / large-car through canyon.
+    const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 1;
+    tiles.group.scale.setScalar(_gmapsScale);
+    _lssGmaps.scale = _gmapsScale;
+    scene.add(tiles.group);
+    // Coarser tile target when the world is scaled up ; otherwise the
+    // loader tries to keep <8px error against now-much-larger geometry
+    // and burns bandwidth on hi-detail tiles you can't see anyway.
+    const _errBudget = Math.max(8, 8 * (_lssGmaps.scale || 1));
+    if (tiles.errorTarget !== undefined) tiles.errorTarget = _errBudget;
+    if (tiles.errorThreshold !== undefined) tiles.errorThreshold = _errBudget;
+    // Pre-set resolution so the first update() pass has the camera-error
+    // baseline ready ; otherwise the renderer logs a one-time warning.
+    try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
+    try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
+    // Surface tile-load errors clearly. 403 from tile.googleapis.com is
+    // the most common first-run failure ; the alert text walks the user
+    // through enabling Map Tiles API + billing + key referrer settings.
+    if (typeof tiles.addEventListener === 'function') {
+      let _alerted = false;
+      tiles.addEventListener('load-error', (ev) => {
+        const err = ev && (ev.error || ev.message || '');
+        const isAuth = String(err).match(/40[13]/);
+        console.warn('[lss-gmaps] tile load error:', err);
+        if (isAuth && !_alerted) {
+          _alerted = true;
+          alert('Google Maps tile server returned ' + (String(err).match(/40[13]/) || ['403']) + ' for your API key.\n\nFix on Google Cloud Console:\n' +
+                '1) Enable the Map Tiles API on your project\n' +
+                '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
+                '2) Make sure billing is active on that project\n' +
+                '3) If your key has HTTP-referrer restrictions, add this page\'s origin\n' +
+                '   (or set restriction to None temporarily for testing)\n\n' +
+                'You can clear the saved key with window.lssGmaps.clearKey() in DevTools.');
+        }
+      });
+    }
+    _lssGmaps.tiles = tiles;
+    _lssGmaps.active = true;
+    _lssGmaps.lat = level.lat;
+    _lssGmaps.lng = level.lng;
+    _lssGmaps.cleanup = () => {
+      try { scene.remove(tiles.group); } catch(_) {}
+      try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
+      _lssGmaps.tiles = null;
+    };
+    console.log('[lss-gmaps] active over', level.name, '@', level.lat, level.lng);
+    // (v12 patch32) Continuous refine for ~20 s after build path
+    // attach. Catches high-elevation locations where ground sits well
+    // above world Y=0 ; shifts the tile group so ground lands at the
+    // level's expected min-Y region and the player's spawn at Y=200
+    // ends up above ground.
+    try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+    let _bldRefineCount = 0;
+    _lssGmaps._refineInterval = setInterval(() => {
+      try { _lssGmapsRefinePivot(); } catch(_) {}
+      _bldRefineCount++;
+      if (_bldRefineCount >= 20) {
+        try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+        _lssGmaps._refineInterval = null;
+      }
+    }, 1000);
+    try { _lssGmapsRefinePivot(); } catch(_) {}
+  } catch (e) {
+    console.error('[lss-gmaps] failed to initialize tiles:', e);
+    alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
+    if (typeof selectMap === 'function') selectMap('hourglass');
+  }
+}
+
+// Per-frame tick. setResolutionFromRenderer + setCamera tell the loader what
+// LOD to fetch for the current camera; update() advances the load/dispose
+// queue. Wrapped in try/catch so a transient tile error doesn't kill the
+// whole game loop.
+// Per-frame tick. Three jobs:
+//   1) Drive the photoreal tile streamer (LOD pyramid + load/dispose).
+//   2) Cast a long downward ray (8 km) from each entity to find terrain;
+//      if the surface is within hoverPad, push the entity up to that
+//      hover distance and zero negative-Y velocity.
+//   3) Swept ray from each entity's last frame position to current
+//      position; if anything is hit along that swept segment, snap the
+//      entity back to a safe distance from the hit and strip velocity
+//      going INTO the surface.
+// Wrapped in try/catch so a transient tile error doesn't kill the loop.
+const _lssGmapsRayDown = new THREE.Vector3(0, -1, 0);
+const _lssGmapsRayFwd = new THREE.Vector3();
+const _lssGmapsRaycaster = new THREE.Raycaster();
+const _lssGmapsHoverPad = 120;       // hover height kept above geometry
+const _lssGmapsForwardPad = 120;     // safety distance kept in front of motion
+// Per-entity prior-frame positions for swept-ray collision. WeakMap so a
+// dead entity doesn't keep its memory pinned.
+const _lssGmapsPrevPos = new WeakMap();
+// Optional debug counters (toggle window.lssGmaps.debug = true).
+const _lssGmapsDebug = { hitsDown: 0, hitsFwd: 0, casts: 0, lastReport: 0 };
+
+// Cache of leaf mesh objects under tiles.group. Refreshed every frame ;
+// the cost (a single traverse() over ~125 tile wrappers) is far cheaper
+// than the per-ray intersection tests, and traversing is the only way
+// to keep the cache live as tiles stream in and out.
+const _lssGmapsLeaves = [];
+function _lssGmapsCollectLeaves(root) {
+  _lssGmapsLeaves.length = 0;
+  root.traverse((child) => {
+    if (child && child.isMesh && child.geometry && child.visible !== false) {
+      _lssGmapsLeaves.push(child);
+    }
+  });
+  return _lssGmapsLeaves;
+}
+
+function _lssGmapsCollideEntity(pos, vel) {
+  const grp = _lssGmaps.tiles && _lssGmaps.tiles.group;
+  if (!grp || !grp.children || grp.children.length === 0) return;
+  // Force fresh world matrices ; tiles update lazily and our tick runs
+  // before the render pass.
+  grp.updateMatrixWorld(true);
+  // Collect leaf meshes ourselves and raycast against THEM, not the
+  // TilesGroup. TilesGroup's overridden raycast in 3d-tiles-renderer
+  // 0.3.36 throws on Three 0.165 (OBB code missing a target Vector3).
+  const meshes = _lssGmapsCollectLeaves(grp);
+  if (meshes.length === 0) return;
+
+  // -- Down: terrain follow. 8 km far ensures we always find ground.
+  _lssGmapsRayDown.set(0, -1, 0);
+  _lssGmapsRaycaster.set(pos, _lssGmapsRayDown);
+  _lssGmapsRaycaster.far = 8000;
+  let downHits;
+  try { downHits = _lssGmapsRaycaster.intersectObjects(meshes, false); }
+  catch (_) { downHits = null; }
+  _lssGmapsDebug.casts++;
+  if (downHits && downHits.length) {
+    _lssGmapsDebug.hitsDown++;
+    if (downHits[0].distance < _lssGmapsHoverPad) {
+      pos.y += (_lssGmapsHoverPad - downHits[0].distance);
+      if (vel && vel.y < 0) vel.y = 0;
+    }
+  }
+
+  // -- Stuck-inside recovery: cast UP. If hit close, we're inside ;
+  // -- pop above the ceiling and let the down-ray reseat next frame.
+  const ESCAPE_HEIGHT = 20000;  // (v12 patch32) up to ~20 km so high-elevation underground recovers
+  _lssGmapsRayDown.set(0, 1, 0);
+  _lssGmapsRaycaster.set(pos, _lssGmapsRayDown);
+  _lssGmapsRaycaster.far = ESCAPE_HEIGHT;
+  let upHits;
+  try { upHits = _lssGmapsRaycaster.intersectObjects(meshes, false); }
+  catch (_) { upHits = null; }
+  if (upHits && upHits.length) {
+    pos.y += upHits[0].distance + _lssGmapsHoverPad + 10;
+    if (vel) { vel.y = Math.max(0, vel.y); }
+    _lssGmapsDebug.hitsFwd++;
+    return;
+  }
+
+  // -- Swept ray: from previous-frame position to this-frame position
+  // -- plus a forward safety pad. Catches motion at any speed.
+  if (vel) {
+    const prev = _lssGmapsPrevPos.get(pos);
+    if (prev) {
+      const dx = pos.x - prev.x, dy = pos.y - prev.y, dz = pos.z - prev.z;
+      const segLen = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      if (segLen > 0.5) {
+        _lssGmapsRayFwd.set(dx / segLen, dy / segLen, dz / segLen);
+        _lssGmapsRaycaster.set(prev, _lssGmapsRayFwd);
+        _lssGmapsRaycaster.far = segLen + _lssGmapsForwardPad;
+        let fwdHits;
+        try { fwdHits = _lssGmapsRaycaster.intersectObjects(meshes, false); }
+        catch (_) { fwdHits = null; }
+        if (fwdHits && fwdHits.length) {
+          _lssGmapsDebug.hitsFwd++;
+          const safe = Math.max(0, fwdHits[0].distance - _lssGmapsForwardPad);
+          pos.x = prev.x + _lssGmapsRayFwd.x * safe;
+          pos.y = prev.y + _lssGmapsRayFwd.y * safe;
+          pos.z = prev.z + _lssGmapsRayFwd.z * safe;
+          const dotV = vel.x * _lssGmapsRayFwd.x + vel.y * _lssGmapsRayFwd.y + vel.z * _lssGmapsRayFwd.z;
+          if (dotV > 0) {
+            vel.x -= _lssGmapsRayFwd.x * dotV;
+            vel.y -= _lssGmapsRayFwd.y * dotV;
+            vel.z -= _lssGmapsRayFwd.z * dotV;
+          }
+        }
+      }
+    }
+    if (!prev) _lssGmapsPrevPos.set(pos, new THREE.Vector3(pos.x, pos.y, pos.z));
+    else prev.set(pos.x, pos.y, pos.z);
+  }
+}
+
+function _lssGmapsTick(dt) {
+  if (!_lssGmaps.active || !_lssGmaps.tiles) return;
+  const t = _lssGmaps.tiles;
+  try {
+    if (typeof t.setResolutionFromRenderer === 'function') t.setResolutionFromRenderer(camera, renderer);
+    if (typeof t.setCamera === 'function') t.setCamera(camera);
+    if (typeof t.update === 'function') t.update();
+  } catch (_) { /* swallow per-frame */ }
+  // Terrain + building collision for player and AI ships.
+  try {
+    if (typeof player !== 'undefined' && player && player.position && player.velocity) {
+      _lssGmapsCollideEntity(player.position, player.velocity);
+    }
+    if (game && Array.isArray(game.entities)) {
+      for (const e of game.entities) {
+        if (e && e.position && e.velocity) _lssGmapsCollideEntity(e.position, e.velocity);
+      }
+    }
+  } catch (e) {
+    if (window.lssGmaps && window.lssGmaps.debug) console.warn('[lss-gmaps] collision error:', e);
+  }
+  // Optional: per-second debug summary so the user can tell whether the
+  // raycasts are finding anything. Toggle on with window.lssGmaps.debug = true.
+  if (window.lssGmaps && window.lssGmaps.debug) {
+    const now = performance.now();
+    if (now - _lssGmapsDebug.lastReport > 1000) {
+      const grp = _lssGmaps.tiles && _lssGmaps.tiles.group;
+      let leaves = 0;
+      if (grp) grp.traverse((c) => { if (c && c.isMesh) leaves++; });
+      console.log('[lss-gmaps] casts/sec:', _lssGmapsDebug.casts,
+                  'down hits:', _lssGmapsDebug.hitsDown,
+                  'fwd hits:', _lssGmapsDebug.hitsFwd,
+                  'tile children:', grp ? grp.children.length : 0,
+                  'leaf meshes:', leaves,
+                  'cam:', camera.position.x.toFixed(0), camera.position.y.toFixed(0), camera.position.z.toFixed(0),
+                  'scale:', _lssGmaps.scale || 1);
+      _lssGmapsDebug.casts = 0; _lssGmapsDebug.hitsDown = 0; _lssGmapsDebug.hitsFwd = 0;
+      _lssGmapsDebug.lastReport = now;
+    }
+  }
+}
+
+// DevTools handle for managing keys / debug / live tweaks. Examples:
+//   window.lssGmaps.setScale(20)      bigger world ; ships feel tinier.
+//   window.lssGmaps.clearKey()        forget the saved API key.
+//   window.lssGmaps.debug = true      log per-second collision counters.
+// (v12 patch11) Named city catalog for the overlay helpers below. Same
+// lat/lng pivots used by the dedicated gmaps_* level entries, exposed
+// here as a console-friendly key->coord map.
+const _lssGmapsCities = {
+  vancouver: { lat: 49.2827, lng: -123.1207, name: 'Vancouver, BC' },
+  nyc:       { lat: 40.7484, lng:  -73.9857, name: 'New York City' },
+  tokyo:     { lat: 35.6595, lng:  139.7005, name: 'Tokyo (Shibuya)' },
+  hongkong:  { lat: 22.2855, lng:  114.1577, name: 'Hong Kong (Central)' }
+};
+
+// Overlay: load a city's photoreal tiles into the current scene as
+// scenery, regardless of what map type is active. Existing room/tunnel
+// SDF + walls + AI continue to function ; the city appears around them
+// and depth-sorts naturally where it intersects room geometry. opts:
+//   y      vertical offset for the tile pivot (default 0). Negative
+//          values sink the city below the rooms.
+//   scale  tile group scale (default 1). Bigger = ships read smaller.
+// (v12 patch13) Min/max Y of any room or tunnel ; used to compute a
+// 'building-poke-in' target so tiles slot just under the lowest 10%
+// of the active map's vertical extent.
+function _lssGmapsLevelExtentY() {
+  let lo =  Infinity, hi = -Infinity;
+  if (Array.isArray(game.levelSpheres)) {
+    for (const s of game.levelSpheres) {
+      lo = Math.min(lo, s.cy - s.r); hi = Math.max(hi, s.cy + s.r);
+    }
+  }
+  if (Array.isArray(game.levelCylinders)) {
+    for (const c of game.levelCylinders) {
+      const r = c.r || 180;
+      lo = Math.min(lo, Math.min(c.ay, c.by) - r);
+      hi = Math.max(hi, Math.max(c.ay, c.by) + r);
+    }
+  }
+  if (!isFinite(lo)) lo = 0;
+  if (!isFinite(hi)) hi = 500;
+  return { lo, hi };
+}
+
+// Height-probe pass: after tiles have streamed in, raycast straight down
+// at sample points around origin to find the highest building, then shift
+// the tile group so that highest point sits below the level's min room
+// minus a safety margin. Result: tunnels never get clipped by buildings.
+// (v13r-3) Shift every piece of level state by dy in lockstep.
+// Touches: visual mesh positions, SDF source data (spheres/cylinders),
+// room data (sdfRoomData), corridor points (spawn picker / AI nav),
+// race graph nodes + neighbor midpoints, the live champion field,
+// and any spawned ships (player + bots + network players). Cumulative
+// shift is tracked on game._raceLevelShiftY so callers can be idempotent.
+function _lssGmapsShiftLevelY(dy) {
+  if (!isFinite(dy) || Math.abs(dy) < 0.01) return;
+  for (const m of (game.mapMeshes || [])) { if (m && m.position) m.position.y += dy; }
+  for (const sp of (game.levelSpheres || [])) { sp.cy += dy; }
+  for (const cy of (game.levelCylinders || [])) { cy.ay += dy; cy.by += dy; }
+  for (const r of (game.sdfRoomData || [])) { r.y += dy; }
+  for (const p of (game.corridorPoints || [])) { p.y += dy; }
+  if (game.raceGraph && game.raceGraph.nodes) {
+    for (const id in game.raceGraph.nodes) {
+      const n = game.raceGraph.nodes[id];
+      n.y += dy;
+      for (const nb of (n.neighbors || [])) { if (nb && nb.mid) nb.mid.y += dy; }
+    }
+  }
+  if (game.championField && game.championField.position) game.championField.position.y += dy;
+  if (typeof player !== 'undefined' && player && player.position) player.position.y += dy;
+  for (const b of (game.entities || [])) { if (b && b.position) b.position.y += dy; }
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) { if (np && np.position) np.position.y += dy; }
+  }
+  game._raceLevelShiftY = (game._raceLevelShiftY || 0) + dy;
+}
+
+// (v13r-3) Race-mode level-to-terrain follow. Raycast straight down at
+// each room's xz to find local terrain, take the max so the level's
+// floor clears the highest hit by a fixed clearance, then apply the
+// delta. Re-runs idempotently as more tiles stream in.
+function _lssGmapsApplyTerrainFollow() {
+  if (LSS.MODE !== 'race') return;
+  if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return;
+  _lssGmaps.tiles.group.updateMatrixWorld(true);
+  const meshes = _lssGmapsCollectLeaves(_lssGmaps.tiles.group);
+  if (meshes.length === 0) return;
+  // Cumulative shift already applied. Sample terrain in CURRENT (shifted)
+  // world coords ; we'll rebase the desired offset on top of the existing
+  // shift so the result converges without compounding.
+  const rc = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  let maxTerrainY = -Infinity;
+  for (const r of game.sdfRoomData) {
+    const o = new THREE.Vector3(r.x, 8000, r.z);
+    rc.set(o, dir);
+    rc.far = 14000;
+    try {
+      const hits = rc.intersectObjects(meshes, false);
+      if (hits.length && hits[0].point.y > maxTerrainY) maxTerrainY = hits[0].point.y;
+    } catch (_) {}
+  }
+  if (maxTerrainY === -Infinity) return;
+  // Lowest current room bottom (post-shift).
+  let curLow = Infinity;
+  for (const r of game.sdfRoomData) {
+    const lo = r.y - r.r;
+    if (lo < curLow) curLow = lo;
+  }
+  if (!isFinite(curLow)) return;
+  // Park the level's floor 50 world units above the highest terrain hit.
+  const desiredLow = maxTerrainY + 50;
+  const dy = desiredLow - curLow;
+  if (Math.abs(dy) < 1) return;
+  _lssGmapsShiftLevelY(dy);
+  console.log('[lss-gmaps] race terrain-follow : maxTerrainY', maxTerrainY.toFixed(0),
+              '; curLow', curLow.toFixed(0), '; shifted by', dy.toFixed(0),
+              '; cumulative', (game._raceLevelShiftY || 0).toFixed(0));
+}
+
+function _lssGmapsRefinePivot() {
+  if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
+  // (v12m patch3) In overlay mode, refining without populated SDF
+  // arrays would target the default extent (0, 500) and visibly
+  // shift the city to the wrong place. Bail until the build
+  // completes ; the next interval tick (1 s later) will pick it up.
+  if (_lssGmaps.overlayOnly) {
+    const haveSpheres = Array.isArray(game.levelSpheres) && game.levelSpheres.length > 0;
+    const haveCyls    = Array.isArray(game.levelCylinders) && game.levelCylinders.length > 0;
+    if (!haveSpheres && !haveCyls) return;
+  }
+  const grp = _lssGmaps.tiles.group;
+  grp.updateMatrixWorld(true);
+  const meshes = _lssGmapsCollectLeaves(grp);
+  if (meshes.length === 0) return;
+  const samples = 12;
+  const ringR = 400;
+  let maxHitY = -Infinity;
+  const rc = new THREE.Raycaster();
+  const dir = new THREE.Vector3(0, -1, 0);
+  for (let i = 0; i < samples; i++) {
+    const ang = (i / samples) * Math.PI * 2;
+    const o = new THREE.Vector3(Math.cos(ang) * ringR, 8000, Math.sin(ang) * ringR);
+    rc.set(o, dir);
+    rc.far = 12000;
+    try {
+      const hits = rc.intersectObjects(meshes, false);
+      if (hits.length && hits[0].point.y > maxHitY) maxHitY = hits[0].point.y;
+    } catch (_) {}
+  }
+  if (maxHitY === -Infinity) return;
+  // (v13r-3) Race-mode terrain-follow. Instead of moving the city to fit
+  // the level (which leaves the level deep in cliffs / floating over
+  // valleys depending on the chosen city), keep the city at its lat/lng
+  // pivot and shift the LEVEL up to sit just above the highest local
+  // terrain under the level's footprint. Idempotent: cumulative shift is
+  // stashed on game and re-applied as a delta so re-running on tile
+  // updates doesn't compound. Buildings still poke up where the terrain
+  // dips between rooms ; the room locations themselves stay clear.
+  if (LSS.MODE === 'race') {
+    if (typeof _lssGmapsApplyTerrainFollow === 'function') _lssGmapsApplyTerrainFollow();
+    return;
+  }
+  // (v12 patch28) City sits just below the lowest tunnel/room point,
+  // with minimal clearance so it reads as 'right under you' instead
+  // of 'distant landscape far below'. Patch27's 100 + 5% was too
+  // much ; now max(30, 1%) which is ~30 units for typical maps.
+  const ext = _lssGmapsLevelExtentY();
+  const clearance = Math.max(30, (ext.hi - ext.lo) * 0.01);
+  const targetMaxY = ext.lo - clearance;
+  const levelMinY = ext.lo;
+  const shift = targetMaxY - maxHitY;
+  grp.position.y += shift;
+  console.log('[lss-gmaps] auto-positioned tiles : highest building was at world Y',
+              maxHitY.toFixed(0), '; level min Y', levelMinY.toFixed(0),
+              '; shifted tiles by', shift.toFixed(0),
+              '; new pivot Y', grp.position.y.toFixed(0));
+  // (v12m patch5) Broadcast the new pivot Y so peers converge on the
+  // same vertical position. Without this, each peer's refine probes
+  // its own tile state and they diverge.
+  try {
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'gmaps_pivot_y', y: grp.position.y });
+    }
+  } catch (_) {}
+}
+
+// (v12 patch17) Direct probe of the tile API root manifest. The 3d-
+// tiles-renderer library swallows fetch errors ; this surfaces the
+// actual HTTP status so we can tell the user exactly what's wrong.
+// Returns { ok, status, body, error } ; logs to console either way.
+async function _lssGmapsTestKey(key) {
+  key = key || _lssGmapsGetKey();
+  if (!key) { console.warn('[lss-gmaps] testKey: no key set.'); return { ok: false, error: 'no key' }; }
+  const url = 'https://tile.googleapis.com/v1/3dtiles/root.json?key=' + encodeURIComponent(key);
+  try {
+    const r = await fetch(url);
+    const status = r.status;
+    let body = '';
+    try { body = await r.text(); } catch (_) {}
+    if (status === 200) {
+      console.log('[lss-gmaps] testKey OK : root.json fetched, ' + body.length + ' bytes.');
+      return { ok: true, status: 200, body };
+    }
+    console.warn('[lss-gmaps] testKey FAILED : HTTP ' + status, body.slice(0, 500));
+    return { ok: false, status, body };
+  } catch (e) {
+    console.error('[lss-gmaps] testKey fetch threw : ' + (e && e.message), e);
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
+// Translate a probe result into a human-readable diagnosis.
+function _lssGmapsDiagnoseProbe(probe) {
+  if (!probe) return 'Unknown error.';
+  if (probe.ok) return 'Tile API reachable, key valid.';
+  if (probe.error && !probe.status) {
+    return 'Network or CORS error : ' + probe.error +
+           '\n(Try serving the page over http://localhost rather than file:// ; some setups block fetches from local files.)';
+  }
+  const s = probe.status;
+  if (s === 401) {
+    return 'HTTP 401 Unauthorized.\nYour API key is invalid or has been revoked. Re-issue a key in Google Cloud Console.';
+  }
+  if (s === 403) {
+    return 'HTTP 403 Forbidden.\nMost likely:\n' +
+           '1) Map Tiles API not enabled on this project\n' +
+           '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
+           '2) Billing not active on the project\n' +
+           '3) HTTP-referrer restriction blocks this origin (try setting key restriction to None for testing).';
+  }
+  if (s === 429) return 'HTTP 429 Rate-limited. Wait a moment and try again.';
+  if (s >= 500) return 'HTTP ' + s + ' from Google. Server-side issue ; try again in a minute.';
+  return 'HTTP ' + s + ' from tile.googleapis.com.\nResponse: ' + (probe.body || '').slice(0, 200);
+}
+
+// Core attach worker. Takes raw lat/lng; the named-city and geocoded
+// flavors below both call this.
+async function _lssGmapsAttachAtLatLng(lat, lng, label, opts) {
+  opts = opts || {};
+  let key = _lssGmapsGetKey();
+  if (!key) {
+    key = await _lssGmapsPromptKey();
+    if (!key) { console.warn('[lss-gmaps] attach cancelled (no key).'); return; }
+  }
+  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch (_) {} _lssGmaps.cleanup = null; }
+  _lssGmaps.active = false;
+  _lssGmaps.tiles = null;
+  // (v12 patch17) Probe the tile API directly first. The lib swallows
+  // fetch errors so we wouldn't otherwise know whether the request
+  // succeeded. If the probe fails we surface the actual cause and
+  // bail without constructing the renderer.
+  const probe = await _lssGmapsTestKey(key);
+  if (!probe.ok) {
+    const diag = _lssGmapsDiagnoseProbe(probe);
+    console.error('[lss-gmaps] tile API probe failed:\n' + diag);
+    alert('Tile API probe failed.\n\n' + diag);
+    return;
+  }
+  console.log('[lss-gmaps] tile API probe OK ; constructing renderer.');
+  try {
+    const mod = await _lssGmapsLoadModule();
+    const GTR = mod.GoogleTilesRenderer || (mod.default && mod.default.GoogleTilesRenderer);
+    if (!GTR) throw new Error('GoogleTilesRenderer not found.');
+    const tiles = new GTR(key);
+    if (typeof tiles.setLatLonToYUp === 'function') {
+      tiles.setLatLonToYUp(lat * Math.PI/180, lng * Math.PI/180);
+    }
+    const sc = (typeof opts.scale === 'number' && opts.scale > 0) ? opts.scale : 1;
+    tiles.group.scale.setScalar(sc);
+    // (v12 patch21) Start at Y=0 like the build path. The refine pass
+    // below drops the city under the tunnel rooms once tiles have
+    // actually loaded ; doing it before causes the LOD math to think
+    // every tile is far from the camera and skip loading.
+    const initialY = (typeof opts.y === 'number') ? opts.y : 0;
+    tiles.group.position.y = initialY;
+    const eb = Math.max(8, 8 * sc);
+    if (tiles.errorTarget !== undefined) tiles.errorTarget = eb;
+    if (tiles.errorThreshold !== undefined) tiles.errorThreshold = eb;
+    scene.add(tiles.group);
+    // (v12 patch21) Pre-set resolution + camera + first update so the
+    // tile loader's bootstrap has its inputs before any other code
+    // calls update(). Mirrors the build path which already does this.
+    try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
+    try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
+    try { if (typeof tiles.update === 'function') tiles.update(); } catch(_) {}
+    _lssGmaps.tiles = tiles;
+    _lssGmaps.scale = sc;
+    _lssGmaps.overlayOnly = true;
+    _lssGmaps.active = true;
+    // (v12 patch21) Always-on 500ms pulse to drive update() regardless
+    // of whether the gameLoop tile-tick is firing for the current state.
+    // This was the missing piece : when the gameLoop didn't tick the
+    // gmaps hook (lobby state, paused state, etc) the loader never got
+    // its update() called and silently sat idle. The pulse runs in any
+    // game state and stops on detach.
+    let _streamPulseCount = 0;
+    const _streamPulse = setInterval(() => {
+      if (!_lssGmaps.tiles) { clearInterval(_streamPulse); return; }
+      const t = _lssGmaps.tiles;
+      try {
+        if (typeof t.setResolutionFromRenderer === 'function') t.setResolutionFromRenderer(camera, renderer);
+        if (typeof t.setCamera === 'function') t.setCamera(camera);
+        if (typeof t.update === 'function') t.update();
+      } catch (e) { /* swallow per-pulse */ }
+      _streamPulseCount++;
+      // First-second probe so the user can see whether anything is
+      // actually loading without enabling debug mode.
+      if (_streamPulseCount === 6 || _streamPulseCount === 20) {
+        let leaves = 0;
+        if (t.group) t.group.traverse((c) => { if (c && c.isMesh) leaves++; });
+        console.log('[lss-gmaps] stream pulse @ ' + (_streamPulseCount * 0.5).toFixed(1) + 's : ' + leaves + ' leaf meshes loaded.');
+      }
+    }, 500);
+    _lssGmaps.cleanup = () => {
+      try { clearInterval(_streamPulse); } catch (_) {}
+      try { scene.remove(tiles.group); } catch (_) {}
+      try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch (_) {}
+      _lssGmaps.tiles = null;
+      _lssGmaps.overlayOnly = false;
+    };
+    console.log('[lss-gmaps] overlay attached:', label || (lat + ',' + lng), 'scale:', sc, 'initial yOffset:', initialY);
+    // Auto-refine after a delay so tiles have time to load. Skip if the
+    // user passed an explicit opts.y (they want manual control).
+    if (typeof opts.y !== 'number') {
+      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch (e) { console.warn('[lss-gmaps] refine failed:', e); } }, 3500);
+      // Second pass a little later catches additional tile loads ; usually
+      // tightens the position by another few hundred units.
+      setTimeout(() => { try { _lssGmapsRefinePivot(); } catch (_) {} }, 9000);
+    }
+  } catch (e) {
+    console.error('[lss-gmaps] attach failed:', e);
+  }
+}
+
+// Named-city attach (uses the cities table set up earlier in this file).
+async function _lssGmapsAttachCity(cityKey, opts) {
+  const c = _lssGmapsCities[cityKey];
+  if (!c) {
+    console.warn('[lss-gmaps] unknown city:', cityKey, '. Try one of:', Object.keys(_lssGmapsCities));
+    return;
+  }
+  return _lssGmapsAttachAtLatLng(c.lat, c.lng, c.name, opts);
+}
+
+// Geocoded attach. Takes any human-readable place string ('Empire State
+// Building', '1600 Pennsylvania Ave', 'Mount Fuji', or just 'Hong Kong')
+// and resolves it via Nominatim (free OSM geocoder, no key required).
+async function _lssGmapsLocation(query, opts) {
+  if (!query || typeof query !== 'string') {
+    console.warn('[lss-gmaps] location: pass a place name string.');
+    return;
+  }
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(query);
+  try {
+    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!resp.ok) throw new Error('Geocoder HTTP ' + resp.status);
+    const arr = await resp.json();
+    if (!Array.isArray(arr) || arr.length === 0) {
+      console.warn('[lss-gmaps] no match for:', query);
+      alert('Location not found: ' + query);
+      return;
+    }
+    const lat = parseFloat(arr[0].lat);
+    const lng = parseFloat(arr[0].lon);
+    const name = arr[0].display_name || query;
+    console.log('[lss-gmaps] geocoded "' + query + '" ->', lat, lng, '(' + name + ')');
+    return _lssGmapsAttachAtLatLng(lat, lng, name, opts);
+  } catch (e) {
+    console.error('[lss-gmaps] location() failed:', e);
+    alert('Geocoder failed: ' + e.message);
+  }
+}
+
+function _lssGmapsDetachCity() {
+  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch (_) {} _lssGmaps.cleanup = null; }
+  _lssGmaps.active = false;
+  _lssGmaps.tiles = null;
+  _lssGmaps.overlayOnly = false;
+  console.log('[lss-gmaps] overlay detached.');
+}
+
+function _lssGmapsSetScaleLive(n) {
+  if (typeof n !== 'number' || n <= 0) return;
+  _lssGmaps.scale = n;
+  if (_lssGmaps.tiles && _lssGmaps.tiles.group) _lssGmaps.tiles.group.scale.setScalar(n);
+  // Update errorTarget so tile detail re-balances at the new scale.
+  if (_lssGmaps.tiles) {
+    const e = Math.max(8, 8 * n);
+    if (_lssGmaps.tiles.errorTarget !== undefined) _lssGmaps.tiles.errorTarget = e;
+    if (_lssGmaps.tiles.errorThreshold !== undefined) _lssGmaps.tiles.errorThreshold = e;
+  }
+  console.log('[lss-gmaps] world scale ->', n);
+}
+// (v13r-2) Procgen a race-custom map from two geocoded points. Great-
+// circle is approximated by flat-earth (good to <1% at city scale).
+// Spawn rooms sit at the start (gmaps pivot), finish room flagged
+// champion:true sits at the delta XZ, 1-5 intermediate rooms along
+// the line. Y values are seeded at zero ; terrain-follow shifts the
+// whole level up to fit once tiles load.
+// (v13r-2 revised) Custom Location race emits a wall-less gmaps stub
+// (type:'gmaps' so _lssGmapsBuildLevel handles the build path). The
+// actual race geometry — spawn clusters at the start, finish marker
+// at the destination — is wired up inside _lssGmapsBuildLevel by
+// reading game.pendingRaceRoute. No tunnels, no rooms, no walls ;
+// just open-air free-flight from A to B over the photoreal city.
+function _buildRaceCustomMap(startGeo, finishGeo) {
+  return {
+    type: 'gmaps',
+    name: 'Race ; ' + (startGeo.name || 'Start') + ' to ' + (finishGeo.name || 'Finish'),
+    description: 'Free-flight race between two real-world locations. No walls ; just sky and city.',
+    lat: startGeo.lat,
+    lng: startGeo.lng,
+    scale: 1,
+    palette: [0x102030, 0x122838, 0x143040, 0x163848, 0x184050, 0x1a4858, 0x1c5060, 0x1e5868],
+    rooms: [],
+    tunnels: [],
+  };
+}
+
+// Convert a finish lat/lng (relative to a start lat/lng) into world XZ.
+// Flat-earth approximation, accurate to <1% at city scale. Output matches
+// the post-setLatLonToYUp convention : X = east, Z = south (north = -Z).
+function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
+  const M_PER_DEG_LAT = 111320;
+  const sLat = startLat * Math.PI / 180;
+  const dLng = finishLng - startLng;
+  const dLat = finishLat - startLat;
+  return {
+    x: dLng * Math.cos(sLat) * M_PER_DEG_LAT,
+    z: -dLat * M_PER_DEG_LAT,
+  };
+}
+
+// (v12 patch13) Wire the lobby's DROP / DETACH buttons + Enter key on
+// the location input to the gmaps overlay path. Bound once at boot ;
+// the elements are static lobby DOM that exists from page load.
+(function _lssGmapsLobbyBindings() {
+  const goBtn  = document.getElementById('gmaps-loc-go');
+  const detBtn = document.getElementById('gmaps-loc-detach');
+  const inp    = document.getElementById('gmaps-loc-input');
+  const stat   = document.getElementById('gmaps-loc-status');
+  if (!goBtn || !detBtn || !inp || !stat) return;
+  function setStatus(msg, kind) {
+    stat.textContent = msg || '';
+    stat.classList.remove('err','ok');
+    if (kind) stat.classList.add(kind);
+  }
+  // Cancel any running pulse before starting a new one.
+  let _pulseTimer = null;
+  function stopPulse() { if (_pulseTimer) { clearInterval(_pulseTimer); _pulseTimer = null; } }
+  async function doDrop() {
+    const q = (inp.value || '').trim();
+    if (!q) { setStatus('Type a location first.', 'err'); inp.focus(); return; }
+    setStatus('Looking up ' + q + '...');
+    let lat, lng, displayName;
+    const coordMatch = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (coordMatch) {
+      lat = parseFloat(coordMatch[1]); lng = parseFloat(coordMatch[2]);
+      displayName = 'Custom (' + lat.toFixed(4) + ', ' + lng.toFixed(4) + ')';
+    } else {
+      try {
+        const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (!resp.ok) throw new Error('Geocoder HTTP ' + resp.status);
+        const arr = await resp.json();
+        if (!Array.isArray(arr) || arr.length === 0) {
+          setStatus('No match for: ' + q, 'err'); return;
+        }
+        lat = parseFloat(arr[0].lat); lng = parseFloat(arr[0].lon);
+        displayName = arr[0].display_name || q;
+      } catch (e) {
+        setStatus('Geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
+        return;
+      }
+    }
+    // Store the typed location ; LAUNCH will use it.
+    game.pendingGmapsOverlay = { lat, lng, name: displayName };
+    const shortName = displayName.length > 60 ? displayName.slice(0, 57) + '...' : displayName;
+
+    // (v13r-2) Race-mode branch : if the FINISH input is also filled,
+    // geocode it and procgen a race route.
+    const finInp = document.getElementById('gmaps-loc-finish-input');
+    if (LSS.MODE === 'race' && finInp && (finInp.value || '').trim()) {
+      const fq = finInp.value.trim();
+      let flat, flng, fname;
+      const fcm = fq.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+      if (fcm) {
+        flat = parseFloat(fcm[1]); flng = parseFloat(fcm[2]);
+        fname = 'Custom (' + flat.toFixed(4) + ', ' + flng.toFixed(4) + ')';
+      } else {
+        try {
+          const furl = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(fq);
+          const fresp = await fetch(furl, { headers: { 'Accept': 'application/json' } });
+          if (!fresp.ok) throw new Error('Geocoder HTTP ' + fresp.status);
+          const farr = await fresp.json();
+          if (!Array.isArray(farr) || farr.length === 0) {
+            setStatus('No match for finish: ' + fq, 'err'); return;
+          }
+          flat = parseFloat(farr[0].lat); flng = parseFloat(farr[0].lon);
+          fname = farr[0].display_name || fq;
+        } catch (e) {
+          setStatus('Finish geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
+          return;
+        }
+      }
+      const raceFinish = { lat: flat, lng: flng, name: fname };
+      const procgen = _buildRaceCustomMap({ lat, lng, name: displayName }, raceFinish);
+      MAP_DATA.race_custom = procgen;
+      game.pendingRaceRoute = {
+        start: { lat, lng, name: displayName },
+        finish: raceFinish,
+      };
+      // No round timer for custom-location races.
+      game.raceNoTimer = true;
+      setStatus('Race route armed : ' + shortName + ' -> ' + (fname.length > 40 ? fname.slice(0, 37) + '...' : fname), 'ok');
+      // Force-select race_custom (bypassing the echo guard).
+      try {
+        if (typeof selectMap === 'function') {
+          game.selectedMap = '__force_race_custom__';
+          selectMap('race_custom');
+        }
+      } catch(_) {}
+      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
+      return;
+    }
+
+    // (v12m) Broadcast to peers so they apply the same overlay. We re-send
+    // map_change with the current selectedMap so the existing receiver path
+    // handles both the map AND the overlay in one shot.
+    if (net && net.active && net.sendEvent) {
+      net.sendEvent({
+        type: 'map_change',
+        mapKey: game.selectedMap,
+        gmapsOverlay: { lat, lng, name: displayName },
+        // (v13r) Tag the active mode along with the overlay broadcast.
+        mode: LSS.MODE || 'classic'
+      });
+    }
+    const sel = game.selectedMap;
+    const isGmaps = sel && MAP_DATA[sel] && MAP_DATA[sel].type === 'gmaps';
+    if (isGmaps) {
+      // gmaps_user is selected ; rewrite its lat/lng so the carousel
+      // shows the right name now too.
+      const e = MAP_DATA[sel];
+      e.lat = lat; e.lng = lng;
+      e.name = shortName;
+      e.description = 'Pure city flight. Lat ' + lat.toFixed(4) + ', Lng ' + lng.toFixed(4) + '.';
+      // Force re-render of the map name in the lobby card.
+      const wasKey = sel; game.selectedMap = null; selectMap(wasKey);
+      setStatus('Pure-city map selected: ' + shortName + '. LAUNCH to drop in.', 'ok');
+    } else {
+      const tunnelName = (MAP_DATA[sel] && MAP_DATA[sel].name) || sel;
+      setStatus('Will overlay ' + shortName + ' under "' + tunnelName + '" on LAUNCH.', 'ok');
+    }
+  }
+    goBtn.addEventListener('click', doDrop);
+  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); doDrop(); } });
+  detBtn.addEventListener('click', () => {
+    stopPulse();
+    _lssGmapsDetachCity();
+    game.pendingGmapsOverlay = null;
+    // (v13r-2) Also clear race-custom route on DETACH.
+    game.pendingRaceRoute = null;
+    game.raceNoTimer = false;
+    if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
+    // (v13r-3) Restore the default arena clamp.
+    if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
+    if (typeof LSS._origCameraFar === 'number') {
+      camera.far = LSS._origCameraFar;
+      camera.updateProjectionMatrix();
+    }
+    if (scene.fog && typeof LSS._origFogDensity === 'number') {
+      scene.fog.density = LSS._origFogDensity;
+    }
+    if (game.selectedMap === 'race_custom') {
+      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
+    }
+    // Also blank the FINISH input so the next race lobby starts fresh.
+    try {
+      const fin = document.getElementById('gmaps-loc-finish-input');
+      if (fin) fin.value = '';
+    } catch (_) {}
+    setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
+    // Re-enable the input that may have been locked by a peer's set.
+    try { const inp = document.getElementById('gmaps-loc-input'); if (inp) inp.disabled = false; } catch(_) {}
+    // (v12m) Broadcast detach so peers also clear and unlock.
+    if (net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'map_change', mapKey: game.selectedMap, gmapsOverlay: null, mode: LSS.MODE || 'classic' });
+    }
+  });
+
+  // (v13r) Race-mode toggle: flip LSS.MODE and rebroadcast the current
+  // map_change so peers stay in sync. When flipping ON, if the current
+  // map isn't a race_* map, auto-select Pole Position so race mode is
+  // a one-click experience.
+  const raceBtn = document.getElementById('race-mode-toggle');
+  if (raceBtn) {
+    raceBtn.addEventListener('click', () => {
+      const on = raceBtn.dataset.on !== '1';
+      raceBtn.dataset.on = on ? '1' : '0';
+      raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
+      raceBtn.classList.toggle('active', on);
+      LSS.MODE = on ? 'race' : 'classic';
+      // (v13r) Rebuild the carousel so the dots / arrows reflect the new
+      // mode's filtered map list. buildMapSelector also re-snaps the
+      // selection if the previous map is no longer eligible.
+      if (typeof buildMapSelector === 'function') {
+        try { buildMapSelector(); } catch (_) {}
+      }
+      // (v13r-2) Toggle the FINISH input + relabel the panel for race mode.
+      try {
+        const lbl = document.getElementById('gmaps-overlay-label');
+        const fin = document.getElementById('gmaps-loc-finish-input');
+        const startInp = document.getElementById('gmaps-loc-input');
+        if (on) {
+          if (lbl) lbl.textContent = 'RACE: START -> FINISH';
+          if (fin) fin.style.display = '';
+          if (startInp) startInp.placeholder = 'Start location (e.g. Stanley Park)';
+        } else {
+          if (lbl) lbl.textContent = 'DROP ON LOCATION';
+          if (fin) fin.style.display = 'none';
+          if (startInp) startInp.placeholder = 'Empire State Building';
+        }
+      } catch (_) {}
+      // Convenience: when flipping ON, also set the race-default walls
+      // to Datamosh Cube (preset 22). User-tested choice ; reads well
+      // through the gmaps city overlay and doesn't glitch on cycle.
+      // User can still cycle off with P.
+      if (on && typeof setWallPattern === 'function') {
+        try { setWallPattern(22); } catch (_) {}
+      }
+      // Convenience: when flipping ON, force-select Pole Position
+      // (currently the only race map). selectMap broadcasts map_change
+      // with the mode tagged along.
+      if (on && typeof selectMap === 'function' && MAP_DATA && MAP_DATA.race_pole_position) {
+        if (game.selectedMap !== 'race_pole_position') {
+          selectMap('race_pole_position');
+          return;
+        }
+      }
+      if (net && net.active && net.sendEvent && game.selectedMap) {
+        const ov = game.pendingGmapsOverlay;
+        net.sendEvent({
+          type: 'map_change',
+          mapKey: game.selectedMap,
+          gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
+          mode: LSS.MODE
+        });
+      }
+    });
+  }
+})();
+
+window.lssGmaps = {
+  state: _lssGmaps,
+  cities: _lssGmapsCities,
+  setKey: _lssGmapsSetKey,
+  getKey: _lssGmapsGetKey,
+  clearKey: _lssGmapsClearKey,
+  prompt: _lssGmapsPromptKey,
+  setScale: _lssGmapsSetScaleLive,
+  attachCity: _lssGmapsAttachCity,
+  attachLatLng: _lssGmapsAttachAtLatLng,
+  location: _lssGmapsLocation,
+  refinePivot: _lssGmapsRefinePivot,
+  detachCity: _lssGmapsDetachCity,
+  testKey: _lssGmapsTestKey
+};
+
+
+} // end _bootLSS
+
+// v8VR: kick off the game once the THREE module bootstrap has run.
+// If the event already fired before this listener was added (race), boot now.
+if (window.LSS_ENGINE_READY) {
+  _bootLSS();
+} else {
+  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
+}
+
+</script>
+</body>
+</html>

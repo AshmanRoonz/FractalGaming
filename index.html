@@ -35825,6 +35825,11 @@ function updateStasisFields(dt) {
   if (_championDue && !game.championSpawned) {
     spawnChampionField();
     game.championSpawned = true;
+    // (v15m music upgrade) Champion-field appearance cue : low rumble +
+    // ascending pad swell to signal "the field is open, last 10 seconds".
+    if (typeof musicPlayChampionCue === 'function') {
+      try { musicPlayChampionCue(); } catch (_) {}
+    }
   }
 
   // (v11) Update the cosmic anomaly if one's active. Self-destroys when
@@ -46170,85 +46175,162 @@ function _musicMidiHz(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
 // === SYNTH RECIPES (lifted from framework_dancing_cosmos_band.html) ===
 
 // Drum: kick (note 35/36), snare (38/40), crash (49/57), default = hat.
+// (v15m music upgrade) Improved drum kit.
+//   Kick : pitched body sweep + click transient (the "thump + tick").
+//   Snare : tuned body tone + noise crack, both shaped (the "ka-snap").
+//   Crash : longer noise sweep with darker tail (not just bright sizzle).
+//   Hat : tightened transient + tiny pitched accent.
 function _musicSynthDrum(note, g, when, out) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  // ----- KICK (note 35 / 36) -----
   if (note === 35 || note === 36) {
-    const osc = ctx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(150, when);
-    osc.frequency.exponentialRampToValueAtTime(45, when + 0.1);
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.9 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.28);
-    osc.connect(amp).connect(out);
-    osc.start(when); osc.stop(when + 0.35);
-    return { stop: (t) => { try { osc.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+    // Body : pitched sine sweep (the thump)
+    const body = ctx.createOscillator();
+    body.type = 'sine';
+    body.frequency.setValueAtTime(180, when);
+    body.frequency.exponentialRampToValueAtTime(42, when + 0.10);
+    const bodyAmp = ctx.createGain();
+    bodyAmp.gain.setValueAtTime(0.95 * g, when);
+    bodyAmp.gain.exponentialRampToValueAtTime(0.01, when + 0.32);
+    body.connect(bodyAmp).connect(out);
+    // Click transient : short triangle blip for the attack pop
+    const click = ctx.createOscillator();
+    click.type = 'triangle';
+    click.frequency.setValueAtTime(1200, when);
+    click.frequency.exponentialRampToValueAtTime(200, when + 0.008);
+    const clickAmp = ctx.createGain();
+    clickAmp.gain.setValueAtTime(0.30 * g, when);
+    clickAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.012);
+    click.connect(clickAmp).connect(out);
+    body.start(when); body.stop(when + 0.40);
+    click.start(when); click.stop(when + 0.015);
+    return { stop: (t) => { try { body.stop(Math.max(when + 0.01, t)); click.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
+  // ----- SNARE (note 38 / 40) -----
   if (note === 38 || note === 40) {
+    // Body tone : 200 Hz triangle quickly fading (the "ka")
+    const body = ctx.createOscillator();
+    body.type = 'triangle';
+    body.frequency.value = 200;
+    const bodyAmp = ctx.createGain();
+    bodyAmp.gain.setValueAtTime(0.45 * g, when);
+    bodyAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.06);
+    body.connect(bodyAmp).connect(out);
+    // Noise crack (the "snap") through a bandpass
     const buf = ctx.createBuffer(1, 4096, ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     const src = ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
     const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.8;
-    const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.7 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.01, when + 0.15);
-    src.connect(bp).connect(amp).connect(out);
-    src.start(when); src.stop(when + 0.18);
-    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+    bp.type = 'bandpass'; bp.frequency.value = 2200; bp.Q.value = 1.0;
+    const noiseAmp = ctx.createGain();
+    noiseAmp.gain.setValueAtTime(0.75 * g, when);
+    noiseAmp.gain.exponentialRampToValueAtTime(0.01, when + 0.16);
+    src.connect(bp).connect(noiseAmp).connect(out);
+    body.start(when); body.stop(when + 0.08);
+    src.start(when); src.stop(when + 0.20);
+    return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); body.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
+  // ----- CRASH (note 49 / 57) -----
   if (note === 49 || note === 57) {
     const buf = ctx.createBuffer(1, 8192, ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     const src = ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
+    // Sweeping highpass : starts bright, drops over time for darker tail.
     const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass'; hp.frequency.value = 5000;
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(7000, when);
+    hp.frequency.exponentialRampToValueAtTime(2500, when + 0.8);
     const amp = ctx.createGain();
-    amp.gain.setValueAtTime(0.35 * g, when);
-    amp.gain.exponentialRampToValueAtTime(0.005, when + 1.2);
+    amp.gain.setValueAtTime(0.38 * g, when);
+    amp.gain.exponentialRampToValueAtTime(0.005, when + 1.3);
     src.connect(hp).connect(amp).connect(out);
-    src.start(when); src.stop(when + 1.3);
+    src.start(when); src.stop(when + 1.4);
     return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
-  // Default = hat (closed).
+  // ----- HAT (default, closed) -----
   const buf = ctx.createBuffer(1, 1024, ctx.sampleRate);
   const d = buf.getChannelData(0);
   for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
   const src = ctx.createBufferSource();
   src.buffer = buf;
+  // Tight highpass + bandpass mix : pitched hat with crisp transient.
   const hp = ctx.createBiquadFilter();
-  hp.type = 'highpass'; hp.frequency.value = 7000;
+  hp.type = 'highpass'; hp.frequency.value = 7500;
   const amp = ctx.createGain();
-  amp.gain.setValueAtTime(0.35 * g, when);
-  amp.gain.exponentialRampToValueAtTime(0.005, when + 0.06);
+  amp.gain.setValueAtTime(0.40 * g, when);
+  amp.gain.exponentialRampToValueAtTime(0.005, when + 0.05);
   src.connect(hp).connect(amp).connect(out);
-  src.start(when); src.stop(when + 0.08);
-  return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
+  // Pitched accent : tiny triangle ping for hat tonality
+  const ping = ctx.createOscillator();
+  ping.type = 'triangle';
+  ping.frequency.value = 9000;
+  const pingAmp = ctx.createGain();
+  pingAmp.gain.setValueAtTime(0.06 * g, when);
+  pingAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.02);
+  ping.connect(pingAmp).connect(out);
+  src.start(when); src.stop(when + 0.07);
+  ping.start(when); ping.stop(when + 0.025);
+  return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); ping.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
 }
 
+// (v15m music upgrade) Fattened bass voice. Main saw + sub-octave sine
+// for low-end weight, tanh saturation for harmonic content (the "growl"),
+// and a filter envelope that opens for transient punch then closes for
+// sustained body. Much more present than the previous single-sawtooth
+// version.
+// _bassSatCurve : computed once at module-load, reused per note.
+const _bassSatCurve = (function() {
+  const curve = new Float32Array(512);
+  for (let i = 0; i < 512; i++) {
+    const x = (i / 255.5) - 1;
+    curve[i] = Math.tanh(x * 1.7);   // soft saturation
+  }
+  return curve;
+})();
 function _musicSynthBass(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  // Main oscillator (saw — the timbral body)
   const osc = ctx.createOscillator();
-  osc.type = music.bassWave || 'sawtooth'; osc.frequency.value = freq;
+  osc.type = music.bassWave || 'sawtooth';
+  osc.frequency.value = freq;
+  // Sub-octave sine for low-end foundation
+  const sub = ctx.createOscillator();
+  sub.type = 'sine';
+  sub.frequency.value = freq * 0.5;
+  // Saturation on the main oscillator path for harmonic richness
+  const sat = ctx.createWaveShaper();
+  sat.curve = _bassSatCurve;
+  // Lowpass filter with envelope :
+  //   - At note-on : opens to 1800 Hz briefly (transient punch — bright click)
+  //   - Closes to 400 Hz over 80 ms (sustained body — round low end)
   const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 450; lp.Q.value = 1;
+  lp.type = 'lowpass';
+  lp.Q.value = 2.5;
+  lp.frequency.setValueAtTime(1800, when);
+  lp.frequency.exponentialRampToValueAtTime(400, when + 0.08);
+  // Per-layer gain (sub balanced against main)
+  const subGain = ctx.createGain();
+  subGain.gain.value = 0.55;
+  // Master amp envelope (fast attack, hold, then release)
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.48 * g, when + 0.008);
-  amp.gain.linearRampToValueAtTime(0.30 * g, when + 0.15);
-  osc.connect(lp).connect(amp).connect(out);
-  osc.start(when);
-  // Auto-stop on duration. Caller can also stop early via the returned handle.
+  amp.gain.linearRampToValueAtTime(0.50 * g, when + 0.008);
+  amp.gain.linearRampToValueAtTime(0.32 * g, when + 0.15);
+  // Routing
+  osc.connect(sat).connect(lp);
+  sub.connect(subGain).connect(lp);
+  lp.connect(amp).connect(out);
+  osc.start(when); sub.start(when);
   const stopAt = when + (durSec != null ? durSec : 0.5);
-  amp.gain.setValueAtTime(0.30 * g, stopAt);
+  amp.gain.setValueAtTime(0.32 * g, stopAt);
   amp.gain.linearRampToValueAtTime(0, stopAt + 0.05);
-  try { osc.stop(stopAt + 0.1); } catch (_) {}
+  try { osc.stop(stopAt + 0.1); sub.stop(stopAt + 0.1); } catch (_) {}
   let stopped = false;
   return {
     stop: (t) => {
@@ -46257,33 +46339,80 @@ function _musicSynthBass(freq, g, when, out, durSec) {
         amp.gain.cancelScheduledValues(t);
         amp.gain.setValueAtTime(amp.gain.value, t);
         amp.gain.linearRampToValueAtTime(0, t + 0.05);
-        osc.stop(t + 0.1);
+        osc.stop(t + 0.1); sub.stop(t + 0.1);
       } catch (_) {}
     }
   };
 }
 
+// (v15m music upgrade) Fattened pad voice. Four oscillators (unison saw
+// pair detuned ±~9 cents for chorus-like width + sub-octave sine for
+// foundation + fifth-up sine for upper shimmer), slow LFO modulating the
+// lowpass cutoff for evolving movement, filter envelope that "blooms in"
+// over the attack. Way more bed-of-sound than the previous 2-oscillator
+// thin pad.
 function _musicSynthPad(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  const padWave = music.padWave || 'sawtooth';
+  // Main detuned unison pair (the body of the pad)
   const o1 = ctx.createOscillator();
   const o2 = ctx.createOscillator();
-  const padWave = music.padWave || 'sawtooth';
   o1.type = padWave; o2.type = padWave;
-  o1.frequency.value = freq;
-  o2.frequency.value = freq * 1.005;
+  o1.frequency.value = freq * 0.997;       // ~-5 cents
+  o2.frequency.value = freq * 1.005;       // ~+9 cents
+  // Sub-octave sine for low-end weight
+  const oSub = ctx.createOscillator();
+  oSub.type = 'sine';
+  oSub.frequency.value = freq * 0.5;
+  // Fifth-up sine for harmonic shimmer (very subtle)
+  const oFifth = ctx.createOscillator();
+  oFifth.type = 'sine';
+  oFifth.frequency.value = freq * 1.5;
+  // Filter — base 1200 Hz lowpass, modulated by LFO for breathing motion.
   const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass'; lp.frequency.value = 1400; lp.Q.value = 0.7;
+  lp.type = 'lowpass';
+  lp.frequency.value = 1200;
+  lp.Q.value = 0.85;
+  // Filter envelope : pad "blooms in" — cutoff opens from 700 → 1500
+  // over the attack, giving the pad warmth-into-air motion.
+  lp.frequency.setValueAtTime(700, when);
+  lp.frequency.linearRampToValueAtTime(1500, when + 0.8);
+  // Slow LFO modulating cutoff for evolving movement (0.3–0.7 Hz, ±300 Hz).
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = 0.30 + Math.random() * 0.40;
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 300;
+  lfo.connect(lfoGain);
+  lfoGain.connect(lp.frequency);
+  // Per-voice gain stages so we can balance the layers
+  const subGain = ctx.createGain();
+  subGain.gain.value = 0.42;
+  oSub.connect(subGain).connect(lp);
+  const fifthGain = ctx.createGain();
+  fifthGain.gain.value = 0.14;
+  oFifth.connect(fifthGain).connect(lp);
+  o1.connect(lp);
+  o2.connect(lp);
+  // Master amp envelope : slow attack, slow release (pad behavior).
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.18 * g, when + 0.35);
-  o1.connect(lp); o2.connect(lp);
+  amp.gain.linearRampToValueAtTime(0.15 * g, when + 0.5);
   lp.connect(amp).connect(out);
   o1.start(when); o2.start(when);
+  oSub.start(when); oFifth.start(when);
+  lfo.start(when);
   const stopAt = when + (durSec != null ? durSec : 2.0);
-  amp.gain.setValueAtTime(0.18 * g, stopAt);
-  amp.gain.linearRampToValueAtTime(0, stopAt + 0.35);
-  try { o1.stop(stopAt + 0.4); o2.stop(stopAt + 0.4); } catch (_) {}
+  amp.gain.setValueAtTime(0.15 * g, stopAt);
+  amp.gain.linearRampToValueAtTime(0, stopAt + 0.5);
+  try {
+    o1.stop(stopAt + 0.55);
+    o2.stop(stopAt + 0.55);
+    oSub.stop(stopAt + 0.55);
+    oFifth.stop(stopAt + 0.55);
+    lfo.stop(stopAt + 0.55);
+  } catch (_) {}
   let stopped = false;
   return {
     stop: (t) => {
@@ -46291,28 +46420,63 @@ function _musicSynthPad(freq, g, when, out, durSec) {
       try {
         amp.gain.cancelScheduledValues(t);
         amp.gain.setValueAtTime(amp.gain.value, t);
-        amp.gain.linearRampToValueAtTime(0, t + 0.35);
-        o1.stop(t + 0.4); o2.stop(t + 0.4);
+        amp.gain.linearRampToValueAtTime(0, t + 0.5);
+        o1.stop(t + 0.55); o2.stop(t + 0.55);
+        oSub.stop(t + 0.55); oFifth.stop(t + 0.55);
+        lfo.stop(t + 0.55);
       } catch (_) {}
     }
   };
 }
 
+// (v15m music upgrade) Lead voice now has a soft octave-up sine layer
+// for shimmer + delayed vibrato (LFO ramps in after the attack so the
+// note's onset is pure, then warms with vibrato as it sustains). The
+// result is a more vocal / expressive lead instead of a sterile single
+// oscillator.
 function _musicSynthLead(freq, g, when, out, durSec) {
   const ctx = music.ctx;
   if (!ctx) return null;
+  // Main oscillator
   const osc = ctx.createOscillator();
-  osc.type = music.leadWave || 'triangle'; osc.frequency.value = freq;
+  osc.type = music.leadWave || 'triangle';
+  osc.frequency.value = freq;
+  // Octave-up sine (subtle harmonic shimmer)
+  const oct = ctx.createOscillator();
+  oct.type = 'sine';
+  oct.frequency.value = freq * 2;
+  // Vibrato LFO : 5.5 Hz, ±0.5% (~9 cents). Gain starts at 0 and ramps
+  // up after the attack so the note's onset is clean.
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = 5.5;
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 0;
+  lfoGain.gain.setValueAtTime(0, when);
+  lfoGain.gain.linearRampToValueAtTime(freq * 0.005, when + 0.12);  // vibrato grows in
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc.frequency);
+  // Octave layer gain (subtle harmonic enrichment)
+  const octGain = ctx.createGain();
+  octGain.gain.value = 0.18;
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.28 * g, when + 0.015);
-  amp.gain.linearRampToValueAtTime(0.14 * g, when + 0.12);
-  osc.connect(amp).connect(out);
-  osc.start(when);
+  amp.gain.linearRampToValueAtTime(0.30 * g, when + 0.015);
+  amp.gain.linearRampToValueAtTime(0.16 * g, when + 0.12);
+  osc.connect(amp);
+  oct.connect(octGain).connect(amp);
+  amp.connect(out);
+  // (v15m music upgrade) Reverb send : a tap off the amp goes to the lead
+  // send (predelay → convolver → wet gain → out). Wet level is controlled
+  // by the send chain's internal gain, so this just feeds it.
+  if (music.leadSend) {
+    try { amp.connect(music.leadSend); } catch (_) {}
+  }
+  osc.start(when); oct.start(when); lfo.start(when);
   const stopAt = when + (durSec != null ? durSec : 0.35);
-  amp.gain.setValueAtTime(0.14 * g, stopAt);
+  amp.gain.setValueAtTime(0.16 * g, stopAt);
   amp.gain.linearRampToValueAtTime(0, stopAt + 0.08);
-  try { osc.stop(stopAt + 0.12); } catch (_) {}
+  try { osc.stop(stopAt + 0.12); oct.stop(stopAt + 0.12); lfo.stop(stopAt + 0.12); } catch (_) {}
   let stopped = false;
   return {
     stop: (t) => {
@@ -46322,6 +46486,8 @@ function _musicSynthLead(freq, g, when, out, durSec) {
         amp.gain.setValueAtTime(amp.gain.value, t);
         amp.gain.linearRampToValueAtTime(0, t + 0.08);
         osc.stop(t + 0.12);
+        oct.stop(t + 0.12);
+        lfo.stop(t + 0.12);
       } catch (_) {}
     }
   };
@@ -46331,11 +46497,24 @@ function _musicSynthLead(freq, g, when, out, durSec) {
 
 // Build a chord from scale degree (0..6) + quality.
 // Returns array of MIDI offsets from keyMidi.
+// (v15m music upgrade) Expanded chord qualities :
+//   - min7, maj7 : sevenths add harmonic depth, modern jazzy color
+//   - sus2, sus4 : suspended chords for tension/anticipation
+//   - dim7 : darker than plain dim, used sparingly for unease
+//   - add9 : minor with added 9th, dreamier than plain minor
+//   - maj9 : full 9th chord, lush
 function _musicChord(degree, quality) {
   const scale = music.scale;
   const root = scale[degree % 7];
-  if (quality === 'maj') return [root, root + 4, root + 7];
-  if (quality === 'dim') return [root, root + 3, root + 6];
+  if (quality === 'maj')   return [root, root + 4, root + 7];
+  if (quality === 'maj7')  return [root, root + 4, root + 7, root + 11];
+  if (quality === 'maj9')  return [root, root + 4, root + 7, root + 11, root + 14];
+  if (quality === 'min7')  return [root, root + 3, root + 7, root + 10];
+  if (quality === 'dim')   return [root, root + 3, root + 6];
+  if (quality === 'dim7')  return [root, root + 3, root + 6, root + 9];
+  if (quality === 'sus2')  return [root, root + 2, root + 7];
+  if (quality === 'sus4')  return [root, root + 5, root + 7];
+  if (quality === 'add9')  return [root, root + 3, root + 7, root + 14];
   return [root, root + 3, root + 7]; // 'min' default
 }
 
@@ -46700,6 +46879,37 @@ function musicEnsureCtx() {
   if (!audio.musicGain) return false;
   music.ctx = audio.ctx;
   music.out = audio.musicGain;
+  // (v15m music upgrade) Build a dedicated reverb send for the lead voice
+  // so kill-triggered phrases and lead lines have spatial presence —
+  // sustained tail + slight predelay, sits underneath the dry signal.
+  // Built once and reused for every lead note via music.leadSend.
+  if (!music.leadSend) {
+    try {
+      const ctx = music.ctx;
+      const leadReverb = ctx.createConvolver();
+      // Generate a small impulse response : 1.2s decay, soft attack.
+      const irLen = Math.floor(ctx.sampleRate * 1.2);
+      const ir = ctx.createBuffer(2, irLen, ctx.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const d = ir.getChannelData(ch);
+        for (let i = 0; i < irLen; i++) {
+          // Exponential decay, randomized for stereo difference.
+          const t = i / irLen;
+          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 2.8) * 0.6;
+        }
+      }
+      leadReverb.buffer = ir;
+      // 35 ms predelay so the wet signal sits behind the dry, not on top.
+      const predelay = ctx.createDelay(0.1);
+      predelay.delayTime.value = 0.035;
+      // Wet level — subtle, just enough to give the lead air.
+      const wetGain = ctx.createGain();
+      wetGain.gain.value = 0.42;
+      predelay.connect(leadReverb).connect(wetGain).connect(music.out);
+      // The send node : lead voices connect to this AND directly to music.out.
+      music.leadSend = predelay;
+    } catch (_) { music.leadSend = null; }
+  }
   return true;
 }
 
@@ -46904,12 +47114,67 @@ function musicSetVolume(v) {
   }
 }
 
+// (v15m music upgrade) Fire a short transition fill when the pattern
+// changes, so the soundtrack doesn't snap to a new mood instantly. Fill
+// shape varies with the destination :
+//   combat       → snare roll + crash (escalating into action)
+//   doomed       → low tom + reverse-swell (dread)
+//   roundEndVictory / matchEndVictory → big crash (celebration)
+//   roundEndDefeat / matchEndDefeat   → kick + tomb (collapse)
+//   warmup / lobby → soft hat sweep (calm reset)
+// Fills run at ~0.4 sec duration so they fit before the next bar starts.
+function _musicFireTransitionFill(fromId, toId) {
+  if (!music.ctx || !music.out) return;
+  if (fromId === toId) return;
+  if (fromId === 'silent' || toId === 'silent') return; // no fill on silence
+  const ctx = music.ctx;
+  const t = ctx.currentTime + 0.02;
+  const secPerBeat = 60 / (music.bpm || 96);
+  const out = music.out;
+  try {
+    if (toId === 'combat') {
+      // Snare 16ths building intensity + crash on downbeat.
+      for (let i = 0; i < 5; i++) {
+        const dt = i * secPerBeat * 0.20;        // 20ths of a beat apart
+        const vol = 0.45 + i * 0.12;             // crescendo
+        _musicSynthDrum(38, vol, t + dt, out);
+      }
+      _musicSynthDrum(49, 0.95, t + secPerBeat * 1.0, out);
+      _musicSynthDrum(36, 1.00, t + secPerBeat * 1.0, out);
+    } else if (toId === 'doomed') {
+      // Low ominous tom + delayed crash for dread.
+      _musicSynthDrum(36, 1.10, t, out);                  // pitched kick = tom-ish
+      _musicSynthDrum(36, 0.70, t + secPerBeat * 0.35, out);
+      _musicSynthDrum(49, 0.40, t + secPerBeat * 0.5, out);
+    } else if (toId === 'roundEndVictory' || toId === 'matchEndVictory') {
+      // Big crash + open hat for triumph.
+      _musicSynthDrum(49, 1.10, t, out);
+      _musicSynthDrum(36, 1.00, t, out);
+      _musicSynthDrum(38, 0.50, t + secPerBeat * 0.25, out);
+      _musicSynthDrum(38, 0.50, t + secPerBeat * 0.5, out);
+    } else if (toId === 'roundEndDefeat' || toId === 'matchEndDefeat') {
+      // Hollow kick + tomb-fall snare for "we lost".
+      _musicSynthDrum(36, 0.95, t, out);
+      _musicSynthDrum(38, 0.45, t + secPerBeat * 0.5, out);
+      _musicSynthDrum(36, 0.70, t + secPerBeat * 1.0, out);
+    } else if (toId === 'warmup' || toId === 'lobby') {
+      // Calm reset : soft hat triplet.
+      _musicSynthDrum(42, 0.30, t, out);
+      _musicSynthDrum(42, 0.30, t + secPerBeat * 0.33, out);
+      _musicSynthDrum(42, 0.30, t + secPerBeat * 0.66, out);
+    }
+  } catch (_) {}
+}
+
 function musicSetPattern(id, opts) {
   if (!MUSIC_PATTERNS[id]) {
     console.warn('[music] unknown pattern', id);
     return;
   }
+  const prevId = music.patternId;
   music.patternId = id;
+  // (v15m music upgrade) Fire the transition fill on every pattern change.
+  if (prevId !== id) _musicFireTransitionFill(prevId, id);
   music.lastChordKey = null;
   // Reset riff cycle bar so each pattern starts at its first phrase.
   music._riffCycleBar = 0;
@@ -47003,17 +47268,91 @@ function musicOnKill(who, streakHint) {
   music.lastKillBeat = music.beat;
   if (streakHint != null) music.multikillCount = Math.max(music.multikillCount, streakHint | 0);
   phraseLen = Math.min(5, music.multikillCount);
-  // Phrase: ascending pentatonic from root, eighth notes.
-  for (let i = 0; i < phraseLen; i++) {
-    const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
-    const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
-    music.pendingLeadNotes.push({
-      atBeat: startBeat + i * 0.5,
-      note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
-      dur: 0.30,
-      vel: 0.85,
-    });
+  // (v15m music upgrade) Phrase character escalates with multikill count :
+  //   1 kill     : single root note (existing behavior)
+  //   2 kills    : pentatonic ascending pair
+  //   3 kills    : pentatonic ascending triple (existing extended)
+  //   4+ kills   : CHROMATIC RISER — semitones climbing, the "you're on a tear" cue
+  // Plus a crash on multikill ≥ 3 to punctuate.
+  const useChromatic = music.multikillCount >= 4;
+  if (useChromatic) {
+    // 6-note chromatic riser from root up an octave.
+    phraseLen = 6;
+    for (let i = 0; i < phraseLen; i++) {
+      music.pendingLeadNotes.push({
+        atBeat: startBeat + i * 0.33,           // 8th-triplet feel for urgency
+        note: i * 2,                            // whole-tone climb gives chromatic feel without dissonance
+        dur: 0.18,
+        vel: 0.9 + i * 0.02,
+      });
+    }
+    // Crash on the final note for punctuation.
+    try {
+      const crashT = music.ctx.currentTime + (startBeat - music.beat) * (60 / music.bpm);
+      _musicSynthDrum(49, 0.95, crashT, music.out);
+    } catch (_) {}
+  } else if (music.multikillCount >= 3) {
+    // Pentatonic phrase + small crash hit.
+    for (let i = 0; i < phraseLen; i++) {
+      const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
+      const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
+      music.pendingLeadNotes.push({
+        atBeat: startBeat + i * 0.5,
+        note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
+        dur: 0.30,
+        vel: 0.90,
+      });
+    }
+    try {
+      const crashT = music.ctx.currentTime + (startBeat - music.beat) * (60 / music.bpm);
+      _musicSynthDrum(49, 0.55, crashT, music.out);
+    } catch (_) {}
+  } else {
+    // Standard pentatonic phrase, eighth notes.
+    for (let i = 0; i < phraseLen; i++) {
+      const scaleIdx = i % MUSIC_PENTATONIC_MIN.length;
+      const oct = Math.floor(i / MUSIC_PENTATONIC_MIN.length) * 12;
+      music.pendingLeadNotes.push({
+        atBeat: startBeat + i * 0.5,
+        note: MUSIC_PENTATONIC_MIN[scaleIdx] + oct,
+        dur: 0.30,
+        vel: 0.85,
+      });
+    }
   }
+}
+
+// (v15m music upgrade) Champion-field cue : low rumble + crash + ascending
+// pad-like swell. Fires when the champion field spawns (last 10 seconds of
+// round). Tells the player "endgame is here" without a HUD prompt.
+function musicPlayChampionCue() {
+  if (!musicEnsureCtx()) return;
+  const ctx = music.ctx;
+  const t = ctx.currentTime + 0.02;
+  const out = music.out;
+  // Big low rumble : pitched-down kick + sustained sub sine.
+  try {
+    _musicSynthDrum(36, 1.20, t, out);
+    // Sustained low rumble : 50 Hz sine for ~1.2s.
+    const rumble = ctx.createOscillator();
+    rumble.type = 'sine';
+    rumble.frequency.setValueAtTime(60, t);
+    rumble.frequency.exponentialRampToValueAtTime(40, t + 1.2);
+    const rumAmp = ctx.createGain();
+    rumAmp.gain.setValueAtTime(0, t);
+    rumAmp.gain.linearRampToValueAtTime(0.45, t + 0.4);
+    rumAmp.gain.linearRampToValueAtTime(0, t + 1.4);
+    rumble.connect(rumAmp).connect(out);
+    rumble.start(t); rumble.stop(t + 1.5);
+    // Cymbal swell : two delayed crashes for big sustained shimmer.
+    _musicSynthDrum(49, 0.40, t + 0.10, out);
+    _musicSynthDrum(49, 0.30, t + 0.65, out);
+    // Ascending lead phrase : root, fifth, octave — "the field calls".
+    const startBeat = Math.ceil(music.beat + 0.5);
+    music.pendingLeadNotes.push({ atBeat: startBeat,       note: 0,  dur: 0.45, vel: 0.95 });
+    music.pendingLeadNotes.push({ atBeat: startBeat + 1,   note: 7,  dur: 0.45, vel: 0.95 });
+    music.pendingLeadNotes.push({ atBeat: startBeat + 2,   note: 12, dur: 0.65, vel: 1.00 });
+  } catch (_) {}
 }
 
 // Round-end victory/defeat phrase (longer scripted lead figure).
@@ -47067,8 +47406,9 @@ const MUSIC_PATTERNS = {
       return null;
     },
     bassDurBeats: 2,
-    // i - VI - i - i loop (Aeolian)
-    chords: [[0, 'min'], [5, 'maj'], [0, 'min'], [0, 'min']],
+    // (v15m music upgrade) Calmer, dreamier lobby with min7 + maj7 colors.
+    // i7 - VImaj7 - i(add9) - i7
+    chords: [[0, 'min7'], [5, 'maj7'], [0, 'add9'], [0, 'min7']],
     chordsBars: [2, 2, 2, 2],
   },
 
@@ -47120,8 +47460,9 @@ const MUSIC_PATTERNS = {
       return null;
     },
     bassDurBeats: 1,
-    // i - VI - VII - i (Aeolian standard)
-    chords: [[0, 'min'], [5, 'maj'], [6, 'maj'], [0, 'min']],
+    // (v15m music upgrade) Combat now mixes a sus4 build-up before the
+    // i7 resolution — adds anticipation. i - VI - sus4_i - i7.
+    chords: [[0, 'min'], [5, 'maj'], [0, 'sus4'], [0, 'min7']],
     chordsBars: [2, 1, 1, 2],
   },
 
@@ -47138,7 +47479,9 @@ const MUSIC_PATTERNS = {
     },
     bass: (beat) => 0, // pedal on root, every beat
     bassDurBeats: 1,
-    chords: [[0, 'min'], [1, 'min']], // i then b2 minor (Phrygian sting)
+    // (v15m music upgrade) Doomed pattern : dim7 root + b2 min7 = darker, more
+    // unstable. The dim7 is famously "I'm in trouble" jazz/horror chord.
+    chords: [[0, 'dim7'], [1, 'min7']],
     chordsBars: [2, 2],
   },
 
@@ -47154,7 +47497,7 @@ const MUSIC_PATTERNS = {
     },
     bass: (beat) => beat === 0 ? 0 : null,
     bassDurBeats: 4,
-    chords: [[0, 'maj']],  // Picardy lift
+    chords: [[0, 'maj9']],  // (v15m) Picardy lift → maj9 for lush victory
     chordsBars: [2],
   },
 
@@ -47176,7 +47519,8 @@ const MUSIC_PATTERNS = {
     drum: () => null,
     bass: (beat) => (beat % 8 === 0) ? 0 : null,
     bassDurBeats: 8,
-    chords: [[0, 'maj'], [4, 'maj'], [0, 'maj']],
+    // (v15m) Cinematic resolution : Imaj7 - Vsus4 - Imaj9.
+    chords: [[0, 'maj7'], [4, 'sus4'], [0, 'maj9']],
     chordsBars: [2, 2, 4],
   },
 
@@ -47185,7 +47529,9 @@ const MUSIC_PATTERNS = {
     drum: () => null,
     bass: (beat) => (beat % 4 === 0) ? 0 : null,
     bassDurBeats: 4,
-    chords: [[0, 'min'], [6, 'maj'], [5, 'maj'], [4, 'maj']],
+    // (v15m) Match-end defeat : all-min7 progression for melancholic
+    // mood — "Round Midnight"-style harmonic color.
+    chords: [[0, 'min7'], [6, 'min7'], [5, 'min7'], [4, 'min7']],
     chordsBars: [2, 2, 2, 2],
   },
 };
