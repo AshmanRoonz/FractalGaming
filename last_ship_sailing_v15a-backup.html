@@ -9351,32 +9351,19 @@ class GasCloud {
   // game.time and the sprite's stored phase/speed/amp. Each sprite traces
   // an independent wandering path within the cloud volume, so the cloud
   // looks alive instead of like a rigid blob translating through space.
-  // Disabled in QUALITY.potato mode (3 sin() per slot per frame adds up
-  // across hundreds of sprites on low-end hardware).
   setPosition(x, y, z) {
     this.position.set(x, y, z);
-    const churn = (typeof QUALITY === 'undefined' || QUALITY.cloudChurn());
-    if (churn) {
-      const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
-      for (let i = 0; i < this.slots.length; i++) {
-        const s = this.slots[i];
-        const sp = s.driftSpeed;
-        const dx = Math.sin(t * sp + s.driftPhaseX) * s.driftAmp;
-        const dy = Math.sin(t * sp * 1.3 + s.driftPhaseY) * s.driftAmp * 0.55;
-        const dz = Math.sin(t * sp * 0.85 + s.driftPhaseZ) * s.driftAmp;
-        this.bcs.setSlotPosition(s.idx,
-          x + s.off.x + s.wakeOff.x + dx,
-          y + s.off.y + s.wakeOff.y + dy,
-          z + s.off.z + s.wakeOff.z + dz);
-      }
-    } else {
-      for (let i = 0; i < this.slots.length; i++) {
-        const s = this.slots[i];
-        this.bcs.setSlotPosition(s.idx,
-          x + s.off.x + s.wakeOff.x,
-          y + s.off.y + s.wakeOff.y,
-          z + s.off.z + s.wakeOff.z);
-      }
+    const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      const sp = s.driftSpeed;
+      const dx = Math.sin(t * sp + s.driftPhaseX) * s.driftAmp;
+      const dy = Math.sin(t * sp * 1.3 + s.driftPhaseY) * s.driftAmp * 0.55;
+      const dz = Math.sin(t * sp * 0.85 + s.driftPhaseZ) * s.driftAmp;
+      this.bcs.setSlotPosition(s.idx,
+        x + s.off.x + s.wakeOff.x + dx,
+        y + s.off.y + s.wakeOff.y + dy,
+        z + s.off.z + s.wakeOff.z + dz);
     }
   }
 
@@ -9486,20 +9473,18 @@ class GasCloud {
   // trail-behind effect actually read.
   tickWake(dt) {
     const decay = Math.exp(-1.5 * dt);
-    const churn = (typeof QUALITY === 'undefined' || QUALITY.cloudChurn());
-    const t = churn && typeof game !== 'undefined' && typeof game.time === 'number' ? game.time : 0;
+    // (v15a per-sprite churn) Apply drift offset here too so wake-driven
+    // updates include the same animation as setPosition.
+    const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       s.wakeOff.x *= decay;
       s.wakeOff.y *= decay;
       s.wakeOff.z *= decay;
-      let dx = 0, dy = 0, dz = 0;
-      if (churn) {
-        const sp = s.driftSpeed;
-        dx = Math.sin(t * sp + s.driftPhaseX) * s.driftAmp;
-        dy = Math.sin(t * sp * 1.3 + s.driftPhaseY) * s.driftAmp * 0.55;
-        dz = Math.sin(t * sp * 0.85 + s.driftPhaseZ) * s.driftAmp;
-      }
+      const sp = s.driftSpeed;
+      const dx = Math.sin(t * sp + s.driftPhaseX) * s.driftAmp;
+      const dy = Math.sin(t * sp * 1.3 + s.driftPhaseY) * s.driftAmp * 0.55;
+      const dz = Math.sin(t * sp * 0.85 + s.driftPhaseZ) * s.driftAmp;
       this.bcs.setSlotPosition(s.idx,
         this.position.x + s.off.x + s.wakeOff.x + dx,
         this.position.y + s.off.y + s.wakeOff.y + dy,
@@ -11163,117 +11148,63 @@ function clearAmbientCloudDots() {
   }
 }
 
-// (v6.9 → v15a 2026-05-10) Graphics quality preset. Read by various render
-// paths to lower detail (smoke octaves, smoke cap, particle rates, bloom).
-//
-// Tiers from cheapest to most expensive :
-//   potato  — Quest VR / no-GPU laptops. Skips basin clouds, per-sprite
-//             cloud churn, shockwave-on-impact, bloom, halves smoke octaves.
-//             Roughly half the CPU/GPU of 'low'. Aim : 60 FPS on Intel HD.
-//   low     — old "low" preset. No bloom, 1-octave smoke, light particles.
-//   medium  — old default. No bloom, 2-octave smoke.
-//   high    — old "high". Full bloom + 3-octave smoke. Tuned for mid GPUs.
-//   ultra   — high-end desktop. 4-octave smoke, 1.5× particles, denser
-//             basin pools, bigger bloom RT (1.5× DPR). For GPUs with
-//             headroom — pushes visual quality up without changing logic.
-// Default 'high'. Settings -> Graphics -> Quality drives this.
+// (v6.9) Graphics quality preset. Read by various render paths to lower
+// detail (smoke octaves, smoke cap, particle rates, bloom). Default 'high'
+// matches pre-v6.9 behavior ; 'medium' / 'low' shed cost progressively.
+// Settings -> Graphics -> Quality drives this and persists via saveSettings.
 const QUALITY = {
   level: 'high',
-  isPotato() { return this.level === 'potato'; },
-  isUltra()  { return this.level === 'ultra';  },
-  bloomEnabled() { return this.level !== 'potato' && this.level !== 'low' && this.level !== 'medium'; },
+  // Multipliers applied where they're read each frame.
+  bloomEnabled() { return this.level === 'high'; },
   smokeOctaves() {
     const tier = getVRPerfTier();
     if (tier >= 1) return 1;
-    if (this.level === 'potato') return 1;
-    if (this.level === 'low')    return 1;
-    if (this.level === 'medium') return 2;
-    if (this.level === 'high')   return 3;
-    if (this.level === 'ultra')  return 4;
-    return 3;
+    return this.level === 'high' ? 3 : (this.level === 'medium' ? 2 : 1);
   },
   smokeMax() {
     const tier = getVRPerfTier();
     if (tier >= 3) return 0;
     if (tier >= 2) return 2;
     if (tier >= 1) return 3;
-    if (this.level === 'potato') return 1;
-    if (this.level === 'low')    return 5;
-    if (this.level === 'medium') return 8;
-    if (this.level === 'high')   return 12;
-    if (this.level === 'ultra')  return 18;
-    return 12;
+    return this.level === 'high' ? 12 : (this.level === 'medium' ? 8 : 5);
   },
   particleRate() {
     const tier = getVRPerfTier();
     if (tier >= 3) return 0.08;
     if (tier >= 2) return 0.16;
     if (tier >= 1) return 0.25;
-    if (this.level === 'potato') return 0.15;
-    if (this.level === 'low')    return 0.4;
-    if (this.level === 'medium') return 0.7;
-    if (this.level === 'high')   return 1.0;
-    if (this.level === 'ultra')  return 1.5;
-    return 1.0;
+    return this.level === 'high' ? 1.0 : (this.level === 'medium' ? 0.7 : 0.4);
   },
   heatTrails() {
     if (getVRPerfTier() >= 1) return 0.0;
-    if (this.level === 'potato') return 0.0;
-    if (this.level === 'low')    return 0.0;
-    if (this.level === 'medium') return 0.6;
-    if (this.level === 'high')   return 1.0;
-    if (this.level === 'ultra')  return 1.2;
-    return 1.0;
-  },
-  // (v15a) Per-sprite cloud churn animation : adds 3 sin() calls per slot
-  // per frame to make clouds look alive instead of rigid. Disabled in
-  // potato mode (the churn is purely visual flair).
-  cloudChurn() { return this.level !== 'potato'; },
-  // (v15a) Basin gas pools : decorative gas pools spawned in rooms at level
-  // build time. Disabled in potato mode since each pool adds 8-11 GasClouds
-  // with 10 sprites each (~80-110 sprites per basin × ~15 basins per level).
-  basinClouds() { return this.level !== 'potato'; },
-  // (v15a) Cloud-wall shockwave on impact : runs spreadAgainstWall +
-  // shockwaveExpand for 0.35 s on every cloud-wall collision. Disabled
-  // in potato mode ; clouds still bounce / slide, just without the
-  // sprite-level burst.
-  shockwaveOnImpact() { return this.level !== 'potato'; },
-  // (v15a) Bloom RT pixel-ratio cap. Multiplies window.devicePixelRatio.
-  // Potato runs the bloom path at 0.7× native, ultra at 1.5× for crisper
-  // bloom highlights on high-end GPUs.
-  bloomDPR() {
-    if (this.level === 'potato') return 0.7;
-    if (this.level === 'ultra')  return 1.5;
-    return 1.0;
+    return this.level === 'high' ? 1.0 : (this.level === 'medium' ? 0.6 : 0.0);
   },
 };
 function applyQualityPreset(level) {
-  const valid = ['potato', 'low', 'medium', 'high', 'ultra'];
-  QUALITY.level = valid.indexOf(level) >= 0 ? level : 'high';
+  QUALITY.level = (level === 'low' || level === 'medium' || level === 'high') ? level : 'high';
   postFX.enabled = QUALITY.bloomEnabled();
   try { localStorage.setItem('lss_quality', QUALITY.level); } catch (e) {}
 }
 try {
   const stored = localStorage.getItem('lss_quality');
-  const valid = ['potato', 'low', 'medium', 'high', 'ultra'];
-  if (valid.indexOf(stored) >= 0) {
+  if (stored === 'low' || stored === 'medium' || stored === 'high') {
     QUALITY.level = stored;
     postFX.enabled = QUALITY.bloomEnabled();
   }
 } catch (e) {}
 
 // Render target: scene renders here first, then post-processed to screen
-// (v15a 2026-05-10 opt) Scene RT pixel ratio driven by QUALITY.bloomDPR().
-// potato → 0.7×, low/medium/high → 1.0×, ultra → 1.5× DPR.
-function _getBloomRTSize() {
-  const cap = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function')
-              ? QUALITY.bloomDPR() : 1.0;
-  const dpr = Math.min(window.devicePixelRatio, cap);
-  return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr) };
-}
-const _initBloomRT = _getBloomRTSize();
+// (v15a 2026-05-10 opt) Scene RT pixel ratio capped at 1x DPR (was 2x).
+// On a 1440p × 2 DPR display the previous setting allocated a 5120×2880
+// scene texture + half-res bright/blurH/blurV bloom RTs — each composite
+// frame then sampled that giant texture multiple times. Capping at 1x
+// drops the scene RT to 1440×900 with no perceptible quality loss : the
+// canvas itself is at native DPR, only the bloom path was supersampling.
+// 30-40% GPU savings on high-DPR displays.
+const _BLOOM_RT_DPR_CAP = 1.0;
 postFX.rtScene = new THREE.WebGLRenderTarget(
-  _initBloomRT.w, _initBloomRT.h,
+  Math.floor(window.innerWidth * Math.min(window.devicePixelRatio, _BLOOM_RT_DPR_CAP)),
+  Math.floor(window.innerHeight * Math.min(window.devicePixelRatio, _BLOOM_RT_DPR_CAP)),
   { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
 );
 
@@ -19497,10 +19428,6 @@ function _spawnBasinClouds() {
   if (!game.levelSpheres || !game.levelSpheres.length) return;
   if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
   if (typeof GasCloud !== 'function') return;
-  // (v15a quality) Skip basin pools in potato mode — each basin spawns
-  // 8-11 GasClouds × 10 sprites, and a typical level has ~10 basins, so
-  // basin gas alone can add ~1000 BCS sprites to the per-frame cost.
-  if (typeof QUALITY !== 'undefined' && !QUALITY.basinClouds()) return;
   if (!game.detachedGasPockets) game.detachedGasPockets = [];
   const cylinders = game.levelCylinders || [];
   // (v15a revised) Angle-based drain detection : a tunnel drains the
@@ -19838,8 +19765,7 @@ function updateDetachedGasPockets(dt) {
         // if the cloud drifts away from the wall mid-phase. Threshold
         // prevents triggering on slow drifts / grazes.
         const IMPACT_VEL_THRESHOLD = 80;
-        const _doShockwave = (typeof QUALITY === 'undefined' || QUALITY.shockwaveOnImpact());
-        if (_doShockwave && p._splatTimer === undefined && vDotN > IMPACT_VEL_THRESHOLD) {
+        if (p._splatTimer === undefined && vDotN > IMPACT_VEL_THRESHOLD) {
           p._splatTimer = _GAS_SPLAT_DURATION;
           p._splatNx = _gasSDFNormal.x;
           p._splatNy = _gasSDFNormal.y;
@@ -19847,7 +19773,7 @@ function updateDetachedGasPockets(dt) {
           if (p.gasCloud && typeof p.gasCloud.splatAgainstWall === 'function') {
             p.gasCloud.splatAgainstWall(_gasSDFNormal.x, _gasSDFNormal.y, _gasSDFNormal.z, vDotN);
           }
-        } else if (_doShockwave && p._splatTimer !== undefined && p._splatTimer <= 0 && vDotN > IMPACT_VEL_THRESHOLD) {
+        } else if (p._splatTimer !== undefined && p._splatTimer <= 0 && vDotN > IMPACT_VEL_THRESHOLD) {
           // Re-arm the shockwave for a future impact.
           p._splatTimer = undefined;
         }
@@ -30985,11 +30911,12 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  // Resize post-processing render targets via the QUALITY-driven helper
-  // so changing the quality tier mid-session will reshape RTs correctly
-  // on the next window resize.
-  const _sz = _getBloomRTSize();
-  const w = _sz.w, h = _sz.h;
+  // Resize post-processing render targets.
+  // (v15a 2026-05-10 opt) Match the _BLOOM_RT_DPR_CAP = 1.0 used at
+  // initial allocation. Previously this resize used 2x DPR which would
+  // grow the RTs back to supersampled size after any window resize.
+  const dpr = Math.min(window.devicePixelRatio, _BLOOM_RT_DPR_CAP);
+  const w = Math.floor(window.innerWidth * dpr), h = Math.floor(window.innerHeight * dpr);
   postFX.rtScene.setSize(w, h);
   postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2));
   postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2));
@@ -31215,15 +31142,13 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Preset</label>
         <select id="set-quality" style="flex:1;">
-          <option value="potato" ${QUALITY.level === 'potato' ? 'selected' : ''}>Potato (Quest VR / no-GPU : no bloom, no basin pools, no cloud churn, no shockwave)</option>
           <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, light particles)</option>
           <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke)</option>
-          <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">If the framerate dips during heavy fights, drop to Medium / Low / Potato. If your GPU has headroom, push to Ultra. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">If the framerate dips during heavy fights, drop to Medium or Low. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out.</label>
       </div>
       <div class="setting-row">
         <label>Field of View</label>
