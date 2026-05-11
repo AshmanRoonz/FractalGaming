@@ -9471,11 +9471,12 @@ class GasCloud {
     }
   }
 
-  // (v15a 2026-05-10 wall-spread, retained as utility) Apply continuous
-  // per-sprite dispersion along the wall surface. Currently unused (the
-  // wall-collision path now fragments clouds via spawnFragmentClouds
-  // instead of dispersing) but kept available for callers that want a
-  // softer "squish against wall" effect.
+  // (v15a 2026-05-10) Apply continuous per-sprite dispersion along the
+  // wall surface during the cloud's splat phase. Used by the wall
+  // collision path to flatten the cloud against the wall BEFORE it
+  // fragments — gives the impact a "squish, then shatter" feel instead
+  // of an abrupt pop. spreadAgainstWall runs every frame during the
+  // ~0.35 s splat phase ; fragmentation happens at the end.
   spreadAgainstWall(nx, ny, nz, dt) {
     const spread = 50 * dt;  // base lateral push per second
     const maxOff = this.boundsRadius * 1.4;
@@ -9515,6 +9516,42 @@ class GasCloud {
         s.wakeOff.y *= scale;
         s.wakeOff.z *= scale;
       }
+    }
+  }
+
+  // (v15a 2026-05-10) Shockwave expansion : push every sprite radially
+  // outward from the cloud center. Used during the post-splat cross-fade
+  // phase, paired with parent fade-out + fragment fade-in, so the
+  // transition reads as "the cloud's body expands and dissolves while
+  // the fragments solidify out of it" instead of a discrete swap.
+  shockwaveExpand(dt) {
+    const expandSpeed = 90 * dt;
+    const maxOff = this.boundsRadius * 1.7;
+    const maxOff2 = maxOff * maxOff;
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      const ox = s.off.x + s.wakeOff.x;
+      const oy = s.off.y + s.wakeOff.y;
+      const oz = s.off.z + s.wakeOff.z;
+      const r2 = ox * ox + oy * oy + oz * oz;
+      if (r2 > 0.04) {
+        const invR = 1.0 / Math.sqrt(r2);
+        s.wakeOff.x += ox * invR * expandSpeed;
+        s.wakeOff.y += oy * invR * expandSpeed;
+        s.wakeOff.z += oz * invR * expandSpeed;
+      }
+      const wo2 = s.wakeOff.x * s.wakeOff.x + s.wakeOff.y * s.wakeOff.y + s.wakeOff.z * s.wakeOff.z;
+      if (wo2 > maxOff2) {
+        const scale = maxOff / Math.sqrt(wo2);
+        s.wakeOff.x *= scale;
+        s.wakeOff.y *= scale;
+        s.wakeOff.z *= scale;
+      }
+      // Push sprite positions to BCS so the expansion is visible.
+      this.bcs.setSlotPosition(s.idx,
+        this.position.x + s.off.x + s.wakeOff.x,
+        this.position.y + s.off.y + s.wakeOff.y,
+        this.position.z + s.off.z + s.wakeOff.z);
     }
   }
 
@@ -19309,14 +19346,16 @@ function spawnDynamicObjects(rooms) {
 // stays constant (we replace 1 with 6, then 5 vanish, leaving 1).
 const _gasSDFNormal = new THREE.Vector3(); // scratch for sdfNormal
 
-// (v15a 2026-05-10 fragmentation) Replace a pocket that just hit a wall
-// with 6 mini-clouds that spread radially in the wall's tangent plane,
-// with a slight back-bounce along the inward normal. Inherits the parent's
-// color so the visual identity reads as "shattered piece of the same gas".
-// The first 5 are flagged with _fadeLife so they die over ~1.5 seconds ;
-// the 6th has no fade so it persists as the surviving fragment. Pushes
-// new children to game.detachedGasPockets ; caller is responsible for
-// removing the parent and disposing its GasCloud.
+// (v15a 2026-05-10 fragmentation) Replace a pocket that finished its splat
+// phase with 6 mini-clouds. Each fragment INHERITS the position of a
+// representative sprite from the parent cloud, so the spread shape the
+// player has been watching for the last ~0.35 s seamlessly becomes the
+// fragment burst (instead of all fragments spawning at the cloud center).
+// Velocity is radial from cloud center to sprite (the direction the
+// sprite was already drifting), mixed with a slight inward back-bounce.
+// First 5 fragments fade over ~1.5 s ; the 6th persists so the total
+// pocket count returns to its pre-impact value. _isFragment flag prevents
+// cascade fragmentation if a child also hits a wall.
 function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
   if (!parentCloud || typeof billboardCloudSystem === 'undefined') return;
   const cx = parentCloud.position.x;
@@ -19324,55 +19363,76 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
   const cz = parentCloud.position.z;
   const parentR = parentCloud.boundsRadius || 40;
   const parentColor = parentCloud.color || new THREE.Color(0.4, 0.4, 0.4);
-  // Build an orthonormal basis (U, V) for the wall's tangent plane.
-  // U starts as any axis not parallel to N, then Gram-Schmidted against N.
-  // V = N × U.
-  let ux = (Math.abs(nx) > 0.9) ? 0 : 1;
-  let uy = (Math.abs(nx) > 0.9) ? 1 : 0;
-  let uz = 0;
-  const ud = ux * nx + uy * ny + uz * nz;
-  ux -= ud * nx; uy -= ud * ny; uz -= ud * nz;
-  const ul = 1.0 / Math.max(1e-4, Math.sqrt(ux*ux + uy*uy + uz*uz));
-  ux *= ul; uy *= ul; uz *= ul;
-  const vx = ny * uz - nz * uy;
-  const vy = nz * ux - nx * uz;
-  const vz = nx * uy - ny * ux;
   const NUM_FRAGS = 6;
   const childR = parentR * 0.50;
-  // Spread speed scales with impact (faster wall hit → faster splash) but
-  // capped so a hyperspeed pocket doesn't fling fragments across the map.
   const spreadSpeed = Math.min(Math.max(impactVel * 0.7, 60), 220);
-  // Push children slightly off the wall surface so they don't immediately
-  // re-collide and trigger cascade fragmentation. _isFragment flag also
-  // disables fragmenting for these children — they bounce normally if
-  // they hit a wall.
-  const startOffset = parentR * 1.1;
+  const sprites = parentCloud.slots || [];
+  // Fallback tangent basis used when the cloud has no sprites (shouldn't
+  // happen, but we guard against degenerate states like a cloud that was
+  // disposed mid-splat).
+  let ux, uy, uz, fvx, fvy, fvz;
+  if (sprites.length === 0) {
+    ux = (Math.abs(nx) > 0.9) ? 0 : 1;
+    uy = (Math.abs(nx) > 0.9) ? 1 : 0;
+    uz = 0;
+    const ud = ux * nx + uy * ny + uz * nz;
+    ux -= ud * nx; uy -= ud * ny; uz -= ud * nz;
+    const ul = 1.0 / Math.max(1e-4, Math.sqrt(ux*ux + uy*uy + uz*uz));
+    ux *= ul; uy *= ul; uz *= ul;
+    fvx = ny * uz - nz * uy;
+    fvy = nz * ux - nx * uz;
+    fvz = nx * uy - ny * ux;
+  }
   const startAngle = Math.random() * 6.28318;
   for (let i = 0; i < NUM_FRAGS; i++) {
-    const angle = startAngle + i * (6.28318 / NUM_FRAGS) + (Math.random() - 0.5) * 0.5;
-    const ca = Math.cos(angle), sa = Math.sin(angle);
-    // Tangent direction in the wall plane.
-    const tdx = ca * ux + sa * vx;
-    const tdy = ca * uy + sa * vy;
-    const tdz = ca * uz + sa * vz;
-    // Mix in inward normal for slight back-bounce (-N points into playable
-    // space, since N points outward from playable).
-    const mix = 0.7;  // 70% tangent + 30% inward bounce
-    const fdx = tdx * mix - nx * (1 - mix);
-    const fdy = tdy * mix - ny * (1 - mix);
-    const fdz = tdz * mix - nz * (1 - mix);
-    const flen = 1.0 / Math.max(1e-4, Math.sqrt(fdx*fdx + fdy*fdy + fdz*fdz));
-    const ndx = fdx * flen, ndy = fdy * flen, ndz = fdz * flen;
-    // Spawn position : parent center, kicked back into playable along the
-    // inward normal, plus a small offset in the fragment's spread direction
-    // so they don't all stack on top of each other.
-    const pos = new THREE.Vector3(
-      cx - nx * startOffset + ndx * (parentR * 0.35),
-      cy - ny * startOffset + ndy * (parentR * 0.35),
-      cz - nz * startOffset + ndz * (parentR * 0.35)
-    );
-    const vmag = spreadSpeed * (0.7 + Math.random() * 0.6);
-    const vel = new THREE.Vector3(ndx * vmag, ndy * vmag, ndz * vmag);
+    let pos, vel;
+    if (sprites.length > 0) {
+      // Pick a sprite spread across the slot count so we sample
+      // representative positions from across the flattened cloud.
+      const sIdx = Math.floor((i + 0.5) * sprites.length / NUM_FRAGS) % sprites.length;
+      const s = sprites[sIdx];
+      const sprX = cx + s.off.x + s.wakeOff.x;
+      const sprY = cy + s.off.y + s.wakeOff.y;
+      const sprZ = cz + s.off.z + s.wakeOff.z;
+      // Spread direction = radial from cloud center to this sprite.
+      // (The sprite has been drifting outward during the splat phase, so
+      // this direction matches its existing motion.)
+      let rdx = sprX - cx, rdy = sprY - cy, rdz = sprZ - cz;
+      const rlen = Math.max(0.01, Math.sqrt(rdx*rdx + rdy*rdy + rdz*rdz));
+      rdx /= rlen; rdy /= rlen; rdz /= rlen;
+      // Mix in slight inward back-bounce.
+      rdx = rdx * 0.78 - nx * 0.22;
+      rdy = rdy * 0.78 - ny * 0.22;
+      rdz = rdz * 0.78 - nz * 0.22;
+      const flen = 1.0 / Math.max(1e-4, Math.sqrt(rdx*rdx + rdy*rdy + rdz*rdz));
+      const ndx = rdx * flen, ndy = rdy * flen, ndz = rdz * flen;
+      const vmag = spreadSpeed * (0.7 + Math.random() * 0.6);
+      // Fragment spawns AT the sprite's current world position — visually,
+      // that sprite "becomes" the new mini-cloud.
+      pos = new THREE.Vector3(sprX, sprY, sprZ);
+      vel = new THREE.Vector3(ndx * vmag, ndy * vmag, ndz * vmag);
+    } else {
+      // Fallback (no sprites) : use the precomputed tangent basis.
+      const angle = startAngle + i * (6.28318 / NUM_FRAGS);
+      const ca = Math.cos(angle), sa = Math.sin(angle);
+      const tdx = ca * ux + sa * fvx;
+      const tdy = ca * uy + sa * fvy;
+      const tdz = ca * uz + sa * fvz;
+      const mix = 0.7;
+      const fdx = tdx * mix - nx * (1 - mix);
+      const fdy = tdy * mix - ny * (1 - mix);
+      const fdz = tdz * mix - nz * (1 - mix);
+      const flen = 1.0 / Math.max(1e-4, Math.sqrt(fdx*fdx + fdy*fdy + fdz*fdz));
+      const ndx = fdx * flen, ndy = fdy * flen, ndz = fdz * flen;
+      const startOffset = parentR * 1.1;
+      pos = new THREE.Vector3(
+        cx - nx * startOffset + ndx * (parentR * 0.35),
+        cy - ny * startOffset + ndy * (parentR * 0.35),
+        cz - nz * startOffset + ndz * (parentR * 0.35)
+      );
+      const vmag = spreadSpeed * (0.7 + Math.random() * 0.6);
+      vel = new THREE.Vector3(ndx * vmag, ndy * vmag, ndz * vmag);
+    }
     const child = new GasCloud(billboardCloudSystem, pos, {
       boundsRadius:   childR,
       spriteScale:    childR * 1.55,
@@ -19385,10 +19445,14 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
     const pocket = {
       gasCloud: child,
       velocity: vel,
-      _isFragment: true,  // prevents recursive fragmentation
+      _isFragment: true,
+      // (v15a smoother transition) Fragments fade IN over the parent's
+      // cross-fade window, so as the parent dissolves the fragments
+      // brighten in the same world positions — viewer's eye reads it as
+      // a continuous reorganization of the cloud rather than a swap.
+      _fadeInLife: 0.20,
+      _fadeInAge: 0,
     };
-    // First 5 fragments fade and dispose ; 6th (last) survives so the
-    // total live-cloud count returns to its pre-impact value.
     if (i < NUM_FRAGS - 1) {
       pocket._fadeLife = 1.3 + Math.random() * 0.5;
       pocket._fadeAge = 0;
@@ -19396,6 +19460,12 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
     game.detachedGasPockets.push(pocket);
   }
 }
+
+// (v15a) Splat phase duration. Cloud flattens against the wall for this
+// long (with sprite dispersion via spreadAgainstWall) before fragmenting
+// into 6 mini-clouds. Tuned so the squish reads as fluid behavior but
+// doesn't drag on long enough to feel sluggish.
+const _GAS_SPLAT_DURATION = 0.35;
 
 function updateDetachedGasPockets(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
@@ -19407,19 +19477,35 @@ function updateDetachedGasPockets(dt) {
     const p = game.detachedGasPockets[i];
     if (!p) continue;
 
-    // (v15a) Fade-out aging for fragment clouds with _fadeLife. Cloud
-    // opacity ramps 1 → 0 over the life ; disposed + removed at end.
-    if (p._fadeLife) {
-      p._fadeAge += dt;
-      if (p._fadeAge >= p._fadeLife) {
-        if (p.gasCloud && typeof p.gasCloud.dispose === 'function') p.gasCloud.dispose();
-        game.detachedGasPockets.splice(i, 1);
-        continue;
+    // (v15a 2026-05-10 stuck-cloud fix) Ensure every pocket has a non-
+    // decaying drift component. Without this, a pocket whose `velocity`
+    // damps to near-zero (after ~30 s with no wake pushes) just sits in
+    // place and looks frozen. driftVelocity is set once on first touch
+    // and persists for the pocket's lifetime ; only `velocity` (the wake
+    // transient) is damped by the 0.97/s drag below. This mirrors the
+    // pattern ambient atmospheric clouds use (see spawnDot driftVelocity).
+    // Defensive : applies to pockets spawned before this fix too.
+    if (!p._driftVelocity) {
+      p._driftVelocity = new THREE.Vector3(
+        (Math.random() - 0.5) * 28,
+        (Math.random() - 0.5) * 16,  // less vertical drift
+        (Math.random() - 0.5) * 28
+      );
+    }
+
+    // (v15a shockwave-only) Active shockwave phase : cloud sprites
+    // continue expanding radially + dispersing along the wall surface.
+    // Sprites settle back via the existing wakeOff decay in tickWake
+    // when the phase ends. Cloud stays intact throughout — no fragmenting,
+    // no fade. Just a visible "puff and disperse" on impact.
+    if (p._splatTimer > 0) {
+      if (p.gasCloud && typeof p.gasCloud.spreadAgainstWall === 'function') {
+        p.gasCloud.spreadAgainstWall(p._splatNx, p._splatNy, p._splatNz, dt);
       }
-      const fadeFrac = 1 - p._fadeAge / p._fadeLife;
-      if (p.gasCloud && typeof p.gasCloud.setOpacity === 'function') {
-        p.gasCloud.setOpacity(fadeFrac);
+      if (p.gasCloud && typeof p.gasCloud.shockwaveExpand === 'function') {
+        p.gasCloud.shockwaveExpand(dt);
       }
+      p._splatTimer -= dt;
     }
 
     // (v14e) p.gasCloud stores a GasCloud (swarm of billboards). Drift the
@@ -19428,18 +19514,27 @@ function updateDetachedGasPockets(dt) {
     // detached pockets from a hot-reload) drift the mesh directly.
     const center = p.gasCloud ? p.gasCloud.position : (p.mesh && p.mesh.position);
     if (!center) continue;
-    center.addScaledVector(p.velocity, dt);
-    // Drag: damp velocity by ~3% per second. Gas slows but never quite
-    // settles, which keeps the map alive without ping-ponging.
+    // (v15a) Center drifts from velocity (wake transient) + driftVelocity
+    // (persistent background drift). Only velocity gets damped below.
+    center.x += (p.velocity.x + p._driftVelocity.x) * dt;
+    center.y += (p.velocity.y + p._driftVelocity.y) * dt;
+    center.z += (p.velocity.z + p._driftVelocity.z) * dt;
+    // Drag: damp velocity by ~3% per second. driftVelocity untouched so
+    // pockets always have some baseline motion ; without this, pockets
+    // far from any wake source eventually decay to a complete stop and
+    // look frozen on the map.
     p.velocity.multiplyScalar(Math.pow(0.97, dt));
 
-    // (Phase 2 / v15a fragmentation) Wall repulsion via worldSDF. SDF
-    // semantics: negative = inside playable space, positive = inside wall.
-    // sdfNormal returns the outward gradient. Soft buffer = ~40% of the
-    // cloud's bounds radius. On meaningful impact (vDotN > threshold), a
-    // non-fragment pocket fragments into 6 mini-clouds and is removed.
-    // Fragments (_isFragment=true) bounce normally without fragmenting,
-    // to prevent cascade explosions.
+    // (Phase 2 / v15a shockwave-only) Wall repulsion via worldSDF. SDF
+    // semantics: negative = inside playable space, positive = inside
+    // wall. sdfNormal returns the outward gradient. Soft buffer = ~40%
+    // of the cloud's bounds radius.
+    //
+    // Cloud impacts (vDotN > threshold) trigger a shockwave phase :
+    // sprites disperse along the wall + radially expand outward for
+    // ~0.35 s. The cloud stays intact ; existing wakeOff decay (1.5/s)
+    // settles sprites back to rest position over ~2 s after the phase
+    // ends. Cloud bounces normally via the rigid containment below.
     if (typeof worldSDF !== 'function' || typeof sdfNormal !== 'function') {
       if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
       continue;
@@ -19447,31 +19542,75 @@ function updateDetachedGasPockets(dt) {
     const d = worldSDF(center.x, center.y, center.z);
     const radius = p.gasCloud ? p.gasCloud.boundsRadius : (p.mesh ? p.mesh.scale.x : 30) || 30;
     const buffer = radius * 0.4;
-    if (d > -buffer) {
+    // (v15a wall gravity) Gravity range extends 2x past the contact zone
+    // so clouds feel pulled toward nearby walls from a distance and
+    // gradually settle against them, like dust drawn to a surface by
+    // static cling. Gravity always pulls toward the wall ; only contact
+    // adds friction + shockwave triggering + containment push.
+    const gravRange = buffer * 2;
+    if (d > -gravRange) {
       sdfNormal(center.x, center.y, center.z, _gasSDFNormal);
       const vDotN = p.velocity.x * _gasSDFNormal.x +
                     p.velocity.y * _gasSDFNormal.y +
                     p.velocity.z * _gasSDFNormal.z;
-      // Real impact: non-fragment pocket moving fast into the wall →
-      // fragment it. Threshold prevents fragmenting on slow drifts /
-      // grazes (which would generate noise).
-      const IMPACT_VEL_THRESHOLD = 80;
-      if (!p._isFragment && vDotN > IMPACT_VEL_THRESHOLD) {
-        _spawnWallFragments(p.gasCloud, _gasSDFNormal.x, _gasSDFNormal.y, _gasSDFNormal.z, vDotN);
-        if (p.gasCloud && typeof p.gasCloud.dispose === 'function') p.gasCloud.dispose();
-        game.detachedGasPockets.splice(i, 1);
-        continue;
-      }
-      // Otherwise (fragment hitting wall, or slow drift contact) : rigid
-      // bounce. Same behavior as before.
-      if (d > 0) {
-        center.addScaledVector(_gasSDFNormal, -(d + buffer));
-      } else {
-        const proximity = (d + buffer) / buffer;
-        center.addScaledVector(_gasSDFNormal, -proximity * dt * 60);
-      }
-      if (vDotN > 0) {
-        p.velocity.addScaledVector(_gasSDFNormal, -vDotN * 1.3);
+      // Wall gravity : pull cloud toward nearest wall. Falls off linearly,
+      // weakest at the gravity range edge (d = -2*buffer) and strongest
+      // at the wall surface (d = 0). Goes into velocity (transient) not
+      // drift so the pull is self-limited by friction + proximity push.
+      const gravFactor = (d + gravRange) / gravRange;  // 0 at far edge, 1 at wall
+      p.velocity.addScaledVector(_gasSDFNormal, gravFactor * dt * 35);
+
+      // Contact-zone behavior (d > -buffer)
+      if (d > -buffer) {
+        // First-contact impact triggers the shockwave phase. Stored normal
+        // is used by the splat-tick block at the top of the loop body so
+        // dispersion + expansion keep going for _GAS_SPLAT_DURATION even
+        // if the cloud drifts away from the wall mid-phase. Threshold
+        // prevents triggering on slow drifts / grazes.
+        const IMPACT_VEL_THRESHOLD = 80;
+        if (p._splatTimer === undefined && vDotN > IMPACT_VEL_THRESHOLD) {
+          p._splatTimer = _GAS_SPLAT_DURATION;
+          p._splatNx = _gasSDFNormal.x;
+          p._splatNy = _gasSDFNormal.y;
+          p._splatNz = _gasSDFNormal.z;
+          if (p.gasCloud && typeof p.gasCloud.splatAgainstWall === 'function') {
+            p.gasCloud.splatAgainstWall(_gasSDFNormal.x, _gasSDFNormal.y, _gasSDFNormal.z, vDotN);
+          }
+        } else if (p._splatTimer !== undefined && p._splatTimer <= 0 && vDotN > IMPACT_VEL_THRESHOLD) {
+          // Re-arm the shockwave for a future impact.
+          p._splatTimer = undefined;
+        }
+        // Containment : push center back into playable space. Runs for ALL
+        // contact so the cloud center never penetrates the wall. Reduced
+        // from previous * 60 to * 25 so it doesn't fight wall gravity as
+        // hard ; clouds can settle close to walls instead of being kicked
+        // away. Still strong enough to prevent penetration.
+        if (d > 0) {
+          center.addScaledVector(_gasSDFNormal, -(d + buffer));
+        } else {
+          const proximity = (d + buffer) / buffer;
+          center.addScaledVector(_gasSDFNormal, -proximity * dt * 25);
+        }
+        // Particle-like wall behavior : kill the velocity + drift component
+        // going INTO the wall (multiplier -1.0), so only the tangent
+        // component remains. The cloud slides along the wall, doesn't
+        // bounce off it.
+        if (vDotN > 0) {
+          p.velocity.addScaledVector(_gasSDFNormal, -vDotN);
+        }
+        const dvDotN = p._driftVelocity.x * _gasSDFNormal.x +
+                       p._driftVelocity.y * _gasSDFNormal.y +
+                       p._driftVelocity.z * _gasSDFNormal.z;
+        if (dvDotN > 0) {
+          p._driftVelocity.addScaledVector(_gasSDFNormal, -dvDotN);
+        }
+        // (v15a stronger friction) Wall friction : when in contact, the
+        // remaining tangent velocity bleeds off fast. Real particles
+        // hitting a surface lose energy quickly ; the cloud should brake
+        // hard against the wall, not glide along it forever. 20%/s loss
+        // (was 5%/s). Combined with wall gravity above, clouds tend to
+        // settle and crawl along walls rather than slipping past them.
+        p.velocity.multiplyScalar(Math.pow(0.80, dt));
       }
     }
     // Now push the (possibly corrected) center to the owned billboards.
