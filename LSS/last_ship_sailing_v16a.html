@@ -50077,22 +50077,41 @@ function _lssGmapsRefinePivot() {
   grp.updateMatrixWorld(true);
   const meshes = _lssGmapsCollectLeaves(grp);
   if (meshes.length === 0) return;
-  const samples = 12;
-  const ringR = 400;
-  let maxHitY = -Infinity;
+  // (v16a) Track BOTH min and max first-hit Y. min ≈ street / ground
+  // level (since a downward ray hits the first surface, low hits are
+  // streets between buildings) ; max ≈ tallest building roof. We want
+  // the level to *touch the ground at its lowest points*, so we line
+  // ext.lo up with the ground (low hits) rather than parking the
+  // tallest building just under the level (the old behavior, which
+  // pushed the city way down in dense cities and made the level feel
+  // like a flyover). Multiple concentric rings give us a robust ground
+  // estimate even if a single ray lands on a roof.
   const rc = new THREE.Raycaster();
   const dir = new THREE.Vector3(0, -1, 0);
-  for (let i = 0; i < samples; i++) {
-    const ang = (i / samples) * Math.PI * 2;
-    const o = new THREE.Vector3(Math.cos(ang) * ringR, 8000, Math.sin(ang) * ringR);
-    rc.set(o, dir);
-    rc.far = 12000;
-    try {
-      const hits = rc.intersectObjects(meshes, false);
-      if (hits.length && hits[0].point.y > maxHitY) maxHitY = hits[0].point.y;
-    } catch (_) {}
+  const rings = [200, 500, 900, 1400];
+  const samplesPerRing = 12;
+  const hitYs = [];
+  let maxHitY = -Infinity;
+  for (const ringR of rings) {
+    for (let i = 0; i < samplesPerRing; i++) {
+      // Tiny per-ring phase offset so rings don't all sample the same
+      // angular slice (which can systematically miss streets if the
+      // city block grid lines up with the cardinal directions).
+      const ang = (i / samplesPerRing) * Math.PI * 2 + ringR * 0.001;
+      const o = new THREE.Vector3(Math.cos(ang) * ringR, 8000, Math.sin(ang) * ringR);
+      rc.set(o, dir);
+      rc.far = 12000;
+      try {
+        const hits = rc.intersectObjects(meshes, false);
+        if (hits.length) {
+          const y = hits[0].point.y;
+          hitYs.push(y);
+          if (y > maxHitY) maxHitY = y;
+        }
+      } catch (_) {}
+    }
   }
-  if (maxHitY === -Infinity) return;
+  if (hitYs.length === 0) return;
   // (v13r-3) Race-mode terrain-follow. Instead of moving the city to fit
   // the level (which leaves the level deep in cliffs / floating over
   // valleys depending on the chosen city), keep the city at its lat/lng
@@ -50105,18 +50124,27 @@ function _lssGmapsRefinePivot() {
     if (typeof _lssGmapsApplyTerrainFollow === 'function') _lssGmapsApplyTerrainFollow();
     return;
   }
-  // (v12 patch28) City sits just below the lowest tunnel/room point,
-  // with minimal clearance so it reads as 'right under you' instead
-  // of 'distant landscape far below'. Patch27's 100 + 5% was too
-  // much ; now max(30, 1%) which is ~30 units for typical maps.
+  // (v16a) Use the 10th percentile of hits as a "ground" estimate. Pure
+  // min is too aggressive (a single outlier ray that pierced into an
+  // open atrium or a low geometry seam could put the city below the
+  // ground), so we trim the bottom slightly. Tall buildings (top end of
+  // hitYs) are intentionally ignored here ; they're allowed to poke up
+  // into the level, which is the look we want.
+  hitYs.sort((a, b) => a - b);
+  const groundIdx = Math.min(hitYs.length - 1, Math.max(0, Math.floor(hitYs.length * 0.10)));
+  const groundY = hitYs[groundIdx];
+  // (v16a) Touch the ground at the level's lowest point. 5 unit pad
+  // keeps us a hair above the surface so we don't z-fight or read as
+  // submerged. Negative pad would put the level underground, which is
+  // exactly what we're trying to avoid.
   const ext = _lssGmapsLevelExtentY();
-  const clearance = Math.max(30, (ext.hi - ext.lo) * 0.01);
-  const targetMaxY = ext.lo - clearance;
-  const levelMinY = ext.lo;
-  const shift = targetMaxY - maxHitY;
+  const clearance = 5;
+  const targetGroundY = ext.lo - clearance;
+  const shift = targetGroundY - groundY;
   grp.position.y += shift;
-  console.log('[lss-gmaps] auto-positioned tiles : highest building was at world Y',
-              maxHitY.toFixed(0), '; level min Y', levelMinY.toFixed(0),
+  console.log('[lss-gmaps] auto-positioned tiles : ground (p10) at world Y',
+              groundY.toFixed(0), '; tallest sample', maxHitY.toFixed(0),
+              '; level min Y', ext.lo.toFixed(0),
               '; shifted tiles by', shift.toFixed(0),
               '; new pivot Y', grp.position.y.toFixed(0));
   // (v12m patch5) Broadcast the new pivot Y so peers converge on the
