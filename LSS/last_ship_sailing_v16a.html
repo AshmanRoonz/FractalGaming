@@ -7208,9 +7208,12 @@ const _LAYERED_FX_FRAG = [
   // these on materials tagged with userData.acceptsDynamicLights = true
   // (gas pockets) by picking the closest projectiles. Inactive slots
   // contribute zero light; loop runs unconditionally for branch-free perf.
-  'uniform vec3  uDynLightPos[4];',
-  'uniform vec3  uDynLightColor[4];',
-  'uniform float uDynLightStrength[4];',
+  // (v16a Ultra) Dynamic-light slot count bumped 4 -> 8. Non-Ultra tiers
+  // leave slots 4..7 at strength 0 (early-continue inside the loop costs
+  // one uniform fetch + branch per slot, no vector math).
+  'uniform vec3  uDynLightPos[8];',
+  'uniform vec3  uDynLightColor[8];',
+  'uniform float uDynLightStrength[8];',
   'uniform int   uLayerPattern[3];',
   'uniform float uLayerScale[3];',
   'uniform float uLayerTimeRate[3];',
@@ -7404,7 +7407,11 @@ const _LAYERED_FX_FRAG = [
   // only shows where the volume is dense. When all strengths are zero
   // (no projectiles nearby) the loop accumulates 0 and adds nothing.
   '  vec3 dynLighting = vec3(0.0);',
-  '  for (int li = 0; li < 4; li++) {',
+  // (v16a Ultra) Loop bound 4 -> 8. Empty slots short-circuit on
+  // strength check so non-Ultra tiers (where slots 4..7 stay at 0) only
+  // pay 4 extra uniform reads + branches, not 4 extra vector evaluations.
+  '  for (int li = 0; li < 8; li++) {',
+  '    if (uDynLightStrength[li] <= 0.0) continue;',
   '    vec3 toLight = uDynLightPos[li] - vWorldPos;',
   '    float d2 = dot(toLight, toLight);',
   '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
@@ -7505,10 +7512,14 @@ function _makeLayeredFXMaterial(preset) {
       ] },
       uHitRadius:     { value: 80.0 },
       uHitColor:      { value: new THREE.Color(0xffffff) },
-      // (v14d Phase 3) Dynamic projectile lights ; 4 inactive slots by
-      // default. Strength 0 = inactive, contributes nothing. Per-frame
-      // updateGasLighting() populates these on materials that opted in.
+      // (v14d Phase 3 + v16a Ultra) Dynamic projectile lights. Slot count
+      // bumped 4 -> 8 so Ultra mode can light up gas from more projectiles
+      // simultaneously. Strength 0 = inactive, contributes nothing.
       uDynLightPos: { value: [
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(0, 0, 0),
         new THREE.Vector3(0, 0, 0),
         new THREE.Vector3(0, 0, 0),
         new THREE.Vector3(0, 0, 0),
@@ -7519,8 +7530,12 @@ function _makeLayeredFXMaterial(preset) {
         new THREE.Color(0, 0, 0),
         new THREE.Color(0, 0, 0),
         new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
+        new THREE.Color(0, 0, 0),
       ] },
-      uDynLightStrength: { value: [0, 0, 0, 0] },
+      uDynLightStrength: { value: [0, 0, 0, 0, 0, 0, 0, 0] },
       uLayerPattern:  { value: layers.map(l => l.pattern) },
       uLayerScale:    { value: layers.map(l => l.scale) },
       uLayerTimeRate: { value: layers.map(l => l.timeRate) },
@@ -7583,8 +7598,12 @@ function updateGasLighting() {
   // Gather up to 4 active projectiles (first-N ; could be improved later
   // by picking strongest / closest to camera). Skip projectiles still in
   // their fade-in window so the gas doesn't pre-light at the muzzle.
+  // (v16a Ultra) Gather up to 8 lights on Ultra (8 slots), 4 on other
+  // tiers. Slots 4..7 stay at strength 0 on lower tiers and short-circuit
+  // in the shader loop.
+  const _maxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
   const lights = [];
-  for (let i = 0; i < game.projectiles.length && lights.length < 4; i++) {
+  for (let i = 0; i < game.projectiles.length && lights.length < _maxLights; i++) {
     const proj = game.projectiles[i];
     if (!proj || !proj.alive || !proj.position) continue;
     lights.push({
@@ -7593,13 +7612,13 @@ function updateGasLighting() {
       strength: 1.0,
     });
   }
-  // Push the 4 lights into every gas-flagged material. Scratch reused so
-  // we don't allocate Color objects per material per frame.
+  // Push lights into every gas-flagged material. Always write all 8 slots ;
+  // unfilled slots get strength = 0 so the shader skips them.
   _ACTIVE_LAYERED_FX.forEach(mat => {
     if (!mat || !mat.userData || !mat.userData.acceptsDynamicLights) return;
     const u = mat.uniforms;
     if (!u || !u.uDynLightPos) return;
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 8; i++) {
       if (i < lights.length) {
         const l = lights[i];
         u.uDynLightPos.value[i].copy(l.pos);
@@ -10112,15 +10131,26 @@ const renderer = new THREE.WebGLRenderer({
   failIfMajorPerformanceCaveat: false,
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
-// (v16a Potato) Read the persisted quality tier from localStorage so the scene
-// DPR drops to 0.75 on Potato even on the very first frame ; the QUALITY const
-// itself isn't declared until ~1300 lines below, so we can't call its helper here.
-// applyQualityPreset() below also re-applies setPixelRatio when the user changes
-// tier at runtime so the change takes effect without a reload.
+// (v16a Potato + Ultra) Read the persisted quality tier from localStorage so the
+// scene DPR is set correctly on the first frame. The QUALITY const itself isn't
+// declared until ~1300 lines below so we can't call its helper here.
+// applyQualityPreset() below re-applies setPixelRatio on runtime tier change.
+//   potato  -> 0.75 (sub-native, big perf win on no-GPU laptops)
+//   default -> min(devicePixelRatio, 2)   ; native, capped at 2
+//   ultra   -> min(devicePixelRatio * 1.5, 2.5)   ; supersampling for crisper
+//              edges + cleaner highlights. On 1080p (DPR=1) the scene renders at
+//              1.5x = 2880x1620 internal ; on 4K (DPR=2) it caps at 2.5x.
 (function () {
-  let _potatoBoot = false;
-  try { _potatoBoot = (localStorage.getItem('lss_quality') === 'potato'); } catch (_) {}
-  const _dprCap = _potatoBoot ? 0.75 : Math.min(window.devicePixelRatio, 2);
+  let _stored = 'high';
+  try { _stored = localStorage.getItem('lss_quality') || 'high'; } catch (_) {}
+  let _dprCap;
+  if (_stored === 'potato') {
+    _dprCap = 0.75;
+  } else if (_stored === 'ultra') {
+    _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
+  } else {
+    _dprCap = Math.min(window.devicePixelRatio, 2);
+  }
   renderer.setPixelRatio(_dprCap);
 })();
 renderer.setClearColor(0x0a0520); // Dark purple-black (cartoon space)
@@ -11454,7 +11484,10 @@ const QUALITY = {
     if (this.level === 'low')    return 1;
     if (this.level === 'medium') return 2;
     if (this.level === 'high')   return 3;
-    if (this.level === 'ultra')  return 4;
+    // (v16a Ultra) 4 -> 6 octaves. FBM cost scales linearly per octave
+    // (one extra noise sample per pixel) so this is cheap-ish in absolute
+    // terms but doubles the detail in turbulence/plume texture.
+    if (this.level === 'ultra')  return 6;
     return 3;
   },
   smokeMax() {
@@ -11466,7 +11499,9 @@ const QUALITY = {
     if (this.level === 'low')    return 5;
     if (this.level === 'medium') return 8;
     if (this.level === 'high')   return 12;
-    if (this.level === 'ultra')  return 18;
+    // (v16a Ultra) 18 -> 28. Cluster fights leave more lingering plumes ;
+    // explosion residue overlaps instead of single-plume-at-a-time.
+    if (this.level === 'ultra')  return 28;
     return 12;
   },
   particleRate() {
@@ -11478,7 +11513,9 @@ const QUALITY = {
     if (this.level === 'low')    return 0.4;
     if (this.level === 'medium') return 0.7;
     if (this.level === 'high')   return 1.0;
-    if (this.level === 'ultra')  return 1.5;
+    // (v16a Ultra) 1.5x -> 2.0x. More debris, more sparks, denser explosion
+    // cores. v8 instanced pools handle the count without extra draw calls.
+    if (this.level === 'ultra')  return 2.0;
     return 1.0;
   },
   heatTrails() {
@@ -11487,7 +11524,9 @@ const QUALITY = {
     if (this.level === 'low')    return 0.0;
     if (this.level === 'medium') return 0.6;
     if (this.level === 'high')   return 1.0;
-    if (this.level === 'ultra')  return 1.2;
+    // (v16a Ultra) 1.2x -> 1.5x. Engine exhaust trails read more vividly
+    // behind fast-moving ships ; pairs with the increased particle rate.
+    if (this.level === 'ultra')  return 1.5;
     return 1.0;
   },
   // (v15a) Per-sprite cloud churn animation : adds 3 sin() calls per slot
@@ -11504,11 +11543,12 @@ const QUALITY = {
   // sprite-level burst.
   shockwaveOnImpact() { return this.level !== 'potato'; },
   // (v15a) Bloom RT pixel-ratio cap. Multiplies window.devicePixelRatio.
-  // Potato runs the bloom path at 0.7× native, ultra at 1.5× for crisper
-  // bloom highlights on high-end GPUs.
+  // (v16a) Ultra bumped 1.5x to 2.0x for crisper highlights ; pairs with the
+  // scene supersampling bump (renderer.setPixelRatio also 1.5x on Ultra) so
+  // the bloom texture isn't downsampling the supersampled scene.
   bloomDPR() {
     if (this.level === 'potato') return 0.7;
-    if (this.level === 'ultra')  return 1.5;
+    if (this.level === 'ultra')  return 2.0;
     return 1.0;
   },
 };
@@ -11516,12 +11556,19 @@ function applyQualityPreset(level) {
   const valid = ['potato', 'low', 'medium', 'high', 'ultra'];
   QUALITY.level = valid.indexOf(level) >= 0 ? level : 'high';
   postFX.enabled = QUALITY.bloomEnabled();
-  // (v16a Potato) Re-apply scene DPR so tier changes at runtime drop / restore
-  // the canvas resolution without needing a page reload. Bloom RT still uses
-  // QUALITY.bloomDPR() via _getBloomRTSize ; this is the scene pass.
+  // (v16a Potato + Ultra) Re-apply scene DPR on tier change so resolution
+  // updates without a page reload. Bloom RT uses QUALITY.bloomDPR() via
+  // _getBloomRTSize ; this is the scene pass.
   try {
     if (typeof renderer !== 'undefined' && renderer && renderer.setPixelRatio) {
-      const _cap = QUALITY.isPotato() ? 0.75 : Math.min(window.devicePixelRatio, 2);
+      let _cap;
+      if (QUALITY.isPotato()) {
+        _cap = 0.75;
+      } else if (QUALITY.isUltra()) {
+        _cap = Math.min(window.devicePixelRatio * 1.5, 2.5);
+      } else {
+        _cap = Math.min(window.devicePixelRatio, 2);
+      }
       renderer.setPixelRatio(_cap);
     }
   } catch (_) {}
@@ -11546,9 +11593,32 @@ function _getBloomRTSize() {
   return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr) };
 }
 const _initBloomRT = _getBloomRTSize();
+// (v16a Ultra) MSAA on the offscreen scene render target. The renderer's
+// own `antialias: true` only covers the on-canvas framebuffer ; once the
+// scene renders into an offscreen RT (which is the case any time postFX
+// runs), edges read as aliased steps even on Ultra. Bumping samples to 4
+// on the rtScene gets us 4x MSAA on the actual scene pass, then the bloom
+// and composite quads sample the resolved result. Requires WebGL 2 (the
+// `samples` field is ignored otherwise) so we feature-check before using.
+// Tier check uses localStorage so it works at boot before QUALITY is in
+// scope ; runtime tier change to / from Ultra requires a page reload to
+// pick up the new sample count (can't reconfigure samples on an existing
+// RT after creation).
+const _rtSceneOpts = {
+  minFilter: THREE.LinearFilter,
+  magFilter: THREE.LinearFilter,
+  format: THREE.RGBAFormat,
+};
+try {
+  const _bootQuality = localStorage.getItem('lss_quality') || 'high';
+  const _isWebGL2 = renderer.capabilities && renderer.capabilities.isWebGL2;
+  if (_bootQuality === 'ultra' && _isWebGL2) {
+    _rtSceneOpts.samples = 4;
+  }
+} catch (_) {}
 postFX.rtScene = new THREE.WebGLRenderTarget(
   _initBloomRT.w, _initBloomRT.h,
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtSceneOpts
 );
 
 // Bloom: extract bright pixels, blur, composite
@@ -12168,6 +12238,16 @@ function renderFrame() {
   if (cineFX.enabled && cineFX.composer) {
     renderer.setRenderTarget(null);
     cineFX.composer.render();
+    return;
+  }
+  // (v16a Potato) Skip the entire postFX pipeline (scene -> offscreen RT ->
+  // composite quad with tonemap/vignette/chrom-aberration/damage-warp). Render
+  // the scene directly to the canvas instead, cutting two fullscreen passes
+  // per frame down to one. Big win on integrated GPUs. Loses the screen-space
+  // damage flash + shockwave warp ; the DOM-based damage indicators stay.
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
+    renderer.setRenderTarget(null);
+    renderer.render(scene, camera);
     return;
   }
   renderPostFX();
@@ -13746,6 +13826,13 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
     for (let i = 0; i < engineGlows.length; i++) engineGlows[i].visible = false;
     for (let i = 0; i < enginePlumes.length; i++) enginePlumes[i].visible = false;
+    // (v16a Potato F) Hide the energy-shield bubble too. The shield ShaderMaterial
+    // runs a fresnel rim + scrolling hex-cell pattern + 4-slot ripple impact
+    // every frame even at intensity 0 (the shader has a discard branch but the
+    // fragment program still executes). Hiding the mesh skips fragment work
+    // entirely. Shield hit registration is gameplay-side, not visual ; damage
+    // logic still flashes via the DOM HUD indicators.
+    if (shield) shield.visible = false;
   }
   const barrelMeshes = []; // no procedural barrels to recoil on imported hulls
   // V5a rim-PointLight was removed: the fresnel rim-shader on hullMat already
@@ -14136,6 +14223,8 @@ function createShipMesh(chassisData, teamColor, loadoutKey) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
     for (let i = 0; i < engineGlows.length; i++) engineGlows[i].visible = false;
     for (let i = 0; i < enginePlumes.length; i++) enginePlumes[i].visible = false;
+    // (v16a Potato F) Hide the energy-shield bubble (procedural ship builder path).
+    if (shield) shield.visible = false;
   }
   // Collect barrel meshes for muzzle flash animation
   const barrelMeshes = [];
@@ -20003,7 +20092,12 @@ function _spawnBasinClouds() {
     const maxSize = sphere.r * (1 - poolDepth - 0.18);
     const minSize = Math.min(40, maxSize * 0.6);
     // (v15a 2026-05-10) Denser basin : 12-16 clouds (was 8-11).
-    const numClouds = 12 + Math.floor(Math.random() * 5);  // 12-16 per basin
+    // (v16a Ultra) Denser still on Ultra : 16-20 per basin. Each cloud is
+    // ~10 sprites so this is a per-basin sprite count of ~160-200 vs
+    // ~120-160 on High. Bounded by the BCS slot pool.
+    const _basinBase   = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 16 : 12;
+    const _basinJitter = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 5  : 5;
+    const numClouds = _basinBase + Math.floor(Math.random() * _basinJitter);
     for (let i = 0; i < numClouds; i++) {
       const ang = Math.random() * Math.PI * 2;
       const rho = Math.sqrt(Math.random()) * poolR;
@@ -36096,7 +36190,19 @@ class StasisField {
     // proximity boost still drives uPulse via core.material.uniforms.uPulse
     // in update(dt) ; that uniform is added below as a custom field.
     let coreMat;
-    if (typeof _makeFXMaterial === 'function') {
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
+      // (v16a Potato F) Skip the LayeredFX 'plasma_purple' / 'plasma_wall'
+      // fragment shader. Core becomes a flat additive sphere ; rings + beacon
+      // (already MeshBasicMaterial) carry the visual identity. The proximity-
+      // pulse code in update(dt) is uniform-guarded so it no-ops on this material.
+      coreMat = new THREE.MeshBasicMaterial({
+        color: coreColor,
+        transparent: true,
+        opacity: 0.65,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+    } else if (typeof _makeFXMaterial === 'function') {
       coreMat = _makeFXMaterial(this.championMode ? 'plasma_purple' : 'plasma_wall');
       // (v11 fix) Sample the noise patterns at lab-equivalent scale: divide
       // world position by core radius so the same per-layer scale settings
@@ -39012,12 +39118,80 @@ function buildRoomGraphLevel(level) {
     // uniform write at the bottom of this file is also guarded for v16a.
     let sdfMat;
     if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
+      // (v16a Potato depth fix) The first Potato wall material rendered every
+      // face at the same unlit color ; reads as a flat silhouette because
+      // MeshBasicMaterial ignores all lights and faces share a single color.
+      // The walls had no sense of "you are inside a room". Fix : bake
+      // per-vertex colors onto levelGeo using the vertex normals (faces with
+      // normal pointing UP are brighter, faces pointing DOWN are darker,
+      // approximating a soft top-down sun) and the nearest-room palette so
+      // each chamber gets its own tint. This is a one-time cost at level
+      // build ; per-frame cost is zero ; runs through the cheapest possible
+      // MeshBasicMaterial(vertexColors: true) path.
+      const _vertCount = (levelGeo.attributes.position && levelGeo.attributes.position.count) || 0;
+      const _positions = levelGeo.attributes.position ? levelGeo.attributes.position.array : null;
+      const _normals = levelGeo.attributes.normal ? levelGeo.attributes.normal.array : null;
+      // Brighten each palette color the same way we brightened the single
+      // color in the previous pass : floor lightness 0.35, cap saturation
+      // 0.45. Pre-allocates an 8-slot palette aligned with roomCentersArr.
+      const _brightPalette = [];
+      const _hslTmp = { h: 0, s: 0, l: 0 };
+      for (let i = 0; i < 8; i++) {
+        const src = (roomColorsArr && roomColorsArr[i]) ? roomColorsArr[i] : null;
+        const c = src ? src.clone() : new THREE.Color(0x556677);
+        c.getHSL(_hslTmp);
+        const lift = Math.max(0.35, Math.min(0.65, _hslTmp.l + 0.18));
+        const sat  = Math.min(0.45, _hslTmp.s);
+        c.setHSL(_hslTmp.h, sat, lift);
+        _brightPalette.push(c);
+      }
+      const _colorAttr = new Float32Array(_vertCount * 3);
+      if (_positions && _vertCount > 0) {
+        const _rcLen = Math.min(8, (roomCentersArr && roomCentersArr.length) || 0);
+        for (let i = 0; i < _vertCount; i++) {
+          const px = _positions[i * 3];
+          const py = _positions[i * 3 + 1];
+          const pz = _positions[i * 3 + 2];
+          // Pick nearest room center ; use squared distance, no sqrt.
+          let nearest = 0;
+          let nearestD2 = Infinity;
+          for (let j = 0; j < _rcLen; j++) {
+            const rc = roomCentersArr[j];
+            const dx = px - rc.x, dy = py - rc.y, dz = pz - rc.z;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 < nearestD2) { nearestD2 = d2; nearest = j; }
+          }
+          const base = _brightPalette[nearest] || _brightPalette[0];
+          // Normal-based shade : ny in [-1, 1] -> shade in [0.55, 1.10].
+          // Up-facing (ceiling, ny ~ -1 when viewed from inside) is dim ;
+          // down-facing (floor) is bright. Bias toward the brighter half so
+          // the rooms don't read as caves.
+          let shade = 1.0;
+          if (_normals) {
+            const ny = _normals[i * 3 + 1];
+            // Inside-the-room interior face shading : the wall's outward
+            // normal generally points away from the room center, so a
+            // floor's normal is +Y (bright) and a ceiling's is -Y (dim).
+            shade = 0.65 + (ny + 1.0) * 0.225; // ny=-1 -> 0.65 ; ny=+1 -> 1.10
+            if (shade > 1.0) shade = 1.0;
+          }
+          _colorAttr[i * 3]     = Math.min(1, base.r * shade);
+          _colorAttr[i * 3 + 1] = Math.min(1, base.g * shade);
+          _colorAttr[i * 3 + 2] = Math.min(1, base.b * shade);
+        }
+      }
+      levelGeo.setAttribute('color', new THREE.BufferAttribute(_colorAttr, 3));
+
+      const _wallOpacity = (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0;
+      const _wallTransparent = _wallOpacity < 0.999;
       sdfMat = new THREE.MeshBasicMaterial({
-        color: 0x1a1a2e,
+        vertexColors: true,
         side: THREE.DoubleSide,
-        transparent: true,
+        // Only mark transparent when the user actually requested translucent
+        // walls ; opaque walls render in the opaque pass with no overhead.
+        transparent: _wallTransparent,
         depthWrite: true,
-        opacity: (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0,
+        opacity: _wallOpacity,
       });
       // Tag so later code can tell at a glance this isn't the shader path.
       sdfMat.userData = { isPotatoWallMat: true };
@@ -46587,7 +46761,15 @@ function playSound(type) {
   // while sustained heavy fire (~12+/0.4s) triggers degradation.
   const stressOn  = _AUDIO_VOICE_BUDGET * _AUDIO_STRESS_RATIO;       // ~11
   const stressOff = _AUDIO_VOICE_BUDGET * (_AUDIO_STRESS_RATIO - 0.2); // ~8
-  if (!_audioStressed && _audioRecentVoices.length >= stressOn) _audioStressed = true;
+  // (v16a Potato) Pin _audioStressed = true regardless of voice budget. The
+  // stress system already gates convolver-reverb sends (line ~46365) and
+  // chorus oscillators ; in Potato we want those off all the time, not just
+  // during heavy fights. Convolution against a 2.4s impulse response on every
+  // SFX is the most expensive single thing in the audio graph ; skipping the
+  // send fixes the bulk of the audio-thread CPU load.
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
+    _audioStressed = true;
+  } else if (!_audioStressed && _audioRecentVoices.length >= stressOn) _audioStressed = true;
   else if (_audioStressed && _audioRecentVoices.length <= stressOff) _audioStressed = false;
   // Rate-limit per type. ctx.currentTime is monotonic and tracks audio-thread
   // time, which is what we actually want here (real time can drift if the
@@ -46658,7 +46840,11 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
   const triple = _acquireSpatialTriple(audio.ctx);
   const { panner, occl, occlGain } = triple;
   try {
-    panner.panningModel = 'HRTF';
+    // (v16a Potato) HRTF panning convolves every sample against a head-related
+    // impulse response per active voice ; equalpower is just two gain factors.
+    // 10-100x cheaper per voice on the audio thread. Lose precise 3D
+    // localization, keep L/R stereo placement.
+    panner.panningModel = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) ? 'equalpower' : 'HRTF';
     panner.distanceModel = 'inverse';
     // Optional range override: some sounds (titan core activation) should carry farther.
     // refDistance = how close before attenuation begins; higher = louder at distance.
@@ -46683,7 +46869,13 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     occl.type = 'lowpass';
     let cutoff = 18000;
     let occludedGain = 1.0;
-    if (distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
+    // (v16a Potato) Skip the per-voice raycast against game.mapMeshes (often
+    // 30+ wall meshes). During dense fire this runs hundreds of times per
+    // second on the main thread, blocking the render frame. Cutoff stays at
+    // 18 kHz and gain stays at 1.0 ; you can hear sounds through walls, which
+    // is the same trade-off any plain stereo mixer makes.
+    const _potatoSkipOcclusion = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    if (!_potatoSkipOcclusion && distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
       _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
       _spatialRaycaster.set(_spatialCamPos, _spatialDir);
       _spatialRaycaster.near = 0;
