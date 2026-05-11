@@ -9268,6 +9268,26 @@ class BillboardCloudSystem {
   }
 }
 
+// (v15a 2026-05-10) Derive a smoke / ash color from a rock's base color.
+// The cloud should share the rock's HUE (red rocks → pinkish smoke, green
+// rocks → pale-green smoke) but with much lower saturation and higher
+// lightness so it reads as "particles suspended in air" rather than the
+// solid rock's pigment. Slight hue + saturation jitter so adjacent clouds
+// from the same cluster aren't identical. Accepts a hex int or any
+// THREE.Color-acceptable value.
+const _smokeColorScratch = new THREE.Color();
+const _smokeHSL = { h: 0, s: 0, l: 0 };
+function _smokeColorFromRock(rockColor) {
+  _smokeColorScratch.set(rockColor != null ? rockColor : 0x808080);
+  _smokeColorScratch.getHSL(_smokeHSL);
+  const h = (_smokeHSL.h + (Math.random() - 0.5) * 0.05 + 1) % 1;
+  const s = _smokeHSL.s * (0.28 + Math.random() * 0.22);       // 28-50% of rock saturation
+  const l = Math.min(0.78, _smokeHSL.l + 0.18 + Math.random() * 0.18); // lift toward smoke
+  const out = new THREE.Color();
+  out.setHSL(h, s, l);
+  return out;
+}
+
 // (v14e) GasCloud ; one cluster of N billboard sprites attached to an atom
 // or free-floating after detachment. N slot indices in BCS, each at a
 // random offset within a bounds volume centered on this.position.
@@ -18782,20 +18802,12 @@ class ClusterObstacle {
   _buildChildSmokeSphere(child) {
     if (!child || typeof scene === 'undefined') return;
     if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
-    // (v14e) GasCloud per child. Replaces the v14d displaced-sphere mesh
-    // with a swarm of camera-facing billboard sprites instanced through
-    // billboardCloudSystem. The aggregate silhouette is whatever shape
-    // the swarm forms ; never a sphere unless the random offsets happen
-    // to arrange that way. Per-child luminance variation 0.32-0.58 (gray
-    // shades) so adjacent atoms aren't identical. Phase 3 (dynamic
-    // lighting) will add projectile-color pickup ; until then, gray.
-    // (v14e tune 9) Thicker gas. segments 9 -> 13 (more sprites for
-    // denser coverage), alpha 0.65 -> 0.75 (more solid per-sprite). Gray
-    // range unchanged so it doesn't blow out white. Combined with the
-    // shader's noise-threshold drop (0.30 -> 0.22) more pixels survive
-    // per sprite, making the gas read as substance instead of wisps.
-    const v = 0.20 + Math.random() * 0.30;
-    const cloudColor = new THREE.Color(v, v, v);
+    // (v15a 2026-05-10 colored smoke) Cloud color inherits from the parent
+    // cluster's baseColor — gas reads as ash/dust from the rock rather
+    // than generic gray. Hue preserved, saturation reduced to ~40% of
+    // rock, lightness lifted toward smoke. Slight per-cloud jitter on
+    // both axes so adjacent atoms don't look uniform.
+    const cloudColor = _smokeColorFromRock(this.baseColor);
     const radius = (child.scale || child.radius || 20) * 2.8;
     const cloud = new GasCloud(billboardCloudSystem, child.position, {
       boundsRadius:   radius,
@@ -19297,8 +19309,9 @@ class ClusterObstacle {
             // projectile-lighting / round-rebuild systems all pick it up
             // without further wiring. The cluster phase is no longer used
             // since BCS clouds bond via spatial chemistry, not phase tags.
-            const _v = 0.20 + Math.random() * 0.30;
-            const _cloudColor = new THREE.Color(_v, _v, _v);
+            // (v15a colored smoke) Detached pocket from cluster shatter
+            // inherits the parent cluster's baseColor as muted smoke.
+            const _cloudColor = _smokeColorFromRock(this.baseColor);
             const _cloud = new GasCloud(billboardCloudSystem, _pos, {
               boundsRadius:   _size,
               spriteScale:    _size * 1.55,
@@ -19541,6 +19554,29 @@ function _spawnBasinClouds() {
     }
     if (hasDrain) { drainCount++; continue; }
     basinCount++;
+    // (v15a colored smoke) Basin pool inherits the color of the nearest
+    // cluster (within ~1.5x sphere radius) ; falls back to neutral warm
+    // off-white when no cluster is near. The whole pool shares one base
+    // color so the sphere reads as having a consistent atmosphere.
+    let basinBaseColor = null;
+    if (game.clusters && game.clusters.length) {
+      let nearestD2 = Infinity;
+      let nearest = null;
+      const maxD2 = (sphere.r * 1.5) * (sphere.r * 1.5);
+      for (let ci = 0; ci < game.clusters.length; ci++) {
+        const cl = game.clusters[ci];
+        if (!cl || !cl.position || cl.baseColor == null) continue;
+        const dx = cl.position.x - sphere.cx;
+        const dy = cl.position.y - sphere.cy;
+        const dz = cl.position.z - sphere.cz;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        if (d2 < maxD2 && d2 < nearestD2) {
+          nearestD2 = d2;
+          nearest = cl;
+        }
+      }
+      if (nearest) basinBaseColor = nearest.baseColor;
+    }
     // Basin sphere : spawn a POOL of clouds along the lower curve. Pool
     // is held high enough that cloud bodies (sprite radius up to ~size)
     // stay inside the sphere — previously cloud bottoms clipped through
@@ -19568,11 +19604,15 @@ function _spawnBasinClouds() {
         sphere.cz + rho * Math.sin(ang)
       );
       const size = minSize + Math.random() * (maxSize - minSize);
-      // (v15a 2026-05-10 debug brightness) Bright off-white pools so they
-      // visibly stand out against the dark wall pattern. Slight color
-      // jitter per cloud + bigger per-sprite jitter for variety.
-      const v = 0.55 + Math.random() * 0.25;
-      const color = new THREE.Color(v, v * 0.97, v * 0.92);  // very subtly warm
+      // (v15a colored smoke) Pool clouds share the nearest-cluster's hue
+      // as muted smoke ; otherwise default to off-white.
+      let color;
+      if (basinBaseColor != null) {
+        color = _smokeColorFromRock(basinBaseColor);
+      } else {
+        const v = 0.55 + Math.random() * 0.25;
+        color = new THREE.Color(v, v * 0.97, v * 0.92);
+      }
       const cloud = new GasCloud(billboardCloudSystem, pos, {
         boundsRadius:   size,
         spriteScale:    size * 1.7,
@@ -19736,6 +19776,115 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
 // into 6 mini-clouds. Tuned so the squish reads as fluid behavior but
 // doesn't drag on long enough to feel sluggish.
 const _GAS_SPLAT_DURATION = 0.35;
+
+// (v15a 2026-05-10 cloud attraction, revised) Lennard-Jones-like force
+// between detached gas pockets so they form loose lattices instead of
+// collapsing into tight orbiting blobs.
+//
+// Three components per pair :
+//   1. REPULSION when closer than equilibrium distance — keeps clouds
+//      from stacking on top of each other.
+//   2. ATTRACTION (bell curve) when between equilibrium and range —
+//      gently pulls neighbors into formation.
+//   3. TANGENTIAL DAMPING when in range — selectively kills the
+//      perpendicular component of relative velocity so clouds don't
+//      orbit each other once they're close. The radial component is
+//      preserved so attraction / repulsion still work.
+//
+// Equilibrium distance is 1.4× the sum of cloud radii (so clouds sit
+// with a small gap between their bounds, not touching). This naturally
+// produces "particles arranged in a lattice" behavior : pairs settle
+// at the equilibrium spacing, triplets form triangles, larger groups
+// form regular packings.
+//
+// Skipped in potato mode (the O(N²) cost matters on weak CPUs).
+function _applyCloudAttraction(dt) {
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato()) return;
+  const pockets = game.detachedGasPockets;
+  if (!pockets || pockets.length < 2) return;
+  const ATTRACT_STRENGTH   = 10;   // peak attraction (units/sec²) — gentle
+  const REPULSION_STRENGTH = 38;   // close-range push — stronger so clouds don't overlap
+  const TANGENT_DAMP_RATE  = 3.0;  // per-second tangential damping factor
+  const MAX_DAMP_PER_FRAME = 0.35; // clamp so low-FPS frames don't over-damp
+  for (let i = 0; i < pockets.length; i++) {
+    const a = pockets[i];
+    if (!a || !a.gasCloud || !a.velocity) continue;
+    const ap = a.gasCloud.position;
+    const ar = a.gasCloud.boundsRadius || 40;
+    for (let j = i + 1; j < pockets.length; j++) {
+      const b = pockets[j];
+      if (!b || !b.gasCloud || !b.velocity) continue;
+      const bp = b.gasCloud.position;
+      const br = b.gasCloud.boundsRadius || 40;
+      const dx = bp.x - ap.x;
+      const dy = bp.y - ap.y;
+      const dz = bp.z - ap.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < 0.01) continue;
+      const minD = ar + br;
+      // (v15a 2026-05-10 tight reach) Equilibrium spacing at 2.0× radius
+      // sum (loose lattice). Range at 3.0× so attraction only kicks in
+      // when clouds are ALREADY near each other — beyond ~3 radii away
+      // they don't feel each other at all. Previously the 5× range had
+      // clouds seeking each other from across rooms ; that produced a
+      // single dense super-cluster instead of natural local lattices.
+      const equilibriumD = minD * 2.0;
+      const range = minD * 3.0;
+      if (d2 > range * range) continue;
+      const d = Math.sqrt(d2);
+      const inv = 1 / d;
+      // (v15a 2026-05-10) Speed-based force reduction. When either cloud
+      // is moving fast (e.g. caught in a projectile / ship wake), reduce
+      // the attractive force and tangential damping so the wake can break
+      // it free of the lattice. Slow clouds get full lattice forces ;
+      // fast clouds become "energized" and slip out. At 100 u/s : ~50%.
+      // At 300 u/s (typical wake-driven speed) : ~22%.
+      const aSpd2 = a.velocity.x * a.velocity.x + a.velocity.y * a.velocity.y + a.velocity.z * a.velocity.z;
+      const bSpd2 = b.velocity.x * b.velocity.x + b.velocity.y * b.velocity.y + b.velocity.z * b.velocity.z;
+      const pairSpd = Math.sqrt(Math.max(aSpd2, bSpd2));
+      const speedScale = 1 / (1 + pairSpd * 0.012);
+      // --- (1) Force : repulsion if too close, attraction if too far.
+      let impulse = 0;
+      if (d < equilibriumD) {
+        // Repulsion always full strength so clouds never stack, even
+        // when in a wake. (Stacking would render as one big blob.)
+        const u = Math.min(1, (equilibriumD - d) / (equilibriumD * 0.5));
+        impulse = -REPULSION_STRENGTH * u * u * dt;
+      } else {
+        // Attraction scaled down by speed so wakes can break lattice.
+        const u = (d - equilibriumD) / (range - equilibriumD);
+        const pull = 4 * u * (1 - u);
+        impulse = ATTRACT_STRENGTH * pull * dt * speedScale;
+      }
+      const ix = dx * inv * impulse;
+      const iy = dy * inv * impulse;
+      const iz = dz * inv * impulse;
+      a.velocity.x += ix; a.velocity.y += iy; a.velocity.z += iz;
+      b.velocity.x -= ix; b.velocity.y -= iy; b.velocity.z -= iz;
+      // --- (2) Tangential damping. Project relative velocity onto the
+      // radial direction ; damp only the perpendicular component. This
+      // bleeds off orbital motion. Damping also scaled by speed so a
+      // wake-pushed cloud isn't dragged back to its lattice neighbors'
+      // speed — its tangent motion gets preserved so it can break free.
+      const ux = dx * inv, uy = dy * inv, uz = dz * inv;
+      const rvx = b.velocity.x - a.velocity.x;
+      const rvy = b.velocity.y - a.velocity.y;
+      const rvz = b.velocity.z - a.velocity.z;
+      const rvRadial = rvx * ux + rvy * uy + rvz * uz;
+      const tx = rvx - rvRadial * ux;
+      const ty = rvy - rvRadial * uy;
+      const tz = rvz - rvRadial * uz;
+      const damp = Math.min(MAX_DAMP_PER_FRAME, TANGENT_DAMP_RATE * dt * speedScale);
+      const half = damp * 0.5;
+      a.velocity.x += tx * half;
+      a.velocity.y += ty * half;
+      a.velocity.z += tz * half;
+      b.velocity.x -= tx * half;
+      b.velocity.y -= ty * half;
+      b.velocity.z -= tz * half;
+    }
+  }
+}
 
 function updateDetachedGasPockets(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
@@ -20039,6 +20188,11 @@ function updateDynamicObjects(dt) {
   // Tick clusters first so intact children's positions follow the cluster rotation,
   // then tick individual pieces (broken fragments drift + check impacts)
   for (const cl of game.clusters) cl.update(dt);
+  // (v15a 2026-05-10) Inter-cloud gravitational attraction. Each pair of
+  // detached gas pockets within range gets a small attractive impulse,
+  // so clouds gradually cluster together over time. Runs BEFORE the
+  // drift pass so this frame's impulse is integrated into position.
+  if (typeof _applyCloudAttraction === 'function') _applyCloudAttraction(dt);
   // (v14d Phase 4) Drift any free-floating gas pockets after clusters tick.
   updateDetachedGasPockets(dt);
   // (v14d Phase 5) Pairwise chemistry between gas pockets (and pockets vs
