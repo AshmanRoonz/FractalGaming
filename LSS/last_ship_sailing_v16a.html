@@ -17223,10 +17223,28 @@ class Projectile {
         // doesn't false-negative a real hit before the mesh test runs.
         // The narrow-phase _swepRayHitsShipMesh fires only for projectiles
         // already known to be close to the ship.
+        //
+        // (v16a Phase R2 — close-range salvo lag fix, replaces Phase U)
+        // The swept raycast walks every triangle of every hull mesh on
+        // the target ship (Three.js Raycaster does not BVH by default).
+        // For SPLASH-heavy ordnance (Syphon Rocket Salvo splash=100,
+        // Tracker Rockets splash=80, Puncture Cluster Missile, Pyro
+        // thermite, etc.) 5+ live rockets all inside one bot's OBB for
+        // several frames runs the raycast many times per frame ; that
+        // is the close-range lag the user reports (v16 had no such
+        // raycast and no such lag). For splash weapons the detonation
+        // fireball completely covers any sub-hull-precision imprecision,
+        // so we fall back to the v16 distance-squared check for them
+        // and keep the mesh-precise path only for direct-hit rounds
+        // (splash 0) where the player perceives "did the bullet hit
+        // metal or air around it." This restores v16 perf for rockets
+        // without giving up the Phase R improvement for the cases that
+        // actually wanted it (chaingun, plasma, hitscan-y main weapons).
         const hitRadius = bot.chassis.hullLength * 1.2;
         const hasShield = bot.shield > 0;
+        const _usesSplashSlop = (this.splash || 0) >= 25;
         let isHit;
-        if (hasShield) {
+        if (hasShield || _usesSplashSlop) {
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
           const inBroadOBB = _pointInsideShipOBB(this.position, bot, { w: 1.4, h: 1.1, l: 1.4 });
@@ -17353,10 +17371,13 @@ class Projectile {
       // as the bot-target branch above. Player hitbox now matches the
       // exact hull silhouette, same shape data the per-class hull-hug
       // shields use to draw their force-field outlines.
+      // (v16a Phase R2) Splash-heavy ordnance falls back to v16 distance
+      // check ; see the bot-target branch above for rationale.
       const hitRadius = player.chassis.hullLength * 1.2;
       const hasShield = player.shield > 0;
+      const _usesSplashSlop = (this.splash || 0) >= 25;
       let isHit;
-      if (hasShield) {
+      if (hasShield || _usesSplashSlop) {
         isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
       } else {
         const inBroadOBB = _pointInsideShipOBB(this.position, player, { w: 1.4, h: 1.1, l: 1.4 });
@@ -18926,20 +18947,6 @@ function applyExplosionPush(pos, force, radius) {
 }
 if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPush;
 
-// (v16a Phase U) Ring buffer of recent explosion positions + timestamps,
-// used by spawnExplosion's same-frame coalescing gate to detect when a new
-// detonation lands inside a recent blast's space-time neighborhood (e.g.
-// Syphon Rocket Salvo's 5-10 missiles all hitting the same target within
-// ~200ms). Capacity 8 is enough to cover Tracker's worst-case 20-missile
-// flurry because the lookback window is only 60ms ; older entries fall
-// out of the time gate before the buffer wraps.
-const _RECENT_EXPLOSION_CAP = 8;
-let _recentExplosionTimes = null;   // Float64Array, lazy init in spawnExplosion
-let _recentExplosionPx = null;
-let _recentExplosionPy = null;
-let _recentExplosionPz = null;
-let _recentExplosionRing = 0;
-
 function spawnExplosion(pos, size) {
   size = size || 20;
   // (v16a Potato) Minimal explosion : one 3D sphere mesh from the pool, no
@@ -18978,89 +18985,6 @@ function spawnExplosion(pos, size) {
     });
     return;
   }
-  // (v16a Phase U) Same-frame / same-spot explosion FX coalescing.
-  //
-  // Why : Syphon Rocket Salvo (5-10 rockets) and Tracker Rockets (5 missiles
-  // per locked target, up to 4 targets = 20 missiles) all detonate within a
-  // ~200ms window when fired up close to a ship. Each detonation runs the
-  // full FX chain : flash mesh, flare mesh, fireball mesh, inner-core mesh,
-  // 14 sparks, 6 debris, 18 embers, 3 dynamic lights, 2-7 fresh-geometry
-  // lightning bolts, plus a shaderSmoke ico if size>12. 5-20 of those
-  // stacking inside ~12 frames is the close-range lag spike the user reports.
-  //
-  // Fix : if another explosion fired within COALESCE_TIME at a position
-  // within COALESCE_DIST, downgrade THIS one to a minimal visual path :
-  //   - applyExplosionPush, audio, screen shake (gameplay-feel, keep all)
-  //   - one pooled sphere mesh (so the impact still has a visual marker)
-  //   - skip flash/flare/fireball/core/smoke/embers/lights/lightning
-  // The lead detonation still draws the full firework ; followers ride on
-  // its visual coattails. Solo and well-spaced explosions are unaffected
-  // because the ring-buffer recency check fails for them.
-  //
-  // The lightning bolts and three-stage dynamic lights are the heaviest
-  // single contributors (fresh tube geometry + 3 light slots per call),
-  // so coalescing them away buys back most of the salvo cost.
-  if (!_recentExplosionTimes) {
-    _recentExplosionTimes = new Float64Array(_RECENT_EXPLOSION_CAP);
-    _recentExplosionPx = new Float32Array(_RECENT_EXPLOSION_CAP);
-    _recentExplosionPy = new Float32Array(_RECENT_EXPLOSION_CAP);
-    _recentExplosionPz = new Float32Array(_RECENT_EXPLOSION_CAP);
-    for (let i = 0; i < _RECENT_EXPLOSION_CAP; i++) _recentExplosionTimes[i] = -1e9;
-  }
-  const _nowEx = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
-  const _COALESCE_TIME = 0.06;          // ~3-4 frames at 60Hz
-  const _COALESCE_DIST = 180;           // generous : Syphon splash is 100, blast reads merged
-  const _COALESCE_DIST_SQ = _COALESCE_DIST * _COALESCE_DIST;
-  let _shouldCoalesce = false;
-  for (let i = 0; i < _RECENT_EXPLOSION_CAP; i++) {
-    if (_nowEx - _recentExplosionTimes[i] > _COALESCE_TIME) continue;
-    const dx = pos.x - _recentExplosionPx[i];
-    const dy = pos.y - _recentExplosionPy[i];
-    const dz = pos.z - _recentExplosionPz[i];
-    if (dx*dx + dy*dy + dz*dz < _COALESCE_DIST_SQ) { _shouldCoalesce = true; break; }
-  }
-  if (_shouldCoalesce) {
-    // Keep gameplay-feel : cloud push, audio, screen shake.
-    if (typeof applyExplosionPush === 'function') {
-      applyExplosionPush(pos, 40 + size * 2.5, 200 + size * 12);
-    }
-    if (typeof playSpatialSound === 'function') {
-      const _far = Math.max(300, size * 18);
-      try { playSpatialSound('explosion', pos.clone(), { refDistance: Math.max(180, size * 10), maxDistance: _far, rolloffFactor: 0.85 }); } catch (_) {}
-    }
-    if (typeof player !== 'undefined' && player && player.position && typeof triggerScreenShake === 'function') {
-      const dxp = pos.x - player.position.x, dyp = pos.y - player.position.y, dzp = pos.z - player.position.z;
-      const dist = Math.sqrt(dxp*dxp + dyp*dyp + dzp*dzp);
-      const reach = Math.max(400, size * 25);
-      if (dist < reach) {
-        const falloff = 1 - (dist / reach);
-        const shake = Math.min(12, size * 0.18 * falloff * falloff);
-        if (shake > 0.05) triggerScreenShake(shake);
-      }
-    }
-    // One pooled sphere so the impact still has a visible flash at the
-    // hit site (otherwise follow-up rockets would look like duds).
-    const _coSphere = _acquireExplosionMesh('potatoSphere');
-    if (_coSphere) {
-      _coSphere.position.copy(pos);
-      _coSphere.scale.setScalar(size * 0.8);
-      _coSphere.material.color.setHex(0xff6600);
-      _coSphere.material.opacity = 0.7;
-      game.effects.push({
-        mesh: _coSphere, lifetime: 0.25, age: 0,
-        type: 'explosionFire', pooled: true, billboard: false,
-        maxSize: size * 1.8, baseScale: size * 0.8,
-      });
-    }
-    return;
-  }
-  // Not coalesced ; record this explosion so subsequent close ones in the
-  // same ~60ms window coalesce against it.
-  _recentExplosionTimes[_recentExplosionRing] = _nowEx;
-  _recentExplosionPx[_recentExplosionRing] = pos.x;
-  _recentExplosionPy[_recentExplosionRing] = pos.y;
-  _recentExplosionPz[_recentExplosionRing] = pos.z;
-  _recentExplosionRing = (_recentExplosionRing + 1) % _RECENT_EXPLOSION_CAP;
   // (v14g) Isotropic cloud push : every cloud / smoke system within radius
   // gets an outward velocity impulse. Force scales with explosion size so a
   // small hit barely ripples the gas while a death bloom or Salvo Core
