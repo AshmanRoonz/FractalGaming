@@ -2013,12 +2013,24 @@ body.vr-active .hit-marker {
 
       <div style="margin:20px 0;color:#333;font-size:10px;letter-spacing:3px;">; OR ;</div>
 
-      <button id="btn-solo" onclick="startSolo()" style="
-        background:rgba(60,60,80,0.3);border:1px solid rgba(100,100,120,0.4);color:#888;
-        padding:10px 30px;font-family:'Courier New',monospace;font-size:13px;
-        cursor:pointer;letter-spacing:2px;transition:all 0.2s;"
-        onmouseover="this.style.borderColor='#888';this.style.color='#ccc'"
-        onmouseout="this.style.borderColor='rgba(100,100,120,0.4)';this.style.color='#888'">SOLO + BOTS</button>
+      <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
+        <button id="btn-solo" onclick="startSolo()" style="
+          background:rgba(60,60,80,0.3);border:1px solid rgba(100,100,120,0.4);color:#888;
+          padding:10px 30px;font-family:'Courier New',monospace;font-size:13px;
+          cursor:pointer;letter-spacing:2px;transition:all 0.2s;"
+          onmouseover="this.style.borderColor='#888';this.style.color='#ccc'"
+          onmouseout="this.style.borderColor='rgba(100,100,120,0.4)';this.style.color='#888'">SOLO + BOTS</button>
+        <!-- (v16a) Test mode : no timer, no round-end, bots fly around but
+             don't shoot. For practicing flight, weapon-testing, scenery / sky
+             pairing review, anything where you don't want the round to end on
+             you. Same chassis / map / loadout flow as solo. -->
+        <button id="btn-test" onclick="startTest()" style="
+          background:rgba(40,60,80,0.3);border:1px solid rgba(80,140,180,0.4);color:#7aa;
+          padding:10px 30px;font-family:'Courier New',monospace;font-size:13px;
+          cursor:pointer;letter-spacing:2px;transition:all 0.2s;"
+          onmouseover="this.style.borderColor='#7cf';this.style.color='#cdf'"
+          onmouseout="this.style.borderColor='rgba(80,140,180,0.4)';this.style.color='#7aa'">TEST MODE</button>
+      </div>
     </div>
 
     <!-- (v10 Phase 3) External pages: leaderboard + live rooms browser.
@@ -2331,6 +2343,9 @@ body.vr-active .hit-marker {
   }
   window.joinRoom       = function() { return queueOrCall('joinRoom',       arguments); };
   window.startSolo      = function() { return queueOrCall('startSolo',      arguments); };
+  // (v16a) Test mode entry ; same queue-replay shape as startSolo so an
+  // early click during boot still lands.
+  window.startTest      = function() { return queueOrCall('startTest',      arguments); };
   // (v10) Discord signin/signout buttons share the same stub pattern.
   window.discordSignin  = function() { return queueOrCall('discordSignin',  arguments); };
   window.discordSignout = function() { return queueOrCall('discordSignout', arguments); };
@@ -2653,6 +2668,13 @@ const game = {
   state: 'select', // select, warmup, playing, roundEnd, matchEnd
   roundTimer: LSS.ROUND_TIME,
   warmupTimer: LSS.WARMUP_TIME,
+  // (v16a) Test mode : no countdown, no round timer, no round-end conditions,
+  // bots fly their normal AI patterns but don't fire weapons or use abilities.
+  // For practicing flight, weapon-testing, sky/wall pairing review, etc. Set
+  // by startTest() ; cleared by startSolo() / joinRoom() so it doesn't leak
+  // across sessions. Round-end checks in updateRoundSystem skip when true ;
+  // warmup countdown is set to 0 on entry ; bot AI gates fire + abilities.
+  testMode: false,
   scoreA: 0, scoreB: 0,
   currentRound: 1,
   // (v8_1VR) Wall opacity default ; can be overridden by saved settings.
@@ -4413,6 +4435,10 @@ async function postMatchResultToBackend() {
 // ---- LOBBY FUNCTIONS ----
 
 async function joinRoom() {
+  // (v16a) Clear the test-mode flag so a previous TEST MODE session doesn't
+  // bleed into multiplayer (passive bots in a multiplayer match would be
+  // very confusing, and test mode is offline-only anyway).
+  game.testMode = false;
   const codeInput = document.getElementById('room-code');
   const code = codeInput.value.trim().toUpperCase();
   if (!code) {
@@ -4632,6 +4658,22 @@ async function joinRoom() {
 function startSolo() {
   net.active = false;
   net.solo = true;
+  // (v16a) Clear the test-mode flag explicitly so going back to lobby and
+  // hitting SOLO + BOTS after a TEST MODE session doesn't carry the flag.
+  game.testMode = false;
+  enterShipSelect();
+}
+
+// (v16a) Test mode entry. Same flow as startSolo (offline, ship-select
+// screen, map carousel, loadout pick, launch) but flips game.testMode = true
+// so the round system skips warmup countdown + round-end checks, and bot AI
+// skips weapon fire + ability use. Bots still navigate, dodge, and patrol ;
+// they just won't shoot you. Useful for weapon range testing, scenery review,
+// flight practice, and skybox / wall pattern pairing reviews.
+function startTest() {
+  net.active = false;
+  net.solo = true;
+  game.testMode = true;
   enterShipSelect();
 }
 
@@ -15780,7 +15822,12 @@ class Bot {
           // LOS check: raycast toward player, only fire if path is clear
           const losDist = raycastLevel(this.position, toPlayer, distToPlayer + 10);
           if (losDist >= distToPlayer - 5) {
-            this.fireAtPlayer(toPlayer, distToPlayer);
+            // (v16a) Test mode : bots fly the same AI patterns but never fire.
+            // The fireTimer is still scheduled so movement / target-lock state
+            // ticks normally ; only the actual fireAtPlayer call is skipped.
+            if (!game.testMode) {
+              this.fireAtPlayer(toPlayer, distToPlayer);
+            }
             this.fireTimer = this.loadout.weapon.fireRate * (1 + Math.random() * 0.5);
           }
         }
@@ -15793,7 +15840,10 @@ class Bot {
     // when the player is within range and bot is healthy.
     this.abilityCooldowns[0] = Math.max(0, this.abilityCooldowns[0] - dt);
     this.abilityCooldowns[2] = Math.max(0, this.abilityCooldowns[2] - dt);
-    if (game.state === 'playing' && !this.aiRetreating && player.shipState !== 'dead' && player.team !== this.team) {
+    // (v16a) Skip ability use in test mode ; offensive abilities spawn
+    // projectiles tagged with owner='bot' that damage the player same as
+    // weapon fire.
+    if (game.state === 'playing' && !this.aiRetreating && player.shipState !== 'dead' && player.team !== this.team && !game.testMode) {
       this.tryUseAbilities();
     }
 
@@ -29070,6 +29120,11 @@ function dash() {
 // ---- ROUND SYSTEM ----
 
 function updateRoundSystem(dt) {
+  // (v16a) Test mode : skip the warmup countdown entirely and go straight
+  // to 'playing'. Player can fly immediately after ship select ; no 3-2-1.
+  if (game.state === 'warmup' && game.testMode) {
+    game.warmupTimer = 0;
+  }
   if (game.state === 'warmup') {
     const prev = game.warmupTimer;
     // (v11d) Wall-clock-anchored ; alt-tab safe.
@@ -29183,7 +29238,7 @@ function updateRoundSystem(dt) {
     }
     const endByChampion = (game.championResult === 'A' || game.championResult === 'B')
       && (!game.championEndTimer || game.championEndTimer <= 0);
-    const endByTimer = !game.raceNoTimer && game.roundTimer <= 0;
+    const endByTimer = !game.raceNoTimer && !game.testMode && game.roundTimer <= 0;
     // (v10 fix) In multiplayer, only the stasis owner peer is allowed to
     // RESOLVE the round (compute winner + bump score + transition to
     // roundEnd). Other peers wait for the broadcast 'round_end' event
@@ -29191,7 +29246,11 @@ function updateRoundSystem(dt) {
     // the per-peer tiebreaker computing different winners due to stale
     // NetworkPlayer.health values around the timer-out moment.
     const isResolutionAuthority = !net.active || amStasisOwner();
-    if ((endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) && isResolutionAuthority) {
+    // (v16a) Test mode : no round-end at all. No timer end, no team
+    // elimination end (player can shoot bots without ending the round),
+    // no champion-claim end. The round just stays in 'playing' forever
+    // until the user manually leaves via the lobby button.
+    if (!game.testMode && (endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) && isResolutionAuthority) {
       let winnerLabel = '';
       // (post-v6.9) Track which fleet won so the round-end banner can read
       // personally to the local player ("Round Won!" / "Round Lost") instead
@@ -49881,6 +49940,8 @@ renderer.setAnimationLoop(gameLoop);
 // Stash the real ones under `__real_X` and replay any pending click.
 if (typeof joinRoom  === 'function') window.__real_joinRoom  = joinRoom;
 if (typeof startSolo === 'function') window.__real_startSolo = startSolo;
+// (v16a) Test mode entry.
+if (typeof startTest === 'function') window.__real_startTest = startTest;
 // (v10) Discord signin/signout exports for the early stub pattern.
 if (typeof discordSignin  === 'function') window.__real_discordSignin  = discordSignin;
 if (typeof discordSignout === 'function') window.__real_discordSignout = discordSignout;
