@@ -16429,6 +16429,71 @@ function _pointInsideShipOBB(worldPoint, ship, margin) {
   );
 }
 
+// (v16a Phase R) Mesh-precise hit test. Raycasts the projectile's swept
+// path (previous frame position -> current position) against the ship's
+// actual hull geometry, the same mesh tree the per-class "hull-hug" shield
+// abilities (Vortex / Pyro thermal / Slayer / Charger) mirror to draw an
+// exact-silhouette force field. Three.js Raycaster.intersectObjects does
+// the precise ray-vs-triangle math ; bounding-sphere reject inside the
+// raycaster culls leaf meshes the ray clearly misses.
+//
+// Filter: shield bubble (name === 'shield') and engine plumes (userData
+// isPlume) are excluded so the hit registers on the body / wings / cockpit
+// / fins, not on the cone of light behind the ship or the dimmed shield
+// sphere. Filtered list is cached on shipMesh.userData._hullHitMeshes so
+// later calls reuse the array rather than re-traversing the mesh tree.
+//
+// Used as a NARROW PHASE only ; callers do the OBB broad-phase first so
+// this expensive walk only runs on projectiles already known to be close.
+const _hitRayRaycaster = new THREE.Raycaster();
+const _hitRayOrigin    = new THREE.Vector3();
+const _hitRayDir       = new THREE.Vector3();
+function _swepRayHitsShipMesh(currentPos, velocity, shipMesh) {
+  if (!shipMesh) return false;
+  let hullMeshes = shipMesh.userData && shipMesh.userData._hullHitMeshes;
+  if (!hullMeshes) {
+    hullMeshes = [];
+    shipMesh.traverse(child => {
+      if (!child || !child.isMesh) return;
+      if (child.name === 'shield') return;
+      if (child.userData && child.userData.isPlume) return;
+      hullMeshes.push(child);
+    });
+    if (!shipMesh.userData) shipMesh.userData = {};
+    shipMesh.userData._hullHitMeshes = hullMeshes;
+  }
+  if (hullMeshes.length === 0) return false;
+  // Swept length from velocity * dt. Frame deltas can be 0 on the first
+  // frame a projectile exists or under hitstop time-dilation ; in that
+  // case fall back to a tiny stationary probe ray so freshly-spawned shots
+  // still register if they're literally inside a hull.
+  const dt = (typeof game !== 'undefined' && game.deltaTime) ? game.deltaTime : 0.016;
+  const sx = (velocity && velocity.x) ? velocity.x * dt : 0;
+  const sy = (velocity && velocity.y) ? velocity.y * dt : 0;
+  const sz = (velocity && velocity.z) ? velocity.z * dt : 0;
+  const sweptLen = Math.sqrt(sx*sx + sy*sy + sz*sz);
+  if (sweptLen < 0.5) {
+    // Stationary or near-stationary : tiny radial probe in an arbitrary
+    // direction. 1-unit far is enough to catch a projectile already inside
+    // a hull triangle.
+    _hitRayOrigin.copy(currentPos);
+    _hitRayDir.set(0, 0, 1);
+    _hitRayRaycaster.set(_hitRayOrigin, _hitRayDir);
+    _hitRayRaycaster.far = 1.5;
+    const hits = _hitRayRaycaster.intersectObjects(hullMeshes, false);
+    return hits.length > 0;
+  }
+  // Cast from previous-frame position toward current position. far is
+  // the swept length + 1 unit tolerance ; any triangle along that segment
+  // registers a hit.
+  _hitRayOrigin.set(currentPos.x - sx, currentPos.y - sy, currentPos.z - sz);
+  _hitRayDir.set(sx / sweptLen, sy / sweptLen, sz / sweptLen);
+  _hitRayRaycaster.set(_hitRayOrigin, _hitRayDir);
+  _hitRayRaycaster.far = sweptLen + 1.0;
+  const hits = _hitRayRaycaster.intersectObjects(hullMeshes, false);
+  return hits.length > 0;
+}
+
 class Projectile {
   constructor(origin, velocity, damage, splash, owner, color) {
     this.position = origin.clone();
@@ -16447,7 +16512,16 @@ class Projectile {
     //   _smokeTrailTimer is the per-frame emission accumulator.
     this.smokeTrail = false;
     this._smokeTrailTimer = 0;
-    this._smokeTrailInterval = 0.045; // ~22 puffs/sec
+    this._smokeTrailInterval = 0.045; // fallback time interval for slow / stationary projectiles
+    // (v16a Phase S) Distance-based emission. Fast rockets used to leave
+    // big 3D-space gaps between puffs because emission was time-only ;
+    // firing directly away from the camera made the trail read as
+    // "frame-skipping" because consecutive puffs projected to nearly the
+    // same screen pixel until perspective separated them. Emitting per N
+    // world units traveled keeps the trail visually continuous.
+    this._smokeTrailMinDist = 18;
+    this._smokeTrailLastEmitPos = null; // initialized on first frame to spawn position
+    this._smokeTrailMaxPuffsPerFrame = 4; // cap for absurd single-frame deltas (alt-tab catch-up)
     // Fade-in: projectile is invisible at the muzzle and ramps to full
     // opacity over the first FADE_IN_DIST world units. Hides the harsh
     // "geometry pops in at the gun" look. Per-frame the update loop
@@ -16653,17 +16727,54 @@ class Projectile {
     // Spawned BEFORE the per-frame position move so puffs sit at the
     // projectile's current position and read as a wake of past locations.
     if (this.smokeTrail && typeof spawnFXBurst === 'function') {
+      // (v16a Phase S) Hybrid distance + time emission. Fast-moving rockets
+      // emit puffs at uniform 3D-space intervals (one per _smokeTrailMinDist
+      // world units), interpolating multiple puffs across the swept segment
+      // when the per-frame delta is large. Slow / hovering shots fall back
+      // to the legacy time-based interval. Result : firing directly away
+      // from camera no longer reads as "skipping puffs" since the trail's
+      // 3D-space density stays uniform.
       this._smokeTrailTimer -= dt;
-      if (this._smokeTrailTimer <= 0) {
-        this._smokeTrailTimer = this._smokeTrailInterval;
-        const _szM = this.sizeMult || 1.0;
-        const puff = spawnFXBurst('cloud', this.position, 5 * _szM, 0.65, {
+      const _szM = this.sizeMult || 1.0;
+      const _puffR = 5 * _szM;
+      const _emitPuff = (px, py, pz) => {
+        const puff = spawnFXBurst('cloud', { x: px, y: py, z: pz }, _puffR, 0.65, {
           startScale: 0.4,
           endScale: 1.6,
           segs: 12,
         });
         if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) {
           puff.material.uniforms.uBaseColor.value.set(this.trailColor);
+        }
+      };
+      if (!this._smokeTrailLastEmitPos) {
+        // First update : seed at spawn so the first puff is at spawn position
+        this._smokeTrailLastEmitPos = this.position.clone();
+        _emitPuff(this.position.x, this.position.y, this.position.z);
+        this._smokeTrailTimer = this._smokeTrailInterval;
+      } else {
+        const lx = this._smokeTrailLastEmitPos.x;
+        const ly = this._smokeTrailLastEmitPos.y;
+        const lz = this._smokeTrailLastEmitPos.z;
+        const dx = this.position.x - lx;
+        const dy = this.position.y - ly;
+        const dz = this.position.z - lz;
+        const moved = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        if (moved >= this._smokeTrailMinDist) {
+          // Fast enough that distance triggers : emit one puff per minDist
+          // step along the swept segment, capped per-frame for safety.
+          const want = Math.min(this._smokeTrailMaxPuffsPerFrame, Math.floor(moved / this._smokeTrailMinDist));
+          for (let i = 1; i <= want; i++) {
+            const t = i / want;
+            _emitPuff(lx + dx * t, ly + dy * t, lz + dz * t);
+          }
+          this._smokeTrailLastEmitPos.copy(this.position);
+          this._smokeTrailTimer = this._smokeTrailInterval;
+        } else if (this._smokeTrailTimer <= 0) {
+          // Slow / stationary : time fallback. One puff at current position.
+          _emitPuff(this.position.x, this.position.y, this.position.z);
+          this._smokeTrailLastEmitPos.copy(this.position);
+          this._smokeTrailTimer = this._smokeTrailInterval;
         }
       }
     }
@@ -17104,17 +17215,23 @@ class Projectile {
         if (!bot.alive || bot.team === player.team) continue;
         // (v11c) Arc Wave already hit this bot ; skip so it pierces past.
         if (this.isArcWave && this._arcHitBots && this._arcHitBots.has(bot.id)) continue;
-        // (v16a Phase Q) Branch on shield state. Shielded : keep the big
-        // sphere so shots strike the visible shield bubble. Unshielded :
-        // tighter OBB on the ship body. Per-axis margins : w 1.2 / l 1.2
-        // (wings + plumes), h 0.95 (ships don't have much sticking out
-        // above or below the hull, so the vertical hitbox reads closer
-        // to the visible silhouette).
+        // (v16a Phase R) Two-phase unshielded collision. Shielded path
+        // unchanged ; still the big sphere matching the shield bubble.
+        // Unshielded : OBB broad-phase (cheap reject) then a swept ray
+        // cast against the actual hull mesh for the precise check. The
+        // broad-phase OBB is loosened to {w:1.4, h:1.1, l:1.4} so it
+        // doesn't false-negative a real hit before the mesh test runs.
+        // The narrow-phase _swepRayHitsShipMesh fires only for projectiles
+        // already known to be close to the ship.
         const hitRadius = bot.chassis.hullLength * 1.2;
         const hasShield = bot.shield > 0;
-        const isHit = hasShield
-          ? (this.position.distanceToSquared(bot.position) < hitRadius * hitRadius)
-          : _pointInsideShipOBB(this.position, bot, { w: 1.2, h: 0.95, l: 1.2 });
+        let isHit;
+        if (hasShield) {
+          isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
+        } else {
+          const inBroadOBB = _pointInsideShipOBB(this.position, bot, { w: 1.4, h: 1.1, l: 1.4 });
+          isHit = inBroadOBB && _swepRayHitsShipMesh(this.position, this.velocity, bot.mesh);
+        }
         if (isHit) {
           // (v9) Sonar beacon: lands on ship, spawns the pulse around it
           // (so the ship that ate the beacon and any ship near them get
@@ -17232,15 +17349,19 @@ class Projectile {
         }
       }
     } else if (this.owner !== 'player' && player.shipState !== 'dead') {
-      // (v16a Phase Q) Same shielded-sphere / unshielded-OBB pattern as
-      // the bot-target branch above. Per-axis margins keep the wing/plume
-      // forgiveness (w 1.2, l 1.2) while pulling the top/bottom in
-      // (h 0.95) so the vertical hitbox tracks the visible ship.
+      // (v16a Phase R) Same OBB-broad-phase + mesh-raycast-narrow-phase
+      // as the bot-target branch above. Player hitbox now matches the
+      // exact hull silhouette, same shape data the per-class hull-hug
+      // shields use to draw their force-field outlines.
       const hitRadius = player.chassis.hullLength * 1.2;
       const hasShield = player.shield > 0;
-      const isHit = hasShield
-        ? (this.position.distanceToSquared(player.position) < hitRadius * hitRadius)
-        : _pointInsideShipOBB(this.position, player, { w: 1.2, h: 0.95, l: 1.2 });
+      let isHit;
+      if (hasShield) {
+        isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
+      } else {
+        const inBroadOBB = _pointInsideShipOBB(this.position, player, { w: 1.4, h: 1.1, l: 1.4 });
+        isHit = inBroadOBB && _swepRayHitsShipMesh(this.position, this.velocity, player.mesh);
+      }
       if (isHit) {
         playerTakeDamage(this.damage, this.owner, this);
         if (this.isCluster) this.spawnClusterChildren();
@@ -17939,6 +18060,53 @@ function warmupCombatShaders() {
             _gasMesh.userData._layeredFXWarmup = true;
             scene.add(_gasMesh);
             _layeredFXWarmupMeshes.push(_gasMesh);
+          }
+        } catch (_) {}
+        // (v16a Phase S) Pre-warm the Phase P fractal lightning shader. The
+        // pool's placeholder meshes don't trigger a compile because their
+        // geometry has no triangles, so the first real lightning bolt of a
+        // match used to compile the program inline. Rock-destruction
+        // chemistry arcs are often the first bolt to fire, which is exactly
+        // when the user reports a mini-spike. Build a tiny real tube + halo
+        // and core materials, parked offscreen, included in renderer.compile.
+        // Three.js's program cache is keyed on vert+frag source, so once the
+        // throwaway material compiles, every pool slot finds the cached
+        // program and skips its own compile.
+        try {
+          if (typeof _generateLightningPath === 'function' &&
+              typeof _buildLightningTubeGeometry === 'function' &&
+              typeof _LIGHTNING_VERT_SRC === 'string' &&
+              typeof _LIGHTNING_FRAG_SRC === 'string') {
+            const _wlFrom = new THREE.Vector3(0, -1e6, 0);
+            const _wlTo   = new THREE.Vector3(0, -1e6, 50);
+            const _wlPath = _generateLightningPath(_wlFrom, _wlTo, 3, 0.3);
+            const _wlGeom = _buildLightningTubeGeometry([_wlPath], 2.0, 8);
+            const _wlMakeMat = (isCore) => new THREE.ShaderMaterial({
+              vertexShader:   _LIGHTNING_VERT_SRC,
+              fragmentShader: _LIGHTNING_FRAG_SRC,
+              uniforms: {
+                uColor:   { value: new THREE.Color(0xffffff) },
+                uOpacity: { value: isCore ? 0.95 : 0.55 },
+                uTime:    { value: 0 },
+                uIsCore:  { value: isCore ? 1.0 : 0.0 },
+              },
+              transparent: true,
+              blending: THREE.AdditiveBlending,
+              depthWrite: false,
+              side: THREE.DoubleSide,
+            });
+            const _wlHaloMesh = new THREE.Mesh(_wlGeom, _wlMakeMat(false));
+            const _wlCoreMesh = new THREE.Mesh(_wlGeom, _wlMakeMat(true));
+            _wlHaloMesh.position.set(0, -1e6, 0);
+            _wlCoreMesh.position.set(0, -1e6, 0);
+            _wlHaloMesh.frustumCulled = false;
+            _wlCoreMesh.frustumCulled = false;
+            _wlHaloMesh.userData._layeredFXWarmup = true;
+            _wlCoreMesh.userData._layeredFXWarmup = true;
+            scene.add(_wlHaloMesh);
+            scene.add(_wlCoreMesh);
+            _layeredFXWarmupMeshes.push(_wlHaloMesh);
+            _layeredFXWarmupMeshes.push(_wlCoreMesh);
           }
         } catch (_) {}
         // Stash the meshes on a global so we can remove them after the
@@ -26573,25 +26741,33 @@ function executeAbility(slot, ability) {
       // the tracker_rockets recipe. Plays here, AFTER the full-lock check,
       // so an empty press is silent.
       try { playSound('tracker_rockets'); } catch (_) {}
-      // Fire 5 tracking missiles at each fully-locked target.
+      // (v16a Phase T) Same staggering as Rocket Salvo. Tracker fires 5
+      // rockets per full-locked target ; with 2 locked targets that's
+      // 10 simultaneous Projectile allocations in one frame, same lag spike
+      // as Rocket Salvo. Queue them all and the dispatcher releases one
+      // per frame. Locks consumed up-front since the user already pressed
+      // the button ; partial locks on other targets are unchanged.
+      const _trQueue = [];
       for (const target of lockedTargets) {
         for (let m = 0; m < 5; m++) {
-          const spread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
-          const vel = forward.clone().add(spread).normalize().multiplyScalar(900);
-          const proj = new Projectile(player.position.clone(), vel, 1000, 80, 'player', LSS.CLASS_COLORS.TRACKER);
-          proj.smokeTrail = true;
-          proj.removeHaze();
-          proj.tracking = true;
-          proj.trackTarget = target;
-          game.projectiles.push(proj);
-          // (v6.7) Receivers see straight-line missiles (no homing client-side);
-          // damage still flows via hit-claim. Future: broadcast trackTarget.peerId
-          // so receivers can render homing too.
-          broadcastAbilityProjectile(proj);
+          const _trSpread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
+          const _trVel = forward.clone().add(_trSpread).normalize().multiplyScalar(900);
+          _trQueue.push({
+            velocity:    _trVel,
+            damage:      1000,
+            splash:      80,
+            color:       LSS.CLASS_COLORS.TRACKER,
+            smokeTrail:  true,
+            removeHaze:  true,
+            tracking:    true,
+            trackTarget: target,
+          });
         }
-        // Only consume full locks ; partial locks on other targets stay.
+        // Consume the full lock immediately so a second press during the
+        // burst doesn't double-fire on the same target.
         delete player.trackerLocks[target.id];
       }
+      _enqueueStaggeredRocketSalvo(player, _trQueue, 0.035);
       player.trackerLockedTarget = null;
     }
     // BLASTER: Power Shot (1s charge, then fires; mode-dependent)
@@ -26610,15 +26786,27 @@ function executeAbility(slot, ability) {
       // the rocket_salvo recipe in DEFAULT_SOUND_LIBRARY.
       try { playSound('rocket_salvo'); } catch (_) {}
       const rocketCount = player.syphonMissileRacks ? 10 : 5;
+      // (v16a Phase T) Stagger the launches over the ability's duration
+      // instead of allocating 5-10 Projectile instances (each with a sphere
+      // mesh + Line trail + LayeredFX proj_glow ShaderMaterial) in one frame.
+      // The recipe always intended "5 staggered rocket launches over 0.35s"
+      // (see DEFAULT_SOUND_LIBRARY comment for the rocket_salvo sound) but
+      // the code spawned them simultaneously. Now queued ; the dispatcher
+      // in updateAbilities releases one rocket per frame at ~35ms intervals.
+      // Same rapid-salvo visual ; allocation cost spread across frames.
+      const _rsQueue = [];
       for (let r = 0; r < rocketCount; r++) {
-        const spread = new THREE.Vector3((Math.random()-0.5)*0.12, (Math.random()-0.5)*0.12, 0);
-        const vel = forward.clone().add(spread).normalize().multiplyScalar(800);
-        const proj = new Projectile(player.position.clone(), vel, 700, 100, 'player', LSS.CLASS_COLORS.SYPHON);
-        proj.smokeTrail = true; // Syphon Rocket Salvo keeps haze ; smoke only.
-        game.projectiles.push(proj);
-        // (v6.7) Broadcast each rocket so peers see the salvo.
-        broadcastAbilityProjectile(proj);
+        const _rsSpread = new THREE.Vector3((Math.random()-0.5)*0.12, (Math.random()-0.5)*0.12, 0);
+        const _rsVel = forward.clone().add(_rsSpread).normalize().multiplyScalar(800);
+        _rsQueue.push({
+          velocity:   _rsVel,
+          damage:     700,
+          splash:     100,
+          color:      LSS.CLASS_COLORS.SYPHON,
+          smokeTrail: true,
+        });
       }
+      _enqueueStaggeredRocketSalvo(player, _rsQueue, 0.035);
     }
   }
 
@@ -28151,7 +28339,74 @@ function _spawnSonarPulse(pos, owner) {
   try { playSound('sonar_pulse'); } catch (e) {}
 }
 
+// (v16a Phase T) Staggered-rocket-salvo support.
+//
+// _enqueueStaggeredRocketSalvo(player, configs, interval)
+//   Pushes a fresh queue onto player._pendingRocketSalvo. Each `config` is
+//   a plain object describing one rocket's spawn parameters :
+//     velocity     THREE.Vector3 (already includes spread + speed)
+//     damage       number, projectile damage
+//     splash       number, splash radius
+//     color        hex color
+//     smokeTrail   bool, set proj.smokeTrail = true after spawn
+//     removeHaze   bool, call proj.removeHaze() after spawn
+//     tracking     bool, set proj.tracking = true after spawn
+//     trackTarget  bot, set proj.trackTarget = target after spawn
+//   The dispatcher (_drainStaggeredRocketSalvo, called from updateAbilities
+//   every frame) shifts one config per frame and spawns the Projectile.
+//   This avoids the 5-10-rockets-in-one-frame allocation spike that the
+//   user reported as a lag hitch when firing Rocket Salvo / Tracker Rockets.
+function _enqueueStaggeredRocketSalvo(target, configs, interval) {
+  if (!target || !configs || configs.length === 0) return;
+  target._pendingRocketSalvo = {
+    queue: configs,
+    nextFireDelay: 0,            // first rocket fires on the next dispatcher tick
+    interval: (interval > 0) ? interval : 0.035,
+  };
+}
+function _drainStaggeredRocketSalvo(dt) {
+  if (typeof player === 'undefined' || !player || !player._pendingRocketSalvo) return;
+  // Drop the queue if the player died mid-burst ; the salvo just ends.
+  if (player.shipState === 'dead') { player._pendingRocketSalvo = null; return; }
+  const q = player._pendingRocketSalvo;
+  if (!q.queue || q.queue.length === 0) { player._pendingRocketSalvo = null; return; }
+  q.nextFireDelay -= dt;
+  if (q.nextFireDelay > 0) return;
+  // One rocket per call. If many frames elapsed (alt-tab catch-up), the
+  // queue still releases at the natural per-frame cadence so we never spike
+  // multiple Projectile constructors in a single frame.
+  const cfg = q.queue.shift();
+  // Re-validate tracking target ; the target may have died during the burst.
+  let tracking = !!cfg.tracking;
+  let trackTarget = cfg.trackTarget;
+  if (tracking && (!trackTarget || !trackTarget.alive)) {
+    tracking = false;
+    trackTarget = null;
+  }
+  const proj = new Projectile(
+    player.position.clone(),
+    cfg.velocity,
+    cfg.damage,
+    cfg.splash,
+    'player',
+    cfg.color
+  );
+  if (cfg.smokeTrail) proj.smokeTrail = true;
+  if (cfg.removeHaze && typeof proj.removeHaze === 'function') proj.removeHaze();
+  if (tracking) {
+    proj.tracking = true;
+    proj.trackTarget = trackTarget;
+  }
+  game.projectiles.push(proj);
+  if (typeof broadcastAbilityProjectile === 'function') broadcastAbilityProjectile(proj);
+  q.nextFireDelay = q.interval;
+  if (q.queue.length === 0) player._pendingRocketSalvo = null;
+}
+
 function updateAbilities(dt) {
+  // (v16a Phase T) Drain queued staggered rocket salvos (Rocket Salvo,
+  // Tracker Rockets). One Projectile allocation per frame at most.
+  _drainStaggeredRocketSalvo(dt);
   // Update shield visuals each frame
   updateShieldVisuals(dt);
 
