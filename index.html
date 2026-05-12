@@ -16373,6 +16373,62 @@ const _projToTarget = new THREE.Vector3();
 const _projHitPoint = new THREE.Vector3();
 const _projArcEnd = new THREE.Vector3();
 
+// (v16a Phase Q) OBB hitbox for ships when shields are down.
+// Original code used a single sphere of hullLength*1.2 around the ship
+// center for every hit check, which is sized to roughly match the shield
+// bubble. When shields ARE up that reads correctly (the sphere is the
+// thing the projectile visually struck). When shields are DOWN the same
+// sphere is way bigger than the visible ship body (e.g. a Frigate with
+// 60x25x80 hull dimensions had a 96-unit hit radius, ~2.4x its longest
+// half-extent) so shots register hits in empty space around the ship.
+// This helper transforms the projectile world position into the ship's
+// local frame and tests against the chassis half-extents : same axes the
+// ship is modeled in, so the hitbox tracks the ship's actual shape and
+// orientation. Three abs() comparisons plus one quaternion inversion +
+// rotation. Cheap.
+const _hitOBBScratchV = new THREE.Vector3();
+const _hitOBBScratchQ = new THREE.Quaternion();
+function _pointInsideShipOBB(worldPoint, ship, margin) {
+  if (!ship || !ship.chassis || !ship.position || !worldPoint) return false;
+  // `margin` accepts either a single number (uniform on all three axes)
+  // or an object { w, h, l } for per-axis margins. Per-axis is the useful
+  // case here : real ship silhouettes are wider+longer than they are tall,
+  // since wings extend horizontally and plumes extend backward but nothing
+  // sticks much above or below the hull. Letting Y margin run tighter than
+  // X / Z gets the hitbox to read as the ship's actual vertical profile.
+  let mw, mh, ml;
+  if (margin && typeof margin === 'object') {
+    mw = (margin.w > 0) ? margin.w : 1.0;
+    mh = (margin.h > 0) ? margin.h : 1.0;
+    ml = (margin.l > 0) ? margin.l : 1.0;
+  } else if (typeof margin === 'number' && margin > 0) {
+    mw = mh = ml = margin;
+  } else {
+    mw = mh = ml = 1.0;
+  }
+  const halfW = ship.chassis.hullWidth  * 0.5 * mw;
+  const halfH = ship.chassis.hullHeight * 0.5 * mh;
+  const halfL = ship.chassis.hullLength * 0.5 * ml;
+  _hitOBBScratchV.x = worldPoint.x - ship.position.x;
+  _hitOBBScratchV.y = worldPoint.y - ship.position.y;
+  _hitOBBScratchV.z = worldPoint.z - ship.position.z;
+  // Rotate the offset into ship-local space. Ship orientation lives on
+  // ship.mesh.quaternion (ship.quaternion is sometimes a different thing,
+  // depends on how the ship class is wired). Fall back to identity if
+  // no quaternion is available (e.g. headless / network-replicated ghost).
+  const q = (ship.mesh && ship.mesh.quaternion) ? ship.mesh.quaternion :
+            (ship.quaternion ? ship.quaternion : null);
+  if (q) {
+    _hitOBBScratchQ.copy(q).invert();
+    _hitOBBScratchV.applyQuaternion(_hitOBBScratchQ);
+  }
+  return (
+    Math.abs(_hitOBBScratchV.x) < halfW &&
+    Math.abs(_hitOBBScratchV.y) < halfH &&
+    Math.abs(_hitOBBScratchV.z) < halfL
+  );
+}
+
 class Projectile {
   constructor(origin, velocity, damage, splash, owner, color) {
     this.position = origin.clone();
@@ -17048,8 +17104,18 @@ class Projectile {
         if (!bot.alive || bot.team === player.team) continue;
         // (v11c) Arc Wave already hit this bot ; skip so it pierces past.
         if (this.isArcWave && this._arcHitBots && this._arcHitBots.has(bot.id)) continue;
+        // (v16a Phase Q) Branch on shield state. Shielded : keep the big
+        // sphere so shots strike the visible shield bubble. Unshielded :
+        // tighter OBB on the ship body. Per-axis margins : w 1.2 / l 1.2
+        // (wings + plumes), h 0.95 (ships don't have much sticking out
+        // above or below the hull, so the vertical hitbox reads closer
+        // to the visible silhouette).
         const hitRadius = bot.chassis.hullLength * 1.2;
-        if (this.position.distanceToSquared(bot.position) < hitRadius * hitRadius) {
+        const hasShield = bot.shield > 0;
+        const isHit = hasShield
+          ? (this.position.distanceToSquared(bot.position) < hitRadius * hitRadius)
+          : _pointInsideShipOBB(this.position, bot, { w: 1.2, h: 0.95, l: 1.2 });
+        if (isHit) {
           // (v9) Sonar beacon: lands on ship, spawns the pulse around it
           // (so the ship that ate the beacon and any ship near them get
           // locked together). No damage is dealt.
@@ -17166,8 +17232,16 @@ class Projectile {
         }
       }
     } else if (this.owner !== 'player' && player.shipState !== 'dead') {
+      // (v16a Phase Q) Same shielded-sphere / unshielded-OBB pattern as
+      // the bot-target branch above. Per-axis margins keep the wing/plume
+      // forgiveness (w 1.2, l 1.2) while pulling the top/bottom in
+      // (h 0.95) so the vertical hitbox tracks the visible ship.
       const hitRadius = player.chassis.hullLength * 1.2;
-      if (this.position.distanceToSquared(player.position) < hitRadius * hitRadius) {
+      const hasShield = player.shield > 0;
+      const isHit = hasShield
+        ? (this.position.distanceToSquared(player.position) < hitRadius * hitRadius)
+        : _pointInsideShipOBB(this.position, player, { w: 1.2, h: 0.95, l: 1.2 });
+      if (isHit) {
         playerTakeDamage(this.damage, this.owner, this);
         if (this.isCluster) this.spawnClusterChildren();
         this.destroy();
