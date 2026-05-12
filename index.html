@@ -21392,6 +21392,88 @@ const GAS_SPARK_INTERVAL_MIN   = 12.0;
 const GAS_SPARK_INTERVAL_MAX   = 30.0;
 const GAS_ARC_COLOR            = 0xddddee; // soft white-blue
 
+// (v16a Phase W) Layered gas-pocket arc. Mirrors the Energy Siphon
+// conduit recipe (halo + bright core + optional offset crackle + path
+// glow particles) at a scale appropriate for the inter-cloud range.
+// `scale` is 0..1 where 0 = sparse lone drifter pair and 1 = densest
+// observed lattice. All three chemistry paths route through this so
+// the visual reads as a unified "atmospheric discharge" system rather
+// than a scattering of tiny single-bolt cracks.
+//
+// Bolt count cap : 2 bolts per call for scale <= 0.55, 3 for higher
+// (the extra offset crackle). With the 12-30s per-pair spark interval
+// the global lightning pool (24 slots, see _LIGHTNING_POOL_SIZE) has
+// generous headroom even when many lattice arcs overlap.
+//
+// Glow particles use game.particles (sprite pool, ~500 cap), same
+// system the Siphon conduit feeds. Count scales with density so
+// dense lattice arcs read as a fat blue halo and lone drifter arcs
+// just sprinkle a few embers.
+const _gasArcScratchOff = new THREE.Vector3();
+const _gasArcScratchA   = new THREE.Vector3();
+const _gasArcScratchB   = new THREE.Vector3();
+const _gasArcScratchDir = new THREE.Vector3();
+function _spawnLayeredGasArc(from, to, scale) {
+  if (typeof spawnLightningBolt !== 'function') return;
+  const s = Math.max(0, Math.min(1, scale || 0));
+  // Halo : wider, softer outer bolt. Pale blue-white at low density,
+  // shifts toward icy lavender-white as the lattice tightens.
+  const haloColor = (s < 0.5) ? 0xa8c8ff : 0xccdfff;
+  const haloLife  = 0.22 + s * 0.10;
+  const haloBr    = 2 + Math.floor(s * 2);
+  const haloThk   = 2.0 + s * 2.4;
+  spawnLightningBolt(from, to, haloColor, haloLife, haloBr, haloThk);
+  // Bright core : narrow ice-white inner bolt sitting inside the halo.
+  const coreLife  = 0.16 + s * 0.08;
+  const coreBr    = 1 + Math.floor(s * 2);
+  const coreThk   = 0.8 + s * 0.8;
+  spawnLightningBolt(from, to, 0xeef2ff, coreLife, coreBr, coreThk);
+  // Offset crackle for dense lattice : a parallel thinner spark a few
+  // units off-axis gives the conduit visible thickness on the high end.
+  if (s > 0.55) {
+    _gasArcScratchOff.set(
+      Math.random() - 0.5,
+      Math.random() - 0.5,
+      Math.random() - 0.5
+    ).normalize().multiplyScalar(8 + Math.random() * 6);
+    _gasArcScratchA.copy(from).add(_gasArcScratchOff);
+    _gasArcScratchB.copy(to).add(_gasArcScratchOff);
+    spawnLightningBolt(_gasArcScratchA, _gasArcScratchB, 0x88ccff, 0.14 + s * 0.06, 1, 0.7);
+  }
+  // Path-aligned glow particles. Count and transverse spread scale
+  // with density ; sparse pairs get a few embers, lattice gets a
+  // fat blue halo running along the bolt.
+  if (game && game.particles) {
+    _gasArcScratchDir.subVectors(to, from);
+    const len = _gasArcScratchDir.length();
+    if (len > 1) {
+      const partCount = 4 + Math.floor(s * 6);
+      const spread = 6 + s * 8;
+      for (let gi = 0; gi < partCount; gi++) {
+        const t = Math.random();
+        const pPos = new THREE.Vector3()
+          .copy(from)
+          .addScaledVector(_gasArcScratchDir, t);
+        pPos.x += (Math.random() - 0.5) * spread * 2;
+        pPos.y += (Math.random() - 0.5) * spread * 2;
+        pPos.z += (Math.random() - 0.5) * spread * 2;
+        game.particles.push({
+          position: pPos,
+          velocity: new THREE.Vector3(
+            (Math.random() - 0.5) * 30,
+            (Math.random() - 0.5) * 30,
+            (Math.random() - 0.5) * 30
+          ),
+          life: 0.14 + Math.random() * 0.12,
+          maxLife: 0.26,
+          color: Math.random() < 0.5 ? 0xaaccff : 0xddeeff,
+          size: 2.5 + Math.random() * 2,
+        });
+      }
+    }
+  }
+}
+
 // (v14e) Per-pocket position helper. Returns Vector3 of the pocket's
 // world center regardless of whether it's a GasCloud or a legacy mesh.
 function _gasPocketCenter(p) {
@@ -21443,21 +21525,21 @@ function updateGasChemistry(dt) {
         // neighbors counted by _applyCloudAttraction), spawn a thicker,
         // brighter, multi-branch bolt — the kind of lightning you'd
         // expect when many charged clouds are crammed together. Sparse
-        // pairs (drifting alone) still get the original tiny crackle.
+        // pairs (drifting alone) still get a smaller layered crackle.
+        //
+        // (v16a Phase W) Both branches now route through the layered
+        // arc helper (halo + bright core + path glow + optional offset
+        // crackle for dense lattice) so the discharge reads as a real
+        // atmospheric conduit, not a thread.
         const aN = a._latticeNeighbors || 0;
         const bN = b._latticeNeighbors || 0;
         const isLattice = (aN >= 2 && bN >= 2);
         if (isLattice) {
           // Scale lightning intensity with how dense the lattice is.
           const denseFrac = Math.min(1, (Math.min(aN, bN) - 1) / 4);  // 0 at 2, 1 at 6+
-          const life      = 0.18 + denseFrac * 0.22;            // 0.18 - 0.40 s
-          const branches  = 1 + Math.floor(denseFrac * 3);      // 1 - 4
-          const thickness = 1.4 + denseFrac * 1.8;              // 1.4 - 3.2
-          // Whiter / brighter as density grows.
-          const col = denseFrac > 0.5 ? 0xeef0ff : 0xc8d4ee;
-          spawnLightningBolt(ap, bp, col, life, branches, thickness);
+          _spawnLayeredGasArc(ap, bp, 0.35 + denseFrac * 0.65);
         } else {
-          spawnLightningBolt(ap, bp, GAS_ARC_COLOR, 0.10, 1, 1.0);
+          _spawnLayeredGasArc(ap, bp, 0);
         }
         a._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
       }
@@ -21485,7 +21567,12 @@ function updateGasChemistry(dt) {
         const dist = Math.sqrt(d2);
         const intensity = 1.0 + (1.0 - dist / GAS_CLUSTER_REACT_RADIUS) * 1.0;
         if (p._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
-          spawnLightningBolt(pp, cl.position, GAS_ARC_COLOR, 0.10, 1, 1.0);
+          // (v16a Phase W) Layered arc to the rock cluster. Slight
+          // scale uplift over a sparse drifter-vs-drifter spark so the
+          // discharge to a stationary mass reads as a touch more
+          // committed (a rock is a real ground point) without ballooning
+          // into the dense-lattice silhouette.
+          _spawnLayeredGasArc(pp, cl.position, 0.20);
           p._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
         }
       }
