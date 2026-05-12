@@ -1373,32 +1373,49 @@ body.vr-active .hit-marker {
    Cyan accent so it reads as visually distinct from the yellow map
    controls. Mirrors the map-select-row arrow + window pattern but
    trimmed (no dot indicator ; just an active-name display). */
-#sky-select-section {
+#preset-select-section {
   width: 100%; margin-top: 8px;
   padding-top: 14px;
   border-top: 1px solid rgba(80,80,120,0.25);
   display: flex; flex-direction: column;
   align-items: center; gap: 8px;
 }
-#sky-select-label {
+#preset-select-label {
   font-size: 11px; color: #888; letter-spacing: 2px;
 }
-#sky-window {
+#preset-window {
   width: 100%; padding: 12px 10px;
   background: rgba(20,20,40,0.6);
   border: 2px solid #66ccff;
   box-shadow: inset 0 0 12px rgba(100,200,255,0.18);
   position: relative; text-align: center;
 }
-#sky-window-name {
+#preset-window-name {
   font-size: 14px; font-weight: bold; color: #99ddff;
   letter-spacing: 1.5px;
 }
-#sky-select-row {
+#preset-select-row {
   display: flex; flex-direction: row;
   align-items: center; justify-content: space-between;
   gap: 10px; width: 100%;
 }
+#preset-locked-note {
+  font-size: 9px; color: #ffaa00; letter-spacing: 1px;
+  text-align: center; padding-top: 2px;
+}
+/* (v16a Phase V) When a preset is active, gray out the gmaps Custom
+   Location panel to advertise the mutual exclusion ; clicks still pass
+   through because the click handlers themselves no-op while locked. */
+#gmaps-overlay-panel.preset-locked {
+  opacity: 0.4;
+  pointer-events: none;
+}
+/* And vice versa : when a gmaps overlay is queued, the preset cycle
+   is grayed because it would have no effect (gmaps replaces the
+   scene). The cycle stays focusable so the user can clear gmaps
+   then pick a preset. */
+#preset-select-section.gmaps-locked .sky-arrow { opacity: 0.4; }
+#preset-select-section.gmaps-locked #preset-window-name { color: #777; }
 .sky-arrow {
   background: rgba(20,20,40,0.6);
   border: 1px solid rgba(80,80,120,0.4);
@@ -2268,18 +2285,22 @@ body.vr-active .hit-marker {
         </div>
         <div id="gmaps-loc-status"></div>
       </div>
-      <!-- (v16a) Skybox cycle inside the map panel ; B key cycles in
-           game and at this screen. Full list lives in
-           Settings -> Graphics -> Background. -->
-      <div id="sky-select-section">
-        <div id="sky-select-label">SKYBOX (B)</div>
-        <div id="sky-window">
-          <div id="sky-window-name">Stars only</div>
+      <!-- (v16a Phase V) Map preset cycle. Replaces the raw skybox cycle
+           with curated combos of (wall pattern + skybox + wall opacity).
+           B key cycles presets in lobby and in game. Mutually exclusive
+           with the Google Maps "Custom Location" panel above : selecting
+           a preset disables the location input ; entering a location
+           clears the preset back to None. -->
+      <div id="preset-select-section">
+        <div id="preset-select-label">PRESET (B)</div>
+        <div id="preset-window">
+          <div id="preset-window-name">None</div>
         </div>
-        <div id="sky-select-row">
-          <button class="sky-arrow" id="sky-prev" title="Previous skybox">&#9664;</button>
-          <button class="sky-arrow" id="sky-next" title="Next skybox">&#9654;</button>
+        <div id="preset-select-row">
+          <button class="sky-arrow" id="preset-prev" title="Previous preset">&#9664;</button>
+          <button class="sky-arrow" id="preset-next" title="Next preset">&#9654;</button>
         </div>
+        <div id="preset-locked-note" style="display:none;">Clear preset to use Custom Location</div>
       </div>
     </div>
   </div>
@@ -2684,6 +2705,9 @@ const game = {
   // (v12 patch20) Typed-location for gmaps overlay on tunnel maps.
   // Set by the lobby DROP panel ; consumed by buildRoomGraphLevel.
   pendingGmapsOverlay: null,
+  // (v16a Phase V) Active map preset name (one of MAP_PRESETS), or
+  // empty string for None. Mutually exclusive with pendingGmapsOverlay.
+  mapPreset: '',
   entities: [],
   projectiles: [],
   particles: [],  // muzzle flash particles, sparks, etc.
@@ -4762,10 +4786,10 @@ function buildMapSelector() {
   rebindArrow('map-prev', -1);
   rebindArrow('map-next',  1);
 
-  // (v16a) Wire the skybox prev/next arrows the same way ; idempotent
-  // and safe to re-call when buildMapSelector rebuilds the panel. Also
-  // refresh the sky-window label to whatever the user last picked, so
-  // the lobby reflects the persisted skybox even before they touch it.
+  // (v16a Phase V) Wire the preset prev/next arrows ; idempotent and
+  // safe to re-call when buildMapSelector rebuilds the panel. Also
+  // refresh the preset label to whatever the user last picked, so
+  // the lobby reflects the persisted preset even before they touch it.
   if (typeof _bindSkyArrows === 'function') _bindSkyArrows();
   if (typeof _updateSkyUI === 'function')   _updateSkyUI();
 
@@ -6106,6 +6130,10 @@ function handleNetEvent(evt, fromPeerId) {
     if (evt.gmapsOverlay && typeof evt.gmapsOverlay.lat === 'number' && typeof evt.gmapsOverlay.lng === 'number') {
       const ov = evt.gmapsOverlay;
       game.pendingGmapsOverlay = { lat: ov.lat, lng: ov.lng, name: ov.name || ('lat ' + ov.lat + ',' + ov.lng) };
+      // (v16a Phase V) Peer set a Custom Location ; clear any local
+      // preset so the lobby UI lock matches the broadcast state.
+      game.mapPreset = '';
+      if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
       // Show what the peer set, but DON'T disable the input ;
       // anyone can still change it. Last setter wins.
       try {
@@ -6120,6 +6148,8 @@ function handleNetEvent(evt, fromPeerId) {
     } else if ('gmapsOverlay' in evt && evt.gmapsOverlay === null) {
       // Explicit null = peer detached. Clear locally.
       game.pendingGmapsOverlay = null;
+      // (v16a Phase V) Refresh preset UI ; gmaps lock falls away.
+      if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
       try {
         const stat = document.getElementById('gmaps-loc-status');
         if (stat) { stat.textContent = 'Overlay cleared by peer.'; stat.classList.remove('err','ok'); }
@@ -11381,59 +11411,133 @@ function showStarfield() {
   }
 }
 
-// (v16a) UI sync helper. Pushes the current game.skyboxChoice into
-// (a) the in-lobby sky-window-name label inside #map-select, and
-// (b) the Settings -> Background dropdown if it's mounted. Anything
-// that changes the active skybox (cycleSky, settings dropdown, file
-// picker, custom path, loadSettings restore) calls this so all three
-// surfaces stay in lockstep.
+// (v16a Phase V) Map presets : curated (wall pattern + skybox + wall
+// opacity) combos. Each entry pairs a thematic name with the three
+// values that move in lockstep. Index 0 is the 'None' off state ; the
+// arrow cycle and B hotkey wrap through these 9 entries. Picking a
+// preset on the ship/map select screen mutes the gmaps Custom Location
+// panel (and vice versa) so the two scene paths can't conflict.
+//
+// Wall pattern indices reference WALL_PATTERN_NAMES (see line ~34405).
+// Skybox keys reference _skyboxPresets (see line ~11270).
+// Opacity is the same scale as the Settings 'Wall opacity' slider
+// (1.0 = fully solid, 0.0 = invisible).
+const MAP_PRESETS = [
+  { name: 'None',           wallPattern: null, sky: null,          opacity: null },
+  { name: 'Atlantis',       wallPattern: 32,   sky: 'underthesea', opacity: 0.90 },
+  { name: 'Neon Grid',      wallPattern: 21,   sky: 'cyberpunk',   opacity: 0.82 },
+  { name: 'Megacity',       wallPattern: 31,   sky: 'cyberpunk2',  opacity: 0.86 },
+  { name: 'Bioluminescent', wallPattern: 11,   sky: 'blue',        opacity: 0.20 },
+  { name: 'Cosmic Bloom',   wallPattern:  1,   sky: 'purple',      opacity: 0.42 },
+  { name: 'Carmine Track',  wallPattern: 31,   sky: 'red',         opacity: 0.92 },
+  { name: 'Glacier Run',    wallPattern: 32,   sky: 'ice',         opacity: 0.72 },
+  { name: 'Prism Hive',     wallPattern: 27,   sky: 'rainbow',     opacity: 0.54 },
+];
+
+// (v16a Phase V) UI sync : pushes preset state into the lobby preset
+// window label, syncs the Settings -> Background dropdown (which still
+// shows the raw underlying skybox), and toggles the mutual-exclusion
+// CSS classes against the gmaps Custom Location panel. Anything that
+// changes the active preset OR the active skybox OR the gmaps overlay
+// state should call this so all surfaces stay in lockstep.
 function _updateSkyUI() {
-  const choice = (typeof game !== 'undefined' && typeof game.skyboxChoice === 'string')
+  const presetName = (typeof game !== 'undefined' && typeof game.mapPreset === 'string')
+    ? game.mapPreset : '';
+  const skyChoice = (typeof game !== 'undefined' && typeof game.skyboxChoice === 'string')
     ? game.skyboxChoice : '';
-  let label = 'Stars only';
-  if (typeof _skyboxLabels !== 'undefined') {
-    const m = _skyboxLabels.find(([k]) => k === choice);
-    if (m) label = m[1];
-    else if (choice) {
-      // Custom path / blob : derive a reasonable display name from the
-      // filename so the lobby label still reads meaningfully.
-      label = choice.replace(/^.*[\\/]/, '').replace(/\.[^.]+$/, '') || 'Custom';
-    }
-  }
+  const gmapsActive = !!(typeof game !== 'undefined' && game.pendingGmapsOverlay);
+
+  // Lobby preset window. Empty preset name renders as "None".
+  let presetLabel = presetName || 'None';
+  if (gmapsActive && !presetName) presetLabel = 'Custom Location';
   try {
-    const wn = document.getElementById('sky-window-name');
-    if (wn) wn.textContent = label;
+    const wn = document.getElementById('preset-window-name');
+    if (wn) wn.textContent = presetLabel;
   } catch (_) {}
+
+  // Mutual-exclusion CSS classes : preset-locked dims gmaps when a
+  // preset is set ; gmaps-locked dims preset cycle when a gmaps
+  // overlay is queued. Both clear themselves when their counterpart
+  // is None / absent.
+  try {
+    const gpanel = document.getElementById('gmaps-overlay-panel');
+    if (gpanel) gpanel.classList.toggle('preset-locked', !!presetName);
+    const pnote = document.getElementById('preset-locked-note');
+    if (pnote) pnote.style.display = presetName ? '' : 'none';
+    const psec = document.getElementById('preset-select-section');
+    if (psec) psec.classList.toggle('gmaps-locked', gmapsActive && !presetName);
+  } catch (_) {}
+
+  // Settings -> Background dropdown still reflects the raw skybox so
+  // it stays useful for ad-hoc sky overrides. Preset selection drives
+  // the skybox into this same slot.
   try {
     const sel = document.getElementById('set-skybox');
     if (sel) {
-      // Empty value option exists for "Stars only" ; preset keys match
-      // _skyboxPresets entries. Custom paths leave the dropdown at ''
-      // (the Custom field below it will hold the actual path).
-      const v = (_skyboxLabels && _skyboxLabels.find(([k]) => k === choice)) ? choice : '';
+      const v = (_skyboxLabels && _skyboxLabels.find(([k]) => k === skyChoice)) ? skyChoice : '';
       if (sel.value !== v) sel.value = v;
     }
   } catch (_) {}
 }
 
-// (v16a) Cycle through _skyboxLabels by `dir` (+1 forward, -1 back).
-// Wraps around the full list including the empty 'Stars only' entry,
-// so users can hotkey their way to no-backdrop without opening
-// settings. Persists via saveSettings and toasts the new selection.
-function cycleSky(dir) {
-  if (typeof _skyboxLabels === 'undefined' || !_skyboxLabels.length) return;
-  const labels = _skyboxLabels;
-  const cur = (typeof game !== 'undefined' && typeof game.skyboxChoice === 'string')
-    ? game.skyboxChoice : '';
-  let idx = labels.findIndex(([k]) => k === cur);
-  if (idx < 0) idx = 0;
-  idx = (idx + ((dir | 0) || 1) + labels.length) % labels.length;
-  const [key, label] = labels[idx];
-  if (typeof game !== 'undefined') game.skyboxChoice = key;
-  if (key === '') { try { clearSky(); } catch (_) {} }
-  else            { try { setSky(key); }   catch (_) {} }
+// (v16a Phase V) Apply a preset by name. Empty string / 'None' clears
+// preset state ; reverts the scene to stars-only sky, default wall
+// pattern (0 = Kali IFS), and full wall opacity. Any other name looks
+// up its entry in MAP_PRESETS and writes wallPattern + skybox +
+// wallOpacity together. Persists via saveSettings.
+function applyMapPreset(name) {
+  const preset = MAP_PRESETS.find(p => p.name === name);
+  if (!preset) return false;
+  const isNone = (preset.name === 'None');
+  if (typeof game !== 'undefined') game.mapPreset = isNone ? '' : preset.name;
+  if (isNone) {
+    // Revert : default wall pattern, full opacity, stars-only sky.
+    try { if (typeof setWallPattern === 'function') setWallPattern(0); } catch (_) {}
+    if (typeof game !== 'undefined') {
+      game.wallOpacity = 1.0;
+      if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uOpacity) {
+        try { game.levelMaterial.uniforms.uOpacity.value = 1.0; } catch (_) {}
+      }
+      game.skyboxChoice = '';
+    }
+    try { clearSky(); } catch (_) {}
+  } else {
+    try { if (typeof setWallPattern === 'function') setWallPattern(preset.wallPattern | 0); } catch (_) {}
+    if (typeof game !== 'undefined') {
+      game.wallOpacity = Math.max(0, Math.min(1, preset.opacity));
+      if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uOpacity) {
+        try { game.levelMaterial.uniforms.uOpacity.value = game.wallOpacity; } catch (_) {}
+      }
+      game.skyboxChoice = preset.sky;
+    }
+    try { setSky(preset.sky); } catch (_) {}
+  }
   _updateSkyUI();
   if (typeof saveSettings === 'function') { try { saveSettings(); } catch (_) {} }
+  return true;
+}
+
+// (v16a Phase V) Cycle through MAP_PRESETS by `dir` (+1 forward, -1
+// back). Wraps around the full list including the 'None' entry so
+// users can hotkey their way back to default. If a gmaps overlay is
+// queued, cycling clears it first ; the user explicitly asked for a
+// preset, so we honor that over the still-pending location.
+function cyclePreset(dir) {
+  if (!MAP_PRESETS.length) return;
+  // Clear any pending gmaps overlay first ; selecting a preset means
+  // the player wants the preset scene, not the city tiles.
+  if (typeof game !== 'undefined' && game.pendingGmapsOverlay) {
+    game.pendingGmapsOverlay = null;
+    try {
+      const stat = document.getElementById('gmaps-loc-status');
+      if (stat) { stat.textContent = ''; stat.classList.remove('err','ok'); }
+    } catch (_) {}
+  }
+  const cur = (typeof game !== 'undefined' && typeof game.mapPreset === 'string') ? game.mapPreset : '';
+  let idx = MAP_PRESETS.findIndex(p => (p.name === 'None' ? '' : p.name) === cur);
+  if (idx < 0) idx = 0;
+  idx = (idx + ((dir | 0) || 1) + MAP_PRESETS.length) % MAP_PRESETS.length;
+  applyMapPreset(MAP_PRESETS[idx].name);
   // Toast (mirrors setWallPattern's pattern toast styling).
   try {
     let toast = document.getElementById('sky-toast');
@@ -11447,26 +11551,29 @@ function cycleSky(dir) {
         'pointer-events:none;z-index:99999;opacity:0;transition:opacity 0.18s;';
       document.body.appendChild(toast);
     }
-    toast.textContent = 'SKYBOX: ' + (label || 'STARS').toUpperCase();
+    toast.textContent = 'PRESET: ' + MAP_PRESETS[idx].name.toUpperCase();
     toast.style.opacity = '1';
     if (toast._t) clearTimeout(toast._t);
     toast._t = setTimeout(() => { toast.style.opacity = '0'; }, 1100);
   } catch (_) {}
 }
 
-// (v16a) One-shot wiring for the lobby sky-prev / sky-next arrows.
-// Idempotent ; safe to call multiple times. Mirrors the rebindArrow
-// pattern used for map-prev / map-next (clone node to drop any old
-// listeners, then add fresh click + mousedown blur).
+// (v16a Phase V) Back-compat shim. Old callers (B-key handler, any
+// scripts loaded ad-hoc) used cycleSky ; route them to cyclePreset
+// so the keybind keeps working through the preset system.
+function cycleSky(dir) { cyclePreset(dir); }
+
+// (v16a Phase V) One-shot wiring for the lobby preset-prev / -next
+// arrows. Idempotent ; safe to call multiple times.
 function _bindSkyArrows() {
-  ['sky-prev', 'sky-next'].forEach((id, i) => {
+  ['preset-prev', 'preset-next'].forEach((id, i) => {
     const btn = document.getElementById(id);
     if (!btn || btn.__skyBound) return;
     const fresh = btn.cloneNode(true);
     fresh.setAttribute('tabindex', '-1');
     btn.parentNode.replaceChild(fresh, btn);
     const dir = (i === 0) ? -1 : +1;
-    fresh.addEventListener('click', () => { cycleSky(dir); try { fresh.blur(); } catch (_) {} });
+    fresh.addEventListener('click', () => { cyclePreset(dir); try { fresh.blur(); } catch (_) {} });
     fresh.addEventListener('mousedown', () => { try { fresh.blur(); } catch (_) {} });
     fresh.__skyBound = true;
   });
@@ -11478,6 +11585,9 @@ window.clearSky               = clearSky;
 window.hideStarfield          = hideStarfield;
 window.showStarfield          = showStarfield;
 window.cycleSky               = cycleSky;
+window.cyclePreset            = cyclePreset;
+window.applyMapPreset         = applyMapPreset;
+window.MAP_PRESETS            = MAP_PRESETS;
 window._updateSkyUI           = _updateSkyUI;
 
 // =====================================================================
@@ -33654,6 +33764,12 @@ function buildSettingsPage() {
   if (wpSel) {
     wpSel.addEventListener('change', e => {
       setWallPattern(parseInt(e.target.value, 10) | 0);
+      // (v16a Phase V) Manual wall pattern change drops the preset
+      // (the preset implied a specific pattern ; the user just left
+      // that coherent combo).
+      if (typeof game !== 'undefined') game.mapPreset = '';
+      if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
+      if (typeof saveSettings === 'function') { try { saveSettings(); } catch (_) {} }
     });
   }
   // FOV slider.
@@ -33704,6 +33820,10 @@ function buildSettingsPage() {
         game.levelMaterial.uniforms.uOpacity.value = v;
       }
       if (wallOpVal) wallOpVal.textContent = v.toFixed(2);
+      // (v16a Phase V) Manual opacity drag breaks any active preset
+      // (it implied a specific opacity).
+      if (typeof game !== 'undefined') game.mapPreset = '';
+      if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
       if (typeof saveSettings === 'function') saveSettings();
     });
   }
@@ -33787,6 +33907,9 @@ function buildSettingsPage() {
     skySel.addEventListener('change', e => {
       const v = e.target.value || '';
       game.skyboxChoice = v;
+      // (v16a Phase V) Manually picking a sky from Settings overrides
+      // any active preset, since the user is now driving the sky alone.
+      game.mapPreset = '';
       if (!v) { if (typeof clearSky === 'function') clearSky(); setSkyStatus('Skybox cleared (stars only).'); }
       else if (typeof setSky === 'function') { setSky(v); setSkyStatus('Loading: ' + v); }
       if (typeof _updateSkyUI === 'function') _updateSkyUI();
@@ -33825,11 +33948,14 @@ function buildSettingsPage() {
       // reference it via the Custom path field.
       const blobUrl = URL.createObjectURL(f);
       if (typeof setSky === 'function') setSky(blobUrl);
+      // (v16a Phase V) Custom file skybox is its own thing ; clear any
+      // active preset so the label reflects what's actually on screen.
+      if (typeof game !== 'undefined') game.mapPreset = '';
       // Stash the friendly filename on game so _updateSkyUI shows
       // something readable in the lobby label (game.skyboxChoice
       // itself stays empty so it isn't persisted as a dead blob URL).
       try {
-        const wn = document.getElementById('sky-window-name');
+        const wn = document.getElementById('preset-window-name');
         if (wn) wn.textContent = f.name.replace(/\.[^.]+$/, '');
       } catch (_) {}
       setSkyStatus('Loaded local file: ' + f.name + ' (session-only)');
@@ -34719,6 +34845,10 @@ function saveSettings() {
       // picks are intentionally not persisted (they expire on reload).
       skyboxChoice: (typeof game.skyboxChoice === 'string' && !/^blob:/i.test(game.skyboxChoice)) ? game.skyboxChoice : '',
       skyboxStars:  (game.skyboxStars !== false),
+      // (v16a Phase V) Map preset name (Atlantis, Neon Grid, etc.) or
+      // empty string for None. Persisted so the lobby remembers the
+      // last chosen preset across reloads.
+      mapPreset:    (typeof game.mapPreset === 'string') ? game.mapPreset : '',
     };
     localStorage.setItem('lss_settings', JSON.stringify(data));
   } catch(e) {}
@@ -36238,7 +36368,19 @@ function loadSettings() {
     } else {
       game.skyboxChoice = '';
     }
-    // (v16a) Refresh the lobby SKYBOX label + settings dropdown to
+    // (v16a Phase V) Restore map preset if persisted. Re-applying the
+    // preset re-writes wallPattern + sky + opacity in lockstep, so the
+    // saved values supersede the standalone skyboxChoice / wallOpacity
+    // restores above when a preset is active. This is the desired
+    // behavior : a saved preset always wins over loose state, because
+    // the user picked it as a coherent visual combo.
+    if (typeof data.mapPreset === 'string' && data.mapPreset.length > 0 &&
+        typeof applyMapPreset === 'function') {
+      try { applyMapPreset(data.mapPreset); } catch (e) { console.warn('[v16a preset] restore failed:', e && e.message); }
+    } else {
+      game.mapPreset = '';
+    }
+    // (v16a) Refresh the lobby preset label + settings dropdown to
     // match the restored choice. Safe even if the lobby DOM isn't
     // built yet ; _updateSkyUI() guards every getElementById.
     if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
@@ -51616,6 +51758,11 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     }
     // Store the typed location ; LAUNCH will use it.
     game.pendingGmapsOverlay = { lat, lng, name: displayName };
+    // (v16a Phase V) Custom Location and Map Preset are mutually
+    // exclusive ; setting a location clears any active preset so
+    // the lobby UI doesn't lie about what's about to launch.
+    game.mapPreset = '';
+    if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
     const shortName = displayName.length > 60 ? displayName.slice(0, 57) + '...' : displayName;
 
     // (v13r-2) Race-mode branch : if the FINISH input is also filled,
@@ -51700,6 +51847,8 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     stopPulse();
     _lssGmapsDetachCity();
     game.pendingGmapsOverlay = null;
+    // (v16a Phase V) Re-enable the preset cycle now that gmaps is gone.
+    if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
     // (v13r-2) Also clear race-custom route on DETACH.
     game.pendingRaceRoute = null;
     game.raceNoTimer = false;
