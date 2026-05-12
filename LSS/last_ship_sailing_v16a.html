@@ -11105,32 +11105,80 @@ function restoreProceduralEnvironment() {
 // =====================================================================
 const _equirectSky = { texture: null, url: null, loading: false };
 
+// (v16a) JPG is the production format ; PNG kept as a hot-swap fallback
+// in case the JPG export hasn't been generated yet for a given preset.
+// setSky() automatically retries with .png if the .jpg 404s.
 const _skyboxPresets = {
-  green:  './skybox/green.png',
-  purple: './skybox/purple.png',
-  red:    './skybox/red.png',
+  green:    './skybox/green.jpg',
+  purple:   './skybox/purple.jpg',
+  red:      './skybox/red.jpg',
+  // HDR slots remain available ; drop a .hdr file with these names in
+  // skybox/ to use them. setSky() detects the extension and routes
+  // through RGBELoader vs TextureLoader.
+  cyberpunk: './skybox/cyberpunk.hdr',
+  nebula:    './skybox/nebula.hdr',
+  hangar:    './skybox/hangar.hdr',
+  gasgiant:  './skybox/gasgiant.hdr',
+  rift:      './skybox/rift.hdr',
 };
 
-function setEquirectangularSky(url) {
+// (v16a) Friendly labels for the in-game settings dropdown. Order here
+// determines display order in the menu.
+const _skyboxLabels = [
+  ['',          'Stars only (default)'],
+  ['green',     'Green nebula'],
+  ['purple',    'Purple nebula'],
+  ['red',       'Red nebula'],
+  ['cyberpunk', 'Cyberpunk city (HDR)'],
+  ['nebula',    'Deep nebula (HDR)'],
+  ['hangar',    'Alien hangar (HDR)'],
+  ['gasgiant',  'Gas giant orbit (HDR)'],
+  ['rift',      'Dimensional rift (HDR)'],
+];
+
+function setEquirectangularSky(url, _retried) {
   if (_equirectSky.loading) return;
+  // (v16a) Auto-detect .hdr (RGBE-encoded high dynamic range) vs sRGB
+  // PNG/JPG and route through the matching loader. HDR data is linear
+  // float so it must NOT be tagged sRGB or it'll tonemap wrong ; PNG
+  // and JPG ARE sRGB and need explicit tagging to avoid washed-out
+  // colors. The file's renderer outputColorSpace is already sRGB.
+  const isHdr = /\.hdr(\?|$)/i.test(url);
+  if (isHdr && !THREE.RGBELoader) {
+    console.warn('[v16a sky] .hdr requested but RGBELoader is not available ; skipping');
+    return;
+  }
   _equirectSky.loading = true;
-  const loader = new THREE.TextureLoader();
+  const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
   loader.load(url, (tex) => {
     tex.mapping = THREE.EquirectangularReflectionMapping;
-    // (v16a) match the file's existing colorSpace / encoding fallback
-    // pattern (r152 renamed encoding -> colorSpace). PNG/JPG sources
-    // are sRGB ; without this the backdrop reads dim or oversaturated
-    // depending on the renderer's outputColorSpace.
-    if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace || 'srgb';
-    else tex.encoding = THREE.sRGBEncoding || 3001;
+    if (isHdr) {
+      // Linear color data. Leave default colorSpace ; renderer's
+      // outputColorSpace handles tonemap-to-sRGB on present.
+      if ('colorSpace' in tex) tex.colorSpace = THREE.LinearSRGBColorSpace || THREE.NoColorSpace || 'srgb-linear';
+    } else {
+      // sRGB-encoded LDR source ; match the rest of the file's
+      // r152 colorSpace / encoding fallback pattern.
+      if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace || 'srgb';
+      else tex.encoding = THREE.sRGBEncoding || 3001;
+    }
     if (_equirectSky.texture) { try { _equirectSky.texture.dispose(); } catch (_) {} }
     _equirectSky.texture = tex;
     _equirectSky.url = url;
     scene.background = tex;
     _equirectSky.loading = false;
-    console.log('[v16a sky] equirectangular background loaded:', url);
+    console.log('[v16a sky] equirectangular background loaded:', url, isHdr ? '(HDR)' : '(LDR)');
   }, undefined, (err) => {
     _equirectSky.loading = false;
+    // (v16a) Hot-swap fallback : if a .jpg preset 404s, retry with
+    // .png so the upgrade-in-progress doesn't break the menu. Only
+    // attempts the fallback once per call (guarded by _retried).
+    if (!_retried && /\.jpg(\?|$)/i.test(url)) {
+      const pngUrl = url.replace(/\.jpg(\?|$)/i, '.png$1');
+      console.warn('[v16a sky] .jpg failed, retrying with .png:', pngUrl);
+      setEquirectangularSky(pngUrl, true);
+      return;
+    }
     console.warn('[v16a sky] load failed (', url, ')', err && err.message);
   });
 }
@@ -32375,6 +32423,40 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="wall-import-status"></div>
     </div>
 
+    <div class="settings-section">
+      <h3>Background</h3>
+      <div class="setting-row">
+        <label>Skybox</label>
+        <select id="set-skybox" style="flex:1;">
+          ${(typeof _skyboxLabels !== 'undefined' ? _skyboxLabels : []).map(([k, lbl]) => {
+            const sel = (game.skyboxChoice || '') === k ? ' selected' : '';
+            return '<option value="' + k + '"' + sel + '>' + lbl + '</option>';
+          }).join('')}
+        </select>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">3D backdrop visible through transparent walls. Drop your own equirectangular .jpg / .png / .hdr files into <code>LSS/skybox/</code> and either edit the presets list or use the Custom row below.</label>
+      </div>
+      <div class="setting-row">
+        <label>Show stars in front</label>
+        <input type="checkbox" id="set-skybox-stars" ${(game.skyboxStars !== false) ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Procedural starfield is rendered as foreground geometry on top of the skybox. Off = backdrop alone.</label>
+      </div>
+      <div class="setting-row">
+        <label>Custom path</label>
+        <input type="text" id="set-skybox-custom" placeholder="./skybox/your_file.jpg" style="flex:1;" value="${(game.skyboxChoice && game.skyboxChoice.indexOf('/') !== -1) ? game.skyboxChoice : ''}">
+        <button id="skybox-custom-load">Load</button>
+      </div>
+      <div class="setting-row">
+        <label>Load from disk</label>
+        <button id="skybox-file-btn">Choose File</button>
+        <input type="file" id="skybox-file-input" accept="image/png,image/jpeg,image/jpg,.hdr" style="display:none;">
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="skybox-status"></div>
+    </div>
+
     <h2>AUDIO</h2>
 
     <div class="settings-section">
@@ -32803,6 +32885,73 @@ function buildSettingsPage() {
       }
       // Refresh the panel so the pattern dropdown and slider values update.
       buildSettingsPage();
+    });
+  }
+
+  // (v16a) Skybox / Background handlers. The select dropdown swaps
+  // among preset names ; an empty value means "no skybox, use the
+  // default starfield alone". The custom path field accepts any URL
+  // the loader can fetch (relative or absolute), and the file picker
+  // wraps a local file in a blob URL so users can preview drops
+  // before committing them to the skybox/ folder.
+  const skySel    = overlay.querySelector('#set-skybox');
+  const skyStars  = overlay.querySelector('#set-skybox-stars');
+  const skyCustom = overlay.querySelector('#set-skybox-custom');
+  const skyLoad   = overlay.querySelector('#skybox-custom-load');
+  const skyFileBt = overlay.querySelector('#skybox-file-btn');
+  const skyFileIn = overlay.querySelector('#skybox-file-input');
+  const skyStatus = overlay.querySelector('#skybox-status');
+  function setSkyStatus(msg, ok) {
+    if (!skyStatus) return;
+    skyStatus.style.color = (ok === false) ? '#f88' : '#9af';
+    skyStatus.textContent = msg || '';
+  }
+  if (skySel) {
+    skySel.addEventListener('change', e => {
+      const v = e.target.value || '';
+      game.skyboxChoice = v;
+      if (!v) { if (typeof clearSky === 'function') clearSky(); setSkyStatus('Skybox cleared (stars only).'); }
+      else if (typeof setSky === 'function') { setSky(v); setSkyStatus('Loading: ' + v); }
+      if (typeof saveSettings === 'function') saveSettings();
+    });
+  }
+  if (skyStars) {
+    skyStars.addEventListener('change', e => {
+      const on = !!e.target.checked;
+      game.skyboxStars = on;
+      if (on) { if (typeof showStarfield === 'function') showStarfield(); }
+      else    { if (typeof hideStarfield === 'function') hideStarfield(); }
+      if (typeof saveSettings === 'function') saveSettings();
+    });
+  }
+  if (skyLoad && skyCustom) {
+    skyLoad.addEventListener('click', () => {
+      const url = (skyCustom.value || '').trim();
+      if (!url) { setSkyStatus('Enter a path first.', false); return; }
+      game.skyboxChoice = url;
+      if (typeof setSky === 'function') setSky(url);
+      setSkyStatus('Loading: ' + url);
+      // Sync the dropdown to "" since the choice no longer matches a preset.
+      if (skySel) skySel.value = '';
+      if (typeof saveSettings === 'function') saveSettings();
+    });
+  }
+  if (skyFileBt && skyFileIn) {
+    skyFileBt.addEventListener('click', () => skyFileIn.click());
+    skyFileIn.addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      // Blob URLs work with TextureLoader and RGBELoader. Note this is
+      // session-only ; reloading the page won't re-load this file. To
+      // make a local file persistent, copy it into LSS/skybox/ and
+      // reference it via the Custom path field.
+      const blobUrl = URL.createObjectURL(f);
+      if (typeof setSky === 'function') setSky(blobUrl);
+      setSkyStatus('Loaded local file: ' + f.name + ' (session-only)');
+      if (skySel) skySel.value = '';
+      if (skyCustom) skyCustom.value = '';
+      // Don't persist the blob URL ; it's invalid after reload.
+      e.target.value = '';
     });
   }
 
@@ -33679,6 +33828,13 @@ function saveSettings() {
         return out;
       })(),
       wallParams: applyWallParamDefaults(game.wallParams || {}),
+      // (v16a) Skybox preference. Either a preset key from
+      // _skyboxPresets ('green', 'cyberpunk', etc.) or a full path /
+      // URL the user typed into the Custom field. Empty string means
+      // "no skybox, default starfield only". Blob URLs from disk
+      // picks are intentionally not persisted (they expire on reload).
+      skyboxChoice: (typeof game.skyboxChoice === 'string' && !/^blob:/i.test(game.skyboxChoice)) ? game.skyboxChoice : '',
+      skyboxStars:  (game.skyboxStars !== false),
     };
     localStorage.setItem('lss_settings', JSON.stringify(data));
   } catch(e) {}
@@ -35181,6 +35337,23 @@ function loadSettings() {
       }
     }
     _switchToPatternSlot(game.wallPattern || 0);
+    // (v16a) Restore skybox background + starfield visibility. Both
+    // setSky and hideStarfield/showStarfield are defined globally
+    // earlier in the file, and loadSettings() runs after the scene
+    // and starfield are constructed, so direct calls are safe here.
+    if (typeof data.skyboxStars === 'boolean') {
+      game.skyboxStars = data.skyboxStars;
+      if (!data.skyboxStars && typeof hideStarfield === 'function') hideStarfield();
+      else if (typeof showStarfield === 'function') showStarfield();
+    }
+    if (typeof data.skyboxChoice === 'string' && data.skyboxChoice.length > 0) {
+      game.skyboxChoice = data.skyboxChoice;
+      if (typeof setSky === 'function') {
+        try { setSky(data.skyboxChoice); } catch (e) { console.warn('[v16a sky] restore failed:', e && e.message); }
+      }
+    } else {
+      game.skyboxChoice = '';
+    }
   } catch(e) {}
 }
 
