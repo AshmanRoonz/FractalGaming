@@ -10192,12 +10192,45 @@ if (typeof navigator !== 'undefined' && navigator.gpu && navigator.gpu.requestAd
       .catch(() => {});
   } catch (e) { /* WebGPU may be locked behind a flag; that's fine */ }
 }
-const renderer = new THREE.WebGLRenderer({
-  antialias: true,
-  powerPreference: 'high-performance',
-  xrCompatible: true,
-  failIfMajorPerformanceCaveat: false,
-});
+// (v16a) Wrap the renderer constructor so a Chrome-locked-off-WebGL state
+// surfaces a useful diagnostic instead of a blank page. The common trigger
+// is GPU process crash + Chrome auto-disabling hardware acceleration (often
+// after VRAM exhaustion from a heavy scene + large texture swap). Telling
+// the user where to go fixes it 95% of the time.
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    powerPreference: 'high-performance',
+    xrCompatible: true,
+    failIfMajorPerformanceCaveat: false,
+  });
+} catch (_rendererErr) {
+  try {
+    const _overlay = document.createElement('div');
+    _overlay.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;' +
+      'background:#0a0510;color:#cfe7ff;font:14px/1.5 system-ui,sans-serif;padding:40px;z-index:99999;';
+    _overlay.innerHTML =
+      '<div style="max-width:640px;text-align:left;">' +
+      '<h2 style="color:#ff7a8a;margin:0 0 16px;font-size:22px;">Hardware acceleration is off</h2>' +
+      '<p>The browser could not create a WebGL context. This usually means hardware acceleration is disabled, ' +
+      'or a previous GPU process crash caused Chrome to lock it off.</p>' +
+      '<p><strong>Common fixes (try in order):</strong></p>' +
+      '<ol style="line-height:1.7;">' +
+      '<li>Open <code style="background:#1a1428;padding:2px 6px;border-radius:3px;">chrome://gpu/</code> and check ' +
+      '"Graphics Feature Status". If WebGL says "Disabled" or "Software only", that confirms it.</li>' +
+      '<li>Settings → System → "Use graphics acceleration when available" : toggle off, then on, then restart Chrome.</li>' +
+      '<li>If you are on a laptop on battery, plug in and disable Windows battery saver.</li>' +
+      '<li>If those do not work, restart the machine (driver state hangover from sleep/wake can do this).</li>' +
+      '</ol>' +
+      '<p style="margin-top:24px;font-size:12px;opacity:0.7;">Technical detail: ' +
+      ((_rendererErr && _rendererErr.message) ? _rendererErr.message.replace(/[<>]/g, '') : 'WebGL context creation failed.') +
+      '</p>' +
+      '</div>';
+    document.body.appendChild(_overlay);
+  } catch (_) {}
+  throw _rendererErr;
+}
 renderer.setSize(window.innerWidth, window.innerHeight);
 // (v16a Potato + Ultra) Read the persisted quality tier from localStorage so the
 // scene DPR is set correctly on the first frame. The QUALITY const itself isn't
@@ -11234,6 +11267,19 @@ function setEquirectangularSky(url) {
     console.warn('[v16a sky] .hdr requested but RGBELoader is not available ; skipping');
     return;
   }
+  // (v16a fix) EAGERLY dispose the previous sky texture + clear scene.background
+  // before starting the new load. Before this fix the dispose ran in the
+  // success callback, meaning both old + new textures were alive on the GPU
+  // simultaneously during the swap. Skyboxes are 8192x4096 (~170MB on GPU
+  // each, more with mipmaps) so two-at-once was enough to blow VRAM on
+  // constrained laptops and trigger a GPU process crash. The brief gap
+  // before the new sky paints reads as a single black frame ; far better
+  // than the alternative.
+  if (_equirectSky.texture) {
+    try { _equirectSky.texture.dispose(); } catch (_) {}
+    _equirectSky.texture = null;
+  }
+  scene.background = null;
   _equirectSky.loading = true;
   const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
   loader.load(url, (tex) => {
@@ -11248,7 +11294,6 @@ function setEquirectangularSky(url) {
       if ('colorSpace' in tex) tex.colorSpace = THREE.SRGBColorSpace || 'srgb';
       else tex.encoding = THREE.sRGBEncoding || 3001;
     }
-    if (_equirectSky.texture) { try { _equirectSky.texture.dispose(); } catch (_) {} }
     _equirectSky.texture = tex;
     _equirectSky.url = url;
     scene.background = tex;
@@ -11916,7 +11961,11 @@ try {
   const _bootQuality = localStorage.getItem('lss_quality') || 'high';
   const _isWebGL2 = renderer.capabilities && renderer.capabilities.isWebGL2;
   if (_bootQuality === 'ultra' && _isWebGL2) {
-    _rtSceneOpts.samples = 4;
+    // (v16a) Was samples: 4 ; backed off to 2 after a GPU-process crash
+    // report on a laptop where Ultra (2.5x DPR scene + 4x MSAA + 2.0x DPR
+    // bloom RT) combined with an 8K skybox swap blew VRAM. 2x MSAA still
+    // smooths the worst aliasing while halving the multisample memory.
+    _rtSceneOpts.samples = 2;
   }
 } catch (_) {}
 postFX.rtScene = new THREE.WebGLRenderTarget(
