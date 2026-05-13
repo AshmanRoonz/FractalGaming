@@ -51377,6 +51377,39 @@ function _lssGmapsTick(dt) {
     if (typeof t.setCamera === 'function') t.setCamera(camera);
     if (typeof t.update === 'function') t.update();
   } catch (_) { /* swallow per-frame */ }
+  // (v16a Phase Y, gmaps branch) Force every newly-streamed tile mesh
+  // into the opaque pass so it properly occludes ships behind it.
+  //
+  // 3d-tiles-renderer fades tiles in by flipping material.transparent =
+  // true (so the fade-in alpha read works). A side effect is that the
+  // tile then lives in Three.js's TRANSPARENT pass, which runs AFTER
+  // the opaque ship pass ; ships behind the tile have already rasterized
+  // by the time the tile gets its depth write in, so the ship pixels
+  // bleed through. From the player's perspective : "I can see other
+  // ships through the city / through the ground" — exactly the same
+  // symptom the SDF wall occluder fixed for carved-out maps.
+  //
+  // Fix : patch each tile material once (tagged with _lssGmapsPatched
+  // so we don't re-touch). We force depthWrite = true and transparent
+  // = false, which lands the tile in the opaque pass and writes depth
+  // every frame. The visual hit is that newly-streamed tiles pop in
+  // instead of fading in, which is well worth it to stop the see-through
+  // bug. Materials that arrive already opaque are no-op patched.
+  if (t.group && t.group.children && t.group.children.length > 0) {
+    t.group.traverse((c) => {
+      if (!c || !c.isMesh) return;
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      for (let mi = 0; mi < mats.length; mi++) {
+        const m = mats[mi];
+        if (!m || m._lssGmapsPatched) continue;
+        m._lssGmapsPatched = true;
+        m.depthWrite = true;
+        m.transparent = false;
+        if (typeof m.opacity === 'number') m.opacity = 1.0;
+        m.needsUpdate = true;
+      }
+    });
+  }
   // Terrain + building collision for player and AI ships.
   try {
     if (typeof player !== 'undefined' && player && player.position && player.velocity) {
