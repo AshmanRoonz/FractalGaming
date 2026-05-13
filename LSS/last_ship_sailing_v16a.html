@@ -5971,7 +5971,14 @@ function broadcastPlayerState(dt) {
     // the cloak only affected the cloaker's own mesh (which they don't see
     // in first-person anyway), so opponents had no idea the player went
     // ghostlike, which made the entire perk a no-op in multiplayer.
-    cloak: !!player.perkCloakActive,
+    // (cloak 2026-05) Defensive gate : only broadcast cloak:true if the
+    // current perk is actually cloak. If perkCloakActive is stale from a
+    // previous match's cloak perk and the player has now swapped to a
+    // non-cloak perk, this prevents the false positive that would leave
+    // the player perma-invisible to other peers.
+    cloak: !!(player.perkCloakActive
+              && PILOT_PERKS[player.perkId]
+              && PILOT_PERKS[player.perkId].cloakInterval),
   };
 
   const msg = JSON.stringify(state);
@@ -25314,6 +25321,18 @@ function commitLoadout(key) {
     } catch (_) { player.perkId = PILOT_PERK_DEFAULT; }
   }
   const _perk = PILOT_PERKS[player.perkId];
+  // (cloak 2026-05) ALWAYS clear cloak fields on every commit, before the
+  // perk-specific branch decides what to seed them with. The previous
+  // version only reset perkCloakActive when the NEW perk was cloak, so if
+  // a player ran cloak last match, left perkCloakActive=true (e.g. died
+  // mid-cloak window, dropped to lobby), then committed a non-cloak perk
+  // for the new match, the stale active flag stuck and broadcastPlayerState
+  // sent cloak:true every tick. The receiving peer drops the ship to 0.02
+  // opacity and never restores ; perma-invisible to opponents. Clear here
+  // up front so a non-cloak commit always lands cleanly.
+  player.perkCloakActive = false;
+  player.perkCloakActiveTimer = 0;
+  player.perkCloakTimer = 0;
   if (_perk) {
     if (_perk.shieldBonus) {
       player.maxShield += _perk.shieldBonus;
@@ -25323,11 +25342,11 @@ function commitLoadout(key) {
       player.maxDashes += _perk.dashBonus;
       player.dashCharges = player.maxDashes;
     }
-    // Reset cloak timer state on every commit (per-round behavior).
+    // Seed cloak interval if the new perk IS cloak. perkCloakActive +
+    // perkCloakActiveTimer were already zeroed above, so this is just the
+    // initial countdown to first cloak fire.
     if (_perk.cloakInterval) {
       player.perkCloakTimer = _perk.cloakInterval;
-      player.perkCloakActive = false;
-      player.perkCloakActiveTimer = 0;
     }
   }
   player.dashCooldownTimer = 0;
