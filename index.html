@@ -2080,13 +2080,20 @@ body.vr-active .hit-marker {
           onmouseover="this.style.background='rgba(255,170,0,0.30)'"
           onmouseout="this.style.background='rgba(255,170,0,0.15)'">CREATE ROOM</button>
         <!-- (v15 step 6) In-room actions ; rendered hidden, swapped in by
-             _lobbyRenderInRoom when the worker says we're in a room. -->
-        <button id="btn-scoop-all" type="button" style="display:none;
+             _lobbyRenderInRoom when the worker says we're in a room.
+             (lobby 2026-05) Renamed from SCOOP ALL to INVITE ALL. Old
+             behavior auto-added every browsing peer to the host's room
+             without consent ; new behavior sends a polite invite to
+             every online peer in the lobby presence map and lets each
+             one accept or ignore on their end. Per-peer cooldown ladder
+             in _lobbySendInvite still applies so this can't be used to
+             spam. -->
+        <button id="btn-invite-all" type="button" style="display:none;
                  background:rgba(255,170,0,0.15);border:1px solid #ffaa00;color:#ffaa00;
                  padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
                  cursor:pointer;letter-spacing:2px;transition:all 0.2s;border-radius:2px;"
           onmouseover="this.style.background='rgba(255,170,0,0.30)'"
-          onmouseout="this.style.background='rgba(255,170,0,0.15)'">SCOOP ALL</button>
+          onmouseout="this.style.background='rgba(255,170,0,0.15)'">INVITE ALL</button>
         <button id="btn-leave-room" type="button" style="display:none;
                  background:transparent;border:1px solid #666;color:#888;
                  padding:9px 18px;font-family:'Courier New',monospace;font-size:12px;
@@ -3730,7 +3737,7 @@ function _lobbyRenderBrowsing(players, selfId) {
   const qm = document.getElementById('btn-quick-match');
   const cr = document.getElementById('btn-create-room');
   const lr = document.getElementById('btn-leave-room');
-  const sc = document.getElementById('btn-scoop-all');
+  const sc = document.getElementById('btn-invite-all');
   if (qm) qm.style.display = '';
   if (cr) cr.style.display = '';
   if (lr) lr.style.display = 'none';
@@ -3750,14 +3757,18 @@ function _lobbyRenderBrowsing(players, selfId) {
 }
 
 function _lobbyRenderInRoom(room, selfId) {
-  // In-room view : code prominent, player list, Scoop / Leave actions.
+  // In-room view : code prominent, player list, Invite All / Leave actions.
   const qm = document.getElementById('btn-quick-match');
   const cr = document.getElementById('btn-create-room');
   const lr = document.getElementById('btn-leave-room');
-  const sc = document.getElementById('btn-scoop-all');
+  const sc = document.getElementById('btn-invite-all');
   if (qm) qm.style.display = 'none';
   if (cr) cr.style.display = 'none';
   if (lr) lr.style.display = '';
+  // (lobby 2026-05) Invite All is host-only (the invite carries the
+  // host's room code) and only meaningful when the room has free seats.
+  // Same gate as the old SCOOP ALL ; the action just sends polite
+  // invites now instead of auto-adding peers.
   if (sc) sc.style.display = (room.hostId === selfId && room.players.length < room.maxSize) ? '' : 'none';
 
   if (!_lobbyState.playersEl) return;
@@ -4229,7 +4240,7 @@ function _lobbyInit() {
   // the Trystero handoff. The next /lobby/list poll confirms / corrects.
   const qm = document.getElementById('btn-quick-match');
   const cr = document.getElementById('btn-create-room');
-  const sc = document.getElementById('btn-scoop-all');
+  const sc = document.getElementById('btn-invite-all');
   const lr = document.getElementById('btn-leave-room');
   // (v15 P2P) Quick Match : look at peer presences for any open public room
   // and join it ; if none exist, create a fresh one with us as host.
@@ -4283,37 +4294,40 @@ function _lobbyInit() {
     };
     _lobbyApplyRoom(room, 'room created ' + code);
   });
-  // (v15 P2P) Scoop : host walks the local presence map for browsing /
-  // looking multi-mode peers, adds them to the room, and sends each one
-  // a targeted scoop message so their client auto-joins the match room.
+  // (lobby 2026-05) Invite All : host walks the local presence map and
+  // sends a polite invite to every other online peer via _lobbySendInvite,
+  // which handles per-peer cooldowns (so back-to-back clicks can't spam
+  // the same target) and updates the invite-toast on the recipient's
+  // side. Recipients accept or ignore on their own ; nobody gets
+  // auto-added to the room. Replaces the old SCOOP ALL behavior that
+  // pushed everyone into the room without consent.
   if (sc) sc.addEventListener('click', () => {
     const id = _lobbyState.identity;
     const myRoom = _lobbyState.myRoom;
     if (!id || !myRoom || !_lobbyP2P.actions) return;
     if (myRoom.hostId !== id.id) return;
-    let scoopedCount = 0;
+    let invitedCount = 0;
+    let skippedCooldown = 0;
     for (const [peerId, p] of _lobbyP2P.presence) {
-      if (myRoom.players.length >= myRoom.maxSize) break;
-      if (!p || p.id === id.id) continue;
-      if (p.mode !== 'multi') continue;
-      if (p.roomId) continue;
-      if (!(p.status === 'browsing' || p.status === 'lobby' || p.status === 'looking' || p.status === 'idle' || !p.status)) continue;
+      if (!p || !p.id || p.id === id.id) continue;
+      // Skip anyone already in our room (no point inviting them).
       if (myRoom.players.some(pl => pl.id === p.id)) continue;
-      myRoom.players.push({ id: p.id, username: p.username, avatar: p.avatar });
+      // Cooldown check : _lobbySendInvite will silently bail if the
+      // target is on cooldown, but we count it explicitly so the status
+      // message reads honestly ("invited 3, 2 on cooldown") instead of
+      // claiming we invited everyone.
+      if ((_lobbyState.cooldowns && _lobbyState.cooldowns[p.id] || 0) > Date.now()) {
+        skippedCooldown++;
+        continue;
+      }
       try {
-        _lobbyP2P.actions.sendScoop({
-          targetId: p.id,
-          roomCode: myRoom.code,
-          hostId:   myRoom.hostId,
-          isPublic: !!myRoom.isPublic,
-          players:  myRoom.players,
-        }, peerId);
-        scoopedCount++;
+        _lobbySendInvite(p.id);
+        invitedCount++;
       } catch (_) {}
     }
-    _lobbyState.myRoom = myRoom;
-    _lobbySetStatus('scooped ' + scoopedCount + (scoopedCount === 1 ? ' player' : ' players'));
-    _lobbyBroadcastPresence();
+    let msg = 'invited ' + invitedCount + (invitedCount === 1 ? ' player' : ' players');
+    if (skippedCooldown > 0) msg += ' (' + skippedCooldown + ' on cooldown)';
+    _lobbySetStatus(msg);
     _lobbyRefresh();
   });
   if (lr) lr.addEventListener('click', () => {
