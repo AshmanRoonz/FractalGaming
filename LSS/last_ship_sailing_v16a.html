@@ -20310,6 +20310,40 @@ class ClusterObstacle {
       if (this.pushVel.lengthSq() > 0.0001) {
         this.position.addScaledVector(this.pushVel, dt);
         this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
+        // (v16a Phase BB) Keep the cluster inside the playable SDF
+        // volume. Without this guard, a ship bump pushes pushVel into
+        // the cluster, position drifts every frame with no containment
+        // check, and the rock floats straight through the wall. We
+        // sample worldSDF at the new center — convention is negative
+        // inside the play space, positive inside solid wall — and if
+        // the cluster's bounding sphere is overlapping the wall (sdf
+        // > -clusterScale), we push the position back along the SDF
+        // gradient by exactly the overlap depth, then zero out the
+        // velocity component going INTO the wall so the next frame
+        // doesn't re-collide on the same surface. clusterScale is the
+        // overall bounding radius the rest of the cluster code uses,
+        // so this matches how the rock visually fills space.
+        if (typeof worldSDF === 'function') {
+          const r = this.clusterScale || 50;
+          const sdf = worldSDF(this.position.x, this.position.y, this.position.z);
+          if (sdf > -r) {
+            if (typeof sdfNormal === 'function') {
+              if (!ClusterObstacle._sdfScratchN) ClusterObstacle._sdfScratchN = new THREE.Vector3();
+              const n = sdfNormal(this.position.x, this.position.y, this.position.z, ClusterObstacle._sdfScratchN);
+              const overlap = sdf + r;  // positive : how deep into the wall
+              this.position.x -= n.x * overlap;
+              this.position.y -= n.y * overlap;
+              this.position.z -= n.z * overlap;
+              // Kill the velocity component heading further into the wall.
+              const vDotN = this.pushVel.x * n.x + this.pushVel.y * n.y + this.pushVel.z * n.z;
+              if (vDotN > 0) {
+                this.pushVel.x -= n.x * vDotN;
+                this.pushVel.y -= n.y * vDotN;
+                this.pushVel.z -= n.z * vDotN;
+              }
+            }
+          }
+        }
       }
       // (v8VR 2026-05-01) Distortion shell follows the cluster + animates.
       // (v14c) LayeredFX 'distortion_shell' preset ; uTime is auto-ticked
@@ -37531,7 +37565,16 @@ class StasisField {
     // (v6.9) Champion fields are bigger so two ships can cross paths in
     // them and the contested-charge resolution reads at a glance.
     this.championMode = !!championMode;
-    this.radius = this.championMode ? 260 : 120;
+    // (v16a Phase AA) Champion field is now a pinpoint contact dot
+    // instead of a 260-unit hover zone. Ships have to fly THROUGH the
+    // dot (ship center within 10 units of dot center) to register a
+    // claim — basically the dot has to be inside the ship's hull. The
+    // shove-out detection (distToField > field.radius) and bot pickup
+    // paths read this same number, so the whole champion-claim loop
+    // tightens up automatically. The tall beacon column (built below)
+    // remains the from-afar visibility cue ; the dot itself is just
+    // the precise contact point.
+    this.radius = this.championMode ? 10 : 120;
     this.pulseTime = 0;
     // Charge state for champion mode. chargingTeam is null while empty
     // or contested ; chargeTimer accumulates while a single team's
@@ -37559,6 +37602,12 @@ class StasisField {
     // Champion fields are bigger and purple so the prize feels singular.
     const coreColor = this.championMode ? 0xaa55ff : 0x00ccff;
     const ringColor = this.championMode ? 0x9933ff : 0x0088ff;
+    // (v16a Phase CC) Visual size restored to the original champion
+    // values — the capture-only radius (game-side this.radius = 10)
+    // stays tight but the on-screen presence reads as a proper
+    // objective again. The wide outer claim wireframe stays dropped
+    // since it implied a capture zone that no longer exists ; the
+    // core + rings + beacon column carry the identity.
     const coreRadius = this.championMode ? 50 : 22;
     const ringRadius = this.championMode ? 90 : 40;
     this.group = new THREE.Group();
@@ -37616,8 +37665,11 @@ class StasisField {
     this.group.add(ring2);
 
     // (v6.9) Champion fields get a third ring rotated on the third axis
-    // and a wider outer "claim radius" wireframe so the contested zone
-    // is visible from across the room. The wider ring is purely visual.
+    // for the bigger silhouette.
+    // (v16a Phase AA) The wide outer "claim radius" wireframe is gone :
+    // it used to mark the 260-unit hover zone and at the new 60-unit
+    // contact radius it would just sit on top of the inner rings and
+    // muddy the silhouette. The third ring is now plenty of identity.
     if (this.championMode) {
       const ring3 = new THREE.Mesh(ringGeo, ringMat.clone());
       ring3.rotation.z = Math.PI / 2;
@@ -37625,12 +37677,6 @@ class StasisField {
       ring3.renderOrder = 1;
       this.ring3 = ring3;
       this.group.add(ring3);
-      const claimGeo = new THREE.TorusGeometry(this.radius * 0.95, 2.5, 8, 64);
-      const claimMat = new THREE.MeshBasicMaterial({ color: 0xddaaff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false });
-      this.claimRing = new THREE.Mesh(claimGeo, claimMat);
-      this.claimRing.rotation.x = Math.PI / 2;
-      this.claimRing.renderOrder = 1;
-      this.group.add(this.claimRing);
 
       // (v13r-3) Tall vertical beacon column so the finish is visible
       // from any distance, including across-province races. The column
@@ -38113,13 +38159,19 @@ function updateStasisFields(dt) {
             else Overlays.banner('CLAIM BROKEN', 'Champion shoved off');
           }
         } else {
-          // Ship alive and locked. Hold position; advance THIS team's
-          // accrued progress; resolve win when any team reaches
+          // Ship alive and on the dot. Advance THIS team's accrued
+          // progress ; resolve win when any team reaches
           // CHAMPION_CHARGE_TIME. (v16) Per-team progress means a player
           // who shoves the claimer out starts a fresh team-progress
           // counter, while the shoved team's progress is preserved for
           // resume on re-entry.
-          ship.velocity.set(0, 0, 0);
+          // (v16a Phase CC) Velocity is no longer zeroed each frame.
+          // The claimer keeps full control of their ship and a dash
+          // ram can actually shove them off the dot — without that,
+          // the per-frame velocity reset cancelled the dash impulse
+          // and the dash-shove-the-champion mechanic broke. The
+          // shovedOut check above still releases the claim the
+          // moment the ship's center leaves field.radius.
           const teamKey = ship.team;
           if (typeof field.teamProgress[teamKey] !== 'number') field.teamProgress[teamKey] = 0;
           field.teamProgress[teamKey] += dt;
@@ -38182,19 +38234,24 @@ function updateStasisFields(dt) {
             field.claimedBy = player;
             field.chargingTeam = player.team;
             field._championChargeStartShield = null;
+            // (v16a Phase CC) playerInChampionStasis still flips for the
+            // HUD warning + vignette and to suppress the regular stasis
+            // auto-decrement, but playerInStasis no longer flips, because
+            // playerInStasis is what updatePlayerMovement reads to zero
+            // velocity and lock controls. The claimer keeps full control
+            // so dash rams can punch them off the dot.
             game.playerInChampionStasis = true;
-            game.playerInStasis = true;
-            game.playerPreStasisVelocity = player.velocity.clone();
-            player.velocity.set(0, 0, 0);
             const w = document.getElementById('stasis-warning');
             const v = document.getElementById('stasis-vignette');
             if (w) w.style.display = 'block';
             if (v) v.style.display = 'block';
             // (v16) Banner reads differently when resuming preserved progress.
+            // (v16a Phase CC) Banner wording no longer mentions "hold" /
+            // "freeze" since the claimer is no longer locked in place.
             const resumed = (field.teamProgress[player.team] || 0) > 0.1;
             if (window.Overlays) {
-              if (resumed) Overlays.banner('CHAMPION RESUMED', 'Continue your hold');
-              else Overlays.banner('CHAMPION CHARGE', 'Hold for full shields to win');
+              if (resumed) Overlays.banner('CLAIMING', 'Stay on the dot to resume');
+              else Overlays.banner('CLAIMING', 'Stay on the dot to charge');
             }
           }
         }
@@ -38206,7 +38263,10 @@ function updateStasisFields(dt) {
               field.claimedBy = bot;
               field.chargingTeam = bot.team;
               field._championChargeStartShield = null;
-              bot.velocity.set(0, 0, 0);
+              // (v16a Phase CC) Bot velocity no longer zeroed on claim
+              // either — the bot keeps moving and has to be the one
+              // actively steering to stay on the dot, same rules as
+              // the player.
               break;
             }
           }
