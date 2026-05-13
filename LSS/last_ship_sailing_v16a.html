@@ -33677,7 +33677,180 @@ const KB_DEFAULTS = {
 
 let settingsOpen = false;
 
+// (perf 2026-05) The settings overlay used to be rebuilt from scratch on
+// every Esc press : `overlay.innerHTML = \`...\`` swapped out a few thousand
+// DOM nodes, then ~40 addEventListener calls re-wired them, every time.
+// That blocked the main thread for 1-3 s mid-match and made the player
+// "miss" the launch countdown digits ticking. The build only needs to run
+// once per session ; subsequent opens just need the widgets re-synced to
+// live engine state (in case Import / Reset / a map preset / external state
+// changed values while the panel was closed). _settingsBuilt gates the
+// rebuild, and _refreshSettingsValues() is the cheap re-sync path. Every
+// call site that previously expected "rebuild after I mutated state"
+// (Import handler, Reset handler, wall-defaults reload, XR reset, etc.)
+// continues to call buildSettingsPage() ; it now no-ops the rebuild and
+// just refreshes values, which is what those call sites actually wanted.
+let _settingsBuilt = false;
+
+function _refreshSettingsValues() {
+  const overlay = document.getElementById('settings-overlay');
+  if (!overlay) return;
+  const $ = sel => overlay.querySelector(sel);
+  const setRange = (id, valId, val, decimals) => {
+    if (val == null || (typeof val === 'number' && !isFinite(val))) return;
+    const el = $('#' + id);
+    if (el) el.value = val;
+    if (valId) {
+      const ve = $('#' + valId);
+      if (ve) ve.textContent = (typeof decimals === 'number' && typeof val === 'number')
+        ? val.toFixed(decimals) : String(val);
+    }
+  };
+  const setChk = (id, checked) => { const el = $('#' + id); if (el) el.checked = !!checked; };
+  const setSel = (id, val) => { const el = $('#' + id); if (el) el.value = (val == null ? '' : String(val)); };
+
+  // Mouse + gamepad sensitivities.
+  setRange('set-mouse-sens', 'val-mouse-sens', input.sensitivity, 4);
+  setRange('set-gp-look-sens', 'val-gp-look-sens', input.gpLookSensitivity, 1);
+  setRange('set-gp-move-sens', 'val-gp-move-sens', input.gpMoveSensitivity, 1);
+  setRange('set-gp-look-curve', 'val-gp-look-curve', input.gpLookCurve, 1);
+  setRange('set-gp-move-curve', 'val-gp-move-curve', input.gpMoveCurve, 1);
+  setRange('set-gp-deadzone', 'val-gp-deadzone', input.gpDeadzone, 2);
+  setRange('set-gp-trigger', 'val-gp-trigger', input.triggerThreshold, 2);
+  setChk('set-gp-invert-y', input.invertLookY);
+  setChk('set-gp-swap', input.swapSticks);
+
+  // Gamepad button bindings ; each <select.bind-select data-action=...>
+  // already exists in the DOM ; we just push the current index onto it.
+  overlay.querySelectorAll('.bind-select').forEach(sel => {
+    const action = sel.dataset.action;
+    if (!action || !input.gpBindings) return;
+    const idx = input.gpBindings[action];
+    sel.value = (idx == null) ? '-1' : String(idx);
+  });
+
+  // VR controller bindings + synth toggles.
+  setChk('set-xr-leftstick-dpad', input.xrSynth && input.xrSynth.leftStickAsDpad);
+  overlay.querySelectorAll('.xr-bind-select').forEach(sel => {
+    const action = sel.dataset.action;
+    if (!action || !input.xrBindings) return;
+    sel.value = input.xrBindings[action] || '';
+  });
+
+  // VR head-aim nudge.
+  if (input.vrHeadAim) {
+    setChk('set-vrha-enabled', input.vrHeadAim.enabled);
+    setRange('set-vrha-radius', 'val-vrha-radius', input.vrHeadAim.radiusDeg || 12);
+    setRange('set-vrha-sens', 'val-vrha-sens', input.vrHeadAim.sensitivity || 2.0, 1);
+    setChk('set-vrha-invert', input.vrHeadAim.invertPitch);
+  }
+
+  // VR perf + render scale.
+  setSel('set-vr-perf', input.vrPerfMode || 'standard');
+  setRange('set-vr-scale', null,
+    (typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7);
+  const vrScaleVal = $('#val-vr-scale');
+  if (vrScaleVal && typeof getEffectiveVRRenderScale === 'function') {
+    try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
+  }
+
+  // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
+  // re-syncs the display text + Rebind button label for every row.
+  if (typeof window._refreshKbBindRows === 'function') {
+    try { window._refreshKbBindRows(); } catch (_) {}
+  }
+
+  // Active GPU label : the async probe may have resolved between opens.
+  const gpuInfo = $('#set-gpu-info');
+  if (gpuInfo && window.__v8GPU && window.__v8GPU.renderer) {
+    gpuInfo.innerHTML = window.__v8GPU.renderer +
+      '<br><span style="opacity:0.6">' + (window.__v8GPU.vendor || '') + '</span>';
+  }
+
+  // Cinematic mode + Quality + FOV.
+  setChk('set-showcase', typeof showcase !== 'undefined' && showcase.active);
+  setSel('set-quality', (typeof QUALITY !== 'undefined' && QUALITY.level) || 'high');
+  const fov = (typeof input.fovDeg === 'number') ? input.fovDeg : 90;
+  setRange('set-fov', null, fov);
+  const fovVal = $('#val-fov');
+  if (fovVal) fovVal.textContent = (fov | 0) + '°';
+
+  // Wall pattern + opacity.
+  setSel('set-wall-pattern', String(game.wallPattern | 0));
+  setChk('set-wall-black-base', game.wallBlackBase);
+  const wallOp = (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0;
+  setRange('set-wall-opacity', 'val-wall-opacity', wallOp, 2);
+
+  // Skybox.
+  setSel('set-skybox', game.skyboxChoice || '');
+  setChk('set-skybox-stars', game.skyboxStars !== false);
+  const skyCustom = $('#set-skybox-custom');
+  if (skyCustom) {
+    skyCustom.value = (game.skyboxChoice && game.skyboxChoice.indexOf('/') !== -1)
+      ? game.skyboxChoice : '';
+  }
+
+  // Audio volumes + music.
+  if (audio && audio.userVol) {
+    setRange('set-vol-master', 'val-vol-master', audio.userVol.master, 2);
+    setRange('set-vol-sfx', 'val-vol-sfx', audio.userVol.sfx, 2);
+    setRange('set-vol-ambient', 'val-vol-ambient', audio.userVol.ambient, 2);
+    setRange('set-vol-music', 'val-vol-music', audio.userVol.music, 2);
+  }
+  setChk('set-music-enabled', audio && audio.musicEnabled);
+  setSel('set-music-style', (audio && audio.musicStyle) || 'techno');
+  setSel('set-music-ceiling', (audio && audio.musicCeiling) || 'normal');
+  setChk('set-music-mute-lobby', audio && audio.musicMuteLobby);
+
+  // Spatial audio.
+  let reverbWet = 0.4;
+  if (audio) {
+    if (audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') {
+      reverbWet = audio.reverbGain.gain.value;
+    } else if (typeof audio.reverbWet === 'number') {
+      reverbWet = audio.reverbWet;
+    }
+  }
+  setRange('set-reverb-wet', 'val-reverb-wet', reverbWet, 2);
+  setChk('set-ambient-duck', audio && audio.ambientDuckEnabled !== false);
+
+  // Announcer.
+  if (typeof announcer !== 'undefined' && announcer) {
+    setChk('set-ann-enabled', announcer.enabled);
+    setRange('set-ann-pitch', 'val-ann-pitch', announcer.pitch, 2);
+    setRange('set-ann-rate',  'val-ann-rate',  announcer.rate,  2);
+    setRange('set-ann-vol',   'val-ann-vol',   announcer.volume, 2);
+    const annVoice = $('#set-ann-voice');
+    if (annVoice && announcer.voice && announcer.voice.name) {
+      const target = announcer.voice.name;
+      for (const opt of annVoice.options) {
+        if (opt.value === target) { annVoice.value = target; break; }
+      }
+    }
+  }
+
+  // Exit-to-main-menu button : visible only when not on the lobby. Computed
+  // at build time before, so it could stay stale across state changes.
+  const exitBtn = $('#settings-exit-to-menu');
+  if (exitBtn) {
+    const lobbyVisible = (document.getElementById('lobby') &&
+                         document.getElementById('lobby').style.display !== 'none');
+    exitBtn.style.display = lobbyVisible ? 'none' : '';
+  }
+}
+
 function buildSettingsPage() {
+  // (perf 2026-05) See the comment block above _settingsBuilt. The original
+  // function ran on every Esc and rebuilt the entire overlay DOM ; now it
+  // builds once and the cheap value-refresh path handles every subsequent
+  // call. Every existing call site (Import, Reset, wall-defaults reload,
+  // XR reset, etc.) continues to work because mutating state then calling
+  // buildSettingsPage() lands us in the refresh branch with the new values.
+  if (_settingsBuilt) {
+    _refreshSettingsValues();
+    return;
+  }
+  _settingsBuilt = true;
   const overlay = document.getElementById('settings-overlay');
   overlay.innerHTML = `
     <h1>SETTINGS</h1>
