@@ -19572,6 +19572,30 @@ class DestructibleObstacle {
       this.position.addScaledVector(this.fragmentVel, dt);
       // mild drag so debris eventually drifts gently
       this.fragmentVel.multiplyScalar(Math.max(0, 1 - 0.35 * dt));
+      // (v16a Phase BB) SDF containment for the broken fragment.
+      // Same approach as ClusterObstacle.update : sample worldSDF at
+      // the new center and push back along the gradient if the
+      // fragment's bounding sphere is in the wall, then zero the
+      // velocity component going into the wall so it slides along
+      // instead of re-violating next frame.
+      if (typeof worldSDF === 'function' && typeof sdfNormal === 'function') {
+        const r = this.collisionRadius || (this.scale * 1.05) || 30;
+        const sdf = worldSDF(this.position.x, this.position.y, this.position.z);
+        if (sdf > -r) {
+          if (!DestructibleObstacle._sdfScratchN) DestructibleObstacle._sdfScratchN = new THREE.Vector3();
+          const n = sdfNormal(this.position.x, this.position.y, this.position.z, DestructibleObstacle._sdfScratchN);
+          const overlap = sdf + r;
+          this.position.x -= n.x * overlap;
+          this.position.y -= n.y * overlap;
+          this.position.z -= n.z * overlap;
+          const vDotN = this.fragmentVel.x * n.x + this.fragmentVel.y * n.y + this.fragmentVel.z * n.z;
+          if (vDotN > 0) {
+            this.fragmentVel.x -= n.x * vDotN;
+            this.fragmentVel.y -= n.y * vDotN;
+            this.fragmentVel.z -= n.z * vDotN;
+          }
+        }
+      }
       if (this.mesh) this.mesh.position.copy(this.position);
       if (this.edgeMesh) this.edgeMesh.position.copy(this.position);
       this.fragmentLife += dt;
@@ -19592,6 +19616,29 @@ class DestructibleObstacle {
     if (!this.broken && !this.cluster && this.pushVel.lengthSq() > 0.0001) {
       this.position.addScaledVector(this.pushVel, dt);
       this.pushVel.multiplyScalar(Math.max(0, 1 - 1.5 * dt));
+      // (v16a Phase BB) Same SDF containment for standalone (non-cluster)
+      // rocks being shoved around by ship bumps. Cluster children are
+      // skipped here because their positions are driven by the parent
+      // cluster's rotation+translate each frame, and the parent already
+      // has the same containment guard.
+      if (typeof worldSDF === 'function' && typeof sdfNormal === 'function') {
+        const r = this.collisionRadius || (this.scale * 1.05) || 30;
+        const sdf = worldSDF(this.position.x, this.position.y, this.position.z);
+        if (sdf > -r) {
+          if (!DestructibleObstacle._sdfScratchN) DestructibleObstacle._sdfScratchN = new THREE.Vector3();
+          const n = sdfNormal(this.position.x, this.position.y, this.position.z, DestructibleObstacle._sdfScratchN);
+          const overlap = sdf + r;
+          this.position.x -= n.x * overlap;
+          this.position.y -= n.y * overlap;
+          this.position.z -= n.z * overlap;
+          const vDotN = this.pushVel.x * n.x + this.pushVel.y * n.y + this.pushVel.z * n.z;
+          if (vDotN > 0) {
+            this.pushVel.x -= n.x * vDotN;
+            this.pushVel.y -= n.y * vDotN;
+            this.pushVel.z -= n.z * vDotN;
+          }
+        }
+      }
       if (this.mesh) this.mesh.position.copy(this.position);
       if (this.edgeMesh) this.edgeMesh.position.copy(this.position);
     }
