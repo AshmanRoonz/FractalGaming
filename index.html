@@ -2729,12 +2729,12 @@ const PILOT_PERKS = {
   cloak: {
     id: 'cloak',
     name: 'Auto Cloak',
-    desc: 'Every 30s, your ship goes 98% transparent for 3s. Use the window to reposition.',
+    desc: 'Every 30s, your ship goes 99% transparent for 4s. Use the window to reposition.',
     icon: '◌',
     color: 0xaa66ff,
     cloakInterval: 30,
-    cloakDuration: 3,
-    cloakOpacity: 0.02,  // 98% transparent
+    cloakDuration: 4,
+    cloakOpacity: 0.01,  // 99% transparent
   },
   nano: {
     id: 'nano',
@@ -5647,16 +5647,19 @@ class NetworkPlayer {
     }
 
     // (perf 2026-05) Auto Cloak perk : drop the peer's ship opacity to
-    // 2 % while they're in their cloak window, restore on exit. Only
+    // 1 % while they're in their cloak window, restore on exit. Only
     // touch the mesh on transitions ; calling _setShipMeshOpacity every
     // tick would walk the full mesh tree every frame for nothing.
-    // PILOT_PERKS.cloak.cloakOpacity is the source of truth (0.02) ; we
-    // duplicate the constant here rather than reach into PILOT_PERKS so
-    // a missing perk table at module load doesn't crash the render path.
+    // PILOT_PERKS.cloak.cloakOpacity is the source of truth (0.01 as of
+    // 2026-05 retune from 0.02) ; we read it through PILOT_PERKS at use
+    // time so any tuning of the constant doesn't require a code change
+    // here. Falls back to 0.01 if the table is missing.
     const wantCloak = !!s.cloak;
     if (wantCloak !== this._cloaked) {
       this._cloaked = wantCloak;
-      _setShipMeshOpacity(this.mesh, wantCloak ? 0.02 : 1.0);
+      const cloakOp = (PILOT_PERKS && PILOT_PERKS.cloak && typeof PILOT_PERKS.cloak.cloakOpacity === 'number')
+        ? PILOT_PERKS.cloak.cloakOpacity : 0.01;
+      _setShipMeshOpacity(this.mesh, wantCloak ? cloakOp : 1.0);
     }
     // (v6.7) Chassis-specific ability-shield visuals on the network player.
     // The wraparound above is the generic indicator; this adds the actual
@@ -6201,8 +6204,20 @@ function handleHitClaim(claim, fromPeerId) {
     //   - Particle Wall's "is the shooter on the wall's front side?" check
     //     short-circuits (the eff.owner === 'player' wall absorbs nothing)
     //   - any future positional damage logic loses the spatial hook.
+    // (kills 2026-05) Also include peerId and loadout on the fake attacker
+    // so that if THIS hit kills us, playerDie's broadcast of the 'kill'
+    // event has a real killerPeerId / killerName. Previously both were
+    // null/Unknown, which made the kill-credit handler skip the bump and
+    // left multiplayer scoreboards permanently at 0 kills.
+    const shooterPeer = net.peers.get(claim.shooterId);
+    const shooterLoadout = (shooterPeer && shooterPeer.loadoutKey)
+      ? LOADOUTS[shooterPeer.loadoutKey] : null;
     const fakeAttacker = (typeof claim.sx === 'number')
-      ? { position: new THREE.Vector3(claim.sx, claim.sy, claim.sz) }
+      ? {
+          position: new THREE.Vector3(claim.sx, claim.sy, claim.sz),
+          peerId: claim.shooterId,
+          loadout: shooterLoadout,
+        }
       : null;
     playerTakeDamage(claim.damage, fakeAttacker);
   }
@@ -42590,6 +42605,12 @@ function updateEnemyHealthBars() {
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
     if (labelIdx >= _labels.length) return;
+    // (cloak 2026-05) Hide the HUD callout (target bracket + name) on
+    // cloaked NetworkPlayers. ent._cloaked is set inside NetworkPlayer.update
+    // from the broadcast cloak flag ; bots don't have the field so this
+    // is a no-op for the bot-vs-bot solo case. Clears _labelSpotTime so
+    // the digitize-in animation re-runs cleanly when the cloak ends.
+    if (ent._cloaked) { ent._labelSpotTime = null; return; }
     const dist = player.position.distanceTo(ent.position);
     if (dist > 3500) { ent._labelSpotTime = null; return; }
     // (v16) Anchor the callout's target bracket AT the ship (not below
