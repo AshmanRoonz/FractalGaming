@@ -5295,8 +5295,12 @@ function checkAllLoadoutsReady() {
       net.launchTimer = null;
       net.launchScheduledAt = null;
       // (perf 2026-05) Also stop re-broadcasting launch_at so a late-
-      // joining peer doesn't get hammered by stale launch packets.
+      // joining peer doesn't get hammered by stale launch packets, and
+      // clear the dedupe id so the next fresh proposal isn't ignored
+      // as a duplicate (extremely unlikely collision since launchAt is
+      // a wall-clock-ms-derived value, but cheap to reset on cancel).
       if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
+      net.lastLaunchId = null;
       // (v14c) Launch is canceled ; re-enable the map arrows.
       _syncMapButtonsDisabled();
     }
@@ -5312,7 +5316,12 @@ function checkAllLoadoutsReady() {
   const proposer = allIds[0];
   if (proposer === net.myPeerId) {
     const launchAt = Date.now() + 1500;
-    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt });
+    // (perf 2026-05) Include our local clock so the receiver can compute
+    // a relative duration (launchAt - now) instead of trusting that both
+    // machines' wall clocks agree. Windows time sync runs ~once a day and
+    // routinely drifts by hundreds of ms ; cross-machine multiplayer used
+    // to fire 3-2-1-LAUNCH at different real-time moments on each peer.
+    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt, now: Date.now() });
     scheduleLaunch(launchAt);
   }
   // Non-proposers wait for the launch_at event in handleNetEvent.
@@ -5341,7 +5350,10 @@ function scheduleLaunch(launchAt) {
     const allIds = [net.myPeerId, ...net.peers.keys()].sort();
     if (allIds[0] === net.myPeerId) {
       net.launchRebroadcast = setInterval(() => {
-        try { net.sendEvent({ type: 'launch_at', launchAt }); } catch (_) {}
+        // (perf 2026-05) Re-send launchAt with a FRESH `now` each tick so
+        // the receiver, after dedupe by launchAt, can compute a relative
+        // duration from the retry it actually received first.
+        try { net.sendEvent({ type: 'launch_at', launchAt, now: Date.now() }); } catch (_) {}
       }, 150);
     }
   }
@@ -6221,11 +6233,26 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   // (v6.7) Synced ship-select launch from the lowest-peerId proposer.
+  // (perf 2026-05) Clock-skew tolerant : interpret launchAt as a duration
+  // relative to the proposer's send-time, then schedule that duration
+  // off OUR local clock. evt.launchAt acts as the de-duplication key for
+  // the proposer's 150ms re-broadcast loop ; we schedule on the first
+  // packet we ever see for a given launchAt, and ignore subsequent
+  // duplicates so the retry doesn't keep resetting the timer.
   if (evt.type === 'launch_at' && typeof evt.launchAt === 'number') {
     const allIds = [net.myPeerId, ...net.peers.keys()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && player.loadoutKey) {
-      scheduleLaunch(evt.launchAt);
+      if (net.lastLaunchId === evt.launchAt) return; // duplicate retry
+      net.lastLaunchId = evt.launchAt;
+      // Remaining duration in the proposer's frame. Falls back to the
+      // absolute-clock interpretation if the proposer is on an older
+      // build that doesn't send `now` (won't happen in lockstep deploys
+      // but cheap to keep).
+      const remaining = (typeof evt.now === 'number')
+        ? (evt.launchAt - evt.now)
+        : (evt.launchAt - Date.now());
+      scheduleLaunch(Date.now() + Math.max(0, remaining));
     }
     return;
   }
