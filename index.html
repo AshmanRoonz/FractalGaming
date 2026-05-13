@@ -5294,6 +5294,9 @@ function checkAllLoadoutsReady() {
       clearTimeout(net.launchTimer);
       net.launchTimer = null;
       net.launchScheduledAt = null;
+      // (perf 2026-05) Also stop re-broadcasting launch_at so a late-
+      // joining peer doesn't get hammered by stale launch packets.
+      if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
       // (v14c) Launch is canceled ; re-enable the map arrows.
       _syncMapButtonsDisabled();
     }
@@ -5317,13 +5320,36 @@ function checkAllLoadoutsReady() {
 
 function scheduleLaunch(launchAt) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
+  if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
   net.launchScheduledAt = launchAt;
   // (v14c) Everyone has confirmed ; disable the map arrows.
   _syncMapButtonsDisabled();
   const delay = Math.max(0, launchAt - Date.now());
+
+  // (perf 2026-05) Self-healing launch_at handshake. The proposer used to
+  // send launch_at exactly once and trust the network to deliver it ;
+  // WebRTC data channels can drop messages under congestion, and background
+  // tabs get throttled, so a single drop stranded the receiver in
+  // ship-select while the proposer started alone. If we're the proposer,
+  // re-broadcast launch_at every 150ms until our local timer fires.
+  // The receiver's handler at handleNetEvent (case 'launch_at') is
+  // idempotent ; it clears any prior launchTimer and re-schedules from
+  // the same launchAt, so duplicate broadcasts converge instead of
+  // stacking. Non-proposers skip the interval (they don't broadcast
+  // launch_at at all).
+  if (net.active && net.sendEvent) {
+    const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+    if (allIds[0] === net.myPeerId) {
+      net.launchRebroadcast = setInterval(() => {
+        try { net.sendEvent({ type: 'launch_at', launchAt }); } catch (_) {}
+      }, 150);
+    }
+  }
+
   net.launchTimer = setTimeout(() => {
     net.launchTimer = null;
     net.launchScheduledAt = null;
+    if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
     launchCountdown();
   }, delay);
