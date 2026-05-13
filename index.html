@@ -5237,6 +5237,16 @@ function _syncMapButtonsDisabled() {
   const next = document.getElementById('map-next');
   if (prev) prev.disabled = locked;
   if (next) next.disabled = locked;
+  // (perf 2026-05) Also lock the preset-prev / preset-next arrows once
+  // the launch handshake is in flight. Changing the skybox preset triggers
+  // a multi-MB texture swap that can stall the main thread long enough to
+  // miss the launch_at handler, which in 2-peer tests showed up as one
+  // window launching while the other stayed in ship-select. Re-enabled
+  // when the launch is canceled (un-commit) or after the round starts.
+  const presetPrev = document.getElementById('preset-prev');
+  const presetNext = document.getElementById('preset-next');
+  if (presetPrev) presetPrev.disabled = locked;
+  if (presetNext) presetNext.disabled = locked;
 }
 
 function tickStartCountdown() {
@@ -11428,19 +11438,18 @@ function setEquirectangularSky(url) {
     console.warn('[v16a sky] .hdr requested but RGBELoader is not available ; skipping');
     return;
   }
-  // (v16a fix) EAGERLY dispose the previous sky texture + clear scene.background
-  // before starting the new load. Before this fix the dispose ran in the
-  // success callback, meaning both old + new textures were alive on the GPU
-  // simultaneously during the swap. Skyboxes are 8192x4096 (~170MB on GPU
-  // each, more with mipmaps) so two-at-once was enough to blow VRAM on
-  // constrained laptops and trigger a GPU process crash. The brief gap
-  // before the new sky paints reads as a single black frame ; far better
-  // than the alternative.
-  if (_equirectSky.texture) {
-    try { _equirectSky.texture.dispose(); } catch (_) {}
-    _equirectSky.texture = null;
-  }
-  scene.background = null;
+  // (perf 2026-05) Graceful swap : keep the old texture + scene.background
+  // alive until the new one loads, THEN dispose the old. The previous
+  // policy disposed eagerly to keep VRAM usage to a single texture, on the
+  // theory that two 8192x4096 textures (~170MB each at the time, ~134MB
+  // now with mipmaps disabled) could blow up VRAM on constrained laptops.
+  // Trade-off was visible : preset changes in the lobby produced a
+  // multi-second black gap while the new JPG downloaded + decoded. On
+  // modern discrete GPUs (4-12+ GB VRAM) 270MB of transient overlap is
+  // trivial ; on a Quest 3 standalone you wouldn't be running this in a
+  // desktop browser anyway. Snapshot the old texture into _oldTex below,
+  // and dispose it inside the success / error callback after the swap.
+  const _oldTex = _equirectSky.texture;
   _equirectSky.loading = true;
   const loader = isHdr ? new THREE.RGBELoader() : new THREE.TextureLoader();
   loader.load(url, (tex) => {
@@ -11467,9 +11476,19 @@ function setEquirectangularSky(url) {
     _equirectSky.url = url;
     scene.background = tex;
     _equirectSky.loading = false;
+    // (perf 2026-05) Graceful swap : new texture is now live ; safe to
+    // dispose the old one. Wrapped in try because the texture may have
+    // been disposed by a concurrent clearSky() while we were loading.
+    if (_oldTex && _oldTex !== tex) {
+      try { _oldTex.dispose(); } catch (_) {}
+    }
     console.log('[v16a sky] equirectangular background loaded:', url, isHdr ? '(HDR)' : '(LDR)');
   }, undefined, (err) => {
     _equirectSky.loading = false;
+    // (perf 2026-05) Load failed : keep the OLD texture alive. The user
+    // sees their previous skybox instead of a black void on a typo'd
+    // custom path, which matches the visual contract of "preset switch
+    // is graceful". No dispose here.
     console.warn('[v16a sky] load failed (', url, ')', err && err.message);
   });
 }
