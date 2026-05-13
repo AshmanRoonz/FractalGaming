@@ -6227,6 +6227,19 @@ function _tickTimer(name) {
 // average, those transitions land at roughly the same wall-clock moment.
 function broadcastGameSync(dt) {
   if (!net.active || !net.sendEvent) return;
+  // (readiness 2026-05) Suspend game-sync broadcast + consensus while the
+  // readiness handshake is in flight. The fresh-multiplayer path parks
+  // warmupTimer at a large safety value (300 s) until _startIngameCountdown
+  // anchors it to INGAME_COUNTDOWN ; if one peer crosses that transition
+  // before the other, consensus averaging would blend their 3.5 s with
+  // the other peer's 300 s and pull both back up to ~150 s, leaving them
+  // stuck while the round timer ticks behind the loading overlay. We
+  // gate on useIngameCountdown being true AND launchScheduledAt being
+  // null, which is precisely the "world built, waiting for peers / for
+  // launch_at" window. Once scheduleLaunch sets launchScheduledAt the
+  // launch is imminent and the two peers will fire _startIngameCountdown
+  // within milliseconds of each other ; safe to resume.
+  if (net.useIngameCountdown && !net.launchScheduledAt) return;
   net.gameSyncAccum += dt;
   if (net.gameSyncAccum < 1 / net.gameSyncHz) return;
   net.gameSyncAccum = 0;
