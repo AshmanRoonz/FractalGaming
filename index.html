@@ -5440,6 +5440,12 @@ class NetworkPlayer {
     // Stats (for scoreboard)
     this.kills = 0;
     this.damageDealt = 0;
+    // (perf 2026-05) Auto Cloak perk : tracks the broadcast cloak flag so
+    // update() only walks the mesh tree on a transition (cloak on -> off
+    // or off -> on) instead of every tick. Starts false so a peer who
+    // joins mid-match without an active cloak doesn't trigger a redundant
+    // restore-to-opaque traversal on their first state packet.
+    this._cloaked = false;
 
     const teamColor = team === LSS.TEAM_FLEET_A ? 0xff4444 : 0x44bb44;
     this.mesh = createShipMesh(chassisData, teamColor, loadoutKey);
@@ -5542,6 +5548,18 @@ class NetworkPlayer {
       setShieldIntensity(this.mesh, opacity);
     }
 
+    // (perf 2026-05) Auto Cloak perk : drop the peer's ship opacity to
+    // 2 % while they're in their cloak window, restore on exit. Only
+    // touch the mesh on transitions ; calling _setShipMeshOpacity every
+    // tick would walk the full mesh tree every frame for nothing.
+    // PILOT_PERKS.cloak.cloakOpacity is the source of truth (0.02) ; we
+    // duplicate the constant here rather than reach into PILOT_PERKS so
+    // a missing perk table at module load doesn't crash the render path.
+    const wantCloak = !!s.cloak;
+    if (wantCloak !== this._cloaked) {
+      this._cloaked = wantCloak;
+      _setShipMeshOpacity(this.mesh, wantCloak ? 0.02 : 1.0);
+    }
     // (v6.7) Chassis-specific ability-shield visuals on the network player.
     // The wraparound above is the generic indicator; this adds the actual
     // shield mesh per chassis so peers see what kind of shield is up. Right
@@ -5849,6 +5867,13 @@ function broadcastPlayerState(dt) {
     // shield bubble on peers: bright at spawn, fades over LSS.SPAWN_PROTECTION
     // seconds (3s default), gone by the time you can be shot.
     spawnProt: Math.max(0, Math.round((player.spawnProtection || 0) * 10) / 10),
+    // (perf 2026-05) Auto Cloak perk : a single bool that drives remote
+    // NetworkPlayers to drop the cloaked peer's ship opacity to ~0.02. The
+    // perk is purely visual ; hit detection is unchanged. Before this field
+    // the cloak only affected the cloaker's own mesh (which they don't see
+    // in first-person anyway), so opponents had no idea the player went
+    // ghostlike, which made the entire perk a no-op in multiplayer.
+    cloak: !!player.perkCloakActive,
   };
 
   const msg = JSON.stringify(state);
@@ -25986,13 +26011,17 @@ function _tickOutlineOptics(active) {
   }
 }
 
-// Apply opacity to all visible mesh materials on the player's ship. Used
-// by the Auto Cloak perk. Walks player.mesh (the chassis ship group) and
-// any child meshes ; falls back gracefully if the player has no ship
-// mesh. (v16 fix : was reading player.shipMesh which never gets set ;
-// the actual reference is player.mesh.)
-function _setPlayerShipOpacity(opacity) {
-  const root = player && (player.mesh || player.shipMesh);
+// Apply opacity to all visible mesh materials on a ship root. Used by the
+// Auto Cloak perk on the LOCAL player, and (perf 2026-05) on remote
+// NetworkPlayers when the broadcast cloak flag flips. Walks the mesh tree
+// and stashes original opacity/transparent on each material's userData
+// the first time it's touched so the restore branch (opacity >= 0.99)
+// returns the material to its pre-cloak state instead of forcing
+// opacity=1 + transparent=false on materials that were never opaque.
+// (v16 fix : was reading player.shipMesh which never gets set ; the actual
+// reference is player.mesh. Parameterized 2026-05 so NetworkPlayers can
+// reuse it.)
+function _setShipMeshOpacity(root, opacity) {
   if (!root || typeof root.traverse !== 'function') return;
   root.traverse((obj) => {
     if (obj.material) {
@@ -26015,6 +26044,11 @@ function _setPlayerShipOpacity(opacity) {
       }
     }
   });
+}
+
+// Back-compat wrapper for the legacy name used inside _tickPerkEffects.
+function _setPlayerShipOpacity(opacity) {
+  _setShipMeshOpacity(player && (player.mesh || player.shipMesh), opacity);
 }
 
 function updatePlayerMovement(dt) {
