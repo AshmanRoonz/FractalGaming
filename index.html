@@ -40772,6 +40772,66 @@ function buildRoomGraphLevel(level) {
     mesh.userData.isWallMesh = true;
     scene.add(mesh);
     game.mapMeshes.push(mesh);
+
+    // (v16a Phase Y) Depth-only wall occluder. Solves "I can still see
+    // ships through transparent walls" : Three.js renders OPAQUE objects
+    // (ships) before TRANSPARENT objects (walls), so by the time the
+    // transparent wall finally writes its depth value, the ship pixels
+    // behind it are already drawn. Result : ships in neighboring rooms
+    // leak through your transparent near wall.
+    //
+    // Fix : a second mesh sharing the same geometry, with colorWrite =
+    // false and depthWrite = true, in the OPAQUE pass via a low
+    // renderOrder. It writes wall depth values into the depth buffer
+    // BEFORE any ship draws. Ships then depth-test against those wall
+    // depths and the ones behind walls correctly fail.
+    //
+    //   - Opaque pass step 1 : occluder writes depth at every wall
+    //     fragment ; no color output, so it's invisible.
+    //   - Opaque pass step 2 : ship meshes draw. Behind-wall ship
+    //     pixels fail depth and never get rasterized.
+    //   - Transparent pass : the visual wall mesh blends over what's
+    //     drawn (skybox + foreground ships in your room) at the chosen
+    //     opacity. The wall's own depth test still passes (LEQUAL
+    //     against the occluder's identical depth) so the cosmic
+    //     pattern reads correctly.
+    //
+    // BackSide matches the visual wall ; we only want to occlude what
+    // the player would actually see the wall blocking. The shared
+    // BufferGeometry costs nothing extra (Three.js reference-shares
+    // the GPU buffers). renderOrder = -1 ensures the occluder runs
+    // first within the opaque group.
+    const occluderMat = new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      depthWrite: true,
+      side: THREE.BackSide,
+      // (v16a Phase Y fix) Bias the occluder's depth slightly farther
+      // than the visual wall to prevent z-fighting. The visual wall is
+      // a custom ShaderMaterial with its own vertex shader ; the
+      // occluder is MeshBasicMaterial with Three.js's stock vertex
+      // shader. They share the same geometry and transformations but
+      // independent shader programs can produce gl_Position values
+      // that differ by epsilons due to FP precision. Without offset,
+      // the visual wall's LEQUAL depth test sometimes fails, the
+      // navy-blue clear color (or skybox) bleeds through, and the
+      // wall appears to flicker. polygonOffset pushes the occluder's
+      // depth slightly farther so the visual wall is consistently
+      // CLOSER and always passes its depth test.
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    const occluderMesh = new THREE.Mesh(levelGeo, occluderMat);
+    occluderMesh.renderOrder = -1;
+    occluderMesh.userData = { isWallMesh: true, isWallOccluder: true };
+    // (v16a Phase Y) Skip raycasts on the occluder. The spatial-audio
+    // occlusion path (and any other code that calls intersectObjects on
+    // game.mapMeshes) would otherwise test the same shared BufferGeometry
+    // twice ; this no-op stops the duplicate work cleanly without having
+    // to change every consumer to filter by userData.isWallOccluder.
+    occluderMesh.raycast = function () {};
+    scene.add(occluderMesh);
+    game.mapMeshes.push(occluderMesh);
     return mesh;
   }
 
@@ -40786,11 +40846,13 @@ function buildRoomGraphLevel(level) {
         // Dispatch high-res job (gridRes=96)
         game.levelWorker.postMessage({bounds, gridRes: 96, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
       } else if (gridRes === 96) {
-        // Remove low-res, add high-res
-        if (game.mapMeshes.length > 0) {
-          const oldMesh = game.mapMeshes[0];
-          scene.remove(oldMesh);
-          game.mapMeshes.splice(0, 1);
+        // Remove low-res, add high-res.
+        // (v16a Phase Y) createMeshFromPositions now adds TWO meshes per
+        // call (visual + depth-only occluder), so clean out ALL existing
+        // wall meshes here instead of only index 0.
+        while (game.mapMeshes.length > 0) {
+          const oldMesh = game.mapMeshes.shift();
+          if (oldMesh && oldMesh.parent) scene.remove(oldMesh);
         }
         createMeshFromPositions(positions, 96);
         // Hide loading UI
