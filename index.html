@@ -2004,11 +2004,24 @@ body.vr-active .hit-marker {
     </div>
   </div>
 
-  <!-- Right half: buttons + text, centered in its half-box -->
+  <!-- Right half: split into two side-by-side columns.
+       LEFT column = multiplayer (title, Discord identity, lobby panel,
+         P2P room code / JOIN).
+       RIGHT column = solo + everything else (SOLO/TEST buttons,
+         LEADERBOARD/LIVE ROOMS/MY STATS/SETTINGS/ABOUT, COMMUNITY,
+         TOOLS, PLAY IN FULLSCREEN, GPU disclaimer, peer-to-peer
+         description).
+       The narrow-viewport media query below stacks both columns
+       vertically when the viewport gets too tight for two columns. -->
   <div id="lobby-right" style="
-    flex:1 1 50%;display:flex;flex-direction:column;align-items:center;justify-content:center;
-    padding:24px;min-width:0;">
-    <h2 style="font-size:13px;color:#888;letter-spacing:3px;margin:0 0 30px 0;text-align:center;">ZERO-GRAVITY SHIP COMBAT</h2>
+    flex:1 1 50%;display:flex;flex-direction:row;align-items:stretch;justify-content:center;
+    padding:24px;min-width:0;gap:24px;">
+
+    <!-- LEFT column of right panel : multiplayer / lobby -->
+    <div id="lobby-right-multiplayer" style="
+      flex:1.2 1 0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+      min-width:0;gap:0;">
+      <h2 style="font-size:13px;color:#888;letter-spacing:3px;margin:0 0 30px 0;text-align:center;">ZERO-GRAVITY SHIP COMBAT</h2>
 
     <!-- (v10) Discord identity section. Hidden until either signed in or
          the user clicks SIGN IN WITH DISCORD. PKCE flow ; no Client Secret
@@ -2107,8 +2120,17 @@ body.vr-active .hit-marker {
       </div>
       <div id="lobby-status" style="font-size:10px;color:#555;min-height:16px;letter-spacing:1px;"></div>
       <div id="lobby-peers" style="font-size:10px;color:#66bb66;min-height:16px;"></div>
+    </div>
+    <!-- end of multiplayer column -->
+    </div>
 
-      <div style="margin:20px 0;color:#333;font-size:10px;letter-spacing:3px;">; OR ;</div>
+    <!-- RIGHT column of right panel : solo + settings + community + tools -->
+    <div id="lobby-right-solo" style="
+      flex:1 1 0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;
+      min-width:0;gap:0;">
+      <!-- Spacer matches the title margin in the left column so the two
+           columns' first interactive elements line up vertically. -->
+      <div style="height:43px;flex-shrink:0;"></div>
 
       <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;">
         <button id="btn-solo" onclick="startSolo()" style="
@@ -2128,7 +2150,6 @@ body.vr-active .hit-marker {
           onmouseover="this.style.borderColor='#7cf';this.style.color='#cdf'"
           onmouseout="this.style.borderColor='rgba(80,140,180,0.4)';this.style.color='#7aa'">TEST MODE</button>
       </div>
-    </div>
 
     <!-- (v10 Phase 3) External pages: leaderboard + live rooms browser.
          Both render the D1 backend's data via the Worker API.
@@ -2294,11 +2315,22 @@ body.vr-active .hit-marker {
       Share the code; anyone who enters it joins your mesh.<br>
       Sign in with Discord (optional) to track stats on the leaderboard.
     </div>
+    </div>
+    <!-- end of solo column -->
   </div>
 </div>
 <!-- (v8VR 2026-05-01) Narrow-viewport stacking: when window is squeezed
-     thin, drop the side-by-side and stack vertically so nothing clips. -->
+     thin, drop the side-by-side and stack vertically so nothing clips.
+     (layout 2026-05) Also collapse the inner two-column split of
+     lobby-right (multiplayer / solo) at slightly wider viewports so the
+     buttons don't get crushed when the right half is under ~480 px. -->
 <style>
+  @media (max-width: 1100px) {
+    #lobby-right { flex-direction: column !important; }
+    #lobby-right-multiplayer, #lobby-right-solo {
+      flex: 0 0 auto !important; width: 100% !important;
+    }
+  }
   @media (max-width: 760px) {
     #lobby { flex-direction: column !important; }
     #lobby-left, #lobby-right { flex: 0 0 auto !important; width: 100% !important; }
@@ -32075,35 +32107,44 @@ function drawCircumpunctHUD() {
 
   // ---- LAYER 2c: CORE CHARGE BAR (2026-05 retune) ----
   // Replaces the legacy yellow "CORE" text that only appeared when full.
-  // A continuous yellow charge bar now sits in the gap at the bottom of
-  // the inner health ring (where the ring's arc leaves a wedge open at
-  // 6 o'clock between the ~7 and ~5 o'clock segment endpoints). The bar
-  // shows live coreMeter fill 0-100%, pulses softly when full and not
-  // yet spent, and hides while the core is actively firing (the slot
-  // visualization in the bottom ability HUD already shows the duration
-  // bar at that point).
+  // A continuous yellow charge bar sits in the gap at the bottom of the
+  // inner health ring (where the ring's arc leaves a wedge open at 6
+  // o'clock between the ~7 and ~5 o'clock segment endpoints). Always
+  // drawn so the player sees the bar throughout the cycle :
+  //   - charging (0-99%) : yellow fill grows left-to-right.
+  //   - ready (100%, not yet spent) : full yellow, pulses softly + glow.
+  //   - actively firing (coreActive) : coreMeter is forced to 0 by the
+  //     round system, so the bar reads empty with a faint amber "FIRING"
+  //     tint on the track ; this is the visual cue that the core is in
+  //     its duration window. As soon as the window ends, fill starts
+  //     growing again from 0 with the next damage / kill.
+  // Earlier version hid the bar entirely during coreActive, which left
+  // the player wondering whether the bar was permanently gone or about
+  // to recharge.
   const _corePct = Math.min(100, (player.coreMeter || 0));
-  if (!player.coreActive) {
+  {
     const barW = 96;        // total width of the bar background
     const barH = 6;         // height
     const barX = cx - barW / 2;
     const barY = cy + r1 - barH / 2;
     const fillPct = _corePct / 100;
-    const ready = _corePct >= 100;
+    const ready = _corePct >= 100 && !player.coreActive;
+    const firing = !!player.coreActive;
     const pulse = ready ? (0.75 + 0.25 * Math.sin(t * 4.5)) : 1.0;
 
     ctx.save();
-    // Background : faint dark track so the empty portion still reads as
-    // "this slot exists".
-    ctx.fillStyle = 'rgba(20,30,45,0.55)';
+    // Background track. While the core is actively firing, tint the
+    // track slightly amber so the empty bar still reads as "core slot,
+    // currently firing" instead of "core slot, nothing happening".
+    ctx.fillStyle = firing ? 'rgba(60,40,15,0.65)' : 'rgba(20,30,45,0.55)';
     ctx.fillRect(barX, barY, barW, barH);
     // Border : subtle amber outline so the bar carries the same color
     // language as the core ability slot in the bottom HUD.
-    ctx.strokeStyle = 'rgba(255,210,40,0.45)';
+    ctx.strokeStyle = firing ? 'rgba(255,180,50,0.65)' : 'rgba(255,210,40,0.45)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX - 0.5, barY - 0.5, barW + 1, barH + 1);
     // Fill : yellow gradient, fully opaque when ready (and pulsing),
-    // softer while charging.
+    // softer while charging. Skipped when fill is zero.
     if (fillPct > 0) {
       const gradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
       gradient.addColorStop(0, 'rgba(255,210,40,' + (ready ? (0.95 * pulse).toFixed(2) : '0.80') + ')');
