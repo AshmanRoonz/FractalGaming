@@ -2516,6 +2516,68 @@ window.lssAutoFullscreen = function () {
 // 26k+ lines below execute exactly as before once the event fires.
 function _bootLSS() {
 
+// (v16a) Persistent hang detector. A setInterval beat runs every 100ms ;
+// if the actual gap between beats is large, the main thread was blocked
+// for that duration. The report logs AFTER the freeze recovers so the
+// console captures the data even when the user can't reach DevTools
+// during the hang. Also captures memory snapshot at recovery time and
+// listens for WebGL context loss / restore (the most common cause of
+// multi-second freezes that "just resume").
+(function _lssHangDetector() {
+  const THRESH_MS = 250;
+  let last = performance.now();
+  let lastFrameStart = last;
+  let frameCounter = 0;
+  const hangs = [];
+  try { window._lssHangs = hangs; } catch (_) {}
+  setInterval(function () {
+    const now = performance.now();
+    const gap = now - last;
+    last = now;
+    if (gap > THRESH_MS) {
+      const report = {
+        ts: new Date().toISOString(),
+        gapMs: Math.round(gap),
+        sinceLastFrameMs: Math.round(now - lastFrameStart),
+        frameCountAtHang: frameCounter,
+        gameState: (typeof game !== 'undefined' && game) ? game.state : 'n/a',
+        projectiles: (typeof game !== 'undefined' && game && game.projectiles) ? game.projectiles.length : 0,
+        effects: (typeof game !== 'undefined' && game && game.effects) ? game.effects.length : 0,
+        particles: (typeof game !== 'undefined' && game && game.particles) ? game.particles.length : 0,
+        entities: (typeof game !== 'undefined' && game && game.entities) ? game.entities.length : 0,
+      };
+      if (performance && performance.memory) {
+        const m = performance.memory;
+        report.heapUsedMB = Math.round(m.usedJSHeapSize / 1048576);
+        report.heapTotalMB = Math.round(m.totalJSHeapSize / 1048576);
+        report.heapLimitMB = Math.round(m.jsHeapSizeLimit / 1048576);
+      }
+      hangs.push(report);
+      if (hangs.length > 40) hangs.shift();
+      console.warn('[lss-hang]', report.gapMs + 'ms freeze recovered. Details:', report);
+      console.warn('[lss-hang] type window._lssHangs in console to see all recorded freezes this session.');
+    }
+  }, 100);
+  // Tick frameCounter each animation frame so we can tell whether the
+  // freeze was inside the render loop (frameCounter stops advancing) or
+  // happened while the rAF was idle (counter still advances right
+  // before the hang).
+  function _tick() {
+    frameCounter++;
+    lastFrameStart = performance.now();
+    requestAnimationFrame(_tick);
+  }
+  requestAnimationFrame(_tick);
+  // WebGL context loss / restore — common cause of 2-10s freezes that
+  // "just resume" since the browser auto-recovers.
+  window.addEventListener('webglcontextlost', function (e) {
+    console.error('[lss-hang] WEBGL CONTEXT LOST', e);
+  });
+  window.addEventListener('webglcontextrestored', function (e) {
+    console.error('[lss-hang] WEBGL CONTEXT RESTORED', e);
+  });
+})();
+
 // ---- GAME CONSTANTS ----
 
 const LSS = {
@@ -13955,46 +14017,78 @@ function _applyShipPreviewModel(key) {
     return;
   }
   if (s.lastKey === key && s.model) return; // nothing to do
+  // (v16a Phase II) Cache cloned + materialized models per ship key. The
+  // old code cloned the GLB tree AND cloned every material every time
+  // the user clicked a ship card. Each cloned material is a fresh
+  // instance with a unique UUID, which forces WebGL to compile a NEW
+  // shader program for it on first render — a multi-material PBR ship
+  // can take 500ms-2s PER click on a weaker GPU, and the GPU driver
+  // stall during compile blocks the OS compositor for the whole
+  // freeze duration. Caching means each ship is only cloned + compiled
+  // ONCE per session ; subsequent clicks just swap which cached root is
+  // in the preview scene.
+  if (!s.modelByKey) s.modelByKey = Object.create(null);
   if (s.model) {
     s.scene.remove(s.model);
     s.model = null;
   }
   s.lastKey = key;
-  // Clone and neutralize the clone's materials so the preview reads like a
-  // hero shot: no team tint, mild emissive lift, preserved texture/vertexColor.
-  const clone = proto.clone(true);
-  clone.traverse(child => {
-    if (child.isMesh) {
-      const mats = Array.isArray(child.material) ? child.material : [child.material];
-      const newMats = mats.map(m => {
-        if (!m) return m;
-        const copy = m.clone();
-        // Subtle emissive lift so dark hull plates aren't pitch black, but
-        // not loud enough to flatten the silhouette. Earlier value (0x22334a
-        // at intensity 1.0) made every panel self-glow on top of the
-        // ambient + 3 directionals + IBL, washing out form.
-        if (copy.emissive) copy.emissive.setHex(0x121a26);
-        if ('emissiveIntensity' in copy) copy.emissiveIntensity = 0.45;
-        return copy;
-      });
-      child.material = newMats.length === 1 ? newMats[0] : newMats;
-      child.castShadow = false;
-      child.receiveShadow = false;
-    }
-  });
+  let modelRoot = s.modelByKey[key];
+  if (!modelRoot) {
+    // First time we've seen this ship key this session — clone the GLB
+    // tree, clone + neutralize materials, cache the result.
+    modelRoot = proto.clone(true);
+    modelRoot.traverse(child => {
+      if (child.isMesh) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        const newMats = mats.map(m => {
+          if (!m) return m;
+          const copy = m.clone();
+          // Subtle emissive lift so dark hull plates aren't pitch black, but
+          // not loud enough to flatten the silhouette. Earlier value (0x22334a
+          // at intensity 1.0) made every panel self-glow on top of the
+          // ambient + 3 directionals + IBL, washing out form.
+          if (copy.emissive) copy.emissive.setHex(0x121a26);
+          if ('emissiveIntensity' in copy) copy.emissiveIntensity = 0.45;
+          return copy;
+        });
+        child.material = newMats.length === 1 ? newMats[0] : newMats;
+        child.castShadow = false;
+        child.receiveShadow = false;
+      }
+    });
+    // (v16a Phase II) Ask Three.js to compile shader programs for the
+    // new model BEFORE we add it to the scene. compileAsync (added in
+    // r152) runs the compile off the main thread on supporting
+    // drivers ; the synchronous compile() fallback still triggers the
+    // freeze but only happens once per ship, not every click. Wrapped
+    // in a try/catch because some drivers reject compileAsync with a
+    // promise-reject and we still want the model to render.
+    try {
+      if (typeof s.renderer.compileAsync === 'function') {
+        s.renderer.compileAsync(modelRoot, s.scene, s.camera).catch(() => {});
+      } else if (typeof s.renderer.compile === 'function') {
+        // Temporarily attach so compile() can resolve lights / scene env.
+        s.scene.add(modelRoot);
+        s.renderer.compile(s.scene, s.camera);
+        s.scene.remove(modelRoot);
+      }
+    } catch (_) {}
+    s.modelByKey[key] = modelRoot;
+  }
   // Fit camera dolly to the model's bbox so small ships don't look tiny and
   // large ships don't clip. We aim 3/4 down-angled for a good silhouette.
-  const box = new THREE.Box3().setFromObject(clone);
+  const box = new THREE.Box3().setFromObject(modelRoot);
   const sz = box.getSize(new THREE.Vector3());
   const maxDim = Math.max(sz.x, sz.y, sz.z) || 100;
   const cam = s.camera;
   cam.position.set(0, maxDim * 0.35, maxDim * 2.2);
   cam.lookAt(0, 0, 0);
   // Reset rotation so every new ship starts facing camera.
-  clone.rotation.set(0, 0, 0);
+  modelRoot.rotation.set(0, 0, 0);
   s.yaw = 0; // canonical yaw; animate-loop & input handlers add into this
-  s.scene.add(clone);
-  s.model = clone;
+  s.scene.add(modelRoot);
+  s.model = modelRoot;
 }
 
 function _animateShipPreview() {
