@@ -2421,11 +2421,12 @@ body.vr-active .hit-marker {
   </div>
 </div>
 
-<!-- (readiness 2026-05) Multiplayer loading overlay : shown after the
-     player commits a ship and before all peers signal world_ready. Holds
-     the player on the warp-in until the handshake completes (or aborts).
-     LSS_loading.png is optional ; if missing, the text label still
-     reads. -->
+<!-- Loading overlay scaffolding. Kept for a future redesign of the
+     multiplayer match-start handshake (an earlier 2026-05 attempt to wire
+     a world-ready handshake + in-game 3-2-1 was rolled back ; the markup
+     and CSS are still here so the next pass doesn't have to recreate
+     them). Not shown by any current code path. LSS_loading.png is
+     optional ; the onerror hides the broken image icon if absent. -->
 <div id="lss-loading-overlay">
   <img id="lss-loading-img" src="LSS/LSS_loading.png" alt="" onerror="this.style.display='none'">
   <div id="lss-loading-text">WAITING FOR PEERS...</div>
@@ -2592,15 +2593,11 @@ const LSS = {
   // warmupTimer is kept in lockstep with this so bots stay in 'warmup' (no
   // firing, no movement) for the full duration of the visible countdown.
   LAUNCH_COUNTDOWN: 10,
-  // (readiness 2026-05) Multiplayer match-start handshake. Each peer
-  // signals world_ready after its commitLoadout finishes ; the visible
-  // 3-2-1 only starts once every peer has reported in (or READY_TIMEOUT
-  // seconds elapse, at which point we broadcast match_abort and send
-  // everyone back to ship-select). INGAME_COUNTDOWN is how long the
-  // in-world 3-2-1 lasts, anchored to slightly more than 3 so the
-  // existing Overlays.countdown trigger at warmupTimer crossing 3 / 2 / 1
-  // fires reliably on the first frame. Solo path is unaffected ; this
-  // only applies when net.active is true.
+  // Reserved for a future multiplayer match-start handshake redesign.
+  // The first attempt at a "world_ready" gate + in-game 3-2-1 was rolled
+  // back ; these constants stay so the next pass has the values to
+  // reach for without rederiving them. Not consulted by any current
+  // code path.
   READY_TIMEOUT: 10,
   INGAME_COUNTDOWN: 3.5,
   // (v13r) Race mode. MODE drives a few targeted divergences from classic:
@@ -3136,15 +3133,6 @@ const net = {
   myPeerId: null,
   peers: new Map(),           // peerId -> { state, mesh, lastUpdate, interpolation, ready }
   networkPlayers: [],         // NetworkPlayer instances (mirrors game.entities for bots)
-
-  // (readiness 2026-05) Match-start readiness handshake. Flipped to true
-  // at the end of commitLoadout's world build ; once every peer's
-  // peer.ready is also true, the proposer broadcasts launch_at which
-  // fires the in-game 3-2-1. readyTimeoutHandle gates the safety net :
-  // if the handshake doesn't converge inside READY_TIMEOUT seconds,
-  // broadcast match_abort and return every peer to ship-select.
-  localReady: false,
-  readyTimeoutHandle: null,
 
   // Trystero actions (set up on room join)
   sendState: null,            // broadcast own state
@@ -4747,7 +4735,6 @@ async function joinRoom() {
         team: null,
         networkPlayer: null,
         ready: false,           // (v6.7) per-peer ready flag for the start handshake
-        worldReady: false,      // (readiness 2026-05) per-peer ship-select world_ready flag
       });
       updateLobbyPeers();
       checkAllReady();          // (v6.7) a new not-ready peer cancels any pending start
@@ -4801,11 +4788,6 @@ async function joinRoom() {
       updateLobbyPeers();
       checkAllReady();          // (v6.7) someone leaving may complete the ready set
       checkAllLoadoutsReady();  // (v6.7) ; same applies to the ship-select handshake
-      // (readiness 2026-05) ; and to the world-ready handshake. If we were
-      // waiting on the leaver's world_ready, their departure unblocks us.
-      if (typeof _checkAllPeersReady === 'function') {
-        try { _checkAllPeersReady(); } catch (_) {}
-      }
       // (v9b) Refresh the fleet strip so the departing peer's chip drops out.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 
@@ -5405,179 +5387,6 @@ function checkAllLoadoutsReady() {
   // Non-proposers wait for the launch_at event in handleNetEvent.
 }
 
-// (readiness 2026-05) Multiplayer match-start readiness handshake. See
-// LSS.READY_TIMEOUT / INGAME_COUNTDOWN in the constants block. The flow
-// for a fresh multiplayer match is:
-//
-//   1. Player commits ship -> commitLoadout runs (world build, etc.)
-//   2. End of commitLoadout calls _signalWorldReady()
-//   3. _signalWorldReady hides ship-select, shows the loading overlay,
-//      broadcasts world_ready to peers, starts the 10 s timeout, and
-//      calls _checkAllPeersReady
-//   4. handleNetEvent('world_ready') sets peer.worldReady on receipt
-//      and calls _checkAllPeersReady on every receive
-//   5. _checkAllPeersReady : if every peer's worldReady plus our own
-//      localReady are true, the proposer (lowest peerId) broadcasts
-//      launch_at and calls scheduleLaunch ; non-proposers wait for the
-//      launch_at event in handleNetEvent
-//   6. scheduleLaunch's setTimeout fires _startIngameCountdown (instead
-//      of the legacy ship-select launchCountdown) because the
-//      net.useIngameCountdown flag was set by _signalWorldReady
-//   7. _startIngameCountdown anchors warmupTimer to INGAME_COUNTDOWN so
-//      the existing in-world Overlays.countdown(3/2/1) fires naturally
-//      via the warmup state's per-frame tick at line ~30312
-//
-// Mid-match round transitions and solo mode bypass this entirely ; they
-// continue to use the original checkAllLoadoutsReady -> scheduleLaunch
-// -> launchCountdown ship-select 3-2-1 path. useIngameCountdown gates
-// which branch scheduleLaunch's setTimeout dispatches.
-
-function _showLoadingOverlay(subtitle) {
-  const el = document.getElementById('lss-loading-overlay');
-  if (!el) return;
-  if (subtitle) {
-    const sub = document.getElementById('lss-loading-sub');
-    if (sub) sub.textContent = subtitle;
-  }
-  el.classList.add('active');
-}
-
-function _hideLoadingOverlay() {
-  const el = document.getElementById('lss-loading-overlay');
-  if (el) el.classList.remove('active');
-}
-
-function _signalWorldReady() {
-  if (!net.active) return; // solo bypasses the handshake entirely
-  net.useIngameCountdown = true;
-  // Hide ship-select immediately so the player isn't watching a static
-  // panel ; the loading overlay covers the warmup world behind it.
-  try {
-    const sel = document.getElementById('ship-select');
-    if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
-  } catch (_) {}
-  try { if (typeof stopShipPreviewLoop === 'function') stopShipPreviewLoop(); } catch (_) {}
-  _showLoadingOverlay('loading the arena');
-
-  // Already signaled (e.g. a mid-countdown ship swap re-entered
-  // commitLoadout) ; don't re-broadcast or restart the timeout.
-  if (net.localReady) {
-    _checkAllPeersReady();
-    return;
-  }
-  net.localReady = true;
-
-  if (net.sendEvent) {
-    try { net.sendEvent({ type: 'world_ready' }); } catch (_) {}
-  }
-
-  // Safety net : if the handshake doesn't converge inside READY_TIMEOUT
-  // seconds, broadcast match_abort and return every peer (including us)
-  // to ship-select. Without this, a peer that crashes after sending its
-  // own world_ready, or a peer whose connection silently dies, would
-  // leave the rest of the lobby staring at the loading screen forever.
-  if (net.readyTimeoutHandle) clearTimeout(net.readyTimeoutHandle);
-  net.readyTimeoutHandle = setTimeout(() => {
-    net.readyTimeoutHandle = null;
-    if (net.sendEvent) {
-      try { net.sendEvent({ type: 'match_abort', reason: 'ready_timeout' }); } catch (_) {}
-    }
-    _abortMatchToShipSelect('Some pilots failed to load. Try again.');
-  }, (LSS.READY_TIMEOUT || 10) * 1000);
-
-  _checkAllPeersReady();
-}
-
-function _checkAllPeersReady() {
-  if (!net.active || !net.localReady) return;
-  // Wait until every connected peer has reported in. Peers that joined
-  // mid-handshake without a loadout don't count (their worldReady stays
-  // false but we never started waiting for them). If we want stricter
-  // semantics later, gate this on peer.loadoutKey too.
-  for (const peer of net.peers.values()) {
-    if (!peer.worldReady) return;
-  }
-  // Everyone's loaded. Cancel the safety-net timeout.
-  if (net.readyTimeoutHandle) {
-    clearTimeout(net.readyTimeoutHandle);
-    net.readyTimeoutHandle = null;
-  }
-  // Already scheduled ; don't propose twice.
-  if (net.launchScheduledAt) return;
-
-  // Lowest peerId proposes ; everyone else waits for launch_at. 1.5 s
-  // buffer matches the legacy ship-select handshake so the existing
-  // clock-skew-proof launch_at handler stays compatible.
-  const allIds = [net.myPeerId, ...net.peers.keys()].sort();
-  if (allIds[0] === net.myPeerId) {
-    const launchAt = Date.now() + 1500;
-    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt, now: Date.now() });
-    scheduleLaunch(launchAt);
-  }
-}
-
-function _startIngameCountdown() {
-  _hideLoadingOverlay();
-  // Ship-select might still be visible if we're on the non-proposer path
-  // that took the legacy route ; force-hide just in case.
-  try {
-    const sel = document.getElementById('ship-select');
-    if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
-  } catch (_) {}
-  try { if (typeof stopShipPreviewLoop === 'function') stopShipPreviewLoop(); } catch (_) {}
-  // Pointer lock only when not in VR ; XR sessions own their own input.
-  try {
-    if (typeof renderer === 'undefined' || !renderer.xr || !renderer.xr.isPresenting) {
-      if (typeof _safeRequestPointerLock === 'function') _safeRequestPointerLock();
-    }
-  } catch (_) {}
-  // Anchor warmupTimer so the existing warmup-state tick at line ~30312
-  // fires Overlays.countdown(3 / 2 / 1) on the right frames and then
-  // transitions to game.state = 'playing'. We pick 3.5 s (not exactly 3)
-  // so prev > 3 holds true on the first frame after the anchor.
-  if (typeof _anchorTimer === 'function') {
-    _anchorTimer('warmupTimer', LSS.INGAME_COUNTDOWN || 3.5);
-  } else if (typeof game !== 'undefined') {
-    game.warmupTimer = LSS.INGAME_COUNTDOWN || 3.5;
-  }
-  // Reset for the next match cycle. Per-peer worldReady cleared too so
-  // a between-rounds re-commit (if we ever hook it into this path) isn't
-  // pre-acked from the last round.
-  net.useIngameCountdown = false;
-  net.localReady = false;
-  for (const peer of net.peers.values()) peer.worldReady = false;
-}
-
-function _abortMatchToShipSelect(reason) {
-  // Tear down any in-flight launch state and bring the player back to
-  // ship-select. Called by both the local timeout path and the match_abort
-  // network event handler.
-  if (net.launchTimer)        { clearTimeout(net.launchTimer); net.launchTimer = null; }
-  if (net.launchRebroadcast)  { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
-  if (net.readyTimeoutHandle) { clearTimeout(net.readyTimeoutHandle); net.readyTimeoutHandle = null; }
-  net.launchScheduledAt = null;
-  net.lastLaunchId = null;
-  net.useIngameCountdown = false;
-  net.localReady = false;
-  for (const peer of net.peers.values()) peer.worldReady = false;
-  _syncMapButtonsDisabled();
-  _hideLoadingOverlay();
-  // Re-show ship-select. Loadout selection state is preserved so the
-  // player can click confirm again to retry without re-picking.
-  try {
-    const sel = document.getElementById('ship-select');
-    if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
-    if (typeof buildShipSelect === 'function') buildShipSelect();
-    if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
-  } catch (_) {}
-  if (reason) {
-    try {
-      const status = document.getElementById('lobby-status');
-      if (status) { status.textContent = reason; status.style.color = '#ff8866'; }
-    } catch (_) {}
-  }
-}
-
 function scheduleLaunch(launchAt) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
@@ -5614,15 +5423,7 @@ function scheduleLaunch(launchAt) {
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
-    // (readiness 2026-05) Dispatch : fresh-multiplayer-match readiness
-    // flow uses the new in-game 3-2-1 ; everything else (mid-match round
-    // transitions in multiplayer, plus any legacy caller) keeps the
-    // ship-select launchCountdown for backward compat.
-    if (net.useIngameCountdown) {
-      _startIngameCountdown();
-    } else {
-      launchCountdown();
-    }
+    launchCountdown();
   }, delay);
 }
 
@@ -6227,19 +6028,6 @@ function _tickTimer(name) {
 // average, those transitions land at roughly the same wall-clock moment.
 function broadcastGameSync(dt) {
   if (!net.active || !net.sendEvent) return;
-  // (readiness 2026-05) Suspend game-sync broadcast + consensus while the
-  // readiness handshake is in flight. The fresh-multiplayer path parks
-  // warmupTimer at a large safety value (300 s) until _startIngameCountdown
-  // anchors it to INGAME_COUNTDOWN ; if one peer crosses that transition
-  // before the other, consensus averaging would blend their 3.5 s with
-  // the other peer's 300 s and pull both back up to ~150 s, leaving them
-  // stuck while the round timer ticks behind the loading overlay. We
-  // gate on useIngameCountdown being true AND launchScheduledAt being
-  // null, which is precisely the "world built, waiting for peers / for
-  // launch_at" window. Once scheduleLaunch sets launchScheduledAt the
-  // launch is imminent and the two peers will fire _startIngameCountdown
-  // within milliseconds of each other ; safe to resume.
-  if (net.useIngameCountdown && !net.launchScheduledAt) return;
   net.gameSyncAccum += dt;
   if (net.gameSyncAccum < 1 / net.gameSyncHz) return;
   net.gameSyncAccum = 0;
@@ -6502,22 +6290,6 @@ function handleNetEvent(evt, fromPeerId) {
       }
       scheduleMatchStart(evt.startAt);
     }
-    return;
-  }
-  // (readiness 2026-05) A peer reports its world build (and async asset
-  // loads, best-effort) is done. Mark them ready and re-check ; once
-  // every peer plus us are ready, the proposer broadcasts launch_at.
-  if (evt.type === 'world_ready') {
-    const peer = net.peers.get(fromPeerId);
-    if (peer) peer.worldReady = true;
-    _checkAllPeersReady();
-    return;
-  }
-  // (readiness 2026-05) A peer (or its local timeout) bailed on the
-  // current match start. Tear down our pending launch and return to
-  // ship-select so everyone can re-commit and retry.
-  if (evt.type === 'match_abort') {
-    _abortMatchToShipSelect('Another pilot dropped during load. Try again.');
     return;
   }
   // (v6.7) Synced ship-select launch from the lowest-peerId proposer.
@@ -25753,21 +25525,10 @@ function commitLoadout(key) {
   // bots become live behind the scenes while the player is still ticking
   // down to LAUNCH. Only seed the warmup timer when no countdown is already
   // running; swapping ships mid-countdown must not reset either clock.
-  // (readiness 2026-05) Fresh-multiplayer-match path : skip the 10 s
-  // anchor entirely because the readiness handshake might take longer
-  // than LAUNCH_COUNTDOWN, which would let the warmup tick down to 0,
-  // flip game.state to 'playing', and start the round behind the loading
-  // overlay. Anchor to a large value (300 s) as a safety ceiling ;
-  // _startIngameCountdown re-anchors to INGAME_COUNTDOWN when the
-  // handshake actually fires.
   if (!_countdownActive) {
     // (v11d) Anchor to wall-clock so the launch countdown ticks at real
     // rate even if the user alt-tabs during ship-select.
-    if (net.active && !midMatch) {
-      _anchorTimer('warmupTimer', 300);
-    } else {
-      _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
-    }
+    _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
   }
   // Refresh the teammates strip so the newly committed ship shows up as YOU's pick.
   updateTeammatesStrip();
@@ -25780,20 +25541,9 @@ function commitLoadout(key) {
   // launchAt timestamp once every peer has committed, and every peer fires
   // launchCountdown() at that wall-clock moment so the 3-2-1-LAUNCH sequence
   // is in lockstep across the mesh. In solo mode, launch immediately as before.
-  // (readiness 2026-05) Fresh-match multiplayer routes through the new
-  // world-ready handshake : the loading overlay covers the warp-in until
-  // every peer reports their world build is done (or READY_TIMEOUT
-  // elapses), then the in-game 3-2-1 fires from the warmup-state tick.
-  // Mid-match round transitions stay on the legacy ship-select countdown
-  // path because the world is already built and the existing flow is
-  // already proven there.
   if (net.active) {
     showShipSelectWaiting();
-    if (!midMatch) {
-      _signalWorldReady();
-    } else {
-      checkAllLoadoutsReady();
-    }
+    checkAllLoadoutsReady();
   } else {
     launchCountdown();
   }
