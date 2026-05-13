@@ -6234,6 +6234,30 @@ function handleHitVote(vote, fromPeerId) {
 function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'kill') {
     addKillFeed(evt.killerName || 'Peer', evt.victimName || 'Peer');
+    // (kills 2026-05) Credit the killer's kill counter. The dying peer
+    // broadcasts the kill event with killerPeerId set to whoever
+    // landed the killing blow. If that's us, bump player.kills so the
+    // scoreboard reflects multiplayer kills (previously it was always
+    // 0 in multiplayer because no code path incremented player.kills
+    // when a NetworkPlayer died ; the local Bot.die path that does
+    // player.kills++ doesn't run when there are no bots in the match).
+    // Also bumps coreMeter and fires the kill marker / multikill chain
+    // mirroring the bot-kill branch in Bot.die so the player gets the
+    // same UI / audio feedback for a PVP kill as a PVE kill.
+    if (evt.killerPeerId && evt.killerPeerId === net.myPeerId) {
+      player.kills = (player.kills | 0) + 1;
+      player.coreMeter = Math.min(100, (player.coreMeter || 0) + 15);
+      try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
+      try {
+        if (typeof triggerHitFeedback === 'function') {
+          const _now = (typeof game !== 'undefined') ? game.time : 0;
+          const isMK = player._lastKillTime != null && (_now - player._lastKillTime) <= 4.0;
+          triggerHitFeedback({ weight: isMK ? 'multikill' : 'kill' });
+          player._lastKillTime = _now;
+        }
+      } catch (_) {}
+      try { if (typeof musicOnKill === 'function') musicOnKill('player'); } catch (_) {}
+    }
     // (v6.7) Brief screen-shake punch on every kill so the moment registers
     // even when you're not in the camera frame. Stronger when you killed
     // (or were killed by) the named participants is a future polish; this
