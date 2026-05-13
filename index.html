@@ -467,14 +467,14 @@ body.vr-active .hit-marker {
   display: none; gap: 6px; z-index: 30; pointer-events: none;
 }
 
-/* Ability pie: small four-quarter SOLID disk (no center hole) that overlays
-   the painted blue radar-like circle at the bottom-center of every cockpit
-   frame PNG. Each quarter is one ability slot (top=Q, right=E, bottom=F,
-   left=V/core), filled with a color that reflects state ; recharging fades
-   from red toward green, full ready is solid green, active-now is gold.
-   Anchored to the BOTTOM of the viewport (not vertical center) because the
-   painted radar in the cockpit art lives near the bottom. */
+/* (v16a Phase EE) Bottom-center ability pie disabled. The three-bar
+   ability indicator that replaces it is drawn directly onto the
+   circumpunct-hud canvas (see drawCircumpunctHUD), positioned at the
+   shield arc's three major tick marks (left/top/right). The SVG DOM
+   still exists for back-compat with any code that references the
+   slots, but it never renders. */
 #ability-pie {
+  display: none !important;
   position: fixed;
   left: 50%; bottom: 0;
   transform: translateX(-50%);
@@ -16912,6 +16912,38 @@ class Projectile {
       this.destroy(); return;
     }
 
+    // (v16a Phase FF) Drop the camera-facing tube ribbon for projectiles
+    // that paint a smoke trail. The smoke puffs already carry the trail
+    // visual, and the ribbon was reading as a flat 2D streak laid over
+    // them — redundant and visually flatter than the volumetric smoke.
+    // smokeTrail is set AFTER construction at the spawn site, so we
+    // detect it here on the first update tick and tear the ribbon down
+    // once ; subsequent ticks short-circuit because this.trailRibbon is
+    // null. The trail BUFFER positions stay alive because the ribbon
+    // builder also reads them ; they were free-standing already.
+    if (this.smokeTrail && this.trailRibbon) {
+      if (this.trailRibbon.parent) scene.remove(this.trailRibbon);
+      if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
+      if (this.trailRibbon.material) this.trailRibbon.material.dispose();
+      this.trailRibbon = null;
+      this.trailRibbonPositions = null;
+    }
+
+    // (v16a Phase HH) Drop the bright pinpoint "core" sphere on Salvo
+    // Core missiles. The Projectile constructor creates a small
+    // SphereGeometry(2.2, 8, 6) MeshBasicMaterial with additive
+    // blending — at 8 simultaneous missiles this reads as a cluster
+    // of flat 2D dots stamped on the screen. The proj_glow halo and
+    // the smoke trail already give salvoGuided missiles all the
+    // presence they need, so we strip the core here. Same first-tick
+    // dispose pattern as the trail-ribbon tear-down above.
+    if (this.salvoGuided && this.mesh) {
+      if (this.mesh.parent) scene.remove(this.mesh);
+      if (this.mesh.geometry) this.mesh.geometry.dispose();
+      if (this.mesh.material) this.mesh.material.dispose();
+      this.mesh = null;
+    }
+
     // (v14c) Smoke-trail emission. Heavy projectiles (Pyro main, Tracker
     // main + tracking missiles, Puncture cluster missile, Syphon rocket
     // salvo) opt in via this.smokeTrail = true. Each puff is a short-lived
@@ -17024,7 +17056,9 @@ class Projectile {
     // Both reuse module-level scratches.
     const prevPos = _projPrev.copy(this.position);
     this.position.add(_projStep.copy(this.velocity).multiplyScalar(dt));
-    this.mesh.position.copy(this.position);
+    // (v16a Phase HH) this.mesh can be null on salvoGuided missiles
+    // (we strip the bright pinpoint core for that path) so null-check.
+    if (this.mesh) this.mesh.position.copy(this.position);
 
     // Fire projectiles ignite gas clouds as they fly through (not just on splash).
     // Radius 150 ensures a fast-moving round passing near the cloud edge reliably
@@ -17300,7 +17334,10 @@ class Projectile {
         // (v9) Sonar beacon: lands on the wall, spawns a sonar pulse, gone.
         if (this.isSonar) {
           this.position.copy(hitPoint);
-          this.mesh.position.copy(hitPoint);
+          // (v16a Phase HH) Null-check : salvoGuided strips core mesh.
+          // Sonar beacons aren't salvoGuided so this is hygiene rather
+          // than a real bug, but cheap to be safe.
+          if (this.mesh) this.mesh.position.copy(hitPoint);
           if (typeof _spawnSonarPulse === 'function') _spawnSonarPulse(hitPoint, this.owner);
           this.destroy();
           return;
@@ -17311,7 +17348,9 @@ class Projectile {
 
         if (shouldExplode) {
           this.position.copy(hitPoint);
-          this.mesh.position.copy(hitPoint);
+          // (v16a Phase HH) Null-check : salvoGuided missiles strip the
+          // core mesh on first update tick.
+          if (this.mesh) this.mesh.position.copy(hitPoint);
           if (this.isCluster) this.spawnClusterChildren();
           if (this.splash > 0) this.splashDamage();
           spawnImpactSparks(hitPoint, 8);
@@ -17330,7 +17369,9 @@ class Projectile {
           this.velocity.addScaledVector(normal, -2 * vn);
           this.velocity.multiplyScalar(this.isFireSource ? 0.75 : 0.5); // energy loss
           this.position.copy(hitPoint).addScaledVector(normal, 3);
-          this.mesh.position.copy(this.position);
+          // (v16a Phase HH) Null-check for salvoGuided missiles which have
+          // their core mesh stripped.
+          if (this.mesh) this.mesh.position.copy(this.position);
           spawnImpactSparks(hitPoint, 4);
         }
       }
@@ -17397,7 +17438,8 @@ class Projectile {
         }
         spawnImpactSparks(intersect, 6);
         this.position.copy(intersect);
-        this.mesh.position.copy(intersect);
+        // (v16a Phase HH) Null-check : salvoGuided strips core mesh.
+        if (this.mesh) this.mesh.position.copy(intersect);
         this.destroy();
         return;
       }
@@ -31485,6 +31527,116 @@ function drawCircumpunctHUD() {
     ctx.moveTo(cx + Math.cos(angle) * inner, cy + Math.sin(angle) * inner);
     ctx.lineTo(cx + Math.cos(angle) * outer, cy + Math.sin(angle) * outer);
     ctx.stroke();
+  }
+
+  // ---- LAYER 2b: ABILITY CHARGE BARS (v16a Phase EE) ----
+  // Replaces the bottom-center ability pie. Three small charge bars
+  // sit just outside the shield arc's three major tick marks (left at
+  // i=0, top at i=5, right at i=10) and fill with green as each
+  // ability cools down. Active-now flips to amber. Mapping :
+  //   top tick   → Q  (abilities[0])
+  //   right tick → E  (abilities[1])
+  //   left tick  → F  (abilities[2])
+  // Bars are tangent to the arc (perpendicular to the radius) so the
+  // visual reads as "the existing tick has charged up into a bar."
+  const _abilityBars = [
+    { tickI: 5,  slot: 0, key: 'Q' },
+    { tickI: 10, slot: 1, key: 'E' },
+    { tickI: 0,  slot: 2, key: 'F' },
+  ];
+  const barOuter = r2 + 26;   // distance from center where bar lives
+  const barWidth = 60;        // tangential length
+  const barThick = 5;         // radial thickness
+  for (const bar of _abilityBars) {
+    const ab = player.abilities && player.abilities[bar.slot];
+    if (!ab) continue;
+    const cd = (player.abilityCooldowns && player.abilityCooldowns[bar.slot]) || 0;
+    const isActive = player.abilityActive && player.abilityActive[bar.slot];
+    const dur = ab.cooldown || 1;
+    const ready = cd <= 0;
+    let fillPct;
+    if (isActive)     fillPct = 1;
+    else if (ready)   fillPct = 1;
+    else              fillPct = Math.max(0, Math.min(1, 1 - cd / dur));
+
+    const angle = shieldArcStart + shieldArcSpan * (bar.tickI / 10);
+    const ax = Math.cos(angle), ay = Math.sin(angle);
+    // Tangent direction (90° CCW from radius) for bar orientation.
+    const tx = -ay, ty = ax;
+    const bcx = cx + ax * barOuter;
+    const bcy = cy + ay * barOuter;
+    const x1 = bcx - tx * barWidth / 2;
+    const y1 = bcy - ty * barWidth / 2;
+    const x2 = bcx + tx * barWidth / 2;
+    const y2 = bcy + ty * barWidth / 2;
+
+    // Background (empty bar track).
+    ctx.strokeStyle = white + '0.15)';
+    ctx.lineWidth = barThick;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.stroke();
+
+    // Fill : green when ready, amber when actively running, dim green
+    // when partially charged. Glow only on full / active so charging
+    // bars don't compete with health glow for attention.
+    let fillCol;
+    if (isActive)     fillCol = amber + '0.95)';
+    else if (ready)   fillCol = green + '0.90)';
+    else              fillCol = green + '0.40)';
+    const xfill = x1 + (x2 - x1) * fillPct;
+    const yfill = y1 + (y2 - y1) * fillPct;
+    ctx.save();
+    if (ready || isActive) {
+      ctx.shadowColor = fillCol;
+      ctx.shadowBlur = 8;
+    }
+    ctx.strokeStyle = fillCol;
+    ctx.lineWidth = barThick;
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(xfill, yfill);
+    ctx.stroke();
+    ctx.restore();
+    ctx.lineCap = 'butt';
+
+    // Key label (Q/E/F) outside the bar so the player can confirm
+    // which slot is firing without parsing color alone.
+    const labelOuter = barOuter + 18;
+    const lx = cx + ax * labelOuter;
+    const ly = cy + ay * labelOuter;
+    ctx.fillStyle = (ready || isActive) ? white + '0.92)' : white + '0.55)';
+    hudFont('700 12px Orbitron, Courier New');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(bar.key, lx, ly);
+  }
+
+  // ---- LAYER 2c: CORE READY INDICATOR (v16a Phase EE) ----
+  // Yellow "CORE" text appears only when the core meter is full and
+  // the core isn't already running. Positioned at the bottom gap of
+  // the inner health ring — the ring sweeps from ~7 o'clock CW to ~5
+  // o'clock leaving a wedge open at 6 o'clock, which frames this
+  // text cleanly between the two segment endpoints. Hidden when
+  // charging or already running so it doesn't take permanent
+  // real estate.
+  const _corePct = Math.min(100, (player.coreMeter || 0));
+  if (_corePct >= 100 && !player.coreActive) {
+    const pulse = 0.75 + 0.25 * Math.sin(t * 4.5);
+    ctx.save();
+    ctx.shadowColor = amber + '0.85)';
+    ctx.shadowBlur = 12 * pulse;
+    ctx.fillStyle = amber + (0.85 * pulse + 0.10).toFixed(2) + ')';
+    hudFont('700 18px Orbitron, Courier New');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // Center the text in the gap at the bottom of the health ring.
+    // r1 is the health ring radius ; placing the text right at r1
+    // sits it between the two arc endpoints with the open wedge
+    // framing it. The existing health number lives at cy + r1 + 24
+    // (below the ring) so this slot is otherwise empty.
+    ctx.fillText('CORE', cx, cy + r1);
+    ctx.restore();
   }
 
   // ---- LAYER 3: SPEED ARC (left side) ----
