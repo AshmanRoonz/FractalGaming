@@ -5388,12 +5388,15 @@ function checkAllLoadoutsReady() {
   const proposer = allIds[0];
   if (proposer === net.myPeerId) {
     const launchAt = Date.now() + 1500;
-    // (perf 2026-05) Include our local clock so the receiver can compute
-    // a relative duration (launchAt - now) instead of trusting that both
-    // machines' wall clocks agree. Windows time sync runs ~once a day and
-    // routinely drifts by hundreds of ms ; cross-machine multiplayer used
-    // to fire 3-2-1-LAUNCH at different real-time moments on each peer.
-    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt, now: Date.now() });
+    // (launch-sync 2026-05) Plain launchAt only ; the receiver uses
+    // absolute-clock scheduling (delay = launchAt - now, clamped to 0)
+    // which handles late-receipt correctly. An earlier attempt to send
+    // `now` and have the receiver compute a relative duration broke the
+    // late-receipt case (commitLoadout blocking the JS thread for 2 s
+    // queued the launch_at message ; relative duration then scheduled
+    // a fresh 1500 ms wait from receipt instead of firing immediately
+    // to catch up).
+    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt });
     scheduleLaunch(launchAt);
   }
   // Non-proposers wait for the launch_at event in handleNetEvent.
@@ -5422,10 +5425,9 @@ function scheduleLaunch(launchAt) {
     const allIds = [net.myPeerId, ...net.peers.keys()].sort();
     if (allIds[0] === net.myPeerId) {
       net.launchRebroadcast = setInterval(() => {
-        // (perf 2026-05) Re-send launchAt with a FRESH `now` each tick so
-        // the receiver, after dedupe by launchAt, can compute a relative
-        // duration from the retry it actually received first.
-        try { net.sendEvent({ type: 'launch_at', launchAt, now: Date.now() }); } catch (_) {}
+        // (launch-sync 2026-05) Plain launchAt re-broadcast ; receiver
+        // dedupes by launchAt and computes delay against its own clock.
+        try { net.sendEvent({ type: 'launch_at', launchAt }); } catch (_) {}
       }, 150);
     }
   }
@@ -6352,26 +6354,28 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   // (v6.7) Synced ship-select launch from the lowest-peerId proposer.
-  // (perf 2026-05) Clock-skew tolerant : interpret launchAt as a duration
-  // relative to the proposer's send-time, then schedule that duration
-  // off OUR local clock. evt.launchAt acts as the de-duplication key for
-  // the proposer's 150ms re-broadcast loop ; we schedule on the first
-  // packet we ever see for a given launchAt, and ignore subsequent
-  // duplicates so the retry doesn't keep resetting the timer.
+  // (launch-sync 2026-05) Use absolute-clock scheduling : pass launchAt
+  // straight to scheduleLaunch and let it compute delay = launchAt - now.
+  // The earlier relative-duration approach (delay = evt.launchAt - evt.now
+  // = always 1500ms) introduced a serious bug when the receiver was
+  // mid-commitLoadout : the inbound launch_at message would queue while
+  // the JS thread was blocked by the world build, and when commitLoadout
+  // finished and the handler finally ran, the receiver would schedule a
+  // FRESH 1500ms wait instead of firing immediately to catch up. A 2 s
+  // commit on the laptop turned into a 3.5 s lag behind the desktop's
+  // visible 3-2-1. Absolute clocks handle the late-receipt case
+  // naturally : delay clamps to 0 in scheduleLaunch and the receiver
+  // fires on the next tick. The cost is a small clock-skew bias (peers
+  // whose Windows clocks differ by N ms will see countdowns ~N ms apart)
+  // but typical NTP sync keeps that under ~500 ms, which is invisible
+  // alongside the 10 s visible countdown.
   if (evt.type === 'launch_at' && typeof evt.launchAt === 'number') {
     const allIds = [net.myPeerId, ...net.peers.keys()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && player.loadoutKey) {
       if (net.lastLaunchId === evt.launchAt) return; // duplicate retry
       net.lastLaunchId = evt.launchAt;
-      // Remaining duration in the proposer's frame. Falls back to the
-      // absolute-clock interpretation if the proposer is on an older
-      // build that doesn't send `now` (won't happen in lockstep deploys
-      // but cheap to keep).
-      const remaining = (typeof evt.now === 'number')
-        ? (evt.launchAt - evt.now)
-        : (evt.launchAt - Date.now());
-      scheduleLaunch(Date.now() + Math.max(0, remaining));
+      scheduleLaunch(evt.launchAt);
     }
     return;
   }
@@ -32069,30 +32073,48 @@ function drawCircumpunctHUD() {
     ctx.fillText(bar.key, lx, ly);
   }
 
-  // ---- LAYER 2c: CORE READY INDICATOR (v16a Phase EE) ----
-  // Yellow "CORE" text appears only when the core meter is full and
-  // the core isn't already running. Positioned at the bottom gap of
-  // the inner health ring — the ring sweeps from ~7 o'clock CW to ~5
-  // o'clock leaving a wedge open at 6 o'clock, which frames this
-  // text cleanly between the two segment endpoints. Hidden when
-  // charging or already running so it doesn't take permanent
-  // real estate.
+  // ---- LAYER 2c: CORE CHARGE BAR (2026-05 retune) ----
+  // Replaces the legacy yellow "CORE" text that only appeared when full.
+  // A continuous yellow charge bar now sits in the gap at the bottom of
+  // the inner health ring (where the ring's arc leaves a wedge open at
+  // 6 o'clock between the ~7 and ~5 o'clock segment endpoints). The bar
+  // shows live coreMeter fill 0-100%, pulses softly when full and not
+  // yet spent, and hides while the core is actively firing (the slot
+  // visualization in the bottom ability HUD already shows the duration
+  // bar at that point).
   const _corePct = Math.min(100, (player.coreMeter || 0));
-  if (_corePct >= 100 && !player.coreActive) {
-    const pulse = 0.75 + 0.25 * Math.sin(t * 4.5);
+  if (!player.coreActive) {
+    const barW = 96;        // total width of the bar background
+    const barH = 6;         // height
+    const barX = cx - barW / 2;
+    const barY = cy + r1 - barH / 2;
+    const fillPct = _corePct / 100;
+    const ready = _corePct >= 100;
+    const pulse = ready ? (0.75 + 0.25 * Math.sin(t * 4.5)) : 1.0;
+
     ctx.save();
-    ctx.shadowColor = amber + '0.85)';
-    ctx.shadowBlur = 12 * pulse;
-    ctx.fillStyle = amber + (0.85 * pulse + 0.10).toFixed(2) + ')';
-    hudFont('700 18px Orbitron, Courier New');
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // Center the text in the gap at the bottom of the health ring.
-    // r1 is the health ring radius ; placing the text right at r1
-    // sits it between the two arc endpoints with the open wedge
-    // framing it. The existing health number lives at cy + r1 + 24
-    // (below the ring) so this slot is otherwise empty.
-    ctx.fillText('CORE', cx, cy + r1);
+    // Background : faint dark track so the empty portion still reads as
+    // "this slot exists".
+    ctx.fillStyle = 'rgba(20,30,45,0.55)';
+    ctx.fillRect(barX, barY, barW, barH);
+    // Border : subtle amber outline so the bar carries the same color
+    // language as the core ability slot in the bottom HUD.
+    ctx.strokeStyle = 'rgba(255,210,40,0.45)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(barX - 0.5, barY - 0.5, barW + 1, barH + 1);
+    // Fill : yellow gradient, fully opaque when ready (and pulsing),
+    // softer while charging.
+    if (fillPct > 0) {
+      const gradient = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+      gradient.addColorStop(0, 'rgba(255,210,40,' + (ready ? (0.95 * pulse).toFixed(2) : '0.80') + ')');
+      gradient.addColorStop(1, 'rgba(255,235,90,' + (ready ? (0.95 * pulse).toFixed(2) : '0.85') + ')');
+      ctx.fillStyle = gradient;
+      if (ready) {
+        ctx.shadowColor = 'rgba(255,210,40,0.85)';
+        ctx.shadowBlur = 10 * pulse;
+      }
+      ctx.fillRect(barX, barY, barW * fillPct, barH);
+    }
     ctx.restore();
   }
 
