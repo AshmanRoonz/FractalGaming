@@ -6859,18 +6859,25 @@ function handleNetEvent(evt, fromPeerId) {
       const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
       const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
       spawnFlameChainVisual(pos, dir, evt.length || 800, evt.team, evt.ownerPeerId, evt.netId);
-    } else if (evt.kind === 'slayer_core_charge') {
-      // Peer started SLAYER Mega Stun Bolt charge-up. Replicate the
-      // initial green-lightning telegraph ring + the 0.6 s crackle FX
-      // worldEffect at the broadcast position so every client sees it.
-      const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+    }
+    return;
+  }
+  // SLAYER Mega Stun Bolt charge-up telegraph from a peer. Same shape as
+  // the 'lightning' / 'pellet_burst' / 'dash_burst' top-level events :
+  // fire-and-forget visual, no netId required. The helper plants the
+  // initial six-bolt ring + the 0.6 s crackle worldEffect at evt.position.
+  if (evt.type === 'slayer_core_charge' && typeof evt.px === 'number') {
+    const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+    if (typeof _spawnSlayerCoreChargeTelegraph === 'function') {
       _spawnSlayerCoreChargeTelegraph(pos);
-    } else if (evt.kind === 'slayer_core_detonate') {
-      // Peer's SLAYER Mega Stun Bolt detonated. Replicate the green-plasma
-      // detonation : oversized explosion at the broadcast position + the
-      // 18-bolt outward ring marking the 600-unit reach. Damage is applied
-      // by the caster's client ; this is the visual companion.
-      const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+    }
+    return;
+  }
+  // SLAYER Mega Stun Bolt detonation from a peer. Helper spawns the
+  // oversized explosion + the 18-bolt outward ring at evt.position.
+  if (evt.type === 'slayer_core_detonate' && typeof evt.px === 'number') {
+    const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+    if (typeof _spawnSlayerCoreDetonationFX === 'function') {
       _spawnSlayerCoreDetonationFX(pos);
     }
     return;
@@ -28810,14 +28817,10 @@ function activateCore() {
     try { playSound('sword_core_swing'); } catch (_) {}
     _spawnSlayerCoreChargeTelegraph(player.position);
     if (net.active && net.sendEvent) {
-      // netId is required by the effect_spawn dispatcher's outer guard
-      // (typeof evt.netId === 'number'). These FX are one-shots with no
-      // matching effect_destroy event, but they still need a unique id
-      // to pass the guard and reach the slayer_core_charge branch.
+      // Top-level fire-and-forget event, same shape as 'lightning' /
+      // 'pellet_burst' / 'dash_burst' ; no netId, no effect_destroy follow-up.
       net.sendEvent({
-        type: 'effect_spawn', kind: 'slayer_core_charge',
-        netId: ++net.effectIdCounter,
-        ownerPeerId: net.myPeerId, team: player.team,
+        type: 'slayer_core_charge',
         px: player.position.x, py: player.position.y, pz: player.position.z,
       });
     }
@@ -30168,12 +30171,10 @@ function updateAbilities(dt) {
           }
           _spawnSlayerCoreDetonationFX(player.position);
           if (net.active && net.sendEvent) {
-            // netId required by the effect_spawn dispatcher's outer guard ;
-            // see slayer_core_charge broadcast for the rationale.
+            // Top-level fire-and-forget event ; matches the slayer_core_charge
+            // broadcast on the activation side.
             net.sendEvent({
-              type: 'effect_spawn', kind: 'slayer_core_detonate',
-              netId: ++net.effectIdCounter,
-              ownerPeerId: net.myPeerId, team: player.team,
+              type: 'slayer_core_detonate',
               px: player.position.x, py: player.position.y, pz: player.position.z,
             });
           }
