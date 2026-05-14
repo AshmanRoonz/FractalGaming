@@ -10536,7 +10536,15 @@ class GasCloud {
   }
 }
 
-const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 4096 });
+// (v16b) Pool bumped 4096 → 8192. On bigger maps (v8engine2, etc) the
+// cluster atom smokes (~17 sprites each × ~10 clusters × ~7 atoms ≈
+// 1200 slots) plus basin clouds (~127 × 12 ≈ 1500) plus per-frame
+// projectile smoke trails were exceeding 4096, which silently caused
+// later GasCloud constructors to claim zero slots (the constructor
+// bails on first claimSlot() returning -1). Symptom : basin clouds
+// would log as spawned in detachedGasPockets but be visually empty.
+// Doubling the pool costs ~256 KB of GPU buffer memory ; well worth it.
+const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 8192 });
 
 // (v14e wakes) Push wake impulses from active wake sources (player +
 // other ships + projectiles) into nearby gas clouds, then decay each
@@ -21602,6 +21610,18 @@ function _spawnBasinClouds() {
       const dbx = cyl.bx - sphere.cx, dby = cyl.by - sphere.cy, dbz = cyl.bz - sphere.cz;
       const distA2 = dax*dax + day*day + daz*daz;
       const distB2 = dbx*dbx + dby*dby + dbz*dbz;
+      // (v16b basin fix) Require the cylinder to actually CONNECT to this
+      // sphere : at least one endpoint must be inside (or within a small
+      // tolerance of) the sphere. Without this check, a tunnel connecting
+      // two OTHER distant spheres whose nearer endpoint happened to slope
+      // downward away from this sphere's center wrongly flagged this
+      // sphere as drained. That explains why basin clouds appeared to do
+      // nothing on most maps — almost every sphere picked up some
+      // unrelated downward-sloping tunnel as a false "drain". Tolerance
+      // 1.1× radius gives a little slop for tunnels that attach just at
+      // the surface of the sphere.
+      const tolR2 = r2 * 1.21;
+      if (distA2 > tolR2 && distB2 > tolR2) continue;
       // Pick the endpoint closer to the sphere center as the "attached" end.
       // The exit direction is from sphere center toward the far endpoint.
       let farDX, farDY, farDZ;
@@ -21707,8 +21727,17 @@ function _spawnBasinClouds() {
   }
   // Debug : log basin/drain counts so we can tell if the detection is
   // matching the level's geometry as expected. Remove later if too noisy.
+  // (v16b) Also report the total slot count claimed across all basin
+  // clouds. If this is way less than (basin clouds × ~12 segments), the
+  // BCS pool was exhausted by earlier consumers (cluster atom smokes)
+  // and basin clouds spawned visually empty.
   try {
-    console.log('[v15a basin] spheres=' + game.levelSpheres.length + ' basins=' + basinCount + ' drains=' + drainCount + ' pockets=' + game.detachedGasPockets.length);
+    let _basinSpriteCount = 0;
+    for (let pi = 0; pi < game.detachedGasPockets.length; pi++) {
+      const p = game.detachedGasPockets[pi];
+      if (p && p.gasCloud && p.gasCloud.slots) _basinSpriteCount += p.gasCloud.slots.length;
+    }
+    console.log('[v15a basin] spheres=' + game.levelSpheres.length + ' basins=' + basinCount + ' drains=' + drainCount + ' pockets=' + game.detachedGasPockets.length + ' sprites=' + _basinSpriteCount);
     // Also log first basin's first pool position for sanity-check : if it
     // says (NaN, NaN, NaN) or somewhere way outside any sphere, we know
     // the spawn math is broken. Should be inside a sphere's lower hemisphere.
