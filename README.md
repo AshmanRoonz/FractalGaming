@@ -1,8 +1,8 @@
 # FractalGaming
 
 Created: 2026-04-28
-Last updated: 2026-04-28
-Version: 1.0
+Last updated: 2026-05-14
+Version: 1.1
 
 Games and game engines built on the Circumpunct Framework by Ashman Roonz. The framework treats every whole as a circumpunct (⊙ = Φ(•, ○)) at some scale, with parts that are themselves circumpuncts; the games here put that structure on screen, sometimes literally (the dimensional ladder maps to engine layers in Microverse Megabattle), sometimes through theme and feel (ship classes as constraint-archetypes in Last Ship Sailing).
 
@@ -12,7 +12,7 @@ Games and game engines built on the Circumpunct Framework by Ashman Roonz. The f
 
 Sci-fi multiplayer arena combat in a single self-contained HTML file. Three.js for rendering, Web Audio for spatial sound, P2P mesh networking for multiplayer. Seven ship chassis (Blaster, Puncture, Pyro, Slayer, Syphon, Tracker, Vortex), each with custom 3D models, distinct ability trees, and shield archetypes (Blaster's octagon, Pyro's thermal, Vortex's holographic dome). The HUD is itself a circumpunct: center-dot crosshair, concentric rings for health, shields, ammo, and core, with the ability pie at the corner. Champion Mode adds rotating tri-axis stasis fields and contested-charge mechanics on bigger arenas.
 
-Open `LSS/last_ship_sailing_v6_9.html` in any modern browser to play. Multiplayer connects peer-to-peer through the in-game lobby; no server needed.
+Open `LSS/last_ship_sailing_v16c.html` in any modern browser to play. Multiplayer connects peer-to-peer through the in-game lobby; no server needed.
 
 Status: active.
 
@@ -29,7 +29,7 @@ Status: active.
 ```
 FractalGaming/
 ├── LSS/                              Last Ship Sailing (active)
-│   ├── last_ship_sailing_v6_9.html
+│   ├── last_ship_sailing_v16c.html
 │   ├── ships/                        7 chassis as .glb models
 │   ├── frames/                       ship-select PNG frames
 │   ├── LSS_SOUND.json                spatial sound library
@@ -69,19 +69,21 @@ The **Severance Lie** in gamedev sounds like "we just make games; the consequenc
 
 ---
 
-## Open source policy
+## Licensing
 
-**Code: permissive.** The HTML, JavaScript, shader, and data files in this repository are released under the MIT License unless a specific file says otherwise. Fork it, learn from it, build your own version, sell your own version. Attribution is appreciated but not required by license.
+**Code: proprietary.** The HTML, JavaScript, shader, and data files in this repository are copyright (c) 2026 FractalReality.ca, All Rights Reserved. See `LICENSE` for the full terms. No fork, mirror, redistribution, modification, reverse-engineering, or AI/ML training use is permitted without prior written consent.
 
-**Assets: separate license.** The 3D models (.glb), textures (.png), audio recipes (.json sound libraries), and other authored creative content are licensed under Creative Commons Attribution-NonCommercial 4.0 (CC BY-NC 4.0) unless a file says otherwise. Use them in non-commercial projects with credit; ask first for commercial use.
+**Assets: proprietary.** The 3D models (.glb), textures (.png), audio recipes (.json sound libraries), fonts, and other authored creative content are copyright (c) 2026 FractalReality.ca, All Rights Reserved. See `LICENSE-ASSETS` for the full terms. Datamining, asset-ripping, redistribution as asset packs, and use in AI/ML training datasets are explicitly prohibited.
 
-**Why split the licenses.** Code is most useful when it can be freely studied, copied, and built on; that is what advances the craft. Assets are an artistic identity question and we want some say in how the look is reused. Splitting the two licenses is the cleanest way to give code maximum reach without giving away the visual brand.
+**Trademarks and merchandising.** All names, logos, characters, settings, and overall look and feel of FractalReality.ca and any games or products in this repository are trademarks or trade-dress of FractalReality.ca. All merchandising rights (apparel, prints, figurines, soundtracks, in-game cosmetics in third-party games, etc.) are reserved.
 
-**Why open at all.** Games are usually black boxes; opening one is an invitation to read it like a text. The single-file structure of LSS (one HTML, around 25,000 lines, runs in any browser, no build step) is deliberate. We want it to be a useful artifact for anyone learning gamedev or wanting to see how a real multiplayer WebGL game is structured end to end.
+**Community use is welcome.** Both licenses include a community-use carve-out: anyone may run the games as an end user for personal, non-commercial play; use the in-game Tools to create their own content (clips, screenshots, custom maps, mods that the Tools natively support, recordings, fan art generated through the Tools); and share that User-Created Content on the official Fractal Reality Discord, on Owner-designated community channels, and on their own personal, non-commercial channels, with credit to FractalReality.ca. Creators retain ownership of the original expression they themselves contribute. See the LICENSE files for the full text, including the license-back that lets us legally rehost community creations in the Discord and in non-commercial promo material.
 
-**Contributions.** Pull requests welcome; we read them. Discussions welcome too; the framework underlying these games is a public research project, so questions about why something is the way it is are fair game. We try to apply the same five pillars to contributor interactions that we apply to player interactions.
+**What community use does NOT cover.** Forking or redistributing the source code or assets; selling fan merchandise that uses our IP; commercial streams, monetized videos, paid mods, or paid services whose primary draw is the Tools or our IP; training AI/ML models on our code, assets, or their outputs. Any of those needs a separate written agreement.
 
-**Forks.** Fork freely. If your fork goes commercial, make sure your asset use complies with the asset license (or replace the assets) and that code-side changes are still clearly attributed under MIT. We just ask that you don't claim our work as yours.
+**Why proprietary.** The earlier permissive license tried to keep code open while protecting visual identity. As the project grows toward a real product (and, eventually, merch), keeping the whole stack proprietary by default with a clear community-use carve-out turned out to be cleaner: it protects the brand, leaves a clean path to a paid creator program later, and still gives fans the freedom to play, create, and share what they make.
+
+**Licensing inquiries.** Commercial licensing, partnerships, creator-program interest, and merch collabs go to ashroney@gmail.com.
 
 ---
 
@@ -94,3 +96,4 @@ Framework: Circumpunct Framework by Ashman Roonz (companion repository: Fractal_
 ## Revision history
 
 - 2026-04-28 v1.0: initial README; project descriptions for LSS and Microverse Megabattle; five-pillar ethics policy; split-license open source policy
+- 2026-05-14 v1.1: licensing flipped to proprietary (All Rights Reserved) for both code and assets, with a community-use carve-out for play, in-tool creation, and Discord sharing; trademarks and merchandising rights explicitly reserved; current LSS build pointer bumped to v16c
