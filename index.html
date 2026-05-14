@@ -6862,23 +6862,15 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
-  // SLAYER Mega Stun Bolt charge-up telegraph from a peer. Same shape as
+  // SLAYER Mega Stun Bolt storm activation from a peer. Same shape as
   // the 'lightning' / 'pellet_burst' / 'dash_burst' top-level events :
   // fire-and-forget visual, no netId required. The helper plants the
-  // initial six-bolt ring + the 0.6 s crackle worldEffect at evt.position.
-  if (evt.type === 'slayer_core_charge' && typeof evt.px === 'number') {
+  // initial six-bolt ring + the 5 s lightning storm worldEffect that
+  // follows the caster (via ownerPeerId lookup in the worldEffects tick).
+  if (evt.type === 'slayer_core_storm' && typeof evt.px === 'number') {
     const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
-    if (typeof _spawnSlayerCoreChargeTelegraph === 'function') {
-      _spawnSlayerCoreChargeTelegraph(pos);
-    }
-    return;
-  }
-  // SLAYER Mega Stun Bolt detonation from a peer. Helper spawns the
-  // oversized explosion + the 18-bolt outward ring at evt.position.
-  if (evt.type === 'slayer_core_detonate' && typeof evt.px === 'number') {
-    const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
-    if (typeof _spawnSlayerCoreDetonationFX === 'function') {
-      _spawnSlayerCoreDetonationFX(pos);
+    if (typeof _spawnSlayerCoreStormFX === 'function') {
+      _spawnSlayerCoreStormFX(pos, evt.ownerPeerId || fromPeerId);
     }
     return;
   }
@@ -24551,11 +24543,16 @@ function updateEffects(dt) {
 // path and the peer-receive path (effect_spawn handler) call the same code
 // and every client sees the same visual.
 //
-// _spawnSlayerCoreChargeTelegraph fires an initial ring of six green
-// lightning bolts at pos and pushes a slayer_core_charge_fx worldEffect
-// that crackles random bolts at the same point for 0.6 s ; the standard
-// worldEffects update loop ticks it and the expiry path cleans it up.
-function _spawnSlayerCoreChargeTelegraph(pos) {
+// _spawnSlayerCoreStormFX kicks off the SLAYER Mega Stun Bolt core FX:
+// an initial ring of six green lightning bolts at pos for the activation
+// flash, plus a slayer_core_damage_fx worldEffect that crackles continuous
+// green lightning around the caster for the full 5 s of the core. The
+// lightning storm IS the visual representation of the 1800 DPS melee aura ;
+// its 500-unit reach matches the actual damage radius so anyone inside
+// the visible storm is inside the damage zone (and anyone outside is safe).
+// ownerPeerId lets the worldEffects tick look up the caster's current
+// position each frame so the storm follows them as they fly.
+function _spawnSlayerCoreStormFX(pos, ownerPeerId) {
   const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
   for (let i = 0; i < 6; i++) {
     const ang = (i / 6) * Math.PI * 2 + Math.random() * 0.5;
@@ -24568,19 +24565,11 @@ function _spawnSlayerCoreChargeTelegraph(pos) {
     spawnLightningBolt(pos.clone(), endPos, SLAYER_GREEN, 0.45, 2, 3);
   }
   game.worldEffects.push({
-    type: 'slayer_core_charge_fx',
+    type: 'slayer_core_damage_fx',
     position: pos.clone(),
-    timer: 0.6,
+    timer: 5.0,
+    ownerPeerId: ownerPeerId || null,
   });
-}
-
-// _spawnSlayerCoreDetonationFX fires the green-plasma detonation: an
-// oversized explosion fireball at pos. The charge-up lightning storm
-// already reads as enormous damage on its own ; the earlier outward
-// 18-bolt ring made it look comically overpowered, so it's just the
-// fireball now.
-function _spawnSlayerCoreDetonationFX(pos) {
-  spawnExplosion(pos.clone(), 60);
 }
 
 // Fireworks burst: radial streaks of light shooting outward from a point,
@@ -28798,19 +28787,20 @@ function activateCore() {
   // SLAYER: Mega Stun Bolt (charged AoE shockwave + sustained Stun Bolt Flurry over 5s)
   else if (coreName === 'Mega Stun Bolt') {
     // The 600-unit shockwave is telegraphed for ~0.6s so enemies have a
-    // window to break contact. Charge state is consumed in updateAbilities.
-    // _spawnSlayerCoreChargeTelegraph plants the initial green-lightning
-    // ring + a worldEffect that crackles random bolts for the charge window.
-    // The same helper runs on peer-receive, so every client sees the FX.
-    player.slayerCoreShockwavePending = true;
-    player.slayerCoreChargeTimer = 0.6;
+    // The lightning storm is the visual signature of the 1800 DPS melee
+    // aura ; it follows the caster, runs for the full 5 s, and its
+    // 500-unit reach matches the actual damage radius. No charge timer,
+    // no one-time shockwave, no detonation explosion ; the two damage
+    // sources are the lightning AoE (melee aura) and the Stun Bolt flurry.
     try { playSound('sword_core_swing'); } catch (_) {}
-    _spawnSlayerCoreChargeTelegraph(player.position);
+    _spawnSlayerCoreStormFX(player.position, net.myPeerId);
     if (net.active && net.sendEvent) {
       // Top-level fire-and-forget event, same shape as 'lightning' /
-      // 'pellet_burst' / 'dash_burst' ; no netId, no effect_destroy follow-up.
+      // 'pellet_burst' / 'dash_burst'. ownerPeerId lets peers attach the
+      // worldEffect to the right NetworkPlayer so the storm follows them.
       net.sendEvent({
-        type: 'slayer_core_charge',
+        type: 'slayer_core_storm',
+        ownerPeerId: net.myPeerId,
         px: player.position.x, py: player.position.y, pz: player.position.z,
       });
     }
@@ -30141,41 +30131,15 @@ function updateAbilities(dt) {
         game.projectiles.push(proj);
       }
     }
-    // SLAYER Mega Stun Bolt: 0.6 s green-lightning charge telegraphs the
-    // 600-unit AoE shockwave (gives enemies a window to break contact).
-    // The melee aura + Stun Bolt flurry run for the full 5 s duration
-    // from the moment of activation ; only the AoE shockwave damage is
-    // gated by the charge timer. Peers see the buildup + detonation via
-    // the slayer_core_charge / slayer_core_detonate broadcasts and via
-    // the broadcast Stun Bolt projectiles.
+    // SLAYER Mega Stun Bolt: two damage sources, both running for the
+    // full 5 s of the core. (1) Lightning AoE : 1800 DPS melee aura
+    // within 500 units of the caster, visualized by a green-lightning
+    // storm worldEffect that follows the caster and crackles bolts out
+    // to the same 500-unit reach (so what you see is the damage zone).
+    // (2) Stun Bolt flurry : projectile bolts firing forward, broadcast
+    // to peers so they can see and dodge them.
     else if (coreName === 'Mega Stun Bolt') {
-      // Tick the charge timer and detonate the AoE shockwave when ready.
-      if (player.slayerCoreShockwavePending) {
-        player.slayerCoreChargeTimer -= dt;
-        if (player.slayerCoreChargeTimer <= 0) {
-          const radius = 600;
-          for (const bot of game.entities) {
-            if (!bot.alive || bot.team === player.team) continue;
-            if (player.position.distanceTo(bot.position) < radius) {
-              const dealt = bot.takeDamage(500, 'player');
-              if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
-            }
-          }
-          _spawnSlayerCoreDetonationFX(player.position);
-          if (net.active && net.sendEvent) {
-            // Top-level fire-and-forget event ; matches the slayer_core_charge
-            // broadcast on the activation side.
-            net.sendEvent({
-              type: 'slayer_core_detonate',
-              px: player.position.x, py: player.position.y, pz: player.position.z,
-            });
-          }
-          try { playSound('sword_core_swing'); } catch (_) {}
-          player.slayerCoreShockwavePending = false;
-        }
-      }
-      // Melee aura runs the entire 5 s (independent of the charge ; this
-      // is the close-range damage zone the Slayer pilot dances in).
+      // Lightning AoE damage (visualized by slayer_core_damage_fx).
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
         const dist = player.position.distanceTo(bot.position);
@@ -30184,10 +30148,8 @@ function updateAbilities(dt) {
           if (dealt > 0) player.damageDealt += dealt;
         }
       }
-      // Periodic Stun Bolt flurry, also runs the entire 5 s. Broadcast
-      // each projectile so peers see (and can dodge) the flying bolts ;
-      // without this the bolts only existed on the caster's client and
-      // peers had no way to read the threat in time. Fairness-critical.
+      // Periodic Stun Bolt flurry. Broadcast each projectile so peers
+      // see (and can dodge) the flying bolts. Fairness-critical.
       if (Math.random() < dt * 2) {
         const vel = forward.clone().multiplyScalar(800);
         const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
@@ -30910,28 +30872,42 @@ function updateAbilities(dt) {
       }
     }
 
-    // SLAYER Mega Stun Bolt charge-up telegraph. Visual-only worldEffect
-    // spawned by _spawnSlayerCoreChargeTelegraph (both on local activation
-    // and on the peer-receive path). Every frame it has a chance to crack
-    // a green lightning bolt out from eff.position so all clients see the
-    // same buildup ; the standard expiry path at the bottom of the loop
-    // removes the effect when timer hits 0.
-    else if (eff.type === 'slayer_core_charge_fx') {
-      // Spawn multiple bolts per tick (was a single ~22 Hz Bernoulli ; got
-      // lost in the visual mix). Now every frame we fire two thicker
-      // crackles in different directions, which reads as a sustained
-      // electric storm building around the caster instead of an
-      // occasional spark.
+    // SLAYER Mega Stun Bolt damage-phase storm. Spawned by
+    // _spawnSlayerCoreStormFX (local activation + peer-receive). Each
+    // frame we resolve the caster's CURRENT position (via ownerPeerId
+    // lookup ; the storm follows them as they fly), then crackle two
+    // thick green bolts out from that point. Bolts terminate within
+    // the 500-unit melee aura radius so the visual matches the actual
+    // damage zone : if you can see a bolt strike near your ship, you
+    // are taking 1800 DPS. The standard expiry path at the bottom of
+    // the loop removes the effect when timer hits 0.
+    else if (eff.type === 'slayer_core_damage_fx') {
+      let casterPos = eff.position;
+      if (eff.ownerPeerId) {
+        if (eff.ownerPeerId === net.myPeerId && player && player.position) {
+          casterPos = player.position;
+        } else if (net.peers && typeof net.peers.get === 'function') {
+          const peer = net.peers.get(eff.ownerPeerId);
+          const np = peer && peer.networkPlayer;
+          if (np && np.position) casterPos = np.position;
+        }
+      }
+      // Keep the stored position synced so a peer leaving the match
+      // doesn't strand the storm at the original detonation point.
+      eff.position.copy(casterPos);
       const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
       for (let k = 0; k < 2; k++) {
         const ang = Math.random() * Math.PI * 2;
-        const r = 240 + Math.random() * 340;
+        // Bolts terminate inside the 500-unit damage radius. Inner
+        // floor of 200 keeps them from collapsing into a single point
+        // when the random draw is small.
+        const r = 200 + Math.random() * 300;
         const endPos = new THREE.Vector3(
-          eff.position.x + Math.cos(ang) * r,
-          eff.position.y + (Math.random() - 0.5) * 220,
-          eff.position.z + Math.sin(ang) * r
+          casterPos.x + Math.cos(ang) * r,
+          casterPos.y + (Math.random() - 0.5) * 220,
+          casterPos.z + Math.sin(ang) * r
         );
-        spawnLightningBolt(eff.position.clone(), endPos, SLAYER_GREEN, 0.45, 3, 4);
+        spawnLightningBolt(casterPos.clone(), endPos, SLAYER_GREEN, 0.45, 3, 4);
       }
     }
 
