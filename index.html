@@ -3017,7 +3017,7 @@ const LOADOUTS = {
       { name: 'Absorption', cooldown: 0, duration: 999, desc: 'Block 70% incoming (85% Mega Stun Bolt); can\'t shoot', type: 'defensive' },
       { name: 'Teleport', cooldown: 6, duration: 0.2, desc: 'Teleport dash', type: 'utility' },
     ],
-    core: { name: 'Mega Stun Bolt', desc: 'Dash Damage Boost + Stun Bolt Flurry', duration: 5, damage: 9000, cooldown: 60 },
+    core: { name: 'Mega Stun Bolt', desc: 'Charged Shockwave + Stun Bolt Flurry', duration: 5, damage: 9000, cooldown: 60 },
   },
   TRACKER: {
     name: 'TRACKER', className: 'Corvette Spotter', chassis: 'CORVETTE',
@@ -6859,6 +6859,19 @@ function handleNetEvent(evt, fromPeerId) {
       const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
       const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
       spawnFlameChainVisual(pos, dir, evt.length || 800, evt.team, evt.ownerPeerId, evt.netId);
+    } else if (evt.kind === 'slayer_core_charge') {
+      // Peer started SLAYER Mega Stun Bolt charge-up. Replicate the
+      // initial green-lightning telegraph ring + the 0.6 s crackle FX
+      // worldEffect at the broadcast position so every client sees it.
+      const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+      _spawnSlayerCoreChargeTelegraph(pos);
+    } else if (evt.kind === 'slayer_core_detonate') {
+      // Peer's SLAYER Mega Stun Bolt detonated. Replicate the green-plasma
+      // detonation : oversized explosion at the broadcast position + the
+      // 18-bolt outward ring marking the 600-unit reach. Damage is applied
+      // by the caster's client ; this is the visual companion.
+      const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
+      _spawnSlayerCoreDetonationFX(pos);
     }
     return;
   }
@@ -24526,6 +24539,53 @@ function updateEffects(dt) {
 // debug-style outline. Still uses ship position because takeDamage doesn't
 // know the projectile's exact strike point ; future pass could thread that
 // through, but the burst is small enough that center-of-ship feels fine.
+// SLAYER Mega Stun Bolt helpers. The charge-up telegraph and the detonation
+// FX are factored into these two functions so both the local activation
+// path and the peer-receive path (effect_spawn handler) call the same code
+// and every client sees the same visual.
+//
+// _spawnSlayerCoreChargeTelegraph fires an initial ring of six green
+// lightning bolts at pos and pushes a slayer_core_charge_fx worldEffect
+// that crackles random bolts at the same point for 0.6 s ; the standard
+// worldEffects update loop ticks it and the expiry path cleans it up.
+function _spawnSlayerCoreChargeTelegraph(pos) {
+  const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
+  for (let i = 0; i < 6; i++) {
+    const ang = (i / 6) * Math.PI * 2 + Math.random() * 0.5;
+    const r = 280 + Math.random() * 220;
+    const endPos = new THREE.Vector3(
+      pos.x + Math.cos(ang) * r,
+      pos.y + (Math.random() - 0.5) * 200,
+      pos.z + Math.sin(ang) * r
+    );
+    spawnLightningBolt(pos.clone(), endPos, SLAYER_GREEN, 0.45, 2, 3);
+  }
+  game.worldEffects.push({
+    type: 'slayer_core_charge_fx',
+    position: pos.clone(),
+    timer: 0.6,
+  });
+}
+
+// _spawnSlayerCoreDetonationFX fires the green-plasma detonation: an
+// oversized explosion fireball at pos plus a ring of eighteen outward
+// lightning bolts marking the 600-unit reach, so the visual carries the
+// same shape the damage check used.
+function _spawnSlayerCoreDetonationFX(pos) {
+  const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
+  const radius = 600;
+  spawnExplosion(pos.clone(), 60);
+  for (let i = 0; i < 18; i++) {
+    const ang = (i / 18) * Math.PI * 2 + Math.random() * 0.2;
+    const endPos = new THREE.Vector3(
+      pos.x + Math.cos(ang) * radius,
+      pos.y + (Math.random() - 0.5) * 140,
+      pos.z + Math.sin(ang) * radius
+    );
+    spawnLightningBolt(pos.clone(), endPos, SLAYER_GREEN, 0.5, 3, 4);
+  }
+}
+
 // Fireworks burst: radial streaks of light shooting outward from a point,
 // like a real firework. Used by Cluster Missile impacts (initial blast +
 // each periodic secondary explosion) so the sustained zone reads as a
@@ -28738,19 +28798,24 @@ function activateCore() {
     player.velocity.add(forward.clone().multiplyScalar(600));
     try { playSound('barrage_core_thrust'); } catch (_) {}
   }
-  // SLAYER: Mega Stun Bolt (empowered melee + rapid arc waves over 4s)
+  // SLAYER: Mega Stun Bolt (charged AoE shockwave + sustained Stun Bolt Flurry over 5s)
   else if (coreName === 'Mega Stun Bolt') {
-    // Handled in updateAbilities; initial shockwave
-    const radius = 600;
-    for (const bot of game.entities) {
-      if (!bot.alive || bot.team === player.team) continue;
-      if (player.position.distanceTo(bot.position) < radius) {
-        const dealt = bot.takeDamage(500, 'player');
-        if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
-      }
-    }
-    spawnExplosion(player.position, 40);
+    // The 600-unit shockwave is telegraphed for ~0.6s so enemies have a
+    // window to break contact. Charge state is consumed in updateAbilities.
+    // _spawnSlayerCoreChargeTelegraph plants the initial green-lightning
+    // ring + a worldEffect that crackles random bolts for the charge window.
+    // The same helper runs on peer-receive, so every client sees the FX.
+    player.slayerCoreShockwavePending = true;
+    player.slayerCoreChargeTimer = 0.6;
     try { playSound('sword_core_swing'); } catch (_) {}
+    _spawnSlayerCoreChargeTelegraph(player.position);
+    if (net.active && net.sendEvent) {
+      net.sendEvent({
+        type: 'effect_spawn', kind: 'slayer_core_charge',
+        ownerPeerId: net.myPeerId, team: player.team,
+        px: player.position.x, py: player.position.y, pz: player.position.z,
+      });
+    }
   }
   // TRACKER: Mega Tracker Rockets (remote-guided missile volley; all missiles steer toward crosshair in real time)
   else if (coreName === 'Mega Tracker Rockets') {
@@ -30078,23 +30143,52 @@ function updateAbilities(dt) {
         game.projectiles.push(proj);
       }
     }
-    // SLAYER Mega Stun Bolt: melee damage aura + periodic arc waves
+    // SLAYER Mega Stun Bolt: 0.6s green-lightning charge-up telegraphed via
+    // a slayer_core_charge_fx worldEffect (so peers see the buildup too).
+    // On detonation we deal 500 dmg in a 600-unit radius, fire the local
+    // explosion + outward ring, and broadcast the detonation so peers'
+    // visuals match. After detonation : sustained melee aura + Stun Bolt
+    // flurry until the core duration ends.
     else if (coreName === 'Mega Stun Bolt') {
-      // Melee damage aura
-      for (const bot of game.entities) {
-        if (!bot.alive || bot.team === player.team) continue;
-        const dist = player.position.distanceTo(bot.position);
-        if (dist < 500) {
-          const dealt = bot.takeDamage(1800 * dt, 'player');
-          if (dealt > 0) player.damageDealt += dealt;
+      if (player.slayerCoreShockwavePending) {
+        player.slayerCoreChargeTimer -= dt;
+        if (player.slayerCoreChargeTimer <= 0) {
+          const radius = 600;
+          for (const bot of game.entities) {
+            if (!bot.alive || bot.team === player.team) continue;
+            if (player.position.distanceTo(bot.position) < radius) {
+              const dealt = bot.takeDamage(500, 'player');
+              if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
+            }
+          }
+          _spawnSlayerCoreDetonationFX(player.position);
+          if (net.active && net.sendEvent) {
+            net.sendEvent({
+              type: 'effect_spawn', kind: 'slayer_core_detonate',
+              ownerPeerId: net.myPeerId, team: player.team,
+              px: player.position.x, py: player.position.y, pz: player.position.z,
+            });
+          }
+          try { playSound('sword_core_swing'); } catch (_) {}
+          player.slayerCoreShockwavePending = false;
         }
-      }
-      // Periodic arc wave (Slayer Mega Stun Bolt)
-      if (Math.random() < dt * 2) {
-        const vel = forward.clone().multiplyScalar(800);
-        const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
-        proj.isArcWave = true;
-        game.projectiles.push(proj);
+      } else {
+        // Post-detonation: melee damage aura
+        for (const bot of game.entities) {
+          if (!bot.alive || bot.team === player.team) continue;
+          const dist = player.position.distanceTo(bot.position);
+          if (dist < 500) {
+            const dealt = bot.takeDamage(1800 * dt, 'player');
+            if (dealt > 0) player.damageDealt += dealt;
+          }
+        }
+        // Periodic Stun Bolt flurry (formerly arc waves)
+        if (Math.random() < dt * 2) {
+          const vel = forward.clone().multiplyScalar(800);
+          const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
+          proj.isArcWave = true;
+          game.projectiles.push(proj);
+        }
       }
     }
     // TRACKER Mega Tracker Rockets: keep spawning remote-guided missiles during duration.
@@ -30806,6 +30900,26 @@ function updateAbilities(dt) {
           spawnFireworksBurst(burstAt, 140);
         }
         eff.fxTimer = 0.3;
+      }
+    }
+
+    // SLAYER Mega Stun Bolt charge-up telegraph. Visual-only worldEffect
+    // spawned by _spawnSlayerCoreChargeTelegraph (both on local activation
+    // and on the peer-receive path). Every frame it has a chance to crack
+    // a green lightning bolt out from eff.position so all clients see the
+    // same buildup ; the standard expiry path at the bottom of the loop
+    // removes the effect when timer hits 0.
+    else if (eff.type === 'slayer_core_charge_fx') {
+      if (Math.random() < dt * 22) {
+        const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
+        const ang = Math.random() * Math.PI * 2;
+        const r = 220 + Math.random() * 360;
+        const endPos = new THREE.Vector3(
+          eff.position.x + Math.cos(ang) * r,
+          eff.position.y + (Math.random() - 0.5) * 220,
+          eff.position.z + Math.sin(ang) * r
+        );
+        spawnLightningBolt(eff.position.clone(), endPos, SLAYER_GREEN, 0.3, 2, 2);
       }
     }
 
