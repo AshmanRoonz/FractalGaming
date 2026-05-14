@@ -25751,6 +25751,20 @@ const _SHIP_NAMED_FRAMES = {
   PUNCTURE: ['C', 'C2'], // C / C2 : Sodium Railgun charging (alternates ; speed scales with charge level)
 };
 
+// (v16d) Per-ship numbered recoil frames actually present on disk. The loader
+// only probes these numbers, so no 404s for missing files (e.g. TRACKER5.png).
+// Ships absent from this map fall back to the legacy 1..5 blind-probe. To add
+// a new numbered frame, drop the PNG and add the number here.
+const _SHIP_RECOIL_NUMBERS = {
+  BLASTER:  [2, 3, 4],
+  PUNCTURE: [2, 3, 4],
+  PYRO:     [2, 3, 4, 5],
+  SLAYER:   [1, 2, 3, 4],
+  SYPHON:   [1, 2, 3],
+  TRACKER:  [1, 2, 3, 4],
+  VORTEX:   [1, 2],
+};
+
 // Resolve which named-frame suffix (if any) applies to the player right now.
 // Highest-priority frame source ; checked before recoil and base in the
 // animator. Returns the suffix string (e.g. 'L', 'L2') or null for no
@@ -25967,7 +25981,7 @@ function updateCockpitFrame() {
   // Coalesce: if a probe for this key is already in flight, skip re-issuing.
   if (_cockpitFrameInFlight[key]) return;
   _cockpitFrameInFlight[key] = true;
-  // Probe base + numbered recoil frames 1..MAX_RECOIL_FRAMES + any named
+  // Probe base + numbered recoil frames (per _SHIP_RECOIL_NUMBERS) + any named
   // ability frames for this ship, all in parallel. Each is independently
   // optional ; the animator falls back through the priority chain
   // (named -> recoil -> base) using whatever loaded.
@@ -25976,12 +25990,19 @@ function updateCockpitFrame() {
   // the browser can't evict the decoded bitmaps between swaps. Without
   // this, fast swap sequences can hit a transparent flash every Nth frame
   // while the browser re-decodes a recently-evicted PNG.
-  const MAX_RECOIL_FRAMES = 5;
+  // Recoil numbers : per-ship registry of which numbered PNGs exist on disk.
+  // Ships not in _SHIP_RECOIL_NUMBERS fall back to the legacy blind 1..5 probe.
+  const MAX_RECOIL_FRAMES_FALLBACK = 5;
+  const recoilNumbers = _SHIP_RECOIL_NUMBERS[key] || (function() {
+    const arr = [];
+    for (let n = 1; n <= MAX_RECOIL_FRAMES_FALLBACK; n++) arr.push(n);
+    return arr;
+  })();
   const baseProbe = new Image();
   const numberedProbes = [];
   const numberedUrls = [];
-  for (let i = 1; i <= MAX_RECOIL_FRAMES; i++) {
-    numberedUrls.push(_framesBaseUrl + dir + '/' + key + i + '.png' + _FRAME_CACHE_BUST);
+  for (let i = 0; i < recoilNumbers.length; i++) {
+    numberedUrls.push(_framesBaseUrl + dir + '/' + key + recoilNumbers[i] + '.png' + _FRAME_CACHE_BUST);
     numberedProbes.push(new Image());
   }
   const namedSuffixes = _SHIP_NAMED_FRAMES[key] || [];
@@ -25995,10 +26016,10 @@ function updateCockpitFrame() {
     });
   }
   let baseDone = null;
-  const numberedDone = new Array(MAX_RECOIL_FRAMES).fill(null);
+  const numberedDone = new Array(recoilNumbers.length).fill(null);
   function maybeFinish() {
     if (baseDone === null) return;
-    for (let i = 0; i < MAX_RECOIL_FRAMES; i++) {
+    for (let i = 0; i < recoilNumbers.length; i++) {
       if (numberedDone[i] === null) return;
     }
     for (const np of namedProbes) {
@@ -26010,7 +26031,7 @@ function updateCockpitFrame() {
     // the surviving URLs end-to-end.
     const recoilUrls = [];
     const recoilImages = [];
-    for (let i = 0; i < MAX_RECOIL_FRAMES; i++) {
+    for (let i = 0; i < recoilNumbers.length; i++) {
       if (numberedDone[i] === 'ok') {
         recoilUrls.push(numberedUrls[i]);
         recoilImages.push(numberedProbes[i]);
@@ -26042,7 +26063,7 @@ function updateCockpitFrame() {
   }
   baseProbe.onload  = () => { baseDone = 'ok';      maybeFinish(); };
   baseProbe.onerror = () => { baseDone = 'missing'; maybeFinish(); };
-  for (let i = 0; i < MAX_RECOIL_FRAMES; i++) {
+  for (let i = 0; i < recoilNumbers.length; i++) {
     const idx = i;
     numberedProbes[i].onload  = () => { numberedDone[idx] = 'ok';      maybeFinish(); };
     numberedProbes[i].onerror = () => { numberedDone[idx] = 'missing'; maybeFinish(); };
