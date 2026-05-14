@@ -6867,26 +6867,18 @@ function handleNetEvent(evt, fromPeerId) {
   // fire-and-forget visual, no netId required. The helper plants the
   // initial six-bolt ring + the 0.6 s crackle worldEffect at evt.position.
   if (evt.type === 'slayer_core_charge' && typeof evt.px === 'number') {
-    console.log('[SLAYER core] RECEIVED slayer_core_charge from peer at', evt.px, evt.py, evt.pz);
     const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
     if (typeof _spawnSlayerCoreChargeTelegraph === 'function') {
       _spawnSlayerCoreChargeTelegraph(pos);
-      console.log('[SLAYER core] peer helper fired');
-    } else {
-      console.log('[SLAYER core] ERROR: _spawnSlayerCoreChargeTelegraph not defined on peer side');
     }
     return;
   }
   // SLAYER Mega Stun Bolt detonation from a peer. Helper spawns the
   // oversized explosion + the 18-bolt outward ring at evt.position.
   if (evt.type === 'slayer_core_detonate' && typeof evt.px === 'number') {
-    console.log('[SLAYER core] RECEIVED slayer_core_detonate from peer at', evt.px, evt.py, evt.pz);
     const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
     if (typeof _spawnSlayerCoreDetonationFX === 'function') {
       _spawnSlayerCoreDetonationFX(pos);
-      console.log('[SLAYER core] peer detonation helper fired');
-    } else {
-      console.log('[SLAYER core] ERROR: _spawnSlayerCoreDetonationFX not defined on peer side');
     }
     return;
   }
@@ -23259,7 +23251,7 @@ const _LIGHTNING_FRAG_SRC = [
   '}'
 ].join('\n');
 
-const _LIGHTNING_POOL_SIZE = 24; // each slot = one whole bolt (halo + core)
+const _LIGHTNING_POOL_SIZE = 64; // each slot = one whole bolt (halo + core). Bumped from 24 ; SLAYER's Mega Stun Bolt fires up to ~37 bolts in a 0.6 s window (initial 6-bolt ring + ~13 random crackles + 18 outward detonation ring), and with peers casting concurrent effects the old 24-slot cap was exhausting and silently dropping later bolts on the floor.
 const _lightningPool = [];
 function _initLightningPool() {
   for (let i = 0; i < _LIGHTNING_POOL_SIZE; i++) {
@@ -28824,7 +28816,6 @@ function activateCore() {
     player.slayerCoreChargeTimer = 0.6;
     try { playSound('sword_core_swing'); } catch (_) {}
     _spawnSlayerCoreChargeTelegraph(player.position);
-    console.log('[SLAYER core] activation ; net.active=', net.active, ' sendEvent=', typeof net.sendEvent);
     if (net.active && net.sendEvent) {
       // Top-level fire-and-forget event, same shape as 'lightning' /
       // 'pellet_burst' / 'dash_burst' ; no netId, no effect_destroy follow-up.
@@ -28832,7 +28823,6 @@ function activateCore() {
         type: 'slayer_core_charge',
         px: player.position.x, py: player.position.y, pz: player.position.z,
       });
-      console.log('[SLAYER core] broadcast slayer_core_charge at', player.position.x, player.position.y, player.position.z);
     }
   }
   // TRACKER: Mega Tracker Rockets (remote-guided missile volley; all missiles steer toward crosshair in real time)
@@ -30161,13 +30151,15 @@ function updateAbilities(dt) {
         game.projectiles.push(proj);
       }
     }
-    // SLAYER Mega Stun Bolt: 0.6s green-lightning charge-up telegraphed via
-    // a slayer_core_charge_fx worldEffect (so peers see the buildup too).
-    // On detonation we deal 500 dmg in a 600-unit radius, fire the local
-    // explosion + outward ring, and broadcast the detonation so peers'
-    // visuals match. After detonation : sustained melee aura + Stun Bolt
-    // flurry until the core duration ends.
+    // SLAYER Mega Stun Bolt: 0.6 s green-lightning charge telegraphs the
+    // 600-unit AoE shockwave (gives enemies a window to break contact).
+    // The melee aura + Stun Bolt flurry run for the full 5 s duration
+    // from the moment of activation ; only the AoE shockwave damage is
+    // gated by the charge timer. Peers see the buildup + detonation via
+    // the slayer_core_charge / slayer_core_detonate broadcasts and via
+    // the broadcast Stun Bolt projectiles.
     else if (coreName === 'Mega Stun Bolt') {
+      // Tick the charge timer and detonate the AoE shockwave when ready.
       if (player.slayerCoreShockwavePending) {
         player.slayerCoreChargeTimer -= dt;
         if (player.slayerCoreChargeTimer <= 0) {
@@ -30191,22 +30183,28 @@ function updateAbilities(dt) {
           try { playSound('sword_core_swing'); } catch (_) {}
           player.slayerCoreShockwavePending = false;
         }
-      } else {
-        // Post-detonation: melee damage aura
-        for (const bot of game.entities) {
-          if (!bot.alive || bot.team === player.team) continue;
-          const dist = player.position.distanceTo(bot.position);
-          if (dist < 500) {
-            const dealt = bot.takeDamage(1800 * dt, 'player');
-            if (dealt > 0) player.damageDealt += dealt;
-          }
+      }
+      // Melee aura runs the entire 5 s (independent of the charge ; this
+      // is the close-range damage zone the Slayer pilot dances in).
+      for (const bot of game.entities) {
+        if (!bot.alive || bot.team === player.team) continue;
+        const dist = player.position.distanceTo(bot.position);
+        if (dist < 500) {
+          const dealt = bot.takeDamage(1800 * dt, 'player');
+          if (dealt > 0) player.damageDealt += dealt;
         }
-        // Periodic Stun Bolt flurry (formerly arc waves)
-        if (Math.random() < dt * 2) {
-          const vel = forward.clone().multiplyScalar(800);
-          const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
-          proj.isArcWave = true;
-          game.projectiles.push(proj);
+      }
+      // Periodic Stun Bolt flurry, also runs the entire 5 s. Broadcast
+      // each projectile so peers see (and can dodge) the flying bolts ;
+      // without this the bolts only existed on the caster's client and
+      // peers had no way to read the threat in time. Fairness-critical.
+      if (Math.random() < dt * 2) {
+        const vel = forward.clone().multiplyScalar(800);
+        const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
+        game.projectiles.push(proj);
+        if (typeof broadcastAbilityProjectile === 'function') {
+          broadcastAbilityProjectile(proj);
         }
       }
     }
@@ -30929,16 +30927,21 @@ function updateAbilities(dt) {
     // same buildup ; the standard expiry path at the bottom of the loop
     // removes the effect when timer hits 0.
     else if (eff.type === 'slayer_core_charge_fx') {
-      if (Math.random() < dt * 22) {
-        const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
+      // Spawn multiple bolts per tick (was a single ~22 Hz Bernoulli ; got
+      // lost in the visual mix). Now every frame we fire two thicker
+      // crackles in different directions, which reads as a sustained
+      // electric storm building around the caster instead of an
+      // occasional spark.
+      const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
+      for (let k = 0; k < 2; k++) {
         const ang = Math.random() * Math.PI * 2;
-        const r = 220 + Math.random() * 360;
+        const r = 240 + Math.random() * 340;
         const endPos = new THREE.Vector3(
           eff.position.x + Math.cos(ang) * r,
           eff.position.y + (Math.random() - 0.5) * 220,
           eff.position.z + Math.sin(ang) * r
         );
-        spawnLightningBolt(eff.position.clone(), endPos, SLAYER_GREEN, 0.3, 2, 2);
+        spawnLightningBolt(eff.position.clone(), endPos, SLAYER_GREEN, 0.45, 3, 4);
       }
     }
 
