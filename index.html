@@ -23815,6 +23815,70 @@ function _initParticlePool() {
   }
 }
 _initParticlePool();
+
+// (v16d) One-time shader warmup. The lightning, dark-lightning, and
+// particle pools all add their meshes to the scene at module load with
+// visible=false ; this is good for runtime (the GPU skips them) but it
+// also defers shader compilation until the FIRST time each mesh is shown,
+// which produces a one-time frame hitch the moment a player fires a
+// weapon that uses one of those effects. Spotted in v16d by watching a
+// playthrough recording : Syphon's first shot on a rock visibly stalled.
+//
+// Fix : briefly make every pool mesh visible, call renderer.compileAsync
+// (or the synchronous fallback) so Three.js walks traverseVisible() and
+// compiles every material's shader on the GPU, then restore visibility.
+// Gated by _shadersWarmed so it only fires once per session ; calling
+// site is the buildWorld path in commitLoadout, where the player can't
+// see anything for a few hundred ms anyway during the launch countdown.
+let _shadersWarmed = false;
+function _warmupEffectShaders() {
+  if (_shadersWarmed) return;
+  _shadersWarmed = true;
+  if (typeof renderer === 'undefined' || !renderer) return;
+  if (typeof scene === 'undefined' || typeof camera === 'undefined') return;
+  const restore = [];
+  function showAndQueue(mesh) {
+    if (!mesh) return;
+    restore.push([mesh, mesh.visible]);
+    mesh.visible = true;
+  }
+  if (typeof _lightningPool !== 'undefined' && Array.isArray(_lightningPool)) {
+    for (const slot of _lightningPool) {
+      showAndQueue(slot && slot.haloMesh);
+      showAndQueue(slot && slot.coreMesh);
+    }
+  }
+  if (typeof _darkLightningPool !== 'undefined' && Array.isArray(_darkLightningPool)) {
+    for (const slot of _darkLightningPool) {
+      showAndQueue(slot && slot.mesh);
+    }
+  }
+  if (typeof _particlePool !== 'undefined' && Array.isArray(_particlePool)) {
+    for (const slot of _particlePool) {
+      showAndQueue(slot && slot.sprite);
+    }
+  }
+  function restoreAll() {
+    for (const [mesh, v] of restore) {
+      if (mesh) mesh.visible = v;
+    }
+  }
+  try {
+    if (typeof renderer.compileAsync === 'function') {
+      // Off-main-thread on supporting drivers ; restore visibility once
+      // the promise resolves so the compile observes the visible meshes.
+      renderer.compileAsync(scene, camera).then(restoreAll).catch(restoreAll);
+    } else if (typeof renderer.compile === 'function') {
+      renderer.compile(scene, camera);
+      restoreAll();
+    } else {
+      restoreAll();
+    }
+  } catch (e) {
+    restoreAll();
+  }
+}
+
 let _particlePoolCursor = 0;
 function _acquireParticleSlot() {
   for (let i = 0; i < MAX_PARTICLES; i++) {
@@ -26426,6 +26490,11 @@ function commitLoadout(key) {
     } else {
       buildWorld();
     }
+    // (v16d) Force-compile every pooled-effect shader now, before the
+    // player can fire anything. Burns the one-time GPU compile cost
+    // during the launch countdown rather than mid-combat. No-op on
+    // subsequent commits (gated by _shadersWarmed).
+    if (typeof _warmupEffectShaders === 'function') _warmupEffectShaders();
 
     // (v6.7) After the local build, the world owner ships an authoritative
     // cluster manifest to all peers; non-owners' applyWorldObjectsManifest
