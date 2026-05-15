@@ -27833,8 +27833,24 @@ function fireHitscan(origin, dir, w) {
         player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         showHitMarker();
       }
-      spawnExplosion(hitPoint, 6);
-      if (!hadShield) spawnImpactSparks(hitPoint, 4);
+      // (v16d) Puncture Sodium Railgun impact signature : a heavy kinetic
+      // strike scaled to read at the railgun's 4500-unit range. The old
+      // size-6 explosion + 4 sparks was nearly invisible at distance. Now
+      // a yellow-cored explosion, two-layer hull burst (white-hot
+      // kinetic core + yellow debris halo), heavy spark spray on bare
+      // hull, and a bright yellow dynamic light. Visual intensity scales
+      // with charge level so a fully-charged shot reads as significantly
+      // more violent than a tap.
+      const _puncChargeBoost = Math.min(1.6, 1.0 + (chargeMul - 1.0) * 0.5); // 1.0 to 1.6
+      spawnExplosion(hitPoint, 50 * _puncChargeBoost);
+      if (typeof spawnHullBurst === 'function') {
+        spawnHullBurst(hitPoint, 0xffffff, 110 * _puncChargeBoost);   // hot core
+        spawnHullBurst(hitPoint, LSS.CLASS_COLORS.PUNCTURE, 85 * _puncChargeBoost); // yellow debris
+      }
+      if (!hadShield && typeof spawnImpactSparks === 'function') {
+        spawnImpactSparks(hitPoint, Math.round(16 * _puncChargeBoost));
+      }
+      spawnDynamicLight(hitPoint, LSS.CLASS_COLORS.PUNCTURE, 5.5 * _puncChargeBoost, 900, 0.4);
       if (!bot.alive) showKillMarker();
     }
     // After piercing, still strike the obstacle if any was in the way.
@@ -28297,11 +28313,51 @@ function executeAbility(slot, ability) {
         if (proj < 0 || proj > range) continue;
         const closest = player.position.clone().add(forward.clone().multiplyScalar(proj));
         if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.0) {
-          const dealt = bot.takeDamage(2400, 'player');
+          const hadShield = bot.shield > 0;
+          // (v16d fix) Compute the hit point on the bot's HULL SURFACE
+          // along the beam's closest-approach direction. Spawning FX at
+          // bot.position (the ship's center) buried them inside the
+          // ship mesh where they couldn't be seen ; the surface hit
+          // point matches the pattern Sodium Railgun and the other
+          // hitscan weapons use so the FX render outside the hull.
+          const _surfR = bot.chassis.hullLength * 0.5;
+          const _toClosest = closest.clone().sub(bot.position);
+          const _len = _toClosest.length();
+          const hitPoint = (_len > 0.001)
+            ? bot.position.clone().add(_toClosest.multiplyScalar(_surfR / _len))
+            : bot.position.clone();
+          const dealt = bot.takeDamage(2400, 'player', hitPoint);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
-          spawnExplosion(bot.position, 15);
-          // White-blue dynamic light at impact point
-          spawnDynamicLight(bot.position, 0xccddff, 2.5, 500, 0.3);
+          // (v16d) Vortex Laser impact signature : scaled to read at the
+          // beam's 2500-unit range. The previous version stayed too small
+          // to be legible at distance (matching the railgun's size-6
+          // approach, which also doesn't read in playtest). Layered look :
+          //   1. Big violet-cored explosion at the hull surface
+          //   2. Two-layered hull burst (white-hot vaporization core +
+          //      violet outward halo) so the impact reads as "the laser
+          //      flash-vaporized this section of hull"
+          //   3. Electrical discharge arcs venting from the impact site
+          //   4. Bright sustained dynamic light so the hit washes nearby
+          //      walls / ships with the Vortex purple identity color
+          spawnExplosion(hitPoint, 60);
+          if (typeof spawnHullBurst === 'function') {
+            spawnHullBurst(hitPoint, 0xffffff, 110); // hot white core
+            spawnHullBurst(hitPoint, 0xeeccff, 85);  // violet halo
+          }
+          if (!hadShield && typeof spawnImpactSparks === 'function') {
+            spawnImpactSparks(hitPoint, 18);
+          }
+          if (typeof spawnLightningBolt === 'function') {
+            for (let a = 0; a < 4; a++) {
+              const arcEnd = new THREE.Vector3(
+                hitPoint.x + (Math.random() - 0.5) * 110,
+                hitPoint.y + (Math.random() - 0.5) * 110,
+                hitPoint.z + (Math.random() - 0.5) * 110
+              );
+              spawnLightningBolt(hitPoint, arcEnd, 0xeeccff, 0.18, 1, 2.5);
+            }
+          }
+          spawnDynamicLight(hitPoint, 0xeebbff, 6.0, 900, 0.45);
         }
       }
       // (v14g) Sharp piercing zap so the laser beam reads sonically.
@@ -28390,6 +28446,9 @@ function executeAbility(slot, ability) {
       proj.isArcWave = true; // applies slow on hit + pierces + leaves trail
       game.projectiles.push(proj);
       broadcastAbilityProjectile(proj);
+      // (v16d) Reuse the siphon_drain pluck for the Stun Bolt fire sfx ;
+      // its shimmery upper-mid pluck reads as an electric arc launching.
+      try { playSound('siphon_drain'); } catch (_) {}
     }
     // TRACKER: Tracker Rockets (fire homing salvo at fully-locked targets; partial locks preserved)
     // (v9 rework) Strict full-lock-only: if no target has 3/3 locks the ability
@@ -29122,6 +29181,11 @@ function activateCore() {
     // no one-time shockwave, no detonation explosion ; the two damage
     // sources are the lightning AoE (melee aura) and the Stun Bolt flurry.
     try { playSound('sword_core_swing'); } catch (_) {}
+    // (v16d) Sustained low-pitch electrical zapping drone for the full
+    // 5 s of the core. Plays once at activation ; the recipe's envelope
+    // holds for the duration and decays out cleanly on its own. Reads as
+    // the audio signature of the lightning storm following the caster.
+    try { playSound('stun_core_zap'); } catch (_) {}
     _spawnSlayerCoreStormFX(player.position, net.myPeerId);
     if (net.active && net.sendEvent) {
       // Top-level fire-and-forget event, same shape as 'lightning' /
@@ -30429,7 +30493,13 @@ function updateAbilities(dt) {
           player._laserCoreArcTimer = 0.025 + Math.random() * 0.03;
         }
       }
-      // Damage check (unchanged)
+      // (v16d) Damage + rate-limited impact FX per hit ship. Previously
+      // this branch silently applied damage with no visual feedback ; the
+      // beam looked impressive but enemies appeared to take no damage on
+      // contact. Now each hit ship gets a per-tick cadence of explosions,
+      // sparks, hull bursts, and dynamic lights at the impact point,
+      // throttled so we don't spawn 60 FX/sec per victim. The hit marker
+      // is also throttled so the HUD doesn't strobe on a sustained beam.
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
         const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
@@ -30437,8 +30507,58 @@ function updateAbilities(dt) {
         if (proj > 0 && proj < range) {
           const closest = player.position.clone().add(forward.clone().multiplyScalar(proj));
           if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.2) {
-            const dealt = bot.takeDamage(3000 * dt, 'player');
+            const hadShield = bot.shield > 0;
+            // (v16d fix) Surface hit point so the FX render outside the
+            // ship's mesh instead of being buried inside it.
+            const _surfR = bot.chassis.hullLength * 0.5;
+            const _toClosest = closest.clone().sub(bot.position);
+            const _len = _toClosest.length();
+            const hitPoint = (_len > 0.001)
+              ? bot.position.clone().add(_toClosest.multiplyScalar(_surfR / _len))
+              : bot.position.clone();
+            const dealt = bot.takeDamage(3000 * dt, 'player', hitPoint);
             if (dealt > 0) { player.damageDealt += dealt; }
+            // 60 ms cadence per ship -> ~16 Hz roar of impact FX. Per-bot
+            // timer means each victim gets independent feedback even when
+            // the beam sweeps across multiple targets.
+            bot._megaLaserFxTimer = (bot._megaLaserFxTimer || 0) - dt;
+            if (bot._megaLaserFxTimer <= 0 && dealt > 0) {
+              bot._megaLaserFxTimer = 0.06;
+              // (v16d) Per-tick Mega Laser impact ; silent visual layer
+              // only. spawnExplosion was triggering a spatial 'explosion'
+              // sound on each call ; at 16 Hz per hit ship the audio
+              // system glitched on sustained beams. Hull burst + lightning
+              // + dynamic light carry the violent-vaporization read on
+              // their own without each tick firing a sound event. The
+              // sustained Mega Laser beam already has its own continuous
+              // audio loop ('laser_core_beam') so the impact site doesn't
+              // need to compete.
+              if (typeof spawnHullBurst === 'function') {
+                spawnHullBurst(hitPoint, 0xffffff, 70); // hot core
+                spawnHullBurst(hitPoint, 0xeeccff, 55); // violet halo
+              }
+              if (!hadShield && typeof spawnImpactSparks === 'function') {
+                spawnImpactSparks(hitPoint, 8);
+              }
+              if (typeof spawnLightningBolt === 'function') {
+                // One crackle per FX tick (don't multiply by per-frame
+                // rate or the lightning pool gets hammered).
+                const arcEnd = new THREE.Vector3(
+                  hitPoint.x + (Math.random() - 0.5) * 70,
+                  hitPoint.y + (Math.random() - 0.5) * 70,
+                  hitPoint.z + (Math.random() - 0.5) * 70
+                );
+                spawnLightningBolt(hitPoint, arcEnd, 0xeeccff, 0.14, 1, 2.0);
+              }
+              spawnDynamicLight(hitPoint, 0xeebbff, 4.0, 600, 0.22);
+            }
+            // Hit marker throttled to ~5 Hz so a sustained beam doesn't
+            // strobe the HUD.
+            bot._megaLaserHitMarkerTimer = (bot._megaLaserHitMarkerTimer || 0) - dt;
+            if (bot._megaLaserHitMarkerTimer <= 0 && dealt > 0) {
+              bot._megaLaserHitMarkerTimer = 0.18;
+              if (typeof showHitMarker === 'function') showHitMarker();
+            }
           }
         }
       }
@@ -31213,6 +31333,8 @@ function updateAbilities(dt) {
     else if (eff.type === 'slayer_core_damage_fx') {
       let casterPos = eff.position;
       if (eff.ownerPeerId) {
+        // Multiplayer : resolve the caster by peerId. Local caster uses
+        // player.position ; peer casters resolve through NetworkPlayer.
         if (eff.ownerPeerId === net.myPeerId && player && player.position) {
           casterPos = player.position;
         } else if (net.peers && typeof net.peers.get === 'function') {
@@ -31220,6 +31342,13 @@ function updateAbilities(dt) {
           const np = peer && peer.networkPlayer;
           if (np && np.position) casterPos = np.position;
         }
+      } else if (player && player.position) {
+        // Single-player : net.myPeerId is null until multiplayer connects,
+        // so the helper stored ownerPeerId=null and the lookup above is
+        // skipped. Without this fallback the storm froze at the activation
+        // point. The only way to get a null-ownerPeerId effect in single
+        // player is when WE cast it, so player.position is correct.
+        casterPos = player.position;
       }
       // Keep the stored position synced so a peer leaving the match
       // doesn't strand the storm at the original detonation point.
@@ -48624,6 +48753,129 @@ const DEFAULT_SOUND_LIBRARY = {
           "count": 1,
           "spacing": 0,
           "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "stun_core_zap",
+      "description": "5 s sustained low-pitch electrical drone + rhythmic zap clicks (Mega Stun Bolt core)",
+      "category": "SLAYER",
+      "layers": [
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            50,
+            75
+          ],
+          "rampFreqs": [
+            50,
+            75
+          ],
+          "vol": 0.22,
+          "dur": 5,
+          "rampTime": 5,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.08,
+            "hold": 4.5,
+            "decay": 0.4
+          },
+          "pitchVar": 0.05,
+          "durVar": 0.05,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            102,
+            130
+          ],
+          "rampFreqs": [
+            110,
+            145
+          ],
+          "vol": 0.14,
+          "dur": 5,
+          "rampTime": 4.8,
+          "startOffset": 0.02,
+          "envelope": {
+            "attack": 0.1,
+            "hold": 4.4,
+            "decay": 0.45
+          },
+          "pitchVar": 0.07,
+          "durVar": 0.05,
+          "volVar": 0.12,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "noise",
+          "duration": 4.8,
+          "volume": 0.08,
+          "startOffset": 0.1,
+          "filterFreq": 480,
+          "filterQ": 1.4,
+          "filterType": "bandpass",
+          "varDur": 0.05,
+          "varVol": 0.15,
+          "varFreq": 0.2,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "square",
+          "freqs": [
+            180,
+            220
+          ],
+          "rampFreqs": [
+            60,
+            90
+          ],
+          "vol": 0.18,
+          "dur": 0.12,
+          "rampTime": 0.1,
+          "startOffset": 0.15,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0.02,
+            "decay": 0.1
+          },
+          "pitchVar": 0.15,
+          "durVar": 0.3,
+          "volVar": 0.25,
+          "chance": 1,
+          "count": 18,
+          "spacing": 0.27,
+          "spacingVar": 0.06,
           "countDecay": 0,
           "wavePool": [],
           "pitchPool": [],
