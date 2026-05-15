@@ -26138,23 +26138,35 @@ function tickCockpitFrameAnimation() {
   const now = (typeof game !== 'undefined' && typeof game.time === 'number')
     ? game.time
     : (performance.now() / 1000);
-  const RECOIL_HOLD_PER_FRAME = 0.05;
+  // Per-weapon adaptive hold time. The full recoil sequence is sized to
+  // complete in roughly half the inter-shot interval, so a kick-and-settle
+  // pattern is visible on every shot regardless of fire rate or frame count.
+  // BLASTER's Gatling Cannon (0.05 s gap, 2 frames) gets a 15 ms hold ;
+  // the Sodium Railgun (1.5 s gap, 4 frames) gets capped at 60 ms per
+  // frame so the recoil doesn't drag for 300 ms. Floored at 15 ms so the
+  // fastest weapons don't flicker imperceptibly ; ceilinged at 60 ms so
+  // the slowest don't feel like slow-motion.
+  const fireRate = (player.loadout && player.loadout.weapon && player.loadout.weapon.fireRate) || 0.5;
+  const targetCycle = fireRate * 0.5;
+  const RECOIL_HOLD_PER_FRAME = Math.max(0.015, Math.min(0.06, targetCycle / recoilLen));
   // Detect fresh shot.
   const timer = player.muzzleFlashTimer || 0;
   const lastTimer = entry._lastTimer || 0;
   const freshShot = timer > lastTimer + 0.001;
   entry._lastTimer = timer;
   if (freshShot) {
-    // Shot driver : one frame forward, wrap at end. (-1 idle + 1 = 0).
-    const cur = (typeof entry._recoilIdx === 'number') ? entry._recoilIdx : -1;
-    entry._recoilIdx = ((cur + 1) % recoilLen + recoilLen) % recoilLen;
+    // Restart the sequence on every shot ; the time driver below walks
+    // through the frames. This is what produces the "kick, settle, then
+    // a brief rest before the next shot" feel even when a weapon has only
+    // two frames ; the sequence completes inside the inter-shot gap
+    // because RECOIL_HOLD_PER_FRAME is sized to the weapon's fire rate.
+    entry._recoilIdx = 0;
     entry._recoilIdxStartTime = now;
   } else if (typeof entry._recoilIdx === 'number'
              && entry._recoilIdx >= 0
              && entry._recoilIdx < recoilLen
              && (now - (entry._recoilIdxStartTime || 0)) >= RECOIL_HOLD_PER_FRAME) {
-    // Time driver : advance one frame ; the past-end branch below catches
-    // it and snaps to base if we walked off the end with no new shot.
+    // Time driver : advance one frame.
     entry._recoilIdx += 1;
     entry._recoilIdxStartTime = now;
   }
@@ -26165,7 +26177,7 @@ function tickCockpitFrameAnimation() {
       && entry._recoilIdx < recoilLen) {
     targetUrl = recoilUrls[entry._recoilIdx];
   } else if (typeof entry._recoilIdx === 'number' && entry._recoilIdx >= recoilLen) {
-    // Walked off the end with no new shot ; back to idle.
+    // Walked off the end with no new shot ; back to idle, show base.
     entry._recoilIdx = -1;
   }
   if (entry._currentUrl !== targetUrl) {
