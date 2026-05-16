@@ -26334,9 +26334,11 @@ function _abilityOverlayDescFor(loadoutKey, abilityName) {
     return { baseKey: 'M', fireKey: 'M1', slide: 'down', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'SYPHON' && abilityName === 'Energy Syphon') {
-    // Sustained 2 s drain : slide UP from below, alternate E/E1 while held,
-    // slide back down when released. Duration tracked by abilityActive[1].
-    return { baseKey: 'E', fireKey: 'E1', slide: 'up', sustained: true, totalDur: 2.0 };
+    // (v17 hold-prime) Hold the button to slide the syphon emitter UP from
+    // below ; release to fire an instant zap (E1 muzzle, slide back down).
+    // Routes through abilityInputPress / abilityInputRelease and the
+    // primed-mode overlay path, not the sustained loop.
+    return { baseKey: 'E', fireKey: 'E1', slide: 'up', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'TRACKER' && abilityName === 'Tracker Rockets') {
     return { baseKey: 'R', fireKey: 'R1', slide: 'down', sustained: false, totalDur: 1.0 };
@@ -26392,6 +26394,15 @@ function _preloadAbilityOverlayFrames(loadoutKey) {
 // _ABILITY_OVERLAY_FRAMES lookups. Sets player._abilityOverlayTrigger which
 // the per-frame ticker reads.
 function triggerAbilityOverlay(loadoutKey, abilityName) {
+  // (v17) Hold-prime abilities : if a prime overlay is currently in flight
+  // for this ship (released or still held), let the existing prime->release
+  // path play out instead of restarting the cycle. abilityInputRelease calls
+  // releaseAbilityOverlayPrime BEFORE activateAbility, so by the time we get
+  // here the overlay is already running its muzzle / slide-out phase.
+  const existing = player && player._abilityOverlayTrigger;
+  if (existing && existing.primed && existing.ship === loadoutKey) {
+    return;
+  }
   const desc = _abilityOverlayDescFor(loadoutKey, abilityName);
   if (!desc) return;
   _preloadAbilityOverlayFrames(loadoutKey);
@@ -26402,12 +26413,142 @@ function triggerAbilityOverlay(loadoutKey, abilityName) {
     ship: loadoutKey,
     desc,
     startTime: now,
+    primed: false,
     // For sustained overlays we read abilityActive[] each tick to decide
     // when to slide out. For one-shots we just run the canned 1 s cycle.
     sustainedAbility: desc.sustained ? abilityName : null,
     sustainedCore: false,
     releaseTime: null, // set when sustaining state ends
   };
+}
+
+// (v17) Hold-prime trigger : weapon slides up and stays in place until the
+// player releases the bound input. Called by abilityInputPress() for the
+// abilities listed in _isHoldPrimeAbility. Visual matches the standard
+// slide path but with no auto-fire ; releaseAbilityOverlayPrime drives the
+// muzzle + slide-out half once the player lets go.
+function triggerAbilityOverlayPrime(loadoutKey, abilityName) {
+  const desc = _abilityOverlayDescFor(loadoutKey, abilityName);
+  if (!desc) return;
+  _preloadAbilityOverlayFrames(loadoutKey);
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  player._abilityOverlayTrigger = {
+    ship: loadoutKey,
+    desc,
+    abilityName: abilityName,
+    startTime: now,
+    primed: true,
+    primedReleaseTime: null, // set by releaseAbilityOverlayPrime
+    sustainedAbility: null,
+    sustainedCore: false,
+    releaseTime: null,
+  };
+}
+
+// (v17) Latches the release timestamp onto a primed overlay so the per-frame
+// driver knows when to play the muzzle frame + slide-out. Idempotent : if
+// the trigger isn't primed (or doesn't exist), this is a no-op.
+function releaseAbilityOverlayPrime(loadoutKey, abilityName) {
+  const trig = player && player._abilityOverlayTrigger;
+  if (!trig || !trig.primed) return;
+  if (trig.ship !== loadoutKey) return;
+  if (trig.primedReleaseTime !== null) return; // already released
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  trig.primedReleaseTime = now;
+}
+
+// (v17) Hold-prime ability registry. Press starts the slide-in + hold ;
+// release fires (muzzle frame + slide-out) and runs the actual ability
+// effect. Only cores stay tap-fire (player wants the big-moment cores
+// to land instantly when committed).
+function _isHoldPrimeAbility(loadoutKey, abilityName) {
+  if (loadoutKey === 'SLAYER'   && abilityName === 'Stun Bolt')       return true;
+  if (loadoutKey === 'VORTEX'   && abilityName === 'Laser')           return true;
+  if (loadoutKey === 'PUNCTURE' && abilityName === 'Cluster Missile') return true;
+  if (loadoutKey === 'SYPHON'   && abilityName === 'Energy Syphon')   return true;
+  if (loadoutKey === 'SYPHON'   && abilityName === 'Rocket Salvo')    return true;
+  if (loadoutKey === 'TRACKER'  && abilityName === 'Tracker Rockets') return true;
+  if (loadoutKey === 'TRACKER'  && abilityName === 'Sonar Pulse')     return true;
+  return false;
+}
+
+// Per-ability prereq check for entering the priming state. Mirrors what
+// activateAbility checks at fire time so a doomed activation never paints
+// the slide-in (per the user's request, Tracker Rockets with zero full
+// locks should not even animate).
+function _canPrimeAbility(slot, ability) {
+  if (!player || !ability) return false;
+  if (player.shipState === 'dead') return false;
+  if (typeof game !== 'undefined' && game.state === 'warmup') return false;
+  if (player.abilityCooldowns && player.abilityCooldowns[slot] > 0) return false;
+  if (player.loadoutKey === 'TRACKER' && ability.name === 'Tracker Rockets') {
+    let hasFullLock = false;
+    for (const id in (player.trackerLocks || {})) {
+      if (player.trackerLocks[id] >= 3) { hasFullLock = true; break; }
+    }
+    if (!hasFullLock) return false;
+  }
+  // Vortex Laser : 350 vortex energy. Mirrors the check in executeAbility so
+  // we never paint a slide-in for a press that would silently no-op.
+  if (player.loadoutKey === 'VORTEX' && ability.name === 'Laser') {
+    if ((player.vortexEnergy || 0) < 350) return false;
+  }
+  return true;
+}
+
+// Top-level press handler. Routes to the prime path for hold abilities,
+// or to the existing activateAbility tap-fire path for everything else.
+function abilityInputPress(slot) {
+  if (!player || !player.abilities || !player.abilities[slot]) return;
+  const ability = player.abilities[slot];
+  if (!_isHoldPrimeAbility(player.loadoutKey, ability.name)) {
+    activateAbility(slot);
+    return;
+  }
+  if (!_canPrimeAbility(slot, ability)) return;
+  player._abilityPrime = { slot: slot, abilityName: ability.name };
+  triggerAbilityOverlayPrime(player.loadoutKey, ability.name);
+}
+
+// Top-level release handler. Only triggers a fire if the matching slot is
+// currently primed. The order matters here : releaseAbilityOverlayPrime
+// runs BEFORE activateAbility so triggerAbilityOverlay (called inside
+// activateAbility) sees an active primed trigger and bails out instead of
+// restarting the cycle. The visual transitions prime -> muzzle -> slide-out
+// while activateAbility runs the gameplay effect.
+function abilityInputRelease(slot) {
+  if (!player || !player._abilityPrime) return;
+  if (player._abilityPrime.slot !== slot) return;
+  const ability = player.abilities && player.abilities[slot];
+  player._abilityPrime = null;
+  if (!ability) return;
+  // Final prereq check at release time : if a Tracker Rockets player lost
+  // all locks WHILE holding, cancel silently per user spec ("nothing will
+  // happen"). Same for cooldown that elapsed externally, dying mid-hold, etc.
+  if (!_canPrimeAbility(slot, ability)) {
+    cancelAbilityOverlayPrime();
+    return;
+  }
+  releaseAbilityOverlayPrime(player.loadoutKey, ability.name);
+  activateAbility(slot);
+}
+
+// (v17) Cancel an in-flight prime (slide back down with no muzzle frame).
+// Used when the player dies mid-prime, swaps loadout, or loses an ability
+// prereq while holding (e.g. Tracker Rockets losing its last full lock).
+function cancelAbilityOverlayPrime() {
+  const trig = player && player._abilityOverlayTrigger;
+  if (!trig || !trig.primed) return;
+  if (trig.primedReleaseTime !== null) return;
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  trig.primedReleaseTime = now;
+  trig.primedCancelled = true; // skip muzzle frame on slide-out
 }
 function triggerCoreOverlay(loadoutKey, coreName) {
   const desc = _coreOverlayDescFor(loadoutKey, coreName);
@@ -26448,7 +26589,19 @@ function tickAbilityOverlayFrame() {
     el.style.backgroundImage = '';
     el._currentUrl = null;
     player._abilityOverlayTrigger = null;
+    player._abilityPrime = null;
     return;
+  }
+  // (v17) Live prereq re-check for an in-flight prime. If the player loses
+  // the lock state mid-hold (e.g. their last full-locked Tracker target
+  // dies while they're holding), silently cancel the slide and skip the
+  // muzzle frame, per spec.
+  if (player._abilityPrime) {
+    const a = player.abilities && player.abilities[player._abilityPrime.slot];
+    if (!a || !_canPrimeAbility(player._abilityPrime.slot, a)) {
+      cancelAbilityOverlayPrime();
+      player._abilityPrime = null;
+    }
   }
   const trig = player._abilityOverlayTrigger;
   if (!trig) {
@@ -26495,7 +26648,50 @@ function tickAbilityOverlayFrame() {
   let suffix = desc.baseKey;
   let yOffset = 0; // translateY percentage (0 means fully in place)
   const slideSign = (desc.slide === 'up') ? +1 : -1; // 'up' means start below (+50%), 'down' means start above (-50%)
-  if (desc.sustained) {
+  if (trig.primed) {
+    // HOLD-PRIME : slide weapon in, hold indefinitely while pressed, then on
+    // release play the muzzle frame and slide out. The actual ability
+    // effect is fired by abilityInputRelease (which calls activateAbility) ;
+    // this driver just owns the visual.
+    const elapsedSinceStart = now - trig.startTime;
+    if (trig.primedReleaseTime === null) {
+      // Still being held.
+      if (elapsedSinceStart < SLIDE_IN_DUR) {
+        phaseT = elapsedSinceStart / SLIDE_IN_DUR;
+        yOffset = slideSign * 50 * (1 - phaseT);
+        suffix = desc.baseKey;
+      } else {
+        yOffset = 0;
+        suffix = desc.baseKey;
+      }
+    } else {
+      // Released : play muzzle (if not cancelled) then slide out.
+      const sinceRelease = now - trig.primedReleaseTime;
+      if (!trig.primedCancelled && sinceRelease < FIRE_DUR) {
+        yOffset = 0;
+        if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
+          suffix = desc.fireKey;
+        } else {
+          suffix = desc.baseKey;
+        }
+      } else {
+        const slideStart = trig.primedCancelled ? 0 : FIRE_DUR;
+        const slideElapsed = sinceRelease - slideStart;
+        if (slideElapsed < SLIDE_OUT_DUR) {
+          phaseT = slideElapsed / SLIDE_OUT_DUR;
+          yOffset = slideSign * 50 * phaseT;
+          suffix = desc.baseKey;
+        } else {
+          // Done.
+          el.classList.remove('active');
+          el.style.backgroundImage = '';
+          el._currentUrl = null;
+          player._abilityOverlayTrigger = null;
+          return;
+        }
+      }
+    }
+  } else if (desc.sustained) {
     // SUSTAINED : slide in, then hold/loop, then slide out on release.
     const elapsedSinceStart = now - trig.startTime;
     if (elapsedSinceStart < SLIDE_IN_DUR && trig.releaseTime === null) {
@@ -26638,6 +26834,7 @@ function commitLoadout(key) {
   try {
     _preloadAbilityOverlayFrames(key);
     player._abilityOverlayTrigger = null;
+    player._abilityPrime = null;
     const _aof = document.getElementById('ability-overlay-frame');
     if (_aof) {
       _aof.classList.remove('active');
@@ -33141,9 +33338,16 @@ function pollGamepad() {
   // ---- Gameplay edge-triggered actions (suppressed while a menu is active) ----
   if (!_menuActive) {
     if (input.gpDash && !input.gpDashPrev) dash();
-    if (input.gpAbility0 && !input.gpAbility0Prev) activateAbility(0);
-    if (input.gpAbility1 && !input.gpAbility1Prev) activateAbility(1);
-    if (input.gpAbility2 && !input.gpAbility2Prev) activateAbility(2);
+    // (v17) Press uses abilityInputPress (which routes to prime path for
+    // hold abilities), release uses abilityInputRelease to fire the primed
+    // ability. Both kept inside the menu-gate so an open menu doesn't
+    // trigger weapons.
+    if (input.gpAbility0 && !input.gpAbility0Prev) abilityInputPress(0);
+    if (!input.gpAbility0 && input.gpAbility0Prev) abilityInputRelease(0);
+    if (input.gpAbility1 && !input.gpAbility1Prev) abilityInputPress(1);
+    if (!input.gpAbility1 && input.gpAbility1Prev) abilityInputRelease(1);
+    if (input.gpAbility2 && !input.gpAbility2Prev) abilityInputPress(2);
+    if (!input.gpAbility2 && input.gpAbility2Prev) abilityInputRelease(2);
     if (input.gpCore && !input.gpCorePrev) activateCore();
   }
 }
@@ -35362,9 +35566,12 @@ document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   const kb = input.kbBindings;
   if (kb) {
-    if (k === kb.ability0) activateAbility(0);
-    if (k === kb.ability1) activateAbility(1);
-    if (k === kb.ability2) activateAbility(2);
+    // (v17) Hold-prime abilities route through abilityInputPress, which
+    // starts a slide-in primer and defers the actual fire to keyup.
+    // Non-prime abilities still tap-fire immediately via activateAbility.
+    if (k === kb.ability0) abilityInputPress(0);
+    if (k === kb.ability1) abilityInputPress(1);
+    if (k === kb.ability2) abilityInputPress(2);
     if (k === kb.core) activateCore();
     if (k === kb.dash) dash();
   }
@@ -35466,7 +35673,20 @@ document.addEventListener('DOMContentLoaded', () => {
   _tryAutoJoin();
 });
 
-document.addEventListener('keyup', e => { if (typeof e.key === 'string') input.keys[e.key.toLowerCase()] = false; });
+document.addEventListener('keyup', e => {
+  if (typeof e.key !== 'string') return;
+  const k = e.key.toLowerCase();
+  input.keys[k] = false;
+  // (v17) Route ability-binding releases through abilityInputRelease so
+  // hold-prime abilities can fire on key-up. Non-prime abilities will be
+  // ignored by the release handler (no primer is ever set for them).
+  const kb = input.kbBindings;
+  if (kb) {
+    if (k === kb.ability0) abilityInputRelease(0);
+    if (k === kb.ability1) abilityInputRelease(1);
+    if (k === kb.ability2) abilityInputRelease(2);
+  }
+});
 
 document.addEventListener('mousedown', e => {
   // (v9b) Suppress fire/alt-fire intent when the click is on a UI button or

@@ -404,6 +404,26 @@ canvas { display: block; }
 }
 #cockpit-frame.active { opacity: 1; }
 
+/* (v17) Per-ability weapon-out overlay frame. Sits BEHIND #cockpit-frame
+   (z=8 vs cockpit-frame's z=9), so when a slide-in weapon PNG appears,
+   the painted cockpit arms / guns on cockpit-frame stay drawn over top
+   of the new layer. The frame's background image is set by the JS
+   overlay driver (updateAbilityOverlayFrame / tickAbilityOverlayFrame).
+   Slide animation: starts halfway off-screen (translateY +/- 50%, with
+   sign decided by JS slide direction), animates to 0, then back out.
+   pointer-events: none so HUD clicks pass through. */
+#ability-overlay-frame {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 8;
+  background-repeat: no-repeat; background-position: center center;
+  background-size: cover;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s linear;
+  will-change: transform, opacity;
+}
+#ability-overlay-frame.active { opacity: 1; }
+
 /* ---- VR / WebXR mode ----
    When the WebXRManager reports an active session we add `vr-active` to body.
    Inside VR every 2D screen-space overlay is hidden (the cockpit PNG frame,
@@ -412,6 +432,7 @@ canvas { display: block; }
    settings panels stay reachable on the flat browser window so the user can
    still pick a ship and start a match before pressing the headset on. */
 body.vr-active #cockpit-frame,
+body.vr-active #ability-overlay-frame,
 body.vr-active #circumpunct-hud,
 body.vr-active #hud,
 body.vr-active #ability-pie,
@@ -1888,6 +1909,12 @@ body.vr-active .hit-marker {
     <line x1="10" y1="20" x2="30" y2="20" stroke="#ff2200" stroke-width="2" opacity="0.6"/>
   </svg>
 </div>
+
+<!-- (v17) Per-ability weapon-out overlay : sits BEHIND #cockpit-frame and shows
+     the sliding weapon-bring-out / muzzle-fire frames (SLAYER-S, VORTEX-L,
+     PUNCTURE-M, SYPHON-E, SYPHON-M, TRACKER-R, TRACKER-T, etc.). Populated
+     by updateAbilityOverlayFrame() / tickAbilityOverlayFrame(). -->
+<div id="ability-overlay-frame"></div>
 
 <!-- Per-titan cockpit frame: PNG with alpha cutout, populated by updateCockpitFrame() -->
 <div id="cockpit-frame"></div>
@@ -25814,7 +25841,11 @@ const _framesBaseUrl = (function() {
 //   2. Register the suffix here so the loader probes for it.
 //   3. Add the state condition inside _getActiveAbilityFrameKey.
 const _SHIP_NAMED_FRAMES = {
-  VORTEX:   ['L', 'L2'], // L : Laser ability OR static Mega Laser frame ; L2 : alternate Mega Laser frame (flicker pair)
+  // (v17) VORTEX-L migrated off the cockpit-frame layer onto the new
+  // #ability-overlay-frame "behind" layer (see _ABILITY_OVERLAY_FRAMES
+  // and updateAbilityOverlayFrame). Only the passive railgun-charging
+  // C/C2 alternation remains on the main cockpit frame ; it's not a
+  // "weapon out" slide, it's a state the painted cockpit takes on.
   PUNCTURE: ['C', 'C2'], // C / C2 : Sodium Railgun charging (alternates ; speed scales with charge level)
 };
 
@@ -25840,34 +25871,10 @@ const _SHIP_RECOIL_NUMBERS = {
 function _getActiveAbilityFrameKey(player, entry) {
   if (!player || !player.loadout) return null;
   const lk = player.loadoutKey;
-  if (lk === 'VORTEX') {
-    // Laser ability firing : the offensive-slot ability named 'Laser'.
-    // We walk all three ability slots so a future loadout shuffle doesn't
-    // bake a slot index into the check. The single-burst Laser ability
-    // just shows the static L frame ; it's brief enough that no flicker
-    // is needed.
-    const abilities = player.loadout.abilities || [];
-    if (player.abilityActive) {
-      for (let i = 0; i < abilities.length; i++) {
-        if (abilities[i] && abilities[i].name === 'Laser' && player.abilityActive[i]) {
-          return 'L';
-        }
-      }
-    }
-    // Mega Laser core active : sustained 4 s beam. Alternate L / L2 at
-    // 10 Hz to give the visual a pulse / crackle feel during the core,
-    // distinguishing it from the single-shot ability. Falls back to a
-    // static L if L2 hasn't been drawn / loaded yet.
-    if (player.coreActive && player.loadout.core && player.loadout.core.name === 'Mega Laser') {
-      const hasL2 = entry && entry.namedFrames && entry.namedFrames.L2;
-      if (!hasL2) return 'L';
-      const now = (typeof game !== 'undefined' && typeof game.time === 'number')
-        ? game.time
-        : (performance.now() / 1000);
-      const MEGA_LASER_FLICKER_PERIOD = 0.1; // 100 ms : 10 Hz pulse
-      return (Math.floor(now / MEGA_LASER_FLICKER_PERIOD) % 2 === 0) ? 'L' : 'L2';
-    }
-  }
+  // (v17) VORTEX-L / L2 mega-laser flicker moved to the overlay layer
+  // (#ability-overlay-frame) which slides the weapon in/out from above
+  // and alternates L / ML during the Mega Laser core. The cockpit-frame
+  // layer is no longer responsible for the VORTEX laser visual.
   // PUNCTURE-C / C2 : Sodium Railgun charging. The game already tracks
   // a 0-1 charge value in player.railgunCharge (filled by holding aim ;
   // resets on shot, decays slowly if released without firing). Show the
@@ -26266,6 +26273,512 @@ function tickCockpitFrameAnimation() {
   }
 }
 
+// ============================================================================
+// (v17) Ability overlay frame : per-ability "weapon out" PNG that slides in
+// behind the cockpit-frame, briefly swaps to a muzzle-fire frame, then slides
+// back out. Layered BEHIND #cockpit-frame so the painted cockpit arms / guns
+// always sit on top of the bring-out art. The slide starts from halfway
+// off-screen (translateY +/- 50%) ; total cycle is ~1 s.
+//
+// Coverage:
+//   SLAYER-S    / -S1   : Stun Bolt offensive ability (slide down)
+//   VORTEX-L    / -L1   : Laser offensive ability    (slide down)
+//   VORTEX-L    / -ML   : Mega Laser core            (slide down ; sustained, alternates L/ML)
+//   PUNCTURE-M  / -M1   : Cluster Missile offensive  (slide UP from below)
+//   SYPHON-E    / -E1   : Energy Syphon defensive    (slide UP from below)
+//   SYPHON-M    / -M1   : Rocket Salvo offensive     (slide down)
+//   TRACKER-R   / -R1   : Tracker Rockets offensive + Mega Tracker Rockets core (slide down)
+//   TRACKER-T           : Sonar Pulse utility        (slide down ; single frame)
+//
+// Two driver layers :
+//   - _ABILITY_OVERLAY_FRAMES : per-ship registry of suffixes whose PNGs we
+//     load up-front (so they're decoded before first use ; no late-load
+//     flash). Independent of _SHIP_NAMED_FRAMES, which the cockpit-frame
+//     layer still uses for the PUNCTURE-C/C2 charge-state alternation.
+//   - player._abilityOverlayTrigger : runtime descriptor seeded by
+//     activateAbility / activateCore. Carries timing + which frames to play.
+//     The per-frame ticker (tickAbilityOverlayFrame) reads this and drives
+//     the DOM background / transform.
+// ============================================================================
+const _ABILITY_OVERLAY_FRAMES = {
+  SLAYER:   ['S', 'S1'],
+  VORTEX:   ['L', 'L1', 'ML'],
+  PUNCTURE: ['M', 'M1'],
+  SYPHON:   ['E', 'E1', 'M', 'M1'],
+  TRACKER:  ['R', 'R1', 'T'],
+};
+
+// Per (loadoutKey + trigger) overlay descriptor. Looked up by
+// _abilityOverlayDescFor(player, abilityName) or _coreOverlayDescFor.
+//
+// Fields :
+//   baseKey   : suffix to show during slide-in / hold / slide-out
+//   fireKey   : suffix to swap to during the muzzle-fire window (optional)
+//   altKey    : suffix to alternate WITH baseKey during sustained holds (optional ;
+//                used for VORTEX Mega Laser : L / ML flicker pair)
+//   slide     : 'down' (from above) or 'up' (from below)
+//   sustained : true if the overlay should stay up for the full ability duration ;
+//                false drives the canned 1 s slide-fire-slide cycle
+//   totalDur  : total cycle for non-sustained (defaults 1.0 s)
+function _abilityOverlayDescFor(loadoutKey, abilityName) {
+  if (loadoutKey === 'SLAYER' && abilityName === 'Stun Bolt') {
+    return { baseKey: 'S', fireKey: 'S1', slide: 'down', sustained: false, totalDur: 1.0 };
+  }
+  if (loadoutKey === 'VORTEX' && abilityName === 'Laser') {
+    return { baseKey: 'L', fireKey: 'L1', slide: 'down', sustained: false, totalDur: 1.0 };
+  }
+  if (loadoutKey === 'PUNCTURE' && abilityName === 'Cluster Missile') {
+    return { baseKey: 'M', fireKey: 'M1', slide: 'up', sustained: false, totalDur: 1.0 };
+  }
+  if (loadoutKey === 'SYPHON' && abilityName === 'Rocket Salvo') {
+    return { baseKey: 'M', fireKey: 'M1', slide: 'down', sustained: false, totalDur: 1.0 };
+  }
+  if (loadoutKey === 'SYPHON' && abilityName === 'Energy Syphon') {
+    // (v17 hold-prime) Hold the button to slide the syphon emitter UP from
+    // below ; release to fire an instant zap (E1 muzzle, slide back down).
+    // Routes through abilityInputPress / abilityInputRelease and the
+    // primed-mode overlay path, not the sustained loop.
+    return { baseKey: 'E', fireKey: 'E1', slide: 'up', sustained: false, totalDur: 1.0 };
+  }
+  if (loadoutKey === 'TRACKER' && abilityName === 'Tracker Rockets') {
+    return { baseKey: 'R', fireKey: 'R1', slide: 'down', sustained: false, totalDur: 1.0 };
+  }
+  if (loadoutKey === 'TRACKER' && abilityName === 'Sonar Pulse') {
+    return { baseKey: 'T', fireKey: null, slide: 'down', sustained: false, totalDur: 1.0 };
+  }
+  return null;
+}
+function _coreOverlayDescFor(loadoutKey, coreName) {
+  if (loadoutKey === 'VORTEX' && coreName === 'Mega Laser') {
+    // 4 s sustained beam : slide L in, alternate L / ML at 10 Hz for the
+    // core duration, slide out when coreActive drops.
+    return { baseKey: 'L', altKey: 'ML', slide: 'down', sustained: true, totalDur: 4.0 };
+  }
+  if (loadoutKey === 'TRACKER' && coreName === 'Mega Tracker Rockets') {
+    // 3 s barrage : slide R in, alternate R/R1 rapid-fire, slide out.
+    return { baseKey: 'R', fireKey: 'R1', altKey: 'R1', slide: 'down', sustained: true, totalDur: 3.0 };
+  }
+  return null;
+}
+
+// Per-ship loader cache for the overlay PNGs. Separate from the cockpit-frame
+// cache so the two layers can be reasoned about independently.
+const _abilityOverlayCache = {};   // key (ship) -> { frames: { suffix: { url, img } } }
+const _abilityOverlayInFlight = {};
+function _preloadAbilityOverlayFrames(loadoutKey) {
+  if (!loadoutKey) return;
+  if (_abilityOverlayCache[loadoutKey] || _abilityOverlayInFlight[loadoutKey]) return;
+  const suffixes = _ABILITY_OVERLAY_FRAMES[loadoutKey];
+  if (!suffixes || suffixes.length === 0) return;
+  _abilityOverlayInFlight[loadoutKey] = true;
+  const dir = loadoutKey.charAt(0) + loadoutKey.slice(1).toLowerCase();
+  const entry = { frames: {} };
+  let remaining = suffixes.length;
+  for (const suffix of suffixes) {
+    const url = _framesBaseUrl + dir + '/' + loadoutKey + '-' + suffix + '.png' + _FRAME_CACHE_BUST;
+    const img = new Image();
+    const slot = { url, img, status: null };
+    entry.frames[suffix] = slot;
+    img.onload  = () => { slot.status = 'ok';      if (--remaining === 0) finish(); };
+    img.onerror = () => { slot.status = 'missing'; if (--remaining === 0) finish(); };
+    img.src = url;
+  }
+  function finish() {
+    _abilityOverlayInFlight[loadoutKey] = false;
+    _abilityOverlayCache[loadoutKey] = entry;
+  }
+}
+
+// Called by activateAbility() right after the ability is committed (energy /
+// cooldown checks already passed). loadoutKey doubles as the ship key for
+// _ABILITY_OVERLAY_FRAMES lookups. Sets player._abilityOverlayTrigger which
+// the per-frame ticker reads.
+function triggerAbilityOverlay(loadoutKey, abilityName) {
+  // (v17) Hold-prime abilities : if a prime overlay is currently in flight
+  // for this ship (released or still held), let the existing prime->release
+  // path play out instead of restarting the cycle. abilityInputRelease calls
+  // releaseAbilityOverlayPrime BEFORE activateAbility, so by the time we get
+  // here the overlay is already running its muzzle / slide-out phase.
+  const existing = player && player._abilityOverlayTrigger;
+  if (existing && existing.primed && existing.ship === loadoutKey) {
+    return;
+  }
+  const desc = _abilityOverlayDescFor(loadoutKey, abilityName);
+  if (!desc) return;
+  _preloadAbilityOverlayFrames(loadoutKey);
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  player._abilityOverlayTrigger = {
+    ship: loadoutKey,
+    desc,
+    startTime: now,
+    primed: false,
+    // For sustained overlays we read abilityActive[] each tick to decide
+    // when to slide out. For one-shots we just run the canned 1 s cycle.
+    sustainedAbility: desc.sustained ? abilityName : null,
+    sustainedCore: false,
+    releaseTime: null, // set when sustaining state ends
+  };
+}
+
+// (v17) Hold-prime trigger : weapon slides up and stays in place until the
+// player releases the bound input. Called by abilityInputPress() for the
+// abilities listed in _isHoldPrimeAbility. Visual matches the standard
+// slide path but with no auto-fire ; releaseAbilityOverlayPrime drives the
+// muzzle + slide-out half once the player lets go.
+function triggerAbilityOverlayPrime(loadoutKey, abilityName) {
+  const desc = _abilityOverlayDescFor(loadoutKey, abilityName);
+  if (!desc) return;
+  _preloadAbilityOverlayFrames(loadoutKey);
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  player._abilityOverlayTrigger = {
+    ship: loadoutKey,
+    desc,
+    abilityName: abilityName,
+    startTime: now,
+    primed: true,
+    primedReleaseTime: null, // set by releaseAbilityOverlayPrime
+    sustainedAbility: null,
+    sustainedCore: false,
+    releaseTime: null,
+  };
+}
+
+// (v17) Latches the release timestamp onto a primed overlay so the per-frame
+// driver knows when to play the muzzle frame + slide-out. Idempotent : if
+// the trigger isn't primed (or doesn't exist), this is a no-op.
+function releaseAbilityOverlayPrime(loadoutKey, abilityName) {
+  const trig = player && player._abilityOverlayTrigger;
+  if (!trig || !trig.primed) return;
+  if (trig.ship !== loadoutKey) return;
+  if (trig.primedReleaseTime !== null) return; // already released
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  trig.primedReleaseTime = now;
+}
+
+// (v17) Hold-prime ability registry. Press starts the slide-in + hold ;
+// release fires (muzzle frame + slide-out) and runs the actual ability
+// effect. Only cores stay tap-fire (player wants the big-moment cores
+// to land instantly when committed).
+function _isHoldPrimeAbility(loadoutKey, abilityName) {
+  if (loadoutKey === 'SLAYER'   && abilityName === 'Stun Bolt')       return true;
+  if (loadoutKey === 'VORTEX'   && abilityName === 'Laser')           return true;
+  if (loadoutKey === 'PUNCTURE' && abilityName === 'Cluster Missile') return true;
+  if (loadoutKey === 'SYPHON'   && abilityName === 'Energy Syphon')   return true;
+  if (loadoutKey === 'SYPHON'   && abilityName === 'Rocket Salvo')    return true;
+  if (loadoutKey === 'TRACKER'  && abilityName === 'Tracker Rockets') return true;
+  if (loadoutKey === 'TRACKER'  && abilityName === 'Sonar Pulse')     return true;
+  return false;
+}
+
+// Per-ability prereq check for entering the priming state. Mirrors what
+// activateAbility checks at fire time so a doomed activation never paints
+// the slide-in (per the user's request, Tracker Rockets with zero full
+// locks should not even animate).
+function _canPrimeAbility(slot, ability) {
+  if (!player || !ability) return false;
+  if (player.shipState === 'dead') return false;
+  if (typeof game !== 'undefined' && game.state === 'warmup') return false;
+  if (player.abilityCooldowns && player.abilityCooldowns[slot] > 0) return false;
+  if (player.loadoutKey === 'TRACKER' && ability.name === 'Tracker Rockets') {
+    let hasFullLock = false;
+    for (const id in (player.trackerLocks || {})) {
+      if (player.trackerLocks[id] >= 3) { hasFullLock = true; break; }
+    }
+    if (!hasFullLock) return false;
+  }
+  // Vortex Laser : 350 vortex energy. Mirrors the check in executeAbility so
+  // we never paint a slide-in for a press that would silently no-op.
+  if (player.loadoutKey === 'VORTEX' && ability.name === 'Laser') {
+    if ((player.vortexEnergy || 0) < 350) return false;
+  }
+  return true;
+}
+
+// Top-level press handler. Routes to the prime path for hold abilities,
+// or to the existing activateAbility tap-fire path for everything else.
+function abilityInputPress(slot) {
+  if (!player || !player.abilities || !player.abilities[slot]) return;
+  const ability = player.abilities[slot];
+  if (!_isHoldPrimeAbility(player.loadoutKey, ability.name)) {
+    activateAbility(slot);
+    return;
+  }
+  if (!_canPrimeAbility(slot, ability)) return;
+  player._abilityPrime = { slot: slot, abilityName: ability.name };
+  triggerAbilityOverlayPrime(player.loadoutKey, ability.name);
+}
+
+// Top-level release handler. Only triggers a fire if the matching slot is
+// currently primed. The order matters here : releaseAbilityOverlayPrime
+// runs BEFORE activateAbility so triggerAbilityOverlay (called inside
+// activateAbility) sees an active primed trigger and bails out instead of
+// restarting the cycle. The visual transitions prime -> muzzle -> slide-out
+// while activateAbility runs the gameplay effect.
+function abilityInputRelease(slot) {
+  if (!player || !player._abilityPrime) return;
+  if (player._abilityPrime.slot !== slot) return;
+  const ability = player.abilities && player.abilities[slot];
+  player._abilityPrime = null;
+  if (!ability) return;
+  // Final prereq check at release time : if a Tracker Rockets player lost
+  // all locks WHILE holding, cancel silently per user spec ("nothing will
+  // happen"). Same for cooldown that elapsed externally, dying mid-hold, etc.
+  if (!_canPrimeAbility(slot, ability)) {
+    cancelAbilityOverlayPrime();
+    return;
+  }
+  releaseAbilityOverlayPrime(player.loadoutKey, ability.name);
+  activateAbility(slot);
+}
+
+// (v17) Cancel an in-flight prime (slide back down with no muzzle frame).
+// Used when the player dies mid-prime, swaps loadout, or loses an ability
+// prereq while holding (e.g. Tracker Rockets losing its last full lock).
+function cancelAbilityOverlayPrime() {
+  const trig = player && player._abilityOverlayTrigger;
+  if (!trig || !trig.primed) return;
+  if (trig.primedReleaseTime !== null) return;
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  trig.primedReleaseTime = now;
+  trig.primedCancelled = true; // skip muzzle frame on slide-out
+}
+function triggerCoreOverlay(loadoutKey, coreName) {
+  const desc = _coreOverlayDescFor(loadoutKey, coreName);
+  if (!desc) return;
+  _preloadAbilityOverlayFrames(loadoutKey);
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  player._abilityOverlayTrigger = {
+    ship: loadoutKey,
+    desc,
+    startTime: now,
+    sustainedAbility: null,
+    sustainedCore: true,
+    releaseTime: null,
+  };
+}
+
+// Per-frame driver. Computes the current phase from elapsed time + sustaining
+// state, picks the suffix to display, and sets the DOM background image +
+// transform. Slide phase :
+//
+//   0.00 - 0.25 s : SLIDE IN  (translateY 50% -> 0%, base frame)
+//   0.25 - 0.40 s : FIRE       (muzzle suffix if defined ; otherwise base)
+//   0.40 - 0.65 s : HOLD       (base frame in place)
+//   0.65 - 1.00 s : SLIDE OUT  (translateY 0% -> 50%, base frame)
+//
+// For SUSTAINED overlays (Energy Syphon hold, Mega Laser core, Mega Tracker
+// Rockets core), the FIRE/HOLD phase is replaced by a continuous loop while
+// the ability/core is active : base alternates with altKey at 10 Hz (mega
+// laser visual pulse) ; once the source state ends, the slide-out plays.
+function tickAbilityOverlayFrame() {
+  const el = document.getElementById('ability-overlay-frame');
+  if (!el || !player || !player.loadoutKey) return;
+  // Ghost / VR : hide overlay just like cockpit-frame.
+  if (player.shipState === 'dead') {
+    el.classList.remove('active');
+    el.style.backgroundImage = '';
+    el._currentUrl = null;
+    player._abilityOverlayTrigger = null;
+    player._abilityPrime = null;
+    return;
+  }
+  // (v17) Live prereq re-check for an in-flight prime. If the player loses
+  // the lock state mid-hold (e.g. their last full-locked Tracker target
+  // dies while they're holding), silently cancel the slide and skip the
+  // muzzle frame, per spec.
+  if (player._abilityPrime) {
+    const a = player.abilities && player.abilities[player._abilityPrime.slot];
+    if (!a || !_canPrimeAbility(player._abilityPrime.slot, a)) {
+      cancelAbilityOverlayPrime();
+      player._abilityPrime = null;
+    }
+  }
+  const trig = player._abilityOverlayTrigger;
+  if (!trig) {
+    if (el.classList.contains('active')) {
+      el.classList.remove('active');
+      el.style.backgroundImage = '';
+      el._currentUrl = null;
+    }
+    return;
+  }
+  const cache = _abilityOverlayCache[trig.ship];
+  if (!cache) {
+    // Frames still loading ; leave hidden. Trigger stays armed so when they
+    // arrive (next tick) we pick up cleanly.
+    return;
+  }
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  const desc = trig.desc;
+  // For sustaining triggers : detect when the source state has ended so
+  // the slide-out can play. Once detected, latch releaseTime so we can
+  // measure slide-out elapsed time even though the source state is gone.
+  if (desc.sustained && trig.releaseTime === null) {
+    let stillActive = false;
+    if (trig.sustainedCore) {
+      stillActive = !!player.coreActive;
+    } else if (trig.sustainedAbility) {
+      const abilities = player.loadout && player.loadout.abilities || [];
+      for (let i = 0; i < abilities.length; i++) {
+        if (abilities[i] && abilities[i].name === trig.sustainedAbility && player.abilityActive[i]) {
+          stillActive = true; break;
+        }
+      }
+    }
+    if (!stillActive) trig.releaseTime = now;
+  }
+  const SLIDE_IN_DUR   = 0.25;
+  const FIRE_DUR       = 0.15;
+  const HOLD_DUR       = 0.25;
+  const SLIDE_OUT_DUR  = 0.35;
+  const FLICKER_PERIOD = 0.1;  // 10 Hz for sustained-loop alternation
+  let phase, phaseT; // phase name + 0..1 progress within phase
+  let suffix = desc.baseKey;
+  let yOffset = 0; // translateY percentage (0 means fully in place)
+  const slideSign = (desc.slide === 'up') ? +1 : -1; // 'up' means start below (+50%), 'down' means start above (-50%)
+  if (trig.primed) {
+    // HOLD-PRIME : slide weapon in, hold indefinitely while pressed, then on
+    // release play the muzzle frame and slide out. The actual ability
+    // effect is fired by abilityInputRelease (which calls activateAbility) ;
+    // this driver just owns the visual.
+    const elapsedSinceStart = now - trig.startTime;
+    if (trig.primedReleaseTime === null) {
+      // Still being held.
+      if (elapsedSinceStart < SLIDE_IN_DUR) {
+        phaseT = elapsedSinceStart / SLIDE_IN_DUR;
+        yOffset = slideSign * 50 * (1 - phaseT);
+        suffix = desc.baseKey;
+      } else {
+        yOffset = 0;
+        suffix = desc.baseKey;
+      }
+    } else {
+      // Released : play muzzle (if not cancelled) then slide out.
+      const sinceRelease = now - trig.primedReleaseTime;
+      if (!trig.primedCancelled && sinceRelease < FIRE_DUR) {
+        yOffset = 0;
+        if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
+          suffix = desc.fireKey;
+        } else {
+          suffix = desc.baseKey;
+        }
+      } else {
+        const slideStart = trig.primedCancelled ? 0 : FIRE_DUR;
+        const slideElapsed = sinceRelease - slideStart;
+        if (slideElapsed < SLIDE_OUT_DUR) {
+          phaseT = slideElapsed / SLIDE_OUT_DUR;
+          yOffset = slideSign * 50 * phaseT;
+          suffix = desc.baseKey;
+        } else {
+          // Done.
+          el.classList.remove('active');
+          el.style.backgroundImage = '';
+          el._currentUrl = null;
+          player._abilityOverlayTrigger = null;
+          return;
+        }
+      }
+    }
+  } else if (desc.sustained) {
+    // SUSTAINED : slide in, then hold/loop, then slide out on release.
+    const elapsedSinceStart = now - trig.startTime;
+    if (elapsedSinceStart < SLIDE_IN_DUR && trig.releaseTime === null) {
+      phaseT = elapsedSinceStart / SLIDE_IN_DUR;
+      yOffset = slideSign * 50 * (1 - phaseT);
+      suffix = desc.baseKey;
+    } else if (trig.releaseTime === null) {
+      // Looping body
+      yOffset = 0;
+      if (desc.altKey && cache.frames[desc.altKey] && cache.frames[desc.altKey].status === 'ok') {
+        suffix = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseKey : desc.altKey;
+      } else if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
+        // No alt registered : pulse base/fire instead.
+        suffix = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseKey : desc.fireKey;
+      } else {
+        suffix = desc.baseKey;
+      }
+    } else {
+      const sinceRelease = now - trig.releaseTime;
+      if (sinceRelease < SLIDE_OUT_DUR) {
+        phaseT = sinceRelease / SLIDE_OUT_DUR;
+        yOffset = slideSign * 50 * phaseT;
+        suffix = desc.baseKey;
+      } else {
+        // Fully retracted ; clear trigger.
+        el.classList.remove('active');
+        el.style.backgroundImage = '';
+        el._currentUrl = null;
+        player._abilityOverlayTrigger = null;
+        return;
+      }
+    }
+  } else {
+    // ONE-SHOT 1 s cycle.
+    const elapsed = now - trig.startTime;
+    const total = desc.totalDur || 1.0;
+    const slideOutStart = total - SLIDE_OUT_DUR;
+    if (elapsed < SLIDE_IN_DUR) {
+      phaseT = elapsed / SLIDE_IN_DUR;
+      yOffset = slideSign * 50 * (1 - phaseT);
+      suffix = desc.baseKey;
+    } else if (elapsed < SLIDE_IN_DUR + FIRE_DUR) {
+      yOffset = 0;
+      if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
+        suffix = desc.fireKey;
+      } else {
+        suffix = desc.baseKey;
+      }
+    } else if (elapsed < slideOutStart) {
+      yOffset = 0;
+      suffix = desc.baseKey;
+    } else if (elapsed < total) {
+      phaseT = (elapsed - slideOutStart) / SLIDE_OUT_DUR;
+      yOffset = slideSign * 50 * phaseT;
+      suffix = desc.baseKey;
+    } else {
+      // Done.
+      el.classList.remove('active');
+      el.style.backgroundImage = '';
+      el._currentUrl = null;
+      player._abilityOverlayTrigger = null;
+      return;
+    }
+  }
+  // Resolve the suffix to an URL ; fall back to base if the requested frame
+  // didn't load (e.g. SLAYER-S1 missing -> show S so we never paint nothing).
+  let slot = cache.frames[suffix];
+  if (!slot || slot.status !== 'ok') slot = cache.frames[desc.baseKey];
+  if (!slot || slot.status !== 'ok') {
+    // No usable frames at all ; bail.
+    if (el.classList.contains('active')) {
+      el.classList.remove('active');
+      el.style.backgroundImage = '';
+      el._currentUrl = null;
+    }
+    return;
+  }
+  if (el._currentUrl !== slot.url) {
+    el.style.backgroundImage = 'url("' + slot.url + '")';
+    el._currentUrl = slot.url;
+  }
+  if (!el.classList.contains('active')) el.classList.add('active');
+  // Apply slide transform. Use direct style.transform so we don't fight any
+  // CSS transition (transition: opacity only on this element).
+  el.style.transform = 'translateY(' + yOffset.toFixed(2) + '%)';
+}
+
 // Commit a loadout: fully set up the player ship, build the map, spawn bots, and
 // kick off the launchCountdown (3-2-1-LAUNCH) while ship-select stays visible.
 // Used both for the initial pick (fresh match) and for between-round ship swaps
@@ -26315,6 +26828,20 @@ function commitLoadout(key) {
   player.loadout = loadout;
   player.loadoutKey = key;
   updateCockpitFrame(); // swap the cockpit frame PNG to match the new titan
+  // (v17) Kick off the overlay-frame preload for the new ship + drop any
+  // stale slide-in trigger from the previous ship so we don't paint the
+  // wrong weapon when the new pilot first activates an ability.
+  try {
+    _preloadAbilityOverlayFrames(key);
+    player._abilityOverlayTrigger = null;
+    player._abilityPrime = null;
+    const _aof = document.getElementById('ability-overlay-frame');
+    if (_aof) {
+      _aof.classList.remove('active');
+      _aof.style.backgroundImage = '';
+      _aof._currentUrl = null;
+    }
+  } catch (_) {}
   player.chassis = ch;
   player.health = ch.maxHealth;
   player.maxHealth = ch.maxHealth;
@@ -28187,6 +28714,10 @@ function activateAbility(slot) {
     Overlays.abilityFlash(ability.name || 'ABILITY', bucket ? ABILITY_COLORS[bucket] : null);
   }
   executeAbility(slot, ability);
+  // (v17) Per-ability "weapon out" overlay frame (slides in/out from off-screen
+  // behind the cockpit-frame). No-op when the ability/ship pair isn't
+  // registered in _abilityOverlayDescFor.
+  try { triggerAbilityOverlay(player.loadoutKey, ability.name); } catch (_) {}
   if (isTrapCharges) {
     // Consume a trap charge; start the per-charge regen timer if not already running
     player.trapCharges = Math.max(0, (player.trapCharges || 0) - 1);
@@ -29122,6 +29653,10 @@ function activateCore() {
 
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   const coreName = player.loadout.core.name;
+  // (v17) Sustained core overlay frame : slide weapon in, hold/alternate for
+  // the core duration, slide out when coreActive drops. No-op for cores
+  // not registered in _coreOverlayDescFor (e.g. AI Assist, AI Nanobots).
+  try { triggerCoreOverlay(player.loadoutKey, coreName); } catch (_) {}
 
   // VORTEX: Mega Laser (continuous high-power laser, 4500 dmg over 3s; dealt per tick in updateAbilities)
   if (coreName === 'Mega Laser') {
@@ -29884,14 +30419,17 @@ function updateShieldVisuals(dt) {
       if (u.time)  u.time.value  = game.time;
       if (u.uTime) u.uTime.value = game.time;
       if (u.uHp) u.uHp.value = eFrac;
-      if (u.uIntensity) u.uIntensity.value = 0.85 + 0.45 * eFrac;
+      // (v17) Brighter inside-cockpit read : ~2x intensity on the shell
+      // shader plus a fatter hull emissive boost so the pilot sees the
+      // shield as a vivid purple flood rather than a soft purple wash.
+      if (u.uIntensity) u.uIntensity.value = 1.7 + 0.9 * eFrac;
     }
     // Body glow: emissive purple. Strength tracks energy fraction so the
-    // hull dims as the shield drains.
+    // hull dims as the shield drains. (v17) doubled for stronger internal read.
     {
       const eFrac = (player.vortexMaxEnergy > 0)
         ? Math.max(0, Math.min(1, player.vortexEnergy / player.vortexMaxEnergy)) : 1.0;
-      _setShipShieldEmissive(player.mesh, 0xaa55ff, 0.7 + 0.6 * eFrac);
+      _setShipShieldEmissive(player.mesh, 0xaa55ff, 1.4 + 1.2 * eFrac);
     }
     // Inside-cockpit hex-grid edge overlay.
     _setShieldOverlay('ov-vortex-shield', true);
@@ -29940,10 +30478,11 @@ function updateShieldVisuals(dt) {
       if (u.time)  u.time.value  = game.time;
       if (u.uTime) u.uTime.value = game.time;
       if (u.uHp)   u.uHp.value   = hpPct;
-      if (u.uIntensity) u.uIntensity.value = 0.85 + 0.45 * hpPct;
+      // (v17) Brighter inside-cockpit read.
+      if (u.uIntensity) u.uIntensity.value = 1.7 + 0.9 * hpPct;
     }
-    // Body glow: emissive cyan ; dims as gun-shield HP drops.
-    _setShipShieldEmissive(player.mesh, 0x33ccff, 0.7 + 0.6 * hpPct);
+    // Body glow: emissive cyan ; dims as gun-shield HP drops. (v17) doubled.
+    _setShipShieldEmissive(player.mesh, 0x33ccff, 1.4 + 1.2 * hpPct);
     _setShieldOverlay('ov-gun-shield', true);
     _tickSoundLoop(player, '_gunShieldHumTimer', dt, 0.95, 'shield_hum');
   } else {
@@ -29996,7 +30535,8 @@ function updateShieldVisuals(dt) {
       if (u.time)  u.time.value  = game.time;
       if (u.uTime) u.uTime.value = game.time;
       if (u.uHp)   u.uHp.value   = hpFrac;
-      if (u.uIntensity) u.uIntensity.value = 0.95 + 0.55 * hpFrac;
+      // (v17) Brighter inside-cockpit read.
+      if (u.uIntensity) u.uIntensity.value = 1.9 + 1.1 * hpFrac;
       if (u.uColor) {
         // Live-flame flicker on the red, brighter when HP is full.
         const flicker = Math.sin(game.time * 11) * 0.04 + Math.sin(game.time * 17) * 0.025;
@@ -30008,9 +30548,10 @@ function updateShieldVisuals(dt) {
       }
     }
     // Body glow: emissive red ; flickers slightly to read as live fire.
+    // (v17) doubled so the cockpit interior reads as truly furnace-lit.
     {
       const flick = 0.85 + 0.15 * Math.sin(game.time * 14);
-      _setShipShieldEmissive(player.mesh, 0xff3322, (0.7 + 0.6 * hpFrac) * flick);
+      _setShipShieldEmissive(player.mesh, 0xff3322, (1.4 + 1.2 * hpFrac) * flick);
     }
     // (v14f) Red fire particles wrapping the hull while the shield is up.
     _spawnThermalShieldFire(player.position, player.mesh && player.mesh.quaternion, player.chassis, dt);
@@ -30063,9 +30604,10 @@ function updateShieldVisuals(dt) {
       const u = player.swordBlockMesh.userData._shieldMat.uniforms;
       if (u && u.time)  u.time.value  = game.time;
       if (u && u.uTime) u.uTime.value = game.time;
-      if (u && u.uIntensity) u.uIntensity.value = 1.2;
+      // (v17) Brighter inside-cockpit read for Slayer Absorption shield.
+      if (u && u.uIntensity) u.uIntensity.value = 2.2;
     }
-    _setShipShieldEmissive(player.mesh, 0x33ff66, 1.1);
+    _setShipShieldEmissive(player.mesh, 0x33ff66, 2.2);
     _tickSoundLoop(player, '_swordBlockHumTimer', dt, 0.95, 'shield_hum');
   } else {
     player._swordBlockHumTimer = 0;
@@ -32796,9 +33338,16 @@ function pollGamepad() {
   // ---- Gameplay edge-triggered actions (suppressed while a menu is active) ----
   if (!_menuActive) {
     if (input.gpDash && !input.gpDashPrev) dash();
-    if (input.gpAbility0 && !input.gpAbility0Prev) activateAbility(0);
-    if (input.gpAbility1 && !input.gpAbility1Prev) activateAbility(1);
-    if (input.gpAbility2 && !input.gpAbility2Prev) activateAbility(2);
+    // (v17) Press uses abilityInputPress (which routes to prime path for
+    // hold abilities), release uses abilityInputRelease to fire the primed
+    // ability. Both kept inside the menu-gate so an open menu doesn't
+    // trigger weapons.
+    if (input.gpAbility0 && !input.gpAbility0Prev) abilityInputPress(0);
+    if (!input.gpAbility0 && input.gpAbility0Prev) abilityInputRelease(0);
+    if (input.gpAbility1 && !input.gpAbility1Prev) abilityInputPress(1);
+    if (!input.gpAbility1 && input.gpAbility1Prev) abilityInputRelease(1);
+    if (input.gpAbility2 && !input.gpAbility2Prev) abilityInputPress(2);
+    if (!input.gpAbility2 && input.gpAbility2Prev) abilityInputRelease(2);
     if (input.gpCore && !input.gpCorePrev) activateCore();
   }
 }
@@ -35017,9 +35566,12 @@ document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   const kb = input.kbBindings;
   if (kb) {
-    if (k === kb.ability0) activateAbility(0);
-    if (k === kb.ability1) activateAbility(1);
-    if (k === kb.ability2) activateAbility(2);
+    // (v17) Hold-prime abilities route through abilityInputPress, which
+    // starts a slide-in primer and defers the actual fire to keyup.
+    // Non-prime abilities still tap-fire immediately via activateAbility.
+    if (k === kb.ability0) abilityInputPress(0);
+    if (k === kb.ability1) abilityInputPress(1);
+    if (k === kb.ability2) abilityInputPress(2);
     if (k === kb.core) activateCore();
     if (k === kb.dash) dash();
   }
@@ -35121,7 +35673,20 @@ document.addEventListener('DOMContentLoaded', () => {
   _tryAutoJoin();
 });
 
-document.addEventListener('keyup', e => { if (typeof e.key === 'string') input.keys[e.key.toLowerCase()] = false; });
+document.addEventListener('keyup', e => {
+  if (typeof e.key !== 'string') return;
+  const k = e.key.toLowerCase();
+  input.keys[k] = false;
+  // (v17) Route ability-binding releases through abilityInputRelease so
+  // hold-prime abilities can fire on key-up. Non-prime abilities will be
+  // ignored by the release handler (no primer is ever set for them).
+  const kb = input.kbBindings;
+  if (kb) {
+    if (k === kb.ability0) abilityInputRelease(0);
+    if (k === kb.ability1) abilityInputRelease(1);
+    if (k === kb.ability2) abilityInputRelease(2);
+  }
+});
 
 document.addEventListener('mousedown', e => {
   // (v9b) Suppress fire/alt-fire intent when the click is on a UI button or
@@ -44259,6 +44824,7 @@ function gameLoop(timestamp) {
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
+  tickAbilityOverlayFrame();    // (v17) slide-in ability "weapon out" overlay behind cockpit
   checkExecutions(dt);
 
   // Network: broadcast our state to all peers
