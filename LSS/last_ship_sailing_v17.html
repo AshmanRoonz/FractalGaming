@@ -23446,6 +23446,18 @@ const _PLAYER_MAIN_MUZZLE_FRAC = {
   PUNCTURE: { x: 0.62, y: 0.60 }, // Sodium Railgun : single cannon, upper-right of frame
 };
 
+// (v17) Per-ship launcher fractions for ability / core PROJECTILE spawns.
+// Read off missile_TRACKER.png : two pods, upper-left and upper-right, with
+// barrel tips that project at the listed screen fractions. Used by Tracker
+// Rockets ability and Mega Tracker Rockets core so the missiles visibly
+// emerge from the painted launchers instead of from camera center.
+const _PLAYER_LAUNCHER_FRACS = {
+  TRACKER: [
+    { x: 0.38, y: 0.29 },
+    { x: 0.62, y: 0.29 },
+  ],
+};
+
 // Internal helper: spawn one tracer streak along (fromVec -> toVec).
 // spawnTracer() routes player-side shots through two calls to this (one
 // from each arm) so the visible beams converge on the target as a triangle.
@@ -26339,7 +26351,7 @@ function _applyGunLayer(el, slot) {
 const _ABILITY_OVERLAY_FILES = {
   SLAYER:   ['SLAYER-S.png', 'SLAYER-S1.png'],
   VORTEX:   ['laser_VORTEX.png', 'laserfire_VORTEX.png', 'laserfire1_VORTEX.png'],
-  PUNCTURE: ['PUNCTURE-M.png', 'PUNCTURE-M1.png'],
+  PUNCTURE: ['PUNCTURE-M.png', 'PUNCTURE-M1.png', 'core_PUNCTURE.png', 'corefire_PUNCTURE.png'],
   SYPHON:   ['SYPHON-M.png', 'SYPHON-M1.png', 'energy_SYPHON.png', 'energy1_SYPHON.png'],
   TRACKER:  ['missile_TRACKER.png', 'missilefire_TRACKER.png', 'sonar_TRACKER.png'],
   BLASTER:  ['core_BLASTER.png', 'core1_BLASTER.png'],
@@ -26397,6 +26409,16 @@ function _coreOverlayDescFor(loadoutKey, coreName) {
     // during the 10 s burst. The lower-half guns keep cycling on the
     // gun-layer underneath so they stay visible the whole time.
     return { baseFile: 'core_BLASTER.png', altFile: 'core1_BLASTER.png', slide: 'down', sustained: true, totalDur: 10.0 };
+  }
+  if (loadoutKey === 'PUNCTURE' && coreName === 'Mega Barrage') {
+    // (v17) Mega Barrage : 5 s speed boost + rocket barrage. Core PNGs
+    // (core_PUNCTURE.png / corefire_PUNCTURE.png) slide DOWN from above
+    // and alternate at 10 Hz during the burst, same pattern as the
+    // Mega Tracker Rockets core. The PNG files don't exist yet ; the
+    // loader handles missing files gracefully (status 'missing' falls
+    // back to baseFile, or hides if baseFile is also missing), so this
+    // wiring is safe to land before the art is dropped in.
+    return { baseFile: 'core_PUNCTURE.png', altFile: 'corefire_PUNCTURE.png', slide: 'down', sustained: true, totalDur: 5.0 };
   }
   return null;
 }
@@ -29131,6 +29153,11 @@ function executeAbility(slot, ability) {
       // as Rocket Salvo. Queue them all and the dispatcher releases one
       // per frame. Locks consumed up-front since the user already pressed
       // the button ; partial locks on other targets are unchanged.
+      // (v17) Alternate L/R launcher per missile so the volley reads as
+      // both painted pods firing alternately. Launcher fractions are
+      // computed from missile_TRACKER.png (upper-left + upper-right pods).
+      const _trLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
+      let _trIdx = 0;
       const _trQueue = [];
       for (const target of lockedTargets) {
         for (let m = 0; m < 5; m++) {
@@ -29145,6 +29172,7 @@ function executeAbility(slot, ability) {
             removeHaze:  true,
             tracking:    true,
             trackTarget: target,
+            originFrac:  _trLaunchers[_trIdx++ % _trLaunchers.length],
           });
         }
         // Consume the full lock immediately so a second press during the
@@ -29856,10 +29884,19 @@ function activateCore() {
     // since salvoGuided steers them off the camera quaternion every frame.
     // At 700/s they crossed the room before any meaningful guidance read ;
     // at 175/s the player actually gets to fly the swarm.
+    // (v17) Alternate left/right painted launcher per missile in the
+    // initial burst. Falls back to player.position if the helper or the
+    // ship-launcher table isn't available.
+    const _mtrLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER || null;
     for (let m = 0; m < 8; m++) {
       const spread = new THREE.Vector3((Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3, 0);
       const vel = forward.clone().add(spread).normalize().multiplyScalar(525);
-      const proj = new Projectile(player.position.clone(), vel, 250, 120, 'player', 0xffcc00);
+      let _mtrOrigin = player.position.clone();
+      if (_mtrLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+        const _f = _mtrLaunchers[m % _mtrLaunchers.length];
+        _mtrOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrOrigin;
+      }
+      const proj = new Projectile(_mtrOrigin, vel, 250, 120, 'player', 0xffcc00);
       proj.salvoGuided = true; // remote-guided: follows player crosshair
       proj.smokeTrail = true;
       proj.removeHaze();
@@ -30821,8 +30858,19 @@ function _drainStaggeredRocketSalvo(dt) {
     tracking = false;
     trackTarget = null;
   }
+  // (v17) Per-config muzzle origin. If the config carries an originFrac
+  // (screen-space fraction read off the painted launcher PNG), the rocket
+  // spawns from that world-space muzzle point instead of from the camera
+  // center. Computed at DISPATCH time so it tracks the current camera
+  // pose (and the directional shift composed in by _computeScreenMuzzleWorld).
+  let origin;
+  if (cfg.originFrac && typeof _computeScreenMuzzleWorld === 'function') {
+    origin = _computeScreenMuzzleWorld(cfg.originFrac.x, cfg.originFrac.y) || player.position.clone();
+  } else {
+    origin = player.position.clone();
+  }
   const proj = new Projectile(
-    player.position.clone(),
+    origin,
     cfg.velocity,
     cfg.damage,
     cfg.splash,
@@ -31287,7 +31335,16 @@ function updateAbilities(dt) {
         const spread = new THREE.Vector3((Math.random()-0.5)*0.25, (Math.random()-0.5)*0.25, 0);
         const aimDir = forward.clone().add(spread).normalize();
         const vel = aimDir.multiplyScalar(525);
-        const missile = new Projectile(player.position.clone(), vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
+        // (v17) Alternate left/right painted launcher origin per spawn so
+        // continuous core fire visibly emerges from both pods.
+        let _mtrcOrigin = player.position.clone();
+        const _mtrcLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
+        if (_mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+          player._megaTrackerLaunchIdx = (player._megaTrackerLaunchIdx || 0) + 1;
+          const _f = _mtrcLaunchers[player._megaTrackerLaunchIdx % _mtrcLaunchers.length];
+          _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrcOrigin;
+        }
+        const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
         missile.salvoGuided = true;
         missile.smokeTrail = true;
         missile.removeHaze();
