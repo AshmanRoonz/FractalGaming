@@ -424,6 +424,24 @@ canvas { display: block; }
 }
 #ability-overlay-frame.active { opacity: 1; }
 
+/* (v17) Gun layer. Sits behind both the ability overlay (z=8) and the
+   cockpit frame (z=9), so frame_<SHIP>.png always paints in front of the
+   gun graphics. Hosts the per-ship recoil cycle PNGs (gun, gunfire,
+   gun1, gunfire1, guncharge, core, core1, etc.) and gets the same
+   directional shift applied as the ability overlay (translates opposite
+   to turn so the guns lag behind the cockpit during a flick). */
+#gun-layer {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 7;
+  background-repeat: no-repeat; background-position: center center;
+  background-size: cover;
+  opacity: 0;
+  transform: translate(0, 0);
+  transition: opacity 0.35s ease-out;
+  will-change: transform, opacity;
+}
+#gun-layer.active { opacity: 1; }
+
 /* ---- VR / WebXR mode ----
    When the WebXRManager reports an active session we add `vr-active` to body.
    Inside VR every 2D screen-space overlay is hidden (the cockpit PNG frame,
@@ -433,6 +451,7 @@ canvas { display: block; }
    still pick a ship and start a match before pressing the headset on. */
 body.vr-active #cockpit-frame,
 body.vr-active #ability-overlay-frame,
+body.vr-active #gun-layer,
 body.vr-active #circumpunct-hud,
 body.vr-active #hud,
 body.vr-active #ability-pie,
@@ -1910,13 +1929,19 @@ body.vr-active .hit-marker {
   </svg>
 </div>
 
+<!-- (v17) Gun layer : sits behind the ability overlay and cockpit frame.
+     Holds the per-ship gun_/gunfire_/guncharge_/core_ recoil PNGs that
+     used to live as numbered recoil frames on the cockpit-frame layer.
+     Populated by updateGunLayer() / tickGunLayer(). -->
+<div id="gun-layer"></div>
+
 <!-- (v17) Per-ability weapon-out overlay : sits BEHIND #cockpit-frame and shows
-     the sliding weapon-bring-out / muzzle-fire frames (SLAYER-S, VORTEX-L,
-     PUNCTURE-M, SYPHON-E, SYPHON-M, TRACKER-R, TRACKER-T, etc.). Populated
-     by updateAbilityOverlayFrame() / tickAbilityOverlayFrame(). -->
+     the sliding weapon-bring-out / muzzle-fire frames (laser_, missile_,
+     sonar_, energy_, plus legacy PUNCTURE-M, SLAYER-S, SYPHON-M).
+     Populated by tickAbilityOverlayFrame(). -->
 <div id="ability-overlay-frame"></div>
 
-<!-- Per-titan cockpit frame: PNG with alpha cutout, populated by updateCockpitFrame() -->
+<!-- Per-titan cockpit frame: frame_<SHIP>.png with alpha cutout, populated by updateCockpitFrame() -->
 <div id="cockpit-frame"></div>
 
 <!-- VR / WebXR entry button. Wired up after renderer creation. -->
@@ -23372,6 +23397,55 @@ const _TRACER_BEAM_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, tr
 const _TRACER_TAIL_INNER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
 const _TRACER_TAIL_OUTER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
 
+// (v17) Convert a screen-space pixel (as a 0..1 fraction of viewport
+// width / height) to a world-space point at `fwdOff` units in front of
+// the camera. Used to anchor first-person weapon tracers and beams to
+// the PAINTED gun muzzle on the cockpit frame instead of to the camera
+// origin (which sits inside the ship and reads as "the laser came from
+// my eyeballs").
+// Caller passes the muzzle's image coordinates as 0..1 fractions ; on a
+// 16:9 viewport rendered at background-size: cover, those map roughly
+// 1:1 to screen fractions for the central crop area. On non-16:9
+// aspect ratios the painted muzzle drifts slightly relative to the
+// computed world point, same as the existing two-muzzle TIP_FRAC system.
+function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
+  if (typeof camera === 'undefined' || !player || !player.position) return null;
+  fwdOff = (typeof fwdOff === 'number') ? fwdOff : 60;
+  // (v17) Compose the directional shift applied to the gun-layer so the
+  // computed muzzle world point tracks the visibly-shifted painted
+  // muzzle. _overlayShift.{x,y} are viewport percents ; divide by 100
+  // to convert into the same 0..1 fraction space as the muzzle frac.
+  if (typeof _overlayShift === 'object' && _overlayShift) {
+    fracX += _overlayShift.x / 100;
+    fracY += _overlayShift.y / 100;
+  }
+  const q = camera.quaternion;
+  const rightV = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+  const upV    = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+  const fwdV   = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+  const winW = (typeof window !== 'undefined') ? window.innerWidth : 1920;
+  const winH = (typeof window !== 'undefined') ? window.innerHeight : 1080;
+  const fovRad = (camera.fov || 90) * Math.PI / 180;
+  const halfH = fwdOff * Math.tan(fovRad / 2);
+  const halfW = halfH * (winW / winH);
+  const ndx =  2 * fracX - 1;
+  const ndy = -(2 * fracY - 1);
+  return player.position.clone()
+    .add(rightV.clone().multiplyScalar(ndx * halfW))
+    .add(upV.clone().multiplyScalar(ndy * halfH))
+    .add(fwdV.clone().multiplyScalar(fwdOff));
+}
+
+// Per-ship painted-muzzle screen fractions for first-person main-weapon
+// tracer origins. Keys are loadoutKey. Read directly off the gun_<SHIP>.png
+// alpha pixels (topmost-leftmost opaque region of the cannon barrel).
+// Ships not in this map fall back to the default behavior (origin =
+// player.position) which is fine for ships whose tracers visually converge
+// through the painted barrels of the older two-gun cockpits.
+const _PLAYER_MAIN_MUZZLE_FRAC = {
+  PUNCTURE: { x: 0.62, y: 0.60 }, // Sodium Railgun : single cannon, upper-right of frame
+};
+
 // Internal helper: spawn one tracer streak along (fromVec -> toVec).
 // spawnTracer() routes player-side shots through two calls to this (one
 // from each arm) so the visible beams converge on the target as a triangle.
@@ -25832,70 +25906,14 @@ const _framesBaseUrl = (function() {
   } catch (_) { return './frames/'; }
 })();
 
-// (v16d) Per-ship named ability frames. Filename pattern :
-//   ./frames/<TitleCase>/<KEY>-<SUFFIX>.png
-// When the matching ability/core/state is active, the named frame overrides
-// both base and recoil. _getActiveAbilityFrameKey decides which suffix
-// applies per ship per tick. To add a new named frame for a ship :
-//   1. Drop the PNG at the path above.
-//   2. Register the suffix here so the loader probes for it.
-//   3. Add the state condition inside _getActiveAbilityFrameKey.
-const _SHIP_NAMED_FRAMES = {
-  // (v17) VORTEX-L migrated off the cockpit-frame layer onto the new
-  // #ability-overlay-frame "behind" layer (see _ABILITY_OVERLAY_FRAMES
-  // and updateAbilityOverlayFrame). Only the passive railgun-charging
-  // C/C2 alternation remains on the main cockpit frame ; it's not a
-  // "weapon out" slide, it's a state the painted cockpit takes on.
-  PUNCTURE: ['C', 'C2'], // C / C2 : Sodium Railgun charging (alternates ; speed scales with charge level)
-};
-
-// (v16d) Per-ship numbered recoil frames actually present on disk. The loader
-// only probes these numbers, so no 404s for missing files (e.g. TRACKER5.png).
-// Ships absent from this map fall back to the legacy 1..5 blind-probe. To add
-// a new numbered frame, drop the PNG and add the number here.
-const _SHIP_RECOIL_NUMBERS = {
-  BLASTER:  [2, 3, 4],
-  PUNCTURE: [2, 3, 4],
-  PYRO:     [2, 3, 4, 5],
-  SLAYER:   [1, 2, 3, 4],
-  SYPHON:   [1, 2, 3],
-  TRACKER:  [1, 2, 3, 4],
-  VORTEX:   [1, 2],
-};
-
-// Resolve which named-frame suffix (if any) applies to the player right now.
-// Highest-priority frame source ; checked before recoil and base in the
-// animator. Returns the suffix string (e.g. 'L', 'L2') or null for no
-// override. Takes the cache entry so it can check what alternate frames
-// exist for ships that animate via L / L2 / etc. flicker pairs.
-function _getActiveAbilityFrameKey(player, entry) {
-  if (!player || !player.loadout) return null;
-  const lk = player.loadoutKey;
-  // (v17) VORTEX-L / L2 mega-laser flicker moved to the overlay layer
-  // (#ability-overlay-frame) which slides the weapon in/out from above
-  // and alternates L / ML during the Mega Laser core. The cockpit-frame
-  // layer is no longer responsible for the VORTEX laser visual.
-  // PUNCTURE-C / C2 : Sodium Railgun charging. The game already tracks
-  // a 0-1 charge value in player.railgunCharge (filled by holding aim ;
-  // resets on shot, decays slowly if released without firing). Show the
-  // charge frame whenever there's stored charge to read, and alternate
-  // C / C2 with a period that SHRINKS as charge approaches 1.0 so the
-  // visual flicker builds urgency as the shot gets closer to ready.
-  // Falls back to a static C if C2 hasn't been drawn / loaded yet.
-  if (lk === 'PUNCTURE' && typeof player.railgunCharge === 'number' && player.railgunCharge > 0.02) {
-    const hasC2 = entry && entry.namedFrames && entry.namedFrames.C2;
-    if (!hasC2) return 'C';
-    const charge = Math.min(1.0, Math.max(0, player.railgunCharge));
-    // Lerp from 500 ms (slow breath at 0% charge) to 50 ms (crackling at
-    // 100% charge). 10x range gives a clear "building" feel.
-    const period = 0.5 * (1 - charge) + 0.05 * charge;
-    const now = (typeof game !== 'undefined' && typeof game.time === 'number')
-      ? game.time
-      : (performance.now() / 1000);
-    return (Math.floor(now / period) % 2 === 0) ? 'C' : 'C2';
-  }
-  return null;
-}
+// (v17) Legacy registries kept as stubs for any external references. Recoil
+// frames moved to the gun-layer (see _GUN_CYCLE) ; the cockpit-frame layer
+// now shows only frame_<SHIP>.png. PUNCTURE's railgun charging visual
+// migrated to the gun-layer as guncharge_/guncharge1_PUNCTURE.png
+// alternation (see tickGunLayer).
+const _SHIP_NAMED_FRAMES = {};
+const _SHIP_RECOIL_NUMBERS = {};
+function _getActiveAbilityFrameKey(_player, _entry) { return null; }
 
 // Alpha-channel scan to find where the two painted gun-barrel tips point AND
 // what direction the painted barrels are pointing. For each half of the image
@@ -26025,6 +26043,18 @@ function frameImgToScreen(ix, iy, imgW, imgH, W, H) {
 // Blaster has only 2, 3, 4) just skip that slot in the sequence ; the
 // animator iterates whatever made it into recoilUrls. The subdirectory
 // name is the ship key in title-case (VORTEX -> Vortex).
+// (v17) Cockpit-frame loader, simplified. The frame_<SHIP>.png is now the
+// ONLY image on the #cockpit-frame layer (z=9, top of the stack). It
+// always paints in front of the gun-layer (z=7) and ability-overlay (z=8)
+// and is stationary, so we don't need the old recoil-swap / named-frame
+// override machinery here ; those moved to #gun-layer and
+// #ability-overlay-frame respectively.
+//
+// Muzzle-point detection still runs on the loaded image so the HUD knows
+// where the painted barrel tips land for tracer / flash alignment. With
+// the new layout the barrel tips live on gun_<SHIP>.png, not on the
+// frame ; muzzle detection has been moved to the gun-layer loader where
+// it now scans that image.
 function updateCockpitFrame() {
   const el = document.getElementById('cockpit-frame');
   if (!el) return;
@@ -26035,120 +26065,37 @@ function updateCockpitFrame() {
     if (player) player.cockpitFrameMuzzle = null;
     return;
   }
-  // Subdirectory : title-case ship key. VORTEX -> Vortex, BLASTER -> Blaster.
   const dir = key.charAt(0) + key.slice(1).toLowerCase();
-  const baseUrl = _framesBaseUrl + dir + '/' + key + '.png' + _FRAME_CACHE_BUST;
+  const baseUrl = _framesBaseUrl + dir + '/frame_' + key + '.png' + _FRAME_CACHE_BUST;
   const cached = _cockpitFrameCache[key];
   const apply = (entry) => {
     if (!entry || entry.status !== 'ok') {
       el.classList.remove('active');
       el.style.backgroundImage = '';
-      if (player) player.cockpitFrameMuzzle = null;
       return;
     }
-    el.style.backgroundImage = 'url("' + entry.baseUrl + '")';
+    if (el._currentUrl !== entry.baseUrl) {
+      el.style.backgroundImage = 'url("' + entry.baseUrl + '")';
+      el._currentUrl = entry.baseUrl;
+    }
     el.classList.add('active');
-    entry._currentUrl = entry.baseUrl; // tickCockpitFrameAnimation reads this to decide swaps
-    if (player) player.cockpitFrameMuzzle = entry.muzzle || null;
   };
   if (cached) { apply(cached); return; }
-  // Coalesce: if a probe for this key is already in flight, skip re-issuing.
   if (_cockpitFrameInFlight[key]) return;
   _cockpitFrameInFlight[key] = true;
-  // Probe base + numbered recoil frames (per _SHIP_RECOIL_NUMBERS) + any named
-  // ability frames for this ship, all in parallel. Each is independently
-  // optional ; the animator falls back through the priority chain
-  // (named -> recoil -> base) using whatever loaded.
-  //
-  // Image references are stashed in the entry after probing finishes so
-  // the browser can't evict the decoded bitmaps between swaps. Without
-  // this, fast swap sequences can hit a transparent flash every Nth frame
-  // while the browser re-decodes a recently-evicted PNG.
-  // Recoil numbers : per-ship registry of which numbered PNGs exist on disk.
-  // Ships not in _SHIP_RECOIL_NUMBERS fall back to the legacy blind 1..5 probe.
-  const MAX_RECOIL_FRAMES_FALLBACK = 5;
-  const recoilNumbers = _SHIP_RECOIL_NUMBERS[key] || (function() {
-    const arr = [];
-    for (let n = 1; n <= MAX_RECOIL_FRAMES_FALLBACK; n++) arr.push(n);
-    return arr;
-  })();
   const baseProbe = new Image();
-  const numberedProbes = [];
-  const numberedUrls = [];
-  for (let i = 0; i < recoilNumbers.length; i++) {
-    numberedUrls.push(_framesBaseUrl + dir + '/' + key + recoilNumbers[i] + '.png' + _FRAME_CACHE_BUST);
-    numberedProbes.push(new Image());
-  }
-  const namedSuffixes = _SHIP_NAMED_FRAMES[key] || [];
-  const namedProbes = [];
-  for (const suffix of namedSuffixes) {
-    namedProbes.push({
-      suffix: suffix,
-      image: new Image(),
-      url: _framesBaseUrl + dir + '/' + key + '-' + suffix + '.png' + _FRAME_CACHE_BUST,
-      status: null,
-    });
-  }
-  let baseDone = null;
-  const numberedDone = new Array(recoilNumbers.length).fill(null);
-  function maybeFinish() {
-    if (baseDone === null) return;
-    for (let i = 0; i < recoilNumbers.length; i++) {
-      if (numberedDone[i] === null) return;
-    }
-    for (const np of namedProbes) {
-      if (np.status === null) return;
-    }
+  baseProbe.onload = () => {
     _cockpitFrameInFlight[key] = false;
-    // Collect surviving URLs in numerical order. Ships that skip a
-    // frame number just leave a gap that's omitted ; the animator walks
-    // the surviving URLs end-to-end.
-    const recoilUrls = [];
-    const recoilImages = [];
-    for (let i = 0; i < recoilNumbers.length; i++) {
-      if (numberedDone[i] === 'ok') {
-        recoilUrls.push(numberedUrls[i]);
-        recoilImages.push(numberedProbes[i]);
-      }
-    }
-    const namedFrames = {};
-    const namedImages = {};
-    for (const np of namedProbes) {
-      if (np.status === 'ok') {
-        namedFrames[np.suffix] = np.url;
-        namedImages[np.suffix] = np.image;
-      }
-    }
-    const entry = {
-      status: baseDone,
-      muzzle: baseDone === 'ok' ? detectFrameMuzzlePoints(baseProbe) : null,
-      hasFireFrame: recoilUrls.length > 0,
-      baseUrl: baseUrl,
-      recoilUrls: recoilUrls,
-      namedFrames: namedFrames,
-      // Keep Image references alive to pin decoded bitmaps in memory ;
-      // prevents per-Nth-frame transparent-flash from browser eviction.
-      baseImage: baseProbe,
-      recoilImages: recoilImages,
-      namedImages: namedImages,
-    };
+    const entry = { status: 'ok', baseUrl, baseImage: baseProbe };
     _cockpitFrameCache[key] = entry;
     if (player && player.loadoutKey === key) apply(entry);
-  }
-  baseProbe.onload  = () => { baseDone = 'ok';      maybeFinish(); };
-  baseProbe.onerror = () => { baseDone = 'missing'; maybeFinish(); };
-  for (let i = 0; i < recoilNumbers.length; i++) {
-    const idx = i;
-    numberedProbes[i].onload  = () => { numberedDone[idx] = 'ok';      maybeFinish(); };
-    numberedProbes[i].onerror = () => { numberedDone[idx] = 'missing'; maybeFinish(); };
-    numberedProbes[i].src = numberedUrls[i];
-  }
-  for (const np of namedProbes) {
-    const probe = np;
-    probe.image.onload  = () => { probe.status = 'ok';      maybeFinish(); };
-    probe.image.onerror = () => { probe.status = 'missing'; maybeFinish(); };
-    probe.image.src = probe.url;
-  }
+  };
+  baseProbe.onerror = () => {
+    _cockpitFrameInFlight[key] = false;
+    const entry = { status: 'missing', baseUrl };
+    _cockpitFrameCache[key] = entry;
+    if (player && player.loadoutKey === key) apply(entry);
+  };
   baseProbe.src = baseUrl;
 }
 
@@ -26176,101 +26123,194 @@ function updateCockpitFrame() {
 // fresh from frame 1 again ; rapid fire keeps cycling indefinitely.
 //
 // Only writes backgroundImage when the target URL actually changes ; cheap.
+// (v17) The cockpit-frame layer is now stationary : it just shows
+// frame_<SHIP>.png. Recoil cycling moved to #gun-layer (tickGunLayer).
+// This stub stays because it's still called from the main game loop ;
+// it handles death-state visibility plus reserved hook for the future
+// damage-shake-frame effect (translate frame_ slightly on hit).
 function tickCockpitFrameAnimation() {
   const el = document.getElementById('cockpit-frame');
   if (!el || !player || !player.loadoutKey) return;
-  // (v16d) Ghost mode : when the player is dead, hide the cockpit frame
-  // entirely. The death cam / spectator view shouldn't render the
-  // painted cockpit border because the player isn't IN their ship
-  // anymore. Dropping .active drives the CSS opacity transition so the
-  // frame fades out cleanly. Reappears on respawn when shipState is no
-  // longer 'dead'.
   if (player.shipState === 'dead') {
     el.classList.remove('active');
     return;
   }
   const entry = _cockpitFrameCache[player.loadoutKey];
   if (!entry || entry.status !== 'ok') return;
-  // Re-arm the .active class in case ghost mode just ended (respawn).
-  // Cheap : classList.add is a no-op if the class is already present.
   if (!el.classList.contains('active')) el.classList.add('active');
-  // Named-frame override : highest priority. When VORTEX fires Laser or
-  // Mega Laser is active, the VORTEX-L frame replaces both base and
-  // recoil. Future ability frames (PUNCTURE-C, etc.) plug in via the
-  // _getActiveAbilityFrameKey lookup and the _SHIP_NAMED_FRAMES registry.
-  const abilityKey = _getActiveAbilityFrameKey(player, entry);
-  if (abilityKey && entry.namedFrames && entry.namedFrames[abilityKey]) {
-    const overrideUrl = entry.namedFrames[abilityKey];
-    if (entry._currentUrl !== overrideUrl) {
-      el.style.backgroundImage = 'url("' + overrideUrl + '")';
-      entry._currentUrl = overrideUrl;
-    }
+  // (v17 reserved) Damage shake hook : when player took a hit recently,
+  // jitter the cockpit by a few pixels. Disabled by default ; enable by
+  // setting el.style.transform = 'translate(<jx>px, <jy>px)' here.
+}
+
+// ============================================================================
+// (v17) Gun layer : per-ship main-weapon graphics sitting BEHIND both the
+// ability overlay (z=8) and the cockpit frame (z=9). Holds the recoil cycle
+// PNGs (gun_, gunfire_, gun1_, gunfire1_, guncharge_, core_, core1_).
+//
+// Recoil cycling :
+//   - Each ship has a cycle array of suffix tokens (see _GUN_CYCLE).
+//   - Cycle index PERSISTS across shots (continuous cycling, not per-shot
+//     reset). Two quick shots on a 2-frame cycle [gun, gunfire] read as
+//     gunfire -> gun -> gunfire -> gun.
+//   - Shot driver : every fresh shot bumps the index forward one.
+//   - Time driver : between shots, the index walks forward at
+//     RECOIL_HOLD_PER_FRAME intervals until it reaches the rest frame
+//     (index 0), then halts there.
+//
+// Special states (override the recoil cycle while active) :
+//   - PUNCTURE charging : alternates guncharge_ / guncharge1_ at a rate
+//     that scales with railgunCharge (slow breath at 0% -> crackling at 100%).
+//   - BLASTER core active (AI Assist) : cycle swaps from [gun, gunfire, gun1,
+//     gunfire1] to [core, core1] for the duration of the core.
+// ============================================================================
+const _GUN_CYCLE = {
+  BLASTER:  ['gun', 'gunfire', 'gun1', 'gunfire1'],
+  PUNCTURE: ['gun', 'gunfire'],
+  PYRO:     ['gun', 'guncharge', 'gunfire'],
+  SLAYER:   ['gun', 'gunfire'],
+  SYPHON:   ['gun', 'gunfire'],
+  TRACKER:  ['gun', 'gunfire'],
+  VORTEX:   ['gun', 'gunfire'],
+};
+// (v17) Reserved for future ships whose core actually replaces the main
+// gun visuals. BLASTER moved off this path because core_BLASTER.png /
+// core1_BLASTER.png paint upper-cockpit machinery that should sit ABOVE
+// the still-cycling gun PNGs, not replace them ; the core now rides on
+// the #ability-overlay-frame layer instead (see _coreOverlayDescFor).
+const _GUN_CORE_CYCLE = {};
+// Extra suffixes to preload that aren't in the main cycle (charging frames,
+// core frames). The preloader walks the union of these and _GUN_CYCLE.
+const _GUN_EXTRA_FRAMES = {
+  PUNCTURE: ['guncharge', 'guncharge1'],
+  BLASTER:  ['core', 'core1'],
+};
+const _gunLayerCache = {};
+const _gunLayerInFlight = {};
+function _preloadGunLayer(loadoutKey) {
+  if (!loadoutKey) return;
+  if (_gunLayerCache[loadoutKey] || _gunLayerInFlight[loadoutKey]) return;
+  const cycle = _GUN_CYCLE[loadoutKey];
+  if (!cycle) return;
+  _gunLayerInFlight[loadoutKey] = true;
+  const dir = loadoutKey.charAt(0) + loadoutKey.slice(1).toLowerCase();
+  const allSuffixes = cycle.slice();
+  const extras = _GUN_EXTRA_FRAMES[loadoutKey] || [];
+  for (const s of extras) if (allSuffixes.indexOf(s) < 0) allSuffixes.push(s);
+  const entry = { frames: {}, cycle: cycle, cycleIdx: 0, cycleStartTime: 0, lastTimer: 0 };
+  let remaining = allSuffixes.length;
+  for (const suffix of allSuffixes) {
+    const url = _framesBaseUrl + dir + '/' + suffix + '_' + loadoutKey + '.png' + _FRAME_CACHE_BUST;
+    const img = new Image();
+    const slot = { url, img, status: null };
+    entry.frames[suffix] = slot;
+    img.onload  = () => {
+      slot.status = 'ok';
+      // Run muzzle-point detection on gun_<SHIP>.png since that's where the
+      // painted barrel tips live now (used to be on SHIP.png in the old layout).
+      if (suffix === 'gun' && player && player.loadoutKey === loadoutKey) {
+        try { player.cockpitFrameMuzzle = detectFrameMuzzlePoints(img); } catch (_) {}
+      }
+      if (--remaining === 0) finish();
+    };
+    img.onerror = () => { slot.status = 'missing'; if (--remaining === 0) finish(); };
+    img.src = url;
+  }
+  function finish() {
+    _gunLayerInFlight[loadoutKey] = false;
+    _gunLayerCache[loadoutKey] = entry;
+  }
+}
+
+// Per-frame gun-layer driver.
+function tickGunLayer() {
+  const el = document.getElementById('gun-layer');
+  if (!el || !player || !player.loadoutKey) return;
+  if (player.shipState === 'dead') {
+    el.classList.remove('active');
+    el.style.backgroundImage = '';
+    el._currentUrl = null;
     return;
   }
-  if (!entry.hasFireFrame) {
-    // No recoil frames loaded for this ship ; nothing to animate. Make
-    // sure we're showing the base in case an ability frame was active
-    // a moment ago and the override just released.
-    if (entry._currentUrl !== entry.baseUrl) {
-      el.style.backgroundImage = 'url("' + entry.baseUrl + '")';
-      entry._currentUrl = entry.baseUrl;
-    }
-    return;
-  }
-  const recoilUrls = entry.recoilUrls;
-  const recoilLen = recoilUrls.length;
-  if (recoilLen === 0) return;
-  // Time source : prefer game.time (advances with hitstop / pause) ;
-  // fall back to wall-clock if the game object hasn't booted yet.
+  const entry = _gunLayerCache[player.loadoutKey];
+  if (!entry) return; // still loading
   const now = (typeof game !== 'undefined' && typeof game.time === 'number')
     ? game.time
     : (performance.now() / 1000);
-  // Per-weapon adaptive hold time. The full recoil sequence is sized to
-  // complete in roughly half the inter-shot interval, so a kick-and-settle
-  // pattern is visible on every shot regardless of fire rate or frame count.
-  // BLASTER's Gatling Cannon (0.05 s gap, 2 frames) gets a 15 ms hold ;
-  // the Sodium Railgun (1.5 s gap, 4 frames) gets capped at 60 ms per
-  // frame so the recoil doesn't drag for 300 ms. Floored at 15 ms so the
-  // fastest weapons don't flicker imperceptibly ; ceilinged at 60 ms so
-  // the slowest don't feel like slow-motion.
+
+  // ---- PUNCTURE charging override : alternate guncharge / guncharge1
+  // while railgunCharge > 0. Replaces the old PUNCTURE-C / C2 logic that
+  // used to live on the cockpit-frame layer.
+  if (player.loadoutKey === 'PUNCTURE' && typeof player.railgunCharge === 'number' && player.railgunCharge > 0.02) {
+    const charge = Math.min(1.0, Math.max(0, player.railgunCharge));
+    // 500 ms breath at 0% charge -> 50 ms crackle at 100%. 10x dynamic range.
+    const period = 0.5 * (1 - charge) + 0.05 * charge;
+    const useAlt = (Math.floor(now / period) % 2 === 1);
+    const altSlot = useAlt ? entry.frames['guncharge1'] : entry.frames['guncharge'];
+    const slot = (altSlot && altSlot.status === 'ok')
+      ? altSlot
+      : entry.frames['guncharge'] || entry.frames['gun'];
+    _applyGunLayer(el, slot);
+    return;
+  }
+
+  // ---- Optional core-state cycle override per ship (none currently in use).
+  // BLASTER previously routed AI Assist through here to swap the gun cycle
+  // to core / core1, but that hid the main guns ; the core now overlays via
+  // #ability-overlay-frame and gun-layer continues its normal cycle.
+  let cycle = entry.cycle;
+  if (player.loadoutKey && player.coreActive && _GUN_CORE_CYCLE[player.loadoutKey]) {
+    cycle = _GUN_CORE_CYCLE[player.loadoutKey];
+    if (entry.cycleIdx >= cycle.length) entry.cycleIdx = 0;
+  }
+  const cycleLen = cycle.length;
+  if (cycleLen === 0) return;
+
+  // Adaptive hold time based on weapon fire rate. Floor 15 ms so very fast
+  // cycles don't flicker imperceptibly ; ceiling 60 ms so very slow ones
+  // don't drag.
   const fireRate = (player.loadout && player.loadout.weapon && player.loadout.weapon.fireRate) || 0.5;
   const targetCycle = fireRate * 0.5;
-  const RECOIL_HOLD_PER_FRAME = Math.max(0.015, Math.min(0.06, targetCycle / recoilLen));
-  // Detect fresh shot.
+  const RECOIL_HOLD_PER_FRAME = Math.max(0.015, Math.min(0.06, targetCycle / cycleLen));
+
+  // Shot driver : muzzleFlashTimer ticks upward each fire. Compare against
+  // the cached last value to detect rising edges.
   const timer = player.muzzleFlashTimer || 0;
-  const lastTimer = entry._lastTimer || 0;
-  const freshShot = timer > lastTimer + 0.001;
-  entry._lastTimer = timer;
+  const freshShot = timer > entry.lastTimer + 0.001;
+  entry.lastTimer = timer;
   if (freshShot) {
-    // Restart the sequence on every shot ; the time driver below walks
-    // through the frames. This is what produces the "kick, settle, then
-    // a brief rest before the next shot" feel even when a weapon has only
-    // two frames ; the sequence completes inside the inter-shot gap
-    // because RECOIL_HOLD_PER_FRAME is sized to the weapon's fire rate.
-    entry._recoilIdx = 0;
-    entry._recoilIdxStartTime = now;
-  } else if (typeof entry._recoilIdx === 'number'
-             && entry._recoilIdx >= 0
-             && entry._recoilIdx < recoilLen
-             && (now - (entry._recoilIdxStartTime || 0)) >= RECOIL_HOLD_PER_FRAME) {
-    // Time driver : advance one frame.
-    entry._recoilIdx += 1;
-    entry._recoilIdxStartTime = now;
+    entry.cycleIdx = (entry.cycleIdx + 1) % cycleLen;
+    entry.cycleStartTime = now;
+  } else if (entry.cycleIdx !== 0 && (now - entry.cycleStartTime) >= RECOIL_HOLD_PER_FRAME) {
+    // Time driver : walk forward until we hit the rest frame (idx 0), then halt.
+    entry.cycleIdx = (entry.cycleIdx + 1) % cycleLen;
+    entry.cycleStartTime = now;
   }
-  // Resolve display.
-  let targetUrl = entry.baseUrl;
-  if (typeof entry._recoilIdx === 'number'
-      && entry._recoilIdx >= 0
-      && entry._recoilIdx < recoilLen) {
-    targetUrl = recoilUrls[entry._recoilIdx];
-  } else if (typeof entry._recoilIdx === 'number' && entry._recoilIdx >= recoilLen) {
-    // Walked off the end with no new shot ; back to idle, show base.
-    entry._recoilIdx = -1;
+
+  const suffix = cycle[entry.cycleIdx];
+  let slot = entry.frames[suffix];
+  if (!slot || slot.status !== 'ok') slot = entry.frames['gun'];
+  _applyGunLayer(el, slot);
+}
+
+function _applyGunLayer(el, slot) {
+  if (!slot || slot.status !== 'ok') {
+    el.classList.remove('active');
+    el.style.backgroundImage = '';
+    el._currentUrl = null;
+    return;
   }
-  if (entry._currentUrl !== targetUrl) {
-    el.style.backgroundImage = 'url("' + targetUrl + '")';
-    entry._currentUrl = targetUrl;
+  if (el._currentUrl !== slot.url) {
+    el.style.backgroundImage = 'url("' + slot.url + '")';
+    el._currentUrl = slot.url;
   }
+  if (!el.classList.contains('active')) el.classList.add('active');
+  // (v17) Apply the directional shift so the gun lags opposite to the
+  // ship's turn. Same shift state used by the ability overlay so both
+  // behind-layers move in lockstep.
+  const sx = (_overlayShift && _overlayShift.x) || 0;
+  const sy = (_overlayShift && _overlayShift.y) || 0;
+  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + sy.toFixed(2) + '%)';
 }
 
 // ============================================================================
@@ -26280,105 +26320,105 @@ function tickCockpitFrameAnimation() {
 // always sit on top of the bring-out art. The slide starts from halfway
 // off-screen (translateY +/- 50%) ; total cycle is ~1 s.
 //
-// Coverage:
-//   SLAYER-S    / -S1   : Stun Bolt offensive ability (slide down)
-//   VORTEX-L    / -L1   : Laser offensive ability    (slide down)
-//   VORTEX-L    / -ML   : Mega Laser core            (slide down ; sustained, alternates L/ML)
-//   PUNCTURE-M  / -M1   : Cluster Missile offensive  (slide UP from below)
-//   SYPHON-E    / -E1   : Energy Syphon defensive    (slide UP from below)
-//   SYPHON-M    / -M1   : Rocket Salvo offensive     (slide down)
-//   TRACKER-R   / -R1   : Tracker Rockets offensive + Mega Tracker Rockets core (slide down)
-//   TRACKER-T           : Sonar Pulse utility        (slide down ; single frame)
+// Coverage (filenames in disk-native form):
+//   SLAYER-S.png    / SLAYER-S1.png      : Stun Bolt (slide down)
+//   laser_VORTEX    / laserfire_VORTEX   : Laser ability (slide down)
+//   laserfire / laserfire1_VORTEX        : Mega Laser core (sustained, alternates)
+//   PUNCTURE-M.png  / PUNCTURE-M1.png    : Cluster Missile (slide UP)
+//   energy_SYPHON   / energy1_SYPHON     : Energy Syphon (slide down)
+//   SYPHON-M.png    / SYPHON-M1.png      : Rocket Salvo (slide down)
+//   missile_TRACKER / missilefire_TRACKER: Tracker Rockets ability + core (sustained for core)
+//   sonar_TRACKER                        : Sonar Pulse (slide down, single frame)
 //
-// Two driver layers :
-//   - _ABILITY_OVERLAY_FRAMES : per-ship registry of suffixes whose PNGs we
-//     load up-front (so they're decoded before first use ; no late-load
-//     flash). Independent of _SHIP_NAMED_FRAMES, which the cockpit-frame
-//     layer still uses for the PUNCTURE-C/C2 charge-state alternation.
-//   - player._abilityOverlayTrigger : runtime descriptor seeded by
-//     activateAbility / activateCore. Carries timing + which frames to play.
-//     The per-frame ticker (tickAbilityOverlayFrame) reads this and drives
-//     the DOM background / transform.
+// (v17 file naming) Descriptors now carry full filenames instead of bare
+// suffixes so the loader can mix the new `<purpose>_<SHIP>.png` style with
+// the legacy `<SHIP>-<TAG>.png` style transparently. The cache keys by
+// filename ; lookups are O(1).
 // ============================================================================
-const _ABILITY_OVERLAY_FRAMES = {
-  SLAYER:   ['S', 'S1'],
-  VORTEX:   ['L', 'L1', 'ML'],
-  PUNCTURE: ['M', 'M1'],
-  SYPHON:   ['E', 'E1', 'M', 'M1'],
-  TRACKER:  ['R', 'R1', 'T'],
+// Per-ship preload manifest. Filenames the loader probes on ship-commit.
+const _ABILITY_OVERLAY_FILES = {
+  SLAYER:   ['SLAYER-S.png', 'SLAYER-S1.png'],
+  VORTEX:   ['laser_VORTEX.png', 'laserfire_VORTEX.png', 'laserfire1_VORTEX.png'],
+  PUNCTURE: ['PUNCTURE-M.png', 'PUNCTURE-M1.png'],
+  SYPHON:   ['SYPHON-M.png', 'SYPHON-M1.png', 'energy_SYPHON.png', 'energy1_SYPHON.png'],
+  TRACKER:  ['missile_TRACKER.png', 'missilefire_TRACKER.png', 'sonar_TRACKER.png'],
+  BLASTER:  ['core_BLASTER.png', 'core1_BLASTER.png'],
 };
 
-// Per (loadoutKey + trigger) overlay descriptor. Looked up by
-// _abilityOverlayDescFor(player, abilityName) or _coreOverlayDescFor.
+// Per (loadoutKey + ability/core) overlay descriptor.
 //
 // Fields :
-//   baseKey   : suffix to show during slide-in / hold / slide-out
-//   fireKey   : suffix to swap to during the muzzle-fire window (optional)
-//   altKey    : suffix to alternate WITH baseKey during sustained holds (optional ;
-//                used for VORTEX Mega Laser : L / ML flicker pair)
+//   baseFile  : filename of the bring-out / rest frame
+//   fireFile  : filename to swap to during the muzzle-fire window (optional)
+//   altFile   : filename to alternate WITH baseFile during sustained holds (optional)
 //   slide     : 'down' (from above) or 'up' (from below)
-//   sustained : true if the overlay should stay up for the full ability duration ;
-//                false drives the canned 1 s slide-fire-slide cycle
-//   totalDur  : total cycle for non-sustained (defaults 1.0 s)
+//   sustained : true for cores that stay up for their duration
+//   totalDur  : seconds (one-shot cycle length, or sustained ceiling)
 function _abilityOverlayDescFor(loadoutKey, abilityName) {
   if (loadoutKey === 'SLAYER' && abilityName === 'Stun Bolt') {
-    return { baseKey: 'S', fireKey: 'S1', slide: 'down', sustained: false, totalDur: 1.0 };
+    return { baseFile: 'SLAYER-S.png', fireFile: 'SLAYER-S1.png', slide: 'down', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'VORTEX' && abilityName === 'Laser') {
-    return { baseKey: 'L', fireKey: 'L1', slide: 'down', sustained: false, totalDur: 1.0 };
+    return { baseFile: 'laser_VORTEX.png', fireFile: 'laserfire_VORTEX.png', slide: 'down', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'PUNCTURE' && abilityName === 'Cluster Missile') {
-    return { baseKey: 'M', fireKey: 'M1', slide: 'up', sustained: false, totalDur: 1.0 };
+    return { baseFile: 'PUNCTURE-M.png', fireFile: 'PUNCTURE-M1.png', slide: 'up', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'SYPHON' && abilityName === 'Rocket Salvo') {
-    return { baseKey: 'M', fireKey: 'M1', slide: 'down', sustained: false, totalDur: 1.0 };
+    return { baseFile: 'SYPHON-M.png', fireFile: 'SYPHON-M1.png', slide: 'down', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'SYPHON' && abilityName === 'Energy Syphon') {
-    // (v17 hold-prime) Hold the button to slide the syphon emitter UP from
-    // below ; release to fire an instant zap (E1 muzzle, slide back down).
-    // Routes through abilityInputPress / abilityInputRelease and the
-    // primed-mode overlay path, not the sustained loop.
-    return { baseKey: 'E', fireKey: 'E1', slide: 'up', sustained: false, totalDur: 1.0 };
+    // (v17) Slides DOWN from above to match Rocket Salvo. Hold to bring in,
+    // release fires the instant zap (energy1 muzzle), then slides back up.
+    return { baseFile: 'energy_SYPHON.png', fireFile: 'energy1_SYPHON.png', slide: 'down', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'TRACKER' && abilityName === 'Tracker Rockets') {
-    return { baseKey: 'R', fireKey: 'R1', slide: 'down', sustained: false, totalDur: 1.0 };
+    return { baseFile: 'missile_TRACKER.png', fireFile: 'missilefire_TRACKER.png', slide: 'down', sustained: false, totalDur: 1.0 };
   }
   if (loadoutKey === 'TRACKER' && abilityName === 'Sonar Pulse') {
-    return { baseKey: 'T', fireKey: null, slide: 'down', sustained: false, totalDur: 1.0 };
+    return { baseFile: 'sonar_TRACKER.png', fireFile: null, slide: 'down', sustained: false, totalDur: 1.0 };
   }
   return null;
 }
 function _coreOverlayDescFor(loadoutKey, coreName) {
   if (loadoutKey === 'VORTEX' && coreName === 'Mega Laser') {
-    // 4 s sustained beam : slide L in, alternate L / ML at 10 Hz for the
-    // core duration, slide out when coreActive drops.
-    return { baseKey: 'L', altKey: 'ML', slide: 'down', sustained: true, totalDur: 4.0 };
+    // 4 s sustained beam : slide laserfire in, alternate laserfire / laserfire1
+    // at 10 Hz for the core duration, slide out when coreActive drops.
+    return { baseFile: 'laserfire_VORTEX.png', altFile: 'laserfire1_VORTEX.png', slide: 'down', sustained: true, totalDur: 4.0 };
   }
   if (loadoutKey === 'TRACKER' && coreName === 'Mega Tracker Rockets') {
-    // 3 s barrage : slide R in, alternate R/R1 rapid-fire, slide out.
-    return { baseKey: 'R', fireKey: 'R1', altKey: 'R1', slide: 'down', sustained: true, totalDur: 3.0 };
+    // 3 s barrage : missile / missilefire alternation.
+    return { baseFile: 'missile_TRACKER.png', altFile: 'missilefire_TRACKER.png', slide: 'down', sustained: true, totalDur: 3.0 };
+  }
+  if (loadoutKey === 'BLASTER' && coreName === 'AI Assist') {
+    // (v17) AI Assist core machinery sits at the top of core_BLASTER.png
+    // (upper cockpit), so slides DOWN from above. core1 is the muzzle-fire
+    // variant ; alternation at 10 Hz reads as the auto-aim system pulsing
+    // during the 10 s burst. The lower-half guns keep cycling on the
+    // gun-layer underneath so they stay visible the whole time.
+    return { baseFile: 'core_BLASTER.png', altFile: 'core1_BLASTER.png', slide: 'down', sustained: true, totalDur: 10.0 };
   }
   return null;
 }
 
 // Per-ship loader cache for the overlay PNGs. Separate from the cockpit-frame
-// cache so the two layers can be reasoned about independently.
-const _abilityOverlayCache = {};   // key (ship) -> { frames: { suffix: { url, img } } }
+// cache so the two layers can be reasoned about independently. Keys by filename.
+const _abilityOverlayCache = {};   // key (ship) -> { frames: { filename: { url, img, status } } }
 const _abilityOverlayInFlight = {};
 function _preloadAbilityOverlayFrames(loadoutKey) {
   if (!loadoutKey) return;
   if (_abilityOverlayCache[loadoutKey] || _abilityOverlayInFlight[loadoutKey]) return;
-  const suffixes = _ABILITY_OVERLAY_FRAMES[loadoutKey];
-  if (!suffixes || suffixes.length === 0) return;
+  const files = _ABILITY_OVERLAY_FILES[loadoutKey];
+  if (!files || files.length === 0) return;
   _abilityOverlayInFlight[loadoutKey] = true;
   const dir = loadoutKey.charAt(0) + loadoutKey.slice(1).toLowerCase();
   const entry = { frames: {} };
-  let remaining = suffixes.length;
-  for (const suffix of suffixes) {
-    const url = _framesBaseUrl + dir + '/' + loadoutKey + '-' + suffix + '.png' + _FRAME_CACHE_BUST;
+  let remaining = files.length;
+  for (const filename of files) {
+    const url = _framesBaseUrl + dir + '/' + filename + _FRAME_CACHE_BUST;
     const img = new Image();
     const slot = { url, img, status: null };
-    entry.frames[suffix] = slot;
+    entry.frames[filename] = slot;
     img.onload  = () => { slot.status = 'ok';      if (--remaining === 0) finish(); };
     img.onerror = () => { slot.status = 'missing'; if (--remaining === 0) finish(); };
     img.src = url;
@@ -26567,6 +26607,73 @@ function triggerCoreOverlay(loadoutKey, coreName) {
   };
 }
 
+// (v17) Directional shift state. The non-frame layers (#gun-layer +
+// #ability-overlay-frame) translate opposite to the player's turn so the
+// guns visually lag the cockpit. Both layers read the SAME _overlayShift
+// state so they move in lockstep. Smoothed via spring-damp toward a
+// target derived from the per-frame yaw / pitch delta.
+//
+// SHIFT_GAIN     : viewport-percent per rad/s of angular velocity.
+// SHIFT_MAX      : ceiling (percent) so a fast spin doesn't push the layers
+//                  fully off-screen.
+// SHIFT_FOLLOW   : 0..1 lerp factor toward target each tick. Higher = snappier.
+// SHIFT_DECAY    : 0..1 multiplier applied when there's no turn input ; the
+//                  shift relaxes back to 0 over a few hundred ms.
+const _overlayShift = {
+  x: 0, y: 0,
+  lastEulerX: 0, lastEulerY: 0,
+  lastTime: 0,
+  inited: false,
+};
+const SHIFT_GAIN   = 1.4;  // % per rad/s. ~1 rad/s flick produces ~1.4% shift.
+const SHIFT_MAX    = 4.0;  // % cap.
+const SHIFT_FOLLOW = 0.22;
+const SHIFT_DECAY  = 0.88;
+function _updateOverlayShift() {
+  if (!player || !player.euler) return;
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number')
+    ? game.time
+    : (performance.now() / 1000);
+  const ex = player.euler.x, ey = player.euler.y;
+  if (!_overlayShift.inited) {
+    _overlayShift.lastEulerX = ex;
+    _overlayShift.lastEulerY = ey;
+    _overlayShift.lastTime = now;
+    _overlayShift.inited = true;
+    return;
+  }
+  const dt = Math.max(0.001, now - _overlayShift.lastTime);
+  let dEx = ex - _overlayShift.lastEulerX; // pitch delta
+  let dEy = ey - _overlayShift.lastEulerY; // yaw delta
+  // Wrap yaw across the +/-pi seam so a 359 -> 1 deg jump doesn't read as a
+  // huge spin in the wrong direction.
+  if (dEy >  Math.PI) dEy -= 2 * Math.PI;
+  if (dEy < -Math.PI) dEy += 2 * Math.PI;
+  _overlayShift.lastEulerX = ex;
+  _overlayShift.lastEulerY = ey;
+  _overlayShift.lastTime = now;
+  const omegaY = dEy / dt; // yaw rate (rad/s)
+  const omegaX = dEx / dt; // pitch rate
+  // Opposite direction (negative). Yaw moves layer horizontally ; pitch moves it vertically.
+  let targetX = -omegaY * SHIFT_GAIN;
+  let targetY = -omegaX * SHIFT_GAIN;
+  if (targetX >  SHIFT_MAX) targetX =  SHIFT_MAX;
+  if (targetX < -SHIFT_MAX) targetX = -SHIFT_MAX;
+  if (targetY >  SHIFT_MAX) targetY =  SHIFT_MAX;
+  if (targetY < -SHIFT_MAX) targetY = -SHIFT_MAX;
+  // Spring-damp toward target. When the player stops turning the target
+  // collapses to 0 ; the decay keeps the recentering smooth instead of
+  // snapping back the instant input ends.
+  const tinyInput = Math.abs(omegaX) + Math.abs(omegaY) < 0.05;
+  if (tinyInput) {
+    _overlayShift.x *= SHIFT_DECAY;
+    _overlayShift.y *= SHIFT_DECAY;
+  } else {
+    _overlayShift.x += (targetX - _overlayShift.x) * SHIFT_FOLLOW;
+    _overlayShift.y += (targetY - _overlayShift.y) * SHIFT_FOLLOW;
+  }
+}
+
 // Per-frame driver. Computes the current phase from elapsed time + sustaining
 // state, picks the suffix to display, and sets the DOM background image +
 // transform. Slide phase :
@@ -26648,41 +26755,29 @@ function tickAbilityOverlayFrame() {
   let suffix = desc.baseKey;
   let yOffset = 0; // translateY percentage (0 means fully in place)
   const slideSign = (desc.slide === 'up') ? +1 : -1; // 'up' means start below (+50%), 'down' means start above (-50%)
+  let pickedFile = desc.baseFile;
+  const fileExists = (fname) => fname && cache.frames[fname] && cache.frames[fname].status === 'ok';
   if (trig.primed) {
-    // HOLD-PRIME : slide weapon in, hold indefinitely while pressed, then on
-    // release play the muzzle frame and slide out. The actual ability
-    // effect is fired by abilityInputRelease (which calls activateAbility) ;
-    // this driver just owns the visual.
     const elapsedSinceStart = now - trig.startTime;
     if (trig.primedReleaseTime === null) {
-      // Still being held.
       if (elapsedSinceStart < SLIDE_IN_DUR) {
         phaseT = elapsedSinceStart / SLIDE_IN_DUR;
         yOffset = slideSign * 50 * (1 - phaseT);
-        suffix = desc.baseKey;
-      } else {
-        yOffset = 0;
-        suffix = desc.baseKey;
       }
+      pickedFile = desc.baseFile;
     } else {
-      // Released : play muzzle (if not cancelled) then slide out.
       const sinceRelease = now - trig.primedReleaseTime;
       if (!trig.primedCancelled && sinceRelease < FIRE_DUR) {
         yOffset = 0;
-        if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
-          suffix = desc.fireKey;
-        } else {
-          suffix = desc.baseKey;
-        }
+        pickedFile = fileExists(desc.fireFile) ? desc.fireFile : desc.baseFile;
       } else {
         const slideStart = trig.primedCancelled ? 0 : FIRE_DUR;
         const slideElapsed = sinceRelease - slideStart;
         if (slideElapsed < SLIDE_OUT_DUR) {
           phaseT = slideElapsed / SLIDE_OUT_DUR;
           yOffset = slideSign * 50 * phaseT;
-          suffix = desc.baseKey;
+          pickedFile = desc.baseFile;
         } else {
-          // Done.
           el.classList.remove('active');
           el.style.backgroundImage = '';
           el._currentUrl = null;
@@ -26692,31 +26787,27 @@ function tickAbilityOverlayFrame() {
       }
     }
   } else if (desc.sustained) {
-    // SUSTAINED : slide in, then hold/loop, then slide out on release.
     const elapsedSinceStart = now - trig.startTime;
     if (elapsedSinceStart < SLIDE_IN_DUR && trig.releaseTime === null) {
       phaseT = elapsedSinceStart / SLIDE_IN_DUR;
       yOffset = slideSign * 50 * (1 - phaseT);
-      suffix = desc.baseKey;
+      pickedFile = desc.baseFile;
     } else if (trig.releaseTime === null) {
-      // Looping body
       yOffset = 0;
-      if (desc.altKey && cache.frames[desc.altKey] && cache.frames[desc.altKey].status === 'ok') {
-        suffix = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseKey : desc.altKey;
-      } else if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
-        // No alt registered : pulse base/fire instead.
-        suffix = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseKey : desc.fireKey;
+      if (fileExists(desc.altFile)) {
+        pickedFile = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseFile : desc.altFile;
+      } else if (fileExists(desc.fireFile)) {
+        pickedFile = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseFile : desc.fireFile;
       } else {
-        suffix = desc.baseKey;
+        pickedFile = desc.baseFile;
       }
     } else {
       const sinceRelease = now - trig.releaseTime;
       if (sinceRelease < SLIDE_OUT_DUR) {
         phaseT = sinceRelease / SLIDE_OUT_DUR;
         yOffset = slideSign * 50 * phaseT;
-        suffix = desc.baseKey;
+        pickedFile = desc.baseFile;
       } else {
-        // Fully retracted ; clear trigger.
         el.classList.remove('active');
         el.style.backgroundImage = '';
         el._currentUrl = null;
@@ -26725,30 +26816,24 @@ function tickAbilityOverlayFrame() {
       }
     }
   } else {
-    // ONE-SHOT 1 s cycle.
     const elapsed = now - trig.startTime;
     const total = desc.totalDur || 1.0;
     const slideOutStart = total - SLIDE_OUT_DUR;
     if (elapsed < SLIDE_IN_DUR) {
       phaseT = elapsed / SLIDE_IN_DUR;
       yOffset = slideSign * 50 * (1 - phaseT);
-      suffix = desc.baseKey;
+      pickedFile = desc.baseFile;
     } else if (elapsed < SLIDE_IN_DUR + FIRE_DUR) {
       yOffset = 0;
-      if (desc.fireKey && cache.frames[desc.fireKey] && cache.frames[desc.fireKey].status === 'ok') {
-        suffix = desc.fireKey;
-      } else {
-        suffix = desc.baseKey;
-      }
+      pickedFile = fileExists(desc.fireFile) ? desc.fireFile : desc.baseFile;
     } else if (elapsed < slideOutStart) {
       yOffset = 0;
-      suffix = desc.baseKey;
+      pickedFile = desc.baseFile;
     } else if (elapsed < total) {
       phaseT = (elapsed - slideOutStart) / SLIDE_OUT_DUR;
       yOffset = slideSign * 50 * phaseT;
-      suffix = desc.baseKey;
+      pickedFile = desc.baseFile;
     } else {
-      // Done.
       el.classList.remove('active');
       el.style.backgroundImage = '';
       el._currentUrl = null;
@@ -26756,12 +26841,11 @@ function tickAbilityOverlayFrame() {
       return;
     }
   }
-  // Resolve the suffix to an URL ; fall back to base if the requested frame
-  // didn't load (e.g. SLAYER-S1 missing -> show S so we never paint nothing).
-  let slot = cache.frames[suffix];
-  if (!slot || slot.status !== 'ok') slot = cache.frames[desc.baseKey];
+  // Resolve filename -> cache slot ; fall back to baseFile if the requested
+  // one didn't load (e.g. a missing alt frame still gets the base painted).
+  let slot = cache.frames[pickedFile];
+  if (!slot || slot.status !== 'ok') slot = cache.frames[desc.baseFile];
   if (!slot || slot.status !== 'ok') {
-    // No usable frames at all ; bail.
     if (el.classList.contains('active')) {
       el.classList.remove('active');
       el.style.backgroundImage = '';
@@ -26774,9 +26858,12 @@ function tickAbilityOverlayFrame() {
     el._currentUrl = slot.url;
   }
   if (!el.classList.contains('active')) el.classList.add('active');
-  // Apply slide transform. Use direct style.transform so we don't fight any
-  // CSS transition (transition: opacity only on this element).
-  el.style.transform = 'translateY(' + yOffset.toFixed(2) + '%)';
+  // Combine slide-in translateY with the per-frame directional shift so both
+  // effects compose cleanly. The shift moves the layer in the opposite
+  // direction of the player's turn (see _updateOverlayShift below).
+  const sx = (_overlayShift && _overlayShift.x) || 0;
+  const sy = (_overlayShift && _overlayShift.y) || 0;
+  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + (yOffset + sy).toFixed(2) + '%)';
 }
 
 // Commit a loadout: fully set up the player ship, build the map, spawn bots, and
@@ -26828,11 +26915,13 @@ function commitLoadout(key) {
   player.loadout = loadout;
   player.loadoutKey = key;
   updateCockpitFrame(); // swap the cockpit frame PNG to match the new titan
-  // (v17) Kick off the overlay-frame preload for the new ship + drop any
-  // stale slide-in trigger from the previous ship so we don't paint the
-  // wrong weapon when the new pilot first activates an ability.
+  // (v17) Kick off the overlay-frame and gun-layer preloads for the new
+  // ship + drop any stale slide-in trigger / gun cycle state from the
+  // previous ship so we don't paint the wrong weapon when the new pilot
+  // first activates an ability or fires their primary.
   try {
     _preloadAbilityOverlayFrames(key);
+    _preloadGunLayer(key);
     player._abilityOverlayTrigger = null;
     player._abilityPrime = null;
     const _aof = document.getElementById('ability-overlay-frame');
@@ -26840,6 +26929,12 @@ function commitLoadout(key) {
       _aof.classList.remove('active');
       _aof.style.backgroundImage = '';
       _aof._currentUrl = null;
+    }
+    const _gl = document.getElementById('gun-layer');
+    if (_gl) {
+      _gl.classList.remove('active');
+      _gl.style.backgroundImage = '';
+      _gl._currentUrl = null;
     }
   } catch (_) {}
   player.chassis = ch;
@@ -28278,7 +28373,19 @@ function fireHitscan(origin, dir, w) {
   // spiral trail that's the same from inside (cockpit) and outside (peer)
   // views. Every other loadout still uses the dual-barrel V tracer.
   if (player.loadoutKey === 'PUNCTURE') {
-    _spawnRailgunSpiral(origin, end, tracerColor);
+    // (v17) Anchor the LOCAL spiral origin to the painted railgun muzzle
+    // (gun_PUNCTURE.png : single cannon at ~62%, 60% of the screen) instead
+    // of player.position. The camera sits at player.position, so a spiral
+    // starting there visually erupts from inside the cockpit ; the painted
+    // muzzle offset puts it at the barrel tip where it belongs. Network
+    // broadcast below still uses world `origin` so peers see the spiral
+    // start from the ship's center (the camera-local muzzle is meaningless
+    // from any outside perspective).
+    const frac = _PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE;
+    const localFrom = (frac && typeof _computeScreenMuzzleWorld === 'function')
+      ? (_computeScreenMuzzleWorld(frac.x, frac.y) || origin)
+      : origin;
+    _spawnRailgunSpiral(localFrom, end, tracerColor);
   } else {
     spawnTracer(origin, end, tracerColor, isChaingun ? 0.55 : 1.0);
   }
@@ -28776,33 +28883,25 @@ function executeAbility(slot, ability) {
         age: 0,
         lifetime: beamLife,
       });
-      // Stacked thick tracers. spawnTracer splits each call into two
-      // muzzle-tip-anchored streaks that converge on beamEnd, so 5 calls
-      // give 10 visible streaks fanning into the beam.
-      // (v14c) Vortex purple identity palette: deep violet -> magenta ->
-      // lavender -> white core. Replaces the old orange-flame stack so
-      // the ability reads as a Vortex laser, not a flame burst.
-      spawnTracer(player.position, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.7);
-      spawnTracer(player.position, beamEnd, 0xcc77ff, 1.6);
-      spawnTracer(player.position, beamEnd, 0xddaaff, 1.5);
-      spawnTracer(player.position, beamEnd, 0xeeccff, 1.4);
-      spawnTracer(player.position, beamEnd, 0xffffff, 1.3);
-      // Network: ride the existing fire_tracer channel for the lead pair
-      // so peers see at least the converging streaks. The volumetric beam
-      // is local-only (peers don't render it) ; this matches how Plasma Mines
-      // arcs and other shader effects are local-only on receivers.
+      // (v17) ONE laser beam from the painted single-cannon muzzle in
+      // laser_VORTEX.png (the cannon sits upper-right with its barrel tip
+      // projecting at roughly (60%, 40%) of the screen). Width scaled up
+      // so the visual mass roughly matches the old 5-pair stack.
+      const _vlMuzzle = (typeof _computeScreenMuzzleWorld === 'function')
+        ? (_computeScreenMuzzleWorld(0.60, 0.40) || player.position)
+        : player.position;
+      if (typeof _spawnSingleTracer === 'function') {
+        _spawnSingleTracer(_vlMuzzle, beamEnd, LSS.CLASS_COLORS.VORTEX, 2.4);
+      }
+      // Network broadcast : one tracer instead of two. Peers receive the
+      // origin in world space (muzzle position is camera-local, but for a
+      // single-shot beam the slight offset reads fine from outside).
       if (net.active && net.sendEvent) {
         net.sendEvent({
           type: 'fire_tracer',
-          ox: player.position.x, oy: player.position.y, oz: player.position.z,
+          ox: _vlMuzzle.x, oy: _vlMuzzle.y, oz: _vlMuzzle.z,
           ex: beamEnd.x, ey: beamEnd.y, ez: beamEnd.z,
           color: LSS.CLASS_COLORS.VORTEX,
-        });
-        net.sendEvent({
-          type: 'fire_tracer',
-          ox: player.position.x, oy: player.position.y + 3, oz: player.position.z,
-          ex: beamEnd.x, ey: beamEnd.y + 3, ez: beamEnd.z,
-          color: 0xeeccff,
         });
       }
       // Lightning crackle along the beam path. Six arcs at staggered
@@ -31028,6 +31127,19 @@ function updateAbilities(dt) {
       spawnTracer(player.position, end, 0xffffff, 1.4);
       // Extra hot-pink-violet stack at the center for the "white-hot" overload look.
       spawnTracer(player.position, end, 0xeebbff, 1.3);
+      // (v17) THIRD beam from the painted top-right laser muzzle in
+      // laser_VORTEX.png (at ~60%, 40% of screen). Adds a single-origin
+      // stack alongside the left/right pair so the core looks like it's
+      // firing from all three painted cannons. 3 thin layers keep the
+      // visual mass balanced ; more would dominate the existing pair.
+      if (typeof _computeScreenMuzzleWorld === 'function' && typeof _spawnSingleTracer === 'function') {
+        const _mlMuzzle = _computeScreenMuzzleWorld(0.60, 0.40);
+        if (_mlMuzzle) {
+          _spawnSingleTracer(_mlMuzzle, end, LSS.CLASS_COLORS.VORTEX, 1.55);
+          _spawnSingleTracer(_mlMuzzle, end, 0xeeccff, 1.30);
+          _spawnSingleTracer(_mlMuzzle, end, 0xffffff, 1.10);
+        }
+      }
       // Electric crackle along the beam length. Boosted: more arcs per pulse,
       // wider lateral jitter, slightly longer reach so the beam feels alive
       // with discharge ; thicker tube radius for fatter bolts.
@@ -44823,7 +44935,9 @@ function gameLoop(timestamp) {
   if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
-  tickCockpitFrameAnimation(); // (v6.7) swap cockpit frame to KEY1.png while firing
+  tickCockpitFrameAnimation(); // (v17) cockpit frame: now stationary frame_<SHIP>.png + damage-shake hook
+  _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
+  tickGunLayer();               // (v17) per-ship gun recoil cycle on the behind-layer
   tickAbilityOverlayFrame();    // (v17) slide-in ability "weapon out" overlay behind cockpit
   checkExecutions(dt);
 
