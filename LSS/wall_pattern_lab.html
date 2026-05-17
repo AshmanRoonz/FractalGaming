@@ -188,6 +188,30 @@
     <div class="row"><label>Sat base</label><input type="range" id="u_satBase_fg2" min="0" max="1" step="0.01" value="0.7"><span class="val" id="u_satBase_fg2-val">0.70</span></div>
     <div class="row"><label>Cosmic</label><input type="range" id="K_COSMIC_fg2" min="0" max="6" step="0.05" value="1.5"><span class="val" id="K_COSMIC_fg2-val">1.50</span></div>
 
+    <h2>Venturi corrugation</h2>
+    <div class="hint" style="margin-bottom: 6px;">
+      Drives a corrugation mask along the tunnel axis (world-X in this lab).
+      When enabled, BG plays the VALLEY (bright / organic) role and FG1 plays
+      the RIDGE (dark / mechanical) role ; the mask blends between them. FG2
+      still composites on top as usual.
+    </div>
+    <div class="row">
+      <label>Enable</label>
+      <input type="checkbox" id="venturiEnable">
+      <span class="hint" style="flex:1;">on = BG/FG1 are blended by ridge mask</span>
+    </div>
+    <div class="row"><label>Frequency</label><input type="range" id="venturiFreq" min="0.001" max="0.05" step="0.0005" value="0.012"><span class="val" id="venturiFreq-val">0.0120</span></div>
+    <div class="row"><label>Warp</label><input type="range" id="venturiWarp" min="0" max="6" step="0.05" value="1.4"><span class="val" id="venturiWarp-val">1.40</span></div>
+    <div class="row"><label>Valley bias</label><input type="range" id="venturiBias" min="-0.5" max="0.5" step="0.01" value="0.0"><span class="val" id="venturiBias-val">0.00</span></div>
+    <div class="row"><label>Edge sharp</label><input type="range" id="venturiSharp" min="0.005" max="0.5" step="0.005" value="0.18"><span class="val" id="venturiSharp-val">0.180</span></div>
+    <div class="row"><label>Ridge tone</label><input type="range" id="venturiRidgeTone" min="0" max="1.5" step="0.01" value="0.55"><span class="val" id="venturiRidgeTone-val">0.55</span></div>
+    <div class="row"><label>Valley pop</label><input type="range" id="venturiValleyPop" min="0.5" max="3" step="0.05" value="1.6"><span class="val" id="venturiValleyPop-val">1.60</span></div>
+    <div class="row">
+      <label>Debug mask</label>
+      <input type="checkbox" id="venturiDebug">
+      <span class="hint" style="flex:1;">show ridge mask as grayscale</span>
+    </div>
+
     <h2>Background pattern controls</h2>
     <div class="row"><label>Time ×</label><input type="range" id="bgTime" min="0" max="3" step="0.05" value="1.0"><span class="val" id="bgTime-val">1.00</span></div>
     <div class="row"><label>Iterations</label><input type="range" id="u_iters_bg" min="1" max="12" step="1" value="8"><span class="val" id="u_iters_bg-val">8</span></div>
@@ -365,6 +389,19 @@ const wallFS = `
   uniform vec3 tintColor;
   uniform vec3 roomCenters[2];
   uniform float roomRadii[2];
+  // (Venturi) Corrugation mask uniforms. When uVenturiEnable == 1, BG plays
+  // the VALLEY (bright / organic) role and FG1 plays the RIDGE (dark /
+  // mechanical) role ; the mask blends between them along the tunnel axis.
+  // For this lab the tunnel runs along world X ; in game the per-vertex
+  // axial coordinate should be baked into a vertex attribute.
+  uniform int   uVenturiEnable;
+  uniform int   uVenturiDebug;
+  uniform float uVenturiFreq;
+  uniform float uVenturiWarp;
+  uniform float uVenturiBias;
+  uniform float uVenturiSharp;
+  uniform float uVenturiRidgeTone;
+  uniform float uVenturiValleyPop;
   varying vec3 vWorldPos;
   varying vec3 vNormal;
   varying vec2 vUv;
@@ -792,34 +829,82 @@ const wallFS = `
     if (mode == 4) return mix(base, layer, alpha);                           // Mix
     return base;
   }
+  // (Venturi) Corrugation mask helpers. The "axis" coordinate is the
+  // position along the tunnel spine ; for this lab the tunnel runs along
+  // world X. In the game (curved tunnels) this should be replaced with a
+  // per-vertex baked axial distance or an SDF gradient derivation.
+  float _venturiFbm(vec3 p) {
+    // Two-octave hash-based noise. Cheap enough for a per-fragment warp.
+    return mix(hash13(p), hash13(p * 2.03 + vec3(17.0, 9.0, 31.0)), 0.55);
+  }
+  // Returns the ridge mask in [0, 1] : 1.0 = on a ridge (dark/mechanical),
+  // 0.0 = in a valley (bright/organic). Smoothstep around the midpoint
+  // gives a soft transition band whose width is uVenturiSharp.
+  float venturiRidgeMask() {
+    float axis = vWorldPos.x * uVenturiFreq;
+    float warp = (_venturiFbm(vWorldPos * 0.003) - 0.5) * 2.0 * uVenturiWarp;
+    float rib  = 0.5 + 0.5 * sin(axis + warp);    // 0..1
+    rib = clamp(rib + uVenturiBias, 0.0, 1.0);
+    float lo = clamp(0.5 - uVenturiSharp, 0.0, 1.0);
+    float hi = clamp(0.5 + uVenturiSharp, 0.0, 1.0);
+    return smoothstep(lo, hi, rib);
+  }
   void main() {
     // Pure pattern-layering pipeline: BG → FG1 → FG2 with per-layer
     // pattern-control parameters, blend mode, hue shift, and time speed.
+    // (Venturi) When uVenturiEnable == 1, BG and FG1 are blended by the
+    // corrugation mask instead of the normal alpha+blend pipeline ; FG2
+    // still composites on top as usual.
     vec3 zoneC = tintColor;
-    // Background: full per-layer params.
-    vec3 final = sampleWallPattern(patternId, zoneC, time * bgTime,
-      u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;
-    // Foreground 1: independent params.
-    if (fgPatternId >= 0) {
-      vec3 fg1 = sampleWallPattern(fgPatternId, zoneC, time * fgTime,
-        u_iters_fg, u_scale_fg, u_invBase_fg, u_hueSpin_fg, u_satBase_fg) * K_COSMIC_fg;
-      fg1 = hueShift(fg1, fgHue);
-      final = applyBlend(final, fg1, fgBlend, fgAlpha);
+    vec3 final;
+    if (uVenturiEnable == 1) {
+      float ridge = venturiRidgeMask();       // 1 at ridges, 0 at valleys
+      if (uVenturiDebug == 1) {
+        // Debug visualization : show ridge mask as grayscale.
+        final = vec3(ridge);
+      } else {
+        vec3 valleyCol = sampleWallPattern(patternId, zoneC, time * bgTime,
+          u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;
+        valleyCol *= uVenturiValleyPop;       // pop the valleys hotter
+        vec3 ridgeCol = vec3(0.0);
+        if (fgPatternId >= 0) {
+          ridgeCol = sampleWallPattern(fgPatternId, zoneC, time * fgTime,
+            u_iters_fg, u_scale_fg, u_invBase_fg, u_hueSpin_fg, u_satBase_fg) * K_COSMIC_fg;
+          ridgeCol = hueShift(ridgeCol, fgHue);
+        }
+        ridgeCol *= uVenturiRidgeTone;        // dim the ridges so they read as "dead"
+        final = mix(valleyCol, ridgeCol, ridge);
+      }
+    } else {
+      // Standard pipeline (Venturi off).
+      // Background: full per-layer params.
+      final = sampleWallPattern(patternId, zoneC, time * bgTime,
+        u_iters_bg, u_scale_bg, u_invBase_bg, u_hueSpin_bg, u_satBase_bg) * K_COSMIC_bg;
+      // Foreground 1: independent params.
+      if (fgPatternId >= 0) {
+        vec3 fg1 = sampleWallPattern(fgPatternId, zoneC, time * fgTime,
+          u_iters_fg, u_scale_fg, u_invBase_fg, u_hueSpin_fg, u_satBase_fg) * K_COSMIC_fg;
+        fg1 = hueShift(fg1, fgHue);
+        final = applyBlend(final, fg1, fgBlend, fgAlpha);
+      }
     }
-    // Foreground 2: independent params.
+    // Foreground 2 always composites on top (both Venturi and standard paths).
     if (fg2PatternId >= 0) {
       vec3 fg2 = sampleWallPattern(fg2PatternId, zoneC, time * fg2Time,
         u_iters_fg2, u_scale_fg2, u_invBase_fg2, u_hueSpin_fg2, u_satBase_fg2) * K_COSMIC_fg2;
       fg2 = hueShift(fg2, fg2Hue);
       final = applyBlend(final, fg2, fg2Blend, fg2Alpha);
     }
-    // Soft fresnel rim so curved surfaces read as curved.
-    vec3 vd = normalize(cameraPosition - vWorldPos);
-    float fres = pow(1.0 - abs(dot(vNormal, vd)), 2.0);
-    final += zoneC * fres * 0.15;
-    // Soft tone-map so any pattern outputting big values doesn't blow out.
-    final = final / (1.0 + final * 0.35);
-    final *= 1.35;
+    // Skip fresnel + tone-map in debug mode so the mask reads as pure gray.
+    if (!(uVenturiEnable == 1 && uVenturiDebug == 1)) {
+      // Soft fresnel rim so curved surfaces read as curved.
+      vec3 vd = normalize(cameraPosition - vWorldPos);
+      float fres = pow(1.0 - abs(dot(vNormal, vd)), 2.0);
+      final += zoneC * fres * 0.15;
+      // Soft tone-map so any pattern outputting big values doesn't blow out.
+      final = final / (1.0 + final * 0.35);
+      final *= 1.35;
+    }
     gl_FragColor = vec4(final, uOpacity);
   }
 `;
@@ -857,7 +942,18 @@ const wallMat = new THREE.ShaderMaterial({
     K_COSMIC_bg:   { value: 1.5 }, K_COSMIC_fg:   { value: 1.5 }, K_COSMIC_fg2:   { value: 1.5 },
     tintColor:     { value: new THREE.Color(0x88ccff) },
     roomCenters:   { value: [new THREE.Vector3(-SEP*0.5, 0, 0), new THREE.Vector3(SEP*0.5, 0, 0)] },
-    roomRadii:     { value: [ROOM_R, ROOM_R] }
+    roomRadii:     { value: [ROOM_R, ROOM_R] },
+    // (Venturi corrugation) defaults : enable=0 so the lab boots into the
+    // existing 3-layer additive pipeline ; the new mode is opt-in via the
+    // sidebar checkbox.
+    uVenturiEnable:    { value: 0 },
+    uVenturiDebug:     { value: 0 },
+    uVenturiFreq:      { value: 0.012 },
+    uVenturiWarp:      { value: 1.4 },
+    uVenturiBias:      { value: 0.0 },
+    uVenturiSharp:     { value: 0.18 },
+    uVenturiRidgeTone: { value: 0.55 },
+    uVenturiValleyPop: { value: 1.6 }
   }
 });
 
@@ -941,6 +1037,23 @@ bindSlider('fg2Time',  'fg2Time-val',  v => wallMat.uniforms.fg2Time.value  = v,
 
 document.getElementById('color-b').addEventListener('input', e => wallMat.uniforms.tintColor.value.set(e.target.value));
 
+// (Venturi corrugation) UI bindings. Checkboxes drive the int uniforms ;
+// sliders drive their respective floats. Same bindSlider helper used by
+// the rest of the lab so the value-display spans update automatically.
+function bindCheckbox(id, target) {
+  const el = document.getElementById(id);
+  el.addEventListener('change', () => target(el.checked ? 1 : 0));
+  target(el.checked ? 1 : 0);
+}
+bindCheckbox('venturiEnable', v => wallMat.uniforms.uVenturiEnable.value = v);
+bindCheckbox('venturiDebug',  v => wallMat.uniforms.uVenturiDebug.value  = v);
+bindSlider('venturiFreq',       'venturiFreq-val',       v => wallMat.uniforms.uVenturiFreq.value      = v, 4);
+bindSlider('venturiWarp',       'venturiWarp-val',       v => wallMat.uniforms.uVenturiWarp.value      = v, 2);
+bindSlider('venturiBias',       'venturiBias-val',       v => wallMat.uniforms.uVenturiBias.value      = v, 2);
+bindSlider('venturiSharp',      'venturiSharp-val',      v => wallMat.uniforms.uVenturiSharp.value     = v, 3);
+bindSlider('venturiRidgeTone',  'venturiRidgeTone-val',  v => wallMat.uniforms.uVenturiRidgeTone.value = v, 2);
+bindSlider('venturiValleyPop',  'venturiValleyPop-val',  v => wallMat.uniforms.uVenturiValleyPop.value = v, 2);
+
 let paused = false;
 const pauseBtn = document.getElementById('pause');
 pauseBtn.addEventListener('click', () => {
@@ -991,6 +1104,16 @@ const CONFIG_ITEMS = [
   { id: 'K_COSMIC_fg2',  uniform: 'K_COSMIC_fg2',  kind: 'slider' },
   // Tint color (handled separately because it's a color picker)
   { id: 'color-b',       uniform: 'tint',          kind: 'color' },
+  // (Venturi corrugation) Persist the new mask controls alongside the
+  // pattern config so a saved preset captures the binary-blend look too.
+  { id: 'venturiEnable',     uniform: 'uVenturiEnable',    kind: 'checkbox' },
+  { id: 'venturiDebug',      uniform: 'uVenturiDebug',     kind: 'checkbox' },
+  { id: 'venturiFreq',       uniform: 'uVenturiFreq',      kind: 'slider' },
+  { id: 'venturiWarp',       uniform: 'uVenturiWarp',      kind: 'slider' },
+  { id: 'venturiBias',       uniform: 'uVenturiBias',      kind: 'slider' },
+  { id: 'venturiSharp',      uniform: 'uVenturiSharp',     kind: 'slider' },
+  { id: 'venturiRidgeTone',  uniform: 'uVenturiRidgeTone', kind: 'slider' },
+  { id: 'venturiValleyPop',  uniform: 'uVenturiValleyPop', kind: 'slider' },
 ];
 
 function exportConfig() {
@@ -999,6 +1122,7 @@ function exportConfig() {
     const el = document.getElementById(item.id);
     if (!el) continue;
     if (item.kind === 'color') out[item.id] = el.value;
+    else if (item.kind === 'checkbox') out[item.id] = !!el.checked;
     else if (item.kind === 'select-int' || item.kind === 'slider-int') out[item.id] = parseInt(el.value, 10);
     else out[item.id] = parseFloat(el.value);
   }
@@ -1011,6 +1135,12 @@ function importConfig(cfg) {
     if (!(item.id in cfg)) continue;
     const el = document.getElementById(item.id);
     if (!el) continue;
+    if (item.kind === 'checkbox') {
+      el.checked = !!cfg[item.id];
+      // Checkboxes use 'change', not 'input', for the listener we registered.
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      continue;
+    }
     el.value = cfg[item.id];
     // Dispatch the right event so the registered handlers fire and update
     // both the value-display span and the wallMat uniform.
