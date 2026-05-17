@@ -43380,7 +43380,16 @@ function buildRoomGraphLevel(level) {
       'vec3 _venturiAxis(vec3 n) {',
       '  vec3 axis = cross(n, vec3(0.0, 1.0, 0.0));',
       '  float l2 = dot(axis, axis);',
-      '  if (l2 < 0.01) axis = cross(n, vec3(1.0, 0.0, 0.0));',
+      '  if (l2 < 0.01) {',
+      '    axis = cross(n, vec3(1.0, 0.0, 0.0));',
+      '    l2 = dot(axis, axis);',
+      '  }',
+      // Final fallback : if both crosses degenerated (n nearly perpendicular
+      // to both up and X, mathematically impossible for unit n but driver
+      // imprecision could produce it), return world X so normalize() never
+      // sees a zero-length vector. Without this guard, normalize(0) ->
+      // NaN propagates through every fragment and some drivers panic.
+      '  if (l2 < 0.0001) return vec3(1.0, 0.0, 0.0);',
       '  return normalize(axis);',
       '}',
       // Returns the ridge mask in [0, 1] ; 1.0 = ridge (dark/mechanical),
@@ -43413,7 +43422,11 @@ function buildRoomGraphLevel(level) {
       // radial-falloff boost that lets a preset bake the wormhole-eye look
       // from the reference art.
       'vec3 cosmicField(vec3 wp, vec3 zoneC, float tt) {',
-      '  vec3 col;',
+      // (v17a fix) Initialize explicitly. Driver-strict GLSL compilers can
+      // hang or refuse to compile if they can't statically prove `col` is
+      // assigned before use across all branches, even when JS-side logic
+      // guarantees it. vec3(0.0) costs nothing and makes the compile safe.
+      '  vec3 col = vec3(0.0);',
       '  if (uVenturiEnable == 1) {',
       '    float ridge = venturiRidgeMask(wp, tt);',
       '    vec3 valleyCol = sampleWallPattern(bgPatternId, wp, zoneC, tt * bgTime,',
@@ -43433,7 +43446,11 @@ function buildRoomGraphLevel(level) {
       // valley and ridge near the focal point. Range falloff is exponential
       // so the boost concentrates ; the further away you are the less
       // visible the hotspot is.
-      '      float vd = length(wp - uVenturiVortexCenter);',
+      // (v17a fix) Clamp the radial distance before feeding it to exp() so
+      // a tunnel-vs-vortex-center distance of, say, 10000 (typical room
+      // worldPos magnitude) doesn't produce a denormalized exp() result.
+      // Some drivers stall when exp underflows to denormalized floats.
+      '      float vd = min(length(wp - uVenturiVortexCenter), 8000.0);',
       '      float vBoost = uVenturiVortex * exp(-vd * 0.0008);',
       '      col += col * vBoost;',
       '    }',

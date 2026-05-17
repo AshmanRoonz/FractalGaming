@@ -26105,11 +26105,21 @@ function updateCockpitFrame() {
   if (_cockpitFrameInFlight[key]) return;
   _cockpitFrameInFlight[key] = true;
   const baseProbe = new Image();
-  baseProbe.onload = () => {
+  // (v17) Off-thread decode so the first paint of frame_<SHIP>.png at launch
+  // doesn't hitch the countdown.
+  try { baseProbe.decoding = 'async'; } catch (_) {}
+  const finalizeReady = () => {
     _cockpitFrameInFlight[key] = false;
     const entry = { status: 'ok', baseUrl, baseImage: baseProbe };
     _cockpitFrameCache[key] = entry;
     if (player && player.loadoutKey === key) apply(entry);
+  };
+  baseProbe.onload = () => {
+    if (typeof baseProbe.decode === 'function') {
+      baseProbe.decode().then(finalizeReady).catch(finalizeReady);
+    } else {
+      finalizeReady();
+    }
   };
   baseProbe.onerror = () => {
     _cockpitFrameInFlight[key] = false;
@@ -26220,12 +26230,19 @@ function _preloadGunLayer(loadoutKey) {
   for (const s of extras) if (allSuffixes.indexOf(s) < 0) allSuffixes.push(s);
   const entry = { frames: {}, cycle: cycle, cycleIdx: 0, cycleStartTime: 0, lastTimer: 0 };
   let remaining = allSuffixes.length;
+  // (v17) Hint the browser to decode off the main thread. Without this,
+  // the first PAINT of each PNG (during/right after launch countdown)
+  // triggers a synchronous on-main-thread decode of every gun-layer
+  // image, which hitches the countdown ticks. async decoding lets the
+  // browser pull bitmaps in parallel ; calling img.decode() in onload
+  // forces the work to a worker thread before the image is ever drawn.
   for (const suffix of allSuffixes) {
     const url = _framesBaseUrl + dir + '/' + suffix + '_' + loadoutKey + '.png' + _FRAME_CACHE_BUST;
     const img = new Image();
+    try { img.decoding = 'async'; } catch (_) {}
     const slot = { url, img, status: null };
     entry.frames[suffix] = slot;
-    img.onload  = () => {
+    const onReady = () => {
       slot.status = 'ok';
       // Run muzzle-point detection on gun_<SHIP>.png since that's where the
       // painted barrel tips live now (used to be on SHIP.png in the old layout).
@@ -26233,6 +26250,17 @@ function _preloadGunLayer(loadoutKey) {
         try { player.cockpitFrameMuzzle = detectFrameMuzzlePoints(img); } catch (_) {}
       }
       if (--remaining === 0) finish();
+    };
+    img.onload  = () => {
+      // Force off-thread bitmap decode so the first paint isn't blocked.
+      // decode() returns a Promise on supporting browsers ; fall back to
+      // the onload path if it isn't available or rejects (the image is
+      // still usable, just decoded later on paint).
+      if (typeof img.decode === 'function') {
+        img.decode().then(onReady).catch(onReady);
+      } else {
+        onReady();
+      }
     };
     img.onerror = () => { slot.status = 'missing'; if (--remaining === 0) finish(); };
     img.src = url;
@@ -26445,12 +26473,23 @@ function _preloadAbilityOverlayFrames(loadoutKey) {
   const dir = loadoutKey.charAt(0) + loadoutKey.slice(1).toLowerCase();
   const entry = { frames: {} };
   let remaining = files.length;
+  // (v17) Off-thread bitmap decode for the same reason as the gun-layer
+  // preloader : avoid the first-paint decode hitch when ability slide-ins
+  // start the moment gameplay begins.
   for (const filename of files) {
     const url = _framesBaseUrl + dir + '/' + filename + _FRAME_CACHE_BUST;
     const img = new Image();
+    try { img.decoding = 'async'; } catch (_) {}
     const slot = { url, img, status: null };
     entry.frames[filename] = slot;
-    img.onload  = () => { slot.status = 'ok';      if (--remaining === 0) finish(); };
+    const onReady = () => { slot.status = 'ok'; if (--remaining === 0) finish(); };
+    img.onload  = () => {
+      if (typeof img.decode === 'function') {
+        img.decode().then(onReady).catch(onReady);
+      } else {
+        onReady();
+      }
+    };
     img.onerror = () => { slot.status = 'missing'; if (--remaining === 0) finish(); };
     img.src = url;
   }
