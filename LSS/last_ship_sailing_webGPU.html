@@ -675,17 +675,56 @@ window.LSS = window.LSS || {
 // Minimal port glue : drain shield first, then health, set lastDamageTime,
 // play hit sound. v17 has fuller logic (death state, doomed timer, etc.)
 // but that lives in the modules.
-window.playerTakeDamage = function(amount, source) {
-  if (!player) return;
-  if (player.shield > 0) {
-    const absorb = Math.min(player.shield, amount);
-    player.shield -= absorb;
-    amount -= absorb;
+window.playerTakeDamage = function(amount, attacker, projectile) {
+  if (!player || !amount || amount <= 0) return;
+  // Death / spawn protection / SLAYER phase-invuln gates : drop the
+  // damage entirely. Matches v17o playerTakeDamage gating in
+  // last_ship_sailing_v17o.html ~line 27355.
+  if (player.shipState === 'dead') return;
+  if (player.spawnProtection > 0) return;
+  if (player.phaseInvuln) return;
+  player.lastDamageTime = (game && game.time) || 0;
+  // (port glue) v17o triggers screen shake proportional to incoming
+  // damage. triggerScreenShake is provided by fx.js after cluster load.
+  if (typeof triggerScreenShake === 'function') {
+    try { triggerScreenShake(Math.min(8, amount / 150)); } catch (_) {}
   }
-  if (amount > 0) player.health = Math.max(0, player.health - amount);
-  player.lastDamageTime = game.time;
-  if (typeof playSound === 'function') {
-    try { playSound(player.shield > 0 ? 'damage_shield' : 'damage'); } catch (_) {}
+  // Shield absorbs first.
+  if (player.shield > 0) {
+    if (amount <= player.shield) { player.shield -= amount; amount = 0; }
+    else { amount -= player.shield; player.shield = 0; }
+    if (typeof playSound === 'function') {
+      try { playSound('damage_shield'); } catch (_) {}
+    }
+  } else if (typeof playSound === 'function') {
+    try { playSound('damage'); } catch (_) {}
+  }
+  if (amount <= 0) return;
+  // Health drain.
+  player.health = Math.max(0, player.health - amount);
+  // Doomed transition (matches v17o LSS.DOOMED_HEALTH_PCT gate).
+  const doomedPct = (typeof LSS !== 'undefined' && LSS.DOOMED_HEALTH_PCT) || 0.20;
+  if (!player.doomed && player.health > 0 && (player.health / player.maxHealth) <= doomedPct) {
+    player.doomed = true;
+    player.doomTimer = (typeof LSS !== 'undefined' && LSS.DOOMED_TIMER) || 10;
+    player.shipState = 'doomed';
+  }
+  // Death detection. v17o has a separate playerDie() with explosion +
+  // killfeed + respawn overlay ; until those land, mark dead + spawn an
+  // explosion at the player's position so the moment reads visually.
+  if (player.health <= 0) {
+    player.health = 0;
+    player.shipState = 'dead';
+    player.doomed = false;
+    player.doomTimer = 0;
+    player.deaths = (player.deaths || 0) + 1;
+    try {
+      if (typeof spawnExplosion === 'function' && player.position) {
+        const hullLen = (player.chassis && player.chassis.hullLength) || 40;
+        spawnExplosion(player.position.clone(), hullLen);
+      }
+    } catch (_) {}
+    try { if (typeof triggerScreenShake === 'function') triggerScreenShake(12); } catch (_) {}
   }
 };
 // (v2) Stub fireWeapon so the audio module's monkey-patch (which wraps
@@ -708,15 +747,42 @@ window._applyProceduralShipNormalMap = function() { /* no-op */ };
 // values so the module's logic continues. Every entry is "the simplest
 // behavior that keeps the module from throwing on load." Real
 // implementations will replace these as each phase lands.
-window._makeFXMaterial = function() {
-  // Return a plain MeshStandardMaterial as a stand-in for custom shader
-  // effects ; the real LayeredFX preset library is on the skip list and
-  // would need TSL ports. Add a dummy `uniforms` proxy so consumer code
-  // that does `mat.uniforms.uPosScale.value = ...` doesn't null-crash.
-  const m = new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
+window._makeFXMaterial = function(presetName) {
+  // (bugfix 2026-05-18 #5) Return a plain MeshStandardMaterial as a
+  // stand-in for custom LayeredFX shader presets (skip-list for now,
+  // TSL ports come in Phase 11). Tint by preset name so projectile /
+  // ability dispatchers that fall through to `mat.color` get the
+  // expected hue family instead of universal white.
+  let baseHex = 0xffffff, opacity = 0.6;
+  if (typeof presetName === 'string') {
+    if      (presetName.indexOf('proj_glow')   === 0) { baseHex = 0xffcc66; opacity = 0.85; }
+    else if (presetName.indexOf('proj_core')   === 0) { baseHex = 0xffffff; opacity = 0.95; }
+    else if (presetName.indexOf('proj_haze')   === 0) { baseHex = 0xffaa44; opacity = 0.20; }
+    else if (presetName.indexOf('plasma_purple') === 0) { baseHex = 0xaa55ff; opacity = 0.65; }
+    else if (presetName.indexOf('plasma_cyan')   === 0) { baseHex = 0x66ccff; opacity = 0.65; }
+    else if (presetName.indexOf('plasma_red')    === 0) { baseHex = 0xff5566; opacity = 0.65; }
+    else if (presetName.indexOf('plasma_green')  === 0) { baseHex = 0x66ff88; opacity = 0.65; }
+    else if (presetName.indexOf('plasma_amber')  === 0) { baseHex = 0xffaa44; opacity = 0.65; }
+    else if (presetName.indexOf('plasma_wall')   === 0) { baseHex = 0x44ccff; opacity = 0.55; }
+    else if (presetName.indexOf('fire')        === 0) { baseHex = 0xff6622; opacity = 0.8; }
+    else if (presetName.indexOf('smoke')       === 0) { baseHex = 0x222233; opacity = 0.5; }
+  }
+  const m = new THREE.MeshBasicMaterial({
+    color: baseHex, transparent: true, opacity,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  // (bugfix 2026-05-18 #5) Uniforms proxy now returns a smart per-uniform
+  // descriptor :
+  //   - .value is a THREE.Color by default, which has .set / .setHex /
+  //     .copy / .lerp — covering the Projectile constructor's
+  //     `glowMat.uniforms.uBaseColor.value.set(this.trailColor)` path
+  //     and every ability that does `mat.uniforms.uColor.value.setHex(...)`.
+  //   - Assigning a number to .value (e.g. `uPosScale.value = 1.0/7.0`)
+  //     just overwrites the Color, matching how real ShaderMaterial
+  //     uniforms behave : you can swap the runtime type freely.
   m.uniforms = new Proxy({}, {
     get(t, k) {
-      if (!(k in t)) t[k] = { value: 0 };
+      if (!(k in t)) t[k] = { value: new THREE.Color(0xffffff) };
       return t[k];
     },
   });
@@ -1311,21 +1377,11 @@ function _resetParticlePoolForFrame() {
 }
 
 
-// Override spawnTripWireOrb to push into _activeMines so we track them.
-const _origSpawnTripWireOrb = window.spawnTripWireOrb;
-window.spawnTripWireOrb = function(pos, color) {
-  if (!pos || !scene) return;
-  const c = color || 0xff44aa;
-  const m = new THREE.Mesh(
-    new THREE.SphereGeometry(14, 16, 12),
-    new THREE.MeshStandardMaterial({
-      color: c, emissive: c, emissiveIntensity: 2.5, transparent: true, opacity: 0.9,
-    })
-  );
-  m.position.copy(pos);
-  scene.add(m);
-  _activeMines.push({ mesh: m, life: 12 });
-};
+// (bugfix 2026-05-18) Removed a dead override of spawnTripWireOrb that
+// pushed into an undeclared `_activeMines` array. The reference would have
+// thrown ReferenceError every time a mine spawned. The later definition at
+// line ~1475 below uses _scheduleEffectDispose() for cleanup and is the
+// version that actually runs (it overwrites window.spawnTripWireOrb).
 
 
 function updateParticles(dt) {
@@ -1743,9 +1799,71 @@ window.emitChassisMuzzleFlash = function(pos, dir, loadoutKey) {
     }
   }
 };
+// (bugfix 2026-05-18 #3) abilities.js references `_holdAbilityNames` at
+// updateAbilities() line ~1374. The v17 source declares it as
+//   const _holdAbilityNames = ['Vortex Shield', 'Absorption', 'Fire Shield'];
+// but the extraction into lss_v17_abilities.js dropped the declaration.
+// Effect : every frame, updateAbilities throws ReferenceError at that
+// line, swallowed by the gameLoop's try/catch ; everything past that
+// line (cooldown ticking, ability timers, active-state decay, doomed
+// timer, dash recovery, etc.) silently STOPS WORKING. The hold-to-prime
+// model is also dead because the const that gates the per-frame branch
+// doesn't exist. Define it on window so abilities.js's free-variable
+// lookup resolves correctly.
+window._holdAbilityNames = ['Vortex Shield', 'Absorption', 'Fire Shield'];
+// (bugfix 2026-05-18 #4) Shared projectile geometry constants. weapons.js
+// Projectile constructor passes these to new THREE.Mesh() so every
+// projectile (PYRO Thermite, TRACKER Missile, Plasma Mine, Tracker
+// Rocket, Cluster Missile, etc.) shares one geometry per layer. v17
+// declares them at module top (~line 17393) ; the extraction missed
+// them. Effect : every projectile-mode weapon fire throws "_SHARED_PROJ_*
+// is not defined" inside fireProjectile -> Projectile constructor. PYRO
+// and TRACKER's primary fire are completely broken without these.
+window._SHARED_PROJ_CORE_GEO = new THREE.SphereGeometry(2.2, 8, 6);
+window._SHARED_PROJ_GLOW_GEO = new THREE.SphereGeometry(7, 16, 12);
+window._SHARED_PROJ_HAZE_GEO = new THREE.SphereGeometry(15, 10, 8);
+// (bugfix 2026-05-18 #3) Core-ability + Mega-FX timers / launch indices
+// referenced by abilities.js but never declared in the extraction. They
+// are scalar state ; initializing to 0 / null is the safe default
+// because each core's activation path resets the relevant one to its
+// starting value (megaBarrage starts launchIdx at 0, megaTracker likewise,
+// laserCoreArc / megaLaserFx / thermalBurnSfx all start their respective
+// countdown clocks). Keeping them on window means abilities.js's bare-
+// name reads resolve cleanly.
+window._megaLaserFxTimer = 0;
+window._megaLaserHitMarkerTimer = 0;
+window._megaBarrageLaunchIdx = 0;
+window._megaTrackerLaunchIdx = 0;
+window._laserCoreArcTimer = 0;
+window._thermalBurnSfxTimer = 0;
+window._vortexCoreBeam = null;
+// (bugfix 2026-05-18 #3) Core FX dispatch stubs. abilities.js's core
+// activation calls _spawnSlayerCoreStormFX (Mega Stun Bolt lightning
+// storm), _buildFlameChainFlameLicks (Mega Flame Chain trail). Both
+// are LayeredFX-heavy in v17 and on the Phase 11 (TSL FX) skip list.
+// No-op stubs let the core activate without throwing ; the rest of the
+// core ability (damage application, sound, timer countdown) still runs.
+window._spawnSlayerCoreStormFX = function() { /* TSL port pending Phase 11 */ };
+window._buildFlameChainFlameLicks = function() { /* TSL port pending Phase 11 */ };
+// (bugfix 2026-05-18 #3) LayeredFX preset opacity uniforms referenced
+// by some ability code paths (FX flash + ribbon + trail layers).
+// fx.js's _makeFXMaterial returns the proxy that returns { value: 0 }
+// on demand, so reading `_baseOpacityX` from the module-level scope
+// just needs a defined numeric. Set to safe defaults.
+window._baseOpacityCore = 1.0;
+window._baseOpacityGlow = 0.85;
+window._baseOpacityHaze = 0.65;
+window._baseOpacityRibbon = 0.85;
+window._baseOpacityTrail = 0.75;
 window.emitDamageState = function() {};
 window.startReload = function() { player.reloading = false; };
-window.playerTakeDamage = function() {};
+// (bugfix 2026-05-18) DO NOT stub playerTakeDamage here. The real impl
+// lives at line ~678 (shield-drain -> health-drain -> hit sound) and
+// nothing else replaces it ; the previous `window.playerTakeDamage =
+// function() {};` line silently turned every bot hit into a no-op so
+// the player took zero damage in solo matches. Bots call playerTakeDamage
+// (damage, this) from bots.js lines 724 / 772 / 1049 ; with the stub
+// gone, those calls now actually drain shield + health.
 window.activateAbility = function(slot) {};
 window.activateCore = function() {};
 window.executeAbility = function() {};
@@ -3155,6 +3273,160 @@ async function main() {
       // modules. They override the stubs registered above. Each module is
       // try-caught so a single failure doesn't kill the rest.
       await loadClusterTwoAndThree();
+      // (bugfix 2026-05-18) fx.js declares several `function fooName() { /*
+      // large body omitted */ }` skeleton stubs as classic-script function
+      // declarations. Classic-script function decls assign to window, so
+      // they SILENTLY OVERWRITE the working WebGPU-friendly implementations
+      // we set earlier in this file. Net effect : after fx.js loads,
+      // updateDynamicObjects is a no-op (clusters never tumble/drift),
+      // updateStasisFields is missing its per-field tick (fields don't
+      // pulse / fade / slow ships), and spawnStasisField calls undefined
+      // instantiateStasisField (silent throw, no field ever spawns).
+      // Re-install the WebGPU port's working versions here, AFTER fx.js
+      // has had its turn, so they win for the rest of the session.
+      window.updateDynamicObjects = function(dt) {
+        if (!game || !game.clusters) return;
+        const _dt = (typeof dt === 'number') ? dt : 0.016;
+        for (const c of game.clusters) {
+          if (c && typeof c.update === 'function') c.update(_dt);
+        }
+      };
+      window.spawnStasisField = function() {
+        if (!game.stasisFields) game.stasisFields = [];
+        if (game.stasisFields.filter(f => f.alive).length >= 3) return null;
+        let pos;
+        if (typeof getValidSpawnPoint === 'function') {
+          try { pos = getValidSpawnPoint(null, 80); } catch (_) {}
+        }
+        if (!pos) pos = new THREE.Vector3(
+          (Math.random() - 0.5) * 800,
+          (Math.random() - 0.5) * 300,
+          (Math.random() - 0.5) * 800
+        );
+        const field = new StasisField(pos);
+        game.stasisFields.push(field);
+        return field;
+      };
+      window.updateStasisFields = function(dt) {
+        if (!game.stasisFields || !game.stasisFields.length) return;
+        const _dt = (typeof dt === 'number') ? dt : 0.016;
+        for (let i = game.stasisFields.length - 1; i >= 0; i--) {
+          const f = game.stasisFields[i];
+          if (!f) { game.stasisFields.splice(i, 1); continue; }
+          f.update(_dt);
+          if (!f.alive) game.stasisFields.splice(i, 1);
+        }
+        const allFields = game.stasisFields;
+        if (!allFields.length) return;
+        if (player && player.velocity) {
+          let factor = 1.0;
+          for (const f of allFields) factor = Math.min(factor, f.speedFactorAt(player.position));
+          if (factor < 1.0) {
+            player.velocity.x *= factor;
+            player.velocity.y *= factor;
+            player.velocity.z *= factor;
+          }
+        }
+        if (game.entities && game.entities.length) {
+          for (const bot of game.entities) {
+            if (!bot || !bot.alive || !bot.velocity) continue;
+            let factor = 1.0;
+            for (const f of allFields) factor = Math.min(factor, f.speedFactorAt(bot.position));
+            if (factor < 1.0) {
+              bot.velocity.x *= factor;
+              bot.velocity.y *= factor;
+              bot.velocity.z *= factor;
+            }
+          }
+        }
+        if (game.projectiles && game.projectiles.length) {
+          for (const p of game.projectiles) {
+            if (!p || !p.alive || !p.velocity || !p.position) continue;
+            let factor = 1.0;
+            for (const f of allFields) factor = Math.min(factor, f.speedFactorAt(p.position));
+            if (factor < 1.0) {
+              const projFactor = 0.6 + 0.4 * factor;
+              p.velocity.x *= projFactor;
+              p.velocity.y *= projFactor;
+              p.velocity.z *= projFactor;
+            }
+          }
+        }
+      };
+      // (bugfix 2026-05-18 #2) fx.js spawnLightningBolt references three
+      // helpers (_generateLightningPath, _generateLightningBranches,
+      // _buildLightningTubeGeometry) that aren't defined anywhere in the
+      // extraction. Any ability that fires lightning (SLAYER Stun Bolt,
+      // SYPHON Energy Syphon zap, Mega Stun Bolt core, tracker lightning
+      // chain) throws ReferenceError silently inside its try/catch. Re-
+      // install the HTML's 4-segment jagged poly-line fallback so the
+      // visual feedback at least lands and the ability completes its tick.
+      window.spawnLightningBolt = function(from, to, color, lifetime) {
+        if (!from || !to || !scene) return;
+        const c = color || 0x88ccff;
+        const life = lifetime || 0.30;
+        const segs = 4;
+        const pts = [from.clone()];
+        for (let i = 1; i < segs; i++) {
+          const t = i / segs;
+          const p = from.clone().lerp(to, t);
+          p.x += (Math.random() - 0.5) * 30;
+          p.y += (Math.random() - 0.5) * 30;
+          p.z += (Math.random() - 0.5) * 30;
+          pts.push(p);
+        }
+        pts.push(to.clone());
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const line = new THREE.Line(geo, new THREE.LineBasicMaterial({
+          color: c, transparent: true, opacity: 1,
+        }));
+        scene.add(line);
+        if (typeof _scheduleEffectDispose === 'function') {
+          _scheduleEffectDispose(line, life);
+        } else {
+          game.effects.push({ mesh: line, type: 'fxstub', age: 0, lifetime: life });
+        }
+        // Quick midpoint dynamic light so the bolt lights its surroundings.
+        try {
+          if (typeof spawnDynamicLight === 'function') {
+            const mid = from.clone().lerp(to, 0.5);
+            spawnDynamicLight(mid, c, 2.0, 300, Math.min(0.20, life));
+          }
+        } catch (_) {}
+      };
+      // (bugfix 2026-05-18 #2) fx.js spawnImpactSparks early-returns in
+      // potato mode (which we force via the QUALITY shim) so every
+      // weapon impact has zero visual feedback. Wrap it with a particle
+      // burst + dynamic light so chaingun/railgun/shotgun hits actually
+      // register on the eye. Doesn't touch fx.js's full impl ; we just
+      // ensure the potato path doesn't silently no-op.
+      const _origSpawnImpactSparks = window.spawnImpactSparks;
+      window.spawnImpactSparks = function(pos, count) {
+        if (!pos) return;
+        try { _origSpawnImpactSparks(pos, count); } catch (_) {}
+        // Always add the potato-mode fallback : 8-16 amber sparks.
+        const n = Math.max(6, Math.min(16, (count || 6) | 0));
+        for (let i = 0; i < n; i++) {
+          const speed = 200 + Math.random() * 320;
+          game.particles.push({
+            position: pos.clone(),
+            velocity: new THREE.Vector3(
+              (Math.random() - 0.5) * speed,
+              (Math.random() - 0.5) * speed,
+              (Math.random() - 0.5) * speed
+            ),
+            life: 0.15 + Math.random() * 0.20,
+            maxLife: 0.35,
+            color: Math.random() > 0.5 ? 0xffaa44 : 0xfff0aa,
+            size: 1.2 + Math.random() * 1.4,
+          });
+        }
+        try {
+          if (typeof spawnDynamicLight === 'function') {
+            spawnDynamicLight(pos, 0xffaa55, 1.6, 160, 0.12);
+          }
+        } catch (_) {}
+      };
       // (v2) After the weapons module replaced our fireWeapon stub with
       // the real fire dispatcher, the audio module's monkey-patch (which
       // wrapped the stub) is gone. Re-apply : wrap the real fireWeapon
