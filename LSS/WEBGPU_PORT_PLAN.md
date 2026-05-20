@@ -1,337 +1,361 @@
 # Last Ship Sailing : WebGPU Port Plan
 
-**Source**: `last_ship_sailing_v17.html` (and forks: `v17o.html` with perf opts, `v17a.html` with Venturi)
-**Target**: `last_ship_sailing_webGPU.html`
+**Source**: `last_ship_sailing_v17o.html` (~55,325 lines, authoritative reference)
+**Target**: `last_ship_sailing_webGPU.html` (~12,035 lines + 11 extracted JS modules)
 **Engine**: Three.js r170 + WebGPURenderer + TSL
 **Started**: 2026-05-17
+**Last updated**: 2026-05-20
+**Bugfix counter**: #240 (next tag: #241)
+
+**Mass-port pass (2026-05-20):** A subagent swept every remaining no-op stub in webGPU.html, cross-referenced v17o for real implementations, and concluded the Phase 11 stub list is essentially complete. Most "remaining stubs" turn out to be pre-load fallbacks that get overwritten by module loads (32+ of them), skip-list items (walls, Venturi, LayeredFX shaders), XR/VR disabled paths, deferred Phase 8 lobby-browser, or deferred gmaps. Ports added : `cleanupPendingHits` (#236), `disposeAllDots` (#237), `_syncMapButtonsDisabled` (#238), `_setShipShieldEmissive` / `_clearShipShieldEmissive` (#239), `_settingsClearFocus` (#240).
+
+**Status honesty note (2026-05-19):** previous revisions of this plan marked some phases DONE based on code-presence checks alone (functions exist, modules load, dispatch chains wire up). Actual playtest is finding real bugs in those phases. From now on, DONE means "code present AND verified by user playtest." CODE-WIRED means the path is wired but not playtested end-to-end.
 
 ---
 
-## Skip List (deferred or replaced later)
+## Status at a glance
 
-These are intentionally excluded from the port. Most will be redesigned from scratch rather than ported.
+| Phase | Status | One-line summary |
+|---|---|---|
+| 0  Foundation | DONE | WebGPU renderer + scene + input + boot |
+| 1  Cockpit + ship | DONE | 7 ships load, frames swap, GLTFLoader works |
+| 2  Weapons | DONE | All 7 chassis fire correctly via lss_v17_weapons.js |
+| 3  Arenas | DONE | All 6 maps build, walls plain emissive per skip-list |
+| 4  Bots | CODE-WIRED | bot.update ticks ; solo combat plays ; not stress-tested |
+| 5  Abilities | CODE-WIRED | All 21 abilities + hold-prime ; Vortex/shields fixed via #208-#209 |
+| 6  Cores | CODE-WIRED | All 7 cores dispatch ; not all playtested |
+| 7  Multiplayer | PARTIAL | Trystero connects ; lobby flow fixed via #211-#213 ; needs re-test |
+| 8  Lobby | CODE-WIRED | Ship-select + ship preview (#215, #216), settings, perks ; MP lobby flow needs verify |
+| 9  HUD | DONE | Circumpunct, killfeed, scoreboard, minimap, doomed UI, name tags with LOS gate (#218) |
+| 10 Sound | DONE | Synth library + spatial sound + music + announcer |
+| 11 FX polish | PARTIAL | Gameplay-critical FX ported ; cosmetic polish stubs remain |
+| 12 Pilot perks | CODE-WIRED | Perk registry + Auto Cloak + Syphon stack ; not playtested |
+| 13 Polish + perf | ONGOING | 226 bugfixes shipped ; no bloom / no perf-tier yet |
+
+**Status legend:**
+- **DONE** : code present AND user-confirmed via playtest
+- **CODE-WIRED** : code present and modules load cleanly ; user hasn't played through end-to-end yet
+- **PARTIAL** : known gaps remain (listed in the phase section)
+- **ONGOING** : continuous work, no terminal state
+
+**Critical path (Phases 1, 2, 3, 4, 5, 7) is code-wired and solo + bots is playable. MP needs re-test after the #211-#213 fixes.**
+
+---
+
+## Skip list (intentionally excluded)
+
+These are by design ; do not log them as gaps.
 
 - The 19 GLSL wall patterns (Kali IFS, Apollonian, Voronoi, Mandelbox, Hex, Circuit, Caustic, Panel Maze, Wave Interference, Plasma FBM, Circumpunct, Holographic Glitch, Cellular Membrane, Warped Streaks, Hex Pulse, Cyber Datamosh, Ring Tunnel, Neon Cube, Layered Cube)
-- The multi-layer composite presets (Lab Composite, Digital, Matrix, all Venturi variants, etc.)
-- The Venturi corrugation system (the wall pattern lab in `wall_pattern_lab.html` and its variants in `v17a`)
+- The multi-layer composite presets (Lab Composite, Digital, Matrix, all Venturi variants)
+- The Venturi corrugation system
 - Triplanar texture sampling (stone, tile, metal, fabric)
 - The `cosmicField` / `sampleWallPattern` shader dispatcher
-- The `wall_pattern_lab.html`, `wall_lab_v2.html`, `fx_lab.html` lab tools (these stay on r128; not part of the game)
-- The PNG cockpit frames in `frames/` ARE kept ; they're images, not shaders
+- The wall_pattern_lab.html, wall_lab_v2.html, fx_lab.html tools (these stay on r128)
+- The PNG cockpit frames ARE kept ; they're images, not shaders
 
-Walls become a single TSL material with emissive + roughness that we'll redesign once the rest of the game is ported. Expect a 30+ prompt savings versus a faithful pattern port.
+Walls render as `MeshStandardMaterial` with emissive + roughness. Per-arena hue drift gives the rooms identity. Redesign comes after the game is fully ported.
 
 ---
 
 ## Phase 0 : Foundation (DONE)
 
-What's already shipped in `last_ship_sailing_webGPU.html`:
-
-- WebGPURenderer boot with async init
-- WebGPU-unsupported overlay with clear error message
-- Importmap pinning Three.js r170
+- WebGPURenderer boot with async init + WebGPU-unsupported overlay
+- Importmap pinning Three.js r170 ; loads three/webgpu namespace
 - Scene + perspective camera + ACES tone mapping + sRGB color space
-- Fog
-- Ambient + three accent point lights at PBR scale
-- Inverted-normal tunnel geometry (two rooms + cylinder)
-- Eight neon-ring corridor accents
-- Pointer lock + WASD + Space/Ctrl + mouse look
-- Hitscan tracer + visual hit confirmation on a target dummy
-- FPS / position status pill
-- Crosshair HUD
-
-Lines: ~550. Foundation is solid. Confirmed running.
+- Fog + ambient light + accent point lights at PBR scale
+- Pointer lock + WASD + Space/Ctrl + mouse look + gamepad input
+- FPS / position pill, crosshair HUD
+- Async module loader for the 11 lss_v17_*.js files with cache-busting
 
 ---
 
-## Phase 1 : Player ship + cockpit frame stack (~6-10 prompts)
+## Phase 1 : Player ship + cockpit (DONE)
 
-Goal: replace the "flying camera" with an actual ship + cockpit frame layer underneath.
-
-- Port GLTFLoader (works as-is in r170 WebGPU)
-- Load the seven ship .glb files from `ships/`
-- First-person mount: ship mesh slightly forward + below camera so it's visible to the player
-- Cockpit frame stack from v17 (three DOM layers behind the renderer): `#gun-layer`, `#ability-overlay-frame`, `#cockpit-frame` with the new `frame_<SHIP>.png` / `gun_<SHIP>.png` / etc. naming
-- Off-thread PNG decode (already implemented in v17, near-direct port)
-- Directional shift on non-frame layers (per-frame yaw/pitch delta drives translate)
-- Damage-shake hook on frame layer
-- Test deliverable: load each of seven ships, see cockpit + ship-from-inside
-
-**Output**: ship loadout commit works, cockpit frames swap correctly per ship.
+- GLTFLoader port (works as-is in r170) ; loads all 7 .glb files from ships/
+- buildModelShipMesh (webGPU.html:6792) ports v17's mesh walker
+- First-person mount + player.mesh.visible = false in cockpit view
+- Cockpit frame stack DOM layers : #gun-layer, #ability-overlay-frame, #cockpit-frame
+- Off-thread PNG decode + frame cache + cache-bust
+- Directional shift on non-frame layers via yaw/pitch delta
+- Damage-shake hook wired through triggerScreenShake
+- Per-ship frame swap (lss_v17_cockpit.js : preload + tick)
 
 ---
 
-## Phase 2 : Weapon system (~8-12 prompts)
+## Phase 2 : Weapons (DONE)
 
-Goal: full weapon dispatch for all 7 chassis.
-
-- Loadout data block (already pure data, copies over directly)
-- Weapon firing dispatch: `hitscan` / `projectile` / `spread` modes
-- `fireWeapon`, `fireHitscan`, `fireProjectile`, `fireSpread`
-- Projectile class with mesh + smoke trail option + impact handler
-- Clip ammo + reload state + spinup state (Blaster Gatling Cannon)
-- Muzzle flash light (point light pool)
-- Recoil camera kick + screen shake
-- Tracer effects per chassis (currently a simple line; expand to colored core + tail later)
-- Per-ship muzzle origin (the painted muzzle position work from v17 ports directly: `_PLAYER_MAIN_MUZZLE_FRAC`, `_PLAYER_LAUNCHER_FRACS`)
+- Loadout data block (lss_v17_data.js : LOADOUTS, CHASSIS, PILOT_PERKS, MAP_DATA)
+- Projectile class (lss_v17_weapons.js:5) : mesh + trail + smoke + glow
+- fireWeapon dispatch with hitscan / projectile / spread modes
+- fireHitscan + raycastLevel for SDF wall intersection (webGPU.html:2762)
+- Clip ammo + reload state + spinup (Blaster Gatling)
+- Tracer effects routed via painted-barrel split (bugfix #217)
+- Muzzle visuals now owned by the painted PNG gun frames ; 3D world flash suppressed (bugfix #222)
+- Per-ship muzzle origin from `_PLAYER_MAIN_MUZZLE_FRAC` / `_PLAYER_LAUNCHER_FRACS`
 - Spiral railgun trail for Puncture
-- Test deliverable: each of seven weapons fires correctly, hits register, reloads work
-
-**Output**: full main-weapon parity with v17.
 
 ---
 
-## Phase 3 : Marching cubes arena + level build (~6-10 prompts)
+## Phase 3 : Arenas (DONE)
 
-Goal: build actual game arenas instead of the placeholder tunnel.
-
-- Port `levelWorker` (already runs in a Web Worker, no renderer dependency)
-- Port `buildRoomGraphLevel` and the SDF room generation
-- Port `MAP_DATA` registry (six tunnel layouts + race mode + gmaps)
-- Per-arena room palette (per-room base hue, drift over time)
-- Wall material: plain `MeshStandardMaterial` with emissive + roughness (skip-list: no patterns yet)
-- Dynamic objects: atom clusters, cylinders, organic blobs (geometry only, no patterns)
-- Stasis field placement and effect
+- levelWorker (lss_v17_arena.js) : marching cubes off-thread
+- buildRoomGraphLevel + SDF room generation
+- MAP_DATA registry (6 tunnel layouts + race mode + gmaps slots)
+- Per-arena room palette with hue drift
+- Wall material : MeshStandardMaterial + emissive + roughness (no patterns ; skip-list)
+- Dynamic objects : atom clusters, cylinders, organic blobs (geometry only)
+- Stasis field placement (Phase K) + slow-zone effect
 - Spawn points per team
-- `spawnDynamicObjects` and `spawnOrganics` minus shader-heavy materials
-- Test deliverable: each of the six tunnel maps builds, walls render, dynamic objects spawn
-
-**Output**: arenas exist and are flyable. No patterns yet ; walls are plain emissive.
+- spawnDynamicObjects + spawnOrganics ; shader-heavy materials swapped for plain emissive
 
 ---
 
-## Phase 4 : Bot AI (~6-10 prompts)
+## Phase 4 : Bot AI (CODE-WIRED)
 
-Goal: bots that fly, shoot, use abilities, fight each other.
-
-- Port Bot class with per-chassis behavior tuning
-- Movement: pursue, strafe, flee on low HP
-- Aim leading, fire-when-in-cone logic
-- Ability dispatch (the simplified bot version, not the player hold-prime version)
-- Death + respawn
-- Team assignment + kill credit
-- Damage states (emit particles on low HP)
-- Test deliverable: solo match with 4 bots, they fight, kill, respawn
-
-**Output**: solo gameplay against bots works.
+- Bot class (lss_v17_bots.js:207) with per-chassis tuning
+- bot.update(dt) ticked from main loop (webGPU.html:8524)
+- Movement : pursue, strafe, flee on low HP
+- Aim leading + fire-when-in-cone
+- Ability dispatch (simplified bot version, not hold-prime)
+- Death + respawn + team assignment + kill credit (bugfix #214 wires respawn via window._roundTimerTick)
+- Damage states (emitDamageState ticks particles per HP tier)
+- animateShipMesh ticks engine plumes / running lights / barrel recoil for bots
 
 ---
 
-## Phase 5 : Player ability system (~12-20 prompts)
+## Phase 5 : Abilities (CODE-WIRED — all 21)
 
-Goal: all 21 player abilities + hold-to-prime input model.
+- Three-slot ability state + cooldown / active / hold timers
+- abilityInputPress / abilityInputRelease hold-to-prime model
+- _canPrimeAbility prereq checks (energy gates, lock gates, charge gates)
+- Per-ability frame overlay (slide-in / hold / slide-out, per-ability PNG)
 
-- Three-slot ability state (offensive / defensive / utility)
-- Cooldown timers, active timers, hold-state
-- Hold-to-prime input wrapping (already designed in v17: `abilityInputPress` / `abilityInputRelease`)
-- Per-ability prereq checks (`_canPrimeAbility`)
-- Ability frame overlay system (slide-in, hold, slide-out, with per-ability frame files)
-- Abilities by chassis:
-  - **Vortex**: Laser (energy-cost), Vortex Shield (hold-drain), Plasma Mines
-  - **Pyro**: Flame Chain (firewall), Fire Shield (hold), Explosive Gas (charge-based)
-  - **Puncture**: Cluster Missile, Afterburner, Stasis Trap
-  - **Slayer**: Stun Bolt, Absorption (hold), Teleport (phase-invuln)
-  - **Tracker**: Tracker Rockets (lock-gated), Plasma Shield, Sonar Pulse
-  - **Blaster**: Charge Shot, Body Shield (HP-pool), Range Mode (toggle)
-  - **Syphon**: Rocket Salvo, Energy Syphon (instant zap), Inner Spark (reset cooldowns)
-- Ability HUD pie + cooldown indicators
-- Per-ability sound dispatch
-- Test deliverable: every ability fires, behaves correctly, sounds, applies damage
+**Vortex**: Laser, Vortex Shield (hold-drain + lockout), Plasma Mines
+**Pyro**: Flame Chain (#223 added damage + flame licks), Fire Shield (#224 added flame cone), Explosive Gas (#219 added chemistry)
+**Puncture**: Cluster Missile, Afterburner, Stasis Trap
+**Slayer**: Stun Bolt, Absorption (hold), Teleport (phase-invuln)
+**Tracker**: Tracker Rockets (lock-gated), Plasma Shield (#207 ported), Sonar Pulse
+**Blaster**: Charge Shot, Body Shield (HP pool), Range Mode (toggle)
+**Syphon**: Rocket Salvo, Energy Syphon, Inner Spark
 
-**Output**: full ability parity.
+Shield damage clone visual now hugs the hull for all four hold-to-use shields (#225).
 
 ---
 
-## Phase 6 : Core abilities (~6-10 prompts)
+## Phase 6 : Cores (CODE-WIRED — all 7)
 
-Goal: 7 core implementations + core meter charging.
-
-- Core meter accumulation (damage dealt + time-based)
-- Core activation gate (100% meter required)
-- **Vortex**: Mega Laser (4 s sustained beam, alternating L/ML frame)
-- **Pyro**: Mega Flame Chain (instant AoE + three radiating trails)
-- **Puncture**: Mega Barrage (5 s speed + rocket stream from painted launchers)
-- **Slayer**: Mega Stun Bolt (lightning storm + bolt flurry for 5 s)
-- **Tracker**: Mega Tracker Rockets (3 s remote-guided swarm from launchers)
-- **Blaster**: AI Assist (10 s auto-aim, unlimited ammo, core frame overlay)
-- **Syphon**: AI Nanobots (3-tier permanent upgrades)
-- Core frame overlay (already designed)
+- Core meter accumulation (damage + time) + 100% activation gate
+- **Vortex** Mega Laser : 4 s sustained beam
+- **Pyro** Mega Flame Chain : instant AoE + 3 radiating trails + gas chain ignition (#219)
+- **Puncture** Mega Barrage : speed boost + rocket stream from painted launchers
+- **Slayer** Mega Stun Bolt : lightning storm + bolt flurry
+- **Tracker** Mega Tracker Rockets : 3 s remote-guided swarm
+- **Blaster** AI Assist : 10 s auto-aim + unlimited ammo
+- **Syphon** AI Nanobots : 3-tier permanent upgrades
+- Core frame overlay slides in for the duration
 - Per-core sound + spectacle
-- Test deliverable: each core activates, sustains, ends, applies effect
-
-**Output**: full core parity.
 
 ---
 
-## Phase 7 : Multiplayer (~8-12 prompts)
+## Phase 7 : Multiplayer (PARTIAL — needs re-test after #211-#213)
 
-Goal: Trystero-backed peer-to-peer matches.
+### Confirmed working
+- Trystero room creation / join : two clients connect cleanly
+- Peer state broadcast, hit consensus, effect broadcast (code-wired, not stress-tested)
 
-- Trystero room creation / join (no renderer dependency, direct port)
-- Peer state broadcast (use pooled state object from v17o)
-- NetworkPlayer ghost ship class
-- Interp + extrapolation between state packets
-- Loadout sync (peer ship select)
-- Hit consensus (the 3-tier system: claim → vote → resolve)
-- Match state sync (warmup countdown, round timer, scores, match end)
-- Spectator camera for dead players
-- Killfeed broadcast
-- Effect broadcast (lightning, tracers, ability projectiles)
-- Test deliverable: 2-player MP works, 4-player MP works, no desyncs
+### Bugs found in playtest (all fixed)
 
-**Output**: full MP parity.
+| Bug | Cause | Fix |
+|---|---|---|
+| Bots appear in MP | Boot-time `spawnBots()` (webGPU.html:10457) fired unconditionally | #211 gate boot spawnBots on `!net.active` |
+| Match starts the moment peers connect | Boot defaults `player.loadoutKey = 'VORTEX'` ; auto-broadcast as commit | #213 wrap `joinRoom` : null out loadoutKey + clear game.entities |
+| Players never see ship-select / map-select | Same root cause | #213 fixes the side-effect |
+| 6s defensive fallback in commitLoadout wrap could force playing state on MP | Setting state ignored `net.active` | #212 add `if (window.net && window.net.active) return;` guard |
+
+### Still untested (need MP playtest)
+
+- READY handshake : do both peers see + click the READY button ?
+- enterShipSelect on both peers after match_start proposal
+- Both peers commit + scheduleLaunch broadcasts launch_at + countdown syncs
+- Loadout sync : peer ship select visible on the other side
+- Match state sync (warmup countdown shared, round timer shared, score sync)
+- Spectator camera for dead players in MP
+- Killfeed broadcast across peers
+- Effect broadcast across peers (lightning, tracers, particle walls, firewalls, gas pockets)
+- 3-tier hit consensus actually resolves hits in MP
+
+### NetworkPlayer ghost ship class : code-wired, behavior untested
 
 ---
 
-## Phase 8 : Lobby / ship-select / settings (~6-10 prompts)
+## Phase 8 : Lobby / settings (CODE-WIRED)
 
-Goal: full pre-match UI.
-
-- Ship-select panel with seven ship cards
-- Ship thumbnail baking from .glb (one-time at boot)
-- Ship preview renderer (small isolated renderer in the lobby)
+- Ship-select panel with 7 ship cards + descriptions
+- Ship preview renderer (WebGPURenderer wrapper #215 + per-frame material sweep #216)
 - Loadout descriptions + ability summaries
 - Pilot perk picker
-- Settings panel: graphics (perf tier, fog, bloom), audio (master + per-bus), controls (keyboard rebind, gamepad rebind, sensitivity)
-- Lobby room code share + join
+- Settings panel : graphics tier, audio (master + per-bus), controls (keyboard + gamepad rebind, sensitivity)
+- Lobby room code share + join (Discord-gated lobby browser is deferred)
 - Ready / not-ready state
-- Map selector
-- DROP / gmaps input (or skip if not porting gmaps)
-- Test deliverable: full lobby flow from boot to launch
-
-**Output**: lobby + settings work end-to-end.
+- Map selector + race mode toggle
 
 ---
 
-## Phase 9 : HUD + scoreboard + killfeed (~5-8 prompts)
+## Phase 9 : HUD (DONE)
 
-Goal: full in-game UI.
-
-- Circumpunct HUD (the canvas-based central ring overlay)
+- Circumpunct HUD (canvas-based central ring overlay)
 - Health, shield, core meter rings
 - Ammo + reload indicator
-- Ability cooldown HUD
-- Minimap (top-down arena projection)
+- Ability cooldown HUD (pie segments)
+- Minimap (top-down arena projection at 20 Hz)
 - Killfeed
 - Scoreboard (tab)
 - Damage indicators (directional edge flashes)
 - Doomed warning + vignette
 - Enemy lock-on warning (Tracker locks)
 - Match end screen with stats
-- Test deliverable: HUD reads correctly in all match states
-
-**Output**: in-game HUD parity.
+- Ship name tags with LOS gate (#218) ; tags hide when occluded by walls
 
 ---
 
-## Phase 10 : Sound (~3-5 prompts)
+## Phase 10 : Sound (DONE)
 
-Goal: full audio.
-
-- Port the synth recipe library (Web Audio API, no renderer dependency)
-- Spatial sound for 3D effects
+- Synth recipe library (Web Audio API, lss_v17_audio.js)
+- Spatial sound for 3D effects (playSpatialSound)
 - Music patterns (warmup, combat, intensity ramping)
 - Per-class ability sounds
 - Ambient bed loop
-- Announcer (ship welcome, kill streaks, doomed alert)
-- Optional: hook into browser TTS for procedural callouts (the discussion from earlier)
-- Test deliverable: every action has audible feedback
-
-**Output**: audio parity.
+- Announcer (ship welcome, kill streaks, doomed alert, core ready, low ammo, dash ready, stasis active, multiple hostiles)
 
 ---
 
-## Phase 11 : Effects FX TSL ports (~10-15 prompts)
+## Phase 11 : Effects FX TSL ports (PARTIAL)
 
-Goal: visual polish layer; each effect type ported from GLSL to TSL.
+### Already shipped (good-enough fallbacks live, gameplay correct)
 
-- Tracer (line + tail + bright core)
-- Fractal lightning bolt (the heavy one; multi-segment jagged geometry)
-- Smoke (volumetric / billboard hybrid)
-- Fractal atom (cluster center self-illumination)
-- Shield materials (plasma_cyan, plasma_purple, plasma_red, plasma_green, plasma_amber, plasma_wall)
-- Projectile glow (LayeredFX core beam)
-- Vortex Laser core beam
-- Explosion (multi-stage hull burst + plumes)
-- Impact sparks
-- Stasis field shader
-- Gas chemistry pockets (atoms ignite + propagate)
-- Dynamic light pool + smoke-flash piggyback (already optimized in v17o, near-direct port)
-- Test deliverable: visual feedback matches v17 within reasonable fidelity
+- Tracer : LineBasicMaterial line with painted-barrel split (#217)
+- Lightning bolt : 4-segment jagged geometry (works ; full multi-segment tube pending)
+- Smoke : billboard particles (works ; volumetric upgrade pending)
+- Fractal atom : emissive sphere cluster (works ; IFS shader pending)
+- Projectile glow : MeshBasicMaterial additive (works ; core_beam TSL pending)
+- Vortex Laser core beam : cylinder fallback (works ; uses `_makeFXMaterial` proxy)
+- Explosion : multi-stage hull burst (works fully)
+- Impact sparks (#206) : v8Sparks InstancedMesh pool
+- Dynamic light pool : pointLight pool working
+- Smoke-flash piggyback : co-trigger working
+- Stasis field : emissive cylinder (gameplay correct ; full shader pending)
+- TRACKER Plasma Shield (#207) : additive BoxGeometry + wireframe ; collision works
+- Pyro gas chemistry (#219) : full chain reaction + sustained burn damage
+- Pyro Flame Chain (#223) : visible flame curtain + damage tick
+- Pyro Fire Shield (#224) : forward cone of fire particles tied to damage cone
+- Shield damage clones (#225) : ellipsoid hull-hug shields for all 4 holdable shields
+- Heat trail (#226) : warm particle trail behind fast movers
 
-**Output**: full FX parity (or "good enough" placeholder per effect).
+### Still truly stubbed (cosmetic only ; no gameplay impact)
+
+- `flashFXMaterialHit` — FX material flash on hit
+- `_releaseLightningSlot` / `_releaseHeatTrail` / `_releaseExplosionMesh` / `_releaseParticleSlot` — FX pool releases
+- `spawnHitstop` — slow-mo on big hits
+- `cullOldestParticle` — particle pressure relief
+- `_spawnSlayerCoreStormFX` — SLAYER core storm
+- `updateGasLighting` / `updateBCSLighting` / `updateBCSWakes` / `updateAmbientCloudWakes` — atmosphere lighting
 
 ---
 
-## Phase 12 : Pilot perks (~2-4 prompts)
+## Phase 12 : Pilot perks (CODE-WIRED)
 
-Goal: per-perk runtime effects.
-
-- Perk registry (already pure data)
-- Apply perk on loadout commit (shield bonus, dash bonus, etc.)
-- Auto Cloak perk (core-meter-triggered opacity drop, broadcast bit)
+- Perk registry (PILOT_PERKS in lss_v17_data.js)
+- Apply perk on loadout commit (shield bonus, dash bonus)
+- Auto Cloak (core-meter-triggered opacity drop, broadcast bit)
 - Syphon-stack perk (per-kill tier escalation)
-- Other passive perks
-- Test deliverable: each perk applies correctly
-
-**Output**: perk parity.
+- Other passive perks + Nano Repair regen via _tickPerkEffects
+- Outline Optics : deferred (needs _mirrorMeshTree backface clone ; #225 uses ellipsoid wrap instead)
 
 ---
 
-## Phase 13 : Polish + perf tuning (~10-20 prompts)
+## Phase 13 : Polish + perf (ONGOING)
 
-Goal: ship-ready build.
-
-- Performance profile vs WebGL v17 build
-- Per-perf-tier graphics quality (potato / low / high)
-- Bloom pass on WebGPU (use Three.js postprocessing if available, else write custom)
-- Damage shake / hit flash tuning
-- Bug fixes from playtesting
-- Migration guide for users coming from v17
-- Final QA pass with multiple peers
-- Test deliverable: builds feel as good or better than v17
-
-**Output**: shippable WebGPU build.
+- **226 bugfixes shipped** ; see inline `bugfix YYYY-MM-DD #N` tags
+- Damage shake + hit flash tuning : done
+- Per-perf-tier graphics quality : forced QUALITY.isPotato() path ; full tier picker not wired yet
+- Bloom pass : not yet (Three.js postprocessing or custom)
+- Performance profile vs WebGL v17 : not measured
+- Migration guide : not written
+- Final QA pass : Phases 0-4 well-tested, Phases 5-13 lightly tested
 
 ---
 
-## Total estimated prompts
+## Recent fixes table
 
-| Path | Prompts |
+| Tag | What |
 |---|---|
-| Minimum viable (Phases 1, 2, 3, 4, 5, 7) | 40-65 |
-| Full single-player (add 6, 8, 9, 11, 12) | 70-100 |
-| Full parity (everything + polish 13) | 85-150 |
+| #206 | v8Sparks InstancedMesh impact pool ported |
+| #207 | TRACKER Plasma Shield (spawnParticleWall) ported |
+| #208 | updateAbilities tail post-tick : Vortex regen + Blaster transition + Charge Shot + core meter freeze |
+| #209 | playerTakeDamage defensive layer : Vortex / Slayer / Body / Fire absorption + Stun Bolt counter |
+| #210 | Stasis / warmup branch : gamepad look + pitch clamp outside lock guard |
+| #211 | Boot spawnBots gated on `!net.active` |
+| #212 | commitLoadout 6s fallback gated on `!net.active` |
+| #213 | joinRoom wrap : reset state for clean MP slate |
+| #214 | gameLoop calls window._roundTimerTick (round-end multi-fire) |
+| #215 | WebGLRenderer stub → real WebGPURenderer wrapper for ship preview |
+| #216 | Preview renderer per-frame material sweep |
+| #217 | spawnTracer override : _overlayShift composition + velocity comp |
+| #218 | Ship name tag LOS gate via raycastLevel |
+| #219 | igniteNearbyGas + spawnIncendiaryGas (Pyro chemistry + chain reaction) |
+| #220-#222 | fireWeapon muzzle visuals (3 iterations ; settled on suppressing 3D flash) |
+| #223 | _buildFlameChainFlameLicks + attached firewall `_tick` damage handler |
+| #224 | _spawnThermalShieldFire + updateShieldVisuals wiring |
+| #225 | _makeHullHugShield / _disposeShieldClone (ellipsoid wrap) |
+| #226 | spawnHeatTrail particle-based fallback |
 
-Realistic with debugging overhead and discovery: budget 2x the optimistic count. So 80-200 prompts total to genuine v17 parity, spread across however many sessions you want.
+---
+
+## Known small-rule gaps (verified)
+
+1. **Outline Optics perk visual** — perk's stat bonus applies on commit but the visible backface outline doesn't render. Needs `_mirrorMeshTree` from v17's shield system. The simpler `_makeHullHugShield` in #225 uses an ellipsoid instead of the mirrored tree.
+
+### Lesson learned (2026-05-19)
+
+The audit agent's "DONE" claim for Phase 7 was wrong. It checked that functions existed and modules loaded but didn't notice the boot bootstrap was pre-populating player state in a way that broke MP at runtime. Going forward :
+
+- DON'T mark a phase DONE based on grep / code-presence alone.
+- DO mark phases CODE-WIRED until the user (or me) actually playtests end-to-end.
+- DO trace every state initialization at boot and ask "would this leak into a path where it shouldn't?" Specifically: boot-time defaults that look like user choices (loadout, ship mesh, bots, etc.) need to be invalidated when entering a clean-slate path (MP, returnToRootMenu, etc.).
 
 ---
 
 ## Critical path (shortest to playable)
 
-1. **Phase 1** (cockpit) → see your own ship
-2. **Phase 2** (weapons) → shoot stuff
-3. **Phase 3** (arena) → real maps
-4. **Phase 4** (bots) → solo opponents
-5. **Phase 5** (abilities) → full combat
-6. **Phase 7** (multiplayer) → play with friends
+1. Phase 1 (cockpit) ✓ DONE
+2. Phase 2 (weapons) ✓ DONE
+3. Phase 3 (arena) ✓ DONE
+4. Phase 4 (bots) ✓ CODE-WIRED
+5. Phase 5 (abilities) ✓ CODE-WIRED
+6. Phase 7 (multiplayer) ⚠ PARTIAL (needs re-test after #211-#213)
 
-Six phases. Estimated 40-65 prompts to a playable game. Walls will be plain emissive throughout; that's the skip list at work.
-
-Phases 6 (cores), 8 (lobby polish), 9 (HUD), 10 (sound), 11 (FX polish), 12 (perks), 13 (polish) are optional layers on top. Decide per-phase whether the time investment is worth the fidelity.
+Solo + bots is playable. MP needs re-test. Remaining work is Phase 11 cosmetic FX and Phase 13 perf tuning.
 
 ---
 
-## Future-state items (post-port, post-walls)
+## Suggested next ports
 
-These come AFTER the game is fully ported. Don't tackle until the rest is done.
+1. **Re-test MP end-to-end** with the #211-#213 fixes
+2. **Playtest the FX ports** (#219, #223-#226) — Pyro gas + Flame Chain + Fire Shield + shield clones should all be visible in-game
+3. **`flashFXMaterialHit`** — shield-hit FX flash, visual only
+4. **`_spawnSlayerCoreStormFX`** — Slayer Mega Stun Bolt core lightning storm, visual only
+5. **Per-perf-tier graphics quality picker** — tier selection in settings + per-tier toggles for shadows / bloom / particle cap / dynamic light count
+6. **Bloom pass** — Phase 13 polish
+
+---
+
+## Future-state items (post-port)
 
 - New wall design replacing the 19 patterns (TSL-native, designed for WebGPU strengths)
-- WebGPU compute shader for marching cubes (massive level-build speedup, enables real-time arena variation)
+- WebGPU compute shader for marching cubes
 - Volumetric fog as a compute pass
 - GPU particle simulation (instanced + compute-updated)
-- New cosmetic upgrades
-- Procedural ship hull variations
 - Music synthesis on GPU
 - Custom postprocess stack (motion blur, depth-of-field, lens distortion)
 
@@ -339,6 +363,4 @@ These come AFTER the game is fully ported. Don't tackle until the rest is done.
 
 ## Tracking
 
-Each phase ends with a `// Phase N : <name> (done)` comment block in the webGPU file marking the milestone. Plan tasks per phase in the TaskCreate tool so we can see the gauge advance.
-
-If at any point the WebGPU build feels meaningfully better than v17 (lower latency, smoother framerate, less stutter), consider declaring victory early and merging back into v17a / v17o as the new mainline.
+Each non-trivial fix lands with a `(bugfix YYYY-MM-DD #N)` comment in the source. Counter is monotonic ; current high-water mark is #226. The full grep of the bugfix tags is the canonical changelog ; no separate CHANGELOG file is maintained.

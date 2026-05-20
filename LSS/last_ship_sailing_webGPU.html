@@ -114,7 +114,18 @@
     position: fixed; top: 0; left: 0; width: 100%; height: 100%;
     pointer-events: none;
     background-repeat: no-repeat; background-position: center center;
-    background-size: 100% 100%;
+    /* (bugfix 2026-05-20 #234) Switched from `100% 100%` (stretch) to
+       `cover` (uniform scale + crop). The painted barrel tips in the
+       cockpit / gun PNGs are at fixed PIXEL positions in the art ; the
+       tracer-origin math at spawnTracer uses raw viewport-fraction
+       TIP_FRAC constants (0.305, 0.695, 0.680). With `100% 100%` the
+       PNG stretches non-uniformly on any aspect ratio that isn't 16:9
+       (devtools open, ultrawide monitor, browser resize), so the
+       painted barrel tip is at a different viewport pixel than the
+       tracer-origin computation expects, and tracers visibly diverge
+       from the painted muzzle. `cover` matches v17's CSS and keeps
+       the PNG aspect locked. */
+    background-size: cover;
     opacity: 0;
     will-change: transform, opacity;
     image-rendering: auto;
@@ -2293,6 +2304,77 @@ window.playerTakeDamage = function(amount, attacker, projectile) {
   if (typeof showDamageIndicator === 'function' && attacker && attacker.position) {
     try { showDamageIndicator(attacker.position); } catch (_) {}
   }
+  // (bugfix 2026-05-19 #209) Defensive ability damage modifiers ported
+  // from v17o.html:27401-27455. The webGPU playerTakeDamage was going
+  // straight from gates to shield drain, skipping the entire pre-shield
+  // ability layer. Effect : Vortex Shield, Absorption, Body Shield, and
+  // Fire Shield were all purely cosmetic (frame slid in, sound played,
+  // cooldown ticked, but damage went through anyway). Order matches
+  // v17 exactly so the same DPS math + same shield interactions happen.
+  //
+  // Stun Bolt counter (Arc Wave projectile) : destroys Plasma Shield +
+  // Body Shield instantly. Routed FIRST so the destroy-shield path
+  // happens before the still-up-this-frame absorption checks below.
+  const _isArcWaveHit = projectile && projectile.isArcWave;
+  if (_isArcWaveHit) {
+    try { if (typeof playSound === 'function') playSound('stun'); } catch (_) {}
+    if (player.velocity) player.velocity.multiplyScalar(0.3);
+    player.arcSlowTimer = Math.max(player.arcSlowTimer || 0, 2.0);
+    // Destroy player's Plasma Shield walls
+    if (game.worldEffects && game.worldEffects.length) {
+      for (let we = game.worldEffects.length - 1; we >= 0; we--) {
+        const eff = game.worldEffects[we];
+        if (eff && eff.type === 'particle_wall' && eff.owner === 'player' && eff.hp > 0) {
+          eff.hp = 0; eff.timer = 0;
+          if (eff.mesh && eff.mesh.parent) eff.mesh.parent.remove(eff.mesh);
+          if (eff.edgeMesh && eff.edgeMesh.parent) eff.edgeMesh.parent.remove(eff.edgeMesh);
+          if (eff.plasmaMesh && eff.plasmaMesh.parent) eff.plasmaMesh.parent.remove(eff.plasmaMesh);
+          try { if (typeof spawnExplosion === 'function') spawnExplosion(eff.position, 20); } catch (_) {}
+        }
+      }
+    }
+    // Destroy player's Body Shield
+    if (player.abilityActive && player.abilityActive[1] &&
+        player.abilities && player.abilities[1] && player.abilities[1].name === 'Body Shield') {
+      player.gunShieldHP = 0; player.gunShieldTimer = 0;
+      player.abilityActive[1] = false;
+      player.abilityCooldowns[1] = 15;
+    }
+  }
+  // Absorption (SLAYER) : 70% damage reduction, 85% under Mega Stun Bolt core.
+  if (player.abilityActive && player.abilityActive[1] &&
+      player.abilities && player.abilities[1] && player.abilities[1].name === 'Absorption') {
+    const _swordCore = player.coreActive && player.loadout && player.loadout.core &&
+                       player.loadout.core.name === 'Mega Stun Bolt';
+    amount *= _swordCore ? 0.15 : 0.30;
+  }
+  // Body Shield (BLASTER) : full immunity while HP pool > 0, drains by damage.
+  if (player.abilityActive && player.abilityActive[1] &&
+      player.abilities && player.abilities[1] && player.abilities[1].name === 'Body Shield' &&
+      (player.gunShieldHP || 0) > 0) {
+    player.gunShieldHP -= amount;
+    if (player.gunShieldHP <= 0) {
+      player.gunShieldHP = 0;
+      player.gunShieldTimer = 0;
+      player.abilityActive[1] = false;
+      player.abilityCooldowns[1] = 15;
+    }
+    return; // fully blocked
+  }
+  // Fire Shield (PYRO) : full immunity while thermal HP > 0 (drains via tick).
+  if (player.abilityActive && player.abilityActive[1] &&
+      player.abilities && player.abilities[1] && player.abilities[1].name === 'Fire Shield' &&
+      (player.thermalShieldHP || 0) > 0) {
+    return; // fully blocked
+  }
+  // Vortex Shield : 100% block + stores damage for the on-release burst.
+  // Energy drain (per-frame in updateAbilities) caps total uptime.
+  if (player.abilityActive && player.abilityActive[1] &&
+      player.abilities && player.abilities[1] && player.abilities[1].name === 'Vortex Shield') {
+    player.vortexStored = (player.vortexStored || 0) + amount;
+    if (amount > 0) { try { if (typeof playSound === 'function') playSound('vortex_absorb'); } catch (_) {} }
+    return; // fully blocked
+  }
   // Shield absorbs first.
   const _shieldBefore = player.shield;
   if (player.shield > 0) {
@@ -3046,14 +3128,23 @@ window.buildWorld = function() {
   } catch (_) {}
 };
 
-// (bugfix 2026-05-19 #76) Enemy ship name labels + bracket callouts.
-// Simplified port of v17o:44712. Skips the legacy bar pool (v11 already
-// disabled it) and the LOS raycast (no raycastLevel available in the
-// port). Renders friendly-blue / enemy-red callouts above each visible
-// ship within 3500 units, with a 0.45s digitize-in reveal animation.
+// (bugfix 2026-05-19 #76 ; #218 added LOS gate 2026-05-20) Enemy ship
+// name labels + bracket callouts. Simplified port of v17o:44712. Renders
+// friendly-blue / enemy-red callouts above each visible ship within 3500
+// units with a 0.45s digitize-in reveal animation.
+//
+// (bugfix 2026-05-20 #218) The original port note said "no raycastLevel
+// available" and skipped the LOS gate ; that note was stale (arena.js's
+// raycastLevel + the SDF sphere/cylinder ray march at sdfRaycast both
+// exist and work). Without the LOS check, ship tags drew through walls,
+// giving the player an effective wallhack. Ported v17o:44773-44780's
+// gate verbatim : raycast camera → ship per ~15 Hz, mark _hbLosBlocked
+// when wallDist < dist-30, skip painting the label while blocked.
+const HBAR_LOS_INTERVAL = 0.067; // ~15 Hz throttle, matches v17o:44710
 window._hbarPool = { labels: [], initialized: false };
 window._hbScratchA = null;
 window._hbScratchB = null;
+window._hbScratchLos = null;
 function _initHbarLabelPool(maxBars) {
   const container = document.getElementById('enemy-healthbars');
   if (!container) return;
@@ -3109,6 +3200,23 @@ function updateEnemyHealthBars() {
     if (sx < -140 || sx > winW + 140 || sy < -20 || sy > winH + 30) {
       ent._labelSpotTime = null; return;
     }
+    // (bugfix 2026-05-20 #218) LOS gate. Cached at ~15 Hz so we don't
+    // pay the SDF ray march cost every frame per entity. raycastLevel
+    // returns the wall hit distance ; if a wall sits between the player
+    // and the ship (with a 30u margin so the ship's own hull doesn't
+    // self-occlude), suppress the label. v17o:44773-44780 verbatim.
+    if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
+      if (typeof raycastLevel === 'function') {
+        if (!window._hbScratchLos) window._hbScratchLos = new THREE.Vector3();
+        const toEnt = window._hbScratchLos.subVectors(ent.position, window.player.position).normalize();
+        const wallDist = raycastLevel(window.player.position, toEnt, dist + 50);
+        ent._hbLosBlocked = (wallDist < dist - 30);
+      } else {
+        ent._hbLosBlocked = false;
+      }
+      ent._hbLosTime = now;
+    }
+    if (ent._hbLosBlocked) { ent._labelSpotTime = null; return; }
     if (ent._labelSpotTime == null) ent._labelSpotTime = now;
     const isEnemy = _localTeam == null || ent.team !== _localTeam;
     const fullText = (ent.loadout.name || '?').toUpperCase();
@@ -3971,6 +4079,123 @@ window._visibleMapKeys = function() {
 
 
 
+// (bugfix 2026-05-19 #206) v8Sparks port from v17o:19738-19843. Phase 11
+// FX item ; an InstancedMesh + MeshBasicMaterial pool of additive-blend
+// octahedron sparks driven from a fixed-capacity ring buffer. Spawned
+// by every weapon impact (lss_v17_bots.js:91, lss_v17_fx.js:648/709) and
+// by the projectile-vs-cluster path in this file (~8360). Until this
+// landed those calls were silent no-ops because the typeof guard failed.
+// InstancedMesh + MeshBasicMaterial are first-class in r170 WebGPU so
+// the port is mechanical : no TSL needed, just classic Three.js objects.
+// Lazy-inits the first time a caller spawns ; falls back gracefully if
+// the scene isn't ready yet (matches v17o's defensive shape).
+const v8Sparks = {
+  capacity: 512,
+  mesh: null,
+  active: null, age: null, life: null, size: null,
+  vx: null, vy: null, vz: null,
+  px: null, py: null, pz: null,
+  cursor: 0,
+  _m: null, _qIdent: null, _s: null, _p: null,
+  _color: null,
+};
+function v8SparksInit() {
+  if (v8Sparks.mesh) return;
+  if (typeof scene === 'undefined' || !scene || !THREE.InstancedMesh) return;
+  const geo = new THREE.OctahedronGeometry(1, 0);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 1, depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const mesh = new THREE.InstancedMesh(geo, mat, v8Sparks.capacity);
+  mesh.frustumCulled = false;
+  mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(v8Sparks.capacity * 3), 3);
+  mesh.count = v8Sparks.capacity;
+  const m0 = new THREE.Matrix4(); m0.makeScale(0, 0, 0);
+  for (let i = 0; i < v8Sparks.capacity; i++) mesh.setMatrixAt(i, m0);
+  mesh.instanceMatrix.needsUpdate = true;
+  scene.add(mesh);
+  v8Sparks.mesh = mesh;
+  const C = v8Sparks.capacity;
+  v8Sparks.active = new Uint8Array(C);
+  v8Sparks.age   = new Float32Array(C);
+  v8Sparks.life  = new Float32Array(C);
+  v8Sparks.size  = new Float32Array(C);
+  v8Sparks.vx = new Float32Array(C); v8Sparks.vy = new Float32Array(C); v8Sparks.vz = new Float32Array(C);
+  v8Sparks.px = new Float32Array(C); v8Sparks.py = new Float32Array(C); v8Sparks.pz = new Float32Array(C);
+  v8Sparks._m = new THREE.Matrix4();
+  v8Sparks._qIdent = new THREE.Quaternion(0, 0, 0, 1);
+  v8Sparks._s = new THREE.Vector3();
+  v8Sparks._p = new THREE.Vector3();
+  v8Sparks._color = new THREE.Color();
+}
+function v8SpawnSparks(pos, count, baseSize, vScale, color1, color2) {
+  // Potato quality skips instanced sparks entirely (matches v17o).
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (!pos) return;
+  if (!v8Sparks.mesh) v8SparksInit();
+  if (!v8Sparks.mesh) return;
+  color1 = color1 != null ? color1 : 0xffaa44;
+  color2 = color2 != null ? color2 : 0xfff0c0;
+  const tmp = v8Sparks._color;
+  const c1 = tmp.setHex(color1); const r1 = c1.r, g1 = c1.g, b1 = c1.b;
+  const c2 = tmp.setHex(color2); const r2 = c2.r, g2 = c2.g, b2 = c2.b;
+  for (let i = 0; i < count; i++) {
+    const idx = v8Sparks.cursor;
+    v8Sparks.cursor = (v8Sparks.cursor + 1) % v8Sparks.capacity;
+    v8Sparks.active[idx] = 1;
+    v8Sparks.px[idx] = pos.x; v8Sparks.py[idx] = pos.y; v8Sparks.pz[idx] = pos.z;
+    const theta = Math.random() * Math.PI * 2;
+    const phi   = Math.acos(2 * Math.random() - 1);
+    const speed = (0.6 + Math.random() * 1.0) * vScale;
+    const sinP  = Math.sin(phi);
+    v8Sparks.vx[idx] = sinP * Math.cos(theta) * speed;
+    v8Sparks.vy[idx] = sinP * Math.sin(theta) * speed;
+    v8Sparks.vz[idx] = Math.cos(phi)            * speed;
+    v8Sparks.age[idx]  = 0;
+    v8Sparks.life[idx] = 0.22 + Math.random() * 0.45;
+    v8Sparks.size[idx] = baseSize * (0.6 + Math.random() * 0.7);
+    const tt = Math.random();
+    v8Sparks.mesh.instanceColor.setXYZ(idx,
+      r1 * (1 - tt) + r2 * tt,
+      g1 * (1 - tt) + g2 * tt,
+      b1 * (1 - tt) + b2 * tt);
+  }
+  v8Sparks.mesh.instanceColor.needsUpdate = true;
+}
+function v8UpdateSparks(dt) {
+  if (!v8Sparks.mesh) return;
+  let dirty = false;
+  const drag = Math.pow(0.4, dt); // sparks slow faster than debris
+  for (let i = 0; i < v8Sparks.capacity; i++) {
+    if (!v8Sparks.active[i]) continue;
+    dirty = true;
+    v8Sparks.age[i] += dt;
+    if (v8Sparks.age[i] >= v8Sparks.life[i]) {
+      v8Sparks.active[i] = 0;
+      v8Sparks._m.makeScale(0, 0, 0);
+      v8Sparks.mesh.setMatrixAt(i, v8Sparks._m);
+      continue;
+    }
+    v8Sparks.vx[i] *= drag; v8Sparks.vy[i] *= drag; v8Sparks.vz[i] *= drag;
+    v8Sparks.px[i] += v8Sparks.vx[i] * dt;
+    v8Sparks.py[i] += v8Sparks.vy[i] * dt;
+    v8Sparks.pz[i] += v8Sparks.vz[i] * dt;
+    const t = v8Sparks.age[i] / v8Sparks.life[i];
+    const fade = 1 - t;
+    const s = v8Sparks.size[i] * fade;
+    v8Sparks._p.set(v8Sparks.px[i], v8Sparks.py[i], v8Sparks.pz[i]);
+    v8Sparks._s.set(s, s, s);
+    v8Sparks._m.compose(v8Sparks._p, v8Sparks._qIdent, v8Sparks._s);
+    v8Sparks.mesh.setMatrixAt(i, v8Sparks._m);
+  }
+  if (dirty) v8Sparks.mesh.instanceMatrix.needsUpdate = true;
+}
+window.v8Sparks       = v8Sparks;
+window.v8SpawnSparks  = v8SpawnSparks;
+window.v8UpdateSparks = v8UpdateSparks;
+window.v8SparksInit   = v8SparksInit;
+
 function _scheduleEffectDispose(obj, life) {
   if (!obj || !window.game || !game.effects) return;
   game.effects.push({ mesh: obj, lifetime: life, age: 0, type: 'fxstub' });
@@ -4012,6 +4237,15 @@ function updateParticles(dt) {
   if (!game.particles || !game.particles.length) {
     _resetParticlePoolForFrame();
     return;
+  }
+  // (bugfix 2026-05-20 #235) Cap the array at MAX_PARTICLES so the
+  // integrate loop below doesn't process unbounded entries during
+  // heavy combat. cullOldestParticle removes the particle with the
+  // least remaining life so freshest spawns are preserved.
+  const _max = window.MAX_PARTICLES || 500;
+  while (game.particles.length > _max) {
+    if (typeof window.cullOldestParticle === 'function') window.cullOldestParticle();
+    else { game.particles.pop(); }  // defensive fallback
   }
   // Integrate + cull.
   for (let i = game.particles.length - 1; i >= 0; i--) {
@@ -4180,17 +4414,273 @@ window.spawnTripWireOrb = function(pos, color) {
   scene.add(m);
   _scheduleEffectDispose(m, 12);
 };
-window.spawnIncendiaryGas = function(pos) {
-  if (!pos || !scene) return;
-  const m = new THREE.Mesh(
-    new THREE.SphereGeometry(80, 16, 12),
-    new THREE.MeshBasicMaterial({ color: 0xff8844, transparent: true, opacity: 0.35 })
-  );
-  m.position.copy(pos);
-  scene.add(m);
-  _scheduleEffectDispose(m, 5);
+// (bugfix 2026-05-20 #219) spawnIncendiaryGas ported from v17o:9130-9258.
+// Pyro Explosive Gas trap : green volumetric cloud (350u radius) that
+// hangs unignited for 10 s, can be lit by firewall proximity / thermite
+// splash / Mega Flame Chain, then burns 1500 DPS for 10 s while orange.
+// Previous stub spawned only a cosmetic blob with no gameplay : no
+// damage, no chain reaction, no chemistry. The v17 ShaderMaterial
+// volumetric hull is Phase 11 (skip-listed) ; this WebGPU build uses
+// simpler MeshBasicMaterial additive spheres with the same gameplay
+// fields. _tick(dt) drives both unignited and ignited behavior :
+//   - Pulse + breathe the outer hull
+//   - Spawn drift particles every 0.4 s (green) or 0.25 s (orange + fire)
+//   - Check firewall proximity for natural ignition
+//   - Apply DPS + slow to enemies inside while ignited
+//   - End the cloud's outer timer when igniteTimer expires
+window.spawnIncendiaryGas = function(pos, owner, team, ownerPeerId, netId, broadcast) {
+  if (!pos || !scene) return null;
+  const _pos = (pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z));
+  const RADIUS = 350;
+  const CORE_SIZE = 160;
+  const GAS_GREEN = 0xaecc55;
+  const GAS_ORANGE_OUTER = 0xff5520;
+  const GAS_ORANGE_CORE  = 0xff7722;
+  // Outer cloud hull.
+  const gasGeo = new THREE.SphereGeometry(1, 24, 16);
+  const gasMat = new THREE.MeshBasicMaterial({
+    color: GAS_GREEN, transparent: true, opacity: 0.30,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const gasMesh = new THREE.Mesh(gasGeo, gasMat);
+  gasMesh.position.copy(_pos);
+  gasMesh.scale.setScalar(RADIUS);
+  gasMesh.frustumCulled = false;
+  gasMesh.renderOrder = 1;
+  scene.add(gasMesh);
+  // Brighter inner core for legibility at distance.
+  const coreGeo = new THREE.SphereGeometry(1, 24, 14);
+  const coreMat = new THREE.MeshBasicMaterial({
+    color: GAS_GREEN, transparent: true, opacity: 0.55,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+  coreMesh.position.copy(_pos);
+  coreMesh.scale.setScalar(CORE_SIZE);
+  coreMesh.renderOrder = 2;
+  scene.add(coreMesh);
+  const eff = {
+    type: 'incendiary_gas',
+    position: _pos,
+    timer: 10, radius: RADIUS,
+    owner, team,
+    ignited: false,
+    igniteDmgPerSec: 1500,
+    igniteTimer: 0,
+    igniteDuration: 10,
+    slowFactor: 0.5,
+    fxTimer: 0,
+    ownerPeerId, netId,
+    mesh: gasMesh, coreMesh,
+    meshes: [gasMesh, coreMesh],
+    _tick: function(dt) {
+      this.timer -= dt;
+      const tNow = (window.game && game.time) || 0;
+      if (!this.ignited) {
+        // Firewall-proximity ignition (v17o:31761-31820 condensed).
+        if (game.worldEffects) {
+          for (const other of game.worldEffects) {
+            if (!other || other.type !== 'firewall') continue;
+            const toGas = new THREE.Vector3().subVectors(this.position, other.position);
+            const along = toGas.dot(other.direction);
+            if (along < -50 || along > (other.length || 0) + 50) continue;
+            const perp = toGas.clone().sub(other.direction.clone().multiplyScalar(along));
+            if (perp.length() < this.radius + 150) {
+              window.igniteNearbyGas(this.position, 1);
+              break;
+            }
+          }
+        }
+        // Outer + core breathe so the cloud reads as alive.
+        gasMesh.scale.setScalar(this.radius + Math.sin(tNow * 1.5) * 20);
+        coreMesh.scale.setScalar(CORE_SIZE + Math.sin(tNow * 2 + 1) * 12);
+        // Periodic green drift particles.
+        this.fxTimer -= dt;
+        if (this.fxTimer <= 0 && Array.isArray(game.particles)) {
+          const n = 2 + Math.floor(Math.random() * 2);
+          for (let i = 0; i < n; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const r = Math.random() * this.radius * 0.7;
+            const pPt = this.position.clone().add(new THREE.Vector3(
+              Math.cos(theta) * r,
+              (Math.random() - 0.5) * this.radius * 0.4,
+              Math.sin(theta) * r
+            ));
+            game.particles.push({
+              position: pPt,
+              velocity: new THREE.Vector3(
+                (Math.random() - 0.5) * 50,
+                40 + Math.random() * 60,
+                (Math.random() - 0.5) * 50
+              ),
+              life: 0.6 + Math.random() * 0.4, maxLife: 1.0,
+              color: Math.random() > 0.5 ? 0x88aa33 : 0x99bb44,
+              size: 4 + Math.random() * 3,
+            });
+          }
+          this.fxTimer = 0.4;
+        }
+      } else {
+        this.igniteTimer -= dt;
+        // DPS + slow to enemy ships inside.
+        if (game.entities) {
+          for (const bot of game.entities) {
+            if (!bot || !bot.alive || bot.team === this.team) continue;
+            if (bot.position.distanceTo(this.position) < this.radius) {
+              try {
+                const dealt = bot.takeDamage(this.igniteDmgPerSec * dt, this.owner);
+                if (dealt > 0 && this.owner === 'player' && window.player) window.player.damageDealt += dealt;
+              } catch (_) {}
+              if (bot.velocity) bot.velocity.multiplyScalar(1 - this.slowFactor * dt);
+            }
+          }
+        }
+        if (window.player && window.player.shipState !== 'dead' && this.team !== window.player.team) {
+          if (window.player.position.distanceTo(this.position) < this.radius) {
+            if (typeof playerTakeDamage === 'function') {
+              try { playerTakeDamage(this.igniteDmgPerSec * dt, this.owner, null); } catch (_) {}
+            }
+            if (window.player.velocity) window.player.velocity.multiplyScalar(1 - this.slowFactor * dt);
+          }
+        }
+        // Outer flicker + scale pulse.
+        const flicker = 0.55 + Math.sin(tNow * 8) * 0.10 + (Math.random() - 0.5) * 0.08;
+        gasMat.opacity = Math.max(0, Math.min(0.85, flicker));
+        gasMesh.scale.setScalar(this.radius + Math.sin(tNow * 3) * 30);
+        coreMat.opacity = 0.50 + Math.sin(tNow * 6) * 0.10;
+        // Periodic fire particles + flicker light.
+        this.fxTimer -= dt;
+        if (this.fxTimer <= 0 && Array.isArray(game.particles)) {
+          const fireColors = [0xff4400, 0xff6600, 0xff8833, 0xffaa00];
+          const n = 4 + Math.floor(Math.random() * 3);
+          for (let i = 0; i < n; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const r = Math.random() * this.radius * 0.8;
+            const pPt = this.position.clone().add(new THREE.Vector3(
+              Math.cos(theta) * r,
+              (Math.random() - 0.3) * this.radius * 0.5,
+              Math.sin(theta) * r
+            ));
+            game.particles.push({
+              position: pPt,
+              velocity: new THREE.Vector3(
+                (Math.random() - 0.5) * 120,
+                80 + Math.random() * 160,
+                (Math.random() - 0.5) * 120
+              ),
+              life: 0.5 + Math.random() * 0.3, maxLife: 0.8,
+              color: fireColors[Math.floor(Math.random() * fireColors.length)],
+              size: 5 + Math.random() * 4,
+            });
+          }
+          if (Math.random() > 0.5 && typeof spawnDynamicLight === 'function') {
+            spawnDynamicLight(this.position, 0xff4400, 2.0, 400, 0.3);
+          }
+          this.fxTimer = 0.25;
+        }
+        if (this.igniteTimer <= 0) this.timer = 0; // burned out
+      }
+    },
+  };
+  game.worldEffects.push(eff);
+  // Network broadcast (matches v17o:9251-9257 shape).
+  if (broadcast && typeof net !== 'undefined' && net.active && net.sendEvent) {
+    net.sendEvent({
+      type: 'effect_spawn', kind: 'incendiary_gas',
+      netId, ownerPeerId, team,
+      px: _pos.x, py: _pos.y, pz: _pos.z,
+    });
+  }
+  return eff;
 };
-window.spawnParticleWall = function() {};
+// (bugfix 2026-05-19 #207) spawnParticleWall ported from v17o:7251 ;
+// TRACKER's Plasma Shield ability. Previously a no-op stub, so the
+// ability fired (cooldown ticked, sound played, frame overlay slid in)
+// but spawned nothing. Bots calling it (bots.js:851) likewise no-op'd,
+// killing a chunk of Tracker combat behavior. The v17 version layers a
+// hex-hologram ShaderMaterial + plasma_amber FX shader on top of the
+// box ; both need TSL ports to run under WebGPURenderer (Phase 11), so
+// this WebGPU build ships the gameplay-complete simpler visual : an
+// additive amber box + wireframe edge. All gameplay fields (hp, maxHp,
+// timer, owner, team, ownerPeerId, netId) match v17 so the projectile-
+// vs-wall collision in lss_v17_weapons.js:526-548 and Stun Bolt break
+// path at :622 work unchanged. Meshes go in eff.meshes so the existing
+// worldEffects dispose path at ~8528 cleans them up automatically.
+// _tick fades opacity proportional to remaining hp so the wall visibly
+// cracks as it absorbs damage, and forces timer<=0 once hp hits zero
+// so the cleanup runs immediately instead of waiting for the 10s expiry.
+window.spawnParticleWall = function(pos, dir, owner, team, ownerPeerId, netId, broadcast) {
+  if (!pos || !dir || !scene) return null;
+  const _dir = (dir.clone ? dir.clone() : new THREE.Vector3(dir.x, dir.y, dir.z));
+  const _pos = (pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z));
+  // Tracker palette (amber/orange), matches v17's plasma_amber tint.
+  // (bugfix 2026-05-20 #234) Switched from AdditiveBlending + 0.42 opacity
+  // to NormalBlending + 0.5 opacity. Under WebGPURenderer's NodeMaterial
+  // translation, MeshBasicMaterial + Additive + DoubleSide was rendering
+  // the wall as pale white (user screenshot showed a big white sheet
+  // instead of the intended orange). NormalBlending preserves the
+  // material color cleanly and reads as a translucent orange shield
+  // wall. Color amped from 0xff8800 to a slightly lighter shade so the
+  // translucent fill still pops.
+  const wallColor = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.TRACKER) || 0xff8800;
+  const wallGeo = new THREE.BoxGeometry(400, 300, 25);
+  const wallMat = new THREE.MeshBasicMaterial({
+    color: wallColor,
+    transparent: true,
+    opacity: 0.35,
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+    depthWrite: false,
+  });
+  const wallMesh = new THREE.Mesh(wallGeo, wallMat);
+  wallMesh.position.copy(_pos);
+  wallMesh.lookAt(_pos.clone().add(_dir));
+  wallMesh.renderOrder = 1;
+  scene.add(wallMesh);
+  // Wireframe edge so the wall reads as a defined plane even at low alpha.
+  const edgeGeo = new THREE.EdgesGeometry(wallGeo);
+  const edgeMat = new THREE.LineBasicMaterial({
+    color: 0xffaa44, transparent: true, opacity: 0.95, depthWrite: false,
+  });
+  const edgeMesh = new THREE.LineSegments(edgeGeo, edgeMat);
+  edgeMesh.position.copy(_pos);
+  edgeMesh.lookAt(_pos.clone().add(_dir));
+  edgeMesh.renderOrder = 2;
+  scene.add(edgeMesh);
+  const eff = {
+    type: 'particle_wall',
+    position: _pos,
+    direction: _dir,
+    hp: 10000, maxHp: 10000, timer: 10,
+    owner, team,
+    mesh: wallMesh, edgeMesh,
+    meshes: [wallMesh, edgeMesh],  // for the standard worldEffects dispose path
+    spawnTime: (window.game && game.time) || 0,
+    ownerPeerId, netId,
+    _tick: function(dt) {
+      this.timer -= dt;
+      // Cracking visual : wall body opacity drops with hp, edge stays
+      // bright so the wireframe still reads even at low hp.
+      const k = Math.max(0, Math.min(1, (this.hp || 0) / (this.maxHp || 1)));
+      if (this.mesh && this.mesh.material) {
+        this.mesh.material.opacity = 0.42 * (0.35 + 0.65 * k);
+      }
+      // Auto-despawn when hp hits zero (matches v17 collision path).
+      if (this.hp <= 0) this.timer = 0;
+    },
+  };
+  game.worldEffects.push(eff);
+  // Mirror v17's network broadcast so peers spawn the same wall.
+  if (broadcast && typeof net !== 'undefined' && net.active && net.sendEvent) {
+    net.sendEvent({
+      type: 'effect_spawn', kind: 'particle_wall',
+      netId, ownerPeerId, team,
+      px: _pos.x, py: _pos.y, pz: _pos.z,
+      dx: _dir.x, dy: _dir.y, dz: _dir.z,
+    });
+  }
+  return eff;
+};
 window.spawnFlameChainVisual = function(from, to) {
   if (!from || !to || !scene) return;
   const geo = new THREE.BufferGeometry().setFromPoints([from.clone(), to.clone()]);
@@ -4198,7 +4688,40 @@ window.spawnFlameChainVisual = function(from, to) {
   scene.add(line);
   _scheduleEffectDispose(line, 0.8);
 };
-window.spawnHeatTrail = function() {};
+// (bugfix 2026-05-20 #226) spawnHeatTrail ported as a particle-based
+// fallback. v17's version (lss_v17_fx.js:1280) uses a sprite pool +
+// getHeatTrailTexture() — neither is ported (sprite pool helpers
+// _acquireHeatTrail / _releaseHeatTrail are no-op stubs, and the
+// heat-trail texture is generated via a canvas2D blur the fx module
+// doesn't expose to WebGPU). Falls back to a warm-orange particle
+// pushed into game.particles at the ship's tail position so missiles +
+// fast-moving ships still leave a visible trail.
+//
+// Called from v17o:45158 (bots) and v17o:45194 (player) every frame
+// when velocity > 30 and perf-tier < 1. With our particle-pool render
+// path (line 4133+ of webGPU.html) the warm particles fan out behind
+// the hull and fade over ~0.5s.
+window.spawnHeatTrail = function(pos, velocity, maxSpeed, hullRadius) {
+  if (!pos || !velocity || !game || !game.particles) return;
+  const speed = velocity.length();
+  if (speed < 30) return;
+  const tNorm = Math.min(1, speed / Math.max(1, maxSpeed || 1));
+  if (tNorm < 0.12) return;
+  const back = velocity.clone().normalize().multiplyScalar(-(hullRadius * 0.85));
+  const trailPos = pos.clone().add(back);
+  trailPos.x += (Math.random() - 0.5) * (hullRadius * 0.4);
+  trailPos.y += (Math.random() - 0.5) * (hullRadius * 0.4);
+  trailPos.z += (Math.random() - 0.5) * (hullRadius * 0.4);
+  const drift = velocity.clone().multiplyScalar(-0.08);
+  game.particles.push({
+    position: trailPos,
+    velocity: drift,
+    life: 0.35 + tNorm * 0.45,
+    maxLife: 0.80,
+    color: 0xffb070,
+    size: hullRadius * (0.9 + tNorm * 1.1),
+  });
+};
 window._getVortexCoreBeamGeometry = function() {
   // Cheap fallback for the Vortex Laser : a tall thin cylinder.
   if (!window.__vortexBeamGeo) {
@@ -4214,7 +4737,53 @@ window._DARK_LIGHTNING_POOL_SIZE = 256;
 window._LIGHTNING_CYL_GEO = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
 window.triggerScreenShake = function(amt) { game.shakeIntensity = Math.max(game.shakeIntensity || 0, amt || 0); };
 window.showHitMarker = function() {};
-window.flashFXMaterialHit = function() {};
+// (bugfix 2026-05-20 #229) flashFXMaterialHit : visual feedback when a
+// shield takes a hit. v17 (v17o:8377) writes to the LayeredFX shield
+// material's uHits/uHitColor/uHitRadius uniforms ; the WebGPU port's
+// shields use plain MeshBasicMaterial (#225) so those uniforms don't
+// exist. Instead spawn a small additive ripple sphere at worldPos that
+// expands + fades over 0.25 s, tinted by the shield's color. Same
+// signature as v17 so the playerTakeDamage path (v17o:27422+, ported
+// in #209) works unchanged.
+window.flashFXMaterialHit = function(mat, worldPos, hitColor, radius) {
+  if (!mat || !worldPos || !scene) return;
+  // Extract a color from the material (MeshBasicMaterial.color or
+  // ShaderMaterial.uniforms.uColor). Fallback to white.
+  let color = 0xffffff;
+  if (hitColor != null) {
+    color = (typeof hitColor === 'number') ? hitColor :
+            (hitColor.isColor ? hitColor.getHex() : 0xffffff);
+  } else if (mat.color && typeof mat.color.getHex === 'function') {
+    color = mat.color.getHex();
+  } else if (mat.uniforms && mat.uniforms.uColor && mat.uniforms.uColor.value && mat.uniforms.uColor.value.getHex) {
+    color = mat.uniforms.uColor.value.getHex();
+  }
+  const r0 = (typeof radius === 'number' && radius > 0) ? radius * 0.4 : 8;
+  const geo = new THREE.SphereGeometry(1, 12, 8);
+  const rippleMat = new THREE.MeshBasicMaterial({
+    color: color,
+    transparent: true,
+    opacity: 0.85,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  });
+  const ripple = new THREE.Mesh(geo, rippleMat);
+  ripple.position.copy(worldPos);
+  ripple.scale.setScalar(r0);
+  ripple.renderOrder = 2;
+  scene.add(ripple);
+  if (!game.effects) game.effects = [];
+  // Animation handled inline in updateEffects (`type === 'shieldRipple'`).
+  // updateEffects increments age + disposes on age >= lifetime, so just
+  // push the entry with the type tag.
+  game.effects.push({
+    mesh: ripple,
+    age: 0,
+    lifetime: 0.25,
+    type: 'shieldRipple',
+    _r0: r0,
+  });
+};
 
 // (Phase D) Shield-hit FX : v17 verbatim port. Bot.takeDamage and
 // network handlers call this on every shielded hit.
@@ -4304,29 +4873,30 @@ window.spawnExplosion = function(pos, size) {
   try { if (typeof spawnDynamicLight === 'function')
     spawnDynamicLight(pos, 0xffaa55, 6.0, size * 8, 0.6);
   } catch (_) {}
-  // Phase 1: white-hot flash (camera-facing plane, very short).
-  try {
-    const flashGeo = new THREE.PlaneGeometry(1, 1);
-    const flashMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 1.0,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    });
-    const flash = new THREE.Mesh(flashGeo, flashMat);
-    flash.position.copy(pos);
-    flash.scale.setScalar(size * 1.4);
-    if (typeof camera !== 'undefined' && camera) flash.lookAt(camera.position);
-    scene.add(flash);
-    game.worldEffects.push({
-      timer: 0.12, meshes: [flash], _ageBase: 0.12,
-      _tick(dt) {
-        this.timer -= dt;
-        const t = Math.max(0, this.timer / this._ageBase);
-        flashMat.opacity = t;
-        flash.scale.setScalar(size * (1.4 + (1 - t) * 0.6));
-        if (typeof camera !== 'undefined' && camera) flash.lookAt(camera.position);
-      },
-    });
-  } catch (_) {}
+  // Phase 1: REMOVED (bugfix 2026-05-20 #233).
+  //
+  // v17 design : "white-hot flash (camera-facing plane, very short)".
+  // The pre-#233 implementation spawned a PlaneGeometry tinted
+  // 0xffffff at opacity 1.0 with AdditiveBlending, scaled to
+  // size * 1.4 units, camera-facing, with a 0.12s _tick lifetime.
+  //
+  // User reported : while turning + shooting, a huge white shape
+  // would slide into view from whichever side they turned away from.
+  // Root cause : every weapon hit calls spawnExplosion at the world
+  // hit point. At BLASTER's 20Hz fire rate that's ~3-4 simultaneous
+  // white planes at hit points around the player. As the camera
+  // rotates, the world-locked planes drift toward the screen edge
+  // opposite the turn direction. flash.lookAt(camera.position) keeps
+  // them facing the camera even off-axis, so they read as huge bright
+  // white sheets sliding off-screen each frame.
+  //
+  // Phase 2 (orange fireball) and Phase 3 (cyan shockwave) below are
+  // both world-anchored spheres that read correctly from any angle and
+  // give enough visual feedback for a hit. Skipping Phase 1 entirely
+  // is the cleanest fix ; doesn't change v17 damage / sound / shake /
+  // particle behavior (those run from the same spawnExplosion call).
+  // If a hit-specific white punch is wanted later, smaller (size*0.2)
+  // and shorter (0.03s) would read fine without dominating the view.
   // Phase 2: orange fireball sphere expanding from size*0.4 to size*1.8.
   try {
     const fireGeo = new THREE.SphereGeometry(1, 16, 12);
@@ -4410,7 +4980,30 @@ window._acquireParticleSlot = function() { return null; };
 window._releaseParticleSlot = function() {};
 window._pVel = function(x, y, z) { return { x: x, y: y, z: z }; };
 window.spawnHitstop = function() {};
-window.cullOldestParticle = function() {};
+// (bugfix 2026-05-20 #235) cullOldestParticle ported from v17o:24053.
+// Removes the particle with the LEAST remaining life (the one about
+// to fade anyway), so the freshest spawns are preserved when the array
+// hits MAX_PARTICLES. Without this the WebGPU updateParticles let
+// game.particles grow unbounded ; only 500 got rendered but every one
+// got processed by the integrate loop each frame, leaking CPU under
+// heavy combat (BLASTER 20Hz × multi-effect spawns can grow the array
+// past 5000+ in a few seconds).
+window.cullOldestParticle = function() {
+  if (!game || !Array.isArray(game.particles) || !game.particles.length) return;
+  let oldestIdx = 0;
+  let lowestLife = Infinity;
+  for (let i = 0; i < game.particles.length; i++) {
+    const p = game.particles[i];
+    if (p && p.life < lowestLife) {
+      lowestLife = p.life;
+      oldestIdx = i;
+    }
+  }
+  // Swap-pop is O(1) ; cheaper than Array.splice when cull fires every frame.
+  const last = game.particles.length - 1;
+  if (oldestIdx !== last) game.particles[oldestIdx] = game.particles[last];
+  game.particles.pop();
+};
 // (Phase F) Broadcast helpers : leave undefined and let network.js
 // install the real implementations as top-level function declarations.
 // We only stub broadcastAbilityProjectile because network.js has no
@@ -4775,7 +5368,42 @@ window._spawnSonarPulse = function(pos, owner) {
 // ever spawn in the WebGPU build), so the function has no work to do.
 // No-op stub lets the core activate without throwing ; the radial damage
 // and the AoE light + sound still fire from the core's main path.
-window.igniteNearbyGas = function() { /* gas chemistry pending Phase 11 */ };
+// (bugfix 2026-05-20 #219) igniteNearbyGas ported from v17o:18529-18588.
+// Walks worldEffects, ignites any 'incendiary_gas' clouds within
+// (eff.radius + radius). First-time ignition swaps the mesh color from
+// green to orange, locks the outer timer to igniteDuration so the burn
+// lasts the full 10 s, fires an explosion + dynamic light. Re-contact
+// refreshes the burn timer (capped at igniteDuration). Without this,
+// Pyro's Mega Flame Chain core, Fire Shield, and projectile splash all
+// silently failed to chain-ignite gas pockets.
+window.igniteNearbyGas = function(pos, radius) {
+  if (!pos || !game || !Array.isArray(game.worldEffects)) return;
+  radius = radius || 0;
+  for (const eff of game.worldEffects) {
+    if (!eff || eff.type !== 'incendiary_gas') continue;
+    const igniteRadius = (eff.radius || 0) + radius;
+    if (pos.distanceToSquared(eff.position) >= igniteRadius * igniteRadius) continue;
+    if (!eff.ignited) {
+      eff.ignited = true;
+      eff.igniteTimer = eff.igniteDuration;
+      eff.timer = Math.max(eff.timer, eff.igniteDuration);
+      // Swap to fire palette : outer hull + core both flip green -> orange.
+      if (eff.mesh && eff.mesh.material) {
+        if (eff.mesh.material.color) eff.mesh.material.color.setHex(0xff5520);
+        eff.mesh.material.opacity = 0.55;
+      }
+      if (eff.coreMesh && eff.coreMesh.material) {
+        if (eff.coreMesh.material.color) eff.coreMesh.material.color.setHex(0xff7722);
+        eff.coreMesh.material.opacity = 0.65;
+      }
+      try { if (typeof spawnExplosion === 'function') spawnExplosion(eff.position, 30); } catch (_) {}
+      try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(eff.position, 0xff4400, 3.0, 500, 0.5); } catch (_) {}
+    } else {
+      // Re-contact refreshes the burn timer (capped at igniteDuration).
+      eff.igniteTimer = Math.max(eff.igniteTimer, eff.igniteDuration);
+    }
+  }
+};
 // (bugfix 2026-05-19 #80) raycastLevel stub. v17 uses an SDF-based
 // wall raycast to gate bot fireAtPlayer, updateEnemyHealthBars LOS,
 // and tracer wall-hits. The proper port requires the wall SDF and
@@ -4858,8 +5486,214 @@ window._vortexCoreBeam = null;
 // are LayeredFX-heavy in v17 and on the Phase 11 (TSL FX) skip list.
 // No-op stubs let the core activate without throwing ; the rest of the
 // core ability (damage application, sound, timer countdown) still runs.
-window._spawnSlayerCoreStormFX = function() { /* TSL port pending Phase 11 */ };
-window._buildFlameChainFlameLicks = function() { /* TSL port pending Phase 11 */ };
+// (bugfix 2026-05-20 #230) _spawnSlayerCoreStormFX ported from v17o:24770.
+// SLAYER Mega Stun Bolt core lightning storm — activation flash (6 bolts)
+// + 5-second sustained green lightning storm following the caster.
+// The damage logic for the core's 1800 DPS melee aura runs in
+// lss_v17_abilities.js:1670+ (Mega Stun Bolt core ; condensed from
+// v17o:31398-31420) ; this function provides the visual representation
+// that matches the 500-unit damage radius. Without this port the core
+// ran silently — players had no visual of the storm zone they were
+// inside, and the activation read as just an unexplained green flash.
+//
+// Continuous storm runs as a worldEffect with a _tick(dt) that resolves
+// the caster's current position (player or peer) each frame so the
+// storm follows them as they fly. Spawns 2 lightning bolts per tick
+// matching v17o:32173-32185.
+window._spawnSlayerCoreStormFX = function(pos, ownerPeerId) {
+  if (!pos || !game || !game.worldEffects) return;
+  const SLAYER_GREEN = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) || 0x44ff77;
+  // Activation flash : 6 lightning bolts radiating outward.
+  if (typeof spawnLightningBolt === 'function') {
+    for (let i = 0; i < 6; i++) {
+      const ang = (i / 6) * Math.PI * 2 + Math.random() * 0.5;
+      const r = 280 + Math.random() * 220;
+      const endPos = new THREE.Vector3(
+        pos.x + Math.cos(ang) * r,
+        pos.y + (Math.random() - 0.5) * 200,
+        pos.z + Math.sin(ang) * r
+      );
+      try { spawnLightningBolt(pos.clone(), endPos, SLAYER_GREEN, 0.45, 2, 3); } catch (_) {}
+    }
+  }
+  // Sustained 5-second storm worldEffect with _tick handler.
+  game.worldEffects.push({
+    type: 'slayer_core_damage_fx',
+    position: pos.clone(),
+    timer: 5.0,
+    ownerPeerId: ownerPeerId || null,
+    _tick: function(dt) {
+      this.timer -= dt;
+      // Resolve caster position : local player, peer via NetworkPlayer,
+      // or fallback to the stored position (single-player local cast).
+      let casterPos = this.position;
+      if (this.ownerPeerId) {
+        if (typeof net !== 'undefined' && net.myPeerId === this.ownerPeerId && window.player && window.player.position) {
+          casterPos = window.player.position;
+        } else if (typeof net !== 'undefined' && net.peers && typeof net.peers.get === 'function') {
+          const peer = net.peers.get(this.ownerPeerId);
+          const np = peer && peer.networkPlayer;
+          if (np && np.position) casterPos = np.position;
+        }
+      } else if (window.player && window.player.position) {
+        casterPos = window.player.position;
+      }
+      this.position.copy(casterPos);
+      // 2 fresh bolts per tick. Matches v17 density ; with 0.45s
+      // lightning lifetime that gives ~54 active bolts at 60fps, which
+      // reads as a constant crackling storm at the 500-unit reach.
+      if (typeof spawnLightningBolt === 'function') {
+        for (let k = 0; k < 2; k++) {
+          const ang = Math.random() * Math.PI * 2;
+          const r = 200 + Math.random() * 300;
+          const endPos = new THREE.Vector3(
+            casterPos.x + Math.cos(ang) * r,
+            casterPos.y + (Math.random() - 0.5) * 220,
+            casterPos.z + Math.sin(ang) * r
+          );
+          try { spawnLightningBolt(casterPos.clone(), endPos, SLAYER_GREEN, 0.45, 3, 4); } catch (_) {}
+        }
+      }
+    },
+  });
+};
+// (bugfix 2026-05-20 #223) _buildFlameChainFlameLicks ported from
+// v17o:9320-9359. Builds the visible curtain of flame spheres along
+// the Pyro Flame Chain ability's firewall worldEffect, AND attaches a
+// _tick(dt) handler so the firewall actually applies its 400 dmg/s to
+// bots + player crossing the line. The lss_v17_abilities.js spawn at
+// line 749 pushes the firewall entry to game.worldEffects but does NOT
+// define _tick ; the WebGPU port's worldEffects loop only ticks effects
+// that define one (the v17 inline `if (eff.type === 'firewall') {...}`
+// loop body wasn't extracted to the module path). Without a _tick the
+// firewall did nothing except decay its 5s timer — no damage, no flame.
+//
+// v17's LayeredFX 'fireball' ShaderMaterial is Phase 11 skip-list ; we
+// use additive MeshBasicMaterial spheres instead. Same per-instance
+// noise phase + bob + breathe scale so the curtain reads as a row of
+// distinct living flames rather than uniform blobs.
+window._buildFlameChainFlameLicks = function(effData, pos, dir, length) {
+  if (!effData || !pos || !dir || !length || !scene) return;
+  if (!Array.isArray(effData.meshes)) effData.meshes = [];
+  const lickCount = Math.max(5, Math.min(10, Math.floor(length / 110)));
+  const perp = new THREE.Vector3(-dir.z, 0, dir.x).normalize();
+  // Two-tone fire palette : amber-orange core + deep red wrap so each
+  // lick reads as warm flame even without the shader.
+  for (let i = 0; i < lickCount; i++) {
+    const u = (i + 0.5) / lickCount;
+    const tAlong = u * length + (Math.random() - 0.5) * (length / lickCount) * 0.6;
+    const lateral = (Math.random() - 0.5) * 35;
+    const basePt = pos.clone()
+      .add(dir.clone().multiplyScalar(tAlong))
+      .add(perp.clone().multiplyScalar(lateral));
+    const radius = 80 + Math.random() * 30;
+    const flameColor = (Math.random() < 0.4) ? 0xff3300 : 0xff7722;
+    const geo = new THREE.SphereGeometry(radius, 16, 10);
+    const mat = new THREE.MeshBasicMaterial({
+      color: flameColor,
+      transparent: true,
+      opacity: 0.65,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.copy(basePt);
+    mesh.position.y += radius * 0.35 + (Math.random() - 0.5) * 15;
+    mesh.rotation.set(
+      Math.random() * Math.PI * 2,
+      Math.random() * Math.PI * 2,
+      Math.random() * Math.PI * 2
+    );
+    mesh.renderOrder = 1;
+    mesh.userData._fwFX = {
+      phase: Math.random() * Math.PI * 2,
+      freq: 4 + Math.random() * 3,
+      baseRadius: radius,
+      baseY: mesh.position.y,
+    };
+    scene.add(mesh);
+    effData.meshes.push(mesh);
+  }
+  // (bugfix #223) Attach a _tick handler so the firewall actually
+  // damages enemies crossing its line + spawns drift fire particles.
+  // The webGPU.html worldEffects loop calls eff._tick(dt) per frame
+  // if defined ; without this attach the firewall only decays its
+  // timer and never deals damage. Port of v17o:31510-31576 logic
+  // condensed to the gameplay-critical paths.
+  if (typeof effData._tick !== 'function') {
+    effData._tick = function(dt) {
+      this.timer -= dt;
+      const isMyEff = (typeof net === 'undefined' || !net.active || !this.ownerPeerId || this.ownerPeerId === net.myPeerId);
+      const halfPerpRange = 150;
+      // Bot damage. Owner-only so MP peers don't double-apply ; visuals
+      // run on all peers via the mesh breathe loop below.
+      if (isMyEff && game.entities) {
+        for (const bot of game.entities) {
+          if (!bot || !bot.alive || bot.team === this.team) continue;
+          const toBot = new THREE.Vector3().subVectors(bot.position, this.position);
+          const along = toBot.dot(this.direction);
+          if (along > -50 && along < this.length + 50) {
+            const perpV = toBot.clone().sub(this.direction.clone().multiplyScalar(along));
+            if (perpV.length() < halfPerpRange) {
+              try {
+                const dealt = bot.takeDamage(this.dmgPerSec * dt, this.owner);
+                if (dealt > 0 && this.owner === 'player' && window.player) window.player.damageDealt += dealt;
+              } catch (_) {}
+            }
+          }
+        }
+      }
+      // Player damage from enemy firewalls.
+      if (window.player && window.player.shipState !== 'dead' && this.team !== window.player.team) {
+        const toP = new THREE.Vector3().subVectors(window.player.position, this.position);
+        const along = toP.dot(this.direction);
+        if (along > -50 && along < this.length + 50) {
+          const perpV = toP.clone().sub(this.direction.clone().multiplyScalar(along));
+          if (perpV.length() < halfPerpRange) {
+            if (typeof playerTakeDamage === 'function') {
+              try { playerTakeDamage(this.dmgPerSec * dt, this.owner, null); } catch (_) {}
+            }
+          }
+        }
+      }
+      // Breathe + bob the flame licks so the curtain reads as alive.
+      if (Array.isArray(this.meshes)) {
+        const tNow = (window.game && game.time) || 0;
+        for (const m of this.meshes) {
+          const fx = m && m.userData && m.userData._fwFX;
+          if (!fx) continue;
+          const breath = 1 + 0.08 * Math.sin(tNow * fx.freq + fx.phase);
+          m.scale.setScalar(breath);
+          m.position.y = fx.baseY + Math.sin(tNow * (fx.freq * 0.5) + fx.phase) * 6;
+        }
+      }
+      // Drift fire particles along the line ; 4-6 every 0.15s.
+      this.fxTimer = (this.fxTimer || 0) - dt;
+      if (this.fxTimer <= 0 && Array.isArray(game.particles)) {
+        const fireColors = [0xff4400, 0xff6600, 0xff8833, 0xffaa00];
+        const n = 4 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < n; i++) {
+          const randT = Math.random() * this.length;
+          const firePt = this.position.clone().add(this.direction.clone().multiplyScalar(randT));
+          firePt.x += (Math.random() - 0.5) * 60;
+          firePt.z += (Math.random() - 0.5) * 60;
+          game.particles.push({
+            position: firePt,
+            velocity: new THREE.Vector3(
+              (Math.random() - 0.5) * 80,
+              60 + Math.random() * 120,
+              (Math.random() - 0.5) * 80
+            ),
+            life: 0.4 + Math.random() * 0.3, maxLife: 0.7,
+            color: fireColors[Math.floor(Math.random() * fireColors.length)],
+            size: 4 + Math.random() * 4,
+          });
+        }
+        this.fxTimer = 0.15;
+      }
+    };
+  }
+};
 // (bugfix 2026-05-18 #3) LayeredFX preset opacity uniforms referenced
 // by some ability code paths (FX flash + ribbon + trail layers).
 // fx.js's _makeFXMaterial returns the proxy that returns { value: 0 }
@@ -4976,11 +5810,197 @@ window.serializeWorldObjects = function() {
   };
 };
 window._updateAbilityShieldVisual = function() { /* peer hull-hug shield uniform tick (MP only) */ };
-window._setShipShieldEmissive = function() { /* peer shield emissive tint (MP only) */ };
-window._clearShipShieldEmissive = function() { /* clear emissive (MP only) */ };
-window._makeHullHugShield = function() { return null; /* hull-hug shield clone (Phase 11 deferred) */ };
-window._disposeShieldClone = function() { /* cleanup hull-hug shield (Phase 11 deferred) */ };
-window._spawnThermalShieldFire = function() { /* PYRO Fire Shield FX (Phase 11 deferred) */ };
+// (bugfix 2026-05-20 #239) _setShipShieldEmissive / _clearShipShieldEmissive
+// ported from v17o:30464 + 30485. Tints every emissive-capable material on
+// a ship mesh to a shield color so the hull glows in the shield's palette
+// (cyan for Vortex/Tracker, red for Pyro Fire Shield, purple for Slayer
+// Absorption, green for Syphon stack). The original material's emissive
+// hex + intensity are stashed on m.userData._shieldOrigEmissive so the
+// clear path restores cleanly. Called by every shield path in v17 player
+// (v17o:30646/30699/30768/30824) and by NetworkPlayer.update for peer
+// shield mirroring (network.js:634/669/702/731). Without this port, every
+// peer's shield was invisible on hull (only the wrap shield ellipsoid
+// showed) and the player's own shields had no on-hull color cue either.
+// WebGPU port ship materials are MeshStandardMaterial (#216) which all
+// have emissive channels, so this works without TSL conversion.
+window._setShipShieldEmissive = function(shipMesh, colorHex, intensity) {
+  if (!shipMesh || typeof shipMesh.traverse !== 'function') return;
+  shipMesh.traverse(child => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    for (const m of mats) {
+      if (!m || !('emissive' in m) || !m.emissive) continue;
+      if (!m.userData) m.userData = {};
+      if (!m.userData._shieldOrigEmissive) {
+        m.userData._shieldOrigEmissive = {
+          hex: m.emissive.getHex(),
+          intensity: ('emissiveIntensity' in m) ? m.emissiveIntensity : 1.0,
+        };
+      }
+      m.emissive.setHex(colorHex);
+      if ('emissiveIntensity' in m) m.emissiveIntensity = intensity;
+    }
+  });
+};
+window._clearShipShieldEmissive = function(shipMesh) {
+  if (!shipMesh || typeof shipMesh.traverse !== 'function') return;
+  shipMesh.traverse(child => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    for (const m of mats) {
+      if (!m || !m.userData || !m.userData._shieldOrigEmissive) continue;
+      const orig = m.userData._shieldOrigEmissive;
+      if (m.emissive) m.emissive.setHex(orig.hex);
+      if ('emissiveIntensity' in m) m.emissiveIntensity = orig.intensity;
+      m.userData._shieldOrigEmissive = null;
+    }
+  });
+};
+// (bugfix 2026-05-20 #225) _makeHullHugShield / _disposeShieldClone
+// ported from v17o:30416 + 30506. The full v17 version uses
+// _mirrorMeshTree to clone the ship's exact hull silhouette + a
+// LayeredFX plasma ShaderMaterial. Neither is ported to WebGPU yet
+// (_mirrorMeshTree is on the same skip list as the shield ShaderMaterial
+// presets), so this build uses a simpler ellipsoid sphere sized to the
+// chassis bounding box. Added as a child of player.mesh so it follows
+// the ship's world transform automatically. Disposal frees both the
+// fresh geometry + material (unlike v17 which shared geometry with the
+// source mesh tree).
+//
+// Color map matches v17's LayeredFX preset names so the bot ship
+// (lss_v17_bots.js:5985-6117) and updateShieldVisuals (v17o:30623-30683)
+// callers don't need to know about the simpler implementation.
+const _SHIELD_PRESET_COLORS = {
+  plasma_cyan:   0x44eeff,
+  plasma_red:    0xff4422,
+  plasma_purple: 0x9966ff,
+  plasma_green:  0x44ff77,
+  plasma_amber:  0xff9933,
+  plasma_wall:   0x66ccff,
+};
+window._makeHullHugShield = function(playerOrBot, presetName) {
+  if (!playerOrBot || !playerOrBot.mesh) return null;
+  const c = playerOrBot.chassis || {};
+  const color = _SHIELD_PRESET_COLORS[presetName] || 0xffffff;
+  // Ellipsoid sized to the chassis. v17 uses scale=1.07 against the
+  // mirrored mesh ; ours wraps a unit sphere with axis scales matching
+  // the chassis dimensions + a 7% expansion margin.
+  const halfW = (c.hullWidth || 80) * 0.55;
+  const halfH = (c.hullHeight || 30) * 0.85;
+  const halfL = (c.hullLength || 100) * 0.55;
+  const geo = new THREE.SphereGeometry(1, 24, 16);
+  const mat = new THREE.MeshBasicMaterial({
+    color: color,
+    transparent: true,
+    opacity: 0.35,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.scale.set(halfW, halfH, halfL);
+  mesh.renderOrder = 1;
+  mesh.userData = {
+    shieldClone: true,
+    isModelShip: false,
+    _shieldMat: mat,
+    _shieldGeo: geo,
+    _basePulse: 1.0,
+  };
+  // Parent under the ship's mesh so the shield follows the hull
+  // automatically (position + quaternion inherited from parent).
+  try {
+    playerOrBot.mesh.add(mesh);
+  } catch (_) {
+    // If the parent isn't a Group/Object3D for any reason, fall back
+    // to scene-resident and update the position via a tick. The bot/
+    // player update paths in lss_v17_bots.js:6000-6090 expect the
+    // shield to track the hull, so this is a defensive fallback.
+    try {
+      if (scene) scene.add(mesh);
+      mesh.position.copy(playerOrBot.position || new THREE.Vector3());
+    } catch (_) {}
+  }
+  return mesh;
+};
+window._disposeShieldClone = function(clone) {
+  if (!clone) return;
+  if (clone.parent) try { clone.parent.remove(clone); } catch (_) {}
+  const mat = clone.userData && clone.userData._shieldMat;
+  if (mat && typeof mat.dispose === 'function') {
+    try { mat.dispose(); } catch (_) {}
+  }
+  const geo = clone.userData && clone.userData._shieldGeo;
+  if (geo && typeof geo.dispose === 'function') {
+    try { geo.dispose(); } catch (_) {}
+  }
+  if (clone.userData) {
+    clone.userData._shieldMat = null;
+    clone.userData._shieldGeo = null;
+  }
+};
+// (bugfix 2026-05-20 #224) _spawnThermalShieldFire ported from
+// v17o:30526-30596. PYRO Fire Shield ability spawns a forward-cone
+// burn — the damage cone math lives in updateAbilities (lss_v17_abilities.js
+// :1444-1488) but the visible flame particles were just a no-op stub.
+// This is pure particles (no shader) so it's a direct port : ~220
+// particles/sec in a cone matching the damage geometry, hot-to-cool
+// palette, fractional-spawn so dt fluctuations don't quantize visibly.
+const _thermalFireForward = new THREE.Vector3();
+const _thermalFirePerp1   = new THREE.Vector3();
+const _thermalFirePerp2   = new THREE.Vector3();
+window._spawnThermalShieldFire = function(shipPos, shipQuat, chassis, dt) {
+  if (!shipPos || !chassis || !game || !game.particles) return;
+  const hLen = chassis.hullLength || 100;
+  const reach      = hLen * 2.6;
+  const baseRadius = hLen * 0.75;
+  const tipRadius  = hLen * 1.70;
+  _thermalFireForward.set(0, 0, -1);
+  if (shipQuat) _thermalFireForward.applyQuaternion(shipQuat);
+  if (Math.abs(_thermalFireForward.y) < 0.95) {
+    _thermalFirePerp1.set(0, 1, 0).cross(_thermalFireForward);
+  } else {
+    _thermalFirePerp1.set(1, 0, 0).cross(_thermalFireForward);
+  }
+  _thermalFirePerp1.normalize();
+  _thermalFirePerp2.crossVectors(_thermalFireForward, _thermalFirePerp1).normalize();
+  const expected = 220 * (dt || 1/60);
+  let toSpawn = Math.floor(expected);
+  if (Math.random() < (expected - toSpawn)) toSpawn += 1;
+  // Hot-to-cool palette : weighted toward bright cores so the cone reads
+  // as a vivid blaze, not a uniform red blob.
+  const palette = [
+    0xffffcc, 0xffee99, 0xffcc66,
+    0xff9933, 0xff6622, 0xff4411, 0xff2200, 0xcc1100,
+  ];
+  for (let i = 0; i < toSpawn; i++) {
+    const along01 = Math.pow(Math.random(), 0.7);
+    const along = along01 * reach;
+    const coneR = baseRadius + (tipRadius - baseRadius) * along01;
+    const ang = Math.random() * Math.PI * 2;
+    const radius = coneR * Math.sqrt(Math.random());
+    const lat1 = Math.cos(ang) * radius;
+    const lat2 = Math.sin(ang) * radius;
+    const pos = shipPos.clone()
+      .addScaledVector(_thermalFireForward, along)
+      .addScaledVector(_thermalFirePerp1, lat1)
+      .addScaledVector(_thermalFirePerp2, lat2);
+    const fwdSpeed = 180 + Math.random() * 120;
+    const lateralKick = (radius / Math.max(1, coneR)) * 80;
+    const vel = new THREE.Vector3()
+      .addScaledVector(_thermalFireForward, fwdSpeed)
+      .addScaledVector(_thermalFirePerp1, lat1 / Math.max(1, radius) * lateralKick + (Math.random() - 0.5) * 30)
+      .addScaledVector(_thermalFirePerp2, lat2 / Math.max(1, radius) * lateralKick + (Math.random() - 0.5) * 30);
+    game.particles.push({
+      position: pos,
+      velocity: vel,
+      life: 0.35 + Math.random() * 0.30,
+      maxLife: 0.65,
+      color: palette[Math.floor(Math.random() * palette.length)],
+      size: 10 + Math.random() * 10,
+    });
+  }
+};
 // (bugfix 2026-05-18 #52) resolveShipShipCollisions ported from v17o:14000.
 // Without this, bots could fly through the player and vice versa with no
 // damage or push - ramming was meaningless. This pass : iterates each
@@ -5461,7 +6481,20 @@ window.triggerHitFeedback = function(opts) {
 // throws ReferenceError. Safe stubs : no-ops are fine for closeSettings
 // (just visual cleanup), false return for _settingsBuilt (forces a
 // re-build path), no-ops for everything else.
-window._settingsClearFocus = function() { /* clears settings UI focus highlight */ };
+// (bugfix 2026-05-20 #240) _settingsClearFocus ported from v17o:37448.
+// Strips the .gp-focus / .gp-focus-row classes from the settings overlay
+// so gamepad d-pad nav doesn't leave stale highlights when the focused
+// row is rebuilt. Called from lobby.js:1623/1641 every time a setting
+// changes (which can rebuild the row). Without it, the visible focus
+// cursor desyncs from the actual logical focus index.
+window._settingsClearFocus = function() {
+  const overlay = document.getElementById('settings-overlay');
+  if (!overlay) return;
+  try {
+    overlay.querySelectorAll('.gp-focus').forEach(el => el.classList.remove('gp-focus'));
+    overlay.querySelectorAll('.gp-focus-row').forEach(el => el.classList.remove('gp-focus-row'));
+  } catch (_) {}
+};
 // (port 2026-05-19) Sync each slider / checkbox / select to the current
 // runtime state. Called by buildSettingsPage when the panel is re-opened
 // after first build, so changes made outside the panel (e.g. resetSettings,
@@ -5814,9 +6847,10 @@ window.spawnDamageSmoke = function(pos, healthPct) {
 };
 // (bugfix 2026-05-19 #172) emitDamageState : v17o:9596 emits hull
 // damage particles tiered by HP fraction (sparks → smoke → fire).
-// Full port wants v8SpawnSparks (deferred Phase 11 FX) but the simpler
-// route is to delegate to spawnDamageSmoke, which already does the
-// black-smoke + orange-fire particle spawning via game.particles.
+// Full port wants v8SpawnSparks (now LIVE via bugfix #206) but the
+// simpler route is to delegate to spawnDamageSmoke, which already does
+// the black-smoke + orange-fire particle spawning via game.particles
+// and reads correctly across all damage tiers.
 // Per-entity cadence guard so we don't spawn 60 puffs per second.
 window.emitDamageState = function(entity, dt) {
   if (!entity || !entity.alive || !entity.position) return;
@@ -5853,9 +6887,56 @@ window.executeAbility = function() {};
 window.fireProjectile = function() {};
 window.fireSpread = function() {};
 window.fireHitscan = function() {};
-// cleanupPendingHits isn't in network.js ; stays a no-op so any stray
-// call from older module paths just returns.
-window.cleanupPendingHits = function() {};
+// (bugfix 2026-05-20 #236) cleanupPendingHits ported from v17o:9904.
+// MP hit-consensus pruner : walks net.pendingHits and either deletes
+// stale entries past the hard timeout or auto-resolves soft-timeout
+// entries based on majority vote + per-peer abuse tracking. The earlier
+// "isn't in network.js" comment was stale ; v17 has a real impl and the
+// gameLoop already calls it once per second (webGPU.html:9892).
+//
+// Without this port, pendingHits accumulates forever in long MP rounds
+// and lagged peers' hits never resolve — shooter gets the credit only
+// if every peer responds with a vote. With the timeout path, the
+// shooter gets benefit-of-the-doubt on a soft-timeout, OR gets penalized
+// (full consensus required) after 5 timeouts in a 30s window.
+//
+// Pure no-op in solo : `game.time % 1 < dt` guard upstream + net.active
+// check + empty net.pendingHits keeps the cost at one Map check / sec.
+window.cleanupPendingHits = function() {
+  if (typeof net === 'undefined' || !net || !net.pendingHits) return;
+  if (!net.timeoutCounts) net.timeoutCounts = new Map();
+  const now = performance.now();
+  const HIT_CONSENSUS_TIMEOUT = 500;       // ms : soft timeout for missing votes
+  const HIT_HARD_TIMEOUT      = 2000;      // ms : forced cleanup regardless
+  const TIMEOUT_ABUSE_WINDOW  = 30000;     // ms : tracking window per shooter
+  const TIMEOUT_ABUSE_THRESHOLD = 5;       // soft-timeouts before penalty
+  for (const [id, hit] of net.pendingHits) {
+    const age = now - hit.timestamp;
+    // Hard timeout : always reap.
+    if (age > HIT_HARD_TIMEOUT) {
+      net.pendingHits.delete(id);
+      continue;
+    }
+    // Soft timeout : decide based on shooter's recent timeout history.
+    if (age > HIT_CONSENSUS_TIMEOUT) {
+      const shooterTimeouts = net.timeoutCounts.get(hit.shooterId) || [];
+      const recent = shooterTimeouts.filter(t => now - t < TIMEOUT_ABUSE_WINDOW);
+      const penalized = recent.length >= TIMEOUT_ABUSE_THRESHOLD;
+      if (penalized) {
+        // Penalized shooter : reject the hit, no abuse-count update.
+        net.pendingHits.delete(id);
+      } else {
+        // Normal timeout : accept the hit (benefit-of-the-doubt) +
+        // track this timeout for abuse detection.
+        if (!net.timeoutCounts.has(hit.shooterId)) net.timeoutCounts.set(hit.shooterId, []);
+        const entries = net.timeoutCounts.get(hit.shooterId);
+        entries.push(now);
+        while (entries.length > 0 && now - entries[0] > TIMEOUT_ABUSE_WINDOW) entries.shift();
+        net.pendingHits.delete(id);
+      }
+    }
+  }
+};
 // (Phase F) handleHitClaim + handleHitVote come from network.js (top-level
 // function declarations propagate to the global object on classic-script
 // load). Leaving these stubs commented out so the real versions win.
@@ -6011,7 +7092,7 @@ window.updateAbilities = function() {};
 // (#ov-sword-block / #ov-vortex-shield / #ov-gun-shield / #ov-thermal-shield)
 // so the player sees the shield-color edge wash when holding the
 // relevant ability. 3D mesh + shader work is Phase 11 deferred.
-window.updateShieldVisuals = function() {
+window.updateShieldVisuals = function(dt) {
   if (!window.player || !window.player.abilityActive) return;
   const p = window.player;
   const key = p.loadoutKey;
@@ -6033,6 +7114,21 @@ window.updateShieldVisuals = function() {
   _toggle('ov-gun-shield', gunOn);
   _toggle('ov-thermal-shield', thermalOn);
   _toggle('ov-sword-block', swordOn);
+  // (bugfix 2026-05-20 #224) Drive _spawnThermalShieldFire for Pyro
+  // Fire Shield. v17o:30771 makes this call from inside updateShieldVisuals
+  // whenever the player's Fire Shield is active. Without it the ability
+  // applies its cone damage silently with no visible flame.
+  if (thermalOn && typeof _spawnThermalShieldFire === 'function') {
+    const _dt = (typeof dt === 'number') ? dt : (game && game.deltaTime) || (1 / 60);
+    try {
+      _spawnThermalShieldFire(
+        p.position,
+        (p.mesh && p.mesh.quaternion) || (window.camera && window.camera.quaternion) || null,
+        p.chassis,
+        _dt
+      );
+    } catch (_) {}
+  }
 };
 window.updateGasLighting = function() {};
 window.updateBCSLighting = function() {};
@@ -6345,7 +7441,22 @@ window.updateDynamicLights = function() {};
 window.updateSmokeLights = function() {};
 // (Phase F) updateNetworkPlayer is defined in network.js ; don't shadow.
 // window.updateNetworkPlayer = function() {};
-window.disposeAllDots = function() {};
+// (bugfix 2026-05-20 #237) disposeAllDots ported from v17o:25135.
+// Called from round-end cleanup (_resetSceneForNewRound, webGPU.html:3613).
+// In WebGPU port, game.dots is rarely populated (BillboardCloudSystem
+// is on the skip list) but spawnDot can still be called by lingering
+// module code paths. This guarantees a clean wipe at round boundaries.
+window.disposeAllDots = function() {
+  if (!game || !game.dots) return;
+  for (let i = 0; i < game.dots.length; i++) {
+    const d = game.dots[i];
+    try {
+      if (d && typeof d.dispose === 'function') d.dispose();
+      else if (d && d.anchor && d.anchor.parent) d.anchor.parent.remove(d.anchor);
+    } catch (_) {}
+  }
+  game.dots = [];
+};
 window.clearAmbientCloudDots = function() {};
 window.tickScanlineTexture = function() {};
 window.tickEnergyShields = function() {};
@@ -6746,10 +7857,23 @@ window.ClusterObstacle = class ClusterObstacle {
   }
 };
 
-// (port glue) Lobby helper stub. _syncMapButtonsDisabled re-enables / dims
-// the prev/next map arrows based on solo vs net state ; with no
-// multiplayer wired (Phase F) all maps are selectable so this is a no-op.
-window._syncMapButtonsDisabled = function() {};
+// (bugfix 2026-05-20 #238) _syncMapButtonsDisabled ported from v17o:5585.
+// Called from lobby.js:931 + network.js:1353/1372/1391 when the MP launch
+// handshake commits. Locks the map prev/next + preset prev/next arrows so
+// no peer can swap arena (or skybox preset, which triggers a multi-MB
+// texture swap) while launch_at is in flight. Re-enables once launch is
+// canceled or the round starts. Pure no-op in solo (net.active = false).
+window._syncMapButtonsDisabled = function() {
+  const locked = !!(typeof net !== 'undefined' && net && net.active && net.launchScheduledAt);
+  const prev = document.getElementById('map-prev');
+  const next = document.getElementById('map-next');
+  if (prev) prev.disabled = locked;
+  if (next) next.disabled = locked;
+  const presetPrev = document.getElementById('preset-prev');
+  const presetNext = document.getElementById('preset-next');
+  if (presetPrev) presetPrev.disabled = locked;
+  if (presetNext) presetNext.disabled = locked;
+};
 
 // (port glue) Wall-shader helpers : the arena module references these even
 // in potato mode. They configure ShaderMaterial uniforms ; in potato mode
@@ -6762,26 +7886,149 @@ window.setWallParam = function() {};
 window._switchToPatternSlot = function() {};
 window._cleanupOrphanWallMeshes = function() {};
 
-// (port glue) WebGLRenderer stub : three.webgpu.js drops WebGLRenderer
-// and the THREE module namespace is frozen, so we can't add a property
-// to it directly. The v17 modules access THREE via the `window.THREE`
-// alias we set up early, so replace that alias with a non-frozen
-// wrapper that copies all THREE props + adds the missing WebGLRenderer.
-// Real fix : Phase 8 ports the lobby ship-preview to WebGPURenderer.
+// (port glue ; bugfix 2026-05-19 #215) WebGLRenderer wrapper that delegates
+// to a real WebGPURenderer so the lobby ship-preview actually renders.
+//
+// three.webgpu.js drops WebGLRenderer ; the THREE module namespace is
+// frozen so we can't patch a property on directly. v17 modules access
+// THREE via window.THREE (set up earlier), so we replace that alias with
+// a non-frozen wrapper that copies all THREE props + adds a real-ish
+// WebGLRenderer constructor.
+//
+// Before #215 this was a pure no-op stub : `setSize() {}, render() {},
+// dispose() {}`. That made lss_v17_lobby.js:_initShipPreview3D appear to
+// succeed (no throw) but every renderer.render() call did nothing, so
+// the ship-select preview canvas stayed blank. Phase 8 was supposed to
+// port the preview to WebGPURenderer later ; doing it now via shim is
+// simpler than rewriting all of _animateShipPreview / setShipPreviewModel.
+//
+// The wrapper :
+//   1. Forwards opts.canvas + opts.antialias + opts.alpha to WebGPURenderer
+//   2. Calls renderer.init() (async) and queues any pre-init render() calls
+//   3. Exposes the same API surface the lobby code uses : domElement,
+//      setSize, setPixelRatio, setClearColor, render, dispose, compileAsync,
+//      outputColorSpace, physicallyCorrectLights, useLegacyLights
+//
+// WebGPURenderer's render() is technically async, but it returns a
+// promise and Three.js handles the queueing internally for typical
+// scene+camera renders. Sync-ish wrappers work because we only need
+// rAF-driven render-when-ready behavior, not full Promise chains.
 if (!window.THREE.WebGLRenderer) {
   const _shimThree = Object.create(null);
-  // Forward every THREE prop ; can't enumerate a frozen module namespace
-  // with Object.keys but can with Object.getOwnPropertyNames.
   for (const k of Object.getOwnPropertyNames(window.THREE)) {
     try { _shimThree[k] = window.THREE[k]; } catch (_) {}
   }
   _shimThree.WebGLRenderer = function(opts) {
-    const cv = opts && opts.canvas ? opts.canvas : document.createElement('canvas');
-    return {
-      domElement: cv,
-      setPixelRatio() {}, setSize() {}, setClearColor() {}, render() {},
-      dispose() {}, outputColorSpace: 'srgb',
+    opts = opts || {};
+    const canvas = opts.canvas || document.createElement('canvas');
+    // (bugfix 2026-05-19 #215) Use a real WebGPURenderer bound to the
+    // provided canvas. Two WebGPURenderers per page is supported in r170
+    // (each gets its own GPUAdapter/Device).
+    let r;
+    try {
+      r = new window.THREE.WebGPURenderer({
+        canvas: canvas,
+        antialias: opts.antialias !== false,
+        alpha: opts.alpha !== false,
+        powerPreference: opts.powerPreference || 'high-performance',
+      });
+    } catch (e) {
+      console.warn('[ship-preview WebGPURenderer ctor]', e);
+      // Last-resort no-op fallback so the lobby code doesn't crash.
+      return {
+        domElement: canvas,
+        setPixelRatio() {}, setSize() {}, setClearColor() {}, render() {},
+        renderAsync() { return Promise.resolve(); },
+        compileAsync() { return Promise.resolve(); },
+        dispose() {}, outputColorSpace: 'srgb',
+      };
+    }
+    // Init is async ; queue render calls until the device is ready so the
+    // first few frames don't get dropped.
+    let _ready = false;
+    const _pending = [];
+    r.init().then(() => {
+      _ready = true;
+      while (_pending.length) {
+        const [scene, camera] = _pending.shift();
+        try { _sweepAndRender(scene, camera); } catch (_) {}
+      }
+    }).catch(e => console.warn('[ship-preview WebGPU init]', e));
+    const _origRender = r.render.bind(r);
+    // (bugfix 2026-05-19 #216) Per-render material sweep. Cloned .glb
+    // models can contain ShaderMaterial / MeshPhongMaterial nodes that
+    // WebGPURenderer's NodeMaterial compiler rejects with the runtime
+    // log "NodeMaterial: Material X is not compatible." Swap any such
+    // material to a WebGPU-safe MeshStandardMaterial that preserves
+    // color + emissive + map + normalMap when possible. Cached via a
+    // WeakSet so each material is only walked once.
+    const _SWAPPED = new WeakSet();
+    const _isWebGPUCompat = (m) => m && (
+      m.isMeshStandardMaterial || m.isMeshBasicMaterial ||
+      m.isMeshLambertMaterial || m.isMeshNormalMaterial ||
+      m.isLineBasicMaterial   || m.isPointsMaterial    ||
+      m.isSpriteMaterial      || m.isNodeMaterial      ||
+      m.isMeshPhysicalMaterial
+    );
+    const _swapMat = (oldMat) => {
+      const out = new window.THREE.MeshStandardMaterial({
+        color:    oldMat.color    ? oldMat.color.clone()    : new window.THREE.Color(0xcccccc),
+        emissive: oldMat.emissive ? oldMat.emissive.clone() : new window.THREE.Color(0x000000),
+        emissiveIntensity: ('emissiveIntensity' in oldMat) ? oldMat.emissiveIntensity : 0.0,
+        roughness: 0.55, metalness: 0.35,
+        transparent: !!oldMat.transparent,
+        opacity:    (typeof oldMat.opacity === 'number') ? oldMat.opacity : 1,
+        side:       oldMat.side || window.THREE.FrontSide,
+      });
+      // Preserve common texture maps if present.
+      if (oldMat.map)        out.map        = oldMat.map;
+      if (oldMat.normalMap)  out.normalMap  = oldMat.normalMap;
+      if (oldMat.roughnessMap) out.roughnessMap = oldMat.roughnessMap;
+      if (oldMat.metalnessMap) out.metalnessMap = oldMat.metalnessMap;
+      if (oldMat.emissiveMap)  out.emissiveMap  = oldMat.emissiveMap;
+      out.needsUpdate = true;
+      return out;
     };
+    const _sweepScene = (scene) => {
+      if (!scene || !scene.traverse) return;
+      scene.traverse((obj) => {
+        if (!obj || !obj.isMesh || !obj.material) return;
+        if (Array.isArray(obj.material)) {
+          for (let i = 0; i < obj.material.length; i++) {
+            const m = obj.material[i];
+            if (!m || _SWAPPED.has(m)) continue;
+            if (_isWebGPUCompat(m)) { _SWAPPED.add(m); continue; }
+            const r2 = _swapMat(m);
+            _SWAPPED.add(r2);
+            obj.material[i] = r2;
+          }
+        } else {
+          const m = obj.material;
+          if (!m || _SWAPPED.has(m)) return;
+          if (_isWebGPUCompat(m)) { _SWAPPED.add(m); return; }
+          const r2 = _swapMat(m);
+          _SWAPPED.add(r2);
+          obj.material = r2;
+        }
+      });
+    };
+    const _sweepAndRender = (scene, camera) => {
+      _sweepScene(scene);
+      return _origRender(scene, camera);
+    };
+    r.render = function(scene, camera) {
+      if (!_ready) { _pending.push([scene, camera]); return; }
+      try { return _sweepAndRender(scene, camera); } catch (e) {
+        // Some shader compilations only resolve async in WebGPU ; ignore
+        // transient throws so the rAF loop doesn't tear out.
+        return undefined;
+      }
+    };
+    // Lobby code checks `'physicallyCorrectLights' in renderer` and
+    // `'useLegacyLights' in renderer` ; provide both as writable props.
+    if (!('physicallyCorrectLights' in r)) r.physicallyCorrectLights = true;
+    if (!('useLegacyLights' in r)) r.useLegacyLights = false;
+    return r;
   };
   window.THREE = _shimThree;
 }
@@ -7102,6 +8349,81 @@ async function loadClusterTwoAndThree() {
   // The wide stub layer above means most module-level const/function
   // declarations resolve cleanly ; runtime calls fall back to stubs.
   await loadScript('./lss_v17_fx.js').catch(e => console.warn('[load] fx failed:', e.message));
+  // (bugfix 2026-05-20 #228) Rebuild fx.js's _TRACER_*_GEO cylinders with
+  // more radial segments. fx.js gates segment count on QUALITY.level and
+  // the WebGPU port forces 'potato' which gives core: 4 (literal square
+  // cross-section), beam: 6, inner: 8, outer: 12. When tracers fire
+  // rapid-fire (BLASTER 20 Hz, SYPHON 10 Hz, VORTEX 5 Hz) and the player
+  // turns, the world-locked bright-white core cylinders read as "white
+  // squares" sliding into view from the sides — the 4-sided cross-section
+  // is literally a square seen end-on. Higher segment counts make each
+  // cylinder read as a clean round streak instead of a sharp polygon.
+  // Done as an injected classic-script (sibling of fx.js) so we can reach
+  // the module-scoped `_TRACER_*_GEO` const bindings by bareword and use
+  // BufferGeometry.copy to swap the underlying buffer data in place ;
+  // the const reference stays valid for weapons.js + the rest of the
+  // tracer pipeline.
+  await (function _rebuildTracerGeos() {
+    return new Promise((resolve) => {
+      const s = document.createElement('script');
+      s.text = [
+        'try {',
+        '  if (typeof _TRACER_CORE_GEO !== "undefined") {',
+        '    const hiCore = new THREE.CylinderGeometry(0.55, 0.55, 1, 16, 1);',
+        '    hiCore.rotateX(Math.PI / 2);',
+        '    _TRACER_CORE_GEO.copy(hiCore);',
+        '    hiCore.dispose();',
+        '  }',
+        '  if (typeof _TRACER_BEAM_GEO !== "undefined") {',
+        '    const hiBeam = new THREE.CylinderGeometry(1.30, 0.95, 1, 16, 1);',
+        '    hiBeam.rotateX(Math.PI / 2);',
+        '    _TRACER_BEAM_GEO.copy(hiBeam);',
+        '    hiBeam.dispose();',
+        '  }',
+        '  if (typeof _TRACER_TAIL_INNER_GEO !== "undefined") {',
+        '    const hiInner = new THREE.CylinderGeometry(3.50, 2.50, 1, 16, 1);',
+        '    hiInner.rotateX(Math.PI / 2);',
+        '    _TRACER_TAIL_INNER_GEO.copy(hiInner);',
+        '    hiInner.dispose();',
+        '  }',
+        '  if (typeof _TRACER_TAIL_OUTER_GEO !== "undefined") {',
+        '    const hiOuter = new THREE.CylinderGeometry(9.00, 6.50, 1, 20, 1);',
+        '    hiOuter.rotateX(Math.PI / 2);',
+        '    _TRACER_TAIL_OUTER_GEO.copy(hiOuter);',
+        '    hiOuter.dispose();',
+        '  }',
+        '  // Re-apply the per-vertex fade attribute that fx.js sets at',
+        '  // module load (smoothstep near-end black to far-end white).',
+        '  // CylinderGeometry has position attribute with .z running from',
+        '  // -0.5 (near) to +0.5 (far) after the rotateX above.',
+        '  const _vertFadeAll = [',
+        '    _TRACER_CORE_GEO, _TRACER_BEAM_GEO,',
+        '    _TRACER_TAIL_INNER_GEO, _TRACER_TAIL_OUTER_GEO',
+        '  ];',
+        '  for (const g of _vertFadeAll) {',
+        '    const pos = g.attributes.position.array;',
+        '    const n = pos.length / 3;',
+        '    const colors = new Float32Array(n * 3);',
+        '    for (let i = 0; i < n; i++) {',
+        '      const z = pos[i * 3 + 2];',
+        '      let t = (z + 0.5);',
+        '      if (t < 0) t = 0; else if (t > 1) t = 1;',
+        '      const s = t * t * (3 - 2 * t);',
+        '      colors[i * 3]     = s;',
+        '      colors[i * 3 + 1] = s;',
+        '      colors[i * 3 + 2] = s;',
+        '    }',
+        '    g.setAttribute("color", new THREE.BufferAttribute(colors, 3));',
+        '  }',
+        '  console.log("[v228] tracer geos rebuilt with 16-segment cross-section");',
+        '} catch (e) { console.warn("[v228] tracer geo rebuild failed:", e); }',
+      ].join('\n');
+      s.onload = resolve; s.onerror = resolve;
+      document.head.appendChild(s);
+      // Inline scripts execute synchronously on append, so resolve right after.
+      resolve();
+    });
+  })();
   await loadScript('./lss_v17_weapons.js').catch(e => console.warn('[load] weapons failed:', e.message));
   await loadScript('./lss_v17_abilities.js').catch(e => console.warn('[load] abilities failed:', e.message));
   await loadScript('./lss_v17_bots.js').catch(e => console.warn('[load] bots failed:', e.message));
@@ -7838,17 +9160,31 @@ function updatePlayer(dt) {
   } else if (_ammoFrac >= 0.20) {
     player._lastLowAmmo = false;
   }
-  // (bugfix 2026-05-18 #59) Pre-round warmup + stasis-field lock. Player
-  // can look but not move during the 3-2-1-FIGHT countdown or while
-  // standing in a stasis recharge bubble. Velocity zeroed every frame so
-  // residual drift is killed.
+  // (bugfix 2026-05-18 #59 ; refined 2026-05-19 #210) Pre-round warmup +
+  // stasis-field lock. Player can look (mouse + gamepad) but not move
+  // during the 3-2-1-FIGHT countdown or while standing in a stasis
+  // recharge bubble. Velocity zeroed every frame so residual drift is
+  // killed. Matches v17o:27937-27958.
+  //
+  // (bugfix 2026-05-19 #210) Previously the branch only handled mouse
+  // look ; gamepad players were stuck staring forward all through stasis
+  // / warmup because the gp* axes were never consumed. Also the pitch
+  // clamp was nested inside the mouse `if (input.locked)` block so
+  // gamepad look (which doesn't require lock) could still drive pitch
+  // past ±81° and flip the world. Both fixed here.
   if ((game && (game.state === 'warmup' || game.playerInStasis))) {
     player.velocity.set(0, 0, 0);
+    const _sens = (player.sensitivity || input.sensitivity || 0.002);
     if (input.locked) {
-      player.euler.y -= input.mouseDX * (player.sensitivity || input.sensitivity || 0.002);
-      player.euler.x -= input.mouseDY * (player.sensitivity || input.sensitivity || 0.002);
-      player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
+      player.euler.y -= input.mouseDX * _sens;
+      player.euler.x -= input.mouseDY * _sens;
     }
+    if (input.gpConnected) {
+      const _gpSens = (typeof input.gpLookSensitivity === 'number') ? input.gpLookSensitivity : 10.0;
+      if (typeof input.gpLookX === 'number') player.euler.y -= input.gpLookX * _gpSens * dt;
+      if (typeof input.gpLookY === 'number') player.euler.x -= input.gpLookY * _gpSens * dt;
+    }
+    player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     input.mouseDX = 0; input.mouseDY = 0;
     camera.quaternion.setFromEuler(player.euler);
     camera.position.copy(player.position);
@@ -8124,6 +9460,14 @@ function updateEffects(dt) {
     if (e.type === 'tracer' && e.mesh.material) {
       e.mesh.material.opacity = 0.9 * (1 - e.age / e.lifetime);
     }
+    // (bugfix 2026-05-20 #229) Shield ripple : expand + fade.
+    if (e.type === 'shieldRipple' && e.mesh.material) {
+      const t = Math.min(1, e.age / e.lifetime);
+      const grow = 1 + t * 2.2;
+      const r0 = e._r0 || 8;
+      e.mesh.scale.setScalar(r0 * grow);
+      e.mesh.material.opacity = 0.85 * (1 - t);
+    }
     if (e.type === 'fxstub') {
       const k = 1 - e.age / e.lifetime;
       if (e.mesh.material && 'opacity' in e.mesh.material) {
@@ -8221,6 +9565,11 @@ function gameLoop(timestamp) {
   // Particle pool render (v17 modules push hull-damage + ability particles
   // into game.particles ; we draw them via a pooled instanced mesh).
   try { updateParticles(dt); } catch (_) {}
+  // (bugfix 2026-05-19 #206) Tick the v8Sparks instanced pool on the same
+  // dt. v17o keeps this inside updateEffects ; in the WebGPU port we drive
+  // it from the main loop so a missing/stubbed updateEffects path can't
+  // strand active sparks (was: matrices frozen, sparks never aged out).
+  try { if (typeof v8UpdateSparks === 'function') v8UpdateSparks(dt); } catch (_) {}
   // Player ship mesh animation : v17's animateShipMesh drives engine
   // plumes, running lights, barrel recoil.
   try {
@@ -8415,6 +9764,69 @@ function gameLoop(timestamp) {
   } catch (_) {}
   // v17 module ticks : abilities, ability overlay, HUD, cockpit frame.
   try { if (typeof updateAbilities === 'function') updateAbilities(dt); } catch (_) {}
+  // (bugfix 2026-05-19 #208) Post-tick the chunks the abilities-module
+  // extraction cut off. lss_v17_abilities.js:updateAbilities ends at the
+  // "// continues with worldEffects update — out of scope here" comment,
+  // dropping FOUR pieces that lived in v17o.html:32260-32312 :
+  //   1. VORTEX energy regen (the user-reported bug : pool never refills)
+  //   2. Blaster Range Mode 1s transition delay (mode swap never completes)
+  //   3. Blaster Charge Shot auto-fire on full charge (charge never releases)
+  //   4. coreMeter freeze during core + ANN.coreReady edge-detect
+  // All four are pure state ticks ; safe to run as a post-pass after the
+  // module's main tick. Each guard checks loadoutKey so non-matching
+  // chassis pay nothing.
+  try {
+    if (player && player.loadoutKey === 'VORTEX' && typeof player.vortexEnergy === 'number') {
+      player.vortexEnergy = Math.min(
+        player.vortexMaxEnergy || 1000,
+        player.vortexEnergy + (player.vortexEnergyRegen || 150) * dt
+      );
+    }
+    if (player && player.blasterSwitchTimer > 0) {
+      player.blasterSwitchTimer -= dt;
+      if (player.blasterSwitchTimer <= 0) {
+        player.blasterSwitchTimer = 0;
+        player.blasterMode = player.blasterPendingMode;
+        if (player.weapon) {
+          const ammoPct = player.maxClip > 0 ? player.clipAmmo / player.maxClip : 1;
+          if (player.blasterMode === 'close') {
+            player.weapon.fireRate = 0.05;
+            player.weapon.range = 1500;
+            player.weapon.damage = 85;
+            player.weapon.spread = 0.04;
+            player.maxClip = 150;
+            player.clipAmmo = Math.round(ammoPct * 150);
+          } else {
+            player.weapon.fireRate = 0.08;
+            player.weapon.range = 3000;
+            player.weapon.damage = 100;
+            player.weapon.spread = 0.005;
+            player.maxClip = 100;
+            player.clipAmmo = Math.round(ammoPct * 100);
+          }
+        }
+      }
+    }
+    if (player && player.powerShotCharging) {
+      player.powerShotCharge = Math.min(1.0, (player.powerShotCharge || 0) + dt / 1.0);
+      if (player.powerShotCharge >= 1.0 && typeof firePowerShot === 'function') {
+        try { firePowerShot(); } catch (_) {}
+      }
+    }
+    if (player && player.coreActive) player.coreMeter = 0;
+    if (player && player.loadout && player.loadout.core &&
+        player.loadout.core.name === 'AI Nanobots' && player.syphonTier >= 3) {
+      player.coreMeter = 0;
+    }
+    if (player) {
+      const _nowCoreReady = (player.coreMeter || 0) >= 100;
+      if (_nowCoreReady && !player._wasCoreReady) {
+        try { if (typeof ANN !== 'undefined' && ANN.coreReady) ANN.coreReady(); } catch (_) {}
+      }
+      player._wasCoreReady = _nowCoreReady;
+      player.coreReady = _nowCoreReady;
+    }
+  } catch (_) {}
   try { if (typeof tickAbilityOverlayFrame === 'function') tickAbilityOverlayFrame(); } catch (_) {}
   try { if (typeof updateHUD === 'function') updateHUD(); } catch (_) {}
   // (bugfix 2026-05-19 #92) Tick shield visuals : toggles edge overlay
@@ -8570,7 +9982,16 @@ function gameLoop(timestamp) {
   // on shift / damage / ship swap). Cheap : early-exits when unchanged.
   try { if (typeof updateCockpitFrame === 'function') updateCockpitFrame(); } catch (_) {}
   // (Phase J) Round timer + warmup decay.
-  try { _roundTimerTick(dt); } catch (_) {}
+  // (bugfix 2026-05-19 #214) Call via window._roundTimerTick so the
+  // bugfix #16 wrap at line ~5965 (respawnPlayer + spawnBots on
+  // warmup transition) actually intercepts the tick. Previously the
+  // bare name `_roundTimerTick` resolved to the lexically-bound function
+  // declaration at line 3605 ; the wrap reassigned only window._roundTimerTick,
+  // never the lexical binding, so the wrap never fired. Symptom : after
+  // round 1 ended, no respawn happened, so the next warmup→playing flip
+  // saw _aliveA = _aliveB = 0 and immediately re-resolved the round.
+  // Cascade : "Round Won" fired every 5 s forever.
+  try { window._roundTimerTick(dt); } catch (_) {}
   // (bugfix 2026-05-18 #17) Per-frame pilot perk effects : Nano Repair
   // HP regen + Auto Cloak core-trigger. Stat bonuses (shield, dash) are
   // applied once on commitLoadout ; these are the live ones.
@@ -9214,6 +10635,283 @@ async function main() {
           return _origSelectMap(mapKey);
         };
       }
+      // (bugfix 2026-05-19 #213) joinRoom wrap : wipe the boot-time defaults
+      // so MP starts from a clean slate. The webGPU boot bootstrap sets
+      // player.loadoutKey = 'VORTEX' and spawns bots for a "free-roam test"
+      // mode. Once a player joins a real room, those defaults leak into MP :
+      //   1. onPeerJoin (lobby.js:1980) auto-broadcasts the boot loadout key
+      //      as if the user had committed, so checkAllLoadoutsReady fires
+      //      immediately on the other peer and triggers launch.
+      //   2. The boot-spawned bots remain in game.entities and follow the
+      //      player into the MP match.
+      // Wrapping joinRoom to null out player.loadoutKey + clear game.entities
+      // + hide the boot ship mesh forces the user through a real ship-select
+      // (and READY handshake) before any peer launch is proposed.
+      if (typeof joinRoom === 'function') {
+        const _origJoinRoom = window.joinRoom;
+        window.joinRoom = async function() {
+          try {
+            if (player) {
+              player.loadoutKey = null;
+              player.loadout = null;
+              player.committed = false;
+              if (player.mesh && player.mesh.parent) {
+                try { player.mesh.parent.remove(player.mesh); } catch (_) {}
+                player.mesh = null;
+              }
+            }
+            if (game && Array.isArray(game.entities) && game.entities.length) {
+              for (const bot of game.entities) {
+                if (bot && bot.mesh && bot.mesh.parent) {
+                  try { bot.mesh.parent.remove(bot.mesh); } catch (_) {}
+                }
+              }
+              game.entities.length = 0;
+            }
+            // (bugfix 2026-05-19 #213b) Clear stale projectiles + effects too
+            // so MP doesn't inherit any solo-test residue. worldEffects + the
+            // particle pool are reset on the next buildWorld but cleared here
+            // for tidiness and to drop any boot-time lights from the scene.
+            if (game) {
+              if (Array.isArray(game.projectiles)) {
+                for (const p of game.projectiles) {
+                  if (p && p.mesh && p.mesh.parent) try { p.mesh.parent.remove(p.mesh); } catch (_) {}
+                }
+                game.projectiles.length = 0;
+              }
+              if (Array.isArray(game.effects)) game.effects.length = 0;
+              if (Array.isArray(game.particles)) game.particles.length = 0;
+            }
+          } catch (e) { console.warn('[joinRoom wrap pre]', e); }
+          return _origJoinRoom.apply(this, arguments);
+        };
+      }
+      // (bugfix 2026-05-20 #220) fireWeapon wrap : relocate the bright
+      // muzzle flash light + the orange spark particles + the chassis
+      // flash particles from camera-center (~30u in front of the
+      // crosshair) to the painted gun barrel. Without this, every shot
+      // paints a hot flash + particle cluster directly in the middle of
+      // the screen ; v17 inherited the same issue but it reads worse on
+      // WebGPU because the painted gun art is brighter under the new
+      // PBR lighting and the eye locks onto the flash.
+      //
+      // Strategy : snapshot game.particles + dynamicLights.active lengths
+      // before calling the module's fireWeapon, then walk the NEW entries
+      // and copy each one's position to the painted-barrel world point
+      // (alternates left/right per shot to match the existing recoil
+      // animation that v17 already drives via player.muzzleFlashSide).
+      // The painted-muzzle math mirrors what spawnTracer's screenToMuzzle
+      // uses + the v17 _overlayShift composition from
+      // _computeScreenMuzzleWorld so flashes track the visibly-shifted
+      // painted gun when the cockpit drifts during turns.
+      if (typeof fireWeapon === 'function') {
+        // (bugfix 2026-05-20 #227) Suppress _spawnSingleTracer's per-call
+        // sparkle particles GLOBALLY. v17's _spawnSingleTracer pushes 1-3
+        // small white-ish particles along the tracer beam as "trace of
+        // dust" (lss_v17_weapons.js:1657-1672). The pooled particle
+        // renderer (_getParticleMesh, webGPU.html:3988) draws each with
+        // a 6-segment SphereGeometry that reads as low-poly cubes /
+        // "white squares" at small sizes. #222 only caught these for the
+        // local player's fireWeapon path ; bot tracers, ability tracers
+        // (Mega Laser, AI Assist core auto-aim, Stun Bolt core), and the
+        // network fire_tracer receive handler all bypassed that wrap.
+        // While turning + shooting, the world-locked sparkles drift in
+        // and out of view from the sides as the camera rotates.
+        //
+        // Wrap : snapshot game.particles.length, call original, splice
+        // out new entries. Idempotent guard so re-entry from the bot
+        // update loop doesn't double-wrap.
+        // (bugfix 2026-05-20 #232) FULL REPLACEMENT of _spawnSingleTracer.
+        // Earlier wraps (#227 sparkle splice, #231 white-core mesh removal)
+        // either ran but failed to suppress everything, or didn't run at
+        // all due to some load-order or scope issue I can't easily verify
+        // without the running game. This version owns the entire tracer
+        // visual from scratch :
+        //   - Own 16-segment cylinder geometries (no dependency on the
+        //     classic-script-scope `_TRACER_*_GEO` consts from fx.js)
+        //   - Plain MeshBasicMaterial with the chassis color and NO
+        //     vertexColors gradient (the gradient setup in fx.js:340-364
+        //     may not translate correctly through WebGPURenderer's
+        //     NodeMaterial layer, leaving meshes uniform white)
+        //   - NO bright-white "core" mesh — just three chassis-colored
+        //     layers (beam + inner tail + outer tail) for the streak
+        //   - NO per-tracer sparkle particles
+        // Lifetimes mirror v17 so updateEffects' opacity decay matches.
+        if (window.game) {
+          const _SST_CORE_GEO  = new THREE.CylinderGeometry(0.55, 0.55, 1, 16, 1); _SST_CORE_GEO.rotateX(Math.PI / 2);
+          const _SST_BEAM_GEO  = new THREE.CylinderGeometry(1.30, 0.95, 1, 16, 1); _SST_BEAM_GEO.rotateX(Math.PI / 2);
+          const _SST_INNER_GEO = new THREE.CylinderGeometry(3.50, 2.50, 1, 16, 1); _SST_INNER_GEO.rotateX(Math.PI / 2);
+          const _SST_OUTER_GEO = new THREE.CylinderGeometry(9.00, 6.50, 1, 20, 1); _SST_OUTER_GEO.rotateX(Math.PI / 2);
+          const _SST_TMP_MID = new THREE.Vector3();
+          window._spawnSingleTracer = function(fromVec, toVec, color, widthScale) {
+            if (!fromVec || !toVec || !scene) return;
+            widthScale = (typeof widthScale === 'number' && widthScale > 0) ? widthScale : 1.0;
+            const dx = toVec.x - fromVec.x, dy = toVec.y - fromVec.y, dz = toVec.z - fromVec.z;
+            const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (len < 1) return;
+            _SST_TMP_MID.set(
+              (fromVec.x + toVec.x) * 0.5,
+              (fromVec.y + toVec.y) * 0.5,
+              (fromVec.z + toVec.z) * 0.5
+            );
+            const col = (typeof color === 'number') ? color : 0xffff00;
+            const _makeLayer = (geo, opacity, lifetime, type) => {
+              const m = new THREE.MeshBasicMaterial({
+                color: col,
+                transparent: true,
+                opacity: opacity,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                side: THREE.FrontSide,
+              });
+              const mesh = new THREE.Mesh(geo, m);
+              mesh.position.copy(_SST_TMP_MID);
+              mesh.lookAt(toVec);
+              mesh.scale.set(widthScale, widthScale, len);
+              mesh.renderOrder = 1;
+              mesh.frustumCulled = false;
+              scene.add(mesh);
+              game.effects.push({ mesh, lifetime, age: 0, type });
+            };
+            // Three layers, all chassis-colored. No white core.
+            _makeLayer(_SST_BEAM_GEO,  0.85, 0.16, 'tracer');     // bright streak
+            _makeLayer(_SST_INNER_GEO, 0.45, 0.32, 'tracerTail'); // inner haze
+            _makeLayer(_SST_OUTER_GEO, 0.15, 0.50, 'tracerTail'); // outer halo
+          };
+          // Mark as wrapped so any later code that checks this flag (e.g.
+          // the audio module's onPlay hook) knows the tracer pipeline is
+          // owned by the webGPU port now.
+          window._spawnSingleTracerSparkleWrapped = true;
+          window._spawnSingleTracerFullyReplaced = true;
+        }
+
+        // (bugfix 2026-05-20 #222) Suppress ALL 3D world muzzle visuals
+        // on the local player's first-person shots. The painted gun
+        // PNGs (gun.png + gunfire.png + gun1.png + gunfire1.png) already
+        // contain the muzzle flash AND the recoil animation baked into
+        // the per-frame art ; the cockpit cycle flips between them via
+        // tickGunLayer on every shot. Spawning additional world particles
+        // + dynamic lights + chassis-flash sparks just stacks ugly white
+        // blobs at the painted barrel ("white squares flickering" per
+        // user feedback on BLASTER's 20 Hz fire).
+        //
+        // Strategy : wrap fireWeapon, snapshot particle + worldEffect
+        // lengths, suppress all spawnDynamicLight calls during the
+        // original call via a flag, then splice out any new particles
+        // spawned by the original. The tracer split-into-two-from-
+        // painted-barrels logic from #217 still runs because spawnTracer
+        // is a separate function ; we ONLY suppress the close-range
+        // muzzle visuals.
+        //
+        // Earlier attempts (#220, #221) tried to RELOCATE the spawns to
+        // the painted muzzle world point. That worked geometrically but
+        // the spawned spheres + lights stacked with the painted PNG art
+        // and read as "extra shit" near the gun. Suppressing is cleaner
+        // since v17's painted frames are the authoritative visual.
+        const _origFireWeapon = window.fireWeapon;
+        if (typeof window.spawnDynamicLight === 'function' && !window._spawnDynamicLightMuzzleWrapped) {
+          const _origSpawnDL = window.spawnDynamicLight;
+          window.spawnDynamicLight = function(pos, color, intensity, range, duration) {
+            // Skip entirely when the fireWeapon wrap has the suppression
+            // flag set. Non-fire light spawns (explosions, beam impacts,
+            // shield hits, etc.) are untouched.
+            if (window._suppressMuzzleVisuals) return;
+            return _origSpawnDL(pos, color, intensity, range, duration);
+          };
+          window._spawnDynamicLightMuzzleWrapped = true;
+        }
+        window.fireWeapon = function() {
+          if (!player || !player.position || !window.game) {
+            return _origFireWeapon.apply(this, arguments);
+          }
+          const _partsBefore = Array.isArray(game.particles) ? game.particles.length : 0;
+          window._suppressMuzzleVisuals = true;
+          let result;
+          try {
+            result = _origFireWeapon.apply(this, arguments);
+          } finally {
+            window._suppressMuzzleVisuals = false;
+          }
+          // Splice out particles the module spawned (chassis flash +
+          // muzzle sparks + PYRO extras). The painted PNG art owns the
+          // visual identity of the shot ; the world spawns just clutter
+          // the cockpit framing.
+          if (Array.isArray(game.particles) && game.particles.length > _partsBefore) {
+            game.particles.length = _partsBefore;
+          }
+          return result;
+        };
+      }
+
+      // (bugfix 2026-05-19 #217) spawnTracer override : fix two
+      // muzzle-position issues the user noticed while moving and shooting.
+      //
+      // ISSUE A : the painted gun on the cockpit-frame DOM drifts left/right
+      // via _overlayShift when the player turns. The v17 pattern
+      // (_computeScreenMuzzleWorld at lss_v17_cockpit.js:872) adds
+      // _overlayShift.{x,y}/100 to the screen fraction so the WORLD muzzle
+      // point tracks that drift. But spawnTracer's inner screenToMuzzle
+      // helper (lss_v17_weapons.js:1632-1639) uses raw TIP_FRAC constants
+      // without the shift, so basic-hitscan tracers diverge from the
+      // painted gun as you turn. This override applies the same
+      // _overlayShift composition.
+      //
+      // ISSUE B : the tracer's `from` is computed from camera.position which
+      // was set in updatePlayer this frame. The tracer mesh's geometry is
+      // baked at spawn time. By the time the next render happens, the
+      // player has moved one more dt worth of velocity. The visible result :
+      // every tracer appears to start one frame behind where the gun is.
+      // At 500 u/s movement and 60 fps that's ~8 units of lag per shot,
+      // which reads as "gunfire coming from the wrong place." Push the
+      // `from` forward by player.velocity / 60 to compensate.
+      if (typeof spawnTracer === 'function' && typeof _spawnSingleTracer === 'function') {
+        window.spawnTracer = function(from, to, color, widthScale) {
+          color = color || 0xffff00;
+          const wScale = (typeof widthScale === 'number' && widthScale > 0) ? widthScale : 1.0;
+          const camDist = (camera && from) ? from.distanceTo(camera.position) : 9999;
+          if (camDist < 80) {
+            const q = camera.quaternion;
+            const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+            const up    = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+            const fwd   = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+            const fwdOff = 60;
+            const winW = window.innerWidth || 1920;
+            const winH = window.innerHeight || 1080;
+            const fovRad = (camera.fov || 90) * Math.PI / 180;
+            const halfH = fwdOff * Math.tan(fovRad / 2);
+            const halfW = halfH * (winW / winH);
+            // ISSUE B : compensate `from` by one frame of player velocity
+            // so the tracer starts at the painted-gun's projected world
+            // point THIS RENDER, not last frame's.
+            const _vlag = (player && player.velocity)
+              ? player.velocity.clone().multiplyScalar(1 / 60)
+              : new THREE.Vector3();
+            const fromComp = from.clone().add(_vlag);
+            // ISSUE A : overlay-shift composition. _overlayShift values
+            // are viewport percents ; divide by 100 to convert to the
+            // same 0..1 fraction space the TIP_FRAC constants live in.
+            const sx = (typeof _overlayShift === 'object' && _overlayShift) ? (_overlayShift.x / 100) : 0;
+            const sy = (typeof _overlayShift === 'object' && _overlayShift) ? (_overlayShift.y / 100) : 0;
+            const TIP_FRAC_X_LEFT  = 0.305 + sx;
+            const TIP_FRAC_X_RIGHT = 0.695 + sx;
+            const TIP_FRAC_Y       = 0.680 + sy;
+            const screenToMuzzle = (fracX, fracY) => {
+              const ndx =  2 * fracX - 1;
+              const ndy = -(2 * fracY - 1);
+              return fromComp.clone()
+                .add(right.clone().multiplyScalar(ndx * halfW))
+                .add(up.clone().multiplyScalar(ndy * halfH))
+                .add(fwd.clone().multiplyScalar(fwdOff));
+            };
+            const leftMuzzle  = screenToMuzzle(TIP_FRAC_X_LEFT,  TIP_FRAC_Y);
+            const rightMuzzle = screenToMuzzle(TIP_FRAC_X_RIGHT, TIP_FRAC_Y);
+            _spawnSingleTracer(leftMuzzle,  to, color, 0.85 * wScale);
+            _spawnSingleTracer(rightMuzzle, to, color, 0.85 * wScale);
+            return;
+          }
+          _spawnSingleTracer(from, to, color, 1.0 * wScale);
+        };
+      }
       if (typeof commitLoadout === 'function') {
         const _origCommitLoadout = window.commitLoadout;
         window.commitLoadout = function(key) {
@@ -9243,8 +10941,16 @@ async function main() {
           try { if (typeof _preloadAbilityOverlayFrames === 'function') _preloadAbilityOverlayFrames(key); } catch (_) {}
           // Cinematic launchCountdown handles the canonical hide / pointer-
           // lock / state flip ; we add a small fallback in case it didn't run.
+          // (bugfix 2026-05-19 #212) The fallback used to fire unconditionally
+          // after 6s, which silently bypassed MP's launch handshake (proposer
+          // sends launch_at, all peers schedule). MP commits go through
+          // checkAllLoadoutsReady → scheduleLaunch → launchCountdown ; that
+          // chain can legitimately take > 6s while peers commit. The fallback
+          // was forcing the host into 'playing' alone before peer commits
+          // arrived. Gate on !net.active so MP relies on the real handshake.
           setTimeout(() => {
             if (window._countdownActive) return;  // countdown is doing it
+            if (window.net && window.net.active) return; // MP : handshake owns launch
             const ssEl = document.getElementById('ship-select');
             if (ssEl && ssEl.classList.contains('active') && game.state === 'warmup') {
               ssEl.classList.remove('active');
@@ -10104,6 +11810,17 @@ async function main() {
           cache && cache.loaded ? Object.keys(cache.loaded) : 'none');
         try {
           if (typeof spawnBots !== 'function') { console.warn('[v3] spawnBots not defined'); return; }
+          // (bugfix 2026-05-19 #211) Skip boot-time spawnBots when an MP
+          // room is already active. v17 only spawns bots inside the SOLO
+          // branch of commitLoadout's internal buildWorld (lobby.js:757),
+          // never at boot. The webGPU port's boot bootstrap was spawning
+          // bots unconditionally as a "free roam" test convenience, but
+          // when a user joins a room those leftover bots followed them
+          // into the MP match. Gate on net.active so MP starts clean.
+          if (window.net && window.net.active) {
+            console.log('[v3] skipping boot spawnBots (MP active)');
+            return;
+          }
           spawnBots();
           console.log('[v3] spawnBots() OK, game.entities.length =', game.entities.length);
           // WebGPU material compat sweep on bot meshes : the cloned glb
