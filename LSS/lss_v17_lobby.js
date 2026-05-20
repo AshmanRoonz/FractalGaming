@@ -1363,15 +1363,245 @@ function buildSettingsPage() {
           }).join('')}
         </select></div>
     </div>
-    <!-- (Audio, Announcer, Music sections continue; followed by:) -->
+    <h2>AUDIO</h2>
+    <div class="settings-section"><h3>Volume</h3>
+      <div class="setting-row"><label>Master</label>
+        <input type="range" id="set-vol-master" min="0" max="1" step="0.01" value="${(audio && audio.userVol && typeof audio.userVol.master === 'number') ? audio.userVol.master : 0.8}"></div>
+      <div class="setting-row"><label>SFX</label>
+        <input type="range" id="set-vol-sfx" min="0" max="1" step="0.01" value="${(audio && audio.userVol && typeof audio.userVol.sfx === 'number') ? audio.userVol.sfx : 0.8}"></div>
+      <div class="setting-row"><label>Ambient</label>
+        <input type="range" id="set-vol-ambient" min="0" max="1" step="0.01" value="${(audio && audio.userVol && typeof audio.userVol.ambient === 'number') ? audio.userVol.ambient : 0.5}"></div>
+      <div class="setting-row"><label>Music</label>
+        <input type="range" id="set-vol-music" min="0" max="1" step="0.01" value="${(audio && audio.userVol && typeof audio.userVol.music === 'number') ? audio.userVol.music : 0.45}"></div>
+    </div>
+    <div class="settings-section"><h3>Music</h3>
+      <div class="setting-row"><label>Music Enabled</label>
+        <input type="checkbox" id="set-music-enabled" ${(audio && audio.musicEnabled !== false) ? 'checked' : ''}></div>
+      <div class="setting-row"><label>Mute Music In Lobby</label>
+        <input type="checkbox" id="set-music-mute-lobby" ${(audio && audio.musicMuteLobby) ? 'checked' : ''}></div>
+      <div class="setting-row"><label>Intensity Ceiling</label>
+        <select id="set-music-ceiling" style="flex:1;">
+          <option value="chill"  ${(audio && audio.musicCeiling) === 'chill'  ? 'selected' : ''}>Chill</option>
+          <option value="normal" ${!audio || !audio.musicCeiling || audio.musicCeiling === 'normal' ? 'selected' : ''}>Normal</option>
+          <option value="wild"   ${(audio && audio.musicCeiling) === 'wild'   ? 'selected' : ''}>Wild</option>
+        </select></div>
+      <div class="setting-row"><label>Style</label>
+        <select id="set-music-style" style="flex:1;">
+          <option value="cosmic" ${!audio || !audio.musicStyle || audio.musicStyle === 'cosmic' ? 'selected' : ''}>Cosmic</option>
+          <option value="cyber"  ${(audio && audio.musicStyle) === 'cyber'  ? 'selected' : ''}>Cyber</option>
+          <option value="doom"   ${(audio && audio.musicStyle) === 'doom'   ? 'selected' : ''}>Doom</option>
+          <option value="drift"  ${(audio && audio.musicStyle) === 'drift'  ? 'selected' : ''}>Drift</option>
+          <option value="battle" ${(audio && audio.musicStyle) === 'battle' ? 'selected' : ''}>Battle</option>
+          <option value="jazz"   ${(audio && audio.musicStyle) === 'jazz'   ? 'selected' : ''}>Jazz</option>
+          <option value="techno" ${(audio && audio.musicStyle) === 'techno' ? 'selected' : ''}>Techno</option>
+        </select></div>
+    </div>
+    <div class="settings-section"><h3>Announcer</h3>
+      <div class="setting-row"><label>Enabled</label>
+        <input type="checkbox" id="set-announcer-enabled" ${(typeof announcer !== 'undefined' && announcer.enabled !== false) ? 'checked' : ''}></div>
+      <div class="setting-row"><label>Voice</label>
+        <select id="set-announcer-voice" style="flex:1;"></select></div>
+      <div class="setting-row" style="margin-top:4px;">
+        <button id="set-announcer-audition">Audition Voice</button>
+      </div>
+    </div>
     <button id="settings-close">CLOSE</button>
     <button id="settings-reset">RESET TO DEFAULTS</button>
     <button id="settings-export">EXPORT</button>
     <button id="settings-import">IMPORT</button>
   `;
-  // ... wiring up event handlers for every slider/select/checkbox; keyboard rebind
-  // capture (click row -> press key); gamepad rebind capture (click row -> press btn);
-  // import/export to JSON ; settings-close -> closeSettings() etc. ...
+  // (port 2026-05-19) Wire the audio + music + announcer controls. The
+  // earlier wiring lived inside a 600-line block dropped during extraction ;
+  // we re-attach the minimum set needed to make sliders + checkboxes work.
+  try {
+    const wire = (id, handler, evt) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener(evt || 'input', () => { try { handler(el); } catch (_) {} try { saveSettings(); } catch (_) {} });
+    };
+    // ---- Controls : mouse + gamepad ----
+    wire('set-mouse-sens', (el) => {
+      input.sensitivity = parseFloat(el.value);
+      const disp = document.getElementById('val-mouse-sens');
+      if (disp) disp.textContent = input.sensitivity.toFixed(4);
+    });
+    wire('set-gp-look-sens', (el) => {
+      input.gpLookSensitivity = parseFloat(el.value);
+      const disp = document.getElementById('val-gp-look-sens');
+      if (disp) disp.textContent = input.gpLookSensitivity.toFixed(1);
+    });
+    wire('set-gp-move-sens', (el) => {
+      input.gpMoveSensitivity = parseFloat(el.value);
+      const disp = document.getElementById('val-gp-move-sens');
+      if (disp) disp.textContent = input.gpMoveSensitivity.toFixed(1);
+    });
+    wire('set-gp-look-curve', (el) => { input.gpLookCurve = parseFloat(el.value); });
+    wire('set-gp-move-curve', (el) => { input.gpMoveCurve = parseFloat(el.value); });
+    wire('set-gp-deadzone',   (el) => { input.gpDeadzone   = parseFloat(el.value); });
+    wire('set-gp-trigger',    (el) => { input.triggerThreshold = parseFloat(el.value); });
+    wire('set-gp-invert-y',   (el) => { input.invertLookY  = el.checked; }, 'change');
+    wire('set-gp-swap',       (el) => { input.swapSticks   = el.checked; }, 'change');
+    // ---- Graphics : FOV + quality + wall pattern + skybox + showcase ----
+    wire('set-fov', (el) => {
+      input.fovDeg = parseFloat(el.value);
+      try { if (typeof camera !== 'undefined' && camera) { camera.fov = input.fovDeg; camera.updateProjectionMatrix(); } } catch (_) {}
+    });
+    wire('set-quality', (el) => {
+      if (typeof applyQualityPreset === 'function') applyQualityPreset(el.value);
+    }, 'change');
+    wire('set-wall-pattern', (el) => {
+      game.wallPattern = parseInt(el.value, 10) || 0;
+      // v17 uses applyMultiLayerPreset(idx % WALL_PATTERN_NAMES.length) ;
+      // see arena.js:1063.
+      try {
+        if (typeof applyMultiLayerPreset === 'function' && typeof WALL_PATTERN_NAMES !== 'undefined') {
+          applyMultiLayerPreset(game.wallPattern % WALL_PATTERN_NAMES.length);
+        }
+      } catch (_) {}
+    }, 'change');
+    wire('set-wall-black-base', (el) => { game.wallBlackBase = el.checked; }, 'change');
+    wire('set-wall-opacity', (el) => {
+      game.wallOpacity = parseFloat(el.value);
+      try { if (typeof applyWallOpacity === 'function') applyWallOpacity(game.wallOpacity); } catch (_) {}
+    });
+    wire('set-skybox', (el) => {
+      game.skyboxChoice = el.value;
+      try { if (typeof applySkybox === 'function') applySkybox(game.skyboxChoice); } catch (_) {}
+    }, 'change');
+    wire('set-showcase', (el) => {
+      try { if (typeof showcase !== 'undefined') showcase.active = el.checked; } catch (_) {}
+    }, 'change');
+    wire('set-vol-master', (el) => {
+      const v = parseFloat(el.value);
+      if (audio && audio.userVol) audio.userVol.master = v;
+      // v17 multiplies userVol.master by 0.85 to set masterGain.
+      if (audio && audio.masterGain && audio.masterGain.gain) audio.masterGain.gain.value = 0.85 * v;
+      if (audio && audio.spatial51Master && audio.spatial51Master.gain) audio.spatial51Master.gain.value = 0.85 * v;
+    });
+    wire('set-vol-sfx', (el) => {
+      const v = parseFloat(el.value);
+      if (audio && audio.userVol) audio.userVol.sfx = v;
+      // v17 uses audio.sfxBus.gain (not sfxGain).
+      if (audio && audio.sfxBus && audio.sfxBus.gain) audio.sfxBus.gain.value = v;
+      if (audio && audio.spatial51Bus && audio.spatial51Bus.gain) audio.spatial51Bus.gain.value = v;
+    });
+    wire('set-vol-ambient', (el) => {
+      const v = parseFloat(el.value);
+      if (audio && audio.userVol) audio.userVol.ambient = v;
+      // Ambient gain reads userVol.ambient each tick (see audio.js:596) ;
+      // no direct gain.value setter required.
+    });
+    wire('set-vol-music', (el) => {
+      const v = parseFloat(el.value);
+      if (audio && audio.userVol) audio.userVol.music = v;
+      if (audio && audio.musicGain && audio.musicGain.gain) audio.musicGain.gain.value = 0.30 * v;
+    });
+    wire('set-music-enabled', (el) => {
+      if (audio) audio.musicEnabled = el.checked;
+      if (typeof musicSetEnabled === 'function') musicSetEnabled(el.checked);
+    }, 'change');
+    wire('set-music-mute-lobby', (el) => {
+      if (audio) audio.musicMuteLobby = el.checked;
+    }, 'change');
+    wire('set-music-ceiling', (el) => {
+      if (audio) audio.musicCeiling = el.value;
+      if (typeof musicSetCeiling === 'function') musicSetCeiling(el.value);
+    }, 'change');
+    wire('set-music-style', (el) => {
+      if (audio) audio.musicStyle = el.value;
+      if (typeof musicSetStyle === 'function') musicSetStyle(el.value);
+    }, 'change');
+    wire('set-announcer-enabled', (el) => {
+      if (typeof announcer !== 'undefined') announcer.enabled = el.checked;
+    }, 'change');
+    // Populate announcer voice list lazily ; speechSynthesis voices load async.
+    const populateVoices = () => {
+      const sel = document.getElementById('set-announcer-voice');
+      if (!sel || typeof announcerListVoices !== 'function') return;
+      const voices = announcerListVoices() || [];
+      sel.innerHTML = '';
+      for (const v of voices) {
+        const opt = document.createElement('option');
+        opt.value = v.name;
+        opt.textContent = v.name + (v.lang ? '  ('+v.lang+')' : '');
+        if (typeof announcer !== 'undefined' && announcer.voiceName === v.name) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    };
+    populateVoices();
+    try {
+      if (typeof speechSynthesis !== 'undefined') {
+        speechSynthesis.addEventListener('voiceschanged', populateVoices);
+      }
+    } catch (_) {}
+    wire('set-announcer-voice', (el) => {
+      if (typeof announcerSetVoiceByName === 'function') announcerSetVoiceByName(el.value);
+    }, 'change');
+    const audBtn = document.getElementById('set-announcer-audition');
+    if (audBtn) audBtn.addEventListener('click', () => {
+      try { if (typeof announcerAudition === 'function') announcerAudition(); } catch (_) {}
+    });
+    // (port 2026-05-19) Settings export : dump lss_settings localStorage
+    // entry as a JSON file download. Useful for backing up complex
+    // gamepad rebinds + audio volumes + map presets. saveSettings is
+    // called first to make sure the on-disk JSON reflects the current
+    // in-memory state.
+    const exportBtn = document.getElementById('settings-export');
+    if (exportBtn) exportBtn.addEventListener('click', () => {
+      try { saveSettings(); } catch (_) {}
+      try {
+        const raw = localStorage.getItem('lss_settings') || '{}';
+        const blob = new Blob([raw], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.download = 'lss_settings_' + ts + '.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (e) { console.warn('[settings-export]', e); }
+    });
+    // Settings import : open file picker, parse JSON, write to
+    // localStorage, call loadSettings to apply. Rebuilds the settings
+    // panel so all UI controls reflect the imported values.
+    const importBtn = document.getElementById('settings-import');
+    if (importBtn) importBtn.addEventListener('click', () => {
+      try {
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'application/json,.json';
+        fileInput.style.display = 'none';
+        fileInput.addEventListener('change', (e) => {
+          const file = e.target.files && e.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            try {
+              // Validate it parses as JSON before we overwrite storage.
+              const _data = JSON.parse(reader.result);
+              localStorage.setItem('lss_settings', JSON.stringify(_data));
+              if (typeof loadSettings === 'function') loadSettings();
+              // Rebuild UI so all controls reflect imported values.
+              try { _settingsBuilt = false; buildSettingsPage(); } catch (_) {}
+            } catch (err) {
+              alert('Settings import failed : ' + err.message);
+            }
+          };
+          reader.readAsText(file);
+        });
+        document.body.appendChild(fileInput);
+        fileInput.click();
+        setTimeout(() => { try { document.body.removeChild(fileInput); } catch (_) {} }, 1000);
+      } catch (e) { console.warn('[settings-import]', e); }
+    });
+    // Close / reset buttons.
+    const closeBtn = document.getElementById('settings-close');
+    if (closeBtn) closeBtn.addEventListener('click', () => { try { closeSettings(); } catch (_) {} });
+    const resetBtn = document.getElementById('settings-reset');
+    if (resetBtn) resetBtn.addEventListener('click', () => {
+      try { if (typeof resetSettingsToDefaults === 'function') resetSettingsToDefaults(); } catch (_) {}
+      try { _settingsBuilt = false; buildSettingsPage(); } catch (_) {}
+    });
+  } catch (_) {}
 }
 
 function openSettings() {
@@ -1999,3 +2229,16 @@ function tickStartCountdown() {
 // (game.state === 'matchEnd') as a force-show condition, so flipping state
 // brings the scoreboard up with final totals. The Orbitron banner text reads
 // "FLEET A WINS" or "FLEET B WINS" through window.Overlays.banner(title, sub).
+
+// (port 2026-05-19) Expose lobby entry points on window so the inline
+// pre-stubs in the html can locate them after this module loads.
+try {
+  window.startSolo = startSolo;
+  window.startTest = startTest;
+  window.enterShipSelect = enterShipSelect;
+  window.openSettings = openSettings;
+  window.closeSettings = closeSettings;
+  window.saveSettings = saveSettings;
+  window.buildSettingsPage = buildSettingsPage;
+  window.updateLobbyPeers = updateLobbyPeers;
+} catch (_) {}

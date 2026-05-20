@@ -8011,6 +8011,21 @@ fireWeapon = function() {
   _origFireWeapon();
   const w = player.weapon;
   if (!w) return;
+  // (bugfix 2026-05-18 #102) Restored sound-dispatch + closing brace
+  // from v17o:53245. Extraction dropped both, leaving the entire rest
+  // of this file buried inside fireWeapon's body. The broken wrap
+  // meant per-weapon fire sounds never played AND announcer / ANN /
+  // music functions only became globally available after first fire.
+  const isRailgun = w.mode === 'hitscan' && w.fireRate >= 0.8;
+  const isMinigun = w.mode === 'hitscan' && w.fireRate < 0.08;
+  const isMissile = w.mode === 'projectile' && (w.homing || w.salvo);
+  if (isMinigun) playSound('fire_minigun');
+  else if (isRailgun) playSound('fire_railgun');
+  else if (isMissile) playSound('fire_salvo');
+  else if (w.mode === 'hitscan') playSound('fire_hitscan');
+  else if (w.mode === 'projectile') playSound('fire_projectile');
+  else if (w.mode === 'spread') playSound('fire_spread');
+};
 
 // ============================================================================
 // SECTION 6 : Announcer (Web Speech API, ship-AI lines)
@@ -8200,6 +8215,11 @@ function _announcerCurrentRate() {
   if (!announcer.dynamicRate) return announcer.rate;
   const s = (typeof game !== 'undefined' && game && game.state) ? game.state : '';
   switch (s) {
+    // (bugfix 2026-05-19 #182) Port uses 'menu' for the main lobby +
+    // boot screen ; map it to the menu rate (1.05) so the intro
+    // announcement and any boot callouts speak at a calm deliberate
+    // pace instead of falling through to default rate (1.5 = combat).
+    case 'menu':
     case 'select':
     case 'lobby':
     case '':
@@ -8314,5 +8334,3 @@ window.announcerSetVoiceByName = announcerSetVoiceByName;
 window.announcerAudition     = announcerAudition;
 window.ANN                   = ANN;
 window.announceMultikill     = announceMultikill;
-
-}

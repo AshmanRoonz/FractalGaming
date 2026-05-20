@@ -379,8 +379,13 @@ class Bot {
     // (webgpu port) SDF collision is now wired (Phase A), so the v17 AI
     // can run natively. The freeze-when-no-levelBoxes guard previously
     // here is no longer needed.
-    // Bots are locked in place during pre-round warmup.
-    if (game.state === 'warmup') {
+    // Bots are locked in place during warmup / menu / select / matchEnd.
+    // (bugfix 2026-05-19 #182) Previously only 'warmup' froze them, so
+    // when the user reloaded into the main-menu lobby with spawned bots
+    // hanging around, bots would run their AI in the background ; that
+    // triggered ANN.enemyLock / multipleHostiles / ramming callouts
+    // from the lobby and the announcer started rattling at boot.
+    if (game.state !== 'playing') {
       if (this.velocity) this.velocity.set(0, 0, 0);
       return;
     }
@@ -1121,10 +1126,12 @@ class Bot {
     // (port glue) Death SFX. Big spatial explosion clip + a softer kill
     // toast tick if the audio recipe is available.
     try {
+      // 'ship_explode' was a draft name ; the library recipe is 'explosion'
+      // (v17o:53341 routes spawnExplosion to the 'explosion' recipe).
       if (typeof playSpatialSound === 'function') {
-        playSpatialSound('ship_explode', this.position, { volume: 1.0 });
+        playSpatialSound('explosion', this.position, { volume: 1.0 });
       } else if (typeof playSound === 'function') {
-        playSound('ship_explode', { volume: 0.9 });
+        playSound('explosion', { volume: 0.9 });
       }
     } catch (_) {}
   }
