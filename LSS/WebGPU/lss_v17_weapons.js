@@ -160,6 +160,18 @@ class Projectile {
 
     // --- Per-projectile electric arc emitter ---
     this.electricArcTimer = 0.05 + Math.random() * 0.10;
+
+    // (bugfix 2026-05-22 #369) Engine plume reverted entirely. Two
+    // versions of the plume were tried : per-projectile TSL fire
+    // NodeMaterial (laggy due to noise shader × every plume), then a
+    // shared-geometry MeshBasicMaterial version (still laggy, and the
+    // render trap returned with a setIndexBuffer cascade right after
+    // it shipped). Each one degraded perf or stability more than the
+    // visual gain was worth. The base projectile already has core +
+    // glow + haze + ribbon trail which give the rocket-fire read at
+    // far less cost ; revisit plume later via a properly pooled
+    // InstancedMesh + a tested noise material.
+    this.plumeMesh = null;
   }
 
   update(dt) {
@@ -194,8 +206,16 @@ class Projectile {
       this._smokeTrailTimer -= dt;
       const _szM = this.sizeMult || 1.0;
       const _puffR = 5 * _szM;
+      // (bugfix 2026-05-22 #368) Use 'fireball' kind for fire-source
+      // projectiles (PYRO thermite mainly) so the trail palette reads
+      // as flame (orange / red / yellow) instead of the muddy brown
+      // smoke palette. The user reported PYRO's gas+fire looking like
+      // circles ; switching to the fire palette + the new TSL fire
+      // material on splash explosions makes the trail actually read
+      // as burning gas rather than rocks-in-fog.
+      const _puffKind = (this.isFireSource || this.isPyroThermite) ? 'fireball' : 'cloud';
       const _emitPuff = (px, py, pz) => {
-        const puff = spawnFXBurst('cloud', { x: px, y: py, z: pz }, _puffR, 0.65, {
+        const puff = spawnFXBurst(_puffKind, { x: px, y: py, z: pz }, _puffR, 0.65, {
           startScale: 0.4, endScale: 1.6, segs: 12,
         });
         if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) {
@@ -332,6 +352,9 @@ class Projectile {
       const hazePulse = 1 + Math.sin(this.age * 8) * 0.10;
       this.hazeMesh.scale.setScalar(hazePulse * _szM);
     }
+    // (bugfix 2026-05-22 #369) Plume tick removed alongside the
+    // constructor revert above. plumeMesh is permanently null until
+    // the plume is reintroduced via a pooled instanced path.
 
     // --- Tube ribbon trail update with near-camera fade + far-cull early-out ---
     if (this.trailRibbon && this.trailRibbonPositions) {
@@ -762,6 +785,16 @@ class Projectile {
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
       if (this.trailRibbon.material) this.trailRibbon.material.dispose();
     }
+    // (bugfix 2026-05-22 #368, revised) Engine plume disposal. The
+    // geometry is shared (window._sharedPlumeGeo) so DO NOT dispose
+    // it ; only the per-instance MeshBasicMaterial gets disposed.
+    if (this.plumeMesh && this.plumeMesh.parent) {
+      scene.remove(this.plumeMesh);
+      if (this.plumeMesh.material && this.plumeMesh.material.dispose) {
+        try { this.plumeMesh.material.dispose(); } catch (_) {}
+      }
+      this.plumeMesh = null;
+    }
     // (v14g) Hull-clamped impact when projectile destroyed by ship hit.
     let _exPos = this.position;
     let _exSize = this.isPyroThermite ? 22 : 15;
@@ -958,6 +991,18 @@ function fireHitscan(origin, dir, w) {
   if (bestClusterHit && bestClusterDist < bestObstDist) {
     bestObstacle = bestClusterHit;
     bestObstDist = bestClusterDist;
+    // (bugfix 2026-05-21 #366) Diagnostic : confirm hitscan flags a cluster.
+    // Single log per cluster ; drop after the cause is found.
+    if (!bestClusterHit._loggedHitscanSelected) {
+      bestClusterHit._loggedHitscanSelected = true;
+      try {
+        console.warn('[weapons #366] cluster selected as bestObstacle',
+          { dist: bestClusterDist,
+            cnstrName: bestClusterHit.constructor && bestClusterHit.constructor.name,
+            broken: bestClusterHit.broken,
+            alive: bestClusterHit.alive });
+      } catch (_) {}
+    }
   }
 
   // (v14f) PUNCTURE pierces ; damage every ship along the line.
@@ -1622,16 +1667,40 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale) {
   if (len < 1) return;
   const mid = new THREE.Vector3().addVectors(fromVec, toVec).multiplyScalar(0.5);
 
+  // (bugfix 2026-05-22 #371) When the tracer originates near the
+  // player's camera (i.e. from the painted-gun muzzle), parent it to
+  // the camera so it MOVES + ROTATES with the player view during its
+  // lifetime. Without this, the tracer's `from` point stays anchored
+  // in world space while the player strafes/turns, and the long-lived
+  // outer-tail mesh (0.65s) drags as a spaghetti tail behind the gun.
+  // Camera-parented tracers convert from/to into camera-local space
+  // ONCE at spawn ; subsequent player motion moves the parent and
+  // the tracer follows correctly.
+  const isPlayerTracer = (typeof camera !== 'undefined' && camera)
+    && fromVec.distanceTo(camera.position) < 80;
+  let parent = scene;
+  let mid_p = mid;
+  let to_p = toVec;
+  let len_p = len;
+  if (isPlayerTracer) {
+    parent = camera;
+    // worldToLocal mutates ; clone first.
+    mid_p = camera.worldToLocal(mid.clone());
+    to_p  = camera.worldToLocal(toVec.clone());
+    const from_p = camera.worldToLocal(fromVec.clone());
+    len_p = from_p.distanceTo(to_p);
+  }
+
   function _makeShape(geo, matProto, col, opacity, lifetime, type) {
     const m = matProto.clone();
     m.color = new THREE.Color(col);
     m.opacity = opacity;
     const mesh = new THREE.Mesh(geo, m);
-    mesh.position.copy(mid);
-    mesh.lookAt(toVec);
-    mesh.scale.set(widthScale, widthScale, len);
+    mesh.position.copy(mid_p);
+    mesh.lookAt(to_p);
+    mesh.scale.set(widthScale, widthScale, len_p);
     mesh.renderOrder = 1;
-    scene.add(mesh);
+    parent.add(mesh);
     game.effects.push({ mesh, lifetime, age: 0, type });
   }
 

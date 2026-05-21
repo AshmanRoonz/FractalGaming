@@ -575,60 +575,100 @@ function _applyShipPreviewModel(key) {
     } catch (_) {}
     s.modelByKey[key] = modelRoot;
   }
-  // Fit camera dolly to the model's bbox
-  const box = new THREE.Box3().setFromObject(modelRoot);
-  const sz = box.getSize(new THREE.Vector3());
-  const maxDim = Math.max(sz.x, sz.y, sz.z) || 100;
-  const cam = s.camera;
-  cam.position.set(0, maxDim * 0.35, maxDim * 2.2);
-  cam.lookAt(0, 0, 0);
+  // (bugfix 2026-05-22 #367, revised) Wrapper-group spin pivot. The
+  // previous fix that just changed cam.lookAt to box.center was wrong :
+  // as the model rotates around `modelRoot.rotation.y` each frame, the
+  // pivot is `modelRoot.position` in world space ; that point is NOT
+  // the geometric center of the children (it's the cockpit's pre-
+  // computed offset that assumes rotation = faceRotY, which the lobby
+  // resets to 0). So the ship orbits an off-center point and drifts
+  // out of the camera's lookAt position as it spins ; user reads it
+  // as "ship fell off / sank".
+  //
+  // The clean fix : wrap modelRoot in an outer Group at world origin.
+  // Shift modelRoot.position so that the children's geometric center
+  // sits exactly at the wrapper's local origin. Spin the wrapper, NOT
+  // the model ; the children's world center stays put at (0,0,0)
+  // regardless of yaw, and the camera looks at origin reliably.
   modelRoot.rotation.set(0, 0, 0);
+  modelRoot.position.set(0, 0, 0);
   s.yaw = 0;
-  s.scene.add(modelRoot);
-  s.model = modelRoot;
+  modelRoot.updateMatrixWorld(true);
+  // Natural bbox of modelRoot with position=0, rotation=0 ; this is
+  // the children's geometric extent in modelRoot's local frame
+  // (scale already baked in by cockpit).
+  const naturalBox = new THREE.Box3().setFromObject(modelRoot);
+  const naturalCenter = naturalBox.getCenter(new THREE.Vector3());
+  const sz = naturalBox.getSize(new THREE.Vector3());
+  const maxDim = Math.max(sz.x, sz.y, sz.z) || 100;
+  // Offset modelRoot so its children's natural center coincides with
+  // the wrapper's local origin. After this, averaging world positions
+  // of all children gives (0,0,0) inside the wrapper's frame.
+  modelRoot.position.copy(naturalCenter).negate();
+  const wrapper = new THREE.Group();
+  wrapper.add(modelRoot);
+  s.scene.add(wrapper);
+  // Lobby tick reads s.model.rotation.y ; point it at the wrapper so
+  // the per-frame yaw update spins the wrapper instead of modelRoot.
+  s.model = wrapper;
+  const cam = s.camera;
+  cam.position.set(0, maxDim * 0.10, maxDim * 2.2);
+  cam.lookAt(0, 0, 0);
 }
 
 function _animateShipPreview() {
   const s = _shipPreview3D;
   if (!s.renderer || !s.canvas) return;
-  // Skip the render entirely when the tab is hidden or when the ship-select
-  // panel isn't actually on screen. We still rAF so we can resume seamlessly.
-  const sel = document.getElementById('ship-select');
-  const visible = !document.hidden && sel && sel.classList.contains('active');
-  if (!visible) {
-    s.animId = requestAnimationFrame(_animateShipPreview);
-    return;
-  }
-  // Keep the backbuffer in sync with the CSS-sized canvas.
-  const w = s.canvas.clientWidth | 0;
-  const h = s.canvas.clientHeight | 0;
-  if (w > 0 && h > 0) {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
-    if (s.renderer.domElement.width !== wantW || s.renderer.domElement.height !== wantH) {
-      s.renderer.setSize(w, h, false);
-      s.camera.aspect = w / h;
-      s.camera.updateProjectionMatrix();
+  // (bugfix 2026-05-21 #366) Wrap the body in try / finally so an exception
+  // anywhere inside ; the renderer call, the bridge stash, an event handler
+  // queued by mouseup, etc. ; never kills the rAF chain. Earlier the loop
+  // could die silently mid-render and the ship would stop spinning until
+  // the user navigated away + back. That matched the user's "ship stopped
+  // spinning, then I opened devtools" report. Schedule next rAF
+  // unconditionally first ; if anything throws, the next frame still runs.
+  s.animId = requestAnimationFrame(_animateShipPreview);
+  try {
+    // Skip the render entirely when the tab is hidden or when the ship-select
+    // panel isn't actually on screen. We still rAF (already scheduled above)
+    // so we can resume seamlessly.
+    const sel = document.getElementById('ship-select');
+    const visible = !document.hidden && sel && sel.classList.contains('active');
+    if (!visible) return;
+    // Keep the backbuffer in sync with the CSS-sized canvas.
+    const w = s.canvas.clientWidth | 0;
+    const h = s.canvas.clientHeight | 0;
+    if (w > 0 && h > 0) {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
+      if (s.renderer.domElement.width !== wantW || s.renderer.domElement.height !== wantH) {
+        s.renderer.setSize(w, h, false);
+        s.camera.aspect = w / h;
+        s.camera.updateProjectionMatrix();
+      }
+    }
+    const _now = performance.now();
+    const _last = s._lastAnimT || _now;
+    const dt = Math.min(0.1, (_now - _last) / 1000);
+    s._lastAnimT = _now;
+
+    // Gamepad right-stick X
+    const gpX = (typeof input !== 'undefined' && input && input.gpConnected) ? (input.gpLookX || 0) : 0;
+    const userActive = Math.abs(gpX) > 0.01 || s.isMouseDragging;
+    if (Math.abs(gpX) > 0.01) {
+      s.yaw += gpX * s.GAMEPAD_ROT_RATE * dt;
+    }
+    // Auto-rotation continues only while neither input is active
+    if (!userActive) {
+      s.yaw += s.rotationSpeed;
+    }
+    if (s.model) s.model.rotation.y = s.yaw;
+    s.renderer.render(s.scene, s.camera);
+  } catch (e) {
+    if (!s._animErrLogged) {
+      s._animErrLogged = true;
+      try { console.warn('[lobby #366] ship preview animate threw:', e && e.message, e && e.stack); } catch (_) {}
     }
   }
-  const _now = performance.now();
-  const _last = s._lastAnimT || _now;
-  const dt = Math.min(0.1, (_now - _last) / 1000);
-  s._lastAnimT = _now;
-
-  // Gamepad right-stick X
-  const gpX = (typeof input !== 'undefined' && input && input.gpConnected) ? (input.gpLookX || 0) : 0;
-  const userActive = Math.abs(gpX) > 0.01 || s.isMouseDragging;
-  if (Math.abs(gpX) > 0.01) {
-    s.yaw += gpX * s.GAMEPAD_ROT_RATE * dt;
-  }
-  // Auto-rotation continues only while neither input is active
-  if (!userActive) {
-    s.yaw += s.rotationSpeed;
-  }
-  if (s.model) s.model.rotation.y = s.yaw;
-  s.renderer.render(s.scene, s.camera);
-  s.animId = requestAnimationFrame(_animateShipPreview);
 }
 
 function startShipPreviewLoop() {

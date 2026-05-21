@@ -217,13 +217,13 @@ function _disposeOrReleaseEffect(e) {
   // four module-level _TRACER_*_GEO prototypes, so we must NOT call
   // geometry.dispose() on them.
   if (e.type === 'tracer' || e.type === 'tracerTail') {
-    scene.remove(e.mesh);
+    if (e.mesh.parent) e.mesh.parent.remove(e.mesh);
     if (e.mesh.material) e.mesh.material.dispose();
     return;
   }
   // (v11d) Puncture railgun spiral: per-instance geometry AND material
   if (e.type === 'tracerSpiral') {
-    scene.remove(e.mesh);
+    if (e.mesh.parent) e.mesh.parent.remove(e.mesh);
     if (e.mesh.geometry && e.mesh.geometry.dispose) e.mesh.geometry.dispose();
     if (e.mesh.material && e.mesh.material.dispose) e.mesh.material.dispose();
     return;
@@ -231,13 +231,13 @@ function _disposeOrReleaseEffect(e) {
   // Shader-smoke meshes (explosion plumes) share the global _SMOKE_GEO so
   // disposing the geometry would break the next spawn.
   if (e.type === 'shaderSmoke') {
-    scene.remove(e.mesh);
+    if (e.mesh.parent) e.mesh.parent.remove(e.mesh);
     if (e.mesh.material) e.mesh.material.dispose();
     return;
   }
   // (v6.9) Vortex Laser beams share the global _VORTEX_CORE_BEAM_GEO
   if (e.type === 'vortexLaserBeam') {
-    scene.remove(e.mesh);
+    if (e.mesh.parent) e.mesh.parent.remove(e.mesh);
     if (e.mesh.material) e.mesh.material.dispose();
     return;
   }
@@ -264,7 +264,7 @@ function _disposeOrReleaseEffect(e) {
     _releaseExplosionMesh(e.mesh);
     return;
   }
-  scene.remove(e.mesh);
+  if (e.mesh.parent) e.mesh.parent.remove(e.mesh);
   if (e.mesh.geometry) e.mesh.geometry.dispose();
   if (e.mesh.material) e.mesh.material.dispose();
 }
@@ -759,179 +759,30 @@ function spawnImpactSparks(pos, count) {
   // ... Volumetric scorch shaderSmoke puffs (1-2 if count > 3) ...
 }
 
-// ----- 6. LIGHTNING BOLT SYSTEM (v16a Phase P fractal) -----
-const _LIGHTNING_POOL_SIZE = 64; // bumped from 24 ; SLAYER Mega Stun Bolt ~37 bolts/0.6s
-const _lightningPool = [];
-// Shader source globals: _LIGHTNING_VERT_SRC / _LIGHTNING_FRAG_SRC (GLSL - port to TSL)
-function _initLightningPool() {
-  for (let i = 0; i < _LIGHTNING_POOL_SIZE; i++) {
-    const haloMat = new THREE.ShaderMaterial({
-      vertexShader:   _LIGHTNING_VERT_SRC,
-      fragmentShader: _LIGHTNING_FRAG_SRC,
-      uniforms: {
-        uColor:   { value: new THREE.Color(0xffffff) },
-        uOpacity: { value: 0.55 },
-        uTime:    { value: 0 },
-        uIsCore:  { value: 0.0 },
-      },
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    const coreMat = new THREE.ShaderMaterial({
-      vertexShader:   _LIGHTNING_VERT_SRC,
-      fragmentShader: _LIGHTNING_FRAG_SRC,
-      uniforms: {
-        uColor:   { value: new THREE.Color(0xffffff) },
-        uOpacity: { value: 0.95 },
-        uTime:    { value: 0 },
-        uIsCore:  { value: 1.0 },
-      },
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    // Placeholder geometry so the mesh has something to render until first acquire.
-    const placeholderGeom = new THREE.BufferGeometry();
-    placeholderGeom.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 0,0,0, 0,0,0], 3));
-    placeholderGeom.setIndex([0, 1, 2]);
-    const haloMesh = new THREE.Mesh(placeholderGeom, haloMat);
-    const coreMesh = new THREE.Mesh(placeholderGeom, coreMat);
-    haloMesh.visible = false;
-    coreMesh.visible = false;
-    haloMesh.frustumCulled = false;
-    coreMesh.frustumCulled = false;
-    haloMesh.renderOrder = 1;
-    coreMesh.renderOrder = 1;
-    scene.add(haloMesh);
-    scene.add(coreMesh);
-    _lightningPool.push({
-      haloMesh, coreMesh, haloMat, coreMat,
-      _haloGeom: null, _coreGeom: null,
-      free: true,
-    });
-  }
-}
-_initLightningPool();
-let _lightningPoolCursor = 0;
-function _acquireLightningSlot() {
-  for (let i = 0; i < _LIGHTNING_POOL_SIZE; i++) {
-    const idx = (_lightningPoolCursor + i) % _LIGHTNING_POOL_SIZE;
-    const slot = _lightningPool[idx];
-    if (slot.free) {
-      slot.free = false;
-      _lightningPoolCursor = (idx + 1) % _LIGHTNING_POOL_SIZE;
-      return slot;
-    }
-  }
-  return null; // pool exhausted ; the spawn is dropped (rare in practice)
-}
-function _releaseLightningSlot(slot) {
-  if (!slot) return;
-  slot.haloMesh.visible = false;
-  slot.coreMesh.visible = false;
-  // (v16c Phase H) Geometry buffers stay with the slot for the
-  // lifetime of the pool — _buildLightningTubeGeometry's reuseGeom
-  // path overwrites them in place on the next spawn.
-  slot.free = true;
-}
-
-// Legacy dark-lightning pool (Slayer Absorption aura) ; NormalBlending so
-// dark fragments actually paint over bright scene content.
-const _LIGHTNING_CYL_GEO = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
-_LIGHTNING_CYL_GEO.rotateX(Math.PI / 2);
-const _DARK_LIGHTNING_POOL_SIZE = 256;
-const _darkLightningPool = [];
-function _initDarkLightningPool() {
-  for (let i = 0; i < _DARK_LIGHTNING_POOL_SIZE; i++) {
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0x2a0a40, transparent: true, opacity: 0.90,
-      blending: THREE.NormalBlending, depthTest: true, depthWrite: false,
-      side: THREE.DoubleSide, toneMapped: false,
-    });
-    const mesh = new THREE.Mesh(_LIGHTNING_CYL_GEO, mat);
-    mesh.frustumCulled = false;
-    mesh.visible = false;
-    mesh.renderOrder = 2;
-    scene.add(mesh);
-    _darkLightningPool.push({ mesh, mat, free: true });
-  }
-}
-
-// (v16a Phase P) Fractal lightning bolt. Public API unchanged ; body uses
-// recursive-midpoint path generator + custom tube geometry + ShaderMaterial
-// halo+core pair. One mesh-pair per spawn ; geometry rebuilt each spawn.
-function spawnLightningBolt(from, to, color, lifetime, branches, thickness) {
-  color = color || 0x44aaff;
-  lifetime = lifetime || 0.2;
-  branches = Math.min(branches || 3, 4);
-  thickness = thickness || 2;
-  const dist = from.distanceTo(to);
-  if (dist < 5) return;
-
-  const slot = _acquireLightningSlot();
-  if (!slot) return;
-
-  // Subdivision depth scales with bolt length (3..6 range, ~16..96 path points).
-  const depth = Math.max(3, Math.min(6, Math.round(Math.log2(Math.max(2, dist / 30)))));
-  const mainPath = _generateLightningPath(from, to, depth, 0.32);
-  const branchPaths = _generateLightningBranches(mainPath, branches, 0.22);
-  const allPaths = (branchPaths.length > 0) ? [mainPath].concat(branchPaths) : [mainPath];
-
-  // Two tubes : halo (wide, colored) + core (narrow, white).
-  const haloRadius = thickness * 0.5;
-  const coreRadius = Math.max(0.35, thickness * 0.18);
-  const radSegs = (thickness > 4) ? 10 : 8;
-  // Pass slot's existing geometries as reuse targets (Phase H zero-alloc).
-  const haloGeom = _buildLightningTubeGeometry(allPaths, haloRadius, radSegs, slot._haloGeom);
-  const coreGeom = _buildLightningTubeGeometry(allPaths, coreRadius, Math.max(6, radSegs - 2), slot._coreGeom);
-
-  slot._haloGeom = haloGeom;
-  slot._coreGeom = coreGeom;
-  slot.haloMesh.geometry = haloGeom;
-  slot.coreMesh.geometry = coreGeom;
-  slot.haloMat.uniforms.uColor.value.setHex(color);
-  slot.haloMat.uniforms.uOpacity.value = 0.55;
-  slot.haloMat.uniforms.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
-  slot.coreMat.uniforms.uColor.value.setHex(color);
-  slot.coreMat.uniforms.uOpacity.value = 0.95;
-  slot.coreMat.uniforms.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
-  slot.haloMesh.visible = true;
-  slot.coreMesh.visible = true;
-
-  game.effects.push({
-    poolSlot: slot,
-    lifetime: lifetime,
-    age: 0,
-    type: 'lightning',
-    _haloOp0: 0.55,
-    _coreOp0: 0.95,
-  });
-
-  // Dynamic light at the midpoint of the main path.
-  const boltMid = mainPath[Math.floor(mainPath.length / 2)];
-  if (typeof spawnDynamicLight === 'function') spawnDynamicLight(boltMid, color, 2.0, 400, lifetime);
-}
+// ----- 6. LIGHTNING BOLT SYSTEM -----
+// (FX migration #370) Lightning moved to lss_v17_fx_lightning.js. fx.js
+// no longer owns spawnLightningBolt or the pool. The pool that fx.js
+// built was using GLSL ShaderMaterial which the WebGPU port could not
+// honor anyway ; the new module uses MeshBasicMaterial + a hand-built
+// tapered tube. _releaseLightningSlot / _initDarkLightningPool dropped
+// (no callers ; were leftover from v17o pool retire path).
 
 // ----- 7. DYNAMIC LIGHTS + SMOKE-LIGHT PIGGYBACK -----
 // Pool of PointLights for explosions, impacts. NUM_POINT_LIGHTS is pinned
 // to MAX_LIGHTS by keeping all pool lights permanently visible with
 // intensity=0 when idle, avoiding runtime program relinks.
-const dynamicLights = {
-  pool: [],
-  active: [],
-  MAX_LIGHTS: 8,
-};
-(function initDynamicLights() {
-  for (let i = 0; i < dynamicLights.MAX_LIGHTS; i++) {
-    const light = new THREE.PointLight(0xff8800, 0, 600);
-    light.visible = true; // pinned visible ; intensity=0 is the "off" state
-    scene.add(light);
-    dynamicLights.pool.push(light);
-  }
-})();
+// (bugfix 2026-05-22 #369) Reuse the window.dynamicLights pool from
+// webGPU.html instead of building a parallel one. fx.js was constructing
+// its own pool of 8 PointLights at boot and adding them to the scene,
+// running alongside webGPU.html's pool of 8 → 16 idle lights in scene
+// at all times. WebGPU's per-fragment lighting pass scales with light
+// count so doubling N doubled fragment shader cost. By aliasing the
+// fx.js local `dynamicLights` to the window object's pool, the two
+// modules share a single pool of MAX_LIGHTS=4 (cut down per the same
+// fix), and fx.js's spawnDynamicLight below correctly pops from the
+// already-built pool instead of creating duplicates.
+const dynamicLights = (typeof window !== 'undefined' && window.dynamicLights)
+  || { pool: [], active: [], MAX_LIGHTS: 4 };
 
 function spawnDynamicLight(pos, color, intensity, range, duration) {
   const tier = getVRPerfTier();
@@ -950,6 +801,11 @@ function spawnDynamicLight(pos, color, intensity, range, duration) {
   light.intensity = intensity;
   light.distance = range;
   light.position.copy(pos);
+  // (bugfix 2026-05-22 #369) Attach to scene on activation ; mirrors
+  // the same attach/detach lifecycle from webGPU.html's spawnDynamicLight.
+  // Pool lights live OUTSIDE the scene so the WebGPU lighting pass only
+  // counts the active set.
+  if (light.parent !== scene) scene.add(light);
   dynamicLights.active.push({ light, intensity, duration, age: 0 });
   // (v9) Track this flash so the smoke shader can pick it up.
   if (typeof _smokeLightFlashes !== 'undefined') {
@@ -1015,6 +871,9 @@ function updateDynamicLights() {
     entry.age += dt;
     if (entry.age >= entry.duration) {
       entry.light.intensity = 0;
+      // (bugfix 2026-05-22 #369) Detach from scene on recycle so the
+      // lighting pass doesn't keep iterating an idle light.
+      if (entry.light.parent) entry.light.parent.remove(entry.light);
       dynamicLights.pool.push(entry.light);
       dynamicLights.active.splice(i, 1);
     } else {
@@ -1358,39 +1217,5 @@ function updateScreenShake(dt) {
     game.shakeIntensity = 0;
     game.shakeOffset.x = 0;
     game.shakeOffset.y = 0;
-  }
-}
-
-function showDamageIndicator(attackerPos) {
-  if (!attackerPos || !player.position) return;
-  const toAttacker = new THREE.Vector3().subVectors(attackerPos, player.position);
-  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
-  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
-
-  const fDot = forward.dot(toAttacker.clone().normalize());
-  const rDot = right.dot(toAttacker.clone().normalize());
-  const uDot = up.dot(toAttacker.clone().normalize());
-
-  const absR = Math.abs(rDot), absU = Math.abs(uDot), absF = Math.abs(fDot);
-
-  if (fDot < -0.3) game.damageIndicators.bottom = 1.0;
-  if (fDot > 0.3)  game.damageIndicators.top    = 1.0;
-  if (rDot > 0.3)  game.damageIndicators.right  = 1.0;
-  if (rDot < -0.3) game.damageIndicators.left   = 1.0;
-  if (absF > 0.7) {
-    if (rDot > 0.15)  game.damageIndicators.right = Math.max(game.damageIndicators.right, 0.5);
-    if (rDot < -0.15) game.damageIndicators.left  = Math.max(game.damageIndicators.left, 0.5);
-  }
-}
-
-function updateDamageIndicators(dt) {
-  const dirs = ['top', 'bottom', 'left', 'right'];
-  for (const dir of dirs) {
-    if (game.damageIndicators[dir] > 0) {
-      game.damageIndicators[dir] = Math.max(0, game.damageIndicators[dir] - dt * 2.5);
-    }
-    const el = document.getElementById('dmg-' + dir);
-    if (el) el.style.opacity = game.damageIndicators[dir];
   }
 }
