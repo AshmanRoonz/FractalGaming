@@ -1469,6 +1469,10 @@ function buildSettingsPage() {
     }, 'change');
     wire('set-showcase', (el) => {
       try { if (typeof showcase !== 'undefined') showcase.active = el.checked; } catch (_) {}
+      // (bugfix 2026-05-20 #304) Persist the Cinematic Mode preference
+      // so the user's choice survives reloads. Paired with the boot
+      // default in webGPU.html which reads 'lss_showcase' on init.
+      try { localStorage.setItem('lss_showcase', el.checked ? '1' : '0'); } catch (_) {}
     }, 'change');
     wire('set-vol-master', (el) => {
       const v = parseFloat(el.value);

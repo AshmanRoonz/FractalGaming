@@ -149,8 +149,18 @@ function updateParticles(dt) {
     game.particles.length = 0;
     return;
   }
-  // Cap particle count: cull oldest when over budget
-  while (game.particles.length > MAX_PARTICLES) cullOldestParticle();
+  // Cap particle count: cull oldest when over budget.
+  // (bugfix 2026-05-20 #301) Read window.MAX_PARTICLES instead of the
+  // module-local const so applyQualityPreset's per-tier cap actually
+  // takes effect. potato 200 / low 350 / medium 500 / high 700 / ultra
+  // 1000 ; falls back to the module default (500) if the window value
+  // is missing or non-numeric. The pool itself is still sized to 500 at
+  // module load (these const refs at lines 83/102/103/108/112 are
+  // unchangeable), so ultra is effectively capped at 500 by the pool
+  // anyway ; the key win is potato actually getting 200 instead of 500.
+  const _CAP = (typeof window.MAX_PARTICLES === 'number' && window.MAX_PARTICLES > 0)
+    ? window.MAX_PARTICLES : MAX_PARTICLES;
+  while (game.particles.length > _CAP) cullOldestParticle();
 
   const arenaLimit = LSS.ARENA_SIZE;
   // (v16c Phase C) Manual x/y/z math on velocity so POJO-typed

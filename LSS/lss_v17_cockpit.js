@@ -1464,8 +1464,51 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
       // Heat-haze billboard removed in webgpu port (Sprite + getHeatHazeSpriteMat
       // depend on bespoke ShaderMaterials we have not ported yet ; plume scale
       // already conveys thrust).
+      // (bugfix 2026-05-20 #309) Particle-stream layer on top of the cone
+      // so the plume reads as "spewing exhaust" instead of a static neon
+      // cone. Rate scales with throttle ; idle plumes emit zero, full
+      // throttle emits ~14 per second per plume.
+      // (bugfix 2026-05-20 #315) Wrap the spawn in try/catch + parent
+      // chain guard. Without this, plumeless / detached / mid-rebuild
+      // ships could throw during plume.getWorldPosition() and animate-
+      // ShipMesh would bail mid-loop ; webGPU.html catches the throw
+      // silently so the player ship visibly stops animating ("ship
+      // froze, game continued").
+      try {
+        if (plume && plume.parent && mesh && mesh.quaternion &&
+            window.game && window.game.particles && t > 0.05 &&
+            Math.random() < t * 0.30) {
+          const _plumeWorldPos = (plume.userData._tmpWorld = plume.userData._tmpWorld || new THREE.Vector3());
+          plume.getWorldPosition(_plumeWorldPos);
+          const _shipFwd = (mesh.userData._tmpFwd = mesh.userData._tmpFwd || new THREE.Vector3());
+          _shipFwd.set(0, 0, 1).applyQuaternion(mesh.quaternion);
+          const backLen = (plume.userData.basePlumeLength || 30) * 0.45;
+          const px = _plumeWorldPos.x + _shipFwd.x * backLen + (Math.random() - 0.5) * 1.5;
+          const py = _plumeWorldPos.y + _shipFwd.y * backLen + (Math.random() - 0.5) * 1.5;
+          const pz = _plumeWorldPos.z + _shipFwd.z * backLen + (Math.random() - 0.5) * 1.5;
+          const sp = (mesh.userData._lastShipSpeed || 0);
+          const vx = _shipFwd.x * (60 + sp * 0.4) + (Math.random() - 0.5) * 20;
+          const vy = _shipFwd.y * (60 + sp * 0.4) + (Math.random() - 0.5) * 20;
+          const vz = _shipFwd.z * (60 + sp * 0.4) + (Math.random() - 0.5) * 20;
+          const baseCol = (plume.userData.basePlumeColor && plume.userData.basePlumeColor.getHex)
+            ? plume.userData.basePlumeColor.getHex() : 0xffaa55;
+          window.game.particles.push({
+            position: { x: px, y: py, z: pz },
+            velocity: { x: vx, y: vy, z: vz },
+            life: 0.35 + t * 0.30,
+            maxLife: 0.65,
+            color: baseCol,
+            size: 2.2 + t * 1.6,
+          });
+        }
+      } catch (_) { /* skip emit this frame ; never break animateShipMesh */ }
     }
   }
+  // (bugfix 2026-05-20 #309) Cache speed on the mesh so the plume
+  // particle emitter above can use it without re-reading the player
+  // object every frame. Falls back to 0 ; we don't strictly need this
+  // for correctness but it keeps the inner loop branch-free.
+  mesh.userData._lastShipSpeed = speed;
   // Barrel recoil decay (procedural ships only ; GLB models have empty barrels).
   if (mesh.userData.barrelMeshes && mesh.userData.barrelMeshes.length) {
     for (const b of mesh.userData.barrelMeshes) {

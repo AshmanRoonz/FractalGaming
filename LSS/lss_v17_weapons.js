@@ -910,6 +910,55 @@ function fireHitscan(origin, dir, w) {
       bestObstDist = proj;
     }
   }
+  // (bugfix 2026-05-20 #306, hardened in #317) Cluster obstacle hitscan
+  // collision. v17's fireHitscan only walked game.dynamicObjects which
+  // is empty in the WebGPU port (clusters own all rocks), so laser /
+  // gatling / railgun tracers passed straight through asteroids.
+  // The cluster's child mesh is a child of cl.group which has a
+  // tumbling rotation, so child.position is LOCAL ; world position
+  // must come from child.mesh.getWorldPosition() rather than
+  // cl.position + child.position (the latter ignores group rotation,
+  // making aim tests miss the moment the cluster spins even slightly).
+  const _childW = new THREE.Vector3();
+  let bestClusterHit = null, bestClusterDist = Infinity, bestClusterChild = null;
+  if (game.clusters && game.clusters.length) {
+    for (const cl of game.clusters) {
+      if (!cl || !cl.alive || !cl.children || !cl.children.length) continue;
+      if (cl.group) cl.group.updateMatrixWorld(true);
+      const toCl = new THREE.Vector3().subVectors(cl.position, origin);
+      const proj = toCl.dot(aimDir);
+      if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+      const reachR = (cl.clusterScale || 60) * 1.1;
+      const closest = origin.clone().add(aimDir.clone().multiplyScalar(proj));
+      const distSq = closest.distanceToSquared(cl.position);
+      if (distSq > reachR * reachR) continue;
+      for (const c of cl.children) {
+        if (!c.alive || !c.mesh) continue;
+        c.mesh.getWorldPosition(_childW);
+        const toChild = _childW.clone().sub(origin);
+        const childProj = toChild.dot(aimDir);
+        if (childProj < 0 || childProj > Math.min(w.range, levelDist)) continue;
+        const cClosest = origin.clone().add(aimDir.clone().multiplyScalar(childProj));
+        const cdist = cClosest.distanceToSquared(_childW);
+        const cr = (c.scale || 30) * 0.85;
+        if (cdist < cr * cr && childProj < bestClusterDist) {
+          bestClusterHit = cl;
+          bestClusterDist = childProj;
+          bestClusterChild = c;
+        }
+      }
+    }
+  }
+  // If a cluster hit beats the bestObstacle, the beam stops at the
+  // cluster impact and the standard "obstacle blocks shot" branch below
+  // (line ~1069) calls takeDamage + spawns sparks + spawnExplosion.
+  // ClusterObstacle.takeDamage(amount) breaks one alive child via #307.
+  // (#306 originally fired its own impact ; removed to avoid double-fire
+  // since the bestObstacle path already lands the same effects.)
+  if (bestClusterHit && bestClusterDist < bestObstDist) {
+    bestObstacle = bestClusterHit;
+    bestObstDist = bestClusterDist;
+  }
 
   // (v14f) PUNCTURE pierces ; damage every ship along the line.
   const isPiercing = (player.loadoutKey === 'PUNCTURE');
@@ -981,12 +1030,23 @@ function fireHitscan(origin, dir, w) {
     if (bestObstacle) {
       let finalDmg = w.damage * chargeMul;
       if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
-      const dealt = bestObstacle.takeDamage(finalDmg);
-      if (dealt > 0) {
-        player.damageDealt += dealt;
-        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
-      }
       const hitPt = origin.clone().add(aimDir.clone().multiplyScalar(bestObstDist));
+      // (bugfix 2026-05-20 #312) Cluster vs dynamicObject signature
+      // split. Cluster.takeDamage(amount, attacker, projectile) doesn't
+      // return dealt damage ; pass hitPt as projectile.position so #307
+      // picks the closest alive child. Credit damage to player so the
+      // core meter responds.
+      if (bestObstacle.constructor && bestObstacle.constructor.name === 'ClusterObstacle') {
+        bestObstacle.takeDamage(finalDmg, 'player', { position: hitPt });
+        player.damageDealt += finalDmg;
+        player.coreMeter = Math.min(100, player.coreMeter + finalDmg / 100);
+      } else {
+        const dealt = bestObstacle.takeDamage(finalDmg);
+        if (dealt > 0) {
+          player.damageDealt += dealt;
+          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+        }
+      }
       spawnExplosion(hitPt, 8);
       spawnImpactSparks(hitPt, 4);
     }
@@ -1005,13 +1065,21 @@ function fireHitscan(origin, dir, w) {
       }
     }
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
-    const dealt = bestObstacle.takeDamage(finalDmg);
-    if (dealt > 0) {
-      player.damageDealt += dealt;
-      player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
-      showHitMarker();
-    }
     const hitPt = origin.clone().add(aimDir.clone().multiplyScalar(bestObstDist));
+    // (bugfix 2026-05-20 #312) Same split as the pierce branch above.
+    if (bestObstacle.constructor && bestObstacle.constructor.name === 'ClusterObstacle') {
+      bestObstacle.takeDamage(finalDmg, 'player', { position: hitPt });
+      player.damageDealt += finalDmg;
+      player.coreMeter = Math.min(100, player.coreMeter + finalDmg / 100);
+      showHitMarker();
+    } else {
+      const dealt = bestObstacle.takeDamage(finalDmg);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+        showHitMarker();
+      }
+    }
     spawnExplosion(hitPt, 8);
     spawnImpactSparks(hitPt, 4);
     return;
@@ -1153,6 +1221,36 @@ function fireSpread(origin, dir, w) {
         bestObstDist = proj;
       }
     }
+    // (bugfix 2026-05-20 #312, hardened in #317) Cluster collision for
+    // SLAYER spread / shotgun pellets. Use child.mesh.getWorldPosition
+    // (not cl.position + child.position) so the cluster's group rotation
+    // is honored. See #317 in fireHitscan for the same fix.
+    const _pelletChildW = new THREE.Vector3();
+    if (game.clusters && game.clusters.length) {
+      for (const cl of game.clusters) {
+        if (!cl || !cl.alive || !cl.children || !cl.children.length) continue;
+        if (cl.group) cl.group.updateMatrixWorld(true);
+        const reachR = (cl.clusterScale || 60) * 1.1;
+        const toCl = new THREE.Vector3().subVectors(cl.position, origin);
+        const projCl = toCl.dot(spreadDir);
+        if (projCl < 0 || projCl > Math.min(w.range, levelDist)) continue;
+        const closestCl = origin.clone().add(spreadDir.clone().multiplyScalar(projCl));
+        if (closestCl.distanceToSquared(cl.position) > reachR * reachR) continue;
+        for (const c of cl.children) {
+          if (!c.alive || !c.mesh) continue;
+          c.mesh.getWorldPosition(_pelletChildW);
+          const toChild = _pelletChildW.clone().sub(origin);
+          const childProj = toChild.dot(spreadDir);
+          if (childProj < 0 || childProj > Math.min(w.range, levelDist)) continue;
+          const cClosest = origin.clone().add(spreadDir.clone().multiplyScalar(childProj));
+          const cr = (c.scale || 30) * 0.85;
+          if (cClosest.distanceToSquared(_pelletChildW) < cr * cr && childProj < bestObstDist) {
+            bestObst = cl;
+            bestObstDist = childProj;
+          }
+        }
+      }
+    }
 
     let hitBot = false;
     for (const bot of game.entities) {
@@ -1182,13 +1280,28 @@ function fireSpread(origin, dir, w) {
     if (bestObst && !hitBot) {
       const rangeRatio = bestObstDist / w.range;
       const proximityBoost = Math.max(0.3, 1 - rangeRatio * 0.7);
-      const dealt = bestObst.takeDamage(w.damage * proximityBoost);
-      if (dealt > 0) {
-        player.damageDealt += dealt;
-        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
-        showHitMarker();
-        const hitPt = origin.clone().add(spreadDir.clone().multiplyScalar(bestObstDist));
-        spawnImpactSparks(hitPt, 2);
+      const hitPt = origin.clone().add(spreadDir.clone().multiplyScalar(bestObstDist));
+      // (bugfix 2026-05-20 #312) Cluster path : takeDamage(amount, attacker,
+      // projectile) signature ; doesn't return dealt damage, just shatters
+      // one child. Fire the player-facing feedback (sparks, hit marker,
+      // core meter) unconditionally as long as the damage cleared the
+      // threshold (≥ 30, satisfied by every chassis since SLAYER does 200).
+      if (bestObst.constructor && bestObst.constructor.name === 'ClusterObstacle') {
+        try {
+          bestObst.takeDamage(w.damage * proximityBoost, 'player', { position: hitPt });
+          player.damageDealt += w.damage * proximityBoost;
+          player.coreMeter = Math.min(100, player.coreMeter + (w.damage * proximityBoost) / 100);
+          showHitMarker();
+          spawnImpactSparks(hitPt, 4);
+        } catch (_) {}
+      } else {
+        const dealt = bestObst.takeDamage(w.damage * proximityBoost);
+        if (dealt > 0) {
+          player.damageDealt += dealt;
+          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+          showHitMarker();
+          spawnImpactSparks(hitPt, 2);
+        }
       }
     }
   }
