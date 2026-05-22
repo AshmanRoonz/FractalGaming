@@ -7525,34 +7525,34 @@ function _makeGasCloudMaterial(initialColor, baseAlpha, radius) {
       '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
       '  float fres = pow(1.0 - abs(dot(vNormal, viewDir)), 1.6);',
       '  float density = clamp(baseDensity * (1.0 + fres * 0.60), 0.0, 1.0);',
-      // (2026-05-21) Adaptive contrast blend. Color is clamped to LDR
-      // (0-1) and the alpha is premultiplied into the output ; the
-      // material uses CustomBlending below (OneMinusDstColor src +
-      // OneMinusSrcColor dst), which mathematically approximates a
-      // Difference blend : result = src*(1-dst) + dst*(1-src). The
-      // upshot is the cloud appears bright on dark backgrounds
-      // (additive-like glow) and DARK on bright backgrounds
-      // (silhouette / inverse), so the cloud is always readable and
-      // never blows out against the brighter wall presets. Previously
-      // this path pushed colors into super-1.0 HDR and used
-      // AdditiveBlending, which combined with bloom and bright walls
-      // (Slime/Toxin/Ooze/Phasm) washed clouds out.
-      '  vec3 col = clamp(uColor * (0.50 + density * 1.10), 0.0, 1.0);',
+      // (2026-05-21 v2) Screen blend. The earlier Difference blend
+      // (src*(1-dst) + dst*(1-src)) DID solve the washout problem on
+      // bright walls, but mathematically averaged cloud + bg toward
+      // middle gray, so the clouds read as featureless grey fog
+      // instead of colored cloud volumes. Screen blend
+      // (src + dst - src*dst, set up below) behaves like additive on
+      // dark backgrounds (cloud glows bright) but caps smoothly at
+      // 1.0 instead of blowing out into bloom. Preserves cloud hue
+      // and wispy density shape, doesn't blow out on bright walls.
+      // The one remaining failure mode is "same-hue saturated cloud
+      // on same-hue saturated bg" (e.g. green cloud on Slime green
+      // wall) ; pick a contrasting cloud color for those cases.
+      '  vec3 col = clamp(uColor * (0.50 + density * 1.30), 0.0, 1.0);',
       '  float alpha = density * uBaseAlpha;',
       '  if (alpha < 0.05) discard;',
-      // Premultiplied alpha : col already scaled by alpha so the custom
-      // blend math (src*(1-dst) + dst*(1-src)) responds to cloud density
-      // not just cloud presence.
+      // Premultiplied alpha : col already scaled by alpha so the Screen
+      // blend (set up below) responds to cloud density, not cloud presence.
       '  gl_FragColor = vec4(col * alpha, alpha);',
       '}',
     ].join('\n'),
     transparent: true,
-    // (2026-05-21) Adaptive Difference-ish blend ; see the shader
-    // comment above for the rationale. Implemented as CustomBlending
-    // because Three.js has no built-in Difference mode.
+    // (2026-05-21 v2) Screen blend via CustomBlending. Result formula :
+    //   out = src*1 + dst*(1-src) = src + dst - src*dst
+    // Caps smoothly at 1.0 (no blow-out) but preserves cloud color
+    // unlike Difference, which averaged everything toward gray.
     blending: THREE.CustomBlending,
     blendEquation: THREE.AddEquation,
-    blendSrc: THREE.OneMinusDstColorFactor,
+    blendSrc: THREE.OneFactor,
     blendDst: THREE.OneMinusSrcColorFactor,
     blendEquationAlpha: THREE.AddEquation,
     blendSrcAlpha: THREE.OneFactor,
@@ -10229,16 +10229,14 @@ class BillboardCloudSystem {
         uLightStrength: { value: [0, 0, 0, 0, 0, 0, 0, 0] },
       },
       transparent: true,
-      // (2026-05-21) Adaptive Difference-style blend. Same rationale
-      // as _makeGasCloudMaterial : clouds glow bright on dark walls
-      // and appear DARK (inverted) on bright walls so the bright-wall
-      // presets (Slime/Toxin/Ooze/Phasm) don't wash the cloud out.
-      // Approximated by CustomBlending : result = src*(1-dst) + dst*(1-src),
-      // which behaves like a difference blend on most pixels. Premultiplied
-      // alpha is already applied by the fragment shader (lit * a).
+      // (2026-05-21 v2) Screen blend ; matches _makeGasCloudMaterial.
+      // Difference (the earlier attempt) solved the washout but made
+      // clouds read as fog ; Screen behaves like additive on dark
+      // backgrounds (cloud glows) but caps at 1.0 instead of blowing
+      // out, while preserving cloud color and shape.
       blending: THREE.CustomBlending,
       blendEquation: THREE.AddEquation,
-      blendSrc: THREE.OneMinusDstColorFactor,
+      blendSrc: THREE.OneFactor,
       blendDst: THREE.OneMinusSrcColorFactor,
       blendEquationAlpha: THREE.AddEquation,
       blendSrcAlpha: THREE.OneFactor,
