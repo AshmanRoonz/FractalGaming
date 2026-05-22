@@ -13257,28 +13257,28 @@ postFX.compositeMat = new THREE.ShaderMaterial({
         col += rays * rayStrength;
       }
 
-      // (v18L Phase L-G) Generic-emitter god-rays. Same shape as the
-      // shockwave path above but the "emitter" is wherever the bloom RT
-      // happens to be bright. We march from each fragment toward screen
-      // center sampling the bloom RT, then gate the result on the
-      // sample's luminance so only bright pixels (champion field, dash
-      // trails, projectile glows, ship engine plumes) cast shafts ;
-      // mid-tones don't grey out the screen. Five samples per fragment
-      // ; cheap because the bloom RT is already downsampled.
+      // (v18L Phase L-G + cheapen 2026-05-22) Generic-emitter god-rays.
+      // Sample the bloom RT along a radial-to-center vector ; bright bloom
+      // pixels cast shafts through the scene. Reduced from 5 samples to 3
+      // (~40% fewer texel reads) + added an early-out probe so dim regions
+      // skip the full sample march. Reduces baseline GPU load during combat
+      // where the user reported intermittent context loss.
       if (godrayStrength > 0.001) {
         vec2 toCenter = vec2(0.5, 0.5) - vUv;
-        vec3 emRays = vec3(0.0);
-        float emTotal = 0.0;
-        emRays += texture2D(tBloom, vUv + toCenter * 0.091).rgb * 0.833;
-        emRays += texture2D(tBloom, vUv + toCenter * 0.183).rgb * 0.666;
-        emRays += texture2D(tBloom, vUv + toCenter * 0.275).rgb * 0.500;
-        emRays += texture2D(tBloom, vUv + toCenter * 0.366).rgb * 0.333;
-        emRays += texture2D(tBloom, vUv + toCenter * 0.458).rgb * 0.166;
-        emTotal = 0.833 + 0.666 + 0.500 + 0.333 + 0.166;
-        emRays /= emTotal;
-        float emLum = dot(emRays, vec3(0.2126, 0.7152, 0.0722));
-        float emGate = smoothstep(0.18, 0.55, emLum);
-        col += emRays * (godrayStrength * emGate);
+        // Single probe sample to skip the full pass when the bloom along
+        // this fragment's ray is dim. Mid-march point catches most cases.
+        vec3 probe = texture2D(tBloom, vUv + toCenter * 0.25).rgb;
+        float probeLum = dot(probe, vec3(0.2126, 0.7152, 0.0722));
+        if (probeLum > 0.10) {
+          vec3 emRays = vec3(0.0);
+          emRays += texture2D(tBloom, vUv + toCenter * 0.137).rgb * 0.75;
+          emRays += probe * 0.50;
+          emRays += texture2D(tBloom, vUv + toCenter * 0.395).rgb * 0.25;
+          emRays /= 1.50;  // 0.75 + 0.50 + 0.25
+          float emLum = dot(emRays, vec3(0.2126, 0.7152, 0.0722));
+          float emGate = smoothstep(0.18, 0.55, emLum);
+          col += emRays * (godrayStrength * emGate);
+        }
       }
 
       // Exposure
@@ -36864,26 +36864,43 @@ document.addEventListener('pointerlockchange', () => {
 
 document.addEventListener('contextmenu', e => e.preventDefault());
 
+// (v18L 2026-05-22) Resize handler split into an immediate camera/canvas
+// update + a debounced render-target reallocation. Browser fullscreen
+// transitions fire several resize events in rapid succession (intermediate
+// sizes during the animation), and reallocating 4 large render targets per
+// event thrashes VRAM. On some GPU drivers this crashes the GPU process,
+// triggering the in-game context-loss recovery overlay. Now only the FINAL
+// settled size triggers the RT reallocation, ~200ms after resize events stop.
+let _rtResizeTimer = 0;
+function _doPostFXResize() {
+  _rtResizeTimer = 0;
+  if (renderer.xr && renderer.xr.isPresenting) return;
+  try {
+    const _sz = _getBloomRTSize();
+    const w = _sz.w, h = _sz.h;
+    try { postFX.rtScene.setSize(w, h); } catch (_) {}
+    try { postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.rtBlurV.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.blurMat.uniforms.resolution.value.set(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { resizeCineFX(window.innerWidth, window.innerHeight); } catch (_) {}
+  } catch (_) {}
+}
 window.addEventListener('resize', () => {
   // (Ported from v8) When an XR session is active, the headset compositor
   // owns the canvas size and per-eye projection; mutating either mid-session
   // causes flicker and stereo aspect mismatch. Bail.
   if (renderer.xr && renderer.xr.isPresenting) return;
+  // Camera + canvas update is cheap ; do it every event so the scene
+  // continues to render at the right aspect during the transition.
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  // Resize post-processing render targets via the QUALITY-driven helper
-  // so changing the quality tier mid-session will reshape RTs correctly
-  // on the next window resize.
-  const _sz = _getBloomRTSize();
-  const w = _sz.w, h = _sz.h;
-  postFX.rtScene.setSize(w, h);
-  postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2));
-  postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2));
-  postFX.rtBlurV.setSize(Math.floor(w / 2), Math.floor(h / 2));
-  postFX.blurMat.uniforms.resolution.value.set(Math.floor(w / 2), Math.floor(h / 2));
-  // v8VR: keep the EffectComposer (cineFX) sized in lockstep with the canvas.
-  resizeCineFX(window.innerWidth, window.innerHeight);
+  try { renderer.setSize(window.innerWidth, window.innerHeight); } catch (_) {}
+  // RT reallocation is expensive ; debounce so the storm of intermediate
+  // resize events during a fullscreen <-> windowed transition collapses
+  // into one allocation at the final size.
+  if (_rtResizeTimer) clearTimeout(_rtResizeTimer);
+  _rtResizeTimer = setTimeout(_doPostFXResize, 200);
 });
 
 // ---- SETTINGS PAGE ----
