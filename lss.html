@@ -3127,7 +3127,7 @@ const LOADOUTS = {
     // (v9) Slower fire rate (0.6 -> 0.85 sec/shot) and tighter clip (20 -> 12)
     // so the main gun is paced more like a sniper-spotter instead of a chaingun.
     // Each main-gun hit still adds +1 lock to its target (capped at 3).
-    weapon: { name: 'Tracking Bolt', mode: 'projectile', damage: 660, fireRate: 0.85, clipSize: 12, range: 3500, splash: 220, projSpeed: 900, pellets: 1, spinup: 0 },
+    weapon: { name: 'Tracking Bolt', mode: 'projectile', damage: 660, fireRate: 0.85, clipSize: 12, range: 3500, splash: 0, projSpeed: 900, pellets: 1, spinup: 0 },
     abilities: [
       // (v9) Tracker Rockets: no real cooldown. The gating is the lock state:
       // pressing the ability does NOTHING unless at least one ship has a full
@@ -18333,16 +18333,6 @@ class Projectile {
           // pan + occlude + reverb correctly relative to the player.
           if (typeof playSpatialSound === 'function') playSpatialSound('damage', hitPoint.clone(), { refDistance: 220, maxDistance: 4000 });
           else playSound('damage');
-          // (v18L 2026-05-22) Force-field wall ripple at the exact hit
-          // point. Color = projectile trail color so weapon identity
-          // reads in the ripple. Covers every projectile-type wall
-          // impact (Pyro thermite, cluster missiles, Tracker bolts,
-          // tracking missiles, salvo-guided, sonar beacons skip via
-          // their own early-return above).
-          if (typeof spawnWallRipple === 'function') {
-            const _rc = (this.trailColor != null) ? this.trailColor : 0x66ccff;
-            spawnWallRipple(hitPoint, _rc);
-          }
           this.destroy();
           return;
         } else {
@@ -18358,15 +18348,6 @@ class Projectile {
           // their core mesh stripped.
           if (this.mesh) this.mesh.position.copy(this.position);
           spawnImpactSparks(hitPoint, 4);
-          // (v18L 2026-05-22) Force-field wall ripple at the bounce
-          // point too. Slayer shotgun pellets are now fire via fireSpread
-          // (hitscan) instead of bouncing projectiles, so this catches
-          // any remaining bouncing-projectile cases (rare gameplay
-          // paths and any future bouncy weapon).
-          if (typeof spawnWallRipple === 'function') {
-            const _rc = (this.trailColor != null) ? this.trailColor : 0x66ccff;
-            spawnWallRipple(hitPoint, _rc);
-          }
         }
       }
     }
@@ -18663,20 +18644,6 @@ class Projectile {
           player.damageDealt += dealt;
           player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           showHitMarker();
-        }
-        // (v18L 2026-05-22) Tracker main-weapon splash adds a lock mark
-        // to any ship caught in the splash radius, same as the direct-
-        // hit lock-add path in Projectile.update. Falloff-weighted : only
-        // bots in the inner ~70% of the splash radius accrue a lock so
-        // an edge-graze of a wall blast doesn't grant a lock through
-        // tunnels of cover.
-        if (this.isTrackerMain && falloff > 0.30 && this.owner === 'player' && game && game.state === 'playing') {
-          const prevLocks = player.trackerLocks[bot.id] || 0;
-          player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
-          if (player.trackerLocks[bot.id] > prevLocks) {
-            try { playSound('sonar_ping_' + player.trackerLocks[bot.id]); } catch (_) {}
-          }
-          if (player.trackerLocks[bot.id] >= 3) player.trackerLockedTarget = bot;
         }
       }
     }
@@ -29602,13 +29569,6 @@ function fireProjectile(origin, dir, w) {
     // and leaves a small lingering flame at the hit point for 2 seconds.
     proj.isPyroThermite = true;
   }
-  // (v18L 2026-05-22) Tag Tracker main-weapon bolts so the splash damage
-  // path can also acquire a lock on any ship caught by the splash. The
-  // direct-hit lock-add is in Projectile.update ; this flag wires the
-  // splash branch into the same lock system.
-  if (player.loadoutKey === 'TRACKER') {
-    proj.isTrackerMain = true;
-  }
   // Both projectile-mode mains (Pyro Thermite Launcher, Tracker 40mm) get the
   // fading smoke-puff trail and lose the outer haze sphere.
   proj.smokeTrail = true;
@@ -29660,12 +29620,6 @@ function fireSpread(origin, dir, w) {
     // a brief shower of warm-colored sparks reads as a shotgun blast (per the
     // particle-burst pattern in effects_demo.html).
     spawnPelletBurst(origin, spreadDir, levelDist);
-    // (v18L 2026-05-22) Wall ripple for every Slayer pellet that hits a
-    // wall before max range.
-    if (levelDist < w.range && typeof spawnWallRipple === 'function') {
-      const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
-      spawnWallRipple(end, _slCol);
-    }
     if (net.active && net.sendEvent) {
       net.sendEvent({
         type: 'pellet_burst',
@@ -30649,15 +30603,8 @@ function firePowerShot() {
       pelletDir.y += (Math.random() - 0.5) * spreadAngle;
       pelletDir.z += (Math.random() - 0.5) * spreadAngle;
       pelletDir.normalize();
-      // (v18L 2026-05-22) Raycast the wall so the pellet's tracer stops
-      // at the actual wall + the ripple lands at the impact point. Falls
-      // back to max range when no wall is hit.
-      const _pelletWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, pelletDir, range) : range;
-      const pelletEnd = player.position.clone().add(pelletDir.clone().multiplyScalar(_pelletWallDist));
+      const pelletEnd = player.position.clone().add(pelletDir.clone().multiplyScalar(range));
       spawnTracer(player.position, pelletEnd, LSS.CLASS_COLORS.BLASTER);
-      if (_pelletWallDist < range && typeof spawnWallRipple === 'function') {
-        spawnWallRipple(pelletEnd, LSS.CLASS_COLORS.BLASTER);
-      }
       // (v6.7) Broadcast each pellet on the fire_tracer channel.
       if (net.active && net.sendEvent) {
         net.sendEvent({
@@ -30692,15 +30639,9 @@ function firePowerShot() {
   } else {
     // Long-range Charge Shot: precision piercing shot (travels through all enemies)
     const range = 3500;
-    // (v18L 2026-05-22) Raycast for wall hit + spawn ripple. The
-    // piercing shot goes through enemies but still stops at a wall.
-    const _csWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, forward, range) : range;
-    const end = player.position.clone().add(forward.clone().multiplyScalar(_csWallDist));
+    const end = player.position.clone().add(forward.clone().multiplyScalar(range));
     spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
     spawnTracer(player.position.clone().add(new THREE.Vector3(0,2,0)), end.clone().add(new THREE.Vector3(0,2,0)), 0xaaeeff);
-    if (_csWallDist < range && typeof spawnWallRipple === 'function') {
-      spawnWallRipple(end, LSS.CLASS_COLORS.BLASTER);
-    }
     // (v6.7) Broadcast both beams on the fire_tracer channel.
     if (net.active && net.sendEvent) {
       net.sendEvent({
@@ -45079,12 +45020,12 @@ function buildRoomGraphLevel(level) {
       // ripple (see rippleSample below the energy shield material)
       // uses this exact unroll pattern.
       '  vec3 _wrSum = vec3(0.0);',
-      '  { vec4 _h = uWallRippleHits[0]; vec3 _c = uWallRippleColors[0]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
-      '  { vec4 _h = uWallRippleHits[1]; vec3 _c = uWallRippleColors[1]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
-      '  { vec4 _h = uWallRippleHits[2]; vec3 _c = uWallRippleColors[2]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
-      '  { vec4 _h = uWallRippleHits[3]; vec3 _c = uWallRippleColors[3]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
-      '  { vec4 _h = uWallRippleHits[4]; vec3 _c = uWallRippleColors[4]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
-      '  { vec4 _h = uWallRippleHits[5]; vec3 _c = uWallRippleColors[5]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[0]; vec3 _c = uWallRippleColors[0]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 90.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[1]; vec3 _c = uWallRippleColors[1]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 90.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[2]; vec3 _c = uWallRippleColors[2]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 90.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[3]; vec3 _c = uWallRippleColors[3]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 90.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[4]; vec3 _c = uWallRippleColors[4]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 90.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[5]; vec3 _c = uWallRippleColors[5]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 90.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
       '  c += _wrSum * 1.6;',
       '  c = min(c, vec3(6.0));',
       // (v8VR 2026-04-30) uOpacity multiplies the final alpha so the
@@ -45460,7 +45401,7 @@ function buildRoomGraphLevel(level) {
           new THREE.Color(1,1,1), new THREE.Color(1,1,1), new THREE.Color(1,1,1),
         ] },
         uWallRippleMaxAge:    { value: 1.5 },
-        uWallRippleMaxRadius: { value: 280.0 }
+        uWallRippleMaxRadius: { value: 800.0 }
       }
     });
     }  // (v16a Potato) end of else (full ShaderMaterial path)
