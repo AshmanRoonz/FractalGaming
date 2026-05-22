@@ -20597,6 +20597,10 @@ function _ensureZoneColors() {
   // a valid initial selection. loadSettings + applyZoneTheme override
   // this with the persisted value during boot.
   if (typeof game.zoneTheme !== 'string') game.zoneTheme = 'default';
+  // (2026-05-21) Cloud theme default ; same lazy-init pattern. Auto
+  // preserves the rock-derived behavior so existing users see no
+  // change until they pick a different theme.
+  if (typeof game.cloudTheme !== 'string') game.cloudTheme = 'auto';
   return game.zoneColors;
 }
 // Return the obstacle palette with overrides applied. The 5-slot array
@@ -20822,6 +20826,95 @@ function applyZoneTheme(themeName) {
   }
   try { applyZoneColorOverrides(); } catch (_) {}
   try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
+}
+
+// (2026-05-21) Cloud theme system. Cluster atom gas clouds (the wisps
+// around the breakable rocks) used to derive their color directly from
+// the parent rock's baseColor via _smokeColorFromRock(). The cloud
+// theme is a layer above that : when set, it replaces the rock-derived
+// color with a coherent user-chosen palette. Only affects the three
+// CLUSTER gas-cloud spawn sites (atom cloud, detached pocket, basin
+// pool). Gameplay-meaningful clouds like the Pyro thermite green gas
+// are left alone because their color signals an interactable hazard.
+const CLOUD_THEMES = {
+  'auto': {
+    label: 'Auto (inherit from rocks)',
+    kind: 'auto',
+  },
+  'smoke': {
+    label: 'Smoke (soft grays)',
+    kind: 'fixed',
+    colors: [0x7a7a7a, 0x8a8a8a, 0x6a6a6a, 0x959595, 0x707070],
+  },
+  'toxic': {
+    label: 'Toxic (greens)',
+    kind: 'fixed',
+    colors: [0x6acc55, 0x88dd66, 0x4ab83a, 0x70cc88, 0x9adb40],
+  },
+  'plasma': {
+    label: 'Plasma (magenta + cyan)',
+    kind: 'fixed',
+    colors: [0xdd44dd, 0x66ccee, 0xee66bb, 0x88aaff, 0xdd88dd],
+  },
+  'ember': {
+    label: 'Ember (orange + red)',
+    kind: 'fixed',
+    colors: [0xff7733, 0xffaa55, 0xdd5522, 0xff8855, 0xee9944],
+  },
+  'frost': {
+    label: 'Frost (icy blues)',
+    kind: 'fixed',
+    colors: [0xaaccee, 0xccddee, 0x88bbdd, 0xddeeff, 0x99c8e5],
+  },
+  'mystic': {
+    label: 'Mystic (purple + violet)',
+    kind: 'fixed',
+    colors: [0x9966dd, 0xbb88ee, 0x7755bb, 0xaa77dd, 0xcc99ff],
+  },
+  'match-walls': {
+    label: 'Match Wall Theme',
+    kind: 'match-walls',
+  },
+};
+
+// Pick a cloud color for the given parent rock color. Auto theme keeps
+// the existing rock-derived behavior ; fixed themes pick a random color
+// from the theme's palette ; match-walls picks a random color from the
+// currently-active zone wall theme's palette (or the map's palette if
+// the zone theme is 'default'). Returns a THREE.Color.
+function _getEffectiveCloudColor(parentRockColor) {
+  const themeName = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string')
+    ? game.cloudTheme : 'auto';
+  const theme = CLOUD_THEMES[themeName] || CLOUD_THEMES.auto;
+  if (theme.kind === 'fixed' && Array.isArray(theme.colors) && theme.colors.length > 0) {
+    const hex = theme.colors[Math.floor(Math.random() * theme.colors.length)];
+    return new THREE.Color(hex);
+  }
+  if (theme.kind === 'match-walls') {
+    // Pull from the active zone wall theme's resolved palette. We use
+    // ZONE_COLOR_DEFAULTS as the fallback so the dropdown also works
+    // before a level is built. Random pick across the 8 wall slots.
+    const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+    const _palette = [];
+    if (z && Array.isArray(z.walls)) {
+      for (let i = 0; i < z.walls.length; i++) {
+        if (typeof z.walls[i] === 'number') _palette.push(z.walls[i]);
+      }
+    }
+    if (_palette.length === 0) {
+      // Zone theme is 'default' (no overrides) ; pull from defaults.
+      for (let i = 0; i < ZONE_COLOR_DEFAULTS.walls.length; i++) _palette.push(ZONE_COLOR_DEFAULTS.walls[i]);
+    }
+    const hex = _palette[Math.floor(Math.random() * _palette.length)];
+    return new THREE.Color(hex);
+  }
+  // Auto (or unknown theme key) : fall through to rock-derived smoke
+  // color. Preserves the original behavior so this addition is fully
+  // opt-in via the dropdown.
+  if (typeof _smokeColorFromRock === 'function') {
+    return _smokeColorFromRock(parentRockColor);
+  }
+  return new THREE.Color(parentRockColor != null ? parentRockColor : 0x808080);
 }
 
 class DestructibleObstacle {
@@ -21523,7 +21616,11 @@ class ClusterObstacle {
     // than generic gray. Hue preserved, saturation reduced to ~40% of
     // rock, lightness lifted toward smoke. Slight per-cloud jitter on
     // both axes so adjacent atoms don't look uniform.
-    const cloudColor = _smokeColorFromRock(this.baseColor);
+    // (2026-05-21) Routed through the cloud theme system : Auto theme
+    // returns _smokeColorFromRock(rockColor) so this path is unchanged
+    // by default ; other themes (Toxic, Plasma, Ember, etc.) replace
+    // the rock-derived color with a palette pick.
+    const cloudColor = _getEffectiveCloudColor(this.baseColor);
     // (v15a 2026-05-10) Denser cluster smoke. Radius bumped 2.8 → 3.2 so
     // gas envelops the atom more visibly, sprite count 13 → 17 so the
     // body of the cloud reads thicker, alpha up from 0.75 to 0.80.
@@ -22062,7 +22159,9 @@ class ClusterObstacle {
             // since BCS clouds bond via spatial chemistry, not phase tags.
             // (v15a colored smoke) Detached pocket from cluster shatter
             // inherits the parent cluster's baseColor as muted smoke.
-            const _cloudColor = _smokeColorFromRock(this.baseColor);
+            // (2026-05-21) Routed through cloud theme ; Auto preserves
+            // the rock-derived behavior.
+            const _cloudColor = _getEffectiveCloudColor(this.baseColor);
             const _cloud = new GasCloud(billboardCloudSystem, _pos, {
               boundsRadius:   _size,
               spriteScale:    _size * 1.55,
@@ -22375,9 +22474,11 @@ function _spawnBasinClouds() {
       const size = minSize + Math.random() * (maxSize - minSize);
       // (v15a colored smoke) Pool clouds share the nearest-cluster's hue
       // as muted smoke ; otherwise default to off-white.
+      // (2026-05-21) Routed through cloud theme ; Auto preserves the
+      // rock-derived behavior, other themes pick from a palette.
       let color;
       if (basinBaseColor != null) {
-        color = _smokeColorFromRock(basinBaseColor);
+        color = _getEffectiveCloudColor(basinBaseColor);
       } else {
         const v = 0.55 + Math.random() * 0.25;
         color = new THREE.Color(v, v * 0.97, v * 0.92);
@@ -37095,6 +37196,71 @@ function buildSettingsPage() {
     </div>
 
     <div class="settings-section">
+      <h3>Cloud Colors</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Color theme for the gas clouds drifting around cluster rocks. "Auto" inherits each cloud's color from its parent rock (current default). Other themes pick from a fixed palette ; "Match Wall Theme" pulls from the active Zone wall palette. Pyro gameplay clouds keep their identity colors regardless. Changes apply to newly-spawned clouds.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-cloud-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+            const keys = Object.keys(CLOUD_THEMES);
+            let out = '';
+            for (const k of keys) {
+              const t = CLOUD_THEMES[k];
+              const sel = (k === cur) ? ' selected' : '';
+              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
+            }
+            return out;
+          })()}
+        </select>
+      </div>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW</div>
+        <div id="cloud-theme-preview" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+            const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            // For auto / match-walls we don't have a static palette ; show
+            // greyscale fallback for auto, wall-theme colors for match-walls.
+            let palette;
+            if (theme.kind === 'fixed') {
+              palette = theme.colors.slice();
+            } else if (theme.kind === 'match-walls') {
+              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+              palette = [];
+              if (z && Array.isArray(z.walls)) {
+                for (let i = 0; i < z.walls.length; i++) {
+                  if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+                }
+              }
+              if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+            } else {
+              // Auto : show the default obstacle palette as a stand-in,
+              // run through _smokeColorFromRock so the preview reflects
+              // what the cloud will actually look like.
+              palette = [];
+              for (const rockHex of OBSTACLE_COLORS) {
+                const c = (typeof _smokeColorFromRock === 'function')
+                  ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
+                palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
+              }
+            }
+            // Cap preview to 8 swatches max so the row stays compact.
+            if (palette.length > 8) palette = palette.slice(0, 8);
+            let out = '';
+            for (const c of palette) {
+              out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3>Background</h3>
       <div class="setting-row">
         <label>Skybox</label>
@@ -37600,6 +37766,54 @@ function buildSettingsPage() {
       const name = String(e.target.value || 'default');
       try { applyZoneTheme(name); } catch (err) { console.warn('[zone theme] apply failed:', err); }
       _zoneRefreshSwatches();
+    });
+  }
+
+  // (2026-05-21) Cloud theme dropdown. Writes game.cloudTheme, persists
+  // via saveSettings, and refreshes the inline preview row. New clouds
+  // pick from the chosen palette ; existing clouds keep their color.
+  const _cloudRefreshSwatches = () => {
+    const cur = (typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+    const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
+    const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    let palette;
+    if (theme.kind === 'fixed') {
+      palette = theme.colors.slice();
+    } else if (theme.kind === 'match-walls') {
+      const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+      palette = [];
+      if (z && Array.isArray(z.walls)) {
+        for (let i = 0; i < z.walls.length; i++) {
+          if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+        }
+      }
+      if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+    } else {
+      // Auto : show what _smokeColorFromRock makes of the default obstacles.
+      palette = [];
+      for (const rockHex of OBSTACLE_COLORS) {
+        const c = (typeof _smokeColorFromRock === 'function')
+          ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
+        palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
+      }
+    }
+    if (palette.length > 8) palette = palette.slice(0, 8);
+    const host = overlay.querySelector('#cloud-theme-preview');
+    if (host) {
+      let out = '';
+      for (const c of palette) {
+        out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
+      }
+      host.innerHTML = out;
+    }
+  };
+  const cloudSel = overlay.querySelector('#set-cloud-theme');
+  if (cloudSel) {
+    cloudSel.addEventListener('change', e => {
+      const name = String(e.target.value || 'auto');
+      game.cloudTheme = (name in CLOUD_THEMES) ? name : 'auto';
+      try { saveSettings(); } catch (_) {}
+      _cloudRefreshSwatches();
     });
   }
 
@@ -38588,6 +38802,9 @@ function saveSettings() {
       // the colors recompute (especially gradient themes that depend on
       // the new session's map layout).
       zoneTheme:    (typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default',
+      // (2026-05-21) Cloud color theme key. Auto inherits from rocks
+      // (current default) ; other themes pick from a palette.
+      cloudTheme:   (typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto',
       zoneColors:   (function() {
         const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
         if (!z) return undefined;
@@ -40159,6 +40376,12 @@ function loadSettings() {
         applyZoneTheme(_zt);
       } else if (typeof game !== 'undefined' && game) {
         game.zoneTheme = (typeof ZONE_THEMES !== 'undefined' && (_zt in ZONE_THEMES)) ? _zt : 'default';
+      }
+      // (2026-05-21) Cloud theme restore. Independent of zone theme ;
+      // unknown keys fall back to 'auto'.
+      const _ct = (typeof data.cloudTheme === 'string') ? data.cloudTheme : 'auto';
+      if (typeof game !== 'undefined' && game) {
+        game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_ct in CLOUD_THEMES)) ? _ct : 'auto';
       }
     } catch (_) { /* zone color restore is non-fatal */ }
   } catch(e) {}

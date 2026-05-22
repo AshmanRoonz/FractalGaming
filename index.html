@@ -7533,7 +7533,7 @@ function _makeGasCloudMaterial(initialColor, baseAlpha, radius) {
       '  vec3 col = uColor * (0.80 + density * 3.20);',
       '  float alpha = density * uBaseAlpha;',
       // Higher discard threshold so the silhouette breakup is more
-      // aggressive â€” many low-density rim fragments simply vanish.
+      // aggressive — many low-density rim fragments simply vanish.
       '  if (alpha < 0.05) discard;',
       '  gl_FragColor = vec4(col, alpha);',
       '}',
@@ -20561,6 +20561,362 @@ function spawnExplosion(pos, size) {
 const OBSTACLE_SHAPES = ['box', 'diamond', 'cross', 'wedge', 'ring'];
 const OBSTACLE_COLORS = [0x4a6a8a, 0x6a4a7a, 0x3a7a5a, 0x7a5a3a, 0x5a3a6a];
 
+// (2026-05-21) User-configurable zone color overrides. Two parallel
+// arrays of nullable hex values ; null means "use the default for that
+// slot". Persisted across sessions via saveSettings / loadSettings and
+// edited from the Zone Colors section in the settings panel.
+//   walls[i]      : overrides the i-th wall room slot (0..7). Applied
+//                   inside the wall material build path where
+//                   wallRoomBaseHues is derived from the level palette.
+//                   Live updates re-derive the base hues and the
+//                   per-frame hue-drift loop picks them up on its next
+//                   tick (~6 frames). Note: a MULTI_LAYER_PRESETS
+//                   paletteOverride still wins (Matrix, Slime, etc.) ;
+//                   the curated single-color look intentionally locks
+//                   all 8 slots to one hex.
+//   obstacles[i]  : overrides the i-th obstacle/cluster color (0..4).
+//                   Read by _getEffectiveObstacleColors() at obstacle
+//                   spawn time ; existing obstacles keep their assigned
+//                   color until the next round respawn.
+const ZONE_COLOR_DEFAULTS = {
+  walls: [0x1a3050, 0x3a1010, 0x103a10, 0x351828, 0x183520, 0x2a2040, 0x1a4030, 0x402020],
+  obstacles: OBSTACLE_COLORS.slice(),
+};
+function _ensureZoneColors() {
+  if (typeof game === 'undefined' || !game) return null;
+  if (!game.zoneColors || typeof game.zoneColors !== 'object') {
+    game.zoneColors = { walls: [null,null,null,null,null,null,null,null], obstacles: [null,null,null,null,null] };
+  }
+  if (!Array.isArray(game.zoneColors.walls)     || game.zoneColors.walls.length     !== 8) {
+    game.zoneColors.walls     = [null,null,null,null,null,null,null,null];
+  }
+  if (!Array.isArray(game.zoneColors.obstacles) || game.zoneColors.obstacles.length !== 5) {
+    game.zoneColors.obstacles = [null,null,null,null,null];
+  }
+  // (2026-05-21) Default theme key so the settings dropdown always has
+  // a valid initial selection. loadSettings + applyZoneTheme override
+  // this with the persisted value during boot.
+  if (typeof game.zoneTheme !== 'string') game.zoneTheme = 'default';
+  // (2026-05-21) Cloud theme default ; same lazy-init pattern. Auto
+  // preserves the rock-derived behavior so existing users see no
+  // change until they pick a different theme.
+  if (typeof game.cloudTheme !== 'string') game.cloudTheme = 'auto';
+  return game.zoneColors;
+}
+// Return the obstacle palette with overrides applied. The 5-slot array
+// is fresh each call (cheap) ; callers that need stable references
+// should cache locally.
+function _getEffectiveObstacleColors() {
+  const z = _ensureZoneColors();
+  const out = OBSTACLE_COLORS.slice();
+  if (z && z.obstacles) {
+    for (let i = 0; i < out.length; i++) {
+      if (typeof z.obstacles[i] === 'number') out[i] = z.obstacles[i] | 0;
+    }
+  }
+  return out;
+}
+// Return the wall slot i color, falling back to the level's palette
+// (or the global default) when no override is set. Used by the wall
+// material build to seed wallRoomBaseHues, and by the live-update
+// helper to re-seed them after a settings change.
+function _getEffectiveWallSlotColor(i, levelPalette) {
+  const z = _ensureZoneColors();
+  if (z && typeof z.walls[i] === 'number') return z.walls[i] | 0;
+  if (Array.isArray(levelPalette) && levelPalette.length > 0) {
+    return levelPalette[i % levelPalette.length] | 0;
+  }
+  return ZONE_COLOR_DEFAULTS.walls[i % ZONE_COLOR_DEFAULTS.walls.length] | 0;
+}
+// (2026-05-21) Live-update entry point called by the Zone Colors settings
+// UI after the user changes a color picker or theme. Walks the 8 wall slots
+// and re-derives wallRoomBaseHues from the current override + level palette,
+// then immediately pushes the resulting RGB to the wall shader's
+// roomColorsU uniform so the change is visible on the very next frame
+// (rather than waiting up to 6 frames for the hue-drift loop's next tick).
+// No-op outside an active match.
+const _zoneApplyTmpHsl = { h: 0, s: 0, l: 0 };
+const _zoneApplyTmpColor = new THREE.Color();
+function applyZoneColorOverrides() {
+  if (typeof game === 'undefined' || !game || !Array.isArray(game.wallRoomBaseHues)) return;
+  // Resolve the active map's palette so overrides cleanly fall through
+  // to it for any slot the user hasn't touched. Mirrors the lookup in
+  // createMeshFromPositions ; default palette is the same fallback there.
+  const _level = (typeof MAP_DATA !== 'undefined' && game.selectedMap) ? MAP_DATA[game.selectedMap] : null;
+  const _defaultPalette = ZONE_COLOR_DEFAULTS.walls;
+  const _levelPalette = (_level && Array.isArray(_level.palette) && _level.palette.length > 0)
+    ? _level.palette : _defaultPalette;
+  for (let i = 0; i < game.wallRoomBaseHues.length && i < 8; i++) {
+    const slotHex = _getEffectiveWallSlotColor(i, _levelPalette);
+    _zoneApplyTmpColor.setHex(slotHex);
+    _zoneApplyTmpColor.getHSL(_zoneApplyTmpHsl);
+    game.wallRoomBaseHues[i] = { h: _zoneApplyTmpHsl.h, s: _zoneApplyTmpHsl.s, l: _zoneApplyTmpHsl.l };
+  }
+  // Push the new colors straight to the wall shader's uniform so the
+  // change is instant. The per-frame drift loop will overwrite this on
+  // its next tick when the theme is 'default' (drift wanted) ; for
+  // non-default themes the drift loop locks colors to wallRoomBaseHues
+  // (no time offset) so the picked values stay frozen.
+  if (game.levelMaterial && game.levelMaterial.uniforms &&
+      game.levelMaterial.uniforms.roomColorsU) {
+    const colors = game.levelMaterial.uniforms.roomColorsU.value;
+    const boost = game.wallPaletteBoost || 1.0;
+    for (let i = 0; i < colors.length && i < game.wallRoomBaseHues.length; i++) {
+      const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+      _zoneApplyTmpColor.setHSL(base.h, base.s, base.l);
+      colors[i].setRGB(
+        Math.min(1.0, _zoneApplyTmpColor.r * boost),
+        Math.min(1.0, _zoneApplyTmpColor.g * boost),
+        Math.min(1.0, _zoneApplyTmpColor.b * boost)
+      );
+    }
+  }
+}
+
+// (2026-05-21) Zone theme system. Each theme is a coherent visual identity
+// (all greens, all blues, rainbow, dark-to-light gradient, etc.) selected
+// from a dropdown in settings. Themes write directly into game.zoneColors,
+// so the obstacle spawn path + wall material build pick them up via the
+// same _getEffectiveObstacleColors / _getEffectiveWallSlotColor helpers.
+// The per-frame hue-drift loop locks to wallRoomBaseHues (no time offset)
+// when a non-default theme is active, so picked colors stay frozen ;
+// without that lock, the drift was rotating each slot's hue around the
+// full color wheel over ~4 minutes which made themes feel unstable.
+//
+// Two theme kinds:
+//   fixed     : 8 wall colors + 5 obstacle colors are explicit hex values.
+//               Same look on every map.
+//   gradient  : bottom + top hex pair ; per-slot wall color is lerped
+//               from each room's Y position (bottom-Y -> bottom color,
+//               top-Y -> top color) at apply time. Obstacles get a
+//               separate explicit palette since they're scattered, not
+//               positional. Re-applied on level build so the lerp
+//               recomputes against the new map's room layout.
+const ZONE_THEMES = {
+  'default': {
+    label: 'Map Default (animated drift)',
+    kind: 'default',
+  },
+  'verdant': {
+    label: 'Verdant (shades of green)',
+    kind: 'fixed',
+    walls:     [0x0a2010, 0x153020, 0x1f4525, 0x2a5a30, 0x35703a, 0x408548, 0x4d9b58, 0x5ab068],
+    obstacles: [0x2a5a30, 0x408548, 0x5ab068, 0x80c080, 0x1f4525],
+  },
+  'azure': {
+    label: 'Azure (shades of blue)',
+    kind: 'fixed',
+    walls:     [0x081428, 0x0e2040, 0x142c55, 0x1a386a, 0x204480, 0x2655a0, 0x2c66c0, 0x3677d8],
+    obstacles: [0x1a386a, 0x2655a0, 0x3677d8, 0x6090e0, 0x142c55],
+  },
+  'ember': {
+    label: 'Ember (shades of red & orange)',
+    kind: 'fixed',
+    walls:     [0x2a0a05, 0x40180a, 0x55260f, 0x6a3415, 0x80421a, 0x9b521f, 0xb56225, 0xd0762a],
+    obstacles: [0x6a3415, 0x9b521f, 0xd0762a, 0xff9a40, 0x55260f],
+  },
+  'twilight': {
+    label: 'Twilight (shades of purple)',
+    kind: 'fixed',
+    walls:     [0x180a28, 0x251040, 0x301858, 0x3c2070, 0x482888, 0x5530a0, 0x6238b8, 0x7044d0],
+    obstacles: [0x3c2070, 0x5530a0, 0x7044d0, 0xa060e8, 0x301858],
+  },
+  'rainbow': {
+    label: 'Rainbow (full spectrum)',
+    kind: 'fixed',
+    walls:     [0x802020, 0x803c20, 0x806820, 0x308020, 0x208068, 0x206080, 0x202080, 0x602080],
+    obstacles: [0x802020, 0x806820, 0x308020, 0x206080, 0x602080],
+  },
+  'aurora': {
+    label: 'Aurora (teals & magentas)',
+    kind: 'fixed',
+    walls:     [0x0a2030, 0x153a40, 0x205050, 0x2a6a55, 0x408855, 0x6aa05a, 0x8a8a70, 0xb05a90],
+    obstacles: [0x2a6a55, 0x408855, 0x6aa05a, 0xb05a90, 0x205050],
+  },
+  'forest': {
+    label: 'Forest Canopy (green bottom, sky top)',
+    kind: 'gradient',
+    bottom: 0x1a3010,                                  // deep forest green
+    top:    0x2a5080,                                  // sky blue
+    obstacles: [0x1a3010, 0x305020, 0x4a7050, 0x2a4060, 0x2a5080],
+  },
+  'volcanic': {
+    label: 'Volcanic (red bottom, gold top)',
+    kind: 'gradient',
+    bottom: 0x4a1005,                                  // deep crimson
+    top:    0xb0902a,                                  // gold-amber
+    obstacles: [0x4a1005, 0x803020, 0x9a5520, 0xb07020, 0xb0902a],
+  },
+  'abyss': {
+    label: 'Abyss (dark bottom, pale top)',
+    kind: 'gradient',
+    bottom: 0x080a10,                                  // near-black
+    top:    0xccd4e0,                                  // pale gray-blue
+    obstacles: [0x080a10, 0x303440, 0x606878, 0x9098a8, 0xccd4e0],
+  },
+};
+
+// Compute the 8 wall hexes + 5 obstacle hexes for a given theme, given
+// the current map's room data. Returns { walls: number[8], obstacles:
+// number[5] } so callers can either write the result into game.zoneColors
+// (the normal apply path) or just preview it (the settings UI swatches).
+const _zoneThemeTmpRgb = { r: 0, g: 0, b: 0 };
+function _computeZoneThemeColors(themeName) {
+  const theme = ZONE_THEMES[themeName] || ZONE_THEMES.default;
+  const out = { walls: [null,null,null,null,null,null,null,null], obstacles: [null,null,null,null,null] };
+  if (theme.kind === 'default') return out;
+  if (theme.kind === 'fixed') {
+    for (let i = 0; i < 8; i++) out.walls[i]     = (theme.walls && theme.walls[i] != null) ? (theme.walls[i] | 0) : null;
+    for (let i = 0; i < 5; i++) out.obstacles[i] = (theme.obstacles && theme.obstacles[i] != null) ? (theme.obstacles[i] | 0) : null;
+    return out;
+  }
+  if (theme.kind === 'gradient') {
+    const rooms = (typeof game !== 'undefined' && game && Array.isArray(game.sdfRoomData)) ? game.sdfRoomData : null;
+    const bottomC = new THREE.Color(theme.bottom);
+    const topC    = new THREE.Color(theme.top);
+    if (rooms && rooms.length > 0) {
+      // Y-range across the active map's rooms.
+      let minY = Infinity, maxY = -Infinity;
+      for (const r of rooms) { if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y; }
+      const range = Math.max(1, maxY - minY);
+      const tmpC = new THREE.Color();
+      for (let i = 0; i < 8; i++) {
+        if (i < rooms.length) {
+          const t = Math.max(0, Math.min(1, (rooms[i].y - minY) / range));
+          tmpC.copy(bottomC).lerp(topC, t);
+          out.walls[i] = ((Math.round(tmpC.r * 255) << 16) | (Math.round(tmpC.g * 255) << 8) | Math.round(tmpC.b * 255)) | 0;
+        } else {
+          out.walls[i] = bottomC.getHex();
+        }
+      }
+    } else {
+      // No level built yet ; fall back to a Y-uniform lerp over slot index
+      // so the settings-panel preview still has something useful to show.
+      const tmpC = new THREE.Color();
+      for (let i = 0; i < 8; i++) {
+        const t = i / 7;
+        tmpC.copy(bottomC).lerp(topC, t);
+        out.walls[i] = ((Math.round(tmpC.r * 255) << 16) | (Math.round(tmpC.g * 255) << 8) | Math.round(tmpC.b * 255)) | 0;
+      }
+    }
+    for (let i = 0; i < 5; i++) out.obstacles[i] = (theme.obstacles && theme.obstacles[i] != null) ? (theme.obstacles[i] | 0) : null;
+    return out;
+  }
+  return out;
+}
+
+// Apply a theme by key. Writes the computed colors into game.zoneColors,
+// updates game.zoneTheme, pushes the change to the wall shader, and
+// persists the choice. Gradient themes re-apply on level build because
+// their per-slot colors depend on the new map's room positions.
+function applyZoneTheme(themeName) {
+  const key = (themeName in ZONE_THEMES) ? themeName : 'default';
+  if (typeof game === 'undefined' || !game) return;
+  game.zoneTheme = key;
+  const z = _ensureZoneColors();
+  if (!z) return;
+  if (key === 'default') {
+    // Clear all overrides ; map palette + hue drift take over.
+    for (let i = 0; i < 8; i++) z.walls[i]     = null;
+    for (let i = 0; i < 5; i++) z.obstacles[i] = null;
+  } else {
+    const computed = _computeZoneThemeColors(key);
+    for (let i = 0; i < 8; i++) z.walls[i]     = (typeof computed.walls[i]     === 'number') ? computed.walls[i]     : null;
+    for (let i = 0; i < 5; i++) z.obstacles[i] = (typeof computed.obstacles[i] === 'number') ? computed.obstacles[i] : null;
+  }
+  try { applyZoneColorOverrides(); } catch (_) {}
+  try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
+}
+
+// (2026-05-21) Cloud theme system. Cluster atom gas clouds (the wisps
+// around the breakable rocks) used to derive their color directly from
+// the parent rock's baseColor via _smokeColorFromRock(). The cloud
+// theme is a layer above that : when set, it replaces the rock-derived
+// color with a coherent user-chosen palette. Only affects the three
+// CLUSTER gas-cloud spawn sites (atom cloud, detached pocket, basin
+// pool). Gameplay-meaningful clouds like the Pyro thermite green gas
+// are left alone because their color signals an interactable hazard.
+const CLOUD_THEMES = {
+  'auto': {
+    label: 'Auto (inherit from rocks)',
+    kind: 'auto',
+  },
+  'smoke': {
+    label: 'Smoke (soft grays)',
+    kind: 'fixed',
+    colors: [0x7a7a7a, 0x8a8a8a, 0x6a6a6a, 0x959595, 0x707070],
+  },
+  'toxic': {
+    label: 'Toxic (greens)',
+    kind: 'fixed',
+    colors: [0x6acc55, 0x88dd66, 0x4ab83a, 0x70cc88, 0x9adb40],
+  },
+  'plasma': {
+    label: 'Plasma (magenta + cyan)',
+    kind: 'fixed',
+    colors: [0xdd44dd, 0x66ccee, 0xee66bb, 0x88aaff, 0xdd88dd],
+  },
+  'ember': {
+    label: 'Ember (orange + red)',
+    kind: 'fixed',
+    colors: [0xff7733, 0xffaa55, 0xdd5522, 0xff8855, 0xee9944],
+  },
+  'frost': {
+    label: 'Frost (icy blues)',
+    kind: 'fixed',
+    colors: [0xaaccee, 0xccddee, 0x88bbdd, 0xddeeff, 0x99c8e5],
+  },
+  'mystic': {
+    label: 'Mystic (purple + violet)',
+    kind: 'fixed',
+    colors: [0x9966dd, 0xbb88ee, 0x7755bb, 0xaa77dd, 0xcc99ff],
+  },
+  'match-walls': {
+    label: 'Match Wall Theme',
+    kind: 'match-walls',
+  },
+};
+
+// Pick a cloud color for the given parent rock color. Auto theme keeps
+// the existing rock-derived behavior ; fixed themes pick a random color
+// from the theme's palette ; match-walls picks a random color from the
+// currently-active zone wall theme's palette (or the map's palette if
+// the zone theme is 'default'). Returns a THREE.Color.
+function _getEffectiveCloudColor(parentRockColor) {
+  const themeName = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string')
+    ? game.cloudTheme : 'auto';
+  const theme = CLOUD_THEMES[themeName] || CLOUD_THEMES.auto;
+  if (theme.kind === 'fixed' && Array.isArray(theme.colors) && theme.colors.length > 0) {
+    const hex = theme.colors[Math.floor(Math.random() * theme.colors.length)];
+    return new THREE.Color(hex);
+  }
+  if (theme.kind === 'match-walls') {
+    // Pull from the active zone wall theme's resolved palette. We use
+    // ZONE_COLOR_DEFAULTS as the fallback so the dropdown also works
+    // before a level is built. Random pick across the 8 wall slots.
+    const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+    const _palette = [];
+    if (z && Array.isArray(z.walls)) {
+      for (let i = 0; i < z.walls.length; i++) {
+        if (typeof z.walls[i] === 'number') _palette.push(z.walls[i]);
+      }
+    }
+    if (_palette.length === 0) {
+      // Zone theme is 'default' (no overrides) ; pull from defaults.
+      for (let i = 0; i < ZONE_COLOR_DEFAULTS.walls.length; i++) _palette.push(ZONE_COLOR_DEFAULTS.walls[i]);
+    }
+    const hex = _palette[Math.floor(Math.random() * _palette.length)];
+    return new THREE.Color(hex);
+  }
+  // Auto (or unknown theme key) : fall through to rock-derived smoke
+  // color. Preserves the original behavior so this addition is fully
+  // opt-in via the dropdown.
+  if (typeof _smokeColorFromRock === 'function') {
+    return _smokeColorFromRock(parentRockColor);
+  }
+  return new THREE.Color(parentRockColor != null ? parentRockColor : 0x808080);
+}
+
 class DestructibleObstacle {
   constructor(pos, shapeType, scale) {
     this.position = pos.clone();
@@ -20601,8 +20957,13 @@ class DestructibleObstacle {
       Math.random() * Math.PI * 2
     );
 
-    const colorIdx = Math.floor(Math.random() * OBSTACLE_COLORS.length);
-    this.baseColor = OBSTACLE_COLORS[colorIdx];
+    // (2026-05-21) Read the effective obstacle palette so user-set zone
+    // color overrides apply to newly-spawned obstacles. Existing
+    // obstacles keep their baseColor until the round respawns them.
+    const _effObstColors = (typeof _getEffectiveObstacleColors === 'function')
+      ? _getEffectiveObstacleColors() : OBSTACLE_COLORS;
+    const colorIdx = Math.floor(Math.random() * _effObstColors.length);
+    this.baseColor = _effObstColors[colorIdx];
 
     this._buildMesh();
   }
@@ -21023,13 +21384,14 @@ function _makeAtomFractalMaterial(baseColor) {
     uniforms: {
       time:       { value: 0 },
       uBaseColor: { value: new THREE.Color(baseColor) },
-      // (v11d) 0.95 = 5% transparency on cluster rocks ; lets the player
-      // see what's behind a rock when ducking around it without losing
-      // the silhouette. The fragment shader writes gl_FragColor.a = uOpacity
-      // directly, and the material is already transparent: true below.
-      // Override per-instance later (e.g. impact fade, doomed dim) by
-      // poking mesh.material.uniforms.uOpacity.value.
-      uOpacity:   { value: 0.78 },
+      // (2026-05-21) Rocks render fully opaque at user request ; the
+      // earlier 0.78 (22% transparent) "see-through ducking" feature was
+      // removed. The fragment shader still writes gl_FragColor.a = uOpacity
+      // and `transparent: true` is kept on the material so the rockChunk
+      // fade-out path (mesh.material.uniforms.uOpacity.value = 1 - t,
+      // see updateEffects rockChunk branch) keeps working. Cluster rocks
+      // stay at the 1.0 default forever ; only chunks animate it down.
+      uOpacity:   { value: 1.0 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -21215,8 +21577,12 @@ class ClusterObstacle {
         Math.random() * Math.PI * 2,
         Math.random() * Math.PI * 2
       );
-      const colorIdx = Math.floor(Math.random() * OBSTACLE_COLORS.length);
-      this.baseColor = OBSTACLE_COLORS[colorIdx];
+      // (2026-05-21) Pull from the user-overridden obstacle palette so
+      // zone color settings cascade into new cluster spawns.
+      const _effObstColors2 = (typeof _getEffectiveObstacleColors === 'function')
+        ? _getEffectiveObstacleColors() : OBSTACLE_COLORS;
+      const colorIdx = Math.floor(Math.random() * _effObstColors2.length);
+      this.baseColor = _effObstColors2[colorIdx];
     }
     this.children = [];
     if (config && config.children) {
@@ -21250,7 +21616,11 @@ class ClusterObstacle {
     // than generic gray. Hue preserved, saturation reduced to ~40% of
     // rock, lightness lifted toward smoke. Slight per-cloud jitter on
     // both axes so adjacent atoms don't look uniform.
-    const cloudColor = _smokeColorFromRock(this.baseColor);
+    // (2026-05-21) Routed through the cloud theme system : Auto theme
+    // returns _smokeColorFromRock(rockColor) so this path is unchanged
+    // by default ; other themes (Toxic, Plasma, Ember, etc.) replace
+    // the rock-derived color with a palette pick.
+    const cloudColor = _getEffectiveCloudColor(this.baseColor);
     // (v15a 2026-05-10) Denser cluster smoke. Radius bumped 2.8 → 3.2 so
     // gas envelops the atom more visibly, sprite count 13 → 17 so the
     // body of the cloud reads thicker, alpha up from 0.75 to 0.80.
@@ -21789,7 +22159,9 @@ class ClusterObstacle {
             // since BCS clouds bond via spatial chemistry, not phase tags.
             // (v15a colored smoke) Detached pocket from cluster shatter
             // inherits the parent cluster's baseColor as muted smoke.
-            const _cloudColor = _smokeColorFromRock(this.baseColor);
+            // (2026-05-21) Routed through cloud theme ; Auto preserves
+            // the rock-derived behavior.
+            const _cloudColor = _getEffectiveCloudColor(this.baseColor);
             const _cloud = new GasCloud(billboardCloudSystem, _pos, {
               boundsRadius:   _size,
               spriteScale:    _size * 1.55,
@@ -22102,9 +22474,11 @@ function _spawnBasinClouds() {
       const size = minSize + Math.random() * (maxSize - minSize);
       // (v15a colored smoke) Pool clouds share the nearest-cluster's hue
       // as muted smoke ; otherwise default to off-white.
+      // (2026-05-21) Routed through cloud theme ; Auto preserves the
+      // rock-derived behavior, other themes pick from a palette.
       let color;
       if (basinBaseColor != null) {
-        color = _smokeColorFromRock(basinBaseColor);
+        color = _getEffectiveCloudColor(basinBaseColor);
       } else {
         const v = 0.55 + Math.random() * 0.25;
         color = new THREE.Color(v, v * 0.97, v * 0.92);
@@ -36471,9 +36845,9 @@ function _refreshSettingsValues() {
   const fovVal = $('#val-fov');
   if (fovVal) fovVal.textContent = (fov | 0) + '°';
 
-  // Wall pattern + opacity.
+  // Wall pattern + opacity. (2026-05-21) set-wall-black-base checkbox
+  // removed at user request ; pure black base is permanently off now.
   setSel('set-wall-pattern', String(game.wallPattern | 0));
-  setChk('set-wall-black-base', game.wallBlackBase);
   const wallOp = (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0;
   setRange('set-wall-opacity', 'val-wall-opacity', wallOp, 2);
 
@@ -36744,12 +37118,8 @@ function buildSettingsPage() {
           ${WALL_PATTERN_NAMES.map((nm, i) => `<option value="${i}"${(game.wallPattern|0) === i ? ' selected' : ''}>${nm}</option>`).join('')}
         </select>
       </div>
-      <div class="setting-row">
-        <label>Pure Black Base</label>
-        <input type="checkbox" id="set-wall-black-base" ${game.wallBlackBase ? 'checked' : ''}>
-      </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Pure Black Base hides the map's wall geometry (no zone-color tint, no AO/diffuse, no fresnel rim) so only the active pattern reads against pure black. Press P in-game to cycle patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
+        <label style="flex:1;">Press P in-game to cycle wall patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
       </div>
       <div class="setting-row">
         <label>Wall opacity</label>
@@ -36766,6 +37136,128 @@ function buildSettingsPage() {
         <input type="file" id="wall-import-file" accept="application/json,.json" style="display:none;">
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="wall-import-status"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Zone Colors</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Pick a coherent color theme for the wall zones and floating obstacles. "Map Default" uses each map's built-in palette with a slow hue drift ; every other theme locks the colors so what you see is what stays. Gradient themes (Forest, Volcanic, Abyss) lerp by each room's height. Note: wall-pattern presets with a fixed palette (Matrix, Slime, Toxin, Ooze, Phasm) still lock all wall zones to their tint while active.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-zone-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const keys = Object.keys(ZONE_THEMES);
+            let out = '';
+            for (const k of keys) {
+              const t = ZONE_THEMES[k];
+              const sel = (k === cur) ? ' selected' : '';
+              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
+            }
+            return out;
+          })()}
+        </select>
+      </div>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW (walls / obstacles)</div>
+        <div id="zone-theme-preview-walls" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const comp = _computeZoneThemeColors(cur);
+            const defaults = ZONE_COLOR_DEFAULTS.walls;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let out = '';
+            for (let i = 0; i < 8; i++) {
+              const c = (typeof comp.walls[i] === 'number') ? comp.walls[i] : defaults[i];
+              out += '<div style="flex:1; height:30px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Zone ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+        <div id="zone-theme-preview-obst" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const comp = _computeZoneThemeColors(cur);
+            const defaults = ZONE_COLOR_DEFAULTS.obstacles;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let out = '';
+            for (let i = 0; i < 5; i++) {
+              const c = (typeof comp.obstacles[i] === 'number') ? comp.obstacles[i] : defaults[i];
+              out += '<div style="flex:1; height:22px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Obstacle ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+        <div class="setting-row" style="opacity:0.65; font-size:0.8em;">
+          <label style="flex:1;">Wall zones update live. Obstacle changes affect only newly-spawned obstacles (next round respawn).</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Cloud Colors</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Color theme for the gas clouds drifting around cluster rocks. "Auto" inherits each cloud's color from its parent rock (current default). Other themes pick from a fixed palette ; "Match Wall Theme" pulls from the active Zone wall palette. Pyro gameplay clouds keep their identity colors regardless. Changes apply to newly-spawned clouds.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-cloud-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+            const keys = Object.keys(CLOUD_THEMES);
+            let out = '';
+            for (const k of keys) {
+              const t = CLOUD_THEMES[k];
+              const sel = (k === cur) ? ' selected' : '';
+              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
+            }
+            return out;
+          })()}
+        </select>
+      </div>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW</div>
+        <div id="cloud-theme-preview" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+            const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            // For auto / match-walls we don't have a static palette ; show
+            // greyscale fallback for auto, wall-theme colors for match-walls.
+            let palette;
+            if (theme.kind === 'fixed') {
+              palette = theme.colors.slice();
+            } else if (theme.kind === 'match-walls') {
+              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+              palette = [];
+              if (z && Array.isArray(z.walls)) {
+                for (let i = 0; i < z.walls.length; i++) {
+                  if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+                }
+              }
+              if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+            } else {
+              // Auto : show the default obstacle palette as a stand-in,
+              // run through _smokeColorFromRock so the preview reflects
+              // what the cloud will actually look like.
+              palette = [];
+              for (const rockHex of OBSTACLE_COLORS) {
+                const c = (typeof _smokeColorFromRock === 'function')
+                  ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
+                palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
+              }
+            }
+            // Cap preview to 8 swatches max so the row stays compact.
+            if (palette.length > 8) palette = palette.slice(0, 8);
+            let out = '';
+            for (const c of palette) {
+              out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -37160,12 +37652,10 @@ function buildSettingsPage() {
     });
   }
   // Pure Black Base checkbox
-  const blackBaseChk = overlay.querySelector('#set-wall-black-base');
-  if (blackBaseChk) {
-    blackBaseChk.addEventListener('change', e => {
-      setWallBlackBase(!!e.target.checked);
-    });
-  }
+  // (2026-05-21) Pure Black Base toggle removed at user request. The
+  // setWallBlackBase function still exists (call sites in preset apply
+  // and loadSettings restore would otherwise reference an undefined
+  // function), but it now ignores its argument and always forces OFF.
   // (v8VR 2026-04-30) Wall opacity slider. Pushes uOpacity uniform live.
   const wallOpEl = overlay.querySelector('#set-wall-opacity');
   const wallOpVal = overlay.querySelector('#val-wall-opacity');
@@ -37239,6 +37729,91 @@ function buildSettingsPage() {
       }
       // Refresh the panel so the pattern dropdown and slider values update.
       buildSettingsPage();
+    });
+  }
+
+  // (2026-05-21) Zone theme dropdown handler. Selecting a theme calls
+  // applyZoneTheme which writes per-slot colors into game.zoneColors,
+  // pushes them to the wall shader uniform immediately, persists via
+  // saveSettings, and refreshes the preview swatches inline so the
+  // user can see the new colors without scrolling the panel.
+  const _zoneRefreshSwatches = () => {
+    const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+    const comp = _computeZoneThemeColors(cur);
+    const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    const wallsHost = overlay.querySelector('#zone-theme-preview-walls');
+    const obstHost  = overlay.querySelector('#zone-theme-preview-obst');
+    if (wallsHost) {
+      let out = '';
+      for (let i = 0; i < 8; i++) {
+        const c = (typeof comp.walls[i] === 'number') ? comp.walls[i] : ZONE_COLOR_DEFAULTS.walls[i];
+        out += '<div style="flex:1; height:30px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Zone ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+      }
+      wallsHost.innerHTML = out;
+    }
+    if (obstHost) {
+      let out = '';
+      for (let i = 0; i < 5; i++) {
+        const c = (typeof comp.obstacles[i] === 'number') ? comp.obstacles[i] : ZONE_COLOR_DEFAULTS.obstacles[i];
+        out += '<div style="flex:1; height:22px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Obstacle ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+      }
+      obstHost.innerHTML = out;
+    }
+  };
+  const themeSel = overlay.querySelector('#set-zone-theme');
+  if (themeSel) {
+    themeSel.addEventListener('change', e => {
+      const name = String(e.target.value || 'default');
+      try { applyZoneTheme(name); } catch (err) { console.warn('[zone theme] apply failed:', err); }
+      _zoneRefreshSwatches();
+    });
+  }
+
+  // (2026-05-21) Cloud theme dropdown. Writes game.cloudTheme, persists
+  // via saveSettings, and refreshes the inline preview row. New clouds
+  // pick from the chosen palette ; existing clouds keep their color.
+  const _cloudRefreshSwatches = () => {
+    const cur = (typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+    const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
+    const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    let palette;
+    if (theme.kind === 'fixed') {
+      palette = theme.colors.slice();
+    } else if (theme.kind === 'match-walls') {
+      const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+      palette = [];
+      if (z && Array.isArray(z.walls)) {
+        for (let i = 0; i < z.walls.length; i++) {
+          if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+        }
+      }
+      if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+    } else {
+      // Auto : show what _smokeColorFromRock makes of the default obstacles.
+      palette = [];
+      for (const rockHex of OBSTACLE_COLORS) {
+        const c = (typeof _smokeColorFromRock === 'function')
+          ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
+        palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
+      }
+    }
+    if (palette.length > 8) palette = palette.slice(0, 8);
+    const host = overlay.querySelector('#cloud-theme-preview');
+    if (host) {
+      let out = '';
+      for (const c of palette) {
+        out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
+      }
+      host.innerHTML = out;
+    }
+  };
+  const cloudSel = overlay.querySelector('#set-cloud-theme');
+  if (cloudSel) {
+    cloudSel.addEventListener('change', e => {
+      const name = String(e.target.value || 'auto');
+      game.cloudTheme = (name in CLOUD_THEMES) ? name : 'auto';
+      try { saveSettings(); } catch (_) {}
+      _cloudRefreshSwatches();
     });
   }
 
@@ -37932,7 +38507,21 @@ const WALL_PATTERN_NAMES = [
   'Race Glow',          // 29 ; (v13r) triple Plasma FBM tinted neon green ; auto-flips Pure Black Base OFF for the glow look
   'Stone Folds',        // 30 ; (v14) Mandelbox depth-folds * stone texture
   'Tile Track',         // 31 ; (v14) Voronoi cells * brick tile texture
-  'Sheet Metal'         // 32 ; (v14) Kali IFS structure * brushed metal texture
+  'Sheet Metal',        // 32 ; (v14) Kali IFS structure * brushed metal texture
+  // (2026-05-21) Four green-tinted Panel Maze variants exported from
+  // wall_pattern_lab.html. All share the same BG (Panel Maze, lab id 6
+  // -> game id 17) + the same FG2 (Mandelbox Folds multiply, lab id 2
+  // -> game id 4) + a #00ff55 spring-green paletteOverride. The
+  // differences are in the FG1 layer's pattern + per-layer parameters.
+  // The lab exports also carried venturi ridge/valley distortion
+  // settings ; v18's wall shader doesn't ship the venturi uniforms,
+  // so those settings are dropped on import. If venturi gets ported
+  // later, the source values are preserved in the comment block above
+  // each preset entry.
+  'Slime',              // 33 ; Panel Maze + Cyber Datamosh fg + Mandelbox fg2 (green)
+  'Toxin',              // 34 ; Panel Maze + Wave Interference fg + Mandelbox fg2 (green)
+  'Ooze',               // 35 ; Panel Maze + Plasma FBM fg + Mandelbox fg2 (green)
+  'Phasm'               // 36 ; Panel Maze + Holographic Glitch fg + Mandelbox fg2 (green)
 ];
 
 const WALL_PARAM_DEFS = [
@@ -38040,15 +38629,20 @@ function resetWallParams() {
   saveSettings();
 }
 
-// Toggle Pure Black Base mode. When on, the wall draws only the active
-// pattern over black (no dark floor, no zone-color tint, no fresnel, no
-// diffuse/AO, no zone floor) so the map's geometry disappears and only
-// the pattern reads. Live-pushes uBlackBase and persists.
-function setWallBlackBase(on) {
-  game.wallBlackBase = !!on;
+// (2026-05-21) Pure Black Base is permanently disabled at user request.
+// The toggle in settings was removed and this function now ignores its
+// input argument, always forcing the mode OFF. Kept as a function (vs
+// deleted) so existing callers continue to compile: the multi-layer
+// preset apply path (e.g. Race Glow's _blackBase: false hint) still
+// invokes setWallBlackBase, and loadSettings used to call it during
+// state restore. All those calls now converge on the OFF state.
+function setWallBlackBase(_ignored) {
+  game.wallBlackBase = false;
   if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uBlackBase) {
-    game.levelMaterial.uniforms.uBlackBase.value = game.wallBlackBase ? 1 : 0;
+    game.levelMaterial.uniforms.uBlackBase.value = 0;
   }
+  // saveSettings() write still happens so the persisted boolean stays
+  // in sync with the in-memory value (both always false now).
   saveSettings();
 }
 
@@ -38201,6 +38795,21 @@ function saveSettings() {
       // empty string for None. Persisted so the lobby remembers the
       // last chosen preset across reloads.
       mapPreset:    (typeof game.mapPreset === 'string') ? game.mapPreset : '',
+      // (2026-05-21) Zone color overrides + theme key. zoneColors carries
+      // the resolved per-slot hexes (so older code that reads game.zoneColors
+      // directly keeps working) ; zoneTheme is the theme key the user
+      // selected from the dropdown. On load we re-apply the theme so
+      // the colors recompute (especially gradient themes that depend on
+      // the new session's map layout).
+      zoneTheme:    (typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default',
+      // (2026-05-21) Cloud color theme key. Auto inherits from rocks
+      // (current default) ; other themes pick from a palette.
+      cloudTheme:   (typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto',
+      zoneColors:   (function() {
+        const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+        if (!z) return undefined;
+        return { walls: z.walls.slice(), obstacles: z.obstacles.slice() };
+      })(),
     };
     localStorage.setItem('lss_settings', JSON.stringify(data));
   } catch(e) {}
@@ -39736,6 +40345,45 @@ function loadSettings() {
     // match the restored choice. Safe even if the lobby DOM isn't
     // built yet ; _updateSkyUI() guards every getElementById.
     if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
+    // (2026-05-21) Restore zone theme. We also restore zoneColors as a
+    // fallback for older save files (pre-theme schema), but the theme
+    // key takes precedence : applyZoneTheme will recompute the per-slot
+    // colors from the theme definition (especially gradient themes,
+    // whose colors depend on the current map's room positions).
+    try {
+      const _zc = data.zoneColors;
+      if (_zc && typeof _zc === 'object') {
+        const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+        if (z) {
+          if (Array.isArray(_zc.walls)) {
+            for (let i = 0; i < 8; i++) {
+              const v = _zc.walls[i];
+              z.walls[i] = (typeof v === 'number') ? (v | 0) : null;
+            }
+          }
+          if (Array.isArray(_zc.obstacles)) {
+            for (let i = 0; i < 5; i++) {
+              const v = _zc.obstacles[i];
+              z.obstacles[i] = (typeof v === 'number') ? (v | 0) : null;
+            }
+          }
+        }
+      }
+      // Theme key wins ; if set and valid, re-apply so per-slot colors
+      // recompute. Unknown theme keys fall back to 'default'.
+      const _zt = (typeof data.zoneTheme === 'string') ? data.zoneTheme : 'default';
+      if (typeof applyZoneTheme === 'function') {
+        applyZoneTheme(_zt);
+      } else if (typeof game !== 'undefined' && game) {
+        game.zoneTheme = (typeof ZONE_THEMES !== 'undefined' && (_zt in ZONE_THEMES)) ? _zt : 'default';
+      }
+      // (2026-05-21) Cloud theme restore. Independent of zone theme ;
+      // unknown keys fall back to 'auto'.
+      const _ct = (typeof data.cloudTheme === 'string') ? data.cloudTheme : 'auto';
+      if (typeof game !== 'undefined' && game) {
+        game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_ct in CLOUD_THEMES)) ? _ct : 'auto';
+      }
+    } catch (_) { /* zone color restore is non-fatal */ }
   } catch(e) {}
 }
 
@@ -40292,6 +40940,118 @@ const MULTI_LAYER_PRESETS = {
     K_COSMIC_fg2: 0,
     texId: 'metal',
     texBlend: 1, texAlpha: 0.9, texHue: 0.0, texScale: 0.0035, texBrightness: 1.05,
+  },
+  // (2026-05-21) Presets 33-36: four green-tinted (#00ff55) variants on
+  // a Panel Maze base with a Mandelbox multiply layer behind a varying
+  // foreground. Exported from wall_pattern_lab.html ; lab pattern ids
+  // translated to game ids (lab 2 Mandelbox -> game 4 ; lab 6 Panel
+  // Maze -> game 17 ; lab 8 Wave Interference -> game 3 ; lab 9 Plasma
+  // FBM -> game 6 ; lab 11 Holographic Glitch -> game 10 ; lab 15
+  // Cyber Datamosh -> game 15). Lab exports also carried venturi
+  // ridge/valley distortion settings that v18's wall shader doesn't
+  // implement ; those settings are dropped here (would be a no-op even
+  // if included). Source venturi values from lab, in case venturi gets
+  // ported later:
+  //   venturiEnable: true, venturiFreq: 0.05, venturiWarp: 2.45,
+  //   venturiBias: 0.24, venturiSharp: 0.165, venturiRidgeTone: 0.75,
+  //   venturiValleyPop: 2.5
+  //
+  // Index 33: Slime. Cyber Datamosh fg with very low iteration count
+  // and tiny spatial scale gives a fine digital-grain over the Panel
+  // Maze ; reads as bright green static.
+  // (2026-05-21) K_COSMIC values dropped from the original lab export
+  // to compensate for Pure Black Base now being permanently off ; the
+  // wall geometry's AO + diffuse + fresnel now add to brightness,
+  // which combined with the lab-tuned K_COSMIC was pushing highlights
+  // pure white. Originals retained in `K_COSMIC_*_lab` comments below
+  // so the lab-faithful look can be restored if needed:
+  //   K_COSMIC_fg_lab: 2.45, K_COSMIC_fg2_lab: 4.7
+  33: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 15,                                  // Cyber Datamosh (lab 15)
+    fgAlpha: 1.55, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.05,
+    u_iters_fg: 1, u_scale_fg: 0.0006, u_invBase_fg: 10.2,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.0,
+    K_COSMIC_fg: 1.8,                                 // lab: 2.45
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
+  // Index 34: Toxin. Wave Interference fg gives rippling concentric
+  // bands ; combined with the green tint and Mandelbox multiply this
+  // reads as a toxic liquid surface.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 3.8, K_COSMIC_fg2 4.7.
+  34: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 3,                                   // Wave Interference (lab 8)
+    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0.81, fgTime: 0.25,
+    u_iters_fg: 9, u_scale_fg: 0.0043, u_invBase_fg: 10.2,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.91,
+    K_COSMIC_fg: 2.3,                                 // lab: 3.8
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
+  // Index 35: Ooze. Plasma FBM fg gives smooth flowing organic motion ;
+  // the green tint + Mandelbox cell structure reads as viscous oozing
+  // slime trailing down the maze walls.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 6.0, K_COSMIC_fg2 4.7.
+  35: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 6,                                   // Plasma FBM (lab 9)
+    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 1.0, fgTime: 0.45,
+    u_iters_fg: 8, u_scale_fg: 0.0112, u_invBase_fg: 5.5,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 0.62,
+    K_COSMIC_fg: 3.5,                                 // lab: 6.0
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
+  // Index 36: Phasm. Holographic Glitch fg with high alpha + frozen time
+  // (fgTime=0) gives sharp scanline tears that read as a holographic
+  // phantom flickering through the green maze.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 6.0, K_COSMIC_fg2 4.7.
+  36: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 10,                                  // Holographic Glitch (lab 11)
+    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.0,
+    u_iters_fg: 3, u_scale_fg: 0.0168, u_invBase_fg: 9.2,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 3.5,                                 // lab: 6.0
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
 };
 
@@ -43615,7 +44375,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29 || uPattern == 30 || uPattern == 31 || uPattern == 32) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29 || uPattern == 30 || uPattern == 31 || uPattern == 32 || uPattern == 33 || uPattern == 34 || uPattern == 35 || uPattern == 36) {',
       // (v8VR 2026-05-01) Pass a tint to cosmicField for multi-layer
       // composite presets so per-room zoneColor doesn't leak into pattern
       // sampling. The lab uses a single tintColor across the whole
@@ -43744,7 +44504,14 @@ function buildRoomGraphLevel(level) {
       if (i < numRooms) {
         const r = game.sdfRoomData[i];
         roomCentersArr.push(new THREE.Vector3(r.x, r.y, r.z));
-        const slotCol = new THREE.Color(roomPalette[i % roomPalette.length]);
+        // (2026-05-21) Pull the slot color through the zone-color
+        // override helper. When the user has set a custom color for
+        // this slot, it replaces the map's palette[i] entry ; otherwise
+        // we fall through to the map's palette as before.
+        const _slotHex = (typeof _getEffectiveWallSlotColor === 'function')
+          ? _getEffectiveWallSlotColor(i, roomPalette)
+          : roomPalette[i % roomPalette.length];
+        const slotCol = new THREE.Color(_slotHex);
         slotCol.getHSL(_slotHslTmp);
         game.wallRoomBaseHues.push({ h: _slotHslTmp.h, s: _slotHslTmp.s, l: _slotHslTmp.l });
         const startCol = new THREE.Color(
@@ -43769,9 +44536,12 @@ function buildRoomGraphLevel(level) {
     // (v14e) Default to Tile Track (31) instead of pattern 0 so the curated
     // look is what new players see on first load.
     if (typeof game.wallPattern !== 'number') game.wallPattern = 31;
-    // Pure Black Base is on by default: wall geometry hides, only the active
-    // pattern reads against pure black. User can toggle off in Settings.
-    if (typeof game.wallBlackBase !== 'boolean') game.wallBlackBase = true;
+    // (2026-05-21) Pure Black Base is permanently disabled at user
+    // request ; always seed false here so any code path that reads
+    // game.wallBlackBase before the first setWallBlackBase() call sees
+    // the disabled state. The setting toggle was removed from the UI
+    // and setWallBlackBase() now ignores its argument.
+    game.wallBlackBase = false;
     if (!game.wallParams) game.wallParams = {};
     // Pull current values out of the central params table (with defaults) so
     // every uniform has a known starting value.
@@ -43923,7 +44693,10 @@ function buildRoomGraphLevel(level) {
         // this on every settings push regardless, but the initial value
         // ensures correct rendering on the very first frame.
         uPattern:   { value: 21 },
-        uBlackBase: { value: 1 },
+        // (2026-05-21) Pure Black Base permanently off ; initial uniform
+        // value matches game.wallBlackBase = false so no first-frame
+        // flash of black-base rendering before setWallBlackBase fires.
+        uBlackBase: { value: 0 },
         // (v8VR 2026-04-30) Wall opacity. 1.0 = solid (legacy default).
         // Settings -> Wall Pattern -> Wall opacity slider drives this.
         // Honor any value already loaded from settings before the
@@ -44065,6 +44838,18 @@ function buildRoomGraphLevel(level) {
     // Pushing here makes the first frame correct.
     if (typeof pushWallParamsToUniforms === 'function') {
       pushWallParamsToUniforms();
+    }
+
+    // (2026-05-21) Re-apply the zone theme after the wall material is
+    // built. Necessary for gradient themes (Forest, Volcanic, Abyss)
+    // whose per-slot colors are lerped from each room's Y position ;
+    // game.sdfRoomData just changed when the new level was built so
+    // the previous lerp is stale. For fixed-color themes this is a
+    // cheap no-op that re-writes the same values. For 'default' it
+    // clears overrides (already cleared by loadSettings on first boot,
+    // and a no-op on subsequent level builds when no theme is active).
+    if (typeof applyZoneTheme === 'function' && typeof game.zoneTheme === 'string') {
+      try { applyZoneTheme(game.zoneTheme); } catch (_) {}
     }
 
     const mesh = new THREE.Mesh(levelGeo, sdfMat);
@@ -45284,11 +46069,30 @@ function gameLoop(timestamp) {
         ? MULTI_LAYER_PRESETS[game.wallPattern | 0] : null;
       const _paletteOverride = (_activePreset && typeof _activePreset.paletteOverride === 'number')
         ? _activePreset.paletteOverride : null;
+      // (2026-05-21) Zone-theme lock. When the user picked a non-default
+      // theme from settings, freeze the drift so the picked colors stay
+      // exactly as chosen ; without this lock, the drift was rotating
+      // each slot's hue around the full color wheel over ~4 minutes,
+      // which made themes feel inconsistent ("the colors are never the
+      // same after messing with them"). Map Default keeps the drift.
+      const _themeActive = (typeof game.zoneTheme === 'string') && game.zoneTheme !== 'default';
       if (_paletteOverride !== null) {
         // Lock all 8 room slots to the override hex. The hue-drift loop
         // below is skipped while this preset is active.
         for (let i = 0; i < colors.length; i++) {
           colors[i].setHex(_paletteOverride);
+        }
+      } else if (_themeActive) {
+        // Theme is active : lock to wallRoomBaseHues without time offset
+        // so picked colors don't walk around the wheel. wallRoomBaseHues
+        // was set from the theme by applyZoneColorOverrides.
+        for (let i = 0; i < colors.length; i++) {
+          const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+          _wallHueScratchColor.setHSL(base.h, base.s, base.l);
+          const r = Math.min(1.0, _wallHueScratchColor.r * boost);
+          const g = Math.min(1.0, _wallHueScratchColor.g * boost);
+          const b = Math.min(1.0, _wallHueScratchColor.b * boost);
+          colors[i].setRGB(r, g, b);
         }
       } else {
       // Mutating each THREE.Color is fine because Three.js samples the
