@@ -13311,10 +13311,13 @@ postFX.compositeMat = new THREE.ShaderMaterial({
 
       // Kill shutter flash: brief inverse-bloom pulse. First half = dip (neg exposure), second half = bright crack.
       // killFlash is already a decaying curve from 1.0; we shape it with smoothstep peaks.
+      // (v18L 2026-05-22) Kill flash: warm bright lift on kills only.
+      // Previously also did a partial 1-col inversion ; in rapid combat
+      // the overlapping inversions read as a persistent psychedelic
+      // "inverted skybox" wash on dark walls (vec3(0) -> vec3(1)). The
+      // bright warm crack alone is enough to mark kills.
       if (killFlash > 0.001) {
-        float dip = smoothstep(0.55, 1.0, killFlash);       // dark slam at the very top of the curve
         float crack = smoothstep(0.15, 0.9, killFlash);     // bright lift across most of the pulse
-        col = mix(col, 1.0 - col, dip * 0.35);              // partial inversion at peak (inverse-bloom feel)
         col += vec3(1.05, 1.02, 0.95) * crack * 0.35;       // warm bright kick
       }
 
@@ -31430,110 +31433,105 @@ const _thermalFirePerp2 = new THREE.Vector3();
 // in the cone, scale-breathes, and bobs slightly. When Fire Shield turns
 // off, the spheres are hidden ; on ship death / round end the existing
 // thermalFlameMeshes cleanup helper disposes them.
-const _THERMAL_FLAME_COUNT = 7;
-const _thermalFlameTmpFwd  = new THREE.Vector3();
-const _thermalFlameTmpUp   = new THREE.Vector3();
-const _thermalFlameTmpRgt  = new THREE.Vector3();
+// (v18L 2026-05-22 v6) Titanfall Scorch-style fire envelope. A large
+// SPHERE rendered with side=BackSide so the camera inside sees the
+// inner walls covered in fireball-shader flames. From cockpit POV the
+// flames radiate outward from screen center in all directions, matching
+// the Scorch flame-shield look from Titanfall 2. The sphere stays
+// locked to the ship center each frame ; no rotation tracking needed
+// since the geometry is rotationally symmetric.
 function _ensureThermalFlameMeshes(ship, chassis) {
   if (!ship || !chassis) return null;
-  if (ship.thermalFlameMeshes && ship.thermalFlameMeshes.length === _THERMAL_FLAME_COUNT) {
-    return ship.thermalFlameMeshes;
-  }
+  // Skip on lower perf tiers ; the existing hull-hug plasma_red shield
+  // + small particle accent still play.
+  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 2) return null;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return null;
+  if (ship.thermalFlameMesh) return ship.thermalFlameMesh;
   if (typeof _makeFXMaterial !== 'function' || typeof THREE === 'undefined') return null;
   const hLen = chassis.hullLength || 100;
-  const out = [];
-  for (let i = 0; i < _THERMAL_FLAME_COUNT; i++) {
-    // Radius scales with depth along the cone : smaller at base, larger at
-    // tip so the silhouette flares like a flame thrower. Stash baseRadius
-    // so the per-frame breath knows what value to swell around.
-    const u = (i + 0.5) / _THERMAL_FLAME_COUNT; // 0..1
-    const baseRadius = hLen * (0.50 + 0.65 * u); // 50% hull at base, ~115% at tip
-    const mat = _makeFXMaterial('fireball');
-    if (mat.uniforms && mat.uniforms.uPosScale) {
-      mat.uniforms.uPosScale.value = 1.0 / Math.max(1, baseRadius);
-    }
-    if (mat.userData) mat.userData._timeOffset = Math.random() * 10;
-    const geo = new THREE.SphereGeometry(baseRadius, 16, 10);
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.frustumCulled = false; // big displaced sphere ; bounds are unreliable
-    mesh.renderOrder = 1;
-    mesh.visible = false;
-    mesh.userData._tsFX = {
-      phase: Math.random() * Math.PI * 2,
-      freq: 4 + Math.random() * 3,
-      baseRadius,
-      u, // depth along cone
-      perpAngle: i * 2.39996, // golden-angle distribution around the axis
-    };
-    scene.add(mesh);
-    out.push(mesh);
+  // Sphere radius : about 1.0 hull lengths so the sphere envelops the
+  // ship hull + cockpit view. Big enough to fill the screen from inside,
+  // small enough not to read as an obvious orb from outside.
+  const radius = hLen * 1.10;
+  const geo = new THREE.SphereGeometry(radius, 32, 24);
+  const mat = _makeFXMaterial('fireball');
+  if (mat.uniforms && mat.uniforms.uPosScale) {
+    mat.uniforms.uPosScale.value = 1.0 / Math.max(1, radius);
   }
-  ship.thermalFlameMeshes = out;
-  return out;
+  if (mat.userData) mat.userData._timeOffset = Math.random() * 10;
+  // Hot red identity matching Pyro Fire Shield.
+  if (mat.uniforms && mat.uniforms.uBaseColor && mat.uniforms.uBaseColor.value) {
+    try { mat.uniforms.uBaseColor.value.setHex(0xff3322); } catch (_) {}
+  }
+  // Brighter than default so the inner walls read strongly against
+  // close-camera view.
+  if (mat.uniforms && mat.uniforms.uBrightness) {
+    mat.uniforms.uBrightness.value = 2.8;
+  }
+  // DoubleSide so BOTH the local Pyro (camera inside the sphere sees
+  // inner walls) AND any peer/spectator (camera outside the sphere sees
+  // the front face wrapping the ship) get the flame envelope. BackSide
+  // alone would render only the inner walls, leaving peers seeing the
+  // Pyro almost uncovered. DoubleSide pays a small cost for the back-
+  // face render from outside view but the result is the ship wrapped
+  // in a fireball for everyone watching.
+  mat.side = THREE.DoubleSide;
+  // depthWrite false so the sphere doesn't occlude the cockpit / ship
+  // body it surrounds.
+  mat.depthWrite = false;
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 2;  // composite over walls + ships
+  mesh.visible = false;
+  scene.add(mesh);
+  ship.thermalFlameMesh = mesh;
+  return mesh;
 }
 function _updateThermalShieldFlameSpheres(ship, shipPos, shipQuat, chassis, dt) {
   if (!ship || !shipPos || !chassis) return;
-  const meshes = _ensureThermalFlameMeshes(ship, chassis);
-  if (!meshes) return;
-  const hLen = chassis.hullLength || 100;
-  const reach      = hLen * 2.6;
-  const baseRadius = hLen * 0.75;
-  const tipRadius  = hLen * 1.70;
-  // Build cone basis from ship quaternion (or default -Z if missing).
-  _thermalFlameTmpFwd.set(0, 0, -1);
-  if (shipQuat) _thermalFlameTmpFwd.applyQuaternion(shipQuat);
-  if (Math.abs(_thermalFlameTmpFwd.y) < 0.95) {
-    _thermalFlameTmpRgt.set(0, 1, 0).cross(_thermalFlameTmpFwd);
-  } else {
-    _thermalFlameTmpRgt.set(1, 0, 0).cross(_thermalFlameTmpFwd);
-  }
-  _thermalFlameTmpRgt.normalize();
-  _thermalFlameTmpUp.crossVectors(_thermalFlameTmpFwd, _thermalFlameTmpRgt).normalize();
+  const mesh = _ensureThermalFlameMeshes(ship, chassis);
+  if (!mesh) return;
+  // Lock the sphere to the ship's center. No rotation needed (sphere is
+  // rotationally symmetric). Breathe the scale slightly so the envelope
+  // visibly churns + adds to the flame motion that the fireball preset's
+  // displacement already produces.
   const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
-  for (let i = 0; i < meshes.length; i++) {
-    const m = meshes[i];
-    const fx = m.userData._tsFX;
-    // Position : depth along forward + perpendicular offset for fanning
-    // shape. The perpAngle is fixed per mesh + golden-angle stepped so
-    // the 7 spheres tile the cone cross-section evenly without lining up.
-    const along = fx.u * reach;
-    const coneR = baseRadius + (tipRadius - baseRadius) * fx.u;
-    // Small radial drift over time so the cone visibly churns instead of
-    // sitting frozen. Stays within ~40% of coneR so all spheres remain
-    // inside the burn cone.
-    const driftAng = fx.perpAngle + t * (fx.freq * 0.4);
-    const driftR   = coneR * (0.20 + 0.20 * Math.sin(t * (fx.freq * 0.7) + fx.phase));
-    const lat1 = Math.cos(driftAng) * driftR;
-    const lat2 = Math.sin(driftAng) * driftR;
-    m.position.set(
-      shipPos.x + _thermalFlameTmpFwd.x * along + _thermalFlameTmpRgt.x * lat1 + _thermalFlameTmpUp.x * lat2,
-      shipPos.y + _thermalFlameTmpFwd.y * along + _thermalFlameTmpRgt.y * lat1 + _thermalFlameTmpUp.y * lat2,
-      shipPos.z + _thermalFlameTmpFwd.z * along + _thermalFlameTmpRgt.z * lat1 + _thermalFlameTmpUp.z * lat2
-    );
-    // Breath scale + slight rotation so each sphere visibly churns.
-    const breath = 1 + 0.18 * Math.sin(t * fx.freq + fx.phase);
-    m.scale.setScalar(breath);
-    m.rotation.x = (m.rotation.x + dt * (0.4 + fx.freq * 0.05)) % (Math.PI * 2);
-    m.rotation.y = (m.rotation.y + dt * (0.3 + fx.freq * 0.03)) % (Math.PI * 2);
-    m.visible = true;
-  }
+  const breath = 1 + 0.08 * Math.sin(t * 4.5);
+  mesh.position.set(shipPos.x, shipPos.y, shipPos.z);
+  mesh.scale.setScalar(breath);
+  mesh.rotation.y = (mesh.rotation.y + dt * 0.6) % (Math.PI * 2);
+  mesh.rotation.x = (mesh.rotation.x + dt * 0.4) % (Math.PI * 2);
+  mesh.visible = true;
 }
 function _hideThermalShieldFlameSpheres(ship) {
-  if (!ship || !ship.thermalFlameMeshes) return;
-  for (const m of ship.thermalFlameMeshes) {
-    if (m) m.visible = false;
+  if (!ship) return;
+  if (ship.thermalFlameMesh) ship.thermalFlameMesh.visible = false;
+  // Legacy fallback : the previous sphere-array system kept meshes in
+  // ship.thermalFlameMeshes. Tolerate old shape so a hot-reload doesn't
+  // strand visible spheres.
+  if (ship.thermalFlameMeshes) {
+    for (const m of ship.thermalFlameMeshes) { if (m) m.visible = false; }
   }
 }
 function _disposeThermalShieldFlameSpheres(ship) {
-  if (!ship || !ship.thermalFlameMeshes) return;
-  for (const m of ship.thermalFlameMeshes) {
-    if (m) {
-      if (m.parent) scene.remove(m);
-      if (m.geometry) m.geometry.dispose();
-      if (m.material && m.material.dispose) m.material.dispose();
-    }
+  if (!ship) return;
+  if (ship.thermalFlameMesh) {
+    const m = ship.thermalFlameMesh;
+    if (m.parent) scene.remove(m);
+    if (m.geometry) m.geometry.dispose();
+    if (m.material && m.material.dispose) m.material.dispose();
+    ship.thermalFlameMesh = null;
   }
-  ship.thermalFlameMeshes = null;
+  if (ship.thermalFlameMeshes) {
+    for (const m of ship.thermalFlameMeshes) {
+      if (m) {
+        if (m.parent) scene.remove(m);
+        if (m.geometry) m.geometry.dispose();
+        if (m.material && m.material.dispose) m.material.dispose();
+      }
+    }
+    ship.thermalFlameMeshes = null;
+  }
 }
 window._updateThermalShieldFlameSpheres = _updateThermalShieldFlameSpheres;
 window._hideThermalShieldFlameSpheres   = _hideThermalShieldFlameSpheres;
@@ -31559,12 +31557,10 @@ function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
   }
   _thermalFirePerp1.normalize();
   _thermalFirePerp2.crossVectors(_thermalFireForward, _thermalFirePerp1).normalize();
-  // (v18L 2026-05-22 v2) Particle storm replaced by persistent LayeredFX
-  // flame spheres (see _updateThermalShieldFlameSpheres). Particles
-  // remain as light accent sparkle on top of the spheres ; dropped
-  // from 520/sec back to 90/sec so they read as embers / heat shimmer
-  // rather than as the primary visual.
-  const expected = 90 * dt;
+  // (v18L 2026-05-22 perf) Cone accent particles further trimmed to
+  // 50/sec ; the 5 flame spheres carry the cone silhouette so accent
+  // particles just need to add sparkle, not fill in volume.
+  const expected = 50 * dt;
   let toSpawn = Math.floor(expected);
   if (Math.random() < (expected - toSpawn)) toSpawn += 1;
   // Hot-to-cool palette : white-yellow cores fade through orange to
@@ -32005,7 +32001,7 @@ const _FIRE_DOT_PARTICLE_PALETTE = [
 ];
 function _tickFireDOTs(dt) {
   if (!game || !game.entities) return;
-  const particlesPerSec = 25;
+  const particlesPerSec = 10;  // (v18L perf) dropped from 25
   for (let bi = 0; bi < game.entities.length; bi++) {
     const bot = game.entities[bi];
     if (!bot || !bot.alive || !bot.position) continue;
@@ -42305,85 +42301,35 @@ class StasisField {
     this.core.renderOrder = 1;
     this.group.add(this.core);
 
-    // (v18L 2026-05-22) Rings now CHAMPION-ONLY. Regular stasis fields
-    // are a lone orb (no rings) so they read as simple pickups ; the
-    // champion field keeps three orbiting fireball rings + the beacon
-    // shaft for its singular-prize identity.
+    // (v18L 2026-05-22) Champion field frills (rings + outer beacon +
+    // white inner core) stripped. Only a SINGLE thin fireball_purple
+    // beam is restored on champion fields — the user wants the beam
+    // for finish-line visibility but much thinner than v18L's original
+    // double-cylinder design. update() rescales width per-frame so the
+    // beam stays readable at distance, but at a much smaller cap than
+    // before.
     if (this.championMode) {
-      // (v18L Phase L-B2 / leak fix v2) Rings use the LayeredFX fireball
-      // preset family for the "electric fire" energy look. Three separate
-      // _makeFXMaterial calls (no .clone()) so each ring is independently
-      // registered with _layeredFXTick and animates on its own phase.
-      // Tessellation dialed back to 14x48 (from 18x64) and the geometry
-      // is shared across all stasis fields via _SHARED_STASIS_GEO so the
-      // per-spawn geometry alloc + the leak window on destroy both shrink.
-      const ringGeo = _getSharedStasisRingGeo(this.championMode);
-      const ringPreset = 'fireball_purple';
-      const _ringPosScale = 1.0 / Math.max(8, ringRadius);
-      const _makeRingMat = () => {
-        const m = _makeFXMaterial(ringPreset);
-        if (m.uniforms && m.uniforms.uPosScale)  m.uniforms.uPosScale.value = _ringPosScale;
-        if (m.userData) m.userData._timeOffset = Math.random() * 10;
-        return m;
-      };
-      this.ring = new THREE.Mesh(ringGeo, _makeRingMat());
-      this.ring.renderOrder = 1;
-      this.ring.frustumCulled = false;       // fireball displacement can spike past torus bounds
-      this.group.add(this.ring);
-
-      const ring2 = new THREE.Mesh(ringGeo, _makeRingMat());
-      ring2.rotation.x = Math.PI / 2;
-      ring2.renderOrder = 1;
-      ring2.frustumCulled = false;
-      this.ring2 = ring2;
-      this.group.add(ring2);
-
-      // (v6.9) Champion fields get a third ring rotated on the third axis
-      // for the bigger silhouette.
-      const ring3 = new THREE.Mesh(ringGeo, _makeRingMat());
-      ring3.rotation.z = Math.PI / 2;
-      ring3.rotation.x = Math.PI / 4;
-      ring3.renderOrder = 1;
-      ring3.frustumCulled = false;
-      this.ring3 = ring3;
-      this.group.add(ring3);
-
-      // (v13r-3) Tall vertical beacon column so the finish is visible
-      // from any distance, including across-province races. The column
-      // is purely visual : 8000 units tall (covers any sane race scale).
-      // Width scales per-frame in update(dt) so far-away distances still
-      // subtend a readable angle on screen.
-      // (v18L Phase L-B2 / leak fix v2) Outer beacon uses fireball_purple
-      // for the electric-fire shaft look. Inner beaconCore stays solid
-      // white (hot heart). Cylinder tessellation dialed back to 18x3
-      // (from 24x8) and shared so champion respawns reuse one geometry.
+      // (v18L 2026-05-22 v2) Beam is a CLEAN THIN solid cylinder, not a
+      // LayeredFX fireball. The fireball preset's displacement +
+      // multi-layer noise was making the beam read as a giant chunky
+      // purple cloud at close range instead of a clean pole through
+      // the orb. Plain MeshBasicMaterial with additive blending gives
+      // a sharp narrow line that reads as a beacon pole, while the
+      // orb keeps its full fireball energy ball look.
       const beaconGeo = _getSharedStasisBeaconGeo();
-      const beaconMat = _makeFXMaterial('fireball_purple');
-      if (beaconMat.uniforms && beaconMat.uniforms.uPosScale) {
-        // Sample the noise at a column-scale frequency : the cylinder is
-        // 1 unit radius x 8000 tall (in object space), scaled per-frame.
-        // Setting uPosScale to ~1/200 puts the noise features at a
-        // readable scale along the column.
-        beaconMat.uniforms.uPosScale.value = 1.0 / 200.0;
-      }
-      if (beaconMat.userData) beaconMat.userData._timeOffset = Math.random() * 10;
-      // Need DoubleSide so the inside of the tube reads from any angle.
-      beaconMat.side = THREE.DoubleSide;
+      const beaconMat = new THREE.MeshBasicMaterial({
+        color: 0xcc66ff,
+        transparent: true,
+        opacity: 0.75,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
+      });
       this.beacon = new THREE.Mesh(beaconGeo, beaconMat);
       this.beacon.renderOrder = 1;
-      this.beacon.frustumCulled = false;   // 8000-unit-tall mesh ; never cull
+      this.beacon.frustumCulled = false;
       this.group.add(this.beacon);
-      // A second, tighter inner core for the beacon to give it a hot center.
-      // Stays as bright white solid (additive) so the column has a clear
-      // bright heart inside the fireball envelope.
-      const beaconCoreGeo = new THREE.CylinderGeometry(0.4, 0.4, 8000, 12, 1, true);
-      const beaconCoreMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.45,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-      });
-      this.beaconCore = new THREE.Mesh(beaconCoreGeo, beaconCoreMat);
-      this.beaconCore.renderOrder = 2;
-      this.group.add(this.beaconCore);
     }
 
     // No per-field PointLight: adding lights post-init forces Three.js to
@@ -42433,7 +42379,10 @@ class StasisField {
     // so it punches through any horizon haze.
     if (this.beacon && typeof camera !== 'undefined') {
       const d = camera.position.distanceTo(this.position);
-      const w = Math.max(20, d * 0.005);
+      // (v18L 2026-05-22) Beam much thinner. Min 3 units wide ; per-distance
+      // scale factor reduced from 0.005 to 0.0012 so even at race scales
+      // the beam reads as a thin line through the orb, not a fat column.
+      const w = Math.max(3, d * 0.0012);
       const hScale = Math.max(1, (d * 0.05) / 8000);
       this.beacon.scale.set(w, hScale, w);
       if (this.beaconCore) this.beaconCore.scale.set(w, hScale, w);
@@ -45296,6 +45245,10 @@ function buildRoomGraphLevel(level) {
       // (v8VR 2026-04-30) uOpacity multiplies the final alpha so the
       // Settings -> Wall Pattern transparency slider actually fades the
       // wall. Defaults to 1.0 (legacy fully-opaque behavior).
+      // (v18L 2026-05-22 reverted) Wall proximity opacity FULLY reverted
+      // to v18 baseline. The variable-alpha proximity calc was somehow
+      // producing skybox bleed-through that the v18 constant alpha did
+      // not have. Back to v18 exact behavior.
       '  gl_FragColor = vec4(c, alpha * uOpacity);',
       '}'
     ].join('\n');
