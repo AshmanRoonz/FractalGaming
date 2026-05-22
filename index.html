@@ -6208,6 +6208,9 @@ class NetworkPlayer {
       // (v14f) Red fire particles around the peer's hull while shield is up.
       if (typeof _spawnThermalShieldFire === 'function') {
         _spawnThermalShieldFire(this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
+        if (typeof _updateThermalShieldFlameSpheres === 'function') {
+          _updateThermalShieldFlameSpheres(this, this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
+        }
       }
     } else {
       if (this._thermalShieldMesh) {
@@ -31420,6 +31423,122 @@ function _disposeShieldClone(clone) {
 const _thermalFireForward = new THREE.Vector3();
 const _thermalFirePerp1 = new THREE.Vector3();
 const _thermalFirePerp2 = new THREE.Vector3();
+// (v18L 2026-05-22 v2) Persistent flame spheres for the Pyro Fire Shield
+// cone. Replaces the dot-storm with a row of large LayeredFX fireball
+// spheres (same preset family the Flame Chain ability uses) anchored to
+// a ship's position + forward axis. Each frame the spheres are repositioned
+// in the cone, scale-breathes, and bobs slightly. When Fire Shield turns
+// off, the spheres are hidden ; on ship death / round end the existing
+// thermalFlameMeshes cleanup helper disposes them.
+const _THERMAL_FLAME_COUNT = 7;
+const _thermalFlameTmpFwd  = new THREE.Vector3();
+const _thermalFlameTmpUp   = new THREE.Vector3();
+const _thermalFlameTmpRgt  = new THREE.Vector3();
+function _ensureThermalFlameMeshes(ship, chassis) {
+  if (!ship || !chassis) return null;
+  if (ship.thermalFlameMeshes && ship.thermalFlameMeshes.length === _THERMAL_FLAME_COUNT) {
+    return ship.thermalFlameMeshes;
+  }
+  if (typeof _makeFXMaterial !== 'function' || typeof THREE === 'undefined') return null;
+  const hLen = chassis.hullLength || 100;
+  const out = [];
+  for (let i = 0; i < _THERMAL_FLAME_COUNT; i++) {
+    // Radius scales with depth along the cone : smaller at base, larger at
+    // tip so the silhouette flares like a flame thrower. Stash baseRadius
+    // so the per-frame breath knows what value to swell around.
+    const u = (i + 0.5) / _THERMAL_FLAME_COUNT; // 0..1
+    const baseRadius = hLen * (0.50 + 0.65 * u); // 50% hull at base, ~115% at tip
+    const mat = _makeFXMaterial('fireball');
+    if (mat.uniforms && mat.uniforms.uPosScale) {
+      mat.uniforms.uPosScale.value = 1.0 / Math.max(1, baseRadius);
+    }
+    if (mat.userData) mat.userData._timeOffset = Math.random() * 10;
+    const geo = new THREE.SphereGeometry(baseRadius, 16, 10);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.frustumCulled = false; // big displaced sphere ; bounds are unreliable
+    mesh.renderOrder = 1;
+    mesh.visible = false;
+    mesh.userData._tsFX = {
+      phase: Math.random() * Math.PI * 2,
+      freq: 4 + Math.random() * 3,
+      baseRadius,
+      u, // depth along cone
+      perpAngle: i * 2.39996, // golden-angle distribution around the axis
+    };
+    scene.add(mesh);
+    out.push(mesh);
+  }
+  ship.thermalFlameMeshes = out;
+  return out;
+}
+function _updateThermalShieldFlameSpheres(ship, shipPos, shipQuat, chassis, dt) {
+  if (!ship || !shipPos || !chassis) return;
+  const meshes = _ensureThermalFlameMeshes(ship, chassis);
+  if (!meshes) return;
+  const hLen = chassis.hullLength || 100;
+  const reach      = hLen * 2.6;
+  const baseRadius = hLen * 0.75;
+  const tipRadius  = hLen * 1.70;
+  // Build cone basis from ship quaternion (or default -Z if missing).
+  _thermalFlameTmpFwd.set(0, 0, -1);
+  if (shipQuat) _thermalFlameTmpFwd.applyQuaternion(shipQuat);
+  if (Math.abs(_thermalFlameTmpFwd.y) < 0.95) {
+    _thermalFlameTmpRgt.set(0, 1, 0).cross(_thermalFlameTmpFwd);
+  } else {
+    _thermalFlameTmpRgt.set(1, 0, 0).cross(_thermalFlameTmpFwd);
+  }
+  _thermalFlameTmpRgt.normalize();
+  _thermalFlameTmpUp.crossVectors(_thermalFlameTmpFwd, _thermalFlameTmpRgt).normalize();
+  const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+  for (let i = 0; i < meshes.length; i++) {
+    const m = meshes[i];
+    const fx = m.userData._tsFX;
+    // Position : depth along forward + perpendicular offset for fanning
+    // shape. The perpAngle is fixed per mesh + golden-angle stepped so
+    // the 7 spheres tile the cone cross-section evenly without lining up.
+    const along = fx.u * reach;
+    const coneR = baseRadius + (tipRadius - baseRadius) * fx.u;
+    // Small radial drift over time so the cone visibly churns instead of
+    // sitting frozen. Stays within ~40% of coneR so all spheres remain
+    // inside the burn cone.
+    const driftAng = fx.perpAngle + t * (fx.freq * 0.4);
+    const driftR   = coneR * (0.20 + 0.20 * Math.sin(t * (fx.freq * 0.7) + fx.phase));
+    const lat1 = Math.cos(driftAng) * driftR;
+    const lat2 = Math.sin(driftAng) * driftR;
+    m.position.set(
+      shipPos.x + _thermalFlameTmpFwd.x * along + _thermalFlameTmpRgt.x * lat1 + _thermalFlameTmpUp.x * lat2,
+      shipPos.y + _thermalFlameTmpFwd.y * along + _thermalFlameTmpRgt.y * lat1 + _thermalFlameTmpUp.y * lat2,
+      shipPos.z + _thermalFlameTmpFwd.z * along + _thermalFlameTmpRgt.z * lat1 + _thermalFlameTmpUp.z * lat2
+    );
+    // Breath scale + slight rotation so each sphere visibly churns.
+    const breath = 1 + 0.18 * Math.sin(t * fx.freq + fx.phase);
+    m.scale.setScalar(breath);
+    m.rotation.x = (m.rotation.x + dt * (0.4 + fx.freq * 0.05)) % (Math.PI * 2);
+    m.rotation.y = (m.rotation.y + dt * (0.3 + fx.freq * 0.03)) % (Math.PI * 2);
+    m.visible = true;
+  }
+}
+function _hideThermalShieldFlameSpheres(ship) {
+  if (!ship || !ship.thermalFlameMeshes) return;
+  for (const m of ship.thermalFlameMeshes) {
+    if (m) m.visible = false;
+  }
+}
+function _disposeThermalShieldFlameSpheres(ship) {
+  if (!ship || !ship.thermalFlameMeshes) return;
+  for (const m of ship.thermalFlameMeshes) {
+    if (m) {
+      if (m.parent) scene.remove(m);
+      if (m.geometry) m.geometry.dispose();
+      if (m.material && m.material.dispose) m.material.dispose();
+    }
+  }
+  ship.thermalFlameMeshes = null;
+}
+window._updateThermalShieldFlameSpheres = _updateThermalShieldFlameSpheres;
+window._hideThermalShieldFlameSpheres   = _hideThermalShieldFlameSpheres;
+window._disposeThermalShieldFlameSpheres = _disposeThermalShieldFlameSpheres;
+
 function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
   if (!shipPos || !chassis || !game || !game.particles) return;
   const hLen = chassis.hullLength || 100;
@@ -31440,18 +31559,20 @@ function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
   }
   _thermalFirePerp1.normalize();
   _thermalFirePerp2.crossVectors(_thermalFireForward, _thermalFirePerp1).normalize();
-  // ~220 particles/sec at full frame rate so the cone reads as a torrent
-  // of flame, not a sparse trail. Fractional-spawn keeps dt fluctuations
-  // from quantizing visibly.
-  const expected = 220 * dt;
+  // (v18L 2026-05-22 v2) Particle storm replaced by persistent LayeredFX
+  // flame spheres (see _updateThermalShieldFlameSpheres). Particles
+  // remain as light accent sparkle on top of the spheres ; dropped
+  // from 520/sec back to 90/sec so they read as embers / heat shimmer
+  // rather than as the primary visual.
+  const expected = 90 * dt;
   let toSpawn = Math.floor(expected);
   if (Math.random() < (expected - toSpawn)) toSpawn += 1;
   // Hot-to-cool palette : white-yellow cores fade through orange to
-  // deep red as flames travel out. Picked so the BRIGHTEST cores are
-  // weighted heavier (3/8 entries) for a vivid blaze.
+  // deep red. (v18L) Hot core weighting bumped (6/11 entries) so the
+  // bright center of the cone visibly dominates over the cooling tail.
   const palette = [
-    0xffffcc, 0xffee99, 0xffcc66, // hot cores (weighted)
-    0xff9933, 0xff6622, 0xff4411, 0xff2200, 0xcc1100, // cooling tail
+    0xffffee, 0xffffcc, 0xffee99, 0xffcc66, 0xffbb55, 0xffaa44, // hot cores (weighted)
+    0xff9933, 0xff7722, 0xff5511, 0xff3300, 0xcc1100, // cooling tail
   ];
   for (let i = 0; i < toSpawn; i++) {
     // Distance along the cone, biased slightly toward the BASE so
@@ -31478,16 +31599,17 @@ function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
       .addScaledVector(_thermalFireForward, fwdSpeed)
       .addScaledVector(_thermalFirePerp1, lat1 / Math.max(1, radius) * lateralKick + (Math.random() - 0.5) * 30)
       .addScaledVector(_thermalFirePerp2, lat2 / Math.max(1, radius) * lateralKick + (Math.random() - 0.5) * 30);
+    // (v18L 2026-05-22 v2) Particles now serve as accent sparkle on top
+    // of the persistent flame-sphere cone. Small + short-lived so they
+    // read as embers, heat shimmer, and spit-off blobs rather than the
+    // main flame body.
     game.particles.push({
       position: pos,
       velocity: vel,
-      life: 0.35 + Math.random() * 0.30,
-      maxLife: 0.65,
+      life: 0.30 + Math.random() * 0.30,
+      maxLife: 0.60,
       color: palette[Math.floor(Math.random() * palette.length)],
-      // BIG sizes so particles read as overlapping flame masses, not
-      // discrete dots. The hottest particles (palette[0..2]) get a
-      // size bump for an extra "flare" feel where they cluster.
-      size: 10 + Math.random() * 10,
+      size: 6 + Math.random() * 8,
     });
   }
 }
@@ -31666,6 +31788,10 @@ function updateShieldVisuals(dt) {
     }
     // (v14f) Red fire particles wrapping the hull while the shield is up.
     _spawnThermalShieldFire(player.position, player.mesh && player.mesh.quaternion, player.chassis, dt);
+    // (v18L 2026-05-22 v2) Persistent flame spheres carry the cone silhouette.
+    if (typeof _updateThermalShieldFlameSpheres === 'function') {
+      _updateThermalShieldFlameSpheres(player, player.position, player.mesh && player.mesh.quaternion, player.chassis, dt);
+    }
     _setShieldOverlay('ov-thermal-shield', true);
     _tickSoundLoop(player, '_thermalShieldHumTimer', dt, 0.95, 'fire_shield_hum');
   } else {
@@ -31679,6 +31805,9 @@ function updateShieldVisuals(dt) {
         if (m.material) m.material.dispose();
       }
       player.thermalShieldJets = null;
+    }
+    if (typeof _hideThermalShieldFlameSpheres === 'function') {
+      _hideThermalShieldFlameSpheres(player);
     }
     if (player.thermalShieldMesh) {
       _clearShipShieldEmissive(player.mesh);
@@ -31864,6 +31993,76 @@ function _drainStaggeredRocketSalvo(dt) {
   if (q.queue.length === 0) player._pendingRocketSalvo = null;
 }
 
+// (v18L 2026-05-22) Per-bot fire DOT tick. Walks game.entities ; any
+// bot whose onFireTimer > 0 takes onFireDps * dt damage per frame, and
+// gets ~25 small flame particles per second sprayed around its hull so
+// the burning state is visible from any angle. Source attribution
+// preserved for damage credit (currently always 'player' since only
+// the local Pyro's Fire Shield ignites). Timer expires naturally ;
+// when the bot dies the DOT is cleared by Bot.die's existing cleanup.
+const _FIRE_DOT_PARTICLE_PALETTE = [
+  0xffffaa, 0xffdd66, 0xffaa33, 0xff7722, 0xff4411, 0xcc2200,
+];
+function _tickFireDOTs(dt) {
+  if (!game || !game.entities) return;
+  const particlesPerSec = 25;
+  for (let bi = 0; bi < game.entities.length; bi++) {
+    const bot = game.entities[bi];
+    if (!bot || !bot.alive || !bot.position) continue;
+    if (!bot.onFireTimer || bot.onFireTimer <= 0) continue;
+    // Apply DOT damage. Routed through bot.takeDamage so shield/health
+    // accounting + doomed thresholds + kill processing all run normally.
+    const dps = bot.onFireDps || 200;
+    if (typeof bot.takeDamage === 'function') {
+      try {
+        const dealt = bot.takeDamage(dps * dt, bot.onFireSource || 'player');
+        if (dealt > 0 && bot.onFireSource === 'player' && typeof player !== 'undefined' && player) {
+          player.damageDealt = (player.damageDealt || 0) + dealt;
+        }
+      } catch (_) {}
+    }
+    bot.onFireTimer -= dt;
+    if (bot.onFireTimer <= 0) {
+      bot.onFireTimer = 0;
+      bot.onFireDps = 0;
+      bot.onFireSource = null;
+    }
+    // Particle spray around the bot's hull. ~25/sec ; fractional spawn
+    // so the rate doesn't quantize visibly.
+    const expected = particlesPerSec * dt;
+    let toSpawn = Math.floor(expected);
+    if (Math.random() < (expected - toSpawn)) toSpawn += 1;
+    if (game.particles && toSpawn > 0) {
+      const hLen = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 80;
+      const hullR = hLen * 0.45;
+      for (let pi = 0; pi < toSpawn; pi++) {
+        // Random point on a sphere of radius hullR around the bot center.
+        const phi = Math.random() * Math.PI * 2;
+        const cosTheta = 2 * Math.random() - 1;
+        const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+        const ox = hullR * sinTheta * Math.cos(phi);
+        const oy = hullR * sinTheta * Math.sin(phi);
+        const oz = hullR * cosTheta;
+        // Velocity : slow outward drift + slight upward bias so flames
+        // peel off the hull like a real fire plume in motion.
+        const vScale = 60 + Math.random() * 60;
+        const vx = (ox / hullR) * vScale + (Math.random() - 0.5) * 30;
+        const vy = (oy / hullR) * vScale + Math.random() * 40;
+        const vz = (oz / hullR) * vScale + (Math.random() - 0.5) * 30;
+        game.particles.push({
+          position: new THREE.Vector3(bot.position.x + ox, bot.position.y + oy, bot.position.z + oz),
+          velocity: new THREE.Vector3(vx, vy, vz),
+          life: 0.30 + Math.random() * 0.40,
+          maxLife: 0.70,
+          color: _FIRE_DOT_PARTICLE_PALETTE[Math.floor(Math.random() * _FIRE_DOT_PARTICLE_PALETTE.length)],
+          size: 8 + Math.random() * 10,
+        });
+      }
+    }
+  }
+}
+window._tickFireDOTs = _tickFireDOTs;
+
 function updateAbilities(dt) {
   // (v16a Phase T) Drain queued staggered rocket salvos (Rocket Salvo,
   // Tracker Rockets). One Projectile allocation per frame at most.
@@ -32026,6 +32225,13 @@ function updateAbilities(dt) {
               else playSound('thermal_burn');
             } catch (_) {}
           }
+          // (v18L 2026-05-22) Light the ship on fire. Refresh the burn
+          // timer each frame the bot is in the cone so a long hold means
+          // a long DOT after release. _tickFireDOTs in updateEffects
+          // applies the per-second damage + spawns flames around the bot.
+          bot.onFireTimer = Math.max(bot.onFireTimer || 0, 3.0);
+          bot.onFireDps   = Math.max(bot.onFireDps   || 0, 320);
+          bot.onFireSource = 'player';
         }
       }
       // Fire Shield is a fire source: ignite Explosive Gas anywhere
@@ -46829,6 +47035,7 @@ function gameLoop(timestamp) {
     updatePlayerMovement(dt);
     updateWeapon(dt);
     updateAbilities(dt);
+    if (typeof _tickFireDOTs === 'function') _tickFireDOTs(dt); // (v18L 2026-05-22) per-bot fire DOT
   }
   // (v16 perks) Per-frame perk effect ticks. Nano repair regens HP each
   // frame ; Auto cloak counts down its interval and fires its cycle.
