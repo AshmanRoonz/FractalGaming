@@ -36565,9 +36565,9 @@ function _refreshSettingsValues() {
   const fovVal = $('#val-fov');
   if (fovVal) fovVal.textContent = (fov | 0) + '°';
 
-  // Wall pattern + opacity.
+  // Wall pattern + opacity. (2026-05-21) set-wall-black-base checkbox
+  // removed at user request ; pure black base is permanently off now.
   setSel('set-wall-pattern', String(game.wallPattern | 0));
-  setChk('set-wall-black-base', game.wallBlackBase);
   const wallOp = (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0;
   setRange('set-wall-opacity', 'val-wall-opacity', wallOp, 2);
 
@@ -36838,12 +36838,8 @@ function buildSettingsPage() {
           ${WALL_PATTERN_NAMES.map((nm, i) => `<option value="${i}"${(game.wallPattern|0) === i ? ' selected' : ''}>${nm}</option>`).join('')}
         </select>
       </div>
-      <div class="setting-row">
-        <label>Pure Black Base</label>
-        <input type="checkbox" id="set-wall-black-base" ${game.wallBlackBase ? 'checked' : ''}>
-      </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Pure Black Base hides the map's wall geometry (no zone-color tint, no AO/diffuse, no fresnel rim) so only the active pattern reads against pure black. Press P in-game to cycle patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
+        <label style="flex:1;">Press P in-game to cycle wall patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
       </div>
       <div class="setting-row">
         <label>Wall opacity</label>
@@ -37306,12 +37302,10 @@ function buildSettingsPage() {
     });
   }
   // Pure Black Base checkbox
-  const blackBaseChk = overlay.querySelector('#set-wall-black-base');
-  if (blackBaseChk) {
-    blackBaseChk.addEventListener('change', e => {
-      setWallBlackBase(!!e.target.checked);
-    });
-  }
+  // (2026-05-21) Pure Black Base toggle removed at user request. The
+  // setWallBlackBase function still exists (call sites in preset apply
+  // and loadSettings restore would otherwise reference an undefined
+  // function), but it now ignores its argument and always forces OFF.
   // (v8VR 2026-04-30) Wall opacity slider. Pushes uOpacity uniform live.
   const wallOpEl = overlay.querySelector('#set-wall-opacity');
   const wallOpVal = overlay.querySelector('#val-wall-opacity');
@@ -38287,15 +38281,20 @@ function resetWallParams() {
   saveSettings();
 }
 
-// Toggle Pure Black Base mode. When on, the wall draws only the active
-// pattern over black (no dark floor, no zone-color tint, no fresnel, no
-// diffuse/AO, no zone floor) so the map's geometry disappears and only
-// the pattern reads. Live-pushes uBlackBase and persists.
-function setWallBlackBase(on) {
-  game.wallBlackBase = !!on;
+// (2026-05-21) Pure Black Base is permanently disabled at user request.
+// The toggle in settings was removed and this function now ignores its
+// input argument, always forcing the mode OFF. Kept as a function (vs
+// deleted) so existing callers continue to compile: the multi-layer
+// preset apply path (e.g. Race Glow's _blackBase: false hint) still
+// invokes setWallBlackBase, and loadSettings used to call it during
+// state restore. All those calls now converge on the OFF state.
+function setWallBlackBase(_ignored) {
+  game.wallBlackBase = false;
   if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uBlackBase) {
-    game.levelMaterial.uniforms.uBlackBase.value = game.wallBlackBase ? 1 : 0;
+    game.levelMaterial.uniforms.uBlackBase.value = 0;
   }
+  // saveSettings() write still happens so the persisted boolean stays
+  // in sync with the in-memory value (both always false now).
   saveSettings();
 }
 
@@ -40590,6 +40589,13 @@ const MULTI_LAYER_PRESETS = {
   // Index 33: Slime. Cyber Datamosh fg with very low iteration count
   // and tiny spatial scale gives a fine digital-grain over the Panel
   // Maze ; reads as bright green static.
+  // (2026-05-21) K_COSMIC values dropped from the original lab export
+  // to compensate for Pure Black Base now being permanently off ; the
+  // wall geometry's AO + diffuse + fresnel now add to brightness,
+  // which combined with the lab-tuned K_COSMIC was pushing highlights
+  // pure white. Originals retained in `K_COSMIC_*_lab` comments below
+  // so the lab-faithful look can be restored if needed:
+  //   K_COSMIC_fg_lab: 2.45, K_COSMIC_fg2_lab: 4.7
   33: {
     paletteOverride: 0x00ff55,                        // bright spring green
     bgPatternId: 17,                                  // Panel Maze (lab 6)
@@ -40601,16 +40607,18 @@ const MULTI_LAYER_PRESETS = {
     fgAlpha: 1.55, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.05,
     u_iters_fg: 1, u_scale_fg: 0.0006, u_invBase_fg: 10.2,
     u_hueSpin_fg: 0.0, u_satBase_fg: 0.0,
-    K_COSMIC_fg: 2.45,
+    K_COSMIC_fg: 1.8,                                 // lab: 2.45
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
     fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 4.7,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 34: Toxin. Wave Interference fg gives rippling concentric
   // bands ; combined with the green tint and Mandelbox multiply this
   // reads as a toxic liquid surface.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 3.8, K_COSMIC_fg2 4.7.
   34: {
     paletteOverride: 0x00ff55,                        // bright spring green
     bgPatternId: 17,                                  // Panel Maze (lab 6)
@@ -40622,16 +40630,18 @@ const MULTI_LAYER_PRESETS = {
     fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0.81, fgTime: 0.25,
     u_iters_fg: 9, u_scale_fg: 0.0043, u_invBase_fg: 10.2,
     u_hueSpin_fg: 0.0, u_satBase_fg: 0.91,
-    K_COSMIC_fg: 3.8,
+    K_COSMIC_fg: 2.3,                                 // lab: 3.8
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
     fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 4.7,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 35: Ooze. Plasma FBM fg gives smooth flowing organic motion ;
   // the green tint + Mandelbox cell structure reads as viscous oozing
   // slime trailing down the maze walls.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 6.0, K_COSMIC_fg2 4.7.
   35: {
     paletteOverride: 0x00ff55,                        // bright spring green
     bgPatternId: 17,                                  // Panel Maze (lab 6)
@@ -40643,16 +40653,18 @@ const MULTI_LAYER_PRESETS = {
     fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 1.0, fgTime: 0.45,
     u_iters_fg: 8, u_scale_fg: 0.0112, u_invBase_fg: 5.5,
     u_hueSpin_fg: 0.5, u_satBase_fg: 0.62,
-    K_COSMIC_fg: 6.0,
+    K_COSMIC_fg: 3.5,                                 // lab: 6.0
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
     fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 4.7,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 36: Phasm. Holographic Glitch fg with high alpha + frozen time
   // (fgTime=0) gives sharp scanline tears that read as a holographic
   // phantom flickering through the green maze.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 6.0, K_COSMIC_fg2 4.7.
   36: {
     paletteOverride: 0x00ff55,                        // bright spring green
     bgPatternId: 17,                                  // Panel Maze (lab 6)
@@ -40664,12 +40676,12 @@ const MULTI_LAYER_PRESETS = {
     fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.0,
     u_iters_fg: 3, u_scale_fg: 0.0168, u_invBase_fg: 9.2,
     u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 6.0,
+    K_COSMIC_fg: 3.5,                                 // lab: 6.0
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
     fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
     u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 4.7,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
 };
 
@@ -44154,9 +44166,12 @@ function buildRoomGraphLevel(level) {
     // (v14e) Default to Tile Track (31) instead of pattern 0 so the curated
     // look is what new players see on first load.
     if (typeof game.wallPattern !== 'number') game.wallPattern = 31;
-    // Pure Black Base is on by default: wall geometry hides, only the active
-    // pattern reads against pure black. User can toggle off in Settings.
-    if (typeof game.wallBlackBase !== 'boolean') game.wallBlackBase = true;
+    // (2026-05-21) Pure Black Base is permanently disabled at user
+    // request ; always seed false here so any code path that reads
+    // game.wallBlackBase before the first setWallBlackBase() call sees
+    // the disabled state. The setting toggle was removed from the UI
+    // and setWallBlackBase() now ignores its argument.
+    game.wallBlackBase = false;
     if (!game.wallParams) game.wallParams = {};
     // Pull current values out of the central params table (with defaults) so
     // every uniform has a known starting value.
@@ -44308,7 +44323,10 @@ function buildRoomGraphLevel(level) {
         // this on every settings push regardless, but the initial value
         // ensures correct rendering on the very first frame.
         uPattern:   { value: 21 },
-        uBlackBase: { value: 1 },
+        // (2026-05-21) Pure Black Base permanently off ; initial uniform
+        // value matches game.wallBlackBase = false so no first-frame
+        // flash of black-base rendering before setWallBlackBase fires.
+        uBlackBase: { value: 0 },
         // (v8VR 2026-04-30) Wall opacity. 1.0 = solid (legacy default).
         // Settings -> Wall Pattern -> Wall opacity slider drives this.
         // Honor any value already loaded from settings before the
