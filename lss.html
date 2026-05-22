@@ -7525,21 +7525,38 @@ function _makeGasCloudMaterial(initialColor, baseAlpha, radius) {
       '  vec3 viewDir = normalize(cameraPosition - vWorldPos);',
       '  float fres = pow(1.0 - abs(dot(vNormal, viewDir)), 1.6);',
       '  float density = clamp(baseDensity * (1.0 + fres * 0.60), 0.0, 1.0);',
-      // HDR-bright color in dense spots so the cloud reads from across
-      // the room. Walls render very bright (K_COSMIC_BRIGHTNESS = 4.85)
-      // and additive contribution from a faintly-colored cloud gets
-      // washed out against them ; pushing dense pixels into super-1.0
-      // range lets the cloud compete.
-      '  vec3 col = uColor * (0.80 + density * 3.20);',
+      // (2026-05-21) Adaptive contrast blend. Color is clamped to LDR
+      // (0-1) and the alpha is premultiplied into the output ; the
+      // material uses CustomBlending below (OneMinusDstColor src +
+      // OneMinusSrcColor dst), which mathematically approximates a
+      // Difference blend : result = src*(1-dst) + dst*(1-src). The
+      // upshot is the cloud appears bright on dark backgrounds
+      // (additive-like glow) and DARK on bright backgrounds
+      // (silhouette / inverse), so the cloud is always readable and
+      // never blows out against the brighter wall presets. Previously
+      // this path pushed colors into super-1.0 HDR and used
+      // AdditiveBlending, which combined with bloom and bright walls
+      // (Slime/Toxin/Ooze/Phasm) washed clouds out.
+      '  vec3 col = clamp(uColor * (0.50 + density * 1.10), 0.0, 1.0);',
       '  float alpha = density * uBaseAlpha;',
-      // Higher discard threshold so the silhouette breakup is more
-      // aggressive â€” many low-density rim fragments simply vanish.
       '  if (alpha < 0.05) discard;',
-      '  gl_FragColor = vec4(col, alpha);',
+      // Premultiplied alpha : col already scaled by alpha so the custom
+      // blend math (src*(1-dst) + dst*(1-src)) responds to cloud density
+      // not just cloud presence.
+      '  gl_FragColor = vec4(col * alpha, alpha);',
       '}',
     ].join('\n'),
     transparent: true,
-    blending: THREE.AdditiveBlending,
+    // (2026-05-21) Adaptive Difference-ish blend ; see the shader
+    // comment above for the rationale. Implemented as CustomBlending
+    // because Three.js has no built-in Difference mode.
+    blending: THREE.CustomBlending,
+    blendEquation: THREE.AddEquation,
+    blendSrc: THREE.OneMinusDstColorFactor,
+    blendDst: THREE.OneMinusSrcColorFactor,
+    blendEquationAlpha: THREE.AddEquation,
+    blendSrcAlpha: THREE.OneFactor,
+    blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
     depthWrite: false,
     // DoubleSide so the player sees cloud noise from INSIDE the trap too
     // (FrontSide-only previously made the inside view a hollow sphere).
@@ -10189,6 +10206,11 @@ class BillboardCloudSystem {
         '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
         '    lit += uLightColor[li] * atten * uLightStrength[li];',
         '  }',
+        // (2026-05-21) Clamp to LDR before output so the Difference-style
+        // CustomBlending below doesn't math against super-1.0 values
+        // (which would produce negative blend factors and flicker on
+        // bright wall pixels). Premultiplied alpha is preserved.
+        '  lit = clamp(lit, 0.0, 1.0);',
         '  gl_FragColor = vec4(lit * a, a);',
         '}',
       ].join('\n'),
@@ -10207,7 +10229,20 @@ class BillboardCloudSystem {
         uLightStrength: { value: [0, 0, 0, 0, 0, 0, 0, 0] },
       },
       transparent: true,
-      blending: THREE.AdditiveBlending,
+      // (2026-05-21) Adaptive Difference-style blend. Same rationale
+      // as _makeGasCloudMaterial : clouds glow bright on dark walls
+      // and appear DARK (inverted) on bright walls so the bright-wall
+      // presets (Slime/Toxin/Ooze/Phasm) don't wash the cloud out.
+      // Approximated by CustomBlending : result = src*(1-dst) + dst*(1-src),
+      // which behaves like a difference blend on most pixels. Premultiplied
+      // alpha is already applied by the fragment shader (lit * a).
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneMinusDstColorFactor,
+      blendDst: THREE.OneMinusSrcColorFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneMinusSrcAlphaFactor,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
@@ -21291,13 +21326,14 @@ function _makeAtomFractalMaterial(baseColor) {
     uniforms: {
       time:       { value: 0 },
       uBaseColor: { value: new THREE.Color(baseColor) },
-      // (v11d) 0.95 = 5% transparency on cluster rocks ; lets the player
-      // see what's behind a rock when ducking around it without losing
-      // the silhouette. The fragment shader writes gl_FragColor.a = uOpacity
-      // directly, and the material is already transparent: true below.
-      // Override per-instance later (e.g. impact fade, doomed dim) by
-      // poking mesh.material.uniforms.uOpacity.value.
-      uOpacity:   { value: 0.78 },
+      // (2026-05-21) Rocks render fully opaque at user request ; the
+      // earlier 0.78 (22% transparent) "see-through ducking" feature was
+      // removed. The fragment shader still writes gl_FragColor.a = uOpacity
+      // and `transparent: true` is kept on the material so the rockChunk
+      // fade-out path (mesh.material.uniforms.uOpacity.value = 1 - t,
+      // see updateEffects rockChunk branch) keeps working. Cluster rocks
+      // stay at the 1.0 default forever ; only chunks animate it down.
+      uOpacity:   { value: 1.0 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
