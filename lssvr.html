@@ -11163,11 +11163,29 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 // re-upload state in-place because LSS holds thousands of textures /
 // programs and the partial-restore path in three.js is fragile ; a
 // clean reload is the reliable recovery.
+// (v18VR 2026-05-22 round 3) Track the last intentional XR session end.
+// On some browsers (Quest, hybrid-GPU laptops) ending the WebXR session
+// briefly drops the WebGL context and re-acquires it on the very next
+// frame ; that transient triggers the recovery handler below and the
+// page reloads, landing the user at the cold-boot lobby (which felt
+// like "the match quit" to the user even though no match logic ran).
+// Stamped from sessionend ; the loss handler suppresses its reload if
+// the loss fires within ~6 s of an intentional end. Real GPU process
+// crashes still reload normally (they happen outside this window).
+window._lssLastIntentionalXrEndMs = 0;
 try {
   const _glCanvas = renderer && renderer.domElement;
   if (_glCanvas && typeof _glCanvas.addEventListener === 'function') {
     _glCanvas.addEventListener('webglcontextlost', (ev) => {
       try { ev.preventDefault(); } catch (_) {}
+      const _sinceEnd = (typeof window._lssLastIntentionalXrEndMs === 'number')
+        ? (performance.now() - window._lssLastIntentionalXrEndMs)
+        : Infinity;
+      if (_sinceEnd < 6000) {
+        console.warn('[context-loss] transient loss within ' + Math.round(_sinceEnd) +
+                     'ms of XR session end ; suppressing reload, waiting for restore');
+        return;
+      }
       console.warn('[context-loss] WebGL context lost ; recovery overlay + reload in 3s');
       try {
         let overlay = document.getElementById('lss-context-lost-overlay');
@@ -11365,6 +11383,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   // Pending auto-resume already fired (user manually clicked Enter VR);
   // suppress the countdown so it doesn't double-fire on session end.
   _xrPendingResume = false;
+  _xrResumeArmedForWarmup = false;
   if (typeof _xrCancelResumeCountdown === 'function') _xrCancelResumeCountdown();
   // Re-parent camera under dolly so head pose composes with ship pose.
   if (camera.parent !== xrDolly) xrDolly.add(camera);
@@ -11420,6 +11439,10 @@ renderer.xr.addEventListener('sessionstart', () => {
 
 renderer.xr.addEventListener('sessionend', () => {
   try { console.log('[v11b VR] sessionend fired'); } catch (_) {}
+  // (v18VR 2026-05-22 round 3) Stamp for the context-loss guard above so a
+  // transient context drop right after the session end doesn't auto-reload
+  // the page (which lands the user at the cold-boot lobby).
+  try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
@@ -11549,6 +11572,11 @@ let _xrLastSeenState = null;
 // on a single game.state transition (the between-rounds ship-select runs
 // during 'warmup', which the old state-watcher missed).
 let _xrLastSeenMenu = false;
+// (v18VR 2026-05-22 round 2) Set when an auto-exit landed us in a between
+// -rounds warmup ; tells the watcher to fire the 5s resume countdown
+// when warmupTimer drops below 5.5s (so the user is back in VR exactly
+// when the round restarts, instead of 5s late on flat screen).
+let _xrResumeArmedForWarmup = false;
 function _xrCancelResumeCountdown() {
   if (_xrResumeIntervalId) {
     clearInterval(_xrResumeIntervalId);
@@ -11571,9 +11599,13 @@ function _xrStartResumeCountdown(seconds) {
     'border:2px solid #ffaa44; border-radius:10px;' +
     'box-shadow:0 0 24px rgba(255,170,68,0.45);'
   );
+  // (v18VR 2026-05-22 round 3) Removed the "PUT ON HEADSET" subtitle.
+  // The Quest browser flow keeps the headset on the whole time : "exit
+  // VR" is the in-headset switch from stereo to flat 2D, so telling the
+  // user to put on a headset they're already wearing was just confusing.
   overlay.innerHTML =
     'RESUMING VR IN <span id="xr-resume-num" style="color:#fff;">' + remaining + '</span>s' +
-    '<br><span style="font-size:13px; opacity:0.78; letter-spacing:0.18em;">PUT ON HEADSET</span>' +
+    '<br><span style="font-size:13px; opacity:0.78; letter-spacing:0.18em;">NEXT ROUND STARTING</span>' +
     '<br><button id="xr-resume-cancel" style="margin-top:10px; padding:6px 14px; font-family:Orbitron, sans-serif; font-size:11px; letter-spacing:0.18em; background:rgba(80,40,40,0.85); color:#ffcccc; border:1px solid #cc6644; border-radius:4px; cursor:pointer;">CANCEL</button>';
   document.body.appendChild(overlay);
   const cancelBtn = document.getElementById('xr-resume-cancel');
@@ -22050,18 +22082,31 @@ function _makeAtomFractalMaterial(baseColor) {
       '  return v;',
       '}',
       'void main(){',
+      // (v18VR 2026-05-22 round 2) VR fast path : drop the entire
+      // Mandelbox + FBM pipeline for a flat Fresnel-shaded rock when in
+      // VR. The earlier "shorten the loop" pass shaved ~30% off but the
+      // 8-iter Mandelbox + two FBM calls were still the dominant per-
+      // fragment cost. At headset resolution and on a Quest-class GPU,
+      // even 4 Mandelbox iters per fragment x ~1.2M fragments per eye
+      // burns the frame budget when the player faces a wall of rocks.
+      // This fast path is roughly 20x cheaper per fragment ; the rocks
+      // read as solid colored shapes with edge-glow, which keeps them
+      // readable as obstacles without the fractal surface drift.
+      '  if (uVRLite > 0.5) {',
+      '    vec3 Vlite = normalize(cameraPosition - vWorldPos);',
+      '    float fresLite = pow(1.0 - max(0.0, dot(normalize(vNormal), Vlite)), 2.5);',
+      '    vec3 baseLite = uBaseColor * 0.55 + vec3(0.18);',
+      '    vec3 colorLite = baseLite + uBaseColor * fresLite * 0.35;',
+      '    gl_FragColor = vec4(colorLite, uOpacity);',
+      '    return;',
+      '  }',
       '  // Use surface position as the fractal coordinate. Scale + slow',
       '  // breathing so the fractal pattern drifts visibly over time.',
       '  vec3 p = vLocalPos * (3.0 + cos(time * 0.4) * 1.0);',
       '  p = p * rotate3D(time * 0.25, vec3(-4.0, sin(time) + 7.0, 0.0));',
       '  float s = 1.0;',
       '  float e = 0.0;',
-      // (v18VR) Loop bound is constant for WebGL1 ; break on a
-      // uniform-driven condition to short-circuit at iter 4 in VR. The
-      // visual difference is imperceptible at headset resolution but the
-      // GPU saves four full Mandelbox iters per fragment.
       '  for(int k = 0; k < 8; k++){',
-      '    if (uVRLite > 0.5 && k >= 4) break;',
       '    e = max(0.95, 9.0 / dot(p, p));',
       '    s *= e;',
       '    p = vec3(2.618, 4.0, 3.0) - abs(abs(p) * e - vec3(1.0, 1.5, 1.618));',
@@ -22087,15 +22132,8 @@ function _makeAtomFractalMaterial(baseColor) {
       '  //   lowFreq darkens crevices (large irregular zones)',
       '  //   highFreq adds fine surface grain',
       '  // Combined into texMod which multiplies the final rock color.',
-      // (v18VR) Skip the high-frequency FBM call entirely in VR. lowFreq
-      // alone keeps the readable silhouette ; the per-vertex displacement
-      // already supplies plenty of surface chaos so the fine grain is
-      // not missed at headset resolution.
       '  float lowFreq  = fbm3(vLocalPos * 3.5);',
-      '  float highFreq = 0.5;',
-      '  if (uVRLite < 0.5) {',
-      '    highFreq = fbm3(vLocalPos * 22.0 + 13.7);',
-      '  }',
+      '  float highFreq = fbm3(vLocalPos * 22.0 + 13.7);',
       '  float texMod = 0.45 + 0.55 * lowFreq;',
       '  texMod *= (0.86 + 0.14 * highFreq);',
       '  vec3 colorOut = (base + rim) * texMod;',
@@ -35050,6 +35088,9 @@ function pollGamepad() {
     if (settingsOpen) {
       closeSettings();
     } else if (renderer.xr && renderer.xr.isPresenting) {
+      // Stamp the intentional-end window before session.end() so a
+      // transient context loss inside end() doesn't auto-reload the page.
+      try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
       const _xrSess = renderer.xr.getSession();
       if (_xrSess) { try { _xrSess.end(); } catch (_) {} }
       _xrPendingResume = true; // closeSettings will start a 5s auto-resume
@@ -47252,16 +47293,26 @@ function gameLoop(timestamp) {
   // (just before render) will lift that pose up to the dolly.
   _xrResetDollyAtFrameStart();
 
-  // (VR fork ; v18VR 2026-05-22 rewrite) Detect any flat-screen menu while
-  // presenting. The old version watched only game.state ; that missed the
-  // between-rounds ship-select (which runs during state 'warmup' with the
-  // #ship-select panel toggled .active) and the in-match Settings overlay,
-  // both of which left the user staring at an unreadable html2canvas
-  // mirror inside the headset. The new check is DOM-driven : if any of
-  // ship-select.active, settings-overlay.active, the lobby, or the
-  // matchEnd state is present, treat it as "menu mode" and end the XR
-  // session. When the menu closes (combat resumes), the existing 5s
-  // resume countdown re-enters VR.
+  // (VR fork ; v18VR 2026-05-22 round 2) DOM-driven watcher with a
+  // launch-aware resume trigger. Two-phase design :
+  //
+  //   PHASE A : detect that a flat-screen menu just opened while in VR ;
+  //             end the session so the user can read the UI on the
+  //             desktop / 2D display. Triggers : ship-select panel
+  //             becoming .active, settings overlay open, lobby visible,
+  //             game.state matchEnd / select. The session-end teardown
+  //             (resize, RT realloc, camera reparent) runs once here.
+  //
+  //   PHASE B : decide WHEN to re-enter VR for the next round. The old
+  //             version started the 5s "PUT ON HEADSET" countdown the
+  //             moment ship-select hid (LAUNCH tick) ; problem is the
+  //             round starts at the SAME moment, so the player missed
+  //             the first ~5s of gameplay on flat screen while the
+  //             countdown ran. The new trigger fires when warmupTimer
+  //             drops below ~5.5s during the between-rounds warmup, so
+  //             the resume countdown finishes right when the round
+  //             starts. _xrResumeArmedForWarmup gates this to once per
+  //             warmup phase so we don't double-fire.
   const _xrSel  = document.getElementById('ship-select');
   const _xrLob  = document.getElementById('lobby');
   const _xrSelActive = !!(_xrSel  && _xrSel.classList.contains('active'));
@@ -47269,17 +47320,46 @@ function gameLoop(timestamp) {
   const _xrLobActive = !!(_xrLob  && _xrLob.style.display !== 'none' && _xrLob.offsetParent !== null);
   const nowMenu = _xrSelActive || _xrSetActive || _xrLobActive
                   || game.state === 'select' || game.state === 'matchEnd';
+  // Phase A : edge-triggered session end. Arm the warmup-aware resume
+  // path only when the menu opened during a between-rounds transition
+  // (roundEnd / warmup) ; an in-match settings open stays on the regular
+  // "resume when menu closes" path so the user is back in VR the moment
+  // they close settings.
   if (nowMenu !== _xrLastSeenMenu) {
     if (nowMenu && renderer.xr && renderer.xr.isPresenting) {
-      // Entered a menu while in VR -> exit and request auto-resume later.
+      // Stamp BEFORE calling end() so the context-loss guard sees the
+      // window even if the loss event fires synchronously inside end().
+      try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
       const _xs = renderer.xr.getSession();
       if (_xs) { try { _xs.end(); } catch (_) {} }
       _xrPendingResume = true;
-    } else if (!nowMenu && _xrPendingResume) {
-      // Left the menu (combat resumed). Trigger the 5 s countdown.
+      if (game.state === 'roundEnd' || game.state === 'warmup') {
+        _xrResumeArmedForWarmup = true;
+      }
+    } else if (!nowMenu && _xrPendingResume && !_xrResumeArmedForWarmup) {
+      // Left a non-warmup menu (settings closed mid-match etc.) ; resume now.
       try { _xrStartResumeCountdown(5); _xrPendingResume = false; } catch (_) {}
     }
     _xrLastSeenMenu = nowMenu;
+  }
+  // Phase B : pre-launch resume during between-rounds warmup. Fire when
+  // warmupTimer drops below 5.5s so the 5s "PUT ON HEADSET" countdown
+  // completes right as the round starts ; the player is already back in
+  // VR when ship-select hides and gameplay resumes.
+  if (_xrPendingResume && _xrResumeArmedForWarmup
+      && game.state === 'warmup'
+      && typeof game.warmupTimer === 'number'
+      && game.warmupTimer > 0
+      && game.warmupTimer <= 5.5) {
+    try { _xrStartResumeCountdown(5); } catch (_) {}
+    _xrPendingResume = false;
+    _xrResumeArmedForWarmup = false;
+  }
+  // Reset the warmup-arm flag once we leave warmup (e.g. the user closed
+  // settings mid-warmup and we never made it to the timer trigger, or
+  // they went to the main menu).
+  if (game.state !== 'warmup' && game.state !== 'roundEnd') {
+    _xrResumeArmedForWarmup = false;
   }
 
   if (!game.lastTime) game.lastTime = timestamp;
