@@ -2876,7 +2876,15 @@ const LSS = {
   // Seconds shown on the in-screen 3-2-1-LAUNCH ticker. The round-system
   // warmupTimer is kept in lockstep with this so bots stay in 'warmup' (no
   // firing, no movement) for the full duration of the visible countdown.
+  // (2026-05-21) Kept for the between-rounds path that still uses the
+  // legacy long countdown. The fresh-match-start path now shows the
+  // loading overlay during warmup and uses SHORT_COUNTDOWN afterward.
   LAUNCH_COUNTDOWN: 10,
+  // (2026-05-21) Short 3-2-1 countdown used after the loading overlay
+  // hides. The shader-warmup work runs while loading is up, so this
+  // short visible countdown can't lag the way the 10s version sometimes
+  // did when warmup compiled mid-countdown.
+  SHORT_COUNTDOWN: 3,
   // Reserved for a future multiplayer match-start handshake redesign.
   // The first attempt at a "world_ready" gate + in-game 3-2-1 was rolled
   // back ; these constants stay so the next pass has the values to
@@ -5026,6 +5034,7 @@ async function joinRoom() {
         team: null,
         networkPlayer: null,
         ready: false,           // (v6.7) per-peer ready flag for the start handshake
+        warmupReady: false,     // (2026-05-21) per-peer shader-warmup done flag
       });
       updateLobbyPeers();
       checkAllReady();          // (v6.7) a new not-ready peer cancels any pending start
@@ -5051,6 +5060,13 @@ async function joinRoom() {
       // (v6.7) Re-announce our ready state so the joiner sees it immediately.
       if (net.myReady && net.sendEvent) {
         net.sendEvent({ type: 'ready', ready: true });
+      }
+
+      // (2026-05-21) Also re-announce our warmup-ready state so a peer
+      // joining mid-match-start handshake doesn't deadlock waiting on
+      // a warmup_ready from us that already fired.
+      if (typeof _localWarmupReady !== 'undefined' && _localWarmupReady && net.sendEvent) {
+        try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
       }
 
       // (v6.7) If I'm the world owner and we have a built world, ship the
@@ -5626,9 +5642,16 @@ function checkAllLoadoutsReady() {
   showShipSelectWaiting();
 
   // Alone in the mesh (e.g. peers all dropped during ship-select); fall back
-  // to launching solo so testing doesn't deadlock.
+  // to launching solo so testing doesn't deadlock. (2026-05-21) Still
+  // gate on local warmup ready ; if shaders aren't compiled yet, the
+  // solo launch happens via the warmup completion callback in
+  // commitLoadout instead.
   if (net.peers.size === 0) {
-    launchCountdown();
+    if (_localWarmupReady) {
+      try { hideLoadingOverlay(); } catch (_) {}
+      _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    }
     return;
   }
 
@@ -5636,6 +5659,23 @@ function checkAllLoadoutsReady() {
   let allCommitted = true;
   for (const peer of net.peers.values()) {
     if (!peer.loadoutKey) { allCommitted = false; break; }
+  }
+
+  // (2026-05-21) Warmup-ready gate. Every peer (including us) must have
+  // reported its shader-warmup done before the proposer broadcasts
+  // launch_at ; otherwise some peers would still be compiling shaders
+  // when the visible 3-2-1 countdown hits LAUNCH and the first impact
+  // would re-introduce the very stutter the loading overlay was added
+  // to hide. _allPeersWarmupReady covers the peer side ; _localWarmupReady
+  // covers us. If we're not all warm, fall through and wait for the next
+  // checkAllLoadoutsReady call (triggered by the next warmup_ready event).
+  if (!_localWarmupReady || !_allPeersWarmupReady()) {
+    // Update the loading overlay so the user knows we're waiting on peers
+    // rather than still compiling locally.
+    if (_localWarmupReady) {
+      try { showLoadingOverlay('WAITING FOR PEERS', 'syncing match start'); } catch (_) {}
+    }
+    return;
   }
 
   if (!allCommitted) {
@@ -5716,7 +5756,15 @@ function scheduleLaunch(launchAt) {
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
-    launchCountdown();
+    // (2026-05-21) Hand off from the loading overlay to the short visible
+    // 3-2-1 countdown. Hide loading (which has been showing "WAITING FOR
+    // PEERS" while we waited on warmup_ready from the rest of the mesh),
+    // re-anchor warmupTimer to SHORT_COUNTDOWN so the round system's
+    // warmup -> playing gate fires at the same wall-clock moment as the
+    // visible LAUNCH tick, then run the short countdown.
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+    launchCountdown(LSS.SHORT_COUNTDOWN);
   }, delay);
 }
 
@@ -6615,6 +6663,22 @@ function handleNetEvent(evt, fromPeerId) {
       checkAllReady();
       // (v9b) Refresh the fleet strip so the peer's chip pip flips colour.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+    }
+    return;
+  }
+  // (2026-05-21) Per-peer shader-warmup done signal. Sent by each peer
+  // when its local warmupCombatShaders promise resolves. The lowest-id
+  // proposer holds off broadcasting launch_at until every peer (and
+  // itself) has reported warmup_ready, so the visible 3-2-1 countdown
+  // starts on a warm GPU for everyone. Idempotent: re-sends just flip
+  // the same flag.
+  if (evt.type === 'warmup_ready') {
+    const peer = net.peers.get(fromPeerId);
+    if (peer) {
+      peer.warmupReady = true;
+      // Re-check the launch gate; the proposer may now have everything
+      // it needs to broadcast launch_at.
+      try { checkAllLoadoutsReady(); } catch (_) {}
     }
     return;
   }
@@ -8331,19 +8395,13 @@ function updateGasLighting() {
   // skip explicitly so the projectile scan + per-light math never runs.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   if (!game || !game.projectiles || _ACTIVE_LAYERED_FX.size === 0) return;
-  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
-  if (_cadence > 1) {
-    updateGasLighting._frame = ((updateGasLighting._frame || 0) + 1) % _cadence;
-    if (updateGasLighting._frame !== 0) return;
-  }
   // Gather up to 4 active projectiles (first-N ; could be improved later
   // by picking strongest / closest to camera). Skip projectiles still in
   // their fade-in window so the gas doesn't pre-light at the muzzle.
   // (v16a Ultra) Gather up to 8 lights on Ultra (8 slots), 4 on other
   // tiers. Slots 4..7 stay at strength 0 on lower tiers and short-circuit
   // in the shader loop.
-  const _baseMaxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
-  const _maxLights = (typeof getVRLightCap === 'function') ? getVRLightCap(_baseMaxLights) : _baseMaxLights;
+  const _maxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
   const lights = [];
   for (let i = 0; i < game.projectiles.length && lights.length < _maxLights; i++) {
     const proj = game.projectiles[i];
@@ -10019,10 +10077,6 @@ class BillboardCloudSystem {
     this._iCol = iCol;
     this._iAlp = iAlp;
     this._iSeed = iSeed;
-    this._geo = geo;
-    this._activeSlots = new Uint8Array(this.maxSlots);
-    this._highestActiveSlot = -1;
-    this._setInstanceCount(0);
 
     // Custom ShaderMaterial. Camera-facing billboard via viewMatrix basis
     // columns ; soft-circle alpha via smoothstep on radial distance.
@@ -10130,13 +10184,10 @@ class BillboardCloudSystem {
         // distance from the sprite's world center.
         '  vec3 lit = vColor;',
         '  for (int li = 0; li < 8; li++) {',
-        '    float strength = uLightStrength[li];',
-        '    if (strength > 0.0) {',
-        '      vec3 toL = uLightPos[li] - vSpritePos;',
-        '      float d2 = dot(toL, toL);',
-        '      float atten = 1.0 / (1.0 + d2 * 0.0002);',
-        '      lit += uLightColor[li] * atten * strength;',
-        '    }',
+        '    vec3 toL = uLightPos[li] - vSpritePos;',
+        '    float d2 = dot(toL, toL);',
+        '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
+        '    lit += uLightColor[li] * atten * uLightStrength[li];',
         '  }',
         '  gl_FragColor = vec4(lit * a, a);',
         '}',
@@ -10167,20 +10218,9 @@ class BillboardCloudSystem {
     scn.add(this.mesh);
   }
 
-  _setInstanceCount(count) {
-    if (!this._geo) return;
-    this._geo.instanceCount = count;
-    this._geo.maxInstancedCount = count; // legacy Three.js name, harmless on newer builds
-  }
-
   claimSlot() {
     if (this._free.length === 0) return -1;
     const idx = this._free.pop();
-    this._activeSlots[idx] = 1;
-    if (idx > this._highestActiveSlot) {
-      this._highestActiveSlot = idx;
-      this._setInstanceCount(idx + 1);
-    }
     // (v14e tune 1) Assign a unique random seed per slot. The fragment
     // shader uses iSeed to offset its FBM noise field so adjacent sprites
     // read as distinct wispy patches rather than identical circles. Set
@@ -10194,15 +10234,8 @@ class BillboardCloudSystem {
     if (idx < 0 || idx >= this.maxSlots) return;
     this._scales[idx] = 0;
     this._alphas[idx] = 0;
-    this._activeSlots[idx] = 0;
     this._iSca.needsUpdate = true;
     this._iAlp.needsUpdate = true;
-    if (idx === this._highestActiveSlot) {
-      while (this._highestActiveSlot >= 0 && !this._activeSlots[this._highestActiveSlot]) {
-        this._highestActiveSlot--;
-      }
-      this._setInstanceCount(this._highestActiveSlot + 1);
-    }
     this._free.push(idx);
   }
 
@@ -10697,9 +10730,7 @@ class GasCloud {
 // bails on first claimSlot() returning -1). Symptom : basin clouds
 // would log as spawned in detachedGasPockets but be visually empty.
 // Doubling the pool costs ~256 KB of GPU buffer memory ; well worth it.
-const billboardCloudSystem = new BillboardCloudSystem(scene, {
-  maxSlots: (typeof getVRBCSMaxSlots === 'function') ? getVRBCSMaxSlots(8192) : 8192
-});
+const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 8192 });
 
 // (v14e wakes) Push wake impulses from active wake sources (player +
 // other ships + projectiles) into nearby gas clouds, then decay each
@@ -10711,17 +10742,8 @@ const billboardCloudSystem = new BillboardCloudSystem(scene, {
 function updateBCSWakes(dt) {
   // (v16a Potato) No BCS clouds in Potato, skip the wake-source gather entirely.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
-  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 3) return;
   if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
   if (!game) return;
-  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
-  if (_cadence > 1) {
-    updateBCSWakes._dt = (updateBCSWakes._dt || 0) + (dt || 0);
-    updateBCSWakes._frame = ((updateBCSWakes._frame || 0) + 1) % _cadence;
-    if (updateBCSWakes._frame !== 0) return;
-    dt = Math.min(0.08, updateBCSWakes._dt || dt || 0.016);
-    updateBCSWakes._dt = 0;
-  }
 
   // Gather wake sources : player + nearby ships + nearby projectiles.
   // Each source : { x, y, z, vx, vy, vz, str, radius }.
@@ -10863,16 +10885,10 @@ function updateBCSLighting() {
   if (!game || !game.projectiles) return;
   const u = billboardCloudSystem.material.uniforms;
   if (!u || !u.uLightPos) return;
-  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
-  if (_cadence > 1) {
-    updateBCSLighting._frame = ((updateBCSLighting._frame || 0) + 1) % _cadence;
-    if (updateBCSLighting._frame !== 0) return;
-  }
   // Gather up to 8 active projectiles. First-N for now ; could improve
   // to "closest to camera" or "highest visual impact" later.
-  const _maxLights = (typeof getVRLightCap === 'function') ? getVRLightCap(8) : 8;
   let count = 0;
-  for (let i = 0; i < game.projectiles.length && count < _maxLights; i++) {
+  for (let i = 0; i < game.projectiles.length && count < 8; i++) {
     const p = game.projectiles[i];
     if (!p || !p.alive || !p.position) continue;
     u.uLightPos.value[count].copy(p.position);
@@ -10966,7 +10982,6 @@ try {
   } catch (_) {}
   throw _rendererErr;
 }
-window.renderer = renderer;
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 // (context-loss 2026-05) WebGL context loss recovery scaffolding. Chrome
@@ -12668,167 +12683,17 @@ window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
 
 const postFX = { enabled: true };
 
-function isStandaloneQuest() {
-  try {
-    const ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
-    return /\bQuest\b|OculusBrowser|MetaQuest/i.test(ua);
-  } catch (_) {
-    return false;
-  }
-}
-
-function isXRPresenting() {
-  const r = (typeof window !== 'undefined') ? window.renderer : null;
-  return !!(r && r.xr && r.xr.isPresenting);
-}
-
-var _lssSettingsLoaded = false;
-function getStoredVRPerfMode() {
-  if (typeof localStorage === 'undefined' || _lssSettingsLoaded) return '';
-  if (getStoredVRPerfMode._checked) return getStoredVRPerfMode._mode || '';
-  getStoredVRPerfMode._checked = true;
-  try {
-    const raw = localStorage.getItem('lss_settings');
-    if (!raw) return '';
-    const data = JSON.parse(raw);
-    getStoredVRPerfMode._mode = (data && typeof data.vrPerfMode === 'string') ? data.vrPerfMode : '';
-  } catch (_) {
-    getStoredVRPerfMode._mode = '';
-  }
-  return getStoredVRPerfMode._mode || '';
-}
-
 function getVRPerfMode() {
-  const live = (typeof input !== 'undefined' && input && input.vrPerfMode) ? input.vrPerfMode : 'standard';
-  if (_lssSettingsLoaded || live !== 'standard') return live;
-  return getStoredVRPerfMode() || live;
+  return (typeof input !== 'undefined' && input && input.vrPerfMode) ? input.vrPerfMode : 'standard';
 }
 
 function getVRPerfTier() {
-  if (!isXRPresenting()) return 0;
+  if (!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting)) return 0;
   const mode = getVRPerfMode();
   if (mode === 'max') return 3;
   if (mode === 'fast') return 2;
   if (mode === 'lite') return 1;
   return 0;
-}
-
-function getVRBudgetTier() {
-  if (!isStandaloneQuest() && !isXRPresenting()) return 0;
-  const mode = getVRPerfMode();
-  if (mode === 'max') return 3;
-  if (mode === 'fast') return 2;
-  if (mode === 'lite') return 1;
-  return isStandaloneQuest() ? 1 : 0;
-}
-
-function getVRThrottleTier() {
-  if (!isXRPresenting()) return 0;
-  const perfTier = getVRPerfTier();
-  if (perfTier > 0) return perfTier;
-  return isStandaloneQuest() ? 1 : 0;
-}
-
-function getVRCadence(base, lite, fast, max) {
-  const tier = getVRThrottleTier();
-  if (tier >= 3) return max;
-  if (tier >= 2) return fast;
-  if (tier >= 1) return lite;
-  return base;
-}
-
-function getVRLightCap(defaultCap) {
-  const tier = getVRThrottleTier();
-  if (tier >= 3) return 0;
-  if (tier >= 2) return Math.min(defaultCap, 1);
-  if (tier >= 1) return Math.min(defaultCap, 2);
-  return defaultCap;
-}
-
-function getVRGasBudget() {
-  const tier = getVRBudgetTier();
-  if (tier >= 3) {
-    return {
-      bcsMaxSlots: 1536,
-      atomSmokeSegments: 5,
-      shatterClouds: 1,
-      shatterSegments: 4,
-      basinClouds: 0,
-      basinJitter: 0,
-      basinSegments: 0,
-      fragmentSegments: 3,
-      detachedPockets: 48,
-      chemistryCadence: 0,
-      cloudAttraction: false
-    };
-  }
-  if (tier >= 2) {
-    return {
-      bcsMaxSlots: 2048,
-      atomSmokeSegments: 7,
-      shatterClouds: 2,
-      shatterSegments: 5,
-      basinClouds: 2,
-      basinJitter: 2,
-      basinSegments: 5,
-      fragmentSegments: 4,
-      detachedPockets: 80,
-      chemistryCadence: 4,
-      cloudAttraction: false
-    };
-  }
-  if (tier >= 1) {
-    return {
-      bcsMaxSlots: 3072,
-      atomSmokeSegments: 9,
-      shatterClouds: 3,
-      shatterSegments: 7,
-      basinClouds: 4,
-      basinJitter: 2,
-      basinSegments: 6,
-      fragmentSegments: 5,
-      detachedPockets: 120,
-      chemistryCadence: 3,
-      cloudAttraction: false
-    };
-  }
-  return {
-    bcsMaxSlots: 8192,
-    atomSmokeSegments: 17,
-    shatterClouds: 6,
-    shatterSegments: 16,
-    basinClouds: 12,
-    basinJitter: 5,
-    basinSegments: 12,
-    fragmentSegments: 7,
-    detachedPockets: Infinity,
-    chemistryCadence: 1,
-    cloudAttraction: true
-  };
-}
-
-function getVRBCSMaxSlots(defaultMax) {
-  const budget = getVRGasBudget();
-  return Math.min(defaultMax, budget.bcsMaxSlots || defaultMax);
-}
-
-function getVRGasSegments(defaultSegments, key) {
-  const budget = getVRGasBudget();
-  const value = budget && key ? budget[key] : 0;
-  return value > 0 ? Math.min(defaultSegments, value) : defaultSegments;
-}
-
-function getVRDetachedGasLimit() {
-  const budget = getVRGasBudget();
-  return budget.detachedPockets;
-}
-
-function getVRLevelGridRes(defaultRes) {
-  const tier = getVRBudgetTier();
-  if (tier >= 3) return Math.min(defaultRes, 56);
-  if (tier >= 2) return Math.min(defaultRes, 64);
-  if (tier >= 1) return Math.min(defaultRes, 72);
-  return defaultRes;
 }
 
 function getEffectiveVRRenderScale() {
@@ -13571,7 +13436,7 @@ const _xrHudUpdateEveryN = 2;
 let _xrHudUploadCounter = 0;
 let _xrAuxUploadCounter = 0;
 function _xrHudUpdateCadence() {
-  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
+  const tier = getVRPerfTier();
   if (tier >= 3) return 6;
   if (tier >= 2) return 4;
   if (tier >= 1) return 3;
@@ -13769,11 +13634,9 @@ let _starfieldPoints = null;
 // ---- ARENA BOUNDARY GRID ----
 
 (function createArenaGrid() {
-  const tier = (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0;
-  if (tier >= 3) return;
   const s = LSS.ARENA_SIZE;
-  const gridMat = new THREE.LineBasicMaterial({ color: 0x112244, transparent: true, opacity: tier > 0 ? 0.08 : 0.15 });
-  const step = tier > 0 ? 2000 : 500;
+  const gridMat = new THREE.LineBasicMaterial({ color: 0x112244, transparent: true, opacity: 0.15 });
+  const step = 500;
   for (let axis = 0; axis < 3; axis++) {
     for (let sign = -1; sign <= 1; sign += 2) {
       const lines = [];
@@ -16049,16 +15912,7 @@ function updateAmbientCloudWakes(dt) {
   // already returns false in Potato so game.dots is empty, but we skip
   // the per-frame loop explicitly as well.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
-  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 2) return;
   if (!game || !game.dots || !game.dots.length) return;
-  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
-  if (_cadence > 1) {
-    updateAmbientCloudWakes._dt = (updateAmbientCloudWakes._dt || 0) + (dt || 0);
-    updateAmbientCloudWakes._frame = ((updateAmbientCloudWakes._frame || 0) + 1) % _cadence;
-    if (updateAmbientCloudWakes._frame !== 0) return;
-    dt = Math.min(0.08, updateAmbientCloudWakes._dt || dt || 0.016);
-    updateAmbientCloudWakes._dt = 0;
-  }
   // Gather sources : reuse the same pattern as updateBCSWakes.
   const sources = [];
   if (typeof player !== 'undefined' && player && player.shipState !== 'dead'
@@ -18804,7 +18658,7 @@ function igniteNearbyGas(pos, radius) {
 const dynamicLights = {
   pool: [],
   active: [],
-  MAX_LIGHTS: (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ? 4 : 8,
+  MAX_LIGHTS: 8,
 };
 
 // NUM_POINT_LIGHTS PINNING (Trace 20260420T164534 fix):
@@ -18984,11 +18838,43 @@ function _warmupYield() {
 }
 
 async function warmupCombatShaders() {
+  // (2026-05-21) Promise caching for the loading-overlay launch flow.
+  // commitLoadout now hooks the warmup completion to drive the visible
+  // 3-2-1 countdown ; if the player double-clicks ship-select while
+  // warmup is mid-flight, a second commitLoadout would call this again.
+  // The original guard (return-if-done) returned a freshly-resolved
+  // promise on the second call, which would have tripped the countdown
+  // to start before the in-flight warmup actually finished. By caching
+  // _shaderWarmup.promise we ensure every caller awaits the SAME
+  // promise ; the second commit's `.then` only fires when the real
+  // work resolves, matching the first commit.
+  if (_shaderWarmup.promise) return _shaderWarmup.promise;
   if (_shaderWarmup.done) return;
   if (!(typeof renderer !== 'undefined' && renderer) ||
       !(typeof scene !== 'undefined' && scene) ||
       !(typeof camera !== 'undefined' && camera)) return;
   _shaderWarmup.done = true;
+  // Park the in-flight promise on the cache. Resolves to undefined on
+  // success ; we clear the cache slot on completion so any callers
+  // after `done` short-circuit on the (cheaper) `done` check.
+  _shaderWarmup.promise = (async () => {
+    try {
+      await _warmupCombatShadersBody();
+    } finally {
+      // Leave _shaderWarmup.done = true ; clear the in-flight pointer
+      // so subsequent callers don't pin a now-resolved promise.
+      _shaderWarmup.promise = null;
+    }
+  })();
+  return _shaderWarmup.promise;
+}
+
+// (2026-05-21) Body of warmupCombatShaders, extracted so the outer
+// function can wrap it in promise-caching logic. All the original
+// warmup work (ship meshes, explosion pool, LayeredFX, lightning, smoke,
+// gas, v8Debris/v8Sparks pre-init, rock-chunk warm mesh, the renderer
+// compile, the texture upload loop, cleanup) lives here unchanged.
+async function _warmupCombatShadersBody() {
   const _warmupT0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
   let _warmupShipMeshCount = 0;
   let _warmupTextureCount = 0;
@@ -19363,6 +19249,62 @@ async function warmupCombatShaders() {
       }
     } catch (_) { /* non-fatal: first burst will just have its usual hitch */ }
 
+    // (warmup 2026-05-21) Pre-init the v8Debris + v8Sparks InstancedMesh
+    // pools. Both are lazy-initialized on their first spawn call, which
+    // means the FIRST projectile impact of the match (most commonly the
+    // first shot at a cluster rock, since rocks are always in front of
+    // the spawn) paid the full cost of:
+    //   - allocating a 256-instance InstancedMesh + MeshStandardMaterial
+    //     for v8Debris (USE_INSTANCING shader variant ; not present on
+    //     any other warmup mesh, so the driver had to link it inline)
+    //   - allocating a 512-instance InstancedMesh + MeshBasicMaterial
+    //     for v8Sparks with per-instance color (USE_INSTANCING +
+    //     USE_INSTANCING_COLOR variant ; also unique to this path)
+    //   - first-frame instance buffer + instanceColor buffer upload
+    // spawnExplosion -> v8SpawnDebris and spawnImpactSparks ->
+    // v8SpawnSparks both fire on the very first rock hit, so the player
+    // saw a ~one-frame stall on shot #1. By initing the pools here, both
+    // InstancedMeshes are scene-resident before renderer.compile() below,
+    // which makes the driver link their programs as part of the warmup
+    // pass; the first impact then renders against an already-warm cache.
+    try {
+      if (typeof v8DebrisInit === 'function') v8DebrisInit();
+    } catch (_) { /* non-fatal: first impact will just have its usual hitch */ }
+    try {
+      if (typeof v8SparksInit === 'function') v8SparksInit();
+    } catch (_) { /* non-fatal: first impact will just have its usual hitch */ }
+
+    // (warmup 2026-05-21) Pre-warm the rock-chunk geometry+material path
+    // used by spawnRockChunks(). The cluster-atom shader program
+    // (_makeAtomFractalMaterial) is already warm from the cluster atoms
+    // present in the scene, but chunks use _makeRockGeometry(detail=0),
+    // while cluster atoms use detail=1. That's a different vertex count
+    // and a fresh BufferGeometry upload on the very first rock kill, plus
+    // 4-8 fresh ShaderMaterial instances. Parking ONE chunk-shaped mesh
+    // off-screen here makes renderer.compile + the one-shot render below
+    // walk the detail=0 path once, so the first real chunk spawn skips
+    // the cold upload+link.
+    let _rockChunkWarmMesh = null;
+    try {
+      if (typeof _makeRockGeometry === 'function' && typeof _makeAtomFractalMaterial === 'function') {
+        const _rcGeo = _makeRockGeometry(0, 0);
+        const _rcMat = _makeAtomFractalMaterial(0x808080);
+        _rockChunkWarmMesh = new THREE.Mesh(_rcGeo, _rcMat);
+        _rockChunkWarmMesh.position.set(0, -1e6, 0);
+        _rockChunkWarmMesh.frustumCulled = false;
+        _rockChunkWarmMesh.userData._layeredFXWarmup = true; // share cleanup tag
+        _rockChunkWarmMesh.userData._ownsGeoForCleanup = true; // mark for geo dispose
+        scene.add(_rockChunkWarmMesh);
+        // Register with the existing layered-FX warmup cleanup pass so
+        // it gets removed + its material disposed after the one-shot
+        // render. The cleanup loop handles geometry disposal too (see
+        // _ownsGeoForCleanup tag below).
+        if (window._layeredFXWarmupMeshes && window._layeredFXWarmupMeshes.push) {
+          window._layeredFXWarmupMeshes.push(_rockChunkWarmMesh);
+        }
+      }
+    } catch (_) { /* non-fatal: first chunk spawn will just have its usual hitch */ }
+
     // (warmup-chunk 2026-05) Yield BEFORE the big compile so the driver
     // has finished processing the level-build GL work (basin pool
     // geometries, wall shader rebuild, etc.) that just happened inside
@@ -19398,11 +19340,28 @@ async function warmupCombatShaders() {
 
     // Now strip the warmup meshes ; their job is done. Materials get
     // disposed (the registry self-deregisters in mat.dispose()).
+    // Geometries are mostly shared across the layered-FX meshes so we
+    // leave them alone, except for any mesh explicitly tagged with
+    // _ownsGeoForCleanup (e.g. the rock-chunk warm mesh, whose
+    // BufferGeometry is a unique one-shot allocation).
     try {
       if (window._layeredFXWarmupMeshes && window._layeredFXWarmupMeshes.length) {
         for (const m of window._layeredFXWarmupMeshes) {
           if (m.parent) scene.remove(m);
+          // De-register from _atomFractalMaterials BEFORE dispose so the
+          // per-frame tick loop (see _atomFractalMaterials block in the
+          // effects update) doesn't keep writing time uniform on a
+          // disposed material. Only matters for the rock-chunk warm mesh
+          // since _makeAtomFractalMaterial is the only factory that
+          // pushes into this registry.
+          if (m.material && typeof _atomFractalMaterials !== 'undefined') {
+            const _afmIdx = _atomFractalMaterials.indexOf(m.material);
+            if (_afmIdx >= 0) _atomFractalMaterials.splice(_afmIdx, 1);
+          }
           if (m.material && m.material.dispose) m.material.dispose();
+          if (m.userData && m.userData._ownsGeoForCleanup && m.geometry && m.geometry.dispose) {
+            m.geometry.dispose();
+          }
         }
         window._layeredFXWarmupMeshes.length = 0;
       }
@@ -21303,7 +21262,7 @@ class ClusterObstacle {
       alpha:          0.80,
       color:          cloudColor,
       colorJitter:    0.14,
-      segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(17, 'atomSmokeSegments') : 17,
+      segments:       17,
     });
     child._atomSmoke = cloud;
   }
@@ -21323,7 +21282,7 @@ class ClusterObstacle {
         (Math.random() - 0.5) * 80,
         (Math.random() - 0.5) * 80
       );
-      _pushDetachedGasPocket({ gasCloud: cloud, velocity: vel });
+      game.detachedGasPockets.push({ gasCloud: cloud, velocity: vel });
     } else if (cloud && typeof cloud.dispose === 'function') {
       cloud.dispose();
     } else {
@@ -21804,10 +21763,8 @@ class ClusterObstacle {
             // (v16a Potato) Skip the shatter-residue cloud bloom in Potato.
             !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
           // (v15a 2026-05-10) Denser shatter spawn : 4..6 instead of 2..4.
-          const _gasBudget = (typeof getVRBudgetTier === 'function' && getVRBudgetTier() > 0 && typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
-          const _spawnN = _gasBudget ? Math.min(_gasBudget.shatterClouds, 4 + Math.floor(Math.random() * 3)) : (4 + Math.floor(Math.random() * 3)); // 4..6
+          const _spawnN = 4 + Math.floor(Math.random() * 3); // 4..6
           for (let _k = 0; _k < _spawnN; _k++) {
-            if (typeof _canSpawnDetachedGasPocket === 'function' && !_canSpawnDetachedGasPocket()) break;
             const _theta = Math.random() * Math.PI * 2;
             const _phi   = Math.acos(2 * Math.random() - 1);
             const _sinP  = Math.sin(_phi);
@@ -21840,9 +21797,9 @@ class ClusterObstacle {
               alpha:          0.80,
               color:          _cloudColor,
               colorJitter:    0.14,
-              segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(16, 'shatterSegments') : 16,
+              segments:       16,
             });
-            _pushDetachedGasPocket({ gasCloud: _cloud, velocity: _drift });
+            game.detachedGasPockets.push({ gasCloud: _cloud, velocity: _drift });
           }
         }
       } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
@@ -22036,8 +21993,6 @@ function _spawnBasinClouds() {
   // basin gas alone can add ~1000 BCS sprites to the per-frame cost.
   if (typeof QUALITY !== 'undefined' && !QUALITY.basinClouds()) return;
   if (!game.detachedGasPockets) game.detachedGasPockets = [];
-  const _gasBudget = (typeof getVRBudgetTier === 'function' && getVRBudgetTier() > 0 && typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
-  if (_gasBudget && _gasBudget.basinClouds <= 0) return;
   const cylinders = game.levelCylinders || [];
   // (v15a revised) Angle-based drain detection : a tunnel drains the
   // sphere only if it EXITS the sphere through the lower hemisphere at
@@ -22050,7 +22005,6 @@ function _spawnBasinClouds() {
   const DRAIN_Y_FRAC = -0.5;  // -0.5 = 30° below horizontal
   let basinCount = 0, drainCount = 0;
   for (const sphere of game.levelSpheres) {
-    if (typeof _canSpawnDetachedGasPocket === 'function' && !_canSpawnDetachedGasPocket()) break;
     const r2 = sphere.r * sphere.r;
     let hasDrain = false;
     for (const cyl of cylinders) {
@@ -22133,11 +22087,10 @@ function _spawnBasinClouds() {
     // (v16a Ultra) Denser still on Ultra : 16-20 per basin. Each cloud is
     // ~10 sprites so this is a per-basin sprite count of ~160-200 vs
     // ~120-160 on High. Bounded by the BCS slot pool.
-    const _basinBase   = _gasBudget ? _gasBudget.basinClouds : ((typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 16 : 12);
-    const _basinJitter = _gasBudget ? _gasBudget.basinJitter : ((typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 5  : 5);
+    const _basinBase   = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 16 : 12;
+    const _basinJitter = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 5  : 5;
     const numClouds = _basinBase + Math.floor(Math.random() * _basinJitter);
     for (let i = 0; i < numClouds; i++) {
-      if (typeof _canSpawnDetachedGasPocket === 'function' && !_canSpawnDetachedGasPocket()) break;
       const ang = Math.random() * Math.PI * 2;
       const rho = Math.sqrt(Math.random()) * poolR;
       const yJitter = (Math.random() - 0.5) * sphere.r * 0.12;
@@ -22164,14 +22117,14 @@ function _spawnBasinClouds() {
         color:          color,
         colorJitter:    0.20,
         // (v15a 2026-05-10) Denser basin clouds : 12 sprites (was 10).
-        segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(12, 'basinSegments') : 12,
+        segments:       12,
       });
       const vel = new THREE.Vector3(
         (Math.random() - 0.5) * 10,
         (Math.random() - 0.5) * 3,
         (Math.random() - 0.5) * 10
       );
-      _pushDetachedGasPocket({ gasCloud: cloud, velocity: vel });
+      game.detachedGasPockets.push({ gasCloud: cloud, velocity: vel });
     }
   }
   // Debug : log basin/drain counts so we can tell if the detection is
@@ -22306,7 +22259,7 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
       alpha:          0.70,
       color:          parentColor,
       colorJitter:    0.14,
-      segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(7, 'fragmentSegments') : 7,  // fewer sprites for "mini" feel
+      segments:       7,  // fewer sprites for "mini" feel
     });
     const pocket = {
       gasCloud: child,
@@ -22323,44 +22276,8 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
       pocket._fadeLife = 1.3 + Math.random() * 0.5;
       pocket._fadeAge = 0;
     }
-    _pushDetachedGasPocket(pocket);
+    game.detachedGasPockets.push(pocket);
   }
-}
-
-function _disposeDetachedGasPocket(p) {
-  if (!p) return;
-  if (p.gasCloud && typeof p.gasCloud.dispose === 'function') {
-    p.gasCloud.dispose();
-  } else if (p.mesh) {
-    if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
-    if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
-  }
-}
-
-function _canSpawnDetachedGasPocket(extra) {
-  if (!game || !game.detachedGasPockets) return true;
-  const limit = (typeof getVRDetachedGasLimit === 'function') ? getVRDetachedGasLimit() : Infinity;
-  if (!Number.isFinite(limit)) return true;
-  return game.detachedGasPockets.length + (extra || 1) <= limit;
-}
-
-function _enforceDetachedGasBudget() {
-  if (!game || !game.detachedGasPockets) return;
-  const limit = (typeof getVRDetachedGasLimit === 'function') ? getVRDetachedGasLimit() : Infinity;
-  if (!Number.isFinite(limit)) return;
-  while (game.detachedGasPockets.length > limit) {
-    _disposeDetachedGasPocket(game.detachedGasPockets.shift());
-  }
-}
-
-function _pushDetachedGasPocket(p) {
-  if (!game || !game.detachedGasPockets) {
-    _disposeDetachedGasPocket(p);
-    return false;
-  }
-  game.detachedGasPockets.push(p);
-  _enforceDetachedGasBudget();
-  return true;
 }
 
 // (v15a) Splat phase duration. Cloud flattens against the wall for this
@@ -22392,8 +22309,6 @@ const _GAS_SPLAT_DURATION = 0.35;
 // Skipped in potato mode (the O(N²) cost matters on weak CPUs).
 function _applyCloudAttraction(dt) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato()) return;
-  const budget = (typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
-  if (budget && budget.cloudAttraction === false) return;
   const pockets = game.detachedGasPockets;
   if (!pockets || pockets.length < 2) return;
   const ATTRACT_STRENGTH   = 10;
@@ -22493,7 +22408,6 @@ function _applyCloudAttraction(dt) {
 
 function updateDetachedGasPockets(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
-  if (typeof _enforceDetachedGasBudget === 'function') _enforceDetachedGasBudget();
   // Reverse iteration so we can splice fading or fragmented pockets out
   // during the loop without skipping any siblings. New fragment children
   // are pushed to the end of the array, past our current index, and get
@@ -22790,14 +22704,6 @@ function _gasPocketCenter(p) {
 
 function updateGasChemistry(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
-  const budget = (typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
-  const cadence = budget ? budget.chemistryCadence : 1;
-  if (cadence <= 0) return;
-  if (cadence > 1) {
-    updateGasChemistry._frame = ((updateGasChemistry._frame || 0) + 1) % cadence;
-    if (updateGasChemistry._frame !== 0) return;
-    dt *= cadence;
-  }
   const pockets = game.detachedGasPockets;
 
   // Decrement each pocket's spark cooldown. (v14e: GasCloud has no
@@ -22892,7 +22798,15 @@ function updateGasChemistry(dt) {
 function disposeAllDetachedGasPockets() {
   if (!game.detachedGasPockets) return;
   for (const p of game.detachedGasPockets) {
-    _disposeDetachedGasPocket(p);
+    if (!p) continue;
+    // (v14e) GasCloud entries dispose via their own method (releases BCS
+    // slots). Legacy mesh entries dispose the old way.
+    if (p.gasCloud && typeof p.gasCloud.dispose === 'function') {
+      p.gasCloud.dispose();
+    } else if (p.mesh) {
+      if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+      if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
+    }
   }
   game.detachedGasPockets.length = 0;
 }
@@ -27535,33 +27449,95 @@ function commitLoadout(key) {
     });
   }
 
-  // Hold the round in 'warmup' for the full duration of the visible
-  // ship-select countdown; otherwise the warmup elapses partway through and
-  // bots become live behind the scenes while the player is still ticking
-  // down to LAUNCH. Only seed the warmup timer when no countdown is already
-  // running; swapping ships mid-countdown must not reset either clock.
+  // (2026-05-21) Loading-overlay launch flow. The old 10s ship-select
+  // countdown ran in parallel with warmupCombatShaders, which meant the
+  // visible 3-2-1 ticker could lag mid-compile on slower GPUs. New flow:
+  // show LSS_loading.png while warmup runs (no visible timer = no lag),
+  // then run a short 3-2-1 ONLY AFTER warmup is done. Solo and MP share
+  // the same loading screen ; MP additionally waits for every peer's
+  // warmup_ready event before the lowest-id proposer broadcasts launch_at.
+  //
+  // The warmupTimer is intentionally NOT anchored here anymore. If it
+  // were, it would tick down from LAUNCH_COUNTDOWN during the variable-
+  // length loading phase and hit 0 (triggering the warmup -> playing
+  // transition) before the visible countdown even started. Instead we
+  // hold it un-anchored ; the short countdown's startpoint anchors it
+  // to SHORT_COUNTDOWN so the round-system transition lands on the
+  // same wall-clock moment as the visible LAUNCH tick.
   if (!_countdownActive) {
-    // (v11d) Anchor to wall-clock so the launch countdown ticks at real
-    // rate even if the user alt-tabs during ship-select.
-    _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
+    game.warmupTimer = LSS.WARMUP_TIME || 5;     // positive sentinel ; gates 'warmup' state
+    game.warmupTimerAnchorMs = undefined;        // unanchored ; _tickTimer no-ops
+    game.warmupTimerTotal    = undefined;
   }
   // Refresh the teammates strip so the newly committed ship shows up as YOU's pick.
   updateTeammatesStrip();
-  // Pre-compile shader programs for combat-effect materials while the player
-  // watches the 10s launch countdown. One-shot (idempotent).
-  warmupCombatShaders();
-  // (v6.7) In multiplayer, picking a ship is the ship-select equivalent of
-  // pressing READY in the lobby. Don't launch alone; the loadout broadcast
-  // above is the "ready" signal. The lowest-peerId peer proposes a synced
-  // launchAt timestamp once every peer has committed, and every peer fires
-  // launchCountdown() at that wall-clock moment so the 3-2-1-LAUNCH sequence
-  // is in lockstep across the mesh. In solo mode, launch immediately as before.
-  if (net.active) {
-    showShipSelectWaiting();
-    checkAllLoadoutsReady();
-  } else {
-    launchCountdown();
+
+  // Show the loading overlay over ship-select while shaders compile.
+  // Skip the overlay if local warmup is already done (subsequent matches
+  // in the same session, or ship-swaps between rounds when warmup has
+  // long since finished) ; the promise will resolve on the next microtask
+  // and a one-frame flash of "PREPARING ARENA" would look weird.
+  if (!_localWarmupReady) {
+    try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   }
+
+  // Pre-compile shader programs for combat-effect materials. Hook the
+  // promise so we know when warmup is done and can proceed to the
+  // short visible countdown (solo) or the peer-ready handshake (MP).
+  // warmupCombatShaders is idempotent ; calling it again after the
+  // first session resolves immediately so the loading overlay flashes
+  // briefly then hides on subsequent commits.
+  let _warmupPromise;
+  try {
+    _warmupPromise = warmupCombatShaders();
+  } catch (_) {
+    _warmupPromise = Promise.resolve();
+  }
+  // Defensive: if warmupCombatShaders ever returned non-thenable, wrap.
+  if (!_warmupPromise || typeof _warmupPromise.then !== 'function') {
+    _warmupPromise = Promise.resolve();
+  }
+  _warmupPromise.then(() => {
+    // Local warmup is done ; mark ourselves ready and notify peers.
+    _markLocalWarmupReady();
+    if (net.active) {
+      // Multiplayer: show "waiting for peers" while the rest of the
+      // mesh finishes its warmup. checkAllLoadoutsReady (re-run by each
+      // incoming warmup_ready event) will broadcast launch_at when all
+      // peers AND loadouts are ready ; scheduleLaunch then hides the
+      // overlay and runs the short countdown.
+      try { showShipSelectWaiting(); } catch (_) {}
+      checkAllLoadoutsReady();
+    } else {
+      // Solo: hand straight off to the short visible countdown. Anchor
+      // warmupTimer to SHORT_COUNTDOWN so the round-system gate fires
+      // at the same wall-clock moment as the LAUNCH tick.
+      // (2026-05-21) Skip both the re-anchor and the countdown if another
+      // countdown is already in flight (between-rounds swap re-enters
+      // commitLoadout while the round-end → next-round 10s countdown is
+      // already ticking ; we don't want to stomp its anchor with a 3s
+      // value).
+      try { hideLoadingOverlay(); } catch (_) {}
+      if (!_countdownActive) {
+        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+        launchCountdown(LSS.SHORT_COUNTDOWN);
+      }
+    }
+  }).catch((e) => {
+    // Warmup failed unexpectedly ; don't strand the player on the
+    // loading screen. Fall back to launching anyway ; the first
+    // impact will hit a cold shader but at least the match starts.
+    console.warn('[commitLoadout] warmup failed, launching anyway:', e);
+    _markLocalWarmupReady();
+    try { hideLoadingOverlay(); } catch (_) {}
+    if (net.active) {
+      try { showShipSelectWaiting(); } catch (_) {}
+      checkAllLoadoutsReady();
+    } else if (!_countdownActive) {
+      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    }
+  });
 }
 
 function spawnBots() {
@@ -33347,12 +33323,24 @@ function returnToRootMenu() {
   // selectMap() short-circuits while net.worldMap or net.myReady is set ;
   // clear both so the picker is fully editable again. Peer.ready flags
   // also reset so the start handshake doesn't fire stale.
+  // (2026-05-21) Also tear down the loading overlay if it's somehow up
+  // (e.g. user hit Main Menu during the warmup splash), and clear the
+  // warmup-ready state machine. _localWarmupReady stays true across
+  // matches in the same session (warmupCombatShaders is one-shot
+  // per session, gated by _shaderWarmup.done), but peer.warmupReady
+  // flags need to clear so the next match's handshake re-collects
+  // them as peers re-confirm their warmup state.
+  try { hideLoadingOverlay(); } catch (_) {}
+  try { _clearLaunchCountdown(); } catch (_) {}
   if (typeof net !== 'undefined') {
     net.worldMap = null;
     net.worldSeed = null;
     net.myReady = false;
     if (net.peers) {
-      for (const peer of net.peers.values()) peer.ready = false;
+      for (const peer of net.peers.values()) {
+        peer.ready = false;
+        peer.warmupReady = false;       // (2026-05-21) clear warmup gate state
+      }
     }
   }
 
@@ -34947,19 +34935,8 @@ function _hudClass(el, key, v) {
 function updateHUD() {
   if (!player.chassis) return;
 
-  // Draw the circumpunct ring HUD. In VR the DOM HUD is hidden and mirrored
-  // through a CanvasTexture, so redrawing the source canvas every XR frame
-  // wastes CPU. Match the canvas redraw cadence to the texture upload cadence.
-  const _xrHudActive = (typeof isXRPresenting === 'function') ? isXRPresenting() : false;
-  let _drawHudCanvas = true;
-  if (_xrHudActive) {
-    const _cadence = (typeof _xrHudUpdateCadence === 'function') ? _xrHudUpdateCadence() : 2;
-    const _prev = (updateHUD._xrHudFrame == null) ? (_cadence - 1) : updateHUD._xrHudFrame;
-    updateHUD._xrHudFrame = (_prev + 1) % Math.max(1, _cadence);
-    _drawHudCanvas = (updateHUD._xrHudFrame === 0);
-  }
-  if (_drawHudCanvas) drawCircumpunctHUD();
-  if (_xrHudActive && !_drawHudCanvas) return;
+  // Draw the circumpunct ring HUD
+  drawCircumpunctHUD();
 
   // Core meter (keep DOM element updated for backward compat)
   const corePct = Math.min(100, player.coreMeter);
@@ -35932,12 +35909,81 @@ function _clearLaunchCountdown() {
   _activeLaunchTimers = [];
   _countdownActive = false;
 }
-function launchCountdown() {
+
+// (2026-05-21) Loading-overlay controller. The markup (#lss-loading-overlay
+// with the LSS_loading.png splash + text + sub-text) was already present
+// in the document; it was scaffolding from an earlier rolled-back match-
+// start handshake attempt. The new commitLoadout flow uses it to hide
+// the shader-warmup work behind a splash so the visible 3-2-1 countdown
+// can't lag mid-compile the way the old 10s countdown sometimes did.
+function showLoadingOverlay(mainText, subText) {
+  const ov = document.getElementById('lss-loading-overlay');
+  if (!ov) return;
+  if (mainText != null) {
+    const t = document.getElementById('lss-loading-text');
+    if (t) t.textContent = mainText;
+  }
+  if (subText != null) {
+    const s = document.getElementById('lss-loading-sub');
+    if (s) s.textContent = subText;
+  }
+  ov.classList.add('active');
+}
+function hideLoadingOverlay() {
+  const ov = document.getElementById('lss-loading-overlay');
+  if (ov) ov.classList.remove('active');
+}
+
+// (2026-05-21) Warmup-ready state machine. Tracks whether the local
+// shader warmup has finished, and (in multiplayer) coordinates with
+// peers so the visible 3-2-1 countdown only starts after every peer's
+// warmup is done. The flag is reset when a match ends or when the
+// player exits to the lobby ; see resetMatchState() / _clearWarmupReadyState.
+let _localWarmupReady = false;
+function _clearWarmupReadyState() {
+  _localWarmupReady = false;
+  if (typeof net !== 'undefined' && net && net.peers) {
+    for (const peer of net.peers.values()) {
+      if (peer) peer.warmupReady = false;
+    }
+  }
+}
+function _markLocalWarmupReady() {
+  _localWarmupReady = true;
+  // (2026-05-21) Always (re-)broadcast on commit. Peer.warmupReady gets
+  // cleared at match end (resetMatchState) so peers can re-collect the
+  // gate state for the next match. If we only sent the first time, peers
+  // would never re-learn we're ready and the next match's handshake
+  // would deadlock. Receiver is idempotent ; duplicate sends within a
+  // match just keep the flag at true. The send is cheap (a few bytes
+  // over the existing event channel) so we don't bother deduping.
+  if (typeof net !== 'undefined' && net.active && net.sendEvent) {
+    try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+  }
+}
+function _allPeersWarmupReady() {
+  if (typeof net === 'undefined' || !net.active) return true;       // solo
+  if (!net.peers || net.peers.size === 0) return true;              // alone in mesh
+  for (const peer of net.peers.values()) {
+    if (!peer || !peer.warmupReady) return false;
+  }
+  return true;
+}
+function launchCountdown(duration) {
+  // (2026-05-21) Duration is configurable. When called without an argument
+  // it defaults to the legacy 10s LAUNCH_COUNTDOWN (preserves any caller
+  // we missed). The new commitLoadout flow passes SHORT_COUNTDOWN (3s)
+  // because the shader-warmup work has already finished behind the
+  // loading overlay, so the visible countdown only needs to be a brief
+  // "get ready" beat.
   // If already running, do not reset. Ship swaps during countdown are allowed
   // by commitLoadout but must not restart the timer; the clock keeps ticking.
   if (_countdownActive) return;
   _clearLaunchCountdown();
   _countdownActive = true;
+  // Defensive: if the loading overlay is somehow still up (caller forgot
+  // to hide it), tear it down now so it doesn't cover the countdown.
+  try { hideLoadingOverlay(); } catch (_) {}
   const overlay = document.getElementById('ship-select-countdown');
   const numEl = overlay ? overlay.querySelector('.cd-num') : null;
   const subEl = overlay ? overlay.querySelector('.cd-sub') : null;
@@ -35960,7 +36006,10 @@ function launchCountdown() {
   // on LAUNCH. The silent head gives players time to settle before the pings.
   // START is shared with game.warmupTimer so the round system stays in
   // 'warmup' (no bot firing/movement) for the full visible countdown.
-  const START = LSS.LAUNCH_COUNTDOWN;
+  // (2026-05-21) For START <= 3, the silent body loop runs 0 iterations
+  // and the countdown is just the pings on 3, 2, 1 + LAUNCH ; that's the
+  // expected behaviour for the new short post-warmup countdown.
+  const START = (typeof duration === 'number' && duration > 0) ? duration : LSS.LAUNCH_COUNTDOWN;
   // First tick immediate (no sound).
   tick(String(START), 'LAUNCH IN');
   // Silent body: START-1 â†’ 4.
@@ -36610,7 +36659,7 @@ function buildSettingsPage() {
     <div class="settings-section">
       <h3>VR - Performance</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Standard keeps the visuals, and Quest browsers still get hidden cadence savings for gas lights, gas wakes, audio probes, and HUD canvas uploads. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
+        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
       </div>
       <div class="setting-row">
         <label>Performance Mode</label>
@@ -39431,7 +39480,6 @@ const BAKED_DEFAULTS = {
 
 
 function loadSettings() {
-  _lssSettingsLoaded = true;
   // First-run / cleared-storage seed: if no persisted settings exist, apply
   // the baked-in DEFAULT_WALL_CONFIG (from LSS_WALLS.json) so the curated
   // Soul Array pattern + tuned wallParams are live on first boot. The rest
@@ -44057,54 +44105,51 @@ function buildRoomGraphLevel(level) {
     // BufferGeometry costs nothing extra (Three.js reference-shares
     // the GPU buffers). renderOrder = -1 ensures the occluder runs
     // first within the opaque group.
-    if (!(typeof getVRBudgetTier === 'function' && getVRBudgetTier() >= 3)) {
-      const occluderMat = new THREE.MeshBasicMaterial({
-        colorWrite: false,
-        depthWrite: true,
-        side: THREE.BackSide,
-        // (v16a Phase Y fix) Bias the occluder's depth slightly farther
-        // than the visual wall to prevent z-fighting. The visual wall is
-        // a custom ShaderMaterial with its own vertex shader ; the
-        // occluder is MeshBasicMaterial with Three.js's stock vertex
-        // shader. They share the same geometry and transformations but
-        // independent shader programs can produce gl_Position values
-        // that differ by epsilons due to FP precision. Without offset,
-        // the visual wall's LEQUAL depth test sometimes fails, the
-        // navy-blue clear color (or skybox) bleeds through, and the
-        // wall appears to flicker. polygonOffset pushes the occluder's
-        // depth slightly farther so the visual wall is consistently
-        // CLOSER and always passes its depth test.
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1,
-      });
-      const occluderMesh = new THREE.Mesh(levelGeo, occluderMat);
-      occluderMesh.renderOrder = -1;
-      occluderMesh.userData = { isWallMesh: true, isWallOccluder: true };
-      // (v16a Phase Y) Skip raycasts on the occluder. The spatial-audio
-      // occlusion path (and any other code that calls intersectObjects on
-      // game.mapMeshes) would otherwise test the same shared BufferGeometry
-      // twice ; this no-op stops the duplicate work cleanly without having
-      // to change every consumer to filter by userData.isWallOccluder.
-      occluderMesh.raycast = function () {};
-      scene.add(occluderMesh);
-      game.mapMeshes.push(occluderMesh);
-    }
+    const occluderMat = new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      depthWrite: true,
+      side: THREE.BackSide,
+      // (v16a Phase Y fix) Bias the occluder's depth slightly farther
+      // than the visual wall to prevent z-fighting. The visual wall is
+      // a custom ShaderMaterial with its own vertex shader ; the
+      // occluder is MeshBasicMaterial with Three.js's stock vertex
+      // shader. They share the same geometry and transformations but
+      // independent shader programs can produce gl_Position values
+      // that differ by epsilons due to FP precision. Without offset,
+      // the visual wall's LEQUAL depth test sometimes fails, the
+      // navy-blue clear color (or skybox) bleeds through, and the
+      // wall appears to flicker. polygonOffset pushes the occluder's
+      // depth slightly farther so the visual wall is consistently
+      // CLOSER and always passes its depth test.
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    const occluderMesh = new THREE.Mesh(levelGeo, occluderMat);
+    occluderMesh.renderOrder = -1;
+    occluderMesh.userData = { isWallMesh: true, isWallOccluder: true };
+    // (v16a Phase Y) Skip raycasts on the occluder. The spatial-audio
+    // occlusion path (and any other code that calls intersectObjects on
+    // game.mapMeshes) would otherwise test the same shared BufferGeometry
+    // twice ; this no-op stops the duplicate work cleanly without having
+    // to change every consumer to filter by userData.isWallOccluder.
+    occluderMesh.raycast = function () {};
+    scene.add(occluderMesh);
+    game.mapMeshes.push(occluderMesh);
     return mesh;
   }
 
-  const finalGridRes = (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96;
-  const previewGridRes = Math.min(48, finalGridRes);
-
   // Worker available and enabled
   if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
+    // Dispatch low-res job first (gridRes=48)
     game.levelWorker.onmessage = (e) => {
       const {gridRes, positions} = e.data;
 
-      if (gridRes === previewGridRes && previewGridRes !== finalGridRes) {
-        createMeshFromPositions(positions, previewGridRes);
-        game.levelWorker.postMessage({bounds, gridRes: finalGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
-      } else if (gridRes === finalGridRes) {
+      if (gridRes === 48) {
+        const lowResMesh = createMeshFromPositions(positions, 48);
+        // Dispatch high-res job (gridRes=96)
+        game.levelWorker.postMessage({bounds, gridRes: 96, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
+      } else if (gridRes === 96) {
         // Remove low-res, add high-res.
         // (v16a Phase Y) createMeshFromPositions now adds TWO meshes per
         // call (visual + depth-only occluder), so clean out ALL existing
@@ -44113,17 +44158,17 @@ function buildRoomGraphLevel(level) {
           const oldMesh = game.mapMeshes.shift();
           if (oldMesh && oldMesh.parent) scene.remove(oldMesh);
         }
-        createMeshFromPositions(positions, finalGridRes);
+        createMeshFromPositions(positions, 96);
         // Hide loading UI
         if (mapGenHud) mapGenHud.style.display = 'none';
       }
     };
 
     // Start with low-res
-    game.levelWorker.postMessage({bounds, gridRes: previewGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
+    game.levelWorker.postMessage({bounds, gridRes: 48, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
   } else {
     // Fallback: synchronous marching cubes (no worker)
-    const gridRes = finalGridRes;
+    const gridRes = 96;
     const nx=gridRes,ny=gridRes,nz=gridRes;
     const dx=(bounds.maxX-bounds.minX)/nx;
     const dy=(bounds.maxY-bounds.minY)/ny;
@@ -46068,8 +46113,7 @@ function updateAmbientBed() {
   // Probe environment openness every 8th frame to drive reverb crossfade.
   if (audio.convolverWide && audio.convolverTight && audio.reverbWideGain && audio.reverbTightGain) {
     _envProbeCounter++;
-    const _probeMask = (typeof getVRThrottleTier === 'function' && getVRThrottleTier() > 0) ? 31 : 7;
-    if ((_envProbeCounter & _probeMask) === 0) {
+    if ((_envProbeCounter & 7) === 0) {
       const openness = probeEnvironmentOpenness();
       audio.envOpenness += (openness - audio.envOpenness) * 0.25;
     }
@@ -54277,52 +54321,6 @@ window.camera   = camera;
 window.renderer = renderer;
 window.input    = input;
 window.audio    = audio;
-window.lssPerfSnapshot = function lssPerfSnapshot() {
-  const bcs = (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null;
-  let bcsActive = 0;
-  if (bcs && bcs._activeSlots) {
-    for (let i = 0; i < bcs._activeSlots.length; i++) bcsActive += bcs._activeSlots[i] ? 1 : 0;
-  }
-  const info = renderer && renderer.info ? renderer.info : null;
-  return {
-    xr: !!(typeof isXRPresenting === 'function' && isXRPresenting()),
-    quest: !!(typeof isStandaloneQuest === 'function' && isStandaloneQuest()),
-    vrPerfMode: (typeof getVRPerfMode === 'function') ? getVRPerfMode() : null,
-    vrPerfTier: (typeof getVRPerfTier === 'function') ? getVRPerfTier() : 0,
-    vrThrottleTier: (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 0,
-    vrBudgetTier: (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0,
-    vrRenderScale: (typeof getEffectiveVRRenderScale === 'function') ? getEffectiveVRRenderScale() : null,
-    vrBudgets: (typeof getVRGasBudget === 'function') ? {
-      bcsMaxSlots: getVRGasBudget().bcsMaxSlots,
-      detachedPockets: getVRGasBudget().detachedPockets,
-      atomSmokeSegments: getVRGasBudget().atomSmokeSegments,
-      basinClouds: getVRGasBudget().basinClouds,
-      levelGridRes: (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96
-    } : null,
-    bcs: bcs ? {
-      maxSlots: bcs.maxSlots,
-      activeSlots: bcsActive,
-      drawnSlots: bcs._geo ? bcs._geo.instanceCount : null,
-      highestSlot: bcs._highestActiveSlot
-    } : null,
-    counts: {
-      effects: game && game.effects ? game.effects.length : 0,
-      particles: game && game.particles ? game.particles.length : 0,
-      projectiles: game && game.projectiles ? game.projectiles.length : 0,
-      dynamicLights: (typeof dynamicLights !== 'undefined' && dynamicLights.active) ? dynamicLights.active.length : 0,
-      layeredFxMaterials: (typeof _ACTIVE_LAYERED_FX !== 'undefined' && _ACTIVE_LAYERED_FX) ? _ACTIVE_LAYERED_FX.size : 0,
-      detachedGasPockets: game && game.detachedGasPockets ? game.detachedGasPockets.length : 0
-    },
-    rendererInfo: info ? {
-      calls: info.render.calls,
-      triangles: info.render.triangles,
-      points: info.render.points,
-      lines: info.render.lines,
-      textures: info.memory.textures,
-      geometries: info.memory.geometries
-    } : null
-  };
-};
 
 // ============================================================
 // (v12) Google Maps Photorealistic 3D Tiles module
