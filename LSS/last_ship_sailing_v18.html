@@ -20593,6 +20593,10 @@ function _ensureZoneColors() {
   if (!Array.isArray(game.zoneColors.obstacles) || game.zoneColors.obstacles.length !== 5) {
     game.zoneColors.obstacles = [null,null,null,null,null];
   }
+  // (2026-05-21) Default theme key so the settings dropdown always has
+  // a valid initial selection. loadSettings + applyZoneTheme override
+  // this with the persisted value during boot.
+  if (typeof game.zoneTheme !== 'string') game.zoneTheme = 'default';
   return game.zoneColors;
 }
 // Return the obstacle palette with overrides applied. The 5-slot array
@@ -20621,14 +20625,14 @@ function _getEffectiveWallSlotColor(i, levelPalette) {
   return ZONE_COLOR_DEFAULTS.walls[i % ZONE_COLOR_DEFAULTS.walls.length] | 0;
 }
 // (2026-05-21) Live-update entry point called by the Zone Colors settings
-// UI after the user changes a color picker. Walks the 8 wall slots and
-// re-derives wallRoomBaseHues from the current override + level palette ;
-// the per-frame hue-drift loop in gameLoop picks the new base hues up
-// on its next 6-frame tick and writes the resulting RGB to the wall
-// shader's roomColorsU uniform. No-op outside an active match (no
-// level palette to fall back to ; the next level build will pick the
-// overrides up via _getEffectiveWallSlotColor anyway).
+// UI after the user changes a color picker or theme. Walks the 8 wall slots
+// and re-derives wallRoomBaseHues from the current override + level palette,
+// then immediately pushes the resulting RGB to the wall shader's
+// roomColorsU uniform so the change is visible on the very next frame
+// (rather than waiting up to 6 frames for the hue-drift loop's next tick).
+// No-op outside an active match.
 const _zoneApplyTmpHsl = { h: 0, s: 0, l: 0 };
+const _zoneApplyTmpColor = new THREE.Color();
 function applyZoneColorOverrides() {
   if (typeof game === 'undefined' || !game || !Array.isArray(game.wallRoomBaseHues)) return;
   // Resolve the active map's palette so overrides cleanly fall through
@@ -20640,10 +20644,184 @@ function applyZoneColorOverrides() {
     ? _level.palette : _defaultPalette;
   for (let i = 0; i < game.wallRoomBaseHues.length && i < 8; i++) {
     const slotHex = _getEffectiveWallSlotColor(i, _levelPalette);
-    const c = new THREE.Color(slotHex);
-    c.getHSL(_zoneApplyTmpHsl);
+    _zoneApplyTmpColor.setHex(slotHex);
+    _zoneApplyTmpColor.getHSL(_zoneApplyTmpHsl);
     game.wallRoomBaseHues[i] = { h: _zoneApplyTmpHsl.h, s: _zoneApplyTmpHsl.s, l: _zoneApplyTmpHsl.l };
   }
+  // Push the new colors straight to the wall shader's uniform so the
+  // change is instant. The per-frame drift loop will overwrite this on
+  // its next tick when the theme is 'default' (drift wanted) ; for
+  // non-default themes the drift loop locks colors to wallRoomBaseHues
+  // (no time offset) so the picked values stay frozen.
+  if (game.levelMaterial && game.levelMaterial.uniforms &&
+      game.levelMaterial.uniforms.roomColorsU) {
+    const colors = game.levelMaterial.uniforms.roomColorsU.value;
+    const boost = game.wallPaletteBoost || 1.0;
+    for (let i = 0; i < colors.length && i < game.wallRoomBaseHues.length; i++) {
+      const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+      _zoneApplyTmpColor.setHSL(base.h, base.s, base.l);
+      colors[i].setRGB(
+        Math.min(1.0, _zoneApplyTmpColor.r * boost),
+        Math.min(1.0, _zoneApplyTmpColor.g * boost),
+        Math.min(1.0, _zoneApplyTmpColor.b * boost)
+      );
+    }
+  }
+}
+
+// (2026-05-21) Zone theme system. Each theme is a coherent visual identity
+// (all greens, all blues, rainbow, dark-to-light gradient, etc.) selected
+// from a dropdown in settings. Themes write directly into game.zoneColors,
+// so the obstacle spawn path + wall material build pick them up via the
+// same _getEffectiveObstacleColors / _getEffectiveWallSlotColor helpers.
+// The per-frame hue-drift loop locks to wallRoomBaseHues (no time offset)
+// when a non-default theme is active, so picked colors stay frozen ;
+// without that lock, the drift was rotating each slot's hue around the
+// full color wheel over ~4 minutes which made themes feel unstable.
+//
+// Two theme kinds:
+//   fixed     : 8 wall colors + 5 obstacle colors are explicit hex values.
+//               Same look on every map.
+//   gradient  : bottom + top hex pair ; per-slot wall color is lerped
+//               from each room's Y position (bottom-Y -> bottom color,
+//               top-Y -> top color) at apply time. Obstacles get a
+//               separate explicit palette since they're scattered, not
+//               positional. Re-applied on level build so the lerp
+//               recomputes against the new map's room layout.
+const ZONE_THEMES = {
+  'default': {
+    label: 'Map Default (animated drift)',
+    kind: 'default',
+  },
+  'verdant': {
+    label: 'Verdant (shades of green)',
+    kind: 'fixed',
+    walls:     [0x0a2010, 0x153020, 0x1f4525, 0x2a5a30, 0x35703a, 0x408548, 0x4d9b58, 0x5ab068],
+    obstacles: [0x2a5a30, 0x408548, 0x5ab068, 0x80c080, 0x1f4525],
+  },
+  'azure': {
+    label: 'Azure (shades of blue)',
+    kind: 'fixed',
+    walls:     [0x081428, 0x0e2040, 0x142c55, 0x1a386a, 0x204480, 0x2655a0, 0x2c66c0, 0x3677d8],
+    obstacles: [0x1a386a, 0x2655a0, 0x3677d8, 0x6090e0, 0x142c55],
+  },
+  'ember': {
+    label: 'Ember (shades of red & orange)',
+    kind: 'fixed',
+    walls:     [0x2a0a05, 0x40180a, 0x55260f, 0x6a3415, 0x80421a, 0x9b521f, 0xb56225, 0xd0762a],
+    obstacles: [0x6a3415, 0x9b521f, 0xd0762a, 0xff9a40, 0x55260f],
+  },
+  'twilight': {
+    label: 'Twilight (shades of purple)',
+    kind: 'fixed',
+    walls:     [0x180a28, 0x251040, 0x301858, 0x3c2070, 0x482888, 0x5530a0, 0x6238b8, 0x7044d0],
+    obstacles: [0x3c2070, 0x5530a0, 0x7044d0, 0xa060e8, 0x301858],
+  },
+  'rainbow': {
+    label: 'Rainbow (full spectrum)',
+    kind: 'fixed',
+    walls:     [0x802020, 0x803c20, 0x806820, 0x308020, 0x208068, 0x206080, 0x202080, 0x602080],
+    obstacles: [0x802020, 0x806820, 0x308020, 0x206080, 0x602080],
+  },
+  'aurora': {
+    label: 'Aurora (teals & magentas)',
+    kind: 'fixed',
+    walls:     [0x0a2030, 0x153a40, 0x205050, 0x2a6a55, 0x408855, 0x6aa05a, 0x8a8a70, 0xb05a90],
+    obstacles: [0x2a6a55, 0x408855, 0x6aa05a, 0xb05a90, 0x205050],
+  },
+  'forest': {
+    label: 'Forest Canopy (green bottom, sky top)',
+    kind: 'gradient',
+    bottom: 0x1a3010,                                  // deep forest green
+    top:    0x2a5080,                                  // sky blue
+    obstacles: [0x1a3010, 0x305020, 0x4a7050, 0x2a4060, 0x2a5080],
+  },
+  'volcanic': {
+    label: 'Volcanic (red bottom, gold top)',
+    kind: 'gradient',
+    bottom: 0x4a1005,                                  // deep crimson
+    top:    0xb0902a,                                  // gold-amber
+    obstacles: [0x4a1005, 0x803020, 0x9a5520, 0xb07020, 0xb0902a],
+  },
+  'abyss': {
+    label: 'Abyss (dark bottom, pale top)',
+    kind: 'gradient',
+    bottom: 0x080a10,                                  // near-black
+    top:    0xccd4e0,                                  // pale gray-blue
+    obstacles: [0x080a10, 0x303440, 0x606878, 0x9098a8, 0xccd4e0],
+  },
+};
+
+// Compute the 8 wall hexes + 5 obstacle hexes for a given theme, given
+// the current map's room data. Returns { walls: number[8], obstacles:
+// number[5] } so callers can either write the result into game.zoneColors
+// (the normal apply path) or just preview it (the settings UI swatches).
+const _zoneThemeTmpRgb = { r: 0, g: 0, b: 0 };
+function _computeZoneThemeColors(themeName) {
+  const theme = ZONE_THEMES[themeName] || ZONE_THEMES.default;
+  const out = { walls: [null,null,null,null,null,null,null,null], obstacles: [null,null,null,null,null] };
+  if (theme.kind === 'default') return out;
+  if (theme.kind === 'fixed') {
+    for (let i = 0; i < 8; i++) out.walls[i]     = (theme.walls && theme.walls[i] != null) ? (theme.walls[i] | 0) : null;
+    for (let i = 0; i < 5; i++) out.obstacles[i] = (theme.obstacles && theme.obstacles[i] != null) ? (theme.obstacles[i] | 0) : null;
+    return out;
+  }
+  if (theme.kind === 'gradient') {
+    const rooms = (typeof game !== 'undefined' && game && Array.isArray(game.sdfRoomData)) ? game.sdfRoomData : null;
+    const bottomC = new THREE.Color(theme.bottom);
+    const topC    = new THREE.Color(theme.top);
+    if (rooms && rooms.length > 0) {
+      // Y-range across the active map's rooms.
+      let minY = Infinity, maxY = -Infinity;
+      for (const r of rooms) { if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y; }
+      const range = Math.max(1, maxY - minY);
+      const tmpC = new THREE.Color();
+      for (let i = 0; i < 8; i++) {
+        if (i < rooms.length) {
+          const t = Math.max(0, Math.min(1, (rooms[i].y - minY) / range));
+          tmpC.copy(bottomC).lerp(topC, t);
+          out.walls[i] = ((Math.round(tmpC.r * 255) << 16) | (Math.round(tmpC.g * 255) << 8) | Math.round(tmpC.b * 255)) | 0;
+        } else {
+          out.walls[i] = bottomC.getHex();
+        }
+      }
+    } else {
+      // No level built yet ; fall back to a Y-uniform lerp over slot index
+      // so the settings-panel preview still has something useful to show.
+      const tmpC = new THREE.Color();
+      for (let i = 0; i < 8; i++) {
+        const t = i / 7;
+        tmpC.copy(bottomC).lerp(topC, t);
+        out.walls[i] = ((Math.round(tmpC.r * 255) << 16) | (Math.round(tmpC.g * 255) << 8) | Math.round(tmpC.b * 255)) | 0;
+      }
+    }
+    for (let i = 0; i < 5; i++) out.obstacles[i] = (theme.obstacles && theme.obstacles[i] != null) ? (theme.obstacles[i] | 0) : null;
+    return out;
+  }
+  return out;
+}
+
+// Apply a theme by key. Writes the computed colors into game.zoneColors,
+// updates game.zoneTheme, pushes the change to the wall shader, and
+// persists the choice. Gradient themes re-apply on level build because
+// their per-slot colors depend on the new map's room positions.
+function applyZoneTheme(themeName) {
+  const key = (themeName in ZONE_THEMES) ? themeName : 'default';
+  if (typeof game === 'undefined' || !game) return;
+  game.zoneTheme = key;
+  const z = _ensureZoneColors();
+  if (!z) return;
+  if (key === 'default') {
+    // Clear all overrides ; map palette + hue drift take over.
+    for (let i = 0; i < 8; i++) z.walls[i]     = null;
+    for (let i = 0; i < 5; i++) z.obstacles[i] = null;
+  } else {
+    const computed = _computeZoneThemeColors(key);
+    for (let i = 0; i < 8; i++) z.walls[i]     = (typeof computed.walls[i]     === 'number') ? computed.walls[i]     : null;
+    for (let i = 0; i < 5; i++) z.obstacles[i] = (typeof computed.obstacles[i] === 'number') ? computed.obstacles[i] : null;
+  }
+  try { applyZoneColorOverrides(); } catch (_) {}
+  try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
 }
 
 class DestructibleObstacle {
@@ -36861,52 +37039,57 @@ function buildSettingsPage() {
     <div class="settings-section">
       <h3>Zone Colors</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Override the color of each wall zone and obstacle palette slot. Empty (default) = use the map's built-in color. Wall zones update live ; obstacle changes affect newly-spawned obstacles only. Note: presets with a fixed palette (Matrix, Slime, Toxin, Ooze, Phasm) still lock all wall zones to their tint while active.</label>
+        <label style="flex:1;">Pick a coherent color theme for the wall zones and floating obstacles. "Map Default" uses each map's built-in palette with a slow hue drift ; every other theme locks the colors so what you see is what stays. Gradient themes (Forest, Volcanic, Abyss) lerp by each room's height. Note: wall-pattern presets with a fixed palette (Matrix, Slime, Toxin, Ooze, Phasm) still lock all wall zones to their tint while active.</label>
       </div>
-      <div class="setting-row" style="margin-top:6px; flex-direction:column; align-items:stretch; gap:4px;">
-        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">WALL ZONES (8)</div>
-        ${(function() {
-          const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
-          const defaults = ZONE_COLOR_DEFAULTS.walls;
-          const hexStr = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
-          let out = '';
-          for (let i = 0; i < 8; i++) {
-            const ov = (z && typeof z.walls[i] === 'number') ? z.walls[i] : null;
-            const val = (ov != null) ? hexStr(ov) : hexStr(defaults[i]);
-            const isOverride = (ov != null);
-            out += `<div class="setting-row" style="gap:6px;">
-              <label style="min-width:70px;">Zone ${i + 1}</label>
-              <input type="color" id="set-zone-wall-${i}" value="${val}" style="width:48px; height:28px; padding:0; border:1px solid rgba(255,255,255,0.25); background:#000;">
-              <span id="val-zone-wall-${i}" style="font-family:monospace; font-size:0.85em; opacity:0.75; min-width:80px;">${isOverride ? val.toUpperCase() : '(default)'}</span>
-              <button class="zone-reset-btn" data-zone-kind="wall" data-zone-idx="${i}" style="padding:2px 8px; font-size:0.8em;">Reset</button>
-            </div>`;
-          }
-          return out;
-        })()}
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-zone-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const keys = Object.keys(ZONE_THEMES);
+            let out = '';
+            for (const k of keys) {
+              const t = ZONE_THEMES[k];
+              const sel = (k === cur) ? ' selected' : '';
+              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
+            }
+            return out;
+          })()}
+        </select>
       </div>
-      <div class="setting-row" style="margin-top:10px; flex-direction:column; align-items:stretch; gap:4px;">
-        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">OBSTACLE COLORS (5)</div>
-        ${(function() {
-          const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
-          const defaults = ZONE_COLOR_DEFAULTS.obstacles;
-          const hexStr = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
-          let out = '';
-          for (let i = 0; i < 5; i++) {
-            const ov = (z && typeof z.obstacles[i] === 'number') ? z.obstacles[i] : null;
-            const val = (ov != null) ? hexStr(ov) : hexStr(defaults[i]);
-            const isOverride = (ov != null);
-            out += `<div class="setting-row" style="gap:6px;">
-              <label style="min-width:70px;">Color ${i + 1}</label>
-              <input type="color" id="set-zone-obst-${i}" value="${val}" style="width:48px; height:28px; padding:0; border:1px solid rgba(255,255,255,0.25); background:#000;">
-              <span id="val-zone-obst-${i}" style="font-family:monospace; font-size:0.85em; opacity:0.75; min-width:80px;">${isOverride ? val.toUpperCase() : '(default)'}</span>
-              <button class="zone-reset-btn" data-zone-kind="obst" data-zone-idx="${i}" style="padding:2px 8px; font-size:0.8em;">Reset</button>
-            </div>`;
-          }
-          return out;
-        })()}
-      </div>
-      <div class="setting-row" style="margin-top:10px;">
-        <button id="zone-reset-all">Reset All Zone Colors</button>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW (walls / obstacles)</div>
+        <div id="zone-theme-preview-walls" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const comp = _computeZoneThemeColors(cur);
+            const defaults = ZONE_COLOR_DEFAULTS.walls;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let out = '';
+            for (let i = 0; i < 8; i++) {
+              const c = (typeof comp.walls[i] === 'number') ? comp.walls[i] : defaults[i];
+              out += '<div style="flex:1; height:30px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Zone ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+        <div id="zone-theme-preview-obst" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const comp = _computeZoneThemeColors(cur);
+            const defaults = ZONE_COLOR_DEFAULTS.obstacles;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let out = '';
+            for (let i = 0; i < 5; i++) {
+              const c = (typeof comp.obstacles[i] === 'number') ? comp.obstacles[i] : defaults[i];
+              out += '<div style="flex:1; height:22px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Obstacle ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+        <div class="setting-row" style="opacity:0.65; font-size:0.8em;">
+          <label style="flex:1;">Wall zones update live. Obstacle changes affect only newly-spawned obstacles (next round respawn).</label>
+        </div>
       </div>
     </div>
 
@@ -37382,90 +37565,40 @@ function buildSettingsPage() {
     });
   }
 
-  // (2026-05-21) Zone Colors handlers. Each color picker writes its hex
-  // back into game.zoneColors, persists via saveSettings, refreshes its
-  // value label, and (for wall zones) calls applyZoneColorOverrides()
-  // so the per-frame hue-drift loop picks up the new base hue on its
-  // next tick (~6 frames, imperceptible). Obstacle changes are picked
-  // up at next obstacle spawn via _getEffectiveObstacleColors().
-  const _zoneHexToInt = (s) => {
-    const m = /^#?([0-9a-fA-F]{6})$/.exec(String(s || ''));
-    return m ? parseInt(m[1], 16) : null;
-  };
-  const _zoneRefreshLabel = (kind, i, hex, isOverride) => {
-    const lbl = overlay.querySelector('#val-zone-' + (kind === 'wall' ? 'wall' : 'obst') + '-' + i);
-    if (lbl) lbl.textContent = isOverride ? hex.toUpperCase() : '(default)';
-  };
-  for (let i = 0; i < 8; i++) {
-    const inp = overlay.querySelector('#set-zone-wall-' + i);
-    if (!inp) continue;
-    inp.addEventListener('input', (e) => {
-      const hex = e.target.value;
-      const n = _zoneHexToInt(hex);
-      if (n == null) return;
-      const z = _ensureZoneColors();
-      if (!z) return;
-      z.walls[i] = n;
-      _zoneRefreshLabel('wall', i, hex, true);
-      try { applyZoneColorOverrides(); } catch (_) {}
-      try { saveSettings(); } catch (_) {}
-    });
-  }
-  for (let i = 0; i < 5; i++) {
-    const inp = overlay.querySelector('#set-zone-obst-' + i);
-    if (!inp) continue;
-    inp.addEventListener('input', (e) => {
-      const hex = e.target.value;
-      const n = _zoneHexToInt(hex);
-      if (n == null) return;
-      const z = _ensureZoneColors();
-      if (!z) return;
-      z.obstacles[i] = n;
-      _zoneRefreshLabel('obst', i, hex, true);
-      try { saveSettings(); } catch (_) {}
-    });
-  }
-  // Per-row reset buttons clear the slot's override (null) so the slot
-  // falls back to the map's palette (walls) or OBSTACLE_COLORS (obstacles).
-  const resetBtns = overlay.querySelectorAll('.zone-reset-btn');
-  for (const btn of resetBtns) {
-    btn.addEventListener('click', () => {
-      const kind = btn.getAttribute('data-zone-kind');
-      const i = parseInt(btn.getAttribute('data-zone-idx'), 10) | 0;
-      const z = _ensureZoneColors();
-      if (!z) return;
-      if (kind === 'wall') {
-        z.walls[i] = null;
-        const def = ZONE_COLOR_DEFAULTS.walls[i];
-        const defHex = '#' + ((def | 0) & 0xffffff).toString(16).padStart(6, '0');
-        const inp = overlay.querySelector('#set-zone-wall-' + i);
-        if (inp) inp.value = defHex;
-        _zoneRefreshLabel('wall', i, defHex, false);
-        try { applyZoneColorOverrides(); } catch (_) {}
-      } else {
-        z.obstacles[i] = null;
-        const def = ZONE_COLOR_DEFAULTS.obstacles[i];
-        const defHex = '#' + ((def | 0) & 0xffffff).toString(16).padStart(6, '0');
-        const inp = overlay.querySelector('#set-zone-obst-' + i);
-        if (inp) inp.value = defHex;
-        _zoneRefreshLabel('obst', i, defHex, false);
+  // (2026-05-21) Zone theme dropdown handler. Selecting a theme calls
+  // applyZoneTheme which writes per-slot colors into game.zoneColors,
+  // pushes them to the wall shader uniform immediately, persists via
+  // saveSettings, and refreshes the preview swatches inline so the
+  // user can see the new colors without scrolling the panel.
+  const _zoneRefreshSwatches = () => {
+    const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+    const comp = _computeZoneThemeColors(cur);
+    const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    const wallsHost = overlay.querySelector('#zone-theme-preview-walls');
+    const obstHost  = overlay.querySelector('#zone-theme-preview-obst');
+    if (wallsHost) {
+      let out = '';
+      for (let i = 0; i < 8; i++) {
+        const c = (typeof comp.walls[i] === 'number') ? comp.walls[i] : ZONE_COLOR_DEFAULTS.walls[i];
+        out += '<div style="flex:1; height:30px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Zone ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
       }
-      try { saveSettings(); } catch (_) {}
-    });
-  }
-  // "Reset All Zone Colors" : wipe every override and rebuild the panel
-  // so all the pickers show their default values + (default) labels.
-  const resetAllBtn = overlay.querySelector('#zone-reset-all');
-  if (resetAllBtn) {
-    resetAllBtn.addEventListener('click', () => {
-      const z = _ensureZoneColors();
-      if (z) {
-        for (let i = 0; i < z.walls.length; i++)     z.walls[i] = null;
-        for (let i = 0; i < z.obstacles.length; i++) z.obstacles[i] = null;
+      wallsHost.innerHTML = out;
+    }
+    if (obstHost) {
+      let out = '';
+      for (let i = 0; i < 5; i++) {
+        const c = (typeof comp.obstacles[i] === 'number') ? comp.obstacles[i] : ZONE_COLOR_DEFAULTS.obstacles[i];
+        out += '<div style="flex:1; height:22px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Obstacle ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
       }
-      try { applyZoneColorOverrides(); } catch (_) {}
-      try { saveSettings(); } catch (_) {}
-      try { buildSettingsPage(); } catch (_) {}
+      obstHost.innerHTML = out;
+    }
+  };
+  const themeSel = overlay.querySelector('#set-zone-theme');
+  if (themeSel) {
+    themeSel.addEventListener('change', e => {
+      const name = String(e.target.value || 'default');
+      try { applyZoneTheme(name); } catch (err) { console.warn('[zone theme] apply failed:', err); }
+      _zoneRefreshSwatches();
     });
   }
 
@@ -38447,9 +38580,13 @@ function saveSettings() {
       // empty string for None. Persisted so the lobby remembers the
       // last chosen preset across reloads.
       mapPreset:    (typeof game.mapPreset === 'string') ? game.mapPreset : '',
-      // (2026-05-21) Per-zone color overrides ; walls (8 slots) + obstacles
-      // (5 slots). Each slot is either a hex number (override) or null
-      // (use default). Whole object may be undefined on first session.
+      // (2026-05-21) Zone color overrides + theme key. zoneColors carries
+      // the resolved per-slot hexes (so older code that reads game.zoneColors
+      // directly keeps working) ; zoneTheme is the theme key the user
+      // selected from the dropdown. On load we re-apply the theme so
+      // the colors recompute (especially gradient themes that depend on
+      // the new session's map layout).
+      zoneTheme:    (typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default',
       zoneColors:   (function() {
         const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
         if (!z) return undefined;
@@ -39990,10 +40127,11 @@ function loadSettings() {
     // match the restored choice. Safe even if the lobby DOM isn't
     // built yet ; _updateSkyUI() guards every getElementById.
     if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
-    // (2026-05-21) Restore zone-color overrides. Walls and obstacles
-    // are independent slot arrays ; each entry is either a number (hex
-    // override) or null (use map/default). Length-coerced so a future
-    // schema bump that adds/removes slots doesn't crash.
+    // (2026-05-21) Restore zone theme. We also restore zoneColors as a
+    // fallback for older save files (pre-theme schema), but the theme
+    // key takes precedence : applyZoneTheme will recompute the per-slot
+    // colors from the theme definition (especially gradient themes,
+    // whose colors depend on the current map's room positions).
     try {
       const _zc = data.zoneColors;
       if (_zc && typeof _zc === 'object') {
@@ -40012,6 +40150,14 @@ function loadSettings() {
             }
           }
         }
+      }
+      // Theme key wins ; if set and valid, re-apply so per-slot colors
+      // recompute. Unknown theme keys fall back to 'default'.
+      const _zt = (typeof data.zoneTheme === 'string') ? data.zoneTheme : 'default';
+      if (typeof applyZoneTheme === 'function') {
+        applyZoneTheme(_zt);
+      } else if (typeof game !== 'undefined' && game) {
+        game.zoneTheme = (typeof ZONE_THEMES !== 'undefined' && (_zt in ZONE_THEMES)) ? _zt : 'default';
       }
     } catch (_) { /* zone color restore is non-fatal */ }
   } catch(e) {}
@@ -44470,6 +44616,18 @@ function buildRoomGraphLevel(level) {
       pushWallParamsToUniforms();
     }
 
+    // (2026-05-21) Re-apply the zone theme after the wall material is
+    // built. Necessary for gradient themes (Forest, Volcanic, Abyss)
+    // whose per-slot colors are lerped from each room's Y position ;
+    // game.sdfRoomData just changed when the new level was built so
+    // the previous lerp is stale. For fixed-color themes this is a
+    // cheap no-op that re-writes the same values. For 'default' it
+    // clears overrides (already cleared by loadSettings on first boot,
+    // and a no-op on subsequent level builds when no theme is active).
+    if (typeof applyZoneTheme === 'function' && typeof game.zoneTheme === 'string') {
+      try { applyZoneTheme(game.zoneTheme); } catch (_) {}
+    }
+
     const mesh = new THREE.Mesh(levelGeo, sdfMat);
     // (v14) Tag every wall mesh so scene-walk cleanup can identify it
     // even when game.mapMeshes loses track during the gmaps-overlay
@@ -45687,11 +45845,30 @@ function gameLoop(timestamp) {
         ? MULTI_LAYER_PRESETS[game.wallPattern | 0] : null;
       const _paletteOverride = (_activePreset && typeof _activePreset.paletteOverride === 'number')
         ? _activePreset.paletteOverride : null;
+      // (2026-05-21) Zone-theme lock. When the user picked a non-default
+      // theme from settings, freeze the drift so the picked colors stay
+      // exactly as chosen ; without this lock, the drift was rotating
+      // each slot's hue around the full color wheel over ~4 minutes,
+      // which made themes feel inconsistent ("the colors are never the
+      // same after messing with them"). Map Default keeps the drift.
+      const _themeActive = (typeof game.zoneTheme === 'string') && game.zoneTheme !== 'default';
       if (_paletteOverride !== null) {
         // Lock all 8 room slots to the override hex. The hue-drift loop
         // below is skipped while this preset is active.
         for (let i = 0; i < colors.length; i++) {
           colors[i].setHex(_paletteOverride);
+        }
+      } else if (_themeActive) {
+        // Theme is active : lock to wallRoomBaseHues without time offset
+        // so picked colors don't walk around the wheel. wallRoomBaseHues
+        // was set from the theme by applyZoneColorOverrides.
+        for (let i = 0; i < colors.length; i++) {
+          const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+          _wallHueScratchColor.setHSL(base.h, base.s, base.l);
+          const r = Math.min(1.0, _wallHueScratchColor.r * boost);
+          const g = Math.min(1.0, _wallHueScratchColor.g * boost);
+          const b = Math.min(1.0, _wallHueScratchColor.b * boost);
+          colors[i].setRGB(r, g, b);
         }
       } else {
       // Mutating each THREE.Color is fine because Three.js samples the
