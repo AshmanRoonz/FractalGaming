@@ -11835,9 +11835,17 @@ function _xrDrawAuxHud() {
 // menu into a canvas every ~250 ms, which is then mirrored on a 3D plane
 // floating in front of the dolly. Existing gamepad/d-pad navigation works
 // unchanged; this is purely a "render the existing DOM in stereo" path.
+// (v18VR 2026-05-22 round 4) Canvas bumped 1024 -> 2048 and the plane
+// enlarged from 2.4m to 3.4m at 2m distance so text is readable inside
+// the headset. With Quest 2 per-eye native at ~1832 horizontal and the
+// plane covering ~80° FOV at this size, the new texture supersamples
+// the eye view slightly instead of being downsampled : letters render
+// crisp instead of blurry. Memory cost is 2048² × 4 bytes = 16 MB ; the
+// HUD canvas tier already runs textures larger than this so we're not
+// near any new ceiling.
 const _xrMenuCanvas = document.createElement('canvas');
-_xrMenuCanvas.width = 1024;
-_xrMenuCanvas.height = 1024;
+_xrMenuCanvas.width = 2048;
+_xrMenuCanvas.height = 2048;
 const _xrMenuCtx = _xrMenuCanvas.getContext('2d');
 let _xrMenuTex = null;
 let xrMenuMesh = null;
@@ -11851,9 +11859,11 @@ function _xrEnsureMenuMesh() {
   _xrMenuTex.magFilter = THREE.LinearFilter;
   _xrMenuTex.format = THREE.RGBAFormat;
   _xrMenuTex.generateMipmaps = false;
-  // Comfortable reading distance: 2.0m, large enough to read text. Square
-  // because the source DOM is variable aspect; we letterbox inside.
-  const geo = new THREE.PlaneGeometry(2.4, 2.4);
+  // (v18VR 2026-05-22 round 4) Plane bumped 2.4m -> 3.4m (covers ~80°
+  // horizontal FOV at the 2m reading distance ; reads as a large
+  // billboard sitting just past arm's reach). Square because the source
+  // DOM is variable aspect ; we letterbox inside.
+  const geo = new THREE.PlaneGeometry(3.4, 3.4);
   const mat = new THREE.MeshBasicMaterial({
     map: _xrMenuTex,
     transparent: true,
@@ -11880,9 +11890,14 @@ function _xrRasterizeMenu(targetEl) {
   // overlay can reflow under us during async work.
   const w = Math.max(64, targetEl.offsetWidth  || 800);
   const h = Math.max(64, targetEl.offsetHeight || 600);
+  // (v18VR 2026-05-22 round 4) html2canvas scale bumped 1 -> 2 so the
+  // intermediate raster is rendered at 2x DPR before being downsampled
+  // into the menu canvas. With the destination canvas now 2048², the
+  // 2x source preserves text edges that the old 1x source was throwing
+  // away during the upscale.
   html2canvas(targetEl, {
     backgroundColor: null,
-    scale: 1,
+    scale: 2,
     logging: false,
     width: w,
     height: h,
@@ -11909,19 +11924,47 @@ function _xrRasterizeMenu(targetEl) {
   });
 }
 
-// (v18VR 2026-05-22) Menu mirror disabled. Earlier builds rasterized the
-// active menu DOM with html2canvas at 250 ms cadence and projected it onto
-// a 3D plane inside the headset ; the result was unreadable, gamepad nav
-// was awkward, and the html2canvas pass alone cost several ms per refresh.
-// The new flow exits the XR session whenever any flat-screen menu opens
-// (see the DOM-driven watcher inside gameLoop) and auto-resumes 5 s after
-// it closes, so the user always interacts with menus on the flat screen
-// at full fidelity. The function is preserved as a no-op so existing
-// per-frame call sites keep linking ; the mesh is kept hidden if it was
-// ever created.
+// (v18VR 2026-05-22 round 4) Menu mirror restored at higher fidelity.
+// Each frame in VR, decide which flat menu (if any) is on top, and
+// rasterize it onto the 3D billboard at most every 250 ms. Switching
+// menus forces an immediate rebuild so the user sees the new screen
+// right away. The plane + canvas size + html2canvas scale bumps above
+// take the result from "blurry, unusable" to legible inside the
+// headset.
 function _xrUpdateMenuMirror() {
-  if (xrMenuMesh) xrMenuMesh.visible = false;
-  _xrMenuLastTarget = null;
+  if (!renderer.xr.isPresenting) {
+    if (xrMenuMesh) xrMenuMesh.visible = false;
+    return;
+  }
+  let target = null;
+  if (typeof settingsOpen !== 'undefined' && settingsOpen) {
+    target = document.getElementById('settings-overlay');
+  } else {
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) target = sel;
+    if (!target) {
+      const lob = document.getElementById('lobby');
+      // #lobby uses position:fixed so offsetParent is always null ; check
+      // its inline display directly instead.
+      if (lob && lob.style.display !== 'none') target = lob;
+    }
+  }
+  const mesh = _xrEnsureMenuMesh();
+  if (!target) {
+    mesh.visible = false;
+    _xrMenuLastTarget = null;
+    return;
+  }
+  mesh.visible = true;
+  const now = performance.now();
+  if (target !== _xrMenuLastTarget) {
+    // Switched menus : rebuild immediately so the user sees the new
+    // screen on the very next frame instead of waiting up to 250 ms.
+    _xrMenuLastTarget = target;
+    _xrRasterizeMenu(target);
+  } else if (now - _xrMenuLastRasterTime > 250) {
+    _xrRasterizeMenu(target);
+  }
 }
 
 // 3D enemy health bars. The flat-screen HUD uses #enemy-healthbars (DOM
@@ -35088,15 +35131,15 @@ function pollGamepad() {
     if (settingsOpen) {
       closeSettings();
     } else if (renderer.xr && renderer.xr.isPresenting) {
-      // Stamp the intentional-end window before session.end() so a
-      // transient context loss inside end() doesn't auto-reload the page.
-      try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
-      const _xrSess = renderer.xr.getSession();
-      if (_xrSess) { try { _xrSess.end(); } catch (_) {} }
-      _xrPendingResume = true; // closeSettings will start a 5s auto-resume
-      // Defer until after the session-end teardown completes so the
-      // overlay isn't competing with the XR cleanup.
-      setTimeout(() => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, 120);
+      // (v18VR 2026-05-22 round 4) The Open Settings VR button used to
+      // end the session and re-enter via a 5s resume countdown. That
+      // path was unreliable on Quest (occasional transient context drop
+      // triggered the auto-reload trap). With the menu mirror restored
+      // at usable fidelity, settings can stay in stereo : the overlay
+      // opens, _xrUpdateMenuMirror picks it up next frame and the user
+      // navigates with the gamepad bindings already wired through.
+      buildSettingsPage();
+      openSettings();
     } else {
       buildSettingsPage();
       openSettings();
@@ -47293,74 +47336,16 @@ function gameLoop(timestamp) {
   // (just before render) will lift that pose up to the dolly.
   _xrResetDollyAtFrameStart();
 
-  // (VR fork ; v18VR 2026-05-22 round 2) DOM-driven watcher with a
-  // launch-aware resume trigger. Two-phase design :
-  //
-  //   PHASE A : detect that a flat-screen menu just opened while in VR ;
-  //             end the session so the user can read the UI on the
-  //             desktop / 2D display. Triggers : ship-select panel
-  //             becoming .active, settings overlay open, lobby visible,
-  //             game.state matchEnd / select. The session-end teardown
-  //             (resize, RT realloc, camera reparent) runs once here.
-  //
-  //   PHASE B : decide WHEN to re-enter VR for the next round. The old
-  //             version started the 5s "PUT ON HEADSET" countdown the
-  //             moment ship-select hid (LAUNCH tick) ; problem is the
-  //             round starts at the SAME moment, so the player missed
-  //             the first ~5s of gameplay on flat screen while the
-  //             countdown ran. The new trigger fires when warmupTimer
-  //             drops below ~5.5s during the between-rounds warmup, so
-  //             the resume countdown finishes right when the round
-  //             starts. _xrResumeArmedForWarmup gates this to once per
-  //             warmup phase so we don't double-fire.
-  const _xrSel  = document.getElementById('ship-select');
-  const _xrLob  = document.getElementById('lobby');
-  const _xrSelActive = !!(_xrSel  && _xrSel.classList.contains('active'));
-  const _xrSetActive = (typeof settingsOpen !== 'undefined' && !!settingsOpen);
-  const _xrLobActive = !!(_xrLob  && _xrLob.style.display !== 'none' && _xrLob.offsetParent !== null);
-  const nowMenu = _xrSelActive || _xrSetActive || _xrLobActive
-                  || game.state === 'select' || game.state === 'matchEnd';
-  // Phase A : edge-triggered session end. Arm the warmup-aware resume
-  // path only when the menu opened during a between-rounds transition
-  // (roundEnd / warmup) ; an in-match settings open stays on the regular
-  // "resume when menu closes" path so the user is back in VR the moment
-  // they close settings.
-  if (nowMenu !== _xrLastSeenMenu) {
-    if (nowMenu && renderer.xr && renderer.xr.isPresenting) {
-      // Stamp BEFORE calling end() so the context-loss guard sees the
-      // window even if the loss event fires synchronously inside end().
-      try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
-      const _xs = renderer.xr.getSession();
-      if (_xs) { try { _xs.end(); } catch (_) {} }
-      _xrPendingResume = true;
-      if (game.state === 'roundEnd' || game.state === 'warmup') {
-        _xrResumeArmedForWarmup = true;
-      }
-    } else if (!nowMenu && _xrPendingResume && !_xrResumeArmedForWarmup) {
-      // Left a non-warmup menu (settings closed mid-match etc.) ; resume now.
-      try { _xrStartResumeCountdown(5); _xrPendingResume = false; } catch (_) {}
-    }
-    _xrLastSeenMenu = nowMenu;
-  }
-  // Phase B : pre-launch resume during between-rounds warmup. Fire when
-  // warmupTimer drops below 5.5s so the 5s "PUT ON HEADSET" countdown
-  // completes right as the round starts ; the player is already back in
-  // VR when ship-select hides and gameplay resumes.
-  if (_xrPendingResume && _xrResumeArmedForWarmup
-      && game.state === 'warmup'
-      && typeof game.warmupTimer === 'number'
-      && game.warmupTimer > 0
-      && game.warmupTimer <= 5.5) {
-    try { _xrStartResumeCountdown(5); } catch (_) {}
-    _xrPendingResume = false;
-    _xrResumeArmedForWarmup = false;
-  }
-  // Reset the warmup-arm flag once we leave warmup (e.g. the user closed
-  // settings mid-warmup and we never made it to the timer trigger, or
-  // they went to the main menu).
-  if (game.state !== 'warmup' && game.state !== 'roundEnd') {
-    _xrResumeArmedForWarmup = false;
-  }
+  // (v18VR 2026-05-22 round 4) The auto-exit-for-menus watcher was
+  // removed at user request : ending the WebXR session every round-end
+  // was risky (transient Quest context drops, occasional reload to
+  // cold-boot lobby) and unnecessary, since the Quest browser keeps the
+  // headset on the entire time. The menu mirror now does the work of
+  // making flat DOM menus readable inside the headset ; see
+  // _xrUpdateMenuMirror below. The Open Settings VR button still
+  // intentionally ends the session (it's a deliberate user choice) ; the
+  // between-rounds ship-select and matchEnd / lobby states no longer
+  // force-end on their own.
 
   if (!game.lastTime) game.lastTime = timestamp;
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
