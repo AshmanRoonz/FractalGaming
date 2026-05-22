@@ -8518,13 +8518,19 @@ function updateGasLighting() {
   // skip explicitly so the projectile scan + per-light math never runs.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   if (!game || !game.projectiles || _ACTIVE_LAYERED_FX.size === 0) return;
+  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
+  if (_cadence > 1) {
+    updateGasLighting._frame = ((updateGasLighting._frame || 0) + 1) % _cadence;
+    if (updateGasLighting._frame !== 0) return;
+  }
   // Gather up to 4 active projectiles (first-N ; could be improved later
   // by picking strongest / closest to camera). Skip projectiles still in
   // their fade-in window so the gas doesn't pre-light at the muzzle.
   // (v16a Ultra) Gather up to 8 lights on Ultra (8 slots), 4 on other
   // tiers. Slots 4..7 stay at strength 0 on lower tiers and short-circuit
   // in the shader loop.
-  const _maxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
+  const _baseMaxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
+  const _maxLights = (typeof getVRLightCap === 'function') ? getVRLightCap(_baseMaxLights) : _baseMaxLights;
   const lights = [];
   for (let i = 0; i < game.projectiles.length && lights.length < _maxLights; i++) {
     const proj = game.projectiles[i];
@@ -10873,7 +10879,9 @@ class GasCloud {
 // bails on first claimSlot() returning -1). Symptom : basin clouds
 // would log as spawned in detachedGasPockets but be visually empty.
 // Doubling the pool costs ~256 KB of GPU buffer memory ; well worth it.
-const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 8192 });
+const billboardCloudSystem = new BillboardCloudSystem(scene, {
+  maxSlots: (typeof getVRBCSMaxSlots === 'function') ? getVRBCSMaxSlots(8192) : 8192
+});
 
 // (v14e wakes) Push wake impulses from active wake sources (player +
 // other ships + projectiles) into nearby gas clouds, then decay each
@@ -10885,8 +10893,17 @@ const billboardCloudSystem = new BillboardCloudSystem(scene, { maxSlots: 8192 })
 function updateBCSWakes(dt) {
   // (v16a Potato) No BCS clouds in Potato, skip the wake-source gather entirely.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 3) return;
   if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
   if (!game) return;
+  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
+  if (_cadence > 1) {
+    updateBCSWakes._dt = (updateBCSWakes._dt || 0) + (dt || 0);
+    updateBCSWakes._frame = ((updateBCSWakes._frame || 0) + 1) % _cadence;
+    if (updateBCSWakes._frame !== 0) return;
+    dt = Math.min(0.08, updateBCSWakes._dt || dt || 0.016);
+    updateBCSWakes._dt = 0;
+  }
 
   // Gather wake sources : player + nearby ships + nearby projectiles.
   // Each source : { x, y, z, vx, vy, vz, str, radius }.
@@ -11028,10 +11045,16 @@ function updateBCSLighting() {
   if (!game || !game.projectiles) return;
   const u = billboardCloudSystem.material.uniforms;
   if (!u || !u.uLightPos) return;
+  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
+  if (_cadence > 1) {
+    updateBCSLighting._frame = ((updateBCSLighting._frame || 0) + 1) % _cadence;
+    if (updateBCSLighting._frame !== 0) return;
+  }
   // Gather up to 8 active projectiles. First-N for now ; could improve
   // to "closest to camera" or "highest visual impact" later.
+  const _maxLights = (typeof getVRLightCap === 'function') ? getVRLightCap(8) : 8;
   let count = 0;
-  for (let i = 0; i < game.projectiles.length && count < 8; i++) {
+  for (let i = 0; i < game.projectiles.length && count < _maxLights; i++) {
     const p = game.projectiles[i];
     if (!p || !p.alive || !p.position) continue;
     u.uLightPos.value[count].copy(p.position);
@@ -11357,6 +11380,19 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (session) {
     session.addEventListener('inputsourceschange', _xrUpdateInputSources);
   }
+  // (v18VR 2026-05-22) Prime speechSynthesis on the user-gesture-driven
+  // sessionstart so Quest browser's TTS engine warms up before the first
+  // priority announcement. Speaking an empty utterance is the canonical
+  // way to unlock the synthesizer on browsers that gate it on activation.
+  try {
+    if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
+      if (typeof speechSynthesis.resume === 'function') speechSynthesis.resume();
+      const _primer = new SpeechSynthesisUtterance(' ');
+      _primer.volume = 0;
+      _primer.rate = 1;
+      speechSynthesis.speak(_primer);
+    }
+  } catch (_) {}
 
   // Auto-skip the initial Solo/Multi lobby when entering VR. The 2D lobby
   // panel is invisible in the headset, so without this the user would be
@@ -11605,6 +11641,10 @@ function _xrEnsureHudMesh() {
   _xrHudTex.minFilter = THREE.LinearFilter;
   _xrHudTex.magFilter = THREE.LinearFilter;
   _xrHudTex.format = THREE.RGBAFormat;
+  // (v18VR HUD brighten) Sample texture in linear-ish space + skip tone mapping
+  // so the HUD reads as bright in VR. Without this the HDR tone-map crushes the
+  // white HUD lines toward gray against the bright sky/wall material.
+  _xrHudTex.colorSpace = THREE.SRGBColorSpace;
   // Plane sized in meters; 16:9 aspect to roughly match desktop window.
   // 2.0m wide at 2.0m forward of dolly => ~53 deg horizontal FOV, a
   // comfortable non-headlocked HUD distance for VR.
@@ -11614,6 +11654,8 @@ function _xrEnsureHudMesh() {
     transparent: true,
     depthTest: false,   // always on top
     depthWrite: false,
+    toneMapped: false,  // (v18VR HUD brighten) bypass HDR tone-mapping
+    color: new THREE.Color(1.45, 1.45, 1.45), // boost luminance ~45%
   });
   xrHudMesh = new THREE.Mesh(geo, mat);
   xrHudMesh.position.set(0, 0, -2.0);
@@ -11638,12 +11680,16 @@ function _xrEnsureAuxMesh() {
   _xrAuxTex.magFilter = THREE.LinearFilter;
   _xrAuxTex.format = THREE.RGBAFormat;
   _xrAuxTex.generateMipmaps = false;
+  // (v18VR HUD brighten) Same brightness pop as the main HUD plane.
+  _xrAuxTex.colorSpace = THREE.SRGBColorSpace;
   const geo = new THREE.PlaneGeometry(2.0, 1.5);
   const mat = new THREE.MeshBasicMaterial({
     map: _xrAuxTex,
     transparent: true,
     depthTest: false,
     depthWrite: false,
+    toneMapped: false,
+    color: new THREE.Color(1.45, 1.45, 1.45),
   });
   xrAuxMesh = new THREE.Mesh(geo, mat);
   // 1.7m forward, 0.85m below eye, tilted ~26 deg toward face.
@@ -11698,6 +11744,10 @@ const _xrAuxQuarters = [
 ];
 
 function _xrDrawAuxHud() {
+  // (v18VR HUD pass 2026-05-22) The four-quarter ability pie has been removed
+  // here ; ability charge bars now ride the circumpunct HUD itself (Layer 2b
+  // in drawCircumpunctHUD), mirrored into xrHudMesh. The aux plane is now a
+  // pure score + timer readout so the lower-FOV slot stays uncluttered.
   const ctx = _xrAuxCtx;
   const W = _xrAuxCanvas.width, H = _xrAuxCanvas.height;
   ctx.clearRect(0, 0, W, H);
@@ -11707,11 +11757,12 @@ function _xrDrawAuxHud() {
   const scoreB = (typeof game !== 'undefined' && typeof game.scoreB === 'number') ? game.scoreB : 0;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.font = '700 64px Orbitron, sans-serif';
-  ctx.fillStyle = 'rgba(120,200,255,0.95)';
-  ctx.fillText('FLEET A   ' + scoreA, W * 0.27, 18);
-  ctx.fillStyle = 'rgba(255,140,110,0.95)';
-  ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 18);
+  ctx.font = '700 72px Orbitron, sans-serif';
+  // Brighter fleet score colors for VR.
+  ctx.fillStyle = 'rgba(160,220,255,1.0)';
+  ctx.fillText('FLEET A   ' + scoreA, W * 0.27, 60);
+  ctx.fillStyle = 'rgba(255,170,140,1.0)';
+  ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 60);
 
   let timerStr = '', stateStr = '';
   try {
@@ -11721,56 +11772,14 @@ function _xrDrawAuxHud() {
     if (sEl && sEl.textContent) stateStr = sEl.textContent;
   } catch (_) {}
   if (timerStr) {
-    ctx.font = '600 56px Orbitron, sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.92)';
-    ctx.fillText(timerStr, W / 2, 110);
+    ctx.font = '600 88px Orbitron, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,1.0)';
+    ctx.fillText(timerStr, W / 2, H * 0.4);
   }
   if (stateStr) {
-    ctx.font = '500 24px Rajdhani, sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.fillText(stateStr, W / 2, 180);
-  }
-
-  const cx = W / 2;
-  const cy = H * 0.62 + 110;
-  const outR = 230;
-  const labelR = outR * 0.58;
-  const gapDeg = 3;
-
-  for (const q of _xrAuxQuarters) {
-    const st = _xrReadQuarterState(q.slotKey);
-    const t1 = (q.t1 + gapDeg / 2) * Math.PI / 180;
-    const t2 = (q.t2 - gapDeg / 2) * Math.PI / 180;
-    ctx.fillStyle = _xrApFill(st.cls, st.barW);
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + outR * Math.cos(t1), cy + outR * Math.sin(t1));
-    ctx.arc(cx, cy, outR, t1, t2, false);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    const tMid = ((q.t1 + q.t2) / 2) * Math.PI / 180;
-    const lx = cx + labelR * Math.cos(tMid);
-    const ly = cy + labelR * Math.sin(tMid);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(255,255,255,0.96)';
-    ctx.font = '700 38px Orbitron, sans-serif';
-    ctx.fillText(q.key, lx, ly - 22);
-    if (st.abName) {
-      const shortName = String(st.abName).split(/\s+/)[0].slice(0, 11);
-      ctx.font = '600 18px Rajdhani, sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillText(shortName.toUpperCase(), lx, ly + 4);
-    }
-    if (st.cdText) {
-      ctx.font = '500 16px Rajdhani, sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.70)';
-      ctx.fillText(st.cdText, lx, ly + 24);
-    }
+    ctx.font = '500 36px Rajdhani, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText(stateStr, W / 2, H * 0.62);
   }
 
   ctx.restore();
@@ -12013,6 +12022,157 @@ function _vrUpdateAllHealthBars() {
       _vrUpdateBotHealthBar(np, isVR, isEnemy);
     }
   }
+  // (v18VR 2026-05-22) Ship-name callouts. The flat-screen "ship-name-label"
+  // DOM elements are hidden inside VR (body.vr-active rule), so build an
+  // in-world equivalent : Sprite with the chassis name + a thin Line going
+  // from the hull up to the sprite anchor. Color matches the friend/foe
+  // palette used by the flat HUD (cyan friendly / red enemy).
+  if (typeof game !== 'undefined' && game.entities) {
+    for (const bot of game.entities) {
+      const isEnemy = (playerTeam == null) || (bot && bot.team !== playerTeam);
+      _vrUpdateShipNameLabel(bot, isVR, isEnemy);
+    }
+  }
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) {
+      const isEnemy = (playerTeam == null) || (np && np.team !== playerTeam);
+      _vrUpdateShipNameLabel(np, isVR, isEnemy);
+    }
+  }
+}
+
+function _vrEnsureShipNameLabel(bot) {
+  if (!bot || !bot.mesh) return null;
+  if (bot._vrNameSprite) return bot._vrNameSprite;
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 128;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    sizeAttenuation: true,
+    toneMapped: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  const hullR = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 60;
+  // Bigger and pushed further up than the (legacy) health bar so the
+  // callout reads as the dominant identifier above the ship.
+  sprite.scale.set(hullR * 2.4, hullR * 0.6, 1);
+  sprite.position.set(0, hullR * 1.9, 0);
+  sprite.renderOrder = 1001;
+  sprite.frustumCulled = false;
+  sprite.visible = false;
+  // Thin line from hull origin up to the sprite anchor. Stored as a Line2
+  // in the same parent so it inherits the ship transform.
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+    0, hullR * 0.6, 0,
+    0, hullR * 1.85, 0,
+  ]), 3));
+  const lineMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.85,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const line = new THREE.Line(lineGeo, lineMat);
+  line.renderOrder = 1000;
+  line.frustumCulled = false;
+  line.visible = false;
+  bot.mesh.add(line);
+  bot.mesh.add(sprite);
+  sprite.userData = { canvas: canvas, tex: tex, lastText: '', lastEnemy: null, line: line, lineMat: lineMat };
+  bot._vrNameSprite = sprite;
+  bot._vrNameLine = line;
+  return sprite;
+}
+
+function _vrUpdateShipNameLabel(bot, isVR, isEnemy) {
+  if (!isVR || !bot || !bot.alive || !bot.loadout || !bot.position) {
+    const sp = bot && bot._vrNameSprite;
+    const ln = bot && bot._vrNameLine;
+    if (sp) sp.visible = false;
+    if (ln) ln.visible = false;
+    return;
+  }
+  // Cloaked NetworkPlayers : suppress the callout the same way the flat
+  // HUD callout system does.
+  if (bot._cloaked) {
+    const sp = bot._vrNameSprite, ln = bot._vrNameLine;
+    if (sp) sp.visible = false;
+    if (ln) ln.visible = false;
+    return;
+  }
+  // Distance gate matches the flat-screen callout (3500 units).
+  if (typeof player !== 'undefined' && player.position) {
+    const dist = player.position.distanceTo(bot.position);
+    if (dist > 3500) {
+      const sp = bot._vrNameSprite, ln = bot._vrNameLine;
+      if (sp) sp.visible = false;
+      if (ln) ln.visible = false;
+      return;
+    }
+  }
+  const sprite = _vrEnsureShipNameLabel(bot);
+  if (!sprite) return;
+  const ud = sprite.userData;
+  const name = (bot.loadout.name || '?').toUpperCase();
+  const text = (isEnemy ? 'ENEMY: ' : 'ALLY: ') + name;
+  if (text !== ud.lastText || isEnemy !== ud.lastEnemy) {
+    ud.lastText = text;
+    ud.lastEnemy = isEnemy;
+    const ctx = ud.canvas.getContext('2d');
+    const W = ud.canvas.width, H = ud.canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    // Subtle dark backing so the text stays legible against bright walls.
+    ctx.fillStyle = 'rgba(8,12,22,0.55)';
+    const padX = 14, padY = 18;
+    ctx.fillRect(padX, padY, W - padX * 2, H - padY * 2);
+    // Outer bracket lines reminiscent of the flat HUD callout shape.
+    const bracketColor = isEnemy ? '#ff5050' : '#5fb6ff';
+    ctx.strokeStyle = bracketColor;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    // Left bracket
+    ctx.moveTo(padX, padY + 22);
+    ctx.lineTo(padX, padY);
+    ctx.lineTo(padX + 30, padY);
+    // Right bracket
+    ctx.moveTo(W - padX, padY + 22);
+    ctx.lineTo(W - padX, padY);
+    ctx.lineTo(W - padX - 30, padY);
+    // Bottom-left
+    ctx.moveTo(padX, H - padY - 22);
+    ctx.lineTo(padX, H - padY);
+    ctx.lineTo(padX + 30, H - padY);
+    // Bottom-right
+    ctx.moveTo(W - padX, H - padY - 22);
+    ctx.lineTo(W - padX, H - padY);
+    ctx.lineTo(W - padX - 30, H - padY);
+    ctx.stroke();
+    // Name text. Big + bright so it reads at distance.
+    ctx.font = '700 60px Orbitron, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = isEnemy ? '#ff6868' : '#7fc4ff';
+    ctx.shadowColor = 'rgba(0,0,0,0.85)';
+    ctx.shadowBlur = 6;
+    ctx.fillText(text, W / 2, H / 2);
+    ctx.shadowBlur = 0;
+    ud.tex.needsUpdate = true;
+    // Recolor the line to match team.
+    if (ud.lineMat) ud.lineMat.color.set(isEnemy ? 0xff5050 : 0x5fb6ff);
+  }
+  sprite.visible = true;
+  if (bot._vrNameLine) bot._vrNameLine.visible = true;
 }
 
 // Toggle HUD plane visibility from session events so it does not sit in
@@ -12826,17 +12986,177 @@ window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
 
 const postFX = { enabled: true };
 
+// (v18VR ChatGPT pass 2026-05-22) Quest-aware tiered VR perf/budget/throttle
+// system. Three orthogonal tier readouts:
+//   PerfTier     ; engaged only when XR is presenting. Driven by input.vrPerfMode.
+//   BudgetTier   ; engaged on Quest UA even before VR session opens (so level
+//                  build budgets pre-size correctly), or when XR is presenting.
+//   ThrottleTier ; engaged when XR is presenting. Auto-promotes Quest to tier 1
+//                  even when user hasn't picked a vrPerfMode.
+// Helper accessors (getVRCadence, getVRLightCap, getVRGasBudget, getVRBCSMaxSlots,
+// getVRGasSegments, getVRDetachedGasLimit, getVRLevelGridRes) consume those tiers
+// to return concrete per-frame numbers; call sites stay short and consistent.
+function isStandaloneQuest() {
+  try {
+    const ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
+    return /\bQuest\b|OculusBrowser|MetaQuest/i.test(ua);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isXRPresenting() {
+  const r = (typeof window !== 'undefined') ? window.renderer : null;
+  return !!(r && r.xr && r.xr.isPresenting);
+}
+
+var _lssSettingsLoaded = false;
+function getStoredVRPerfMode() {
+  if (typeof localStorage === 'undefined' || _lssSettingsLoaded) return '';
+  if (getStoredVRPerfMode._checked) return getStoredVRPerfMode._mode || '';
+  getStoredVRPerfMode._checked = true;
+  try {
+    const raw = localStorage.getItem('lss_settings');
+    if (!raw) return '';
+    const data = JSON.parse(raw);
+    getStoredVRPerfMode._mode = (data && typeof data.vrPerfMode === 'string') ? data.vrPerfMode : '';
+  } catch (_) {
+    getStoredVRPerfMode._mode = '';
+  }
+  return getStoredVRPerfMode._mode || '';
+}
+
 function getVRPerfMode() {
-  return (typeof input !== 'undefined' && input && input.vrPerfMode) ? input.vrPerfMode : 'standard';
+  const live = (typeof input !== 'undefined' && input && input.vrPerfMode) ? input.vrPerfMode : 'standard';
+  if (_lssSettingsLoaded || live !== 'standard') return live;
+  return getStoredVRPerfMode() || live;
 }
 
 function getVRPerfTier() {
-  if (!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting)) return 0;
+  if (!isXRPresenting()) return 0;
   const mode = getVRPerfMode();
   if (mode === 'max') return 3;
   if (mode === 'fast') return 2;
   if (mode === 'lite') return 1;
   return 0;
+}
+
+function getVRBudgetTier() {
+  if (!isStandaloneQuest() && !isXRPresenting()) return 0;
+  const mode = getVRPerfMode();
+  if (mode === 'max') return 3;
+  if (mode === 'fast') return 2;
+  if (mode === 'lite') return 1;
+  return isStandaloneQuest() ? 1 : 0;
+}
+
+function getVRThrottleTier() {
+  if (!isXRPresenting()) return 0;
+  const perfTier = getVRPerfTier();
+  if (perfTier > 0) return perfTier;
+  return isStandaloneQuest() ? 1 : 0;
+}
+
+function getVRCadence(base, lite, fast, max) {
+  const tier = getVRThrottleTier();
+  if (tier >= 3) return max;
+  if (tier >= 2) return fast;
+  if (tier >= 1) return lite;
+  return base;
+}
+
+function getVRLightCap(defaultCap) {
+  const tier = getVRThrottleTier();
+  if (tier >= 3) return 0;
+  if (tier >= 2) return Math.min(defaultCap, 1);
+  if (tier >= 1) return Math.min(defaultCap, 2);
+  return defaultCap;
+}
+
+function getVRGasBudget() {
+  const tier = getVRBudgetTier();
+  if (tier >= 3) {
+    return {
+      bcsMaxSlots: 1536,
+      atomSmokeSegments: 5,
+      shatterClouds: 1,
+      shatterSegments: 4,
+      basinClouds: 0,
+      basinJitter: 0,
+      basinSegments: 0,
+      fragmentSegments: 3,
+      detachedPockets: 48,
+      chemistryCadence: 0,
+      cloudAttraction: false
+    };
+  }
+  if (tier >= 2) {
+    return {
+      bcsMaxSlots: 2048,
+      atomSmokeSegments: 7,
+      shatterClouds: 2,
+      shatterSegments: 5,
+      basinClouds: 2,
+      basinJitter: 2,
+      basinSegments: 5,
+      fragmentSegments: 4,
+      detachedPockets: 80,
+      chemistryCadence: 4,
+      cloudAttraction: false
+    };
+  }
+  if (tier >= 1) {
+    return {
+      bcsMaxSlots: 3072,
+      atomSmokeSegments: 9,
+      shatterClouds: 3,
+      shatterSegments: 7,
+      basinClouds: 4,
+      basinJitter: 2,
+      basinSegments: 6,
+      fragmentSegments: 5,
+      detachedPockets: 120,
+      chemistryCadence: 3,
+      cloudAttraction: false
+    };
+  }
+  return {
+    bcsMaxSlots: 8192,
+    atomSmokeSegments: 17,
+    shatterClouds: 6,
+    shatterSegments: 16,
+    basinClouds: 12,
+    basinJitter: 5,
+    basinSegments: 12,
+    fragmentSegments: 7,
+    detachedPockets: Infinity,
+    chemistryCadence: 1,
+    cloudAttraction: true
+  };
+}
+
+function getVRBCSMaxSlots(defaultMax) {
+  const budget = getVRGasBudget();
+  return Math.min(defaultMax, budget.bcsMaxSlots || defaultMax);
+}
+
+function getVRGasSegments(defaultSegments, key) {
+  const budget = getVRGasBudget();
+  const value = budget && key ? budget[key] : 0;
+  return value > 0 ? Math.min(defaultSegments, value) : defaultSegments;
+}
+
+function getVRDetachedGasLimit() {
+  const budget = getVRGasBudget();
+  return budget.detachedPockets;
+}
+
+function getVRLevelGridRes(defaultRes) {
+  const tier = getVRBudgetTier();
+  if (tier >= 3) return Math.min(defaultRes, 56);
+  if (tier >= 2) return Math.min(defaultRes, 64);
+  if (tier >= 1) return Math.min(defaultRes, 72);
+  return defaultRes;
 }
 
 function getEffectiveVRRenderScale() {
@@ -13615,7 +13935,7 @@ const _xrHudUpdateEveryN = 2;
 let _xrHudUploadCounter = 0;
 let _xrAuxUploadCounter = 0;
 function _xrHudUpdateCadence() {
-  const tier = getVRPerfTier();
+  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (tier >= 3) return 6;
   if (tier >= 2) return 4;
   if (tier >= 1) return 3;
@@ -13813,9 +14133,11 @@ let _starfieldPoints = null;
 // ---- ARENA BOUNDARY GRID ----
 
 (function createArenaGrid() {
+  const tier = (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0;
+  if (tier >= 3) return;
   const s = LSS.ARENA_SIZE;
-  const gridMat = new THREE.LineBasicMaterial({ color: 0x112244, transparent: true, opacity: 0.15 });
-  const step = 500;
+  const gridMat = new THREE.LineBasicMaterial({ color: 0x112244, transparent: true, opacity: tier > 0 ? 0.08 : 0.15 });
+  const step = tier > 0 ? 2000 : 500;
   for (let axis = 0; axis < 3; axis++) {
     for (let sign = -1; sign <= 1; sign += 2) {
       const lines = [];
@@ -16091,7 +16413,16 @@ function updateAmbientCloudWakes(dt) {
   // already returns false in Potato so game.dots is empty, but we skip
   // the per-frame loop explicitly as well.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 2) return;
   if (!game || !game.dots || !game.dots.length) return;
+  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
+  if (_cadence > 1) {
+    updateAmbientCloudWakes._dt = (updateAmbientCloudWakes._dt || 0) + (dt || 0);
+    updateAmbientCloudWakes._frame = ((updateAmbientCloudWakes._frame || 0) + 1) % _cadence;
+    if (updateAmbientCloudWakes._frame !== 0) return;
+    dt = Math.min(0.08, updateAmbientCloudWakes._dt || dt || 0.016);
+    updateAmbientCloudWakes._dt = 0;
+  }
   // Gather sources : reuse the same pattern as updateBCSWakes.
   const sources = [];
   if (typeof player !== 'undefined' && player && player.shipState !== 'dead'
@@ -18878,7 +19209,7 @@ function igniteNearbyGas(pos, radius) {
 const dynamicLights = {
   pool: [],
   active: [],
-  MAX_LIGHTS: 8,
+  MAX_LIGHTS: (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ? 4 : 8,
 };
 
 // NUM_POINT_LIGHTS PINNING (Trace 20260420T164534 fix):
@@ -21883,7 +22214,7 @@ class ClusterObstacle {
       alpha:          0.80,
       color:          cloudColor,
       colorJitter:    0.14,
-      segments:       17,
+      segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(17, 'atomSmokeSegments') : 17,
     });
     child._atomSmoke = cloud;
   }
@@ -22384,8 +22715,10 @@ class ClusterObstacle {
             // (v16a Potato) Skip the shatter-residue cloud bloom in Potato.
             !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
           // (v15a 2026-05-10) Denser shatter spawn : 4..6 instead of 2..4.
-          const _spawnN = 4 + Math.floor(Math.random() * 3); // 4..6
+          const _gasBudget = (typeof getVRBudgetTier === 'function' && getVRBudgetTier() > 0 && typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
+          const _spawnN = _gasBudget ? Math.min(_gasBudget.shatterClouds, 4 + Math.floor(Math.random() * 3)) : (4 + Math.floor(Math.random() * 3)); // 4..6
           for (let _k = 0; _k < _spawnN; _k++) {
+            if (typeof _canSpawnDetachedGasPocket === 'function' && !_canSpawnDetachedGasPocket()) break;
             const _theta = Math.random() * Math.PI * 2;
             const _phi   = Math.acos(2 * Math.random() - 1);
             const _sinP  = Math.sin(_phi);
@@ -22420,9 +22753,9 @@ class ClusterObstacle {
               alpha:          0.80,
               color:          _cloudColor,
               colorJitter:    0.14,
-              segments:       16,
+              segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(16, 'shatterSegments') : 16,
             });
-            game.detachedGasPockets.push({ gasCloud: _cloud, velocity: _drift });
+            _pushDetachedGasPocket({ gasCloud: _cloud, velocity: _drift });
           }
         }
       } catch (_e) { /* non-fatal ; smoke ghost is cosmetic */ }
@@ -22616,6 +22949,8 @@ function _spawnBasinClouds() {
   // basin gas alone can add ~1000 BCS sprites to the per-frame cost.
   if (typeof QUALITY !== 'undefined' && !QUALITY.basinClouds()) return;
   if (!game.detachedGasPockets) game.detachedGasPockets = [];
+  const _gasBudget = (typeof getVRBudgetTier === 'function' && getVRBudgetTier() > 0 && typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
+  if (_gasBudget && _gasBudget.basinClouds <= 0) return;
   const cylinders = game.levelCylinders || [];
   // (v15a revised) Angle-based drain detection : a tunnel drains the
   // sphere only if it EXITS the sphere through the lower hemisphere at
@@ -22742,14 +23077,14 @@ function _spawnBasinClouds() {
         color:          color,
         colorJitter:    0.20,
         // (v15a 2026-05-10) Denser basin clouds : 12 sprites (was 10).
-        segments:       12,
+        segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(12, 'basinSegments') : 12,
       });
       const vel = new THREE.Vector3(
         (Math.random() - 0.5) * 10,
         (Math.random() - 0.5) * 3,
         (Math.random() - 0.5) * 10
       );
-      game.detachedGasPockets.push({ gasCloud: cloud, velocity: vel });
+      _pushDetachedGasPocket({ gasCloud: cloud, velocity: vel });
     }
   }
   // Debug : log basin/drain counts so we can tell if the detection is
@@ -22884,7 +23219,7 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
       alpha:          0.70,
       color:          parentColor,
       colorJitter:    0.14,
-      segments:       7,  // fewer sprites for "mini" feel
+      segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(7, 'fragmentSegments') : 7,  // fewer sprites for "mini" feel
     });
     const pocket = {
       gasCloud: child,
@@ -22901,8 +23236,44 @@ function _spawnWallFragments(parentCloud, nx, ny, nz, impactVel) {
       pocket._fadeLife = 1.3 + Math.random() * 0.5;
       pocket._fadeAge = 0;
     }
-    game.detachedGasPockets.push(pocket);
+    _pushDetachedGasPocket(pocket);
   }
+}
+
+function _disposeDetachedGasPocket(p) {
+  if (!p) return;
+  if (p.gasCloud && typeof p.gasCloud.dispose === 'function') {
+    p.gasCloud.dispose();
+  } else if (p.mesh) {
+    if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+    if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
+  }
+}
+
+function _canSpawnDetachedGasPocket(extra) {
+  if (!game || !game.detachedGasPockets) return true;
+  const limit = (typeof getVRDetachedGasLimit === 'function') ? getVRDetachedGasLimit() : Infinity;
+  if (!Number.isFinite(limit)) return true;
+  return game.detachedGasPockets.length + (extra || 1) <= limit;
+}
+
+function _enforceDetachedGasBudget() {
+  if (!game || !game.detachedGasPockets) return;
+  const limit = (typeof getVRDetachedGasLimit === 'function') ? getVRDetachedGasLimit() : Infinity;
+  if (!Number.isFinite(limit)) return;
+  while (game.detachedGasPockets.length > limit) {
+    _disposeDetachedGasPocket(game.detachedGasPockets.shift());
+  }
+}
+
+function _pushDetachedGasPocket(p) {
+  if (!game || !game.detachedGasPockets) {
+    _disposeDetachedGasPocket(p);
+    return false;
+  }
+  game.detachedGasPockets.push(p);
+  _enforceDetachedGasBudget();
+  return true;
 }
 
 // (v15a) Splat phase duration. Cloud flattens against the wall for this
@@ -22934,6 +23305,8 @@ const _GAS_SPLAT_DURATION = 0.35;
 // Skipped in potato mode (the O(N²) cost matters on weak CPUs).
 function _applyCloudAttraction(dt) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato()) return;
+  const budget = (typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
+  if (budget && budget.cloudAttraction === false) return;
   const pockets = game.detachedGasPockets;
   if (!pockets || pockets.length < 2) return;
   const ATTRACT_STRENGTH   = 10;
@@ -23329,6 +23702,14 @@ function _gasPocketCenter(p) {
 
 function updateGasChemistry(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
+  const budget = (typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
+  const cadence = budget ? budget.chemistryCadence : 1;
+  if (cadence <= 0) return;
+  if (cadence > 1) {
+    updateGasChemistry._frame = ((updateGasChemistry._frame || 0) + 1) % cadence;
+    if (updateGasChemistry._frame !== 0) return;
+    dt *= cadence;
+  }
   const pockets = game.detachedGasPockets;
 
   // Decrement each pocket's spark cooldown. (v14e: GasCloud has no
@@ -35803,8 +36184,19 @@ function _hudClass(el, key, v) {
 function updateHUD() {
   if (!player.chassis) return;
 
-  // Draw the circumpunct ring HUD
-  drawCircumpunctHUD();
+  // Draw the circumpunct ring HUD. In VR the DOM HUD is hidden and mirrored
+  // through a CanvasTexture, so redrawing the source canvas every XR frame
+  // wastes CPU. Match the canvas redraw cadence to the texture upload cadence.
+  const _xrHudActive = (typeof isXRPresenting === 'function') ? isXRPresenting() : false;
+  let _drawHudCanvas = true;
+  if (_xrHudActive) {
+    const _cadence = (typeof _xrHudUpdateCadence === 'function') ? _xrHudUpdateCadence() : 2;
+    const _prev = (updateHUD._xrHudFrame == null) ? (_cadence - 1) : updateHUD._xrHudFrame;
+    updateHUD._xrHudFrame = (_prev + 1) % Math.max(1, _cadence);
+    _drawHudCanvas = (updateHUD._xrHudFrame === 0);
+  }
+  if (_drawHudCanvas) drawCircumpunctHUD();
+  if (_xrHudActive && !_drawHudCanvas) return;
 
   // Core meter (keep DOM element updated for backward compat)
   const corePct = Math.min(100, player.coreMeter);
@@ -45737,17 +46129,22 @@ function buildRoomGraphLevel(level) {
     return mesh;
   }
 
+  // (v18VR ChatGPT) High-res grid resolution is throttled in VR via getVRLevelGridRes ;
+  // standalone Quest gets 72/64/56 depending on tier. Preview pass shares the final
+  // res when the final res is already low enough.
+  const finalGridRes = (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96;
+  const previewGridRes = Math.min(48, finalGridRes);
+
   // Worker available and enabled
   if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
-    // Dispatch low-res job first (gridRes=48)
     game.levelWorker.onmessage = (e) => {
       const {gridRes, positions} = e.data;
 
-      if (gridRes === 48) {
-        const lowResMesh = createMeshFromPositions(positions, 48);
-        // Dispatch high-res job (gridRes=96)
-        game.levelWorker.postMessage({bounds, gridRes: 96, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
-      } else if (gridRes === 96) {
+      if (gridRes === previewGridRes && previewGridRes !== finalGridRes) {
+        createMeshFromPositions(positions, previewGridRes);
+        // Dispatch high-res job
+        game.levelWorker.postMessage({bounds, gridRes: finalGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
+      } else if (gridRes === finalGridRes) {
         // Remove low-res, add high-res.
         // (v16a Phase Y) createMeshFromPositions now adds TWO meshes per
         // call (visual + depth-only occluder), so clean out ALL existing
@@ -45756,14 +46153,14 @@ function buildRoomGraphLevel(level) {
           const oldMesh = game.mapMeshes.shift();
           if (oldMesh && oldMesh.parent) scene.remove(oldMesh);
         }
-        createMeshFromPositions(positions, 96);
+        createMeshFromPositions(positions, finalGridRes);
         // Hide loading UI
         if (mapGenHud) mapGenHud.style.display = 'none';
       }
     };
 
-    // Start with low-res
-    game.levelWorker.postMessage({bounds, gridRes: 48, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
+    // Start with low-res preview (or final res directly if final is already low)
+    game.levelWorker.postMessage({bounds, gridRes: previewGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
   } else {
     // Fallback: synchronous marching cubes (no worker)
     const gridRes = 96;
@@ -46330,9 +46727,24 @@ function announcerSay(text, opts) {
   opts = opts || {};
   if (!announcer.enabled || !text) return false;
   if (typeof speechSynthesis === 'undefined') return false;
-  // Skip in VR (the headset audio path differs and TTS is awkward there);
-  // can be revisited if Quest-side TTS becomes desirable.
-  if (typeof renderer !== 'undefined' && renderer.xr && renderer.xr.isPresenting) return false;
+  // (v18VR 2026-05-22) Previously the announcer was forced off when WebXR was
+  // presenting. We now let it through ; on tethered PCVR (Link / Air Link via
+  // a desktop Chromium) the system TTS works fine. On Meta Quest standalone
+  // the OculusBrowser exposes speechSynthesis but the OS ships no TTS voices,
+  // so getVoices() returns []. We attempt the speak() anyway (some Quest
+  // builds will still synthesize via a default web voice) ; if it silently
+  // no-ops, only the audio is missing and gameplay continues.
+  const _isQuestUA = (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
+  if (_isQuestUA && announcer._questVoicesChecked == null) {
+    announcer._questVoicesChecked = false;
+    try {
+      const _vs = speechSynthesis.getVoices() || [];
+      if (_vs.length === 0) {
+        console.warn('[v18VR Announcer] Meta Quest browser exposes speechSynthesis but reports 0 voices. TTS will attempt to speak via default voice ; if silent, the OS lacks a TTS engine.');
+      }
+      announcer._questVoicesChecked = true;
+    } catch (_) {}
+  }
 
   const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   // Per-key cooldown gate.
@@ -46355,6 +46767,20 @@ function announcerSay(text, opts) {
   u.rate   = opts.rate   != null ? opts.rate   : _announcerCurrentRate();
   u.pitch  = opts.pitch  != null ? opts.pitch  : announcer.pitch;
   u.volume = opts.volume != null ? opts.volume : announcer.volume;
+  // (v18VR) Diagnostic hooks ; surface engine-level failures so Quest users
+  // can see why TTS may be silent. Cheap when speech works.
+  u.onerror = function(e) {
+    if (!announcerSay._errLogged) {
+      announcerSay._errLogged = true;
+      console.warn('[v18VR Announcer] SpeechSynthesisUtterance error:', e && e.error, '— platform may lack a TTS engine.');
+    }
+  };
+  try {
+    // (v18VR) Chromium/Quest browser sometimes leaves speechSynthesis in a
+    // paused state after a tab idle window. resume() is a no-op when not
+    // paused, so it's safe to call defensively.
+    if (typeof speechSynthesis.resume === 'function') speechSynthesis.resume();
+  } catch (_) {}
   speechSynthesis.speak(u);
   return true;
 }
@@ -47732,7 +48158,8 @@ function updateAmbientBed() {
   // Probe environment openness every 8th frame to drive reverb crossfade.
   if (audio.convolverWide && audio.convolverTight && audio.reverbWideGain && audio.reverbTightGain) {
     _envProbeCounter++;
-    if ((_envProbeCounter & 7) === 0) {
+    const _probeMask = (typeof getVRThrottleTier === 'function' && getVRThrottleTier() > 0) ? 31 : 7;
+    if ((_envProbeCounter & _probeMask) === 0) {
       const openness = probeEnvironmentOpenness();
       audio.envOpenness += (openness - audio.envOpenness) * 0.25;
     }
@@ -55940,6 +56367,52 @@ window.camera   = camera;
 window.renderer = renderer;
 window.input    = input;
 window.audio    = audio;
+window.lssPerfSnapshot = function lssPerfSnapshot() {
+  const bcs = (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null;
+  let bcsActive = 0;
+  if (bcs && bcs._activeSlots) {
+    for (let i = 0; i < bcs._activeSlots.length; i++) bcsActive += bcs._activeSlots[i] ? 1 : 0;
+  }
+  const info = renderer && renderer.info ? renderer.info : null;
+  return {
+    xr: !!(typeof isXRPresenting === 'function' && isXRPresenting()),
+    quest: !!(typeof isStandaloneQuest === 'function' && isStandaloneQuest()),
+    vrPerfMode: (typeof getVRPerfMode === 'function') ? getVRPerfMode() : null,
+    vrPerfTier: (typeof getVRPerfTier === 'function') ? getVRPerfTier() : 0,
+    vrThrottleTier: (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 0,
+    vrBudgetTier: (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0,
+    vrRenderScale: (typeof getEffectiveVRRenderScale === 'function') ? getEffectiveVRRenderScale() : null,
+    vrBudgets: (typeof getVRGasBudget === 'function') ? {
+      bcsMaxSlots: getVRGasBudget().bcsMaxSlots,
+      detachedPockets: getVRGasBudget().detachedPockets,
+      atomSmokeSegments: getVRGasBudget().atomSmokeSegments,
+      basinClouds: getVRGasBudget().basinClouds,
+      levelGridRes: (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96
+    } : null,
+    bcs: bcs ? {
+      maxSlots: bcs.maxSlots,
+      activeSlots: bcsActive,
+      drawnSlots: bcs._geo ? bcs._geo.instanceCount : null,
+      highestSlot: bcs._highestActiveSlot
+    } : null,
+    counts: {
+      effects: game && game.effects ? game.effects.length : 0,
+      particles: game && game.particles ? game.particles.length : 0,
+      projectiles: game && game.projectiles ? game.projectiles.length : 0,
+      dynamicLights: (typeof dynamicLights !== 'undefined' && dynamicLights.active) ? dynamicLights.active.length : 0,
+      layeredFxMaterials: (typeof _ACTIVE_LAYERED_FX !== 'undefined' && _ACTIVE_LAYERED_FX) ? _ACTIVE_LAYERED_FX.size : 0,
+      detachedGasPockets: game && game.detachedGasPockets ? game.detachedGasPockets.length : 0
+    },
+    rendererInfo: info ? {
+      calls: info.render.calls,
+      triangles: info.render.triangles,
+      points: info.render.points,
+      lines: info.render.lines,
+      textures: info.memory.textures,
+      geometries: info.memory.geometries
+    } : null
+  };
+};
 
 // ============================================================
 // (v12) Google Maps Photorealistic 3D Tiles module

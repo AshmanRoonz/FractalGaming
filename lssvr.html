@@ -2,8 +2,32 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v16d</title>
-<!-- v16c fork started 2026-05. Branched off v16b. v16c is the performance
+<title>Last Ship Sailing v18L</title>
+<!-- v18L fork started 2026-05-22. Branched off v18. v18L is the "Visual
+     upgrade" fork, landed phase by phase so any regression can be bisected
+     to a single change. An earlier batched attempt ran into a black-screen
+     regression in one of the four shader-touching phases (god-rays, wall
+     light pickup, speed lines, dynamic exposure) ; this single-phase
+     rollout adds them back one at a time, with user verification between
+     each.
+
+       Phase L-B : Stasis pickup + champion field redesigned away from the
+                   flat plasma_wall / plasma_purple membrane toward the
+                   billowing fireball preset family that the Vortex Plasma
+                   Mines tripwire orbs use. Champion stays purple
+                   (fireball_purple), regular stasis fields use a new
+                   fireball_cyan variant for color identity. Pickup pops
+                   as a double-tap fireball burst instead of an expanding
+                   torus. Champion field with an active claimant pulses
+                   brighter + faster. Pure JS preset swap, no shader edits.
+
+     v18 remains the stable baseline ; do NOT edit it. v18L is the active
+     visual fork ; if any single phase regresses, fall back to v18 and
+     bisect from there.
+     ----------------------------------------------------------------
+     ORIGINAL v16c header below preserved for archaeological reference :
+     ----------------------------------------------------------------
+     v16c fork started 2026-05. Branched off v16b. v16c is the performance
      pass. v16b accumulated a stack of UI mockup work + lobby restructure +
      misc gameplay tweaks but never went back to look at per-frame allocation
      and CPU hot spots ; v16c is that audit's payoff. Each phase below is a
@@ -1429,6 +1453,21 @@ body.vr-active .hit-marker {
   position: relative; text-align: center;
   display: flex; flex-direction: column; justify-content: center;
 }
+/* (v18L 2026-05-22) Top-down schematic preview rendered from MAP_DATA */
+/* rooms + tunnels at selectMap() time. Sits above the name + desc. */
+#map-window-preview {
+  width: 100%;
+  height: 110px;
+  margin-bottom: 8px;
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,170,0,0.30);
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+#map-window-preview svg { width: 100%; height: 100%; display: block; }
+#map-window-preview .map-preview-placeholder {
+  font-size: 11px; color: #888; letter-spacing: 1px;
+}
 #map-window-name {
   font-size: 18px; font-weight: bold; color: #ffaa00;
   letter-spacing: 2px; margin-bottom: 8px;
@@ -2641,6 +2680,7 @@ body.vr-active .hit-marker {
     <div id="map-select">
       <div id="map-select-label">MAP</div>
       <div id="map-window">
+        <div id="map-window-preview"></div>
         <div id="map-window-name"></div>
         <div id="map-window-desc"></div>
       </div>
@@ -2876,7 +2916,15 @@ const LSS = {
   // Seconds shown on the in-screen 3-2-1-LAUNCH ticker. The round-system
   // warmupTimer is kept in lockstep with this so bots stay in 'warmup' (no
   // firing, no movement) for the full duration of the visible countdown.
+  // (2026-05-21) Kept for the between-rounds path that still uses the
+  // legacy long countdown. The fresh-match-start path now shows the
+  // loading overlay during warmup and uses SHORT_COUNTDOWN afterward.
   LAUNCH_COUNTDOWN: 10,
+  // (2026-05-21) Short 3-2-1 countdown used after the loading overlay
+  // hides. The shader-warmup work runs while loading is up, so this
+  // short visible countdown can't lag the way the 10s version sometimes
+  // did when warmup compiled mid-countdown.
+  SHORT_COUNTDOWN: 3,
   // Reserved for a future multiplayer match-start handshake redesign.
   // The first attempt at a "world_ready" gate + in-game 3-2-1 was rolled
   // back ; these constants stay so the next pass has the values to
@@ -3079,7 +3127,7 @@ const LOADOUTS = {
     // (v9) Slower fire rate (0.6 -> 0.85 sec/shot) and tighter clip (20 -> 12)
     // so the main gun is paced more like a sniper-spotter instead of a chaingun.
     // Each main-gun hit still adds +1 lock to its target (capped at 3).
-    weapon: { name: 'Tracking Bolt', mode: 'projectile', damage: 660, fireRate: 0.85, clipSize: 12, range: 3500, splash: 0, projSpeed: 900, pellets: 1, spinup: 0 },
+    weapon: { name: 'Tracking Bolt', mode: 'projectile', damage: 660, fireRate: 0.85, clipSize: 12, range: 3500, splash: 220, projSpeed: 900, pellets: 1, spinup: 0 },
     abilities: [
       // (v9) Tracker Rockets: no real cooldown. The gating is the lock state:
       // pressing the ability does NOTHING unless at least one ship has a full
@@ -5026,6 +5074,7 @@ async function joinRoom() {
         team: null,
         networkPlayer: null,
         ready: false,           // (v6.7) per-peer ready flag for the start handshake
+        warmupReady: false,     // (2026-05-21) per-peer shader-warmup done flag
       });
       updateLobbyPeers();
       checkAllReady();          // (v6.7) a new not-ready peer cancels any pending start
@@ -5051,6 +5100,13 @@ async function joinRoom() {
       // (v6.7) Re-announce our ready state so the joiner sees it immediately.
       if (net.myReady && net.sendEvent) {
         net.sendEvent({ type: 'ready', ready: true });
+      }
+
+      // (2026-05-21) Also re-announce our warmup-ready state so a peer
+      // joining mid-match-start handshake doesn't deadlock waiting on
+      // a warmup_ready from us that already fired.
+      if (typeof _localWarmupReady !== 'undefined' && _localWarmupReady && net.sendEvent) {
+        try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
       }
 
       // (v6.7) If I'm the world owner and we have a built world, ship the
@@ -5256,6 +5312,8 @@ function selectMap(mapKey) {
   if (nameEl) nameEl.textContent = mapData.name;
   const descEl = document.getElementById('map-window-desc');
   if (descEl) descEl.textContent = mapData.description;
+  // (v18L 2026-05-22) Render top-down schematic preview into #map-window-preview.
+  try { _renderMapPreview(mapData); } catch (_) {}
 
   // Active dot
   const dots = document.querySelectorAll('#map-indicator .map-dot');
@@ -5277,6 +5335,84 @@ function selectMap(mapKey) {
       mode: LSS.MODE || 'classic'
     });
   }
+}
+
+// (v18L 2026-05-22) Render a top-down schematic preview into
+// #map-window-preview from a map's rooms + tunnels data. Each room is a
+// circle scaled by its r param ; tunnels are lines connecting endpoints.
+// Team A rooms are red, team B green, champion gold, neutral gray. Auto-
+// fits the SVG viewBox to the room extents on the x-z plane (top-down).
+// Falls back to a placeholder label for map types that don't carry
+// rooms/tunnels arrays (e.g. gmaps_*).
+function _renderMapPreview(mapData) {
+  const wrap = document.getElementById('map-window-preview');
+  if (!wrap) return;
+  if (!mapData || !Array.isArray(mapData.rooms) || mapData.rooms.length === 0) {
+    // Placeholder for maps without structural data (gmaps, race custom).
+    const label = (mapData && mapData.type === 'gmaps') ? 'CITY OVERLAY'
+                : (mapData && mapData.name) ? mapData.name.toUpperCase()
+                : 'PREVIEW UNAVAILABLE';
+    wrap.innerHTML = '<div class="map-preview-placeholder">' + label + '</div>';
+    return;
+  }
+  const rooms = mapData.rooms;
+  const tunnels = Array.isArray(mapData.tunnels) ? mapData.tunnels : [];
+  // Extent pass : compute min/max x + z including each room's radius.
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const r of rooms) {
+    const rad = (typeof r.r === 'number') ? r.r : 1;
+    if (r.x - rad < minX) minX = r.x - rad;
+    if (r.x + rad > maxX) maxX = r.x + rad;
+    if (r.z - rad < minZ) minZ = r.z - rad;
+    if (r.z + rad > maxZ) maxZ = r.z + rad;
+  }
+  // Tunnel endpoints in case any extend outside the room bounds.
+  for (const t of tunnels) {
+    if (!Array.isArray(t.path)) continue;
+    for (const p of t.path) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.z < minZ) minZ = p.z;
+      if (p.z > maxZ) maxZ = p.z;
+    }
+  }
+  // 6% pad so the silhouettes don't kiss the box edges.
+  const w = Math.max(1, maxX - minX);
+  const h = Math.max(1, maxZ - minZ);
+  const pad = Math.max(w, h) * 0.06;
+  const vx = minX - pad, vy = minZ - pad, vw = w + pad * 2, vh = h + pad * 2;
+  // Color picker. Match the in-game team colors.
+  const colorFor = (room) => {
+    if (room.champion === true) return '#ffaa00';
+    if (room.team === 'A') return '#ff4a4a';
+    if (room.team === 'B') return '#44bb44';
+    return '#7a8aaa';
+  };
+  const stroke = 'rgba(255,170,0,0.55)';
+  const parts = [];
+  parts.push('<svg viewBox="' + vx + ' ' + vy + ' ' + vw + ' ' + vh + '" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">');
+  // Background fill of the play volume so rooms read as cavities in a
+  // dimmer arena outline. Simple rect ; the rooms + tunnels paint on top.
+  parts.push('<rect x="' + vx + '" y="' + vy + '" width="' + vw + '" height="' + vh + '" fill="rgba(0,0,0,0)" />');
+  // Tunnels first so rooms sit on top of them.
+  const tunnelWidth = Math.max(vw, vh) * 0.012;
+  for (const t of tunnels) {
+    if (!Array.isArray(t.path) || t.path.length < 2) continue;
+    let d = '';
+    for (let i = 0; i < t.path.length; i++) {
+      const p = t.path[i];
+      d += (i === 0 ? 'M ' : 'L ') + p.x + ' ' + p.z + ' ';
+    }
+    parts.push('<path d="' + d.trim() + '" fill="none" stroke="' + stroke + '" stroke-width="' + tunnelWidth + '" stroke-linecap="round" stroke-linejoin="round" />');
+  }
+  // Rooms : filled circles with a faint outline.
+  for (const r of rooms) {
+    const rr = (typeof r.r === 'number') ? r.r : Math.min(vw, vh) * 0.06;
+    const fill = colorFor(r);
+    parts.push('<circle cx="' + r.x + '" cy="' + r.z + '" r="' + rr + '" fill="' + fill + '" fill-opacity="0.65" stroke="' + fill + '" stroke-width="' + (rr * 0.10) + '" />');
+  }
+  parts.push('</svg>');
+  wrap.innerHTML = parts.join('');
 }
 
 // Cycle to the prev (-1) or next (+1) map, wrapping at either end.
@@ -5626,9 +5762,16 @@ function checkAllLoadoutsReady() {
   showShipSelectWaiting();
 
   // Alone in the mesh (e.g. peers all dropped during ship-select); fall back
-  // to launching solo so testing doesn't deadlock.
+  // to launching solo so testing doesn't deadlock. (2026-05-21) Still
+  // gate on local warmup ready ; if shaders aren't compiled yet, the
+  // solo launch happens via the warmup completion callback in
+  // commitLoadout instead.
   if (net.peers.size === 0) {
-    launchCountdown();
+    if (_localWarmupReady) {
+      try { hideLoadingOverlay(); } catch (_) {}
+      _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    }
     return;
   }
 
@@ -5636,6 +5779,23 @@ function checkAllLoadoutsReady() {
   let allCommitted = true;
   for (const peer of net.peers.values()) {
     if (!peer.loadoutKey) { allCommitted = false; break; }
+  }
+
+  // (2026-05-21) Warmup-ready gate. Every peer (including us) must have
+  // reported its shader-warmup done before the proposer broadcasts
+  // launch_at ; otherwise some peers would still be compiling shaders
+  // when the visible 3-2-1 countdown hits LAUNCH and the first impact
+  // would re-introduce the very stutter the loading overlay was added
+  // to hide. _allPeersWarmupReady covers the peer side ; _localWarmupReady
+  // covers us. If we're not all warm, fall through and wait for the next
+  // checkAllLoadoutsReady call (triggered by the next warmup_ready event).
+  if (!_localWarmupReady || !_allPeersWarmupReady()) {
+    // Update the loading overlay so the user knows we're waiting on peers
+    // rather than still compiling locally.
+    if (_localWarmupReady) {
+      try { showLoadingOverlay('WAITING FOR PEERS', 'syncing match start'); } catch (_) {}
+    }
+    return;
   }
 
   if (!allCommitted) {
@@ -5716,7 +5876,15 @@ function scheduleLaunch(launchAt) {
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
-    launchCountdown();
+    // (2026-05-21) Hand off from the loading overlay to the short visible
+    // 3-2-1 countdown. Hide loading (which has been showing "WAITING FOR
+    // PEERS" while we waited on warmup_ready from the rest of the mesh),
+    // re-anchor warmupTimer to SHORT_COUNTDOWN so the round system's
+    // warmup -> playing gate fires at the same wall-clock moment as the
+    // visible LAUNCH tick, then run the short countdown.
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+    launchCountdown(LSS.SHORT_COUNTDOWN);
   }, delay);
 }
 
@@ -6040,6 +6208,9 @@ class NetworkPlayer {
       // (v14f) Red fire particles around the peer's hull while shield is up.
       if (typeof _spawnThermalShieldFire === 'function') {
         _spawnThermalShieldFire(this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
+        if (typeof _updateThermalShieldFlameSpheres === 'function') {
+          _updateThermalShieldFlameSpheres(this, this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
+        }
       }
     } else {
       if (this._thermalShieldMesh) {
@@ -6615,6 +6786,22 @@ function handleNetEvent(evt, fromPeerId) {
       checkAllReady();
       // (v9b) Refresh the fleet strip so the peer's chip pip flips colour.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+    }
+    return;
+  }
+  // (2026-05-21) Per-peer shader-warmup done signal. Sent by each peer
+  // when its local warmupCombatShaders promise resolves. The lowest-id
+  // proposer holds off broadcasting launch_at until every peer (and
+  // itself) has reported warmup_ready, so the visible 3-2-1 countdown
+  // starts on a warm GPU for everyone. Idempotent: re-sends just flip
+  // the same flag.
+  if (evt.type === 'warmup_ready') {
+    const peer = net.peers.get(fromPeerId);
+    if (peer) {
+      peer.warmupReady = true;
+      // Re-check the launch gate; the proposer may now have everything
+      // it needs to broadcast launch_at.
+      try { checkAllLoadoutsReady(); } catch (_) {}
     }
     return;
   }
@@ -7469,7 +7656,7 @@ function _makeGasCloudMaterial(initialColor, baseAlpha, radius) {
       '  vec3 col = uColor * (0.80 + density * 3.20);',
       '  float alpha = density * uBaseAlpha;',
       // Higher discard threshold so the silhouette breakup is more
-      // aggressive â€” many low-density rim fragments simply vanish.
+      // aggressive — many low-density rim fragments simply vanish.
       '  if (alpha < 0.05) discard;',
       '  gl_FragColor = vec4(col, alpha);',
       '}',
@@ -8427,6 +8614,26 @@ const EFFECT_PRESETS = {
   // and brightness pulled down a touch so the orbs don't blow out at
   // close range. Per-layer hue offsets are also shifted so the warm
   // accents become magenta accents.
+  // (v18L Phase L-B) Cyan fireball variant. Same recipe as fireball_purple
+  // but tuned into the cyan/teal range so regular (non-champion) stasis
+  // fields keep their cyan pickup identity while gaining the billowing
+  // fireball silhouette used by the Vortex Plasma Mines orbs. Slightly
+  // tamer displacement than fireball_purple so the regular stasis fields
+  // read as "valuable pickup" rather than "danger, do not touch."
+  fireball_cyan: {
+    name: 'Fireball (Cyan)',
+    baseColor: '#22ddff',
+    fresnel: 0.32,
+    brightness: 2.3,
+    displaceAmount: 0.28,
+    displaceFreq:   1.7,
+    softEdge:       0.55,
+    layers: [
+      { pattern: 2, scale: 0.8,  timeRate: 1.6,  hue: 0.05,  alpha: 1.0,  blend: 2, sat: 0.95 },
+      { pattern: 5, scale: 2.38, timeRate: 1.97, hue: 0.085, alpha: 0.73, blend: 2, sat: 0.99 },
+      { pattern: 0, scale: 2.33, timeRate: 2.76, hue: 0.245, alpha: 0.44, blend: 6, sat: 0.89 },
+    ],
+  },
   fireball_purple: {
     name: 'Fireball (Purple)',
     baseColor: '#aa44ff',
@@ -10019,10 +10226,6 @@ class BillboardCloudSystem {
     this._iCol = iCol;
     this._iAlp = iAlp;
     this._iSeed = iSeed;
-    this._geo = geo;
-    this._activeSlots = new Uint8Array(this.maxSlots);
-    this._highestActiveSlot = -1;
-    this._setInstanceCount(0);
 
     // Custom ShaderMaterial. Camera-facing billboard via viewMatrix basis
     // columns ; soft-circle alpha via smoothstep on radial distance.
@@ -10130,13 +10333,10 @@ class BillboardCloudSystem {
         // distance from the sprite's world center.
         '  vec3 lit = vColor;',
         '  for (int li = 0; li < 8; li++) {',
-        '    float strength = uLightStrength[li];',
-        '    if (strength > 0.0) {',
-        '      vec3 toL = uLightPos[li] - vSpritePos;',
-        '      float d2 = dot(toL, toL);',
-        '      float atten = 1.0 / (1.0 + d2 * 0.0002);',
-        '      lit += uLightColor[li] * atten * strength;',
-        '    }',
+        '    vec3 toL = uLightPos[li] - vSpritePos;',
+        '    float d2 = dot(toL, toL);',
+        '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
+        '    lit += uLightColor[li] * atten * uLightStrength[li];',
         '  }',
         '  gl_FragColor = vec4(lit * a, a);',
         '}',
@@ -10167,20 +10367,9 @@ class BillboardCloudSystem {
     scn.add(this.mesh);
   }
 
-  _setInstanceCount(count) {
-    if (!this._geo) return;
-    this._geo.instanceCount = count;
-    this._geo.maxInstancedCount = count; // legacy Three.js name, harmless on newer builds
-  }
-
   claimSlot() {
     if (this._free.length === 0) return -1;
     const idx = this._free.pop();
-    this._activeSlots[idx] = 1;
-    if (idx > this._highestActiveSlot) {
-      this._highestActiveSlot = idx;
-      this._setInstanceCount(idx + 1);
-    }
     // (v14e tune 1) Assign a unique random seed per slot. The fragment
     // shader uses iSeed to offset its FBM noise field so adjacent sprites
     // read as distinct wispy patches rather than identical circles. Set
@@ -10194,15 +10383,8 @@ class BillboardCloudSystem {
     if (idx < 0 || idx >= this.maxSlots) return;
     this._scales[idx] = 0;
     this._alphas[idx] = 0;
-    this._activeSlots[idx] = 0;
     this._iSca.needsUpdate = true;
     this._iAlp.needsUpdate = true;
-    if (idx === this._highestActiveSlot) {
-      while (this._highestActiveSlot >= 0 && !this._activeSlots[this._highestActiveSlot]) {
-        this._highestActiveSlot--;
-      }
-      this._setInstanceCount(this._highestActiveSlot + 1);
-    }
     this._free.push(idx);
   }
 
@@ -10966,7 +11148,6 @@ try {
   } catch (_) {}
   throw _rendererErr;
 }
-window.renderer = renderer;
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 // (context-loss 2026-05) WebGL context loss recovery scaffolding. Chrome
@@ -11199,6 +11380,19 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (session) {
     session.addEventListener('inputsourceschange', _xrUpdateInputSources);
   }
+  // (v18VR 2026-05-22) Prime speechSynthesis on the user-gesture-driven
+  // sessionstart so Quest browser's TTS engine warms up before the first
+  // priority announcement. Speaking an empty utterance is the canonical
+  // way to unlock the synthesizer on browsers that gate it on activation.
+  try {
+    if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
+      if (typeof speechSynthesis.resume === 'function') speechSynthesis.resume();
+      const _primer = new SpeechSynthesisUtterance(' ');
+      _primer.volume = 0;
+      _primer.rate = 1;
+      speechSynthesis.speak(_primer);
+    }
+  } catch (_) {}
 
   // Auto-skip the initial Solo/Multi lobby when entering VR. The 2D lobby
   // panel is invisible in the headset, so without this the user would be
@@ -11447,6 +11641,10 @@ function _xrEnsureHudMesh() {
   _xrHudTex.minFilter = THREE.LinearFilter;
   _xrHudTex.magFilter = THREE.LinearFilter;
   _xrHudTex.format = THREE.RGBAFormat;
+  // (v18VR HUD brighten) Sample texture in linear-ish space + skip tone mapping
+  // so the HUD reads as bright in VR. Without this the HDR tone-map crushes the
+  // white HUD lines toward gray against the bright sky/wall material.
+  _xrHudTex.colorSpace = THREE.SRGBColorSpace;
   // Plane sized in meters; 16:9 aspect to roughly match desktop window.
   // 2.0m wide at 2.0m forward of dolly => ~53 deg horizontal FOV, a
   // comfortable non-headlocked HUD distance for VR.
@@ -11456,6 +11654,8 @@ function _xrEnsureHudMesh() {
     transparent: true,
     depthTest: false,   // always on top
     depthWrite: false,
+    toneMapped: false,  // (v18VR HUD brighten) bypass HDR tone-mapping
+    color: new THREE.Color(1.45, 1.45, 1.45), // boost luminance ~45%
   });
   xrHudMesh = new THREE.Mesh(geo, mat);
   xrHudMesh.position.set(0, 0, -2.0);
@@ -11480,12 +11680,16 @@ function _xrEnsureAuxMesh() {
   _xrAuxTex.magFilter = THREE.LinearFilter;
   _xrAuxTex.format = THREE.RGBAFormat;
   _xrAuxTex.generateMipmaps = false;
+  // (v18VR HUD brighten) Same brightness pop as the main HUD plane.
+  _xrAuxTex.colorSpace = THREE.SRGBColorSpace;
   const geo = new THREE.PlaneGeometry(2.0, 1.5);
   const mat = new THREE.MeshBasicMaterial({
     map: _xrAuxTex,
     transparent: true,
     depthTest: false,
     depthWrite: false,
+    toneMapped: false,
+    color: new THREE.Color(1.45, 1.45, 1.45),
   });
   xrAuxMesh = new THREE.Mesh(geo, mat);
   // 1.7m forward, 0.85m below eye, tilted ~26 deg toward face.
@@ -11540,6 +11744,10 @@ const _xrAuxQuarters = [
 ];
 
 function _xrDrawAuxHud() {
+  // (v18VR HUD pass 2026-05-22) The four-quarter ability pie has been removed
+  // here ; ability charge bars now ride the circumpunct HUD itself (Layer 2b
+  // in drawCircumpunctHUD), mirrored into xrHudMesh. The aux plane is now a
+  // pure score + timer readout so the lower-FOV slot stays uncluttered.
   const ctx = _xrAuxCtx;
   const W = _xrAuxCanvas.width, H = _xrAuxCanvas.height;
   ctx.clearRect(0, 0, W, H);
@@ -11549,11 +11757,12 @@ function _xrDrawAuxHud() {
   const scoreB = (typeof game !== 'undefined' && typeof game.scoreB === 'number') ? game.scoreB : 0;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.font = '700 64px Orbitron, sans-serif';
-  ctx.fillStyle = 'rgba(120,200,255,0.95)';
-  ctx.fillText('FLEET A   ' + scoreA, W * 0.27, 18);
-  ctx.fillStyle = 'rgba(255,140,110,0.95)';
-  ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 18);
+  ctx.font = '700 72px Orbitron, sans-serif';
+  // Brighter fleet score colors for VR.
+  ctx.fillStyle = 'rgba(160,220,255,1.0)';
+  ctx.fillText('FLEET A   ' + scoreA, W * 0.27, 60);
+  ctx.fillStyle = 'rgba(255,170,140,1.0)';
+  ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 60);
 
   let timerStr = '', stateStr = '';
   try {
@@ -11563,56 +11772,14 @@ function _xrDrawAuxHud() {
     if (sEl && sEl.textContent) stateStr = sEl.textContent;
   } catch (_) {}
   if (timerStr) {
-    ctx.font = '600 56px Orbitron, sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.92)';
-    ctx.fillText(timerStr, W / 2, 110);
+    ctx.font = '600 88px Orbitron, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,1.0)';
+    ctx.fillText(timerStr, W / 2, H * 0.4);
   }
   if (stateStr) {
-    ctx.font = '500 24px Rajdhani, sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.fillText(stateStr, W / 2, 180);
-  }
-
-  const cx = W / 2;
-  const cy = H * 0.62 + 110;
-  const outR = 230;
-  const labelR = outR * 0.58;
-  const gapDeg = 3;
-
-  for (const q of _xrAuxQuarters) {
-    const st = _xrReadQuarterState(q.slotKey);
-    const t1 = (q.t1 + gapDeg / 2) * Math.PI / 180;
-    const t2 = (q.t2 - gapDeg / 2) * Math.PI / 180;
-    ctx.fillStyle = _xrApFill(st.cls, st.barW);
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + outR * Math.cos(t1), cy + outR * Math.sin(t1));
-    ctx.arc(cx, cy, outR, t1, t2, false);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    const tMid = ((q.t1 + q.t2) / 2) * Math.PI / 180;
-    const lx = cx + labelR * Math.cos(tMid);
-    const ly = cy + labelR * Math.sin(tMid);
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(255,255,255,0.96)';
-    ctx.font = '700 38px Orbitron, sans-serif';
-    ctx.fillText(q.key, lx, ly - 22);
-    if (st.abName) {
-      const shortName = String(st.abName).split(/\s+/)[0].slice(0, 11);
-      ctx.font = '600 18px Rajdhani, sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      ctx.fillText(shortName.toUpperCase(), lx, ly + 4);
-    }
-    if (st.cdText) {
-      ctx.font = '500 16px Rajdhani, sans-serif';
-      ctx.fillStyle = 'rgba(255,255,255,0.70)';
-      ctx.fillText(st.cdText, lx, ly + 24);
-    }
+    ctx.font = '500 36px Rajdhani, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.fillText(stateStr, W / 2, H * 0.62);
   }
 
   ctx.restore();
@@ -11855,6 +12022,157 @@ function _vrUpdateAllHealthBars() {
       _vrUpdateBotHealthBar(np, isVR, isEnemy);
     }
   }
+  // (v18VR 2026-05-22) Ship-name callouts. The flat-screen "ship-name-label"
+  // DOM elements are hidden inside VR (body.vr-active rule), so build an
+  // in-world equivalent : Sprite with the chassis name + a thin Line going
+  // from the hull up to the sprite anchor. Color matches the friend/foe
+  // palette used by the flat HUD (cyan friendly / red enemy).
+  if (typeof game !== 'undefined' && game.entities) {
+    for (const bot of game.entities) {
+      const isEnemy = (playerTeam == null) || (bot && bot.team !== playerTeam);
+      _vrUpdateShipNameLabel(bot, isVR, isEnemy);
+    }
+  }
+  if (typeof net !== 'undefined' && net && net.networkPlayers) {
+    for (const np of net.networkPlayers) {
+      const isEnemy = (playerTeam == null) || (np && np.team !== playerTeam);
+      _vrUpdateShipNameLabel(np, isVR, isEnemy);
+    }
+  }
+}
+
+function _vrEnsureShipNameLabel(bot) {
+  if (!bot || !bot.mesh) return null;
+  if (bot._vrNameSprite) return bot._vrNameSprite;
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 128;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.generateMipmaps = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    sizeAttenuation: true,
+    toneMapped: false,
+  });
+  const sprite = new THREE.Sprite(mat);
+  const hullR = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 60;
+  // Bigger and pushed further up than the (legacy) health bar so the
+  // callout reads as the dominant identifier above the ship.
+  sprite.scale.set(hullR * 2.4, hullR * 0.6, 1);
+  sprite.position.set(0, hullR * 1.9, 0);
+  sprite.renderOrder = 1001;
+  sprite.frustumCulled = false;
+  sprite.visible = false;
+  // Thin line from hull origin up to the sprite anchor. Stored as a Line2
+  // in the same parent so it inherits the ship transform.
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([
+    0, hullR * 0.6, 0,
+    0, hullR * 1.85, 0,
+  ]), 3));
+  const lineMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.85,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const line = new THREE.Line(lineGeo, lineMat);
+  line.renderOrder = 1000;
+  line.frustumCulled = false;
+  line.visible = false;
+  bot.mesh.add(line);
+  bot.mesh.add(sprite);
+  sprite.userData = { canvas: canvas, tex: tex, lastText: '', lastEnemy: null, line: line, lineMat: lineMat };
+  bot._vrNameSprite = sprite;
+  bot._vrNameLine = line;
+  return sprite;
+}
+
+function _vrUpdateShipNameLabel(bot, isVR, isEnemy) {
+  if (!isVR || !bot || !bot.alive || !bot.loadout || !bot.position) {
+    const sp = bot && bot._vrNameSprite;
+    const ln = bot && bot._vrNameLine;
+    if (sp) sp.visible = false;
+    if (ln) ln.visible = false;
+    return;
+  }
+  // Cloaked NetworkPlayers : suppress the callout the same way the flat
+  // HUD callout system does.
+  if (bot._cloaked) {
+    const sp = bot._vrNameSprite, ln = bot._vrNameLine;
+    if (sp) sp.visible = false;
+    if (ln) ln.visible = false;
+    return;
+  }
+  // Distance gate matches the flat-screen callout (3500 units).
+  if (typeof player !== 'undefined' && player.position) {
+    const dist = player.position.distanceTo(bot.position);
+    if (dist > 3500) {
+      const sp = bot._vrNameSprite, ln = bot._vrNameLine;
+      if (sp) sp.visible = false;
+      if (ln) ln.visible = false;
+      return;
+    }
+  }
+  const sprite = _vrEnsureShipNameLabel(bot);
+  if (!sprite) return;
+  const ud = sprite.userData;
+  const name = (bot.loadout.name || '?').toUpperCase();
+  const text = (isEnemy ? 'ENEMY: ' : 'ALLY: ') + name;
+  if (text !== ud.lastText || isEnemy !== ud.lastEnemy) {
+    ud.lastText = text;
+    ud.lastEnemy = isEnemy;
+    const ctx = ud.canvas.getContext('2d');
+    const W = ud.canvas.width, H = ud.canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    // Subtle dark backing so the text stays legible against bright walls.
+    ctx.fillStyle = 'rgba(8,12,22,0.55)';
+    const padX = 14, padY = 18;
+    ctx.fillRect(padX, padY, W - padX * 2, H - padY * 2);
+    // Outer bracket lines reminiscent of the flat HUD callout shape.
+    const bracketColor = isEnemy ? '#ff5050' : '#5fb6ff';
+    ctx.strokeStyle = bracketColor;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    // Left bracket
+    ctx.moveTo(padX, padY + 22);
+    ctx.lineTo(padX, padY);
+    ctx.lineTo(padX + 30, padY);
+    // Right bracket
+    ctx.moveTo(W - padX, padY + 22);
+    ctx.lineTo(W - padX, padY);
+    ctx.lineTo(W - padX - 30, padY);
+    // Bottom-left
+    ctx.moveTo(padX, H - padY - 22);
+    ctx.lineTo(padX, H - padY);
+    ctx.lineTo(padX + 30, H - padY);
+    // Bottom-right
+    ctx.moveTo(W - padX, H - padY - 22);
+    ctx.lineTo(W - padX, H - padY);
+    ctx.lineTo(W - padX - 30, H - padY);
+    ctx.stroke();
+    // Name text. Big + bright so it reads at distance.
+    ctx.font = '700 60px Orbitron, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = isEnemy ? '#ff6868' : '#7fc4ff';
+    ctx.shadowColor = 'rgba(0,0,0,0.85)';
+    ctx.shadowBlur = 6;
+    ctx.fillText(text, W / 2, H / 2);
+    ctx.shadowBlur = 0;
+    ud.tex.needsUpdate = true;
+    // Recolor the line to match team.
+    if (ud.lineMat) ud.lineMat.color.set(isEnemy ? 0xff5050 : 0x5fb6ff);
+  }
+  sprite.visible = true;
+  if (bot._vrNameLine) bot._vrNameLine.visible = true;
 }
 
 // Toggle HUD plane visibility from session events so it does not sit in
@@ -12668,6 +12986,16 @@ window._v8updateCinemaFlyover = _v8updateCinemaFlyover;
 
 const postFX = { enabled: true };
 
+// (v18VR ChatGPT pass 2026-05-22) Quest-aware tiered VR perf/budget/throttle
+// system. Three orthogonal tier readouts:
+//   PerfTier     ; engaged only when XR is presenting. Driven by input.vrPerfMode.
+//   BudgetTier   ; engaged on Quest UA even before VR session opens (so level
+//                  build budgets pre-size correctly), or when XR is presenting.
+//   ThrottleTier ; engaged when XR is presenting. Auto-promotes Quest to tier 1
+//                  even when user hasn't picked a vrPerfMode.
+// Helper accessors (getVRCadence, getVRLightCap, getVRGasBudget, getVRBCSMaxSlots,
+// getVRGasSegments, getVRDetachedGasLimit, getVRLevelGridRes) consume those tiers
+// to return concrete per-frame numbers; call sites stay short and consistent.
 function isStandaloneQuest() {
   try {
     const ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
@@ -13116,7 +13444,14 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     shockIntensity: { value: 0.0 },     // base strength (0 = off)
     lensDirt: { value: 0.55 },          // procedural dirt response strength
     exposure: { value: 1.05 },
-    time: { value: 0.0 }
+    time: { value: 0.0 },
+    // (v18L Phase L-G) Generic-emitter god-ray strength. Drives the
+    // radial-to-screen-center bloom-RT sample-along-vector pass in the
+    // fragment shader so bright pixels (explosions, champion field, dash
+    // trails, projectile glows) cast cathedral-of-light shafts through
+    // the gas. (v18L 2026-05-22 tune) Bumped 0.25 -> 0.40 per user
+    // request. Set to 0 to disable the pass.
+    godrayStrength: { value: 0.40 }
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
@@ -13136,6 +13471,8 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     uniform float lensDirt;
     uniform float exposure;
     uniform float time;
+    // (v18L Phase L-G) Generic-emitter god-ray strength uniform.
+    uniform float godrayStrength;
     varying vec2 vUv;
 
     // Narkowicz 2015 ACES filmic tonemap (cheap, cinematic)
@@ -13243,6 +13580,30 @@ postFX.compositeMat = new THREE.ShaderMaterial({
         col += rays * rayStrength;
       }
 
+      // (v18L Phase L-G + cheapen 2026-05-22) Generic-emitter god-rays.
+      // Sample the bloom RT along a radial-to-center vector ; bright bloom
+      // pixels cast shafts through the scene. Reduced from 5 samples to 3
+      // (~40% fewer texel reads) + added an early-out probe so dim regions
+      // skip the full sample march. Reduces baseline GPU load during combat
+      // where the user reported intermittent context loss.
+      if (godrayStrength > 0.001) {
+        vec2 toCenter = vec2(0.5, 0.5) - vUv;
+        // Single probe sample to skip the full pass when the bloom along
+        // this fragment's ray is dim. Mid-march point catches most cases.
+        vec3 probe = texture2D(tBloom, vUv + toCenter * 0.25).rgb;
+        float probeLum = dot(probe, vec3(0.2126, 0.7152, 0.0722));
+        if (probeLum > 0.10) {
+          vec3 emRays = vec3(0.0);
+          emRays += texture2D(tBloom, vUv + toCenter * 0.137).rgb * 0.75;
+          emRays += probe * 0.50;
+          emRays += texture2D(tBloom, vUv + toCenter * 0.395).rgb * 0.25;
+          emRays /= 1.50;  // 0.75 + 0.50 + 0.25
+          float emLum = dot(emRays, vec3(0.2126, 0.7152, 0.0722));
+          float emGate = smoothstep(0.18, 0.55, emLum);
+          col += emRays * (godrayStrength * emGate);
+        }
+      }
+
       // Exposure
       col *= exposure;
 
@@ -13270,10 +13631,13 @@ postFX.compositeMat = new THREE.ShaderMaterial({
 
       // Kill shutter flash: brief inverse-bloom pulse. First half = dip (neg exposure), second half = bright crack.
       // killFlash is already a decaying curve from 1.0; we shape it with smoothstep peaks.
+      // (v18L 2026-05-22) Kill flash: warm bright lift on kills only.
+      // Previously also did a partial 1-col inversion ; in rapid combat
+      // the overlapping inversions read as a persistent psychedelic
+      // "inverted skybox" wash on dark walls (vec3(0) -> vec3(1)). The
+      // bright warm crack alone is enough to mark kills.
       if (killFlash > 0.001) {
-        float dip = smoothstep(0.55, 1.0, killFlash);       // dark slam at the very top of the curve
         float crack = smoothstep(0.15, 0.9, killFlash);     // bright lift across most of the pulse
-        col = mix(col, 1.0 - col, dip * 0.35);              // partial inversion at peak (inverse-bloom feel)
         col += vec3(1.05, 1.02, 0.95) * crack * 0.35;       // warm bright kick
       }
 
@@ -18306,6 +18670,16 @@ class Projectile {
           // pan + occlude + reverb correctly relative to the player.
           if (typeof playSpatialSound === 'function') playSpatialSound('damage', hitPoint.clone(), { refDistance: 220, maxDistance: 4000 });
           else playSound('damage');
+          // (v18L 2026-05-22) Force-field wall ripple at the exact hit
+          // point. Color = projectile trail color so weapon identity
+          // reads in the ripple. Covers every projectile-type wall
+          // impact (Pyro thermite, cluster missiles, Tracker bolts,
+          // tracking missiles, salvo-guided, sonar beacons skip via
+          // their own early-return above).
+          if (typeof spawnWallRipple === 'function') {
+            const _rc = (this.trailColor != null) ? this.trailColor : 0x66ccff;
+            spawnWallRipple(hitPoint, _rc);
+          }
           this.destroy();
           return;
         } else {
@@ -18321,6 +18695,15 @@ class Projectile {
           // their core mesh stripped.
           if (this.mesh) this.mesh.position.copy(this.position);
           spawnImpactSparks(hitPoint, 4);
+          // (v18L 2026-05-22) Force-field wall ripple at the bounce
+          // point too. Slayer shotgun pellets are now fire via fireSpread
+          // (hitscan) instead of bouncing projectiles, so this catches
+          // any remaining bouncing-projectile cases (rare gameplay
+          // paths and any future bouncy weapon).
+          if (typeof spawnWallRipple === 'function') {
+            const _rc = (this.trailColor != null) ? this.trailColor : 0x66ccff;
+            spawnWallRipple(hitPoint, _rc);
+          }
         }
       }
     }
@@ -18618,6 +19001,20 @@ class Projectile {
           player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           showHitMarker();
         }
+        // (v18L 2026-05-22) Tracker main-weapon splash adds a lock mark
+        // to any ship caught in the splash radius, same as the direct-
+        // hit lock-add path in Projectile.update. Falloff-weighted : only
+        // bots in the inner ~70% of the splash radius accrue a lock so
+        // an edge-graze of a wall blast doesn't grant a lock through
+        // tunnels of cover.
+        if (this.isTrackerMain && falloff > 0.30 && this.owner === 'player' && game && game.state === 'playing') {
+          const prevLocks = player.trackerLocks[bot.id] || 0;
+          player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
+          if (player.trackerLocks[bot.id] > prevLocks) {
+            try { playSound('sonar_ping_' + player.trackerLocks[bot.id]); } catch (_) {}
+          }
+          if (player.trackerLocks[bot.id] >= 3) player.trackerLockedTarget = bot;
+        }
       }
     }
     // Fire ignites Explosive Gas: thermite splash, firewalls, any fire source
@@ -18692,6 +19089,14 @@ class Projectile {
     // Pyro thermite leaves a small lingering flame at the impact point.
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
       spawnPyroFlame(_exPos);
+    }
+    // (v18L Phase L-J) Force-field wall ripple on wall hits only. The
+    // wall is a holographic force-field membrane ; impacts ring outward
+    // like a sonar ping fading at a distance. Color = projectile trail
+    // color so the weapon identity reads in the ripple.
+    if (!this._hitShipBot && typeof spawnWallRipple === 'function') {
+      const _rc = (this.trailColor != null) ? this.trailColor : 0x66ccff;
+      spawnWallRipple(this.position, _rc);
     }
   }
 }
@@ -18873,6 +19278,37 @@ function spawnDynamicLight(pos, color, intensity, range, duration) {
   }
 }
 
+// (v18L Phase L-J) Wall ripple ring buffer. The wall ShaderMaterial owns
+// the actual uniform array ; this cursor just tracks which slot to use
+// next so we wrap correctly when more than 6 hits happen in a short
+// window. Each spawn writes into uWallRippleHits[cursor] (xyz + age=0)
+// and bumps the cursor.
+const _WALL_RIPPLE_SLOTS = 6;
+let _wallRippleCursor = 0;
+function spawnWallRipple(pos, colorHex) {
+  if (typeof game === 'undefined' || !game || !game.levelMaterial) return;
+  const u = game.levelMaterial.uniforms;
+  if (!u || !u.uWallRippleHits) return;
+  const slot = _wallRippleCursor;
+  _wallRippleCursor = (_wallRippleCursor + 1) % _WALL_RIPPLE_SLOTS;
+  const v = u.uWallRippleHits.value[slot];
+  v.set(pos.x, pos.y, pos.z, 0);
+  u.uWallRippleColors.value[slot].setHex(colorHex || 0x66ccff);
+}
+function _tickWallRipples(dt) {
+  if (typeof game === 'undefined' || !game || !game.levelMaterial) return;
+  const u = game.levelMaterial.uniforms;
+  if (!u || !u.uWallRippleHits) return;
+  const maxAge = u.uWallRippleMaxAge ? u.uWallRippleMaxAge.value : 1.5;
+  const arr = u.uWallRippleHits.value;
+  for (let i = 0; i < _WALL_RIPPLE_SLOTS; i++) {
+    const v = arr[i];
+    if (v.w < maxAge) v.w += dt;
+  }
+}
+window.spawnWallRipple   = spawnWallRipple;
+window._tickWallRipples  = _tickWallRipples;
+
 // (v9) Smoke-flash queue. Capped at twice the per-shader slot count so we
 // always have enough recent flashes to fill the slots when many shots fire.
 // (v17o) Pool the flash records so spawnDynamicLight doesn't allocate a
@@ -18984,11 +19420,43 @@ function _warmupYield() {
 }
 
 async function warmupCombatShaders() {
+  // (2026-05-21) Promise caching for the loading-overlay launch flow.
+  // commitLoadout now hooks the warmup completion to drive the visible
+  // 3-2-1 countdown ; if the player double-clicks ship-select while
+  // warmup is mid-flight, a second commitLoadout would call this again.
+  // The original guard (return-if-done) returned a freshly-resolved
+  // promise on the second call, which would have tripped the countdown
+  // to start before the in-flight warmup actually finished. By caching
+  // _shaderWarmup.promise we ensure every caller awaits the SAME
+  // promise ; the second commit's `.then` only fires when the real
+  // work resolves, matching the first commit.
+  if (_shaderWarmup.promise) return _shaderWarmup.promise;
   if (_shaderWarmup.done) return;
   if (!(typeof renderer !== 'undefined' && renderer) ||
       !(typeof scene !== 'undefined' && scene) ||
       !(typeof camera !== 'undefined' && camera)) return;
   _shaderWarmup.done = true;
+  // Park the in-flight promise on the cache. Resolves to undefined on
+  // success ; we clear the cache slot on completion so any callers
+  // after `done` short-circuit on the (cheaper) `done` check.
+  _shaderWarmup.promise = (async () => {
+    try {
+      await _warmupCombatShadersBody();
+    } finally {
+      // Leave _shaderWarmup.done = true ; clear the in-flight pointer
+      // so subsequent callers don't pin a now-resolved promise.
+      _shaderWarmup.promise = null;
+    }
+  })();
+  return _shaderWarmup.promise;
+}
+
+// (2026-05-21) Body of warmupCombatShaders, extracted so the outer
+// function can wrap it in promise-caching logic. All the original
+// warmup work (ship meshes, explosion pool, LayeredFX, lightning, smoke,
+// gas, v8Debris/v8Sparks pre-init, rock-chunk warm mesh, the renderer
+// compile, the texture upload loop, cleanup) lives here unchanged.
+async function _warmupCombatShadersBody() {
   const _warmupT0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
   let _warmupShipMeshCount = 0;
   let _warmupTextureCount = 0;
@@ -19363,6 +19831,62 @@ async function warmupCombatShaders() {
       }
     } catch (_) { /* non-fatal: first burst will just have its usual hitch */ }
 
+    // (warmup 2026-05-21) Pre-init the v8Debris + v8Sparks InstancedMesh
+    // pools. Both are lazy-initialized on their first spawn call, which
+    // means the FIRST projectile impact of the match (most commonly the
+    // first shot at a cluster rock, since rocks are always in front of
+    // the spawn) paid the full cost of:
+    //   - allocating a 256-instance InstancedMesh + MeshStandardMaterial
+    //     for v8Debris (USE_INSTANCING shader variant ; not present on
+    //     any other warmup mesh, so the driver had to link it inline)
+    //   - allocating a 512-instance InstancedMesh + MeshBasicMaterial
+    //     for v8Sparks with per-instance color (USE_INSTANCING +
+    //     USE_INSTANCING_COLOR variant ; also unique to this path)
+    //   - first-frame instance buffer + instanceColor buffer upload
+    // spawnExplosion -> v8SpawnDebris and spawnImpactSparks ->
+    // v8SpawnSparks both fire on the very first rock hit, so the player
+    // saw a ~one-frame stall on shot #1. By initing the pools here, both
+    // InstancedMeshes are scene-resident before renderer.compile() below,
+    // which makes the driver link their programs as part of the warmup
+    // pass; the first impact then renders against an already-warm cache.
+    try {
+      if (typeof v8DebrisInit === 'function') v8DebrisInit();
+    } catch (_) { /* non-fatal: first impact will just have its usual hitch */ }
+    try {
+      if (typeof v8SparksInit === 'function') v8SparksInit();
+    } catch (_) { /* non-fatal: first impact will just have its usual hitch */ }
+
+    // (warmup 2026-05-21) Pre-warm the rock-chunk geometry+material path
+    // used by spawnRockChunks(). The cluster-atom shader program
+    // (_makeAtomFractalMaterial) is already warm from the cluster atoms
+    // present in the scene, but chunks use _makeRockGeometry(detail=0),
+    // while cluster atoms use detail=1. That's a different vertex count
+    // and a fresh BufferGeometry upload on the very first rock kill, plus
+    // 4-8 fresh ShaderMaterial instances. Parking ONE chunk-shaped mesh
+    // off-screen here makes renderer.compile + the one-shot render below
+    // walk the detail=0 path once, so the first real chunk spawn skips
+    // the cold upload+link.
+    let _rockChunkWarmMesh = null;
+    try {
+      if (typeof _makeRockGeometry === 'function' && typeof _makeAtomFractalMaterial === 'function') {
+        const _rcGeo = _makeRockGeometry(0, 0);
+        const _rcMat = _makeAtomFractalMaterial(0x808080);
+        _rockChunkWarmMesh = new THREE.Mesh(_rcGeo, _rcMat);
+        _rockChunkWarmMesh.position.set(0, -1e6, 0);
+        _rockChunkWarmMesh.frustumCulled = false;
+        _rockChunkWarmMesh.userData._layeredFXWarmup = true; // share cleanup tag
+        _rockChunkWarmMesh.userData._ownsGeoForCleanup = true; // mark for geo dispose
+        scene.add(_rockChunkWarmMesh);
+        // Register with the existing layered-FX warmup cleanup pass so
+        // it gets removed + its material disposed after the one-shot
+        // render. The cleanup loop handles geometry disposal too (see
+        // _ownsGeoForCleanup tag below).
+        if (window._layeredFXWarmupMeshes && window._layeredFXWarmupMeshes.push) {
+          window._layeredFXWarmupMeshes.push(_rockChunkWarmMesh);
+        }
+      }
+    } catch (_) { /* non-fatal: first chunk spawn will just have its usual hitch */ }
+
     // (warmup-chunk 2026-05) Yield BEFORE the big compile so the driver
     // has finished processing the level-build GL work (basin pool
     // geometries, wall shader rebuild, etc.) that just happened inside
@@ -19398,11 +19922,28 @@ async function warmupCombatShaders() {
 
     // Now strip the warmup meshes ; their job is done. Materials get
     // disposed (the registry self-deregisters in mat.dispose()).
+    // Geometries are mostly shared across the layered-FX meshes so we
+    // leave them alone, except for any mesh explicitly tagged with
+    // _ownsGeoForCleanup (e.g. the rock-chunk warm mesh, whose
+    // BufferGeometry is a unique one-shot allocation).
     try {
       if (window._layeredFXWarmupMeshes && window._layeredFXWarmupMeshes.length) {
         for (const m of window._layeredFXWarmupMeshes) {
           if (m.parent) scene.remove(m);
+          // De-register from _atomFractalMaterials BEFORE dispose so the
+          // per-frame tick loop (see _atomFractalMaterials block in the
+          // effects update) doesn't keep writing time uniform on a
+          // disposed material. Only matters for the rock-chunk warm mesh
+          // since _makeAtomFractalMaterial is the only factory that
+          // pushes into this registry.
+          if (m.material && typeof _atomFractalMaterials !== 'undefined') {
+            const _afmIdx = _atomFractalMaterials.indexOf(m.material);
+            if (_afmIdx >= 0) _atomFractalMaterials.splice(_afmIdx, 1);
+          }
           if (m.material && m.material.dispose) m.material.dispose();
+          if (m.userData && m.userData._ownsGeoForCleanup && m.geometry && m.geometry.dispose) {
+            m.geometry.dispose();
+          }
         }
         window._layeredFXWarmupMeshes.length = 0;
       }
@@ -20602,6 +21143,362 @@ function spawnExplosion(pos, size) {
 const OBSTACLE_SHAPES = ['box', 'diamond', 'cross', 'wedge', 'ring'];
 const OBSTACLE_COLORS = [0x4a6a8a, 0x6a4a7a, 0x3a7a5a, 0x7a5a3a, 0x5a3a6a];
 
+// (2026-05-21) User-configurable zone color overrides. Two parallel
+// arrays of nullable hex values ; null means "use the default for that
+// slot". Persisted across sessions via saveSettings / loadSettings and
+// edited from the Zone Colors section in the settings panel.
+//   walls[i]      : overrides the i-th wall room slot (0..7). Applied
+//                   inside the wall material build path where
+//                   wallRoomBaseHues is derived from the level palette.
+//                   Live updates re-derive the base hues and the
+//                   per-frame hue-drift loop picks them up on its next
+//                   tick (~6 frames). Note: a MULTI_LAYER_PRESETS
+//                   paletteOverride still wins (Matrix, Slime, etc.) ;
+//                   the curated single-color look intentionally locks
+//                   all 8 slots to one hex.
+//   obstacles[i]  : overrides the i-th obstacle/cluster color (0..4).
+//                   Read by _getEffectiveObstacleColors() at obstacle
+//                   spawn time ; existing obstacles keep their assigned
+//                   color until the next round respawn.
+const ZONE_COLOR_DEFAULTS = {
+  walls: [0x1a3050, 0x3a1010, 0x103a10, 0x351828, 0x183520, 0x2a2040, 0x1a4030, 0x402020],
+  obstacles: OBSTACLE_COLORS.slice(),
+};
+function _ensureZoneColors() {
+  if (typeof game === 'undefined' || !game) return null;
+  if (!game.zoneColors || typeof game.zoneColors !== 'object') {
+    game.zoneColors = { walls: [null,null,null,null,null,null,null,null], obstacles: [null,null,null,null,null] };
+  }
+  if (!Array.isArray(game.zoneColors.walls)     || game.zoneColors.walls.length     !== 8) {
+    game.zoneColors.walls     = [null,null,null,null,null,null,null,null];
+  }
+  if (!Array.isArray(game.zoneColors.obstacles) || game.zoneColors.obstacles.length !== 5) {
+    game.zoneColors.obstacles = [null,null,null,null,null];
+  }
+  // (2026-05-21) Default theme key so the settings dropdown always has
+  // a valid initial selection. loadSettings + applyZoneTheme override
+  // this with the persisted value during boot.
+  if (typeof game.zoneTheme !== 'string') game.zoneTheme = 'default';
+  // (2026-05-21) Cloud theme default ; same lazy-init pattern. Auto
+  // preserves the rock-derived behavior so existing users see no
+  // change until they pick a different theme.
+  if (typeof game.cloudTheme !== 'string') game.cloudTheme = 'auto';
+  return game.zoneColors;
+}
+// Return the obstacle palette with overrides applied. The 5-slot array
+// is fresh each call (cheap) ; callers that need stable references
+// should cache locally.
+function _getEffectiveObstacleColors() {
+  const z = _ensureZoneColors();
+  const out = OBSTACLE_COLORS.slice();
+  if (z && z.obstacles) {
+    for (let i = 0; i < out.length; i++) {
+      if (typeof z.obstacles[i] === 'number') out[i] = z.obstacles[i] | 0;
+    }
+  }
+  return out;
+}
+// Return the wall slot i color, falling back to the level's palette
+// (or the global default) when no override is set. Used by the wall
+// material build to seed wallRoomBaseHues, and by the live-update
+// helper to re-seed them after a settings change.
+function _getEffectiveWallSlotColor(i, levelPalette) {
+  const z = _ensureZoneColors();
+  if (z && typeof z.walls[i] === 'number') return z.walls[i] | 0;
+  if (Array.isArray(levelPalette) && levelPalette.length > 0) {
+    return levelPalette[i % levelPalette.length] | 0;
+  }
+  return ZONE_COLOR_DEFAULTS.walls[i % ZONE_COLOR_DEFAULTS.walls.length] | 0;
+}
+// (2026-05-21) Live-update entry point called by the Zone Colors settings
+// UI after the user changes a color picker or theme. Walks the 8 wall slots
+// and re-derives wallRoomBaseHues from the current override + level palette,
+// then immediately pushes the resulting RGB to the wall shader's
+// roomColorsU uniform so the change is visible on the very next frame
+// (rather than waiting up to 6 frames for the hue-drift loop's next tick).
+// No-op outside an active match.
+const _zoneApplyTmpHsl = { h: 0, s: 0, l: 0 };
+const _zoneApplyTmpColor = new THREE.Color();
+function applyZoneColorOverrides() {
+  if (typeof game === 'undefined' || !game || !Array.isArray(game.wallRoomBaseHues)) return;
+  // Resolve the active map's palette so overrides cleanly fall through
+  // to it for any slot the user hasn't touched. Mirrors the lookup in
+  // createMeshFromPositions ; default palette is the same fallback there.
+  const _level = (typeof MAP_DATA !== 'undefined' && game.selectedMap) ? MAP_DATA[game.selectedMap] : null;
+  const _defaultPalette = ZONE_COLOR_DEFAULTS.walls;
+  const _levelPalette = (_level && Array.isArray(_level.palette) && _level.palette.length > 0)
+    ? _level.palette : _defaultPalette;
+  for (let i = 0; i < game.wallRoomBaseHues.length && i < 8; i++) {
+    const slotHex = _getEffectiveWallSlotColor(i, _levelPalette);
+    _zoneApplyTmpColor.setHex(slotHex);
+    _zoneApplyTmpColor.getHSL(_zoneApplyTmpHsl);
+    game.wallRoomBaseHues[i] = { h: _zoneApplyTmpHsl.h, s: _zoneApplyTmpHsl.s, l: _zoneApplyTmpHsl.l };
+  }
+  // Push the new colors straight to the wall shader's uniform so the
+  // change is instant. The per-frame drift loop will overwrite this on
+  // its next tick when the theme is 'default' (drift wanted) ; for
+  // non-default themes the drift loop locks colors to wallRoomBaseHues
+  // (no time offset) so the picked values stay frozen.
+  if (game.levelMaterial && game.levelMaterial.uniforms &&
+      game.levelMaterial.uniforms.roomColorsU) {
+    const colors = game.levelMaterial.uniforms.roomColorsU.value;
+    const boost = game.wallPaletteBoost || 1.0;
+    for (let i = 0; i < colors.length && i < game.wallRoomBaseHues.length; i++) {
+      const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+      _zoneApplyTmpColor.setHSL(base.h, base.s, base.l);
+      colors[i].setRGB(
+        Math.min(1.0, _zoneApplyTmpColor.r * boost),
+        Math.min(1.0, _zoneApplyTmpColor.g * boost),
+        Math.min(1.0, _zoneApplyTmpColor.b * boost)
+      );
+    }
+  }
+}
+
+// (2026-05-21) Zone theme system. Each theme is a coherent visual identity
+// (all greens, all blues, rainbow, dark-to-light gradient, etc.) selected
+// from a dropdown in settings. Themes write directly into game.zoneColors,
+// so the obstacle spawn path + wall material build pick them up via the
+// same _getEffectiveObstacleColors / _getEffectiveWallSlotColor helpers.
+// The per-frame hue-drift loop locks to wallRoomBaseHues (no time offset)
+// when a non-default theme is active, so picked colors stay frozen ;
+// without that lock, the drift was rotating each slot's hue around the
+// full color wheel over ~4 minutes which made themes feel unstable.
+//
+// Two theme kinds:
+//   fixed     : 8 wall colors + 5 obstacle colors are explicit hex values.
+//               Same look on every map.
+//   gradient  : bottom + top hex pair ; per-slot wall color is lerped
+//               from each room's Y position (bottom-Y -> bottom color,
+//               top-Y -> top color) at apply time. Obstacles get a
+//               separate explicit palette since they're scattered, not
+//               positional. Re-applied on level build so the lerp
+//               recomputes against the new map's room layout.
+const ZONE_THEMES = {
+  'default': {
+    label: 'Map Default (animated drift)',
+    kind: 'default',
+  },
+  'verdant': {
+    label: 'Verdant (shades of green)',
+    kind: 'fixed',
+    walls:     [0x0a2010, 0x153020, 0x1f4525, 0x2a5a30, 0x35703a, 0x408548, 0x4d9b58, 0x5ab068],
+    obstacles: [0x2a5a30, 0x408548, 0x5ab068, 0x80c080, 0x1f4525],
+  },
+  'azure': {
+    label: 'Azure (shades of blue)',
+    kind: 'fixed',
+    walls:     [0x081428, 0x0e2040, 0x142c55, 0x1a386a, 0x204480, 0x2655a0, 0x2c66c0, 0x3677d8],
+    obstacles: [0x1a386a, 0x2655a0, 0x3677d8, 0x6090e0, 0x142c55],
+  },
+  'ember': {
+    label: 'Ember (shades of red & orange)',
+    kind: 'fixed',
+    walls:     [0x2a0a05, 0x40180a, 0x55260f, 0x6a3415, 0x80421a, 0x9b521f, 0xb56225, 0xd0762a],
+    obstacles: [0x6a3415, 0x9b521f, 0xd0762a, 0xff9a40, 0x55260f],
+  },
+  'twilight': {
+    label: 'Twilight (shades of purple)',
+    kind: 'fixed',
+    walls:     [0x180a28, 0x251040, 0x301858, 0x3c2070, 0x482888, 0x5530a0, 0x6238b8, 0x7044d0],
+    obstacles: [0x3c2070, 0x5530a0, 0x7044d0, 0xa060e8, 0x301858],
+  },
+  'rainbow': {
+    label: 'Rainbow (full spectrum)',
+    kind: 'fixed',
+    walls:     [0x802020, 0x803c20, 0x806820, 0x308020, 0x208068, 0x206080, 0x202080, 0x602080],
+    obstacles: [0x802020, 0x806820, 0x308020, 0x206080, 0x602080],
+  },
+  'aurora': {
+    label: 'Aurora (teals & magentas)',
+    kind: 'fixed',
+    walls:     [0x0a2030, 0x153a40, 0x205050, 0x2a6a55, 0x408855, 0x6aa05a, 0x8a8a70, 0xb05a90],
+    obstacles: [0x2a6a55, 0x408855, 0x6aa05a, 0xb05a90, 0x205050],
+  },
+  'forest': {
+    label: 'Forest Canopy (green bottom, sky top)',
+    kind: 'gradient',
+    bottom: 0x1a3010,                                  // deep forest green
+    top:    0x2a5080,                                  // sky blue
+    obstacles: [0x1a3010, 0x305020, 0x4a7050, 0x2a4060, 0x2a5080],
+  },
+  'volcanic': {
+    label: 'Volcanic (red bottom, gold top)',
+    kind: 'gradient',
+    bottom: 0x4a1005,                                  // deep crimson
+    top:    0xb0902a,                                  // gold-amber
+    obstacles: [0x4a1005, 0x803020, 0x9a5520, 0xb07020, 0xb0902a],
+  },
+  'abyss': {
+    label: 'Abyss (dark bottom, pale top)',
+    kind: 'gradient',
+    bottom: 0x080a10,                                  // near-black
+    top:    0xccd4e0,                                  // pale gray-blue
+    obstacles: [0x080a10, 0x303440, 0x606878, 0x9098a8, 0xccd4e0],
+  },
+};
+
+// Compute the 8 wall hexes + 5 obstacle hexes for a given theme, given
+// the current map's room data. Returns { walls: number[8], obstacles:
+// number[5] } so callers can either write the result into game.zoneColors
+// (the normal apply path) or just preview it (the settings UI swatches).
+const _zoneThemeTmpRgb = { r: 0, g: 0, b: 0 };
+function _computeZoneThemeColors(themeName) {
+  const theme = ZONE_THEMES[themeName] || ZONE_THEMES.default;
+  const out = { walls: [null,null,null,null,null,null,null,null], obstacles: [null,null,null,null,null] };
+  if (theme.kind === 'default') return out;
+  if (theme.kind === 'fixed') {
+    for (let i = 0; i < 8; i++) out.walls[i]     = (theme.walls && theme.walls[i] != null) ? (theme.walls[i] | 0) : null;
+    for (let i = 0; i < 5; i++) out.obstacles[i] = (theme.obstacles && theme.obstacles[i] != null) ? (theme.obstacles[i] | 0) : null;
+    return out;
+  }
+  if (theme.kind === 'gradient') {
+    const rooms = (typeof game !== 'undefined' && game && Array.isArray(game.sdfRoomData)) ? game.sdfRoomData : null;
+    const bottomC = new THREE.Color(theme.bottom);
+    const topC    = new THREE.Color(theme.top);
+    if (rooms && rooms.length > 0) {
+      // Y-range across the active map's rooms.
+      let minY = Infinity, maxY = -Infinity;
+      for (const r of rooms) { if (r.y < minY) minY = r.y; if (r.y > maxY) maxY = r.y; }
+      const range = Math.max(1, maxY - minY);
+      const tmpC = new THREE.Color();
+      for (let i = 0; i < 8; i++) {
+        if (i < rooms.length) {
+          const t = Math.max(0, Math.min(1, (rooms[i].y - minY) / range));
+          tmpC.copy(bottomC).lerp(topC, t);
+          out.walls[i] = ((Math.round(tmpC.r * 255) << 16) | (Math.round(tmpC.g * 255) << 8) | Math.round(tmpC.b * 255)) | 0;
+        } else {
+          out.walls[i] = bottomC.getHex();
+        }
+      }
+    } else {
+      // No level built yet ; fall back to a Y-uniform lerp over slot index
+      // so the settings-panel preview still has something useful to show.
+      const tmpC = new THREE.Color();
+      for (let i = 0; i < 8; i++) {
+        const t = i / 7;
+        tmpC.copy(bottomC).lerp(topC, t);
+        out.walls[i] = ((Math.round(tmpC.r * 255) << 16) | (Math.round(tmpC.g * 255) << 8) | Math.round(tmpC.b * 255)) | 0;
+      }
+    }
+    for (let i = 0; i < 5; i++) out.obstacles[i] = (theme.obstacles && theme.obstacles[i] != null) ? (theme.obstacles[i] | 0) : null;
+    return out;
+  }
+  return out;
+}
+
+// Apply a theme by key. Writes the computed colors into game.zoneColors,
+// updates game.zoneTheme, pushes the change to the wall shader, and
+// persists the choice. Gradient themes re-apply on level build because
+// their per-slot colors depend on the new map's room positions.
+function applyZoneTheme(themeName) {
+  const key = (themeName in ZONE_THEMES) ? themeName : 'default';
+  if (typeof game === 'undefined' || !game) return;
+  game.zoneTheme = key;
+  const z = _ensureZoneColors();
+  if (!z) return;
+  if (key === 'default') {
+    // Clear all overrides ; map palette + hue drift take over.
+    for (let i = 0; i < 8; i++) z.walls[i]     = null;
+    for (let i = 0; i < 5; i++) z.obstacles[i] = null;
+  } else {
+    const computed = _computeZoneThemeColors(key);
+    for (let i = 0; i < 8; i++) z.walls[i]     = (typeof computed.walls[i]     === 'number') ? computed.walls[i]     : null;
+    for (let i = 0; i < 5; i++) z.obstacles[i] = (typeof computed.obstacles[i] === 'number') ? computed.obstacles[i] : null;
+  }
+  try { applyZoneColorOverrides(); } catch (_) {}
+  try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
+}
+
+// (2026-05-21) Cloud theme system. Cluster atom gas clouds (the wisps
+// around the breakable rocks) used to derive their color directly from
+// the parent rock's baseColor via _smokeColorFromRock(). The cloud
+// theme is a layer above that : when set, it replaces the rock-derived
+// color with a coherent user-chosen palette. Only affects the three
+// CLUSTER gas-cloud spawn sites (atom cloud, detached pocket, basin
+// pool). Gameplay-meaningful clouds like the Pyro thermite green gas
+// are left alone because their color signals an interactable hazard.
+const CLOUD_THEMES = {
+  'auto': {
+    label: 'Auto (inherit from rocks)',
+    kind: 'auto',
+  },
+  'smoke': {
+    label: 'Smoke (soft grays)',
+    kind: 'fixed',
+    colors: [0x7a7a7a, 0x8a8a8a, 0x6a6a6a, 0x959595, 0x707070],
+  },
+  'toxic': {
+    label: 'Toxic (greens)',
+    kind: 'fixed',
+    colors: [0x6acc55, 0x88dd66, 0x4ab83a, 0x70cc88, 0x9adb40],
+  },
+  'plasma': {
+    label: 'Plasma (magenta + cyan)',
+    kind: 'fixed',
+    colors: [0xdd44dd, 0x66ccee, 0xee66bb, 0x88aaff, 0xdd88dd],
+  },
+  'ember': {
+    label: 'Ember (orange + red)',
+    kind: 'fixed',
+    colors: [0xff7733, 0xffaa55, 0xdd5522, 0xff8855, 0xee9944],
+  },
+  'frost': {
+    label: 'Frost (icy blues)',
+    kind: 'fixed',
+    colors: [0xaaccee, 0xccddee, 0x88bbdd, 0xddeeff, 0x99c8e5],
+  },
+  'mystic': {
+    label: 'Mystic (purple + violet)',
+    kind: 'fixed',
+    colors: [0x9966dd, 0xbb88ee, 0x7755bb, 0xaa77dd, 0xcc99ff],
+  },
+  'match-walls': {
+    label: 'Match Wall Theme',
+    kind: 'match-walls',
+  },
+};
+
+// Pick a cloud color for the given parent rock color. Auto theme keeps
+// the existing rock-derived behavior ; fixed themes pick a random color
+// from the theme's palette ; match-walls picks a random color from the
+// currently-active zone wall theme's palette (or the map's palette if
+// the zone theme is 'default'). Returns a THREE.Color.
+function _getEffectiveCloudColor(parentRockColor) {
+  const themeName = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string')
+    ? game.cloudTheme : 'auto';
+  const theme = CLOUD_THEMES[themeName] || CLOUD_THEMES.auto;
+  if (theme.kind === 'fixed' && Array.isArray(theme.colors) && theme.colors.length > 0) {
+    const hex = theme.colors[Math.floor(Math.random() * theme.colors.length)];
+    return new THREE.Color(hex);
+  }
+  if (theme.kind === 'match-walls') {
+    // Pull from the active zone wall theme's resolved palette. We use
+    // ZONE_COLOR_DEFAULTS as the fallback so the dropdown also works
+    // before a level is built. Random pick across the 8 wall slots.
+    const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+    const _palette = [];
+    if (z && Array.isArray(z.walls)) {
+      for (let i = 0; i < z.walls.length; i++) {
+        if (typeof z.walls[i] === 'number') _palette.push(z.walls[i]);
+      }
+    }
+    if (_palette.length === 0) {
+      // Zone theme is 'default' (no overrides) ; pull from defaults.
+      for (let i = 0; i < ZONE_COLOR_DEFAULTS.walls.length; i++) _palette.push(ZONE_COLOR_DEFAULTS.walls[i]);
+    }
+    const hex = _palette[Math.floor(Math.random() * _palette.length)];
+    return new THREE.Color(hex);
+  }
+  // Auto (or unknown theme key) : fall through to rock-derived smoke
+  // color. Preserves the original behavior so this addition is fully
+  // opt-in via the dropdown.
+  if (typeof _smokeColorFromRock === 'function') {
+    return _smokeColorFromRock(parentRockColor);
+  }
+  return new THREE.Color(parentRockColor != null ? parentRockColor : 0x808080);
+}
+
 class DestructibleObstacle {
   constructor(pos, shapeType, scale) {
     this.position = pos.clone();
@@ -20642,8 +21539,13 @@ class DestructibleObstacle {
       Math.random() * Math.PI * 2
     );
 
-    const colorIdx = Math.floor(Math.random() * OBSTACLE_COLORS.length);
-    this.baseColor = OBSTACLE_COLORS[colorIdx];
+    // (2026-05-21) Read the effective obstacle palette so user-set zone
+    // color overrides apply to newly-spawned obstacles. Existing
+    // obstacles keep their baseColor until the round respawns them.
+    const _effObstColors = (typeof _getEffectiveObstacleColors === 'function')
+      ? _getEffectiveObstacleColors() : OBSTACLE_COLORS;
+    const colorIdx = Math.floor(Math.random() * _effObstColors.length);
+    this.baseColor = _effObstColors[colorIdx];
 
     this._buildMesh();
   }
@@ -21064,13 +21966,14 @@ function _makeAtomFractalMaterial(baseColor) {
     uniforms: {
       time:       { value: 0 },
       uBaseColor: { value: new THREE.Color(baseColor) },
-      // (v11d) 0.95 = 5% transparency on cluster rocks ; lets the player
-      // see what's behind a rock when ducking around it without losing
-      // the silhouette. The fragment shader writes gl_FragColor.a = uOpacity
-      // directly, and the material is already transparent: true below.
-      // Override per-instance later (e.g. impact fade, doomed dim) by
-      // poking mesh.material.uniforms.uOpacity.value.
-      uOpacity:   { value: 0.78 },
+      // (2026-05-21) Rocks render fully opaque at user request ; the
+      // earlier 0.78 (22% transparent) "see-through ducking" feature was
+      // removed. The fragment shader still writes gl_FragColor.a = uOpacity
+      // and `transparent: true` is kept on the material so the rockChunk
+      // fade-out path (mesh.material.uniforms.uOpacity.value = 1 - t,
+      // see updateEffects rockChunk branch) keeps working. Cluster rocks
+      // stay at the 1.0 default forever ; only chunks animate it down.
+      uOpacity:   { value: 1.0 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -21256,8 +22159,12 @@ class ClusterObstacle {
         Math.random() * Math.PI * 2,
         Math.random() * Math.PI * 2
       );
-      const colorIdx = Math.floor(Math.random() * OBSTACLE_COLORS.length);
-      this.baseColor = OBSTACLE_COLORS[colorIdx];
+      // (2026-05-21) Pull from the user-overridden obstacle palette so
+      // zone color settings cascade into new cluster spawns.
+      const _effObstColors2 = (typeof _getEffectiveObstacleColors === 'function')
+        ? _getEffectiveObstacleColors() : OBSTACLE_COLORS;
+      const colorIdx = Math.floor(Math.random() * _effObstColors2.length);
+      this.baseColor = _effObstColors2[colorIdx];
     }
     this.children = [];
     if (config && config.children) {
@@ -21291,7 +22198,11 @@ class ClusterObstacle {
     // than generic gray. Hue preserved, saturation reduced to ~40% of
     // rock, lightness lifted toward smoke. Slight per-cloud jitter on
     // both axes so adjacent atoms don't look uniform.
-    const cloudColor = _smokeColorFromRock(this.baseColor);
+    // (2026-05-21) Routed through the cloud theme system : Auto theme
+    // returns _smokeColorFromRock(rockColor) so this path is unchanged
+    // by default ; other themes (Toxic, Plasma, Ember, etc.) replace
+    // the rock-derived color with a palette pick.
+    const cloudColor = _getEffectiveCloudColor(this.baseColor);
     // (v15a 2026-05-10) Denser cluster smoke. Radius bumped 2.8 → 3.2 so
     // gas envelops the atom more visibly, sprite count 13 → 17 so the
     // body of the cloud reads thicker, alpha up from 0.75 to 0.80.
@@ -21323,7 +22234,7 @@ class ClusterObstacle {
         (Math.random() - 0.5) * 80,
         (Math.random() - 0.5) * 80
       );
-      _pushDetachedGasPocket({ gasCloud: cloud, velocity: vel });
+      game.detachedGasPockets.push({ gasCloud: cloud, velocity: vel });
     } else if (cloud && typeof cloud.dispose === 'function') {
       cloud.dispose();
     } else {
@@ -21832,7 +22743,9 @@ class ClusterObstacle {
             // since BCS clouds bond via spatial chemistry, not phase tags.
             // (v15a colored smoke) Detached pocket from cluster shatter
             // inherits the parent cluster's baseColor as muted smoke.
-            const _cloudColor = _smokeColorFromRock(this.baseColor);
+            // (2026-05-21) Routed through cloud theme ; Auto preserves
+            // the rock-derived behavior.
+            const _cloudColor = _getEffectiveCloudColor(this.baseColor);
             const _cloud = new GasCloud(billboardCloudSystem, _pos, {
               boundsRadius:   _size,
               spriteScale:    _size * 1.55,
@@ -22050,7 +22963,6 @@ function _spawnBasinClouds() {
   const DRAIN_Y_FRAC = -0.5;  // -0.5 = 30° below horizontal
   let basinCount = 0, drainCount = 0;
   for (const sphere of game.levelSpheres) {
-    if (typeof _canSpawnDetachedGasPocket === 'function' && !_canSpawnDetachedGasPocket()) break;
     const r2 = sphere.r * sphere.r;
     let hasDrain = false;
     for (const cyl of cylinders) {
@@ -22133,11 +23045,10 @@ function _spawnBasinClouds() {
     // (v16a Ultra) Denser still on Ultra : 16-20 per basin. Each cloud is
     // ~10 sprites so this is a per-basin sprite count of ~160-200 vs
     // ~120-160 on High. Bounded by the BCS slot pool.
-    const _basinBase   = _gasBudget ? _gasBudget.basinClouds : ((typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 16 : 12);
-    const _basinJitter = _gasBudget ? _gasBudget.basinJitter : ((typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 5  : 5);
+    const _basinBase   = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 16 : 12;
+    const _basinJitter = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 5  : 5;
     const numClouds = _basinBase + Math.floor(Math.random() * _basinJitter);
     for (let i = 0; i < numClouds; i++) {
-      if (typeof _canSpawnDetachedGasPocket === 'function' && !_canSpawnDetachedGasPocket()) break;
       const ang = Math.random() * Math.PI * 2;
       const rho = Math.sqrt(Math.random()) * poolR;
       const yJitter = (Math.random() - 0.5) * sphere.r * 0.12;
@@ -22149,9 +23060,11 @@ function _spawnBasinClouds() {
       const size = minSize + Math.random() * (maxSize - minSize);
       // (v15a colored smoke) Pool clouds share the nearest-cluster's hue
       // as muted smoke ; otherwise default to off-white.
+      // (2026-05-21) Routed through cloud theme ; Auto preserves the
+      // rock-derived behavior, other themes pick from a palette.
       let color;
       if (basinBaseColor != null) {
-        color = _smokeColorFromRock(basinBaseColor);
+        color = _getEffectiveCloudColor(basinBaseColor);
       } else {
         const v = 0.55 + Math.random() * 0.25;
         color = new THREE.Color(v, v * 0.97, v * 0.92);
@@ -22493,7 +23406,6 @@ function _applyCloudAttraction(dt) {
 
 function updateDetachedGasPockets(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
-  if (typeof _enforceDetachedGasBudget === 'function') _enforceDetachedGasBudget();
   // Reverse iteration so we can splice fading or fragmented pockets out
   // during the loop without skipping any siblings. New fragment children
   // are pushed to the end of the array, past our current index, and get
@@ -22892,7 +23804,15 @@ function updateGasChemistry(dt) {
 function disposeAllDetachedGasPockets() {
   if (!game.detachedGasPockets) return;
   for (const p of game.detachedGasPockets) {
-    _disposeDetachedGasPocket(p);
+    if (!p) continue;
+    // (v14e) GasCloud entries dispose via their own method (releases BCS
+    // slots). Legacy mesh entries dispose the old way.
+    if (p.gasCloud && typeof p.gasCloud.dispose === 'function') {
+      p.gasCloud.dispose();
+    } else if (p.mesh) {
+      if (p.mesh.parent) p.mesh.parent.remove(p.mesh);
+      if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
+    }
   }
   game.detachedGasPockets.length = 0;
 }
@@ -23751,8 +24671,16 @@ const _PLAYER_LAUNCHER_FRACS = {
 // Internal helper: spawn one tracer streak along (fromVec -> toVec).
 // spawnTracer() routes player-side shots through two calls to this (one
 // from each arm) so the visible beams converge on the target as a triangle.
-function _spawnSingleTracer(fromVec, toVec, color, widthScale) {
+function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
   widthScale = widthScale || 1.0;
+  // (v18L tracer-strafe fix) tailMul multiplies the haze-tail lifetimes
+  // (inner + outer) so callers can shorten the lingering trail. Player-
+  // side rapid-fire weapons (Syphon, Blaster, Vortex) pass ~0.3 to
+  // collapse 0.42s/0.65s tails to ~0.13s/0.20s ; without this fix, the
+  // tails stayed at their world-spawn position while the strafing player's
+  // camera moved past them, creating the "spaghetti" disconnect the user
+  // saw inside gas clouds. Core + beam are short enough to not need it.
+  tailMul = (typeof tailMul === 'number' && tailMul > 0) ? tailMul : 1.0;
   const dir = new THREE.Vector3().subVectors(toVec, fromVec);
   const len = dir.length();
   if (len < 1) return;
@@ -23790,8 +24718,8 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale) {
   // wispy, fading over ~0.55s so the beam reads as a lingering volumetric
   // shaft of light around the thin filament. Additive + depthWrite:false
   // so the haze reads as emitted light through air, not a solid cylinder.
-  _makeShape(_TRACER_TAIL_INNER_GEO, _TRACER_TAIL_INNER_MAT_PROTO, color, 0.55, 0.42, 'tracerTail');
-  _makeShape(_TRACER_TAIL_OUTER_GEO, _TRACER_TAIL_OUTER_MAT_PROTO, color, 0.18, 0.65, 'tracerTail');
+  _makeShape(_TRACER_TAIL_INNER_GEO, _TRACER_TAIL_INNER_MAT_PROTO, color, 0.55, 0.42 * tailMul, 'tracerTail');
+  _makeShape(_TRACER_TAIL_OUTER_GEO, _TRACER_TAIL_OUTER_MAT_PROTO, color, 0.18, 0.65 * tailMul, 'tracerTail');
 
   // --- Tracer sparkles along the beam (trace of dust) ---
   const particleCount = Math.min(Math.ceil(len / 400), 3);
@@ -23976,8 +24904,12 @@ function spawnTracer(from, to, color, widthScale) {
     // world correctly as the camera rotates. Each beam is somewhat thinner
     // than a single-tracer default so the two converging streaks together
     // don't visually outweigh the old single-shot mass.
-    _spawnSingleTracer(leftMuzzle, to, color, 0.85 * wScale);
-    _spawnSingleTracer(rightMuzzle, to, color, 0.85 * wScale);
+    // (v18L tracer-strafe fix) Player-side tracers : pass tailMul=0.30
+    // to collapse the long-lived haze tails so the strafing-spaghetti
+    // disconnect inside gas clouds goes away. Bot/far-field shots keep
+    // tailMul=1.0 so external views still see the full lingering haze.
+    _spawnSingleTracer(leftMuzzle, to, color, 0.85 * wScale, 0.30);
+    _spawnSingleTracer(rightMuzzle, to, color, 0.85 * wScale, 0.30);
     return;
   }
   // Bot / far-field shots: single tracer as before.
@@ -27535,33 +28467,95 @@ function commitLoadout(key) {
     });
   }
 
-  // Hold the round in 'warmup' for the full duration of the visible
-  // ship-select countdown; otherwise the warmup elapses partway through and
-  // bots become live behind the scenes while the player is still ticking
-  // down to LAUNCH. Only seed the warmup timer when no countdown is already
-  // running; swapping ships mid-countdown must not reset either clock.
+  // (2026-05-21) Loading-overlay launch flow. The old 10s ship-select
+  // countdown ran in parallel with warmupCombatShaders, which meant the
+  // visible 3-2-1 ticker could lag mid-compile on slower GPUs. New flow:
+  // show LSS_loading.png while warmup runs (no visible timer = no lag),
+  // then run a short 3-2-1 ONLY AFTER warmup is done. Solo and MP share
+  // the same loading screen ; MP additionally waits for every peer's
+  // warmup_ready event before the lowest-id proposer broadcasts launch_at.
+  //
+  // The warmupTimer is intentionally NOT anchored here anymore. If it
+  // were, it would tick down from LAUNCH_COUNTDOWN during the variable-
+  // length loading phase and hit 0 (triggering the warmup -> playing
+  // transition) before the visible countdown even started. Instead we
+  // hold it un-anchored ; the short countdown's startpoint anchors it
+  // to SHORT_COUNTDOWN so the round-system transition lands on the
+  // same wall-clock moment as the visible LAUNCH tick.
   if (!_countdownActive) {
-    // (v11d) Anchor to wall-clock so the launch countdown ticks at real
-    // rate even if the user alt-tabs during ship-select.
-    _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
+    game.warmupTimer = LSS.WARMUP_TIME || 5;     // positive sentinel ; gates 'warmup' state
+    game.warmupTimerAnchorMs = undefined;        // unanchored ; _tickTimer no-ops
+    game.warmupTimerTotal    = undefined;
   }
   // Refresh the teammates strip so the newly committed ship shows up as YOU's pick.
   updateTeammatesStrip();
-  // Pre-compile shader programs for combat-effect materials while the player
-  // watches the 10s launch countdown. One-shot (idempotent).
-  warmupCombatShaders();
-  // (v6.7) In multiplayer, picking a ship is the ship-select equivalent of
-  // pressing READY in the lobby. Don't launch alone; the loadout broadcast
-  // above is the "ready" signal. The lowest-peerId peer proposes a synced
-  // launchAt timestamp once every peer has committed, and every peer fires
-  // launchCountdown() at that wall-clock moment so the 3-2-1-LAUNCH sequence
-  // is in lockstep across the mesh. In solo mode, launch immediately as before.
-  if (net.active) {
-    showShipSelectWaiting();
-    checkAllLoadoutsReady();
-  } else {
-    launchCountdown();
+
+  // Show the loading overlay over ship-select while shaders compile.
+  // Skip the overlay if local warmup is already done (subsequent matches
+  // in the same session, or ship-swaps between rounds when warmup has
+  // long since finished) ; the promise will resolve on the next microtask
+  // and a one-frame flash of "PREPARING ARENA" would look weird.
+  if (!_localWarmupReady) {
+    try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   }
+
+  // Pre-compile shader programs for combat-effect materials. Hook the
+  // promise so we know when warmup is done and can proceed to the
+  // short visible countdown (solo) or the peer-ready handshake (MP).
+  // warmupCombatShaders is idempotent ; calling it again after the
+  // first session resolves immediately so the loading overlay flashes
+  // briefly then hides on subsequent commits.
+  let _warmupPromise;
+  try {
+    _warmupPromise = warmupCombatShaders();
+  } catch (_) {
+    _warmupPromise = Promise.resolve();
+  }
+  // Defensive: if warmupCombatShaders ever returned non-thenable, wrap.
+  if (!_warmupPromise || typeof _warmupPromise.then !== 'function') {
+    _warmupPromise = Promise.resolve();
+  }
+  _warmupPromise.then(() => {
+    // Local warmup is done ; mark ourselves ready and notify peers.
+    _markLocalWarmupReady();
+    if (net.active) {
+      // Multiplayer: show "waiting for peers" while the rest of the
+      // mesh finishes its warmup. checkAllLoadoutsReady (re-run by each
+      // incoming warmup_ready event) will broadcast launch_at when all
+      // peers AND loadouts are ready ; scheduleLaunch then hides the
+      // overlay and runs the short countdown.
+      try { showShipSelectWaiting(); } catch (_) {}
+      checkAllLoadoutsReady();
+    } else {
+      // Solo: hand straight off to the short visible countdown. Anchor
+      // warmupTimer to SHORT_COUNTDOWN so the round-system gate fires
+      // at the same wall-clock moment as the LAUNCH tick.
+      // (2026-05-21) Skip both the re-anchor and the countdown if another
+      // countdown is already in flight (between-rounds swap re-enters
+      // commitLoadout while the round-end → next-round 10s countdown is
+      // already ticking ; we don't want to stomp its anchor with a 3s
+      // value).
+      try { hideLoadingOverlay(); } catch (_) {}
+      if (!_countdownActive) {
+        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+        launchCountdown(LSS.SHORT_COUNTDOWN);
+      }
+    }
+  }).catch((e) => {
+    // Warmup failed unexpectedly ; don't strand the player on the
+    // loading screen. Fall back to launching anyway ; the first
+    // impact will hit a cold shader but at least the match starts.
+    console.warn('[commitLoadout] warmup failed, launching anyway:', e);
+    _markLocalWarmupReady();
+    try { hideLoadingOverlay(); } catch (_) {}
+    if (net.active) {
+      try { showShipSelectWaiting(); } catch (_) {}
+      checkAllLoadoutsReady();
+    } else if (!_countdownActive) {
+      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    }
+  });
 }
 
 function spawnBots() {
@@ -28712,6 +29706,15 @@ function fireHitscan(origin, dir, w) {
   // Check level geometry first
   const levelDist = raycastLevel(origin, aimDir, w.range);
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
+  // (v18L Phase L-J) If the hitscan terminated at a wall (not at max
+  // range), spawn a force-field ripple at the impact point. If a ship
+  // closer to origin also got hit, the ship-hit visual dominates the
+  // foreground ; the ripple sits at the wall behind it.
+  if (levelDist < w.range && typeof spawnWallRipple === 'function') {
+    const _hsCol = (typeof chassisFlashColor === 'function')
+      ? chassisFlashColor(player.loadoutKey) : 0x66ccff;
+    spawnWallRipple(end, _hsCol);
+  }
   // Color follows each loadout's chassis flash color so muzzle flash and
   // tracer share one palette (sourced from LSS.CLASS_COLORS so weapons,
   // abilities, and cores all read with the same class-themed identity).
@@ -28986,6 +29989,13 @@ function fireProjectile(origin, dir, w) {
     // and leaves a small lingering flame at the hit point for 2 seconds.
     proj.isPyroThermite = true;
   }
+  // (v18L 2026-05-22) Tag Tracker main-weapon bolts so the splash damage
+  // path can also acquire a lock on any ship caught by the splash. The
+  // direct-hit lock-add is in Projectile.update ; this flag wires the
+  // splash branch into the same lock system.
+  if (player.loadoutKey === 'TRACKER') {
+    proj.isTrackerMain = true;
+  }
   // Both projectile-mode mains (Pyro Thermite Launcher, Tracker 40mm) get the
   // fading smoke-puff trail and lose the outer haze sphere.
   proj.smokeTrail = true;
@@ -29037,6 +30047,12 @@ function fireSpread(origin, dir, w) {
     // a brief shower of warm-colored sparks reads as a shotgun blast (per the
     // particle-burst pattern in effects_demo.html).
     spawnPelletBurst(origin, spreadDir, levelDist);
+    // (v18L 2026-05-22) Wall ripple for every Slayer pellet that hits a
+    // wall before max range.
+    if (levelDist < w.range && typeof spawnWallRipple === 'function') {
+      const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
+      spawnWallRipple(end, _slCol);
+    }
     if (net.active && net.sendEvent) {
       net.sendEvent({
         type: 'pellet_burst',
@@ -30020,8 +31036,15 @@ function firePowerShot() {
       pelletDir.y += (Math.random() - 0.5) * spreadAngle;
       pelletDir.z += (Math.random() - 0.5) * spreadAngle;
       pelletDir.normalize();
-      const pelletEnd = player.position.clone().add(pelletDir.clone().multiplyScalar(range));
+      // (v18L 2026-05-22) Raycast the wall so the pellet's tracer stops
+      // at the actual wall + the ripple lands at the impact point. Falls
+      // back to max range when no wall is hit.
+      const _pelletWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, pelletDir, range) : range;
+      const pelletEnd = player.position.clone().add(pelletDir.clone().multiplyScalar(_pelletWallDist));
       spawnTracer(player.position, pelletEnd, LSS.CLASS_COLORS.BLASTER);
+      if (_pelletWallDist < range && typeof spawnWallRipple === 'function') {
+        spawnWallRipple(pelletEnd, LSS.CLASS_COLORS.BLASTER);
+      }
       // (v6.7) Broadcast each pellet on the fire_tracer channel.
       if (net.active && net.sendEvent) {
         net.sendEvent({
@@ -30056,9 +31079,15 @@ function firePowerShot() {
   } else {
     // Long-range Charge Shot: precision piercing shot (travels through all enemies)
     const range = 3500;
-    const end = player.position.clone().add(forward.clone().multiplyScalar(range));
+    // (v18L 2026-05-22) Raycast for wall hit + spawn ripple. The
+    // piercing shot goes through enemies but still stops at a wall.
+    const _csWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, forward, range) : range;
+    const end = player.position.clone().add(forward.clone().multiplyScalar(_csWallDist));
     spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
     spawnTracer(player.position.clone().add(new THREE.Vector3(0,2,0)), end.clone().add(new THREE.Vector3(0,2,0)), 0xaaeeff);
+    if (_csWallDist < range && typeof spawnWallRipple === 'function') {
+      spawnWallRipple(end, LSS.CLASS_COLORS.BLASTER);
+    }
     // (v6.7) Broadcast both beams on the fire_tracer channel.
     if (net.active && net.sendEvent) {
       net.sendEvent({
@@ -30778,6 +31807,117 @@ function _disposeShieldClone(clone) {
 const _thermalFireForward = new THREE.Vector3();
 const _thermalFirePerp1 = new THREE.Vector3();
 const _thermalFirePerp2 = new THREE.Vector3();
+// (v18L 2026-05-22 v2) Persistent flame spheres for the Pyro Fire Shield
+// cone. Replaces the dot-storm with a row of large LayeredFX fireball
+// spheres (same preset family the Flame Chain ability uses) anchored to
+// a ship's position + forward axis. Each frame the spheres are repositioned
+// in the cone, scale-breathes, and bobs slightly. When Fire Shield turns
+// off, the spheres are hidden ; on ship death / round end the existing
+// thermalFlameMeshes cleanup helper disposes them.
+// (v18L 2026-05-22 v6) Titanfall Scorch-style fire envelope. A large
+// SPHERE rendered with side=BackSide so the camera inside sees the
+// inner walls covered in fireball-shader flames. From cockpit POV the
+// flames radiate outward from screen center in all directions, matching
+// the Scorch flame-shield look from Titanfall 2. The sphere stays
+// locked to the ship center each frame ; no rotation tracking needed
+// since the geometry is rotationally symmetric.
+function _ensureThermalFlameMeshes(ship, chassis) {
+  if (!ship || !chassis) return null;
+  // Skip on lower perf tiers ; the existing hull-hug plasma_red shield
+  // + small particle accent still play.
+  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 2) return null;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return null;
+  if (ship.thermalFlameMesh) return ship.thermalFlameMesh;
+  if (typeof _makeFXMaterial !== 'function' || typeof THREE === 'undefined') return null;
+  const hLen = chassis.hullLength || 100;
+  // Sphere radius : about 1.0 hull lengths so the sphere envelops the
+  // ship hull + cockpit view. Big enough to fill the screen from inside,
+  // small enough not to read as an obvious orb from outside.
+  const radius = hLen * 1.10;
+  const geo = new THREE.SphereGeometry(radius, 32, 24);
+  const mat = _makeFXMaterial('fireball');
+  if (mat.uniforms && mat.uniforms.uPosScale) {
+    mat.uniforms.uPosScale.value = 1.0 / Math.max(1, radius);
+  }
+  if (mat.userData) mat.userData._timeOffset = Math.random() * 10;
+  // Hot red identity matching Pyro Fire Shield.
+  if (mat.uniforms && mat.uniforms.uBaseColor && mat.uniforms.uBaseColor.value) {
+    try { mat.uniforms.uBaseColor.value.setHex(0xff3322); } catch (_) {}
+  }
+  // Brighter than default so the inner walls read strongly against
+  // close-camera view.
+  if (mat.uniforms && mat.uniforms.uBrightness) {
+    mat.uniforms.uBrightness.value = 2.8;
+  }
+  // DoubleSide so BOTH the local Pyro (camera inside the sphere sees
+  // inner walls) AND any peer/spectator (camera outside the sphere sees
+  // the front face wrapping the ship) get the flame envelope. BackSide
+  // alone would render only the inner walls, leaving peers seeing the
+  // Pyro almost uncovered. DoubleSide pays a small cost for the back-
+  // face render from outside view but the result is the ship wrapped
+  // in a fireball for everyone watching.
+  mat.side = THREE.DoubleSide;
+  // depthWrite false so the sphere doesn't occlude the cockpit / ship
+  // body it surrounds.
+  mat.depthWrite = false;
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 2;  // composite over walls + ships
+  mesh.visible = false;
+  scene.add(mesh);
+  ship.thermalFlameMesh = mesh;
+  return mesh;
+}
+function _updateThermalShieldFlameSpheres(ship, shipPos, shipQuat, chassis, dt) {
+  if (!ship || !shipPos || !chassis) return;
+  const mesh = _ensureThermalFlameMeshes(ship, chassis);
+  if (!mesh) return;
+  // Lock the sphere to the ship's center. No rotation needed (sphere is
+  // rotationally symmetric). Breathe the scale slightly so the envelope
+  // visibly churns + adds to the flame motion that the fireball preset's
+  // displacement already produces.
+  const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+  const breath = 1 + 0.08 * Math.sin(t * 4.5);
+  mesh.position.set(shipPos.x, shipPos.y, shipPos.z);
+  mesh.scale.setScalar(breath);
+  mesh.rotation.y = (mesh.rotation.y + dt * 0.6) % (Math.PI * 2);
+  mesh.rotation.x = (mesh.rotation.x + dt * 0.4) % (Math.PI * 2);
+  mesh.visible = true;
+}
+function _hideThermalShieldFlameSpheres(ship) {
+  if (!ship) return;
+  if (ship.thermalFlameMesh) ship.thermalFlameMesh.visible = false;
+  // Legacy fallback : the previous sphere-array system kept meshes in
+  // ship.thermalFlameMeshes. Tolerate old shape so a hot-reload doesn't
+  // strand visible spheres.
+  if (ship.thermalFlameMeshes) {
+    for (const m of ship.thermalFlameMeshes) { if (m) m.visible = false; }
+  }
+}
+function _disposeThermalShieldFlameSpheres(ship) {
+  if (!ship) return;
+  if (ship.thermalFlameMesh) {
+    const m = ship.thermalFlameMesh;
+    if (m.parent) scene.remove(m);
+    if (m.geometry) m.geometry.dispose();
+    if (m.material && m.material.dispose) m.material.dispose();
+    ship.thermalFlameMesh = null;
+  }
+  if (ship.thermalFlameMeshes) {
+    for (const m of ship.thermalFlameMeshes) {
+      if (m) {
+        if (m.parent) scene.remove(m);
+        if (m.geometry) m.geometry.dispose();
+        if (m.material && m.material.dispose) m.material.dispose();
+      }
+    }
+    ship.thermalFlameMeshes = null;
+  }
+}
+window._updateThermalShieldFlameSpheres = _updateThermalShieldFlameSpheres;
+window._hideThermalShieldFlameSpheres   = _hideThermalShieldFlameSpheres;
+window._disposeThermalShieldFlameSpheres = _disposeThermalShieldFlameSpheres;
+
 function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
   if (!shipPos || !chassis || !game || !game.particles) return;
   const hLen = chassis.hullLength || 100;
@@ -30798,18 +31938,18 @@ function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
   }
   _thermalFirePerp1.normalize();
   _thermalFirePerp2.crossVectors(_thermalFireForward, _thermalFirePerp1).normalize();
-  // ~220 particles/sec at full frame rate so the cone reads as a torrent
-  // of flame, not a sparse trail. Fractional-spawn keeps dt fluctuations
-  // from quantizing visibly.
-  const expected = 220 * dt;
+  // (v18L 2026-05-22 perf) Cone accent particles further trimmed to
+  // 50/sec ; the 5 flame spheres carry the cone silhouette so accent
+  // particles just need to add sparkle, not fill in volume.
+  const expected = 50 * dt;
   let toSpawn = Math.floor(expected);
   if (Math.random() < (expected - toSpawn)) toSpawn += 1;
   // Hot-to-cool palette : white-yellow cores fade through orange to
-  // deep red as flames travel out. Picked so the BRIGHTEST cores are
-  // weighted heavier (3/8 entries) for a vivid blaze.
+  // deep red. (v18L) Hot core weighting bumped (6/11 entries) so the
+  // bright center of the cone visibly dominates over the cooling tail.
   const palette = [
-    0xffffcc, 0xffee99, 0xffcc66, // hot cores (weighted)
-    0xff9933, 0xff6622, 0xff4411, 0xff2200, 0xcc1100, // cooling tail
+    0xffffee, 0xffffcc, 0xffee99, 0xffcc66, 0xffbb55, 0xffaa44, // hot cores (weighted)
+    0xff9933, 0xff7722, 0xff5511, 0xff3300, 0xcc1100, // cooling tail
   ];
   for (let i = 0; i < toSpawn; i++) {
     // Distance along the cone, biased slightly toward the BASE so
@@ -30836,16 +31976,17 @@ function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
       .addScaledVector(_thermalFireForward, fwdSpeed)
       .addScaledVector(_thermalFirePerp1, lat1 / Math.max(1, radius) * lateralKick + (Math.random() - 0.5) * 30)
       .addScaledVector(_thermalFirePerp2, lat2 / Math.max(1, radius) * lateralKick + (Math.random() - 0.5) * 30);
+    // (v18L 2026-05-22 v2) Particles now serve as accent sparkle on top
+    // of the persistent flame-sphere cone. Small + short-lived so they
+    // read as embers, heat shimmer, and spit-off blobs rather than the
+    // main flame body.
     game.particles.push({
       position: pos,
       velocity: vel,
-      life: 0.35 + Math.random() * 0.30,
-      maxLife: 0.65,
+      life: 0.30 + Math.random() * 0.30,
+      maxLife: 0.60,
       color: palette[Math.floor(Math.random() * palette.length)],
-      // BIG sizes so particles read as overlapping flame masses, not
-      // discrete dots. The hottest particles (palette[0..2]) get a
-      // size bump for an extra "flare" feel where they cluster.
-      size: 10 + Math.random() * 10,
+      size: 6 + Math.random() * 8,
     });
   }
 }
@@ -31024,6 +32165,10 @@ function updateShieldVisuals(dt) {
     }
     // (v14f) Red fire particles wrapping the hull while the shield is up.
     _spawnThermalShieldFire(player.position, player.mesh && player.mesh.quaternion, player.chassis, dt);
+    // (v18L 2026-05-22 v2) Persistent flame spheres carry the cone silhouette.
+    if (typeof _updateThermalShieldFlameSpheres === 'function') {
+      _updateThermalShieldFlameSpheres(player, player.position, player.mesh && player.mesh.quaternion, player.chassis, dt);
+    }
     _setShieldOverlay('ov-thermal-shield', true);
     _tickSoundLoop(player, '_thermalShieldHumTimer', dt, 0.95, 'fire_shield_hum');
   } else {
@@ -31037,6 +32182,9 @@ function updateShieldVisuals(dt) {
         if (m.material) m.material.dispose();
       }
       player.thermalShieldJets = null;
+    }
+    if (typeof _hideThermalShieldFlameSpheres === 'function') {
+      _hideThermalShieldFlameSpheres(player);
     }
     if (player.thermalShieldMesh) {
       _clearShipShieldEmissive(player.mesh);
@@ -31222,6 +32370,76 @@ function _drainStaggeredRocketSalvo(dt) {
   if (q.queue.length === 0) player._pendingRocketSalvo = null;
 }
 
+// (v18L 2026-05-22) Per-bot fire DOT tick. Walks game.entities ; any
+// bot whose onFireTimer > 0 takes onFireDps * dt damage per frame, and
+// gets ~25 small flame particles per second sprayed around its hull so
+// the burning state is visible from any angle. Source attribution
+// preserved for damage credit (currently always 'player' since only
+// the local Pyro's Fire Shield ignites). Timer expires naturally ;
+// when the bot dies the DOT is cleared by Bot.die's existing cleanup.
+const _FIRE_DOT_PARTICLE_PALETTE = [
+  0xffffaa, 0xffdd66, 0xffaa33, 0xff7722, 0xff4411, 0xcc2200,
+];
+function _tickFireDOTs(dt) {
+  if (!game || !game.entities) return;
+  const particlesPerSec = 10;  // (v18L perf) dropped from 25
+  for (let bi = 0; bi < game.entities.length; bi++) {
+    const bot = game.entities[bi];
+    if (!bot || !bot.alive || !bot.position) continue;
+    if (!bot.onFireTimer || bot.onFireTimer <= 0) continue;
+    // Apply DOT damage. Routed through bot.takeDamage so shield/health
+    // accounting + doomed thresholds + kill processing all run normally.
+    const dps = bot.onFireDps || 200;
+    if (typeof bot.takeDamage === 'function') {
+      try {
+        const dealt = bot.takeDamage(dps * dt, bot.onFireSource || 'player');
+        if (dealt > 0 && bot.onFireSource === 'player' && typeof player !== 'undefined' && player) {
+          player.damageDealt = (player.damageDealt || 0) + dealt;
+        }
+      } catch (_) {}
+    }
+    bot.onFireTimer -= dt;
+    if (bot.onFireTimer <= 0) {
+      bot.onFireTimer = 0;
+      bot.onFireDps = 0;
+      bot.onFireSource = null;
+    }
+    // Particle spray around the bot's hull. ~25/sec ; fractional spawn
+    // so the rate doesn't quantize visibly.
+    const expected = particlesPerSec * dt;
+    let toSpawn = Math.floor(expected);
+    if (Math.random() < (expected - toSpawn)) toSpawn += 1;
+    if (game.particles && toSpawn > 0) {
+      const hLen = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 80;
+      const hullR = hLen * 0.45;
+      for (let pi = 0; pi < toSpawn; pi++) {
+        // Random point on a sphere of radius hullR around the bot center.
+        const phi = Math.random() * Math.PI * 2;
+        const cosTheta = 2 * Math.random() - 1;
+        const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+        const ox = hullR * sinTheta * Math.cos(phi);
+        const oy = hullR * sinTheta * Math.sin(phi);
+        const oz = hullR * cosTheta;
+        // Velocity : slow outward drift + slight upward bias so flames
+        // peel off the hull like a real fire plume in motion.
+        const vScale = 60 + Math.random() * 60;
+        const vx = (ox / hullR) * vScale + (Math.random() - 0.5) * 30;
+        const vy = (oy / hullR) * vScale + Math.random() * 40;
+        const vz = (oz / hullR) * vScale + (Math.random() - 0.5) * 30;
+        game.particles.push({
+          position: new THREE.Vector3(bot.position.x + ox, bot.position.y + oy, bot.position.z + oz),
+          velocity: new THREE.Vector3(vx, vy, vz),
+          life: 0.30 + Math.random() * 0.40,
+          maxLife: 0.70,
+          color: _FIRE_DOT_PARTICLE_PALETTE[Math.floor(Math.random() * _FIRE_DOT_PARTICLE_PALETTE.length)],
+          size: 8 + Math.random() * 10,
+        });
+      }
+    }
+  }
+}
+window._tickFireDOTs = _tickFireDOTs;
+
 function updateAbilities(dt) {
   // (v16a Phase T) Drain queued staggered rocket salvos (Rocket Salvo,
   // Tracker Rockets). One Projectile allocation per frame at most.
@@ -31384,6 +32602,13 @@ function updateAbilities(dt) {
               else playSound('thermal_burn');
             } catch (_) {}
           }
+          // (v18L 2026-05-22) Light the ship on fire. Refresh the burn
+          // timer each frame the bot is in the cone so a long hold means
+          // a long DOT after release. _tickFireDOTs in updateEffects
+          // applies the per-second damage + spawns flames around the bot.
+          bot.onFireTimer = Math.max(bot.onFireTimer || 0, 3.0);
+          bot.onFireDps   = Math.max(bot.onFireDps   || 0, 320);
+          bot.onFireSource = 'player';
         }
       }
       // Fire Shield is a fire source: ignite Explosive Gas anywhere
@@ -33347,12 +34572,24 @@ function returnToRootMenu() {
   // selectMap() short-circuits while net.worldMap or net.myReady is set ;
   // clear both so the picker is fully editable again. Peer.ready flags
   // also reset so the start handshake doesn't fire stale.
+  // (2026-05-21) Also tear down the loading overlay if it's somehow up
+  // (e.g. user hit Main Menu during the warmup splash), and clear the
+  // warmup-ready state machine. _localWarmupReady stays true across
+  // matches in the same session (warmupCombatShaders is one-shot
+  // per session, gated by _shaderWarmup.done), but peer.warmupReady
+  // flags need to clear so the next match's handshake re-collects
+  // them as peers re-confirm their warmup state.
+  try { hideLoadingOverlay(); } catch (_) {}
+  try { _clearLaunchCountdown(); } catch (_) {}
   if (typeof net !== 'undefined') {
     net.worldMap = null;
     net.worldSeed = null;
     net.myReady = false;
     if (net.peers) {
-      for (const peer of net.peers.values()) peer.ready = false;
+      for (const peer of net.peers.values()) {
+        peer.ready = false;
+        peer.warmupReady = false;       // (2026-05-21) clear warmup gate state
+      }
     }
   }
 
@@ -35932,12 +37169,81 @@ function _clearLaunchCountdown() {
   _activeLaunchTimers = [];
   _countdownActive = false;
 }
-function launchCountdown() {
+
+// (2026-05-21) Loading-overlay controller. The markup (#lss-loading-overlay
+// with the LSS_loading.png splash + text + sub-text) was already present
+// in the document; it was scaffolding from an earlier rolled-back match-
+// start handshake attempt. The new commitLoadout flow uses it to hide
+// the shader-warmup work behind a splash so the visible 3-2-1 countdown
+// can't lag mid-compile the way the old 10s countdown sometimes did.
+function showLoadingOverlay(mainText, subText) {
+  const ov = document.getElementById('lss-loading-overlay');
+  if (!ov) return;
+  if (mainText != null) {
+    const t = document.getElementById('lss-loading-text');
+    if (t) t.textContent = mainText;
+  }
+  if (subText != null) {
+    const s = document.getElementById('lss-loading-sub');
+    if (s) s.textContent = subText;
+  }
+  ov.classList.add('active');
+}
+function hideLoadingOverlay() {
+  const ov = document.getElementById('lss-loading-overlay');
+  if (ov) ov.classList.remove('active');
+}
+
+// (2026-05-21) Warmup-ready state machine. Tracks whether the local
+// shader warmup has finished, and (in multiplayer) coordinates with
+// peers so the visible 3-2-1 countdown only starts after every peer's
+// warmup is done. The flag is reset when a match ends or when the
+// player exits to the lobby ; see resetMatchState() / _clearWarmupReadyState.
+let _localWarmupReady = false;
+function _clearWarmupReadyState() {
+  _localWarmupReady = false;
+  if (typeof net !== 'undefined' && net && net.peers) {
+    for (const peer of net.peers.values()) {
+      if (peer) peer.warmupReady = false;
+    }
+  }
+}
+function _markLocalWarmupReady() {
+  _localWarmupReady = true;
+  // (2026-05-21) Always (re-)broadcast on commit. Peer.warmupReady gets
+  // cleared at match end (resetMatchState) so peers can re-collect the
+  // gate state for the next match. If we only sent the first time, peers
+  // would never re-learn we're ready and the next match's handshake
+  // would deadlock. Receiver is idempotent ; duplicate sends within a
+  // match just keep the flag at true. The send is cheap (a few bytes
+  // over the existing event channel) so we don't bother deduping.
+  if (typeof net !== 'undefined' && net.active && net.sendEvent) {
+    try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+  }
+}
+function _allPeersWarmupReady() {
+  if (typeof net === 'undefined' || !net.active) return true;       // solo
+  if (!net.peers || net.peers.size === 0) return true;              // alone in mesh
+  for (const peer of net.peers.values()) {
+    if (!peer || !peer.warmupReady) return false;
+  }
+  return true;
+}
+function launchCountdown(duration) {
+  // (2026-05-21) Duration is configurable. When called without an argument
+  // it defaults to the legacy 10s LAUNCH_COUNTDOWN (preserves any caller
+  // we missed). The new commitLoadout flow passes SHORT_COUNTDOWN (3s)
+  // because the shader-warmup work has already finished behind the
+  // loading overlay, so the visible countdown only needs to be a brief
+  // "get ready" beat.
   // If already running, do not reset. Ship swaps during countdown are allowed
   // by commitLoadout but must not restart the timer; the clock keeps ticking.
   if (_countdownActive) return;
   _clearLaunchCountdown();
   _countdownActive = true;
+  // Defensive: if the loading overlay is somehow still up (caller forgot
+  // to hide it), tear it down now so it doesn't cover the countdown.
+  try { hideLoadingOverlay(); } catch (_) {}
   const overlay = document.getElementById('ship-select-countdown');
   const numEl = overlay ? overlay.querySelector('.cd-num') : null;
   const subEl = overlay ? overlay.querySelector('.cd-sub') : null;
@@ -35960,7 +37266,10 @@ function launchCountdown() {
   // on LAUNCH. The silent head gives players time to settle before the pings.
   // START is shared with game.warmupTimer so the round system stays in
   // 'warmup' (no bot firing/movement) for the full visible countdown.
-  const START = LSS.LAUNCH_COUNTDOWN;
+  // (2026-05-21) For START <= 3, the silent body loop runs 0 iterations
+  // and the countdown is just the pings on 3, 2, 1 + LAUNCH ; that's the
+  // expected behaviour for the new short post-warmup countdown.
+  const START = (typeof duration === 'number' && duration > 0) ? duration : LSS.LAUNCH_COUNTDOWN;
   // First tick immediate (no sound).
   tick(String(START), 'LAUNCH IN');
   // Silent body: START-1 â†’ 4.
@@ -36256,26 +37565,43 @@ document.addEventListener('pointerlockchange', () => {
 
 document.addEventListener('contextmenu', e => e.preventDefault());
 
+// (v18L 2026-05-22) Resize handler split into an immediate camera/canvas
+// update + a debounced render-target reallocation. Browser fullscreen
+// transitions fire several resize events in rapid succession (intermediate
+// sizes during the animation), and reallocating 4 large render targets per
+// event thrashes VRAM. On some GPU drivers this crashes the GPU process,
+// triggering the in-game context-loss recovery overlay. Now only the FINAL
+// settled size triggers the RT reallocation, ~200ms after resize events stop.
+let _rtResizeTimer = 0;
+function _doPostFXResize() {
+  _rtResizeTimer = 0;
+  if (renderer.xr && renderer.xr.isPresenting) return;
+  try {
+    const _sz = _getBloomRTSize();
+    const w = _sz.w, h = _sz.h;
+    try { postFX.rtScene.setSize(w, h); } catch (_) {}
+    try { postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.rtBlurV.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.blurMat.uniforms.resolution.value.set(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { resizeCineFX(window.innerWidth, window.innerHeight); } catch (_) {}
+  } catch (_) {}
+}
 window.addEventListener('resize', () => {
   // (Ported from v8) When an XR session is active, the headset compositor
   // owns the canvas size and per-eye projection; mutating either mid-session
   // causes flicker and stereo aspect mismatch. Bail.
   if (renderer.xr && renderer.xr.isPresenting) return;
+  // Camera + canvas update is cheap ; do it every event so the scene
+  // continues to render at the right aspect during the transition.
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  // Resize post-processing render targets via the QUALITY-driven helper
-  // so changing the quality tier mid-session will reshape RTs correctly
-  // on the next window resize.
-  const _sz = _getBloomRTSize();
-  const w = _sz.w, h = _sz.h;
-  postFX.rtScene.setSize(w, h);
-  postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2));
-  postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2));
-  postFX.rtBlurV.setSize(Math.floor(w / 2), Math.floor(h / 2));
-  postFX.blurMat.uniforms.resolution.value.set(Math.floor(w / 2), Math.floor(h / 2));
-  // v8VR: keep the EffectComposer (cineFX) sized in lockstep with the canvas.
-  resizeCineFX(window.innerWidth, window.innerHeight);
+  try { renderer.setSize(window.innerWidth, window.innerHeight); } catch (_) {}
+  // RT reallocation is expensive ; debounce so the storm of intermediate
+  // resize events during a fullscreen <-> windowed transition collapses
+  // into one allocation at the final size.
+  if (_rtResizeTimer) clearTimeout(_rtResizeTimer);
+  _rtResizeTimer = setTimeout(_doPostFXResize, 200);
 });
 
 // ---- SETTINGS PAGE ----
@@ -36422,9 +37748,9 @@ function _refreshSettingsValues() {
   const fovVal = $('#val-fov');
   if (fovVal) fovVal.textContent = (fov | 0) + '°';
 
-  // Wall pattern + opacity.
+  // Wall pattern + opacity. (2026-05-21) set-wall-black-base checkbox
+  // removed at user request ; pure black base is permanently off now.
   setSel('set-wall-pattern', String(game.wallPattern | 0));
-  setChk('set-wall-black-base', game.wallBlackBase);
   const wallOp = (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0;
   setRange('set-wall-opacity', 'val-wall-opacity', wallOp, 2);
 
@@ -36610,7 +37936,7 @@ function buildSettingsPage() {
     <div class="settings-section">
       <h3>VR - Performance</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Standard keeps the visuals, and Quest browsers still get hidden cadence savings for gas lights, gas wakes, audio probes, and HUD canvas uploads. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
+        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
       </div>
       <div class="setting-row">
         <label>Performance Mode</label>
@@ -36695,12 +38021,8 @@ function buildSettingsPage() {
           ${WALL_PATTERN_NAMES.map((nm, i) => `<option value="${i}"${(game.wallPattern|0) === i ? ' selected' : ''}>${nm}</option>`).join('')}
         </select>
       </div>
-      <div class="setting-row">
-        <label>Pure Black Base</label>
-        <input type="checkbox" id="set-wall-black-base" ${game.wallBlackBase ? 'checked' : ''}>
-      </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Pure Black Base hides the map's wall geometry (no zone-color tint, no AO/diffuse, no fresnel rim) so only the active pattern reads against pure black. Press P in-game to cycle patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
+        <label style="flex:1;">Press P in-game to cycle wall patterns. Tune everything else in the companion lab (docs/LSS/wall_pattern_lab.html), download a config, then import it here.</label>
       </div>
       <div class="setting-row">
         <label>Wall opacity</label>
@@ -36717,6 +38039,128 @@ function buildSettingsPage() {
         <input type="file" id="wall-import-file" accept="application/json,.json" style="display:none;">
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;" id="wall-import-status"></div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Zone Colors</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Pick a coherent color theme for the wall zones and floating obstacles. "Map Default" uses each map's built-in palette with a slow hue drift ; every other theme locks the colors so what you see is what stays. Gradient themes (Forest, Volcanic, Abyss) lerp by each room's height. Note: wall-pattern presets with a fixed palette (Matrix, Slime, Toxin, Ooze, Phasm) still lock all wall zones to their tint while active.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-zone-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const keys = Object.keys(ZONE_THEMES);
+            let out = '';
+            for (const k of keys) {
+              const t = ZONE_THEMES[k];
+              const sel = (k === cur) ? ' selected' : '';
+              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
+            }
+            return out;
+          })()}
+        </select>
+      </div>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW (walls / obstacles)</div>
+        <div id="zone-theme-preview-walls" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const comp = _computeZoneThemeColors(cur);
+            const defaults = ZONE_COLOR_DEFAULTS.walls;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let out = '';
+            for (let i = 0; i < 8; i++) {
+              const c = (typeof comp.walls[i] === 'number') ? comp.walls[i] : defaults[i];
+              out += '<div style="flex:1; height:30px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Zone ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+        <div id="zone-theme-preview-obst" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+            const comp = _computeZoneThemeColors(cur);
+            const defaults = ZONE_COLOR_DEFAULTS.obstacles;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let out = '';
+            for (let i = 0; i < 5; i++) {
+              const c = (typeof comp.obstacles[i] === 'number') ? comp.obstacles[i] : defaults[i];
+              out += '<div style="flex:1; height:22px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Obstacle ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+        <div class="setting-row" style="opacity:0.65; font-size:0.8em;">
+          <label style="flex:1;">Wall zones update live. Obstacle changes affect only newly-spawned obstacles (next round respawn).</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Cloud Colors</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Color theme for the gas clouds drifting around cluster rocks. "Auto" inherits each cloud's color from its parent rock (current default). Other themes pick from a fixed palette ; "Match Wall Theme" pulls from the active Zone wall palette. Pyro gameplay clouds keep their identity colors regardless. Changes apply to newly-spawned clouds.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-cloud-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+            const keys = Object.keys(CLOUD_THEMES);
+            let out = '';
+            for (const k of keys) {
+              const t = CLOUD_THEMES[k];
+              const sel = (k === cur) ? ' selected' : '';
+              out += '<option value="' + k + '"' + sel + '>' + (t.label || k) + '</option>';
+            }
+            return out;
+          })()}
+        </select>
+      </div>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW</div>
+        <div id="cloud-theme-preview" style="display:flex; gap:3px;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+            const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
+            const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            // For auto / match-walls we don't have a static palette ; show
+            // greyscale fallback for auto, wall-theme colors for match-walls.
+            let palette;
+            if (theme.kind === 'fixed') {
+              palette = theme.colors.slice();
+            } else if (theme.kind === 'match-walls') {
+              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+              palette = [];
+              if (z && Array.isArray(z.walls)) {
+                for (let i = 0; i < z.walls.length; i++) {
+                  if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+                }
+              }
+              if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+            } else {
+              // Auto : show the default obstacle palette as a stand-in,
+              // run through _smokeColorFromRock so the preview reflects
+              // what the cloud will actually look like.
+              palette = [];
+              for (const rockHex of OBSTACLE_COLORS) {
+                const c = (typeof _smokeColorFromRock === 'function')
+                  ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
+                palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
+              }
+            }
+            // Cap preview to 8 swatches max so the row stays compact.
+            if (palette.length > 8) palette = palette.slice(0, 8);
+            let out = '';
+            for (const c of palette) {
+              out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
+            }
+            return out;
+          })()}
+        </div>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -37111,12 +38555,10 @@ function buildSettingsPage() {
     });
   }
   // Pure Black Base checkbox
-  const blackBaseChk = overlay.querySelector('#set-wall-black-base');
-  if (blackBaseChk) {
-    blackBaseChk.addEventListener('change', e => {
-      setWallBlackBase(!!e.target.checked);
-    });
-  }
+  // (2026-05-21) Pure Black Base toggle removed at user request. The
+  // setWallBlackBase function still exists (call sites in preset apply
+  // and loadSettings restore would otherwise reference an undefined
+  // function), but it now ignores its argument and always forces OFF.
   // (v8VR 2026-04-30) Wall opacity slider. Pushes uOpacity uniform live.
   const wallOpEl = overlay.querySelector('#set-wall-opacity');
   const wallOpVal = overlay.querySelector('#val-wall-opacity');
@@ -37190,6 +38632,91 @@ function buildSettingsPage() {
       }
       // Refresh the panel so the pattern dropdown and slider values update.
       buildSettingsPage();
+    });
+  }
+
+  // (2026-05-21) Zone theme dropdown handler. Selecting a theme calls
+  // applyZoneTheme which writes per-slot colors into game.zoneColors,
+  // pushes them to the wall shader uniform immediately, persists via
+  // saveSettings, and refreshes the preview swatches inline so the
+  // user can see the new colors without scrolling the panel.
+  const _zoneRefreshSwatches = () => {
+    const cur = (typeof game !== 'undefined' && typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default';
+    const comp = _computeZoneThemeColors(cur);
+    const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    const wallsHost = overlay.querySelector('#zone-theme-preview-walls');
+    const obstHost  = overlay.querySelector('#zone-theme-preview-obst');
+    if (wallsHost) {
+      let out = '';
+      for (let i = 0; i < 8; i++) {
+        const c = (typeof comp.walls[i] === 'number') ? comp.walls[i] : ZONE_COLOR_DEFAULTS.walls[i];
+        out += '<div style="flex:1; height:30px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Zone ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+      }
+      wallsHost.innerHTML = out;
+    }
+    if (obstHost) {
+      let out = '';
+      for (let i = 0; i < 5; i++) {
+        const c = (typeof comp.obstacles[i] === 'number') ? comp.obstacles[i] : ZONE_COLOR_DEFAULTS.obstacles[i];
+        out += '<div style="flex:1; height:22px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="Obstacle ' + (i+1) + ': ' + hex(c).toUpperCase() + '"></div>';
+      }
+      obstHost.innerHTML = out;
+    }
+  };
+  const themeSel = overlay.querySelector('#set-zone-theme');
+  if (themeSel) {
+    themeSel.addEventListener('change', e => {
+      const name = String(e.target.value || 'default');
+      try { applyZoneTheme(name); } catch (err) { console.warn('[zone theme] apply failed:', err); }
+      _zoneRefreshSwatches();
+    });
+  }
+
+  // (2026-05-21) Cloud theme dropdown. Writes game.cloudTheme, persists
+  // via saveSettings, and refreshes the inline preview row. New clouds
+  // pick from the chosen palette ; existing clouds keep their color.
+  const _cloudRefreshSwatches = () => {
+    const cur = (typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto';
+    const theme = CLOUD_THEMES[cur] || CLOUD_THEMES.auto;
+    const hex = (n) => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    let palette;
+    if (theme.kind === 'fixed') {
+      palette = theme.colors.slice();
+    } else if (theme.kind === 'match-walls') {
+      const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+      palette = [];
+      if (z && Array.isArray(z.walls)) {
+        for (let i = 0; i < z.walls.length; i++) {
+          if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+        }
+      }
+      if (palette.length === 0) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+    } else {
+      // Auto : show what _smokeColorFromRock makes of the default obstacles.
+      palette = [];
+      for (const rockHex of OBSTACLE_COLORS) {
+        const c = (typeof _smokeColorFromRock === 'function')
+          ? _smokeColorFromRock(rockHex) : new THREE.Color(rockHex);
+        palette.push(((Math.round(c.r * 255) << 16) | (Math.round(c.g * 255) << 8) | Math.round(c.b * 255)) | 0);
+      }
+    }
+    if (palette.length > 8) palette = palette.slice(0, 8);
+    const host = overlay.querySelector('#cloud-theme-preview');
+    if (host) {
+      let out = '';
+      for (const c of palette) {
+        out += '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>';
+      }
+      host.innerHTML = out;
+    }
+  };
+  const cloudSel = overlay.querySelector('#set-cloud-theme');
+  if (cloudSel) {
+    cloudSel.addEventListener('change', e => {
+      const name = String(e.target.value || 'auto');
+      game.cloudTheme = (name in CLOUD_THEMES) ? name : 'auto';
+      try { saveSettings(); } catch (_) {}
+      _cloudRefreshSwatches();
     });
   }
 
@@ -37883,7 +39410,21 @@ const WALL_PATTERN_NAMES = [
   'Race Glow',          // 29 ; (v13r) triple Plasma FBM tinted neon green ; auto-flips Pure Black Base OFF for the glow look
   'Stone Folds',        // 30 ; (v14) Mandelbox depth-folds * stone texture
   'Tile Track',         // 31 ; (v14) Voronoi cells * brick tile texture
-  'Sheet Metal'         // 32 ; (v14) Kali IFS structure * brushed metal texture
+  'Sheet Metal',        // 32 ; (v14) Kali IFS structure * brushed metal texture
+  // (2026-05-21) Four green-tinted Panel Maze variants exported from
+  // wall_pattern_lab.html. All share the same BG (Panel Maze, lab id 6
+  // -> game id 17) + the same FG2 (Mandelbox Folds multiply, lab id 2
+  // -> game id 4) + a #00ff55 spring-green paletteOverride. The
+  // differences are in the FG1 layer's pattern + per-layer parameters.
+  // The lab exports also carried venturi ridge/valley distortion
+  // settings ; v18's wall shader doesn't ship the venturi uniforms,
+  // so those settings are dropped on import. If venturi gets ported
+  // later, the source values are preserved in the comment block above
+  // each preset entry.
+  'Slime',              // 33 ; Panel Maze + Cyber Datamosh fg + Mandelbox fg2 (green)
+  'Toxin',              // 34 ; Panel Maze + Wave Interference fg + Mandelbox fg2 (green)
+  'Ooze',               // 35 ; Panel Maze + Plasma FBM fg + Mandelbox fg2 (green)
+  'Phasm'               // 36 ; Panel Maze + Holographic Glitch fg + Mandelbox fg2 (green)
 ];
 
 const WALL_PARAM_DEFS = [
@@ -37991,15 +39532,20 @@ function resetWallParams() {
   saveSettings();
 }
 
-// Toggle Pure Black Base mode. When on, the wall draws only the active
-// pattern over black (no dark floor, no zone-color tint, no fresnel, no
-// diffuse/AO, no zone floor) so the map's geometry disappears and only
-// the pattern reads. Live-pushes uBlackBase and persists.
-function setWallBlackBase(on) {
-  game.wallBlackBase = !!on;
+// (2026-05-21) Pure Black Base is permanently disabled at user request.
+// The toggle in settings was removed and this function now ignores its
+// input argument, always forcing the mode OFF. Kept as a function (vs
+// deleted) so existing callers continue to compile: the multi-layer
+// preset apply path (e.g. Race Glow's _blackBase: false hint) still
+// invokes setWallBlackBase, and loadSettings used to call it during
+// state restore. All those calls now converge on the OFF state.
+function setWallBlackBase(_ignored) {
+  game.wallBlackBase = false;
   if (game.levelMaterial && game.levelMaterial.uniforms && game.levelMaterial.uniforms.uBlackBase) {
-    game.levelMaterial.uniforms.uBlackBase.value = game.wallBlackBase ? 1 : 0;
+    game.levelMaterial.uniforms.uBlackBase.value = 0;
   }
+  // saveSettings() write still happens so the persisted boolean stays
+  // in sync with the in-memory value (both always false now).
   saveSettings();
 }
 
@@ -38152,6 +39698,21 @@ function saveSettings() {
       // empty string for None. Persisted so the lobby remembers the
       // last chosen preset across reloads.
       mapPreset:    (typeof game.mapPreset === 'string') ? game.mapPreset : '',
+      // (2026-05-21) Zone color overrides + theme key. zoneColors carries
+      // the resolved per-slot hexes (so older code that reads game.zoneColors
+      // directly keeps working) ; zoneTheme is the theme key the user
+      // selected from the dropdown. On load we re-apply the theme so
+      // the colors recompute (especially gradient themes that depend on
+      // the new session's map layout).
+      zoneTheme:    (typeof game.zoneTheme === 'string') ? game.zoneTheme : 'default',
+      // (2026-05-21) Cloud color theme key. Auto inherits from rocks
+      // (current default) ; other themes pick from a palette.
+      cloudTheme:   (typeof game.cloudTheme === 'string') ? game.cloudTheme : 'auto',
+      zoneColors:   (function() {
+        const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+        if (!z) return undefined;
+        return { walls: z.walls.slice(), obstacles: z.obstacles.slice() };
+      })(),
     };
     localStorage.setItem('lss_settings', JSON.stringify(data));
   } catch(e) {}
@@ -38163,10 +39724,10 @@ function saveSettings() {
 // Soul Array configuration without going to the wall lab. User changes
 // persist via saveSettings() and override these on subsequent loads.
 const DEFAULT_WALL_CONFIG = {
-  "wallPattern": 31,
+  "wallPattern": 24,
   "patternName": "Tile Track",
   "wallBlackBase": false,
-  "wallOpacity": 0.7,
+  "wallOpacity": 1,
   "palette": [
     5111552,
     8388863,
@@ -39300,6 +40861,58 @@ const DEFAULT_WALL_CONFIG = {
       "SA_BREATH_RATE": 0.4,
       "SA_DOT_SAT": 0.92,
       "SA_ZONE_FLOOR": 0.012
+    },
+    "33": {
+      "K_DARK_BASE_R": 0.046, "K_DARK_BASE_G": 0.033, "K_DARK_BASE_B": 0.035,
+      "K_ZONE_TINT": 0.22, "K_COSMIC_BRIGHTNESS": 4.85, "K_FRESNEL_STRENGTH": 1.55,
+      "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
+      "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
+      "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
+      "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
+      "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
+      "SA_BREATH_AMP": 0.22, "SA_BREATH_RATE": 0.4,
+      "SA_DOT_SAT": 0.92, "SA_ZONE_FLOOR": 0.012
+    },
+    "34": {
+      "K_DARK_BASE_R": 0.046, "K_DARK_BASE_G": 0.033, "K_DARK_BASE_B": 0.035,
+      "K_ZONE_TINT": 0.22, "K_COSMIC_BRIGHTNESS": 4.85, "K_FRESNEL_STRENGTH": 1.55,
+      "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
+      "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
+      "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
+      "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
+      "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
+      "SA_BREATH_AMP": 0.22, "SA_BREATH_RATE": 0.4,
+      "SA_DOT_SAT": 0.92, "SA_ZONE_FLOOR": 0.012
+    },
+    "35": {
+      "K_DARK_BASE_R": 0.046, "K_DARK_BASE_G": 0.033, "K_DARK_BASE_B": 0.035,
+      "K_ZONE_TINT": 0.22, "K_COSMIC_BRIGHTNESS": 4.85, "K_FRESNEL_STRENGTH": 1.55,
+      "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
+      "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
+      "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
+      "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
+      "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
+      "SA_BREATH_AMP": 0.22, "SA_BREATH_RATE": 0.4,
+      "SA_DOT_SAT": 0.92, "SA_ZONE_FLOOR": 0.012
+    },
+    "36": {
+      "K_DARK_BASE_R": 0.046, "K_DARK_BASE_G": 0.033, "K_DARK_BASE_B": 0.035,
+      "K_ZONE_TINT": 0.22, "K_COSMIC_BRIGHTNESS": 4.85, "K_FRESNEL_STRENGTH": 1.55,
+      "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
+      "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
+      "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
+      "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
+      "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
+      "SA_BREATH_AMP": 0.22, "SA_BREATH_RATE": 0.4,
+      "SA_DOT_SAT": 0.92, "SA_ZONE_FLOOR": 0.012
     }
   },
   "wallParams": {
@@ -39415,23 +41028,33 @@ const BAKED_DEFAULTS = {
   "audioMaster": 1,
   "audioSfx": 1,
   "audioAmbient": 0.85,
-  "audioMusic": 0.1,
+  "audioMusic": 0.4,
   "musicEnabled": true,
-  "musicCeiling": "normal",
+  "musicCeiling": "wild",
   "musicMuteLobby": false,
   "musicStyle": "techno",
   "annEnabled": true,
   "annVoice": "Microsoft Imani Online (Natural) - English (Tanzania)",
   "annPitch": 1,
   "annRate": 1.5,
-  "annVolume": 0.9,
+  "annVolume": 0.8,
   "reverbWet": 0.4000000059604645,
-  "ambientDuckEnabled": true
+  "ambientDuckEnabled": true,
+  // (v18 settings bake-in, 2026-05-22) New defaults baked from Ashman's
+  // exported lss_settings_20260522.json. skyboxChoice seeds the background
+  // on first boot; zoneTheme + cloudTheme + zoneColors seed the new
+  // wall/obstacle/cloud palette system added earlier in v18.
+  "skyboxChoice": "cyberpunk2",
+  "zoneTheme": "ember",
+  "cloudTheme": "toxic",
+  "zoneColors": {
+    "walls": [2755077, 4200458, 5580303, 6960149, 8405530, 10179103, 11887141, 13661738],
+    "obstacles": [6960149, 10179103, 13661738, 16751168, 5580303]
+  }
 };
 
 
 function loadSettings() {
-  _lssSettingsLoaded = true;
   // First-run / cleared-storage seed: if no persisted settings exist, apply
   // the baked-in DEFAULT_WALL_CONFIG (from LSS_WALLS.json) so the curated
   // Soul Array pattern + tuned wallParams are live on first boot. The rest
@@ -39529,6 +41152,49 @@ function loadSettings() {
           if (typeof bd.annVolume === 'number')     game.annVolume = bd.annVolume;
           if (typeof bd.reverbWet === 'number')     game.reverbWet = bd.reverbWet;
           if (typeof bd.ambientDuckEnabled === 'boolean') game.ambientDuckEnabled = bd.ambientDuckEnabled;
+          // (v18 settings bake-in, 2026-05-22) New baked defaults: skybox
+          // background + zone/cloud palette system. Mirrors the regular
+          // load path so a fresh install reads as Ashman's curated look.
+          if (typeof bd.skyboxChoice === 'string' && bd.skyboxChoice.length > 0) {
+            game.skyboxChoice = bd.skyboxChoice;
+            if (typeof setSky === 'function') {
+              try { setSky(bd.skyboxChoice); } catch (e) { console.warn('[v18 bake sky] failed:', e && e.message); }
+            }
+          }
+          try {
+            const _bzc = bd.zoneColors;
+            if (_bzc && typeof _bzc === 'object') {
+              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+              if (z) {
+                if (Array.isArray(_bzc.walls)) {
+                  for (let i = 0; i < 8; i++) {
+                    const v = _bzc.walls[i];
+                    z.walls[i] = (typeof v === 'number') ? (v | 0) : null;
+                  }
+                }
+                if (Array.isArray(_bzc.obstacles)) {
+                  for (let i = 0; i < 5; i++) {
+                    const v = _bzc.obstacles[i];
+                    z.obstacles[i] = (typeof v === 'number') ? (v | 0) : null;
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+          try {
+            const _bzt = (typeof bd.zoneTheme === 'string') ? bd.zoneTheme : 'default';
+            if (typeof applyZoneTheme === 'function') {
+              applyZoneTheme(_bzt);
+            } else if (typeof game !== 'undefined' && game) {
+              game.zoneTheme = (typeof ZONE_THEMES !== 'undefined' && (_bzt in ZONE_THEMES)) ? _bzt : 'default';
+            }
+          } catch (_) {}
+          try {
+            const _bct = (typeof bd.cloudTheme === 'string') ? bd.cloudTheme : 'auto';
+            if (typeof game !== 'undefined' && game) {
+              game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_bct in CLOUD_THEMES)) ? _bct : 'auto';
+            }
+          } catch (_) {}
         }
       } catch (_) {}
       return;
@@ -39688,6 +41354,45 @@ function loadSettings() {
     // match the restored choice. Safe even if the lobby DOM isn't
     // built yet ; _updateSkyUI() guards every getElementById.
     if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
+    // (2026-05-21) Restore zone theme. We also restore zoneColors as a
+    // fallback for older save files (pre-theme schema), but the theme
+    // key takes precedence : applyZoneTheme will recompute the per-slot
+    // colors from the theme definition (especially gradient themes,
+    // whose colors depend on the current map's room positions).
+    try {
+      const _zc = data.zoneColors;
+      if (_zc && typeof _zc === 'object') {
+        const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+        if (z) {
+          if (Array.isArray(_zc.walls)) {
+            for (let i = 0; i < 8; i++) {
+              const v = _zc.walls[i];
+              z.walls[i] = (typeof v === 'number') ? (v | 0) : null;
+            }
+          }
+          if (Array.isArray(_zc.obstacles)) {
+            for (let i = 0; i < 5; i++) {
+              const v = _zc.obstacles[i];
+              z.obstacles[i] = (typeof v === 'number') ? (v | 0) : null;
+            }
+          }
+        }
+      }
+      // Theme key wins ; if set and valid, re-apply so per-slot colors
+      // recompute. Unknown theme keys fall back to 'default'.
+      const _zt = (typeof data.zoneTheme === 'string') ? data.zoneTheme : 'default';
+      if (typeof applyZoneTheme === 'function') {
+        applyZoneTheme(_zt);
+      } else if (typeof game !== 'undefined' && game) {
+        game.zoneTheme = (typeof ZONE_THEMES !== 'undefined' && (_zt in ZONE_THEMES)) ? _zt : 'default';
+      }
+      // (2026-05-21) Cloud theme restore. Independent of zone theme ;
+      // unknown keys fall back to 'auto'.
+      const _ct = (typeof data.cloudTheme === 'string') ? data.cloudTheme : 'auto';
+      if (typeof game !== 'undefined' && game) {
+        game.cloudTheme = (typeof CLOUD_THEMES !== 'undefined' && (_ct in CLOUD_THEMES)) ? _ct : 'auto';
+      }
+    } catch (_) { /* zone color restore is non-fatal */ }
   } catch(e) {}
 }
 
@@ -40245,6 +41950,118 @@ const MULTI_LAYER_PRESETS = {
     texId: 'metal',
     texBlend: 1, texAlpha: 0.9, texHue: 0.0, texScale: 0.0035, texBrightness: 1.05,
   },
+  // (2026-05-21) Presets 33-36: four green-tinted (#00ff55) variants on
+  // a Panel Maze base with a Mandelbox multiply layer behind a varying
+  // foreground. Exported from wall_pattern_lab.html ; lab pattern ids
+  // translated to game ids (lab 2 Mandelbox -> game 4 ; lab 6 Panel
+  // Maze -> game 17 ; lab 8 Wave Interference -> game 3 ; lab 9 Plasma
+  // FBM -> game 6 ; lab 11 Holographic Glitch -> game 10 ; lab 15
+  // Cyber Datamosh -> game 15). Lab exports also carried venturi
+  // ridge/valley distortion settings that v18's wall shader doesn't
+  // implement ; those settings are dropped here (would be a no-op even
+  // if included). Source venturi values from lab, in case venturi gets
+  // ported later:
+  //   venturiEnable: true, venturiFreq: 0.05, venturiWarp: 2.45,
+  //   venturiBias: 0.24, venturiSharp: 0.165, venturiRidgeTone: 0.75,
+  //   venturiValleyPop: 2.5
+  //
+  // Index 33: Slime. Cyber Datamosh fg with very low iteration count
+  // and tiny spatial scale gives a fine digital-grain over the Panel
+  // Maze ; reads as bright green static.
+  // (2026-05-21) K_COSMIC values dropped from the original lab export
+  // to compensate for Pure Black Base now being permanently off ; the
+  // wall geometry's AO + diffuse + fresnel now add to brightness,
+  // which combined with the lab-tuned K_COSMIC was pushing highlights
+  // pure white. Originals retained in `K_COSMIC_*_lab` comments below
+  // so the lab-faithful look can be restored if needed:
+  //   K_COSMIC_fg_lab: 2.45, K_COSMIC_fg2_lab: 4.7
+  33: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 15,                                  // Cyber Datamosh (lab 15)
+    fgAlpha: 1.55, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.05,
+    u_iters_fg: 1, u_scale_fg: 0.0006, u_invBase_fg: 10.2,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.0,
+    K_COSMIC_fg: 1.8,                                 // lab: 2.45
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
+  // Index 34: Toxin. Wave Interference fg gives rippling concentric
+  // bands ; combined with the green tint and Mandelbox multiply this
+  // reads as a toxic liquid surface.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 3.8, K_COSMIC_fg2 4.7.
+  34: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 3,                                   // Wave Interference (lab 8)
+    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0.81, fgTime: 0.25,
+    u_iters_fg: 9, u_scale_fg: 0.0043, u_invBase_fg: 10.2,
+    u_hueSpin_fg: 0.0, u_satBase_fg: 0.91,
+    K_COSMIC_fg: 2.3,                                 // lab: 3.8
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
+  // Index 35: Ooze. Plasma FBM fg gives smooth flowing organic motion ;
+  // the green tint + Mandelbox cell structure reads as viscous oozing
+  // slime trailing down the maze walls.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 6.0, K_COSMIC_fg2 4.7.
+  35: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 6,                                   // Plasma FBM (lab 9)
+    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 1.0, fgTime: 0.45,
+    u_iters_fg: 8, u_scale_fg: 0.0112, u_invBase_fg: 5.5,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 0.62,
+    K_COSMIC_fg: 3.5,                                 // lab: 6.0
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
+  // Index 36: Phasm. Holographic Glitch fg with high alpha + frozen time
+  // (fgTime=0) gives sharp scanline tears that read as a holographic
+  // phantom flickering through the green maze.
+  // (2026-05-21) Tamed for Pure Black Base off. Originals: K_COSMIC_fg
+  // 6.0, K_COSMIC_fg2 4.7.
+  36: {
+    paletteOverride: 0x00ff55,                        // bright spring green
+    bgPatternId: 17,                                  // Panel Maze (lab 6)
+    bgTime: 0.4,
+    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
+    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    K_COSMIC_bg: 0.9,
+    fgPatternId: 10,                                  // Holographic Glitch (lab 11)
+    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.0,
+    u_iters_fg: 3, u_scale_fg: 0.0168, u_invBase_fg: 9.2,
+    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    K_COSMIC_fg: 3.5,                                 // lab: 6.0
+    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
+    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    K_COSMIC_fg2: 2.5,                                // lab: 4.7
+  },
 };
 
 // Apply a multi-layer preset's per-layer values to the wall material's
@@ -40741,6 +42558,34 @@ function spawnCosmicAnomaly() {
 
 // ---- STASIS FIELD SYSTEM ----
 
+// (v18L 2026-05-22 leak fix v2) Module-level shared geometries for
+// StasisField. Created lazily on first use and reused for the lifetime
+// of the page so we stop allocating new GPU buffers per stasis spawn.
+// Three sizes : regular ring (radius 40, tube 2), champion ring
+// (radius 90, tube 4), beacon cylinder (1 radius, 8000 tall, scaled
+// per-frame on the mesh transform). Tessellation tuned to read smooth
+// under fireball displacement without the heavy footprint of L-B2's
+// initial 18x64 / 24x8 settings.
+const _SHARED_STASIS_GEO = { regularRing: null, championRing: null, beacon: null };
+function _getSharedStasisRingGeo(isChampion) {
+  if (isChampion) {
+    if (!_SHARED_STASIS_GEO.championRing) {
+      _SHARED_STASIS_GEO.championRing = new THREE.TorusGeometry(90, 4, 14, 48);
+    }
+    return _SHARED_STASIS_GEO.championRing;
+  }
+  if (!_SHARED_STASIS_GEO.regularRing) {
+    _SHARED_STASIS_GEO.regularRing = new THREE.TorusGeometry(40, 2, 14, 48);
+  }
+  return _SHARED_STASIS_GEO.regularRing;
+}
+function _getSharedStasisBeaconGeo() {
+  if (!_SHARED_STASIS_GEO.beacon) {
+    _SHARED_STASIS_GEO.beacon = new THREE.CylinderGeometry(1, 1, 8000, 18, 3, true);
+  }
+  return _SHARED_STASIS_GEO.beacon;
+}
+
 class StasisField {
   constructor(position, championMode) {
     this.position = position.clone();
@@ -40789,7 +42634,10 @@ class StasisField {
     // objective again. The wide outer claim wireframe stays dropped
     // since it implied a capture zone that no longer exists ; the
     // core + rings + beacon column carry the identity.
-    const coreRadius = this.championMode ? 50 : 22;
+    // (v18L 2026-05-22) Regular core radius bumped 22 -> 32 to compensate
+    // for the rings being removed from non-champion fields ; the lone
+    // orb needs more presence on screen. Champion stays at 50.
+    const coreRadius = this.championMode ? 50 : 32;
     const ringRadius = this.championMode ? 90 : 40;
     this.group = new THREE.Group();
     const coreGeo = new THREE.SphereGeometry(coreRadius, 32, 20);
@@ -40813,7 +42661,13 @@ class StasisField {
         depthWrite: false,
       });
     } else if (typeof _makeFXMaterial === 'function') {
-      coreMat = _makeFXMaterial(this.championMode ? 'plasma_purple' : 'plasma_wall');
+      // (v18L Phase L-B) Stasis core now uses the billowing fireball preset
+      // (the same shape as the Vortex Plasma Mines tripwire orb) instead of
+      // the flat plasma_wall / plasma_purple membrane. Champion keeps its
+      // purple identity (fireball_purple) ; regular fields use the new
+      // fireball_cyan variant so they still read as cyan pickups. The
+      // surrounding torus rings provide the rotation cue.
+      coreMat = _makeFXMaterial(this.championMode ? 'fireball_purple' : 'fireball_cyan');
       // (v11 fix) Sample the noise patterns at lab-equivalent scale: divide
       // world position by core radius so the same per-layer scale settings
       // produce the same visual feature density regardless of how big the
@@ -40821,6 +42675,12 @@ class StasisField {
       // noise grain instead of the flowing plasma seen in the lab.
       if (coreMat.uniforms && coreMat.uniforms.uPosScale) {
         coreMat.uniforms.uPosScale.value = 1.0 / Math.max(1, coreRadius);
+      }
+      // (v18L Phase L-B) Per-instance noise phase offset so two simultaneous
+      // fields don't billow in lockstep. _layeredFXTick honors _timeOffset
+      // (set elsewhere by spawnFXBurst for the same reason).
+      if (coreMat.userData) {
+        coreMat.userData._timeOffset = Math.random() * 10;
       }
       // Proximity-pulse is a per-instance gameplay tell ; we layer it on top
       // of the layered material's uBrightness so the field reads more
@@ -40833,55 +42693,35 @@ class StasisField {
     this.core.renderOrder = 1;
     this.group.add(this.core);
 
-    const ringGeo = new THREE.TorusGeometry(ringRadius, this.championMode ? 4 : 2, 10, 40);
-    const ringMat = new THREE.MeshBasicMaterial({ color: ringColor, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false });
-    this.ring = new THREE.Mesh(ringGeo, ringMat);
-    this.ring.renderOrder = 1;
-    this.group.add(this.ring);
-
-    const ring2 = new THREE.Mesh(ringGeo, ringMat.clone());
-    ring2.rotation.x = Math.PI / 2;
-    ring2.renderOrder = 1;
-    this.ring2 = ring2;
-    this.group.add(ring2);
-
-    // (v6.9) Champion fields get a third ring rotated on the third axis
-    // for the bigger silhouette.
-    // (v16a Phase AA) The wide outer "claim radius" wireframe is gone :
-    // it used to mark the 260-unit hover zone and at the new 60-unit
-    // contact radius it would just sit on top of the inner rings and
-    // muddy the silhouette. The third ring is now plenty of identity.
+    // (v18L 2026-05-22) Champion field frills (rings + outer beacon +
+    // white inner core) stripped. Only a SINGLE thin fireball_purple
+    // beam is restored on champion fields — the user wants the beam
+    // for finish-line visibility but much thinner than v18L's original
+    // double-cylinder design. update() rescales width per-frame so the
+    // beam stays readable at distance, but at a much smaller cap than
+    // before.
     if (this.championMode) {
-      const ring3 = new THREE.Mesh(ringGeo, ringMat.clone());
-      ring3.rotation.z = Math.PI / 2;
-      ring3.rotation.x = Math.PI / 4;
-      ring3.renderOrder = 1;
-      this.ring3 = ring3;
-      this.group.add(ring3);
-
-      // (v13r-3) Tall vertical beacon column so the finish is visible
-      // from any distance, including across-province races. The column
-      // is purely visual : 8000 units tall (covers any sane race scale),
-      // additive-blended purple so it reads against both sky and city.
-      // Width scales per-frame in update(dt) so far-away distances still
-      // subtend a readable angle on screen.
-      const beaconGeo = new THREE.CylinderGeometry(1, 1, 8000, 16, 1, true);
+      // (v18L 2026-05-22 v2) Beam is a CLEAN THIN solid cylinder, not a
+      // LayeredFX fireball. The fireball preset's displacement +
+      // multi-layer noise was making the beam read as a giant chunky
+      // purple cloud at close range instead of a clean pole through
+      // the orb. Plain MeshBasicMaterial with additive blending gives
+      // a sharp narrow line that reads as a beacon pole, while the
+      // orb keeps its full fireball energy ball look.
+      const beaconGeo = _getSharedStasisBeaconGeo();
       const beaconMat = new THREE.MeshBasicMaterial({
-        color: 0xff66ff, transparent: true, opacity: 0.55,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        color: 0xcc66ff,
+        transparent: true,
+        opacity: 0.75,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        fog: false,
       });
       this.beacon = new THREE.Mesh(beaconGeo, beaconMat);
       this.beacon.renderOrder = 1;
+      this.beacon.frustumCulled = false;
       this.group.add(this.beacon);
-      // A second, tighter inner core for the beacon to give it a hot center.
-      const beaconCoreGeo = new THREE.CylinderGeometry(0.4, 0.4, 8000, 12, 1, true);
-      const beaconCoreMat = new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0.45,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-      });
-      this.beaconCore = new THREE.Mesh(beaconCoreGeo, beaconCoreMat);
-      this.beaconCore.renderOrder = 2;
-      this.group.add(this.beaconCore);
     }
 
     // No per-field PointLight: adding lights post-init forces Three.js to
@@ -40909,9 +42749,11 @@ class StasisField {
         proximityBoost = 1 + (1 - d / 600) * 2.0; // up to 3x at zero distance
       }
     }
-    // Rotate rings (faster when close)
-    this.ring.rotation.z += dt * 1.5 * proximityBoost;
-    this.ring2.rotation.y += dt * 1.2 * proximityBoost;
+    // Rotate rings (faster when close). (v18L 2026-05-22) Rings are
+    // champion-only now ; guard the access since regular fields skip
+    // ring creation entirely.
+    if (this.ring)  this.ring.rotation.z  += dt * 1.5 * proximityBoost;
+    if (this.ring2) this.ring2.rotation.y += dt * 1.2 * proximityBoost;
     // (v6.9) Champion field's third ring + claim wireframe for the
     // bigger silhouette. Rotation slightly faster while charging so the
     // field reads as "active" as soon as a team plants in it.
@@ -40929,7 +42771,10 @@ class StasisField {
     // so it punches through any horizon haze.
     if (this.beacon && typeof camera !== 'undefined') {
       const d = camera.position.distanceTo(this.position);
-      const w = Math.max(20, d * 0.005);
+      // (v18L 2026-05-22) Beam much thinner. Min 3 units wide ; per-distance
+      // scale factor reduced from 0.005 to 0.0012 so even at race scales
+      // the beam reads as a thin line through the orb, not a fat column.
+      const w = Math.max(3, d * 0.0012);
       const hScale = Math.max(1, (d * 0.05) / 8000);
       this.beacon.scale.set(w, hScale, w);
       if (this.beaconCore) this.beaconCore.scale.set(w, hScale, w);
@@ -40946,7 +42791,20 @@ class StasisField {
         // Layered FX path. uTime is ticked globally from gameLoop ; just
         // boost uBrightness on top of the cached base for the proximity tell.
         const baseB = (this.core.material.userData && this.core.material.userData._stasisBaseBrightness) || _coreUni.uBrightness.value;
-        _coreUni.uBrightness.value = baseB * Math.min(2.0, proximityBoost);
+        // (v18L Phase L-B) Champion field with an active claimant pulses
+        // brighter (up to +60% on top of the proximity boost) so the swing
+        // moment reads as the swing moment. Regular fields are unaffected.
+        let _chargeBoost = 1.0;
+        if (this.championMode && this.chargingTeam) {
+          _chargeBoost = 1.0 + 0.6 * (0.5 + 0.5 * Math.sin(this.pulseTime * 8.0));
+        }
+        _coreUni.uBrightness.value = baseB * Math.min(2.4, proximityBoost * _chargeBoost);
+        // (v18L Phase L-B) Layered FX uIntensity (tempo scalar) speeds up
+        // the noise patterns when claimed ; the field visibly "wakes up"
+        // the moment a ship enters capture distance.
+        if (_coreUni.uIntensity) {
+          _coreUni.uIntensity.value = (this.championMode && this.chargingTeam) ? 1.8 : 1.0;
+        }
       } else {
         // Legacy _makeStasisCoreMaterial path.
         if (_coreUni.time)   _coreUni.time.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
@@ -40968,19 +42826,88 @@ class StasisField {
   destroy() {
     this.alive = false;
     if (this.group.parent) scene.remove(this.group);
-    // Pickup effect: expanding ring. (v14c) LayeredFX 'shockwave_ring'
-    // preset. The stasis_pickup effect tick scales uIntensity from 1.0
-    // (start) to 0.0 (end) so the patterns fade with the expanding ring.
-    const ringRadius = 20;
-    const ringGeo = new THREE.TorusGeometry(ringRadius, 3, 8, 32);
-    const ringMat = _makeFXMaterial('shockwave_ring');
-    if (ringMat.uniforms.uBaseColor) ringMat.uniforms.uBaseColor.value.set(0x00ddff);
-    if (ringMat.uniforms.uPosScale)  ringMat.uniforms.uPosScale.value = 1.0 / ringRadius;
-    const ring = new THREE.Mesh(ringGeo, ringMat);
-    ring.position.copy(this.position);
-    ring.renderOrder = 1;
-    scene.add(ring);
-    game.effects.push({ mesh: ring, lifetime: 0.6, age: 0, type: 'stasis_pickup', startScale: 1 });
+    // (v18L 2026-05-22 leak fix v2) Geometries for rings + beacon are now
+    // shared module-level singletons (see _SHARED_STASIS_GEO below) so
+    // disposal handles materials ONLY. Calling dispose() on a shared
+    // geometry would kill the next field's rings. Materials are still
+    // per-instance (each field gets its own _makeFXMaterial(...) call)
+    // so they get disposed normally to free GPU uniform buffer state +
+    // unregister from _ACTIVE_LAYERED_FX.
+    // (v18L 2026-05-22 leak fix) Dispose every owned GPU resource so the
+    // LayeredFX ring + beacon materials don't accumulate in
+    // _ACTIVE_LAYERED_FX across rounds. The LayeredFX dispose override
+    // also self-removes from that registry so the per-frame uTime tick
+    // stops walking dead materials. The torus + cylinder geometries
+    // were higher-tessellation in L-B2 (18x64 / 24x8) so leaving them
+    // alive is meaningful GPU memory ; explicit dispose returns it.
+    try {
+      // Per-instance geo + material : core only (its SphereGeometry is
+      // created fresh per spawn so disposing returns its GPU buffer).
+      if (this.core) {
+        if (this.core.geometry && typeof this.core.geometry.dispose === 'function') {
+          try { this.core.geometry.dispose(); } catch (_) {}
+        }
+        if (this.core.material && typeof this.core.material.dispose === 'function') {
+          try { this.core.material.dispose(); } catch (_) {}
+        }
+      }
+      // Shared-geometry meshes : dispose MATERIAL only. Geometry stays
+      // alive in _SHARED_STASIS_GEO for the next field to reuse.
+      const _disposeMatOnly = (m) => {
+        if (!m || !m.material) return;
+        if (typeof m.material.dispose === 'function') {
+          try { m.material.dispose(); } catch (_) {}
+        }
+      };
+      _disposeMatOnly(this.ring);
+      _disposeMatOnly(this.ring2);
+      if (this.ring3)      _disposeMatOnly(this.ring3);
+      if (this.beacon)     _disposeMatOnly(this.beacon);
+      if (this.beaconCore) _disposeMatOnly(this.beaconCore);
+    } catch (_) {}
+    // Pickup effect: (v18L Phase L-B) replaced the flat expanding torus
+    // shockwave_ring with an exploding fireball burst that matches the new
+    // core silhouette. Pops outward then fades, reading as the orb popping
+    // open. Uses the same fireball preset family that the StasisField core
+    // uses (fireball_purple for champion, fireball_cyan for regular). The
+    // legacy stasis_pickup effect tick is bypassed because spawnFXBurst
+    // pushes its own fx_burst-typed effect.
+    const burstRadius = this.championMode ? 75 : 40;
+    const burstPreset = this.championMode ? 'fireball_purple' : 'fireball_cyan';
+    if (typeof spawnFXBurst === 'function') {
+      spawnFXBurst(burstPreset, this.position, burstRadius, 0.55, {
+        startScale: 0.20, endScale: 1.6,
+      });
+      // Secondary smaller pop a moment later for the "double tap" exploding-orb
+      // beat. Offsets slightly so the silhouette doesn't sit perfectly on top.
+      const _off = new THREE.Vector3(
+        (Math.random() - 0.5) * burstRadius * 0.4,
+        (Math.random() - 0.5) * burstRadius * 0.4,
+        (Math.random() - 0.5) * burstRadius * 0.4
+      ).add(this.position);
+      spawnFXBurst(burstPreset, _off, burstRadius * 0.55, 0.40, {
+        startScale: 0.15, endScale: 1.3,
+      });
+    } else {
+      // Fallback: keep the legacy torus ring if spawnFXBurst isn't available.
+      const ringRadius = 20;
+      const ringGeo = new THREE.TorusGeometry(ringRadius, 3, 8, 32);
+      const ringMat = _makeFXMaterial('shockwave_ring');
+      if (ringMat.uniforms.uBaseColor) ringMat.uniforms.uBaseColor.value.set(0x00ddff);
+      if (ringMat.uniforms.uPosScale)  ringMat.uniforms.uPosScale.value = 1.0 / ringRadius;
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.position.copy(this.position);
+      ring.renderOrder = 1;
+      scene.add(ring);
+      game.effects.push({ mesh: ring, lifetime: 0.6, age: 0, type: 'stasis_pickup', startScale: 1 });
+    }
+    // (v18L Phase L-B) Bright dynamic light flash on pickup so the burst
+    // lights surrounding walls + gas, not just self-glow. Same color as
+    // the orb identity.
+    if (typeof spawnDynamicLight === 'function') {
+      const lightColor = this.championMode ? 0xaa44ff : 0x44ddff;
+      spawnDynamicLight(this.position, lightColor, 0.5, burstRadius * 12, 1.5);
+    }
     // (v6.7) Godray straight up so peers across the level can see "someone
     // grabbed it." Pure visual; no gameplay impact. Reuses the volumetric
     // tracer material for consistency with the rest of the visual vocabulary.
@@ -41319,6 +43246,45 @@ function updateStasisFields(dt) {
         if (field.recentlyReleasedTimer <= 0) {
           field.recentlyReleasedShip = null;
           field.recentlyReleasedTimer = 0;
+        }
+      }
+
+      // (v18L 2026-05-22) Slight magnetic pull. Any ship inside the
+      // champion field's contact radius feels a gentle pull toward
+      // center so the player FEELS they're on target. Strength scales
+      // with distance from center (zero at center, strongest at edge)
+      // and is weak enough that a dash ram from another ship easily
+      // bumps the claimer off the dot. Per-frame impulse is
+      // pullAccel * dt, so doubling dt doubles the pull magnitude ;
+      // a typical dash adds ~600 velocity at once vs ~6 from a full
+      // second of magnetism.
+      const _CHAMPION_PULL_ACCEL = 120; // units/sec^2 at the edge
+      const _applyChampionPull = (ship) => {
+        if (!ship || !ship.position || !ship.velocity) return;
+        const dx = field.position.x - ship.position.x;
+        const dy = field.position.y - ship.position.y;
+        const dz = field.position.z - ship.position.z;
+        const d2 = dx*dx + dy*dy + dz*dz;
+        const r2 = field.radius * field.radius;
+        if (d2 >= r2 || d2 < 1) return;
+        const d = Math.sqrt(d2);
+        const distRatio = d / field.radius;  // 0 at center, 1 at edge
+        // Scaled with distance squared so the snap reads strongest near
+        // the edge and tapers to zero at center. Multiplied by dt so the
+        // velocity nudge is frame-rate independent.
+        const k = _CHAMPION_PULL_ACCEL * distRatio * distRatio * dt;
+        const inv = 1 / d;
+        ship.velocity.x += dx * inv * k;
+        ship.velocity.y += dy * inv * k;
+        ship.velocity.z += dz * inv * k;
+      };
+      if (typeof player !== 'undefined' && player.position && player.shipState !== 'dead') {
+        _applyChampionPull(player);
+      }
+      if (game && game.entities) {
+        for (let _bi = 0; _bi < game.entities.length; _bi++) {
+          const _b = game.entities[_bi];
+          if (_b && _b.alive) _applyChampionPull(_b);
         }
       }
 
@@ -42741,6 +44707,15 @@ function buildRoomGraphLevel(level) {
       'uniform float SA_BREATH_RATE;',
       'uniform float SA_DOT_SAT;',
       'uniform float SA_ZONE_FLOOR;',
+      // (v18L Phase L-J) Wall force-field ripple uniforms. Up to 6
+      // simultaneous active ripples. Each slot stores world-space hit
+      // position xyz + current age in .w. Color is per-slot. Inactive
+      // slots have age >= uWallRippleMaxAge so the multiplicative gate
+      // in the shader collapses their contribution to zero.
+      'uniform vec4 uWallRippleHits[6];',
+      'uniform vec3 uWallRippleColors[6];',
+      'uniform float uWallRippleMaxAge;',
+      'uniform float uWallRippleMaxRadius;',
       '',
       // HSV -> RGB (same formulation as the dancing cosmos shader so the
       // wall palette harmonises with the docs page).
@@ -43567,7 +45542,7 @@ function buildRoomGraphLevel(level) {
       // layer bg/fg/fg2 uniforms; the JS-side MULTI_LAYER_PRESETS swaps
       // those uniforms to the correct preset's values when wallPattern
       // changes.
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29 || uPattern == 30 || uPattern == 31 || uPattern == 32) {',
+      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29 || uPattern == 30 || uPattern == 31 || uPattern == 32 || uPattern == 33 || uPattern == 34 || uPattern == 35 || uPattern == 36) {',
       // (v8VR 2026-05-01) Pass a tint to cosmicField for multi-layer
       // composite presets so per-room zoneColor doesn't leak into pattern
       // sampling. The lab uses a single tintColor across the whole
@@ -43642,9 +45617,30 @@ function buildRoomGraphLevel(level) {
       // up in the uBlackBase==1 branch above (matching the lab's main()
       // exactly). Final clamp here only catches truly runaway HDR.
       '  c = min(c, vec3(4.0));',
+      // (v18L Phase L-J / fix) Force-field wall ripples. Same model as
+      // before but the loop is UNROLLED into 6 inline function calls
+      // because GLSL ES 1.0 disallows dynamic indexing into uniform
+      // arrays in fragment shaders on some drivers, which caused the
+      // first attempt to fall back to a broken default material and
+      // render walls as nearly invisible. The existing ship shield
+      // ripple (see rippleSample below the energy shield material)
+      // uses this exact unroll pattern.
+      '  vec3 _wrSum = vec3(0.0);',
+      '  { vec4 _h = uWallRippleHits[0]; vec3 _c = uWallRippleColors[0]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[1]; vec3 _c = uWallRippleColors[1]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[2]; vec3 _c = uWallRippleColors[2]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[3]; vec3 _c = uWallRippleColors[3]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[4]; vec3 _c = uWallRippleColors[4]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  { vec4 _h = uWallRippleHits[5]; vec3 _c = uWallRippleColors[5]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
+      '  c += _wrSum * 1.6;',
+      '  c = min(c, vec3(6.0));',
       // (v8VR 2026-04-30) uOpacity multiplies the final alpha so the
       // Settings -> Wall Pattern transparency slider actually fades the
       // wall. Defaults to 1.0 (legacy fully-opaque behavior).
+      // (v18L 2026-05-22 reverted) Wall proximity opacity FULLY reverted
+      // to v18 baseline. The variable-alpha proximity calc was somehow
+      // producing skybox bleed-through that the v18 constant alpha did
+      // not have. Back to v18 exact behavior.
       '  gl_FragColor = vec4(c, alpha * uOpacity);',
       '}'
     ].join('\n');
@@ -43696,7 +45692,14 @@ function buildRoomGraphLevel(level) {
       if (i < numRooms) {
         const r = game.sdfRoomData[i];
         roomCentersArr.push(new THREE.Vector3(r.x, r.y, r.z));
-        const slotCol = new THREE.Color(roomPalette[i % roomPalette.length]);
+        // (2026-05-21) Pull the slot color through the zone-color
+        // override helper. When the user has set a custom color for
+        // this slot, it replaces the map's palette[i] entry ; otherwise
+        // we fall through to the map's palette as before.
+        const _slotHex = (typeof _getEffectiveWallSlotColor === 'function')
+          ? _getEffectiveWallSlotColor(i, roomPalette)
+          : roomPalette[i % roomPalette.length];
+        const slotCol = new THREE.Color(_slotHex);
         slotCol.getHSL(_slotHslTmp);
         game.wallRoomBaseHues.push({ h: _slotHslTmp.h, s: _slotHslTmp.s, l: _slotHslTmp.l });
         const startCol = new THREE.Color(
@@ -43721,9 +45724,12 @@ function buildRoomGraphLevel(level) {
     // (v14e) Default to Tile Track (31) instead of pattern 0 so the curated
     // look is what new players see on first load.
     if (typeof game.wallPattern !== 'number') game.wallPattern = 31;
-    // Pure Black Base is on by default: wall geometry hides, only the active
-    // pattern reads against pure black. User can toggle off in Settings.
-    if (typeof game.wallBlackBase !== 'boolean') game.wallBlackBase = true;
+    // (2026-05-21) Pure Black Base is permanently disabled at user
+    // request ; always seed false here so any code path that reads
+    // game.wallBlackBase before the first setWallBlackBase() call sees
+    // the disabled state. The setting toggle was removed from the UI
+    // and setWallBlackBase() now ignores its argument.
+    game.wallBlackBase = false;
     if (!game.wallParams) game.wallParams = {};
     // Pull current values out of the central params table (with defaults) so
     // every uniform has a known starting value.
@@ -43875,7 +45881,10 @@ function buildRoomGraphLevel(level) {
         // this on every settings push regardless, but the initial value
         // ensures correct rendering on the very first frame.
         uPattern:   { value: 21 },
-        uBlackBase: { value: 1 },
+        // (2026-05-21) Pure Black Base permanently off ; initial uniform
+        // value matches game.wallBlackBase = false so no first-frame
+        // flash of black-base rendering before setWallBlackBase fires.
+        uBlackBase: { value: 0 },
         // (v8VR 2026-04-30) Wall opacity. 1.0 = solid (legacy default).
         // Settings -> Wall Pattern -> Wall opacity slider drives this.
         // Honor any value already loaded from settings before the
@@ -43985,7 +45994,24 @@ function buildRoomGraphLevel(level) {
         SA_BREATH_AMP:     { value: wp.SA_BREATH_AMP },
         SA_BREATH_RATE:    { value: wp.SA_BREATH_RATE },
         SA_DOT_SAT:        { value: wp.SA_DOT_SAT },
-        SA_ZONE_FLOOR:     { value: wp.SA_ZONE_FLOOR }
+        SA_ZONE_FLOOR:     { value: wp.SA_ZONE_FLOOR },
+        // (v18L Phase L-J) Wall force-field ripple uniforms. 6 slots ;
+        // hit.xyz = world position, hit.w = current age. Inactive slots
+        // sit at age >= uWallRippleMaxAge so the GLSL multiplicative
+        // gate skips their contribution. Populated by spawnWallRipple()
+        // when a projectile or hitscan terminates against the wall ;
+        // aged each frame by _tickWallRipples in gameLoop.
+        uWallRippleHits: { value: [
+          new THREE.Vector4(0, 0, 0, 9999), new THREE.Vector4(0, 0, 0, 9999),
+          new THREE.Vector4(0, 0, 0, 9999), new THREE.Vector4(0, 0, 0, 9999),
+          new THREE.Vector4(0, 0, 0, 9999), new THREE.Vector4(0, 0, 0, 9999),
+        ] },
+        uWallRippleColors: { value: [
+          new THREE.Color(1,1,1), new THREE.Color(1,1,1), new THREE.Color(1,1,1),
+          new THREE.Color(1,1,1), new THREE.Color(1,1,1), new THREE.Color(1,1,1),
+        ] },
+        uWallRippleMaxAge:    { value: 1.5 },
+        uWallRippleMaxRadius: { value: 280.0 }
       }
     });
     }  // (v16a Potato) end of else (full ShaderMaterial path)
@@ -44017,6 +46043,18 @@ function buildRoomGraphLevel(level) {
     // Pushing here makes the first frame correct.
     if (typeof pushWallParamsToUniforms === 'function') {
       pushWallParamsToUniforms();
+    }
+
+    // (2026-05-21) Re-apply the zone theme after the wall material is
+    // built. Necessary for gradient themes (Forest, Volcanic, Abyss)
+    // whose per-slot colors are lerped from each room's Y position ;
+    // game.sdfRoomData just changed when the new level was built so
+    // the previous lerp is stale. For fixed-color themes this is a
+    // cheap no-op that re-writes the same values. For 'default' it
+    // clears overrides (already cleared by loadSettings on first boot,
+    // and a no-op on subsequent level builds when no theme is active).
+    if (typeof applyZoneTheme === 'function' && typeof game.zoneTheme === 'string') {
+      try { applyZoneTheme(game.zoneTheme); } catch (_) {}
     }
 
     const mesh = new THREE.Mesh(levelGeo, sdfMat);
@@ -44057,42 +46095,43 @@ function buildRoomGraphLevel(level) {
     // BufferGeometry costs nothing extra (Three.js reference-shares
     // the GPU buffers). renderOrder = -1 ensures the occluder runs
     // first within the opaque group.
-    if (!(typeof getVRBudgetTier === 'function' && getVRBudgetTier() >= 3)) {
-      const occluderMat = new THREE.MeshBasicMaterial({
-        colorWrite: false,
-        depthWrite: true,
-        side: THREE.BackSide,
-        // (v16a Phase Y fix) Bias the occluder's depth slightly farther
-        // than the visual wall to prevent z-fighting. The visual wall is
-        // a custom ShaderMaterial with its own vertex shader ; the
-        // occluder is MeshBasicMaterial with Three.js's stock vertex
-        // shader. They share the same geometry and transformations but
-        // independent shader programs can produce gl_Position values
-        // that differ by epsilons due to FP precision. Without offset,
-        // the visual wall's LEQUAL depth test sometimes fails, the
-        // navy-blue clear color (or skybox) bleeds through, and the
-        // wall appears to flicker. polygonOffset pushes the occluder's
-        // depth slightly farther so the visual wall is consistently
-        // CLOSER and always passes its depth test.
-        polygonOffset: true,
-        polygonOffsetFactor: 1,
-        polygonOffsetUnits: 1,
-      });
-      const occluderMesh = new THREE.Mesh(levelGeo, occluderMat);
-      occluderMesh.renderOrder = -1;
-      occluderMesh.userData = { isWallMesh: true, isWallOccluder: true };
-      // (v16a Phase Y) Skip raycasts on the occluder. The spatial-audio
-      // occlusion path (and any other code that calls intersectObjects on
-      // game.mapMeshes) would otherwise test the same shared BufferGeometry
-      // twice ; this no-op stops the duplicate work cleanly without having
-      // to change every consumer to filter by userData.isWallOccluder.
-      occluderMesh.raycast = function () {};
-      scene.add(occluderMesh);
-      game.mapMeshes.push(occluderMesh);
-    }
+    const occluderMat = new THREE.MeshBasicMaterial({
+      colorWrite: false,
+      depthWrite: true,
+      side: THREE.BackSide,
+      // (v16a Phase Y fix) Bias the occluder's depth slightly farther
+      // than the visual wall to prevent z-fighting. The visual wall is
+      // a custom ShaderMaterial with its own vertex shader ; the
+      // occluder is MeshBasicMaterial with Three.js's stock vertex
+      // shader. They share the same geometry and transformations but
+      // independent shader programs can produce gl_Position values
+      // that differ by epsilons due to FP precision. Without offset,
+      // the visual wall's LEQUAL depth test sometimes fails, the
+      // navy-blue clear color (or skybox) bleeds through, and the
+      // wall appears to flicker. polygonOffset pushes the occluder's
+      // depth slightly farther so the visual wall is consistently
+      // CLOSER and always passes its depth test.
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
+    });
+    const occluderMesh = new THREE.Mesh(levelGeo, occluderMat);
+    occluderMesh.renderOrder = -1;
+    occluderMesh.userData = { isWallMesh: true, isWallOccluder: true };
+    // (v16a Phase Y) Skip raycasts on the occluder. The spatial-audio
+    // occlusion path (and any other code that calls intersectObjects on
+    // game.mapMeshes) would otherwise test the same shared BufferGeometry
+    // twice ; this no-op stops the duplicate work cleanly without having
+    // to change every consumer to filter by userData.isWallOccluder.
+    occluderMesh.raycast = function () {};
+    scene.add(occluderMesh);
+    game.mapMeshes.push(occluderMesh);
     return mesh;
   }
 
+  // (v18VR ChatGPT) High-res grid resolution is throttled in VR via getVRLevelGridRes ;
+  // standalone Quest gets 72/64/56 depending on tier. Preview pass shares the final
+  // res when the final res is already low enough.
   const finalGridRes = (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96;
   const previewGridRes = Math.min(48, finalGridRes);
 
@@ -44103,6 +46142,7 @@ function buildRoomGraphLevel(level) {
 
       if (gridRes === previewGridRes && previewGridRes !== finalGridRes) {
         createMeshFromPositions(positions, previewGridRes);
+        // Dispatch high-res job
         game.levelWorker.postMessage({bounds, gridRes: finalGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
       } else if (gridRes === finalGridRes) {
         // Remove low-res, add high-res.
@@ -44119,11 +46159,11 @@ function buildRoomGraphLevel(level) {
       }
     };
 
-    // Start with low-res
+    // Start with low-res preview (or final res directly if final is already low)
     game.levelWorker.postMessage({bounds, gridRes: previewGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
   } else {
     // Fallback: synchronous marching cubes (no worker)
-    const gridRes = finalGridRes;
+    const gridRes = 96;
     const nx=gridRes,ny=gridRes,nz=gridRes;
     const dx=(bounds.maxX-bounds.minX)/nx;
     const dy=(bounds.maxY-bounds.minY)/ny;
@@ -44687,9 +46727,24 @@ function announcerSay(text, opts) {
   opts = opts || {};
   if (!announcer.enabled || !text) return false;
   if (typeof speechSynthesis === 'undefined') return false;
-  // Skip in VR (the headset audio path differs and TTS is awkward there);
-  // can be revisited if Quest-side TTS becomes desirable.
-  if (typeof renderer !== 'undefined' && renderer.xr && renderer.xr.isPresenting) return false;
+  // (v18VR 2026-05-22) Previously the announcer was forced off when WebXR was
+  // presenting. We now let it through ; on tethered PCVR (Link / Air Link via
+  // a desktop Chromium) the system TTS works fine. On Meta Quest standalone
+  // the OculusBrowser exposes speechSynthesis but the OS ships no TTS voices,
+  // so getVoices() returns []. We attempt the speak() anyway (some Quest
+  // builds will still synthesize via a default web voice) ; if it silently
+  // no-ops, only the audio is missing and gameplay continues.
+  const _isQuestUA = (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
+  if (_isQuestUA && announcer._questVoicesChecked == null) {
+    announcer._questVoicesChecked = false;
+    try {
+      const _vs = speechSynthesis.getVoices() || [];
+      if (_vs.length === 0) {
+        console.warn('[v18VR Announcer] Meta Quest browser exposes speechSynthesis but reports 0 voices. TTS will attempt to speak via default voice ; if silent, the OS lacks a TTS engine.');
+      }
+      announcer._questVoicesChecked = true;
+    } catch (_) {}
+  }
 
   const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   // Per-key cooldown gate.
@@ -44712,6 +46767,20 @@ function announcerSay(text, opts) {
   u.rate   = opts.rate   != null ? opts.rate   : _announcerCurrentRate();
   u.pitch  = opts.pitch  != null ? opts.pitch  : announcer.pitch;
   u.volume = opts.volume != null ? opts.volume : announcer.volume;
+  // (v18VR) Diagnostic hooks ; surface engine-level failures so Quest users
+  // can see why TTS may be silent. Cheap when speech works.
+  u.onerror = function(e) {
+    if (!announcerSay._errLogged) {
+      announcerSay._errLogged = true;
+      console.warn('[v18VR Announcer] SpeechSynthesisUtterance error:', e && e.error, '— platform may lack a TTS engine.');
+    }
+  };
+  try {
+    // (v18VR) Chromium/Quest browser sometimes leaves speechSynthesis in a
+    // paused state after a tab idle window. resume() is a no-op when not
+    // paused, so it's safe to call defensively.
+    if (typeof speechSynthesis.resume === 'function') speechSynthesis.resume();
+  } catch (_) {}
   speechSynthesis.speak(u);
   return true;
 }
@@ -45239,11 +47308,30 @@ function gameLoop(timestamp) {
         ? MULTI_LAYER_PRESETS[game.wallPattern | 0] : null;
       const _paletteOverride = (_activePreset && typeof _activePreset.paletteOverride === 'number')
         ? _activePreset.paletteOverride : null;
+      // (2026-05-21) Zone-theme lock. When the user picked a non-default
+      // theme from settings, freeze the drift so the picked colors stay
+      // exactly as chosen ; without this lock, the drift was rotating
+      // each slot's hue around the full color wheel over ~4 minutes,
+      // which made themes feel inconsistent ("the colors are never the
+      // same after messing with them"). Map Default keeps the drift.
+      const _themeActive = (typeof game.zoneTheme === 'string') && game.zoneTheme !== 'default';
       if (_paletteOverride !== null) {
         // Lock all 8 room slots to the override hex. The hue-drift loop
         // below is skipped while this preset is active.
         for (let i = 0; i < colors.length; i++) {
           colors[i].setHex(_paletteOverride);
+        }
+      } else if (_themeActive) {
+        // Theme is active : lock to wallRoomBaseHues without time offset
+        // so picked colors don't walk around the wheel. wallRoomBaseHues
+        // was set from the theme by applyZoneColorOverrides.
+        for (let i = 0; i < colors.length; i++) {
+          const base = game.wallRoomBaseHues[i] || { h: 0, s: 0, l: 0 };
+          _wallHueScratchColor.setHSL(base.h, base.s, base.l);
+          const r = Math.min(1.0, _wallHueScratchColor.r * boost);
+          const g = Math.min(1.0, _wallHueScratchColor.g * boost);
+          const b = Math.min(1.0, _wallHueScratchColor.b * boost);
+          colors[i].setRGB(r, g, b);
         }
       } else {
       // Mutating each THREE.Color is fine because Three.js samples the
@@ -45326,6 +47414,7 @@ function gameLoop(timestamp) {
     updatePlayerMovement(dt);
     updateWeapon(dt);
     updateAbilities(dt);
+    if (typeof _tickFireDOTs === 'function') _tickFireDOTs(dt); // (v18L 2026-05-22) per-bot fire DOT
   }
   // (v16 perks) Per-frame perk effect ticks. Nano repair regens HP each
   // frame ; Auto cloak counts down its interval and fires its cycle.
@@ -45354,6 +47443,7 @@ function gameLoop(timestamp) {
   if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
+  if (typeof _tickWallRipples === 'function') _tickWallRipples(dt); // (v18L Phase L-J)
   tickCockpitFrameAnimation(); // (v17) cockpit frame: now stationary frame_<SHIP>.png + damage-shake hook
   _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
   tickGunLayer();               // (v17) per-ship gun recoil cycle on the behind-layer
