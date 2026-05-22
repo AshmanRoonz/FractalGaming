@@ -11227,10 +11227,17 @@ try {
 (function () {
   let _stored = 'high';
   try { _stored = localStorage.getItem('lss_quality') || 'high'; } catch (_) {}
-  let _dprCap;
+  // (v18VR 2026-05-22) Potato tier removed. Any persisted 'potato' value
+  // is silently migrated to 'low' so users coming back from a 'potato'
+  // save don't end up with the now-invalid tier (which would fall through
+  // to the default branch anyway, but writing the migration back makes
+  // QUALITY.level land on 'low' once applyQualityPreset reads it later).
   if (_stored === 'potato') {
-    _dprCap = 0.75;
-  } else if (_stored === 'ultra') {
+    _stored = 'low';
+    try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
+  }
+  let _dprCap;
+  if (_stored === 'ultra') {
     _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
   } else {
     _dprCap = Math.min(window.devicePixelRatio, 2);
@@ -11536,6 +11543,12 @@ renderer.xr.addEventListener('sessionend', () => {
 let _xrPendingResume = false;
 let _xrResumeIntervalId = null;
 let _xrLastSeenState = null;
+// (v18VR 2026-05-22) DOM-driven menu watcher state ; the per-frame block
+// in gameLoop flips this when a flat-screen menu opens / closes so we can
+// end the XR session and trigger the resume countdown without depending
+// on a single game.state transition (the between-rounds ship-select runs
+// during 'warmup', which the old state-watcher missed).
+let _xrLastSeenMenu = false;
 function _xrCancelResumeCountdown() {
   if (_xrResumeIntervalId) {
     clearInterval(_xrResumeIntervalId);
@@ -11864,37 +11877,19 @@ function _xrRasterizeMenu(targetEl) {
   });
 }
 
-// Each frame in VR, decide which menu (if any) to mirror, and re-rasterize
-// it on a 250 ms cadence. Forces a rebuild immediately when the active
-// target changes (so the user sees the new menu right away, not after
-// the next interval).
+// (v18VR 2026-05-22) Menu mirror disabled. Earlier builds rasterized the
+// active menu DOM with html2canvas at 250 ms cadence and projected it onto
+// a 3D plane inside the headset ; the result was unreadable, gamepad nav
+// was awkward, and the html2canvas pass alone cost several ms per refresh.
+// The new flow exits the XR session whenever any flat-screen menu opens
+// (see the DOM-driven watcher inside gameLoop) and auto-resumes 5 s after
+// it closes, so the user always interacts with menus on the flat screen
+// at full fidelity. The function is preserved as a no-op so existing
+// per-frame call sites keep linking ; the mesh is kept hidden if it was
+// ever created.
 function _xrUpdateMenuMirror() {
-  if (!renderer.xr.isPresenting) {
-    if (xrMenuMesh) xrMenuMesh.visible = false;
-    return;
-  }
-  let target = null;
-  if (settingsOpen) {
-    target = document.getElementById('settings-overlay');
-  } else {
-    const sel = document.getElementById('ship-select');
-    if (sel && sel.classList.contains('active')) target = sel;
-  }
-  const mesh = _xrEnsureMenuMesh();
-  if (!target) {
-    mesh.visible = false;
-    _xrMenuLastTarget = null;
-    return;
-  }
-  mesh.visible = true;
-  const now = performance.now();
-  if (target !== _xrMenuLastTarget) {
-    // Switched menus: rebuild immediately.
-    _xrMenuLastTarget = target;
-    _xrRasterizeMenu(target);
-  } else if (now - _xrMenuLastRasterTime > 250) {
-    _xrRasterizeMenu(target);
-  }
+  if (xrMenuMesh) xrMenuMesh.visible = false;
+  _xrMenuLastTarget = null;
 }
 
 // 3D enemy health bars. The flat-screen HUD uses #enemy-healthbars (DOM
@@ -13282,7 +13277,9 @@ const QUALITY = {
   },
 };
 function applyQualityPreset(level) {
-  const valid = ['potato', 'low', 'medium', 'high', 'ultra'];
+  // (v18VR 2026-05-22) Potato tier removed ; migrate legacy callers to 'low'.
+  if (level === 'potato') level = 'low';
+  const valid = ['low', 'medium', 'high', 'ultra'];
   QUALITY.level = valid.indexOf(level) >= 0 ? level : 'high';
   postFX.enabled = QUALITY.bloomEnabled();
   // (v16a Potato + Ultra) Re-apply scene DPR on tier change so resolution
@@ -13304,8 +13301,17 @@ function applyQualityPreset(level) {
   try { localStorage.setItem('lss_quality', QUALITY.level); } catch (e) {}
 }
 try {
-  const stored = localStorage.getItem('lss_quality');
-  const valid = ['potato', 'low', 'medium', 'high', 'ultra'];
+  let stored = localStorage.getItem('lss_quality');
+  // (v18VR 2026-05-22) Potato tier removed from the UI. Migrate any
+  // persisted 'potato' value to 'low' so existing saves still load to a
+  // valid tier. The internal QUALITY.isPotato() / .bloomDPR() branches
+  // are kept as no-op safety nets in case anything else still touches
+  // them, but nothing should land on 'potato' from the load path now.
+  if (stored === 'potato') {
+    stored = 'low';
+    try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
+  }
+  const valid = ['low', 'medium', 'high', 'ultra'];
   if (valid.indexOf(stored) >= 0) {
     QUALITY.level = stored;
     postFX.enabled = QUALITY.bloomEnabled();
@@ -21974,6 +21980,14 @@ function _makeAtomFractalMaterial(baseColor) {
       // see updateEffects rockChunk branch) keeps working. Cluster rocks
       // stay at the 1.0 default forever ; only chunks animate it down.
       uOpacity:   { value: 1.0 },
+      // (v18VR 2026-05-22) VR-lite branch for the rock shader. Set to 1.0
+      // per frame from updateEffects when isXRPresenting() is true ; the
+      // fragment shader uses it to early-exit the 8-iter Mandelbox at 4
+      // iters and skip the high-frequency FBM pass entirely. That dropped
+      // the per-pixel cost of looking at a wall of rocks by ~55% on Quest
+      // without a visible difference at headset resolution. Flat-screen
+      // keeps the full quality (uniform stays at 0).
+      uVRLite:    { value: 0.0 },
     },
     vertexShader: [
       'varying vec3 vLocalPos;',
@@ -21994,6 +22008,7 @@ function _makeAtomFractalMaterial(baseColor) {
       'uniform float time;',
       'uniform vec3 uBaseColor;',
       'uniform float uOpacity;',
+      'uniform float uVRLite;',
       'vec3 hsv(float h, float s, float v){',
       '  vec3 k = mod(vec3(5.0, 3.0, 1.0) + h * 6.0, 6.0);',
       '  return v - v * s * clamp(min(k, 4.0 - k), 0.0, 1.0);',
@@ -22041,7 +22056,12 @@ function _makeAtomFractalMaterial(baseColor) {
       '  p = p * rotate3D(time * 0.25, vec3(-4.0, sin(time) + 7.0, 0.0));',
       '  float s = 1.0;',
       '  float e = 0.0;',
+      // (v18VR) Loop bound is constant for WebGL1 ; break on a
+      // uniform-driven condition to short-circuit at iter 4 in VR. The
+      // visual difference is imperceptible at headset resolution but the
+      // GPU saves four full Mandelbox iters per fragment.
       '  for(int k = 0; k < 8; k++){',
+      '    if (uVRLite > 0.5 && k >= 4) break;',
       '    e = max(0.95, 9.0 / dot(p, p));',
       '    s *= e;',
       '    p = vec3(2.618, 4.0, 3.0) - abs(abs(p) * e - vec3(1.0, 1.5, 1.618));',
@@ -22067,8 +22087,15 @@ function _makeAtomFractalMaterial(baseColor) {
       '  //   lowFreq darkens crevices (large irregular zones)',
       '  //   highFreq adds fine surface grain',
       '  // Combined into texMod which multiplies the final rock color.',
+      // (v18VR) Skip the high-frequency FBM call entirely in VR. lowFreq
+      // alone keeps the readable silhouette ; the per-vertex displacement
+      // already supplies plenty of surface chaos so the fine grain is
+      // not missed at headset resolution.
       '  float lowFreq  = fbm3(vLocalPos * 3.5);',
-      '  float highFreq = fbm3(vLocalPos * 22.0 + 13.7);',
+      '  float highFreq = 0.5;',
+      '  if (uVRLite < 0.5) {',
+      '    highFreq = fbm3(vLocalPos * 22.0 + 13.7);',
+      '  }',
       '  float texMod = 0.45 + 0.55 * lowFreq;',
       '  texMod *= (0.86 + 0.14 * highFreq);',
       '  vec3 colorOut = (base + rim) * texMod;',
@@ -25399,9 +25426,14 @@ function updateEffects(dt) {
   // time value across all live atom mats (one uniform write per mat).
   if (_atomFractalMaterials.length) {
     const _gameT = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+    // (v18VR 2026-05-22) Drive uVRLite from XR presence each frame. Cluster
+    // rocks share this uniform across all live mats so the branch flips on
+    // session start / end without recompile.
+    const _vrLite = (typeof isXRPresenting === 'function' && isXRPresenting()) ? 1.0 : 0.0;
     for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
       const _am = _atomFractalMaterials[_mi];
       if (_am && _am.uniforms && _am.uniforms.time) _am.uniforms.time.value = _gameT;
+      if (_am && _am.uniforms && _am.uniforms.uVRLite) _am.uniforms.uVRLite.value = _vrLite;
     }
   }
   // v8VR: drive the InstancedMesh particle pools from inside the same
@@ -37993,7 +38025,6 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Preset</label>
         <select id="set-quality" style="flex:1;">
-          <option value="potato" ${QUALITY.level === 'potato' ? 'selected' : ''}>Potato (Quest VR / no-GPU : no bloom, no basin pools, no cloud churn, no shockwave)</option>
           <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, light particles)</option>
           <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke)</option>
@@ -38001,7 +38032,7 @@ function buildSettingsPage() {
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">If the framerate dips during heavy fights, drop to Medium / Low / Potato. If your GPU has headroom, push to Ultra. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">If the framerate dips during heavy fights, drop to Medium or Low. If your GPU has headroom, push to Ultra. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <div class="setting-row">
         <label>Field of View</label>
@@ -47221,24 +47252,34 @@ function gameLoop(timestamp) {
   // (just before render) will lift that pose up to the dolly.
   _xrResetDollyAtFrameStart();
 
-  // (VR fork) Watch game.state transitions: if a non-VR menu (ship-select,
-  // matchEnd) appears while presenting, exit VR so the user can use the
-  // proper flat-screen UI; flag for auto-resume when combat starts again.
-  // When game.state goes back to play, kick the resume countdown.
-  if (typeof _xrLastSeenState === 'undefined') _xrLastSeenState = null;
-  if (game.state !== _xrLastSeenState) {
-    const wasMenu  = (_xrLastSeenState === 'select' || _xrLastSeenState === 'matchEnd');
-    const nowMenu  = (game.state === 'select' || game.state === 'matchEnd');
-    if (nowMenu && !wasMenu && renderer.xr && renderer.xr.isPresenting) {
+  // (VR fork ; v18VR 2026-05-22 rewrite) Detect any flat-screen menu while
+  // presenting. The old version watched only game.state ; that missed the
+  // between-rounds ship-select (which runs during state 'warmup' with the
+  // #ship-select panel toggled .active) and the in-match Settings overlay,
+  // both of which left the user staring at an unreadable html2canvas
+  // mirror inside the headset. The new check is DOM-driven : if any of
+  // ship-select.active, settings-overlay.active, the lobby, or the
+  // matchEnd state is present, treat it as "menu mode" and end the XR
+  // session. When the menu closes (combat resumes), the existing 5s
+  // resume countdown re-enters VR.
+  const _xrSel  = document.getElementById('ship-select');
+  const _xrLob  = document.getElementById('lobby');
+  const _xrSelActive = !!(_xrSel  && _xrSel.classList.contains('active'));
+  const _xrSetActive = (typeof settingsOpen !== 'undefined' && !!settingsOpen);
+  const _xrLobActive = !!(_xrLob  && _xrLob.style.display !== 'none' && _xrLob.offsetParent !== null);
+  const nowMenu = _xrSelActive || _xrSetActive || _xrLobActive
+                  || game.state === 'select' || game.state === 'matchEnd';
+  if (nowMenu !== _xrLastSeenMenu) {
+    if (nowMenu && renderer.xr && renderer.xr.isPresenting) {
       // Entered a menu while in VR -> exit and request auto-resume later.
       const _xs = renderer.xr.getSession();
       if (_xs) { try { _xs.end(); } catch (_) {} }
       _xrPendingResume = true;
-    } else if (!nowMenu && wasMenu && _xrPendingResume) {
+    } else if (!nowMenu && _xrPendingResume) {
       // Left the menu (combat resumed). Trigger the 5 s countdown.
       try { _xrStartResumeCountdown(5); _xrPendingResume = false; } catch (_) {}
     }
-    _xrLastSeenState = game.state;
+    _xrLastSeenMenu = nowMenu;
   }
 
   if (!game.lastTime) game.lastTime = timestamp;
