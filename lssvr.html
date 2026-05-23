@@ -38015,16 +38015,25 @@ function previewLoadout(key) {
       commitLoadout(key);
     });
   }
-  // (v18VR 2026-05-22 round 12) Companion "CONFIRM & LAUNCH IN VR" button.
-  // Visible only when the floating #vr-enter-btn reports VR is available
-  // (its disabled state is set by the WebXR support probe at boot, and
-  // its label text is 'ENTER VR' when supported / 'VR NOT AVAILABLE' /
-  // 'WEBXR UNSUPPORTED' / 'VR BLOCKED' otherwise). Click flow : commit
-  // the loadout (kicks off the 10s launch countdown) then trigger the
-  // existing VR-button handler via .click(). The synthesized click is
-  // synchronous inside this user-activated click handler, so transient
-  // user activation propagates and navigator.xr.requestSession is
-  // allowed by the browser.
+  // (v18VR round 12 → v20VR 2026-05-22) "CONFIRM & LAUNCH IN VR".
+  // Visible only when the floating #vr-enter-btn reports VR is available.
+  // ORDER MATTERS HERE :
+  //   1. Fire vr-enter-btn.click() FIRST so navigator.xr.requestSession is
+  //      called with fresh transient user-activation. requestSession is
+  //      a native async — it kicks off the XR runtime in parallel while
+  //      JS continues.
+  //   2. Defer commitLoadout to the next macrotask. commitLoadout runs
+  //      synchronously and BLOCKS the main thread for ~3 s on a cold
+  //      start (full world build : buildRoomGraphLevel + spawnDynamic
+  //      Objects + spawnOrganics + spawnBots + shader warmup pre-pass).
+  //      If we ran commitLoadout in the same tick as the click, the
+  //      block would happen BEFORE requestSession even gets to the
+  //      runtime, and a Quest player reported the headset showing a
+  //      stuck/looping frame (no new frames submitted during the 3 s
+  //      block ; the cinematic never visibly started ; only when they
+  //      exited VR did they see the cinematic was about to fire).
+  //      Yielding to the event loop with setTimeout(..., 0) lets the
+  //      browser dispatch the XR session-start handshake first.
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
     const floatingVR = document.getElementById('vr-enter-btn');
@@ -38036,13 +38045,22 @@ function previewLoadout(key) {
       vrBtn.parentNode.replaceChild(newVR, vrBtn);
       newVR.addEventListener('click', () => {
         if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen();
-        commitLoadout(key);
-        // Trigger the existing VR button handler. Synchronous click event
-        // preserves the user-activation context so requestSession works.
+        // (1) Start XR session FIRST, with the user-activation still alive.
         try {
           const fv = document.getElementById('vr-enter-btn');
           if (fv && !fv.disabled) fv.click();
         } catch (e) { console.warn('[vr-launch] vr-enter-btn.click failed', e); }
+        // (2) Defer commitLoadout so the requestSession promise can be
+        // dispatched and the XR runtime can start initializing while
+        // the main thread is still free. The 50ms slack is enough for
+        // the browser to hand off to the XR runtime ; commitLoadout
+        // then runs (still synchronous, still blocks ~3 s), but the
+        // headset compositor is already engaged and will keep showing
+        // a valid frame instead of a stuck one.
+        setTimeout(() => {
+          try { commitLoadout(key); }
+          catch (e) { console.warn('[vr-launch] commitLoadout failed', e); }
+        }, 50);
       });
     } else {
       vrBtn.style.display = 'none';
