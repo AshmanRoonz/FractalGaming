@@ -29767,7 +29767,7 @@ function _setPlayerShipOpacity(opacity) {
 const _cinematic = {
   active: false,
   startMs: 0,
-  duration: 10.0,     // seconds
+  duration: 6.0,      // seconds (was 10 ; shorter to reduce wait)
   camPos:    new THREE.Vector3(),
   camTarget: new THREE.Vector3(),
   baseY:     0,
@@ -29872,65 +29872,75 @@ function _lssStartSpectatorCinematic() {
   // Roster counts. Declared BEFORE the geometry block so the
   // stack-sizing math below can read them (strict-mode TDZ otherwise).
   const NA = aShips.length, NB = bShips.length;
-  // (v20 tune 4) Two-column face-off formation. Team A is a vertical
-  // stack on the LEFT, team B is a vertical stack on the RIGHT, both
-  // facing each other across the cx axis. Reads as a wide cinematic
-  // shot of two fighter wings squaring up, with the map visible
-  // between/below the columns and the skybox behind. Replaces the
-  // V-formation, which had the back ships stacking on top of each
-  // other at the apex on wide aspect ratios.
+  // (v20 tune 5) Diving-wedge formation, ported from the user's
+  // custom (10).json layout in map_lab. Both teams ascend diagonally
+  // toward the map center : front ship at (large +X offset, low Y,
+  // large |Z| offset) and back ship at (near-origin X, high Y,
+  // small |Z| offset). Team A on the +Z side, team B mirrored at -Z.
+  // The wedge has the cinematic feel of two squadrons banking in
+  // from outside the map and converging on the center.
   //
-  // Geometry knobs :
-  //   STACK_SPACING    : vertical gap between ships in a column (~130
-  //                      makes hulls almost touch since hull is ~100).
-  //   COLUMN_HALF_W    : horizontal half-distance from center to each
-  //                      column. Camera standoff is paired with this
-  //                      so the columns always sit ~40 deg off-center.
-  //   cameraBack       : camera offset behind the formation along -Z.
-  //   camLift          : camera Y above lineupY for a hair of downward
-  //                      tilt (also pulls the map into frame below).
-  const STACK_SPACING  = 130;
-  const COLUMN_HALF_W  = 230;
-  const cameraBack     = 280;
-  const camLift        = 130;
-  const lineupY        = yMax + 700;
-  // Helper : Nth slot in a vertical stack of N ships, indexed from
-  // bottom (i=0) to top (i=N-1). Center of stack sits at y=lineupY.
-  // For N=1 the single ship sits at center.
-  function _stackY(i, n) {
-    if (n <= 1) return lineupY;
-    return lineupY + (i - (n - 1) * 0.5) * STACK_SPACING;
+  // Player goes to i=0 = the FRONT slot on their team, which sits
+  // closest to the camera and largest in frame.
+  //
+  // Wedge keyframes are interpolated for any roster size (1..MAX).
+  // From custom (12).json with Z values widened : back ships at z=70
+  // were crowding at the apex (visually almost touching across the
+  // centerline). Pull both Z endpoints out so the two team lines stay
+  // more parallel and the formation reads as two distinct flights.
+  // Front:back ratio stays ~5:3 (still a wedge, just less convergent).
+  const WEDGE_FRONT_X = 740, WEDGE_FRONT_Y = 600, WEDGE_FRONT_Z = 250;
+  const WEDGE_BACK_X  = 600, WEDGE_BACK_Y  = 800, WEDGE_BACK_Z  = 150;
+  function _wedgeSlot(i, n, teamSignZ) {
+    const t = (n <= 1) ? 0.5 : i / (n - 1);
+    const wx = WEDGE_FRONT_X + (WEDGE_BACK_X - WEDGE_FRONT_X) * t;
+    const wy = WEDGE_FRONT_Y + (WEDGE_BACK_Y - WEDGE_FRONT_Y) * t;
+    const wz = WEDGE_FRONT_Z + (WEDGE_BACK_Z - WEDGE_FRONT_Z) * t;
+    return {
+      x: cx + wx,
+      // Y is anchored to mapTop : front ship sits at mapTop, back ship
+      // sits at mapTop + (WEDGE_BACK_Y - WEDGE_FRONT_Y) = mapTop + 500.
+      y: yMax + (wy - WEDGE_FRONT_Y),
+      z: cz + wz * teamSignZ,
+    };
   }
-  // Build the ship-state array : original pose for restore, target
-  // pose for the cinematic, and a pre-computed quaternion. Each ship
-  // faces purely horizontally toward the OPPOSITE column (team A
-  // ships face +X, team B ships face -X). Vertical offset between
-  // matched-index slots isn't translated into the facing direction
-  // so the ships read as a clean broadside, not "looking up/down at
-  // each other."
+  // Facing : team A (+Z side) faces world -Z (toward team B). The ship
+  // model's nose ends up at mesh's -Z (after the baked-in faceRotY),
+  // so identity quaternion on team A points the nose at world -Z.
+  // Team B (-Z side) needs a 180 deg Y-axis rotation so nose points
+  // at world +Z (toward team A).
   _cinematic.ships = [];
-  const _qFaceRight = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 0, -1), new THREE.Vector3(1, 0, 0));
-  const _qFaceLeft = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0));
+  const _qFaceMinusZ = new THREE.Quaternion(); // identity ; mesh -Z = world -Z
+  const _qFacePlusZ  = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 1, 0), Math.PI);
   function _pushShip(rec, slotX, slotY, slotZ, quat) {
+    // Snapshot spawn-protection / damage shield child so we can hide
+    // it during the cinematic and restore on end. The warmup state
+    // freezes bot.update so the spawnProtection countdown never
+    // ticks ; without this hide, the shield bubble persists for the
+    // full 10s on every freshly-spawned bot.
+    const _shield = rec.mesh && rec.mesh.userData && rec.mesh.userData.shieldMesh;
     _cinematic.ships.push({
       mesh: rec.mesh,
       isPlayer: rec.isPlayer,
       origPos: rec.mesh.position.clone(),
       origQuat: rec.mesh.quaternion.clone(),
       origVisible: rec.mesh.visible,
+      shield: _shield || null,
+      origShieldVisible: _shield ? _shield.visible : null,
       pos: { x: slotX, y: slotY, z: slotZ },
       quat: quat,
     });
   }
-  // Team A : left column, ships face +X (toward team B).
+  // Team A : +Z side, faces -Z.
   for (let i = 0; i < NA; i++) {
-    _pushShip(aShips[i], cx - COLUMN_HALF_W, _stackY(i, NA), cz, _qFaceRight);
+    const slot = _wedgeSlot(i, NA, +1);
+    _pushShip(aShips[i], slot.x, slot.y, slot.z, _qFaceMinusZ);
   }
-  // Team B : right column, ships face -X (toward team A).
+  // Team B : -Z side, faces +Z.
   for (let i = 0; i < NB; i++) {
-    _pushShip(bShips[i], cx + COLUMN_HALF_W, _stackY(i, NB), cz, _qFaceLeft);
+    const slot = _wedgeSlot(i, NB, -1);
+    _pushShip(bShips[i], slot.x, slot.y, slot.z, _qFacePlusZ);
   }
   // Apply initial pose immediately so the very first frame after the
   // cinematic starts already shows the formation (no one-frame pop
@@ -29940,17 +29950,24 @@ function _lssStartSpectatorCinematic() {
     s.mesh.visible = true;
     s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
     s.mesh.quaternion.copy(s.quat);
+    // Spawn-protection shield bubble : hide for the duration. Set
+    // .visible = false on the shield mesh (a child of the ship group).
+    if (s.shield) s.shield.visible = false;
   }
-  // Camera : behind the formation along -Z, well above ship level so
-  // it tilts DOWN onto the lineup. lookAt sits at ship-center height
-  // (lineupY), so ships are symmetric around frame vertical center
-  // and the map fills the lower portion of the frame as the camera
-  // pitches down toward it. Tilt angle = atan(camLift / cameraBack)
-  // ~= atan(130/280) ~= 25 degrees down. Ships at the top/bottom of
-  // the stack (~ +/-130 from lineupY) sit at ~25 degrees from frame
-  // center, comfortably inside the 60 deg half-FOV.
-  _cinematic.camPos.set(cx, lineupY + camLift, cz - cameraBack);
-  _cinematic.camTarget.set(cx, lineupY, cz);
+  // Camera : behind the wedge at large +X (past the front ships at
+  // WEDGE_FRONT_X=1234), low altitude (slightly above mapTop = floor),
+  // centered on Z=0 between the two teams. Looks up-and-forward at
+  // the vanishing point in the middle of the formation. The slight
+  // upward tilt gives the cinematic ground-up-perspective feel from
+  // the JSON map_lab screenshot ; the ships occupy the upper half of
+  // the frame and the map fills the lower half as the camera arcs
+  // up over the map plane.
+  const camBehind  = 300;   // closer to front ship (was 400)
+  const camLowOff  = 120;   // raised camera (was 50) - downward angle
+  const lookFwdOff = -50;   // lookAt X offset relative to wedge back
+  const lookUpOff  = 80;    // lowered lookAt (was 200) - ~5 deg down tilt
+  _cinematic.camPos.set(cx + WEDGE_FRONT_X + camBehind, yMax + camLowOff, cz);
+  _cinematic.camTarget.set(cx + WEDGE_BACK_X + lookFwdOff, yMax + lookUpOff, cz);
   _cinematic.baseY  = _cinematic.camPos.y;
   _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   _cinematic.active = true;
@@ -29972,8 +29989,8 @@ function _lssStartSpectatorCinematic() {
   } catch (_) {}
   try { if (typeof hideShipSelectWaiting === 'function') hideShipSelectWaiting(); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
-  console.log('[cinematic] stacks formation : team A=' + NA + ', team B=' + NB +
-    ' ; lineupY=' + lineupY.toFixed(0) + ' ; mapCenter=(' + cx.toFixed(0) + ',' + cz.toFixed(0) + ')');
+  console.log('[cinematic] wedge formation : team A=' + NA + ', team B=' + NB +
+    ' ; mapTop=' + yMax.toFixed(0) + ' ; mapCenter=(' + cx.toFixed(0) + ',' + cz.toFixed(0) + ')');
   return true;
 }
 
@@ -29986,11 +30003,28 @@ function _lssEndSpectatorCinematic() {
         s.mesh.position.copy(s.origPos);
         s.mesh.quaternion.copy(s.origQuat);
         s.mesh.visible = s.origVisible;
+        // Restore spawn-protection shield mesh visibility.
+        if (s.shield && s.origShieldVisible !== null) s.shield.visible = s.origShieldVisible;
       } catch (_) {}
     }
     _cinematic.ships = null;
   }
   try { document.body.classList.remove('lss-cinematic-active'); } catch (_) {}
+  // (v20+ fix) Snap camera and quaternion back to the player on the
+  // very frame the cinematic ends. Without this, the camera's last
+  // spectator-position write persists until the next gameLoop tick
+  // hits updatePlayerMovement's warmup/playing branches ; under any
+  // hitch (shader compile, GC pause, GLB load) that gap can stretch
+  // to multiple seconds and the player watches the battle from the
+  // V-formation point.
+  try {
+    if (typeof player !== 'undefined' && player && player.position && typeof camera !== 'undefined' && camera) {
+      camera.position.copy(player.position);
+      if (player.euler && camera.quaternion) {
+        camera.quaternion.setFromEuler(player.euler);
+      }
+    }
+  } catch (_) {}
   console.log('[cinematic] V-formation end ; ships restored to spawn positions.');
 }
 
@@ -30048,7 +30082,11 @@ function _lssRunCinematicThen(andThen) {
     started = false;
   }
   if (started) {
-    setTimeout(() => { try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); } }, 10000);
+    // 3-2-1 fires AFTER the cinematic ends. Defer by the cinematic's
+    // own duration so the countdown sits between cinematic and round
+    // start (not overlapping).
+    const delayMs = (_cinematic.duration || 10) * 1000;
+    setTimeout(() => { try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); } }, delayMs);
   } else {
     try { andThen(); } catch (e) { console.warn('[cinematic] immediate andThen failed:', e && e.message); }
   }
@@ -30071,7 +30109,12 @@ function updatePlayerMovement(dt) {
     }
     if (player && player.velocity) player.velocity.set(0, 0, 0);
     input.mouseDX = 0; input.mouseDY = 0;
-    return;
+    // (v20+ fix) Only early-return if the cinematic is STILL active.
+    // If _lssUpdateSpectatorCinematic just ended it (active flipped
+    // to false), fall through to the warmup/playing branch below so
+    // the camera snaps to player.position on the same frame instead
+    // of holding at the stale spectator pose for a frame or more.
+    if (_cinematic.active) return;
   }
   // Immobilized during stasis field recharge OR during pre-round warmup
   // (ships locked in place until the 3-2-1-FIGHT countdown finishes).
