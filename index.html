@@ -5838,8 +5838,11 @@ function checkAllLoadoutsReady() {
   if (net.peers.size === 0) {
     if (_localWarmupReady) {
       try { hideLoadingOverlay(); } catch (_) {}
-      _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
-      launchCountdown(LSS.SHORT_COUNTDOWN);
+      // (v20+) Cinematic before the 3-2-1. Solo / no-peers fallback path.
+      _lssRunCinematicThen(() => {
+        _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
+        launchCountdown(LSS.SHORT_COUNTDOWN);
+      });
     }
     return;
   }
@@ -5952,8 +5955,15 @@ function scheduleLaunch(launchAt) {
     // warmup -> playing gate fires at the same wall-clock moment as the
     // visible LAUNCH tick, then run the short countdown.
     try { hideLoadingOverlay(); } catch (_) {}
-    try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-    launchCountdown(LSS.SHORT_COUNTDOWN);
+    // (v20+) Spectator cinematic before the 3-2-1. Multiplayer path.
+    // All peers run this setTimeout body at the same broadcast launchAt
+    // instant, so the cinematic start + the deferred 3-2-1 fire
+    // synchronously across the mesh. Race mode + edge cases fall
+    // through to the immediate 3-2-1 inside _lssRunCinematicThen.
+    _lssRunCinematicThen(() => {
+      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    });
   }, delay);
 }
 
@@ -29012,8 +29022,11 @@ function commitLoadout(key) {
       // value).
       try { hideLoadingOverlay(); } catch (_) {}
       if (!_countdownActive) {
-        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-        launchCountdown(LSS.SHORT_COUNTDOWN);
+        // (v20+) Cinematic before the 3-2-1. Solo warmup-success path.
+        _lssRunCinematicThen(() => {
+          try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+          launchCountdown(LSS.SHORT_COUNTDOWN);
+        });
       }
     }
   }).catch((e) => {
@@ -29027,8 +29040,11 @@ function commitLoadout(key) {
       try { showShipSelectWaiting(); } catch (_) {}
       checkAllLoadoutsReady();
     } else if (!_countdownActive) {
-      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-      launchCountdown(LSS.SHORT_COUNTDOWN);
+      // (v20+) Cinematic before the 3-2-1. Solo warmup-failed fallback.
+      _lssRunCinematicThen(() => {
+        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+        launchCountdown(LSS.SHORT_COUNTDOWN);
+      });
     }
   });
 }
@@ -29658,8 +29674,334 @@ function _setPlayerShipOpacity(opacity) {
   _setShipMeshOpacity(player && (player.mesh || player.shipMesh), opacity);
 }
 
+// (v20+) Pre-round V-formation cinematic. At round start, all alive
+// ships are teleported into a V-formation hovering above the map :
+// team A on the left arm, team B on the right arm, with the player
+// at the front-left (closest, left edge of frame). The V's point
+// faces away from the camera. The camera sits just above ship-level
+// behind the V's open end, looking down the centerline toward the
+// point ; the map sits below the formation at the user's wallOpacity
+// (no flicker), skybox behind. After 10 seconds, ship meshes snap
+// back to their original positions/orientations and the player drops
+// into their cockpit for the existing 3-2-1.
+//
+// Multiplayer sync : the cinematic anchors to the broadcast launchAt
+// inside scheduleLaunch's setTimeout, so every peer enters the
+// cinematic at the same wall-clock instant. V geometry is derived
+// from game.sdfRoomData + the team rosters, both deterministic across
+// peers, so every peer renders the same formation. Ship mesh
+// positions are written per-frame ; underlying bot/np/player position
+// state is never mutated, so peer-broadcast positions still reflect
+// each ship's spawn location and no resync is needed when the
+// cinematic ends.
+//
+// Failure modes (race mode, missing rooms, no ships on a team)
+// silently return false ; caller falls through to the immediate 3-2-1.
+const _cinematic = {
+  active: false,
+  startMs: 0,
+  duration: 10.0,     // seconds
+  camPos:    new THREE.Vector3(),
+  camTarget: new THREE.Vector3(),
+  baseY:     0,
+  ships: null,        // [{ mesh, isPlayer, origPos, origQuat, origVisible, pos, look }, ...]
+};
+
+// Inject HUD-hiding CSS exactly once. Element IDs come from the
+// gameplay overlay roots in <body> (line 2006-2083). The class
+// `lss-cinematic-active` is toggled on <body> during the cinematic ;
+// CSS does the rest. Using a single class on body means we don't
+// have to find + null-check every overlay element each tick.
+function _lssEnsureCinematicStyles() {
+  if (document.getElementById('lss-cinematic-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'lss-cinematic-styles';
+  style.textContent =
+    'body.lss-cinematic-active #crosshair,' +
+    'body.lss-cinematic-active #circumpunct-hud,' +
+    'body.lss-cinematic-active #gun-layer,' +
+    'body.lss-cinematic-active #ability-overlay-frame,' +
+    'body.lss-cinematic-active #cockpit-frame,' +
+    'body.lss-cinematic-active #hud,' +
+    'body.lss-cinematic-active #reload-indicator,' +
+    'body.lss-cinematic-active #round-info,' +
+    'body.lss-cinematic-active #kill-feed,' +
+    'body.lss-cinematic-active #minimap,' +
+    'body.lss-cinematic-active #doomed-warning,' +
+    'body.lss-cinematic-active #ship-select-countdown,' +
+    'body.lss-cinematic-active .ship-name-label,' +
+    'body.lss-cinematic-active #hbar-pool,' +
+    'body.lss-cinematic-active #ability-overlay-frame *,' +
+    'body.lss-cinematic-active #hud * { display: none !important; }';
+  document.head.appendChild(style);
+}
+
+function _lssStartSpectatorCinematic() {
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
+  if (typeof game === 'undefined' || !game) return false;
+  if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return false;
+  // Gather alive ships partitioned by team. The player goes in their
+  // team's list and is sorted to the FRONT so we land them at the
+  // front-left slot (closest to camera on team A's arm).
+  //
+  // IMPORTANT : ship team membership uses the LSS.TEAM_FLEET_A / _B
+  // *numeric* constants (2 and 3), NOT the strings 'A' and 'B' that
+  // room records use. Earlier comparing against 'A'/'B' on ships
+  // produced empty rosters every time and the cinematic silently
+  // fell through to the immediate 3-2-1. Resolving the constants
+  // through LSS keeps this in lock-step if those values are ever
+  // renumbered.
+  const TA = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_A !== 'undefined') ? LSS.TEAM_FLEET_A : 2;
+  const TB = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_B !== 'undefined') ? LSS.TEAM_FLEET_B : 3;
+  const aShips = [];
+  const bShips = [];
+  if (player && player.mesh && player.team === TA) {
+    aShips.push({ ent: player, mesh: player.mesh, isPlayer: true });
+  } else if (player && player.mesh && player.team === TB) {
+    bShips.push({ ent: player, mesh: player.mesh, isPlayer: true });
+  }
+  if (Array.isArray(game.entities)) {
+    for (let i = 0; i < game.entities.length; i++) {
+      const e = game.entities[i];
+      if (!e || !e.alive || !e.mesh) continue;
+      if (e.team === TA)      aShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
+      else if (e.team === TB) bShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
+    }
+  }
+  if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
+    for (let i = 0; i < net.networkPlayers.length; i++) {
+      const np = net.networkPlayers[i];
+      if (!np || !np.alive || !np.mesh) continue;
+      if (np.team === TA)      aShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
+      else if (np.team === TB) bShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
+    }
+  }
+  if (aShips.length === 0 || bShips.length === 0) {
+    console.warn('[cinematic] bail : empty roster. teamA=' + aShips.length +
+      ' teamB=' + bShips.length + ' (TA=' + TA + ' TB=' + TB +
+      ' player.team=' + (player && player.team) + ')');
+    return false;
+  }
+  // Force the player to the front of team A's list (front-left slot).
+  // If the player is on team B, mirror to front of team B (front-right).
+  const _moveFront = (list) => {
+    const i = list.findIndex(s => s.isPlayer);
+    if (i > 0) { const s = list.splice(i, 1)[0]; list.unshift(s); }
+  };
+  _moveFront(aShips);
+  _moveFront(bShips);
+  // Map XZ center + top Y from sdfRoomData. The lineup hovers above
+  // the highest room so the map sits below the formation in frame.
+  let cxAcc = 0, czAcc = 0, yMax = -Infinity;
+  for (let i = 0; i < game.sdfRoomData.length; i++) {
+    const r = game.sdfRoomData[i];
+    cxAcc += r.x; czAcc += r.z;
+    const top = r.y + (r.r || 250);
+    if (top > yMax) yMax = top;
+  }
+  const cx = cxAcc / game.sdfRoomData.length;
+  const cz = czAcc / game.sdfRoomData.length;
+  if (!isFinite(yMax)) yMax = 500;
+  // Roster counts. Declared BEFORE the geometry block so the
+  // stack-sizing math below can read them (strict-mode TDZ otherwise).
+  const NA = aShips.length, NB = bShips.length;
+  // (v20 tune 4) Two-column face-off formation. Team A is a vertical
+  // stack on the LEFT, team B is a vertical stack on the RIGHT, both
+  // facing each other across the cx axis. Reads as a wide cinematic
+  // shot of two fighter wings squaring up, with the map visible
+  // between/below the columns and the skybox behind. Replaces the
+  // V-formation, which had the back ships stacking on top of each
+  // other at the apex on wide aspect ratios.
+  //
+  // Geometry knobs :
+  //   STACK_SPACING    : vertical gap between ships in a column (~130
+  //                      makes hulls almost touch since hull is ~100).
+  //   COLUMN_HALF_W    : horizontal half-distance from center to each
+  //                      column. Camera standoff is paired with this
+  //                      so the columns always sit ~40 deg off-center.
+  //   cameraBack       : camera offset behind the formation along -Z.
+  //   camLift          : camera Y above lineupY for a hair of downward
+  //                      tilt (also pulls the map into frame below).
+  const STACK_SPACING  = 130;
+  const COLUMN_HALF_W  = 230;
+  const cameraBack     = 280;
+  const camLift        = 60;
+  const lineupY        = yMax + 700;
+  // Helper : Nth slot in a vertical stack of N ships, indexed from
+  // bottom (i=0) to top (i=N-1). Center of stack sits at y=lineupY.
+  // For N=1 the single ship sits at center.
+  function _stackY(i, n) {
+    if (n <= 1) return lineupY;
+    return lineupY + (i - (n - 1) * 0.5) * STACK_SPACING;
+  }
+  // Build the ship-state array : original pose for restore, target
+  // pose for the cinematic, and a pre-computed quaternion. Each ship
+  // faces purely horizontally toward the OPPOSITE column (team A
+  // ships face +X, team B ships face -X). Vertical offset between
+  // matched-index slots isn't translated into the facing direction
+  // so the ships read as a clean broadside, not "looking up/down at
+  // each other."
+  _cinematic.ships = [];
+  const _qFaceRight = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 0, -1), new THREE.Vector3(1, 0, 0));
+  const _qFaceLeft = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 0, -1), new THREE.Vector3(-1, 0, 0));
+  function _pushShip(rec, slotX, slotY, slotZ, quat) {
+    _cinematic.ships.push({
+      mesh: rec.mesh,
+      isPlayer: rec.isPlayer,
+      origPos: rec.mesh.position.clone(),
+      origQuat: rec.mesh.quaternion.clone(),
+      origVisible: rec.mesh.visible,
+      pos: { x: slotX, y: slotY, z: slotZ },
+      quat: quat,
+    });
+  }
+  // Team A : left column, ships face +X (toward team B).
+  for (let i = 0; i < NA; i++) {
+    _pushShip(aShips[i], cx - COLUMN_HALF_W, _stackY(i, NA), cz, _qFaceRight);
+  }
+  // Team B : right column, ships face -X (toward team A).
+  for (let i = 0; i < NB; i++) {
+    _pushShip(bShips[i], cx + COLUMN_HALF_W, _stackY(i, NB), cz, _qFaceLeft);
+  }
+  // Apply initial pose immediately so the very first frame after the
+  // cinematic starts already shows the formation (no one-frame pop
+  // through the player's first-person view).
+  for (let i = 0; i < _cinematic.ships.length; i++) {
+    const s = _cinematic.ships[i];
+    s.mesh.visible = true;
+    s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
+    s.mesh.quaternion.copy(s.quat);
+  }
+  // Camera : behind the formation along -Z, slightly above ship
+  // level, looking horizontally at the midpoint between the two
+  // columns. camLift gives a hair of downward tilt so the map sits
+  // visible below the formation in frame.
+  _cinematic.camPos.set(cx, lineupY + camLift, cz - cameraBack);
+  _cinematic.camTarget.set(cx, lineupY, cz);
+  _cinematic.baseY  = _cinematic.camPos.y;
+  _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  _cinematic.active = true;
+  // CSS-driven HUD hide. Class lives on <body> ; styles injected once.
+  try {
+    _lssEnsureCinematicStyles();
+    document.body.classList.add('lss-cinematic-active');
+  } catch (_) {}
+  // Belt-and-suspenders : also explicitly clear UI overlays that the
+  // CSS rules cover, in case any of them rely on inline styles that
+  // override CSS class rules.
+  try {
+    const sel = document.getElementById('ship-select');
+    if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
+  } catch (_) {}
+  try {
+    const ov = document.getElementById('ship-select-countdown');
+    if (ov) ov.classList.remove('active');
+  } catch (_) {}
+  try { if (typeof hideShipSelectWaiting === 'function') hideShipSelectWaiting(); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  console.log('[cinematic] stacks formation : team A=' + NA + ', team B=' + NB +
+    ' ; lineupY=' + lineupY.toFixed(0) + ' ; mapCenter=(' + cx.toFixed(0) + ',' + cz.toFixed(0) + ')');
+  return true;
+}
+
+function _lssEndSpectatorCinematic() {
+  _cinematic.active = false;
+  if (_cinematic.ships) {
+    for (let i = 0; i < _cinematic.ships.length; i++) {
+      const s = _cinematic.ships[i];
+      try {
+        s.mesh.position.copy(s.origPos);
+        s.mesh.quaternion.copy(s.origQuat);
+        s.mesh.visible = s.origVisible;
+      } catch (_) {}
+    }
+    _cinematic.ships = null;
+  }
+  try { document.body.classList.remove('lss-cinematic-active'); } catch (_) {}
+  console.log('[cinematic] V-formation end ; ships restored to spawn positions.');
+}
+
+function _lssUpdateSpectatorCinematic() {
+  if (!_cinematic.active) return false;
+  const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const elapsed = (nowMs - _cinematic.startMs) / 1000.0;
+  if (elapsed >= _cinematic.duration) {
+    _lssEndSpectatorCinematic();
+    return false;
+  }
+  // Re-apply ship poses every frame. Defensive : even though the
+  // warmup state freezes physics, NetworkPlayer.update interpolates
+  // mesh.position from peer broadcasts every frame regardless of
+  // game state, so we re-anchor each tick to keep the formation
+  // locked. Position + quaternion are pre-computed on cinematic
+  // start ; no per-tick math is needed beyond the writes themselves.
+  if (_cinematic.ships) {
+    for (let i = 0; i < _cinematic.ships.length; i++) {
+      const s = _cinematic.ships[i];
+      s.mesh.visible = true;
+      s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
+      s.mesh.quaternion.copy(s.quat);
+    }
+  }
+  // Camera : subtle horizontal sway (~ ±80 units) so the framing
+  // isn't dead-static, but small enough that the V composition holds.
+  // Pure function of elapsed -> identical across peers.
+  const sway = Math.sin(elapsed * 0.6) * 80.0;
+  camera.position.set(
+    _cinematic.camPos.x + sway,
+    _cinematic.baseY,
+    _cinematic.camPos.z
+  );
+  camera.lookAt(_cinematic.camTarget);
+  return true;
+}
+
+// (v20+) Run the spectator cinematic and then hand off to the 3-2-1
+// SHORT_COUNTDOWN. Used by all four match-start entry points (solo,
+// solo fallback from no-peers, solo from warmup-failed, and the
+// multiplayer scheduleLaunch path) so behavior is uniform across modes.
+// `andThen` is the callback that triggers the 3-2-1 (different in
+// each caller : some anchor the warmup timer first, others don't,
+// some are gated on _countdownActive). If the cinematic can't start
+// (race mode, missing rooms, etc.), andThen fires immediately.
+function _lssRunCinematicThen(andThen) {
+  let started = false;
+  try {
+    if (typeof _lssStartSpectatorCinematic === 'function') {
+      started = !!_lssStartSpectatorCinematic();
+    }
+  } catch (e) {
+    console.warn('[cinematic] start failed:', e && e.message);
+    started = false;
+  }
+  if (started) {
+    setTimeout(() => { try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); } }, 10000);
+  } else {
+    try { andThen(); } catch (e) { console.warn('[cinematic] immediate andThen failed:', e && e.message); }
+  }
+}
+
 function updatePlayerMovement(dt) {
   if (player.shipState === 'dead' || !player.chassis) return;
+  // (v20+) Spectator cinematic gate. When the pre-round cinematic is
+  // active the camera is on rails at the isosceles spectator apex ;
+  // skip all player-driven movement and let _lssUpdateSpectatorCinematic
+  // own camera.position + camera.quaternion this frame. Velocity zeroed
+  // defensively so a player who mashes keys during the cinematic
+  // doesn't accumulate drift that snaps in when the camera reattaches.
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
+    if (typeof _lssUpdateSpectatorCinematic === 'function') {
+      try { _lssUpdateSpectatorCinematic(); } catch (e) {
+        console.warn('[cinematic] tick failed:', e && e.message);
+        _cinematic.active = false; // bail gracefully on error
+      }
+    }
+    if (player && player.velocity) player.velocity.set(0, 0, 0);
+    input.mouseDX = 0; input.mouseDY = 0;
+    return;
+  }
   // Immobilized during stasis field recharge OR during pre-round warmup
   // (ships locked in place until the 3-2-1-FIGHT countdown finishes).
   if (game.playerInStasis || game.state === 'warmup') {
@@ -49456,6 +49798,16 @@ function updateEnemyHealthBars() {
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
     if (labelIdx >= _labels.length) return;
+    // (v20+) Hide all ship name callouts during the pre-round spectator
+    // cinematic. The friendly/enemy tags read as a HUD overlay over a
+    // cinematic shot, which breaks the "you're watching the arena
+    // reveal itself" feel. Resetting _labelSpotTime here also lets
+    // the digitize-in animation re-run cleanly when the cinematic
+    // ends and labels start appearing again.
+    if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
+      ent._labelSpotTime = null;
+      return;
+    }
     // (cloak 2026-05) Hide the HUD callout (target bracket + name) on
     // cloaked NetworkPlayers. ent._cloaked is set inside NetworkPlayer.update
     // from the broadcast cloak flag ; bots don't have the field so this
