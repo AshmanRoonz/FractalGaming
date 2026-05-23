@@ -11519,11 +11519,18 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (typeof _xrCancelResumeCountdown === 'function') _xrCancelResumeCountdown();
   // Re-parent camera under dolly so head pose composes with ship pose.
   if (camera.parent !== xrDolly) xrDolly.add(camera);
-  // Make both HUD planes visible (created lazily on first use).
+  // Make HUD plane visible (created lazily on first use).
   const hud = _xrEnsureHudMesh();
   if (hud) hud.visible = true;
+  // (v20VR 2026-05-22) Aux HUD plane (the floating FLEET A / FLEET B
+  // score + round timer + WARMUP-state readout) hidden in VR per user
+  // request. The info is duplicated on the main circumpunct HUD anyway
+  // (round-timer / round-state DOM elements get mirrored implicitly via
+  // the canvas pass) so the dedicated lower-FOV plane was redundant.
+  // We still _ensure_ the mesh so the per-frame draw paths don't NPE,
+  // but force-hide it.
   const aux = _xrEnsureAuxMesh();
-  if (aux) aux.visible = true;
+  if (aux) aux.visible = false;
   // Capture the cameraVR ArrayCamera. WebXRManager.onAnimationFrame writes
   // the headset pose into cameraVR.matrix every frame; we read it for the
   // head-aim nudge.
@@ -12332,7 +12339,13 @@ function _vrEnsureShipNameLabel(bot) {
   const mat = new THREE.SpriteMaterial({
     map: tex,
     transparent: true,
-    depthTest: false,
+    // (v20VR 2026-05-22) depthTest re-enabled so the ship-name callout
+    // gets occluded when the ship is behind a wall. Was `false` for the
+    // legacy "always-on-top" behavior ; the user reported name tags
+    // bleeding through walls in VR, which gives away enemy positions
+    // through level geometry. Sprite anchor depth determines per-fragment
+    // visibility ; if you can't see the ship, you can't see its label.
+    depthTest: true,
     depthWrite: false,
     sizeAttenuation: true,
     toneMapped: false,
@@ -12343,7 +12356,10 @@ function _vrEnsureShipNameLabel(bot) {
   // callout reads as the dominant identifier above the ship.
   sprite.scale.set(hullR * 2.4, hullR * 0.6, 1);
   sprite.position.set(0, hullR * 1.9, 0);
-  sprite.renderOrder = 1001;
+  // (v20VR 2026-05-22) renderOrder dropped to default 0 now that depth
+  // test is on ; the 1001 was a "draw on top of everything" hint that's
+  // no longer needed and would actually fight the depth test by drawing
+  // late in the pass.
   sprite.frustumCulled = false;
   sprite.visible = false;
   // Thin line from hull origin up to the sprite anchor. Stored as a Line2
@@ -12357,12 +12373,14 @@ function _vrEnsureShipNameLabel(bot) {
     color: 0xffffff,
     transparent: true,
     opacity: 0.85,
-    depthTest: false,
+    // (v20VR 2026-05-22) Same as the sprite : depth-test the leader line
+    // so it doesn't punch through walls. Without this, the line was
+    // showing even when the ship was occluded.
+    depthTest: true,
     depthWrite: false,
     toneMapped: false,
   });
   const line = new THREE.Line(lineGeo, lineMat);
-  line.renderOrder = 1000;
   line.frustumCulled = false;
   line.visible = false;
   bot.mesh.add(line);
@@ -14303,7 +14321,10 @@ function renderFrame() {
           _xrHudUploadCounter = 0;
         }
       }
-      if (xrAuxMesh && _xrAuxTex) {
+      // (v20VR 2026-05-22) Skip the aux-HUD redraw entirely while the
+      // mesh is hidden. Was burning ~5 ms of Canvas2D fillText per beat
+      // on a plane the user never sees ; pure waste.
+      if (xrAuxMesh && _xrAuxTex && xrAuxMesh.visible) {
         _xrAuxUploadCounter++;
         if (_xrAuxUploadCounter >= _xrHudUpdateCadence()) {
           _xrDrawAuxHud();
