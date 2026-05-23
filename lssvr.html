@@ -484,8 +484,14 @@ body.vr-active .hit-marker {
   display: none !important;
 }
 
-/* "Enter VR" button. Anchored bottom-right; disabled state shows why VR is
-   unavailable (no XR device, insecure context, etc.). */
+/* (v18VR 2026-05-22 round 12) The floating "ENTER VR" button is now
+   permanently hidden from the game UI. Its WebXR setup logic
+   (setupVRButton IIFE) still runs and still maintains the button's
+   disabled-state + label text — those are read at ship-select preview
+   time to decide whether the "CONFIRM & LAUNCH IN VR" button should
+   appear. The button itself is also still clicked programmatically
+   from that path to invoke requestSession. To exit VR mid-match, use
+   the headset's system menu (Quest, etc. all expose one). */
 #vr-enter-btn {
   position: fixed; right: 18px; bottom: 60px; z-index: 30;
   padding: 10px 18px; font-family: 'Orbitron', sans-serif; font-weight: 700;
@@ -496,6 +502,7 @@ body.vr-active .hit-marker {
   text-transform: uppercase;
   box-shadow: 0 0 16px rgba(255,170,68,0.35);
   transition: background 0.15s, transform 0.15s, box-shadow 0.15s;
+  display: none !important;
 }
 #vr-enter-btn:hover:not(:disabled) {
   background: rgba(60,30,80,0.95);
@@ -892,6 +899,30 @@ body.vr-active .hit-marker {
   transform: translateY(-1px);
 }
 #ship-preview-confirm:disabled { opacity: 0.3; cursor: not-allowed; }
+/* (v18VR 2026-05-22 round 12) Sibling button : same shape as confirm,
+   amber-orange swapped for the VR amber-yellow so the two visually
+   read as paired primary actions. Sits to the right of the main
+   CONFIRM button when previewLoadout shows it. */
+#ship-preview-confirm-vr {
+  margin-top: 18px; margin-left: 14px; padding: 11px 32px;
+  background: rgba(255,200,80,0.14);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
+          backdrop-filter: blur(8px) saturate(140%);
+  border: 2px solid #ffc850; border-radius: 6px;
+  color: #ffe8a0;
+  font-family: 'Orbitron', sans-serif; font-weight: 700;
+  font-size: 12px; letter-spacing: 3.5px;
+  text-transform: uppercase;
+  cursor: pointer; transition: all 0.18s ease; pointer-events: all;
+  align-self: center;
+  box-shadow: 0 0 24px rgba(255,200,80,0.20), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+#ship-preview-confirm-vr:hover {
+  background: rgba(255,200,80,0.36); color: #fff;
+  box-shadow: 0 0 36px rgba(255,200,80,0.55);
+  transform: translateY(-1px);
+}
+#ship-preview-confirm-vr:disabled { opacity: 0.3; cursor: not-allowed; }
 /* (v16 perks) Perk picker row : sits between abilities/core and the
    confirm button. Five horizontal tiles, one selected at a time. */
 #ship-preview-perks {
@@ -2655,6 +2686,12 @@ body.vr-active .hit-marker {
             <div id="perks-desc"></div>
           </div>
           <button id="ship-preview-confirm" style="display:none;">CONFIRM &amp; LAUNCH</button>
+          <!-- (v18VR 2026-05-22 round 12) Combined commit + VR-enter button.
+               Hidden unless a ship is previewed AND WebXR is available. Picks
+               the ship, kicks off launchCountdown, AND requests the immersive
+               session in one click so the user doesn't have to click the
+               floating ENTER VR button separately after launch. -->
+          <button id="ship-preview-confirm-vr" style="display:none;">CONFIRM &amp; LAUNCH IN VR</button>
         </div>
       </div>
       <div id="teammates-strip">
@@ -37120,7 +37157,7 @@ function buildShipSelect() {
     for (const id of ['ship-preview-model', 'ship-preview-info',
                       'ship-preview-header', 'ship-preview-stats', 'ship-preview-weapon',
                       'ship-preview-abilities', 'ship-preview-core', 'ship-preview-perks',
-                      'ship-preview-confirm']) {
+                      'ship-preview-confirm', 'ship-preview-confirm-vr']) {
       const el = document.getElementById(id);
       if (el) el.style.display = 'none';
     }
@@ -37205,6 +37242,39 @@ function previewLoadout(key) {
       if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen();
       commitLoadout(key);
     });
+  }
+  // (v18VR 2026-05-22 round 12) Companion "CONFIRM & LAUNCH IN VR" button.
+  // Visible only when the floating #vr-enter-btn reports VR is available
+  // (its disabled state is set by the WebXR support probe at boot, and
+  // its label text is 'ENTER VR' when supported / 'VR NOT AVAILABLE' /
+  // 'WEBXR UNSUPPORTED' / 'VR BLOCKED' otherwise). Click flow : commit
+  // the loadout (kicks off the 10s launch countdown) then trigger the
+  // existing VR-button handler via .click(). The synthesized click is
+  // synchronous inside this user-activated click handler, so transient
+  // user activation propagates and navigator.xr.requestSession is
+  // allowed by the browser.
+  const vrBtn = document.getElementById('ship-preview-confirm-vr');
+  if (vrBtn) {
+    const floatingVR = document.getElementById('vr-enter-btn');
+    const vrAvailable = !!(floatingVR && !floatingVR.disabled
+                            && floatingVR.textContent === 'ENTER VR');
+    if (vrAvailable) {
+      vrBtn.style.display = 'inline-block';
+      const newVR = vrBtn.cloneNode(true);
+      vrBtn.parentNode.replaceChild(newVR, vrBtn);
+      newVR.addEventListener('click', () => {
+        if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen();
+        commitLoadout(key);
+        // Trigger the existing VR button handler. Synchronous click event
+        // preserves the user-activation context so requestSession works.
+        try {
+          const fv = document.getElementById('vr-enter-btn');
+          if (fv && !fv.disabled) fv.click();
+        } catch (e) { console.warn('[vr-launch] vr-enter-btn.click failed', e); }
+      });
+    } else {
+      vrBtn.style.display = 'none';
+    }
   }
 }
 
