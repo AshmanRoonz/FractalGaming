@@ -3463,6 +3463,14 @@ const input = {
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
+  // (v18VR 2026-05-22 round 13) Hard kill-switch for the three biggest
+  // GPU spenders : rock cluster meshes, BCS / basin gas clouds, and
+  // lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, etc.).
+  // When ON and a WebXR session is active, the spawn helpers early-out
+  // entirely so nothing is rendered or even allocated. Off-by-default
+  // so flat-screen and "normal VR" players keep the full visual stack.
+  // Tweakable per-session ; persisted to localStorage.
+  vrStripFx: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
   fovDeg: 120,
@@ -13193,6 +13201,17 @@ function isXRPresenting() {
   const r = (typeof window !== 'undefined') ? window.renderer : null;
   return !!(r && r.xr && r.xr.isPresenting);
 }
+// (v18VR 2026-05-22 round 13) Helper for the strip-FX toggle. Returns
+// true only when an XR session is presenting AND the user has the
+// "Strip Clouds / Rocks / Lightning" checkbox enabled. Spawn helpers
+// for those three system call it as an early-out gate so nothing is
+// allocated or drawn for them while the player is in VR with the
+// switch on. Flat-screen players never hit the strip path regardless
+// of the flag, so their visuals are untouched.
+function isVRStripFx() {
+  if (typeof input === 'undefined' || !input || !input.vrStripFx) return false;
+  return isXRPresenting();
+}
 
 var _lssSettingsLoaded = false;
 function getStoredVRPerfMode() {
@@ -22324,6 +22343,10 @@ function _makeAtomFractalMaterial(baseColor) {
 // Chunks live in game.effects with type 'rockChunk' ; updateEffects ticks
 // them and they auto-dispose on lifetime expiry.
 function spawnRockChunks(pos, baseColor, parentScale) {
+  // (v18VR 2026-05-22 round 13) Strip-FX gate. No chunks when VR has the
+  // "no rocks" switch flipped ; the parent rock is already absent in that
+  // case so a fragment spray wouldn't make sense.
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
   if (typeof game === 'undefined' || !game || !game.effects) return;
   if (typeof scene === 'undefined' || !scene) return;
   const N = 4 + Math.floor(Math.random() * 5);                // 4..8 chunks
@@ -23115,6 +23138,14 @@ function spawnDynamicObjects(rooms) {
         }
       }
     }
+  }
+  // (v18VR 2026-05-22 round 13) Strip-FX early-out. The cleanup loop
+  // above still runs (so leftover state from a previous round is wiped)
+  // ; we just don't build any new rocks for this round. Clusters array
+  // is cleared by the existing teardown below right after this comment.
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) {
+    game.clusters = [];
+    return;
   }
   // Tear down existing cluster children and any standalone debris
   for (const obj of game.dynamicObjects) {
@@ -24268,6 +24299,12 @@ function spawnOrganics(rooms) {
     }
   }
   game.organics = [];
+  // (v18VR 2026-05-22 round 13) Strip-FX gate. Organics include all the
+  // basin gas pockets and atmospheric plants ; they're the per-room
+  // cloud spawners. Clear and return so the next round has zero gas.
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) {
+    return;
+  }
 
   // Spawn organics in every room (more in larger rooms)
   for (const rm of rooms) {
@@ -25287,6 +25324,9 @@ const _lbFStep = new THREE.Vector3();
 // tube geometry + a ShaderMaterial halo+core pair. One mesh-pair (halo+core)
 // per spawn ; geometry is rebuilt each spawn and disposed on release.
 function spawnLightningBolt(from, to, color, lifetime, branches, thickness) {
+  // (v18VR 2026-05-22 round 13) Strip-FX gate. Covers Stun Bolt, Mega
+  // Stun Bolt arcs, Syphon drain conduits, plasma shield crackle, etc.
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
   color = color || 0x44aaff;
   lifetime = lifetime || 0.2;
   // Branch cap : up to 4 sub-rays (was 2). The fractal path keeps each
@@ -26928,6 +26968,12 @@ let _ambientCloudTimer = 1.5;          // first ambient cloud appears ~1.5s in
 const _AMBIENT_CLOUD_MAX = 5;          // cap so we don't drown the scene
 function updateAmbientClouds(dt) {
   if (getVRPerfTier() >= 1) { clearAmbientCloudDots(); return; }
+  // (v18VR 2026-05-22 round 13) Strip-FX gate. Wipe any extant ambient
+  // dots and stop spawning new ones for the duration of the strip flag.
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) {
+    if (typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();
+    return;
+  }
   if (typeof game === 'undefined' || !game) return;
   if (typeof scene === 'undefined' || !scene) return;
   if (typeof _SMOKE_GEO === 'undefined') return;
@@ -38317,6 +38363,14 @@ function buildSettingsPage() {
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
       </div>
+      <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Strip Clouds / Rocks / Lightning</label>
+        <input type="checkbox" id="set-vr-strip-fx" ${input.vrStripFx ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Removes rock cluster meshes (asteroids and their atom-fractal shaders), all gas clouds (basin pools, per-rock pockets, ambient cloud puffs), and lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, dash crackle). Only applies in VR ; flat mode is unaffected. Takes effect on the next round / map build ; existing meshes stay until that point.</label>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -39431,6 +39485,16 @@ function buildSettingsPage() {
       }
     } catch (_) {}
   });
+  // (v18VR 2026-05-22 round 13) VR strip-FX toggle. Just flips the flag
+  // and persists ; the spawn helpers check it at next call. Pre-existing
+  // meshes (already-spawned rocks, basin clouds) stay until the next
+  // round build cycle wipes them ; same lifecycle as the QUALITY tier
+  // changes already follow.
+  const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
+  if (vrStripSel) vrStripSel.addEventListener('change', () => {
+    input.vrStripFx = !!vrStripSel.checked;
+    saveSettings();
+  });
 
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
@@ -40015,6 +40079,7 @@ function saveSettings() {
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
       vrPerfMode: input.vrPerfMode || 'standard',
+      vrStripFx: !!input.vrStripFx,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
@@ -41602,6 +41667,7 @@ function loadSettings() {
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
+    if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
       if (typeof camera !== 'undefined' && camera) {
