@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<!--
+  sabosugi tunnel shader (codepen raWwMWO) perf test
+  Defaulted to dpr 1.0 with a live FPS / frame-time overlay so we can
+  read the actual cost on this machine instead of inheriting the pen's
+  cautious 0.4 default. Use the GUI to drop dpr if the fps tanks; if it
+  holds at 100% the shader is a viable candidate for loading / menu /
+  warp-transition use in LSS.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>sabosugi tunnel shader perf test (DPR 1.0)</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #000; overflow: hidden; height: 100%; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; top: 10px; left: 10px;
+    background: rgba(0, 0, 0, 0.6); color: #b8d8ff;
+    font-family: 'Courier New', monospace; font-size: 13px;
+    padding: 8px 12px; border: 1px solid #335;
+    border-radius: 4px; pointer-events: none;
+    line-height: 1.5; min-width: 220px; z-index: 10;
+  }
+  #hud .ttl { color: #88aaff; font-weight: 700; letter-spacing: 0.1em; font-size: 11px; }
+  #hud .v { color: #cfe6ff; }
+  #hud .warn { color: #ffaa66; }
+  #hud .ok   { color: #88ff99; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.umd.min.js"></script>
+</head>
+<body>
+<div id="hud">
+  <div class="ttl">SABOSUGI TUNNEL (DPR 1.0)</div>
+  <div>fps        : <span class="v" id="h-fps">,</span></div>
+  <div>frame ms   : <span class="v" id="h-ms">,</span></div>
+  <div>dpr        : <span class="v" id="h-dpr">,</span></div>
+  <div>render px  : <span class="v" id="h-px">,</span></div>
+  <div>avg (60f)  : <span class="v" id="h-avg">,</span></div>
+  <div>verdict    : <span class="v" id="h-verdict">measuring,</span></div>
+</div>
+<script>
+  // ===== Scene =====
+  const scene = new THREE.Scene();
+  const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const renderer = new THREE.WebGLRenderer({ antialias: false });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // ===== Parameters =====
+  // dpr is the multiplier on devicePixelRatio. Pen shipped at 0.4; bumping
+  // to 1.0 so we render at native resolution. Drop with the GUI if needed.
+  const params = {
+    dpr: 1.0,
+    speed: 1.5,
+    glowIntensity: 15.8,
+    exposure: 256.5,
+    voxelResolution: 55.0,
+    color1R: 0.1, color1G: 2.0, color1B: 4.0,
+    color2R: 0.0, color2G: 1.0, color2B: 2.0,
+    foldingX: 3.145, foldingY: 1.79, foldingZ: 7.81,
+  };
+
+  const initialDPR = window.devicePixelRatio * params.dpr;
+  renderer.setPixelRatio(initialDPR);
+
+  // ===== Uniforms =====
+  const uniforms = {
+    iTime:                  { value: 0.0 },
+    iResolution:            { value: new THREE.Vector2(window.innerWidth * initialDPR, window.innerHeight * initialDPR) },
+    u_speed:                { value: params.speed },
+    u_glowIntensity:        { value: params.glowIntensity },
+    u_exposure:             { value: params.exposure },
+    u_voxelResolution:      { value: params.voxelResolution },
+    u_colorPhasePrimary:    { value: new THREE.Vector3(params.color1R, params.color1G, params.color1B) },
+    u_colorPhaseSecondary:  { value: new THREE.Vector3(params.color2R, params.color2G, params.color2B) },
+    u_foldingAxis:          { value: new THREE.Vector3(params.foldingX, params.foldingY, params.foldingZ) },
+  };
+
+  // ===== Shaders (verbatim from the pen) =====
+  const vertexShader = `
+    void main() { gl_Position = vec4(position, 1.0); }
+  `;
+
+  const fragmentShader = `
+    uniform float iTime;
+    uniform vec2 iResolution;
+    uniform float u_speed;
+    uniform float u_glowIntensity;
+    uniform float u_exposure;
+    uniform float u_voxelResolution;
+    uniform vec3 u_colorPhasePrimary;
+    uniform vec3 u_colorPhaseSecondary;
+    uniform vec3 u_foldingAxis;
+
+    #define MAX_RAY_STEPS 110
+    #define STEP_MULTIPLIER 0.23
+
+    vec3 custom_tanh(vec3 x) {
+      vec3 e = exp(2.0 * x);
+      return (e - 1.0) / (e + 1.0);
+    }
+
+    vec3 applySpaceReflection(vec3 position, vec3 axis) {
+      return 36.4 * dot(axis, position) * axis - position;
+    }
+
+    vec3 calculateDisplacement(vec3 pos, float scale) {
+      return (1.1 / scale) * sin(pos.zxy * scale + 3.0 * scale);
+    }
+
+    void main() {
+      vec2 uv = (gl_FragCoord.xy * 2.0 - iResolution.xy) / iResolution.y;
+      vec3 rayOrigin = vec3(0.0, 0.0, iTime * u_speed);
+      vec3 rayDir = normalize(vec3(uv, 1.0));
+      vec3 foldingAxis = normalize(tan(u_foldingAxis));
+
+      float traveledDistance = 0.5;
+      vec3 accumulatedColor = vec3(0.0);
+
+      float tRot = iTime * 0.3;
+      mat2 timeRotation = mat2(cos(tRot), cos(tRot + 8.0),
+                               cos(tRot + 30.0), cos(tRot));
+      vec3 precomputedCoreAnim = u_glowIntensity * exp(sin(iTime * 2.0 + u_colorPhaseSecondary));
+      vec3 currentPhase = u_colorPhasePrimary;
+
+      for (int stepIndex = 0; stepIndex < MAX_RAY_STEPS; stepIndex++) {
+        vec3 currentPos = rayOrigin + rayDir * traveledDistance;
+        float tunnelDist = max(abs(currentPos.x), abs(currentPos.y)) - 3.3;
+
+        vec3 fractalPos = currentPos;
+        fractalPos.z = abs(mod(fractalPos.z, 7.0) - 3.5);
+        fractalPos = applySpaceReflection(fractalPos, foldingAxis);
+        fractalPos = log(abs(fractalPos) + 1.03);
+        fractalPos = ceil(fractalPos * u_voxelResolution) / u_voxelResolution;
+
+        float maxIter = 21.0 - clamp(traveledDistance * 0.7, 0.0, 16.0);
+        for (float iter = 2.0; iter <= 20.9; iter += 1.6) {
+          if (iter > maxIter) break;
+          fractalPos += calculateDisplacement(fractalPos, iter);
+        }
+
+        fractalPos.yz *= timeRotation;
+        fractalPos += calculateDisplacement(fractalPos, 1.0);
+
+        float localDensity = abs(tunnelDist) + abs(fractalPos.x) * 0.15 + 0.04;
+
+        vec3 primaryEmission = exp(sin(currentPhase)) / localDensity;
+        currentPhase += 0.2;
+
+        float sqDistToCenter = dot(currentPos.xy, currentPos.xy);
+        vec3 coreEmission = precomputedCoreAnim / (sqDistToCenter + 1.5);
+
+        accumulatedColor += primaryEmission * 0.5 + coreEmission * 0.05;
+        traveledDistance += localDensity * STEP_MULTIPLIER;
+
+        if (traveledDistance > 45.0 ||
+            max(accumulatedColor.x, max(accumulatedColor.y, accumulatedColor.z)) > 1000.0) {
+          break;
+        }
+      }
+
+      gl_FragColor = vec4(custom_tanh(accumulatedColor / u_exposure), 1.0);
+    }
+  `;
+
+  const material = new THREE.ShaderMaterial({
+    vertexShader, fragmentShader, uniforms,
+  });
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+  scene.add(mesh);
+
+  // ===== Resize =====
+  window.addEventListener('resize', () => {
+    const currentDPR = window.devicePixelRatio * params.dpr;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    uniforms.iResolution.value.set(window.innerWidth * currentDPR, window.innerHeight * currentDPR);
+  });
+
+  // ===== GUI =====
+  const gui = new lil.GUI({ title: 'sabosugi (DPR 1.0 test)' });
+
+  const perfFolder = gui.addFolder('Performance');
+  perfFolder.add(params, 'dpr', 0.1, 2.0, 0.1).name('Resolution (DPR)').onChange(v => {
+    const currentDPR = window.devicePixelRatio * v;
+    renderer.setPixelRatio(currentDPR);
+    uniforms.iResolution.value.set(window.innerWidth * currentDPR, window.innerHeight * currentDPR);
+  });
+
+  const envFolder = gui.addFolder('Environment');
+  envFolder.add(params, 'speed', 0.0, 10.0, 0.1).name('Flight Speed').onChange(v => uniforms.u_speed.value = v);
+  envFolder.add(params, 'glowIntensity', 0.0, 50.0, 0.1).name('Core Glow').onChange(v => uniforms.u_glowIntensity.value = v);
+  envFolder.add(params, 'exposure', 50.0, 500.0, 1.0).name('Exposure').onChange(v => uniforms.u_exposure.value = v);
+  envFolder.add(params, 'voxelResolution', 10.0, 150.0, 1.0).name('Voxel Res').onChange(v => uniforms.u_voxelResolution.value = v);
+
+  const shapeFolder = gui.addFolder('Fractal Shape');
+  const updateFolding = () => uniforms.u_foldingAxis.value.set(params.foldingX, params.foldingY, params.foldingZ);
+  shapeFolder.add(params, 'foldingX', 0.0, 10.0, 0.01).name('Fold X').onChange(updateFolding);
+  shapeFolder.add(params, 'foldingY', 0.0, 10.0, 0.01).name('Fold Y').onChange(updateFolding);
+  shapeFolder.add(params, 'foldingZ', 0.0, 10.0, 0.01).name('Fold Z').onChange(updateFolding);
+
+  const colorFolder = gui.addFolder('Color Phases');
+  const updateColor1 = () => uniforms.u_colorPhasePrimary.value.set(params.color1R, params.color1G, params.color1B);
+  const updateColor2 = () => uniforms.u_colorPhaseSecondary.value.set(params.color2R, params.color2G, params.color2B);
+  colorFolder.add(params, 'color1R', 0.0, 10.0, 0.1).name('Primary Phase R').onChange(updateColor1);
+  colorFolder.add(params, 'color1G', 0.0, 10.0, 0.1).name('Primary Phase G').onChange(updateColor1);
+  colorFolder.add(params, 'color1B', 0.0, 10.0, 0.1).name('Primary Phase B').onChange(updateColor1);
+  colorFolder.add(params, 'color2R', 0.0, 10.0, 0.1).name('Core Phase R').onChange(updateColor2);
+  colorFolder.add(params, 'color2G', 0.0, 10.0, 0.1).name('Core Phase G').onChange(updateColor2);
+  colorFolder.add(params, 'color2B', 0.0, 10.0, 0.1).name('Core Phase B').onChange(updateColor2);
+  gui.close();
+
+  // ===== HUD =====
+  const hudEls = {
+    fps:     document.getElementById('h-fps'),
+    ms:      document.getElementById('h-ms'),
+    dpr:     document.getElementById('h-dpr'),
+    px:      document.getElementById('h-px'),
+    avg:     document.getElementById('h-avg'),
+    verdict: document.getElementById('h-verdict'),
+  };
+
+  const msRing = new Array(60).fill(16.7);
+  let msIdx = 0;
+  let lastTime = performance.now();
+  let hudTick = 0;
+
+  function updateHud(nowMs) {
+    const dt = nowMs - lastTime;
+    lastTime = nowMs;
+    msRing[msIdx] = dt;
+    msIdx = (msIdx + 1) % 60;
+
+    // Throttle DOM writes to every 6 frames to avoid HUD itself impacting fps.
+    if (++hudTick % 6 !== 0) return;
+
+    let sum = 0;
+    for (let i = 0; i < 60; i++) sum += msRing[i];
+    const avg = sum / 60;
+    const fps = 1000 / dt;
+    const avgFps = 1000 / avg;
+    const currentDPR = window.devicePixelRatio * params.dpr;
+    const rpx = Math.round(window.innerWidth * currentDPR) + ' x ' + Math.round(window.innerHeight * currentDPR);
+
+    hudEls.fps.textContent = fps.toFixed(1);
+    hudEls.ms.textContent  = dt.toFixed(2) + ' ms';
+    hudEls.dpr.textContent = currentDPR.toFixed(2) + '   (mult ' + params.dpr.toFixed(1) + ')';
+    hudEls.px.textContent  = rpx;
+    hudEls.avg.textContent = avgFps.toFixed(1) + ' fps  (' + avg.toFixed(2) + ' ms)';
+
+    let verdict, cls;
+    if (avgFps >= 58)      { verdict = 'smooth (60fps target hit)';      cls = 'ok'; }
+    else if (avgFps >= 45) { verdict = 'usable (mid-budget)';            cls = 'ok'; }
+    else if (avgFps >= 30) { verdict = 'rough (cinematic, not gameplay)'; cls = 'warn'; }
+    else                   { verdict = 'too heavy (drop DPR)';            cls = 'warn'; }
+    hudEls.verdict.textContent = verdict;
+    hudEls.verdict.className = 'v ' + cls;
+  }
+
+  // ===== Loop =====
+  const clock = new THREE.Clock();
+  function animate() {
+    requestAnimationFrame(animate);
+    uniforms.iTime.value = clock.getElapsedTime();
+    renderer.render(scene, camera);
+    updateHud(performance.now());
+  }
+  animate();
+</script>
+</body>
+</html>

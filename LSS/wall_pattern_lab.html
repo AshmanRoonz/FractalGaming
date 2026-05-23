@@ -95,6 +95,7 @@
         <option value="16">Ring Tunnel</option>
         <option value="17">Neon Cube</option>
         <option value="18">Layered Cube</option>
+        <option value="19">Claude Custom</option>
       </select>
     </div>
 
@@ -121,6 +122,7 @@
         <option value="16">Ring Tunnel</option>
         <option value="17">Neon Cube</option>
         <option value="18">Layered Cube</option>
+        <option value="19">Claude Custom</option>
       </select>
     </div>
     <div class="row"><label>Opacity</label><input type="range" id="fgAlpha" min="0" max="2" step="0.05" value="1.0"><span class="val" id="fgAlpha-val">1.00</span></div>
@@ -166,6 +168,7 @@
         <option value="16">Ring Tunnel</option>
         <option value="17">Neon Cube</option>
         <option value="18">Layered Cube</option>
+        <option value="19">Claude Custom</option>
       </select>
     </div>
     <div class="row"><label>Opacity</label><input type="range" id="fg2Alpha" min="0" max="2" step="0.05" value="1.0"><span class="val" id="fg2Alpha-val">1.00</span></div>
@@ -772,6 +775,71 @@ const wallFS = `
     }
     return col * 1.5 + hsv(rgbHue(zoneC), u_satBase * 0.4, 0.06);
   }
+  // ----------------------------------------------------------------
+  // Pattern 19 : Claude Custom
+  // ----------------------------------------------------------------
+  // Voxel-quantized fractal cathedral, ported from the sabosugi tunnel
+  // shader (codepen raWwMWO) but adapted for surface sampling. Builds
+  // a displacement field by folding space along a fixed axis (Kali-
+  // style reflection), log-warping the result, snapping to a voxel
+  // grid, then accumulating sin-turbulence at growing scales. The
+  // magnitude of the final displacement vector becomes the field value
+  // that drives hue and brightness via the lab's HSV machinery so the
+  // pattern composites cleanly with every existing layer/blend mode.
+  //
+  // Slider mapping (re-purposes the existing lab controls; no new uniforms):
+  //   u_iters    : turbulence iteration count (effective cap on the cascade)
+  //   u_invBase  : voxel resolution (try 3..120; 55 is sabosugi default)
+  //   u_hueSpin  : hue advance per unit field
+  //   u_satBase  : color saturation
+  //   u_scale    : world-space sampling density (already applied to p)
+  //
+  // Perf notes:
+  //   - No raymarch loop. One fold + one log + one ceil + ~7 sin turns
+  //     at u_iters=12. Cost is roughly Mandelbox-class, not raymarch-class.
+  //   - foldAxis is computed once per fragment; the tan() is fixed-arg
+  //     so the compiler can fold it to a constant on most drivers.
+  vec3 _ccDisplace(vec3 q, float k) {
+    return (1.1 / k) * sin(q.zxy * k + 3.0 * k);
+  }
+  vec3 patternClaudeCustom(vec3 p, vec3 zoneC, float tt) {
+    // Fold axis. tan() of a fixed-ish vector gives the wobbly diagonal
+    // direction that defines the pen's character. Normalize so the 36.4x
+    // reflection scale stays well-conditioned.
+    vec3 foldAxis = normalize(tan(vec3(3.145, 1.79, 7.81)));
+
+    // Space reflection (Kali-style fold), log warp, voxel quantize.
+    vec3 f = p;
+    f = 36.4 * dot(foldAxis, f) * foldAxis - f;
+    f = log(abs(f) + 1.03);
+    float voxelRes = max(2.0, u_invBase);
+    f = ceil(f * voxelRes) / voxelRes;
+
+    // Time-varying 2x2 mixing matrix reused at the end of the cascade.
+    float tRot = tt * 0.3;
+    mat2 R = mat2(cos(tRot),        cos(tRot + 8.0),
+                  cos(tRot + 30.0), cos(tRot));
+
+    // Turbulence cascade. Iteration cap honours u_iters so the existing
+    // slider doubles as a quality / perf knob just like Mandelbox.
+    float maxIter = float(u_iters);
+    for (float k = 2.0; k <= 20.9; k += 1.6) {
+      if (k > maxIter) break;
+      f += _ccDisplace(f, k);
+    }
+    f.yz = R * f.yz;
+    f += _ccDisplace(f, 1.0);
+
+    // Field magnitude, log-compressed into [0, 1].
+    float fld = length(f);
+    float val = clamp(1.0 - exp(-fld * 0.35), 0.0, 1.0);
+
+    // Hue drifts with field value and time; zone tint sets the base.
+    float baseHue = rgbHue(zoneC);
+    float hue = fract(baseHue + val * u_hueSpin + tt * 0.03);
+    return hsv(hue, u_satBase, pow(val, 0.85) * 1.15);
+  }
+
   // Dispatcher (subset of patterns; the rest can be added if useful)
   // Per-layer dispatcher. Sets the active pattern-control globals from
   // the layer's own inputs before dispatching, so a background and two
@@ -806,6 +874,7 @@ const wallFS = `
     if (pid == 16) return patternRingTunnel(p, zoneC, tt);
     if (pid == 17) return patternNeonCube(p, zoneC, tt);
     if (pid == 18) return patternLayeredCube(p, zoneC, tt);
+    if (pid == 19) return patternClaudeCustom(p, zoneC, tt);
     return vec3(0.0);
   }
   // Hue shift via Rodrigues rotation around the gray axis. Cheaper than
