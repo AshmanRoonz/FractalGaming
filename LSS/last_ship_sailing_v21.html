@@ -23895,12 +23895,25 @@ function _spawnBasinClouds() {
       // as muted smoke ; otherwise default to off-white.
       // (2026-05-21) Routed through cloud theme ; Auto preserves the
       // rock-derived behavior, other themes pick from a palette.
+      // (v21 2026-05-23) FIX : the no-cluster branch was hardcoding a
+      // near-white THREE.Color and bypassing _getEffectiveCloudColor
+      // entirely, which meant basin pools in cluster-less spheres ignored
+      // Custom / Toxic / Plasma / etc themes and stayed off-white forever
+      // (recolor() would also re-resolve to the same near-white because
+      // baseColor was the resolved fallback, not a parent hue). Now the
+      // fallback is just a seed parent color passed THROUGH
+      // _getEffectiveCloudColor, so Auto still produces light gray smoke
+      // (rock-derived from a white parent) while non-Auto themes get to
+      // pick from their palette like every other cloud.
       let color;
+      let basinSeed;
       if (basinBaseColor != null) {
+        basinSeed = basinBaseColor;
         color = _getEffectiveCloudColor(basinBaseColor);
       } else {
         const v = 0.55 + Math.random() * 0.25;
-        color = new THREE.Color(v, v * 0.97, v * 0.92);
+        basinSeed = new THREE.Color(v, v * 0.97, v * 0.92);
+        color = _getEffectiveCloudColor(basinSeed);
       }
       const cloud = new GasCloud(billboardCloudSystem, pos, {
         boundsRadius:   size,
@@ -23908,11 +23921,14 @@ function _spawnBasinClouds() {
         spriteScaleVar: 0.50,
         alpha:          0.85,
         color:          color,
-        // (v21 2026-05-23) Basin clouds borrow the nearest cluster\'s rock
-        // color. When that\'s unavailable basinBaseColor is null and the
-        // GasCloud falls back to its resolved color as the recolor seed —
-        // either way the Auto / Match-walls themes pick something sensible.
-        baseColor:      (basinBaseColor != null) ? basinBaseColor : color,
+        // (v21 2026-05-23) Pass the SEED color (parent rock hue, or the
+        // off-white fallback for cluster-less basins) so live recolor can
+        // re-resolve through the active theme. Previously we passed the
+        // resolved color here, which meant the recolor seed for fallback
+        // basins was a white THREE.Color — non-Auto themes ignore it
+        // anyway, but Auto would re-derive light gray smoke from white
+        // forever instead of being able to inherit anything later.
+        baseColor:      basinSeed,
         colorJitter:    0.20,
         // (v15a 2026-05-10) Denser basin clouds : 12 sprites (was 10).
         segments:       (typeof getVRGasSegments === 'function') ? getVRGasSegments(12, 'basinSegments') : 12,
