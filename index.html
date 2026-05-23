@@ -5274,6 +5274,11 @@ function enterShipSelect() {
   // whenever we (re-)enter the screen (first time, or between rounds).
   const cd = document.getElementById('ship-select-countdown');
   if (cd) cd.classList.remove('active');
+  // (v20VR 2026-05-22) Re-show the bespoke VR overlay when we land back on
+  // the ship-select panel (cold start, between rounds, post-match return).
+  // commitLoadout set _xrMenuForceHidden=true earlier ; clearing it here
+  // lets the menu mirror surface again for the next pick.
+  try { _xrMenuForceHidden = false; } catch (_) {}
   buildShipSelect();
   buildMapSelector();
   updateTeammatesStrip();
@@ -11514,11 +11519,18 @@ renderer.xr.addEventListener('sessionstart', () => {
   if (typeof _xrCancelResumeCountdown === 'function') _xrCancelResumeCountdown();
   // Re-parent camera under dolly so head pose composes with ship pose.
   if (camera.parent !== xrDolly) xrDolly.add(camera);
-  // Make both HUD planes visible (created lazily on first use).
+  // Make HUD plane visible (created lazily on first use).
   const hud = _xrEnsureHudMesh();
   if (hud) hud.visible = true;
+  // (v20VR 2026-05-22) Aux HUD plane (the floating FLEET A / FLEET B
+  // score + round timer + WARMUP-state readout) hidden in VR per user
+  // request. The info is duplicated on the main circumpunct HUD anyway
+  // (round-timer / round-state DOM elements get mirrored implicitly via
+  // the canvas pass) so the dedicated lower-FOV plane was redundant.
+  // We still _ensure_ the mesh so the per-frame draw paths don't NPE,
+  // but force-hide it.
   const aux = _xrEnsureAuxMesh();
-  if (aux) aux.visible = true;
+  if (aux) aux.visible = false;
   // Capture the cameraVR ArrayCamera. WebXRManager.onAnimationFrame writes
   // the headset pose into cameraVR.matrix every frame; we read it for the
   // head-aim nudge.
@@ -12103,6 +12115,13 @@ function _xrDrawLobbyHint(ctx, W, H) {
 // 250ms-cadence html2canvas thrash on the main thread.
 let _xrMenuLastMode = null;
 let _xrMenuLastKey = null;
+// (v20VR 2026-05-22) Set the instant commitLoadout fires in VR. Stays
+// true through the warmup → cinematic → 3-2-1 → match-start sequence so
+// the bespoke VR ship-select overlay disappears immediately when the
+// player commits, instead of lingering for the variable-length shader
+// warmup window. Cleared on round-end / when ship-select re-activates
+// for the between-rounds picker (so the overlay can show again).
+let _xrMenuForceHidden = false;
 function _xrUpdateMenuMirror() {
   if (!renderer.xr.isPresenting) {
     if (xrMenuMesh) xrMenuMesh.visible = false;
@@ -12110,9 +12129,28 @@ function _xrUpdateMenuMirror() {
     _xrMenuLastKey = null;
     return;
   }
+  // (v20VR 2026-05-22) Suppress the overlay once the match is starting.
+  // Three triggers, any of which hides the menu :
+  //   (a) _xrMenuForceHidden : set the instant commitLoadout fires in
+  //       VR so the panel disappears immediately even though shader
+  //       warmup keeps ship-select.active=true for a variable window
+  //       before the cinematic / countdown begin. This was the bug —
+  //       in v18VR (pre-cinematic) and v20VR (post-cinematic) the
+  //       overlay sat pinned in front of the player after they pressed
+  //       Confirm because the commit kicks off async shader compile
+  //       and only THEN starts launchCountdown. We force-hide here.
+  //   (b) _cinematic.active : v20+ cinematic window (~6 s).
+  //   (c) _countdownActive : the 3-2-1 SHORT_COUNTDOWN window.
+  // Cleared elsewhere on round-end / ship-select reactivation.
+  const _matchStarting = _xrMenuForceHidden || !!(
+    (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
+    (typeof _countdownActive !== 'undefined' && _countdownActive)
+  );
   // Determine current menu mode. settingsOpen beats ship-select beats lobby.
   let mode = null;
-  if (typeof settingsOpen !== 'undefined' && settingsOpen) {
+  if (_matchStarting) {
+    mode = null; // explicit hide ; let the normal !mode path turn the mesh off
+  } else if (typeof settingsOpen !== 'undefined' && settingsOpen) {
     mode = 'settings';
   } else {
     const sel = document.getElementById('ship-select');
@@ -12301,7 +12339,13 @@ function _vrEnsureShipNameLabel(bot) {
   const mat = new THREE.SpriteMaterial({
     map: tex,
     transparent: true,
-    depthTest: false,
+    // (v20VR 2026-05-22) depthTest re-enabled so the ship-name callout
+    // gets occluded when the ship is behind a wall. Was `false` for the
+    // legacy "always-on-top" behavior ; the user reported name tags
+    // bleeding through walls in VR, which gives away enemy positions
+    // through level geometry. Sprite anchor depth determines per-fragment
+    // visibility ; if you can't see the ship, you can't see its label.
+    depthTest: true,
     depthWrite: false,
     sizeAttenuation: true,
     toneMapped: false,
@@ -12312,7 +12356,10 @@ function _vrEnsureShipNameLabel(bot) {
   // callout reads as the dominant identifier above the ship.
   sprite.scale.set(hullR * 2.4, hullR * 0.6, 1);
   sprite.position.set(0, hullR * 1.9, 0);
-  sprite.renderOrder = 1001;
+  // (v20VR 2026-05-22) renderOrder dropped to default 0 now that depth
+  // test is on ; the 1001 was a "draw on top of everything" hint that's
+  // no longer needed and would actually fight the depth test by drawing
+  // late in the pass.
   sprite.frustumCulled = false;
   sprite.visible = false;
   // Thin line from hull origin up to the sprite anchor. Stored as a Line2
@@ -12326,12 +12373,14 @@ function _vrEnsureShipNameLabel(bot) {
     color: 0xffffff,
     transparent: true,
     opacity: 0.85,
-    depthTest: false,
+    // (v20VR 2026-05-22) Same as the sprite : depth-test the leader line
+    // so it doesn't punch through walls. Without this, the line was
+    // showing even when the ship was occluded.
+    depthTest: true,
     depthWrite: false,
     toneMapped: false,
   });
   const line = new THREE.Line(lineGeo, lineMat);
-  line.renderOrder = 1000;
   line.frustumCulled = false;
   line.visible = false;
   bot.mesh.add(line);
@@ -14272,7 +14321,10 @@ function renderFrame() {
           _xrHudUploadCounter = 0;
         }
       }
-      if (xrAuxMesh && _xrAuxTex) {
+      // (v20VR 2026-05-22) Skip the aux-HUD redraw entirely while the
+      // mesh is hidden. Was burning ~5 ms of Canvas2D fillText per beat
+      // on a plane the user never sees ; pure waste.
+      if (xrAuxMesh && _xrAuxTex && xrAuxMesh.visible) {
         _xrAuxUploadCounter++;
         if (_xrAuxUploadCounter >= _xrHudUpdateCadence()) {
           _xrDrawAuxHud();
@@ -28749,6 +28801,14 @@ function commitLoadout(key) {
 
   player.loadout = loadout;
   player.loadoutKey = key;
+  // (v20VR 2026-05-22) Force the bespoke VR ship-select overlay off the
+  // instant a commit happens. Shader warmup then cinematic then 3-2-1
+  // all happen with #ship-select.active still set, so without this the
+  // headset stayed staring at the ship-list panel for the entire pre-
+  // round window. The overlay's own _xrUpdateMenuMirror reads this flag
+  // and forces mode=null. The flag is cleared by enterShipSelect /
+  // returnToRootMenu when the panel is shown again (next round / match).
+  try { _xrMenuForceHidden = true; } catch (_) {}
   updateCockpitFrame(); // swap the cockpit frame PNG to match the new titan
   // (v17) Kick off the overlay-frame and gun-layer preloads for the new
   // ship + drop any stale slide-in trigger / gun cycle state from the
@@ -35317,6 +35377,9 @@ function updateRoundSystem(dt) {
         }
         const sel = document.getElementById('ship-select');
         if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
+        // (v20VR 2026-05-22) Between-rounds : surface the VR ship-select
+        // overlay again for the next pick. Mirror of enterShipSelect.
+        try { _xrMenuForceHidden = false; } catch (_) {}
         buildShipSelect();
         updateTeammatesStrip();
         launchCountdown();
@@ -35599,6 +35662,8 @@ function returnToRootMenu() {
   // Show the ship-select root menu exactly as it appears on cold boot.
   const sel = document.getElementById('ship-select');
   if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
+  // (v20VR 2026-05-22) Post-match return : VR overlay can show again.
+  try { _xrMenuForceHidden = false; } catch (_) {}
   buildShipSelect();
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
@@ -35941,7 +36006,17 @@ function pollGamepad() {
 
   // ---- Menu navigation (runs before gameplay edge triggers) ----
   const _shipSelect = document.getElementById('ship-select');
-  const _shipSelectActive = !!(_shipSelect && _shipSelect.classList.contains('active'));
+  // (v20VR 2026-05-22) Once the match-start cinematic or 3-2-1 countdown
+  // is running, treat ship-select as inactive even though its .active
+  // class is still on. Otherwise the d-pad / stick / face-button commit
+  // logic below tries to re-commit a loadout that's already locked in,
+  // potentially re-broadcasting and re-scheduling the launch.
+  const _matchStartingNav = !!(
+    (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
+    (typeof _countdownActive !== 'undefined' && _countdownActive)
+  );
+  const _shipSelectActive = !_matchStartingNav
+    && !!(_shipSelect && _shipSelect.classList.contains('active'));
   // (v6.9) The first screen shown on cold boot is #lobby (Solo vs Join Room
   // chooser), not #ship-select. Without an explicit gate here gamepad input
   // never reaches the lobby, so users had to mouse-click SOLO once before
@@ -36068,13 +36143,19 @@ function pollGamepad() {
     } else if (input.gpRB && !input.gpRBPrev) {
       if (typeof _cyclePerk === 'function') _cyclePerk(+1);
     }
-    // (v18VR 2026-05-22 round 14) Any face button (A/B/X/Y) commits the
-    // currently-previewed ship in addition to Start. Same edge-detect
-    // shape as the lobby A-button shortcut above ; gpAPrev was already
-    // tracked there. Tracking the rest with shared snapshots so the
-    // edge logic stays clean. Only fires inside ship-select, so the
-    // dash/ability bindings on these buttons during gameplay are
-    // untouched (the menu gate at !_menuActive below blocks those).
+    // (v18VR round 14 → v20VR 2026-05-22) "Any gamepad button commits"
+    // in ship-select. Previously we only watched raw buttons[0..3]
+    // (A/B/X/Y), but the XR-virtual-gamepad only populates those slots
+    // when the user has the matching action bound and the matching XR
+    // controller button mapped — so a non-default xrBindings or
+    // gpBindings configuration could leave the user unable to commit.
+    // The Quest player who reported being stuck on the VR menu was
+    // hitting exactly this case. New detection : edge-trigger off ANY
+    // common action flag (fire / altFire / dash / reload / abilities /
+    // core) PLUS the raw face-button reads, with OR. The menu gate
+    // `_shipSelectActive` already blocks gameplay from these edges, so
+    // double-firing isn't a concern. Start (gpMenu) commits via its own
+    // handler above ; this is for everything else.
     const _aBtn = !!(gp.buttons[0] && gp.buttons[0].pressed);
     const _bBtn = !!(gp.buttons[1] && gp.buttons[1].pressed);
     const _xBtn = !!(gp.buttons[2] && gp.buttons[2].pressed);
@@ -36083,7 +36164,20 @@ function pollGamepad() {
     const _bFresh = _bBtn && !input.gpBPrev;
     const _xFresh = _xBtn && !input.gpXPrev;
     const _yFresh = _yBtn && !input.gpYPrev;
-    if ((_aFresh || _bFresh || _xFresh || _yFresh)
+    // Action-flag edges. Each `gp{Action}Prev` snapshot is maintained
+    // at the top of pollGamepad (line ~35919), so we can edge-detect
+    // here cleanly without owning the snapshots. altFire is skipped
+    // because its Prev isn't tracked anywhere ; using it here would
+    // be a level-trigger (fires every frame held).
+    const _actionFresh =
+         (input.gpFire     && !input.gpFirePrev)
+      || (input.gpDash     && !input.gpDashPrev)
+      || (input.gpReload   && !input.gpReloadPrev)
+      || (input.gpAbility0 && !input.gpAbility0Prev)
+      || (input.gpAbility1 && !input.gpAbility1Prev)
+      || (input.gpAbility2 && !input.gpAbility2Prev)
+      || (input.gpCore     && !input.gpCorePrev);
+    if ((_aFresh || _bFresh || _xFresh || _yFresh || _actionFresh)
         && _previewedKey && LOADOUTS[_previewedKey]) {
       try { commitLoadout(_previewedKey); } catch (e) { console.warn('[ship-select] commit failed', e); }
     }
@@ -37942,16 +38036,25 @@ function previewLoadout(key) {
       commitLoadout(key);
     });
   }
-  // (v18VR 2026-05-22 round 12) Companion "CONFIRM & LAUNCH IN VR" button.
-  // Visible only when the floating #vr-enter-btn reports VR is available
-  // (its disabled state is set by the WebXR support probe at boot, and
-  // its label text is 'ENTER VR' when supported / 'VR NOT AVAILABLE' /
-  // 'WEBXR UNSUPPORTED' / 'VR BLOCKED' otherwise). Click flow : commit
-  // the loadout (kicks off the 10s launch countdown) then trigger the
-  // existing VR-button handler via .click(). The synthesized click is
-  // synchronous inside this user-activated click handler, so transient
-  // user activation propagates and navigator.xr.requestSession is
-  // allowed by the browser.
+  // (v18VR round 12 → v20VR 2026-05-22) "CONFIRM & LAUNCH IN VR".
+  // Visible only when the floating #vr-enter-btn reports VR is available.
+  // ORDER MATTERS HERE :
+  //   1. Fire vr-enter-btn.click() FIRST so navigator.xr.requestSession is
+  //      called with fresh transient user-activation. requestSession is
+  //      a native async — it kicks off the XR runtime in parallel while
+  //      JS continues.
+  //   2. Defer commitLoadout to the next macrotask. commitLoadout runs
+  //      synchronously and BLOCKS the main thread for ~3 s on a cold
+  //      start (full world build : buildRoomGraphLevel + spawnDynamic
+  //      Objects + spawnOrganics + spawnBots + shader warmup pre-pass).
+  //      If we ran commitLoadout in the same tick as the click, the
+  //      block would happen BEFORE requestSession even gets to the
+  //      runtime, and a Quest player reported the headset showing a
+  //      stuck/looping frame (no new frames submitted during the 3 s
+  //      block ; the cinematic never visibly started ; only when they
+  //      exited VR did they see the cinematic was about to fire).
+  //      Yielding to the event loop with setTimeout(..., 0) lets the
+  //      browser dispatch the XR session-start handshake first.
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
     const floatingVR = document.getElementById('vr-enter-btn');
@@ -37963,13 +38066,22 @@ function previewLoadout(key) {
       vrBtn.parentNode.replaceChild(newVR, vrBtn);
       newVR.addEventListener('click', () => {
         if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen();
-        commitLoadout(key);
-        // Trigger the existing VR button handler. Synchronous click event
-        // preserves the user-activation context so requestSession works.
+        // (1) Start XR session FIRST, with the user-activation still alive.
         try {
           const fv = document.getElementById('vr-enter-btn');
           if (fv && !fv.disabled) fv.click();
         } catch (e) { console.warn('[vr-launch] vr-enter-btn.click failed', e); }
+        // (2) Defer commitLoadout so the requestSession promise can be
+        // dispatched and the XR runtime can start initializing while
+        // the main thread is still free. The 50ms slack is enough for
+        // the browser to hand off to the XR runtime ; commitLoadout
+        // then runs (still synchronous, still blocks ~3 s), but the
+        // headset compositor is already engaged and will keep showing
+        // a valid frame instead of a stuck one.
+        setTimeout(() => {
+          try { commitLoadout(key); }
+          catch (e) { console.warn('[vr-launch] commitLoadout failed', e); }
+        }, 50);
       });
     } else {
       vrBtn.style.display = 'none';
