@@ -5274,6 +5274,11 @@ function enterShipSelect() {
   // whenever we (re-)enter the screen (first time, or between rounds).
   const cd = document.getElementById('ship-select-countdown');
   if (cd) cd.classList.remove('active');
+  // (v20VR 2026-05-22) Re-show the bespoke VR overlay when we land back on
+  // the ship-select panel (cold start, between rounds, post-match return).
+  // commitLoadout set _xrMenuForceHidden=true earlier ; clearing it here
+  // lets the menu mirror surface again for the next pick.
+  try { _xrMenuForceHidden = false; } catch (_) {}
   buildShipSelect();
   buildMapSelector();
   updateTeammatesStrip();
@@ -12103,6 +12108,13 @@ function _xrDrawLobbyHint(ctx, W, H) {
 // 250ms-cadence html2canvas thrash on the main thread.
 let _xrMenuLastMode = null;
 let _xrMenuLastKey = null;
+// (v20VR 2026-05-22) Set the instant commitLoadout fires in VR. Stays
+// true through the warmup → cinematic → 3-2-1 → match-start sequence so
+// the bespoke VR ship-select overlay disappears immediately when the
+// player commits, instead of lingering for the variable-length shader
+// warmup window. Cleared on round-end / when ship-select re-activates
+// for the between-rounds picker (so the overlay can show again).
+let _xrMenuForceHidden = false;
 function _xrUpdateMenuMirror() {
   if (!renderer.xr.isPresenting) {
     if (xrMenuMesh) xrMenuMesh.visible = false;
@@ -12111,19 +12123,19 @@ function _xrUpdateMenuMirror() {
     return;
   }
   // (v20VR 2026-05-22) Suppress the overlay once the match is starting.
-  // In v20 the launch flow runs the V-formation cinematic for ~6 s and
-  // then the 3-2-1 SHORT_COUNTDOWN before ship-select.active is finally
-  // removed at the LAUNCH tick. That meant the bespoke VR ship-select
-  // overlay stayed pinned in front of the player for ~9 s after they
-  // pressed Confirm — they couldn't see the cinematic, the d-pad/face
-  // buttons still tried to commit a loadout that was already committed,
-  // and the panel only cleared when the round actually began. Both
-  // `_cinematic.active` and `_countdownActive` are true during this
-  // "match starting" window ; either gates the overlay to invisible
-  // even though #ship-select still has the .active class. Once the
-  // round begins, both flip false and the normal hide path (ship-select
-  // panel deactivated) takes over.
-  const _matchStarting = !!(
+  // Three triggers, any of which hides the menu :
+  //   (a) _xrMenuForceHidden : set the instant commitLoadout fires in
+  //       VR so the panel disappears immediately even though shader
+  //       warmup keeps ship-select.active=true for a variable window
+  //       before the cinematic / countdown begin. This was the bug —
+  //       in v18VR (pre-cinematic) and v20VR (post-cinematic) the
+  //       overlay sat pinned in front of the player after they pressed
+  //       Confirm because the commit kicks off async shader compile
+  //       and only THEN starts launchCountdown. We force-hide here.
+  //   (b) _cinematic.active : v20+ cinematic window (~6 s).
+  //   (c) _countdownActive : the 3-2-1 SHORT_COUNTDOWN window.
+  // Cleared elsewhere on round-end / ship-select reactivation.
+  const _matchStarting = _xrMenuForceHidden || !!(
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
     (typeof _countdownActive !== 'undefined' && _countdownActive)
   );
@@ -28768,6 +28780,14 @@ function commitLoadout(key) {
 
   player.loadout = loadout;
   player.loadoutKey = key;
+  // (v20VR 2026-05-22) Force the bespoke VR ship-select overlay off the
+  // instant a commit happens. Shader warmup then cinematic then 3-2-1
+  // all happen with #ship-select.active still set, so without this the
+  // headset stayed staring at the ship-list panel for the entire pre-
+  // round window. The overlay's own _xrUpdateMenuMirror reads this flag
+  // and forces mode=null. The flag is cleared by enterShipSelect /
+  // returnToRootMenu when the panel is shown again (next round / match).
+  try { _xrMenuForceHidden = true; } catch (_) {}
   updateCockpitFrame(); // swap the cockpit frame PNG to match the new titan
   // (v17) Kick off the overlay-frame and gun-layer preloads for the new
   // ship + drop any stale slide-in trigger / gun cycle state from the
@@ -35336,6 +35356,9 @@ function updateRoundSystem(dt) {
         }
         const sel = document.getElementById('ship-select');
         if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
+        // (v20VR 2026-05-22) Between-rounds : surface the VR ship-select
+        // overlay again for the next pick. Mirror of enterShipSelect.
+        try { _xrMenuForceHidden = false; } catch (_) {}
         buildShipSelect();
         updateTeammatesStrip();
         launchCountdown();
@@ -35618,6 +35641,8 @@ function returnToRootMenu() {
   // Show the ship-select root menu exactly as it appears on cold boot.
   const sel = document.getElementById('ship-select');
   if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
+  // (v20VR 2026-05-22) Post-match return : VR overlay can show again.
+  try { _xrMenuForceHidden = false; } catch (_) {}
   buildShipSelect();
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
@@ -36097,13 +36122,19 @@ function pollGamepad() {
     } else if (input.gpRB && !input.gpRBPrev) {
       if (typeof _cyclePerk === 'function') _cyclePerk(+1);
     }
-    // (v18VR 2026-05-22 round 14) Any face button (A/B/X/Y) commits the
-    // currently-previewed ship in addition to Start. Same edge-detect
-    // shape as the lobby A-button shortcut above ; gpAPrev was already
-    // tracked there. Tracking the rest with shared snapshots so the
-    // edge logic stays clean. Only fires inside ship-select, so the
-    // dash/ability bindings on these buttons during gameplay are
-    // untouched (the menu gate at !_menuActive below blocks those).
+    // (v18VR round 14 → v20VR 2026-05-22) "Any gamepad button commits"
+    // in ship-select. Previously we only watched raw buttons[0..3]
+    // (A/B/X/Y), but the XR-virtual-gamepad only populates those slots
+    // when the user has the matching action bound and the matching XR
+    // controller button mapped — so a non-default xrBindings or
+    // gpBindings configuration could leave the user unable to commit.
+    // The Quest player who reported being stuck on the VR menu was
+    // hitting exactly this case. New detection : edge-trigger off ANY
+    // common action flag (fire / altFire / dash / reload / abilities /
+    // core) PLUS the raw face-button reads, with OR. The menu gate
+    // `_shipSelectActive` already blocks gameplay from these edges, so
+    // double-firing isn't a concern. Start (gpMenu) commits via its own
+    // handler above ; this is for everything else.
     const _aBtn = !!(gp.buttons[0] && gp.buttons[0].pressed);
     const _bBtn = !!(gp.buttons[1] && gp.buttons[1].pressed);
     const _xBtn = !!(gp.buttons[2] && gp.buttons[2].pressed);
@@ -36112,7 +36143,20 @@ function pollGamepad() {
     const _bFresh = _bBtn && !input.gpBPrev;
     const _xFresh = _xBtn && !input.gpXPrev;
     const _yFresh = _yBtn && !input.gpYPrev;
-    if ((_aFresh || _bFresh || _xFresh || _yFresh)
+    // Action-flag edges. Each `gp{Action}Prev` snapshot is maintained
+    // at the top of pollGamepad (line ~35919), so we can edge-detect
+    // here cleanly without owning the snapshots. altFire is skipped
+    // because its Prev isn't tracked anywhere ; using it here would
+    // be a level-trigger (fires every frame held).
+    const _actionFresh =
+         (input.gpFire     && !input.gpFirePrev)
+      || (input.gpDash     && !input.gpDashPrev)
+      || (input.gpReload   && !input.gpReloadPrev)
+      || (input.gpAbility0 && !input.gpAbility0Prev)
+      || (input.gpAbility1 && !input.gpAbility1Prev)
+      || (input.gpAbility2 && !input.gpAbility2Prev)
+      || (input.gpCore     && !input.gpCorePrev);
+    if ((_aFresh || _bFresh || _xFresh || _yFresh || _actionFresh)
         && _previewedKey && LOADOUTS[_previewedKey]) {
       try { commitLoadout(_previewedKey); } catch (e) { console.warn('[ship-select] commit failed', e); }
     }
