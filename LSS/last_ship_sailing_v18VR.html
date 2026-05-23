@@ -35294,8 +35294,17 @@ function pollGamepad() {
   // D-pad up/down read directly (buttons 12/13) so menu nav still works when
   // button 12 is bound to 'core' for gameplay. We gate the gameplay core-edge
   // below whenever a menu is active, so there's no double-fire.
-  input.gpDpadUp = !!(gp.buttons[12] && (gp.buttons[12].pressed || gp.buttons[12].value > input.triggerThreshold));
-  input.gpDpadDown = !!(gp.buttons[13] && (gp.buttons[13].pressed || gp.buttons[13].value > input.triggerThreshold));
+  // (v18VR 2026-05-22 round 14) Left-stick Y fallback so the joystick
+  // also scrolls menu selections. Mirrors the existing stick-X fallback
+  // for D-pad LEFT/RIGHT a few lines below ; axis [1] is the left
+  // stick's Y on standard mapping (negative = up on most pads). Same
+  // 0.6 threshold to match the d-pad feel.
+  const _gpDpadUpBtn   = !!(gp.buttons[12] && (gp.buttons[12].pressed || gp.buttons[12].value > input.triggerThreshold));
+  const _gpDpadDownBtn = !!(gp.buttons[13] && (gp.buttons[13].pressed || gp.buttons[13].value > input.triggerThreshold));
+  const _gpStickUp   = (gp.axes[1] !== undefined && gp.axes[1] < -0.6);
+  const _gpStickDown = (gp.axes[1] !== undefined && gp.axes[1] >  0.6);
+  input.gpDpadUp   = _gpDpadUpBtn   || _gpStickUp;
+  input.gpDpadDown = _gpDpadDownBtn || _gpStickDown;
   // D-pad LEFT/RIGHT (buttons 14/15) and left-stick horizontal fallback for menu nav.
   // Stick threshold 0.6 matches the d-pad feel; only registers when the user pushes hard.
   const _gpDpadLeftBtn  = !!(gp.buttons[14] && (gp.buttons[14].pressed || gp.buttons[14].value > input.triggerThreshold));
@@ -35438,6 +35447,29 @@ function pollGamepad() {
     } else if (input.gpRB && !input.gpRBPrev) {
       if (typeof _cyclePerk === 'function') _cyclePerk(+1);
     }
+    // (v18VR 2026-05-22 round 14) Any face button (A/B/X/Y) commits the
+    // currently-previewed ship in addition to Start. Same edge-detect
+    // shape as the lobby A-button shortcut above ; gpAPrev was already
+    // tracked there. Tracking the rest with shared snapshots so the
+    // edge logic stays clean. Only fires inside ship-select, so the
+    // dash/ability bindings on these buttons during gameplay are
+    // untouched (the menu gate at !_menuActive below blocks those).
+    const _aBtn = !!(gp.buttons[0] && gp.buttons[0].pressed);
+    const _bBtn = !!(gp.buttons[1] && gp.buttons[1].pressed);
+    const _xBtn = !!(gp.buttons[2] && gp.buttons[2].pressed);
+    const _yBtn = !!(gp.buttons[3] && gp.buttons[3].pressed);
+    const _aFresh = _aBtn && !input.gpAPrev;
+    const _bFresh = _bBtn && !input.gpBPrev;
+    const _xFresh = _xBtn && !input.gpXPrev;
+    const _yFresh = _yBtn && !input.gpYPrev;
+    if ((_aFresh || _bFresh || _xFresh || _yFresh)
+        && _previewedKey && LOADOUTS[_previewedKey]) {
+      try { commitLoadout(_previewedKey); } catch (e) { console.warn('[ship-select] commit failed', e); }
+    }
+    input.gpAPrev = _aBtn;
+    input.gpBPrev = _bBtn;
+    input.gpXPrev = _xBtn;
+    input.gpYPrev = _yBtn;
   } else if (settingsOpen) {
     // Settings overlay nav: d-pad up/down moves focus between rows; d-pad
     // left/right adjusts the focused widget (slider step or dropdown cycle);
