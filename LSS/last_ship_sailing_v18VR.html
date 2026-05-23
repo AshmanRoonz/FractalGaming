@@ -10278,6 +10278,16 @@ class BillboardCloudSystem {
         'uniform vec3  uLightPos[8];',
         'uniform vec3  uLightColor[8];',
         'uniform float uLightStrength[8];',
+        // (v18VR 2026-05-22 round 9) Set to 1.0 per frame when XR is
+        // presenting. The fragment shader then drops the per-fragment
+        // FBM noise pass (~32 hash ops) and the 8-iter dynamic-light
+        // loop, falling back to a radial soft-disc with flat per-instance
+        // color. Sprites read as soft puffs instead of wispy patches but
+        // the silhouette and density stay roughly the same ; with the
+        // basin overdraw in V8-engine\'s big room (~100 overlapping
+        // sprites per pixel) this is where most of the GPU time was
+        // going. Driven from the per-frame tick in updateEffects.
+        'uniform float uVRLite;',
         // (v14e tune 1) FBM noise inside each sprite. Each instance offsets
         // the noise field by its iSeed so adjacent sprites read as distinct
         // wispy patches rather than identical soft circles. Combined with
@@ -10314,6 +10324,19 @@ class BillboardCloudSystem {
         // Outer radial falloff : alpha rolls smoothly from 1 to 0 across
         // the whole quad, no defined inner disc to read as a "bubble".
         '  float radial = 1.0 - smoothstep(0.0, 1.0, r);',
+        // (v18VR 2026-05-22 round 9) VR fast path. With heavy basin
+        // overdraw the FBM mask + 8-iter light loop dominate per-pixel
+        // cost ; in VR we just emit the radial-only soft puff and skip
+        // both. Sprites read as fuzzy soft circles instead of wispy
+        // patches, but the basin silhouette as a whole is unchanged
+        // because the radial falloff alone already breaks up the
+        // overlapping quads into a continuous blend.
+        '  if (uVRLite > 0.5) {',
+        '    float a0 = radial * vAlpha;',
+        '    if (a0 < 0.005) discard;',
+        '    gl_FragColor = vec4(vColor * a0, a0);',
+        '    return;',
+        '  }',
         // FBM noise mask. Per-instance seed shifts the noise into a
         // unique region for each sprite (47.3 / 19.7 just decorrelate
         // the x/y axes so seed steps don't repeat patterns).
@@ -10354,6 +10377,10 @@ class BillboardCloudSystem {
           new THREE.Color(), new THREE.Color(), new THREE.Color(), new THREE.Color(),
         ] },
         uLightStrength: { value: [0, 0, 0, 0, 0, 0, 0, 0] },
+        // (v18VR 2026-05-22 round 9) Driven from updateEffects per frame
+        // based on isXRPresenting(). 1.0 picks the radial-only fast path
+        // in the fragment shader ; 0.0 keeps the full FBM + light loop.
+        uVRLite:        { value: 0.0 },
       },
       transparent: true,
       blending: THREE.AdditiveBlending,
@@ -11830,22 +11857,21 @@ function _xrDrawAuxHud() {
   ctx.restore();
 }
 
-// Menu mirror plane. While the user is in VR and a 2D menu (settings or
-// ship-select) is on screen, html2canvas is used to rasterize the active
-// menu into a canvas every ~250 ms, which is then mirrored on a 3D plane
-// floating in front of the dolly. Existing gamepad/d-pad navigation works
-// unchanged; this is purely a "render the existing DOM in stereo" path.
-// (v18VR 2026-05-22 round 4) Canvas bumped 1024 -> 2048 and the plane
-// enlarged from 2.4m to 3.4m at 2m distance so text is readable inside
-// the headset. With Quest 2 per-eye native at ~1832 horizontal and the
-// plane covering ~80° FOV at this size, the new texture supersamples
-// the eye view slightly instead of being downsampled : letters render
-// crisp instead of blurry. Memory cost is 2048² × 4 bytes = 16 MB ; the
-// HUD canvas tier already runs textures larger than this so we're not
-// near any new ceiling.
+// VR menu overlay. (v18VR 2026-05-22 round 10) Replaced the html2canvas
+// DOM-mirror with a bespoke Canvas2D minimal overlay. The mirror approach
+// had two unfixable problems on Quest : html2canvas rasterizing the full
+// ship-select DOM (with its embedded WebGL ship-preview canvas, custom
+// fonts, gradients, and nested grids) blew the frame budget on every
+// rebuild and produced unreadable blurry text anyway, and the user
+// couldn't actually interact with the resulting picture in VR (no cursor,
+// no pointer). The new overlay draws a small native Canvas2D panel with
+// just the ship list and current selection ; gamepad D-pad cycles ships
+// (existing input handler unchanged) and B / Start commits. Text stays
+// crisp because we're drawing it natively into the canvas, and the
+// repaint only fires when the selection changes, not every 250 ms.
 const _xrMenuCanvas = document.createElement('canvas');
-_xrMenuCanvas.width = 2048;
-_xrMenuCanvas.height = 2048;
+_xrMenuCanvas.width = 1280;
+_xrMenuCanvas.height = 960;
 const _xrMenuCtx = _xrMenuCanvas.getContext('2d');
 let _xrMenuTex = null;
 let xrMenuMesh = null;
@@ -11859,11 +11885,12 @@ function _xrEnsureMenuMesh() {
   _xrMenuTex.magFilter = THREE.LinearFilter;
   _xrMenuTex.format = THREE.RGBAFormat;
   _xrMenuTex.generateMipmaps = false;
-  // (v18VR 2026-05-22 round 4) Plane bumped 2.4m -> 3.4m (covers ~80°
-  // horizontal FOV at the 2m reading distance ; reads as a large
-  // billboard sitting just past arm's reach). Square because the source
-  // DOM is variable aspect ; we letterbox inside.
-  const geo = new THREE.PlaneGeometry(3.4, 3.4);
+  // (v18VR 2026-05-22 round 10) 4:3 plane matching the new 1280x960
+  // canvas, brought closer (1.5m forward, 1.6m × 1.2m wide) so it reads
+  // as a cockpit-anchored panel rather than a wall-sized billboard.
+  // Covers ~57° horizontal FOV — comfortable to read without blocking
+  // peripheral view of the world.
+  const geo = new THREE.PlaneGeometry(1.6, 1.2);
   const mat = new THREE.MeshBasicMaterial({
     map: _xrMenuTex,
     transparent: true,
@@ -11871,7 +11898,7 @@ function _xrEnsureMenuMesh() {
     depthWrite: false,
   });
   xrMenuMesh = new THREE.Mesh(geo, mat);
-  xrMenuMesh.position.set(0, 0.2, -2.0);
+  xrMenuMesh.position.set(0, 0.0, -1.5);
   xrMenuMesh.renderOrder = 1000;
   xrMenuMesh.frustumCulled = false;
   xrMenuMesh.visible = false;
@@ -11879,91 +11906,141 @@ function _xrEnsureMenuMesh() {
   return xrMenuMesh;
 }
 
-// Rasterize a DOM element into _xrMenuCanvas using html2canvas. Async; the
-// pending flag prevents overlapping renders. Letterboxes the result into
-// the square menu canvas so the source DOM aspect is preserved.
-function _xrRasterizeMenu(targetEl) {
-  if (_xrMenuRasterizing) return;
-  if (!targetEl || typeof html2canvas === 'undefined') return;
-  _xrMenuRasterizing = true;
-  // Snapshot offsetWidth/Height before html2canvas does its DOM walk; the
-  // overlay can reflow under us during async work.
-  const w = Math.max(64, targetEl.offsetWidth  || 800);
-  const h = Math.max(64, targetEl.offsetHeight || 600);
-  // (v18VR 2026-05-22 round 4) html2canvas scale bumped 1 -> 2 so the
-  // intermediate raster is rendered at 2x DPR before being downsampled
-  // into the menu canvas. With the destination canvas now 2048², the
-  // 2x source preserves text edges that the old 1x source was throwing
-  // away during the upscale.
-  html2canvas(targetEl, {
-    backgroundColor: null,
-    scale: 2,
-    logging: false,
-    width: w,
-    height: h,
-    useCORS: true,
-  }).then(srcCanvas => {
-    const ctx = _xrMenuCtx;
-    const dw = _xrMenuCanvas.width;
-    const dh = _xrMenuCanvas.height;
-    ctx.clearRect(0, 0, dw, dh);
-    const sw = srcCanvas.width || w;
-    const sh = srcCanvas.height || h;
-    const scale = Math.min(dw / sw, dh / sh);
-    const drawW = sw * scale;
-    const drawH = sh * scale;
-    const x = (dw - drawW) * 0.5;
-    const y = (dh - drawH) * 0.5;
-    ctx.drawImage(srcCanvas, x, y, drawW, drawH);
-    if (_xrMenuTex) _xrMenuTex.needsUpdate = true;
-    _xrMenuLastRasterTime = performance.now();
-    _xrMenuRasterizing = false;
-  }).catch((err) => {
-    console.warn('VR menu rasterize failed:', err);
-    _xrMenuRasterizing = false;
-  });
+// (v18VR 2026-05-22 round 10) Bespoke Canvas2D draw of the active menu
+// into _xrMenuCanvas. Replaces the html2canvas-based _xrRasterizeMenu :
+// no async work, no DOM walk, no font/gradient quirks ; just native
+// Canvas2D text rendering at the canvas's native resolution. Called
+// from _xrUpdateMenuMirror only when the visible state changes (mode
+// flip or ship-select selection change), so the GPU upload cost is
+// effectively zero in steady state.
+function _xrDrawMenuCanvas(mode) {
+  const ctx = _xrMenuCtx;
+  const W = _xrMenuCanvas.width, H = _xrMenuCanvas.height;
+  ctx.clearRect(0, 0, W, H);
+  // Background panel + amber border, matching the in-game cockpit aesthetic.
+  ctx.fillStyle = 'rgba(10, 6, 30, 0.94)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255, 170, 68, 0.85)';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(3, 3, W - 6, H - 6);
+  if (mode === 'shipSelect')    _xrDrawShipSelectContent(ctx, W, H);
+  else if (mode === 'settings') _xrDrawSettingsHint(ctx, W, H);
+  else if (mode === 'lobby')    _xrDrawLobbyHint(ctx, W, H);
+  if (_xrMenuTex) _xrMenuTex.needsUpdate = true;
+  _xrMenuLastRasterTime = performance.now();
+}
+function _xrDrawShipSelectContent(ctx, W, H) {
+  ctx.fillStyle = '#ffaa44';
+  ctx.font = 'bold 64px Orbitron, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('SELECT SHIP', W / 2, 90);
+  if (typeof LOADOUTS === 'undefined' || !LOADOUTS) return;
+  const keys = Object.keys(LOADOUTS);
+  const selectedKey = (typeof _previewedKey !== 'undefined' && _previewedKey)
+    ? _previewedKey
+    : ((typeof player !== 'undefined' && player) ? player.loadoutKey : null);
+  const rowH = 78;
+  const listStartY = 180;
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const loadout = LOADOUTS[key];
+    const y = listStartY + i * rowH;
+    const isSelected = (key === selectedKey);
+    if (isSelected) {
+      ctx.fillStyle = 'rgba(255, 170, 68, 0.32)';
+      ctx.fillRect(60, y - 50, W - 120, rowH - 4);
+      ctx.strokeStyle = '#ffaa44';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(60, y - 50, W - 120, rowH - 4);
+    }
+    ctx.font = 'bold 44px Orbitron, sans-serif';
+    ctx.fillStyle = isSelected ? '#ffe8b0' : '#cfe7ff';
+    ctx.textAlign = 'left';
+    ctx.fillText(loadout.name || key, 90, y);
+    ctx.font = '30px Orbitron, sans-serif';
+    ctx.fillStyle = isSelected ? '#ffd080' : '#88aacc';
+    ctx.textAlign = 'right';
+    ctx.fillText(loadout.className || '', W - 90, y);
+  }
+  ctx.font = '26px Orbitron, sans-serif';
+  ctx.fillStyle = '#bbccdd';
+  ctx.textAlign = 'center';
+  ctx.fillText('D-PAD UP/DOWN : Cycle    B / START : Launch', W / 2, H - 38);
+}
+function _xrDrawSettingsHint(ctx, W, H) {
+  ctx.fillStyle = '#ffaa44';
+  ctx.font = 'bold 64px Orbitron, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('SETTINGS', W / 2, 120);
+  ctx.font = '36px Orbitron, sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.fillText('Settings UI is not available in VR.', W / 2, H / 2 - 30);
+  ctx.fillText('Tweak settings on the flat browser', W / 2, H / 2 + 30);
+  ctx.fillText('before entering VR.', W / 2, H / 2 + 90);
+  ctx.font = '26px Orbitron, sans-serif';
+  ctx.fillStyle = '#88aacc';
+  ctx.fillText('Press SETTINGS button again to close', W / 2, H - 50);
+}
+function _xrDrawLobbyHint(ctx, W, H) {
+  ctx.fillStyle = '#ffaa44';
+  ctx.font = 'bold 64px Orbitron, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('LAST SHIP SAILING', W / 2, 120);
+  ctx.font = '36px Orbitron, sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.fillText('Press A or START to begin', W / 2, H / 2);
+  ctx.font = '26px Orbitron, sans-serif';
+  ctx.fillStyle = '#88aacc';
+  ctx.fillText('Solo mode launches into ship select', W / 2, H / 2 + 60);
 }
 
-// (v18VR 2026-05-22 round 4) Menu mirror restored at higher fidelity.
-// Each frame in VR, decide which flat menu (if any) is on top, and
-// rasterize it onto the 3D billboard at most every 250 ms. Switching
-// menus forces an immediate rebuild so the user sees the new screen
-// right away. The plane + canvas size + html2canvas scale bumps above
-// take the result from "blurry, unusable" to legible inside the
-// headset.
+// (v18VR 2026-05-22 round 10) Replaces the html2canvas-based mirror.
+// Each frame picks the current visible menu mode (ship-select / settings
+// / lobby / none), and only repaints the canvas when the mode flips OR
+// when the ship-select cursor moves to a different ship. Steady-state
+// cost in VR is now one cheap visibility check per frame ; the actual
+// Canvas2D draw + texture upload only happens on user input. No more
+// 250ms-cadence html2canvas thrash on the main thread.
+let _xrMenuLastMode = null;
+let _xrMenuLastKey = null;
 function _xrUpdateMenuMirror() {
   if (!renderer.xr.isPresenting) {
     if (xrMenuMesh) xrMenuMesh.visible = false;
+    _xrMenuLastMode = null;
+    _xrMenuLastKey = null;
     return;
   }
-  let target = null;
+  // Determine current menu mode. settingsOpen beats ship-select beats lobby.
+  let mode = null;
   if (typeof settingsOpen !== 'undefined' && settingsOpen) {
-    target = document.getElementById('settings-overlay');
+    mode = 'settings';
   } else {
     const sel = document.getElementById('ship-select');
-    if (sel && sel.classList.contains('active')) target = sel;
-    if (!target) {
+    if (sel && sel.classList.contains('active')) {
+      mode = 'shipSelect';
+    } else {
       const lob = document.getElementById('lobby');
-      // #lobby uses position:fixed so offsetParent is always null ; check
-      // its inline display directly instead.
-      if (lob && lob.style.display !== 'none') target = lob;
+      if (lob && lob.style.display !== 'none') mode = 'lobby';
     }
   }
   const mesh = _xrEnsureMenuMesh();
-  if (!target) {
+  if (!mode) {
     mesh.visible = false;
-    _xrMenuLastTarget = null;
+    _xrMenuLastMode = null;
+    _xrMenuLastKey = null;
     return;
   }
   mesh.visible = true;
-  const now = performance.now();
-  if (target !== _xrMenuLastTarget) {
-    // Switched menus : rebuild immediately so the user sees the new
-    // screen on the very next frame instead of waiting up to 250 ms.
-    _xrMenuLastTarget = target;
-    _xrRasterizeMenu(target);
-  } else if (now - _xrMenuLastRasterTime > 250) {
-    _xrRasterizeMenu(target);
+  // Repaint on mode change, or on ship-select selection change.
+  const currentKey = (mode === 'shipSelect')
+    ? ((typeof _previewedKey !== 'undefined' && _previewedKey)
+        ? _previewedKey
+        : ((typeof player !== 'undefined' && player) ? player.loadoutKey : null))
+    : null;
+  if (mode !== _xrMenuLastMode || currentKey !== _xrMenuLastKey) {
+    _xrMenuLastMode = mode;
+    _xrMenuLastKey = currentKey;
+    _xrDrawMenuCanvas(mode);
   }
 }
 
@@ -25545,6 +25622,14 @@ function updateEffects(dt) {
       if (_am && _am.uniforms && _am.uniforms.time) _am.uniforms.time.value = _gameT;
       if (_am && _am.uniforms && _am.uniforms.uVRLite) _am.uniforms.uVRLite.value = _vrLite;
     }
+    // (v18VR 2026-05-22 round 9) BCS shares the same VR-lite branch ;
+    // single material on the singleton system, so one uniform write
+    // flips every basin / atom cloud sprite to the radial-only fast path.
+    if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem
+        && billboardCloudSystem.material && billboardCloudSystem.material.uniforms
+        && billboardCloudSystem.material.uniforms.uVRLite) {
+      billboardCloudSystem.material.uniforms.uVRLite.value = _vrLite;
+    }
   }
   // v8VR: drive the InstancedMesh particle pools from inside the same
   // per-frame effects update so they age on the same hitstop-respecting
@@ -29706,16 +29791,28 @@ function updateWeapon(dt) {
     }
   }
 
-  // ADS zoom (FOV change)
-  const baseFov = 90;
-  let targetFov = baseFov;
-  if (aiming) {
-    if (player.loadoutKey === 'PUNCTURE') targetFov = 40; // sniper zoom
-    else if (player.loadoutKey === 'VORTEX') targetFov = 55;
-    else targetFov = 65; // general ADS
+  // ADS zoom (FOV change). (v18VR 2026-05-22 round 11) Skipped in VR.
+  // The WebXR compositor uses the headset's projection matrices from
+  // the XR view ; camera.fov + camera.updateProjectionMatrix() are
+  // effectively ignored for stereo render. Running the lerp anyway
+  // produced no visible zoom but left players (correctly) wondering
+  // whether the system was stuck mid-zoom. The gameplay flags that
+  // actually depend on alt-fire — player.vortexAdsActive (damage
+  // bonus while ADS) and player.railgunCharge (sniper charge meter
+  // for Puncture) — are derived from `aiming` above, so they still
+  // fire normally on the XR controller's left-trigger input. Only
+  // the cosmetic FOV bend is bypassed here.
+  if (!(typeof isXRPresenting === 'function' && isXRPresenting())) {
+    const baseFov = 90;
+    let targetFov = baseFov;
+    if (aiming) {
+      if (player.loadoutKey === 'PUNCTURE') targetFov = 40; // sniper zoom
+      else if (player.loadoutKey === 'VORTEX') targetFov = 55;
+      else targetFov = 65; // general ADS
+    }
+    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12);
+    camera.updateProjectionMatrix();
   }
-  camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12);
-  camera.updateProjectionMatrix();
 
   // Spinup
   let firing = input.mouseDown || input.gpFire;
