@@ -30631,13 +30631,17 @@ function executeAbility(slot, ability) {
       // computed from missile_TRACKER.png (upper-left + upper-right pods).
       const _trLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
       let _trIdx = 0;
+      // (v18VR 2026-05-22 round 6) Same speed+spread refactor as Rocket
+      // Salvo : recompute forward at dispatch time so a player turning
+      // mid-volley doesn't see later missiles fly in the stale direction.
+      // Each missile still gets its own pre-rolled spread for the visible
+      // dispersion pattern.
       const _trQueue = [];
       for (const target of lockedTargets) {
         for (let m = 0; m < 5; m++) {
-          const _trSpread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
-          const _trVel = forward.clone().add(_trSpread).normalize().multiplyScalar(900);
           _trQueue.push({
-            velocity:    _trVel,
+            speed:       900,
+            spread:      new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0),
             damage:      1000,
             splash:      80,
             color:       LSS.CLASS_COLORS.TRACKER,
@@ -30679,12 +30683,21 @@ function executeAbility(slot, ability) {
       // the code spawned them simultaneously. Now queued ; the dispatcher
       // in updateAbilities releases one rocket per frame at ~35ms intervals.
       // Same rapid-salvo visual ; allocation cost spread across frames.
+      // (v18VR 2026-05-22 round 6) Store speed + spread separately so
+      // the dispatcher can rebuild velocity from the CURRENT forward at
+      // each rocket's spawn frame. The previous "freeze velocity at
+      // activation" approach meant that if the player rotated during
+      // the 0.14s staggered window (5 rockets × 0.035s interval), the
+      // later rockets still flew along the old forward — felt like
+      // "missiles shoot out the side of my head" in VR. Each rocket
+      // gets its own pre-rolled random spread so the visible pattern
+      // is identical to before ; only the base direction tracks the
+      // live ship orientation.
       const _rsQueue = [];
       for (let r = 0; r < rocketCount; r++) {
-        const _rsSpread = new THREE.Vector3((Math.random()-0.5)*0.12, (Math.random()-0.5)*0.12, 0);
-        const _rsVel = forward.clone().add(_rsSpread).normalize().multiplyScalar(800);
         _rsQueue.push({
-          velocity:   _rsVel,
+          speed:      800,
+          spread:     new THREE.Vector3((Math.random()-0.5)*0.12, (Math.random()-0.5)*0.12, 0),
           damage:     700,
           splash:     100,
           color:      LSS.CLASS_COLORS.SYPHON,
@@ -32427,8 +32440,17 @@ function _spawnSonarPulse(pos, owner) {
 //
 // _enqueueStaggeredRocketSalvo(player, configs, interval)
 //   Pushes a fresh queue onto player._pendingRocketSalvo. Each `config` is
-//   a plain object describing one rocket's spawn parameters :
-//     velocity     THREE.Vector3 (already includes spread + speed)
+//   a plain object describing one rocket's spawn parameters. Two velocity
+//   shapes are supported :
+//     speed (number) + spread (THREE.Vector3)  PREFERRED — direction is
+//       rebuilt from camera.quaternion at dispatch so a player turning
+//       mid-volley sees later rockets follow current aim. Required for
+//       correct VR behavior (otherwise the frozen forward becomes "out
+//       the side of my head" if the head/ship pose shifts during the
+//       0.14s staggered window).
+//     velocity (THREE.Vector3, fully baked)    LEGACY fallback — used by
+//       any older caller. Direction is frozen at activation time.
+//   Other fields :
 //     damage       number, projectile damage
 //     splash       number, splash radius
 //     color        hex color
@@ -32436,6 +32458,10 @@ function _spawnSonarPulse(pos, owner) {
 //     removeHaze   bool, call proj.removeHaze() after spawn
 //     tracking     bool, set proj.tracking = true after spawn
 //     trackTarget  bot, set proj.trackTarget = target after spawn
+//     originFrac   {x,y}, painted-cockpit launcher pod ; in flat mode the
+//                  rocket spawns from that world point, in VR it falls
+//                  through to player.position (see _computeScreenMuzzleWorld
+//                  VR early-return).
 //   The dispatcher (_drainStaggeredRocketSalvo, called from updateAbilities
 //   every frame) shifts one config per frame and spawns the Projectile.
 //   This avoids the 5-10-rockets-in-one-frame allocation spike that the
@@ -32478,9 +32504,21 @@ function _drainStaggeredRocketSalvo(dt) {
   } else {
     origin = player.position.clone();
   }
+  // (v18VR 2026-05-22 round 6) Live velocity from current ship pose. If
+  // the config carries speed+spread (the new shape), rebuild the velocity
+  // from the CURRENT camera.quaternion ; otherwise fall back to the
+  // pre-baked cfg.velocity for backwards compat with any callers we
+  // haven't migrated. This fixes the "missiles shoot out the side of my
+  // head" VR bug : a player turning during the 0.14s staggered salvo
+  // window used to see the later rockets fly along the stale forward.
+  let velocity = cfg.velocity;
+  if (typeof cfg.speed === 'number' && cfg.spread) {
+    const _liveFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    velocity = _liveFwd.add(cfg.spread).normalize().multiplyScalar(cfg.speed);
+  }
   const proj = new Projectile(
     origin,
-    cfg.velocity,
+    velocity,
     cfg.damage,
     cfg.splash,
     'player',
