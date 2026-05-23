@@ -36365,7 +36365,13 @@ function updateHUD() {
     _drawHudCanvas = (updateHUD._xrHudFrame === 0);
   }
   if (_drawHudCanvas) drawCircumpunctHUD();
-  if (_xrHudActive && !_drawHudCanvas) return;
+  // (v18VR 2026-05-22 round 7) In VR the canvas mirror is all we need ;
+  // every #core-fill / #doomed-vignette / #round-timer etc. update below
+  // hits a `display: none !important` DOM element. Return unconditionally
+  // after the canvas redraw so the long DOM-update tail (lockon decay
+  // walk + ~30 _hudText / _hudWidth / _hudDisplay calls + querySelector
+  // lookups) doesn't run on hidden elements every other frame.
+  if (_xrHudActive) return;
 
   // Core meter (keep DOM element updated for backward compat)
   const corePct = Math.min(100, player.coreMeter);
@@ -47603,10 +47609,24 @@ function gameLoop(timestamp) {
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   if (typeof _tickWallRipples === 'function') _tickWallRipples(dt); // (v18L Phase L-J)
-  tickCockpitFrameAnimation(); // (v17) cockpit frame: now stationary frame_<SHIP>.png + damage-shake hook
-  _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
-  tickGunLayer();               // (v17) per-ship gun recoil cycle on the behind-layer
-  tickAbilityOverlayFrame();    // (v17) slide-in ability "weapon out" overlay behind cockpit
+  // (v18VR 2026-05-22 round 7) Cockpit-overlay DOM ticks skipped in VR.
+  // tickCockpitFrameAnimation / _updateOverlayShift / tickGunLayer /
+  // tickAbilityOverlayFrame all run every frame to swap backgroundImage
+  // PNGs, parallax-shift transforms, and toggle classList on the painted
+  // cockpit DOM. In VR those elements all carry `display: none !important`
+  // (CSS rule on body.vr-active), so every write hits an invisible
+  // element ; the math + style assignments are pure waste. The user
+  // observed that ghost mode runs at full FPS — same gating logic these
+  // functions already use for `player.shipState === 'dead'` — and asked
+  // why ; this is one of the contributors. Skipping them in VR closes
+  // part of that perf gap without changing any visible output.
+  const _xrPresentingForOverlays = (typeof isXRPresenting === 'function') && isXRPresenting();
+  if (!_xrPresentingForOverlays) {
+    tickCockpitFrameAnimation(); // (v17) cockpit frame: now stationary frame_<SHIP>.png + damage-shake hook
+    _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
+    tickGunLayer();               // (v17) per-ship gun recoil cycle on the behind-layer
+    tickAbilityOverlayFrame();    // (v17) slide-in ability "weapon out" overlay behind cockpit
+  }
   checkExecutions(dt);
 
   // Network: broadcast our state to all peers
