@@ -10279,7 +10279,13 @@ renderer.xr.addEventListener('sessionstart', () => {
   const session = renderer.xr.getSession();
   if (session) {
     session.addEventListener('inputsourceschange', _xrUpdateInputSources);
+    try {
+      session.addEventListener('selectstart', _lssUnlockAnnouncerAudio, { once: true });
+      session.addEventListener('select', _lssUnlockAnnouncerAudio, { once: true });
+      session.addEventListener('squeezestart', _lssUnlockAnnouncerAudio, { once: true });
+    } catch (_) {}
   }
+  try { _lssUnlockAnnouncerAudio(); } catch (_) {}
   // (v18VR 2026-05-22) Prime speechSynthesis on the user-gesture-driven
   // sessionstart so Quest browser's TTS engine warms up before the first
   // priority announcement. Speaking an empty utterance is the canonical
@@ -44234,8 +44240,8 @@ const announcer = {
 
 function announcerInit() {
   if (typeof speechSynthesis === 'undefined') {
-    announcer.enabled = false;
-    console.log('[v8VR Announcer] SpeechSynthesis API not available; disabled.');
+    if (announcer.voiceSource === 'native') announcer.enabled = false;
+    console.log('[v8VR Announcer] SpeechSynthesis API not available; MP3 backend will be used if available.');
     return;
   }
   function pickVoice() {
@@ -44311,9 +44317,16 @@ function announcerAudition() {
 function announcerSay(text, opts) {
   opts = opts || {};
   if (!announcer.enabled || !text) return false;
-  if (typeof speechSynthesis === 'undefined') return false;
+  const _hasSpeechBackend = (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined');
+  const _hasMP3Backend = (
+    typeof window !== 'undefined' &&
+    window.announcerBackend &&
+    typeof window.announcerBackend.playText === 'function' &&
+    (typeof window.announcerBackend.isLocal !== 'function' || window.announcerBackend.isLocal())
+  );
+  if (!_hasSpeechBackend && !_hasMP3Backend) return false;
   const _isQuestUA = (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
-  if (_isQuestUA && announcer._questVoicesChecked == null) {
+  if (_hasSpeechBackend && _isQuestUA && announcer._questVoicesChecked == null) {
     announcer._questVoicesChecked = false;
     try {
       const _vs = speechSynthesis.getVoices() || [];
@@ -44335,7 +44348,20 @@ function announcerSay(text, opts) {
   if (!opts.priority && (now - announcer._lastSpokenAt) < announcer.globalGap) return false;
   announcer._lastSpokenAt = now;
 
-  if (opts.priority) speechSynthesis.cancel();
+  if (opts.priority) {
+    if (_hasSpeechBackend) speechSynthesis.cancel();
+    else if (_hasMP3Backend && typeof window.announcerBackend.cancel === 'function') window.announcerBackend.cancel();
+  }
+
+  if (!_hasSpeechBackend) {
+    try {
+      window.announcerBackend.playText(text, opts.volume != null ? opts.volume : announcer.volume);
+      return true;
+    } catch (e) {
+      console.warn('[v18VR Announcer] MP3 backend failed:', e && e.message);
+      return false;
+    }
+  }
 
   const u = new SpeechSynthesisUtterance(text);
   if (announcer.voice) u.voice = announcer.voice;
@@ -44350,7 +44376,7 @@ function announcerSay(text, opts) {
   u.onerror = function(e) {
     if (!announcerSay._errLogged) {
       announcerSay._errLogged = true;
-      console.warn('[v18VR Announcer] SpeechSynthesisUtterance error:', e && e.error, '— platform may lack a TTS engine.');
+      console.warn('[v18VR Announcer] SpeechSynthesisUtterance error:', e && e.error, '; platform may lack a TTS engine.');
     }
   };
   try {
@@ -44396,6 +44422,7 @@ function announce(key, text, opts) {
 
 function announcerCancelAll() {
   if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  else if (typeof window !== 'undefined' && window.announcerBackend && typeof window.announcerBackend.cancel === 'function') window.announcerBackend.cancel();
 }
 
 // =====================================================================
@@ -44492,14 +44519,36 @@ window.announceMultikill     = announceMultikill;
 // Voice source is configured in the Ship AI Voice settings panel.
 // =====================================================================
 (function () {
-  const AUDIO_BASE   = 'LSS/audio/';
-  const MANIFEST_URL = AUDIO_BASE + 'manifest.json';
+  const AUDIO_BASE_CANDIDATES = ['LSS/audio/', 'audio/', './audio/'];
+  let _audioBase = AUDIO_BASE_CANDIDATES[0];
+  let _manifestUrl = _audioBase + 'manifest.json';
 
   if (typeof window === 'undefined') return;
-  if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
-    // No speech API at all: hook will go on a stub. Worth it for the cancel side too.
-    console.warn('[announcer-mp3] speechSynthesis missing ; cannot intercept.');
-    return;
+  const _hasNativeSpeech = (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined');
+  if (!_hasNativeSpeech) {
+    console.warn('[announcer-mp3] speechSynthesis missing; installing MP3-only stub.');
+    window.SpeechSynthesisUtterance = function(text) {
+      this.text = text || '';
+      this.volume = 1;
+      this.rate = 1;
+      this.pitch = 1;
+      this.onerror = null;
+      this.onend = null;
+    };
+    window.speechSynthesis = {
+      speak: function(utterance) {
+        const text = utterance && utterance.text;
+        const volume = utterance && (utterance.volume != null ? utterance.volume : undefined);
+        if (text) _playLocal(text, volume);
+      },
+      cancel: function() { _stopCurrent(); },
+      resume: function() {},
+      getVoices: function() { return []; },
+      addEventListener: function() {},
+    };
+    if (typeof announcer !== 'undefined' && announcer && announcer.voiceSource !== 'native') {
+      announcer.enabled = true;
+    }
   }
 
   function _source() {
@@ -44517,38 +44566,176 @@ window.announceMultikill     = announceMultikill;
 
   // ---- Manifest -----------------------------------------------------
   const _manifest = new Map();
+  let _manifestReady = false;
+  let _manifestError = '';
   async function _loadManifest() {
-    try {
-      const resp = await fetch(MANIFEST_URL, { cache: 'no-cache' });
-      if (!resp.ok) throw new Error('manifest HTTP ' + resp.status);
-      const data = await resp.json();
-      _manifest.clear();
-      for (const hash of Object.keys(data)) _manifest.set(hash, data[hash]);
-      console.log('[announcer-mp3] loaded', _manifest.size, 'pre-baked lines.');
-    } catch (e) {
-      console.warn('[announcer-mp3] manifest load failed:', e && e.message);
+    _manifestReady = false;
+    _manifestError = '';
+    for (let i = 0; i < AUDIO_BASE_CANDIDATES.length; i++) {
+      const base = AUDIO_BASE_CANDIDATES[i];
+      const url = base + 'manifest.json';
+      try {
+        const resp = await fetch(url, { cache: 'no-cache' });
+        if (!resp.ok) throw new Error('manifest HTTP ' + resp.status);
+        const data = await resp.json();
+        _manifest.clear();
+        for (const hash of Object.keys(data)) _manifest.set(hash, data[hash]);
+        _audioBase = base;
+        _manifestUrl = url;
+        _manifestReady = true;
+        console.log('[announcer-mp3] loaded', _manifest.size, 'pre-baked lines from', url);
+        return true;
+      } catch (e) {
+        _manifestError = (e && e.message) || String(e);
+      }
     }
+    console.warn('[announcer-mp3] manifest load failed:', _manifestError);
+    return false;
   }
-  _loadManifest();
+  let _manifestPromise = _loadManifest();
+
+  function _sha256Hex16(bytes) {
+    const K = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    ];
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+    const len = bytes.length;
+    const bitLen = len * 8;
+    const total = (((len + 9 + 63) >> 6) << 6);
+    const msg = new Uint8Array(total);
+    msg.set(bytes);
+    msg[len] = 0x80;
+    msg[total - 4] = (bitLen >>> 24) & 255;
+    msg[total - 3] = (bitLen >>> 16) & 255;
+    msg[total - 2] = (bitLen >>> 8) & 255;
+    msg[total - 1] = bitLen & 255;
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    const w = new Uint32Array(64);
+    for (let off = 0; off < msg.length; off += 64) {
+      for (let i = 0; i < 16; i++) {
+        const j = off + i * 4;
+        w[i] = ((msg[j] << 24) | (msg[j + 1] << 16) | (msg[j + 2] << 8) | msg[j + 3]) >>> 0;
+      }
+      for (let i = 16; i < 64; i++) {
+        const s0 = (rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)) >>> 0;
+        const s1 = (rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)) >>> 0;
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (let i = 0; i < 64; i++) {
+        const S1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+        const ch = ((e & f) ^ (~e & g)) >>> 0;
+        const temp1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+        const S0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+        const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+        const temp2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + temp1) >>> 0;
+        d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+      }
+      h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+      h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    }
+    const words = [h0, h1];
+    let out = '';
+    for (let i = 0; i < words.length; i++) {
+      out += ((words[i] >>> 24) & 255).toString(16).padStart(2, '0');
+      out += ((words[i] >>> 16) & 255).toString(16).padStart(2, '0');
+      out += ((words[i] >>> 8) & 255).toString(16).padStart(2, '0');
+      out += (words[i] & 255).toString(16).padStart(2, '0');
+    }
+    return out;
+  }
 
   async function _hash16(text) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    const bytes = new TextEncoder().encode(text);
+    if (!window.isSecureContext || !window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) {
+      return _sha256Hex16(bytes);
+    }
+    const buf = await window.crypto.subtle.digest('SHA-256', bytes);
     return Array.from(new Uint8Array(buf)).slice(0, 8)
       .map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
   // ---- Playback -----------------------------------------------------
   let _current = null;
+  const _bufferCache = new Map();
   function _stopCurrent() {
     if (_current) {
-      try { _current.pause(); } catch (_) {}
-      try { _current.src = ''; } catch (_) {}
+      try { if (_current.stop) _current.stop(); } catch (_) {}
+      try { if (_current.pause) _current.pause(); } catch (_) {}
+      try { if (_current.src != null) _current.src = ''; } catch (_) {}
       _current = null;
+    }
+  }
+
+  function _audioCtx() {
+    try {
+      if (typeof initAudio === 'function') initAudio();
+      if (audio && audio.ctx) return audio.ctx;
+    } catch (_) {}
+    return null;
+  }
+
+  async function _playViaWebAudio(url, volume) {
+    const ctx = _audioCtx();
+    if (!ctx) return false;
+    try { if (ctx.state === 'suspended' && ctx.resume) await ctx.resume(); } catch (_) {}
+    let buf = _bufferCache.get(url);
+    if (!buf) {
+      const resp = await fetch(url, { cache: 'force-cache' });
+      if (!resp.ok) throw new Error('mp3 HTTP ' + resp.status);
+      const arr = await resp.arrayBuffer();
+      buf = await ctx.decodeAudioData(arr.slice(0));
+      _bufferCache.set(url, buf);
+    }
+    _stopCurrent();
+    const src = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    gain.gain.value = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
+    src.buffer = buf;
+    src.connect(gain);
+    try {
+      if (audio && audio.sfxBus) gain.connect(audio.sfxBus);
+      else if (audio && audio.masterGain) gain.connect(audio.masterGain);
+      else gain.connect(ctx.destination);
+    } catch (_) {
+      gain.connect(ctx.destination);
+    }
+    src.onended = () => { if (_current === src) _current = null; };
+    _current = src;
+    src.start(0);
+    return true;
+  }
+
+  function _playViaElement(url, volume) {
+    _stopCurrent();
+    const elAudio = new Audio(url);
+    elAudio.volume = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
+    elAudio.preload = 'auto';
+    elAudio.onended = () => { if (_current === elAudio) _current = null; };
+    elAudio.onerror = (e) => { console.warn('[announcer-mp3] audio error:', e); if (_current === elAudio) _current = null; };
+    _current = elAudio;
+    try {
+      const p = elAudio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(err => console.warn('[announcer-mp3] play() blocked:', err && err.message));
+      }
+    } catch (e) {
+      console.warn('[announcer-mp3] play() threw:', e);
     }
   }
 
   const _missLogged = {};
   async function _playLocal(text, volume) {
+    await _manifestPromise;
     let hash;
     try { hash = await _hash16(text); }
     catch (e) { console.warn('[announcer-mp3] hash failed:', e && e.message); return; }
@@ -44556,26 +44743,22 @@ window.announceMultikill     = announceMultikill;
     if (!_manifest.has(hash)) {
       if (!_missLogged[hash]) {
         _missLogged[hash] = true;
-        console.warn('[announcer-mp3] no MP3 for line, run bake.py to add:', JSON.stringify(text));
+        if (!_manifestReady) {
+          console.warn('[announcer-mp3] no manifest available; cannot play MP3:', _manifestError || _manifestUrl);
+        } else {
+          console.warn('[announcer-mp3] no MP3 for line, run bake.py to add:', JSON.stringify(text));
+        }
       }
       return;
     }
 
-    _stopCurrent();
-    const audio = new Audio(AUDIO_BASE + hash + '.mp3');
-    audio.volume = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
-    audio.preload = 'auto';
-    audio.onended = () => { if (_current === audio) _current = null; };
-    audio.onerror = (e) => { console.warn('[announcer-mp3] audio error:', e); if (_current === audio) _current = null; };
-    _current = audio;
+    const url = _audioBase + hash + '.mp3';
     try {
-      const p = audio.play();
-      if (p && typeof p.catch === 'function') {
-        p.catch(err => console.warn('[announcer-mp3] play() blocked:', err && err.message));
-      }
+      if (await _playViaWebAudio(url, volume)) return;
     } catch (e) {
-      console.warn('[announcer-mp3] play() threw:', e);
+      console.warn('[announcer-mp3] WebAudio playback failed:', e && e.message);
     }
+    _playViaElement(url, volume);
   }
 
   // ---- Intercept speechSynthesis.speak / cancel ---------------------
@@ -44605,9 +44788,18 @@ window.announceMultikill     = announceMultikill;
     console.warn('[announcer-mp3] could not patch speechSynthesis methods:', e);
   }
 
+  function _primeLocalAudio() {
+    try {
+      const ctx = _audioCtx();
+      if (ctx && ctx.state === 'suspended' && ctx.resume) ctx.resume();
+    } catch (_) {}
+    return _manifestPromise;
+  }
+
   // ---- Public debug surface -----------------------------------------
   window.announcerBackend = {
-    audioBase: AUDIO_BASE,
+    get audioBase() { return _audioBase; },
+    get manifestUrl() { return _manifestUrl; },
     manifest: _manifest,
     source: _source,
     setSource: (s) => {
@@ -44620,18 +44812,31 @@ window.announceMultikill     = announceMultikill;
       console.log('[announcer-mp3] source =', s);
     },
     isLocal: () => _shouldUseLocal(),
+    playText: (text, volume) => _playLocal(text, volume),
+    cancel: () => _stopCurrent(),
+    prime: () => _primeLocalAudio(),
+    hash16: _hash16,
     test: () => {
       // Goes through the real ANN path to prove the intercept works end-to-end.
       if (typeof ANN !== 'undefined' && ANN.welcomeAboard) return ANN.welcomeAboard('pilot');
       if (typeof window.announcerSay === 'function') return window.announcerSay('Welcome aboard, pilot. All systems online.', { priority: true });
     },
-    cacheStats: () => ({ manifest: _manifest.size }),
-    reloadManifest: _loadManifest,
+    cacheStats: () => ({ manifest: _manifest.size, buffers: _bufferCache.size, ready: _manifestReady, base: _audioBase, error: _manifestError }),
+    reloadManifest: () => { _manifestPromise = _loadManifest(); return _manifestPromise; },
   };
 
-  console.log('[announcer-mp3] active. source =', _source(), 'audio =', AUDIO_BASE);
+  console.log('[announcer-mp3] active. source =', _source(), 'audio =', _audioBase);
 })();
 
+function _lssUnlockAnnouncerAudio() {
+  try { if (typeof initAudio === 'function') initAudio(); } catch (_) {}
+  try { if (audio && audio.ctx && audio.ctx.state === 'suspended' && audio.ctx.resume) audio.ctx.resume(); } catch (_) {}
+  try {
+    if (typeof window !== 'undefined' && window.announcerBackend && typeof window.announcerBackend.prime === 'function') {
+      window.announcerBackend.prime();
+    }
+  } catch (_) {}
+}
 
 function updateScreenShake(dt) {
   if (game.shakeIntensity > 0.1) {
@@ -53399,40 +53604,53 @@ buildShipSelect();
 buildSettingsPage();
 _setupCustomMapLoader();
 
-// Hook audio init on first user interaction
-document.addEventListener('click', initAudio, { once: false });
-document.addEventListener('keydown', initAudio, { once: false });
+// Hook audio init on first user interaction.
+document.addEventListener('pointerdown', _lssUnlockAnnouncerAudio, { once: false });
+document.addEventListener('mousedown', _lssUnlockAnnouncerAudio, { once: false });
+document.addEventListener('touchstart', _lssUnlockAnnouncerAudio, { once: false, passive: true });
+document.addEventListener('click', _lssUnlockAnnouncerAudio, { once: false });
+document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
 
 // (v8_1VR) Resume the suspended AudioContext on first user gesture so the
 // reactive band can actually be heard without waiting for a sound effect to
 // play first. initAudio itself is idempotent ; this is just the resume.
 (function() {
   const fireResume = function() {
-    try { if (typeof initAudio === 'function') initAudio(); } catch (_) {}
-    try { if (audio && audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume(); } catch (_) {}
+    try { _lssUnlockAnnouncerAudio(); } catch (_) {}
     try {
       if (typeof musicSyncToGameState === 'function') musicSyncToGameState();
       if (typeof musicStart === 'function') musicStart();
     } catch (_) {}
+    document.removeEventListener('pointerdown', fireResume, true);
+    document.removeEventListener('mousedown', fireResume, true);
+    document.removeEventListener('touchstart', fireResume, true);
     document.removeEventListener('click',   fireResume, true);
     document.removeEventListener('keydown', fireResume, true);
   };
+  document.addEventListener('pointerdown', fireResume, true);
+  document.addEventListener('mousedown', fireResume, true);
+  document.addEventListener('touchstart', fireResume, { capture: true, passive: true });
   document.addEventListener('click',   fireResume, true);
   document.addEventListener('keydown', fireResume, true);
 })();
 
-// v8VR: one-shot ship-AI boot intro. SpeechSynthesis is gated by browsers
-// until a user gesture, so we trigger on the first click / keydown of the
-// session. Once is enough; subsequent clicks just go to the existing
-// initAudio handler. Tiny delay so the speech engine has settled.
+// v8VR: one-shot ship-AI boot intro. Browser audio is gated until a user
+// gesture, so we trigger from the first input event of the session. Once is
+// enough; subsequent input goes to the existing initAudio handler.
 (function() {
   const fireIntro = function() {
     setTimeout(() => {
       try { if (typeof ANN !== 'undefined' && ANN.introBoot) ANN.introBoot(); } catch (_) {}
     }, 250);
+    document.removeEventListener('pointerdown', fireIntro, true);
+    document.removeEventListener('mousedown', fireIntro, true);
+    document.removeEventListener('touchstart', fireIntro, true);
     document.removeEventListener('click',   fireIntro, true);
     document.removeEventListener('keydown', fireIntro, true);
   };
+  document.addEventListener('pointerdown', fireIntro, true);
+  document.addEventListener('mousedown', fireIntro, true);
+  document.addEventListener('touchstart', fireIntro, { capture: true, passive: true });
   document.addEventListener('click',   fireIntro, true);
   document.addEventListener('keydown', fireIntro, true);
 })();
