@@ -9844,6 +9844,15 @@ function _recolorAllAmbientClouds() {
   return touched;
 }
 
+function _bcsWakeInRange(cloud, source) {
+  if (!cloud || !cloud.position || !source) return true;
+  const r = (source.radius || 0) + (cloud.boundsRadius || 40);
+  const dx = source.x - cloud.position.x;
+  const dy = source.y - cloud.position.y;
+  const dz = source.z - cloud.position.z;
+  return (dx * dx + dy * dy + dz * dz) <= r * r;
+}
+
 function updateBCSWakes(dt) {
   // (v16a Potato) No BCS clouds in Potato, skip the wake-source gather entirely.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
@@ -9910,6 +9919,7 @@ function updateBCSWakes(dt) {
         if (!cloud || !cloud.applyWake) continue;
         for (let si = 0; si < sources.length; si++) {
           const s = sources[si];
+          if (!_bcsWakeInRange(cloud, s)) continue;
           cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
         }
         cloud.tickWake(dt);
@@ -9923,6 +9933,7 @@ function updateBCSWakes(dt) {
       if (!cloud || !cloud.applyWake) continue;
       for (let si = 0; si < sources.length; si++) {
         const s = sources[si];
+        if (!_bcsWakeInRange(cloud, s)) continue;
         // Per-sprite deformation (sprites within the cloud get tugged).
         cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
         if (p.velocity) {
@@ -10268,7 +10279,13 @@ renderer.xr.addEventListener('sessionstart', () => {
   const session = renderer.xr.getSession();
   if (session) {
     session.addEventListener('inputsourceschange', _xrUpdateInputSources);
+    try {
+      session.addEventListener('selectstart', _lssUnlockAnnouncerAudio, { once: true });
+      session.addEventListener('select', _lssUnlockAnnouncerAudio, { once: true });
+      session.addEventListener('squeezestart', _lssUnlockAnnouncerAudio, { once: true });
+    } catch (_) {}
   }
+  try { _lssUnlockAnnouncerAudio(); } catch (_) {}
   // (v18VR 2026-05-22) Prime speechSynthesis on the user-gesture-driven
   // sessionstart so Quest browser's TTS engine warms up before the first
   // priority announcement. Speaking an empty utterance is the canonical
@@ -10966,7 +10983,7 @@ function _vrUpdateShipNameLabel(bot, isVR, isEnemy) {
   if (!sprite) return;
   const ud = sprite.userData;
   const name = (bot.loadout.name || '?').toUpperCase();
-  const text = (isEnemy ? 'ENEMY: ' : 'ALLY: ') + name;
+  const text = name;
   if (text !== ud.lastText || isEnemy !== ud.lastEnemy) {
     ud.lastText = text;
     ud.lastEnemy = isEnemy;
@@ -21254,6 +21271,57 @@ function _gasPocketCenter(p) {
   return null;
 }
 
+const _gasPocketChemBuckets = new Map();
+const _gasClusterChemBuckets = new Map();
+function _gasBucketCoord(v, cell) {
+  return Math.floor(v / cell);
+}
+function _gasBucketKey(ix, iy, iz) {
+  return ix + '|' + iy + '|' + iz;
+}
+function _gasBucketAdd(map, ix, iy, iz, item) {
+  const key = _gasBucketKey(ix, iy, iz);
+  let bucket = map.get(key);
+  if (!bucket) {
+    bucket = [];
+    map.set(key, bucket);
+  }
+  bucket.push(item);
+}
+function _buildGasPocketChemBuckets(pockets, cell) {
+  _gasPocketChemBuckets.clear();
+  for (let i = 0; i < pockets.length; i++) {
+    const p = pockets[i];
+    const pos = _gasPocketCenter(p);
+    if (!pos) {
+      if (p) p._gasChemPos = null;
+      continue;
+    }
+    const ix = _gasBucketCoord(pos.x, cell);
+    const iy = _gasBucketCoord(pos.y, cell);
+    const iz = _gasBucketCoord(pos.z, cell);
+    p._gasChemPos = pos;
+    p._gasChemIndex = i;
+    p._gasChemIx = ix;
+    p._gasChemIy = iy;
+    p._gasChemIz = iz;
+    _gasBucketAdd(_gasPocketChemBuckets, ix, iy, iz, p);
+  }
+}
+function _buildGasClusterChemBuckets(clusters, cell) {
+  _gasClusterChemBuckets.clear();
+  if (!clusters || clusters.length === 0) return;
+  for (let k = 0; k < clusters.length; k++) {
+    const cl = clusters[k];
+    if (!cl || !cl.position) continue;
+    if (cl.alive === false || cl.broken) continue;
+    const ix = _gasBucketCoord(cl.position.x, cell);
+    const iy = _gasBucketCoord(cl.position.y, cell);
+    const iz = _gasBucketCoord(cl.position.z, cell);
+    _gasBucketAdd(_gasClusterChemBuckets, ix, iy, iz, cl);
+  }
+}
+
 function updateGasChemistry(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
   const budget = (typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
@@ -21265,6 +21333,7 @@ function updateGasChemistry(dt) {
     dt *= cadence;
   }
   const pockets = game.detachedGasPockets;
+  _buildGasPocketChemBuckets(pockets, GAS_REACT_RADIUS);
 
   // Decrement each pocket's spark cooldown. (v14e: GasCloud has no
   // intensity uniform like the v14d sphere shader did ; intensity boost
@@ -21280,52 +21349,71 @@ function updateGasChemistry(dt) {
   // Detached x detached pairs.
   for (let i = 0; i < pockets.length; i++) {
     const a = pockets[i];
-    const ap = _gasPocketCenter(a);
+    const ap = a && a._gasChemPos;
     if (!ap) continue;
-    for (let j = i + 1; j < pockets.length; j++) {
-      const b = pockets[j];
-      const bp = _gasPocketCenter(b);
-      if (!bp) continue;
-      const dx = ap.x - bp.x, dy = ap.y - bp.y, dz = ap.z - bp.z;
-      const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 > GAS_REACT_RADIUS_SQ) continue;
-      const dist = Math.sqrt(d2);
-      const intensity = 1.0 + (1.0 - dist / GAS_REACT_RADIUS) * 1.6;
-      // Spark fires only off pocket A's timer (one spark per pair attempt).
-      if (a._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
-        const aN = a._latticeNeighbors || 0;
-        const bN = b._latticeNeighbors || 0;
-        const isLattice = (aN >= 2 && bN >= 2);
-        if (isLattice) {
-          // Scale lightning intensity with how dense the lattice is.
-          const denseFrac = Math.min(1, (Math.min(aN, bN) - 1) / 4);  // 0 at 2, 1 at 6+
-          _spawnLayeredGasArc(ap, bp, 0.35 + denseFrac * 0.65);
-        } else {
-          _spawnLayeredGasArc(ap, bp, 0);
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let oz = -1; oz <= 1; oz++) {
+          const bucket = _gasPocketChemBuckets.get(_gasBucketKey(a._gasChemIx + ox, a._gasChemIy + oy, a._gasChemIz + oz));
+          if (!bucket) continue;
+          for (let bi = 0; bi < bucket.length; bi++) {
+            const b = bucket[bi];
+            if (!b || b._gasChemIndex <= i) continue;
+            const bp = b._gasChemPos;
+            if (!bp) continue;
+            const dx = ap.x - bp.x, dy = ap.y - bp.y, dz = ap.z - bp.z;
+            const d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > GAS_REACT_RADIUS_SQ) continue;
+            const dist = Math.sqrt(d2);
+            const intensity = 1.0 + (1.0 - dist / GAS_REACT_RADIUS) * 1.6;
+            // Spark fires only off pocket A's timer (one spark per pair attempt).
+            if (a._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
+              const aN = a._latticeNeighbors || 0;
+              const bN = b._latticeNeighbors || 0;
+              const isLattice = (aN >= 2 && bN >= 2);
+              if (isLattice) {
+                // Scale lightning intensity with how dense the lattice is.
+                const denseFrac = Math.min(1, (Math.min(aN, bN) - 1) / 4);  // 0 at 2, 1 at 6+
+                _spawnLayeredGasArc(ap, bp, 0.35 + denseFrac * 0.65);
+              } else {
+                _spawnLayeredGasArc(ap, bp, 0);
+              }
+              a._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
+            }
+          }
         }
-        a._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
       }
     }
   }
 
   // Detached x cluster pairs (free-floating gas reacts to nearby rocks).
   if (game.clusters && game.clusters.length > 0) {
+    _buildGasClusterChemBuckets(game.clusters, GAS_CLUSTER_REACT_RADIUS);
     for (let i = 0; i < pockets.length; i++) {
       const p = pockets[i];
-      const pp = _gasPocketCenter(p);
+      const pp = p && p._gasChemPos;
       if (!pp) continue;
-      for (let k = 0; k < game.clusters.length; k++) {
-        const cl = game.clusters[k];
-        if (!cl || !cl.position) continue;
-        if (cl.alive === false || cl.broken) continue;
-        const dx = pp.x - cl.position.x, dy = pp.y - cl.position.y, dz = pp.z - cl.position.z;
-        const d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > GAS_CLUSTER_REACT_RADIUS_SQ) continue;
-        const dist = Math.sqrt(d2);
-        const intensity = 1.0 + (1.0 - dist / GAS_CLUSTER_REACT_RADIUS) * 1.0;
-        if (p._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
-          _spawnLayeredGasArc(pp, cl.position, 0.20);
-          p._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
+      const ix = _gasBucketCoord(pp.x, GAS_CLUSTER_REACT_RADIUS);
+      const iy = _gasBucketCoord(pp.y, GAS_CLUSTER_REACT_RADIUS);
+      const iz = _gasBucketCoord(pp.z, GAS_CLUSTER_REACT_RADIUS);
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          for (let oz = -1; oz <= 1; oz++) {
+            const bucket = _gasClusterChemBuckets.get(_gasBucketKey(ix + ox, iy + oy, iz + oz));
+            if (!bucket) continue;
+            for (let bi = 0; bi < bucket.length; bi++) {
+              const cl = bucket[bi];
+              const dx = pp.x - cl.position.x, dy = pp.y - cl.position.y, dz = pp.z - cl.position.z;
+              const d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 > GAS_CLUSTER_REACT_RADIUS_SQ) continue;
+              const dist = Math.sqrt(d2);
+              const intensity = 1.0 + (1.0 - dist / GAS_CLUSTER_REACT_RADIUS) * 1.0;
+              if (p._sparkTimer <= 0 && typeof spawnLightningBolt === 'function') {
+                _spawnLayeredGasArc(pp, cl.position, 0.20);
+                p._sparkTimer = (GAS_SPARK_INTERVAL_MIN + Math.random() * (GAS_SPARK_INTERVAL_MAX - GAS_SPARK_INTERVAL_MIN)) / intensity;
+              }
+            }
+          }
         }
       }
     }
@@ -22789,6 +22877,8 @@ function _disposeOrReleaseEffect(e) {
   if (e.mesh.geometry) e.mesh.geometry.dispose();
   if (e.mesh.material) e.mesh.material.dispose();
 }
+const _fxArcFrom = new THREE.Vector3();
+const _fxArcTo = new THREE.Vector3();
 function updateEffects(dt) {
   // (v9) Tick the fractal atom shaders so they animate. Single shared
   // time value across all live atom mats (one uniform write per mat).
@@ -23026,16 +23116,16 @@ function updateEffects(dt) {
           // Two random points on the plume sphere for the bolt endpoints.
           const _t1 = Math.random() * Math.PI * 2, _p1 = Math.acos(2*Math.random() - 1);
           const _t2 = Math.random() * Math.PI * 2, _p2 = Math.acos(2*Math.random() - 1);
-          const _from = e.mesh.position.clone().add(new THREE.Vector3(
-            r * Math.sin(_p1) * Math.cos(_t1),
-            r * Math.cos(_p1),
-            r * Math.sin(_p1) * Math.sin(_t1),
-          ));
-          const _to = e.mesh.position.clone().add(new THREE.Vector3(
-            r * Math.sin(_p2) * Math.cos(_t2),
-            r * Math.cos(_p2),
-            r * Math.sin(_p2) * Math.sin(_t2),
-          ));
+          const _from = _fxArcFrom.set(
+            e.mesh.position.x + r * Math.sin(_p1) * Math.cos(_t1),
+            e.mesh.position.y + r * Math.cos(_p1),
+            e.mesh.position.z + r * Math.sin(_p1) * Math.sin(_t1),
+          );
+          const _to = _fxArcTo.set(
+            e.mesh.position.x + r * Math.sin(_p2) * Math.cos(_t2),
+            e.mesh.position.y + r * Math.cos(_p2),
+            e.mesh.position.z + r * Math.sin(_p2) * Math.sin(_t2),
+          );
           // Color, lifetime, branches, thickness. Short, slim, branchy ;
           // reads as electric crackle, not a weapon arc.
           const _col = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
@@ -23069,8 +23159,8 @@ function updateEffects(dt) {
           if (_bestEf) {
             const _icCol = (Math.random() < 0.7) ? 0x88aaff : 0xc080ff;
             spawnLightningBolt(
-              e.mesh.position.clone(),
-              _bestEf.mesh.position.clone(),
+              e.mesh.position,
+              _bestEf.mesh.position,
               _icCol,
               0.10 + Math.random() * 0.06,
               3 + Math.floor(Math.random() * 3),
@@ -23162,7 +23252,7 @@ function updateEffects(dt) {
     else if (e.type === 'debris') {
       const base = e.baseScale || 1;
       if (e.vel) {
-        e.mesh.position.add(e.vel.clone().multiplyScalar(dt));
+        e.mesh.position.addScaledVector(e.vel, dt);
         e.vel.multiplyScalar(0.97); // slight drag
       }
       if (e.rotVel) {
@@ -23260,7 +23350,7 @@ function updateEffects(dt) {
     // --- Sparks: fly, drag, shrink, fade ---
     else if (e.type === 'spark' && e.vel) {
       const base = e.baseScale || 1;
-      e.mesh.position.add(e.vel.clone().multiplyScalar(dt));
+      e.mesh.position.addScaledVector(e.vel, dt);
       e.vel.multiplyScalar(0.93);
       e.mesh.material.opacity = 1 - t;
       const s = (1 - t * 0.6) * base;
@@ -29024,6 +29114,43 @@ function _tickFireDOTs(dt) {
 }
 window._tickFireDOTs = _tickFireDOTs;
 
+const _abForward = new THREE.Vector3();
+const _abTmpA = new THREE.Vector3();
+const _abTmpB = new THREE.Vector3();
+const _abTmpC = new THREE.Vector3();
+const _abTmpD = new THREE.Vector3();
+const _abProbeMid = new THREE.Vector3();
+
+function _releaseVortexShieldBurst(playBurstSound) {
+  if (!player || player.vortexStored <= 0 || !player.position || !camera) return;
+  if (playBurstSound !== false) playBurstSound = true;
+  const stored = player.vortexStored;
+  const fwd = _abForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  const burstRadiusSq = 300 * 300;
+  const px = player.position.x, py = player.position.y, pz = player.position.z;
+  if (game && game.entities) {
+    for (const bot of game.entities) {
+      if (!bot || !bot.alive || bot.team === player.team || !bot.position) continue;
+      const dx = bot.position.x - px;
+      const dy = bot.position.y - py;
+      const dz = bot.position.z - pz;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 >= burstRadiusSq || d2 <= 0.0001) continue;
+      const inv = 1 / Math.sqrt(d2);
+      const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
+      if (facingDot > 0.2) {
+        const dealt = bot.takeDamage(stored, 'player');
+        if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
+      }
+    }
+  }
+  spawnExplosion(_abTmpA.copy(player.position).addScaledVector(fwd, 100), 30);
+  if (playBurstSound) {
+    try { playSound('vortex_reflect'); } catch (_) {}
+  }
+  player.vortexStored = 0;
+}
+
 function updateAbilities(dt) {
   // (v16a Phase T) Drain queued staggered rocket salvos (Rocket Salvo,
   // Tracker Rockets). One Projectile allocation per frame at most.
@@ -29033,35 +29160,13 @@ function updateAbilities(dt) {
 
   // Hold-to-use abilities: auto-deactivate when button released
   const holdKey = !input.keys['e'] && !(input.gpAbility1); // E key or gamepad RB
-  // Helper: detonate the Vortex Shield's stored projectile damage as a forward
-  // burst. Called both on key-release deactivation and on energy-drain
-  // forced-deactivation so either path delivers the same payoff.
-  const _vortexShieldRelease = () => {
-    if (player.vortexStored <= 0) return;
-    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    for (const bot of game.entities) {
-      if (!bot.alive || bot.team === player.team) continue;
-      const dist = player.position.distanceTo(bot.position);
-      if (dist < 300) {
-        const toBot = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
-        if (fwd.dot(toBot) > 0.2) {
-          const dealt = bot.takeDamage(player.vortexStored, 'player');
-          if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
-        }
-      }
-    }
-    spawnExplosion(player.position.clone().add(fwd.multiplyScalar(100)), 30);
-    // (v11) Cracking schwoop on the reflect burst.
-    try { playSound('vortex_reflect'); } catch (_) {}
-    player.vortexStored = 0;
-  };
   for (let i = 0; i < 3; i++) {
     if (player.abilityActive[i] && player.abilities[i] && _holdAbilityNames.includes(player.abilities[i].name)) {
       const abName = player.abilities[i].name;
       if (holdKey) {
         player.abilityActive[i] = false;
         // Trigger Vortex Shield burst release on drop
-        if (abName === 'Vortex Shield') _vortexShieldRelease();
+        if (abName === 'Vortex Shield') _releaseVortexShieldBurst();
         // Afterburner deactivation
         if (abName === 'Afterburner') {
           player.afterburnerActive = false;
@@ -29078,7 +29183,7 @@ function updateAbilities(dt) {
         if (player.vortexEnergy <= 0) {
           player.abilityActive[i] = false;
           player.vortexShieldLockout = true;
-          _vortexShieldRelease();
+          _releaseVortexShieldBurst();
         }
       }
     }
@@ -29097,21 +29202,7 @@ function updateAbilities(dt) {
         player.abilityActive[i] = false;
         // Vortex Shield: release stored damage as burst on deactivation
         if (player.abilities[i] && player.abilities[i].name === 'Vortex Shield' && player.vortexStored > 0) {
-          const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-          const burstRadius = 300;
-          for (const bot of game.entities) {
-            if (!bot.alive || bot.team === player.team) continue;
-            const dist = player.position.distanceTo(bot.position);
-            if (dist < burstRadius) {
-              const toBot = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
-              if (forward.dot(toBot) > 0.2) {
-                const dealt = bot.takeDamage(player.vortexStored, 'player');
-                if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
-              }
-            }
-          }
-          spawnExplosion(player.position.clone().add(forward.multiplyScalar(100)), 30);
-          player.vortexStored = 0;
+          _releaseVortexShieldBurst(false);
         }
         // Afterburner: deactivate speed boost
         if (player.abilities[i] && player.abilities[i].name === 'Afterburner') {
@@ -29145,18 +29236,22 @@ function updateAbilities(dt) {
         player.abilityTimers[i] = 0;
         // No fixed cooldown; the 10s recharge IS the cooldown.
       }
-      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const forward = _abForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
       const reach = player.chassis.hullLength * 2.6;
       const baseRadius = player.chassis.hullLength * 0.75; // wider face
       const tipRadius  = player.chassis.hullLength * 1.70; // much wider tip
       const maxDPS = 4000;
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
-        const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
-        const along = toBot.dot(forward);
+        const dx = bot.position.x - player.position.x;
+        const dy = bot.position.y - player.position.y;
+        const dz = bot.position.z - player.position.z;
+        const along = dx * forward.x + dy * forward.y + dz * forward.z;
         if (along < 0 || along > reach) continue; // behind or past tip
-        const perp = toBot.clone().sub(forward.clone().multiplyScalar(along));
-        const perpLen = perp.length();
+        const px = dx - forward.x * along;
+        const py = dy - forward.y * along;
+        const pz = dz - forward.z * along;
+        const perpLen = Math.sqrt(px * px + py * py + pz * pz);
         const along01 = along / reach; // 0 at shield face, 1 at cone tip
         const coneR = baseRadius + (tipRadius - baseRadius) * along01;
         if (perpLen > coneR) continue; // outside the cone
@@ -29194,7 +29289,7 @@ function updateAbilities(dt) {
       // inside the burn cone (probe at mid-cone with a generous radius so a
       // single call covers most of the cone volume), plus a small probe at
       // the player so clouds we are standing in also light up.
-      const probeMid = player.position.clone().add(forward.clone().multiplyScalar(reach * 0.5));
+      const probeMid = _abProbeMid.copy(player.position).addScaledVector(forward, reach * 0.5);
       const probeRadius = Math.max(reach * 0.5, (baseRadius + tipRadius) * 0.5);
       igniteNearbyGas(probeMid, probeRadius);
       igniteNearbyGas(player.position, baseRadius);
@@ -29211,34 +29306,6 @@ function updateAbilities(dt) {
         player.thermalShieldHP + rechargePerSec * dt
       );
     }
-    // Vortex Shield: drains VORTEX energy while held up; auto-drops when depleted
-    if (player.abilityActive[i] && player.abilities[i] && player.abilities[i].name === 'Vortex Shield') {
-      const drainRate = 120; // energy per second while held
-      player.vortexEnergy -= drainRate * dt;
-      if (player.vortexEnergy <= 0) {
-        player.vortexEnergy = 0;
-        // Force deactivate: release burst and drop shield
-        player.abilityActive[i] = false;
-        player.abilityTimers[i] = 0;
-        if (player.vortexStored > 0) {
-          const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-          const burstR = 300;
-          for (const bot of game.entities) {
-            if (!bot.alive || bot.team === player.team) continue;
-            const dist = player.position.distanceTo(bot.position);
-            if (dist < burstR) {
-              const toBot = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
-              if (fwd.dot(toBot) > 0.2) {
-                const dealt = bot.takeDamage(player.vortexStored, 'player');
-                if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
-              }
-            }
-          }
-          spawnExplosion(player.position.clone().add(fwd.multiplyScalar(100)), 30);
-          player.vortexStored = 0;
-        }
-      }
-    }
   }
 
   // Teleport invulnerability timer
@@ -29250,7 +29317,7 @@ function updateAbilities(dt) {
   // ---- CORE ABILITY TICK EFFECTS ----
   if (player.coreActive) {
     player.coreTimer -= dt;
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const forward = _abTmpB.set(0, 0, -1).applyQuaternion(camera.quaternion);
     const coreName = player.loadout ? player.loadout.core.name : '';
 
     // VORTEX Mega Laser: continuous heavy laser. Three layers stack into
@@ -29262,7 +29329,7 @@ function updateAbilities(dt) {
     // ; the arcs sell the high-voltage feel.
     if (coreName === 'Mega Laser') {
       const range = 3000;
-      const end = player.position.clone().add(forward.clone().multiplyScalar(range));
+      const end = _abTmpC.copy(player.position).addScaledVector(forward, range);
       if (!player._vortexCoreBeam) {
         // (v14c) LayeredFX 'core_beam' preset replaces the bespoke vortex
         // core beam shader. uIntensity is written per frame below.
@@ -29280,7 +29347,7 @@ function updateAbilities(dt) {
       // scale Y to the full range and X/Z to the beam radius. BEAM_RADIUS
       // controls the visible thickness ; bumped up for "epic" mass.
       const BEAM_RADIUS = 95;
-      const mid = player.position.clone().add(forward.clone().multiplyScalar(range * 0.5));
+      const mid = _abProbeMid.copy(player.position).addScaledVector(forward, range * 0.5);
       beam.position.copy(mid);
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
@@ -29316,14 +29383,13 @@ function updateAbilities(dt) {
           // Spawn 4 arcs per pulse (was 2) at varying scales.
           for (let a = 0; a < 4; a++) {
             const t = 0.15 + Math.random() * 0.78;
-            const along = player.position.clone().add(forward.clone().multiplyScalar(range * t));
+            const along = _abTmpA.copy(player.position).addScaledVector(forward, range * t);
             const reach = 110 + Math.random() * 90; // was ~80
-            const jit = new THREE.Vector3(
-              (Math.random() - 0.5) * reach,
-              (Math.random() - 0.5) * reach,
-              (Math.random() - 0.5) * reach
+            const tip = _abTmpC.set(
+              along.x + (Math.random() - 0.5) * reach,
+              along.y + (Math.random() - 0.5) * reach,
+              along.z + (Math.random() - 0.5) * reach
             );
-            const tip = along.clone().add(jit);
             spawnLightningBolt(along, tip, 0xeeccff, 0.12, 1, 2.4);
           }
           player._laserCoreArcTimer = 0.025 + Math.random() * 0.03;
@@ -29331,20 +29397,24 @@ function updateAbilities(dt) {
       }
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
-        const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
-        const proj = toBot.dot(forward);
+        const dx = bot.position.x - player.position.x;
+        const dy = bot.position.y - player.position.y;
+        const dz = bot.position.z - player.position.z;
+        const proj = dx * forward.x + dy * forward.y + dz * forward.z;
         if (proj > 0 && proj < range) {
-          const closest = player.position.clone().add(forward.clone().multiplyScalar(proj));
-          if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.2) {
+          const closest = _abTmpA.copy(player.position).addScaledVector(forward, proj);
+          const cdx = closest.x - bot.position.x;
+          const cdy = closest.y - bot.position.y;
+          const cdz = closest.z - bot.position.z;
+          const hitRadius = bot.chassis.hullLength * 1.2;
+          if (cdx * cdx + cdy * cdy + cdz * cdz < hitRadius * hitRadius) {
             const hadShield = bot.shield > 0;
             // (v16d fix) Surface hit point so the FX render outside the
             // ship's mesh instead of being buried inside it.
             const _surfR = bot.chassis.hullLength * 0.5;
-            const _toClosest = closest.clone().sub(bot.position);
-            const _len = _toClosest.length();
-            const hitPoint = (_len > 0.001)
-              ? bot.position.clone().add(_toClosest.multiplyScalar(_surfR / _len))
-              : bot.position.clone();
+            const _len = Math.sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
+            const hitPoint = _abProbeMid.copy(bot.position);
+            if (_len > 0.001) hitPoint.addScaledVector(_abTmpD.set(cdx, cdy, cdz), _surfR / _len);
             const dealt = bot.takeDamage(3000 * dt, 'player', hitPoint);
             if (dealt > 0) { player.damageDealt += dealt; }
             // 60 ms cadence per ship -> ~16 Hz roar of impact FX. Per-bot
@@ -29363,7 +29433,7 @@ function updateAbilities(dt) {
               if (typeof spawnLightningBolt === 'function') {
                 // One crackle per FX tick (don't multiply by per-frame
                 // rate or the lightning pool gets hammered).
-                const arcEnd = new THREE.Vector3(
+                const arcEnd = _abTmpA.set(
                   hitPoint.x + (Math.random() - 0.5) * 70,
                   hitPoint.y + (Math.random() - 0.5) * 70,
                   hitPoint.z + (Math.random() - 0.5) * 70
@@ -29388,17 +29458,19 @@ function updateAbilities(dt) {
       // Speed boost
       const curSpeed = player.velocity.length();
       if (curSpeed < player.chassis.flightSpeed * 2) {
-        player.velocity.add(forward.clone().multiplyScalar(200 * dt));
+        player.velocity.addScaledVector(forward, 200 * dt);
       }
       // Fire rockets periodically (Puncture Mega Barrage)
       if (Math.random() < dt * 3) {
-        const spread = new THREE.Vector3((Math.random()-0.5)*0.2, (Math.random()-0.5)*0.2, 0);
-        const vel = forward.clone().add(spread).normalize().multiplyScalar(1200);
+        const vel = _abTmpA.copy(forward);
+        vel.x += (Math.random() - 0.5) * 0.2;
+        vel.y += (Math.random() - 0.5) * 0.2;
+        vel.normalize().multiplyScalar(1200);
         // (v17) Alternate L/R painted launcher origin per spawn so the
         // barrage visibly emerges from both painted pods on core_PUNCTURE.png.
         // Falls back to player.position if the helper or launcher table
         // isn't available.
-        let _pbOrigin = player.position.clone();
+        let _pbOrigin = player.position;
         const _pbLaunchers = _PLAYER_LAUNCHER_FRACS.PUNCTURE;
         if (_pbLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
           player._megaBarrageLaunchIdx = (player._megaBarrageLaunchIdx || 0) + 1;
@@ -29431,8 +29503,8 @@ function updateAbilities(dt) {
       // Periodic Stun Bolt flurry. Broadcast each projectile so peers
       // see (and can dodge) the flying bolts. Fairness-critical.
       if (Math.random() < dt * 2) {
-        const vel = forward.clone().multiplyScalar(800);
-        const proj = new Projectile(player.position.clone(), vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
+        const vel = _abTmpA.copy(forward).multiplyScalar(800);
+        const proj = new Projectile(player.position, vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
         proj.isArcWave = true;
         game.projectiles.push(proj);
         if (typeof broadcastAbilityProjectile === 'function') {
@@ -29445,12 +29517,14 @@ function updateAbilities(dt) {
     // herd cleanly with the rest of the swarm.
     else if (coreName === 'Mega Tracker Rockets') {
       if (Math.random() < dt * 10) {
-        const spread = new THREE.Vector3((Math.random()-0.5)*0.25, (Math.random()-0.5)*0.25, 0);
-        const aimDir = forward.clone().add(spread).normalize();
+        const aimDir = _abTmpA.copy(forward);
+        aimDir.x += (Math.random() - 0.5) * 0.25;
+        aimDir.y += (Math.random() - 0.5) * 0.25;
+        aimDir.normalize();
         const vel = aimDir.multiplyScalar(525);
         // (v17) Alternate left/right painted launcher origin per spawn so
         // continuous core fire visibly emerges from both pods.
-        let _mtrcOrigin = player.position.clone();
+        let _mtrcOrigin = player.position;
         const _mtrcLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
         if (_mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
           player._megaTrackerLaunchIdx = (player._megaTrackerLaunchIdx || 0) + 1;
@@ -29471,7 +29545,7 @@ function updateAbilities(dt) {
         if (!bot.alive || bot.team === player.team) continue;
         const dist = player.position.distanceTo(bot.position);
         if (dist >= 3000 || dist >= nearDist) continue;
-        const losDir = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
+        const losDir = _abTmpA.subVectors(bot.position, player.position).normalize();
         // Pad +20 so a target sitting flush against a wall isn't excluded
         // by a microscopic SDF tolerance. raycastLevel's reported distance
         // is "to first wall hit"; targets closer than that are visible.
@@ -29481,14 +29555,14 @@ function updateAbilities(dt) {
       }
       if (nearest) {
         // Auto-aim: fire at nearest visible enemy with perfect accuracy.
-        const toTarget = new THREE.Vector3().subVectors(nearest.position, player.position).normalize();
+        const toTarget = _abTmpA.subVectors(nearest.position, player.position).normalize();
         if (Math.random() < dt * 20) { // 20 shots/sec
           // The target's LoS may have changed in the few ms since we
           // selected, so recheck before firing. Trim the tracer to the
           // wall distance if anything is now in the way (the shot then
           // visibly stops at the wall and deals no damage).
           const wallDist = raycastLevel(player.position, toTarget, 3000);
-          const end = player.position.clone().add(toTarget.clone().multiplyScalar(wallDist));
+          const end = _abTmpC.copy(player.position).addScaledVector(toTarget, wallDist);
           // Blaster AI Assist auto-aim shot uses class cyan tint.
           spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
           if (net.active && net.sendEvent) {
@@ -31175,6 +31249,28 @@ function _xrSynthGamepad() {
   };
 }
 
+const _mergedGamepadState = {
+  buttons: [],
+  axes: [0, 0, 0, 0],
+  gp: {
+    id: '',
+    index: -1,
+    connected: true,
+    mapping: 'standard',
+    timestamp: 0,
+    buttons: null,
+    axes: null,
+  },
+};
+const _emptyGpButton = { pressed: false, touched: false, value: 0 };
+let _gamepadIndicatorVisible = null;
+function _setGamepadIndicatorVisible(visible) {
+  if (_gamepadIndicatorVisible === visible) return;
+  _gamepadIndicatorVisible = visible;
+  const el = document.getElementById('gamepad-indicator');
+  if (el) el.style.display = visible ? 'block' : 'none';
+}
+
 function pollGamepad() {
   // VR fork: prefer a synthesized gamepad assembled from the active XR
   // controllers; falls through to native gamepads when not in VR or when
@@ -31203,17 +31299,17 @@ function pollGamepad() {
   let gp;
   if (xrGP && realGP) {
     // Merge: 18-slot virtual gamepad, OR on buttons, max-magnitude on axes.
-    const buttons = new Array(Math.max(xrGP.buttons.length, realGP.buttons.length, 18));
+    const buttons = _mergedGamepadState.buttons;
+    buttons.length = Math.max(xrGP.buttons.length, realGP.buttons.length, 18);
     for (let i = 0; i < buttons.length; i++) {
-      const a = xrGP.buttons[i] || { pressed: false, touched: false, value: 0 };
-      const b = realGP.buttons[i] || { pressed: false, touched: false, value: 0 };
-      buttons[i] = {
-        pressed: !!(a.pressed || b.pressed),
-        touched: !!(a.touched || b.touched),
-        value: Math.max(a.value || 0, b.value || 0),
-      };
+      const a = xrGP.buttons[i] || _emptyGpButton;
+      const b = realGP.buttons[i] || _emptyGpButton;
+      const out = buttons[i] || (buttons[i] = { pressed: false, touched: false, value: 0 });
+      out.pressed = !!(a.pressed || b.pressed);
+      out.touched = !!(a.touched || b.touched);
+      out.value = Math.max(a.value || 0, b.value || 0);
     }
-    const axes = [0, 0, 0, 0];
+    const axes = _mergedGamepadState.axes;
     for (let i = 0; i < 4; i++) {
       const ax = xrGP.axes[i] || 0;
       const bx = (realGP.axes && realGP.axes[i]) || 0;
@@ -31221,24 +31317,23 @@ function pollGamepad() {
       // ~0 from both sources, so this naturally prefers the active source.
       axes[i] = (Math.abs(ax) >= Math.abs(bx)) ? ax : bx;
     }
-    gp = {
-      id: 'Merged (XR + ' + (realGP.id || 'gamepad') + ')',
-      index: -1, connected: true, mapping: 'standard',
-      timestamp: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
-      buttons: buttons, axes: axes,
-    };
+    gp = _mergedGamepadState.gp;
+    gp.id = 'Merged (XR + ' + (realGP.id || 'gamepad') + ')';
+    gp.timestamp = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    gp.buttons = buttons;
+    gp.axes = axes;
   } else {
     gp = xrGP || realGP;
   }
 
   if (!gp) {
     input.gpConnected = false;
-    document.getElementById('gamepad-indicator').style.display = 'none';
+    _setGamepadIndicatorVisible(false);
     return;
   }
 
   input.gpConnected = true;
-  document.getElementById('gamepad-indicator').style.display = 'block';
+  _setGamepadIndicatorVisible(true);
 
   const dz = input.gpDeadzone;
 
@@ -44145,8 +44240,8 @@ const announcer = {
 
 function announcerInit() {
   if (typeof speechSynthesis === 'undefined') {
-    announcer.enabled = false;
-    console.log('[v8VR Announcer] SpeechSynthesis API not available; disabled.');
+    if (announcer.voiceSource === 'native') announcer.enabled = false;
+    console.log('[v8VR Announcer] SpeechSynthesis API not available; MP3 backend will be used if available.');
     return;
   }
   function pickVoice() {
@@ -44222,9 +44317,16 @@ function announcerAudition() {
 function announcerSay(text, opts) {
   opts = opts || {};
   if (!announcer.enabled || !text) return false;
-  if (typeof speechSynthesis === 'undefined') return false;
+  const _hasSpeechBackend = (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined');
+  const _hasMP3Backend = (
+    typeof window !== 'undefined' &&
+    window.announcerBackend &&
+    typeof window.announcerBackend.playText === 'function' &&
+    (typeof window.announcerBackend.isLocal !== 'function' || window.announcerBackend.isLocal())
+  );
+  if (!_hasSpeechBackend && !_hasMP3Backend) return false;
   const _isQuestUA = (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
-  if (_isQuestUA && announcer._questVoicesChecked == null) {
+  if (_hasSpeechBackend && _isQuestUA && announcer._questVoicesChecked == null) {
     announcer._questVoicesChecked = false;
     try {
       const _vs = speechSynthesis.getVoices() || [];
@@ -44246,7 +44348,20 @@ function announcerSay(text, opts) {
   if (!opts.priority && (now - announcer._lastSpokenAt) < announcer.globalGap) return false;
   announcer._lastSpokenAt = now;
 
-  if (opts.priority) speechSynthesis.cancel();
+  if (opts.priority) {
+    if (_hasSpeechBackend) speechSynthesis.cancel();
+    else if (_hasMP3Backend && typeof window.announcerBackend.cancel === 'function') window.announcerBackend.cancel();
+  }
+
+  if (!_hasSpeechBackend) {
+    try {
+      window.announcerBackend.playText(text, opts.volume != null ? opts.volume : announcer.volume);
+      return true;
+    } catch (e) {
+      console.warn('[v18VR Announcer] MP3 backend failed:', e && e.message);
+      return false;
+    }
+  }
 
   const u = new SpeechSynthesisUtterance(text);
   if (announcer.voice) u.voice = announcer.voice;
@@ -44261,7 +44376,7 @@ function announcerSay(text, opts) {
   u.onerror = function(e) {
     if (!announcerSay._errLogged) {
       announcerSay._errLogged = true;
-      console.warn('[v18VR Announcer] SpeechSynthesisUtterance error:', e && e.error, '— platform may lack a TTS engine.');
+      console.warn('[v18VR Announcer] SpeechSynthesisUtterance error:', e && e.error, '; platform may lack a TTS engine.');
     }
   };
   try {
@@ -44307,6 +44422,7 @@ function announce(key, text, opts) {
 
 function announcerCancelAll() {
   if (typeof speechSynthesis !== 'undefined') speechSynthesis.cancel();
+  else if (typeof window !== 'undefined' && window.announcerBackend && typeof window.announcerBackend.cancel === 'function') window.announcerBackend.cancel();
 }
 
 // =====================================================================
@@ -44403,14 +44519,36 @@ window.announceMultikill     = announceMultikill;
 // Voice source is configured in the Ship AI Voice settings panel.
 // =====================================================================
 (function () {
-  const AUDIO_BASE   = 'LSS/audio/';
-  const MANIFEST_URL = AUDIO_BASE + 'manifest.json';
+  const AUDIO_BASE_CANDIDATES = ['LSS/audio/', 'audio/', './audio/'];
+  let _audioBase = AUDIO_BASE_CANDIDATES[0];
+  let _manifestUrl = _audioBase + 'manifest.json';
 
   if (typeof window === 'undefined') return;
-  if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
-    // No speech API at all: hook will go on a stub. Worth it for the cancel side too.
-    console.warn('[announcer-mp3] speechSynthesis missing ; cannot intercept.');
-    return;
+  const _hasNativeSpeech = (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined');
+  if (!_hasNativeSpeech) {
+    console.warn('[announcer-mp3] speechSynthesis missing; installing MP3-only stub.');
+    window.SpeechSynthesisUtterance = function(text) {
+      this.text = text || '';
+      this.volume = 1;
+      this.rate = 1;
+      this.pitch = 1;
+      this.onerror = null;
+      this.onend = null;
+    };
+    window.speechSynthesis = {
+      speak: function(utterance) {
+        const text = utterance && utterance.text;
+        const volume = utterance && (utterance.volume != null ? utterance.volume : undefined);
+        if (text) _playLocal(text, volume);
+      },
+      cancel: function() { _stopCurrent(); },
+      resume: function() {},
+      getVoices: function() { return []; },
+      addEventListener: function() {},
+    };
+    if (typeof announcer !== 'undefined' && announcer && announcer.voiceSource !== 'native') {
+      announcer.enabled = true;
+    }
   }
 
   function _source() {
@@ -44428,38 +44566,176 @@ window.announceMultikill     = announceMultikill;
 
   // ---- Manifest -----------------------------------------------------
   const _manifest = new Map();
+  let _manifestReady = false;
+  let _manifestError = '';
   async function _loadManifest() {
-    try {
-      const resp = await fetch(MANIFEST_URL, { cache: 'no-cache' });
-      if (!resp.ok) throw new Error('manifest HTTP ' + resp.status);
-      const data = await resp.json();
-      _manifest.clear();
-      for (const hash of Object.keys(data)) _manifest.set(hash, data[hash]);
-      console.log('[announcer-mp3] loaded', _manifest.size, 'pre-baked lines.');
-    } catch (e) {
-      console.warn('[announcer-mp3] manifest load failed:', e && e.message);
+    _manifestReady = false;
+    _manifestError = '';
+    for (let i = 0; i < AUDIO_BASE_CANDIDATES.length; i++) {
+      const base = AUDIO_BASE_CANDIDATES[i];
+      const url = base + 'manifest.json';
+      try {
+        const resp = await fetch(url, { cache: 'no-cache' });
+        if (!resp.ok) throw new Error('manifest HTTP ' + resp.status);
+        const data = await resp.json();
+        _manifest.clear();
+        for (const hash of Object.keys(data)) _manifest.set(hash, data[hash]);
+        _audioBase = base;
+        _manifestUrl = url;
+        _manifestReady = true;
+        console.log('[announcer-mp3] loaded', _manifest.size, 'pre-baked lines from', url);
+        return true;
+      } catch (e) {
+        _manifestError = (e && e.message) || String(e);
+      }
     }
+    console.warn('[announcer-mp3] manifest load failed:', _manifestError);
+    return false;
   }
-  _loadManifest();
+  let _manifestPromise = _loadManifest();
+
+  function _sha256Hex16(bytes) {
+    const K = [
+      0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+      0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+      0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+      0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+      0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+      0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+      0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+      0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    ];
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+    const len = bytes.length;
+    const bitLen = len * 8;
+    const total = (((len + 9 + 63) >> 6) << 6);
+    const msg = new Uint8Array(total);
+    msg.set(bytes);
+    msg[len] = 0x80;
+    msg[total - 4] = (bitLen >>> 24) & 255;
+    msg[total - 3] = (bitLen >>> 16) & 255;
+    msg[total - 2] = (bitLen >>> 8) & 255;
+    msg[total - 1] = bitLen & 255;
+    let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+    let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+    const w = new Uint32Array(64);
+    for (let off = 0; off < msg.length; off += 64) {
+      for (let i = 0; i < 16; i++) {
+        const j = off + i * 4;
+        w[i] = ((msg[j] << 24) | (msg[j + 1] << 16) | (msg[j + 2] << 8) | msg[j + 3]) >>> 0;
+      }
+      for (let i = 16; i < 64; i++) {
+        const s0 = (rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3)) >>> 0;
+        const s1 = (rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10)) >>> 0;
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+      for (let i = 0; i < 64; i++) {
+        const S1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+        const ch = ((e & f) ^ (~e & g)) >>> 0;
+        const temp1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+        const S0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+        const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+        const temp2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + temp1) >>> 0;
+        d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+      }
+      h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+      h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+    }
+    const words = [h0, h1];
+    let out = '';
+    for (let i = 0; i < words.length; i++) {
+      out += ((words[i] >>> 24) & 255).toString(16).padStart(2, '0');
+      out += ((words[i] >>> 16) & 255).toString(16).padStart(2, '0');
+      out += ((words[i] >>> 8) & 255).toString(16).padStart(2, '0');
+      out += (words[i] & 255).toString(16).padStart(2, '0');
+    }
+    return out;
+  }
 
   async function _hash16(text) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    const bytes = new TextEncoder().encode(text);
+    if (!window.isSecureContext || !window.crypto || !window.crypto.subtle || !window.crypto.subtle.digest) {
+      return _sha256Hex16(bytes);
+    }
+    const buf = await window.crypto.subtle.digest('SHA-256', bytes);
     return Array.from(new Uint8Array(buf)).slice(0, 8)
       .map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
   // ---- Playback -----------------------------------------------------
   let _current = null;
+  const _bufferCache = new Map();
   function _stopCurrent() {
     if (_current) {
-      try { _current.pause(); } catch (_) {}
-      try { _current.src = ''; } catch (_) {}
+      try { if (_current.stop) _current.stop(); } catch (_) {}
+      try { if (_current.pause) _current.pause(); } catch (_) {}
+      try { if (_current.src != null) _current.src = ''; } catch (_) {}
       _current = null;
+    }
+  }
+
+  function _audioCtx() {
+    try {
+      if (typeof initAudio === 'function') initAudio();
+      if (audio && audio.ctx) return audio.ctx;
+    } catch (_) {}
+    return null;
+  }
+
+  async function _playViaWebAudio(url, volume) {
+    const ctx = _audioCtx();
+    if (!ctx) return false;
+    try { if (ctx.state === 'suspended' && ctx.resume) await ctx.resume(); } catch (_) {}
+    let buf = _bufferCache.get(url);
+    if (!buf) {
+      const resp = await fetch(url, { cache: 'force-cache' });
+      if (!resp.ok) throw new Error('mp3 HTTP ' + resp.status);
+      const arr = await resp.arrayBuffer();
+      buf = await ctx.decodeAudioData(arr.slice(0));
+      _bufferCache.set(url, buf);
+    }
+    _stopCurrent();
+    const src = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    gain.gain.value = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
+    src.buffer = buf;
+    src.connect(gain);
+    try {
+      if (audio && audio.sfxBus) gain.connect(audio.sfxBus);
+      else if (audio && audio.masterGain) gain.connect(audio.masterGain);
+      else gain.connect(ctx.destination);
+    } catch (_) {
+      gain.connect(ctx.destination);
+    }
+    src.onended = () => { if (_current === src) _current = null; };
+    _current = src;
+    src.start(0);
+    return true;
+  }
+
+  function _playViaElement(url, volume) {
+    _stopCurrent();
+    const elAudio = new Audio(url);
+    elAudio.volume = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
+    elAudio.preload = 'auto';
+    elAudio.onended = () => { if (_current === elAudio) _current = null; };
+    elAudio.onerror = (e) => { console.warn('[announcer-mp3] audio error:', e); if (_current === elAudio) _current = null; };
+    _current = elAudio;
+    try {
+      const p = elAudio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(err => console.warn('[announcer-mp3] play() blocked:', err && err.message));
+      }
+    } catch (e) {
+      console.warn('[announcer-mp3] play() threw:', e);
     }
   }
 
   const _missLogged = {};
   async function _playLocal(text, volume) {
+    await _manifestPromise;
     let hash;
     try { hash = await _hash16(text); }
     catch (e) { console.warn('[announcer-mp3] hash failed:', e && e.message); return; }
@@ -44467,26 +44743,22 @@ window.announceMultikill     = announceMultikill;
     if (!_manifest.has(hash)) {
       if (!_missLogged[hash]) {
         _missLogged[hash] = true;
-        console.warn('[announcer-mp3] no MP3 for line, run bake.py to add:', JSON.stringify(text));
+        if (!_manifestReady) {
+          console.warn('[announcer-mp3] no manifest available; cannot play MP3:', _manifestError || _manifestUrl);
+        } else {
+          console.warn('[announcer-mp3] no MP3 for line, run bake.py to add:', JSON.stringify(text));
+        }
       }
       return;
     }
 
-    _stopCurrent();
-    const audio = new Audio(AUDIO_BASE + hash + '.mp3');
-    audio.volume = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
-    audio.preload = 'auto';
-    audio.onended = () => { if (_current === audio) _current = null; };
-    audio.onerror = (e) => { console.warn('[announcer-mp3] audio error:', e); if (_current === audio) _current = null; };
-    _current = audio;
+    const url = _audioBase + hash + '.mp3';
     try {
-      const p = audio.play();
-      if (p && typeof p.catch === 'function') {
-        p.catch(err => console.warn('[announcer-mp3] play() blocked:', err && err.message));
-      }
+      if (await _playViaWebAudio(url, volume)) return;
     } catch (e) {
-      console.warn('[announcer-mp3] play() threw:', e);
+      console.warn('[announcer-mp3] WebAudio playback failed:', e && e.message);
     }
+    _playViaElement(url, volume);
   }
 
   // ---- Intercept speechSynthesis.speak / cancel ---------------------
@@ -44516,9 +44788,18 @@ window.announceMultikill     = announceMultikill;
     console.warn('[announcer-mp3] could not patch speechSynthesis methods:', e);
   }
 
+  function _primeLocalAudio() {
+    try {
+      const ctx = _audioCtx();
+      if (ctx && ctx.state === 'suspended' && ctx.resume) ctx.resume();
+    } catch (_) {}
+    return _manifestPromise;
+  }
+
   // ---- Public debug surface -----------------------------------------
   window.announcerBackend = {
-    audioBase: AUDIO_BASE,
+    get audioBase() { return _audioBase; },
+    get manifestUrl() { return _manifestUrl; },
     manifest: _manifest,
     source: _source,
     setSource: (s) => {
@@ -44531,18 +44812,31 @@ window.announceMultikill     = announceMultikill;
       console.log('[announcer-mp3] source =', s);
     },
     isLocal: () => _shouldUseLocal(),
+    playText: (text, volume) => _playLocal(text, volume),
+    cancel: () => _stopCurrent(),
+    prime: () => _primeLocalAudio(),
+    hash16: _hash16,
     test: () => {
       // Goes through the real ANN path to prove the intercept works end-to-end.
       if (typeof ANN !== 'undefined' && ANN.welcomeAboard) return ANN.welcomeAboard('pilot');
       if (typeof window.announcerSay === 'function') return window.announcerSay('Welcome aboard, pilot. All systems online.', { priority: true });
     },
-    cacheStats: () => ({ manifest: _manifest.size }),
-    reloadManifest: _loadManifest,
+    cacheStats: () => ({ manifest: _manifest.size, buffers: _bufferCache.size, ready: _manifestReady, base: _audioBase, error: _manifestError }),
+    reloadManifest: () => { _manifestPromise = _loadManifest(); return _manifestPromise; },
   };
 
-  console.log('[announcer-mp3] active. source =', _source(), 'audio =', AUDIO_BASE);
+  console.log('[announcer-mp3] active. source =', _source(), 'audio =', _audioBase);
 })();
 
+function _lssUnlockAnnouncerAudio() {
+  try { if (typeof initAudio === 'function') initAudio(); } catch (_) {}
+  try { if (audio && audio.ctx && audio.ctx.state === 'suspended' && audio.ctx.resume) audio.ctx.resume(); } catch (_) {}
+  try {
+    if (typeof window !== 'undefined' && window.announcerBackend && typeof window.announcerBackend.prime === 'function') {
+      window.announcerBackend.prime();
+    }
+  } catch (_) {}
+}
 
 function updateScreenShake(dt) {
   if (game.shakeIntensity > 0.1) {
@@ -44606,6 +44900,12 @@ function updateDamageIndicators(dt) {
 // ---- ENEMY HEALTH BARS (Pooled DOM elements) ----
 
 const hbarPool = { bars: [], markers: [], labels: [], initialized: false };
+
+function _hbarDisplay(el, value) {
+  if (!el || el._hbarDisplay === value) return;
+  el._hbarDisplay = value;
+  el.style.display = value;
+}
 
 function initHbarPool(maxBars, maxMarkers) {
   const container = document.getElementById('enemy-healthbars');
@@ -44688,8 +44988,8 @@ function updateEnemyHealthBars() {
   if (!hbarPool.initialized) initHbarPool(24, 8);
 
   if (!player.position || player.shipState === 'dead') {
-    for (const bar of hbarPool.bars) bar.style.display = 'none';
-    for (const mk of hbarPool.markers) mk.style.display = 'none';
+    for (const bar of hbarPool.bars) _hbarDisplay(bar, 'none');
+    for (const mk of hbarPool.markers) _hbarDisplay(mk, 'none');
     return;
   }
 
@@ -44698,7 +44998,7 @@ function updateEnemyHealthBars() {
   const halfH = winH / 2;
   const now = game.time || 0;
 
-  for (let i = 0; i < hbarPool.bars.length; i++) hbarPool.bars[i].style.display = 'none';
+  for (let i = 0; i < hbarPool.bars.length; i++) _hbarDisplay(hbarPool.bars[i], 'none');
 
   let labelIdx = 0;
   const _labels = hbarPool.labels;
@@ -44761,7 +45061,7 @@ function updateEnemyHealthBars() {
       visText = fullText;
     }
     const div = _labels[labelIdx++];
-    div.style.display = '';
+    _hbarDisplay(div, '');
     const flip = (sx > winW * 0.55);
     let cls = 'ship-name-label ' + (isEnemy ? 'ship-name-label--enemy' : 'ship-name-label--friendly');
     if (flip) cls += ' flip-left';
@@ -44777,7 +45077,7 @@ function updateEnemyHealthBars() {
     for (const np of net.networkPlayers) _processShipForLabel(np);
   }
   // Hide unused label slots.
-  for (let i = labelIdx; i < _labels.length; i++) _labels[i].style.display = 'none';
+  for (let i = labelIdx; i < _labels.length; i++) _hbarDisplay(_labels[i], 'none');
 
   // Stasis field world markers
   let mkIdx = 0;
@@ -44800,7 +45100,7 @@ function updateEnemyHealthBars() {
     if (mkIdx >= hbarPool.markers.length) break;
 
     const div = hbarPool.markers[mkIdx];
-    div.style.display = '';
+    _hbarDisplay(div, '');
     div.style.left = (sx - 20) + 'px';
     div.style.top = (sy - 20) + 'px';
     // Use cached label reference (populated in initHbarPool); saves per-frame
@@ -44808,7 +45108,7 @@ function updateEnemyHealthBars() {
     div._distEl.textContent = Math.round(dist) + 'm';
     mkIdx++;
   }
-  for (let i = mkIdx; i < hbarPool.markers.length; i++) hbarPool.markers[i].style.display = 'none';
+  for (let i = mkIdx; i < hbarPool.markers.length; i++) _hbarDisplay(hbarPool.markers[i], 'none');
 }
 
 // ---- MAIN GAME LOOP ----
@@ -53304,40 +53604,53 @@ buildShipSelect();
 buildSettingsPage();
 _setupCustomMapLoader();
 
-// Hook audio init on first user interaction
-document.addEventListener('click', initAudio, { once: false });
-document.addEventListener('keydown', initAudio, { once: false });
+// Hook audio init on first user interaction.
+document.addEventListener('pointerdown', _lssUnlockAnnouncerAudio, { once: false });
+document.addEventListener('mousedown', _lssUnlockAnnouncerAudio, { once: false });
+document.addEventListener('touchstart', _lssUnlockAnnouncerAudio, { once: false, passive: true });
+document.addEventListener('click', _lssUnlockAnnouncerAudio, { once: false });
+document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
 
 // (v8_1VR) Resume the suspended AudioContext on first user gesture so the
 // reactive band can actually be heard without waiting for a sound effect to
 // play first. initAudio itself is idempotent ; this is just the resume.
 (function() {
   const fireResume = function() {
-    try { if (typeof initAudio === 'function') initAudio(); } catch (_) {}
-    try { if (audio && audio.ctx && audio.ctx.state === 'suspended') audio.ctx.resume(); } catch (_) {}
+    try { _lssUnlockAnnouncerAudio(); } catch (_) {}
     try {
       if (typeof musicSyncToGameState === 'function') musicSyncToGameState();
       if (typeof musicStart === 'function') musicStart();
     } catch (_) {}
+    document.removeEventListener('pointerdown', fireResume, true);
+    document.removeEventListener('mousedown', fireResume, true);
+    document.removeEventListener('touchstart', fireResume, true);
     document.removeEventListener('click',   fireResume, true);
     document.removeEventListener('keydown', fireResume, true);
   };
+  document.addEventListener('pointerdown', fireResume, true);
+  document.addEventListener('mousedown', fireResume, true);
+  document.addEventListener('touchstart', fireResume, { capture: true, passive: true });
   document.addEventListener('click',   fireResume, true);
   document.addEventListener('keydown', fireResume, true);
 })();
 
-// v8VR: one-shot ship-AI boot intro. SpeechSynthesis is gated by browsers
-// until a user gesture, so we trigger on the first click / keydown of the
-// session. Once is enough; subsequent clicks just go to the existing
-// initAudio handler. Tiny delay so the speech engine has settled.
+// v8VR: one-shot ship-AI boot intro. Browser audio is gated until a user
+// gesture, so we trigger from the first input event of the session. Once is
+// enough; subsequent input goes to the existing initAudio handler.
 (function() {
   const fireIntro = function() {
     setTimeout(() => {
       try { if (typeof ANN !== 'undefined' && ANN.introBoot) ANN.introBoot(); } catch (_) {}
     }, 250);
+    document.removeEventListener('pointerdown', fireIntro, true);
+    document.removeEventListener('mousedown', fireIntro, true);
+    document.removeEventListener('touchstart', fireIntro, true);
     document.removeEventListener('click',   fireIntro, true);
     document.removeEventListener('keydown', fireIntro, true);
   };
+  document.addEventListener('pointerdown', fireIntro, true);
+  document.addEventListener('mousedown', fireIntro, true);
+  document.addEventListener('touchstart', fireIntro, { capture: true, passive: true });
   document.addEventListener('click',   fireIntro, true);
   document.addEventListener('keydown', fireIntro, true);
 })();
