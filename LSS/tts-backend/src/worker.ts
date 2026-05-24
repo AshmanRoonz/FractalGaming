@@ -1,24 +1,13 @@
 /**
  * Last Ship Sailing - TTS backend
  *
- * A Cloudflare Worker that turns text into spoken audio so the Meta Quest
- * browser (which has no built-in TTS voices) can still hear the ship-AI
- * announcer. The code lives on GitHub; a GitHub Action deploys it to
- * Cloudflare on push (see ../.github/workflows/deploy-tts-backend.yml).
+ * Cloudflare Worker that turns text into spoken audio so the Meta Quest
+ * browser can hear the ship-AI announcer. Defaults to Cloudflare Workers AI
+ * (MeloTTS) when no ElevenLabs key is configured ; uses ElevenLabs when
+ * ELEVENLABS_API_KEY is set.
  *
  * Endpoint:
- *   GET /tts?text=<text>&voice=<id>&speed=<float>
- *     -> 200 audio/mpeg (MP3)
- *
- * Provider: Cloudflare Workers AI MeloTTS by default
- * (model "@cf/myshell-ai/melotts"). Free tier covers tens of thousands of
- * calls per day for a personal project. Swap to ElevenLabs by setting the
- * ELEVENLABS_API_KEY secret (see the commented section in handleTts()).
- *
- * Caching: every distinct (text, voice, speed) tuple is cached in the
- * Cloudflare edge cache forever (immutable), so repeated announcer lines
- * never re-bill the AI model. The cache key is a SHA-256 of the inputs,
- * so URL ordering does not matter.
+ *   GET /tts?text=<text>&voice=<id>&speed=<float>  ->  200 audio/mpeg
  */
 
 export interface Env {
@@ -36,6 +25,20 @@ const DEFAULT_VOICE = 'EN-US';
 const DEFAULT_SPEED = 1.0;
 const MAX_TEXT_LEN = 400;
 
+// Hardcoded ElevenLabs voice id for the ship AI announcer. Used when the
+// ELEVENLABS_API_KEY secret is present and ELEVENLABS_VOICE_ID is unset.
+// Change voice without redeploying by setting ELEVENLABS_VOICE_ID secret:
+//   echo "<new-id>" | npx wrangler secret put ELEVENLABS_VOICE_ID
+const DEFAULT_ELEVEN_VOICE_ID = 'Xq2dbIWNPChFB77imiDe';
+
+// Heuristic: ElevenLabs voice ids are ~20 char alphanumeric strings.
+// The MeloTTS voice param uses "EN-US" / "EN-GB" style codes. We only
+// honor a client-passed voice for ElevenLabs when it actually looks like
+// an ElevenLabs id ; otherwise we fall back to the env / default voice.
+function looksLikeElevenLabsId(s: string): boolean {
+  return /^[A-Za-z0-9]{16,32}$/.test(s);
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -43,19 +46,20 @@ export default {
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: corsHeaders(request, env) });
     }
-
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       return json({ error: 'method_not_allowed' }, 405, request, env);
     }
-
     if (url.pathname === '/' || url.pathname === '/health') {
-      return json({ ok: true, service: 'lss-tts', voices: listVoices() }, 200, request, env);
+      return json({
+        ok: true,
+        service: 'lss-tts',
+        provider: env.ELEVENLABS_API_KEY ? 'elevenlabs' : 'workers-ai-melotts',
+        voices: listVoices(),
+      }, 200, request, env);
     }
-
     if (url.pathname === '/tts') {
       return handleTts(request, env, ctx, url);
     }
-
     return json({ error: 'not_found' }, 404, request, env);
   },
 };
@@ -70,21 +74,16 @@ async function handleTts(request: Request, env: Env, ctx: ExecutionContext, url:
     return json({ error: 'text_too_long', max: MAX_TEXT_LEN }, 413, request, env);
   }
 
-  // Edge cache lookup, keyed by SHA-256 of normalized inputs.
-  const cacheKey = await buildCacheKey(text, voice, speed, url);
+  const cacheKey = await buildCacheKey(text, voice, speed, url, !!env.ELEVENLABS_API_KEY);
   const cache = (caches as any).default as Cache;
   const cached = await cache.match(cacheKey);
-  if (cached) {
-    return withCors(cached, request, env);
-  }
+  if (cached) return withCors(cached, request, env);
 
   let audio: ArrayBuffer;
-  let contentType = 'audio/mpeg';
+  const contentType = 'audio/mpeg';
   try {
     if (env.ELEVENLABS_API_KEY) {
-      const eleven = await elevenlabsTts(env, text, voice, speed);
-      audio = eleven.audio;
-      contentType = eleven.contentType;
+      audio = await elevenlabsTts(env, text, voice, speed);
     } else {
       const out = await env.AI.run('@cf/myshell-ai/melotts', {
         prompt: text,
@@ -105,14 +104,19 @@ async function handleTts(request: Request, env: Env, ctx: ExecutionContext, url:
       'cache-control': 'public, max-age=31536000, immutable',
     },
   });
-
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
-
   return withCors(response, request, env);
 }
 
-async function elevenlabsTts(env: Env, text: string, voice: string, speed: number): Promise<{ audio: ArrayBuffer; contentType: string }> {
-  const voiceId = env.ELEVENLABS_VOICE_ID || voice;
+async function elevenlabsTts(env: Env, text: string, voice: string, speed: number): Promise<ArrayBuffer> {
+  // Priority: client-passed id (only if it looks like one) > env override > hardcoded default.
+  // This lets the client stay provider-agnostic (it always passes EN-US-style codes).
+  const voiceId = looksLikeElevenLabsId(voice)
+    ? voice
+    : (env.ELEVENLABS_VOICE_ID || DEFAULT_ELEVEN_VOICE_ID);
+  // ElevenLabs speed lives in voice_settings ; valid band is ~0.7-1.2.
+  // Our incoming speed mirrors announcer.rate (0.5-2.0) so we clamp here.
+  const elevenSpeed = Math.min(1.2, Math.max(0.7, speed));
   const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`, {
     method: 'POST',
     headers: {
@@ -123,14 +127,14 @@ async function elevenlabsTts(env: Env, text: string, voice: string, speed: numbe
     body: JSON.stringify({
       text,
       model_id: 'eleven_turbo_v2_5',
-      voice_settings: { stability: 0.45, similarity_boost: 0.75, speed },
+      voice_settings: { stability: 0.45, similarity_boost: 0.75, speed: elevenSpeed },
     }),
   });
   if (!resp.ok) {
     const errBody = await resp.text().catch(() => '');
-    throw new Error(`elevenlabs ${resp.status}: ${errBody.slice(0, 200)}`);
+    throw new Error(`elevenlabs ${resp.status}: ${errBody.slice(0, 300)}`);
   }
-  return { audio: await resp.arrayBuffer(), contentType: 'audio/mpeg' };
+  return await resp.arrayBuffer();
 }
 
 function voiceToLang(voice: string): string {
@@ -142,7 +146,7 @@ function voiceToLang(voice: string): string {
 function listVoices() {
   return {
     melotts: ['EN-US', 'EN-GB', 'EN-AU', 'EN-INDIA', 'EN-DEFAULT'],
-    note: 'Pass ?voice=<id>. ElevenLabs voice ids work too if ELEVENLABS_API_KEY is set.',
+    note: 'Pass ?voice=<id>. When ELEVENLABS_API_KEY is set, an ElevenLabs voice id may also be passed.',
   };
 }
 
@@ -151,8 +155,15 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
-async function buildCacheKey(text: string, voice: string, speed: number, baseUrl: URL): Promise<Request> {
-  const normalized = JSON.stringify({ t: text, v: voice.toUpperCase(), s: Math.round(speed * 100) / 100 });
+async function buildCacheKey(text: string, voice: string, speed: number, baseUrl: URL, isEleven: boolean): Promise<Request> {
+  // Bake provider into the cache key so flipping ELEVENLABS_API_KEY does not
+  // serve stale MeloTTS audio for an ElevenLabs-configured worker.
+  const normalized = JSON.stringify({
+    p: isEleven ? 'el' : 'melo',
+    t: text,
+    v: voice.toUpperCase(),
+    s: Math.round(speed * 100) / 100,
+  });
   const hashBuf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(normalized));
   const hex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
   const keyUrl = new URL(baseUrl.toString());
@@ -164,9 +175,7 @@ async function buildCacheKey(text: string, voice: string, speed: number, baseUrl
 async function coerceToArrayBuffer(out: any): Promise<ArrayBuffer> {
   if (out instanceof ArrayBuffer) return out;
   if (out && typeof out.arrayBuffer === 'function') return await out.arrayBuffer();
-  if (out instanceof Uint8Array) {
-    return out.slice().buffer as ArrayBuffer;
-  }
+  if (out instanceof Uint8Array) return out.slice().buffer as ArrayBuffer;
   if (out instanceof ReadableStream) {
     const reader = out.getReader();
     const chunks: Uint8Array[] = [];
@@ -181,13 +190,11 @@ async function coerceToArrayBuffer(out: any): Promise<ArrayBuffer> {
     for (const c of chunks) { merged.set(c, offset); offset += c.byteLength; }
     return merged.buffer;
   }
-  if (out && out.audio) {
-    if (typeof out.audio === 'string') {
-      const bin = atob(out.audio);
-      const bytes = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      return bytes.slice().buffer as ArrayBuffer;
-    }
+  if (out && typeof out.audio === 'string') {
+    const bin = atob(out.audio);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes.slice().buffer as ArrayBuffer;
   }
   throw new Error('unrecognized AI output shape');
 }
