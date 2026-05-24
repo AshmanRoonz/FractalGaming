@@ -77,9 +77,9 @@ repo**. Move (or copy) the file to its proper home:
 
 ```bash
 mkdir -p .github/workflows
-cp fractalgaming/LSS/tts-backend/.github/workflows/deploy-tts-backend.yml \
+cp LSS/tts-backend/.github/workflows/deploy-tts-backend.yml \
    .github/workflows/deploy-tts-backend.yml
-git rm -r fractalgaming/LSS/tts-backend/.github
+git rm -r LSS/tts-backend/.github
 ```
 
 ### 5. Push
@@ -97,16 +97,16 @@ Open that URL plus `/health` in a browser to confirm.
 
 ### 6. Wire it into the game
 
-Open `fractalgaming/LSS/last_ship_sailing_v21.html` and paste the
-contents of `client-snippet.html` (in this folder) **after** the
+Open `LSS/last_ship_sailing_v21.html` and paste the contents of
+`client-snippet.html` (in this folder) **after** the
 `const ANN = { ... };` block (around line 44331), inside the same
-`<script>`. Set the `BACKEND` constant at the top of the snippet to
-your worker URL.
+`<script>`. Set the `TTS_BACKEND` constant at the top of the snippet
+to your worker URL.
 
 ## Local development (optional)
 
 ```bash
-cd fractalgaming/LSS/tts-backend
+cd LSS/tts-backend
 npm install
 npx wrangler login    # one-time browser-based auth
 npm run dev           # local server at http://localhost:8787
