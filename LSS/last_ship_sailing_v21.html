@@ -39003,13 +39003,16 @@ document.addEventListener('mousedown', e => {
   // inside a menu panel. Without this guard, clicking the map > arrow during
   // the launch countdown latched input.mouseDown=true, which leaked into a
   // phantom muzzle flash on the first frame of the round.
+  // (v21 2026-05-23) The settings element id is #settings-overlay, not
+  // #settings-panel — the old selector never matched so settings clicks
+  // were being routed through the gameplay click logic. Fixed below.
   const isUI = !!(e.target && e.target.closest && (
     e.target.closest('button') ||
     e.target.closest('input') ||
     e.target.closest('select') ||
     e.target.closest('textarea') ||
     e.target.closest('#ship-select') ||
-    e.target.closest('#settings-panel') ||
+    e.target.closest('#settings-overlay') ||
     e.target.closest('#lobby')
   ));
   if (!isUI) {
@@ -39019,9 +39022,20 @@ document.addEventListener('mousedown', e => {
   // Don't grab pointer lock while ship-select is showing (between-rounds swap
   // path leaves game.state='warmup' with ship-select visible; we need clicks to
   // reach the ship list and confirm button).
+  // (v21 2026-05-23) Also skip pointer-lock acquisition while the Settings
+  // overlay is open, OR for any click that lands inside the overlay / on a
+  // UI control. Without this, every click on a slider / dropdown / button
+  // re-requested pointer lock under the cursor, which (a) yanked the
+  // cursor away mid-interaction, and (b) Chrome rate-limits repeated lock
+  // requests, producing the alternating "press ESC, then click works"
+  // pattern users had to fight through. Settings should leave gameplay
+  // input alone entirely.
   const selectActive = document.getElementById('ship-select') &&
                        document.getElementById('ship-select').classList.contains('active');
-  if (!input.locked && game.state !== 'select' && !selectActive) _safeRequestPointerLock();
+  const settingsBlocking = (typeof settingsOpen !== 'undefined' && settingsOpen);
+  if (!input.locked && game.state !== 'select' && !selectActive && !settingsBlocking && !isUI) {
+    _safeRequestPointerLock();
+  }
 });
 
 document.addEventListener('mouseup', e => {
