@@ -20796,6 +20796,194 @@ class ClusterObstacle {
   }
 }
 
+// === VOXEL ROOM SYSTEM ===
+// (v22 2026-05-25) Cave-like voxel skin inside each level sphere. Uses a
+// signed-distance + 3D noise field to give rooms organic, irregular walls
+// instead of perfect spheres. Tunnels stay smooth (the user wants tunnel
+// flight to be fast and unobstructed). Voxels are decorative for now ;
+// existing SDF collision handles ship physics, voxels just sit on top.
+//
+// Console toggles :
+//   game.voxelRoomsEnabled (default true)
+//   game.voxelRoomSize     (cell size in world units, default 30)
+//   game.voxelRoomNoise    (noise amplitude in world units, default 40)
+//   game.voxelRoomColor    (hex color, default 0x4a4a55)
+//   game.voxelRoomDepth    (wall band thickness multiplier, default 2)
+//   game.voxelRoomCore     (ship clearance multiplier, default 4)
+// After tweaking, trigger a round rebuild to see the change.
+
+// Cheap 3D value noise + fractal Brownian motion. Good enough for cave
+// shaping ; not a Perlin / Simplex, just hashed-gradient interpolation.
+function _vxHash3D(x, y, z) {
+  let n = (x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1402024683;
+  n = (n ^ (n >>> 13)) * 1274126177;
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967295;
+}
+function _vxNoise3D(x, y, z) {
+  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+  const x1 = x0 + 1, y1 = y0 + 1, z1 = z0 + 1;
+  const fx = x - x0, fy = y - y0, fz = z - z0;
+  const ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy), uz = fz*fz*(3-2*fz);
+  const c000 = _vxHash3D(x0,y0,z0);
+  const c100 = _vxHash3D(x1,y0,z0);
+  const c010 = _vxHash3D(x0,y1,z0);
+  const c110 = _vxHash3D(x1,y1,z0);
+  const c001 = _vxHash3D(x0,y0,z1);
+  const c101 = _vxHash3D(x1,y0,z1);
+  const c011 = _vxHash3D(x0,y1,z1);
+  const c111 = _vxHash3D(x1,y1,z1);
+  const c00 = c000*(1-ux) + c100*ux;
+  const c10 = c010*(1-ux) + c110*ux;
+  const c01 = c001*(1-ux) + c101*ux;
+  const c11 = c011*(1-ux) + c111*ux;
+  const c0 = c00*(1-uy) + c10*uy;
+  const c1 = c01*(1-uy) + c11*uy;
+  return c0*(1-uz) + c1*uz;
+}
+function _vxFbm3D(x, y, z, octaves) {
+  let sum = 0, amp = 1, freq = 1, ampSum = 0;
+  for (let i = 0; i < octaves; i++) {
+    sum += _vxNoise3D(x * freq, y * freq, z * freq) * amp;
+    ampSum += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return sum / ampSum;
+}
+// Point-in-cylinder test ; small overscan at ends so tunnel mouths inside
+// a sphere stay clear of voxels right at the join.
+function _vxPointInCylinder(px, py, pz, cyl) {
+  const ax = cyl.ax, ay = cyl.ay, az = cyl.az;
+  const dx = cyl.bx - ax, dy = cyl.by - ay, dz = cyl.bz - az;
+  const len2 = dx*dx + dy*dy + dz*dz;
+  if (len2 < 1) return false;
+  const t = ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / len2;
+  if (t < -0.08 || t > 1.08) return false;
+  const cx = ax + dx * t, cy = ay + dy * t, cz = az + dz * t;
+  const r = (cyl.r || 100) + 8;  // small grow so cylinder + voxel surface don't touch tangent
+  const distSq = (px - cx) * (px - cx) + (py - cy) * (py - cy) + (pz - cz) * (pz - cz);
+  return distSq < r * r;
+}
+
+class VoxelRoomSystem {
+  constructor(scn) {
+    this.scn = scn;
+    this._maxInstances = 30000;
+    this._color = 0x4a4a55;
+    // Unit-cube base geometry, scaled per instance via the dummy matrix so
+    // voxel size can change at runtime without rebuilding the mesh.
+    this.geometry = new THREE.BoxGeometry(1, 1, 1);
+    this.material = new THREE.MeshLambertMaterial({ color: this._color });
+    this.mesh = new THREE.InstancedMesh(this.geometry, this.material, this._maxInstances);
+    this.mesh.count = 0;
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 0;
+    scn.add(this.mesh);
+    this._dummy = new THREE.Object3D();
+  }
+
+  rebuild() {
+    if (!game.levelSpheres || game.levelSpheres.length === 0) {
+      this.mesh.count = 0;
+      this.mesh.instanceMatrix.needsUpdate = true;
+      return 0;
+    }
+    const vs       = (typeof game.voxelRoomSize === 'number'  && game.voxelRoomSize  >= 5)   ? game.voxelRoomSize  : 30;
+    const noiseAmp = (typeof game.voxelRoomNoise === 'number' && game.voxelRoomNoise >= 0)   ? game.voxelRoomNoise : 40;
+    const color    = (typeof game.voxelRoomColor === 'number')                               ? game.voxelRoomColor : this._color;
+    const depthMul = (typeof game.voxelRoomDepth === 'number' && game.voxelRoomDepth >= 0.5) ? game.voxelRoomDepth : 2;
+    const coreMul  = (typeof game.voxelRoomCore  === 'number' && game.voxelRoomCore  >= 1)   ? game.voxelRoomCore  : 4;
+    const shipClearance = vs * coreMul;
+    const wallDepth     = vs * depthMul;
+    if (this.material.color.getHex() !== color) this.material.color.setHex(color);
+    let spawned = 0;
+    const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+
+    for (const sphere of game.levelSpheres) {
+      if (spawned >= this._maxInstances) break;
+      const r = sphere.r;
+      const cellMin = Math.floor(-(r + wallDepth + vs) / vs);
+      const cellMax = Math.ceil((r + wallDepth + vs) / vs);
+
+      // Pass 1 : populate local grid of solid cells in the shell band.
+      const localGrid = new Set();
+      for (let ix = cellMin; ix <= cellMax; ix++) {
+        for (let iy = cellMin; iy <= cellMax; iy++) {
+          for (let iz = cellMin; iz <= cellMax; iz++) {
+            const wx = sphere.cx + (ix + 0.5) * vs;
+            const wy = sphere.cy + (iy + 0.5) * vs;
+            const wz = sphere.cz + (iz + 0.5) * vs;
+            const dx = wx - sphere.cx, dy = wy - sphere.cy, dz = wz - sphere.cz;
+            const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            const sd = d - r;
+            // Outside the band of interest
+            if (sd < -shipClearance - vs) continue;
+            if (sd > wallDepth + vs) continue;
+            // Ship clearance hard floor : never make voxels solid this far inside
+            if (sd < -shipClearance + vs * 0.5) continue;
+            // Tunnel cutout : any cell whose center is inside a tunnel stays air
+            let inTunnel = false;
+            if (game.levelCylinders) {
+              for (let ti = 0; ti < game.levelCylinders.length; ti++) {
+                if (_vxPointInCylinder(wx, wy, wz, game.levelCylinders[ti])) { inTunnel = true; break; }
+              }
+            }
+            if (inTunnel) continue;
+            // Noise-perturbed SDF : sd + noise > 0 => solid
+            const n = _vxFbm3D(wx * 0.006, wy * 0.006, wz * 0.006, 3) * 2 - 1;
+            if (sd + n * noiseAmp > -vs * 0.5) {
+              localGrid.add(ix + ',' + iy + ',' + iz);
+            }
+          }
+        }
+      }
+
+      // Pass 2 : keep only surface cells (any 6-neighbor empty) and write
+      // their transforms to the InstancedMesh.
+      const neighbors = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+      for (const key of localGrid) {
+        if (spawned >= this._maxInstances) break;
+        const parts = key.split(',');
+        const ix = parts[0] | 0, iy = parts[1] | 0, iz = parts[2] | 0;
+        let isSurface = false;
+        for (let k = 0; k < 6; k++) {
+          const nb = neighbors[k];
+          if (!localGrid.has((ix + nb[0]) + ',' + (iy + nb[1]) + ',' + (iz + nb[2]))) {
+            isSurface = true;
+            break;
+          }
+        }
+        if (!isSurface) continue;
+        const wx = sphere.cx + (ix + 0.5) * vs;
+        const wy = sphere.cy + (iy + 0.5) * vs;
+        const wz = sphere.cz + (iz + 0.5) * vs;
+        this._dummy.position.set(wx, wy, wz);
+        this._dummy.rotation.set(0, 0, 0);
+        this._dummy.scale.set(vs, vs, vs);
+        this._dummy.updateMatrix();
+        this.mesh.setMatrixAt(spawned, this._dummy.matrix);
+        spawned++;
+      }
+    }
+
+    this.mesh.count = spawned;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    if (typeof console !== 'undefined' && console.log) {
+      const dt = t0 ? ((performance.now() - t0) | 0) : -1;
+      console.log('[voxel-rooms] ' + spawned + ' surface voxels, vs=' + vs + ', noise=' + noiseAmp + (dt >= 0 ? ', ' + dt + ' ms' : ''));
+    }
+    return spawned;
+  }
+}
+
+let _voxelRoomSystem = null;
+function _voxelRoomsRebuild() {
+  if (typeof scene === 'undefined' || !scene) return 0;
+  if (!_voxelRoomSystem) _voxelRoomSystem = new VoxelRoomSystem(scene);
+  return _voxelRoomSystem.rebuild();
+}
+
+
 function spawnDynamicObjects(rooms) {
   if (game.clusters) {
     for (const cluster of game.clusters) {
@@ -20865,6 +21053,12 @@ function spawnDynamicObjects(rooms) {
   // tunnel draining downward from them — gas would naturally settle at
   // the bottom of those "basin" rooms.
   if (typeof _spawnBasinClouds === 'function') _spawnBasinClouds();
+  // (v22 2026-05-25) Voxel cave skin for rooms. Toggle / tunables on game
+  // object ; defaults to on. See VoxelRoomSystem above for console knobs.
+  if (typeof game.voxelRoomsEnabled !== 'boolean') game.voxelRoomsEnabled = true;
+  if (game.voxelRoomsEnabled && typeof _voxelRoomsRebuild === 'function') {
+    try { _voxelRoomsRebuild(); } catch (e) { console.warn('[voxel-rooms] rebuild failed:', e); }
+  }
 }
 
 function _spawnBasinClouds() {
