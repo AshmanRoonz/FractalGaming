@@ -44354,6 +44354,219 @@ window.announcerAudition     = announcerAudition;
 window.ANN                   = ANN;
 window.announceMultikill     = announceMultikill;
 
+// =====================================================================
+// LSS TTS BACKEND BRIDGE  (auto-inserted from tts-backend/client-snippet.html)
+// Routes announcer calls to https://lss-tts.ashroney.workers.dev when
+// the browser has no native TTS voices (Meta Quest). On platforms with
+// voices, the original speechSynthesis path is used unchanged.
+// Console toggles: announcerBackend.forceOn() / .forceOff() / .test()
+// =====================================================================
+(function () {
+  // ===================================================================
+  // CONFIG - edit this one line.
+  // ===================================================================
+  const TTS_BACKEND = 'https://lss-tts.ashroney.workers.dev';
+  const TTS_VOICE   = 'EN-US';    // or EN-GB, EN-AU, EN-INDIA, EN-DEFAULT
+  // ===================================================================
+
+  if (typeof window === 'undefined') return;
+  if (typeof window.announcerSay !== 'function') {
+    console.warn('[TTS-backend] announcerSay not found ; paste this snippet AFTER announcerSay is defined.');
+    return;
+  }
+
+  // Decide whether to route through the backend. We do this lazily on each
+  // call so a late-arriving voiceschanged event (desktop browsers) flips us
+  // back to native speech without reload.
+  let _forceMode = null;   // 'on' | 'off' | null (= auto)
+  function _shouldUseBackend() {
+    if (_forceMode === 'on')  return true;
+    if (_forceMode === 'off') return false;
+    if (typeof speechSynthesis === 'undefined') return true;
+    try {
+      const voices = speechSynthesis.getVoices() || [];
+      // Quest browser exposes speechSynthesis but reports 0 voices forever.
+      return voices.length === 0;
+    } catch (_) { return true; }
+  }
+
+  // -------- In-memory MP3 cache so repeated lines are instant ----------
+  // The Worker already caches at the edge, but a second round trip is
+  // still ~50-100ms; an in-memory blob URL is < 1ms.
+  const _blobCache = new Map();        // key -> objectURL
+  const MAX_CACHE  = 128;              // ship-AI vocabulary is small
+
+  function _cacheKey(text, voice, speed) {
+    return voice + '|' + speed + '|' + text;
+  }
+
+  async function _fetchAudio(text, voice, speed) {
+    const key = _cacheKey(text, voice, speed);
+    if (_blobCache.has(key)) return _blobCache.get(key);
+
+    const url = TTS_BACKEND + '/tts'
+              + '?text='  + encodeURIComponent(text)
+              + '&voice=' + encodeURIComponent(voice)
+              + '&speed=' + encodeURIComponent(speed);
+
+    const resp = await fetch(url, { method: 'GET' });
+    if (!resp.ok) throw new Error('TTS HTTP ' + resp.status);
+    const blob = await resp.blob();
+    const objectUrl = URL.createObjectURL(blob);
+
+    // LRU-ish: drop the oldest entry if we are over the cap.
+    if (_blobCache.size >= MAX_CACHE) {
+      const oldestKey = _blobCache.keys().next().value;
+      URL.revokeObjectURL(_blobCache.get(oldestKey));
+      _blobCache.delete(oldestKey);
+    }
+    _blobCache.set(key, objectUrl);
+    return objectUrl;
+  }
+
+  // -------- Audio playback with priority cancellation ------------------
+  // Mirrors the contract of speechSynthesis: only one line at a time;
+  // priority lines cancel whatever is playing.
+  let _current = null;
+
+  function _stopCurrent() {
+    if (_current) {
+      try { _current.pause(); } catch (_) {}
+      try { _current.src = ''; } catch (_) {}
+      _current = null;
+    }
+  }
+
+  // Mirror of the in-file _announcerCurrentRate() so backend playback
+  // follows the same menu / warmup / combat / round-end cadence the
+  // desktop speechSynthesis path uses. Falls back to announcer.rate when
+  // dynamicRate is off or game state is unrecognized.
+  function _currentRate() {
+    if (typeof announcer === 'undefined' || !announcer) return 1.0;
+    if (!announcer.dynamicRate) return announcer.rate || 1.0;
+    const s = (typeof game !== 'undefined' && game && game.state) ? game.state : '';
+    switch (s) {
+      case 'select': case 'lobby': case '': case undefined: case null:
+        return announcer.rateMenu     || announcer.rate || 1.0;
+      case 'warmup':   return announcer.rateWarmup   || announcer.rate || 1.0;
+      case 'playing':  return announcer.rateCombat   || announcer.rate || 1.0;
+      case 'roundEnd': return announcer.rateRoundEnd || announcer.rate || 1.0;
+      case 'matchEnd': return announcer.rateMatchEnd || announcer.rate || 1.0;
+      default:         return announcer.rate || 1.0;
+    }
+  }
+
+  async function _backendSpeak(text, opts) {
+    opts = opts || {};
+    const voice = opts.voice || TTS_VOICE;
+    // Map announcer rate (0.5-2.0, with 1.0 = normal) to the backend speed
+    // param 1:1. The Worker clamps to [0.5, 2.0].
+    const speed = opts.rate != null ? opts.rate : _currentRate();
+    const volume = opts.volume != null ? opts.volume
+                  : (typeof announcer !== 'undefined' ? announcer.volume : 0.9);
+
+    if (opts.priority) _stopCurrent();
+
+    let audioUrl;
+    try {
+      audioUrl = await _fetchAudio(text, voice, speed);
+    } catch (e) {
+      if (!_backendSpeak._errLogged) {
+        _backendSpeak._errLogged = true;
+        console.warn('[TTS-backend] fetch failed:', e && e.message ? e.message : e);
+      }
+      return;
+    }
+
+    const audio = new Audio(audioUrl);
+    audio.volume = Math.max(0, Math.min(1, volume));
+    audio.preload = 'auto';
+    audio.onended = () => { if (_current === audio) _current = null; };
+    audio.onerror = (e) => {
+      console.warn('[TTS-backend] <audio> error:', e);
+      if (_current === audio) _current = null;
+    };
+
+    if (opts.priority || !_current) {
+      _current = audio;
+      try {
+        const p = audio.play();
+        if (p && typeof p.catch === 'function') {
+          p.catch(err => {
+            // Autoplay block (desktop). The original speechSynthesis path
+            // has the same issue and the game already primes audio on a
+            // user gesture in sessionstart, so this should be rare.
+            console.warn('[TTS-backend] play() blocked:', err && err.message);
+          });
+        }
+      } catch (e) {
+        console.warn('[TTS-backend] play() threw:', e);
+      }
+    }
+  }
+
+  // -------- Wrap announcerSay -----------------------------------------
+  // We re-implement the gating (cooldown / globalGap / priority) so the
+  // backend path follows identical pacing rules to the speechSynthesis
+  // path, and fall through to the original when the platform has voices.
+  const _origSay = window.announcerSay;
+
+  function announcerSayWrapped(text, opts) {
+    opts = opts || {};
+    if (!_shouldUseBackend()) return _origSay(text, opts);
+
+    if (typeof announcer === 'undefined' || !announcer.enabled || !text) return false;
+
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+    // Per-key cooldown (same semantics as the original).
+    if (opts.key) {
+      const readyAt = announcer.cooldowns[opts.key] || 0;
+      if (now < readyAt) return false;
+      if (opts.cooldown > 0) announcer.cooldowns[opts.key] = now + opts.cooldown * 1000;
+    }
+    // Anti-chain global gap (priority lines bypass it).
+    if (!opts.priority && (now - (announcer._lastSpokenAt || 0)) < (announcer.globalGap || 600)) return false;
+    announcer._lastSpokenAt = now;
+
+    _backendSpeak(text, opts);
+    return true;
+  }
+
+  window.announcerSay = announcerSayWrapped;
+
+  // Also patch the global cancel so priority lines correctly stop us.
+  const _origCancel = window.announcerCancelAll;
+  window.announcerCancelAll = function () {
+    _stopCurrent();
+    if (typeof _origCancel === 'function') {
+      try { _origCancel(); } catch (_) {}
+    }
+  };
+
+  // -------- Public debug surface --------------------------------------
+  window.announcerBackend = {
+    url: TTS_BACKEND,
+    forceOn:  () => { _forceMode = 'on';  console.log('[TTS-backend] forced ON');  },
+    forceOff: () => { _forceMode = 'off'; console.log('[TTS-backend] forced OFF'); },
+    reset:    () => { _forceMode = null;  console.log('[TTS-backend] auto-detect');},
+    isActive: () => _shouldUseBackend(),
+    test:     () => announcerSayWrapped('Backend test successful. Welcome aboard, pilot.', { priority: true }),
+    cacheStats: () => ({ size: _blobCache.size, max: MAX_CACHE }),
+    clearCache: () => {
+      for (const u of _blobCache.values()) URL.revokeObjectURL(u);
+      _blobCache.clear();
+    },
+  };
+
+  if (_shouldUseBackend()) {
+    console.log('[TTS-backend] active. Audio served from', TTS_BACKEND);
+  } else {
+    console.log('[TTS-backend] standing by (native voices available). Use announcerBackend.forceOn() to override.');
+  }
+})();
+
+
 function updateScreenShake(dt) {
   if (game.shakeIntensity > 0.1) {
     game.shakeOffset.x = (Math.random() - 0.5) * game.shakeIntensity * 2;
