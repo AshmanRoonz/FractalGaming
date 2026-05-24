@@ -10219,6 +10219,19 @@ const xrControllers = { left: null, right: null, leftSrc: null, rightSrc: null }
 // sessionstart so we can read its .matrix every frame without re-calling
 // getCamera (which mutates camera.matrix as a side effect).
 let _xrCachedCameraVR = null;
+let _xrSessionStarting = false;
+let _xrSessionActive = false;
+
+function _xrIsSessionBusy() {
+  return !!(
+    _xrSessionStarting ||
+    _xrSessionActive ||
+    (renderer && renderer.xr && (
+      renderer.xr.isPresenting ||
+      (typeof renderer.xr.getSession === 'function' && renderer.xr.getSession())
+    ))
+  );
+}
 
 function _xrUpdateInputSources() {
   const session = renderer.xr.getSession && renderer.xr.getSession();
@@ -10233,6 +10246,9 @@ function _xrUpdateInputSources() {
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
+  _xrSessionStarting = false;
+  _xrSessionActive = true;
+  try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
   // (v11b VR diag) Log session lifecycle so we can correlate "no video"
   // reports with the actual sequence of events. Lands in the Quest
   // browser's chrome://inspect console.
@@ -10302,6 +10318,8 @@ renderer.xr.addEventListener('sessionstart', () => {
 
 renderer.xr.addEventListener('sessionend', () => {
   try { console.log('[v11b VR] sessionend fired'); } catch (_) {}
+  _xrSessionStarting = false;
+  _xrSessionActive = false;
   // (v18VR 2026-05-22 round 3) Stamp for the context-loss guard above so a
   // transient context drop right after the session end doesn't auto-reload
   // the page (which lands the user at the cold-boot lobby).
@@ -10397,9 +10415,12 @@ renderer.xr.addEventListener('sessionend', () => {
 
   btn.addEventListener('click', () => {
     if (currentSession === null) {
+      _xrSessionStarting = true;
+      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
       navigator.xr.requestSession('immersive-vr', sessionInit)
         .then(onSessionStarted)
         .catch((e) => {
+          _xrSessionStarting = false;
           btn.textContent = 'VR FAILED';
           btn.title = String((e && e.message) || e);
           console.warn('XR session request failed:', e);
@@ -53218,8 +53239,16 @@ renderer.setAnimationLoop(gameLoop);
     return bgWorker;
   }
   document.addEventListener('visibilitychange', () => {
-    const inXR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
-    if (inXR) return;            // XR overrides visibility ; leave it alone
+    const inXR = (typeof _xrIsSessionBusy === 'function') ? _xrIsSessionBusy()
+      : !!(renderer && renderer.xr && renderer.xr.isPresenting);
+    if (inXR) {
+      // Quest can mark the tab hidden while an XR session is being requested,
+      // before isPresenting flips true. Keep the XR animation loop alive.
+      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+      bgActive = false;
+      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+      return;
+    }
     if (document.hidden) {
       // Hand off from rAF to the worker tick.
       try { renderer.setAnimationLoop(null); } catch (_) {}
