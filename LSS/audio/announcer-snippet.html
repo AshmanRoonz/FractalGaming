@@ -1,0 +1,156 @@
+<!--
+  LSS announcer audio bridge.
+
+  Intercepts speechSynthesis.speak() so ANY utterance the game produces
+  (no matter which function queued it) is routed through our MP3 catalog
+  when announcer.voiceSource = 'mp3'. Avoids the V8 lexical-binding gotcha
+  where wrapping window.announcerSay doesn't intercept calls from `announce()`.
+
+  Controlled by `announcer.voiceSource`:
+    'mp3'    - always play pre-baked MP3 (default ; settings UI "Pre-baked MP3")
+    'auto'   - native speechSynthesis if voices exist, else MP3
+    'native' - always native speechSynthesis (silent on Quest)
+-->
+
+<script>
+(function () {
+  const AUDIO_BASE   = 'LSS/audio/';
+  const MANIFEST_URL = AUDIO_BASE + 'manifest.json';
+
+  if (typeof window === 'undefined') return;
+  if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') {
+    // No speech API at all: hook will go on a stub. Worth it for the cancel side too.
+    console.warn('[announcer-mp3] speechSynthesis missing ; cannot intercept.');
+    return;
+  }
+
+  function _source() {
+    return (typeof announcer !== 'undefined' && announcer && announcer.voiceSource) || 'mp3';
+  }
+  function _shouldUseLocal() {
+    const s = _source();
+    if (s === 'mp3')    return true;
+    if (s === 'native') return false;
+    try {
+      const voices = speechSynthesis.getVoices() || [];
+      return voices.length === 0;
+    } catch (_) { return true; }
+  }
+
+  // ---- Manifest -----------------------------------------------------
+  const _manifest = new Map();
+  async function _loadManifest() {
+    try {
+      const resp = await fetch(MANIFEST_URL, { cache: 'no-cache' });
+      if (!resp.ok) throw new Error('manifest HTTP ' + resp.status);
+      const data = await resp.json();
+      _manifest.clear();
+      for (const hash of Object.keys(data)) _manifest.set(hash, data[hash]);
+      console.log('[announcer-mp3] loaded', _manifest.size, 'pre-baked lines.');
+    } catch (e) {
+      console.warn('[announcer-mp3] manifest load failed:', e && e.message);
+    }
+  }
+  _loadManifest();
+
+  async function _hash16(text) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf)).slice(0, 8)
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  // ---- Playback -----------------------------------------------------
+  let _current = null;
+  function _stopCurrent() {
+    if (_current) {
+      try { _current.pause(); } catch (_) {}
+      try { _current.src = ''; } catch (_) {}
+      _current = null;
+    }
+  }
+
+  const _missLogged = {};
+  async function _playLocal(text, volume) {
+    let hash;
+    try { hash = await _hash16(text); }
+    catch (e) { console.warn('[announcer-mp3] hash failed:', e && e.message); return; }
+
+    if (!_manifest.has(hash)) {
+      if (!_missLogged[hash]) {
+        _missLogged[hash] = true;
+        console.warn('[announcer-mp3] no MP3 for line, run bake.py to add:', JSON.stringify(text));
+      }
+      return;
+    }
+
+    _stopCurrent();
+    const audio = new Audio(AUDIO_BASE + hash + '.mp3');
+    audio.volume = Math.max(0, Math.min(1, volume != null ? volume : 0.9));
+    audio.preload = 'auto';
+    audio.onended = () => { if (_current === audio) _current = null; };
+    audio.onerror = (e) => { console.warn('[announcer-mp3] audio error:', e); if (_current === audio) _current = null; };
+    _current = audio;
+    try {
+      const p = audio.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(err => console.warn('[announcer-mp3] play() blocked:', err && err.message));
+      }
+    } catch (e) {
+      console.warn('[announcer-mp3] play() threw:', e);
+    }
+  }
+
+  // ---- Intercept speechSynthesis.speak / cancel ---------------------
+  const _origSpeak  = speechSynthesis.speak.bind(speechSynthesis);
+  const _origCancel = speechSynthesis.cancel.bind(speechSynthesis);
+
+  try {
+    speechSynthesis.speak = function (utterance) {
+      if (!_shouldUseLocal()) return _origSpeak(utterance);
+      try {
+        // Always silence the native engine for this utterance, even if our
+        // local playback ends up missing the manifest. Otherwise the OS
+        // voice would speak alongside us on desktop.
+        try { _origCancel(); } catch (_) {}
+        const text   = utterance && utterance.text;
+        const volume = utterance && (utterance.volume != null ? utterance.volume : undefined);
+        if (text) _playLocal(text, volume);
+      } catch (e) {
+        console.warn('[announcer-mp3] speak intercept failed:', e);
+      }
+    };
+    speechSynthesis.cancel = function () {
+      _stopCurrent();
+      try { return _origCancel(); } catch (_) {}
+    };
+  } catch (e) {
+    console.warn('[announcer-mp3] could not patch speechSynthesis methods:', e);
+  }
+
+  // ---- Public debug surface -----------------------------------------
+  window.announcerBackend = {
+    audioBase: AUDIO_BASE,
+    manifest: _manifest,
+    source: _source,
+    setSource: (s) => {
+      if (!['mp3', 'auto', 'native'].includes(s)) {
+        console.warn('[announcer-mp3] setSource: pick one of mp3 | auto | native');
+        return;
+      }
+      if (typeof announcer !== 'undefined') announcer.voiceSource = s;
+      if (typeof saveSettings === 'function') { try { saveSettings(); } catch (_) {} }
+      console.log('[announcer-mp3] source =', s);
+    },
+    isLocal: () => _shouldUseLocal(),
+    test: () => {
+      // Goes through the real ANN path to prove the intercept works end-to-end.
+      if (typeof ANN !== 'undefined' && ANN.welcomeAboard) return ANN.welcomeAboard('pilot');
+      if (typeof window.announcerSay === 'function') return window.announcerSay('Welcome aboard, pilot. All systems online.', { priority: true });
+    },
+    cacheStats: () => ({ manifest: _manifest.size }),
+    reloadManifest: _loadManifest,
+  };
+
+  console.log('[announcer-mp3] active. source =', _source(), 'audio =', AUDIO_BASE);
+})();
+</script>
