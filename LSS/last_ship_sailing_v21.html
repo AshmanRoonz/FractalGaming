@@ -17445,6 +17445,18 @@ function updateDynamicLights() {
 // That moves the compile cost out of the first combat frame and into the
 // pre-match countdown where the player is already watching a 10-second timer.
 const _shaderWarmup = { done: false };
+let _lssFrameYieldResolvers = [];
+function _lssYieldNextGameFrame() {
+  return new Promise(resolve => { _lssFrameYieldResolvers.push(resolve); });
+}
+function _lssResolveFrameYields() {
+  if (!_lssFrameYieldResolvers.length) return;
+  const pending = _lssFrameYieldResolvers;
+  _lssFrameYieldResolvers = [];
+  for (let i = 0; i < pending.length; i++) {
+    try { pending[i](); } catch (_) {}
+  }
+}
 // (warmup-chunk 2026-05) Yields control back to the event loop for one
 // animation frame so the GPU driver can process program links queued
 // during the previous synchronous block. Bundling 210+ program compiles
@@ -17458,6 +17470,19 @@ function _warmupYield() {
   return new Promise(r => {
     const inXR = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
     const pageHidden = !!(typeof document !== 'undefined' && document.hidden);
+    if (inXR && typeof _lssYieldNextGameFrame === 'function') {
+      let done = false;
+      let fallback = null;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (fallback) clearTimeout(fallback);
+        r();
+      };
+      _lssYieldNextGameFrame().then(finish);
+      fallback = setTimeout(finish, 250);
+      return;
+    }
     if (!inXR && !pageHidden && typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => r());
     } else {
@@ -26054,6 +26079,7 @@ const _cinematic = {
   camTarget: new THREE.Vector3(),
   baseY:     0,
   ships: null,        // [{ mesh, isPlayer, origPos, origQuat, origVisible, pos, look }, ...]
+  after: null,
 };
 
 // Inject HUD-hiding CSS exactly once. Element IDs come from the
@@ -26236,6 +26262,7 @@ function _lssStartSpectatorCinematic() {
   _cinematic.baseY  = _cinematic.camPos.y;
   _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   _cinematic.active = true;
+  _cinematic.after = null;
   // CSS-driven HUD hide. Class lives on <body> ; styles injected once.
   try {
     _lssEnsureCinematicStyles();
@@ -26286,12 +26313,21 @@ function _lssEndSpectatorCinematic() {
   console.log('[cinematic] V-formation end ; ships restored to spawn positions.');
 }
 
+function _lssCompleteSpectatorCinematic() {
+  const after = _cinematic.after;
+  _cinematic.after = null;
+  _lssEndSpectatorCinematic();
+  if (after) {
+    try { after(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
+  }
+}
+
 function _lssUpdateSpectatorCinematic() {
   if (!_cinematic.active) return false;
   const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   const elapsed = (nowMs - _cinematic.startMs) / 1000.0;
   if (elapsed >= _cinematic.duration) {
-    _lssEndSpectatorCinematic();
+    _lssCompleteSpectatorCinematic();
     return false;
   }
   // Re-apply ship poses every frame. Defensive : even though the
@@ -26332,11 +26368,9 @@ function _lssRunCinematicThen(andThen) {
     started = false;
   }
   if (started) {
-    // 3-2-1 fires AFTER the cinematic ends. Defer by the cinematic's
-    // own duration so the countdown sits between cinematic and round
-    // start (not overlapping).
-    const delayMs = (_cinematic.duration || 10) * 1000;
-    setTimeout(() => { try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); } }, delayMs);
+    _cinematic.after = () => {
+      try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
+    };
   } else {
     try { andThen(); } catch (e) { console.warn('[cinematic] immediate andThen failed:', e && e.message); }
   }
@@ -26348,7 +26382,7 @@ function updatePlayerMovement(dt) {
     if (typeof _lssUpdateSpectatorCinematic === 'function') {
       try { _lssUpdateSpectatorCinematic(); } catch (e) {
         console.warn('[cinematic] tick failed:', e && e.message);
-        _cinematic.active = false; // bail gracefully on error
+        try { _lssCompleteSpectatorCinematic(); } catch (_) { _cinematic.active = false; }
       }
     }
     if (player && player.velocity) player.velocity.set(0, 0, 0);
@@ -33677,10 +33711,23 @@ function updateTeammatesStrip() {
 // explicit abort (round end, lobby exit).
 let _activeLaunchTimers = [];
 let _countdownActive = false;
+let _launchCountdownRuntime = null;
 function _clearLaunchCountdown() {
   for (const t of _activeLaunchTimers) clearTimeout(t);
   _activeLaunchTimers = [];
   _countdownActive = false;
+  _launchCountdownRuntime = null;
+}
+function _tickLaunchCountdownWatchdog(nowMs) {
+  const rt = _launchCountdownRuntime;
+  if (!rt || !_countdownActive) return;
+  const now = (typeof nowMs === 'number') ? nowMs : ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  if (!rt.launched && now - rt.startMs >= rt.durationMs + 75) {
+    try { rt.finish('frame'); } catch (_) {}
+  }
+  if (rt.launched && rt.hideAt && now >= rt.hideAt) {
+    try { rt.hide(); } catch (_) {}
+  }
 }
 
 function showLoadingOverlay(mainText, subText) {
@@ -33749,6 +33796,15 @@ function launchCountdown(duration) {
   // and the countdown is just the pings on 3, 2, 1 + LAUNCH ; that's the
   // expected behaviour for the new short post-warmup countdown.
   const START = (typeof duration === 'number' && duration > 0) ? duration : LSS.LAUNCH_COUNTDOWN;
+  const countdownRuntime = {
+    startMs: (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(),
+    durationMs: START * 1000,
+    launched: false,
+    hideAt: 0,
+    finish: null,
+    hide: null,
+  };
+  _launchCountdownRuntime = countdownRuntime;
   // First tick immediate (no sound).
   tick(String(START), 'LAUNCH IN');
   // Silent body: START-1 â†’ 4.
@@ -33774,7 +33830,17 @@ function launchCountdown(duration) {
     try { playSound('sonar_ping_3'); } catch (e) {}
   }, (START - 1) * 1000));
 
-  _activeLaunchTimers.push(setTimeout(() => {
+  function hideLaunchOverlay() {
+    overlay.classList.remove('active');
+    // Countdown has fully handed off to gameplay; next round (or a fresh
+    // post-match re-entry) is allowed to start a new one.
+    _countdownActive = false;
+    if (_launchCountdownRuntime === countdownRuntime) _launchCountdownRuntime = null;
+  }
+
+  function finishLaunch() {
+    if (countdownRuntime.launched) return;
+    countdownRuntime.launched = true;
     tick('LAUNCH', 'WARP-IN');
     try { playSound('round_start'); } catch (e) {}
     // Hand off to gameplay: hide ship-select, lock pointer, hide overlay shortly.
@@ -33787,13 +33853,13 @@ function launchCountdown(duration) {
     // the actual match; buildShipSelect() will start it again next time.
     try { stopShipPreviewLoop(); } catch (e) {}
     _safeRequestPointerLock();
-    _activeLaunchTimers.push(setTimeout(() => {
-      overlay.classList.remove('active');
-      // Countdown has fully handed off to gameplay; next round (or a fresh
-      // post-match re-entry) is allowed to start a new one.
-      _countdownActive = false;
-    }, 700));
-  }, START * 1000));
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    countdownRuntime.hideAt = now + 700;
+    _activeLaunchTimers.push(setTimeout(hideLaunchOverlay, 700));
+  }
+  countdownRuntime.finish = finishLaunch;
+  countdownRuntime.hide = hideLaunchOverlay;
+  _activeLaunchTimers.push(setTimeout(finishLaunch, START * 1000));
 }
 
 // requestPointerLock() returns a Promise in modern Chrome ; both
@@ -45127,6 +45193,8 @@ function gameLoop(timestamp) {
   // headset-cadence timestamps when XR is presenting.
   // setAnimationLoop's callback signature is (time, frame); time is in ms.
   if (typeof timestamp !== 'number') timestamp = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  if (typeof _lssResolveFrameYields === 'function') _lssResolveFrameYields();
+  if (typeof _tickLaunchCountdownWatchdog === 'function') _tickLaunchCountdownWatchdog(timestamp);
 
   // Reset the dolly to identity at the very top of each frame so that the
   // existing per-frame logic, which writes camera.position in world space,
