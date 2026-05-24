@@ -30866,7 +30866,16 @@ function updateRoundSystem(dt) {
     // elimination end (player can shoot bots without ending the round),
     // no champion-claim end. The round just stays in 'playing' forever
     // until the user manually leaves via the lobby button.
-    if (!game.testMode && (endByChampion || aliveB === 0 || aliveA === 0 || endByTimer) && isResolutionAuthority) {
+    // (v22 bug fix 2026-05-25) If a champion claim is in flight, only let
+    // endByChampion (the 5s grace expiry) end the round. Without this guard,
+    // an alive-count or timer end can fire DURING the grace window and
+    // award the round to whoever is still standing, even though the claim
+    // already completed. Repro : capture the field, then your team gets
+    // wiped during the 5s grace -> round-end picks the alive-counts branch
+    // and credits the OTHER team. Fixed by gating the non-champion endings
+    // on !championPending.
+    const championPending = (game.championResult === 'A' || game.championResult === 'B');
+    if (!game.testMode && (endByChampion || (!championPending && (aliveB === 0 || aliveA === 0 || endByTimer))) && isResolutionAuthority) {
       let winnerLabel = '';
       // (post-v6.9) Track which fleet won so the round-end banner can read
       // personally to the local player ("Round Won!" / "Round Lost") instead
@@ -31743,8 +31752,16 @@ function pollGamepad() {
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
     (typeof _countdownActive !== 'undefined' && _countdownActive)
   );
-  const _shipSelectActive = !_matchStartingNav
-    && !!(_shipSelect && _shipSelect.classList.contains('active'));
+  // (v22 bug fix 2026-05-25) Ship-select is "navigable" whenever the panel
+  // is visible. Previously we also required !_matchStartingNav, which
+  // blocked the d-pad whenever launchCountdown was running. That broke
+  // between-rounds ship-select : when round 2 begins, launchCountdown
+  // auto-starts so _matchStartingNav becomes true, but the ship-select
+  // panel is still on screen and the player should be able to swap ships
+  // before the countdown finishes. The countdown gate only blocks
+  // GAMEPLAY input ; menu nav stays available as long as the menu is
+  // visible.
+  const _shipSelectActive = !!(_shipSelect && _shipSelect.classList.contains('active'));
   const _lobby = document.getElementById('lobby');
   const _lobbyActive = !!(_lobby && _lobby.style.display !== 'none' && _lobby.offsetParent !== null);
   const _menuActive = settingsOpen || _shipSelectActive || _lobbyActive || game.state === 'select' || game.state === 'matchEnd';
@@ -35036,6 +35053,59 @@ function buildSettingsPage() {
       </div>
     </div>
 
+
+    <div class="settings-section">
+      <h3>Voxel Caves</h3>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Voxel-cube skin on the inside of each room sphere, with noise-driven irregularity for cave-like geology. Tunnels stay smooth and clear for fast flight. Decorative only ; collision still uses the underlying smooth walls. Changes apply on next round rebuild.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Enabled</label>
+        <input type="checkbox" id="set-voxel-enabled" ${(typeof game !== 'undefined' && game.voxelRoomsEnabled !== false) ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Theme</label>
+        <select id="set-voxel-theme" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone';
+            const keys = (typeof VOXEL_ROOM_THEMES !== 'undefined') ? Object.keys(VOXEL_ROOM_THEMES) : ['stone'];
+            return keys.map(k => '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + k + '</option>').join('');
+          })()}
+        </select>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Voxel size</label>
+        <input type="range" id="set-voxel-size" min="15" max="60" step="5" value="${(typeof game !== 'undefined' && typeof game.voxelRoomSize === 'number') ? game.voxelRoomSize : 30}">
+        <div class="value-display" id="val-voxel-size">${(typeof game !== 'undefined' && typeof game.voxelRoomSize === 'number') ? game.voxelRoomSize : 30}</div>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Wall noise</label>
+        <input type="range" id="set-voxel-noise" min="0" max="120" step="5" value="${(typeof game !== 'undefined' && typeof game.voxelRoomNoise === 'number') ? game.voxelRoomNoise : 40}">
+        <div class="value-display" id="val-voxel-noise">${(typeof game !== 'undefined' && typeof game.voxelRoomNoise === 'number') ? game.voxelRoomNoise : 40}</div>
+      </div>
+      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
+        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW</div>
+        <div id="voxel-theme-preview" style="display:flex; gap:3px;">
+          ${(function() {
+            if (typeof VOXEL_ROOM_THEMES === 'undefined') return '';
+            const cur = (typeof game !== 'undefined' && typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone';
+            const theme = VOXEL_ROOM_THEMES[cur] || VOXEL_ROOM_THEMES['stone'];
+            const hex = n => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+            let palette = [];
+            if (theme.kind === 'fixed') palette = theme.colors.slice();
+            else if (theme.kind === 'mono') palette = [(typeof game.voxelRoomColor === 'number') ? game.voxelRoomColor : 0x4a4a55];
+            else if (theme.kind === 'match-walls') {
+              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+              if (z && Array.isArray(z.walls)) for (let i = 0; i < z.walls.length; i++) if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+              if (palette.length === 0 && typeof ZONE_COLOR_DEFAULTS !== 'undefined' && ZONE_COLOR_DEFAULTS.walls) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+            }
+            if (palette.length > 8) palette = palette.slice(0, 8);
+            return palette.map(c => '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>').join('');
+          })()}
+        </div>
+      </div>
+    </div>
+
     <div class="settings-section">
       <h3>Background</h3>
       <div class="setting-row">
@@ -35681,6 +35751,75 @@ function buildSettingsPage() {
       game.cloudBrightness = v;
       if (cloudBrightVal) cloudBrightVal.textContent = v.toFixed(2);
       if (typeof _applyCloudVisualSettings === 'function') _applyCloudVisualSettings();
+      try { saveSettings(); } catch (_) {}
+    });
+  }
+
+
+  // (v22 2026-05-25) Voxel Caves settings handlers. Sliders use 'change'
+  // (fires on release) instead of 'input' (fires per pixel) to avoid
+  // re-running the 200-500ms rebuild on every cursor move.
+  const _voxelRefreshPreview = () => {
+    const host = overlay.querySelector('#voxel-theme-preview');
+    if (!host || typeof VOXEL_ROOM_THEMES === 'undefined') return;
+    const cur = (typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone';
+    const theme = VOXEL_ROOM_THEMES[cur] || VOXEL_ROOM_THEMES['stone'];
+    const hex = n => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
+    let palette = [];
+    if (theme.kind === 'fixed') palette = theme.colors.slice();
+    else if (theme.kind === 'mono') palette = [(typeof game.voxelRoomColor === 'number') ? game.voxelRoomColor : 0x4a4a55];
+    else if (theme.kind === 'match-walls') {
+      const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
+      if (z && Array.isArray(z.walls)) for (let i = 0; i < z.walls.length; i++) if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
+      if (palette.length === 0 && typeof ZONE_COLOR_DEFAULTS !== 'undefined' && ZONE_COLOR_DEFAULTS.walls) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
+    }
+    if (palette.length > 8) palette = palette.slice(0, 8);
+    host.innerHTML = palette.map(c => '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>').join('');
+  };
+  const _voxelRebuild = () => {
+    if (typeof _voxelRoomsRebuild === 'function') {
+      try { _voxelRoomsRebuild(); } catch (e) { console.warn('[voxel-rooms] rebuild failed:', e); }
+    }
+  };
+  const voxEn = overlay.querySelector('#set-voxel-enabled');
+  if (voxEn) {
+    voxEn.addEventListener('change', e => {
+      game.voxelRoomsEnabled = !!e.target.checked;
+      _voxelRebuild();
+      try { saveSettings(); } catch (_) {}
+    });
+  }
+  const voxTheme = overlay.querySelector('#set-voxel-theme');
+  if (voxTheme) {
+    voxTheme.addEventListener('change', e => {
+      const name = String(e.target.value || 'stone');
+      game.voxelRoomTheme = (typeof VOXEL_ROOM_THEMES !== 'undefined' && (name in VOXEL_ROOM_THEMES)) ? name : 'stone';
+      _voxelRebuild();
+      _voxelRefreshPreview();
+      try { saveSettings(); } catch (_) {}
+    });
+  }
+  const voxSize = overlay.querySelector('#set-voxel-size');
+  const voxSizeVal = overlay.querySelector('#val-voxel-size');
+  if (voxSize) {
+    voxSize.addEventListener('input', e => { if (voxSizeVal) voxSizeVal.textContent = String(+e.target.value | 0); });
+    voxSize.addEventListener('change', e => {
+      const v = Math.max(15, Math.min(60, +e.target.value || 30));
+      game.voxelRoomSize = v;
+      if (voxSizeVal) voxSizeVal.textContent = v;
+      _voxelRebuild();
+      try { saveSettings(); } catch (_) {}
+    });
+  }
+  const voxNoise = overlay.querySelector('#set-voxel-noise');
+  const voxNoiseVal = overlay.querySelector('#val-voxel-noise');
+  if (voxNoise) {
+    voxNoise.addEventListener('input', e => { if (voxNoiseVal) voxNoiseVal.textContent = String(+e.target.value | 0); });
+    voxNoise.addEventListener('change', e => {
+      const v = Math.max(0, Math.min(120, +e.target.value || 40));
+      game.voxelRoomNoise = v;
+      if (voxNoiseVal) voxNoiseVal.textContent = v;
+      _voxelRebuild();
       try { saveSettings(); } catch (_) {}
     });
   }
@@ -36672,6 +36811,11 @@ function saveSettings() {
       // upgrades from an older settings blob feel unchanged.
       cloudBlend:      (typeof game.cloudBlend === 'string') ? game.cloudBlend : 'additive',
       cloudBrightness: (typeof game.cloudBrightness === 'number') ? game.cloudBrightness : 1.0,
+      // (v22 2026-05-25) Voxel cave settings.
+      voxelRoomsEnabled: (typeof game.voxelRoomsEnabled === 'boolean') ? game.voxelRoomsEnabled : true,
+      voxelRoomTheme:    (typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone',
+      voxelRoomSize:     (typeof game.voxelRoomSize === 'number') ? game.voxelRoomSize : 30,
+      voxelRoomNoise:    (typeof game.voxelRoomNoise === 'number') ? game.voxelRoomNoise : 40,
       zoneColors:   (function() {
         const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
         if (!z) return undefined;
@@ -39811,6 +39955,13 @@ function loadSettings() {
       }
       const _cbr = (typeof data.cloudBrightness === 'number' && isFinite(data.cloudBrightness))
         ? Math.max(0.05, Math.min(2.0, data.cloudBrightness)) : 1.0;
+      // (v22 2026-05-25) Voxel cave settings restore.
+      if (typeof game !== 'undefined' && game) {
+        if (typeof data.voxelRoomsEnabled === 'boolean') game.voxelRoomsEnabled = data.voxelRoomsEnabled;
+        if (typeof data.voxelRoomTheme === 'string' && typeof VOXEL_ROOM_THEMES !== 'undefined' && (data.voxelRoomTheme in VOXEL_ROOM_THEMES)) game.voxelRoomTheme = data.voxelRoomTheme;
+        if (typeof data.voxelRoomSize === 'number' && isFinite(data.voxelRoomSize)) game.voxelRoomSize = Math.max(10, Math.min(80, data.voxelRoomSize));
+        if (typeof data.voxelRoomNoise === 'number' && isFinite(data.voxelRoomNoise)) game.voxelRoomNoise = Math.max(0, Math.min(200, data.voxelRoomNoise));
+      }
       if (typeof game !== 'undefined' && game) {
         game.cloudBrightness = _cbr;
       }
