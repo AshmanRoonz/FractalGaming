@@ -26381,104 +26381,107 @@ function _lssEnsureCinematicStyles() {
 }
 
 function _lssStartSpectatorCinematic() {
+  // (v22 2026-05-25, team-lineup rework) Show only the player's team
+  // arranged side by side in their spawn room. Previously we showed both
+  // teams in a wedge, but that revealed the enemy loadouts before the
+  // round started. The lineup keeps the cinematic feel (HUD hidden,
+  // camera pose) without leaking strategic info.
   if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
   if (typeof game === 'undefined' || !game) return false;
   if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return false;
-  // Gather alive ships partitioned by team. The player goes in their
-  // team's list and is sorted to the FRONT so we land them at the
-  // front-left slot (closest to camera on team A's arm).
-  //
-  // IMPORTANT : ship team membership uses the LSS.TEAM_FLEET_A / _B
-  // *numeric* constants (2 and 3), NOT the strings 'A' and 'B' that
-  // room records use. Earlier comparing against 'A'/'B' on ships
-  // produced empty rosters every time and the cinematic silently
-  // fell through to the immediate 3-2-1. Resolving the constants
-  // through LSS keeps this in lock-step if those values are ever
-  // renumbered.
+
   const TA = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_A !== 'undefined') ? LSS.TEAM_FLEET_A : 2;
   const TB = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_B !== 'undefined') ? LSS.TEAM_FLEET_B : 3;
-  const aShips = [];
-  const bShips = [];
-  if (player && player.mesh && player.team === TA) {
-    aShips.push({ ent: player, mesh: player.mesh, isPlayer: true });
-  } else if (player && player.mesh && player.team === TB) {
-    bShips.push({ ent: player, mesh: player.mesh, isPlayer: true });
+
+  // Player's team ; default to A if unassigned (spectator / bot-only).
+  const myTeam = (player && (player.team === TA || player.team === TB)) ? player.team : TA;
+  const myTeamCode = (myTeam === TA) ? 'A' : 'B';
+  const enemyTeamCode = (myTeamCode === 'A') ? 'B' : 'A';
+
+  // Collect ONLY the player's team. Player goes first so they're at center.
+  const myShips = [];
+  if (player && player.mesh && player.team === myTeam) {
+    myShips.push({ ent: player, mesh: player.mesh, isPlayer: true });
   }
   if (Array.isArray(game.entities)) {
     for (let i = 0; i < game.entities.length; i++) {
       const e = game.entities[i];
       if (!e || !e.alive || !e.mesh) continue;
-      if (e.team === TA)      aShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
-      else if (e.team === TB) bShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
+      if (e.team === myTeam) myShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
     }
   }
   if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
     for (let i = 0; i < net.networkPlayers.length; i++) {
       const np = net.networkPlayers[i];
       if (!np || !np.alive || !np.mesh) continue;
-      if (np.team === TA)      aShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
-      else if (np.team === TB) bShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
+      if (np.team === myTeam) myShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
     }
   }
-  if (aShips.length === 0 || bShips.length === 0) {
-    console.warn('[cinematic] bail : empty roster. teamA=' + aShips.length +
-      ' teamB=' + bShips.length + ' (TA=' + TA + ' TB=' + TB +
-      ' player.team=' + (player && player.team) + ')');
+  if (myShips.length === 0) {
+    console.warn('[cinematic] bail : empty team roster, myTeam=' + myTeam);
     return false;
   }
-  // Force the player to the front of team A's list (front-left slot).
-  // If the player is on team B, mirror to front of team B (front-right).
+  // Move player to index 0 so they're at center of the lineup.
   const _moveFront = (list) => {
     const i = list.findIndex(s => s.isPlayer);
     if (i > 0) { const s = list.splice(i, 1)[0]; list.unshift(s); }
   };
-  _moveFront(aShips);
-  _moveFront(bShips);
-  // Map XZ center + top Y from sdfRoomData. The lineup hovers above
-  // the highest room so the map sits below the formation in frame.
-  let cxAcc = 0, czAcc = 0, yMax = -Infinity;
-  for (let i = 0; i < game.sdfRoomData.length; i++) {
-    const r = game.sdfRoomData[i];
-    cxAcc += r.x; czAcc += r.z;
-    const top = r.y + (r.r || 250);
-    if (top > yMax) yMax = top;
+  _moveFront(myShips);
+
+  // Find player's spawn room from sdfRoomData ; fall back to map centroid.
+  let spawnRoom = null;
+  for (const r of game.sdfRoomData) {
+    if (r.team === myTeamCode) { spawnRoom = r; break; }
   }
-  const cx = cxAcc / game.sdfRoomData.length;
-  const cz = czAcc / game.sdfRoomData.length;
-  if (!isFinite(yMax)) yMax = 500;
-  // Roster counts. Declared BEFORE the geometry block so the
-  // stack-sizing math below can read them (strict-mode TDZ otherwise).
-  const NA = aShips.length, NB = bShips.length;
-  const WEDGE_FRONT_X = 740, WEDGE_FRONT_Y = 600, WEDGE_FRONT_Z = 250;
-  const WEDGE_BACK_X  = 600, WEDGE_BACK_Y  = 800, WEDGE_BACK_Z  = 150;
-  function _wedgeSlot(i, n, teamSignZ) {
-    const t = (n <= 1) ? 0.5 : i / (n - 1);
-    const wx = WEDGE_FRONT_X + (WEDGE_BACK_X - WEDGE_FRONT_X) * t;
-    const wy = WEDGE_FRONT_Y + (WEDGE_BACK_Y - WEDGE_FRONT_Y) * t;
-    const wz = WEDGE_FRONT_Z + (WEDGE_BACK_Z - WEDGE_FRONT_Z) * t;
-    return {
-      x: cx + wx,
-      // Y is anchored to mapTop : front ship sits at mapTop, back ship
-      // sits at mapTop + (WEDGE_BACK_Y - WEDGE_FRONT_Y) = mapTop + 500.
-      y: yMax + (wy - WEDGE_FRONT_Y),
-      z: cz + wz * teamSignZ,
-    };
+  let cx, cy, cz, roomR;
+  if (spawnRoom) {
+    cx = spawnRoom.x; cy = spawnRoom.y; cz = spawnRoom.z;
+    roomR = spawnRoom.r || 300;
+  } else {
+    let xs = 0, ys = 0, zs = 0;
+    for (const r of game.sdfRoomData) { xs += r.x; ys += r.y; zs += r.z; }
+    cx = xs / game.sdfRoomData.length;
+    cy = ys / game.sdfRoomData.length;
+    cz = zs / game.sdfRoomData.length;
+    roomR = 400;
   }
-  // Facing : team A (+Z side) faces world -Z (toward team B). The ship
-  // model's nose ends up at mesh's -Z (after the baked-in faceRotY),
-  // so identity quaternion on team A points the nose at world -Z.
-  // Team B (-Z side) needs a 180 deg Y-axis rotation so nose points
-  // at world +Z (toward team A).
+
+  // "Forward" direction = toward enemy spawn (if present), else +X.
+  // Ships face this direction ; camera sits in front of the lineup,
+  // looking back at the team.
+  let fwdX = 1, fwdZ = 0;
+  let enemyRoom = null;
+  for (const r of game.sdfRoomData) {
+    if (r.team === enemyTeamCode) { enemyRoom = r; break; }
+  }
+  if (enemyRoom) {
+    fwdX = enemyRoom.x - cx;
+    fwdZ = enemyRoom.z - cz;
+    const fl = Math.sqrt(fwdX * fwdX + fwdZ * fwdZ);
+    if (fl > 1) { fwdX /= fl; fwdZ /= fl; }
+    else { fwdX = 1; fwdZ = 0; }
+  }
+  // Side axis perpendicular to forward (used for lateral spread + camera sway).
+  const sideX = -fwdZ;
+  const sideZ = fwdX;
+
+  // Lineup parameters : ships side by side along the side axis, all at
+  // the same depth and height. Spacing adapts to room size so the line
+  // doesn't overflow on small spawns.
+  const NS = myShips.length;
+  const SPACING = Math.min(220, Math.max(80, (roomR * 1.4) / Math.max(1, NS)));
+  const lineCenterX = cx + fwdX * roomR * 0.10;  // slightly forward of room center
+  const lineCenterZ = cz + fwdZ * roomR * 0.10;
+  const lineY = cy + 30;
+
   _cinematic.ships = [];
-  const _qFaceMinusZ = new THREE.Quaternion(); // identity ; mesh -Z = world -Z
-  const _qFacePlusZ  = new THREE.Quaternion().setFromAxisAngle(
-    new THREE.Vector3(0, 1, 0), Math.PI);
+  // Quaternion : rotate the model so its "nose forward" (mesh -Z, after
+  // baked faceRotY) aligns with our world "forward" direction.
+  const _qFaceForward = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 0, -1), new THREE.Vector3(fwdX, 0, fwdZ).normalize()
+  );
+
   function _pushShip(rec, slotX, slotY, slotZ, quat) {
-    // Snapshot spawn-protection / damage shield child so we can hide
-    // it during the cinematic and restore on end. The warmup state
-    // freezes bot.update so the spawnProtection countdown never
-    // ticks ; without this hide, the shield bubble persists for the
-    // full 10s on every freshly-spawned bot.
     const _shield = rec.mesh && rec.mesh.userData && rec.mesh.userData.shieldMesh;
     _cinematic.ships.push({
       mesh: rec.mesh,
@@ -26492,54 +26495,54 @@ function _lssStartSpectatorCinematic() {
       quat: quat,
     });
   }
-  // Team A : +Z side, faces -Z.
-  for (let i = 0; i < NA; i++) {
-    const slot = _wedgeSlot(i, NA, +1);
-    _pushShip(aShips[i], slot.x, slot.y, slot.z, _qFaceMinusZ);
+
+  for (let i = 0; i < NS; i++) {
+    // i=0 (player) at center ; subsequent ships alternate side : +1, -1, +2, -2 ...
+    let sideIdx;
+    if (i === 0) sideIdx = 0;
+    else sideIdx = (i % 2 === 1) ? Math.ceil(i / 2) : -Math.ceil(i / 2);
+    const off = sideIdx * SPACING;
+    _pushShip(myShips[i],
+      lineCenterX + sideX * off,
+      lineY,
+      lineCenterZ + sideZ * off,
+      _qFaceForward
+    );
   }
-  // Team B : -Z side, faces +Z.
-  for (let i = 0; i < NB; i++) {
-    const slot = _wedgeSlot(i, NB, -1);
-    _pushShip(bShips[i], slot.x, slot.y, slot.z, _qFacePlusZ);
-  }
-  // Apply initial pose immediately so the very first frame after the
-  // cinematic starts already shows the formation (no one-frame pop
-  // through the player's first-person view).
+  // Apply initial pose immediately so no one-frame pop from first-person.
   for (let i = 0; i < _cinematic.ships.length; i++) {
     const s = _cinematic.ships[i];
     s.mesh.visible = true;
     s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
     s.mesh.quaternion.copy(s.quat);
-    // Spawn-protection shield bubble : hide for the duration. Set
-    // .visible = false on the shield mesh (a child of the ship group).
     if (s.shield) s.shield.visible = false;
   }
-  // Camera : behind the wedge at large +X (past the front ships at
-  // WEDGE_FRONT_X=1234), low altitude (slightly above mapTop = floor),
-  // centered on Z=0 between the two teams. Looks up-and-forward at
-  // the vanishing point in the middle of the formation. The slight
-  // upward tilt gives the cinematic ground-up-perspective feel from
-  // the JSON map_lab screenshot ; the ships occupy the upper half of
-  // the frame and the map fills the lower half as the camera arcs
-  // up over the map plane.
-  const camBehind  = 300;   // closer to front ship (was 400)
-  const camLowOff  = 120;   // raised camera (was 50) - downward angle
-  const lookFwdOff = -50;   // lookAt X offset relative to wedge back
-  const lookUpOff  = 80;    // lowered lookAt (was 200) - ~5 deg down tilt
-  _cinematic.camPos.set(cx + WEDGE_FRONT_X + camBehind, yMax + camLowOff, cz);
-  _cinematic.camTarget.set(cx + WEDGE_BACK_X + lookFwdOff, yMax + lookUpOff, cz);
-  _cinematic.baseY  = _cinematic.camPos.y;
+
+  // Camera : sit slightly ahead of the lineup, looking back at it. Frame
+  // the team in the lower half with a small downward tilt.
+  const camAhead   = Math.max(280, roomR * 0.65);
+  const camHeight  = lineY + 50;
+  const lookHeight = lineY + 10;
+  _cinematic.camPos.set(
+    lineCenterX + fwdX * camAhead,
+    camHeight,
+    lineCenterZ + fwdZ * camAhead
+  );
+  _cinematic.camTarget.set(lineCenterX, lookHeight, lineCenterZ);
+  _cinematic.baseY = _cinematic.camPos.y;
+  // Store the side basis so the per-frame sway in _lssUpdateSpectatorCinematic
+  // moves the camera laterally relative to the lineup, regardless of which
+  // world axes the spawn room happens to align with.
+  _cinematic.swayX = sideX;
+  _cinematic.swayZ = sideZ;
   _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   _cinematic.active = true;
   _cinematic.after = null;
-  // CSS-driven HUD hide. Class lives on <body> ; styles injected once.
+
   try {
     _lssEnsureCinematicStyles();
     document.body.classList.add('lss-cinematic-active');
   } catch (_) {}
-  // Belt-and-suspenders : also explicitly clear UI overlays that the
-  // CSS rules cover, in case any of them rely on inline styles that
-  // override CSS class rules.
   try {
     const sel = document.getElementById('ship-select');
     if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
@@ -26550,8 +26553,7 @@ function _lssStartSpectatorCinematic() {
   } catch (_) {}
   try { if (typeof hideShipSelectWaiting === 'function') hideShipSelectWaiting(); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
-  console.log('[cinematic] wedge formation : team A=' + NA + ', team B=' + NB +
-    ' ; mapTop=' + yMax.toFixed(0) + ' ; mapCenter=(' + cx.toFixed(0) + ',' + cz.toFixed(0) + ')');
+  console.log('[cinematic] team lineup : ' + myTeamCode + ' team, ' + NS + ' ships, spawn=(' + cx.toFixed(0) + ',' + cy.toFixed(0) + ',' + cz.toFixed(0) + ')');
   return true;
 }
 
@@ -26616,11 +26618,16 @@ function _lssUpdateSpectatorCinematic() {
   // Camera : subtle horizontal sway (~ ±80 units) so the framing
   // isn't dead-static, but small enough that the V composition holds.
   // Pure function of elapsed -> identical across peers.
+  // Sway laterally relative to the lineup (along the stored side basis)
+  // instead of always on the world X axis, so the framing slides parallel
+  // to the team line regardless of the room's world orientation.
   const sway = Math.sin(elapsed * 0.6) * 80.0;
+  const swayX = (typeof _cinematic.swayX === 'number') ? _cinematic.swayX : 1;
+  const swayZ = (typeof _cinematic.swayZ === 'number') ? _cinematic.swayZ : 0;
   camera.position.set(
-    _cinematic.camPos.x + sway,
+    _cinematic.camPos.x + swayX * sway,
     _cinematic.baseY,
-    _cinematic.camPos.z
+    _cinematic.camPos.z + swayZ * sway
   );
   camera.lookAt(_cinematic.camTarget);
   return true;
