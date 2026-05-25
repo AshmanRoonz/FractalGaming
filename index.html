@@ -14011,61 +14011,6 @@ function bakeShipThumbnails() {
 // Procedural panel-lines + rivets normal map. Built once, reused on every PBR
 // hull material so flat boxes/cones read as plated metal under IBL lighting.
 // Cheap canvas-based generator: no network, no asset, ~64KB GPU footprint.
-const _hullNormalMap = (function() {
-  const size = 256;
-  const c = document.createElement('canvas');
-  c.width = size; c.height = size;
-  const ctx = c.getContext('2d');
-  // Base normal = (0.5, 0.5, 1.0) -> RGB (128, 128, 255) = "flat surface".
-  ctx.fillStyle = 'rgb(128, 128, 255)';
-  ctx.fillRect(0, 0, size, size);
-  // Horizontal panel seams: dark/light gradient pair at each seam encodes a
-  // groove (concave V). Spaced randomly so it doesn't read as a uniform grid.
-  const seams = [];
-  let y = 8;
-  while (y < size - 8) {
-    seams.push(y);
-    y += 14 + Math.floor(Math.random() * 22);
-  }
-  for (const sy of seams) {
-    // Top edge of groove: blue-green tint (normal pointing slightly +Y)
-    ctx.fillStyle = 'rgb(128, 168, 220)';
-    ctx.fillRect(0, sy - 1, size, 1);
-    // Bottom edge of groove: blue-magenta tint (normal pointing slightly -Y)
-    ctx.fillStyle = 'rgb(128, 88, 220)';
-    ctx.fillRect(0, sy + 1, size, 1);
-    // Center of groove: dark indent
-    ctx.fillStyle = 'rgb(128, 128, 200)';
-    ctx.fillRect(0, sy, size, 1);
-  }
-  // Vertical seams (sparser than horizontal)
-  for (let x = 24; x < size - 12; x += 32 + Math.floor(Math.random() * 28)) {
-    ctx.fillStyle = 'rgb(168, 128, 220)';
-    ctx.fillRect(x - 1, 0, 1, size);
-    ctx.fillStyle = 'rgb(88, 128, 220)';
-    ctx.fillRect(x + 1, 0, 1, size);
-    ctx.fillStyle = 'rgb(128, 128, 200)';
-    ctx.fillRect(x, 0, 1, size);
-  }
-  // Rivets: small bumps (radial light/dark). Encodes a tiny convex dome.
-  for (let i = 0; i < 60; i++) {
-    const rx = Math.random() * size;
-    const ry = Math.random() * size;
-    const r = 1.2 + Math.random() * 0.8;
-    // Highlight side
-    ctx.fillStyle = 'rgba(168, 168, 220, 0.7)';
-    ctx.beginPath(); ctx.arc(rx - 0.5, ry - 0.5, r, 0, Math.PI * 2); ctx.fill();
-    // Shadow side
-    ctx.fillStyle = 'rgba(88, 88, 220, 0.7)';
-    ctx.beginPath(); ctx.arc(rx + 0.5, ry + 0.5, r, 0, Math.PI * 2); ctx.fill();
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(2, 2);
-  tex.anisotropy = 4;
-  return tex;
-})();
 
 const _SHIP_RUNNING_LIGHT_RADIUS = 6.0;
 const _SHIP_RUNNING_LIGHT_PORT_COL = 0xff3030;       // saturated red, port (left, -X)
@@ -14308,7 +14253,12 @@ function swapToModelMeshWhenReady(owner, teamColor) {
     const oldMesh = owner.mesh;
     const pos = oldMesh.position.clone();
     const quat = oldMesh.quaternion.clone();
-    const visible = oldMesh.visible;
+    // (v22 2026-05-25) If we're replacing the invisible GLB-pending
+    // placeholder (isProceduralFallback + awaitingGlb), force the new mesh
+    // visible regardless of the placeholder's visibility. Otherwise
+    // preserve whatever visibility the previous mesh had (cloak states etc).
+    const wasAwaitingGlb = !!(oldMesh.userData && oldMesh.userData.awaitingGlb);
+    const visible = wasAwaitingGlb ? true : oldMesh.visible;
     const botRef = oldMesh.userData && oldMesh.userData.bot;
     if (oldMesh.parent) oldMesh.parent.remove(oldMesh);
     owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey);
@@ -14321,341 +14271,26 @@ function swapToModelMeshWhenReady(owner, teamColor) {
 }
 
 function createShipMesh(chassisData, teamColor, loadoutKey) {
-  // Model-backed path: if the cache has a preloaded glTF for this loadout,
-  // build the mesh from it. Otherwise, fall through to the procedural path.
+  // (v22 2026-05-25) GLB-only ship build path. The procedural fallback was
+  // removed (~16KB) ; every playable ship has a GLB in SHIP_MODELS, so the
+  // fallback only ever ran during cold-start while GLBs were still
+  // downloading. When that happens we now return an invisible placeholder
+  // and let swapToModelMeshWhenReady upgrade to the real model once it
+  // lands. If a key has no SHIP_MODELS entry at all, that's a bug worth
+  // fixing in the catalog ; we log it and still spawn invisible so the
+  // game keeps running.
   if (loadoutKey && shipModelCache.loaded[loadoutKey]) {
     return buildModelShipMesh(chassisData, teamColor, loadoutKey);
   }
-  const group = new THREE.Group();
-  const w = chassisData.hullWidth * 0.5;
-  const h = chassisData.hullHeight * 0.5;
-  const l = chassisData.hullLength * 0.5;
-
-  // Shared materials (PBR sci-fi: MeshStandardMaterial with metalness/roughness,
-  // shared procedural normal map for plated-hull detail, IBL reflections from
-  // scene.environment, team-color emissive for self-glow + bloom catch).
-  // Fresnel rim-shader injection survives the Phong->Standard switch because
-  // <common> and <dithering_fragment> are present in both shader chunk sets.
-  const teamCol = new THREE.Color(teamColor);
-  const hullMat = new THREE.MeshStandardMaterial({
-    color: teamColor,
-    metalness: 0.30,
-    roughness: 0.60,
-    normalMap: _hullNormalMap,
-    normalScale: new THREE.Vector2(0.55, 0.55),
-    emissive: teamCol.clone().multiplyScalar(0.10),
-    emissiveIntensity: 1.0,
-    envMapIntensity: 0.25
-  });
-  // Restored to original team-colored fresnel rim. Procedural ships are
-  // already entirely team-colored (color: teamColor + normalMap detail),
-  // so a team-color rim doesn't change their visual identity the way it
-  // did on the GLB hulls.
-  hullMat.userData.rimColor = { value: teamCol.clone().multiplyScalar(1.35) };
-  hullMat.userData.rimPower = { value: 2.5 };
-  hullMat.userData.rimStrength = { value: 0.75 };
-  hullMat.onBeforeCompile = function(shader) {
-    shader.uniforms.rimColor = hullMat.userData.rimColor;
-    shader.uniforms.rimPower = hullMat.userData.rimPower;
-    shader.uniforms.rimStrength = hullMat.userData.rimStrength;
-    shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>',
-        '#include <common>\nuniform vec3 rimColor;\nuniform float rimPower;\nuniform float rimStrength;')
-      .replace('#include <dithering_fragment>',
-        'vec3 _rimViewDir = normalize(-vViewPosition);\n' +
-        'float _rimFresnel = pow(1.0 - max(dot(normalize(normal), _rimViewDir), 0.0), rimPower);\n' +
-        'gl_FragColor.rgb += rimColor * (_rimFresnel * rimStrength);\n' +
-        '#include <dithering_fragment>');
-  };
-  hullMat.customProgramCacheKey = function () {
-    return 'lss_procship_hull_rimlight_v1';
-  };
-  const darkMat = new THREE.MeshStandardMaterial({
-    color: 0x222233,
-    metalness: 0.85,
-    roughness: 0.55,
-    normalMap: _hullNormalMap,
-    normalScale: new THREE.Vector2(0.45, 0.45),
-    envMapIntensity: 0.8
-  });
-  const accentMat = new THREE.MeshStandardMaterial({
-    color: teamCol.clone().offsetHSL(0, 0, -0.15),
-    metalness: 0.88,
-    roughness: 0.30,
-    normalMap: _hullNormalMap,
-    normalScale: new THREE.Vector2(0.40, 0.40),
-    emissive: teamCol.clone().multiplyScalar(0.18),
-    emissiveIntensity: 1.0,
-    envMapIntensity: 1.10
-  });
-  // Cockpit canopy: glass-like (low roughness, metallic-ish for tinted reflection,
-  // bright emissive so the bloom still catches the cabin glow).
-  const cockpitMat = new THREE.MeshStandardMaterial({
-    color: 0x2244aa,
-    metalness: 0.20,
-    roughness: 0.08,
-    emissive: 0x66aaff,
-    emissiveIntensity: 1.4,
-    envMapIntensity: 1.40
-  });
-  // Register the cockpit material on the group so animateShipMesh can pulse it (heartbeat).
-  group.userData.cockpitMat = cockpitMat;
-  group.userData.cockpitBaseEmissiveIntensity = 1.4;
-  // Register hull material so doomed-state darkening can dim the silhouette.
-  group.userData.hullMat = hullMat;
-  // Procedural-fallback engine + plume materials. (v14c) Same LayeredFX
-  // 'engine_disc' / 'engine_plume' presets as the GLB path (see
-  // buildModelShipMesh) so the two render paths look identical from
-  // outside. Per-instance uBaseColor overrides give each ship its tint.
-  const engineGlowMat = _makeFXMaterial('engine_disc');
-  if (engineGlowMat.uniforms.uBaseColor) engineGlowMat.uniforms.uBaseColor.value.set(teamColor);
-  const thrusterMat   = _makeFXMaterial('engine_disc');
-  if (thrusterMat.uniforms.uBaseColor)   thrusterMat.uniforms.uBaseColor.value.set(0x66eeff);
-  const panelGlowMat = new THREE.MeshBasicMaterial({
-    color: teamColor, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending,
-    depthWrite: false
-  });
-  const plumeMat     = _makeFXMaterial('engine_plume');
-  if (plumeMat.uniforms.uBaseColor) plumeMat.uniforms.uBaseColor.value.copy(teamCol.clone().lerp(new THREE.Color(0xffffff), 0.35));
-  const plumeMatCool = _makeFXMaterial('engine_plume');
-  if (plumeMatCool.uniforms.uBaseColor) plumeMatCool.uniforms.uBaseColor.value.set(0xaaeeff);
-  group.userData.shaderEngineMats = [engineGlowMat, thrusterMat, plumeMat, plumeMatCool];
-
-  // Helper: build a tapered engine plume cone at (x,y,z) extending +z (out the back).
-  // Returns the cone mesh (so caller can register it for animation).
-  function addPlume(group, x, y, z, radius, length, mat) {
-    const geo = new THREE.ConeGeometry(radius, length, 12, 1, true);
-    geo.rotateX(Math.PI / 2);
-    // Cone center sits at z + length/2 so base is flush with the engine glow.
-    const cone = new THREE.Mesh(geo, mat);
-    cone.position.set(x, y, z + length * 0.5);
-    cone.userData.isPlume = true;
-    cone.userData.basePlumeLength = length;
-    cone.userData.basePlumeOpacity = mat.opacity;
-    group.add(cone);
-    return cone;
+  const haveSpec = !!(loadoutKey && typeof SHIP_MODELS !== 'undefined' && SHIP_MODELS[loadoutKey]);
+  if (!haveSpec) {
+    console.error('[ships] no SHIP_MODELS entry for loadoutKey=' + loadoutKey +
+      ' ; spawning invisible. Add a GLB to SHIP_MODELS or fix the loadout setup.');
   }
-  const outlineMat = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 2 });
-  group.userData.outlineMat = outlineMat;
-
-  // Helper: add mesh + outline to group
-  function addPart(geo, mat, pos, rot) {
-    const mesh = new THREE.Mesh(geo, mat);
-    if (pos) mesh.position.set(pos[0], pos[1], pos[2]);
-    if (rot) mesh.rotation.set(rot[0], rot[1], rot[2]);
-    group.add(mesh);
-    const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geo, 20), outlineMat);
-    if (pos) outline.position.set(pos[0], pos[1], pos[2]);
-    if (rot) outline.rotation.set(rot[0], rot[1], rot[2]);
-    group.add(outline);
-    return mesh;
-  }
-
-  let engineMesh;
-  const chassisName = chassisData.name;
-
-  if (chassisName === 'Frigate') {
-    // FRIGATE: Sleek, angular, fast. Pointed nose, swept wings, twin engines.
-    // Main fuselage: tapered wedge shape (narrow front, wider back)
-    const noseGeo = new THREE.ConeGeometry(w * 0.6, l * 1.2, 4);
-    noseGeo.rotateX(Math.PI / 2);
-    addPart(noseGeo, hullMat, [0, 0, -l * 0.3]);
-
-    // Mid hull
-    const midGeo = new THREE.BoxGeometry(w * 1.2, h * 1.0, l * 1.4);
-    addPart(midGeo, hullMat, [0, 0, l * 0.3]);
-
-    // Cockpit: angular canopy
-    const canopyGeo = new THREE.BoxGeometry(w * 0.5, h * 0.5, l * 0.5);
-    addPart(canopyGeo, cockpitMat, [0, h * 0.55, -l * 0.2]);
-
-    // Swept wings (angled back)
-    const wingGeo = new THREE.BoxGeometry(w * 2.0, h * 0.12, l * 1.0);
-    const wingL = addPart(wingGeo, accentMat, [-w * 1.1, 0, l * 0.3]);
-    wingL.rotation.z = -0.12; // swept angle
-    const wingR = addPart(wingGeo, accentMat, [w * 1.1, 0, l * 0.3]);
-    wingR.rotation.z = 0.12;
-
-    // Wing tips (vertical stabilizers)
-    const tipGeo = new THREE.BoxGeometry(w * 0.15, h * 0.8, l * 0.4);
-    addPart(tipGeo, darkMat, [-w * 2.0, h * 0.2, l * 0.5]);
-    addPart(tipGeo, darkMat, [w * 2.0, h * 0.2, l * 0.5]);
-
-    // Twin engine pods
-    const podGeo = new THREE.CylinderGeometry(h * 0.35, h * 0.45, l * 0.6, 6);
-    podGeo.rotateX(Math.PI / 2);
-    addPart(podGeo, darkMat, [-w * 0.5, -h * 0.15, l * 0.9]);
-    addPart(podGeo, darkMat, [w * 0.5, -h * 0.15, l * 0.9]);
-
-    // Engine glow (visible from behind) + tapered plume
-    const glowGeo = new THREE.CircleGeometry(h * 0.35, 12);
-    const glow1 = new THREE.Mesh(glowGeo, engineGlowMat);
-    glow1.position.set(-w * 0.5, -h * 0.15, l * 1.2);
-    group.add(glow1);
-    const glow2 = new THREE.Mesh(glowGeo, engineGlowMat);
-    glow2.position.set(w * 0.5, -h * 0.15, l * 1.2);
-    group.add(glow2);
-    addPlume(group, -w * 0.5, -h * 0.15, l * 1.2, h * 0.32, l * 1.4, plumeMat);
-    addPlume(group,  w * 0.5, -h * 0.15, l * 1.2, h * 0.32, l * 1.4, plumeMat);
-
-    engineMesh = glow1;
-
-  } else if (chassisName === 'Corvette') {
-    // CORVETTE: Balanced military workhorse. Boxy but purposeful, armored bridge,
-    // weapon hardpoints visible, single large engine.
-
-    // Main hull: chunky central body
-    const bodyGeo = new THREE.BoxGeometry(w * 1.6, h * 1.4, l * 2.0);
-    addPart(bodyGeo, hullMat, [0, 0, 0]);
-
-    // Forward prow: angled front plate
-    const prowGeo = new THREE.BoxGeometry(w * 1.4, h * 1.0, l * 0.5);
-    const prow = addPart(prowGeo, accentMat, [0, h * 0.1, -l * 1.1]);
-    prow.rotation.x = 0.15;
-
-    // Bridge (raised command section)
-    const bridgeGeo = new THREE.BoxGeometry(w * 0.9, h * 0.7, l * 0.7);
-    addPart(bridgeGeo, cockpitMat, [0, h * 0.9, -l * 0.1]);
-
-    // Shoulder armor plates
-    const armorGeo = new THREE.BoxGeometry(w * 0.5, h * 1.2, l * 1.0);
-    addPart(armorGeo, darkMat, [-w * 0.95, h * 0.1, l * 0.1]);
-    addPart(armorGeo, darkMat, [w * 0.95, h * 0.1, l * 0.1]);
-
-    // Weapon hardpoints (stubby barrels on shoulders)
-    const barrelGeo = new THREE.CylinderGeometry(h * 0.12, h * 0.12, l * 0.5, 6);
-    barrelGeo.rotateX(Math.PI / 2);
-    addPart(barrelGeo, darkMat, [-w * 0.95, h * 0.5, -l * 0.7]);
-    addPart(barrelGeo, darkMat, [w * 0.95, h * 0.5, -l * 0.7]);
-
-    // Rear engine block
-    const engineBlockGeo = new THREE.BoxGeometry(w * 1.2, h * 0.8, l * 0.4);
-    addPart(engineBlockGeo, darkMat, [0, 0, l * 1.1]);
-
-    // Engine glow (large single) + dramatic plume
-    const glowGeo = new THREE.CircleGeometry(h * 0.6, 16);
-    engineMesh = new THREE.Mesh(glowGeo, engineGlowMat);
-    engineMesh.position.set(0, 0, l * 1.3);
-    group.add(engineMesh);
-    addPlume(group, 0, 0, l * 1.3, h * 0.55, l * 1.8, plumeMat);
-
-    // Small maneuvering thrusters (4 corners) + tiny cool plumes
-    const thrGeo = new THREE.CircleGeometry(h * 0.12, 8);
-    [-1, 1].forEach(sx => [-1, 1].forEach(sy => {
-      const thr = new THREE.Mesh(thrGeo, thrusterMat);
-      thr.position.set(sx * w * 0.7, sy * h * 0.5, l * 1.0);
-      group.add(thr);
-      addPlume(group, sx * w * 0.7, sy * h * 0.5, l * 1.0, h * 0.10, l * 0.45, plumeMatCool);
-    }));
-
-  } else {
-    // DREADNOUGHT: Heavy, imposing, slow. Wide hull, layered armor,
-    // multiple engine banks, weapons everywhere.
-
-    // Core hull: massive central block
-    const coreGeo = new THREE.BoxGeometry(w * 2.0, h * 1.6, l * 2.2);
-    addPart(coreGeo, hullMat, [0, 0, 0]);
-
-    // Upper armor deck
-    const deckGeo = new THREE.BoxGeometry(w * 2.2, h * 0.3, l * 1.8);
-    addPart(deckGeo, accentMat, [0, h * 0.9, 0]);
-
-    // Lower keel plate
-    addPart(deckGeo, accentMat, [0, -h * 0.9, 0]);
-
-    // Forward ram prow (armored wedge)
-    const ramGeo = new THREE.BoxGeometry(w * 1.6, h * 1.0, l * 0.8);
-    const ram = addPart(ramGeo, darkMat, [0, 0, -l * 1.3]);
-    ram.rotation.x = 0.1;
-
-    // Bridge tower (raised, armored)
-    const towerGeo = new THREE.BoxGeometry(w * 0.8, h * 1.0, l * 0.5);
-    addPart(towerGeo, cockpitMat, [0, h * 1.3, -l * 0.3]);
-
-    // Side armor blisters (weapons nacelles)
-    const blisterGeo = new THREE.BoxGeometry(w * 0.6, h * 0.9, l * 1.4);
-    addPart(blisterGeo, darkMat, [-w * 1.2, 0, l * 0.1]);
-    addPart(blisterGeo, darkMat, [w * 1.2, 0, l * 0.1]);
-
-    // Heavy weapon barrels
-    const heavyBarrelGeo = new THREE.CylinderGeometry(h * 0.15, h * 0.18, l * 0.8, 6);
-    heavyBarrelGeo.rotateX(Math.PI / 2);
-    addPart(heavyBarrelGeo, darkMat, [-w * 1.2, h * 0.2, -l * 0.8]);
-    addPart(heavyBarrelGeo, darkMat, [w * 1.2, h * 0.2, -l * 0.8]);
-    // Dorsal turret barrel
-    addPart(heavyBarrelGeo, darkMat, [0, h * 1.6, -l * 0.6]);
-
-    // Rear engine bank: 3 large + 4 small
-    const engineBankGeo = new THREE.BoxGeometry(w * 1.8, h * 1.2, l * 0.3);
-    addPart(engineBankGeo, darkMat, [0, 0, l * 1.2]);
-
-    const bigGlowGeo = new THREE.CircleGeometry(h * 0.35, 12);
-    const dreadBigGlows = [];
-    [-1, 0, 1].forEach(i => {
-      const g = new THREE.Mesh(bigGlowGeo, engineGlowMat);
-      g.position.set(i * w * 0.5, 0, l * 1.35);
-      group.add(g);
-      dreadBigGlows.push(g);
-      // Heavy plume per main engine
-      addPlume(group, i * w * 0.5, 0, l * 1.35, h * 0.32, l * 1.6, plumeMat);
-    });
-    const smGlowGeo = new THREE.CircleGeometry(h * 0.15, 8);
-    [-1.5, -0.5, 0.5, 1.5].forEach(i => {
-      const g = new THREE.Mesh(smGlowGeo, thrusterMat);
-      g.position.set(i * w * 0.35, h * 0.5, l * 1.2);
-      group.add(g);
-      addPlume(group, i * w * 0.35, h * 0.5, l * 1.2, h * 0.13, l * 0.55, plumeMatCool);
-    });
-
-    engineMesh = dreadBigGlows[1]; // middle big glow
-  }
-
-  // Shield bubble (shared across all chassis)
-  const shieldGeo = new THREE.SphereGeometry(Math.max(w, l) * 2, 24, 16);
-  // (v6.7) Energy-shield ShaderMaterial; same factory as the model-ship path.
-  // (v14g) Tinted by the ship's class weapon color so each ship's shield
-  // matches their guns (Blaster cyan, Pyro red, Vortex purple, etc.).
-  const shieldMat = makeEnergyShieldMaterial(_shipShieldColor(loadoutKey));
-  const shield = new THREE.Mesh(shieldGeo, shieldMat);
-  shield.name = 'shield';
-  group.add(shield);
-
-  // Collect all engine glow meshes for thrust animation (glow circles + plume cones)
-  const engineGlows = [];
-  const enginePlumes = [];
-  group.traverse(child => {
-    if (child.material === engineGlowMat || child.material === thrusterMat) engineGlows.push(child);
-    if (child.userData && child.userData.isPlume) enginePlumes.push(child);
-  });
-  // (v16a Potato) Same hide as the imported-hull ship builder above. Keeps
-  // the ship silhouette readable, kills the LayeredFX fragment cost on the
-  // engine bank.
-  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
-    for (let i = 0; i < engineGlows.length; i++) engineGlows[i].visible = false;
-    for (let i = 0; i < enginePlumes.length; i++) enginePlumes[i].visible = false;
-    // (v16a Potato F) Hide the energy-shield bubble (procedural ship builder path).
-    if (shield) shield.visible = false;
-  }
-  // Collect barrel meshes for muzzle flash animation
-  const barrelMeshes = [];
-  group.traverse(child => {
-    if (child.geometry && child.geometry.type === 'CylinderGeometry' && child.material === darkMat) {
-      barrelMeshes.push(child);
-    }
-  });
-  // V5a rim-PointLight was removed here too; see note in buildModelShipMesh.
-  // The fresnel shader on hullMat delivers the silhouette tint without adding
-  // a scene light per ship.
-  const prevUD = group.userData || {};
-  group.userData = Object.assign(prevUD, { engineMesh, shieldMesh: shield, engineGlows, enginePlumes, barrelMeshes, panelGlowMat, engineGlowMat });
-  // Same VISUAL_SCALE_BOOST applied to the GLB-backed path; keeps the
-  // procedural fallback ships visually consistent in size with the
-  // model-backed ones. Collision math uses chassis.hullLength directly,
-  // unaffected by this scale.
-  group.scale.setScalar(VISUAL_SCALE_BOOST);
-  // (v9) Half-red half-green tail running light, fixed pi-radius across all ships.
-  _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
-  return group;
+  const placeholder = new THREE.Group();
+  placeholder.visible = false;
+  placeholder.userData = { isProceduralFallback: true, awaitingGlb: haveSpec };
+  return placeholder;
 }
 
 // ---- SHIP ANIMATION ----
