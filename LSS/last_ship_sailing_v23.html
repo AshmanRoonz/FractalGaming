@@ -25880,8 +25880,15 @@ function _tickOutlineOptics(active) {
   const playerTeam = player.team;
   function makeOutlineClone(sourceMesh, ally) {
     if (!sourceMesh || typeof _mirrorMeshTree !== 'function') return null;
+    // (v23 2026-05-25) Match the nametag color scheme (blue ally / red
+    // enemy) so the HUD callouts and the in-world outlines read as one
+    // visual language. Color is set as an HDR Color (RGB > 1) so the
+    // additive bloom pass catches the rim and it punches against bright
+    // voxel walls instead of washing out.
+    const allyColor  = new THREE.Color(0x4fb6ff).multiplyScalar(2.6);
+    const enemyColor = new THREE.Color(0xff4040).multiplyScalar(2.6);
     const mat = new THREE.MeshBasicMaterial({
-      color: ally ? 0x66ff88 : 0xff5566,
+      color: ally ? allyColor : enemyColor,
       side: THREE.BackSide,
       transparent: true,
       opacity: 1.0,
@@ -25889,6 +25896,7 @@ function _tickOutlineOptics(active) {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       fog: false,
+      toneMapped: false,
     });
     const clone = _mirrorMeshTree(sourceMesh, mat);
     if (!clone) return null;
@@ -25913,9 +25921,11 @@ function _tickOutlineOptics(active) {
     const dy = ship.position.y - camera.position.y;
     const dz = ship.position.z - camera.position.z;
     const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
-    // Tune (v16d) : floor 1.005 (0.5% rim close-up) ; grows with distance
-    // so distant ships still punch through clouds. Cap 1.215 (21.5% rim far).
-    const boost = Math.min(0.215, Math.max(0.005, dist * 0.00013));
+    // Tune (v23 2026-05-25) : floor raised 0.005 -> 0.018 (1.8% rim
+    // close-up) so the halo is visible even when the player is right on
+    // top of an ally. Cap stays 0.215 (21.5% rim far) and the linear
+    // distance ramp is unchanged.
+    const boost = Math.min(0.215, Math.max(0.018, dist * 0.00013));
     const s = 1.0 + boost;
     ship._outlineHugMesh.scale.set(s, s, s);
   }
@@ -29445,6 +29455,10 @@ function updateAbilities(dt) {
       }
       // Fire rockets periodically (Puncture Mega Barrage)
       if (Math.random() < dt * 3) {
+        // (v23 2026-05-25) Per-missile audio so the barrage isn't silent
+        // between the activation thrust roar and the impact / explosion
+        // bookends. Short pitch-varied tube thump + whoosh + chirp.
+        try { playSound('barrage_missile_pop'); } catch (_) {}
         const vel = _abTmpA.copy(forward);
         vel.x += (Math.random() - 0.5) * 0.2;
         vel.y += (Math.random() - 0.5) * 0.2;
@@ -49725,6 +49739,78 @@ const DEFAULT_SOUND_LIBRARY = {
         }
       ],
       "recipeGain": 1
+    },
+    {
+      "name": "barrage_missile_pop",
+      "description": "Mega Barrage individual missile launch : short tube-thump + whoosh + rising chirp, pitch-varies per-shot so ~15-in-5-seconds doesn't read as robotic",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.06,
+          "volume": 0.32,
+          "startOffset": 0,
+          "filterFreq": 180,
+          "filterQ": 0.5,
+          "filterType": "lowpass",
+          "varDur": 0.03,
+          "varVol": 0.15,
+          "varFreq": 0.3,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "noise",
+          "duration": 0.18,
+          "volume": 0.22,
+          "startOffset": 0.02,
+          "filterFreq": 1800,
+          "filterQ": 1,
+          "filterType": "bandpass",
+          "varDur": 0.05,
+          "varVol": 0.2,
+          "varFreq": 0.4,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0,
+          "reverseEnvelope": false
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [220, 320],
+          "rampFreqs": [480, 620],
+          "vol": 0.22,
+          "dur": 0.16,
+          "rampTime": 0.12,
+          "startOffset": 0.01,
+          "envelope": {
+            "attack": 0.005,
+            "hold": 0.03,
+            "decay": 0.13
+          },
+          "pitchVar": 0.18,
+          "durVar": 0.1,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 0.9
     },
     {
       "name": "fire_spread",
