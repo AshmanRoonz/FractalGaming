@@ -2812,9 +2812,14 @@ const LOADOUTS = {
       { name: 'Energy Syphon', cooldown: 8, duration: 2, desc: 'Drain shields: 800 heal', type: 'defensive' },
       { name: 'Inner Spark', cooldown: 12, duration: 0.1, desc: 'Reset ability cooldowns', type: 'utility' },
     ],
-    core: { name: 'AI Nanobots', desc: '3 tiers of permanent upgrades', duration: 12, damage: 3000, cooldown: 60 },
+    core: { name: 'AI Nanobots', desc: '3 tiers of round-scoped upgrades', duration: 12, damage: 3000, cooldown: 60 },
   },
 };
+
+const LOADOUT_BASE_WEAPONS = {};
+for (const [key, loadout] of Object.entries(LOADOUTS)) {
+  LOADOUT_BASE_WEAPONS[key] = { ...loadout.weapon };
+}
 
 // ---- GAME STATE ----
 
@@ -2961,6 +2966,45 @@ const player = {
   lastDamageTime: 0,
   mesh: null,
 };
+
+function resetLoadoutWeaponToBase(key) {
+  const loadout = LOADOUTS[key];
+  const base = LOADOUT_BASE_WEAPONS[key];
+  if (!loadout || !loadout.weapon || !base) return;
+  Object.assign(loadout.weapon, base);
+  if (player.loadoutKey === key) {
+    player.weapon = loadout.weapon;
+    player.maxClip = loadout.weapon.clipSize;
+    player.clipAmmo = Math.min(player.clipAmmo || 0, player.maxClip);
+  }
+}
+
+function getPlayerRoundBaseMaxShield() {
+  const chassisShield = player.chassis ? player.chassis.maxShield : (player.maxShield || 0);
+  const perk = player.perkId ? PILOT_PERKS[player.perkId] : null;
+  const perkShield = (perk && typeof perk.shieldBonus === 'number') ? perk.shieldBonus : 0;
+  return chassisShield + perkShield;
+}
+
+function resetSyphonCoreUpgrades(refillAmmo) {
+  player.syphonTier = 0;
+  player.syphonDmgMult = 1.0;
+  player.syphonCooldownMult = 1.0;
+  player.syphonShieldBonus = 0;
+  player.syphonArcRounds = false;
+  player.syphonMissileRacks = false;
+  player.syphonXO16Accel = false;
+  resetLoadoutWeaponToBase('SYPHON');
+
+  if (player.loadoutKey === 'SYPHON') {
+    const baseShield = getPlayerRoundBaseMaxShield();
+    if (typeof baseShield === 'number') {
+      player.maxShield = baseShield;
+      player.shield = refillAmmo ? baseShield : Math.min(player.shield || 0, baseShield);
+    }
+    if (refillAmmo) player.clipAmmo = player.maxClip;
+  }
+}
 
 // ---- INPUT ----
 
@@ -25099,6 +25143,7 @@ function commitLoadout(key) {
   })();
   const loadout = LOADOUTS[key];
   const ch = CHASSIS[loadout.chassis];
+  resetLoadoutWeaponToBase(key);
   // midMatch: between-rounds swap. Skip the match reset + map rebuild + bot respawn.
   // The round-end path already handled those; all we need here is the player-side
   // loadout refresh and a fresh launchCountdown.
@@ -25229,13 +25274,7 @@ function commitLoadout(key) {
   player.thermalShieldHP = player.thermalShieldMaxHP; // Pyro thermal shield starts fully charged
   player.trapCharges = player.maxTrapCharges; // Pyro starts with both Explosive Gas charges
   player.trapCooldownTimer = 0;
-  player.syphonTier = 0;
-  player.syphonDmgMult = 1.0;
-  player.syphonCooldownMult = 1.0;
-  player.syphonShieldBonus = 0;
-  player.syphonArcRounds = false;
-  player.syphonMissileRacks = false;
-  player.syphonXO16Accel = false;
+  resetSyphonCoreUpgrades(true);
   player.phaseInvuln = false;
   player.phaseInvulnTimer = 0;
   player.afterburnerActive = false;
@@ -25737,8 +25776,11 @@ function respawnPlayer() {
   game.playerInChampionStasis = false;
   game.playerInStasis = false;
   const ch = player.chassis;
+  resetSyphonCoreUpgrades(true);
   player.health = ch.maxHealth;
-  player.shield = ch.maxShield;
+  player.maxHealth = ch.maxHealth;
+  player.maxShield = getPlayerRoundBaseMaxShield();
+  player.shield = player.maxShield;
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
   player.doomed = false;
@@ -25782,7 +25824,6 @@ function respawnPlayer() {
   player.abilityCooldowns = [0, 0, 0];
   player.coreActive = false;
   player.coreTimer = 0;
-  // Syphon upgrades persist across respawns
   // Spawn at a valid corridor position in the player's team territory
   const sp = getValidSpawnPoint(player.team === LSS.TEAM_FLEET_B ? 'B' : 'A');
   player.position.copy(sp);
@@ -28287,7 +28328,7 @@ function activateCore() {
   else if (coreName === 'AI Assist') {
     // Handled per-tick in updateAbilities (auto-aim firing)
   }
-  // SYPHON: AI Nanobots (permanent tier upgrade, 3 tiers; TF2-style choices auto-applied)
+  // SYPHON: AI Nanobots (round-scoped tier upgrade, 3 tiers; TF2-style choices auto-applied)
   else if (coreName === 'AI Nanobots') {
     // (v14g) Three rising chimes + downbeat = "tier acquired."
     try { playSound('upgrade_core'); } catch (_) {}
@@ -28300,7 +28341,7 @@ function activateCore() {
         break;
       case 2: // Tier 2: Maelstrom (shield recharge + 500 bonus shield HP)
         player.syphonShieldBonus = 500;
-        player.maxShield = player.chassis.maxShield + 500;
+        player.maxShield = getPlayerRoundBaseMaxShield() + 500;
         player.shield = Math.min(player.shield + 500, player.maxShield);
         // Also reset ability cooldowns (Inner Spark bonus at Tier 2)
         player.syphonCooldownMult = 0.7;
