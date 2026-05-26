@@ -22359,6 +22359,41 @@ _TRACER_TAIL_OUTER_GEO.rotateX(Math.PI / 2);
   g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 });
 
+// (v24 round 5) Anti-spaghetti tracer retract. When the player strafes
+// hard during a continuous-fire weapon (Blaster, Vortex, Syphon, etc.)
+// each tracer is anchored at the muzzle position at the moment of fire ;
+// a quarter-second later the player has moved sideways but the tracer's
+// back end is still in world space at the old muzzle position, painting
+// a diagonal noodle that visually disconnects from the gun. Fix : shrink
+// the cylinder geometry FROM THE BACK as it ages, pulling the trailing
+// end forward toward the impact. The hot end stays put, the spaghetti
+// trail shortens away. Per-vertex fade attribute (above) lives at local
+// -Z which is the back end, so the soft muzzle fade shrinks with the
+// cylinder automatically.
+// Scratch vectors so the per-frame retract math doesn't allocate.
+const _VX_TRC_FROM = new THREE.Vector3();
+const _VX_TRC_MID  = new THREE.Vector3();
+function _vxTracerRetract(e, t) {
+  if (!e._retractFrom || !e._retractTo) return;
+  // (v24 round 6) Delay the retract by 30% of lifetime so each tracer
+  // gets a "full length, full bright" window first. Without the delay,
+  // retract starts at t=0 and the additive-haze tubes lose volume early,
+  // which read as dim / barely visible tracers even though the shape was
+  // technically correct. With the delay the bolt clearly leaves the gun
+  // at full intensity, then the back end peels forward in the last 70%
+  // of lifetime, which is when strafe-induced spaghetti would form anyway.
+  const DELAY = 0.30;
+  if (t <= DELAY) return;
+  const tt = (t - DELAY) / (1 - DELAY);
+  const r = tt > 1 ? 1 : tt;
+  const retract = r * r * 0.94;
+  _VX_TRC_FROM.copy(e._retractFrom).lerp(e._retractTo, retract);
+  const newLen = _VX_TRC_FROM.distanceTo(e._retractTo);
+  _VX_TRC_MID.copy(_VX_TRC_FROM).add(e._retractTo).multiplyScalar(0.5);
+  e.mesh.position.copy(_VX_TRC_MID);
+  e.mesh.scale.z = newLen;
+}
+
 // ---- LIGHTNING BOLT SYSTEM (v16a Phase P) ----
 // Was : chain of pooled cylinder segments (one cylinder per straight piece
 // of a midpoint-jittered path). Read as a hex-prism zigzag stick close-up ;
@@ -22784,7 +22819,15 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     // wall's bounding-sphere-center sort puts it later in the queue.
     mesh.renderOrder = 1;
     scene.add(mesh);
-    game.effects.push({ mesh, lifetime, age: 0, type });
+    // (v24 round 5) Store endpoints so updateEffects can retract the
+    // muzzle end forward over the lifetime (see _vxTracerRetract). All
+    // four shapes share the same from/to references ; they're never
+    // mutated, only read.
+    game.effects.push({
+      mesh, lifetime, age: 0, type,
+      _retractFrom: fromVec,
+      _retractTo:   toVec,
+    });
   }
 
   // --- Hot core (white-hot pinprick, very short-lived: the "shot" itself) ---
@@ -22793,11 +22836,13 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
   _makeShape(_TRACER_BEAM_GEO, _TRACER_BEAM_MAT_PROTO, color, 1.0, 0.18, 'tracer');
   // --- Volumetric haze: two nested additive tubes that linger and taper.
   // The inner haze is tighter and fades faster; the outer haze is wide and
-  // wispy, fading over ~0.55s so the beam reads as a lingering volumetric
-  // shaft of light around the thin filament. Additive + depthWrite:false
-  // so the haze reads as emitted light through air, not a solid cylinder.
-  _makeShape(_TRACER_TAIL_INNER_GEO, _TRACER_TAIL_INNER_MAT_PROTO, color, 0.55, 0.42 * tailMul, 'tracerTail');
-  _makeShape(_TRACER_TAIL_OUTER_GEO, _TRACER_TAIL_OUTER_MAT_PROTO, color, 0.18, 0.65 * tailMul, 'tracerTail');
+  // wispy. (v24 round 6) Tuned for retract-aware visibility : initial
+  // opacity bumped (inner 0.55 → 0.85, outer 0.18 → 0.35) to compensate
+  // for the reduced on-screen additive volume that comes with the muzzle-
+  // retract animation. Lifetimes slightly restored (inner 0.32, outer 0.42)
+  // so the bright window before retract kicks in lasts long enough to read.
+  _makeShape(_TRACER_TAIL_INNER_GEO, _TRACER_TAIL_INNER_MAT_PROTO, color, 0.85, 0.32 * tailMul, 'tracerTail');
+  _makeShape(_TRACER_TAIL_OUTER_GEO, _TRACER_TAIL_OUTER_MAT_PROTO, color, 0.35, 0.42 * tailMul, 'tracerTail');
 
   // --- Tracer sparkles along the beam (trace of dust) ---
   const particleCount = Math.min(Math.ceil(len / 400), 3);
@@ -23805,8 +23850,9 @@ function updateEffects(dt) {
         e.mesh.material.uniforms.uOpacity.value = Math.max(0, 1 - tt);
       }
     }
-    // --- Tracers: fade ---
+    // --- Tracers: retract muzzle end + fade ---
     else if (e.type === 'tracer') {
+      _vxTracerRetract(e, t);
       e.mesh.material.opacity = (e.mesh.material.opacity || 0.8) * (1 - t);
     }
     // --- Lightning tubes (spawnLightningBolt): linear fade from initial opacity.
@@ -23852,6 +23898,10 @@ function updateEffects(dt) {
     // curve is clean single-shot (vs compounding per-frame multiply).
     else if (e.type === 'tracerTail') {
       if (e.initialOpacity == null) e.initialOpacity = e.mesh.material.opacity;
+      // (v24 round 5) Retract back end first so the haze stops painting
+      // a noodle behind a strafing player ; opacity fade and swell layer
+      // on top of the geometrically-shrinking cylinder.
+      _vxTracerRetract(e, t);
       // Cubic ease-out fade: holds bright briefly, then fades softly
       const fade = 1 - t * t * t;
       e.mesh.material.opacity = e.initialOpacity * fade;
