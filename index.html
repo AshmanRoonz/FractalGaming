@@ -22988,9 +22988,19 @@ function spawnTracer(from, to, color, widthScale) {
         .add(up.clone().multiplyScalar(ndy * halfH))
         .add(fwd.clone().multiplyScalar(fwdOff));
     }
-    const TIP_FRAC_X_LEFT  = 0.305; // fraction of viewport width
+    // (v24 round 10) Tried wiring player.cockpitFrameMuzzle here so each ship
+    // would get its own per-cockpit barrel tips ; reverted because
+    // detectFrameMuzzlePoints scans for the FIRST opaque row top-down in each
+    // half, which for VORTEX (and any cockpit where the gun mount has
+    // structure above the actual barrel tip) lands on the top of the mount
+    // instead of the muzzle. Result was tracers spawning from "random spots"
+    // way up the screen. Sticking with the one-size-fits-all fractions for
+    // now ; per-ship muzzle fractions (a small _PLAYER_MAIN_MUZZLE_FRAC-style
+    // map keyed by loadoutKey) is the right fix when we want pixel-perfect
+    // alignment per ship.
+    const TIP_FRAC_X_LEFT  = 0.305;
     const TIP_FRAC_X_RIGHT = 0.695;
-    const TIP_FRAC_Y       = 0.680; // fraction of viewport height (same for both)
+    const TIP_FRAC_Y       = 0.680;
     const sxL = winW * TIP_FRAC_X_LEFT;
     const sxR = winW * TIP_FRAC_X_RIGHT;
     const syLR = winH * TIP_FRAC_Y;
@@ -27328,6 +27338,15 @@ function updateWeapon(dt) {
 
   // Spinup
   let firing = input.mouseDown || input.gpFire;
+  // (v24 round 7) VORTEX Mega Laser core already fires the dual main lasers
+  // AND the laser-shot visually as one channeled beam. Block primary fire
+  // while the core is active so the player isn't double-spending ammo /
+  // double-painting the same shot. The core is a "you're the gun right now"
+  // ability ; normal trigger is muted for its duration.
+  if (firing && player.coreActive && player.loadoutKey === 'VORTEX' &&
+      player.loadout && player.loadout.core && player.loadout.core.name === 'Mega Laser') {
+    firing = false;
+  }
   if (w.spinup > 0 && firing) {
     if (!player.spunUp) {
       player.spinupTimer += dt;
@@ -27385,9 +27404,12 @@ function fireWeapon() {
   else if (w.mode === 'projectile') fireProjectile(origin, forward, w);
   else if (w.mode === 'spread') fireSpread(origin, forward, w);
 
-  // Trigger HUD gun muzzle flash
+  // (v24 round 9) muzzleFlashTimer ticks the cockpit PNG gun-cycle rising
+  // edge (see tickGunLayer / updateCockpitFrame) which IS the muzzle flash.
+  // muzzleFlashSide alternates the per-side recoil kick (gunRecoilL/R) so
+  // the painted guns visually kick in alternation as the cycle advances.
   player.muzzleFlashTimer = 0.08;
-  player.muzzleFlashSide = 1 - player.muzzleFlashSide; // alternate left/right
+  player.muzzleFlashSide = 1 - player.muzzleFlashSide;
   if (player.muzzleFlashSide === 0) player.gunRecoilL = 1.0;
   else player.gunRecoilR = 1.0;
 
@@ -27408,8 +27430,6 @@ function fireWeapon() {
   const flashPos = origin.clone().add(forward.clone().multiplyScalar(30));
   const flashColor = w.mode === 'hitscan' ? 0xffdd44 : 0xff8833;
   spawnDynamicLight(flashPos, flashColor, 3.0, 400, 0.08);
-
-  // Muzzle flash: concentric warm circles (drawn on HUD canvas via muzzleFlashTimer)
 
   // Camera recoil (small pitch kick upward, recovers naturally)
   const recoilAmount = w.mode === 'spread' ? 0.015 : (w.fireRate > 0.5 ? 0.025 : 0.005);
@@ -27475,6 +27495,10 @@ function fireHitscan(origin, dir, w) {
       ? chassisFlashColor(player.loadoutKey) : 0x66ccff;
     spawnWallRipple(end, _hsCol);
   }
+  // (v24 round 15) Reverted : hitscan weapons do NOT spawn along-beam cloud
+  // lights. The class-color wash bloomed across the screen on every shot and
+  // made it hard to see when firing near cloud cover. Hitscan keeps just the
+  // brief muzzle flash spawned in fireWeapon.
   // Color follows each loadout's chassis flash color so muzzle flash and
   // tracer share one palette (sourced from LSS.CLASS_COLORS so weapons,
   // abilities, and cores all read with the same class-themed identity).
@@ -27886,6 +27910,16 @@ function activateAbility(slot) {
   // so the shield can't be spammed back on with a sliver of charge.
   if (ability.name === 'Vortex Shield' && player.vortexShieldLockout) return;
 
+  // (v24 round 7) VORTEX Mega Laser core channels through all three guns
+  // (dual main lasers + the laser-shot) for its duration ; firing the
+  // standalone Laser ability on top of that would double-spend Vortex
+  // energy and paint the same beam twice. Lock it out while core is active.
+  if (player.coreActive && player.loadoutKey === 'VORTEX' &&
+      ability.name === 'Laser' &&
+      player.loadout && player.loadout.core && player.loadout.core.name === 'Mega Laser') {
+    return;
+  }
+
   // Hold-to-use abilities: pressing while already held does nothing (release handles deactivation)
   const isHoldAbility = ['Vortex Shield', 'Absorption', 'Fire Shield'].includes(ability.name);
   if (ability.cooldown === 0 && player.abilityActive[slot]) {
@@ -28080,6 +28114,32 @@ function executeAbility(slot, ability) {
             }
           }
           spawnDynamicLight(hitPoint, 0xeebbff, 6.0, 900, 0.45);
+        }
+      }
+      // (v24 round 16) Rocks / dynamic obstacles also take damage from the
+      // laser beam ; matches the user's mental model that "lasers bust rocks".
+      // Mirrors the bot-line-hit math : project each obstacle onto the beam
+      // axis, check if it's in front and within the obstacle's collisionRadius
+      // of the line, and if so apply 2400 damage (same per-shot value as bots).
+      if (game.dynamicObjects && game.dynamicObjects.length) {
+        for (const obst of game.dynamicObjects) {
+          if (!obst.alive) continue;
+          const _toObst = new THREE.Vector3().subVectors(obst.position, player.position);
+          const _objProj = _toObst.dot(forward);
+          if (_objProj < 0 || _objProj > range) continue;
+          const _objClosest = player.position.clone().add(forward.clone().multiplyScalar(_objProj));
+          const _objR = obst.collisionRadius || 60;
+          if (_objClosest.distanceTo(obst.position) < _objR) {
+            const _hitPt = _objClosest.clone();
+            const _dealt = obst.takeDamage(2400);
+            if (_dealt > 0) {
+              player.damageDealt += _dealt;
+              player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+            }
+            spawnExplosion(_hitPt, 28);
+            if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_hitPt, 8);
+            spawnDynamicLight(_hitPt, 0xeebbff, 4.0, 600, 0.30);
+          }
         }
       }
       // (v14g) Sharp piercing zap so the laser beam reads sonically.
@@ -29960,20 +30020,29 @@ function updateAbilities(dt) {
         const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
         beam.material.uniforms.uIntensity.value = breath;
       }
-      spawnTracer(player.position, end, LSS.CLASS_COLORS.VORTEX, 1.8);
-      spawnTracer(player.position, end, 0xbb66ff, 1.7);
-      spawnTracer(player.position, end, 0xcc99ff, 1.6);
-      spawnTracer(player.position, end, 0xeeccff, 1.5);
-      spawnTracer(player.position, end, 0xffffff, 1.4);
-      // Extra hot-pink-violet stack at the center for the "white-hot" overload look.
-      spawnTracer(player.position, end, 0xeebbff, 1.3);
-      if (typeof _computeScreenMuzzleWorld === 'function' && typeof _spawnSingleTracer === 'function') {
-        const _mlMuzzle = _computeScreenMuzzleWorld(0.60, 0.40);
-        if (_mlMuzzle) {
-          _spawnSingleTracer(_mlMuzzle, end, LSS.CLASS_COLORS.VORTEX, 1.55);
-          _spawnSingleTracer(_mlMuzzle, end, 0xeeccff, 1.30);
-          _spawnSingleTracer(_mlMuzzle, end, 0xffffff, 1.10);
-        }
+      // (v24 round 12) Cylinder tracers removed during core. The persistent
+      // shader beam cylinder above carries the main visual ; the painted
+      // gun PNGs (gun_VORTEX.png / gunfire_VORTEX.png alternation, driven
+      // by tickGunLayer) carry the muzzle-flash signal. Spawning per-frame
+      // cylinder tracers stacked past-position ghosts that read as "tracers
+      // dancing around in random spots" when the player rotated during core.
+      // Pulsing the PNG cycle at ~10 Hz gives the firing-rate feel without
+      // any world-space cylinder artifacts.
+      if (!player._laserCorePngPulseTimer) player._laserCorePngPulseTimer = 0;
+      player._laserCorePngPulseTimer -= dt;
+      if (player._laserCorePngPulseTimer <= 0) {
+        player._laserCorePngPulseTimer = 0.10;
+        // muzzleFlashTimer = 0.08 creates a rising edge in tickGunLayer's
+        // shot-detector (timer > lastTimer + 0.001) which advances the gun
+        // PNG cycle one frame. By the next pulse 100 ms later the value has
+        // decayed to 0 (cockpit ticker subtracts 1/60 per frame), so the
+        // next 0.08 write is another rising edge.
+        player.muzzleFlashTimer = 0.08;
+        // Alternate side so the painted guns kick L/R/L/R during the core
+        // (gunRecoilL/R drives the per-side recoil offset in drawGun).
+        player.muzzleFlashSide = 1 - (player.muzzleFlashSide || 0);
+        if (player.muzzleFlashSide === 0) player.gunRecoilL = 1.0;
+        else                              player.gunRecoilR = 1.0;
       }
       // Electric crackle along the beam length. Boosted: more arcs per pulse,
       // wider lateral jitter, slightly longer reach so the beam feels alive
@@ -30050,6 +30119,41 @@ function updateAbilities(dt) {
             if (bot._megaLaserHitMarkerTimer <= 0 && dealt > 0) {
               bot._megaLaserHitMarkerTimer = 0.18;
               if (typeof showHitMarker === 'function') showHitMarker();
+            }
+          }
+        }
+      }
+      // (v24 round 16) Mega Laser core also chews through rocks / dynamic
+      // obstacles in its path. Continuous damage like the bot loop above
+      // (2500 dmg/sec via 2500 * dt per frame). FX are throttled per-obstacle
+      // so a sustained beam parked on a single rock doesn't hammer the
+      // explosion / spark pools every frame.
+      if (game.dynamicObjects && game.dynamicObjects.length) {
+        for (const obst of game.dynamicObjects) {
+          if (!obst.alive) continue;
+          const _objDx = obst.position.x - player.position.x;
+          const _objDy = obst.position.y - player.position.y;
+          const _objDz = obst.position.z - player.position.z;
+          const _objProj = _objDx * forward.x + _objDy * forward.y + _objDz * forward.z;
+          if (_objProj <= 0 || _objProj > range) continue;
+          const _objClosestX = player.position.x + forward.x * _objProj;
+          const _objClosestY = player.position.y + forward.y * _objProj;
+          const _objClosestZ = player.position.z + forward.z * _objProj;
+          const _cdx = _objClosestX - obst.position.x;
+          const _cdy = _objClosestY - obst.position.y;
+          const _cdz = _objClosestZ - obst.position.z;
+          const _objR = obst.collisionRadius || 60;
+          if (_cdx * _cdx + _cdy * _cdy + _cdz * _cdz < _objR * _objR) {
+            const _dealt = obst.takeDamage(2500 * dt);
+            if (_dealt > 0) {
+              player.damageDealt += _dealt;
+            }
+            obst._megaLaserFxTimer = (obst._megaLaserFxTimer || 0) - dt;
+            if (obst._megaLaserFxTimer <= 0 && _dealt > 0) {
+              obst._megaLaserFxTimer = 0.08;
+              const _hitPt = _abTmpA.set(_objClosestX, _objClosestY, _objClosestZ);
+              if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_hitPt, 5);
+              spawnDynamicLight(_hitPt, 0xeebbff, 3.0, 500, 0.20);
             }
           }
         }
@@ -33072,7 +33176,7 @@ function drawCircumpunctHUD() {
 
   const gunAccentCol = player.team === 'A' ? 'rgba(60,200,120,' : 'rgba(200,80,60,';
 
-  function drawGun(side, recoil, flashActive) {
+  function drawGun(side, recoil) {
     const recoilAmt = recoil * 22;
     const sway = Math.sin(t * 1.2 + side * Math.PI) * 2;
 
@@ -33126,56 +33230,25 @@ function drawCircumpunctHUD() {
       tipY = tipCY;
     }
 
-    // Procedural arms/gun bodies removed; cockpit art now comes from the
-    // per-titan frame PNG overlay (see updateCockpitFrame). The HUD-space
-    // muzzle-flash paint block used to sit here; it has been removed at the
-    // player's request because it dominated the center of the screen on every
-    // shot. The visual feedback on the player's ship is now: (1) the arm
-    // light-up and recoil kick via gunRecoilL/R and the per-frame flash overlay
-    // from updateCockpitFrame, (2) the 3D tracer beam in spawnTracer which now
-    // carries an ethereal lingering tail instead of a HUD-space burst. The
-    // flashActive parameter is retained only so the (unused) flashL/flashR
-    // call-sites remain readable; a future pass can drop it entirely.
-    void flashActive;
+    // Procedural arms/gun bodies removed ; cockpit art now comes from the
+    // per-titan frame PNG overlay (see updateCockpitFrame). Visual feedback
+    // on the player's ship is now: (1) the per-side recoil kick via
+    // gunRecoilL/R driving the cockpit PNG's alternating gun-fire cycle
+    // frames (which IS the muzzle flash), (2) the 3D tracer beam in
+    // spawnTracer with its retract+haze tail. (v24 round 9) The unused
+    // flashActive parameter and its void marker are gone too.
 
     ctx.restore();
   }
 
-  const flashL = player.muzzleFlashTimer > 0 && player.muzzleFlashSide === 0;
-  const flashR = player.muzzleFlashTimer > 0 && player.muzzleFlashSide === 1;
-  drawGun(0, player.gunRecoilL, flashL);
-  drawGun(1, player.gunRecoilR, flashR);
+  drawGun(0, player.gunRecoilL);
+  drawGun(1, player.gunRecoilR);
 
-  // ---- CENTER MUZZLE FLASH: concentric warm circles ----
-  if (player.muzzleFlashTimer > 0) {
-    const fi = player.muzzleFlashTimer / 0.08; // 1.0 at start, fades to 0
-    const cx = W / 2;
-    const cy = H / 2;
-    const warmColors = [
-      [255, 255, 220], // white-hot
-      [255, 220, 100], // bright yellow
-      [255, 160, 40],  // orange
-      [255, 100, 20],  // deep orange
-      [220, 60, 10],   // red-orange
-    ];
-    // Draw 3-5 concentric rings, random radii each shot
-    const ringCount = 3 + Math.floor(Math.random() * 3);
-    for (let r = 0; r < ringCount; r++) {
-      const radius = (8 + r * 12) * fi;
-      const c = warmColors[r % warmColors.length];
-      const alpha = (0.6 - r * 0.1) * fi;
-      ctx.strokeStyle = `rgba(${c[0]},${c[1]},${c[2]},${Math.max(0, alpha)})`;
-      ctx.lineWidth = (3 - r * 0.4) * fi;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    // Bright center dot
-    ctx.fillStyle = `rgba(255,255,240,${0.8 * fi})`;
-    ctx.beginPath();
-    ctx.arc(cx, cy, 4 * fi, 0, Math.PI * 2);
-    ctx.fill();
-  }
+  // (v24 round 9) HUD center muzzle flash removed. The per-ship cockpit PNG
+  // gun-cycle (driven by muzzleFlashTimer rising edges in updateCockpitFrame
+  // and tickGunLayer) IS the muzzle flash now ; alternating frames paint the
+  // flash in the right place per ship, so the HUD-canvas concentric circles
+  // that used to draw here were redundant + always painted at screen center.
 
   // ---- TRACKER LOCK-ON CIRCUMPUNCT INDICATORS (over locked enemies) ----
   if (player.loadoutKey === 'TRACKER') {
