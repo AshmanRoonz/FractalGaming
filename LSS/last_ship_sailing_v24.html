@@ -16761,6 +16761,24 @@ class Projectile {
         }
       }
     }
+    // (v24 round 17) Optional rock damage : projectiles with bustsRocks = true
+    // (currently : Mega Tracker Rockets core missiles) also chew through
+    // game.dynamicObjects in their splash radius using the same falloff.
+    if (this.bustsRocks && game.dynamicObjects && game.dynamicObjects.length) {
+      for (const obst of game.dynamicObjects) {
+        if (!obst.alive) continue;
+        const _odSq = this.position.distanceToSquared(obst.position);
+        if (_odSq < this.splash * this.splash && _odSq > 0) {
+          const _odist = Math.sqrt(_odSq);
+          const _ofall = 1 - _odist / this.splash;
+          const _dealt = obst.takeDamage(this.damage * 0.75 * _ofall);
+          if (_dealt > 0 && this.owner === 'player') {
+            player.damageDealt += _dealt;
+            player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+          }
+        }
+      }
+    }
     // Fire ignites Explosive Gas: thermite splash, firewalls, any fire source
     igniteNearbyGas(this.position, this.splash);
   }
@@ -28768,6 +28786,27 @@ function firePowerShot() {
           spawnExplosion(_exPos, 5);
         }
       }
+      // (v24 round 17) Each pellet also chews rocks in its line. Same per-
+      // pellet damage as bots (270) so a full 12-pellet blast hitting one
+      // rock dumps ~3240 dmg into it, on par with the long-range branch.
+      if (game.dynamicObjects && game.dynamicObjects.length) {
+        for (const obst of game.dynamicObjects) {
+          if (!obst.alive) continue;
+          const _toObst = new THREE.Vector3().subVectors(obst.position, player.position);
+          const _objProj = _toObst.dot(pelletDir);
+          if (_objProj < 0 || _objProj > range) continue;
+          const _objClosest = player.position.clone().add(pelletDir.clone().multiplyScalar(_objProj));
+          const _objR = obst.collisionRadius || 60;
+          if (_objClosest.distanceTo(obst.position) < _objR) {
+            const _dealt = obst.takeDamage(270);
+            if (_dealt > 0) {
+              player.damageDealt += _dealt;
+              player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+            }
+            spawnExplosion(_objClosest, 4);
+          }
+        }
+      }
     }
     triggerScreenShake(5);
   } else {
@@ -28814,6 +28853,27 @@ function firePowerShot() {
           ? bot.position.clone().add(_toHit.multiplyScalar(_surfR / _len))
           : bot.position.clone();
         spawnExplosion(_exPos, 8);
+      }
+    }
+    // (v24 round 17) Piercing shot also tears through any rocks in its line.
+    // Full 3200 dmg per rock since the shot pierces all enemies + obstacles.
+    if (game.dynamicObjects && game.dynamicObjects.length) {
+      for (const obst of game.dynamicObjects) {
+        if (!obst.alive) continue;
+        const _toObst = new THREE.Vector3().subVectors(obst.position, player.position);
+        const _objProj = _toObst.dot(forward);
+        if (_objProj < 0 || _objProj > range) continue;
+        const _objClosest = player.position.clone().add(forward.clone().multiplyScalar(_objProj));
+        const _objR = obst.collisionRadius || 60;
+        if (_objClosest.distanceTo(obst.position) < _objR) {
+          const _dealt = obst.takeDamage(3200);
+          if (_dealt > 0) {
+            player.damageDealt += _dealt;
+            player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+          }
+          spawnExplosion(_objClosest, 10);
+          if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_objClosest, 8);
+        }
       }
     }
     triggerScreenShake(3);
@@ -30244,6 +30304,8 @@ function updateAbilities(dt) {
         const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
         missile.salvoGuided = true;
         missile.smokeTrail = true;
+        // (v24 round 17) Mega Tracker Rockets bust rocks on splash impact.
+        missile.bustsRocks = true;
         missile.removeHaze();
         game.projectiles.push(missile);
       }
@@ -30415,6 +30477,19 @@ function updateAbilities(dt) {
             const dealt = bot.takeDamage(eff.dmg, eff.owner);
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; showHitMarker(); }
             spawnExplosion(eff.position, 20);
+            // (v24 round 17) On detonation, the blast also damages any rocks
+            // within the wire's radius. Wire is triggered by a bot entering
+            // proximity, but the explosion itself doesn't care what it hits ;
+            // rocks in range should crumble too.
+            if (game.dynamicObjects && game.dynamicObjects.length) {
+              for (const obst of game.dynamicObjects) {
+                if (!obst.alive) continue;
+                if (obst.position.distanceTo(eff.position) < eff.radius) {
+                  const _dealt = obst.takeDamage(eff.dmg);
+                  if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt;
+                }
+              }
+            }
             // (v11) Trip wire detonation crack so the trigger reads in
             // 3D before the explosion sound lands.
             try {
@@ -30895,6 +30970,18 @@ function updateAbilities(dt) {
         if (bot.position.distanceTo(eff.position) < eff.radius) {
           const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
           if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; }
+        }
+      }
+      // (v24 round 17) Rocks in the blast zone also take continuous damage.
+      // Same dmgPerSec * dt as bots so a sustained zone parked over a rock
+      // crumbles it on the same timescale as a ship caught in the same spot.
+      if (game.dynamicObjects && game.dynamicObjects.length) {
+        for (const obst of game.dynamicObjects) {
+          if (!obst.alive) continue;
+          if (obst.position.distanceTo(eff.position) < eff.radius) {
+            const _dealt = obst.takeDamage(eff.dmgPerSec * dt);
+            if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt;
+          }
         }
       }
       // Periodic fireworks bursts. Each tick: a smaller fireworks display
