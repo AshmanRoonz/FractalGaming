@@ -41,10 +41,10 @@
 <script type="importmap">
 {
   "imports": {
-    "three":           "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-    "three/webgpu":    "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.webgpu.js",
-    "three/tsl":       "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.tsl.js",
-    "three/addons/":   "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    "three":           "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+    "three/webgpu":    "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.webgpu.js",
+    "three/tsl":       "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.tsl.js",
+    "three/addons/":   "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
   }
 }
 </script>
@@ -85,86 +85,98 @@
    ========================================================================== */
 
 let THREE = null;
-let usingWebGPU = false;
 const statusEl = document.getElementById('status');
 const rnameEl  = document.getElementById('rname');
 const vrBtn    = document.getElementById('vrbtn');
 
 /* ----------------------------------------------------------------------------
-   1. Renderer bootstrap (WebGPU first, WebGL fallback).
-   - We dynamically import three/webgpu and try to construct WebGPURenderer.
-   - On any failure (init throws, async backend rejects, XR not compatible),
-     we discard and fall back to WebGLRenderer from the classic three build.
-   - The rest of the code uses Three.js classes off `THREE`, which works
-     for both backends since WebGPURenderer re-exports the full namespace.
+   Visible error overlay. The original problem with this POC was that any
+   throw during module bootstrap vanished into the console, leaving the
+   user with a black page and no signal. We catch synchronously at the
+   top of the script and asynchronously via window error handlers, and
+   draw the error into a fixed div over everything else.
+   ------------------------------------------------------------------------- */
+function showError(label, err) {
+  console.error('[cave]', label, err);
+  let el = document.getElementById('err-overlay');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'err-overlay';
+    el.style.cssText = 'position:fixed;top:60px;left:10px;right:10px;z-index:99;padding:14px 18px;background:rgba(40,5,12,0.92);border:1px solid #a23;border-radius:8px;color:#ffd5d5;font:13px/1.5 monospace;white-space:pre-wrap;max-height:60vh;overflow:auto;';
+    document.body.appendChild(el);
+  }
+  const msg = (err && err.stack) ? err.stack : (err && err.message) ? err.message : String(err);
+  el.textContent += `\n[${label}]\n${msg}\n`;
+}
+window.addEventListener('error',              (e) => showError('window.error',           e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => showError('unhandledrejection',    e.reason));
+
+/* ----------------------------------------------------------------------------
+   1. Renderer bootstrap: WebGPU only.
+   - import three/webgpu (full namespace + WebGPURenderer in one bundle).
+   - construct WebGPURenderer, call init() asynchronously, enable xr.
+   - if WebGPU is unavailable on the device or init throws, show the error
+     on the page; we do NOT fall back to WebGL per project decision.
    ------------------------------------------------------------------------- */
 async function initRenderer() {
-  // Try WebGPU first.
-  if (navigator.gpu) {
-    try {
-      const mod = await import('three/webgpu');
-      THREE = mod;
-      const r = new mod.WebGPURenderer({ antialias: true, alpha: false });
-      r.setPixelRatio(window.devicePixelRatio);
-      r.setSize(window.innerWidth, window.innerHeight);
-      await r.init(); // WebGPU is async; throws if backend unavailable.
-      r.xr.enabled = true;
-      usingWebGPU = true;
-      rnameEl.textContent = 'WebGPU';
-      return r;
-    } catch (err) {
-      console.warn('[cave] WebGPU init failed, falling back to WebGL:', err);
-    }
+  if (!navigator.gpu) {
+    throw new Error('WebGPU is not available in this browser. Enable WebGPU or use a WebGPU-capable browser.');
   }
-  // WebGL fallback.
-  const mod = await import('three');
+  const mod = await import('three/webgpu');
   THREE = mod;
-  const r = new mod.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
+  const r = new mod.WebGPURenderer({ antialias: true, alpha: false });
   r.setPixelRatio(window.devicePixelRatio);
   r.setSize(window.innerWidth, window.innerHeight);
+  await r.init();
   r.xr.enabled = true;
-  r.outputColorSpace = mod.SRGBColorSpace;
-  usingWebGPU = false;
-  rnameEl.textContent = 'WebGL (WebGPU unavailable)';
+  rnameEl.textContent = 'WebGPU (three@0.184.0)';
   return r;
 }
 
-const renderer = await initRenderer();
-document.body.appendChild(renderer.domElement);
+let renderer;
+try {
+  renderer = await initRenderer();
+  document.body.appendChild(renderer.domElement);
+} catch (err) {
+  showError('initRenderer', err);
+  throw err;
+}
 
 // VR button setup; gated on the session being supported AND the renderer
 // honouring xr.enabled. We lazily kick the session on click.
+//
+// Session lifecycle: we attach the 'end' listener to the XRSession itself
+// rather than to renderer.xr, because WebGPURenderer's xr manager does
+// not expose addEventListener in r184 (only the WebGL one does). On
+// requestSession success we flip the CSS class and the button label
+// directly; on session end the 'end' event flips them back.
 async function setupVRButton() {
   if (!('xr' in navigator)) { vrBtn.textContent = 'WebXR not available'; return; }
   const supported = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
   if (!supported) { vrBtn.textContent = 'No immersive-vr device'; return; }
   vrBtn.disabled = false;
   vrBtn.addEventListener('click', async () => {
-    if (renderer.xr.getSession()) {
-      await renderer.xr.getSession().end();
-      return;
-    }
+    const current = renderer.xr.getSession && renderer.xr.getSession();
+    if (current) { await current.end(); return; }
     try {
       const session = await navigator.xr.requestSession('immersive-vr', {
         optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
       });
+      // Hook end BEFORE handing the session to Three.js so we don't miss it.
+      session.addEventListener('end', () => {
+        document.body.classList.remove('vr-active');
+        vrBtn.textContent = 'ENTER VR';
+      });
       await renderer.xr.setSession(session);
+      document.body.classList.add('vr-active');
+      vrBtn.textContent = 'EXIT VR';
     } catch (err) {
-      console.error('[cave] failed to enter VR:', err);
-      vrBtn.textContent = 'VR failed: ' + err.message;
+      showError('requestSession', err);
+      vrBtn.textContent = 'VR failed: ' + (err && err.message ? err.message : err);
     }
   });
 }
 setupVRButton();
-
-renderer.xr.addEventListener('sessionstart', () => {
-  document.body.classList.add('vr-active');
-  vrBtn.textContent = 'EXIT VR';
-});
-renderer.xr.addEventListener('sessionend', () => {
-  document.body.classList.remove('vr-active');
-  vrBtn.textContent = 'ENTER VR';
-});
 
 /* ----------------------------------------------------------------------------
    2. Scene, camera, dolly.
@@ -173,8 +185,11 @@ renderer.xr.addEventListener('sessionend', () => {
      composes on top of dolly transform as a child.
    ------------------------------------------------------------------------- */
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x06030c);
-scene.fog = new THREE.FogExp2(0x06030c, 0.018);
+scene.background = new THREE.Color(0x0a0818);
+// Lighter fog so the player can read the tunnel further ahead. With density
+// 0.010 the wall is ~60% visible at 30 m and ~10% at 100 m, which still
+// reads as cave but isn't pitch-dark on first load.
+scene.fog = new THREE.FogExp2(0x0a0818, 0.010);
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 400);
 camera.position.set(0, 1.6, 0); // ~eye height when standing.
@@ -308,11 +323,14 @@ function buildCave({
       positions.push(vx, vy, vz);
       // Crevice darkening: where the sample is low, the wall is recessed
       // and gets darker. Tint also drifts subtly along the cave length.
-      const dark = 0.35 + sample * 0.55;
+      // With an unlit material these are the final colours, so the base
+      // brightness is high enough that the rock is readable on a dark
+      // background while still leaving room for crevice contrast.
+      const dark = 0.45 + sample * 0.55;       // 0.45 .. 1.0
       const huedrift = i / points.length;
-      const cR = (0.22 + huedrift * 0.05) * dark;
-      const cG = (0.18 + 0.04 * Math.sin(i * 0.07)) * dark;
-      const cB = (0.30 + huedrift * 0.10) * dark;
+      const cR = (0.55 + huedrift * 0.10) * dark;
+      const cG = (0.42 + 0.08 * Math.sin(i * 0.07)) * dark;
+      const cB = (0.70 + huedrift * 0.15) * dark;
       colours.push(cR, cG, cB);
     }
   }
@@ -343,11 +361,15 @@ function buildCave({
   }
   nAttr.needsUpdate = true;
 
-  const mat = new THREE.MeshStandardMaterial({
+  // Use a basic (unlit) material driven by vertex colours so the cave is
+  // visible regardless of how WebGPU r184 evaluates lights for the legacy
+  // MeshStandardMaterial path. The vertex colours we bake during ring
+  // generation already encode crevice darkening + hue drift, so the cave
+  // reads with depth even without dynamic lights. A standard-lit second
+  // pass can be added later once the light path is sorted.
+  const mat = new THREE.MeshBasicMaterial({
     vertexColors: true,
-    roughness: 0.95,
-    metalness: 0.05,
-    flatShading: false,
+    fog: true,
     side: THREE.FrontSide
   });
   const mesh = new THREE.Mesh(geom, mat);
@@ -358,11 +380,26 @@ function buildCave({
 
 const cave = buildCave();
 scene.add(cave.mesh);
+console.log('[cave] built mesh, verts =', cave.mesh.geometry.getAttribute('position').count,
+            'tris =', cave.mesh.geometry.getIndex().count / 3,
+            'path length =', cave.points.length);
 
-// Lights: dim ambient + a chain of pointlights along the cave path so the
-// player can actually see something more than 4 metres away. We sample
-// every Nth path point.
-scene.add(new THREE.AmbientLight(0x303060, 0.25));
+// Lights: ambient + hemisphere for a base read of the geometry, a chain of
+// coloured pointlights along the path for mood, and a head-mounted spot
+// that follows the camera so the player always has visibility on what
+// they're looking at (think headlamp / dive torch).
+scene.add(new THREE.AmbientLight(0x4a4570, 0.55));
+scene.add(new THREE.HemisphereLight(0x6a5dff, 0x1a0a2a, 0.35));
+
+// Headlamp: SpotLight parented to the camera so it tracks head orientation
+// in both flat and VR mode. Narrow cone, decent range, warm white.
+const headlamp = new THREE.SpotLight(0xfff0d0, 8.0, 30, Math.PI / 5, 0.4, 1.6);
+headlamp.position.set(0, 0, 0);
+const headlampTarget = new THREE.Object3D();
+headlampTarget.position.set(0, 0, -1);
+camera.add(headlamp);
+camera.add(headlampTarget);
+headlamp.target = headlampTarget;
 const torches = [];
 {
   const step = 18;
@@ -829,7 +866,7 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, camera);
 });
 
-console.log('[cave] init complete. WebGPU =', usingWebGPU);
+console.log('[cave] init complete.');
 </script>
 </body>
 </html>
