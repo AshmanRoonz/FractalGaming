@@ -3056,6 +3056,7 @@ const input = {
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
+  vrHideRocks: false,
   vrStripFx: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
@@ -10308,6 +10309,10 @@ renderer.xr.addEventListener('sessionstart', () => {
   camera.quaternion.set(0, 0, 0, 1);
   camera.updateMatrixWorld(true);
   _xrUpdateInputSources();
+  if (typeof isVRRockHideActive === 'function' && isVRRockHideActive() &&
+      typeof clearVRRockObstacles === 'function') {
+    try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-rocks] hide failed:', e); }
+  }
   const session = renderer.xr.getSession();
   if (session) {
     session.addEventListener('inputsourceschange', _xrUpdateInputSources);
@@ -10754,57 +10759,329 @@ function _xrDrawMenuCanvas(mode) {
   if (_xrMenuTex) _xrMenuTex.needsUpdate = true;
   _xrMenuLastRasterTime = performance.now();
 }
+
+function _xrText(ctx, text, x, y, font, color, align) {
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(String(text == null ? '' : text), x, y);
+}
+
+function _xrWrapText(ctx, text, x, y, maxWidth, lineHeight, maxLines) {
+  const words = String(text || '').split(/\s+/).filter(Boolean);
+  let line = '';
+  let lines = 0;
+  for (let i = 0; i < words.length; i++) {
+    const test = line ? (line + ' ' + words[i]) : words[i];
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines++;
+      if (maxLines && lines >= maxLines) {
+        ctx.fillText(line.replace(/\s+$/, '') + '...', x, y);
+        return y + lineHeight;
+      }
+      ctx.fillText(line, x, y);
+      y += lineHeight;
+      line = words[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line) {
+    lines++;
+    if (maxLines && lines > maxLines) line += '...';
+    ctx.fillText(line, x, y);
+    y += lineHeight;
+  }
+  return y;
+}
+
+function _xrSelectedLoadoutKey() {
+  if (typeof LOADOUTS === 'undefined' || !LOADOUTS) return null;
+  if (typeof _previewedKey !== 'undefined' && _previewedKey && LOADOUTS[_previewedKey]) return _previewedKey;
+  if (typeof player !== 'undefined' && player && player.loadoutKey && LOADOUTS[player.loadoutKey]) return player.loadoutKey;
+  const keys = Object.keys(LOADOUTS);
+  return keys.length ? keys[0] : null;
+}
+
+function _xrGetPerkInfo() {
+  if (typeof PILOT_PERKS === 'undefined' || !PILOT_PERKS) return null;
+  const id = (typeof player !== 'undefined' && player && player.perkId && PILOT_PERKS[player.perkId])
+    ? player.perkId
+    : ((typeof _getStoredPerkId === 'function') ? _getStoredPerkId() : PILOT_PERK_DEFAULT);
+  return PILOT_PERKS[id] || null;
+}
+
+function _xrShipMenuSignature() {
+  const key = _xrSelectedLoadoutKey() || '';
+  const perk = (typeof player !== 'undefined' && player && player.perkId) || '';
+  const map = (typeof game !== 'undefined' && game && game.selectedMap) || '';
+  return key + '|' + perk + '|' + map;
+}
+
 function _xrDrawShipSelectContent(ctx, W, H) {
-  ctx.fillStyle = '#ffaa44';
-  ctx.font = 'bold 64px Orbitron, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('SELECT SHIP', W / 2, 90);
   if (typeof LOADOUTS === 'undefined' || !LOADOUTS) return;
   const keys = Object.keys(LOADOUTS);
-  const selectedKey = (typeof _previewedKey !== 'undefined' && _previewedKey)
-    ? _previewedKey
-    : ((typeof player !== 'undefined' && player) ? player.loadoutKey : null);
-  const rowH = 78;
-  const listStartY = 180;
+  const selectedKey = _xrSelectedLoadoutKey();
+  const selected = selectedKey ? LOADOUTS[selectedKey] : null;
+  const chassis = selected && selected.chassis && typeof CHASSIS !== 'undefined'
+    ? CHASSIS[selected.chassis] : null;
+  const weapon = selected && selected.weapon ? selected.weapon : null;
+  const perk = _xrGetPerkInfo();
+  const mapData = (typeof MAP_DATA !== 'undefined' && typeof game !== 'undefined' && game && game.selectedMap)
+    ? MAP_DATA[game.selectedMap] : null;
+
+  _xrText(ctx, 'SHIP SELECT', 70, 82, 'bold 54px Orbitron, sans-serif', '#ffaa44', 'left');
+  _xrText(ctx, 'START launches', W - 70, 82, '26px Orbitron, sans-serif', '#88aacc', 'right');
+
+  ctx.fillStyle = 'rgba(255,255,255,0.035)';
+  ctx.fillRect(48, 116, 340, H - 190);
+  ctx.strokeStyle = 'rgba(120,170,220,0.35)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(48, 116, 340, H - 190);
+
+  const rowH = 74;
+  const listStartY = 170;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     const loadout = LOADOUTS[key];
     const y = listStartY + i * rowH;
     const isSelected = (key === selectedKey);
     if (isSelected) {
-      ctx.fillStyle = 'rgba(255, 170, 68, 0.32)';
-      ctx.fillRect(60, y - 50, W - 120, rowH - 4);
+      ctx.fillStyle = 'rgba(255, 170, 68, 0.34)';
+      ctx.fillRect(68, y - 48, 300, rowH - 6);
       ctx.strokeStyle = '#ffaa44';
       ctx.lineWidth = 3;
-      ctx.strokeRect(60, y - 50, W - 120, rowH - 4);
+      ctx.strokeRect(68, y - 48, 300, rowH - 6);
     }
-    ctx.font = 'bold 44px Orbitron, sans-serif';
-    ctx.fillStyle = isSelected ? '#ffe8b0' : '#cfe7ff';
-    ctx.textAlign = 'left';
-    ctx.fillText(loadout.name || key, 90, y);
-    ctx.font = '30px Orbitron, sans-serif';
-    ctx.fillStyle = isSelected ? '#ffd080' : '#88aacc';
-    ctx.textAlign = 'right';
-    ctx.fillText(loadout.className || '', W - 90, y);
+    _xrText(ctx, loadout.name || key, 90, y - 6, 'bold 34px Orbitron, sans-serif',
+      isSelected ? '#ffe8b0' : '#cfe7ff', 'left');
+    _xrText(ctx, loadout.className || '', 90, y + 26, '22px Orbitron, sans-serif',
+      isSelected ? '#ffd080' : '#88aacc', 'left');
   }
-  ctx.font = '26px Orbitron, sans-serif';
-  ctx.fillStyle = '#bbccdd';
-  ctx.textAlign = 'center';
-  ctx.fillText('D-PAD UP/DOWN : Cycle    B / START : Launch', W / 2, H - 38);
+
+  const detailX = 430;
+  const detailW = W - detailX - 70;
+  ctx.fillStyle = 'rgba(8, 18, 34, 0.72)';
+  ctx.fillRect(detailX, 116, detailW, H - 190);
+  ctx.strokeStyle = 'rgba(255, 170, 68, 0.45)';
+  ctx.strokeRect(detailX, 116, detailW, H - 190);
+
+  if (selected) {
+    const classColor = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[selectedKey])
+      ? LSS.CLASS_COLORS[selectedKey] : 0x88ccff;
+    ctx.fillStyle = '#' + classColor.toString(16).padStart(6, '0');
+    ctx.fillRect(detailX, 116, 8, H - 190);
+    _xrText(ctx, selected.name || selectedKey, detailX + 34, 178, 'bold 60px Orbitron, sans-serif', '#f8fbff', 'left');
+    _xrText(ctx, selected.className || '', detailX + 36, 224, '30px Orbitron, sans-serif', '#88c8ff', 'left');
+
+    const statY = 292;
+    const statFont = '28px Orbitron, sans-serif';
+    if (chassis) {
+      _xrText(ctx, 'HULL ' + Math.round(chassis.maxHealth), detailX + 36, statY, statFont, '#cfe7ff', 'left');
+      _xrText(ctx, 'SHIELD ' + Math.round(chassis.maxShield), detailX + 300, statY, statFont, '#cfe7ff', 'left');
+      _xrText(ctx, 'SPEED ' + Math.round(chassis.flightSpeed), detailX + 610, statY, statFont, '#cfe7ff', 'left');
+    }
+
+    let y = 360;
+    _xrText(ctx, 'WEAPON', detailX + 36, y, 'bold 24px Orbitron, sans-serif', '#ffaa44', 'left');
+    y += 34;
+    _xrText(ctx, weapon ? (weapon.name || 'Primary') : 'Primary', detailX + 36, y, '30px Orbitron, sans-serif', '#ffffff', 'left');
+    if (weapon) {
+      _xrText(ctx, 'DMG ' + weapon.damage + '   RANGE ' + weapon.range + '   CLIP ' + weapon.clipSize,
+        detailX + 36, y + 38, '23px Orbitron, sans-serif', '#9fb6cc', 'left');
+    }
+
+    y += 108;
+    _xrText(ctx, 'ABILITIES', detailX + 36, y, 'bold 24px Orbitron, sans-serif', '#ffaa44', 'left');
+    y += 36;
+    ctx.font = '26px Orbitron, sans-serif';
+    ctx.fillStyle = '#d9efff';
+    const abilityNames = (selected.abilities || []).map(a => a.name).join(' / ');
+    y = _xrWrapText(ctx, abilityNames, detailX + 36, y, detailW - 80, 34, 2);
+
+    y += 28;
+    _xrText(ctx, 'CORE', detailX + 36, y, 'bold 24px Orbitron, sans-serif', '#ffaa44', 'left');
+    y += 36;
+    _xrText(ctx, selected.core ? selected.core.name : '', detailX + 36, y, '28px Orbitron, sans-serif', '#d9efff', 'left');
+    if (selected.core && selected.core.desc) {
+      ctx.font = '22px Orbitron, sans-serif';
+      ctx.fillStyle = '#9fb6cc';
+      y = _xrWrapText(ctx, selected.core.desc, detailX + 36, y + 34, detailW - 80, 30, 2);
+    }
+
+    const bottomY = H - 184;
+    if (perk) {
+      _xrText(ctx, 'PERK: ' + perk.name, detailX + 36, bottomY, '26px Orbitron, sans-serif', '#ffe0a0', 'left');
+    }
+    const fallbackMapName = (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : 'Default';
+    _xrText(ctx, 'MAP: ' + (mapData ? mapData.name : fallbackMapName),
+      detailX + 36, bottomY + 40, '24px Orbitron, sans-serif', '#a9d8ff', 'left');
+  }
+
+  _xrText(ctx, 'UP/DOWN ship    LEFT/RIGHT map    LB/RB perk    A/B/START launch',
+    W / 2, H - 38, '24px Orbitron, sans-serif', '#bbccdd', 'center');
 }
+
+const _XR_VR_PERF_MODES = ['standard', 'lite', 'fast', 'max'];
+const _XR_VR_PERF_LABELS = {
+  standard: 'Standard',
+  lite: 'Quest Lite',
+  fast: 'Quest Fast',
+  max: 'Max FPS',
+};
+let _xrSettingsFocusIdx = 0;
+
+function _xrSetVRPerfMode(mode) {
+  if (!input) return;
+  input.vrPerfMode = mode || 'standard';
+  if (input.vrPerfMode !== 'standard' && typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();
+  if (typeof saveSettings === 'function') saveSettings();
+  try {
+    if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+      renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
+    }
+  } catch (_) {}
+}
+
+function _xrStepVRScale(dir) {
+  if (!input) return;
+  const cur = (typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7;
+  const next = Math.max(0.35, Math.min(1.2, Math.round((cur + dir * 0.05) * 20) / 20));
+  input.vrRenderScale = next;
+  if (typeof saveSettings === 'function') saveSettings();
+  try {
+    if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+      renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
+    }
+  } catch (_) {}
+}
+
+function _xrToggleVRRocks() {
+  if (!input) return;
+  input.vrHideRocks = !input.vrHideRocks;
+  if (typeof saveSettings === 'function') saveSettings();
+  if (input.vrHideRocks && typeof clearVRRockObstacles === 'function') {
+    try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-rocks] live clear failed:', e); }
+  }
+}
+
+function _xrToggleVRStripFx() {
+  if (!input) return;
+  input.vrStripFx = !input.vrStripFx;
+  if (input.vrStripFx) {
+    if (typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();
+    if (typeof clearVRRockObstacles === 'function') {
+      try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-strip] live clear failed:', e); }
+    }
+  }
+  if (typeof saveSettings === 'function') saveSettings();
+}
+
+function _xrSettingsRows() {
+  const mode = (input && input.vrPerfMode) || 'standard';
+  const idx = Math.max(0, _XR_VR_PERF_MODES.indexOf(mode));
+  return [
+    {
+      label: 'Performance Mode',
+      value: _XR_VR_PERF_LABELS[mode] || 'Standard',
+      change: (dir) => _xrSetVRPerfMode(_XR_VR_PERF_MODES[(idx + dir + _XR_VR_PERF_MODES.length) % _XR_VR_PERF_MODES.length]),
+      activate: () => _xrSetVRPerfMode(_XR_VR_PERF_MODES[(idx + 1) % _XR_VR_PERF_MODES.length]),
+    },
+    {
+      label: 'VR Render Scale',
+      value: ((input && typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7).toFixed(2) +
+        '  effective ' + ((typeof getEffectiveVRRenderScale === 'function') ? getEffectiveVRRenderScale().toFixed(2) : '0.70'),
+      change: _xrStepVRScale,
+      activate: () => _xrStepVRScale(1),
+    },
+    {
+      label: 'Hide Rocks',
+      value: (input && input.vrHideRocks) ? 'ON' : 'OFF',
+      change: _xrToggleVRRocks,
+      activate: _xrToggleVRRocks,
+    },
+    {
+      label: 'Strip Clouds and Lightning',
+      value: (input && input.vrStripFx) ? 'ON' : 'OFF',
+      change: _xrToggleVRStripFx,
+      activate: _xrToggleVRStripFx,
+    },
+    {
+      label: 'Head Aim Nudge',
+      value: (input && input.vrHeadAim && input.vrHeadAim.enabled) ? 'ON' : 'OFF',
+      change: () => {
+        if (!input.vrHeadAim) input.vrHeadAim = {};
+        input.vrHeadAim.enabled = !input.vrHeadAim.enabled;
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+      activate: () => {
+        if (!input.vrHeadAim) input.vrHeadAim = {};
+        input.vrHeadAim.enabled = !input.vrHeadAim.enabled;
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+    },
+    {
+      label: 'Close Settings',
+      value: 'A or START',
+      activate: () => { if (typeof closeSettings === 'function') closeSettings(); },
+    },
+  ];
+}
+
+function _xrSettingsSignature() {
+  return [
+    _xrSettingsFocusIdx,
+    input && input.vrPerfMode,
+    input && input.vrRenderScale,
+    input && input.vrHideRocks,
+    input && input.vrStripFx,
+    input && input.vrHeadAim && input.vrHeadAim.enabled,
+  ].join('|');
+}
+
+function _xrHandleSettingsMenuInput(gp) {
+  const rows = _xrSettingsRows();
+  if (!rows.length) return false;
+  if (_xrSettingsFocusIdx < 0) _xrSettingsFocusIdx = rows.length - 1;
+  if (_xrSettingsFocusIdx >= rows.length) _xrSettingsFocusIdx = 0;
+  if (input.gpDpadUp && !input.gpDpadUpPrev) {
+    _xrSettingsFocusIdx = (_xrSettingsFocusIdx + rows.length - 1) % rows.length;
+  }
+  if (input.gpDpadDown && !input.gpDpadDownPrev) {
+    _xrSettingsFocusIdx = (_xrSettingsFocusIdx + 1) % rows.length;
+  }
+  const focused = rows[_xrSettingsFocusIdx];
+  if (input.gpDpadLeft && !input.gpDpadLeftPrev && focused && focused.change) focused.change(-1);
+  if (input.gpDpadRight && !input.gpDpadRightPrev && focused && focused.change) focused.change(1);
+  const aBtn = !!(gp && gp.buttons && gp.buttons[0] &&
+    (gp.buttons[0].pressed || gp.buttons[0].value > input.triggerThreshold));
+  if (aBtn && !input.gpAPrev && focused && focused.activate) focused.activate();
+  input.gpAPrev = aBtn;
+  return true;
+}
+
 function _xrDrawSettingsHint(ctx, W, H) {
-  ctx.fillStyle = '#ffaa44';
-  ctx.font = 'bold 64px Orbitron, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('SETTINGS', W / 2, 120);
-  ctx.font = '36px Orbitron, sans-serif';
-  ctx.fillStyle = '#cfe7ff';
-  ctx.fillText('Settings UI is not available in VR.', W / 2, H / 2 - 30);
-  ctx.fillText('Tweak settings on the flat browser', W / 2, H / 2 + 30);
-  ctx.fillText('before entering VR.', W / 2, H / 2 + 90);
-  ctx.font = '26px Orbitron, sans-serif';
-  ctx.fillStyle = '#88aacc';
-  ctx.fillText('Press SETTINGS button again to close', W / 2, H - 50);
+  _xrText(ctx, 'VR SETTINGS', 70, 88, 'bold 54px Orbitron, sans-serif', '#ffaa44', 'left');
+  _xrText(ctx, 'START closes', W - 70, 88, '26px Orbitron, sans-serif', '#88aacc', 'right');
+
+  const rows = _xrSettingsRows();
+  const x = 120, y0 = 170, rowH = 92, w = W - 240;
+  for (let i = 0; i < rows.length; i++) {
+    const y = y0 + i * rowH;
+    const active = i === _xrSettingsFocusIdx;
+    ctx.fillStyle = active ? 'rgba(255, 170, 68, 0.28)' : 'rgba(255,255,255,0.045)';
+    ctx.fillRect(x, y - 54, w, rowH - 12);
+    ctx.strokeStyle = active ? '#ffaa44' : 'rgba(120,170,220,0.25)';
+    ctx.lineWidth = active ? 4 : 2;
+    ctx.strokeRect(x, y - 54, w, rowH - 12);
+    _xrText(ctx, rows[i].label, x + 34, y, 'bold 34px Orbitron, sans-serif',
+      active ? '#ffe8b0' : '#d9efff', 'left');
+    _xrText(ctx, rows[i].value, x + w - 34, y, '30px Orbitron, sans-serif',
+      active ? '#ffffff' : '#9fb6cc', 'right');
+  }
+  _xrText(ctx, 'UP/DOWN select    LEFT/RIGHT adjust    A toggles',
+    W / 2, H - 38, '24px Orbitron, sans-serif', '#bbccdd', 'center');
 }
 function _xrDrawLobbyHint(ctx, W, H) {
   ctx.fillStyle = '#ffaa44';
@@ -10858,10 +11135,10 @@ function _xrUpdateMenuMirror() {
   mesh.visible = true;
   // Repaint on mode change, or on ship-select selection change.
   const currentKey = (mode === 'shipSelect')
-    ? ((typeof _previewedKey !== 'undefined' && _previewedKey)
-        ? _previewedKey
-        : ((typeof player !== 'undefined' && player) ? player.loadoutKey : null))
-    : null;
+    ? ((typeof _xrShipMenuSignature === 'function') ? _xrShipMenuSignature() : null)
+    : (mode === 'settings' && typeof _xrSettingsSignature === 'function')
+      ? _xrSettingsSignature()
+      : null;
   if (mode !== _xrMenuLastMode || currentKey !== _xrMenuLastKey) {
     _xrMenuLastMode = mode;
     _xrMenuLastKey = currentKey;
@@ -11842,6 +12119,12 @@ function isXRPresenting() {
 function isVRStripFx() {
   if (typeof input === 'undefined' || !input || !input.vrStripFx) return false;
   return isXRPresenting();
+}
+function isVRRockHideActive() {
+  if (typeof input === 'undefined' || !input) return false;
+  if (input.vrHideRocks) return true;
+  if (!input.vrStripFx) return false;
+  return (typeof isXRPresenting === 'function') ? isXRPresenting() : false;
 }
 
 var _lssSettingsLoaded = false;
@@ -16168,7 +16451,9 @@ class Projectile {
 
     // Mega Tracker Rockets remote guidance: missile steers toward player's crosshair aim point
     if (this.salvoGuided) {
-      const aimDir = _projAimDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      const aimDir = (typeof getPlayerAimForward === 'function' && this.owner === 'player')
+        ? getPlayerAimForward(_projAimDir)
+        : _projAimDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
       const speed = this.velocity.length();
       // Aggressive turn rate (player has full control)
       this.velocity.lerp(aimDir.multiplyScalar(speed), 6.0 * dt);
@@ -19875,7 +20160,8 @@ function spawnRockChunks(pos, baseColor, parentScale) {
   // (v18VR 2026-05-22 round 13) Strip-FX gate. No chunks when VR has the
   // "no rocks" switch flipped ; the parent rock is already absent in that
   // case so a fragment spray wouldn't make sense.
-  if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
+  if ((typeof isVRStripFx === 'function' && isVRStripFx()) ||
+      (typeof isVRRockHideActive === 'function' && isVRRockHideActive())) return;
   if (typeof game === 'undefined' || !game || !game.effects) return;
   if (typeof scene === 'undefined' || !scene) return;
   const N = 4 + Math.floor(Math.random() * 5);                // 4..8 chunks
@@ -21298,6 +21584,69 @@ function _voxelRoomsRebuild() {
   return _voxelRoomSystem.rebuild();
 }
 
+function _disposeVRRockMesh(mesh) {
+  if (!mesh) return;
+  if (mesh.parent) mesh.parent.remove(mesh);
+  if (mesh.geometry && mesh.geometry.dispose) {
+    try { mesh.geometry.dispose(); } catch (_) {}
+  }
+  const mat = mesh.material;
+  if (Array.isArray(mat)) {
+    for (const m of mat) {
+      if (m && m.dispose) { try { m.dispose(); } catch (_) {} }
+    }
+  } else if (mat && mat.dispose) {
+    try { mat.dispose(); } catch (_) {}
+  }
+}
+
+function clearVRRockObstacles() {
+  if (typeof game === 'undefined' || !game) return;
+  if (game.clusters) {
+    for (const cluster of game.clusters) {
+      if (!cluster) continue;
+      if (cluster.children) {
+        for (const ch of cluster.children) {
+          if (ch && ch._atomSmoke) {
+            try {
+              if (typeof ch._atomSmoke.dispose === 'function') ch._atomSmoke.dispose();
+            } catch (_) {}
+            ch._atomSmoke = null;
+          }
+        }
+      }
+      if (typeof cluster._disposeDistortionShell === 'function') {
+        try { cluster._disposeDistortionShell(); } catch (_) {}
+      }
+    }
+  }
+  if (game.dynamicObjects) {
+    for (const obj of game.dynamicObjects) {
+      if (!obj) continue;
+      _disposeVRRockMesh(obj.mesh);
+      _disposeVRRockMesh(obj.edgeMesh);
+      obj.mesh = null;
+      obj.edgeMesh = null;
+      obj.alive = false;
+    }
+  }
+  game.dynamicObjects = [];
+  game.clusters = [];
+
+  if (Array.isArray(game.effects)) {
+    for (let i = game.effects.length - 1; i >= 0; i--) {
+      const eff = game.effects[i];
+      if (eff && eff.type === 'rockChunk') {
+        _disposeVRRockMesh(eff.mesh);
+        game.effects.splice(i, 1);
+      }
+    }
+  }
+  if (typeof disposeAllDetachedGasPockets === 'function') {
+    try { disposeAllDetachedGasPockets(); } catch (_) {}
+  }
+}
+
 
 function spawnDynamicObjects(rooms) {
   if (game.clusters) {
@@ -21313,10 +21662,10 @@ function spawnDynamicObjects(rooms) {
   }
   // (v18VR 2026-05-22 round 13) Strip-FX early-out. The cleanup loop
   // above still runs (so leftover state from a previous round is wiped)
-  // ; we just don't build any new rocks for this round. Clusters array
-  // is cleared by the existing teardown below right after this comment.
-  if (typeof isVRStripFx === 'function' && isVRStripFx()) {
-    game.clusters = [];
+  // ; we just don't build any new rocks for this round.
+  if ((typeof isVRStripFx === 'function' && isVRStripFx()) ||
+      (typeof isVRRockHideActive === 'function' && isVRRockHideActive())) {
+    if (typeof clearVRRockObstacles === 'function') clearVRRockObstacles();
     return;
   }
   // Tear down existing cluster children and any standalone debris
@@ -27906,6 +28255,26 @@ function fireSpread(origin, dir, w) {
 
 // ---- ABILITIES ----
 
+function getPlayerAimForward(out) {
+  const target = out || new THREE.Vector3();
+  if (!getPlayerAimForward._q) getPlayerAimForward._q = new THREE.Quaternion();
+  const q = getPlayerAimForward._q;
+  if (typeof player !== 'undefined' && player && player.euler) {
+    q.setFromEuler(player.euler);
+  } else if (typeof camera !== 'undefined' && camera && camera.quaternion) {
+    q.copy(camera.quaternion);
+  } else {
+    q.identity();
+  }
+  return target.set(0, 0, -1).applyQuaternion(q).normalize();
+}
+
+function getPlayerForwardOrigin(forward, distance, out) {
+  const target = out || new THREE.Vector3();
+  if (typeof player === 'undefined' || !player || !player.position) return target.set(0, 0, 0);
+  return target.copy(player.position).addScaledVector(forward, distance || 0);
+}
+
 function activateAbility(slot) {
   if (player.shipState === 'dead' || !player.abilities[slot]) return;
   // No abilities during the pre-round warmup countdown
@@ -27990,7 +28359,9 @@ function activateAbility(slot) {
 }
 
 function executeAbility(slot, ability) {
-  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const forward = (typeof getPlayerAimForward === 'function')
+    ? getPlayerAimForward(new THREE.Vector3())
+    : new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
 
   // VORTEX energy cost check (all VORTEX abilities share one energy pool).
   // Vortex Shield has NO upfront cost; it's a continuous hold ability whose
@@ -28369,20 +28740,23 @@ function executeAbility(slot, ability) {
         // reads as Syphon's identity color rather than generic white
         // electricity. 0x4169E1 = classic royal blue ; 0x6080ff = bright
         // electric-blue inner core for the secondary streak.
-        spawnLightningBolt(player.position, bestBot.position, 0x4169E1, 0.32, 8, 9.0);
-        spawnLightningBolt(player.position, bestBot.position, 0x6080ff, 0.28, 6, 7.0);
+        const siphonOrigin = (typeof getPlayerForwardOrigin === 'function')
+          ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3())
+          : player.position.clone();
+        spawnLightningBolt(siphonOrigin, bestBot.position, 0x4169E1, 0.32, 8, 9.0);
+        spawnLightningBolt(siphonOrigin, bestBot.position, 0x6080ff, 0.28, 6, 7.0);
         // (v12m patch2) Broadcast the siphon beam so peers see the
         // conduit too (not just the local shooter). Receivers spawn
         // matching lightning bolts via the event handler.
         if (net && net.active && net.sendEvent) {
           net.sendEvent({
             type: 'siphon_beam',
-            ax: player.position.x, ay: player.position.y, az: player.position.z,
+            ax: siphonOrigin.x, ay: siphonOrigin.y, az: siphonOrigin.z,
             bx: bestBot.position.x, by: bestBot.position.y, bz: bestBot.position.z
           });
         }
         // Wide blue-tinted halo bolt for the soft glow read (Syphon class blue).
-        spawnLightningBolt(player.position, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.32, 8, 14.0);
+        spawnLightningBolt(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.32, 8, 14.0);
         // Five parallel offset bolts give the conduit visible thickness
         // around the central core. Mix of paler-blue / class-blue tints so the
         // conduit pulses between bright energy white-blue and Syphon blue.
@@ -28391,7 +28765,7 @@ function executeAbility(slot, ability) {
             .normalize().multiplyScalar(40 + Math.random() * 30);
           const tint = (oi % 2 === 0) ? 0x88ccff : LSS.CLASS_COLORS.SYPHON;
           spawnLightningBolt(
-            player.position.clone().add(offset),
+            siphonOrigin.clone().add(offset),
             bestBot.position.clone().add(offset),
             tint, 0.20 + Math.random() * 0.10, 4, 4.0
           );
@@ -28399,12 +28773,12 @@ function executeAbility(slot, ability) {
         // Blue glow particles along the beam path â€” soft additive sprites
         // that linger and fade, sitting around the bolts to give the
         // conduit a volumetric blue halo. ~24 particles per tick.
-        const _siphonDir = new THREE.Vector3().subVectors(bestBot.position, player.position);
+        const _siphonDir = new THREE.Vector3().subVectors(bestBot.position, siphonOrigin);
         const _siphonLen = _siphonDir.length();
         if (_siphonLen > 1) {
           for (let gi = 0; gi < 24; gi++) {
             const t = Math.random();
-            const pPos = player.position.clone().addScaledVector(_siphonDir, t);
+            const pPos = siphonOrigin.clone().addScaledVector(_siphonDir, t);
             // Random transverse offset so the glow forms a fat tube around
             // the beam axis instead of a line on it.
             pPos.x += (Math.random() - 0.5) * 50;
@@ -28428,13 +28802,13 @@ function executeAbility(slot, ability) {
         if (net.active && net.sendEvent) {
           net.sendEvent({
             type: 'lightning',
-            ox: player.position.x, oy: player.position.y, oz: player.position.z,
+            ox: siphonOrigin.x, oy: siphonOrigin.y, oz: siphonOrigin.z,
             ex: bestBot.position.x, ey: bestBot.position.y, ez: bestBot.position.z,
             color: 0x4169E1, lifetime: 0.32, branches: 8, thickness: 9.0,
           });
           net.sendEvent({
             type: 'lightning',
-            ox: player.position.x, oy: player.position.y, oz: player.position.z,
+            ox: siphonOrigin.x, oy: siphonOrigin.y, oz: siphonOrigin.z,
             ex: bestBot.position.x, ey: bestBot.position.y, ez: bestBot.position.z,
             color: LSS.CLASS_COLORS.SYPHON, lifetime: 0.32, branches: 8, thickness: 14.0,
           });
@@ -32400,19 +32774,25 @@ function pollGamepad() {
     input.gpXPrev = _xBtn;
     input.gpYPrev = _yBtn;
   } else if (settingsOpen) {
-    // Settings overlay nav: d-pad up/down moves focus between rows; d-pad
-    // left/right adjusts the focused widget (slider step or dropdown cycle);
-    // gamepad A (button 0) activates buttons or toggles checkboxes.
-    if (typeof _settingsEnsureFocus === 'function') _settingsEnsureFocus();
-    if (input.gpDpadUp    && !input.gpDpadUpPrev)    _settingsMoveFocus(-1);
-    if (input.gpDpadDown  && !input.gpDpadDownPrev)  _settingsMoveFocus(+1);
-    if (input.gpDpadLeft  && !input.gpDpadLeftPrev)  _settingsAdjustFocused(-1);
-    if (input.gpDpadRight && !input.gpDpadRightPrev) _settingsAdjustFocused(+1);
-    // Raw button 0 (A) for confirm; do not use the configurable 'dash' binding
-    // because the user may have remapped dash to something non-A.
-    const _aBtn = !!(gp.buttons[0] && gp.buttons[0].pressed);
-    if (_aBtn && !input.gpAPrev) _settingsActivateFocused();
-    input.gpAPrev = _aBtn;
+    if (renderer && renderer.xr && renderer.xr.isPresenting &&
+        typeof _xrHandleSettingsMenuInput === 'function' &&
+        _xrHandleSettingsMenuInput(gp)) {
+      // In-headset settings are handled by the native VR canvas menu.
+    } else {
+      // Settings overlay nav: d-pad up/down moves focus between rows; d-pad
+      // left/right adjusts the focused widget (slider step or dropdown cycle);
+      // gamepad A (button 0) activates buttons or toggles checkboxes.
+      if (typeof _settingsEnsureFocus === 'function') _settingsEnsureFocus();
+      if (input.gpDpadUp    && !input.gpDpadUpPrev)    _settingsMoveFocus(-1);
+      if (input.gpDpadDown  && !input.gpDpadDownPrev)  _settingsMoveFocus(+1);
+      if (input.gpDpadLeft  && !input.gpDpadLeftPrev)  _settingsAdjustFocused(-1);
+      if (input.gpDpadRight && !input.gpDpadRightPrev) _settingsAdjustFocused(+1);
+      // Raw button 0 (A) for confirm; do not use the configurable 'dash' binding
+      // because the user may have remapped dash to something non-A.
+      const _aBtn = !!(gp.buttons[0] && gp.buttons[0].pressed);
+      if (_aBtn && !input.gpAPrev) _settingsActivateFocused();
+      input.gpAPrev = _aBtn;
+    }
   } else if (typeof deathCam !== 'undefined' && deathCam.active) {
     // (v8_2a) Ghost free-fly while dead. Spectate cycling removed; movement
     // is handled inside updateDeathCam itself (WASD + mouse / gamepad).
@@ -35001,6 +35381,8 @@ function _refreshSettingsValues() {
   if (vrScaleVal && typeof getEffectiveVRRenderScale === 'function') {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
+  setChk('set-vr-hide-rocks', input.vrHideRocks);
+  setChk('set-vr-strip-fx', input.vrStripFx);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
   // re-syncs the display text + Rebind button label for every row.
@@ -35298,13 +35680,20 @@ function buildSettingsPage() {
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
       </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Hide Rocks</label>
+        <input type="checkbox" id="set-vr-hide-rocks" ${input.vrHideRocks ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Removes the destructible rock clusters and their per-rock smoke without lowering render scale or stripping lightning. Current rocks are removed immediately. Turn it off before the next map build to restore rocks.</label>
+      </div>
       <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
       <div class="setting-row" style="margin-top:6px;">
         <label>Strip Clouds / Rocks / Lightning</label>
         <input type="checkbox" id="set-vr-strip-fx" ${input.vrStripFx ? 'checked' : ''}>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Removes rock cluster meshes (asteroids and their atom-fractal shaders), all gas clouds (basin pools, per-rock pockets, ambient cloud puffs), and lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, dash crackle). Only applies in VR ; flat mode is unaffected. Takes effect on the next round / map build ; existing meshes stay until that point.</label>
+        <label style="flex:1;">Removes rock cluster meshes (asteroids and their atom-fractal shaders), all gas clouds (basin pools, per-rock pockets, ambient cloud puffs), and lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, dash crackle). Only applies in VR ; flat mode is unaffected. If toggled during an active VR session, current rocks and ambient cloud dots are removed immediately.</label>
       </div>
     </div>
 
@@ -36703,9 +37092,24 @@ function buildSettingsPage() {
       }
     } catch (_) {}
   });
+  const vrHideRocksSel = overlay.querySelector('#set-vr-hide-rocks');
+  if (vrHideRocksSel) vrHideRocksSel.addEventListener('change', () => {
+    input.vrHideRocks = !!vrHideRocksSel.checked;
+    if (input.vrHideRocks && typeof clearVRRockObstacles === 'function') {
+      try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-rocks] live clear failed:', e); }
+    }
+    saveSettings();
+  });
   const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
   if (vrStripSel) vrStripSel.addEventListener('change', () => {
     input.vrStripFx = !!vrStripSel.checked;
+    if (input.vrStripFx) {
+      if (typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();
+      if (typeof clearVRRockObstacles === 'function' &&
+          typeof isXRPresenting === 'function' && isXRPresenting()) {
+        try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-strip] live clear failed:', e); }
+      }
+    }
     saveSettings();
   });
 
@@ -37424,6 +37828,7 @@ function saveSettings() {
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
       vrPerfMode: input.vrPerfMode || 'standard',
+      vrHideRocks: !!input.vrHideRocks,
       vrStripFx: !!input.vrStripFx,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -38804,6 +39209,8 @@ const BAKED_DEFAULTS = {
   },
   "vrRenderScale": 0.7,
   "vrPerfMode": "standard",
+  "vrHideRocks": false,
+  "vrStripFx": false,
   "fovDeg": 120,
   "audioMaster": 1,
   "audioSfx": 1,
@@ -38903,6 +39310,7 @@ const SHIPPED_DEFAULTS = {
   },
   "vrRenderScale": 1,
   "vrPerfMode": "standard",
+  "vrHideRocks": false,
   "vrStripFx": true,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -40470,6 +40878,7 @@ function loadSettings() {
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
+    if (typeof data.vrHideRocks === 'boolean') input.vrHideRocks = data.vrHideRocks;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
@@ -42074,6 +42483,10 @@ function broadcastWorldObjects() {
 
 function applyWorldObjectsManifest(clusterEntries) {
   if (!Array.isArray(clusterEntries)) return;
+  if (typeof isVRRockHideActive === 'function' && isVRRockHideActive()) {
+    if (typeof clearVRRockObstacles === 'function') clearVRRockObstacles();
+    return;
+  }
   // Tear down whatever clusters / children we currently have. Existing meshes
   // are removed from the scene; game.dynamicObjects (which children get pushed
   // into during build) is cleared and refilled by the new instantiations.
