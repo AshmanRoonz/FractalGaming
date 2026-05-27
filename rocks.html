@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LSS WebGPU Rock Cloud Lightning Spike</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #05060a;
+    color: #d8e8f8;
+    font: 12px/1.4 system-ui, Segoe UI, sans-serif;
+  }
+  canvas { display: block; width: 100%; height: 100%; }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 20;
+    width: min(410px, calc(100vw - 24px));
+    background: rgba(5, 8, 14, 0.78);
+    border: 1px solid rgba(130, 175, 220, 0.28);
+    border-radius: 6px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(12px);
+  }
+  #hud header {
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid rgba(130, 175, 220, 0.18);
+  }
+  #hud h1 {
+    margin: 0;
+    color: #ffaa44;
+    font-size: 13px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+  }
+  #stats {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(130, 175, 220, 0.18);
+  }
+  .stat {
+    min-width: 0;
+    padding: 6px 7px;
+    border: 1px solid rgba(130, 175, 220, 0.16);
+    border-radius: 4px;
+    background: rgba(18, 28, 42, 0.54);
+  }
+  .stat span {
+    display: block;
+    color: #86a6c8;
+    font-size: 9px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .stat strong {
+    display: block;
+    margin-top: 2px;
+    color: #f3fbff;
+    font-size: 13px;
+    font-weight: 650;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #controls {
+    display: grid;
+    gap: 9px;
+    padding: 12px;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 118px 1fr 46px;
+    align-items: center;
+    gap: 8px;
+  }
+  .row label {
+    color: #b9d0e8;
+    font-size: 11px;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+  }
+  input[type="range"] { width: 100%; }
+  .value {
+    color: #f8cc7a;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 2px;
+  }
+  button {
+    appearance: none;
+    border: 1px solid rgba(130, 175, 220, 0.28);
+    border-radius: 4px;
+    background: rgba(34, 48, 66, 0.85);
+    color: #dcefff;
+    padding: 8px 10px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0.7px;
+    text-transform: uppercase;
+  }
+  button:hover { background: rgba(50, 70, 96, 0.9); }
+  button.on {
+    border-color: rgba(255, 170, 68, 0.55);
+    color: #ffd38a;
+    background: rgba(86, 54, 22, 0.75);
+  }
+  #log {
+    position: fixed;
+    left: 12px;
+    bottom: 12px;
+    z-index: 20;
+    max-width: min(760px, calc(100vw - 24px));
+    max-height: 132px;
+    overflow: auto;
+    padding: 8px 10px;
+    background: rgba(5, 8, 14, 0.72);
+    border: 1px solid rgba(130, 175, 220, 0.22);
+    border-radius: 5px;
+    color: #b8cbe0;
+    font: 11px/1.35 Consolas, monospace;
+    pointer-events: none;
+  }
+  #log .info { color: #8bd6ff; }
+  #log .warn { color: #ffcc77; }
+  #log .err { color: #ff9a9a; }
+  #fatal {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    background: rgba(4, 6, 10, 0.94);
+  }
+  #fatal > div {
+    max-width: 660px;
+    padding: 24px;
+    border: 1px solid rgba(255, 120, 120, 0.38);
+    border-radius: 6px;
+    background: rgba(25, 14, 20, 0.82);
+  }
+  #fatal h2 {
+    margin: 0 0 12px;
+    color: #ff9a9a;
+    font-size: 18px;
+  }
+  #fatal pre {
+    white-space: pre-wrap;
+    color: #ffd0d0;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="hud">
+  <header>
+    <h1>Rocks, Clouds, Lightning Spike</h1>
+  </header>
+  <div id="stats">
+    <div class="stat"><span>Renderer</span><strong id="rendererStat">WebGPU</strong></div>
+    <div class="stat"><span>FPS</span><strong id="fpsStat">--</strong></div>
+    <div class="stat"><span>Draws</span><strong id="drawStat">--</strong></div>
+    <div class="stat"><span>Bolts</span><strong id="boltStat">--</strong></div>
+    <div class="stat"><span>XR</span><strong id="xrStat">checking</strong></div>
+  </div>
+  <div id="controls">
+    <div class="row">
+      <label for="rockCount">Rocks</label>
+      <input id="rockCount" type="range" min="8" max="48" step="1" value="24">
+      <div id="rockCountValue" class="value">24</div>
+    </div>
+    <div class="row">
+      <label for="cloudSlots">Clouds</label>
+      <input id="cloudSlots" type="range" min="40" max="260" step="10" value="150">
+      <div id="cloudSlotsValue" class="value">150</div>
+    </div>
+    <div class="row">
+      <label for="boltCount">Lightning</label>
+      <input id="boltCount" type="range" min="1" max="9" step="1" value="5">
+      <div id="boltCountValue" class="value">5</div>
+    </div>
+    <div class="row">
+      <label for="stormRate">Storm Rate</label>
+      <input id="stormRate" type="range" min="0.2" max="2.0" step="0.1" value="0.7">
+      <div id="stormRateValue" class="value">0.7</div>
+    </div>
+    <div class="row">
+      <label for="cloudOpacity">Cloud Alpha</label>
+      <input id="cloudOpacity" type="range" min="0.25" max="1.4" step="0.05" value="0.85">
+      <div id="cloudOpacityValue" class="value">0.85</div>
+    </div>
+    <div class="row">
+      <label for="boltThickness">Bolt Width</label>
+      <input id="boltThickness" type="range" min="1" max="8" step="0.5" value="3.5">
+      <div id="boltThicknessValue" class="value">3.5</div>
+    </div>
+    <div class="buttons">
+      <button id="rebuildBtn">Rebuild Field</button>
+      <button id="respawnBtn">Respawn Bolts</button>
+      <button id="vrBtn" disabled>VR Checking</button>
+      <button id="stormBtn" class="on">Auto Storm</button>
+      <button id="orbitBtn" class="on">Orbit</button>
+      <button id="noiseBtn" class="on">Noise</button>
+    </div>
+  </div>
+</div>
+<div id="log"></div>
+<div id="fatal"><div><h2>WebGPU spike failed</h2><pre id="fatalText"></pre></div></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.172.0/build/three.tsl.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import * as TSL from 'three/tsl';
+
+const {
+  Fn, attribute, uniform, vec2, vec3, vec4, float,
+  positionLocal, cameraPosition, uv, time,
+  fract, sin, floor, mix, smoothstep, length, min, max,
+  mx_noise_float,
+} = TSL;
+
+const logEl = document.getElementById('log');
+const fatalEl = document.getElementById('fatal');
+const fatalText = document.getElementById('fatalText');
+
+function log(message, level) {
+  const row = document.createElement('div');
+  row.className = level || 'info';
+  row.textContent = message;
+  logEl.appendChild(row);
+  logEl.scrollTop = logEl.scrollHeight;
+  if (level === 'err') console.error(message);
+  else if (level === 'warn') console.warn(message);
+  else console.log(message);
+}
+
+function showFatal(err) {
+  fatalText.textContent = (err && err.stack) ? err.stack : String(err);
+  fatalEl.style.display = 'flex';
+  log(String(err && err.message ? err.message : err), 'err');
+}
+
+window.addEventListener('error', (ev) => {
+  log('[window.error] ' + ev.message, 'err');
+});
+window.addEventListener('unhandledrejection', (ev) => {
+  const reason = ev.reason && ev.reason.message ? ev.reason.message : ev.reason;
+  log('[unhandledrejection] ' + reason, 'err');
+});
+
+const ui = {
+  rockCount: document.getElementById('rockCount'),
+  cloudSlots: document.getElementById('cloudSlots'),
+  boltCount: document.getElementById('boltCount'),
+  stormRate: document.getElementById('stormRate'),
+  cloudOpacity: document.getElementById('cloudOpacity'),
+  boltThickness: document.getElementById('boltThickness'),
+  rebuildBtn: document.getElementById('rebuildBtn'),
+  respawnBtn: document.getElementById('respawnBtn'),
+  vrBtn: document.getElementById('vrBtn'),
+  stormBtn: document.getElementById('stormBtn'),
+  orbitBtn: document.getElementById('orbitBtn'),
+  noiseBtn: document.getElementById('noiseBtn'),
+  rendererStat: document.getElementById('rendererStat'),
+  fpsStat: document.getElementById('fpsStat'),
+  drawStat: document.getElementById('drawStat'),
+  boltStat: document.getElementById('boltStat'),
+  xrStat: document.getElementById('xrStat'),
+};
+
+const valueIds = ['rockCount', 'cloudSlots', 'boltCount', 'stormRate', 'cloudOpacity', 'boltThickness'];
+function syncControlLabels() {
+  for (const id of valueIds) {
+    const valEl = document.getElementById(id + 'Value');
+    if (valEl) valEl.textContent = ui[id].value;
+  }
+}
+syncControlLabels();
+
+let renderer, scene, camera, clock;
+let xrDolly;
+let rockRoot, cloudMesh;
+let clouds = null;
+let anchors = [];
+let boltMeshes = [];
+let stormOn = true;
+let orbitOn = true;
+let noiseOn = true;
+let yaw = 0.0;
+let pitch = 0.24;
+let distance = 700;
+let dragging = false;
+let dragX = 0;
+let dragY = 0;
+let lastStorm = 0;
+let xrSession = null;
+let xrSupported = false;
+let flatRaf = 0;
+let renderInFlight = false;
+
+const tmpVec = new THREE.Vector3();
+const tmpColor = new THREE.Color();
+
+function hashDisplace(x, y, z) {
+  const qx = Math.round(x * 1000) / 1000;
+  const qy = Math.round(y * 1000) / 1000;
+  const qz = Math.round(z * 1000) / 1000;
+  const h = Math.sin(qx * 127.1 + qy * 311.7 + qz * 74.7) * 43758.5453;
+  return h - Math.floor(h);
+}
+
+function makeRockGeometry(detail, seed) {
+  const geo = new THREE.IcosahedronGeometry(1, detail || 1);
+  const pos = geo.attributes.position;
+  const v = new THREE.Vector3();
+  const s = (typeof seed === 'number') ? seed : 0;
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i);
+    const factor = 0.55 + hashDisplace(
+      v.x + s * 13.7,
+      v.y + s * 7.3,
+      v.z + s * 19.1,
+    ) * 0.82;
+    v.multiplyScalar(factor);
+    pos.setXYZ(i, v.x, v.y, v.z);
+  }
+  pos.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function makeRockMaterial(i) {
+  const palette = [0x7e776a, 0x6e7580, 0x827062, 0x596d70, 0x837d71];
+  const color = palette[i % palette.length];
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.92,
+    metalness: 0.05,
+    emissive: new THREE.Color(color).multiplyScalar(0.045),
+    emissiveIntensity: 0.6,
+  });
+}
+
+function disposeObject3D(root) {
+  if (!root) return;
+  root.traverse((obj) => {
+    if (obj.geometry && obj.geometry.dispose) obj.geometry.dispose();
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    for (const mat of mats) {
+      if (mat && mat.dispose) mat.dispose();
+    }
+  });
+  if (root.parent) root.parent.remove(root);
+}
+
+function rebuildRocks() {
+  disposeObject3D(rockRoot);
+  rockRoot = new THREE.Group();
+  rockRoot.name = 'rock_cluster_spike';
+  scene.add(rockRoot);
+  anchors = [];
+
+  const count = parseInt(ui.rockCount.value, 10);
+  const matCache = [];
+  for (let i = 0; i < count; i++) {
+    const band = i / Math.max(1, count - 1);
+    const cluster = i % 3;
+    const theta = (i * 2.399963 + cluster * 0.65) % (Math.PI * 2);
+    const ring = 70 + (i % 7) * 21 + Math.sin(i * 1.77) * 18;
+    const centerX = (cluster - 1) * 210;
+    const centerY = Math.sin(i * 0.73) * 72;
+    const centerZ = Math.cos(i * 0.51) * 75;
+
+    const mesh = new THREE.Mesh(
+      makeRockGeometry(i % 4 === 0 ? 2 : 1, i * 19.31 + 4.7),
+      matCache[i % 5] || (matCache[i % 5] = makeRockMaterial(i)),
+    );
+    mesh.position.set(
+      centerX + Math.cos(theta) * ring,
+      centerY,
+      centerZ + Math.sin(theta) * ring,
+    );
+    const s = 32 + Math.sin(i * 1.1) * 8 + (i % 5) * 4;
+    mesh.scale.set(
+      s * (0.78 + hashDisplace(i, 0, 0) * 0.55),
+      s * (0.72 + hashDisplace(0, i, 0) * 0.62),
+      s * (0.80 + hashDisplace(0, 0, i) * 0.50),
+    );
+    mesh.rotation.set(i * 0.62, i * 1.19, i * 0.37);
+    mesh.userData.spin = new THREE.Vector3(
+      (hashDisplace(i, 1, 2) - 0.5) * 0.34,
+      (hashDisplace(i, 3, 4) - 0.5) * 0.46,
+      (hashDisplace(i, 5, 6) - 0.5) * 0.38,
+    );
+    rockRoot.add(mesh);
+
+    if (i % 2 === 0 || anchors.length < 10) {
+      const cloudAnchor = mesh.position.clone();
+      cloudAnchor.x += (hashDisplace(i, 8, 2) - 0.5) * s * 1.7;
+      cloudAnchor.y += (hashDisplace(i, 2, 8) - 0.5) * s * 1.5;
+      cloudAnchor.z += (hashDisplace(i, 4, 9) - 0.5) * s * 1.7;
+      anchors.push({
+        position: cloudAnchor,
+        basePosition: cloudAnchor.clone(),
+        color: tmpColor.setHSL(0.52 + band * 0.18, 0.68, 0.55).getHex(),
+      });
+    }
+  }
+
+  const core = new THREE.Mesh(
+    new THREE.SphereGeometry(10, 24, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 0.35 }),
+  );
+  core.name = 'field_center_marker';
+  rockRoot.add(core);
+  log('rocks rebuilt: ' + count + ' children, ' + anchors.length + ' cloud anchors', 'info');
+}
+
+function makeCloudMaterial() {
+  const iPosition = attribute('iPosition');
+  const iScale = attribute('iScale');
+  const iColor = attribute('iColor');
+  const iAlpha = attribute('iAlpha');
+  const iSeed = attribute('iSeed');
+
+  const uOpacity = uniform(parseFloat(ui.cloudOpacity.value));
+  const uNoise = uniform(1.0);
+  const uLight0Pos = uniform(new THREE.Vector3());
+  const uLight1Pos = uniform(new THREE.Vector3());
+  const uLight2Pos = uniform(new THREE.Vector3());
+  const uLight0Color = uniform(new THREE.Color(0x88ccff));
+  const uLight1Color = uniform(new THREE.Color(0xffaa44));
+  const uLight2Color = uniform(new THREE.Color(0x9cffba));
+  const uLightStrength = uniform(0.0);
+
+  const positionNode = Fn(() => {
+    const slotWorld = iPosition;
+    const toCam = cameraPosition.sub(slotWorld).normalize();
+    const worldUp = vec3(0.0, 1.0, 0.0);
+    const camBias = toCam.add(vec3(0.0, 0.0, 0.0001));
+    const right = worldUp.cross(camBias).normalize();
+    const up = camBias.cross(right).normalize();
+    const local = positionLocal.xy;
+    const offset = right.mul(local.x).add(up.mul(local.y)).mul(iScale);
+    return slotWorld.add(offset);
+  })();
+
+  const cloudNoise = Fn(([centered, seed]) => {
+    const p = vec3(
+      centered.x.mul(4.2).add(seed.mul(31.7)),
+      centered.y.mul(4.2).add(seed.mul(53.3)),
+      seed.mul(13.1).add(time.mul(0.08)),
+    );
+    const n1 = mx_noise_float(p).mul(0.5).add(0.5);
+    const n2 = mx_noise_float(p.mul(2.35)).mul(0.5).add(0.5);
+    return n1.mul(0.62).add(n2.mul(0.38));
+  });
+
+  const colorNode = Fn(() => {
+    const centered = uv().sub(vec2(0.5, 0.5));
+    const n = cloudNoise(centered, iSeed);
+    const noiseMul = mix(float(1.0), n.mul(1.42), uNoise);
+    const d0 = length(uLight0Pos.sub(iPosition));
+    const d1 = length(uLight1Pos.sub(iPosition));
+    const d2 = length(uLight2Pos.sub(iPosition));
+    const a0 = float(1.0).div(d0.mul(0.010).add(1.0));
+    const a1 = float(1.0).div(d1.mul(0.010).add(1.0));
+    const a2 = float(1.0).div(d2.mul(0.010).add(1.0));
+    const light = uLight0Color.mul(a0).add(uLight1Color.mul(a1)).add(uLight2Color.mul(a2)).mul(uLightStrength);
+    return iColor.mul(noiseMul).add(light);
+  })();
+
+  const opacityNode = Fn(() => {
+    const centered = uv().sub(vec2(0.5, 0.5));
+    const r = length(centered);
+    const soft = smoothstep(float(0.5), float(0.035), r);
+    const n = cloudNoise(centered, iSeed);
+    const wisps = mix(float(1.0), n.mul(1.55), uNoise);
+    return soft.mul(iAlpha).mul(uOpacity).mul(wisps);
+  })();
+
+  const mat = new THREE.NodeMaterial();
+  mat.transparent = true;
+  mat.blending = THREE.AdditiveBlending;
+  mat.depthWrite = false;
+  mat.depthTest = true;
+  mat.side = THREE.DoubleSide;
+  mat.positionNode = positionNode;
+  mat.colorNode = colorNode;
+  mat.opacityNode = opacityNode;
+  mat.userData = {
+    uOpacity,
+    uNoise,
+    uLight0Pos,
+    uLight1Pos,
+    uLight2Pos,
+    uLightStrength,
+  };
+  return mat;
+}
+
+function rebuildClouds() {
+  disposeObject3D(cloudMesh);
+  const maxSlots = parseInt(ui.cloudSlots.value, 10);
+  const positions = new Float32Array(maxSlots * 3);
+  const base = new Float32Array(maxSlots * 3);
+  const velocities = new Float32Array(maxSlots * 3);
+  const scales = new Float32Array(maxSlots);
+  const colors = new Float32Array(maxSlots * 3);
+  const alphas = new Float32Array(maxSlots);
+  const seeds = new Float32Array(maxSlots);
+
+  const baseGeo = new THREE.PlaneGeometry(1, 1);
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.index = baseGeo.index;
+  geo.setAttribute('position', baseGeo.attributes.position);
+  geo.setAttribute('uv', baseGeo.attributes.uv);
+  geo.instanceCount = maxSlots;
+  geo.setAttribute('iPosition', new THREE.InstancedBufferAttribute(positions, 3));
+  geo.setAttribute('iScale', new THREE.InstancedBufferAttribute(scales, 1));
+  geo.setAttribute('iColor', new THREE.InstancedBufferAttribute(colors, 3));
+  geo.setAttribute('iAlpha', new THREE.InstancedBufferAttribute(alphas, 1));
+  geo.setAttribute('iSeed', new THREE.InstancedBufferAttribute(seeds, 1));
+
+  const fallbackAnchor = { position: new THREE.Vector3(), color: 0x77ccff };
+  for (let i = 0; i < maxSlots; i++) {
+    const anchor = anchors.length ? anchors[i % anchors.length] : fallbackAnchor;
+    const radius = 42 + hashDisplace(i, 11, 2) * 92;
+    const theta = hashDisplace(i, 1, 9) * Math.PI * 2;
+    const phi = Math.acos(hashDisplace(i, 2, 3) * 2 - 1);
+    const px = anchor.position.x + Math.sin(phi) * Math.cos(theta) * radius;
+    const py = anchor.position.y + Math.sin(phi) * Math.sin(theta) * radius * 0.66;
+    const pz = anchor.position.z + Math.cos(phi) * radius;
+    positions[i * 3 + 0] = base[i * 3 + 0] = px;
+    positions[i * 3 + 1] = base[i * 3 + 1] = py;
+    positions[i * 3 + 2] = base[i * 3 + 2] = pz;
+    velocities[i * 3 + 0] = (hashDisplace(i, 7, 1) - 0.5) * 5.0;
+    velocities[i * 3 + 1] = (hashDisplace(i, 7, 2) - 0.5) * 3.6;
+    velocities[i * 3 + 2] = (hashDisplace(i, 7, 3) - 0.5) * 5.0;
+    scales[i] = 22 + hashDisplace(i, 4, 2) * 50;
+    tmpColor.set(anchor.color).offsetHSL((hashDisplace(i, 3, 4) - 0.5) * 0.08, 0, (hashDisplace(i, 5, 4) - 0.5) * 0.18);
+    colors[i * 3 + 0] = tmpColor.r;
+    colors[i * 3 + 1] = tmpColor.g;
+    colors[i * 3 + 2] = tmpColor.b;
+    alphas[i] = 0.28 + hashDisplace(i, 5, 7) * 0.46;
+    seeds[i] = hashDisplace(i, 13, 17);
+  }
+
+  cloudMesh = new THREE.Mesh(geo, makeCloudMaterial());
+  cloudMesh.frustumCulled = false;
+  cloudMesh.renderOrder = 3;
+  cloudMesh.userData.clouds = { positions, base, velocities, maxSlots };
+  scene.add(cloudMesh);
+  clouds = cloudMesh.userData.clouds;
+  log('cloud field rebuilt: ' + maxSlots + ' billboards', 'info');
+}
+
+function updateClouds(dt, now) {
+  if (!cloudMesh || !clouds) return;
+  const attr = cloudMesh.geometry.getAttribute('iPosition');
+  const p = clouds.positions;
+  const b = clouds.base;
+  const v = clouds.velocities;
+  const n = clouds.maxSlots;
+  for (let i = 0; i < n; i++) {
+    const j = i * 3;
+    const wobble = Math.sin(now * 0.00037 + i * 0.43) * 10;
+    p[j + 0] = b[j + 0] + v[j + 0] * Math.sin(now * 0.00022 + i) * 4 + wobble * 0.35;
+    p[j + 1] = b[j + 1] + v[j + 1] * Math.cos(now * 0.00027 + i * 0.3) * 4 + Math.sin(now * 0.00041 + i) * 6;
+    p[j + 2] = b[j + 2] + v[j + 2] * Math.sin(now * 0.00024 + i * 0.7) * 4 + wobble;
+  }
+  attr.needsUpdate = true;
+  if (cloudMesh.material && cloudMesh.material.userData) {
+    cloudMesh.material.userData.uOpacity.value = parseFloat(ui.cloudOpacity.value);
+    cloudMesh.material.userData.uNoise.value = noiseOn ? 1.0 : 0.0;
+  }
+}
+
+function makeLightningMaterial(color, opacity, isCore) {
+  const uColor = uniform(new THREE.Color(color));
+  const uOpacity = uniform(opacity);
+  const uIsCore = uniform(isCore ? 1.0 : 0.0);
+  const uPulseSpeed = uniform(9.0);
+  const uPulseFreq = uniform(18.0);
+
+  const hash1 = Fn(([x]) => fract(sin(x.mul(12.9898)).mul(43758.5453)));
+  const vnoise = Fn(([x]) => {
+    const i = floor(x);
+    const f = fract(x);
+    const a = hash1(i);
+    const b = hash1(i.add(1.0));
+    return mix(a, b, smoothstep(0.0, 1.0, f));
+  });
+
+  const mat = new THREE.NodeMaterial();
+  mat.transparent = true;
+  mat.blending = THREE.AdditiveBlending;
+  mat.depthWrite = false;
+  mat.side = THREE.DoubleSide;
+  mat.colorNode = Fn(() => {
+    const v = uv().y;
+    const tipFade = sin(v.mul(Math.PI));
+    const pulse = mix(float(0.78), float(1.0), vnoise(v.mul(uPulseFreq).add(time.mul(uPulseSpeed))));
+    const col = mix(uColor, mix(vec3(1.0, 1.0, 1.0), uColor, 0.10), uIsCore);
+    const a = uOpacity.mul(tipFade).mul(pulse);
+    return vec4(col, a);
+  })();
+  return mat;
+}
+
+const lightDir = new THREE.Vector3();
+const lightPerp = new THREE.Vector3();
+const lightR1 = new THREE.Vector3();
+const lightR2 = new THREE.Vector3();
+
+function generateLightningPath(from, to, depth, roughness) {
+  let points = [from.clone(), to.clone()];
+  for (let d = 0; d < depth; d++) {
+    const next = [points[0]];
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      const segLen = a.distanceTo(b);
+      const mx = (a.x + b.x) * 0.5;
+      const my = (a.y + b.y) * 0.5;
+      const mz = (a.z + b.z) * 0.5;
+      lightDir.subVectors(b, a).normalize();
+      if (Math.abs(lightDir.y) < 0.9) lightPerp.set(0, 1, 0);
+      else lightPerp.set(1, 0, 0);
+      lightR1.crossVectors(lightDir, lightPerp).normalize();
+      lightR2.crossVectors(lightDir, lightR1).normalize();
+      const theta = Math.random() * Math.PI * 2;
+      const offset = segLen * roughness * Math.pow(0.55, d);
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
+      next.push(new THREE.Vector3(
+        mx + (cosT * lightR1.x + sinT * lightR2.x) * offset,
+        my + (cosT * lightR1.y + sinT * lightR2.y) * offset,
+        mz + (cosT * lightR1.z + sinT * lightR2.z) * offset,
+      ));
+      next.push(b);
+    }
+    points = next;
+  }
+  return points;
+}
+
+function generateLightningBranches(mainPath, count, lenFrac) {
+  const branches = [];
+  if (!mainPath || mainPath.length < 3) return branches;
+  const totalLen = mainPath[0].distanceTo(mainPath[mainPath.length - 1]);
+  for (let b = 0; b < count; b++) {
+    const idx = 1 + Math.floor(Math.random() * (mainPath.length - 2));
+    const start = mainPath[idx];
+    const dir = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+    const end = start.clone().addScaledVector(dir, totalLen * lenFrac * (0.7 + Math.random() * 0.6));
+    branches.push(generateLightningPath(start, end, 3, 0.40));
+  }
+  return branches;
+}
+
+function buildLightningTubeGeometry(paths, radius, radialSegments) {
+  let totalVerts = 0;
+  let totalIdx = 0;
+  for (const path of paths) {
+    const np = path.length;
+    if (np < 2) continue;
+    totalVerts += np * radialSegments;
+    totalIdx += (np - 1) * radialSegments * 6;
+  }
+  const geom = new THREE.BufferGeometry();
+  const posArr = new Float32Array(totalVerts * 3);
+  const uvArr = new Float32Array(totalVerts * 2);
+  const idxArr = totalVerts > 65535 ? new Uint32Array(totalIdx) : new Uint16Array(totalIdx);
+  let posCur = 0;
+  let uvCur = 0;
+  let idxCur = 0;
+  let vertOffset = 0;
+  for (const path of paths) {
+    if (path.length < 2) continue;
+    const numPts = path.length;
+    for (let i = 0; i < numPts; i++) {
+      let tx, ty, tz;
+      if (i === 0) {
+        tx = path[1].x - path[0].x; ty = path[1].y - path[0].y; tz = path[1].z - path[0].z;
+      } else if (i === numPts - 1) {
+        tx = path[i].x - path[i - 1].x; ty = path[i].y - path[i - 1].y; tz = path[i].z - path[i - 1].z;
+      } else {
+        tx = path[i + 1].x - path[i - 1].x; ty = path[i + 1].y - path[i - 1].y; tz = path[i + 1].z - path[i - 1].z;
+      }
+      const tlen = Math.sqrt(tx * tx + ty * ty + tz * tz) || 1;
+      tx /= tlen; ty /= tlen; tz /= tlen;
+      let rx, ry, rz;
+      if (Math.abs(ty) < 0.95) { rx = -tz; ry = 0; rz = tx; }
+      else { rx = 1; ry = 0; rz = 0; }
+      let rlen = Math.sqrt(rx * rx + ry * ry + rz * rz);
+      if (rlen < 0.001) { rx = 1; ry = 0; rz = 0; rlen = 1; }
+      rx /= rlen; ry /= rlen; rz /= rlen;
+      const ux = ry * tz - rz * ty;
+      const uy = rz * tx - rx * tz;
+      const uz = rx * ty - ry * tx;
+      const v = i / (numPts - 1);
+      const taper = 0.30 + Math.sin(v * Math.PI) * 0.70;
+      const rr = radius * taper;
+      const px = path[i].x;
+      const py = path[i].y;
+      const pz = path[i].z;
+      for (let s = 0; s < radialSegments; s++) {
+        const theta = (s / radialSegments) * Math.PI * 2;
+        const ct = Math.cos(theta) * rr;
+        const st = Math.sin(theta) * rr;
+        posArr[posCur++] = px + rx * ct + ux * st;
+        posArr[posCur++] = py + ry * ct + uy * st;
+        posArr[posCur++] = pz + rz * ct + uz * st;
+        uvArr[uvCur++] = s / radialSegments;
+        uvArr[uvCur++] = v;
+      }
+    }
+    for (let i = 0; i < numPts - 1; i++) {
+      for (let s = 0; s < radialSegments; s++) {
+        const a = vertOffset + i * radialSegments + s;
+        const b = vertOffset + i * radialSegments + (s + 1) % radialSegments;
+        const c = vertOffset + (i + 1) * radialSegments + s;
+        const d = vertOffset + (i + 1) * radialSegments + (s + 1) % radialSegments;
+        idxArr[idxCur++] = a; idxArr[idxCur++] = c; idxArr[idxCur++] = b;
+        idxArr[idxCur++] = b; idxArr[idxCur++] = c; idxArr[idxCur++] = d;
+      }
+    }
+    vertOffset += numPts * radialSegments;
+  }
+  geom.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geom.setAttribute('uv', new THREE.BufferAttribute(uvArr, 2));
+  geom.setIndex(new THREE.BufferAttribute(idxArr, 1));
+  geom.computeVertexNormals();
+  return geom;
+}
+
+function disposeBolts() {
+  for (const mesh of boltMeshes) {
+    if (mesh.parent) mesh.parent.remove(mesh);
+    if (mesh.geometry) mesh.geometry.dispose();
+    if (mesh.material && mesh.material.dispose) mesh.material.dispose();
+  }
+  boltMeshes = [];
+}
+
+function getAnchorPosition(index) {
+  if (!anchors.length) return new THREE.Vector3();
+  const a = anchors[index % anchors.length];
+  return a.position.clone();
+}
+
+function respawnBolts() {
+  disposeBolts();
+  const count = parseInt(ui.boltCount.value, 10);
+  const thickness = parseFloat(ui.boltThickness.value);
+  const colors = [0x88ccff, 0xffaa44, 0x8cffb8, 0xcaa2ff];
+  const litPositions = [];
+
+  for (let i = 0; i < count; i++) {
+    const from = getAnchorPosition(Math.floor(Math.random() * Math.max(1, anchors.length)));
+    let to = getAnchorPosition(Math.floor(Math.random() * Math.max(1, anchors.length)));
+    if (from.distanceTo(to) < 130) {
+      to.x += (Math.random() - 0.5) * 260;
+      to.y += (Math.random() - 0.5) * 120;
+      to.z += (Math.random() - 0.5) * 260;
+    }
+    const mainPath = generateLightningPath(from, to, 4, 0.32);
+    const branches = generateLightningBranches(mainPath, 2, 0.18);
+    const paths = [mainPath].concat(branches);
+    const color = colors[i % colors.length];
+    const haloGeom = buildLightningTubeGeometry(paths, thickness * 0.55, 8);
+    const coreGeom = buildLightningTubeGeometry(paths, Math.max(0.35, thickness * 0.18), 6);
+    const halo = new THREE.Mesh(haloGeom, makeLightningMaterial(color, 0.46, false));
+    const core = new THREE.Mesh(coreGeom, makeLightningMaterial(color, 0.96, true));
+    halo.frustumCulled = false;
+    core.frustumCulled = false;
+    halo.renderOrder = 5;
+    core.renderOrder = 6;
+    scene.add(halo);
+    scene.add(core);
+    boltMeshes.push(halo, core);
+    litPositions.push(from, to);
+  }
+
+  if (cloudMesh && cloudMesh.material && cloudMesh.material.userData) {
+    const ud = cloudMesh.material.userData;
+    const p0 = litPositions[0] || new THREE.Vector3();
+    const p1 = litPositions[1] || p0;
+    const p2 = litPositions[2] || p1;
+    ud.uLight0Pos.value.copy(p0);
+    ud.uLight1Pos.value.copy(p1);
+    ud.uLight2Pos.value.copy(p2);
+    ud.uLightStrength.value = 1.15;
+  }
+  ui.boltStat.textContent = String(count);
+}
+
+function rebuildAll() {
+  rebuildRocks();
+  rebuildClouds();
+  respawnBolts();
+  syncControlLabels();
+}
+
+function updateCamera(dt) {
+  if (isXRPresenting()) return;
+  if (xrDolly) xrDolly.position.set(0, 0, 0);
+  if (orbitOn && !dragging) yaw += dt * 0.17;
+  pitch = Math.max(-0.85, Math.min(0.85, pitch));
+  distance = Math.max(260, Math.min(1200, distance));
+  const cp = Math.cos(pitch);
+  camera.position.set(
+    Math.sin(yaw) * cp * distance,
+    Math.sin(pitch) * distance,
+    Math.cos(yaw) * cp * distance,
+  );
+  camera.lookAt(0, 0, 0);
+}
+
+function isXRPresenting() {
+  return !!(renderer && renderer.xr && renderer.xr.isPresenting);
+}
+
+function updateXRUserPose() {
+  if (!xrDolly || !camera) return;
+  xrDolly.position.set(0, 36, 650);
+  camera.position.set(0, 0, 0);
+  camera.rotation.set(0, 0, 0);
+}
+
+function setXRStatus(text, enabled) {
+  ui.xrStat.textContent = text;
+  ui.vrBtn.textContent = text === 'presenting' ? 'Exit VR' : (enabled ? 'Enter VR' : text);
+  ui.vrBtn.disabled = !enabled && text !== 'presenting';
+  ui.vrBtn.classList.toggle('on', text === 'presenting');
+}
+
+async function detectXRSupport() {
+  if (!navigator.xr) {
+    setXRStatus('no xr', false);
+    log('WebXR unavailable: navigator.xr is missing', 'warn');
+    return;
+  }
+  if (!renderer || !renderer.xr || typeof renderer.xr.setSession !== 'function') {
+    setXRStatus('no hook', false);
+    log('WebXR unavailable: this WebGPURenderer exposes no renderer.xr.setSession hook', 'warn');
+    return;
+  }
+  try {
+    xrSupported = await navigator.xr.isSessionSupported('immersive-vr');
+  } catch (err) {
+    xrSupported = false;
+    log('WebXR support probe failed: ' + (err && err.message ? err.message : err), 'warn');
+  }
+  if (xrSupported) {
+    setXRStatus('ready', true);
+    log('WebXR immersive-vr is available. Use Enter VR to test WebGPU plus XR.', 'info');
+  } else {
+    setXRStatus('no vr', false);
+    log('WebXR immersive-vr is not available in this browser or no headset runtime is connected', 'warn');
+  }
+}
+
+async function enterVR() {
+  if (isXRPresenting() && xrSession) {
+    try { await xrSession.end(); } catch (_) {}
+    return;
+  }
+  if (!xrSupported || !navigator.xr || !renderer || !renderer.xr) {
+    log('Enter VR blocked: WebXR immersive-vr is not ready', 'warn');
+    return;
+  }
+  ui.vrBtn.disabled = true;
+  ui.vrBtn.textContent = 'VR Starting';
+  try {
+    const session = await navigator.xr.requestSession('immersive-vr', {
+      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
+    });
+    xrSession = session;
+    session.addEventListener('end', onXRSessionEnd, { once: true });
+    try { renderer.xr.setReferenceSpaceType('local-floor'); }
+    catch (_) {
+      try { renderer.xr.setReferenceSpaceType('local'); } catch (_) {}
+    }
+    renderer.xr.enabled = true;
+    if (flatRaf) {
+      cancelAnimationFrame(flatRaf);
+      flatRaf = 0;
+    }
+    updateXRUserPose();
+    await renderer.xr.setSession(session);
+    renderer.setAnimationLoop(xrTick);
+    setXRStatus('presenting', true);
+    log('XR session started through WebGPURenderer', 'info');
+  } catch (err) {
+    xrSession = null;
+    try { renderer.setAnimationLoop(null); } catch (_) {}
+    try { renderer.xr.enabled = false; } catch (_) {}
+    startFlatLoop();
+    setXRStatus('failed', true);
+    log('XR session failed: ' + (err && err.message ? err.message : err), 'err');
+  }
+}
+
+function onXRSessionEnd() {
+  xrSession = null;
+  try { renderer.setAnimationLoop(null); } catch (_) {}
+  try { renderer.xr.enabled = false; } catch (_) {}
+  if (xrDolly) xrDolly.position.set(0, 0, 0);
+  setXRStatus(xrSupported ? 'ready' : 'no vr', xrSupported);
+  startFlatLoop();
+  log('XR session ended', 'info');
+}
+
+function wireInput() {
+  for (const id of valueIds) {
+    ui[id].addEventListener('input', () => {
+      syncControlLabels();
+      if (id === 'cloudOpacity' && cloudMesh && cloudMesh.material && cloudMesh.material.userData) {
+        cloudMesh.material.userData.uOpacity.value = parseFloat(ui.cloudOpacity.value);
+      }
+      if (id === 'boltCount' || id === 'boltThickness') respawnBolts();
+    });
+  }
+  ui.rockCount.addEventListener('change', rebuildAll);
+  ui.cloudSlots.addEventListener('change', rebuildAll);
+  ui.rebuildBtn.addEventListener('click', rebuildAll);
+  ui.respawnBtn.addEventListener('click', respawnBolts);
+  ui.vrBtn.addEventListener('click', enterVR);
+  ui.stormBtn.addEventListener('click', () => {
+    stormOn = !stormOn;
+    ui.stormBtn.classList.toggle('on', stormOn);
+  });
+  ui.orbitBtn.addEventListener('click', () => {
+    orbitOn = !orbitOn;
+    ui.orbitBtn.classList.toggle('on', orbitOn);
+  });
+  ui.noiseBtn.addEventListener('click', () => {
+    noiseOn = !noiseOn;
+    ui.noiseBtn.classList.toggle('on', noiseOn);
+    if (cloudMesh && cloudMesh.material && cloudMesh.material.userData) {
+      cloudMesh.material.userData.uNoise.value = noiseOn ? 1.0 : 0.0;
+    }
+  });
+
+  window.addEventListener('pointerdown', (ev) => {
+    if (ev.target && ev.target.closest && ev.target.closest('#hud')) return;
+    dragging = true;
+    dragX = ev.clientX;
+    dragY = ev.clientY;
+  });
+  window.addEventListener('pointerup', () => { dragging = false; });
+  window.addEventListener('pointermove', (ev) => {
+    if (!dragging) return;
+    const dx = ev.clientX - dragX;
+    const dy = ev.clientY - dragY;
+    dragX = ev.clientX;
+    dragY = ev.clientY;
+    yaw -= dx * 0.006;
+    pitch -= dy * 0.005;
+  });
+  window.addEventListener('wheel', (ev) => {
+    distance += ev.deltaY * 0.45;
+  }, { passive: true });
+  window.addEventListener('resize', () => {
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+  });
+}
+
+async function boot() {
+  if (!navigator.gpu) {
+    throw new Error('navigator.gpu is unavailable. Use a current Chromium or Edge build with hardware acceleration enabled.');
+  }
+  log('booting native WebGPU spike', 'info');
+  renderer = new THREE.WebGPURenderer({ antialias: true, powerPreference: 'high-performance' });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x05060a, 1);
+  document.body.appendChild(renderer.domElement);
+  await renderer.init();
+  ui.rendererStat.textContent = 'WebGPU';
+
+  scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x05060a, 0.0013);
+  camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 4000);
+  xrDolly = new THREE.Group();
+  xrDolly.name = 'xr_dolly';
+  scene.add(xrDolly);
+  xrDolly.add(camera);
+  clock = new THREE.Clock();
+
+  const amb = new THREE.AmbientLight(0x273248, 0.72);
+  const key = new THREE.DirectionalLight(0xffd1a1, 2.0);
+  key.position.set(280, 360, 220);
+  const rim = new THREE.DirectionalLight(0x70b7ff, 1.2);
+  rim.position.set(-260, -90, -240);
+  scene.add(amb, key, rim);
+
+  const grid = new THREE.GridHelper(900, 18, 0x224466, 0x182638);
+  grid.position.y = -190;
+  grid.material.transparent = true;
+  grid.material.opacity = 0.28;
+  scene.add(grid);
+
+  wireInput();
+  rebuildAll();
+  log('ready: rocks, billboard clouds, and TSL lightning are in one WebGPU scene', 'info');
+  await detectXRSupport();
+  startFlatLoop();
+}
+
+let fpsFrames = 0;
+let fpsTime = 0;
+let renderErrorShown = false;
+
+function startFlatLoop() {
+  if (isXRPresenting()) return;
+  if (flatRaf) cancelAnimationFrame(flatRaf);
+  flatRaf = requestAnimationFrame(flatTick);
+}
+
+async function flatTick(now) {
+  flatRaf = 0;
+  await runFrame(now, false);
+  if (!isXRPresenting()) flatRaf = requestAnimationFrame(flatTick);
+}
+
+function xrTick(now, frame) {
+  runFrame(now, true, frame);
+}
+
+async function renderScene(xrFrame) {
+  if (renderInFlight) return;
+  renderInFlight = true;
+  try {
+    if (xrFrame && typeof renderer.render === 'function') {
+      const out = renderer.render(scene, camera);
+      if (out && typeof out.then === 'function') await out;
+    } else if (typeof renderer.renderAsync === 'function') {
+      await renderer.renderAsync(scene, camera);
+    } else {
+      const out = renderer.render(scene, camera);
+      if (out && typeof out.then === 'function') await out;
+    }
+  } catch (err) {
+    if (!renderErrorShown) {
+      renderErrorShown = true;
+      log('render failed: ' + (err && err.message ? err.message : err), 'err');
+    }
+  } finally {
+    renderInFlight = false;
+  }
+}
+
+async function runFrame(now, xrFrame) {
+  const dt = Math.min(0.05, clock.getDelta());
+  if (xrFrame) updateXRUserPose();
+  else updateCamera(dt);
+  updateClouds(dt, now);
+
+  if (rockRoot) {
+    rockRoot.rotation.y += dt * 0.08;
+    rockRoot.children.forEach((child) => {
+      if (!child.userData || !child.userData.spin) return;
+      child.rotation.x += child.userData.spin.x * dt;
+      child.rotation.y += child.userData.spin.y * dt;
+      child.rotation.z += child.userData.spin.z * dt;
+    });
+  }
+
+  if (cloudMesh && cloudMesh.material && cloudMesh.material.userData) {
+    const ud = cloudMesh.material.userData;
+    ud.uLightStrength.value = Math.max(0.0, ud.uLightStrength.value - dt * 1.6);
+  }
+
+  const stormRate = parseFloat(ui.stormRate.value);
+  if (stormOn && now - lastStorm > stormRate * 1000) {
+    lastStorm = now;
+    respawnBolts();
+  }
+
+  await renderScene(xrFrame);
+
+  fpsFrames++;
+  fpsTime += dt;
+  if (fpsTime >= 0.5) {
+    ui.fpsStat.textContent = Math.round(fpsFrames / fpsTime);
+    ui.drawStat.textContent = renderer.info && renderer.info.render ? renderer.info.render.calls : '--';
+    fpsFrames = 0;
+    fpsTime = 0;
+  }
+}
+
+boot().catch(showFatal);
+</script>
+</body>
+</html>
