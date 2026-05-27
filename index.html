@@ -3056,7 +3056,6 @@ const input = {
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
-  vrHideRocks: false,
   vrStripFx: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
@@ -10309,9 +10308,9 @@ renderer.xr.addEventListener('sessionstart', () => {
   camera.quaternion.set(0, 0, 0, 1);
   camera.updateMatrixWorld(true);
   _xrUpdateInputSources();
-  if (typeof isVRRockHideActive === 'function' && isVRRockHideActive() &&
+  if (typeof isVRStripFx === 'function' && isVRStripFx() &&
       typeof clearVRRockObstacles === 'function') {
-    try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-rocks] hide failed:', e); }
+    try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-strip] rock clear failed:', e); }
   }
   const session = renderer.xr.getSession();
   if (session) {
@@ -10957,15 +10956,6 @@ function _xrStepVRScale(dir) {
   } catch (_) {}
 }
 
-function _xrToggleVRRocks() {
-  if (!input) return;
-  input.vrHideRocks = !input.vrHideRocks;
-  if (typeof saveSettings === 'function') saveSettings();
-  if (input.vrHideRocks && typeof clearVRRockObstacles === 'function') {
-    try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-rocks] live clear failed:', e); }
-  }
-}
-
 function _xrToggleVRStripFx() {
   if (!input) return;
   input.vrStripFx = !input.vrStripFx;
@@ -10996,13 +10986,7 @@ function _xrSettingsRows() {
       activate: () => _xrStepVRScale(1),
     },
     {
-      label: 'Hide Rocks',
-      value: (input && input.vrHideRocks) ? 'ON' : 'OFF',
-      change: _xrToggleVRRocks,
-      activate: _xrToggleVRRocks,
-    },
-    {
-      label: 'Strip Clouds and Lightning',
+      label: 'Strip Rocks, Clouds, Lightning',
       value: (input && input.vrStripFx) ? 'ON' : 'OFF',
       change: _xrToggleVRStripFx,
       activate: _xrToggleVRStripFx,
@@ -11034,7 +11018,6 @@ function _xrSettingsSignature() {
     _xrSettingsFocusIdx,
     input && input.vrPerfMode,
     input && input.vrRenderScale,
-    input && input.vrHideRocks,
     input && input.vrStripFx,
     input && input.vrHeadAim && input.vrHeadAim.enabled,
   ].join('|');
@@ -11865,70 +11848,58 @@ window.demoteMeshFromPBR            = demoteMeshFromPBR;
 // =====================================================================
 // v8VR: Showcase / Cinematic Arena mode
 // =====================================================================
-// Single switch that toggles the AAA-tier presentation stack:
+// Always-on AAA-tier presentation stack:
 //   1. EffectComposer post-pipeline (bloom + ACES + SMAA)
 //   2. HDRI / IBL (if a file is reachable; otherwise procedural starfield)
 //   3. PBR promotion of the player's hero ship
 //   4. Hit-feedback chain (always live; just gets used more here)
 //
-// Default OFF so v7.1VR-equivalent rendering remains the baseline. Flip on
-// from the dev console: `setShowcaseMode(true)`. Toggle persists via
-// localStorage key 'lss_showcase_mode_v8'.
+// Kept as a function because the pipeline setup is idempotent and useful
+// during startup. Old saved opt-out values are ignored.
 // =====================================================================
 const SHOWCASE_LSKEY = 'lss_showcase_mode_v8';
-const showcase = { active: false, pbrPromotedRoot: null };
+const showcase = { active: true, pbrPromotedRoot: null };
 
 function setShowcaseMode(on, opts) {
-  on = !!on;
   opts = opts || {};
+  on = true;
   showcase.active = on;
-  try { localStorage.setItem(SHOWCASE_LSKEY, on ? '1' : '0'); } catch (_) {}
+  try { localStorage.setItem(SHOWCASE_LSKEY, '1'); } catch (_) {}
 
   // 1. Post-pipeline.
   if (typeof setCineFXEnabled === 'function') setCineFXEnabled(on);
 
   // 2. HDRI / IBL.
-  if (on && opts.hdrUrl !== false) {
+  if (opts.hdrUrl !== false) {
     setHdrEnvironment(opts.hdrUrl || _heroEnv.hdrUrl);
-  } else if (!on) {
-    restoreProceduralEnvironment();
   }
 
-  // 3. PBR promotion of the player's hero ship (idempotent + reversible).
+  // 3. PBR promotion of the player's hero ship (idempotent).
   try {
     const heroRoot = (typeof player !== 'undefined' && player && player.mesh) ? player.mesh : null;
-    if (on && heroRoot) {
+    if (heroRoot) {
       const n = promoteMeshToPBR(heroRoot, opts.pbr);
       showcase.pbrPromotedRoot = heroRoot;
       console.log('[v8VR Showcase] Promoted', n, 'materials to PBR on player.mesh.');
-    } else if (!on && showcase.pbrPromotedRoot) {
-      const n = demoteMeshFromPBR(showcase.pbrPromotedRoot);
-      console.log('[v8VR Showcase] Restored', n, 'original materials.');
-      showcase.pbrPromotedRoot = null;
     }
   } catch (e) { console.warn('[v8VR Showcase] PBR promotion error:', e); }
 
-  console.log('[v8VR Showcase] Mode', on ? 'ENABLED' : 'disabled');
+  console.log('[v8VR Showcase] Mode ENABLED');
 }
 
 try {
-  const _showcaseSaved = localStorage.getItem(SHOWCASE_LSKEY);
-  // null = first run, '1' = previously enabled, anything else = enable.
-  // Only '0' explicitly opts out.
-  if (_showcaseSaved !== '0') {
-    setTimeout(() => setShowcaseMode(true), 0);
-  }
+  localStorage.setItem(SHOWCASE_LSKEY, '1');
 } catch (_) {
   // localStorage unavailable (private browsing, locked-down browser);
   // still enable in-memory so the user gets the visual upgrade.
-  setTimeout(() => setShowcaseMode(true), 0);
 }
+setTimeout(() => setShowcaseMode(true), 0);
 
 window.setShowcaseMode = setShowcaseMode;
 window.showcase        = showcase;
 
 // =====================================================================
-// v8VR: Round-winning kill cam (Showcase mode only)
+// v8VR: Round-winning kill cam
 // =====================================================================
 // When the player lands the kill that empties the opposing team, lock
 // the camera into a 1.5s slow-motion orbit around the dying ship.
@@ -11937,7 +11908,6 @@ window.showcase        = showcase;
 // timer ticks on real (wall-clock) dt so it lasts 1.5s wall time even
 // while gameplay slows to ~25%. Auto-deactivates; the round-end banner
 // + ANN.roundWon() lands cleanly inside the slow-mo window.
-// Gated to showcase.active so stock matches stay snappy.
 // =====================================================================
 const roundKillCam = {
   active: false,
@@ -12119,12 +12089,6 @@ function isXRPresenting() {
 function isVRStripFx() {
   if (typeof input === 'undefined' || !input || !input.vrStripFx) return false;
   return isXRPresenting();
-}
-function isVRRockHideActive() {
-  if (typeof input === 'undefined' || !input) return false;
-  if (input.vrHideRocks) return true;
-  if (!input.vrStripFx) return false;
-  return (typeof isXRPresenting === 'function') ? isXRPresenting() : false;
 }
 
 var _lssSettingsLoaded = false;
@@ -20157,11 +20121,9 @@ function _makeAtomFractalMaterial(baseColor) {
 // Chunks live in game.effects with type 'rockChunk' ; updateEffects ticks
 // them and they auto-dispose on lifetime expiry.
 function spawnRockChunks(pos, baseColor, parentScale) {
-  // (v18VR 2026-05-22 round 13) Strip-FX gate. No chunks when VR has the
-  // "no rocks" switch flipped ; the parent rock is already absent in that
-  // case so a fragment spray wouldn't make sense.
-  if ((typeof isVRStripFx === 'function' && isVRStripFx()) ||
-      (typeof isVRRockHideActive === 'function' && isVRRockHideActive())) return;
+  // (v18VR 2026-05-22 round 13) Strip-FX gate. No chunks when the combined
+  // rocks, clouds, and lightning strip is active in VR.
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
   if (typeof game === 'undefined' || !game || !game.effects) return;
   if (typeof scene === 'undefined' || !scene) return;
   const N = 4 + Math.floor(Math.random() * 5);                // 4..8 chunks
@@ -21663,8 +21625,7 @@ function spawnDynamicObjects(rooms) {
   // (v18VR 2026-05-22 round 13) Strip-FX early-out. The cleanup loop
   // above still runs (so leftover state from a previous round is wiped)
   // ; we just don't build any new rocks for this round.
-  if ((typeof isVRStripFx === 'function' && isVRStripFx()) ||
-      (typeof isVRRockHideActive === 'function' && isVRRockHideActive())) {
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) {
     if (typeof clearVRRockObstacles === 'function') clearVRRockObstacles();
     return;
   }
@@ -35381,7 +35342,6 @@ function _refreshSettingsValues() {
   if (vrScaleVal && typeof getEffectiveVRRenderScale === 'function') {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
-  setChk('set-vr-hide-rocks', input.vrHideRocks);
   setChk('set-vr-strip-fx', input.vrStripFx);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
@@ -35397,8 +35357,7 @@ function _refreshSettingsValues() {
       '<br><span style="opacity:0.6">' + (window.__v8GPU.vendor || '') + '</span>';
   }
 
-  // Cinematic mode + Quality + FOV.
-  setChk('set-showcase', typeof showcase !== 'undefined' && showcase.active);
+  // Quality + FOV. Cinematic mode is always enabled.
   setSel('set-quality', (typeof QUALITY !== 'undefined' && QUALITY.level) || 'high');
   const fov = (typeof input.fovDeg === 'number') ? input.fovDeg : 90;
   setRange('set-fov', null, fov);
@@ -35624,17 +35583,6 @@ function buildSettingsPage() {
     </div>
 
     <div class="settings-section">
-      <h3>Cinematic Mode</h3>
-      <div class="setting-row">
-        <label>Enable</label>
-        <input type="checkbox" id="set-showcase" ${(typeof showcase !== 'undefined' && showcase.active) ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1; line-height:1.5;">Turns on the AAA-tier presentation stack: <em>EffectComposer post-pipeline</em> (UnrealBloomPass + ACES tonemap + SMAA), <em>HDRI image-based lighting</em>, <em>PBR ship hulls</em>, <em>cinematic round-start camera flyover</em> with depth-of-field, and <em>round-winning kill-cam</em> slow-mo orbits. The hit-feedback chain (camera shake + rumble + vignette + hitstop) is always on regardless of this toggle. Persists between sessions. May lower frame rate on integrated GPUs; drop the Quality preset below to Medium or Low if needed.</label>
-      </div>
-    </div>
-
-    <div class="settings-section">
       <h3>Quality</h3>
       <div class="setting-row">
         <label>Preset</label>
@@ -35659,12 +35607,11 @@ function buildSettingsPage() {
     </div>
 
     <!-- (v19+) VR Performance moved here from Controls tab : these knobs
-         govern render cost rather than input handling, so they belong
-         alongside Quality and Cinematic Mode. -->
+         govern render cost rather than input handling. -->
     <div class="settings-section">
       <h3>VR - Performance</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Performance Mode removes whole cosmetic systems while in the headset. Fast and Max FPS are built for Quest 3 standalone: lower render scale caps, fewer particles, no heat trails, no ambient clouds, tighter effect caps, and reduced smoke.</label>
+        <label style="flex:1;">Performance Mode is a throttle ladder for VR: it caps render scale, smoke, particles, light counts, gas budgets, effect pools, chemistry cadence, and level grid resolution. It does not hard-remove the major rock/cloud/lightning systems unless the strip switch below is on.</label>
       </div>
       <div class="setting-row">
         <label>Performance Mode</label>
@@ -35680,20 +35627,13 @@ function buildSettingsPage() {
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
       </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Hide Rocks</label>
-        <input type="checkbox" id="set-vr-hide-rocks" ${input.vrHideRocks ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Removes the destructible rock clusters and their per-rock smoke without lowering render scale or stripping lightning. Current rocks are removed immediately. Turn it off before the next map build to restore rocks.</label>
-      </div>
       <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
       <div class="setting-row" style="margin-top:6px;">
-        <label>Strip Clouds / Rocks / Lightning</label>
+        <label>Strip Rocks / Clouds / Lightning</label>
         <input type="checkbox" id="set-vr-strip-fx" ${input.vrStripFx ? 'checked' : ''}>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Removes rock cluster meshes (asteroids and their atom-fractal shaders), all gas clouds (basin pools, per-rock pockets, ambient cloud puffs), and lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, dash crackle). Only applies in VR ; flat mode is unaffected. If toggled during an active VR session, current rocks and ambient cloud dots are removed immediately.</label>
+        <label style="flex:1;">Hard-removes the expensive VR systems: rock cluster meshes and atom-fractal shaders, gas clouds (basin pools, per-rock pockets, ambient cloud puffs), and lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, dash crackle). Only applies in VR ; flat mode is unaffected. If toggled during an active VR session, current rocks and ambient cloud dots are removed immediately.</label>
       </div>
     </div>
 
@@ -36418,16 +36358,6 @@ function buildSettingsPage() {
       applyQualityPreset(e.target.value);
     });
   }
-  // v8VR: Cinematic Mode (Showcase) toggle. Calls setShowcaseMode which
-  // owns the post-pipeline / HDRI / PBR promotion lifecycle plus its own
-  // localStorage persistence. The checkbox above this row reads the live
-  // showcase.active state on settings open.
-  const showcaseChk = overlay.querySelector('#set-showcase');
-  if (showcaseChk) {
-    showcaseChk.addEventListener('change', e => {
-      if (typeof setShowcaseMode === 'function') setShowcaseMode(!!e.target.checked);
-    });
-  }
   // Pure Black Base checkbox
   const wallOpEl = overlay.querySelector('#set-wall-opacity');
   const wallOpVal = overlay.querySelector('#val-wall-opacity');
@@ -37091,14 +37021,6 @@ function buildSettingsPage() {
         renderer.xr.setFramebufferScaleFactor(effective);
       }
     } catch (_) {}
-  });
-  const vrHideRocksSel = overlay.querySelector('#set-vr-hide-rocks');
-  if (vrHideRocksSel) vrHideRocksSel.addEventListener('change', () => {
-    input.vrHideRocks = !!vrHideRocksSel.checked;
-    if (input.vrHideRocks && typeof clearVRRockObstacles === 'function') {
-      try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-rocks] live clear failed:', e); }
-    }
-    saveSettings();
   });
   const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
   if (vrStripSel) vrStripSel.addEventListener('change', () => {
@@ -37828,7 +37750,6 @@ function saveSettings() {
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
       vrPerfMode: input.vrPerfMode || 'standard',
-      vrHideRocks: !!input.vrHideRocks,
       vrStripFx: !!input.vrStripFx,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -39209,7 +39130,6 @@ const BAKED_DEFAULTS = {
   },
   "vrRenderScale": 0.7,
   "vrPerfMode": "standard",
-  "vrHideRocks": false,
   "vrStripFx": false,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -39310,7 +39230,6 @@ const SHIPPED_DEFAULTS = {
   },
   "vrRenderScale": 1,
   "vrPerfMode": "standard",
-  "vrHideRocks": false,
   "vrStripFx": true,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -40878,7 +40797,6 @@ function loadSettings() {
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
-    if (typeof data.vrHideRocks === 'boolean') input.vrHideRocks = data.vrHideRocks;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
@@ -42483,7 +42401,7 @@ function broadcastWorldObjects() {
 
 function applyWorldObjectsManifest(clusterEntries) {
   if (!Array.isArray(clusterEntries)) return;
-  if (typeof isVRRockHideActive === 'function' && isVRRockHideActive()) {
+  if (typeof isVRStripFx === 'function' && isVRStripFx()) {
     if (typeof clearVRRockObstacles === 'function') clearVRRockObstacles();
     return;
   }
