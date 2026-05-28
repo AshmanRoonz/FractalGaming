@@ -21541,20 +21541,19 @@ class VoxelRoomSystem {
 
 let _voxelRoomSystem = null;
 function _voxelRoomsRebuild() {
-  if (typeof scene === 'undefined' || !scene) return 0;
-  if (!_voxelRoomSystem) _voxelRoomSystem = new VoxelRoomSystem(scene);
-  // (v25 round 10) Honor game.voxelRoomsEnabled : when the user toggles the
-  // "Enabled" checkbox off, zero out the instance counts on every mesh so
-  // nothing draws ; previously the rebuild ran regardless and produced the
-  // same voxels, making the checkbox look broken.
-  if (game.voxelRoomsEnabled === false) {
+  // (v25 round 20) Voxels removed. The VoxelRoomSystem class + helpers
+  // (_vxIsWallSolid, _vxFbm3D, _vxPointInCylinder, etc.) still live in
+  // the file but are never instantiated ; rooms now read as the smooth
+  // SDF surface alone, with interior parallax wallpaper as the visual
+  // identity instead. If something already built a system instance
+  // during dev or hot-reload, zero out its meshes so it disappears.
+  if (_voxelRoomSystem) {
     const sys = _voxelRoomSystem;
     if (sys.mesh)     { sys.mesh.count     = 0; sys.mesh.instanceMatrix.needsUpdate     = true; }
     if (sys.glowMesh) { sys.glowMesh.count = 0; sys.glowMesh.instanceMatrix.needsUpdate = true; }
     if (sys.pipeMesh) { sys.pipeMesh.count = 0; sys.pipeMesh.instanceMatrix.needsUpdate = true; }
-    return 0;
   }
-  return _voxelRoomSystem.rebuild();
+  return 0;
 }
 
 function _disposeVRRockMesh(mesh) {
@@ -21699,15 +21698,35 @@ function spawnDynamicObjects(rooms) {
   // via game.voxelGlowEnabled and game.voxelGlowFraction.
   if (typeof game.voxelGlowEnabled !== 'boolean') game.voxelGlowEnabled = true;
   if (typeof game.voxelGlowFraction !== 'number' || !isFinite(game.voxelGlowFraction)) game.voxelGlowFraction = 0.10;
-  if (game.voxelRoomsEnabled && typeof _voxelRoomsRebuild === 'function') {
-    try { _voxelRoomsRebuild(); } catch (e) { console.warn('[voxel-rooms] rebuild failed:', e); }
+  // (v25 round 20) Voxel rebuild path removed ; rooms are smooth-shaded
+  // walls only. Interior parallax wallpaper takes over the "fill the
+  // room with character" role. The _voxelRoomsRebuild call below is
+  // still kept as a defensive no-op cleanup (zeroes mesh counts if any
+  // stale instance survives a hot reload).
+  if (typeof _voxelRoomsRebuild === 'function') {
+    try { _voxelRoomsRebuild(); } catch (_) {}
   }
-  // (v25 round 10) After the level rebuilds, refresh the interior parallax
-  // cylinder uniforms so map-switching doesn't leave stale data from the
-  // previous map (which would cause tunnels to project to the wrong
-  // positions or get skipped entirely).
+  // (v25 round 12) Refresh interior-wallpaper cylinder uniforms after the
+  // level rebuilds so map-switching doesn't leave stale cylinder data
+  // from the previous map.
   if (typeof _pushInteriorCylinders === 'function') {
     try { _pushInteriorCylinders(); } catch (_) {}
+  }
+  // (v25 round 19) Also rebind the interior sphere/tunnel textures here.
+  // The level material build hook isn't always the path round restarts
+  // take (sometimes the material is reused), but spawnDynamicObjects
+  // runs on every round transition, so this catches the cases the
+  // material hook misses.
+  if (game.wallInteriorEnabled === true) {
+    try {
+      if (game.wallInteriorSphereImg && typeof setInteriorSphere === 'function') {
+        setInteriorSphere(game.wallInteriorSphereImg);
+      }
+      if (game.wallInteriorTunnelImg && typeof setInteriorTunnel === 'function') {
+        setInteriorTunnel(game.wallInteriorTunnelImg);
+      }
+      console.log('[interior-walls] auto-rebound after level rebuild ; sphere=', game.wallInteriorSphereImg, 'tunnel=', game.wallInteriorTunnelImg);
+    } catch (e) { console.warn('[interior-walls] auto-rebind failed:', e); }
   }
 }
 
@@ -35846,74 +35865,92 @@ function buildSettingsPage() {
     </div>
 
 
+    <!-- (v25 round 20) Voxel Caves section removed ; voxel system retired
+         in favor of smooth-shaded walls + interior parallax wallpaper. -->
+
     <div class="settings-section">
-      <h3>Voxel Caves</h3>
+      <h3>Interior Walls</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Voxel-cube skin on the inside of each room sphere, with noise-driven irregularity for cave-like geology. Tunnels stay smooth and clear for fast flight. Decorative only ; collision still uses the underlying smooth walls. Changes apply on next round rebuild.</label>
+        <label style="flex:1;">Paint a panoramic image onto each wall via parallax interior mapping. Sphere rooms get one image, tunnels get another. Each wall pixel ray-casts through itself into a virtual back surface ; as the camera moves the sample shifts, giving real depth without rendering anything behind the walls.</label>
       </div>
       <div class="setting-row" style="margin-top:6px;">
         <label>Enabled</label>
-        <input type="checkbox" id="set-voxel-enabled" ${(typeof game !== 'undefined' && game.voxelRoomsEnabled !== false) ? 'checked' : ''}>
+        <input type="checkbox" id="set-interior-enabled" ${(typeof game !== 'undefined' && game.wallInteriorEnabled === true) ? 'checked' : ''}>
       </div>
       <div class="setting-row" style="margin-top:6px;">
-        <label>Textures</label>
-        <input type="checkbox" id="set-voxel-textures" ${(typeof game !== 'undefined' && game.voxelTexturesEnabled !== false) ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Procedural pixel-art surface detail per theme (cracks, striations, magma veins, frost lines, sparkle stars, etc.). Per-instance UV rotation breaks up tiling. Disable for a cleaner flat-shaded look.</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Glow accents</label>
-        <input type="checkbox" id="set-voxel-glow" ${(typeof game !== 'undefined' && game.voxelGlowEnabled !== false) ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Unlit bright "ore" cubes scattered through each cave (gold in stone, magma orange in volcanic, neon green in toxic, etc.). They render at full brightness regardless of lighting so they pop visually even on dark themes.</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Glow density</label>
-        <input type="range" id="set-voxel-glow-density" min="0" max="30" step="1" value="${(typeof game !== 'undefined' && typeof game.voxelGlowFraction === 'number') ? Math.round(game.voxelGlowFraction * 100) : 10}">
-        <div class="value-display" id="val-voxel-glow-density">${(typeof game !== 'undefined' && typeof game.voxelGlowFraction === 'number') ? Math.round(game.voxelGlowFraction * 100) : 10}%</div>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Theme</label>
-        <select id="set-voxel-theme" style="flex:1;">
+        <label>Sphere image</label>
+        <select id="set-interior-sphere-img" style="flex:1;">
           ${(function() {
-            const cur = (typeof game !== 'undefined' && typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone';
-            const keys = (typeof VOXEL_ROOM_THEMES !== 'undefined') ? Object.keys(VOXEL_ROOM_THEMES) : ['stone'];
-            return keys.map(k => '<option value="' + k + '"' + (k === cur ? ' selected' : '') + '>' + k + '</option>').join('');
+            const cur = (typeof game !== 'undefined' && typeof game.wallInteriorSphereImg === 'string') ? game.wallInteriorSphereImg : 'sphere1.png';
+            // (v25 round 17) Full directory listing : every file in
+            // LSS/pipes&panels/. Sphere and tunnel dropdowns share this
+            // list so you can mix and match (e.g. use a panel texture
+            // for the sphere wall if you want a "carved into a wall"
+            // look ; nothing prevents an equirect of a flat panel).
+            const opts = (typeof INTERIOR_IMAGE_FILES !== 'undefined') ? INTERIOR_IMAGE_FILES : ['sphere1.png','tunnel1.png'];
+            return [
+              '<option value=""' + (cur === '' ? ' selected' : '') + '>(none)</option>',
+            ].concat(opts.map(o => '<option value="' + o + '"' + (cur === o ? ' selected' : '') + '>' + o + '</option>')).join('');
           })()}
         </select>
       </div>
       <div class="setting-row" style="margin-top:6px;">
-        <label>Voxel size</label>
-        <input type="range" id="set-voxel-size" min="15" max="60" step="5" value="${(typeof game !== 'undefined' && typeof game.voxelRoomSize === 'number') ? game.voxelRoomSize : 30}">
-        <div class="value-display" id="val-voxel-size">${(typeof game !== 'undefined' && typeof game.voxelRoomSize === 'number') ? game.voxelRoomSize : 30}</div>
+        <label>Tunnel image</label>
+        <select id="set-interior-tunnel-img" style="flex:1;">
+          ${(function() {
+            const cur = (typeof game !== 'undefined' && typeof game.wallInteriorTunnelImg === 'string') ? game.wallInteriorTunnelImg : 'tunnel1.png';
+            const opts = (typeof INTERIOR_IMAGE_FILES !== 'undefined') ? INTERIOR_IMAGE_FILES : ['sphere1.png','tunnel1.png'];
+            return [
+              '<option value=""' + (cur === '' ? ' selected' : '') + '>(none)</option>',
+            ].concat(opts.map(o => '<option value="' + o + '"' + (cur === o ? ' selected' : '') + '>' + o + '</option>')).join('');
+          })()}
+        </select>
       </div>
       <div class="setting-row" style="margin-top:6px;">
-        <label>Wall noise</label>
-        <input type="range" id="set-voxel-noise" min="0" max="120" step="5" value="${(typeof game !== 'undefined' && typeof game.voxelRoomNoise === 'number') ? game.voxelRoomNoise : 40}">
-        <div class="value-display" id="val-voxel-noise">${(typeof game !== 'undefined' && typeof game.voxelRoomNoise === 'number') ? game.voxelRoomNoise : 40}</div>
+        <label>Mix amount</label>
+        <input type="range" id="set-interior-amount" min="0" max="100" step="1" value="${(typeof game !== 'undefined' && typeof game.wallInteriorAmount === 'number') ? Math.round(game.wallInteriorAmount * 100) : 95}">
+        <div class="value-display" id="val-interior-amount">${(typeof game !== 'undefined' && typeof game.wallInteriorAmount === 'number') ? Math.round(game.wallInteriorAmount * 100) : 95}%</div>
       </div>
-      <div class="setting-row" style="margin-top:8px; flex-direction:column; align-items:stretch; gap:6px;">
-        <div style="font-size:0.85em; color:#9ac; letter-spacing:1px;">PREVIEW</div>
-        <div id="voxel-theme-preview" style="display:flex; gap:3px;">
-          ${(function() {
-            if (typeof VOXEL_ROOM_THEMES === 'undefined') return '';
-            const cur = (typeof game !== 'undefined' && typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone';
-            const theme = VOXEL_ROOM_THEMES[cur] || VOXEL_ROOM_THEMES['stone'];
-            const hex = n => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
-            let palette = [];
-            if (theme.kind === 'fixed') palette = theme.colors.slice();
-            else if (theme.kind === 'mono') palette = [(typeof game.voxelRoomColor === 'number') ? game.voxelRoomColor : 0x4a4a55];
-            else if (theme.kind === 'match-walls') {
-              const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
-              if (z && Array.isArray(z.walls)) for (let i = 0; i < z.walls.length; i++) if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
-              if (palette.length === 0 && typeof ZONE_COLOR_DEFAULTS !== 'undefined' && ZONE_COLOR_DEFAULTS.walls) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
-            }
-            if (palette.length > 8) palette = palette.slice(0, 8);
-            return palette.map(c => '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>').join('');
-          })()}
-        </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">How strongly the panorama replaces the existing wall color. 100% = full panorama, 50% = blended over the existing pattern.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Sphere depth</label>
+        <input type="range" id="set-interior-depth-sphere" min="0" max="500" step="10" value="${(typeof game !== 'undefined' && typeof game.wallInteriorDepthSphere === 'number') ? Math.round(game.wallInteriorDepthSphere) : 150}">
+        <div class="value-display" id="val-interior-depth-sphere">${(typeof game !== 'undefined' && typeof game.wallInteriorDepthSphere === 'number') ? Math.round(game.wallInteriorDepthSphere) : 150}</div>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Sphere parallax</label>
+        <input type="range" id="set-interior-parallax-sphere" min="0" max="100" step="1" value="${(typeof game !== 'undefined' && typeof game.wallInteriorParallaxSphere === 'number') ? Math.round(game.wallInteriorParallaxSphere * 100) : 100}">
+        <div class="value-display" id="val-interior-parallax-sphere">${(typeof game !== 'undefined' && typeof game.wallInteriorParallaxSphere === 'number') ? Math.round(game.wallInteriorParallaxSphere * 100) : 100}%</div>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Tunnel depth</label>
+        <input type="range" id="set-interior-depth-cyl" min="0" max="500" step="10" value="${(typeof game !== 'undefined' && typeof game.wallInteriorDepthCyl === 'number') ? Math.round(game.wallInteriorDepthCyl) : 100}">
+        <div class="value-display" id="val-interior-depth-cyl">${(typeof game !== 'undefined' && typeof game.wallInteriorDepthCyl === 'number') ? Math.round(game.wallInteriorDepthCyl) : 100}</div>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Tunnel parallax</label>
+        <input type="range" id="set-interior-parallax-cyl" min="0" max="100" step="1" value="${(typeof game !== 'undefined' && typeof game.wallInteriorParallaxCyl === 'number') ? Math.round(game.wallInteriorParallaxCyl * 100) : 50}">
+        <div class="value-display" id="val-interior-parallax-cyl">${(typeof game !== 'undefined' && typeof game.wallInteriorParallaxCyl === 'number') ? Math.round(game.wallInteriorParallaxCyl * 100) : 50}%</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Lower values calm down sliding at tunnel entrances. 0% = pure wallpaper (no movement), 100% = full depth parallax.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Sphere/cyl bias</label>
+        <input type="range" id="set-interior-cylbias" min="-50" max="250" step="5" value="${(typeof game !== 'undefined' && typeof game.wallInteriorCylBias === 'number') ? Math.round(game.wallInteriorCylBias) : 80}">
+        <div class="value-display" id="val-interior-cylbias">${(typeof game !== 'undefined' && typeof game.wallInteriorCylBias === 'number') ? Math.round(game.wallInteriorCylBias) : 80}</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Higher values give the sphere texture more area at junctions ; lower values give tunnels more area. Soft transition either way.</label>
+      </div>
+      <div class="setting-row" style="margin-top:6px;">
+        <label>Debug</label>
+        <input type="checkbox" id="set-interior-debug" ${(typeof game !== 'undefined' && game.wallInteriorDebug === true) ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Visualize which projection each pixel uses : RED = sphere, GREEN = tunnel, YELLOW = blend zone.</label>
       </div>
     </div>
 
@@ -36570,107 +36607,121 @@ function buildSettingsPage() {
   }
 
 
-  // (v22 2026-05-25) Voxel Caves settings handlers. Sliders use 'change'
-  // (fires on release) instead of 'input' (fires per pixel) to avoid
-  // re-running the 200-500ms rebuild on every cursor move.
-  const _voxelRefreshPreview = () => {
-    const host = overlay.querySelector('#voxel-theme-preview');
-    if (!host || typeof VOXEL_ROOM_THEMES === 'undefined') return;
-    const cur = (typeof game.voxelRoomTheme === 'string') ? game.voxelRoomTheme : 'stone';
-    const theme = VOXEL_ROOM_THEMES[cur] || VOXEL_ROOM_THEMES['stone'];
-    const hex = n => '#' + ((n | 0) & 0xffffff).toString(16).padStart(6, '0');
-    let palette = [];
-    if (theme.kind === 'fixed') palette = theme.colors.slice();
-    else if (theme.kind === 'mono') palette = [(typeof game.voxelRoomColor === 'number') ? game.voxelRoomColor : 0x4a4a55];
-    else if (theme.kind === 'match-walls') {
-      const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
-      if (z && Array.isArray(z.walls)) for (let i = 0; i < z.walls.length; i++) if (typeof z.walls[i] === 'number') palette.push(z.walls[i]);
-      if (palette.length === 0 && typeof ZONE_COLOR_DEFAULTS !== 'undefined' && ZONE_COLOR_DEFAULTS.walls) palette = ZONE_COLOR_DEFAULTS.walls.slice(0, 5);
-    }
-    if (palette.length > 8) palette = palette.slice(0, 8);
-    host.innerHTML = palette.map(c => '<div style="flex:1; height:26px; background:' + hex(c) + '; border:1px solid rgba(255,255,255,0.15); border-radius:3px;" title="' + hex(c).toUpperCase() + '"></div>').join('');
-  };
-  const _voxelRebuild = () => {
-    if (typeof _voxelRoomsRebuild === 'function') {
-      try { _voxelRoomsRebuild(); } catch (e) { console.warn('[voxel-rooms] rebuild failed:', e); }
-    }
-  };
-  const voxEn = overlay.querySelector('#set-voxel-enabled');
-  if (voxEn) {
-    voxEn.addEventListener('change', e => {
-      game.voxelRoomsEnabled = !!e.target.checked;
-      _voxelRebuild();
+  // (v25 round 20) Voxel handlers removed along with the voxel system.
+  // The DOM controls that used to drive _voxelRoomsRebuild() are gone from
+  // the settings panel ; interior parallax wallpaper is the visual identity
+  // now. Old saved fields (voxelRoomsEnabled, voxelTexturesEnabled,
+  // voxelGlowEnabled, voxelGlowFraction, voxelRoomTheme, voxelRoomSize,
+  // voxelRoomNoise) are still tolerated by loadSettings for backward compat
+  // but no longer affect anything.
+
+  // (v25 round 15) Interior Walls settings handlers. Wire each control to
+  // live-update the shader uniforms via setInteriorWalls / setInteriorSphere
+  // / setInteriorTunnel / setInteriorDebug. Sliders use 'input' for live
+  // feedback while dragging.
+  const _ie  = overlay.querySelector('#set-interior-enabled');
+  const _is  = overlay.querySelector('#set-interior-sphere-img');
+  const _it  = overlay.querySelector('#set-interior-tunnel-img');
+  const _ia  = overlay.querySelector('#set-interior-amount');
+  const _iaV = overlay.querySelector('#val-interior-amount');
+  const _ids = overlay.querySelector('#set-interior-depth-sphere');
+  const _idsV= overlay.querySelector('#val-interior-depth-sphere');
+  const _ips = overlay.querySelector('#set-interior-parallax-sphere');
+  const _ipsV= overlay.querySelector('#val-interior-parallax-sphere');
+  const _idc = overlay.querySelector('#set-interior-depth-cyl');
+  const _idcV= overlay.querySelector('#val-interior-depth-cyl');
+  const _ipc = overlay.querySelector('#set-interior-parallax-cyl');
+  const _ipcV= overlay.querySelector('#val-interior-parallax-cyl');
+  const _icb = overlay.querySelector('#set-interior-cylbias');
+  const _icbV= overlay.querySelector('#val-interior-cylbias');
+  const _idb = overlay.querySelector('#set-interior-debug');
+  if (_ie) {
+    _ie.addEventListener('change', e => {
+      const on = !!e.target.checked;
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ enabled: on });
+      // (v25 round 16) When the user turns it on for the first time and
+      // no image has been picked yet, auto-load the defaults so the
+      // effect is visible immediately. They can change images via the
+      // dropdowns after.
+      if (on) {
+        if (!game.wallInteriorSphereImg && typeof setInteriorSphere === 'function') {
+          game.wallInteriorSphereImg = 'sphere1.png';
+          setInteriorSphere('sphere1.png');
+        }
+        if (!game.wallInteriorTunnelImg && typeof setInteriorTunnel === 'function') {
+          game.wallInteriorTunnelImg = 'tunnel1.png';
+          setInteriorTunnel('tunnel1.png');
+        }
+      }
       try { saveSettings(); } catch (_) {}
     });
   }
-  // (v24 2026-05-25) Voxel surface textures toggle.
-  const voxTex = overlay.querySelector('#set-voxel-textures');
-  if (voxTex) {
-    voxTex.addEventListener('change', e => {
-      game.voxelTexturesEnabled = !!e.target.checked;
-      _voxelRebuild();
+  if (_is) {
+    _is.addEventListener('change', e => {
+      const v = String(e.target.value || '');
+      game.wallInteriorSphereImg = v;
+      if (v && typeof setInteriorSphere === 'function') setInteriorSphere(v);
       try { saveSettings(); } catch (_) {}
     });
   }
-  // (v24 round 3) Glow accents toggle.
-  const voxGlow = overlay.querySelector('#set-voxel-glow');
-  if (voxGlow) {
-    voxGlow.addEventListener('change', e => {
-      game.voxelGlowEnabled = !!e.target.checked;
-      _voxelRebuild();
+  if (_it) {
+    _it.addEventListener('change', e => {
+      const v = String(e.target.value || '');
+      game.wallInteriorTunnelImg = v;
+      if (v && typeof setInteriorTunnel === 'function') setInteriorTunnel(v);
       try { saveSettings(); } catch (_) {}
     });
   }
-  // (v24 round 3) Glow density slider. Stored as 0-1 fraction, displayed as %.
-  const voxGlowD = overlay.querySelector('#set-voxel-glow-density');
-  const voxGlowDVal = overlay.querySelector('#val-voxel-glow-density');
-  if (voxGlowD) {
-    voxGlowD.addEventListener('input', e => {
+  if (_ia) {
+    _ia.addEventListener('input', e => {
       const v = +e.target.value | 0;
-      if (voxGlowDVal) voxGlowDVal.textContent = v + '%';
+      if (_iaV) _iaV.textContent = v + '%';
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ amount: v / 100 });
     });
-    voxGlowD.addEventListener('change', e => {
-      const v = Math.max(0, Math.min(30, +e.target.value | 0));
-      game.voxelGlowFraction = v / 100;
-      if (voxGlowDVal) voxGlowDVal.textContent = v + '%';
-      _voxelRebuild();
+  }
+  if (_ids) {
+    _ids.addEventListener('input', e => {
+      const v = +e.target.value | 0;
+      if (_idsV) _idsV.textContent = v;
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ depthSphere: v });
+    });
+  }
+  if (_ips) {
+    _ips.addEventListener('input', e => {
+      const v = +e.target.value | 0;
+      if (_ipsV) _ipsV.textContent = v + '%';
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ parallaxSphere: v / 100 });
+    });
+  }
+  if (_idc) {
+    _idc.addEventListener('input', e => {
+      const v = +e.target.value | 0;
+      if (_idcV) _idcV.textContent = v;
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ depthCyl: v });
+    });
+  }
+  if (_ipc) {
+    _ipc.addEventListener('input', e => {
+      const v = +e.target.value | 0;
+      if (_ipcV) _ipcV.textContent = v + '%';
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ parallaxCyl: v / 100 });
+    });
+  }
+  if (_icb) {
+    _icb.addEventListener('input', e => {
+      const v = +e.target.value | 0;
+      if (_icbV) _icbV.textContent = v;
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({ cylBias: v });
+    });
+  }
+  if (_idb) {
+    _idb.addEventListener('change', e => {
+      if (typeof setInteriorDebug === 'function') setInteriorDebug(!!e.target.checked);
       try { saveSettings(); } catch (_) {}
     });
   }
-  const voxTheme = overlay.querySelector('#set-voxel-theme');
-  if (voxTheme) {
-    voxTheme.addEventListener('change', e => {
-      const name = String(e.target.value || 'stone');
-      game.voxelRoomTheme = (typeof VOXEL_ROOM_THEMES !== 'undefined' && (name in VOXEL_ROOM_THEMES)) ? name : 'stone';
-      _voxelRebuild();
-      _voxelRefreshPreview();
-      try { saveSettings(); } catch (_) {}
-    });
-  }
-  const voxSize = overlay.querySelector('#set-voxel-size');
-  const voxSizeVal = overlay.querySelector('#val-voxel-size');
-  if (voxSize) {
-    voxSize.addEventListener('input', e => { if (voxSizeVal) voxSizeVal.textContent = String(+e.target.value | 0); });
-    voxSize.addEventListener('change', e => {
-      const v = Math.max(15, Math.min(60, +e.target.value || 30));
-      game.voxelRoomSize = v;
-      if (voxSizeVal) voxSizeVal.textContent = v;
-      _voxelRebuild();
-      try { saveSettings(); } catch (_) {}
-    });
-  }
-  const voxNoise = overlay.querySelector('#set-voxel-noise');
-  const voxNoiseVal = overlay.querySelector('#val-voxel-noise');
-  if (voxNoise) {
-    voxNoise.addEventListener('input', e => { if (voxNoiseVal) voxNoiseVal.textContent = String(+e.target.value | 0); });
-    voxNoise.addEventListener('change', e => {
-      const v = Math.max(0, Math.min(120, +e.target.value || 40));
-      game.voxelRoomNoise = v;
-      if (voxNoiseVal) voxNoiseVal.textContent = v;
-      _voxelRebuild();
-      try { saveSettings(); } catch (_) {}
-    });
-  }
+  // (v25 round 20) Voxel surface-textures / glow / glow-density / theme /
+  // size / noise handlers all removed along with their DOM controls.
 
   const skySel    = overlay.querySelector('#set-skybox');
   // (v16c Phase K) #set-skybox-stars removed from the DOM.
@@ -37190,6 +37241,18 @@ function buildSettingsPage() {
       voxelRoomTheme:    safe(game.voxelRoomTheme, 'stone'),
       voxelRoomSize:     safe(game.voxelRoomSize, 30),
       voxelRoomNoise:    safe(game.voxelRoomNoise, 40),
+      // (v25 round 18) Interior parallax wallpaper settings in the theme
+      // preset, so a saved theme carries its sphere/tunnel panorama choice
+      // and parallax tuning along with the rest of its visual identity.
+      wallInteriorEnabled:        (game.wallInteriorEnabled === true),
+      wallInteriorSphereImg:      safe(game.wallInteriorSphereImg, ''),
+      wallInteriorTunnelImg:      safe(game.wallInteriorTunnelImg, ''),
+      wallInteriorAmount:         safe(game.wallInteriorAmount, 0.95),
+      wallInteriorDepthSphere:    safe(game.wallInteriorDepthSphere, 150),
+      wallInteriorDepthCyl:       safe(game.wallInteriorDepthCyl, 100),
+      wallInteriorParallaxSphere: safe(game.wallInteriorParallaxSphere, 1.0),
+      wallInteriorParallaxCyl:    safe(game.wallInteriorParallaxCyl, 0.5),
+      wallInteriorCylBias:        safe(game.wallInteriorCylBias, 80),
       skyboxChoice:      safe(game.skyboxChoice, ''),
     };
   };
@@ -37228,6 +37291,16 @@ function buildSettingsPage() {
     if (typeof preset.voxelRoomTheme === 'string')        game.voxelRoomTheme       = preset.voxelRoomTheme;
     if (typeof preset.voxelRoomSize === 'number')         game.voxelRoomSize        = preset.voxelRoomSize;
     if (typeof preset.voxelRoomNoise === 'number')        game.voxelRoomNoise       = preset.voxelRoomNoise;
+    // (v25 round 18) Interior parallax wallpaper restore from preset.
+    if (typeof preset.wallInteriorEnabled === 'boolean')        game.wallInteriorEnabled        = preset.wallInteriorEnabled;
+    if (typeof preset.wallInteriorSphereImg === 'string')       game.wallInteriorSphereImg      = preset.wallInteriorSphereImg;
+    if (typeof preset.wallInteriorTunnelImg === 'string')       game.wallInteriorTunnelImg      = preset.wallInteriorTunnelImg;
+    if (typeof preset.wallInteriorAmount === 'number')          game.wallInteriorAmount         = preset.wallInteriorAmount;
+    if (typeof preset.wallInteriorDepthSphere === 'number')     game.wallInteriorDepthSphere    = preset.wallInteriorDepthSphere;
+    if (typeof preset.wallInteriorDepthCyl === 'number')        game.wallInteriorDepthCyl       = preset.wallInteriorDepthCyl;
+    if (typeof preset.wallInteriorParallaxSphere === 'number')  game.wallInteriorParallaxSphere = preset.wallInteriorParallaxSphere;
+    if (typeof preset.wallInteriorParallaxCyl === 'number')     game.wallInteriorParallaxCyl    = preset.wallInteriorParallaxCyl;
+    if (typeof preset.wallInteriorCylBias === 'number')         game.wallInteriorCylBias        = preset.wallInteriorCylBias;
     if (typeof preset.skyboxChoice === 'string')       game.skyboxChoice      = preset.skyboxChoice;
     try { if (typeof setWallPattern === 'function') setWallPattern(game.wallPattern | 0); } catch (_) {}
     try { if (typeof applyZoneColorOverrides === 'function') applyZoneColorOverrides(); } catch (_) {}
@@ -37235,6 +37308,17 @@ function buildSettingsPage() {
     try { if (typeof _recolorAllAmbientClouds === 'function') _recolorAllAmbientClouds(); } catch (_) {}
     try { if (typeof _voxelRoomsRebuild === 'function') _voxelRoomsRebuild(); } catch (_) {}
     try { if (preset.skyboxChoice && typeof setSky === 'function') setSky(preset.skyboxChoice); } catch (_) {}
+    // (v25 round 18) Push the now-restored interior knobs to the live
+    // material uniforms and (if enabled) rebind the sphere/tunnel images.
+    try {
+      if (typeof setInteriorWalls === 'function') setInteriorWalls({});
+      if (game.wallInteriorEnabled === true) {
+        if (game.wallInteriorSphereImg && typeof setInteriorSphere === 'function') setInteriorSphere(game.wallInteriorSphereImg);
+        if (game.wallInteriorTunnelImg && typeof setInteriorTunnel === 'function') setInteriorTunnel(game.wallInteriorTunnelImg);
+      } else if (typeof setInteriorWallsOff === 'function') {
+        setInteriorWallsOff();
+      }
+    } catch (_) {}
     try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
     try {
       const overlay = document.getElementById('settings-overlay');
@@ -37545,7 +37629,8 @@ const WALL_PATTERN_NAMES = [
   // First in-game preset to use the venturi corrugation system AND the
   // ported sabosugi fractal cathedral pattern.
   'Claude Special',     // 37 ; venturi + Mandelbox + Claude Custom (#88ccff tint)
-  'Goop'                // 38 ; bg=Apollonian + fg=Circuit Traces (hue 0.455, no fg2)
+  'Goop',               // 38 ; bg=Apollonian + fg=Circuit Traces (hue 0.455, no fg2)
+  'Plasma FBM (zoned)'  // 39 ; (v25 round 19) fork of Plasma FBM that uses the room palette directly
 ];
 
 const WALL_PARAM_DEFS = [
@@ -37569,7 +37654,7 @@ const WALL_PARAM_DEFS = [
   { key: 'u_off_z',           label: 'Offset Z',              scope: 'pmath',  type: 'f', def: 2.51,  min: 0,    max: 3.0,  step: 0.01,  uniform: 'u_off', comp: 'z' },
   { key: 'u_invBase',         label: 'Inverse base',          scope: 'pmath',  type: 'f', def: 8.1,   min: 3,    max: 20,   step: 0.1,   uniform: 'u_invBase_solo' },
   { key: 'u_valDiv',          label: 'Value divisor',         scope: 'pmath',  type: 'f', def: 690,   min: 50,   max: 1200, step: 5,     uniform: 'u_valDiv' },
-  { key: 'u_hueSpin',         label: 'Hue spin / ring',       scope: 'pmath',  type: 'f', def: 0.28,  min: 0,    max: 0.5,  step: 0.005, uniform: 'u_hueSpin_solo' },
+  { key: 'u_hueSpin',         label: 'Hue spin / ring',       scope: 'pmath',  type: 'f', def: 0,     min: 0,    max: 0.5,  step: 0.005, uniform: 'u_hueSpin_solo' },
   { key: 'u_satBase',         label: 'Saturation base',       scope: 'pmath',  type: 'f', def: 0.75,  min: 0,    max: 1.0,  step: 0.01,  uniform: 'u_satBase_solo' },
   // ---- Soul Array ----
   { key: 'SA_CELL_SIZE',      label: 'Cell size',             scope: 'soul',   type: 'f', def: 110,   min: 30,   max: 300,  step: 1,     uniform: 'SA_CELL_SIZE' },
@@ -37812,6 +37897,19 @@ function saveSettings() {
       // (v24 round 3) Voxel glow accents.
       voxelGlowEnabled:     (typeof game.voxelGlowEnabled === 'boolean')     ? game.voxelGlowEnabled     : true,
       voxelGlowFraction:    (typeof game.voxelGlowFraction === 'number')     ? game.voxelGlowFraction    : 0.10,
+      // (v25 round 16) Interior parallax wallpaper settings. Persisting the
+      // image names + knobs so the effect auto-rebinds on each round
+      // without needing setInteriorDefaults() every match.
+      wallInteriorEnabled:        (game.wallInteriorEnabled === true),
+      wallInteriorSphereImg:      (typeof game.wallInteriorSphereImg === 'string') ? game.wallInteriorSphereImg : '',
+      wallInteriorTunnelImg:      (typeof game.wallInteriorTunnelImg === 'string') ? game.wallInteriorTunnelImg : '',
+      wallInteriorAmount:         (typeof game.wallInteriorAmount === 'number') ? game.wallInteriorAmount : 0.95,
+      wallInteriorDepthSphere:    (typeof game.wallInteriorDepthSphere === 'number') ? game.wallInteriorDepthSphere : 150,
+      wallInteriorDepthCyl:       (typeof game.wallInteriorDepthCyl === 'number')    ? game.wallInteriorDepthCyl    : 100,
+      wallInteriorParallaxSphere: (typeof game.wallInteriorParallaxSphere === 'number') ? game.wallInteriorParallaxSphere : 1.0,
+      wallInteriorParallaxCyl:    (typeof game.wallInteriorParallaxCyl === 'number')    ? game.wallInteriorParallaxCyl    : 0.5,
+      wallInteriorCylBias:        (typeof game.wallInteriorCylBias === 'number') ? game.wallInteriorCylBias : 80,
+      wallInteriorDebug:          (game.wallInteriorDebug === true),
       zoneColors:   (function() {
         const z = (typeof _ensureZoneColors === 'function') ? _ensureZoneColors() : null;
         if (!z) return undefined;
@@ -38849,7 +38947,7 @@ const DEFAULT_WALL_CONFIG = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -38883,7 +38981,7 @@ const DEFAULT_WALL_CONFIG = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -38917,7 +39015,7 @@ const DEFAULT_WALL_CONFIG = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -38951,7 +39049,7 @@ const DEFAULT_WALL_CONFIG = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -38972,7 +39070,7 @@ const DEFAULT_WALL_CONFIG = {
       "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
       "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
       "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
-      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0, "u_satBase": 0.75,
       "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
       "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
       "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
@@ -38985,7 +39083,7 @@ const DEFAULT_WALL_CONFIG = {
       "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
       "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
       "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
-      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0, "u_satBase": 0.75,
       "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
       "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
       "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
@@ -38998,7 +39096,7 @@ const DEFAULT_WALL_CONFIG = {
       "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
       "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
       "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
-      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0, "u_satBase": 0.75,
       "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
       "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
       "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
@@ -39011,7 +39109,7 @@ const DEFAULT_WALL_CONFIG = {
       "K_DIFF_MIN": 0.89, "K_AO_FLOOR": 0.17, "K_FLOOR": 0.085,
       "u_iters": 9, "u_rings": 2, "u_scale": 0.0028, "u_rotSpeed": 0.08,
       "u_off_x": 2.03, "u_off_y": 2.65, "u_off_z": 2.51,
-      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0.28, "u_satBase": 0.75,
+      "u_invBase": 8.1, "u_valDiv": 690, "u_hueSpin": 0, "u_satBase": 0.75,
       "SA_CELL_SIZE": 110, "SA_DOT_RADIUS": 18, "SA_DOT_DEPTH_TOL": 70,
       "SA_WAVE_SPEED": 260, "SA_WAVE_PERIOD": 720, "SA_WAVE_SHARPNESS": 4,
       "SA_BASE_DOT": 0.3, "SA_WAVE_PEAK": 2.1,
@@ -39038,7 +39136,7 @@ const DEFAULT_WALL_CONFIG = {
     "u_off_z": 2.51,
     "u_invBase": 8.1,
     "u_valDiv": 690,
-    "u_hueSpin": 0.28,
+    "u_hueSpin": 0,
     "u_satBase": 0.75,
     "SA_CELL_SIZE": 110,
     "SA_DOT_RADIUS": 18,
@@ -40254,7 +40352,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40288,7 +40386,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40322,7 +40420,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40356,7 +40454,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40390,7 +40488,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40424,7 +40522,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40458,7 +40556,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40492,7 +40590,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40526,7 +40624,7 @@ const SHIPPED_DEFAULTS = {
       "u_off_z": 2.51,
       "u_invBase": 8.1,
       "u_valDiv": 690,
-      "u_hueSpin": 0.28,
+      "u_hueSpin": 0,
       "u_satBase": 0.75,
       "SA_CELL_SIZE": 110,
       "SA_DOT_RADIUS": 18,
@@ -40561,7 +40659,7 @@ const SHIPPED_DEFAULTS = {
     "u_off_z": 2.51,
     "u_invBase": 8.1,
     "u_valDiv": 690,
-    "u_hueSpin": 0.28,
+    "u_hueSpin": 0,
     "u_satBase": 0.75,
     "SA_CELL_SIZE": 110,
     "SA_DOT_RADIUS": 18,
@@ -40965,6 +41063,29 @@ function loadSettings() {
         if (typeof data.voxelGlowFraction === 'number' && isFinite(data.voxelGlowFraction)) {
           game.voxelGlowFraction = Math.max(0, Math.min(0.5, data.voxelGlowFraction));
         }
+        // (v25 round 16) Interior parallax wallpaper restore.
+        if (typeof data.wallInteriorEnabled === 'boolean') game.wallInteriorEnabled = data.wallInteriorEnabled;
+        if (typeof data.wallInteriorSphereImg === 'string') game.wallInteriorSphereImg = data.wallInteriorSphereImg;
+        if (typeof data.wallInteriorTunnelImg === 'string') game.wallInteriorTunnelImg = data.wallInteriorTunnelImg;
+        if (typeof data.wallInteriorAmount === 'number' && isFinite(data.wallInteriorAmount)) {
+          game.wallInteriorAmount = Math.max(0, Math.min(1, data.wallInteriorAmount));
+        }
+        if (typeof data.wallInteriorDepthSphere === 'number' && isFinite(data.wallInteriorDepthSphere)) {
+          game.wallInteriorDepthSphere = Math.max(0, Math.min(1000, data.wallInteriorDepthSphere));
+        }
+        if (typeof data.wallInteriorDepthCyl === 'number' && isFinite(data.wallInteriorDepthCyl)) {
+          game.wallInteriorDepthCyl = Math.max(0, Math.min(1000, data.wallInteriorDepthCyl));
+        }
+        if (typeof data.wallInteriorParallaxSphere === 'number' && isFinite(data.wallInteriorParallaxSphere)) {
+          game.wallInteriorParallaxSphere = Math.max(0, Math.min(1, data.wallInteriorParallaxSphere));
+        }
+        if (typeof data.wallInteriorParallaxCyl === 'number' && isFinite(data.wallInteriorParallaxCyl)) {
+          game.wallInteriorParallaxCyl = Math.max(0, Math.min(1, data.wallInteriorParallaxCyl));
+        }
+        if (typeof data.wallInteriorCylBias === 'number' && isFinite(data.wallInteriorCylBias)) {
+          game.wallInteriorCylBias = Math.max(-100, Math.min(400, data.wallInteriorCylBias));
+        }
+        if (typeof data.wallInteriorDebug === 'boolean') game.wallInteriorDebug = data.wallInteriorDebug;
       }
       if (typeof game !== 'undefined' && game) {
         game.cloudBrightness = _cbr;
@@ -41213,17 +41334,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze (game id)
     bgTime: 1.0,
     u_iters_bg: 3, u_scale_bg: 0.0012, u_invBase_bg: 3.0,
-    u_hueSpin_bg: 0.115, u_satBase_bg: 0.0,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.0,
     K_COSMIC_bg: 0.65,
     fgPatternId: 19,                                  // Layered Cube (game id)
-    fgAlpha: 2.0, fgBlend: 4 /* Mix */, fgHue: 0.06, fgTime: 0.3,
+    fgAlpha: 2.0, fgBlend: 4 /* Mix */, fgHue: 0, fgTime: 0.3,
     u_iters_fg: 12, u_scale_fg: 0.02, u_invBase_fg: 2.0,
-    u_hueSpin_fg: 0.09, u_satBase_fg: 0.92,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.92,
     K_COSMIC_fg: 0.65,
     fg2PatternId: 3,                                  // Wave Interference (game id)
-    fg2Alpha: 0.75, fg2Blend: 1 /* Multiply */, fg2Hue: 0.3, fg2Time: 0.95,
+    fg2Alpha: 0.75, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.95,
     u_iters_fg2: 7, u_scale_fg2: 0.0012, u_invBase_fg2: 16.7,
-    u_hueSpin_fg2: 0.115, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 1.5,
   },
   // Index 21: Digital. User-authored preset; lab ids translated to game ids:
@@ -41234,17 +41355,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 19,                                  // Layered Cube
     bgTime: 0.1,
     u_iters_bg: 12, u_scale_bg: 0.0005, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    u_hueSpin_bg: 0, u_satBase_bg: 1.0,
     K_COSMIC_bg: 0.3,
     fgPatternId: 15,                                  // Cyber Datamosh
-    fgAlpha: 0.45, fgBlend: 1 /* Multiply */, fgHue: 0.06, fgTime: 0.1,
+    fgAlpha: 0.45, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 0.1,
     u_iters_fg: 7, u_scale_fg: 0.0016, u_invBase_fg: 3.7,
-    u_hueSpin_fg: 0.07, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 2.2,
     fg2PatternId: 17,                                 // Panel Maze
-    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
+    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.0,
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.5,
   },
   // Index 22: Datamosh Cube. User export ; lab ids translated:
@@ -41255,17 +41376,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 15,                                  // Cyber Datamosh
     bgTime: 0.05,
     u_iters_bg: 12, u_scale_bg: 0.0005, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    u_hueSpin_bg: 0, u_satBase_bg: 1.0,
     K_COSMIC_bg: 0.15,
     fgPatternId: 19,                                  // Layered Cube
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.845, fgTime: 0.1,
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 0.1,
     u_iters_fg: 7, u_scale_fg: 0.0016, u_invBase_fg: 3.7,
-    u_hueSpin_fg: 0.07, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 3.1,
     fg2PatternId: 17,                                 // Panel Maze
-    fg2Alpha: 0.05, fg2Blend: 2, fg2Hue: 1.0, fg2Time: 0.0,
+    fg2Alpha: 0.05, fg2Blend: 2, fg2Hue: 0, fg2Time: 0.0,
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.41, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.9,
   },
   // Index 23: Mandelbox Plasma. User export ; lab ids translated:
@@ -41276,17 +41397,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 4,                                   // Mandelbox
     bgTime: 3.0,
     u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
     K_COSMIC_bg: 6.0,
     fgPatternId: 6,                                   // Plasma FBM
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.845, fgTime: 2.5,
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 2.5,
     u_iters_fg: 7, u_scale_fg: 0.002, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 6.0,
     fg2PatternId: 17,                                 // Panel Maze
-    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.05,
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.41, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.9,
   },
   // Index 24: Mandelbox Kali. User export ; lab ids translated:
@@ -41297,17 +41418,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 4,                                   // Mandelbox
     bgTime: 3.0,
     u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
     K_COSMIC_bg: 6.0,
     fgPatternId: 0,                                   // Kali IFS
-    fgAlpha: 1.05, fgBlend: 1 /* Multiply */, fgHue: 0.585, fgTime: 3.0,
+    fgAlpha: 1.05, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 3.0,
     u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 6.0,
     fg2PatternId: 17,                                 // Panel Maze
-    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.05,
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.9,
   },
   // Index 25: Matrix. User export ; bright green digital-rain feel.
@@ -41322,17 +41443,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 15,                                  // Cyber Datamosh
     bgTime: 0.1,
     u_iters_bg: 1, u_scale_bg: 0.0019, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 1.0,
+    u_hueSpin_bg: 0, u_satBase_bg: 1.0,
     K_COSMIC_bg: 0.2,
     fgPatternId: 17,                                  // Panel Maze
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.0, fgTime: 1.0,
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 1.0,
     u_iters_fg: 3, u_scale_fg: 0.0011, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 0.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.0,
     K_COSMIC_fg: 6.0,
     fg2PatternId: 17,                                 // Panel Maze (second layer)
-    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
+    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.0,
     u_iters_fg2: 8, u_scale_fg2: 0.0035, u_invBase_fg2: 9.0,
-    u_hueSpin_fg2: 0.12, u_satBase_fg2: 0.7,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.7,
     K_COSMIC_fg2: 6.0,
   },
   // Index 26: Hue-Shifting Grid. User export ; lab IDs translated:
@@ -41347,17 +41468,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze
     bgTime: 3.0,
     u_iters_bg: 11, u_scale_bg: 0.0155, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0.5, u_satBase_bg: 0.99,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
     K_COSMIC_bg: 0.25,
     fgPatternId: 0,                                   // Kali IFS
-    fgAlpha: 1.1, fgBlend: 1 /* Multiply */, fgHue: 0.585, fgTime: 3.0,
+    fgAlpha: 1.1, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 3.0,
     u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 6.0,
     fg2PatternId: 17,                                 // Panel Maze (second layer)
-    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.05,
+    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.05,
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.5, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.9,
   },
   // Index 27: Hexeizure. User export ; lab IDs translated:
@@ -41371,17 +41492,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze
     bgTime: 0.25,
     u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
     K_COSMIC_bg: 0.05,
     fgPatternId: 4,                                   // Mandelbox
-    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 1.0, fgTime: 3.0,
+    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 3.0,
     u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 3.6,
     fg2PatternId: 14,                                 // Hex Pulse Radar
-    fg2Alpha: 0.5, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.5,
+    fg2Alpha: 0.5, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.5,
     u_iters_fg2: 12, u_scale_fg2: 0.001, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.31, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 3.1,
   },
   // Index 28: Starfield. User export ; lab IDs translated:
@@ -41395,17 +41516,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze
     bgTime: 0.25,
     u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0.0, u_satBase_bg: 0.99,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
     K_COSMIC_bg: 0.05,
     fgPatternId: 15,                                  // Cyber Datamosh
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 1.0, fgTime: 3.0,
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 3.0,
     u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 4.95,
     fg2PatternId: 1,                                  // Apollonian Gasket
-    fg2Alpha: 2.0, fg2Blend: 1 /* Multiply */, fg2Hue: 1.0, fg2Time: 0.5,
+    fg2Alpha: 2.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.5,
     u_iters_fg2: 12, u_scale_fg2: 0.0099, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0.31, u_satBase_fg2: 0.94,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 6.0,
   },
   // Index 29: Race Glow. (v13r) User-authored from the wall lab. Three
@@ -41421,17 +41542,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 6,                                   // Plasma FBM
     bgTime: 0.0,
     u_iters_bg: 1, u_scale_bg: 0.0013, u_invBase_bg: 9.0,
-    u_hueSpin_bg: 0.12, u_satBase_bg: 0.7,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.7,
     K_COSMIC_bg: 0.1,
     fgPatternId: 6,                                   // Plasma FBM
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0.0, fgTime: 0.0,
+    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 0.0,
     u_iters_fg: 1, u_scale_fg: 0.0013, u_invBase_fg: 20.0,
-    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 1.2,
     fg2PatternId: 6,                                  // Plasma FBM
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.0, fg2Time: 0.0,
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.0,
     u_iters_fg2: 1, u_scale_fg2: 0.0013, u_invBase_fg2: 9.0,
-    u_hueSpin_fg2: 0.5, u_satBase_fg2: 1.0,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 1.0,
     K_COSMIC_fg2: 0.4,
   },
   // Index 30: Stone Folds. (v14) Mandelbox carries the where-to-darken
@@ -41441,12 +41562,12 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 4,                                   // Mandelbox
     bgTime: 1.5,
     u_iters_bg: 8, u_scale_bg: 0.0048, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0.05, u_satBase_bg: 0.6,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.6,
     K_COSMIC_bg: 1.6,
     fgPatternId: 6,                                   // Plasma FBM
-    fgAlpha: 0.6, fgBlend: 0 /* Add */, fgHue: 0.0, fgTime: 0.6,
+    fgAlpha: 0.6, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.6,
     u_iters_fg: 4, u_scale_fg: 0.0018, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0.05, u_satBase_fg: 0.4,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.4,
     K_COSMIC_fg: 0.5,
     fg2PatternId: -1,                                  // unused
     fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
@@ -41463,12 +41584,12 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 2,                                   // Voronoi
     bgTime: 0.4,
     u_iters_bg: 6, u_scale_bg: 0.0024, u_invBase_bg: 9.0,
-    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
     K_COSMIC_bg: 0.9,
     fgPatternId: 14,                                  // Hex Pulse Radar
-    fgAlpha: 0.4, fgBlend: 0 /* Add */, fgHue: 0.5, fgTime: 0.7,
+    fgAlpha: 0.4, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.7,
     u_iters_fg: 4, u_scale_fg: 0.0012, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 0.3,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.3,
     K_COSMIC_fg: 0.4,
     fg2PatternId: -1,
     fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
@@ -41486,12 +41607,12 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 0,                                   // Kali IFS
     bgTime: 0.6,
     u_iters_bg: 9, u_scale_bg: 0.003, u_invBase_bg: 8.0,
-    u_hueSpin_bg: 0.55, u_satBase_bg: 0.3,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.3,
     K_COSMIC_bg: 1.1,
     fgPatternId: 6,                                   // Plasma FBM
-    fgAlpha: 0.35, fgBlend: 0 /* Add */, fgHue: 0.0, fgTime: 0.8,
+    fgAlpha: 0.35, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.8,
     u_iters_fg: 4, u_scale_fg: 0.0014, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 0.4,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.4,
     K_COSMIC_fg: 0.4,
     fg2PatternId: -1,
     fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
@@ -41506,17 +41627,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze (lab 6)
     bgTime: 0.4,
     u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
     K_COSMIC_bg: 0.9,
     fgPatternId: 15,                                  // Cyber Datamosh (lab 15)
-    fgAlpha: 1.55, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.05,
+    fgAlpha: 1.55, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.05,
     u_iters_fg: 1, u_scale_fg: 0.0006, u_invBase_fg: 10.2,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 0.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.0,
     K_COSMIC_fg: 1.8,                                 // lab: 2.45
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
     K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 34: Toxin. Wave Interference fg gives rippling concentric
@@ -41529,17 +41650,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze (lab 6)
     bgTime: 0.4,
     u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
     K_COSMIC_bg: 0.9,
     fgPatternId: 3,                                   // Wave Interference (lab 8)
-    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0.81, fgTime: 0.25,
+    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.25,
     u_iters_fg: 9, u_scale_fg: 0.0043, u_invBase_fg: 10.2,
-    u_hueSpin_fg: 0.0, u_satBase_fg: 0.91,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.91,
     K_COSMIC_fg: 2.3,                                 // lab: 3.8
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
     K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 35: Ooze. Plasma FBM fg gives smooth flowing organic motion ;
@@ -41552,17 +41673,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze (lab 6)
     bgTime: 0.4,
     u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
     K_COSMIC_bg: 0.9,
     fgPatternId: 6,                                   // Plasma FBM (lab 9)
-    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 1.0, fgTime: 0.45,
+    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.45,
     u_iters_fg: 8, u_scale_fg: 0.0112, u_invBase_fg: 5.5,
-    u_hueSpin_fg: 0.5, u_satBase_fg: 0.62,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.62,
     K_COSMIC_fg: 3.5,                                 // lab: 6.0
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
     K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 36: Phasm. Holographic Glitch fg with high alpha + frozen time
@@ -41575,17 +41696,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 17,                                  // Panel Maze (lab 6)
     bgTime: 0.4,
     u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0.5, u_satBase_bg: 0.55,
+    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
     K_COSMIC_bg: 0.9,
     fgPatternId: 10,                                  // Holographic Glitch (lab 11)
-    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0.61, fgTime: 0.0,
+    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.0,
     u_iters_fg: 3, u_scale_fg: 0.0168, u_invBase_fg: 9.2,
-    u_hueSpin_fg: 0.5, u_satBase_fg: 1.0,
+    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
     K_COSMIC_fg: 3.5,                                 // lab: 6.0
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0.385, fg2Time: 0.35,
+    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
     u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0.0, u_satBase_fg2: 0.11,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
     K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 37 : Claude Special. First in-game preset to use both venturi
@@ -41602,17 +41723,17 @@ const MULTI_LAYER_PRESETS = {
     bgPatternId: 4,                                   // Mandelbox Folds (lab 2)
     bgTime: 0.0,
     u_iters_bg: 12, u_scale_bg: 0.0009, u_invBase_bg: 19.6,
-    u_hueSpin_bg: 0.04, u_satBase_bg: 1.0,
+    u_hueSpin_bg: 0, u_satBase_bg: 1.0,
     K_COSMIC_bg: 6.0,
     fgPatternId: 100,                                 // Claude Custom (shader pid)
-    fgAlpha: 0.45, fgBlend: 0 /* Add */, fgHue: 0.09, fgTime: 0.5,
+    fgAlpha: 0.45, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.5,
     u_iters_fg: 12, u_scale_fg: 0.0005, u_invBase_fg: 20.0,
-    u_hueSpin_fg: 0.28, u_satBase_fg: 0.78,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.78,
     K_COSMIC_fg: 0.25,
     fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.45, fg2Blend: 2 /* Screen */, fg2Hue: 0.205, fg2Time: 0.0,
+    fg2Alpha: 1.45, fg2Blend: 2 /* Screen */, fg2Hue: 0, fg2Time: 0.0,
     u_iters_fg2: 4, u_scale_fg2: 0.0017, u_invBase_fg2: 13.0,
-    u_hueSpin_fg2: 0.5, u_satBase_fg2: 0.0,
+    u_hueSpin_fg2: 0, u_satBase_fg2: 0.0,
     K_COSMIC_fg2: 0.95,
     venturiEnable: 1, venturiDebug: 0,
     venturiFreq: 0.0245, venturiWarp: 0.2,
@@ -41628,9 +41749,9 @@ const MULTI_LAYER_PRESETS = {
     u_hueSpin_bg: 0, u_satBase_bg: 0.89,
     K_COSMIC_bg: 0.45,
     fgPatternId: 9,                                  // Circuit Traces
-    fgAlpha: 1.5, fgBlend: 3, fgHue: 0.455, fgTime: 1.55,
+    fgAlpha: 1.5, fgBlend: 3, fgHue: 0, fgTime: 1.55,
     u_iters_fg: 3, u_scale_fg: 0.0016, u_invBase_fg: 8,
-    u_hueSpin_fg: 0.1, u_satBase_fg: 0.92,
+    u_hueSpin_fg: 0, u_satBase_fg: 0.92,
     K_COSMIC_fg: 0.4,
     fg2PatternId: -1,
     fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
@@ -41690,27 +41811,42 @@ function applyMultiLayerPreset(idx) {
   return true;
 }
 
-// (v25 round 8) Interior parallax mapping helpers. The wall shader treats
-// each wall pixel as a window into a virtual back surface : for sphere
-// walls, a slightly larger virtual sphere ; for tunnel walls, a slightly
-// larger virtual cylinder. Each surface is painted with a panoramic
-// texture. As the camera moves, the view ray through each wall pixel
-// hits a different point on the virtual surface, so the sampled UV
-// shifts naturally and we get real parallax depth without geometry.
+// (v25 round 12) Interior WALLPAPER mapping helpers. The wall shader
+// samples sphere1.png (equirect) onto sphere walls and tunnel1.png
+// (cylindrical) onto tunnel walls. No parallax ; the panorama sits flat
+// on the wall surface. Bonus : no convergence weirdness, no endpoint
+// stretching, no view-direction math.
 //
 //   setInteriorSphere('sphere1.png')   // load + bind sphere texture, enable
 //   setInteriorTunnel('tunnel1.png')   // load + bind tunnel texture
-//   setInteriorWalls({ depth: 200, amount: 0.9 })  // adjust knobs only
+//   setInteriorDefaults()              // sphere1 + tunnel1 in one call
+//   setInteriorWalls({ amount: 0.9, cylBias: 100 })  // adjust knobs only
 //   setInteriorWallsOff()              // disable
+//   setInteriorDebug(true)             // colorize RED=sphere GREEN=cyl
 //
 // Sphere/tunnel images live in LSS/pipes&panels/. Cylinder data is auto-
-// pushed to the uniform arrays from game.levelCylinders when interior is
-// enabled (and again whenever you call setInteriorTunnel).
+// pushed from game.levelCylinders whenever a setInterior* call fires and
+// at end of every level rebuild.
+// (v25 round 17) Available files in LSS/pipes&panels/ for the interior
+// dropdowns. Edit when you add new images. Both the sphere and tunnel
+// dropdowns share this list so you can mix-and-match.
+const INTERIOR_IMAGE_FILES = [
+  'sphere1.png', 'sphere2.png', 'sphere3.png',
+  'tunnel1.png', 'tunnel2.png', 'tunnel3.png',
+  'panel1.png',  'panel1a.png', 'panel2.png',  'panel2a.png', 'panel3.png',  'panel3a.png', 'panel_cp.png',
+  'pipe1.png',   'pipe1a.png',  'pipe2.png',   'pipe2a.png',  'pipe3.png',   'pipe3a.png',
+  'pipeA.png',   'pipeB.png',   'pipeD.png',   'pipe_cp.png',
+];
 const _vxInteriorTexCache = {};
 function _vxInteriorAssetUrl(name) {
-  // sphere*.png / tunnel*.png live in pipes&panels/ ; everything else
-  // (legacy compat) falls back to skybox/.
-  let dir = (name.indexOf('sphere') === 0 || name.indexOf('tunnel') === 0) ? 'pipes%26panels' : 'skybox';
+  // (v25 round 17) Any file in our known pipes&panels list routes to that
+  // directory ; everything else falls back to skybox/ for backward compat.
+  const inPanels = (typeof INTERIOR_IMAGE_FILES !== 'undefined') && INTERIOR_IMAGE_FILES.indexOf(name) >= 0;
+  let dir;
+  if (inPanels) dir = 'pipes%26panels';
+  else if (name.indexOf('sphere') === 0 || name.indexOf('tunnel') === 0
+        || name.indexOf('panel') === 0 || name.indexOf('pipe') === 0) dir = 'pipes%26panels';
+  else dir = 'skybox';
   try {
     const path = (typeof location !== 'undefined' && location.pathname) ? location.pathname : '';
     const base = /\/LSS\//i.test(path) ? ('./' + dir + '/') : ('./LSS/' + dir + '/');
@@ -41731,8 +41867,6 @@ function _pushInteriorCylinders() {
     b[i].set(c.bx, c.by, c.bz);
     r[i] = c.r || 100;
   }
-  // Zero out any stale tail slots so a previous longer level doesn't bleed
-  // through (the shader skips them via uIntCylCount, but keep them clean).
   for (let i = N; i < 16; i++) {
     a[i].set(0, 0, 0);
     b[i].set(0, 0, 0);
@@ -41749,7 +41883,7 @@ function _loadInteriorTexture(name, onReady) {
   const loader = new THREE.TextureLoader();
   loader.load(_vxInteriorAssetUrl(name), (tex) => {
     tex.wrapS = THREE.RepeatWrapping;
-    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
     tex.magFilter = THREE.LinearFilter;
     tex.minFilter = THREE.LinearMipmapLinearFilter;
     tex.anisotropy = 4;
@@ -41784,19 +41918,34 @@ function setInteriorTunnel(name) {
   });
 }
 function setInteriorWalls(opts) {
-  // Adjust shared knobs (amount / depth / enabled) without changing textures.
-  // Accept (opts) only ; for texture loading use setInteriorSphere/Tunnel.
   opts = opts || {};
   const mat = game.levelMaterial;
   if (!mat || !mat.uniforms) return;
   const u = mat.uniforms;
-  if (typeof opts.enabled === 'boolean') game.wallInteriorEnabled = opts.enabled;
-  if (typeof opts.amount  === 'number')  game.wallInteriorAmount  = opts.amount;
-  if (typeof opts.depth   === 'number')  game.wallInteriorDepth   = opts.depth;
+  if (typeof opts.enabled        === 'boolean') game.wallInteriorEnabled        = opts.enabled;
+  if (typeof opts.amount         === 'number')  game.wallInteriorAmount         = opts.amount;
+  // "depth" / "parallax" set BOTH sphere and cyl ; per-primitive
+  // override via depthSphere/depthCyl/parallaxSphere/parallaxCyl.
+  if (typeof opts.depth          === 'number') {
+    game.wallInteriorDepthSphere = opts.depth;
+    game.wallInteriorDepthCyl    = opts.depth;
+  }
+  if (typeof opts.parallax       === 'number') {
+    game.wallInteriorParallaxSphere = opts.parallax;
+    game.wallInteriorParallaxCyl    = opts.parallax;
+  }
+  if (typeof opts.depthSphere    === 'number')  game.wallInteriorDepthSphere    = opts.depthSphere;
+  if (typeof opts.depthCyl       === 'number')  game.wallInteriorDepthCyl       = opts.depthCyl;
+  if (typeof opts.parallaxSphere === 'number')  game.wallInteriorParallaxSphere = opts.parallaxSphere;
+  if (typeof opts.parallaxCyl    === 'number')  game.wallInteriorParallaxCyl    = opts.parallaxCyl;
+  if (typeof opts.cylBias        === 'number')  game.wallInteriorCylBias        = opts.cylBias;
   if (u.uInteriorEnabled) u.uInteriorEnabled.value = (game.wallInteriorEnabled === false ? 0.0 : 1.0);
-  if (u.uInteriorAmount && typeof game.wallInteriorAmount === 'number') u.uInteriorAmount.value = game.wallInteriorAmount;
-  if (u.uInteriorDepth  && typeof game.wallInteriorDepth  === 'number') u.uInteriorDepth.value  = game.wallInteriorDepth;
-  // Refresh cylinder uniforms in case the level changed.
+  if (u.uInteriorAmount         && typeof game.wallInteriorAmount         === 'number') u.uInteriorAmount.value         = game.wallInteriorAmount;
+  if (u.uInteriorDepthSphere    && typeof game.wallInteriorDepthSphere    === 'number') u.uInteriorDepthSphere.value    = game.wallInteriorDepthSphere;
+  if (u.uInteriorDepthCyl       && typeof game.wallInteriorDepthCyl       === 'number') u.uInteriorDepthCyl.value       = game.wallInteriorDepthCyl;
+  if (u.uInteriorParallaxSphere && typeof game.wallInteriorParallaxSphere === 'number') u.uInteriorParallaxSphere.value = game.wallInteriorParallaxSphere;
+  if (u.uInteriorParallaxCyl    && typeof game.wallInteriorParallaxCyl    === 'number') u.uInteriorParallaxCyl.value    = game.wallInteriorParallaxCyl;
+  if (u.uInteriorCylBias        && typeof game.wallInteriorCylBias        === 'number') u.uInteriorCylBias.value        = game.wallInteriorCylBias;
   if (game.wallInteriorEnabled) _pushInteriorCylinders();
   try { saveSettings(); } catch (_) {}
 }
@@ -41805,11 +41954,6 @@ function setInteriorWallsOff() {
   const mat = game.levelMaterial;
   if (mat && mat.uniforms && mat.uniforms.uInteriorEnabled) mat.uniforms.uInteriorEnabled.value = 0.0;
 }
-// (v25 round 9) Debug mode : tint sphere-projected pixels RED and
-// cylinder-projected pixels GREEN. Lets you visually verify the
-// arbitration is routing each wall pixel to the correct projection.
-//   setInteriorDebug(true)   // colorize
-//   setInteriorDebug(false)  // back to normal interior view
 function setInteriorDebug(on) {
   game.wallInteriorDebug = !!on;
   const mat = game.levelMaterial;
@@ -41817,7 +41961,6 @@ function setInteriorDebug(on) {
     mat.uniforms.uInteriorDebug.value = on ? 1.0 : 0.0;
   }
 }
-// Convenience : load both at once with the canonical default images.
 function setInteriorDefaults() {
   setInteriorSphere('sphere1.png');
   setInteriorTunnel('tunnel1.png');
@@ -41827,10 +41970,8 @@ if (typeof window !== 'undefined') {
   window.setInteriorTunnel   = setInteriorTunnel;
   window.setInteriorWalls    = setInteriorWalls;
   window.setInteriorWallsOff = setInteriorWallsOff;
-  window.setInteriorDefaults = setInteriorDefaults;
   window.setInteriorDebug    = setInteriorDebug;
-  // Push cylinder uniforms in case the level was already built when this
-  // helper became available (no-op if material isn't ready yet).
+  window.setInteriorDefaults = setInteriorDefaults;
   window._pushInteriorCylinders = _pushInteriorCylinders;
 }
 
@@ -44046,21 +44187,27 @@ function buildRoomGraphLevel(level) {
       // (legacy), 0.0 = invisible. Bound to Settings -> Wall Pattern ->
       // Wall opacity slider; defaults preserve v7.1VR rendering.
       'uniform float uOpacity;',
-      // (v25 round 7) Interior parallax mapping. Each wall pixel ray-casts
-      // outward (from the camera, through itself) until it hits a virtual
-      // back surface and samples a panorama there. Spheres use a virtual
-      // sphere + equirectangular sample ; cylinders (tunnels) use a virtual
-      // cylinder + angle/along-axis sample. The two are picked per-pixel
-      // by which one's surface is closer at this wall point.
+      // (v25 round 12) Interior wallpaper mapping. NO parallax ; the wall
+      // point itself is the texture sample point. Sphere walls get an
+      // equirectangular sample using normalize(vWorldPos - nearC) ;
+      // tunnel walls get a cylindrical sample using (angle around axis,
+      // along axis). Picks between the two by which surface this wall
+      // pixel is closest to. Wallpaper has no depth illusion but reads
+      // cleanly at every convergence and never wraps weirdly.
       'uniform float uInteriorEnabled;',
       'uniform float uInteriorAmount;',
-      'uniform float uInteriorDepth;',
-      'uniform float uInteriorDebug;',       // (v25 round 9) 1.0 = colorize sphere/cyl pixels for inspection
-      'uniform sampler2D uInteriorTex;',     // sphere1.png : painted onto virtual sphere behind sphere walls
-      'uniform sampler2D uInteriorTexCyl;',  // tunnel1.png : painted onto virtual cylinder behind tunnel walls
-      // Cylinder data for tunnel projection. Max 16 cylinders ; uIntCylCount
-      // says how many slots are populated. Each cylinder is defined by two
-      // endpoints (A, B) + radius. Pushed by _pushInteriorCylinders().
+      // (v25 round 15) Per-primitive parallax + depth knobs. Sphere and
+      // cylinder were sharing one set, but sphere parallax holds up at
+      // strong values while tunnel parallax gets unstable at endpoints ;
+      // splitting lets each be tuned independently.
+      'uniform float uInteriorDepthSphere;',
+      'uniform float uInteriorDepthCyl;',
+      'uniform float uInteriorParallaxSphere;',
+      'uniform float uInteriorParallaxCyl;',
+      'uniform float uInteriorDebug;',
+      'uniform float uInteriorCylBias;',
+      'uniform sampler2D uInteriorTex;',     // sphere1.png : equirect for sphere walls
+      'uniform sampler2D uInteriorTexCyl;',  // tunnel1.png : cylindrical for tunnel walls
       'uniform vec3  uIntCylAxisA[16];',
       'uniform vec3  uIntCylAxisB[16];',
       'uniform float uIntCylR[16];',
@@ -44162,6 +44309,45 @@ function buildRoomGraphLevel(level) {
       '  else h = ((c.r - c.g) / d + 4.0) / 6.0;',
       '  return h;',
       '}',
+      // ============================================================
+      // zoneSample : pull an RGB color out of the room palette
+      // (roomColorsU[8]) using a 0-1 field scalar (idxV) to pick the
+      // slot, lerping between adjacent slots. u_hueSpin is reused as
+      // the time-drift rate ; 0 locks colors to the zone palette,
+      // small values cycle them slowly. Replaces the legacy HSV-roundtrip
+      // tinting so wall patterns sit on the actual zone palette RGB
+      // rather than the hue extracted from it.
+      // ============================================================
+      'vec3 zoneSample(float idxV, float tt, float val) {',
+      '  float idxF = (idxV + tt * u_hueSpin * 0.1) * 7.0;',
+      '  idxF = fract(idxF / 7.0) * 7.0;',
+      '  int idx0 = int(clamp(idxF, 0.0, 6.999));',
+      '  int idx1 = idx0 + 1;',
+      '  float frac = idxF - float(idx0);',
+      '  vec3 c0 = roomColorsU[0]; vec3 c1 = roomColorsU[0];',
+      '  for (int i = 0; i < 8; i++) {',
+      '    if (i == idx0) c0 = roomColorsU[i];',
+      '    if (i == idx1) c1 = roomColorsU[i];',
+      '  }',
+      '  vec3 col = mix(c0, c1, frac);',
+      '  vec3 desat = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, u_satBase);',
+      '  return desat * val * 1.5;',
+      '}',
+      // Two-slot palette pick (for patterns that originally mixed two',
+      // hardcoded colors like magenta/cyan). idxV selects between adjacent',
+      // slots of roomColorsU using the same drift logic as zoneSample.',
+      'vec3 zonePair(float idxV, float tt, out vec3 cA, out vec3 cB) {',
+      '  float idxF = (idxV + tt * u_hueSpin * 0.1) * 7.0;',
+      '  idxF = fract(idxF / 7.0) * 7.0;',
+      '  int idx0 = int(clamp(idxF, 0.0, 6.999));',
+      '  int idx1 = idx0 + 1;',
+      '  cA = roomColorsU[0]; cB = roomColorsU[0];',
+      '  for (int i = 0; i < 8; i++) {',
+      '    if (i == idx0) cA = roomColorsU[i];',
+      '    if (i == idx1) cB = roomColorsU[i];',
+      '  }',
+      '  return cA;',
+      '}',
       // ---- Shared noise/hash helpers ----
       'vec3 hash33(vec3 p) {',
       '  p = fract(p * vec3(443.897, 441.423, 437.195));',
@@ -44206,7 +44392,6 @@ function buildRoomGraphLevel(level) {
       '  return s;',
       '}',
       'vec3 patternKali(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  vec3 accum = vec3(0.0);',
       '  for (int ring = 0; ring < 5; ring++) {',
       '    if (ring >= u_rings) break;',
@@ -44218,9 +44403,8 @@ function buildRoomGraphLevel(level) {
       '    float q = 0.5 + 0.5 * sin(phase * 3.0 + tt * 0.3 + rf * 1.7);',
       '    float band = q < 0.5 ? 0.65 : 1.0;',
       '    float val = clamp(s / u_valDiv * (0.20 + 0.45 * band), 0.0, 2.5);',
-      '    float hue = fract(baseHue + rf * u_hueSpin + phase * 0.05 + tt * 0.02);',
-      '    float sat = u_satBase + rf * 0.10;',
-      '    accum += hsv(hue, sat, val) * pow(0.75, rf);',
+      '    float idxV = fract(rf * 0.142857 + phase * 0.05);',
+      '    accum += zoneSample(idxV, tt, val) * pow(0.75, rf);',
       '  }',
       '  return accum;',
       '}',
@@ -44228,7 +44412,6 @@ function buildRoomGraphLevel(level) {
       // PATTERN 1: Apollonian Gasket (recursive sphere-inversion)
       // ============================================================
       'vec3 patternApollonian(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  float scl = 1.0;',
       '  vec3 q = p;',
       '  for (int k = 0; k < 12; k++) {',
@@ -44242,8 +44425,8 @@ function buildRoomGraphLevel(level) {
       '  float lum = abs(0.25 * q.y / scl) * 100.0;',
       '  float val = clamp(lum / u_valDiv * 60.0, 0.0, 4.5);',
       '  float phase = atan(q.x, q.z);',
-      '  float hue = fract(baseHue + phase * 0.10 + tt * 0.02);',
-      '  return hsv(hue, u_satBase, val);',
+      '  float idxV = fract(phase * 0.15915 + 0.5);',
+      '  return zoneSample(idxV, tt, val);',
       '}',
       // ============================================================
       // PATTERN 2: Voronoi Cells (cellular structure, edges bright)
@@ -44262,7 +44445,6 @@ function buildRoomGraphLevel(level) {
       '  return d;',
       '}',
       'vec3 patternVoronoi(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  vec3 accum = vec3(0.0);',
       // Voronoi3 internally runs a 3x3x3 = 27-iteration loop per call. Layer
       // count is hard-capped at 2 here (regardless of user u_iters) so the
@@ -44276,8 +44458,8 @@ function buildRoomGraphLevel(level) {
       '    float d = voronoi3(q + vec3(0.0, tt * 0.05, 0.0));',
       '    float edge = 1.0 - smoothstep(0.05, 0.45, d);',
       '    float val = clamp(edge * 4.0 / u_valDiv * 80.0, 0.0, 4.0);',
-      '    float hue = fract(baseHue + lf * u_hueSpin + tt * 0.02);',
-      '    accum += hsv(hue, u_satBase, val) * pow(0.65, lf);',
+      '    float idxV = fract(lf * 0.142857 + d * 0.5);',
+      '    accum += zoneSample(idxV, tt, val) * pow(0.65, lf);',
       '  }',
       '  return accum;',
       '}',
@@ -44294,14 +44476,13 @@ function buildRoomGraphLevel(level) {
       '  float w3 = sin(length(p - s3) * k - tt * 2.0);',
       '  float sum = (w1 + w2 + w3) / 3.0;',
       '  float val = pow(0.5 + 0.5 * sum, 4.0);',
-      '  float baseHue = rgbHue(zoneC);',
-      '  return hsv(fract(baseHue + sum * u_hueSpin + tt * 0.02), u_satBase, val * 1.5);',
+      '  float idxV = 0.5 + 0.5 * sum;',
+      '  return zoneSample(idxV, tt, val);',
       '}',
       // ============================================================
       // PATTERN 4: Mandelbox Folds (box-fold + sphere-fold iterated)
       // ============================================================
       'vec3 patternMandelbox(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  vec3 cv = p;',
       '  vec3 q = p;',
       '  float dr = 1.0;',
@@ -44327,8 +44508,8 @@ function buildRoomGraphLevel(level) {
       '  }',
       '  float lum = length(q) / max(0.001, abs(dr));',
       '  float val = clamp(lum * 80.0 / u_valDiv, 0.0, 4.5);',
-      '  float hue = fract(baseHue + length(q) * u_hueSpin * 0.1 + tt * 0.02);',
-      '  return hsv(hue, u_satBase, val);',
+      '  float idxV = fract(length(q) * 0.1);',
+      '  return zoneSample(idxV, tt, val);',
       '}',
       // ============================================================
       // PATTERN 5: Hex Lattice (extruded 2D hex grid, layered)
@@ -44343,7 +44524,6 @@ function buildRoomGraphLevel(level) {
       '  return max(abs(d.x), abs(d.y * 0.86603 + d.x * 0.5));',
       '}',
       'vec3 patternHex(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  vec3 accum = vec3(0.0);',
       // Hex cell pitch in PATTERN space is 1/u_invBase. In WORLD space it
       // becomes (1/u_invBase) / u_scale. With high u_invBase + low u_scale
@@ -44360,13 +44540,9 @@ function buildRoomGraphLevel(level) {
       '    vec3 q = vec3(ca * p.x - sa * p.y, sa * p.x + ca * p.y, p.z);',
       '    float h = hex2D(q.xy + vec2(tt * 0.10, 0.0), cell * pow(1.5, lf));',
       '    float edge = 1.0 - smoothstep(0.42, 0.50, h);',
-      // (v21 2026-05-23) Brightness reduction. Edge gain was 3.5 * 80 = 280
-      // and capped at 4.0 ; brought down to 2.0 * 80 = 160 capped at 2.2
-      // so the hex outlines stop reading as glowing neon against bright
-      // wall palettes. Spatial pattern unchanged.
       '    float val = clamp(edge * 2.0 / u_valDiv * 80.0, 0.0, 2.2);',
-      '    float hue = fract(baseHue + lf * u_hueSpin + tt * 0.02);',
-      '    accum += hsv(hue, u_satBase, val) * pow(0.70, lf);',
+      '    float idxV = fract(lf * 0.142857 + h * 0.25);',
+      '    accum += zoneSample(idxV, tt, val) * pow(0.70, lf);',
       '  }',
       '  return accum;',
       '}',
@@ -44374,7 +44550,6 @@ function buildRoomGraphLevel(level) {
       // PATTERN 6: Plasma FBM (fractal Brownian motion)
       // ============================================================
       'vec3 patternPlasma(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  float v = 0.0;',
       '  float a = 0.5;',
       '  vec3 q = p + vec3(0.0, tt * 0.05, tt * 0.03);',
@@ -44385,14 +44560,51 @@ function buildRoomGraphLevel(level) {
       '    a *= 0.5;',
       '  }',
       '  float val = clamp(pow(v, 1.4) * 4.5 / u_valDiv * 80.0, 0.0, 4.5);',
-      '  float hue = fract(baseHue + v * u_hueSpin * 4.0 + tt * 0.02);',
-      '  return hsv(hue, u_satBase, val);',
+      '  return zoneSample(v, tt, val) / 1.5;',
+      '}',
+      // ============================================================
+      // PATTERN 39: Plasma FBM (zoned) ; fork of Plasma FBM that uses
+      // the zone palette directly instead of rotating around a base hue.
+      // The FBM value v picks a position in the 8-entry room palette,
+      // blends between adjacent entries, and modulates by brightness.
+      // Reads as "this room's official colors flowing as plasma," vs the
+      // original which can wander across the entire hue wheel.
+      // ============================================================
+      'vec3 patternPlasmaZoned(vec3 p, vec3 zoneC, float tt) {',
+      '  float v = 0.0;',
+      '  float a = 0.5;',
+      '  vec3 q = p + vec3(0.0, tt * 0.05, tt * 0.03);',
+      '  for (int k = 0; k < 12; k++) {',
+      '    if (k >= u_iters) break;',
+      '    v += a * noise3(q);',
+      '    q *= 2.0;',
+      '    a *= 0.5;',
+      '  }',
+      '  float val = clamp(pow(v, 1.4) * 4.5 / u_valDiv * 80.0, 0.0, 4.5);',
+      // Drift the palette index over time so the pattern still feels alive.
+      // u_hueSpin reused as the drift rate ; set it to 0 to lock the colors,
+      // keep it small for slow color cycling.
+      '  float idxF = (v + tt * u_hueSpin * 0.1) * 7.0;',
+      '  idxF = fract(idxF / 7.0) * 7.0;', // wrap so we always lerp between valid slots
+      '  int idx0 = int(clamp(idxF, 0.0, 6.999));',
+      '  int idx1 = idx0 + 1;',
+      '  float frac = idxF - float(idx0);',
+      // Loop-unroll-friendly palette lookup (WebGL 1 dynamic-array safe).
+      '  vec3 c0 = zoneC; vec3 c1 = zoneC;',
+      '  for (int i = 0; i < 8; i++) {',
+      '    if (i == idx0) c0 = roomColorsU[i];',
+      '    if (i == idx1) c1 = roomColorsU[i];',
+      '  }',
+      '  vec3 col = mix(c0, c1, frac);',
+      // Saturate-blend (u_satBase controls how much of the picked color
+      // comes through vs neutral white) and apply brightness.
+      '  vec3 desat = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, u_satBase);',
+      '  return desat * val * 1.5;',
       '}',
       // ============================================================
       // PATTERN 7: Circumpunct Lattice (rings around lattice convergence pts)
       // ============================================================
       'vec3 patternCircumpunct(vec3 p, vec3 zoneC, float tt) {',
-      '  float baseHue = rgbHue(zoneC);',
       '  vec3 cell = floor(p) + 0.5;',
       '  vec3 d = p - cell;',
       '  float r = length(d);',
@@ -44402,10 +44614,9 @@ function buildRoomGraphLevel(level) {
       '  float center = 1.0 - smoothstep(0.04, 0.10, r);',
       '  float boundaryFade = 1.0 - smoothstep(0.42, 0.55, r);',
       '  float lum = (rings * 0.6 + center * 1.4) * boundaryFade;',
-      '  float cellHue = fract(hash13(cell) * 0.25 + baseHue);',
       '  float val = clamp(lum * 4.5 / u_valDiv * 80.0, 0.0, 4.5);',
-      '  float hue = fract(cellHue + u_hueSpin * lum + tt * 0.02);',
-      '  return hsv(hue, u_satBase, val);',
+      '  float idxV = hash13(cell);',
+      '  return zoneSample(idxV, tt, val);',
       '}',
       // ============================================================
       // (post-v6.9 patch, 2026-04-28) Patterns 9-16 ported from
@@ -44439,9 +44650,7 @@ function buildRoomGraphLevel(level) {
       '                    min(length(cellUv - vec2(-0.5,  0.5)), length(cellUv - vec2( 0.5,  0.5))));',
       '  float node = smoothstep(0.10, 0.04, nodeD);',
       '  float val = max(trace, node * 1.8);',
-      '  float baseHue = rgbHue(zoneC);',
-      '  float hue = fract(baseHue + h * u_hueSpin + tt * 0.02);',
-      '  return hsv(hue, u_satBase, val * 1.2);',
+      '  return zoneSample(h, tt, val * 1.2);',
       '}',
       // PATTERN 10: Holographic Glitch
       'vec3 patternGlitch(vec3 p, vec3 zoneC, float tt) {',
@@ -44455,8 +44664,8 @@ function buildRoomGraphLevel(level) {
       '  float n1 = hash13(pj * 8.0 + vec3(0.05, 0.0, 0.0));',
       '  float n2 = hash13(pj * 8.0 - vec3(0.05, 0.0, 0.0));',
       '  float wave = 0.5 + 0.5 * sin(p.x * 2.0 + tt * 0.25);',
-      '  float baseHue = fract(rgbHue(zoneC) + u_hueSpin * 0.5);',
-      '  vec3 col = hsv(baseHue, u_satBase, scan * wave);',
+      '  float val = scan * wave;',
+      '  vec3 col = zoneSample(bandHash, tt, val) / 1.5;',
       '  col.r *= 0.9 + n1 * 0.6;',
       '  col.g *= 0.9 + n0 * 0.4;',
       '  col.b *= 0.9 + n2 * 0.7;',
@@ -44492,9 +44701,7 @@ function buildRoomGraphLevel(level) {
       '    float distToRoom = length(vWorldPos - roomCenters[i]) / max(1.0, roomRadii[i]);',
       '    val += smoothstep(1.5, 0.0, distToRoom) * 0.20;',
       '  }',
-      '  float baseHue = rgbHue(zoneC);',
-      '  float hue = fract(baseHue + hash13(nearestId) * u_hueSpin);',
-      '  return hsv(hue, u_satBase, val);',
+      '  return zoneSample(hash13(nearestId), tt, val) / 1.5;',
       '}',
       // PATTERN 12: Domain-Warped Streaks
       'vec3 patternStreaks(vec3 p, vec3 zoneC, float tt) {',
@@ -44516,9 +44723,8 @@ function buildRoomGraphLevel(level) {
       // and animation timing untouched.
       '  float glow = 0.09 + 0.09 * sin(field * 3.0 + tt * 0.5);',
       '  float val = max(streaks * 0.9, glow);',
-      '  float baseHue = rgbHue(zoneC);',
-      '  float hue = fract(baseHue + field * 0.05 + tt * 0.01);',
-      '  return hsv(hue, u_satBase, val);',
+      '  float idxV = fract(field * 0.25 + 0.5);',
+      '  return zoneSample(idxV, tt, val) / 1.5;',
       '}',
       // PATTERN 13: Caustic Shimmer
       'vec3 patternCaustic(vec3 p, vec3 zoneC, float tt) {',
@@ -44534,9 +44740,7 @@ function buildRoomGraphLevel(level) {
       // animation untouched.
       '  float hum = 0.06 + 0.03 * sin(q.x + q.y + q.z + tt * 0.4);',
       '  float val = caustic * 0.9 + hum;',
-      '  float baseHue = rgbHue(zoneC);',
-      '  float hue = fract(baseHue + caustic * 0.08 + tt * 0.01);',
-      '  return hsv(hue, u_satBase * 0.7, val);',
+      '  return zoneSample(caustic, tt, val) / 1.5;',
       '}',
       // PATTERN 14: Hex Pulse Radar
       'vec3 patternHexPulse(vec3 p, vec3 zoneC, float tt) {',
@@ -44568,9 +44772,8 @@ function buildRoomGraphLevel(level) {
       // a full white-out. Wave timing and silhouette unchanged.
       '  float cellLight = hash13(vec3(hid, 0.0)) * 0.18 + pulseVal * 0.9;',
       '  float val = edge * 0.45 + cellLight * (1.0 - edge * 0.5);',
-      '  float baseHue = rgbHue(zoneC);',
-      '  float hue = fract(baseHue + pulseVal * u_hueSpin + tt * 0.01);',
-      '  return hsv(hue, u_satBase, val);',
+      '  float idxV = fract(hash13(vec3(hid, 0.0)) + pulseVal);',
+      '  return zoneSample(idxV, tt, val) / 1.5;',
       '}',
       // PATTERN 15: Cyber Datamosh
       'vec3 patternCyberMosh(vec3 p, vec3 zoneC, float tt) {',
@@ -44597,14 +44800,13 @@ function buildRoomGraphLevel(level) {
       // was *0.55, pixCorrupt was *0.85 ; all pulled down ~45% so the
       // magenta/cyan datamosh stops blowing out against bright walls.
       '  float band = step(0.88, bandH) * 0.9;',
-      '  vec3 magenta = vec3(1.00, 0.10, 0.85);',
-      '  vec3 cyan    = vec3(0.20, 0.95, 1.00);',
+      '  vec3 cA; vec3 cB;',
+      '  zonePair(0.5 + 0.5 * sin(uv.x * 0.6 + tt * 0.35), tt, cA, cB);',
       '  float colorMix = 0.5 + 0.5 * sin(uv.x * 0.6 + tt * 0.35);',
-      '  vec3 baseCol = mix(cyan, magenta, colorMix);',
+      '  vec3 baseCol = mix(cA, cB, colorMix);',
+      '  vec3 baseColDesat = mix(vec3(dot(baseCol, vec3(0.299, 0.587, 0.114))), baseCol, u_satBase);',
       '  float val = vScan * 0.32 + pixCorrupt * 0.48 + band;',
-      '  vec3 col = baseCol * val;',
-      '  float baseHue = rgbHue(zoneC);',
-      '  col = mix(col, hsv(baseHue, u_satBase, val * 0.6), 0.18);',
+      '  vec3 col = baseColDesat * val;',
       '  return col;',
       '}',
       // PATTERN 16: Neon Cube (raymarched).
@@ -44644,18 +44846,15 @@ function buildRoomGraphLevel(level) {
       '  vec3 col = vec3(0.0);',
       '  if (hit) {',
       '    float h = hash13(hitId);',
-      '    vec3 magenta = vec3(1.00, 0.15, 0.85);',
-      '    vec3 cyan    = vec3(0.20, 0.95, 1.00);',
-      '    vec3 cubeCol = (h > 0.5) ? cyan : magenta;',
+      '    vec3 cA; vec3 cB;',
+      '    zonePair(h, tt, cA, cB);',
+      '    vec3 cubeCol = (h > 0.5) ? cA : cB;',
+      '    cubeCol = mix(vec3(dot(cubeCol, vec3(0.299, 0.587, 0.114))), cubeCol, u_satBase);',
       '    float pulse = 0.55 + 0.45 * sin(hash13(hitId + vec3(7.0)) * 6.28 + tt * 1.5);',
       '    float fog = exp(-hitT * 0.28);',
-      // (v21 2026-05-23) Brightness reduction. Final cube glow was *1.8 ;
-      // pulled down to *0.95 so the neon frames don\'t HDR-flare against
-      // bright wall palettes. Pulse animation and color choice unchanged.
       '    col = cubeCol * pulse * fog * 0.95;',
       '  }',
-      '  float baseHue = rgbHue(zoneC);',
-      '  col += hsv(baseHue, u_satBase * 0.4, 0.04);',
+      '  col += zoneSample(0.0, tt, 0.027);',
       '  return col;',
       '}',
       // PATTERN 17: Panel Maze (architectural plating)
@@ -44725,10 +44924,12 @@ function buildRoomGraphLevel(level) {
       '  float distToRing = abs(r - ringR);',
       '  float ringW = ringSpacing * 0.10;',
       '  float ringMask = smoothstep(ringW, 0.0, distToRing);',
-      '  float isWarm = mod(ringIdx + step(0.5, u_hueSpin), 2.0);',
-      '  vec3 warmCol = vec3(1.0, 0.85, 0.40);',
-      '  vec3 coolCol = vec3(0.30, 0.95, 1.00);',
-      '  vec3 ringCol = mix(coolCol, warmCol, isWarm);',
+      '  float isWarm = mod(ringIdx, 2.0);',
+      '  vec3 cA; vec3 cB;',
+      '  zonePair(fract(ringIdx * 0.142857), tt, cA, cB);',
+      '  cA = mix(vec3(dot(cA, vec3(0.299, 0.587, 0.114))), cA, u_satBase);',
+      '  cB = mix(vec3(dot(cB, vec3(0.299, 0.587, 0.114))), cB, u_satBase);',
+      '  vec3 ringCol = mix(cA, cB, isWarm);',
       '  float angle = atan(uv2.y, uv2.x);',
       '  float sliceMark = pow(0.5 + 0.5 * sin(angle * (16.0 + float(u_rings) * 4.0)), 4.0);',
       '  float betweenRings = 1.0 - ringMask;',
@@ -44754,9 +44955,10 @@ function buildRoomGraphLevel(level) {
       '    float d = neonSceneSDF(wp, cid);',
       '    if (d < 0.012) {',
       '      float h = hash13(cid);',
-      '      vec3 magenta = vec3(1.00, 0.15, 0.85);',
-      '      vec3 cyan    = vec3(0.20, 0.95, 1.00);',
-      '      vec3 cubeCol = (h > 0.5) ? cyan : magenta;',
+      '      vec3 cA; vec3 cB;',
+      '      zonePair(h, tt, cA, cB);',
+      '      vec3 cubeCol = (h > 0.5) ? cA : cB;',
+      '      cubeCol = mix(vec3(dot(cubeCol, vec3(0.299, 0.587, 0.114))), cubeCol, u_satBase);',
       '      float pulse = 0.55 + 0.45 * sin(hash13(cid + vec3(7.0)) * 6.28 + tt * 1.5);',
       '      float fog = exp(-t * 0.30);',
       '      float layerA = 0.45 * fog * pulse;',
@@ -44768,8 +44970,7 @@ function buildRoomGraphLevel(level) {
       '    if (t > 9.0) break;',
       '    t += max(d * 0.85, 0.01);',
       '  }',
-      '  float baseHue = rgbHue(zoneC);',
-      '  col += hsv(baseHue, u_satBase * 0.4, 0.04);',
+      '  col += zoneSample(0.0, tt, 0.027);',
       '  return col * 0.85;',
       '}',
       // ============================================================
@@ -44816,9 +45017,8 @@ function buildRoomGraphLevel(level) {
       '  f += _ccDisplace(f, 1.0);',
       '  float fld = length(f);',
       '  float val = clamp(1.0 - exp(-fld * 0.35), 0.0, 1.0);',
-      '  float baseHue = rgbHue(zoneC);',
-      '  float hue = fract(baseHue + val * u_hueSpin + tt * 0.03);',
-      '  return hsv(hue, u_satBase, pow(val, 0.85) * 1.15);',
+      '  float brightness = pow(val, 0.85) * 1.15;',
+      '  return zoneSample(val, tt, brightness) / 1.5;',
       '}',
       // ============================================================
       // (v7.1 multi-layer rework) Pattern dispatcher takes a pattern ID
@@ -44855,6 +45055,7 @@ function buildRoomGraphLevel(level) {
       '  if (pid == 17) return patternPanelMaze(p, zoneC, tt);',
       '  if (pid == 18) return patternRingTunnel(p, zoneC, tt);',
       '  if (pid == 19) return patternLayeredCube(p, zoneC, tt);',
+      '  if (pid == 39) return patternPlasmaZoned(p, zoneC, tt);',
       // (v19+) pid 100 reserved for Claude Custom ; referenced by composite
       // presets only, not selectable as a solo pattern.
       '  if (pid == 100) return patternClaudeCustom(p, zoneC, tt);',
@@ -44974,7 +45175,19 @@ function buildRoomGraphLevel(level) {
       '    float inSurfDist = length(inSurfVec);',
       '    float depthFade  = 1.0 - smoothstep(SA_DOT_DEPTH_TOL * 0.5, SA_DOT_DEPTH_TOL, alongN);',
       '    float dotMask    = (1.0 - smoothstep(SA_DOT_RADIUS * 0.45, SA_DOT_RADIUS, inSurfDist)) * depthFade;',
-      '    float dotHue     = fract(hash3s(cellId) + time * 0.011);',
+      // (Zone-palette pick) Each cell maps to a slot in the room palette
+      // via its cellId hash, drifting slowly through the palette over time
+      // so souls still feel alive without escaping the zone colors.
+      '    float saIdxF = fract(hash3s(cellId) + time * 0.011) * 7.0;',
+      '    int saIdx0 = int(clamp(saIdxF, 0.0, 6.999));',
+      '    int saIdx1 = saIdx0 + 1;',
+      '    float saFrac = saIdxF - float(saIdx0);',
+      '    vec3 saC0 = roomColorsU[0]; vec3 saC1 = roomColorsU[0];',
+      '    for (int saI = 0; saI < 8; saI++) {',
+      '      if (saI == saIdx0) saC0 = roomColorsU[saI];',
+      '      if (saI == saIdx1) saC1 = roomColorsU[saI];',
+      '    }',
+      '    vec3 saPalCol = mix(saC0, saC1, saFrac);',
       // Wave brightness contributed by each room center; rooms run at
       // staggered phases so they do not pulse in lockstep.
       '    float waveBright = SA_BASE_DOT;',
@@ -44990,7 +45203,8 @@ function buildRoomGraphLevel(level) {
       // Global breath.
       '    float breath = 1.0 + SA_BREATH_AMP * sin(time * SA_BREATH_RATE);',
       '    waveBright  *= breath;',
-      '    vec3 dotRGB = hsv(dotHue, SA_DOT_SAT, waveBright);',
+      '    vec3 saDesat = mix(vec3(dot(saPalCol, vec3(0.299, 0.587, 0.114))), saPalCol, SA_DOT_SAT);',
+      '    vec3 dotRGB = saDesat * waveBright;',
       '    c = dotRGB * dotMask;',
       // Faint zone-color hint so wall silhouettes still read between dots.
       // Skipped in Pure Black Base mode so walls go fully black between dots.
@@ -45062,14 +45276,16 @@ function buildRoomGraphLevel(level) {
       '  { vec4 _h = uWallRippleHits[5]; vec3 _c = uWallRippleColors[5]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
       '  c += _wrSum * 1.6;',
       '  c = min(c, vec3(6.0));',
-      // (v25 round 8) Interior parallax mapping with sphere + cylinder
-      // arbitration. Find the nearest cylinder wall ; if it's closer to
-      // this pixel than the nearest sphere wall, use cylindrical projection
-      // with uInteriorTexCyl ; otherwise spherical projection with
-      // uInteriorTex. The view ray continues outward through each wall
-      // pixel and intersects a virtual LARGER primitive ; the hit point
-      // drives the texture UV. Camera motion shifts the UV naturally,
-      // giving real parallax depth without rendering anything behind.
+      // ============================================================
+      // (v25 round 13) Interior PARALLAX with smooth sphere/cyl blend.
+      // ============================================================
+      // Both projections are computed every wall pixel, then blended by
+      // smoothstep around the sphDist/cylDist+bias boundary. No hard
+      // switch ; convergence points get a soft transition instead of a
+      // visible seam. The cylindrical branch fades parallax to wallpaper
+      // as the view direction approaches the cylinder axis (kills the
+      // wild V tiling when looking down a tunnel). Sphere always uses
+      // full parallax (always perpendicular-ish to the room shell).
       '  if (uInteriorEnabled > 0.5) {',
       '    vec3 _viewDir = normalize(vWorldPos - cameraPosition);',
       // ---- Find nearest cylinder + its surface distance at this wall point ----
@@ -45083,10 +45299,6 @@ function buildRoomGraphLevel(level) {
       '      float _len2 = dot(_axD, _axD);',
       '      if (_len2 < 1.0) continue;',
       '      float _tRaw = dot(vWorldPos - _axA, _axD) / _len2;',
-      // (v25 round 9) Skip cylinders whose axial extent doesn't contain
-      // this wall point. Without this check, a sphere far from any tunnel
-      // could "match" a distant tunnel's endpoint as its nearest cylinder
-      // and route the pixel to tunnel projection.
       '      if (_tRaw < -0.05 || _tRaw > 1.05) continue;',
       '      float _tProj = clamp(_tRaw, 0.0, 1.0);',
       '      vec3 _onAxis = _axA + _axD * _tProj;',
@@ -45094,83 +45306,106 @@ function buildRoomGraphLevel(level) {
       '      float _wd = abs(_radial - uIntCylR[_i]);',
       '      if (_wd < _bestCylDist) { _bestCylDist = _wd; _bestCyl = _i; }',
       '    }',
-      // Sphere-side distance : how far is this wall point from the nearest
-      // sphere's perfect surface?
       '    float _sphDist = abs(length(vWorldPos - nearC) - nearR);',
-      // (v25 round 9) Pick cylinder ONLY when its surface is meaningfully
-      // closer than the sphere surface (cyl must be at least 40 units
-      // closer). Previous code had the bias backwards which routed sphere
-      // walls near tunnel mouths to tunnel projection.
-      '    bool _useCyl = (_bestCyl >= 0) && (_bestCylDist + 40.0 < _sphDist);',
-      '    vec3 _interior = vec3(0.0);',
-      '    bool _gotInterior = false;',
-      '    if (_useCyl) {',
-      // ---- Cylindrical parallax : ray meets virtual larger cylinder ----
-      '      vec3 _axA = uIntCylAxisA[_bestCyl];',
-      '      vec3 _axB = uIntCylAxisB[_bestCyl];',
-      '      vec3 _axisU = (_axB - _axA);',
-      '      float _cylLen = length(_axisU);',
-      '      _axisU /= max(_cylLen, 1e-3);',
-      '      float _rIn = uIntCylR[_bestCyl] + uInteriorDepth;',
-      // Project ray + origin onto plane perpendicular to axis ; solve 2D
-      // circle-ray intersection there.
-      '      vec3 _oc = vWorldPos - _axA;',
-      '      vec3 _ocP = _oc - _axisU * dot(_oc, _axisU);',
-      '      vec3 _dP  = _viewDir - _axisU * dot(_viewDir, _axisU);',
-      '      float _a2 = dot(_dP, _dP);',
-      '      float _b2 = dot(_ocP, _dP);',
-      '      float _c2 = dot(_ocP, _ocP) - _rIn * _rIn;',
-      '      float _disc2 = _b2 * _b2 - _a2 * _c2;',
-      '      if (_disc2 > 0.0 && _a2 > 1e-4) {',
-      '        float _t = (-_b2 + sqrt(_disc2)) / _a2;',
-      '        vec3 _hit = vWorldPos + _viewDir * _t;',
-      '        vec3 _hAx = _hit - _axA;',
-      '        float _along = dot(_hAx, _axisU);',
-      '        vec3 _hRad  = _hAx - _axisU * _along;',
-      '        float _hLen = length(_hRad);',
-      '        vec3 _hRadN = _hLen > 1e-4 ? _hRad / _hLen : vec3(1.0, 0.0, 0.0);',
-      // Stable tangent frame on the cylinder for angle computation
-      '        vec3 _t1 = abs(_axisU.y) < 0.92 ? normalize(cross(_axisU, vec3(0,1,0))) : normalize(cross(_axisU, vec3(1,0,0)));',
-      '        vec3 _t2 = cross(_axisU, _t1);',
-      '        float _angle = atan(dot(_hRadN, _t2), dot(_hRadN, _t1));',
-      '        float _uC = _angle / 6.2831853 + 0.5;',
-      '        float _vC = clamp(_along / max(_cylLen, 1e-3), 0.0, 1.0);',
-      '        _interior = texture2D(uInteriorTexCyl, vec2(_uC, _vC)).rgb;',
-      '        _gotInterior = true;',
-      '      }',
-      '    } else {',
-      // ---- Spherical parallax (room wall) ----
+      // ---- Blend weight 0..1 : how much "cyl" this pixel is.
+      // 0 = pure sphere, 1 = pure cyl. Smooth transition of ~40 world
+      // units around the boundary (sphDist - cylDist - cylBias == 0).
+      '    float _cylWeight = 0.0;',
+      '    if (_bestCyl >= 0) {',
+      '      _cylWeight = smoothstep(-20.0, 20.0, _sphDist - _bestCylDist - uInteriorCylBias);',
+      '    }',
+      // ---- Sphere parallax : ray from camera through wall hits virtual
+      //      larger sphere centered at room center, radius nearR+depth.
+      // Sample direction is mix(wallPoint, parallaxHit, uInteriorParallax)
+      // so the user can dial parallax intensity globally without losing
+      // the interior look ; at uInteriorParallax = 0 the sphere collapses
+      // to pure wallpaper (no movement when you fly around).
+      '    vec3 _sphereInt = vec3(0.0);',
+      '    {',
       '      vec3 _oc = vWorldPos - nearC;',
-      '      float _rIn = nearR + uInteriorDepth;',
+      '      float _rIn = nearR + uInteriorDepthSphere;',
       '      float _bC = dot(_oc, _viewDir);',
       '      float _cQ = dot(_oc, _oc) - _rIn * _rIn;',
       '      float _disc = _bC * _bC - _cQ;',
+      '      vec3 _hit = vWorldPos;',
       '      if (_disc > 0.0) {',
-      '        float _t = -_bC + sqrt(_disc);',  // far hit ; camera is inside the bigger sphere too
-      '        vec3 _hit = vWorldPos + _viewDir * _t;',
-      '        vec3 _hDir = normalize(_hit - nearC);',
-      '        float _u = atan(_hDir.z, _hDir.x) / 6.2831853 + 0.5;',
-      '        float _v = asin(clamp(_hDir.y, -1.0, 1.0)) / 3.1415927 + 0.5;',
-      '        _interior = texture2D(uInteriorTex, vec2(_u, _v)).rgb;',
-      '        _gotInterior = true;',
+      '        float _t = -_bC + sqrt(_disc);',
+      '        vec3 _parallaxHit = vWorldPos + _viewDir * _t;',
+      '        _hit = mix(vWorldPos, _parallaxHit, uInteriorParallaxSphere);',
       '      }',
+      '      vec3 _hDir = normalize(_hit - nearC);',
+      '      float _u = atan(_hDir.z, _hDir.x) / 6.2831853 + 0.5;',
+      '      float _v = asin(clamp(_hDir.y, -1.0, 1.0)) / 3.1415927 + 0.5;',
+      '      _sphereInt = texture2D(uInteriorTex, vec2(_u, _v)).rgb;',
       '    }',
-      '    if (_gotInterior) {',
-      '      c = mix(c, _interior, uInteriorAmount);',
-      // (v25 round 9) Debug mode : tint by which projection was picked,
-      // so we can verify arbitration is working visually. Turn on with
-      // setInteriorDebug(true). Off : c stays as the parallax mix.
-      '      if (uInteriorDebug > 0.5) {',
-      '        if (_useCyl) c = mix(c, vec3(0.0, 1.0, 0.0), 0.5);',
-      '        else         c = mix(c, vec3(1.0, 0.0, 0.0), 0.5);',
+      // ---- Cylindrical parallax with axis-parallel fall-off ----
+      // When the view direction is nearly parallel to the cyl axis (you're
+      // looking DOWN the tunnel), the ray-to-virtual-cylinder intersection
+      // blows up : _t becomes huge, the hit lands far past the cyl end,
+      // V wraps many times producing rapid tiling. Solution : sample
+      // position is mix(wall_point, parallax_hit, perp_strength) where
+      // perp_strength fades parallax out as the view aligns with the axis.
+      '    vec3 _cylInt = _sphereInt;',
+      '    if (_bestCyl >= 0) {',
+      '      vec3 _axA = uIntCylAxisA[_bestCyl];',
+      '      vec3 _axB = uIntCylAxisB[_bestCyl];',
+      '      vec3 _axisD = _axB - _axA;',
+      '      float _cylTotalLen = length(_axisD);',
+      '      vec3 _axisU = _axisD / max(_cylTotalLen, 1e-3);',
+      '      float _rInC = uIntCylR[_bestCyl] + uInteriorDepthCyl;',
+      '      vec3 _ocC = vWorldPos - _axA;',
+      '      vec3 _ocP = _ocC - _axisU * dot(_ocC, _axisU);',
+      '      vec3 _dP  = _viewDir - _axisU * dot(_viewDir, _axisU);',
+      '      float _a2 = dot(_dP, _dP);',
+      // Perpendicularity : 1 = view perpendicular to axis (full parallax),
+      // 0 = view parallel to axis (fall back to wallpaper, no parallax).
+      '      float _perp = smoothstep(0.18, 0.55, sqrt(_a2));',
+      // (v25 round 14) Endpoint fade : near tunnel ends the ray-cast lands
+      // way past the cyl's axial extent and V wraps rapidly, making the
+      // entrance look like it slides around. Fade parallax to wallpaper
+      // over the outer ~18% of the cyl length on each end.
+      '      float _ocAlong = dot(_ocC, _axisU);',
+      '      float _normT = clamp(_ocAlong / max(_cylTotalLen, 1.0), 0.0, 1.0);',
+      '      float _endDist = min(_normT, 1.0 - _normT);',
+      '      float _endFactor = smoothstep(0.02, 0.18, _endDist);',
+      // Combined parallax strength : view-perpendicular AND mid-tunnel
+      // AND globally scaled by uInteriorParallaxCyl.
+      '      float _strength = _perp * _endFactor * uInteriorParallaxCyl;',
+      '      vec3 _sampleHit = vWorldPos;', // wallpaper fallback
+      '      if (_a2 > 1e-4) {',
+      '        float _b2 = dot(_ocP, _dP);',
+      '        float _c2 = dot(_ocP, _ocP) - _rInC * _rInC;',
+      '        float _disc2 = _b2 * _b2 - _a2 * _c2;',
+      '        if (_disc2 > 0.0) {',
+      '          float _t2 = (-_b2 + sqrt(_disc2)) / _a2;',
+      '          vec3 _parallaxHit = vWorldPos + _viewDir * _t2;',
+      '          _sampleHit = mix(vWorldPos, _parallaxHit, _strength);',
+      '        }',
       '      }',
+      '      vec3 _hAx = _sampleHit - _axA;',
+      '      float _along = dot(_hAx, _axisU);',
+      '      vec3 _hRad  = _hAx - _axisU * _along;',
+      '      float _hLen = length(_hRad);',
+      '      vec3 _hRadN = _hLen > 1e-4 ? _hRad / _hLen : vec3(1.0, 0.0, 0.0);',
+      '      vec3 _ct1 = abs(_axisU.y) < 0.92 ? normalize(cross(_axisU, vec3(0,1,0))) : normalize(cross(_axisU, vec3(1,0,0)));',
+      '      vec3 _ct2 = cross(_axisU, _ct1);',
+      '      float _angle = atan(dot(_hRadN, _ct2), dot(_hRadN, _ct1));',
+      '      float _uC = _angle / 6.2831853 + 0.5;',
+      '      float _circ = 6.2831853 * uIntCylR[_bestCyl];',
+      '      float _vC = fract(_along / max(_circ, 1.0));',
+      '      _cylInt = texture2D(uInteriorTexCyl, vec2(_uC, _vC)).rgb;',
+      '    }',
+      // ---- Blend sphere and cyl interiors ----
+      '    vec3 _interior = mix(_sphereInt, _cylInt, _cylWeight);',
+      '    c = mix(c, _interior, uInteriorAmount);',
+      // Debug : RED = sphere-mode dominant, GREEN = cyl-mode dominant,
+      // YELLOW = blend zone.
+      '    if (uInteriorDebug > 0.5) {',
+      '      c = mix(c, vec3(1.0 - _cylWeight, _cylWeight, 0.0), 0.5);',
       '    }',
       '  }',
-      // (v25 round 9) When interior parallax is on, force the wall to be
-      // at least uInteriorAmount opaque so the outer skybox doesn't bleed
-      // through the painted interior. Without this, translucent walls
-      // composite the outer panorama on top of the interior, washing it
-      // out and confusing the two systems.
+      // When interior is on, force the wall opaque enough that the outer
+      // skybox doesn't bleed through and wash out the painted panorama.
       '  float _finalA = alpha * uOpacity;',
       '  if (uInteriorEnabled > 0.5) {',
       '    _finalA = max(_finalA, uInteriorAmount);',
@@ -45338,14 +45573,18 @@ function buildRoomGraphLevel(level) {
         // Honor any value already loaded from settings before the
         // material is built (e.g. saved-as-translucent across reloads).
         uOpacity:   { value: (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0 },
-        // (v25 round 7/8) Interior parallax mapping uniforms. Off by default ;
-        // opt in via setInteriorSphere('sphere1.png') and
-        // setInteriorTunnel('tunnel1.png'). Both samplers start as a 1x1
-        // white texture so the WebGL bindings are always valid.
-        uInteriorEnabled: { value: (game.wallInteriorEnabled === true ? 1.0 : 0.0) },
-        uInteriorAmount:  { value: (typeof game.wallInteriorAmount === 'number') ? game.wallInteriorAmount : 0.85 },
-        uInteriorDepth:   { value: (typeof game.wallInteriorDepth === 'number')  ? game.wallInteriorDepth  : 120.0 },
-        uInteriorDebug:   { value: (game.wallInteriorDebug === true ? 1.0 : 0.0) },
+        // (v25 round 12) Interior wallpaper mapping. Off by default ;
+        // user opts in via setInteriorSphere('sphere1.png') and
+        // setInteriorTunnel('tunnel1.png'). Samplers start as 1x1 white so
+        // the bindings are always valid even before any texture loads.
+        uInteriorEnabled:        { value: (game.wallInteriorEnabled === true ? 1.0 : 0.0) },
+        uInteriorAmount:         { value: (typeof game.wallInteriorAmount === 'number') ? game.wallInteriorAmount : 0.95 },
+        uInteriorDepthSphere:    { value: (typeof game.wallInteriorDepthSphere === 'number') ? game.wallInteriorDepthSphere : 150.0 },
+        uInteriorDepthCyl:       { value: (typeof game.wallInteriorDepthCyl === 'number')    ? game.wallInteriorDepthCyl    : 100.0 },
+        uInteriorParallaxSphere: { value: (typeof game.wallInteriorParallaxSphere === 'number') ? game.wallInteriorParallaxSphere : 1.0 },
+        uInteriorParallaxCyl:    { value: (typeof game.wallInteriorParallaxCyl === 'number')    ? game.wallInteriorParallaxCyl    : 0.5 },
+        uInteriorDebug:          { value: (game.wallInteriorDebug === true ? 1.0 : 0.0) },
+        uInteriorCylBias:        { value: (typeof game.wallInteriorCylBias === 'number') ? game.wallInteriorCylBias : 80.0 },
         uInteriorTex:     { value: (function(){
           if (typeof THREE === 'undefined') return null;
           const c = document.createElement('canvas'); c.width = c.height = 1;
@@ -45364,8 +45603,6 @@ function buildRoomGraphLevel(level) {
           if (THREE.SRGBColorSpace) t.colorSpace = THREE.SRGBColorSpace;
           return t;
         })() },
-        // Cylinder data uploaded by _pushInteriorCylinders. Static-allocated
-        // 16-slot arrays ; uIntCylCount says how many slots are populated.
         uIntCylAxisA: { value: (function(){ const a = []; for (let i = 0; i < 16; i++) a.push(new THREE.Vector3()); return a; })() },
         uIntCylAxisB: { value: (function(){ const a = []; for (let i = 0; i < 16; i++) a.push(new THREE.Vector3()); return a; })() },
         uIntCylR:     { value: new Float32Array(16) },
@@ -45418,7 +45655,7 @@ function buildRoomGraphLevel(level) {
         u_iters_fg2:   { value: 8 },
         u_scale_fg2:   { value: 0.0035 },
         u_invBase_fg2: { value: 9 },
-        u_hueSpin_fg2: { value: 0.12 },
+        u_hueSpin_fg2: { value: 0 },
         u_satBase_fg2: { value: 0.7 },
         K_COSMIC_fg2:  { value: 6 },
         uWallTex:      { value: (function(){
@@ -45444,7 +45681,7 @@ function buildRoomGraphLevel(level) {
         u_iters_solo:    { value: 9 },
         u_scale_solo:    { value: 0.0028 },
         u_invBase_solo:  { value: 8.1 },
-        u_hueSpin_solo:  { value: 0.28 },
+        u_hueSpin_solo:  { value: 0 },
         u_satBase_solo:  { value: 0.75 },
         // (v19+) Venturi corrugation defaults. Disabled by default so existing
         // presets render unchanged. applyMultiLayerPreset auto-pushes the
@@ -45497,6 +45734,22 @@ function buildRoomGraphLevel(level) {
 
     if (typeof applyZoneTheme === 'function' && typeof game.zoneTheme === 'string') {
       try { applyZoneTheme(game.zoneTheme); } catch (_) {}
+    }
+
+    // (v25 round 16) Interior wallpaper auto-rebind. The level material
+    // is rebuilt every round, which resets uInteriorTex / uInteriorTexCyl
+    // back to their 1x1 white defaults. Reapply the persisted image names
+    // so the panorama returns immediately without needing the user to
+    // re-run setInteriorDefaults() manually each round.
+    if (game.wallInteriorEnabled === true) {
+      try {
+        if (game.wallInteriorSphereImg && typeof setInteriorSphere === 'function') {
+          setInteriorSphere(game.wallInteriorSphereImg);
+        }
+        if (game.wallInteriorTunnelImg && typeof setInteriorTunnel === 'function') {
+          setInteriorTunnel(game.wallInteriorTunnelImg);
+        }
+      } catch (_) {}
     }
 
     const mesh = new THREE.Mesh(levelGeo, sdfMat);
