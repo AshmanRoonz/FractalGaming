@@ -21543,6 +21543,17 @@ let _voxelRoomSystem = null;
 function _voxelRoomsRebuild() {
   if (typeof scene === 'undefined' || !scene) return 0;
   if (!_voxelRoomSystem) _voxelRoomSystem = new VoxelRoomSystem(scene);
+  // (v25 round 10) Honor game.voxelRoomsEnabled : when the user toggles the
+  // "Enabled" checkbox off, zero out the instance counts on every mesh so
+  // nothing draws ; previously the rebuild ran regardless and produced the
+  // same voxels, making the checkbox look broken.
+  if (game.voxelRoomsEnabled === false) {
+    const sys = _voxelRoomSystem;
+    if (sys.mesh)     { sys.mesh.count     = 0; sys.mesh.instanceMatrix.needsUpdate     = true; }
+    if (sys.glowMesh) { sys.glowMesh.count = 0; sys.glowMesh.instanceMatrix.needsUpdate = true; }
+    if (sys.pipeMesh) { sys.pipeMesh.count = 0; sys.pipeMesh.instanceMatrix.needsUpdate = true; }
+    return 0;
+  }
   return _voxelRoomSystem.rebuild();
 }
 
@@ -21690,6 +21701,13 @@ function spawnDynamicObjects(rooms) {
   if (typeof game.voxelGlowFraction !== 'number' || !isFinite(game.voxelGlowFraction)) game.voxelGlowFraction = 0.10;
   if (game.voxelRoomsEnabled && typeof _voxelRoomsRebuild === 'function') {
     try { _voxelRoomsRebuild(); } catch (e) { console.warn('[voxel-rooms] rebuild failed:', e); }
+  }
+  // (v25 round 10) After the level rebuilds, refresh the interior parallax
+  // cylinder uniforms so map-switching doesn't leave stale data from the
+  // previous map (which would cause tunnels to project to the wrong
+  // positions or get skipped entirely).
+  if (typeof _pushInteriorCylinders === 'function') {
+    try { _pushInteriorCylinders(); } catch (_) {}
   }
 }
 
@@ -41672,6 +41690,150 @@ function applyMultiLayerPreset(idx) {
   return true;
 }
 
+// (v25 round 8) Interior parallax mapping helpers. The wall shader treats
+// each wall pixel as a window into a virtual back surface : for sphere
+// walls, a slightly larger virtual sphere ; for tunnel walls, a slightly
+// larger virtual cylinder. Each surface is painted with a panoramic
+// texture. As the camera moves, the view ray through each wall pixel
+// hits a different point on the virtual surface, so the sampled UV
+// shifts naturally and we get real parallax depth without geometry.
+//
+//   setInteriorSphere('sphere1.png')   // load + bind sphere texture, enable
+//   setInteriorTunnel('tunnel1.png')   // load + bind tunnel texture
+//   setInteriorWalls({ depth: 200, amount: 0.9 })  // adjust knobs only
+//   setInteriorWallsOff()              // disable
+//
+// Sphere/tunnel images live in LSS/pipes&panels/. Cylinder data is auto-
+// pushed to the uniform arrays from game.levelCylinders when interior is
+// enabled (and again whenever you call setInteriorTunnel).
+const _vxInteriorTexCache = {};
+function _vxInteriorAssetUrl(name) {
+  // sphere*.png / tunnel*.png live in pipes&panels/ ; everything else
+  // (legacy compat) falls back to skybox/.
+  let dir = (name.indexOf('sphere') === 0 || name.indexOf('tunnel') === 0) ? 'pipes%26panels' : 'skybox';
+  try {
+    const path = (typeof location !== 'undefined' && location.pathname) ? location.pathname : '';
+    const base = /\/LSS\//i.test(path) ? ('./' + dir + '/') : ('./LSS/' + dir + '/');
+    return base + name;
+  } catch (_) { return './' + dir + '/' + name; }
+}
+function _pushInteriorCylinders() {
+  const mat = game.levelMaterial;
+  if (!mat || !mat.uniforms) return;
+  const u = mat.uniforms;
+  if (!u.uIntCylAxisA || !u.uIntCylAxisB || !u.uIntCylR || !u.uIntCylCount) return;
+  const cyls = (game && game.levelCylinders) ? game.levelCylinders : [];
+  const N = Math.min(16, cyls.length);
+  const a = u.uIntCylAxisA.value, b = u.uIntCylAxisB.value, r = u.uIntCylR.value;
+  for (let i = 0; i < N; i++) {
+    const c = cyls[i];
+    a[i].set(c.ax, c.ay, c.az);
+    b[i].set(c.bx, c.by, c.bz);
+    r[i] = c.r || 100;
+  }
+  // Zero out any stale tail slots so a previous longer level doesn't bleed
+  // through (the shader skips them via uIntCylCount, but keep them clean).
+  for (let i = N; i < 16; i++) {
+    a[i].set(0, 0, 0);
+    b[i].set(0, 0, 0);
+    r[i] = 0;
+  }
+  u.uIntCylCount.value = N;
+}
+function _loadInteriorTexture(name, onReady) {
+  if (typeof THREE === 'undefined' || !name) return null;
+  const cached = _vxInteriorTexCache[name];
+  if (cached && cached !== 'loading') { if (onReady) onReady(cached); return cached; }
+  if (cached === 'loading') return null;
+  _vxInteriorTexCache[name] = 'loading';
+  const loader = new THREE.TextureLoader();
+  loader.load(_vxInteriorAssetUrl(name), (tex) => {
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.anisotropy = 4;
+    if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    _vxInteriorTexCache[name] = tex;
+    if (onReady) onReady(tex);
+  }, undefined, () => {
+    console.warn('[interior-walls] failed to load:', name);
+    _vxInteriorTexCache[name] = null;
+  });
+  return null;
+}
+function setInteriorSphere(name) {
+  const mat = game.levelMaterial;
+  if (!mat || !mat.uniforms) return;
+  _loadInteriorTexture(name, (tex) => {
+    mat.uniforms.uInteriorTex.value = tex;
+    game.wallInteriorEnabled = true;
+    mat.uniforms.uInteriorEnabled.value = 1.0;
+    _pushInteriorCylinders();
+  });
+}
+function setInteriorTunnel(name) {
+  const mat = game.levelMaterial;
+  if (!mat || !mat.uniforms) return;
+  _loadInteriorTexture(name, (tex) => {
+    mat.uniforms.uInteriorTexCyl.value = tex;
+    game.wallInteriorEnabled = true;
+    mat.uniforms.uInteriorEnabled.value = 1.0;
+    _pushInteriorCylinders();
+  });
+}
+function setInteriorWalls(opts) {
+  // Adjust shared knobs (amount / depth / enabled) without changing textures.
+  // Accept (opts) only ; for texture loading use setInteriorSphere/Tunnel.
+  opts = opts || {};
+  const mat = game.levelMaterial;
+  if (!mat || !mat.uniforms) return;
+  const u = mat.uniforms;
+  if (typeof opts.enabled === 'boolean') game.wallInteriorEnabled = opts.enabled;
+  if (typeof opts.amount  === 'number')  game.wallInteriorAmount  = opts.amount;
+  if (typeof opts.depth   === 'number')  game.wallInteriorDepth   = opts.depth;
+  if (u.uInteriorEnabled) u.uInteriorEnabled.value = (game.wallInteriorEnabled === false ? 0.0 : 1.0);
+  if (u.uInteriorAmount && typeof game.wallInteriorAmount === 'number') u.uInteriorAmount.value = game.wallInteriorAmount;
+  if (u.uInteriorDepth  && typeof game.wallInteriorDepth  === 'number') u.uInteriorDepth.value  = game.wallInteriorDepth;
+  // Refresh cylinder uniforms in case the level changed.
+  if (game.wallInteriorEnabled) _pushInteriorCylinders();
+  try { saveSettings(); } catch (_) {}
+}
+function setInteriorWallsOff() {
+  game.wallInteriorEnabled = false;
+  const mat = game.levelMaterial;
+  if (mat && mat.uniforms && mat.uniforms.uInteriorEnabled) mat.uniforms.uInteriorEnabled.value = 0.0;
+}
+// (v25 round 9) Debug mode : tint sphere-projected pixels RED and
+// cylinder-projected pixels GREEN. Lets you visually verify the
+// arbitration is routing each wall pixel to the correct projection.
+//   setInteriorDebug(true)   // colorize
+//   setInteriorDebug(false)  // back to normal interior view
+function setInteriorDebug(on) {
+  game.wallInteriorDebug = !!on;
+  const mat = game.levelMaterial;
+  if (mat && mat.uniforms && mat.uniforms.uInteriorDebug) {
+    mat.uniforms.uInteriorDebug.value = on ? 1.0 : 0.0;
+  }
+}
+// Convenience : load both at once with the canonical default images.
+function setInteriorDefaults() {
+  setInteriorSphere('sphere1.png');
+  setInteriorTunnel('tunnel1.png');
+}
+if (typeof window !== 'undefined') {
+  window.setInteriorSphere   = setInteriorSphere;
+  window.setInteriorTunnel   = setInteriorTunnel;
+  window.setInteriorWalls    = setInteriorWalls;
+  window.setInteriorWallsOff = setInteriorWallsOff;
+  window.setInteriorDefaults = setInteriorDefaults;
+  window.setInteriorDebug    = setInteriorDebug;
+  // Push cylinder uniforms in case the level was already built when this
+  // helper became available (no-op if material isn't ready yet).
+  window._pushInteriorCylinders = _pushInteriorCylinders;
+}
+
 function setWallPattern(idx) {
   const N = WALL_PATTERN_NAMES.length;
   idx = (idx | 0) % N;
@@ -43884,6 +44046,25 @@ function buildRoomGraphLevel(level) {
       // (legacy), 0.0 = invisible. Bound to Settings -> Wall Pattern ->
       // Wall opacity slider; defaults preserve v7.1VR rendering.
       'uniform float uOpacity;',
+      // (v25 round 7) Interior parallax mapping. Each wall pixel ray-casts
+      // outward (from the camera, through itself) until it hits a virtual
+      // back surface and samples a panorama there. Spheres use a virtual
+      // sphere + equirectangular sample ; cylinders (tunnels) use a virtual
+      // cylinder + angle/along-axis sample. The two are picked per-pixel
+      // by which one's surface is closer at this wall point.
+      'uniform float uInteriorEnabled;',
+      'uniform float uInteriorAmount;',
+      'uniform float uInteriorDepth;',
+      'uniform float uInteriorDebug;',       // (v25 round 9) 1.0 = colorize sphere/cyl pixels for inspection
+      'uniform sampler2D uInteriorTex;',     // sphere1.png : painted onto virtual sphere behind sphere walls
+      'uniform sampler2D uInteriorTexCyl;',  // tunnel1.png : painted onto virtual cylinder behind tunnel walls
+      // Cylinder data for tunnel projection. Max 16 cylinders ; uIntCylCount
+      // says how many slots are populated. Each cylinder is defined by two
+      // endpoints (A, B) + radius. Pushed by _pushInteriorCylinders().
+      'uniform vec3  uIntCylAxisA[16];',
+      'uniform vec3  uIntCylAxisB[16];',
+      'uniform float uIntCylR[16];',
+      'uniform int   uIntCylCount;',
       // ---- Wall constants (live-tweakable) ----
       'uniform vec3  K_DARK_BASE;',
       'uniform float K_ZONE_TINT;',
@@ -44881,7 +45062,120 @@ function buildRoomGraphLevel(level) {
       '  { vec4 _h = uWallRippleHits[5]; vec3 _c = uWallRippleColors[5]; float _age = _h.w; float _act = step(_age, uWallRippleMaxAge - 0.001); float _aT = clamp(_age / uWallRippleMaxAge, 0.0, 1.0); float _d = length(_h.xyz - vWorldPos); float _rR = _aT * uWallRippleMaxRadius; float _rb = exp(-pow((_d - _rR) / 38.0, 2.0)); _wrSum += _c * (_rb * (1.0 - _aT) * _act); }',
       '  c += _wrSum * 1.6;',
       '  c = min(c, vec3(6.0));',
-      '  gl_FragColor = vec4(c, alpha * uOpacity);',
+      // (v25 round 8) Interior parallax mapping with sphere + cylinder
+      // arbitration. Find the nearest cylinder wall ; if it's closer to
+      // this pixel than the nearest sphere wall, use cylindrical projection
+      // with uInteriorTexCyl ; otherwise spherical projection with
+      // uInteriorTex. The view ray continues outward through each wall
+      // pixel and intersects a virtual LARGER primitive ; the hit point
+      // drives the texture UV. Camera motion shifts the UV naturally,
+      // giving real parallax depth without rendering anything behind.
+      '  if (uInteriorEnabled > 0.5) {',
+      '    vec3 _viewDir = normalize(vWorldPos - cameraPosition);',
+      // ---- Find nearest cylinder + its surface distance at this wall point ----
+      '    int   _bestCyl = -1;',
+      '    float _bestCylDist = 99999.0;',
+      '    for (int _i = 0; _i < 16; _i++) {',
+      '      if (_i >= uIntCylCount) break;',
+      '      vec3 _axA = uIntCylAxisA[_i];',
+      '      vec3 _axB = uIntCylAxisB[_i];',
+      '      vec3 _axD = _axB - _axA;',
+      '      float _len2 = dot(_axD, _axD);',
+      '      if (_len2 < 1.0) continue;',
+      '      float _tRaw = dot(vWorldPos - _axA, _axD) / _len2;',
+      // (v25 round 9) Skip cylinders whose axial extent doesn't contain
+      // this wall point. Without this check, a sphere far from any tunnel
+      // could "match" a distant tunnel's endpoint as its nearest cylinder
+      // and route the pixel to tunnel projection.
+      '      if (_tRaw < -0.05 || _tRaw > 1.05) continue;',
+      '      float _tProj = clamp(_tRaw, 0.0, 1.0);',
+      '      vec3 _onAxis = _axA + _axD * _tProj;',
+      '      float _radial = length(vWorldPos - _onAxis);',
+      '      float _wd = abs(_radial - uIntCylR[_i]);',
+      '      if (_wd < _bestCylDist) { _bestCylDist = _wd; _bestCyl = _i; }',
+      '    }',
+      // Sphere-side distance : how far is this wall point from the nearest
+      // sphere's perfect surface?
+      '    float _sphDist = abs(length(vWorldPos - nearC) - nearR);',
+      // (v25 round 9) Pick cylinder ONLY when its surface is meaningfully
+      // closer than the sphere surface (cyl must be at least 40 units
+      // closer). Previous code had the bias backwards which routed sphere
+      // walls near tunnel mouths to tunnel projection.
+      '    bool _useCyl = (_bestCyl >= 0) && (_bestCylDist + 40.0 < _sphDist);',
+      '    vec3 _interior = vec3(0.0);',
+      '    bool _gotInterior = false;',
+      '    if (_useCyl) {',
+      // ---- Cylindrical parallax : ray meets virtual larger cylinder ----
+      '      vec3 _axA = uIntCylAxisA[_bestCyl];',
+      '      vec3 _axB = uIntCylAxisB[_bestCyl];',
+      '      vec3 _axisU = (_axB - _axA);',
+      '      float _cylLen = length(_axisU);',
+      '      _axisU /= max(_cylLen, 1e-3);',
+      '      float _rIn = uIntCylR[_bestCyl] + uInteriorDepth;',
+      // Project ray + origin onto plane perpendicular to axis ; solve 2D
+      // circle-ray intersection there.
+      '      vec3 _oc = vWorldPos - _axA;',
+      '      vec3 _ocP = _oc - _axisU * dot(_oc, _axisU);',
+      '      vec3 _dP  = _viewDir - _axisU * dot(_viewDir, _axisU);',
+      '      float _a2 = dot(_dP, _dP);',
+      '      float _b2 = dot(_ocP, _dP);',
+      '      float _c2 = dot(_ocP, _ocP) - _rIn * _rIn;',
+      '      float _disc2 = _b2 * _b2 - _a2 * _c2;',
+      '      if (_disc2 > 0.0 && _a2 > 1e-4) {',
+      '        float _t = (-_b2 + sqrt(_disc2)) / _a2;',
+      '        vec3 _hit = vWorldPos + _viewDir * _t;',
+      '        vec3 _hAx = _hit - _axA;',
+      '        float _along = dot(_hAx, _axisU);',
+      '        vec3 _hRad  = _hAx - _axisU * _along;',
+      '        float _hLen = length(_hRad);',
+      '        vec3 _hRadN = _hLen > 1e-4 ? _hRad / _hLen : vec3(1.0, 0.0, 0.0);',
+      // Stable tangent frame on the cylinder for angle computation
+      '        vec3 _t1 = abs(_axisU.y) < 0.92 ? normalize(cross(_axisU, vec3(0,1,0))) : normalize(cross(_axisU, vec3(1,0,0)));',
+      '        vec3 _t2 = cross(_axisU, _t1);',
+      '        float _angle = atan(dot(_hRadN, _t2), dot(_hRadN, _t1));',
+      '        float _uC = _angle / 6.2831853 + 0.5;',
+      '        float _vC = clamp(_along / max(_cylLen, 1e-3), 0.0, 1.0);',
+      '        _interior = texture2D(uInteriorTexCyl, vec2(_uC, _vC)).rgb;',
+      '        _gotInterior = true;',
+      '      }',
+      '    } else {',
+      // ---- Spherical parallax (room wall) ----
+      '      vec3 _oc = vWorldPos - nearC;',
+      '      float _rIn = nearR + uInteriorDepth;',
+      '      float _bC = dot(_oc, _viewDir);',
+      '      float _cQ = dot(_oc, _oc) - _rIn * _rIn;',
+      '      float _disc = _bC * _bC - _cQ;',
+      '      if (_disc > 0.0) {',
+      '        float _t = -_bC + sqrt(_disc);',  // far hit ; camera is inside the bigger sphere too
+      '        vec3 _hit = vWorldPos + _viewDir * _t;',
+      '        vec3 _hDir = normalize(_hit - nearC);',
+      '        float _u = atan(_hDir.z, _hDir.x) / 6.2831853 + 0.5;',
+      '        float _v = asin(clamp(_hDir.y, -1.0, 1.0)) / 3.1415927 + 0.5;',
+      '        _interior = texture2D(uInteriorTex, vec2(_u, _v)).rgb;',
+      '        _gotInterior = true;',
+      '      }',
+      '    }',
+      '    if (_gotInterior) {',
+      '      c = mix(c, _interior, uInteriorAmount);',
+      // (v25 round 9) Debug mode : tint by which projection was picked,
+      // so we can verify arbitration is working visually. Turn on with
+      // setInteriorDebug(true). Off : c stays as the parallax mix.
+      '      if (uInteriorDebug > 0.5) {',
+      '        if (_useCyl) c = mix(c, vec3(0.0, 1.0, 0.0), 0.5);',
+      '        else         c = mix(c, vec3(1.0, 0.0, 0.0), 0.5);',
+      '      }',
+      '    }',
+      '  }',
+      // (v25 round 9) When interior parallax is on, force the wall to be
+      // at least uInteriorAmount opaque so the outer skybox doesn't bleed
+      // through the painted interior. Without this, translucent walls
+      // composite the outer panorama on top of the interior, washing it
+      // out and confusing the two systems.
+      '  float _finalA = alpha * uOpacity;',
+      '  if (uInteriorEnabled > 0.5) {',
+      '    _finalA = max(_finalA, uInteriorAmount);',
+      '  }',
+      '  gl_FragColor = vec4(c, _finalA);',
       '}'
     ].join('\n');
 
@@ -45044,6 +45338,38 @@ function buildRoomGraphLevel(level) {
         // Honor any value already loaded from settings before the
         // material is built (e.g. saved-as-translucent across reloads).
         uOpacity:   { value: (typeof game.wallOpacity === 'number') ? game.wallOpacity : 1.0 },
+        // (v25 round 7/8) Interior parallax mapping uniforms. Off by default ;
+        // opt in via setInteriorSphere('sphere1.png') and
+        // setInteriorTunnel('tunnel1.png'). Both samplers start as a 1x1
+        // white texture so the WebGL bindings are always valid.
+        uInteriorEnabled: { value: (game.wallInteriorEnabled === true ? 1.0 : 0.0) },
+        uInteriorAmount:  { value: (typeof game.wallInteriorAmount === 'number') ? game.wallInteriorAmount : 0.85 },
+        uInteriorDepth:   { value: (typeof game.wallInteriorDepth === 'number')  ? game.wallInteriorDepth  : 120.0 },
+        uInteriorDebug:   { value: (game.wallInteriorDebug === true ? 1.0 : 0.0) },
+        uInteriorTex:     { value: (function(){
+          if (typeof THREE === 'undefined') return null;
+          const c = document.createElement('canvas'); c.width = c.height = 1;
+          const cx = c.getContext('2d'); cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, 1, 1);
+          const t = new THREE.CanvasTexture(c);
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          if (THREE.SRGBColorSpace) t.colorSpace = THREE.SRGBColorSpace;
+          return t;
+        })() },
+        uInteriorTexCyl:  { value: (function(){
+          if (typeof THREE === 'undefined') return null;
+          const c = document.createElement('canvas'); c.width = c.height = 1;
+          const cx = c.getContext('2d'); cx.fillStyle = '#ffffff'; cx.fillRect(0, 0, 1, 1);
+          const t = new THREE.CanvasTexture(c);
+          t.wrapS = t.wrapT = THREE.RepeatWrapping;
+          if (THREE.SRGBColorSpace) t.colorSpace = THREE.SRGBColorSpace;
+          return t;
+        })() },
+        // Cylinder data uploaded by _pushInteriorCylinders. Static-allocated
+        // 16-slot arrays ; uIntCylCount says how many slots are populated.
+        uIntCylAxisA: { value: (function(){ const a = []; for (let i = 0; i < 16; i++) a.push(new THREE.Vector3()); return a; })() },
+        uIntCylAxisB: { value: (function(){ const a = []; for (let i = 0; i < 16; i++) a.push(new THREE.Vector3()); return a; })() },
+        uIntCylR:     { value: new Float32Array(16) },
+        uIntCylCount: { value: 0 },
         // ---- Wall constants ----
         K_DARK_BASE:         { value: new THREE.Vector3(wp.K_DARK_BASE_R, wp.K_DARK_BASE_G, wp.K_DARK_BASE_B) },
         K_ZONE_TINT:         { value: wp.K_ZONE_TINT },
