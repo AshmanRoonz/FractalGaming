@@ -144,6 +144,23 @@ body.vr-active .hit-marker {
 #vr-rejoin-btn:hover { opacity: 1.0; background: rgba(40,20,70,0.85); border-color: #ffaa44; }
 body.vr-active #vr-rejoin-btn { display: none !important; }
 
+/* (v26VR) Top-right FPS readout. Monospace digits, low-contrast amber on
+   translucent panel so it doesn't compete with the HUD. Hidden by default
+   ; surfaced via the Performance settings toggle. Auto-hides in VR (the
+   headset uses its own perf overlay). */
+#fps-counter {
+  position: fixed; top: 8px; right: 12px; z-index: 22;
+  padding: 2px 8px;
+  font-family: 'Courier New', monospace; font-weight: 700;
+  font-size: 12px; letter-spacing: 0.05em;
+  color: #ffd680; background: rgba(15,10,30,0.55);
+  border: 1px solid rgba(255,170,68,0.35); border-radius: 4px;
+  pointer-events: none;
+  display: none;
+  text-shadow: 0 0 4px rgba(255,170,68,0.5);
+}
+body.vr-active #fps-counter { display: none !important; }
+
 /* Old crosshair hidden; replaced by circumpunct HUD canvas */
 #crosshair { display: none; }
 
@@ -1703,6 +1720,7 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
 <!-- VR / WebXR entry button. Wired up after renderer creation. -->
 <button id="vr-enter-btn" disabled>VR NOT AVAILABLE</button>
   <button id="vr-rejoin-btn" title="Re-enter VR">VR</button>
+  <div id="fps-counter">-- fps</div>
 
 <div id="hud">
   <canvas id="health-canvas" width="500" height="70"></canvas>
@@ -3077,6 +3095,8 @@ const input = {
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
   vrStripFx: false,
+  // (v26VR) Top-right FPS readout toggle. Persisted ; updated each gameLoop tick.
+  showFps: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
   fovDeg: 120,
@@ -35745,6 +35765,7 @@ function _refreshSettingsValues() {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
   setChk('set-vr-strip-fx', input.vrStripFx);
+  setChk('set-show-fps', input.showFps);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
   // re-syncs the display text + Rebind button label for every row.
@@ -36005,6 +36026,17 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">FOV applies to flat-screen rendering. The headset's native FOV is used in VR (slider has no visible effect there).</label>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3>Display</h3>
+      <div class="setting-row">
+        <label>Show FPS Counter</label>
+        <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Small amber readout in the top-right corner. Updates 4x/second from a rolling 60-frame average. Auto-hides in VR.</label>
       </div>
     </div>
 
@@ -37456,7 +37488,12 @@ function buildSettingsPage() {
       }
     } catch (_) {}
   });
-  const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
+  const showFpsChk = overlay.querySelector('#set-show-fps');
+  if (showFpsChk) showFpsChk.addEventListener('change', () => {
+    input.showFps = !!showFpsChk.checked;
+    saveSettings();
+  });
+    const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
   if (vrStripSel) vrStripSel.addEventListener('change', () => {
     input.vrStripFx = !!vrStripSel.checked;
     if (input.vrStripFx) {
@@ -38219,6 +38256,7 @@ function saveSettings() {
       vrRenderScale: input.vrRenderScale,
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
+      showFps: !!input.showFps,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
@@ -41279,6 +41317,7 @@ function loadSettings() {
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
+    if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
       if (typeof camera !== 'undefined' && camera) {
@@ -47559,6 +47598,33 @@ function gameLoop(timestamp) {
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
   game.lastTime = timestamp;
   game.time += game.deltaTime;
+
+  // (v26VR) FPS readout. Maintain a 60-sample rolling average of frame
+  // intervals and write the inverse to the top-right counter at ~4 Hz so
+  // the DOM write doesn't churn every frame. Updates always (cheap), but
+  // the element only renders when input.showFps is on (CSS-gated).
+  if (input.showFps) {
+    if (!game._fpsSamples) { game._fpsSamples = new Float32Array(60); game._fpsIdx = 0; game._fpsLastWriteMs = 0; }
+    const dtMs = Math.max(0.5, timestamp - (game._fpsLastTimestamp || timestamp));
+    game._fpsLastTimestamp = timestamp;
+    game._fpsSamples[game._fpsIdx] = dtMs;
+    game._fpsIdx = (game._fpsIdx + 1) % 60;
+    if (timestamp - game._fpsLastWriteMs > 250) {
+      game._fpsLastWriteMs = timestamp;
+      let sum = 0, n = 0;
+      for (let i = 0; i < 60; i++) { const v = game._fpsSamples[i]; if (v > 0) { sum += v; n++; } }
+      const meanMs = n > 0 ? (sum / n) : dtMs;
+      const fps = Math.round(1000 / meanMs);
+      const el = document.getElementById('fps-counter');
+      if (el) {
+        if (el.style.display !== 'block') el.style.display = 'block';
+        el.textContent = fps + ' fps';
+      }
+    }
+  } else {
+    const el = document.getElementById('fps-counter');
+    if (el && el.style.display !== 'none') el.style.display = 'none';
+  }
 
   // (lssdev test mode) On the first playing-state frame of a test-mode match,
   // auto-open settings to the Theme tab so the user can tweak themes live
