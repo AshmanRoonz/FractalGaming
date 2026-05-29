@@ -125,6 +125,25 @@ body.vr-active .hit-marker {
   color: #888; box-shadow: none;
 }
 
+/* (v26VR) Discreet in-game VR re-entry pill. Shown only during gameplay
+   when WebXR is available and the page is not currently presenting. The
+   normal #vr-enter-btn stays hidden in-game. */
+#vr-rejoin-btn {
+  position: fixed; right: 14px; bottom: 14px; z-index: 25;
+  padding: 4px 10px; font-family: 'Orbitron', sans-serif; font-weight: 700;
+  letter-spacing: 0.14em; font-size: 10px;
+  color: #ffe8b0; background: rgba(20,10,40,0.55);
+  border: 1px solid rgba(255,170,68,0.55); border-radius: 12px;
+  cursor: pointer; pointer-events: auto;
+  text-transform: uppercase;
+  box-shadow: 0 0 8px rgba(255,170,68,0.20);
+  transition: opacity 0.15s, background 0.15s, border-color 0.15s;
+  display: none;
+  opacity: 0.55;
+}
+#vr-rejoin-btn:hover { opacity: 1.0; background: rgba(40,20,70,0.85); border-color: #ffaa44; }
+body.vr-active #vr-rejoin-btn { display: none !important; }
+
 /* Old crosshair hidden; replaced by circumpunct HUD canvas */
 #crosshair { display: none; }
 
@@ -1683,6 +1702,7 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
 
 <!-- VR / WebXR entry button. Wired up after renderer creation. -->
 <button id="vr-enter-btn" disabled>VR NOT AVAILABLE</button>
+  <button id="vr-rejoin-btn" title="Re-enter VR">VR</button>
 
 <div id="hud">
   <canvas id="health-canvas" width="500" height="70"></canvas>
@@ -10278,6 +10298,35 @@ const xrControllers = { left: null, right: null, leftSrc: null, rightSrc: null }
 // sessionstart so we can read its .matrix every frame without re-calling
 // getCamera (which mutates camera.matrix as a side effect).
 let _xrCachedCameraVR = null;
+let _xrLobbyPressArmed = false;  // (v26VR) Set on sessionstart ; first controller press in lobby triggers Solo + audio unlock.
+let _xrTrustedMenuSuppressUntil = 0;
+let _xrSessionLifecycleActive = false;
+
+function _xrLifecycleActive() {
+  return !!(
+    (renderer && renderer.xr && renderer.xr.isPresenting) ||
+    _xrSessionLifecycleActive ||
+    (typeof document !== 'undefined' && document.body && document.body.classList.contains('vr-active'))
+  );
+}
+
+function _xrEnsureAnimationLoop(reason) {
+  try {
+    if (typeof gameLoop === 'function') renderer.setAnimationLoop(gameLoop);
+    console.log('[v26VR] animation loop ensured:', reason || 'xr');
+  } catch (_) {}
+}
+
+function _xrQuestLaunchContext() {
+  return !!(
+    typeof isStandaloneQuest === 'function' && isStandaloneQuest() &&
+    (
+      (typeof isXRPresenting === 'function' && isXRPresenting()) ||
+      (renderer && renderer.xr && renderer.xr.enabled) ||
+      _xrLifecycleActive()
+    )
+  );
+}
 
 function _xrUpdateInputSources() {
   const session = renderer.xr.getSession && renderer.xr.getSession();
@@ -10291,6 +10340,69 @@ function _xrUpdateInputSources() {
   }
 }
 
+function _xrNowMs() {
+  return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+}
+
+function _xrLobbyVisible() {
+  const lob = document.getElementById('lobby');
+  return !!(lob && lob.style.display !== 'none' && lob.offsetParent !== null);
+}
+
+function _xrShipSelectVisible() {
+  const sel = document.getElementById('ship-select');
+  return !!(sel && sel.classList.contains('active'));
+}
+
+function _xrTrustedUnlockMedia() {
+  try { if (typeof _lssUnlockAnnouncerAudio === 'function') _lssUnlockAnnouncerAudio(); } catch (_) {}
+  try {
+    if (typeof speechSynthesis !== 'undefined' && speechSynthesis.resume) speechSynthesis.resume();
+    if (typeof audio !== 'undefined' && audio.ctx && audio.ctx.state === 'suspended' && audio.ctx.resume) {
+      audio.ctx.resume();
+    }
+  } catch (_) {}
+}
+
+function _xrHandleTrustedMenuActivation() {
+  if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
+  _xrTrustedUnlockMedia();
+  let handled = false;
+
+  if (_xrLobbyVisible() && _xrLobbyPressArmed) {
+    _xrLobbyPressArmed = false;
+    const soloBtn = document.getElementById('btn-solo');
+    if (soloBtn) {
+      handled = true;
+      try { soloBtn.click(); } catch (e) { console.warn('[v26VR] trusted lobby start failed:', e && e.message); }
+    }
+  } else if (_xrShipSelectVisible() && !(typeof _countdownActive !== 'undefined' && _countdownActive)) {
+    handled = true;
+    try {
+      if (_previewedKey && LOADOUTS[_previewedKey]) {
+        commitLoadout(_previewedKey);
+      } else {
+        const first = document.querySelector('.ship-list-entry');
+        if (first && first.dataset && first.dataset.key) previewLoadout(first.dataset.key);
+      }
+    } catch (e) {
+      console.warn('[v26VR] trusted ship-select confirm failed:', e && e.message);
+    }
+  } else if (typeof settingsOpen !== 'undefined' && settingsOpen) {
+    handled = true;
+    try { closeSettings(); } catch (e) { console.warn('[v26VR] trusted settings close failed:', e && e.message); }
+  }
+
+  if (handled) {
+    _xrTrustedMenuSuppressUntil = _xrNowMs() + 350;
+    try {
+      console.log('[v26VR] trusted XR menu activation',
+        'userActive=' + !!(navigator.userActivation && navigator.userActivation.isActive));
+    } catch (_) {}
+  }
+  return handled;
+}
+
 renderer.xr.addEventListener('sessionstart', () => {
   // (v11b VR diag) Log session lifecycle so we can correlate "no video"
   // reports with the actual sequence of events. Lands in the Quest
@@ -10301,6 +10413,8 @@ renderer.xr.addEventListener('sessionstart', () => {
       'presenting=' + renderer.xr.isPresenting,
       'gameState=' + (typeof game !== 'undefined' ? game.state : 'n/a'));
   } catch (_) {}
+  _xrSessionLifecycleActive = true;
+  _xrEnsureAnimationLoop('sessionstart');
   document.body.classList.add('vr-active');
   // Pending auto-resume already fired (user manually clicked Enter VR);
   // suppress the countdown so it doesn't double-fire on session end.
@@ -10335,6 +10449,8 @@ renderer.xr.addEventListener('sessionstart', () => {
       session.addEventListener('selectstart', _lssUnlockAnnouncerAudio, { once: true });
       session.addEventListener('select', _lssUnlockAnnouncerAudio, { once: true });
       session.addEventListener('squeezestart', _lssUnlockAnnouncerAudio, { once: true });
+      session.addEventListener('selectstart', _xrHandleTrustedMenuActivation);
+      session.addEventListener('squeezestart', _xrHandleTrustedMenuActivation);
     } catch (_) {}
   }
   try { _lssUnlockAnnouncerAudio(); } catch (_) {}
@@ -10352,21 +10468,14 @@ renderer.xr.addEventListener('sessionstart', () => {
     }
   } catch (_) {}
 
-  // Auto-skip the initial Solo/Multi lobby when entering VR. The 2D lobby
-  // panel is invisible in the headset, so without this the user would be
-  // stuck pressing buttons blindly. After auto-click, they land in the
-  // ship-select panel; D-Pad up/down (left thumbstick) cycles ship, and B
-  // (right secondary, mapped to standard btn 9 = Start) commits.
-  // Long delay so this can't race with the renderer's first XR frames or
-  // any heavy shader compile that ship-select kicks off.
-  try {
-    const soloBtn = document.getElementById('btn-solo');
-    const lobbyEl = document.getElementById('lobby');
-    const lobbyVisible = lobbyEl && lobbyEl.offsetParent !== null;
-    if (soloBtn && lobbyVisible) {
-      setTimeout(() => { try { soloBtn.click(); } catch (_) {} }, 600);
-    }
-  } catch (_) { /* lobby not present, ignore */ }
+  // (v26VR) Don't auto-click Solo : the click would lack userActivation,
+  // which is the documented cause of the "cinematic won't start until the
+  // user pops the Meta menu" stall (TTS / WebAudio / RTC primitives all
+  // require user-gesture context). Instead arm a one-shot hook : the first
+  // controller button press in the lobby triggers Solo, AND that press
+  // gives us a user-gesture from which we can resume audio + speech
+  // synthesis. The in-VR lobby canvas shows the prompt.
+  _xrLobbyPressArmed = true;
 });
 
 renderer.xr.addEventListener('sessionend', () => {
@@ -10375,6 +10484,7 @@ renderer.xr.addEventListener('sessionend', () => {
   // transient context drop right after the session end doesn't auto-reload
   // the page (which lands the user at the cold-boot lobby).
   try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
+  _xrSessionLifecycleActive = false;
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
@@ -10401,6 +10511,7 @@ renderer.xr.addEventListener('sessionend', () => {
   try {
     renderer.setRenderTarget(null);
     window.dispatchEvent(new Event('resize'));
+    _xrEnsureAnimationLoop('sessionend-flat');
   } catch (e) {
     console.warn('[v11b VR] flat renderer restore failed:', e);
   }
@@ -10430,6 +10541,7 @@ renderer.xr.addEventListener('sessionend', () => {
   async function onSessionStarted(session) {
     session.addEventListener('end', onSessionEnded);
     btn.textContent = 'STARTING...';
+    _xrSessionLifecycleActive = true;
     try {
       // Configure WebXR right before binding the session, so flat mode
       // never has these flags flipped on.
@@ -10453,6 +10565,7 @@ renderer.xr.addEventListener('sessionend', () => {
       btn.textContent = 'VR INIT FAILED';
       btn.title = String((e && e.message) || e);
       renderer.xr.enabled = false;
+      _xrSessionLifecycleActive = false;
       try { session.end(); } catch (_) {}
       currentSession = null;
     }
@@ -10461,16 +10574,19 @@ renderer.xr.addEventListener('sessionend', () => {
   function onSessionEnded() {
     if (currentSession) currentSession.removeEventListener('end', onSessionEnded);
     btn.textContent = 'ENTER VR';
+    _xrSessionLifecycleActive = false;
     currentSession = null;
   }
 
   btn.addEventListener('click', () => {
     if (currentSession === null) {
+      _xrSessionLifecycleActive = true;
       navigator.xr.requestSession('immersive-vr', sessionInit)
         .then(onSessionStarted)
         .catch((e) => {
           btn.textContent = 'VR FAILED';
           btn.title = String((e && e.message) || e);
+          _xrSessionLifecycleActive = false;
           console.warn('XR session request failed:', e);
         });
     } else {
@@ -10491,6 +10607,33 @@ renderer.xr.addEventListener('sessionend', () => {
     console.warn('XR support probe failed:', e);
   });
 })();
+
+// (v26VR) Small discreet in-game VR re-entry pill. Mirrors the click on
+// #vr-enter-btn so the user can pop back into VR without going through
+// the lobby. Visibility is gated below by _xrUpdateRejoinButton().
+(function setupVRRejoinButton() {
+  const rb = document.getElementById('vr-rejoin-btn');
+  if (!rb) return;
+  rb.addEventListener('click', () => {
+    const fv = document.getElementById('vr-enter-btn');
+    if (fv && !fv.disabled) {
+      try { fv.click(); } catch (e) { console.warn('[vr-rejoin] click failed', e); }
+    }
+  });
+})();
+function _xrUpdateRejoinButton() {
+  const rb = document.getElementById('vr-rejoin-btn');
+  if (!rb) return;
+  const fv = document.getElementById('vr-enter-btn');
+  const vrAvailable = !!(fv && !fv.disabled && fv.textContent === 'ENTER VR');
+  const presenting = !!(typeof renderer !== 'undefined' && renderer.xr && renderer.xr.isPresenting);
+  // Only show during gameplay : game.state === 'playing' or 'warmup'.
+  const inCombat = (typeof game !== 'undefined') && (game.state === 'playing' || game.state === 'warmup');
+  rb.style.display = (vrAvailable && !presenting && inCombat) ? 'inline-block' : 'none';
+}
+// Poll on a slow interval so the pill appears/disappears with game-state
+// changes without coupling to every state transition.
+setInterval(_xrUpdateRejoinButton, 500);
 
 // (VR fork) Track when the user left VR by pressing the Open Settings
 // button so closeSettings can auto-resume the session 5 s later, with a
@@ -11023,7 +11166,7 @@ function _xrSettingsRows() {
     },
     {
       label: 'Close Settings',
-      value: 'A or START',
+      value: 'Press A',
       activate: () => { if (typeof closeSettings === 'function') closeSettings(); },
     },
   ];
@@ -11089,7 +11232,7 @@ function _xrDrawLobbyHint(ctx, W, H) {
   ctx.fillText('LAST SHIP SAILING', W / 2, 120);
   ctx.font = '36px Orbitron, sans-serif';
   ctx.fillStyle = '#cfe7ff';
-  ctx.fillText('Press A or START to begin', W / 2, H / 2);
+  ctx.fillText('Press any button to begin', W / 2, H / 2);
   ctx.font = '26px Orbitron, sans-serif';
   ctx.fillStyle = '#88aacc';
   ctx.fillText('Solo mode launches into ship select', W / 2, H / 2 + 60);
@@ -11152,11 +11295,13 @@ function _vrUpdateBotHealthBar(bot, isVR, isEnemy) {
 }
 
 const _vrNameLosDir = new THREE.Vector3();
+let _vrNameLabelUpdateFrame = 0;
 
 // Keep any old VR health sprites hidden.
 function _vrUpdateAllHealthBars() {
   const isVR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
   if (!isVR) {
+    _vrNameLabelUpdateFrame = 0;
     // Hide any sprites that were left visible.
     if (typeof game !== 'undefined' && game.entities) {
       for (const bot of game.entities) {
@@ -11169,6 +11314,11 @@ function _vrUpdateAllHealthBars() {
       }
     }
     return;
+  }
+  const cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
+  if (cadence > 1) {
+    _vrNameLabelUpdateFrame = (_vrNameLabelUpdateFrame + 1) % cadence;
+    if (_vrNameLabelUpdateFrame !== 0) return;
   }
   const playerTeam = (typeof player !== 'undefined' && player && player.team) || null;
   if (typeof game !== 'undefined' && game.entities) {
@@ -12271,7 +12421,7 @@ function getEffectiveVRRenderScale() {
 }
 
 function getEffectBudget() {
-  const tier = getVRPerfTier();
+  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (tier >= 3) return 80;
   if (tier >= 2) return 140;
   if (tier >= 1) return 220;
@@ -14894,6 +15044,8 @@ function getFlameLickTexture() {
   return tex;
 }
 
+const _shipAnimWhiteColor = new THREE.Color(0xffffff);
+
 function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (!mesh || !mesh.userData) return;
   const t = Math.min(1, speed / maxSpeed);
@@ -15054,7 +15206,7 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
           plume.userData.basePlumeColor = plume.material.color.clone();
         }
         const heat = Math.min(1, Math.max(0, (t - 0.5) * 2.0));
-        plume.material.color.copy(plume.userData.basePlumeColor).lerp(new THREE.Color(0xffffff), heat * 0.55);
+        plume.material.color.copy(plume.userData.basePlumeColor).lerp(_shipAnimWhiteColor, heat * 0.55);
       }
       // Heat-haze billboard: a stretched additive Sprite sits behind the plume tip.
       // Lazily created on first update. Opacity scales with thrust^2 so haze only
@@ -17250,7 +17402,7 @@ const dynamicLights = {
 })();
 
 function spawnDynamicLight(pos, color, intensity, range, duration) {
-  const tier = getVRPerfTier();
+  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (tier >= 3) return;
   if (tier >= 2 && (intensity || 0) < 3.0) return;
   if (tier >= 1) {
@@ -17328,6 +17480,11 @@ for (let _fi = 0; _fi < _SMOKE_FLASH_MAX * 2; _fi++) {
     intensity: 0, duration: 0, age: 0,
   });
 }
+const _smokeLightTop = [];
+for (let _si = 0; _si < _MAX_SMOKE_LIGHTS; _si++) {
+  _smokeLightTop.push({ f: null, eff: 0 });
+}
+let _smokeLightHadActive = false;
 
 function updateSmokeLights(dt) {
   // Age out and remove finished flashes.
@@ -17343,15 +17500,35 @@ function updateSmokeLights(dt) {
       _smokeLightFlashPool.push(f);
     }
   }
+
+  if (_smokeLightFlashes.length === 0) {
+    if (!_smokeLightHadActive) return;
+    _smokeLightHadActive = false;
+  } else {
+    _smokeLightHadActive = true;
+  }
+
   // Build up to 4 strongest active flashes (intensity * fadeOut).
-  const top = [];
+  for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
+    _smokeLightTop[k].f = null;
+    _smokeLightTop[k].eff = 0;
+  }
   for (const f of _smokeLightFlashes) {
     const t = f.age / f.duration;
     const fadeOut = Math.max(0, 1 - t * t);
     const eff = f.intensity * fadeOut;
-    top.push({ f, eff });
+    if (eff <= _smokeLightTop[_MAX_SMOKE_LIGHTS - 1].eff) continue;
+    for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
+      if (eff <= _smokeLightTop[k].eff) continue;
+      for (let j = _MAX_SMOKE_LIGHTS - 1; j > k; j--) {
+        _smokeLightTop[j].f = _smokeLightTop[j - 1].f;
+        _smokeLightTop[j].eff = _smokeLightTop[j - 1].eff;
+      }
+      _smokeLightTop[k].f = f;
+      _smokeLightTop[k].eff = eff;
+      break;
+    }
   }
-  top.sort((a, b) => b.eff - a.eff);
   // Walk the smoke material registry. Drop dead WeakRefs.
   for (let i = _smokeMatRegistry.length - 1; i >= 0; i--) {
     const ref = _smokeMatRegistry[i];
@@ -17364,8 +17541,8 @@ function updateSmokeLights(dt) {
     const lc = mat.uniforms.uLightColor.value;
     const ls = mat.uniforms.uLightStrength.value;
     for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
-      const e = top[k];
-      if (e) {
+      const e = _smokeLightTop[k];
+      if (e && e.f) {
         lp[k].copy(e.f.pos);
         lc[k].copy(e.f.color);
         ls[k] = e.eff;
@@ -17459,6 +17636,11 @@ async function warmupCombatShaders() {
   if (!(typeof renderer !== 'undefined' && renderer) ||
       !(typeof scene !== 'undefined' && scene) ||
       !(typeof camera !== 'undefined' && camera)) return;
+  if (typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) {
+    _shaderWarmup.done = true;
+    console.log('[warmup] skipped heavy shader warmup on standalone Quest VR');
+    return;
+  }
   _shaderWarmup.done = true;
   // Park the in-flight promise on the cache. Resolves to undefined on
   // success ; we clear the cache slot on completion so any callers
@@ -20205,6 +20387,8 @@ class ClusterObstacle {
       (Math.random() - 0.5) * 0.20,
       (Math.random() - 0.5) * 0.15
     );
+    this._qScratch = new THREE.Quaternion();
+    this._offsetScratch = new THREE.Vector3();
     if (config) {
       this.rotation = new THREE.Euler(config.rx, config.ry, config.rz);
       this.baseColor = config.color;
@@ -20460,7 +20644,7 @@ class ClusterObstacle {
       this.rotation.x += this.rotSpeed.x * dt;
       this.rotation.y += this.rotSpeed.y * dt;
       this.rotation.z += this.rotSpeed.z * dt;
-      const q = new THREE.Quaternion().setFromEuler(this.rotation);
+      const q = this._qScratch.setFromEuler(this.rotation);
       let avgHpFrac = 0, aliveChildren = 0;
       for (const c of this.children) {
         if (c.alive) {
@@ -20474,7 +20658,7 @@ class ClusterObstacle {
       const stressEmissive = 1 + stress * (1.0 + stressPulse * 1.5);
       for (const c of this.children) {
         if (!c.alive || c.broken) continue;
-        const rotated = c.localOffset.clone().applyQuaternion(q);
+        const rotated = this._offsetScratch.copy(c.localOffset).applyQuaternion(q);
         c.position.copy(this.position).add(rotated);
         if (c.mesh) c.mesh.position.copy(c.position);
         if (c.edgeMesh) c.edgeMesh.position.copy(c.position);
@@ -22379,6 +22563,7 @@ function updateDynamicObjects(dt) {
 
 // ---- ORGANIC LIFE: glowing alien flora that makes maps feel alive ----
 // Neon bioluminescent growths: tendrils, polyp clusters, spore clouds, coral fans, vein networks
+const LSS_ORGANIC_LIFE_ENABLED = false;
 
 const ORGANIC_PALETTE = [
   0xff00ff, 0x00ffff, 0xff4488, 0x44ff88, 0x8844ff,
@@ -22386,8 +22571,17 @@ const ORGANIC_PALETTE = [
   0xff66aa, 0x44ffff, 0xffaa00, 0x00ffaa, 0xcc44ff,
   0xff2266, 0x22ff88, 0x8866ff, 0xff6622, 0x22ffcc
 ];
+const ORGANIC_QUEST_PALETTE = [
+  0x00ffff, 0x44ff88, 0x66ffcc, 0x44ffff,
+  0xffaa00, 0x00ffaa, 0x22ff88, 0x22ffcc
+];
 
-function createOrganicMesh(type, scale, color) {
+function _pickOrganicPaletteColor(palette) {
+  const p = (Array.isArray(palette) && palette.length) ? palette : ORGANIC_PALETTE;
+  return p[Math.floor(Math.random() * p.length)];
+}
+
+function createOrganicMesh(type, scale, color, palette) {
   let geo, meshGroup;
   const mat = new THREE.MeshBasicMaterial({
     color: color, transparent: true, opacity: 0.7,
@@ -22396,7 +22590,8 @@ function createOrganicMesh(type, scale, color) {
 
   switch (type) {
     case 'tendril': {
-      // Twisting vine: chain of small spheres/cones along a curve
+      // Smooth glowing vine. Older builds used separated sphere beads, which
+      // could read as a vertical row of pink debug dots when close to camera.
       meshGroup = new THREE.Group();
       const segments = 6 + Math.floor(Math.random() * 6);
       const totalLen = scale * (1.5 + Math.random());
@@ -22404,27 +22599,25 @@ function createOrganicMesh(type, scale, color) {
       let dirX = (Math.random() - 0.5), dirY = 0.5 + Math.random() * 0.5, dirZ = (Math.random() - 0.5);
       const dLen = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
       dirX /= dLen; dirY /= dLen; dirZ /= dLen;
+      const pts = [new THREE.Vector3(px, py, pz)];
       for (let s = 0; s < segments; s++) {
-        const t = s / segments;
-        const segR = scale * 0.12 * (1 - t * 0.6);
-        const segGeo = new THREE.SphereGeometry(segR, 5, 4);
-        const segMat = mat.clone();
-        segMat.opacity = 0.5 + (1 - t) * 0.4;
-        const seg = new THREE.Mesh(segGeo, segMat);
-        seg.position.set(px, py, pz);
-        meshGroup.add(seg);
-        // Advance with organic curve
         const step = totalLen / segments;
         dirX += (Math.random() - 0.5) * 0.4;
         dirZ += (Math.random() - 0.5) * 0.4;
         const dl = Math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ);
         dirX /= dl; dirY /= dl; dirZ /= dl;
         px += dirX * step; py += dirY * step; pz += dirZ * step;
+        pts.push(new THREE.Vector3(px, py, pz));
       }
-      // Tip: bright glowing bulb
-      const tipGeo = new THREE.SphereGeometry(scale * 0.18, 6, 5);
+      const curve = new THREE.CatmullRomCurve3(pts);
+      const tubeGeo = new THREE.TubeGeometry(curve, Math.max(8, segments * 3), scale * 0.045, 5, false);
+      const tubeMat = mat.clone();
+      tubeMat.opacity = 0.48;
+      meshGroup.add(new THREE.Mesh(tubeGeo, tubeMat));
+      // Tip: small glow node, kept singular so it does not form a bead chain.
+      const tipGeo = new THREE.SphereGeometry(scale * 0.11, 6, 5);
       const tipMat = mat.clone();
-      tipMat.opacity = 0.9;
+      tipMat.opacity = 0.65;
       const tip = new THREE.Mesh(tipGeo, tipMat);
       tip.position.set(px, py, pz);
       meshGroup.add(tip);
@@ -22439,7 +22632,7 @@ function createOrganicMesh(type, scale, color) {
         const bR = scale * (0.15 + Math.random() * 0.25);
         const bGeo = new THREE.SphereGeometry(bR, 6, 5);
         const bMat = mat.clone();
-        bMat.color = new THREE.Color(ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)]);
+        bMat.color = new THREE.Color(_pickOrganicPaletteColor(palette));
         bMat.opacity = 0.5 + Math.random() * 0.4;
         const bulb = new THREE.Mesh(bGeo, bMat);
         const angle = Math.random() * Math.PI * 2;
@@ -22470,7 +22663,7 @@ function createOrganicMesh(type, scale, color) {
         posAttr.needsUpdate = true;
         fGeo.computeVertexNormals();
         const fMat = mat.clone();
-        fMat.color = new THREE.Color(ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)]);
+        fMat.color = new THREE.Color(_pickOrganicPaletteColor(palette));
         fMat.opacity = 0.4 + Math.random() * 0.3;
         const fan = new THREE.Mesh(fGeo, fMat);
         fan.rotation.set(
@@ -22496,7 +22689,7 @@ function createOrganicMesh(type, scale, color) {
         const sR = scale * (0.03 + Math.random() * 0.06);
         const sGeo = new THREE.SphereGeometry(sR, 4, 3);
         const sMat = mat.clone();
-        sMat.color = new THREE.Color(ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)]);
+        sMat.color = new THREE.Color(_pickOrganicPaletteColor(palette));
         sMat.opacity = 0.6 + Math.random() * 0.4;
         const spore = new THREE.Mesh(sGeo, sMat);
         spore.position.set(
@@ -22529,7 +22722,7 @@ function createOrganicMesh(type, scale, color) {
         }
         const lineGeo = new THREE.BufferGeometry().setFromPoints(pts);
         const lineMat = new THREE.LineBasicMaterial({
-          color: ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)],
+          color: _pickOrganicPaletteColor(palette),
           transparent: true, opacity: 0.6,
           blending: THREE.AdditiveBlending
         });
@@ -22557,6 +22750,33 @@ function createOrganicMesh(type, scale, color) {
 }
 
 const ORGANIC_TYPES = ['tendril', 'polyp', 'coral', 'spore', 'vein'];
+const ORGANIC_QUEST_TYPES = ['coral', 'vein'];
+
+function _organicTypesForBudget(tier) {
+  return tier > 0 ? ORGANIC_QUEST_TYPES : ORGANIC_TYPES;
+}
+
+function _organicPaletteForBudget(tier) {
+  return tier > 0 ? ORGANIC_QUEST_PALETTE : ORGANIC_PALETTE;
+}
+
+function _collectOrganicMaterials(root) {
+  const out = [];
+  if (!root || typeof root.traverse !== 'function') return out;
+  root.traverse(child => {
+    if (!child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    for (let i = 0; i < mats.length; i++) {
+      const m = mats[i];
+      if (!m) continue;
+      if (m.userData_baseOpacity === undefined) {
+        m.userData_baseOpacity = (m.opacity !== undefined) ? m.opacity : 1.0;
+      }
+      out.push(m);
+    }
+  });
+  return out;
+}
 
 function spawnOrganics(rooms) {
   // Clean up old organics
@@ -22566,16 +22786,23 @@ function spawnOrganics(rooms) {
     }
   }
   game.organics = [];
+  if (!LSS_ORGANIC_LIFE_ENABLED) return;
   // (v18VR 2026-05-22 round 13) Strip-FX gate. Organics include all the
   // basin gas pockets and atmospheric plants ; they're the per-room
   // cloud spawners. Clear and return so the next round has zero gas.
   if (typeof isVRStripFx === 'function' && isVRStripFx()) {
     return;
   }
+  const vrBudgetTier = (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0;
+  const roomDivisor = vrBudgetTier > 0 ? 180 : 60;
+  const roomMin = vrBudgetTier > 0 ? 1 : 3;
+  const roomCap = vrBudgetTier > 0 ? 2 : Infinity;
+  const organicTypes = _organicTypesForBudget(vrBudgetTier);
+  const organicPalette = _organicPaletteForBudget(vrBudgetTier);
 
   // Spawn organics in every room (more in larger rooms)
   for (const rm of rooms) {
-    const count = Math.max(3, Math.floor(rm.r / 60));
+    const count = Math.min(roomCap, Math.max(roomMin, Math.floor(rm.r / roomDivisor)));
     for (let i = 0; i < count; i++) {
       // Position: on the inner surface of the room sphere (near walls)
       const u = Math.random(), v = Math.random();
@@ -22586,10 +22813,10 @@ function spawnOrganics(rooms) {
       const py = rm.y + surfaceDist * Math.sin(phi) * Math.sin(theta);
       const pz = rm.z + surfaceDist * Math.cos(phi);
 
-      const type = ORGANIC_TYPES[Math.floor(Math.random() * ORGANIC_TYPES.length)];
+      const type = organicTypes[Math.floor(Math.random() * organicTypes.length)];
       const scale = 15 + Math.random() * 40;
-      const color = ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)];
-      const mesh = createOrganicMesh(type, scale, color);
+      const color = _pickOrganicPaletteColor(organicPalette);
+      const mesh = createOrganicMesh(type, scale, color, organicPalette);
 
       mesh.position.set(px, py, pz);
       // Orient toward room center (growths face inward)
@@ -22599,6 +22826,7 @@ function spawnOrganics(rooms) {
       game.organics.push({
         mesh: mesh,
         type: type,
+        materials: _collectOrganicMaterials(mesh),
         basePos: new THREE.Vector3(px, py, pz),
         pulseSpeed: 0.5 + Math.random() * 2.0,
         pulsePhase: Math.random() * Math.PI * 2,
@@ -22610,7 +22838,7 @@ function spawnOrganics(rooms) {
 
   // Also spawn some along tunnels
   const tunnelPts = game.corridorPoints.filter(p => p.roomType === 'tunnel');
-  const tunnelOrgCount = Math.min(20, Math.floor(tunnelPts.length / 2));
+  const tunnelOrgCount = Math.min(vrBudgetTier > 0 ? 4 : 20, Math.floor(tunnelPts.length / (vrBudgetTier > 0 ? 6 : 2)));
   for (let i = 0; i < tunnelOrgCount; i++) {
     const idx = Math.floor(Math.random() * tunnelPts.length);
     const pt = tunnelPts[idx];
@@ -22621,10 +22849,10 @@ function spawnOrganics(rooms) {
     const py = pt.y + Math.sin(offsetAngle) * offsetDist * 0.5;
     const pz = pt.z + Math.sin(offsetAngle) * offsetDist;
 
-    const type = ORGANIC_TYPES[Math.floor(Math.random() * ORGANIC_TYPES.length)];
+    const type = organicTypes[Math.floor(Math.random() * organicTypes.length)];
     const scale = 10 + Math.random() * 25;
-    const color = ORGANIC_PALETTE[Math.floor(Math.random() * ORGANIC_PALETTE.length)];
-    const mesh = createOrganicMesh(type, scale, color);
+    const color = _pickOrganicPaletteColor(organicPalette);
+    const mesh = createOrganicMesh(type, scale, color, organicPalette);
 
     mesh.position.set(px, py, pz);
     scene.add(mesh);
@@ -22632,6 +22860,7 @@ function spawnOrganics(rooms) {
     game.organics.push({
       mesh: mesh,
       type: type,
+      materials: _collectOrganicMaterials(mesh),
       basePos: new THREE.Vector3(px, py, pz),
       pulseSpeed: 0.5 + Math.random() * 2.0,
       pulsePhase: Math.random() * Math.PI * 2,
@@ -22642,7 +22871,25 @@ function spawnOrganics(rooms) {
 }
 
 function updateOrganics(dt) {
+  if (!LSS_ORGANIC_LIFE_ENABLED) {
+    if (game.organics && game.organics.length) {
+      for (const org of game.organics) {
+        try { if (org.mesh && org.mesh.parent) scene.remove(org.mesh); } catch (_) {}
+      }
+      game.organics = [];
+    }
+    return;
+  }
   if (!game.organics) return;
+  const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
+    ? getVRCadence(1, 4, 6, 10) : 1;
+  if (cadence > 1) {
+    updateOrganics._dt = (updateOrganics._dt || 0) + (dt || 0);
+    updateOrganics._frame = ((updateOrganics._frame || 0) + 1) % cadence;
+    if (updateOrganics._frame !== 0) return;
+    dt = Math.min(0.18, updateOrganics._dt || dt || 0.016);
+    updateOrganics._dt = 0;
+  }
   const t = game.time;
   for (const org of game.organics) {
     if (!org.mesh || !org.mesh.parent) continue;
@@ -22650,14 +22897,17 @@ function updateOrganics(dt) {
     // Pulse glow: cycle opacity/emissive
     const pulse = 0.5 + 0.5 * Math.sin(t * org.pulseSpeed + org.pulsePhase);
 
-    // Apply to all child meshes in group
-    org.mesh.traverse(child => {
-      if (child.material) {
-        if (child.material.opacity !== undefined) {
-          child.material.opacity = (child.material.userData_baseOpacity || child.material.opacity) * (0.5 + pulse * 0.5);
-        }
+    // Apply to cached material list. Avoids a group traverse for every
+    // organic every frame, which is pure CPU/draw-call-adjacent cost in VR.
+    const mats = org.materials || [];
+    const opacityMul = 0.5 + pulse * 0.5;
+    for (let mi = 0; mi < mats.length; mi++) {
+      const m = mats[mi];
+      if (m && m.opacity !== undefined) {
+        const baseOpacity = (m.userData_baseOpacity !== undefined) ? m.userData_baseOpacity : m.opacity;
+        m.opacity = baseOpacity * opacityMul;
       }
-    });
+    }
 
     // Gentle sway
     const swayX = Math.sin(t * org.swaySpeed + org.pulsePhase) * org.swayAmount;
@@ -22670,7 +22920,8 @@ function updateOrganics(dt) {
 
     // Spore type: drift individual particles
     if (org.type === 'spore') {
-      org.mesh.children.forEach(spore => {
+      for (let si = 0; si < org.mesh.children.length; si++) {
+        const spore = org.mesh.children[si];
         if (spore.userData.driftSpeed) {
           const ds = spore.userData;
           const ox = Math.sin(t * ds.driftSpeed + ds.driftPhase) * ds.driftRadius;
@@ -22680,7 +22931,7 @@ function updateOrganics(dt) {
           spore.position.y += oy * dt;
           spore.position.z += oz * dt;
         }
-      });
+      }
     }
   }
 }
@@ -23508,10 +23759,13 @@ const _lbFStep = new THREE.Vector3();
 // is rewritten to use the recursive-midpoint path generator above + a custom
 // tube geometry + a ShaderMaterial halo+core pair. One mesh-pair (halo+core)
 // per spawn ; geometry is rebuilt each spawn and disposed on release.
-function spawnLightningBolt(from, to, color, lifetime, branches, thickness) {
+function spawnLightningBolt(from, to, color, lifetime, branches, thickness, essential) {
   // (v18VR 2026-05-22 round 13) Strip-FX gate. Covers Stun Bolt, Mega
   // Stun Bolt arcs, Syphon drain conduits, plasma shield crackle, etc.
-  if (typeof isVRStripFx === 'function' && isVRStripFx()) return;
+  // (v26VR) `essential` bypasses the gate ; used for gameplay-critical
+  // feedback like Syphon drain that the player must see to read whether
+  // their ability hit.
+  if (!essential && typeof isVRStripFx === 'function' && isVRStripFx()) return;
   color = color || 0x44aaff;
   lifetime = lifetime || 0.2;
   // Branch cap : up to 4 sub-rays (was 2). The fractal path keeps each
@@ -23713,7 +23967,8 @@ function cullOldestParticle() {
 function _pVel(x, y, z) { return { x: x || 0, y: y || 0, z: z || 0 }; }
 
 function updateParticles(dt) {
-  if (getVRPerfTier() >= 3) {
+  const _vrTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
+  if (_vrTier >= 3) {
     for (let i = game.particles.length - 1; i >= 0; i--) {
       const p = game.particles[i];
       if (p && p.poolSlot) _releaseParticleSlot(p.poolSlot);
@@ -24718,6 +24973,14 @@ function disposeAllDots() {
 
 function updateDots(dt) {
   if (!game.dots || !game.dots.length) return;
+  const cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
+  if (cadence > 1) {
+    updateDots._dt = (updateDots._dt || 0) + (dt || 0);
+    updateDots._frame = ((updateDots._frame || 0) + 1) % cadence;
+    if (updateDots._frame !== 0) return;
+    dt = Math.min(0.12, updateDots._dt || dt || 0.016);
+    updateDots._dt = 0;
+  }
   const _gameTime = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
   // ---- Per-dot update (physics, age, hue, internal lightning, growth) ----
   for (let i = game.dots.length - 1; i >= 0; i--) {
@@ -26388,6 +26651,26 @@ function commitLoadout(key) {
     try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   }
 
+  const _launchSoloAfterCinematic = () => {
+    if (_countdownActive) return;
+    _lssRunCinematicThen(() => {
+      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    });
+  };
+  let _questWarmupWatchdog = null;
+  if (!net.active && typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) {
+    _questWarmupWatchdog = setTimeout(() => {
+      if (net.active || _countdownActive) return;
+      if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
+      if (game.state !== 'warmup' || !player.loadoutKey) return;
+      console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff');
+      try { _markLocalWarmupReady(); } catch (_) {}
+      try { hideLoadingOverlay(); } catch (_) {}
+      _launchSoloAfterCinematic();
+    }, 1800);
+  }
+
   // Pre-compile shader programs for combat-effect materials. Hook the
   // promise so we know when warmup is done and can proceed to the
   // short visible countdown (solo) or the peer-ready handshake (MP).
@@ -26405,6 +26688,7 @@ function commitLoadout(key) {
     _warmupPromise = Promise.resolve();
   }
   _warmupPromise.then(() => {
+    if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     // Local warmup is done ; mark ourselves ready and notify peers.
     _markLocalWarmupReady();
     if (net.active) {
@@ -26422,13 +26706,11 @@ function commitLoadout(key) {
       try { hideLoadingOverlay(); } catch (_) {}
       if (!_countdownActive) {
         // (v20+) Cinematic before the 3-2-1. Solo warmup-success path.
-        _lssRunCinematicThen(() => {
-          try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-          launchCountdown(LSS.SHORT_COUNTDOWN);
-        });
+        _launchSoloAfterCinematic();
       }
     }
   }).catch((e) => {
+    if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     // Warmup failed unexpectedly ; don't strand the player on the
     // loading screen. Fall back to launching anyway ; the first
     // impact will hit a cold shader but at least the match starts.
@@ -26440,10 +26722,7 @@ function commitLoadout(key) {
       checkAllLoadoutsReady();
     } else if (!_countdownActive) {
       // (v20+) Cinematic before the 3-2-1. Solo warmup-failed fallback.
-      _lssRunCinematicThen(() => {
-        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-        launchCountdown(LSS.SHORT_COUNTDOWN);
-      });
+      _launchSoloAfterCinematic();
     }
   });
 }
@@ -27038,7 +27317,32 @@ const _cinematic = {
   baseY:     0,
   ships: null,        // [{ mesh, isPlayer, origPos, origQuat, origVisible, pos, look }, ...]
   after: null,
+  watchdog: null,
 };
+
+function _lssClearCinematicWatchdog() {
+  if (_cinematic.watchdog) {
+    clearTimeout(_cinematic.watchdog);
+    _cinematic.watchdog = null;
+  }
+}
+
+function _lssArmCinematicWatchdog() {
+  _lssClearCinematicWatchdog();
+  const ms = Math.max(1000, ((_cinematic.duration || 6.0) + 1.0) * 1000);
+  _cinematic.watchdog = setTimeout(() => {
+    if (!_cinematic.active) return;
+    console.warn('[cinematic] watchdog completed stalled intro');
+    try { _lssCompleteSpectatorCinematic(); } catch (_) {
+      _cinematic.active = false;
+      const after = _cinematic.after;
+      _cinematic.after = null;
+      if (after) {
+        try { after(); } catch (e) { console.warn('[cinematic] watchdog after failed:', e && e.message); }
+      }
+    }
+  }, ms);
+}
 
 // Inject HUD-hiding CSS exactly once. Element IDs come from the
 // gameplay overlay roots in <body> (line 2006-2083). The class
@@ -27247,6 +27551,7 @@ function _lssStartSpectatorCinematic() {
 }
 
 function _lssEndSpectatorCinematic() {
+  _lssClearCinematicWatchdog();
   _cinematic.active = false;
   if (_cinematic.ships) {
     for (let i = 0; i < _cinematic.ships.length; i++) {
@@ -27336,6 +27641,7 @@ function _lssRunCinematicThen(andThen) {
     _cinematic.after = () => {
       try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
     };
+    _lssArmCinematicWatchdog();
   } else {
     try { andThen(); } catch (e) { console.warn('[cinematic] immediate andThen failed:', e && e.message); }
   }
@@ -28766,8 +29072,8 @@ function executeAbility(slot, ability) {
         const siphonOrigin = (typeof getPlayerForwardOrigin === 'function')
           ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3())
           : player.position.clone();
-        spawnLightningBolt(siphonOrigin, bestBot.position, 0x4169E1, 0.32, 8, 9.0);
-        spawnLightningBolt(siphonOrigin, bestBot.position, 0x6080ff, 0.28, 6, 7.0);
+        spawnLightningBolt(siphonOrigin, bestBot.position, 0x4169E1, 0.32, 8, 9.0, true);
+        spawnLightningBolt(siphonOrigin, bestBot.position, 0x6080ff, 0.28, 6, 7.0, true);
         // (v12m patch2) Broadcast the siphon beam so peers see the
         // conduit too (not just the local shooter). Receivers spawn
         // matching lightning bolts via the event handler.
@@ -28779,7 +29085,7 @@ function executeAbility(slot, ability) {
           });
         }
         // Wide blue-tinted halo bolt for the soft glow read (Syphon class blue).
-        spawnLightningBolt(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.32, 8, 14.0);
+        spawnLightningBolt(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.32, 8, 14.0, true);
         // Five parallel offset bolts give the conduit visible thickness
         // around the central core. Mix of paler-blue / class-blue tints so the
         // conduit pulses between bright energy white-blue and Syphon blue.
@@ -28790,7 +29096,7 @@ function executeAbility(slot, ability) {
           spawnLightningBolt(
             siphonOrigin.clone().add(offset),
             bestBot.position.clone().add(offset),
-            tint, 0.20 + Math.random() * 0.10, 4, 4.0
+            tint, 0.20 + Math.random() * 0.10, 4, 4.0, true
           );
         }
         // Blue glow particles along the beam path â€” soft additive sprites
@@ -32666,14 +32972,68 @@ function pollGamepad() {
   // gameplay actions like "core" or "fire"), making it look like ANY
   // button confirms. Now only Start (gpMenu) confirms the lobby.
   if (_lobbyActive) {
-    if (input.gpMenu && !input.gpMenuPrev) {
+    // (v26VR) In VR the lobby accepts ANY common controller button (face
+    // buttons, triggers, grips, start) so the user can confirm even on
+    // headsets without a Start button. Outside VR, only Start counts.
+    let _lobbyConfirm = (input.gpMenu && !input.gpMenuPrev);
+    const _vrPresenting = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+    if (_vrPresenting && _xrLobbyPressArmed) {
+      const _gpBtns = gp && gp.buttons;
+      const _anyPressed = !!(_gpBtns && (
+        (_gpBtns[0] && _gpBtns[0].pressed) ||  // A / left X
+        (_gpBtns[1] && _gpBtns[1].pressed) ||  // grip / trigger fallback
+        (_gpBtns[4] && _gpBtns[4].pressed) ||  // right A / left X (synth)
+        (_gpBtns[5] && _gpBtns[5].pressed) ||  // right B / left Y (synth)
+        (_gpBtns[7] && _gpBtns[7].pressed) ||  // right trigger
+        (_gpBtns[6] && _gpBtns[6].pressed) ||  // left trigger
+        (_gpBtns[9] && _gpBtns[9].pressed)     // start
+      ));
+      if (_anyPressed) {
+        _lobbyConfirm = true;
+        _xrLobbyPressArmed = false;
+        // Take advantage of the now-active user gesture to unlock audio
+        // and speech synthesis for this XR session. Without this the
+        // cinematic stalls because TTS / WebAudio gating never resolves.
+        try { if (typeof _lssUnlockAnnouncerAudio === 'function') _lssUnlockAnnouncerAudio(); } catch (_) {}
+        try {
+          if (typeof speechSynthesis !== 'undefined' && speechSynthesis.resume) speechSynthesis.resume();
+          if (typeof audio !== 'undefined' && audio.ctx && audio.ctx.state === 'suspended' && audio.ctx.resume) {
+            audio.ctx.resume();
+          }
+        } catch (_) {}
+      }
+    }
+    if (_lobbyConfirm) {
       const soloBtn = document.getElementById('btn-solo');
       if (soloBtn) soloBtn.click();
     }
   }
 
-  // Start: confirm / select (menus) or hold-to-show scoreboard (in combat)
-  if (input.gpMenu && !input.gpMenuPrev) {
+  // Start: confirm / select (menus) or hold-to-show scoreboard (in combat).
+  // (v26VR) In VR, ship-select also accepts A / B / trigger as confirm
+  // because Quest has no Start button. Track the new face-button edge
+  // here so multiple buttons can trigger the same confirm path.
+  let _menuConfirmEdge = (input.gpMenu && !input.gpMenuPrev);
+  const _vrPresentingMenu = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+  if (_vrPresentingMenu && (_shipSelectActive || settingsOpen)) {
+    const _gpBtns = gp && gp.buttons;
+    const _aRaw = !!(_gpBtns && _gpBtns[0] && _gpBtns[0].pressed);
+    const _bRaw = !!(_gpBtns && _gpBtns[1] && _gpBtns[1].pressed);
+    const _ltRaw = !!(_gpBtns && _gpBtns[6] && (_gpBtns[6].pressed || _gpBtns[6].value > input.triggerThreshold));
+    const _rtRaw = !!(_gpBtns && _gpBtns[7] && (_gpBtns[7].pressed || _gpBtns[7].value > input.triggerThreshold));
+    const _lgRaw = !!(_gpBtns && _gpBtns[4] && (_gpBtns[4].pressed || _gpBtns[4].value > input.triggerThreshold));
+    const _rgRaw = !!(_gpBtns && _gpBtns[5] && (_gpBtns[5].pressed || _gpBtns[5].value > input.triggerThreshold));
+    const _menuAnyRaw = _aRaw || _bRaw || _ltRaw || _rtRaw || _lgRaw || _rgRaw;
+    if (_menuAnyRaw && !input.gpMenuFaceAnyPrev) _menuConfirmEdge = true;
+    input.gpMenuFaceAnyPrev = _menuAnyRaw;
+  } else {
+    input.gpMenuFaceAnyPrev = false;
+  }
+  if (_menuConfirmEdge && typeof _xrTrustedMenuSuppressUntil === 'number' &&
+      ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) < _xrTrustedMenuSuppressUntil) {
+    _menuConfirmEdge = false;
+  }
+  if (_menuConfirmEdge) {
     if (settingsOpen) {
       closeSettings();
     } else if (_shipSelectActive) {
@@ -42916,7 +43276,10 @@ function _releaseChampionClaim(field, preserveProgress, releasedShip) {
 function updateStasisFields(dt) {
   // Spawn timer
   if (game.state === 'playing') {
-    const aliveCount = game.stasisFields.filter(f => f.alive).length;
+    let aliveCount = 0;
+    for (let _si = 0; _si < game.stasisFields.length; _si++) {
+      if (game.stasisFields[_si] && game.stasisFields[_si].alive) aliveCount++;
+    }
     if (aliveCount < 3) {
       game.stasisSpawnTimer -= dt;
       if (game.stasisSpawnTimer <= 0) {
@@ -43176,6 +43539,15 @@ const _FOG_TUNNEL_MULT = 1.4;   // tunnels: in-between
 function updateRoomFog(dt) {
   if (!scene.fog || !player || !player.position) return;
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
+  const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
+    ? getVRCadence(1, 4, 6, 10) : 1;
+  if (cadence > 1) {
+    updateRoomFog._dt = (updateRoomFog._dt || 0) + (dt || 0);
+    updateRoomFog._frame = ((updateRoomFog._frame || 0) + 1) % cadence;
+    if (updateRoomFog._frame !== 0) return;
+    dt = Math.min(0.18, updateRoomFog._dt || dt || 0.016);
+    updateRoomFog._dt = 0;
+  }
   // Find the room the player is inside (closest center within radius).
   let inRoom = null;
   let bestD = Infinity;
@@ -47335,6 +47707,8 @@ function gameLoop(timestamp) {
   const _wallDt = game.deltaTime;
   const dt = (typeof updateHitstop === 'function') ? updateHitstop(_wallDt) : _wallDt;
   const _vrPerfTier = getVRPerfTier();
+  const _vrThrottleTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : _vrPerfTier;
+  const _xrPresentingForOverlays = (typeof isXRPresenting === 'function') && isXRPresenting();
 
   // Update systems
   updatePlayerStasis(dt);
@@ -47356,13 +47730,18 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  if (_vrPerfTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
-  clearAmbientCloudDots();
-  if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
+  if (_vrThrottleTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
+  if (_xrPresentingForOverlays) {
+    const _clearCadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 6, 12, 30) : 6;
+    game._vrAmbientClearFrame = ((game._vrAmbientClearFrame || 0) + 1) % Math.max(1, _clearCadence);
+    if (game._vrAmbientClearFrame === 0) clearAmbientCloudDots();
+  } else {
+    clearAmbientCloudDots();
+  }
+  if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   if (typeof _tickWallRipples === 'function') _tickWallRipples(dt); // (v18L Phase L-J)
-  const _xrPresentingForOverlays = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (!_xrPresentingForOverlays) {
     tickCockpitFrameAnimation(); // (v17) cockpit frame: now stationary frame_<SHIP>.png + damage-shake hook
     _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
@@ -47410,7 +47789,7 @@ function gameLoop(timestamp) {
     animateShipMesh(bot.mesh, botSpeed, botMaxSpeed, bot.isFiring, dt, !!bot.doomed);
     // (v6.7) Damage-state particles for bots and network players. Healthy
     // ships emit nothing (early-return inside emitDamageState).
-    if (_vrPerfTier < 2) emitDamageState(bot, dt);
+    if (_vrThrottleTier < 2) emitDamageState(bot, dt);
   }
   if (typeof net !== 'undefined' && net && net.networkPlayers) {
     for (const np of net.networkPlayers) {
@@ -47431,7 +47810,7 @@ function gameLoop(timestamp) {
     const botMaxSpeed = bot.chassis ? bot.chassis.maxSpeed : 400;
     // Heat-trail blur: throttled emitter, scales rate with speed so cruising
     // bots get a steady wake and parked bots get nothing.
-    if (_vrPerfTier < 1 && bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
+    if (_vrThrottleTier < 1 && bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
       if (bot._heatTrailTimer == null) bot._heatTrailTimer = Math.random() * 0.05;
       bot._heatTrailTimer -= dt;
       if (bot._heatTrailTimer <= 0) {
@@ -47452,7 +47831,7 @@ function gameLoop(timestamp) {
     // (v6.7) Damage-state particles on the local player too (visible from
     // third-person / death cam, and other peers see them on our broadcast
     // position via their NetworkPlayer iteration).
-    if (_vrPerfTier < 2) emitDamageState(player, dt);
+    if (_vrThrottleTier < 2) emitDamageState(player, dt);
     // (v6.7) Spawn-protection bubble on the local player too (visible in
     // death cam / third-person). Same fade curve as the broadcast version.
     if (player.mesh && player.mesh.userData && player.mesh.userData.shieldMesh && player.spawnProtection > 0) {
@@ -47467,7 +47846,7 @@ function gameLoop(timestamp) {
       }
     }
     // Heat-trail blur on the player too (visible in third-person / death cam)
-    if (_vrPerfTier < 1 && !player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
+    if (_vrThrottleTier < 1 && !player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
       if (player._heatTrailTimer == null) player._heatTrailTimer = 0;
       player._heatTrailTimer -= dt;
       if (player._heatTrailTimer <= 0) {
@@ -47500,8 +47879,8 @@ function gameLoop(timestamp) {
   updateScreenShake(dt);
   updateDamageIndicators(dt);
   updateHUD();
-  if (_vrPerfTier < 2) updateMinimap();
-  if (_vrPerfTier < 1) updateEnemyHealthBars();
+  if (!_xrPresentingForOverlays && _vrPerfTier < 2) updateMinimap();
+  if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
 
   // Apply screen shake offset to camera (skip during death cam)
   if (!deathCam.active) {
@@ -47639,7 +48018,7 @@ function initAudio() {
       }
       return curve;
     })();
-    audio.masterShaper.oversample = '4x';
+    audio.masterShaper.oversample = (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ? 'none' : '4x';
     audio.postLimiterGain = audio.ctx.createGain();
     audio.postLimiterGain.gain.value = 2.0;
     audio.hiCut.connect(audio.preLimiterGain);
@@ -47676,7 +48055,10 @@ function initAudio() {
 
     audio.reverbGain = audio.ctx.createGain();
     // v8VR: honor any reverb wet level loaded from settings; default 0.40.
-    audio.reverbGain.gain.value = (typeof audio.reverbWet === 'number') ? audio.reverbWet : 0.40;
+    const _wetDefault = (typeof audio.reverbWet === 'number') ? audio.reverbWet : 0.40;
+    audio.reverbGain.gain.value = (typeof isStandaloneQuest === 'function' && isStandaloneQuest())
+      ? Math.min(_wetDefault, 0.12)
+      : _wetDefault;
     audio.reverbGain.connect(audio.sfxBus);
 
     // Dual convolvers with environment crossfade:
@@ -48077,8 +48459,9 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
   // voices in this chord share the same simplified routing. Skips chorus
   // (halves oscillator count) and reverb sends (removes convolution input)
   // when the audio thread is under sustained load.
-  const stressed = _audioStressed;
-  freqs.forEach((freq, i) => {
+  const stressed = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
+  const voiceFreqs = (stressed && freqs.length > 2) ? freqs.slice(0, 2) : freqs;
+  voiceFreqs.forEach((freq, i) => {
     // Main oscillator and shared envelope gain
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -48087,7 +48470,7 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     if (rampFreqs && rampFreqs[i] != null && rampFreqs[i] > 0 && rampFreqs[i] !== freq) {
       osc.frequency.exponentialRampToValueAtTime(Math.max(1, rampFreqs[i]), now + (rampTime || dur));
     }
-    const peakVol = vol / 3;
+    const peakVol = vol / Math.max(1, voiceFreqs.length);
     // ADSR: attack ramp, hold at peak, then decay
     gain.gain.setValueAtTime(0.001, now);
     gain.gain.linearRampToValueAtTime(peakVol, now + env.attack);
@@ -48132,10 +48515,12 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
 function playNoiseBurst(duration, volume, startTime, filterFreq, filterQ) {
   if (!audio.ctx) return;
   const ctx = audio.ctx;
-  const bufSize = Math.floor(ctx.sampleRate * duration);
-  const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-  const data = buf.getChannelData(0);
-  for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+  const lean = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
+  if (lean) {
+    duration = Math.min(duration, 0.10);
+    volume *= 0.85;
+  }
+  const buf = _audioSharedNoiseBuffer(ctx, duration);
   const src = ctx.createBufferSource();
   src.buffer = buf;
   const gain = ctx.createGain();
@@ -48155,9 +48540,25 @@ function playNoiseBurst(duration, volume, startTime, filterFreq, filterQ) {
   // Route to dry + reverb (dry routes through spatial panner if active)
   const drySink = audio._spatialSink || audio.dryGain || audio.masterGain;
   gain.connect(drySink);
-  if (audio.convolver) gain.connect(audio.convolver);
-  if (audio._extraReverbSend) gain.connect(audio._extraReverbSend);
-  src.start(startTime);
+  if (!lean && audio.convolver) gain.connect(audio.convolver);
+  if (!lean && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  const maxOffset = Math.max(0, buf.duration - duration - 0.005);
+  const offset = maxOffset > 0 ? Math.random() * maxOffset : 0;
+  src.start(startTime, offset, duration);
+}
+
+let _audioNoiseBuf = null;
+let _audioNoiseBufRate = 0;
+function _audioSharedNoiseBuffer(ctx, minDuration) {
+  const needDur = Math.max(0.5, minDuration + 0.05);
+  if (!_audioNoiseBuf || _audioNoiseBufRate !== ctx.sampleRate || _audioNoiseBuf.duration < needDur) {
+    const len = Math.ceil(ctx.sampleRate * Math.max(1.0, needDur));
+    _audioNoiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    _audioNoiseBufRate = ctx.sampleRate;
+    const data = _audioNoiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+  }
+  return _audioNoiseBuf;
 }
 
 // ============================================================
@@ -53252,6 +53653,11 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
   const dur = Math.max(0.003, layer.duration);
   const filterType = layer.filterType || 'lowpass';
   const startTime = ctx.currentTime + atOffsetSec;
+  if (typeof _audioLeanMode === 'function' && _audioLeanMode()) {
+    playNoiseBurst(Math.min(dur, 0.10), (layer.volume || 0.1) * volMul * 0.85,
+      startTime, layer.filterFreq || 2200, Math.min(layer.filterQ || 0.7, 0.8));
+    return;
+  }
   // Lowpass + standard envelope: route through the existing playNoiseBurst
   // (caps Q, handles dry+convolver routing). All other filter types and
   // reverseEnvelope take the custom path below.
@@ -53317,11 +53723,22 @@ function _playSoundFromLabRecipe(type) {
   const recipe = audio.labRecipes[type];
   if (!recipe || !Array.isArray(recipe.layers)) return false;
   const recipeGain = (typeof recipe.recipeGain === 'number') ? recipe.recipeGain : 1.0;
+  const leanRecipe = !!(typeof _audioLeanMode === 'function' && _audioLeanMode() && _AUDIO_LEAN_RECIPE_TYPES[type]);
+  let leanTri = 0, leanNoise = 0;
   for (const layer of recipe.layers) {
     if (typeof layer.chance === 'number' && layer.chance < 1 && Math.random() > layer.chance) continue;
+    if (leanRecipe) {
+      if (layer.kind === 'tri') {
+        if (leanTri >= 1) continue;
+        leanTri++;
+      } else if (layer.kind === 'noise') {
+        if (leanNoise >= 1) continue;
+        leanNoise++;
+      }
+    }
     const baseOffset = layer.startOffset || 0;
-    const count = Math.max(1, Math.floor(layer.count || 1));
-    const spacing = layer.spacing || 0;
+    const count = leanRecipe ? 1 : Math.max(1, Math.floor(layer.count || 1));
+    const spacing = leanRecipe ? 0 : (layer.spacing || 0);
     const spacingVar = layer.spacingVar || 0;
     const countDecay = layer.countDecay || 0;
     let cursor = 0;
@@ -53545,6 +53962,22 @@ const _SOUND_MIN_GAP = {
   hit:             0.025,
   damage:          0.040,
   damage_shield:   0.040,
+  siphon_drain:    0.080,
+  siphon_hit:      0.090,
+  stun:            0.080,
+};
+const _SOUND_MIN_GAP_VR = {
+  fire_minigun:    0.075,
+  fire_hitscan:    0.085,
+  fire_spread:     0.100,
+  fire_projectile: 0.110,
+  fire_salvo:      0.120,
+  hit:             0.090,
+  damage:          0.130,
+  damage_shield:   0.130,
+  siphon_drain:    0.120,
+  siphon_hit:      0.140,
+  stun:            0.120,
 };
 const _lastSoundTime = {};
 
@@ -53565,37 +53998,96 @@ const _AUDIO_SKIPPABLE = {
   rocket_salvo: 1, tracker_rockets: 1, sonar_pulse: 1,
   fire_arc_wave: 1, fire_buckshot: 1, fire_leadwall: 1,
   laser_core: 1, blaster_power: 1, plasma_railgun: 1,
+  siphon_drain: 1, siphon_hit: 1, stun: 1,
 };
+const _AUDIO_LEAN_RECIPE_TYPES = {
+  fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
+  fire_railgun: 1, fire_salvo: 1, fire_burn: 1,
+  hit: 1, damage: 1, damage_shield: 1,
+  siphon_drain: 1, siphon_hit: 1, stun: 1,
+  sonar_ping_1: 1, sonar_ping_2: 1, sonar_ping_3: 1,
+};
+
+function _audioIsQuestVR() {
+  return (typeof isXRPresenting === 'function' && isXRPresenting()) &&
+         (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
+}
+
+function _audioQuestCombatMode() {
+  return _audioIsQuestVR() &&
+         (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup'));
+}
+
+function _audioLeanMode() {
+  return _audioQuestCombatMode() ||
+         _audioStressed ||
+         (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+}
+
+function _audioVoiceBudget() {
+  if (_audioIsQuestVR()) {
+    const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 1;
+    if (tier >= 3) return 5;
+    if (tier >= 2) return 6;
+    return 8;
+  }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return 10;
+  return _AUDIO_VOICE_BUDGET;
+}
+
+function _soundMinGap(type) {
+  const base = _SOUND_MIN_GAP[type] || 0;
+  if (!_audioIsQuestVR()) return base;
+  return Math.max(base, _SOUND_MIN_GAP_VR[type] || 0);
+}
+
+function _audioPruneRecentVoices(now) {
+  // Sliding-window voice budget: drop oldest stamps that fell out the back.
+  while (_audioRecentVoices.length && (now - _audioRecentVoices[0]) > _AUDIO_VOICE_WINDOW) {
+    _audioRecentVoices.shift();
+  }
+}
+
+function _audioUpdateStress(count, budget) {
+  const stressOn  = budget * _AUDIO_STRESS_RATIO;
+  const stressOff = budget * (_AUDIO_STRESS_RATIO - 0.2);
+  if (_audioQuestCombatMode() ||
+      (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
+    _audioStressed = true;
+  } else if (!_audioStressed && count >= stressOn) _audioStressed = true;
+  else if (_audioStressed && count <= stressOff) _audioStressed = false;
+}
+
+function _audioPeekSoundAllowed(type) {
+  if (!audio.initialized || !audio.ctx) return false;
+  const t = audio.ctx.currentTime;
+  _audioPruneRecentVoices(t);
+  const budget = _audioVoiceBudget();
+  _audioUpdateStress(_audioRecentVoices.length, budget);
+  const gap = _soundMinGap(type);
+  if (gap) {
+    const last = _lastSoundTime[type];
+    if (last !== undefined && t - last < gap) return false;
+  }
+  // Over-budget skip for cosmetic sounds. Critical SFX always play.
+  if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) return false;
+  return true;
+}
+
+function _audioReserveSound(type) {
+  if (!_audioPeekSoundAllowed(type)) return false;
+  const t = audio.ctx.currentTime;
+  const gap = _soundMinGap(type);
+  if (gap) _lastSoundTime[type] = t;
+  _audioRecentVoices.push(t);
+  _audioUpdateStress(_audioRecentVoices.length, _audioVoiceBudget());
+  return true;
+}
 
 function playSound(type) {
   if (!audio.initialized || !audio.ctx) return;
   resumeAudio();
-  const _ctxT = audio.ctx.currentTime;
-  // Sliding-window voice budget: drop oldest stamps that fell out the back.
-  while (_audioRecentVoices.length && (_ctxT - _audioRecentVoices[0]) > _AUDIO_VOICE_WINDOW) {
-    _audioRecentVoices.shift();
-  }
-  // Over-budget skip for cosmetic sounds. Critical SFX always play.
-  if (_audioRecentVoices.length >= _AUDIO_VOICE_BUDGET && _AUDIO_SKIPPABLE[type]) {
-    return;
-  }
-  _audioRecentVoices.push(_ctxT);
-  const stressOn  = _AUDIO_VOICE_BUDGET * _AUDIO_STRESS_RATIO;       // ~11
-  const stressOff = _AUDIO_VOICE_BUDGET * (_AUDIO_STRESS_RATIO - 0.2); // ~8
-  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
-    _audioStressed = true;
-  } else if (!_audioStressed && _audioRecentVoices.length >= stressOn) _audioStressed = true;
-  else if (_audioStressed && _audioRecentVoices.length <= stressOff) _audioStressed = false;
-  // Rate-limit per type. ctx.currentTime is monotonic and tracks audio-thread
-  // time, which is what we actually want here (real time can drift if the
-  // tab loses focus).
-  const gap = _SOUND_MIN_GAP[type];
-  if (gap) {
-    const t = audio.ctx.currentTime;
-    const last = _lastSoundTime[type] || 0;
-    if (t - last < gap) return;
-    _lastSoundTime[type] = t;
-  }
+  if (!_audioReserveSound(type)) return;
   _playSoundFromLabRecipe(type);
 }
 
@@ -53654,7 +54146,7 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     // impulse response per active voice ; equalpower is just two gain factors.
     // 10-100x cheaper per voice on the audio thread. Lose precise 3D
     // localization, keep L/R stereo placement.
-    panner.panningModel = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) ? 'equalpower' : 'HRTF';
+    panner.panningModel = (typeof _audioLeanMode === 'function' && _audioLeanMode()) ? 'equalpower' : 'HRTF';
     panner.distanceModel = 'inverse';
     // Optional range override: some sounds (titan core activation) should carry farther.
     // refDistance = how close before attenuation begins; higher = louder at distance.
@@ -53709,7 +54201,8 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     audio._spatialSink = null;
     // Return to pool after the sound tail has played out. 4s is well past the
     // longest sfx envelope; keeps the pool saturated under rapid fire.
-    setTimeout(() => { _releaseSpatialTriple(triple); }, 4000);
+    setTimeout(() => { _releaseSpatialTriple(triple); },
+      (typeof _audioLeanMode === 'function' && _audioLeanMode()) ? 1200 : 4000);
   } catch (e) {
     audio._spatialSink = null;
     _releaseSpatialTriple(triple);
@@ -53892,7 +54385,8 @@ function _playSpatialSound51(type, worldPos, opts) {
     playSound(type);
     audio._spatialSink = null;
 
-    setTimeout(() => { _releaseSpatial51(triple); }, 4000);
+    setTimeout(() => { _releaseSpatial51(triple); },
+      (typeof _audioLeanMode === 'function' && _audioLeanMode()) ? 1200 : 4000);
   } catch (e) {
     audio._spatialSink = null;
     _releaseSpatial51(triple);
@@ -53903,6 +54397,7 @@ function _playSpatialSound51(type, worldPos, opts) {
 // (v8_2a) Public spatial-sound entry. Dispatches to the 5.1 path when
 // the system has a multi-channel destination, otherwise the HRTF path.
 function playSpatialSound(type, worldPos, opts) {
+  if (typeof _audioPeekSoundAllowed === 'function' && !_audioPeekSoundAllowed(type)) return;
   if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
   return _playSpatialSoundHRTF(type, worldPos, opts);
 }
@@ -55424,10 +55919,11 @@ playerTakeDamage = function(amount, attacker, projectile) {
   const shieldBefore = player.shield || 0;
   _origPlayerTakeDamage(amount, attacker, projectile);
   const shieldAfter = player.shield || 0;
-  // Shield absorbed all or part of this hit => crystalline crack
-  if (shieldBefore > 0) playSound('damage_shield');
-  // Shield ran out (or was already out) and armor took the overflow => dissonance
-  if (shieldAfter <= 0 && shieldBefore < amount + 0.001) playSound('damage');
+  // Play one impact identity per damage event. A shield-break overflow used to
+  // stack damage_shield and damage on the same hit, which is rough on Quest.
+  const hullTookDamage = shieldAfter <= 0 && shieldBefore < amount + 0.001;
+  if (hullTookDamage) playSound('damage');
+  else if (shieldBefore > 0) playSound('damage_shield');
 };
 
 const _origPlayerDie = playerDie;
@@ -55850,14 +56346,31 @@ renderer.setAnimationLoop(gameLoop);
     return bgWorker;
   }
   document.addEventListener('visibilitychange', () => {
-    const inXR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
-    if (inXR) return;            // XR overrides visibility ; leave it alone
+    const inXR = (typeof _xrLifecycleActive === 'function')
+      ? _xrLifecycleActive()
+      : !!(renderer && renderer.xr && renderer.xr.isPresenting);
+    if (inXR) {
+      bgActive = false;
+      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+      return;                    // XR overrides visibility ; leave it alone
+    }
     if (document.hidden) {
       // Hand off from rAF to the worker tick.
       try { renderer.setAnimationLoop(null); } catch (_) {}
       bgActive = true;
       const w = _ensureWorker();
       if (w) w.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) });
+      setTimeout(() => {
+        const xrLate = (typeof _xrLifecycleActive === 'function')
+          ? _xrLifecycleActive()
+          : !!(renderer && renderer.xr && renderer.xr.isPresenting);
+        if (!xrLate) return;
+        bgActive = false;
+        if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+        try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+        console.log('[v26VR] restored animation loop after XR visibility race');
+      }, 350);
     } else {
       // Hand back to rAF ; gameLoop will run at refresh rate again.
       bgActive = false;
