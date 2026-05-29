@@ -53843,6 +53843,22 @@ const _SOUND_MIN_GAP = {
   hit:             0.025,
   damage:          0.040,
   damage_shield:   0.040,
+  siphon_drain:    0.080,
+  siphon_hit:      0.090,
+  stun:            0.080,
+};
+const _SOUND_MIN_GAP_VR = {
+  fire_minigun:    0.060,
+  fire_hitscan:    0.070,
+  fire_spread:     0.100,
+  fire_projectile: 0.110,
+  fire_salvo:      0.120,
+  hit:             0.070,
+  damage:          0.100,
+  damage_shield:   0.100,
+  siphon_drain:    0.120,
+  siphon_hit:      0.140,
+  stun:            0.120,
 };
 const _lastSoundTime = {};
 
@@ -53863,37 +53879,77 @@ const _AUDIO_SKIPPABLE = {
   rocket_salvo: 1, tracker_rockets: 1, sonar_pulse: 1,
   fire_arc_wave: 1, fire_buckshot: 1, fire_leadwall: 1,
   laser_core: 1, blaster_power: 1, plasma_railgun: 1,
+  siphon_drain: 1, siphon_hit: 1, stun: 1,
 };
+
+function _audioIsQuestVR() {
+  return (typeof isXRPresenting === 'function' && isXRPresenting()) &&
+         (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
+}
+
+function _audioVoiceBudget() {
+  if (_audioIsQuestVR()) {
+    const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 1;
+    if (tier >= 3) return 6;
+    if (tier >= 2) return 8;
+    return 10;
+  }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return 10;
+  return _AUDIO_VOICE_BUDGET;
+}
+
+function _soundMinGap(type) {
+  const base = _SOUND_MIN_GAP[type] || 0;
+  if (!_audioIsQuestVR()) return base;
+  return Math.max(base, _SOUND_MIN_GAP_VR[type] || 0);
+}
+
+function _audioPruneRecentVoices(now) {
+  // Sliding-window voice budget: drop oldest stamps that fell out the back.
+  while (_audioRecentVoices.length && (now - _audioRecentVoices[0]) > _AUDIO_VOICE_WINDOW) {
+    _audioRecentVoices.shift();
+  }
+}
+
+function _audioUpdateStress(count, budget) {
+  const stressOn  = budget * _AUDIO_STRESS_RATIO;
+  const stressOff = budget * (_AUDIO_STRESS_RATIO - 0.2);
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
+    _audioStressed = true;
+  } else if (!_audioStressed && count >= stressOn) _audioStressed = true;
+  else if (_audioStressed && count <= stressOff) _audioStressed = false;
+}
+
+function _audioPeekSoundAllowed(type) {
+  if (!audio.initialized || !audio.ctx) return false;
+  const t = audio.ctx.currentTime;
+  _audioPruneRecentVoices(t);
+  const budget = _audioVoiceBudget();
+  _audioUpdateStress(_audioRecentVoices.length, budget);
+  const gap = _soundMinGap(type);
+  if (gap) {
+    const last = _lastSoundTime[type];
+    if (last !== undefined && t - last < gap) return false;
+  }
+  // Over-budget skip for cosmetic sounds. Critical SFX always play.
+  if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) return false;
+  return true;
+}
+
+function _audioReserveSound(type) {
+  if (!_audioPeekSoundAllowed(type)) return false;
+  const t = audio.ctx.currentTime;
+  const gap = _soundMinGap(type);
+  if (gap) _lastSoundTime[type] = t;
+  _audioRecentVoices.push(t);
+  _audioUpdateStress(_audioRecentVoices.length, _audioVoiceBudget());
+  return true;
+}
 
 function playSound(type) {
   if (!audio.initialized || !audio.ctx) return;
   resumeAudio();
-  const _ctxT = audio.ctx.currentTime;
-  // Sliding-window voice budget: drop oldest stamps that fell out the back.
-  while (_audioRecentVoices.length && (_ctxT - _audioRecentVoices[0]) > _AUDIO_VOICE_WINDOW) {
-    _audioRecentVoices.shift();
-  }
-  // Over-budget skip for cosmetic sounds. Critical SFX always play.
-  if (_audioRecentVoices.length >= _AUDIO_VOICE_BUDGET && _AUDIO_SKIPPABLE[type]) {
-    return;
-  }
-  _audioRecentVoices.push(_ctxT);
-  const stressOn  = _AUDIO_VOICE_BUDGET * _AUDIO_STRESS_RATIO;       // ~11
-  const stressOff = _AUDIO_VOICE_BUDGET * (_AUDIO_STRESS_RATIO - 0.2); // ~8
-  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
-    _audioStressed = true;
-  } else if (!_audioStressed && _audioRecentVoices.length >= stressOn) _audioStressed = true;
-  else if (_audioStressed && _audioRecentVoices.length <= stressOff) _audioStressed = false;
-  // Rate-limit per type. ctx.currentTime is monotonic and tracks audio-thread
-  // time, which is what we actually want here (real time can drift if the
-  // tab loses focus).
-  const gap = _SOUND_MIN_GAP[type];
-  if (gap) {
-    const t = audio.ctx.currentTime;
-    const last = _lastSoundTime[type] || 0;
-    if (t - last < gap) return;
-    _lastSoundTime[type] = t;
-  }
+  if (!_audioReserveSound(type)) return;
   _playSoundFromLabRecipe(type);
 }
 
@@ -54201,6 +54257,7 @@ function _playSpatialSound51(type, worldPos, opts) {
 // (v8_2a) Public spatial-sound entry. Dispatches to the 5.1 path when
 // the system has a multi-channel destination, otherwise the HRTF path.
 function playSpatialSound(type, worldPos, opts) {
+  if (typeof _audioPeekSoundAllowed === 'function' && !_audioPeekSoundAllowed(type)) return;
   if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
   return _playSpatialSoundHRTF(type, worldPos, opts);
 }
@@ -55722,10 +55779,11 @@ playerTakeDamage = function(amount, attacker, projectile) {
   const shieldBefore = player.shield || 0;
   _origPlayerTakeDamage(amount, attacker, projectile);
   const shieldAfter = player.shield || 0;
-  // Shield absorbed all or part of this hit => crystalline crack
-  if (shieldBefore > 0) playSound('damage_shield');
-  // Shield ran out (or was already out) and armor took the overflow => dissonance
-  if (shieldAfter <= 0 && shieldBefore < amount + 0.001) playSound('damage');
+  // Play one impact identity per damage event. A shield-break overflow used to
+  // stack damage_shield and damage on the same hit, which is rough on Quest.
+  const hullTookDamage = shieldAfter <= 0 && shieldBefore < amount + 0.001;
+  if (hullTookDamage) playSound('damage');
+  else if (shieldBefore > 0) playSound('damage_shield');
 };
 
 const _origPlayerDie = playerDie;
