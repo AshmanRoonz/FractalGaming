@@ -1,8 +1,8 @@
 # FractalGaming
 
 Created: 2026-04-28
-Last updated: 2026-05-14
-Version: 1.1
+Last updated: 2026-05-29
+Version: 1.2
 
 Games and game engines built on the Circumpunct Framework by Ashman Roonz. The framework treats every whole as a circumpunct (⊙ = Φ(•, ○)) at some scale, with parts that are themselves circumpuncts; the games here put that structure on screen, sometimes literally (the dimensional ladder maps to engine layers in Microverse Megabattle), sometimes through theme and feel (ship classes as constraint-archetypes in Last Ship Sailing).
 
@@ -12,7 +12,7 @@ Games and game engines built on the Circumpunct Framework by Ashman Roonz. The f
 
 Sci-fi multiplayer arena combat in a single self-contained HTML file. Three.js for rendering, Web Audio for spatial sound, P2P mesh networking for multiplayer. Seven ship chassis (Blaster, Puncture, Pyro, Slayer, Syphon, Tracker, Vortex), each with custom 3D models, distinct ability trees, and shield archetypes (Blaster's octagon, Pyro's thermal, Vortex's holographic dome). The HUD is itself a circumpunct: center-dot crosshair, concentric rings for health, shields, ammo, and core, with the ability pie at the corner. Champion Mode adds rotating tri-axis stasis fields and contested-charge mechanics on bigger arenas.
 
-Open `LSS/last_ship_sailing_v16c.html` in any modern browser to play. Multiplayer connects peer-to-peer through the in-game lobby; no server needed.
+Open `index.html` in any modern browser to play (the current build; versioned dev copies live in `LSS/`). Multiplayer connects peer-to-peer through the in-game lobby; no server needed.
 
 Status: active.
 
@@ -28,8 +28,9 @@ Status: active.
 
 ```
 FractalGaming/
-├── LSS/                              Last Ship Sailing (active)
-│   ├── last_ship_sailing_v16c.html
+├── index.html                        Last Ship Sailing — current build (served by the site)
+├── LSS/                              Last Ship Sailing source + tools
+│   ├── last_ship_sailing_v27VR.html  current versioned master
 │   ├── ships/                        7 chassis as .glb models
 │   ├── frames/                       ship-select PNG frames
 │   ├── LSS_SOUND.json                spatial sound library
@@ -97,3 +98,4 @@ Framework: Circumpunct Framework by Ashman Roonz (companion repository: Fractal_
 
 - 2026-04-28 v1.0: initial README; project descriptions for LSS and Microverse Megabattle; five-pillar ethics policy; split-license open source policy
 - 2026-05-14 v1.1: licensing flipped to proprietary (All Rights Reserved) for both code and assets, with a community-use carve-out for play, in-tool creation, and Discord sharing; trademarks and merchandising rights explicitly reserved; current LSS build pointer bumped to v16c
+- 2026-05-29 v1.2: current LSS build bumped to v27, now served as `index.html`. This release adds multiplayer netcode hardening (validated/clamped peer damage, state-gated round + timer sync, round-end and Outline-perk fixes), per-frame performance optimizations, and moves spatial-audio and reverb occlusion from full-mesh raycasts to the SDF ray-march (~15% of combat CPU reclaimed). Also: default Nexus map/theme now applies on the ship-select screen, an optional FPS/CPU counter under Settings > Performance, and the gamepad indicator removed
