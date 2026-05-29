@@ -10300,6 +10300,33 @@ const xrControllers = { left: null, right: null, leftSrc: null, rightSrc: null }
 let _xrCachedCameraVR = null;
 let _xrLobbyPressArmed = false;  // (v26VR) Set on sessionstart ; first controller press in lobby triggers Solo + audio unlock.
 let _xrTrustedMenuSuppressUntil = 0;
+let _xrSessionLifecycleActive = false;
+
+function _xrLifecycleActive() {
+  return !!(
+    (renderer && renderer.xr && renderer.xr.isPresenting) ||
+    _xrSessionLifecycleActive ||
+    (typeof document !== 'undefined' && document.body && document.body.classList.contains('vr-active'))
+  );
+}
+
+function _xrEnsureAnimationLoop(reason) {
+  try {
+    if (typeof gameLoop === 'function') renderer.setAnimationLoop(gameLoop);
+    console.log('[v26VR] animation loop ensured:', reason || 'xr');
+  } catch (_) {}
+}
+
+function _xrQuestLaunchContext() {
+  return !!(
+    typeof isStandaloneQuest === 'function' && isStandaloneQuest() &&
+    (
+      (typeof isXRPresenting === 'function' && isXRPresenting()) ||
+      (renderer && renderer.xr && renderer.xr.enabled) ||
+      _xrLifecycleActive()
+    )
+  );
+}
 
 function _xrUpdateInputSources() {
   const session = renderer.xr.getSession && renderer.xr.getSession();
@@ -10386,6 +10413,8 @@ renderer.xr.addEventListener('sessionstart', () => {
       'presenting=' + renderer.xr.isPresenting,
       'gameState=' + (typeof game !== 'undefined' ? game.state : 'n/a'));
   } catch (_) {}
+  _xrSessionLifecycleActive = true;
+  _xrEnsureAnimationLoop('sessionstart');
   document.body.classList.add('vr-active');
   // Pending auto-resume already fired (user manually clicked Enter VR);
   // suppress the countdown so it doesn't double-fire on session end.
@@ -10455,6 +10484,7 @@ renderer.xr.addEventListener('sessionend', () => {
   // transient context drop right after the session end doesn't auto-reload
   // the page (which lands the user at the cold-boot lobby).
   try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
+  _xrSessionLifecycleActive = false;
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
@@ -10481,6 +10511,7 @@ renderer.xr.addEventListener('sessionend', () => {
   try {
     renderer.setRenderTarget(null);
     window.dispatchEvent(new Event('resize'));
+    _xrEnsureAnimationLoop('sessionend-flat');
   } catch (e) {
     console.warn('[v11b VR] flat renderer restore failed:', e);
   }
@@ -10510,6 +10541,7 @@ renderer.xr.addEventListener('sessionend', () => {
   async function onSessionStarted(session) {
     session.addEventListener('end', onSessionEnded);
     btn.textContent = 'STARTING...';
+    _xrSessionLifecycleActive = true;
     try {
       // Configure WebXR right before binding the session, so flat mode
       // never has these flags flipped on.
@@ -10533,6 +10565,7 @@ renderer.xr.addEventListener('sessionend', () => {
       btn.textContent = 'VR INIT FAILED';
       btn.title = String((e && e.message) || e);
       renderer.xr.enabled = false;
+      _xrSessionLifecycleActive = false;
       try { session.end(); } catch (_) {}
       currentSession = null;
     }
@@ -10541,16 +10574,19 @@ renderer.xr.addEventListener('sessionend', () => {
   function onSessionEnded() {
     if (currentSession) currentSession.removeEventListener('end', onSessionEnded);
     btn.textContent = 'ENTER VR';
+    _xrSessionLifecycleActive = false;
     currentSession = null;
   }
 
   btn.addEventListener('click', () => {
     if (currentSession === null) {
+      _xrSessionLifecycleActive = true;
       navigator.xr.requestSession('immersive-vr', sessionInit)
         .then(onSessionStarted)
         .catch((e) => {
           btn.textContent = 'VR FAILED';
           btn.title = String((e && e.message) || e);
+          _xrSessionLifecycleActive = false;
           console.warn('XR session request failed:', e);
         });
     } else {
@@ -17600,8 +17636,7 @@ async function warmupCombatShaders() {
   if (!(typeof renderer !== 'undefined' && renderer) ||
       !(typeof scene !== 'undefined' && scene) ||
       !(typeof camera !== 'undefined' && camera)) return;
-  if (typeof isStandaloneQuest === 'function' && isStandaloneQuest() &&
-      typeof isXRPresenting === 'function' && isXRPresenting()) {
+  if (typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) {
     _shaderWarmup.done = true;
     console.log('[warmup] skipped heavy shader warmup on standalone Quest VR');
     return;
@@ -26586,6 +26621,26 @@ function commitLoadout(key) {
     try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   }
 
+  const _launchSoloAfterCinematic = () => {
+    if (_countdownActive) return;
+    _lssRunCinematicThen(() => {
+      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+      launchCountdown(LSS.SHORT_COUNTDOWN);
+    });
+  };
+  let _questWarmupWatchdog = null;
+  if (!net.active && typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) {
+    _questWarmupWatchdog = setTimeout(() => {
+      if (net.active || _countdownActive) return;
+      if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
+      if (game.state !== 'warmup' || !player.loadoutKey) return;
+      console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff');
+      try { _markLocalWarmupReady(); } catch (_) {}
+      try { hideLoadingOverlay(); } catch (_) {}
+      _launchSoloAfterCinematic();
+    }, 1800);
+  }
+
   // Pre-compile shader programs for combat-effect materials. Hook the
   // promise so we know when warmup is done and can proceed to the
   // short visible countdown (solo) or the peer-ready handshake (MP).
@@ -26603,6 +26658,7 @@ function commitLoadout(key) {
     _warmupPromise = Promise.resolve();
   }
   _warmupPromise.then(() => {
+    if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     // Local warmup is done ; mark ourselves ready and notify peers.
     _markLocalWarmupReady();
     if (net.active) {
@@ -26620,13 +26676,11 @@ function commitLoadout(key) {
       try { hideLoadingOverlay(); } catch (_) {}
       if (!_countdownActive) {
         // (v20+) Cinematic before the 3-2-1. Solo warmup-success path.
-        _lssRunCinematicThen(() => {
-          try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-          launchCountdown(LSS.SHORT_COUNTDOWN);
-        });
+        _launchSoloAfterCinematic();
       }
     }
   }).catch((e) => {
+    if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     // Warmup failed unexpectedly ; don't strand the player on the
     // loading screen. Fall back to launching anyway ; the first
     // impact will hit a cold shader but at least the match starts.
@@ -26638,10 +26692,7 @@ function commitLoadout(key) {
       checkAllLoadoutsReady();
     } else if (!_countdownActive) {
       // (v20+) Cinematic before the 3-2-1. Solo warmup-failed fallback.
-      _lssRunCinematicThen(() => {
-        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-        launchCountdown(LSS.SHORT_COUNTDOWN);
-      });
+      _launchSoloAfterCinematic();
     }
   });
 }
@@ -56206,14 +56257,31 @@ renderer.setAnimationLoop(gameLoop);
     return bgWorker;
   }
   document.addEventListener('visibilitychange', () => {
-    const inXR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
-    if (inXR) return;            // XR overrides visibility ; leave it alone
+    const inXR = (typeof _xrLifecycleActive === 'function')
+      ? _xrLifecycleActive()
+      : !!(renderer && renderer.xr && renderer.xr.isPresenting);
+    if (inXR) {
+      bgActive = false;
+      if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+      return;                    // XR overrides visibility ; leave it alone
+    }
     if (document.hidden) {
       // Hand off from rAF to the worker tick.
       try { renderer.setAnimationLoop(null); } catch (_) {}
       bgActive = true;
       const w = _ensureWorker();
       if (w) w.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) });
+      setTimeout(() => {
+        const xrLate = (typeof _xrLifecycleActive === 'function')
+          ? _xrLifecycleActive()
+          : !!(renderer && renderer.xr && renderer.xr.isPresenting);
+        if (!xrLate) return;
+        bgActive = false;
+        if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
+        try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+        console.log('[v26VR] restored animation loop after XR visibility race');
+      }, 350);
     } else {
       // Hand back to rAF ; gameLoop will run at refresh rate again.
       bgActive = false;
