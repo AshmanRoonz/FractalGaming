@@ -6579,6 +6579,30 @@ function handleNetEvent(evt, fromPeerId) {
       const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
       const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
       spawnFlameChainVisual(pos, dir, evt.length || 800, evt.team, evt.ownerPeerId, evt.netId);
+    } else if (evt.kind === 'vortex_laser_beam') {
+      // (v27) Peer fired the Vortex Laser ability. Reproduce the local
+      // volumetric beam visual : LayeredFX 'core_beam' on a unit-Y
+      // cylinder positioned at midpoint, oriented along the dir vector,
+      // scaled to (radius, range, radius). Ages out via the existing
+      // 'vortexLaserBeam' fade path in updateEffects.
+      try {
+        const _vlbOrigin = new THREE.Vector3(evt.ox, evt.oy, evt.oz);
+        const _vlbDir    = new THREE.Vector3(evt.dx, evt.dy, evt.dz).normalize();
+        const _vlbRange  = (typeof evt.range  === 'number') ? evt.range  : 2500;
+        const _vlbRadius = (typeof evt.radius === 'number') ? evt.radius :   80;
+        const _vlbLife   = (typeof evt.life   === 'number') ? evt.life   : 0.45;
+        const _vlbMid    = _vlbOrigin.clone().addScaledVector(_vlbDir, _vlbRange * 0.5);
+        const _vlbMat    = _makeFXMaterial('core_beam');
+        if (_vlbMat.uniforms.uPosScale) _vlbMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _vlbRadius);
+        const _vlbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vlbMat);
+        _vlbMesh.position.copy(_vlbMid);
+        _vlbMesh.quaternion.setFromUnitVectors(_mvUp, _vlbDir);
+        _vlbMesh.scale.set(_vlbRadius, _vlbRange, _vlbRadius);
+        _vlbMesh.frustumCulled = false;
+        _vlbMesh.renderOrder = 2;
+        scene.add(_vlbMesh);
+        game.effects.push({ mesh: _vlbMesh, type: 'vortexLaserBeam', age: 0, lifetime: _vlbLife });
+      } catch (e) { console.warn('[v27 net] vortex_laser_beam spawn failed:', e); }
     }
     return;
   }
@@ -6591,6 +6615,35 @@ function handleNetEvent(evt, fromPeerId) {
     const pos = new THREE.Vector3(evt.px, evt.py, evt.pz);
     if (typeof _spawnSlayerCoreStormFX === 'function') {
       _spawnSlayerCoreStormFX(pos, evt.ownerPeerId || fromPeerId);
+    }
+    return;
+  }
+  // (v27) Vortex Mega Laser core activation from a peer. Same shape as
+  // slayer_core_storm : top-level event with ownerPeerId. We create a
+  // peer-side worldEffect that holds the persistent beam mesh, ticked
+  // each frame against the caster's NetworkPlayer pos/quaternion in
+  // the worldEffects tick loop. Self-expires after `duration` so we
+  // don't need an explicit stop packet.
+  if (evt.type === 'vortex_core_beam_start') {
+    const _vcbOwner = evt.ownerPeerId || fromPeerId;
+    // Skip if it's our own broadcast bouncing back.
+    if (_vcbOwner && _vcbOwner !== net.myPeerId) {
+      try {
+        const _vcbDur = (typeof evt.duration === 'number' && evt.duration > 0) ? evt.duration : 4.0;
+        const _vcbMat = _makeFXMaterial('core_beam');
+        if (_vcbMat.uniforms.uPosScale) _vcbMat.uniforms.uPosScale.value = 1.0 / 95;
+        const _vcbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vcbMat);
+        _vcbMesh.frustumCulled = false;
+        _vcbMesh.renderOrder = 2;
+        scene.add(_vcbMesh);
+        game.worldEffects.push({
+          type: 'vortex_core_beam_remote',
+          ownerPeerId: _vcbOwner,
+          mesh: _vcbMesh,
+          timer: _vcbDur,
+          totalDur: _vcbDur,
+        });
+      } catch (e) { console.warn('[v27 net] vortex_core_beam_start spawn failed:', e); }
     }
     return;
   }
@@ -8238,25 +8291,31 @@ const EFFECT_PRESETS = {
     // (v14c) Purple base tint to match LSS.CLASS_COLORS.VORTEX so the
     // Vortex Laser ability and Mega Laser ability beams both read
     // as purple energy beams instead of orange flame plumes.
-    baseColor: '#aa55ff',
+    // (v27) Pushed harder toward Vortex purple identity : deeper base
+    // violet, axial "hot core" tinted lavender instead of pure white,
+    // less white-hot blow-out, layer-3 crackle picks up some purple
+    // saturation instead of reading as bright white streaks.
+    baseColor: '#9933ff',
     fresnel: 0.4,
     brightness: 3.0,
     intensity: 1.0,
     // Subtle taper from base to tip so the beam reads directional.
     axialFalloff:      0.25,
-    axialCoreColor:    '#ffffff',
-    axialCoreStrength: 0.5,
+    axialCoreColor:    '#dccff5',
+    axialCoreStrength: 0.30,
     axialCoreFalloff:  1.4,
     displaceAmount: 0.0,
     displaceFreq:   1.0,
     softEdge:       0.20,
     layers: [
       // Layer 1: ridges for the longitudinal energy striations.
-      { pattern: 5, scale: 2.4, timeRate: 4.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.80 },
+      { pattern: 5, scale: 2.4, timeRate: 4.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.90 },
       // Layer 2: plasma cross-flow as the traveling-pulse stand-in.
-      { pattern: 1, scale: 1.6, timeRate: 3.2, hue: 0.06, alpha: 0.75, blend: 2, sat: 0.85 },
-      // Layer 3: ridges high-freq, screen blend for white-hot crackle.
-      { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.0,  alpha: 0.55, blend: 3, sat: 0.0  },
+      { pattern: 1, scale: 1.6, timeRate: 3.2, hue: 0.92, alpha: 0.80, blend: 2, sat: 0.95 },
+      // Layer 3: ridges high-freq, screen blend ; some saturation so
+      // the high-freq crackle reads as purple-violet sparks instead of
+      // a wash of white-hot streaks across the beam.
+      { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.92, alpha: 0.55, blend: 3, sat: 0.45 },
     ],
   },
   gas_pocket: {
@@ -28782,6 +28841,19 @@ function executeAbility(slot, ability) {
           ex: beamEnd.x, ey: beamEnd.y, ez: beamEnd.z,
           color: LSS.CLASS_COLORS.VORTEX,
         });
+        // (v27) Volumetric beam broadcast. The fire_tracer above gives the
+        // thin muzzle streak ; this carries the fat purple shader cylinder
+        // that the local player sees. Without it peers only saw the
+        // tracer streak and no beam mass.
+        net.sendEvent({
+          type: 'effect_spawn',
+          kind: 'vortex_laser_beam',
+          ox: player.position.x, oy: player.position.y, oz: player.position.z,
+          dx: forward.x, dy: forward.y, dz: forward.z,
+          range: range,
+          radius: BEAM_RADIUS,
+          life: beamLife,
+        });
       }
       // Lightning crackle along the beam path. Six arcs at staggered
       // positions, each with lateral jitter, gives a high-voltage feel
@@ -29645,6 +29717,18 @@ function activateCore() {
     // (v14g) Single sustained 4s beam sound. Plays once at activation
     // and holds for the entire core duration ; no looping / pulsing.
     try { playSound('laser_core_beam'); } catch (_) {}
+    // (v27) Broadcast Mega Laser core activation so peers see the
+    // sustained volumetric beam following the caster. Same shape as
+    // slayer_core_storm : top-level event, ownerPeerId resolves the
+    // caster on the receiver, worldEffect auto-expires on duration.
+    if (net.active && net.sendEvent) {
+      const _mlDur = (player.loadout.core && player.loadout.core.duration) || 4.0;
+      net.sendEvent({
+        type: 'vortex_core_beam_start',
+        ownerPeerId: net.myPeerId,
+        duration: _mlDur,
+      });
+    }
   }
   // PYRO: Mega Flame Chain (massive AoE incendiary, 4500 dmg instant around player; TF2)
   else if (coreName === 'Mega Flame Chain') {
@@ -31749,6 +31833,36 @@ function updateAbilities(dt) {
     // damage zone : if you can see a bolt strike near your ship, you
     // are taking 1800 DPS. The standard expiry path at the bottom of
     // the loop removes the effect when timer hits 0.
+    // (v27) Remote Mega Laser beam tick : follow the caster's NetworkPlayer.
+    // Same transform recipe as the local _vortexCoreBeam render path
+    // (BEAM_RADIUS 95, range 3000). Reads pos + forward from the
+    // NetworkPlayer mesh each frame, no allocations beyond the scratch
+    // forward vector.
+    else if (eff.type === 'vortex_core_beam_remote') {
+      if (!eff.mesh) continue;
+      let np = null;
+      if (eff.ownerPeerId && net.peers && typeof net.peers.get === 'function') {
+        const peer = net.peers.get(eff.ownerPeerId);
+        np = peer && peer.networkPlayer;
+      }
+      if (!np || !np.mesh || !np.alive) {
+        eff.mesh.visible = false;
+      } else {
+        if (!eff._fwd) eff._fwd = new THREE.Vector3();
+        eff._fwd.set(0, 0, -1).applyQuaternion(np.mesh.quaternion);
+        const _vcbRange = 3000;
+        const _vcbRadius = 95;
+        const _vcbMid = np.position.clone().addScaledVector(eff._fwd, _vcbRange * 0.5);
+        eff.mesh.position.copy(_vcbMid);
+        eff.mesh.quaternion.setFromUnitVectors(_mvUp, eff._fwd);
+        eff.mesh.scale.set(_vcbRadius, _vcbRange, _vcbRadius);
+        eff.mesh.visible = true;
+        if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
+          const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
+          eff.mesh.material.uniforms.uIntensity.value = breath;
+        }
+      }
+    }
     else if (eff.type === 'slayer_core_damage_fx') {
       let casterPos = eff.position;
       if (eff.ownerPeerId) {
@@ -31822,6 +31936,12 @@ function updateAbilities(dt) {
 
     // Remove expired effects
     if (eff.timer <= 0) {
+      if (eff.type === 'vortex_core_beam_remote' && eff.mesh) {
+        try { scene.remove(eff.mesh); } catch (_) {}
+        try { if (eff.mesh.geometry && eff.mesh.geometry !== _getVortexCoreBeamGeometry()) eff.mesh.geometry.dispose(); } catch (_) {}
+        try { if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose(); } catch (_) {}
+        eff.mesh = null;
+      }
       if (eff.mesh && eff.mesh.parent) { scene.remove(eff.mesh); eff.mesh.geometry.dispose(); eff.mesh.material.dispose(); }
       if (eff.coreMesh && eff.coreMesh.parent) { scene.remove(eff.coreMesh); eff.coreMesh.geometry.dispose(); eff.coreMesh.material.dispose(); }
       if (eff.glow && eff.glow.parent) { scene.remove(eff.glow); eff.glow.geometry.dispose(); eff.glow.material.dispose(); }
@@ -57731,9 +57851,4 @@ window.lssGmaps = {
 if (window.LSS_ENGINE_READY) {
   _bootLSS();
 } else {
-  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
-}
-
-</script>
-</body>
-</html>
+  window.addEventListener('lss-engine-ready', _bootLSS
