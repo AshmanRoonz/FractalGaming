@@ -24,17 +24,6 @@ canvas { display: block; }
 .lss-title { font-family: 'Orbitron', 'Rajdhani', sans-serif; font-weight: 700; }
 
 #hud { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
-/* (perf) Optional FPS readout, top-right. Hidden by default; shown via input.showFps. */
-#fps-counter {
-  position: fixed; top: 6px; right: 14px; z-index: 11; pointer-events: none;
-  display: none;
-  font-family: 'Orbitron', 'Rajdhani', monospace;
-  font-size: 13px; font-weight: 700; letter-spacing: 0.06em;
-  color: rgba(120,230,255,0.92);
-  text-shadow: 0 0 6px rgba(0,180,255,0.55);
-  padding: 2px 7px; border-radius: 4px;
-  background: rgba(4,10,24,0.45);
-}
 
 /* Per-titan cockpit frame overlay. Full-viewport PNG with alpha, cutout in the middle.
    z-index 9 sits above the Three.js canvas (default stacking) but below the HUD (z:10),
@@ -101,6 +90,7 @@ body.vr-active #gun-layer,
 body.vr-active #circumpunct-hud,
 body.vr-active #hud,
 body.vr-active #ability-pie,
+body.vr-active #gamepad-indicator,
 body.vr-active .hit-marker {
   display: none !important;
 }
@@ -856,6 +846,12 @@ body.vr-active #fps-counter { display: none !important; }
 }
 
 #speed-display { display: none; }
+
+/* Gamepad indicator */
+#gamepad-indicator {
+  position: fixed; top: 20px; right: 20px; z-index: 10; pointer-events: none;
+  color: rgba(100,200,255,0.6); font-size: 9px; display: none;
+}
 
 /* Settings overlay */
 #settings-overlay {
@@ -1727,7 +1723,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   <div id="fps-counter">-- fps</div>
 
 <div id="hud">
-  <div id="fps-counter"></div>
   <canvas id="health-canvas" width="500" height="70"></canvas>
 
   <div id="ship-status">
@@ -1761,6 +1756,7 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   <div id="kill-feed"></div>
   <canvas id="minimap"></canvas>
   <div id="speed-display">0 m/s</div>
+  <div id="gamepad-indicator">GAMEPAD</div>
   <div id="doomed-warning">! HULL CRITICAL !</div>
   <div id="doomed-vignette"></div>
   <div id="enemy-lockon-warning">
@@ -3099,11 +3095,7 @@ const input = {
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
   vrStripFx: false,
-<<<<<<< HEAD:lss.html
   // (v26VR) Top-right FPS readout toggle. Persisted ; updated each gameLoop tick.
-=======
-  // (perf) Show the on-screen FPS counter (top-right). Toggled in Settings > Performance.
->>>>>>> 02d8cbff822226f548185e1be860de4a11b910f5:index.html
   showFps: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
@@ -4915,12 +4907,7 @@ function buildMapSelector() {
   if (typeof _updateSkyUI === 'function')   _updateSkyUI();
 
   // Render the window contents for the currently-selected map.
-  // (fix) selectMap() early-returns when the key already equals
-  // game.selectedMap, which on first entry would skip applying the map's
-  // defaultTheme and marking the active carousel dot. Null-first forces a full
-  // apply; silent=true so we don't broadcast a map_change just from opening the
-  // panel (matches the original no-broadcast-on-entry behavior).
-  { const _initMapKey = game.selectedMap; game.selectedMap = null; selectMap(_initMapKey, true); }
+  selectMap(game.selectedMap);
   // (v14c) Sync disabled state after rebinding ; buildMapSelector can run
   // mid-countdown (e.g. race-mode toggle) and the freshly-cloned buttons
   // would otherwise render fully clickable.
@@ -4932,9 +4919,9 @@ function buildMapSelector() {
 // (v26) Names of map default themes. selectMap() auto-applies the new map's
 // defaultTheme when the active preset is empty or is itself a map default
 // (i.e., the user hasn't overridden with a non-map preset like Cyberpunk).
-const MAP_DEFAULT_THEME_NAMES = new Set(['Nexus','TheSpine','TheInfinity','TheTower','TheArc','TheOctahedron','ThePentagon','TheGyre','TheCross']);
+const MAP_DEFAULT_THEME_NAMES = new Set(['Nexus','TheSpine','TheInfinity','TheTower','TheArc','Octahedron','ThePentagon','TheGyre','TheCross']);
 
-function selectMap(mapKey, silent) {
+function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
   // (v6.7) Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
@@ -4965,7 +4952,7 @@ function selectMap(mapKey, silent) {
   const dots = document.querySelectorAll('#map-indicator .map-dot');
   dots.forEach(d => d.classList.toggle('active', d.dataset.key === mapKey));
 
-  if (!silent && net.active && net.sendEvent) {
+  if (net.active && net.sendEvent) {
     const ov = game.pendingGmapsOverlay;
     net.sendEvent({
       type: 'map_change',
@@ -5931,10 +5918,6 @@ class NetworkPlayer {
     // (v11b) Slayer Absorption dome / ring ; same dispose pattern.
     dispose(this._swordBlockMesh);    this._swordBlockMesh = null;
     dispose(this._swordBlockRing);    this._swordBlockRing = null;
-    // (B6) Mark dead and drop the mesh ref so the per-frame animation loop
-    // (for np of net.networkPlayers) skips this orphan if it ever lingers.
-    this.alive = false;
-    this.mesh = null;
   }
 }
 
@@ -5951,15 +5934,6 @@ function updateNetworkPlayer(peerId, data) {
     if (eidx >= 0) game.entities.splice(eidx, 1);
   }
 
-  // (B5) Validate the peer-supplied loadout BEFORE constructing/registering.
-  // An unknown loadoutKey (version skew or corrupted/hostile packet) makes the
-  // ctor bail at line ~5543 before peerId/mesh/team are set ; pushing that
-  // half-built object into game.entities crashes the per-frame loop or skews
-  // round-end team counts.
-  if (!LOADOUTS[data.loadoutKey]) {
-    console.warn('[net] ignoring NetworkPlayer with unknown loadoutKey:', data.loadoutKey);
-    return;
-  }
   // Create new NetworkPlayer
   const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B);
   peer.networkPlayer = np;
@@ -6103,52 +6077,42 @@ function applyGameSyncConsensus() {
   let crMax = (game.currentRound  | 0);
   let saMax = (game.scoreA        | 0);
   let sbMax = (game.scoreB        | 0);
-  // (B2 fix) Track timer-average samples separately from the score/round
-  // merge. Forward-only fields (cr/sa/sb) merge by max across ALL fresh
-  // peers regardless of state ; continuous timers only average across peers
-  // in the SAME game.state (tn), because blending a roundEnd peer's timers
-  // against a playing peer's made the countdowns oscillate at boundaries.
-  let tn = 1;
   for (const [pid, snap] of peerMap) {
     if (!snap) continue;
     if ((now - (snap.lastUpdate || 0)) > STALE) continue;
     n++;
-    if ((snap.cr | 0) > crMax) crMax = (snap.cr | 0);
-    if ((snap.sa | 0) > saMax) saMax = (snap.sa | 0);
-    if ((snap.sb | 0) > sbMax) sbMax = (snap.sb | 0);
-    if (snap.s && snap.s !== game.state) continue; // timers: same-state only
-    tn++;
     rtSum += (snap.rt || 0);
     wtSum += (snap.wt || 0);
     etSum += (snap.et || 0);
     mtSum += (snap.mt || 0);
     gtSum += (snap.gt || 0);
+    if ((snap.cr | 0) > crMax) crMax = (snap.cr | 0);
+    if ((snap.sa | 0) > saMax) saMax = (snap.sa | 0);
+    if ((snap.sb | 0) > sbMax) sbMax = (snap.sb | 0);
   }
   if (n < 2) return; // no fresh peer data ; nothing to blend
-  // Forward-only ints take the maximum reported across the active mesh.
+  // Apply the consensus. Continuous values become the running average ;
+  // forward-only ints take the maximum reported across the active mesh.
+  game.roundTimer    = rtSum / n;
+  game.warmupTimer   = wtSum / n;
+  game.roundEndTimer = etSum / n;
+  game.matchEndTimer = mtSum / n;
+  game.time          = gtSum / n;
   game.currentRound  = crMax;
   game.scoreA        = saMax;
   game.scoreB        = sbMax;
-  // Continuous values become the running average across same-state peers only.
-  if (tn >= 2) {
-    game.roundTimer    = rtSum / tn;
-    game.warmupTimer   = wtSum / tn;
-    game.roundEndTimer = etSum / tn;
-    game.matchEndTimer = mtSum / tn;
-    game.time          = gtSum / tn;
-    const _nowMs = Date.now();
-    if (typeof game.roundTimerAnchorMs === 'number') {
-      game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
-    }
-    if (typeof game.warmupTimerAnchorMs === 'number') {
-      game.warmupTimerAnchorMs = _nowMs; game.warmupTimerTotal = game.warmupTimer;
-    }
-    if (typeof game.roundEndTimerAnchorMs === 'number') {
-      game.roundEndTimerAnchorMs = _nowMs; game.roundEndTimerTotal = game.roundEndTimer;
-    }
-    if (typeof game.matchEndTimerAnchorMs === 'number') {
-      game.matchEndTimerAnchorMs = _nowMs; game.matchEndTimerTotal = game.matchEndTimer;
-    }
+  const _nowMs = Date.now();
+  if (typeof game.roundTimerAnchorMs === 'number') {
+    game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
+  }
+  if (typeof game.warmupTimerAnchorMs === 'number') {
+    game.warmupTimerAnchorMs = _nowMs; game.warmupTimerTotal = game.warmupTimer;
+  }
+  if (typeof game.roundEndTimerAnchorMs === 'number') {
+    game.roundEndTimerAnchorMs = _nowMs; game.roundEndTimerTotal = game.roundEndTimer;
+  }
+  if (typeof game.matchEndTimerAnchorMs === 'number') {
+    game.matchEndTimerAnchorMs = _nowMs; game.matchEndTimerTotal = game.matchEndTimer;
   }
 }
 
@@ -6205,14 +6169,7 @@ function handleHitClaim(claim, fromPeerId) {
           loadout: shooterLoadout,
         }
       : null;
-    // (B1) Sanitize peer-supplied damage: reject non-finite, clamp to a sane
-    // range so a malformed or hostile peer can't one-shot, heal via negative
-    // damage, or poison HP with NaN. 100000 is far above any legit single hit
-    // (the largest ability damage in the game is 10000).
-    let _dmg = Number(claim.damage);
-    if (!Number.isFinite(_dmg)) _dmg = 0;
-    _dmg = Math.max(0, Math.min(100000, _dmg));
-    playerTakeDamage(_dmg, fakeAttacker);
+    playerTakeDamage(claim.damage, fakeAttacker);
   }
 }
 
@@ -6274,11 +6231,7 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'round_end') {
-    // (B3) Accept the authoritative round_end from any plausibly mid-round
-    // state, not just 'playing'. A peer whose timers drifted into 'warmup'
-    // (or got nudged by sync) would otherwise drop this event and hang for
-    // the rest of the match with no score advance and no respawn.
-    if (game.state === 'playing' || game.state === 'warmup') {
+    if (game.state === 'playing') {
       game.scoreA      = Math.max(game.scoreA | 0, (evt.scoreA | 0));
       game.scoreB      = Math.max(game.scoreB | 0, (evt.scoreB | 0));
       game.state       = 'roundEnd';
@@ -6330,8 +6283,6 @@ function handleNetEvent(evt, fromPeerId) {
     const allIds = [net.myPeerId, ...net.peers.keys()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && net.myReady) {
-      if (net.lastMatchStartId === evt.startAt) return; // dedup re-delivered packet (mirrors launch_at)
-      net.lastMatchStartId = evt.startAt;
       // (v6.7) Apply the proposer's chosen map + seed before scheduling the
       // start, so commitLoadout's world build is identical on every peer.
       if (evt.mapKey && typeof evt.seed === 'number') {
@@ -7868,9 +7819,6 @@ function _layeredFXTick(tSec) {
 }
 
 const _gasLightTmpColor = new THREE.Color(); // scratch, no per-frame alloc
-// (P3) Reused light-slot pool for updateGasLighting (max 8 lights).
-const _gasLightSlots = [];
-for (let _gi = 0; _gi < 8; _gi++) _gasLightSlots.push({ pos: null, color: 0, strength: 0 });
 function updateGasLighting() {
   // (v16a Potato) No gas materials exist in Potato (BCS spawn is gated off below)
   // so even without this guard the .size === 0 check would short-circuit, but we
@@ -7890,27 +7838,25 @@ function updateGasLighting() {
   // in the shader loop.
   const _baseMaxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
   const _maxLights = (typeof getVRLightCap === 'function') ? getVRLightCap(_baseMaxLights) : _baseMaxLights;
-  // (P3) Fill a reused 8-slot pool instead of allocating a fresh array of
-  // object literals every frame, and iterate the Set with for...of instead of
-  // forEach (no per-frame closure allocation).
-  let nLights = 0;
-  for (let i = 0; i < game.projectiles.length && nLights < _maxLights; i++) {
+  const lights = [];
+  for (let i = 0; i < game.projectiles.length && lights.length < _maxLights; i++) {
     const proj = game.projectiles[i];
     if (!proj || !proj.alive || !proj.position) continue;
-    const slot = _gasLightSlots[nLights++];
-    slot.pos = proj.position;
-    slot.color = proj.trailColor || 0xffaa00;
-    slot.strength = 1.0;
+    lights.push({
+      pos: proj.position,
+      color: proj.trailColor || 0xffaa00,
+      strength: 1.0,
+    });
   }
   // Push lights into every gas-flagged material. Always write all 8 slots ;
   // unfilled slots get strength = 0 so the shader skips them.
-  for (const mat of _ACTIVE_LAYERED_FX) {
-    if (!mat || !mat.userData || !mat.userData.acceptsDynamicLights) continue;
+  _ACTIVE_LAYERED_FX.forEach(mat => {
+    if (!mat || !mat.userData || !mat.userData.acceptsDynamicLights) return;
     const u = mat.uniforms;
-    if (!u || !u.uDynLightPos) continue;
+    if (!u || !u.uDynLightPos) return;
     for (let i = 0; i < 8; i++) {
-      if (i < nLights) {
-        const l = _gasLightSlots[i];
+      if (i < lights.length) {
+        const l = lights[i];
         u.uDynLightPos.value[i].copy(l.pos);
         _gasLightTmpColor.setHex(l.color);
         u.uDynLightColor.value[i].copy(_gasLightTmpColor);
@@ -7919,7 +7865,7 @@ function updateGasLighting() {
         u.uDynLightStrength.value[i] = 0;
       }
     }
-  }
+  });
 }
 
 function flashFXMaterialHit(mat, worldPos, hitColor, radius) {
@@ -9019,9 +8965,7 @@ function triggerSympatheticDetonation(epicenter) {
 
 function spawnNetworkProjectile(data, fromPeerId) {
   // Spawn a visual-only projectile from a network peer's fire event
-  // Use a type check, not truthiness: a shot fired from exactly world-x 0
-  // has data.ox === 0, which !data.ox would wrongly reject.
-  if (!data || typeof data.ox !== 'number') return;
+  if (!data || !data.ox) return;
   const origin = new THREE.Vector3(data.ox, data.oy, data.oz);
   const vel = new THREE.Vector3(data.vx, data.vy, data.vz);
   const color = data.color || 0xffaa00;
@@ -9997,16 +9941,6 @@ function _bcsWakeInRange(cloud, source) {
   return (dx * dx + dy * dy + dz * dz) <= r * r;
 }
 
-// (P3) Reused wake-source slot pools + helper, shared shape across the BCS and
-// ambient-cloud wake passes. Each pass resets its own count and overwrites
-// slots in place, so no per-frame array or object-literal allocation.
-const _BCS_ZERO_VEL = { x: 0, y: 0, z: 0 };
-function _wakeSlot(pool, n) {
-  let s = pool[n];
-  if (!s) { s = { x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, str: 0, radius: 0 }; pool[n] = s; }
-  return s;
-}
-const _bcsWakeSources = [];
 function updateBCSWakes(dt) {
   // (v16a Potato) No BCS clouds in Potato, skip the wake-source gather entirely.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
@@ -10024,25 +9958,25 @@ function updateBCSWakes(dt) {
 
   // Gather wake sources : player + nearby ships + nearby projectiles.
   // Each source : { x, y, z, vx, vy, vz, str, radius }.
-  // (P3) Fill the reused slot pool instead of allocating a fresh array of
-  // object literals every frame. nSrc is the live count for this call.
-  let nSrc = 0;
+  const sources = [];
   if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
       player.position && player.velocity) {
-    const s = _wakeSlot(_bcsWakeSources, nSrc++);
-    s.x = player.position.x; s.y = player.position.y; s.z = player.position.z;
-    s.vx = player.velocity.x; s.vy = player.velocity.y; s.vz = player.velocity.z;
-    s.str = 0.95; s.radius = 400;
+    sources.push({
+      x: player.position.x, y: player.position.y, z: player.position.z,
+      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
+      str: 0.95, radius: 400,
+    });
   }
   if (game.entities) {
     for (let i = 0; i < game.entities.length; i++) {
       const e = game.entities[i];
       if (!e || e === player || !e.alive || !e.position) continue;
-      const v = e.velocity || _BCS_ZERO_VEL;
-      const s = _wakeSlot(_bcsWakeSources, nSrc++);
-      s.x = e.position.x; s.y = e.position.y; s.z = e.position.z;
-      s.vx = v.x; s.vy = v.y; s.vz = v.z;
-      s.str = 0.78; s.radius = 360;
+      const v = e.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: e.position.x, y: e.position.y, z: e.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.78, radius: 360,
+      });
     }
   }
   if (game.projectiles) {
@@ -10052,11 +9986,12 @@ function updateBCSWakes(dt) {
     for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
       const p = game.projectiles[i];
       if (!p || !p.alive || !p.position) continue;
-      const v = p.velocity || _BCS_ZERO_VEL;
-      const s = _wakeSlot(_bcsWakeSources, nSrc++);
-      s.x = p.position.x; s.y = p.position.y; s.z = p.position.z;
-      s.vx = v.x; s.vy = v.y; s.vz = v.z;
-      s.str = 0.90; s.radius = 260;
+      const v = p.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: p.position.x, y: p.position.y, z: p.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.90, radius: 260,
+      });
       pCount++;
     }
   }
@@ -10070,8 +10005,8 @@ function updateBCSWakes(dt) {
         const c = cl.children[ci];
         const cloud = c && c._atomSmoke;
         if (!cloud || !cloud.applyWake) continue;
-        for (let si = 0; si < nSrc; si++) {
-          const s = _bcsWakeSources[si];
+        for (let si = 0; si < sources.length; si++) {
+          const s = sources[si];
           if (!_bcsWakeInRange(cloud, s)) continue;
           cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
         }
@@ -10084,8 +10019,8 @@ function updateBCSWakes(dt) {
       const p = game.detachedGasPockets[di];
       const cloud = p && p.gasCloud;
       if (!cloud || !cloud.applyWake) continue;
-      for (let si = 0; si < nSrc; si++) {
-        const s = _bcsWakeSources[si];
+      for (let si = 0; si < sources.length; si++) {
+        const s = sources[si];
         if (!_bcsWakeInRange(cloud, s)) continue;
         // Per-sprite deformation (sprites within the cloud get tugged).
         cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
@@ -11858,10 +11793,10 @@ const MAP_PRESETS = [
   { name: "TheInfinity", wallPattern: 39, wallOpacity: 1, wallBlackBase: false, zoneTheme: "cyber", zoneColors: { walls: [1574952,2756672,4855896,6953584,9052288,12071064,13648040,15622344], obstacles: [4855896,9052288,15622344,4247790,2130072] }, cloudTheme: "plasma", cloudBlend: "additive", cloudBrightness: 0.7, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Circuitcity-Sphere.jpg", wallInteriorTunnelImg: "Circuitcity-Pipe.jpg", wallInteriorAmount: 0.8, wallInteriorDepthSphere: 100, wallInteriorDepthCyl: 100, wallInteriorParallaxSphere: 0, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 110, skyboxChoice: "", schema: "lss-theme/1" },
   { name: "TheTower", wallPattern: 39, wallOpacity: 1, wallBlackBase: false, zoneTheme: "cyber", zoneColors: { walls: [1574952,2756672,4855896,6953584,9052288,12071064,13648040,15622344], obstacles: [4855896,9052288,15622344,4247790,2130072] }, cloudTheme: "plasma", cloudBlend: "normal", cloudBrightness: 0.25, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Datacenter-Sphere.jpg", wallInteriorTunnelImg: "Datacenter-Pipe.jpg", wallInteriorAmount: 0.79, wallInteriorDepthSphere: 100, wallInteriorDepthCyl: 100, wallInteriorParallaxSphere: 0, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 80, skyboxChoice: "", schema: "lss-theme/1" },
   { name: "TheArc", wallPattern: 39, wallOpacity: 1, wallBlackBase: false, zoneTheme: "rainbow", zoneColors: { walls: [8396832,8404000,8415264,3178528,2130024,2121856,2105472,6299776], obstacles: [8396832,8415264,3178528,2121856,6299776] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 0.4, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Aquarium-Sphere.jpg", wallInteriorTunnelImg: "Aquarium-Pipes.jpg", wallInteriorAmount: 0.57, wallInteriorDepthSphere: 100, wallInteriorDepthCyl: 100, wallInteriorParallaxSphere: 0, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 80, skyboxChoice: "", schema: "lss-theme/1" },
-  { name: "TheOctahedron", wallPattern: 39, wallOpacity: 1, wallBlackBase: false, zoneTheme: "azure", zoneColors: { walls: [529448,925760,1322069,1718378,2114688,2512288,2909888,3569624], obstacles: [1718378,2512288,3569624,6328544,1322069] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 1.5, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Starbase-Sphere.jpg", wallInteriorTunnelImg: "Starbase-Pipes.jpg", wallInteriorAmount: 0.84, wallInteriorDepthSphere: 0, wallInteriorDepthCyl: 0, wallInteriorParallaxSphere: 1, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 80, skyboxChoice: "", schema: "lss-theme/1" },
-  { name: "ThePentagon", wallPattern: 14, wallOpacity: 1, wallBlackBase: false, zoneTheme: "twilight", zoneColors: { walls: [1575464,2428992,3151960,3940464,4728968,5583008,6437048,7357648], obstacles: [3940464,5583008,7357648,10510568,3151960] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 1.5, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: true, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Cyberpunk-Sphere.jpg", wallInteriorTunnelImg: "Cyberpunk-Pipe.jpg", wallInteriorAmount: 0.81, wallInteriorDepthSphere: 500, wallInteriorDepthCyl: 500, wallInteriorParallaxSphere: 0, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 130, skyboxChoice: "", schema: "lss-theme/1" },
+  { name: "Octahedron", wallPattern: 11, wallOpacity: 1, wallBlackBase: false, zoneTheme: "azure", zoneColors: { walls: [529448,925760,1322069,1718378,2114688,2512288,2909888,3569624], obstacles: [1718378,2512288,3569624,6328544,1322069] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 1.5, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Starbase-Sphere.jpg", wallInteriorTunnelImg: "Starbase-Pipes.jpg", wallInteriorAmount: 0.87, wallInteriorDepthSphere: 500, wallInteriorDepthCyl: 500, wallInteriorParallaxSphere: 1, wallInteriorParallaxCyl: 1, wallInteriorCylBias: 80, skyboxChoice: "", schema: "lss-theme/1" },
+  { name: "ThePentagon", wallPattern: 14, wallOpacity: 1, wallBlackBase: false, zoneTheme: "twilight", zoneColors: { walls: [1575464,2428992,3151960,3940464,4728968,5583008,6437048,7357648], obstacles: [3940464,5583008,7357648,10510568,3151960] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 1.5, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: true, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Cyberpunk-Sphere.jpg", wallInteriorTunnelImg: "Cyberpunk-Pipe.jpg", wallInteriorAmount: 0.76, wallInteriorDepthSphere: 500, wallInteriorDepthCyl: 500, wallInteriorParallaxSphere: 1, wallInteriorParallaxCyl: 1, wallInteriorCylBias: 130, skyboxChoice: "", schema: "lss-theme/1" },
   { name: "TheGyre", wallPattern: 3, wallOpacity: 1, wallBlackBase: false, zoneTheme: "azure", zoneColors: { walls: [529448,925760,1322069,1718378,2114688,2512288,2909888,3569624], obstacles: [1718378,2512288,3569624,6328544,1322069] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 0.55, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: true, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Jewel-Sphere.jpg", wallInteriorTunnelImg: "Jewel-Pipe.jpg", wallInteriorAmount: 0.86, wallInteriorDepthSphere: 500, wallInteriorDepthCyl: 500, wallInteriorParallaxSphere: 0.1, wallInteriorParallaxCyl: 0.1, wallInteriorCylBias: 170, skyboxChoice: "clouds", schema: "lss-theme/1" },
-  { name: "TheCross", wallPattern: 39, wallOpacity: 1, wallBlackBase: false, zoneTheme: "twilight", zoneColors: { walls: [1575464,2428992,3151960,3940464,4728968,5583008,6437048,7357648], obstacles: [3940464,5583008,7357648,10510568,3151960] }, cloudTheme: "match-walls", cloudBlend: "additive", cloudBrightness: 1.25, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Cyberpunk-Sphere.jpg", wallInteriorTunnelImg: "Cyberpunk-Pipe.jpg", wallInteriorAmount: 0.8, wallInteriorDepthSphere: 500, wallInteriorDepthCyl: 500, wallInteriorParallaxSphere: 0, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 90, skyboxChoice: "", schema: "lss-theme/1" },
+  { name: "TheCross", wallPattern: 11, wallOpacity: 1, wallBlackBase: false, zoneTheme: "molten", zoneColors: { walls: [4861968,4861968,3680272,3680272,2236432,2236432,1640960,1640960], obstacles: [4861968,3680272,2236432,1640960,3940352] }, cloudTheme: "match-walls", cloudBlend: "normal", cloudBrightness: 0.6, cloudCustomColors: [9085104,7110288,11057352,5925760,10401480,7571616,12372694,5202037], voxelRoomsEnabled: false, voxelTexturesEnabled: true, voxelGlowEnabled: true, voxelGlowFraction: 0.1, voxelRoomTheme: "stone", voxelRoomSize: 30, voxelRoomNoise: 40, wallInteriorEnabled: true, wallInteriorSphereImg: "Techno-Sphere.jpg", wallInteriorTunnelImg: "Techno-Pipe.jpg", wallInteriorAmount: 0.8, wallInteriorDepthSphere: 100, wallInteriorDepthCyl: 100, wallInteriorParallaxSphere: 0, wallInteriorParallaxCyl: 0, wallInteriorCylBias: 90, skyboxChoice: "", schema: "lss-theme/1" },
   { name: 'Cyberpunk_City1', wallPattern: 21, wallOpacity: 0.84, wallBlackBase: false, zoneTheme: 'deep-space', zoneColors: { walls: [656419,656419,656419,656419,853552,853552,853552,853552], obstacles: [131848,1317424,2760784,3680368,4205176] }, cloudTheme: 'custom', cloudBlend: 'normal', cloudBrightness: 0.65, cloudCustomColors: [689371,8325750,812736,9111936,615594,8325535,1141947,7935435], voxelRoomsEnabled: true, voxelRoomTheme: 'cosmic', voxelRoomSize: 30.0, voxelRoomNoise: 5.0, skyboxChoice: 'cyberpunk', schema: 'lss-theme/1' },
   { name: 'Cyberpunk_City2', wallPattern: 23, wallOpacity: 0.48, wallBlackBase: false, zoneTheme: 'deep-space', zoneColors: { walls: [656419,656419,656419,656419,853552,853552,853552,853552], obstacles: [131848,1317424,2760784,3680368,4205176] }, cloudTheme: 'midnight', cloudBlend: 'additive', cloudBrightness: 0.6, cloudCustomColors: [689371,15439882,812736,14845704,615594,11890962,1141947,13334037], voxelRoomsEnabled: true, voxelRoomTheme: 'match-walls', voxelRoomSize: 30.0, voxelRoomNoise: 5.0, skyboxChoice: 'cyberpunk2', schema: 'lss-theme/1' },
   { name: 'Cyberpunk_City3', wallPattern: 15, wallOpacity: 0.02, wallBlackBase: false, zoneTheme: 'cyber', zoneColors: { walls: [1574952,2756672,4855896,6953584,9052288,12071064,13648040,15622344], obstacles: [4855896,9052288,15622344,4247790,2130072] }, cloudTheme: 'plasma', cloudBlend: 'normal', cloudBrightness: 0.2, cloudCustomColors: [88431,1552542,28298,295322,415338,295814,1667978,970176], voxelRoomsEnabled: true, voxelRoomTheme: 'match-walls', voxelRoomSize: 30.0, voxelRoomNoise: 5.0, skyboxChoice: 'rainbow', schema: 'lss-theme/1' },
@@ -12519,10 +12454,7 @@ function clearAmbientCloudDots() {
     const d = game.dots[i];
     if (d && d._isAmbientCloud) {
       try { d.dispose(); } catch (_) {}
-      // (P4) O(1) swap-with-last removal (safe in a backward loop).
-      const lastIdx = game.dots.length - 1;
-      if (i !== lastIdx) game.dots[i] = game.dots[lastIdx];
-      game.dots.pop();
+      game.dots.splice(i, 1);
     }
   }
 }
@@ -14953,7 +14885,6 @@ function getElectricSmokeTexture() {
 // repeats and pulse-scale them subtly. Call once per frame.
 
 
-const _ambientWakeSources = []; // (P3) reused source pool for ambient wakes
 function updateAmbientCloudWakes(dt) {
   // (v16a Potato) Ambient cloud halos are visual flair ; basinClouds()
   // already returns false in Potato so game.dots is empty, but we skip
@@ -14970,25 +14901,25 @@ function updateAmbientCloudWakes(dt) {
     updateAmbientCloudWakes._dt = 0;
   }
   // Gather sources : reuse the same pattern as updateBCSWakes.
-  // (P3) Fill the reused slot pool instead of allocating a fresh array of
-  // object literals every frame. nSrc is the live count for this call.
-  let nSrc = 0;
+  const sources = [];
   if (typeof player !== 'undefined' && player && player.shipState !== 'dead'
       && player.position && player.velocity) {
-    const s = _wakeSlot(_ambientWakeSources, nSrc++);
-    s.x = player.position.x; s.y = player.position.y; s.z = player.position.z;
-    s.vx = player.velocity.x; s.vy = player.velocity.y; s.vz = player.velocity.z;
-    s.str = 0.30; s.radius = 260;
+    sources.push({
+      x: player.position.x, y: player.position.y, z: player.position.z,
+      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
+      str: 0.30, radius: 260,
+    });
   }
   if (game.entities) {
     for (let i = 0; i < game.entities.length; i++) {
       const e = game.entities[i];
       if (!e || e === player || !e.alive || !e.position) continue;
-      const v = e.velocity || _BCS_ZERO_VEL;
-      const s = _wakeSlot(_ambientWakeSources, nSrc++);
-      s.x = e.position.x; s.y = e.position.y; s.z = e.position.z;
-      s.vx = v.x; s.vy = v.y; s.vz = v.z;
-      s.str = 0.24; s.radius = 220;
+      const v = e.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: e.position.x, y: e.position.y, z: e.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.24, radius: 220,
+      });
     }
   }
   if (game.projectiles) {
@@ -14996,15 +14927,16 @@ function updateAmbientCloudWakes(dt) {
     for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
       const p = game.projectiles[i];
       if (!p || !p.alive || !p.position) continue;
-      const v = p.velocity || _BCS_ZERO_VEL;
-      const s = _wakeSlot(_ambientWakeSources, nSrc++);
-      s.x = p.position.x; s.y = p.position.y; s.z = p.position.z;
-      s.vx = v.x; s.vy = v.y; s.vz = v.z;
-      s.str = 0.32; s.radius = 150;
+      const v = p.velocity || { x: 0, y: 0, z: 0 };
+      sources.push({
+        x: p.position.x, y: p.position.y, z: p.position.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        str: 0.32, radius: 150,
+      });
       pCount++;
     }
   }
-  if (nSrc === 0) return;
+  if (sources.length === 0) return;
   for (let di = 0; di < game.dots.length; di++) {
     const d = game.dots[di];
     if (!d) continue;
@@ -15020,8 +14952,8 @@ function updateAmbientCloudWakes(dt) {
       for (let pi = 0; pi < d._puffs.length; pi++) {
         const p = d._puffs[pi];
         if (!p || !p.wakeOff) continue;
-        for (let si = 0; si < nSrc; si++) {
-          const s = _ambientWakeSources[si];
+        for (let si = 0; si < sources.length; si++) {
+          const s = sources[si];
           // World-to-local source delta (anchor rotation is small/none for
           // ambient dots, so we treat the world delta as the local delta).
           const lsx = s.x - ax, lsy = s.y - ay, lsz = s.z - az;
@@ -22642,10 +22574,7 @@ function updateDynamicObjects(dt) {
   for (let i = game.dynamicObjects.length - 1; i >= 0; i--) {
     const obj = game.dynamicObjects[i];
     if (!obj.alive && obj.cluster) {
-      // (P4) O(1) swap-with-last removal (safe in a backward loop).
-      const lastIdx = game.dynamicObjects.length - 1;
-      if (i !== lastIdx) game.dynamicObjects[i] = game.dynamicObjects[lastIdx];
-      game.dynamicObjects.pop();
+      game.dynamicObjects.splice(i, 1);
       continue;
     }
     obj.update(dt);
@@ -24081,12 +24010,7 @@ function updateParticles(dt) {
     const pos = p.position;
     if (p.life <= 0 || Math.abs(pos.x) > arenaLimit || Math.abs(pos.y) > arenaLimit || Math.abs(pos.z) > arenaLimit) {
       if (p.poolSlot) _releaseParticleSlot(p.poolSlot);
-      // (P4) swap-with-last + pop is O(1) ; splice(i,1) shifts every later
-      // element (O(n)), which is O(n^2) on frames that expire many particles.
-      // Safe in a backward loop: the swapped-in element was already visited.
-      const lastIdx = game.particles.length - 1;
-      if (i !== lastIdx) game.particles[i] = game.particles[lastIdx];
-      game.particles.pop();
+      game.particles.splice(i, 1);
       continue;
     }
     const _pv = p.velocity;
@@ -24247,10 +24171,7 @@ function updateEffects(dt) {
     e.age += dt;
     if (e.age >= e.lifetime) {
       _disposeOrReleaseEffect(e);
-      // (P4) O(1) swap-with-last removal (safe in a backward loop).
-      const lastIdx = game.effects.length - 1;
-      if (i !== lastIdx) game.effects[i] = game.effects[lastIdx];
-      game.effects.pop();
+      game.effects.splice(i, 1);
       continue;
     }
     const t = e.age / e.lifetime;
@@ -25087,10 +25008,7 @@ function updateDots(dt) {
     d.age += dt;
     if (d.age >= d.lifetime) {
       d.dispose();
-      // (P4) O(1) swap-with-last removal (safe in a backward loop).
-      const lastIdx = game.dots.length - 1;
-      if (i !== lastIdx) game.dots[i] = game.dots[lastIdx];
-      game.dots.pop();
+      game.dots.splice(i, 1);
       continue;
     }
     // Move (gas: no wall checks, pass through everything)
@@ -27361,9 +27279,8 @@ function _tickOutlineOptics(active) {
     }
   }
   if (typeof net !== 'undefined' && net && net.peers) {
-    // (B4) net.peers is a Map ; for...in yields no entries. Iterate values()
-    // so the Outline perk actually attaches to remote ships in multiplayer.
-    for (const peer of net.peers.values()) {
+    for (const pid in net.peers) {
+      const peer = net.peers[pid];
       if (!peer) continue;
       if (!peer.mesh && peer.shipMesh) peer.mesh = peer.shipMesh;
       if (active) attach(peer); else detach(peer);
@@ -28127,10 +28044,9 @@ function updateWeapon(dt) {
       ? input.fovDeg : 90;
     let targetFov = baseFov;
     if (aiming) {
-      // (2026-05-29) Unified ADS zoom for every ship. Puncture's old 40 (and
-      // Vortex's 55) pulled extra distant gas/fractal overdraw into view during
-      // the charge ; one zoom level is consistent and avoids that GPU spike.
-      targetFov = 65;
+      if (player.loadoutKey === 'PUNCTURE') targetFov = 40; // sniper zoom
+      else if (player.loadoutKey === 'VORTEX') targetFov = 55;
+      else targetFov = 65; // general ADS
     }
     camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12);
     camera.updateProjectionMatrix();
@@ -30027,57 +29943,40 @@ function _makeHullHugShield(player, presetName) {
   return clone;
 }
 
-// (P2) Build once and cache the flat list of emissive-capable materials on a
-// ship mesh. _setShipShieldEmissive runs every frame while a shield is up ;
-// re-traversing the whole hierarchy and re-wrapping each material in an array
-// every frame was the dominant shield cost. Cache is keyed to the mesh, so a
-// loadout swap (new mesh) rebuilds it automatically.
-function _getShipEmissiveMats(shipMesh) {
-  let list = shipMesh.userData && shipMesh.userData._shieldEmissiveMats;
-  if (list) return list;
-  list = [];
+function _setShipShieldEmissive(shipMesh, colorHex, intensity) {
+  if (!shipMesh) return;
   shipMesh.traverse(child => {
     if (!child.isMesh || !child.material) return;
     const mats = Array.isArray(child.material) ? child.material : [child.material];
     for (const m of mats) {
       if (!m || !('emissive' in m) || !m.emissive) continue;
-      list.push(m);
+      // Stash original emissive so we can restore on shield-down.
+      if (!m.userData) m.userData = {};
+      if (!m.userData._shieldOrigEmissive) {
+        m.userData._shieldOrigEmissive = {
+          hex: m.emissive.getHex(),
+          intensity: ('emissiveIntensity' in m) ? m.emissiveIntensity : 1.0,
+        };
+      }
+      m.emissive.setHex(colorHex);
+      if ('emissiveIntensity' in m) m.emissiveIntensity = intensity;
     }
   });
-  if (!shipMesh.userData) shipMesh.userData = {};
-  shipMesh.userData._shieldEmissiveMats = list;
-  return list;
-}
-
-function _setShipShieldEmissive(shipMesh, colorHex, intensity) {
-  if (!shipMesh) return;
-  const mats = _getShipEmissiveMats(shipMesh);
-  for (let i = 0; i < mats.length; i++) {
-    const m = mats[i];
-    // Stash original emissive so we can restore on shield-down.
-    if (!m.userData) m.userData = {};
-    if (!m.userData._shieldOrigEmissive) {
-      m.userData._shieldOrigEmissive = {
-        hex: m.emissive.getHex(),
-        intensity: ('emissiveIntensity' in m) ? m.emissiveIntensity : 1.0,
-      };
-    }
-    m.emissive.setHex(colorHex);
-    if ('emissiveIntensity' in m) m.emissiveIntensity = intensity;
-  }
 }
 
 function _clearShipShieldEmissive(shipMesh) {
   if (!shipMesh) return;
-  const mats = _getShipEmissiveMats(shipMesh);
-  for (let i = 0; i < mats.length; i++) {
-    const m = mats[i];
-    if (!m.userData || !m.userData._shieldOrigEmissive) continue;
-    const orig = m.userData._shieldOrigEmissive;
-    if (m.emissive) m.emissive.setHex(orig.hex);
-    if ('emissiveIntensity' in m) m.emissiveIntensity = orig.intensity;
-    m.userData._shieldOrigEmissive = null;
-  }
+  shipMesh.traverse(child => {
+    if (!child.isMesh || !child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    for (const m of mats) {
+      if (!m || !m.userData || !m.userData._shieldOrigEmissive) continue;
+      const orig = m.userData._shieldOrigEmissive;
+      if (m.emissive) m.emissive.setHex(orig.hex);
+      if ('emissiveIntensity' in m) m.emissiveIntensity = orig.intensity;
+      m.userData._shieldOrigEmissive = null;
+    }
+  });
 }
 
 function _disposeShieldClone(clone) {
@@ -30265,25 +30164,13 @@ function _spawnThermalShieldFire(shipPos, shipQuat, chassis, dt) {
 
 // Toggle a CSS edge overlay on/off. Idempotent and tolerant of missing
 // elements so we don't have to guard every callsite.
-// (P1) updateShieldVisuals calls this 5+ times every frame, often with no
-// state change. Cache the element by id (one getElementById ever, retried
-// only while the node is missing) and remember the last on/off state so an
-// unchanged call does zero DOM work.
-const _shieldOverlayElCache = new Map();
-const _shieldOverlayState   = new Map();
 function _setShieldOverlay(id, on) {
-  on = !!on;
-  let el = _shieldOverlayElCache.get(id);
-  let justFound = false;
-  if (!el) {
-    el = document.getElementById(id) || null;
-    if (el) { _shieldOverlayElCache.set(id, el); justFound = true; }
-  }
-  if (!el) return; // not in the DOM yet ; retry on the next call
-  if (!justFound && _shieldOverlayState.get(id) === on) return; // unchanged
-  _shieldOverlayState.set(id, on);
-  if (on) el.classList.add('show');
-  else    el.classList.remove('show');
+  try {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (on) el.classList.add('show');
+    else    el.classList.remove('show');
+  } catch (_) {}
 }
 
 function updateShieldVisuals(dt) {
@@ -32586,11 +32473,6 @@ function returnToRootMenu() {
   // the world, but these references live on game until then).
   for (const bot of game.entities) { try { bot.destroy(); } catch (e) {} }
   game.entities = [];
-  // (B6) Also empty the parallel NetworkPlayer registry. destroy() ran above
-  // (network players live in game.entities too), but net.networkPlayers itself
-  // was never cleared, so the per-frame animation loop kept touching orphaned
-  // ships and the array grew every match.
-  if (typeof net !== 'undefined' && net && net.networkPlayers) net.networkPlayers.length = 0;
   game.projectiles = [];
   // Release particle pool slots back before clearing the array, otherwise
   // the slots stay claimed forever and the pool exhausts after a few rounds.
@@ -32910,6 +32792,13 @@ const _mergedGamepadState = {
   },
 };
 const _emptyGpButton = { pressed: false, touched: false, value: 0 };
+let _gamepadIndicatorVisible = null;
+function _setGamepadIndicatorVisible(visible) {
+  if (_gamepadIndicatorVisible === visible) return;
+  _gamepadIndicatorVisible = visible;
+  const el = document.getElementById('gamepad-indicator');
+  if (el) el.style.display = visible ? 'block' : 'none';
+}
 
 function pollGamepad() {
   // VR fork: prefer a synthesized gamepad assembled from the active XR
@@ -32968,10 +32857,12 @@ function pollGamepad() {
 
   if (!gp) {
     input.gpConnected = false;
+    _setGamepadIndicatorVisible(false);
     return;
   }
 
   input.gpConnected = true;
+  _setGamepadIndicatorVisible(true);
 
   const dz = input.gpDeadzone;
 
@@ -36105,13 +35996,6 @@ function buildSettingsPage() {
 
     <div class="settings-tab-panel" data-tab-panel="performance">
     <div class="settings-section">
-      <h3>On-Screen Display</h3>
-      <div class="setting-row">
-        <label>Show FPS counter (top-right)</label>
-        <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
-      </div>
-    </div>
-    <div class="settings-section">
       <h3>Active GPU</h3>
       <div class="setting-row" style="opacity:0.85; font-size:0.85em;">
         <label style="flex:1; line-height:1.5;" id="set-gpu-info">${(window.__v8GPU && window.__v8GPU.renderer) ? (window.__v8GPU.renderer + '<br><span style="opacity:0.6">' + (window.__v8GPU.vendor || '') + '</span>') : 'detecting...'}</label>
@@ -36851,7 +36735,6 @@ function buildSettingsPage() {
   // Checkboxes
   overlay.querySelector('#set-gp-invert-y').addEventListener('change', e => { input.invertLookY = e.target.checked; saveSettings(); });
   overlay.querySelector('#set-gp-swap').addEventListener('change', e => { input.swapSticks = e.target.checked; saveSettings(); });
-  { const _fpsChk = overlay.querySelector('#set-show-fps'); if (_fpsChk) _fpsChk.addEventListener('change', e => { input.showFps = e.target.checked; saveSettings(); const _el = document.getElementById('fps-counter'); if (_el) _el.style.display = input.showFps ? 'block' : 'none'; }); }
 
   // (v8_1VR) Reactive band controls.
   const musicEnabledChk = overlay.querySelector('#set-music-enabled');
@@ -44123,7 +44006,7 @@ const MAP_DATA = {
   octahedron: {
     name: 'The Octahedron',
     description: 'Bipyramid. Two apex spawns, four equator rooms, a central hub. Vertical and lateral, no camp.',
-    defaultTheme: 'TheOctahedron',
+    defaultTheme: 'Octahedron',
     palette: [
       0x4a3818, 0x1a2848, 0x1c2a50, 0x1a2848, 0x1c2a50, 0x1a2848, 0x1c2a50, 0x202848
     ],
@@ -47694,7 +47577,6 @@ let _wallHueDriftFrame = 0;
 const _vrHeadQuatScratch = new THREE.Quaternion();
 const _vrHeadFwdScratch  = new THREE.Vector3();
 
-let _fpsEl, _fpsFrames = 0, _fpsWinStart = 0, _fpsCpuMs = 0, _fpsCpuAccum = 0;
 function gameLoop(timestamp) {
   // VR fork: renderer.setAnimationLoop drives this every frame (in both
   // flat and immersive modes), so we no longer self-schedule via
@@ -47717,7 +47599,6 @@ function gameLoop(timestamp) {
   game.lastTime = timestamp;
   game.time += game.deltaTime;
 
-<<<<<<< HEAD:lss.html
   // (v26VR) FPS readout. Maintain a 60-sample rolling average of frame
   // intervals and write the inverse to the top-right counter at ~4 Hz so
   // the DOM write doesn't churn every frame. Updates always (cheap), but
@@ -47743,29 +47624,6 @@ function gameLoop(timestamp) {
   } else {
     const el = document.getElementById('fps-counter');
     if (el && el.style.display !== 'none') el.style.display = 'none';
-=======
-  // (perf) On-screen FPS counter (top-right HUD). Counts real frames over a
-  // ~250ms window so the clamped game.deltaTime can't distort the reading.
-  // Visibility is driven by input.showFps (Settings > Performance).
-  if (!_fpsEl) _fpsEl = document.getElementById('fps-counter');
-  if (_fpsEl) {
-    _fpsFrames++;
-    _fpsCpuAccum += _fpsCpuMs;
-    if (!_fpsWinStart) _fpsWinStart = timestamp;
-    const _fpsElapsed = timestamp - _fpsWinStart;
-    if (_fpsElapsed >= 250) {
-      if (input.showFps) {
-        if (_fpsEl.style.display !== 'block') _fpsEl.style.display = 'block';
-        const _fps = Math.round((_fpsFrames * 1000) / _fpsElapsed);
-        _fpsEl.textContent = _fps + ' FPS | CPU ' + (_fpsCpuAccum / _fpsFrames).toFixed(1) + ' ms';
-      } else if (_fpsEl.style.display !== 'none') {
-        _fpsEl.style.display = 'none';
-      }
-      _fpsWinStart = timestamp;
-      _fpsFrames = 0;
-      _fpsCpuAccum = 0;
-    }
->>>>>>> 02d8cbff822226f548185e1be860de4a11b910f5:index.html
   }
 
   // (lssdev test mode) On the first playing-state frame of a test-mode match,
@@ -47964,13 +47822,8 @@ function gameLoop(timestamp) {
   // every peer's clock stays in lockstep. Crucial for 3+ peer matches where
   // independent local timers visibly diverge over the course of a round.
   broadcastGameSync(dt);
-  // Network: clean up stale hit claims. Drive off an accumulator instead of
-  // `game.time % 1 < dt`, which can double-fire or skip a whole second under
-  // variable dt / frame skips.
-  if (net.active) {
-    net._cleanupAccum = (net._cleanupAccum || 0) + dt;
-    if (net._cleanupAccum >= 1) { net._cleanupAccum = 0; cleanupPendingHits(); }
-  }
+  // Network: clean up stale hit claims
+  if (net.active && game.time % 1 < dt) cleanupPendingHits();
 
   // Decay enemy TRACKER locks on player (lose all locks after 5 seconds of no new hits)
   // (v17o) Use Object.keys() snapshot + index iteration instead of for...in
@@ -48124,7 +47977,6 @@ function gameLoop(timestamp) {
   }
 
   renderFrame();
-  _fpsCpuMs = performance.now() - timestamp;
 }
 
 // ---- WEB AUDIO SOUND SYSTEM ----
@@ -48554,17 +48406,24 @@ const _envProbeRay = new THREE.Raycaster();
 _envProbeRay.far = 2000;
 let _envProbeCounter = 0;
 function probeEnvironmentOpenness() {
-  if (!camera || !game || !game.mapMeshes || !game.mapMeshes.length || typeof raycastLevel !== 'function') return 0.7;
+  if (!camera || !game || !game.mapMeshes || !game.mapMeshes.length) return 0.7;
   const camPos = camera.getWorldPosition(_envProbeCamPos);
   let sum = 0;
+  let hits = 0;
   for (const d of _envProbeDirs) {
-    // (perf) SDF ray-march (raycastLevel) instead of intersectObjects against
-    // the full level mesh. 6 rays every 8th frame add up ; raycastLevel returns
-    // the nearest wall distance (or maxDist 2000 when nothing's hit), matching
-    // the previous per-ray value.
-    sum += raycastLevel(camPos, d, 2000);
+    _envProbeRay.set(camPos, d);
+    _envProbeRay.near = 0;
+    _envProbeRay.far = 2000;
+    const hit = _envProbeRay.intersectObjects(game.mapMeshes, false);
+    if (hit && hit.length) {
+      sum += hit[0].distance;
+      hits++;
+    } else {
+      sum += 2000;
+      hits++;
+    }
   }
-  const avg = sum / _envProbeDirs.length;
+  const avg = hits ? sum / hits : 2000;
   // 200 u = very tight tunnel, 1200+ u = open room
   return Math.max(0, Math.min(1, (avg - 200) / 1000));
 }
@@ -54380,19 +54239,18 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     let occludedGain = 1.0;
     const _potatoSkipOcclusion = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
     const _xrSkipOcclusion = (typeof isXRPresenting === 'function') && isXRPresenting();
-    if (!_potatoSkipOcclusion && !_xrSkipOcclusion && distToSource > 1 && typeof raycastLevel === 'function') {
-      // (perf) Occlusion via the analytic SDF ray-march (raycastLevel) instead of
-      // THREE.Raycaster.intersectObjects against the wall meshes. The walls are
-      // generated from this same SDF, so the first-wall distance matches, but it
-      // costs an ~80-step march instead of walking thousands of triangles per
-      // sound. (~15% of main-thread CPU in combat per the round-2 trace.)
+    if (!_potatoSkipOcclusion && !_xrSkipOcclusion && distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
       _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
-      const _occFar = distToSource * 0.99;
-      const wallDist = raycastLevel(_spatialCamPos, _spatialDir, _occFar);
-      if (wallDist < _occFar) {
-        // A wall between listener and source = occluded. Deeper behind the wall
-        // = more attenuation (same proxy ; wallDist is the first-wall distance).
-        const penetration = distToSource - wallDist;
+      _spatialRaycaster.set(_spatialCamPos, _spatialDir);
+      _spatialRaycaster.near = 0;
+      _spatialRaycaster.far = distToSource * 0.99;
+      const hits = _spatialRaycaster.intersectObjects(game.mapMeshes, false);
+      if (hits && hits.length) {
+        // A hit between listener and source = occluded. Shorter path inside geometry
+        // = thinner wall = less attenuation. Use ray distance ratio as a rough proxy.
+        const h = hits[0];
+        const penetration = distToSource - h.distance;
+        // 100 u = thin wall, 1000+ u = deep occlusion
         const wallDepth = Math.min(1.0, penetration / 600);
         cutoff = 2400 - 1500 * wallDepth; // 2400 Hz thin, ~900 Hz deep
         occludedGain = 0.55 - 0.20 * wallDepth; // -5 dB thin, -9 dB deep
@@ -54551,13 +54409,15 @@ function _playSpatialSound51(type, worldPos, opts) {
     occl.type = 'lowpass';
     let cutoff = 18000;
     let occludedGain = 1.0;
-    if (distToSource > 1 && typeof raycastLevel === 'function') {
-      // (perf) SDF ray-march occlusion instead of mesh raycast ; see HRTF path.
+    if (distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
       _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
-      const _occFar = distToSource * 0.99;
-      const wallDist = raycastLevel(_spatialCamPos, _spatialDir, _occFar);
-      if (wallDist < _occFar) {
-        const penetration = distToSource - wallDist;
+      _spatialRaycaster.set(_spatialCamPos, _spatialDir);
+      _spatialRaycaster.near = 0;
+      _spatialRaycaster.far = distToSource * 0.99;
+      const hits = _spatialRaycaster.intersectObjects(game.mapMeshes, false);
+      if (hits && hits.length) {
+        const h = hits[0];
+        const penetration = distToSource - h.distance;
         const wallDepth = Math.min(1.0, penetration / 600);
         cutoff = 2400 - 1500 * wallDepth;
         occludedGain = 0.55 - 0.20 * wallDepth;
