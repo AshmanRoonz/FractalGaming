@@ -10299,6 +10299,7 @@ const xrControllers = { left: null, right: null, leftSrc: null, rightSrc: null }
 // getCamera (which mutates camera.matrix as a side effect).
 let _xrCachedCameraVR = null;
 let _xrLobbyPressArmed = false;  // (v26VR) Set on sessionstart ; first controller press in lobby triggers Solo + audio unlock.
+let _xrTrustedMenuSuppressUntil = 0;
 
 function _xrUpdateInputSources() {
   const session = renderer.xr.getSession && renderer.xr.getSession();
@@ -10310,6 +10311,69 @@ function _xrUpdateInputSources() {
     if (src.handedness === 'left')  xrControllers.leftSrc  = src;
     else if (src.handedness === 'right') xrControllers.rightSrc = src;
   }
+}
+
+function _xrNowMs() {
+  return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+}
+
+function _xrLobbyVisible() {
+  const lob = document.getElementById('lobby');
+  return !!(lob && lob.style.display !== 'none' && lob.offsetParent !== null);
+}
+
+function _xrShipSelectVisible() {
+  const sel = document.getElementById('ship-select');
+  return !!(sel && sel.classList.contains('active'));
+}
+
+function _xrTrustedUnlockMedia() {
+  try { if (typeof _lssUnlockAnnouncerAudio === 'function') _lssUnlockAnnouncerAudio(); } catch (_) {}
+  try {
+    if (typeof speechSynthesis !== 'undefined' && speechSynthesis.resume) speechSynthesis.resume();
+    if (typeof audio !== 'undefined' && audio.ctx && audio.ctx.state === 'suspended' && audio.ctx.resume) {
+      audio.ctx.resume();
+    }
+  } catch (_) {}
+}
+
+function _xrHandleTrustedMenuActivation() {
+  if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
+  _xrTrustedUnlockMedia();
+  let handled = false;
+
+  if (_xrLobbyVisible() && _xrLobbyPressArmed) {
+    _xrLobbyPressArmed = false;
+    const soloBtn = document.getElementById('btn-solo');
+    if (soloBtn) {
+      handled = true;
+      try { soloBtn.click(); } catch (e) { console.warn('[v26VR] trusted lobby start failed:', e && e.message); }
+    }
+  } else if (_xrShipSelectVisible() && !(typeof _countdownActive !== 'undefined' && _countdownActive)) {
+    handled = true;
+    try {
+      if (_previewedKey && LOADOUTS[_previewedKey]) {
+        commitLoadout(_previewedKey);
+      } else {
+        const first = document.querySelector('.ship-list-entry');
+        if (first && first.dataset && first.dataset.key) previewLoadout(first.dataset.key);
+      }
+    } catch (e) {
+      console.warn('[v26VR] trusted ship-select confirm failed:', e && e.message);
+    }
+  } else if (typeof settingsOpen !== 'undefined' && settingsOpen) {
+    handled = true;
+    try { closeSettings(); } catch (e) { console.warn('[v26VR] trusted settings close failed:', e && e.message); }
+  }
+
+  if (handled) {
+    _xrTrustedMenuSuppressUntil = _xrNowMs() + 350;
+    try {
+      console.log('[v26VR] trusted XR menu activation',
+        'userActive=' + !!(navigator.userActivation && navigator.userActivation.isActive));
+    } catch (_) {}
+  }
+  return handled;
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
@@ -10356,6 +10420,8 @@ renderer.xr.addEventListener('sessionstart', () => {
       session.addEventListener('selectstart', _lssUnlockAnnouncerAudio, { once: true });
       session.addEventListener('select', _lssUnlockAnnouncerAudio, { once: true });
       session.addEventListener('squeezestart', _lssUnlockAnnouncerAudio, { once: true });
+      session.addEventListener('selectstart', _xrHandleTrustedMenuActivation);
+      session.addEventListener('squeezestart', _xrHandleTrustedMenuActivation);
     } catch (_) {}
   }
   try { _lssUnlockAnnouncerAudio(); } catch (_) {}
@@ -11193,11 +11259,13 @@ function _vrUpdateBotHealthBar(bot, isVR, isEnemy) {
 }
 
 const _vrNameLosDir = new THREE.Vector3();
+let _vrNameLabelUpdateFrame = 0;
 
 // Keep any old VR health sprites hidden.
 function _vrUpdateAllHealthBars() {
   const isVR = !!(renderer && renderer.xr && renderer.xr.isPresenting);
   if (!isVR) {
+    _vrNameLabelUpdateFrame = 0;
     // Hide any sprites that were left visible.
     if (typeof game !== 'undefined' && game.entities) {
       for (const bot of game.entities) {
@@ -11210,6 +11278,11 @@ function _vrUpdateAllHealthBars() {
       }
     }
     return;
+  }
+  const cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
+  if (cadence > 1) {
+    _vrNameLabelUpdateFrame = (_vrNameLabelUpdateFrame + 1) % cadence;
+    if (_vrNameLabelUpdateFrame !== 0) return;
   }
   const playerTeam = (typeof player !== 'undefined' && player && player.team) || null;
   if (typeof game !== 'undefined' && game.entities) {
@@ -12312,7 +12385,7 @@ function getEffectiveVRRenderScale() {
 }
 
 function getEffectBudget() {
-  const tier = getVRPerfTier();
+  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (tier >= 3) return 80;
   if (tier >= 2) return 140;
   if (tier >= 1) return 220;
@@ -14935,6 +15008,8 @@ function getFlameLickTexture() {
   return tex;
 }
 
+const _shipAnimWhiteColor = new THREE.Color(0xffffff);
+
 function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (!mesh || !mesh.userData) return;
   const t = Math.min(1, speed / maxSpeed);
@@ -15095,7 +15170,7 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
           plume.userData.basePlumeColor = plume.material.color.clone();
         }
         const heat = Math.min(1, Math.max(0, (t - 0.5) * 2.0));
-        plume.material.color.copy(plume.userData.basePlumeColor).lerp(new THREE.Color(0xffffff), heat * 0.55);
+        plume.material.color.copy(plume.userData.basePlumeColor).lerp(_shipAnimWhiteColor, heat * 0.55);
       }
       // Heat-haze billboard: a stretched additive Sprite sits behind the plume tip.
       // Lazily created on first update. Opacity scales with thrust^2 so haze only
@@ -17291,7 +17366,7 @@ const dynamicLights = {
 })();
 
 function spawnDynamicLight(pos, color, intensity, range, duration) {
-  const tier = getVRPerfTier();
+  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (tier >= 3) return;
   if (tier >= 2 && (intensity || 0) < 3.0) return;
   if (tier >= 1) {
@@ -17369,6 +17444,11 @@ for (let _fi = 0; _fi < _SMOKE_FLASH_MAX * 2; _fi++) {
     intensity: 0, duration: 0, age: 0,
   });
 }
+const _smokeLightTop = [];
+for (let _si = 0; _si < _MAX_SMOKE_LIGHTS; _si++) {
+  _smokeLightTop.push({ f: null, eff: 0 });
+}
+let _smokeLightHadActive = false;
 
 function updateSmokeLights(dt) {
   // Age out and remove finished flashes.
@@ -17384,15 +17464,35 @@ function updateSmokeLights(dt) {
       _smokeLightFlashPool.push(f);
     }
   }
+
+  if (_smokeLightFlashes.length === 0) {
+    if (!_smokeLightHadActive) return;
+    _smokeLightHadActive = false;
+  } else {
+    _smokeLightHadActive = true;
+  }
+
   // Build up to 4 strongest active flashes (intensity * fadeOut).
-  const top = [];
+  for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
+    _smokeLightTop[k].f = null;
+    _smokeLightTop[k].eff = 0;
+  }
   for (const f of _smokeLightFlashes) {
     const t = f.age / f.duration;
     const fadeOut = Math.max(0, 1 - t * t);
     const eff = f.intensity * fadeOut;
-    top.push({ f, eff });
+    if (eff <= _smokeLightTop[_MAX_SMOKE_LIGHTS - 1].eff) continue;
+    for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
+      if (eff <= _smokeLightTop[k].eff) continue;
+      for (let j = _MAX_SMOKE_LIGHTS - 1; j > k; j--) {
+        _smokeLightTop[j].f = _smokeLightTop[j - 1].f;
+        _smokeLightTop[j].eff = _smokeLightTop[j - 1].eff;
+      }
+      _smokeLightTop[k].f = f;
+      _smokeLightTop[k].eff = eff;
+      break;
+    }
   }
-  top.sort((a, b) => b.eff - a.eff);
   // Walk the smoke material registry. Drop dead WeakRefs.
   for (let i = _smokeMatRegistry.length - 1; i >= 0; i--) {
     const ref = _smokeMatRegistry[i];
@@ -17405,8 +17505,8 @@ function updateSmokeLights(dt) {
     const lc = mat.uniforms.uLightColor.value;
     const ls = mat.uniforms.uLightStrength.value;
     for (let k = 0; k < _MAX_SMOKE_LIGHTS; k++) {
-      const e = top[k];
-      if (e) {
+      const e = _smokeLightTop[k];
+      if (e && e.f) {
         lp[k].copy(e.f.pos);
         lc[k].copy(e.f.color);
         ls[k] = e.eff;
@@ -17500,6 +17600,12 @@ async function warmupCombatShaders() {
   if (!(typeof renderer !== 'undefined' && renderer) ||
       !(typeof scene !== 'undefined' && scene) ||
       !(typeof camera !== 'undefined' && camera)) return;
+  if (typeof isStandaloneQuest === 'function' && isStandaloneQuest() &&
+      typeof isXRPresenting === 'function' && isXRPresenting()) {
+    _shaderWarmup.done = true;
+    console.log('[warmup] skipped heavy shader warmup on standalone Quest VR');
+    return;
+  }
   _shaderWarmup.done = true;
   // Park the in-flight promise on the cache. Resolves to undefined on
   // success ; we clear the cache slot on completion so any callers
@@ -20246,6 +20352,8 @@ class ClusterObstacle {
       (Math.random() - 0.5) * 0.20,
       (Math.random() - 0.5) * 0.15
     );
+    this._qScratch = new THREE.Quaternion();
+    this._offsetScratch = new THREE.Vector3();
     if (config) {
       this.rotation = new THREE.Euler(config.rx, config.ry, config.rz);
       this.baseColor = config.color;
@@ -20501,7 +20609,7 @@ class ClusterObstacle {
       this.rotation.x += this.rotSpeed.x * dt;
       this.rotation.y += this.rotSpeed.y * dt;
       this.rotation.z += this.rotSpeed.z * dt;
-      const q = new THREE.Quaternion().setFromEuler(this.rotation);
+      const q = this._qScratch.setFromEuler(this.rotation);
       let avgHpFrac = 0, aliveChildren = 0;
       for (const c of this.children) {
         if (c.alive) {
@@ -20515,7 +20623,7 @@ class ClusterObstacle {
       const stressEmissive = 1 + stress * (1.0 + stressPulse * 1.5);
       for (const c of this.children) {
         if (!c.alive || c.broken) continue;
-        const rotated = c.localOffset.clone().applyQuaternion(q);
+        const rotated = this._offsetScratch.copy(c.localOffset).applyQuaternion(q);
         c.position.copy(this.position).add(rotated);
         if (c.mesh) c.mesh.position.copy(c.position);
         if (c.edgeMesh) c.edgeMesh.position.copy(c.position);
@@ -22599,6 +22707,24 @@ function createOrganicMesh(type, scale, color) {
 
 const ORGANIC_TYPES = ['tendril', 'polyp', 'coral', 'spore', 'vein'];
 
+function _collectOrganicMaterials(root) {
+  const out = [];
+  if (!root || typeof root.traverse !== 'function') return out;
+  root.traverse(child => {
+    if (!child.material) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    for (let i = 0; i < mats.length; i++) {
+      const m = mats[i];
+      if (!m) continue;
+      if (m.userData_baseOpacity === undefined) {
+        m.userData_baseOpacity = (m.opacity !== undefined) ? m.opacity : 1.0;
+      }
+      out.push(m);
+    }
+  });
+  return out;
+}
+
 function spawnOrganics(rooms) {
   // Clean up old organics
   if (game.organics) {
@@ -22613,10 +22739,14 @@ function spawnOrganics(rooms) {
   if (typeof isVRStripFx === 'function' && isVRStripFx()) {
     return;
   }
+  const vrBudgetTier = (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0;
+  const roomDivisor = vrBudgetTier > 0 ? 180 : 60;
+  const roomMin = vrBudgetTier > 0 ? 1 : 3;
+  const roomCap = vrBudgetTier > 0 ? 2 : Infinity;
 
   // Spawn organics in every room (more in larger rooms)
   for (const rm of rooms) {
-    const count = Math.max(3, Math.floor(rm.r / 60));
+    const count = Math.min(roomCap, Math.max(roomMin, Math.floor(rm.r / roomDivisor)));
     for (let i = 0; i < count; i++) {
       // Position: on the inner surface of the room sphere (near walls)
       const u = Math.random(), v = Math.random();
@@ -22640,6 +22770,7 @@ function spawnOrganics(rooms) {
       game.organics.push({
         mesh: mesh,
         type: type,
+        materials: _collectOrganicMaterials(mesh),
         basePos: new THREE.Vector3(px, py, pz),
         pulseSpeed: 0.5 + Math.random() * 2.0,
         pulsePhase: Math.random() * Math.PI * 2,
@@ -22651,7 +22782,7 @@ function spawnOrganics(rooms) {
 
   // Also spawn some along tunnels
   const tunnelPts = game.corridorPoints.filter(p => p.roomType === 'tunnel');
-  const tunnelOrgCount = Math.min(20, Math.floor(tunnelPts.length / 2));
+  const tunnelOrgCount = Math.min(vrBudgetTier > 0 ? 4 : 20, Math.floor(tunnelPts.length / (vrBudgetTier > 0 ? 6 : 2)));
   for (let i = 0; i < tunnelOrgCount; i++) {
     const idx = Math.floor(Math.random() * tunnelPts.length);
     const pt = tunnelPts[idx];
@@ -22673,6 +22804,7 @@ function spawnOrganics(rooms) {
     game.organics.push({
       mesh: mesh,
       type: type,
+      materials: _collectOrganicMaterials(mesh),
       basePos: new THREE.Vector3(px, py, pz),
       pulseSpeed: 0.5 + Math.random() * 2.0,
       pulsePhase: Math.random() * Math.PI * 2,
@@ -22684,6 +22816,15 @@ function spawnOrganics(rooms) {
 
 function updateOrganics(dt) {
   if (!game.organics) return;
+  const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
+    ? getVRCadence(1, 4, 6, 10) : 1;
+  if (cadence > 1) {
+    updateOrganics._dt = (updateOrganics._dt || 0) + (dt || 0);
+    updateOrganics._frame = ((updateOrganics._frame || 0) + 1) % cadence;
+    if (updateOrganics._frame !== 0) return;
+    dt = Math.min(0.18, updateOrganics._dt || dt || 0.016);
+    updateOrganics._dt = 0;
+  }
   const t = game.time;
   for (const org of game.organics) {
     if (!org.mesh || !org.mesh.parent) continue;
@@ -22691,14 +22832,17 @@ function updateOrganics(dt) {
     // Pulse glow: cycle opacity/emissive
     const pulse = 0.5 + 0.5 * Math.sin(t * org.pulseSpeed + org.pulsePhase);
 
-    // Apply to all child meshes in group
-    org.mesh.traverse(child => {
-      if (child.material) {
-        if (child.material.opacity !== undefined) {
-          child.material.opacity = (child.material.userData_baseOpacity || child.material.opacity) * (0.5 + pulse * 0.5);
-        }
+    // Apply to cached material list. Avoids a group traverse for every
+    // organic every frame, which is pure CPU/draw-call-adjacent cost in VR.
+    const mats = org.materials || [];
+    const opacityMul = 0.5 + pulse * 0.5;
+    for (let mi = 0; mi < mats.length; mi++) {
+      const m = mats[mi];
+      if (m && m.opacity !== undefined) {
+        const baseOpacity = (m.userData_baseOpacity !== undefined) ? m.userData_baseOpacity : m.opacity;
+        m.opacity = baseOpacity * opacityMul;
       }
-    });
+    }
 
     // Gentle sway
     const swayX = Math.sin(t * org.swaySpeed + org.pulsePhase) * org.swayAmount;
@@ -22711,7 +22855,8 @@ function updateOrganics(dt) {
 
     // Spore type: drift individual particles
     if (org.type === 'spore') {
-      org.mesh.children.forEach(spore => {
+      for (let si = 0; si < org.mesh.children.length; si++) {
+        const spore = org.mesh.children[si];
         if (spore.userData.driftSpeed) {
           const ds = spore.userData;
           const ox = Math.sin(t * ds.driftSpeed + ds.driftPhase) * ds.driftRadius;
@@ -22721,7 +22866,7 @@ function updateOrganics(dt) {
           spore.position.y += oy * dt;
           spore.position.z += oz * dt;
         }
-      });
+      }
     }
   }
 }
@@ -23757,7 +23902,8 @@ function cullOldestParticle() {
 function _pVel(x, y, z) { return { x: x || 0, y: y || 0, z: z || 0 }; }
 
 function updateParticles(dt) {
-  if (getVRPerfTier() >= 3) {
+  const _vrTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
+  if (_vrTier >= 3) {
     for (let i = game.particles.length - 1; i >= 0; i--) {
       const p = game.particles[i];
       if (p && p.poolSlot) _releaseParticleSlot(p.poolSlot);
@@ -24762,6 +24908,14 @@ function disposeAllDots() {
 
 function updateDots(dt) {
   if (!game.dots || !game.dots.length) return;
+  const cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
+  if (cadence > 1) {
+    updateDots._dt = (updateDots._dt || 0) + (dt || 0);
+    updateDots._frame = ((updateDots._frame || 0) + 1) % cadence;
+    if (updateDots._frame !== 0) return;
+    dt = Math.min(0.12, updateDots._dt || dt || 0.016);
+    updateDots._dt = 0;
+  }
   const _gameTime = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
   // ---- Per-dot update (physics, age, hue, internal lightning, growth) ----
   for (let i = game.dots.length - 1; i >= 0; i--) {
@@ -27082,7 +27236,32 @@ const _cinematic = {
   baseY:     0,
   ships: null,        // [{ mesh, isPlayer, origPos, origQuat, origVisible, pos, look }, ...]
   after: null,
+  watchdog: null,
 };
+
+function _lssClearCinematicWatchdog() {
+  if (_cinematic.watchdog) {
+    clearTimeout(_cinematic.watchdog);
+    _cinematic.watchdog = null;
+  }
+}
+
+function _lssArmCinematicWatchdog() {
+  _lssClearCinematicWatchdog();
+  const ms = Math.max(1000, ((_cinematic.duration || 6.0) + 1.0) * 1000);
+  _cinematic.watchdog = setTimeout(() => {
+    if (!_cinematic.active) return;
+    console.warn('[cinematic] watchdog completed stalled intro');
+    try { _lssCompleteSpectatorCinematic(); } catch (_) {
+      _cinematic.active = false;
+      const after = _cinematic.after;
+      _cinematic.after = null;
+      if (after) {
+        try { after(); } catch (e) { console.warn('[cinematic] watchdog after failed:', e && e.message); }
+      }
+    }
+  }, ms);
+}
 
 // Inject HUD-hiding CSS exactly once. Element IDs come from the
 // gameplay overlay roots in <body> (line 2006-2083). The class
@@ -27291,6 +27470,7 @@ function _lssStartSpectatorCinematic() {
 }
 
 function _lssEndSpectatorCinematic() {
+  _lssClearCinematicWatchdog();
   _cinematic.active = false;
   if (_cinematic.ships) {
     for (let i = 0; i < _cinematic.ships.length; i++) {
@@ -27380,6 +27560,7 @@ function _lssRunCinematicThen(andThen) {
     _cinematic.after = () => {
       try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
     };
+    _lssArmCinematicWatchdog();
   } else {
     try { andThen(); } catch (e) { console.warn('[cinematic] immediate andThen failed:', e && e.message); }
   }
@@ -32757,11 +32938,19 @@ function pollGamepad() {
     const _gpBtns = gp && gp.buttons;
     const _aRaw = !!(_gpBtns && _gpBtns[0] && _gpBtns[0].pressed);
     const _bRaw = !!(_gpBtns && _gpBtns[1] && _gpBtns[1].pressed);
-    const _menuAnyRaw = _aRaw || _bRaw;
+    const _ltRaw = !!(_gpBtns && _gpBtns[6] && (_gpBtns[6].pressed || _gpBtns[6].value > input.triggerThreshold));
+    const _rtRaw = !!(_gpBtns && _gpBtns[7] && (_gpBtns[7].pressed || _gpBtns[7].value > input.triggerThreshold));
+    const _lgRaw = !!(_gpBtns && _gpBtns[4] && (_gpBtns[4].pressed || _gpBtns[4].value > input.triggerThreshold));
+    const _rgRaw = !!(_gpBtns && _gpBtns[5] && (_gpBtns[5].pressed || _gpBtns[5].value > input.triggerThreshold));
+    const _menuAnyRaw = _aRaw || _bRaw || _ltRaw || _rtRaw || _lgRaw || _rgRaw;
     if (_menuAnyRaw && !input.gpMenuFaceAnyPrev) _menuConfirmEdge = true;
     input.gpMenuFaceAnyPrev = _menuAnyRaw;
   } else {
     input.gpMenuFaceAnyPrev = false;
+  }
+  if (_menuConfirmEdge && typeof _xrTrustedMenuSuppressUntil === 'number' &&
+      ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) < _xrTrustedMenuSuppressUntil) {
+    _menuConfirmEdge = false;
   }
   if (_menuConfirmEdge) {
     if (settingsOpen) {
@@ -43006,7 +43195,10 @@ function _releaseChampionClaim(field, preserveProgress, releasedShip) {
 function updateStasisFields(dt) {
   // Spawn timer
   if (game.state === 'playing') {
-    const aliveCount = game.stasisFields.filter(f => f.alive).length;
+    let aliveCount = 0;
+    for (let _si = 0; _si < game.stasisFields.length; _si++) {
+      if (game.stasisFields[_si] && game.stasisFields[_si].alive) aliveCount++;
+    }
     if (aliveCount < 3) {
       game.stasisSpawnTimer -= dt;
       if (game.stasisSpawnTimer <= 0) {
@@ -43266,6 +43458,15 @@ const _FOG_TUNNEL_MULT = 1.4;   // tunnels: in-between
 function updateRoomFog(dt) {
   if (!scene.fog || !player || !player.position) return;
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
+  const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
+    ? getVRCadence(1, 4, 6, 10) : 1;
+  if (cadence > 1) {
+    updateRoomFog._dt = (updateRoomFog._dt || 0) + (dt || 0);
+    updateRoomFog._frame = ((updateRoomFog._frame || 0) + 1) % cadence;
+    if (updateRoomFog._frame !== 0) return;
+    dt = Math.min(0.18, updateRoomFog._dt || dt || 0.016);
+    updateRoomFog._dt = 0;
+  }
   // Find the room the player is inside (closest center within radius).
   let inRoom = null;
   let bestD = Infinity;
@@ -47425,6 +47626,8 @@ function gameLoop(timestamp) {
   const _wallDt = game.deltaTime;
   const dt = (typeof updateHitstop === 'function') ? updateHitstop(_wallDt) : _wallDt;
   const _vrPerfTier = getVRPerfTier();
+  const _vrThrottleTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : _vrPerfTier;
+  const _xrPresentingForOverlays = (typeof isXRPresenting === 'function') && isXRPresenting();
 
   // Update systems
   updatePlayerStasis(dt);
@@ -47446,13 +47649,18 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  if (_vrPerfTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
-  clearAmbientCloudDots();
-  if (_vrPerfTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
+  if (_vrThrottleTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
+  if (_xrPresentingForOverlays) {
+    const _clearCadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 6, 12, 30) : 6;
+    game._vrAmbientClearFrame = ((game._vrAmbientClearFrame || 0) + 1) % Math.max(1, _clearCadence);
+    if (game._vrAmbientClearFrame === 0) clearAmbientCloudDots();
+  } else {
+    clearAmbientCloudDots();
+  }
+  if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   tickScanlineTexture(); // (v6.7) drift the hologram-scanline map for shields
   tickEnergyShields(dt); // (v6.7) drive time + decay impact pulses on energy shields
   if (typeof _tickWallRipples === 'function') _tickWallRipples(dt); // (v18L Phase L-J)
-  const _xrPresentingForOverlays = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (!_xrPresentingForOverlays) {
     tickCockpitFrameAnimation(); // (v17) cockpit frame: now stationary frame_<SHIP>.png + damage-shake hook
     _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
@@ -47500,7 +47708,7 @@ function gameLoop(timestamp) {
     animateShipMesh(bot.mesh, botSpeed, botMaxSpeed, bot.isFiring, dt, !!bot.doomed);
     // (v6.7) Damage-state particles for bots and network players. Healthy
     // ships emit nothing (early-return inside emitDamageState).
-    if (_vrPerfTier < 2) emitDamageState(bot, dt);
+    if (_vrThrottleTier < 2) emitDamageState(bot, dt);
   }
   if (typeof net !== 'undefined' && net && net.networkPlayers) {
     for (const np of net.networkPlayers) {
@@ -47521,7 +47729,7 @@ function gameLoop(timestamp) {
     const botMaxSpeed = bot.chassis ? bot.chassis.maxSpeed : 400;
     // Heat-trail blur: throttled emitter, scales rate with speed so cruising
     // bots get a steady wake and parked bots get nothing.
-    if (_vrPerfTier < 1 && bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
+    if (_vrThrottleTier < 1 && bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
       if (bot._heatTrailTimer == null) bot._heatTrailTimer = Math.random() * 0.05;
       bot._heatTrailTimer -= dt;
       if (bot._heatTrailTimer <= 0) {
@@ -47542,7 +47750,7 @@ function gameLoop(timestamp) {
     // (v6.7) Damage-state particles on the local player too (visible from
     // third-person / death cam, and other peers see them on our broadcast
     // position via their NetworkPlayer iteration).
-    if (_vrPerfTier < 2) emitDamageState(player, dt);
+    if (_vrThrottleTier < 2) emitDamageState(player, dt);
     // (v6.7) Spawn-protection bubble on the local player too (visible in
     // death cam / third-person). Same fade curve as the broadcast version.
     if (player.mesh && player.mesh.userData && player.mesh.userData.shieldMesh && player.spawnProtection > 0) {
@@ -47557,7 +47765,7 @@ function gameLoop(timestamp) {
       }
     }
     // Heat-trail blur on the player too (visible in third-person / death cam)
-    if (_vrPerfTier < 1 && !player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
+    if (_vrThrottleTier < 1 && !player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
       if (player._heatTrailTimer == null) player._heatTrailTimer = 0;
       player._heatTrailTimer -= dt;
       if (player._heatTrailTimer <= 0) {
@@ -47590,8 +47798,8 @@ function gameLoop(timestamp) {
   updateScreenShake(dt);
   updateDamageIndicators(dt);
   updateHUD();
-  if (_vrPerfTier < 2) updateMinimap();
-  if (_vrPerfTier < 1) updateEnemyHealthBars();
+  if (!_xrPresentingForOverlays && _vrPerfTier < 2) updateMinimap();
+  if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
 
   // Apply screen shake offset to camera (skip during death cam)
   if (!deathCam.active) {
