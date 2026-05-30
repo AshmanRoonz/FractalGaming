@@ -3170,6 +3170,13 @@ const net = {
   launchScheduledAt: null,
   launchTimer: null,
 
+  // (v27) Map lock for multiplayer: flips true as soon as ANY peer (us or
+  // another) broadcasts a loadout in ship-select. While set, selectMap /
+  // cycleMap reject changes and the lobby map arrows / dots are disabled
+  // for everyone. Prevents the "one player launched, another swapped maps
+  // mid-handshake" desync class. Cleared in returnToRootMenu.
+  mapCommitLocked: false,
+
   // Synced world state (v6.7). The lobby proposer picks a map key + a 32-bit
   // seed and broadcasts them with match_start; every peer applies them before
   // commitLoadout's world build. Seeding the corridor / obstacle / organic
@@ -4661,6 +4668,11 @@ async function joinRoom() {
     onLoadout((data, peerId) => {
       const peer = net.peers.get(peerId);
       if (peer) {
+        // (v27) First peer to commit locks the map for everyone.
+        if (!net.mapCommitLocked) {
+          net.mapCommitLocked = true;
+          try { _syncMapButtonsDisabled(); } catch (_) {}
+        }
         peer.loadoutKey = data.loadoutKey;
         peer.team = data.team;
         // Capture peer's Discord identity if they sent it ; lets
@@ -4928,6 +4940,18 @@ let _mapSelectorRendered = false;
 
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
+  // (v27) MP lock : once any peer has committed in ship-select, refuse
+  // to switch maps. The map already-matches case still falls through so
+  // a peer receiving the world-sync mapKey can re-paint the UI.
+  // Second guard : even if mapCommitLocked is somehow false (cold reload
+  // mid-match, etc.), refuse any map change in MP outside of the lobby
+  // 'select' state. The VR D-pad cycler routes through here too, so
+  // this catches between-rounds + active play in all input paths.
+  if (typeof net !== 'undefined' && net.active &&
+      game.selectedMap && game.selectedMap !== mapKey) {
+    const _outOfSelect = (typeof game !== 'undefined' && game.state && game.state !== 'select');
+    if (net.mapCommitLocked || _outOfSelect) return;
+  }
   // Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
   // already selected stops the storm without needing a per-call suppress flag.
@@ -5046,6 +5070,14 @@ function _renderMapPreview(mapData) {
 
 // Cycle to the prev (-1) or next (+1) map, wrapping at either end.
 function cycleMap(dir) {
+  // (v27) MP lock : ignore arrow / hotkey cycling once any peer has
+  // committed, AND ignore it outside of the lobby 'select' state. The
+  // second guard catches VR D-pad cycling between rounds and any other
+  // mid-match input path that wires into cycleMap.
+  if (typeof net !== 'undefined' && net.active) {
+    if (net.mapCommitLocked) return;
+    if (typeof game !== 'undefined' && game.state && game.state !== 'select') return;
+  }
   // Cycle only through maps eligible for the active mode.
   const keys = _visibleMapKeys();
   if (keys.length === 0) return;
@@ -5336,7 +5368,12 @@ function scheduleMatchStart(startAt) {
 }
 
 function _syncMapButtonsDisabled() {
-  const locked = !!(typeof net !== 'undefined' && net.active && net.launchScheduledAt);
+  // (v27) Lock on EITHER the launch-handshake-scheduled state OR the
+  // earlier "any peer has committed a loadout" state. The second case
+  // freezes the map UI the moment the first ship-select confirm fires,
+  // rather than waiting for the full all-loadouts launchAt proposal.
+  const locked = !!(typeof net !== 'undefined' && net.active &&
+                    (net.launchScheduledAt || net.mapCommitLocked));
   const prev = document.getElementById('map-prev');
   const next = document.getElementById('map-next');
   if (prev) prev.disabled = locked;
@@ -6353,29 +6390,13 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'siphon_beam') {
     const a = new THREE.Vector3(evt.ax, evt.ay, evt.az);
     const b = new THREE.Vector3(evt.bx, evt.by, evt.bz);
-    if (typeof spawnLightningBolt === 'function') {
+    // (v27) Peer-side helix : same call as the shooter. Pool-free,
+    // strip-fx-free, depth-occlusion-free.
+    if (typeof spawnSiphonHelix === 'function') {
       try {
-        // (v27) Match the shooter's full visual stack : main + secondary
-        // + halo + 5 parallel offset bolts. essential=true bypasses the
-        // VR strip-fx gate so peers don't silently lose the conduit when
-        // viewing in headset mode.
-        spawnLightningBolt(a, b, 0x4169E1, 0.32, 8, 9.0, true);
-        spawnLightningBolt(a, b, 0x6080ff, 0.28, 6, 7.0, true);
-        spawnLightningBolt(a, b, (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SYPHON : 0x4169E1, 0.32, 8, 14.0, true);
-        for (let oi = 0; oi < 5; oi++) {
-          const ox = (Math.random() - 0.5), oy = (Math.random() - 0.5), oz = (Math.random() - 0.5);
-          const oLen = Math.max(0.001, Math.sqrt(ox*ox + oy*oy + oz*oz));
-          const oMag = 40 + Math.random() * 30;
-          const offX = (ox / oLen) * oMag, offY = (oy / oLen) * oMag, offZ = (oz / oLen) * oMag;
-          const tint = (oi % 2 === 0) ? 0x88ccff
-            : ((typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SYPHON : 0x4169E1);
-          spawnLightningBolt(
-            new THREE.Vector3(a.x + offX, a.y + offY, a.z + offZ),
-            new THREE.Vector3(b.x + offX, b.y + offY, b.z + offZ),
-            tint, 0.20 + Math.random() * 0.10, 4, 4.0, true
-          );
-        }
-      } catch (e) { console.warn('[v12m] siphon_beam replay failed:', e); }
+        const _hotCol = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SYPHON : 0x4169E1;
+        spawnSiphonHelix(a, b, _hotCol, 0.55);
+      } catch (e) { console.warn('[v27] siphon_beam helix replay failed:', e); }
     }
     return;
   }
@@ -10198,7 +10219,7 @@ function updateBCSWakes(dt) {
   if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 3) return;
   if (typeof billboardCloudSystem === 'undefined' || !billboardCloudSystem) return;
   if (!game) return;
-  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
+  const _cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 3, 4, 6) : 1;
   if (_cadence > 1) {
     updateBCSWakes._dt = (updateBCSWakes._dt || 0) + (dt || 0);
     updateBCSWakes._frame = ((updateBCSWakes._frame || 0) + 1) % _cadence;
@@ -12768,9 +12789,17 @@ const QUALITY = {
     return 1.0;
   },
   // Per-sprite cloud churn animation : adds 3 sin() calls per slot
-  // per frame to make clouds look alive instead of rigid. Disabled in
-  // potato mode (the churn is purely visual flair).
-  cloudChurn() { return this.level !== 'potato'; },
+  // per frame to make clouds look alive instead of rigid. On standalone
+  // Quest this cost scales with thousands of BCS slots and does not respond
+  // to render scale, so keep the clouds but freeze this decorative drift.
+  cloudChurn() {
+    const tier = Math.max(
+      (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 0,
+      (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0
+    );
+    if (tier >= 1) return false;
+    return this.level !== 'potato';
+  },
   // Basin gas pools : decorative gas pools spawned in rooms at level
   // build time. Disabled in potato mode since each pool adds 8-11 GasClouds
   // with 10 sprites each (~80-110 sprites per basin × ~15 basins per level).
@@ -13283,7 +13312,10 @@ function renderPostFX() {
   // GPU cost from 5 fullscreen passes to 2 on menus / settings and when the
   // user has disabled postFX. The composite still runs so tonemap + vignette +
   // chromatic aberration stay consistent between the menu and combat looks.
+  const cinematicActive =
+    (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
   const lowQuality = !postFX.enabled
+    || cinematicActive
     || (typeof game !== 'undefined' && (game.state === 'select' || game.state === 'matchEnd'))
     || (typeof settingsOpen !== 'undefined' && settingsOpen);
 
@@ -13402,6 +13434,13 @@ function _xrHudUpdateCadence() {
   if (tier >= 1) return 3;
   return _xrHudUpdateEveryN;
 }
+function _shouldUseCineFXFrame() {
+  if (!cineFX.enabled || !cineFX.composer) return false;
+  if (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup')) {
+    return false;
+  }
+  return true;
+}
 function renderFrame() {
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
@@ -13449,6 +13488,7 @@ function renderFrame() {
       }
     }
     try {
+      if (typeof _syncVRLiteMaterialUniforms === 'function') _syncVRLiteMaterialUniforms();
       // Quest WebXR owns the XR framebuffer here. Calling setRenderTarget(null)
       // rebinds the flat browser canvas and leaves the headset black.
       renderer.render(scene, camera);
@@ -13463,7 +13503,7 @@ function renderFrame() {
   // v8VR: Cinematic post-pipeline (EffectComposer) takes priority over the
   // legacy custom postFX when enabled. Skipped in VR (handled above) and
   // when not opted-in (default), preserving v7.1VR rendering exactly.
-  if (cineFX.enabled && cineFX.composer) {
+  if (_shouldUseCineFXFrame()) {
     renderer.setRenderTarget(null);
     cineFX.composer.render();
     return;
@@ -17957,6 +17997,7 @@ async function _warmupCombatShadersBody() {
   let _warmupShipMeshCount = 0;
   let _warmupTextureCount = 0;
   let _warmupMaterialCount = 0;
+  let _warmupExtraGeos = []; // (v27) one-off geos (siphon helix prototype)
   try {
     const group = new THREE.Group();
     // Park the prototypes far below the map so they cannot be seen by the
@@ -18015,6 +18056,32 @@ async function _warmupCombatShadersBody() {
     // the signature.
     const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 4, 1);
     group.add(new THREE.Mesh(cylGeo, matRefs[1] /* additive variant */));
+    // (v27) Syphon helix prototype : TubeGeometry + MeshBasicMaterial
+    // (additive, depthTest:false, depthWrite:false, side:FrontSide). The
+    // siphonHelix branch in spawnSiphonHelix builds the same signature
+    // per-spawn ; pre-binding here means the first Energy Syphon hit
+    // doesn't stall the main thread on a fresh program link.
+    try {
+      const _syHelixPts = [];
+      for (let _i = 0; _i <= 16; _i++) {
+        const _t = _i / 16;
+        const _a = _t * Math.PI * 4;
+        _syHelixPts.push(new THREE.Vector3(Math.cos(_a) * 0.1, _t - 0.5, Math.sin(_a) * 0.1));
+      }
+      const _syHelixCurve = new THREE.CatmullRomCurve3(_syHelixPts, false, 'catmullrom', 0.5);
+      const _syHelixGeo = new THREE.TubeGeometry(_syHelixCurve, 48, 0.04, 5, false);
+      const _syHelixMat = new THREE.MeshBasicMaterial({
+        color: 0x4169E1, transparent: true, opacity: 1.0,
+        blending: THREE.AdditiveBlending,
+        depthTest: false, depthWrite: false, side: THREE.FrontSide,
+      });
+      matRefs.push(_syHelixMat);
+      group.add(new THREE.Mesh(_syHelixGeo, _syHelixMat));
+      // Geometry is local-only ; dispose right after the warmup pass so
+      // no leak. Material disposal is handled by the matRefs cleanup loop
+      // that runs at the end of _warmupCombatShadersBody.
+      _warmupExtraGeos.push(_syHelixGeo);
+    } catch (_) {}
     // T3.14: explicitly render each of the four tracer prototype materials
     // once through the compile pass, binding them against the exact pooled
     // cylinder geometries _spawnSingleTracer will reuse. The two tail
@@ -22422,6 +22489,15 @@ const _gasSDFNormal = new THREE.Vector3(); // scratch for sdfNormal
 
 function updateDetachedGasPockets(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
+  const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
+    ? getVRCadence(1, 2, 3, 4) : 1;
+  if (cadence > 1) {
+    updateDetachedGasPockets._dt = (updateDetachedGasPockets._dt || 0) + (dt || 0);
+    updateDetachedGasPockets._frame = ((updateDetachedGasPockets._frame || 0) + 1) % cadence;
+    if (updateDetachedGasPockets._frame !== 0) return;
+    dt = Math.min(0.12, updateDetachedGasPockets._dt || dt || 0.016);
+    updateDetachedGasPockets._dt = 0;
+  }
   // Reverse iteration so we can splice fading or fragmented pockets out
   // during the loop without skipping any siblings. New fragment children
   // are pushed to the end of the array, past our current index, and get
@@ -23563,7 +23639,7 @@ const _LIGHTNING_FRAG_SRC = [
   '}'
 ].join('\n');
 
-const _LIGHTNING_POOL_SIZE = 64; // each slot = one whole bolt (halo + core). Bumped from 24 ; SLAYER's Mega Stun Bolt fires up to ~37 bolts in a 0.6 s window (initial 6-bolt ring + ~13 random crackles + 18 outward detonation ring), and with peers casting concurrent effects the old 24-slot cap was exhausting and silently dropping later bolts on the floor.
+const _LIGHTNING_POOL_SIZE = 96; // each slot = one whole bolt (halo + core). Bumped from 24 then 64 then 96 ; with the cone-trail era of v27 and Syphon's 8-bolt essential cluster racing against Mega Stun storms + Mega Laser arcs, 64 was still exhausting in heavy fights. 96 + essential-eviction (see _acquireLightningSlot) closes the visible-syphon-bolt gap.
 const _lightningPool = [];
 function _initLightningPool() {
   for (let i = 0; i < _LIGHTNING_POOL_SIZE; i++) {
@@ -23615,28 +23691,74 @@ function _initLightningPool() {
       haloMesh, coreMesh, haloMat, coreMat,
       _haloGeom: null, _coreGeom: null,
       free: true,
+      // (v27) Eviction-aware fields. essential=true bolts cannot be
+      // evicted ; non-essential ones can be when an essential acquire
+      // would otherwise fail. acquiredAt picks the oldest non-essential
+      // when stealing.
+      essential: false,
+      acquiredAt: 0,
     });
   }
 }
 _initLightningPool();
 let _lightningPoolCursor = 0;
-function _acquireLightningSlot() {
+function _acquireLightningSlot(essential) {
+  const _nowMs = (typeof performance !== 'undefined' && performance.now)
+    ? performance.now() : Date.now();
+  // Pass 1 : ordinary cursor-walk for a free slot.
   for (let i = 0; i < _LIGHTNING_POOL_SIZE; i++) {
     const idx = (_lightningPoolCursor + i) % _LIGHTNING_POOL_SIZE;
     const slot = _lightningPool[idx];
     if (slot.free) {
       slot.free = false;
+      slot.essential = !!essential;
+      slot.acquiredAt = _nowMs;
       _lightningPoolCursor = (idx + 1) % _LIGHTNING_POOL_SIZE;
       return slot;
     }
   }
-  return null; // pool exhausted ; the spawn is dropped (rare in practice)
+  // (v27) Pass 2 : essential preemption. When the caller flagged this
+  // spawn as gameplay-critical (Syphon conduit, etc.) and the pool is
+  // exhausted by lower-priority FX, evict the OLDEST non-essential
+  // slot. Steal it for the new essential bolt. The orphaned game.effects
+  // entry for the old slot is removed so its fade-out tick doesn't
+  // overwrite the new bolt's opacity uniform.
+  if (essential) {
+    let oldestIdx = -1, oldestT = Infinity;
+    for (let i = 0; i < _LIGHTNING_POOL_SIZE; i++) {
+      const s = _lightningPool[i];
+      if (s.essential) continue;
+      if (s.acquiredAt < oldestT) { oldestT = s.acquiredAt; oldestIdx = i; }
+    }
+    if (oldestIdx >= 0) {
+      const stolen = _lightningPool[oldestIdx];
+      // Drop the old effect entry (search by direct slot reference).
+      if (typeof game !== 'undefined' && Array.isArray(game.effects)) {
+        for (let ei = game.effects.length - 1; ei >= 0; ei--) {
+          if (game.effects[ei] && game.effects[ei].poolSlot === stolen) {
+            game.effects.splice(ei, 1);
+            break;
+          }
+        }
+      }
+      stolen.essential = true;
+      stolen.acquiredAt = _nowMs;
+      stolen.free = false; // (already false ; explicit for clarity)
+      _lightningPoolCursor = (oldestIdx + 1) % _LIGHTNING_POOL_SIZE;
+      return stolen;
+    }
+    // Every slot is essential. Genuinely no room ; return null.
+  }
+  return null;
 }
 function _releaseLightningSlot(slot) {
   if (!slot) return;
   slot.haloMesh.visible = false;
   slot.coreMesh.visible = false;
   slot.free = true;
+  // (v27) Clear priority + timestamp so a recycled slot starts neutral.
+  slot.essential = false;
+  slot.acquiredAt = 0;
 }
 
 // Prototype materials. The two 'tracer' variants and the two 'tracerTail'
@@ -24057,8 +24179,8 @@ function spawnLightningBolt(from, to, color, lifetime, branches, thickness, esse
   const dist = from.distanceTo(to);
   if (dist < 5) return;
 
-  const slot = _acquireLightningSlot();
-  if (!slot) return; // pool exhausted ; rare in practice
+  const slot = _acquireLightningSlot(essential);
+  if (!slot) return; // pool exhausted ; essential bolts also evicted nothing
 
   // Subdivision depth scales with bolt length so short crackles get fewer
   // wiggles and long arcs get more detail. 3..6 range maps roughly to
@@ -24115,6 +24237,101 @@ function spawnLightningBolt(from, to, color, lifetime, branches, thickness, esse
   const boltMid = mainPath[Math.floor(mainPath.length / 2)];
   if (typeof spawnDynamicLight === 'function') spawnDynamicLight(boltMid, color, 2.0, 400, lifetime);
 }
+
+// (v27) Twisting-helix Energy Syphon visual. Built in the same style as
+// Puncture's _spawnRailgunSpiral above : per-spawn CatmullRom curve in
+// real world coordinates, TubeGeometry, MeshBasicMaterial + additive
+// blending, sine-tapered radius so the helix anchors at the player's
+// muzzle and the target hit point.
+//
+// The difference from Puncture's single spiral is two strands offset by
+// 180 degrees in phase, intertwined around the same axis. The pair fades
+// out together over the lifetime (cubic ease-out, same as tracerSpiral).
+//
+// Bypasses every failure mode that made the lightning-bolt approach
+// invisible in heavy combat :
+//   - no shared pool to exhaust
+//   - no strip-fx gate
+//   - depthTest off + high renderOrder so the cockpit / nearby walls
+//     can't hide it from the shooter's POV
+//
+// Color is Syphon class blue (LSS.CLASS_COLORS.SYPHON) at both call
+// sites, matching the SYPHON identity ; Puncture's yellow stays
+// Puncture-only.
+function spawnSiphonHelix(from, to, color, lifetime) {
+  if (typeof scene === 'undefined' || typeof THREE === 'undefined') return;
+  color = (color != null) ? color : 0x4169E1;
+  const _life = (typeof lifetime === 'number' && lifetime > 0) ? lifetime : 0.55;
+  const dir = new THREE.Vector3().subVectors(to, from);
+  const len = dir.length();
+  if (len < 8) return;
+  const fwd = dir.clone().multiplyScalar(1 / len);
+  const upHint = (Math.abs(fwd.y) < 0.92) ? new THREE.Vector3(0, 1, 0)
+                                          : new THREE.Vector3(1, 0, 0);
+  const right  = new THREE.Vector3().crossVectors(fwd, upHint).normalize();
+  const realUp = new THREE.Vector3().crossVectors(right, fwd).normalize();
+  // Helix parameters tuned to read at any drain range. coilsPerUnit a
+  // touch tighter than Puncture so the two strands clearly intertwine
+  // instead of reading as a single fat spiral. helixR a bit larger so
+  // each strand has visible breathing room around the other.
+  const helixR = 14.0;
+  const coilsPerUnit = 0.014;
+  const totalCoils = Math.max(2.5, len * coilsPerUnit);
+  const ptsPerCoil = 6;
+  const numPoints  = Math.max(10, Math.round(totalCoils * ptsPerCoil));
+  const ptsA = [];
+  const ptsB = [];
+  for (let i = 0; i <= numPoints; i++) {
+    const t = i / numPoints;
+    const r = helixR * Math.sin(t * Math.PI);
+    const angle = t * totalCoils * Math.PI * 2;
+    const cx = from.x + fwd.x * (t * len);
+    const cy = from.y + fwd.y * (t * len);
+    const cz = from.z + fwd.z * (t * len);
+    const cA = Math.cos(angle) * r;
+    const sA = Math.sin(angle) * r;
+    ptsA.push(new THREE.Vector3(
+      cx + right.x * cA + realUp.x * sA,
+      cy + right.y * cA + realUp.y * sA,
+      cz + right.z * cA + realUp.z * sA
+    ));
+    ptsB.push(new THREE.Vector3(
+      cx + right.x * (-cA) + realUp.x * (-sA),
+      cy + right.y * (-cA) + realUp.y * (-sA),
+      cz + right.z * (-cA) + realUp.z * (-sA)
+    ));
+  }
+  const curveA = new THREE.CatmullRomCurve3(ptsA, false, 'catmullrom', 0.5);
+  const curveB = new THREE.CatmullRomCurve3(ptsB, false, 'catmullrom', 0.5);
+  const tubularSegments = Math.min(160, numPoints * 3);
+  const tubeRadius      = 1.2;
+  const radialSegments  = 5;
+  const geoA = new THREE.TubeGeometry(curveA, tubularSegments, tubeRadius, radialSegments, false);
+  const geoB = new THREE.TubeGeometry(curveB, tubularSegments, tubeRadius, radialSegments, false);
+  const matA = new THREE.MeshBasicMaterial({
+    color: color, transparent: true, opacity: 1.0,
+    blending: THREE.AdditiveBlending,
+    depthTest: false, depthWrite: false, side: THREE.FrontSide,
+  });
+  const matB = new THREE.MeshBasicMaterial({
+    color: color, transparent: true, opacity: 1.0,
+    blending: THREE.AdditiveBlending,
+    depthTest: false, depthWrite: false, side: THREE.FrontSide,
+  });
+  const meshA = new THREE.Mesh(geoA, matA);
+  const meshB = new THREE.Mesh(geoB, matB);
+  meshA.frustumCulled = false; meshB.frustumCulled = false;
+  meshA.renderOrder = 1010;    meshB.renderOrder = 1010;
+  scene.add(meshA); scene.add(meshB);
+  if (game && game.effects) {
+    game.effects.push({
+      meshA, meshB, matA, matB, geoA, geoB,
+      lifetime: _life, age: 0, type: 'siphonHelix',
+    });
+  }
+}
+if (typeof window !== 'undefined') window.spawnSiphonHelix = spawnSiphonHelix;
+
 
 const MAX_PARTICLES = 500;
 const _sharedParticleGeo = new THREE.SphereGeometry(1, 4, 3); // shared; scale per particle
@@ -24348,7 +24565,17 @@ function _disposeOrReleaseEffect(e) {
   // and core meshes share the slot. The slot's per-spawn geometry gets
   // disposed inside _releaseLightningSlot ; meshes + materials stay live
   // in the pool for the next acquire.
-  if (e.type === 'lightning') {
+  if (e.type === 'siphonHelix') {
+    if (e.meshA && e.meshA.parent) e.meshA.parent.remove(e.meshA);
+    if (e.meshB && e.meshB.parent) e.meshB.parent.remove(e.meshB);
+    if (e.geoA  && e.geoA.dispose) { try { e.geoA.dispose(); } catch (_) {} }
+    if (e.geoB  && e.geoB.dispose) { try { e.geoB.dispose(); } catch (_) {} }
+    if (e.matA  && e.matA.dispose) { try { e.matA.dispose(); } catch (_) {} }
+    if (e.matB  && e.matB.dispose) { try { e.matB.dispose(); } catch (_) {} }
+    e.meshA = e.meshB = e.matA = e.matB = e.geoA = e.geoB = null;
+    return; // (v27) helix has no e.mesh ; skip the generic dispose tail
+  }
+  else if (e.type === 'lightning') {
     _releaseLightningSlot(e.poolSlot);
     return;
   }
@@ -24384,7 +24611,24 @@ function _disposeOrReleaseEffect(e) {
 }
 const _fxArcFrom = new THREE.Vector3();
 const _fxArcTo = new THREE.Vector3();
+function _syncVRLiteMaterialUniforms() {
+  const _vrLiteForMaterials = (typeof isXRPresenting === 'function' && isXRPresenting()) ? 1.0 : 0.0;
+  if (_atomFractalMaterials.length) {
+    for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
+      const _am = _atomFractalMaterials[_mi];
+      if (_am && _am.uniforms && _am.uniforms.uVRLite) _am.uniforms.uVRLite.value = _vrLiteForMaterials;
+    }
+  }
+  if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem
+      && billboardCloudSystem.material && billboardCloudSystem.material.uniforms
+      && billboardCloudSystem.material.uniforms.uVRLite) {
+    billboardCloudSystem.material.uniforms.uVRLite.value = _vrLiteForMaterials;
+  }
+  return _vrLiteForMaterials;
+}
+
 function updateEffects(dt) {
+  _syncVRLiteMaterialUniforms();
   // Tick the fractal atom shaders so they animate. Single shared
   // time value across all live atom mats (one uniform write per mat).
   if (_atomFractalMaterials.length) {
@@ -24392,19 +24636,9 @@ function updateEffects(dt) {
     // Drive uVRLite from XR presence each frame. Cluster
     // rocks share this uniform across all live mats so the branch flips on
     // session start / end without recompile.
-    const _vrLite = (typeof isXRPresenting === 'function' && isXRPresenting()) ? 1.0 : 0.0;
     for (let _mi = 0; _mi < _atomFractalMaterials.length; _mi++) {
       const _am = _atomFractalMaterials[_mi];
       if (_am && _am.uniforms && _am.uniforms.time) _am.uniforms.time.value = _gameT;
-      if (_am && _am.uniforms && _am.uniforms.uVRLite) _am.uniforms.uVRLite.value = _vrLite;
-    }
-    // BCS shares the same VR-lite branch ;
-    // single material on the singleton system, so one uniform write
-    // flips every basin / atom cloud sprite to the radial-only fast path.
-    if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem
-        && billboardCloudSystem.material && billboardCloudSystem.material.uniforms
-        && billboardCloudSystem.material.uniforms.uVRLite) {
-      billboardCloudSystem.material.uniforms.uVRLite.value = _vrLite;
     }
   }
   // v8VR: drive the InstancedMesh particle pools from inside the same
@@ -24803,6 +25037,15 @@ function updateEffects(dt) {
     // together. uTime keeps ticking so the scrolling-noise pulse keeps
     // animating through the fade. Linear fade matches the old curve so the
     // overall bolt readability stays consistent with rest-of-game pacing.
+    else if (e.type === 'siphonHelix') {
+      // (v27) Cubic ease-out fade matching Puncture's tracerSpiral so the
+      // pair fades read with the visual cadence the player is already
+      // familiar with from the railgun shot.
+      const k = Math.max(0, 1 - t);
+      const ease = k * k * k;
+      if (e.matA) e.matA.opacity = ease;
+      if (e.matB) e.matB.opacity = ease;
+    }
     else if (e.type === 'lightning') {
       const k = Math.max(0, 1 - t);
       const slot = e.poolSlot;
@@ -26904,6 +27147,9 @@ function commitLoadout(key) {
   // Announce our loadout to peers. (v10) Include Discord identity
   // so peers can render our avatar in their lobby chips.
   if (net.active && net.sendLoadout) {
+    // (v27) Our commit IS the lock signal ; freeze the map for everyone.
+    net.mapCommitLocked = true;
+    try { _syncMapButtonsDisabled(); } catch (_) {}
     const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
     net.sendLoadout({
       loadoutKey: player.loadoutKey,
@@ -29368,32 +29614,18 @@ function executeAbility(slot, ability) {
         const siphonOrigin = (typeof getPlayerForwardOrigin === 'function')
           ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3())
           : player.position.clone();
-        spawnLightningBolt(siphonOrigin, bestBot.position, 0x4169E1, 0.32, 8, 9.0, true);
-        spawnLightningBolt(siphonOrigin, bestBot.position, 0x6080ff, 0.28, 6, 7.0, true);
-        // Broadcast the siphon beam so peers see the
-        // conduit too (not just the local shooter). Receivers spawn
-        // matching lightning bolts via the event handler.
+        // (v27) Twisting helix replaces the 8-bolt lightning cluster.
+        // The cluster was unreliable : pool exhaustion + strip-fx gate
+        // + cockpit depth occlusion all dropped bolts. Helix is one
+        // mesh pair with depthTest off, always visible.
+        spawnSiphonHelix(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.55);
+        // Broadcast so peers spawn their own helix from the same coords.
         if (net && net.active && net.sendEvent) {
           net.sendEvent({
             type: 'siphon_beam',
             ax: siphonOrigin.x, ay: siphonOrigin.y, az: siphonOrigin.z,
             bx: bestBot.position.x, by: bestBot.position.y, bz: bestBot.position.z
           });
-        }
-        // Wide blue-tinted halo bolt for the soft glow read (Syphon class blue).
-        spawnLightningBolt(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.32, 8, 14.0, true);
-        // Five parallel offset bolts give the conduit visible thickness
-        // around the central core. Mix of paler-blue / class-blue tints so the
-        // conduit pulses between bright energy white-blue and Syphon blue.
-        for (let oi = 0; oi < 5; oi++) {
-          const offset = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
-            .normalize().multiplyScalar(40 + Math.random() * 30);
-          const tint = (oi % 2 === 0) ? 0x88ccff : LSS.CLASS_COLORS.SYPHON;
-          spawnLightningBolt(
-            siphonOrigin.clone().add(offset),
-            bestBot.position.clone().add(offset),
-            tint, 0.20 + Math.random() * 0.10, 4, 4.0, true
-          );
         }
         // Blue glow particles along the beam path â€” soft additive sprites
         // that linger and fade, sitting around the bolts to give the
@@ -32942,6 +33174,10 @@ function returnToRootMenu() {
     net.worldMap = null;
     net.worldSeed = null;
     net.myReady = false;
+    // (v27) Map-commit lock clears on menu return so the next match can
+    // pick a fresh map. Mid-match (between rounds) deliberately stays
+    // locked since the map can't legally change mid-match anyway.
+    net.mapCommitLocked = false;
     if (net.peers) {
       for (const peer of net.peers.values()) {
         peer.ready = false;
@@ -42084,24 +42320,6 @@ function _initWallTextures() {
 // WALL_PATTERN_NAMES, and add the new index to the shader's lab-composite
 // branch ('uPattern == 20 || uPattern == 21 || uPattern == 22 ...').
 const MULTI_LAYER_PRESETS = {
-  // Index 20: Lab Composite. Mirrors the wall material's hardcoded init.
-  20: {
-    bgPatternId: 17,                                  // Panel Maze (game id)
-    bgTime: 1.0,
-    u_iters_bg: 3, u_scale_bg: 0.0012, u_invBase_bg: 3.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.0,
-    K_COSMIC_bg: 0.65,
-    fgPatternId: 19,                                  // Layered Cube (game id)
-    fgAlpha: 2.0, fgBlend: 4 /* Mix */, fgHue: 0, fgTime: 0.3,
-    u_iters_fg: 12, u_scale_fg: 0.02, u_invBase_fg: 2.0,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.92,
-    K_COSMIC_fg: 0.65,
-    fg2PatternId: 3,                                  // Wave Interference (game id)
-    fg2Alpha: 0.75, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.95,
-    u_iters_fg2: 7, u_scale_fg2: 0.0012, u_invBase_fg2: 16.7,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
-    K_COSMIC_fg2: 1.5,
-  },
   // Index 21: Digital. User-authored preset; lab ids translated to game ids:
   //   lab 18 (Layered Cube) -> game 19
   //   lab 15 (Cyber Datamosh) -> game 15
@@ -42123,27 +42341,6 @@ const MULTI_LAYER_PRESETS = {
     u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.5,
   },
-  // Index 22: Datamosh Cube. User export ; lab ids translated:
-  //   bg lab 15 (Cyber Datamosh) -> game 15
-  //   fg lab 18 (Layered Cube)   -> game 19
-  //   fg2 lab 6 (Panel Maze)     -> game 17
-  22: {
-    bgPatternId: 15,                                  // Cyber Datamosh
-    bgTime: 0.05,
-    u_iters_bg: 12, u_scale_bg: 0.0005, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 1.0,
-    K_COSMIC_bg: 0.15,
-    fgPatternId: 19,                                  // Layered Cube
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 0.1,
-    u_iters_fg: 7, u_scale_fg: 0.0016, u_invBase_fg: 3.7,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 3.1,
-    fg2PatternId: 17,                                 // Panel Maze
-    fg2Alpha: 0.05, fg2Blend: 2, fg2Hue: 0, fg2Time: 0.0,
-    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
-    K_COSMIC_fg2: 2.9,
-  },
   // Index 23: Mandelbox Plasma. User export ; lab ids translated:
   //   bg lab 2 (Mandelbox)     -> game 4
   //   fg lab 9 (Plasma FBM)    -> game 6
@@ -42164,195 +42361,6 @@ const MULTI_LAYER_PRESETS = {
     u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
     u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
     K_COSMIC_fg2: 2.9,
-  },
-  // Index 24: Mandelbox Kali. User export ; lab ids translated:
-  //   bg lab 2 (Mandelbox)   -> game 4
-  //   fg lab 0 (Kali IFS)    -> game 0
-  //   fg2 lab 6 (Panel Maze) -> game 17
-  24: {
-    bgPatternId: 4,                                   // Mandelbox
-    bgTime: 3.0,
-    u_iters_bg: 8, u_scale_bg: 0.0153, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
-    K_COSMIC_bg: 6.0,
-    fgPatternId: 0,                                   // Kali IFS
-    fgAlpha: 1.05, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 3.0,
-    u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 6.0,
-    fg2PatternId: 17,                                 // Panel Maze
-    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.05,
-    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
-    K_COSMIC_fg2: 2.9,
-  },
-  // Index 25: Matrix. User export ; bright green digital-rain feel.
-  // Lab IDs translated to game IDs:
-  //   bg  lab 15 (Cyber Datamosh) -> game 15
-  //   fg  lab 6  (Panel Maze)     -> game 17
-  //   fg2 lab 6  (Panel Maze)     -> game 17
-  // Two stacked Panel Maze layers at different scales over Cyber
-  // Datamosh background reads as cascading glyph rain.
-  25: {
-    paletteOverride: 0x1eff00,                        // lock walls to Matrix green
-    bgPatternId: 15,                                  // Cyber Datamosh
-    bgTime: 0.1,
-    u_iters_bg: 1, u_scale_bg: 0.0019, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 1.0,
-    K_COSMIC_bg: 0.2,
-    fgPatternId: 17,                                  // Panel Maze
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 1.0,
-    u_iters_fg: 3, u_scale_fg: 0.0011, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.0,
-    K_COSMIC_fg: 6.0,
-    fg2PatternId: 17,                                 // Panel Maze (second layer)
-    fg2Alpha: 0.8, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.0,
-    u_iters_fg2: 8, u_scale_fg2: 0.0035, u_invBase_fg2: 9.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.7,
-    K_COSMIC_fg2: 6.0,
-  },
-  // Index 26: Hue-Shifting Grid. User export ; lab IDs translated:
-  //   bg  lab 6  (Panel Maze)   -> game 17
-  //   fg  lab 0  (Kali IFS)     -> game 0
-  //   fg2 lab 6  (Panel Maze)   -> game 17
-  // Two stacked Panel Maze layers with a Kali tint between, locked to a
-  // soft blue paletteOverride (#197fcc) so the grid reads as cyan-tinted
-  // rather than picking up the map's per-room palette.
-  26: {
-    paletteOverride: 0x197fcc,                        // soft cyan-blue
-    bgPatternId: 17,                                  // Panel Maze
-    bgTime: 3.0,
-    u_iters_bg: 11, u_scale_bg: 0.0155, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
-    K_COSMIC_bg: 0.25,
-    fgPatternId: 0,                                   // Kali IFS
-    fgAlpha: 1.1, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 3.0,
-    u_iters_fg: 12, u_scale_fg: 0.002, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 6.0,
-    fg2PatternId: 17,                                 // Panel Maze (second layer)
-    fg2Alpha: 0.85, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.05,
-    u_iters_fg2: 7, u_scale_fg2: 0.0014, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
-    K_COSMIC_fg2: 2.9,
-  },
-  // Index 27: Hexeizure. User export ; lab IDs translated:
-  //   bg  lab 6  (Panel Maze)   -> game 17
-  //   fg  lab 2  (Mandelbox)    -> game 4
-  //   fg2 lab 14 (Hex Pulse Radar) -> game 14
-  // Black paletteOverride pushes the wall to pure black ; the layered
-  // hex pulse over Mandelbox folds reads as strobing geometric seizure.
-  27: {
-    paletteOverride: 0x000000,                        // pure black
-    bgPatternId: 17,                                  // Panel Maze
-    bgTime: 0.25,
-    u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
-    K_COSMIC_bg: 0.05,
-    fgPatternId: 4,                                   // Mandelbox
-    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 3.0,
-    u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 3.6,
-    fg2PatternId: 14,                                 // Hex Pulse Radar
-    fg2Alpha: 0.5, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.5,
-    u_iters_fg2: 12, u_scale_fg2: 0.001, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
-    K_COSMIC_fg2: 3.1,
-  },
-  // Index 28: Starfield. User export ; lab IDs translated:
-  //   bg  lab 6  (Panel Maze)      -> game 17
-  //   fg  lab 15 (Cyber Datamosh)  -> game 15
-  //   fg2 lab 7  (Apollonian Gasket) -> game 1
-  // Dark green paletteOverride (#142400) tints the deep field ; the
-  // bright Datamosh + Apollonian fractals over it read as scattered stars.
-  28: {
-    paletteOverride: 0x142400,                        // dark green/black
-    bgPatternId: 17,                                  // Panel Maze
-    bgTime: 0.25,
-    u_iters_bg: 5, u_scale_bg: 0.0121, u_invBase_bg: 2.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.99,
-    K_COSMIC_bg: 0.05,
-    fgPatternId: 15,                                  // Cyber Datamosh
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 3.0,
-    u_iters_fg: 7, u_scale_fg: 0.0166, u_invBase_fg: 4.1,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 4.95,
-    fg2PatternId: 1,                                  // Apollonian Gasket
-    fg2Alpha: 2.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.5,
-    u_iters_fg2: 12, u_scale_fg2: 0.0099, u_invBase_fg2: 20.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.94,
-    K_COSMIC_fg2: 6.0,
-  },
-  // Index 29: Race Glow. (v13r) User-authored from the wall lab. Three
-  // Plasma FBM layers stacked with multiply blends and a bright neon-
-  // green tint (#00ff55). The glow effect only reads when Pure Black
-  // Base is OFF (the multiply layers crush to near-black against the
-  // BlackBase=ON path). The _blackBase hint flips it off automatically
-  // when this preset is selected so the cool look is one-cycle-away
-  // instead of requiring a settings dive.
-  29: {
-    _blackBase: 0,
-    paletteOverride: 0x00ff55,
-    bgPatternId: 6,                                   // Plasma FBM
-    bgTime: 0.0,
-    u_iters_bg: 1, u_scale_bg: 0.0013, u_invBase_bg: 9.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.7,
-    K_COSMIC_bg: 0.1,
-    fgPatternId: 6,                                   // Plasma FBM
-    fgAlpha: 2.0, fgBlend: 1 /* Multiply */, fgHue: 0, fgTime: 0.0,
-    u_iters_fg: 1, u_scale_fg: 0.0013, u_invBase_fg: 20.0,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 1.2,
-    fg2PatternId: 6,                                  // Plasma FBM
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.0,
-    u_iters_fg2: 1, u_scale_fg2: 0.0013, u_invBase_fg2: 9.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 1.0,
-    K_COSMIC_fg2: 0.4,
-  },
-  // Index 30: Stone Folds. (v14) Mandelbox carries the where-to-darken
-  // mask (folds = recess), Plasma FBM adds a flowing energy hint,
-  // stone texture in multiply gives the surface its weight.
-  30: {
-    bgPatternId: 4,                                   // Mandelbox
-    bgTime: 1.5,
-    u_iters_bg: 8, u_scale_bg: 0.0048, u_invBase_bg: 4.5,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.6,
-    K_COSMIC_bg: 1.6,
-    fgPatternId: 6,                                   // Plasma FBM
-    fgAlpha: 0.6, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.6,
-    u_iters_fg: 4, u_scale_fg: 0.0018, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.4,
-    K_COSMIC_fg: 0.5,
-    fg2PatternId: -1,                                  // unused
-    fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
-    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0,
-    K_COSMIC_fg2: 0,
-    texId: 'stone',                                    // (v14) 4th layer
-    texBlend: 1, texAlpha: 0.85, texHue: 0.0, texScale: 0.005, texBrightness: 1.0,
-  },
-  // Index 31: Tile Track. (v14) Voronoi gives sharp cell breaks ;
-  // tile texture grouted across them reads as a cracked-tile floor.
-  // Hex Pulse Radar fg adds a subtle shimmer at cell centers.
-  31: {
-    bgPatternId: 2,                                   // Voronoi
-    bgTime: 0.4,
-    u_iters_bg: 6, u_scale_bg: 0.0024, u_invBase_bg: 9.0,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
-    K_COSMIC_bg: 0.9,
-    fgPatternId: 14,                                  // Hex Pulse Radar
-    fgAlpha: 0.4, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.7,
-    u_iters_fg: 4, u_scale_fg: 0.0012, u_invBase_fg: 9.0,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.3,
-    K_COSMIC_fg: 0.4,
-    fg2PatternId: -1,
-    fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
-    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0,
-    K_COSMIC_fg2: 0,
-    texId: 'tile',
-    texBlend: 1, texAlpha: 0.95, texHue: 0.0, texScale: 0.004, texBrightness: 1.0,
   },
   // Index 32: Sheet Metal. (v14) Kali IFS provides angular celestial
   // bands ; brushed metal multiplied through gives the bands a real
@@ -42376,93 +42384,6 @@ const MULTI_LAYER_PRESETS = {
     K_COSMIC_fg2: 0,
     texId: 'metal',
     texBlend: 1, texAlpha: 0.9, texHue: 0.0, texScale: 0.0035, texBrightness: 1.05,
-  },
-  33: {
-    paletteOverride: 0x00ff55,                        // bright spring green
-    bgPatternId: 17,                                  // Panel Maze (lab 6)
-    bgTime: 0.4,
-    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
-    K_COSMIC_bg: 0.9,
-    fgPatternId: 15,                                  // Cyber Datamosh (lab 15)
-    fgAlpha: 1.55, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.05,
-    u_iters_fg: 1, u_scale_fg: 0.0006, u_invBase_fg: 10.2,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.0,
-    K_COSMIC_fg: 1.8,                                 // lab: 2.45
-    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
-    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 2.5,                                // lab: 4.7
-  },
-  // Index 34: Toxin. Wave Interference fg gives rippling concentric
-  // bands ; combined with the green tint and Mandelbox multiply this
-  // reads as a toxic liquid surface.
-  // Tamed for Pure Black Base off. Originals: K_COSMIC_fg
-  // 3.8, K_COSMIC_fg2 4.7.
-  34: {
-    paletteOverride: 0x00ff55,                        // bright spring green
-    bgPatternId: 17,                                  // Panel Maze (lab 6)
-    bgTime: 0.4,
-    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
-    K_COSMIC_bg: 0.9,
-    fgPatternId: 3,                                   // Wave Interference (lab 8)
-    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.25,
-    u_iters_fg: 9, u_scale_fg: 0.0043, u_invBase_fg: 10.2,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.91,
-    K_COSMIC_fg: 2.3,                                 // lab: 3.8
-    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
-    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 2.5,                                // lab: 4.7
-  },
-  // Index 35: Ooze. Plasma FBM fg gives smooth flowing organic motion ;
-  // the green tint + Mandelbox cell structure reads as viscous oozing
-  // slime trailing down the maze walls.
-  // Tamed for Pure Black Base off. Originals: K_COSMIC_fg
-  // 6.0, K_COSMIC_fg2 4.7.
-  35: {
-    paletteOverride: 0x00ff55,                        // bright spring green
-    bgPatternId: 17,                                  // Panel Maze (lab 6)
-    bgTime: 0.4,
-    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
-    K_COSMIC_bg: 0.9,
-    fgPatternId: 6,                                   // Plasma FBM (lab 9)
-    fgAlpha: 1.4, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.45,
-    u_iters_fg: 8, u_scale_fg: 0.0112, u_invBase_fg: 5.5,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.62,
-    K_COSMIC_fg: 3.5,                                 // lab: 6.0
-    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
-    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 2.5,                                // lab: 4.7
-  },
-  // Index 36: Phasm. Holographic Glitch fg with high alpha + frozen time
-  // (fgTime=0) gives sharp scanline tears that read as a holographic
-  // phantom flickering through the green maze.
-  // Tamed for Pure Black Base off. Originals: K_COSMIC_fg
-  // 6.0, K_COSMIC_fg2 4.7.
-  36: {
-    paletteOverride: 0x00ff55,                        // bright spring green
-    bgPatternId: 17,                                  // Panel Maze (lab 6)
-    bgTime: 0.4,
-    u_iters_bg: 9, u_scale_bg: 0.0111, u_invBase_bg: 9.8,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.55,
-    K_COSMIC_bg: 0.9,
-    fgPatternId: 10,                                  // Holographic Glitch (lab 11)
-    fgAlpha: 2.0, fgBlend: 0 /* Add */, fgHue: 0, fgTime: 0.0,
-    u_iters_fg: 3, u_scale_fg: 0.0168, u_invBase_fg: 9.2,
-    u_hueSpin_fg: 0, u_satBase_fg: 1.0,
-    K_COSMIC_fg: 3.5,                                 // lab: 6.0
-    fg2PatternId: 4,                                  // Mandelbox Folds (lab 2)
-    fg2Alpha: 1.0, fg2Blend: 1 /* Multiply */, fg2Hue: 0, fg2Time: 0.35,
-    u_iters_fg2: 10, u_scale_fg2: 0.0196, u_invBase_fg2: 2.0,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0.11,
-    K_COSMIC_fg2: 2.5,                                // lab: 4.7
   },
   // Index 37 : Claude Special. First in-game preset to use both venturi
   // corrugation AND the ported Claude Custom (sabosugi-derived) fractal
@@ -42494,24 +42415,6 @@ const MULTI_LAYER_PRESETS = {
     venturiFreq: 0.0245, venturiWarp: 0.2,
     venturiBias: -0.3, venturiSharp: 0.415,
     venturiRidgeTone: 1.27, venturiValleyPop: 2.7,
-  },
-  // Index 38: Goop. User-authored ; Apollonian background with a Circuit Traces
-  // fg overlay (hue 0.455), no fg2.
-  38: {
-    bgPatternId: 1,                                  // Apollonian Gasket
-    bgTime: 0.2,
-    u_iters_bg: 6, u_scale_bg: 0.0135, u_invBase_bg: 13.5,
-    u_hueSpin_bg: 0, u_satBase_bg: 0.89,
-    K_COSMIC_bg: 0.45,
-    fgPatternId: 9,                                  // Circuit Traces
-    fgAlpha: 1.5, fgBlend: 3, fgHue: 0, fgTime: 1.55,
-    u_iters_fg: 3, u_scale_fg: 0.0016, u_invBase_fg: 8,
-    u_hueSpin_fg: 0, u_satBase_fg: 0.92,
-    K_COSMIC_fg: 0.4,
-    fg2PatternId: -1,
-    fg2Alpha: 0, fg2Blend: 0, fg2Hue: 0, fg2Time: 0,
-    u_iters_fg2: 1, u_scale_fg2: 0.001, u_invBase_fg2: 2,
-    u_hueSpin_fg2: 0, u_satBase_fg2: 0, K_COSMIC_fg2: 0,
   },
 };
 
@@ -45144,41 +45047,6 @@ function buildRoomGraphLevel(level) {
       '  return zoneSample(idxV, tt, val);',
       '}',
       // ============================================================
-      // PATTERN 2: Voronoi Cells (cellular structure, edges bright)
-      // ============================================================
-      'float voronoi3(vec3 x) {',
-      '  vec3 p = floor(x);',
-      '  vec3 f = fract(x);',
-      '  float d = 1.0;',
-      '  for (int k = -1; k <= 1; k++)',
-      '  for (int j = -1; j <= 1; j++)',
-      '  for (int i = -1; i <= 1; i++) {',
-      '    vec3 g = vec3(i, j, k);',
-      '    vec3 o = hash33(p + g);',
-      '    d = min(d, length(g + o - f));',
-      '  }',
-      '  return d;',
-      '}',
-      'vec3 patternVoronoi(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 accum = vec3(0.0);',
-      // Voronoi3 internally runs a 3x3x3 = 27-iteration loop per call. Layer
-      // count is hard-capped at 2 here (regardless of user u_iters) so the
-      // fragment cost stays at ~54 ops instead of 297. Lab-level perf
-      // complaints all stemmed from the layer count scaling with u_iters.
-      '  for (int layer = 0; layer < 2; layer++) {',
-      '    if (layer >= u_iters) break;',
-      '    float lf = float(layer);',
-      '    float sMul = pow(1.7, lf * 0.6);',
-      '    vec3 q = p * sMul + u_off * lf;',
-      '    float d = voronoi3(q + vec3(0.0, tt * 0.05, 0.0));',
-      '    float edge = 1.0 - smoothstep(0.05, 0.45, d);',
-      '    float val = clamp(edge * 4.0 / u_valDiv * 80.0, 0.0, 4.0);',
-      '    float idxV = fract(lf * 0.142857 + d * 0.5);',
-      '    accum += zoneSample(idxV, tt, val) * pow(0.65, lf);',
-      '  }',
-      '  return accum;',
-      '}',
-      // ============================================================
       // PATTERN 3: Wave Interference (sum of plane waves)
       // ============================================================
       'vec3 patternWaves(vec3 p, vec3 zoneC, float tt) {',
@@ -45225,41 +45093,6 @@ function buildRoomGraphLevel(level) {
       '  float val = clamp(lum * 80.0 / u_valDiv, 0.0, 4.5);',
       '  float idxV = fract(length(q) * 0.1);',
       '  return zoneSample(idxV, tt, val);',
-      '}',
-      // ============================================================
-      // PATTERN 5: Hex Lattice (extruded 2D hex grid, layered)
-      // ============================================================
-      'float hex2D(vec2 q, float cell) {',
-      '  q /= cell;',
-      '  vec2 r = vec2(1.0, 1.7320508);',
-      '  vec2 h = r * 0.5;',
-      '  vec2 a = mod(q, r) - h;',
-      '  vec2 b = mod(q + h, r) - h;',
-      '  vec2 d = (dot(a, a) < dot(b, b)) ? a : b;',
-      '  return max(abs(d.x), abs(d.y * 0.86603 + d.x * 0.5));',
-      '}',
-      'vec3 patternHex(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 accum = vec3(0.0);',
-      // Hex cell pitch in PATTERN space is 1/u_invBase. In WORLD space it
-      // becomes (1/u_invBase) / u_scale. With high u_invBase + low u_scale
-      // the cells go subpixel (~5 world units). Floor the pattern-space
-      // cell at 0.5 so the hex tiling is always at least visible.
-      // Layer count capped at 3 (vs 5) because the per-layer scale doubles
-      // each time (pow(1.5, lf)), and beyond layer 3 the hexes are
-      // sub-pixel anyway. User u_iters still terminates the loop early.
-      '  float cell = max(0.5, 1.0 / max(0.001, u_invBase));',
-      '  for (int layer = 0; layer < 3; layer++) {',
-      '    if (layer >= u_iters) break;',
-      '    float lf = float(layer);',
-      '    float ca = cos(lf * 1.04719), sa = sin(lf * 1.04719);',
-      '    vec3 q = vec3(ca * p.x - sa * p.y, sa * p.x + ca * p.y, p.z);',
-      '    float h = hex2D(q.xy + vec2(tt * 0.10, 0.0), cell * pow(1.5, lf));',
-      '    float edge = 1.0 - smoothstep(0.42, 0.50, h);',
-      '    float val = clamp(edge * 2.0 / u_valDiv * 80.0, 0.0, 2.2);',
-      '    float idxV = fract(lf * 0.142857 + h * 0.25);',
-      '    accum += zoneSample(idxV, tt, val) * pow(0.70, lf);',
-      '  }',
-      '  return accum;',
       '}',
       // ============================================================
       // PATTERN 6: Plasma FBM (fractal Brownian motion)
@@ -45317,23 +45150,6 @@ function buildRoomGraphLevel(level) {
       '  return desat * val * 1.5;',
       '}',
       // ============================================================
-      // PATTERN 7: Circumpunct Lattice (rings around lattice convergence pts)
-      // ============================================================
-      'vec3 patternCircumpunct(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 cell = floor(p) + 0.5;',
-      '  vec3 d = p - cell;',
-      '  float r = length(d);',
-      '  float ringFreq = 6.0 + u_invBase * 0.5;',
-      '  float rings = 0.5 + 0.5 * cos(r * ringFreq - tt * 1.2);',
-      '  rings = pow(rings, 2.0);',
-      '  float center = 1.0 - smoothstep(0.04, 0.10, r);',
-      '  float boundaryFade = 1.0 - smoothstep(0.42, 0.55, r);',
-      '  float lum = (rings * 0.6 + center * 1.4) * boundaryFade;',
-      '  float val = clamp(lum * 4.5 / u_valDiv * 80.0, 0.0, 4.5);',
-      '  float idxV = hash13(cell);',
-      '  return zoneSample(idxV, tt, val);',
-      '}',
-      // ============================================================
       // Patterns 9-16 ported from
       // wall_pattern_lab.html. Same uniforms, same compositing pipeline.
       // ============================================================
@@ -45367,26 +45183,6 @@ function buildRoomGraphLevel(level) {
       '  float val = max(trace, node * 1.8);',
       '  return zoneSample(h, tt, val * 1.2);',
       '}',
-      // PATTERN 10: Holographic Glitch
-      'vec3 patternGlitch(vec3 p, vec3 zoneC, float tt) {',
-      '  float scan = 0.5 + 0.5 * sin(p.y * (40.0 + float(u_iters) * 5.0) + tt * 3.0);',
-      '  scan = pow(scan, 2.0);',
-      '  float bandY = floor(p.y * 12.0 + tt * 1.2);',
-      '  float bandHash = hash13(vec3(bandY, 0.0, floor(tt * 1.5)));',
-      '  float jitter = (bandHash > 0.85) ? (bandHash - 0.85) * 6.0 : 0.0;',
-      '  vec3 pj = p + vec3(jitter * 0.3, 0.0, 0.0);',
-      '  float n0 = hash13(pj * 8.0);',
-      '  float n1 = hash13(pj * 8.0 + vec3(0.05, 0.0, 0.0));',
-      '  float n2 = hash13(pj * 8.0 - vec3(0.05, 0.0, 0.0));',
-      '  float wave = 0.5 + 0.5 * sin(p.x * 2.0 + tt * 0.25);',
-      '  float val = scan * wave;',
-      '  vec3 col = zoneSample(bandHash, tt, val) / 1.5;',
-      '  col.r *= 0.9 + n1 * 0.6;',
-      '  col.g *= 0.9 + n0 * 0.4;',
-      '  col.b *= 0.9 + n2 * 0.7;',
-      '  if (jitter > 0.0) col = mix(col, vec3(1.0, 0.9, 0.8), 0.6);',
-      '  return col;',
-      '}',
       // PATTERN 11: Cellular Membrane (Worley)
       'vec3 patternCellular(vec3 p, vec3 zoneC, float tt) {',
       '  vec3 pid = floor(p);',
@@ -45417,45 +45213,6 @@ function buildRoomGraphLevel(level) {
       '    val += smoothstep(1.5, 0.0, distToRoom) * 0.20;',
       '  }',
       '  return zoneSample(hash13(nearestId), tt, val) / 1.5;',
-      '}',
-      // PATTERN 12: Domain-Warped Streaks
-      'vec3 patternStreaks(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 q = p;',
-      '  vec3 warp = vec3(0.0);',
-      '  for (int k = 0; k < 6; k++) {',
-      '    if (k >= u_iters) break;',
-      '    warp.x = sin(q.y * 1.3 + tt * 0.3 + warp.z * 2.0);',
-      '    warp.y = sin(q.z * 1.7 + tt * 0.4 + warp.x * 2.0);',
-      '    warp.z = sin(q.x * 1.1 + tt * 0.2 + warp.y * 2.0);',
-      '    q = p + warp * (0.6 + float(k) * 0.2);',
-      '  }',
-      '  float field = warp.x + warp.y * 0.5 + warp.z * 0.3;',
-      '  float streaks = abs(fract(field * 2.0) - 0.5) * 2.0;',
-      '  streaks = smoothstep(0.85, 0.95, 1.0 - streaks);',
-      // Brightness reduction. glow was 0.15 + 0.15*sin and
-      // streaks were *1.5 ; dropped to ~60% so streak ridges don\'t flare
-      // up to HDR levels against the brighter wall patterns. Spatial shape
-      // and animation timing untouched.
-      '  float glow = 0.09 + 0.09 * sin(field * 3.0 + tt * 0.5);',
-      '  float val = max(streaks * 0.9, glow);',
-      '  float idxV = fract(field * 0.25 + 0.5);',
-      '  return zoneSample(idxV, tt, val) / 1.5;',
-      '}',
-      // PATTERN 13: Caustic Shimmer
-      'vec3 patternCaustic(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 q = p * 1.5;',
-      '  float a1 = sin(q.x * 1.7 + q.y * 0.6 + tt * 0.7);',
-      '  float a2 = sin(q.y * 1.3 - q.z * 0.9 + tt * 0.9);',
-      '  float a3 = sin(q.z * 1.1 + q.x * 0.4 + tt * 0.5);',
-      '  float caustic = a1 * a2 + a2 * a3 + a3 * a1;',
-      '  caustic = pow(0.5 + 0.5 * caustic, 6.0);',
-      // Brightness reduction. Caustic was *1.6 with a 0.10
-      // ambient hum ; dropped to *0.9 with a 0.06 hum so the bright caustic
-      // ripples stop washing out the scene. Spatial pattern and shimmer
-      // animation untouched.
-      '  float hum = 0.06 + 0.03 * sin(q.x + q.y + q.z + tt * 0.4);',
-      '  float val = caustic * 0.9 + hum;',
-      '  return zoneSample(caustic, tt, val) / 1.5;',
       '}',
       // PATTERN 14: Hex Pulse Radar
       'vec3 patternHexPulse(vec3 p, vec3 zoneC, float tt) {',
@@ -45524,10 +45281,10 @@ function buildRoomGraphLevel(level) {
       '  vec3 col = baseColDesat * val;',
       '  return col;',
       '}',
-      // PATTERN 16: Neon Cube (raymarched).
-      // Three.js auto-provides cameraPosition as a built-in uniform on
-      // ShaderMaterial; the existing wall shader already references it
-      // for fresnel, so it works here too.
+      // (v27) Shared SDF helpers (sdBoxFrame + neonSceneSDF). The NeonCube
+      // pattern that originally lived here was stripped because no theme
+      // referenced it ; LayeredCube (pattern 19) still uses these helpers,
+      // so they stay.
       'float sdBoxFrame(vec3 p, vec3 b, float e) {',
       '  p = abs(p) - b;',
       '  vec3 q = abs(p + e) - e;',
@@ -45541,36 +45298,6 @@ function buildRoomGraphLevel(level) {
       '  cellId = floor(wp / CELL);',
       '  vec3 local = mod(wp, CELL) - CELL * 0.5;',
       '  return sdBoxFrame(local, vec3(CELL * 0.42), 0.05);',
-      '}',
-      'vec3 patternNeonCube(vec3 p, vec3 zoneC, float tt) {',
-      '  vec3 ro = vWorldPos * 0.003 + vec3(tt * 0.05, 0.0, 0.0);',
-      '  vec3 rd = normalize(vWorldPos - cameraPosition);',
-      '  float t = 0.0;',
-      '  bool hit = false;',
-      '  vec3 hitId = vec3(0.0);',
-      '  float hitT = 0.0;',
-      '  for (int i = 0; i < 32; i++) {',
-      '    if (i >= u_iters * 3) break;',
-      '    vec3 wp = ro + rd * t;',
-      '    vec3 cid;',
-      '    float d = neonSceneSDF(wp, cid);',
-      '    if (d < 0.006) { hit = true; hitId = cid; hitT = t; break; }',
-      '    if (t > 9.0) break;',
-      '    t += max(d * 0.85, 0.01);',
-      '  }',
-      '  vec3 col = vec3(0.0);',
-      '  if (hit) {',
-      '    float h = hash13(hitId);',
-      '    vec3 cA; vec3 cB;',
-      '    zonePair(h, tt, cA, cB);',
-      '    vec3 cubeCol = (h > 0.5) ? cA : cB;',
-      '    cubeCol = mix(vec3(dot(cubeCol, vec3(0.299, 0.587, 0.114))), cubeCol, u_satBase);',
-      '    float pulse = 0.55 + 0.45 * sin(hash13(hitId + vec3(7.0)) * 6.28 + tt * 1.5);',
-      '    float fog = exp(-hitT * 0.28);',
-      '    col = cubeCol * pulse * fog * 0.95;',
-      '  }',
-      '  col += zoneSample(0.0, tt, 0.027);',
-      '  return col;',
       '}',
       // PATTERN 17: Panel Maze (architectural plating)
       'vec3 patternPanelMaze(vec3 p, vec3 zoneC, float tt) {',
@@ -45751,22 +45478,17 @@ function buildRoomGraphLevel(level) {
       '  u_hueSpin = hueSpinIn;',
       '  u_satBase = satBaseIn;',
       '  vec3 p = wp * u_scale;',
+      // (v27) Dispatch table : kept only the 14 pattern IDs reachable
+      // from any active MAP_PRESETS theme. 2/5/7/10/12/13/16 stripped.
       '  if (pid == 0)  return patternKali(p, zoneC, tt);',
       '  if (pid == 1)  return patternApollonian(p, zoneC, tt);',
-      '  if (pid == 2)  return patternVoronoi(p, zoneC, tt);',
       '  if (pid == 3)  return patternWaves(p, zoneC, tt);',
       '  if (pid == 4)  return patternMandelbox(p, zoneC, tt);',
-      '  if (pid == 5)  return patternHex(p, zoneC, tt);',
       '  if (pid == 6)  return patternPlasma(p, zoneC, tt);',
-      '  if (pid == 7)  return patternCircumpunct(p, zoneC, tt);',
       '  if (pid == 9)  return patternCircuit(p, zoneC, tt);',
-      '  if (pid == 10) return patternGlitch(p, zoneC, tt);',
       '  if (pid == 11) return patternCellular(p, zoneC, tt);',
-      '  if (pid == 12) return patternStreaks(p, zoneC, tt);',
-      '  if (pid == 13) return patternCaustic(p, zoneC, tt);',
       '  if (pid == 14) return patternHexPulse(p, zoneC, tt);',
       '  if (pid == 15) return patternCyberMosh(p, zoneC, tt);',
-      '  if (pid == 16) return patternNeonCube(p, zoneC, tt);',
       '  if (pid == 17) return patternPanelMaze(p, zoneC, tt);',
       '  if (pid == 18) return patternRingTunnel(p, zoneC, tt);',
       '  if (pid == 19) return patternLayeredCube(p, zoneC, tt);',
@@ -45933,7 +45655,7 @@ function buildRoomGraphLevel(level) {
       '    float fracPulse = 0.92 + 0.12 * sin(time * 0.35);',
       '    float shimmer   = 0.90 + 0.18 * sin(time * 1.10 + vWorldPos.x * 0.003 + vWorldPos.z * 0.003);',
       '    vec3 cosmic;',
-      '    if (uPattern == 20 || uPattern == 21 || uPattern == 22 || uPattern == 23 || uPattern == 24 || uPattern == 25 || uPattern == 26 || uPattern == 27 || uPattern == 28 || uPattern == 29 || uPattern == 30 || uPattern == 31 || uPattern == 32 || uPattern == 33 || uPattern == 34 || uPattern == 35 || uPattern == 36 || uPattern == 37) {',
+      '    if (uPattern == 21 || uPattern == 23 || uPattern == 32 || uPattern == 37) {',
       '      cosmic = cosmicField(vWorldPos, uCompositeTint, time);',
       '    } else {',
       // Solo mode: use the solo uniforms (managed by the wallParams per-
@@ -47952,6 +47674,27 @@ function gameLoop(timestamp) {
   } else {
     const el = document.getElementById('fps-counter');
     if (el && el.style.display !== 'none') el.style.display = 'none';
+  }
+
+  // The team-lineup cinematic only needs the camera/lineup tick and a render.
+  // Keep the full combat simulation paused here so warmup visuals do not pay
+  // for gas wakes, bot loops, projectiles, particles, HUD, and audio on Quest.
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
+    if (typeof _lssUpdateSpectatorCinematic === 'function') {
+      try {
+        _lssUpdateSpectatorCinematic();
+      } catch (e) {
+        console.warn('[cinematic] tick failed:', e && e.message);
+        try { _lssCompleteSpectatorCinematic(); } catch (_) { _cinematic.active = false; }
+      }
+    }
+    if (_cinematic.active) {
+      if (player && player.velocity) player.velocity.set(0, 0, 0);
+      if (typeof input !== 'undefined' && input) { input.mouseDX = 0; input.mouseDY = 0; }
+      const _xrActive = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+      if (typeof document === 'undefined' || !document.hidden || _xrActive) renderFrame();
+      return;
+    }
   }
 
   // (lssdev test mode) On the first playing-state frame of a test-mode match,
@@ -58033,6 +57776,7 @@ window.lssGmaps = {
   detachCity: _lssGmapsDetachCity,
   testKey: _lssGmapsTestKey
 };
+
 
 } // end _bootLSS
 
