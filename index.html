@@ -87,12 +87,15 @@ canvas { display: block; }
 body.vr-active #cockpit-frame,
 body.vr-active #ability-overlay-frame,
 body.vr-active #gun-layer,
-body.vr-active #circumpunct-hud,
 body.vr-active #hud,
 body.vr-active #ability-pie,
 body.vr-active #gamepad-indicator,
 body.vr-active .hit-marker {
   display: none !important;
+}
+body.vr-active #circumpunct-hud {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* The floating "ENTER VR" button is now
@@ -9260,6 +9263,9 @@ function spawnNetworkProjectile(data, fromPeerId) {
   if (typeof data.sizeMult === 'number' && data.sizeMult > 0) {
     proj.sizeMult = data.sizeMult;
   }
+  if (typeof data.smokeTrailLengthMult === 'number' && data.smokeTrailLengthMult > 0) {
+    proj.smokeTrailLengthMult = data.smokeTrailLengthMult;
+  }
   // Mirror explode-vs-bounce flags so peers see the
   // same impact behaviour as the shooter.
   if (typeof data.splash === 'number') proj.splash = data.splash;
@@ -9330,6 +9336,7 @@ function broadcastAbilityProjectile(proj) {
     isArcWave: !!proj.isArcWave,
     isCluster: !!proj.isCluster,
     sizeMult: (typeof proj.sizeMult === 'number') ? proj.sizeMult : 1.0,
+    smokeTrailLengthMult: (typeof proj.smokeTrailLengthMult === 'number') ? proj.smokeTrailLengthMult : 2.0,
     // Without these, peers spawn projectiles with
     // splash=0 / no tracking flags, so the shouldExplode test in
     // Projectile.update fails and rockets bounce instead of explode.
@@ -11108,6 +11115,23 @@ function _xrEnsureAuxMesh() {
   return xrAuxMesh;
 }
 
+function _xrShouldShowGameplayHud() {
+  if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
+  if (typeof player === 'undefined' || !player || !player.chassis) return false;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  if (typeof _countdownActive !== 'undefined' && _countdownActive) return false;
+  if (typeof settingsOpen !== 'undefined' && settingsOpen) return false;
+  if (typeof game !== 'undefined' && game && game.state === 'select') return false;
+  try {
+    if (document.body && document.body.classList.contains('lss-cinematic-active')) return false;
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) return false;
+    const lob = document.getElementById('lobby');
+    if (lob && lob.style.display !== 'none') return false;
+  } catch (_) {}
+  return true;
+}
+
 function _xrDrawAuxHud() {
 const ctx = _xrAuxCtx;
   const W = _xrAuxCanvas.width, H = _xrAuxCanvas.height;
@@ -11126,12 +11150,18 @@ const ctx = _xrAuxCtx;
   ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 60);
 
   let timerStr = '', stateStr = '';
-  try {
-    const tEl = document.getElementById('round-timer');
-    if (tEl && tEl.textContent) timerStr = tEl.textContent;
-    const sEl = document.getElementById('round-state');
-    if (sEl && sEl.textContent) stateStr = sEl.textContent;
-  } catch (_) {}
+  if (typeof game !== 'undefined' && game) {
+    const timerValue = game.state === 'warmup' ? game.warmupTimer : game.roundTimer;
+    const minutes = Math.floor(Math.max(0, timerValue || 0) / 60);
+    const seconds = Math.floor(Math.max(0, timerValue || 0) % 60);
+    timerStr = (game.raceNoTimer && game.state !== 'warmup')
+      ? '--'
+      : (minutes + ':' + String(seconds).padStart(2, '0'));
+    stateStr = game.state === 'warmup' ? 'WARMUP' :
+      game.state === 'playing' ? 'ROUND ' + (game.currentRound || 1) :
+      game.state === 'roundEnd' ? 'ROUND OVER' :
+      game.state === 'matchEnd' ? (game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A WINS' : 'FLEET B WINS') : '';
+  }
   if (timerStr) {
     ctx.font = '600 88px Orbitron, sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,1.0)';
@@ -13498,22 +13528,21 @@ function renderFrame() {
     // to render the scene so the headset isn't black.
     try {
       _xrSyncDollyBeforeRender();
+      const _xrShowHud = (typeof _xrShouldShowGameplayHud === 'function') ? _xrShouldShowGameplayHud() : true;
+      const _hudMesh = _xrEnsureHudMesh();
+      if (_hudMesh) _hudMesh.visible = _xrShowHud;
+      if (xrAuxMesh) xrAuxMesh.visible = false;
+      if (_xrShowHud && renderFrame._xrHudWasVisible !== true) {
+        if (typeof drawCircumpunctHUD === 'function') drawCircumpunctHUD();
+        if (_xrHudTex) _xrHudTex.needsUpdate = true;
+        _xrHudUploadCounter = 0;
+      }
+      renderFrame._xrHudWasVisible = _xrShowHud;
       if (_xrHudTex) {
         _xrHudUploadCounter++;
         if (_xrHudUploadCounter >= _xrHudUpdateCadence()) {
           _xrHudTex.needsUpdate = true;
           _xrHudUploadCounter = 0;
-        }
-      }
-      // Skip the aux-HUD redraw entirely while the
-      // mesh is hidden. Was burning ~5 ms of Canvas2D fillText per beat
-      // on a plane the user never sees ; pure waste.
-      if (xrAuxMesh && _xrAuxTex && xrAuxMesh.visible) {
-        _xrAuxUploadCounter++;
-        if (_xrAuxUploadCounter >= _xrHudUpdateCadence()) {
-          _xrDrawAuxHud();
-          _xrAuxTex.needsUpdate = true;
-          _xrAuxUploadCounter = 0;
         }
       }
       _xrUpdateMenuMirror();
@@ -16667,6 +16696,9 @@ class Projectile {
     // projectile size ; ability projectiles can override (e.g. Cluster
     // Missile sets sizeMult=2.8 so it reads as a heavy missile from far).
     this.sizeMult = 1.0;
+    // Smoke/cloud plumes use a per-projectile length multiplier so rockets can
+    // carry longer exhaust without reintroducing per-frame smoke-puff spawns.
+    this.smokeTrailLengthMult = 2.0;
 
     this.color = color || 0xffaa00;
     // Reuse the shared core geometry instead of allocating
@@ -16684,7 +16716,7 @@ class Projectile {
 
     // --- Enhanced multi-segment ribbon trail (per-vertex color gradient) ---
     this.trailColor = color || 0xffaa00;
-    const trailSegs = 14; // slightly longer ribbon (8-14 history positions recommended)
+    const trailSegs = 28; // doubled ribbon history so non-smoke projectile trails read longer
     this.trailSegs = trailSegs;
     this.trailPositions = new Float32Array(trailSegs * 3);
     for (let i = 0; i < trailSegs; i++) {
@@ -16882,7 +16914,10 @@ class Projectile {
         const _spd = (typeof this.velocity !== 'undefined' && this.velocity)
           ? Math.sqrt(this.velocity.x*this.velocity.x + this.velocity.y*this.velocity.y + this.velocity.z*this.velocity.z)
           : 0.0;
-        const _coneLen = Math.min(280, Math.max(60, _spd * 0.20)) * _szMC;
+        const _trailLenMult = Math.max(0.25, Math.min(3.0,
+          (typeof this.smokeTrailLengthMult === 'number') ? this.smokeTrailLengthMult : 2.0
+        ));
+        const _coneLen = Math.min(560, Math.max(120, _spd * 0.20 * _trailLenMult)) * _szMC;
         const _coneRad = 18 * _szMC;
         // Forward direction = velocity normalized ; if stationary, point
         // along the projectile mesh's facing (best-effort fallback).
@@ -29178,6 +29213,7 @@ function fireProjectile(origin, dir, w) {
       isArcWave:      !!proj.isArcWave,
       isSonar:        !!proj.isSonar,
       sizeMult:       (typeof proj.sizeMult === 'number') ? proj.sizeMult : 1.0,
+      smokeTrailLengthMult: (typeof proj.smokeTrailLengthMult === 'number') ? proj.smokeTrailLengthMult : 2.0,
     });
   }
 }
@@ -31184,6 +31220,9 @@ function _drainStaggeredRocketSalvo(dt) {
     cfg.color
   );
   if (cfg.smokeTrail) proj.smokeTrail = true;
+  if (typeof cfg.smokeTrailLengthMult === 'number' && cfg.smokeTrailLengthMult > 0) {
+    proj.smokeTrailLengthMult = cfg.smokeTrailLengthMult;
+  }
   if (cfg.removeHaze && typeof proj.removeHaze === 'function') proj.removeHaze();
   if (tracking) {
     proj.tracking = true;
@@ -40401,7 +40440,7 @@ const BAKED_DEFAULTS = {
   "annVoice": "Microsoft Imani Online (Natural) - English (Tanzania)",
   "annPitch": 1,
   "annRate": 1.5,
-  "annVolume": 0.8,
+  "annVolume": 0.3,
   "reverbWet": 0.4000000059604645,
   "ambientDuckEnabled": true,
   // New defaults baked from Ashman's
@@ -40500,7 +40539,7 @@ const SHIPPED_DEFAULTS = {
   "annVoice": "Microsoft Imani Online (Natural) - English (Tanzania)",
   "annPitch": 1,
   "annRate": 1.5,
-  "annVolume": 0.9,
+  "annVolume": 0.3,
   "reverbWet": 0.4000000059604645,
   "ambientDuckEnabled": true,
   "wallPattern": 37,
@@ -42082,7 +42121,16 @@ function loadSettings() {
       if (typeof data.annSource === 'string') announcer.voiceSource = data.annSource;
       if (typeof data.annPitch  === 'number') announcer.pitch  = data.annPitch;
       if (typeof data.annRate   === 'number') announcer.rate   = data.annRate;
-      if (typeof data.annVolume === 'number') announcer.volume = data.annVolume;
+      if (typeof data.annVolume === 'number') {
+        const _oldDefaultAnnVol = data.annVolumeMigrated30 !== true &&
+          (Math.abs(data.annVolume - 0.9) < 0.0001 || Math.abs(data.annVolume - 0.8) < 0.0001);
+        announcer.volume = _oldDefaultAnnVol ? 0.30 : data.annVolume;
+        if (_oldDefaultAnnVol) {
+          data.annVolume = 0.30;
+          data.annVolumeMigrated30 = true;
+          try { localStorage.setItem('lss_settings', JSON.stringify(data)); } catch (_) {}
+        }
+      }
       if (typeof data.annVoice  === 'string' && data.annVoice) {
         announcer.voiceName = data.annVoice;
         // If voices already loaded, resolve immediately. Otherwise the
@@ -46869,7 +46917,7 @@ const announcer = {
   voiceName: null,         // persisted voice name (resolves to .voice on init)
   rate: 1.5,               // base / fallback rate; dynamic rates below override
   pitch: 1.0,              // natural pitch; lower the slider for more robotic feel
-  volume: 0.9,
+  volume: 0.30,
   globalGap: 600,          // ms between any two lines (anti-chain)
   cooldowns: {},
   _lastSpokenAt: 0,

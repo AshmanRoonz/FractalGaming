@@ -87,12 +87,15 @@ canvas { display: block; }
 body.vr-active #cockpit-frame,
 body.vr-active #ability-overlay-frame,
 body.vr-active #gun-layer,
-body.vr-active #circumpunct-hud,
 body.vr-active #hud,
 body.vr-active #ability-pie,
 body.vr-active #gamepad-indicator,
 body.vr-active .hit-marker {
   display: none !important;
+}
+body.vr-active #circumpunct-hud {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* The floating "ENTER VR" button is now
@@ -11112,6 +11115,23 @@ function _xrEnsureAuxMesh() {
   return xrAuxMesh;
 }
 
+function _xrShouldShowGameplayHud() {
+  if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
+  if (typeof player === 'undefined' || !player || !player.chassis) return false;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  if (typeof _countdownActive !== 'undefined' && _countdownActive) return false;
+  if (typeof settingsOpen !== 'undefined' && settingsOpen) return false;
+  if (typeof game !== 'undefined' && game && game.state === 'select') return false;
+  try {
+    if (document.body && document.body.classList.contains('lss-cinematic-active')) return false;
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) return false;
+    const lob = document.getElementById('lobby');
+    if (lob && lob.style.display !== 'none') return false;
+  } catch (_) {}
+  return true;
+}
+
 function _xrDrawAuxHud() {
 const ctx = _xrAuxCtx;
   const W = _xrAuxCanvas.width, H = _xrAuxCanvas.height;
@@ -11130,12 +11150,18 @@ const ctx = _xrAuxCtx;
   ctx.fillText('FLEET B   ' + scoreB, W * 0.73, 60);
 
   let timerStr = '', stateStr = '';
-  try {
-    const tEl = document.getElementById('round-timer');
-    if (tEl && tEl.textContent) timerStr = tEl.textContent;
-    const sEl = document.getElementById('round-state');
-    if (sEl && sEl.textContent) stateStr = sEl.textContent;
-  } catch (_) {}
+  if (typeof game !== 'undefined' && game) {
+    const timerValue = game.state === 'warmup' ? game.warmupTimer : game.roundTimer;
+    const minutes = Math.floor(Math.max(0, timerValue || 0) / 60);
+    const seconds = Math.floor(Math.max(0, timerValue || 0) % 60);
+    timerStr = (game.raceNoTimer && game.state !== 'warmup')
+      ? '--'
+      : (minutes + ':' + String(seconds).padStart(2, '0'));
+    stateStr = game.state === 'warmup' ? 'WARMUP' :
+      game.state === 'playing' ? 'ROUND ' + (game.currentRound || 1) :
+      game.state === 'roundEnd' ? 'ROUND OVER' :
+      game.state === 'matchEnd' ? (game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A WINS' : 'FLEET B WINS') : '';
+  }
   if (timerStr) {
     ctx.font = '600 88px Orbitron, sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,1.0)';
@@ -13502,22 +13528,21 @@ function renderFrame() {
     // to render the scene so the headset isn't black.
     try {
       _xrSyncDollyBeforeRender();
+      const _xrShowHud = (typeof _xrShouldShowGameplayHud === 'function') ? _xrShouldShowGameplayHud() : true;
+      const _hudMesh = _xrEnsureHudMesh();
+      if (_hudMesh) _hudMesh.visible = _xrShowHud;
+      if (xrAuxMesh) xrAuxMesh.visible = false;
+      if (_xrShowHud && renderFrame._xrHudWasVisible !== true) {
+        if (typeof drawCircumpunctHUD === 'function') drawCircumpunctHUD();
+        if (_xrHudTex) _xrHudTex.needsUpdate = true;
+        _xrHudUploadCounter = 0;
+      }
+      renderFrame._xrHudWasVisible = _xrShowHud;
       if (_xrHudTex) {
         _xrHudUploadCounter++;
         if (_xrHudUploadCounter >= _xrHudUpdateCadence()) {
           _xrHudTex.needsUpdate = true;
           _xrHudUploadCounter = 0;
-        }
-      }
-      // Skip the aux-HUD redraw entirely while the
-      // mesh is hidden. Was burning ~5 ms of Canvas2D fillText per beat
-      // on a plane the user never sees ; pure waste.
-      if (xrAuxMesh && _xrAuxTex && xrAuxMesh.visible) {
-        _xrAuxUploadCounter++;
-        if (_xrAuxUploadCounter >= _xrHudUpdateCadence()) {
-          _xrDrawAuxHud();
-          _xrAuxTex.needsUpdate = true;
-          _xrAuxUploadCounter = 0;
         }
       }
       _xrUpdateMenuMirror();
