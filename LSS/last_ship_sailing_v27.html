@@ -6355,10 +6355,68 @@ function handleNetEvent(evt, fromPeerId) {
     const b = new THREE.Vector3(evt.bx, evt.by, evt.bz);
     if (typeof spawnLightningBolt === 'function') {
       try {
-        spawnLightningBolt(a, b, 0x4169E1, 0.32, 8, 9.0);
-        spawnLightningBolt(a, b, 0x6080ff, 0.28, 6, 7.0);
+        // (v27) Match the shooter's full visual stack : main + secondary
+        // + halo + 5 parallel offset bolts. essential=true bypasses the
+        // VR strip-fx gate so peers don't silently lose the conduit when
+        // viewing in headset mode.
+        spawnLightningBolt(a, b, 0x4169E1, 0.32, 8, 9.0, true);
+        spawnLightningBolt(a, b, 0x6080ff, 0.28, 6, 7.0, true);
+        spawnLightningBolt(a, b, (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SYPHON : 0x4169E1, 0.32, 8, 14.0, true);
+        for (let oi = 0; oi < 5; oi++) {
+          const ox = (Math.random() - 0.5), oy = (Math.random() - 0.5), oz = (Math.random() - 0.5);
+          const oLen = Math.max(0.001, Math.sqrt(ox*ox + oy*oy + oz*oz));
+          const oMag = 40 + Math.random() * 30;
+          const offX = (ox / oLen) * oMag, offY = (oy / oLen) * oMag, offZ = (oz / oLen) * oMag;
+          const tint = (oi % 2 === 0) ? 0x88ccff
+            : ((typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SYPHON : 0x4169E1);
+          spawnLightningBolt(
+            new THREE.Vector3(a.x + offX, a.y + offY, a.z + offZ),
+            new THREE.Vector3(b.x + offX, b.y + offY, b.z + offZ),
+            tint, 0.20 + Math.random() * 0.10, 4, 4.0, true
+          );
+        }
       } catch (e) { console.warn('[v12m] siphon_beam replay failed:', e); }
     }
+    return;
+  }
+  // (v27) SLAYER Teleport dash trail from a peer. Reproduce the 10
+  // cloud puffs along the dash segment + the endpoint explosion. Peer
+  // state interpolation handles the actual position change ; this is
+  // purely the visual signature so the dash reads instead of looking
+  // like the ship snapped silently across the room.
+  if (evt.type === 'slayer_teleport_dash' && typeof evt.sx === 'number') {
+    try {
+      const _tdStart  = new THREE.Vector3(evt.sx, evt.sy, evt.sz);
+      const _tdDir    = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
+      const _tdLen    = (typeof evt.len === 'number') ? evt.len : 400;
+      const _tdEndPop = new THREE.Vector3(
+        _tdStart.x + _tdDir.x * (_tdLen - 200),
+        _tdStart.y + _tdDir.y * (_tdLen - 200),
+        _tdStart.z + _tdDir.z * (_tdLen - 200)
+      );
+      if (typeof spawnExplosion === 'function') {
+        spawnExplosion(_tdEndPop, 15);
+      }
+      if (typeof spawnFXBurst === 'function') {
+        const PUFF_COUNT = 10;
+        const _slayerCol = new THREE.Color(
+          (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x33ff66
+        );
+        for (let pi = 0; pi < PUFF_COUNT; pi++) {
+          const t = (pi + 0.5) / PUFF_COUNT;
+          const px = _tdStart.x + _tdDir.x * _tdLen * t + (Math.random() - 0.5) * 28;
+          const py = _tdStart.y + _tdDir.y * _tdLen * t + (Math.random() - 0.5) * 28;
+          const pz = _tdStart.z + _tdDir.z * _tdLen * t + (Math.random() - 0.5) * 28;
+          const puff = spawnFXBurst('cloud', { x: px, y: py, z: pz },
+            22 + Math.random() * 8,
+            0.85 + Math.random() * 0.45,
+            { startScale: 0.30, endScale: 1.50, segs: 14 });
+          if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) {
+            puff.material.uniforms.uBaseColor.value.copy(_slayerCol);
+          }
+        }
+      }
+    } catch (e) { console.warn('[v27 net] slayer_teleport_dash replay failed:', e); }
     return;
   }
   // Pre-match map sync. selectMap's "no-op if already selected"
@@ -7362,6 +7420,112 @@ function _getVortexCoreBeamConeGeometry() {
   if (_VORTEX_CORE_BEAM_CONE_GEO) return _VORTEX_CORE_BEAM_CONE_GEO;
   _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.25, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_CONE_GEO;
+}
+
+// (v27) Smoke-trail cone geometry + shader. Shared singletons : the
+// geometry is one unit cylinder (narrow at +Y, wide at -Y) that every
+// rocket scales per-frame ; the ShaderMaterial factory bakes the
+// projectile's trailColor into uniforms and returns a fresh material
+// per projectile so each rocket can color-grade independently.
+//
+// Axis convention after the per-frame quaternion alignment :
+//   local +Y -> world forward (velocity direction) -> rocket position
+//   local -Y -> world backward                     -> trail far end
+//
+// The fragment shader maps that axis to a "headFrac" in [0..1] :
+// 1 at the rocket end (hot, opaque), 0 at the trail tip (cool, fades to
+// nothing). Noise from a cheap 3-octave fbm gives the volume a cloudy
+// character without sampling textures.
+let _SMOKE_CONE_GEO = null;
+function _getSmokeConeGeometry() {
+  if (_SMOKE_CONE_GEO) return _SMOKE_CONE_GEO;
+  // Narrow tip at +Y (sits at rocket), wide base at -Y (trails behind).
+  // 14 radial segs + 6 along Y for a smoothly-shaded gradient surface.
+  _SMOKE_CONE_GEO = new THREE.CylinderGeometry(0.06, 1.0, 1, 14, 6, true);
+  return _SMOKE_CONE_GEO;
+}
+
+const _smokeConeForward = new THREE.Vector3();
+const _smokeConeHotCol  = new THREE.Color();
+const _smokeConeCoolCol = new THREE.Color(0x2a2638); // dim violet-grey
+
+const _SMOKE_CONE_VS = [
+  'varying vec3 vLocal;',
+  'varying vec3 vWorld;',
+  'void main() {',
+  '  vLocal = position;',
+  '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+  '  vWorld = wp.xyz;',
+  '  gl_Position = projectionMatrix * viewMatrix * wp;',
+  '}',
+].join('\n');
+
+const _SMOKE_CONE_FS = [
+  'precision mediump float;',
+  'varying vec3 vLocal;',
+  'varying vec3 vWorld;',
+  'uniform float uTime;',
+  'uniform vec3  uHotColor;',
+  'uniform vec3  uCoolColor;',
+  'uniform float uOpacity;',
+  // Cheap 3D hash + value-noise + 3-octave fbm.
+  'float hash13(vec3 p) {',
+  '  p = fract(p * 0.1031);',
+  '  p += dot(p, p.yzx + 33.33);',
+  '  return fract((p.x + p.y) * p.z);',
+  '}',
+  'float vnoise(vec3 p) {',
+  '  vec3 i = floor(p), f = fract(p);',
+  '  f = f*f*(3.0 - 2.0*f);',
+  '  return mix(mix(mix(hash13(i+vec3(0,0,0)), hash13(i+vec3(1,0,0)), f.x),',
+  '                 mix(hash13(i+vec3(0,1,0)), hash13(i+vec3(1,1,0)), f.x), f.y),',
+  '             mix(mix(hash13(i+vec3(0,0,1)), hash13(i+vec3(1,0,1)), f.x),',
+  '                 mix(hash13(i+vec3(0,1,1)), hash13(i+vec3(1,1,1)), f.x), f.y), f.z);',
+  '}',
+  'float fbm(vec3 p) {',
+  '  return 0.55 * vnoise(p) + 0.27 * vnoise(p * 2.07) + 0.13 * vnoise(p * 4.13);',
+  '}',
+  'void main() {',
+  // headFrac : 1 at +Y (rocket tip), 0 at -Y (trail base).
+  '  float headFrac = clamp(vLocal.y + 0.5, 0.0, 1.0);',
+  // Radial : 1 at center, 0 at silhouette ; soft edges for cloud feel.
+  '  float r = length(vec2(vLocal.x, vLocal.z));',
+  '  float radial = 1.0 - smoothstep(0.55, 1.0, r);',
+  // Noise drift + breath. world-space sampling keeps puff structure
+  // tied to motion, not the unit-cylinder UV.
+  '  vec3 ns = vWorld * 0.018 + vec3(0.0, uTime * 1.4, uTime * 0.9);',
+  '  float n = fbm(ns);',
+  // Opacity : strongest right at the rocket tip, fades quadratically
+  // backward, modulated by noise (so the trail breaks up into wisps).
+  '  float a = pow(headFrac, 1.20) * (0.40 + 0.60 * n) * radial;',
+  // Color gradient : hot at tip, cool at trail. Mix curves slightly
+  // forward so the bright color reads through more of the cone.
+  '  vec3 col = mix(uCoolColor, uHotColor, smoothstep(0.05, 0.95, headFrac));',
+  // Cooler shadow from noise dips so the volume reads chunky.
+  '  col *= 0.65 + 0.45 * n;',
+  '  gl_FragColor = vec4(col, a * uOpacity);',
+  '}',
+].join('\n');
+
+function _makeSmokeConeMaterial(hotColorHex) {
+  _smokeConeHotCol.set(hotColorHex || 0xff8844);
+  // The cool end is a fixed dim violet-grey ; close enough to "spent
+  // exhaust" across class colors that we don't need a per-projectile
+  // cool override. Could be exposed later if needed.
+  return new THREE.ShaderMaterial({
+    vertexShader:   _SMOKE_CONE_VS,
+    fragmentShader: _SMOKE_CONE_FS,
+    transparent: true,
+    depthWrite:  false,
+    blending:    THREE.AdditiveBlending,
+    side:        THREE.DoubleSide,
+    uniforms: {
+      uTime:      { value: 0 },
+      uHotColor:  { value: new THREE.Color(_smokeConeHotCol.getHex()) },
+      uCoolColor: { value: new THREE.Color(_smokeConeCoolCol.getHex()) },
+      uOpacity:   { value: 0.9 },
+    },
+  });
 }
 
 // ============================================================
@@ -16411,11 +16575,9 @@ class Projectile {
     this.age = 0;
     this.bounceCount = 0;
     this.smokeTrail = false;
-    this._smokeTrailTimer = 0;
-    this._smokeTrailInterval = 0.045; // fallback time interval for slow / stationary projectiles
-    this._smokeTrailMinDist = 18;
-    this._smokeTrailLastEmitPos = null; // initialized on first frame to spawn position
-    this._smokeTrailMaxPuffsPerFrame = 4; // cap for absurd single-frame deltas (alt-tab catch-up)
+    // (v27) Per-puff spawn replaced by a single 3D cone-shaped smoke
+    // cloud mesh per projectile (see smokeCone setup in update()).
+    // smokeTrail still controls whether the cone is created.
     // Fade-in: projectile is invisible at the muzzle and ramps to full
     // opacity over the first FADE_IN_DIST world units. Hides the harsh
     // "geometry pops in at the gun" look. Per-frame the update loop
@@ -16600,6 +16762,16 @@ class Projectile {
       this.trailRibbon = null;
       this.trailRibbonPositions = null;
     }
+    // (v27) Cone-cloud trail mesh : material is per-projectile (custom
+    // hotColor) so it disposes ; geometry is the shared singleton so
+    // we just unlink the mesh from the scene without disposing geo.
+    if (this.smokeCone) {
+      if (this.smokeCone.parent) scene.remove(this.smokeCone);
+      if (this.smokeCone.material && this.smokeCone.material.dispose) {
+        try { this.smokeCone.material.dispose(); } catch (_) {}
+      }
+      this.smokeCone = null;
+    }
 
     if (this.salvoGuided && this.mesh) {
       if (this.mesh.parent) scene.remove(this.mesh);
@@ -16608,48 +16780,54 @@ class Projectile {
       this.mesh = null;
     }
 
-    if (this.smokeTrail && typeof spawnFXBurst === 'function') {
-      this._smokeTrailTimer -= dt;
-      const _szM = this.sizeMult || 1.0;
-      const _puffR = 5 * _szM;
-      const _emitPuff = (px, py, pz) => {
-        const puff = spawnFXBurst('cloud', { x: px, y: py, z: pz }, _puffR, 0.65, {
-          startScale: 0.4,
-          endScale: 1.6,
-          segs: 12,
-        });
-        if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) {
-          puff.material.uniforms.uBaseColor.value.set(this.trailColor);
+    // (v27) 3D cone-cloud smoke trail. One ShaderMaterial mesh per
+    // projectile : tip at the rocket (hot trailColor), base trailing
+    // behind ; opacity + color gradient along axis so it reads as an
+    // exhaust plume cooling as it disperses. Replaces the per-puff
+    // spawn loop entirely (was N cloud-shader spheres per second
+    // per rocket ; Tracker core volleys were the worst case).
+    if (this.smokeTrail) {
+      if (!this.smokeCone) {
+        try {
+          const _scGeo = _getSmokeConeGeometry();
+          const _scMat = _makeSmokeConeMaterial(this.trailColor || 0xaaaaaa);
+          this.smokeCone = new THREE.Mesh(_scGeo, _scMat);
+          this.smokeCone.frustumCulled = false;
+          this.smokeCone.renderOrder = 1;
+          scene.add(this.smokeCone);
+        } catch (e) { /* fail silent ; cone visual is non-critical */ }
+      }
+      if (this.smokeCone) {
+        // Choose a length scale : faster projectiles draw a longer plume,
+        // capped to keep the cone from running off into infinity. Width
+        // scales with sizeMult so big rockets get a fatter plume.
+        const _szMC = this.sizeMult || 1.0;
+        const _spd = (typeof this.velocity !== 'undefined' && this.velocity)
+          ? Math.sqrt(this.velocity.x*this.velocity.x + this.velocity.y*this.velocity.y + this.velocity.z*this.velocity.z)
+          : 0.0;
+        const _coneLen = Math.min(280, Math.max(60, _spd * 0.20)) * _szMC;
+        const _coneRad = 18 * _szMC;
+        // Forward direction = velocity normalized ; if stationary, point
+        // along the projectile mesh's facing (best-effort fallback).
+        const _f = _smokeConeForward.set(this.velocity.x, this.velocity.y, this.velocity.z);
+        if (_f.lengthSq() < 0.01 && this.mesh) {
+          _f.set(0, 0, -1).applyQuaternion(this.mesh.quaternion);
+        } else {
+          _f.normalize();
         }
-      };
-      if (!this._smokeTrailLastEmitPos) {
-        // First update : seed at spawn so the first puff is at spawn position
-        this._smokeTrailLastEmitPos = this.position.clone();
-        _emitPuff(this.position.x, this.position.y, this.position.z);
-        this._smokeTrailTimer = this._smokeTrailInterval;
-      } else {
-        const lx = this._smokeTrailLastEmitPos.x;
-        const ly = this._smokeTrailLastEmitPos.y;
-        const lz = this._smokeTrailLastEmitPos.z;
-        const dx = this.position.x - lx;
-        const dy = this.position.y - ly;
-        const dz = this.position.z - lz;
-        const moved = Math.sqrt(dx*dx + dy*dy + dz*dz);
-        if (moved >= this._smokeTrailMinDist) {
-          // Fast enough that distance triggers : emit one puff per minDist
-          // step along the swept segment, capped per-frame for safety.
-          const want = Math.min(this._smokeTrailMaxPuffsPerFrame, Math.floor(moved / this._smokeTrailMinDist));
-          for (let i = 1; i <= want; i++) {
-            const t = i / want;
-            _emitPuff(lx + dx * t, ly + dy * t, lz + dz * t);
-          }
-          this._smokeTrailLastEmitPos.copy(this.position);
-          this._smokeTrailTimer = this._smokeTrailInterval;
-        } else if (this._smokeTrailTimer <= 0) {
-          // Slow / stationary : time fallback. One puff at current position.
-          _emitPuff(this.position.x, this.position.y, this.position.z);
-          this._smokeTrailLastEmitPos.copy(this.position);
-          this._smokeTrailTimer = this._smokeTrailInterval;
+        // Center at the midpoint behind the rocket so the +Y end of the
+        // unit cylinder lands AT the rocket and the wide -Y end trails.
+        this.smokeCone.position.set(
+          this.position.x - _f.x * (_coneLen * 0.5),
+          this.position.y - _f.y * (_coneLen * 0.5),
+          this.position.z - _f.z * (_coneLen * 0.5)
+        );
+        this.smokeCone.quaternion.setFromUnitVectors(_mvUp, _f);
+        this.smokeCone.scale.set(_coneRad, _coneLen, _coneRad);
+        // Drive uTime so the cloud noise drifts ; cheap uniform write.
+        const u = this.smokeCone.material && this.smokeCone.material.uniforms;
+        if (u) {
+          if (u.uTime) u.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : 0;
         }
       }
     }
@@ -16793,7 +16971,14 @@ class Projectile {
     // the camera so it reads as a continuous wide streak from any angle,
     // and width shrinks from baseWidth at the head to ~30% at the tail tip
     // so the silhouette tapers in addition to the per-vertex color fade.
-    if (this.trailRibbon && this.trailRibbonPositions) {
+    // (v27) When smokeTrail is on, the 3D cone-cloud trail (smokeCone
+    // above) is the signature visual. Hide the 2D billboard ribbon so
+    // the flat-strip look doesn't read alongside the cone. Cheap
+    // projectiles without a cone still use the ribbon as before.
+    if (this.trailRibbon && this.smokeTrail) {
+      if (this.trailRibbon.visible) this.trailRibbon.visible = false;
+    } else if (this.trailRibbon && this.trailRibbonPositions) {
+      if (!this.trailRibbon.visible) this.trailRibbon.visible = true;
       const linePos = this.trail.geometry.attributes.position.array;
       const ribbonPos = this.trailRibbonPositions;
       const camPos = camera.position;
@@ -17339,6 +17524,13 @@ class Projectile {
     if (this.hazeMesh && this.hazeMesh.parent) {
       scene.remove(this.hazeMesh);
       this.hazeMesh.material.dispose();
+    }
+    if (this.smokeCone && this.smokeCone.parent) {
+      scene.remove(this.smokeCone);
+      if (this.smokeCone.material && this.smokeCone.material.dispose) {
+        try { this.smokeCone.material.dispose(); } catch (_) {}
+      }
+      this.smokeCone = null;
     }
     if (this.trailRibbon && this.trailRibbon.parent) {
       scene.remove(this.trailRibbon);
@@ -29343,6 +29535,18 @@ function executeAbility(slot, ability) {
         const dashLen   = 400;
         player.position.add(moveDir.clone().multiplyScalar(dashLen));
         spawnExplosion(player.position.clone().add(moveDir.clone().multiplyScalar(-200)), 15);
+        // (v27) Broadcast the dash visual so peers see the cloud trail
+        // + endpoint pop. State interpolation alone already moves the
+        // peer's ship to the new position, but the local-only puffs left
+        // a "ship just teleports silently" read for everyone else.
+        if (net && net.active && net.sendEvent) {
+          net.sendEvent({
+            type: 'slayer_teleport_dash',
+            sx: dashStart.x, sy: dashStart.y, sz: dashStart.z,
+            dx: moveDir.x,   dy: moveDir.y,   dz: moveDir.z,
+            len: dashLen,
+          });
+        }
         if (typeof spawnFXBurst === 'function') {
           const PUFF_COUNT = 10;
           const _slayerSmokeCol = new THREE.Color(LSS.CLASS_COLORS.SLAYER);
