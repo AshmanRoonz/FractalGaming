@@ -589,6 +589,25 @@ async def handle_bridge(ws):
                       f"finish={st.map.finish_id}")
                 continue
 
+            if kind == "map_request":
+                # Bridge couldn't fetch the map (file:// origin or hosted
+                # somewhere different from the maps folder). Read it off
+                # disk and ship it back.
+                mk = packet.get("mapKey") or ""
+                path = os.path.join("maps", f"map_{mk}.json")
+                try:
+                    with open(path, "r") as fmap:
+                        data = json.load(fmap)
+                    await ws.send(json.dumps({
+                        "kind": "map_data", "mapKey": mk, "data": data,
+                    }))
+                    print(f"[brain] map_data sent : {mk}")
+                except FileNotFoundError:
+                    print(f"[brain] map_request failed : no such file {path}")
+                except Exception as e:
+                    print(f"[brain] map_request failed ({mk}) : {e}")
+                continue
+
             if kind != "obs":
                 continue
 

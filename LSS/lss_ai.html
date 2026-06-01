@@ -178,7 +178,11 @@
 // stubbed out ; next iteration adds them on top of this base.
 // ============================================================
 
-const TRYSTERO_URL = 'https://esm.sh/@trystero-p2p/torrent';
+// Pinned to match last_ship_sailing_v27.html exactly. The unpinned
+// @trystero-p2p/torrent URL resolves to v0.25.x, which has a different
+// wire protocol than v27's pinned 0.22.0 and trips a "not iterable"
+// error during the offer handshake. See trystero_0.25_upgrade_plan.md.
+const TRYSTERO_URL = 'https://esm.sh/trystero@0.22.0/torrent';
 const APP_ID = 'last-ship-sailing-v1';
 const BROADCAST_HZ = 20;
 const SHIPS = ['VORTEX', 'PYRO', 'PUNCTURE', 'SLAYER', 'TRACKER', 'BLASTER', 'SYPHON'];
@@ -388,7 +392,10 @@ function buildStatePacket() {
   // ship-select / warmup, which looks like "the AI spawned before me."
   // The lobby ready / loadout checks operate on separate channels so
   // hiding the ship doesn't affect handshake.
-  const broadcastDead = ai.dead || ai.matchState !== 'playing';
+  // Also broadcast dead=true when the map hasn't loaded yet ; without
+  // map data we can't be at a sensible position and we'd render in a wall.
+  const mapReadyForBroadcast = !!(ai.mapRooms && ai.mapRooms.length > 0);
+  const broadcastDead = ai.dead || ai.matchState !== 'playing' || !mapReadyForBroadcast;
   return {
     px: Math.round(ai.position.x * 10) / 10,
     py: Math.round(ai.position.y * 10) / 10,
@@ -445,28 +452,86 @@ function startTickLoop() {
     // lobby + warmup phases and peer-snapping to the human's spawn
     // point before the match even started.
     const isPlaying = (ai.matchState === 'playing');
-    if (isPlaying && !ai.dead) {
+    // If the map JSON hasn't loaded we can't safely navigate ; freeze
+    // and broadcast dead=true so peers don't see us floating in a wall.
+    const mapReady = !!(ai.mapRooms && ai.mapRooms.length > 0);
+
+    // Orphan detection : suppressed for the first 7 seconds after
+    // entering playing (so a slow-spawning human isn't misread as gone),
+    // and requires _lastPeerStateAt to be a real timestamp (not null).
+    // Without this guard the first playing tick fires the check, the
+    // bot bounces back to lobby with dead=true, the human's v27 sees
+    // 'all of team A dead' and ends the round abruptly.
+    if (isPlaying && ai._playingSince) {
+      const settleMs = 7000;
+      const beyondSettle = (now - ai._playingSince) > settleMs;
+      const noStates = beyondSettle
+        && ai._lastPeerStateAt
+        && (now - ai._lastPeerStateAt) > 5000;
+      if (ai.peers.size === 0) {
+        ai._noPeersSince = ai._noPeersSince || now;
+      } else {
+        ai._noPeersSince = 0;
+      }
+      const orphanedByPeers = beyondSettle
+        && ai._noPeersSince
+        && (now - ai._noPeersSince) > 5000;
+      if (noStates || orphanedByPeers) {
+        log('orphan detected ; returning to lobby', 'warn');
+        ai.matchState = 'lobby';
+        setStat('s-match', 'lobby', 'warn');
+        ai.dead = true;
+        ai.matchStartSent = false;
+        ai.launchAtSent = false;
+        ai._warmupReadySent = false;
+        ai._spawnSnapped = false;
+        ai._noPeersSince = 0;
+        ai._playingSince = 0;
+        ai.velocity.x = 0; ai.velocity.y = 0; ai.velocity.z = 0;
+      }
+    } else if (!isPlaying) {
+      ai._noPeersSince = 0;
+      ai._playingSince = 0;
+    }
+
+    if (isPlaying && !ai.dead && mapReady) {
       if (ai.brainConnected && ai.brainAction && ai.brainActionAge < ACTION_STALE_S) {
         applyAction(ai.brainAction);
-        // Integrate position from velocity (the brain controls velocity).
-        ai.position.x += ai.velocity.x * dt;
-        ai.position.y += ai.velocity.y * dt;
-        ai.position.z += ai.velocity.z * dt;
+        // Substepped integration : split each tick into substeps no
+        // larger than 15 units of travel and clamp at each substep. A
+        // single high-velocity request can no longer punch through a
+        // wall in one frame ; the clamp catches it at sub-substep
+        // boundaries.
+        const moveLen = Math.sqrt(
+          ai.velocity.x * ai.velocity.x +
+          ai.velocity.y * ai.velocity.y +
+          ai.velocity.z * ai.velocity.z) * dt;
+        const subs = Math.max(1, Math.ceil(moveLen / 15));
+        const subDt = dt / subs;
+        for (let i = 0; i < subs; i++) {
+          ai.position.x += ai.velocity.x * subDt;
+          ai.position.y += ai.velocity.y * subDt;
+          ai.position.z += ai.velocity.z * subDt;
+          clampToRooms();
+        }
       } else {
-        // Fallback : original orbit policy. Keeps the bot alive even when
-        // Python is silent / disconnected DURING gameplay.
         tickBrain(dt);
+        clampToRooms();
       }
-      // (v0.4) Spawn protection always decays during playing+alive,
-      // regardless of whether the brain is driving us or the orbit
-      // fallback is. Previously this was inside the brain branch only,
-      // so when the brain was silent (e.g. between actions) the
-      // protection never ticked down and the AI was invulnerable
-      // indefinitely.
       if (ai.spawnProt > 0) ai.spawnProt = Math.max(0, ai.spawnProt - dt);
-      // Wall containment : keep the AI inside a room sphere or tunnel
-      // cylinder from the current map. No-op if no map JSON loaded yet.
-      clampToRooms();
+    } else if (isPlaying && !ai.dead && !mapReady) {
+      // Map not ready : sit still, keep asking the brain for it. The
+      // broadcast loop is gated to send dead=true (see buildStatePacket)
+      // so peers don't render us mid-air outside the playable volume.
+      ai.velocity.x = 0; ai.velocity.y = 0; ai.velocity.z = 0;
+      ai._mapAskTimer = (ai._mapAskTimer || 0) + dt;
+      if (ai._mapAskTimer >= 1.0 && ai.brainConnected && ai.brainWs && ai.brainWs.readyState === 1) {
+        ai._mapAskTimer = 0;
+        const mk = ai.mapKey || ai.mapPending || 'hourglass';
+        try {
+          ai.brainWs.send(JSON.stringify({ kind: 'map_request', mapKey: mk }));
+        } catch (_) {}
+      }
     } else {
       // Pre-game / post-round : freeze velocity so we don't drift. Keep
       // broadcasting position so peers still see us in the lobby.
@@ -483,6 +548,23 @@ function startTickLoop() {
     while (ai.recentProjectiles.length > 0 && ai.recentProjectiles[0]._seenAt < now - 1500) {
       ai.recentProjectiles.shift();
     }
+    // Lobby heartbeat : every ~2 s while in lobby/start/launch phases
+    // we re-announce loadout + ready. This covers two failure modes :
+    //   (a) initial 400 ms ready broadcast fires before WebRTC peer
+    //       channels are fully established, so the message is lost.
+    //   (b) trystero's onPeerJoin handler races our ai.ready=true flag
+    //       and fires before we've flipped it.
+    // Either way, a periodic resend guarantees the human eventually sees
+    // the AI as a ready peer and the lobby clears.
+    ai._lobbyHeartbeat = (ai._lobbyHeartbeat || 0) + dt;
+    if (ai._lobbyHeartbeat >= 2.0 && ai.matchState !== 'playing') {
+      ai._lobbyHeartbeat = 0;
+      try { sendLoadoutAnnounce(); } catch (_) {}
+      if (ai.ready) {
+        try { ai.sendEvent({ type: 'ready', ready: true }); } catch (_) {}
+      }
+    }
+
     ai.broadcastTimer += dt;
     if (ai.broadcastTimer >= 1 / BROADCAST_HZ) {
       ai.broadcastTimer = 0;
@@ -524,6 +606,7 @@ function bindChannels(room) {
     // position / hp / shield in its observation packet.
     if (data && typeof data.px === 'number' && data.px === data.px) {
       ai.peerStates.set(peerId, { ...data, _seenAt: performance.now() });
+      ai._lastPeerStateAt = performance.now();
     }
     // (v0.3 fix) State-driven round resume. If we're in 'roundEnd' state
     // and we see a peer broadcast with fresh spawn protection AND alive,
@@ -537,6 +620,14 @@ function bindChannels(room) {
       ai.matchState = 'playing';
       setStat('s-match', 'playing', 'good');
       respawnAtMapSpawn();
+      // Critical : reset the orphan timers for the new round. Without
+      // this, _playingSince still holds round-1's launch_at time, so
+      // beyondSettle is true on the first tick, and noStates fires the
+      // moment any state-broadcast hiccup happens. Bot bounces to lobby
+      // and never appears for round 2.
+      ai._playingSince = performance.now();
+      ai._lastPeerStateAt = performance.now();
+      ai._noPeersSince = 0;
       log('round resume (peer spawn signal from ' + shortId(peerId) + ')', 'ok');
     }
     // Peer-anchor snap : jump to within ~250 u of a real peer so we
@@ -597,9 +688,24 @@ function bindChannels(room) {
     // peers compute consensus independently ; this just keeps our
     // broadcast HP / shield honest so the scoreboard and shield ripple
     // visuals are correct on every screen.
+    // Debug : log EVERY hit-claim that targets us, including the ones we
+    // reject. Lets the user see in the bridge log whether their shots are
+    // landing as expected or being silently dropped by some gate.
+    if (claim.targetId === ai.selfId) {
+      const rawDmg = Math.max(0, claim.damage || 0);
+      if (!valid) {
+        log('[hit] rejected (invalid geometry) dmg=' + Math.round(rawDmg), 'warn');
+      } else if (ai.dead) {
+        log('[hit] ignored (already dead) dmg=' + Math.round(rawDmg), 'warn');
+      } else if (ai.spawnProt > 0) {
+        log('[hit] ignored (spawn prot ' + ai.spawnProt.toFixed(1) + 's) dmg=' + Math.round(rawDmg), 'warn');
+      }
+    }
     if (claim.targetId === ai.selfId && valid && !ai.dead && ai.spawnProt <= 0) {
       const dmg = Math.max(0, claim.damage || 0);
       if (dmg > 0) {
+        const shieldBefore = ai.shield;
+        const healthBefore = ai.health;
         if (ai.shield > 0) {
           if (dmg <= ai.shield) {
             ai.shield -= dmg;
@@ -611,12 +717,13 @@ function bindChannels(room) {
         } else {
           ai.health -= dmg;
         }
+        log('[hit] -' + Math.round(dmg)
+          + ' dmg ; shield ' + Math.round(shieldBefore) + '->' + Math.round(ai.shield)
+          + ', hp ' + Math.round(healthBefore) + '->' + Math.round(ai.health), 'info');
         if (ai.health <= 0 && !ai.dead) {
           ai.health = 0;
           ai.dead = true;
           log('AI died (killed by ' + shortId(claim.shooterId) + ')', 'bad');
-          // Broadcast a kill event so the killer's scoreboard / killfeed
-          // sees credit. The game's kill-event handler reads killerPeerId.
           if (ai.sendEvent) {
             try {
               ai.sendEvent({
@@ -627,6 +734,30 @@ function bindChannels(room) {
               });
             } catch (_) {}
           }
+          // v27's per-tick round-end check only runs on the resolution
+          // authority (lowest peerId). If THAT'S the bot, no peer will
+          // fire round_end after we die, and the human is stuck in
+          // playing forever. Fire it ourselves 250 ms later as a backup ;
+          // v27's handler is idempotent if a real authority already fired.
+          setTimeout(() => {
+            if (!ai.sendEvent || ai.matchState !== 'playing') return;
+            // Winner = the team that isn't us. If our team was 2 (A) the
+            // human (or human team) is 3 (B).
+            const ourTeam = ai.team;
+            const winnerTeam = (ourTeam === 2) ? 3 : 2;
+            const winnerLabel = winnerTeam === 2
+              ? 'FLEET A WIPED FLEET B'
+              : 'FLEET B WIPED FLEET A';
+            try {
+              ai.sendEvent({
+                type: 'round_end',
+                winnerTeam: winnerTeam,
+                winnerLabel: winnerLabel,
+                // Don't second-guess score deltas ; let v27 figure it out.
+              });
+              log('round_end broadcast (winner: team ' + (winnerTeam === 2 ? 'A' : 'B') + ')', 'ok');
+            } catch (_) {}
+          }, 250);
         }
       }
     }
@@ -669,7 +800,21 @@ function bindChannels(room) {
       // Also drives the team-spawn placement when the map loads.
       // mapSpawnedFor reset so the spawn logic re-fires for this match.
       ai.mapSpawnedFor = null;
-      if (evt.mapKey) loadMapRooms(evt.mapKey);
+      if (evt.mapKey) {
+        ai.mapPending = evt.mapKey;  // for the map_request retry loop
+        loadMapRooms(evt.mapKey);
+      }
+      // Tell the human's launch gate we're done warming up. The bridge
+      // has no shaders / assets to compile so warmup_ready is immediate.
+      // Without this the human's loading screen waits forever on
+      // 'WAITING FOR PEERS' while we self-transition to playing alone.
+      if (ai.sendEvent) {
+        try { ai.sendEvent({ type: 'warmup_ready' }); log('warmup_ready broadcast', 'ok'); }
+        catch (_) {}
+      }
+      // Track that we've sent it so the lobby-heartbeat path can also
+      // resend if a peer joined late and missed the original.
+      ai._warmupReadySent = true;
       // Once match_start fires we move to the loadout/launch handshake.
       // Re-check in case all peers already have loadouts announced.
       checkProposer();
@@ -677,11 +822,28 @@ function bindChannels(room) {
       ai.matchState = 'launching';
       ai.launchAtSent = true;
       setStat('s-match', 'launching', 'warn');
-      setTimeout(() => {
-        ai.matchState = 'playing';
-        setStat('s-match', 'playing', 'good');
-        ai.spawnProt = 3.0;
-      }, 1800);
+      // v27 rebroadcasts launch_at every 150 ms for ~1.5 s ; only the
+      // FIRST one (per match) should schedule the playing transition.
+      // Stacking setTimeouts means each fire re-sets spawnProt = 3.0,
+      // which kept the bot invulnerable for many seconds past the
+      // intended 3-second window. Debounce by the launchAt wall-clock :
+      // duplicate broadcasts of the same launchAt are no-ops.
+      const SHORT_COUNTDOWN_MS = 3000;
+      const launchAtKey = (typeof evt.launchAt === 'number') ? evt.launchAt : 0;
+      if (ai._launchTimer && ai._launchTimerForKey === launchAtKey) {
+        // Same launchAt as a pending timer ; ignore the duplicate.
+      } else {
+        if (ai._launchTimer) { clearTimeout(ai._launchTimer); ai._launchTimer = null; }
+        ai._launchTimerForKey = launchAtKey;
+        ai._launchTimer = setTimeout(() => {
+          ai._launchTimer = null;
+          ai.matchState = 'playing';
+          setStat('s-match', 'playing', 'good');
+          ai.spawnProt = 3.0;
+          ai._playingSince = performance.now();
+          ai._lastPeerStateAt = performance.now();
+        }, SHORT_COUNTDOWN_MS);
+      }
     } else if (evt.type === 'round_end') {
       ai.matchState = 'roundEnd';
       setStat('s-match', 'roundEnd', 'warn');
@@ -692,6 +854,9 @@ function bindChannels(room) {
       // listener that watches for a peer's fresh spawnProt).
       ai.matchStartSent = false;
       ai.launchAtSent = false;
+      ai._warmupReadySent = false;
+      if (ai._launchTimer) { clearTimeout(ai._launchTimer); ai._launchTimer = null; }
+      ai._launchTimerForKey = 0;
       // Re-anchor on the next round's spawns instead of inheriting the
       // previous round's position.
       ai._spawnSnapped = false;
@@ -722,6 +887,9 @@ function bindChannels(room) {
           ai.matchState = 'playing';
           setStat('s-match', 'playing', 'good');
           respawnAtMapSpawn();
+          ai._playingSince = performance.now();
+          ai._lastPeerStateAt = performance.now();
+          ai._noPeersSince = 0;
           log('round resume (timer fallback)', 'ok');
         }
       }, 6000);
@@ -904,7 +1072,96 @@ async function loadMapRooms(mapKey) {
     ai.mapRooms = null;
     ai.mapTunnels = null;
     log('Map load failed (' + mapKey + ') : ' + (e && e.message ? e.message : e), 'warn');
+    // Fallback : ask the Python brain to ship us the map. The brain has
+    // disk access to the maps/ folder regardless of where the bridge is
+    // hosted. The brain answers with a 'map_data' packet that we re-feed
+    // into loadMapRooms via the raw JSON path (so the rest of this
+    // function still runs, just with brain-supplied bytes).
+    if (ai.brainConnected && ai.brainWs && ai.brainWs.readyState === 1) {
+      try {
+        ai.brainWs.send(JSON.stringify({ kind: 'map_request', mapKey: mapKey }));
+        log('Requested map ' + mapKey + ' from Python brain (fetch unavailable)', 'warn');
+      } catch (_) {}
+    }
   }
+}
+
+// Apply a map_data packet from the Python brain. Same shape as the JSON
+// the bridge would normally fetch (data.rooms, data.tunnels) ; we route
+// it through a tiny shim that re-uses the rest of loadMapRooms's logic.
+function applyMapDataFromBrain(mapKey, data) {
+  if (!data || !Array.isArray(data.rooms)) {
+    log('applyMapDataFromBrain : malformed payload', 'warn');
+    return;
+  }
+  // Reuse loadMapRooms's body by stashing the fetched data into a closure
+  // variable. Simplest path : duplicate the parse + raceGraph build here.
+  const rooms = data.rooms.map(r => ({
+    id: r.id || '', team: r.team || null, champion: !!r.champion,
+    x: +r.x || 0, y: +r.y || 0, z: +r.z || 0, r: +r.r || 200,
+  }));
+  const tunnels = (Array.isArray(data.tunnels) ? data.tunnels : []).map(t => ({
+    r: +t.r || 100,
+    path: (t.path || []).map(p => ({ x: +p.x || 0, y: +p.y || 0, z: +p.z || 0 })),
+  })).filter(t => t.path.length >= 2);
+  ai.mapRooms = rooms;
+  ai.mapTunnels = tunnels;
+  ai.mapKey = mapKey;
+  ai.mapMode = mapKey.startsWith('race_') ? 'race' : 'champion';
+  const graph = { nodes: {}, finishId: null };
+  for (const rm of rooms) {
+    graph.nodes[rm.id] = {
+      id: rm.id, x: rm.x, y: rm.y, z: rm.z, r: rm.r,
+      team: rm.team, champion: !!rm.champion, neighbors: [],
+    };
+  }
+  function _rc(pt) {
+    let best = null, bestD = Infinity;
+    for (const rm of rooms) {
+      const dx = pt.x - rm.x, dy = pt.y - rm.y, dz = pt.z - rm.z;
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 <= rm.r * rm.r && d2 < bestD) { best = rm; bestD = d2; }
+    }
+    return best;
+  }
+  for (const tun of tunnels) {
+    const path = tun.path;
+    if (!path || path.length < 2) continue;
+    const a = _rc(path[0]);
+    const b = _rc(path[path.length - 1]);
+    if (!a || !b || a.id === b.id) continue;
+    const mid = path[Math.floor(path.length / 2)];
+    const na = graph.nodes[a.id], nb = graph.nodes[b.id];
+    if (!na.neighbors.find(n => n.id === b.id)) {
+      na.neighbors.push({ id: b.id, mid: { x: mid.x, y: mid.y, z: mid.z } });
+    }
+    if (!nb.neighbors.find(n => n.id === a.id)) {
+      nb.neighbors.push({ id: a.id, mid: { x: mid.x, y: mid.y, z: mid.z } });
+    }
+  }
+  for (const id in graph.nodes) {
+    if (graph.nodes[id].champion) { graph.finishId = id; break; }
+  }
+  ai.raceGraph = graph;
+  ai.championRoomId = graph.finishId;
+  log('Loaded map ' + mapKey + ' from brain (' + rooms.length + ' rooms, mode=' + ai.mapMode + ')', 'ok');
+  // Spawn at team room.
+  if (ai.mapSpawnedFor !== mapKey) {
+    const teamLetter = (ai.team === 2) ? 'A' : 'B';
+    const spawnRoom = rooms.find(r => r.team === teamLetter);
+    if (spawnRoom) {
+      const jr = Math.max(0, spawnRoom.r - 60);
+      ai.position.x = spawnRoom.x + (Math.random() - 0.5) * jr * 0.6;
+      ai.position.y = spawnRoom.y + (Math.random() - 0.5) * jr * 0.3;
+      ai.position.z = spawnRoom.z + (Math.random() - 0.5) * jr * 0.6;
+      ai._spawnSnapped = true;
+      ai.mapSpawnedFor = mapKey;
+      ai.spawnProt = 3.0;
+      ai.dead = false;
+    }
+  }
+  // Re-push map_static so the brain's cached map matches what we built.
+  sendMapStaticToBrain();
 }
 
 // Respawn the AI at its team's spawn room from the loaded map. Used by
@@ -956,11 +1213,11 @@ function _nearestPlayableElement() {
       const dz = ai.position.z - room.z;
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
       const surface = dist - room.r;
-      if (surface <= 0) return { inside: true };
+      // Inside requires hull-radius (~50u) of slack so ships don't half-poke through.
+      if (surface <= -50) return { inside: true };
       if (surface < bestOutDist) {
         bestOutDist = surface;
-        // Projection point : on the room's surface along the line from room center to AI.
-        const t = Math.max(0, room.r - 20) / Math.max(0.001, dist);
+        const t = Math.max(0, room.r - 70) / Math.max(0.001, dist);  // 70 = max hull radius
         bestProjX = room.x + dx * t;
         bestProjY = room.y + dy * t;
         bestProjZ = room.z + dz * t;
@@ -987,10 +1244,10 @@ function _nearestPlayableElement() {
         const dx = ai.position.x - cx, dy = ai.position.y - cy, dz = ai.position.z - cz;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         const surface = dist - tunnel.r;
-        if (surface <= 0) return { inside: true };
+        if (surface <= -50) return { inside: true };
         if (surface < bestOutDist) {
           bestOutDist = surface;
-          const k = Math.max(0, tunnel.r - 20) / Math.max(0.001, dist);
+          const k = Math.max(0, tunnel.r - 70) / Math.max(0.001, dist);  // 70 = max hull radius
           bestProjX = cx + dx * k;
           bestProjY = cy + dy * k;
           bestProjZ = cz + dz * k;
@@ -1030,10 +1287,24 @@ function clampToRooms() {
   }
   const r = _nearestPlayableElement();
   if (r.inside) return false;
+  // Outward direction = position - projection (the side we came from).
+  const ox = ai.position.x - r.projX;
+  const oy = ai.position.y - r.projY;
+  const oz = ai.position.z - r.projZ;
+  const oLen = Math.sqrt(ox*ox + oy*oy + oz*oz) || 1;
+  const onx = ox / oLen, ony = oy / oLen, onz = oz / oLen;
   ai.position.x = r.projX;
   ai.position.y = r.projY;
   ai.position.z = r.projZ;
-  ai.velocity.x = 0; ai.velocity.y = 0; ai.velocity.z = 0;
+  // Slide along the surface : remove the outward velocity component,
+  // keep the tangent. The brain's lateral intent isn't erased ; the AI
+  // grinds along the wall instead of stopping dead.
+  const vDot = ai.velocity.x * onx + ai.velocity.y * ony + ai.velocity.z * onz;
+  if (vDot > 0) {
+    ai.velocity.x -= onx * vDot;
+    ai.velocity.y -= ony * vDot;
+    ai.velocity.z -= onz * vDot;
+  }
   return true;
 }
 
@@ -1061,17 +1332,17 @@ function sendLaunchAtProposal() {
   } catch (e) { log('launch_at send failed : ' + e.message, 'err'); }
   ai.matchState = 'launching';
   setStat('s-match', 'launching', 'warn');
-  // (v0.3 fix) Delay the playing-phase transition to ~5 s after launch_at
-  // (was 1.8 s). The game's launch flow is :
-  //   launch_at fires at +1.5 s ->  3-2-1 countdown overlay ~2 s ->
-  //   warp animation ~1 s ->  player actually spawns into world
-  // The previous 1.8 s timer made the AI "playing" before the human was
-  // even rendered, which is why the AI looked like it was lurking pre-spawn.
+  // Same timing as the receiver path : event-receipt + SHORT_COUNTDOWN.
+  // For the proposer, that's launchAt + SHORT_COUNTDOWN (since we issue
+  // launchAt = now + 1500 and treat 'now' as our receipt).
+  const SHORT_COUNTDOWN_MS = 3000;
   setTimeout(() => {
     ai.matchState = 'playing';
     setStat('s-match', 'playing', 'good');
     ai.spawnProt = 3.0;
-  }, 5000);
+    ai._playingSince = performance.now();
+    ai._lastPeerStateAt = performance.now();
+  }, (launchAt - Date.now()) + SHORT_COUNTDOWN_MS);
 }
 
 // ============================================================
@@ -1118,10 +1389,18 @@ function connectBrain() {
     sendMapStaticToBrain();
   };
   ws.onmessage = (ev) => {
-    let act;
-    try { act = JSON.parse(ev.data); } catch (e) { return; }
-    if (!act || typeof act !== 'object') return;
-    ai.brainAction = act;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (!msg || typeof msg !== 'object') return;
+    // The brain can push two kinds of message :
+    //   { kind: 'map_data', mapKey, data: {...} } -> use as fallback map source
+    //   anything else (no kind, or kind === 'action') -> treat as an action
+    if (msg.kind === 'map_data' && msg.mapKey && msg.data) {
+      try { applyMapDataFromBrain(msg.mapKey, msg.data); }
+      catch (e) { log('applyMapDataFromBrain failed : ' + e.message, 'err'); }
+      return;
+    }
+    ai.brainAction = msg;
     ai.brainActionAge = 0;
     ai.brainActionCount++;
     setStat('s-actions', ai.brainActionCount);
@@ -1264,18 +1543,21 @@ function applyAction(act) {
     ai.quat.z = -sy * sp;
     ai.quat.w = cy * cp;
   }
-  if (act.fire && ai.fireGate <= 0 && !ai.dead) {
+  // Don't broadcast attacks into an empty mesh. If no peers are present
+  // the only audience is the bridge itself, so firing is just noise.
+  const haveAudience = ai.peers.size > 0;
+  if (act.fire && ai.fireGate <= 0 && !ai.dead && haveAudience) {
     fireWeapon();
     const w = WEAPON_BY_LOADOUT[ai.loadoutKey];
     ai.fireGate = (w && w.fireRate) || 0.25;
   }
   if (typeof act.ability === 'number' && act.ability >= 0 && act.ability <= 2
-      && ai.abilityGate[act.ability] <= 0 && !ai.dead) {
+      && ai.abilityGate[act.ability] <= 0 && !ai.dead && haveAudience) {
     fireAbility(act.ability);
     const cds = ABILITY_CDS_BY_LOADOUT[ai.loadoutKey] || [5, 0, 8];
     ai.abilityGate[act.ability] = cds[act.ability] || 5;
   }
-  if (act.core && ai.coreMeter >= 100 && !ai.dead) {
+  if (act.core && ai.coreMeter >= 100 && !ai.dead && haveAudience) {
     fireCore();
     ai.coreMeter = 0;
   }
@@ -1514,13 +1796,17 @@ async function joinRoom() {
       ai.peers.add(peerId);
       setStat('s-peers', ai.peers.size);
       log('peer joined : ' + shortId(peerId), 'ok');
-      // Re-announce loadout so the new peer sees us. Same payload shape
-      // the game uses ; discord_* fields omitted because the AI has no
-      // Discord identity (game already supports nameless peers).
+      // Re-announce loadout so the new peer sees us.
       sendLoadoutAnnounce();
       // Re-send ready so the joiner knows we're ready to launch.
       if (ai.ready && ai.sendEvent) {
         try { ai.sendEvent({ type: 'ready', ready: true }); } catch (_) {}
+      }
+      // If we've already passed match_start, the new peer is mid-warmup
+      // gate and is waiting for us to confirm. Resend warmup_ready so
+      // their loading screen advances.
+      if (ai._warmupReadySent && ai.sendEvent) {
+        try { ai.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
       }
     });
     ai.room.onPeerLeave((peerId) => {
