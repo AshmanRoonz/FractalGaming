@@ -2960,6 +2960,7 @@ const player = {
   abilityTimers: [0, 0, 0],
   coreReady: false, coreActive: false, coreTimer: 0,
   vortexStored: 0,
+  vortexRecentAbsorb: 0, // decaying memory of recently-absorbed dmg; ramps shield drain 1.0x->2x
   // VORTEX energy pool (shared across all abilities)
   vortexEnergy: 1000, vortexMaxEnergy: 1000, vortexEnergyRegen: 150, // per second (always regens, no delay)
   vortexAdsActive: false, // true when VORTEX is ADS (drains energy, boosts damage)
@@ -27200,6 +27201,7 @@ function commitLoadout(key) {
   player.vortexEnergy = 1000;
   player.vortexAdsActive = false;
   player.vortexStored = 0;
+  player.vortexRecentAbsorb = 0;
   player.vortexShieldLockout = false;
   player.trackerLocks = {};
   player.trackerLockedTarget = null;
@@ -27576,6 +27578,11 @@ function playerTakeDamage(amount, attacker, projectile) {
     // you hold under fire, the bigger the reflected burst when you let
     // go. Energy pool drain (250/s) caps how long this can be sustained.
     player.vortexStored = (player.vortexStored || 0) + amount;
+    // Feed a short, decaying memory of recently-absorbed damage. The drain
+    // tick reads this to ramp shield-energy drain from 1.0x (idle) up to 2x
+    // under heavy fire, so sitting in flame / eating a core burns the pool
+    // fast while a stray shot barely registers. Decay happens in the tick.
+    player.vortexRecentAbsorb = (player.vortexRecentAbsorb || 0) + amount;
     if (amount > 0) { try { playSound('vortex_absorb'); } catch (_) {} }
     return; // fully blocked
   }
@@ -27777,6 +27784,7 @@ function respawnPlayer() {
   }
   player._railgunChargingPrev = false;
   player.vortexStored = 0;
+  player.vortexRecentAbsorb = 0;
   player.vortexEnergy = player.vortexMaxEnergy;
   player.vortexAdsActive = false;
   player.gunShieldHP = 0; player.gunShieldTimer = 0;
@@ -31332,6 +31340,7 @@ function _releaseVortexShieldBurst(playBurstSound) {
     try { playSound('vortex_reflect'); } catch (_) {}
   }
   player.vortexStored = 0;
+  player.vortexRecentAbsorb = 0; // reset drain-ramp memory on shield drop
 }
 
 function updateAbilities(dt) {
@@ -31361,8 +31370,23 @@ function updateAbilities(dt) {
         // force-deactivate the shield and raise the lockout flag so the
         // user can't immediately re-activate; lockout clears in the cooldown
         // tick block below once energy regens to 20%.
-        const VORTEX_SHIELD_DRAIN = 250; // energy units per second
-        player.vortexEnergy = Math.max(0, player.vortexEnergy - VORTEX_SHIELD_DRAIN * dt);
+        const VORTEX_SHIELD_DRAIN = 250; // base energy/sec (amp 1.0, idle hold)
+        // Ramp the drain by how much damage the shield has eaten recently.
+        // vortexRecentAbsorb is a decaying accumulator (fed at the absorb
+        // site). Map it 0..FULL onto amp MIN_HIT..MAX so: open flame / core /
+        // cluster pin it to ~2x (shield lasts ~2s instead of ~4s), a stray
+        // shot or two sits near ~1.1x (basically free), nothing incoming = 1.0x.
+        const VORTEX_AMP_MAX      = 2.0;  // hard cap on drain multiplier
+        const VORTEX_AMP_MIN_HIT  = 1.1;  // floor while taking ANY damage
+        const VORTEX_AMP_WINDOW   = 0.45; // sec of "memory" (decay time const)
+        const VORTEX_AMP_DMG_FULL = 150;  // windowed dmg that maps to full 2x
+        player.vortexRecentAbsorb = (player.vortexRecentAbsorb || 0) * Math.exp(-dt / VORTEX_AMP_WINDOW);
+        let _vortexAmp = 1.0;
+        if (player.vortexRecentAbsorb > 0) {
+          const _t = Math.min(1, player.vortexRecentAbsorb / VORTEX_AMP_DMG_FULL);
+          _vortexAmp = VORTEX_AMP_MIN_HIT + _t * (VORTEX_AMP_MAX - VORTEX_AMP_MIN_HIT);
+        }
+        player.vortexEnergy = Math.max(0, player.vortexEnergy - VORTEX_SHIELD_DRAIN * _vortexAmp * dt);
         if (player.vortexEnergy <= 0) {
           player.abilityActive[i] = false;
           player.vortexShieldLockout = true;
