@@ -23098,7 +23098,16 @@ function _buildGasClusterChemBuckets(clusters, cell) {
 function updateGasChemistry(dt) {
   if (!game.detachedGasPockets || game.detachedGasPockets.length === 0) return;
   const budget = (typeof getVRGasBudget === 'function') ? getVRGasBudget() : null;
-  const cadence = budget ? budget.chemistryCadence : 1;
+  let cadence = budget ? budget.chemistryCadence : 1;
+  // Flat-mode (non-VR) throttle: gas spark chemistry is purely decorative
+  // (intermittent arcs between gas pockets) and ran every frame over ~130
+  // pockets, ~5% of frame time in profiling. Run it every other frame on
+  // normal and quarter-rate on low/potato; the dt *= cadence below keeps the
+  // spark timers correct. VR keeps its own gas-budget cadence.
+  if (!(typeof isXRPresenting === 'function' && isXRPresenting())) {
+    const flatCad = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) ? 4 : 2;
+    if (flatCad > cadence) cadence = flatCad;
+  }
   if (cadence <= 0) return;
   if (cadence > 1) {
     updateGasChemistry._frame = ((updateGasChemistry._frame || 0) + 1) % cadence;
@@ -35263,6 +35272,18 @@ function updateHUD() {
     const _prev = (updateHUD._xrHudFrame == null) ? (_cadence - 1) : updateHUD._xrHudFrame;
     updateHUD._xrHudFrame = (_prev + 1) % Math.max(1, _cadence);
     _drawHudCanvas = (updateHUD._xrHudFrame === 0);
+  } else {
+    // Flat-mode throttle: the circumpunct canvas redraw was ~3% of frame and
+    // ran every frame even at 144 Hz. Its ring/tick animations are slow and it
+    // overlays the (smooth) 3D scene, so ~30 Hz reads identically. The
+    // crosshair is screen-centered, so aim responsiveness is unaffected. The
+    // canvas keeps its last frame between redraws.
+    const _now = (typeof game !== 'undefined' && game) ? game.time : 0;
+    if (updateHUD._lastHudDraw != null && (_now - updateHUD._lastHudDraw) < (1 / 30)) {
+      _drawHudCanvas = false;
+    } else {
+      updateHUD._lastHudDraw = _now;
+    }
   }
   if (_drawHudCanvas) drawCircumpunctHUD();
   if (_xrHudActive) return;
@@ -43420,8 +43441,16 @@ class CosmicAnomaly {
     // Tumble slowly around the random axis.
     this.mesh.rotateOnWorldAxis(this.tumbleAxis, this.tumbleRate * dt);
 
-    // Rebuild the supershape vertices.
-    this._rebuildGeometry();
+    // Rebuild the supershape vertices. The morph periods are 9-16s so the
+    // shape changes very slowly; rebuilding positions + computeVertexNormals
+    // every frame cost ~3% of frame time for no visible benefit. Throttle to
+    // ~24 Hz (the per-frame tumble above still spins the mesh smoothly). First
+    // tick rebuilds immediately so the geometry isn't empty.
+    this._rebuildAccum = (this._rebuildAccum == null) ? 1 : this._rebuildAccum + dt;
+    if (this._rebuildAccum >= (1 / 24)) {
+      this._rebuildAccum = 0;
+      this._rebuildGeometry();
+    }
 
     // Occasional internal lightning arcs ; reuse the existing lightning
     // pool for the punctuation cracks across the anomaly's body.
