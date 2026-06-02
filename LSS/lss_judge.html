@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>LSS Judge Bot ; passive observer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: #0a0d12;
+      color: #cfd6df;
+      min-height: 100vh;
+    }
+    header {
+      padding: 18px 22px;
+      border-bottom: 1px solid #1d2530;
+      background: #0d1117;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 17px;
+      letter-spacing: 0.04em;
+      color: #ffcc44;
+    }
+    header .sub {
+      margin-top: 4px;
+      color: #6b7785;
+      font-size: 11px;
+    }
+    main {
+      display: grid;
+      grid-template-columns: 360px 1fr;
+      gap: 22px;
+      padding: 22px;
+      max-width: 1400px;
+    }
+    .panel {
+      background: #11161d;
+      border: 1px solid #1d2530;
+      border-radius: 6px;
+      padding: 16px 18px;
+    }
+    .panel h2 {
+      margin: 0 0 14px;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      color: #8aa7c8;
+      text-transform: uppercase;
+    }
+    label {
+      display: block;
+      margin: 12px 0 4px;
+      font-size: 11px;
+      color: #8593a4;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 8px 10px;
+      background: #070a0e;
+      border: 1px solid #1d2530;
+      border-radius: 4px;
+      color: #e0e6ee;
+      font: inherit;
+      font-size: 13px;
+    }
+    button {
+      margin-top: 12px;
+      width: 100%;
+      padding: 9px;
+      background: #1f7a3b;
+      border: none;
+      border-radius: 4px;
+      color: white;
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button.danger { background: #7a1f1f; }
+    button:disabled { background: #2a2f37; color: #555; cursor: not-allowed; }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px dotted #1d2530;
+      font-size: 12px;
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-row .k { color: #6b7785; }
+    .stat-row .v { color: #e0e6ee; }
+    .stat-row .v.good { color: #4ade80; }
+    .stat-row .v.warn { color: #fbbf24; }
+    .stat-row .v.bad { color: #f87171; }
+    .nodot { color: #6b7785; }
+    #log {
+      max-height: 520px;
+      overflow-y: auto;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    #log .e { color: #6b7785; padding: 1px 0; }
+    #log .ok { color: #4ade80; }
+    #log .warn { color: #fbbf24; }
+    #log .err { color: #f87171; }
+    #log .info { color: #93c5fd; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>LSS Judge Bot ; passive observer</h1>
+  <div class="sub">joins a room, never plays, forwards everything to the judge brain for cheat detection</div>
+</header>
+
+<main>
+
+  <section class="panel" id="ctrl-panel">
+    <h2>Control</h2>
+
+    <label for="room-code">Room code</label>
+    <input id="room-code" type="text" maxlength="16" placeholder="ABCD" autocomplete="off">
+
+    <label for="brain-url">Judge brain (WebSocket URL)</label>
+    <input id="brain-url" type="text" value="ws://localhost:8766" autocomplete="off">
+
+    <button id="btn-join">Join Room</button>
+    <button id="btn-leave" class="danger" disabled>Leave</button>
+  </section>
+
+  <section style="display: flex; flex-direction: column; gap: 22px;">
+    <div class="panel">
+      <h2>Status</h2>
+      <div class="stat-row"><span class="k">Mesh</span><span class="v" id="s-conn"><span class="nodot">disconnected</span></span></div>
+      <div class="stat-row"><span class="k">Judge peer ID</span><span class="v" id="s-self"><span class="nodot">-</span></span></div>
+      <div class="stat-row"><span class="k">Room</span><span class="v" id="s-room"><span class="nodot">-</span></span></div>
+      <div class="stat-row"><span class="k">Peers in mesh</span><span class="v" id="s-peers">0</span></div>
+      <div class="stat-row"><span class="k">Lobby phase</span><span class="v" id="s-match"><span class="nodot">lobby</span></span></div>
+      <div class="stat-row"><span class="k">Brain WS</span><span class="v" id="s-brain"><span class="nodot">offline</span></span></div>
+      <div class="stat-row"><span class="k">Messages forwarded</span><span class="v" id="s-fwd">0</span></div>
+      <div class="stat-row"><span class="k">State recv</span><span class="v" id="s-recv">0</span></div>
+    </div>
+
+    <div class="panel">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </section>
+
+</main>
+
+<script type="module">
+
+// ============================================================
+// LSS Judge Bot v0.1
+// ------------------------------------------------------------
+// Passive observer peer. Joins a Trystero room with the same
+// appId the game uses, participates in the lobby handshake
+// (ready / loadout / warmup_ready / match_start proposer) so
+// it does not block matches, but NEVER broadcasts position,
+// fires, hits, or votes. State broadcasts go out at 1 Hz with
+// dead=true permanently so peers do not render a judge ship.
+//
+// Every incoming P2P message is forwarded over WebSocket to
+// lss_judge_brain.py for detection + logging.
+// ============================================================
+
+const TRYSTERO_URL = 'https://esm.sh/trystero@0.22.0/torrent';
+const APP_ID = 'last-ship-sailing-v1';
+const BROADCAST_HZ = 1;      // keep peer alive in lobby, no need for fast updates
+const HEARTBEAT_HZ = 0.5;    // re-announce ready/loadout periodically
+// We commit to BLASTER as a sentinel loadout: it is the lightest, so if any
+// game gate reads our chassis stats the judge looks like a tiny non-threat.
+// We never actually spawn ; permanent dead=true hides our ship completely.
+const SENTINEL_LOADOUT = 'BLASTER';
+const SENTINEL_TEAM = 3;
+const SENTINEL_NAME = 'JUDGE';
+
+const judge = {
+  selfId: null,
+  room: null,
+  peers: new Set(),
+  peerReady: new Map(),     // peerId -> bool
+  peerLoadouts: new Map(),  // peerId -> { loadoutKey, team, name }
+  matchState: 'lobby',
+  matchStartSent: false,
+  warmupReadySent: false,
+  tickCount: 0,
+  broadcastTimer: 0,
+  heartbeatTimer: 0,
+
+  // Brain WebSocket
+  brainWs: null,
+  brainUrl: null,
+  brainQueue: [],           // buffer envelopes while ws disconnected
+  forwardedCount: 0,
+  recvCount: 0,
+
+  // Senders (set in bindChannels)
+  sendState: null,
+  sendEvent: null,
+  sendLoadout: null,
+};
+
+// ============================================================
+// UI helpers
+// ============================================================
+function $(id) { return document.getElementById(id); }
+function setStat(id, val, cls) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = '';
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = val;
+  el.appendChild(span);
+}
+function shortId(id) { return id ? id.slice(0, 8) : '-'; }
+function log(msg, level) {
+  const el = $('log');
+  if (!el) return;
+  const div = document.createElement('div');
+  div.className = 'e ' + (level || '');
+  const t = new Date().toLocaleTimeString();
+  div.textContent = '[' + t + '] ' + msg;
+  el.appendChild(div);
+  while (el.children.length > 200) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ============================================================
+// Brain WebSocket : forward every observed envelope
+// ============================================================
+function connectBrain() {
+  judge.brainUrl = $('brain-url').value.trim();
+  if (!judge.brainUrl) return;
+  try {
+    judge.brainWs = new WebSocket(judge.brainUrl);
+  } catch (e) {
+    log('brain ws ctor failed : ' + e, 'err');
+    setStat('s-brain', 'failed', 'bad');
+    return;
+  }
+  judge.brainWs.onopen = () => {
+    setStat('s-brain', 'connected', 'good');
+    log('brain connected : ' + judge.brainUrl, 'ok');
+    // Flush queue
+    while (judge.brainQueue.length) {
+      const env = judge.brainQueue.shift();
+      try { judge.brainWs.send(JSON.stringify(env)); } catch (_) {}
+    }
+  };
+  judge.brainWs.onclose = () => {
+    setStat('s-brain', 'disconnected', 'bad');
+    if (judge.room) setTimeout(connectBrain, 2000);
+  };
+  judge.brainWs.onerror = () => {
+    setStat('s-brain', 'error', 'bad');
+  };
+}
+
+function forwardToBrain(env) {
+  judge.forwardedCount++;
+  setStat('s-fwd', judge.forwardedCount);
+  if (judge.brainWs && judge.brainWs.readyState === 1) {
+    try { judge.brainWs.send(JSON.stringify(env)); } catch (_) {}
+  } else {
+    // Buffer up to 1000 envelopes; drop oldest.
+    judge.brainQueue.push(env);
+    if (judge.brainQueue.length > 1000) judge.brainQueue.shift();
+  }
+}
+
+// ============================================================
+// Channel bindings : every action is observed, none are
+// actively used for play. State/event/loadout senders are
+// retained only for lobby handshake participation.
+// ============================================================
+function bindChannels(room) {
+  const [sendState, onState]       = room.makeAction('state');
+  const [sendHitClaim, onHitClaim] = room.makeAction('hit');
+  const [sendHitVote, onHitVote]   = room.makeAction('vote');
+  const [sendEvent, onEvent]       = room.makeAction('event');
+  const [sendLoadout, onLoadout]   = room.makeAction('loadout');
+  const [sendProj, onProj]         = room.makeAction('proj');
+
+  judge.sendState = sendState;
+  judge.sendEvent = sendEvent;
+  judge.sendLoadout = sendLoadout;
+  // sendHitClaim / sendHitVote / sendProj intentionally never invoked.
+
+  onState((data, peerId) => {
+    judge.recvCount++;
+    setStat('s-recv', judge.recvCount);
+    forwardToBrain({ kind: 'state', peerId, ts: Date.now(), data });
+  });
+  onHitClaim((data, peerId) => {
+    forwardToBrain({ kind: 'hit', peerId, ts: Date.now(), data });
+  });
+  onHitVote((data, peerId) => {
+    forwardToBrain({ kind: 'vote', peerId, ts: Date.now(), data });
+  });
+  onEvent((data, peerId) => {
+    forwardToBrain({ kind: 'event', peerId, ts: Date.now(), data });
+    if (!data || !data.type) return;
+    if (data.type === 'ready') {
+      judge.peerReady.set(peerId, !!data.ready);
+      checkProposer();
+    } else if (data.type === 'match_start') {
+      judge.matchState = 'starting';
+      judge.matchStartSent = true;
+      setStat('s-match', 'starting', 'warn');
+      // Tell humans we are "warmed up" so their launch gate proceeds.
+      if (judge.sendEvent && !judge.warmupReadySent) {
+        try {
+          judge.sendEvent({ type: 'warmup_ready' });
+          judge.warmupReadySent = true;
+          log('warmup_ready broadcast', 'ok');
+        } catch (_) {}
+      }
+    } else if (data.type === 'launch_at') {
+      judge.matchState = 'launching';
+      setStat('s-match', 'launching', 'warn');
+      // Game flips to playing shortly. We stay silent.
+      setTimeout(() => {
+        judge.matchState = 'playing';
+        setStat('s-match', 'playing', 'good');
+      }, 3500);
+    } else if (data.type === 'round_end') {
+      judge.matchState = 'roundEnd';
+      setStat('s-match', 'roundEnd', 'warn');
+    }
+  });
+  onLoadout((data, peerId) => {
+    forwardToBrain({ kind: 'loadout', peerId, ts: Date.now(), data });
+    if (data && data.loadoutKey) {
+      judge.peerLoadouts.set(peerId, {
+        loadoutKey: data.loadoutKey,
+        team: data.team,
+        name: data.discord_name || null,
+      });
+    }
+    checkProposer();
+  });
+  onProj((data, peerId) => {
+    forwardToBrain({ kind: 'proj', peerId, ts: Date.now(), data });
+  });
+}
+
+// ============================================================
+// Lobby handshake helpers : participate but never play.
+// ============================================================
+function sendLoadoutAnnounce() {
+  if (!judge.sendLoadout) return;
+  try {
+    judge.sendLoadout({
+      loadoutKey: SENTINEL_LOADOUT,
+      team: SENTINEL_TEAM,
+      discord_name: SENTINEL_NAME,
+      // (v27.judge) v27 and later treat this flag as "I am an observer,
+      // not a player". The game excludes us from lobby gates, team
+      // assignment, fleet chips, and the hit-vote quorum. Older v27
+      // builds ignore the flag and still see us as a dead BLASTER ;
+      // upgrade the game alongside this bot for full effect.
+      isJudge: true,
+    });
+  } catch (_) {}
+}
+
+function sendReadyEvent() {
+  if (!judge.sendEvent) return;
+  try { judge.sendEvent({ type: 'ready', ready: true }); } catch (_) {}
+}
+
+// Permanent-dead state. Players hide our ship and the scoreboard shows us
+// inert. Coordinates pinned to origin ; HP zero ; spawnProt zero so the
+// game does not think we are a fresh respawn.
+function buildJudgeState() {
+  return {
+    px: 0, py: 0, pz: 0,
+    vx: 0, vy: 0, vz: 0,
+    qx: 0, qy: 0, qz: 0, qw: 1,
+    hp: 0, shield: 0,
+    doomed: false, dead: true,
+    kills: 0, damageDealt: 0,
+    abilityShield: false,
+    spawnProt: 0, cloak: false,
+  };
+}
+
+// (v27.judge) Proposer logic is now a no-op. In v27 and later, the game
+// excludes judges from proposer candidacy via isJudge, so a human always
+// proposes match_start and launch_at. If you point this bot at an older
+// v27 build that does not recognize isJudge, lobbies where the judge
+// happens to have the lowest peerId will stall ; upgrade the game.
+function checkProposer() { /* no-op : humans propose, judge observes */ }
+
+// ============================================================
+// Tick loop : keep our dead-state heartbeat going so peers
+// do not GC our presence. Heartbeat re-sends ready+loadout.
+// ============================================================
+function startTickLoop() {
+  let lastT = performance.now();
+  function tick() {
+    if (!judge.room) return;
+    const t = performance.now();
+    const dt = (t - lastT) / 1000;
+    lastT = t;
+    judge.tickCount++;
+    judge.broadcastTimer += dt;
+    if (judge.broadcastTimer >= 1 / BROADCAST_HZ) {
+      judge.broadcastTimer = 0;
+      try { judge.sendState && judge.sendState(buildJudgeState()); } catch (_) {}
+    }
+    judge.heartbeatTimer += dt;
+    if (judge.heartbeatTimer >= 1 / HEARTBEAT_HZ) {
+      judge.heartbeatTimer = 0;
+      sendLoadoutAnnounce();
+      sendReadyEvent();
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+// ============================================================
+// Join / Leave
+// ============================================================
+async function joinRoom() {
+  const code = $('room-code').value.trim().toUpperCase();
+  if (!code) { log('Room code required', 'err'); return; }
+  $('btn-join').disabled = true;
+  $('btn-leave').disabled = false;
+  setStat('s-conn', 'connecting', 'warn');
+
+  connectBrain();
+
+  try {
+    const trystero = await import(TRYSTERO_URL);
+    const { joinRoom: trysteroJoin, selfId } = trystero;
+    judge.selfId = selfId;
+    judge.room = trysteroJoin({ appId: APP_ID }, code);
+
+    setStat('s-conn', 'connected', 'good');
+    setStat('s-self', shortId(selfId));
+    setStat('s-room', code);
+    log('joined room ' + code + ' as ' + shortId(selfId), 'ok');
+
+    // Tell brain a new match observation has begun.
+    forwardToBrain({
+      kind: 'match_start_obs',
+      ts: Date.now(),
+      roomCode: code,
+      judgeId: selfId,
+    });
+
+    bindChannels(judge.room);
+
+    judge.room.onPeerJoin((peerId) => {
+      judge.peers.add(peerId);
+      setStat('s-peers', judge.peers.size);
+      log('peer joined : ' + shortId(peerId), 'ok');
+      forwardToBrain({ kind: 'peer_join', peerId, ts: Date.now() });
+      // Re-announce so the new peer sees our ready+loadout.
+      sendLoadoutAnnounce();
+      sendReadyEvent();
+      if (judge.warmupReadySent && judge.sendEvent) {
+        try { judge.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+      }
+    });
+    judge.room.onPeerLeave((peerId) => {
+      judge.peers.delete(peerId);
+      judge.peerReady.delete(peerId);
+      judge.peerLoadouts.delete(peerId);
+      setStat('s-peers', judge.peers.size);
+      log('peer left : ' + shortId(peerId), 'warn');
+      forwardToBrain({ kind: 'peer_leave', peerId, ts: Date.now() });
+    });
+
+    // Initial announces.
+    sendLoadoutAnnounce();
+    setTimeout(() => { sendReadyEvent(); log('ready broadcast', 'ok'); }, 400);
+
+    startTickLoop();
+  } catch (e) {
+    log('join failed : ' + (e && e.message ? e.message : e), 'err');
+    setStat('s-conn', 'failed', 'bad');
+    $('btn-join').disabled = false;
+    $('btn-leave').disabled = true;
+  }
+}
+
+function leaveRoom() {
+  forwardToBrain({ kind: 'match_end_obs', ts: Date.now() });
+  if (judge.room) {
+    try { judge.room.leave(); } catch (_) {}
+    judge.room = null;
+  }
+  if (judge.brainWs) {
+    try { judge.brainWs.close(); } catch (_) {}
+    judge.brainWs = null;
+  }
+  judge.peers.clear();
+  judge.peerReady.clear();
+  judge.peerLoadouts.clear();
+  judge.matchStartSent = false;
+  judge.warmupReadySent = false;
+  judge.matchState = 'lobby';
+  setStat('s-conn', 'disconnected', 'bad');
+  setStat('s-peers', 0);
+  setStat('s-match', 'lobby');
+  setStat('s-self', '-');
+  setStat('s-room', '-');
+  setStat('s-brain', 'offline');
+  $('btn-join').disabled = false;
+  $('btn-leave').disabled = true;
+  log('left room', 'warn');
+}
+
+$('btn-join').addEventListener('click', joinRoom);
+$('btn-leave').addEventListener('click', leaveRoom);
+
+</script>
+
+</body>
+</html>

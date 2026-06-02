@@ -620,14 +620,12 @@ function bindChannels(room) {
       ai.matchState = 'playing';
       setStat('s-match', 'playing', 'good');
       respawnAtMapSpawn();
-      // Critical : reset the orphan timers for the new round. Without
-      // this, _playingSince still holds round-1's launch_at time, so
-      // beyondSettle is true on the first tick, and noStates fires the
-      // moment any state-broadcast hiccup happens. Bot bounces to lobby
-      // and never appears for round 2.
       ai._playingSince = performance.now();
       ai._lastPeerStateAt = performance.now();
       ai._noPeersSince = 0;
+      // Force-push an alive state immediately so v27's per-tick alive
+      // count doesn't read stale dead=true from our previous broadcast.
+      try { if (ai.sendState) ai.sendState(buildStatePacket()); } catch (_) {}
       log('round resume (peer spawn signal from ' + shortId(peerId) + ')', 'ok');
     }
     // Peer-anchor snap : jump to within ~250 u of a real peer so we
@@ -735,29 +733,34 @@ function bindChannels(room) {
             } catch (_) {}
           }
           // v27's per-tick round-end check only runs on the resolution
-          // authority (lowest peerId). If THAT'S the bot, no peer will
-          // fire round_end after we die, and the human is stuck in
-          // playing forever. Fire it ourselves 250 ms later as a backup ;
-          // v27's handler is idempotent if a real authority already fired.
-          setTimeout(() => {
-            if (!ai.sendEvent || ai.matchState !== 'playing') return;
-            // Winner = the team that isn't us. If our team was 2 (A) the
-            // human (or human team) is 3 (B).
-            const ourTeam = ai.team;
-            const winnerTeam = (ourTeam === 2) ? 3 : 2;
-            const winnerLabel = winnerTeam === 2
-              ? 'FLEET A WIPED FLEET B'
-              : 'FLEET B WIPED FLEET A';
-            try {
-              ai.sendEvent({
-                type: 'round_end',
-                winnerTeam: winnerTeam,
-                winnerLabel: winnerLabel,
-                // Don't second-guess score deltas ; let v27 figure it out.
-              });
-              log('round_end broadcast (winner: team ' + (winnerTeam === 2 ? 'A' : 'B') + ')', 'ok');
-            } catch (_) {}
-          }, 250);
+          // authority (lowest peerId / amStasisOwner). If THAT'S the
+          // human, the human will fire round_end on their own when they
+          // see our broadcast hp/dead state ; we DON'T also fire one,
+          // because two round_end events score twice and end the match
+          // in a single death. Only fire ourselves if WE are the
+          // resolution authority (our peerId sorts lowest in the mesh).
+          const _allIds = [ai.selfId, ...ai.peers].sort();
+          const _amAuthority = (_allIds[0] === ai.selfId);
+          if (_amAuthority) {
+            setTimeout(() => {
+              if (!ai.sendEvent || ai.matchState !== 'playing') return;
+              const ourTeam = ai.team;
+              const winnerTeam = (ourTeam === 2) ? 3 : 2;
+              const winnerLabel = winnerTeam === 2
+                ? 'FLEET A WIPED FLEET B'
+                : 'FLEET B WIPED FLEET A';
+              try {
+                ai.sendEvent({
+                  type: 'round_end',
+                  winnerTeam: winnerTeam,
+                  winnerLabel: winnerLabel,
+                });
+                log('round_end broadcast (winner: team ' + (winnerTeam === 2 ? 'A' : 'B') + ')', 'ok');
+              } catch (_) {}
+            }, 250);
+          } else {
+            log('skip round_end broadcast ; human is the resolution authority', 'info');
+          }
         }
       }
     }
@@ -839,9 +842,20 @@ function bindChannels(room) {
           ai._launchTimer = null;
           ai.matchState = 'playing';
           setStat('s-match', 'playing', 'good');
+          // Force-clear the dead/damage carryover from the previous
+          // round so our very first 'playing' broadcast says alive.
+          // Without this, v27's per-tick aliveB count can fire round_end
+          // in the brief window between matchState flipping and our
+          // next 20 Hz broadcast going out.
+          ai.dead = false;
+          ai.doomed = false;
+          ai.health = ai.maxHealth;
+          ai.shield = ai.maxShield;
           ai.spawnProt = 3.0;
           ai._playingSince = performance.now();
           ai._lastPeerStateAt = performance.now();
+          // Push a state broadcast immediately, don't wait the 50 ms.
+          try { if (ai.sendState) ai.sendState(buildStatePacket()); } catch (_) {}
         }, SHORT_COUNTDOWN_MS);
       }
     } else if (evt.type === 'round_end') {
@@ -890,6 +904,7 @@ function bindChannels(room) {
           ai._playingSince = performance.now();
           ai._lastPeerStateAt = performance.now();
           ai._noPeersSince = 0;
+          try { if (ai.sendState) ai.sendState(buildStatePacket()); } catch (_) {}
           log('round resume (timer fallback)', 'ok');
         }
       }, 6000);
@@ -1459,27 +1474,137 @@ function _currentRoomId() {
 // Build the observation packet the brain receives each tick.
 // Designed to be flat / fixed-ish ; arrays for peers and recent
 // projectiles. Brain is responsible for handling variable list lengths.
+// ============================================================
+// Perception filter : the brain only "sees" what a human pilot would.
+// - FOV cone : peers outside the forward 110 deg field of view are
+//   omitted entirely.
+// - Line of sight : a 16-sample raycast against rooms/tunnels. If any
+//   sample point is outside the playable volume, a wall is in the way
+//   and the peer is hidden.
+// - Health bucketing : exact hp/shield collapsed to a categorical bucket
+//   (healthy / shielded / sparking / on_fire / doomed) derived from the
+//   peer's loadout-implied maxHealth. Real pilots see paint scorching
+//   and shield ripples, not hit-point integers.
+// - Minimap glance : every MINIMAP_GLANCE_PERIOD_S seconds the obs
+//   includes a brief positional dump of all alive peers (no health, no
+//   loadout, no orientation). Simulates the cost of glancing at the
+//   minimap : a tick of global position info, then back to cockpit.
+// ============================================================
+const FOV_HALF_COS = Math.cos(55 * Math.PI / 180); // 110 deg total cone
+const MINIMAP_GLANCE_PERIOD_S = 4.0;
+
+function _losPointInsidePlayVolume(x, y, z) {
+  if (ai.mapRooms) {
+    for (const rm of ai.mapRooms) {
+      const dx = x - rm.x, dy = y - rm.y, dz = z - rm.z;
+      if (dx*dx + dy*dy + dz*dz <= rm.r * rm.r) return true;
+    }
+  }
+  if (ai.mapTunnels) {
+    for (const tun of ai.mapTunnels) {
+      const path = tun.path;
+      for (let i = 0; i < path.length - 1; i++) {
+        const a = path[i], b = path[i + 1];
+        const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+        const ab2 = abx*abx + aby*aby + abz*abz;
+        if (ab2 < 0.001) continue;
+        const apx = x - a.x, apy = y - a.y, apz = z - a.z;
+        let t = (apx*abx + apy*aby + apz*abz) / ab2;
+        if (t < 0) t = 0; else if (t > 1) t = 1;
+        const cx = a.x + abx * t, cy = a.y + aby * t, cz = a.z + abz * t;
+        const dx = x - cx, dy = y - cy, dz = z - cz;
+        if (dx*dx + dy*dy + dz*dz <= tun.r * tun.r) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function _losClearTo(toX, toY, toZ) {
+  // No map yet : assume LOS clear (fail-open, brain just gets all peers).
+  if ((!ai.mapRooms || ai.mapRooms.length === 0)
+      && (!ai.mapTunnels || ai.mapTunnels.length === 0)) return true;
+  const steps = 16;
+  const fx = ai.position.x, fy = ai.position.y, fz = ai.position.z;
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    const px = fx + (toX - fx) * t;
+    const py = fy + (toY - fy) * t;
+    const pz = fz + (toZ - fz) * t;
+    if (!_losPointInsidePlayVolume(px, py, pz)) return false;
+  }
+  return true;
+}
+
+function _peerHealthBucket(st, loadoutKey) {
+  if (st.dead) return 'dead';
+  if (st.doomed) return 'doomed';
+  if ((st.shield || 0) > 0) return 'shielded';
+  const stats = CHASSIS_BY_LOADOUT[loadoutKey] || { maxHealth: 10000 };
+  const hpFrac = (st.hp || 0) / Math.max(1, stats.maxHealth);
+  if (hpFrac < 0.25) return 'on_fire';
+  if (hpFrac < 0.60) return 'sparking';
+  return 'healthy';
+}
+
 function buildObservation(dt) {
+  // ---------- VISIBLE PEERS (FOV + LOS gated) ----------
+  const fwd = quatForward(ai.quat);
   const peers = [];
   for (const [pid, st] of ai.peerStates) {
+    if (!st || typeof st.px !== 'number') continue;
+    const dx = st.px - ai.position.x;
+    const dy = st.py - ai.position.y;
+    const dz = st.pz - ai.position.z;
+    const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (dist < 0.01) continue;
+    const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+    const dot = ux * fwd.x + uy * fwd.y + uz * fwd.z;
+    if (dot < FOV_HALF_COS) continue;          // outside FOV cone
+    if (!_losClearTo(st.px, st.py, st.pz)) continue;  // wall in the way
     const lo = ai.peerLoadouts.get(pid);
+    const loadoutKey = (lo && lo.loadoutKey) || null;
     peers.push({
       id: pid,
       px: st.px, py: st.py, pz: st.pz,
       vx: st.vx, vy: st.vy, vz: st.vz,
       qx: st.qx, qy: st.qy, qz: st.qz, qw: st.qw,
-      hp: st.hp || 0, shield: st.shield || 0,
-      dead: !!st.dead, doomed: !!st.doomed,
       team: (lo && lo.team) || st.team || null,
-      loadout: (lo && lo.loadoutKey) || null,
+      loadout: loadoutKey,
+      health: _peerHealthBucket(st, loadoutKey),
+      dead: !!st.dead, doomed: !!st.doomed,
+      dist: Math.round(dist),
     });
   }
+
+  // ---------- MINIMAP GLANCE (periodic positional dump, no health) ----------
+  ai._minimapTimer = (ai._minimapTimer || 0) + dt;
+  let minimap = null;
+  if (ai._minimapTimer >= MINIMAP_GLANCE_PERIOD_S) {
+    ai._minimapTimer = 0;
+    minimap = [];
+    for (const [pid, st] of ai.peerStates) {
+      if (!st || st.dead) continue;
+      const lo = ai.peerLoadouts.get(pid);
+      minimap.push({
+        id: pid,
+        px: st.px, py: st.py, pz: st.pz,
+        team: (lo && lo.team) || st.team || null,
+      });
+    }
+  }
+
+  // Projectiles : a real pilot sees streaks past their cockpit so we
+  // keep these unfiltered. (We could add a FOV gate later but most
+  // projectiles do their own visible/audible cue ; brain knowing about
+  // them is closer to lived experience than not knowing.)
   const projs = ai.recentProjectiles.slice(-40).map(p => ({
     ox: p.ox, oy: p.oy, oz: p.oz,
     vx: p.vx, vy: p.vy, vz: p.vz,
     color: p.color, owner: p.owner,
     isArcWave: !!p.isArcWave, isCluster: !!p.isCluster, isFireSource: !!p.isFireSource,
   }));
+
   return {
     kind: 'obs',
     tick: ai.tickCount,
@@ -1500,15 +1625,13 @@ function buildObservation(dt) {
       fire_ready: ai.fireGate <= 0,
       spawn_prot: ai.spawnProt,
     },
-    // Cheap precomputed nav hints. Lets the brain skip per-tick
-    // containment checks ; brain still has the full map_static cache
-    // for its own BFS / steering decisions.
     nav: {
       current_room_id: _currentRoomId(),
       champion_room_id: ai.championRoomId || null,
       mode: ai.mapMode || 'champion',
     },
-    peers: peers,
+    peers: peers,                  // filtered : only what's in view
+    minimap_glance: minimap,       // null on most ticks, populated periodically
     projectiles: projs,
   };
 }
