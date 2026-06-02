@@ -8611,6 +8611,50 @@ function _makeFXMaterial(presetName) {
   return _makeLayeredFXMaterial(preset);
 }
 
+// Shared unit-sphere geometries for FX bursts, keyed by segment count.
+// spawnFXBurst used to build a fresh radius-baked SphereGeometry on every
+// call, which profiling showed to be the single largest per-frame heap
+// allocator during combat (GC churn -> frame hitches -> audio glitches).
+// We now reuse one unit sphere per seg count and scale the mesh by radius.
+const _fxBurstGeoCache = new Map();
+function _getFXBurstGeometry(segs, heightSegs) {
+  const h = (heightSegs != null) ? heightSegs : Math.max(8, Math.floor(segs / 2));
+  const key = segs + 'x' + h;
+  let g = _fxBurstGeoCache.get(key);
+  if (!g) {
+    g = new THREE.SphereGeometry(1, segs, h);
+    _fxBurstGeoCache.set(key, g);
+  }
+  return g;
+}
+
+// Material pool for LayeredFX bursts, keyed by preset name. Reuses spent
+// burst materials instead of cloning + disposing one per burst. Pooled
+// materials are removed from _ACTIVE_LAYERED_FX so the per-frame uTime tick
+// skips them while idle, and re-added on acquire.
+const _fxBurstMatPool = new Map();
+function _acquireFXBurstMaterial(presetName) {
+  const pool = _fxBurstMatPool.get(presetName);
+  if (pool && pool.length) {
+    const m = pool.pop();
+    _ACTIVE_LAYERED_FX.add(m);
+    return m;
+  }
+  return _makeFXMaterial(presetName);
+}
+function _releaseFXBurstMaterial(mat) {
+  if (!mat) return;
+  const name = mat.userData && mat.userData.presetName;
+  if (!name || !mat.uniforms) { try { mat.dispose(); } catch (_) {} return; }
+  const u = mat.uniforms;
+  if (u.uBrightness && u._fxBaseBrightness != null) u.uBrightness.value = u._fxBaseBrightness;
+  _ACTIVE_LAYERED_FX.delete(mat);
+  let pool = _fxBurstMatPool.get(name);
+  if (!pool) { pool = []; _fxBurstMatPool.set(name, pool); }
+  if (pool.length < 64) pool.push(mat);
+  else { try { mat.dispose(); } catch (_) {} }
+}
+
 function spawnFXBurst(presetName, pos, radius, life, opts) {
   // All LayeredFX bursts skipped (fireball, cloud, gas, shock,
   // engine_disc, engine_plume, etc.). Many callers test for spawnFXBurst's
@@ -8621,7 +8665,7 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
   const startScale = (opts.startScale != null) ? opts.startScale : 0.15;
   const endScale   = (opts.endScale   != null) ? opts.endScale   : 1.0;
   const segs       = (opts.segs       != null) ? opts.segs       : 24;
-  const mat = _makeFXMaterial(presetName);
+  const mat = _acquireFXBurstMaterial(presetName);
   // Match fx_lab's radius-1 preview sphere sampling: divide world
   // position by `radius` so the per-layer scale settings cover the same
   // visual range regardless of how big the explosion is. Without this the
@@ -8632,7 +8676,10 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
   if (mat && mat.userData) {
     mat.userData._timeOffset = Math.random() * 10;
   }
-  const geo = new THREE.SphereGeometry(radius, segs, Math.max(8, Math.floor(segs / 2)));
+  // Shared unit sphere (radius 1). The radius is applied via mesh.scale
+  // below and baked into _fxStartScale/_fxEndScale so the scale ramp in
+  // updateEffects produces the same world size as the old radius-baked geo.
+  const geo = _getFXBurstGeometry(segs);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.copy(pos);
   // Randomize rotation so the displacement-driven bumpy silhouette
@@ -8644,7 +8691,7 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
     Math.random() * Math.PI * 2,
     Math.random() * Math.PI * 2
   );
-  mesh.scale.setScalar(startScale * radius / radius);
+  mesh.scale.setScalar(startScale * radius);
   mesh.renderOrder = 1;
   scene.add(mesh);
   // game.effects entries get age incremented each frame in updateEffects;
@@ -8655,8 +8702,9 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
       lifetime: life,
       age: 0,
       type: 'fx_burst',
-      _fxStartScale: startScale,
-      _fxEndScale: endScale,
+      _fxSharedGeo: true,
+      _fxStartScale: startScale * radius,
+      _fxEndScale: endScale * radius,
       _fxStartAlpha: 1.0,
       _fxEndAlpha: 0.0,
       playerWake: true,
@@ -8929,14 +8977,18 @@ function _buildFlameChainFlameLicks(effData, pos, dir, length) {
     // ~80-110 unit spheres ; size variance per-instance so the curtain
     // reads as a row of distinct flames rather than uniform blobs.
     const radius = 80 + Math.random() * 30;
-    const mat = _makeFXMaterial('fireball');
+    const mat = _acquireFXBurstMaterial('fireball');
     if (mat.uniforms && mat.uniforms.uPosScale) {
       mat.uniforms.uPosScale.value = 1.0 / Math.max(1, radius);
     }
     // Per-instance noise-phase offset so adjacent flames don't pulse in lockstep.
     if (mat.userData) mat.userData._timeOffset = Math.random() * 10;
-    const geo = new THREE.SphereGeometry(radius, 16, 10);
+    // Shared unit sphere (16x10) scaled by radius; the breathe animation in
+    // the firewall tick applies baseRadius * breath * fade each frame.
+    const geo = _getFXBurstGeometry(16, 10);
     const mesh = new THREE.Mesh(geo, mat);
+    mesh.scale.setScalar(radius);
+    mesh.userData._fxSharedGeo = true;
     mesh.position.copy(basePt);
     mesh.position.y += radius * 0.35 + (Math.random() - 0.5) * 15;
     mesh.rotation.set(
@@ -24822,6 +24874,20 @@ function _disposeOrReleaseEffect(e) {
     _releaseExplosionMesh(e.mesh);
     return;
   }
+  // FX bursts. spawnFXBurst meshes share a pooled unit-sphere geometry
+  // (_fxSharedGeo) that must NOT be disposed; their material returns to the
+  // burst pool. spawnSupershapeBurst owns a unique geometry (no _fxSharedGeo)
+  // so that one still disposes its geometry.
+  if (e.type === 'fx_burst') {
+    if (e.mesh) {
+      if (e.mesh.parent) scene.remove(e.mesh);
+      if (!e._fxSharedGeo && e.mesh.geometry && e.mesh.geometry.dispose) {
+        try { e.mesh.geometry.dispose(); } catch (_) {}
+      }
+      if (e.mesh.material) _releaseFXBurstMaterial(e.mesh.material);
+    }
+    return;
+  }
   scene.remove(e.mesh);
   if (e.mesh.geometry) e.mesh.geometry.dispose();
   if (e.mesh.material) e.mesh.material.dispose();
@@ -32647,7 +32713,7 @@ function updateAbilities(dt) {
           // Breathe scale Â±8% so the silhouette pulses organically alongside
           // the shader's vertex-displacement noise.
           const breath = 1 + 0.08 * Math.sin(t * fwFX.freq + fwFX.phase);
-          m.scale.setScalar(breath * fade);
+          m.scale.setScalar((fwFX.baseRadius || 1) * breath * fade);
           m.position.y = fwFX.baseY + Math.sin(t * (fwFX.freq * 0.5) + fwFX.phase) * 6;
           continue;
         }
@@ -32687,8 +32753,12 @@ function updateAbilities(dt) {
       if (eff.meshes) {
         for (const m of eff.meshes) {
           if (m.parent) scene.remove(m);
-          if (m.geometry && m.geometry.dispose) m.geometry.dispose();
-          if (m.material && m.material.dispose) m.material.dispose();
+          const _shared = m.userData && m.userData._fxSharedGeo;
+          if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
+          if (m.material) {
+            if (_shared) _releaseFXBurstMaterial(m.material);
+            else if (m.material.dispose) m.material.dispose();
+          }
         }
       }
       // Clean up incendiary gas puff spheres
@@ -33221,8 +33291,12 @@ function updateRoundSystem(dt) {
           if (eff.meshes) {
             for (const m of eff.meshes) {
               if (m.parent) scene.remove(m);
-              if (m.geometry && m.geometry.dispose) m.geometry.dispose();
-              if (m.material && m.material.dispose) m.material.dispose();
+              const _shared = m.userData && m.userData._fxSharedGeo;
+              if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
+              if (m.material) {
+                if (_shared) _releaseFXBurstMaterial(m.material);
+                else if (m.material.dispose) m.material.dispose();
+              }
             }
           }
           if (eff.puffMeshes) {
@@ -33432,8 +33506,12 @@ function returnToRootMenu() {
     if (eff.meshes) {
       for (const m of eff.meshes) {
         if (m.parent) scene.remove(m);
-        if (m.geometry && m.geometry.dispose) m.geometry.dispose();
-        if (m.material && m.material.dispose) m.material.dispose();
+        const _shared = m.userData && m.userData._fxSharedGeo;
+        if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
+        if (m.material) {
+          if (_shared) _releaseFXBurstMaterial(m.material);
+          else if (m.material.dispose) m.material.dispose();
+        }
       }
     }
     if (eff.puffMeshes) {
@@ -43208,6 +43286,10 @@ class CosmicAnomaly {
       { key: 'n22', base: 1.0, amp: 0.4, period: 12.3 },
       { key: 'n32', base: 1.0, amp: 0.4, period: 15.9 },
     ];
+    // Key->param lookup so _rebuildGeometry can sample by name without
+    // allocating a fresh object every frame.
+    this._pmap = {};
+    for (const q of this.params) this._pmap[q.key] = q;
 
     // BufferGeometry with positions we'll rewrite each frame. Triangles
     // are computed once in the constructor (topology doesn't change).
@@ -43287,16 +43369,18 @@ class CosmicAnomaly {
   _rebuildGeometry() {
     // Sample the morphing parameters for this frame.
     const tSec = this.elapsed;
-    const p = {};
-    for (const { key, base, amp, period } of this.params) {
-      p[key] = base + amp * Math.sin(tSec * 2 * Math.PI / period);
-    }
-    // Clamp exponents so the shape stays sane (very low n* explodes the
-    // radius via the -1/n1 term). Real n1 âˆˆ [0.2, âˆž) is well-behaved.
-    const clampN = (v) => Math.max(0.3, v);
-    const n11 = clampN(p.n11), n21 = clampN(p.n21), n31 = clampN(p.n31);
-    const n12 = clampN(p.n12), n22 = clampN(p.n22), n32 = clampN(p.n32);
-    const m1 = p.m1, m2 = p.m2;
+    // Sample each morph param in place (no per-frame object allocation).
+    // Exponents are clamped so a very low n* doesn't explode the radius via
+    // the -1/n1 term. Real n1 in [0.2, inf) is well-behaved.
+    const TAU = 2 * Math.PI, pm = this._pmap;
+    const m1  = pm.m1.base  + pm.m1.amp  * Math.sin(tSec * TAU / pm.m1.period);
+    const m2  = pm.m2.base  + pm.m2.amp  * Math.sin(tSec * TAU / pm.m2.period);
+    const n11 = Math.max(0.3, pm.n11.base + pm.n11.amp * Math.sin(tSec * TAU / pm.n11.period));
+    const n21 = Math.max(0.3, pm.n21.base + pm.n21.amp * Math.sin(tSec * TAU / pm.n21.period));
+    const n31 = Math.max(0.3, pm.n31.base + pm.n31.amp * Math.sin(tSec * TAU / pm.n31.period));
+    const n12 = Math.max(0.3, pm.n12.base + pm.n12.amp * Math.sin(tSec * TAU / pm.n12.period));
+    const n22 = Math.max(0.3, pm.n22.base + pm.n22.amp * Math.sin(tSec * TAU / pm.n22.period));
+    const n32 = Math.max(0.3, pm.n32.base + pm.n32.amp * Math.sin(tSec * TAU / pm.n32.period));
 
     const positions = this._positions;
     const resTheta = this.resTheta;
