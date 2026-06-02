@@ -4655,6 +4655,11 @@ async function joinRoom() {
 
     // Hit claims (Tier 3: consensus)
     onHitClaim((claim, peerId) => {
+      // (v27.judge) Reject hit claims from judges. Anyone can spoof
+      // isJudge to dodge lobby gates ; this rule means the dodge costs
+      // them all combat ability. Judges cannot deal damage, period.
+      const sender = net.peers.get(peerId);
+      if (_peerIsJudge(sender)) return;
       handleHitClaim(claim, peerId);
     });
 
@@ -4672,6 +4677,25 @@ async function joinRoom() {
     onLoadout((data, peerId) => {
       const peer = net.peers.get(peerId);
       if (peer) {
+        // (v27.judge) Recognize judge bots so we don't lock the map on a
+        // judge's "loadout", spawn a ship for it, gate ready on it, or
+        // render it on the fleet strip. The judge bot still commits a
+        // sentinel loadout (BLASTER) for protocol parity, but the
+        // isJudge flag tells us to treat it as an observer.
+        if (data.isJudge) {
+          peer.isJudge = true;
+          peer.loadoutKey = data.loadoutKey || null; // sentinel; not used for spawning
+          peer.team = null;
+          if (data.discord_name) peer.discord_name = data.discord_name;
+          console.log('[net] judge peer recognized:', peerId);
+          // Update the lobby ready tally now that the judge is excluded
+          // from the denominator.
+          try { updateLobbyPeers(); } catch (_) {}
+          // Re-run gates in case the judge was previously blocking them.
+          try { checkAllReady(); } catch (_) {}
+          try { checkAllLoadoutsReady(); } catch (_) {}
+          return;
+        }
         // (v27) First peer to commit locks the map for everyone.
         if (!net.mapCommitLocked) {
           net.mapCommitLocked = true;
@@ -4700,6 +4724,11 @@ async function joinRoom() {
 
     // Projectile broadcasts
     onProjectile((data, peerId) => {
+      // (v27.judge) Reject projectiles from judges. Combined with the
+      // hit-claim block above, this means a peer that declared itself
+      // a judge cannot fire a weapon or land damage by any path.
+      const sender = net.peers.get(peerId);
+      if (_peerIsJudge(sender)) return;
       spawnNetworkProjectile(data, peerId);
     });
 
@@ -4716,6 +4745,7 @@ async function joinRoom() {
         networkPlayer: null,
         ready: false,           // (v6.7) per-peer ready flag for the start handshake
         warmupReady: false,     // (2026-05-21) per-peer shader-warmup done flag
+        isJudge: false,         // (v27.judge) flipped true when the loadout commit arrives with isJudge:true
       });
       updateLobbyPeers();
       checkAllReady();          // (v6.7) a new not-ready peer cancels any pending start
@@ -5257,18 +5287,43 @@ function _setupCustomMapLoader() {
   });
 }
 
+// ---- JUDGE PEER FILTERING (v27.judge) -------------------------------
+// Judge bots (lss_judge.html) join as Trystero peers so they can observe
+// the P2P stream for cheat detection, but they never play. They commit
+// a loadout with isJudge:true so every game-side gate / count / election
+// can skip them. Without this, a judge takes a "player slot" and shows
+// up in the scoreboard, blocks lobby ready, and skews team assignment.
+function _peerIsJudge(peer) { return !!(peer && peer.isJudge); }
+function nonJudgePeerIds() {
+  const out = [];
+  if (!net.peers) return out;
+  for (const [id, p] of net.peers.entries()) {
+    if (!_peerIsJudge(p)) out.push(id);
+  }
+  return out;
+}
+function nonJudgePeerEntries() {
+  const out = [];
+  if (!net.peers) return out;
+  for (const [id, p] of net.peers.entries()) {
+    if (!_peerIsJudge(p)) out.push([id, p]);
+  }
+  return out;
+}
+function nonJudgePeerCount() { return nonJudgePeerIds().length; }
+
 function updateLobbyPeers() {
   const el = document.getElementById('lobby-peers');
   if (!el) return;
-  const count = net.peers.size;
+  const count = nonJudgePeerCount();
   if (count === 0) {
     el.textContent = 'WAITING FOR PEERS...';
     el.style.color = '#66bb66';
     return;
   }
-  // Show ready tally alongside peer count.
+  // Show ready tally alongside peer count. Judges don't have a ready pip.
   let readyCount = net.myReady ? 1 : 0;
-  for (const peer of net.peers.values()) {
+  for (const [, peer] of nonJudgePeerEntries()) {
     if (peer.ready) readyCount++;
   }
   const total = count + 1; // peers + me
@@ -5314,9 +5369,10 @@ function updateReadyButton() {
 // Are we, plus every peer in the mesh, flagged ready?
 // Need at least one other peer; alone in a room, use SOLO+BOTS instead.
 function allPeersReady() {
-  if (net.peers.size === 0) return false;
+  // Judges don't count toward the ready set.
+  if (nonJudgePeerCount() === 0) return false;
   if (!net.myReady) return false;
-  for (const peer of net.peers.values()) {
+  for (const [, peer] of nonJudgePeerEntries()) {
     if (!peer.ready) return false;
   }
   return true;
@@ -5345,8 +5401,9 @@ function checkAllReady() {
 
   // Everyone is ready. Lowest peerId proposes the start time, the map, and
   // the world seed. Every peer computes the same proposer independently
-  // (deterministic tie-break); no negotiation, no host election.
-  const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+  // (deterministic tie-break); no negotiation, no host election. Judges
+  // are excluded from candidacy so we don't pick a non-player to propose.
+  const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
   const proposer = allIds[0];
   if (proposer === net.myPeerId) {
     const startAt = Date.now() + 3000;
@@ -5424,7 +5481,7 @@ function checkAllLoadoutsReady() {
   // gate on local warmup ready ; if shaders aren't compiled yet, the
   // solo launch happens via the warmup completion callback in
   // commitLoadout instead.
-  if (net.peers.size === 0) {
+  if (nonJudgePeerCount() === 0) {
     if (_localWarmupReady) {
       try { hideLoadingOverlay(); } catch (_) {}
       // Cinematic before the 3-2-1. Solo / no-peers fallback path.
@@ -5436,9 +5493,10 @@ function checkAllLoadoutsReady() {
     return;
   }
 
-  // Are all peers committed?
+  // Are all peers committed? Judges have already committed their sentinel
+  // loadout on entry and are skipped.
   let allCommitted = true;
-  for (const peer of net.peers.values()) {
+  for (const [, peer] of nonJudgePeerEntries()) {
     if (!peer.loadoutKey) { allCommitted = false; break; }
   }
 
@@ -5475,8 +5533,9 @@ function checkAllLoadoutsReady() {
   if (net.launchScheduledAt) return;
 
   // Lowest peerId proposes the launch moment. 1.5s buffer so the launch_at
-  // event reaches every peer before any peer's local timer fires.
-  const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+  // event reaches every peer before any peer's local timer fires. Judges
+  // are excluded from candidacy.
+  const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
   const proposer = allIds[0];
   if (proposer === net.myPeerId) {
     const launchAt = Date.now() + 1500;
@@ -5514,7 +5573,7 @@ function scheduleLaunch(launchAt) {
   // stacking. Non-proposers skip the interval (they don't broadcast
   // launch_at at all).
   if (net.active && net.sendEvent) {
-    const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+    const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     if (allIds[0] === net.myPeerId) {
       net.launchRebroadcast = setInterval(() => {
         // (launch-sync 2026-05) Plain launchAt re-broadcast ; receiver
@@ -5556,7 +5615,8 @@ function applyWorldSync(mapKey, seed) {
 
 function assignTeamFromPeerOrder() {
   if (typeof player === 'undefined' || !net.myPeerId) return;
-  const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+  // Judges aren't players, so they don't take a team slot.
+  const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
   const myIndex = allIds.indexOf(net.myPeerId);
   player.team = (myIndex % 2 === 0) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
 }
@@ -6234,8 +6294,9 @@ function handleHitVote(vote, fromPeerId) {
   if (!hit) return;
   hit.votes.set(vote.voterId, vote.valid);
 
-  // Check consensus (majority of peers who voted)
-  const totalPeers = net.peers.size + 1; // +1 for self
+  // Check consensus (majority of peers who voted). Judges don't vote,
+  // so they shouldn't count toward the quorum.
+  const totalPeers = nonJudgePeerCount() + 1; // +1 for self
   const votesNeeded = Math.ceil(totalPeers / 2);
   let yesVotes = 0, noVotes = 0;
   for (const v of hit.votes.values()) {
@@ -6336,7 +6397,9 @@ function handleNetEvent(evt, fromPeerId) {
   // Sanity-check: only honor proposals from the actual proposer (the lowest
   // peerId in the current mesh) and only when we are also ready.
   if (evt.type === 'match_start' && typeof evt.startAt === 'number') {
-    const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+    // Judges aren't valid proposers ; if one were to send match_start,
+    // ignore it (the expected proposer would be the lowest human peerId).
+    const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && net.myReady) {
       // Apply the proposer's chosen map + seed before scheduling the
@@ -6349,7 +6412,8 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'launch_at' && typeof evt.launchAt === 'number') {
-    const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+    // Judges aren't valid proposers ; ignore launch_at from one.
+    const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && player.loadoutKey) {
       if (net.lastLaunchId === evt.launchAt) return; // duplicate retry
@@ -9374,7 +9438,7 @@ function cleanupPendingHits() {
 
     // Soft timeout: auto-resolve in shooter's favor if consensus stalled
     if (age > HIT_CONSENSUS_TIMEOUT) {
-      const totalPeers = net.peers.size + 1;
+      const totalPeers = nonJudgePeerCount() + 1;
       const votesNeeded = Math.ceil(totalPeers / 2);
       let yesVotes = 0;
       for (const v of hit.votes.values()) { if (v) yesVotes++; }
@@ -27989,6 +28053,7 @@ function _tickOutlineOptics(active) {
     // string properties and produces nothing here. Use .values().
     for (const peer of net.peers.values()) {
       if (!peer) continue;
+      if (_peerIsJudge(peer)) continue; // judges have no ship mesh
       if (!peer.mesh && peer.shipMesh) peer.mesh = peer.shipMesh;
       if (active) attach(peer); else detach(peer);
     }
@@ -35944,6 +36009,7 @@ function updateTeammatesStrip() {
   // Use the peer's broadcast Discord identity for chip name + avatar.
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
+      if (_peerIsJudge(peer)) continue; // judges aren't shown on the strip
       if (peer.team === undefined) continue;
       if (peer.team !== myTeam) continue;
       const peerAvatar = peer.discord_id
@@ -35982,6 +36048,7 @@ function updateTeammatesStrip() {
   // green = ship committed for this round. (v10) Discord avatars too.
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
+      if (_peerIsJudge(peer)) continue; // judges aren't shown on the strip
       if (peer.team === undefined) continue;
       if (peer.team !== otherTeam) continue;
       const peerAvatar = peer.discord_id
@@ -36073,8 +36140,9 @@ function _markLocalWarmupReady() {
 }
 function _allPeersWarmupReady() {
   if (typeof net === 'undefined' || !net.active) return true;       // solo
-  if (!net.peers || net.peers.size === 0) return true;              // alone in mesh
-  for (const peer of net.peers.values()) {
+  // Judges don't compile shaders ; they're skipped from the warmup gate.
+  if (typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() === 0) return true;
+  for (const [, peer] of (typeof nonJudgePeerEntries === 'function' ? nonJudgePeerEntries() : Array.from((net.peers || new Map()).entries()))) {
     if (!peer || !peer.warmupReady) return false;
   }
   return true;
@@ -43561,7 +43629,8 @@ function getStasisSphereIndex(pos) {
 
 function amStasisOwner() {
   if (!net.active) return true;
-  const allIds = [net.myPeerId, ...net.peers.keys()].sort();
+  // Judges can't own stasis fields (they have no ship); exclude.
+  const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
   return allIds[0] === net.myPeerId;
 }
 
