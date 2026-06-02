@@ -10622,6 +10622,11 @@ try {
   let _dprCap;
   if (_stored === 'ultra') {
     _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
+  } else if (_stored === 'low' || _stored === 'potato') {
+    // Low-end / potato tier : render well under native res. Matches the
+    // 0.75 cap applyQualityPreset() uses, so a phone booting straight into
+    // 'low' isn't drawing combat at up to 2x devicePixelRatio.
+    _dprCap = 0.75;
   } else {
     _dprCap = Math.min(window.devicePixelRatio, 2);
   }
@@ -12917,7 +12922,15 @@ function clearAmbientCloudDots() {
 
 const QUALITY = {
   level: 'high',
-  isPotato() { return this.level === 'potato'; },
+  // 'potato' was collapsed into 'low' by a refactor (applyQualityPreset and
+  // the boot loader migrate 'potato' -> 'low'), but the dozens of
+  // `if (QUALITY.isPotato()) ...` gates that strip the heavy FX (BCS gas
+  // clouds, basin clouds, particles, layered FX, dynamic lights, potato wall)
+  // were never updated, so they became dead code and the lowest setting kept
+  // rendering everything. Treat 'low' as the potato tier so the lowest option
+  // actually is the low-end path. This also makes applyQualityPreset apply the
+  // 0.75 DPR cap on 'low'.
+  isPotato() { return this.level === 'potato' || this.level === 'low'; },
   isUltra()  { return this.level === 'ultra';  },
   bloomEnabled() { return this.level !== 'potato' && this.level !== 'low' && this.level !== 'medium'; },
   smokeOctaves() {
@@ -12982,17 +12995,17 @@ const QUALITY = {
       (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0
     );
     if (tier >= 1) return false;
-    return this.level !== 'potato';
+    return this.level !== 'potato' && this.level !== 'low';
   },
   // Basin gas pools : decorative gas pools spawned in rooms at level
   // build time. Disabled in potato mode since each pool adds 8-11 GasClouds
   // with 10 sprites each (~80-110 sprites per basin × ~15 basins per level).
-  basinClouds() { return this.level !== 'potato'; },
+  basinClouds() { return this.level !== 'potato' && this.level !== 'low'; },
   // Cloud-wall shockwave on impact : runs spreadAgainstWall +
   // shockwaveExpand for 0.35 s on every cloud-wall collision. Disabled
   // in potato mode ; clouds still bounce / slide, just without the
   // sprite-level burst.
-  shockwaveOnImpact() { return this.level !== 'potato'; },
+  shockwaveOnImpact() { return this.level !== 'potato' && this.level !== 'low'; },
   // Bloom RT pixel-ratio cap. Multiplies window.devicePixelRatio.
   // Ultra bumped 1.5x to 2.0x for crisper highlights ; pairs with the
   // scene supersampling bump (renderer.setPixelRatio also 1.5x on Ultra) so
@@ -23618,7 +23631,7 @@ const _SMOKE_GEO = new THREE.SphereGeometry(1, 12, 8);
 
 const _TRC_SEG = (function() {
   const t = (typeof QUALITY !== 'undefined' && QUALITY.level) ? QUALITY.level : 'high';
-  if (t === 'potato') return { core: 4,  beam: 6,  inner: 8,  outer: 12 };
+  if (t === 'potato' || t === 'low') return { core: 4,  beam: 6,  inner: 8,  outer: 12 };
   if (t === 'ultra')  return { core: 8,  beam: 16, inner: 16, outer: 24 };
   return                       { core: 6,  beam: 12, inner: 12, outer: 16 };
 })();
