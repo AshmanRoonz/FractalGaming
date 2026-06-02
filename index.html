@@ -18545,6 +18545,29 @@ async function _warmupCombatShadersBody() {
             _layeredFXWarmupMeshes.push(_smkMesh);
           }
         } catch (_) {}
+        // (v27) Rocket smoke-trail cone : its own ShaderMaterial program
+        // (_SMOKE_CONE_VS/FS), distinct from LayeredFX and the explosion
+        // smoke above, and previously NOT warmed here -- so the first
+        // smoke-trailing rocket compiled it mid-frame. Unlike the LayeredFX
+        // and lightning programs (kept resident by ship engine materials and
+        // the 96-slot bolt pool), nothing persistent holds the cone program,
+        // so we keep a proto material alive for the life of the page
+        // (window._SMOKE_CONE_MAT_PROTO, skipped by the cleanup dispose via
+        // _keepMaterial). That pins the program's refcount >= 1 so runtime
+        // cones reuse the compiled program and never recompile, even between
+        // volleys when all in-flight rockets have cleared.
+        try {
+          if (typeof _makeSmokeConeMaterial === 'function' && typeof _getSmokeConeGeometry === 'function') {
+            if (!window._SMOKE_CONE_MAT_PROTO) window._SMOKE_CONE_MAT_PROTO = _makeSmokeConeMaterial(0xffffff);
+            const _scWarmMesh = new THREE.Mesh(_getSmokeConeGeometry(), window._SMOKE_CONE_MAT_PROTO);
+            _scWarmMesh.position.set(0, -1e6, 0);
+            _scWarmMesh.frustumCulled = false;
+            _scWarmMesh.userData._layeredFXWarmup = true;
+            _scWarmMesh.userData._keepMaterial = true; // persistent proto ; do not dispose in cleanup
+            scene.add(_scWarmMesh);
+            _layeredFXWarmupMeshes.push(_scWarmMesh);
+          }
+        } catch (_) {}
         try {
           if (typeof _makeGasCloudMaterial === 'function') {
             const _gasGeo = new THREE.SphereGeometry(0.5, 16, 8);
@@ -18705,7 +18728,9 @@ async function _warmupCombatShadersBody() {
             const _afmIdx = _atomFractalMaterials.indexOf(m.material);
             if (_afmIdx >= 0) _atomFractalMaterials.splice(_afmIdx, 1);
           }
-          if (m.material && m.material.dispose) m.material.dispose();
+          // Skip dispose for persistent protos (e.g. the smoke-cone material)
+          // that must stay alive to keep their shader program resident.
+          if (m.material && m.material.dispose && !(m.userData && m.userData._keepMaterial)) m.material.dispose();
           if (m.userData && m.userData._ownsGeoForCleanup && m.geometry && m.geometry.dispose) {
             m.geometry.dispose();
           }
