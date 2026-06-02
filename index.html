@@ -54747,7 +54747,24 @@ const _spatialInvQuat = new THREE.Quaternion();
 const _spatialCamPos = new THREE.Vector3();
 const _spatialDir = new THREE.Vector3();
 const _spatialRaycaster = new THREE.Raycaster();
-_spatialRaycaster.firstHitOnly = true;
+_spatialRaycaster.firstHitOnly = true; // (note) no BVH is actually built, so this hint is a no-op; see budget below
+// Audio-occlusion raycasts brute-force the entire level mesh (~87k+ tris, no
+// BVH despite firstHitOnly above). Combat fires many SFX per frame and each
+// one raycast the whole level, which CPU profiling showed to be ~28% of frame
+// time and the dominant cause of the cinematic->combat fps cliff (and the
+// phone's 60->10 drop). Cap occlusion raycasts to a small per-frame budget:
+// the first few (closest/loudest, since they're scheduled first) get true
+// occlusion, the rest play unoccluded that frame, which refills next frame so
+// it's imperceptible. Potato and XR skip occlusion entirely (see call sites).
+let _occlFrameKey = -1, _occlCount = 0;
+const _OCCL_RAYCAST_BUDGET = 3;
+function _occlusionRaycastAllowed() {
+  const key = (typeof game !== 'undefined' && game) ? game.time : 0;
+  if (key !== _occlFrameKey) { _occlFrameKey = key; _occlCount = 0; }
+  if (_occlCount >= _OCCL_RAYCAST_BUDGET) return false;
+  _occlCount++;
+  return true;
+}
 // Pool of { panner, occl, occlGain } triples. Each call to playSpatialSound
 // acquires a triple, uses it for ~4s, then releases it back. Nodes are reset on
 // release (cancelScheduledValues + disconnect) so they come back to acquire()
@@ -54818,7 +54835,7 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     let occludedGain = 1.0;
     const _potatoSkipOcclusion = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
     const _xrSkipOcclusion = (typeof isXRPresenting === 'function') && isXRPresenting();
-    if (!_potatoSkipOcclusion && !_xrSkipOcclusion && distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
+    if (!_potatoSkipOcclusion && !_xrSkipOcclusion && distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length && _occlusionRaycastAllowed()) {
       _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
       _spatialRaycaster.set(_spatialCamPos, _spatialDir);
       _spatialRaycaster.near = 0;
@@ -54988,7 +55005,9 @@ function _playSpatialSound51(type, worldPos, opts) {
     occl.type = 'lowpass';
     let cutoff = 18000;
     let occludedGain = 1.0;
-    if (distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length) {
+    const _potatoSkipOccl51 = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    const _xrSkipOccl51 = (typeof isXRPresenting === 'function') && isXRPresenting();
+    if (!_potatoSkipOccl51 && !_xrSkipOccl51 && distToSource > 1 && game && game.mapMeshes && game.mapMeshes.length && _occlusionRaycastAllowed()) {
       _spatialDir.subVectors(worldPos, _spatialCamPos).normalize();
       _spatialRaycaster.set(_spatialCamPos, _spatialDir);
       _spatialRaycaster.near = 0;
