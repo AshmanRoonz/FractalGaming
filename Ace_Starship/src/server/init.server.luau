@@ -65,6 +65,11 @@ local beginBattle = Instance.new("RemoteEvent")
 beginBattle.Name = "BeginBattle"
 beginBattle.Parent = ReplicatedStorage
 
+-- Client asks to come back to the hangar (death / respawn / leave battle).
+local leaveBattle = Instance.new("RemoteEvent")
+leaveBattle.Name = "LeaveBattle"
+leaveBattle.Parent = ReplicatedStorage
+
 local inLobby: { [Player]: boolean } = {}
 
 local function spawnInLobby(player: Player)
@@ -97,6 +102,27 @@ local function launchPlayer(player: Player)
 	end
 	beginBattle:FireClient(player, shipId, mainId, secId)
 end
+
+-- Return a battling player to their existing hangar bay (no new bay allocated).
+-- The shared server battle keeps running for everyone else.
+local function returnToHangar(player: Player)
+	if inLobby[player] then
+		return -- already home
+	end
+	if Battle then
+		Battle.playerLeft(player)
+	end
+	local spawnPos = if Hangar then Hangar.returnPoint(player) else nil
+	player:LoadCharacter()
+	local char = player.Character or player.CharacterAdded:Wait()
+	task.wait()
+	if spawnPos and char then
+		char:PivotTo(CFrame.new(spawnPos))
+	end
+	inLobby[player] = true
+end
+
+leaveBattle.OnServerEvent:Connect(returnToHangar)
 
 Players.PlayerAdded:Connect(spawnInLobby)
 for _, player in Players:GetPlayers() do

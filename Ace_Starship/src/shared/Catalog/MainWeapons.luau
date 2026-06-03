@@ -25,4 +25,23 @@ local MainWeapons: { MainDef } = {
 	{ id = "dna", displayName = "DNA Strand", color = Color3.fromRGB(120, 200, 255), shape = Enum.PartType.Ball, size = 1.5, spacing = 1.6, price = 350 },
 }
 
+-- Append one laser per asset the user dropped in Assets/Lasers (Studio). The beam
+-- stacks a clone of that mesh along the line. Priced in Bolts; tweak below.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local laserFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Lasers")
+if laserFolder then
+	for _, asset in laserFolder:GetChildren() do
+		table.insert(MainWeapons, {
+			id = asset.Name,
+			displayName = asset.Name,
+			color = Color3.fromRGB(255, 255, 255),
+			shape = Enum.PartType.Ball,
+			size = 4, -- object size along the beam
+			spacing = 5, -- gap between stacked objects
+			price = 300,
+			object = asset.Name, -- cloned from Assets/Lasers
+		})
+	end
+end
+
 return MainWeapons

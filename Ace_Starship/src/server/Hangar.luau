@@ -25,7 +25,7 @@ end
 local BASE = Vector3.new(0, 300, 3000)
 local SLOT_SPACING = 240
 local DISPLAY_SIZE = 60
-local START_BOLTS = 800 -- Bolts every player starts with (earn more in battle)
+local START_BOLTS = 1500 -- Bolts every player starts with (earn more in battle)
 local SHIP_PRICE = 600 -- cost of any non-starter ship
 
 local openShopEvent: any = nil -- set in Hangar.start (server -> client shop window)
@@ -246,7 +246,7 @@ local function equipItem(s: Slot, category: string, id: string)
 	end
 	if category == "ship" then
 		s.shipId = id
-		showShip(s)
+		pcall(showShip, s) -- equip even if the display rebuild hiccups
 	elseif category == "main" then
 		s.mainId = id
 		s.mainLabel.Text = findById(MainWeapons, id).displayName
@@ -409,6 +409,13 @@ function Hangar.padCenter(player: Player): Vector3?
 	return if s then s.center else nil
 end
 
+-- Where to drop a returning player: in front of their existing bay's ship (the
+-- same spot Hangar.assign first spawned them), without allocating a new bay.
+function Hangar.returnPoint(player: Player): Vector3?
+	local s = slots[player]
+	return if s then s.center + Vector3.new(0, 5, 45) else nil
+end
+
 local function buildConcourse()
 	local folder = Instance.new("Folder")
 	folder.Name = "Concourse"
@@ -458,6 +465,7 @@ function Hangar.start()
 		end
 		if action == "buy" then
 			buyItem(s, category, id)
+			equipItem(s, category, id) -- equip what you just bought (no-op if buy failed)
 		elseif action == "equip" then
 			equipItem(s, category, id)
 		else

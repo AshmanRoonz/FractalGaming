@@ -12,6 +12,7 @@ local Debris = game:GetService("Debris")
 local ShipState = require(script.Parent.ShipState)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local Explosion = require(ReplicatedStorage.Shared.Explosion)
+local BattleSession = require(script.Parent.BattleSession)
 
 local EnemyController = {}
 
@@ -148,9 +149,14 @@ local function bigBoom(pos: Vector3)
 end
 
 function EnemyController.start()
+	local gen = BattleSession.gen
 	local container = Instance.new("Folder")
 	container.Name = "Enemies"
 	container.Parent = workspace
+	BattleSession.track(container)
+	BattleSession.onCleanup(function()
+		EnemyController.enemies = {} -- drop stale targets so weapons don't chase ghosts
+	end)
 
 	local enemyStates = ReplicatedStorage:WaitForChild("EnemyStates")
 	local enemyFired = ReplicatedStorage:WaitForChild("EnemyFired")
@@ -191,6 +197,9 @@ function EnemyController.start()
 	end
 
 	enemyStates.OnClientEvent:Connect(function(elist)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		local present = {}
 		for _, e in elist do
 			if type(e) == "table" and e.id and typeof(e.c) == "CFrame" then
@@ -217,6 +226,9 @@ function EnemyController.start()
 	end)
 
 	playerHit.OnClientEvent:Connect(function(amount)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		ShipState.damage(amount)
 	end)
 
@@ -226,6 +238,7 @@ function EnemyController.start()
 	hud.IgnoreGuiInset = true
 	hud.ResetOnSpawn = false
 	hud.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
+	BattleSession.track(hud)
 	local banner = Instance.new("TextLabel")
 	banner.AnchorPoint = Vector2.new(0.5, 0.5)
 	banner.Position = UDim2.fromScale(0.5, 0.22)
@@ -239,6 +252,9 @@ function EnemyController.start()
 	banner.Parent = hud
 	local bannerClock = -10
 	waveEvent.OnClientEvent:Connect(function(n, boss)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		banner.Text = if boss then `WAVE {n}  -  BOSS` else `WAVE {n}`
 		banner.TextColor3 = if boss then Color3.fromRGB(255, 90, 90) else Color3.fromRGB(255, 255, 255)
 		bannerClock = os.clock()
@@ -247,6 +263,9 @@ function EnemyController.start()
 	-- Enemy ball visuals (server decides hits; this is just the projectile look).
 	local visualBalls: { { part: BasePart, vel: Vector3, life: number } } = {}
 	enemyFired.OnClientEvent:Connect(function(origin, dir, speed)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		local p = Instance.new("Part")
 		p.Shape = Enum.PartType.Ball
 		p.Size = Vector3.new(3, 3, 3)
@@ -256,11 +275,14 @@ function EnemyController.start()
 		p.Material = Enum.Material.Neon
 		p.Color = Color3.fromRGB(180, 120, 255)
 		p.CFrame = CFrame.new(origin)
-		p.Parent = workspace
+		p.Parent = container -- destroyed with the battle on teardown
 		table.insert(visualBalls, { part = p, vel = dir * speed, life = 4 })
 	end)
 
 	RunService.RenderStepped:Connect(function(dt)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		-- Interpolate enemies toward their latest server transform.
 		for _, r in byId do
 			r.current = r.current:Lerp(r.target, math.clamp(dt * 12, 0, 1))

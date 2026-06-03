@@ -11,6 +11,7 @@ local RunService = game:GetService("RunService")
 
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
+local BattleSession = require(script.Parent.BattleSession)
 
 local RemoteShipsController = {}
 
@@ -27,6 +28,7 @@ end
 type Remote = { model: Model, modelYaw: CFrame, target: CFrame, snapped: boolean, beam: BasePart, beamHit: Vector3? }
 
 function RemoteShipsController.start()
+	local gen = BattleSession.gen
 	local localId = Players.LocalPlayer.UserId
 	local states = ReplicatedStorage:WaitForChild("ShipStates")
 	local playerFired = ReplicatedStorage:WaitForChild("PlayerFired")
@@ -34,6 +36,7 @@ function RemoteShipsController.start()
 	local container = Instance.new("Folder")
 	container.Name = "RemoteShips"
 	container.Parent = workspace
+	BattleSession.track(container)
 
 	local ships: { [number]: Remote } = {}
 	local balls: { { part: BasePart, vel: Vector3, life: number } } = {}
@@ -95,6 +98,9 @@ function RemoteShipsController.start()
 	end
 
 	states.OnClientEvent:Connect(function(list)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		local present = {}
 		for _, e in list do
 			if e.u ~= localId then
@@ -115,7 +121,7 @@ function RemoteShipsController.start()
 
 	-- Render other players' secondary shots.
 	playerFired.OnClientEvent:Connect(function(userId, origin, dir)
-		if userId == localId then
+		if BattleSession.gen ~= gen or userId == localId then
 			return
 		end
 		local p = Instance.new("Part")
@@ -132,6 +138,9 @@ function RemoteShipsController.start()
 	end)
 
 	RunService.RenderStepped:Connect(function(dt)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		for _, rec in ships do
 			local goal = rec.target * rec.modelYaw
 			if rec.snapped then

@@ -24,4 +24,22 @@ local SecondaryWeapons: { SecDef } = {
 	{ id = "barrel", displayName = "Barrel", color = Color3.fromRGB(120, 75, 40), size = 5, shape = Enum.PartType.Cylinder, price = 220 },
 }
 
+-- Append one projectile per asset the user dropped in Assets/Projectiles (Studio).
+-- Fires a clone of that mesh. Priced in Bolts; tweak below.
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local projFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Projectiles")
+if projFolder then
+	for _, asset in projFolder:GetChildren() do
+		table.insert(SecondaryWeapons, {
+			id = asset.Name,
+			displayName = asset.Name,
+			color = Color3.fromRGB(255, 255, 255),
+			size = 5, -- fired object size
+			shape = Enum.PartType.Ball,
+			price = 250,
+			object = asset.Name, -- cloned from Assets/Projectiles
+		})
+	end
+end
+
 return SecondaryWeapons

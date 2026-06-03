@@ -17,6 +17,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ShipState = require(script.Parent.ShipState)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
+local BattleSession = require(script.Parent.BattleSession)
 
 local TerrainController = {}
 
@@ -119,6 +120,7 @@ local function writeShell(x0: number, z0: number, isCeiling: boolean)
 end
 
 function TerrainController.start()
+	local gen = BattleSession.gen
 	for _, name in { "Baseplate", "SpawnLocation" } do
 		local inst = workspace:FindFirstChild(name)
 		if inst then
@@ -133,6 +135,11 @@ function TerrainController.start()
 	Lighting.FogColor = Color3.fromRGB(150, 180, 210)
 	Lighting.FogStart = FOG_START
 	Lighting.FogEnd = FOG_END
+	-- Restore open visibility back in the hangar on teardown.
+	BattleSession.onCleanup(function()
+		Lighting.FogStart = 0
+		Lighting.FogEnd = 100000
+	end)
 
 	local built: { [string]: boolean } = {}
 
@@ -142,6 +149,9 @@ function TerrainController.start()
 	end
 
 	RunService.Heartbeat:Connect(function()
+		if BattleSession.gen ~= gen then
+			return
+		end
 		local pos = ShipState.position
 		local scx = math.floor(pos.X / CHUNK)
 		local scz = math.floor(pos.Z / CHUNK)

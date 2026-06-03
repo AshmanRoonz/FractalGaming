@@ -20,6 +20,7 @@ local Lighting = game:GetService("Lighting")
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local ShipState = require(script.Parent.ShipState)
 local TerrainController = require(script.Parent.TerrainController)
+local BattleSession = require(script.Parent.BattleSession)
 
 local ShipController = {}
 
@@ -77,9 +78,21 @@ local function gamepadStick(which: Enum.KeyCode): Vector2
 end
 
 function ShipController.start(shipId: string?)
+	local gen = BattleSession.gen
 	local player = Players.LocalPlayer
 	local camera = workspace.CurrentCamera
 	camera.CameraType = Enum.CameraType.Scriptable
+
+	-- Always launch at full health (death leaves it at 0).
+	ShipState.health = ShipState.maxHealth
+	ShipState.invulnUntil = 0
+	ShipState.lastHit = 0
+	ShipState.beamHit = nil
+
+	-- On return-to-hangar, hand the camera back to the character.
+	BattleSession.onCleanup(function()
+		camera.CameraType = Enum.CameraType.Custom
+	end)
 
 	local ship = ShipTemplate.new(shipId or "starter_skiff")
 	local model = ship.model
@@ -91,6 +104,7 @@ function ShipController.start(shipId: string?)
 	end
 	scaleToSize(model, TARGET_SHIP_SIZE)
 	model.Parent = workspace
+	BattleSession.track(model)
 	local modelYaw = CFrame.Angles(0, math.rad(ship.def.modelYawOffset or 0), 0)
 
 	-- Keep the ship lit no matter the sun angle (the mesh is dark).
@@ -134,7 +148,7 @@ function ShipController.start(shipId: string?)
 		ShipState.invulnUntil = os.clock() + ROLL_DURATION -- i-frames during the roll
 	end
 	UserInputService.InputBegan:Connect(function(input, gpe)
-		if gpe then
+		if gpe or BattleSession.gen ~= gen then
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonL1 or input.KeyCode == Enum.KeyCode.Q then
@@ -154,6 +168,7 @@ function ShipController.start(shipId: string?)
 		gui.IgnoreGuiInset = true
 		gui.ResetOnSpawn = false
 		gui.Parent = player:WaitForChild("PlayerGui")
+		BattleSession.track(gui)
 
 		local function makeStick(minX: number, maxX: number): () -> Vector2
 			local base = Instance.new("Frame")
@@ -183,7 +198,7 @@ function ShipController.start(shipId: string?)
 			local value = Vector2.zero
 
 			UserInputService.TouchStarted:Connect(function(touch, processed)
-				if processed or active then
+				if processed or active or BattleSession.gen ~= gen then
 					return
 				end
 				local frac = touch.Position.X / camera.ViewportSize.X
@@ -197,7 +212,7 @@ function ShipController.start(shipId: string?)
 				base.Visible = true
 			end)
 			UserInputService.TouchMoved:Connect(function(touch)
-				if touch ~= active then
+				if touch ~= active or BattleSession.gen ~= gen then
 					return
 				end
 				local d = Vector2.new(touch.Position.X, touch.Position.Y) - origin
@@ -208,7 +223,7 @@ function ShipController.start(shipId: string?)
 				value = d / STICK_RADIUS
 			end)
 			UserInputService.TouchEnded:Connect(function(touch)
-				if touch ~= active then
+				if touch ~= active or BattleSession.gen ~= gen then
 					return
 				end
 				active = nil
@@ -282,6 +297,9 @@ function ShipController.start(shipId: string?)
 		makeRoll("\u{21BB}", 120, 1) -- right roll
 
 		RunService.RenderStepped:Connect(function()
+			if BattleSession.gen ~= gen then
+				return
+			end
 			touchMove = getMove()
 			touchLook = getLook()
 		end)
@@ -293,6 +311,7 @@ function ShipController.start(shipId: string?)
 	hud.IgnoreGuiInset = true
 	hud.ResetOnSpawn = false
 	hud.Parent = player:WaitForChild("PlayerGui")
+	BattleSession.track(hud)
 
 	local barBg = Instance.new("Frame")
 	barBg.AnchorPoint = Vector2.new(0, 0)
@@ -326,6 +345,9 @@ function ShipController.start(shipId: string?)
 	-- Gamepad altitude buttons: A = down, B = up.
 	local padUp, padDown = false, false
 	UserInputService.InputBegan:Connect(function(input)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		if input.KeyCode == Enum.KeyCode.ButtonB then
 			padUp = true
 		elseif input.KeyCode == Enum.KeyCode.ButtonA then
@@ -333,6 +355,9 @@ function ShipController.start(shipId: string?)
 		end
 	end)
 	UserInputService.InputEnded:Connect(function(input)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		if input.KeyCode == Enum.KeyCode.ButtonB then
 			padUp = false
 		elseif input.KeyCode == Enum.KeyCode.ButtonA then
@@ -349,6 +374,9 @@ function ShipController.start(shipId: string?)
 	local pos = Vector3.new(0, 100, 0) -- spawn in the gap between floor and ceiling
 
 	RunService.RenderStepped:Connect(function(dt)
+		if BattleSession.gen ~= gen then
+			return -- battle torn down; stop flying
+		end
 		local padMove = gamepadStick(Enum.KeyCode.Thumbstick1)
 		local padLook = gamepadStick(Enum.KeyCode.Thumbstick2)
 
@@ -423,11 +451,9 @@ function ShipController.start(shipId: string?)
 		damageFlash.BackgroundTransparency = math.min(1, damageFlash.BackgroundTransparency + dt * 1.5)
 
 		if ShipState.health <= 0 then
-			-- Respawn: lift back to the gap, refill, brief immunity.
-			local mid = (TerrainController.groundY(pos.X, pos.Z) + TerrainController.ceilY(pos.X, pos.Z)) / 2
-			pos = Vector3.new(pos.X, mid, pos.Z)
-			ShipState.health = ShipState.maxHealth
-			ShipState.invulnUntil = os.clock() + 2.5
+			-- Death is handled by the battle death-watcher (return to hangar);
+			-- just hold at zero here, no in-place respawn.
+			ShipState.health = 0
 		elseif os.clock() - ShipState.lastHit > REGEN_DELAY then
 			ShipState.health = math.min(ShipState.maxHealth, ShipState.health + REGEN_RATE * dt)
 		end

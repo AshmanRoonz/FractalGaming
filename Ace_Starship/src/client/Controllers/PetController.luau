@@ -11,6 +11,7 @@ local Debris = game:GetService("Debris")
 
 local ShipState = require(script.Parent.ShipState)
 local EnemyController = require(script.Parent.EnemyController)
+local BattleSession = require(script.Parent.BattleSession)
 
 local PetController = {}
 
@@ -50,6 +51,7 @@ local function nearestEnemy(from: Vector3)
 end
 
 function PetController.start()
+	local gen = BattleSession.gen
 	-- Placeholder orb: glowing body + a little pupil so it has some character.
 	local orb = Instance.new("Model")
 	orb.Name = "Pet"
@@ -73,12 +75,16 @@ function PetController.start()
 	pupil.Parent = orb
 	orb.PrimaryPart = body
 	orb.Parent = workspace
+	BattleSession.track(orb)
 
 	local pos = ShipState.position
 	local nextShot = 0
 	local bob = 0
 
 	RunService.Heartbeat:Connect(function(dt)
+		if BattleSession.gen ~= gen then
+			return -- battle torn down; this old loop is inert
+		end
 		bob += dt
 		local shipPos = ShipState.position
 		local fwd = ShipState.forward

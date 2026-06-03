@@ -20,6 +20,7 @@ local Explosion = require(ReplicatedStorage.Shared.Explosion)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
 local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
+local BattleSession = require(script.Parent.BattleSession)
 
 local function findById(list: any, id: string): any
 	for _, d in list do
@@ -30,42 +31,98 @@ local function findById(list: any, id: string): any
 	return list[1]
 end
 
--- Resolve a named object in Assets/Objects to its mesh + texture ids.
-local objectsFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Objects")
-local function resolveObject(name: string?): (string?, string?)
-	if not objectsFolder or not name then
-		return nil, nil
+-- Weapon objects come from the Assets folders the user filled in Studio: Lasers
+-- (beam objects), Projectiles (fired objects), and Objects (legacy). A weapon's
+-- `object` field names an asset in any of these.
+local assetsRoot = ReplicatedStorage:WaitForChild("Assets")
+local objectFolders: { Instance } = {}
+for _, n in { "Lasers", "Projectiles", "Objects" } do
+	local f = assetsRoot:FindFirstChild(n)
+	if f then
+		table.insert(objectFolders, f)
 	end
-	local inst = objectsFolder:FindFirstChild(name)
-	if not inst then
-		return nil, nil
-	end
-	local mp = if inst:IsA("MeshPart") then inst else inst:FindFirstChildWhichIsA("MeshPart")
-	if mp then
-		return (mp :: MeshPart).MeshId, (mp :: MeshPart).TextureID
-	end
-	return nil, nil
 end
 
--- Make a Part look like the weapon's object: a real mesh (named in Assets/Objects
--- or a meshId) if given, otherwise a plain shape. SmoothPlastic so it's readable.
-local function styleObject(part: Part, def: any)
-	part.Material = Enum.Material.SmoothPlastic
-	part.Color = def.color
-	part.Size = Vector3.new(def.size, def.size, def.size)
-	local meshId, texId = resolveObject(def.object)
-	meshId = meshId or def.meshId
-	if meshId then
+-- Find a named asset's main part (the asset itself if it's a part, else the first
+-- part inside a model).
+local function findAssetPart(name: string?): BasePart?
+	if not name then
+		return nil
+	end
+	for _, folder in objectFolders do
+		local inst = folder:FindFirstChild(name)
+		if inst then
+			if inst:IsA("BasePart") then
+				return inst :: BasePart
+			end
+			local mp = inst:FindFirstChildWhichIsA("BasePart")
+			if mp then
+				return mp
+			end
+		end
+	end
+	return nil
+end
+
+-- Build the weapon's object as a BasePart: a CLONE of the named asset mesh (kept
+-- at its real look, scaled to fit def.size), else a meshId mesh, else a plain
+-- shape. Anchored, no-collide, no-shadow.
+local function makeObject(def: any): BasePart
+	local part: BasePart
+	local src = findAssetPart(def.object)
+	if src then
+		part = src:Clone()
+		local s = part.Size
+		local longest = math.max(s.X, s.Y, s.Z)
+		if longest > 0 then
+			part.Size = s * (def.size / longest) -- fit to size, keep aspect ratio
+		end
+	elseif def.meshId then
+		local p = Instance.new("Part")
+		p.Size = Vector3.new(def.size, def.size, def.size)
+		p.Material = Enum.Material.SmoothPlastic
+		p.Color = def.color
 		local m = Instance.new("SpecialMesh")
 		m.MeshType = Enum.MeshType.FileMesh
-		m.MeshId = meshId
-		m.TextureId = texId or def.textureId or ""
+		m.MeshId = def.meshId
+		m.TextureId = def.textureId or ""
 		local sc = def.meshScale or 1
 		m.Scale = Vector3.new(sc, sc, sc)
-		m.Parent = part
+		m.Parent = p
+		part = p
 	else
-		part.Shape = def.shape
+		local p = Instance.new("Part")
+		p.Shape = def.shape
+		p.Size = Vector3.new(def.size, def.size, def.size)
+		p.Material = Enum.Material.SmoothPlastic
+		p.Color = def.color
+		part = p
 	end
+	part.Anchored = true
+	part.CanCollide = false
+	part.CastShadow = false
+	return part
+end
+
+-- Resolve the equipped weapon to a def. If the id isn't in the catalog (e.g. an
+-- asset that replicated after the catalog was built), but it names an asset in
+-- the Lasers/Projectiles folders, build a def on the fly so it still renders --
+-- instead of silently falling back to the default.
+local function resolveWeaponDef(list: any, id: string?, isLaser: boolean): any
+	if id then
+		for _, d in list do
+			if d.id == id then
+				return d
+			end
+		end
+		if findAssetPart(id) then
+			if isLaser then
+				return { id = id, displayName = id, color = Color3.fromRGB(255, 255, 255), shape = Enum.PartType.Ball, size = 4, spacing = 5, price = 0, object = id }
+			end
+			return { id = id, displayName = id, color = Color3.fromRGB(255, 255, 255), shape = Enum.PartType.Ball, size = 5, price = 0, object = id }
+		end
+	end
+	return list[1]
 end
 
 local ShipState = require(script.Parent.ShipState)
@@ -124,8 +181,9 @@ local function acquireTarget(origin: Vector3, dir: Vector3)
 end
 
 function WeaponController.start(mainId: string?, secId: string?)
-	local mainCfg = findById(MainWeapons, mainId or "candy")
-	local secCfg = findById(SecondaryWeapons, secId or "ball")
+	local gen = BattleSession.gen
+	local mainCfg = resolveWeaponDef(MainWeapons, mainId or "candy", true)
+	local secCfg = resolveWeaponDef(SecondaryWeapons, secId or "ball", false)
 	local player = Players.LocalPlayer
 	local camera = workspace.CurrentCamera
 
@@ -138,6 +196,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 	hud.IgnoreGuiInset = true
 	hud.ResetOnSpawn = false
 	hud.Parent = player:WaitForChild("PlayerGui")
+	BattleSession.track(hud)
 
 	local ring = Instance.new("Frame")
 	ring.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -167,15 +226,12 @@ function WeaponController.start(mainId: string?, secId: string?)
 	local segFolder = Instance.new("Folder")
 	segFolder.Name = "MainBeam"
 	segFolder.Parent = workspace
+	BattleSession.track(segFolder) -- also holds projectiles + bombs (below)
 	local segPool: { BasePart } = {}
 	local function getSeg(i: number): BasePart
 		local s = segPool[i]
 		if not s then
-			s = Instance.new("Part")
-			s.Anchored = true
-			s.CanCollide = false
-			s.CastShadow = false
-			styleObject(s, mainCfg)
+			s = makeObject(mainCfg)
 			s.Transparency = 1
 			s.Parent = segFolder
 			segPool[i] = s
@@ -197,7 +253,8 @@ function WeaponController.start(mainId: string?, secId: string?)
 		local count = math.clamp(math.floor(dist / mainCfg.spacing), 1, MAX_SEG)
 		for i = 1, count do
 			local s = getSeg(i)
-			s.CFrame = CFrame.new(from + d * ((i - 0.5) / count))
+			local p = from + d * ((i - 0.5) / count)
+			s.CFrame = CFrame.lookAt(p, p + d) -- align each object along the beam
 			s.Transparency = 0
 		end
 		return count
@@ -221,6 +278,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 	bombHud.IgnoreGuiInset = true
 	bombHud.ResetOnSpawn = false
 	bombHud.Parent = player:WaitForChild("PlayerGui")
+	BattleSession.track(bombHud)
 	local killLabel = Instance.new("TextLabel")
 	killLabel.Position = UDim2.fromOffset(24, 58)
 	killLabel.Size = UDim2.fromOffset(220, 24)
@@ -258,6 +316,9 @@ function WeaponController.start(mainId: string?, secId: string?)
 	bombText.Parent = chargeBg
 
 	killEvent.OnClientEvent:Connect(function()
+		if BattleSession.gen ~= gen then
+			return
+		end
 		killCount += 1
 		local now = os.clock()
 		local since = now - lastKill
@@ -269,18 +330,14 @@ function WeaponController.start(mainId: string?, secId: string?)
 
 	local function fireBomb()
 		local origin, dir = muzzle()
-		local p = Instance.new("Part")
-		p.Anchored = true
-		p.CanCollide = false
-		p.CastShadow = false
-		styleObject(p, secCfg)
-		p.Size = p.Size * BOMB_SCALE
+		local p = makeObject(secCfg)
+		p.Size = p.Size * BOMB_SCALE -- HUGE version of the projectile
 		local mesh = p:FindFirstChildWhichIsA("SpecialMesh")
 		if mesh then
 			mesh.Scale = mesh.Scale * BOMB_SCALE
 		end
 		p.CFrame = CFrame.new(origin)
-		p.Parent = workspace
+		p.Parent = segFolder
 		table.insert(bombs, { part = p, vel = dir * BOMB_SPEED, life = 5 })
 	end
 
@@ -293,13 +350,9 @@ function WeaponController.start(mainId: string?, secId: string?)
 
 	local function fireSecondary()
 		local origin, dir = muzzle()
-		local p = Instance.new("Part")
-		p.Anchored = true
-		p.CanCollide = false
-		p.CastShadow = false
-		styleObject(p, secCfg)
+		local p = makeObject(secCfg)
 		p.CFrame = CFrame.new(origin)
-		p.Parent = workspace
+		p.Parent = segFolder
 		table.insert(projectiles, { part = p, vel = dir * SECONDARY_SPEED, life = SECONDARY_LIFE })
 		if playerFired then
 			(playerFired :: any):FireServer(origin, dir) -- show this shot to others
@@ -307,7 +360,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 	end
 
 	UserInputService.InputBegan:Connect(function(input, gpe)
-		if gpe then
+		if gpe or BattleSession.gen ~= gen then
 			return
 		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.ButtonR2 then
@@ -317,6 +370,9 @@ function WeaponController.start(mainId: string?, secId: string?)
 		end
 	end)
 	UserInputService.InputEnded:Connect(function(input)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.ButtonR2 then
 			secondaryHeld = false
 		end
@@ -329,6 +385,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 		gui.IgnoreGuiInset = true
 		gui.ResetOnSpawn = false
 		gui.Parent = player:WaitForChild("PlayerGui")
+		BattleSession.track(gui)
 
 		local btn = Instance.new("TextButton")
 		btn.Size = UDim2.fromOffset(120, 120)
@@ -376,6 +433,9 @@ function WeaponController.start(mainId: string?, secId: string?)
 	end
 
 	RunService.Heartbeat:Connect(function(dt)
+		if BattleSession.gen ~= gen then
+			return
+		end
 		local origin, dir = muzzle()
 
 		-- MAIN: auto-target + beam + damage over time.
