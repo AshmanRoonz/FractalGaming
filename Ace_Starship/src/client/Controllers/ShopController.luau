@@ -119,15 +119,24 @@ function ShopController.start()
 	closeBtn.Activated:Connect(close)
 
 	local function makeRow(category: string, item: any, bolts: number, order: number)
-		local row = Instance.new("Frame")
+		local row = Instance.new("TextButton")
 		row.Size = UDim2.new(1, -8, 0, 56)
 		row.BackgroundColor3 = Color3.fromRGB(36, 40, 54)
+		row.AutoButtonColor = false
+		row.Text = ""
 		row.BorderSizePixel = 0
 		row.LayoutOrder = order
 		row.Parent = scroll
 		local rc = Instance.new("UICorner")
 		rc.CornerRadius = UDim.new(0, 8)
 		rc.Parent = row
+		-- Tap a ship row to preview it on the pad (even if you don't own it yet).
+		if category == "ship" then
+			row.Activated:Connect(function()
+				Sfx.play("ui")
+				shopAction:FireServer("ship", "preview", item.id)
+			end)
+		end
 
 		local name = Instance.new("TextLabel")
 		name.Position = UDim2.fromOffset(14, 8)
@@ -229,7 +238,7 @@ function ShopController.start()
 		titleLabel.Text = TITLES[data.category] or "SHOP"
 		boltsLabel.Text = "Bolts: " .. tostring(data.bolts)
 		for _, child in scroll:GetChildren() do
-			if child:IsA("Frame") then
+			if child:IsA("GuiObject") then -- rows (Frames/TextButtons), not the UIListLayout
 				child:Destroy()
 			end
 		end

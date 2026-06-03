@@ -76,7 +76,8 @@ type Slot = {
 	owner: Player,
 	model: Model,
 	shipModel: Model?,
-	shipId: string,
+	shipId: string, -- the ship you launch with (must be owned)
+	previewShipId: string, -- the ship shown on the pad (any ship, just to look at)
 	center: Vector3,
 	nameLabel: TextLabel,
 	mainId: string,
@@ -166,13 +167,13 @@ local function showShip(slot: Slot)
 		slot.shipModel = nil
 	end
 	local ok, ship = pcall(function()
-		return ShipTemplate.new(slot.shipId)
+		return ShipTemplate.new(slot.previewShipId) -- show whatever you're previewing
 	end)
 	if not ok or not ship then
-		slot.nameLabel.Text = slot.shipId
+		slot.nameLabel.Text = slot.previewShipId
 		return
 	end
-	slot.nameLabel.Text = ship.def.displayName or slot.shipId
+	slot.nameLabel.Text = ship.def.displayName or slot.previewShipId
 	local model = ship.model
 	for _, p in model:GetDescendants() do
 		if p:IsA("BasePart") then
@@ -369,6 +370,7 @@ local function equipItem(s: Slot, category: string, id: string)
 	end
 	if category == "ship" then
 		s.shipId = id
+		s.previewShipId = id -- equipping also shows it on the pad
 		pcall(showShip, s) -- equip even if the display rebuild hiccups
 	elseif category == "main" then
 		s.mainId = id
@@ -493,6 +495,7 @@ function Hangar.assign(player: Player): Vector3
 		model = model,
 		shipModel = nil,
 		shipId = defaultShip(),
+		previewShipId = defaultShip(),
 		center = center,
 		nameLabel = nameLabel,
 		mainId = MainWeapons[1].id,
@@ -618,6 +621,12 @@ function Hangar.start()
 			equipItem(s, category, id) -- equip what you just bought (no-op if buy failed)
 		elseif action == "equip" then
 			equipItem(s, category, id)
+		elseif action == "preview" then
+			-- Show any ship on the pad without owning/equipping it.
+			if category == "ship" and table.find(shipOrder, id) then
+				s.previewShipId = id
+				pcall(showShip, s)
+			end
 		else
 			return
 		end
