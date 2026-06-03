@@ -55,7 +55,7 @@ local function findAssetPart(name: string?): BasePart?
 			if inst:IsA("BasePart") then
 				return inst :: BasePart
 			end
-			local mp = inst:FindFirstChildWhichIsA("BasePart")
+			local mp = inst:FindFirstChildWhichIsA("BasePart", true) -- search nested too
 			if mp then
 				return mp
 			end
@@ -104,6 +104,64 @@ local function makeObject(def: any): BasePart
 	return part
 end
 
+-- Find a named asset's full instance (Model or BasePart), not just one piece.
+local function findAssetSource(name: string?): Instance?
+	if not name then
+		return nil
+	end
+	for _, folder in objectFolders do
+		local inst = folder:FindFirstChild(name)
+		if inst then
+			return inst
+		end
+	end
+	return nil
+end
+
+-- Build a fired projectile as a MODEL: clone the WHOLE object (all its parts) so
+-- multi-piece objects come out intact, then scale the entire thing to one uniform
+-- size so every object fires at the same scale. Falls back to a shape.
+local function makeProjectile(def: any, targetSize: number): Model
+	local model: Model
+	local src = findAssetSource(def.object)
+	if src and src:IsA("Model") then
+		model = src:Clone()
+	elseif src and src:IsA("BasePart") then
+		model = Instance.new("Model")
+		local c = src:Clone()
+		c.Parent = model
+		model.PrimaryPart = c
+	else
+		model = Instance.new("Model")
+		local p = Instance.new("Part")
+		p.Shape = if def.shape then def.shape else Enum.PartType.Ball
+		p.Size = Vector3.new(2, 2, 2) -- cube base; uniform scaling fits it to targetSize
+		p.Material = Enum.Material.SmoothPlastic
+		p.Color = def.color
+		p.Parent = model
+		model.PrimaryPart = p
+	end
+	for _, d in model:GetDescendants() do
+		if d:IsA("BasePart") then
+			d.Anchored = true
+			d.CanCollide = false
+			d.CastShadow = false
+		end
+	end
+	if not model.PrimaryPart then
+		model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart", true)
+	end
+	-- Scale the whole object so its longest side == targetSize (uniform output).
+	local _, size = model:GetBoundingBox()
+	local longest = math.max(size.X, size.Y, size.Z)
+	if longest > 0 then
+		pcall(function()
+			model:ScaleTo(targetSize / longest)
+		end)
+	end
+	return model
+end
+
 -- Resolve the equipped weapon to a def. If the id isn't in the catalog (e.g. an
 -- asset that replicated after the catalog was built), but it names an asset in
 -- the Lasers/Projectiles folders, build a def on the fly so it still renders --
@@ -134,15 +192,17 @@ local WeaponController = {}
 local MAIN_RANGE = 300
 local MAIN_CONE = math.cos(math.rad(15)) -- auto-aim assist half-angle
 local MAIN_DPS = 18
+local LASER_STRETCH = 2.5 -- beam objects use the projectile size, then stretch this much along the beam
 
 local AIM_DIST = 160 -- where the crosshair sits along the aim ray
 
 -- Secondary (projectiles).
-local SECONDARY_SPEED = 380
+local SECONDARY_SPEED = 175 -- slower so you can see the object fly
 local SECONDARY_DMG = 45
 local SECONDARY_COOLDOWN = 0.35
-local SECONDARY_LIFE = 3
+local SECONDARY_LIFE = 5
 local SECONDARY_HIT = 11 -- hit radius
+local PROJECTILE_SIZE = 12 -- every fired object is scaled to this (uniform, bigger)
 
 -- Big bomb (charged by kills; faster kills charge it faster).
 local KILL_CHARGE = 9 -- base charge per kill
@@ -227,20 +287,69 @@ function WeaponController.start(mainId: string?, secId: string?)
 	segFolder.Name = "MainBeam"
 	segFolder.Parent = workspace
 	BattleSession.track(segFolder) -- also holds projectiles + bombs (below)
-	local segPool: { BasePart } = {}
-	local function getSeg(i: number): BasePart
+	-- Each beam segment is a whole-object clone (multi-part intact), scaled uniform
+	-- like the projectiles. Pooled; we cache each segment's parts + their original
+	-- transparency so we can show/hide quickly without losing the mesh's look.
+	local LASER_SEG_SIZE = PROJECTILE_SIZE -- same base size as the projectiles
+	local LASER_SPACING = LASER_SEG_SIZE * LASER_STRETCH * 0.85 -- tile the stretched objects
+	type Seg = { model: Model, parts: { { part: BasePart, t: number } }, align: CFrame }
+	local segPool: { Seg } = {}
+	local function setSegVisible(s: Seg, visible: boolean)
+		for _, rec in s.parts do
+			rec.part.Transparency = if visible then rec.t else 1
+		end
+	end
+	-- The object's longest local axis + the rotation that lays it along the beam
+	-- (-Z), so a tall object like the CN Tower lies sideways instead of standing up.
+	local function longestAxisInfo(model: Model): (CFrame, string)
+		local saved = model:GetPivot()
+		model:PivotTo(CFrame.new()) -- identity, so the box reads local-axis sizes
+		local _, size = model:GetBoundingBox()
+		model:PivotTo(saved)
+		local mx = math.max(size.X, size.Y, size.Z)
+		if mx == size.X then
+			return CFrame.Angles(0, math.pi / 2, 0), "X" -- local X -> beam
+		elseif mx == size.Y then
+			return CFrame.Angles(-math.pi / 2, 0, 0), "Y" -- local Y (height) -> beam
+		end
+		return CFrame.new(), "Z" -- local Z already runs along the beam
+	end
+	local function getSeg(i: number): Seg
 		local s = segPool[i]
 		if not s then
-			s = makeObject(mainCfg)
-			s.Transparency = 1
-			s.Parent = segFolder
+			local model = makeProjectile(mainCfg, LASER_SEG_SIZE)
+			model.Parent = segFolder
+			local align, axis = longestAxisInfo(model)
+			local parts = {}
+			local baseParts: { BasePart } = {}
+			for _, d in model:GetDescendants() do
+				if d:IsA("BasePart") then
+					table.insert(baseParts, d)
+					table.insert(parts, { part = d, t = d.Transparency })
+				end
+			end
+			-- Stretch single-mesh beam objects along the beam axis for the laser look
+			-- (same cross-section as a projectile, just longer down the line).
+			if #baseParts == 1 then
+				local pp = baseParts[1]
+				local z = pp.Size
+				if axis == "X" then
+					pp.Size = Vector3.new(z.X * LASER_STRETCH, z.Y, z.Z)
+				elseif axis == "Y" then
+					pp.Size = Vector3.new(z.X, z.Y * LASER_STRETCH, z.Z)
+				else
+					pp.Size = Vector3.new(z.X, z.Y, z.Z * LASER_STRETCH)
+				end
+			end
+			s = { model = model, parts = parts, align = align }
+			setSegVisible(s, false)
 			segPool[i] = s
 		end
 		return s
 	end
 	local function hideSegmentsFrom(n: number)
 		for i = n + 1, #segPool do
-			segPool[i].Transparency = 1
+			setSegVisible(segPool[i], false)
 		end
 	end
 	-- Stack objects evenly along origin->hit; returns how many were used.
@@ -250,12 +359,12 @@ function WeaponController.start(mainId: string?, secId: string?)
 		if dist < 0.1 then
 			return 0
 		end
-		local count = math.clamp(math.floor(dist / mainCfg.spacing), 1, MAX_SEG)
+		local count = math.clamp(math.floor(dist / LASER_SPACING), 1, MAX_SEG)
 		for i = 1, count do
 			local s = getSeg(i)
 			local p = from + d * ((i - 0.5) / count)
-			s.CFrame = CFrame.lookAt(p, p + d) -- align each object along the beam
-			s.Transparency = 0
+			s.model:PivotTo(CFrame.lookAt(p, p + d) * s.align) -- longest side along the beam
+			setSegVisible(s, true)
 		end
 		return count
 	end
@@ -264,14 +373,14 @@ function WeaponController.start(mainId: string?, secId: string?)
 	local secondaryHeld = false
 	local lastFire = 0
 	local beamTimer = 0 -- throttles beam damage reports to the server
-	local projectiles: { { part: BasePart, vel: Vector3, life: number } } = {}
+	local projectiles: { { obj: Model, vel: Vector3, life: number } } = {}
 
 	-- ---- Kill count + big bomb -------------------------------------------
 	local killEvent = ReplicatedStorage:WaitForChild("Kill")
 	local killCount = 0
 	local charge = 0 -- 0..100
 	local lastKill = 0
-	local bombs: { { part: BasePart, vel: Vector3, life: number } } = {}
+	local bombs: { { obj: Model, vel: Vector3, life: number } } = {}
 
 	local bombHud = Instance.new("ScreenGui")
 	bombHud.Name = "BombHud"
@@ -330,15 +439,17 @@ function WeaponController.start(mainId: string?, secId: string?)
 
 	local function fireBomb()
 		local origin, dir = muzzle()
-		local p = makeObject(secCfg)
-		p.Size = p.Size * BOMB_SCALE -- HUGE version of the projectile
-		local mesh = p:FindFirstChildWhichIsA("SpecialMesh")
-		if mesh then
-			mesh.Scale = mesh.Scale * BOMB_SCALE
+		local m = makeProjectile(secCfg, PROJECTILE_SIZE * BOMB_SCALE) -- HUGE
+		if m.PrimaryPart then
+			local light = Instance.new("PointLight")
+			light.Brightness = 4
+			light.Range = 50
+			light.Color = Color3.fromRGB(255, 230, 180)
+			light.Parent = m.PrimaryPart
 		end
-		p.CFrame = CFrame.new(origin)
-		p.Parent = segFolder
-		table.insert(bombs, { part = p, vel = dir * BOMB_SPEED, life = 5 })
+		m:PivotTo(CFrame.new(origin))
+		m.Parent = segFolder
+		table.insert(bombs, { obj = m, vel = dir * BOMB_SPEED, life = 5 })
 	end
 
 	local function tryBomb()
@@ -350,10 +461,18 @@ function WeaponController.start(mainId: string?, secId: string?)
 
 	local function fireSecondary()
 		local origin, dir = muzzle()
-		local p = makeObject(secCfg)
-		p.CFrame = CFrame.new(origin)
-		p.Parent = segFolder
-		table.insert(projectiles, { part = p, vel = dir * SECONDARY_SPEED, life = SECONDARY_LIFE })
+		local m = makeProjectile(secCfg, PROJECTILE_SIZE)
+		-- Light it so a dark mesh object is readable against the dim world.
+		if m.PrimaryPart then
+			local light = Instance.new("PointLight")
+			light.Brightness = 2.5
+			light.Range = 18
+			light.Color = Color3.fromRGB(255, 245, 220)
+			light.Parent = m.PrimaryPart
+		end
+		m:PivotTo(CFrame.new(origin))
+		m.Parent = segFolder
+		table.insert(projectiles, { obj = m, vel = dir * SECONDARY_SPEED, life = SECONDARY_LIFE })
 		if playerFired then
 			(playerFired :: any):FireServer(origin, dir) -- show this shot to others
 		end
@@ -478,12 +597,12 @@ function WeaponController.start(mainId: string?, secId: string?)
 		for i = #projectiles, 1, -1 do
 			local pr = projectiles[i]
 			pr.life -= dt
-			pr.part.CFrame = pr.part.CFrame + pr.vel * dt
-			local p = pr.part.Position
+			pr.obj:PivotTo(pr.obj:GetPivot() + pr.vel * dt)
+			local p = pr.obj:GetPivot().Position
 			local hitTerrain = p.Y < WorldHeights.groundY(p.X, p.Z) or p.Y > WorldHeights.ceilY(p.X, p.Z)
 			local hitEnemy = nil
 			for _, e in EnemyController.enemies do
-				if e.root and (e.root.Position - p).Magnitude <= (e.radius or SECONDARY_HIT) then
+				if e.root and (e.root.Position - p).Magnitude <= (e.radius or SECONDARY_HIT) + PROJECTILE_SIZE * 0.5 then
 					hitEnemy = e
 					break
 				end
@@ -493,10 +612,10 @@ function WeaponController.start(mainId: string?, secId: string?)
 				if hitEnemy then
 					EnemyController.damage(hitEnemy, SECONDARY_DMG)
 				end
-				pr.part:Destroy()
+				pr.obj:Destroy()
 				table.remove(projectiles, i)
 			elseif pr.life <= 0 then
-				pr.part:Destroy()
+				pr.obj:Destroy()
 				table.remove(projectiles, i)
 			end
 		end
@@ -515,8 +634,8 @@ function WeaponController.start(mainId: string?, secId: string?)
 		for i = #bombs, 1, -1 do
 			local b = bombs[i]
 			b.life -= dt
-			b.part.CFrame = b.part.CFrame + b.vel * dt
-			local pos = b.part.Position
+			b.obj:PivotTo(b.obj:GetPivot() + b.vel * dt)
+			local pos = b.obj:GetPivot().Position
 			local hitTerrain = pos.Y < WorldHeights.groundY(pos.X, pos.Z) or pos.Y > WorldHeights.ceilY(pos.X, pos.Z)
 			local hitEnemy = false
 			for _, e in EnemyController.enemies do
@@ -533,7 +652,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 						EnemyController.damage(e, BOMB_DAMAGE)
 					end
 				end
-				b.part:Destroy()
+				b.obj:Destroy()
 				table.remove(bombs, i)
 			end
 		end

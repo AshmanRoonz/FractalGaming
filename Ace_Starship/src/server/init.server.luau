@@ -94,13 +94,14 @@ local function launchPlayer(player: Player)
 	local shipId = if Hangar then Hangar.getShip(player) else "Pyro"
 	local mainId = if Hangar then Hangar.getMain(player) else "candy"
 	local secId = if Hangar then Hangar.getSecondary(player) else "ball"
+	local petId = if Hangar then Hangar.getPet(player) else "orb"
 	if player.Character then
 		player.Character:Destroy()
 	end
 	if Battle then
 		Battle.playerLaunched(player, shipId)
 	end
-	beginBattle:FireClient(player, shipId, mainId, secId)
+	beginBattle:FireClient(player, shipId, mainId, secId, petId)
 end
 
 -- Return a battling player to their existing hangar bay (no new bay allocated).

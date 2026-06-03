@@ -13,6 +13,7 @@ local TITLES = {
 	ship = "SHIP HANGAR",
 	main = "LASER SHOP",
 	secondary = "PROJECTILE SHOP",
+	pet = "PET SHOP",
 }
 
 local GOLD = Color3.fromRGB(255, 205, 90)

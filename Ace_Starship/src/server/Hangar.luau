@@ -10,6 +10,7 @@ local RunService = game:GetService("RunService")
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
 local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
+local Pets = require(ReplicatedStorage.Shared.Catalog.Pets)
 
 local Hangar = {}
 
@@ -70,12 +71,15 @@ type Slot = {
 	nameLabel: TextLabel,
 	mainId: string,
 	secId: string,
+	petId: string,
 	mainLabel: TextLabel,
 	secLabel: TextLabel,
+	petLabel: TextLabel,
 	bolts: number,
 	ownedShips: { [string]: boolean },
 	ownedMain: { [string]: boolean },
 	ownedSec: { [string]: boolean },
+	ownedPets: { [string]: boolean },
 }
 local slots: { [Player]: Slot } = {}
 local used: { [number]: boolean } = {}
@@ -194,6 +198,10 @@ local function buildShopData(s: Slot, category: string): any
 		for _, d in SecondaryWeapons do
 			table.insert(items, { id = d.id, name = d.displayName, price = d.price, owned = s.ownedSec[d.id] == true, equipped = s.secId == d.id })
 		end
+	elseif category == "pet" then
+		for _, d in Pets do
+			table.insert(items, { id = d.id, name = d.displayName, price = d.price, owned = s.ownedPets[d.id] == true, equipped = s.petId == d.id })
+		end
 	end
 	return { category = category, bolts = s.bolts, items = items }
 end
@@ -222,6 +230,12 @@ local function priceAndOwned(s: Slot, category: string, id: string): (number?, {
 		for _, d in SecondaryWeapons do
 			if d.id == id then
 				return d.price, s.ownedSec
+			end
+		end
+	elseif category == "pet" then
+		for _, d in Pets do
+			if d.id == id then
+				return d.price, s.ownedPets
 			end
 		end
 	end
@@ -253,6 +267,9 @@ local function equipItem(s: Slot, category: string, id: string)
 	elseif category == "secondary" then
 		s.secId = id
 		s.secLabel.Text = findById(SecondaryWeapons, id).displayName
+	elseif category == "pet" then
+		s.petId = id
+		s.petLabel.Text = findById(Pets, id).displayName
 	end
 end
 
@@ -263,7 +280,7 @@ function Hangar.addBolts(player: Player, amount: number)
 	end
 end
 
-local function buildBay(owner: Player, center: Vector3): (Model, TextLabel)
+local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, TextLabel, TextLabel, TextLabel)
 	local model = Instance.new("Model")
 	model.Name = "Hangar"
 
@@ -331,18 +348,21 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel)
 		return label
 	end
 
-	makePedestal(Vector3.new(0, 0, 26), "Ship Shop", "SHIP", function(plr)
+	makePedestal(Vector3.new(-30, 0, 26), "Ship Shop", "SHIP", function(plr)
 		openShop(plr, "ship")
 	end)
-	local mainLabel = makePedestal(Vector3.new(-20, 0, 26), "Laser Shop", MainWeapons[1].displayName, function(plr)
+	local mainLabel = makePedestal(Vector3.new(-10, 0, 26), "Laser Shop", MainWeapons[1].displayName, function(plr)
 		openShop(plr, "main")
 	end)
-	local secLabel = makePedestal(Vector3.new(20, 0, 26), "Projectile Shop", SecondaryWeapons[1].displayName, function(plr)
+	local secLabel = makePedestal(Vector3.new(10, 0, 26), "Projectile Shop", SecondaryWeapons[1].displayName, function(plr)
 		openShop(plr, "secondary")
+	end)
+	local petLabel = makePedestal(Vector3.new(30, 0, 26), "Pet Shop", Pets[1].displayName, function(plr)
+		openShop(plr, "pet")
 	end)
 
 	model.Parent = workspace
-	return model, nameLabel, mainLabel, secLabel
+	return model, nameLabel, mainLabel, secLabel, petLabel
 end
 
 local function freeIndex(): number
@@ -357,7 +377,7 @@ function Hangar.assign(player: Player): Vector3
 	local index = freeIndex()
 	used[index] = true
 	local center = BASE + Vector3.new(index * SLOT_SPACING, 0, 0)
-	local model, nameLabel, mainLabel, secLabel = buildBay(player, center)
+	local model, nameLabel, mainLabel, secLabel, petLabel = buildBay(player, center)
 	slots[player] = {
 		index = index,
 		owner = player,
@@ -368,12 +388,15 @@ function Hangar.assign(player: Player): Vector3
 		nameLabel = nameLabel,
 		mainId = MainWeapons[1].id,
 		secId = SecondaryWeapons[1].id,
+		petId = Pets[1].id,
 		mainLabel = mainLabel,
 		secLabel = secLabel,
+		petLabel = petLabel,
 		bolts = START_BOLTS,
 		ownedShips = { [defaultShip()] = true },
 		ownedMain = { [MainWeapons[1].id] = true },
 		ownedSec = { [SecondaryWeapons[1].id] = true },
+		ownedPets = { [Pets[1].id] = true },
 	}
 	showShip(slots[player])
 	return center + Vector3.new(0, 5, 45) -- spawn in front of the ship
@@ -402,6 +425,11 @@ end
 function Hangar.getSecondary(player: Player): string
 	local s = slots[player]
 	return if s then s.secId else SecondaryWeapons[1].id
+end
+
+function Hangar.getPet(player: Player): string
+	local s = slots[player]
+	return if s then s.petId else Pets[1].id
 end
 
 function Hangar.padCenter(player: Player): Vector3?
@@ -456,7 +484,7 @@ function Hangar.start()
 		if type(category) ~= "string" or type(action) ~= "string" or type(id) ~= "string" then
 			return
 		end
-		if category ~= "ship" and category ~= "main" and category ~= "secondary" then
+		if category ~= "ship" and category ~= "main" and category ~= "secondary" and category ~= "pet" then
 			return
 		end
 		local s = slots[player]
