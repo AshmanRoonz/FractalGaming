@@ -43,15 +43,19 @@ local WAVE_DELAY = 3
 local BASE_COUNT = 2
 local MAX_COUNT = 12
 local BOSS_EVERY = 10
+-- Boss scaling: each boss appearance (1st boss, 2nd boss, ...) gets tougher.
+local BOSS_HP_STEP = 0.75 -- +75% HP per boss tier
+local BOSS_DMG_BASE, BOSS_DMG_STEP = 18, 6 -- ball damage: tier1=18, then +6 each
+local BOSS_CD_BASE, BOSS_CD_STEP, BOSS_CD_MIN = 1.0, 0.15, 0.4 -- fire cooldown shrinks
 local MAX_HIT = 160 -- cap on a single damage report (light anti-cheat; allows the bomb)
 local BOLTS_PER_KILL = 10
 local BOLTS_PER_WAVE = 50
 local START_DIR = Vector3.new(0, 0, -1)
 
-type EnemyRec = { id: number, cf: CFrame, hp: number, mh: number, boss: boolean, nextFire: number, bob: number, kind: string }
-type BallRec = { pos: Vector3, vel: Vector3, life: number }
+type EnemyRec = { id: number, cf: CFrame, hp: number, mh: number, boss: boolean, nextFire: number, bob: number, kind: string, dmg: number, cooldown: number, burst: number }
+type BallRec = { pos: Vector3, vel: Vector3, life: number, dmg: number }
 
-local battling: { [Player]: { cf: CFrame, shipId: string, beamHit: Vector3? } } = {}
+local battling: { [Player]: { cf: CFrame, shipId: string, mainId: string, secId: string, petId: string, beamHit: Vector3? } } = {}
 
 -- Fire an event only to players currently in battle (lobby players don't listen).
 local function fireBattling(event: any, ...)
@@ -63,8 +67,9 @@ local enemies: { EnemyRec } = {}
 local balls: { BallRec } = {}
 local nextId = 0
 local wave, waveActive, nextWaveAt = 0, false, 0
+local bossTier = 0 -- how many bosses have appeared; each one is tougher
 
-local shipUpdate, shipStates, enemyStates, waveEvent, damageEnemy, enemyFired, playerHit, playerFired, killEvent
+local shipUpdate, shipStates, enemyStates, waveEvent, damageEnemy, enemyFired, playerHit, playerFired, killEvent, playerDied, shipExploded
 
 local function makeEvent(name: string, unreliable: boolean): any
 	local e = Instance.new(if unreliable then "UnreliableRemoteEvent" else "RemoteEvent")
@@ -125,15 +130,25 @@ local function spawnEnemy(boss: boolean)
 	local dist = SPAWN_MIN + math.random() * (SPAWN_MAX - SPAWN_MIN)
 	local pos = center + dir * dist + Vector3.new(0, (math.random() - 0.5) * 60, 0)
 	pos = Vector3.new(pos.X, math.clamp(pos.Y, GAP_Y - 60, GAP_Y + 60), pos.Z)
+	-- Boss stats scale with how many bosses have come before (bossTier).
+	local hp = if boss then math.floor(BOSS_HP * (1 + (bossTier - 1) * BOSS_HP_STEP)) else ENEMY_HP
+	local dmg = if boss then BOSS_DMG_BASE + (bossTier - 1) * BOSS_DMG_STEP else BALL_DMG
+	local cooldown = if boss
+		then math.max(BOSS_CD_MIN, BOSS_CD_BASE - (bossTier - 1) * BOSS_CD_STEP)
+		else BALL_COOLDOWN
+	local burst = if boss then math.min(6, 1 + bossTier) else 1 -- shots per volley
 	table.insert(enemies, {
 		id = nextId,
 		cf = CFrame.new(pos),
-		hp = if boss then BOSS_HP else ENEMY_HP,
-		mh = if boss then BOSS_HP else ENEMY_HP,
+		hp = hp,
+		mh = hp,
 		boss = boss,
 		nextFire = os.clock() + 1 + math.random() * 2,
 		bob = math.random() * 10,
 		kind = pickKind(),
+		dmg = dmg,
+		cooldown = cooldown,
+		burst = burst,
 	})
 end
 
@@ -142,6 +157,7 @@ local function startWave()
 	local isBoss = wave % BOSS_EVERY == 0
 	fireBattling(waveEvent, wave, isBoss)
 	if isBoss then
+		bossTier += 1 -- next boss tier (scales HP/damage/fire rate/volley)
 		spawnEnemy(true)
 		for _ = 1, 3 do
 			spawnEnemy(false)
@@ -163,8 +179,15 @@ local function findEnemy(id: number): EnemyRec?
 	return nil
 end
 
-function Battle.playerLaunched(player: Player, shipId: string?)
-	battling[player] = { cf = CFrame.new(0, 100, 0), shipId = shipId or "starter_skiff", beamHit = nil }
+function Battle.playerLaunched(player: Player, shipId: string?, mainId: string?, secId: string?, petId: string?)
+	battling[player] = {
+		cf = CFrame.new(0, 100, 0),
+		shipId = shipId or "starter_skiff",
+		mainId = mainId or "laser",
+		secId = secId or "ball",
+		petId = petId or "orb",
+		beamHit = nil,
+	}
 end
 
 function Battle.playerLeft(player: Player)
@@ -184,6 +207,23 @@ function Battle.start()
 	playerHit = makeEvent("PlayerHit", false)
 	playerFired = makeEvent("PlayerFired", true)
 	killEvent = makeEvent("Kill", false)
+	playerDied = makeEvent("PlayerDied", false)
+	shipExploded = makeEvent("ShipExploded", false)
+
+	-- A player's ship was destroyed: blow it up + remove it for everyone else right
+	-- away (don't wait for them to return to the hangar).
+	playerDied.OnServerEvent:Connect(function(player, pos)
+		if not battling[player] then
+			return
+		end
+		local at = if typeof(pos) == "Vector3" then pos else battling[player].cf.Position
+		for other in battling do
+			if other ~= player then
+				shipExploded:FireClient(other, player.UserId, at)
+			end
+		end
+		battling[player] = nil -- stop broadcasting the dead ship
+	end)
 
 	shipUpdate.OnServerEvent:Connect(function(player, cf, beamHit)
 		local rec = battling[player]
@@ -257,10 +297,15 @@ function Battle.start()
 				e.cf = CFrame.lookAt(newPos, target)
 				-- Only fire when a mountain isn't between us (so hiding works).
 				if to.Magnitude <= FIRE_RANGE and now >= e.nextFire and not WorldHeights.blocked(newPos, target) then
-					e.nextFire = now + BALL_COOLDOWN
-					local dir = (target - newPos).Unit
-					table.insert(balls, { pos = newPos, vel = dir * BALL_SPEED, life = 4 })
-					fireBattling(enemyFired, newPos, dir, BALL_SPEED)
+					e.nextFire = now + e.cooldown
+					local baseDir = (target - newPos).Unit
+					-- Fire e.burst shots in a small fan (bosses fire several at once).
+					for b = 1, e.burst do
+						local spread = if e.burst > 1 then (b - (e.burst + 1) / 2) * math.rad(9) else 0
+						local dir = CFrame.fromAxisAngle(Vector3.yAxis, spread) * baseDir
+						table.insert(balls, { pos = newPos, vel = dir * BALL_SPEED, life = 4, dmg = e.dmg })
+						fireBattling(enemyFired, newPos, dir, BALL_SPEED)
+					end
 				end
 			end
 		end
@@ -280,7 +325,7 @@ function Battle.start()
 			local hitTerrain = b.pos.Y < WorldHeights.groundY(b.pos.X, b.pos.Z)
 				or b.pos.Y > WorldHeights.ceilY(b.pos.X, b.pos.Z)
 			if hitPlayer then
-				playerHit:FireClient(hitPlayer, BALL_DMG)
+				playerHit:FireClient(hitPlayer, b.dmg)
 				table.remove(balls, i)
 			elseif hitTerrain or b.life <= 0 then
 				table.remove(balls, i)
@@ -293,7 +338,7 @@ function Battle.start()
 			accum = 0
 			local ships = {}
 			for player, rec in battling do
-				table.insert(ships, { u = player.UserId, c = rec.cf, s = rec.shipId, b = rec.beamHit })
+				table.insert(ships, { u = player.UserId, c = rec.cf, s = rec.shipId, b = rec.beamHit, m = rec.mainId, x = rec.secId, p = rec.petId })
 			end
 			if #ships > 0 then
 				fireBattling(shipStates, ships)

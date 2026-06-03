@@ -10,6 +10,15 @@ local RunService = game:GetService("RunService")
 
 local Explosion = {}
 
+-- Fewer particles on touch devices (tablets/phones) to keep combat smooth.
+local MOBILE = false
+pcall(function()
+	MOBILE = game:GetService("UserInputService").TouchEnabled
+end)
+local function lo(n: number): number
+	return if MOBILE then math.max(1, math.floor(n * 0.4)) else n
+end
+
 -- Expanding shockwave: an energy sphere + a flat ground ring that grow with the
 -- Sedov-Taylor blast law (radius ~ t^(2/5)), so they shoot out fast then
 -- decelerate and fade -- the hallmark of a real shock front.
@@ -159,11 +168,11 @@ local function blast(pos: Vector3, scale: number, puffCount: number, sparkCount:
 end
 
 function Explosion.burst(pos: Vector3)
-	blast(pos, 1, 4, 18, 12)
+	blast(pos, 1, lo(4), lo(18), lo(12))
 end
 
 function Explosion.big(pos: Vector3)
-	blast(pos, 3, 9, 45, 28)
+	blast(pos, 3, lo(9), lo(45), lo(28))
 end
 
 return Explosion

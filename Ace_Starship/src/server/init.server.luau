@@ -72,6 +72,30 @@ leaveBattle.Parent = ReplicatedStorage
 
 local inLobby: { [Player]: boolean } = {}
 
+-- Spawn (or respawn) the player's character in their hangar bay. Because we manage
+-- spawning ourselves (CharacterAutoLoads is off), we must re-spawn on death/reset
+-- too, or the menu "Reset" button leaves them dead in the hangar.
+local function placeInBay(player: Player, spawnPos: Vector3?)
+	player:LoadCharacter()
+	local char = player.Character or player.CharacterAdded:Wait()
+	task.wait()
+	if spawnPos and char then
+		char:PivotTo(CFrame.new(spawnPos))
+	end
+	inLobby[player] = true
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		hum.Died:Connect(function()
+			if inLobby[player] then -- not if they just launched into battle
+				task.wait(0.4)
+				if inLobby[player] and player.Parent then
+					placeInBay(player, if Hangar then Hangar.returnPoint(player) else nil)
+				end
+			end
+		end)
+	end
+end
+
 local function spawnInLobby(player: Player)
 	local spawnPos: Vector3? = nil
 	if Hangar then
@@ -80,13 +104,7 @@ local function spawnInLobby(player: Player)
 			spawnPos = pos
 		end
 	end
-	player:LoadCharacter()
-	local char = player.Character or player.CharacterAdded:Wait()
-	task.wait()
-	if spawnPos and char then
-		char:PivotTo(CFrame.new(spawnPos))
-	end
-	inLobby[player] = true
+	placeInBay(player, spawnPos)
 end
 
 local function launchPlayer(player: Player)
@@ -99,7 +117,7 @@ local function launchPlayer(player: Player)
 		player.Character:Destroy()
 	end
 	if Battle then
-		Battle.playerLaunched(player, shipId)
+		Battle.playerLaunched(player, shipId, mainId, secId, petId)
 	end
 	beginBattle:FireClient(player, shipId, mainId, secId, petId)
 end
@@ -113,14 +131,7 @@ local function returnToHangar(player: Player)
 	if Battle then
 		Battle.playerLeft(player)
 	end
-	local spawnPos = if Hangar then Hangar.returnPoint(player) else nil
-	player:LoadCharacter()
-	local char = player.Character or player.CharacterAdded:Wait()
-	task.wait()
-	if spawnPos and char then
-		char:PivotTo(CFrame.new(spawnPos))
-	end
-	inLobby[player] = true
+	placeInBay(player, if Hangar then Hangar.returnPoint(player) else nil)
 end
 
 leaveBattle.OnServerEvent:Connect(returnToHangar)

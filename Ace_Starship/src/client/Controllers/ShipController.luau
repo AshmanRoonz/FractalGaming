@@ -31,6 +31,7 @@ local MOVE_SPEED = 90 -- studs/sec forward/back/strafe
 local VERT_SPEED = 110 -- studs/sec rise/sink
 local YAW_RATE = math.rad(130) -- how fast the right stick turns the heading
 local PITCH_RATE = math.rad(95)
+local MOUSE_SENS = 0.006 -- radians of turn per pixel of mouse movement
 local MAX_PITCH = math.rad(80) -- clamp so you can't flip fully over
 local MAX_BANK = math.rad(22)
 local CAM_DIST = 26
@@ -89,9 +90,15 @@ function ShipController.start(shipId: string?)
 	ShipState.lastHit = 0
 	ShipState.beamHit = nil
 
-	-- On return-to-hangar, hand the camera back to the character.
+	-- Mouse-look on desktop: lock the cursor and steer with mouse movement.
+	local mouseLook = UserInputService.MouseEnabled and not UserInputService.TouchEnabled
+	local mouseUnlocked = false -- Tab toggles this to free the cursor for clicking
+
+	-- On return-to-hangar, hand the camera + mouse back to the character.
 	BattleSession.onCleanup(function()
 		camera.CameraType = Enum.CameraType.Custom
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
 	end)
 
 	local ship = ShipTemplate.new(shipId or "starter_skiff")
@@ -155,6 +162,8 @@ function ShipController.start(shipId: string?)
 			triggerRoll(-1)
 		elseif input.KeyCode == Enum.KeyCode.ButtonR1 or input.KeyCode == Enum.KeyCode.E then
 			triggerRoll(1)
+		elseif input.KeyCode == Enum.KeyCode.Tab then
+			mouseUnlocked = not mouseUnlocked -- free / re-lock the cursor
 		end
 	end)
 
@@ -394,9 +403,26 @@ function ShipController.start(shipId: string?)
 			vert -= 1
 		end
 
-		-- Right stick turns the heading (yaw, full 360) and pitches it.
-		camYaw -= turn * YAW_RATE * dt
-		camPitch = math.clamp(camPitch - pitchIn * PITCH_RATE * dt, -MAX_PITCH, MAX_PITCH)
+		-- Mouse-look: lock the cursor and steer with the mouse while alive; free it
+		-- when dead so the death menu is clickable.
+		local mouseDX, mouseDY = 0, 0
+		if mouseLook then
+			if ShipState.health > 0 and not mouseUnlocked then
+				UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+				UserInputService.MouseIconEnabled = false -- hide the center cursor dot
+				local md = UserInputService:GetMouseDelta()
+				mouseDX = md.X * MOUSE_SENS
+				mouseDY = md.Y * MOUSE_SENS
+			else
+				-- Dead or Tab-unlocked: free cursor for clicking, no steering.
+				UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+				UserInputService.MouseIconEnabled = true
+			end
+		end
+
+		-- Right stick / mouse turns the heading (yaw, full 360) and pitches it.
+		camYaw -= turn * YAW_RATE * dt + mouseDX
+		camPitch = math.clamp(camPitch - pitchIn * PITCH_RATE * dt - mouseDY, -MAX_PITCH, MAX_PITCH)
 		local yawCF = CFrame.Angles(0, camYaw, 0) -- horizontal heading
 		local lookCF = yawCF * CFrame.Angles(camPitch, 0, 0)
 

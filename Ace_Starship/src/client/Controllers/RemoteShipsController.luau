@@ -1,9 +1,8 @@
 --!strict
--- Renders OTHER players' ships in your battle, driven by the server's broadcast
--- of everyone's transforms. Each remote ship is interpolated between the ~20 Hz
--- updates and tagged with the pilot's name.
---
--- Phase 2 of multiplayer: presence in battle. (Shared enemies come later.)
+-- Renders OTHER players in your battle from the server broadcast: their ship, their
+-- equipped pet, their laser (colored to match), and their fired projectile objects,
+-- so everyone sees each other's unlocks. Interpolated between ~20 Hz updates and
+-- tagged with the pilot's name.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,10 +11,28 @@ local RunService = game:GetService("RunService")
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local BattleSession = require(script.Parent.BattleSession)
+local WeaponVisuals = require(ReplicatedStorage.Shared.WeaponVisuals)
+local PetVisuals = require(ReplicatedStorage.Shared.PetVisuals)
+local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
+local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
+local Explosion = require(ReplicatedStorage.Shared.Explosion)
+local Sfx = require(ReplicatedStorage.Shared.Sfx)
 
 local RemoteShipsController = {}
 
 local TARGET_SHIP_SIZE = 14
+local PROJECTILE_SIZE = 12 -- match WeaponController's fired-object size
+local SECONDARY_SPEED = 175
+local PET_SIDE, PET_UP, PET_BACK = 13, 7, 5
+
+local function findById(list: any, id: string?): any
+	for _, d in list do
+		if d.id == id then
+			return d
+		end
+	end
+	return list[1]
+end
 
 local function scaleToSize(model: Model, target: number)
 	local size = model:GetExtentsSize()
@@ -25,7 +42,19 @@ local function scaleToSize(model: Model, target: number)
 	end
 end
 
-type Remote = { model: Model, modelYaw: CFrame, target: CFrame, snapped: boolean, beam: BasePart, beamHit: Vector3? }
+type Remote = {
+	model: Model,
+	modelYaw: CFrame,
+	target: CFrame,
+	snapped: boolean,
+	beam: BasePart,
+	beamHit: Vector3?,
+	pet: Model?,
+	petFacing: CFrame,
+	petPos: Vector3,
+	petBob: number,
+	secCfg: any,
+}
 
 function RemoteShipsController.start()
 	local gen = BattleSession.gen
@@ -39,9 +68,9 @@ function RemoteShipsController.start()
 	BattleSession.track(container)
 
 	local ships: { [number]: Remote } = {}
-	local balls: { { part: BasePart, vel: Vector3, life: number } } = {}
+	local balls: { { obj: Model, vel: Vector3, life: number } } = {}
 
-	local function ensure(userId: number, shipId: string): Remote
+	local function ensure(userId: number, shipId: string, mainId: string?, secId: string?, petId: string?): Remote
 		local existing = ships[userId]
 		if existing then
 			return existing
@@ -75,15 +104,21 @@ function RemoteShipsController.start()
 		nameLbl.Text = if plr then plr.Name else "Pilot"
 		nameLbl.Parent = bb
 
-		-- Beam this pilot fires (shown when they have a target).
+		-- Beam, colored to match their laser.
+		local mainCfg = findById(MainWeapons, mainId)
 		local beam = Instance.new("Part")
 		beam.Anchored = true
 		beam.CanCollide = false
 		beam.CastShadow = false
 		beam.Material = Enum.Material.Neon
-		beam.Color = Color3.fromRGB(255, 70, 190)
+		beam.Color = mainCfg.color
 		beam.Transparency = 1
 		beam.Parent = container
+
+		-- Their equipped pet, flying alongside.
+		local petCfg = PetVisuals.findById(petId)
+		local pet = PetVisuals.buildBody(petCfg)
+		pet.Parent = container
 
 		local rec: Remote = {
 			model = model,
@@ -92,6 +127,11 @@ function RemoteShipsController.start()
 			snapped = false,
 			beam = beam,
 			beamHit = nil,
+			pet = pet,
+			petFacing = CFrame.Angles(0, math.rad(petCfg.yawOffset or 0), 0),
+			petPos = Vector3.new(0, 100, 0),
+			petBob = 0,
+			secCfg = findById(SecondaryWeapons, secId),
 		}
 		ships[userId] = rec
 		return rec
@@ -105,36 +145,53 @@ function RemoteShipsController.start()
 		for _, e in list do
 			if e.u ~= localId then
 				present[e.u] = true
-				local rec = ensure(e.u, e.s)
+				local rec = ensure(e.u, e.s, e.m, e.x, e.p)
 				rec.target = e.c
 				rec.beamHit = e.b
 			end
 		end
-		-- Drop ships for players no longer broadcasting (left battle / game).
+		-- Drop players no longer broadcasting (left battle / game).
 		for id, rec in ships do
 			if not present[id] then
 				rec.model:Destroy()
+				if rec.pet then
+					rec.pet:Destroy()
+				end
 				ships[id] = nil
 			end
 		end
 	end)
 
-	-- Render other players' secondary shots.
+	-- A remote ship was destroyed: explode it and remove it right away.
+	local shipExploded = ReplicatedStorage:WaitForChild("ShipExploded")
+	shipExploded.OnClientEvent:Connect(function(userId, pos)
+		if BattleSession.gen ~= gen or userId == localId then
+			return
+		end
+		local rec = ships[userId]
+		local at = if rec then rec.model:GetPivot().Position else pos
+		Explosion.big(at)
+		Sfx.play("explosion")
+		if rec then
+			rec.model:Destroy()
+			if rec.pet then
+				rec.pet:Destroy()
+			end
+			ships[userId] = nil
+		end
+	end)
+
+	-- Render other players' secondary shots as their actual projectile object.
 	playerFired.OnClientEvent:Connect(function(userId, origin, dir)
 		if BattleSession.gen ~= gen or userId == localId then
 			return
 		end
-		local p = Instance.new("Part")
-		p.Shape = Enum.PartType.Ball
-		p.Size = Vector3.new(4, 4, 4)
-		p.Anchored = true
-		p.CanCollide = false
-		p.CastShadow = false
-		p.Material = Enum.Material.Neon
-		p.Color = Color3.fromRGB(255, 180, 40)
-		p.CFrame = CFrame.new(origin)
-		p.Parent = container
-		table.insert(balls, { part = p, vel = dir * 380, life = 3 })
+		local rec = ships[userId]
+		local secCfg = (rec and rec.secCfg) or findById(SecondaryWeapons, "ball")
+		local m = WeaponVisuals.makeProjectile(secCfg, PROJECTILE_SIZE)
+		m:PivotTo(CFrame.new(origin))
+		m.Parent = container
+		table.insert(balls, { obj = m, vel = dir * SECONDARY_SPEED, life = 5 })
 	end)
 
 	RunService.RenderStepped:Connect(function(dt)
@@ -153,22 +210,33 @@ function RemoteShipsController.start()
 			if rec.beamHit then
 				local from = rec.model:GetPivot().Position
 				local hit = rec.beamHit
-				rec.beam.Size = Vector3.new(0.7, 0.7, (hit - from).Magnitude)
+				rec.beam.Size = Vector3.new(0.9, 0.9, (hit - from).Magnitude)
 				rec.beam.CFrame = CFrame.lookAt((from + hit) / 2, hit)
 				rec.beam.Transparency = 0.1
 			else
 				rec.beam.Transparency = 1
 			end
+			-- Pet trails their ship.
+			if rec.pet then
+				local pos = rec.model:GetPivot().Position
+				local fwd = rec.target.LookVector
+				local right = fwd:Cross(Vector3.yAxis)
+				right = if right.Magnitude > 0.01 then right.Unit else Vector3.xAxis
+				rec.petBob += dt
+				local g = pos + right * PET_SIDE + Vector3.new(0, PET_UP + math.sin(rec.petBob * 2) * 1.2, 0) - fwd * PET_BACK
+				rec.petPos = rec.petPos:Lerp(g, math.clamp(dt * 5, 0, 1))
+				rec.pet:PivotTo(CFrame.lookAt(rec.petPos, rec.petPos + fwd) * rec.petFacing)
+			end
 		end
-		-- Other players' secondary balls.
+		-- Other players' projectile objects.
 		for i = #balls, 1, -1 do
 			local b = balls[i]
 			b.life -= dt
-			b.part.CFrame = b.part.CFrame + b.vel * dt
-			local pos = b.part.Position
+			b.obj:PivotTo(b.obj:GetPivot() + b.vel * dt)
+			local pos = b.obj:GetPivot().Position
 			local hitTerrain = pos.Y < WorldHeights.groundY(pos.X, pos.Z) or pos.Y > WorldHeights.ceilY(pos.X, pos.Z)
 			if b.life <= 0 or hitTerrain then
-				b.part:Destroy()
+				b.obj:Destroy()
 				table.remove(balls, i)
 			end
 		end

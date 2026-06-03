@@ -14,6 +14,7 @@
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
 
 local ShipState = require(script.Parent.ShipState)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
@@ -121,6 +122,18 @@ end
 
 function TerrainController.start()
 	local gen = BattleSession.gen
+
+	-- Tablets/phones: cut terrain GPU so Roblox's auto-quality stays higher and keeps
+	-- drawing distant enemies. The ground uses a small radius and the CEILING (upper
+	-- mountains) an even tighter one -- you look up far less than ahead, so this drops
+	-- a lot of ceiling triangles while keeping it visible nearby. Wide fog stays for
+	-- enemy visibility; ceiling collision math is unchanged.
+	local CEIL_VIEW = VIEW
+	if UserInputService.TouchEnabled then
+		VIEW = 3
+		CEIL_VIEW = 2
+	end
+
 	for _, name in { "Baseplate", "SpawnLocation" } do
 		local inst = workspace:FindFirstChild(name)
 		if inst then
@@ -141,11 +154,19 @@ function TerrainController.start()
 		Lighting.FogEnd = 100000
 	end)
 
-	local built: { [string]: boolean } = {}
+	local builtG: { [string]: boolean } = {} -- chunks with the ground shell built
+	local builtC: { [string]: boolean } = {} -- chunks with the ceiling shell built
 
 	local function clearChunk(cx: number, cz: number)
 		local center = Vector3.new(cx * CHUNK + CHUNK / 2, (FLOOR_Y + ROOF_Y) / 2, cz * CHUNK + CHUNK / 2)
 		terrain:FillBlock(CFrame.new(center), Vector3.new(CHUNK, ROOF_Y - FLOOR_Y, CHUNK), AIR)
+	end
+	-- Clear only the ceiling band (above the ground), for chunks that left the
+	-- tighter ceiling radius but are still within the ground radius.
+	local function clearCeiling(cx: number, cz: number)
+		local yLow = CEIL_BASE - CEIL_AMP - 4
+		local center = Vector3.new(cx * CHUNK + CHUNK / 2, (yLow + ROOF_Y) / 2, cz * CHUNK + CHUNK / 2)
+		terrain:FillBlock(CFrame.new(center), Vector3.new(CHUNK, ROOF_Y - yLow, CHUNK), AIR)
 	end
 
 	RunService.Heartbeat:Connect(function()
@@ -156,12 +177,16 @@ function TerrainController.start()
 		local scx = math.floor(pos.X / CHUNK)
 		local scz = math.floor(pos.Z / CHUNK)
 
-		local todo: { { cx: number, cz: number, d: number } } = {}
+		local todo: { { cx: number, cz: number, d: number, g: boolean, c: boolean } } = {}
 		for cx = scx - VIEW, scx + VIEW do
 			for cz = scz - VIEW, scz + VIEW do
-				if not built[cx .. "," .. cz] then
+				local key = cx .. "," .. cz
+				local cheb = math.max(math.abs(cx - scx), math.abs(cz - scz))
+				local needG = not builtG[key]
+				local needC = cheb <= CEIL_VIEW and not builtC[key]
+				if needG or needC then
 					local d = (cx - scx) * (cx - scx) + (cz - scz) * (cz - scz)
-					table.insert(todo, { cx = cx, cz = cz, d = d })
+					table.insert(todo, { cx = cx, cz = cz, d = d, g = needG, c = needC })
 				end
 			end
 		end
@@ -169,18 +194,35 @@ function TerrainController.start()
 			return a.d < b.d
 		end)
 		for i = 1, math.min(CHUNKS_PER_FRAME, #todo) do
-			local c = todo[i]
-			built[c.cx .. "," .. c.cz] = true
-			writeShell(c.cx * CHUNK, c.cz * CHUNK, false)
-			writeShell(c.cx * CHUNK, c.cz * CHUNK, true)
+			local t = todo[i]
+			local key = t.cx .. "," .. t.cz
+			if t.g then
+				writeShell(t.cx * CHUNK, t.cz * CHUNK, false)
+				builtG[key] = true
+			end
+			if t.c then
+				writeShell(t.cx * CHUNK, t.cz * CHUNK, true)
+				builtC[key] = true
+			end
 		end
 
-		for key in built do
+		-- Unload everything for chunks well outside the ground view.
+		for key in builtG do
 			local sx, sz = key:match("(-?%d+),(-?%d+)")
 			local cx, cz = tonumber(sx) :: number, tonumber(sz) :: number
 			if math.abs(cx - scx) > VIEW + 1 or math.abs(cz - scz) > VIEW + 1 then
 				clearChunk(cx, cz)
-				built[key] = nil
+				builtG[key] = nil
+				builtC[key] = nil
+			end
+		end
+		-- Unload just the ceiling for chunks outside the tighter ceiling radius.
+		for key in builtC do
+			local sx, sz = key:match("(-?%d+),(-?%d+)")
+			local cx, cz = tonumber(sx) :: number, tonumber(sz) :: number
+			if math.max(math.abs(cx - scx), math.abs(cz - scz)) > CEIL_VIEW + 1 then
+				clearCeiling(cx, cz)
+				builtC[key] = nil
 			end
 		end
 	end)

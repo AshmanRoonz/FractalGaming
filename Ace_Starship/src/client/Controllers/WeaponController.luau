@@ -21,6 +21,7 @@ local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
 local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
 local BattleSession = require(script.Parent.BattleSession)
+local Sfx = require(ReplicatedStorage.Shared.Sfx)
 
 local function findById(list: any, id: string): any
 	for _, d in list do
@@ -31,136 +32,10 @@ local function findById(list: any, id: string): any
 	return list[1]
 end
 
--- Weapon objects come from the Assets folders the user filled in Studio: Lasers
--- (beam objects), Projectiles (fired objects), and Objects (legacy). A weapon's
--- `object` field names an asset in any of these.
-local assetsRoot = ReplicatedStorage:WaitForChild("Assets")
-local objectFolders: { Instance } = {}
-for _, n in { "Lasers", "Projectiles", "Objects" } do
-	local f = assetsRoot:FindFirstChild(n)
-	if f then
-		table.insert(objectFolders, f)
-	end
-end
-
--- Find a named asset's main part (the asset itself if it's a part, else the first
--- part inside a model).
-local function findAssetPart(name: string?): BasePart?
-	if not name then
-		return nil
-	end
-	for _, folder in objectFolders do
-		local inst = folder:FindFirstChild(name)
-		if inst then
-			if inst:IsA("BasePart") then
-				return inst :: BasePart
-			end
-			local mp = inst:FindFirstChildWhichIsA("BasePart", true) -- search nested too
-			if mp then
-				return mp
-			end
-		end
-	end
-	return nil
-end
-
--- Build the weapon's object as a BasePart: a CLONE of the named asset mesh (kept
--- at its real look, scaled to fit def.size), else a meshId mesh, else a plain
--- shape. Anchored, no-collide, no-shadow.
-local function makeObject(def: any): BasePart
-	local part: BasePart
-	local src = findAssetPart(def.object)
-	if src then
-		part = src:Clone()
-		local s = part.Size
-		local longest = math.max(s.X, s.Y, s.Z)
-		if longest > 0 then
-			part.Size = s * (def.size / longest) -- fit to size, keep aspect ratio
-		end
-	elseif def.meshId then
-		local p = Instance.new("Part")
-		p.Size = Vector3.new(def.size, def.size, def.size)
-		p.Material = Enum.Material.SmoothPlastic
-		p.Color = def.color
-		local m = Instance.new("SpecialMesh")
-		m.MeshType = Enum.MeshType.FileMesh
-		m.MeshId = def.meshId
-		m.TextureId = def.textureId or ""
-		local sc = def.meshScale or 1
-		m.Scale = Vector3.new(sc, sc, sc)
-		m.Parent = p
-		part = p
-	else
-		local p = Instance.new("Part")
-		p.Shape = def.shape
-		p.Size = Vector3.new(def.size, def.size, def.size)
-		p.Material = Enum.Material.SmoothPlastic
-		p.Color = def.color
-		part = p
-	end
-	part.Anchored = true
-	part.CanCollide = false
-	part.CastShadow = false
-	return part
-end
-
--- Find a named asset's full instance (Model or BasePart), not just one piece.
-local function findAssetSource(name: string?): Instance?
-	if not name then
-		return nil
-	end
-	for _, folder in objectFolders do
-		local inst = folder:FindFirstChild(name)
-		if inst then
-			return inst
-		end
-	end
-	return nil
-end
-
--- Build a fired projectile as a MODEL: clone the WHOLE object (all its parts) so
--- multi-piece objects come out intact, then scale the entire thing to one uniform
--- size so every object fires at the same scale. Falls back to a shape.
-local function makeProjectile(def: any, targetSize: number): Model
-	local model: Model
-	local src = findAssetSource(def.object)
-	if src and src:IsA("Model") then
-		model = src:Clone()
-	elseif src and src:IsA("BasePart") then
-		model = Instance.new("Model")
-		local c = src:Clone()
-		c.Parent = model
-		model.PrimaryPart = c
-	else
-		model = Instance.new("Model")
-		local p = Instance.new("Part")
-		p.Shape = if def.shape then def.shape else Enum.PartType.Ball
-		p.Size = Vector3.new(2, 2, 2) -- cube base; uniform scaling fits it to targetSize
-		p.Material = Enum.Material.SmoothPlastic
-		p.Color = def.color
-		p.Parent = model
-		model.PrimaryPart = p
-	end
-	for _, d in model:GetDescendants() do
-		if d:IsA("BasePart") then
-			d.Anchored = true
-			d.CanCollide = false
-			d.CastShadow = false
-		end
-	end
-	if not model.PrimaryPart then
-		model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart", true)
-	end
-	-- Scale the whole object so its longest side == targetSize (uniform output).
-	local _, size = model:GetBoundingBox()
-	local longest = math.max(size.X, size.Y, size.Z)
-	if longest > 0 then
-		pcall(function()
-			model:ScaleTo(targetSize / longest)
-		end)
-	end
-	return model
-end
+-- Object builders are shared (so remote players' projectiles render identically).
+local WeaponVisuals = require(ReplicatedStorage.Shared.WeaponVisuals)
+local findAssetPart = WeaponVisuals.findAssetPart
+local makeProjectile = WeaponVisuals.makeProjectile
 
 -- Resolve the equipped weapon to a def. If the id isn't in the catalog (e.g. an
 -- asset that replicated after the catalog was built), but it names an asset in
@@ -485,6 +360,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 		if charge >= 100 then
 			charge = 0
 			fireBomb()
+			Sfx.play("bomb")
 		end
 	end
 
@@ -502,6 +378,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 		m:PivotTo(CFrame.new(origin))
 		m.Parent = segFolder
 		table.insert(projectiles, { obj = m, vel = dir * SECONDARY_SPEED, life = SECONDARY_LIFE })
+		Sfx.play("shoot")
 		if playerFired then
 			(playerFired :: any):FireServer(origin, dir) -- show this shot to others
 		end
@@ -580,6 +457,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 		end)
 	end
 
+	local hadTarget = false
 	RunService.Heartbeat:Connect(function(dt)
 		if BattleSession.gen ~= gen then
 			return
@@ -592,6 +470,10 @@ function WeaponController.start(mainId: string?, secId: string?)
 		if target and WorldHeights.blocked(origin, target.root.Position) then
 			target = nil
 		end
+		if target and not hadTarget then
+			Sfx.play("laser") -- a tick when the beam locks on
+		end
+		hadTarget = target ~= nil
 
 		-- Crosshair: project the aim point to the screen; red when locked.
 		local sp = camera:WorldToViewportPoint(origin + dir * AIM_DIST)
@@ -681,6 +563,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 			if hitEnemy or hitTerrain or b.life <= 0 then
 				Explosion.big(pos)
 				Explosion.shockwave(pos, BOMB_RADIUS, 0.6) -- Sedov-Taylor blast ring
+				Sfx.play("explosion")
 				for _, e in EnemyController.enemies do
 					if e.root and (e.root.Position - pos).Magnitude <= BOMB_RADIUS then
 						EnemyController.damage(e, BOMB_DAMAGE)

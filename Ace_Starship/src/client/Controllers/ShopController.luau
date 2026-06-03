@@ -8,6 +8,8 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local MarketplaceService = game:GetService("MarketplaceService")
 
+local Sfx = require(ReplicatedStorage.Shared.Sfx)
+
 local ShopController = {}
 
 local TITLES = {
@@ -192,6 +194,7 @@ function ShopController.start()
 			btn.Text = "EQUIP"
 			btn.BackgroundColor3 = GREEN
 			btn.Activated:Connect(function()
+				Sfx.play("ui")
 				shopAction:FireServer(category, "equip", item.id)
 			end)
 		elseif item.robux then
@@ -200,12 +203,14 @@ function ShopController.start()
 			btn.BackgroundColor3 = ROBUX
 			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
 			btn.Activated:Connect(function()
+				Sfx.play("ui")
 				MarketplaceService:PromptGamePassPurchase(player, item.robux)
 			end)
 		elseif bolts >= item.price then
 			btn.Text = "BUY"
 			btn.BackgroundColor3 = GOLD
 			btn.Activated:Connect(function()
+				Sfx.play("ui")
 				shopAction:FireServer(category, "buy", item.id)
 			end)
 		else

@@ -7,6 +7,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
 
 local LobbyController = {}
 
@@ -16,8 +17,11 @@ local function startBattle(shipId: string, mainId: string, secId: string, petId:
 	local Controllers = script.Parent
 	local BattleSession = require(Controllers.BattleSession)
 	local ShipState = require(Controllers.ShipState)
+	local Explosion = require(ReplicatedStorage.Shared.Explosion)
+	local Sfx = require(ReplicatedStorage.Shared.Sfx)
 	local player = Players.LocalPlayer
 	local leaveBattle = ReplicatedStorage:WaitForChild("LeaveBattle")
+	local playerDied = ReplicatedStorage:WaitForChild("PlayerDied")
 	local gen = BattleSession.gen
 
 	local function go(name: string, ...)
@@ -44,10 +48,21 @@ local function startBattle(shipId: string, mainId: string, secId: string, petId:
 			return
 		end
 		returning = true
+		pcall(function()
+			StarterGui:SetCore("ResetButtonCallback", true) -- restore the normal Reset button
+		end)
 		BattleSession.teardown() -- stop + destroy this player's local battle view
 		leaveBattle:FireServer() -- server respawns us in our existing bay
 		launched = false -- allow relaunch by walking into the ship again
 	end
+
+	-- Route the Roblox menu's Reset/Respawn button to a clean return, so it doesn't
+	-- strand the player (we manage spawning, so the default reset has nothing to do).
+	local resetBindable = Instance.new("BindableEvent")
+	resetBindable.Event:Connect(returnToHangar)
+	pcall(function()
+		StarterGui:SetCore("ResetButtonCallback", resetBindable)
+	end)
 
 	local menu = Instance.new("ScreenGui")
 	menu.Name = "BattleMenu"
@@ -106,13 +121,21 @@ local function startBattle(shipId: string, mainId: string, secId: string, petId:
 	rc.Parent = respawn
 	respawn.Activated:Connect(returnToHangar)
 
-	-- Death watcher: surface the overlay when health hits zero.
+	-- Death watcher: surface the overlay when health hits zero, blow up our ship,
+	-- and tell the server so other players see the explosion + removal immediately.
+	local diedFired = false
 	RunService.RenderStepped:Connect(function()
 		if BattleSession.gen ~= gen then
 			return
 		end
 		if ShipState.health <= 0 then
 			death.Visible = true
+			if not diedFired then
+				diedFired = true
+				playerDied:FireServer(ShipState.position)
+				Explosion.big(ShipState.position)
+				Sfx.play("explosion")
+			end
 		end
 	end)
 end

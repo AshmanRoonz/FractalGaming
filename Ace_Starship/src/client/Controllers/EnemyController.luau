@@ -13,6 +13,7 @@ local ShipState = require(script.Parent.ShipState)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local Explosion = require(ReplicatedStorage.Shared.Explosion)
 local BattleSession = require(script.Parent.BattleSession)
+local Sfx = require(ReplicatedStorage.Shared.Sfx)
 
 local EnemyController = {}
 
@@ -215,8 +216,10 @@ function EnemyController.start()
 			if not present[id] then
 				if r.boss then
 					Explosion.big(r.lastPos)
+					Sfx.play("explosion")
 				else
 					Explosion.burst(r.lastPos)
+					Sfx.play("enemyDown")
 				end
 				r.model:Destroy()
 				byId[id] = nil
@@ -230,6 +233,7 @@ function EnemyController.start()
 			return
 		end
 		ShipState.damage(amount)
+		Sfx.play("hit")
 	end)
 
 	-- Wave banner.
@@ -258,6 +262,7 @@ function EnemyController.start()
 		banner.Text = if boss then `WAVE {n}  -  BOSS` else `WAVE {n}`
 		banner.TextColor3 = if boss then Color3.fromRGB(255, 90, 90) else Color3.fromRGB(255, 255, 255)
 		bannerClock = os.clock()
+		Sfx.play("wave")
 	end)
 
 	-- Enemy ball visuals (server decides hits; this is just the projectile look).
