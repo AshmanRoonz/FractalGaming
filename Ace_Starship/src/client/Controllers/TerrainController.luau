@@ -13,8 +13,10 @@
 
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ShipState = require(script.Parent.ShipState)
+local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 
 local TerrainController = {}
 
@@ -27,57 +29,22 @@ local CHUNKS_PER_FRAME = 1 -- bulk chunks written per frame (smoother frames)
 local FOG_START = 320 -- terrain fades from here...
 local FOG_END = 700 -- ...to fully hazed here (well inside the build radius)
 
-local GROUND_BASE = 0
-local GROUND_AMP = 95 -- floor peak height
+-- Heightfield from the shared module (server evaluates the same math for LOS).
+local GROUND_BASE = WorldHeights.GROUND_BASE
+local GROUND_AMP = WorldHeights.GROUND_AMP
 local GROUND_SHELL = 40 -- solid thickness below the floor surface
-local CEIL_BASE = 190 -- flat ceiling height (tips hang down from here)
-local CEIL_AMP = 85
+local CEIL_BASE = WorldHeights.CEIL_BASE
+local CEIL_AMP = WorldHeights.CEIL_AMP
 local CEIL_SHELL = 40 -- solid thickness above the ceiling surface
-local FLOOR_Y = -120 -- clear-volume bounds
-local ROOF_Y = 420
-
--- Noise shaping.
-local OCTAVES = 5
-local BASE_FREQ = 0.0088
-local LACUNARITY = 2.0
-local GAIN = 0.5
-local EXPONENT = 2.3
-local WARP = 24
-local WARP_FREQ = 0.0048
+local FLOOR_Y = GROUND_BASE - GROUND_SHELL - 80 -- clear-volume bounds
+local ROOF_Y = CEIL_BASE + CEIL_SHELL + 80
 
 local GROUND_MAT = Enum.Material.Rock
 local CEIL_MAT = Enum.Material.Basalt
 local AIR = Enum.Material.Air
 
-local function ridged(x: number, z: number, seed: number): number
-	local sum, amp, freq, prev, norm = 0, 1, BASE_FREQ, 1, 0
-	for _ = 1, OCTAVES do
-		local n = math.noise(x * freq + seed * 19.3, z * freq + seed * 7.1, seed)
-		local r = 1 - math.abs(n)
-		r = r * r
-		sum += r * amp * prev
-		prev = r
-		norm += amp
-		freq *= LACUNARITY
-		amp *= GAIN
-	end
-	return (sum / norm) ^ EXPONENT
-end
-
-local function warp(x: number, z: number): (number, number)
-	local wx = x + WARP * math.noise(x * WARP_FREQ, z * WARP_FREQ, 11.2)
-	local wz = z + WARP * math.noise(x * WARP_FREQ + 31.7, z * WARP_FREQ + 17.3, 12.7)
-	return wx, wz
-end
-
-local function groundY(x: number, z: number): number
-	local wx, wz = warp(x, z)
-	return GROUND_BASE + GROUND_AMP * ridged(wx, wz, 1.7)
-end
-local function ceilY(x: number, z: number): number
-	local wx, wz = warp(x + 4000, z - 4000)
-	return CEIL_BASE - CEIL_AMP * ridged(wx, wz, 5.9)
-end
+local groundY = WorldHeights.groundY
+local ceilY = WorldHeights.ceilY
 
 -- Exposed so the ship can stay inside the terrain and weapons can test against it.
 TerrainController.groundY = groundY

@@ -6,6 +6,7 @@
 local ShipState = {
 	position = Vector3.new(0, 100, 0),
 	forward = Vector3.new(0, 0, -1), -- unit heading the ship is looking/flying
+	beamHit = (nil :: Vector3?), -- where our main beam is hitting (for replication)
 
 	maxHealth = 100,
 	health = 100,

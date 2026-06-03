@@ -10,110 +10,62 @@
 -- LOCAL prototype (client-side). Targets come from EnemyController.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Debris = game:GetService("Debris")
 local TweenService = game:GetService("TweenService")
 
--- Layered procedural explosion: flash + lumpy puff-cluster fireball + spark and
--- smoke particle bursts + a decaying light. All code-driven, no asset uploads.
-local function makeEmitter(parent: Instance, props: { [string]: any }): ParticleEmitter
-	local e = Instance.new("ParticleEmitter")
-	e.Rate = 0 -- burst-only (we call :Emit)
-	for k, v in props do
-		(e :: any)[k] = v
+local Explosion = require(ReplicatedStorage.Shared.Explosion)
+local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
+local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
+local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
+
+local function findById(list: any, id: string): any
+	for _, d in list do
+		if d.id == id then
+			return d
+		end
 	end
-	e.Parent = parent
-	return e
+	return list[1]
 end
 
-local function explode(pos: Vector3)
-	local holder = Instance.new("Part")
-	holder.Anchored = true
-	holder.CanCollide = false
-	holder.Transparency = 1
-	holder.Size = Vector3.one
-	holder.CFrame = CFrame.new(pos)
-	holder.Parent = workspace
-	local att = Instance.new("Attachment")
-	att.Parent = holder
-
-	-- 1) Flash: a brief white pop.
-	local flash = Instance.new("Part")
-	flash.Shape = Enum.PartType.Ball
-	flash.Anchored = true
-	flash.CanCollide = false
-	flash.CastShadow = false
-	flash.Material = Enum.Material.Neon
-	flash.Color = Color3.fromRGB(255, 250, 230)
-	flash.Size = Vector3.new(5, 5, 5)
-	flash.CFrame = CFrame.new(pos)
-	flash.Parent = workspace
-	TweenService:Create(flash, TweenInfo.new(0.12), { Size = Vector3.new(11, 11, 11), Transparency = 1 }):Play()
-	Debris:AddItem(flash, 0.15)
-
-	-- 2) Decaying light.
-	local light = Instance.new("PointLight")
-	light.Color = Color3.fromRGB(255, 160, 60)
-	light.Brightness = 7
-	light.Range = 30
-	light.Parent = holder
-	TweenService:Create(light, TweenInfo.new(0.35), { Brightness = 0 }):Play()
-
-	-- 3) Lumpy fireball: a few neon puffs at random offsets, expanding + fading.
-	for _ = 1, 4 do
-		local puff = Instance.new("Part")
-		puff.Shape = Enum.PartType.Ball
-		puff.Anchored = true
-		puff.CanCollide = false
-		puff.CastShadow = false
-		puff.Material = Enum.Material.Neon
-		puff.Color = Color3.fromRGB(255, 120 + math.random(0, 80), 40)
-		puff.Size = Vector3.new(3, 3, 3)
-		local off = Vector3.new((math.random() - 0.5) * 6, (math.random() - 0.5) * 6, (math.random() - 0.5) * 6)
-		puff.CFrame = CFrame.new(pos + off)
-		puff.Parent = workspace
-		local grow = 9 + math.random() * 7
-		TweenService:Create(
-			puff,
-			TweenInfo.new(0.3 + math.random() * 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-			{ Size = Vector3.new(grow, grow, grow), Transparency = 1 }
-		):Play()
-		Debris:AddItem(puff, 0.5)
+-- Resolve a named object in Assets/Objects to its mesh + texture ids.
+local objectsFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Objects")
+local function resolveObject(name: string?): (string?, string?)
+	if not objectsFolder or not name then
+		return nil, nil
 	end
+	local inst = objectsFolder:FindFirstChild(name)
+	if not inst then
+		return nil, nil
+	end
+	local mp = if inst:IsA("MeshPart") then inst else inst:FindFirstChildWhichIsA("MeshPart")
+	if mp then
+		return (mp :: MeshPart).MeshId, (mp :: MeshPart).TextureID
+	end
+	return nil, nil
+end
 
-	-- 4) Spark burst (fast, gravity, short-lived).
-	local sparks = makeEmitter(att, {
-		Texture = "rbxasset://textures/particles/sparkles_main.dds",
-		Color = ColorSequence.new(Color3.fromRGB(255, 240, 160), Color3.fromRGB(255, 120, 30)),
-		Size = NumberSequence.new(1.2, 0.1),
-		Transparency = NumberSequence.new(0.1, 1),
-		Lifetime = NumberRange.new(0.3, 0.6),
-		Speed = NumberRange.new(40, 90),
-		SpreadAngle = Vector2.new(180, 180),
-		Acceleration = Vector3.new(0, -70, 0),
-		LightEmission = 1,
-		Brightness = 2,
-	})
-	sparks:Emit(18)
-
-	-- 5) Smoke puff (slow, fades).
-	local smoke = makeEmitter(att, {
-		Texture = "rbxasset://textures/particles/smoke_main.dds",
-		Color = ColorSequence.new(Color3.fromRGB(70, 60, 55), Color3.fromRGB(30, 28, 30)),
-		Size = NumberSequence.new(4, 13),
-		Transparency = NumberSequence.new({
-			NumberSequenceKeypoint.new(0, 0.35),
-			NumberSequenceKeypoint.new(1, 1),
-		}),
-		Lifetime = NumberRange.new(0.6, 1.0),
-		Speed = NumberRange.new(6, 16),
-		SpreadAngle = Vector2.new(180, 180),
-		Rotation = NumberRange.new(0, 360),
-	})
-	smoke:Emit(12)
-
-	Debris:AddItem(holder, 1.4)
+-- Make a Part look like the weapon's object: a real mesh (named in Assets/Objects
+-- or a meshId) if given, otherwise a plain shape. SmoothPlastic so it's readable.
+local function styleObject(part: Part, def: any)
+	part.Material = Enum.Material.SmoothPlastic
+	part.Color = def.color
+	part.Size = Vector3.new(def.size, def.size, def.size)
+	local meshId, texId = resolveObject(def.object)
+	meshId = meshId or def.meshId
+	if meshId then
+		local m = Instance.new("SpecialMesh")
+		m.MeshType = Enum.MeshType.FileMesh
+		m.MeshId = meshId
+		m.TextureId = texId or def.textureId or ""
+		local sc = def.meshScale or 1
+		m.Scale = Vector3.new(sc, sc, sc)
+		m.Parent = part
+	else
+		part.Shape = def.shape
+	end
 end
 
 local ShipState = require(script.Parent.ShipState)
@@ -135,6 +87,15 @@ local SECONDARY_COOLDOWN = 0.35
 local SECONDARY_LIFE = 3
 local SECONDARY_HIT = 11 -- hit radius
 
+-- Big bomb (charged by kills; faster kills charge it faster).
+local KILL_CHARGE = 9 -- base charge per kill
+local COMBO_WINDOW = 2.5 -- kills within this give bonus charge
+local COMBO_BONUS = 20 -- max bonus charge for a fast kill
+local BOMB_SCALE = 8 -- how much bigger the bomb is than a normal projectile
+local BOMB_SPEED = 250
+local BOMB_RADIUS = 95 -- area-of-effect radius
+local BOMB_DAMAGE = 150 -- damage to each enemy in the blast
+
 local MUZZLE_FWD = 6 -- spawn weapons slightly ahead of the ship center
 
 local function muzzle(): (Vector3, Vector3)
@@ -146,6 +107,9 @@ end
 local function acquireTarget(origin: Vector3, dir: Vector3)
 	local best, bestDot = nil, MAIN_CONE
 	for _, e in EnemyController.enemies do
+		if not e.root then
+			continue
+		end
 		local to = e.root.Position - origin
 		local dist = to.Magnitude
 		if dist > MAIN_RANGE or dist < 1 then
@@ -159,14 +123,13 @@ local function acquireTarget(origin: Vector3, dir: Vector3)
 	return best
 end
 
-function WeaponController.start()
+function WeaponController.start(mainId: string?, secId: string?)
+	local mainCfg = findById(MainWeapons, mainId or "candy")
+	local secCfg = findById(SecondaryWeapons, secId or "ball")
 	local player = Players.LocalPlayer
 	local camera = workspace.CurrentCamera
 
-	-- Raycasts that only hit the terrain (so weapons can't shoot through hills).
-	local terrainParams = RaycastParams.new()
-	terrainParams.FilterType = Enum.RaycastFilterType.Include
-	terrainParams.FilterDescendantsInstances = { workspace.Terrain }
+	local playerFired = ReplicatedStorage:FindFirstChild("PlayerFired")
 
 	-- Crosshair showing where the secondary projectiles will go (tints red on a
 	-- main-weapon lock).
@@ -199,35 +162,148 @@ function WeaponController.start()
 	dotCorner.CornerRadius = UDim.new(1, 0)
 	dotCorner.Parent = dot
 
-	-- Beam visual (reused).
-	local beam = Instance.new("Part")
-	beam.Name = "MainBeam"
-	beam.Anchored = true
-	beam.CanCollide = false
-	beam.CastShadow = false
-	beam.Material = Enum.Material.Neon
-	beam.Color = Color3.fromRGB(255, 70, 190)
-	beam.Transparency = 1
-	beam.Parent = workspace
+	-- Beam = a pooled line of the weapon's object, stacked toward the target.
+	local MAX_SEG = 60
+	local segFolder = Instance.new("Folder")
+	segFolder.Name = "MainBeam"
+	segFolder.Parent = workspace
+	local segPool: { BasePart } = {}
+	local function getSeg(i: number): BasePart
+		local s = segPool[i]
+		if not s then
+			s = Instance.new("Part")
+			s.Anchored = true
+			s.CanCollide = false
+			s.CastShadow = false
+			styleObject(s, mainCfg)
+			s.Transparency = 1
+			s.Parent = segFolder
+			segPool[i] = s
+		end
+		return s
+	end
+	local function hideSegmentsFrom(n: number)
+		for i = n + 1, #segPool do
+			segPool[i].Transparency = 1
+		end
+	end
+	-- Stack objects evenly along origin->hit; returns how many were used.
+	local function drawLaser(from: Vector3, to: Vector3): number
+		local d = to - from
+		local dist = d.Magnitude
+		if dist < 0.1 then
+			return 0
+		end
+		local count = math.clamp(math.floor(dist / mainCfg.spacing), 1, MAX_SEG)
+		for i = 1, count do
+			local s = getSeg(i)
+			s.CFrame = CFrame.new(from + d * ((i - 0.5) / count))
+			s.Transparency = 0
+		end
+		return count
+	end
 
 	-- Secondary input state (touch button / mouse / gamepad trigger).
 	local secondaryHeld = false
 	local lastFire = 0
+	local beamTimer = 0 -- throttles beam damage reports to the server
 	local projectiles: { { part: BasePart, vel: Vector3, life: number } } = {}
+
+	-- ---- Kill count + big bomb -------------------------------------------
+	local killEvent = ReplicatedStorage:WaitForChild("Kill")
+	local killCount = 0
+	local charge = 0 -- 0..100
+	local lastKill = 0
+	local bombs: { { part: BasePart, vel: Vector3, life: number } } = {}
+
+	local bombHud = Instance.new("ScreenGui")
+	bombHud.Name = "BombHud"
+	bombHud.IgnoreGuiInset = true
+	bombHud.ResetOnSpawn = false
+	bombHud.Parent = player:WaitForChild("PlayerGui")
+	local killLabel = Instance.new("TextLabel")
+	killLabel.Position = UDim2.fromOffset(24, 58)
+	killLabel.Size = UDim2.fromOffset(220, 24)
+	killLabel.BackgroundTransparency = 1
+	killLabel.Font = Enum.Font.GothamBold
+	killLabel.TextSize = 20
+	killLabel.TextXAlignment = Enum.TextXAlignment.Left
+	killLabel.TextColor3 = Color3.fromRGB(255, 230, 150)
+	killLabel.Text = "Kills  0"
+	killLabel.Parent = bombHud
+	local chargeBg = Instance.new("Frame")
+	chargeBg.Position = UDim2.fromOffset(24, 86)
+	chargeBg.Size = UDim2.fromOffset(220, 16)
+	chargeBg.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+	chargeBg.BackgroundTransparency = 0.25
+	chargeBg.Parent = bombHud
+	local bgC = Instance.new("UICorner")
+	bgC.CornerRadius = UDim.new(0.5, 0)
+	bgC.Parent = chargeBg
+	local chargeFill = Instance.new("Frame")
+	chargeFill.Size = UDim2.fromScale(0, 1)
+	chargeFill.BackgroundColor3 = Color3.fromRGB(190, 90, 255)
+	chargeFill.BorderSizePixel = 0
+	chargeFill.Parent = chargeBg
+	local fillC = Instance.new("UICorner")
+	fillC.CornerRadius = UDim.new(0.5, 0)
+	fillC.Parent = chargeFill
+	local bombText = Instance.new("TextLabel")
+	bombText.Size = UDim2.fromScale(1, 1)
+	bombText.BackgroundTransparency = 1
+	bombText.Font = Enum.Font.GothamBold
+	bombText.TextSize = 12
+	bombText.TextColor3 = Color3.fromRGB(255, 255, 255)
+	bombText.Text = "BOMB"
+	bombText.Parent = chargeBg
+
+	killEvent.OnClientEvent:Connect(function()
+		killCount += 1
+		local now = os.clock()
+		local since = now - lastKill
+		lastKill = now
+		local bonus = if since < COMBO_WINDOW then (1 - since / COMBO_WINDOW) * COMBO_BONUS else 0
+		charge = math.min(100, charge + KILL_CHARGE + bonus)
+		killLabel.Text = "Kills  " .. killCount
+	end)
+
+	local function fireBomb()
+		local origin, dir = muzzle()
+		local p = Instance.new("Part")
+		p.Anchored = true
+		p.CanCollide = false
+		p.CastShadow = false
+		styleObject(p, secCfg)
+		p.Size = p.Size * BOMB_SCALE
+		local mesh = p:FindFirstChildWhichIsA("SpecialMesh")
+		if mesh then
+			mesh.Scale = mesh.Scale * BOMB_SCALE
+		end
+		p.CFrame = CFrame.new(origin)
+		p.Parent = workspace
+		table.insert(bombs, { part = p, vel = dir * BOMB_SPEED, life = 5 })
+	end
+
+	local function tryBomb()
+		if charge >= 100 then
+			charge = 0
+			fireBomb()
+		end
+	end
 
 	local function fireSecondary()
 		local origin, dir = muzzle()
 		local p = Instance.new("Part")
-		p.Shape = Enum.PartType.Ball
-		p.Size = Vector3.new(4, 4, 4)
 		p.Anchored = true
 		p.CanCollide = false
 		p.CastShadow = false
-		p.Material = Enum.Material.Neon
-		p.Color = Color3.fromRGB(255, 180, 40)
+		styleObject(p, secCfg)
 		p.CFrame = CFrame.new(origin)
 		p.Parent = workspace
 		table.insert(projectiles, { part = p, vel = dir * SECONDARY_SPEED, life = SECONDARY_LIFE })
+		if playerFired then
+			(playerFired :: any):FireServer(origin, dir) -- show this shot to others
+		end
 	end
 
 	UserInputService.InputBegan:Connect(function(input, gpe)
@@ -236,6 +312,8 @@ function WeaponController.start()
 		end
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.KeyCode == Enum.KeyCode.ButtonR2 then
 			secondaryHeld = true
+		elseif input.KeyCode == Enum.KeyCode.F or input.KeyCode == Enum.KeyCode.ButtonX then
+			tryBomb()
 		end
 	end)
 	UserInputService.InputEnded:Connect(function(input)
@@ -275,6 +353,26 @@ function WeaponController.start()
 				secondaryHeld = false
 			end
 		end)
+
+		-- Touch BOMB button (above FIRE).
+		local bombBtn = Instance.new("TextButton")
+		bombBtn.Size = UDim2.fromOffset(120, 76)
+		bombBtn.AnchorPoint = Vector2.new(1, 1)
+		bombBtn.Position = UDim2.new(1, -150, 1, -160)
+		bombBtn.BackgroundColor3 = Color3.fromRGB(150, 70, 220)
+		bombBtn.BackgroundTransparency = 0.25
+		bombBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		bombBtn.TextScaled = true
+		bombBtn.Text = "BOMB"
+		bombBtn.Parent = gui
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0.3, 0)
+		bc.Parent = bombBtn
+		bombBtn.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.Touch then
+				tryBomb()
+			end
+		end)
 	end
 
 	RunService.Heartbeat:Connect(function(dt)
@@ -282,12 +380,9 @@ function WeaponController.start()
 
 		-- MAIN: auto-target + beam + damage over time.
 		local target = acquireTarget(origin, dir)
-		-- Drop the lock if terrain blocks the line of sight.
-		if target then
-			local to = target.root.Position - origin
-			if workspace:Raycast(origin, to, terrainParams) then
-				target = nil
-			end
+		-- Drop the lock if a mountain blocks the line of sight.
+		if target and WorldHeights.blocked(origin, target.root.Position) then
+			target = nil
 		end
 
 		-- Crosshair: project the aim point to the screen; red when locked.
@@ -298,16 +393,19 @@ function WeaponController.start()
 		ringStroke.Color = rc
 		dot.BackgroundColor3 = rc
 
+		ShipState.beamHit = if target then target.root.Position else nil -- replicate beam
+
 		if target then
-			local hit = target.root.Position
-			local mid = (origin + hit) / 2
-			local dist = (hit - origin).Magnitude
-			beam.Size = Vector3.new(0.7, 0.7, dist)
-			beam.CFrame = CFrame.lookAt(mid, hit)
-			beam.Transparency = 0.1
-			EnemyController.damage(target, MAIN_DPS * dt)
+			hideSegmentsFrom(drawLaser(origin, target.root.Position))
+			-- Report accumulated beam damage ~10x/sec instead of every frame.
+			beamTimer += dt
+			if beamTimer >= 0.1 then
+				EnemyController.damage(target, MAIN_DPS * beamTimer)
+				beamTimer = 0
+			end
 		else
-			beam.Transparency = 1
+			hideSegmentsFrom(0)
+			beamTimer = 0
 		end
 
 		-- SECONDARY: fire on held + cooldown.
@@ -320,29 +418,63 @@ function WeaponController.start()
 		for i = #projectiles, 1, -1 do
 			local pr = projectiles[i]
 			pr.life -= dt
-			local stepVec = pr.vel * dt
-			-- Stop at terrain instead of passing through it.
-			if workspace:Raycast(pr.part.Position, stepVec, terrainParams) then
-				pr.part:Destroy()
-				table.remove(projectiles, i)
-				continue
-			end
-			pr.part.CFrame = pr.part.CFrame + stepVec
+			pr.part.CFrame = pr.part.CFrame + pr.vel * dt
+			local p = pr.part.Position
+			local hitTerrain = p.Y < WorldHeights.groundY(p.X, p.Z) or p.Y > WorldHeights.ceilY(p.X, p.Z)
 			local hitEnemy = nil
 			for _, e in EnemyController.enemies do
-				if (e.root.Position - pr.part.Position).Magnitude <= SECONDARY_HIT then
+				if e.root and (e.root.Position - p).Magnitude <= (e.radius or SECONDARY_HIT) then
 					hitEnemy = e
 					break
 				end
 			end
-			if hitEnemy then
-				explode(pr.part.Position)
-				EnemyController.damage(hitEnemy, SECONDARY_DMG)
+			if hitEnemy or hitTerrain then
+				Explosion.burst(p)
+				if hitEnemy then
+					EnemyController.damage(hitEnemy, SECONDARY_DMG)
+				end
 				pr.part:Destroy()
 				table.remove(projectiles, i)
 			elseif pr.life <= 0 then
 				pr.part:Destroy()
 				table.remove(projectiles, i)
+			end
+		end
+
+		-- Charge bar: fills with kills, glows when ready.
+		chargeFill.Size = UDim2.fromScale(charge / 100, 1)
+		if charge >= 100 then
+			chargeFill.BackgroundColor3 = Color3.fromRGB(255, 120, 255)
+			bombText.Text = "BOMB READY"
+		else
+			chargeFill.BackgroundColor3 = Color3.fromRGB(160, 90, 220)
+			bombText.Text = "BOMB"
+		end
+
+		-- Update bombs: huge projectile, wide-area blast on impact.
+		for i = #bombs, 1, -1 do
+			local b = bombs[i]
+			b.life -= dt
+			b.part.CFrame = b.part.CFrame + b.vel * dt
+			local pos = b.part.Position
+			local hitTerrain = pos.Y < WorldHeights.groundY(pos.X, pos.Z) or pos.Y > WorldHeights.ceilY(pos.X, pos.Z)
+			local hitEnemy = false
+			for _, e in EnemyController.enemies do
+				if e.root and (e.root.Position - pos).Magnitude <= (e.radius or 10) + 14 then
+					hitEnemy = true
+					break
+				end
+			end
+			if hitEnemy or hitTerrain or b.life <= 0 then
+				Explosion.big(pos)
+				Explosion.shockwave(pos, BOMB_RADIUS, 0.6) -- Sedov-Taylor blast ring
+				for _, e in EnemyController.enemies do
+					if e.root and (e.root.Position - pos).Magnitude <= BOMB_RADIUS then
+						EnemyController.damage(e, BOMB_DAMAGE)
+					end
+				end
+				b.part:Destroy()
+				table.remove(bombs, i)
 			end
 		end
 	end)

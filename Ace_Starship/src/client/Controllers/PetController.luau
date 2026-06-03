@@ -39,9 +39,11 @@ end
 local function nearestEnemy(from: Vector3)
 	local best, bestD = nil, PET.range
 	for _, e in EnemyController.enemies do
-		local d = (e.root.Position - from).Magnitude
-		if d < bestD and losClear(from, e.root.Position) then
-			best, bestD = e, d
+		if e.root then
+			local d = (e.root.Position - from).Magnitude
+			if d < bestD and losClear(from, e.root.Position) then
+				best, bestD = e, d
+			end
 		end
 	end
 	return best

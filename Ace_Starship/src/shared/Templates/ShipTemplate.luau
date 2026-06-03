@@ -26,9 +26,24 @@ export type Ship = typeof(setmetatable(
 
 local shipAssets = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Ships")
 
+-- Resolve a ship id that may be a catalog id ("starter_skiff"), a mesh/asset
+-- name ("Pyro"), or any imported ship with no catalog entry yet.
+local function resolveDef(shipId: string): any
+	local d = Ships[shipId]
+	if d then
+		return d
+	end
+	for _, def in Ships do
+		if def.assetId == shipId then
+			return def
+		end
+	end
+	-- Default config for a freshly-imported ship (tune via the catalog later).
+	return { id = shipId, displayName = shipId, assetId = shipId, modelYawOffset = 90 }
+end
+
 function ShipTemplate.new(defId: string): Ship
-	local def = Ships[defId]
-	assert(def, `Unknown ship id: {defId}`)
+	local def = resolveDef(defId)
 
 	local source = shipAssets:FindFirstChild(def.assetId)
 	assert(source, `Ship asset missing: {def.assetId}`)

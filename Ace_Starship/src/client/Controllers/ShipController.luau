@@ -76,12 +76,12 @@ local function gamepadStick(which: Enum.KeyCode): Vector2
 	return Vector2.zero
 end
 
-function ShipController.start()
+function ShipController.start(shipId: string?)
 	local player = Players.LocalPlayer
 	local camera = workspace.CurrentCamera
 	camera.CameraType = Enum.CameraType.Scriptable
 
-	local ship = ShipTemplate.new("starter_skiff")
+	local ship = ShipTemplate.new(shipId or "starter_skiff")
 	local model = ship.model
 	for _, part in model:GetDescendants() do
 		if part:IsA("BasePart") then
@@ -99,6 +99,19 @@ function ShipController.start()
 	light.Range = 45
 	light.Color = Color3.fromRGB(255, 244, 224)
 	light.Parent = ship.root
+
+	-- Spark burst emitted whenever the ship takes a hit.
+	local hitSparks = Instance.new("ParticleEmitter")
+	hitSparks.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+	hitSparks.Rate = 0
+	hitSparks.Lifetime = NumberRange.new(0.25, 0.5)
+	hitSparks.Speed = NumberRange.new(25, 60)
+	hitSparks.SpreadAngle = Vector2.new(180, 180)
+	hitSparks.Color = ColorSequence.new(Color3.fromRGB(255, 200, 90), Color3.fromRGB(255, 70, 40))
+	hitSparks.Size = NumberSequence.new(1.4, 0.1)
+	hitSparks.Transparency = NumberSequence.new(0.1, 1)
+	hitSparks.LightEmission = 1
+	hitSparks.Parent = ship.root
 
 	-- Lift the scene's ambient so nothing reads pitch-black.
 	Lighting.Ambient = Color3.fromRGB(95, 98, 110)
@@ -327,6 +340,10 @@ function ShipController.start()
 		end
 	end)
 
+	-- Stream our ship transform to the server for replication (~20 Hz).
+	local shipUpdate = ReplicatedStorage:FindFirstChild("ShipUpdate")
+	local sendAccum = 0
+
 	-- ---- Free 3D flight ----------------------------------------------------
 	local camYaw, camPitch = 0, 0
 	local pos = Vector3.new(0, 100, 0) -- spawn in the gap between floor and ceiling
@@ -385,6 +402,14 @@ function ShipController.start()
 		ShipState.position = pos
 		ShipState.forward = lookCF.LookVector
 
+		-- Replicate our transform to other players.
+		sendAccum += dt
+		if shipUpdate and sendAccum >= 0.05 then
+			sendAccum = 0
+			-- Include the bank/roll so others see us roll; send our beam target.
+			shipUpdate:FireServer(CFrame.new(pos) * lookCF * bank, ShipState.beamHit)
+		end
+
 		-- Chase camera behind the look direction.
 		local camPos = (CFrame.new(pos) * lookCF * CFrame.new(0, CAM_HEIGHT, CAM_DIST)).Position
 		local goal = CFrame.lookAt(camPos, pos, Vector3.yAxis)
@@ -393,6 +418,7 @@ function ShipController.start()
 		-- ---- Health: regen, damage flash, death/respawn --------------------
 		if ShipState.health < prevHealth then
 			damageFlash.BackgroundTransparency = 0.55 -- flash on taking damage
+			hitSparks:Emit(14) -- sparks off the hull
 		end
 		damageFlash.BackgroundTransparency = math.min(1, damageFlash.BackgroundTransparency + dt * 1.5)
 

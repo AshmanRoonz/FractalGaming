@@ -1,71 +1,38 @@
 --!strict
--- Placeholder flying enemies. Simple blocky "Roblox guy" dummies that drift
--- around the ship in the gap, with health. Real Meshy monsters drop into this
--- same structure later. Exposes the live list + a damage() helper for weapons.
---
--- LOCAL prototype (client-side enemies).
+-- Client-side enemy RENDERER for the server-authoritative battle. The server
+-- owns enemies, waves, and enemy fire; this module renders them from broadcasts,
+-- exposes the list for weapon targeting, reports hits back to the server, shows
+-- the wave banner, draws enemy ball visuals, and applies player-hit damage.
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Debris = game:GetService("Debris")
 
 local ShipState = require(script.Parent.ShipState)
+local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
+local Explosion = require(ReplicatedStorage.Shared.Explosion)
 
 local EnemyController = {}
 
-local ENEMY_HP = 100
-local SPAWN_MIN, SPAWN_MAX = 360, 680 -- spawn distance from ship
-local DRIFT_SPEED = 42 -- studs/sec they ease toward the ship
-local BIAS_TO_START = 0.7 -- how strongly spawns favor the starting heading vs current view
+-- Live targets for the weapons: array of { id, root }.
+EnemyController.enemies = {} :: { any }
 
--- Waves.
-local WAVE_DELAY = 3 -- seconds between clearing a wave and the next
-local BASE_COUNT = 2 -- wave N normal enemies = BASE_COUNT + N (wave 1 = 3)
-local MAX_COUNT = 12 -- cap on normal enemies per wave
-local BOSS_EVERY = 10 -- every Nth wave is a boss wave
-local BOSS_HP = 900
+-- Report a hit to the server (called by WeaponController / PetController).
+function EnemyController.damage(enemy: any, amount: number)
+	local ev = ReplicatedStorage:FindFirstChild("DamageEnemy")
+	if ev then
+		(ev :: RemoteEvent):FireServer(enemy.id, amount)
+	end
+end
 
-EnemyController.wave = 0
-EnemyController.waveActive = false
-EnemyController.nextWaveAt = 0
-local GAP_Y = 110 -- rough middle of the floor/ceiling gap
-
--- Enemy weapons (they shoot back).
-local FIRE_RANGE = 300 -- only enemies this close fire
-local LASER_DMG = 4 -- per shot
-local LASER_COOLDOWN = 2.4
-local BALL_DMG = 9
-local BALL_SPEED = 170
-local BALL_COOLDOWN = 1.5
-local SHIP_HIT_RADIUS = 10
-
-local terrainParams = RaycastParams.new()
-terrainParams.FilterType = Enum.RaycastFilterType.Include
-terrainParams.FilterDescendantsInstances = { workspace.Terrain }
-
-export type Enemy = {
-	model: Model,
-	root: BasePart,
-	hp: number,
-	bob: number,
-	weapon: string, -- "laser" | "ball"
-	nextFire: number, -- os.clock() when it can fire again
-}
-
-EnemyController.enemies = {} :: { Enemy }
-
-local container = Instance.new("Folder")
-
--- A simple blocky humanoid placeholder (classic Roblox colors). Bosses are
--- scaled up and tinted red.
+-- Blocky placeholder skibidi (scaled + red for bosses).
 local function buildDummy(scale: number, isBoss: boolean): (Model, BasePart)
 	local model = Instance.new("Model")
 	model.Name = if isBoss then "Boss" else "Enemy"
-
 	local torsoColor = if isBoss then Color3.fromRGB(180, 40, 40) else Color3.fromRGB(60, 140, 220)
 	local skinColor = if isBoss then Color3.fromRGB(150, 60, 60) else Color3.fromRGB(240, 200, 40)
 	local legColor = if isBoss then Color3.fromRGB(90, 25, 25) else Color3.fromRGB(60, 80, 120)
-
 	local function part(size: Vector3, color: Color3, offset: Vector3): BasePart
 		local p = Instance.new("Part")
 		p.Size = size * scale
@@ -74,131 +41,184 @@ local function buildDummy(scale: number, isBoss: boolean): (Model, BasePart)
 		p.Anchored = true
 		p.CanCollide = false
 		p.CastShadow = false
-		p:SetAttribute("LocalOffset", offset * scale)
+		p.CFrame = CFrame.new(offset * scale) -- arranged rigidly so PivotTo works
 		p.Parent = model
 		return p
 	end
-
 	local torso = part(Vector3.new(2, 2, 1), torsoColor, Vector3.new(0, 0, 0))
-	part(Vector3.new(1.2, 1.2, 1.2), skinColor, Vector3.new(0, 1.7, 0)) -- head
-	part(Vector3.new(1, 2, 1), skinColor, Vector3.new(-1.5, 0, 0)) -- left arm
-	part(Vector3.new(1, 2, 1), skinColor, Vector3.new(1.5, 0, 0)) -- right arm
-	part(Vector3.new(1, 2, 1), legColor, Vector3.new(-0.5, -2, 0)) -- left leg
-	part(Vector3.new(1, 2, 1), legColor, Vector3.new(0.5, -2, 0)) -- right leg
-
+	part(Vector3.new(1.2, 1.2, 1.2), skinColor, Vector3.new(0, 1.7, 0))
+	part(Vector3.new(1, 2, 1), skinColor, Vector3.new(-1.5, 0, 0))
+	part(Vector3.new(1, 2, 1), skinColor, Vector3.new(1.5, 0, 0))
+	part(Vector3.new(1, 2, 1), legColor, Vector3.new(-0.5, -2, 0))
+	part(Vector3.new(1, 2, 1), legColor, Vector3.new(0.5, -2, 0))
 	model.PrimaryPart = torso
 	return model, torso
 end
 
--- Pose all parts around the torso CFrame using their stored local offsets.
-local function poseDummy(model: Model, cf: CFrame)
-	for _, p in model:GetChildren() do
-		if p:IsA("BasePart") then
-			local off = p:GetAttribute("LocalOffset") :: Vector3
-			p.CFrame = cf * CFrame.new(off)
+-- Build an enemy: clone the matching model from Assets/Enemies, or fall back to
+-- the blocky placeholder. Returns (model, rootPart).
+local enemyAssets = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Enemies")
+local ENEMY_SIZE = 35
+local BOSS_SIZE = 105
+
+local function scaleModel(model: Model, target: number)
+	local size = model:GetExtentsSize()
+	local longest = math.max(size.X, size.Y, size.Z)
+	if longest > 0 then
+		pcall(function()
+			model:ScaleTo(target / longest)
+		end)
+	end
+end
+
+local function buildEnemy(kind: string, boss: boolean): (Model, BasePart)
+	local src = if enemyAssets and kind ~= "" then enemyAssets:FindFirstChild(kind) else nil
+	local model: Model? = nil
+	if src and src:IsA("Model") then
+		model = src:Clone()
+	elseif src and src:IsA("BasePart") then
+		model = Instance.new("Model")
+		local p = src:Clone() :: BasePart
+		p.Parent = model
+		model.PrimaryPart = p
+	end
+	if model then
+		for _, d in model:GetDescendants() do
+			if d:IsA("BasePart") then
+				d.Anchored = true
+				d.CanCollide = false
+				d.CastShadow = false
+			end
 		end
+		if not model.PrimaryPart then
+			model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart", true) -- recursive
+		end
+		if not model.PrimaryPart then
+			model:Destroy() -- no usable part; use the placeholder instead
+			return buildDummy(if boss then 3 else 1, boss)
+		end
+		scaleModel(model, if boss then BOSS_SIZE else ENEMY_SIZE)
+		return model, model.PrimaryPart :: BasePart
 	end
+	return buildDummy(if boss then 3 else 1, boss)
 end
 
-local function spawnEnemy(isBoss: boolean?)
-	local boss = isBoss == true
-	local model, root = buildDummy(if boss then 3 else 1, boss)
-	local shipPos = ShipState.position
+local TweenService = game:GetService("TweenService")
 
-	-- Spawn in a 90-degree arc, biased toward the STARTING heading (so enemies
-	-- trend from down-level) blended with where you're currently looking.
-	local startD = EnemyController.startDir or Vector3.new(0, 0, -1)
-	local cur = Vector3.new(ShipState.forward.X, 0, ShipState.forward.Z)
-	cur = if cur.Magnitude > 0.01 then cur.Unit else startD
-	local ref = startD * BIAS_TO_START + cur * (1 - BIAS_TO_START)
-	ref = if ref.Magnitude > 0.01 then ref.Unit else startD
-	local off = (math.random() - 0.5) * math.rad(90)
-	local dir = CFrame.fromAxisAngle(Vector3.yAxis, off) * ref
-
-	local dist = SPAWN_MIN + math.random() * (SPAWN_MAX - SPAWN_MIN)
-	local pos = shipPos + dir * dist + Vector3.new(0, (math.random() - 0.5) * 60, 0)
-	pos = Vector3.new(pos.X, math.clamp(pos.Y, GAP_Y - 60, GAP_Y + 60), pos.Z)
-	poseDummy(model, CFrame.new(pos))
-	model.Parent = container
-	table.insert(EnemyController.enemies, {
-		model = model,
-		root = root,
-		hp = if boss then BOSS_HP else ENEMY_HP,
-		bob = math.random() * 10,
-		weapon = "ball", -- enemies only throw balls (no hitscan)
-		nextFire = os.clock() + 1 + math.random() * 2,
-	})
+local function poof(pos: Vector3)
+	local e = Instance.new("Part")
+	e.Shape = Enum.PartType.Ball
+	e.Anchored = true
+	e.CanCollide = false
+	e.CastShadow = false
+	e.Material = Enum.Material.Neon
+	e.Color = Color3.fromRGB(255, 150, 50)
+	e.Size = Vector3.new(4, 4, 4)
+	e.CFrame = CFrame.new(pos)
+	e.Parent = workspace
+	TweenService:Create(e, TweenInfo.new(0.3), { Size = Vector3.new(16, 16, 16), Transparency = 1 }):Play()
+	Debris:AddItem(e, 0.35)
 end
 
--- Apply damage. Returns true if this killed the enemy (and respawns one).
-function EnemyController.damage(enemy: Enemy, amount: number): boolean
-	enemy.hp -= amount
-	if enemy.hp > 0 then
-		return false
-	end
-	local idx = table.find(EnemyController.enemies, enemy)
-	if idx then
-		table.remove(EnemyController.enemies, idx)
-	end
-	enemy.model:Destroy()
-	-- Wave cleared? Schedule the next one.
-	if EnemyController.waveActive and #EnemyController.enemies == 0 then
-		EnemyController.waveActive = false
-		EnemyController.nextWaveAt = os.clock() + WAVE_DELAY
-	end
-	return true
-end
-
-local enemyBalls: { { part: BasePart, vel: Vector3, life: number } } = {}
-
-local function losClear(from: Vector3, to: Vector3): boolean
-	return workspace:Raycast(from, to - from, terrainParams) == nil
-end
-
-local function enemyFire(e: Enemy, shipPos: Vector3)
-	local origin = e.root.Position + Vector3.new(0, 1.5, 0)
-	if not losClear(origin, shipPos) then
-		return -- can't see the ship through terrain
-	end
-	if e.weapon == "laser" then
-		-- Instant beam + damage, with a short visible flash.
-		local beam = Instance.new("Part")
-		beam.Anchored = true
-		beam.CanCollide = false
-		beam.CastShadow = false
-		beam.Material = Enum.Material.Neon
-		beam.Color = Color3.fromRGB(120, 230, 255)
-		local mid = (origin + shipPos) / 2
-		beam.Size = Vector3.new(0.4, 0.4, (shipPos - origin).Magnitude)
-		beam.CFrame = CFrame.lookAt(mid, shipPos)
-		beam.Parent = workspace
-		Debris:AddItem(beam, 0.12)
-		ShipState.damage(LASER_DMG)
-		e.nextFire = os.clock() + LASER_COOLDOWN
-	else
-		-- Lob a ball toward the ship.
-		local p = Instance.new("Part")
-		p.Shape = Enum.PartType.Ball
-		p.Size = Vector3.new(3, 3, 3)
-		p.Anchored = true
-		p.CanCollide = false
-		p.CastShadow = false
-		p.Material = Enum.Material.Neon
-		p.Color = Color3.fromRGB(180, 120, 255)
-		p.CFrame = CFrame.new(origin)
-		p.Parent = workspace
-		table.insert(enemyBalls, { part = p, vel = (shipPos - origin).Unit * BALL_SPEED, life = 4 })
-		e.nextFire = os.clock() + BALL_COOLDOWN
+-- Big multi-burst blast for a boss death.
+local function bigBoom(pos: Vector3)
+	local flash = Instance.new("Part")
+	flash.Shape = Enum.PartType.Ball
+	flash.Anchored = true
+	flash.CanCollide = false
+	flash.CastShadow = false
+	flash.Material = Enum.Material.Neon
+	flash.Color = Color3.fromRGB(255, 240, 200)
+	flash.Size = Vector3.new(12, 12, 12)
+	flash.CFrame = CFrame.new(pos)
+	flash.Parent = workspace
+	local light = Instance.new("PointLight")
+	light.Brightness = 10
+	light.Range = 60
+	light.Color = Color3.fromRGB(255, 170, 70)
+	light.Parent = flash
+	TweenService:Create(flash, TweenInfo.new(0.5), { Size = Vector3.new(55, 55, 55), Transparency = 1 }):Play()
+	TweenService:Create(light, TweenInfo.new(0.5), { Brightness = 0 }):Play()
+	Debris:AddItem(flash, 0.55)
+	for i = 1, 7 do
+		task.delay(i * 0.05, function()
+			poof(pos + Vector3.new((math.random() - 0.5) * 26, (math.random() - 0.5) * 26, (math.random() - 0.5) * 26))
+		end)
 	end
 end
 
 function EnemyController.start()
+	local container = Instance.new("Folder")
 	container.Name = "Enemies"
 	container.Parent = workspace
 
-	-- Capture the starting heading; spawns favor this direction.
-	local sd = Vector3.new(ShipState.forward.X, 0, ShipState.forward.Z)
-	EnemyController.startDir = if sd.Magnitude > 0.01 then sd.Unit else Vector3.new(0, 0, -1)
+	local enemyStates = ReplicatedStorage:WaitForChild("EnemyStates")
+	local enemyFired = ReplicatedStorage:WaitForChild("EnemyFired")
+	local waveEvent = ReplicatedStorage:WaitForChild("WaveEvent")
+	local playerHit = ReplicatedStorage:WaitForChild("PlayerHit")
+
+	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number }
+	local byId: { [number]: Rec } = {}
+
+	local function ensure(id: number, kind: string, boss: boolean, cf: CFrame): Rec
+		local r = byId[id]
+		if r then
+			return r
+		end
+		local model, root = buildEnemy(kind, boss)
+		model:PivotTo(cf)
+		model.Parent = container
+		r = {
+			id = id,
+			model = model,
+			root = root,
+			current = cf,
+			target = cf,
+			lastPos = cf.Position,
+			boss = boss,
+			radius = (if boss then BOSS_SIZE else ENEMY_SIZE) * 0.5,
+		}
+		byId[id] = r
+		return r
+	end
+
+	local function rebuildList()
+		local list = {}
+		for _, r in byId do
+			table.insert(list, r)
+		end
+		EnemyController.enemies = list
+	end
+
+	enemyStates.OnClientEvent:Connect(function(elist)
+		local present = {}
+		for _, e in elist do
+			if type(e) == "table" and e.id and typeof(e.c) == "CFrame" then
+				present[e.id] = true
+				-- One bad enemy must not abort the whole snapshot.
+				local ok, r = pcall(ensure, e.id, e.k or "", e.boss, e.c)
+				if ok and r then
+					r.target = e.c
+				end
+			end
+		end
+		for id, r in byId do
+			if not present[id] then
+				if r.boss then
+					Explosion.big(r.lastPos)
+				else
+					Explosion.burst(r.lastPos)
+				end
+				r.model:Destroy()
+				byId[id] = nil
+			end
+		end
+		rebuildList()
+	end)
+
+	playerHit.OnClientEvent:Connect(function(amount)
+		ShipState.damage(amount)
+	end)
 
 	-- Wave banner.
 	local hud = Instance.new("ScreenGui")
@@ -215,85 +235,59 @@ function EnemyController.start()
 	banner.TextSize = 52
 	banner.TextStrokeTransparency = 1
 	banner.TextTransparency = 1
-	banner.TextColor3 = Color3.fromRGB(255, 255, 255)
 	banner.Text = ""
 	banner.Parent = hud
 	local bannerClock = -10
-
-	local function startWave()
-		EnemyController.wave += 1
-		local n = EnemyController.wave
-		local isBossWave = n % BOSS_EVERY == 0
-		if isBossWave then
-			banner.Text = `WAVE {n}  -  BOSS`
-			banner.TextColor3 = Color3.fromRGB(255, 90, 90)
-			spawnEnemy(true)
-			for _ = 1, 3 do
-				spawnEnemy(false)
-			end
-		else
-			banner.Text = `WAVE {n}`
-			banner.TextColor3 = Color3.fromRGB(255, 255, 255)
-			local count = math.min(MAX_COUNT, BASE_COUNT + n)
-			for _ = 1, count do
-				spawnEnemy(false)
-			end
-		end
+	waveEvent.OnClientEvent:Connect(function(n, boss)
+		banner.Text = if boss then `WAVE {n}  -  BOSS` else `WAVE {n}`
+		banner.TextColor3 = if boss then Color3.fromRGB(255, 90, 90) else Color3.fromRGB(255, 255, 255)
 		bannerClock = os.clock()
-		EnemyController.waveActive = true
-	end
+	end)
 
-	EnemyController.wave = 0
-	EnemyController.waveActive = false
-	EnemyController.nextWaveAt = os.clock() + 2 -- first wave shortly after start
+	-- Enemy ball visuals (server decides hits; this is just the projectile look).
+	local visualBalls: { { part: BasePart, vel: Vector3, life: number } } = {}
+	enemyFired.OnClientEvent:Connect(function(origin, dir, speed)
+		local p = Instance.new("Part")
+		p.Shape = Enum.PartType.Ball
+		p.Size = Vector3.new(3, 3, 3)
+		p.Anchored = true
+		p.CanCollide = false
+		p.CastShadow = false
+		p.Material = Enum.Material.Neon
+		p.Color = Color3.fromRGB(180, 120, 255)
+		p.CFrame = CFrame.new(origin)
+		p.Parent = workspace
+		table.insert(visualBalls, { part = p, vel = dir * speed, life = 4 })
+	end)
 
-	RunService.Heartbeat:Connect(function(dt)
-		local shipPos = ShipState.position
-
-		-- Start the next wave once the field is clear and the breather is over.
-		if not EnemyController.waveActive and #EnemyController.enemies == 0 and os.clock() >= EnemyController.nextWaveAt then
-			startWave()
+	RunService.RenderStepped:Connect(function(dt)
+		-- Interpolate enemies toward their latest server transform.
+		for _, r in byId do
+			r.current = r.current:Lerp(r.target, math.clamp(dt * 12, 0, 1))
+			r.lastPos = r.current.Position
+			r.model:PivotTo(r.current)
 		end
-
-		-- Fade the banner: hold ~2s, then fade out over 1s.
+		-- Move enemy ball visuals.
+		for i = #visualBalls, 1, -1 do
+			local b = visualBalls[i]
+			b.life -= dt
+			b.part.CFrame = b.part.CFrame + b.vel * dt
+			local p = b.part.Position
+			local hitTerrain = p.Y < WorldHeights.groundY(p.X, p.Z) or p.Y > WorldHeights.ceilY(p.X, p.Z)
+			local hitShip = (ShipState.position - p).Magnitude <= 13
+			if hitShip or hitTerrain then
+				Explosion.burst(p) -- layered blast on impact
+			end
+			if b.life <= 0 or hitTerrain or hitShip then
+				b.part:Destroy()
+				table.remove(visualBalls, i)
+			end
+		end
+		-- Fade the wave banner.
 		local t = os.clock() - bannerClock
 		local a = math.clamp((t - 2) / 1, 0, 1)
 		banner.TextTransparency = a
 		banner.TextStrokeTransparency = math.clamp(0.3 + a, 0, 1)
-		for _, e in EnemyController.enemies do
-			-- Ease toward the ship and bob a little, so they read as "flying".
-			e.bob += dt
-			local toShip = shipPos - e.root.Position
-			local step = Vector3.zero
-			if toShip.Magnitude > 60 then
-				step = toShip.Unit * DRIFT_SPEED * dt
-			end
-			local bobY = math.sin(e.bob * 1.5) * 8 * dt
-			local newPos = e.root.Position + step + Vector3.new(0, bobY, 0)
-			poseDummy(e.model, CFrame.lookAt(newPos, shipPos))
-
-			-- Fire at the ship if in range and off cooldown.
-			if toShip.Magnitude <= FIRE_RANGE and os.clock() >= e.nextFire then
-				enemyFire(e, shipPos)
-			end
-		end
-
-		-- Update enemy balls: move, stop at terrain, damage ship on contact.
-		for i = #enemyBalls, 1, -1 do
-			local b = enemyBalls[i]
-			b.life -= dt
-			local stepVec = b.vel * dt
-			local hitTerrain = workspace:Raycast(b.part.Position, stepVec, terrainParams) ~= nil
-			b.part.CFrame = b.part.CFrame + stepVec
-			if (b.part.Position - shipPos).Magnitude <= SHIP_HIT_RADIUS then
-				ShipState.damage(BALL_DMG)
-				b.part:Destroy()
-				table.remove(enemyBalls, i)
-			elseif hitTerrain or b.life <= 0 then
-				b.part:Destroy()
-				table.remove(enemyBalls, i)
-			end
-		end
 	end)
 end
 

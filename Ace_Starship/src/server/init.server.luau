@@ -1,28 +1,130 @@
 --!strict
--- Server bootstrap. Requires each system in dependency order and starts it.
--- Keep this thin: it just wires systems together.
+-- Server bootstrap. A guaranteed lobby platform is built first (so nobody ever
+-- falls into the void), then per-player hangars + the battle. Walking into your
+-- ship launches you flying your selected ship.
 
-local ServerScriptService = game:GetService("ServerScriptService")
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local RunService = game:GetService("RunService")
 
--- The player flies a ship, not a walking avatar. Stop the default character
--- from spawning. (Later, MatchManager will spawn/own the ship per player.)
+-- Never auto-spawn (we place players ourselves). Set FIRST so a later error
+-- can't leave players dropping into empty space.
 Players.CharacterAutoLoads = false
 
-local Systems = ServerScriptService.Server.Systems
+-- Big lobby platform, sized for ~8 bays side by side. Built directly here so it
+-- always exists regardless of the hangar module.
+local LOBBY_Y = 300
+local LOBBY_CX, LOBBY_CZ = 900, 3000
+do
+	local folder = Instance.new("Folder")
+	folder.Name = "LobbyPlatform"
+	folder.Parent = workspace
+	local function block(size: Vector3, pos: Vector3, color: Color3)
+		local p = Instance.new("Part")
+		p.Anchored = true
+		p.Size = size
+		p.Position = pos
+		p.Color = color
+		p.Material = Enum.Material.Metal
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.Parent = folder
+	end
+	local accent = Color3.fromRGB(70, 150, 255)
+	local w, d, h = 4400, 1600, 40
+	block(Vector3.new(w, 8, d), Vector3.new(LOBBY_CX, LOBBY_Y - 4, LOBBY_CZ), Color3.fromRGB(34, 38, 50))
+	block(Vector3.new(w, h, 6), Vector3.new(LOBBY_CX, LOBBY_Y + h / 2, LOBBY_CZ - d / 2), accent)
+	block(Vector3.new(w, h, 6), Vector3.new(LOBBY_CX, LOBBY_Y + h / 2, LOBBY_CZ + d / 2), accent)
+	block(Vector3.new(6, h, d), Vector3.new(LOBBY_CX - w / 2, LOBBY_Y + h / 2, LOBBY_CZ), accent)
+	block(Vector3.new(6, h, d), Vector3.new(LOBBY_CX + w / 2, LOBBY_Y + h / 2, LOBBY_CZ), accent)
 
-local CurrencyService = require(Systems.CurrencyService)
-local LeaderboardService = require(Systems.LeaderboardService)
-local ShopService = require(Systems.ShopService)
-local CombatService = require(Systems.CombatService)
-local MatchManager = require(Systems.MatchManager)
+	local sl = Instance.new("SpawnLocation")
+	sl.Name = "LobbySpawn"
+	sl.Anchored = true
+	sl.Size = Vector3.new(12, 1, 12)
+	sl.Position = Vector3.new(0, LOBBY_Y + 0.5, LOBBY_CZ + 80)
+	sl.Neutral = true
+	sl.Duration = 0
+	sl.Transparency = 1
+	sl.Parent = folder
+end
 
-print("[AceStarship] server starting...")
+-- Load hangar + battle (don't let a failure break spawning).
+local Hangar, Battle
+local setupOk = pcall(function()
+	Hangar = require(ServerScriptService.Server.Hangar)
+	Battle = require(ServerScriptService.Server.Battle)
+	Hangar.start()
+	Battle.start()
+end)
+if not setupOk then
+	warn("[AceStarship] hangar/battle setup failed; lobby is bare")
+end
 
-CurrencyService.start() -- loads/saves banked profiles (DataStore)
-LeaderboardService.start() -- solo + co-op boards
-ShopService.start() -- server-authoritative buy/equip
-CombatService.start() -- server-authoritative hit validation
-MatchManager.start() -- owns runs: tunnel, spawns, bosses, distance
+local beginBattle = Instance.new("RemoteEvent")
+beginBattle.Name = "BeginBattle"
+beginBattle.Parent = ReplicatedStorage
 
-print("[AceStarship] server ready.")
+local inLobby: { [Player]: boolean } = {}
+
+local function spawnInLobby(player: Player)
+	local spawnPos: Vector3? = nil
+	if Hangar then
+		local ok, pos = pcall(Hangar.assign, player)
+		if ok then
+			spawnPos = pos
+		end
+	end
+	player:LoadCharacter()
+	local char = player.Character or player.CharacterAdded:Wait()
+	task.wait()
+	if spawnPos and char then
+		char:PivotTo(CFrame.new(spawnPos))
+	end
+	inLobby[player] = true
+end
+
+local function launchPlayer(player: Player)
+	inLobby[player] = nil
+	local shipId = if Hangar then Hangar.getShip(player) else "Pyro"
+	local mainId = if Hangar then Hangar.getMain(player) else "candy"
+	local secId = if Hangar then Hangar.getSecondary(player) else "ball"
+	if player.Character then
+		player.Character:Destroy()
+	end
+	if Battle then
+		Battle.playerLaunched(player, shipId)
+	end
+	beginBattle:FireClient(player, shipId, mainId, secId)
+end
+
+Players.PlayerAdded:Connect(spawnInLobby)
+for _, player in Players:GetPlayers() do
+	task.spawn(spawnInLobby, player)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	inLobby[player] = nil
+	if Hangar then
+		Hangar.release(player)
+	end
+end)
+
+RunService.Heartbeat:Connect(function()
+	if not Hangar then
+		return
+	end
+	for player in inLobby do
+		local char = player.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart") :: BasePart?
+		local pad = Hangar.padCenter(player)
+		if root and pad then
+			local flat = Vector3.new(root.Position.X - pad.X, 0, root.Position.Z - pad.Z)
+			if flat.Magnitude <= 11 then
+				launchPlayer(player)
+			end
+		end
+	end
+end)
+
+print("[AceStarship] lobby server ready.")
