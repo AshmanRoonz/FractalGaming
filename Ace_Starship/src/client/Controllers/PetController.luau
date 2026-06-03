@@ -116,6 +116,7 @@ function PetController.start(petId: string?)
 	local pet = buildBody(cfg)
 	pet.Parent = workspace
 	BattleSession.track(pet)
+	local facing = CFrame.Angles(0, math.rad(cfg.yawOffset or 0), 0) -- correct model orientation
 
 	local pos = ShipState.position
 	local nextShot = 0
@@ -138,7 +139,7 @@ function PetController.start(petId: string?)
 		-- Face the nearest visible enemy (else look where the ship flies).
 		local target = nearestEnemy(pos, cfg.range)
 		local lookDir = if target then (target.root.Position - pos).Unit else fwd
-		pet:PivotTo(CFrame.lookAt(pos, pos + lookDir))
+		pet:PivotTo(CFrame.lookAt(pos, pos + lookDir) * facing)
 
 		-- Fire.
 		if target and os.clock() >= nextShot then

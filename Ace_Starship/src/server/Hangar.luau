@@ -6,6 +6,7 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local MarketplaceService = game:GetService("MarketplaceService")
 
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
@@ -28,6 +29,15 @@ local SLOT_SPACING = 240
 local DISPLAY_SIZE = 60
 local START_BOLTS = 1500 -- Bolts every player starts with (earn more in battle)
 local SHIP_PRICE = 600 -- cost of any non-starter ship
+-- Ships that are free (owned from the start). Everything else is premium/Bolts.
+local FREE_SHIPS: { [string]: boolean } = { Pyro = true, Corvette = true, Speeder = true }
+local function freshFreeShips(): { [string]: boolean }
+	local t = {}
+	for s in FREE_SHIPS do
+		t[s] = true
+	end
+	return t
+end
 
 local openShopEvent: any = nil -- set in Hangar.start (server -> client shop window)
 local ASSET_FOOTPRINT = 170 -- scale the hangar asset to roughly this wide
@@ -80,6 +90,7 @@ type Slot = {
 	ownedMain: { [string]: boolean },
 	ownedSec: { [string]: boolean },
 	ownedPets: { [string]: boolean },
+	lastShop: string?,
 }
 local slots: { [Player]: Slot } = {}
 local used: { [number]: boolean } = {}
@@ -180,27 +191,114 @@ local function showShip(slot: Slot)
 end
 
 local function shipPrice(id: string): number
-	return if id == defaultShip() then 0 else SHIP_PRICE
+	return if FREE_SHIPS[id] then 0 else SHIP_PRICE
+end
+
+-- ===== Premium items (sold for Robux via Game Passes) ======================
+-- To make an item Robux-only: create a Game Pass on the Roblox Creator Dashboard,
+-- then add its ID here under the right category, keyed by the item's id (ship/pet
+-- asset name, or weapon catalog id). Items NOT listed stay Bolts-buyable.
+-- Replace each 0 with the Game Pass ID you create for that item. While it's 0 the
+-- item stays Bolts-priced (not yet premium), so nothing breaks before you make the
+-- passes. Free ships (Pyro/Corvette/Speeder) are not listed here.
+local PREMIUM: { [string]: { [string]: number } } = {
+	ship = {
+		BlackKnight = 0,
+		BumbleBee = 0,
+		Charger = 0,
+		Goldian = 0,
+		IceSki = 0,
+		Knifehand = 0,
+		MantaRay = 0,
+		Puncture = 0,
+		QuickSilver = 0,
+		RedLegend = 0,
+		Slayer = 0,
+		Slice = 0,
+		Stryder = 0,
+		Syphon = 0,
+		Tracker = 0,
+		Vortex = 0,
+	},
+	main = {},
+	secondary = {
+		["Bathroom Toilet"] = 0,
+	},
+	pet = {
+		Dragon = 1863666268,
+		Puppy = 0,
+	},
+}
+
+-- A real Game Pass id only (0 = placeholder, treated as not-yet-premium).
+local function premiumId(category: string, id: string): number?
+	local m = PREMIUM[category]
+	local gp = if m then m[id] else nil
+	return if gp and gp > 0 then gp else nil
+end
+
+local gpOwned: { [Player]: { [number]: boolean } } = {} -- cache: does player own gamepass
+local gpPrice: { [number]: number } = {} -- cache: gamepass Robux price
+
+local function ownsGamepass(player: Player, gpId: number): boolean
+	local c = gpOwned[player]
+	if c and c[gpId] ~= nil then
+		return c[gpId]
+	end
+	local ok, owns = pcall(function()
+		return MarketplaceService:UserOwnsGamePassAsync(player.UserId, gpId)
+	end)
+	local val = ok and owns == true
+	gpOwned[player] = gpOwned[player] or {}
+	gpOwned[player][gpId] = val
+	return val
+end
+
+local function gamepassPrice(gpId: number): number?
+	if gpPrice[gpId] ~= nil then
+		return gpPrice[gpId]
+	end
+	local ok, info = pcall(function()
+		return MarketplaceService:GetProductInfo(gpId, Enum.InfoType.GamePass)
+	end)
+	if ok and info then
+		gpPrice[gpId] = info.PriceInRobux or 0
+		return gpPrice[gpId]
+	end
+	return nil
+end
+
+-- owned?, gamepass id (if premium), Robux price (if premium)
+local function itemFlags(player: Player, category: string, id: string, ownSet: { [string]: boolean }): (boolean, number?, number?)
+	local gp = premiumId(category, id)
+	if gp then
+		return ownsGamepass(player, gp), gp, gamepassPrice(gp)
+	end
+	return ownSet[id] == true, nil, nil
 end
 
 -- Build the item list + Bolts for a category, sent to the client shop window.
 local function buildShopData(s: Slot, category: string): any
 	local items = {}
+	local function add(id: string, name: string, price: number, ownSet: { [string]: boolean }, selId: string)
+		local owned, robux, robuxPrice = itemFlags(s.owner, category, id, ownSet)
+		table.insert(items, { id = id, name = name, price = price, owned = owned, equipped = selId == id, robux = robux, robuxPrice = robuxPrice })
+	end
 	if category == "ship" then
 		for _, id in shipOrder do
-			table.insert(items, { id = id, name = id, price = shipPrice(id), owned = s.ownedShips[id] == true, equipped = s.shipId == id })
+			add(id, id, shipPrice(id), s.ownedShips, s.shipId)
 		end
 	elseif category == "main" then
 		for _, d in MainWeapons do
-			table.insert(items, { id = d.id, name = d.displayName, price = d.price, owned = s.ownedMain[d.id] == true, equipped = s.mainId == d.id })
+			add(d.id, d.displayName, d.price, s.ownedMain, s.mainId)
 		end
 	elseif category == "secondary" then
 		for _, d in SecondaryWeapons do
-			table.insert(items, { id = d.id, name = d.displayName, price = d.price, owned = s.ownedSec[d.id] == true, equipped = s.secId == d.id })
+			add(d.id, d.displayName, d.price, s.ownedSec, s.secId)
 		end
 	elseif category == "pet" then
 		for _, d in Pets do
-			table.insert(items, { id = d.id, name = d.displayName, price = d.price, owned = s.ownedPets[d.id] == true, equipped = s.petId == d.id })
+			add(d.id, d.displayName, d.price, s.ownedPets, s.petId)
 		end
 	end
 	return { category = category, bolts = s.bolts, items = items }
@@ -209,6 +307,7 @@ end
 local function openShop(player: Player, category: string)
 	local s = slots[player]
 	if s and openShopEvent then
+		s.lastShop = category -- so a Robux purchase can refresh the right window
 		openShopEvent:FireClient(player, buildShopData(s, category))
 	end
 end
@@ -243,6 +342,9 @@ local function priceAndOwned(s: Slot, category: string, id: string): (number?, {
 end
 
 local function buyItem(s: Slot, category: string, id: string)
+	if premiumId(category, id) then
+		return -- Robux item: bought via the Game Pass prompt, not Bolts
+	end
 	local price, ownedSet = priceAndOwned(s, category, id)
 	if not price or not ownedSet or ownedSet[id] then
 		return
@@ -254,8 +356,15 @@ local function buyItem(s: Slot, category: string, id: string)
 end
 
 local function equipItem(s: Slot, category: string, id: string)
-	local _, ownedSet = priceAndOwned(s, category, id)
-	if not ownedSet or not ownedSet[id] then
+	local gp = premiumId(category, id)
+	local allowed
+	if gp then
+		allowed = ownsGamepass(s.owner, gp) -- premium: must own the Game Pass
+	else
+		local _, ownedSet = priceAndOwned(s, category, id)
+		allowed = ownedSet ~= nil and ownedSet[id] == true
+	end
+	if not allowed then
 		return -- must own it first
 	end
 	if category == "ship" then
@@ -393,16 +502,29 @@ function Hangar.assign(player: Player): Vector3
 		secLabel = secLabel,
 		petLabel = petLabel,
 		bolts = START_BOLTS,
-		ownedShips = { [defaultShip()] = true },
+		ownedShips = freshFreeShips(),
 		ownedMain = { [MainWeapons[1].id] = true },
 		ownedSec = { [SecondaryWeapons[1].id] = true },
 		ownedPets = { [Pets[1].id] = true },
 	}
 	showShip(slots[player])
+
+	-- Warm the Game Pass ownership/price caches in the background so the shop
+	-- opens instantly (no web call mid-open).
+	task.spawn(function()
+		for _, m in PREMIUM do
+			for _, gp in m do
+				ownsGamepass(player, gp)
+				gamepassPrice(gp)
+			end
+		end
+	end)
+
 	return center + Vector3.new(0, 5, 45) -- spawn in front of the ship
 end
 
 function Hangar.release(player: Player)
+	gpOwned[player] = nil -- drop the ownership cache
 	local s = slots[player]
 	if not s then
 		return
@@ -500,6 +622,29 @@ function Hangar.start()
 			return
 		end
 		openShop(player, category) -- refresh the window
+	end)
+
+	-- Reverse map (Game Pass id -> category + item id) so a purchase auto-equips.
+	local premiumByPass: { [number]: { category: string, id: string } } = {}
+	for cat, m in PREMIUM do
+		for id, gp in m do
+			premiumByPass[gp] = { category = cat, id = id }
+		end
+	end
+
+	-- When a Robux Game Pass purchase completes, grant + auto-equip + refresh.
+	MarketplaceService.PromptGamePassPurchaseFinished:Connect(function(player, gpId, purchased)
+		if not purchased then
+			return
+		end
+		gpOwned[player] = gpOwned[player] or {}
+		gpOwned[player][gpId] = true
+		local s = slots[player]
+		local info = premiumByPass[gpId]
+		if s and info then
+			equipItem(s, info.category, info.id)
+			openShop(player, s.lastShop or info.category)
+		end
 	end)
 
 	-- The lobby platform is built by init.server now; just spin the displays.

@@ -192,7 +192,11 @@ local WeaponController = {}
 local MAIN_RANGE = 300
 local MAIN_CONE = math.cos(math.rad(15)) -- auto-aim assist half-angle
 local MAIN_DPS = 18
-local LASER_STRETCH = 2.5 -- beam objects use the projectile size, then stretch this much along the beam
+local LASER_BEAM_THICKNESS = 1.6 -- the real "laser" beam's width
+local LASER_OBJ_SIZE = 7 -- base size for stacked-object lasers (candy, snakes, etc.)
+local LASER_STRETCH = 1.8 -- elongate stacked objects along the beam
+local LASER_MIN_THICK = 4 -- fatten thin objects (snakes/towers) so they're not skinny
+local LASER_CONVEYOR = 12 -- studs/sec the objects stream toward the target (slow crawl)
 
 local AIM_DIST = 160 -- where the crosshair sits along the aim ray
 
@@ -242,7 +246,7 @@ end
 
 function WeaponController.start(mainId: string?, secId: string?)
 	local gen = BattleSession.gen
-	local mainCfg = resolveWeaponDef(MainWeapons, mainId or "candy", true)
+	local mainCfg = resolveWeaponDef(MainWeapons, mainId or "laser", true)
 	local secCfg = resolveWeaponDef(SecondaryWeapons, secId or "ball", false)
 	local player = Players.LocalPlayer
 	local camera = workspace.CurrentCamera
@@ -287,10 +291,28 @@ function WeaponController.start(mainId: string?, secId: string?)
 	segFolder.Name = "MainBeam"
 	segFolder.Parent = workspace
 	BattleSession.track(segFolder) -- also holds projectiles + bombs (below)
+
+	-- Real "laser" beam: a single glowing part stretched to the target (used when
+	-- the weapon is a beam type instead of a line of objects).
+	local beamPart = Instance.new("Part")
+	beamPart.Anchored = true
+	beamPart.CanCollide = false
+	beamPart.CastShadow = false
+	beamPart.Material = Enum.Material.Neon
+	beamPart.Color = mainCfg.color
+	beamPart.Size = Vector3.new(LASER_BEAM_THICKNESS, LASER_BEAM_THICKNESS, 1)
+	beamPart.Transparency = 1
+	beamPart.Parent = segFolder
+	local function drawBeam(from: Vector3, to: Vector3)
+		local d = to - from
+		beamPart.Size = Vector3.new(LASER_BEAM_THICKNESS, LASER_BEAM_THICKNESS, d.Magnitude)
+		beamPart.CFrame = CFrame.lookAt((from + to) / 2, to)
+		beamPart.Transparency = 0
+	end
 	-- Each beam segment is a whole-object clone (multi-part intact), scaled uniform
 	-- like the projectiles. Pooled; we cache each segment's parts + their original
 	-- transparency so we can show/hide quickly without losing the mesh's look.
-	local LASER_SEG_SIZE = PROJECTILE_SIZE -- same base size as the projectiles
+	local LASER_SEG_SIZE = LASER_OBJ_SIZE
 	local LASER_SPACING = LASER_SEG_SIZE * LASER_STRETCH * 0.85 -- tile the stretched objects
 	type Seg = { model: Model, parts: { { part: BasePart, t: number } }, align: CFrame }
 	local segPool: { Seg } = {}
@@ -328,18 +350,16 @@ function WeaponController.start(mainId: string?, secId: string?)
 					table.insert(parts, { part = d, t = d.Transparency })
 				end
 			end
-			-- Stretch single-mesh beam objects along the beam axis for the laser look
-			-- (same cross-section as a projectile, just longer down the line).
+			-- Single-mesh beam objects: stretch the beam axis for the laser look, and
+			-- fatten the two cross axes to a minimum so thin objects (snakes, towers)
+			-- don't read as skinny.
 			if #baseParts == 1 then
 				local pp = baseParts[1]
 				local z = pp.Size
-				if axis == "X" then
-					pp.Size = Vector3.new(z.X * LASER_STRETCH, z.Y, z.Z)
-				elseif axis == "Y" then
-					pp.Size = Vector3.new(z.X, z.Y * LASER_STRETCH, z.Z)
-				else
-					pp.Size = Vector3.new(z.X, z.Y, z.Z * LASER_STRETCH)
-				end
+				local nx = if axis == "X" then z.X * LASER_STRETCH else math.max(z.X, LASER_MIN_THICK)
+				local ny = if axis == "Y" then z.Y * LASER_STRETCH else math.max(z.Y, LASER_MIN_THICK)
+				local nz = if axis == "Z" then z.Z * LASER_STRETCH else math.max(z.Z, LASER_MIN_THICK)
+				pp.Size = Vector3.new(nx, ny, nz)
 			end
 			s = { model = model, parts = parts, align = align }
 			setSegVisible(s, false)
@@ -352,21 +372,30 @@ function WeaponController.start(mainId: string?, secId: string?)
 			setSegVisible(segPool[i], false)
 		end
 	end
-	-- Stack objects evenly along origin->hit; returns how many were used.
+	-- Stream objects along origin->hit like a conveyor belt: a time-based phase
+	-- scrolls them toward the target, new ones appearing at the gun. Returns how
+	-- many segments were used (the rest get hidden).
 	local function drawLaser(from: Vector3, to: Vector3): number
 		local d = to - from
 		local dist = d.Magnitude
 		if dist < 0.1 then
 			return 0
 		end
-		local count = math.clamp(math.floor(dist / LASER_SPACING), 1, MAX_SEG)
-		for i = 1, count do
-			local s = getSeg(i)
-			local p = from + d * ((i - 0.5) / count)
-			s.model:PivotTo(CFrame.lookAt(p, p + d) * s.align) -- longest side along the beam
-			setSegVisible(s, true)
+		local dir = d / dist
+		local phase = (os.clock() * LASER_CONVEYOR) % LASER_SPACING -- scroll offset
+		local slots = math.clamp(math.floor(dist / LASER_SPACING) + 2, 1, MAX_SEG)
+		local used = 0
+		for i = 0, slots - 1 do
+			local along = i * LASER_SPACING + phase
+			if along <= dist then
+				used += 1
+				local s = getSeg(used)
+				local p = from + dir * along
+				s.model:PivotTo(CFrame.lookAt(p, p + dir) * s.align) -- longest side along beam
+				setSegVisible(s, true)
+			end
 		end
-		return count
+		return used
 	end
 
 	-- Secondary input state (touch button / mouse / gamepad trigger).
@@ -575,7 +604,11 @@ function WeaponController.start(mainId: string?, secId: string?)
 		ShipState.beamHit = if target then target.root.Position else nil -- replicate beam
 
 		if target then
-			hideSegmentsFrom(drawLaser(origin, target.root.Position))
+			if mainCfg.beam then
+				drawBeam(origin, target.root.Position) -- real laser
+			else
+				hideSegmentsFrom(drawLaser(origin, target.root.Position)) -- line of objects
+			end
 			-- Report accumulated beam damage ~10x/sec instead of every frame.
 			beamTimer += dt
 			if beamTimer >= 0.1 then
@@ -583,6 +616,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 				beamTimer = 0
 			end
 		else
+			beamPart.Transparency = 1
 			hideSegmentsFrom(0)
 			beamTimer = 0
 		end

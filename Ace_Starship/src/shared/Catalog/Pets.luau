@@ -15,6 +15,14 @@ export type PetDef = {
 	cooldown: number,
 	price: number,
 	object: string?,
+	yawOffset: number?, -- degrees to correct which way the model faces (0 if it faces -Z)
+}
+
+-- Per-asset facing corrections (degrees), for pets whose model isn't built facing
+-- forward. Only list the ones that need it; everything else stays at 0. Add a line
+-- here (key = the exact asset name in Assets/Pets) for any pet that faces wrong.
+local FACING_FIX: { [string]: number } = {
+	Dragon = 180, -- faces tail-first; spin it around
 }
 
 local Pets: { PetDef } = {
@@ -40,6 +48,7 @@ if petFolder then
 			cooldown = 0.5,
 			price = 600,
 			object = asset.Name,
+			yawOffset = FACING_FIX[asset.Name] or 0, -- no flip unless listed in FACING_FIX
 		})
 	end
 end

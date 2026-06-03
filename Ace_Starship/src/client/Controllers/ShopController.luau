@@ -6,6 +6,7 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MarketplaceService = game:GetService("MarketplaceService")
 
 local ShopController = {}
 
@@ -20,6 +21,7 @@ local GOLD = Color3.fromRGB(255, 205, 90)
 local GREEN = Color3.fromRGB(90, 200, 110)
 local GREY = Color3.fromRGB(90, 96, 110)
 local RED = Color3.fromRGB(200, 80, 80)
+local ROBUX = Color3.fromRGB(70, 180, 90) -- Robux green for premium "GET" buttons
 
 function ShopController.start()
 	local player = Players.LocalPlayer
@@ -127,7 +129,7 @@ function ShopController.start()
 
 		local name = Instance.new("TextLabel")
 		name.Position = UDim2.fromOffset(14, 8)
-		name.Size = UDim2.fromOffset(260, 24)
+		name.Size = UDim2.fromOffset(if item.robux then 150 else 260, 24)
 		name.BackgroundTransparency = 1
 		name.Font = Enum.Font.GothamBold
 		name.TextSize = 18
@@ -135,6 +137,22 @@ function ShopController.start()
 		name.TextColor3 = Color3.fromRGB(245, 245, 245)
 		name.Text = item.name
 		name.Parent = row
+
+		-- "PREMIUM" badge for Robux items.
+		if item.robux then
+			local tag = Instance.new("TextLabel")
+			tag.Position = UDim2.fromOffset(170, 9)
+			tag.Size = UDim2.fromOffset(86, 20)
+			tag.BackgroundColor3 = Color3.fromRGB(245, 200, 70)
+			tag.Font = Enum.Font.GothamBold
+			tag.TextSize = 12
+			tag.TextColor3 = Color3.fromRGB(35, 28, 10)
+			tag.Text = "PREMIUM"
+			tag.Parent = row
+			local tc = Instance.new("UICorner")
+			tc.CornerRadius = UDim.new(0.5, 0)
+			tc.Parent = tag
+		end
 
 		local sub = Instance.new("TextLabel")
 		sub.Position = UDim2.fromOffset(14, 30)
@@ -144,7 +162,12 @@ function ShopController.start()
 		sub.TextSize = 13
 		sub.TextXAlignment = Enum.TextXAlignment.Left
 		sub.TextColor3 = Color3.fromRGB(170, 175, 185)
-		sub.Text = if item.price == 0 then "Free" else item.price .. " Bolts"
+		if item.robux then
+			sub.TextColor3 = Color3.fromRGB(120, 220, 140)
+			sub.Text = if item.robuxPrice then "R$ " .. item.robuxPrice .. "  (Robux)" else "Robux item"
+		else
+			sub.Text = if item.price == 0 then "Free" else item.price .. " Bolts"
+		end
 		sub.Parent = row
 
 		local btn = Instance.new("TextButton")
@@ -170,6 +193,14 @@ function ShopController.start()
 			btn.BackgroundColor3 = GREEN
 			btn.Activated:Connect(function()
 				shopAction:FireServer(category, "equip", item.id)
+			end)
+		elseif item.robux then
+			-- Premium item: prompt the Game Pass purchase (Robux).
+			btn.Text = "GET"
+			btn.BackgroundColor3 = ROBUX
+			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			btn.Activated:Connect(function()
+				MarketplaceService:PromptGamePassPurchase(player, item.robux)
 			end)
 		elseif bolts >= item.price then
 			btn.Text = "BUY"
