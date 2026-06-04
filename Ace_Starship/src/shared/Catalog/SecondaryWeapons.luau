@@ -16,21 +16,16 @@ export type SecDef = {
 	textureId: string?,
 }
 
-local SecondaryWeapons: { SecDef } = {
-	{ id = "ball", displayName = "Funny Ball", color = Color3.fromRGB(255, 180, 40), size = 4, shape = Enum.PartType.Ball, price = 0 },
-	{ id = "beachball", displayName = "Beach Ball", color = Color3.fromRGB(255, 95, 95), size = 5.5, shape = Enum.PartType.Ball, price = 120 },
-	{ id = "noob", displayName = "Noob Head", color = Color3.fromRGB(255, 225, 75), size = 4.5, shape = Enum.PartType.Ball, price = 180 },
-	{ id = "brick", displayName = "Classic Brick", color = Color3.fromRGB(196, 40, 28), size = 4, shape = Enum.PartType.Block, price = 150 },
-	{ id = "barrel", displayName = "Barrel", color = Color3.fromRGB(120, 75, 40), size = 5, shape = Enum.PartType.Cylinder, price = 220 },
-}
+-- All projectiles are real objects from Assets/Projectiles. "Missile" is the free
+-- starting projectile; everything else costs Bolts.
+local DEFAULT_SEC = "Missile"
+local SecondaryWeapons: { SecDef } = {}
 
--- Append one projectile per asset the user dropped in Assets/Projectiles (Studio).
--- Fires a clone of that mesh. Priced in Bolts; tweak below.
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local projFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Projectiles")
 if projFolder then
 	for _, asset in projFolder:GetChildren() do
-		table.insert(SecondaryWeapons, {
+		local def: SecDef = {
 			id = asset.Name,
 			displayName = asset.Name,
 			color = Color3.fromRGB(255, 255, 255),
@@ -38,8 +33,17 @@ if projFolder then
 			shape = Enum.PartType.Ball,
 			price = 250,
 			object = asset.Name, -- cloned from Assets/Projectiles
-		})
+		}
+		if asset.Name == DEFAULT_SEC then
+			table.insert(SecondaryWeapons, 1, def) -- the default goes first
+		else
+			table.insert(SecondaryWeapons, def)
+		end
 	end
+end
+-- The first projectile (Missile if present, else whatever loaded first) is free.
+if SecondaryWeapons[1] then
+	SecondaryWeapons[1].price = 0
 end
 
 return SecondaryWeapons

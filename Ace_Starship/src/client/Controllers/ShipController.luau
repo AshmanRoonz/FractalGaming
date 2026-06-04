@@ -34,6 +34,12 @@ local PITCH_RATE = math.rad(95)
 local MOUSE_SENS = 0.006 -- radians of turn per pixel of mouse movement
 local MAX_PITCH = math.rad(80) -- clamp so you can't flip fully over
 local MAX_BANK = math.rad(22)
+local BOOST_MULT = 2.1 -- speed multiplier while boosting
+local BOOST_MAX = 100 -- boost energy
+local BOOST_DRAIN = 45 -- energy/sec drained while boosting
+local BOOST_RECHARGE = 20 -- energy/sec recharged while not boosting
+local BASE_FOV, BOOST_FOV = 70, 90 -- camera widens while boosting for speed feel
+local ROLL_DODGE = 115 -- studs/sec sideways push during a barrel roll (left/right)
 local CAM_DIST = 26
 local CAM_HEIGHT = 8
 local TARGET_SHIP_SIZE = 14
@@ -97,6 +103,7 @@ function ShipController.start(shipId: string?)
 	-- On return-to-hangar, hand the camera + mouse back to the character.
 	BattleSession.onCleanup(function()
 		camera.CameraType = Enum.CameraType.Custom
+		camera.FieldOfView = BASE_FOV
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		UserInputService.MouseIconEnabled = true
 	end)
@@ -169,7 +176,7 @@ function ShipController.start(shipId: string?)
 
 	-- ---- Touch UI (only on touch devices) ----------------------------------
 	local touchMove, touchLook = Vector2.zero, Vector2.zero
-	local touchUp, touchDown = false, false
+	local touchUp, touchDown, touchBoost = false, false, false
 
 	if UserInputService.TouchEnabled then
 		local gui = Instance.new("ScreenGui")
@@ -280,6 +287,9 @@ function ShipController.start(shipId: string?)
 		makeButton("DN", -30, function(held)
 			touchDown = held
 		end)
+		makeButton("BOOST", -230, function(held)
+			touchBoost = held
+		end)
 
 		-- Roll buttons (bottom center, clear of the sticks).
 		local function makeRoll(text: string, xOffset: number, dir: number)
@@ -347,6 +357,25 @@ function ShipController.start(shipId: string?)
 	damageFlash.ZIndex = 5
 	damageFlash.Parent = hud
 
+	-- Boost energy bar (thin, under the health bar).
+	local boostBg = Instance.new("Frame")
+	boostBg.Position = UDim2.fromOffset(24, 52)
+	boostBg.Size = UDim2.fromOffset(320, 6)
+	boostBg.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+	boostBg.BackgroundTransparency = 0.3
+	boostBg.Parent = hud
+	local boostBgC = Instance.new("UICorner")
+	boostBgC.CornerRadius = UDim.new(0.5, 0)
+	boostBgC.Parent = boostBg
+	local boostFill = Instance.new("Frame")
+	boostFill.Size = UDim2.fromScale(1, 1)
+	boostFill.BackgroundColor3 = Color3.fromRGB(90, 200, 255)
+	boostFill.BorderSizePixel = 0
+	boostFill.Parent = boostBg
+	local boostFillC = Instance.new("UICorner")
+	boostFillC.CornerRadius = UDim.new(0.5, 0)
+	boostFillC.Parent = boostFill
+
 	local REGEN_DELAY = 4 -- seconds after a hit before health regenerates
 	local REGEN_RATE = 9 -- health per second
 	local prevHealth = ShipState.health
@@ -381,6 +410,7 @@ function ShipController.start(shipId: string?)
 	-- ---- Free 3D flight ----------------------------------------------------
 	local camYaw, camPitch = 0, 0
 	local pos = Vector3.new(0, 100, 0) -- spawn in the gap between floor and ceiling
+	local boostEnergy = BOOST_MAX
 
 	RunService.RenderStepped:Connect(function(dt)
 		if BattleSession.gen ~= gen then
@@ -399,9 +429,22 @@ function ShipController.start(shipId: string?)
 		if touchUp or padUp or UserInputService:IsKeyDown(Enum.KeyCode.Space) then
 			vert += 1
 		end
-		if touchDown or padDown or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
+		if touchDown or padDown or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
 			vert -= 1
 		end
+
+		-- Speed boost: hold Shift / left trigger / BOOST to fly faster while energy
+		-- lasts; recharges when off.
+		local boostHeld = touchBoost
+			or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+			or UserInputService:IsKeyDown(Enum.KeyCode.ButtonL2)
+		local boosting = boostHeld and boostEnergy > 0 and ShipState.health > 0
+		if boosting then
+			boostEnergy = math.max(0, boostEnergy - BOOST_DRAIN * dt)
+		else
+			boostEnergy = math.min(BOOST_MAX, boostEnergy + BOOST_RECHARGE * dt)
+		end
+		local speedMult = if boosting then BOOST_MULT else 1
 
 		-- Mouse-look: lock the cursor and steer with the mouse while alive; free it
 		-- when dead so the death menu is clickable.
@@ -429,7 +472,11 @@ function ShipController.start(shipId: string?)
 		-- Fly where the nose points (pitch included), so aiming down dives toward
 		-- the floor and up climbs; buttons still give pure vertical.
 		local worldMove = lookCF.LookVector * moveFwd + lookCF.RightVector * moveStrafe
-		pos += (worldMove * MOVE_SPEED + Vector3.yAxis * vert * VERT_SPEED) * dt
+		pos += (worldMove * MOVE_SPEED * speedMult + Vector3.yAxis * vert * VERT_SPEED) * dt
+		-- Barrel-roll dodge: shove the ship sideways in the roll direction.
+		if rolling then
+			pos += lookCF.RightVector * rollDir * ROLL_DODGE * dt
+		end
 
 		-- Stay inside the terrain: clamp altitude between floor and ceiling.
 		local floorY = TerrainController.groundY(pos.X, pos.Z) + SHIP_MARGIN
@@ -468,6 +515,12 @@ function ShipController.start(shipId: string?)
 		local camPos = (CFrame.new(pos) * lookCF * CFrame.new(0, CAM_HEIGHT, CAM_DIST)).Position
 		local goal = CFrame.lookAt(camPos, pos, Vector3.yAxis)
 		camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(dt * 8, 0, 1))
+
+		-- Boost feedback: widen the FOV + update the energy bar.
+		local fovTarget = if boosting then BOOST_FOV else BASE_FOV
+		camera.FieldOfView = camera.FieldOfView + (fovTarget - camera.FieldOfView) * math.clamp(dt * 6, 0, 1)
+		boostFill.Size = UDim2.fromScale(boostEnergy / BOOST_MAX, 1)
+		boostFill.BackgroundColor3 = if boosting then Color3.fromRGB(150, 230, 255) else Color3.fromRGB(90, 200, 255)
 
 		-- ---- Health: regen, damage flash, death/respawn --------------------
 		if ShipState.health < prevHealth then

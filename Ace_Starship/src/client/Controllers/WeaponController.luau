@@ -122,7 +122,7 @@ end
 function WeaponController.start(mainId: string?, secId: string?)
 	local gen = BattleSession.gen
 	local mainCfg = resolveWeaponDef(MainWeapons, mainId or "laser", true)
-	local secCfg = resolveWeaponDef(SecondaryWeapons, secId or "ball", false)
+	local secCfg = resolveWeaponDef(SecondaryWeapons, secId or "Missile", false)
 	local player = Players.LocalPlayer
 	local camera = workspace.CurrentCamera
 
@@ -351,7 +351,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 			light.Color = Color3.fromRGB(255, 230, 180)
 			light.Parent = m.PrimaryPart
 		end
-		m:PivotTo(CFrame.new(origin))
+		m:PivotTo(CFrame.lookAt(origin, origin + dir)) -- face the way it's fired
 		m.Parent = segFolder
 		table.insert(bombs, { obj = m, vel = dir * BOMB_SPEED, life = 5 })
 	end
@@ -375,7 +375,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 			light.Color = Color3.fromRGB(255, 245, 220)
 			light.Parent = m.PrimaryPart
 		end
-		m:PivotTo(CFrame.new(origin))
+		m:PivotTo(CFrame.lookAt(origin, origin + dir)) -- face the way it's fired
 		m.Parent = segFolder
 		table.insert(projectiles, { obj = m, vel = dir * SECONDARY_SPEED, life = SECONDARY_LIFE })
 		Sfx.play("shoot")

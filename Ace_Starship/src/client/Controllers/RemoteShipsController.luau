@@ -187,9 +187,9 @@ function RemoteShipsController.start()
 			return
 		end
 		local rec = ships[userId]
-		local secCfg = (rec and rec.secCfg) or findById(SecondaryWeapons, "ball")
+		local secCfg = (rec and rec.secCfg) or findById(SecondaryWeapons, "Missile")
 		local m = WeaponVisuals.makeProjectile(secCfg, PROJECTILE_SIZE)
-		m:PivotTo(CFrame.new(origin))
+		m:PivotTo(CFrame.lookAt(origin, origin + dir)) -- face the way it's fired
 		m.Parent = container
 		table.insert(balls, { obj = m, vel = dir * SECONDARY_SPEED, life = 5 })
 	end)

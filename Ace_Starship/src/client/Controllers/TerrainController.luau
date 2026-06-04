@@ -41,9 +41,34 @@ local CEIL_SHELL = 40 -- solid thickness above the ceiling surface
 local FLOOR_Y = GROUND_BASE - GROUND_SHELL - 80 -- clear-volume bounds
 local ROOF_Y = CEIL_BASE + CEIL_SHELL + 80
 
-local GROUND_MAT = Enum.Material.Rock
-local CEIL_MAT = Enum.Material.Basalt
 local AIR = Enum.Material.Air
+
+-- ===== Mountain themes ====================================================
+-- Re-skin the whole world by changing THEME below. `cap`/`capY` paint high peaks
+-- (e.g. snow), `base`/`baseY` paint low valleys (e.g. lava); both optional.
+local Mat = Enum.Material
+local THEMES = {
+	rocky = { ground = Mat.Rock, ceil = Mat.Basalt, fog = Color3.fromRGB(150, 180, 210) },
+	grassy = { ground = Mat.Grass, ceil = Mat.LeafyGrass, fog = Color3.fromRGB(168, 205, 158) },
+	snowcap = { ground = Mat.Grass, cap = Mat.Snow, capY = 55, ceil = Mat.Snow, fog = Color3.fromRGB(214, 226, 240) },
+	frozen = { ground = Mat.Glacier, cap = Mat.Snow, capY = 40, ceil = Mat.Ice, fog = Color3.fromRGB(198, 226, 242) },
+	volcanic = { ground = Mat.Basalt, base = Mat.CrackedLava, baseY = 15, ceil = Mat.Rock, fog = Color3.fromRGB(72, 46, 42) },
+}
+-- The world cycles through these as you progress (a new biome after each boss).
+-- Newly built terrain uses the current theme, so it transitions gradually as you
+-- fly into fresh ground.
+local themeOrder = { THEMES.rocky, THEMES.grassy, THEMES.snowcap, THEMES.frozen, THEMES.volcanic }
+local currentTheme = themeOrder[1]
+
+local function groundMaterial(wy: number): Enum.Material
+	if currentTheme.cap and wy > currentTheme.capY then
+		return currentTheme.cap
+	end
+	if currentTheme.base and wy < currentTheme.baseY then
+		return currentTheme.base
+	end
+	return currentTheme.ground
+end
 
 local groundY = WorldHeights.groundY
 local ceilY = WorldHeights.ceilY
@@ -52,18 +77,20 @@ local ceilY = WorldHeights.ceilY
 TerrainController.groundY = groundY
 TerrainController.ceilY = ceilY
 
--- Bulk-write one surface shell (ground or ceiling) for a chunk.
-local function writeShell(x0: number, z0: number, isCeiling: boolean)
+-- Bulk-write one surface shell (ground or ceiling) for a chunk. `coarse` samples
+-- the surface on a 2x-coarser grid (bigger, flatter steps -> fewer triangles) --
+-- used for the dark ceiling on tablets where the lower detail isn't noticeable.
+local function writeShell(x0: number, z0: number, isCeiling: boolean, coarse: boolean?)
 	local yMin, yMax, mat, surfaceFn
 	if isCeiling then
 		yMin = math.floor((CEIL_BASE - CEIL_AMP) / RES) * RES
 		yMax = math.ceil((CEIL_BASE + CEIL_SHELL) / RES) * RES
-		mat = CEIL_MAT
+		mat = currentTheme.ceil
 		surfaceFn = ceilY
 	else
 		yMin = math.floor((GROUND_BASE - GROUND_SHELL) / RES) * RES
 		yMax = math.ceil((GROUND_BASE + GROUND_AMP) / RES) * RES
-		mat = GROUND_MAT
+		mat = currentTheme.ground -- base; cap/base by height applied per voxel below
 		surfaceFn = groundY
 	end
 
@@ -76,10 +103,13 @@ local function writeShell(x0: number, z0: number, isCeiling: boolean)
 
 	local surf = table.create(nx)
 	for ix = 1, nx do
-		local wx = corner.X + (ix - 0.5) * RES
+		-- Snap to a 2x-coarser grid when coarse, so 2x2 voxel blocks share a height.
+		local six = if coarse then math.floor((ix - 1) / 2) * 2 + 1 else ix
+		local wx = corner.X + (six - 0.5) * RES
 		local col = table.create(nz)
 		for iz = 1, nz do
-			col[iz] = surfaceFn(wx, corner.Z + (iz - 0.5) * RES)
+			local siz = if coarse then math.floor((iz - 1) / 2) * 2 + 1 else iz
+			col[iz] = surfaceFn(wx, corner.Z + (siz - 0.5) * RES)
 		end
 		surf[ix] = col
 	end
@@ -92,6 +122,8 @@ local function writeShell(x0: number, z0: number, isCeiling: boolean)
 		local scol = surf[ix]
 		for iy = 1, ny do
 			local wy = corner.Y + (iy - 0.5) * RES
+			-- Ceiling is one material; ground varies by height (snow caps / lava).
+			local rowMat = if isCeiling then mat else groundMaterial(wy)
 			local matZ = table.create(nz)
 			local occZ = table.create(nz)
 			for iz = 1, nz do
@@ -103,7 +135,7 @@ local function writeShell(x0: number, z0: number, isCeiling: boolean)
 					o = math.clamp((s - (wy - RES / 2)) / RES, 0, 1)
 				end
 				if o > 0 then
-					matZ[iz] = mat
+					matZ[iz] = rowMat
 					occZ[iz] = o
 				else
 					matZ[iz] = AIR
@@ -129,9 +161,13 @@ function TerrainController.start()
 	-- a lot of ceiling triangles while keeping it visible nearby. Wide fog stays for
 	-- enemy visibility; ceiling collision math is unchanged.
 	local CEIL_VIEW = VIEW
+	local coarseCeiling = false -- low-detail ceiling on tablet (fewer triangles)
+	local coarseGround = false -- low-detail ground on tablet (fewer triangles)
 	if UserInputService.TouchEnabled then
 		VIEW = 3
 		CEIL_VIEW = 2
+		coarseCeiling = true
+		coarseGround = true
 	end
 
 	for _, name in { "Baseplate", "SpawnLocation" } do
@@ -145,13 +181,28 @@ function TerrainController.start()
 	if atmo then
 		atmo:Destroy()
 	end
-	Lighting.FogColor = Color3.fromRGB(150, 180, 210)
+	currentTheme = themeOrder[1] -- fresh start each battle
+	Lighting.FogColor = currentTheme.fog
 	Lighting.FogStart = FOG_START
 	Lighting.FogEnd = FOG_END
+	local targetFog = currentTheme.fog
 	-- Restore open visibility back in the hangar on teardown.
 	BattleSession.onCleanup(function()
 		Lighting.FogStart = 0
 		Lighting.FogEnd = 100000
+	end)
+
+	-- Rotate the biome each boss cycle. Newly built chunks use the new theme, so it
+	-- bleeds in gradually as you fly forward into fresh ground; fog eases over.
+	local THEME_EVERY = 10 -- waves per theme (matches the boss cadence)
+	local waveEvent = ReplicatedStorage:WaitForChild("WaveEvent")
+	waveEvent.OnClientEvent:Connect(function(n)
+		if BattleSession.gen ~= gen or type(n) ~= "number" then
+			return
+		end
+		local idx = math.floor((n - 1) / THEME_EVERY) % #themeOrder + 1
+		currentTheme = themeOrder[idx]
+		targetFog = currentTheme.fog
 	end)
 
 	local builtG: { [string]: boolean } = {} -- chunks with the ground shell built
@@ -169,10 +220,11 @@ function TerrainController.start()
 		terrain:FillBlock(CFrame.new(center), Vector3.new(CHUNK, ROOF_Y - yLow, CHUNK), AIR)
 	end
 
-	RunService.Heartbeat:Connect(function()
+	RunService.Heartbeat:Connect(function(dt)
 		if BattleSession.gen ~= gen then
 			return
 		end
+		Lighting.FogColor = Lighting.FogColor:Lerp(targetFog, math.clamp(dt * 0.5, 0, 1)) -- ease biome fog
 		local pos = ShipState.position
 		local scx = math.floor(pos.X / CHUNK)
 		local scz = math.floor(pos.Z / CHUNK)
@@ -197,11 +249,11 @@ function TerrainController.start()
 			local t = todo[i]
 			local key = t.cx .. "," .. t.cz
 			if t.g then
-				writeShell(t.cx * CHUNK, t.cz * CHUNK, false)
+				writeShell(t.cx * CHUNK, t.cz * CHUNK, false, coarseGround)
 				builtG[key] = true
 			end
 			if t.c then
-				writeShell(t.cx * CHUNK, t.cz * CHUNK, true)
+				writeShell(t.cx * CHUNK, t.cz * CHUNK, true, coarseCeiling)
 				builtC[key] = true
 			end
 		end

@@ -18,13 +18,9 @@ export type MainDef = {
 	textureId: string?, -- optional mesh texture
 }
 
+-- The only non-object laser: a real glowing beam, and the free default.
 local MainWeapons: { MainDef } = {
 	{ id = "laser", displayName = "Laser", color = Color3.fromRGB(255, 60, 60), shape = Enum.PartType.Ball, size = 1, spacing = 1, price = 0, beam = true },
-	{ id = "candy", displayName = "Candy Rope", color = Color3.fromRGB(255, 70, 190), shape = Enum.PartType.Ball, size = 1.8, spacing = 1.5, price = 120 },
-	{ id = "vine", displayName = "Vine Whip", color = Color3.fromRGB(90, 200, 90), shape = Enum.PartType.Block, size = 1.7, spacing = 1.6, price = 150 },
-	{ id = "chain", displayName = "Chain", color = Color3.fromRGB(185, 188, 200), shape = Enum.PartType.Block, size = 2.0, spacing = 2.6, price = 250 },
-	{ id = "straw", displayName = "Crazy Straw", color = Color3.fromRGB(255, 85, 85), shape = Enum.PartType.Ball, size = 1.3, spacing = 1.3, price = 200 },
-	{ id = "dna", displayName = "DNA Strand", color = Color3.fromRGB(120, 200, 255), shape = Enum.PartType.Ball, size = 1.5, spacing = 1.6, price = 350 },
 }
 
 -- Append one laser per asset the user dropped in Assets/Lasers (Studio). The beam

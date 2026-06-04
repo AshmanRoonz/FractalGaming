@@ -111,7 +111,7 @@ local function launchPlayer(player: Player)
 	inLobby[player] = nil
 	local shipId = if Hangar then Hangar.getShip(player) else "Pyro"
 	local mainId = if Hangar then Hangar.getMain(player) else "laser"
-	local secId = if Hangar then Hangar.getSecondary(player) else "ball"
+	local secId = if Hangar then Hangar.getSecondary(player) else "Missile"
 	local petId = if Hangar then Hangar.getPet(player) else "orb"
 	if player.Character then
 		player.Character:Destroy()

@@ -184,7 +184,7 @@ function Battle.playerLaunched(player: Player, shipId: string?, mainId: string?,
 		cf = CFrame.new(0, 100, 0),
 		shipId = shipId or "starter_skiff",
 		mainId = mainId or "laser",
-		secId = secId or "ball",
+		secId = secId or "Missile",
 		petId = petId or "orb",
 		beamHit = nil,
 	}
