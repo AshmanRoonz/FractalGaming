@@ -17,6 +17,7 @@ local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
 local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
 local Explosion = require(ReplicatedStorage.Shared.Explosion)
 local Sfx = require(ReplicatedStorage.Shared.Sfx)
+local ShipState = require(script.Parent.ShipState)
 
 local RemoteShipsController = {}
 
@@ -24,6 +25,14 @@ local TARGET_SHIP_SIZE = 14
 local PROJECTILE_SIZE = 12 -- match WeaponController's fired-object size
 local SECONDARY_SPEED = 175
 local PET_SIDE, PET_UP, PET_BACK = 13, 7, 5
+-- Team clothesline tether: a glowing line from your ship to each teammate. Always
+-- shown as a locator, but goes bright/hot within CL_HOT_LEN (matches the server's
+-- damaging range) and fades out toward CL_FADE_LEN.
+local TETHER_THICK = 1.4
+local CL_HOT_LEN = 320 -- within this it's actively cutting (server CL_MAX_LEN)
+local CL_FADE_LEN = 1500 -- past this the locator line is fully faded
+local TETHER_HOT = Color3.fromRGB(120, 255, 180)
+local TETHER_COLD = Color3.fromRGB(90, 170, 255)
 
 local function findById(list: any, id: string?): any
 	for _, d in list do
@@ -49,6 +58,7 @@ type Remote = {
 	snapped: boolean,
 	beam: BasePart,
 	beamHit: Vector3?,
+	tether: BasePart,
 	pet: Model?,
 	petFacing: CFrame,
 	petPos: Vector3,
@@ -115,6 +125,16 @@ function RemoteShipsController.start()
 		beam.Transparency = 1
 		beam.Parent = container
 
+		-- Team clothesline tether from your ship to this teammate.
+		local tether = Instance.new("Part")
+		tether.Anchored = true
+		tether.CanCollide = false
+		tether.CastShadow = false
+		tether.Material = Enum.Material.Neon
+		tether.Color = TETHER_COLD
+		tether.Transparency = 1
+		tether.Parent = container
+
 		-- Their equipped pet, flying alongside.
 		local petCfg = PetVisuals.findById(petId)
 		local pet = PetVisuals.buildBody(petCfg)
@@ -127,6 +147,7 @@ function RemoteShipsController.start()
 			snapped = false,
 			beam = beam,
 			beamHit = nil,
+			tether = tether,
 			pet = pet,
 			petFacing = CFrame.Angles(0, math.rad(petCfg.yawOffset or 0), 0),
 			petPos = Vector3.new(0, 100, 0),
@@ -154,6 +175,8 @@ function RemoteShipsController.start()
 		for id, rec in ships do
 			if not present[id] then
 				rec.model:Destroy()
+				rec.beam:Destroy()
+				rec.tether:Destroy()
 				if rec.pet then
 					rec.pet:Destroy()
 				end
@@ -174,6 +197,8 @@ function RemoteShipsController.start()
 		Sfx.play("explosion")
 		if rec then
 			rec.model:Destroy()
+			rec.beam:Destroy()
+			rec.tether:Destroy()
 			if rec.pet then
 				rec.pet:Destroy()
 			end
@@ -215,6 +240,26 @@ function RemoteShipsController.start()
 				rec.beam.Transparency = 0.1
 			else
 				rec.beam.Transparency = 1
+			end
+			-- Team clothesline tether from your ship to this teammate. Always shown as
+			-- a locator; bright/hot when close enough to be cutting, fading out far away.
+			local myPos = ShipState.position
+			local theirPos = rec.model:GetPivot().Position
+			local span = theirPos - myPos
+			local len = span.Magnitude
+			if len > 1 then
+				rec.tether.Size = Vector3.new(TETHER_THICK, TETHER_THICK, len)
+				rec.tether.CFrame = CFrame.lookAt((myPos + theirPos) / 2, theirPos)
+				if len <= CL_HOT_LEN then
+					rec.tether.Color = TETHER_HOT
+					rec.tether.Transparency = 0.1 -- actively cutting
+				else
+					rec.tether.Color = TETHER_COLD
+					local f = math.clamp((len - CL_HOT_LEN) / (CL_FADE_LEN - CL_HOT_LEN), 0, 1)
+					rec.tether.Transparency = 0.35 + f * 0.6 -- fade with distance
+				end
+			else
+				rec.tether.Transparency = 1
 			end
 			-- Pet trails their ship.
 			if rec.pet then

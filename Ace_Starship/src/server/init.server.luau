@@ -13,9 +13,10 @@ local RunService = game:GetService("RunService")
 Players.CharacterAutoLoads = false
 
 -- Big lobby platform, sized for ~8 bays side by side. Built directly here so it
--- always exists regardless of the hangar module.
+-- always exists regardless of the hangar module. Centered on the hangar row
+-- (bays run along Z from x=0, z=3000) with generous room in front of the openings.
 local LOBBY_Y = 300
-local LOBBY_CX, LOBBY_CZ = 900, 3000
+local LOBBY_CX, LOBBY_CZ = 0, 3420
 do
 	local folder = Instance.new("Folder")
 	folder.Name = "LobbyPlatform"
@@ -30,13 +31,8 @@ do
 		p.TopSurface = Enum.SurfaceType.Smooth
 		p.Parent = folder
 	end
-	local accent = Color3.fromRGB(70, 150, 255)
-	local w, d, h = 4400, 1600, 40
-	block(Vector3.new(w, 8, d), Vector3.new(LOBBY_CX, LOBBY_Y - 4, LOBBY_CZ), Color3.fromRGB(34, 38, 50))
-	block(Vector3.new(w, h, 6), Vector3.new(LOBBY_CX, LOBBY_Y + h / 2, LOBBY_CZ - d / 2), accent)
-	block(Vector3.new(w, h, 6), Vector3.new(LOBBY_CX, LOBBY_Y + h / 2, LOBBY_CZ + d / 2), accent)
-	block(Vector3.new(6, h, d), Vector3.new(LOBBY_CX - w / 2, LOBBY_Y + h / 2, LOBBY_CZ), accent)
-	block(Vector3.new(6, h, d), Vector3.new(LOBBY_CX + w / 2, LOBBY_Y + h / 2, LOBBY_CZ), accent)
+	local w, d = 4000, 2800 -- X width (room to step back), Z depth (covers the bay row)
+	block(Vector3.new(w, 8, d), Vector3.new(LOBBY_CX, LOBBY_Y - 4, LOBBY_CZ), Color3.fromRGB(34, 38, 50)) -- floor only; border rails removed
 
 	local sl = Instance.new("SpawnLocation")
 	sl.Name = "LobbySpawn"
@@ -47,6 +43,45 @@ do
 	sl.Duration = 0
 	sl.Transparency = 1
 	sl.Parent = folder
+end
+
+-- Skybox. A skybox is SIX cube-face images (not one panorama). Upload each PNG to
+-- Roblox (Studio -> View -> Asset Manager -> Images -> Add, or create.roblox.com),
+-- copy the asset id it gives you, and paste the six numbers below. Leave them all
+-- empty ("") to keep Roblox's default sky. You can paste just the number or the
+-- full rbxassetid://... string.
+local SKYBOX = {
+	Up = "rbxassetid://99169773652835", -- top.png
+	Dn = "rbxassetid://80244383769929", -- bottom.png
+	Lf = "rbxassetid://124926972111468", -- wall4.png
+	Rt = "rbxassetid://124926972111468", -- wall4.png (reused; wall2 dropped)
+	Ft = "rbxassetid://123854486300811", -- wall1.png
+	Bk = "rbxassetid://114056284235262", -- wall3.png
+}
+do
+	local Lighting = game:GetService("Lighting")
+	local function asContent(v: string): string
+		if v == "" then
+			return ""
+		end
+		return if string.match(v, "^%d+$") then "rbxassetid://" .. v else v
+	end
+	-- Only install a Sky once you've filled the faces in, so we don't replace the
+	-- default sky with black faces.
+	if SKYBOX.Up ~= "" then
+		local existing = Lighting:FindFirstChildOfClass("Sky")
+		if existing then
+			existing:Destroy()
+		end
+		local sky = Instance.new("Sky")
+		sky.SkyboxUp = asContent(SKYBOX.Up)
+		sky.SkyboxDn = asContent(SKYBOX.Dn)
+		sky.SkyboxLf = asContent(SKYBOX.Lf)
+		sky.SkyboxRt = asContent(SKYBOX.Rt)
+		sky.SkyboxFt = asContent(SKYBOX.Ft)
+		sky.SkyboxBk = asContent(SKYBOX.Bk)
+		sky.Parent = Lighting
+	end
 end
 
 -- Load hangar + battle (don't let a failure break spawning).

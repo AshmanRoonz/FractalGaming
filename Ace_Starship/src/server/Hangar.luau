@@ -7,11 +7,14 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local MarketplaceService = game:GetService("MarketplaceService")
+local DataStoreService = game:GetService("DataStoreService")
 
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
 local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
 local Pets = require(ReplicatedStorage.Shared.Catalog.Pets)
+local WeaponVisuals = require(ReplicatedStorage.Shared.WeaponVisuals)
+local PetVisuals = require(ReplicatedStorage.Shared.PetVisuals)
 
 local Hangar = {}
 
@@ -25,7 +28,11 @@ local function findById(list: any, id: string): any
 end
 
 local BASE = Vector3.new(0, 300, 3000)
-local SLOT_SPACING = 240
+local SLOT_SPACING = 120 -- gap between neighboring bays along the row (bump if they clip)
+local PODIUM_Z = 45 -- how far in front of the pad the shop podiums sit (toward the wall)
+local SPAWN_OFFSET = Vector3.new(-30, 5, 26) -- spawn where the ship podium used to be
+local PREVIEW_LIFT = 13 -- height of the floating item preview above a podium
+local PREVIEW_SIZE = 9 -- every floating preview is normalized to this longest visible axis
 local DISPLAY_SIZE = 60
 local START_BOLTS = 0 -- Bolts every player starts with (earn it all in battle)
 local SHIP_PRICE = 600 -- cost of any non-starter ship
@@ -88,6 +95,9 @@ type Slot = {
 	secLabel: TextLabel,
 	petLabel: TextLabel,
 	bolts: number,
+	kills: number,
+	previewMounts: { [string]: Vector3 },
+	previewModels: { [string]: Instance? },
 	ownedShips: { [string]: boolean },
 	ownedMain: { [string]: boolean },
 	ownedSec: { [string]: boolean },
@@ -103,6 +113,36 @@ local function pushBolts(player: Player)
 		boltsEvent:FireClient(player, s.bolts)
 	end
 end
+
+-- Leaderboard: the server formats the live ranking into a string and publishes it
+-- to ReplicatedStorage.Leaderboard (a StringValue, created in Hangar.start). Any TV
+-- object you build in Studio just mirrors that value onto its own SurfaceGui.
+local lbValue: StringValue? = nil
+local function rebuildLeaderboard()
+	if not lbValue then
+		return
+	end
+	local list = {}
+	for plr, s in slots do
+		table.insert(list, { name = plr.Name, kills = s.kills, bolts = s.bolts })
+	end
+	table.sort(list, function(a, b)
+		if a.kills ~= b.kills then
+			return a.kills > b.kills
+		end
+		return a.bolts > b.bolts
+	end)
+	local lines = { string.format("%-3s %-12s %5s %7s", "#", "PILOT", "KILLS", "BOLTS") }
+	for i, e in list do
+		if i > 10 then
+			break
+		end
+		local nm = if #e.name > 12 then e.name:sub(1, 12) else e.name
+		table.insert(lines, string.format("%-3d %-12s %5d %7d", i, nm, e.kills, e.bolts))
+	end
+	lbValue.Value = if #list > 0 then table.concat(lines, "\n") else "No pilots yet"
+end
+
 local used: { [number]: boolean } = {}
 
 local function part(parent: Instance, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material): BasePart
@@ -202,6 +242,91 @@ end
 
 local function shipPrice(id: string): number
 	return if FREE_SHIPS[id] then 0 else SHIP_PRICE
+end
+
+-- Longest VISIBLE dimension (ignores invisible helper parts that would otherwise
+-- inflate the bounds and make the visible object shrink when normalized).
+local function visibleLongest(model: Model): number
+	local minv: Vector3? = nil
+	local maxv: Vector3? = nil
+	for _, p in model:GetDescendants() do
+		if p:IsA("BasePart") and p.Transparency < 1 then
+			local r = p.Size * 0.5
+			local lo, hi = p.Position - r, p.Position + r
+			if minv then
+				minv = Vector3.new(math.min(minv.X, lo.X), math.min(minv.Y, lo.Y), math.min(minv.Z, lo.Z))
+				maxv = Vector3.new(math.max((maxv :: Vector3).X, hi.X), math.max((maxv :: Vector3).Y, hi.Y), math.max((maxv :: Vector3).Z, hi.Z))
+			else
+				minv, maxv = lo, hi
+			end
+		end
+	end
+	if minv and maxv then
+		local d = (maxv :: Vector3) - minv
+		return math.max(d.X, d.Y, d.Z)
+	end
+	local s = model:GetExtentsSize()
+	return math.max(s.X, s.Y, s.Z)
+end
+
+-- Build a small floating preview of the selected item, normalized so every podium's
+-- object is the same visible size.
+local function buildPreview(category: string, id: string, mount: Vector3, parent: Instance): Instance?
+	local model: Model? = nil
+	if category == "ship" then
+		local ok, ship = pcall(function()
+			return ShipTemplate.new(id)
+		end)
+		if ok and ship then
+			model = ship.model
+		end
+	elseif category == "main" then
+		model = WeaponVisuals.makeProjectile(findById(MainWeapons, id), PREVIEW_SIZE)
+	elseif category == "secondary" then
+		model = WeaponVisuals.makeProjectile(findById(SecondaryWeapons, id), PREVIEW_SIZE)
+	elseif category == "pet" then
+		model = PetVisuals.buildBody(PetVisuals.findById(id))
+	end
+	if model then
+		for _, p in model:GetDescendants() do
+			if p:IsA("BasePart") then
+				p.Anchored = true
+				p.CanCollide = false
+				p.CastShadow = false
+			end
+		end
+		-- Reset to native scale, then normalize every preview to the same visible size.
+		pcall(function()
+			model:ScaleTo(1)
+		end)
+		local l = visibleLongest(model)
+		if l > 0 then
+			pcall(function()
+				model:ScaleTo(PREVIEW_SIZE / l)
+			end)
+		end
+		model:PivotTo(CFrame.new(mount))
+		model.Parent = parent
+	end
+	return model
+end
+
+-- Rebuild all four floating previews from the slot's current loadout.
+local function updatePreviews(slot: Slot)
+	if not slot.previewMounts then
+		return
+	end
+	local picks = { ship = slot.shipId, main = slot.mainId, secondary = slot.secId, pet = slot.petId }
+	for cat, id in picks do
+		local mount = slot.previewMounts[cat]
+		if mount then
+			local old = slot.previewModels[cat]
+			if old then
+				old:Destroy()
+			end
+			slot.previewModels[cat] = buildPreview(cat, id, mount, slot.model)
+		end
+	end
 end
 
 -- ===== Premium items (sold for Robux via Game Passes) ======================
@@ -392,6 +517,7 @@ local function equipItem(s: Slot, category: string, id: string)
 		s.petId = id
 		s.petLabel.Text = findById(Pets, id).displayName
 	end
+	updatePreviews(s) -- refresh the floating preview for the equipped category
 end
 
 function Hangar.addBolts(player: Player, amount: number)
@@ -399,6 +525,15 @@ function Hangar.addBolts(player: Player, amount: number)
 	if s then
 		s.bolts += amount
 		pushBolts(player)
+	end
+end
+
+-- Credit a kill to a player (drives the leaderboard TVs).
+function Hangar.addKill(player: Player)
+	local s = slots[player]
+	if s then
+		s.kills += 1
+		rebuildLeaderboard()
 	end
 end
 
@@ -436,8 +571,12 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 	nameLabel.Parent = bb
 	bb.Parent = pad
 
+	-- Floating-preview mount positions, filled in by makePedestal (keyed by category).
+	local mounts: { [string]: Vector3 } = {}
+
 	-- Pedestal builder (in front of the pad). Returns its small value label.
-	local function makePedestal(offset: Vector3, actionText: string, labelText: string, onTrigger: (Player) -> ()): TextLabel
+	local function makePedestal(offset: Vector3, category: string, actionText: string, labelText: string, onTrigger: (Player) -> ()): TextLabel
+		mounts[category] = center + offset + Vector3.new(0, PREVIEW_LIFT, 0)
 		part(model, Vector3.new(3, 5, 3), CFrame.new(center + offset + Vector3.new(0, 2.5, 0)), Color3.fromRGB(60, 66, 84), Enum.Material.Metal)
 		local button = part(model, Vector3.new(4, 1.2, 4), CFrame.new(center + offset + Vector3.new(0, 5.6, 0)), Color3.fromRGB(255, 120, 60), Enum.Material.Neon)
 		local prompt = Instance.new("ProximityPrompt")
@@ -470,21 +609,21 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 		return label
 	end
 
-	makePedestal(Vector3.new(-30, 0, 26), "Ship Shop", "SHIP", function(plr)
+	makePedestal(Vector3.new(-30, 0, PODIUM_Z), "ship", "Ship Shop", "SHIP", function(plr)
 		openShop(plr, "ship")
 	end)
-	local mainLabel = makePedestal(Vector3.new(-10, 0, 26), "Laser Shop", MainWeapons[1].displayName, function(plr)
+	local mainLabel = makePedestal(Vector3.new(-10, 0, PODIUM_Z), "main", "Laser Shop", MainWeapons[1].displayName, function(plr)
 		openShop(plr, "main")
 	end)
-	local secLabel = makePedestal(Vector3.new(10, 0, 26), "Projectile Shop", SecondaryWeapons[1].displayName, function(plr)
+	local secLabel = makePedestal(Vector3.new(10, 0, PODIUM_Z), "secondary", "Projectile Shop", SecondaryWeapons[1].displayName, function(plr)
 		openShop(plr, "secondary")
 	end)
-	local petLabel = makePedestal(Vector3.new(30, 0, 26), "Pet Shop", Pets[1].displayName, function(plr)
+	local petLabel = makePedestal(Vector3.new(30, 0, PODIUM_Z), "pet", "Pet Shop", Pets[1].displayName, function(plr)
 		openShop(plr, "pet")
 	end)
 
 	model.Parent = workspace
-	return model, nameLabel, mainLabel, secLabel, petLabel
+	return model, nameLabel, mainLabel, secLabel, petLabel, mounts
 end
 
 local function freeIndex(): number
@@ -495,11 +634,101 @@ local function freeIndex(): number
 	return i
 end
 
+-- ---- Saved profiles (Bolts + unlocks + loadout persist to the player's account) --
+-- NOTE: DataStores only work in published places, and in Studio you must enable
+-- "Studio Access to API Services" (Game Settings -> Security) or saving is skipped.
+local profileStore = DataStoreService:GetDataStore("AceProfiles_v1")
+local function profileKey(player: Player): string
+	return "u_" .. player.UserId
+end
+
+local function loadProfile(player: Player): { [string]: any }?
+	local ok, data = pcall(function()
+		return profileStore:GetAsync(profileKey(player))
+	end)
+	if ok and type(data) == "table" then
+		return data
+	end
+	return nil
+end
+
+local function saveProfile(player: Player)
+	local s = slots[player]
+	if not s then
+		return
+	end
+	local data = {
+		bolts = s.bolts,
+		kills = s.kills,
+		shipId = s.shipId,
+		mainId = s.mainId,
+		secId = s.secId,
+		petId = s.petId,
+		ownedShips = s.ownedShips,
+		ownedMain = s.ownedMain,
+		ownedSec = s.ownedSec,
+		ownedPets = s.ownedPets,
+	}
+	pcall(function()
+		profileStore:SetAsync(profileKey(player), data)
+	end)
+end
+
+-- Apply a loaded profile onto a freshly created slot (keeps free defaults owned).
+local function applyProfile(player: Player, saved: { [string]: any })
+	local s = slots[player]
+	if not s then
+		return
+	end
+	if type(saved.bolts) == "number" then
+		s.bolts = saved.bolts
+	end
+	if type(saved.kills) == "number" then
+		s.kills = saved.kills
+	end
+	if type(saved.ownedShips) == "table" then
+		s.ownedShips = saved.ownedShips
+	end
+	if type(saved.ownedMain) == "table" then
+		s.ownedMain = saved.ownedMain
+	end
+	if type(saved.ownedSec) == "table" then
+		s.ownedSec = saved.ownedSec
+	end
+	if type(saved.ownedPets) == "table" then
+		s.ownedPets = saved.ownedPets
+	end
+	-- Never lose the free starter items even if the schema changes.
+	for id in freshFreeShips() do
+		s.ownedShips[id] = true
+	end
+	s.ownedMain[MainWeapons[1].id] = true
+	s.ownedSec[SecondaryWeapons[1].id] = true
+	s.ownedPets[Pets[1].id] = true
+	-- Re-equip the saved loadout via equipItem, which checks Game Pass ownership for
+	-- premium items and the owned-set for regular ones (so premium picks stick too).
+	if type(saved.shipId) == "string" then
+		equipItem(s, "ship", saved.shipId)
+	end
+	if type(saved.mainId) == "string" then
+		equipItem(s, "main", saved.mainId)
+	end
+	if type(saved.secId) == "string" then
+		equipItem(s, "secondary", saved.secId)
+	end
+	if type(saved.petId) == "string" then
+		equipItem(s, "pet", saved.petId)
+	end
+	pcall(showShip, s)
+	pushBolts(player)
+	rebuildLeaderboard()
+end
+
 function Hangar.assign(player: Player): Vector3
 	local index = freeIndex()
 	used[index] = true
-	local center = BASE + Vector3.new(index * SLOT_SPACING, 0, 0)
-	local model, nameLabel, mainLabel, secLabel, petLabel = buildBay(player, center)
+	local center = BASE + Vector3.new(0, 0, index * SLOT_SPACING)
+	local model, nameLabel, mainLabel, secLabel, petLabel, mounts = buildBay(player, center)
 	slots[player] = {
 		index = index,
 		owner = player,
@@ -516,13 +745,23 @@ function Hangar.assign(player: Player): Vector3
 		secLabel = secLabel,
 		petLabel = petLabel,
 		bolts = START_BOLTS,
+		kills = 0,
+		previewMounts = mounts,
+		previewModels = {},
 		ownedShips = freshFreeShips(),
 		ownedMain = { [MainWeapons[1].id] = true },
 		ownedSec = { [SecondaryWeapons[1].id] = true },
 		ownedPets = { [Pets[1].id] = true },
 	}
 	showShip(slots[player])
+	updatePreviews(slots[player]) -- floating item previews over the podiums
 	pushBolts(player) -- seed the HUD counter with the starting balance
+
+	-- Load this player's saved Bolts / unlocks / loadout (yields on the web call).
+	local saved = loadProfile(player)
+	if saved and slots[player] then
+		applyProfile(player, saved)
+	end
 
 	-- Warm the Game Pass ownership/price caches in the background so the shop
 	-- opens instantly (no web call mid-open).
@@ -535,10 +774,11 @@ function Hangar.assign(player: Player): Vector3
 		end
 	end)
 
-	return center + Vector3.new(0, 5, 45) -- spawn in front of the ship
+	return center + SPAWN_OFFSET -- spawn where the ship podium used to be
 end
 
 function Hangar.release(player: Player)
+	saveProfile(player) -- persist Bolts / unlocks / loadout before tearing down
 	gpOwned[player] = nil -- drop the ownership cache
 	local s = slots[player]
 	if not s then
@@ -578,7 +818,7 @@ end
 -- same spot Hangar.assign first spawned them), without allocating a new bay.
 function Hangar.returnPoint(player: Player): Vector3?
 	local s = slots[player]
-	return if s then s.center + Vector3.new(0, 5, 45) else nil
+	return if s then s.center + SPAWN_OFFSET else nil
 end
 
 local function buildConcourse()
@@ -619,6 +859,12 @@ function Hangar.start()
 	boltsEvent = Instance.new("RemoteEvent")
 	boltsEvent.Name = "BoltsChanged"
 	boltsEvent.Parent = ReplicatedStorage
+	-- Live leaderboard text any TV object in Studio can mirror onto its SurfaceGui.
+	lbValue = Instance.new("StringValue")
+	lbValue.Name = "Leaderboard"
+	lbValue.Value = "No pilots yet"
+	lbValue.Parent = ReplicatedStorage
+	rebuildLeaderboard()
 	boltsEvent.OnServerEvent:Connect(function(player)
 		pushBolts(player)
 	end)
@@ -676,12 +922,45 @@ function Hangar.start()
 		end
 	end)
 
-	-- The lobby platform is built by init.server now; just spin the displays.
+	-- The lobby platform is built by init.server now; just spin the displays and
+	-- refresh the leaderboard TVs a couple times a second (catches joins/leaves/Bolts).
+	local lbAccum = 0
 	RunService.Heartbeat:Connect(function(dt)
+		local t = os.clock()
 		for _, s in slots do
 			if s.shipModel then
 				s.shipModel:PivotTo(s.shipModel:GetPivot() * CFrame.Angles(0, dt * 0.3, 0))
 			end
+			-- Spin + bob the floating item previews above the podiums.
+			if s.previewModels and s.previewMounts then
+				for cat, m in s.previewModels do
+					local mount = s.previewMounts[cat]
+					if m and (m :: Instance).Parent and mount then
+						local bob = math.sin(t * 2 + mount.X) * 0.7
+						;(m :: PVInstance):PivotTo(CFrame.new(mount + Vector3.new(0, bob, 0)) * CFrame.Angles(0, t, 0))
+					end
+				end
+			end
+		end
+		lbAccum += dt
+		if lbAccum >= 2 then
+			lbAccum = 0
+			rebuildLeaderboard()
+		end
+	end)
+
+	-- Autosave every 60s, and save everyone when the server shuts down.
+	task.spawn(function()
+		while true do
+			task.wait(60)
+			for plr in slots do
+				saveProfile(plr)
+			end
+		end
+	end)
+	game:BindToClose(function()
+		for plr in slots do
+			saveProfile(plr)
 		end
 	end)
 end

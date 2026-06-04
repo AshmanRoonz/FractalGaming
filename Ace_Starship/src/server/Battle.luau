@@ -62,8 +62,12 @@ local MAX_HIT = 160 -- cap on a single damage report (light anti-cheat; allows t
 local BOLTS_PER_KILL = 6
 local BOLTS_PER_WAVE = 30
 local BOSS_BOLTS = 300 -- boss kills drop a huge lump
-local DROP_PICKUP_RADIUS = 24 -- fly this close to a dropped Bolts to collect it
+local DROP_PICKUP_RADIUS = 70 -- fly this close to a dropped Bolts to collect it
 local DROP_LIFE = 25 -- seconds a dropped Bolts stays before despawning
+-- Team "clothesline": a damaging beam strung between two nearby teammates' ships.
+local CL_MAX_LEN = 320 -- only cuts when teammates are within this distance
+local CL_RADIUS = 20 -- enemies this close to the beam get sliced
+local CL_DPS = 70 -- clothesline damage per second
 local START_DIR = Vector3.new(0, 0, -1)
 
 type EnemyRec = { id: number, cf: CFrame, hp: number, mh: number, boss: boolean, nextFire: number, bob: number, kind: string, dmg: number, cooldown: number, burst: number }
@@ -90,6 +94,38 @@ local boltsDropped, boltsCollected -- physical Bolts pickups dropped by dead mon
 type Drop = { id: number, pos: Vector3, value: number, life: number }
 local drops: { Drop } = {}
 local nextDropId = 0
+
+-- Shortest distance from point p to the segment a..b (for clothesline hit tests).
+local function segDist(p: Vector3, a: Vector3, b: Vector3): number
+	local ab = b - a
+	local denom = ab:Dot(ab)
+	local t = if denom > 0 then math.clamp((p - a):Dot(ab) / denom, 0, 1) else 0
+	return (p - (a + ab * t)).Magnitude
+end
+
+-- An enemy reached 0 HP: credit the kill (if a player landed it), drop its Bolts,
+-- remove it, and award the wave-clear bonus if that emptied the wave.
+local function killEnemy(e: EnemyRec, crediter: Player?)
+	if crediter then
+		killEvent:FireClient(crediter)
+		Hangar.addKill(crediter) -- count it for the leaderboard TVs
+	end
+	nextDropId += 1
+	local value = if e.boss then BOSS_BOLTS else BOLTS_PER_KILL
+	table.insert(drops, { id = nextDropId, pos = e.cf.Position, value = value, life = DROP_LIFE })
+	fireBattling(boltsDropped, nextDropId, e.cf.Position, value)
+	local idx = table.find(enemies, e)
+	if idx then
+		table.remove(enemies, idx)
+	end
+	if waveActive and #enemies == 0 then
+		waveActive = false
+		nextWaveAt = os.clock() + WAVE_DELAY
+		for p in battling do
+			Hangar.addBolts(p, BOLTS_PER_WAVE) -- everyone gets the wave-clear bonus
+		end
+	end
+end
 
 local function makeEvent(name: string, unreliable: boolean): any
 	local e = Instance.new(if unreliable then "UnreliableRemoteEvent" else "RemoteEvent")
@@ -280,23 +316,7 @@ function Battle.start()
 		end
 		e.hp -= math.clamp(amount, 0, MAX_HIT)
 		if e.hp <= 0 then
-			killEvent:FireClient(player) -- credit the kill to whoever landed it
-			-- Monsters drop physical Bolts you fly over to collect (boss = big lump).
-			nextDropId += 1
-			local value = if e.boss then BOSS_BOLTS else BOLTS_PER_KILL
-			table.insert(drops, { id = nextDropId, pos = e.cf.Position, value = value, life = DROP_LIFE })
-			fireBattling(boltsDropped, nextDropId, e.cf.Position, value)
-			local idx = table.find(enemies, e)
-			if idx then
-				table.remove(enemies, idx)
-			end
-			if waveActive and #enemies == 0 then
-				waveActive = false
-				nextWaveAt = os.clock() + WAVE_DELAY
-				for p in battling do
-					Hangar.addBolts(p, BOLTS_PER_WAVE) -- everyone gets the wave-clear bonus
-				end
-			end
+			killEnemy(e, player)
 		end
 	end)
 
@@ -370,6 +390,37 @@ function Battle.start()
 				table.remove(balls, i)
 			elseif hitTerrain or b.life <= 0 then
 				table.remove(balls, i)
+			end
+		end
+
+		-- Team clothesline: enemies caught on the beam between two nearby teammates
+		-- take damage over time. Encourages flying in formation.
+		local pts: { Vector3 } = {}
+		for _, rec in battling do
+			table.insert(pts, rec.cf.Position)
+		end
+		if #pts >= 2 then
+			for ei = #enemies, 1, -1 do
+				local e = enemies[ei]
+				local sliced = false
+				for i = 1, #pts do
+					for j = i + 1, #pts do
+						local a, b = pts[i], pts[j]
+						if (b - a).Magnitude <= CL_MAX_LEN and segDist(e.cf.Position, a, b) <= CL_RADIUS then
+							sliced = true
+							break
+						end
+					end
+					if sliced then
+						break
+					end
+				end
+				if sliced then
+					e.hp -= CL_DPS * dt
+					if e.hp <= 0 then
+						killEnemy(e, nil)
+					end
+				end
 			end
 		end
 

@@ -112,15 +112,40 @@ local function buildDummy(scale: number, isBoss: boolean): (Model, BasePart)
 end
 
 -- Build an enemy: clone the matching model (bosses from Assets/Bosses, regulars
--- from Assets/Enemies) at the size you built it in Studio (WYSIWYG, no forced
--- normalize), or fall back to the blocky placeholder. Returns (model, root, radius).
+-- from Assets/Enemies). Regular enemies keep their Studio size (WYSIWYG); bosses
+-- are normalized to a fixed on-screen size so they're reliably big no matter how
+-- the boss mesh was built. Falls back to the blocky placeholder. Returns
+-- (model, root, radius).
 local assetsRoot = ReplicatedStorage:WaitForChild("Assets")
 local enemyAssets = assetsRoot:FindFirstChild("Enemies")
 local bossAssets = assetsRoot:FindFirstChild("Bosses")
-local BOSS_SCALE = 1.5 -- bosses render this much bigger than their built Studio size
+local BOSS_SIZE = 90 -- bosses are scaled to this longest-axis size (studs)
 
+-- Longest visible dimension of a model. Measures only NON-transparent parts, so a
+-- stray invisible hitbox / oversized helper part can't inflate the bounds and make
+-- the visible body shrink to nothing when we normalize bosses. Falls back to the
+-- full extents if everything is invisible.
 local function longestAxis(model: Model): number
-	local s = model:GetExtentsSize()
+	local minv: Vector3? = nil
+	local maxv: Vector3? = nil
+	for _, p in model:GetDescendants() do
+		if p:IsA("BasePart") and p.Transparency < 1 then
+			local r = p.Size * 0.5
+			local lo = p.Position - r
+			local hi = p.Position + r
+			if minv then
+				minv = Vector3.new(math.min(minv.X, lo.X), math.min(minv.Y, lo.Y), math.min(minv.Z, lo.Z))
+				maxv = Vector3.new(math.max((maxv :: Vector3).X, hi.X), math.max((maxv :: Vector3).Y, hi.Y), math.max((maxv :: Vector3).Z, hi.Z))
+			else
+				minv, maxv = lo, hi
+			end
+		end
+	end
+	if minv and maxv then
+		local d = maxv - minv
+		return math.max(d.X, d.Y, d.Z)
+	end
+	local s = model:GetExtentsSize() -- nothing visible; fall back
 	return math.max(s.X, s.Y, s.Z)
 end
 
@@ -137,9 +162,27 @@ local function sizeMul(src: Instance?): number
 	return 1
 end
 
+local function normalizeTo(model: Model, target: number)
+	local longest = longestAxis(model)
+	if longest > 0 then
+		pcall(function()
+			model:ScaleTo(target / longest)
+		end)
+	end
+end
+
 local function buildEnemy(kind: string, boss: boolean): (Model, BasePart, number)
-	local folder = if boss and bossAssets then bossAssets else enemyAssets
-	local src = if folder and kind ~= "" then folder:FindFirstChild(kind) else nil
+	-- Bosses look in Assets/Bosses first, then fall back to Assets/Enemies so a
+	-- missing boss model still uses a real enemy instead of the tiny placeholder.
+	local src: Instance? = nil
+	if kind ~= "" then
+		if boss and bossAssets then
+			src = bossAssets:FindFirstChild(kind)
+		end
+		if not src and enemyAssets then
+			src = enemyAssets:FindFirstChild(kind)
+		end
+	end
 	local mul = sizeMul(src)
 	local model: Model? = nil
 	if src and src:IsA("Model") then
@@ -162,19 +205,19 @@ local function buildEnemy(kind: string, boss: boolean): (Model, BasePart, number
 			model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart", true) -- recursive
 		end
 		if model.PrimaryPart then
-			-- Keep the Studio size, but render bosses BOSS_SCALE bigger. SizeMul
-			-- (default 1) is an optional per-enemy tweak on top.
-			local scale = (if boss then BOSS_SCALE else 1) * mul
-			if scale ~= 1 then
-				pcall(function()
-					model:ScaleTo(scale)
-				end)
+			if boss then
+				normalizeTo(model, BOSS_SIZE * mul) -- guaranteed-big, ignores mesh scale
+			elseif mul ~= 1 then
+				model:ScaleTo(mul) -- regulars keep Studio size + optional SizeMul tweak
 			end
 			return model, model.PrimaryPart :: BasePart, longestAxis(model) * 0.5
 		end
 		model:Destroy() -- no usable part; use the placeholder instead
 	end
 	local dm, dr = buildDummy(if boss then 3 else 1, boss)
+	if boss then
+		normalizeTo(dm, BOSS_SIZE) -- keep the boss placeholder big too
+	end
 	return dm, dr, longestAxis(dm) * 0.5
 end
 
@@ -237,7 +280,7 @@ function EnemyController.start()
 	local waveEvent = ReplicatedStorage:WaitForChild("WaveEvent")
 	local playerHit = ReplicatedStorage:WaitForChild("PlayerHit")
 
-	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number }
+	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number, faceFix: CFrame }
 	local byId: { [number]: Rec } = {}
 
 	local function ensure(id: number, kind: string, boss: boolean, cf: CFrame): Rec
@@ -246,6 +289,10 @@ function EnemyController.start()
 			return r
 		end
 		local model, root, radius = buildEnemy(kind, boss)
+		-- Per-model facing correction: set a number attribute "YawOffset" (degrees)
+		-- on the model in Assets/Enemies or /Bosses if it's built facing the wrong way.
+		local yaw = model:GetAttribute("YawOffset")
+		local faceFix = if typeof(yaw) == "number" then CFrame.Angles(0, math.rad(yaw), 0) else CFrame.identity
 		model:PivotTo(cf)
 		model.Parent = container
 		r = {
@@ -257,6 +304,7 @@ function EnemyController.start()
 			lastPos = cf.Position,
 			boss = boss,
 			radius = radius,
+			faceFix = faceFix,
 		}
 		byId[id] = r
 		-- Roar on spawn, then every few seconds while alive (so you hear them as they
@@ -393,7 +441,14 @@ function EnemyController.start()
 		for _, r in byId do
 			r.current = r.current:Lerp(r.target, math.clamp(dt * 12, 0, 1))
 			r.lastPos = r.current.Position
-			r.model:PivotTo(r.current)
+			-- Keep enemies upright and turn to face the player by YAW only, so tall
+			-- bosses (pointed at a player flying overhead) don't tip over sideways.
+			local look = r.current.LookVector
+			local flat = Vector3.new(look.X, 0, look.Z)
+			local facing = if flat.Magnitude > 0.001
+				then CFrame.lookAt(r.lastPos, r.lastPos + flat)
+				else CFrame.new(r.lastPos)
+			r.model:PivotTo(facing * r.faceFix)
 		end
 		-- Move enemy projectile visuals.
 		for i = #visualBalls, 1, -1 do

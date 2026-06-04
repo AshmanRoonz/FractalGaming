@@ -170,15 +170,22 @@ function ShipController.start(shipId: string?)
 		Sfx.play("roll")
 	end
 	UserInputService.InputBegan:Connect(function(input, gpe)
-		if gpe or BattleSession.gen ~= gen then
+		if BattleSession.gen ~= gen then
+			return
+		end
+		-- Tab is "game processed" by Roblox (UI nav), so handle it before the gpe
+		-- guard or the toggle never fires.
+		if input.KeyCode == Enum.KeyCode.Tab then
+			mouseUnlocked = not mouseUnlocked -- free / re-lock the cursor
+			return
+		end
+		if gpe then
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.ButtonL1 or input.KeyCode == Enum.KeyCode.Q then
 			triggerRoll(-1)
 		elseif input.KeyCode == Enum.KeyCode.ButtonR1 or input.KeyCode == Enum.KeyCode.E then
 			triggerRoll(1)
-		elseif input.KeyCode == Enum.KeyCode.Tab then
-			mouseUnlocked = not mouseUnlocked -- free / re-lock the cursor
 		end
 	end)
 

@@ -14,7 +14,11 @@ local Sfx = require(ReplicatedStorage.Shared.Sfx)
 
 local PickupController = {}
 
-local BOLT_SIZE = 8 -- on-screen size of a dropped Bolts
+local BOLT_SIZE = 18 -- on-screen size of a dropped Bolts (longest axis, studs)
+-- Upright correction: the spawn forces world orientation, which can lay the model
+-- flat if its Studio pivot is rotated. Tweak these degrees if it spawns lying down /
+-- sideways (try 90 on a different axis, or flip a sign).
+local BOLT_UPRIGHT = CFrame.Angles(math.rad(90), 0, 0)
 local objectsFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Objects")
 
 -- Build the Bolts pickup from Assets/Objects/Bolts, or a glowing fallback so it
@@ -77,7 +81,7 @@ function PickupController.start()
 			return
 		end
 		local model = buildBolt()
-		model:PivotTo(CFrame.new(pos))
+		model:PivotTo(CFrame.new(pos) * BOLT_UPRIGHT)
 		model.Parent = container
 		byId[id] = { model = model, base = pos, t = math.random() * 6.28 }
 	end)
@@ -115,7 +119,7 @@ function PickupController.start()
 		for _, d in byId do
 			d.t += dt
 			local bob = math.sin(d.t * 2) * 2
-			d.model:PivotTo(CFrame.new(d.base + Vector3.new(0, bob, 0)) * CFrame.Angles(0, d.t * 2, 0))
+			d.model:PivotTo(CFrame.new(d.base + Vector3.new(0, bob, 0)) * CFrame.Angles(0, d.t * 2, 0) * BOLT_UPRIGHT)
 		end
 	end)
 end
