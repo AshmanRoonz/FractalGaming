@@ -14,8 +14,62 @@ local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local Explosion = require(ReplicatedStorage.Shared.Explosion)
 local BattleSession = require(script.Parent.BattleSession)
 local Sfx = require(ReplicatedStorage.Shared.Sfx)
+local WeaponVisuals = require(ReplicatedStorage.Shared.WeaponVisuals)
+local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
 
 local EnemyController = {}
+
+-- Enemies fire a random projectile object from Assets/Projectiles (same models the
+-- player's secondary weapons use), picked per shot.
+local ENEMY_PROJ_SIZE = 9
+local function randomProjectileDef(): any
+	if #SecondaryWeapons > 0 then
+		return SecondaryWeapons[math.random(1, #SecondaryWeapons)]
+	end
+	return nil
+end
+
+-- Monster roars. Drop Sounds named monster1..monsterN (and "sirenhead") into
+-- Assets/Sound. Every enemy plays a random monster sound when it appears; a
+-- "Siren Head" enemy plays the sirenhead sound instead.
+local soundFolder = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Sound")
+local monsterSounds: { Sound } = {}
+if soundFolder then
+	for _, s in soundFolder:GetChildren() do
+		if s:IsA("Sound") and string.match(s.Name:lower(), "^monster%d+$") then
+			table.insert(monsterSounds, s)
+		end
+	end
+end
+local function normalize(name: string): string
+	return (name:gsub("%s", "")):lower() -- "Siren Head" -> "sirenhead"
+end
+local function roar(root: BasePart, kind: string)
+	local template: Sound? = nil
+	if normalize(kind) == "sirenhead" and soundFolder then
+		local sh = soundFolder:FindFirstChild("sirenhead") or soundFolder:FindFirstChild("Sirenhead")
+		template = if sh and sh:IsA("Sound") then sh :: Sound else nil
+	elseif #monsterSounds > 0 then
+		template = monsterSounds[math.random(1, #monsterSounds)]
+	end
+	if not template then
+		return
+	end
+	local s = template:Clone()
+	s.Looped = false
+	s.Parent = root -- parenting to a part makes it positional (3D)
+	-- Carry across the arena: enemies start ~hundreds of studs out, so a default
+	-- rolloff would be near-silent. Stay loud out to ~600 studs, then fall off.
+	s.Volume = math.max(s.Volume, 1)
+	s.RollOffMode = Enum.RollOffMode.Linear
+	s.RollOffMinDistance = 120
+	s.RollOffMaxDistance = 1400
+	s:Play()
+	s.Ended:Once(function()
+		s:Destroy()
+	end)
+	Debris:AddItem(s, 15) -- safety net if Ended never fires
+end
 
 -- Live targets for the weapons: array of { id, root }.
 EnemyController.enemies = {} :: { any }
@@ -57,24 +111,36 @@ local function buildDummy(scale: number, isBoss: boolean): (Model, BasePart)
 	return model, torso
 end
 
--- Build an enemy: clone the matching model from Assets/Enemies, or fall back to
--- the blocky placeholder. Returns (model, rootPart).
-local enemyAssets = ReplicatedStorage:WaitForChild("Assets"):FindFirstChild("Enemies")
-local ENEMY_SIZE = 35
-local BOSS_SIZE = 105
+-- Build an enemy: clone the matching model (bosses from Assets/Bosses, regulars
+-- from Assets/Enemies) at the size you built it in Studio (WYSIWYG, no forced
+-- normalize), or fall back to the blocky placeholder. Returns (model, root, radius).
+local assetsRoot = ReplicatedStorage:WaitForChild("Assets")
+local enemyAssets = assetsRoot:FindFirstChild("Enemies")
+local bossAssets = assetsRoot:FindFirstChild("Bosses")
+local BOSS_SCALE = 1.5 -- bosses render this much bigger than their built Studio size
 
-local function scaleModel(model: Model, target: number)
-	local size = model:GetExtentsSize()
-	local longest = math.max(size.X, size.Y, size.Z)
-	if longest > 0 then
-		pcall(function()
-			model:ScaleTo(target / longest)
-		end)
-	end
+local function longestAxis(model: Model): number
+	local s = model:GetExtentsSize()
+	return math.max(s.X, s.Y, s.Z)
 end
 
-local function buildEnemy(kind: string, boss: boolean): (Model, BasePart)
-	local src = if enemyAssets and kind ~= "" then enemyAssets:FindFirstChild(kind) else nil
+-- Optional per-enemy fine-tune: set a number attribute "SizeMul" on the model in
+-- Assets/Enemies (or /Bosses) to scale it relative to how you built it in Studio.
+-- 1 (or no attribute) = exactly as built, 1.5 = 50% bigger, 0.7 = 30% smaller.
+local function sizeMul(src: Instance?): number
+	if src then
+		local a = src:GetAttribute("SizeMul")
+		if typeof(a) == "number" and a > 0 then
+			return math.clamp(a, 0.1, 10)
+		end
+	end
+	return 1
+end
+
+local function buildEnemy(kind: string, boss: boolean): (Model, BasePart, number)
+	local folder = if boss and bossAssets then bossAssets else enemyAssets
+	local src = if folder and kind ~= "" then folder:FindFirstChild(kind) else nil
+	local mul = sizeMul(src)
 	local model: Model? = nil
 	if src and src:IsA("Model") then
 		model = src:Clone()
@@ -95,14 +161,21 @@ local function buildEnemy(kind: string, boss: boolean): (Model, BasePart)
 		if not model.PrimaryPart then
 			model.PrimaryPart = model:FindFirstChildWhichIsA("BasePart", true) -- recursive
 		end
-		if not model.PrimaryPart then
-			model:Destroy() -- no usable part; use the placeholder instead
-			return buildDummy(if boss then 3 else 1, boss)
+		if model.PrimaryPart then
+			-- Keep the Studio size, but render bosses BOSS_SCALE bigger. SizeMul
+			-- (default 1) is an optional per-enemy tweak on top.
+			local scale = (if boss then BOSS_SCALE else 1) * mul
+			if scale ~= 1 then
+				pcall(function()
+					model:ScaleTo(scale)
+				end)
+			end
+			return model, model.PrimaryPart :: BasePart, longestAxis(model) * 0.5
 		end
-		scaleModel(model, if boss then BOSS_SIZE else ENEMY_SIZE)
-		return model, model.PrimaryPart :: BasePart
+		model:Destroy() -- no usable part; use the placeholder instead
 	end
-	return buildDummy(if boss then 3 else 1, boss)
+	local dm, dr = buildDummy(if boss then 3 else 1, boss)
+	return dm, dr, longestAxis(dm) * 0.5
 end
 
 local TweenService = game:GetService("TweenService")
@@ -172,7 +245,7 @@ function EnemyController.start()
 		if r then
 			return r
 		end
-		local model, root = buildEnemy(kind, boss)
+		local model, root, radius = buildEnemy(kind, boss)
 		model:PivotTo(cf)
 		model.Parent = container
 		r = {
@@ -183,9 +256,18 @@ function EnemyController.start()
 			target = cf,
 			lastPos = cf.Position,
 			boss = boss,
-			radius = (if boss then BOSS_SIZE else ENEMY_SIZE) * 0.5,
+			radius = radius,
 		}
 		byId[id] = r
+		-- Roar on spawn, then every few seconds while alive (so you hear them as they
+		-- close in). The random first delay spreads a whole wave's roars out.
+		task.spawn(function()
+			task.wait(math.random() * (if boss then 0.4 else 1.5))
+			while byId[id] == r and root and root.Parent do
+				roar(root, kind)
+				task.wait(if boss then 4 + math.random() * 3 else 6 + math.random() * 6)
+			end
+		end)
 		return r
 	end
 
@@ -265,23 +347,42 @@ function EnemyController.start()
 		Sfx.play("wave")
 	end)
 
-	-- Enemy ball visuals (server decides hits; this is just the projectile look).
-	local visualBalls: { { part: BasePart, vel: Vector3, life: number } } = {}
+	-- Enemy projectile visuals (server decides hits; this is just the look). Each
+	-- shot is a random projectile object from Assets/Projectiles.
+	local visualBalls: { { obj: Instance, vel: Vector3, life: number, spin: Vector3 } } = {}
+	local function spawnEnemyShot(origin: Vector3, dir: Vector3, speed: number)
+		local def = randomProjectileDef()
+		local obj: Instance
+		if def then
+			local m = WeaponVisuals.makeProjectile(def, ENEMY_PROJ_SIZE)
+			m:PivotTo(CFrame.lookAt(origin, origin + dir)) -- face the way it's fired
+			obj = m
+		else
+			-- Fallback to the old neon ball if no projectile assets exist.
+			local p = Instance.new("Part")
+			p.Shape = Enum.PartType.Ball
+			p.Size = Vector3.new(3, 3, 3)
+			p.Anchored = true
+			p.CanCollide = false
+			p.CastShadow = false
+			p.Material = Enum.Material.Neon
+			p.Color = Color3.fromRGB(180, 120, 255)
+			p.CFrame = CFrame.new(origin)
+			obj = p
+		end
+		obj.Parent = container -- destroyed with the battle on teardown
+		table.insert(visualBalls, {
+			obj = obj,
+			vel = dir * speed,
+			life = 4,
+			spin = Vector3.new(math.random(-3, 3), math.random(-3, 3), math.random(-3, 3)),
+		})
+	end
 	enemyFired.OnClientEvent:Connect(function(origin, dir, speed)
 		if BattleSession.gen ~= gen then
 			return
 		end
-		local p = Instance.new("Part")
-		p.Shape = Enum.PartType.Ball
-		p.Size = Vector3.new(3, 3, 3)
-		p.Anchored = true
-		p.CanCollide = false
-		p.CastShadow = false
-		p.Material = Enum.Material.Neon
-		p.Color = Color3.fromRGB(180, 120, 255)
-		p.CFrame = CFrame.new(origin)
-		p.Parent = container -- destroyed with the battle on teardown
-		table.insert(visualBalls, { part = p, vel = dir * speed, life = 4 })
+		spawnEnemyShot(origin, dir, speed)
 	end)
 
 	RunService.RenderStepped:Connect(function(dt)
@@ -294,19 +395,23 @@ function EnemyController.start()
 			r.lastPos = r.current.Position
 			r.model:PivotTo(r.current)
 		end
-		-- Move enemy ball visuals.
+		-- Move enemy projectile visuals.
 		for i = #visualBalls, 1, -1 do
 			local b = visualBalls[i]
 			b.life -= dt
-			b.part.CFrame = b.part.CFrame + b.vel * dt
-			local p = b.part.Position
+			local pv = b.obj :: PVInstance
+			local cf = pv:GetPivot() + b.vel * dt -- translate, keep facing the travel dir
+			cf *= CFrame.Angles(b.spin.X * dt, b.spin.Y * dt, b.spin.Z * dt) -- gentle tumble
+			pv:PivotTo(cf)
+			local p = cf.Position
 			local hitTerrain = p.Y < WorldHeights.groundY(p.X, p.Z) or p.Y > WorldHeights.ceilY(p.X, p.Z)
 			local hitShip = (ShipState.position - p).Magnitude <= 13
 			if hitShip or hitTerrain then
 				Explosion.burst(p) -- layered blast on impact
 			end
 			if b.life <= 0 or hitTerrain or hitShip then
-				b.part:Destroy()
+				WeaponVisuals.clearEffects(b.obj) -- stop smoke/fire so it doesn't linger
+				b.obj:Destroy()
 				table.remove(visualBalls, i)
 			end
 		end

@@ -31,7 +31,7 @@ if projFolder then
 			color = Color3.fromRGB(255, 255, 255),
 			size = 5, -- fired object size
 			shape = Enum.PartType.Ball,
-			price = 250,
+			price = 500,
 			object = asset.Name, -- cloned from Assets/Projectiles
 		}
 		if asset.Name == DEFAULT_SEC then

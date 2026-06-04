@@ -40,6 +40,7 @@ local function startBattle(shipId: string, mainId: string, secId: string, petId:
 	go("PetController", petId)
 	go("EnemyController")
 	go("RemoteShipsController")
+	go("PickupController")
 
 	-- ---- Return-to-hangar flow ---------------------------------------------
 	local returning = false

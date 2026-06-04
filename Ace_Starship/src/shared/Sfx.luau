@@ -5,7 +5,7 @@
 -- Roblox sound so there's never silence. For music, add Sounds named "MusicLobby"
 -- and "MusicBattle" to that same folder.
 --
--- Event names: shoot, bomb, explosion, enemyDown, hit, laser, wave, ui, launch.
+-- Event names: shoot, bomb, explosion, enemyDown, hit, laser, wave, ui, launch, roll, dash, pickup.
 
 local SoundService = game:GetService("SoundService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -35,6 +35,9 @@ local FALLBACK: { [string]: Def } = {
 	wave = { id = "rbxasset://sounds/electronicpingshort.wav", volume = 0.6, pitch = 0.5 },
 	ui = { id = "rbxasset://sounds/button.wav", volume = 0.5 },
 	launch = { id = "rbxasset://sounds/Rocket whoosh 01.wav", volume = 0.7, pitch = 0.8 },
+	roll = { id = "rbxasset://sounds/swoosh.mp3", volume = 0.5, pitch = 1.2 },
+	dash = { id = "rbxasset://sounds/Rocket whoosh 01.wav", volume = 0.55, pitch = 1.15 },
+	pickup = { id = "rbxasset://sounds/electronicpingshort.wav", volume = 0.6, pitch = 1.5 },
 }
 
 local function cleanup(s: Sound)

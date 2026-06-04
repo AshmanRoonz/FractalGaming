@@ -129,4 +129,21 @@ function WeaponVisuals.makeProjectile(def: any, targetSize: number): Model
 	return model
 end
 
+-- Stop + clear particle/trail effects on an object so its smoke/fire vanishes with
+-- it instead of lingering after it's removed.
+function WeaponVisuals.clearEffects(inst: Instance)
+	for _, d in inst:GetDescendants() do
+		if d:IsA("ParticleEmitter") then
+			d.Enabled = false
+			d:Clear()
+		elseif d:IsA("Trail") or d:IsA("Beam") then
+			d.Enabled = false
+		elseif d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+			-- Legacy Fire/Smoke effects have no :Clear(); disabling stops them and
+			-- their lingering flame fades on its own.
+			d.Enabled = false
+		end
+	end
+end
+
 return WeaponVisuals

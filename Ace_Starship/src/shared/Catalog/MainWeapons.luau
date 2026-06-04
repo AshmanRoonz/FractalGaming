@@ -36,7 +36,7 @@ if laserFolder then
 			shape = Enum.PartType.Ball,
 			size = 4, -- object size along the beam
 			spacing = 5, -- gap between stacked objects
-			price = 300,
+			price = 700,
 			object = asset.Name, -- cloned from Assets/Lasers
 		})
 	end

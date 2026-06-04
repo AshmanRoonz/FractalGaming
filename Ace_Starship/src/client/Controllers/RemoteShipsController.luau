@@ -236,6 +236,7 @@ function RemoteShipsController.start()
 			local pos = b.obj:GetPivot().Position
 			local hitTerrain = pos.Y < WorldHeights.groundY(pos.X, pos.Z) or pos.Y > WorldHeights.ceilY(pos.X, pos.Z)
 			if b.life <= 0 or hitTerrain then
+				WeaponVisuals.clearEffects(b.obj)
 				b.obj:Destroy()
 				table.remove(balls, i)
 			end

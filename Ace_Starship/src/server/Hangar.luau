@@ -27,7 +27,7 @@ end
 local BASE = Vector3.new(0, 300, 3000)
 local SLOT_SPACING = 240
 local DISPLAY_SIZE = 60
-local START_BOLTS = 1500 -- Bolts every player starts with (earn more in battle)
+local START_BOLTS = 0 -- Bolts every player starts with (earn it all in battle)
 local SHIP_PRICE = 600 -- cost of any non-starter ship
 -- Ships that are free (owned from the start). Everything else is premium/Bolts.
 local FREE_SHIPS: { [string]: boolean } = { Pyro = true, Corvette = true, Speeder = true }
@@ -40,6 +40,7 @@ local function freshFreeShips(): { [string]: boolean }
 end
 
 local openShopEvent: any = nil -- set in Hangar.start (server -> client shop window)
+local boltsEvent: any = nil -- set in Hangar.start (server -> client live Bolts balance)
 local ASSET_FOOTPRINT = 170 -- scale the hangar asset to roughly this wide
 local ASSET_Y_OFFSET = -50 -- drop the asset onto the ground (tune if it floats)
 -- Correct the imported asset's orientation (it comes in standing on end with
@@ -94,6 +95,14 @@ type Slot = {
 	lastShop: string?,
 }
 local slots: { [Player]: Slot } = {}
+
+-- Push a player's current Bolts balance to their HUD counter.
+local function pushBolts(player: Player)
+	local s = slots[player]
+	if boltsEvent and s then
+		boltsEvent:FireClient(player, s.bolts)
+	end
+end
 local used: { [number]: boolean } = {}
 
 local function part(parent: Instance, size: Vector3, cf: CFrame, color: Color3, material: Enum.Material): BasePart
@@ -353,6 +362,7 @@ local function buyItem(s: Slot, category: string, id: string)
 	if s.bolts >= price then
 		s.bolts -= price
 		ownedSet[id] = true
+		pushBolts(s.owner)
 	end
 end
 
@@ -388,6 +398,7 @@ function Hangar.addBolts(player: Player, amount: number)
 	local s = slots[player]
 	if s then
 		s.bolts += amount
+		pushBolts(player)
 	end
 end
 
@@ -511,6 +522,7 @@ function Hangar.assign(player: Player): Vector3
 		ownedPets = { [Pets[1].id] = true },
 	}
 	showShip(slots[player])
+	pushBolts(player) -- seed the HUD counter with the starting balance
 
 	-- Warm the Game Pass ownership/price caches in the background so the shop
 	-- opens instantly (no web call mid-open).
@@ -602,6 +614,14 @@ function Hangar.start()
 	openShopEvent = Instance.new("RemoteEvent")
 	openShopEvent.Name = "OpenShop"
 	openShopEvent.Parent = ReplicatedStorage
+	-- Live Bolts balance for the HUD counter. Client fires it (no args) to ask for
+	-- its current balance on spawn; server pushes the number back here and on change.
+	boltsEvent = Instance.new("RemoteEvent")
+	boltsEvent.Name = "BoltsChanged"
+	boltsEvent.Parent = ReplicatedStorage
+	boltsEvent.OnServerEvent:Connect(function(player)
+		pushBolts(player)
+	end)
 	local shopAction = Instance.new("RemoteEvent")
 	shopAction.Name = "ShopAction"
 	shopAction.Parent = ReplicatedStorage

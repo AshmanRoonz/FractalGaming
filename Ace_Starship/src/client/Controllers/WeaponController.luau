@@ -119,6 +119,21 @@ local function acquireTarget(origin: Vector3, dir: Vector3)
 	return best
 end
 
+-- Stop + clear any particle/trail effects on an object so its smoke/fire vanishes
+-- with it, instead of lingering for the particle lifetime after it's removed.
+local function clearEffects(inst: Instance)
+	for _, d in inst:GetDescendants() do
+		if d:IsA("ParticleEmitter") then
+			d.Enabled = false
+			d:Clear()
+		elseif d:IsA("Trail") or d:IsA("Beam") then
+			d.Enabled = false
+		elseif d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+			d.Enabled = false
+		end
+	end
+end
+
 function WeaponController.start(mainId: string?, secId: string?)
 	local gen = BattleSession.gen
 	local mainCfg = resolveWeaponDef(MainWeapons, mainId or "laser", true)
@@ -189,11 +204,19 @@ function WeaponController.start(mainId: string?, secId: string?)
 	-- transparency so we can show/hide quickly without losing the mesh's look.
 	local LASER_SEG_SIZE = LASER_OBJ_SIZE
 	local LASER_SPACING = LASER_SEG_SIZE * LASER_STRETCH * 0.85 -- tile the stretched objects
-	type Seg = { model: Model, parts: { { part: BasePart, t: number } }, align: CFrame }
+	type Seg = { model: Model, parts: { { part: BasePart, t: number } }, align: CFrame, effects: { Instance } }
 	local segPool: { Seg } = {}
 	local function setSegVisible(s: Seg, visible: boolean)
 		for _, rec in s.parts do
 			rec.part.Transparency = if visible then rec.t else 1
+		end
+		-- Stop particle/fire/smoke effects on hidden segments (and clear leftovers),
+		-- so the beam's effects only show along the active part of the beam.
+		for _, fx in s.effects do
+			(fx :: any).Enabled = visible
+			if not visible and fx:IsA("ParticleEmitter") then
+				fx:Clear()
+			end
 		end
 	end
 	-- The object's longest local axis + the rotation that lays it along the beam
@@ -219,10 +242,13 @@ function WeaponController.start(mainId: string?, secId: string?)
 			local align, axis = longestAxisInfo(model)
 			local parts = {}
 			local baseParts: { BasePart } = {}
+			local effects: { Instance } = {}
 			for _, d in model:GetDescendants() do
 				if d:IsA("BasePart") then
 					table.insert(baseParts, d)
 					table.insert(parts, { part = d, t = d.Transparency })
+				elseif d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+					table.insert(effects, d)
 				end
 			end
 			-- Single-mesh beam objects: stretch the beam axis for the laser look, and
@@ -236,7 +262,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 				local nz = if axis == "Z" then z.Z * LASER_STRETCH else math.max(z.Z, LASER_MIN_THICK)
 				pp.Size = Vector3.new(nx, ny, nz)
 			end
-			s = { model = model, parts = parts, align = align }
+			s = { model = model, parts = parts, align = align, effects = effects }
 			setSegVisible(s, false)
 			segPool[i] = s
 		end
@@ -528,9 +554,11 @@ function WeaponController.start(mainId: string?, secId: string?)
 				if hitEnemy then
 					EnemyController.damage(hitEnemy, SECONDARY_DMG)
 				end
+				clearEffects(pr.obj)
 				pr.obj:Destroy()
 				table.remove(projectiles, i)
 			elseif pr.life <= 0 then
+				clearEffects(pr.obj)
 				pr.obj:Destroy()
 				table.remove(projectiles, i)
 			end
@@ -569,6 +597,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 						EnemyController.damage(e, BOMB_DAMAGE)
 					end
 				end
+				clearEffects(b.obj)
 				b.obj:Destroy()
 				table.remove(bombs, i)
 			end

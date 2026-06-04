@@ -21,6 +21,7 @@ local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local ShipState = require(script.Parent.ShipState)
 local TerrainController = require(script.Parent.TerrainController)
 local BattleSession = require(script.Parent.BattleSession)
+local Sfx = require(ReplicatedStorage.Shared.Sfx)
 
 local ShipController = {}
 
@@ -32,6 +33,12 @@ local VERT_SPEED = 110 -- studs/sec rise/sink
 local YAW_RATE = math.rad(130) -- how fast the right stick turns the heading
 local PITCH_RATE = math.rad(95)
 local MOUSE_SENS = 0.006 -- radians of turn per pixel of mouse movement
+local TOUCH_LOOK_SENS = 1.4 -- multiplier on touch-stick turn/pitch (higher = more sensitive)
+local GYRO_SENS = 1.3 -- multiplier on how hard device tilt steers
+-- Tilt is read from the device LookVector (components in -1..1), not Euler angles,
+-- to avoid the pitch/yaw gimbal flip. ~0.5 ≈ a 30-degree tilt = full-speed turn.
+local GYRO_TILT_FULL = 0.5 -- LookVector tilt that gives full turn speed
+local GYRO_TILT_DEAD = 0.05 -- ignore tiny tilt jitter
 local MAX_PITCH = math.rad(80) -- clamp so you can't flip fully over
 local MAX_BANK = math.rad(22)
 local BOOST_MULT = 2.1 -- speed multiplier while boosting
@@ -160,6 +167,7 @@ function ShipController.start(shipId: string?)
 		end
 		rolling, rollT, rollDir, lastRoll = true, 0, dir, os.clock()
 		ShipState.invulnUntil = os.clock() + ROLL_DURATION -- i-frames during the roll
+		Sfx.play("roll")
 	end
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe or BattleSession.gen ~= gen then
@@ -177,6 +185,14 @@ function ShipController.start(shipId: string?)
 	-- ---- Touch UI (only on touch devices) ----------------------------------
 	local touchMove, touchLook = Vector2.zero, Vector2.zero
 	local touchUp, touchDown, touchBoost = false, false, false
+	-- Read the touch sticks inline in the flight loop (not a separate connection),
+	-- so touch input has zero frame lag, exactly like the gamepad and mouse.
+	local getMove: (() -> Vector2)? = nil
+	local getLook: (() -> Vector2)? = nil
+	-- Gyro/tilt look state.
+	local gyroOn = false
+	local gyroLatest: CFrame? = nil -- newest device orientation
+	local gyroRef: CFrame? = nil -- orientation captured when gyro was turned on / recentered
 
 	if UserInputService.TouchEnabled then
 		local gui = Instance.new("ScreenGui")
@@ -252,8 +268,8 @@ function ShipController.start(shipId: string?)
 			end
 		end
 
-		local getMove = makeStick(0, 0.5)
-		local getLook = makeStick(0.5, 1)
+		getMove = makeStick(0, 0.5)
+		getLook = makeStick(0.5, 1)
 
 		local function makeButton(text: string, yOffset: number, onHold: (boolean) -> ())
 			local btn = Instance.new("TextButton")
@@ -315,13 +331,33 @@ function ShipController.start(shipId: string?)
 		makeRoll("\u{21BA}", -120, -1) -- left roll
 		makeRoll("\u{21BB}", 120, 1) -- right roll
 
-		RunService.RenderStepped:Connect(function()
-			if BattleSession.gen ~= gen then
-				return
-			end
-			touchMove = getMove()
-			touchLook = getLook()
-		end)
+		-- Gyro/tilt look: only on devices that have a gyroscope. A toggle button
+		-- turns it on (and recenters to however you're holding the device); tilt then
+		-- steers. Tilt further = turn faster.
+		if UserInputService.GyroscopeEnabled then
+			UserInputService.DeviceRotationChanged:Connect(function(_input, cf)
+				gyroLatest = cf
+			end)
+			local gyroBtn = Instance.new("TextButton")
+			gyroBtn.Size = UDim2.fromOffset(90, 60)
+			gyroBtn.AnchorPoint = Vector2.new(1, 1)
+			gyroBtn.Position = UDim2.new(1, -30, 1, -330)
+			gyroBtn.BackgroundColor3 = Color3.fromRGB(70, 60, 110)
+			gyroBtn.BackgroundTransparency = 0.3
+			gyroBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			gyroBtn.TextScaled = true
+			gyroBtn.Text = "GYRO: OFF"
+			gyroBtn.Parent = gui
+			local gc = Instance.new("UICorner")
+			gc.CornerRadius = UDim.new(0.2, 0)
+			gc.Parent = gyroBtn
+			gyroBtn.Activated:Connect(function()
+				gyroOn = not gyroOn
+				gyroRef = gyroLatest -- recenter to the current hold position
+				gyroBtn.Text = if gyroOn then "GYRO: ON" else "GYRO: OFF"
+				gyroBtn.BackgroundColor3 = if gyroOn then Color3.fromRGB(90, 200, 120) else Color3.fromRGB(70, 60, 110)
+			end)
+		end
 	end
 
 	-- ---- Health HUD --------------------------------------------------------
@@ -380,8 +416,8 @@ function ShipController.start(shipId: string?)
 	local REGEN_RATE = 9 -- health per second
 	local prevHealth = ShipState.health
 
-	-- Gamepad altitude buttons: A = down, B = up.
-	local padUp, padDown = false, false
+	-- Gamepad: A = down, B = up, click left stick (L3) = boost.
+	local padUp, padDown, padBoost = false, false, false
 	UserInputService.InputBegan:Connect(function(input)
 		if BattleSession.gen ~= gen then
 			return
@@ -390,6 +426,8 @@ function ShipController.start(shipId: string?)
 			padUp = true
 		elseif input.KeyCode == Enum.KeyCode.ButtonA then
 			padDown = true
+		elseif input.KeyCode == Enum.KeyCode.ButtonL3 then
+			padBoost = true
 		end
 	end)
 	UserInputService.InputEnded:Connect(function(input)
@@ -400,6 +438,8 @@ function ShipController.start(shipId: string?)
 			padUp = false
 		elseif input.KeyCode == Enum.KeyCode.ButtonA then
 			padDown = false
+		elseif input.KeyCode == Enum.KeyCode.ButtonL3 then
+			padBoost = false
 		end
 	end)
 
@@ -411,6 +451,8 @@ function ShipController.start(shipId: string?)
 	local camYaw, camPitch = 0, 0
 	local pos = Vector3.new(0, 100, 0) -- spawn in the gap between floor and ceiling
 	local boostEnergy = BOOST_MAX
+	local boostDepleted = false -- true once drained to 0; locks boost until it recharges
+	local wasBoosting = false -- play the dash whoosh only on the frame boost kicks in
 
 	RunService.RenderStepped:Connect(function(dt)
 		if BattleSession.gen ~= gen then
@@ -418,11 +460,37 @@ function ShipController.start(shipId: string?)
 		end
 		local padMove = gamepadStick(Enum.KeyCode.Thumbstick1)
 		local padLook = gamepadStick(Enum.KeyCode.Thumbstick2)
+		-- Sample the touch sticks right here (no frame lag), same as the gamepad.
+		if getMove then
+			touchMove = getMove()
+		end
+		if getLook then
+			touchLook = getLook()
+		end
+
+		-- Gyro/tilt -> steering axes (tilt further = turn faster), folded into the same
+		-- look channel as the stick. We read the device LookVector tilt RELATIVE to the
+		-- recenter pose; reading vector components (not Euler angles / Delta) avoids the
+		-- gimbal flip where yaw bleeds into pitch (per Roblox devforum tilt-steering).
+		local gyroTurn, gyroPitch = 0, 0
+		if gyroOn and gyroLatest and gyroRef then
+			local lv = (gyroRef :: CFrame):ToObjectSpace(gyroLatest :: CFrame).LookVector
+			local function tiltAxis(t: number): number
+				local s = if t >= 0 then 1 else -1
+				local mag = math.max(0, math.abs(t) - GYRO_TILT_DEAD)
+				return s * math.clamp(mag / GYRO_TILT_FULL, 0, 1) * GYRO_SENS
+			end
+			gyroTurn = tiltAxis(-lv.X) -- tilt device left/right -> turn
+			gyroPitch = tiltAxis(lv.Y) -- tilt device forward/back -> pitch
+		end
+
+		local lookX = touchLook.X * TOUCH_LOOK_SENS + gyroTurn
+		local lookY = touchLook.Y * TOUCH_LOOK_SENS + gyroPitch
 
 		local moveFwd = math.clamp(keyAxis({ Enum.KeyCode.S }, { Enum.KeyCode.W }) + (-touchMove.Y) + padMove.Y, -1, 1)
 		local moveStrafe = math.clamp(keyAxis({ Enum.KeyCode.A }, { Enum.KeyCode.D }) + touchMove.X + padMove.X, -1, 1)
-		local turn = math.clamp(keyAxis({ Enum.KeyCode.Left }, { Enum.KeyCode.Right }) + touchLook.X + padLook.X, -1, 1)
-		local pitchIn = math.clamp(keyAxis({ Enum.KeyCode.Up }, { Enum.KeyCode.Down }) + touchLook.Y + (-padLook.Y), -1, 1)
+		local turn = math.clamp(keyAxis({ Enum.KeyCode.Left }, { Enum.KeyCode.Right }) + lookX + padLook.X, -1, 1)
+		local pitchIn = math.clamp(keyAxis({ Enum.KeyCode.Up }, { Enum.KeyCode.Down }) + lookY + (-padLook.Y), -1, 1)
 
 		-- Vertical (Y-axis) movement: touch UP/DN buttons, gamepad A/B, or keys.
 		local vert = 0
@@ -436,14 +504,25 @@ function ShipController.start(shipId: string?)
 		-- Speed boost: hold Shift / left trigger / BOOST to fly faster while energy
 		-- lasts; recharges when off.
 		local boostHeld = touchBoost
+			or padBoost -- gamepad left-stick click (tracked via input events)
 			or UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
-			or UserInputService:IsKeyDown(Enum.KeyCode.ButtonL2)
-		local boosting = boostHeld and boostEnergy > 0 and ShipState.health > 0
+		local boosting = boostHeld and not boostDepleted and ShipState.health > 0
 		if boosting then
-			boostEnergy = math.max(0, boostEnergy - BOOST_DRAIN * dt)
+			boostEnergy -= BOOST_DRAIN * dt
+			if boostEnergy <= 0 then
+				boostEnergy = 0
+				boostDepleted = true -- lock out until it recharges
+			end
 		else
 			boostEnergy = math.min(BOOST_MAX, boostEnergy + BOOST_RECHARGE * dt)
+			if boostDepleted and boostEnergy >= BOOST_MAX * 0.35 then
+				boostDepleted = false -- usable again after recharging ~a third
+			end
 		end
+		if boosting and not wasBoosting then
+			Sfx.play("dash") -- rising-edge whoosh as the afterburner lights
+		end
+		wasBoosting = boosting
 		local speedMult = if boosting then BOOST_MULT else 1
 
 		-- Mouse-look: lock the cursor and steer with the mouse while alive; free it
@@ -514,13 +593,18 @@ function ShipController.start(shipId: string?)
 		-- Chase camera behind the look direction.
 		local camPos = (CFrame.new(pos) * lookCF * CFrame.new(0, CAM_HEIGHT, CAM_DIST)).Position
 		local goal = CFrame.lookAt(camPos, pos, Vector3.yAxis)
-		camera.CFrame = camera.CFrame:Lerp(goal, math.clamp(dt * 8, 0, 1))
+		-- Frame-rate independent so it stays tight at low mobile FPS (was dt*8, which
+		-- trailed and read as "input delay" on touch).
+		camera.CFrame = camera.CFrame:Lerp(goal, 1 - math.exp(-dt * 20))
 
 		-- Boost feedback: widen the FOV + update the energy bar.
 		local fovTarget = if boosting then BOOST_FOV else BASE_FOV
 		camera.FieldOfView = camera.FieldOfView + (fovTarget - camera.FieldOfView) * math.clamp(dt * 6, 0, 1)
 		boostFill.Size = UDim2.fromScale(boostEnergy / BOOST_MAX, 1)
-		boostFill.BackgroundColor3 = if boosting then Color3.fromRGB(150, 230, 255) else Color3.fromRGB(90, 200, 255)
+		boostFill.BackgroundColor3 = if boostDepleted
+			then Color3.fromRGB(120, 130, 150) -- locked out, recharging
+			elseif boosting then Color3.fromRGB(150, 230, 255)
+			else Color3.fromRGB(90, 200, 255)
 
 		-- ---- Health: regen, damage flash, death/respawn --------------------
 		if ShipState.health < prevHealth then
