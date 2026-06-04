@@ -51,12 +51,12 @@ end
 -- empty ("") to keep Roblox's default sky. You can paste just the number or the
 -- full rbxassetid://... string.
 local SKYBOX = {
-	Up = "rbxassetid://99169773652835", -- top.png
-	Dn = "rbxassetid://80244383769929", -- bottom.png
-	Lf = "rbxassetid://124926972111468", -- wall4.png
-	Rt = "rbxassetid://124926972111468", -- wall4.png (reused; wall2 dropped)
-	Ft = "rbxassetid://123854486300811", -- wall1.png
-	Bk = "rbxassetid://114056284235262", -- wall3.png
+	Up = "rbxassetid://132381318019359", -- top_1.png (greyscale)
+	Dn = "rbxassetid://85569326507257", -- bottom_1.png
+	Lf = "rbxassetid://104002422471987", -- wall4_2.png
+	Rt = "rbxassetid://104002422471987", -- wall4_2.png (reused; no wall2)
+	Ft = "rbxassetid://140301767713852", -- wall1_2.png
+	Bk = "rbxassetid://98401617886686", -- wall3_2.png
 }
 do
 	local Lighting = game:GetService("Lighting")

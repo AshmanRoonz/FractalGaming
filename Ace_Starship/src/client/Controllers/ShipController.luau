@@ -588,6 +588,7 @@ function ShipController.start(shipId: string?)
 		-- Publish so the streaming tunnel follows the ship.
 		ShipState.position = pos
 		ShipState.forward = lookCF.LookVector
+		ShipState.strafe = moveStrafe
 
 		-- Replicate our transform to other players.
 		sendAccum += dt

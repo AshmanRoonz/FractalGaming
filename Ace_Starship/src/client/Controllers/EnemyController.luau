@@ -163,6 +163,12 @@ local function sizeMul(src: Instance?): number
 end
 
 local function normalizeTo(model: Model, target: number)
+	-- Reset any baked Studio scale to native first, so ScaleTo (which is absolute,
+	-- relative to the ORIGINAL size) lands on exactly `target` no matter how the
+	-- model was scaled when it was built. This is the recurring tiny-boss culprit.
+	pcall(function()
+		model:ScaleTo(1)
+	end)
 	local longest = longestAxis(model)
 	if longest > 0 then
 		pcall(function()
@@ -289,10 +295,17 @@ function EnemyController.start()
 			return r
 		end
 		local model, root, radius = buildEnemy(kind, boss)
-		-- Per-model facing correction: set a number attribute "YawOffset" (degrees)
-		-- on the model in Assets/Enemies or /Bosses if it's built facing the wrong way.
-		local yaw = model:GetAttribute("YawOffset")
-		local faceFix = if typeof(yaw) == "number" then CFrame.Angles(0, math.rad(yaw), 0) else CFrame.identity
+		-- Orientation: the game turns the enemy to face you, so we start from however
+		-- you've ROTATED the model in Studio (in Assets/Enemies or /Bosses) as its rest
+		-- pose, then apply optional attribute fine-tune. So: just rotate the model in
+		-- Studio until it stands upright facing -Z (forward) and it'll face the player.
+		-- Fine-tune attributes (degrees) if needed: YawOffset / PitchOffset / RollOffset.
+		local function deg(attr: string): number
+			local a = model:GetAttribute(attr)
+			return if typeof(a) == "number" then math.rad(a) else 0
+		end
+		local authored = model:GetPivot().Rotation -- whatever you set it to in Studio
+		local faceFix = authored * CFrame.Angles(deg("PitchOffset"), deg("YawOffset"), deg("RollOffset"))
 		model:PivotTo(cf)
 		model.Parent = container
 		r = {

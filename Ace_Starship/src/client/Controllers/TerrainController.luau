@@ -47,12 +47,16 @@ local AIR = Enum.Material.Air
 -- Re-skin the whole world by changing THEME below. `cap`/`capY` paint high peaks
 -- (e.g. snow), `base`/`baseY` paint low valleys (e.g. lava); both optional.
 local Mat = Enum.Material
+-- `sky` is a ColorCorrection filter over the whole view (skybox included). The base
+-- skybox is RED, so a plain tint can't make it green/blue; each theme first DESATURATES
+-- the red toward grey (sat) then multiplies a tint, with a small brightness nudge.
+-- Volcanic keeps the red (sat ~0, warm tint).
 local THEMES = {
-	rocky = { ground = Mat.Rock, ceil = Mat.Basalt, fog = Color3.fromRGB(150, 180, 210) },
-	grassy = { ground = Mat.Grass, ceil = Mat.LeafyGrass, fog = Color3.fromRGB(168, 205, 158) },
-	snowcap = { ground = Mat.Grass, cap = Mat.Snow, capY = 55, ceil = Mat.Snow, fog = Color3.fromRGB(214, 226, 240) },
-	frozen = { ground = Mat.Glacier, cap = Mat.Snow, capY = 40, ceil = Mat.Ice, fog = Color3.fromRGB(198, 226, 242) },
-	volcanic = { ground = Mat.Basalt, base = Mat.CrackedLava, baseY = 15, ceil = Mat.Rock, fog = Color3.fromRGB(72, 46, 42) },
+	rocky = { ground = Mat.Rock, ceil = Mat.Basalt, fog = Color3.fromRGB(150, 180, 210), sky = { tint = Color3.fromRGB(205, 215, 232), sat = -0.45, bright = 0.02 } },
+	grassy = { ground = Mat.Grass, ceil = Mat.LeafyGrass, fog = Color3.fromRGB(168, 205, 158), sky = { tint = Color3.fromRGB(190, 240, 180), sat = -0.5, bright = 0.03 } },
+	snowcap = { ground = Mat.Grass, cap = Mat.Snow, capY = 55, ceil = Mat.Snow, fog = Color3.fromRGB(214, 226, 240), sky = { tint = Color3.fromRGB(226, 238, 250), sat = -0.6, bright = 0.06 } },
+	frozen = { ground = Mat.Glacier, cap = Mat.Snow, capY = 40, ceil = Mat.Ice, fog = Color3.fromRGB(198, 226, 242), sky = { tint = Color3.fromRGB(200, 228, 250), sat = -0.6, bright = 0.05 } },
+	volcanic = { ground = Mat.Basalt, base = Mat.CrackedLava, baseY = 15, ceil = Mat.Rock, fog = Color3.fromRGB(72, 46, 42), sky = { tint = Color3.fromRGB(255, 200, 175), sat = 0.05, bright = 0.0 } },
 }
 -- The world cycles through these as you progress (a new biome after each boss).
 -- Newly built terrain uses the current theme, so it transitions gradually as you
@@ -186,6 +190,17 @@ function TerrainController.start()
 	Lighting.FogStart = FOG_START
 	Lighting.FogEnd = FOG_END
 	local targetFog = currentTheme.fog
+
+	-- Sky/scene color filter that shifts with the biome (skybox included).
+	local cc = Instance.new("ColorCorrectionEffect")
+	cc.Name = "BiomeSky"
+	cc.TintColor = currentTheme.sky.tint
+	cc.Saturation = currentTheme.sky.sat
+	cc.Brightness = currentTheme.sky.bright
+	cc.Parent = Lighting
+	BattleSession.track(cc) -- removed on return to hangar (sky goes back to plain red)
+	local targetSky = currentTheme.sky
+
 	-- Restore open visibility back in the hangar on teardown.
 	BattleSession.onCleanup(function()
 		Lighting.FogStart = 0
@@ -203,6 +218,7 @@ function TerrainController.start()
 		local idx = math.floor((n - 1) / THEME_EVERY) % #themeOrder + 1
 		currentTheme = themeOrder[idx]
 		targetFog = currentTheme.fog
+		targetSky = currentTheme.sky
 	end)
 
 	local builtG: { [string]: boolean } = {} -- chunks with the ground shell built
@@ -225,6 +241,11 @@ function TerrainController.start()
 			return
 		end
 		Lighting.FogColor = Lighting.FogColor:Lerp(targetFog, math.clamp(dt * 0.5, 0, 1)) -- ease biome fog
+		-- Ease the sky/scene filter toward the current biome (skybox shifts color).
+		local a = math.clamp(dt * 0.5, 0, 1)
+		cc.TintColor = cc.TintColor:Lerp(targetSky.tint, a)
+		cc.Saturation = cc.Saturation + (targetSky.sat - cc.Saturation) * a
+		cc.Brightness = cc.Brightness + (targetSky.bright - cc.Brightness) * a
 		local pos = ShipState.position
 		local scx = math.floor(pos.X / CHUNK)
 		local scz = math.floor(pos.Z / CHUNK)

@@ -121,8 +121,14 @@ local function killEnemy(e: EnemyRec, crediter: Player?)
 	if waveActive and #enemies == 0 then
 		waveActive = false
 		nextWaveAt = os.clock() + WAVE_DELAY
-		for p in battling do
+		for p, rec in battling do
 			Hangar.addBolts(p, BOLTS_PER_WAVE) -- everyone gets the wave-clear bonus
+			-- Bank the wave only if it's this player's next continuous one (earned+1),
+			-- so jumping into a higher-wave game doesn't save progress you skipped.
+			if wave == rec.earned + 1 then
+				rec.earned = wave
+				Hangar.bankWave(p, wave)
+			end
 		end
 	end
 end
@@ -244,6 +250,7 @@ local function findEnemy(id: number): EnemyRec?
 end
 
 function Battle.playerLaunched(player: Player, shipId: string?, mainId: string?, secId: string?, petId: string?)
+	local wasEmpty = next(battling) == nil
 	battling[player] = {
 		cf = CFrame.new(0, 100, 0),
 		shipId = shipId or "starter_skiff",
@@ -251,7 +258,20 @@ function Battle.playerLaunched(player: Player, shipId: string?, mainId: string?,
 		secId = secId or "Missile",
 		petId = petId or "orb",
 		beamHit = nil,
+		earned = Hangar.getMaxWave(player), -- only banks waves continuous from here
 	}
+	-- The first player into an empty battle sets the starting wave (1..their max+1).
+	-- Joiners drop into the wave already in progress.
+	if wasEmpty then
+		local start = math.max(1, Hangar.getStartWave(player))
+		wave = start - 1
+		bossTier = math.floor((start - 1) / BOSS_EVERY) -- so bosses scale to the wave
+		waveActive = false
+		nextWaveAt = os.clock() + 3
+		table.clear(enemies)
+		table.clear(balls)
+		table.clear(drops)
+	end
 end
 
 function Battle.playerLeft(player: Player)

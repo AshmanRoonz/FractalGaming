@@ -51,6 +51,8 @@ function PetController.start(petId: string?)
 	local pos = ShipState.position
 	local nextShot = 0
 	local bob = 0
+	local sideTarget = 1 -- +1 = ship's right (default), -1 = left
+	local side = 1 -- smoothed, so it glides across instead of snapping
 
 	RunService.Heartbeat:Connect(function(dt)
 		if BattleSession.gen ~= gen then
@@ -62,8 +64,16 @@ function PetController.start(petId: string?)
 		local right = fwd:Cross(Vector3.yAxis)
 		right = if right.Magnitude > 0.01 then right.Unit else Vector3.xAxis
 
+		-- Flip to the opposite side when you strafe toward the pet (so it doesn't slide
+		-- between the ship and camera). Hysteresis stops it flickering near neutral.
+		local strafe = ShipState.strafe or 0
+		if strafe * sideTarget > 0.3 then -- strafing toward the side the pet is on
+			sideTarget = -sideTarget
+		end
+		side = side + (sideTarget - side) * math.clamp(dt * 4, 0, 1)
+
 		-- Trail the ship with a gentle bob.
-		local goal = shipPos + right * SIDE + Vector3.new(0, UP + math.sin(bob * 2) * 1.5, 0) - fwd * BACK
+		local goal = shipPos + right * (SIDE * side) + Vector3.new(0, UP + math.sin(bob * 2) * 1.5, 0) - fwd * BACK
 		pos = pos:Lerp(goal, math.clamp(dt * 5, 0, 1))
 
 		-- Face the nearest visible enemy (else look where the ship flies).

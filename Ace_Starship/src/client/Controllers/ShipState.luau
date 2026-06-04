@@ -6,6 +6,7 @@
 local ShipState = {
 	position = Vector3.new(0, 100, 0),
 	forward = Vector3.new(0, 0, -1), -- unit heading the ship is looking/flying
+	strafe = 0, -- current lateral input (-1 left .. +1 right), drives the pet's side
 	beamHit = (nil :: Vector3?), -- where our main beam is hitting (for replication)
 
 	maxHealth = 100,

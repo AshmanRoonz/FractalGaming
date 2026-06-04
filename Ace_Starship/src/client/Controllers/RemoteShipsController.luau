@@ -28,7 +28,7 @@ local PET_SIDE, PET_UP, PET_BACK = 13, 7, 5
 -- Team clothesline tether: a glowing line from your ship to each teammate. Always
 -- shown as a locator, but goes bright/hot within CL_HOT_LEN (matches the server's
 -- damaging range) and fades out toward CL_FADE_LEN.
-local TETHER_THICK = 1.4
+local TETHER_THICK = 0.55
 local CL_HOT_LEN = 320 -- within this it's actively cutting (server CL_MAX_LEN)
 local CL_FADE_LEN = 1500 -- past this the locator line is fully faded
 local TETHER_HOT = Color3.fromRGB(120, 255, 180)
@@ -252,11 +252,11 @@ function RemoteShipsController.start()
 				rec.tether.CFrame = CFrame.lookAt((myPos + theirPos) / 2, theirPos)
 				if len <= CL_HOT_LEN then
 					rec.tether.Color = TETHER_HOT
-					rec.tether.Transparency = 0.1 -- actively cutting
+					rec.tether.Transparency = 0.45 -- actively cutting, but see-through
 				else
 					rec.tether.Color = TETHER_COLD
 					local f = math.clamp((len - CL_HOT_LEN) / (CL_FADE_LEN - CL_HOT_LEN), 0, 1)
-					rec.tether.Transparency = 0.35 + f * 0.6 -- fade with distance
+					rec.tether.Transparency = 0.6 + f * 0.35 -- faint, fading with distance
 				end
 			else
 				rec.tether.Transparency = 1

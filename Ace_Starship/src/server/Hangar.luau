@@ -96,6 +96,9 @@ type Slot = {
 	petLabel: TextLabel,
 	bolts: number,
 	kills: number,
+	maxWave: number, -- highest wave continuously earned (persists)
+	startWave: number, -- wave the player has chosen to begin the next battle at
+	waveLabel: TextLabel?,
 	previewMounts: { [string]: Vector3 },
 	previewModels: { [string]: Instance? },
 	ownedShips: { [string]: boolean },
@@ -111,6 +114,13 @@ local function pushBolts(player: Player)
 	local s = slots[player]
 	if boltsEvent and s then
 		boltsEvent:FireClient(player, s.bolts)
+	end
+end
+
+-- Update the Wave Select console label for a slot.
+local function refreshWaveLabel(s: Slot)
+	if s.waveLabel then
+		s.waveLabel.Text = `START: WAVE {s.startWave}\nbest {s.maxWave}`
 	end
 end
 
@@ -537,6 +547,36 @@ function Hangar.addKill(player: Player)
 	end
 end
 
+-- Wave progression API (used by Battle).
+function Hangar.getMaxWave(player: Player): number
+	local s = slots[player]
+	return if s then s.maxWave else 0
+end
+
+function Hangar.getStartWave(player: Player): number
+	local s = slots[player]
+	return if s then s.startWave else 1
+end
+
+-- Bank a newly cleared wave (Battle only calls this when it's continuously earned).
+function Hangar.bankWave(player: Player, n: number)
+	local s = slots[player]
+	if s and n > s.maxWave then
+		s.maxWave = n
+		refreshWaveLabel(s)
+	end
+end
+
+-- The bay console nudges the chosen start wave (clamped to 1..earned max + 1).
+function Hangar.adjustStartWave(player: Player, delta: number)
+	local s = slots[player]
+	if not s then
+		return
+	end
+	s.startWave = math.clamp(s.startWave + delta, 1, math.max(1, s.maxWave + 1))
+	refreshWaveLabel(s)
+end
+
 local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, TextLabel, TextLabel, TextLabel)
 	local model = Instance.new("Model")
 	model.Name = "Hangar"
@@ -622,8 +662,46 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 		openShop(plr, "pet")
 	end)
 
+	-- Wave Select console: nudge which wave you'll launch into (1..earned max+1).
+	local waveLabel
+	do
+		local cz = PODIUM_Z - 22 -- in front of the shop row, toward the pad
+		local base = part(model, Vector3.new(9, 5, 3), CFrame.new(center + Vector3.new(0, 2.5, cz)), Color3.fromRGB(40, 48, 70), Enum.Material.Metal)
+		local function waveBtn(dx: number, text: string, delta: number)
+			local b = part(model, Vector3.new(3, 3, 3), CFrame.new(center + Vector3.new(dx, 5.5, cz)), Color3.fromRGB(80, 140, 230), Enum.Material.Neon)
+			local prompt = Instance.new("ProximityPrompt")
+			prompt.ActionText = text
+			prompt.HoldDuration = 0
+			prompt.MaxActivationDistance = 9
+			prompt.RequiresLineOfSight = false
+			prompt.Parent = b
+			prompt.Triggered:Connect(function(plr)
+				if plr == owner then
+					Hangar.adjustStartWave(plr, delta)
+				end
+			end)
+		end
+		waveBtn(-4.5, "Wave -1", -1)
+		waveBtn(4.5, "Wave +1", 1)
+		waveLabel = Instance.new("TextLabel")
+		waveLabel.Size = UDim2.fromScale(1, 1)
+		waveLabel.BackgroundTransparency = 1
+		waveLabel.Font = Enum.Font.GothamBold
+		waveLabel.TextScaled = true
+		waveLabel.TextColor3 = Color3.fromRGB(170, 230, 255)
+		waveLabel.TextStrokeTransparency = 0.4
+		waveLabel.Text = "START: WAVE 1\nbest 0"
+		local wbb = Instance.new("BillboardGui")
+		wbb.Size = UDim2.fromOffset(210, 66)
+		wbb.StudsOffset = Vector3.new(0, 6, 0)
+		wbb.MaxDistance = 110
+		wbb.Adornee = base
+		waveLabel.Parent = wbb
+		wbb.Parent = base
+	end
+
 	model.Parent = workspace
-	return model, nameLabel, mainLabel, secLabel, petLabel, mounts
+	return model, nameLabel, mainLabel, secLabel, petLabel, mounts, waveLabel
 end
 
 local function freeIndex(): number
@@ -660,6 +738,7 @@ local function saveProfile(player: Player)
 	local data = {
 		bolts = s.bolts,
 		kills = s.kills,
+		maxWave = s.maxWave,
 		shipId = s.shipId,
 		mainId = s.mainId,
 		secId = s.secId,
@@ -686,6 +765,11 @@ local function applyProfile(player: Player, saved: { [string]: any })
 	if type(saved.kills) == "number" then
 		s.kills = saved.kills
 	end
+	if type(saved.maxWave) == "number" then
+		s.maxWave = saved.maxWave
+		s.startWave = s.maxWave + 1 -- default to your frontier; the console can lower it
+	end
+	refreshWaveLabel(s)
 	if type(saved.ownedShips) == "table" then
 		s.ownedShips = saved.ownedShips
 	end
@@ -728,7 +812,7 @@ function Hangar.assign(player: Player): Vector3
 	local index = freeIndex()
 	used[index] = true
 	local center = BASE + Vector3.new(0, 0, index * SLOT_SPACING)
-	local model, nameLabel, mainLabel, secLabel, petLabel, mounts = buildBay(player, center)
+	local model, nameLabel, mainLabel, secLabel, petLabel, mounts, waveLabel = buildBay(player, center)
 	slots[player] = {
 		index = index,
 		owner = player,
@@ -746,6 +830,9 @@ function Hangar.assign(player: Player): Vector3
 		petLabel = petLabel,
 		bolts = START_BOLTS,
 		kills = 0,
+		maxWave = 0,
+		startWave = 1,
+		waveLabel = waveLabel,
 		previewMounts = mounts,
 		previewModels = {},
 		ownedShips = freshFreeShips(),
