@@ -13,7 +13,7 @@ local LobbyController = {}
 
 local launched = false -- module-level so a return-to-hangar can reset it
 
-local function startBattle(shipId: string, mainId: string, secId: string, petId: string)
+local function startBattle(shipId: string, mainId: string, secId: string, petId: string, petId2: string?, el1: string?, el2: string?)
 	local Controllers = script.Parent
 	local BattleSession = require(Controllers.BattleSession)
 	local ShipState = require(Controllers.ShipState)
@@ -37,7 +37,7 @@ local function startBattle(shipId: string, mainId: string, secId: string, petId:
 	go("ShipController", shipId)
 	go("TerrainController")
 	go("WeaponController", mainId, secId)
-	go("PetController", petId)
+	go("PetController", petId) -- single pet (elemental/2-pet system disabled)
 	go("EnemyController")
 	go("RemoteShipsController")
 	go("PickupController")
@@ -171,13 +171,13 @@ function LobbyController.start()
 	title.Text = "ACE STARSHIP"
 	title.Parent = gui
 
-	beginBattle.OnClientEvent:Connect(function(shipId, mainId, secId, petId)
+	beginBattle.OnClientEvent:Connect(function(shipId, mainId, secId, petId, petId2, el1, el2)
 		if launched then
 			return
 		end
 		launched = true
 		gui.Enabled = false -- hide the title while flying (kept for next time)
-		startBattle(shipId, mainId, secId, petId)
+		startBattle(shipId, mainId, secId, petId, petId2, el1, el2)
 	end)
 end
 

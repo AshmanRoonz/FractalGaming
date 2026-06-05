@@ -14,6 +14,7 @@ export type PetDef = {
 	damage: number,
 	cooldown: number,
 	price: number,
+	element: string?, -- "fire" | "cold" | "lightning" | "water" (drives status reactions)
 	object: string?,
 	yawOffset: number?, -- degrees to correct which way the model faces (0 if it faces -Z)
 }
@@ -26,10 +27,10 @@ local FACING_FIX: { [string]: number } = {
 }
 
 local Pets: { PetDef } = {
-	{ id = "orb", displayName = "Spark Orb", bodyColor = Color3.fromRGB(90, 230, 170), laserColor = Color3.fromRGB(120, 255, 170), orbSize = 3.6, range = 360, damage = 14, cooldown = 0.5, price = 0 },
-	{ id = "ember", displayName = "Ember Orb", bodyColor = Color3.fromRGB(255, 130, 70), laserColor = Color3.fromRGB(255, 150, 60), orbSize = 3.8, range = 360, damage = 20, cooldown = 0.55, price = 800 },
-	{ id = "frost", displayName = "Frost Orb", bodyColor = Color3.fromRGB(120, 200, 255), laserColor = Color3.fromRGB(150, 220, 255), orbSize = 3.8, range = 440, damage = 14, cooldown = 0.45, price = 1000 },
-	{ id = "void", displayName = "Void Orb", bodyColor = Color3.fromRGB(185, 120, 255), laserColor = Color3.fromRGB(205, 130, 255), orbSize = 4.2, range = 400, damage = 24, cooldown = 0.6, price = 1500 },
+	{ id = "orb", displayName = "Spark Orb", element = "lightning", bodyColor = Color3.fromRGB(120, 230, 255), laserColor = Color3.fromRGB(150, 240, 255), orbSize = 3.6, range = 360, damage = 14, cooldown = 0.5, price = 0 },
+	{ id = "ember", displayName = "Ember Orb", element = "fire", bodyColor = Color3.fromRGB(255, 130, 70), laserColor = Color3.fromRGB(255, 150, 60), orbSize = 3.8, range = 360, damage = 20, cooldown = 0.55, price = 800 },
+	{ id = "frost", displayName = "Frost Orb", element = "cold", bodyColor = Color3.fromRGB(150, 210, 255), laserColor = Color3.fromRGB(180, 230, 255), orbSize = 3.8, range = 440, damage = 14, cooldown = 0.45, price = 1000 },
+	{ id = "void", displayName = "Tide Orb", element = "water", bodyColor = Color3.fromRGB(70, 150, 240), laserColor = Color3.fromRGB(90, 170, 255), orbSize = 4.2, range = 400, damage = 16, cooldown = 0.5, price = 1500 },
 }
 
 -- Append a pet per asset dropped in Assets/Pets (Studio); uses that model as the body.
@@ -47,6 +48,7 @@ if petFolder then
 			damage = 18,
 			cooldown = 0.5,
 			price = 1200,
+			element = "lightning", -- default; tune per-asset later
 			object = asset.Name,
 			yawOffset = FACING_FIX[asset.Name] or 0, -- no flip unless listed in FACING_FIX
 		})

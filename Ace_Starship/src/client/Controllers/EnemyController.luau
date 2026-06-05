@@ -16,6 +16,7 @@ local BattleSession = require(script.Parent.BattleSession)
 local Sfx = require(ReplicatedStorage.Shared.Sfx)
 local WeaponVisuals = require(ReplicatedStorage.Shared.WeaponVisuals)
 local SecondaryWeapons = require(ReplicatedStorage.Shared.Catalog.SecondaryWeapons)
+local Quality = require(ReplicatedStorage.Shared.Quality)
 
 local EnemyController = {}
 
@@ -45,6 +46,9 @@ local function normalize(name: string): string
 	return (name:gsub("%s", "")):lower() -- "Siren Head" -> "sirenhead"
 end
 local function roar(root: BasePart, kind: string)
+	if Quality.level == "low" then
+		return -- skip the many concurrent positional roars on weak devices
+	end
 	local template: Sound? = nil
 	if normalize(kind) == "sirenhead" and soundFolder then
 		local sh = soundFolder:FindFirstChild("sirenhead") or soundFolder:FindFirstChild("Sirenhead")
@@ -75,10 +79,10 @@ end
 EnemyController.enemies = {} :: { any }
 
 -- Report a hit to the server (called by WeaponController / PetController).
-function EnemyController.damage(enemy: any, amount: number)
+function EnemyController.damage(enemy: any, amount: number, element: string?)
 	local ev = ReplicatedStorage:FindFirstChild("DamageEnemy")
 	if ev then
-		(ev :: RemoteEvent):FireServer(enemy.id, amount)
+		(ev :: RemoteEvent):FireServer(enemy.id, amount, element)
 	end
 end
 
@@ -200,11 +204,21 @@ local function buildEnemy(kind: string, boss: boolean): (Model, BasePart, number
 		model.PrimaryPart = p
 	end
 	if model then
+		-- On Low, strip any VFX/lights baked into the monster model (these are tablet cost).
+		-- NOTE: we do NOT force RenderFidelity here -- Performance fidelity makes some
+		-- high-detail meshes render invisible/broken, and default already LODs at distance.
+		local low = Quality.level == "low"
 		for _, d in model:GetDescendants() do
 			if d:IsA("BasePart") then
 				d.Anchored = true
 				d.CanCollide = false
 				d.CastShadow = false
+			elseif low then
+				if d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Fire") or d:IsA("Smoke") or d:IsA("Sparkles") then
+					d.Enabled = false
+				elseif d:IsA("Light") then
+					d:Destroy()
+				end
 			end
 		end
 		if not model.PrimaryPart then
@@ -286,8 +300,59 @@ function EnemyController.start()
 	local waveEvent = ReplicatedStorage:WaitForChild("WaveEvent")
 	local playerHit = ReplicatedStorage:WaitForChild("PlayerHit")
 
-	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number, faceFix: CFrame }
+	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number, faceFix: CFrame, highlight: Highlight, status: number, shield: BasePart? }
 	local byId: { [number]: Rec } = {}
+
+	-- Formation-core shield bubble: a translucent ForceField sphere while invulnerable.
+	local function applyShield(r: Rec, sh: boolean)
+		if sh and not r.shield then
+			local b = Instance.new("Part")
+			b.Shape = Enum.PartType.Ball
+			b.Anchored = true
+			b.CanCollide = false
+			b.CastShadow = false
+			b.Material = Enum.Material.ForceField
+			b.Color = Color3.fromRGB(120, 200, 255)
+			b.Transparency = 0.4
+			local d = r.radius * 2.6
+			b.Size = Vector3.new(d, d, d)
+			b.Parent = container
+			r.shield = b
+		elseif not sh and r.shield then
+			r.shield:Destroy()
+			r.shield = nil
+		end
+	end
+
+	-- Tint an enemy by its status bitmask (1 = frozen, 2 = burning, 4 = wet).
+	local function applyStatus(r: Rec, st: number)
+		if not Quality.highlights() then
+			return -- skip per-enemy status Highlights below High quality
+		end
+		if st == r.status then
+			return
+		end
+		r.status = st
+		local h = r.highlight
+		if bit32.band(st, 1) ~= 0 then -- frozen (cyan)
+			h.FillColor = Color3.fromRGB(120, 210, 255)
+			h.FillTransparency = 0.45
+			h.OutlineColor = Color3.fromRGB(180, 235, 255)
+			h.OutlineTransparency = 0.2
+		elseif bit32.band(st, 2) ~= 0 then -- burning (orange)
+			h.FillColor = Color3.fromRGB(255, 130, 40)
+			h.FillTransparency = 0.55
+			h.OutlineColor = Color3.fromRGB(255, 170, 60)
+			h.OutlineTransparency = 0.3
+		elseif bit32.band(st, 4) ~= 0 then -- wet (blue sheen)
+			h.FillColor = Color3.fromRGB(60, 120, 230)
+			h.FillTransparency = 0.7
+			h.OutlineTransparency = 1
+		else -- clear
+			h.FillTransparency = 1
+			h.OutlineTransparency = 1
+		end
+	end
 
 	local function ensure(id: number, kind: string, boss: boolean, cf: CFrame): Rec
 		local r = byId[id]
@@ -308,6 +373,12 @@ function EnemyController.start()
 		local faceFix = authored * CFrame.Angles(deg("PitchOffset"), deg("YawOffset"), deg("RollOffset"))
 		model:PivotTo(cf)
 		model.Parent = container
+		local highlight = Instance.new("Highlight")
+		highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+		highlight.FillTransparency = 1
+		highlight.OutlineTransparency = 1
+		highlight.Adornee = model
+		highlight.Parent = model
 		r = {
 			id = id,
 			model = model,
@@ -318,6 +389,9 @@ function EnemyController.start()
 			boss = boss,
 			radius = radius,
 			faceFix = faceFix,
+			highlight = highlight,
+			status = -1, -- force first applyStatus to set it
+			shield = nil,
 		}
 		byId[id] = r
 		-- Roar on spawn, then every few seconds while alive (so you hear them as they
@@ -352,6 +426,8 @@ function EnemyController.start()
 				local ok, r = pcall(ensure, e.id, e.k or "", e.boss, e.c)
 				if ok and r then
 					r.target = e.c
+					applyStatus(r, if type(e.st) == "number" then e.st else 0)
+					applyShield(r, e.sh == true)
 				end
 			end
 		end
@@ -365,6 +441,9 @@ function EnemyController.start()
 					Sfx.play("enemyDown")
 				end
 				r.model:Destroy()
+				if r.shield then
+					r.shield:Destroy()
+				end
 				byId[id] = nil
 			end
 		end
@@ -410,24 +489,35 @@ function EnemyController.start()
 
 	-- Enemy projectile visuals (server decides hits; this is just the look). Each
 	-- shot is a random projectile object from Assets/Projectiles.
-	local visualBalls: { { obj: Instance, vel: Vector3, life: number, spin: Vector3 } } = {}
+	-- Terrain-collision band limits: ground never rises above GMAX, ceiling never dips
+	-- below CMIN, so a bullet between them CAN'T touch terrain and we skip the costly
+	-- noise sampling entirely (the big tablet win when lots of bullets are in flight).
+	local GMAX = WorldHeights.GROUND_BASE + WorldHeights.GROUND_AMP
+	local CMIN = WorldHeights.CEIL_BASE - WorldHeights.CEIL_AMP
+	local visualBalls: { { obj: Instance, vel: Vector3, life: number, spin: Vector3, tcheck: number } } = {}
 	local function spawnEnemyShot(origin: Vector3, dir: Vector3, speed: number)
 		local def = randomProjectileDef()
 		local obj: Instance
-		if def then
+		if def and Quality.fancyProjectiles() then
 			local m = WeaponVisuals.makeProjectile(def, ENEMY_PROJ_SIZE)
 			m:PivotTo(CFrame.lookAt(origin, origin + dir)) -- face the way it's fired
 			obj = m
 		else
-			-- Fallback to the old neon ball if no projectile assets exist.
+			-- Fallback ball. Neon forces a bloom/glow pass per orb, which murders weak
+			-- GPUs when a swarm is on screen, so on Low we use a matte (still bright) ball.
 			local p = Instance.new("Part")
 			p.Shape = Enum.PartType.Ball
 			p.Size = Vector3.new(3, 3, 3)
 			p.Anchored = true
 			p.CanCollide = false
 			p.CastShadow = false
-			p.Material = Enum.Material.Neon
-			p.Color = Color3.fromRGB(180, 120, 255)
+			if Quality.level == "low" then
+				p.Material = Enum.Material.SmoothPlastic -- no glow = no bloom cost
+				p.Color = Color3.fromRGB(210, 150, 255)
+			else
+				p.Material = Enum.Material.Neon
+				p.Color = Color3.fromRGB(180, 120, 255)
+			end
 			p.CFrame = CFrame.new(origin)
 			obj = p
 		end
@@ -437,6 +527,7 @@ function EnemyController.start()
 			vel = dir * speed,
 			life = 4,
 			spin = Vector3.new(math.random(-3, 3), math.random(-3, 3), math.random(-3, 3)),
+			tcheck = 0,
 		})
 	end
 	enemyFired.OnClientEvent:Connect(function(origin, dir, speed)
@@ -462,6 +553,9 @@ function EnemyController.start()
 				then CFrame.lookAt(r.lastPos, r.lastPos + flat)
 				else CFrame.new(r.lastPos)
 			r.model:PivotTo(facing * r.faceFix)
+			if r.shield then
+				r.shield.CFrame = CFrame.new(r.lastPos) -- keep the bubble on the core
+			end
 		end
 		-- Move enemy projectile visuals.
 		for i = #visualBalls, 1, -1 do
@@ -472,7 +566,19 @@ function EnemyController.start()
 			cf *= CFrame.Angles(b.spin.X * dt, b.spin.Y * dt, b.spin.Z * dt) -- gentle tumble
 			pv:PivotTo(cf)
 			local p = cf.Position
-			local hitTerrain = p.Y < WorldHeights.groundY(p.X, p.Z) or p.Y > WorldHeights.ceilY(p.X, p.Z)
+			-- Cheap terrain test: only sample the expensive height noise when the bullet
+			-- is actually within a terrain band, and at most ~12x/sec per bullet.
+			local hitTerrain = false
+			b.tcheck -= dt
+			if b.tcheck <= 0 then
+				b.tcheck = 0.08
+				if p.Y < GMAX then
+					hitTerrain = p.Y < WorldHeights.groundY(p.X, p.Z)
+				end
+				if not hitTerrain and p.Y > CMIN then
+					hitTerrain = p.Y > WorldHeights.ceilY(p.X, p.Z)
+				end
+			end
 			local hitShip = (ShipState.position - p).Magnitude <= 13
 			if hitShip or hitTerrain then
 				Explosion.burst(p) -- layered blast on impact

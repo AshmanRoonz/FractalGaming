@@ -12,6 +12,9 @@ local RunService = game:GetService("RunService")
 -- can't leave players dropping into empty space.
 Players.CharacterAutoLoads = false
 
+-- Mobile perf: skip real-time shadows (big win on tablets, minor visual loss).
+game:GetService("Lighting").GlobalShadows = false
+
 -- Big lobby platform, sized for ~8 bays side by side. Built directly here so it
 -- always exists regardless of the hangar module. Centered on the hangar row
 -- (bays run along Z from x=0, z=3000) with generous room in front of the openings.
@@ -45,44 +48,8 @@ do
 	sl.Parent = folder
 end
 
--- Skybox. A skybox is SIX cube-face images (not one panorama). Upload each PNG to
--- Roblox (Studio -> View -> Asset Manager -> Images -> Add, or create.roblox.com),
--- copy the asset id it gives you, and paste the six numbers below. Leave them all
--- empty ("") to keep Roblox's default sky. You can paste just the number or the
--- full rbxassetid://... string.
-local SKYBOX = {
-	Up = "rbxassetid://132381318019359", -- top_1.png (greyscale)
-	Dn = "rbxassetid://85569326507257", -- bottom_1.png
-	Lf = "rbxassetid://104002422471987", -- wall4_2.png
-	Rt = "rbxassetid://104002422471987", -- wall4_2.png (reused; no wall2)
-	Ft = "rbxassetid://140301767713852", -- wall1_2.png
-	Bk = "rbxassetid://98401617886686", -- wall3_2.png
-}
-do
-	local Lighting = game:GetService("Lighting")
-	local function asContent(v: string): string
-		if v == "" then
-			return ""
-		end
-		return if string.match(v, "^%d+$") then "rbxassetid://" .. v else v
-	end
-	-- Only install a Sky once you've filled the faces in, so we don't replace the
-	-- default sky with black faces.
-	if SKYBOX.Up ~= "" then
-		local existing = Lighting:FindFirstChildOfClass("Sky")
-		if existing then
-			existing:Destroy()
-		end
-		local sky = Instance.new("Sky")
-		sky.SkyboxUp = asContent(SKYBOX.Up)
-		sky.SkyboxDn = asContent(SKYBOX.Dn)
-		sky.SkyboxLf = asContent(SKYBOX.Lf)
-		sky.SkyboxRt = asContent(SKYBOX.Rt)
-		sky.SkyboxFt = asContent(SKYBOX.Ft)
-		sky.SkyboxBk = asContent(SKYBOX.Bk)
-		sky.Parent = Lighting
-	end
-end
+-- Skybox is now installed per-client by SkyController (so it can be turned off on
+-- Low-quality / touch devices). Edit the face ids in Shared/SkyConfig.luau.
 
 -- Load hangar + battle (don't let a failure break spawning).
 local Hangar, Battle
@@ -148,13 +115,16 @@ local function launchPlayer(player: Player)
 	local mainId = if Hangar then Hangar.getMain(player) else "laser"
 	local secId = if Hangar then Hangar.getSecondary(player) else "Missile"
 	local petId = if Hangar then Hangar.getPet(player) else "orb"
+	local petId2 = if Hangar then Hangar.getPet2(player) else "orb"
+	local el1 = if Hangar then Hangar.getEl1(player) else "lightning"
+	local el2 = if Hangar then Hangar.getEl2(player) else "fire"
 	if player.Character then
 		player.Character:Destroy()
 	end
 	if Battle then
 		Battle.playerLaunched(player, shipId, mainId, secId, petId)
 	end
-	beginBattle:FireClient(player, shipId, mainId, secId, petId)
+	beginBattle:FireClient(player, shipId, mainId, secId, petId, petId2, el1, el2)
 end
 
 -- Return a battling player to their existing hangar bay (no new bay allocated).

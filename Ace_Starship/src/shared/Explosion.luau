@@ -10,13 +10,15 @@ local RunService = game:GetService("RunService")
 
 local Explosion = {}
 
--- Fewer particles on touch devices (tablets/phones) to keep combat smooth.
-local MOBILE = false
-pcall(function()
-	MOBILE = game:GetService("UserInputService").TouchEnabled
-end)
-local function lo(n: number): number
-	return if MOBILE then math.max(1, math.floor(n * 0.4)) else n
+-- Particle counts scale with the player's Quality setting (Low = none, just a flash).
+local Quality = require(script.Parent.Quality)
+local function qc(n: number): number
+	if Quality.level == "low" then
+		return 0
+	elseif Quality.level == "med" then
+		return math.max(1, math.floor(n * 0.4))
+	end
+	return n
 end
 
 -- Expanding shockwave: an energy sphere + a flat ground ring that grow with the
@@ -79,6 +81,27 @@ end
 
 -- scale 1 = normal hit; larger = bigger blast.
 local function blast(pos: Vector3, scale: number, puffCount: number, sparkCount: number, smokeCount: number)
+	-- Flash (cheap, always shown).
+	local flash = Instance.new("Part")
+	flash.Shape = Enum.PartType.Ball
+	flash.Anchored = true
+	flash.CanCollide = false
+	flash.CastShadow = false
+	flash.Material = if Quality.level == "low" then Enum.Material.SmoothPlastic else Enum.Material.Neon -- avoid bloom on weak GPUs
+	flash.Color = Color3.fromRGB(255, 250, 230)
+	flash.Size = Vector3.new(5, 5, 5) * scale
+	flash.CFrame = CFrame.new(pos)
+	flash.Parent = workspace
+	TweenService:Create(flash, TweenInfo.new(0.12 * scale), { Size = Vector3.new(11, 11, 11) * scale, Transparency = 1 }):Play()
+	Debris:AddItem(flash, 0.18 * scale)
+
+	-- On Low quality we stop here: just the flash (no holder/attachment/light/puffs).
+	puffCount, sparkCount, smokeCount = qc(puffCount), qc(sparkCount), qc(smokeCount)
+	if puffCount == 0 and sparkCount == 0 and smokeCount == 0 then
+		return
+	end
+
+	-- Particle host (only needed past Low).
 	local holder = Instance.new("Part")
 	holder.Anchored = true
 	holder.CanCollide = false
@@ -89,27 +112,15 @@ local function blast(pos: Vector3, scale: number, puffCount: number, sparkCount:
 	local att = Instance.new("Attachment")
 	att.Parent = holder
 
-	-- Flash.
-	local flash = Instance.new("Part")
-	flash.Shape = Enum.PartType.Ball
-	flash.Anchored = true
-	flash.CanCollide = false
-	flash.CastShadow = false
-	flash.Material = Enum.Material.Neon
-	flash.Color = Color3.fromRGB(255, 250, 230)
-	flash.Size = Vector3.new(5, 5, 5) * scale
-	flash.CFrame = CFrame.new(pos)
-	flash.Parent = workspace
-	TweenService:Create(flash, TweenInfo.new(0.12 * scale), { Size = Vector3.new(11, 11, 11) * scale, Transparency = 1 }):Play()
-	Debris:AddItem(flash, 0.18 * scale)
-
-	-- Decaying light.
-	local light = Instance.new("PointLight")
-	light.Color = Color3.fromRGB(255, 160, 60)
-	light.Brightness = 7 * scale
-	light.Range = 30 * scale
-	light.Parent = holder
-	TweenService:Create(light, TweenInfo.new(0.35 * scale), { Brightness = 0 }):Play()
+	-- Decaying light (High only; dynamic lights are costly on weak GPUs).
+	if Quality.lights() then
+		local light = Instance.new("PointLight")
+		light.Color = Color3.fromRGB(255, 160, 60)
+		light.Brightness = 7 * scale
+		light.Range = 30 * scale
+		light.Parent = holder
+		TweenService:Create(light, TweenInfo.new(0.35 * scale), { Brightness = 0 }):Play()
+	end
 
 	-- Lumpy fireball puffs.
 	for _ = 1, puffCount do
@@ -168,11 +179,11 @@ local function blast(pos: Vector3, scale: number, puffCount: number, sparkCount:
 end
 
 function Explosion.burst(pos: Vector3)
-	blast(pos, 1, lo(4), lo(18), lo(12))
+	blast(pos, 1, 4, 18, 12) -- blast() scales these by the Quality setting
 end
 
 function Explosion.big(pos: Vector3)
-	blast(pos, 3, lo(9), lo(45), lo(28))
+	blast(pos, 3, 9, 45, 28)
 end
 
 return Explosion

@@ -14,11 +14,11 @@
 local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
 
 local ShipState = require(script.Parent.ShipState)
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local BattleSession = require(script.Parent.BattleSession)
+local Quality = require(ReplicatedStorage.Shared.Quality)
 
 local TerrainController = {}
 
@@ -81,10 +81,11 @@ local ceilY = WorldHeights.ceilY
 TerrainController.groundY = groundY
 TerrainController.ceilY = ceilY
 
--- Bulk-write one surface shell (ground or ceiling) for a chunk. `coarse` samples
--- the surface on a 2x-coarser grid (bigger, flatter steps -> fewer triangles) --
--- used for the dark ceiling on tablets where the lower detail isn't noticeable.
-local function writeShell(x0: number, z0: number, isCeiling: boolean, coarse: boolean?)
+-- Bulk-write one surface shell (ground or ceiling) for a chunk. `step` samples the
+-- surface on a coarser grid (step x step voxels share a height -> flatter, fewer
+-- triangles). step 1 = full detail; bigger = blockier + lighter (Low quality).
+local function writeShell(x0: number, z0: number, isCeiling: boolean, step: number?)
+	local gstep = if step and step > 1 then step else 1
 	local yMin, yMax, mat, surfaceFn
 	if isCeiling then
 		yMin = math.floor((CEIL_BASE - CEIL_AMP) / RES) * RES
@@ -107,12 +108,12 @@ local function writeShell(x0: number, z0: number, isCeiling: boolean, coarse: bo
 
 	local surf = table.create(nx)
 	for ix = 1, nx do
-		-- Snap to a 2x-coarser grid when coarse, so 2x2 voxel blocks share a height.
-		local six = if coarse then math.floor((ix - 1) / 2) * 2 + 1 else ix
+		-- Snap to a step-coarser grid, so step x step voxel blocks share a height.
+		local six = math.floor((ix - 1) / gstep) * gstep + 1
 		local wx = corner.X + (six - 0.5) * RES
 		local col = table.create(nz)
 		for iz = 1, nz do
-			local siz = if coarse then math.floor((iz - 1) / 2) * 2 + 1 else iz
+			local siz = math.floor((iz - 1) / gstep) * gstep + 1
 			col[iz] = surfaceFn(wx, corner.Z + (siz - 0.5) * RES)
 		end
 		surf[ix] = col
@@ -164,14 +165,18 @@ function TerrainController.start()
 	-- mountains) an even tighter one -- you look up far less than ahead, so this drops
 	-- a lot of ceiling triangles while keeping it visible nearby. Wide fog stays for
 	-- enemy visibility; ceiling collision math is unchanged.
+	-- Terrain detail follows the Quality setting. VIEW = draw distance; the step values
+	-- = how coarsely the mountain/ceiling surface is sampled (bigger = fewer polygons).
+	VIEW = Quality.viewDistance() -- 2 low / 3 med / 4 high
 	local CEIL_VIEW = VIEW
-	local coarseCeiling = false -- low-detail ceiling on tablet (fewer triangles)
-	local coarseGround = false -- low-detail ground on tablet (fewer triangles)
-	if UserInputService.TouchEnabled then
-		VIEW = 3
-		CEIL_VIEW = 2
-		coarseCeiling = true
-		coarseGround = true
+	local groundStep, ceilStep = 1, 1
+	local DRAW_TERRAIN = true -- mountains drawn on all settings (low = coarse/blocky)
+	if Quality.level == "med" then
+		groundStep, ceilStep = 2, 2
+		CEIL_VIEW = math.max(2, VIEW - 1)
+	elseif Quality.level == "low" then
+		groundStep, ceilStep = 3, 4 -- blocky low-poly mountains + very coarse ceiling
+		CEIL_VIEW = math.max(2, VIEW - 1)
 	end
 
 	for _, name in { "Baseplate", "SpawnLocation" } do
@@ -187,18 +192,26 @@ function TerrainController.start()
 	end
 	currentTheme = themeOrder[1] -- fresh start each battle
 	Lighting.FogColor = currentTheme.fog
-	Lighting.FogStart = FOG_START
-	Lighting.FogEnd = FOG_END
+	-- With mountains off there are no chunk edges to hide, so drop the fog entirely and
+	-- you can see monsters at any range. With terrain on, keep it tight so streaming
+	-- chunks fade in from haze instead of popping.
+	local fogStart = if DRAW_TERRAIN then FOG_START else 90000
+	local fogEnd = if DRAW_TERRAIN then FOG_END else 100000
+	Lighting.FogStart = fogStart
+	Lighting.FogEnd = fogEnd
 	local targetFog = currentTheme.fog
 
-	-- Sky/scene color filter that shifts with the biome (skybox included).
-	local cc = Instance.new("ColorCorrectionEffect")
-	cc.Name = "BiomeSky"
-	cc.TintColor = currentTheme.sky.tint
-	cc.Saturation = currentTheme.sky.sat
-	cc.Brightness = currentTheme.sky.bright
-	cc.Parent = Lighting
-	BattleSession.track(cc) -- removed on return to hangar (sky goes back to plain red)
+	-- Sky/scene color filter that shifts with the biome (skybox included). Skipped on
+	-- Low quality (a full-screen post-process pass is costly on weak GPUs).
+	local cc = if Quality.level ~= "low" then Instance.new("ColorCorrectionEffect") else nil
+	if cc then
+		cc.Name = "BiomeSky"
+		cc.TintColor = currentTheme.sky.tint
+		cc.Saturation = currentTheme.sky.sat
+		cc.Brightness = currentTheme.sky.bright
+		cc.Parent = Lighting
+		BattleSession.track(cc) -- removed on return to hangar
+	end
 	local targetSky = currentTheme.sky
 
 	-- Restore open visibility back in the hangar on teardown.
@@ -242,10 +255,16 @@ function TerrainController.start()
 		end
 		Lighting.FogColor = Lighting.FogColor:Lerp(targetFog, math.clamp(dt * 0.5, 0, 1)) -- ease biome fog
 		-- Ease the sky/scene filter toward the current biome (skybox shifts color).
-		local a = math.clamp(dt * 0.5, 0, 1)
-		cc.TintColor = cc.TintColor:Lerp(targetSky.tint, a)
-		cc.Saturation = cc.Saturation + (targetSky.sat - cc.Saturation) * a
-		cc.Brightness = cc.Brightness + (targetSky.bright - cc.Brightness) * a
+		if cc then
+			local a = math.clamp(dt * 0.5, 0, 1)
+			cc.TintColor = cc.TintColor:Lerp(targetSky.tint, a)
+			cc.Saturation = cc.Saturation + (targetSky.sat - cc.Saturation) * a
+			cc.Brightness = cc.Brightness + (targetSky.bright - cc.Brightness) * a
+		end
+		if not DRAW_TERRAIN then
+			return -- lowest setting: no mountains drawn
+		end
+
 		local pos = ShipState.position
 		local scx = math.floor(pos.X / CHUNK)
 		local scz = math.floor(pos.Z / CHUNK)
@@ -270,11 +289,11 @@ function TerrainController.start()
 			local t = todo[i]
 			local key = t.cx .. "," .. t.cz
 			if t.g then
-				writeShell(t.cx * CHUNK, t.cz * CHUNK, false, coarseGround)
+				writeShell(t.cx * CHUNK, t.cz * CHUNK, false, groundStep)
 				builtG[key] = true
 			end
 			if t.c then
-				writeShell(t.cx * CHUNK, t.cz * CHUNK, true, coarseCeiling)
+				writeShell(t.cx * CHUNK, t.cz * CHUNK, true, ceilStep)
 				builtC[key] = true
 			end
 		end

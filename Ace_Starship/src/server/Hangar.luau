@@ -8,6 +8,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local MarketplaceService = game:GetService("MarketplaceService")
 local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
+local killBoard = DataStoreService:GetOrderedDataStore("KillBoard_v1") -- all-time kills ranking
 
 local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local MainWeapons = require(ReplicatedStorage.Shared.Catalog.MainWeapons)
@@ -47,6 +49,7 @@ local function freshFreeShips(): { [string]: boolean }
 end
 
 local openShopEvent: any = nil -- set in Hangar.start (server -> client shop window)
+local openElementsEvent: any = nil -- set in Hangar.start (server -> client element menu)
 local boltsEvent: any = nil -- set in Hangar.start (server -> client live Bolts balance)
 local ASSET_FOOTPRINT = 170 -- scale the hangar asset to roughly this wide
 local ASSET_Y_OFFSET = -50 -- drop the asset onto the ground (tune if it floats)
@@ -91,9 +94,14 @@ type Slot = {
 	mainId: string,
 	secId: string,
 	petId: string,
+	petId2: string, -- second equipped pet (body only; element is assigned separately)
+	el1: string, -- element assigned to pet slot 1 (fire/cold/lightning/water)
+	el2: string, -- element assigned to pet slot 2
 	mainLabel: TextLabel,
 	secLabel: TextLabel,
 	petLabel: TextLabel,
+	petLabel2: TextLabel?,
+	elLabel: TextLabel?,
 	bolts: number,
 	kills: number,
 	maxWave: number, -- highest wave continuously earned (persists)
@@ -101,6 +109,7 @@ type Slot = {
 	waveLabel: TextLabel?,
 	previewMounts: { [string]: Vector3 },
 	previewModels: { [string]: Instance? },
+	shopPreview: { [string]: string? }, -- per-category podium preview override (nil = equipped)
 	ownedShips: { [string]: boolean },
 	ownedMain: { [string]: boolean },
 	ownedSec: { [string]: boolean },
@@ -124,33 +133,78 @@ local function refreshWaveLabel(s: Slot)
 	end
 end
 
+-- Elements you can assign to a pet slot (cycled at the element podium).
+local ELEMENTS = { "fire", "cold", "lightning", "water" }
+local function refreshElementLabel(s: Slot)
+	if s.elLabel then
+		s.elLabel.Text = `ELEMENTS\nP1: {s.el1}   P2: {s.el2}`
+	end
+end
+
+-- Send the element menu (current assignments + options) to a player.
+local function openElements(player: Player)
+	local s = slots[player]
+	if openElementsEvent and s then
+		openElementsEvent:FireClient(player, { el1 = s.el1, el2 = s.el2, options = ELEMENTS })
+	end
+end
+
 -- Leaderboard: the server formats the live ranking into a string and publishes it
 -- to ReplicatedStorage.Leaderboard (a StringValue, created in Hangar.start). Any TV
 -- object you build in Studio just mirrors that value onto its own SurfaceGui.
 local lbValue: StringValue? = nil
-local function rebuildLeaderboard()
+-- The board is now a PERSISTENT all-time top-10 (refreshGlobalBoard below), not a live
+-- in-server list, so offline players still show. This stub keeps old callers harmless.
+local function rebuildLeaderboard() end
+
+-- All-time leaderboard: top 10 by total kills, with each pilot's best wave alongside.
+-- The OrderedDataStore value encodes kills*10000 + wave (so it sorts by kills, then
+-- wave, and we decode both for display).
+local KILL_MUL = 10000
+local function encodeScore(kills: number, wave: number): number
+	return kills * KILL_MUL + math.clamp(math.floor(wave), 0, KILL_MUL - 1)
+end
+
+local nameCache: { [number]: string } = {}
+local function playerName(userId: number): string
+	if nameCache[userId] then
+		return nameCache[userId]
+	end
+	local plr = Players:GetPlayerByUserId(userId)
+	local nm = if plr then plr.Name else nil
+	if not nm then
+		local ok, res = pcall(function()
+			return Players:GetNameFromUserIdAsync(userId)
+		end)
+		nm = if ok and type(res) == "string" then res else ("Pilot " .. userId)
+	end
+	nameCache[userId] = nm
+	return nm
+end
+
+local function refreshGlobalBoard()
 	if not lbValue then
 		return
 	end
-	local list = {}
-	for plr, s in slots do
-		table.insert(list, { name = plr.Name, kills = s.kills, bolts = s.bolts })
-	end
-	table.sort(list, function(a, b)
-		if a.kills ~= b.kills then
-			return a.kills > b.kills
-		end
-		return a.bolts > b.bolts
+	local ok, page = pcall(function()
+		return killBoard:GetSortedAsync(false, 10)
 	end)
-	local lines = { string.format("%-3s %-12s %5s %7s", "#", "PILOT", "KILLS", "BOLTS") }
-	for i, e in list do
-		if i > 10 then
-			break
-		end
-		local nm = if #e.name > 12 then e.name:sub(1, 12) else e.name
-		table.insert(lines, string.format("%-3d %-12s %5d %7d", i, nm, e.kills, e.bolts))
+	if not ok or not page then
+		return
 	end
-	lbValue.Value = if #list > 0 then table.concat(lines, "\n") else "No pilots yet"
+	local entries = page:GetCurrentPage()
+	local lines = { string.format("%-3s %-12s %6s %5s", "#", "PILOT", "KILLS", "WAVE") }
+	for i, e in entries do
+		local v = tonumber(e.value) or 0
+		local kills = math.floor(v / KILL_MUL)
+		local wave = v % KILL_MUL
+		local nm = playerName(tonumber(e.key) or 0)
+		if #nm > 12 then
+			nm = nm:sub(1, 12)
+		end
+		table.insert(lines, string.format("%-3d %-12s %6d %5d", i, nm, kills, wave))
+	end
+	lbValue.Value = if #entries > 0 then table.concat(lines, "\n") else "No pilots yet"
 end
 
 local used: { [number]: boolean } = {}
@@ -326,15 +380,32 @@ local function updatePreviews(slot: Slot)
 	if not slot.previewMounts then
 		return
 	end
-	local picks = { ship = slot.shipId, main = slot.mainId, secondary = slot.secId, pet = slot.petId }
+	-- Show the previewed item over each podium if one is being browsed, else equipped.
+	local sp = slot.shopPreview
+	local picks = {
+		ship = sp.ship or slot.previewShipId or slot.shipId,
+		main = sp.main or slot.mainId,
+		secondary = sp.secondary or slot.secId,
+		pet = sp.pet or slot.petId,
+		pet2 = slot.petId2,
+	}
 	for cat, id in picks do
 		local mount = slot.previewMounts[cat]
 		if mount then
 			local old = slot.previewModels[cat]
+			-- Skip rebuilding a podium whose previewed item hasn't changed (avoids a
+			-- ship rebuild on every browse tap).
+			if old and (old :: Instance):GetAttribute("pid") == id then
+				continue
+			end
 			if old then
 				old:Destroy()
 			end
-			slot.previewModels[cat] = buildPreview(cat, id, mount, slot.model)
+			local m = buildPreview(cat, id, mount, slot.model)
+			if m then
+				m:SetAttribute("pid", id)
+			end
+			slot.previewModels[cat] = m
 		end
 	end
 end
@@ -377,6 +448,9 @@ local PREMIUM: { [string]: { [string]: number } } = {
 
 -- A real Game Pass id only (0 = placeholder, treated as not-yet-premium).
 local function premiumId(category: string, id: string): number?
+	if category == "pet2" then
+		category = "pet" -- second pet slot shares the pet catalog/ownership
+	end
 	local m = PREMIUM[category]
 	local gp = if m then m[id] else nil
 	return if gp and gp > 0 then gp else nil
@@ -445,6 +519,10 @@ local function buildShopData(s: Slot, category: string): any
 		for _, d in Pets do
 			add(d.id, d.displayName, d.price, s.ownedPets, s.petId)
 		end
+	elseif category == "pet2" then
+		for _, d in Pets do
+			add(d.id, d.displayName, d.price, s.ownedPets, s.petId2)
+		end
 	end
 	return { category = category, bolts = s.bolts, items = items }
 end
@@ -476,7 +554,7 @@ local function priceAndOwned(s: Slot, category: string, id: string): (number?, {
 				return d.price, s.ownedSec
 			end
 		end
-	elseif category == "pet" then
+	elseif category == "pet" or category == "pet2" then
 		for _, d in Pets do
 			if d.id == id then
 				return d.price, s.ownedPets
@@ -526,6 +604,14 @@ local function equipItem(s: Slot, category: string, id: string)
 	elseif category == "pet" then
 		s.petId = id
 		s.petLabel.Text = findById(Pets, id).displayName
+	elseif category == "pet2" then
+		s.petId2 = id
+		if s.petLabel2 then
+			s.petLabel2.Text = findById(Pets, id).displayName
+		end
+	end
+	if s.shopPreview then
+		s.shopPreview[category] = nil -- equipping clears the browse-preview override
 	end
 	updatePreviews(s) -- refresh the floating preview for the equipped category
 end
@@ -661,16 +747,35 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 	local petLabel = makePedestal(Vector3.new(30, 0, PODIUM_Z), "pet", "Pet Shop", Pets[1].displayName, function(plr)
 		openShop(plr, "pet")
 	end)
+	local elLabel = nil -- element podium removed (elemental system disabled)
 
 	-- Wave Select console: nudge which wave you'll launch into (1..earned max+1).
+	-- Four buttons (-10 -1 +1 +10) on a wider console, pulled back near the shop row.
 	local waveLabel
 	do
-		local cz = PODIUM_Z - 22 -- in front of the shop row, toward the pad
-		local base = part(model, Vector3.new(9, 5, 3), CFrame.new(center + Vector3.new(0, 2.5, cz)), Color3.fromRGB(40, 48, 70), Enum.Material.Metal)
-		local function waveBtn(dx: number, text: string, delta: number)
-			local b = part(model, Vector3.new(3, 3, 3), CFrame.new(center + Vector3.new(dx, 5.5, cz)), Color3.fromRGB(80, 140, 230), Enum.Material.Neon)
+		local cz = PODIUM_Z - 12 -- just in front of the shop row, toward the pad
+		local base = part(model, Vector3.new(20, 5, 3), CFrame.new(center + Vector3.new(0, 2.5, cz)), Color3.fromRGB(40, 48, 70), Enum.Material.Metal)
+		local function waveBtn(dx: number, text: string, delta: number, color: Color3)
+			local b = part(model, Vector3.new(3, 3, 3), CFrame.new(center + Vector3.new(dx, 5.5, cz)), color, Enum.Material.Neon)
+			-- floating cap label so the menu reads clearly even before you walk up
+			local cap = Instance.new("TextLabel")
+			cap.Size = UDim2.fromScale(1, 1)
+			cap.BackgroundTransparency = 1
+			cap.Font = Enum.Font.GothamBlack
+			cap.TextScaled = true
+			cap.TextColor3 = Color3.fromRGB(255, 255, 255)
+			cap.TextStrokeTransparency = 0.3
+			cap.Text = text
+			local cbb = Instance.new("BillboardGui")
+			cbb.Size = UDim2.fromOffset(64, 40)
+			cbb.StudsOffset = Vector3.new(0, 2.6, 0)
+			cbb.MaxDistance = 90
+			cbb.Adornee = b
+			cap.Parent = cbb
+			cbb.Parent = b
 			local prompt = Instance.new("ProximityPrompt")
 			prompt.ActionText = text
+			prompt.ObjectText = "Start Wave"
 			prompt.HoldDuration = 0
 			prompt.MaxActivationDistance = 9
 			prompt.RequiresLineOfSight = false
@@ -681,8 +786,12 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 				end
 			end)
 		end
-		waveBtn(-4.5, "Wave -1", -1)
-		waveBtn(4.5, "Wave +1", 1)
+		local down = Color3.fromRGB(225, 110, 80) -- minus = warm
+		local up = Color3.fromRGB(80, 200, 130) -- plus = green
+		waveBtn(-8, "-10", -10, down)
+		waveBtn(-3, "-1", -1, down)
+		waveBtn(3, "+1", 1, up)
+		waveBtn(8, "+10", 10, up)
 		waveLabel = Instance.new("TextLabel")
 		waveLabel.Size = UDim2.fromScale(1, 1)
 		waveLabel.BackgroundTransparency = 1
@@ -692,16 +801,16 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 		waveLabel.TextStrokeTransparency = 0.4
 		waveLabel.Text = "START: WAVE 1\nbest 0"
 		local wbb = Instance.new("BillboardGui")
-		wbb.Size = UDim2.fromOffset(210, 66)
-		wbb.StudsOffset = Vector3.new(0, 6, 0)
-		wbb.MaxDistance = 110
+		wbb.Size = UDim2.fromOffset(230, 70)
+		wbb.StudsOffset = Vector3.new(0, 6.5, 0)
+		wbb.MaxDistance = 120
 		wbb.Adornee = base
 		waveLabel.Parent = wbb
 		wbb.Parent = base
 	end
 
 	model.Parent = workspace
-	return model, nameLabel, mainLabel, secLabel, petLabel, mounts, waveLabel
+	return model, nameLabel, mainLabel, secLabel, petLabel, mounts, waveLabel, elLabel
 end
 
 local function freeIndex(): number
@@ -743,6 +852,9 @@ local function saveProfile(player: Player)
 		mainId = s.mainId,
 		secId = s.secId,
 		petId = s.petId,
+		petId2 = s.petId2,
+		el1 = s.el1,
+		el2 = s.el2,
 		ownedShips = s.ownedShips,
 		ownedMain = s.ownedMain,
 		ownedSec = s.ownedSec,
@@ -750,6 +862,10 @@ local function saveProfile(player: Player)
 	}
 	pcall(function()
 		profileStore:SetAsync(profileKey(player), data)
+	end)
+	-- Push this pilot's score to the all-time kills board (kills primary, wave shown).
+	pcall(function()
+		killBoard:SetAsync(tostring(player.UserId), encodeScore(s.kills, s.maxWave))
 	end)
 end
 
@@ -803,16 +919,29 @@ local function applyProfile(player: Player, saved: { [string]: any })
 	if type(saved.petId) == "string" then
 		equipItem(s, "pet", saved.petId)
 	end
+	if type(saved.petId2) == "string" then
+		equipItem(s, "pet2", saved.petId2)
+	end
+	if type(saved.el1) == "string" then
+		s.el1 = saved.el1
+	end
+	if type(saved.el2) == "string" then
+		s.el2 = saved.el2
+	end
+	refreshElementLabel(s)
 	pcall(showShip, s)
 	pushBolts(player)
-	rebuildLeaderboard()
+	-- Publish the loaded score so a returning player shows on the all-time board now.
+	pcall(function()
+		killBoard:SetAsync(tostring(player.UserId), encodeScore(s.kills, s.maxWave))
+	end)
 end
 
 function Hangar.assign(player: Player): Vector3
 	local index = freeIndex()
 	used[index] = true
 	local center = BASE + Vector3.new(0, 0, index * SLOT_SPACING)
-	local model, nameLabel, mainLabel, secLabel, petLabel, mounts, waveLabel = buildBay(player, center)
+	local model, nameLabel, mainLabel, secLabel, petLabel, mounts, waveLabel, elLabel = buildBay(player, center)
 	slots[player] = {
 		index = index,
 		owner = player,
@@ -825,9 +954,14 @@ function Hangar.assign(player: Player): Vector3
 		mainId = MainWeapons[1].id,
 		secId = SecondaryWeapons[1].id,
 		petId = Pets[1].id,
+		petId2 = Pets[1].id,
+		el1 = "lightning",
+		el2 = "fire",
 		mainLabel = mainLabel,
 		secLabel = secLabel,
 		petLabel = petLabel,
+		petLabel2 = nil,
+		elLabel = elLabel,
 		bolts = START_BOLTS,
 		kills = 0,
 		maxWave = 0,
@@ -835,6 +969,7 @@ function Hangar.assign(player: Player): Vector3
 		waveLabel = waveLabel,
 		previewMounts = mounts,
 		previewModels = {},
+		shopPreview = {},
 		ownedShips = freshFreeShips(),
 		ownedMain = { [MainWeapons[1].id] = true },
 		ownedSec = { [SecondaryWeapons[1].id] = true },
@@ -896,6 +1031,36 @@ function Hangar.getPet(player: Player): string
 	return if s then s.petId else Pets[1].id
 end
 
+function Hangar.getPet2(player: Player): string
+	local s = slots[player]
+	return if s then s.petId2 else Pets[1].id
+end
+
+function Hangar.getEl1(player: Player): string
+	local s = slots[player]
+	return if s then s.el1 else "lightning"
+end
+
+function Hangar.getEl2(player: Player): string
+	local s = slots[player]
+	return if s then s.el2 else "fire"
+end
+
+-- The element menu sets the element on slot 1 or slot 2 (absolute, from the menu).
+function Hangar.setElement(player: Player, which: number, element: string)
+	local s = slots[player]
+	if not s or not table.find(ELEMENTS, element) then
+		return
+	end
+	if which == 2 then
+		s.el2 = element
+	else
+		s.el1 = element
+	end
+	refreshElementLabel(s)
+	openElements(player) -- refresh the menu highlight
+end
+
 function Hangar.padCenter(player: Player): Vector3?
 	local s = slots[player]
 	return if s then s.center else nil
@@ -946,6 +1111,18 @@ function Hangar.start()
 	boltsEvent = Instance.new("RemoteEvent")
 	boltsEvent.Name = "BoltsChanged"
 	boltsEvent.Parent = ReplicatedStorage
+	-- Element menu: server pushes current assignments; client requests a change.
+	openElementsEvent = Instance.new("RemoteEvent")
+	openElementsEvent.Name = "OpenElements"
+	openElementsEvent.Parent = ReplicatedStorage
+	local elementAction = Instance.new("RemoteEvent")
+	elementAction.Name = "ElementAction"
+	elementAction.Parent = ReplicatedStorage
+	elementAction.OnServerEvent:Connect(function(player, which, element)
+		if type(which) == "number" and type(element) == "string" then
+			Hangar.setElement(player, which, element)
+		end
+	end)
 	-- Live leaderboard text any TV object in Studio can mirror onto its SurfaceGui.
 	lbValue = Instance.new("StringValue")
 	lbValue.Name = "Leaderboard"
@@ -962,7 +1139,7 @@ function Hangar.start()
 		if type(category) ~= "string" or type(action) ~= "string" or type(id) ~= "string" then
 			return
 		end
-		if category ~= "ship" and category ~= "main" and category ~= "secondary" and category ~= "pet" then
+		if category ~= "ship" and category ~= "main" and category ~= "secondary" and category ~= "pet" and category ~= "pet2" then
 			return
 		end
 		local s = slots[player]
@@ -975,11 +1152,26 @@ function Hangar.start()
 		elseif action == "equip" then
 			equipItem(s, category, id)
 		elseif action == "preview" then
-			-- Show any ship on the pad without owning/equipping it.
+			-- Show any item (even unowned) over its podium / on the pad while browsing.
 			if category == "ship" and table.find(shipOrder, id) then
 				s.previewShipId = id
 				pcall(showShip, s)
+				updatePreviews(s)
+			elseif category == "main" or category == "secondary" or category == "pet" then
+				local price = priceAndOwned(s, category, id) -- non-nil if it's a real item
+				s.shopPreview[category] = if id ~= "" and price ~= nil then id else nil
+				updatePreviews(s)
 			end
+		elseif action == "open" then
+			-- Just switch/refresh the window to this category (used by the pet slot toggle).
+		elseif action == "close" then
+			-- Leaving the shop: revert the podium float to the equipped item, but DON'T
+			-- reopen the window (that was the "can't close the store" glitch).
+			if category == "main" or category == "secondary" or category == "pet" then
+				s.shopPreview[category] = nil
+				updatePreviews(s)
+			end
+			return
 		else
 			return
 		end
@@ -1043,6 +1235,13 @@ function Hangar.start()
 			for plr in slots do
 				saveProfile(plr)
 			end
+		end
+	end)
+	-- Refresh the all-time kills board on the TVs every ~40s (and once at startup).
+	task.spawn(function()
+		while true do
+			refreshGlobalBoard()
+			task.wait(40)
 		end
 	end)
 	game:BindToClose(function()

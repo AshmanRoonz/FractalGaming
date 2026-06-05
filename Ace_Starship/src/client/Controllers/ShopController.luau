@@ -16,7 +16,8 @@ local TITLES = {
 	ship = "SHIP HANGAR",
 	main = "LASER SHOP",
 	secondary = "PROJECTILE SHOP",
-	pet = "PET SHOP",
+	pet = "PET STORE",
+	pet2 = "PET STORE",
 }
 
 local GOLD = Color3.fromRGB(255, 205, 90)
@@ -98,6 +99,31 @@ function ShopController.start()
 	cc.CornerRadius = UDim.new(0, 8)
 	cc.Parent = closeBtn
 
+	-- Pet slot toggle: switch the store between equipping Slot 1 and Slot 2 (pets only).
+	local function slotButton(text: string, xOff: number, cat: string): TextButton
+		local b = Instance.new("TextButton")
+		b.AnchorPoint = Vector2.new(1, 0)
+		b.Position = UDim2.new(1, xOff, 0, 52)
+		b.Size = UDim2.fromOffset(82, 26)
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 13
+		b.Text = text
+		b.TextColor3 = Color3.fromRGB(235, 235, 240)
+		b.BackgroundColor3 = Color3.fromRGB(50, 55, 70)
+		b.Visible = false
+		b.Parent = panel
+		local sc = Instance.new("UICorner")
+		sc.CornerRadius = UDim.new(0, 6)
+		sc.Parent = b
+		b.Activated:Connect(function()
+			Sfx.play("ui")
+			shopAction:FireServer(cat, "open", "")
+		end)
+		return b
+	end
+	local slot1Btn = slotButton("SLOT 1", -102, "pet")
+	local slot2Btn = slotButton("SLOT 2", -14, "pet2")
+
 	local scroll = Instance.new("ScrollingFrame")
 	scroll.Position = UDim2.fromOffset(16, 92)
 	scroll.Size = UDim2.fromOffset(438, 430)
@@ -112,8 +138,14 @@ function ShopController.start()
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.Parent = scroll
 
+	local currentCategory: string? = nil
 	local function close()
 		gui.Enabled = false
+		-- Revert the podium float back to your equipped item when you leave the shop.
+		-- Uses the "close" action (not "preview") so the server doesn't reopen the window.
+		if currentCategory == "main" or currentCategory == "secondary" or currentCategory == "pet" then
+			shopAction:FireServer(currentCategory, "close", "")
+		end
 	end
 	backdrop.Activated:Connect(close)
 	closeBtn.Activated:Connect(close)
@@ -130,11 +162,11 @@ function ShopController.start()
 		local rc = Instance.new("UICorner")
 		rc.CornerRadius = UDim.new(0, 8)
 		rc.Parent = row
-		-- Tap a ship row to preview it on the pad (even if you don't own it yet).
-		if category == "ship" then
+		-- Tap a row to preview that item over its podium / on the pad (even if unowned).
+		if category == "ship" or category == "main" or category == "secondary" or category == "pet" then
 			row.Activated:Connect(function()
 				Sfx.play("ui")
-				shopAction:FireServer("ship", "preview", item.id)
+				shopAction:FireServer(category, "preview", item.id)
 			end)
 		end
 
@@ -235,8 +267,12 @@ function ShopController.start()
 		if type(data) ~= "table" then
 			return
 		end
+		currentCategory = data.category
 		titleLabel.Text = TITLES[data.category] or "SHOP"
 		boltsLabel.Text = "Bolts: " .. tostring(data.bolts)
+		-- Pet slot toggle hidden (single-pet mode; elemental/2-pet system disabled).
+		slot1Btn.Visible = false
+		slot2Btn.Visible = false
 		for _, child in scroll:GetChildren() do
 			if child:IsA("GuiObject") then -- rows (Frames/TextButtons), not the UIListLayout
 				child:Destroy()

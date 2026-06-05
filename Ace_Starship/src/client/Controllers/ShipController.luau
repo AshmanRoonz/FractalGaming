@@ -35,10 +35,19 @@ local PITCH_RATE = math.rad(95)
 local MOUSE_SENS = 0.006 -- radians of turn per pixel of mouse movement
 local TOUCH_LOOK_SENS = 1.4 -- multiplier on touch-stick turn/pitch (higher = more sensitive)
 local GYRO_SENS = 1.3 -- multiplier on how hard device tilt steers
+-- Calibration: tilt steering reads the accelerometer's gravity vector (physical
+-- "down" in the device frame), so one tilt moves one axis with no gimbal mixing,
+-- and it survives flipping the phone the other way. If turn/pitch feel SWAPPED on
+-- your device flip GYRO_SWAP; if a direction is BACKWARDS flip the matching INVERT;
+-- GYRO_DEBUG draws the raw numbers on screen so the mapping can be dialed in by eye.
+local GYRO_SWAP = false -- swap which tilt axis is turn vs pitch (flip if they feel reversed)
+local GYRO_INVERT_TURN = false
+local GYRO_INVERT_PITCH = true
+local GYRO_DEBUG = false -- true = show raw tilt readout to calibrate (turn off once dialed in)
 -- Tilt is read from the device LookVector (components in -1..1), not Euler angles,
 -- to avoid the pitch/yaw gimbal flip. ~0.5 ≈ a 30-degree tilt = full-speed turn.
-local GYRO_TILT_FULL = 0.5 -- LookVector tilt that gives full turn speed
-local GYRO_TILT_DEAD = 0.05 -- ignore tiny tilt jitter
+local GYRO_TILT_FULL = 0.55 -- tilt (radians, ~31deg) that gives full turn speed
+local GYRO_TILT_DEAD = 0.06 -- ignore tiny tilt jitter (radians, ~3deg)
 local MAX_PITCH = math.rad(80) -- clamp so you can't flip fully over
 local MAX_BANK = math.rad(22)
 local BOOST_MULT = 2.1 -- speed multiplier while boosting
@@ -198,8 +207,10 @@ function ShipController.start(shipId: string?)
 	local getLook: (() -> Vector2)? = nil
 	-- Gyro/tilt look state.
 	local gyroOn = false
-	local gyroLatest: CFrame? = nil -- newest device orientation
-	local gyroRef: CFrame? = nil -- orientation captured when gyro was turned on / recentered
+	local gravLatest: Vector3? = nil -- newest gravity direction (device frame, unit)
+	local gravRef: Vector3? = nil -- gravity captured when gyro was turned on / recentered
+	local gyroDebug: TextLabel? = nil -- on-screen raw readout (only if GYRO_DEBUG)
+	local invertPitch = GYRO_INVERT_PITCH -- runtime toggle (button); default from the constant
 
 	if UserInputService.TouchEnabled then
 		local gui = Instance.new("ScreenGui")
@@ -341,9 +352,9 @@ function ShipController.start(shipId: string?)
 		-- Gyro/tilt look: only on devices that have a gyroscope. A toggle button
 		-- turns it on (and recenters to however you're holding the device); tilt then
 		-- steers. Tilt further = turn faster.
-		if UserInputService.GyroscopeEnabled then
-			UserInputService.DeviceRotationChanged:Connect(function(_input, cf)
-				gyroLatest = cf
+		if UserInputService.AccelerometerEnabled then
+			UserInputService.DeviceGravityChanged:Connect(function(input)
+				gravLatest = input.Position -- unit vector toward ground, device frame
 			end)
 			local gyroBtn = Instance.new("TextButton")
 			gyroBtn.Size = UDim2.fromOffset(90, 60)
@@ -360,10 +371,47 @@ function ShipController.start(shipId: string?)
 			gc.Parent = gyroBtn
 			gyroBtn.Activated:Connect(function()
 				gyroOn = not gyroOn
-				gyroRef = gyroLatest -- recenter to the current hold position
+				gravRef = gravLatest -- recenter to the current hold position
 				gyroBtn.Text = if gyroOn then "GYRO: ON" else "GYRO: OFF"
 				gyroBtn.BackgroundColor3 = if gyroOn then Color3.fromRGB(90, 200, 120) else Color3.fromRGB(70, 60, 110)
 			end)
+			-- Invert-Y toggle: flip vertical tilt look for players who prefer it.
+			local invBtn = Instance.new("TextButton")
+			invBtn.Size = UDim2.fromOffset(90, 44)
+			invBtn.AnchorPoint = Vector2.new(1, 1)
+			invBtn.Position = UDim2.new(1, -30, 1, -396)
+			invBtn.BackgroundColor3 = Color3.fromRGB(70, 60, 110)
+			invBtn.BackgroundTransparency = 0.3
+			invBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+			invBtn.TextScaled = true
+			invBtn.Text = if invertPitch then "INVERT Y: ON" else "INVERT Y: OFF"
+			invBtn.Parent = gui
+			local ic = Instance.new("UICorner")
+			ic.CornerRadius = UDim.new(0.2, 0)
+			ic.Parent = invBtn
+			invBtn.Activated:Connect(function()
+				invertPitch = not invertPitch
+				invBtn.Text = if invertPitch then "INVERT Y: ON" else "INVERT Y: OFF"
+				invBtn.BackgroundColor3 = if invertPitch then Color3.fromRGB(90, 200, 120) else Color3.fromRGB(70, 60, 110)
+			end)
+			if invertPitch then
+				invBtn.BackgroundColor3 = Color3.fromRGB(90, 200, 120)
+			end
+			if GYRO_DEBUG then
+				local dbg = Instance.new("TextLabel")
+				dbg.Size = UDim2.fromOffset(260, 80)
+				dbg.AnchorPoint = Vector2.new(1, 1)
+				dbg.Position = UDim2.new(1, -130, 1, -330)
+				dbg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+				dbg.BackgroundTransparency = 0.4
+				dbg.TextColor3 = Color3.fromRGB(120, 255, 160)
+				dbg.Font = Enum.Font.Code
+				dbg.TextSize = 16
+				dbg.TextXAlignment = Enum.TextXAlignment.Left
+				dbg.Text = "gyro debug"
+				dbg.Parent = gui
+				gyroDebug = dbg
+			end
 		end
 	end
 
@@ -476,19 +524,44 @@ function ShipController.start(shipId: string?)
 		end
 
 		-- Gyro/tilt -> steering axes (tilt further = turn faster), folded into the same
-		-- look channel as the stick. We read the device LookVector tilt RELATIVE to the
-		-- recenter pose; reading vector components (not Euler angles / Delta) avoids the
-		-- gimbal flip where yaw bleeds into pitch (per Roblox devforum tilt-steering).
+		-- look channel as the stick. We use the ACCELEROMETER gravity vector: the physical
+		-- "down" direction in the device frame. We measure how that vector has tilted since
+		-- the recenter pose, per device axis, so one tilt drives one axis with no gimbal
+		-- mixing, and it survives flipping the phone. The motion sensor reports in the
+		-- phone's native PORTRAIT frame, so in landscape turn/pitch come from swapped axes
+		-- (GYRO_SWAP); per-axis INVERT flips a backwards direction; GYRO_DEBUG shows raws.
 		local gyroTurn, gyroPitch = 0, 0
-		if gyroOn and gyroLatest and gyroRef then
-			local lv = (gyroRef :: CFrame):ToObjectSpace(gyroLatest :: CFrame).LookVector
+		if gyroOn and gravLatest and gravRef then
+			-- Decoupled tilt angles (radians) from the gravity vector. atan2 with the
+			-- sqrt term isolates rotation-about-X from rotation-about-Y, so tilting one
+			-- way never bleeds into the other (raw component subtraction does bleed).
+			local function tiltAngles(a: Vector3): (number, number)
+				local aboutX = math.atan2(a.Y, -a.Z) -- dip a left/right side down
+				local aboutY = math.atan2(-a.X, math.sqrt(a.Y * a.Y + a.Z * a.Z)) -- nose up/down
+				return aboutX, aboutY
+			end
+			local gx, gy = tiltAngles(gravLatest :: Vector3)
+			local rx, ry = tiltAngles(gravRef :: Vector3)
+			local aboutX = gx - rx
+			local aboutY = gy - ry
 			local function tiltAxis(t: number): number
 				local s = if t >= 0 then 1 else -1
 				local mag = math.max(0, math.abs(t) - GYRO_TILT_DEAD)
-				return s * math.clamp(mag / GYRO_TILT_FULL, 0, 1) * GYRO_SENS
+				local span = math.max(0.01, GYRO_TILT_FULL - GYRO_TILT_DEAD)
+				return s * math.clamp(mag / span, 0, 1) * GYRO_SENS
 			end
-			gyroTurn = tiltAxis(-lv.X) -- tilt device left/right -> turn
-			gyroPitch = tiltAxis(lv.Y) -- tilt device forward/back -> pitch
+			local turnRaw = if GYRO_SWAP then aboutY else aboutX
+			local pitchRaw = if GYRO_SWAP then aboutX else aboutY
+			if GYRO_INVERT_TURN then turnRaw = -turnRaw end
+			if invertPitch then pitchRaw = -pitchRaw end
+			gyroTurn = tiltAxis(turnRaw)
+			gyroPitch = tiltAxis(pitchRaw)
+			if gyroDebug then
+				(gyroDebug :: TextLabel).Text = string.format(
+					"aboutX %+.2f aboutY %+.2f\nturn %+.2f pitch %+.2f",
+					aboutX, aboutY, gyroTurn, gyroPitch
+				)
+			end
 		end
 
 		local lookX = touchLook.X * TOUCH_LOOK_SENS + gyroTurn
