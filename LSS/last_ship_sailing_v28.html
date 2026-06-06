@@ -2902,6 +2902,11 @@ const game = {
   playerStasisTimer: 0,
   playerStasisDuration: 3,
   playerPreStasisVelocity: null,
+  // Puncture Stasis Trap root on the LOCAL player. In multiplayer the local
+  // player isn't in game.entities and remote peers are network-driven mirrors
+  // whose velocity we can't authoritatively zero, so each client roots its OWN
+  // player when caught by an enemy trap. >0 means rooted for that many seconds.
+  playerRootTimer: 0,
   // Champion-field stasis. When the player
   // enters the champion field this flag goes true and the regular
   // updatePlayerStasis auto-decrement is suppressed; the champion handler
@@ -27539,6 +27544,7 @@ function commitLoadout(key) {
       game.stasisFirstBatch = true;
       game.playerInStasis = false;
       game.playerStasisTimer = 0;
+      game.playerRootTimer = 0;
       document.getElementById('stasis-warning').style.display = 'none';
       document.getElementById('stasis-vignette').style.display = 'none';
 
@@ -28003,6 +28009,7 @@ function respawnPlayer() {
   // where respawn fires before that tick.
   game.playerInChampionStasis = false;
   game.playerInStasis = false;
+  game.playerRootTimer = 0; // clear any Stasis Trap root on respawn
   const ch = player.chassis;
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
@@ -28643,9 +28650,12 @@ function updatePlayerMovement(dt) {
     input.mouseDX = 0; input.mouseDY = 0;
     if (_cinematic.active) return;
   }
-  // Immobilized during stasis field recharge OR during pre-round warmup
-  // (ships locked in place until the 3-2-1-FIGHT countdown finishes).
-  if (game.playerInStasis || game.state === 'warmup') {
+  // Tick down a Puncture Stasis Trap root on the local player.
+  if (game.playerRootTimer > 0) game.playerRootTimer -= dt;
+  // Immobilized during stasis field recharge, while caught in an enemy
+  // Stasis Trap, OR during pre-round warmup (ships locked in place until the
+  // 3-2-1-FIGHT countdown finishes).
+  if (game.playerInStasis || game.playerRootTimer > 0 || game.state === 'warmup') {
     // Kill any residual velocity so we don't drift mid-lockout.
     player.velocity.set(0, 0, 0);
     // Still allow looking around but no movement
@@ -32579,6 +32589,28 @@ function updateAbilities(dt) {
 
     else if (eff.type === 'tether') {
       if (!eff.triggered) {
+        // Local player first. In multiplayer the local player is NOT in
+        // game.entities (it's `player`), and remote enemies are network
+        // mirrors whose velocity we can't authoritatively zero. The trap
+        // effect is mirrored on every client via effect_spawn, so each client
+        // roots its OWN player when it sits inside an enemy trap ; the victim
+        // freezes locally, stops broadcasting movement, and therefore reads as
+        // trapped on every other client too. This is what makes the trap catch
+        // enemy PLAYERS, not just bots.
+        if (player && player.shipState !== 'dead' && player.alive !== false
+            && eff.team !== player.team
+            && player.position.distanceTo(eff.position) < eff.radius) {
+          eff.triggered = true;
+          eff.rootTarget = player;        // arc visual + velocity-zero below
+          eff.rootTimer = eff.rootDuration;
+          game.playerRootTimer = Math.max(game.playerRootTimer || 0, eff.rootDuration);
+          try {
+            if (typeof playSpatialSound === 'function') playSpatialSound('tether_caught', eff.position.clone());
+            else playSound('tether_caught');
+          } catch (_) {}
+        }
+      }
+      if (!eff.triggered) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (bot.position.distanceTo(eff.position) < eff.radius) {
@@ -32594,9 +32626,13 @@ function updateAbilities(dt) {
           }
         }
       }
-      if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
+      const _rootIsLocal = (eff.rootTarget === player);
+      const _rootAlive = eff.rootTarget && (_rootIsLocal ? player.shipState !== 'dead' : eff.rootTarget.alive);
+      if (eff.triggered && _rootAlive) {
         eff.rootTimer -= dt;
-        // Root the target (stop movement)
+        // Root the target (stop movement). For the local player the actual
+        // immobilization is enforced by game.playerRootTimer in
+        // updatePlayerMovement ; zeroing velocity here is belt-and-braces.
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
         if (eff.rootTimer <= 0) eff.timer = 0; // done
       }

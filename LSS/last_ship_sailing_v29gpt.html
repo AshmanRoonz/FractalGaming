@@ -2902,6 +2902,11 @@ const game = {
   playerStasisTimer: 0,
   playerStasisDuration: 3,
   playerPreStasisVelocity: null,
+  // Puncture Stasis Trap root on the LOCAL player. In multiplayer the local
+  // player isn't in game.entities and remote peers are network-driven mirrors
+  // whose velocity we can't authoritatively zero, so each client roots its OWN
+  // player when caught by an enemy trap. >0 means rooted for that many seconds.
+  playerRootTimer: 0,
   // Champion-field stasis. When the player
   // enters the champion field this flag goes true and the regular
   // updatePlayerStasis auto-decrement is suppressed; the champion handler
@@ -10662,12 +10667,11 @@ try {
     _stored = 'low';
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
   }
-  let _dprCap;
-  if (_stored === 'ultra') {
-    _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
-  } else {
-    _dprCap = Math.min(window.devicePixelRatio, 2);
-  }
+  let _dprCap = (typeof getFlatSceneDprCapForQuality === 'function')
+    ? getFlatSceneDprCapForQuality(_stored)
+    : (_stored === 'ultra'
+        ? Math.min((window.devicePixelRatio || 1) * 1.5, 2.5)
+        : Math.min(window.devicePixelRatio || 1, 2));
   renderer.setPixelRatio(_dprCap);
 })();
 renderer.setClearColor(0x0a0520); // Dark purple-black (cartoon space)
@@ -12744,6 +12748,34 @@ function isXRPresenting() {
   const r = (typeof window !== 'undefined') ? window.renderer : null;
   return !!(r && r.xr && r.xr.isPresenting);
 }
+function isFlatAndroidChrome() {
+  try {
+    if (typeof navigator === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    if (!/Android/i.test(ua) || !/Mobile/i.test(ua) || !/Chrome\//i.test(ua)) return false;
+    if (/DuckDuckGo|EdgA|OPR|Opera|SamsungBrowser|Firefox|OculusBrowser|Quest/i.test(ua)) return false;
+    return !(typeof isXRPresenting === 'function' && isXRPresenting());
+  } catch (_) {
+    return false;
+  }
+}
+function getFlatMobileBudgetTier() {
+  if (typeof isXRPresenting === 'function' && isXRPresenting()) return 0;
+  if (isFlatAndroidChrome()) return 2;
+  try {
+    const ua = (navigator && navigator.userAgent) ? navigator.userAgent : '';
+    if (/Android|iPhone|iPad|iPod/i.test(ua) && !/DuckDuckGo/i.test(ua)) return 1;
+  } catch (_) {}
+  return 0;
+}
+function getFlatSceneDprCapForQuality(level) {
+  const tier = (typeof getFlatMobileBudgetTier === 'function') ? getFlatMobileBudgetTier() : 0;
+  if (tier >= 2) return 1.0;
+  if (tier >= 1) return 1.25;
+  if (level === 'potato') return 0.75;
+  if (level === 'ultra') return Math.min((window.devicePixelRatio || 1) * 1.5, 2.5);
+  return Math.min(window.devicePixelRatio || 1, 2);
+}
 function isVRStripFx() {
   if (typeof input === 'undefined' || !input || !input.vrStripFx) return false;
   return isXRPresenting();
@@ -12772,7 +12804,7 @@ function getVRPerfMode() {
 }
 
 function getVRPerfTier() {
-  if (!isXRPresenting()) return 0;
+  if (!isXRPresenting()) return (typeof getFlatMobileBudgetTier === 'function') ? getFlatMobileBudgetTier() : 0;
   const mode = getVRPerfMode();
   if (mode === 'max') return 3;
   if (mode === 'fast') return 2;
@@ -12781,6 +12813,8 @@ function getVRPerfTier() {
 }
 
 function getVRBudgetTier() {
+  const flatTier = (typeof getFlatMobileBudgetTier === 'function') ? getFlatMobileBudgetTier() : 0;
+  if (flatTier > 0) return flatTier;
   if (!isStandaloneQuest() && !isXRPresenting()) return 0;
   const mode = getVRPerfMode();
   if (mode === 'max') return 3;
@@ -12790,7 +12824,7 @@ function getVRBudgetTier() {
 }
 
 function getVRThrottleTier() {
-  if (!isXRPresenting()) return 0;
+  if (!isXRPresenting()) return (typeof getFlatMobileBudgetTier === 'function') ? getFlatMobileBudgetTier() : 0;
   const perfTier = getVRPerfTier();
   if (perfTier > 0) return perfTier;
   return isStandaloneQuest() ? 1 : 0;
@@ -12962,7 +12996,10 @@ const QUALITY = {
   level: 'high',
   isPotato() { return this.level === 'potato'; },
   isUltra()  { return this.level === 'ultra';  },
-  bloomEnabled() { return this.level !== 'potato' && this.level !== 'low' && this.level !== 'medium'; },
+  bloomEnabled() {
+    if ((typeof getFlatMobileBudgetTier === 'function') && getFlatMobileBudgetTier() >= 1) return false;
+    return this.level !== 'potato' && this.level !== 'low' && this.level !== 'medium';
+  },
   smokeOctaves() {
     const tier = getVRPerfTier();
     if (tier >= 1) return 1;
@@ -13030,17 +13067,26 @@ const QUALITY = {
   // Basin gas pools : decorative gas pools spawned in rooms at level
   // build time. Disabled in potato mode since each pool adds 8-11 GasClouds
   // with 10 sprites each (~80-110 sprites per basin × ~15 basins per level).
-  basinClouds() { return this.level !== 'potato'; },
+  basinClouds() {
+    if ((typeof getVRBudgetTier === 'function') && getVRBudgetTier() >= 1) return false;
+    return this.level !== 'potato';
+  },
   // Cloud-wall shockwave on impact : runs spreadAgainstWall +
   // shockwaveExpand for 0.35 s on every cloud-wall collision. Disabled
   // in potato mode ; clouds still bounce / slide, just without the
   // sprite-level burst.
-  shockwaveOnImpact() { return this.level !== 'potato'; },
+  shockwaveOnImpact() {
+    if ((typeof getVRThrottleTier === 'function') && getVRThrottleTier() >= 1) return false;
+    return this.level !== 'potato';
+  },
   // Bloom RT pixel-ratio cap. Multiplies window.devicePixelRatio.
   // Ultra bumped 1.5x to 2.0x for crisper highlights ; pairs with the
   // scene supersampling bump (renderer.setPixelRatio also 1.5x on Ultra) so
   // the bloom texture isn't downsampling the supersampled scene.
   bloomDPR() {
+    const flatTier = (typeof getFlatMobileBudgetTier === 'function') ? getFlatMobileBudgetTier() : 0;
+    if (flatTier >= 2) return 0.7;
+    if (flatTier >= 1) return 0.85;
     if (this.level === 'potato') return 0.7;
     if (this.level === 'ultra')  return 2.0;
     return 1.0;
@@ -13057,14 +13103,9 @@ function applyQualityPreset(level) {
   // _getBloomRTSize ; this is the scene pass.
   try {
     if (typeof renderer !== 'undefined' && renderer && renderer.setPixelRatio) {
-      let _cap;
-      if (QUALITY.isPotato()) {
-        _cap = 0.75;
-      } else if (QUALITY.isUltra()) {
-        _cap = Math.min(window.devicePixelRatio * 1.5, 2.5);
-      } else {
-        _cap = Math.min(window.devicePixelRatio, 2);
-      }
+      let _cap = (typeof getFlatSceneDprCapForQuality === 'function')
+        ? getFlatSceneDprCapForQuality(QUALITY.level)
+        : Math.min(window.devicePixelRatio, 2);
       renderer.setPixelRatio(_cap);
     }
   } catch (_) {}
@@ -13082,6 +13123,7 @@ try {
     postFX.enabled = QUALITY.bloomEnabled();
   }
 } catch (e) {}
+postFX.enabled = QUALITY.bloomEnabled();
 
 // Render target: scene renders here first, then post-processed to screen
 // Scene RT pixel ratio driven by QUALITY.bloomDPR().
@@ -13732,6 +13774,11 @@ function renderFrame() {
   if (_shouldUseCineFXFrame()) {
     renderer.setRenderTarget(null);
     cineFX.composer.render();
+    return;
+  }
+  if ((typeof getFlatMobileBudgetTier === 'function') && getFlatMobileBudgetTier() >= 2) {
+    renderer.setRenderTarget(null);
+    renderer.render(scene, camera);
     return;
   }
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
@@ -27543,6 +27590,7 @@ function commitLoadout(key) {
       game.stasisFirstBatch = true;
       game.playerInStasis = false;
       game.playerStasisTimer = 0;
+      game.playerRootTimer = 0;
       document.getElementById('stasis-warning').style.display = 'none';
       document.getElementById('stasis-vignette').style.display = 'none';
 
@@ -28007,6 +28055,7 @@ function respawnPlayer() {
   // where respawn fires before that tick.
   game.playerInChampionStasis = false;
   game.playerInStasis = false;
+  game.playerRootTimer = 0; // clear any Stasis Trap root on respawn
   const ch = player.chassis;
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
@@ -28647,9 +28696,12 @@ function updatePlayerMovement(dt) {
     input.mouseDX = 0; input.mouseDY = 0;
     if (_cinematic.active) return;
   }
-  // Immobilized during stasis field recharge OR during pre-round warmup
-  // (ships locked in place until the 3-2-1-FIGHT countdown finishes).
-  if (game.playerInStasis || game.state === 'warmup') {
+  // Tick down a Puncture Stasis Trap root on the local player.
+  if (game.playerRootTimer > 0) game.playerRootTimer -= dt;
+  // Immobilized during stasis field recharge, while caught in an enemy
+  // Stasis Trap, OR during pre-round warmup (ships locked in place until the
+  // 3-2-1-FIGHT countdown finishes).
+  if (game.playerInStasis || game.playerRootTimer > 0 || game.state === 'warmup') {
     // Kill any residual velocity so we don't drift mid-lockout.
     player.velocity.set(0, 0, 0);
     // Still allow looking around but no movement
@@ -32583,6 +32635,28 @@ function updateAbilities(dt) {
 
     else if (eff.type === 'tether') {
       if (!eff.triggered) {
+        // Local player first. In multiplayer the local player is NOT in
+        // game.entities (it's `player`), and remote enemies are network
+        // mirrors whose velocity we can't authoritatively zero. The trap
+        // effect is mirrored on every client via effect_spawn, so each client
+        // roots its OWN player when it sits inside an enemy trap ; the victim
+        // freezes locally, stops broadcasting movement, and therefore reads as
+        // trapped on every other client too. This is what makes the trap catch
+        // enemy PLAYERS, not just bots.
+        if (player && player.shipState !== 'dead' && player.alive !== false
+            && eff.team !== player.team
+            && player.position.distanceTo(eff.position) < eff.radius) {
+          eff.triggered = true;
+          eff.rootTarget = player;        // arc visual + velocity-zero below
+          eff.rootTimer = eff.rootDuration;
+          game.playerRootTimer = Math.max(game.playerRootTimer || 0, eff.rootDuration);
+          try {
+            if (typeof playSpatialSound === 'function') playSpatialSound('tether_caught', eff.position.clone());
+            else playSound('tether_caught');
+          } catch (_) {}
+        }
+      }
+      if (!eff.triggered) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (bot.position.distanceTo(eff.position) < eff.radius) {
@@ -32598,9 +32672,13 @@ function updateAbilities(dt) {
           }
         }
       }
-      if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
+      const _rootIsLocal = (eff.rootTarget === player);
+      const _rootAlive = eff.rootTarget && (_rootIsLocal ? player.shipState !== 'dead' : eff.rootTarget.alive);
+      if (eff.triggered && _rootAlive) {
         eff.rootTimer -= dt;
-        // Root the target (stop movement)
+        // Root the target (stop movement). For the local player the actual
+        // immobilization is enforced by game.playerRootTimer in
+        // updatePlayerMovement ; zeroing velocity here is belt-and-braces.
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
         if (eff.rootTimer <= 0) eff.timer = 0; // done
       }
@@ -45103,6 +45181,44 @@ const SANDWICH_TERRAIN_THEMES = [
   }
 ];
 
+function _sandwichPerfTier() {
+  if (typeof getVRBudgetTier === 'function') return getVRBudgetTier();
+  if (typeof getFlatMobileBudgetTier === 'function') return getFlatMobileBudgetTier();
+  return 0;
+}
+
+function _sandwichChunkCells() {
+  const tier = _sandwichPerfTier();
+  if (tier >= 3) return 10;
+  if (tier >= 2) return 12;
+  if (tier >= 1) return 14;
+  return SANDWICH_TERRAIN_CFG.chunkCells;
+}
+
+function _sandwichChunkView() {
+  const tier = _sandwichPerfTier();
+  if (tier >= 2) return 2;
+  return SANDWICH_TERRAIN_CFG.chunkView;
+}
+
+function _sandwichAnchorView() {
+  const tier = _sandwichPerfTier();
+  if (tier >= 2) return 0;
+  return SANDWICH_TERRAIN_CFG.anchorView;
+}
+
+function _sandwichChunkBuildBudget(force) {
+  const tier = _sandwichPerfTier();
+  if (force) {
+    if (tier >= 2) return 32;
+    if (tier >= 1) return 48;
+    return SANDWICH_TERRAIN_CFG.initialBuildBudget;
+  }
+  if (tier >= 2) return 1;
+  if (tier >= 1) return 1;
+  return SANDWICH_TERRAIN_CFG.chunkBuildBudget;
+}
+
 function _sandwichClamp01(v) {
   return Math.max(0, Math.min(1, v));
 }
@@ -45487,11 +45603,12 @@ function _updateSandwichTerrainChunks(force) {
   const size = st.chunkSize;
   const ccx = Math.floor(focus.x / size);
   const ccz = Math.floor(focus.z / size);
+  const view = _sandwichChunkView();
   if (force || st.lastCx !== ccx || st.lastCz !== ccz) {
     st.lastCx = ccx;
     st.lastCz = ccz;
-    _sandwichQueueChunksAround(st, focus.x, focus.z, cfg.chunkView);
-    const keep = cfg.chunkView + cfg.chunkUnloadSlack;
+    _sandwichQueueChunksAround(st, focus.x, focus.z, view);
+    const keep = view + cfg.chunkUnloadSlack;
     const keys = Array.from(st.chunks.keys());
     for (const key of keys) {
       const chunk = st.chunks.get(key);
@@ -45502,11 +45619,11 @@ function _updateSandwichTerrainChunks(force) {
     }
   }
   if (st.queue.length > 1) st.queue.sort((a, b) => a.dist2 - b.dist2);
-  let budget = force ? cfg.initialBuildBudget : cfg.chunkBuildBudget;
+  let budget = _sandwichChunkBuildBudget(force);
   while (budget-- > 0 && st.queue.length > 0) {
     const item = st.queue.shift();
     st.queued.delete(item.key);
-    if (!force && (Math.abs(item.cx - st.lastCx) > cfg.chunkView || Math.abs(item.cz - st.lastCz) > cfg.chunkView)) {
+    if (!force && (Math.abs(item.cx - st.lastCx) > view || Math.abs(item.cz - st.lastCz) > view)) {
       continue;
     }
     _sandwichBuildTerrainChunk(st, item.cx, item.cz);
@@ -45567,7 +45684,7 @@ function _buildSandwichTerrainForLevel(level, bounds, rooms, cylSegs) {
     cylSegs,
     bounds: { minX, maxX, minZ, maxZ },
     chunkSize: cfg.chunkSize,
-    chunkCells: cfg.chunkCells,
+    chunkCells: _sandwichChunkCells(),
     seed: terrainSeed,
     theme: terrainTheme,
     groundMat,
@@ -45576,10 +45693,11 @@ function _buildSandwichTerrainForLevel(level, bounds, rooms, cylSegs) {
   game.sandwichTerrainSeed = terrainSeed;
   const st = game.sandwichTerrain;
   const focus = _sandwichTerrainFocus(st);
-  _sandwichQueueChunksAround(st, focus.x, focus.z, cfg.chunkView);
+  _sandwichQueueChunksAround(st, focus.x, focus.z, _sandwichChunkView());
+  const anchorView = _sandwichAnchorView();
   for (const rm of rooms || []) {
     if (rm && (rm.team || rm.champion)) {
-      _sandwichQueueChunksAround(st, rm.x, rm.z, cfg.anchorView);
+      _sandwichQueueChunksAround(st, rm.x, rm.z, anchorView);
     }
   }
   _updateSandwichTerrainChunks(true);
