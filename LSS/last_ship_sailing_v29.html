@@ -14074,30 +14074,47 @@ function _stGapSDF(px,py,pz,T){
   return Math.max(_stGroundY(px,pz,T)-py, py-_stCeilY(px,pz,T));
 }
 
-// ---- MAP-DRIVEN CARVE (main thread only) ----
-// The mountains part around the map's route: near any room or tunnel the ground
-// is pushed down and the ceiling up, opening a clear lane the cosmic raceway
-// threads through. Pure function of (x,z) + the level's rooms/tunnels, so the
-// rock mesh and the collision field agree and every client draws the same world.
+// ---- MAP-DRIVEN ARENA CARVE (main thread only) ----
+// Each map ROOM becomes an arena: a flat floor at the room's own height with the
+// surrounding mountains rising into walls, and a raised dome ceiling for
+// headroom. Each TUNNEL becomes a connecting lane that ramps between the arena
+// heights it joins. Everywhere else the mountains are untouched. Pure function
+// of (x,z) + the level's rooms/tunnels, so the rock mesh and the collision field
+// agree and every client draws the same world.
 function _stSmooth(e0,e1,x){const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);}
-function _stSegDist2D(px,pz,ax,az,bx,bz){
-  const dx=bx-ax,dz=bz-az,l2=dx*dx+dz*dz;
-  let t=l2>0?((px-ax)*dx+(pz-az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
-  const cx=ax+dx*t,cz=az+dz*t; return Math.hypot(px-cx,pz-cz);
-}
-// 1 on the route centerline, fading to 0 a soft margin beyond room/tunnel radius.
-function _stCarveOpenness(x,z,T){
-  const soft=T.CLEAR_SOFT||260; let o=0;
+// Strongest route influence at (x,z): returns its 0..1 weight and the route's
+// height there (room centre y, or interpolated tunnel y). Wider blend = roomier.
+function _stRouteAt(x,z,T){
+  const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID;
   const S=game.levelSpheres||[];
-  for(let i=0;i<S.length;i++){const s=S[i];const d=Math.hypot(x-s.cx,z-s.cz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;if(o>=1)return 1;}}
+  for(let i=0;i<S.length;i++){const s=S[i];const d=Math.hypot(x-s.cx,z-s.cz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
   const C=game.levelCylinders||[];
-  for(let i=0;i<C.length;i++){const c=C[i];const d=_stSegDist2D(x,z,c.ax,c.az,c.bx,c.bz);const e=1-_stSmooth(c.r,c.r+soft,d);if(e>o){o=e;if(o>=1)return 1;}}
-  return o;
+  for(let i=0;i<C.length;i++){const c=C[i];
+    const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
+    let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
+    const cx=c.ax+dx*t,cz=c.az+dz*t,d=Math.hypot(x-cx,z-cz);
+    const e=1-_stSmooth(c.r,c.r+soft,d);
+    if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}
+  return {o,ty};
 }
-// Carved gap SDF: like _stGapSDF but with the route lane opened up.
+// Kept for callers that only want the openness weight.
+function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
+// Carved heightfield: blend natural mountain toward a flat arena floor / dome.
+function _stGroundYCarved(x,z,T){
+  const g=_stGroundY(x,z,T); const r=_stRouteAt(x,z,T);
+  if(r.o<=0) return g;
+  const floor=r.ty-(T.ARENA_DROP||320);   // flat arena/lane floor below the route
+  return g+(floor-g)*r.o;
+}
+function _stCeilYCarved(x,z,T){
+  const c=_stCeilY(x,z,T); const r=_stRouteAt(x,z,T);
+  if(r.o<=0) return c;
+  const roof=r.ty+(T.ARENA_RISE||420);     // domed ceiling above the route
+  return c+(roof-c)*r.o;
+}
+// Carved gap SDF: open between the carved floor and carved ceiling.
 function _stGapSDFCarved(px,py,pz,T){
-  const open=_stCarveOpenness(px,pz,T)*(T.CLEAR_DEPTH||700);
-  return Math.max((_stGroundY(px,pz,T)-open)-py, py-(_stCeilY(px,pz,T)+open));
+  return Math.max(_stGroundYCarved(px,pz,T)-py, py-_stCeilYCarved(px,pz,T));
 }
 
 // ---- SANDWICH TERRAIN ROCK MESH (separate from the cosmic tube walls) ----
@@ -14111,27 +14128,43 @@ function _stGapSDFCarved(px,py,pz,T){
 // Streaming params (LSS scale). CHUNK * VIEW must sit comfortably inside the
 // camera far plane (8000) so the fog can swallow the build edge.
 const _SW_CHUNK = 900;       // world units per chunk
-const _SW_CELLS = 18;        // grid cells per chunk side (cell = 50u: sharp ridges)
+const _SW_CELLS = 20;        // grid cells per chunk side (higher = finer detail)
 const _SW_VIEW  = 5;         // chunk radius kept built around the ship
 const _SW_BUILD_PER_FRAME = 2;
 
-// Shared colour ramp (dark valley rock -> grey rock -> pale -> snow caps).
-const _SW_C_DARK = new THREE.Color(0x282d38), _SW_C_ROCK = new THREE.Color(0x646b78),
-      _SW_C_HIGH = new THREE.Color(0x9aa6b4), _SW_C_SNOW = new THREE.Color(0xeef4fb);
+// Biome palettes (Ace-Starship feel). Ground ramps low->high; ceiling is a
+// distinct rock that lightens toward its hanging tips. Default biome 'grassy':
+// green slopes with bright snow caps under a grey rock ceiling.
+const _SW_BIOMES = {
+  grassy:  { sky:0xb8cee0, gLo:0x33571f, gMid:0x4d7a33, gHi:0x7b7a5a, gSnow:0xeef4fb, cLo:0x596170, cHi:0xb4becd },
+  rocky:   { sky:0xafc2d6, gLo:0x2c313c, gMid:0x5c636f, gHi:0x97a2b0, gSnow:0xeef4fb, cLo:0x3c4150, cHi:0x9aa3b2 },
+  snow:    { sky:0xd2e2f0, gLo:0x6f8aa0, gMid:0xa9c2d6, gHi:0xd8e6f2, gSnow:0xffffff, cLo:0x8fa6bd, cHi:0xeaf4ff },
+  volcanic:{ sky:0x4a1c14, gLo:0xb5391a, gMid:0x5a2a22, gHi:0x36302e, gSnow:0x9a9088, cLo:0x2a2220, cHi:0x6e5a50 },
+};
 const _SW_tmpC = new THREE.Color();
-function _swColAt(wy, T, out) {
-  const lo = T.YMID - T.AMP * 0.5, hi = T.YMID + T.AMP * 0.78;
+const _SW_cA = new THREE.Color(), _SW_cB = new THREE.Color();
+function _swPal(T){ return _SW_BIOMES[(T && T.biome) || 'grassy'] || _SW_BIOMES.grassy; }
+// Ground colour by height: low slopes -> mid -> high rock -> snow caps.
+function _swColGround(wy, T, out) {
+  const P = _swPal(T), sl = (T && T.snowLine) || 0.72;
+  const lo = T.YMID - T.AMP * 0.5, hi = T.YMID + T.AMP * 0.4;
   let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
-  if (t < 0.34) out.copy(_SW_C_DARK).lerp(_SW_C_ROCK, t / 0.34);
-  else if (t < 0.72) out.copy(_SW_C_ROCK).lerp(_SW_C_HIGH, (t - 0.34) / 0.38);
-  else out.copy(_SW_C_HIGH).lerp(_SW_C_SNOW, (t - 0.72) / 0.28);
+  if (t < 0.42) out.copy(_SW_cA.set(P.gLo)).lerp(_SW_cB.set(P.gMid), t / 0.42);
+  else if (t < sl) out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (t - 0.42) / Math.max(0.01, sl - 0.42));
+  else out.copy(_SW_cA.set(P.gHi)).lerp(_SW_cB.set(P.gSnow), (t - sl) / Math.max(0.01, 1 - sl));
   return out;
+}
+// Ceiling colour: hanging tips (low) lighter, base (high) darker grey rock.
+function _swColCeil(wy, T, out) {
+  const P = _swPal(T);
+  const lo = T.YMID - T.AMP * 0.3, hi = T.YCEIL;
+  let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return out.copy(_SW_cA.set(P.cHi)).lerp(_SW_cB.set(P.cLo), t);
 }
 
 // One height-field shell (ground or ceiling) over a single chunk's footprint.
 function _swBuildShell(x0, z0, isCeil, T) {
   const n = _SW_CELLS, step = _SW_CHUNK / n;
-  const depth = T.CLEAR_DEPTH || 700;
   const nVert = (n + 1) * (n + 1);
   const verts = new Float32Array(nVert * 3);
   const cols  = new Float32Array(nVert * 3);
@@ -14139,10 +14172,10 @@ function _swBuildShell(x0, z0, isCeil, T) {
   for (let j = 0; j <= n; j++) {
     for (let i = 0; i <= n; i++) {
       const x = x0 + i * step, z = z0 + j * step;
-      const open = _stCarveOpenness(x, z, T) * depth;
-      const y = isCeil ? (_stCeilY(x, z, T) + open) : (_stGroundY(x, z, T) - open);
+      const y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
       verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
-      _swColAt(y, T, _SW_tmpC); cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
+      if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(y, T, _SW_tmpC);
+      cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
       p += 3;
     }
   }
@@ -14176,10 +14209,29 @@ function _swDisposeChunk(c) {
   }
 }
 
-// Drop every built chunk (map change / terrain off).
+// Atmosphere: a hazy biome sky + matched fog so distant peaks fade into the
+// horizon (the Ace look). Saves/restores the original fog + background so the
+// toggle returns the cosmic build untouched.
+function _swApplyAtmosphere() {
+  const T = game.sandwichTerrain;
+  if (!T || !T.ON) {
+    if (game._swSavedFog !== undefined) { scene.fog = game._swSavedFog; game._swSavedFog = undefined; }
+    if (game._swSavedBg !== undefined) { scene.background = game._swSavedBg; game._swSavedBg = undefined; }
+    return;
+  }
+  if (game._swSavedFog === undefined) game._swSavedFog = (scene.fog !== undefined ? scene.fog : null);
+  if (game._swSavedBg === undefined) game._swSavedBg = (scene.background !== undefined ? scene.background : null);
+  const P = _SW_BIOMES[T.biome] || _SW_BIOMES.grassy;
+  const sky = new THREE.Color(P.sky);
+  scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 1e-4);
+  scene.background = sky;
+}
+
+// Drop every built chunk (map change / terrain off), restoring atmosphere too.
 function resetSandwichTerrain() {
   if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
   game.sandwichChunks = new Map();
+  try { _swApplyAtmosphere(); } catch (_) {}
 }
 
 // Build/drop chunks around a world position. Cheap; safe to call every frame.
@@ -14217,6 +14269,7 @@ function initSandwichTerrain() {
   resetSandwichTerrain();
   const T = game.sandwichTerrain;
   if (!T || !T.ON || !T.FOOT) return;
+  try { _swApplyAtmosphere(); } catch (_) {}
   const F = T.FOOT;
   const cx0 = Math.floor(F.minX / _SW_CHUNK) - 1, cx1 = Math.floor(F.maxX / _SW_CHUNK) + 1;
   const cz0 = Math.floor(F.minZ / _SW_CHUNK) - 1, cz1 = Math.floor(F.maxZ / _SW_CHUNK) + 1;
@@ -14247,6 +14300,15 @@ function setSandwichTerrain(on) {
   return game.sandwichTerrainEnabled;
 }
 if (typeof window !== 'undefined') window.setSandwichTerrain = setSandwichTerrain;
+
+// Console helper: setSandwichBiome('grassy'|'rocky'|'snow'|'volcanic'). Rebuilds.
+function setSandwichBiome(name) {
+  if (!_SW_BIOMES[name]) { console.warn('[sandwich] unknown biome', name, '— options:', Object.keys(_SW_BIOMES).join(', ')); return; }
+  game.sandwichBiome = name;
+  try { if (typeof buildRoomGraphLevel === 'function' && game.currentLevel) buildRoomGraphLevel(game.currentLevel); } catch (e) { console.warn(e); }
+  return name;
+}
+if (typeof window !== 'undefined') window.setSandwichBiome = setSandwichBiome;
 
 // Evaluate the world SDF: negative = inside playable space, positive = solid wall
 // Rooms blend smoothly with each other and with tunnels (smin),
@@ -44659,6 +44721,8 @@ const _FOG_SPAWN_MULT = 0.55;   // spawn rooms: clear
 const _FOG_CENTRAL_MULT = 2.6;  // central rooms: hazy
 const _FOG_TUNNEL_MULT = 1.4;   // tunnels: in-between
 function updateRoomFog(dt) {
+  // Sandwich terrain owns the fog/atmosphere when active ; don't fight it.
+  if (game.sandwichTerrain && game.sandwichTerrain.ON) return;
   if (!scene.fog || !player || !player.position) return;
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
   const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
@@ -45594,23 +45658,25 @@ function buildRoomGraphLevel(level) {
   // room/tunnel maps reach here, so terrain applies to all of them.
   if (game.sandwichTerrainEnabled) {
     const yMid = (bMinY + bMaxY) * 0.5;
-    const GAP_HALF = 360;   // open-gap half-height before peaks intrude on the route
-    const AMP = 1000;       // peak height / ceiling-tip depth (rides on the noise)
+    const SPACING = 430;    // distance between peaks (smaller = denser range)
+    const GAP_HALF = 580;   // open-gap half-height; tighter = more dramatic sandwich
+    const AMP = 840;        // peak height / ceiling-tip depth (rides on the noise)
     game.sandwichTerrain = {
       ON: true,
-      OCTAVES: 5, LACUNARITY: 2.0, GAIN: 0.5, EXPONENT: 1.8,
-      BASE_FREQ: 1/600,         // ~600u peak spacing at LSS scale
-      WARP: 220, WARP_FREQ: 1/1300,
+      OCTAVES: 5, LACUNARITY: 2.0, GAIN: 0.5, EXPONENT: 1.7,
+      BASE_FREQ: 1/SPACING,
+      WARP: 0, WARP_FREQ: 1/(SPACING*2.2),
       GROUND_AMP: AMP, CEIL_AMP: AMP,
       YFLOOR: yMid - GAP_HALF,  // ground valleys; peaks rise to YFLOOR+AMP
       YCEIL:  yMid + GAP_HALF,  // ceiling base; tips hang down to YCEIL-AMP
       YMID: yMid, AMP: AMP,
-      CLEAR_SOFT: 260,          // lane fade beyond room/tunnel radius
-      CLEAR_DEPTH: 700,         // how far the lane pushes ground down / ceiling up
-      FOOT: { minX:bMinX, maxX:bMaxX, minZ:bMinZ, maxZ:bMaxZ }, // tube footprint
+      CLEAR_SOFT: 120,          // arena/lane wall blend beyond room/tunnel radius
+      ARENA_DROP: 900,          // flat arena floor below the room/lane height
+      ARENA_RISE: 1000,         // domed ceiling above the room/lane height
+      FOOT: { minX:bMinX, maxX:bMaxX, minZ:bMinZ, maxZ:bMaxZ },
+      biome: game.sandwichBiome || 'grassy',   // grassy | rocky | snow | volcanic
+      snowLine: 0.3,
     };
-    // NB: the marching-cubes box stays tight to the tubes (crisp cosmic walls).
-    // The mountains are a SEPARATE rock mesh built from these params below.
   } else {
     game.sandwichTerrain = null;
   }

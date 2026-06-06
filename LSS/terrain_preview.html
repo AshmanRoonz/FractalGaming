@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>LSS Sandwich Terrain Lab</title>
+<style>
+  :root{color-scheme:dark;}
+  html,body{margin:0;height:100%;background:#0a0d12;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif;color:#dfe7f0;}
+  #c{position:fixed;inset:0;display:block;}
+  #panel{position:fixed;top:10px;left:10px;width:280px;max-height:94vh;overflow:auto;
+    background:rgba(12,16,24,.82);border:1px solid rgba(120,160,210,.3);border-radius:10px;
+    padding:12px 12px 16px;font-size:12px;backdrop-filter:blur(6px);}
+  #panel h1{font-size:13px;letter-spacing:2px;margin:0 0 4px;color:#9cd0ff;}
+  #panel .sub{font-size:10px;color:#8895ab;margin-bottom:10px;}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:7px 0;}
+  .row label{flex:1;color:#b9c6d8;}
+  .row input[type=range]{flex:1.1;}
+  .row .val{width:46px;text-align:right;color:#eaf2ff;font-variant-numeric:tabular-nums;}
+  select,button{background:#16202e;color:#dfe7f0;border:1px solid rgba(120,160,210,.35);border-radius:6px;padding:5px 7px;font-size:12px;}
+  button{cursor:pointer;}
+  button:hover{background:#1d2a3c;}
+  .seg{margin-top:10px;border-top:1px solid rgba(120,160,210,.18);padding-top:8px;}
+  .hint{font-size:10px;color:#7e8ba0;line-height:1.4;margin-top:8px;}
+  #dump{width:100%;height:120px;margin-top:6px;background:#0c1118;color:#9fe0b0;border:1px solid rgba(120,160,210,.25);border-radius:6px;font:11px/1.35 ui-monospace,Consolas,monospace;padding:6px;white-space:pre;resize:vertical;}
+  #fps{position:fixed;top:10px;right:12px;font:12px ui-monospace,monospace;color:#8fd0ff;background:rgba(12,16,24,.6);padding:3px 8px;border-radius:6px;}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="fps">--</div>
+<div id="panel">
+  <h1>SANDWICH TERRAIN LAB</h1>
+  <div class="sub">tune the look, then copy the params into v29</div>
+
+  <div class="row"><label>Map</label>
+    <select id="mapSel"></select></div>
+  <div class="row"><label>Biome</label>
+    <select id="biomeSel"></select></div>
+  <div class="row"><label>Camera</label>
+    <select id="camSel"><option value="fly">Auto fly-through</option><option value="orbit">Orbit (drag)</option></select></div>
+
+  <div class="seg">
+  <div class="row"><label>Peak height</label><input id="amp" type="range" min="300" max="2200" step="20"><span class="val" id="amp_v"></span></div>
+  <div class="row"><label>Peak spacing</label><input id="spacing" type="range" min="200" max="1200" step="10"><span class="val" id="spacing_v"></span></div>
+  <div class="row"><label>Sharpness</label><input id="exp" type="range" min="1" max="3.2" step="0.05"><span class="val" id="exp_v"></span></div>
+  <div class="row"><label>Meander</label><input id="warp" type="range" min="0" max="600" step="10"><span class="val" id="warp_v"></span></div>
+  <div class="row"><label>Gap (tightness)</label><input id="gap" type="range" min="120" max="1200" step="20"><span class="val" id="gap_v"></span></div>
+  <div class="row"><label>Snow line</label><input id="snow" type="range" min="0.3" max="1.0" step="0.02"><span class="val" id="snow_v"></span></div>
+  </div>
+
+  <div class="seg">
+  <div class="row"><label>Arena size</label><input id="lane" type="range" min="60" max="700" step="10"><span class="val" id="lane_v"></span></div>
+  <div class="row"><label>Arena floor</label><input id="drop" type="range" min="80" max="900" step="20"><span class="val" id="drop_v"></span></div>
+  <div class="row"><label>Arena dome</label><input id="rise" type="range" min="80" max="1000" step="20"><span class="val" id="rise_v"></span></div>
+  <div class="row"><label>Detail (cells)</label><input id="cells" type="range" min="8" max="32" step="2"><span class="val" id="cells_v"></span></div>
+  </div>
+
+  <div class="seg">
+  <div class="row"><label>Grass</label><input id="grass" type="range" min="0" max="1" step="1"><span class="val" id="grass_v"></span></div>
+  <div class="row"><label>Snow shine</label><input id="shine" type="range" min="0.05" max="1.0" step="0.01"><span class="val" id="shine_v"></span></div>
+  <div class="row"><label>Lava glow</label><input id="glow" type="range" min="0" max="3" step="0.1"><span class="val" id="glow_v"></span></div>
+  </div>
+
+  <div class="seg">
+  <div class="row"><label>Fog haze</label><input id="fog" type="range" min="0" max="40" step="1"><span class="val" id="fog_v"></span></div>
+  <div class="row"><label>Sun height</label><input id="sun" type="range" min="500" max="6000" step="100"><span class="val" id="sun_v"></span></div>
+  <div class="row"><label>Ceiling</label><input id="ceil" type="range" min="0" max="1" step="1"><span class="val" id="ceil_v"></span></div>
+  </div>
+
+  <div class="seg">
+  <button id="copyBtn">Copy params for v29</button>
+  <textarea id="dump" readonly></textarea>
+  <div class="hint">Auto-fly follows the map lane (spawn → champion). Drag = look around · scroll = speed/zoom · WASD = free move. Tell Claude the numbers you like and they'll go into the game.</div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const MAPS = {"race_branch":{"name":"Race ; Forked Run","key":"race_branch","description":"Adjacent spawns, two-room runup, then the track splits ; two arcs rejoin into the finish.","palette":[2101280,2627624,3151920,3676216,4200512,4724808,5249104,5773400],"rooms":[{"id":"spawn_a","team":"A","x":-240,"y":0,"z":-2100,"r":300},{"id":"spawn_b","team":"B","x":240,"y":0,"z":-2100,"r":300},{"id":"gate","team":null,"x":0,"y":0,"z":-1350,"r":360},{"id":"pre","team":null,"x":0,"y":0,"z":-450,"r":360},{"id":"arc_n","team":null,"x":900,"y":225,"z":450,"r":300},{"id":"arc_s","team":null,"x":-900,"y":-225,"z":450,"r":300},{"id":"rejoin","team":null,"x":0,"y":0,"z":1350,"r":360},{"id":"finish","team":null,"x":0,"y":0,"z":2100,"r":390,"champion":true}],"tunnels":[{"path":[{"x":-240,"y":0,"z":-2100},{"x":0,"y":0,"z":-1350}],"r":300},{"path":[{"x":240,"y":0,"z":-2100},{"x":0,"y":0,"z":-1350}],"r":300},{"path":[{"x":0,"y":0,"z":-1350},{"x":0,"y":0,"z":-450}],"r":300},{"path":[{"x":0,"y":0,"z":-450},{"x":900,"y":225,"z":450}],"r":270},{"path":[{"x":0,"y":0,"z":-450},{"x":-900,"y":-225,"z":450}],"r":270},{"path":[{"x":900,"y":225,"z":450},{"x":0,"y":0,"z":1350}],"r":270},{"path":[{"x":-900,"y":-225,"z":450},{"x":0,"y":0,"z":1350}],"r":270},{"path":[{"x":0,"y":0,"z":1350},{"x":0,"y":0,"z":2100}],"r":300}]},"race_straight":{"name":"Race ; Straightaway","key":"race_straight","description":"Two-lane start, five-room sprint, finish line at the far end. The simplest circuit.","palette":[1056816,1190968,1322560,1456712,1589328,1722968,1855584,1988200],"rooms":[{"id":"spawn_a","team":"A","x":-240,"y":0,"z":-2100,"r":300},{"id":"spawn_b","team":"B","x":240,"y":0,"z":-2100,"r":300},{"id":"r1","team":null,"x":0,"y":0,"z":-1200,"r":360},{"id":"r2","team":null,"x":0,"y":0,"z":-300,"r":360},{"id":"r3","team":null,"x":0,"y":0,"z":600,"r":360},{"id":"r4","team":null,"x":0,"y":0,"z":1500,"r":360},{"id":"finish","team":null,"x":0,"y":0,"z":2400,"r":390,"champion":true}],"tunnels":[{"path":[{"x":-240,"y":0,"z":-2100},{"x":0,"y":0,"z":-1200}],"r":300},{"path":[{"x":240,"y":0,"z":-2100},{"x":0,"y":0,"z":-1200}],"r":300},{"path":[{"x":0,"y":0,"z":-1200},{"x":0,"y":0,"z":-300}],"r":300},{"path":[{"x":0,"y":0,"z":-300},{"x":0,"y":0,"z":600}],"r":300},{"path":[{"x":0,"y":0,"z":600},{"x":0,"y":0,"z":1500}],"r":300},{"path":[{"x":0,"y":0,"z":1500},{"x":0,"y":0,"z":2400}],"r":300}]},"race_pole_position":{"name":"Race ; Pole Position","key":"race_pole_position","description":"Hand-built sweep ; spawns at the eastern start, climb to the cathedral roof, descend through the western spine, dive into the central finish.","palette":[4487167,16729224,4521847,16755268,11158783,4521983,16729258,16777028],"rooms":[{"id":"room_1","team":null,"x":274,"y":150,"z":2714,"r":300},{"id":"room_2","team":"A","x":2798,"y":150,"z":2852,"r":300},{"id":"room_3","team":"B","x":2820,"y":150,"z":2487,"r":300},{"id":"room_4","team":null,"x":-835,"y":1183,"z":2463,"r":350},{"id":"room_5","team":null,"x":-1342,"y":524,"z":1112,"r":300},{"id":"room_6","team":null,"x":-2700,"y":219,"z":2331,"r":500},{"id":"room_7","team":null,"x":-2860,"y":175,"z":742,"r":500},{"id":"room_8","team":null,"x":-2234,"y":270,"z":-2673,"r":400},{"id":"room_9","team":null,"x":2572,"y":359,"z":-2632,"r":380},{"id":"room_10","team":null,"x":2701,"y":284,"z":-927,"r":330},{"id":"room_11","team":null,"x":2537,"y":532,"z":572,"r":270},{"id":"room_12","team":null,"x":1548,"y":305,"z":1492,"r":270},{"id":"room_13","team":null,"x":324,"y":463,"z":1078,"r":270},{"id":"room_14","team":null,"x":-501,"y":546,"z":917,"r":350},{"id":"room_15","team":null,"x":-1226,"y":466,"z":-967,"r":400},{"id":"room_17","team":null,"champion":true,"x":1172,"y":466,"z":-1544,"r":500}],"tunnels":[{"path":[{"x":274,"y":150,"z":2714},{"x":2798,"y":150,"z":2852}],"r":250},{"path":[{"x":2820,"y":150,"z":2487},{"x":274,"y":150,"z":2714}],"r":250},{"path":[{"x":274,"y":150,"z":2714},{"x":-835,"y":1183,"z":2463}],"r":300},{"path":[{"x":-1342,"y":524,"z":1112},{"x":-835,"y":1183,"z":2463}],"r":300},{"path":[{"x":-1342,"y":524,"z":1112},{"x":-2700,"y":219,"z":2331}],"r":290},{"path":[{"x":-2860,"y":175,"z":742},{"x":-2700,"y":219,"z":2331}],"r":250},{"path":[{"x":-2860,"y":175,"z":742},{"x":-2234,"y":270,"z":-2673}],"r":300},{"path":[{"x":2572,"y":359,"z":-2632},{"x":-2234,"y":270,"z":-2673}],"r":300},{"path":[{"x":2572,"y":359,"z":-2632},{"x":2701,"y":284,"z":-927}],"r":280},{"path":[{"x":2701,"y":284,"z":-927},{"x":2537,"y":532,"z":572}],"r":250},{"path":[{"x":2537,"y":532,"z":572},{"x":1548,"y":305,"z":1492}],"r":220},{"path":[{"x":1548,"y":305,"z":1492},{"x":324,"y":463,"z":1078}],"r":180},{"path":[{"x":324,"y":463,"z":1078},{"x":-501,"y":546,"z":917}],"r":180},{"path":[{"x":-1226,"y":466,"z":-967},{"x":-501,"y":546,"z":917}],"r":250},{"path":[{"x":1172,"y":466,"z":-1544},{"x":-1226,"y":466,"z":-967}],"r":350}]}};
+const SU = 150, TR = SU*1.2;
+
+// ---------- terrain math (mirrors v29) ----------
+function hash2(x,z){const h=Math.sin(x*127.1+z*311.7)*43758.5453;return h-Math.floor(h);}
+function noise2(x,z){const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);const a=hash2(xi,zi),b=hash2(xi+1,zi),c=hash2(xi,zi+1),d=hash2(xi+1,zi+1);const ab=a+(b-a)*u,cd=c+(d-c)*u;return (ab+(cd-ab)*v)*2-1;}
+function ridged(x,z,seed,T){let sum=0,amp=1,freq=T.BASE_FREQ,prev=1,norm=0;for(let o=0;o<5;o++){const n=noise2(x*freq+seed*19.3,z*freq+seed*7.1);let r=1-Math.abs(n);r*=r;sum+=r*amp*prev;prev=r;norm+=amp;freq*=2;amp*=0.5;}return Math.pow(sum/norm,T.EXPONENT);}
+function groundY(x,z,T){const wx=x+T.WARP*noise2(x*T.WARP_FREQ,z*T.WARP_FREQ);const wz=z+T.WARP*noise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3);return T.YFLOOR+T.GROUND_AMP*ridged(wx,wz,1.7,T);}
+function ceilY(x,z,T){const ax=x+4000,az=z-4000;const wx=ax+T.WARP*noise2(ax*T.WARP_FREQ,az*T.WARP_FREQ);const wz=az+T.WARP*noise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3);return T.YCEIL-T.CEIL_AMP*ridged(wx,wz,5.9,T);}
+function smooth(e0,e1,x){const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);}
+function segDist2D(px,pz,ax,az,bx,bz){const dx=bx-ax,dz=bz-az,l2=dx*dx+dz*dz;let t=l2>0?((px-ax)*dx+(pz-az)*dz)/l2:0;t=t<0?0:(t>1?1:t);const cx=ax+dx*t,cz=az+dz*t;return Math.hypot(px-cx,pz-cz);}
+// Arena carve: strongest route influence + the route's height there.
+function routeAt(x,z,T){let o=0,ty=T.YMID;for(const s of T.S){const d=Math.hypot(x-s.cx,z-s.cz);const e=1-smooth(s.r,s.r+T.CLEAR_SOFT,d);if(e>o){o=e;ty=s.cy;}}for(const c of T.C){const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0;t=t<0?0:(t>1?1:t);const cx=c.ax+dx*t,cz=c.az+dz*t,d=Math.hypot(x-cx,z-cz);const e=1-smooth(c.r,c.r+T.CLEAR_SOFT,d);if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}return {o,ty};}
+function groundYc(x,z,T){const g=groundY(x,z,T);const r=routeAt(x,z,T);if(r.o<=0)return g;return g+((r.ty-T.ARENA_DROP)-g)*r.o;}
+function ceilYc(x,z,T){const c=ceilY(x,z,T);const r=routeAt(x,z,T);if(r.o<=0)return c;return c+((r.ty+T.ARENA_RISE)-c)*r.o;}
+
+// ---------- biomes ----------
+const BIOMES = {
+  grassy:  { name:'Grassy + snow', sky:0xb8cee0, fog:0xb8cee0,
+    gLo:0x33571f, gMid:0x4d7a33, gHi:0x7b7a5a, gSnow:0xeef4fb,
+    cLo:0x596170, cHi:0xb4becd },
+  rocky:   { name:'Rocky + snow', sky:0xafc2d6, fog:0xafc2d6,
+    gLo:0x2c313c, gMid:0x5c636f, gHi:0x97a2b0, gSnow:0xeef4fb,
+    cLo:0x3c4150, cHi:0x9aa3b2 },
+  snow:    { name:'Frozen', sky:0xd2e2f0, fog:0xd2e2f0,
+    gLo:0x6f8aa0, gMid:0xa9c2d6, gHi:0xd8e6f2, gSnow:0xffffff,
+    cLo:0x8fa6bd, cHi:0xeaf4ff },
+  volcanic:{ name:'Volcanic', sky:0x3a1410, fog:0x4a1c14,
+    gLo:0xb5391a, gMid:0x5a2a22, gHi:0x36302e, gSnow:0x9a9088, gSnowFix:0x9a9088,
+    cLo:0x2a2220, cHi:0x6e5a50 },
+};
+function biomeColors(b){ // returns array of {color, tmp}
+  const C={
+    gLo:new THREE.Color(b.gLo), gMid:new THREE.Color(b.gMid),
+    gHi:new THREE.Color(b.gHi), gSnow:new THREE.Color(b.gSnowFix!==undefined?b.gSnowFix:b.gSnow),
+    cLo:new THREE.Color(b.cLo), cHi:new THREE.Color(b.cHi) };
+  return C;
+}
+
+// ---------- state / params ----------
+const params = {
+  mapKey:'race_branch', biome:'grassy', cam:'fly',
+  AMP:840, spacing:430, EXPONENT:1.7, WARP:0, GAP:580,
+  snowLine:0.3, laneWidth:120, arenaDrop:900, arenaRise:1000, cells:20,
+  fog:3, sun:3000, ceiling:1, grass:1, shine:0.22, glow:1.0,
+};
+
+// ---------- three setup ----------
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(2,devicePixelRatio));
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(60,1,1,16000);
+const amb=new THREE.AmbientLight(0xffffff,0.7); scene.add(amb);
+const hemi=new THREE.HemisphereLight(0xbfd4ea,0x35402f,0.6); scene.add(hemi);
+const sun=new THREE.DirectionalLight(0xffffff,2.0); scene.add(sun);
+const sun2=new THREE.DirectionalLight(0xbfd9ff,0.5); sun2.position.set(-1,0.6,-1); scene.add(sun2);
+
+function resize(){const w=innerWidth,h=innerHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+addEventListener('resize',resize);resize();
+
+// ---------- build T (terrain params bundle) from params + map ----------
+let T=null, lanePath=[];
+function buildT(){
+  const map=MAPS[params.mapKey];
+  const S=map.rooms.map(r=>({cx:r.x,cy:r.y,cz:r.z,r:r.r}));
+  const C=[];
+  for(const tun of map.tunnels){const r=tun.r||TR;for(let p=0;p<tun.path.length-1;p++){const a=tun.path[p],b=tun.path[p+1];C.push({ax:a.x,ay:a.y,az:a.z,bx:b.x,by:b.y,bz:b.z,r});}}
+  let mnY=1e9,mxY=-1e9,mnX=1e9,mxX=-1e9,mnZ=1e9,mxZ=-1e9;
+  for(const r of map.rooms){mnY=Math.min(mnY,r.y-r.r);mxY=Math.max(mxY,r.y+r.r);mnX=Math.min(mnX,r.x-r.r);mxX=Math.max(mxX,r.x+r.r);mnZ=Math.min(mnZ,r.z-r.r);mxZ=Math.max(mxZ,r.z+r.r);}
+  const yMid=(mnY+mxY)/2;
+  T={
+    BASE_FREQ:1/params.spacing, EXPONENT:params.EXPONENT, WARP:params.WARP, WARP_FREQ:1/(params.spacing*2.2),
+    GROUND_AMP:params.AMP, CEIL_AMP:params.AMP,
+    YFLOOR:yMid-params.GAP, YCEIL:yMid+params.GAP, YMID:yMid, AMP:params.AMP,
+    CLEAR_SOFT:params.laneWidth, ARENA_DROP:params.arenaDrop, ARENA_RISE:params.arenaRise,
+    S,C, FOOT:{minX:mnX,maxX:mxX,minZ:mnZ,maxZ:mxZ},
+    ceiling:!!params.ceiling, snowLine:params.snowLine,
+    cols:biomeColors(BIOMES[params.biome]),
+  };
+  // lane path for fly cam: order rooms by z (race forward = +z here), spawn first
+  const rooms=map.rooms.slice().sort((a,b)=>a.z-b.z);
+  lanePath=rooms.map(r=>new THREE.Vector3(r.x,yMid,r.z));
+  // apply biome sky/fog
+  const b=BIOMES[params.biome];
+  scene.background=new THREE.Color(b.sky);
+  scene.fog=new THREE.FogExp2(b.fog, params.fog*1e-5);
+  sun.position.set(1200,params.sun,800);
+}
+
+// ---------- chunk streaming ----------
+const CH=900, VIEW=5; let chunks=new Map();
+const tmpC=new THREE.Color();
+function colGround(y){
+  const lo=T.YMID-T.AMP*0.5, hi=T.YMID+T.AMP*0.4; let t=(y-lo)/(hi-lo);t=t<0?0:(t>1?1:t);
+  const c=T.cols, sl=T.snowLine;
+  if(t<0.42) return tmpC.copy(c.gLo).lerp(c.gMid,t/0.42);
+  if(t<sl)   return tmpC.copy(c.gMid).lerp(c.gHi,(t-0.42)/Math.max(0.01,sl-0.42));
+  return tmpC.copy(c.gHi).lerp(c.gSnow,(t-sl)/Math.max(0.01,1-sl));
+}
+function colCeil(y){
+  const lo=T.YMID-T.AMP*0.3, hi=T.YCEIL; let t=(y-lo)/(hi-lo);t=t<0?0:(t>1?1:t);
+  return tmpC.copy(T.cols.cHi).lerp(T.cols.cLo,t); // tips(low)=cHi lighter, base(high)=cLo darker
+}
+// ---------- materials: shiny snow + glowing lava (via onBeforeCompile) ----------
+const stU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.7},
+              uLava:{value:0}, uSnowRough:{value:0.22}, uLavaGlow:{value:1.0} };
+function syncStU(){ stU.uYMid.value=T.YMID; stU.uAMP.value=T.AMP; stU.uSnow.value=T.snowLine;
+  stU.uLava.value=(params.biome==='volcanic')?1:0; stU.uSnowRough.value=params.shine; stU.uLavaGlow.value=params.glow; }
+function makeTerrainMat(){
+  const m=new THREE.MeshStandardMaterial({vertexColors:true,flatShading:true,roughness:1,metalness:0,side:THREE.DoubleSide});
+  m.onBeforeCompile=(sh)=>{
+    sh.uniforms.uTime=stU.uTime; sh.uniforms.uYMid=stU.uYMid; sh.uniforms.uAMP=stU.uAMP;
+    sh.uniforms.uSnow=stU.uSnow; sh.uniforms.uLava=stU.uLava;
+    sh.uniforms.uSnowRough=stU.uSnowRough; sh.uniforms.uLavaGlow=stU.uLavaGlow;
+    sh.vertexShader='varying float vWY;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y;');
+    sh.fragmentShader='varying float vWY;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow;\n'+sh.fragmentShader;
+    // snow: drop roughness so the sun glints off the caps (reflective snow)
+    sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
+      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
+    // lava: low valleys glow + pulse (volcanic biome only)
+    sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
+      '#include <emissivemap_fragment>\n if(uLava>0.5){ float _te=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0); float _lava=1.0-smoothstep(0.03,0.18,_te); float _pulse=0.65+0.35*sin(uTime*2.0+vWY*0.012); totalEmissiveRadiance+=vec3(1.4,0.4,0.06)*_lava*_pulse*uLavaGlow; }');
+  };
+  return m;
+}
+
+// ---------- procedural grass (instanced blades, grassy biome) ----------
+const GRASS_VIEW=2;
+let _bladeGeo=null, _grassMat=null;
+function bladeGeo(){ if(_bladeGeo)return _bladeGeo; const h=34,w=5;
+  const v=new Float32Array([-w/2,0,0, w/2,0,0, -w*0.28,h*0.55,0, w*0.28,h*0.55,0, 0,h,0]);
+  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
+  g.setIndex([0,1,2, 1,3,2, 2,3,4]); g.computeVertexNormals(); _bladeGeo=g; return g; }
+function grassMat(){ if(_grassMat)return _grassMat;
+  const m=new THREE.MeshStandardMaterial({color:0x4f7a30,roughness:1,metalness:0,side:THREE.DoubleSide});
+  m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=stU.uTime;
+    sh.vertexShader='uniform float uTime;\n'+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float sway=sin(uTime*1.6+ph)*0.16+sin(uTime*3.3+ph*1.7)*0.05;\n transformed.x+=sway*transformed.y;'); };
+  _grassMat=m; return m; }
+const _gd=new THREE.Object3D();
+function buildGrass(x0,z0){
+  if(params.biome!=='grassy'||!params.grass) return null;
+  const N=Math.max(8,Math.round(params.cells*0.9)), step=CH/N, pts=[];
+  for(let j=0;j<N;j++)for(let i=0;i<N;i++){
+    const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=groundYc(x,z,T);
+    const t=(y-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
+    if(t<0.04||t>T.snowLine) continue;          // grass band: above lava/floor, below snow
+    pts.push(x,y,z);
+  }
+  if(!pts.length) return null;
+  const im=new THREE.InstancedMesh(bladeGeo(),grassMat(),pts.length/3);
+  for(let k=0;k<pts.length/3;k++){ _gd.position.set(pts[k*3],pts[k*3+1]-1,pts[k*3+2]);
+    _gd.rotation.set(0,Math.random()*6.283,0); const s=0.8+Math.random()*0.9; _gd.scale.set(s,s,s);
+    _gd.updateMatrix(); im.setMatrixAt(k,_gd.matrix); }
+  im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; scene.add(im); return im;
+}
+function removeGrass(im){ if(im){scene.remove(im); im.dispose&&im.dispose();} }
+
+function buildShell(x0,z0,isCeil){
+  const n=params.cells, step=CH/n;
+  const nv=(n+1)*(n+1); const verts=new Float32Array(nv*3), cols=new Float32Array(nv*3); let p=0;
+  for(let j=0;j<=n;j++)for(let i=0;i<=n;i++){
+    const x=x0+i*step,z=z0+j*step;
+    const y=isCeil?ceilYc(x,z,T):groundYc(x,z,T);
+    verts[p]=x;verts[p+1]=y;verts[p+2]=z;
+    const col=isCeil?colCeil(y):colGround(y); cols[p]=col.r;cols[p+1]=col.g;cols[p+2]=col.b; p+=3;
+  }
+  const idx=[];const row=n+1;
+  for(let j=0;j<n;j++)for(let i=0;i<n;i++){const a=j*row+i,b=a+1,c=a+row,d=c+1;if(isCeil){idx.push(a,b,c,b,d,c);}else{idx.push(a,c,b,b,c,d);}}
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+  g.setAttribute('color',new THREE.Float32BufferAttribute(cols,3));
+  g.setIndex(idx);g.computeVertexNormals();
+  const m=new THREE.Mesh(g,makeTerrainMat());
+  scene.add(m);return m;
+}
+function disposeChunk(c){for(const m of [c.g,c.c]){if(m){scene.remove(m);m.geometry.dispose();m.material.dispose();}} removeGrass(c.grass);}
+function resetChunks(){for(const c of chunks.values())disposeChunk(c);chunks=new Map();}
+function streamChunks(px,pz,budget){
+  const scx=Math.floor(px/CH),scz=Math.floor(pz/CH);const todo=[];
+  for(let cx=scx-VIEW;cx<=scx+VIEW;cx++)for(let cz=scz-VIEW;cz<=scz+VIEW;cz++){const k=cx+','+cz;if(chunks.has(k))continue;todo.push({cx,cz,k,d:(cx-scx)**2+(cz-scz)**2});}
+  todo.sort((a,b)=>a.d-b.d);
+  for(let i=0;i<Math.min(budget,todo.length);i++){const t=todo[i];chunks.set(t.k,{g:buildShell(t.cx*CH,t.cz*CH,false),c:T.ceiling?buildShell(t.cx*CH,t.cz*CH,true):null});}
+  for(const [k,c] of chunks){const ci=k.indexOf(',');const cx=+k.slice(0,ci),cz=+k.slice(ci+1);if(Math.abs(cx-scx)>VIEW+1||Math.abs(cz-scz)>VIEW+1){disposeChunk(c);chunks.delete(k);}}
+  // grass: add to near chunks, drop from far ones (perf)
+  const wantGrass=params.grass&&params.biome==='grassy';
+  for(const [k,c] of chunks){const ci=k.indexOf(',');const cx=+k.slice(0,ci),cz=+k.slice(ci+1);
+    const near=Math.max(Math.abs(cx-scx),Math.abs(cz-scz))<=GRASS_VIEW;
+    if(near&&wantGrass&&!c.grassBuilt){c.grass=buildGrass(cx*CH,cz*CH);c.grassBuilt=true;}
+    else if((!near||!wantGrass)&&c.grassBuilt){removeGrass(c.grass);c.grass=null;c.grassBuilt=false;}}
+}
+function rebuildAll(){buildT();syncStU();resetChunks();
+  // initial fill around footprint
+  const F=T.FOOT;const cx0=Math.floor(F.minX/CH)-1,cx1=Math.floor(F.maxX/CH)+1,cz0=Math.floor(F.minZ/CH)-1,cz1=Math.floor(F.maxZ/CH)+1;
+  let n=0;for(let cz=cz0;cz<=cz1&&n<260;cz++)for(let cx=cx0;cx<=cx1&&n<260;cx++){const k=cx+','+cz;if(chunks.has(k))continue;chunks.set(k,{g:buildShell(cx*CH,cz*CH,false),c:T.ceiling?buildShell(cx*CH,cz*CH,true):null});n++;}
+}
+
+// ---------- camera control ----------
+let flyT=0, flySpeed=170, yaw=0,pitch=0,dragging=false,lx=0,ly=0;
+let freePos=new THREE.Vector3(), freeMode=false;
+canvas.addEventListener('mousedown',e=>{dragging=true;lx=e.clientX;ly=e.clientY;});
+addEventListener('mouseup',()=>dragging=false);
+addEventListener('mousemove',e=>{if(!dragging)return;yaw-=(e.clientX-lx)*0.005;pitch-=(e.clientY-ly)*0.005;pitch=Math.max(-1.2,Math.min(1.2,pitch));lx=e.clientX;ly=e.clientY;});
+canvas.addEventListener('wheel',e=>{e.preventDefault();if(params.cam==='fly'){flySpeed=Math.max(40,Math.min(600,flySpeed*(e.deltaY>0?1.1:0.9)));}else{const d=camera.getWorldDirection(new THREE.Vector3());freePos.addScaledVector(d,-e.deltaY*1.5);}},{passive:false});
+const keys={};addEventListener('keydown',e=>keys[e.key.toLowerCase()]=true);addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+
+function lanePointAt(t){ // t in [0, n-1]
+  const n = lanePath.length;
+  const fb = () => ({ pos:new THREE.Vector3(0,(T&&T.YMID)||0,0), dir:new THREE.Vector3(0,0,1) });
+  if(n<2) return fb();
+  let s = Math.floor(t); if(!isFinite(s)) s = 0;
+  s = ((s % (n-1)) + (n-1)) % (n-1);   // safe positive modulo -> [0, n-2]
+  const a = lanePath[s], b = lanePath[s+1];
+  if(!a || !b) return fb();
+  let f = t - Math.floor(t); if(!isFinite(f)) f = 0;
+  const dir = b.clone().sub(a);
+  if(dir.lengthSq() < 1e-6) dir.set(0,0,1); else dir.normalize();  // stacked rooms -> no NaN
+  return { pos:a.clone().lerp(b,f), dir };
+}
+let totalLaneLen=0;
+function updateCam(dt){
+  if(params.cam==='fly'){
+    // advance along lane by arc length approx
+    const {pos,dir}=lanePointAt(flyT);
+    flyT+=dt*flySpeed/420; if(flyT>lanePath.length-1.001)flyT=0;
+    const look=pos.clone().add(dir);
+    // offset camera slightly back/up and apply mouse yaw/pitch as look offset
+    const back=dir.clone().multiplyScalar(-220); back.y+=70;
+    camera.position.copy(pos).add(back);
+    const tgt=pos.clone().add(dir.clone().multiplyScalar(400));
+    tgt.y+=Math.sin(0)*0; 
+    // apply yaw/pitch look offset
+    const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch,yaw,0,'YXZ'));
+    const fdir=dir.clone().applyQuaternion(q);
+    camera.lookAt(camera.position.clone().add(fdir.multiplyScalar(400)));
+  } else {
+    if(!freeMode){freeMode=true;freePos.copy(camera.position);}
+    const q=new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch,yaw,0,'YXZ'));
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(q),right=new THREE.Vector3(1,0,0).applyQuaternion(q);
+    const sp=dt*900;
+    if(keys['w'])freePos.addScaledVector(fwd,sp);if(keys['s'])freePos.addScaledVector(fwd,-sp);
+    if(keys['a'])freePos.addScaledVector(right,-sp);if(keys['d'])freePos.addScaledVector(right,sp);
+    if(keys['q'])freePos.y-=sp;if(keys['e'])freePos.y+=sp;
+    camera.position.copy(freePos);
+    camera.lookAt(freePos.clone().add(fwd.multiplyScalar(400)));
+  }
+}
+
+// ---------- UI ----------
+const mapSel=document.getElementById('mapSel');
+for(const k of Object.keys(MAPS)){const o=document.createElement('option');o.value=k;o.textContent=k;mapSel.appendChild(o);}
+mapSel.value=params.mapKey;
+const biomeSel=document.getElementById('biomeSel');
+for(const k of Object.keys(BIOMES)){const o=document.createElement('option');o.value=k;o.textContent=BIOMES[k].name;biomeSel.appendChild(o);}
+biomeSel.value=params.biome;
+const camSel=document.getElementById('camSel');camSel.value=params.cam;
+
+function bind(id,key,fmt){const el=document.getElementById(id),v=document.getElementById(id+'_v');
+  el.value=params[key];const upd=()=>{v.textContent=fmt?fmt(params[key]):params[key];};upd();
+  el.addEventListener('input',()=>{params[key]=parseFloat(el.value);upd();scheduleRebuild(true);});}
+bind('amp','AMP');bind('spacing','spacing');bind('exp','EXPONENT',x=>x.toFixed(2));bind('warp','WARP');
+bind('gap','GAP');bind('snow','snowLine',x=>x.toFixed(2));bind('lane','laneWidth');bind('drop','arenaDrop');bind('rise','arenaRise');
+bind('cells','cells');bind('fog','fog',x=>(x).toFixed(0));bind('sun','sun');bind('ceil','ceiling',x=>x?'on':'off');
+bind('grass','grass',x=>x?'on':'off');
+{const e=document.getElementById('shine'),v=document.getElementById('shine_v');e.value=params.shine;v.textContent=params.shine.toFixed(2);e.addEventListener('input',()=>{params.shine=parseFloat(e.value);v.textContent=params.shine.toFixed(2);stU.uSnowRough.value=params.shine;});}
+{const e=document.getElementById('glow'),v=document.getElementById('glow_v');e.value=params.glow;v.textContent=params.glow.toFixed(1);e.addEventListener('input',()=>{params.glow=parseFloat(e.value);v.textContent=params.glow.toFixed(1);stU.uLavaGlow.value=params.glow;});}
+mapSel.onchange=()=>{params.mapKey=mapSel.value;flyT=0;scheduleRebuild(false);};
+biomeSel.onchange=()=>{params.biome=biomeSel.value;scheduleRebuild(true);};
+camSel.onchange=()=>{params.cam=camSel.value;freeMode=false;};
+
+let rebuildTimer=null,lightRebuild=false;
+function scheduleRebuild(light){lightRebuild=light;clearTimeout(rebuildTimer);rebuildTimer=setTimeout(()=>{rebuildAll();updateDump();},light?120:10);}
+function updateDump(){
+  const b=BIOMES[params.biome];
+  const txt=
+`// ---- paste into v29 game.sandwichTerrain (buildRoomGraphLevel) ----
+GAP_HALF: ${params.GAP}, AMP: ${params.AMP},
+BASE_FREQ: 1/${params.spacing}, EXPONENT: ${params.EXPONENT}, WARP: ${params.WARP},
+WARP_FREQ: 1/${Math.round(params.spacing*2.2)},
+CLEAR_SOFT: ${params.laneWidth}, ARENA_DROP: ${params.arenaDrop}, ARENA_RISE: ${params.arenaRise},
+// streaming: _SW_CELLS ${params.cells}
+// biome '${params.biome}': sky 0x${b.sky.toString(16)}, fog density ${(params.fog*1e-5).toExponential(1)}
+// ground ramp lo/mid/hi/snow: 0x${b.gLo.toString(16)} 0x${b.gMid.toString(16)} 0x${b.gHi.toString(16)} 0x${(b.gSnowFix!==undefined?b.gSnowFix:b.gSnow).toString(16)}
+// ceiling lo/hi: 0x${b.cLo.toString(16)} 0x${b.cHi.toString(16)}  snowLine ${params.snowLine}
+// materials: grass ${params.grass?'on':'off'}, snow shine(rough) ${params.shine}, lava glow ${params.glow}`;
+  document.getElementById('dump').value=txt;
+}
+document.getElementById('copyBtn').onclick=()=>{const d=document.getElementById('dump');d.select();document.execCommand('copy');};
+
+// ---------- loop ----------
+let last=performance.now(),fpsT=0,frames=0;
+rebuildAll();updateDump();
+function loop(now){
+  const dt=Math.min(0.05,(now-last)/1000);last=now;
+  stU.uTime.value+=dt;
+  updateCam(dt);
+  streamChunks(camera.position.x,camera.position.z,2);
+  renderer.render(scene,camera);
+  frames++;fpsT+=dt;if(fpsT>0.5){document.getElementById('fps').textContent=Math.round(frames/fpsT)+' fps · '+chunks.size+' chunks';frames=0;fpsT=0;}
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
