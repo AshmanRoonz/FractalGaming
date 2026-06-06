@@ -22,13 +22,28 @@ const CRED_TTL_SECONDS = 86400; // 24h; max allowed is 48h (172800)
 
 export default {
   async fetch(request, env) {
-    const allowOrigin = env.ALLOWED_ORIGIN || '*';
+    // CORS allowlist: only these origins may read the response in a browser,
+    // which stops other sites from spending your TURN quota via fetch. localhost
+    // entries let you test the game locally. Add more origins here if needed,
+    // or set an ALLOWED_ORIGIN var to extend it.
+    const ALLOWED = [
+      'https://lss.fractalreality.ca',
+      'https://www.lss.fractalreality.ca',
+      'http://localhost:8888',
+      'http://127.0.0.1:8888',
+    ];
+    if (env.ALLOWED_ORIGIN) ALLOWED.push(env.ALLOWED_ORIGIN);
+    const reqOrigin = request.headers.get('Origin') || '';
+    const allowOrigin = ALLOWED.includes(reqOrigin) ? reqOrigin : '';
     const cors = {
-      'Access-Control-Allow-Origin': allowOrigin,
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Vary': 'Origin',
     };
+    // Only emit the allow-origin header for permitted origins; others get no
+    // CORS header, so the browser blocks the read (the game then falls back to
+    // STUN/LAN). Note: this is browser-origin protection, not auth.
+    if (allowOrigin) cors['Access-Control-Allow-Origin'] = allowOrigin;
 
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: cors });

@@ -4587,6 +4587,33 @@ async function postMatchResultToBackend() {
 
 // ---- LOBBY FUNCTIONS ----
 
+// Cloudflare Worker that mints short-lived TURN credentials. Without TURN,
+// peers behind carrier-grade / symmetric NAT (cell hotspots, many home
+// routers) can't form a WebRTC connection. Replace this with your deployed
+// Worker URL (see cloudflare-turn/SETUP.md). If unreachable / left as the
+// placeholder, joinRoom falls back to STUN-only (LAN still works).
+const LSS_TURN_ENDPOINT = 'https://REPLACE-ME.workers.dev';
+
+// Fetch a fresh iceServers array (STUN + TURN) from the Worker. Returns null
+// on any failure so the caller falls back to Trystero's default ICE.
+async function _lssFetchIceServers() {
+  if (!LSS_TURN_ENDPOINT || LSS_TURN_ENDPOINT.indexOf('REPLACE-ME') >= 0) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000); // don't hang room join on a slow Worker
+    const resp = await fetch(LSS_TURN_ENDPOINT, { method: 'POST', signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) { console.warn('[turn] credential fetch HTTP', resp.status); return null; }
+    const data = await resp.json();
+    if (data && Array.isArray(data.iceServers) && data.iceServers.length) return data.iceServers;
+    console.warn('[turn] credential response had no iceServers');
+    return null;
+  } catch (e) {
+    console.warn('[turn] credential fetch failed:', e && e.message ? e.message : e);
+    return null;
+  }
+}
+
 async function joinRoom() {
   // Clear the test-mode flag so a previous TEST MODE session doesn't
   // bleed into multiplayer (passive bots in a multiplayer match would be
@@ -4614,8 +4641,19 @@ async function joinRoom() {
     net.active = true;
     net.solo = false;
 
-    // Join the room via BitTorrent trackers
-    net.room = trysteroJoin({ appId: 'last-ship-sailing-v1' }, code);
+    // Pull TURN credentials (Cloudflare Worker) so peers behind cell /
+    // symmetric NAT can connect. Falls back to STUN-only (LAN) if unavailable.
+    const _iceServers = await _lssFetchIceServers();
+    const _joinCfg = { appId: 'last-ship-sailing-v1' };
+    if (_iceServers) {
+      _joinCfg.rtcConfig = { iceServers: _iceServers };
+      console.log('[turn] using', _iceServers.length, 'ICE server entr(y/ies) from Worker');
+    } else {
+      console.log('[turn] no TURN creds; using default ICE (LAN / STUN only)');
+    }
+
+    // Join the room via BitTorrent trackers (TURN added via rtcConfig above)
+    net.room = trysteroJoin(_joinCfg, code);
     // Stash the room code so the heartbeat ticker can
     // include it in /heartbeat posts and so returnToRootMenu can DELETE
     // the room when we leave.
@@ -10622,11 +10660,6 @@ try {
   let _dprCap;
   if (_stored === 'ultra') {
     _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
-  } else if (_stored === 'low' || _stored === 'potato') {
-    // Low-end / potato tier : render well under native res. Matches the
-    // 0.75 cap applyQualityPreset() uses, so a phone booting straight into
-    // 'low' isn't drawing combat at up to 2x devicePixelRatio.
-    _dprCap = 0.75;
   } else {
     _dprCap = Math.min(window.devicePixelRatio, 2);
   }
@@ -12922,15 +12955,7 @@ function clearAmbientCloudDots() {
 
 const QUALITY = {
   level: 'high',
-  // 'potato' was collapsed into 'low' by a refactor (applyQualityPreset and
-  // the boot loader migrate 'potato' -> 'low'), but the dozens of
-  // `if (QUALITY.isPotato()) ...` gates that strip the heavy FX (BCS gas
-  // clouds, basin clouds, particles, layered FX, dynamic lights, potato wall)
-  // were never updated, so they became dead code and the lowest setting kept
-  // rendering everything. Treat 'low' as the potato tier so the lowest option
-  // actually is the low-end path. This also makes applyQualityPreset apply the
-  // 0.75 DPR cap on 'low'.
-  isPotato() { return this.level === 'potato' || this.level === 'low'; },
+  isPotato() { return this.level === 'potato'; },
   isUltra()  { return this.level === 'ultra';  },
   bloomEnabled() { return this.level !== 'potato' && this.level !== 'low' && this.level !== 'medium'; },
   smokeOctaves() {
@@ -12995,17 +13020,17 @@ const QUALITY = {
       (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0
     );
     if (tier >= 1) return false;
-    return this.level !== 'potato' && this.level !== 'low';
+    return this.level !== 'potato';
   },
   // Basin gas pools : decorative gas pools spawned in rooms at level
   // build time. Disabled in potato mode since each pool adds 8-11 GasClouds
   // with 10 sprites each (~80-110 sprites per basin × ~15 basins per level).
-  basinClouds() { return this.level !== 'potato' && this.level !== 'low'; },
+  basinClouds() { return this.level !== 'potato'; },
   // Cloud-wall shockwave on impact : runs spreadAgainstWall +
   // shockwaveExpand for 0.35 s on every cloud-wall collision. Disabled
   // in potato mode ; clouds still bounce / slide, just without the
   // sprite-level burst.
-  shockwaveOnImpact() { return this.level !== 'potato' && this.level !== 'low'; },
+  shockwaveOnImpact() { return this.level !== 'potato'; },
   // Bloom RT pixel-ratio cap. Multiplies window.devicePixelRatio.
   // Ultra bumped 1.5x to 2.0x for crisper highlights ; pairs with the
   // scene supersampling bump (renderer.setPixelRatio also 1.5x on Ultra) so
@@ -19519,7 +19544,18 @@ if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPus
 
 function spawnExplosion(pos, size) {
   size = size || 20;
-  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
+  // Burst guard: a missile into a rock cluster destroys many rocks in one
+  // frame, and each full explosion spawns fireball + smoke + debris + a light.
+  // N of them at once spiked the GPU (~244ms) and blocked the main thread on
+  // the GPU. Cap full explosions per frame; the overflow uses the cheap
+  // pooled-sphere path (still a visible burst, no debris/light). The budget is
+  // high enough that normal play (1-2 explosions) is never downgraded; only a
+  // big simultaneous cluster kill trims its overflow. (Audio side is capped by
+  // the 'explosion' min-gap in _SOUND_MIN_GAP.)
+  const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
+  if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
+  const _explOverBudget = (++spawnExplosion._count) > 4;
+  if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget) {
     // Spatial audio kept ; cheap relative to the visual chain we just skipped.
     if (typeof playSpatialSound === 'function') {
       const _far = Math.max(300, size * 18);
@@ -23640,7 +23676,7 @@ const _SMOKE_GEO = new THREE.SphereGeometry(1, 12, 8);
 
 const _TRC_SEG = (function() {
   const t = (typeof QUALITY !== 'undefined' && QUALITY.level) ? QUALITY.level : 'high';
-  if (t === 'potato' || t === 'low') return { core: 4,  beam: 6,  inner: 8,  outer: 12 };
+  if (t === 'potato') return { core: 4,  beam: 6,  inner: 8,  outer: 12 };
   if (t === 'ultra')  return { core: 8,  beam: 16, inner: 16, outer: 24 };
   return                       { core: 6,  beam: 12, inner: 12, outer: 16 };
 })();
@@ -54606,6 +54642,11 @@ const _SOUND_MIN_GAP = {
   siphon_drain:    0.080,
   siphon_hit:      0.090,
   stun:            0.080,
+  // Explosions: a missile into a rock cluster destroys many rocks in one
+  // frame, each firing an HRTF spatial explosion. N simultaneous HRTF panners
+  // spiked the audio thread ~170ms. Fold a burst into ~1 boom per 70ms ; a
+  // cluster pop is muddier with N identical booms anyway.
+  explosion:       0.070,
 };
 const _SOUND_MIN_GAP_VR = {
   fire_minigun:    0.075,
