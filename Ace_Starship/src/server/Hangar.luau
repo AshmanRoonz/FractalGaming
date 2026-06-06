@@ -29,7 +29,7 @@ local function findById(list: any, id: string): any
 	return list[1]
 end
 
-local BASE = Vector3.new(0, 300, 3000)
+local BASE = Vector3.new(0, 1000, 3000) -- raised with the lobby platform (occluded from battle)
 local SLOT_SPACING = 120 -- gap between neighboring bays along the row (bump if they clip)
 local PODIUM_Z = 45 -- how far in front of the pad the shop podiums sit (toward the wall)
 local SPAWN_OFFSET = Vector3.new(-30, 5, 26) -- spawn where the ship podium used to be
@@ -49,6 +49,8 @@ local function freshFreeShips(): { [string]: boolean }
 end
 
 local openShopEvent: any = nil -- set in Hangar.start (server -> client shop window)
+local openWaveEvent: any = nil -- set in Hangar.start (server -> client wave-select menu)
+local openSettingsEvent: any = nil -- set in Hangar.start (server -> client performance menu)
 local openElementsEvent: any = nil -- set in Hangar.start (server -> client element menu)
 local boltsEvent: any = nil -- set in Hangar.start (server -> client live Bolts balance)
 local ASSET_FOOTPRINT = 170 -- scale the hangar asset to roughly this wide
@@ -663,6 +665,14 @@ function Hangar.adjustStartWave(player: Player, delta: number)
 	refreshWaveLabel(s)
 end
 
+-- Open the wave-select popup on the client (and refresh it after each change).
+local function openWaveMenu(player: Player)
+	local s = slots[player]
+	if s and openWaveEvent then
+		openWaveEvent:FireClient(player, { start = s.startWave, max = s.maxWave })
+	end
+end
+
 local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, TextLabel, TextLabel, TextLabel)
 	local model = Instance.new("Model")
 	model.Name = "Hangar"
@@ -749,49 +759,25 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 	end)
 	local elLabel = nil -- element podium removed (elemental system disabled)
 
-	-- Wave Select console: nudge which wave you'll launch into (1..earned max+1).
-	-- Four buttons (-10 -1 +1 +10) on a wider console, pulled back near the shop row.
+	-- Wave Select podium: a single console; walk up and it pops a menu to choose which
+	-- wave you'll launch into (1..earned max+1).
 	local waveLabel
 	do
 		local cz = PODIUM_Z - 12 -- just in front of the shop row, toward the pad
-		local base = part(model, Vector3.new(20, 5, 3), CFrame.new(center + Vector3.new(0, 2.5, cz)), Color3.fromRGB(40, 48, 70), Enum.Material.Metal)
-		local function waveBtn(dx: number, text: string, delta: number, color: Color3)
-			local b = part(model, Vector3.new(3, 3, 3), CFrame.new(center + Vector3.new(dx, 5.5, cz)), color, Enum.Material.Neon)
-			-- floating cap label so the menu reads clearly even before you walk up
-			local cap = Instance.new("TextLabel")
-			cap.Size = UDim2.fromScale(1, 1)
-			cap.BackgroundTransparency = 1
-			cap.Font = Enum.Font.GothamBlack
-			cap.TextScaled = true
-			cap.TextColor3 = Color3.fromRGB(255, 255, 255)
-			cap.TextStrokeTransparency = 0.3
-			cap.Text = text
-			local cbb = Instance.new("BillboardGui")
-			cbb.Size = UDim2.fromOffset(64, 40)
-			cbb.StudsOffset = Vector3.new(0, 2.6, 0)
-			cbb.MaxDistance = 90
-			cbb.Adornee = b
-			cap.Parent = cbb
-			cbb.Parent = b
-			local prompt = Instance.new("ProximityPrompt")
-			prompt.ActionText = text
-			prompt.ObjectText = "Start Wave"
-			prompt.HoldDuration = 0
-			prompt.MaxActivationDistance = 9
-			prompt.RequiresLineOfSight = false
-			prompt.Parent = b
-			prompt.Triggered:Connect(function(plr)
-				if plr == owner then
-					Hangar.adjustStartWave(plr, delta)
-				end
-			end)
-		end
-		local down = Color3.fromRGB(225, 110, 80) -- minus = warm
-		local up = Color3.fromRGB(80, 200, 130) -- plus = green
-		waveBtn(-8, "-10", -10, down)
-		waveBtn(-3, "-1", -1, down)
-		waveBtn(3, "+1", 1, up)
-		waveBtn(8, "+10", 10, up)
+		local base = part(model, Vector3.new(5, 5, 5), CFrame.new(center + Vector3.new(0, 2.5, cz)), Color3.fromRGB(60, 70, 110), Enum.Material.Metal)
+		local cap = part(model, Vector3.new(5.5, 1, 5.5), CFrame.new(center + Vector3.new(0, 5.2, cz)), Color3.fromRGB(120, 180, 255), Enum.Material.Neon)
+		local prompt = Instance.new("ProximityPrompt")
+		prompt.ActionText = "Select Wave"
+		prompt.ObjectText = "Wave"
+		prompt.HoldDuration = 0
+		prompt.MaxActivationDistance = 10
+		prompt.RequiresLineOfSight = false
+		prompt.Parent = cap
+		prompt.Triggered:Connect(function(plr)
+			if plr == owner then
+				openWaveMenu(plr)
+			end
+		end)
 		waveLabel = Instance.new("TextLabel")
 		waveLabel.Size = UDim2.fromScale(1, 1)
 		waveLabel.BackgroundTransparency = 1
@@ -807,6 +793,41 @@ local function buildBay(owner: Player, center: Vector3): (Model, TextLabel, Text
 		wbb.Adornee = base
 		waveLabel.Parent = wbb
 		wbb.Parent = base
+	end
+
+	-- Performance podium: opens the Low/Med/High popup on the client.
+	do
+		local pz = PODIUM_Z - 12
+		local px = 26 -- to the right of the wave podium
+		local base = part(model, Vector3.new(5, 5, 5), CFrame.new(center + Vector3.new(px, 2.5, pz)), Color3.fromRGB(40, 60, 90), Enum.Material.Metal)
+		local cap = part(model, Vector3.new(5.5, 1, 5.5), CFrame.new(center + Vector3.new(px, 5.2, pz)), Color3.fromRGB(90, 160, 255), Enum.Material.Neon)
+		local prompt = Instance.new("ProximityPrompt")
+		prompt.ActionText = "Performance"
+		prompt.ObjectText = "Settings"
+		prompt.HoldDuration = 0
+		prompt.MaxActivationDistance = 10
+		prompt.RequiresLineOfSight = false
+		prompt.Parent = cap
+		prompt.Triggered:Connect(function(plr)
+			if plr == owner and openSettingsEvent then
+				openSettingsEvent:FireClient(plr)
+			end
+		end)
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.fromScale(1, 1)
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.GothamBold
+		lbl.TextScaled = true
+		lbl.TextColor3 = Color3.fromRGB(150, 200, 255)
+		lbl.TextStrokeTransparency = 0.4
+		lbl.Text = "PERFORMANCE"
+		local bb = Instance.new("BillboardGui")
+		bb.Size = UDim2.fromOffset(150, 40)
+		bb.StudsOffset = Vector3.new(0, 4, 0)
+		bb.MaxDistance = 90
+		bb.Adornee = base
+		lbl.Parent = bb
+		bb.Parent = base
 	end
 
 	model.Parent = workspace
@@ -1106,6 +1127,22 @@ function Hangar.start()
 	openShopEvent = Instance.new("RemoteEvent")
 	openShopEvent.Name = "OpenShop"
 	openShopEvent.Parent = ReplicatedStorage
+	-- Wave-select menu: podium opens it; client sends +/- deltas back.
+	openWaveEvent = Instance.new("RemoteEvent")
+	openWaveEvent.Name = "OpenWaveMenu"
+	openWaveEvent.Parent = ReplicatedStorage
+	openSettingsEvent = Instance.new("RemoteEvent")
+	openSettingsEvent.Name = "OpenSettings"
+	openSettingsEvent.Parent = ReplicatedStorage
+	local waveAction = Instance.new("RemoteEvent")
+	waveAction.Name = "WaveAction"
+	waveAction.Parent = ReplicatedStorage
+	waveAction.OnServerEvent:Connect(function(player, delta)
+		if type(delta) == "number" then
+			Hangar.adjustStartWave(player, delta)
+			openWaveMenu(player) -- refresh the open popup
+		end
+	end)
 	-- Live Bolts balance for the HUD counter. Client fires it (no args) to ask for
 	-- its current balance on spawn; server pushes the number back here and on change.
 	boltsEvent = Instance.new("RemoteEvent")

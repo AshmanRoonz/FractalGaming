@@ -9,6 +9,6 @@ return {
 	Dn = "rbxassetid://85569326507257", -- bottom_1.png
 	Lf = "rbxassetid://104002422471987", -- wall4_2.png
 	Rt = "rbxassetid://104002422471987", -- wall4_2.png (reused; no wall2)
-	Ft = "rbxassetid://140301767713852", -- wall1_2.png
-	Bk = "rbxassetid://98401617886686", -- wall3_2.png
+	Ft = "rbxassetid://98401617886686", -- wall3_2.png (the CAVE) -> forward (-Z), a landmark you fly toward
+	Bk = "rbxassetid://140301767713852", -- wall1_2.png -> behind
 }

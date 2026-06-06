@@ -300,7 +300,7 @@ function EnemyController.start()
 	local waveEvent = ReplicatedStorage:WaitForChild("WaveEvent")
 	local playerHit = ReplicatedStorage:WaitForChild("PlayerHit")
 
-	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number, faceFix: CFrame, highlight: Highlight, status: number, shield: BasePart? }
+	type Rec = { id: number, model: Model, root: BasePart, current: CFrame, target: CFrame, lastPos: Vector3, boss: boolean, radius: number, faceFix: CFrame, highlight: Highlight, status: number, shield: BasePart?, hpBar: Frame? }
 	local byId: { [number]: Rec } = {}
 
 	-- Formation-core shield bubble: a translucent ForceField sphere while invulnerable.
@@ -392,8 +392,37 @@ function EnemyController.start()
 			highlight = highlight,
 			status = -1, -- force first applyStatus to set it
 			shield = nil,
+			hpBar = nil,
 		}
 		byId[id] = r
+		-- Bosses get a floating health bar.
+		if boss then
+			local bg = Instance.new("BillboardGui")
+			bg.Name = "BossHP"
+			bg.Size = UDim2.fromOffset(240, 22)
+			bg.StudsOffset = Vector3.new(0, radius + 10, 0)
+			bg.AlwaysOnTop = true
+			bg.MaxDistance = 1600
+			bg.Adornee = root
+			bg.Parent = model
+			local back = Instance.new("Frame")
+			back.Size = UDim2.fromScale(1, 1)
+			back.BackgroundColor3 = Color3.fromRGB(18, 18, 26)
+			back.BackgroundTransparency = 0.2
+			back.Parent = bg
+			local bc = Instance.new("UICorner")
+			bc.CornerRadius = UDim.new(0.5, 0)
+			bc.Parent = back
+			local fill = Instance.new("Frame")
+			fill.Size = UDim2.fromScale(1, 1)
+			fill.BackgroundColor3 = Color3.fromRGB(230, 70, 70)
+			fill.BorderSizePixel = 0
+			fill.Parent = back
+			local fc = Instance.new("UICorner")
+			fc.CornerRadius = UDim.new(0.5, 0)
+			fc.Parent = fill
+			r.hpBar = fill
+		end
 		-- Roar on spawn, then every few seconds while alive (so you hear them as they
 		-- close in). The random first delay spreads a whole wave's roars out.
 		task.spawn(function()
@@ -428,6 +457,11 @@ function EnemyController.start()
 					r.target = e.c
 					applyStatus(r, if type(e.st) == "number" then e.st else 0)
 					applyShield(r, e.sh == true)
+					if r.hpBar and type(e.hpf) == "number" then
+						local f = math.clamp(e.hpf, 0, 1)
+						r.hpBar.Size = UDim2.fromScale(f, 1)
+						r.hpBar.BackgroundColor3 = Color3.fromRGB(230, 70, 70):Lerp(Color3.fromRGB(90, 220, 120), f)
+					end
 				end
 			end
 		end
@@ -494,6 +528,12 @@ function EnemyController.start()
 	-- noise sampling entirely (the big tablet win when lots of bullets are in flight).
 	local GMAX = WorldHeights.GROUND_BASE + WorldHeights.GROUND_AMP
 	local CMIN = WorldHeights.CEIL_BASE - WorldHeights.CEIL_AMP
+	-- Shield vortex: while the player holds the shield, enemy shots within VORTEX_PULL get
+	-- sucked toward the ship and captured once within VORTEX_CAPTURE (counted for throwback).
+	local VORTEX_PULL = 130
+	local VORTEX_CAPTURE = 18
+	local VORTEX_SPEED = 220
+	local SHIELD_HOLD_MAX = 24 -- most projectiles the shield can hold orbiting at once
 	local visualBalls: { { obj: Instance, vel: Vector3, life: number, spin: Vector3, tcheck: number } } = {}
 	local function spawnEnemyShot(origin: Vector3, dir: Vector3, speed: number)
 		local def = randomProjectileDef()
@@ -562,6 +602,27 @@ function EnemyController.start()
 			local b = visualBalls[i]
 			b.life -= dt
 			local pv = b.obj :: PVInstance
+			-- Shield vortex: suck nearby shots toward the ship and capture them.
+			if ShipState.shielding then
+				local cur = pv:GetPivot().Position
+				local toShip = ShipState.position - cur
+				local d = toShip.Magnitude
+				if d < VORTEX_CAPTURE then
+					-- Keep the actual object so the shield can orbit + hurl it back.
+					WeaponVisuals.clearEffects(b.obj) -- stop its smoke/fire trail
+					if #ShipState.shieldCaught < SHIELD_HOLD_MAX then
+						table.insert(ShipState.shieldCaught, b.obj)
+					else
+						b.obj:Destroy() -- at capacity: absorb without holding
+					end
+					table.remove(visualBalls, i)
+					continue
+				elseif d < VORTEX_PULL then
+					local pull = toShip.Unit
+					local swirl = pull:Cross(Vector3.yAxis) * 0.45 -- a little orbit as it spirals in
+					b.vel = b.vel:Lerp((pull + swirl).Unit * VORTEX_SPEED, math.clamp(dt * 8, 0, 1))
+				end
+			end
 			local cf = pv:GetPivot() + b.vel * dt -- translate, keep facing the travel dir
 			cf *= CFrame.Angles(b.spin.X * dt, b.spin.Y * dt, b.spin.Z * dt) -- gentle tumble
 			pv:PivotTo(cf)
@@ -580,7 +641,7 @@ function EnemyController.start()
 				end
 			end
 			local hitShip = (ShipState.position - p).Magnitude <= 13
-			if hitShip or hitTerrain then
+			if hitTerrain or (hitShip and not ShipState.shielding) then
 				Explosion.burst(p) -- layered blast on impact
 			end
 			if b.life <= 0 or hitTerrain or hitShip then

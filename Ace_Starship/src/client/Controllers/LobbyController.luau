@@ -39,8 +39,10 @@ local function startBattle(shipId: string, mainId: string, secId: string, petId:
 	go("WeaponController", mainId, secId)
 	go("PetController", petId) -- single pet (elemental/2-pet system disabled)
 	go("EnemyController")
+	go("ShieldController") -- catch-and-throw shield (after EnemyController: it captures its shots)
 	go("RemoteShipsController")
 	go("PickupController")
+	-- (ambient pets are now server-owned in Battle.luau so co-op players see the same ones)
 
 	-- ---- Return-to-hangar flow ---------------------------------------------
 	local returning = false
@@ -152,6 +154,12 @@ function LobbyController.start()
 	end)
 	if not okShop then
 		warn(`[AceStarship] ShopController failed to start: {errShop}`)
+	end
+	local okWave, errWave = pcall(function()
+		require(script.Parent.WaveMenuController).start()
+	end)
+	if not okWave then
+		warn(`[AceStarship] WaveMenuController failed to start: {errWave}`)
 	end
 
 	-- Quiet title (no window).

@@ -9,9 +9,13 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
 
 local WorldHeights = require(ReplicatedStorage.Shared.WorldHeights)
 local Hangar = require(script.Parent.Hangar)
+local PetVisuals = require(ReplicatedStorage.Shared.PetVisuals)
+local Pets = require(ReplicatedStorage.Shared.Catalog.Pets)
+local WeaponVisuals = require(ReplicatedStorage.Shared.WeaponVisuals)
 
 local Battle = {}
 
@@ -31,6 +35,10 @@ local function namesOf(folder: Instance?): { string }
 end
 local enemyKinds = namesOf(enemyAssets)
 local bossKinds = namesOf(bossAssets)
+local laserNames = namesOf(assetsRoot:FindFirstChild("Lasers")) -- ambient pets fire these
+if #laserNames == 0 then -- fall back so they always have something to shoot
+	laserNames = namesOf(assetsRoot:FindFirstChild("Projectiles"))
+end
 local function pickKind(boss: boolean): string
 	local pool = if boss and #bossKinds > 0 then bossKinds else enemyKinds
 	return if #pool > 0 then pool[math.random(#pool)] else ""
@@ -51,7 +59,7 @@ local BALL_DMG = 12 -- a bit stronger (still many hits to kill you)
 local BALL_SPEED = 170
 local BALL_COOLDOWN = 1.5
 local HIT_RADIUS = 12
-local WAVE_DELAY = 3
+local WAVE_DELAY = 42 -- long travel/exploration breather between waves
 local BASE_COUNT = 2
 local MAX_COUNT = 5 -- far fewer per wave (was 12); they're tougher now
 local BOSS_EVERY = 10
@@ -77,6 +85,34 @@ local BOLTS_PER_WAVE = 30
 local BOSS_BOLTS = 300 -- boss kills drop a huge lump
 local DROP_PICKUP_RADIUS = 70 -- fly this close to a dropped Bolts to collect it
 local DROP_LIFE = 25 -- seconds a dropped Bolts stays before despawning
+-- Travel Bolts: a breadcrumb trail scattered ahead each time a wave clears, so the long
+-- breather between waves is spent flying and collecting.
+local TRAVEL_BOLTS = 26 -- how many to scatter along the corridor
+local TRAVEL_NEAR, TRAVEL_FAR = 160, 3200 -- spread from this near to this far ahead
+local TRAVEL_SPREAD = 40 -- small jitter off the corridor centerline (keeps them on the path)
+local TRAVEL_VHALF = 28 -- small vertical jitter around flight altitude
+local TRAVEL_VALUE = 8 -- Bolts each travel pickup is worth
+local GROUND_HUG = 16 -- Bolts float this high above the ground (fun to skim the bottom)
+-- Shield: an enemy ball this close to a shielding player is absorbed (no damage).
+local SHIELD_ABSORB_RADIUS = 80
+-- Ambient pets: a few wild critters dancing near the ground, server-owned so every
+-- player in a co-op match sees the same ones in the same spots. Rare + spread out.
+local AMBIENT_COUNT = 3
+local AMB_HUG = 18
+local AMB_NEAR, AMB_FAR = 220, 600 -- placed ahead, WITHIN the ~700-stud fog so you can see them
+local AMB_SIDE = 80 -- close to the corridor centerline so you fly right past them
+local AMB_RESPAWN = 950 -- recycle ahead soon after you pass, so there's usually one in view
+local AMB_PLAY_R = 170 -- a ship this close -> the pet follows along
+local AMB_LEASH = 130 -- it'll tag along this far from its home spot before being pulled back
+local AMB_MOVE = 2.6 -- how fast it eases toward its target (follow / return home)
+local AMB_SHOOT_R = 480 -- shoots enemies within this range (wide, so they actually fire)
+local AMB_SHOOT_CD = 1.4 -- multiplier on the pet's cooldown
+local AMB_SHOOT_CHANCE = 0.85 -- chance it actually fires when aimed
+local AMB_DMG = 8 -- damage per ambient-pet potshot
+local AMB_PET_SCALE = 1.7 -- ambient pets are a bit bigger than equipped pets
+local AMB_BOLT_SIZE = 15 -- size of the random laser object they fire (chunky so it reads)
+local AMB_BOLT_SPEED = 300
+local AMB_BOLT_LIFE = 0.9
 -- Team "clothesline": a damaging beam strung between two nearby teammates' ships.
 local CL_MAX_LEN = 320 -- only cuts when teammates are within this distance
 local CL_RADIUS = 20 -- enemies this close to the beam get sliced
@@ -154,6 +190,7 @@ local enemies: { EnemyRec } = {}
 local balls: { BallRec } = {}
 local nextId = 0
 local wave, waveActive, nextWaveAt = 0, false, 0
+local scatterPending = false -- set when a wave clears; the loop then scatters travel Bolts
 local bossTier = 0 -- how many bosses have appeared; each one is tougher
 
 local shipUpdate, shipStates, enemyStates, waveEvent, damageEnemy, enemyFired, playerHit, playerFired, killEvent, playerDied, shipExploded
@@ -163,6 +200,22 @@ local boltsDropped, boltsCollected -- physical Bolts pickups dropped by dead mon
 type Drop = { id: number, pos: Vector3, value: number, life: number }
 local drops: { Drop } = {}
 local nextDropId = 0
+
+-- Ambient pets (server-owned models; replicate to all clients so co-op sees the same).
+type AmbientPet = { model: Model, pos: Vector3, cur: Vector3, ph: number, nextShot: number, laser: Color3, cooldown: number }
+local ambientPets: { AmbientPet } = {}
+local ambientBolts: { { model: Model, vel: Vector3, life: number } } = {} -- random laser objects they shoot
+local ambientFolder: Folder? = nil
+-- Prefer the real model critters from Assets/Pets over the plain starter orbs, for variety.
+local ambientPool: { any } = {}
+for _, p in Pets do
+	if p.object then
+		table.insert(ambientPool, p)
+	end
+end
+if #ambientPool == 0 then
+	ambientPool = Pets
+end
 
 -- Shortest distance from point p to the segment a..b (for clothesline hit tests).
 local function segDist(p: Vector3, a: Vector3, b: Vector3): number
@@ -195,8 +248,11 @@ local function killEnemy(e: EnemyRec, crediter: Player?)
 	end
 	nextDropId += 1
 	local value = if e.boss then BOSS_BOLTS else BOLTS_PER_KILL
-	table.insert(drops, { id = nextDropId, pos = e.cf.Position, value = value, life = DROP_LIFE })
-	fireBattling(boltsDropped, nextDropId, e.cf.Position, value)
+	-- Drop the Bolts down to the ground so you skim the bottom to collect them.
+	local dp = e.cf.Position
+	dp = Vector3.new(dp.X, WorldHeights.groundY(dp.X, dp.Z) + GROUND_HUG, dp.Z)
+	table.insert(drops, { id = nextDropId, pos = dp, value = value, life = DROP_LIFE })
+	fireBattling(boltsDropped, nextDropId, dp, value)
 	local idx = table.find(enemies, e)
 	if idx then
 		table.remove(enemies, idx)
@@ -204,6 +260,7 @@ local function killEnemy(e: EnemyRec, crediter: Player?)
 	if waveActive and #enemies == 0 then
 		waveActive = false
 		nextWaveAt = os.clock() + WAVE_DELAY
+		scatterPending = true -- lay a trail of travel Bolts for the breather (done in the loop)
 		for p, rec in battling do
 			Hangar.addBolts(p, BOLTS_PER_WAVE) -- everyone gets the wave-clear bonus
 			-- Bank the wave only if it's this player's next continuous one (earned+1),
@@ -274,6 +331,177 @@ local function anyForward(): Vector3
 		end
 	end
 	return START_DIR
+end
+
+-- Lay a breadcrumb trail of Bolts down the corridor (toward the cave, -Z) for the
+-- travel breather. The trail leads in from wherever you finished the wave back onto the
+-- corridor centerline (x = 0) at flight altitude, so it's right on the path you fly.
+local function scatterTravelBolts()
+	local center = avgPlayerPos()
+	for i = 1, TRAVEL_BOLTS do
+		local f = i / TRAVEL_BOLTS
+		local dist = TRAVEL_NEAR + (TRAVEL_FAR - TRAVEL_NEAR) * f
+		local x = center.X * (1 - f) + (math.random() - 0.5) * 2 * TRAVEL_SPREAD -- converge to center
+		local z = center.Z - dist -- forward is -Z (toward the cave)
+		local y = WorldHeights.groundY(x, z) + GROUND_HUG + math.random() * TRAVEL_VHALF -- hug the ground
+		local pos = Vector3.new(x, y, z)
+		nextDropId += 1
+		table.insert(drops, { id = nextDropId, pos = pos, value = TRAVEL_VALUE, life = WAVE_DELAY + 6 })
+		fireBattling(boltsDropped, nextDropId, pos, TRAVEL_VALUE)
+	end
+end
+
+-- ---- Ambient pets (decorative, server-owned, shared in co-op) ------------
+local function ambientSpot(lead: Vector3, fwd: Vector3): Vector3
+	local right = fwd:Cross(Vector3.yAxis)
+	right = if right.Magnitude > 0.01 then right.Unit else Vector3.xAxis
+	local ahead = AMB_NEAR + math.random() * (AMB_FAR - AMB_NEAR)
+	local side = (math.random() - 0.5) * 2 * AMB_SIDE
+	local base = lead + fwd * ahead + right * side
+	return Vector3.new(base.X, WorldHeights.groundY(base.X, base.Z) + AMB_HUG, base.Z)
+end
+
+local function spawnAmbient()
+	if not ambientFolder then
+		return
+	end
+	local cfg = ambientPool[math.random(1, #ambientPool)]
+	local model = PetVisuals.buildBody(cfg)
+	model.Name = "AmbientPet"
+	pcall(function()
+		model:ScaleTo(model:GetScale() * AMB_PET_SCALE) -- a bit bigger than equipped pets
+	end)
+	-- Always replicate to every client even with content streaming on (your character
+	-- sits up in the lobby, far from the battlefield, so these would otherwise stream out).
+	pcall(function()
+		model.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+	end)
+	model.Parent = ambientFolder
+	local home = ambientSpot(avgPlayerPos(), anyForward())
+	table.insert(ambientPets, {
+		model = model,
+		pos = home, -- home anchor (leashed to this)
+		cur = home, -- smoothed current position
+		ph = math.random() * 10,
+		nextShot = 0,
+		laser = cfg.laserColor or Color3.fromRGB(120, 220, 255),
+		cooldown = cfg.cooldown or 0.8,
+	})
+end
+
+local function clearAmbient()
+	for _, ap in ambientPets do
+		ap.model:Destroy()
+	end
+	table.clear(ambientPets)
+	for _, b in ambientBolts do
+		b.model:Destroy()
+	end
+	table.clear(ambientBolts)
+end
+
+local function updateAmbient(dt: number)
+	if not next(battling) then
+		if #ambientPets > 0 then
+			clearAmbient() -- nobody around; tidy up
+		end
+		return
+	end
+	while #ambientPets < AMBIENT_COUNT do
+		spawnAmbient()
+	end
+	local lead = avgPlayerPos()
+	local fwd = anyForward()
+	local now = os.clock()
+	for _, ap in ambientPets do
+		if (ap.pos - lead).Magnitude > AMB_RESPAWN then
+			ap.pos = ambientSpot(lead, fwd) -- recycle ahead as the group flies on
+			ap.cur = ap.pos
+			ap.ph = math.random() * 10
+		end
+		-- Follow a ship that comes close, but stay leashed to the home spot; ease back
+		-- to home when no ship is near.
+		local basePoint = ap.pos
+		local bsd = AMB_PLAY_R
+		local nearShip: Vector3? = nil
+		for _, rec in battling do
+			local dd = (rec.cf.Position - ap.cur).Magnitude
+			if dd < bsd then
+				bsd = dd
+				nearShip = rec.cf.Position
+			end
+		end
+		if nearShip then
+			local toShip = nearShip - ap.pos
+			local follow = if toShip.Magnitude > AMB_LEASH then toShip.Unit * AMB_LEASH else toShip
+			basePoint = ap.pos + follow
+		end
+		ap.cur = ap.cur:Lerp(basePoint, math.clamp(dt * AMB_MOVE, 0, 1))
+		-- Bob on top of the eased base position (crisp, not lerped away).
+		local bob = Vector3.new(
+			math.sin(now * 1.3 + ap.ph) * 3,
+			math.abs(math.sin(now * 3 + ap.ph)) * 4,
+			math.cos(now * 1.1 + ap.ph) * 3
+		)
+		local p = ap.cur + bob
+
+		-- Facing: a nearby enemy (which also gets shot) wins; else the near ship; else spin.
+		local faceDir: Vector3? = if nearShip then nearShip - p else nil
+		local enemy: EnemyRec? = nil
+		local bed = AMB_SHOOT_R
+		for _, e in enemies do
+			local dd = (e.cf.Position - p).Magnitude
+			if dd < bed then
+				bed = dd
+				enemy = e
+			end
+		end
+		if enemy then
+			faceDir = enemy.cf.Position - p
+		end
+		if faceDir and faceDir.Magnitude > 0.01 then
+			ap.model:PivotTo(CFrame.lookAt(p, p + faceDir.Unit))
+		else
+			ap.model:PivotTo(CFrame.new(p) * CFrame.Angles(0, now * 2 + ap.ph, 0))
+		end
+		-- Occasional potshot.
+		if enemy and now >= ap.nextShot and not WorldHeights.blocked(p, enemy.cf.Position) then
+			ap.nextShot = now + ap.cooldown * AMB_SHOOT_CD
+			if math.random() < AMB_SHOOT_CHANCE then
+				local hit = enemy.cf.Position
+				local dir = (hit - p)
+				dir = if dir.Magnitude > 0.01 then dir.Unit else Vector3.new(0, 0, -1)
+				if #laserNames > 0 then
+					-- Fire a random laser OBJECT (flies to the target; damage is instant).
+					local name = laserNames[math.random(#laserNames)]
+					local bolt = WeaponVisuals.makeProjectile({ object = name, color = ap.laser, shape = Enum.PartType.Ball }, AMB_BOLT_SIZE)
+					bolt.Name = "AmbientShot"
+					pcall(function()
+						bolt.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+					end)
+					bolt:PivotTo(CFrame.lookAt(p, hit))
+					bolt.Parent = ambientFolder
+					table.insert(ambientBolts, { model = bolt, vel = dir * AMB_BOLT_SPEED, life = AMB_BOLT_LIFE })
+				else
+					-- No laser assets: a simple neon beam.
+					local beam = Instance.new("Part")
+					beam.Anchored = true
+					beam.CanCollide = false
+					beam.CastShadow = false
+					beam.Material = Enum.Material.Neon
+					beam.Color = ap.laser
+					beam.Size = Vector3.new(0.8, 0.8, (hit - p).Magnitude)
+					beam.CFrame = CFrame.lookAt((p + hit) / 2, hit)
+					beam.Parent = ambientFolder
+					Debris:AddItem(beam, 0.12)
+				end
+				enemy.hp -= AMB_DMG
+				if enemy.hp <= 0 then
+					killEnemy(enemy, nil)
+				end
+			end
+		end
+	end
 end
 
 local function spawnEnemy(boss: boolean)
@@ -381,6 +609,7 @@ function Battle.playerLaunched(player: Player, shipId: string?, mainId: string?,
 		beamHit = nil,
 		vel = Vector3.zero, -- estimated velocity, for enemy lead aiming
 		lastUpdate = 0,
+		shielding = false, -- true while holding the catch-and-throw shield (absorbs balls)
 		earned = Hangar.getMaxWave(player), -- only banks waves continuous from here
 	}
 	-- The first player into an empty battle sets the starting wave (1..their max+1).
@@ -434,9 +663,10 @@ function Battle.start()
 		battling[player] = nil -- stop broadcasting the dead ship
 	end)
 
-	shipUpdate.OnServerEvent:Connect(function(player, cf, beamHit)
+	shipUpdate.OnServerEvent:Connect(function(player, cf, beamHit, shielding)
 		local rec = battling[player]
 		if rec and typeof(cf) == "CFrame" then
+			rec.shielding = shielding == true
 			-- Estimate velocity from successive updates for enemy lead aiming.
 			local now = os.clock()
 			local dtu = now - (rec.lastUpdate or now)
@@ -529,9 +759,33 @@ function Battle.start()
 
 	nextWaveAt = os.clock() + 3
 
+	ambientFolder = Instance.new("Folder")
+	ambientFolder.Name = "AmbientPets"
+	ambientFolder.Parent = workspace
+
 	local accum = 0
 	RunService.Heartbeat:Connect(function(dt)
 		local now = os.clock()
+
+		updateAmbient(dt) -- decorative shared pets (dance / follow-leash / occasional potshot)
+		-- Fly the ambient pets' random laser objects, then retire them.
+		for i = #ambientBolts, 1, -1 do
+			local b = ambientBolts[i]
+			b.life -= dt
+			b.model:PivotTo(b.model:GetPivot() + b.vel * dt)
+			if b.life <= 0 then
+				b.model:Destroy()
+				table.remove(ambientBolts, i)
+			end
+		end
+
+		-- Just cleared a wave: scatter a trail of travel Bolts for the breather.
+		if scatterPending then
+			scatterPending = false
+			if #playerPositions() > 0 then
+				scatterTravelBolts()
+			end
+		end
 
 		-- Start next wave when clear.
 		if not waveActive and #enemies == 0 and #playerPositions() > 0 and now >= nextWaveAt then
@@ -681,6 +935,18 @@ function Battle.start()
 			local b = balls[i]
 			b.life -= dt
 			b.pos += b.vel * dt
+			-- A raised shield swallows balls that come near it (no damage to that player).
+			local absorbed = false
+			for _, rec in battling do
+				if rec.shielding and (rec.cf.Position - b.pos).Magnitude <= SHIELD_ABSORB_RADIUS then
+					absorbed = true
+					break
+				end
+			end
+			if absorbed then
+				table.remove(balls, i)
+				continue
+			end
 			local hitPlayer = nil
 			for player, rec in battling do
 				if (rec.cf.Position - b.pos).Magnitude <= HIT_RADIUS then
@@ -763,8 +1029,8 @@ function Battle.start()
 			end
 			local elist = {}
 			for _, e in enemies do
-				-- Only what the client renderer needs (hp/mh stay server-side).
-				-- Status flags (fz/bn/wt) let the client tint frozen/burning/wet enemies.
+				-- What the client renderer needs. Status flags (fz/bn/wt) tint frozen/
+				-- burning/wet enemies; hpf (health fraction) drives the boss health bar.
 				local st = 0
 				if e.frozenUntil > now then
 					st += 1
@@ -775,7 +1041,8 @@ function Battle.start()
 				if e.wetUntil > now then
 					st += 4
 				end
-				table.insert(elist, { id = e.id, c = e.cf, boss = e.boss, k = e.kind, st = st, sh = e.shielded })
+				local hpf = if e.mh > 0 then math.clamp(e.hp / e.mh, 0, 1) else 1
+				table.insert(elist, { id = e.id, c = e.cf, boss = e.boss, k = e.kind, st = st, sh = e.shielded, hpf = hpf })
 			end
 			fireBattling(enemyStates, elist)
 		end

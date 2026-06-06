@@ -3,13 +3,10 @@
 -- skip expensive work on weak devices. Touch devices default to Low. Module-level so
 -- the choice persists across battles; the settings menu changes it live.
 
-local UserInputService = game:GetService("UserInputService")
-
 local Quality = {}
 
--- Auto default: a touch device with no mouse/gamepad (a tablet/phone) starts on Low.
-local isTouchOnly = UserInputService.TouchEnabled and not UserInputService.MouseEnabled and not UserInputService.GamepadEnabled
-Quality.level = if isTouchOnly then "low" else "high" -- "low" | "med" | "high"
+-- Everyone starts on High; lower it at the hangar Performance podium if needed.
+Quality.level = "high" -- "low" | "med" | "high"
 
 local listeners: { (string) -> () } = {}
 

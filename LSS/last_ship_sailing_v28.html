@@ -4587,6 +4587,33 @@ async function postMatchResultToBackend() {
 
 // ---- LOBBY FUNCTIONS ----
 
+// Cloudflare Worker that mints short-lived TURN credentials. Without TURN,
+// peers behind carrier-grade / symmetric NAT (cell hotspots, many home
+// routers) can't form a WebRTC connection. Replace this with your deployed
+// Worker URL (see cloudflare-turn/SETUP.md). If unreachable / left as the
+// placeholder, joinRoom falls back to STUN-only (LAN still works).
+const LSS_TURN_ENDPOINT = 'https://REPLACE-ME.workers.dev';
+
+// Fetch a fresh iceServers array (STUN + TURN) from the Worker. Returns null
+// on any failure so the caller falls back to Trystero's default ICE.
+async function _lssFetchIceServers() {
+  if (!LSS_TURN_ENDPOINT || LSS_TURN_ENDPOINT.indexOf('REPLACE-ME') >= 0) return null;
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000); // don't hang room join on a slow Worker
+    const resp = await fetch(LSS_TURN_ENDPOINT, { method: 'POST', signal: ctrl.signal });
+    clearTimeout(t);
+    if (!resp.ok) { console.warn('[turn] credential fetch HTTP', resp.status); return null; }
+    const data = await resp.json();
+    if (data && Array.isArray(data.iceServers) && data.iceServers.length) return data.iceServers;
+    console.warn('[turn] credential response had no iceServers');
+    return null;
+  } catch (e) {
+    console.warn('[turn] credential fetch failed:', e && e.message ? e.message : e);
+    return null;
+  }
+}
+
 async function joinRoom() {
   // Clear the test-mode flag so a previous TEST MODE session doesn't
   // bleed into multiplayer (passive bots in a multiplayer match would be
@@ -4614,8 +4641,19 @@ async function joinRoom() {
     net.active = true;
     net.solo = false;
 
-    // Join the room via BitTorrent trackers
-    net.room = trysteroJoin({ appId: 'last-ship-sailing-v1' }, code);
+    // Pull TURN credentials (Cloudflare Worker) so peers behind cell /
+    // symmetric NAT can connect. Falls back to STUN-only (LAN) if unavailable.
+    const _iceServers = await _lssFetchIceServers();
+    const _joinCfg = { appId: 'last-ship-sailing-v1' };
+    if (_iceServers) {
+      _joinCfg.rtcConfig = { iceServers: _iceServers };
+      console.log('[turn] using', _iceServers.length, 'ICE server entr(y/ies) from Worker');
+    } else {
+      console.log('[turn] no TURN creds; using default ICE (LAN / STUN only)');
+    }
+
+    // Join the room via BitTorrent trackers (TURN added via rtcConfig above)
+    net.room = trysteroJoin(_joinCfg, code);
     // Stash the room code so the heartbeat ticker can
     // include it in /heartbeat posts and so returnToRootMenu can DELETE
     // the room when we leave.

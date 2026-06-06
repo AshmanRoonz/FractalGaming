@@ -18,7 +18,7 @@ game:GetService("Lighting").GlobalShadows = false
 -- Big lobby platform, sized for ~8 bays side by side. Built directly here so it
 -- always exists regardless of the hangar module. Centered on the hangar row
 -- (bays run along Z from x=0, z=3000) with generous room in front of the openings.
-local LOBBY_Y = 300
+local LOBBY_Y = 1000 -- high above the ceiling mountains so it's hidden from the battlefield
 local LOBBY_CX, LOBBY_CZ = 0, 3420
 do
 	local folder = Instance.new("Folder")

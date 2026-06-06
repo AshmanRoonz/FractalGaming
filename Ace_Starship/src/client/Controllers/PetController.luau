@@ -15,6 +15,10 @@ local PetVisuals = require(ReplicatedStorage.Shared.PetVisuals)
 
 local PetController = {}
 
+-- Live positions of the player's pet buddies, read by AmbientPetsController so the
+-- wild pets can react to them. Rebuilt each frame; empty between battles.
+PetController.buddyPositions = {} :: { Vector3 }
+
 local SIDE, UP, BACK = 17, 7, 5 -- follow offset from the ship (right, up, back)
 
 local findById = PetVisuals.findById
@@ -50,6 +54,7 @@ function PetController.start(ids: any, elements: any)
 	end
 	local els: { string } = if type(elements) == "table" then elements else {}
 	local gen = BattleSession.gen
+	PetController.buddyPositions = {}
 
 	type Buddy = {
 		pet: Model,
@@ -99,6 +104,7 @@ function PetController.start(ids: any, elements: any)
 		local strafe = ShipState.strafe or 0
 		local single = #buddies == 1
 
+		local positions = {}
 		for _, b in buddies do
 			b.bob += dt
 			-- Only a lone pet flips sides on strafe; with two pets they stay on opposite
@@ -113,6 +119,7 @@ function PetController.start(ids: any, elements: any)
 				+ Vector3.new(0, UP + math.sin(b.bob * 2) * 1.5, 0)
 				- fwd * b.back
 			b.pos = b.pos:Lerp(goal, math.clamp(dt * 5, 0, 1))
+			table.insert(positions, b.pos)
 
 			local target = nearestEnemy(b.pos, b.cfg.range)
 			local lookDir = if target then (target.root.Position - b.pos).Unit else fwd
@@ -134,6 +141,7 @@ function PetController.start(ids: any, elements: any)
 				EnemyController.damage(target, b.cfg.damage) -- no element (elemental system off)
 			end
 		end
+		PetController.buddyPositions = positions
 	end)
 end
 

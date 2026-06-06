@@ -175,6 +175,34 @@ function WeaponController.start(mainId: string?, secId: string?)
 	dotCorner.CornerRadius = UDim.new(1, 0)
 	dotCorner.Parent = dot
 
+	-- Status rings hugging the crosshair: health (green) + shield (cyan), plus a dash
+	-- line under it. Children of the reticle, so they follow the aim point.
+	local function ringStrokeOf(diam: number, color: Color3): UIStroke
+		local f = Instance.new("Frame")
+		f.AnchorPoint = Vector2.new(0.5, 0.5)
+		f.Position = UDim2.fromScale(0.5, 0.5)
+		f.Size = UDim2.fromOffset(diam, diam)
+		f.BackgroundTransparency = 1
+		f.Parent = ring
+		local cor = Instance.new("UICorner")
+		cor.CornerRadius = UDim.new(1, 0)
+		cor.Parent = f
+		local st = Instance.new("UIStroke")
+		st.Thickness = 2
+		st.Color = color
+		st.Parent = f
+		return st
+	end
+	local healthStroke = ringStrokeOf(72, Color3.fromRGB(80, 220, 120))
+	local shieldStroke = ringStrokeOf(96, Color3.fromRGB(90, 220, 255))
+	local dashLine = Instance.new("Frame")
+	dashLine.AnchorPoint = Vector2.new(0.5, 0)
+	dashLine.Position = UDim2.new(0.5, 0, 0.5, 60)
+	dashLine.Size = UDim2.fromOffset(96, 5)
+	dashLine.BackgroundColor3 = Color3.fromRGB(90, 200, 255)
+	dashLine.BorderSizePixel = 0
+	dashLine.Parent = ring
+
 	-- Beam = a pooled line of the weapon's object, stacked toward the target.
 	local MAX_SEG = 60
 	local segFolder = Instance.new("Folder")
@@ -319,7 +347,7 @@ function WeaponController.start(mainId: string?, secId: string?)
 	bombHud.Parent = player:WaitForChild("PlayerGui")
 	BattleSession.track(bombHud)
 	local killLabel = Instance.new("TextLabel")
-	killLabel.Position = UDim2.fromOffset(24, 58)
+	killLabel.Position = UDim2.fromOffset(24, 116)
 	killLabel.Size = UDim2.fromOffset(220, 24)
 	killLabel.BackgroundTransparency = 1
 	killLabel.Font = Enum.Font.GothamBold
@@ -329,11 +357,12 @@ function WeaponController.start(mainId: string?, secId: string?)
 	killLabel.Text = "Kills  0"
 	killLabel.Parent = bombHud
 	local chargeBg = Instance.new("Frame")
-	chargeBg.Position = UDim2.fromOffset(24, 86)
-	chargeBg.Size = UDim2.fromOffset(220, 16)
+	chargeBg.AnchorPoint = Vector2.new(0.5, 0)
+	chargeBg.Position = UDim2.new(0.5, 0, 0.5, 74)
+	chargeBg.Size = UDim2.fromOffset(96, 12)
 	chargeBg.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
 	chargeBg.BackgroundTransparency = 0.25
-	chargeBg.Parent = bombHud
+	chargeBg.Parent = ring
 	local bgC = Instance.new("UICorner")
 	bgC.CornerRadius = UDim.new(0.5, 0)
 	bgC.Parent = chargeBg
@@ -410,6 +439,36 @@ function WeaponController.start(mainId: string?, secId: string?)
 		end
 	end
 
+	local bombBtn: TextButton? = nil
+	-- Touch BOMB button (left side, under the shield + boost buttons).
+	if UserInputService.TouchEnabled then
+		local bgui = Instance.new("ScreenGui")
+		bgui.Name = "BombControls"
+		bgui.IgnoreGuiInset = true
+		bgui.ResetOnSpawn = false
+		bgui.Parent = player:WaitForChild("PlayerGui")
+		BattleSession.track(bgui)
+		local bb = Instance.new("TextButton")
+		bb.Size = UDim2.fromOffset(96, 76)
+		bb.AnchorPoint = Vector2.new(0, 0.5)
+		bb.Position = UDim2.new(0, 16, 0.5, 180)
+		bb.BackgroundColor3 = Color3.fromRGB(150, 70, 220)
+		bb.BackgroundTransparency = 0.25
+		bb.TextColor3 = Color3.fromRGB(255, 255, 255)
+		bb.TextScaled = true
+		bb.Text = "BOMB"
+		bb.Parent = bgui
+		bombBtn = bb
+		local bc = Instance.new("UICorner")
+		bc.CornerRadius = UDim.new(0.3, 0)
+		bc.Parent = bb
+		bb.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.Touch then
+				tryBomb()
+			end
+		end)
+	end
+
 	UserInputService.InputBegan:Connect(function(input, gpe)
 		if gpe or BattleSession.gen ~= gen then
 			return
@@ -429,60 +488,6 @@ function WeaponController.start(mainId: string?, secId: string?)
 		end
 	end)
 
-	-- Touch FIRE button (secondary).
-	if UserInputService.TouchEnabled then
-		local gui = Instance.new("ScreenGui")
-		gui.Name = "WeaponControls"
-		gui.IgnoreGuiInset = true
-		gui.ResetOnSpawn = false
-		gui.Parent = player:WaitForChild("PlayerGui")
-		BattleSession.track(gui)
-
-		local btn = Instance.new("TextButton")
-		btn.Size = UDim2.fromOffset(120, 120)
-		btn.AnchorPoint = Vector2.new(1, 1)
-		btn.Position = UDim2.new(1, -150, 1, -30)
-		btn.BackgroundColor3 = Color3.fromRGB(220, 90, 60)
-		btn.BackgroundTransparency = 0.25
-		btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-		btn.TextScaled = true
-		btn.Text = "FIRE"
-		btn.Parent = gui
-		local c = Instance.new("UICorner")
-		c.CornerRadius = UDim.new(1, 0)
-		c.Parent = btn
-		btn.InputBegan:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.Touch then
-				secondaryHeld = true
-			end
-		end)
-		btn.InputEnded:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.Touch then
-				secondaryHeld = false
-			end
-		end)
-
-		-- Touch BOMB button (above FIRE).
-		local bombBtn = Instance.new("TextButton")
-		bombBtn.Size = UDim2.fromOffset(120, 76)
-		bombBtn.AnchorPoint = Vector2.new(1, 1)
-		bombBtn.Position = UDim2.new(1, -150, 1, -160)
-		bombBtn.BackgroundColor3 = Color3.fromRGB(150, 70, 220)
-		bombBtn.BackgroundTransparency = 0.25
-		bombBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-		bombBtn.TextScaled = true
-		bombBtn.Text = "BOMB"
-		bombBtn.Parent = gui
-		local bc = Instance.new("UICorner")
-		bc.CornerRadius = UDim.new(0.3, 0)
-		bc.Parent = bombBtn
-		bombBtn.InputBegan:Connect(function(i)
-			if i.UserInputType == Enum.UserInputType.Touch then
-				tryBomb()
-			end
-		end)
-	end
-
 	local hadTarget = false
 	RunService.Heartbeat:Connect(function(dt)
 		if BattleSession.gen ~= gen then
@@ -490,8 +495,8 @@ function WeaponController.start(mainId: string?, secId: string?)
 		end
 		local origin, dir = muzzle()
 
-		-- MAIN: auto-target + beam + damage over time.
-		local target = acquireTarget(origin, dir)
+		-- MAIN: auto-target + beam + damage over time. The raised shield disables weapons.
+		local target = if ShipState.shielding then nil else acquireTarget(origin, dir)
 		-- Drop the lock if a mountain blocks the line of sight.
 		if target and WorldHeights.blocked(origin, target.root.Position) then
 			target = nil
@@ -508,6 +513,10 @@ function WeaponController.start(mainId: string?, secId: string?)
 		local rc = if target then Color3.fromRGB(255, 80, 80) else Color3.fromRGB(255, 255, 255)
 		ringStroke.Color = rc
 		dot.BackgroundColor3 = rc
+		local hf = math.clamp(ShipState.health / math.max(1, ShipState.maxHealth), 0, 1)
+		healthStroke.Color = Color3.fromRGB(220, 70, 70):Lerp(Color3.fromRGB(80, 220, 120), hf)
+		shieldStroke.Transparency = 1 - math.clamp(ShipState.shieldFrac, 0, 1)
+		dashLine.Size = UDim2.fromOffset(math.max(2, 96 * math.clamp(ShipState.boostFrac, 0, 1)), 5)
 
 		ShipState.beamHit = if target then target.root.Position else nil -- replicate beam
 
@@ -529,10 +538,22 @@ function WeaponController.start(mainId: string?, secId: string?)
 			beamTimer = 0
 		end
 
-		-- SECONDARY: fire on held + cooldown.
-		if secondaryHeld and os.clock() - lastFire >= SECONDARY_COOLDOWN then
+		-- SECONDARY: fire on held + cooldown (disabled while the shield is up).
+		if secondaryHeld and not ShipState.shielding and os.clock() - lastFire >= SECONDARY_COOLDOWN then
 			lastFire = os.clock()
 			fireSecondary()
+		end
+		-- Touch: tap-on-target fires one secondary; double-tap drops the bomb.
+		if ShipState.fireSecondary then
+			ShipState.fireSecondary = false
+			if not ShipState.shielding and os.clock() - lastFire >= SECONDARY_COOLDOWN then
+				lastFire = os.clock()
+				fireSecondary()
+			end
+		end
+		if ShipState.bombPulse then
+			ShipState.bombPulse = false
+			tryBomb()
 		end
 
 		-- Update projectiles.
@@ -572,6 +593,9 @@ function WeaponController.start(mainId: string?, secId: string?)
 		else
 			chargeFill.BackgroundColor3 = Color3.fromRGB(160, 90, 220)
 			bombText.Text = "BOMB"
+		end
+		if bombBtn then
+			(bombBtn :: TextButton).BackgroundTransparency = if charge >= 100 then 0.12 else 0.6 - 0.45 * (charge / 100)
 		end
 
 		-- Update bombs: huge projectile, wide-area blast on impact.

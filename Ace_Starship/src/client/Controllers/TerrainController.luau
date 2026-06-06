@@ -86,15 +86,21 @@ TerrainController.ceilY = ceilY
 -- triangles). step 1 = full detail; bigger = blockier + lighter (Low quality).
 local function writeShell(x0: number, z0: number, isCeiling: boolean, step: number?)
 	local gstep = if step and step > 1 then step else 1
+	-- In a pinch section the peaks/stalactites grow well past the normal range, so this
+	-- chunk's voxel column must be taller to capture them (only here -- normal chunks stay
+	-- cheap). The extra height is sampled at the same coarse step, so Low stays light.
+	local pinch = WorldHeights.pinchInZ(z0, z0 + CHUNK)
 	local yMin, yMax, mat, surfaceFn
 	if isCeiling then
-		yMin = math.floor((CEIL_BASE - CEIL_AMP) / RES) * RES
+		local low = if pinch then WorldHeights.WALL_CEIL_MIN else CEIL_BASE - CEIL_AMP
+		yMin = math.floor(low / RES) * RES
 		yMax = math.ceil((CEIL_BASE + CEIL_SHELL) / RES) * RES
 		mat = currentTheme.ceil
 		surfaceFn = ceilY
 	else
 		yMin = math.floor((GROUND_BASE - GROUND_SHELL) / RES) * RES
-		yMax = math.ceil((GROUND_BASE + GROUND_AMP) / RES) * RES
+		local high = if pinch then WorldHeights.WALL_GROUND_MAX else GROUND_BASE + GROUND_AMP
+		yMax = math.ceil(high / RES) * RES
 		mat = currentTheme.ground -- base; cap/base by height applied per voxel below
 		surfaceFn = groundY
 	end
@@ -275,7 +281,10 @@ function TerrainController.start()
 				local key = cx .. "," .. cz
 				local cheb = math.max(math.abs(cx - scx), math.abs(cz - scz))
 				local needG = not builtG[key]
-				local needC = cheb <= CEIL_VIEW and not builtC[key]
+				-- Pinch chunks always carry their ceiling (ground + ceiling overlap there,
+				-- so they can't be unloaded separately), regardless of the tighter radius.
+				local pinch = WorldHeights.pinchInZ(cz * CHUNK, cz * CHUNK + CHUNK)
+				local needC = (cheb <= CEIL_VIEW or pinch) and not builtC[key]
 				if needG or needC then
 					local d = (cx - scx) * (cx - scx) + (cz - scz) * (cz - scz)
 					table.insert(todo, { cx = cx, cz = cz, d = d, g = needG, c = needC })
@@ -308,11 +317,16 @@ function TerrainController.start()
 				builtC[key] = nil
 			end
 		end
-		-- Unload just the ceiling for chunks outside the tighter ceiling radius.
+		-- Unload just the ceiling for chunks outside the tighter ceiling radius. Skip pinch
+		-- chunks: their ceiling overlaps the ground wall, so a ceiling-only clear would
+		-- punch a hole in the wall -- they're only ever cleared in full by clearChunk above.
 		for key in builtC do
 			local sx, sz = key:match("(-?%d+),(-?%d+)")
 			local cx, cz = tonumber(sx) :: number, tonumber(sz) :: number
-			if math.max(math.abs(cx - scx), math.abs(cz - scz)) > CEIL_VIEW + 1 then
+			if
+				math.max(math.abs(cx - scx), math.abs(cz - scz)) > CEIL_VIEW + 1
+				and not WorldHeights.pinchInZ(cz * CHUNK, cz * CHUNK + CHUNK)
+			then
 				clearCeiling(cx, cz)
 				builtC[key] = nil
 			end

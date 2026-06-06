@@ -30,5 +30,6 @@ end)
 
 require(Controllers.SettingsController).start() -- performance settings menu
 require(Controllers.SkyController).start() -- per-client skybox (off on Low)
+require(Controllers.MusicController).start() -- state-based background music
 require(Controllers.BoltsHudController).start() -- always-on Bolts counter
 require(Controllers.LobbyController).start()

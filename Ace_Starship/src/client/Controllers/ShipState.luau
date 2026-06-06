@@ -9,6 +9,14 @@ local ShipState = {
 	strafe = 0, -- current lateral input (-1 left .. +1 right), drives the pet's side
 	beamHit = (nil :: Vector3?), -- where our main beam is hitting (for replication)
 
+	shielding = false, -- true while the catch-and-throw shield is up (suppresses weapons)
+	shieldCaught = {} :: { Instance }, -- the actual enemy projectile objects caught, orbiting the ship
+
+	fireSecondary = false, -- one-shot: touch tap-on-target requests a secondary shot
+	bombPulse = false, -- one-shot: touch double-tap requests the bomb
+	boostFrac = 1, -- dash/boost energy 0..1 (drives the crosshair dash line)
+	shieldFrac = 1, -- shield energy 0..1 (drives the crosshair shield ring)
+
 	maxHealth = 100,
 	health = 100,
 	lastHit = 0, -- os.clock() of the last damage taken (drives regen delay)

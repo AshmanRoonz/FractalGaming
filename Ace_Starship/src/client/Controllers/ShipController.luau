@@ -21,6 +21,7 @@ local ShipTemplate = require(ReplicatedStorage.Shared.Templates.ShipTemplate)
 local ShipState = require(script.Parent.ShipState)
 local TerrainController = require(script.Parent.TerrainController)
 local BattleSession = require(script.Parent.BattleSession)
+local EnemyController = require(script.Parent.EnemyController)
 local Sfx = require(ReplicatedStorage.Shared.Sfx)
 
 local ShipController = {}
@@ -42,12 +43,24 @@ local GYRO_SENS = 1.3 -- multiplier on how hard device tilt steers
 -- GYRO_DEBUG draws the raw numbers on screen so the mapping can be dialed in by eye.
 local GYRO_SWAP = false -- swap which tilt axis is turn vs pitch (flip if they feel reversed)
 local GYRO_INVERT_TURN = false
-local GYRO_INVERT_PITCH = true
+local GYRO_INVERT_PITCH = false -- flipped: tilt forward now moves forward
 local GYRO_DEBUG = false -- true = show raw tilt readout to calibrate (turn off once dialed in)
 -- Tilt is read from the device LookVector (components in -1..1), not Euler angles,
 -- to avoid the pitch/yaw gimbal flip. ~0.5 ≈ a 30-degree tilt = full-speed turn.
 local GYRO_TILT_FULL = 0.55 -- tilt (radians, ~31deg) that gives full turn speed
 local GYRO_TILT_DEAD = 0.06 -- ignore tiny tilt jitter (radians, ~3deg)
+-- Touch controls: tilt-to-move + gesture/tap tuning.
+local TILT_MOVE_DEAD = 0.07 -- ignore small tilt (radians)
+local TILT_MOVE_FULL = 0.5 -- tilt (radians) for full thrust
+local TILT_SWAP = true -- landscape: which tilt axis is forward vs strafe
+local TILT_INVERT_FWD = true -- flip if tilting forward moves you backward
+local TILT_INVERT_STRAFE = false -- flip if tilting right strafes left
+local TOUCH_TAP_MOVE = 16 -- px of finger travel before it counts as a swipe (not a tap)
+local TOUCH_DOUBLE_TAP = 0.32 -- s window for a double-tap (bomb)
+local TOUCH_TARGET_R = 150 -- px: tap within this of a target -> auto-aim + fire (big-finger friendly)
+local TURN_LERP = 7 -- how fast the heading eases to a tapped/turn-button target
+local AUTOLEVEL_RATE = 1.4 -- touch: how fast the aim pitch drifts back to the horizon
+local AUTOPATH_RATE = 0.9 -- touch: how fast the heading drifts back to the forward path
 local MAX_PITCH = math.rad(80) -- clamp so you can't flip fully over
 local MAX_BANK = math.rad(22)
 local BOOST_MULT = 2.1 -- speed multiplier while boosting
@@ -124,6 +137,29 @@ function ShipController.start(shipId: string?)
 		UserInputService.MouseIconEnabled = true
 	end)
 
+	-- Hide Roblox's default touch controls (jump button + thumbstick) while flying --
+	-- they overlap our custom controls. Restored on return to the hangar.
+	pcall(function()
+		local ps = player:WaitForChild("PlayerScripts", 5)
+		local pm = ps and ps:FindFirstChild("PlayerModule")
+		if pm then
+			local controls = require(pm):GetControls()
+			controls:Disable()
+			BattleSession.onCleanup(function()
+				pcall(function()
+					controls:Enable()
+				end)
+			end)
+		end
+		-- Belt-and-suspenders: hide the jump button directly if it's present.
+		local tg = player.PlayerGui:FindFirstChild("TouchGui")
+		local frame = tg and tg:FindFirstChild("TouchControlFrame")
+		local jump = frame and frame:FindFirstChild("JumpButton")
+		if jump then
+			jump.Visible = false
+		end
+	end)
+
 	local ship = ShipTemplate.new(shipId or "starter_skiff")
 	local model = ship.model
 	for _, part in model:GetDescendants() do
@@ -198,19 +234,31 @@ function ShipController.start(shipId: string?)
 		end
 	end)
 
-	-- ---- Touch UI (only on touch devices) ----------------------------------
-	local touchMove, touchLook = Vector2.zero, Vector2.zero
-	local touchUp, touchDown, touchBoost = false, false, false
-	-- Read the touch sticks inline in the flight loop (not a separate connection),
-	-- so touch input has zero frame lag, exactly like the gamepad and mouse.
-	local getMove: (() -> Vector2)? = nil
-	local getLook: (() -> Vector2)? = nil
-	-- Gyro/tilt look state.
-	local gyroOn = false
-	local gravLatest: Vector3? = nil -- newest gravity direction (device frame, unit)
-	local gravRef: Vector3? = nil -- gravity captured when gyro was turned on / recentered
-	local gyroDebug: TextLabel? = nil -- on-screen raw readout (only if GYRO_DEBUG)
-	local invertPitch = GYRO_INVERT_PITCH -- runtime toggle (button); default from the constant
+	-- ---- Touch controls --------------------------------------------------
+	-- Tilt to move; swipe up/down to thrust vertically; swipe left/right to roll; tap
+	-- to aim (and fire if you tapped a target); double-tap for the bomb. Top-row
+	-- buttons: shield (left, built by ShieldController), 90/180 turns (centre), boost (right).
+	local camYaw, camPitch = 0, 0
+	local camYawTarget, camPitchTarget = 0, 0
+	local touchBoost = false
+	local boostBtn: TextButton? = nil
+	local touchVert = 0 -- -1..1 from a vertical drag
+	local gravLatest: Vector3? = nil -- gravity (device frame) for tilt-to-move
+	local gravRef: Vector3? = nil -- neutral pose captured shortly after launch
+	local headingTouch = false -- a tap/turn has set a heading target
+	local touchAim = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+	-- Turn the ship toward a world direction the shortest way (used by taps).
+	local function aimToward(dir: Vector3)
+		local flat = Vector3.new(dir.X, 0, dir.Z)
+		if flat.Magnitude > 0.001 then
+			local desired = math.atan2(-dir.X, -dir.Z)
+			local delta = ((desired - camYaw + math.pi) % (2 * math.pi)) - math.pi
+			camYawTarget = camYaw + delta
+		end
+		camPitchTarget = math.clamp(math.asin(math.clamp(dir.Y, -1, 1)), -MAX_PITCH, MAX_PITCH)
+		headingTouch = true
+	end
 
 	if UserInputService.TouchEnabled then
 		local gui = Instance.new("ScreenGui")
@@ -220,199 +268,131 @@ function ShipController.start(shipId: string?)
 		gui.Parent = player:WaitForChild("PlayerGui")
 		BattleSession.track(gui)
 
-		local function makeStick(minX: number, maxX: number): () -> Vector2
-			local base = Instance.new("Frame")
-			base.Size = UDim2.fromOffset(STICK_RADIUS * 2, STICK_RADIUS * 2)
-			base.AnchorPoint = Vector2.new(0.5, 0.5)
-			base.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-			base.BackgroundTransparency = 0.75
-			base.Visible = false
-			base.Parent = gui
-			local bc = Instance.new("UICorner")
-			bc.CornerRadius = UDim.new(1, 0)
-			bc.Parent = base
-
-			local knob = Instance.new("Frame")
-			knob.Size = UDim2.fromOffset(STICK_RADIUS, STICK_RADIUS)
-			knob.AnchorPoint = Vector2.new(0.5, 0.5)
-			knob.Position = UDim2.fromScale(0.5, 0.5)
-			knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-			knob.BackgroundTransparency = 0.45
-			knob.Parent = base
-			local kc = Instance.new("UICorner")
-			kc.CornerRadius = UDim.new(1, 0)
-			kc.Parent = knob
-
-			local active: InputObject? = nil
-			local origin = Vector2.zero
-			local value = Vector2.zero
-
-			UserInputService.TouchStarted:Connect(function(touch, processed)
-				if processed or active or BattleSession.gen ~= gen then
-					return
-				end
-				local frac = touch.Position.X / camera.ViewportSize.X
-				if frac < minX or frac >= maxX then
-					return
-				end
-				active = touch
-				origin = Vector2.new(touch.Position.X, touch.Position.Y)
-				base.Position = UDim2.fromOffset(origin.X, origin.Y)
-				knob.Position = UDim2.fromScale(0.5, 0.5)
-				base.Visible = true
+		-- Tilt to move (accelerometer); neutral pose captured just after launch.
+		if UserInputService.AccelerometerEnabled then
+			UserInputService.DeviceGravityChanged:Connect(function(input)
+				gravLatest = input.Position
 			end)
-			UserInputService.TouchMoved:Connect(function(touch)
-				if touch ~= active or BattleSession.gen ~= gen then
-					return
-				end
-				local d = Vector2.new(touch.Position.X, touch.Position.Y) - origin
-				if d.Magnitude > STICK_RADIUS then
-					d = d.Unit * STICK_RADIUS
-				end
-				knob.Position = UDim2.new(0.5, d.X, 0.5, d.Y)
-				value = d / STICK_RADIUS
+			task.delay(0.6, function()
+				gravRef = gravLatest
 			end)
-			UserInputService.TouchEnded:Connect(function(touch)
-				if touch ~= active or BattleSession.gen ~= gen then
-					return
-				end
-				active = nil
-				base.Visible = false
-				value = Vector2.zero
-			end)
+		end
 
-			return function()
-				return value
+		-- Gesture input via UserInputService (reliable + self-recovering). The
+		-- gameProcessed flag means touches on a button (shield/boost/turn) are ignored
+		-- here, so buttons and gestures don't fight. No full-screen catcher (which could
+		-- get a touch 'stuck' and freeze tapping until a restart).
+		local active: InputObject? = nil
+		local startPos = Vector2.zero
+		local moved, axis, rolled = false, "", false
+		local lastTapT = -10
+		local function stale(): boolean
+			return active ~= nil
+				and (active :: InputObject).UserInputState ~= Enum.UserInputState.Begin
+				and (active :: InputObject).UserInputState ~= Enum.UserInputState.Change
+		end
+		UserInputService.TouchStarted:Connect(function(i, processed)
+			if BattleSession.gen ~= gen then
+				return
 			end
-		end
-
-		getMove = makeStick(0, 0.5)
-		getLook = makeStick(0.5, 1)
-
-		local function makeButton(text: string, yOffset: number, onHold: (boolean) -> ())
-			local btn = Instance.new("TextButton")
-			btn.Size = UDim2.fromOffset(90, 90)
-			btn.AnchorPoint = Vector2.new(1, 1)
-			btn.Position = UDim2.new(1, -30, 1, yOffset)
-			btn.BackgroundColor3 = Color3.fromRGB(40, 50, 70)
-			btn.BackgroundTransparency = 0.3
-			btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			btn.TextScaled = true
-			btn.Text = text
-			btn.Parent = gui
-			local c = Instance.new("UICorner")
-			c.CornerRadius = UDim.new(0.2, 0)
-			c.Parent = btn
-			btn.InputBegan:Connect(function(i)
-				if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
-					onHold(true)
+			if stale() then
+				active = nil -- recover a dropped finger
+			end
+			if processed or active then
+				return
+			end
+			active = i
+			startPos = Vector2.new(i.Position.X, i.Position.Y)
+			moved, axis, rolled = false, "", false
+		end)
+		UserInputService.TouchMoved:Connect(function(i)
+			if i ~= active or BattleSession.gen ~= gen then
+				return
+			end
+			local d = Vector2.new(i.Position.X, i.Position.Y) - startPos
+			if not moved and d.Magnitude > TOUCH_TAP_MOVE then
+				moved = true
+				axis = if math.abs(d.X) > math.abs(d.Y) then "horiz" else "vert"
+			end
+			if moved and axis == "horiz" and not rolled then
+				triggerRoll(if d.X >= 0 then 1 else -1)
+				rolled = true
+			elseif moved and axis == "vert" then
+				touchVert = if d.Y < 0 then 1 else -1
+			end
+		end)
+		UserInputService.TouchEnded:Connect(function(i)
+			if i ~= active or BattleSession.gen ~= gen then
+				return
+			end
+			if not moved then
+				-- Auto-aim: snap to the nearest enemy near the tap and fire; else aim there.
+				local bestE, bestD = nil, TOUCH_TARGET_R
+				for _, e in EnemyController.enemies do
+					if e.root then
+						local sp = camera:WorldToViewportPoint(e.root.Position)
+						if sp.Z > 0 then
+							local dd = (Vector2.new(sp.X, sp.Y) - startPos).Magnitude
+							if dd < bestD then
+								bestD = dd
+								bestE = e
+							end
+						end
+					end
 				end
-			end)
-			btn.InputEnded:Connect(function(i)
-				if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
-					onHold(false)
+				if bestE then
+					aimToward((bestE.root.Position - ShipState.position).Unit)
+					ShipState.fireSecondary = true
+				else
+					local ray = camera:ViewportPointToRay(startPos.X, startPos.Y)
+					aimToward(ray.Direction)
 				end
-			end)
-		end
-
-		makeButton("UP", -130, function(held)
-			touchUp = held
-		end)
-		makeButton("DN", -30, function(held)
-			touchDown = held
-		end)
-		makeButton("BOOST", -230, function(held)
-			touchBoost = held
+			end
+			active = nil
+			touchVert = 0
 		end)
 
-		-- Roll buttons (bottom center, clear of the sticks).
-		local function makeRoll(text: string, xOffset: number, dir: number)
+		-- Top-row buttons.
+		local function topBtn(text: string, ax: number, xoff: number, color: Color3): TextButton
 			local b = Instance.new("TextButton")
-			b.Size = UDim2.fromOffset(84, 84)
-			b.AnchorPoint = Vector2.new(0.5, 1)
-			b.Position = UDim2.new(0.5, xOffset, 1, -26)
-			b.BackgroundColor3 = Color3.fromRGB(70, 95, 160)
+			b.Size = UDim2.fromOffset(96, 52)
+			b.AnchorPoint = Vector2.new(ax, 0)
+			b.Position = UDim2.new(ax, xoff, 0, 12)
+			b.BackgroundColor3 = color
 			b.BackgroundTransparency = 0.3
 			b.TextColor3 = Color3.fromRGB(255, 255, 255)
 			b.TextScaled = true
 			b.Text = text
 			b.Parent = gui
 			local c = Instance.new("UICorner")
-			c.CornerRadius = UDim.new(1, 0)
+			c.CornerRadius = UDim.new(0.25, 0)
 			c.Parent = b
-			b.InputBegan:Connect(function(i)
-				if i.UserInputType == Enum.UserInputType.Touch then
-					triggerRoll(dir)
-				end
+			return b
+		end
+		boostBtn = topBtn("BOOST", 1, -16, Color3.fromRGB(40, 90, 150))
+		boostBtn.AnchorPoint = Vector2.new(0, 0.5) -- left side, under the shield button
+		boostBtn.Position = UDim2.new(0, 16, 0.5, 90)
+		boostBtn.Size = UDim2.fromOffset(96, 76)
+		boostBtn.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.Touch then
+				touchBoost = true
+			end
+		end)
+		boostBtn.InputEnded:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.Touch then
+				touchBoost = false
+			end
+		end)
+		local function turnBtn(text: string, xoff: number, delta: number)
+			local b = topBtn(text, 0.5, xoff, Color3.fromRGB(70, 80, 120))
+			b.Activated:Connect(function()
+				camYawTarget += delta
+				headingTouch = true
 			end)
 		end
-		makeRoll("\u{21BA}", -120, -1) -- left roll
-		makeRoll("\u{21BB}", 120, 1) -- right roll
-
-		-- Gyro/tilt look: only on devices that have a gyroscope. A toggle button
-		-- turns it on (and recenters to however you're holding the device); tilt then
-		-- steers. Tilt further = turn faster.
-		if UserInputService.AccelerometerEnabled then
-			UserInputService.DeviceGravityChanged:Connect(function(input)
-				gravLatest = input.Position -- unit vector toward ground, device frame
-			end)
-			local gyroBtn = Instance.new("TextButton")
-			gyroBtn.Size = UDim2.fromOffset(90, 60)
-			gyroBtn.AnchorPoint = Vector2.new(1, 1)
-			gyroBtn.Position = UDim2.new(1, -30, 1, -330)
-			gyroBtn.BackgroundColor3 = Color3.fromRGB(70, 60, 110)
-			gyroBtn.BackgroundTransparency = 0.3
-			gyroBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			gyroBtn.TextScaled = true
-			gyroBtn.Text = "GYRO: OFF"
-			gyroBtn.Parent = gui
-			local gc = Instance.new("UICorner")
-			gc.CornerRadius = UDim.new(0.2, 0)
-			gc.Parent = gyroBtn
-			gyroBtn.Activated:Connect(function()
-				gyroOn = not gyroOn
-				gravRef = gravLatest -- recenter to the current hold position
-				gyroBtn.Text = if gyroOn then "GYRO: ON" else "GYRO: OFF"
-				gyroBtn.BackgroundColor3 = if gyroOn then Color3.fromRGB(90, 200, 120) else Color3.fromRGB(70, 60, 110)
-			end)
-			-- Invert-Y toggle: flip vertical tilt look for players who prefer it.
-			local invBtn = Instance.new("TextButton")
-			invBtn.Size = UDim2.fromOffset(90, 44)
-			invBtn.AnchorPoint = Vector2.new(1, 1)
-			invBtn.Position = UDim2.new(1, -30, 1, -396)
-			invBtn.BackgroundColor3 = Color3.fromRGB(70, 60, 110)
-			invBtn.BackgroundTransparency = 0.3
-			invBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-			invBtn.TextScaled = true
-			invBtn.Text = if invertPitch then "INVERT Y: ON" else "INVERT Y: OFF"
-			invBtn.Parent = gui
-			local ic = Instance.new("UICorner")
-			ic.CornerRadius = UDim.new(0.2, 0)
-			ic.Parent = invBtn
-			invBtn.Activated:Connect(function()
-				invertPitch = not invertPitch
-				invBtn.Text = if invertPitch then "INVERT Y: ON" else "INVERT Y: OFF"
-				invBtn.BackgroundColor3 = if invertPitch then Color3.fromRGB(90, 200, 120) else Color3.fromRGB(70, 60, 110)
-			end)
-			if invertPitch then
-				invBtn.BackgroundColor3 = Color3.fromRGB(90, 200, 120)
-			end
-			if GYRO_DEBUG then
-				local dbg = Instance.new("TextLabel")
-				dbg.Size = UDim2.fromOffset(260, 80)
-				dbg.AnchorPoint = Vector2.new(1, 1)
-				dbg.Position = UDim2.new(1, -130, 1, -330)
-				dbg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-				dbg.BackgroundTransparency = 0.4
-				dbg.TextColor3 = Color3.fromRGB(120, 255, 160)
-				dbg.Font = Enum.Font.Code
-				dbg.TextSize = 16
-				dbg.TextXAlignment = Enum.TextXAlignment.Left
-				dbg.Text = "gyro debug"
-				dbg.Parent = gui
-				gyroDebug = dbg
-			end
-		end
+		turnBtn("<90", -102, math.rad(90))
+		turnBtn("180", 0, math.pi)
+		turnBtn("90>", 102, -math.rad(90))
 	end
 
 	-- ---- Health HUD --------------------------------------------------------
@@ -425,7 +405,8 @@ function ShipController.start(shipId: string?)
 
 	local barBg = Instance.new("Frame")
 	barBg.AnchorPoint = Vector2.new(0, 0)
-	barBg.Position = UDim2.fromOffset(24, 24)
+	barBg.Position = UDim2.fromOffset(24, 76)
+	barBg.Visible = false -- health now shown as a ring on the crosshair
 	barBg.Size = UDim2.fromOffset(320, 26)
 	barBg.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
 	barBg.BackgroundTransparency = 0.25
@@ -450,7 +431,8 @@ function ShipController.start(shipId: string?)
 
 	-- Boost energy bar (thin, under the health bar).
 	local boostBg = Instance.new("Frame")
-	boostBg.Position = UDim2.fromOffset(24, 52)
+	boostBg.Position = UDim2.fromOffset(24, 104)
+	boostBg.Visible = false -- dash now shown under the crosshair
 	boostBg.Size = UDim2.fromOffset(320, 6)
 	boostBg.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
 	boostBg.BackgroundTransparency = 0.3
@@ -503,7 +485,6 @@ function ShipController.start(shipId: string?)
 	local sendAccum = 0
 
 	-- ---- Free 3D flight ----------------------------------------------------
-	local camYaw, camPitch = 0, 0
 	local pos = Vector3.new(0, 100, 0) -- spawn in the gap between floor and ceiling
 	local boostEnergy = BOOST_MAX
 	local boostDepleted = false -- true once drained to 0; locks boost until it recharges
@@ -515,29 +496,14 @@ function ShipController.start(shipId: string?)
 		end
 		local padMove = gamepadStick(Enum.KeyCode.Thumbstick1)
 		local padLook = gamepadStick(Enum.KeyCode.Thumbstick2)
-		-- Sample the touch sticks right here (no frame lag), same as the gamepad.
-		if getMove then
-			touchMove = getMove()
-		end
-		if getLook then
-			touchLook = getLook()
-		end
-
-		-- Gyro/tilt -> steering axes (tilt further = turn faster), folded into the same
-		-- look channel as the stick. We use the ACCELEROMETER gravity vector: the physical
-		-- "down" direction in the device frame. We measure how that vector has tilted since
-		-- the recenter pose, per device axis, so one tilt drives one axis with no gimbal
-		-- mixing, and it survives flipping the phone. The motion sensor reports in the
-		-- phone's native PORTRAIT frame, so in landscape turn/pitch come from swapped axes
-		-- (GYRO_SWAP); per-axis INVERT flips a backwards direction; GYRO_DEBUG shows raws.
-		local gyroTurn, gyroPitch = 0, 0
-		if gyroOn and gravLatest and gravRef then
-			-- Decoupled tilt angles (radians) from the gravity vector. atan2 with the
-			-- sqrt term isolates rotation-about-X from rotation-about-Y, so tilting one
-			-- way never bleeds into the other (raw component subtraction does bleed).
+		-- Tilt to move, mapped like the (working) gyro LOOK: look-turn axis -> strafe,
+		-- look-pitch axis -> forward/back. Reuses the GYRO_* calibration so it matches
+		-- how looking felt. Flip GYRO_SWAP / GYRO_INVERT_* if a direction is off.
+		local tiltFwd, tiltStrafe = 0, 0
+		if gravLatest and gravRef then
 			local function tiltAngles(a: Vector3): (number, number)
-				local aboutX = math.atan2(a.Y, -a.Z) -- dip a left/right side down
-				local aboutY = math.atan2(-a.X, math.sqrt(a.Y * a.Y + a.Z * a.Z)) -- nose up/down
+				local aboutX = math.atan2(a.Y, -a.Z)
+				local aboutY = math.atan2(-a.X, math.sqrt(a.Y * a.Y + a.Z * a.Z))
 				return aboutX, aboutY
 			end
 			local gx, gy = tiltAngles(gravLatest :: Vector3)
@@ -553,33 +519,25 @@ function ShipController.start(shipId: string?)
 			local turnRaw = if GYRO_SWAP then aboutY else aboutX
 			local pitchRaw = if GYRO_SWAP then aboutX else aboutY
 			if GYRO_INVERT_TURN then turnRaw = -turnRaw end
-			if invertPitch then pitchRaw = -pitchRaw end
-			gyroTurn = tiltAxis(turnRaw)
-			gyroPitch = tiltAxis(pitchRaw)
-			if gyroDebug then
-				(gyroDebug :: TextLabel).Text = string.format(
-					"aboutX %+.2f aboutY %+.2f\nturn %+.2f pitch %+.2f",
-					aboutX, aboutY, gyroTurn, gyroPitch
-				)
-			end
+			if GYRO_INVERT_PITCH then pitchRaw = -pitchRaw end
+			tiltStrafe = tiltAxis(turnRaw) -- look-turn -> strafe
+			tiltFwd = tiltAxis(pitchRaw) -- look-pitch -> forward/back
 		end
 
-		local lookX = touchLook.X * TOUCH_LOOK_SENS + gyroTurn
-		local lookY = touchLook.Y * TOUCH_LOOK_SENS + gyroPitch
+		local moveFwd = math.clamp(keyAxis({ Enum.KeyCode.S }, { Enum.KeyCode.W }) + tiltFwd + padMove.Y, -1, 1)
+		local moveStrafe = math.clamp(keyAxis({ Enum.KeyCode.A }, { Enum.KeyCode.D }) + tiltStrafe + padMove.X, -1, 1)
+		local turn = math.clamp(keyAxis({ Enum.KeyCode.Left }, { Enum.KeyCode.Right }) + padLook.X, -1, 1)
+		local pitchIn = math.clamp(keyAxis({ Enum.KeyCode.Up }, { Enum.KeyCode.Down }) + (-padLook.Y), -1, 1)
 
-		local moveFwd = math.clamp(keyAxis({ Enum.KeyCode.S }, { Enum.KeyCode.W }) + (-touchMove.Y) + padMove.Y, -1, 1)
-		local moveStrafe = math.clamp(keyAxis({ Enum.KeyCode.A }, { Enum.KeyCode.D }) + touchMove.X + padMove.X, -1, 1)
-		local turn = math.clamp(keyAxis({ Enum.KeyCode.Left }, { Enum.KeyCode.Right }) + lookX + padLook.X, -1, 1)
-		local pitchIn = math.clamp(keyAxis({ Enum.KeyCode.Up }, { Enum.KeyCode.Down }) + lookY + (-padLook.Y), -1, 1)
-
-		-- Vertical (Y-axis) movement: touch UP/DN buttons, gamepad A/B, or keys.
-		local vert = 0
-		if touchUp or padUp or UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+		-- Vertical (Y-axis): touch vertical drag, gamepad A/B, or keys.
+		local vert = touchVert
+		if padUp or UserInputService:IsKeyDown(Enum.KeyCode.Space) then
 			vert += 1
 		end
-		if touchDown or padDown or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+		if padDown or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
 			vert -= 1
 		end
+		vert = math.clamp(vert, -1, 1)
 
 		-- Speed boost: hold Shift / left trigger / BOOST to fly faster while energy
 		-- lasts; recharges when off.
@@ -604,6 +562,10 @@ function ShipController.start(shipId: string?)
 		end
 		wasBoosting = boosting
 		local speedMult = if boosting then BOOST_MULT else 1
+		ShipState.boostFrac = boostEnergy / BOOST_MAX
+		if boostBtn then
+			(boostBtn :: TextButton).BackgroundTransparency = 0.6 - 0.45 * math.clamp(boostEnergy / BOOST_MAX, 0, 1)
+		end
 
 		-- Mouse-look: lock the cursor and steer with the mouse while alive; free it
 		-- when dead so the death menu is clickable.
@@ -622,14 +584,27 @@ function ShipController.start(shipId: string?)
 			end
 		end
 
-		-- Right stick / mouse turns the heading (yaw, full 360) and pitches it.
-		camYaw -= turn * YAW_RATE * dt + mouseDX
-		camPitch = math.clamp(camPitch - pitchIn * PITCH_RATE * dt - mouseDY, -MAX_PITCH, MAX_PITCH)
+		-- Heading. Touch: ease toward the tap / turn-button target. Else: stick/mouse rate.
+		if touchAim and headingTouch then
+			local a = math.clamp(dt * TURN_LERP, 0, 1)
+			camYaw += (camYawTarget - camYaw) * a
+			camPitch += (camPitchTarget - camPitch) * a
+			camPitch = math.clamp(camPitch, -MAX_PITCH, MAX_PITCH)
+			-- Aim pitch drifts back to level with the horizon.
+			camPitchTarget -= camPitchTarget * math.clamp(dt * AUTOLEVEL_RATE, 0, 1)
+			-- Heading drifts back onto the forward path (toward the cave), shortest way.
+			local onPath = math.floor(camYawTarget / (2 * math.pi) + 0.5) * (2 * math.pi)
+			camYawTarget += (onPath - camYawTarget) * math.clamp(dt * AUTOPATH_RATE, 0, 1)
+		else
+			camYaw -= turn * YAW_RATE * dt + mouseDX
+			camPitch = math.clamp(camPitch - pitchIn * PITCH_RATE * dt - mouseDY, -MAX_PITCH, MAX_PITCH)
+		end
 		local yawCF = CFrame.Angles(0, camYaw, 0) -- horizontal heading
 		local lookCF = yawCF * CFrame.Angles(camPitch, 0, 0)
 
 		-- Fly where the nose points (pitch included), so aiming down dives toward
 		-- the floor and up climbs; buttons still give pure vertical.
+		local prevPos = pos
 		local worldMove = lookCF.LookVector * moveFwd + lookCF.RightVector * moveStrafe
 		pos += (worldMove * MOVE_SPEED * speedMult + Vector3.yAxis * vert * VERT_SPEED) * dt
 		-- Barrel-roll dodge: shove the ship sideways in the roll direction.
@@ -637,9 +612,26 @@ function ShipController.start(shipId: string?)
 			pos += lookCF.RightVector * rollDir * ROLL_DODGE * dt
 		end
 
+		-- Wall collision: a "sealed" column (mountain tips touching floor-to-ceiling) has
+		-- no air, so don't let the ship pass through it and out of the world. Slide along
+		-- whichever axis stays open; if both are blocked, stop at the last good spot.
+		local M = SHIP_MARGIN
+		local function openCol(px: number, pz: number): boolean
+			return TerrainController.ceilY(px, pz) - M > TerrainController.groundY(px, pz) + M
+		end
+		if not openCol(pos.X, pos.Z) then
+			if openCol(prevPos.X, pos.Z) then
+				pos = Vector3.new(prevPos.X, pos.Y, pos.Z)
+			elseif openCol(pos.X, prevPos.Z) then
+				pos = Vector3.new(pos.X, pos.Y, prevPos.Z)
+			else
+				pos = Vector3.new(prevPos.X, pos.Y, prevPos.Z)
+			end
+		end
+
 		-- Stay inside the terrain: clamp altitude between floor and ceiling.
-		local floorY = TerrainController.groundY(pos.X, pos.Z) + SHIP_MARGIN
-		local ceilingY = TerrainController.ceilY(pos.X, pos.Z) - SHIP_MARGIN
+		local floorY = TerrainController.groundY(pos.X, pos.Z) + M
+		local ceilingY = TerrainController.ceilY(pos.X, pos.Z) - M
 		if ceilingY > floorY then
 			pos = Vector3.new(pos.X, math.clamp(pos.Y, floorY, ceilingY), pos.Z)
 		end
@@ -668,7 +660,7 @@ function ShipController.start(shipId: string?)
 		if shipUpdate and sendAccum >= 0.05 then
 			sendAccum = 0
 			-- Include the bank/roll so others see us roll; send our beam target.
-			shipUpdate:FireServer(CFrame.new(pos) * lookCF * bank, ShipState.beamHit)
+			shipUpdate:FireServer(CFrame.new(pos) * lookCF * bank, ShipState.beamHit, ShipState.shielding)
 		end
 
 		-- Chase camera behind the look direction.
