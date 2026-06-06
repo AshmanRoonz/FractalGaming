@@ -8649,7 +8649,9 @@ function _makeFXMaterial(presetName) {
     console.warn('[LayeredFX] unknown preset:', presetName, '; available:', Object.keys(EFFECT_PRESETS));
     return _makeLayeredFXMaterial(null);
   }
-  return _makeLayeredFXMaterial(preset);
+  const mat = _makeLayeredFXMaterial(preset);
+  if (mat && mat.userData) mat.userData.presetName = presetName;
+  return mat;
 }
 
 // Shared unit-sphere geometries for FX bursts, keyed by segment count.
@@ -18548,7 +18550,7 @@ async function _warmupCombatShadersBody() {
         for (const presetName in EFFECT_PRESETS) {
           const preset = EFFECT_PRESETS[presetName];
           if (!preset) continue;
-          const m = _makeLayeredFXMaterial(preset);
+          const m = _makeFXMaterial(presetName);
           const mesh = new THREE.Mesh(_warmGeo, m);
           // Park them WAY off-screen so they render as a single fragment
           // (driver still has to compile + link the program for the first
@@ -18769,9 +18771,19 @@ async function _warmupCombatShadersBody() {
             const _afmIdx = _atomFractalMaterials.indexOf(m.material);
             if (_afmIdx >= 0) _atomFractalMaterials.splice(_afmIdx, 1);
           }
+          // Keep warmed LayeredFX programs resident by returning those
+          // materials to the runtime pool. Disposing them here releases the
+          // compiled WebGL program, which moves the hitch back to the first
+          // real explosion in combat.
+          if (m.material &&
+              m.material.userData &&
+              m.material.userData.isLayeredFX &&
+              typeof _releaseFXBurstMaterial === 'function') {
+            _releaseFXBurstMaterial(m.material);
+          }
           // Skip dispose for persistent protos (e.g. the smoke-cone material)
           // that must stay alive to keep their shader program resident.
-          if (m.material && m.material.dispose && !(m.userData && m.userData._keepMaterial)) m.material.dispose();
+          else if (m.material && m.material.dispose && !(m.userData && m.userData._keepMaterial)) m.material.dispose();
           if (m.userData && m.userData._ownsGeoForCleanup && m.geometry && m.geometry.dispose) {
             m.geometry.dispose();
           }
@@ -19590,7 +19602,7 @@ function spawnExplosion(pos, size) {
   }
   const _flatCombat = (typeof _isFlatCombatActive === 'function') ? _isFlatCombatActive() : false;
   const _flatFxLevel = (typeof getFlatCombatFxLevel === 'function') ? getFlatCombatFxLevel() : 0;
-  if (_flatCombat && size <= 10) {
+  if (_flatCombat && size <= 12) {
     const _accent = (typeof _flatCombatFxAccent === 'function')
       ? _flatCombatFxAccent('smallExplosion', 4, 7, 11)
       : false;
@@ -19929,7 +19941,7 @@ function spawnExplosion(pos, size) {
   // gets a few short crackles and a ship-kill explosion gets a real arc cage.
   // The bolts are rendered through spawnLightningBolt which already gets
   // renderOrder=1 so they composite on top of the wall.
-  if (typeof spawnLightningBolt === 'function') {
+  if (typeof spawnLightningBolt === 'function' && size >= 18) {
     const arcCount = Math.max(2, Math.min(7, Math.ceil(size * 0.18)));
     for (let i = 0; i < arcCount; i++) {
       const dir = new THREE.Vector3(
@@ -49019,27 +49031,39 @@ const _envProbeDirs = [
 const _envProbeRay = new THREE.Raycaster();
 _envProbeRay.far = 2000;
 let _envProbeCounter = 0;
+let _envProbeDirCursor = 0;
+let _envProbeAccumDist = 0;
+let _envProbeAccumHits = 0;
+let _envProbeLastOpenness = 0.7;
+const _envProbeHitsScratch = [];
 function probeEnvironmentOpenness() {
   if (!camera || !game || !game.mapMeshes || !game.mapMeshes.length) return 0.7;
   const camPos = camera.getWorldPosition(_envProbeCamPos);
-  let sum = 0;
-  let hits = 0;
-  for (const d of _envProbeDirs) {
+  const dirsPerCall = (typeof getVRThrottleTier === 'function' && getVRThrottleTier() > 0) ? 1 : 2;
+  for (let pi = 0; pi < dirsPerCall; pi++) {
+    const d = _envProbeDirs[_envProbeDirCursor];
     _envProbeRay.set(camPos, d);
     _envProbeRay.near = 0;
     _envProbeRay.far = 2000;
-    const hit = _envProbeRay.intersectObjects(game.mapMeshes, false);
+    _envProbeHitsScratch.length = 0;
+    const hit = _envProbeRay.intersectObjects(game.mapMeshes, false, _envProbeHitsScratch);
     if (hit && hit.length) {
-      sum += hit[0].distance;
-      hits++;
+      _envProbeAccumDist += hit[0].distance;
+      _envProbeAccumHits++;
     } else {
-      sum += 2000;
-      hits++;
+      _envProbeAccumDist += 2000;
+      _envProbeAccumHits++;
+    }
+    _envProbeDirCursor = (_envProbeDirCursor + 1) % _envProbeDirs.length;
+    if (_envProbeDirCursor === 0 && _envProbeAccumHits > 0) {
+      const avg = _envProbeAccumDist / _envProbeAccumHits;
+      // 200 u = very tight tunnel, 1200+ u = open room
+      _envProbeLastOpenness = Math.max(0, Math.min(1, (avg - 200) / 1000));
+      _envProbeAccumDist = 0;
+      _envProbeAccumHits = 0;
     }
   }
-  const avg = hits ? sum / hits : 2000;
-  // 200 u = very tight tunnel, 1200+ u = open room
-  return Math.max(0, Math.min(1, (avg - 200) / 1000));
+  return _envProbeLastOpenness;
 }
 
 function updateAmbientBed() {

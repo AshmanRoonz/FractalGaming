@@ -1,12 +1,15 @@
 # Sandwich Terrain for LSS (Three.js)
 
 How to build the procedural "sandwich" level: jagged mountains below, mirrored
-mountains hanging above, flying through the open gap between. This is the same
-technique prototyped in Ace Starship (Roblox), ported to LSS's Three.js stack
-(r0.165, `BufferGeometry`, `FogExp2`, GLSL FBM, marching-cubes worker).
+mountains hanging above, flying through the open gap between, with the world
+periodically **pinching into a walled corridor** that narrows, forks, and seals
+shut so you fly a real route instead of open void. This mirrors the working Ace
+Starship (Roblox) build, ported to LSS's Three.js stack (r0.165,
+`BufferGeometry`, `FogExp2`, GLSL FBM, marching-cubes worker).
 
-The whole effect is three ideas stacked: a good noise function for the shape, a
-displaced mesh to render it, and chunk streaming so it's endless.
+The effect is four ideas stacked: a good noise function for the mountain shape, a
+corridor "feature" layer that walls the world in, a displaced mesh to render it,
+and chunk streaming so it's endless.
 
 ---
 
@@ -22,8 +25,7 @@ extra moves, all cheap:
 - **Domain warping**: offset the sample coordinates by another noise so ridges
   meander organically instead of looking grid-aligned.
 
-LSS only has noise in GLSL shaders, so here's a self-contained 2D CPU version
-(no dependency, mirrors your shader's value-noise style):
+Self-contained 2D CPU version (no dependency, mirrors your shader's value-noise):
 
 ```js
 // --- self-contained 2D value noise, range -1..1 ---
@@ -45,7 +47,7 @@ function valueNoise2(x, z) {
   return (ab + (cd - ab) * v) * 2 - 1;       // -1..1
 }
 
-// --- tuning (scale these to LSS world units; see section 5) ---
+// --- tuning (scale these to LSS world units; see section 6) ---
 const T = {
   OCTAVES:   5,
   BASE_FREQ: 0.0088,   // smaller = fewer, broader mountains
@@ -55,7 +57,7 @@ const T = {
   WARP:      24,       // domain-warp strength (world units)
   WARP_FREQ: 0.0048,
   GROUND_BASE: 0,   GROUND_AMP: 95,   // floor: peaks rise to ~AMP
-  CEIL_BASE:   205, CEIL_AMP:   95,   // ceiling: flat at BASE, tips hang to BASE-AMP
+  CEIL_BASE:   190, CEIL_AMP:   85,   // ceiling: flat at BASE, tips hang to BASE-AMP
 };
 
 // --- ridged multifractal, range ~0..1 ---
@@ -81,22 +83,138 @@ function warp(x, z) {
   ];
 }
 
-function groundY(x, z) { const [wx, wz] = warp(x, z);               return T.GROUND_BASE + T.GROUND_AMP * ridged(wx, wz, 1.7); }
-function ceilY(x, z)   { const [wx, wz] = warp(x + 4000, z - 4000); return T.CEIL_BASE   - T.CEIL_AMP   * ridged(wx, wz, 5.9); }
+// Base (open-world) heights, before the corridor feature in section 2.
+function groundBase(x, z) { const [wx, wz] = warp(x, z);               return T.GROUND_BASE + T.GROUND_AMP * ridged(wx, wz, 1.7); }
+function ceilBase(x, z)   { const [wx, wz] = warp(x + 4000, z - 4000); return T.CEIL_BASE   - T.CEIL_AMP   * ridged(wx, wz, 5.9); }
 ```
 
-`groundY`/`ceilY` are the only entry points the rest of the system needs.
+`groundY`/`ceilY` (defined in the next section, wrapping these bases) are the only
+entry points the rest of the system needs.
 
 ---
 
-## 2. Building a chunk mesh
+## 2. Course features: pinch corridors, walls, and forks (NEW)
 
-A chunk is a square grid of vertices displaced to the surface height. Use an
-indexed `BufferGeometry` and let the material do flat shading for the low-poly
-look (no need to duplicate vertices).
+Between open stretches, the world periodically **pinches** into a corridor: the
+side mountains grow up and the ceiling tips grow down until they fuse into a wall,
+leaving a clear lane down the middle. The lane **narrows** across each pinch
+(converging), and every few pinches a central ridge **forks** it into two lanes.
+This is what turns the open sandwich into a flyable route toward a landmark.
+
+The corridor runs along the forward travel axis. In Ace Starship the ship spawns
+facing **-Z** and the lane is centered on **x = 0**; use whatever your forward
+axis is in LSS and center the lane on the perpendicular axis.
+
+### How the wall seals (the important trick)
+
+The ground and ceiling use independent noise, so if you just amplified both they'd
+leave random see-through gaps where a ground valley lines up with a ceiling peak.
+Instead the wall seals **by construction**: inside a wall the ground is pushed
+*above* a shared `MEET` altitude and the ceiling *below* it. So at every walled
+column `ground >= MEET >= ceiling` no matter how the two noises fall, which means
+the surfaces always overlap (a solid wall) with no sneak-through. The craggy look
+is preserved because the amplitude (`GAMP_W` / `CAMP_W`) still rides on the noise.
 
 ```js
-// size = world width of the chunk, cells = grid resolution (e.g. 8 => coarse/low-poly)
+const F = {
+  ON: true,
+  FIRST_OPEN: 1500,   // open run right after spawn before the first pinch
+  PERIOD:     3600,   // distance from one pinch's start to the next
+  LEN:        2200,   // how much of each period is walled (rest is open)
+  OPEN_HALF:  300,    // clear-lane half-width where a pinch begins
+  NARROW_HALF:150,    // clear-lane half-width by the pinch's end (converging)
+  WALL_SOFT:  80,     // soft thickness of the wall faces (ramp, not a cliff)
+  FORK_EVERY: 3,      // every Nth pinch grows a central ridge -> a fork
+  FORK_HALF:  55,     // half-width of that central ridge
+  MEET:       100,    // altitude where ground peaks + ceiling tips fuse
+  GAMP_W:     60,     // craggy height of wall ground peaks above MEET
+  CAMP_W:     60,     // craggy depth of wall ceiling tips below MEET
+  CLEAR:      25,     // how much the open lane is pushed clear
+};
+
+function smoothstep(e0, e1, x) {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+}
+
+// Envelope 0..1 along the forward axis only: 0 in open stretches, ramps to 1
+// inside a walled pinch. (Forward = -z here; swap to your axis.)
+function envAtZ(z) {
+  if (!F.ON) return 0;
+  const p = -z;                          // forward progress
+  if (p < F.FIRST_OPEN) return 0;
+  const q = p - F.FIRST_OPEN;
+  const seg = Math.floor(q / F.PERIOD);
+  const frac = q - seg * F.PERIOD;
+  if (frac > F.LEN) return 0;             // open stretch between pinches
+  const t = frac / F.LEN;
+  return smoothstep(0, 0.12, t) * (1 - smoothstep(0.88, 1, t));  // ramp in/out
+}
+
+// Per-column feature: [env, cross]. cross is 0 in the clear lane, 1 out in the
+// wall (sides + optional fork ridge). No noise here, so it's cheap.
+function feature(x, z) {
+  const e = envAtZ(z);
+  if (e <= 0) return [0, 0];
+  const q = (-z) - F.FIRST_OPEN;
+  const seg = Math.floor(q / F.PERIOD);
+  const t = (q - seg * F.PERIOD) / F.LEN;
+  const half = F.OPEN_HALF + (F.NARROW_HALF - F.OPEN_HALF) * t;   // lane converges
+  const d = Math.abs(x);                  // lane centered on x = 0
+  let cross = smoothstep(half, half + F.WALL_SOFT, d);            // 0 lane, 1 wall
+  if (seg % F.FORK_EVERY === 0 && t > 0.45) {                     // fork on some pinches
+    const fenv = smoothstep(0.45, 0.62, t);
+    const ridge = 1 - smoothstep(F.FORK_HALF, F.FORK_HALF + F.WALL_SOFT, d);
+    cross = Math.max(cross, fenv * ridge);
+  }
+  return [e, cross];
+}
+
+// Final heights = base noise, wrapped with the corridor feature.
+function groundY(x, z) {
+  const [wx, wz] = warp(x, z);
+  const r = ridged(wx, wz, 1.7);
+  let g = T.GROUND_BASE + T.GROUND_AMP * r;
+  const [e, cross] = feature(x, z);
+  if (e > 0) {
+    const gw = e * cross;
+    g = g * (1 - gw) + (F.MEET + F.GAMP_W * r) * gw;   // wall: rise above MEET
+    g -= e * (1 - cross) * F.CLEAR;                     // lane: push the floor down
+  }
+  return g;
+}
+function ceilY(x, z) {
+  const [wx, wz] = warp(x + 4000, z - 4000);
+  const r = ridged(wx, wz, 5.9);
+  let c = T.CEIL_BASE - T.CEIL_AMP * r;
+  const [e, cross] = feature(x, z);
+  if (e > 0) {
+    const cw = e * cross;
+    c = c * (1 - cw) + (F.MEET - F.CAMP_W * r) * cw;   // wall: drop below MEET
+    c += e * (1 - cross) * F.CLEAR;                     // lane: raise the ceiling
+  }
+  return c;
+}
+
+// A column is sealed (solid floor-to-ceiling) wherever the floor reaches the
+// ceiling. Use this for collision so the ship can't fly through a wall.
+function solid(x, z) { return ceilY(x, z) <= groundY(x, z); }
+```
+
+Heightfield note: where a column is sealed, the ground surface pokes *above* the
+ceiling surface, so the two meshes simply interpenetrate and read as a solid
+craggy wall, which is what you want. If you render with marching cubes (section 7)
+the density field closes cleanly with no interpenetration.
+
+---
+
+## 3. Building a chunk mesh
+
+A chunk is a square grid of vertices displaced to the surface height. Use an
+indexed `BufferGeometry` and flat shading for the low-poly look.
+
+```js
+// size = world width of the chunk, cells = grid resolution (e.g. 10 => coarse)
 function buildChunkMesh(originX, originZ, size, cells, surfaceFn, material) {
   const verts = [];
   const step = size / cells;
@@ -123,30 +241,29 @@ function buildChunkMesh(originX, originZ, size, cells, surfaceFn, material) {
 }
 ```
 
-Materials (flat-shaded low-poly; swap for your wall/pipe textures or a shader
-later):
-
 ```js
 const groundMat  = new THREE.MeshStandardMaterial({ color: 0x747a86, flatShading: true, roughness: 1 });
 const ceilingMat = new THREE.MeshStandardMaterial({ color: 0x484c5a, flatShading: true, roughness: 1, side: THREE.BackSide });
 ```
 
-For the **ceiling**, either reverse the triangle winding (swap the index order)
-or render with `side: THREE.BackSide` so its faces point down into the gap.
+For the **ceiling**, reverse the triangle winding or render `side: THREE.BackSide`
+so its faces point down into the gap.
 
-`flatShading: true` gives the faceted look from few triangles. Drop it (and call
-`computeVertexNormals`) for smooth shading.
+**Pinch chunks need more vertical detail.** The walls add sharp height changes, so
+a coarse `cells` will stair-step them. Either raise `cells` everywhere, or bump it
+only for chunks whose span crosses a pinch (sample `envAtZ` across the chunk's
+forward range; if any is > 0, use a finer grid). This mirrors how the Roblox build
+makes only pinch chunks taller/denser to keep normal chunks cheap.
 
 ---
 
-## 3. Streaming chunks (endless world)
+## 4. Streaming chunks (endless world)
 
-Keep a window of chunks around the ship; add new ones ahead, drop ones behind.
-Drive it from LSS's existing animate loop using the ship's world position.
+Keep a window of chunks around the ship; add ahead, drop behind.
 
 ```js
 const CHUNK = 800;     // world units per chunk (LSS scale; tune)
-const CELLS = 10;      // triangles per chunk side
+const CELLS = 12;      // triangles per chunk side (raise for crisp walls)
 const VIEW  = 4;       // chunk radius kept loaded
 const terrainGroup = new THREE.Group();
 scene.add(terrainGroup);
@@ -158,7 +275,6 @@ function updateTerrain(shipPos) {
   const scx = Math.floor(shipPos.x / CHUNK);
   const scz = Math.floor(shipPos.z / CHUNK);
 
-  // add chunks in view
   for (let cx = scx - VIEW; cx <= scx + VIEW; cx++) {
     for (let cz = scz - VIEW; cz <= scz + VIEW; cz++) {
       const k = keyOf(cx, cz);
@@ -170,7 +286,6 @@ function updateTerrain(shipPos) {
       chunks.set(k, { ground, ceiling });
     }
   }
-  // drop chunks out of view
   for (const [k, c] of chunks) {
     const [cx, cz] = k.split(',').map(Number);
     if (Math.abs(cx - scx) > VIEW + 1 || Math.abs(cz - scz) > VIEW + 1) {
@@ -183,82 +298,84 @@ function updateTerrain(shipPos) {
 }
 ```
 
-Call `updateTerrain(ship.position)` once per frame in LSS's render loop. To avoid
-hitches, build at most one or two chunks per frame (queue the rest), exactly like
-the Roblox version.
+Call `updateTerrain(ship.position)` once per frame. Build at most one or two
+chunks per frame (queue the rest) to avoid hitches.
 
 ---
 
-## 4. Fade-in (hide the pop)
+## 5. Fade-in (hide the pop)
 
-Build a bit farther than you can clearly see, and fog the far edge so new chunks
-emerge from haze instead of snapping in. LSS already sets `scene.fog`. For a hard
-build-radius fade, linear fog is easiest to tune to the streaming distance:
+Build farther than you can clearly see and fog the far edge so chunks emerge from
+haze instead of snapping in.
 
 ```js
-// fade matched to VIEW * CHUNK so chunks appear inside the haze
 scene.fog = new THREE.Fog(0x9ab4d2, CHUNK * (VIEW - 1.5), CHUNK * (VIEW + 0.5));
-renderer.setClearColor(0x9ab4d2); // match the horizon so terrain dissolves into sky
+renderer.setClearColor(0x9ab4d2); // match the horizon
 ```
 
-Keep your existing `FogExp2` instead if you prefer the look; just lower the
-density so distant peaks are visible, and make sure `VIEW * CHUNK` extends past
-where the fog goes fully opaque.
+Keep `FogExp2` if you prefer; just make sure `VIEW * CHUNK` extends past where the
+fog goes fully opaque. In open (non-pinch) stretches you can push the fog much
+farther so the player sees the next pinch / landmark coming.
 
 ---
 
-## 5. Tuning for LSS's scale
+## 6. Tuning
 
-The constants above are at Ace Starship scale (small). LSS uses a much larger
-world (camera far plane 25000), so scale the noise to taste. The trick that keeps
-the *shape* identical while resizing is: divide `BASE_FREQ`/`WARP_FREQ` and
-multiply `*_AMP`/`*_BASE`/`WARP`/`CHUNK` by the same factor.
+The constants are at Ace Starship scale (small). LSS uses a much larger world
+(camera far plane 25000), so scale to taste: divide `BASE_FREQ`/`WARP_FREQ` and
+multiply `*_AMP`/`*_BASE`/`WARP`/`CHUNK`/the `F.*` distances by the same factor to
+keep the *shape* identical while resizing.
 
 | Knob | Effect |
 | --- | --- |
-| `GROUND_AMP` / `CEIL_AMP` | peak height |
+| `GROUND_AMP` / `CEIL_AMP` | open-mountain peak height |
 | `CEIL_BASE` | how low the ceiling hangs (smaller = tighter gap) |
 | `BASE_FREQ` | peak spacing (smaller = fewer, broader mountains) |
-| `EXPONENT` | peak sharpness (higher = spikier, flatter valleys) |
+| `EXPONENT` | peak sharpness |
 | `WARP` | how much ridges meander |
-| `CELLS` | triangles per chunk (face count vs detail) |
-| `CHUNK` / `VIEW` | chunk size and how far it draws |
+| `F.PERIOD` / `F.LEN` | spacing of pinches and how much is walled vs open |
+| `F.OPEN_HALF` / `F.NARROW_HALF` | lane width at a pinch's start / end |
+| `F.MEET` | altitude the walls fuse at (set near flight height) |
+| `F.GAMP_W` / `F.CAMP_W` | how craggy/tall the walls are |
+| `F.FORK_EVERY` / `F.FORK_HALF` | fork frequency and ridge width |
+| `CELLS` / `CHUNK` / `VIEW` | mesh detail, chunk size, draw distance |
 
-Spawn the ship in the gap: roughly `y = (GROUND_AMP + (CEIL_BASE - CEIL_AMP)) / 2`.
+Spawn the ship in the gap, on the lane centerline: roughly
+`y = F.MEET`, on the forward axis with the cross axis at 0, and within `FIRST_OPEN`
+so the first pinch is ahead of you.
 
 ---
 
-## 6. Two ways to render it in LSS
+## 7. Two ways to render it in LSS
 
-**A. Heightfield mesh (above).** Simplest, matches the Roblox build, gives clean
-low-poly mountains. Best starting point. Limitation: a heightfield can't make
-caves or overhangs (one height per x,z).
+**A. Heightfield mesh (above).** Simplest, matches the Roblox build, clean
+low-poly mountains and walls. Limitation: one height per (x,z), so sealed walls
+work by surface interpenetration (fine visually) and you can't carve caves.
 
-**B. Marching cubes (you already have the worker).** LSS builds levels through
-`initializeMarchingCubesWorker()`. You can feed it a sandwich *density field*
-instead of a heightmap to get overhangs, arches, and tunnels through the rock:
+**B. Marching cubes (you already have the worker).** Feed it a sandwich *density
+field* instead of a heightmap for true closed walls, overhangs, and tunnels:
 
 ```
 density(x, y, z) = min( y - groundY(x, z),      // positive above the floor
                         ceilY(x, z) - y )        // positive below the ceiling
-// surface where density == 0; subtract a 3D noise term from it for caves/arches
+// surface where density == 0; subtract a 3D noise term for caves/arches.
+// In a pinch column groundY >= ceilY, so density is negative everywhere there
+// (no surface) -> the column is solid rock, exactly the sealed wall.
 ```
 
-This reuses your existing level pipeline and matches LSS's volumetric look, at
-more CPU cost. Start with A to lock the feel, move to B if you want caves.
+Start with A to lock the feel, move to B if you want caves and crisp wall solids.
 
 ---
 
-## 7. Performance notes
+## 8. Performance notes
 
-- Indexed geometry + `flatShading` keeps triangle counts low; `CELLS = 8-12`
-  per chunk is plenty for a low-poly look.
-- Build chunks incrementally (a queue, 1-2 per frame) so generation never stalls
-  a frame. `valueNoise2` is cheap, but a full chunk is hundreds of samples.
-- `dispose()` geometries when unloading chunks (done above) to avoid GPU leaks.
-- If you need it on a worker, the noise + vertex/index arrays compute fine
-  off-thread; post the typed arrays back and build the `BufferGeometry` on the
-  main thread (same pattern as your marching-cubes worker).
+- Indexed geometry + `flatShading` keeps triangle counts low. Use a finer `CELLS`
+  only for pinch chunks (detect via `envAtZ` over the chunk's forward span).
+- Build chunks incrementally (1-2 per frame). `feature`/`envAtZ` are noise-free
+  and nearly free; the cost is the `ridged` noise per vertex.
+- `dispose()` geometries on unload (done above) to avoid GPU leaks.
+- `groundY`/`ceilY`/`feature`/`solid` are pure functions of (x,z), so they run
+  identically on a worker, the main thread, or server-side for collision/AI.
 
 ---
 
@@ -266,5 +383,7 @@ more CPU cost. Start with A to lock the feel, move to B if you want caves.
 
 - Ridged multifractal + power redistribution + domain warping: Red Blob Games,
   "Making maps with noise functions" (redblobgames.com/maps/terrain-from-noise).
-- This guide mirrors the working Ace Starship implementation
-  (`Ace_Starship/src/client/Controllers/TerrainController.luau`).
+- Mirrors the working Ace Starship implementation:
+  `Ace_Starship/src/shared/WorldHeights.luau` (noise + corridor feature, shared by
+  client visuals and server line-of-sight) and
+  `Ace_Starship/src/client/Controllers/TerrainController.luau` (chunk voxelizer).
