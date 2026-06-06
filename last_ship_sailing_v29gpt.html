@@ -8649,7 +8649,9 @@ function _makeFXMaterial(presetName) {
     console.warn('[LayeredFX] unknown preset:', presetName, '; available:', Object.keys(EFFECT_PRESETS));
     return _makeLayeredFXMaterial(null);
   }
-  return _makeLayeredFXMaterial(preset);
+  const mat = _makeLayeredFXMaterial(preset);
+  if (mat && mat.userData) mat.userData.presetName = presetName;
+  return mat;
 }
 
 // Shared unit-sphere geometries for FX bursts, keyed by segment count.
@@ -13998,6 +14000,10 @@ function sdfSmin(a,b,k) {
 const _SDF_BLEND_REACH = 135;  // sk * 3 with sk=45
 function worldSDF(px,py,pz) {
   if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return -10000;
+  if (game && game.sandwichTerrainActive && typeof _sandwichTerrainSDF === 'function') {
+    const td = _sandwichTerrainSDF(px, py, pz);
+    if (typeof td === 'number') return td;
+  }
   const sk = game.sdfSmoothK || 45;
   const blendReach = sk * 3;  // local in case sdfSmoothK overridden per round
   // 1) Room-only SDF (smooth blend between rooms)
@@ -18548,7 +18554,7 @@ async function _warmupCombatShadersBody() {
         for (const presetName in EFFECT_PRESETS) {
           const preset = EFFECT_PRESETS[presetName];
           if (!preset) continue;
-          const m = _makeLayeredFXMaterial(preset);
+          const m = _makeFXMaterial(presetName);
           const mesh = new THREE.Mesh(_warmGeo, m);
           // Park them WAY off-screen so they render as a single fragment
           // (driver still has to compile + link the program for the first
@@ -18769,9 +18775,19 @@ async function _warmupCombatShadersBody() {
             const _afmIdx = _atomFractalMaterials.indexOf(m.material);
             if (_afmIdx >= 0) _atomFractalMaterials.splice(_afmIdx, 1);
           }
+          // Keep warmed LayeredFX programs resident by returning those
+          // materials to the runtime pool. Disposing them here releases the
+          // compiled WebGL program, which moves the hitch back to the first
+          // real explosion in combat.
+          if (m.material &&
+              m.material.userData &&
+              m.material.userData.isLayeredFX &&
+              typeof _releaseFXBurstMaterial === 'function') {
+            _releaseFXBurstMaterial(m.material);
+          }
           // Skip dispose for persistent protos (e.g. the smoke-cone material)
           // that must stay alive to keep their shader program resident.
-          if (m.material && m.material.dispose && !(m.userData && m.userData._keepMaterial)) m.material.dispose();
+          else if (m.material && m.material.dispose && !(m.userData && m.userData._keepMaterial)) m.material.dispose();
           if (m.userData && m.userData._ownsGeoForCleanup && m.geometry && m.geometry.dispose) {
             m.geometry.dispose();
           }
@@ -19590,7 +19606,7 @@ function spawnExplosion(pos, size) {
   }
   const _flatCombat = (typeof _isFlatCombatActive === 'function') ? _isFlatCombatActive() : false;
   const _flatFxLevel = (typeof getFlatCombatFxLevel === 'function') ? getFlatCombatFxLevel() : 0;
-  if (_flatCombat && size <= 10) {
+  if (_flatCombat && size <= 12) {
     const _accent = (typeof _flatCombatFxAccent === 'function')
       ? _flatCombatFxAccent('smallExplosion', 4, 7, 11)
       : false;
@@ -19929,7 +19945,7 @@ function spawnExplosion(pos, size) {
   // gets a few short crackles and a ship-kill explosion gets a real arc cage.
   // The bolts are rendered through spawnLightningBolt which already gets
   // renderOrder=1 so they composite on top of the wall.
-  if (typeof spawnLightningBolt === 'function') {
+  if (typeof spawnLightningBolt === 'function' && size >= 18) {
     const arcCount = Math.max(2, Math.min(7, Math.ceil(size * 0.18)));
     for (let i = 0; i < arcCount; i++) {
       const dir = new THREE.Vector3(
@@ -44985,15 +45001,596 @@ function _cleanupOrphanWallMeshes(keepList) {
   for (const m of toRemove) {
     try { if (m.parent) scene.remove(m); } catch (_) {}
     try { if (m.geometry) m.geometry.dispose(); } catch (_) {}
+    _disposeSandwichShellMaterial(m);
     // material is shared with potentially-still-live game.levelMaterial,
     // don't dispose it here.
   }
   return toRemove.length;
 }
 
+function _disposeSandwichShellMaterial(mesh) {
+  try {
+    const mat = mesh && mesh.material;
+    if (mat && mat.userData && mat.userData.isSandwichCollisionShellMat && typeof mat.dispose === 'function') {
+      mat.dispose();
+    }
+  } catch (_) {}
+}
+
+const SANDWICH_TERRAIN_CFG = {
+  enabled: true,
+  pad: 900,
+  minSpan: 3600,
+  chunkSize: 960,
+  chunkCells: 18,
+  chunkView: 3,
+  chunkUnloadSlack: 1,
+  chunkBuildBudget: 2,
+  initialBuildBudget: 80,
+  anchorView: 1,
+  skipWallMesh: true,
+  targetStep: 82,
+  maxCells: 104,
+  carveSoft: 155,
+  gapHalf: 280,
+  clearPush: 70,
+  laneRipple: 58,
+  wallLift: 115,
+  wallDrop: 115,
+  wallAmp: 720,
+  ceilAmp: 680,
+  wallCragFloor: 0.18,
+  laneCragFloor: 0.08,
+  baseFreq: 0.00385,
+  warpFreq: 0.00165,
+  warp: 260,
+  octaves: 6,
+  lacunarity: 2.0,
+  gain: 0.5,
+  exponent: 2.18
+};
+
+const SANDWICH_TERRAIN_THEMES = [
+  {
+    key: 'rocky',
+    match: /nexus|octahedron/i,
+    groundLow: 0x25231f,
+    groundMid: 0x646660,
+    groundHigh: 0xd8dee6,
+    lane: 0x343844,
+    ceilLow: 0x151b25,
+    ceilHigh: 0x536070
+  },
+  {
+    key: 'alien',
+    match: /infinity|gyre/i,
+    groundLow: 0x18251f,
+    groundMid: 0x3f7658,
+    groundHigh: 0xb7e7cb,
+    lane: 0x243442,
+    ceilLow: 0x161d2d,
+    ceilHigh: 0x4b6a78
+  },
+  {
+    key: 'frozen',
+    match: /tower|frozen/i,
+    groundLow: 0x1d3140,
+    groundMid: 0x4f8aa0,
+    groundHigh: 0xe4f4ff,
+    lane: 0x25394a,
+    ceilLow: 0x102030,
+    ceilHigh: 0x9fd8ef
+  },
+  {
+    key: 'volcanic',
+    match: /spine|cross/i,
+    groundLow: 0x251613,
+    groundMid: 0x6b3823,
+    groundHigh: 0xff9a44,
+    lane: 0x321e1d,
+    ceilLow: 0x170f12,
+    ceilHigh: 0x6d3a32
+  },
+  {
+    key: 'sunset',
+    match: /arc|pentagon/i,
+    groundLow: 0x2d231a,
+    groundMid: 0x8a6540,
+    groundHigh: 0xffd48a,
+    lane: 0x3a3142,
+    ceilLow: 0x191827,
+    ceilHigh: 0x6c5575
+  }
+];
+
+function _sandwichClamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function _sandwichHexToRgb(hex) {
+  hex = (hex == null ? 0xffffff : hex) >>> 0;
+  return {
+    r: ((hex >> 16) & 255) / 255,
+    g: ((hex >> 8) & 255) / 255,
+    b: (hex & 255) / 255
+  };
+}
+
+function _sandwichLerpRgb(a, b, t) {
+  t = _sandwichClamp01(t);
+  return {
+    r: a.r + (b.r - a.r) * t,
+    g: a.g + (b.g - a.g) * t,
+    b: a.b + (b.b - a.b) * t
+  };
+}
+
+function _sandwichScaleRgb(c, s) {
+  return {
+    r: Math.max(0, Math.min(1, c.r * s)),
+    g: Math.max(0, Math.min(1, c.g * s)),
+    b: Math.max(0, Math.min(1, c.b * s))
+  };
+}
+
+function _sandwichTerrainTheme(level, seed) {
+  const label = String((level && (level.defaultTheme || level.name)) || '');
+  for (let i = 0; i < SANDWICH_TERRAIN_THEMES.length; i++) {
+    const theme = SANDWICH_TERRAIN_THEMES[i];
+    if (theme.match && theme.match.test(label)) return theme;
+  }
+  return SANDWICH_TERRAIN_THEMES[(seed >>> 0) % SANDWICH_TERRAIN_THEMES.length];
+}
+
+function _sandwichPaintTerrainVertex(isCeiling, h, sample, theme) {
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const carve = sample && typeof sample.carve === 'number' ? sample.carve : 0;
+  const wall = 1 - carve;
+  const centerY = sample && typeof sample.centerY === 'number' ? sample.centerY : 0;
+  const ridge = isCeiling ? (sample.ceilR || 0) : (sample.groundR || 0);
+  let col;
+  if (isCeiling) {
+    const deep = _sandwichHexToRgb(theme.ceilLow);
+    const tip = _sandwichHexToRgb(theme.ceilHigh);
+    const lane = _sandwichHexToRgb(theme.lane);
+    const icy = _sandwichLerpRgb(deep, tip, _sandwichSmoothstep(0.10, 0.92, ridge));
+    col = _sandwichLerpRgb(lane, icy, 0.35 + wall * 0.65);
+    col = _sandwichScaleRgb(col, 0.70 + ridge * 0.35);
+  } else {
+    const low = _sandwichHexToRgb(theme.groundLow);
+    const mid = _sandwichHexToRgb(theme.groundMid);
+    const high = _sandwichHexToRgb(theme.groundHigh);
+    const lane = _sandwichHexToRgb(theme.lane);
+    const alt = _sandwichClamp01((h - (centerY - cfg.gapHalf - cfg.clearPush)) / Math.max(1, cfg.wallAmp + cfg.gapHalf));
+    const base = alt < 0.42
+      ? _sandwichLerpRgb(low, mid, alt / 0.42)
+      : _sandwichLerpRgb(mid, high, _sandwichSmoothstep(0.42, 1.0, alt));
+    col = _sandwichLerpRgb(lane, base, 0.28 + wall * 0.72);
+    col = _sandwichScaleRgb(col, 0.76 + ridge * 0.32);
+  }
+  return col;
+}
+
+function _sandwichSmoothstep(e0, e1, x) {
+  if (Math.abs(e1 - e0) < 1e-6) return x >= e1 ? 1 : 0;
+  const t = _sandwichClamp01((x - e0) / (e1 - e0));
+  return t * t * (3 - 2 * t);
+}
+
+function _sandwichMixSeed(seed, salt) {
+  let h = ((seed >>> 0) ^ (salt >>> 0) ^ 0x9e3779b9) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function _sandwichHashString(str) {
+  let h = 0x811c9dc5;
+  str = String(str || '');
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function _sandwichQuant(v) {
+  if (!isFinite(v)) return 0;
+  return Math.round(v * 100) | 0;
+}
+
+function _sandwichTerrainSeedFor(level, rooms, cylSegs) {
+  const key = (typeof game !== 'undefined' && game && game.selectedMap)
+    || (typeof net !== 'undefined' && net && net.worldMap)
+    || (level && (level.key || level.name))
+    || 'map';
+  let seed = _sandwichHashString(key + '|' + ((level && level.name) || ''));
+  if (typeof net !== 'undefined' && net && net.active && net.worldSeed != null) {
+    seed = _sandwichMixSeed(seed, net.worldSeed >>> 0);
+  }
+  const roomList = Array.isArray(rooms) ? rooms : [];
+  const segList = Array.isArray(cylSegs) ? cylSegs : [];
+  seed = _sandwichMixSeed(seed, roomList.length);
+  for (let i = 0; i < roomList.length; i++) {
+    const r = roomList[i];
+    seed = _sandwichMixSeed(seed, _sandwichQuant(r.x) ^ _sandwichMixSeed(_sandwichQuant(r.y), _sandwichQuant(r.z)));
+    seed = _sandwichMixSeed(seed, _sandwichQuant(r.r) ^ i);
+  }
+  seed = _sandwichMixSeed(seed, segList.length ^ 0xa53a9d2b);
+  for (let i = 0; i < segList.length; i++) {
+    const s = segList[i];
+    seed = _sandwichMixSeed(seed, _sandwichQuant(s.a.x) ^ _sandwichMixSeed(_sandwichQuant(s.a.y), _sandwichQuant(s.a.z)));
+    seed = _sandwichMixSeed(seed, _sandwichQuant(s.b.x) ^ _sandwichMixSeed(_sandwichQuant(s.b.y), _sandwichQuant(s.b.z)));
+    seed = _sandwichMixSeed(seed, _sandwichQuant(s.r || 0) ^ i);
+  }
+  return seed >>> 0;
+}
+
+function _sandwichHash2(x, z, seed) {
+  let h = _sandwichMixSeed(seed, x | 0);
+  h = _sandwichMixSeed(h, z | 0);
+  return h / 4294967295;
+}
+
+function _sandwichValueNoise2(x, z, seed) {
+  const xi = Math.floor(x), zi = Math.floor(z);
+  const xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = zf * zf * (3 - 2 * zf);
+  const a = _sandwichHash2(xi, zi, seed);
+  const b = _sandwichHash2(xi + 1, zi, seed);
+  const c = _sandwichHash2(xi, zi + 1, seed);
+  const d = _sandwichHash2(xi + 1, zi + 1, seed);
+  const ab = a + (b - a) * u;
+  const cd = c + (d - c) * u;
+  return (ab + (cd - ab) * v) * 2 - 1;
+}
+
+function _sandwichWarp(x, z, seed) {
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const sx = _sandwichMixSeed(seed, 0x9e3779b9);
+  const sz = _sandwichMixSeed(seed, 0x7f4a7c15);
+  const ox = (sx & 4095) * 0.03125;
+  const oz = ((sx >>> 12) & 4095) * 0.03125;
+  const px = (sz & 4095) * 0.03125;
+  const pz = ((sz >>> 12) & 4095) * 0.03125;
+  return {
+    x: x + cfg.warp * _sandwichValueNoise2(x * cfg.warpFreq + ox, z * cfg.warpFreq + oz, sx),
+    z: z + cfg.warp * _sandwichValueNoise2(x * cfg.warpFreq + px, z * cfg.warpFreq + pz, sz)
+  };
+}
+
+function _sandwichRidged(x, z, seed) {
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const w = _sandwichWarp(x, z, seed);
+  let sum = 0, amp = 1, freq = cfg.baseFreq, prev = 1, norm = 0;
+  for (let o = 0; o < cfg.octaves; o++) {
+    const os = _sandwichMixSeed(seed, o + 1);
+    const ox = (os & 2047) * 0.015625;
+    const oz = ((os >>> 11) & 2047) * 0.015625;
+    const n = _sandwichValueNoise2(w.x * freq + ox, w.z * freq + oz, os);
+    let r = 1 - Math.abs(n);
+    r *= r;
+    sum += r * amp * prev;
+    prev = r;
+    norm += amp;
+    freq *= cfg.lacunarity;
+    amp *= cfg.gain;
+  }
+  return Math.pow(sum / Math.max(0.0001, norm), cfg.exponent);
+}
+
+function _sandwichPathSample(x, z, rooms, cylSegs) {
+  const cfg = SANDWICH_TERRAIN_CFG;
+  let carve = 0;
+  let ySum = 0;
+  let wSum = 0;
+  for (let i = 0; i < rooms.length; i++) {
+    const rm = rooms[i];
+    const dx = x - rm.x, dz = z - rm.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    const inner = rm.r * 0.98;
+    const outer = rm.r + cfg.carveSoft;
+    const w = 1 - _sandwichSmoothstep(inner, outer, d);
+    if (w > 0) {
+      carve = Math.max(carve, w);
+      const ww = w * w;
+      ySum += rm.y * ww;
+      wSum += ww;
+    }
+  }
+  for (let i = 0; i < cylSegs.length; i++) {
+    const seg = cylSegs[i];
+    const ax = seg.a.x, az = seg.a.z;
+    const bx = seg.b.x, bz = seg.b.z;
+    const sx = bx - ax, sz = bz - az;
+    const sl2 = sx * sx + sz * sz;
+    let t = 0;
+    if (sl2 > 0.001) t = Math.max(0, Math.min(1, ((x - ax) * sx + (z - az) * sz) / sl2));
+    const px = ax + sx * t, pz = az + sz * t;
+    const dx = x - px, dz = z - pz;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    const baseR = Math.max(120, seg.r || SU * 1.2);
+    const inner = baseR * 1.03;
+    const outer = baseR + cfg.carveSoft;
+    const w = 1 - _sandwichSmoothstep(inner, outer, d);
+    if (w > 0) {
+      carve = Math.max(carve, w);
+      const y = seg.a.y + (seg.b.y - seg.a.y) * t;
+      const ww = w * w;
+      ySum += y * ww;
+      wSum += ww;
+    }
+  }
+  return { carve: _sandwichClamp01(carve), y: wSum > 0 ? ySum / wSum : 0 };
+}
+
+function _sandwichHeights(x, z, rooms, cylSegs, seed) {
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const path = _sandwichPathSample(x, z, rooms, cylSegs);
+  const carve = path.carve;
+  const centerY = path.y;
+  const groundR = _sandwichRidged(x, z, _sandwichMixSeed(seed, 0x139bf31d));
+  const ceilR = _sandwichRidged(x + 4000, z - 4000, _sandwichMixSeed(seed, 0x6d2b79f5));
+  const groundCrag = cfg.wallCragFloor + (1 - cfg.wallCragFloor) * groundR;
+  const ceilCrag = cfg.wallCragFloor + (1 - cfg.wallCragFloor) * ceilR;
+  const laneGroundCrag = cfg.laneCragFloor + (1 - cfg.laneCragFloor) * groundR;
+  const laneCeilCrag = cfg.laneCragFloor + (1 - cfg.laneCragFloor) * ceilR;
+  const wallGround = centerY + cfg.wallLift + cfg.wallAmp * groundCrag;
+  const wallCeil = centerY - cfg.wallDrop - cfg.ceilAmp * ceilCrag;
+  const laneGround = centerY - cfg.gapHalf - cfg.clearPush - cfg.laneRipple * laneGroundCrag;
+  const laneCeil = centerY + cfg.gapHalf + cfg.clearPush + cfg.laneRipple * laneCeilCrag;
+  return {
+    ground: wallGround + (laneGround - wallGround) * carve,
+    ceil: wallCeil + (laneCeil - wallCeil) * carve,
+    carve,
+    centerY,
+    groundR,
+    ceilR
+  };
+}
+
+function _sandwichTerrainSDF(px, py, pz) {
+  const st = game && game.sandwichTerrain;
+  if (!st || !st.rooms || !st.cylSegs || st.seed == null) return null;
+  const h = _sandwichHeights(px, pz, st.rooms, st.cylSegs, st.seed);
+  if (h.ceil <= h.ground) {
+    return Math.min(Math.abs(py - h.ground), Math.abs(py - h.ceil)) + 8;
+  }
+  return Math.max(h.ground - py, py - h.ceil);
+}
+
+function _sandwichDisposeTerrainMesh(mesh) {
+  try { if (mesh && mesh.parent) mesh.parent.remove(mesh); } catch (_) {}
+  try { if (mesh && mesh.geometry) mesh.geometry.dispose(); } catch (_) {}
+}
+
+function _sandwichRemoveFromMapMeshes(mesh) {
+  try {
+    if (!mesh || !Array.isArray(game.mapMeshes)) return;
+    const idx = game.mapMeshes.indexOf(mesh);
+    if (idx >= 0) game.mapMeshes.splice(idx, 1);
+  } catch (_) {}
+}
+
+function _sandwichRemoveTerrainChunk(st, key) {
+  if (!st || !st.chunks) return;
+  const chunk = st.chunks.get(key);
+  if (!chunk) return;
+  for (const mesh of chunk.meshes || []) {
+    _sandwichRemoveFromMapMeshes(mesh);
+    if (Array.isArray(st.meshes)) {
+      const mi = st.meshes.indexOf(mesh);
+      if (mi >= 0) st.meshes.splice(mi, 1);
+    }
+    _sandwichDisposeTerrainMesh(mesh);
+  }
+  st.chunks.delete(key);
+}
+
+function _sandwichBuildTerrainSurface(st, cx, cz, isCeiling) {
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const cells = st.chunkCells || cfg.chunkCells;
+  const size = st.chunkSize || cfg.chunkSize;
+  const x0 = cx * size;
+  const z0 = cz * size;
+  const step = size / cells;
+  const verts = new Float32Array((cells + 1) * (cells + 1) * 3);
+  const colors = new Float32Array((cells + 1) * (cells + 1) * 3);
+  let vi = 0;
+  let ci = 0;
+  for (let j = 0; j <= cells; j++) {
+    const z = z0 + j * step;
+    for (let i = 0; i <= cells; i++) {
+      const x = x0 + i * step;
+      const h = _sandwichHeights(x, z, st.rooms, st.cylSegs, st.seed);
+      const y = isCeiling ? h.ceil : h.ground;
+      const col = _sandwichPaintTerrainVertex(isCeiling, y, h, st.theme);
+      verts[vi++] = x;
+      verts[vi++] = y;
+      verts[vi++] = z;
+      colors[ci++] = col.r;
+      colors[ci++] = col.g;
+      colors[ci++] = col.b;
+    }
+  }
+  const idx = [];
+  const row = cells + 1;
+  for (let j = 0; j < cells; j++) {
+    for (let i = 0; i < cells; i++) {
+      const a = j * row + i, b = a + 1, c = a + row, d = c + 1;
+      if (isCeiling) idx.push(a, b, c, b, d, c);
+      else idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function _sandwichBuildTerrainChunk(st, cx, cz) {
+  const key = cx + ',' + cz;
+  if (!st || !st.chunks || st.chunks.has(key)) return;
+  const ground = new THREE.Mesh(_sandwichBuildTerrainSurface(st, cx, cz, false), st.groundMat);
+  const ceiling = new THREE.Mesh(_sandwichBuildTerrainSurface(st, cx, cz, true), st.ceilMat);
+  ground.userData = { isSandwichTerrain: true, surface: 'ground', chunk: key, theme: st.theme.key };
+  ceiling.userData = { isSandwichTerrain: true, surface: 'ceiling', chunk: key, theme: st.theme.key };
+  ground.receiveShadow = true;
+  ceiling.receiveShadow = true;
+  st.group.add(ground, ceiling);
+  st.chunks.set(key, { cx, cz, meshes: [ground, ceiling] });
+  st.meshes.push(ground, ceiling);
+  if (Array.isArray(game.mapMeshes)) game.mapMeshes.push(ground, ceiling);
+}
+
+function _sandwichQueueChunk(st, cx, cz, dist2) {
+  if (!st || !st.chunks) return;
+  const key = cx + ',' + cz;
+  if (st.chunks.has(key) || st.queued.has(key)) return;
+  st.queued.add(key);
+  st.queue.push({ cx, cz, key, dist2: dist2 || 0 });
+}
+
+function _sandwichQueueChunksAround(st, x, z, view) {
+  const size = st.chunkSize;
+  const ccx = Math.floor(x / size);
+  const ccz = Math.floor(z / size);
+  for (let dz = -view; dz <= view; dz++) {
+    for (let dx = -view; dx <= view; dx++) {
+      const dist2 = dx * dx + dz * dz;
+      _sandwichQueueChunk(st, ccx + dx, ccz + dz, dist2);
+    }
+  }
+}
+
+function _sandwichTerrainFocus(st) {
+  if (typeof player !== 'undefined' && player && player.position) {
+    return { x: player.position.x, z: player.position.z };
+  }
+  if (typeof camera !== 'undefined' && camera && camera.position) {
+    return { x: camera.position.x, z: camera.position.z };
+  }
+  if (st && st.bounds) {
+    return { x: (st.bounds.minX + st.bounds.maxX) * 0.5, z: (st.bounds.minZ + st.bounds.maxZ) * 0.5 };
+  }
+  return { x: 0, z: 0 };
+}
+
+function _updateSandwichTerrainChunks(force) {
+  const st = game && game.sandwichTerrain;
+  if (!st || !st.chunks || !SANDWICH_TERRAIN_CFG.enabled) return;
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const focus = _sandwichTerrainFocus(st);
+  const size = st.chunkSize;
+  const ccx = Math.floor(focus.x / size);
+  const ccz = Math.floor(focus.z / size);
+  if (force || st.lastCx !== ccx || st.lastCz !== ccz) {
+    st.lastCx = ccx;
+    st.lastCz = ccz;
+    _sandwichQueueChunksAround(st, focus.x, focus.z, cfg.chunkView);
+    const keep = cfg.chunkView + cfg.chunkUnloadSlack;
+    const keys = Array.from(st.chunks.keys());
+    for (const key of keys) {
+      const chunk = st.chunks.get(key);
+      if (!chunk) continue;
+      if (Math.abs(chunk.cx - ccx) > keep || Math.abs(chunk.cz - ccz) > keep) {
+        _sandwichRemoveTerrainChunk(st, key);
+      }
+    }
+  }
+  if (st.queue.length > 1) st.queue.sort((a, b) => a.dist2 - b.dist2);
+  let budget = force ? cfg.initialBuildBudget : cfg.chunkBuildBudget;
+  while (budget-- > 0 && st.queue.length > 0) {
+    const item = st.queue.shift();
+    st.queued.delete(item.key);
+    if (!force && (Math.abs(item.cx - st.lastCx) > cfg.chunkView || Math.abs(item.cz - st.lastCz) > cfg.chunkView)) {
+      continue;
+    }
+    _sandwichBuildTerrainChunk(st, item.cx, item.cz);
+  }
+}
+
+function _clearSandwichTerrain() {
+  const st = game && game.sandwichTerrain;
+  if (!st) return;
+  try { if (st.group && st.group.parent) scene.remove(st.group); } catch (_) {}
+  if (st.chunks) {
+    for (const key of Array.from(st.chunks.keys())) _sandwichRemoveTerrainChunk(st, key);
+  } else if (st.meshes) {
+    for (const m of st.meshes) {
+      _sandwichRemoveFromMapMeshes(m);
+      _sandwichDisposeTerrainMesh(m);
+    }
+  }
+  try { if (st.groundMat) st.groundMat.dispose(); } catch (_) {}
+  try { if (st.ceilMat) st.ceilMat.dispose(); } catch (_) {}
+  game.sandwichTerrain = null;
+}
+
+function _buildSandwichTerrainForLevel(level, bounds, rooms, cylSegs) {
+  if (!SANDWICH_TERRAIN_CFG.enabled || !scene || typeof THREE === 'undefined' || !level || level.type === 'gmaps') return null;
+  _clearSandwichTerrain();
+  const cfg = SANDWICH_TERRAIN_CFG;
+  const minX = bounds.minX - cfg.pad, maxX = bounds.maxX + cfg.pad;
+  const minZ = bounds.minZ - cfg.pad, maxZ = bounds.maxZ + cfg.pad;
+  const terrainSeed = _sandwichTerrainSeedFor(level, rooms, cylSegs);
+  const terrainTheme = _sandwichTerrainTheme(level, terrainSeed);
+  const groundMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    vertexColors: true,
+    flatShading: true,
+    roughness: 0.92,
+    metalness: 0.0,
+    side: THREE.DoubleSide
+  });
+  const ceilMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    vertexColors: true,
+    flatShading: true,
+    roughness: 1.0,
+    metalness: 0.0,
+    side: THREE.DoubleSide
+  });
+  const group = new THREE.Group();
+  group.name = 'sandwich_terrain_' + (level.name || 'map');
+  scene.add(group);
+  game.sandwichTerrain = {
+    group,
+    meshes: [],
+    chunks: new Map(),
+    queue: [],
+    queued: new Set(),
+    rooms,
+    cylSegs,
+    bounds: { minX, maxX, minZ, maxZ },
+    chunkSize: cfg.chunkSize,
+    chunkCells: cfg.chunkCells,
+    seed: terrainSeed,
+    theme: terrainTheme,
+    groundMat,
+    ceilMat
+  };
+  game.sandwichTerrainSeed = terrainSeed;
+  const st = game.sandwichTerrain;
+  const focus = _sandwichTerrainFocus(st);
+  _sandwichQueueChunksAround(st, focus.x, focus.z, cfg.chunkView);
+  for (const rm of rooms || []) {
+    if (rm && (rm.team || rm.champion)) {
+      _sandwichQueueChunksAround(st, rm.x, rm.z, cfg.anchorView);
+    }
+  }
+  _updateSandwichTerrainChunks(true);
+  return game.sandwichTerrain;
+}
+
 function buildRoomGraphLevel(level) {
   try {
     _cleanupOrphanWallMeshes([]);
+    if (typeof _clearSandwichTerrain === 'function') _clearSandwichTerrain();
+    game.sandwichTerrainActive = false;
     if (Array.isArray(game.mapMeshes)) game.mapMeshes.length = 0;
     else game.mapMeshes = [];
   } catch (_) {}
@@ -45128,7 +45725,10 @@ function buildRoomGraphLevel(level) {
     _lssGmaps.cleanup = null; _lssGmaps.active = false;
   }
   // Nuke old geometry
-  for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
+  for (const m of game.mapMeshes) {
+    if (m.parent) scene.remove(m);
+    _disposeSandwichShellMaterial(m);
+  }
   game.mapMeshes = [];
   game.levelBoxes = [];
   game.levelSpheres = [];
@@ -45270,6 +45870,19 @@ function buildRoomGraphLevel(level) {
     bMinZ=Math.min(bMinZ,seg.a.z-sr,seg.b.z-sr);bMaxZ=Math.max(bMaxZ,seg.a.z+sr,seg.b.z+sr);
   }
   const bounds={minX:bMinX,minY:bMinY,minZ:bMinZ,maxX:bMaxX,maxY:bMaxY,maxZ:bMaxZ};
+  try {
+    const terrain = _buildSandwichTerrainForLevel(level, bounds, rooms, cylSegs);
+    game.sandwichTerrainActive = !!terrain;
+  } catch (e) {
+    game.sandwichTerrainActive = false;
+    console.warn('[sandwich-terrain] build failed:', e);
+  }
+  if (game.sandwichTerrainActive && SANDWICH_TERRAIN_CFG.skipWallMesh) {
+    game.levelMaterial = null;
+    const mapGenHudDone = document.getElementById('map-gen-hud');
+    if (mapGenHudDone) mapGenHudDone.style.display = 'none';
+    return;
+  }
 
   // Show loading UI
   const mapGenHud = document.getElementById('map-gen-hud');
@@ -46748,13 +47361,27 @@ function buildRoomGraphLevel(level) {
       } catch (_) {}
     }
 
-    const mesh = new THREE.Mesh(levelGeo, sdfMat);
+    let shellMat = sdfMat;
+    if (game.sandwichTerrainActive) {
+      shellMat = new THREE.MeshBasicMaterial({
+        colorWrite: false,
+        depthWrite: false,
+        side: THREE.BackSide
+      });
+      shellMat.userData = { isSandwichCollisionShellMat: true };
+    }
+
+    const mesh = new THREE.Mesh(levelGeo, shellMat);
     // Tag every wall mesh so scene-walk cleanup can identify it
     // even when game.mapMeshes loses track during the gmaps-overlay
     // snapshot/restore dance. _cleanupOrphanWallMeshes() uses this tag
     // to remove abandoned wall meshes from the scene.
     mesh.userData = mesh.userData || {};
     mesh.userData.isWallMesh = true;
+    if (game.sandwichTerrainActive) {
+      mesh.renderOrder = -2;
+      mesh.userData.isSandwichCollisionShell = true;
+    }
     scene.add(mesh);
     game.mapMeshes.push(mesh);
 
@@ -46770,6 +47397,9 @@ function buildRoomGraphLevel(level) {
     occluderMesh.renderOrder = -1;
     occluderMesh.userData = { isWallMesh: true, isWallOccluder: true };
     occluderMesh.raycast = function () {};
+    if (game.sandwichTerrainActive) {
+      occluderMesh.visible = false;
+    }
     scene.add(occluderMesh);
     game.mapMeshes.push(occluderMesh);
     return mesh;
@@ -46798,6 +47428,7 @@ function buildRoomGraphLevel(level) {
         while (game.mapMeshes.length > 0) {
           const oldMesh = game.mapMeshes.shift();
           if (oldMesh && oldMesh.parent) scene.remove(oldMesh);
+          _disposeSandwichShellMaterial(oldMesh);
         }
         createMeshFromPositions(positions, finalGridRes);
         // Hide loading UI
@@ -48280,6 +48911,7 @@ function gameLoop(timestamp) {
   // position; calling update() each frame keeps the LOD pyramid current.
   // No-op when not in a gmaps level.
   if (typeof _lssGmapsTick === 'function') _lssGmapsTick(game.deltaTime);
+  if (typeof _updateSandwichTerrainChunks === 'function') _updateSandwichTerrainChunks(false);
 
   // Update level shader time for vein animations
   // Skip this whole block when game.levelMaterial is a plain
@@ -49019,27 +49651,39 @@ const _envProbeDirs = [
 const _envProbeRay = new THREE.Raycaster();
 _envProbeRay.far = 2000;
 let _envProbeCounter = 0;
+let _envProbeDirCursor = 0;
+let _envProbeAccumDist = 0;
+let _envProbeAccumHits = 0;
+let _envProbeLastOpenness = 0.7;
+const _envProbeHitsScratch = [];
 function probeEnvironmentOpenness() {
   if (!camera || !game || !game.mapMeshes || !game.mapMeshes.length) return 0.7;
   const camPos = camera.getWorldPosition(_envProbeCamPos);
-  let sum = 0;
-  let hits = 0;
-  for (const d of _envProbeDirs) {
+  const dirsPerCall = (typeof getVRThrottleTier === 'function' && getVRThrottleTier() > 0) ? 1 : 2;
+  for (let pi = 0; pi < dirsPerCall; pi++) {
+    const d = _envProbeDirs[_envProbeDirCursor];
     _envProbeRay.set(camPos, d);
     _envProbeRay.near = 0;
     _envProbeRay.far = 2000;
-    const hit = _envProbeRay.intersectObjects(game.mapMeshes, false);
+    _envProbeHitsScratch.length = 0;
+    const hit = _envProbeRay.intersectObjects(game.mapMeshes, false, _envProbeHitsScratch);
     if (hit && hit.length) {
-      sum += hit[0].distance;
-      hits++;
+      _envProbeAccumDist += hit[0].distance;
+      _envProbeAccumHits++;
     } else {
-      sum += 2000;
-      hits++;
+      _envProbeAccumDist += 2000;
+      _envProbeAccumHits++;
+    }
+    _envProbeDirCursor = (_envProbeDirCursor + 1) % _envProbeDirs.length;
+    if (_envProbeDirCursor === 0 && _envProbeAccumHits > 0) {
+      const avg = _envProbeAccumDist / _envProbeAccumHits;
+      // 200 u = very tight tunnel, 1200+ u = open room
+      _envProbeLastOpenness = Math.max(0, Math.min(1, (avg - 200) / 1000));
+      _envProbeAccumDist = 0;
+      _envProbeAccumHits = 0;
     }
   }
-  const avg = hits ? sum / hits : 2000;
-  // 200 u = very tight tunnel, 1200+ u = open room
-  return Math.max(0, Math.min(1, (avg - 200) / 1000));
+  return _envProbeLastOpenness;
 }
 
 function updateAmbientBed() {
@@ -57332,7 +57976,10 @@ async function _lssGmapsLoadModule() {
 async function _lssGmapsBuildLevel(level) {
   // Clear previous map state. Ships / projectiles persist (they'll respawn
   // on the new round per existing match flow).
-  for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
+  for (const m of game.mapMeshes) {
+    if (m.parent) scene.remove(m);
+    _disposeSandwichShellMaterial(m);
+  }
   game.mapMeshes = [];
   game.levelBoxes = [];
   game.levelSpheres = [];
