@@ -16456,6 +16456,9 @@ class Bot {
     // Bots are locked in place during pre-round warmup.
     if (game.state === 'warmup') {
       if (this.velocity) this.velocity.set(0, 0, 0);
+      // Keep the mesh parked on the (correct) spawn even while frozen, so
+      // enemies never show at a stale spot during the pre-round countdown.
+      if (this.mesh && this.position) this.mesh.position.copy(this.position);
       return;
     }
 
@@ -28228,6 +28231,12 @@ function spawnBots() {
     applyPrev(bot);
     game.entities.push(bot);
   }
+  // Snap each bot's MESH onto its assigned spawn right now. The Bot constructor
+  // seeds a random position and adds the mesh to the scene immediately; during
+  // warmup Bot.update() early-returns before its per-frame mesh sync, so without
+  // this the enemy ships would be visible at stale random spots through the
+  // whole 3-2-1 countdown and only snap to spawn at GO.
+  for (const b of game.entities) { if (b.mesh && b.position) b.mesh.position.copy(b.position); }
 }
 
 function playerTakeDamage(amount, attacker, projectile) {
@@ -28470,6 +28479,29 @@ function playerDie(attacker) {
   if (window.Overlays) {
     const killerName = (attacker && attacker.loadout) ? attacker.loadout.name : '';
     Overlays.respawn(killerName);
+  }
+  // Tear down any core visuals that were live at the moment of death. While the
+  // death-cam runs, the main loop skips updateAbilities() ; that's where the
+  // laser-core beam gets hidden and where world effects (Flame Chain fire
+  // trails) tick and expire. Without this they freeze on screen until the round
+  // ends. Clear them here so death wipes them cleanly (single-player and MP).
+  player.coreActive = false;
+  player.coreTimer = 0;
+  player._laserCoreArcTimer = 0;
+  if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
+  for (let we = game.worldEffects.length - 1; we >= 0; we--) {
+    const eff = game.worldEffects[we];
+    if (!eff || eff.type !== 'firewall') continue;
+    // Mine = damaging firewalls I own, or my visual-only Flame Chain trails
+    // (dmgPerSec 0). Leave other players'/bots' effects alone.
+    const mine = (eff.owner === 'player') || (eff.dmgPerSec === 0) ||
+                 (net.active && eff.ownerPeerId === net.myPeerId);
+    if (!mine) continue;
+    try {
+      if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+      if (eff.meshes) for (const m of eff.meshes) { if (m && m.parent) scene.remove(m); }
+    } catch (_) {}
+    game.worldEffects.splice(we, 1);
   }
   // Last Ship Sailing: one life per round. No mid-round respawn. The round-end
   // state transition at the top of updateRoundSystem() calls respawnPlayer()
@@ -28946,6 +28978,7 @@ function _lssStartSpectatorCinematic() {
 
   function _pushShip(rec, slotX, slotY, slotZ, quat) {
     const _shield = rec.mesh && rec.mesh.userData && rec.mesh.userData.shieldMesh;
+    const _fx = _lssShipEngineFX(rec.mesh);
     _cinematic.ships.push({
       mesh: rec.mesh,
       isPlayer: rec.isPlayer,
@@ -28954,6 +28987,7 @@ function _lssStartSpectatorCinematic() {
       origVisible: rec.mesh.visible,
       shield: _shield || null,
       origShieldVisible: _shield ? _shield.visible : null,
+      engineFx: _fx.map(o => ({ o, v: o.visible })),
       pos: { x: slotX, y: slotY, z: slotZ },
       quat: quat,
     });
@@ -28979,6 +29013,8 @@ function _lssStartSpectatorCinematic() {
     s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
     s.mesh.quaternion.copy(s.quat);
     if (s.shield) s.shield.visible = false;
+    // Kill the idle engine exhaust so it doesn't read as fire on parked ships.
+    if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
   }
 
   // Camera : sit slightly ahead of the lineup, looking back at it. Frame
@@ -29020,6 +29056,20 @@ function _lssStartSpectatorCinematic() {
   return true;
 }
 
+// Collect a ship's engine exhaust visuals (plume cones + glow discs) so the
+// pre-round cinematic can hide them. The lineup ships sit at zero throttle and
+// animateShipMesh isn't driving them, so the plumes render at default intensity
+// and read as fire stuck to the hulls. Hidden during the cinematic, restored after.
+function _lssShipEngineFX(mesh) {
+  const out = [];
+  if (!mesh) return out;
+  const ud = mesh.userData || {};
+  if (Array.isArray(ud.enginePlumes)) for (const p of ud.enginePlumes) if (p) out.push(p);
+  if (Array.isArray(ud.engineGlows))  for (const g of ud.engineGlows)  if (g) out.push(g);
+  try { mesh.traverse(c => { if (c && c.userData && c.userData.isPlume && out.indexOf(c) < 0) out.push(c); }); } catch (_) {}
+  return out;
+}
+
 function _lssEndSpectatorCinematic() {
   _lssClearCinematicWatchdog();
   _cinematic.active = false;
@@ -29032,6 +29082,8 @@ function _lssEndSpectatorCinematic() {
         s.mesh.visible = s.origVisible;
         // Restore spawn-protection shield mesh visibility.
         if (s.shield && s.origShieldVisible !== null) s.shield.visible = s.origShieldVisible;
+        // Restore engine exhaust to its pre-cinematic visibility for gameplay.
+        if (s.engineFx) for (const e of s.engineFx) e.o.visible = e.v;
       } catch (_) {}
     }
     _cinematic.ships = null;
@@ -29077,6 +29129,8 @@ function _lssUpdateSpectatorCinematic() {
       s.mesh.visible = true;
       s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
       s.mesh.quaternion.copy(s.quat);
+      // Keep exhaust suppressed each frame in case anything re-enables it.
+      if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
     }
   }
   // Camera : subtle horizontal sway (~ ±80 units) so the framing
@@ -48623,6 +48677,9 @@ function updateEnemyHealthBars() {
   if (!player.position || player.shipState === 'dead') {
     for (const bar of hbarPool.bars) _hbarDisplay(bar, 'none');
     for (const mk of hbarPool.markers) _hbarDisplay(mk, 'none');
+    // Also hide the ship-name callout labels; otherwise the last-frame
+    // nameplates stay stuck on screen for the whole death-cam.
+    for (const lbl of hbarPool.labels) _hbarDisplay(lbl, 'none');
     return;
   }
 
