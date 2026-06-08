@@ -13894,7 +13894,46 @@ function sdfSmin(a,b,k) {
   return b*(1-h)+a*h-k*h*(1-h);
 }
 
-function worldSDF(px,py,pz,spheres,cylinders,smoothK) {
+// ---- SANDWICH TERRAIN (worker copy ; MUST stay identical to main-thread copy) ----
+// Deterministic ridged-multifractal "sandwich": jagged mountains rising from
+// below + mirrored peaks hanging above, with an open gap in the middle. Folded
+// into the SDF as a hard union with the map (rooms+tunnels), so the playable
+// negative space = (map tubes) OR (open gap). Map tunnels therefore stay carved
+// open straight through any mountain pinch. Pure function of (x,z) + the shared
+// terrain params, so every client renders the same draw (no Math.random).
+function _stHash2(x,z){const h=Math.sin(x*127.1+z*311.7)*43758.5453;return h-Math.floor(h);}
+function _stNoise2(x,z){
+  const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);
+  const a=_stHash2(xi,zi),b=_stHash2(xi+1,zi),c=_stHash2(xi,zi+1),d=_stHash2(xi+1,zi+1);
+  const ab=a+(b-a)*u,cd=c+(d-c)*u;return (ab+(cd-ab)*v)*2-1;
+}
+function _stRidged(x,z,seed,T){
+  let sum=0,amp=1,freq=T.BASE_FREQ,prev=1,norm=0;
+  for(let o=0;o<T.OCTAVES;o++){
+    const n=_stNoise2(x*freq+seed*19.3,z*freq+seed*7.1);
+    let r=1-Math.abs(n); r*=r;
+    sum+=r*amp*prev; prev=r; norm+=amp; freq*=T.LACUNARITY; amp*=T.GAIN;
+  }
+  return Math.pow(sum/norm,T.EXPONENT);
+}
+function _stGroundY(x,z,T){
+  const wx=x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ);
+  const wz=z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3);
+  return T.YFLOOR+T.GROUND_AMP*_stRidged(wx,wz,1.7,T);
+}
+function _stCeilY(x,z,T){
+  const ax=x+4000, az=z-4000;
+  const wx=ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ);
+  const wz=az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3);
+  return T.YCEIL-T.CEIL_AMP*_stRidged(wx,wz,5.9,T);
+}
+// Gap slab SDF: negative inside the open gap (air), positive in mountain rock.
+function _stGapSDF(px,py,pz,T){
+  return Math.max(_stGroundY(px,pz,T)-py, py-_stCeilY(px,pz,T));
+}
+
+function worldSDF(px,py,pz,spheres,cylinders,smoothK,terrain) {
   let roomD = 99999;
   for(const s of spheres) roomD = sdfSmin(roomD, sdSphere(px,py,pz,s.cx,s.cy,s.cz,s.r), smoothK);
   let d = roomD;
@@ -13902,6 +13941,7 @@ function worldSDF(px,py,pz,spheres,cylinders,smoothK) {
     const cd = sdCylinder(px,py,pz,c.ax,c.ay,c.az,c.bx,c.by,c.bz,c.r);
     d = Math.min(d, sdfSmin(roomD, cd, smoothK));
   }
+  if (terrain && terrain.ON) d = Math.min(d, _stGapSDF(px,py,pz,terrain));
   return d;
 }
 
@@ -13912,7 +13952,7 @@ const mcTriTable=[[-1],[0,8,3,-1],[0,1,9,-1],[1,8,3,9,8,1,-1],[1,2,10,-1],[0,8,3
 const mcEdgeVerts=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
 
 self.onmessage = function(e) {
-  const {bounds, gridRes, spheres, cylinders, smoothK} = e.data;
+  const {bounds, gridRes, spheres, cylinders, smoothK, terrain} = e.data;
   const nx=gridRes,ny=gridRes,nz=gridRes;
   const dx=(bounds.maxX-bounds.minX)/nx;
   const dy=(bounds.maxY-bounds.minY)/ny;
@@ -13921,7 +13961,7 @@ self.onmessage = function(e) {
   const vals=new Float32Array((nx+1)*(ny+1)*(nz+1));
   const gi=(i,j,k)=>i+(nx+1)*(j+(ny+1)*k);
   for(let k=0;k<=nz;k++)for(let j=0;j<=ny;j++)for(let i=0;i<=nx;i++){
-    vals[gi(i,j,k)]=worldSDF(bounds.minX+i*dx,bounds.minY+j*dy,bounds.minZ+k*dz,spheres,cylinders,smoothK);
+    vals[gi(i,j,k)]=worldSDF(bounds.minX+i*dx,bounds.minY+j*dy,bounds.minZ+k*dz,spheres,cylinders,smoothK,terrain);
   }
 
   function mcInterp(i1,j1,k1,i2,j2,k2){
@@ -13999,12 +14039,447 @@ function sdfSmin(a,b,k) {
   return b*(1-h)+a*h-k*h*(1-h);
 }
 
+// ---- SANDWICH TERRAIN (main-thread copy ; MUST stay identical to worker copy) ----
+// See the worker copy above for the full explanation. These power collision,
+// containment, raycasting and the synchronous-fallback mesher, so the mountains
+// are solid to fly into and the carved tunnels stay open through them.
+function _stHash2(x,z){const h=Math.sin(x*127.1+z*311.7)*43758.5453;return h-Math.floor(h);}
+function _stNoise2(x,z){
+  const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);
+  const a=_stHash2(xi,zi),b=_stHash2(xi+1,zi),c=_stHash2(xi,zi+1),d=_stHash2(xi+1,zi+1);
+  const ab=a+(b-a)*u,cd=c+(d-c)*u;return (ab+(cd-ab)*v)*2-1;
+}
+function _stRidged(x,z,seed,T){
+  let sum=0,amp=1,freq=T.BASE_FREQ,prev=1,norm=0;
+  for(let o=0;o<T.OCTAVES;o++){
+    const n=_stNoise2(x*freq+seed*19.3,z*freq+seed*7.1);
+    let r=1-Math.abs(n); r*=r;
+    sum+=r*amp*prev; prev=r; norm+=amp; freq*=T.LACUNARITY; amp*=T.GAIN;
+  }
+  return Math.pow(sum/norm,T.EXPONENT);
+}
+function _stGroundY(x,z,T){
+  const wx=x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ);
+  const wz=z+T.WARP*_stNoise2(x*T.WARP_FREQ+31.7,z*T.WARP_FREQ+17.3);
+  return T.YFLOOR+T.GROUND_AMP*_stRidged(wx,wz,1.7,T);
+}
+function _stCeilY(x,z,T){
+  const ax=x+4000, az=z-4000;
+  const wx=ax+T.WARP*_stNoise2(ax*T.WARP_FREQ,az*T.WARP_FREQ);
+  const wz=az+T.WARP*_stNoise2(ax*T.WARP_FREQ+31.7,az*T.WARP_FREQ+17.3);
+  return T.YCEIL-T.CEIL_AMP*_stRidged(wx,wz,5.9,T);
+}
+function _stGapSDF(px,py,pz,T){
+  return Math.max(_stGroundY(px,pz,T)-py, py-_stCeilY(px,pz,T));
+}
+
+// ---- MAP-DRIVEN ARENA CARVE (main thread only) ----
+// Each map ROOM becomes an arena: a flat floor at the room's own height with the
+// surrounding mountains rising into walls, and a raised dome ceiling for
+// headroom. Each TUNNEL becomes a connecting lane that ramps between the arena
+// heights it joins. Everywhere else the mountains are untouched. Pure function
+// of (x,z) + the level's rooms/tunnels, so the rock mesh and the collision field
+// agree and every client draws the same world.
+function _stSmooth(e0,e1,x){const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);}
+// Strongest route influence at (x,z): returns its 0..1 weight and the route's
+// height there (room centre y, or interpolated tunnel y). Wider blend = roomier.
+function _stRouteAt(x,z,T){
+  const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID;
+  const S=game.levelSpheres||[];
+  for(let i=0;i<S.length;i++){const s=S[i];const d=Math.hypot(x-s.cx,z-s.cz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
+  const C=game.levelCylinders||[];
+  for(let i=0;i<C.length;i++){const c=C[i];
+    const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
+    let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
+    const cx=c.ax+dx*t,cz=c.az+dz*t,d=Math.hypot(x-cx,z-cz);
+    const e=1-_stSmooth(c.r,c.r+soft,d);
+    if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}
+  return {o,ty};
+}
+// Kept for callers that only want the openness weight.
+function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
+// Carved heightfield: blend natural mountain toward a flat arena floor / dome.
+function _stGroundYCarved(x,z,T){
+  const g=_stGroundY(x,z,T); const r=_stRouteAt(x,z,T);
+  if(r.o<=0) return g;
+  const floor=r.ty-(T.ARENA_DROP||320);   // flat arena/lane floor below the route
+  return g+(floor-g)*r.o;
+}
+function _stCeilYCarved(x,z,T){
+  const c=_stCeilY(x,z,T); const r=_stRouteAt(x,z,T);
+  if(r.o<=0) return c;
+  const roof=r.ty+(T.ARENA_RISE||420);     // domed ceiling above the route
+  return c+(roof-c)*r.o;
+}
+// Carved gap SDF: open between the carved floor and carved ceiling.
+function _stGapSDFCarved(px,py,pz,T){
+  return Math.max(_stGroundYCarved(px,pz,T)-py, py-_stCeilYCarved(px,pz,T));
+}
+
+// ---- SANDWICH TERRAIN ROCK MESH (separate from the cosmic tube walls) ----
+// Builds two flat-shaded heightfield shells (ground mountains + hanging ceiling
+// mountains) with per-vertex height colors: dark valleys -> grey rock -> snow
+// caps, like the Ace Starship terrain. Carved to part around the map so the
+// raceway pathway runs through them. Deterministic -> same draw for every
+// client. Streamed in chunks around the ship, Ace-Starship style, so the
+// mountains extend endlessly while the map's carved lane stays the route.
+
+// Streaming params (LSS scale). CHUNK * VIEW must sit comfortably inside the
+// camera far plane (8000) so the fog can swallow the build edge.
+const _SW_CHUNK = 900;       // world units per chunk
+const _SW_CELLS = 32;        // grid cells per chunk side (higher = finer detail)  [lab-tuned]
+const _SW_VIEW  = 5;         // chunk radius kept built around the ship
+const _SW_BUILD_PER_FRAME = 2;
+
+// Biome palettes (Ace-Starship feel). Ground ramps low->high; ceiling is a
+// distinct rock that lightens toward its hanging tips. Default biome 'grassy':
+// green slopes with bright snow caps under a grey rock ceiling.
+const _SW_BIOMES = {
+  // tGrass/tRock/tSnow/tMoss = slope-shader target colours (ground surface look, lab-tuned)
+  grassy:  { sky:0xb8cee0, gLo:0x33571f, gMid:0x4d7a33, gHi:0x7b7a5a, gSnow:0xeef4fb, cLo:0x596170, cHi:0xb4becd, rock:0x6f6552, moss:0x3f5e26, tGrass:0x5fae4e, tRock:0x6b6f74, tSnow:0xeef2f5, tMoss:0x3f5e26 },
+  rocky:   { sky:0xafc2d6, gLo:0x2c313c, gMid:0x5c636f, gHi:0x97a2b0, gSnow:0xeef4fb, cLo:0x3c4150, cHi:0x9aa3b2, tGrass:0x7c8794, tRock:0x44484f, tSnow:0xeef2f5, tMoss:0x55606b },
+  snow:    { sky:0xd2e2f0, gLo:0x6f8aa0, gMid:0xa9c2d6, gHi:0xd8e6f2, gSnow:0xffffff, cLo:0x8fa6bd, cHi:0xeaf4ff, tGrass:0xbcd2e0, tRock:0x6f7a86, tSnow:0xffffff, tMoss:0x9fb4c6 },
+  volcanic:{ sky:0x4a1c14, gLo:0xb5391a, gMid:0x5a2a22, gHi:0x36302e, gSnow:0x9a9088, cLo:0x2a2220, cHi:0x6e5a50, tGrass:0x4a423a, tRock:0x35302c, tSnow:0x8a7f74, tMoss:0x2a2220 },
+};
+const _SW_tmpC = new THREE.Color();
+const _SW_cA = new THREE.Color(), _SW_cB = new THREE.Color();
+function _swPal(T){ return _SW_BIOMES[(T && T.biome) || 'grassy'] || _SW_BIOMES.grassy; }
+// Low-frequency "ground cover" noise, 0 (bare rock) .. 1 (lush), patches ~250-650u.
+function _stPatch(x, z) {
+  const n = _stNoise2(x*0.0016+5.1, z*0.0016-2.3)*0.62 + _stNoise2(x*0.0041+11.0, z*0.0041+7.0)*0.38;
+  const v = (n + 1) * 0.5; return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+// Ground colour. Grassy biome varies by a patch noise (rock -> moss -> grass) so
+// the ground isn't uniform, with snow caps at altitude. Other biomes: height ramp.
+function _swColGround(x, z, wy, T, out) {
+  const P = _swPal(T), sl = (T && T.snowLine) || 0.72;
+  const lo = T.YMID - T.AMP * 0.5, hi = T.YMID + T.AMP * 0.4;
+  let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  if (T.biome === 'grassy') {
+    const pc = _stPatch(x, z);
+    if (pc < 0.40) out.copy(_SW_cA.set(P.rock)).lerp(_SW_cB.set(P.moss), pc / 0.40);
+    else if (pc < 0.68) out.copy(_SW_cA.set(P.moss)).lerp(_SW_cB.set(P.gMid), (pc - 0.40) / 0.28);
+    else out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (pc - 0.68) / 0.32);
+    if (t > sl) out.lerp(_SW_cB.set(P.gSnow), Math.min(1, (t - sl) / Math.max(0.01, 1 - sl)));
+    return out;
+  }
+  if (t < 0.42) out.copy(_SW_cA.set(P.gLo)).lerp(_SW_cB.set(P.gMid), t / 0.42);
+  else if (t < sl) out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (t - 0.42) / Math.max(0.01, sl - 0.42));
+  else out.copy(_SW_cA.set(P.gHi)).lerp(_SW_cB.set(P.gSnow), (t - sl) / Math.max(0.01, 1 - sl));
+  return out;
+}
+// Ceiling colour: hanging tips (low) lighter, base (high) darker grey rock.
+function _swColCeil(wy, T, out) {
+  const P = _swPal(T);
+  const lo = T.YMID - T.AMP * 0.3, hi = T.YCEIL;
+  let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return out.copy(_SW_cA.set(P.cHi)).lerp(_SW_cB.set(P.cLo), t);
+}
+
+// One height-field shell (ground or ceiling) over a single chunk's footprint.
+// ---- terrain material FX (reflective snow + glowing lava) ----
+const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.7},
+               uLava:{value:0}, uSnowRough:{value:0.22}, uLavaGlow:{value:1.0},
+               uCam:{value:new THREE.Vector3()}, uFadeA:{value:1600}, uFadeB:{value:2500},
+               uColGrass:{value:new THREE.Color(0x5fae4e)}, uColRock:{value:new THREE.Color(0x6b6f74)},
+               uColSnow:{value:new THREE.Color(0xeef2f5)}, uColMoss:{value:new THREE.Color(0x3f5e26)},
+               uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50} };
+function _swSyncFX() {
+  const T = game.sandwichTerrain; if (!T) return;
+  _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
+  _swU.uLava.value = (T.biome === 'volcanic') ? 1 : 0;
+  const _P = _swPal(T);
+  _swU.uColGrass.value.set(_P.tGrass !== undefined ? _P.tGrass : 0x5fae4e);
+  _swU.uColRock.value.set(_P.tRock !== undefined ? _P.tRock : 0x6b6f74);
+  _swU.uColSnow.value.set(_P.tSnow !== undefined ? _P.tSnow : 0xeef2f5);
+  _swU.uColMoss.value.set(_P.tMoss !== undefined ? _P.tMoss : 0x3f5e26);
+  _swU.uSnowRough.value = (typeof game.sandwichShine === 'number') ? game.sandwichShine : 0.22;
+  _swU.uLavaGlow.value = (typeof game.sandwichLavaGlow === 'number') ? game.sandwichLavaGlow : 1.0;
+  // Grass fades out smoothly well before the loaded edge so there's no hard ring.
+  _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58;
+  _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92;
+}
+function _swPatchTerrainMat(m, isCeil) {
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime=_swU.uTime; sh.uniforms.uYMid=_swU.uYMid; sh.uniforms.uAMP=_swU.uAMP;
+    sh.uniforms.uSnow=_swU.uSnow; sh.uniforms.uLava=_swU.uLava;
+    sh.uniforms.uSnowRough=_swU.uSnowRough; sh.uniforms.uLavaGlow=_swU.uLavaGlow;
+    sh.uniforms.uColGrass=_swU.uColGrass; sh.uniforms.uColRock=_swU.uColRock;
+    sh.uniforms.uColSnow=_swU.uColSnow; sh.uniforms.uColMoss=_swU.uColMoss;
+    sh.uniforms.uSlopeGrass=_swU.uSlopeGrass; sh.uniforms.uSlopeRock=_swU.uSlopeRock;
+    sh.uniforms.uCeil={value:isCeil?1:0};
+    sh.vertexShader='varying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;');
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss;\n'
+      +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
+      +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
+      +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
+      +sh.fragmentShader;
+    // ground surface: grass on gentle slopes, bare rock on steep faces, snow on peaks, with a mossy mottle
+    sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
+      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n vec3 terr=mix(uColRock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n diffuseColor.rgb=terr;\n }');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
+      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
+    // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
+    sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
+      '#include <emissivemap_fragment>\n if(uLava>0.5 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips,0.0,1.3)*_pulse;\n totalEmissiveRadiance+=vec3(1.7,0.5,0.08)*glow*uLavaGlow;\n }');
+  };
+  return m;
+}
+
+// ---- procedural grass (instanced wind-swaying blades, grassy biome) ----
+const _SW_GRASS_VIEW = 3;
+let _swBladeGeo=null, _swGrassMat=null;
+const _swGd = new THREE.Object3D();
+function _swBladeGeoGet(){ if(_swBladeGeo)return _swBladeGeo; const h=64,w=8;
+  const v=new Float32Array([-w/2,0,0, w/2,0,0, -w*0.30,h*0.55,0, w*0.30,h*0.55,0, 0,h,0]);
+  const base=[0.15,0.30,0.12], mid=[0.27,0.45,0.16], tip=[0.55,0.66,0.30];
+  const col=new Float32Array([base[0],base[1],base[2], base[0],base[1],base[2], mid[0],mid[1],mid[2], mid[0],mid[1],mid[2], tip[0],tip[1],tip[2]]);
+  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
+  g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+  g.setIndex([0,1,2, 1,3,2, 2,3,4]); g.computeVertexNormals(); _swBladeGeo=g; return g; }
+function _swGrassMatGet(){ if(_swGrassMat)return _swGrassMat;
+  const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
+  m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uFadeA=_swU.uFadeA; sh.uniforms.uFadeB=_swU.uFadeB;
+    sh.vertexShader='uniform float uTime,uFadeA,uFadeB;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float sway=sin(uTime*1.6+ph)*0.16+sin(uTime*3.3+ph*1.7)*0.05;\n transformed.x+=sway*transformed.y;\n float gfade=1.0-smoothstep(uFadeA,uFadeB,distance(ip.xz,uCam.xz));\n transformed.y*=gfade;\n transformed.x*=mix(0.35,1.0,gfade);'); };
+  _swGrassMat=m; return m; }
+function _swBuildGrass(x0,z0,T){
+  if(game.sandwichGrass===false || (T.biome||'grassy')!=='grassy') return null;
+  const spacing=game.sandwichGrassSpacing||16;
+  const N=Math.min(96,Math.max(6,Math.round(_SW_CHUNK/spacing))), step=_SW_CHUNK/N, pts=[];
+  const eps=6, SR=_swU.uSlopeRock.value, SG=_swU.uSlopeGrass.value;   // match the surface shader's grass/rock split
+  for(let j=0;j<N;j++)for(let i=0;i<N;i++){
+    const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=_stGroundYCarved(x,z,T);
+    const t=(y-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
+    if(t>(T.snowLine||0.7)) continue;          // snow caps: no grass
+    // slope gate: blades only on flat-enough ground (steep faces read as bare rock)
+    const yx=_stGroundYCarved(x+eps,z,T)-_stGroundYCarved(x-eps,z,T);
+    const yz=_stGroundYCarved(x,z+eps,T)-_stGroundYCarved(x,z-eps,T);
+    const ny=(2*eps)/Math.hypot(yx,yz,2*eps);  // surface normal.y: 0=cliff 1=flat
+    const fl=Math.max(0,Math.min(1,(ny-SR)/Math.max(0.001,SG-SR)));
+    if(fl<0.55) continue;                        // steep rock: no blades
+    const pc=_stPatch(x,z);                      // ground cover: 0 rocky .. 1 lush
+    if(pc<0.42) continue;                        // grey / low-moss ground: leave bare to show rock & moss
+    // density follows lushness AND flatness; gaps left open so the mossy ground shows through
+    const lush=Math.min(1,(pc-0.42)/0.40);
+    if(Math.random() > lush*fl*0.92) continue;
+    pts.push(x,y,z, 0.45+pc*0.95);              // 4th value = per-blade height factor
+  }
+  if(pts.length<4) return null;
+  const count=pts.length/4;
+  const im=new THREE.InstancedMesh(_swBladeGeoGet(),_swGrassMatGet(),count);
+  for(let k=0;k<count;k++){ const hf=pts[k*4+3];
+    _swGd.position.set(pts[k*4],pts[k*4+1]-1,pts[k*4+2]);
+    _swGd.rotation.set(0,Math.random()*6.283,0);
+    const s=hf*(0.7+Math.random()*0.5); _swGd.scale.set(s,s,s);
+    _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
+  im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.userData={isSandwichTerrain:true}; scene.add(im); return im;
+}
+function _swRemoveGrass(im){ if(im){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(_){} } }
+
+function _swBuildShell(x0, z0, isCeil, T) {
+  const n = _SW_CELLS, step = _SW_CHUNK / n;
+  const nVert = (n + 1) * (n + 1);
+  const verts = new Float32Array(nVert * 3);
+  const cols  = new Float32Array(nVert * 3);
+  let p = 0;
+  for (let j = 0; j <= n; j++) {
+    for (let i = 0; i <= n; i++) {
+      const x = x0 + i * step, z = z0 + j * step;
+      const y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
+      verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
+      if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
+      cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
+      p += 3;
+    }
+  }
+  const idx = [];
+  const row = n + 1;
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const a = j * row + i, b = a + 1, c = a + row, d = c + 1;
+      if (isCeil) { idx.push(a, b, c, b, d, c); } else { idx.push(a, c, b, b, c, d); }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mat = _swPatchTerrainMat(new THREE.MeshStandardMaterial({
+    vertexColors: true, flatShading: true, roughness: 1.0, metalness: 0.0,
+    side: THREE.DoubleSide,
+  }), isCeil);
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.userData = { isSandwichTerrain: true };
+  mesh.renderOrder = -2;
+  scene.add(mesh);
+  return mesh;
+}
+
+function _swDisposeChunk(c) {
+  for (const m of [c.ground, c.ceiling]) {
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); } catch (_) {}
+  }
+  _swRemoveGrass(c.grass);
+}
+
+// Atmosphere: a hazy biome sky + matched fog so distant peaks fade into the
+// horizon (the Ace look). Saves/restores the original fog + background so the
+// toggle returns the cosmic build untouched.
+function _swApplyAtmosphere() {
+  const T = game.sandwichTerrain;
+  if (!T || !T.ON) {
+    if (game._swSavedFog !== undefined) { scene.fog = game._swSavedFog; game._swSavedFog = undefined; }
+    if (game._swSavedBg !== undefined) { scene.background = game._swSavedBg; game._swSavedBg = undefined; }
+    return;
+  }
+  if (game._swSavedFog === undefined) game._swSavedFog = (scene.fog !== undefined ? scene.fog : null);
+  if (game._swSavedBg === undefined) game._swSavedBg = (scene.background !== undefined ? scene.background : null);
+  const P = _SW_BIOMES[T.biome] || _SW_BIOMES.grassy;
+  const sky = new THREE.Color(P.sky);
+  scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 1e-4);
+  scene.background = sky;
+}
+
+// Drop every built chunk (map change / terrain off), restoring atmosphere too.
+function resetSandwichTerrain() {
+  if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
+  game.sandwichChunks = new Map();
+  try { _swApplyAtmosphere(); } catch (_) {}
+}
+
+// Build/drop chunks around a world position. Cheap; safe to call every frame.
+function updateSandwichStream(px, pz, budget) {
+  const T = game.sandwichTerrain;
+  if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
+  if (!game.sandwichChunks) game.sandwichChunks = new Map();
+  const chunks = game.sandwichChunks;
+  const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
+  const todo = [];
+  for (let cx = scx - _SW_VIEW; cx <= scx + _SW_VIEW; cx++) {
+    for (let cz = scz - _SW_VIEW; cz <= scz + _SW_VIEW; cz++) {
+      const key = cx + ',' + cz;
+      if (chunks.has(key)) continue;
+      const d = (cx - scx) * (cx - scx) + (cz - scz) * (cz - scz);
+      todo.push({ cx, cz, key, d });
+    }
+  }
+  todo.sort((a, b) => a.d - b.d);
+  const lim = Math.min(budget || _SW_BUILD_PER_FRAME, todo.length);
+  for (let i = 0; i < lim; i++) {
+    const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
+    chunks.set(t.key, { ground: _swBuildShell(ox, oz, false, T), ceiling: _swBuildShell(ox, oz, true, T) });
+  }
+  // Unload chunks well outside the view ring.
+  for (const [key, c] of chunks) {
+    const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
+    if (Math.abs(cx - scx) > _SW_VIEW + 1 || Math.abs(cz - scz) > _SW_VIEW + 1) { _swDisposeChunk(c); chunks.delete(key); }
+  }
+  // Grass: build on the nearest chunks (grassy biome), drop it from far ones.
+  // One build per call to avoid frame hitches.
+  const wantGrass = (game.sandwichGrass !== false) && ((T.biome || 'grassy') === 'grassy');
+  let gBuilt = 0;
+  for (const [key, c] of chunks) {
+    const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
+    const near = Math.max(Math.abs(cx - scx), Math.abs(cz - scz)) <= _SW_GRASS_VIEW;
+    if (near && wantGrass && !c.grassBuilt && gBuilt < 1) {
+      c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
+    } else if ((!near || !wantGrass) && c.grassBuilt) {
+      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false;
+    }
+  }
+}
+
+// Called at level build: reset, then synchronously fill the map footprint (plus a
+// ring) so the whole pathway has mountains the instant the round starts.
+function initSandwichTerrain() {
+  resetSandwichTerrain();
+  const T = game.sandwichTerrain;
+  if (!T || !T.ON || !T.FOOT) return;
+  try { _swApplyAtmosphere(); _swSyncFX(); } catch (_) {}
+  const F = T.FOOT;
+  const cx0 = Math.floor(F.minX / _SW_CHUNK) - 1, cx1 = Math.floor(F.maxX / _SW_CHUNK) + 1;
+  const cz0 = Math.floor(F.minZ / _SW_CHUNK) - 1, cz1 = Math.floor(F.maxZ / _SW_CHUNK) + 1;
+  const chunks = game.sandwichChunks;
+  let built = 0, CAP = 220;   // safety cap for very large maps
+  try {
+    for (let cz = cz0; cz <= cz1 && built < CAP; cz++) {
+      for (let cx = cx0; cx <= cx1 && built < CAP; cx++) {
+        const key = cx + ',' + cz; if (chunks.has(key)) continue;
+        const ox = cx * _SW_CHUNK, oz = cz * _SW_CHUNK;
+        chunks.set(key, { ground: _swBuildShell(ox, oz, false, T), ceiling: _swBuildShell(ox, oz, true, T) });
+        built++;
+      }
+    }
+  } catch (e) { console.warn('[sandwich] init terrain failed:', e); }
+}
+
+// Console toggle: setSandwichTerrain(false) to fly the original empty-void tubes,
+// setSandwichTerrain(true) to wrap the route in carved mountains. Rebuilds the
+// current level so the change takes effect immediately.
+function setSandwichTerrain(on) {
+  game.sandwichTerrainEnabled = !!on;
+  try {
+    if (typeof buildRoomGraphLevel === 'function' && game.currentLevel) {
+      buildRoomGraphLevel(game.currentLevel);
+    }
+  } catch (e) { console.warn('[sandwich] rebuild failed:', e); }
+  return game.sandwichTerrainEnabled;
+}
+if (typeof window !== 'undefined') window.setSandwichTerrain = setSandwichTerrain;
+
+// Console helper: setSandwichBiome('grassy'|'rocky'|'snow'|'volcanic'). Rebuilds.
+function setSandwichBiome(name) {
+  if (!_SW_BIOMES[name]) { console.warn('[sandwich] unknown biome', name, '— options:', Object.keys(_SW_BIOMES).join(', ')); return; }
+  game.sandwichBiome = name;
+  try { if (typeof buildRoomGraphLevel === 'function' && game.currentLevel) buildRoomGraphLevel(game.currentLevel); } catch (e) { console.warn(e); }
+  return name;
+}
+if (typeof window !== 'undefined') window.setSandwichBiome = setSandwichBiome;
+
+// Live material/grass tweaks (no rebuild needed except density).
+function setSandwichGrass(on){ game.sandwichGrass = !!on; return on; }
+function setSandwichGrassDensity(spacing){ game.sandwichGrassSpacing = spacing;
+  if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) { _swRemoveGrass(c.grass); c.grass=null; c.grassBuilt=false; }
+  return spacing; }
+function setSandwichShine(r){ game.sandwichShine=r; _swU.uSnowRough.value=r; return r; }
+function setSandwichLavaGlow(g){ game.sandwichLavaGlow=g; _swU.uLavaGlow.value=g; return g; }
+if (typeof window !== 'undefined') { window.setSandwichGrass=setSandwichGrass; window.setSandwichGrassDensity=setSandwichGrassDensity; window.setSandwichShine=setSandwichShine; window.setSandwichLavaGlow=setSandwichLavaGlow; }
+
+// Diagnostic: run sandwichDebug() in the console to see why grass may be missing.
+function sandwichDebug() {
+  const T = game.sandwichTerrain, chunks = game.sandwichChunks;
+  let grassChunks = 0, grassInst = 0;
+  if (chunks) for (const c of chunks.values()) { if (c.grass) { grassChunks++; grassInst += (c.grass.count || 0); } }
+  const pp = player && player.position;
+  const info = {
+    on: !!(T && T.ON), biome: T && T.biome, grassEnabled: game.sandwichGrass !== false,
+    chunks: chunks ? chunks.size : 0, grassChunks, grassInstances: grassInst,
+    player: pp ? [Math.round(player.position.x), Math.round(player.position.y), Math.round(player.position.z)] : null,
+    uCam: [Math.round(_swU.uCam.value.x), Math.round(_swU.uCam.value.y), Math.round(_swU.uCam.value.z)],
+    fade: [_swU.uFadeA.value | 0, _swU.uFadeB.value | 0],
+    floorUnderShip: (T && pp) ? Math.round(_stGroundYCarved(player.position.x, player.position.z, T)) : null,
+    ceilOverShip: (T && pp) ? Math.round(_stCeilYCarved(player.position.x, player.position.z, T)) : null,
+  };
+  if (T && pp) info.shipHeightAboveFloor = info.player[1] - info.floorUnderShip;
+  console.log('[sandwichDebug]', JSON.stringify(info, null, 2));
+  return info;
+}
+if (typeof window !== 'undefined') window.sandwichDebug = sandwichDebug;
+
 // Evaluate the world SDF: negative = inside playable space, positive = solid wall
 // Rooms blend smoothly with each other and with tunnels (smin),
 // but tunnels use hard union (min) between each other so parallel tunnels stay separate.
 const _SDF_BLEND_REACH = 135;  // sk * 3 with sk=45
 function worldSDF(px,py,pz) {
   if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return -10000;
+  // Sandwich terrain mode: the world IS the carved mountains ; there are no tube
+  // walls. Collision/containment/raycast all run against the carved gap so ships
+  // fly the open canyon + the map's clear lane, blocked only by rock.
+  const _stT = game.sandwichTerrain;
+  if (_stT && _stT.ON) return _stGapSDFCarved(px,py,pz,_stT);
   const sk = game.sdfSmoothK || 45;
   const blendReach = sk * 3;  // local in case sdfSmoothK overridden per round
   // 1) Room-only SDF (smooth blend between rooms)
@@ -14045,6 +14520,11 @@ function worldSDF(px,py,pz) {
     const cd = sdCylinder(px,py,pz,c.ax,c.ay,c.az,c.bx,c.by,c.bz,c.r);
     d = Math.min(d, sdfSmin(roomD, cd, sk));
   }
+  // Sandwich terrain: union the carved mountain gap into the playable field so
+  // ships fly the open canyon between peaks, blocked by rock, while the route's
+  // lane (and the cosmic tubes) stay clear. Matches the separate rock mesh.
+  const _st = game.sandwichTerrain;
+  if (_st && _st.ON) d = Math.min(d, _stGapSDFCarved(px,py,pz,_st));
   return d;
 }
 
@@ -15976,6 +16456,9 @@ class Bot {
     // Bots are locked in place during pre-round warmup.
     if (game.state === 'warmup') {
       if (this.velocity) this.velocity.set(0, 0, 0);
+      // Keep the mesh parked on the (correct) spawn even while frozen, so
+      // enemies never show at a stale spot during the pre-round countdown.
+      if (this.mesh && this.position) this.mesh.position.copy(this.position);
       return;
     }
 
@@ -27748,6 +28231,12 @@ function spawnBots() {
     applyPrev(bot);
     game.entities.push(bot);
   }
+  // Snap each bot's MESH onto its assigned spawn right now. The Bot constructor
+  // seeds a random position and adds the mesh to the scene immediately; during
+  // warmup Bot.update() early-returns before its per-frame mesh sync, so without
+  // this the enemy ships would be visible at stale random spots through the
+  // whole 3-2-1 countdown and only snap to spawn at GO.
+  for (const b of game.entities) { if (b.mesh && b.position) b.mesh.position.copy(b.position); }
 }
 
 function playerTakeDamage(amount, attacker, projectile) {
@@ -27990,6 +28479,29 @@ function playerDie(attacker) {
   if (window.Overlays) {
     const killerName = (attacker && attacker.loadout) ? attacker.loadout.name : '';
     Overlays.respawn(killerName);
+  }
+  // Tear down any core visuals that were live at the moment of death. While the
+  // death-cam runs, the main loop skips updateAbilities() ; that's where the
+  // laser-core beam gets hidden and where world effects (Flame Chain fire
+  // trails) tick and expire. Without this they freeze on screen until the round
+  // ends. Clear them here so death wipes them cleanly (single-player and MP).
+  player.coreActive = false;
+  player.coreTimer = 0;
+  player._laserCoreArcTimer = 0;
+  if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
+  for (let we = game.worldEffects.length - 1; we >= 0; we--) {
+    const eff = game.worldEffects[we];
+    if (!eff || eff.type !== 'firewall') continue;
+    // Mine = damaging firewalls I own, or my visual-only Flame Chain trails
+    // (dmgPerSec 0). Leave other players'/bots' effects alone.
+    const mine = (eff.owner === 'player') || (eff.dmgPerSec === 0) ||
+                 (net.active && eff.ownerPeerId === net.myPeerId);
+    if (!mine) continue;
+    try {
+      if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+      if (eff.meshes) for (const m of eff.meshes) { if (m && m.parent) scene.remove(m); }
+    } catch (_) {}
+    game.worldEffects.splice(we, 1);
   }
   // Last Ship Sailing: one life per round. No mid-round respawn. The round-end
   // state transition at the top of updateRoundSystem() calls respawnPlayer()
@@ -28466,6 +28978,7 @@ function _lssStartSpectatorCinematic() {
 
   function _pushShip(rec, slotX, slotY, slotZ, quat) {
     const _shield = rec.mesh && rec.mesh.userData && rec.mesh.userData.shieldMesh;
+    const _fx = _lssShipEngineFX(rec.mesh);
     _cinematic.ships.push({
       mesh: rec.mesh,
       isPlayer: rec.isPlayer,
@@ -28474,6 +28987,7 @@ function _lssStartSpectatorCinematic() {
       origVisible: rec.mesh.visible,
       shield: _shield || null,
       origShieldVisible: _shield ? _shield.visible : null,
+      engineFx: _fx.map(o => ({ o, v: o.visible })),
       pos: { x: slotX, y: slotY, z: slotZ },
       quat: quat,
     });
@@ -28499,6 +29013,8 @@ function _lssStartSpectatorCinematic() {
     s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
     s.mesh.quaternion.copy(s.quat);
     if (s.shield) s.shield.visible = false;
+    // Kill the idle engine exhaust so it doesn't read as fire on parked ships.
+    if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
   }
 
   // Camera : sit slightly ahead of the lineup, looking back at it. Frame
@@ -28540,6 +29056,20 @@ function _lssStartSpectatorCinematic() {
   return true;
 }
 
+// Collect a ship's engine exhaust visuals (plume cones + glow discs) so the
+// pre-round cinematic can hide them. The lineup ships sit at zero throttle and
+// animateShipMesh isn't driving them, so the plumes render at default intensity
+// and read as fire stuck to the hulls. Hidden during the cinematic, restored after.
+function _lssShipEngineFX(mesh) {
+  const out = [];
+  if (!mesh) return out;
+  const ud = mesh.userData || {};
+  if (Array.isArray(ud.enginePlumes)) for (const p of ud.enginePlumes) if (p) out.push(p);
+  if (Array.isArray(ud.engineGlows))  for (const g of ud.engineGlows)  if (g) out.push(g);
+  try { mesh.traverse(c => { if (c && c.userData && c.userData.isPlume && out.indexOf(c) < 0) out.push(c); }); } catch (_) {}
+  return out;
+}
+
 function _lssEndSpectatorCinematic() {
   _lssClearCinematicWatchdog();
   _cinematic.active = false;
@@ -28552,6 +29082,8 @@ function _lssEndSpectatorCinematic() {
         s.mesh.visible = s.origVisible;
         // Restore spawn-protection shield mesh visibility.
         if (s.shield && s.origShieldVisible !== null) s.shield.visible = s.origShieldVisible;
+        // Restore engine exhaust to its pre-cinematic visibility for gameplay.
+        if (s.engineFx) for (const e of s.engineFx) e.o.visible = e.v;
       } catch (_) {}
     }
     _cinematic.ships = null;
@@ -28597,6 +29129,8 @@ function _lssUpdateSpectatorCinematic() {
       s.mesh.visible = true;
       s.mesh.position.set(s.pos.x, s.pos.y, s.pos.z);
       s.mesh.quaternion.copy(s.quat);
+      // Keep exhaust suppressed each frame in case anything re-enables it.
+      if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
     }
   }
   // Camera : subtle horizontal sway (~ ±80 units) so the framing
@@ -44400,6 +44934,8 @@ const _FOG_SPAWN_MULT = 0.55;   // spawn rooms: clear
 const _FOG_CENTRAL_MULT = 2.6;  // central rooms: hazy
 const _FOG_TUNNEL_MULT = 1.4;   // tunnels: in-between
 function updateRoomFog(dt) {
+  // Sandwich terrain owns the fog/atmosphere when active ; don't fight it.
+  if (game.sandwichTerrain && game.sandwichTerrain.ON) return;
   if (!scene.fog || !player || !player.position) return;
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
   const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
@@ -45045,6 +45581,11 @@ function buildRoomGraphLevel(level) {
     if (Array.isArray(game.mapMeshes)) game.mapMeshes.length = 0;
     else game.mapMeshes = [];
   } catch (_) {}
+  // Tear down any prior sandwich-terrain chunks so they don't linger when
+  // switching maps (including into gmaps levels, which return early below).
+  try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {}
+  // gmaps levels return before the params block; default terrain off for them.
+  game.sandwichTerrain = null;
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
@@ -45317,7 +45858,47 @@ function buildRoomGraphLevel(level) {
     bMinY=Math.min(bMinY,seg.a.y-sr,seg.b.y-sr);bMaxY=Math.max(bMaxY,seg.a.y+sr,seg.b.y+sr);
     bMinZ=Math.min(bMinZ,seg.a.z-sr,seg.b.z-sr);bMaxZ=Math.max(bMaxZ,seg.a.z+sr,seg.b.z+sr);
   }
+
+  // --- SANDWICH TERRAIN: params + bounds expansion ---
+  // Deterministic mountain "sandwich" (jagged peaks below + mirrored peaks
+  // above, open gap between) folded into worldSDF as a hard union with the
+  // map. The map's tunnels therefore stay carved open straight through any
+  // mountain pinch, and the field is a pure function of position + these
+  // shared params, so every client renders the same draw. Disable with
+  // setSandwichTerrain(false) to restore the original void-tube look exactly.
+  if (game.sandwichTerrainEnabled === undefined) game.sandwichTerrainEnabled = true;
+  // gmaps levels return earlier via their own builder; only standard
+  // room/tunnel maps reach here, so terrain applies to all of them.
+  if (game.sandwichTerrainEnabled) {
+    const yMid = (bMinY + bMaxY) * 0.5;
+    const SPACING = 670;    // distance between peaks (smaller = denser range)  [lab-tuned]
+    const GAP_HALF = 600;   // open-gap half-height; tighter = more dramatic sandwich
+    const AMP = 1120;       // peak height / ceiling-tip depth (rides on the noise)
+    game.sandwichTerrain = {
+      ON: true,
+      OCTAVES: 5, LACUNARITY: 2.0, GAIN: 0.5, EXPONENT: 1.75,
+      BASE_FREQ: 1/SPACING,
+      WARP: 0, WARP_FREQ: 1/(SPACING*2.2),
+      GROUND_AMP: AMP, CEIL_AMP: AMP,
+      YFLOOR: yMid - GAP_HALF,  // ground valleys; peaks rise to YFLOOR+AMP
+      YCEIL:  yMid + GAP_HALF,  // ceiling base; tips hang down to YCEIL-AMP
+      YMID: yMid, AMP: AMP,
+      CLEAR_SOFT: 120,          // arena/lane wall blend beyond room/tunnel radius
+      ARENA_DROP: 640,          // flat arena floor below the room/lane height
+      ARENA_RISE: 760,          // domed ceiling above the room/lane height
+      FOOT: { minX:bMinX, maxX:bMaxX, minZ:bMinZ, maxZ:bMaxZ },
+      biome: game.sandwichBiome || 'grassy',   // grassy | rocky | snow | volcanic
+      snowLine: 0.68,
+    };
+  } else {
+    game.sandwichTerrain = null;
+  }
+
   const bounds={minX:bMinX,minY:bMinY,minZ:bMinZ,maxX:bMaxX,maxY:bMaxY,maxZ:bMaxZ};
+
+  // Fill the streamed rock mountains across the map footprint (the per-frame
+  // game loop streams more as the ship roams the endless range).
+  try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
 
   // Show loading UI
   const mapGenHud = document.getElementById('map-gen-hud');
@@ -46829,15 +47410,23 @@ function buildRoomGraphLevel(level) {
   const finalGridRes = (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96;
   const previewGridRes = Math.min(48, finalGridRes);
 
+  // Sandwich terrain mode: NO cosmic tube walls at all. The map is just the
+  // pathway skeleton (carve + spawn/champion); the world is the streamed
+  // mountains. Skip the marching-cubes wall mesh entirely.
+  if (game.sandwichTerrain && game.sandwichTerrain.ON) {
+    if (mapGenHud) mapGenHud.style.display = 'none';
+  }
   // Worker available and enabled
-  if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
+  else if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
     game.levelWorker.onmessage = (e) => {
       const {gridRes, positions} = e.data;
 
       if (gridRes === previewGridRes && previewGridRes !== finalGridRes) {
         createMeshFromPositions(positions, previewGridRes);
         // Dispatch high-res job
-        game.levelWorker.postMessage({bounds, gridRes: finalGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
+        // terrain:null on purpose ; the cosmic marching-cubes mesh stays
+        // tubes-only (crisp), while mountains render as a separate rock mesh.
+        game.levelWorker.postMessage({bounds, gridRes: finalGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK, terrain: null});
       } else if (gridRes === finalGridRes) {
         // Remove low-res, add high-res.
         // createMeshFromPositions now adds TWO meshes per
@@ -46854,7 +47443,7 @@ function buildRoomGraphLevel(level) {
     };
 
     // Start with low-res preview (or final res directly if final is already low)
-    game.levelWorker.postMessage({bounds, gridRes: previewGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK});
+    game.levelWorker.postMessage({bounds, gridRes: previewGridRes, spheres: game.levelSpheres, cylinders: game.levelCylinders, smoothK: game.sdfSmoothK, terrain: null});
   } else {
     // Fallback: synchronous marching cubes (no worker)
     const gridRes = 96;
@@ -48088,6 +48677,9 @@ function updateEnemyHealthBars() {
   if (!player.position || player.shipState === 'dead') {
     for (const bar of hbarPool.bars) _hbarDisplay(bar, 'none');
     for (const mk of hbarPool.markers) _hbarDisplay(mk, 'none');
+    // Also hide the ship-name callout labels; otherwise the last-frame
+    // nameplates stay stuck on screen for the whole death-cam.
+    for (const lbl of hbarPool.labels) _hbarDisplay(lbl, 'none');
     return;
   }
 
@@ -48458,6 +49050,17 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
+  // Stream the endless sandwich mountains around the ship (Ace-Starship style),
+  // and advance the shader clock (grass sway + lava pulse).
+  if (game.sandwichTerrain && game.sandwichTerrain.ON && player && player.position) {
+    try {
+      _swU.uTime.value += dt;
+      // Fade grass around the SHIP (known-good world position) so near grass is
+      // always at full height ; camera ref can be a stale/lobby cam at origin.
+      _swU.uCam.value.set(player.position.x, player.position.y, player.position.z);
+      updateSandwichStream(player.position.x, player.position.z);
+    } catch (_) {}
+  }
   if (_vrThrottleTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
   if (_xrPresentingForOverlays) {
     const _clearCadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 6, 12, 30) : 6;
