@@ -57,7 +57,12 @@
   </div>
 
   <div class="seg">
-  <div class="row"><label>Grass</label><input id="grass" type="range" min="0" max="1" step="1"><span class="val" id="grass_v"></span></div>
+  <div class="row"><label>Grass↔rock</label><input id="srock" type="range" min="0.15" max="0.85" step="0.01"><span class="val" id="srock_v"></span></div>
+  <div class="row"><label>Rock↔grass top</label><input id="sgrass" type="range" min="0.30" max="0.98" step="0.01"><span class="val" id="sgrass_v"></span></div>
+  <div class="row"><label>Grass blades</label><input id="grass" type="range" min="0" max="1" step="1"><span class="val" id="grass_v"></span></div>
+  <div class="row"><label>Blade density</label><input id="gdens" type="range" min="1" max="14" step="1"><span class="val" id="gdens_v"></span></div>
+  <div class="row"><label>Blade height</label><input id="gheight" type="range" min="20" max="160" step="5"><span class="val" id="gheight_v"></span></div>
+  <div class="row"><label>Blade width</label><input id="gwidth" type="range" min="1.5" max="12" step="0.5"><span class="val" id="gwidth_v"></span></div>
   <div class="row"><label>Snow shine</label><input id="shine" type="range" min="0.05" max="1.0" step="0.01"><span class="val" id="shine_v"></span></div>
   <div class="row"><label>Lava glow</label><input id="glow" type="range" min="0" max="3" step="0.1"><span class="val" id="glow_v"></span></div>
   </div>
@@ -99,24 +104,29 @@ function ceilYc(x,z,T){const c=ceilY(x,z,T);const r=routeAt(x,z,T);if(r.o<=0)ret
 
 // ---------- biomes ----------
 const BIOMES = {
-  grassy:  { name:'Grassy + snow', sky:0xb8cee0, fog:0xb8cee0,
+  grassy:  { name:'Grassy + snow', sky:0xbef0b4, fog:0xa8cd9e,
     gLo:0x33571f, gMid:0x4d7a33, gHi:0x7b7a5a, gSnow:0xeef4fb,
-    cLo:0x596170, cHi:0xb4becd },
+    cLo:0x596170, cHi:0xb4becd, rock:0x6f6552, moss:0x3f5e26,
+    tGrass:0x5fae4e, tRock:0x6b6f74, tSnow:0xeef2f5, tMoss:0x3f5e26, hemi:0xbfe6a8 },
   rocky:   { name:'Rocky + snow', sky:0xafc2d6, fog:0xafc2d6,
     gLo:0x2c313c, gMid:0x5c636f, gHi:0x97a2b0, gSnow:0xeef4fb,
-    cLo:0x3c4150, cHi:0x9aa3b2 },
+    cLo:0x3c4150, cHi:0x9aa3b2,
+    tGrass:0x7c8794, tRock:0x44484f, tSnow:0xeef2f5, tMoss:0x55606b, hemi:0xb8c4d2 },
   snow:    { name:'Frozen', sky:0xd2e2f0, fog:0xd2e2f0,
     gLo:0x6f8aa0, gMid:0xa9c2d6, gHi:0xd8e6f2, gSnow:0xffffff,
-    cLo:0x8fa6bd, cHi:0xeaf4ff },
+    cLo:0x8fa6bd, cHi:0xeaf4ff,
+    tGrass:0xbcd2e0, tRock:0x6f7a86, tSnow:0xffffff, tMoss:0x9fb4c6, hemi:0xd8e8f5 },
   volcanic:{ name:'Volcanic', sky:0x3a1410, fog:0x4a1c14,
     gLo:0xb5391a, gMid:0x5a2a22, gHi:0x36302e, gSnow:0x9a9088, gSnowFix:0x9a9088,
-    cLo:0x2a2220, cHi:0x6e5a50 },
+    cLo:0x2a2220, cHi:0x6e5a50,
+    tGrass:0x4a423a, tRock:0x35302c, tSnow:0x8a7f74, tMoss:0x2a2220, hemi:0x6a4038 },
 };
 function biomeColors(b){ // returns array of {color, tmp}
   const C={
     gLo:new THREE.Color(b.gLo), gMid:new THREE.Color(b.gMid),
     gHi:new THREE.Color(b.gHi), gSnow:new THREE.Color(b.gSnowFix!==undefined?b.gSnowFix:b.gSnow),
-    cLo:new THREE.Color(b.cLo), cHi:new THREE.Color(b.cHi) };
+    cLo:new THREE.Color(b.cLo), cHi:new THREE.Color(b.cHi),
+    rock:new THREE.Color(b.rock!==undefined?b.rock:0x6f6552), moss:new THREE.Color(b.moss!==undefined?b.moss:0x3f5e26) };
   return C;
 }
 
@@ -125,7 +135,8 @@ const params = {
   mapKey:'race_branch', biome:'grassy', cam:'fly',
   AMP:840, spacing:430, EXPONENT:1.7, WARP:0, GAP:580,
   snowLine:0.3, laneWidth:120, arenaDrop:900, arenaRise:1000, cells:20,
-  fog:3, sun:3000, ceiling:1, grass:1, shine:0.22, glow:1.0,
+  fog:3, sun:3000, ceiling:1, grass:1, grassDensity:11, grassHeight:55, bladeWidth:4, shine:0.22, glow:1.0,
+  slopeGrass:0.82, slopeRock:0.50,
 };
 
 // ---------- three setup ----------
@@ -169,14 +180,24 @@ function buildT(){
   scene.background=new THREE.Color(b.sky);
   scene.fog=new THREE.FogExp2(b.fog, params.fog*1e-5);
   sun.position.set(1200,params.sun,800);
+  if(b.hemi!==undefined){ hemi.color.set(b.hemi); hemi.groundColor.set(0x6f7d5a); }  // green valley ambient
 }
 
 // ---------- chunk streaming ----------
 const CH=900, VIEW=5; let chunks=new Map();
 const tmpC=new THREE.Color();
-function colGround(y){
+function patch(x,z){ const n=noise2(x*0.0016+5.1,z*0.0016-2.3)*0.62+noise2(x*0.0041+11.0,z*0.0041+7.0)*0.38; const v=(n+1)*0.5; return v<0?0:(v>1?1:v); }
+function colGround(x,z,y){
   const lo=T.YMID-T.AMP*0.5, hi=T.YMID+T.AMP*0.4; let t=(y-lo)/(hi-lo);t=t<0?0:(t>1?1:t);
   const c=T.cols, sl=T.snowLine;
+  if(params.biome==='grassy'){
+    const pc=patch(x,z);
+    if(pc<0.40) tmpC.copy(c.rock).lerp(c.moss,pc/0.40);
+    else if(pc<0.68) tmpC.copy(c.moss).lerp(c.gMid,(pc-0.40)/0.28);
+    else tmpC.copy(c.gMid).lerp(c.gHi,(pc-0.68)/0.32);
+    if(t>sl) tmpC.lerp(c.gSnow,Math.min(1,(t-sl)/Math.max(0.01,1-sl)));
+    return tmpC;
+  }
   if(t<0.42) return tmpC.copy(c.gLo).lerp(c.gMid,t/0.42);
   if(t<sl)   return tmpC.copy(c.gMid).lerp(c.gHi,(t-0.42)/Math.max(0.01,sl-0.42));
   return tmpC.copy(c.gHi).lerp(c.gSnow,(t-sl)/Math.max(0.01,1-sl));
@@ -187,20 +208,43 @@ function colCeil(y){
 }
 // ---------- materials: shiny snow + glowing lava (via onBeforeCompile) ----------
 const stU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.7},
-              uLava:{value:0}, uSnowRough:{value:0.22}, uLavaGlow:{value:1.0} };
+              uLava:{value:0}, uSnowRough:{value:0.22}, uLavaGlow:{value:1.0},
+              uCam:{value:new THREE.Vector3()}, uFadeA:{value:1600}, uFadeB:{value:2500},
+              uK:{value:8}, uGrassH:{value:60}, uBlade:{value:9}, uBladeW:{value:4.5},
+              uColGrass:{value:new THREE.Color(0x5fae4e)}, uColRock:{value:new THREE.Color(0x6b6f74)},
+              uColSnow:{value:new THREE.Color(0xeef2f5)}, uColMoss:{value:new THREE.Color(0x3f5e26)},
+              uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50} };
 function syncStU(){ stU.uYMid.value=T.YMID; stU.uAMP.value=T.AMP; stU.uSnow.value=T.snowLine;
-  stU.uLava.value=(params.biome==='volcanic')?1:0; stU.uSnowRough.value=params.shine; stU.uLavaGlow.value=params.glow; }
-function makeTerrainMat(){
-  const m=new THREE.MeshStandardMaterial({vertexColors:true,flatShading:true,roughness:1,metalness:0,side:THREE.DoubleSide});
+  stU.uLava.value=(params.biome==='volcanic')?1:0; stU.uSnowRough.value=params.shine; stU.uLavaGlow.value=params.glow;
+  stU.uFadeA.value=GRASS_VIEW*CH*0.58; stU.uFadeB.value=GRASS_VIEW*CH*0.92;
+  stU.uBlade.value=Math.max(3,Math.round(72/params.grassDensity)); stU.uGrassH.value=params.grassHeight; stU.uBladeW.value=params.bladeWidth;
+  const B=BIOMES[params.biome];
+  stU.uColGrass.value.set(B.tGrass!==undefined?B.tGrass:0x5fae4e);
+  stU.uColRock.value.set(B.tRock!==undefined?B.tRock:0x6b6f74);
+  stU.uColSnow.value.set(B.tSnow!==undefined?B.tSnow:0xeef2f5);
+  stU.uColMoss.value.set(B.tMoss!==undefined?B.tMoss:0x3f5e26);
+  stU.uSlopeGrass.value=params.slopeGrass; stU.uSlopeRock.value=params.slopeRock; }
+function makeTerrainMat(isCeil){
+  const m=new THREE.MeshStandardMaterial({flatShading:true,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.onBeforeCompile=(sh)=>{
     sh.uniforms.uTime=stU.uTime; sh.uniforms.uYMid=stU.uYMid; sh.uniforms.uAMP=stU.uAMP;
     sh.uniforms.uSnow=stU.uSnow; sh.uniforms.uLava=stU.uLava;
     sh.uniforms.uSnowRough=stU.uSnowRough; sh.uniforms.uLavaGlow=stU.uLavaGlow;
-    sh.vertexShader='varying float vWY;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y;');
-    sh.fragmentShader='varying float vWY;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow;\n'+sh.fragmentShader;
+    sh.uniforms.uColGrass=stU.uColGrass; sh.uniforms.uColRock=stU.uColRock; sh.uniforms.uColSnow=stU.uColSnow;
+    sh.uniforms.uColMoss=stU.uColMoss; sh.uniforms.uSlopeGrass=stU.uSlopeGrass; sh.uniforms.uSlopeRock=stU.uSlopeRock;
+    sh.uniforms.uCeil={value:isCeil?1:0};
+    sh.vertexShader='varying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;');
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss;\n'
+      +'float thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
+      +'float tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=thsh(i),b=thsh(i+vec2(1.0,0.0)),c=thsh(i+vec2(0.0,1.0)),d=thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
+      +'float tpatch(vec2 p){float n=tvn(p*0.0016+vec2(5.1,-2.3))*0.62+tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
+      +sh.fragmentShader;
+    // slope + height surface: grass on gentle ground, rock on steep, snow on peaks
+    sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
+      '#include <color_fragment>\n {\n vec3 fn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n vec3 terr=mix(uColRock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n if(uCeil>0.5) terr*=0.62;\n diffuseColor.rgb=terr;\n }');
     // snow: drop roughness so the sun glints off the caps (reflective snow)
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
-      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
+      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snowR=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snowR);');
     // lava: low valleys glow + pulse (volcanic biome only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
       '#include <emissivemap_fragment>\n if(uLava>0.5){ float _te=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0); float _lava=1.0-smoothstep(0.03,0.18,_te); float _pulse=0.65+0.35*sin(uTime*2.0+vWY*0.012); totalEmissiveRadiance+=vec3(1.4,0.4,0.06)*_lava*_pulse*uLavaGlow; }');
@@ -208,37 +252,49 @@ function makeTerrainMat(){
   return m;
 }
 
-// ---------- procedural grass (instanced blades, grassy biome) ----------
-const GRASS_VIEW=2;
+// ---------- INSTANCED grass blades (distinct blades on the green grassy ground) ----------
+const GRASS_VIEW=3;
 let _bladeGeo=null, _grassMat=null;
-function bladeGeo(){ if(_bladeGeo)return _bladeGeo; const h=34,w=5;
-  const v=new Float32Array([-w/2,0,0, w/2,0,0, -w*0.28,h*0.55,0, w*0.28,h*0.55,0, 0,h,0]);
+function bladeGeo(){ if(_bladeGeo)return _bladeGeo;
+  // unit blade (1 wide, 1 tall), scaled per instance; tapered, dark base -> bright tip
+  const v=new Float32Array([-0.5,0,0, 0.5,0,0, -0.32,0.5,0, 0.32,0.5,0, 0,1,0]);
+  const base=[0.13,0.26,0.10], mid=[0.27,0.45,0.16], tip=[0.56,0.70,0.32];
+  const col=new Float32Array([base[0],base[1],base[2], base[0],base[1],base[2], mid[0],mid[1],mid[2], mid[0],mid[1],mid[2], tip[0],tip[1],tip[2]]);
   const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
+  g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
   g.setIndex([0,1,2, 1,3,2, 2,3,4]); g.computeVertexNormals(); _bladeGeo=g; return g; }
 function grassMat(){ if(_grassMat)return _grassMat;
-  const m=new THREE.MeshStandardMaterial({color:0x4f7a30,roughness:1,metalness:0,side:THREE.DoubleSide});
-  m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=stU.uTime;
-    sh.vertexShader='uniform float uTime;\n'+sh.vertexShader.replace('#include <begin_vertex>',
-      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float sway=sin(uTime*1.6+ph)*0.16+sin(uTime*3.3+ph*1.7)*0.05;\n transformed.x+=sway*transformed.y;'); };
+  const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
+  m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=stU.uTime; sh.uniforms.uCam=stU.uCam; sh.uniforms.uFadeA=stU.uFadeA; sh.uniforms.uFadeB=stU.uFadeB;
+    sh.vertexShader='uniform float uTime,uFadeA,uFadeB;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float gfade=1.0-smoothstep(uFadeA,uFadeB,distance(ip.xz,uCam.xz));\n float gph=ip.x*0.05+ip.z*0.05;\n float gsw=sin(uTime*1.6+gph)*0.22+sin(uTime*3.3+gph*1.7)*0.08;\n transformed.x+=gsw*transformed.y;\n transformed.y*=gfade;'); };
   _grassMat=m; return m; }
 const _gd=new THREE.Object3D();
 function buildGrass(x0,z0){
   if(params.biome!=='grassy'||!params.grass) return null;
-  const N=Math.max(8,Math.round(params.cells*0.9)), step=CH/N, pts=[];
+  const spacing=Math.max(5,Math.round(130/params.grassDensity));
+  const N=Math.min(80,Math.max(6,Math.round(CH/spacing))), step=CH/N, pts=[];
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
     const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=groundYc(x,z,T);
     const t=(y-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
-    if(t<0.04||t>T.snowLine) continue;          // grass band: above lava/floor, below snow
-    pts.push(x,y,z);
+    if(t>T.snowLine) continue;          // snow caps: no grass
+    const pc=patch(x,z);
+    if(pc<0.28) continue;               // bare rocky patch
+    if(Math.random()>Math.min(1,(pc-0.16)*1.6)) continue;  // sparser in moss, denser in lush
+    pts.push(x,y,z,0.55+pc*0.85);       // 4th = per-blade height factor
   }
-  if(!pts.length) return null;
-  const im=new THREE.InstancedMesh(bladeGeo(),grassMat(),pts.length/3);
-  for(let k=0;k<pts.length/3;k++){ _gd.position.set(pts[k*3],pts[k*3+1]-1,pts[k*3+2]);
-    _gd.rotation.set(0,Math.random()*6.283,0); const s=0.8+Math.random()*0.9; _gd.scale.set(s,s,s);
+  if(pts.length<4) return null;
+  const count=pts.length/4, H=params.grassHeight, W=params.bladeWidth;
+  const im=new THREE.InstancedMesh(bladeGeo(),grassMat(),count);
+  for(let k=0;k<count;k++){ const hf=pts[k*4+3];
+    _gd.position.set(pts[k*4],pts[k*4+1]-1,pts[k*4+2]);
+    _gd.rotation.set((Math.random()-0.5)*0.3, Math.random()*6.283, (Math.random()-0.5)*0.3);
+    _gd.scale.set(W*(0.7+Math.random()*0.6), H*hf*(0.75+Math.random()*0.5), 1);
     _gd.updateMatrix(); im.setMatrixAt(k,_gd.matrix); }
-  im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; scene.add(im); return im;
+  im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.renderOrder=1; scene.add(im); return im;
 }
-function removeGrass(im){ if(im){scene.remove(im); im.dispose&&im.dispose();} }
+function removeGrass(im){ if(im){ scene.remove(im); if(im.dispose)im.dispose(); } }  // shares blade geo; don't dispose it
+function regrass(){ for(const c of chunks.values()){ if(c.grassBuilt){removeGrass(c.grass);c.grass=null;c.grassBuilt=false;} } }  // force rebuild on density/height/width change
 
 function buildShell(x0,z0,isCeil){
   const n=params.cells, step=CH/n;
@@ -247,7 +303,7 @@ function buildShell(x0,z0,isCeil){
     const x=x0+i*step,z=z0+j*step;
     const y=isCeil?ceilYc(x,z,T):groundYc(x,z,T);
     verts[p]=x;verts[p+1]=y;verts[p+2]=z;
-    const col=isCeil?colCeil(y):colGround(y); cols[p]=col.r;cols[p+1]=col.g;cols[p+2]=col.b; p+=3;
+    const col=isCeil?colCeil(y):colGround(x,z,y); cols[p]=col.r;cols[p+1]=col.g;cols[p+2]=col.b; p+=3;
   }
   const idx=[];const row=n+1;
   for(let j=0;j<n;j++)for(let i=0;i<n;i++){const a=j*row+i,b=a+1,c=a+row,d=c+1;if(isCeil){idx.push(a,b,c,b,d,c);}else{idx.push(a,c,b,b,c,d);}}
@@ -255,7 +311,7 @@ function buildShell(x0,z0,isCeil){
   g.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
   g.setAttribute('color',new THREE.Float32BufferAttribute(cols,3));
   g.setIndex(idx);g.computeVertexNormals();
-  const m=new THREE.Mesh(g,makeTerrainMat());
+  const m=new THREE.Mesh(g,makeTerrainMat(isCeil));
   scene.add(m);return m;
 }
 function disposeChunk(c){for(const m of [c.g,c.c]){if(m){scene.remove(m);m.geometry.dispose();m.material.dispose();}} removeGrass(c.grass);}
@@ -346,6 +402,13 @@ bind('amp','AMP');bind('spacing','spacing');bind('exp','EXPONENT',x=>x.toFixed(2
 bind('gap','GAP');bind('snow','snowLine',x=>x.toFixed(2));bind('lane','laneWidth');bind('drop','arenaDrop');bind('rise','arenaRise');
 bind('cells','cells');bind('fog','fog',x=>(x).toFixed(0));bind('sun','sun');bind('ceil','ceiling',x=>x?'on':'off');
 bind('grass','grass',x=>x?'on':'off');
+// slope thresholds update live (surface grass/rock split)
+{const e=document.getElementById('srock'),v=document.getElementById('srock_v');e.value=params.slopeRock;v.textContent=params.slopeRock.toFixed(2);e.addEventListener('input',()=>{params.slopeRock=parseFloat(e.value);v.textContent=params.slopeRock.toFixed(2);stU.uSlopeRock.value=params.slopeRock;});}
+{const e=document.getElementById('sgrass'),v=document.getElementById('sgrass_v');e.value=params.slopeGrass;v.textContent=params.slopeGrass.toFixed(2);e.addEventListener('input',()=>{params.slopeGrass=parseFloat(e.value);v.textContent=params.slopeGrass.toFixed(2);stU.uSlopeGrass.value=params.slopeGrass;});}
+// grass density / height / width update shader uniforms live (no rebuild needed)
+{const e=document.getElementById('gdens'),v=document.getElementById('gdens_v');e.value=params.grassDensity;v.textContent=params.grassDensity;e.addEventListener('input',()=>{params.grassDensity=parseFloat(e.value);v.textContent=params.grassDensity;regrass();});}
+{const e=document.getElementById('gheight'),v=document.getElementById('gheight_v');e.value=params.grassHeight;v.textContent=params.grassHeight;e.addEventListener('input',()=>{params.grassHeight=parseFloat(e.value);v.textContent=params.grassHeight;regrass();});}
+{const e=document.getElementById('gwidth'),v=document.getElementById('gwidth_v');e.value=params.bladeWidth;v.textContent=params.bladeWidth;e.addEventListener('input',()=>{params.bladeWidth=parseFloat(e.value);v.textContent=params.bladeWidth;regrass();});}
 {const e=document.getElementById('shine'),v=document.getElementById('shine_v');e.value=params.shine;v.textContent=params.shine.toFixed(2);e.addEventListener('input',()=>{params.shine=parseFloat(e.value);v.textContent=params.shine.toFixed(2);stU.uSnowRough.value=params.shine;});}
 {const e=document.getElementById('glow'),v=document.getElementById('glow_v');e.value=params.glow;v.textContent=params.glow.toFixed(1);e.addEventListener('input',()=>{params.glow=parseFloat(e.value);v.textContent=params.glow.toFixed(1);stU.uLavaGlow.value=params.glow;});}
 mapSel.onchange=()=>{params.mapKey=mapSel.value;flyT=0;scheduleRebuild(false);};
@@ -378,6 +441,7 @@ function loop(now){
   const dt=Math.min(0.05,(now-last)/1000);last=now;
   stU.uTime.value+=dt;
   updateCam(dt);
+  stU.uCam.value.copy(camera.position);
   streamChunks(camera.position.x,camera.position.z,2);
   renderer.render(scene,camera);
   frames++;fpsT+=dt;if(fpsT>0.5){document.getElementById('fps').textContent=Math.round(frames/fpsT)+' fps · '+chunks.size+' chunks';frames=0;fpsT=0;}

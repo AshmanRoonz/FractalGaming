@@ -14136,7 +14136,7 @@ const _SW_BUILD_PER_FRAME = 2;
 // distinct rock that lightens toward its hanging tips. Default biome 'grassy':
 // green slopes with bright snow caps under a grey rock ceiling.
 const _SW_BIOMES = {
-  grassy:  { sky:0xb8cee0, gLo:0x33571f, gMid:0x4d7a33, gHi:0x7b7a5a, gSnow:0xeef4fb, cLo:0x596170, cHi:0xb4becd },
+  grassy:  { sky:0xb8cee0, gLo:0x33571f, gMid:0x4d7a33, gHi:0x7b7a5a, gSnow:0xeef4fb, cLo:0x596170, cHi:0xb4becd, rock:0x6f6552, moss:0x3f5e26 },
   rocky:   { sky:0xafc2d6, gLo:0x2c313c, gMid:0x5c636f, gHi:0x97a2b0, gSnow:0xeef4fb, cLo:0x3c4150, cHi:0x9aa3b2 },
   snow:    { sky:0xd2e2f0, gLo:0x6f8aa0, gMid:0xa9c2d6, gHi:0xd8e6f2, gSnow:0xffffff, cLo:0x8fa6bd, cHi:0xeaf4ff },
   volcanic:{ sky:0x4a1c14, gLo:0xb5391a, gMid:0x5a2a22, gHi:0x36302e, gSnow:0x9a9088, cLo:0x2a2220, cHi:0x6e5a50 },
@@ -14144,11 +14144,25 @@ const _SW_BIOMES = {
 const _SW_tmpC = new THREE.Color();
 const _SW_cA = new THREE.Color(), _SW_cB = new THREE.Color();
 function _swPal(T){ return _SW_BIOMES[(T && T.biome) || 'grassy'] || _SW_BIOMES.grassy; }
-// Ground colour by height: low slopes -> mid -> high rock -> snow caps.
-function _swColGround(wy, T, out) {
+// Low-frequency "ground cover" noise, 0 (bare rock) .. 1 (lush), patches ~250-650u.
+function _stPatch(x, z) {
+  const n = _stNoise2(x*0.0016+5.1, z*0.0016-2.3)*0.62 + _stNoise2(x*0.0041+11.0, z*0.0041+7.0)*0.38;
+  const v = (n + 1) * 0.5; return v < 0 ? 0 : (v > 1 ? 1 : v);
+}
+// Ground colour. Grassy biome varies by a patch noise (rock -> moss -> grass) so
+// the ground isn't uniform, with snow caps at altitude. Other biomes: height ramp.
+function _swColGround(x, z, wy, T, out) {
   const P = _swPal(T), sl = (T && T.snowLine) || 0.72;
   const lo = T.YMID - T.AMP * 0.5, hi = T.YMID + T.AMP * 0.4;
   let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  if (T.biome === 'grassy') {
+    const pc = _stPatch(x, z);
+    if (pc < 0.40) out.copy(_SW_cA.set(P.rock)).lerp(_SW_cB.set(P.moss), pc / 0.40);
+    else if (pc < 0.68) out.copy(_SW_cA.set(P.moss)).lerp(_SW_cB.set(P.gMid), (pc - 0.40) / 0.28);
+    else out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (pc - 0.68) / 0.32);
+    if (t > sl) out.lerp(_SW_cB.set(P.gSnow), Math.min(1, (t - sl) / Math.max(0.01, 1 - sl)));
+    return out;
+  }
   if (t < 0.42) out.copy(_SW_cA.set(P.gLo)).lerp(_SW_cB.set(P.gMid), t / 0.42);
   else if (t < sl) out.copy(_SW_cA.set(P.gMid)).lerp(_SW_cB.set(P.gHi), (t - 0.42) / Math.max(0.01, sl - 0.42));
   else out.copy(_SW_cA.set(P.gHi)).lerp(_SW_cB.set(P.gSnow), (t - sl) / Math.max(0.01, 1 - sl));
@@ -14163,6 +14177,77 @@ function _swColCeil(wy, T, out) {
 }
 
 // One height-field shell (ground or ceiling) over a single chunk's footprint.
+// ---- terrain material FX (reflective snow + glowing lava) ----
+const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.7},
+               uLava:{value:0}, uSnowRough:{value:0.22}, uLavaGlow:{value:1.0},
+               uCam:{value:new THREE.Vector3()}, uFadeA:{value:1600}, uFadeB:{value:2500} };
+function _swSyncFX() {
+  const T = game.sandwichTerrain; if (!T) return;
+  _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
+  _swU.uLava.value = (T.biome === 'volcanic') ? 1 : 0;
+  _swU.uSnowRough.value = (typeof game.sandwichShine === 'number') ? game.sandwichShine : 0.22;
+  _swU.uLavaGlow.value = (typeof game.sandwichLavaGlow === 'number') ? game.sandwichLavaGlow : 1.0;
+  // Grass fades out smoothly well before the loaded edge so there's no hard ring.
+  _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58;
+  _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92;
+}
+function _swPatchTerrainMat(m) {
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime=_swU.uTime; sh.uniforms.uYMid=_swU.uYMid; sh.uniforms.uAMP=_swU.uAMP;
+    sh.uniforms.uSnow=_swU.uSnow; sh.uniforms.uLava=_swU.uLava;
+    sh.uniforms.uSnowRough=_swU.uSnowRough; sh.uniforms.uLavaGlow=_swU.uLavaGlow;
+    sh.vertexShader='varying float vWY;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y;');
+    sh.fragmentShader='varying float vWY;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow;\n'+sh.fragmentShader;
+    sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
+      '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
+      '#include <emissivemap_fragment>\n if(uLava>0.5){ float _te=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0); float _lava=1.0-smoothstep(0.03,0.18,_te); float _pulse=0.65+0.35*sin(uTime*2.0+vWY*0.012); totalEmissiveRadiance+=vec3(1.4,0.4,0.06)*_lava*_pulse*uLavaGlow; }');
+  };
+  return m;
+}
+
+// ---- procedural grass (instanced wind-swaying blades, grassy biome) ----
+const _SW_GRASS_VIEW = 3;
+let _swBladeGeo=null, _swGrassMat=null;
+const _swGd = new THREE.Object3D();
+function _swBladeGeoGet(){ if(_swBladeGeo)return _swBladeGeo; const h=64,w=8;
+  const v=new Float32Array([-w/2,0,0, w/2,0,0, -w*0.30,h*0.55,0, w*0.30,h*0.55,0, 0,h,0]);
+  const base=[0.15,0.30,0.12], mid=[0.27,0.45,0.16], tip=[0.55,0.66,0.30];
+  const col=new Float32Array([base[0],base[1],base[2], base[0],base[1],base[2], mid[0],mid[1],mid[2], mid[0],mid[1],mid[2], tip[0],tip[1],tip[2]]);
+  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
+  g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+  g.setIndex([0,1,2, 1,3,2, 2,3,4]); g.computeVertexNormals(); _swBladeGeo=g; return g; }
+function _swGrassMatGet(){ if(_swGrassMat)return _swGrassMat;
+  const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
+  m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uFadeA=_swU.uFadeA; sh.uniforms.uFadeB=_swU.uFadeB;
+    sh.vertexShader='uniform float uTime,uFadeA,uFadeB;\nuniform vec3 uCam;\n'+sh.vertexShader.replace('#include <begin_vertex>',
+      '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float sway=sin(uTime*1.6+ph)*0.16+sin(uTime*3.3+ph*1.7)*0.05;\n transformed.x+=sway*transformed.y;\n float gfade=1.0-smoothstep(uFadeA,uFadeB,distance(ip.xz,uCam.xz));\n transformed.y*=gfade;\n transformed.x*=mix(0.35,1.0,gfade);'); };
+  _swGrassMat=m; return m; }
+function _swBuildGrass(x0,z0,T){
+  if(game.sandwichGrass===false || (T.biome||'grassy')!=='grassy') return null;
+  const spacing=game.sandwichGrassSpacing||16;
+  const N=Math.min(96,Math.max(6,Math.round(_SW_CHUNK/spacing))), step=_SW_CHUNK/N, pts=[];
+  for(let j=0;j<N;j++)for(let i=0;i<N;i++){
+    const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=_stGroundYCarved(x,z,T);
+    const t=(y-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
+    if(t>(T.snowLine||0.7)) continue;          // snow caps: no grass
+    const pc=_stPatch(x,z);                     // ground cover: 0 rocky .. 1 lush
+    if(pc<0.30) continue;                        // bare rocky patch: no grass
+    if(Math.random() > Math.min(1,(pc-0.18)*1.5)) continue;  // thinner in moss, denser in lush
+    pts.push(x,y,z, 0.45+pc*0.95);              // 4th value = per-blade height factor
+  }
+  if(pts.length<4) return null;
+  const count=pts.length/4;
+  const im=new THREE.InstancedMesh(_swBladeGeoGet(),_swGrassMatGet(),count);
+  for(let k=0;k<count;k++){ const hf=pts[k*4+3];
+    _swGd.position.set(pts[k*4],pts[k*4+1]-1,pts[k*4+2]);
+    _swGd.rotation.set(0,Math.random()*6.283,0);
+    const s=hf*(0.7+Math.random()*0.5); _swGd.scale.set(s,s,s);
+    _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
+  im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.userData={isSandwichTerrain:true}; scene.add(im); return im;
+}
+function _swRemoveGrass(im){ if(im){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(_){} } }
+
 function _swBuildShell(x0, z0, isCeil, T) {
   const n = _SW_CELLS, step = _SW_CHUNK / n;
   const nVert = (n + 1) * (n + 1);
@@ -14174,7 +14259,7 @@ function _swBuildShell(x0, z0, isCeil, T) {
       const x = x0 + i * step, z = z0 + j * step;
       const y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
       verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
-      if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(y, T, _SW_tmpC);
+      if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
       cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
       p += 3;
     }
@@ -14192,10 +14277,10 @@ function _swBuildShell(x0, z0, isCeil, T) {
   geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
   geo.setIndex(idx);
   geo.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({
+  const mat = _swPatchTerrainMat(new THREE.MeshStandardMaterial({
     vertexColors: true, flatShading: true, roughness: 1.0, metalness: 0.0,
     side: THREE.DoubleSide,
-  });
+  }));
   const mesh = new THREE.Mesh(geo, mat);
   mesh.userData = { isSandwichTerrain: true };
   mesh.renderOrder = -2;
@@ -14207,6 +14292,7 @@ function _swDisposeChunk(c) {
   for (const m of [c.ground, c.ceiling]) {
     try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); } catch (_) {}
   }
+  _swRemoveGrass(c.grass);
 }
 
 // Atmosphere: a hazy biome sky + matched fog so distant peaks fade into the
@@ -14261,6 +14347,19 @@ function updateSandwichStream(px, pz, budget) {
     const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
     if (Math.abs(cx - scx) > _SW_VIEW + 1 || Math.abs(cz - scz) > _SW_VIEW + 1) { _swDisposeChunk(c); chunks.delete(key); }
   }
+  // Grass: build on the nearest chunks (grassy biome), drop it from far ones.
+  // One build per call to avoid frame hitches.
+  const wantGrass = (game.sandwichGrass !== false) && ((T.biome || 'grassy') === 'grassy');
+  let gBuilt = 0;
+  for (const [key, c] of chunks) {
+    const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
+    const near = Math.max(Math.abs(cx - scx), Math.abs(cz - scz)) <= _SW_GRASS_VIEW;
+    if (near && wantGrass && !c.grassBuilt && gBuilt < 1) {
+      c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
+    } else if ((!near || !wantGrass) && c.grassBuilt) {
+      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false;
+    }
+  }
 }
 
 // Called at level build: reset, then synchronously fill the map footprint (plus a
@@ -14269,7 +14368,7 @@ function initSandwichTerrain() {
   resetSandwichTerrain();
   const T = game.sandwichTerrain;
   if (!T || !T.ON || !T.FOOT) return;
-  try { _swApplyAtmosphere(); } catch (_) {}
+  try { _swApplyAtmosphere(); _swSyncFX(); } catch (_) {}
   const F = T.FOOT;
   const cx0 = Math.floor(F.minX / _SW_CHUNK) - 1, cx1 = Math.floor(F.maxX / _SW_CHUNK) + 1;
   const cz0 = Math.floor(F.minZ / _SW_CHUNK) - 1, cz1 = Math.floor(F.maxZ / _SW_CHUNK) + 1;
@@ -14309,6 +14408,36 @@ function setSandwichBiome(name) {
   return name;
 }
 if (typeof window !== 'undefined') window.setSandwichBiome = setSandwichBiome;
+
+// Live material/grass tweaks (no rebuild needed except density).
+function setSandwichGrass(on){ game.sandwichGrass = !!on; return on; }
+function setSandwichGrassDensity(spacing){ game.sandwichGrassSpacing = spacing;
+  if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) { _swRemoveGrass(c.grass); c.grass=null; c.grassBuilt=false; }
+  return spacing; }
+function setSandwichShine(r){ game.sandwichShine=r; _swU.uSnowRough.value=r; return r; }
+function setSandwichLavaGlow(g){ game.sandwichLavaGlow=g; _swU.uLavaGlow.value=g; return g; }
+if (typeof window !== 'undefined') { window.setSandwichGrass=setSandwichGrass; window.setSandwichGrassDensity=setSandwichGrassDensity; window.setSandwichShine=setSandwichShine; window.setSandwichLavaGlow=setSandwichLavaGlow; }
+
+// Diagnostic: run sandwichDebug() in the console to see why grass may be missing.
+function sandwichDebug() {
+  const T = game.sandwichTerrain, chunks = game.sandwichChunks;
+  let grassChunks = 0, grassInst = 0;
+  if (chunks) for (const c of chunks.values()) { if (c.grass) { grassChunks++; grassInst += (c.grass.count || 0); } }
+  const pp = player && player.position;
+  const info = {
+    on: !!(T && T.ON), biome: T && T.biome, grassEnabled: game.sandwichGrass !== false,
+    chunks: chunks ? chunks.size : 0, grassChunks, grassInstances: grassInst,
+    player: pp ? [Math.round(player.position.x), Math.round(player.position.y), Math.round(player.position.z)] : null,
+    uCam: [Math.round(_swU.uCam.value.x), Math.round(_swU.uCam.value.y), Math.round(_swU.uCam.value.z)],
+    fade: [_swU.uFadeA.value | 0, _swU.uFadeB.value | 0],
+    floorUnderShip: (T && pp) ? Math.round(_stGroundYCarved(player.position.x, player.position.z, T)) : null,
+    ceilOverShip: (T && pp) ? Math.round(_stCeilYCarved(player.position.x, player.position.z, T)) : null,
+  };
+  if (T && pp) info.shipHeightAboveFloor = info.player[1] - info.floorUnderShip;
+  console.log('[sandwichDebug]', JSON.stringify(info, null, 2));
+  return info;
+}
+if (typeof window !== 'undefined') window.sandwichDebug = sandwichDebug;
 
 // Evaluate the world SDF: negative = inside playable space, positive = solid wall
 // Rooms blend smoothly with each other and with tunnels (smin),
@@ -48834,9 +48963,16 @@ function gameLoop(timestamp) {
   updateRoundSystem(dt);
   updateStasisFields(dt);
   updateRoomFog(dt);   // (v6.7) per-room atmospheric fog density
-  // Stream the endless sandwich mountains around the ship (Ace-Starship style).
+  // Stream the endless sandwich mountains around the ship (Ace-Starship style),
+  // and advance the shader clock (grass sway + lava pulse).
   if (game.sandwichTerrain && game.sandwichTerrain.ON && player && player.position) {
-    try { updateSandwichStream(player.position.x, player.position.z); } catch (_) {}
+    try {
+      _swU.uTime.value += dt;
+      // Fade grass around the SHIP (known-good world position) so near grass is
+      // always at full height ; camera ref can be a stale/lobby cam at origin.
+      _swU.uCam.value.set(player.position.x, player.position.y, player.position.z);
+      updateSandwichStream(player.position.x, player.position.z);
+    } catch (_) {}
   }
   if (_vrThrottleTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); // (v9) pass dynamic-light flashes into smoke shader uniforms
   if (_xrPresentingForOverlays) {
