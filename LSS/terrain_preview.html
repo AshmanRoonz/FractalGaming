@@ -241,13 +241,13 @@ function makeTerrainMat(isCeil){
       +sh.fragmentShader;
     // slope + height surface: grass on gentle ground, rock on steep, snow on peaks
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
-      '#include <color_fragment>\n {\n vec3 fn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n vec3 terr=mix(uColRock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n if(uCeil>0.5) terr*=0.62;\n diffuseColor.rgb=terr;\n }');
+      '#include <color_fragment>\n {\n vec3 fn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=tvn(vWPos.xz*0.07);\n float moss2=tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n vec3 terr=mix(uColRock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n if(uCeil>0.5) terr*=0.62;\n diffuseColor.rgb=terr;\n }');
     // snow: drop roughness so the sun glints off the caps (reflective snow)
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snowR=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snowR);');
-    // lava: low valleys glow + pulse (volcanic biome only)
+    // lava: glowing icing on the peaks + drips running down (volcanic biome only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
-      '#include <emissivemap_fragment>\n if(uLava>0.5){ float _te=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0); float _lava=1.0-smoothstep(0.03,0.18,_te); float _pulse=0.65+0.35*sin(uTime*2.0+vWY*0.012); totalEmissiveRadiance+=vec3(1.4,0.4,0.06)*_lava*_pulse*uLavaGlow; }');
+      '#include <emissivemap_fragment>\n if(uLava>0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=tvn(vWPos.xz*0.020);\n float c2=tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips,0.0,1.3)*_pulse;\n totalEmissiveRadiance+=vec3(1.7,0.5,0.08)*glow*uLavaGlow;\n }');
   };
   return m;
 }
@@ -274,13 +274,22 @@ function buildGrass(x0,z0){
   if(params.biome!=='grassy'||!params.grass) return null;
   const spacing=Math.max(5,Math.round(130/params.grassDensity));
   const N=Math.min(80,Math.max(6,Math.round(CH/spacing))), step=CH/N, pts=[];
+  const eps=6;                          // finite-diff step for the surface normal
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
     const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=groundYc(x,z,T);
     const t=(y-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
     if(t>T.snowLine) continue;          // snow caps: no grass
+    // slope gate: blades only on flat-enough ground (matches shader's grass/rock split)
+    const yx=groundYc(x+eps,z,T)-groundYc(x-eps,z,T);
+    const yz=groundYc(x,z+eps,T)-groundYc(x,z-eps,T);
+    const ny=(2*eps)/Math.hypot(yx,yz,2*eps);   // surface normal.y, 0=cliff 1=flat
+    const fl=Math.max(0,Math.min(1,(ny-params.slopeRock)/Math.max(0.001,params.slopeGrass-params.slopeRock)));
+    if(fl<0.55) continue;               // steep faces read as bare rock -> no blades
     const pc=patch(x,z);
-    if(pc<0.28) continue;               // bare rocky patch
-    if(Math.random()>Math.min(1,(pc-0.16)*1.6)) continue;  // sparser in moss, denser in lush
+    if(pc<0.42) continue;               // grey / low-moss ground: leave bare to show rock & moss
+    // density follows lushness AND flatness; gaps left open so the mossy ground shows through
+    const lush=Math.min(1,(pc-0.42)/0.40);
+    if(Math.random()>lush*fl*0.92) continue;
     pts.push(x,y,z,0.55+pc*0.85);       // 4th = per-blade height factor
   }
   if(pts.length<4) return null;
