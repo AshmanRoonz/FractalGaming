@@ -14176,7 +14176,7 @@ function _stGapSDFCarved(px,py,pz,T){
 // Streaming params (LSS scale). CHUNK * VIEW must sit comfortably inside the
 // camera far plane (8000) so the fog can swallow the build edge.
 const _SW_CHUNK = 900;       // world units per chunk
-const _SW_CELLS = 32;        // grid cells per chunk side (higher = finer detail)  [lab-tuned]
+const _SW_CELLS = 40;        // grid cells per chunk side (higher = finer detail)
 const _SW_VIEW  = 5;         // chunk radius kept built around the ship
 const _SW_BUILD_PER_FRAME = 2;
 
@@ -14335,7 +14335,16 @@ function _swBuildShell(x0, z0, isCeil, T) {
   let p = 0;
   for (let j = 0; j <= n; j++) {
     for (let i = 0; i <= n; i++) {
-      const x = x0 + i * step, z = z0 + j * step;
+      const gx0 = x0 + i * step, gz0 = z0 + j * step;
+      // De-grid : jitter X/Z by a deterministic world-space hash so facet edges
+      // are irregular/fractal instead of clean grid lines. Keyed off the GLOBAL
+      // vertex index so shared chunk-edge vertices get identical offsets (no
+      // seams). Height field sampled at the jittered point but otherwise
+      // unchanged, so the mountain SHAPE is preserved ; no extra triangles.
+      const _gi = Math.round(gx0 / step), _gj = Math.round(gz0 / step);
+      const _jit = step * 0.40;
+      const x = gx0 + (_stHash2(_gi * 1.7, _gj * 2.3) - 0.5) * _jit;
+      const z = gz0 + (_stHash2(_gi * 3.1 + 5.0, _gj * 1.1 + 9.0) - 0.5) * _jit;
       const y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
       verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
       if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
@@ -14596,7 +14605,7 @@ function sdfNormal(px,py,pz, out, centerSdf) {
 function sdfRaycast(ox,oy,oz,dx,dy,dz,maxDist) {
   // Sphere tracing through the SDF; finds where ray exits playable space
   let t = 4.0; // start ahead to avoid self-hits near walls
-  const MAX_STEPS = 80;
+  const MAX_STEPS = 280;   // capped-step march : more steps to keep range
   let prevD = -999;
   for(let i=0;i<MAX_STEPS;i++){
     if(t>=maxDist) return maxDist;
@@ -14608,7 +14617,7 @@ function sdfRaycast(ox,oy,oz,dx,dy,dz,maxDist) {
     if(d > 0 && d < 1.5) return t;
     prevD = d;
     // Step by |d| (sphere tracing) but enforce minimum step to avoid stalling
-    const step = Math.max(Math.abs(d) * 0.85, 8.0);
+    const step = Math.min(Math.max(Math.abs(d) * 0.85, 4.0), 14.0); // cap so the march cannot overstep thin peak tips (was uncapped -> shots/sightlines passed through peaks)
     t += step;
   }
   return maxDist;
@@ -21671,7 +21680,7 @@ class ClusterObstacle {
     // Denser cluster smoke. Radius bumped 2.8 → 3.2 so
     // gas envelops the atom more visibly, sprite count 13 → 17 so the
     // body of the cloud reads thicker, alpha up from 0.75 to 0.80.
-    const radius = (child.scale || child.radius || 20) * 3.2;
+    const radius = (child.scale || child.radius || 20) * 4.4;
     const cloud = new GasCloud(billboardCloudSystem, child.position, {
       boundsRadius:   radius,
       spriteScale:    radius * 1.55,
@@ -23104,7 +23113,7 @@ function spawnDynamicObjects(rooms) {
         rm.y + yOff,
         rm.z + Math.sin(angle) * dist
       );
-      const clusterScale = 35 + Math.random() * 55; // matches prior obstacle footprint
+      const clusterScale = 55 + Math.random() * 80; // bigger rock clusters
       game.clusters.push(new ClusterObstacle(pos, clusterScale));
     }
   }
@@ -23116,7 +23125,7 @@ function spawnDynamicObjects(rooms) {
     const idx = Math.floor(Math.random() * tunnelPoints.length);
     const pt = tunnelPoints.splice(idx, 1)[0];
     const pos = new THREE.Vector3(pt.x, pt.y, pt.z);
-    const clusterScale = 25 + Math.random() * 35;
+    const clusterScale = 40 + Math.random() * 50;
     game.clusters.push(new ClusterObstacle(pos, clusterScale));
   }
 
@@ -23253,8 +23262,8 @@ function _spawnBasinClouds() {
     const poolR = sphere.r * 0.55;
     // Cap cloud size so sprites stay inside the sphere. Cloud center can
     // sink ~10% more from wall gravity, sprite radius ≈ boundsRadius.
-    const maxSize = sphere.r * (1 - poolDepth - 0.18);
-    const minSize = Math.min(40, maxSize * 0.6);
+    const maxSize = sphere.r * (1 - poolDepth - 0.05);
+    const minSize = Math.min(70, maxSize * 0.72);
     // Denser basin : 12-16 clouds (was 8-11).
     // Denser still on Ultra : 16-20 per basin. Each cloud is
     // ~10 sprites so this is a per-basin sprite count of ~160-200 vs
