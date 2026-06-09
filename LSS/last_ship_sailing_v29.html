@@ -58,6 +58,20 @@ canvas { display: block; }
   will-change: transform, opacity;
 }
 #ability-overlay-frame.active { opacity: 1; }
+/* Core animation layer : independent of the ability overlay so both can show
+   at once (sustained core + one-shot ability). Same box; ability frame paints
+   over it (later in DOM at equal z-index). */
+#core-overlay-frame {
+  position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 8;
+  background-repeat: no-repeat; background-position: center center;
+  background-size: cover;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 0.15s linear;
+  will-change: transform, opacity;
+}
+#core-overlay-frame.active { opacity: 1; }
 
 /* Gun layer. Sits behind both the ability overlay (z=8) and the
    cockpit frame (z=9), so frame_<SHIP>.png always paints in front of the
@@ -86,6 +100,7 @@ canvas { display: block; }
    still pick a ship and start a match before pressing the headset on. */
 body.vr-active #cockpit-frame,
 body.vr-active #ability-overlay-frame,
+body.vr-active #core-overlay-frame,
 body.vr-active #gun-layer,
 body.vr-active #hud,
 body.vr-active #ability-pie,
@@ -1715,6 +1730,11 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
      the sliding weapon-bring-out / muzzle-fire frames (laser_, missile_,
      sonar_, energy_, plus legacy PUNCTURE-M, SLAYER-S, SYPHON-M).
      Populated by tickAbilityOverlayFrame(). -->
+<!-- Core animation layer : a separate overlay so a sustained CORE animation
+     (e.g. Puncture Mega Barrage) keeps playing even while a one-shot ability
+     overlay (e.g. Cluster Missile) plays on #ability-overlay-frame. Placed
+     before the ability frame so the ability one-shot paints over the core. -->
+<div id="core-overlay-frame"></div>
 <div id="ability-overlay-frame"></div>
 
 <!-- Per-titan cockpit frame: frame_<SHIP>.png with alpha cutout, populated by updateCockpitFrame() -->
@@ -2553,6 +2573,37 @@ window.lssRequestFullscreen = function () {
     return p;
   } catch (_) { return null; }
 };
+
+// (browser-shortcut guard) While fullscreen for a match, use the Keyboard Lock
+// API (Chromium-only) to route a targeted set of browser/OS shortcut keys to
+// the page instead of the browser, so a stray Ctrl+W / Ctrl+T / Ctrl+Tab in
+// the heat of play can't close or switch the tab. Escape is deliberately left
+// out so it still exits fullscreen normally. Feature-detected ; no-ops where
+// unsupported (Firefox, Safari) and degrades to the rebinds + preventDefault.
+(function _lssKeyboardLockGuard() {
+  const LOCK_KEYS = ['ControlLeft', 'ControlRight', 'KeyW', 'KeyT', 'KeyN',
+                     'KeyR', 'KeyS', 'KeyP', 'KeyD', 'KeyF', 'KeyA', 'Tab'];
+  let _locked = false;
+  function _apply() {
+    try {
+      const fs = document.fullscreenElement || document.webkitFullscreenElement;
+      const kb = navigator.keyboard;
+      if (!kb || typeof kb.lock !== 'function') return;
+      if (fs && !_locked) {
+        _locked = true;
+        const r = kb.lock(LOCK_KEYS);
+        if (r && typeof r.catch === 'function') r.catch(() => { _locked = false; });
+      } else if (!fs && _locked) {
+        _locked = false;
+        try { kb.unlock(); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  try {
+    document.addEventListener('fullscreenchange', _apply);
+    document.addEventListener('webkitfullscreenchange', _apply);
+  } catch (_) {}
+})();
 // Auto-fullscreen used by the play buttons (joinRoom / startSolo /
 // startTest). Skip if the user is already fullscreen (no point) or if
 // they've explicitly opted out via localStorage ('lss_no_auto_fs' = '1').
@@ -3118,7 +3169,7 @@ const input = {
     left:       'a',
     right:      'd',
     up:         ' ',
-    down:       'control',
+    down:       'c',
     dash:       'shift',
     reload:     'r',
     ability0:   'q',
@@ -4883,7 +4934,32 @@ async function joinRoom() {
   }
 }
 
+// Drop any in-progress / just-created multiplayer room so a LOCAL (solo/test)
+// match doesn't inherit room state. Creating a room kicks off an async Trystero
+// match-room join that would otherwise re-set net.active=true after we go local
+// (which is why SOLO appeared blocked while TEST limped through). Mirrors the
+// Leave Room teardown minus the page reload, since we head straight into play.
+function _cancelRoomForLocalPlay() {
+  try {
+    if (typeof net !== 'undefined' && net) {
+      if (net.room && typeof net.room.leave === 'function') { try { net.room.leave(); } catch (_) {} }
+      net.room = null;
+      net.roomId = null;
+      net.active = false;
+    }
+  } catch (_) {}
+  try {
+    if (typeof _lobbyState !== 'undefined' && _lobbyState) {
+      _lobbyState.myRoom = null;
+      _lobbyState.trysteroJoining = false;
+    }
+    if (typeof _lobbyBroadcastPresence === 'function') _lobbyBroadcastPresence();
+    if (typeof _lobbyRefresh === 'function') _lobbyRefresh();
+  } catch (_) {}
+}
+
 function startSolo() {
+  _cancelRoomForLocalPlay();   // cancel any created/pending room, then go local
   net.active = false;
   net.solo = true;
   // Clear the test-mode flag explicitly so going back to lobby and
@@ -4893,6 +4969,7 @@ function startSolo() {
 }
 
 function startTest() {
+  _cancelRoomForLocalPlay();   // same: don't drag a room into test mode
   net.active = false;
   net.solo = true;
   game.testMode = true;
@@ -5032,6 +5109,14 @@ function selectMap(mapKey) {
     const _outOfSelect = (typeof game !== 'undefined' && game.state && game.state !== 'select');
     if (net.mapCommitLocked || _outOfSelect) return;
   }
+  // Single player : lock the map for the whole match. Once we've left the
+  // lobby 'select' state, refuse switching to a DIFFERENT map between rounds
+  // (selecting the same key still falls through to re-paint the UI).
+  if ((typeof net === 'undefined' || !net.active) &&
+      game.selectedMap && game.selectedMap !== mapKey &&
+      typeof game !== 'undefined' && game.state && game.state !== 'select') {
+    return;
+  }
   // Echo guard: receivers re-call selectMap with the new key, which
   // would re-broadcast and bounce back. The early return when the key is
   // already selected stops the storm without needing a per-call suppress flag.
@@ -5158,6 +5243,9 @@ function cycleMap(dir) {
     if (net.mapCommitLocked) return;
     if (typeof game !== 'undefined' && game.state && game.state !== 'select') return;
   }
+  // Single player : no map cycling once a match is underway (mirrors selectMap).
+  if ((typeof net === 'undefined' || !net.active) &&
+      typeof game !== 'undefined' && game.state && game.state !== 'select') return;
   // Cycle only through maps eligible for the active mode.
   const keys = _visibleMapKeys();
   if (keys.length === 0) return;
@@ -27536,7 +27624,10 @@ function triggerCoreOverlay(loadoutKey, coreName) {
   const now = (typeof game !== 'undefined' && typeof game.time === 'number')
     ? game.time
     : (performance.now() / 1000);
-  player._abilityOverlayTrigger = {
+  // Core overlay lives on its OWN trigger/layer so a one-shot ability overlay
+  // (Cluster Missile, etc.) firing while the core is active no longer wipes the
+  // core animation. Rendered by tickCoreOverlayFrame() into #core-overlay-frame.
+  player._coreOverlayTrigger = {
     ship: loadoutKey,
     desc,
     startTime: now,
@@ -27544,6 +27635,65 @@ function triggerCoreOverlay(loadoutKey, coreName) {
     sustainedCore: true,
     releaseTime: null,
   };
+}
+
+// Dedicated renderer for the sustained CORE animation layer (#core-overlay-frame).
+// Mirrors the sustained branch of tickAbilityOverlayFrame but on its own element
+// + trigger, so it plays independently of one-shot ability overlays.
+function tickCoreOverlayFrame() {
+  const el = document.getElementById('core-overlay-frame');
+  if (!el || !player || !player.loadoutKey) return;
+  if (player.shipState === 'dead') {
+    if (el.classList.contains('active')) { el.classList.remove('active'); el.style.backgroundImage = ''; el._currentUrl = null; }
+    player._coreOverlayTrigger = null;
+    return;
+  }
+  const trig = player._coreOverlayTrigger;
+  if (!trig) {
+    if (el.classList.contains('active')) { el.classList.remove('active'); el.style.backgroundImage = ''; el._currentUrl = null; }
+    return;
+  }
+  const cache = _abilityOverlayCache[trig.ship];
+  if (!cache) return; // frames still loading; trigger stays armed
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : (performance.now() / 1000);
+  const desc = trig.desc;
+  // Latch slide-out once the core ends.
+  if (trig.releaseTime === null && !player.coreActive) trig.releaseTime = now;
+  const SLIDE_IN_DUR = 0.25, SLIDE_OUT_DUR = 0.35, FLICKER_PERIOD = 0.1;
+  const slideSign = (desc.slide === 'up') ? +1 : -1;
+  const fileExists = (fname) => fname && cache.frames[fname] && cache.frames[fname].status === 'ok';
+  let yOffset = 0, pickedFile = desc.baseFile;
+  const elapsedSinceStart = now - trig.startTime;
+  if (elapsedSinceStart < SLIDE_IN_DUR && trig.releaseTime === null) {
+    yOffset = slideSign * 50 * (1 - elapsedSinceStart / SLIDE_IN_DUR);
+    pickedFile = desc.baseFile;
+  } else if (trig.releaseTime === null) {
+    yOffset = 0;
+    if (fileExists(desc.altFile)) pickedFile = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseFile : desc.altFile;
+    else if (fileExists(desc.fireFile)) pickedFile = (Math.floor(now / FLICKER_PERIOD) % 2 === 0) ? desc.baseFile : desc.fireFile;
+    else pickedFile = desc.baseFile;
+  } else {
+    const sinceRelease = now - trig.releaseTime;
+    if (sinceRelease < SLIDE_OUT_DUR) {
+      yOffset = slideSign * 50 * (sinceRelease / SLIDE_OUT_DUR);
+      pickedFile = desc.baseFile;
+    } else {
+      el.classList.remove('active'); el.style.backgroundImage = ''; el._currentUrl = null;
+      player._coreOverlayTrigger = null;
+      return;
+    }
+  }
+  let slot = cache.frames[pickedFile];
+  if (!slot || slot.status !== 'ok') slot = cache.frames[desc.baseFile];
+  if (!slot || slot.status !== 'ok') {
+    if (el.classList.contains('active')) { el.classList.remove('active'); el.style.backgroundImage = ''; el._currentUrl = null; }
+    return;
+  }
+  if (el._currentUrl !== slot.url) { el.style.backgroundImage = 'url("' + slot.url + '")'; el._currentUrl = slot.url; }
+  if (!el.classList.contains('active')) el.classList.add('active');
+  const sx = (_overlayShift && _overlayShift.x) || 0;
+  const sy = (_overlayShift && _overlayShift.y) || 0;
+  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + (yOffset + sy).toFixed(2) + '%)';
 }
 
 const _overlayShift = {
@@ -27846,12 +27996,19 @@ function commitLoadout(key) {
     _preloadAbilityOverlayFrames(key);
     _preloadGunLayer(key);
     player._abilityOverlayTrigger = null;
+    player._coreOverlayTrigger = null;
     player._abilityPrime = null;
     const _aof = document.getElementById('ability-overlay-frame');
     if (_aof) {
       _aof.classList.remove('active');
       _aof.style.backgroundImage = '';
       _aof._currentUrl = null;
+    }
+    const _cof = document.getElementById('core-overlay-frame');
+    if (_cof) {
+      _cof.classList.remove('active');
+      _cof.style.backgroundImage = '';
+      _cof._currentUrl = null;
     }
     const _gl = document.getElementById('gun-layer');
     if (_gl) {
@@ -30598,13 +30755,18 @@ function executeAbility(slot, ability) {
     // Energy Syphon (SYPHON): actively drains enemy shields and heals player
     if (ability.name === 'Energy Syphon') {
       try { playSound('siphon_drain'); } catch (_) {}
+      // No auto-aim: the syphon beam goes straight down the player's aim.
+      // Pick only an enemy the aim ray actually passes through (small perp
+      // tolerance ~= ship size), nearest along the ray. No cone snapping.
       let bestBot = null, bestDist = Infinity;
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
-        const dist = player.position.distanceTo(bot.position);
-        const toBot = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
-        if (dist < 1500 && forward.dot(toBot) > 0.5 && dist < bestDist) {
-          bestBot = bot; bestDist = dist;
+        const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
+        const along = toBot.dot(forward);              // distance projected along aim
+        if (along <= 0 || along > 1500) continue;        // must be ahead, within range
+        const perp = toBot.clone().sub(forward.clone().multiplyScalar(along)).length();
+        if (perp < 140 && along < bestDist) {            // ray must hit the ship
+          bestBot = bot; bestDist = along;
         }
       }
       if (bestBot) {
@@ -37097,6 +37259,10 @@ function _captureKbKey(e) {
   if (typeof e.key !== 'string') return false;
   const key = e.key.toLowerCase();
   if (/^f\d{1,2}$/.test(key)) return true; // swallow but don't bind
+  // Ctrl / Meta are banned as game keys : Ctrl+letter and Meta+letter combos
+  // trigger browser/OS shortcuts (Ctrl+W closes the tab, etc.) that a web page
+  // can't reliably block. Swallow the keypress without binding.
+  if (key === 'control' || key === 'meta') return true;
   input.kbBindings[_kbRebindAction] = key;
   _kbRebindAction = null;
   saveSettings();
@@ -37108,6 +37274,20 @@ function _kbActionHeld(action) {
   const k = input.kbBindings && input.kbBindings[action];
   if (!k) return false;
   return !!input.keys[k];
+}
+
+// True if a key is one the game consumes and whose browser default (page
+// scroll on Space/arrows, focus move on Tab, quick-find on / or ') should be
+// suppressed. Includes every currently-bound game key.
+function _isGamePreventKey(key) {
+  if (typeof key !== 'string') return false;
+  const k = key.toLowerCase();
+  if (k === ' ' || k === 'spacebar' || k === 'tab') return true;
+  if (k === 'arrowup' || k === 'arrowdown' || k === 'arrowleft' || k === 'arrowright') return true;
+  if (k === '/' || k === "'") return true; // quick-find triggers in some browsers
+  const kb = input && input.kbBindings;
+  if (kb) { for (const a in kb) { if (kb[a] && kb[a] === k) return true; } }
+  return false;
 }
 
 document.addEventListener('keydown', e => {
@@ -37128,6 +37308,10 @@ document.addEventListener('keydown', e => {
 
   if (typeof e.key !== 'string') return;
   input.keys[e.key.toLowerCase()] = true;
+  // Suppress the browser default for keys the game uses (Space/arrows scroll,
+  // Tab moves focus). Skip when a modifier is held so we don't swallow combos
+  // we can't block anyway (and so OS/browser combos still behave normally).
+  if (!e.ctrlKey && !e.metaKey && !e.altKey && _isGamePreventKey(e.key)) e.preventDefault();
   if (e.repeat) return; // prevent key repeat from double-firing abilities
   const k = e.key.toLowerCase();
   const kb = input.kbBindings;
@@ -37353,7 +37537,7 @@ const KB_ACTION_LABELS = {
 };
 const KB_DEFAULTS = {
   forward: 'w', back: 's', left: 'a', right: 'd',
-  up: ' ', down: 'control',
+  up: ' ', down: 'c',
   dash: 'shift', reload: 'r',
   ability0: 'q', ability1: 'e', ability2: 'f', core: 'v',
   scoreboard: 'tab', menu: 'escape',
@@ -42960,6 +43144,12 @@ function loadSettings() {
     if (data.triggerThreshold !== undefined) input.triggerThreshold = data.triggerThreshold;
     if (data.gpBindings) Object.assign(input.gpBindings, data.gpBindings);
     if (data.kbBindings) Object.assign(input.kbBindings, data.kbBindings);
+    // Ban Ctrl/Meta as game keys (they collide with browser/OS shortcuts like
+    // Ctrl+W close-tab). Migrate any saved binding using them to a safe default.
+    for (const _a in input.kbBindings) {
+      const _v = input.kbBindings[_a];
+      if (_v === 'control' || _v === 'meta') input.kbBindings[_a] = KB_DEFAULTS[_a] || '';
+    }
     // cycleWallPattern + openSettings used to default
     // to -1 (unbound) before standard btn indices 16 / 17 were assigned;
     // older saves overwrite the new defaults. Force-fix here so XR
@@ -49078,6 +49268,7 @@ function gameLoop(timestamp) {
     _updateOverlayShift();        // (v17) compute directional shift used by gun-layer + ability-overlay
     tickGunLayer();               // (v17) per-ship gun recoil cycle on the behind-layer
     tickAbilityOverlayFrame();    // (v17) slide-in ability "weapon out" overlay behind cockpit
+    tickCoreOverlayFrame();       // core animation layer (plays alongside ability overlays)
   }
   checkExecutions(dt);
 
