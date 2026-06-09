@@ -12001,7 +12001,7 @@ function _vrUpdateShipNameLabel(bot, isVR, isEnemy) {
     if (typeof raycastLevel === 'function' && dist > 1) {
       _vrNameLosDir.subVectors(bot.position, player.position).normalize();
       const wallDist = raycastLevel(player.position, _vrNameLosDir, dist + 50);
-      if (wallDist < dist - 30) {
+      if (wallDist < dist - 30 || _losBlockedByClusters(player.position, _vrNameLosDir, dist)) {
         const sp = bot._vrNameSprite, ln = bot._vrNameLine;
         if (sp) sp.visible = false;
         if (ln) ln.visible = false;
@@ -12343,10 +12343,10 @@ const MAP_PRESETS = [
   // terrain style (mountain shape + rock/grass/snow colours via
   // setSandwichBiome) plus a matching cloud colour. Exact colours are meant to
   // be iterated on in test mode.
-  { name: 'Grassy',   biome: 'grassy',   cloudTheme: 'storm' },
+  { name: 'Grassy',   biome: 'grassy',   cloudTheme: 'midnight', cloudBlend: 'multiply', cloudBrightness: 1.0 },
   { name: 'Rocky',    biome: 'rocky',    cloudTheme: 'midnight' },
-  { name: 'Snow',     biome: 'snow',     cloudTheme: 'frost' },
-  { name: 'Volcanic', biome: 'volcanic', cloudTheme: 'plasma' },
+  { name: 'Snow',     biome: 'snow',     cloudTheme: 'frost', cloudBlend: 'normal', cloudBrightness: 1.5 },
+  {name:'Volcanic',biome:'volcanic',cloudTheme:'golden',cloudBlend:'additive',cloudBrightness:1.0},
 ];
 
 function _updateSkyUI() {
@@ -12399,9 +12399,12 @@ function applyMapPreset(name) {
   // scenery now.
   try { if (typeof setSandwichBiome === 'function' && preset.biome) setSandwichBiome(preset.biome); }
   catch (e) { console.warn('[theme] biome apply failed:', e); }
-  if (typeof game !== 'undefined' && typeof preset.cloudTheme === 'string') {
-    game.cloudTheme = preset.cloudTheme;
+  if (typeof game !== 'undefined') {
+    if (typeof preset.cloudTheme === 'string') game.cloudTheme = preset.cloudTheme;
+    game.cloudBlend = (typeof preset.cloudBlend === 'string') ? preset.cloudBlend : 'additive';
+    game.cloudBrightness = (typeof preset.cloudBrightness === 'number') ? preset.cloudBrightness : 1.0;
   }
+  try { if (typeof _applyCloudVisualSettings === 'function') _applyCloudVisualSettings(); } catch (_) {}
   _updateSkyUI();
   if (typeof saveSettings === 'function') { try { saveSettings(); } catch (_) {} }
   return true;
@@ -14271,7 +14274,7 @@ function _swPatchTerrainMat(m, isCeil) {
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
-      '#include <emissivemap_fragment>\n if(uLava>0.5 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n totalEmissiveRadiance+=vec3(1.7,0.5,0.08)*glow*uLavaGlow;\n }\n if(uRocky>0.5 && uCeil<0.5){ vec3 ffn=normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow; }');
+      '#include <emissivemap_fragment>\n if(uLava>0.5 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow;\n }\n if(uRocky>0.5 && uCeil<0.5){ vec3 ffn=normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow; }');
   };
   return m;
 }
@@ -14961,6 +14964,26 @@ function resolveShipShipCollisions(dt) {
 
 // Helper: is a point inside any cylinder (tunnel)?
 // Helper: is a point inside any sphere (room)?
+
+// Line-of-sight occlusion by the floating rock+cloud clusters, for the enemy
+// callout tags : a tag winks out when a cluster's rock OR its gas envelope sits
+// between you and the target. NOT used for shots (you can still fire through
+// gas). from = origin, dir = UNIT direction, dist = range to the target.
+function _losBlockedByClusters(from, dir, dist) {
+  const cl = (typeof game !== 'undefined') ? game.clusters : null;
+  if (!cl || !cl.length) return false;
+  for (let i = 0; i < cl.length; i++) {
+    const c = cl[i];
+    if (!c || c.alive === false || c.broken || !c.position) continue;
+    const r = (c.clusterScale || 40) * 1.5;            // rock footprint + surrounding gas
+    const vx = c.position.x - from.x, vy = c.position.y - from.y, vz = c.position.z - from.z;
+    const tp = vx * dir.x + vy * dir.y + vz * dir.z;   // projection of centre onto the ray
+    if (tp <= 0 || tp >= dist - 20) continue;          // behind us, or at/behind the target
+    const ex = vx - dir.x * tp, ey = vy - dir.y * tp, ez = vz - dir.z * tp;
+    if (ex * ex + ey * ey + ez * ez < r * r) return true;   // ray passes through the cluster
+  }
+  return false;
+}
 
 function raycastLevel(origin, dir, maxDist) {
   // SDF ray march: no CSG awareness needed, the SDF handles junctions naturally
@@ -45510,7 +45533,7 @@ function updateEnemyHealthBars() {
     if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
       const toEnt = _hbTmpA.subVectors(ent.position, player.position).normalize();
       const wallDist = raycastLevel(player.position, toEnt, dist + 50);
-      ent._hbLosBlocked = (wallDist < dist - 30);
+      ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
       ent._hbLosTime = now;
     }
     if (ent._hbLosBlocked) { ent._labelSpotTime = null; return; }
