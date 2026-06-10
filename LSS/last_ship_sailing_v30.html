@@ -8287,6 +8287,10 @@ function _layeredFXTick(tSec) {
 }
 
 const _gasLightTmpColor = new THREE.Color(); // scratch, no per-frame alloc
+// Fixed slot array reused across updateGasLighting ticks ; this runs at
+// the top of gameLoop, so no per-tick array / object-literal allocation.
+const _gasLightSlots = [];
+for (let _gi = 0; _gi < 8; _gi++) _gasLightSlots.push({ pos: null, color: 0xffaa00 });
 function updateGasLighting() {
   // No gas materials exist in Potato (BCS spawn is gated off below)
   // so even without this guard the .size === 0 check would short-circuit, but we
@@ -8306,16 +8310,17 @@ function updateGasLighting() {
   // in the shader loop.
   const _baseMaxLights = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 8 : 4;
   const _maxLights = (typeof getVRLightCap === 'function') ? getVRLightCap(_baseMaxLights) : _baseMaxLights;
-  const lights = [];
-  for (let i = 0; i < game.projectiles.length && lights.length < _maxLights; i++) {
+  let _lightCount = 0;
+  for (let i = 0; i < game.projectiles.length && _lightCount < _maxLights; i++) {
     const proj = game.projectiles[i];
     if (!proj || !proj.alive || !proj.position) continue;
-    lights.push({
-      pos: proj.position,
-      color: proj.trailColor || 0xffaa00,
-      strength: 1.0,
-    });
+    const slot = _gasLightSlots[_lightCount++];
+    slot.pos = proj.position;
+    slot.color = proj.trailColor || 0xffaa00;
   }
+  // Null out unused slots so the scratch array doesn't retain dead
+  // projectiles' position vectors between ticks.
+  for (let i = _lightCount; i < _gasLightSlots.length; i++) _gasLightSlots[i].pos = null;
   // Push lights into every gas-flagged material. Always write all 8 slots ;
   // unfilled slots get strength = 0 so the shader skips them.
   _ACTIVE_LAYERED_FX.forEach(mat => {
@@ -8323,12 +8328,12 @@ function updateGasLighting() {
     const u = mat.uniforms;
     if (!u || !u.uDynLightPos) return;
     for (let i = 0; i < 8; i++) {
-      if (i < lights.length) {
-        const l = lights[i];
+      if (i < _lightCount) {
+        const l = _gasLightSlots[i];
         u.uDynLightPos.value[i].copy(l.pos);
         _gasLightTmpColor.setHex(l.color);
         u.uDynLightColor.value[i].copy(_gasLightTmpColor);
-        u.uDynLightStrength.value[i] = l.strength;
+        u.uDynLightStrength.value[i] = 1.0;
       } else {
         u.uDynLightStrength.value[i] = 0;
       }
@@ -8784,6 +8789,15 @@ function _releaseFXBurstMaterial(mat) {
   if (!name || !mat.uniforms) { try { mat.dispose(); } catch (_) {} return; }
   const u = mat.uniforms;
   if (u.uBrightness && u._fxBaseBrightness != null) u.uBrightness.value = u._fxBaseBrightness;
+  // Reset any per-instance tint back to the preset's base color before the
+  // material re-enters the pool. Callers (e.g. Slayer teleport-dash puffs)
+  // recolor uBaseColor on acquired 'cloud' materials; without this reset the
+  // green-tinted materials get recycled into explosion / ship-death smoke,
+  // turning ALL later cloud bursts green.
+  const _preset = (typeof EFFECT_PRESETS !== 'undefined') ? EFFECT_PRESETS[name] : null;
+  if (_preset && _preset.baseColor != null && u.uBaseColor && u.uBaseColor.value && u.uBaseColor.value.set) {
+    try { u.uBaseColor.value.set(_preset.baseColor); } catch (_) {}
+  }
   _ACTIVE_LAYERED_FX.delete(mat);
   let pool = _fxBurstMatPool.get(name);
   if (!pool) { pool = []; _fxBurstMatPool.set(name, pool); }
@@ -9332,6 +9346,12 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
 const _emitPos = new THREE.Vector3();
 const _emitArcA = new THREE.Vector3();
 const _emitArcB = new THREE.Vector3();
+// Scratch vectors for Bot.fireAtPlayer ; every callee (raycastLevel,
+// spawnTracer, spawnPelletBurst, spawnDynamicLight) reads or clones,
+// none retain the reference, so reuse is safe.
+const _botFireOrigin = new THREE.Vector3();
+const _botFireDir = new THREE.Vector3();
+const _botSpreadDir = new THREE.Vector3();
 function emitDamageState(entity, dt) {
   if (!entity || !entity.alive || !entity.position) return;
   // Shield up = hide all hull damage. Threshold > 0.5 (not == 0)
@@ -9462,9 +9482,11 @@ function emitDamageState(entity, dt) {
         size: 7 + Math.random() * 5,
       });
     }
-    // Heavier trailing smoke above the flames.
+    // Heavier trailing smoke above the flames. POJO position instead of
+    // pos.clone().add(new Vector3): two heap objects -> one, on a path
+    // that fires every ~45-110 ms per critically damaged ship.
     game.particles.push({
-      position: pos.clone().add(new THREE.Vector3(0, 18, 0)),
+      position: { x: pos.x, y: pos.y + 18, z: pos.z },
       velocity: _pVel(
         (Math.random() - 0.5) * 28,
         50 + Math.random() * 50,
@@ -16558,16 +16580,34 @@ class Bot {
       // Spawn a brief crackle arc on the bot every ~0.2s so the stun is
       // visually obvious. Cheap fallback if spawnLightningBolt is missing.
       if (typeof spawnLightningBolt === 'function' && Math.random() < dt * 5) {
-        const _o1 = new THREE.Vector3((Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30).add(this.position);
-        const _o2 = new THREE.Vector3((Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30, (Math.random() - 0.5) * 30).add(this.position);
-        try { spawnLightningBolt(_o1, _o2, 0xaaccff, 0.08, 1, 0.8); } catch (_e) {}
+        // Module-level scratch vectors (shared with emitDamageState's arc
+        // path ; spawnLightningBolt reads, doesn't retain) instead of two
+        // fresh Vector3 allocations per crackle.
+        _emitArcA.set(
+          this.position.x + (Math.random() - 0.5) * 30,
+          this.position.y + (Math.random() - 0.5) * 30,
+          this.position.z + (Math.random() - 0.5) * 30
+        );
+        _emitArcB.set(
+          this.position.x + (Math.random() - 0.5) * 30,
+          this.position.y + (Math.random() - 0.5) * 30,
+          this.position.z + (Math.random() - 0.5) * 30
+        );
+        try { spawnLightningBolt(_emitArcA, _emitArcB, 0xaaccff, 0.08, 1, 0.8); } catch (_e) {}
       }
       return;
     }
 
-    // Damage smoke/fire when hull is damaged
+    // Damage smoke/fire when hull is damaged. Timer-gated to a 60 Hz
+    // emit-check cadence so high-refresh displays (120/144 Hz) don't emit
+    // 2-2.4x more smoke (and burn proportionally more allocations) than
+    // the 60 fps the effect was tuned at.
     if (this.health < this.maxHealth * 0.5) {
-      spawnDamageSmoke(this.position, this.health / this.maxHealth);
+      this._dmgSmokeTimer = (this._dmgSmokeTimer || 0) - dt;
+      if (this._dmgSmokeTimer <= 0) {
+        this._dmgSmokeTimer = 1 / 60;
+        spawnDamageSmoke(this.position, this.health / this.maxHealth);
+      }
     }
 
     // Shield does NOT regen naturally; only via stasis fields and executions
@@ -17082,8 +17122,10 @@ class Bot {
 
   fireAtPlayer(dir, dist) {
     if (player.shipState === 'dead') return;
-    // Line-of-sight check: can't shoot through walls
-    const wallDist = raycastLevel(this.position, dir.clone().normalize(), dist + 10);
+    // Line-of-sight check: can't shoot through walls. Scratch vector
+    // instead of dir.clone() ; raycastLevel doesn't retain it.
+    _botFireDir.copy(dir).normalize();
+    const wallDist = raycastLevel(this.position, _botFireDir, dist + 10);
     if (wallDist < dist - 5) return; // wall blocks the shot
     this.isFiring = true; this.fireFlashTimer = 0.15; // for animation
     const weapon = this.loadout.weapon;
@@ -17109,8 +17151,10 @@ class Bot {
     }
 
     // ---- BOT FIRING VFX ----
-    const fireOrigin = this.position.clone();
-    const fireDir = dir.clone().normalize();
+    // Scratch vectors, not clones: this path fires for every bot at its
+    // weapon cadence and the callees below all copy what they need.
+    const fireOrigin = _botFireOrigin.copy(this.position);
+    const fireDir = _botFireDir; // already normalized above
 
     // Color scheme per loadout. Pulled from chassisFlashColor() so bot
     // tracers share the same per-ship palette as player tracers (Syphon
@@ -17127,14 +17171,16 @@ class Bot {
       const isChaingunBot = (weapon.fireRate <= 0.10);
       spawnTracer(fireOrigin, player.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
-      // Muzzle particles
+      // Muzzle particles (POJO position/velocity ; no Vector3 churn)
       for (let i = 0; i < 2; i++) {
-        const pVel = fireDir.clone().multiplyScalar(250 + Math.random() * 150);
-        pVel.x += (Math.random() - 0.5) * 100;
-        pVel.y += (Math.random() - 0.5) * 100;
-        pVel.z += (Math.random() - 0.5) * 100;
+        const _spd = 250 + Math.random() * 150;
+        const pVel = _pVel(
+          fireDir.x * _spd + (Math.random() - 0.5) * 100,
+          fireDir.y * _spd + (Math.random() - 0.5) * 100,
+          fireDir.z * _spd + (Math.random() - 0.5) * 100
+        );
         game.particles.push({
-          position: fireOrigin.clone(),
+          position: { x: fireOrigin.x, y: fireOrigin.y, z: fireOrigin.z },
           velocity: pVel,
           life: 0.12 + Math.random() * 0.08,
           maxLife: 0.2,
@@ -17148,7 +17194,8 @@ class Bot {
     } else if (weapon.mode === 'spread') {
       const _shots = Math.max(2, Math.floor(weapon.pellets * 0.5));
       for (let i = 0; i < _shots; i++) {
-        const spreadDir = fireDir.clone();
+        // Scratch reused per pellet ; spawnPelletBurst clones internally.
+        const spreadDir = _botSpreadDir.copy(fireDir);
         spreadDir.x += (Math.random() - 0.5) * 0.15;
         spreadDir.y += (Math.random() - 0.5) * 0.15;
         spreadDir.z += (Math.random() - 0.5) * 0.15;
@@ -25606,7 +25653,14 @@ function updateEffects(dt) {
     e.age += dt;
     if (e.age >= e.lifetime) {
       _disposeOrReleaseEffect(e);
-      game.effects.splice(i, 1);
+      // Swap-with-last + pop (O(1)) instead of splice (O(n) shift of up
+      // to ~350 elements per expiry). Safe in this backward loop: the
+      // element moved into slot i came from an index > i, which was
+      // already processed this frame. Same idiom as the cull loop above
+      // and the projectile update loop.
+      const _lastIdx = game.effects.length - 1;
+      if (i !== _lastIdx) game.effects[i] = game.effects[_lastIdx];
+      game.effects.pop();
       continue;
     }
     const t = e.age / e.lifetime;
@@ -26251,16 +26305,23 @@ function spawnDamageSmoke(pos, healthPct) {
   // Only emit when below 50% health; intensity scales with damage
   if (healthPct > 0.5) return;
   const intensity = 1 - (healthPct / 0.5); // 0 at 50%, 1 at 0%
+  // POJO position/velocity (not THREE.Vector3, no pos.clone()): this is
+  // called every emit tick for every damaged bot, and the old
+  // 3-Vector3-per-puff allocation pattern was steady GC churn during
+  // fights. updateParticles handles {x,y,z} POJOs for both fields.
   // Smoke puff
   if (Math.random() < intensity * 0.4) {
-    const pVel = new THREE.Vector3(
-      (Math.random()-0.5) * 30,
-      20 + Math.random() * 30,
-      (Math.random()-0.5) * 30
-    );
     game.particles.push({
-      position: pos.clone().add(new THREE.Vector3((Math.random()-0.5)*20, (Math.random()-0.5)*10, (Math.random()-0.5)*20)),
-      velocity: pVel,
+      position: {
+        x: pos.x + (Math.random()-0.5)*20,
+        y: pos.y + (Math.random()-0.5)*10,
+        z: pos.z + (Math.random()-0.5)*20,
+      },
+      velocity: _pVel(
+        (Math.random()-0.5) * 30,
+        20 + Math.random() * 30,
+        (Math.random()-0.5) * 30
+      ),
       life: 0.4 + Math.random() * 0.4,
       maxLife: 0.8,
       color: 0x222222,
@@ -26269,22 +26330,25 @@ function spawnDamageSmoke(pos, healthPct) {
   }
   // Fire particles when critically low
   if (healthPct < 0.25 && Math.random() < intensity * 0.3) {
-    const fVel = new THREE.Vector3(
-      (Math.random()-0.5) * 40,
-      30 + Math.random() * 40,
-      (Math.random()-0.5) * 40
-    );
-    const fireColors = [0xff4400, 0xff6600, 0xff8800];
     game.particles.push({
-      position: pos.clone().add(new THREE.Vector3((Math.random()-0.5)*15, (Math.random()-0.5)*8, (Math.random()-0.5)*15)),
-      velocity: fVel,
+      position: {
+        x: pos.x + (Math.random()-0.5)*15,
+        y: pos.y + (Math.random()-0.5)*8,
+        z: pos.z + (Math.random()-0.5)*15,
+      },
+      velocity: _pVel(
+        (Math.random()-0.5) * 40,
+        30 + Math.random() * 40,
+        (Math.random()-0.5) * 40
+      ),
       life: 0.15 + Math.random() * 0.15,
       maxLife: 0.3,
-      color: fireColors[Math.floor(Math.random() * fireColors.length)],
+      color: _DMG_FIRE_COLORS[Math.floor(Math.random() * _DMG_FIRE_COLORS.length)],
       size: 2 + Math.random() * 3
     });
   }
 }
+const _DMG_FIRE_COLORS = [0xff4400, 0xff6600, 0xff8800];
 
 // Electric smoke puff for cluster obstacle clusters: bluish, additive, slowly
 // expands while flickering. Pushed into game.effects with type 'electricSmoke'
@@ -26435,6 +26499,11 @@ function disposeAllDots() {
   game.dots = [];
 }
 
+// Reusable scratch arrays for updateDots ; cleared (length = 0) each
+// call instead of allocating fresh arrays every frame.
+const _dotShipsScratch = [];
+const _dotCollideScratch = [];
+const _dotAttractScratch = [];
 function updateDots(dt) {
   if (!game.dots || !game.dots.length) return;
   const cadence = (typeof getVRCadence === 'function') ? getVRCadence(1, 2, 3, 4) : 1;
@@ -26566,7 +26635,8 @@ function updateDots(dt) {
   // Build a list of all alive ships, then apply wake from each. Dots
   // pass through ships physically (they're gas) but accept momentum from
   // the displacement of air/space the ship's hull creates.
-  const _ships = [];
+  const _ships = _dotShipsScratch;
+  _ships.length = 0;
   if (typeof player !== 'undefined' && player && player.position &&
       player.shipState !== 'dead' && player.shipState !== 'spawning') {
     _ships.push(player);
@@ -26621,12 +26691,17 @@ function updateDots(dt) {
     }
   }
   // ---- Dot-dot collisions (collidable + collidable, walls ignored) ----
+  // Gather collidable dots once (O(n)), then pair-loop over the
+  // sub-list: the O(k^2) pass scales with collidable count k instead of
+  // total dot count, and skips entirely when fewer than 2 qualify.
+  _dotCollideScratch.length = 0;
   for (let i = 0; i < game.dots.length; i++) {
-    const a = game.dots[i];
-    if (!a.collidable) continue;
-    for (let j = i + 1; j < game.dots.length; j++) {
-      const b = game.dots[j];
-      if (!b.collidable) continue;
+    if (game.dots[i].collidable) _dotCollideScratch.push(game.dots[i]);
+  }
+  for (let i = 0; i + 1 < _dotCollideScratch.length; i++) {
+    const a = _dotCollideScratch[i];
+    for (let j = i + 1; j < _dotCollideScratch.length; j++) {
+      const b = _dotCollideScratch[j];
       const dx = b.anchor.position.x - a.anchor.position.x;
       const dy = b.anchor.position.y - a.anchor.position.y;
       const dz = b.anchor.position.z - a.anchor.position.z;
@@ -26657,12 +26732,15 @@ function updateDots(dt) {
   // collapsing straight together. Combined with the elastic-bounce in the
   // collision pass above, this makes dots clump up, swirl around each
   // other, then rebound when too close ; "smoke clusters that orbit".
+  // Same sub-list trick as the collision pass above.
+  _dotAttractScratch.length = 0;
   for (let i = 0; i < game.dots.length; i++) {
-    const a = game.dots[i];
-    if (!a.clusterAttraction) continue;
-    for (let j = i + 1; j < game.dots.length; j++) {
-      const b = game.dots[j];
-      if (!b.clusterAttraction) continue;
+    if (game.dots[i].clusterAttraction) _dotAttractScratch.push(game.dots[i]);
+  }
+  for (let i = 0; i + 1 < _dotAttractScratch.length; i++) {
+    const a = _dotAttractScratch[i];
+    for (let j = i + 1; j < _dotAttractScratch.length; j++) {
+      const b = _dotAttractScratch[j];
       const dx = b.anchor.position.x - a.anchor.position.x;
       const dy = b.anchor.position.y - a.anchor.position.y;
       const dz = b.anchor.position.z - a.anchor.position.z;
@@ -36053,7 +36131,14 @@ function updateHUD() {
   const _lockKeys = Object.keys(player.enemyToneLocks);
   for (let _li = 0; _li < _lockKeys.length; _li++) {
     const botId = _lockKeys[_li];
-    const bot = game.entities.find(b => b.id === parseInt(botId));
+    // Indexed scan instead of .find(closure): this ran every frame and
+    // allocated a fresh closure (plus parseInt per compare) per lock key.
+    const _botIdNum = +botId;
+    let bot = null;
+    for (let _bi = 0; _bi < game.entities.length; _bi++) {
+      const _b = game.entities[_bi];
+      if (_b && _b.id === _botIdNum) { bot = _b; break; }
+    }
     if (!bot || !bot.alive) { delete player.enemyToneLocks[botId]; continue; }
     // Decay locks: lose 1 lock per 4 seconds if the TRACKER bot hasn't hit recently
     // (handled by not decaying here; locks auto-clear on bot death or round reset)
