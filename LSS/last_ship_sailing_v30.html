@@ -24371,6 +24371,34 @@ function _monAuthority() {
   return (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
 }
 
+// Nearest ship of ANY kind (local player, network peers, AI bots) ; used
+// for zap-target selection once a monster is engaged. Aggro is still only
+// triggered by players going outside, but an angry leviathan fries
+// whatever ship is closest — baiting one into the enemy team is legal.
+function _monNearestZapTarget(fromPos) {
+  let best = null, bestD = Infinity, bestKind = null;
+  if (typeof player !== 'undefined' && player && player.position &&
+      player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    const d = fromPos.distanceTo(player.position);
+    if (d < bestD) { bestD = d; best = player; bestKind = 'local'; }
+  }
+  if (typeof net !== 'undefined' && net && net.active && Array.isArray(net.networkPlayers)) {
+    for (const np of net.networkPlayers) {
+      if (!np || !np.alive || !np.position) continue;
+      const d = fromPos.distanceTo(np.position);
+      if (d < bestD) { bestD = d; best = np; bestKind = 'remote'; }
+    }
+  }
+  if (typeof game !== 'undefined' && game && game.entities) {
+    for (const b of game.entities) {
+      if (!b || !b.alive || !b.position) continue;
+      const d = fromPos.distanceTo(b.position);
+      if (d < bestD) { bestD = d; best = b; bestKind = 'bot'; }
+    }
+  }
+  return best ? { ship: best, dist: bestD, kind: bestKind } : null;
+}
+
 // Nearest player ship to a point. requireOutside filters to ships beyond
 // the arena boundary ; considers the local player AND network peers, so a
 // remote friend baiting a leviathan works on the owner's sim.
@@ -24564,13 +24592,20 @@ class OutskirtsMonster {
         : MONSTER_CHASE_SPD;
       if (dist > 1) desired.multiplyScalar(spd / dist);
       this.velocity.lerp(desired, Math.min(1, dt * 0.9));
-      // Electric zap when close. Damage applies only when the victim is
-      // OUR player ; a remote victim's own client runs the identical zap
-      // locally off the synced aggro flag + positions, so it hurts there.
+      // Electric zap when close — at the nearest ship of ANY kind, not
+      // just the chase prey. Local player damage applies here ; a remote
+      // player's own client self-zaps off the synced aggro flag ; bots
+      // take damage directly (authority sim).
       this.zapTimer -= dt;
-      if (dist < MONSTER_ZAP_RANGE && this.zapTimer <= 0) {
-        this.zapTimer = MONSTER_ZAP_EVERY * (0.85 + Math.random() * 0.3);
-        this._zap(tgt.pos, tgt.isLocal);
+      if (this.zapTimer <= 0) {
+        const zt = _monNearestZapTarget(this.position);
+        if (zt && zt.dist < MONSTER_ZAP_RANGE) {
+          this.zapTimer = MONSTER_ZAP_EVERY * (0.85 + Math.random() * 0.3);
+          this._zap(zt.ship.position, zt.kind === 'local');
+          if (zt.kind === 'bot') {
+            try { zt.ship.takeDamage(MONSTER_ZAP_DMG, this, zt.ship.position); } catch (_) {}
+          }
+        }
       }
     } else {
       // Aimless drift around the home patch: retarget every 6-12 s,
@@ -24641,21 +24676,40 @@ class OutskirtsMonster {
     }
   }
 
-  // Contact shock: flying into a leviathan is a mistake. Zap on touch
-  // (own short cooldown, works even on a peaceful drifter) plus a shove
-  // so the ship doesn't ghost through the body. Local-player only ;
-  // every client runs this against its own ship.
+  // Contact shock: flying into a leviathan is a mistake — for ANY ship.
+  // Zap on touch (own short cooldown, works even on a peaceful drifter)
+  // plus a shove so the ship doesn't ghost through the body. The local
+  // player is checked on every client ; bots are checked on the
+  // authority sim only.
   _contactShock() {
-    if (typeof player === 'undefined' || !player || !player.position) return;
-    if (player.shipState === 'dead' || player.shipState === 'spawning') return;
     if (this._touchCd > 0) return;
-    const dist = this.position.distanceTo(player.position);
-    if (dist < this.collisionRadius + 90) {
-      this._touchCd = 0.6;
-      this._zap(player.position, true);
-      const shove = _monScratchA.subVectors(player.position, this.position);
-      const sl = shove.length();
-      if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+    if (typeof player !== 'undefined' && player && player.position &&
+        player.shipState !== 'dead' && player.shipState !== 'spawning') {
+      const dist = this.position.distanceTo(player.position);
+      if (dist < this.collisionRadius + 90) {
+        this._touchCd = 0.6;
+        this._zap(player.position, true);
+        const shove = _monScratchA.subVectors(player.position, this.position);
+        const sl = shove.length();
+        if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+        return;
+      }
+    }
+    // Bots collide too (one shock per cooldown ; nearest-first is fine).
+    if (_monAuthority() && typeof game !== 'undefined' && game && game.entities) {
+      for (const b of game.entities) {
+        if (!b || !b.alive || !b.position) continue;
+        const d = this.position.distanceTo(b.position);
+        if (d < this.collisionRadius + 70) {
+          this._touchCd = 0.6;
+          this._zap(b.position, false);
+          try { b.takeDamage(MONSTER_ZAP_DMG, this, b.position); } catch (_) {}
+          const shove = _monScratchA.subVectors(b.position, this.position);
+          const sl = shove.length();
+          if (sl > 0.001 && b.velocity) b.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+          break;
+        }
+      }
     }
   }
 
