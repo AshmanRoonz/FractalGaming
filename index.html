@@ -16767,32 +16767,33 @@ class Bot {
     } else if (this.aiTarget) {
       const toTarget = this._tempVec3a.subVectors(this.aiTarget, this.position);
       const dist = toTarget.length();
+      // All combat steering (retreat / flank / strafe) is relative to the
+      // current combat target (player OR enemy bot) ; falls back to the
+      // player position so non-combat escort behavior is unchanged.
+      const _ctPos = (this.combatTarget && this.combatTarget.position)
+        ? this.combatTarget.position : player.position;
 
       if (this.aiRetreating) {
-        // Retreat at max speed away from player
-        moveDir = this._tempVec3b.subVectors(this.position, player.position).normalize();
+        // Retreat at max speed away from the threat
+        moveDir = this._tempVec3b.subVectors(this.position, _ctPos).normalize();
       } else if (dist > 100) {
         moveDir = toTarget.normalize();
 
-        // Flanking behavior: offset movement perpendicular to player angle
-        const toPlayer = this._tempVec3b.subVectors(player.position, this.position);
-        const distToPlayer = toPlayer.length();
+        // Flanking behavior: offset movement perpendicular to target angle
+        const toFoe = this._tempVec3b.subVectors(_ctPos, this.position);
+        const distToFoe = toFoe.length();
 
-        if (this.aiRole === 'flank' && distToPlayer < 3000 && distToPlayer > 300) {
-          // Build orthogonal direction for flanking (perpendicular to player facing).
-          // toPlayer becomes playerDir after normalize(); reuse _tempVec3d for the
-          // right/flank math to avoid `new THREE.Vector3()` on every flanking frame.
-          const playerDir = toPlayer.normalize();
-          const right = this._tempVec3d.set(0, 1, 0).cross(playerDir).normalize();
-          // flankTarget = player.position + right * 600, then toFlank = flankTarget - this.position.
-          // = (player.position - this.position) + right * 600 = (-toPlayer_was) + right*600,
-          // but we've overwritten _tempVec3b; easiest path: reuse _tempVec3d as right*600,
-          // then build toFlank into _tempVec3b directly.
+        if (this.aiRole === 'flank' && distToFoe < 3000 && distToFoe > 300) {
+          // Build orthogonal direction for flanking (perpendicular to the
+          // target bearing). Reuse _tempVec3d for the right/flank math to
+          // avoid `new THREE.Vector3()` on every flanking frame.
+          const foeDir = toFoe.normalize();
+          const right = this._tempVec3d.set(0, 1, 0).cross(foeDir).normalize();
           right.multiplyScalar(600);
           this._tempVec3b.set(
-            player.position.x + right.x - this.position.x,
-            player.position.y + right.y - this.position.y,
-            player.position.z + right.z - this.position.z
+            _ctPos.x + right.x - this.position.x,
+            _ctPos.y + right.y - this.position.y,
+            _ctPos.z + right.z - this.position.z
           ).normalize();
           moveDir.lerp(this._tempVec3b, 0.6);
           moveDir.normalize();
@@ -16800,12 +16801,11 @@ class Bot {
 
         // Combat strafing: lateral movement when in engagement range.
         // _tempVec3b here may have been overwritten by the flank branch, so
-        // re-derive toPlayer into _botStep (we reuse it below for substepping
-        // but each substep overwrites via .copy(), so this is safe).
-        if (this.aiStrafe && distToPlayer < this.aiRangePreference * 1.5 && !this.doomed) {
-          // Original: up.cross(toPlayer). _tempVec3d holds world-up; _botStep holds toPlayer.
+        // re-derive the bearing into _botStep (we reuse it below for
+        // substepping but each substep overwrites via .copy(), so this is safe).
+        if (this.aiStrafe && distToFoe < this.aiRangePreference * 1.5 && !this.doomed) {
           this._tempVec3d.set(0, 1, 0);
-          this._botStep.subVectors(player.position, this.position);
+          this._botStep.subVectors(_ctPos, this.position);
           const perp = this._tempVec3d.cross(this._botStep).normalize();
           const k = this.aiStrafeDir * 0.5;
           moveDir.x += perp.x * k;
@@ -16865,74 +16865,92 @@ class Bot {
       this.mesh.lookAt(this._tempVec3a.copy(this.position).add(this.targetDir));
     }
 
-    // AI: fire at player (with range preference, LOS check, and doomed suppression)
+    // AI: fire at the current combat target (player OR enemy bot), with
+    // range preference, LOS check, and doomed suppression.
     this.fireTimer -= dt;
-    if (this.fireTimer <= 0 && game.state === 'playing' && !this.aiRetreating) {
-      const toPlayer = this._tempVec3a.subVectors(player.position, this.position);
-      const distToPlayer = toPlayer.length();
-      if (distToPlayer < this.loadout.weapon.range && player.shipState !== 'dead' && player.team !== this.team) {
+    const _ct = this.combatTarget;
+    const _ctAlive = _ct && (_ct === player ? (player.shipState !== 'dead') : !!_ct.alive);
+    if (this.fireTimer <= 0 && game.state === 'playing' && !this.aiRetreating && _ctAlive) {
+      const toTgt = this._tempVec3a.subVectors(_ct.position, this.position);
+      const distToTgt = toTgt.length();
+      // Range Mode (BLASTER utility approximation) extends reach while active.
+      const _rangeMul = (this._rangeModeT > 0) ? 1.6 : 1.0;
+      if (distToTgt < this.loadout.weapon.range * _rangeMul) {
         // Range preference check: only fire if within optimal range or close enough (range * 1.3)
         const preferredDist = this.aiRangePreference;
-        const withinRange = distToPlayer <= preferredDist * 1.3;
+        const withinRange = distToTgt <= preferredDist * 1.3 * _rangeMul;
 
-        const dot = toPlayer.normalize().dot(this.targetDir);
+        const dot = toTgt.normalize().dot(this.targetDir);
         if (dot > 0.7 && withinRange) {
-          // LOS check: raycast toward player, only fire if path is clear
-          const losDist = raycastLevel(this.position, toPlayer, distToPlayer + 10);
-          if (losDist >= distToPlayer - 5) {
+          // LOS check: raycast toward the target, only fire if path is clear
+          const losDist = raycastLevel(this.position, toTgt, distToTgt + 10);
+          if (losDist >= distToTgt - 5) {
             // Test mode : bots fly the same AI patterns but never fire.
-            // The fireTimer is still scheduled so movement / target-lock state
-            // ticks normally ; only the actual fireAtPlayer call is skipped.
             if (!game.testMode) {
-              this.fireAtPlayer(toPlayer, distToPlayer);
+              this.fireAtShip(_ct, toTgt, distToTgt);
             }
             this.fireTimer = this.loadout.weapon.fireRate * (1 + Math.random() * 0.5);
           }
         }
       }
     }
+    if (this._rangeModeT > 0) this._rangeModeT -= dt;
 
-    // Bot ability use. Tick cooldowns and (when not retreating, in
-    // playing state, with player visible) attempt the offensive ability.
-    // Utility traps (Plasma Mines, Explosive Gas) drop opportunistically
-    // when the player is within range and bot is healthy.
+    // Bot ability use. Tick all three cooldowns ; offensive + defensive +
+    // utility each fire on their own heuristics. Friendly bots now use
+    // abilities too (the old gate required the PLAYER to be the enemy).
     this.abilityCooldowns[0] = Math.max(0, this.abilityCooldowns[0] - dt);
+    this.abilityCooldowns[1] = Math.max(0, this.abilityCooldowns[1] - dt);
     this.abilityCooldowns[2] = Math.max(0, this.abilityCooldowns[2] - dt);
-    // Skip ability use in test mode ; offensive abilities spawn
-    // projectiles tagged with owner='bot' that damage the player same as
-    // weapon fire.
-    if (game.state === 'playing' && !this.aiRetreating && player.shipState !== 'dead' && player.team !== this.team && !game.testMode) {
+    if (game.state === 'playing' && !this.aiRetreating && _ctAlive && !game.testMode) {
       this.tryUseAbilities();
     }
 
     this.coreMeter = Math.min(100, this.coreMeter + dt * 1.5);
+    // Spend the core when charged: ship-flavored surge (salvo + shield).
+    // Probabilistic trigger so five charged bots don't all dump cores in
+    // the same instant.
+    if (this.coreMeter >= 100 && _ctAlive && !this.aiRetreating &&
+        game.state === 'playing' && !game.testMode &&
+        this.position.distanceTo(_ct.position) < 1800 && Math.random() < dt * 0.5) {
+      this._useCoreSurge(_ct);
+    }
   }
 
   tryUseAbilities() {
     const off = this.loadout.abilities[0];
+    const def = this.loadout.abilities[1];
     const util = this.loadout.abilities[2];
     if (off && this.abilityCooldowns[0] <= 0) {
       this._tryUseOffensive(off);
+    }
+    if (def && this.abilityCooldowns[1] <= 0) {
+      this._tryUseDefensive(def);
     }
     if (util && this.abilityCooldowns[2] <= 0) {
       this._tryUseUtility(util);
     }
   }
 
+  // Route ability damage to whatever ship we're fighting.
+  _dealAbilityDamage(tgt, dmg) {
+    if (tgt === player) { try { playerTakeDamage(dmg, this, null); } catch (_) {} }
+    else if (tgt && tgt.takeDamage) { try { tgt.takeDamage(dmg, this, this.position); } catch (_) {} }
+  }
+
   _tryUseOffensive(ability) {
-    if (player.shipState === 'dead') return;
-    const toPlayer = this._tempVec3a.subVectors(player.position, this.position);
-    const dist = toPlayer.length();
-    // Range gate: most offensive abilities want the player within 2400 u and
+    const tgt = this.combatTarget;
+    const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
+    if (!tgtAlive) return;
+    const toTgt = this._tempVec3a.subVectors(tgt.position, this.position);
+    const dist = toTgt.length();
+    // Range gate: most offensive abilities want the target within 2400 u and
     // visible. Out-of-range just skips ; we keep the cooldown ticking from 0.
     if (dist > 2400) return;
-    // Normalize in place ; toPlayer.dot(aim) below still works because
-    // aim is the SAME vector after normalize, but we want toPlayer's
-    // un-normalized form for that dot. Capture length first (already
-    // done), then normalize toPlayer to use as aim.
-    const aim = toPlayer.normalize(); // _tempVec3a, now unit length
+    const aim = toTgt.normalize(); // _tempVec3a, now unit length
     const losDist = raycastLevel(this.position, aim, dist + 10);
     if (losDist < dist - 5) return; // wall in the way
+    const _tgtHullR = (tgt === player ? player.chassis.hullLength : tgt.chassis.hullLength) * 1.0;
     let used = true;
     if (ability.name === 'Laser') {
       // Hitscan beam. Same color stack as the player's Laser and
@@ -16947,8 +16965,8 @@ class Bot {
       // pre-normalized length we saved above so this still works.
       if (dist > 0 && dist < range) {
         const closest = this._tempVec3d.copy(this.position).addScaledVector(aim, dist);
-        if (closest.distanceTo(player.position) < player.chassis.hullLength * 1.0) {
-          playerTakeDamage(2400 * 0.6, this, null);
+        if (closest.distanceTo(tgt.position) < _tgtHullR) {
+          this._dealAbilityDamage(tgt, 2400 * 0.6);
         }
       }
     } else if (ability.name === 'Cluster Missile') {
@@ -16959,30 +16977,34 @@ class Bot {
       proj.cluster = true;
       proj.sizeMult = 2.4;
       proj.smokeTrail = true;
+      proj.ownerTeam = this.team; proj.ownerRef = this;
       proj.removeHaze();
       game.projectiles.push(proj);
     } else if (ability.name === 'Stun Bolt') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(800);
       const proj = new Projectile(this.position, vel, 1200, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
       proj.isArcWave = true;
+      proj.ownerTeam = this.team; proj.ownerRef = this;
       game.projectiles.push(proj);
     } else if (ability.name === 'Charge Shot') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(1200);
       const proj = new Projectile(this.position, vel, 1900, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
       proj.sizeMult = 1.8;
+      proj.ownerTeam = this.team; proj.ownerRef = this;
       game.projectiles.push(proj);
-    } else if (ability.name === 'Tracker Rockets') {
-      // Three rockets in a tight cone toward the player. Reuse _tempVec3b
-      // as the scratch for each rocket's direction+velocity (the
-      // constructor clones, so reusing across iterations is fine).
+    } else if (ability.name === 'Tracker Rockets' || ability.name === 'Rocket Salvo') {
+      // Three rockets in a tight cone toward the target. Rocket Salvo
+      // (SYPHON) shares the recipe with its own color.
+      const _rkColor = (ability.name === 'Rocket Salvo') ? LSS.CLASS_COLORS.SYPHON : LSS.CLASS_COLORS.TRACKER;
       for (let i = 0; i < 3; i++) {
         const vel = this._tempVec3b.set(
           aim.x + (Math.random()-0.5)*0.10,
           aim.y + (Math.random()-0.5)*0.10,
           aim.z
         ).normalize().multiplyScalar(700);
-        const proj = new Projectile(this.position, vel, 1100, 100, 'bot', LSS.CLASS_COLORS.TRACKER);
+        const proj = new Projectile(this.position, vel, 1100, 100, 'bot', _rkColor);
         proj.smokeTrail = true;
+        proj.ownerTeam = this.team; proj.ownerRef = this;
         proj.removeHaze();
         game.projectiles.push(proj);
       }
@@ -16995,13 +17017,11 @@ class Bot {
       spawnTracer(this.position, beamEnd, 0x66ddff, 1.4);
       if (dist > 0 && dist < range) {
         const closest = this._tempVec3d.copy(this.position).addScaledVector(aim, dist);
-        if (closest.distanceTo(player.position) < player.chassis.hullLength * 1.0) {
-          playerTakeDamage(900 * 0.6, this, null);
-          // Energy Syphon stuns the target ; play the stun cue so the player
-          // hears the disable in addition to seeing/feeling the damage. Plays
-          // even when the player's shields fully absorbed the hit because the
-          // ability still applies the slow, just like the player-vs-bot path.
-          try { playSound('stun'); } catch (e) {}
+        if (closest.distanceTo(tgt.position) < _tgtHullR) {
+          this._dealAbilityDamage(tgt, 900 * 0.6);
+          // Energy Syphon stuns the target ; play the stun cue (player
+          // victims only ; bot victims don't need the player's ear cue).
+          if (tgt === player) { try { playSound('stun'); } catch (e) {} }
         }
       }
     } else if (ability.name === 'Flame Chain') {
@@ -17032,16 +17052,16 @@ class Bot {
   }
 
   _tryUseUtility(ability) {
-    // Drop traps when the player is in range and roughly in front of us.
-    // Same pattern as _tryUseOffensive : normalize toPlayer
-    // in place to get aim, use addScaledVector instead of clone().add().
-    // wallPos / orb positions are retained by worldEffects so they DO
-    // need fresh allocations.
-    if (player.shipState === 'dead') return;
-    const toPlayer = this._tempVec3a.subVectors(player.position, this.position);
-    const dist = toPlayer.length();
+    // Drop traps / reposition when the combat target is in range and
+    // roughly in front of us. wallPos / orb positions are retained by
+    // worldEffects so they DO need fresh allocations.
+    const tgt = this.combatTarget;
+    const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
+    if (!tgtAlive) return;
+    const toTgt = this._tempVec3a.subVectors(tgt.position, this.position);
+    const dist = toTgt.length();
     if (dist > 1400) return;
-    const aim = toPlayer.normalize(); // unit vector in _tempVec3a
+    const aim = toTgt.normalize(); // unit vector in _tempVec3a
     let used = true;
     if (ability.name === 'Explosive Gas') {
       const dropPos = this.position.clone().addScaledVector(aim, 160);
@@ -17067,16 +17087,138 @@ class Bot {
       if (typeof spawnParticleWall === 'function') {
         spawnParticleWall(wallPos, aim.clone(), 'bot', this.team, null, ++net.effectIdCounter, false);
       }
+    } else if (ability.name === 'Stasis Trap') {
+      // PUNCTURE utility: plant the tether trap ahead, same owner-tagged
+      // world effect as the player path.
+      const trapPos = this.position.clone().addScaledVector(aim, 200);
+      if (typeof spawnTetherTrap === 'function') {
+        try { spawnTetherTrap(trapPos, 'bot', this.team, null, ++net.effectIdCounter, false); } catch (_) { used = false; }
+      } else used = false;
+    } else if (ability.name === 'Teleport') {
+      // SLAYER utility approximation: blink ~700u along current heading
+      // with a jitter, FX at both ends. Repositions out of bad fights.
+      const from = this.position.clone();
+      const hop = this._tempVec3b.copy(this.targetDir).multiplyScalar(700);
+      hop.x += (Math.random() - 0.5) * 300;
+      hop.y += (Math.random() - 0.5) * 150;
+      hop.z += (Math.random() - 0.5) * 300;
+      this.position.add(hop);
+      try {
+        spawnExplosion(from, 10);
+        spawnExplosion(this.position, 12);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SLAYER, 3.0, 600, 0.3);
+      } catch (_) {}
+    } else if (ability.name === 'Range Mode') {
+      // BLASTER utility approximation: extended weapon reach for 8 s
+      // (read by the fire-gate range multiplier).
+      this._rangeModeT = 8;
+      try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.BLASTER, 2.0, 400, 0.25); } catch (_) {}
+    } else if (ability.name === 'Inner Spark') {
+      // SYPHON utility: refresh the other cooldowns.
+      this.abilityCooldowns[0] = 0;
+      this.abilityCooldowns[1] = Math.min(this.abilityCooldowns[1], 2);
+      try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SYPHON, 2.5, 450, 0.3); } catch (_) {}
     } else {
       used = false;
     }
     if (used) {
-      this.abilityCooldowns[2] = ability.cooldown * (1.4 + Math.random() * 0.6);
+      this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.4 + Math.random() * 0.6);
     }
   }
 
-  findTarget() {
+  // Defensive slot (index 1): bots pop these when hurting. The player's
+  // defensive machinery is player-global, so these are bot-side
+  // approximations that read the same in a fight.
+  _tryUseDefensive(ability) {
+    const hurting = this.health < this.maxHealth * 0.55 ||
+                    (this.shield <= 0 && this.health < this.maxHealth * 0.9);
+    if (!hurting) return;
+    let used = true;
+    const n = ability.name;
+    if (n === 'Vortex Shield' || n === 'Absorption' || n === 'Fire Shield' || n === 'Body Shield') {
+      // Emergency shield surge + ripple so the move reads at a glance.
+      this.shield = Math.min(this.maxShield, this.shield + this.maxShield * 0.5);
+      try {
+        const c = _shipShieldColor(this.loadoutKey);
+        if (typeof spawnShieldHit === 'function') spawnShieldHit(this.position, this.chassis.hullLength * 0.8, c, this.mesh);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, c, 2.5, 500, 0.25);
+      } catch (_) {}
+    } else if (n === 'Afterburner') {
+      // Burst of speed along the current heading + booster visuals.
+      this.velocity.addScaledVector(this.targetDir, this.chassis.flightSpeed * 1.6);
+      try { if (typeof spawnDashBoosters === 'function') spawnDashBoosters(this.mesh, this.targetDir, 0xffaa33); } catch (_) {}
+    } else if (n === 'Energy Syphon') {
+      // Leech the combat target's shield into ours.
+      const t = this.combatTarget;
+      if (t && t.position && this.position.distanceTo(t.position) < 1500) {
+        const steal = 600;
+        if (t === player) player.shield = Math.max(0, player.shield - steal);
+        else if (typeof t.shield === 'number') t.shield = Math.max(0, t.shield - steal);
+        this.shield = Math.min(this.maxShield, this.shield + steal);
+        try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(t.position, this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}
+      } else used = false;
+    } else {
+      used = false;
+    }
+    if (used) {
+      this.abilityCooldowns[1] = (ability.cooldown || 14) * (1.4 + Math.random() * 0.6);
+    }
+  }
+
+  // Core meter spend: a ship-flavored approximation (missile salvo in the
+  // ship's palette + emergency shield) instead of 7 bespoke core ports.
+  _useCoreSurge(target) {
+    this.coreMeter = 0;
+    const aim = this._tempVec3a.subVectors(target.position, this.position).normalize();
+    const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44;
+    for (let i = 0; i < 5; i++) {
+      const vel = this._tempVec3b.set(
+        aim.x + (Math.random() - 0.5) * 0.16,
+        aim.y + (Math.random() - 0.5) * 0.16,
+        aim.z + (Math.random() - 0.5) * 0.16
+      ).normalize().multiplyScalar(850);
+      const proj = new Projectile(this.position, vel, 700, 120, 'bot', col);
+      proj.smokeTrail = true;
+      proj.ownerTeam = this.team; proj.ownerRef = this;
+      try { proj.removeHaze(); } catch (_) {}
+      game.projectiles.push(proj);
+    }
+    this.shield = Math.min(this.maxShield, this.shield + this.maxShield * 0.35);
+    try {
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, col, 4.0, 800, 0.4);
+      if (typeof playSpatialSound === 'function') playSpatialSound('explosion', this.position.clone(), { refDistance: 300, maxDistance: 2500, rolloffFactor: 0.9 });
+    } catch (_) {}
+  }
+
+  // Pick the best enemy SHIP to fight: the player (if on the other team)
+  // or any enemy bot. The player gets a 25% distance discount so enemy
+  // squads still feel like they're hunting YOU, but a clearly closer
+  // enemy bot gets engaged ; this is what makes friendly AI fight enemy
+  // AI and enemy AI fight the friendlies.
+  _acquireCombatTarget() {
+    let best = null, bestScore = Infinity;
     if (player.shipState !== 'dead' && player.team !== this.team) {
+      best = player;
+      bestScore = this.position.distanceTo(player.position) * 0.75;
+    }
+    for (const b of game.entities) {
+      if (!b || b === this || !b.alive || b.team === this.team) continue;
+      const d = this.position.distanceTo(b.position);
+      if (d < bestScore) { bestScore = d; best = b; }
+    }
+    return best;
+  }
+
+  findTarget() {
+    const ct = this._acquireCombatTarget();
+    this.combatTarget = ct;
+    if (ct && ct !== player) {
+      // Enemy bot target: steer straight at it. Squad-mates get AI
+      // omniscience between machines ; LOS still gates actual firing.
+      this.aiTarget = ct.position.clone();
+      return;
+    }
+    if (ct === player && player.shipState !== 'dead' && player.team !== this.team) {
       // Direct line of sight check
       const toPlayer = this._tempVec3a.subVectors(player.position, this.position);
       const dist = toPlayer.length();
@@ -17182,8 +17324,13 @@ class Bot {
     }
   }
 
-  fireAtPlayer(dir, dist) {
-    if (player.shipState === 'dead') return;
+  // Legacy name kept for any external callers ; combat now routes through
+  // fireAtShip so bots can shoot bots.
+  fireAtPlayer(dir, dist) { return this.fireAtShip(player, dir, dist); }
+
+  fireAtShip(target, dir, dist) {
+    const _tgtIsPlayer = (target === player);
+    if (_tgtIsPlayer ? (player.shipState === 'dead') : !(target && target.alive)) return;
     // Line-of-sight check: can't shoot through walls. Scratch vector
     // instead of dir.clone() ; raycastLevel doesn't retain it.
     _botFireDir.copy(dir).normalize();
@@ -17231,7 +17378,7 @@ class Bot {
       // Chaingun-class weapons (fireRate <= 0.10) get a thinner tracer so
       // overlapping haze layers don't pile up into a 2D streak.
       const isChaingunBot = (weapon.fireRate <= 0.10);
-      spawnTracer(fireOrigin, player.position, flashColor, isChaingunBot ? 0.55 : 1.0);
+      spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
       // Muzzle particles (POJO position/velocity ; no Vector3 churn)
       for (let i = 0; i < 2; i++) {
@@ -17267,16 +17414,21 @@ class Bot {
       }
     }
 
-    playerTakeDamage(damage, this);
-    // TRACKER bot lock-on: hits build lock marks on the player (max 3). The sonar
-    // ping is reserved for the player's OWN TRACKER lock progression (hear-when-
-    // you-lock), not for enemy lock progression onto you; the on-screen
-    // "ENEMY LOCKED-ON" warning pips already communicate incoming threat
-    // visually. Otherwise every ship being TRACKER-shot would hear lock pings.
-    if (this.loadoutKey === 'TRACKER') {
-      const prevEnemyLocks = player.enemyToneLocks[this.id] || 0;
-      player.enemyToneLocks[this.id] = Math.min(3, prevEnemyLocks + 1);
-      if (player._enemyLockDecayTimers) player._enemyLockDecayTimers[this.id] = 0; // reset decay
+    if (_tgtIsPlayer) {
+      playerTakeDamage(damage, this);
+      // TRACKER bot lock-on: hits build lock marks on the player (max 3). The sonar
+      // ping is reserved for the player's OWN TRACKER lock progression (hear-when-
+      // you-lock), not for enemy lock progression onto you; the on-screen
+      // "ENEMY LOCKED-ON" warning pips already communicate incoming threat
+      // visually. Otherwise every ship being TRACKER-shot would hear lock pings.
+      if (this.loadoutKey === 'TRACKER') {
+        const prevEnemyLocks = player.enemyToneLocks[this.id] || 0;
+        player.enemyToneLocks[this.id] = Math.min(3, prevEnemyLocks + 1);
+        if (player._enemyLockDecayTimers) player._enemyLockDecayTimers[this.id] = 0; // reset decay
+      }
+    } else {
+      // Bot-vs-bot: same damage model, attacker credited for kill stats.
+      target.takeDamage(damage, this, target.position);
     }
     // Bot core meter charges from dealing damage
     this.coreMeter = Math.min(100, this.coreMeter + damage / 100);
@@ -18390,23 +18542,44 @@ class Projectile {
           }
         }
       }
-    } else if (this.owner !== 'player' && player.shipState !== 'dead') {
-      const hitRadius = player.chassis.hullLength * 1.2;
-      const hasShield = player.shield > 0;
-      const _usesSplashSlop = (this.splash || 0) >= 25;
-      let isHit;
-      if (hasShield || _usesSplashSlop) {
-        isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
-      } else {
-        const inBroadOBB = _pointInsideShipOBB(this.position, player, { w: 1.4, h: 1.1, l: 1.4 });
-        isHit = inBroadOBB && _swepRayHitsShipMesh(this.position, this.velocity, player.mesh);
+    } else if (this.owner !== 'player') {
+      // Friendly-fire guard: bot projectiles tagged with ownerTeam never
+      // hit ships on the firing bot's own team (incl. the player when a
+      // FRIENDLY bot fired this).
+      if (player.shipState !== 'dead' && (this.ownerTeam == null || player.team !== this.ownerTeam)) {
+        const hitRadius = player.chassis.hullLength * 1.2;
+        const hasShield = player.shield > 0;
+        const _usesSplashSlop = (this.splash || 0) >= 25;
+        let isHit;
+        if (hasShield || _usesSplashSlop) {
+          isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
+        } else {
+          const inBroadOBB = _pointInsideShipOBB(this.position, player, { w: 1.4, h: 1.1, l: 1.4 });
+          isHit = inBroadOBB && _swepRayHitsShipMesh(this.position, this.velocity, player.mesh);
+        }
+        if (isHit) {
+          playerTakeDamage(this.damage, this.ownerRef || this.owner, this);
+          if (this.isCluster) this.spawnClusterChildren();
+          this.spawnImpactExplosion(this.position);
+          this.destroy();
+          return;
+        }
       }
-      if (isHit) {
-        playerTakeDamage(this.damage, this.owner, this);
-        if (this.isCluster) this.spawnClusterChildren();
-        this.spawnImpactExplosion(this.position);
-        this.destroy();
-        return;
+      // Bot-vs-bot: enemy bots of the firing team take projectile hits.
+      // 0.6x mirrors the bot weapon damage scaling so AI fights don't melt.
+      if (this.ownerTeam != null) {
+        for (const bot of game.entities) {
+          if (!bot || !bot.alive || bot === this.ownerRef || bot.team === this.ownerTeam) continue;
+          const r = bot.chassis.hullLength * 1.1;
+          if (this.position.distanceToSquared(bot.position) < r * r) {
+            bot.takeDamage(this.damage * 0.6, this.ownerRef || 'bot', this.position);
+            if (this.isCluster) this.spawnClusterChildren();
+            this.spawnImpactExplosion(this.position);
+            if (this.splash > 0) this.splashDamage();
+            this.destroy();
+            return;
+          }
+        }
       }
     }
 
@@ -18466,14 +18639,19 @@ class Projectile {
   }
 
   splashDamage() {
+    // Team-aware splash: player projectiles spare the player's team ;
+    // bot projectiles (tagged ownerTeam) spare the firing bot's team.
+    const _splTeam = (this.owner === 'player') ? player.team
+                   : (this.ownerTeam != null ? this.ownerTeam : player.team);
     for (const bot of game.entities) {
-      if (!bot.alive || bot.team === player.team) continue;
+      if (!bot.alive || bot.team === _splTeam || bot === this.ownerRef) continue;
       const distSq = this.position.distanceToSquared(bot.position);
       if (distSq < this.splash * this.splash && distSq > 0) {
         const dist = Math.sqrt(distSq);
         const falloff = 1 - dist / this.splash;
-        const dealt = bot.takeDamage(this.damage * 0.75 * falloff, 'player');
-        if (dealt > 0) {
+        const dealt = bot.takeDamage(this.damage * 0.75 * falloff,
+          this.owner === 'player' ? 'player' : (this.ownerRef || 'bot'));
+        if (dealt > 0 && this.owner === 'player') {
           player.damageDealt += dealt;
           player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           showHitMarker();
@@ -18486,6 +18664,16 @@ class Projectile {
           }
           if (player.trackerLocks[bot.id] >= 3) player.trackerLockedTarget = bot;
         }
+      }
+    }
+    // Enemy bot splash also hurts the PLAYER (it never did before ; bot
+    // ordnance only direct-hit the player). Friendly bot splash spares them.
+    if (this.owner !== 'player' && player.shipState !== 'dead' &&
+        (this.ownerTeam == null || player.team !== this.ownerTeam)) {
+      const _pdSq = this.position.distanceToSquared(player.position);
+      if (_pdSq < this.splash * this.splash && _pdSq > 0) {
+        const _pfall = 1 - Math.sqrt(_pdSq) / this.splash;
+        try { playerTakeDamage(this.damage * 0.75 * _pfall, this.ownerRef || this.owner, this); } catch (_) {}
       }
     }
     // Optional rock damage : projectiles with bustsRocks = true
@@ -29288,7 +29476,19 @@ function spawnBots() {
     }
   };
 
-  const enemyLoadouts = ['PYRO', 'SLAYER', 'TRACKER'];
+  // Ship variety: deal 5 DISTINCT loadouts from the full roster instead
+  // of the same hardcoded 3+2 every match. Shuffled once per match (round
+  // 1) so mid-match respawns keep the same ships and per-loadout carry-over
+  // stats stay coherent ; a fresh match deals a fresh hand.
+  if (!game._botShipDeal || (game.currentRound || 1) <= 1) {
+    const keys = Object.keys(LOADOUTS);
+    for (let i = keys.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+    }
+    game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  }
+  const enemyLoadouts = game._botShipDeal.enemy;
   for (let i = 0; i < 3; i++) {
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
     const sp = getValidSpawnPoint('B');
@@ -29297,7 +29497,7 @@ function spawnBots() {
     game.entities.push(bot);
   }
 
-  const friendlyLoadouts = ['PUNCTURE', 'BLASTER'];
+  const friendlyLoadouts = game._botShipDeal.friendly;
   for (let i = 0; i < 2; i++) {
     const bot = new Bot(friendlyLoadouts[i], LSS.TEAM_FLEET_A, i + 10);
     const sp = getValidSpawnPoint('A');
