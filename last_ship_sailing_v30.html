@@ -3105,6 +3105,7 @@ const input = {
   // smoothing. Stick values are the literal normalized thumb offset; look
   // deltas feed input.mouseDX/DY 1:1 (just scaled for thumb travel range).
   touchActive: false,           // overlay visible ; gates touch look/move paths
+  touchSuppressMouse: false,    // real touch device: taps never latch mouse fire
   touchMoveX: 0, touchMoveY: 0, // virtual stick, -1..1 (Y: up = -1, gamepad convention)
   touchMoveUp: false, touchMoveDown: false,
   touchFire: false, touchAltFire: false,
@@ -37526,7 +37527,7 @@ document.addEventListener('mousedown', e => {
   // (touch) Also skip when the touch overlay is active: taps on bare
   // canvas synthesize mousedown and would fire a stray shot ; touch users
   // fire via the FIRE button only.
-  if (!isUI && !game.testMode && !input.touchActive) {
+  if (!isUI && !game.testMode && !input.touchActive && !input.touchSuppressMouse) {
     if (e.button === 0) input.mouseDown = true;
     if (e.button === 2) input.rightMouseDown = true;
   }
@@ -37593,6 +37594,12 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // scrolling keeps working.
   if ((navigator.maxTouchPoints > 0) || ('ontouchstart' in window)) {
     try { document.documentElement.classList.add('lss-touch'); } catch (_) {}
+    // Real touch hardware: screen taps must never latch the mouse-fire
+    // path, even while the overlay is hidden (e.g. yielded to a gamepad).
+    // Touch-screen laptops are unaffected ; this module only runs for
+    // them if they opt in, and mouse fire is only suppressed when touch
+    // controls are enabled.
+    if (_enabled) input.touchSuppressMouse = true;
   }
 
   // Gyro sign multipliers ; flip via LSS_TOUCH.gyroSigns if a device
@@ -37617,7 +37624,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '  color: rgba(190, 235, 255, 0.75); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
     '  text-transform: uppercase; }',
     '#touch-controls .tc.tc-pressed { background: rgba(120, 220, 255, 0.22); border-color: rgba(170, 240, 255, 0.7); }',
-    '.tc-rect { width: 6.5vmin; height: 17vmin; border-radius: 1.2vmin; }',
+    '.tc-rect { width: 17vmin; height: 17vmin; border-radius: 1.2vmin; }',
     '.tc-diamond { width: 9.5vmin; height: 9.5vmin; transform: rotate(45deg); border-radius: 1.2vmin; }',
     '.tc-diamond > span { transform: rotate(-45deg); }',
     '#tc-move, #tc-look { border-radius: 50%; width: 30vmin; height: 30vmin; }',
@@ -37886,7 +37893,11 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const inMatch = (typeof game !== 'undefined') && game &&
       (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd' || game.state === 'matchEnd');
     const blocked = (typeof settingsOpen !== 'undefined' && settingsOpen) || selectActive;
-    const show = inMatch && !blocked;
+    // Gamepad takes precedence: a phone/tablet player who connects a
+    // controller gets a clean screen ; the overlay returns automatically
+    // when the pad disconnects (this interval re-polls every 250 ms).
+    // Gyro steering intentionally stays live alongside a gamepad.
+    const show = inMatch && !blocked && !input.gpConnected;
     const cur = root.style.display === 'block';
     if (show !== cur) {
       root.style.display = show ? 'block' : 'none';
