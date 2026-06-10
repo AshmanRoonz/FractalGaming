@@ -2813,7 +2813,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.17';
+const LSS_BUILD = '30.16';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -10293,10 +10293,6 @@ class GasCloud {
     // adjacent sprites read as different shades of gray, not identical
     // tinted copies of the cloud's average color.
     this.colorJitter = (options.colorJitter != null) ? options.colorJitter : 0.0;
-    // Half-rate cosmetic write phase (see _wantSlotWrite) ; random seed so
-    // clouds stagger across both frames instead of all writing together.
-    this._writeFlip = Math.random() < 0.5;
-    this._wakeUntil = 0;
     const segCount = options.segments || 8;
     // Each slot owns: { idx, offset (Vector3 in local space), scale, alpha }
     this.slots = [];
@@ -10347,24 +10343,10 @@ class GasCloud {
     }
   }
 
-  // Half-rate cosmetic slot writes. The Lissajous churn oscillates at
-  // 0.15-0.45 rad/s and clouds drift at ~30 u/s, so pushing sprite
-  // positions to the GPU every OTHER frame is visually identical (sub-
-  // sprite-width deltas) while halving the dominant per-cloud CPU cost
-  // (3 sin() + an attribute write per sprite, hundreds of clouds). Clouds
-  // with a live wake (ship just blasted through / wall splat) keep
-  // writing every frame so combat turbulence stays full-rate smooth.
-  _wantSlotWrite() {
-    this._writeFlip = !this._writeFlip;
-    if (this._writeFlip) return true;
-    return (typeof game !== 'undefined' && game) ? game.time < this._wakeUntil : true;
-  }
-
   // Move all owned slots so they sit at this.position + offset + wakeOff +
   // per-sprite drift offset. Cheap : only writes the position attribute.
   setPosition(x, y, z) {
     this.position.set(x, y, z);
-    if (!this._wantSlotWrite()) return;
     const churn = (typeof QUALITY === 'undefined' || QUALITY.cloudChurn());
     if (churn) {
       const t = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
@@ -10425,8 +10407,6 @@ class GasCloud {
   }
 
   applyWake(srcX, srcY, srcZ, velX, velY, velZ, strength, radius, dt) {
-    // Mark hot: full-rate slot writes while the wake decays (~3.5 s tail).
-    if (typeof game !== 'undefined' && game) this._wakeUntil = game.time + 3.5;
     const r2 = radius * radius;
     const vMag2 = velX*velX + velY*velY + velZ*velZ;
     const vMag = vMag2 > 1 ? Math.sqrt(vMag2) : 0;
@@ -10533,27 +10513,19 @@ class GasCloud {
     }
   }
 
-  tickWake(dt, skipWrite) {
+  tickWake(dt) {
     // Slower decay (1.0/s vs 1.5/s) so the
     // turbulent wake trail lingers longer behind a passing ship — looking
     // back along your flight path, you see the disturbed gas still
     // swirling for ~3 seconds before settling.
     const decay = Math.exp(-1.0 * dt);
+    const churn = (typeof QUALITY === 'undefined' || QUALITY.cloudChurn());
+    const t = churn && typeof game !== 'undefined' && typeof game.time === 'number' ? game.time : 0;
     for (let i = 0; i < this.slots.length; i++) {
       const s = this.slots[i];
       s.wakeOff.x *= decay;
       s.wakeOff.y *= decay;
       s.wakeOff.z *= decay;
-    }
-    // skipWrite: detached pockets get their slot positions pushed by
-    // setPosition later this same frame (updateDetachedGasPockets), so
-    // writing them here too was pure double work — decay only.
-    if (skipWrite) return;
-    if (!this._wantSlotWrite()) return;
-    const churn = (typeof QUALITY === 'undefined' || QUALITY.cloudChurn());
-    const t = churn && typeof game !== 'undefined' && typeof game.time === 'number' ? game.time : 0;
-    for (let i = 0; i < this.slots.length; i++) {
-      const s = this.slots[i];
       let dx = 0, dy = 0, dz = 0;
       if (churn) {
         const sp = s.driftSpeed;
@@ -10580,7 +10552,6 @@ class GasCloud {
   }
 
   spreadAgainstWall(nx, ny, nz, dt) {
-    if (typeof game !== 'undefined' && game) this._wakeUntil = game.time + 3.5;
     const spread = 50 * dt;  // base lateral push per second
     const maxOff = this.boundsRadius * 1.4;
     const maxOff2 = maxOff * maxOff;
@@ -10623,7 +10594,6 @@ class GasCloud {
   }
 
   shockwaveExpand(dt) {
-    if (typeof game !== 'undefined' && game) this._wakeUntil = game.time + 3.5;
     const expandSpeed = 90 * dt;
     const maxOff = this.boundsRadius * 1.7;
     const maxOff2 = maxOff * maxOff;
@@ -10883,7 +10853,7 @@ function updateBCSWakes(dt) {
           }
         }
       }
-      cloud.tickWake(dt, true);
+      cloud.tickWake(dt);
     }
   }
 }
@@ -24044,14 +24014,11 @@ function updateDetachedGasPockets(dt) {
       if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
       continue;
     }
-    // Quarter-rate SDF physics: clouds drift at <=~45 u/s, so checking the
-    // wall field every 4th frame (staggered by index) moves the cloud at
-    // most ~3 units between checks against a >=16-unit soft buffer. The
-    // worldSDF + sdfNormal sampling per pocket was a steady CPU tax that
-    // phones felt ; this quarters it. Gravity impulses below use dt * 2 so
-    // the effective pull matches the old half-rate code exactly.
-    p._sdfPhase = ((p._sdfPhase === undefined ? (i & 3) : p._sdfPhase) + 1) & 3;
-    if (p._sdfPhase !== 0) {
+    // Half-rate SDF physics: clouds drift slowly, and the worldSDF +
+    // gradient sampling per pocket per frame was a steady CPU tax that
+    // phones felt. Alternate frames per pocket.
+    p._sdfTick = !p._sdfTick;
+    if (p._sdfTick) {
       if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
       continue;
     }
@@ -24069,8 +24036,7 @@ function updateDetachedGasPockets(dt) {
       // at the wall surface (d = 0). Goes into velocity (transient) not
       // drift so the pull is self-limited by friction + proximity push.
       const gravFactor = (d + gravRange) / gravRange;  // 0 at far edge, 1 at wall
-      // dt * 70 at quarter-rate == dt * 35 at the old half-rate (same pull).
-      p.velocity.addScaledVector(_gasSDFNormal, gravFactor * dt * 70);
+      p.velocity.addScaledVector(_gasSDFNormal, gravFactor * dt * 35);
 
       // Contact-zone behavior (d > -buffer)
       if (d > -buffer) {
@@ -26783,71 +26749,32 @@ const _emberFalloffTexture = (function() {
   return tex;
 })();
 
-// ---- PARTICLE POINT CLOUD ----
-// (v30.17) Every ember/spark particle renders through ONE THREE.Points
-// object with per-particle position/color/size/alpha attributes. The old
-// pool kept 500 scene-resident Sprites: each VISIBLE sprite was its own
-// draw call (sprites never batch) and every sprite, visible or not, got a
-// matrix composition in updateMatrixWorld each frame. Combat regularly ran
-// 150+ live particles = 150+ extra draw calls; phones paid dearly. Same
-// ember falloff texture, same additive blending, same size attenuation
-// math as Sprite scaling, so the look is pixel-identical.
-const _PTS_MAX = MAX_PARTICLES;
-const _ptsPos   = new Float32Array(_PTS_MAX * 3);
-const _ptsCol   = new Float32Array(_PTS_MAX * 3);
-const _ptsSize  = new Float32Array(_PTS_MAX);
-const _ptsAlpha = new Float32Array(_PTS_MAX);
-const _ptsGeo = new THREE.BufferGeometry();
-const _ptsPosAttr   = new THREE.BufferAttribute(_ptsPos, 3).setUsage(THREE.DynamicDrawUsage);
-const _ptsColAttr   = new THREE.BufferAttribute(_ptsCol, 3).setUsage(THREE.DynamicDrawUsage);
-const _ptsSizeAttr  = new THREE.BufferAttribute(_ptsSize, 1).setUsage(THREE.DynamicDrawUsage);
-const _ptsAlphaAttr = new THREE.BufferAttribute(_ptsAlpha, 1).setUsage(THREE.DynamicDrawUsage);
-_ptsGeo.setAttribute('position', _ptsPosAttr);
-_ptsGeo.setAttribute('aColor', _ptsColAttr);
-_ptsGeo.setAttribute('aSize', _ptsSizeAttr);
-_ptsGeo.setAttribute('aAlpha', _ptsAlphaAttr);
-_ptsGeo.setDrawRange(0, 0);
-const _ptsMat = new THREE.ShaderMaterial({
-  uniforms: { uMap: { value: _emberFalloffTexture }, uScale: { value: 600 } },
-  vertexShader: [
-    'attribute vec3 aColor;',
-    'attribute float aSize;',
-    'attribute float aAlpha;',
-    'varying vec3 vColor;',
-    'varying float vAlpha;',
-    'uniform float uScale;',
-    'void main() {',
-    '  vColor = aColor;',
-    '  vAlpha = aAlpha;',
-    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-    // Same screen-size math as Sprite scaling: worldSize * cot(fov/2) *
-    // halfDrawingBufferHeight / depth (uScale bakes the first two).
-    '  gl_PointSize = aSize * uScale / max(1.0, -mv.z);',
-    '  gl_Position = projectionMatrix * mv;',
-    '}',
-  ].join('\n'),
-  fragmentShader: [
-    'uniform sampler2D uMap;',
-    'varying vec3 vColor;',
-    'varying float vAlpha;',
-    'void main() {',
-    '  vec4 tex = texture2D(uMap, gl_PointCoord);',
-    '  float a = tex.a * vAlpha;',
-    '  if (a < 0.004) discard;',
-    '  gl_FragColor = vec4(vColor * tex.rgb, a);',
-    '}',
-  ].join('\n'),
-  transparent: true,
-  blending: THREE.AdditiveBlending,
-  depthWrite: false,
-  depthTest: true,
-});
-const _particlePoints = new THREE.Points(_ptsGeo, _ptsMat);
-_particlePoints.frustumCulled = false;   // particles span the arena ; one object, skip the cull test
-_particlePoints.matrixAutoUpdate = false; // world positions live in the attribute, object never moves
-_particlePoints.visible = false;
-scene.add(_particlePoints);
-const _ptsColorScratch = new THREE.Color();
+// ---- PARTICLE SPRITE POOL ----
+// Replaces updateParticles' per-particle lazy-create-on-first-frame path
+// (new SpriteMaterial + new Sprite + scene.add per particle, then dispose
+// + scene.remove on expiration). At 200-400 particles per second during
+// shielded combat that was the second-largest combat allocation source
+// after lightning. Pool is sized to MAX_PARTICLES so every particle gets
+// a slot. Pre-allocated Sprites stay scene-resident at visible:false
+// when free; acquire/release just toggles visibility.
+const _particlePool = [];
+function _initParticlePool() {
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    const mat = new THREE.SpriteMaterial({
+      map: _emberFalloffTexture,
+      color: 0xffffff,
+      transparent: true,
+      opacity: 1.0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    });
+    const sprite = new THREE.Sprite(mat);
+    sprite.visible = false;
+    scene.add(sprite);
+    _particlePool.push({ sprite, mat, free: true });
+  }
+}
+_initParticlePool();
 
 let _shadersWarmed = false;
 function _warmupEffectShaders() {
@@ -26872,10 +26799,10 @@ function _warmupEffectShaders() {
       showAndQueue(slot && slot.mesh);
     }
   }
-  if (typeof _particlePoints !== 'undefined' && _particlePoints) {
-    // Compile the particle point-cloud shader during warmup so the first
-    // in-combat ember doesn't pay a mid-frame program link.
-    showAndQueue(_particlePoints);
+  if (typeof _particlePool !== 'undefined' && Array.isArray(_particlePool)) {
+    for (const slot of _particlePool) {
+      showAndQueue(slot && slot.sprite);
+    }
   }
   function restoreAll() {
     for (const [mesh, v] of restore) {
@@ -26898,12 +26825,34 @@ function _warmupEffectShaders() {
   }
 }
 
+let _particlePoolCursor = 0;
+function _acquireParticleSlot() {
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    const idx = (_particlePoolCursor + i) % MAX_PARTICLES;
+    const slot = _particlePool[idx];
+    if (slot.free) {
+      slot.free = false;
+      slot.sprite.visible = true;
+      _particlePoolCursor = (idx + 1) % MAX_PARTICLES;
+      return slot;
+    }
+  }
+  return null; // pool exhausted (shouldn't happen â€” pool size = MAX_PARTICLES)
+}
+function _releaseParticleSlot(slot) {
+  if (!slot) return;
+  slot.free = true;
+  slot.sprite.visible = false;
+}
+
 function cullOldestParticle() {
   // Remove the particle with the least remaining life
   let oldestIdx = 0, lowestLife = Infinity;
   for (let i = 0; i < game.particles.length; i++) {
     if (game.particles[i].life < lowestLife) { lowestLife = game.particles[i].life; oldestIdx = i; }
   }
+  const p = game.particles[oldestIdx];
+  if (p.poolSlot) _releaseParticleSlot(p.poolSlot);
   const _lastC = game.particles.length - 1;
   if (oldestIdx !== _lastC) game.particles[oldestIdx] = game.particles[_lastC];
   game.particles.pop();
@@ -26914,21 +26863,17 @@ function _pVel(x, y, z) { return { x: x || 0, y: y || 0, z: z || 0 }; }
 function updateParticles(dt) {
   const _vrTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (_vrTier >= 3) {
+    for (let i = game.particles.length - 1; i >= 0; i--) {
+      const p = game.particles[i];
+      if (p && p.poolSlot) _releaseParticleSlot(p.poolSlot);
+    }
     game.particles.length = 0;
-    _ptsGeo.setDrawRange(0, 0);
-    _particlePoints.visible = false;
     return;
   }
   // Cap particle count: cull oldest when over budget
   while (game.particles.length > MAX_PARTICLES) cullOldestParticle();
 
   const arenaLimit = LSS.ARENA_SIZE;
-  // Match Sprite-scaling screen size: uScale = cot(fov/2) * halfBufferHeightPx.
-  const _bufH = (typeof renderer !== 'undefined' && renderer && renderer.domElement)
-    ? renderer.domElement.height : 1080;
-  _ptsMat.uniforms.uScale.value = _bufH * 0.5 *
-    ((typeof camera !== 'undefined' && camera) ? camera.projectionMatrix.elements[5] : 2.4);
-  let _w = 0;
   // Manual x/y/z math on velocity so POJO-typed
   // velocities work alongside any remaining Vector3-typed ones
   // (gas-cloud particles). Replaces p.velocity.multiplyScalar(0.95).
@@ -26938,6 +26883,7 @@ function updateParticles(dt) {
     // Kill expired particles and those outside arena bounds
     const pos = p.position;
     if (p.life <= 0 || Math.abs(pos.x) > arenaLimit || Math.abs(pos.y) > arenaLimit || Math.abs(pos.z) > arenaLimit) {
+      if (p.poolSlot) _releaseParticleSlot(p.poolSlot);
       // Swap-with-last + pop (O(1)) ; splice shifted up to ~500 entries
       // per expiry. Safe in this backward loop (slot i refills from an
       // already-processed index).
@@ -26954,29 +26900,21 @@ function updateParticles(dt) {
     _pv.y *= 0.95;
     _pv.z *= 0.95;
     const alpha = p.life / p.maxLife;
-    // Write straight into the Points attributes at a packed cursor; no
-    // slot bookkeeping. Color hex is converted once per particle and
-    // cached on the POJO.
-    if (_w < _PTS_MAX) {
-      if (p._colR === undefined) {
-        _ptsColorScratch.setHex(p.color || 0xffffff);
-        p._colR = _ptsColorScratch.r; p._colG = _ptsColorScratch.g; p._colB = _ptsColorScratch.b;
-      }
-      const _w3 = _w * 3;
-      _ptsPos[_w3]     = pos.x; _ptsPos[_w3 + 1] = pos.y; _ptsPos[_w3 + 2] = pos.z;
-      _ptsCol[_w3]     = p._colR; _ptsCol[_w3 + 1] = p._colG; _ptsCol[_w3 + 2] = p._colB;
-      _ptsSize[_w]  = p.size * 2.2 * (0.5 + alpha * 0.5);
-      _ptsAlpha[_w] = alpha;
-      _w++;
+    if (!p.poolSlot) {
+      // First frame: acquire a pool slot. The shared SpriteMaterial in the
+      // slot is reset per-spawn (color, opacity, scale) so this particle's
+      // appearance doesn't bleed across alive particles. If the pool is
+      // exhausted (shouldn't happen since pool size = MAX_PARTICLES) the
+      // particle is just invisible this frame and will retry next tick.
+      const slot = _acquireParticleSlot();
+      if (!slot) continue;
+      p.poolSlot = slot;
+      slot.mat.color.setHex(p.color || 0xffffff);
     }
-  }
-  _ptsGeo.setDrawRange(0, _w);
-  _particlePoints.visible = _w > 0;
-  if (_w > 0) {
-    _ptsPosAttr.needsUpdate = true;
-    _ptsColAttr.needsUpdate = true;
-    _ptsSizeAttr.needsUpdate = true;
-    _ptsAlphaAttr.needsUpdate = true;
+    const slot = p.poolSlot;
+    slot.sprite.position.copy(pos);
+    slot.mat.opacity = alpha;
+    slot.sprite.scale.setScalar(p.size * 2.2 * (0.5 + alpha * 0.5));
   }
 }
 
@@ -35750,8 +35688,12 @@ function updateRoundSystem(dt) {
           }
         }
         game.effects = [];
+        for (const p of game.particles) {
+          if (p && p.poolSlot && typeof _releaseParticleSlot === 'function') {
+            try { _releaseParticleSlot(p.poolSlot); } catch (_) {}
+          }
+        }
         game.particles = [];
-        if (typeof _ptsGeo !== 'undefined') { _ptsGeo.setDrawRange(0, 0); _particlePoints.visible = false; }
         // Reset the ambient-cloud cadence so a new wave doesn't immediately
         // re-spawn on top of the freshly-built map.
         // Wipe all live Dots (ambient cloud anchors and any other
@@ -35927,8 +35869,10 @@ function returnToRootMenu() {
   for (const bot of game.entities) { try { bot.destroy(); } catch (e) {} }
   game.entities = [];
   game.projectiles = [];
+  // Release particle pool slots back before clearing the array, otherwise
+  // the slots stay claimed forever and the pool exhausts after a few rounds.
+  for (const p of game.particles) { if (p.poolSlot) _releaseParticleSlot(p.poolSlot); }
   game.particles = [];
-  if (typeof _ptsGeo !== 'undefined') { _ptsGeo.setDrawRange(0, 0); _particlePoints.visible = false; }
   for (const sf of game.stasisFields) { try { sf.destroy(); } catch (e) {} }
   game.stasisFields = [];
   // Tear down the cosmic anomaly if one was crossing the map.
