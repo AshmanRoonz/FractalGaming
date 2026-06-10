@@ -4854,10 +4854,15 @@ async function joinRoom() {
 
     // Peer state updates (Tier 1 broadcast)
     onState((data, peerId) => {
-      net.bytesReceived += JSON.stringify(data).length;
+      // Byte counter: sample 1-in-8 and extrapolate. JSON.stringify of
+      // every state packet (20 Hz x peers) existed only to feed this
+      // stat ; sampling keeps it accurate enough at ~12% of the cost.
+      net._rxSample = ((net._rxSample || 0) + 1) & 7;
+      if (net._rxSample === 0) net.bytesReceived += JSON.stringify(data).length * 8;
       const peer = net.peers.get(peerId);
       if (peer) {
-        peer.prevState = peer.state ? { ...peer.state } : null;
+        // prevState removed: it was spread-copied on every packet and
+        // never read anywhere ; pure dead allocation at 20 Hz per peer.
         peer.state = data;
         peer.lastUpdate = performance.now();
         peer.interpT = 0;
@@ -10654,6 +10659,53 @@ function _bcsWakeInRange(cloud, source) {
   return (dx * dx + dy * dy + dz * dz) <= r * r;
 }
 
+// Reusable wake-source slot pools: both wake systems rebuilt a fresh
+// array of ~20 object literals EVERY frame (player + bots + 12
+// projectiles, twice). Fixed slots, filled in place, zero allocation.
+const _WAKE_SLOT_MAX = 24;
+function _makeWakeSlots() {
+  const a = [];
+  for (let i = 0; i < _WAKE_SLOT_MAX; i++) a.push({ x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, str: 0, radius: 0 });
+  return a;
+}
+function _fillWakeSlots(slots, shipStr, shipRadius, playerStr, playerRadius, projStr, projRadius) {
+  let n = 0;
+  if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+      player.position && player.velocity && n < _WAKE_SLOT_MAX) {
+    const s = slots[n++];
+    s.x = player.position.x; s.y = player.position.y; s.z = player.position.z;
+    s.vx = player.velocity.x; s.vy = player.velocity.y; s.vz = player.velocity.z;
+    s.str = playerStr; s.radius = playerRadius;
+  }
+  if (game.entities) {
+    for (let i = 0; i < game.entities.length && n < _WAKE_SLOT_MAX; i++) {
+      const e = game.entities[i];
+      if (!e || e === player || !e.alive || !e.position) continue;
+      const v = e.velocity;
+      const s = slots[n++];
+      s.x = e.position.x; s.y = e.position.y; s.z = e.position.z;
+      s.vx = v ? v.x : 0; s.vy = v ? v.y : 0; s.vz = v ? v.z : 0;
+      s.str = shipStr; s.radius = shipRadius;
+    }
+  }
+  if (game.projectiles) {
+    let pCount = 0;
+    for (let i = 0; i < game.projectiles.length && pCount < 12 && n < _WAKE_SLOT_MAX; i++) {
+      const p = game.projectiles[i];
+      if (!p || !p.alive || !p.position) continue;
+      const v = p.velocity;
+      const s = slots[n++];
+      s.x = p.position.x; s.y = p.position.y; s.z = p.position.z;
+      s.vx = v ? v.x : 0; s.vy = v ? v.y : 0; s.vz = v ? v.z : 0;
+      s.str = projStr; s.radius = projRadius;
+      pCount++;
+    }
+  }
+  return n;
+}
+const _bcsWakeSlots = _makeWakeSlots();
+const _ambWakeSlots = _makeWakeSlots();
+
 function updateBCSWakes(dt) {
   // No BCS clouds in Potato, skip the wake-source gather entirely.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
@@ -10669,45 +10721,12 @@ function updateBCSWakes(dt) {
     updateBCSWakes._dt = 0;
   }
 
-  // Gather wake sources : player + nearby ships + nearby projectiles.
-  // Each source : { x, y, z, vx, vy, vz, str, radius }.
-  const sources = [];
-  if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
-      player.position && player.velocity) {
-    sources.push({
-      x: player.position.x, y: player.position.y, z: player.position.z,
-      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
-      str: 0.95, radius: 400,
-    });
-  }
-  if (game.entities) {
-    for (let i = 0; i < game.entities.length; i++) {
-      const e = game.entities[i];
-      if (!e || e === player || !e.alive || !e.position) continue;
-      const v = e.velocity || { x: 0, y: 0, z: 0 };
-      sources.push({
-        x: e.position.x, y: e.position.y, z: e.position.z,
-        vx: v.x, vy: v.y, vz: v.z,
-        str: 0.78, radius: 360,
-      });
-    }
-  }
-  if (game.projectiles) {
-    // Cap projectile sources at 12 to avoid blowing the budget when a
-    // missile salvo is in flight.
-    let pCount = 0;
-    for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
-      const p = game.projectiles[i];
-      if (!p || !p.alive || !p.position) continue;
-      const v = p.velocity || { x: 0, y: 0, z: 0 };
-      sources.push({
-        x: p.position.x, y: p.position.y, z: p.position.z,
-        vx: v.x, vy: v.y, vz: v.z,
-        str: 0.90, radius: 260,
-      });
-      pCount++;
-    }
-  }
+  // Gather wake sources into the fixed slot pool (no per-frame array /
+  // object-literal allocation). sources is a plain array view: slots
+  // 0..srcCount-1 are live this frame.
+  const srcCount = _fillWakeSlots(_bcsWakeSlots, 0.78, 360, 0.95, 400, 0.90, 260);
+  const sources = _bcsWakeSlots;
+  sources._n = srcCount;
 
   // Apply wakes + tick decay on every gas cloud (attached + detached).
   if (game.clusters) {
@@ -10718,7 +10737,7 @@ function updateBCSWakes(dt) {
         const c = cl.children[ci];
         const cloud = c && c._atomSmoke;
         if (!cloud || !cloud.applyWake) continue;
-        for (let si = 0; si < sources.length; si++) {
+        for (let si = 0; si < (sources._n != null ? sources._n : sources.length); si++) {
           const s = sources[si];
           if (!_bcsWakeInRange(cloud, s)) continue;
           cloud.applyWake(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.str, s.radius, dt);
@@ -10732,7 +10751,7 @@ function updateBCSWakes(dt) {
       const p = game.detachedGasPockets[di];
       const cloud = p && p.gasCloud;
       if (!cloud || !cloud.applyWake) continue;
-      for (let si = 0; si < sources.length; si++) {
+      for (let si = 0; si < (sources._n != null ? sources._n : sources.length); si++) {
         const s = sources[si];
         if (!_bcsWakeInRange(cloud, s)) continue;
         // Per-sprite deformation (sprites within the cloud get tugged).
@@ -16171,43 +16190,11 @@ function updateAmbientCloudWakes(dt) {
     dt = Math.min(0.08, updateAmbientCloudWakes._dt || dt || 0.016);
     updateAmbientCloudWakes._dt = 0;
   }
-  // Gather sources : reuse the same pattern as updateBCSWakes.
-  const sources = [];
-  if (typeof player !== 'undefined' && player && player.shipState !== 'dead'
-      && player.position && player.velocity) {
-    sources.push({
-      x: player.position.x, y: player.position.y, z: player.position.z,
-      vx: player.velocity.x, vy: player.velocity.y, vz: player.velocity.z,
-      str: 0.30, radius: 260,
-    });
-  }
-  if (game.entities) {
-    for (let i = 0; i < game.entities.length; i++) {
-      const e = game.entities[i];
-      if (!e || e === player || !e.alive || !e.position) continue;
-      const v = e.velocity || { x: 0, y: 0, z: 0 };
-      sources.push({
-        x: e.position.x, y: e.position.y, z: e.position.z,
-        vx: v.x, vy: v.y, vz: v.z,
-        str: 0.24, radius: 220,
-      });
-    }
-  }
-  if (game.projectiles) {
-    let pCount = 0;
-    for (let i = 0; i < game.projectiles.length && pCount < 12; i++) {
-      const p = game.projectiles[i];
-      if (!p || !p.alive || !p.position) continue;
-      const v = p.velocity || { x: 0, y: 0, z: 0 };
-      sources.push({
-        x: p.position.x, y: p.position.y, z: p.position.z,
-        vx: v.x, vy: v.y, vz: v.z,
-        str: 0.32, radius: 150,
-      });
-      pCount++;
-    }
-  }
-  if (sources.length === 0) return;
+  // Gather sources into the fixed slot pool (same zero-allocation
+  // pattern as updateBCSWakes).
+  const sources = _ambWakeSlots;
+  sources._n = _fillWakeSlots(_ambWakeSlots, 0.24, 220, 0.30, 260, 0.32, 150);
+  if ((sources._n != null ? sources._n : sources.length) === 0) return;
   for (let di = 0; di < game.dots.length; di++) {
     const d = game.dots[di];
     if (!d) continue;
@@ -16223,7 +16210,7 @@ function updateAmbientCloudWakes(dt) {
       for (let pi = 0; pi < d._puffs.length; pi++) {
         const p = d._puffs[pi];
         if (!p || !p.wakeOff) continue;
-        for (let si = 0; si < sources.length; si++) {
+        for (let si = 0; si < (sources._n != null ? sources._n : sources.length); si++) {
           const s = sources[si];
           // World-to-local source delta (anchor rotation is small/none for
           // ambient dots, so we treat the world delta as the local delta).
@@ -17045,7 +17032,15 @@ class Bot {
     // visible. Out-of-range just skips ; we keep the cooldown ticking from 0.
     if (dist > 2400) return;
     const aim = toTgt.normalize(); // _tempVec3a, now unit length
-    const losDist = raycastLevel(this.position, aim, dist + 10);
+    // LOS gate cached at 4 Hz per bot: this runs EVERY FRAME while the
+    // ability is off cooldown, and each full-range SDF ray costs hundreds
+    // of worldSDF evaluations. 250 ms staleness is invisible in play.
+    const _nowAb = (typeof game !== 'undefined' && game.time) || 0;
+    if (this._abLosT == null || _nowAb - this._abLosT > 0.25) {
+      this._abLosT = _nowAb;
+      this._abLosDist = raycastLevel(this.position, aim, dist + 10);
+    }
+    const losDist = this._abLosDist;
     if (losDist < dist - 5) return; // wall in the way
     const _tgtHullR = (tgt === player ? player.chassis.hullLength : tgt.chassis.hullLength) * 1.0;
     let used = true;
@@ -17293,15 +17288,17 @@ class Bot {
   // enemy bot gets engaged ; this is what makes friendly AI fight enemy
   // AI and enemy AI fight the friendlies.
   _acquireCombatTarget() {
+    // Squared distances throughout ; sqrt only existed for the compare.
     let best = null, bestScore = Infinity;
     if (player.shipState !== 'dead' && player.team !== this.team) {
       best = player;
-      bestScore = this.position.distanceTo(player.position) * 0.75;
+      // 0.75 distance bias -> 0.5625 on squared distances.
+      bestScore = this.position.distanceToSquared(player.position) * 0.5625;
     }
     for (const b of game.entities) {
       if (!b || b === this || !b.alive || b.team === this.team) continue;
-      const d = this.position.distanceTo(b.position);
-      if (d < bestScore) { bestScore = d; best = b; }
+      const d2 = this.position.distanceToSquared(b.position);
+      if (d2 < bestScore) { bestScore = d2; best = b; }
     }
     return best;
   }
@@ -18306,10 +18303,11 @@ class Projectile {
       }
     }
     // Emit trail particles. Reduced from 55% per-frame to 30% (combat perf).
+    // POJO position: ~540 Vector3 clones/sec at 30 live projectiles.
     if (Math.random() < 0.30) {
       const useWhite = Math.random() < 0.35;
       game.particles.push({
-        position: this.position.clone(),
+        position: { x: this.position.x, y: this.position.y, z: this.position.z },
         velocity: _pVel((Math.random()-0.5)*30, (Math.random()-0.5)*30, (Math.random()-0.5)*30),
         life: 0.10 + Math.random() * 0.12,
         maxLife: 0.22,
@@ -18324,16 +18322,22 @@ class Projectile {
       if (!this.arcLightTimer) this.arcLightTimer = 0;
       this.arcLightTimer -= dt;
       if (this.arcLightTimer <= 0) {
-        const ahead = this.velocity.clone().normalize().multiplyScalar(120 + Math.random() * 80);
-        const boltEnd = this.position.clone().add(ahead).add(
-          new THREE.Vector3((Math.random()-0.5)*80, (Math.random()-0.5)*80, (Math.random()-0.5)*80)
+        // Scratch vectors ; spawnLightningBolt copies, doesn't retain.
+        const _vl = this.velocity.length() || 1;
+        const _ahead = 120 + Math.random() * 80;
+        _emitArcA.set(
+          this.position.x + (this.velocity.x / _vl) * _ahead + (Math.random()-0.5)*80,
+          this.position.y + (this.velocity.y / _vl) * _ahead + (Math.random()-0.5)*80,
+          this.position.z + (this.velocity.z / _vl) * _ahead + (Math.random()-0.5)*80
         );
-        spawnLightningBolt(this.position, boltEnd, LSS.CLASS_COLORS.SLAYER, 0.10, 1, 1.5);
+        spawnLightningBolt(this.position, _emitArcA, LSS.CLASS_COLORS.SLAYER, 0.10, 1, 1.5);
         if (Math.random() > 0.7) {
-          const wallArc = this.position.clone().add(
-            new THREE.Vector3((Math.random()-0.5)*200, (Math.random()-0.5)*200, (Math.random()-0.5)*200)
+          _emitArcB.set(
+            this.position.x + (Math.random()-0.5)*200,
+            this.position.y + (Math.random()-0.5)*200,
+            this.position.z + (Math.random()-0.5)*200
           );
-          spawnLightningBolt(this.position, wallArc, 0x22cc44, 0.08, 0, 0.8);
+          spawnLightningBolt(this.position, _emitArcB, 0x22cc44, 0.08, 0, 0.8);
         }
         this.arcLightTimer = 0.14 + Math.random() * 0.08;
       }
@@ -18348,20 +18352,20 @@ class Projectile {
                            0.50 + Math.random() * 0.20, 3 + Math.floor(Math.random() * 3), 2.0 + Math.random() * 1.0);
         // Sometimes a side-branch off the chain for organic crackle.
         if (Math.random() > 0.55) {
-          const _side = this.position.clone().add(new THREE.Vector3(
-            (Math.random() - 0.5) * 220,
-            (Math.random() - 0.5) * 220,
-            (Math.random() - 0.5) * 220,
-          ));
-          spawnLightningBolt(this.position, _side, 0x22cc44,
+          _emitArcA.set(
+            this.position.x + (Math.random() - 0.5) * 220,
+            this.position.y + (Math.random() - 0.5) * 220,
+            this.position.z + (Math.random() - 0.5) * 220
+          );
+          spawnLightningBolt(this.position, _emitArcA, 0x22cc44,
                              0.30 + Math.random() * 0.15, 1 + Math.floor(Math.random() * 2), 1.0);
         }
-        this._arcTrailAnchor = this.position.clone();
+        this._arcTrailAnchor.copy(this.position);
       }
       // Spark particles along the path (recolored green).
       for (let sp = 0; sp < 2; sp++) {
         game.particles.push({
-          position: this.position.clone(),
+          position: { x: this.position.x, y: this.position.y, z: this.position.z },
           velocity: _pVel((Math.random()-0.5)*200, (Math.random()-0.5)*200, (Math.random()-0.5)*200),
           life: 0.08 + Math.random() * 0.06,
           maxLife: 0.14,
@@ -24509,6 +24513,10 @@ class OutskirtsMonster {
     try { spawnMonsterGuts(this.position, MONSTER_SIZE, this.def); } catch (e) { console.warn('[monsters] guts failed:', e); }
     if (this.mesh) {
       try { scene.remove(this.mesh); } catch (_) {}
+      // Full GPU dispose: each monster GLB is loaded uniquely (not cloned
+      // from a shared proto), so geometry + textures are safe to free ;
+      // reclaims tens of MB of VRAM per kill instead of waiting on GC.
+      _disposeMeshTreeDeep(this.mesh, true);
       this.mesh = null;
     }
     try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
@@ -24827,6 +24835,31 @@ const CHAMP_SHELL_SIZE = 340;   // diameter ; interior holds the r=50 field + r=
 let _champShellProto = null;
 let _champShellLoading = false;
 
+// Free GPU resources for a removed mesh tree. fullAssets=true also
+// disposes geometry + textures (safe ONLY when the tree isn't cloned from
+// a shared prototype) ; false disposes just the per-clone materials.
+function _disposeMeshTreeDeep(root, fullAssets) {
+  if (!root) return;
+  try {
+    root.traverse(node => {
+      if (!node.isMesh) return;
+      if (fullAssets && node.geometry && node.geometry.dispose) {
+        try { node.geometry.dispose(); } catch (_) {}
+      }
+      const mats = Array.isArray(node.material) ? node.material : [node.material];
+      for (const m of mats) {
+        if (!m) continue;
+        if (fullAssets) {
+          for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'aoMap']) {
+            if (m[k] && m[k].dispose) { try { m[k].dispose(); } catch (_) {} }
+          }
+        }
+        if (m.dispose) { try { m.dispose(); } catch (_) {} }
+      }
+    });
+  } catch (_) {}
+}
+
 function _preloadChampionShellModel() {
   if (_champShellProto || _champShellLoading) return;
   _champShellLoading = true;
@@ -24928,6 +24961,9 @@ class ChampionShell {
     } catch (_) {}
     if (this.mesh) {
       try { scene.remove(this.mesh); } catch (_) {}
+      // Materials-only dispose: the shell clones share geometry/textures
+      // with the cached Sphere.glb prototype (next round reuses them).
+      _disposeMeshTreeDeep(this.mesh, false);
       this.mesh = null;
     }
     // Sync: peers gate capture on THEIR shell instance ; mirror the kill
@@ -24962,7 +24998,11 @@ function _clearChampionShell() {
   const s = game.championShell;
   if (!s) return;
   s.alive = false;
-  if (s.mesh) { try { scene.remove(s.mesh); } catch (_) {} s.mesh = null; }
+  if (s.mesh) {
+    try { scene.remove(s.mesh); } catch (_) {}
+    _disposeMeshTreeDeep(s.mesh, false);  // clone-shared assets stay with the proto
+    s.mesh = null;
+  }
   if (game.monsters) {
     const i = game.monsters.indexOf(s);
     if (i >= 0) game.monsters.splice(i, 1);
@@ -26584,7 +26624,9 @@ function cullOldestParticle() {
   }
   const p = game.particles[oldestIdx];
   if (p.poolSlot) _releaseParticleSlot(p.poolSlot);
-  game.particles.splice(oldestIdx, 1);
+  const _lastC = game.particles.length - 1;
+  if (oldestIdx !== _lastC) game.particles[oldestIdx] = game.particles[_lastC];
+  game.particles.pop();
 }
 
 function _pVel(x, y, z) { return { x: x || 0, y: y || 0, z: z || 0 }; }
@@ -26613,7 +26655,12 @@ function updateParticles(dt) {
     const pos = p.position;
     if (p.life <= 0 || Math.abs(pos.x) > arenaLimit || Math.abs(pos.y) > arenaLimit || Math.abs(pos.z) > arenaLimit) {
       if (p.poolSlot) _releaseParticleSlot(p.poolSlot);
-      game.particles.splice(i, 1);
+      // Swap-with-last + pop (O(1)) ; splice shifted up to ~500 entries
+      // per expiry. Safe in this backward loop (slot i refills from an
+      // already-processed index).
+      const _lastP = game.particles.length - 1;
+      if (i !== _lastP) game.particles[i] = game.particles[_lastP];
+      game.particles.pop();
       continue;
     }
     const _pv = p.velocity;
@@ -34053,28 +34100,37 @@ function updateAbilities(dt) {
     }
     // BLASTER AI Assist: auto-aim rapid fire at nearest VISIBLE enemy.
     else if (coreName === 'AI Assist') {
-      let nearest = null, nearDist = Infinity;
-      for (const bot of game.entities) {
-        if (!bot.alive || bot.team === player.team) continue;
-        const dist = player.position.distanceTo(bot.position);
-        if (dist >= 3000 || dist >= nearDist) continue;
-        const losDir = _abTmpA.subVectors(bot.position, player.position).normalize();
-        // Pad +20 so a target sitting flush against a wall isn't excluded
-        // by a microscopic SDF tolerance. raycastLevel's reported distance
-        // is "to first wall hit"; targets closer than that are visible.
-        const wallDist = raycastLevel(player.position, losDir, dist + 20);
-        if (wallDist < dist) continue;
-        nearest = bot; nearDist = dist;
+      // Target + LOS selection cached at 10 Hz: the old per-frame loop
+      // fired an SDF ray per candidate enemy per frame, and a second
+      // full-range ray per shot. 100 ms staleness is invisible at these
+      // engagement ranges.
+      if (!player._aiAssist) player._aiAssist = { bot: null, dist: 0, wallDist: 0, t: -1 };
+      const _aas = player._aiAssist;
+      const _nowAA = (typeof game !== 'undefined' && game.time) || 0;
+      if (_nowAA - _aas.t > 0.1) {
+        _aas.t = _nowAA;
+        _aas.bot = null;
+        let nearDistSel = Infinity;
+        for (const bot of game.entities) {
+          if (!bot.alive || bot.team === player.team) continue;
+          const dist = player.position.distanceTo(bot.position);
+          if (dist >= 3000 || dist >= nearDistSel) continue;
+          const losDir = _abTmpA.subVectors(bot.position, player.position).normalize();
+          // Pad +20 so a target sitting flush against a wall isn't excluded
+          // by a microscopic SDF tolerance.
+          const wd = raycastLevel(player.position, losDir, dist + 20);
+          if (wd < dist) continue;
+          _aas.bot = bot; nearDistSel = dist; _aas.dist = dist; _aas.wallDist = wd;
+        }
       }
+      const nearest = (_aas.bot && _aas.bot.alive) ? _aas.bot : null;
+      const nearDist = _aas.dist;
       if (nearest) {
         // Auto-aim: fire at nearest visible enemy with perfect accuracy.
         const toTarget = _abTmpA.subVectors(nearest.position, player.position).normalize();
         if (Math.random() < dt * 20) { // 20 shots/sec
-          // The target's LoS may have changed in the few ms since we
-          // selected, so recheck before firing. Trim the tracer to the
-          // wall distance if anything is now in the way (the shot then
-          // visibly stops at the wall and deals no damage).
-          const wallDist = raycastLevel(player.position, toTarget, 3000);
+          // Wall distance from the 10 Hz cache ; at most ~100 ms stale.
+          const wallDist = _aas.wallDist;
           const end = _abTmpC.copy(player.position).addScaledVector(toTarget, wallDist);
           // Blaster AI Assist auto-aim shot uses class cyan tint.
           spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
@@ -34119,13 +34175,19 @@ function updateAbilities(dt) {
       const isMyEff = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
       // Damage enemies crossing the fire path (position = start, direction = forward, length = extent)
       // Check bots
+      // Scalar segment-distance math ; the old Vector3 chain allocated
+      // ~3 vectors per ship per firewall per frame.
       if (isMyEff) for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
-        const toBot = new THREE.Vector3().subVectors(bot.position, eff.position);
-        const along = toBot.dot(eff.direction);
+        const _tx = bot.position.x - eff.position.x;
+        const _ty = bot.position.y - eff.position.y;
+        const _tz = bot.position.z - eff.position.z;
+        const along = _tx * eff.direction.x + _ty * eff.direction.y + _tz * eff.direction.z;
         if (along > -50 && along < eff.length + 50) {
-          const perp = toBot.clone().sub(eff.direction.clone().multiplyScalar(along));
-          if (perp.length() < 150) {
+          const _px = _tx - eff.direction.x * along;
+          const _py = _ty - eff.direction.y * along;
+          const _pz = _tz - eff.direction.z * along;
+          if (_px * _px + _py * _py + _pz * _pz < 150 * 150) {
             const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
             if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt;
           }
@@ -34133,11 +34195,15 @@ function updateAbilities(dt) {
       }
       // Check player (enemy firewalls hurt the player too)
       if (eff.team !== player.team && player.shipState !== 'dead') {
-        const toPlayer = new THREE.Vector3().subVectors(player.position, eff.position);
-        const along = toPlayer.dot(eff.direction);
+        const _tx = player.position.x - eff.position.x;
+        const _ty = player.position.y - eff.position.y;
+        const _tz = player.position.z - eff.position.z;
+        const along = _tx * eff.direction.x + _ty * eff.direction.y + _tz * eff.direction.z;
         if (along > -50 && along < eff.length + 50) {
-          const perp = toPlayer.clone().sub(eff.direction.clone().multiplyScalar(along));
-          if (perp.length() < 150) {
+          const _px = _tx - eff.direction.x * along;
+          const _py = _ty - eff.direction.y * along;
+          const _pz = _tz - eff.direction.z * along;
+          if (_px * _px + _py * _py + _pz * _pz < 150 * 150) {
             playerTakeDamage(eff.dmgPerSec * dt, eff.owner, null);
           }
         }
@@ -34926,7 +34992,10 @@ function updateAbilities(dt) {
           eff.ownerPeerId === net.myPeerId) {
         net.sendEvent({ type: 'effect_destroy', netId: eff.netId });
       }
-      game.worldEffects.splice(e, 1);
+      // Swap-with-last + pop ; backward loop makes this order-safe.
+      const _lastW = game.worldEffects.length - 1;
+      if (e !== _lastW) game.worldEffects[e] = game.worldEffects[_lastW];
+      game.worldEffects.pop();
     }
   }
 
@@ -53784,6 +53853,7 @@ _loadPersistedSoundRecipes();
 // audible event. Gaps are picked per-type so the rate-limit is invisible
 // during normal play.
 const _SOUND_MIN_GAP = {
+  barrage_missile_pop: 0.06, // was unthrottled ; Mega Barrage volleys could stack dozens in one frame
   // Weapon fire: cap a hair below each weapon's natural fire rate so the
   // local player's stream always passes ; concurrent enemy streams get
   // folded into the same audible burst instead of doubling the load.
@@ -54412,10 +54482,17 @@ function _musicSynthDrum(note, g, when, out) {
     bodyAmp.gain.setValueAtTime(0.45 * g, when);
     bodyAmp.gain.exponentialRampToValueAtTime(0.001, when + 0.06);
     body.connect(bodyAmp).connect(out);
-    // Noise crack (the "snap") through a bandpass
-    const buf = ctx.createBuffer(1, 4096, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    // Noise crack (the "snap") through a bandpass. Noise buffer cached
+    // globally per length ; a fresh 4096-sample buffer per snare hit was
+    // steady allocation at music tempo.
+    const _dnc = (window._lssDrumNoise = window._lssDrumNoise || {});
+    let buf = _dnc[4096];
+    if (!buf || buf.sampleRate !== ctx.sampleRate) {
+      buf = ctx.createBuffer(1, 4096, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      _dnc[4096] = buf;
+    }
     const src = ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
     const bp = ctx.createBiquadFilter();
@@ -54430,9 +54507,14 @@ function _musicSynthDrum(note, g, when, out) {
   }
   // ----- CRASH (note 49 / 57) -----
   if (note === 49 || note === 57) {
-    const buf = ctx.createBuffer(1, 8192, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const _dnc = (window._lssDrumNoise = window._lssDrumNoise || {});
+    let buf = _dnc[8192];
+    if (!buf || buf.sampleRate !== ctx.sampleRate) {
+      buf = ctx.createBuffer(1, 8192, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      _dnc[8192] = buf;
+    }
     const src = ctx.createBufferSource();
     src.buffer = buf; src.loop = true;
     // Sweeping highpass : starts bright, drops over time for darker tail.
@@ -54448,9 +54530,14 @@ function _musicSynthDrum(note, g, when, out) {
     return { stop: (t) => { try { src.stop(Math.max(when + 0.01, t)); } catch (_) {} } };
   }
   // ----- HAT (default, closed) -----
-  const buf = ctx.createBuffer(1, 1024, ctx.sampleRate);
-  const d = buf.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const _dnc = (window._lssDrumNoise = window._lssDrumNoise || {});
+  let buf = _dnc[1024];
+  if (!buf || buf.sampleRate !== ctx.sampleRate) {
+    buf = ctx.createBuffer(1, 1024, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    _dnc[1024] = buf;
+  }
   const src = ctx.createBufferSource();
   src.buffer = buf;
   // Tight highpass + bandpass mix : pitched hat with crisp transient.
