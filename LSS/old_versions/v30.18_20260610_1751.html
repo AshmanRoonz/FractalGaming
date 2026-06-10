@@ -2813,7 +2813,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.19';
+const LSS_BUILD = '30.18';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -15087,12 +15087,6 @@ function resolveCollision(pos, velocity, radius, entity) {
   for (const obj of game.dynamicObjects) {
     if (obj.collideEntity) obj.collideEntity(pos, velocity, radius, entity);
   }
-
-  // 5) Champion Shell: solid while alive. Ships bounce off ; the champion
-  // field inside stays physically out of reach until the shell is down.
-  if (game.championShell && game.championShell.alive) {
-    game.championShell.collideEntity(pos, velocity, radius, entity);
-  }
 }
 
 // 4) Ship-ship collision: magnetic repulsion + bounce + ram damage
@@ -25071,57 +25065,6 @@ class ChampionShell {
     this._usedProto = false;
     this.mesh = null;
     this._buildMesh();
-  }
-
-  // Solid-body collision: ships bounce off the shell instead of flying
-  // through it ; the champion field stays physically unreachable until the
-  // shell is destroyed. No ram damage — the shell is an objective, not a
-  // hazard ; it just refuses entry. A ship that somehow ends up inside
-  // (teleport, net lag) is expelled along the outward radial by the same
-  // push-out math. Called from resolveCollision for player and bots alike.
-  collideEntity(pos, velocity, radius, entity) {
-    if (!this.alive) return;
-    const dx = pos.x - this.position.x;
-    const dy = pos.y - this.position.y;
-    const dz = pos.z - this.position.z;
-    const distSq = dx * dx + dy * dy + dz * dz;
-    const minDist = this.collisionRadius + radius;
-    if (distSq >= minDist * minDist) return;
-    const dist = Math.sqrt(distSq);
-    let nx = 0, ny = 1, nz = 0;
-    if (dist >= 0.1) { nx = dx / dist; ny = dy / dist; nz = dz / dist; }
-    const pen = minDist - dist;
-    pos.x += nx * (pen + 1);
-    pos.y += ny * (pen + 1);
-    pos.z += nz * (pen + 1);
-    const vDotN = velocity.x * nx + velocity.y * ny + velocity.z * nz;
-    if (vDotN < 0) {
-      // Reflect the into-surface velocity component with 45% restitution
-      // so hits read as a firm elastic bounce, not a dead stop.
-      const e = 1.45;
-      velocity.x -= vDotN * e * nx;
-      velocity.y -= vDotN * e * ny;
-      velocity.z -= vDotN * e * nz;
-      const impact = -vDotN;
-      if (impact > 120 && typeof game !== 'undefined' && game &&
-          game.time - (this._lastBumpFx || 0) > 0.15) {
-        this._lastBumpFx = game.time;
-        const cx = this.position.x + nx * this.collisionRadius;
-        const cy = this.position.y + ny * this.collisionRadius;
-        const cz = this.position.z + nz * this.collisionRadius;
-        if (typeof _shellBumpScratch === 'undefined') window._shellBumpScratch = new THREE.Vector3();
-        _shellBumpScratch.set(cx, cy, cz);
-        if (typeof spawnImpactSparks === 'function') {
-          try { spawnImpactSparks(_shellBumpScratch, 4); } catch (_) {}
-        }
-        if (typeof playSpatialSound === 'function') {
-          try { playSpatialSound('hit', _shellBumpScratch, { refDistance: 220, maxDistance: 2400 }); } catch (_) {}
-        }
-        if (entity === player && typeof triggerScreenShake === 'function') {
-          triggerScreenShake(Math.min(6, impact * 0.02));
-        }
-      }
-    }
   }
 
   _buildMesh() {
