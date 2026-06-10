@@ -2403,27 +2403,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   50%      { box-shadow: 0 0 26px rgba(255,170,0,0.52); }
 }
 
-/* ---- Mobile: freeze the menu glow animations ----
-   Animated filter: drop-shadow and box-shadow are NOT compositor-only ;
-   the browser re-rasterizes the blurred element every frame. On phones
-   that constant raster load runs from the moment the page opens and
-   starves the audio scheduler — the "laggy lobby music" was this. Static
-   glows rasterize once and cache ; desktop keeps the breathing. */
-@media (pointer: coarse) {
-  #lobby-logo {
-    animation: none !important;
-    filter: drop-shadow(0 0 30px rgba(255,170,0,0.42));
-  }
-  #btn-solo {
-    animation: none !important;
-    box-shadow: 0 0 20px rgba(255,170,0,0.30), inset 0 0 16px rgba(255,170,0,0.08) !important;
-  }
-  #ship-preview-confirm {
-    animation: none !important;
-    box-shadow: 0 0 18px rgba(255,170,0,0.36) !important;
-  }
-}
-
 /* ---- Mobile: lobby PORTRAIT (stacked) ---- */
 @media (max-width: 700px) {
   #lobby { overflow-y: auto !important; }
@@ -2834,7 +2813,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.23';
+const LSS_BUILD = '30.20';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -48489,14 +48468,10 @@ function initAudio() {
     //   tight = 0.5s decay, fast slap for tunnels
     // `audio.convolver` is repurposed as the reverb INPUT hub: all existing sources
     // that connect to `audio.convolver` fan out to both convolvers in parallel.
-    // Mobile: much shorter IRs. Convolution cost is proportional to IR
-    // length ; 0.8s + 0.3s keeps the room character at ~1/3 the DSP of the
-    // desktop 2.4s + 0.5s pair.
-    const _mobIR = (typeof _audioIsMobileDevice === 'function' && _audioIsMobileDevice());
     audio.convolverWide = audio.ctx.createConvolver();
-    audio.convolverWide.buffer = generateImpulseResponse(audio.ctx, _mobIR ? 0.8 : 2.4, 3.5, 0.015);
+    audio.convolverWide.buffer = generateImpulseResponse(audio.ctx, 2.4, 3.5, 0.015);
     audio.convolverTight = audio.ctx.createConvolver();
-    audio.convolverTight.buffer = generateImpulseResponse(audio.ctx, _mobIR ? 0.3 : 0.5, 6.5, 0.004);
+    audio.convolverTight.buffer = generateImpulseResponse(audio.ctx, 0.5, 6.5, 0.004);
     audio.reverbWideGain = audio.ctx.createGain();
     audio.reverbTightGain = audio.ctx.createGain();
     // Initial crossfade weights favor open volume; updated per-frame in updateAmbientBed.
@@ -48516,19 +48491,12 @@ function initAudio() {
     // the main reverb input hub; triChord/playNoiseBurst opt in via audio._extraReverbSend
     // set on the explosion case. Output mixes into the shared reverb bus so the long
     // tail carries the same mix/duck/compression path as the rest of the wet signal.
-    if (!_mobIR) {
-      audio.convolverLong = audio.ctx.createConvolver();
-      audio.convolverLong.buffer = generateImpulseResponse(audio.ctx, 2.5, 2.2, 0.030);
-      audio.reverbLongGain = audio.ctx.createGain();
-      audio.reverbLongGain.gain.value = 0.18; // low wet level; noticeable as halo, not splash
-      audio.convolverLong.connect(audio.reverbLongGain);
-      audio.reverbLongGain.connect(audio.reverbGain);
-    } else {
-      // Mobile: no third convolver. _extraReverbSend stays null ; the
-      // explosion halo rides the (shortened) wide tail instead.
-      audio.convolverLong = null;
-      audio.reverbLongGain = null;
-    }
+    audio.convolverLong = audio.ctx.createConvolver();
+    audio.convolverLong.buffer = generateImpulseResponse(audio.ctx, 2.5, 2.2, 0.030);
+    audio.reverbLongGain = audio.ctx.createGain();
+    audio.reverbLongGain.gain.value = 0.18; // low wet level; noticeable as halo, not splash
+    audio.convolverLong.connect(audio.reverbLongGain);
+    audio.reverbLongGain.connect(audio.reverbGain);
 
     // Ambient sound bed gain (separate from SFX): bypasses master compressor so the
     // binaural bed isn't pumped by gunfire. Still passes through hi-cut for consistent top.
@@ -54469,23 +54437,8 @@ function _audioQuestCombatMode() {
          (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup'));
 }
 
-// Phone/tablet detection for the audio graph. Convolution reverb burns
-// audio-thread CPU on every sample even when its input is silence, and
-// phone audio threads (Chrome AND DDG both showed it) buffer-underrun
-// audibly under the full desktop chain + the music synth. Cached once.
-let _audioMobileCached = null;
-function _audioIsMobileDevice() {
-  if (_audioMobileCached !== null) return _audioMobileCached;
-  try {
-    _audioMobileCached = ((navigator.maxTouchPoints > 0) || ('ontouchstart' in window)) &&
-      !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-  } catch (_) { _audioMobileCached = false; }
-  return _audioMobileCached;
-}
-
 function _audioLeanMode() {
-  return _audioIsMobileDevice() ||
-         _audioQuestCombatMode() ||
+  return _audioQuestCombatMode() ||
          _audioStressed ||
          (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
 }
@@ -55663,7 +55616,7 @@ function musicEnsureCtx() {
   // so kill-triggered phrases and lead lines have spatial presence —
   // sustained tail + slight predelay, sits underneath the dry signal.
   // Built once and reused for every lead note via music.leadSend.
-  if (!music.leadSend && !(typeof _audioIsMobileDevice === 'function' && _audioIsMobileDevice())) {
+  if (!music.leadSend) {
     try {
       const ctx = music.ctx;
       const leadReverb = ctx.createConvolver();
@@ -55843,14 +55796,6 @@ function _musicTick() {
 function musicStart() {
   if (music.schedTimer) return;
   if (!musicEnsureCtx()) return;
-  // Mobile: schedule further ahead. Main-thread jank routinely delays the
-  // 50 ms tick past the desktop 0.18 s horizon on phones — exactly the
-  // "music stutters from the moment the page loads" symptom. 0.42 s of
-  // pre-scheduled notes rides out the spikes (WebAudio plays already-
-  // scheduled events sample-accurately regardless of main-thread state).
-  if (typeof _audioIsMobileDevice === 'function' && _audioIsMobileDevice()) {
-    music.lookaheadSec = Math.max(music.lookaheadSec, 0.42);
-  }
   music.schedTimer = setInterval(_musicTick, 50);
 }
 
@@ -56869,16 +56814,9 @@ document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
   try { updateAmbientBed = wrap('ambientBed', updateAmbientBed); } catch (_) {}
   try { updateScoreboard = wrap('scoreboard', updateScoreboard); } catch (_) {}
   try { renderFrame = wrap('render(cpu)', renderFrame); } catch (_) {}
-  let _gapMax = 0, _gapLast = 0;
   gameLoop = (function (inner) {
     return function (ts, frame) {
       const t0 = performance.now();
-      // Worst gap between consecutive frames in this window: catches long
-      // main-thread stalls (GC, GLB parses, layout) that per-subsystem
-      // averages smear away. This is the number that starves the music
-      // scheduler when it exceeds the lookahead horizon.
-      if (_gapLast) { const g = t0 - _gapLast; if (g > _gapMax) _gapMax = g; }
-      _gapLast = t0;
       inner(ts, frame);
       acc.TOTAL = (acc.TOTAL || 0) + (performance.now() - t0);
       frames++;
@@ -56893,11 +56831,10 @@ document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
           document.body.appendChild(el);
         }
         const rows = Object.keys(acc).map(k => [k, acc[k] / frames]).sort((a, b) => b[1] - a[1]);
-        let txt = 'state: ' + ((typeof game !== 'undefined' && game && game.state) || '?') + '\n' +
-                  'worstGap     ' + _gapMax.toFixed(0) + ' ms\n';
+        let txt = '';
         for (const r of rows) { if (r[1] >= 0.02 || r[0] === 'TOTAL') txt += r[0].padEnd(13) + r[1].toFixed(2) + '\n'; }
         el.textContent = txt;
-        if (frames >= 150) { for (const k in acc) acc[k] = 0; frames = 0; _gapMax = 0; }
+        if (frames >= 150) { for (const k in acc) acc[k] = 0; frames = 0; }
       }
     };
   })(gameLoop);
