@@ -2834,7 +2834,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.26';
+const LSS_BUILD = '30.25';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -24680,11 +24680,11 @@ class OutskirtsMonster {
     try { spawnMonsterGuts(this.position, MONSTER_SIZE, this.def); } catch (e) { console.warn('[monsters] guts failed:', e); }
     if (this.mesh) {
       try { scene.remove(this.mesh); } catch (_) {}
-      // Keep geometry + textures resident: monsters revive at every round
-      // reset (and at the next match), so a dead beast's GLB must never be
-      // freed — re-parsing 20-45 MB mid-match is exactly the hitch the
-      // staggered loader exists to avoid. The mesh just leaves the scene
-      // until _monsterRoundReset() re-adds it.
+      // Full GPU dispose: each monster GLB is loaded uniquely (not cloned
+      // from a shared proto), so geometry + textures are safe to free ;
+      // reclaims tens of MB of VRAM per kill instead of waiting on GC.
+      _disposeMeshTreeDeep(this.mesh, true);
+      this.mesh = null;
     }
     try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
     // Mirror the kill (and the guts position) on every peer.
@@ -25369,40 +25369,6 @@ function _clearChampionShell() {
   game.championShell = null;
 }
 
-// Full per-round monster reset: every beast (dead ones included) returns
-// to a fresh outskirts patrol point on its (re-anchored) home patch, calm,
-// at full health, with re-rolled timers. Dead monsters kept their GPU
-// assets at death, so revival is just scene.add — no GLB re-parse, no
-// hitch. Runs on every client ; proxies get corrected by the authority's
-// next snapshot anyway (_netX cleared so interpolation doesn't glide).
-function _monsterRoundReset() {
-  if (typeof game === 'undefined' || !game || !game.monsters) return;
-  for (const m of game.monsters) {
-    if (typeof m._rehome !== 'function') continue;   // ChampionShell shares the array
-    m._rehome();
-    if (!m.alive) {
-      m.alive = true;
-      if (m.mesh) {
-        if (!m.mesh.parent) { try { scene.add(m.mesh); } catch (_) {} }
-        m.mesh.visible = true;
-      }
-    }
-    m._wanderTimer = 0;
-    m.position.copy(m.home);
-    m.position.x += (Math.random() - 0.5) * m._roamR;
-    m.position.y += (Math.random() - 0.5) * m._roamR;
-    m.position.z += (Math.random() - 0.5) * m._roamR;
-    if (m.velocity) m.velocity.set(0, 0, 0);
-    if (m.mesh) m.mesh.position.copy(m.position);
-    m.aggro = false;
-    m._deAggroT = 0;
-    m.health = (typeof MONSTER_HEALTH === 'number') ? MONSTER_HEALTH : m.health;
-    m.zapTimer = Math.random() * ((typeof MONSTER_ZAP_EVERY === 'number') ? MONSTER_ZAP_EVERY : 1.25);
-    m._tpCd = 10 + Math.random() * 8;
-    m._netX = null;   // proxies: wait for the authority's fresh snapshot
-  }
-}
-
 function updateMonsters(dt) {
   // Skip entirely on Potato quality: six 20-45 MB GLBs are exactly the
   // load that preset exists to avoid.
@@ -25422,22 +25388,34 @@ function updateMonsters(dt) {
     return;
   }
   if (!game.monsters) return;
-  // Round reset latch: EVERY round transition passes through 'warmup' —
-  // wins, champion captures, and timer draws alike. (The previous trigger
-  // keyed off arena geometry, which timer draws never rebuild and which
-  // two maps with equal carve-piece counts can share, so monsters left
-  // mid-arena sometimes stayed there.) Fires once per warmup entry ;
-  // nobody sees the snap behind the between-round ship-select screen.
-  if (game.state === 'warmup' && updateMonsters._lastState !== 'warmup') {
-    _monsterRoundReset();
-  }
-  updateMonsters._lastState = game.state;
-  // Map switch mid-flow (fresh match build, custom map load): re-anchor +
-  // reset through the same shared path.
+  // Map switch (every round rotates the map): re-anchor every monster's
+  // home patch to the new level's shell AND snap it there with a full
+  // behavior reset. The old code only moved `home` and let the monster
+  // amble over at drift speed (30 u/s) — a beast left mid-arena by a
+  // round's worth of chasing/teleporting then spent whole minutes
+  // balloon-drifting through the play space, inert. Nobody sees the snap:
+  // it happens during the between-round ship-select/warmup screen.
   const _arenaNow = _monsterArenaInfo();
   if (updateMonsters._homeKey !== _arenaNow.key) {
     updateMonsters._homeKey = _arenaNow.key;
-    _monsterRoundReset();
+    for (const m of game.monsters) {
+      // ChampionShell shares the array but has no patrol to re-anchor.
+      if (!m.alive || typeof m._rehome !== 'function') continue;
+      m._rehome();
+      m._wanderTimer = 0;
+      m.position.copy(m.home);
+      m.position.x += (Math.random() - 0.5) * m._roamR;
+      m.position.y += (Math.random() - 0.5) * m._roamR;
+      m.position.z += (Math.random() - 0.5) * m._roamR;
+      if (m.velocity) m.velocity.set(0, 0, 0);
+      if (m.mesh) m.mesh.position.copy(m.position);
+      m.aggro = false;
+      m._deAggroT = 0;
+      m.health = (typeof MONSTER_HEALTH === 'number') ? MONSTER_HEALTH : m.health;
+      m.zapTimer = Math.random() * ((typeof MONSTER_ZAP_EVERY === 'number') ? MONSTER_ZAP_EVERY : 1.25);
+      m._tpCd = 10 + Math.random() * 8;
+      m._netX = null;   // proxies: wait for the authority's fresh snapshot
+    }
   }
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
