@@ -2101,8 +2101,22 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
           </button>
         </div>
 
-        <!-- INFO ROW : P2P description at the bottom. -->
+        <!-- INFO ROW : GPU warning + P2P description side by side at bottom. -->
         <div style="display:flex;gap:12px;align-items:stretch;margin-top:auto;">
+          <!-- GPU warning : visible by default ; auto-hidden if a dGPU is
+               detected via the boot probe at window.__v8GPU. -->
+          <div id="gpu-warning" style="
+              flex:1;background:rgba(40,30,10,0.4);border:1px solid rgba(255,170,0,0.45);
+              border-radius:10px;padding:12px;
+              display:flex;flex-direction:column;gap:6px;font-family:'Rajdhani','Orbitron',sans-serif;">
+            <div style="display:flex;align-items:center;gap:6px;">
+              <span style="color:#ffaa00;font-size:14px;">⚠</span>
+              <span style="font-size:10px;color:#ffcc66;letter-spacing:2px;font-weight:bold;">DEDICATED GPU RECOMMENDED</span>
+            </div>
+            <div style="font-size:9px;color:#aa8844;line-height:1.55;">
+              This game is shader-heavy (volumetric smoke, raymarched walls, post-FX bloom). Integrated graphics (Intel UHD, AMD Radeon Vega) will run sub-10fps.
+            </div>
+          </div>
           <!-- P2P info panel : worldbuilding flavor text. -->
           <div style="flex:1;background:rgba(20,35,55,0.45);border:1px solid rgba(120,200,255,0.45);
                       border-radius:10px;padding:12px;
@@ -2313,7 +2327,9 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
     #lobby-left, #lobby-right { flex: 0 0 auto !important; width: 100% !important; }
     #lobby-left img { max-height: 35vh !important; }
     #lobby-right { padding: 20px 16px !important; }
-    #lobby-grid + div { flex: 0 0 auto !important; } /* bottom info row */
+    #lobby-grid + div, /* GPU+P2P info row if it ends up here */
+    #gpu-warning + div, /* P2P sibling */
+    #gpu-warning { flex: 0 0 auto !important; }
   }
 
 /* ==========================================================================
@@ -2473,6 +2489,42 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   .ship-list-entry .sle-name { font-size: 11px !important; letter-spacing: 1.2px !important; }
 }
 </style>
+<script>
+  (function () {
+    var tries = 0;
+    function check() {
+      tries++;
+      var w = document.getElementById('gpu-warning');
+      if (!w) return; // DOM not built yet
+      var g = (typeof window !== 'undefined' && window.__v8GPU) ? window.__v8GPU : null;
+      if (!g || !g.renderer) {
+        if (tries < 30) setTimeout(check, 250); // ~7.5 s window for the probe
+        return;
+      }
+      var r = String(g.renderer).toLowerCase();
+      // Hide the warning when we see a real dGPU. We accept any of:
+      //   NVIDIA (GeForce, RTX, GTX, Quadro, Tesla)
+      //   AMD Radeon RX / Pro / W-series (but NOT Vega, which is iGPU class)
+      //   Apple M-series (M1/M2/M3/M4 etc.)
+      //   Intel Arc (A-series discrete)
+      var isDGPU = /(nvidia|geforce|\brtx\b|\bgtx\b|quadro|tesla)/.test(r) ||
+                   /(radeon\s+(rx|pro|w\d|navi)|\brdna\b)/.test(r) ||
+                   /apple\s+m\d/.test(r) ||
+                   /intel\s+arc/.test(r);
+      // Also catch the explicit iGPU patterns ; if we see one of these,
+      // keep the warning visible even if a confusing string also matched.
+      var isIGPU = /(intel.*(uhd|hd graphics|iris)|radeon\s+vega|microsoft basic render)/.test(r);
+      if (isDGPU && !isIGPU) {
+        w.style.display = 'none';
+      }
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', check);
+    } else {
+      check();
+    }
+  })();
+</script>
 
 <div id="ship-select">
   <div id="ship-select-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -2782,7 +2834,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.28';
+const LSS_BUILD = '30.26';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -12704,11 +12756,6 @@ function applyMapPreset(name) {
     game.cloudBrightness = (typeof preset.cloudBrightness === 'number') ? preset.cloudBrightness : 1.0;
   }
   try { if (typeof _applyCloudVisualSettings === 'function') _applyCloudVisualSettings(); } catch (_) {}
-  // Retint every live gas cloud (cluster smoke + detached pockets) right
-  // away. Without this, picking a differently-themed map in ship-select
-  // left the still-loaded previous world's clouds in the old tint, and
-  // any cloud that survived into the next match carried it along.
-  try { if (typeof _recolorAllAmbientClouds === 'function') _recolorAllAmbientClouds(); } catch (_) {}
   _updateSkyUI();
   if (typeof saveSettings === 'function') { try { saveSettings(); } catch (_) {} }
   return true;
@@ -23602,12 +23649,6 @@ function clearVRRockObstacles() {
   if (typeof disposeAllDetachedGasPockets === 'function') {
     try { disposeAllDetachedGasPockets(); } catch (_) {}
   }
-  // Ambient sky/basin cloud dots from the previous map kept their OLD
-  // theme tint into the next match on rebuild paths that skip
-  // returnToRootMenu (rematch, map change from ship-select). Wipe them
-  // with the rest of the gas world ; the ambient cadence respawns a
-  // fresh wave in the new map's theme.
-  if (typeof disposeAllDots === 'function') { try { disposeAllDots(); } catch (_) {} }
 }
 
 function spawnDynamicObjects(rooms) {
@@ -40015,6 +40056,9 @@ function buildSettingsPage() {
       <h3>Active GPU</h3>
       <div class="setting-row" style="opacity:0.85; font-size:0.85em;">
         <label style="flex:1; line-height:1.5;" id="set-gpu-info">${(window.__v8GPU && window.__v8GPU.renderer) ? (window.__v8GPU.renderer + '<br><span style="opacity:0.6">' + (window.__v8GPU.vendor || '') + '</span>') : 'detecting...'}</label>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.8em;">
+        <label style="flex:1; line-height:1.5;">v8VR requests <code>powerPreference: 'high-performance'</code> when creating its WebGL context, which on hybrid-graphics laptops asks the OS to pick the discrete GPU. If the renderer above still reads <code>Intel UHD/HD/Iris</code> after a hard reload, the OS overrode the hint. Fix on Windows: <em>Settings &rarr; System &rarr; Display &rarr; Graphics</em>, find your browser, click <em>Options</em>, set <em>High performance</em>, restart the browser. NVIDIA laptops: also check <em>NVIDIA Control Panel &rarr; Manage 3D settings &rarr; Program Settings</em>, add the browser, set <em>High-performance NVIDIA processor</em>.</label>
       </div>
     </div>
 
