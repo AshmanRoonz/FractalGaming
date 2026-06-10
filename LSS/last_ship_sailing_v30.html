@@ -2679,7 +2679,7 @@ const LSS = {
   MAX_PLAYERS: 12, TEAM_FLEET_A: 2, TEAM_FLEET_B: 3,
   ROUND_TIME: 80, WARMUP_TIME: 5, ROUNDS_TO_WIN: 4,
   CHAMPION_TIME: 10,
-  CHAMPION_CHARGE_TIME: 3, // (v16) capture takes 3s ; if the capturer dies, the field is freed and any other ship can try again. Win regardless of HP. The longer window gives dash-ram defenders a real chance to break the claim mid-charge.
+  CHAMPION_CHARGE_TIME: 0.5, // capture takes 0.5s. The contest moved upstream: the field hides inside the Champion Shell (Sphere.glb, 3000 HP) which must be destroyed first ; once it cracks, the touch-capture is nearly instant.
   SPAWN_PROTECTION: 3, DOOMED_HEALTH_PCT: 0.15, DOOMED_TIMER: 10,
   GRAVITY: 0, ARENA_SIZE: 25000, TICK_RATE: 60,
   // Seconds shown on the in-screen 3-2-1-LAUNCH ticker. The round-system
@@ -6711,6 +6711,15 @@ function handleNetEvent(evt, fromPeerId) {
           btn.classList.toggle('active', on);
         }
       } catch (_) {}
+    }
+    return;
+  }
+  // A peer destroyed the Champion Shell ; mirror the kill locally so the
+  // champion field unlocks for everyone at the same moment. (Shell HP is
+  // tracked per-client ; first client to crack it wins the unlock.)
+  if (evt.type === 'champ_shell_dead') {
+    if (game.championShell && game.championShell.alive) {
+      try { game.championShell.die(false); } catch (_) {}
     }
     return;
   }
@@ -24259,6 +24268,9 @@ function _initMonsters() {
     game.monsters.push(new OutskirtsMonster(MONSTER_DEFS[i], faces[i % faces.length]));
   }
   _loadNextMonsterModel();
+  // Warm the Champion Shell model too, so the sphere doesn't hitch-parse
+  // 28 MB the moment the champion field spawns mid-combat.
+  _preloadChampionShellModel();
 }
 
 // The GLBs are 20-45 MB each ; load strictly one at a time with a breather
@@ -24384,6 +24396,160 @@ function spawnMonsterGuts(pos, size, def) {
   } catch (_) {}
 }
 
+// ---------------------- CHAMPION SHELL ----------------------
+// The champion field spawns INSIDE this destructible Sphere.glb object.
+// 3000 HP ; all five player weapon paths hit it because it lives in
+// game.monsters with the same { alive, position, collisionRadius,
+// takeDamage } contract. While it's alive, updateStasisFields' champion
+// branch is gated off ; destroying it exposes the (now 0.5 s) capture.
+const CHAMP_SHELL_HEALTH = 3000;
+const CHAMP_SHELL_SIZE = 340;   // diameter ; interior holds the r=50 field + r=90 ring
+let _champShellProto = null;
+let _champShellLoading = false;
+
+function _preloadChampionShellModel() {
+  if (_champShellProto || _champShellLoading) return;
+  _champShellLoading = true;
+  let loader = null;
+  try { loader = new THREE.GLTFLoader(); } catch (_) { _champShellLoading = false; return; }
+  loader.load(MONSTER_BASE_URL + 'Sphere.glb',
+    g => { _champShellProto = g.scene; },
+    undefined,
+    err => { console.warn('[champ-shell] Sphere.glb load failed:', err && err.message); });
+}
+
+function _champSelfIlluminate(obj3d) {
+  obj3d.traverse(node => {
+    if (!node.isMesh || !node.material) return;
+    const mats = Array.isArray(node.material) ? node.material : [node.material];
+    for (const mat of mats) {
+      if (!mat || !mat.emissive) continue;
+      try {
+        if (mat.map) {
+          mat.emissiveMap = mat.map;
+          mat.emissive.setRGB(1, 1, 1);
+          mat.emissiveIntensity = 0.5;
+        } else {
+          mat.emissive.copy(mat.color || new THREE.Color(0x888888)).multiplyScalar(0.55);
+        }
+        mat.needsUpdate = true;
+      } catch (_) {}
+    }
+  });
+}
+
+class ChampionShell {
+  constructor(pos) {
+    this.alive = true;
+    this.health = CHAMP_SHELL_HEALTH;
+    this.maxHealth = CHAMP_SHELL_HEALTH;
+    this.position = pos.clone();
+    this.collisionRadius = CHAMP_SHELL_SIZE * 0.5;
+    this.team = 'shell';
+    this.name = 'ChampionShell';
+    this._hitFxTimer = 0;
+    this._usedProto = false;
+    this.mesh = null;
+    this._buildMesh();
+  }
+
+  _buildMesh() {
+    const group = new THREE.Group();
+    if (_champShellProto) {
+      const inner = _champShellProto.clone(true);
+      _champSelfIlluminate(inner);
+      const box = new THREE.Box3().setFromObject(inner);
+      const size = box.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z) || 1;
+      const center = box.getCenter(new THREE.Vector3());
+      inner.position.sub(center);
+      group.add(inner);
+      group.scale.setScalar(CHAMP_SHELL_SIZE / maxDim);
+      this._usedProto = true;
+    } else {
+      // Fallback until (or in case) the GLB isn't available: faceted
+      // violet husk, clearly "a thing to shoot".
+      const geo = new THREE.IcosahedronGeometry(CHAMP_SHELL_SIZE / 2, 2);
+      const mat = new THREE.MeshBasicMaterial({ color: 0x7a44cc, transparent: true, opacity: 0.92 });
+      group.add(new THREE.Mesh(geo, mat));
+    }
+    group.position.copy(this.position);
+    if (this.mesh && this.mesh.parent) { try { scene.remove(this.mesh); } catch (_) {} }
+    this.mesh = group;
+    try { scene.add(group); } catch (_) {}
+  }
+
+  takeDamage(dmg, attacker, hitPoint) {
+    if (!this.alive) return 0;
+    this.health -= dmg;
+    if (this._hitFxTimer <= 0) {
+      this._hitFxTimer = 0.1;
+      const at = hitPoint || this.position;
+      try {
+        if (typeof v8SpawnSparks === 'function') v8SpawnSparks(at, 6, 1.3, 300, 0xaa55ff, 0xffffff);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, 0xaa55ff, 2.2, 420, 0.12);
+      } catch (_) {}
+    }
+    if (this.health <= 0) this.die(true);
+    return dmg;
+  }
+
+  die(broadcast) {
+    if (!this.alive) return;
+    this.alive = false;
+    try {
+      spawnExplosion(this.position, 50);
+      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(this.position, 30, 1.6, 700, 0xaa55ff, 0xddbbff);
+      if (typeof spawnFXBurst === 'function') {
+        spawnFXBurst('fireball_purple', this.position, CHAMP_SHELL_SIZE * 0.9, 0.8, { startScale: 0.3, endScale: 1.2 });
+      }
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, 0xaa55ff, 6.0, 1500, 0.6);
+      if (window.Overlays) Overlays.banner('CHAMPION EXPOSED', 'Capture the field!');
+    } catch (_) {}
+    if (this.mesh) {
+      try { scene.remove(this.mesh); } catch (_) {}
+      this.mesh = null;
+    }
+    // Sync: peers gate capture on THEIR shell instance ; mirror the kill
+    // so the field unlocks for everyone at the same moment.
+    if (broadcast && typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      try { net.sendEvent({ type: 'champ_shell_dead' }); } catch (_) {}
+    }
+  }
+
+  update(dt) {
+    if (!this.alive || !this.mesh) return;
+    this._hitFxTimer -= dt;
+    // Late upgrade: if the GLB finished loading after we spawned with the
+    // fallback husk, swap in the real model.
+    if (!this._usedProto && _champShellProto) this._buildMesh();
+    this.mesh.rotation.y += 0.15 * dt;
+    this.mesh.rotation.x += 0.05 * dt;
+  }
+}
+
+function _spawnChampionShell(field) {
+  if (!field || !field.position) return;
+  _preloadChampionShellModel();
+  if (game.championShell) _clearChampionShell();
+  if (!game.monsters) game.monsters = [];
+  const shell = new ChampionShell(field.position);
+  game.championShell = shell;
+  game.monsters.push(shell);   // joins the weapon-path target list
+}
+
+function _clearChampionShell() {
+  const s = game.championShell;
+  if (!s) return;
+  s.alive = false;
+  if (s.mesh) { try { scene.remove(s.mesh); } catch (_) {} s.mesh = null; }
+  if (game.monsters) {
+    const i = game.monsters.indexOf(s);
+    if (i >= 0) game.monsters.splice(i, 1);
+  }
+  game.championShell = null;
+}
+
 function updateMonsters(dt) {
   // Skip entirely on Potato quality: six 20-45 MB GLBs are exactly the
   // load that preset exists to avoid.
@@ -24401,7 +24567,8 @@ function updateMonsters(dt) {
   if (updateMonsters._homeKey !== _arenaNow.key) {
     updateMonsters._homeKey = _arenaNow.key;
     for (const m of game.monsters) {
-      if (!m.alive) continue;
+      // ChampionShell shares the array but has no patrol to re-anchor.
+      if (!m.alive || typeof m._rehome !== 'function') continue;
       m._rehome();
       m._wanderTimer = 0;
     }
@@ -28825,6 +28992,7 @@ function commitLoadout(key) {
     game.championResult = null;
     game.championEndTimer = 0;          // (v11b) clear grace timer
     game._championPlayerChargingTeam = null;
+    if (typeof _clearChampionShell === 'function') _clearChampionShell();
     // Start ambient sound bed (only once per match)
     startAmbientBed();
   } else {
@@ -34802,6 +34970,7 @@ function updateRoundSystem(dt) {
         game.championResult = null;
         game.championEndTimer = 0;       // (v11b) clear grace timer
         game._championPlayerChargingTeam = null;
+        if (typeof _clearChampionShell === 'function') _clearChampionShell();
         document.getElementById('stasis-warning').style.display = 'none';
         document.getElementById('stasis-vignette').style.display = 'none';
         // Clean up world effects. The previous version only removed
@@ -35015,6 +35184,7 @@ function returnToRootMenu() {
   game.championResult = null;
   game.championEndTimer = 0;             // (v11b) clear grace timer
   game._championPlayerChargingTeam = null;
+  if (typeof _clearChampionShell === 'function') _clearChampionShell();
   // Reset player position + velocity. commitLoadout will assign a real
   // spawn point after the new map builds, but until then we want no
   // residual movement / position-based effects (camera, dashes, etc.)
@@ -43583,6 +43753,13 @@ class StasisField {
     // them and the contested-charge resolution reads at a glance.
     this.championMode = !!championMode;
     this.radius = this.championMode ? 50 : 120;
+    // Champion fields spawn sealed inside the destructible Champion
+    // Shell (Sphere.glb, 3000 HP). Constructor hook covers every spawn
+    // path: stasis-owner spawn, net 'stasis_spawn' receivers, race mode.
+    if (this.championMode) {
+      try { if (typeof _spawnChampionShell === 'function') _spawnChampionShell(this); }
+      catch (e) { console.warn('[champ-shell] spawn failed:', e); }
+    }
     this.pulseTime = 0;
     // Charge state for champion mode. chargingTeam is null while empty
     // or contested ; chargeTimer accumulates while a single team's
@@ -44133,6 +44310,14 @@ function updateStasisFields(dt) {
     field.update(dt);
 
     if (field.championMode) {
+      // ---- Champion Shell gate ----
+      // The field sits INSIDE the Sphere object. While the shell lives,
+      // nobody can touch the field: no gravity pull, no claims, no
+      // progress. Destroy the shell (3000 HP) to expose the field.
+      if (game.championShell && game.championShell.alive) {
+        if (field.claimedBy) _releaseChampionClaim(field, /*preserveProgress*/ true, field.claimedBy);
+        continue;
+      }
       // Tick down the brief re-entry grace for the just-shoved ship.
       if (field.recentlyReleasedTimer > 0) {
         field.recentlyReleasedTimer -= dt;
