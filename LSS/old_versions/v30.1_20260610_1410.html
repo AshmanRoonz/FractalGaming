@@ -2802,7 +2802,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.2';
+const LSS_BUILD = '30.1';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -15966,21 +15966,17 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   let engineMesh;
   const name = chassisData.name;
   if (name === 'Frigate') {
-    // NO FLAT SHAPES: engine glows are squashed 3D orbs, not discs.
-    const glowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
-    glowGeo.scale(1, 1, 0.55);
+    const glowGeo = new THREE.CircleGeometry(h * 0.35, 12);
     const g1 = addGlow(glowGeo, engineGlowMat, -w * 0.5, -h * 0.15, tailZ);
     const g2 = addGlow(glowGeo, engineGlowMat,  w * 0.5, -h * 0.15, tailZ);
     addPlume(-w * 0.5, -h * 0.15, tailZ, h * 0.32, l * 1.4, plumeMat);
     addPlume( w * 0.5, -h * 0.15, tailZ, h * 0.32, l * 1.4, plumeMat);
     engineMesh = g1;
   } else if (name === 'Corvette') {
-    const glowGeo = new THREE.SphereGeometry(h * 0.6, 14, 10);
-    glowGeo.scale(1, 1, 0.55);
+    const glowGeo = new THREE.CircleGeometry(h * 0.6, 16);
     const g = addGlow(glowGeo, engineGlowMat, 0, 0, tailZ);
     addPlume(0, 0, tailZ, h * 0.55, l * 1.8, plumeMat);
-    const thrGeo = new THREE.SphereGeometry(h * 0.12, 8, 6);
-    thrGeo.scale(1, 1, 0.6);
+    const thrGeo = new THREE.CircleGeometry(h * 0.12, 8);
     [-1, 1].forEach(sx => [-1, 1].forEach(sy => {
       addGlow(thrGeo, thrusterMat, sx * w * 0.7, sy * h * 0.5, tailZ - h * 0.3);
       addPlume(sx * w * 0.7, sy * h * 0.5, tailZ - h * 0.3, h * 0.10, l * 0.45, plumeMatCool);
@@ -15988,16 +15984,14 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     engineMesh = g;
   } else {
     // Dreadnought
-    const bigGlowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
-    bigGlowGeo.scale(1, 1, 0.55);
+    const bigGlowGeo = new THREE.CircleGeometry(h * 0.35, 12);
     const big = [];
     [-1, 0, 1].forEach(i => {
       const m = addGlow(bigGlowGeo, engineGlowMat, i * w * 0.5, 0, tailZ);
       big.push(m);
       addPlume(i * w * 0.5, 0, tailZ, h * 0.32, l * 1.6, plumeMat);
     });
-    const smGlowGeo = new THREE.SphereGeometry(h * 0.15, 8, 6);
-    smGlowGeo.scale(1, 1, 0.6);
+    const smGlowGeo = new THREE.CircleGeometry(h * 0.15, 8);
     [-1.5, -0.5, 0.5, 1.5].forEach(i => {
       addGlow(smGlowGeo, thrusterMat, i * w * 0.35, h * 0.5, tailZ - h * 0.15);
       addPlume(i * w * 0.35, h * 0.5, tailZ - h * 0.15, h * 0.13, l * 0.55, plumeMatCool);
@@ -20091,8 +20085,7 @@ async function _warmupCombatShadersBody() {
 const _EXPL_SPHERE_LG  = new THREE.SphereGeometry(1, 8, 6);     // flash, fire
 const _EXPL_SPHERE_SM  = new THREE.SphereGeometry(1, 6, 4);     // explosion core
 const _EXPL_SPHERE_TINY= new THREE.SphereGeometry(1, 4, 3);     // impact sparks
-const _EXPL_PLANE      = new THREE.PlaneGeometry(1, 1);          // (retired from explosions ; kept for pool compat)
-const _EXPL_SPHERE_MED = new THREE.SphereGeometry(1, 12, 8);    // flash/flare/fire/core 3D orbs
+const _EXPL_PLANE      = new THREE.PlaneGeometry(1, 1);          // flare billboard
 const _EXPL_RING_FLAT  = new THREE.TorusGeometry(0.5, 0.05, 6, 48); // (v6.7) thin torus instead of RingGeometry so the camera-facing shockwave still has real volume from any oblique angle. Major radius 0.5 / tube 0.05 gives the same 0.45-0.55 visible band as the old flat ring.
 const _EXPL_TORUS_PRI  = new THREE.TorusGeometry(0.5, 0.10, 8, 32); // primary shockwave torus
 const _EXPL_TORUS_SEC  = new THREE.TorusGeometry(0.5, 0.07, 8, 32); // secondary shockwave torus
@@ -20121,37 +20114,47 @@ function _makeExplosionMesh(type) {
   let geo, matOpts;
   switch (type) {
     case 'flash':
-      // NO FLAT SHAPES rule: real 3D orb instead of a camera-facing disc.
-      // Additive blending + no depth-write keeps it reading as a burst of
-      // light (not a hard ball), and the volumetric LayeredFX fireball
-      // cluster spawned alongside carries the body of the blast.
-      geo = _EXPL_SPHERE_MED;
+      // (Descent 3 style) Camera-facing billboard quad with the ember radial-
+      // falloff texture instead of a sphere. A 3D sphere always reads as a
+      // hard ball over whatever you hit (especially noticeable when a
+      // projectile destroys at a ship's center). A camera-facing soft disc
+      // reads as a real burst of light from any viewing angle.
+      geo = _EXPL_PLANE;
       matOpts = {
-        color: 0xffffff, transparent: true, opacity: 0.95,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+        color: 0xffffff, transparent: true, opacity: 1.0,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        map: _emberFalloffTexture,
       };
       break;
     case 'flare':
-      geo = _EXPL_SPHERE_MED;
-      // 3D halo orb (no flat shapes). Lower opacity: additive spheres
-      // stack brighter than the old textured discs.
+      geo = _EXPL_PLANE;
+      // The flare always camera-faces (lookAt(camera.position) at
+      // spawn), but without a soft falloff texture the plane reads as a
+      // warm-colored SQUARE that screams "90s sprite". Mapping the ember
+      // radial-gradient texture turns it into a soft sun-flare disc.
       matOpts = {
-        color: 0xffeec0, transparent: true, opacity: 0.45,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+        color: 0xffeec0, transparent: true, opacity: 0.95,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        map: _emberFalloffTexture,
       };
       break;
     case 'fire':
-      geo = _EXPL_SPHERE_MED;
+      // Same Descent 3 treatment: camera-facing billboard with ember
+      // texture, color tinted orange. Replaces the old _EXPL_SPHERE_LG
+      // 3D ball that was clearly geometric on top of every ship hit.
+      geo = _EXPL_PLANE;
       matOpts = {
-        color: 0xff6600, transparent: true, opacity: 0.6,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+        color: 0xff6600, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        map: _emberFalloffTexture,
       };
       break;
     case 'core':
-      geo = _EXPL_SPHERE_MED;
+      geo = _EXPL_PLANE;
       matOpts = {
-        color: 0xff2200, transparent: true, opacity: 0.5,
-        blending: THREE.AdditiveBlending, depthWrite: false,
+        color: 0xff2200, transparent: true, opacity: 0.6,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+        map: _emberFalloffTexture,
       };
       break;
     case 'flatShock':
@@ -20678,22 +20681,24 @@ function spawnExplosion(pos, size) {
     const flashMesh = _acquireExplosionMesh('flash');
     flashMesh.position.copy(pos);
     flashMesh.scale.setScalar(size * 0.45);
+    flashMesh.lookAt(camera.position);
     flashMesh.material.color.setHex(0xffffff);
     flashMesh.material.opacity = 0.85;
     game.effects.push({
       mesh: flashMesh, lifetime: 0.08, age: 0,
-      type: 'explosionFlash', pooled: true, billboard: false,
+      type: 'explosionFlash', pooled: true, billboard: true,
       baseScale: size * 0.45
     });
     if (_accent) {
       const fireMesh = _acquireExplosionMesh('fire');
       fireMesh.position.copy(pos);
       fireMesh.scale.setScalar(size * 0.7);
+      fireMesh.lookAt(camera.position);
       fireMesh.material.color.setHex(0xff6600);
       fireMesh.material.opacity = 0.72;
       game.effects.push({
         mesh: fireMesh, lifetime: 0.20, age: 0,
-        type: 'explosionFire', pooled: true, billboard: false,
+        type: 'explosionFire', pooled: true, billboard: true,
         maxSize: size * 1.55, baseScale: size * 0.7
       });
       if (typeof v8SpawnSparks === 'function') {
@@ -20830,33 +20835,37 @@ function spawnExplosion(pos, size) {
   const flashMesh = _acquireExplosionMesh('flash');
   flashMesh.position.copy(pos);
   flashMesh.scale.setScalar(size * 0.55);
+  flashMesh.lookAt(camera.position);
   flashMesh.material.color.setHex(0xffffff);
   flashMesh.material.opacity = 1.0;
-  game.effects.push({ mesh: flashMesh, lifetime: 0.12, age: 0, type: 'explosionFlash', pooled: true, billboard: false, baseScale: size * 0.55 });
+  game.effects.push({ mesh: flashMesh, lifetime: 0.12, age: 0, type: 'explosionFlash', pooled: true, billboard: true, baseScale: size * 0.55 });
 
   // --- Phase 1b: Cinematic billboarded "lens flare" disc that faces the camera ---
   const flareMesh = _acquireExplosionMesh('flare');
   flareMesh.position.copy(pos);
   flareMesh.scale.setScalar(size * 1.6);
+  flareMesh.lookAt(camera.position);
   flareMesh.material.color.setHex(0xffeec0);
   flareMesh.material.opacity = 0.95;
-  game.effects.push({ mesh: flareMesh, lifetime: 0.22, age: 0, type: 'explosionFlash', pooled: true, billboard: false, baseScale: size * 1.6 });
+  game.effects.push({ mesh: flareMesh, lifetime: 0.22, age: 0, type: 'explosionFlash', pooled: true, billboard: true, baseScale: size * 1.6 });
 
   // --- Phase 2: Expanding fireball (orange-red, multi-layer, camera-facing) ---
   const fireMesh = _acquireExplosionMesh('fire');
   fireMesh.position.copy(pos);
   fireMesh.scale.setScalar(size);
+  fireMesh.lookAt(camera.position);
   fireMesh.material.color.setHex(0xff6600);
   fireMesh.material.opacity = 0.85;
-  game.effects.push({ mesh: fireMesh, lifetime: 0.5, age: 0, type: 'explosionFire', pooled: true, billboard: false, maxSize: size * 2.5, baseScale: size });
+  game.effects.push({ mesh: fireMesh, lifetime: 0.5, age: 0, type: 'explosionFire', pooled: true, billboard: true, maxSize: size * 2.5, baseScale: size });
 
   // Inner darker core (red, slightly delayed expansion, also billboarded).
   const coreMesh = _acquireExplosionMesh('core');
   coreMesh.position.copy(pos);
   coreMesh.scale.setScalar(size * 0.7);
+  coreMesh.lookAt(camera.position);
   coreMesh.material.color.setHex(0xff2200);
   coreMesh.material.opacity = 0.6;
-  game.effects.push({ mesh: coreMesh, lifetime: 0.35, age: 0, type: 'explosionFire', pooled: true, billboard: false, maxSize: size * 1.8, baseScale: size * 0.7 });
+  game.effects.push({ mesh: coreMesh, lifetime: 0.35, age: 0, type: 'explosionFire', pooled: true, billboard: true, maxSize: size * 1.8, baseScale: size * 0.7 });
 
   // --- Phase 3: (removed) Shockwave torus rings ---
   // The flat camera-facing torus + volumetric ringShock + secondary
