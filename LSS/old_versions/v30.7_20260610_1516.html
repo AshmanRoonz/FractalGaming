@@ -2826,7 +2826,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.8';
+const LSS_BUILD = '30.7';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -7961,23 +7961,6 @@ const _SMOKE_CONE_FS = [
   '  gl_FragColor = vec4(col, a * uOpacity);',
   '}',
 ].join('\n');
-
-// Pool: one fresh ShaderMaterial per rocket was steady allocation during
-// missile fights (Tracker volleys, Mega Barrage). Reuse + retint instead.
-const _smokeConeMatPool = [];
-function _acquireSmokeConeMaterial(hotColorHex) {
-  const m = _smokeConeMatPool.pop();
-  if (m) {
-    try { m.uniforms.uHotColor.value.set(hotColorHex || 0xff8844); } catch (_) {}
-    return m;
-  }
-  return _makeSmokeConeMaterial(hotColorHex);
-}
-function _releaseSmokeConeMaterial(m) {
-  if (!m) return;
-  if (_smokeConeMatPool.length < 24) _smokeConeMatPool.push(m);
-  else { try { m.dispose(); } catch (_) {} }
-}
 
 function _makeSmokeConeMaterial(hotColorHex) {
   _smokeConeHotCol.set(hotColorHex || 0xff8844);
@@ -18078,7 +18061,9 @@ class Projectile {
     // we just unlink the mesh from the scene without disposing geo.
     if (this.smokeCone) {
       if (this.smokeCone.parent) scene.remove(this.smokeCone);
-      _releaseSmokeConeMaterial(this.smokeCone.material);
+      if (this.smokeCone.material && this.smokeCone.material.dispose) {
+        try { this.smokeCone.material.dispose(); } catch (_) {}
+      }
       this.smokeCone = null;
     }
 
@@ -18099,7 +18084,7 @@ class Projectile {
       if (!this.smokeCone) {
         try {
           const _scGeo = _getSmokeConeGeometry();
-          const _scMat = _acquireSmokeConeMaterial(this.trailColor || 0xaaaaaa);
+          const _scMat = _makeSmokeConeMaterial(this.trailColor || 0xaaaaaa);
           this.smokeCone = new THREE.Mesh(_scGeo, _scMat);
           this.smokeCone.frustumCulled = false;
           this.smokeCone.renderOrder = 1;
@@ -20161,71 +20146,43 @@ const _EXPL_POOL_CAP = {
   potatoSphere: 24
 };
 
-// Soft volumetric orb: alpha peaks at the silhouette center and falls to
-// zero at the rim (what the old radial-falloff DISC did, but in 3D).
-// The rim discard skips blending for roughly half of each orb's pixels —
-// a real fill-rate win at high pixel ratios when ordnance fills the view.
-const _ORB_VERT = [
-  'varying vec3 vN; varying vec3 vV;',
-  'void main() {',
-  '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-  '  vN = normalize(mat3(modelMatrix) * normal);',
-  '  vV = normalize(cameraPosition - wp.xyz);',
-  '  gl_Position = projectionMatrix * viewMatrix * wp;',
-  '}'
-].join('\n');
-const _ORB_FRAG = [
-  'uniform vec3 uColor; uniform float uOpacity;',
-  'varying vec3 vN; varying vec3 vV;',
-  'void main() {',
-  '  float f = abs(dot(normalize(vN), normalize(vV)));',
-  '  float a = pow(f, 1.7) * uOpacity;',
-  '  if (a < 0.015) discard;',
-  '  gl_FragColor = vec4(uColor, a);',
-  '}'
-].join('\n');
-function _makeExplosionOrbMaterial(colorHex, baseOpacity) {
-  const mat = new THREE.ShaderMaterial({
-    vertexShader: _ORB_VERT,
-    fragmentShader: _ORB_FRAG,
-    uniforms: {
-      uColor:   { value: new THREE.Color(colorHex) },
-      uOpacity: { value: baseOpacity },
-    },
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  });
-  // The explosion pool + updateEffects animate `.opacity` and call
-  // `.color.setHex()` on plain materials ; bridge both onto the uniforms
-  // so every call site keeps working unchanged.
-  Object.defineProperty(mat, 'opacity', {
-    get() { return this.uniforms.uOpacity.value; },
-    set(v) { this.uniforms.uOpacity.value = v; },
-  });
-  Object.defineProperty(mat, 'color', {
-    get() { return this.uniforms.uColor.value; },
-  });
-  return mat;
-}
-
 function _makeExplosionMesh(type) {
   let geo, matOpts;
   switch (type) {
     case 'flash':
-      // NO FLAT SHAPES rule: 3D fresnel orb — soft center-bright falloff
-      // like the old disc texture, volumetric from every angle.
-      return Object.assign(new THREE.Mesh(_EXPL_SPHERE_MED, _makeExplosionOrbMaterial(0xffffff, 0.95)),
-        { userData: { _poolType: 'flash' } });
+      // NO FLAT SHAPES rule: real 3D orb instead of a camera-facing disc.
+      // Additive blending + no depth-write keeps it reading as a burst of
+      // light (not a hard ball), and the volumetric LayeredFX fireball
+      // cluster spawned alongside carries the body of the blast.
+      geo = _EXPL_SPHERE_MED;
+      matOpts = {
+        color: 0xffffff, transparent: true, opacity: 0.95,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      };
+      break;
     case 'flare':
-      return Object.assign(new THREE.Mesh(_EXPL_SPHERE_MED, _makeExplosionOrbMaterial(0xffeec0, 0.45)),
-        { userData: { _poolType: 'flare' } });
+      geo = _EXPL_SPHERE_MED;
+      // 3D halo orb (no flat shapes). Lower opacity: additive spheres
+      // stack brighter than the old textured discs.
+      matOpts = {
+        color: 0xffeec0, transparent: true, opacity: 0.45,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      };
+      break;
     case 'fire':
-      return Object.assign(new THREE.Mesh(_EXPL_SPHERE_MED, _makeExplosionOrbMaterial(0xff6600, 0.6)),
-        { userData: { _poolType: 'fire' } });
+      geo = _EXPL_SPHERE_MED;
+      matOpts = {
+        color: 0xff6600, transparent: true, opacity: 0.6,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      };
+      break;
     case 'core':
-      return Object.assign(new THREE.Mesh(_EXPL_SPHERE_MED, _makeExplosionOrbMaterial(0xff2200, 0.5)),
-        { userData: { _poolType: 'core' } });
+      geo = _EXPL_SPHERE_MED;
+      matOpts = {
+        color: 0xff2200, transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      };
+      break;
     case 'flatShock':
       geo = _EXPL_RING_FLAT;
       matOpts = { color: 0xffd080, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide };
@@ -39342,28 +39299,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // thumb wherever it lands in the bottom-left zone, so an off-center
     // grab never registers as instant phantom movement. The styled circle
     // follows the thumb and snaps back home on release.
-    // First-gesture fullscreen + orientation lock (the mobile-game
-    // pattern): Chrome only honors a landscape lock reliably inside
-    // fullscreen, and a half-applied lock was leaving the layout stuck
-    // portrait. Retries on any stick/look grab while not fullscreen.
-    const _ensureMobileFullscreen = () => {
-      try {
-        if ((navigator.maxTouchPoints > 0) && !document.fullscreenElement &&
-            document.documentElement.requestFullscreen) {
-          document.documentElement.requestFullscreen({ navigationUI: 'hide' }).then(() => {
-            try {
-              if (screen.orientation && screen.orientation.lock) {
-                screen.orientation.lock('landscape').catch(() => {});
-              }
-            } catch (_) {}
-          }).catch(() => {});
-        }
-      } catch (_) {}
-    };
     let _movePid = null, _moveCx = 0, _moveCy = 0, _moveR = 1, _dashArmed = true;
     moveZone.addEventListener('pointerdown', ev => {
       ev.preventDefault(); ev.stopPropagation();
-      _ensureMobileFullscreen();
       try { moveZone.setPointerCapture(ev.pointerId); } catch (_) {}
       _movePid = ev.pointerId;
       const r = moveEl.getBoundingClientRect();
@@ -39415,7 +39353,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     let _lookPid = null, _lookLx = 0, _lookLy = 0;
     lookZone.addEventListener('pointerdown', ev => {
       ev.preventDefault(); ev.stopPropagation();
-      _ensureMobileFullscreen();
       try { lookZone.setPointerCapture(ev.pointerId); } catch (_) {}
       _lookPid = ev.pointerId;
       _lookLx = ev.clientX; _lookLy = ev.clientY;
@@ -39465,12 +39402,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // when the pad disconnects (this interval re-polls every 250 ms).
     // Gyro steering intentionally stays live alongside a gamepad.
     const show = inMatch && !blocked && !input.gpConnected;
-    // Portrait-layout watchdog: if Chrome's viewport reports portrait
-    // dims while the match overlay is up (lock half-applied), re-kick
-    // the renderer sizing until the browser sorts itself out.
-    if (show && window.innerHeight > window.innerWidth) {
-      try { if (typeof _applyViewportSize === 'function') _applyViewportSize(); } catch (_) {}
-    }
     const cur = root.style.display === 'block';
     if (show !== cur) {
       root.style.display = show ? 'block' : 'none';
