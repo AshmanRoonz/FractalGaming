@@ -18323,6 +18323,28 @@ class Projectile {
           return;
         }
       }
+
+      // Outskirts monsters: projectiles detonate on their hide.
+      if (game.monsters) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.mesh) continue;
+          const r = mon.collisionRadius;
+          if (this.position.distanceToSquared(mon.position) < r * r) {
+            const dealt = mon.takeDamage(this.damage, 'player', this.position);
+            if (dealt > 0) {
+              player.damageDealt += dealt;
+              player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+              showHitMarker();
+              spawnImpactSparks(this.position, 3);
+            }
+            if (this.isCluster) this.spawnClusterChildren();
+            this.spawnImpactExplosion(this.position);
+            if (this.splash > 0) this.splashDamage();
+            this.destroy();
+            return;
+          }
+        }
+      }
     } else if (this.owner !== 'player' && player.shipState !== 'dead') {
       const hitRadius = player.chassis.hullLength * 1.2;
       const hasShield = player.shield > 0;
@@ -18435,6 +18457,25 @@ class Projectile {
           if (_dealt > 0 && this.owner === 'player') {
             player.damageDealt += _dealt;
             player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+          }
+        }
+      }
+    }
+    // Outskirts monsters: flesh takes splash from ANY explosion (no
+    // bustsRocks gate ; rockets and missiles should hurt the leviathans).
+    if (this.owner === 'player' && game.monsters && this.splash > 0) {
+      for (const mon of game.monsters) {
+        if (!mon.alive || !mon.mesh) continue;
+        const _mdSq = this.position.distanceToSquared(mon.position);
+        const _mReach = this.splash + mon.collisionRadius * 0.5;
+        if (_mdSq < _mReach * _mReach && _mdSq > 0) {
+          const _mdist = Math.sqrt(_mdSq);
+          const _mfall = Math.max(0.1, 1 - _mdist / _mReach);
+          const _mdealt = mon.takeDamage(this.damage * 0.75 * _mfall, 'player', this.position);
+          if (_mdealt > 0) {
+            player.damageDealt += _mdealt;
+            player.coreMeter = Math.min(100, player.coreMeter + _mdealt / 100);
+            showHitMarker();
           }
         }
       }
@@ -23880,6 +23921,495 @@ function disposeAllDetachedGasPockets() {
     }
   }
   game.detachedGasPockets.length = 0;
+}
+
+// ========================== OUTSKIRTS MONSTERS ==========================
+// Six leviathans (models designed by Ashman's son ; LSS/objects/*.glb)
+// drift around the arena outskirts, one per cube face. Stay inside the
+// arena and they ignore you ; fly out past the soft boundary
+// (0.8 x ARENA_SIZE, the same edge where the out-of-bounds push begins)
+// and they slowly converge on you. Get close and they zap you with
+// electricity. Each has Dreadnought-class health (12500, matching
+// CHASSIS.DREADNOUGHT.maxHealth). Killing one detonates it into
+// procedurally generated guts: torn-flesh gib meshes (unique displaced
+// geometry per gib), a blood-mist cloud, ichor sparks, and red haze.
+// Damage integration: monsters expose the same { alive, position,
+// collisionRadius, takeDamage(dmg) -> dealt } contract as
+// game.dynamicObjects entries, and are checked in all five player
+// weapon paths (hitscan, spread pellets, projectiles, splash, Mega
+// Laser). Local-sim only ; not synced over the network.
+const MONSTER_DEFS = [
+  { key: 'FleshMaw',     gut1: 0xb22436, gut2: 0x7a1020 },
+  { key: 'GraveTitan',   gut1: 0x9a8468, gut2: 0x5a2c20 },
+  { key: 'HallowWalker', gut1: 0xd8cfa8, gut2: 0x86c44a },
+  { key: 'IronBloom',    gut1: 0xb84a2a, gut2: 0x6a4a8a },
+  { key: 'StoneShroud',  gut1: 0x8a8a92, gut2: 0x5a8a4a },
+  { key: 'VoidGazer',    gut1: 0x8a3aca, gut2: 0x2a1a4a },
+];
+const MONSTER_BASE_URL   = 'LSS/objects/';
+const MONSTER_HEALTH     = 12500; // Dreadnought-class
+const MONSTER_SIZE       = 520;   // normalized longest-axis size, world units
+const MONSTER_DRIFT_SPD  = 30;    // aimless outskirts drift
+const MONSTER_CHASE_SPD  = 130;   // "slowly come toward you" (close-range)
+// The outskirts shell is enormous (each arena face is a ~45k-unit square)
+// and a creature ambling at 130 u/s would never actually reach a player
+// during a round. Far away they surge ; the final approach is still the
+// slow menace: speed ramps from MONSTER_CHASE_SPD inside 4k up to
+// MONSTER_FAR_SPD when crossing the void.
+const MONSTER_FAR_SPD    = 900;
+const MONSTER_ZAP_RANGE  = 700;
+const MONSTER_ZAP_DMG    = 350;
+const MONSTER_ZAP_EVERY  = 1.25;  // seconds between zaps
+const MONSTER_AGGRO_EDGE = 0.8;   // player beyond this fraction of ARENA_SIZE = "outside"
+
+let _monstersInit = false;
+let _monsterLoadIdx = 0;
+const _monScratchA = new THREE.Vector3();
+const _monScratchB = new THREE.Vector3();
+
+// The "arena" is the CARVED play space (the volume the minimap shows:
+// game.levelSpheres rooms + game.levelCylinders tunnels), not the giant
+// hard-clamp cube. Cache its bounding center + radius, keyed the same way
+// the minimap keys its extent cache, so map switches re-anchor the pack.
+const _monArena = { key: null, radius: 0, center: new THREE.Vector3() };
+function _monsterArenaInfo() {
+  const spheres = (game && game.levelSpheres) || [];
+  const cyls = (game && game.levelCylinders) || [];
+  const key = spheres.length * 131071 + cyls.length;
+  if (_monArena.key === key && _monArena.radius > 0) return _monArena;
+  let n = 0, cx = 0, cy = 0, cz = 0;
+  for (const s of spheres) { cx += s.cx; cy += s.cy; cz += s.cz; n++; }
+  for (const c of cyls) { cx += (c.ax + c.bx) * 0.5; cy += (c.ay + c.by) * 0.5; cz += (c.az + c.bz) * 0.5; n++; }
+  if (n === 0) {
+    _monArena.center.set(0, 0, 0);
+    _monArena.radius = 9000;       // sane fallback before a level exists
+    _monArena.key = key;
+    return _monArena;
+  }
+  cx /= n; cy /= n; cz /= n;
+  let maxR = 1500;
+  for (const s of spheres) {
+    const d = Math.sqrt((s.cx-cx)*(s.cx-cx) + (s.cy-cy)*(s.cy-cy) + (s.cz-cz)*(s.cz-cz)) + s.r;
+    if (d > maxR) maxR = d;
+  }
+  for (const c of cyls) {
+    const d1 = Math.sqrt((c.ax-cx)*(c.ax-cx) + (c.ay-cy)*(c.ay-cy) + (c.az-cz)*(c.az-cz)) + c.r;
+    const d2 = Math.sqrt((c.bx-cx)*(c.bx-cx) + (c.by-cy)*(c.by-cy) + (c.bz-cz)*(c.bz-cz)) + c.r;
+    if (d1 > maxR) maxR = d1;
+    if (d2 > maxR) maxR = d2;
+  }
+  _monArena.center.set(cx, cy, cz);
+  _monArena.radius = maxR;
+  _monArena.key = key;
+  return _monArena;
+}
+
+// Effective arena radius. On enclosed maps (The Nexus etc.) the carve
+// skeleton's bounding sphere IS the arena. On open sandwich-terrain maps
+// (Grassy etc.) the playable canyon sprawls far beyond the route skeleton ;
+// with the tight radius, ordinary mid-map flying read as "outside" and all
+// six leviathans converged on the middle unbaited. The 2.2x factor puts
+// the boundary out past normal roaming range on those maps.
+function _monsterArenaRadius() {
+  const a = _monsterArenaInfo();
+  const open = (typeof game !== 'undefined') && game.sandwichTerrain && game.sandwichTerrain.ON;
+  return a.radius * (open ? 2.2 : 1.05);
+}
+
+function _playerOutsideArena() {
+  if (typeof player === 'undefined' || !player || !player.position) return false;
+  if (player.shipState === 'dead' || player.shipState === 'spawning') return false;
+  // "The arena is the carved-out area we see in the minimap": outside =
+  // beyond the (map-type-aware) arena radius. (An SDF-based test was tried
+  // and reverted: open-terrain maps read the whole sky as "inside", and in
+  // enclosed maps wall collision means the SDF can never read "outside".)
+  const a = _monsterArenaInfo();
+  return player.position.distanceTo(a.center) > _monsterArenaRadius() + 150;
+}
+
+class OutskirtsMonster {
+  constructor(def, homeDir) {
+    this.def = def;
+    this.name = def.key;
+    this.alive = true;
+    this.health = MONSTER_HEALTH;
+    this.maxHealth = MONSTER_HEALTH;
+    this.collisionRadius = MONSTER_SIZE * 0.55;
+    this.team = 'monster';
+    this.homeDir = homeDir.clone().normalize();
+    this.home = new THREE.Vector3();
+    this._roamR = 2000;
+    this._rehome();      // anchor just outside the carved play space
+    this.position = this.home.clone();
+    this.position.x += (Math.random() - 0.5) * this._roamR;
+    this.position.y += (Math.random() - 0.5) * this._roamR;
+    this.position.z += (Math.random() - 0.5) * this._roamR;
+    this.velocity = new THREE.Vector3(0, 0, 0);
+    this.mesh = null;               // attached when the GLB finishes loading
+    this.zapTimer = Math.random() * MONSTER_ZAP_EVERY;
+    this.aggro = false;        // set when the player exits the arena ; persists if baited inside
+    this._deAggroT = 0;
+    this._touchCd = 0;
+    this.rotVel = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.10,
+      (Math.random() - 0.5) * 0.16,
+      (Math.random() - 0.5) * 0.10
+    );
+    this._wanderTarget = this.position.clone();
+    this._wanderTimer = 0;
+    this._hitFxTimer = 0;
+  }
+
+  // Anchor the home patch just past the carve's bounding shell, out along
+  // this monster's face direction. Called at spawn and again whenever the
+  // level geometry changes (map switch re-keys _monsterArenaInfo).
+  _rehome() {
+    const a = _monsterArenaInfo();
+    const R = _monsterArenaRadius();
+    const pad = R * 0.20 + 900;
+    this.home.copy(a.center).addScaledVector(this.homeDir, R + pad);
+    this._roamR = Math.max(700, R * 0.22);
+  }
+
+  attachModel(obj3d) {
+    if (!this.alive || !obj3d || typeof scene === 'undefined') return;
+    // Self-illuminate: the outskirts have almost no scene lighting, so
+    // stock GLB PBR materials render near-black out there. Route each
+    // material's own texture/color through its emissive channel ; the
+    // creature reads in the void without needing lights.
+    obj3d.traverse(node => {
+      if (!node.isMesh || !node.material) return;
+      const mats = Array.isArray(node.material) ? node.material : [node.material];
+      for (const mat of mats) {
+        if (!mat || !mat.emissive) continue;
+        try {
+          if (mat.map) {
+            mat.emissiveMap = mat.map;
+            mat.emissive.setRGB(1, 1, 1);
+            mat.emissiveIntensity = 0.5;
+          } else {
+            mat.emissive.copy(mat.color || new THREE.Color(0x888888)).multiplyScalar(0.55);
+          }
+          mat.needsUpdate = true;
+        } catch (_) {}
+      }
+    });
+    // Normalize: every kid-designed monster comes in at its own scale ;
+    // fit the longest axis to MONSTER_SIZE and recentre on origin.
+    const box = new THREE.Box3().setFromObject(obj3d);
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z) || 1;
+    const center = box.getCenter(new THREE.Vector3());
+    obj3d.position.sub(center);
+    const group = new THREE.Group();
+    group.add(obj3d);
+    group.scale.setScalar(MONSTER_SIZE / maxDim);
+    group.position.copy(this.position);
+    scene.add(group);
+    this.mesh = group;
+  }
+
+  takeDamage(dmg, attacker, hitPoint) {
+    if (!this.alive) return 0;
+    this.health -= dmg;
+    // Hit feedback, throttled so chainguns don't hammer the spark pool.
+    if (this._hitFxTimer <= 0) {
+      this._hitFxTimer = 0.12;
+      const at = hitPoint || this.position;
+      try {
+        if (typeof v8SpawnSparks === 'function') v8SpawnSparks(at, 6, 1.4, 320, this.def.gut1, 0xffddee);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, this.def.gut1, 2.0, 420, 0.12);
+      } catch (_) {}
+    }
+    if (this.health <= 0) this.die();
+    return dmg;
+  }
+
+  die() {
+    if (!this.alive) return;
+    this.alive = false;
+    try { spawnMonsterGuts(this.position, MONSTER_SIZE, this.def); } catch (e) { console.warn('[monsters] guts failed:', e); }
+    if (this.mesh) {
+      try { scene.remove(this.mesh); } catch (_) {}
+      this.mesh = null;
+    }
+    try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
+  }
+
+  update(dt) {
+    if (!this.alive || !this.mesh) return;
+    this._hitFxTimer -= dt;
+    this._touchCd -= dt;
+    const playerFlying = (typeof player !== 'undefined') && player &&
+      player.shipState !== 'dead' && player.shipState !== 'spawning';
+    const distToPlayer = playerFlying ? this.position.distanceTo(player.position) : Infinity;
+    // Aggro rules: stepping outside the arena marks you for every
+    // leviathan. A baited monster FOLLOWS you back inside the arena and
+    // only loses interest after you stay out of its reach for a stretch
+    // (then it lumbers back to its patrol).
+    if (_playerOutsideArena()) {
+      this.aggro = true;
+      this._deAggroT = 0;
+    } else if (this.aggro) {
+      if (!playerFlying) {
+        this.aggro = false;
+      } else if (distToPlayer > MONSTER_ZAP_RANGE * 1.6) {
+        this._deAggroT += dt;
+        if (this._deAggroT > 12) this.aggro = false;
+      } else {
+        this._deAggroT = 0;
+      }
+    }
+    const chasing = this.aggro && playerFlying;
+    if (chasing) {
+      // Inevitable convergence on the trespasser: surge across the void,
+      // then the slow menacing creep for the final approach.
+      const desired = _monScratchA.subVectors(player.position, this.position);
+      const dist = distToPlayer;
+      const spd = (dist > 4000)
+        ? Math.min(MONSTER_FAR_SPD, MONSTER_CHASE_SPD + (dist - 4000) * 0.08)
+        : MONSTER_CHASE_SPD;
+      if (dist > 1) desired.multiplyScalar(spd / dist);
+      this.velocity.lerp(desired, Math.min(1, dt * 0.9));
+      // Electric zap when close: bolt + crackle + damage.
+      this.zapTimer -= dt;
+      if (dist < MONSTER_ZAP_RANGE && this.zapTimer <= 0) {
+        this.zapTimer = MONSTER_ZAP_EVERY * (0.85 + Math.random() * 0.3);
+        this._zap(dist);
+      }
+    } else {
+      // Aimless drift around the home patch: retarget every 6-12 s,
+      // amble toward the current wander point.
+      this._wanderTimer -= dt;
+      if (this._wanderTimer <= 0) {
+        this._wanderTimer = 6 + Math.random() * 6;
+        this._wanderTarget.copy(this.home);
+        this._wanderTarget.x += (Math.random() - 0.5) * this._roamR * 2;
+        this._wanderTarget.y += (Math.random() - 0.5) * this._roamR * 2;
+        this._wanderTarget.z += (Math.random() - 0.5) * this._roamR * 2;
+        // Patrol stays OUTSIDE the carve shell ; without this clamp a
+        // wander target could sit inside the level and the leviathan
+        // would ghost through the rock walls.
+        const a = _monsterArenaInfo();
+        const minR = _monsterArenaRadius() * 1.04 + 250;
+        const off = _monScratchB.subVectors(this._wanderTarget, a.center);
+        const d = off.length();
+        if (d < minR && d > 0.001) {
+          this._wanderTarget.copy(a.center).addScaledVector(off.multiplyScalar(1 / d), minR);
+        }
+      }
+      const desired = _monScratchA.subVectors(this._wanderTarget, this.position);
+      const dist = desired.length();
+      if (dist > 1) desired.multiplyScalar(Math.min(MONSTER_DRIFT_SPD, dist * 0.05) / dist);
+      this.velocity.lerp(desired, Math.min(1, dt * 0.5));
+      this.zapTimer = Math.max(this.zapTimer - dt, 0.2);
+    }
+    // Contact shock: flying into a leviathan is a mistake. Zap on touch
+    // (own short cooldown, works even on a peaceful drifter) plus a shove
+    // so the ship doesn't ghost through the body.
+    if (playerFlying && distToPlayer < this.collisionRadius + 90 && this._touchCd <= 0) {
+      this._touchCd = 0.6;
+      this._zap(distToPlayer);
+      const shove = _monScratchA.subVectors(player.position, this.position);
+      const sl = shove.length();
+      if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+    }
+    this.position.addScaledVector(this.velocity, dt);
+    this.mesh.position.copy(this.position);
+    if (chasing) {
+      // Face the prey ; slow menace, no snap.
+      this.mesh.lookAt(player.position);
+    } else {
+      this.mesh.rotation.x += this.rotVel.x * dt;
+      this.mesh.rotation.y += this.rotVel.y * dt;
+      this.mesh.rotation.z += this.rotVel.z * dt;
+    }
+  }
+
+  _zap(dist) {
+    const from = _monScratchA.copy(player.position).sub(this.position).normalize()
+      .multiplyScalar(this.collisionRadius * 0.8).add(this.position);
+    const to = _monScratchB.copy(player.position);
+    to.x += (Math.random() - 0.5) * 25;
+    to.y += (Math.random() - 0.5) * 25;
+    to.z += (Math.random() - 0.5) * 25;
+    try {
+      if (typeof spawnLightningBolt === 'function') {
+        spawnLightningBolt(from, to, 0x99e0ff, 0.22, 3, 2.5, true);
+        spawnLightningBolt(from, to, 0xddf4ff, 0.12, 1, 1.2, true);
+      }
+      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(player.position, 10, 1.0, 260, 0x99e0ff, 0xffffff);
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(from, 0x99e0ff, 3.0, 800, 0.18);
+      if (typeof playSpatialSound === 'function') {
+        playSpatialSound('stun', this.position.clone(), { refDistance: 500, maxDistance: 4000, rolloffFactor: 0.9 });
+      }
+    } catch (_) {}
+    try { playerTakeDamage(MONSTER_ZAP_DMG, this); } catch (_) {}
+  }
+}
+
+function _initMonsters() {
+  game.monsters = [];
+  const faces = [
+    new THREE.Vector3( 1, 0, 0), new THREE.Vector3(-1, 0, 0),
+    new THREE.Vector3( 0, 1, 0), new THREE.Vector3( 0,-1, 0),
+    new THREE.Vector3( 0, 0, 1), new THREE.Vector3( 0, 0,-1),
+  ];
+  for (let i = 0; i < MONSTER_DEFS.length; i++) {
+    game.monsters.push(new OutskirtsMonster(MONSTER_DEFS[i], faces[i % faces.length]));
+  }
+  _loadNextMonsterModel();
+}
+
+// The GLBs are 20-45 MB each ; load strictly one at a time with a breather
+// between parses so six big main-thread GLTF parses don't stack into one
+// long hitch at match start.
+function _loadNextMonsterModel() {
+  if (!game.monsters || _monsterLoadIdx >= game.monsters.length) return;
+  const m = game.monsters[_monsterLoadIdx++];
+  let loader = null;
+  try { loader = new THREE.GLTFLoader(); } catch (e) {
+    console.warn('[monsters] GLTFLoader unavailable:', e);
+    return;
+  }
+  loader.load(
+    MONSTER_BASE_URL + m.def.key + '.glb',
+    gltf => {
+      try { m.attachModel(gltf.scene); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
+      setTimeout(_loadNextMonsterModel, 1200);
+    },
+    undefined,
+    err => {
+      console.warn('[monsters] load failed:', m.def.key, err && err.message);
+      setTimeout(_loadNextMonsterModel, 400);
+    }
+  );
+}
+
+// Procedural guts. Gib geometry is generated fresh per gib: an icosahedron
+// with every vertex displaced by a position-hashed factor (duplicated
+// verts displace identically, so faces stay sealed) ; reads as torn meat
+// chunks, no two alike. Rides the existing 'rockChunk' effect physics
+// (vel + tumble + fade + _ownsGeo disposal).
+function _makeGutGeometry(seed) {
+  const geo = new THREE.IcosahedronGeometry(1, 1);
+  const posAttr = geo.getAttribute('position');
+  for (let i = 0; i < posAttr.count; i++) {
+    const x = posAttr.getX(i), y = posAttr.getY(i), z = posAttr.getZ(i);
+    const h = Math.sin(x * 12.9898 + y * 78.233 + z * 37.719 + seed) * 43758.5453;
+    const f = 0.55 + (h - Math.floor(h)) * 0.85;   // 0.55 .. 1.4
+    posAttr.setXYZ(i, x * f, y * f * (0.8 + 0.4 * Math.abs(Math.sin(seed + x))), z * f);
+  }
+  posAttr.needsUpdate = true;
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function spawnMonsterGuts(pos, size, def) {
+  if (typeof game === 'undefined' || !game || !game.effects || typeof scene === 'undefined') return;
+  // The bang: explosion core + light + shake + spatial audio.
+  try { spawnExplosion(pos, 45); } catch (_) {}
+  // Gib chunks: 10-14 unique torn-flesh meshes tumbling outward.
+  const N = 10 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < N; i++) {
+    const geo = _makeGutGeometry(Math.random() * 1000);
+    const col = new THREE.Color(def.gut1).lerp(new THREE.Color(def.gut2), Math.random());
+    // Wet-flesh value variation: some chunks darker (organ meat), a few
+    // brighter (fresh tears).
+    col.multiplyScalar(0.7 + Math.random() * 0.55);
+    const mat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 1.0 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(
+      pos.x + (Math.random() - 0.5) * size * 0.3,
+      pos.y + (Math.random() - 0.5) * size * 0.3,
+      pos.z + (Math.random() - 0.5) * size * 0.3
+    );
+    const chunkScale = size * (0.05 + Math.random() * 0.11);
+    mesh.scale.setScalar(chunkScale);
+    mesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+    mesh.renderOrder = 1;
+    mesh.frustumCulled = true;
+    scene.add(mesh);
+    const speed = 120 + Math.random() * 260;
+    const dir = new THREE.Vector3(
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2,
+      (Math.random() - 0.5) * 2
+    ).normalize();
+    game.effects.push({
+      mesh: mesh,
+      age: 0,
+      lifetime: 2.2 + Math.random() * 1.8,
+      type: 'rockChunk',                 // reuse chunk physics: vel + tumble + fade
+      vel: dir.multiplyScalar(speed),
+      rotVel: new THREE.Vector3(
+        (Math.random() - 0.5) * 8,
+        (Math.random() - 0.5) * 8,
+        (Math.random() - 0.5) * 8
+      ),
+      _initScale: chunkScale,
+      _ownsGeo: true,
+    });
+  }
+  // Blood mist particles.
+  if (game.particles) {
+    for (let i = 0; i < 26; i++) {
+      game.particles.push({
+        position: {
+          x: pos.x + (Math.random() - 0.5) * size * 0.4,
+          y: pos.y + (Math.random() - 0.5) * size * 0.4,
+          z: pos.z + (Math.random() - 0.5) * size * 0.4,
+        },
+        velocity: _pVel(
+          (Math.random() - 0.5) * size * 2.0,
+          (Math.random() - 0.5) * size * 2.0,
+          (Math.random() - 0.5) * size * 2.0
+        ),
+        life: 0.8 + Math.random() * 0.9, maxLife: 1.7,
+        color: (Math.random() < 0.7) ? def.gut1 : 0x99182a,
+        size: 8 + Math.random() * 9,
+      });
+    }
+  }
+  // Ichor spray + lingering blood haze (tinted pooled cloud ; the pool
+  // release path restores the preset tint afterward).
+  try {
+    if (typeof v8SpawnSparks === 'function') v8SpawnSparks(pos, 28, 1.6, size * 2.6, def.gut2, 0xff6677);
+    if (typeof spawnFXBurst === 'function') {
+      const puff = spawnFXBurst('cloud', pos, size * 1.5, 2.0, { startScale: 0.3, endScale: 1.2 });
+      if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) {
+        puff.material.uniforms.uBaseColor.value.setHex(0x6a0f1a);
+      }
+    }
+  } catch (_) {}
+}
+
+function updateMonsters(dt) {
+  // Skip entirely on Potato quality: six 20-45 MB GLBs are exactly the
+  // load that preset exists to avoid.
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (!game || (game.state !== 'playing' && game.state !== 'warmup' && game.state !== 'roundEnd')) return;
+  if (!_monstersInit) {
+    _monstersInit = true;
+    try { _initMonsters(); } catch (e) { console.warn('[monsters] init failed:', e); }
+    return;
+  }
+  if (!game.monsters) return;
+  // Map switch: the carve geometry changed, so re-anchor every monster's
+  // home patch to the new level's shell (and walk them over to it).
+  const _arenaNow = _monsterArenaInfo();
+  if (updateMonsters._homeKey !== _arenaNow.key) {
+    updateMonsters._homeKey = _arenaNow.key;
+    for (const m of game.monsters) {
+      if (!m.alive) continue;
+      m._rehome();
+      m._wanderTimer = 0;
+    }
+  }
+  for (let i = 0; i < game.monsters.length; i++) {
+    const m = game.monsters[i];
+    if (m.alive) m.update(dt);
+  }
 }
 
 function updateDynamicObjects(dt) {
@@ -30030,6 +30560,22 @@ function fireHitscan(origin, dir, w) {
       bestObstDist = proj;
     }
   }
+  // Outskirts monsters compete in the same obstacle slot (identical
+  // takeDamage(dmg) -> dealt contract), so every hitscan weapon can
+  // hurt them with no further changes downstream.
+  if (game.monsters) {
+    for (const mon of game.monsters) {
+      if (!mon.alive || !mon.mesh) continue;
+      const toMon = new THREE.Vector3().subVectors(mon.position, origin);
+      const proj = toMon.dot(aimDir);
+      if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+      const closest = origin.clone().add(aimDir.clone().multiplyScalar(proj));
+      if (closest.distanceTo(mon.position) < mon.collisionRadius && proj < bestObstDist) {
+        bestObstacle = mon;
+        bestObstDist = proj;
+      }
+    }
+  }
 
   // PUNCTURE Sodium Railgun pierces : damage every ship along the
   // line, not just the closest. The beam still stops at obstacles / level
@@ -30325,6 +30871,20 @@ function fireSpread(origin, dir, w) {
       if (closest.distanceTo(obj.position) < (obj.collisionRadius || 60) && proj < bestObstDist) {
         bestObst = obj;
         bestObstDist = proj;
+      }
+    }
+    // Outskirts monsters: same obstacle slot, so pellets chew them too.
+    if (game.monsters) {
+      for (const mon of game.monsters) {
+        if (!mon.alive || !mon.mesh) continue;
+        const toMon = new THREE.Vector3().subVectors(mon.position, origin);
+        const proj = toMon.dot(spreadDir);
+        if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+        const closest = origin.clone().add(spreadDir.clone().multiplyScalar(proj));
+        if (closest.distanceTo(mon.position) < mon.collisionRadius && proj < bestObstDist) {
+          bestObst = mon;
+          bestObstDist = proj;
+        }
       }
     }
 
@@ -32768,6 +33328,29 @@ function updateAbilities(dt) {
               if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_hitPt, 5);
               spawnDynamicLight(_hitPt, 0xeebbff, 3.0, 500, 0.20);
             }
+          }
+        }
+      }
+      // Outskirts monsters: the Mega Laser carves them like the rocks
+      // above (continuous 2500 dmg/sec, FX throttled per-monster).
+      if (game.monsters) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.mesh) continue;
+          const _mDx = mon.position.x - player.position.x;
+          const _mDy = mon.position.y - player.position.y;
+          const _mDz = mon.position.z - player.position.z;
+          const _mProj = _mDx * forward.x + _mDy * forward.y + _mDz * forward.z;
+          if (_mProj <= 0 || _mProj > range) continue;
+          const _mCx = player.position.x + forward.x * _mProj;
+          const _mCy = player.position.y + forward.y * _mProj;
+          const _mCz = player.position.z + forward.z * _mProj;
+          const _mdx = _mCx - mon.position.x;
+          const _mdy = _mCy - mon.position.y;
+          const _mdz = _mCz - mon.position.z;
+          const _mR = mon.collisionRadius;
+          if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz < _mR * _mR) {
+            const _mDealt = mon.takeDamage(2500 * dt, 'player', _abTmpA.set(_mCx, _mCy, _mCz));
+            if (_mDealt > 0) player.damageDealt += _mDealt;
           }
         }
       }
@@ -46542,6 +47125,7 @@ function gameLoop(timestamp) {
   }
 
   updateDynamicObjects(dt);
+  updateMonsters(dt);
   updateOrganics(dt);
 
   updateParticles(dt);
