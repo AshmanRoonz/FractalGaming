@@ -8993,6 +8993,14 @@ function _releaseFXBurstMaterial(mat) {
 }
 
 function spawnFXBurst(presetName, pos, radius, life, opts) {
+  // Pure-visual bursts: skip entirely beyond 8k units ; at that range a
+  // burst is a couple of pixels but still pays full shader + draw cost.
+  if (typeof camera !== 'undefined' && camera && camera.position && pos &&
+      pos.x != null && (typeof pos.distanceToSquared === 'function'
+        ? pos.distanceToSquared(camera.position)
+        : ((pos.x - camera.position.x) ** 2 + (pos.y - camera.position.y) ** 2 + (pos.z - camera.position.z) ** 2)) > 8000 * 8000) {
+    return null;
+  }
   // All LayeredFX bursts skipped (fireball, cloud, gas, shock,
   // engine_disc, engine_plume, etc.). Many callers test for spawnFXBurst's
   // presence ; returning null keeps that branch consistent.
@@ -10972,8 +10980,17 @@ try {
 } catch (_) {}
 
 (function () {
-  let _stored = 'high';
-  try { _stored = localStorage.getItem('lss_quality') || 'high'; } catch (_) {}
+  // Mobile-aware default: phones/tablets (coarse pointer + touch) start
+  // on LOW instead of HIGH the first time they run. A quality the user
+  // explicitly picked in Settings is always respected.
+  const _isMobileGPU = (navigator.maxTouchPoints > 0) &&
+    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  let _stored = null;
+  try { _stored = localStorage.getItem('lss_quality'); } catch (_) {}
+  if (!_stored) {
+    _stored = _isMobileGPU ? 'low' : 'high';
+    try { localStorage.setItem('lss_quality', _stored); } catch (_) {}
+  }
   if (_stored === 'potato') {
     _stored = 'low';
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
@@ -10981,6 +10998,10 @@ try {
   let _dprCap;
   if (_stored === 'ultra') {
     _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
+  } else if (_isMobileGPU) {
+    // DPR-3 phones at cap 2 still pushed ~2x the fragments they can
+    // afford through bloom ; 1.5 is visually fine at phone sizes.
+    _dprCap = Math.min(window.devicePixelRatio, 1.5);
   } else {
     _dprCap = Math.min(window.devicePixelRatio, 2);
   }
@@ -20601,7 +20622,13 @@ function spawnExplosion(pos, size) {
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
   if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
   const _explOverBudget = (++spawnExplosion._count) > 4;
-  if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget) {
+  // Distance gate: the always-on bot war detonates ordnance all over the
+  // map ; a full volumetric explosion chain 6.5k+ units away reads the
+  // same as the cheap pooled sphere but costs ~20x. Audio + shake live in
+  // the cheap path too, so far booms still sound right.
+  const _explFar = (typeof camera !== 'undefined' && camera && camera.position)
+    ? pos.distanceToSquared(camera.position) > 6500 * 6500 : false;
+  if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget || _explFar) {
     // Spatial audio kept ; cheap relative to the visual chain we just skipped.
     if (typeof playSpatialSound === 'function') {
       const _far = Math.max(300, size * 18);
