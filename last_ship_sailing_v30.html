@@ -37576,13 +37576,15 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 //   dash() / activateCore() called directly.
 // Console API: window.LSS_TOUCH  (enable/disable, lookScale, gyro signs).
 (function () {
-  const _touchCapable = (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
+  const _touchForced = /[?&]touch=1/.test(location.search); // desktop testing hook
+  const _touchCapable = _touchForced || (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
   if (!_touchCapable) return; // desktop: never build the overlay
 
   let _enabled;
   try {
     const saved = localStorage.getItem('lss_touch_enabled');
-    _enabled = (saved != null) ? (saved === '1')
+    _enabled = _touchForced ? true
+      : (saved != null) ? (saved === '1')
       : (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   } catch (_) { _enabled = true; }
 
@@ -37611,6 +37613,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#tc-core { left: 50%; bottom: 2vmin; transform: translateX(-50%); width: 22vmin; height: 7vmin; border-radius: 1.2vmin; }',
     '.tc-chip { width: 8vmin; height: 8vmin; border-radius: 50%; font-size: 3vmin; }',
     '.tc-top { width: 7vmin; height: 7vmin; border-radius: 1.2vmin; font-size: 3vmin; }',
+    // Invisible capture zones (genre standard: stick responds to the whole
+    // bottom-left region, aim to the whole right half). Styled controls are
+    // appended after these, so they paint and hit-test above them.
+    // (#touch-controls prefix: must out-rank the "#touch-controls .tc"
+    // base rule, or the zones render their tint/border.)
+    '#touch-controls #tc-move-zone { left: 0; bottom: 0; width: 42%; height: 60%; background: none; border: none; }',
+    '#touch-controls #tc-look-zone { left: 50%; top: 12%; right: 0; bottom: 0; background: none; border: none; }',
   ].join('\n');
 
   function _el(id, cls, label, style) {
@@ -37641,17 +37650,23 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     moveEl.appendChild(knobEl);
     const lookEl = _el('tc-look', '', 'look');
 
-    // Left edge: ADS (Lt) + Q (Lb). Right edge: FIRE (Rt) + E (Rb).
-    const ltEl = _el('tc-lt', 'tc-rect', 'ads',  { left: '1vmin', top: '22%' });
-    const lbEl = _el('tc-lb', 'tc-rect', 'Q',    { left: '1vmin', top: '46%' });
-    const rtEl = _el('tc-rt', 'tc-rect', 'fire', { right: '1vmin', top: '5%' });
-    const rbEl = _el('tc-rb', 'tc-rect', 'E',    { right: '1vmin', top: '29%' });
+    // Edge buttons, gamepad-named per the mockup: Lt = left trigger (ADS
+    // zoom), Lb = left button (ability0 / Q), Rt = right trigger (fire),
+    // Rb = right button (ability1 / E).
+    const ltEl = _el('tc-lt', 'tc-rect', 'Lt', { left: '1vmin', top: '22%' });
+    const lbEl = _el('tc-lb', 'tc-rect', 'Lb', { left: '1vmin', top: '46%' });
+    const rtEl = _el('tc-rt', 'tc-rect', 'Rt', { right: '1vmin', top: '5%' });
+    const rbEl = _el('tc-rb', 'tc-rect', 'Rb', { right: '1vmin', top: '29%' });
 
-    // Ability diamonds by the right gun (positions from the mockup).
-    const qdEl = _el('tc-qd', 'tc-diamond', 'Q', { left: '74%', top: '76%' });
-    const edEl = _el('tc-ed', 'tc-diamond', 'E', { left: '85%', top: '64%' });
-    const rdEl = _el('tc-rd', 'tc-diamond', 'R', { left: '92%', top: '71%' });
-    const fdEl = _el('tc-fd', 'tc-diamond', 'F', { left: '70%', top: '88%' });
+    // Ability diamonds = keyboard mappings (Q/E/F abilities, R reload).
+    // Anchored in vmin relative to the look circle (30vmin at right 2.5 /
+    // bottom 3, so its top edge sits at bottom 33vmin) so they clear it on
+    // every aspect ratio ; the old %-based spots drifted onto the circle
+    // on wide phones.
+    const qdEl = _el('tc-qd', 'tc-diamond', 'Q', { right: '26vmin', bottom: '34.5vmin' });
+    const edEl = _el('tc-ed', 'tc-diamond', 'E', { right: '15vmin', bottom: '41.5vmin' });
+    const rdEl = _el('tc-rd', 'tc-diamond', 'R', { right: '4.5vmin', bottom: '37.5vmin' });
+    const fdEl = _el('tc-fd', 'tc-diamond', 'F', { right: '34.5vmin', bottom: '9vmin' });
 
     const coreEl = _el('tc-core', '', 'core');
 
@@ -37663,7 +37678,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     gyroEl = _el('tc-gyro', 'tc-top', 'G', { right: '16vmin', top: '1.5vmin', opacity: 0.8 });
     const setEl = _el('tc-set', 'tc-top', '⚙', { right: '7.5vmin', top: '1.5vmin', opacity: 0.8 });
 
-    const els = [moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, gyroEl, setEl];
+    // Invisible capture zones first (controls paint + hit-test above
+    // them). The styled move/look circles become purely visual anchors.
+    const moveZone = _el('tc-move-zone', '', '');
+    const lookZone = _el('tc-look-zone', '', '');
+    moveEl.style.pointerEvents = 'none';
+    lookEl.style.pointerEvents = 'none';
+    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, gyroEl, setEl];
     for (const e of els) root.appendChild(e);
     document.body.appendChild(root);
 
@@ -37700,20 +37721,27 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     _hold(setEl, () => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, null);
     _hold(gyroEl, _gyroToggle, null);
 
-    // ---- move stick: raw normalized offset ; over-travel = dash ----
+    // ---- move stick: floating origin, raw offset ; over-travel = dash ----
+    // Floating origin (CoD/PUBG-style): the stick centers itself under the
+    // thumb wherever it lands in the bottom-left zone, so an off-center
+    // grab never registers as instant phantom movement. The styled circle
+    // follows the thumb and snaps back home on release.
     let _movePid = null, _moveCx = 0, _moveCy = 0, _moveR = 1, _dashArmed = true;
-    moveEl.addEventListener('pointerdown', ev => {
+    moveZone.addEventListener('pointerdown', ev => {
       ev.preventDefault(); ev.stopPropagation();
-      try { moveEl.setPointerCapture(ev.pointerId); } catch (_) {}
+      try { moveZone.setPointerCapture(ev.pointerId); } catch (_) {}
       _movePid = ev.pointerId;
       const r = moveEl.getBoundingClientRect();
-      _moveCx = r.left + r.width / 2;
-      _moveCy = r.top + r.height / 2;
       _moveR = r.width / 2;
+      _moveCx = ev.clientX;
+      _moveCy = ev.clientY;
+      const rr = root.getBoundingClientRect();
+      moveEl.style.left = (_moveCx - rr.left - _moveR) + 'px';
+      moveEl.style.bottom = (rr.bottom - _moveCy - _moveR) + 'px';
       _dashArmed = true;
       _moveTo(ev.clientX, ev.clientY);
     });
-    moveEl.addEventListener('pointermove', ev => {
+    moveZone.addEventListener('pointermove', ev => {
       if (ev.pointerId !== _movePid) return;
       ev.preventDefault();
       _moveTo(ev.clientX, ev.clientY);
@@ -37737,20 +37765,23 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       input.touchMoveX = 0; input.touchMoveY = 0;
       _dashArmed = true;
       knobEl.style.transform = '';
+      moveEl.style.left = ''; moveEl.style.bottom = ''; // snap back home
     };
-    moveEl.addEventListener('pointerup', _moveEnd);
-    moveEl.addEventListener('pointercancel', _moveEnd);
+    moveZone.addEventListener('pointerup', _moveEnd);
+    moveZone.addEventListener('pointercancel', _moveEnd);
 
-    // ---- look pad: raw 1:1 px deltas into the mouse-look accumulators ----
+    // ---- look: swipe anywhere on the right half (genre standard), raw
+    // 1:1 px deltas into the mouse-look accumulators. The styled look
+    // circle lights up while aiming but is purely visual.
     let _lookPid = null, _lookLx = 0, _lookLy = 0;
-    lookEl.addEventListener('pointerdown', ev => {
+    lookZone.addEventListener('pointerdown', ev => {
       ev.preventDefault(); ev.stopPropagation();
-      try { lookEl.setPointerCapture(ev.pointerId); } catch (_) {}
+      try { lookZone.setPointerCapture(ev.pointerId); } catch (_) {}
       _lookPid = ev.pointerId;
       _lookLx = ev.clientX; _lookLy = ev.clientY;
       lookEl.classList.add('tc-pressed');
     });
-    lookEl.addEventListener('pointermove', ev => {
+    lookZone.addEventListener('pointermove', ev => {
       if (ev.pointerId !== _lookPid) return;
       ev.preventDefault();
       input.mouseDX += (ev.clientX - _lookLx) * input.touchLookScale;
@@ -37762,8 +37793,8 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       _lookPid = null;
       lookEl.classList.remove('tc-pressed');
     };
-    lookEl.addEventListener('pointerup', _lookEnd);
-    lookEl.addEventListener('pointercancel', _lookEnd);
+    lookZone.addEventListener('pointerup', _lookEnd);
+    lookZone.addEventListener('pointercancel', _lookEnd);
 
     // Stop browser pan/zoom gestures on the 3D canvas itself.
     try { if (renderer && renderer.domElement) renderer.domElement.style.touchAction = 'none'; } catch (_) {}
