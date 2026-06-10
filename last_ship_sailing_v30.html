@@ -37588,11 +37588,27 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       : (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   } catch (_) { _enabled = true; }
 
+  // Real touch hardware gets the page-scroll lockdown immediately (lobby
+  // included) ; the ?touch=1 desktop testing path skips it so desktop
+  // scrolling keeps working.
+  if ((navigator.maxTouchPoints > 0) || ('ontouchstart' in window)) {
+    try { document.documentElement.classList.add('lss-touch'); } catch (_) {}
+  }
+
   // Gyro sign multipliers ; flip via LSS_TOUCH.gyroSigns if a device
   // reports rotation axes mirrored (varies with OS/orientation quirks).
   const _gyroSign = { yaw: 1, pitch: 1 };
 
   const CSS = [
+    // Mobile page lockdown: even with overflow:hidden, iOS Safari and some
+    // Android browsers let the document rubber-band / drift once a real
+    // viewport meta is active (this is what made the ship-select panel
+    // slide slowly downward on phones). position:fixed on html/body kills
+    // document scrolling entirely ; inner panels with their own overflow
+    // (ship list, settings) still scroll fine. Applied only on touch
+    // devices via the lss-touch class set below.
+    'html.lss-touch, html.lss-touch body { position: fixed; inset: 0; width: 100%; height: 100%;',
+    '  overflow: hidden; overscroll-behavior: none; }',
     '#touch-controls { position: fixed; inset: 0; z-index: 11; pointer-events: none; display: none;',
     '  font-family: "Rajdhani", sans-serif; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }',
     '#touch-controls .tc { position: absolute; pointer-events: auto; touch-action: none;',
@@ -37750,10 +37766,14 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       const dx = (x - _moveCx) / _moveR;
       const dy = (y - _moveCy) / _moveR;
       const len = Math.sqrt(dx * dx + dy * dy);
-      // Over-travel dash: shove the stick well past the rim. Re-arms when
-      // the thumb comes back inside, so holding it out doesn't chain dashes.
-      if (len > 1.3 && _dashArmed) { _dashArmed = false; try { dash(); } catch (_) {} }
-      else if (len < 0.95) _dashArmed = true;
+      // Over-travel dash: shove the stick past the rim. Re-arms when the
+      // thumb comes back inside, so holding it out doesn't chain dashes.
+      // Threshold 1.15 (was 1.3): on phones the OS can steal the gesture
+      // (edge-swipe back, overscroll) partway through a long drag, so the
+      // trigger needs to land early ; 15% past the rim is still a clearly
+      // deliberate shove.
+      if (len > 1.15 && _dashArmed) { _dashArmed = false; try { dash(); } catch (_) {} }
+      else if (len < 0.85) _dashArmed = true;
       const cl = (len > 1) ? 1 / len : 1; // clamp reported axes to the rim
       input.touchMoveX = dx * cl;
       input.touchMoveY = dy * cl;
@@ -37906,7 +37926,7 @@ function _doPostFXResize() {
     try { resizeCineFX(window.innerWidth, window.innerHeight); } catch (_) {}
   } catch (_) {}
 }
-window.addEventListener('resize', () => {
+function _applyViewportSize() {
   // (Ported from v8) When an XR session is active, the headset compositor
   // owns the canvas size and per-eye projection; mutating either mid-session
   // causes flicker and stereo aspect mismatch. Bail.
@@ -37921,7 +37941,35 @@ window.addEventListener('resize', () => {
   // into one allocation at the final size.
   if (_rtResizeTimer) clearTimeout(_rtResizeTimer);
   _rtResizeTimer = setTimeout(_doPostFXResize, 200);
-});
+}
+window.addEventListener('resize', _applyViewportSize);
+// (touch) Phone rotation fix: mobile browsers often fire orientationchange
+// while innerWidth/Height still hold the OLD orientation's values, and
+// don't always fire a final resize once they settle ; the canvas then
+// stays stuck in portrait until the user rotates back and forth. Re-apply
+// on orientation events with delayed retries to catch the settled size,
+// and on visualViewport resize (URL-bar collapse changes the effective
+// viewport without a window resize in some browsers).
+let _vvResizeTimer = 0;
+function _viewportSettle() {
+  _applyViewportSize();
+  setTimeout(_applyViewportSize, 250);
+  setTimeout(_applyViewportSize, 700);
+}
+window.addEventListener('orientationchange', _viewportSettle);
+try {
+  if (screen.orientation && screen.orientation.addEventListener) {
+    screen.orientation.addEventListener('change', _viewportSettle);
+  }
+} catch (_) {}
+try {
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', () => {
+      if (_vvResizeTimer) clearTimeout(_vvResizeTimer);
+      _vvResizeTimer = setTimeout(_applyViewportSize, 100);
+    });
+  }
+} catch (_) {}
 
 // ---- SETTINGS PAGE ----
 
