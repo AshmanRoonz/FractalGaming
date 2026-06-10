@@ -3210,9 +3210,6 @@ const input = {
   touchMoveUp: false, touchMoveDown: false,
   touchFire: false, touchAltFire: false,
   touchLookScale: 6.0,          // look-pad px multiplier into mouseDX/DY (linear, raw)
-  touchGyroEnabled: false,
-  touchGyroScale: 1.0,          // 1.0 = view turns exactly as far as the phone does
-  touchGyroYaw: 0, touchGyroPitch: 0, // tilt deflection -1..1 (gravity vs neutral grip) ; drives turn rate
   // Button mappings (gamepad button indices): -1 = unbound
   gpBindings: {
     fire: 7,       // RT
@@ -30556,7 +30553,6 @@ function updatePlayerMovement(dt) {
     }
     if (player && player.velocity) player.velocity.set(0, 0, 0);
     input.mouseDX = 0; input.mouseDY = 0;
-    input.touchGyroYaw = 0; input.touchGyroPitch = 0;
     if (_cinematic.active) return;
   }
   // Tick down a Puncture Stasis Trap root on the local player.
@@ -30571,11 +30567,6 @@ function updatePlayerMovement(dt) {
     if ((input.locked || input.touchActive) && !game.testMode) {
       player.euler.y -= input.mouseDX * input.sensitivity;
       player.euler.x -= input.mouseDY * input.sensitivity;
-    }
-    if (input.touchGyroEnabled) {
-      // Tilt deflection (-1..1) drives turn RATE (ace_starship model).
-      player.euler.y -= input.touchGyroYaw * 1.9 * (input.touchGyroScale || 1) * dt;
-      player.euler.x -= input.touchGyroPitch * 1.5 * (input.touchGyroScale || 1) * dt;
     }
     if (input.gpConnected) {
       player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
@@ -30605,13 +30596,6 @@ function updatePlayerMovement(dt) {
   if ((input.locked || input.touchActive) && !game.testMode) {
     player.euler.y -= input.mouseDX * input.sensitivity;
     player.euler.x -= input.mouseDY * input.sensitivity;
-  }
-  // Gyro look (touch): tilt-from-neutral deflection (-1..1, set by the
-  // devicemotion handler) drives a continuous turn rate, ace_starship
-  // style. Tilt back to the neutral grip = stop turning.
-  if (input.touchGyroEnabled) {
-    player.euler.y -= input.touchGyroYaw * 1.9 * (input.touchGyroScale || 1) * dt;
-    player.euler.x -= input.touchGyroPitch * 1.5 * (input.touchGyroScale || 1) * dt;
   }
   // Gamepad look (curve already applied in pollGamepad)
   if (input.gpConnected) {
@@ -35118,7 +35102,6 @@ function updateRoundSystem(dt) {
         input.touchAltFire = false;
         input.touchMoveX = 0; input.touchMoveY = 0;
         input.touchMoveUp = false; input.touchMoveDown = false;
-        input.touchGyroYaw = 0; input.touchGyroPitch = 0;
       }
       // Reactive band: round start ; combat pattern at intensity 1.
       if (typeof musicSetPattern === 'function') {
@@ -38775,7 +38758,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 //
 // Integration points (all patched above):
 //   look   -> input.mouseDX/DY  (gate widened to input.touchActive)
-//   gyro   -> input.touchGyroYaw/Pitch (radians, applied + zeroed per frame)
 //   move   -> input.touchMoveX/Y, touchMoveUp/Down (read in updatePlayerMovement)
 //   fire   -> input.touchFire / touchAltFire (read in updateWeapon)
 //   Q/E/F  -> abilityInputPress/Release + input.keys[binding] (hold paths)
@@ -38808,9 +38790,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     if (_enabled) input.touchSuppressMouse = true;
   }
 
-  // Gyro sign multipliers ; flip via LSS_TOUCH.gyroSigns if a device
-  // reports rotation axes mirrored (varies with OS/orientation quirks).
-  const _gyroSign = { yaw: 1, pitch: 1 };
 
   const CSS = [
     // Mobile page lockdown: even with overflow:hidden, iOS Safari and some
@@ -38864,7 +38843,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     return d;
   }
 
-  let root = null, moveEl = null, knobEl = null, gyroEl = null;
+  let root = null, moveEl = null, knobEl = null;
 
   function _build() {
     if (root || !document.body) return;
@@ -38891,7 +38870,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // F, R, E, Q diamonds. Right arm (downward): Rb, then G. Settings ⚙
     // nests in the middle of the L's elbow.
     const ltEl = _el('tc-lt', 'tc-rect', 'Lt', { left: '1vmin', top: '22%' });
-    const lbEl = _el('tc-lb', 'tc-rect', 'Lb', { left: '1vmin', top: '46%' });
+    const lbEl = _el('tc-lb', 'tc-rect', 'Lb', { right: '1vmin', top: '38.5vmin' });
     const rtEl = _el('tc-rt', 'tc-rect', 'Rt', { right: '1vmin', top: '1.5vmin' });
     const rbEl = _el('tc-rb', 'tc-rect', 'Rb', { right: '1vmin', top: '20vmin' });
 
@@ -38906,8 +38885,8 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const upEl = _el('tc-up', 'tc-chip', '▲', { left: '34vmin', bottom: '14vmin' });
     const dnEl = _el('tc-dn', 'tc-chip', '▼', { left: '34vmin', bottom: '4vmin' });
 
-    // Gyro = bottom of the L's right arm ; settings ⚙ sits top-middle.
-    gyroEl = _el('tc-gyro', 'tc-rect', 'G', { right: '1vmin', top: '38.5vmin', opacity: 0.85 });
+    // Settings ⚙ sits top-middle. (Gyro removed ; Lb now fills the
+    // bottom slot of the L's right arm.)
     const setEl = _el('tc-set', 'tc-top', '⚙', { left: '50%', top: '1.5vmin', transform: 'translateX(-50%)', opacity: 0.8 });
 
     // Invisible capture zones first (controls paint + hit-test above
@@ -38916,7 +38895,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const lookZone = _el('tc-look-zone', '', '');
     moveEl.style.pointerEvents = 'none';
     lookEl.style.pointerEvents = 'none';
-    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, gyroEl, setEl];
+    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl];
     for (const e of els) root.appendChild(e);
     document.body.appendChild(root);
 
@@ -38951,7 +38930,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     _hold(upEl, () => { input.touchMoveUp = true; },   () => { input.touchMoveUp = false; });
     _hold(dnEl, () => { input.touchMoveDown = true; }, () => { input.touchMoveDown = false; });
     _hold(setEl, () => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, null);
-    _hold(gyroEl, _gyroToggle, null);
 
     // ---- move stick: floating origin, raw offset ; over-travel = dash ----
     // Floating origin (CoD/PUBG-style): the stick centers itself under the
@@ -39036,87 +39014,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     try { if (renderer && renderer.domElement) renderer.domElement.style.touchAction = 'none'; } catch (_) {}
   }
 
-  // ---- gyro steering: gravity-vector TILT, ported from Ace_Starship ----
-  // The old rotation-rate integration drifted and fought the orientation
-  // mapping. The working ace_starship model instead reads the
-  // accelerometer's GRAVITY vector: capture a reference ("neutral grip")
-  // when gyro turns on, then treat tilt-from-neutral as a virtual stick
-  // deflection that drives a TURN RATE. One tilt axis = one steer axis,
-  // no gimbal mixing, no drift ; toggling gyro off/on recalibrates to
-  // however you're holding the phone right then.
-  const _GYRO_TILT_DEAD = 0.06;  // rad (~3 deg): ignore hand jitter
-  const _GYRO_TILT_FULL = 0.50;  // rad (~29 deg): tilt for full-rate steer
-  let _gyroBound = false;
-  let _gyroSwap = false;         // swap which tilt axis is turn vs pitch
-  let _gravX = 0, _gravY = 0, _gravZ = -9.8, _gravRef = null, _gravSeeded = false;
-  function _gyroAxis(t) {
-    const s = (t >= 0) ? 1 : -1;
-    const m = Math.max(0, Math.abs(t) - _GYRO_TILT_DEAD);
-    return s * Math.min(1, m / (_GYRO_TILT_FULL - _GYRO_TILT_DEAD));
-  }
-  function _onMotion(e) {
-    if (!input.touchGyroEnabled) return;
-    const g = e.accelerationIncludingGravity;
-    if (!g || g.x == null) return;
-    // Rotate device-frame gravity into the current screen orientation so
-    // landscape-left and landscape-right behave identically.
-    const ang = (screen.orientation && typeof screen.orientation.angle === 'number')
-      ? screen.orientation.angle : (window.orientation || 0);
-    let gx = g.x, gy = g.y;
-    if (ang === 90)       { const t = gx; gx = gy;  gy = -t; }
-    else if (ang === 270) { const t = gx; gx = -gy; gy = t;  }
-    else if (ang === 180) { gx = -gx; gy = -gy; }
-    // Low-pass: gravity reads noisy under thrust rumble / hand shake.
-    if (!_gravSeeded) { _gravSeeded = true; _gravX = gx; _gravY = gy; _gravZ = g.z; }
-    const k = 0.25;
-    _gravX += (gx - _gravX) * k;
-    _gravY += (gy - _gravY) * k;
-    _gravZ += (g.z - _gravZ) * k;
-    if (!_gravRef) _gravRef = { x: _gravX, y: _gravY, z: _gravZ };
-    // Tilt angles about the screen axes (ace_starship's atan2-of-gravity
-    // trick), measured relative to the captured neutral grip.
-    const aboutX = Math.atan2(_gravY, -_gravZ) - Math.atan2(_gravRef.y, -_gravRef.z);
-    const aboutY = Math.atan2(-_gravX, Math.hypot(_gravY, _gravZ))
-                 - Math.atan2(-_gravRef.x, Math.hypot(_gravRef.y, _gravRef.z));
-    const turnRaw  = _gyroSwap ? aboutX : aboutY;
-    const pitchRaw = _gyroSwap ? aboutY : aboutX;
-    // These are STICK DEFLECTIONS (-1..1), not deltas ; updatePlayerMovement
-    // applies them as turn rates each frame.
-    input.touchGyroYaw   = _gyroAxis(turnRaw)  * _gyroSign.yaw;
-    input.touchGyroPitch = _gyroAxis(pitchRaw) * _gyroSign.pitch;
-  }
-  function _setGyroLabel() {
-    if (gyroEl) {
-      gyroEl.style.background = input.touchGyroEnabled ? 'rgba(120,255,170,0.25)' : '';
-      gyroEl.style.borderColor = input.touchGyroEnabled ? 'rgba(140,255,190,0.8)' : '';
-    }
-  }
-  function _gyroToggle() {
-    if (input.touchGyroEnabled) {
-      input.touchGyroEnabled = false;
-      input.touchGyroYaw = 0; input.touchGyroPitch = 0;
-      _setGyroLabel();
-      return;
-    }
-    const start = () => {
-      if (!_gyroBound) { window.addEventListener('devicemotion', _onMotion); _gyroBound = true; }
-      // Recalibrate: whatever grip the phone is in right now becomes
-      // neutral. Toggling gyro off/on is the "re-center" gesture.
-      _gravRef = null;
-      _gravSeeded = false;
-      input.touchGyroYaw = 0; input.touchGyroPitch = 0;
-      input.touchGyroEnabled = true;
-      _setGyroLabel();
-    };
-    try {
-      // iOS 13+: motion sensors need an explicit permission grant, and the
-      // request must come from a user gesture (this tap qualifies).
-      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-        DeviceMotionEvent.requestPermission().then(r => { if (r === 'granted') start(); }).catch(() => {});
-      } else start();
-    } catch (_) { start(); }
-  }
-
   function _zeroTouchInputs() {
     input.touchMoveX = 0; input.touchMoveY = 0;
     input.touchMoveUp = false; input.touchMoveDown = false;
@@ -39159,11 +39056,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     get enabled() { return _enabled; },
     set lookScale(v) { if (v > 0) input.touchLookScale = v; },
     get lookScale() { return input.touchLookScale; },
-    set gyroScale(v) { if (v > 0) input.touchGyroScale = v; },
-    get gyroScale() { return input.touchGyroScale; },
-    gyroSigns(yaw, pitch) { if (yaw) _gyroSign.yaw = yaw; if (pitch) _gyroSign.pitch = pitch; },
-    gyroSwap(v) { _gyroSwap = !!v; },
-    gyroCalibrate() { _gravRef = null; _gravSeeded = false; },
   };
 })();
 // ===================== END TOUCH CONTROLS =====================
