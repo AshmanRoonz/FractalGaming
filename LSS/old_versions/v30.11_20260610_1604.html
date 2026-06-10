@@ -2813,7 +2813,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.12';
+const LSS_BUILD = '30.11';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -39251,22 +39251,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   function _kickStuckViewport() {
     try {
       const so = screen.orientation;
-      const screenLandscape = (so && typeof so.type === 'string') ? so.type.indexOf('landscape') === 0 : null;
+      if (!so || typeof so.type !== 'string') return;
+      const screenLandscape = so.type.indexOf('landscape') === 0;
       const viewportLandscape = window.innerWidth > window.innerHeight;
-      const orientMismatch = (screenLandscape != null) && (screenLandscape !== viewportLandscape);
-      // Layout-vs-visual size desync (system-bar hide mid-match): the
-      // stuck layout viewport keeps stale dims while visualViewport
-      // tracks the glass. Needs two consecutive ticks so transient
-      // animation frames don't trigger kicks.
-      let sizeMismatch = false;
-      const vv = window.visualViewport;
-      if (vv && (Math.abs(vv.width - window.innerWidth) > 40 || Math.abs(vv.height - window.innerHeight) > 40)) {
-        sizeMismatch = (_kickStuckViewport._pending === true);
-        _kickStuckViewport._pending = true;
-      } else {
-        _kickStuckViewport._pending = false;
-      }
-      if (!orientMismatch && !sizeMismatch) return;   // in agreement
+      if (screenLandscape === viewportLandscape) return;   // in agreement
       const now = performance.now();
       if (now - _vpKickAt < 2000) return;
       _vpKickAt = now;
@@ -39279,31 +39267,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
         try { if (typeof _applyViewportSize === 'function') _applyViewportSize(); } catch (_) {}
         _syncTouchViewport();
       }, 80);
-    } catch (_) {}
-  }
-
-  // ?vpdebug=1 : tiny live readout of every viewport-truth source, so a
-  // single phone screenshot identifies which number is lying when the
-  // layout breaks.
-  const _vpDebug = /[?&]vpdebug=1/.test(location.search);
-  let _vpDebugEl = null;
-  function _vpDebugTick() {
-    if (!_vpDebug) return;
-    try {
-      if (!_vpDebugEl) {
-        _vpDebugEl = document.createElement('div');
-        _vpDebugEl.style.cssText = 'position:fixed;left:4px;top:34%;z-index:400;font:10px monospace;' +
-          'color:#0f0;background:rgba(0,0,0,0.72);padding:4px 6px;pointer-events:none;white-space:pre;';
-        document.body.appendChild(_vpDebugEl);
-      }
-      const vv = window.visualViewport;
-      const r = (typeof renderer !== 'undefined' && renderer) ? renderer : window.renderer;
-      _vpDebugEl.textContent =
-        'inner  ' + window.innerWidth + 'x' + window.innerHeight + '\n' +
-        'visual ' + (vv ? Math.round(vv.width) + 'x' + Math.round(vv.height) + ' @' + Math.round(vv.offsetLeft) + ',' + Math.round(vv.offsetTop) : 'n/a') + '\n' +
-        'orient ' + ((screen.orientation && screen.orientation.type) || window.orientation || '?') + '\n' +
-        'canvas ' + (r && r.domElement ? r.domElement.width + 'x' + r.domElement.height : '?') + '\n' +
-        'fullscreen ' + !!document.fullscreenElement;
     } catch (_) {}
   }
 
@@ -39538,7 +39501,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       _syncTouchViewport();
       _kickStuckViewport();
     }
-    _vpDebugTick();
     const cur = root.style.display === 'block';
     if (show !== cur) {
       root.style.display = show ? 'block' : 'none';
@@ -39582,20 +39544,9 @@ function _applyViewportSize() {
   if (renderer.xr && renderer.xr.isPresenting) return;
   // Camera + canvas update is cheap ; do it every event so the scene
   // continues to render at the right aspect during the transition.
-  // Trust the VISUAL viewport over the layout viewport when they
-  // disagree by more than ~40px: Chrome on Android can leave
-  // innerWidth/innerHeight stale after fullscreen / system-bar
-  // transitions while visualViewport keeps reporting the truth.
-  let _w = window.innerWidth, _h = window.innerHeight;
-  try {
-    const vv = window.visualViewport;
-    if (vv && (Math.abs(vv.width - _w) > 40 || Math.abs(vv.height - _h) > 40)) {
-      _w = Math.round(vv.width); _h = Math.round(vv.height);
-    }
-  } catch (_) {}
-  camera.aspect = _w / _h;
+  camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
-  try { renderer.setSize(_w, _h); } catch (_) {}
+  try { renderer.setSize(window.innerWidth, window.innerHeight); } catch (_) {}
   // RT reallocation is expensive ; debounce so the storm of intermediate
   // resize events during a fullscreen <-> windowed transition collapses
   // into one allocation at the final size.
