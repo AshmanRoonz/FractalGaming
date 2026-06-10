@@ -8,6 +8,10 @@
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<!-- (touch) Without a viewport meta, phones render at ~980px virtual width
+     and scale down ; touch coordinates and overlay sizes come out wrong.
+     user-scalable=no + viewport-fit=cover for edge-to-edge landscape play. -->
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700;900&family=Rajdhani:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -3096,6 +3100,18 @@ const input = {
   invertLookY: false,
   swapSticks: false,
   triggerThreshold: 0.3,
+  // ---- Touch controls (mobile overlay ; see TOUCH CONTROLS section) ----
+  // Raw-input philosophy per design: no deadzone, no response curve, no
+  // smoothing. Stick values are the literal normalized thumb offset; look
+  // deltas feed input.mouseDX/DY 1:1 (just scaled for thumb travel range).
+  touchActive: false,           // overlay visible ; gates touch look/move paths
+  touchMoveX: 0, touchMoveY: 0, // virtual stick, -1..1 (Y: up = -1, gamepad convention)
+  touchMoveUp: false, touchMoveDown: false,
+  touchFire: false, touchAltFire: false,
+  touchLookScale: 6.0,          // look-pad px multiplier into mouseDX/DY (linear, raw)
+  touchGyroEnabled: false,
+  touchGyroScale: 1.0,          // 1.0 = view turns exactly as far as the phone does
+  touchGyroYaw: 0, touchGyroPitch: 0, // accumulated radians ; applied + zeroed each frame
   // Button mappings (gamepad button indices): -1 = unbound
   gpBindings: {
     fire: 7,       // RT
@@ -29388,6 +29404,7 @@ function updatePlayerMovement(dt) {
     }
     if (player && player.velocity) player.velocity.set(0, 0, 0);
     input.mouseDX = 0; input.mouseDY = 0;
+    input.touchGyroYaw = 0; input.touchGyroPitch = 0;
     if (_cinematic.active) return;
   }
   // Tick down a Puncture Stasis Trap root on the local player.
@@ -29399,10 +29416,15 @@ function updatePlayerMovement(dt) {
     // Kill any residual velocity so we don't drift mid-lockout.
     player.velocity.set(0, 0, 0);
     // Still allow looking around but no movement
-    if (input.locked && !game.testMode) {
+    if ((input.locked || input.touchActive) && !game.testMode) {
       player.euler.y -= input.mouseDX * input.sensitivity;
       player.euler.x -= input.mouseDY * input.sensitivity;
     }
+    if (input.touchGyroEnabled) {
+      player.euler.y -= input.touchGyroYaw;
+      player.euler.x -= input.touchGyroPitch;
+    }
+    input.touchGyroYaw = 0; input.touchGyroPitch = 0;
     if (input.gpConnected) {
       player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
       player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
@@ -29428,10 +29450,17 @@ function updatePlayerMovement(dt) {
   // (lssdev test mode) Mouse is reserved for the floating Theme dev UI ;
   // gate ship-look on !game.testMode so the player can move the cursor
   // over settings without rotating the ship.
-  if (input.locked && !game.testMode) {
+  if ((input.locked || input.touchActive) && !game.testMode) {
     player.euler.y -= input.mouseDX * input.sensitivity;
     player.euler.x -= input.mouseDY * input.sensitivity;
   }
+  // Gyro look (touch): accumulated radians from devicemotion, applied
+  // raw 1:1 (scaled by touchGyroScale) then zeroed. No smoothing.
+  if (input.touchGyroEnabled) {
+    player.euler.y -= input.touchGyroYaw;
+    player.euler.x -= input.touchGyroPitch;
+  }
+  input.touchGyroYaw = 0; input.touchGyroPitch = 0;
   // Gamepad look (curve already applied in pollGamepad)
   if (input.gpConnected) {
     player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
@@ -29512,6 +29541,15 @@ function updatePlayerMovement(dt) {
     // D-pad up/down for vertical movement
     if (input.gpMoveUp) moveDir.addScaledVector(up, ch.verticalSpeed);
     if (input.gpMoveDown) moveDir.addScaledVector(up, -ch.verticalSpeed);
+  }
+
+  // Touch virtual stick: raw -1..1, no deadzone / curve / sensitivity
+  // multiplier by design (see TOUCH CONTROLS section).
+  if (input.touchActive) {
+    if (Math.abs(input.touchMoveY) > 0.001) moveDir.addScaledVector(forward, -input.touchMoveY * ch.flightSpeed);
+    if (Math.abs(input.touchMoveX) > 0.001) moveDir.addScaledVector(right, input.touchMoveX * ch.strafeSpeed);
+    if (input.touchMoveUp)   moveDir.addScaledVector(up, ch.verticalSpeed);
+    if (input.touchMoveDown) moveDir.addScaledVector(up, -ch.verticalSpeed);
   }
 
   // Puncture Afterburner speed boost
@@ -29700,13 +29738,13 @@ function updateWeapon(dt) {
   }
 
   // ADS (aim down sights) state
-  const aiming = input.rightMouseDown || input.gpAltFire;
+  const aiming = input.rightMouseDown || input.gpAltFire || input.touchAltFire;
 
   // VORTEX ADS: zoom in, bonus damage on shots (energy only drains when firing while ADS)
   if (player.loadoutKey === 'VORTEX') {
     if (aiming && player.vortexEnergy > 0) {
       player.vortexAdsActive = true;
-      const firing = input.mouseDown || input.gpFire;
+      const firing = input.mouseDown || input.gpFire || input.touchFire;
       if (firing) {
         player.vortexEnergy = Math.max(0, player.vortexEnergy - 350 * dt); // drains 350/s only while ADS + firing
       }
@@ -29773,7 +29811,7 @@ function updateWeapon(dt) {
   }
 
   // Spinup
-  let firing = input.mouseDown || input.gpFire;
+  let firing = input.mouseDown || input.gpFire || input.touchFire;
   // VORTEX Mega Laser core already fires the dual main lasers
   // AND the laser-shot visually as one channeled beam. Block primary fire
   // while the core is active so the player isn't double-spending ammo /
@@ -33871,6 +33909,11 @@ function updateRoundSystem(dt) {
         input.rightMouseDown = false;
         input.mouseDX = 0;
         input.mouseDY = 0;
+        input.touchFire = false;
+        input.touchAltFire = false;
+        input.touchMoveX = 0; input.touchMoveY = 0;
+        input.touchMoveUp = false; input.touchMoveDown = false;
+        input.touchGyroYaw = 0; input.touchGyroPitch = 0;
       }
       // Reactive band: round start ; combat pattern at intensity 1.
       if (typeof musicSetPattern === 'function') {
@@ -37480,7 +37523,10 @@ document.addEventListener('mousedown', e => {
     e.target.closest('#lobby')
   ));
   // (lssdev test mode) Mouse is dev UI, not weapons. Skip fire-latch.
-  if (!isUI && !game.testMode) {
+  // (touch) Also skip when the touch overlay is active: taps on bare
+  // canvas synthesize mousedown and would fire a stray shot ; touch users
+  // fire via the FIRE button only.
+  if (!isUI && !game.testMode && !input.touchActive) {
     if (e.button === 0) input.mouseDown = true;
     if (e.button === 2) input.rightMouseDown = true;
   }
@@ -37491,7 +37537,7 @@ document.addEventListener('mousedown', e => {
                        document.getElementById('ship-select').classList.contains('active');
   const settingsBlocking = (typeof settingsOpen !== 'undefined' && settingsOpen);
   // (lssdev test mode) Never grab pointer lock ; mouse must stay free for the dev panel.
-  if (!game.testMode && !input.locked && game.state !== 'select' && !selectActive && !settingsBlocking && !isUI) {
+  if (!game.testMode && !input.locked && !input.touchActive && game.state !== 'select' && !selectActive && !settingsBlocking && !isUI) {
     _safeRequestPointerLock();
   }
 });
@@ -37510,6 +37556,309 @@ document.addEventListener('pointerlockchange', () => {
 });
 
 document.addEventListener('contextmenu', e => e.preventDefault());
+
+// ======================= TOUCH CONTROLS (mobile) =======================
+// On-screen overlay per the green-shapes mockup: move stick bottom-left
+// (over-travel past the rim = dash), look pad bottom-right, LT/LB rects on
+// the left edge, RT/RB on the right edge, Q/E/R/F diamonds by the right
+// gun, CORE bottom-center, plus vertical-thrust chips and a GYRO toggle.
+// Raw input everywhere: stick = literal normalized thumb offset (no
+// deadzone, no curve), look pad = 1:1 px deltas into input.mouseDX/DY,
+// gyro = device rotation applied 1:1 to view rotation.
+//
+// Integration points (all patched above):
+//   look   -> input.mouseDX/DY  (gate widened to input.touchActive)
+//   gyro   -> input.touchGyroYaw/Pitch (radians, applied + zeroed per frame)
+//   move   -> input.touchMoveX/Y, touchMoveUp/Down (read in updatePlayerMovement)
+//   fire   -> input.touchFire / touchAltFire (read in updateWeapon)
+//   Q/E/F  -> abilityInputPress/Release + input.keys[binding] (hold paths)
+//   R      -> input.keys[kbBindings.reload]
+//   dash() / activateCore() called directly.
+// Console API: window.LSS_TOUCH  (enable/disable, lookScale, gyro signs).
+(function () {
+  const _touchCapable = (navigator.maxTouchPoints > 0) || ('ontouchstart' in window);
+  if (!_touchCapable) return; // desktop: never build the overlay
+
+  let _enabled;
+  try {
+    const saved = localStorage.getItem('lss_touch_enabled');
+    _enabled = (saved != null) ? (saved === '1')
+      : (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  } catch (_) { _enabled = true; }
+
+  // Gyro sign multipliers ; flip via LSS_TOUCH.gyroSigns if a device
+  // reports rotation axes mirrored (varies with OS/orientation quirks).
+  const _gyroSign = { yaw: 1, pitch: 1 };
+
+  const CSS = [
+    '#touch-controls { position: fixed; inset: 0; z-index: 11; pointer-events: none; display: none;',
+    '  font-family: "Rajdhani", sans-serif; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }',
+    '#touch-controls .tc { position: absolute; pointer-events: auto; touch-action: none;',
+    '  display: flex; align-items: center; justify-content: center;',
+    '  background: rgba(80, 200, 255, 0.07); border: 1px solid rgba(120, 220, 255, 0.30);',
+    '  color: rgba(190, 235, 255, 0.75); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
+    '  text-transform: uppercase; }',
+    '#touch-controls .tc.tc-pressed { background: rgba(120, 220, 255, 0.22); border-color: rgba(170, 240, 255, 0.7); }',
+    '.tc-rect { width: 6.5vmin; height: 17vmin; border-radius: 1.2vmin; }',
+    '.tc-diamond { width: 9.5vmin; height: 9.5vmin; transform: rotate(45deg); border-radius: 1.2vmin; }',
+    '.tc-diamond > span { transform: rotate(-45deg); }',
+    '#tc-move, #tc-look { border-radius: 50%; width: 30vmin; height: 30vmin; }',
+    '#tc-move { left: 2.5vmin; bottom: 3vmin; }',
+    '#tc-look { right: 2.5vmin; bottom: 3vmin; }',
+    '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;',
+    '  margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(120, 220, 255, 0.18);',
+    '  border: 1px solid rgba(170, 240, 255, 0.55); pointer-events: none; }',
+    '#tc-core { left: 50%; bottom: 2vmin; transform: translateX(-50%); width: 22vmin; height: 7vmin; border-radius: 1.2vmin; }',
+    '.tc-chip { width: 8vmin; height: 8vmin; border-radius: 50%; font-size: 3vmin; }',
+    '.tc-top { width: 7vmin; height: 7vmin; border-radius: 1.2vmin; font-size: 3vmin; }',
+  ].join('\n');
+
+  function _el(id, cls, label, style) {
+    const d = document.createElement('div');
+    if (id) d.id = id;
+    d.className = 'tc ' + (cls || '');
+    const s = document.createElement('span');
+    s.textContent = label || '';
+    d.appendChild(s);
+    if (style) for (const k in style) d.style[k] = style[k];
+    return d;
+  }
+
+  let root = null, moveEl = null, knobEl = null, gyroEl = null;
+
+  function _build() {
+    if (root || !document.body) return;
+    const st = document.createElement('style');
+    st.textContent = CSS;
+    document.head.appendChild(st);
+    root = document.createElement('div');
+    root.id = 'touch-controls';
+
+    // Move stick (over-travel = dash) + look pad
+    moveEl = _el('tc-move', '', '');
+    knobEl = document.createElement('div');
+    knobEl.id = 'tc-move-knob';
+    moveEl.appendChild(knobEl);
+    const lookEl = _el('tc-look', '', 'look');
+
+    // Left edge: ADS (Lt) + Q (Lb). Right edge: FIRE (Rt) + E (Rb).
+    const ltEl = _el('tc-lt', 'tc-rect', 'ads',  { left: '1vmin', top: '22%' });
+    const lbEl = _el('tc-lb', 'tc-rect', 'Q',    { left: '1vmin', top: '46%' });
+    const rtEl = _el('tc-rt', 'tc-rect', 'fire', { right: '1vmin', top: '5%' });
+    const rbEl = _el('tc-rb', 'tc-rect', 'E',    { right: '1vmin', top: '29%' });
+
+    // Ability diamonds by the right gun (positions from the mockup).
+    const qdEl = _el('tc-qd', 'tc-diamond', 'Q', { left: '74%', top: '76%' });
+    const edEl = _el('tc-ed', 'tc-diamond', 'E', { left: '85%', top: '64%' });
+    const rdEl = _el('tc-rd', 'tc-diamond', 'R', { left: '92%', top: '71%' });
+    const fdEl = _el('tc-fd', 'tc-diamond', 'F', { left: '70%', top: '88%' });
+
+    const coreEl = _el('tc-core', '', 'core');
+
+    // Vertical thrust chips beside the move stick.
+    const upEl = _el('tc-up', 'tc-chip', '▲', { left: '34vmin', bottom: '14vmin' });
+    const dnEl = _el('tc-dn', 'tc-chip', '▼', { left: '34vmin', bottom: '4vmin' });
+
+    // Top utility row: gyro toggle + settings.
+    gyroEl = _el('tc-gyro', 'tc-top', 'G', { right: '16vmin', top: '1.5vmin', opacity: 0.8 });
+    const setEl = _el('tc-set', 'tc-top', '⚙', { right: '7.5vmin', top: '1.5vmin', opacity: 0.8 });
+
+    const els = [moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, gyroEl, setEl];
+    for (const e of els) root.appendChild(e);
+    document.body.appendChild(root);
+
+    // ---- hold buttons: press/release semantics ----
+    function _hold(el, press, release) {
+      el.addEventListener('pointerdown', ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        try { el.setPointerCapture(ev.pointerId); } catch (_) {}
+        el.classList.add('tc-pressed');
+        try { press(); } catch (_) {}
+      });
+      const end = ev => {
+        el.classList.remove('tc-pressed');
+        try { release && release(); } catch (_) {}
+      };
+      el.addEventListener('pointerup', end);
+      el.addEventListener('pointercancel', end);
+    }
+    function _abPress(i)   { const kb = input.kbBindings, k = kb && kb['ability' + i]; if (k) input.keys[k] = true;  try { abilityInputPress(i); } catch (_) {} }
+    function _abRelease(i) { const kb = input.kbBindings, k = kb && kb['ability' + i]; if (k) input.keys[k] = false; try { abilityInputRelease(i); } catch (_) {} }
+
+    _hold(rtEl, () => { input.touchFire = true; },    () => { input.touchFire = false; });
+    _hold(ltEl, () => { input.touchAltFire = true; }, () => { input.touchAltFire = false; });
+    _hold(lbEl, () => _abPress(0), () => _abRelease(0));
+    _hold(qdEl, () => _abPress(0), () => _abRelease(0));
+    _hold(rbEl, () => _abPress(1), () => _abRelease(1));
+    _hold(edEl, () => _abPress(1), () => _abRelease(1));
+    _hold(fdEl, () => _abPress(2), () => _abRelease(2));
+    _hold(rdEl, () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = true; },
+                () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = false; });
+    _hold(coreEl, () => { try { activateCore(); } catch (_) {} }, null);
+    _hold(upEl, () => { input.touchMoveUp = true; },   () => { input.touchMoveUp = false; });
+    _hold(dnEl, () => { input.touchMoveDown = true; }, () => { input.touchMoveDown = false; });
+    _hold(setEl, () => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, null);
+    _hold(gyroEl, _gyroToggle, null);
+
+    // ---- move stick: raw normalized offset ; over-travel = dash ----
+    let _movePid = null, _moveCx = 0, _moveCy = 0, _moveR = 1, _dashArmed = true;
+    moveEl.addEventListener('pointerdown', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      try { moveEl.setPointerCapture(ev.pointerId); } catch (_) {}
+      _movePid = ev.pointerId;
+      const r = moveEl.getBoundingClientRect();
+      _moveCx = r.left + r.width / 2;
+      _moveCy = r.top + r.height / 2;
+      _moveR = r.width / 2;
+      _dashArmed = true;
+      _moveTo(ev.clientX, ev.clientY);
+    });
+    moveEl.addEventListener('pointermove', ev => {
+      if (ev.pointerId !== _movePid) return;
+      ev.preventDefault();
+      _moveTo(ev.clientX, ev.clientY);
+    });
+    function _moveTo(x, y) {
+      const dx = (x - _moveCx) / _moveR;
+      const dy = (y - _moveCy) / _moveR;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      // Over-travel dash: shove the stick well past the rim. Re-arms when
+      // the thumb comes back inside, so holding it out doesn't chain dashes.
+      if (len > 1.3 && _dashArmed) { _dashArmed = false; try { dash(); } catch (_) {} }
+      else if (len < 0.95) _dashArmed = true;
+      const cl = (len > 1) ? 1 / len : 1; // clamp reported axes to the rim
+      input.touchMoveX = dx * cl;
+      input.touchMoveY = dy * cl;
+      knobEl.style.transform = 'translate(' + (dx * cl * _moveR * 0.62) + 'px,' + (dy * cl * _moveR * 0.62) + 'px)';
+    }
+    const _moveEnd = ev => {
+      if (ev.pointerId !== _movePid) return;
+      _movePid = null;
+      input.touchMoveX = 0; input.touchMoveY = 0;
+      _dashArmed = true;
+      knobEl.style.transform = '';
+    };
+    moveEl.addEventListener('pointerup', _moveEnd);
+    moveEl.addEventListener('pointercancel', _moveEnd);
+
+    // ---- look pad: raw 1:1 px deltas into the mouse-look accumulators ----
+    let _lookPid = null, _lookLx = 0, _lookLy = 0;
+    lookEl.addEventListener('pointerdown', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      try { lookEl.setPointerCapture(ev.pointerId); } catch (_) {}
+      _lookPid = ev.pointerId;
+      _lookLx = ev.clientX; _lookLy = ev.clientY;
+      lookEl.classList.add('tc-pressed');
+    });
+    lookEl.addEventListener('pointermove', ev => {
+      if (ev.pointerId !== _lookPid) return;
+      ev.preventDefault();
+      input.mouseDX += (ev.clientX - _lookLx) * input.touchLookScale;
+      input.mouseDY += (ev.clientY - _lookLy) * input.touchLookScale;
+      _lookLx = ev.clientX; _lookLy = ev.clientY;
+    });
+    const _lookEnd = ev => {
+      if (ev.pointerId !== _lookPid) return;
+      _lookPid = null;
+      lookEl.classList.remove('tc-pressed');
+    };
+    lookEl.addEventListener('pointerup', _lookEnd);
+    lookEl.addEventListener('pointercancel', _lookEnd);
+
+    // Stop browser pan/zoom gestures on the 3D canvas itself.
+    try { if (renderer && renderer.domElement) renderer.domElement.style.touchAction = 'none'; } catch (_) {}
+  }
+
+  // ---- gyro steering: devicemotion rotation rate -> radians/frame ----
+  let _gyroBound = false, _gyroLastT = 0;
+  function _onMotion(e) {
+    if (!input.touchGyroEnabled) return;
+    const rr = e.rotationRate;
+    if (!rr || rr.alpha == null) return;
+    const now = performance.now();
+    const dt = (_gyroLastT > 0) ? Math.min(0.05, (now - _gyroLastT) / 1000) : 0.016;
+    _gyroLastT = now;
+    const ang = (screen.orientation && typeof screen.orientation.angle === 'number')
+      ? screen.orientation.angle : (window.orientation || 0);
+    // Map device rotation axes to view yaw/pitch by screen orientation.
+    // Landscape: yaw = rotation about the screen-vertical axis (device X),
+    // pitch = rotation about the screen-horizontal axis (device Y).
+    let yawDeg, pitchDeg;
+    if (ang === 90)       { yawDeg = rr.beta;   pitchDeg = -rr.gamma; }
+    else if (ang === 270) { yawDeg = -rr.beta;  pitchDeg = rr.gamma;  }
+    else                  { yawDeg = rr.alpha;  pitchDeg = rr.beta;   }
+    const s = (Math.PI / 180) * (input.touchGyroScale || 1.0) * dt;
+    input.touchGyroYaw   += yawDeg   * s * _gyroSign.yaw;
+    input.touchGyroPitch += pitchDeg * s * _gyroSign.pitch;
+  }
+  function _setGyroLabel() {
+    if (gyroEl) {
+      gyroEl.style.background = input.touchGyroEnabled ? 'rgba(120,255,170,0.25)' : '';
+      gyroEl.style.borderColor = input.touchGyroEnabled ? 'rgba(140,255,190,0.8)' : '';
+    }
+  }
+  function _gyroToggle() {
+    if (input.touchGyroEnabled) { input.touchGyroEnabled = false; _setGyroLabel(); return; }
+    const start = () => {
+      if (!_gyroBound) { window.addEventListener('devicemotion', _onMotion); _gyroBound = true; }
+      _gyroLastT = 0;
+      input.touchGyroYaw = 0; input.touchGyroPitch = 0;
+      input.touchGyroEnabled = true;
+      _setGyroLabel();
+    };
+    try {
+      // iOS 13+: motion sensors need an explicit permission grant, and the
+      // request must come from a user gesture (this tap qualifies).
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        DeviceMotionEvent.requestPermission().then(r => { if (r === 'granted') start(); }).catch(() => {});
+      } else start();
+    } catch (_) { start(); }
+  }
+
+  function _zeroTouchInputs() {
+    input.touchMoveX = 0; input.touchMoveY = 0;
+    input.touchMoveUp = false; input.touchMoveDown = false;
+    input.touchFire = false; input.touchAltFire = false;
+  }
+
+  // Visibility: only during a match, never under ship-select / settings.
+  // Cheap 250 ms poll ; avoids threading state through gameLoop.
+  setInterval(() => {
+    if (!_enabled) {
+      if (root && root.style.display !== 'none') { root.style.display = 'none'; input.touchActive = false; _zeroTouchInputs(); }
+      return;
+    }
+    _build();
+    if (!root) return;
+    const sel = document.getElementById('ship-select');
+    const selectActive = sel && sel.classList.contains('active');
+    const inMatch = (typeof game !== 'undefined') && game &&
+      (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd' || game.state === 'matchEnd');
+    const blocked = (typeof settingsOpen !== 'undefined' && settingsOpen) || selectActive;
+    const show = inMatch && !blocked;
+    const cur = root.style.display === 'block';
+    if (show !== cur) {
+      root.style.display = show ? 'block' : 'none';
+      input.touchActive = show;
+      if (!show) _zeroTouchInputs();
+    }
+  }, 250);
+
+  // Console / future-settings API.
+  window.LSS_TOUCH = {
+    enable(v) {
+      _enabled = (v !== false);
+      try { localStorage.setItem('lss_touch_enabled', _enabled ? '1' : '0'); } catch (_) {}
+    },
+    get enabled() { return _enabled; },
+    set lookScale(v) { if (v > 0) input.touchLookScale = v; },
+    get lookScale() { return input.touchLookScale; },
+    set gyroScale(v) { if (v > 0) input.touchGyroScale = v; },
+    get gyroScale() { return input.touchGyroScale; },
+    gyroSigns(yaw, pitch) { if (yaw) _gyroSign.yaw = yaw; if (pitch) _gyroSign.pitch = pitch; },
+  };
+})();
+// ===================== END TOUCH CONTROLS =====================
 
 let _rtResizeTimer = 0;
 function _doPostFXResize() {
