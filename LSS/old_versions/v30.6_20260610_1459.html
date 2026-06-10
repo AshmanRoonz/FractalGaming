@@ -2464,12 +2464,7 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   #ship-preview-confirm, #ship-preview-confirm-vr {
     margin-top: 8px !important; padding: 9px 20px !important; font-size: 11px !important;
   }
-  #teammates-strip { max-height: 88px; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
-  .fleet-chip { width: 84px !important; min-height: 76px !important; }
-  .fleet-chip .chip-thumb, .fleet-chip .chip-avatar-wrap, .fleet-chip .chip-thumb-empty { height: 44px !important; }
-  .fleet-chip .chip-avatar { width: 34px !important; height: 34px !important; }
-  .fleet-chip .chip-name { font-size: 9px !important; padding: 2px 6px 0 !important; }
-  .fleet-chip .chip-ship { font-size: 8px !important; padding: 0 6px 4px !important; }
+  #teammates-strip { max-height: 74px; overflow: hidden; }
   #ship-select-header { padding: 4px 12px 3px !important; }
 }
 
@@ -2826,7 +2821,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.7';
+const LSS_BUILD = '30.6';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -12281,7 +12276,7 @@ function _vrUpdateShipNameLabel(bot, isVR, isEnemy) {
     }
     if (typeof raycastLevel === 'function' && dist > 1) {
       _vrNameLosDir.subVectors(bot.position, player.position).normalize();
-      const wallDist = raycastLevel(player.position, _vrNameLosDir, dist + 50, true);
+      const wallDist = raycastLevel(player.position, _vrNameLosDir, dist + 50);
       if (wallDist < dist - 30 || _losBlockedByClusters(player.position, _vrNameLosDir, dist)) {
         const sp = bot._vrNameSprite, ln = bot._vrNameLine;
         if (sp) sp.visible = false;
@@ -14886,12 +14881,10 @@ function sdfNormal(px,py,pz, out, centerSdf) {
 }
 
 // SDF ray marching: find where a ray hits the wall (SDF crosses from negative to positive)
-function sdfRaycast(ox,oy,oz,dx,dy,dz,maxDist,coarse) {
-  // Sphere tracing through the SDF; finds where ray exits playable space.
-  // coarse=true : AI line-of-sight grade — 3x bigger steps, 90-step cap.
-  // ~8x cheaper per ray ; weapons keep the precise march.
+function sdfRaycast(ox,oy,oz,dx,dy,dz,maxDist) {
+  // Sphere tracing through the SDF; finds where ray exits playable space
   let t = 4.0; // start ahead to avoid self-hits near walls
-  const MAX_STEPS = coarse ? 90 : 280;
+  const MAX_STEPS = 280;   // capped-step march : more steps to keep range
   let prevD = -999;
   for(let i=0;i<MAX_STEPS;i++){
     if(t>=maxDist) return maxDist;
@@ -14903,8 +14896,7 @@ function sdfRaycast(ox,oy,oz,dx,dy,dz,maxDist,coarse) {
     if(d > 0 && d < 1.5) return t;
     prevD = d;
     // Step by |d| (sphere tracing) but enforce minimum step to avoid stalling
-    const step = coarse ? Math.min(Math.max(Math.abs(d) * 0.85, 12.0), 34.0)
-                         : Math.min(Math.max(Math.abs(d) * 0.85, 4.0), 14.0); // cap so the march cannot overstep thin peak tips
+    const step = Math.min(Math.max(Math.abs(d) * 0.85, 4.0), 14.0); // cap so the march cannot overstep thin peak tips (was uncapped -> shots/sightlines passed through peaks)
     t += step;
   }
   return maxDist;
@@ -15269,7 +15261,7 @@ function _losBlockedByClusters(from, dir, dist) {
   return false;
 }
 
-function raycastLevel(origin, dir, maxDist, coarse) {
+function raycastLevel(origin, dir, maxDist) {
   // SDF ray march: no CSG awareness needed, the SDF handles junctions naturally
   let nearest = maxDist;
   // Google Maps mode: SDF is short-circuited (always interior),
@@ -15303,7 +15295,7 @@ function raycastLevel(origin, dir, maxDist, coarse) {
   }
 
   // SDF ray march for sphere/cylinder walls
-  const sdfHit = sdfRaycast(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, nearest, coarse);
+  const sdfHit = sdfRaycast(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, nearest);
   if (sdfHit < nearest) nearest = sdfHit;
 
   return nearest;
@@ -17057,7 +17049,7 @@ class Bot {
         const dot = toTgt.normalize().dot(this.targetDir);
         if (dot > 0.7 && withinRange) {
           // LOS check: raycast toward the target, only fire if path is clear
-          const losDist = raycastLevel(this.position, toTgt, distToTgt + 10, true);
+          const losDist = raycastLevel(this.position, toTgt, distToTgt + 10);
           if (losDist >= distToTgt - 5) {
             // Test mode : bots fly the same AI patterns but never fire.
             if (!game.testMode) {
@@ -17128,7 +17120,7 @@ class Bot {
     const _nowAb = (typeof game !== 'undefined' && game.time) || 0;
     if (this._abLosT == null || _nowAb - this._abLosT > 0.25) {
       this._abLosT = _nowAb;
-      this._abLosDist = raycastLevel(this.position, aim, dist + 10, true);
+      this._abLosDist = raycastLevel(this.position, aim, dist + 10);
     }
     const losDist = this._abLosDist;
     if (losDist < dist - 5) return; // wall in the way
@@ -17518,7 +17510,7 @@ class Bot {
     // Line-of-sight check: can't shoot through walls. Scratch vector
     // instead of dir.clone() ; raycastLevel doesn't retain it.
     _botFireDir.copy(dir).normalize();
-    const wallDist = raycastLevel(this.position, _botFireDir, dist + 10, true);
+    const wallDist = raycastLevel(this.position, _botFireDir, dist + 10);
     if (wallDist < dist - 5) return; // wall blocks the shot
     this.isFiring = true; this.fireFlashTimer = 0.15; // for animation
     const weapon = this.loadout.weapon;
@@ -23981,14 +23973,6 @@ function updateDetachedGasPockets(dt) {
     // settles sprites back to rest position over ~2 s after the phase
     // ends. Cloud bounces normally via the rigid containment below.
     if (typeof worldSDF !== 'function' || typeof sdfNormal !== 'function') {
-      if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
-      continue;
-    }
-    // Half-rate SDF physics: clouds drift slowly, and the worldSDF +
-    // gradient sampling per pocket per frame was a steady CPU tax that
-    // phones felt. Alternate frames per pocket.
-    p._sdfTick = !p._sdfTick;
-    if (p._sdfTick) {
       if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
       continue;
     }
@@ -34321,7 +34305,7 @@ function updateAbilities(dt) {
           const losDir = _abTmpA.subVectors(bot.position, player.position).normalize();
           // Pad +20 so a target sitting flush against a wall isn't excluded
           // by a microscopic SDF tolerance.
-          const wd = raycastLevel(player.position, losDir, dist + 20, true);
+          const wd = raycastLevel(player.position, losDir, dist + 20);
           if (wd < dist) continue;
           _aas.bot = bot; nearDistSel = dist; _aas.dist = dist; _aas.wallDist = wd;
         }
@@ -39407,17 +39391,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       root.style.display = show ? 'block' : 'none';
       input.touchActive = show;
       if (!show) _zeroTouchInputs();
-      // Chrome on Android occasionally re-laid the match out as portrait
-      // mid-game (DuckDuckGo didn't). Lock to landscape while the touch
-      // overlay is live ; silently ignored by browsers that refuse the
-      // lock outside fullscreen.
-      try {
-        if (show && screen.orientation && screen.orientation.lock) {
-          screen.orientation.lock('landscape').catch(() => {});
-        } else if (!show && screen.orientation && screen.orientation.unlock) {
-          screen.orientation.unlock();
-        }
-      } catch (_) {}
     }
   }, 250);
 
@@ -47658,7 +47631,7 @@ function updateEnemyHealthBars() {
     // LOS gate (cached at ~15 Hz, same as the legacy bar code).
     if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
       const toEnt = _hbTmpA.subVectors(ent.position, player.position).normalize();
-      const wallDist = raycastLevel(player.position, toEnt, dist + 50, true);
+      const wallDist = raycastLevel(player.position, toEnt, dist + 50);
       ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
       ent._hbLosTime = now;
     }
