@@ -2813,7 +2813,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.14';
+const LSS_BUILD = '30.13';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -39199,23 +39199,23 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#touch-controls .tc { position: absolute; pointer-events: auto; touch-action: none;',
     '  display: flex; align-items: center; justify-content: center;',
     '  background: rgba(80, 200, 255, 0.07); border: 1px solid rgba(120, 220, 255, 0.30);',
-    '  color: rgba(190, 235, 255, 0.75); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
+    '  color: rgba(190, 235, 255, 0.75); font-size: calc(var(--tcv, 1vmin) * 2.2); font-weight: 600; letter-spacing: 0.08em;',
     '  text-transform: uppercase; }',
     '#touch-controls .tc.tc-pressed { background: rgba(120, 220, 255, 0.22); border-color: rgba(170, 240, 255, 0.7); }',
-    '.tc-rect { width: 17vmin; height: 17vmin; border-radius: 1.2vmin; }',
-    '.tc-diamond { width: 9.5vmin; height: 9.5vmin; transform: rotate(45deg); border-radius: 1.2vmin; }',
+    '.tc-rect { width: calc(var(--tcv, 1vmin) * 17); height: calc(var(--tcv, 1vmin) * 17); border-radius: calc(var(--tcv, 1vmin) * 1.2); }',
+    '.tc-diamond { width: calc(var(--tcv, 1vmin) * 9.5); height: calc(var(--tcv, 1vmin) * 9.5); transform: rotate(45deg); border-radius: calc(var(--tcv, 1vmin) * 1.2); }',
     '.tc-diamond > span { transform: rotate(-45deg); }',
-    '#tc-move, #tc-look { border-radius: 50%; width: 30vmin; height: 30vmin; }',
-    '#tc-move { left: 2.5vmin; bottom: 3vmin; }',
+    '#tc-move, #tc-look { border-radius: 50%; width: calc(var(--tcv, 1vmin) * 30); height: calc(var(--tcv, 1vmin) * 30); }',
+    '#tc-move { left: calc(var(--tcv, 1vmin) * 2.5); bottom: calc(var(--tcv, 1vmin) * 3); }',
     // Look pad pulled in toward the middle of the screen (was hugging the
     // right edge) so the aiming thumb works nearer the screen center.
-    '#tc-look { right: 24vw; bottom: 3vmin; }',
+    '#tc-look { right: calc(var(--tcw, 1vw) * 24); bottom: calc(var(--tcv, 1vmin) * 3); }',
     '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;',
     '  margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(120, 220, 255, 0.18);',
     '  border: 1px solid rgba(170, 240, 255, 0.55); pointer-events: none; }',
-    '#tc-core { left: 50%; bottom: 2vmin; transform: translateX(-50%); width: 22vmin; height: 7vmin; border-radius: 1.2vmin; }',
-    '.tc-chip { width: 8vmin; height: 8vmin; border-radius: 50%; font-size: 3vmin; }',
-    '.tc-top { width: 7vmin; height: 7vmin; border-radius: 1.2vmin; font-size: 3vmin; }',
+    '#tc-core { left: 50%; bottom: calc(var(--tcv, 1vmin) * 2); transform: translateX(-50%); width: calc(var(--tcv, 1vmin) * 22); height: calc(var(--tcv, 1vmin) * 7); border-radius: calc(var(--tcv, 1vmin) * 1.2); }',
+    '.tc-chip { width: calc(var(--tcv, 1vmin) * 8); height: calc(var(--tcv, 1vmin) * 8); border-radius: 50%; font-size: calc(var(--tcv, 1vmin) * 3); }',
+    '.tc-top { width: calc(var(--tcv, 1vmin) * 7); height: calc(var(--tcv, 1vmin) * 7); border-radius: calc(var(--tcv, 1vmin) * 1.2); font-size: calc(var(--tcv, 1vmin) * 3); }',
     // Invisible capture zones (genre standard: stick responds to the whole
     // bottom-left region, aim to the whole right half). Styled controls are
     // appended after these, so they paint and hit-test above them.
@@ -39238,6 +39238,79 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
   let root = null, moveEl = null, knobEl = null;
 
+  // Chrome-stuck-viewport immunity: size + place the overlay from the
+  // VISUAL viewport (always truthful) instead of trusting CSS units tied
+  // to the layout viewport, which Chrome on Android sometimes leaves in
+  // portrait after a fullscreen or rotation transition. --tcv/--tcw feed
+  // every control's calc() sizing.
+  // Viewport-meta kick: when the hardware orientation (truthful) and the
+  // reported viewport shape disagree, rewriting the viewport meta forces
+  // Chrome on Android to recompute its layout viewport — the programmatic
+  // version of the rotate-away-and-back ritual. Cooldown so we never spam.
+  let _vpKickAt = 0;
+  function _kickStuckViewport() {
+    try {
+      const so = screen.orientation;
+      if (!so || typeof so.type !== 'string') return;
+      const screenLandscape = so.type.indexOf('landscape') === 0;
+      const viewportLandscape = window.innerWidth > window.innerHeight;
+      if (screenLandscape === viewportLandscape) return;   // in agreement
+      const now = performance.now();
+      if (now - _vpKickAt < 2000) return;
+      _vpKickAt = now;
+      const m = document.querySelector('meta[name="viewport"]');
+      if (!m) return;
+      const orig = m.getAttribute('content');
+      m.setAttribute('content', orig + ', minimum-scale=1.0001');
+      setTimeout(() => {
+        try { m.setAttribute('content', orig); } catch (_) {}
+        try { if (typeof _applyViewportSize === 'function') _applyViewportSize(); } catch (_) {}
+        _syncTouchViewport();
+      }, 80);
+    } catch (_) {}
+  }
+
+  // ?vpdebug=1 : tiny live readout of every viewport-truth source, so a
+  // single phone screenshot identifies which number is lying when the
+  // layout breaks.
+  const _vpDebug = /[?&]vpdebug=1/.test(location.search);
+  let _vpDebugEl = null;
+  function _vpDebugTick() {
+    if (!_vpDebug) return;
+    try {
+      if (!_vpDebugEl) {
+        _vpDebugEl = document.createElement('div');
+        _vpDebugEl.style.cssText = 'position:fixed;left:4px;top:34%;z-index:400;font:10px monospace;' +
+          'color:#0f0;background:rgba(0,0,0,0.72);padding:4px 6px;pointer-events:none;white-space:pre;';
+        document.body.appendChild(_vpDebugEl);
+      }
+      const vv = window.visualViewport;
+      const r = (typeof renderer !== 'undefined' && renderer) ? renderer : window.renderer;
+      _vpDebugEl.textContent =
+        'inner  ' + window.innerWidth + 'x' + window.innerHeight + '\n' +
+        'visual ' + (vv ? Math.round(vv.width) + 'x' + Math.round(vv.height) + ' @' + Math.round(vv.offsetLeft) + ',' + Math.round(vv.offsetTop) : 'n/a') + '\n' +
+        'orient ' + ((screen.orientation && screen.orientation.type) || window.orientation || '?') + '\n' +
+        'canvas ' + (r && r.domElement ? r.domElement.width + 'x' + r.domElement.height : '?') + '\n' +
+        'fullscreen ' + !!document.fullscreenElement;
+    } catch (_) {}
+  }
+
+  function _syncTouchViewport() {
+    if (!root) return;
+    try {
+      const vv = window.visualViewport;
+      const w = vv ? vv.width : window.innerWidth;
+      const h = vv ? vv.height : window.innerHeight;
+      root.style.left = ((vv && vv.offsetLeft) || 0) + 'px';
+      root.style.top = ((vv && vv.offsetTop) || 0) + 'px';
+      root.style.width = w + 'px';
+      root.style.height = h + 'px';
+      root.style.right = 'auto';
+      root.style.bottom = 'auto';
+      root.style.setProperty('--tcv', (Math.min(w, h) / 100) + 'px');
+      root.style.setProperty('--tcw', (w / 100) + 'px');
+    } catch (_) {}
+  }
 
   function _build() {
     if (root || !document.body) return;
@@ -39263,25 +39336,25 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // hugging the corner. Top arm (right-to-left): Rt in the corner, then
     // F, R, E, Q diamonds. Right arm (downward): Rb, then G. Settings ⚙
     // nests in the middle of the L's elbow.
-    const ltEl = _el('tc-lt', 'tc-rect', 'Lt', { left: '1vmin', top: '22%' });
-    const lbEl = _el('tc-lb', 'tc-rect', 'Lb', { right: '1vmin', top: '38.5vmin' });
-    const rtEl = _el('tc-rt', 'tc-rect', 'Rt', { right: '1vmin', top: '1.5vmin' });
-    const rbEl = _el('tc-rb', 'tc-rect', 'Rb', { right: '1vmin', top: '20vmin' });
+    const ltEl = _el('tc-lt', 'tc-rect', 'Lt', { left: 'calc(var(--tcv, 1vmin) * 1)', top: '22%' });
+    const lbEl = _el('tc-lb', 'tc-rect', 'Lb', { right: 'calc(var(--tcv, 1vmin) * 1)', top: 'calc(var(--tcv, 1vmin) * 38.5)' });
+    const rtEl = _el('tc-rt', 'tc-rect', 'Rt', { right: 'calc(var(--tcv, 1vmin) * 1)', top: 'calc(var(--tcv, 1vmin) * 1.5)' });
+    const rbEl = _el('tc-rb', 'tc-rect', 'Rb', { right: 'calc(var(--tcv, 1vmin) * 1)', top: 'calc(var(--tcv, 1vmin) * 20)' });
 
-    const qdEl = _el('tc-qd', 'tc-diamond', 'Q', { right: '59vmin', top: '3vmin' });
-    const edEl = _el('tc-ed', 'tc-diamond', 'E', { right: '46vmin', top: '3vmin' });
-    const rdEl = _el('tc-rd', 'tc-diamond', 'R', { right: '33vmin', top: '3vmin' });
-    const fdEl = _el('tc-fd', 'tc-diamond', 'F', { right: '20vmin', top: '3vmin' });
+    const qdEl = _el('tc-qd', 'tc-diamond', 'Q', { right: 'calc(var(--tcv, 1vmin) * 59)', top: 'calc(var(--tcv, 1vmin) * 3)' });
+    const edEl = _el('tc-ed', 'tc-diamond', 'E', { right: 'calc(var(--tcv, 1vmin) * 46)', top: 'calc(var(--tcv, 1vmin) * 3)' });
+    const rdEl = _el('tc-rd', 'tc-diamond', 'R', { right: 'calc(var(--tcv, 1vmin) * 33)', top: 'calc(var(--tcv, 1vmin) * 3)' });
+    const fdEl = _el('tc-fd', 'tc-diamond', 'F', { right: 'calc(var(--tcv, 1vmin) * 20)', top: 'calc(var(--tcv, 1vmin) * 3)' });
 
     const coreEl = _el('tc-core', '', 'core');
 
     // Vertical thrust chips beside the move stick.
-    const upEl = _el('tc-up', 'tc-chip', '▲', { left: '34vmin', bottom: '14vmin' });
-    const dnEl = _el('tc-dn', 'tc-chip', '▼', { left: '34vmin', bottom: '4vmin' });
+    const upEl = _el('tc-up', 'tc-chip', '▲', { left: 'calc(var(--tcv, 1vmin) * 34)', bottom: 'calc(var(--tcv, 1vmin) * 14)' });
+    const dnEl = _el('tc-dn', 'tc-chip', '▼', { left: 'calc(var(--tcv, 1vmin) * 34)', bottom: 'calc(var(--tcv, 1vmin) * 4)' });
 
     // Settings ⚙ sits top-middle. (Gyro removed ; Lb now fills the
     // bottom slot of the L's right arm.)
-    const setEl = _el('tc-set', 'tc-top', '⚙', { left: '50%', top: '1.5vmin', transform: 'translateX(-50%)', opacity: 0.8 });
+    const setEl = _el('tc-set', 'tc-top', '⚙', { left: '50%', top: 'calc(var(--tcv, 1vmin) * 1.5)', transform: 'translateX(-50%)', opacity: 0.8 });
 
     // Invisible capture zones first (controls paint + hit-test above
     // them). The styled move/look circles become purely visual anchors.
@@ -39292,6 +39365,18 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl];
     for (const e of els) root.appendChild(e);
     document.body.appendChild(root);
+    _syncTouchViewport();
+    try {
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', _syncTouchViewport);
+        window.visualViewport.addEventListener('scroll', _syncTouchViewport);
+      }
+      window.addEventListener('orientationchange', () => {
+        _syncTouchViewport();
+        setTimeout(_syncTouchViewport, 250);
+        setTimeout(_syncTouchViewport, 700);
+      });
+    } catch (_) {}
 
     // ---- hold buttons: press/release semantics ----
     function _hold(el, press, release) {
@@ -39434,6 +39519,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // when the pad disconnects (this interval re-polls every 250 ms).
     // Gyro steering intentionally stays live alongside a gamepad.
     const show = inMatch && !blocked && !input.gpConnected;
+    // Re-sync overlay sizing every tick (4 Hz, a few style writes) ; if
+    // the hardware says landscape but the viewport says portrait, jolt
+    // Chrome's viewport meta until they agree.
+    if (show) {
+      _syncTouchViewport();
+      _kickStuckViewport();
+    }
     _vpDebugTick();
     const cur = root.style.display === 'block';
     if (show !== cur) {
