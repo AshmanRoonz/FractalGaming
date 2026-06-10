@@ -6714,6 +6714,42 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  // ---- Outskirts monster sync (owner-authority) ----
+  // Owner's position/aggro/hp snapshot ; applied by non-owner proxies.
+  if (evt.type === 'mon_state' && Array.isArray(evt.m)) {
+    if (game.monsters && typeof _monAuthority === 'function' && !_monAuthority()) {
+      for (const row of evt.m) {
+        if (!Array.isArray(row) || row.length < 6) continue;
+        const m = game.monsters.find(x => x.monId === row[0]);
+        if (!m || !m.alive) continue;
+        m._netX = row[1]; m._netY = row[2]; m._netZ = row[3];
+        m.aggro = !!row[4];
+        if (typeof row[5] === 'number') m.health = row[5];
+      }
+    }
+    return;
+  }
+  // A peer's weapon hit ; only the authority applies real HP damage.
+  if (evt.type === 'mon_dmg' && typeof evt.i === 'number') {
+    if (game.monsters && typeof _monAuthority === 'function' && _monAuthority()) {
+      const m = game.monsters.find(x => x.monId === evt.i);
+      if (m && m.alive) {
+        try { m.takeDamage(Math.max(0, +evt.d || 0), 'net', null); } catch (_) {}
+      }
+    }
+    return;
+  }
+  // Authority killed a monster ; mirror the death (and guts) locally.
+  if (evt.type === 'mon_dead' && typeof evt.i === 'number') {
+    if (game.monsters) {
+      const m = game.monsters.find(x => x.monId === evt.i);
+      if (m && m.alive) {
+        if (typeof evt.x === 'number') m.position.set(evt.x, evt.y || 0, evt.z || 0);
+        try { m.die(false); } catch (_) {}
+      }
+    }
+    return;
+  }
   // A peer destroyed the Champion Shell ; mirror the kill locally so the
   // champion field unlocks for everyone at the same moment. (Shell HP is
   // tracked per-client ; first client to crack it wins the unlock.)
@@ -24036,6 +24072,41 @@ function _playerOutsideArena() {
   return player.position.distanceTo(a.center) > _monsterArenaRadius() + 150;
 }
 
+// ---- Multiplayer sync (owner-authority, house style) ----
+// Solo: the local client is always the authority. Multiplayer: the stasis
+// owner simulates the pack and broadcasts ~6.7 Hz 'mon_state' snapshots ;
+// peers run lightweight proxies (position glide + local zaps), forward
+// their weapon damage via 'mon_dmg', and mirror kills via 'mon_dead'.
+function _monAuthority() {
+  if (typeof net === 'undefined' || !net || !net.active) return true;
+  return (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
+}
+
+// Nearest player ship to a point. requireOutside filters to ships beyond
+// the arena boundary ; considers the local player AND network peers, so a
+// remote friend baiting a leviathan works on the owner's sim.
+function _monNearestShip(fromPos, requireOutside) {
+  const a = _monsterArenaInfo();
+  const R = _monsterArenaRadius() + 150;
+  let bestPos = null, bestD = Infinity, bestLocal = false;
+  if (typeof player !== 'undefined' && player && player.position &&
+      player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    if (!requireOutside || player.position.distanceTo(a.center) > R) {
+      const d = fromPos.distanceTo(player.position);
+      if (d < bestD) { bestD = d; bestPos = player.position; bestLocal = true; }
+    }
+  }
+  if (typeof net !== 'undefined' && net && net.active && Array.isArray(net.networkPlayers)) {
+    for (const np of net.networkPlayers) {
+      if (!np || !np.alive || !np.position) continue;
+      if (requireOutside && np.position.distanceTo(a.center) <= R) continue;
+      const d = fromPos.distanceTo(np.position);
+      if (d < bestD) { bestD = d; bestPos = np.position; bestLocal = false; }
+    }
+  }
+  return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal } : null;
+}
+
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -24056,9 +24127,13 @@ class OutskirtsMonster {
     this.velocity = new THREE.Vector3(0, 0, 0);
     this.mesh = null;               // attached when the GLB finishes loading
     this.zapTimer = Math.random() * MONSTER_ZAP_EVERY;
-    this.aggro = false;        // set when the player exits the arena ; persists if baited inside
+    this.aggro = false;        // set when a ship exits the arena ; persists if baited inside
     this._deAggroT = 0;
     this._touchCd = 0;
+    this.monId = -1;           // stable cross-client id, assigned by _initMonsters
+    this._netX = null;         // latest snapshot position (non-owner proxies)
+    this._netY = 0;
+    this._netZ = 0;
     this.rotVel = new THREE.Vector3(
       (Math.random() - 0.5) * 0.10,
       (Math.random() - 0.5) * 0.16,
@@ -24120,7 +24195,6 @@ class OutskirtsMonster {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
-    this.health -= dmg;
     // Hit feedback, throttled so chainguns don't hammer the spark pool.
     if (this._hitFxTimer <= 0) {
       this._hitFxTimer = 0.12;
@@ -24130,11 +24204,21 @@ class OutskirtsMonster {
         if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, this.def.gut1, 2.0, 420, 0.12);
       } catch (_) {}
     }
-    if (this.health <= 0) this.die();
+    if (!_monAuthority()) {
+      // Non-owner: forward the hit to the authority ; HP resolves there
+      // and flows back via snapshots. Returning dmg keeps local hit
+      // markers + damage-dealt feel responsive.
+      if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+        try { net.sendEvent({ type: 'mon_dmg', i: this.monId, d: Math.round(dmg) }); } catch (_) {}
+      }
+      return dmg;
+    }
+    this.health -= dmg;
+    if (this.health <= 0) this.die(true);
     return dmg;
   }
 
-  die() {
+  die(broadcast) {
     if (!this.alive) return;
     this.alive = false;
     try { spawnMonsterGuts(this.position, MONSTER_SIZE, this.def); } catch (e) { console.warn('[monsters] guts failed:', e); }
@@ -24143,48 +24227,57 @@ class OutskirtsMonster {
       this.mesh = null;
     }
     try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
+    // Mirror the kill (and the guts position) on every peer.
+    if (broadcast && typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      try {
+        net.sendEvent({ type: 'mon_dead', i: this.monId,
+          x: Math.round(this.position.x), y: Math.round(this.position.y), z: Math.round(this.position.z) });
+      } catch (_) {}
+    }
   }
 
   update(dt) {
     if (!this.alive || !this.mesh) return;
     this._hitFxTimer -= dt;
     this._touchCd -= dt;
-    const playerFlying = (typeof player !== 'undefined') && player &&
-      player.shipState !== 'dead' && player.shipState !== 'spawning';
-    const distToPlayer = playerFlying ? this.position.distanceTo(player.position) : Infinity;
-    // Aggro rules: stepping outside the arena marks you for every
-    // leviathan. A baited monster FOLLOWS you back inside the arena and
-    // only loses interest after you stay out of its reach for a stretch
-    // (then it lumbers back to its patrol).
-    if (_playerOutsideArena()) {
+    if (!_monAuthority()) { this._updateProxy(dt); return; }
+    // ---- authority sim (solo, or the stasis owner in multiplayer) ----
+    // Aggro rules: ANY ship (local player or network peer) stepping
+    // outside the arena marks itself for every leviathan. A baited
+    // monster FOLLOWS its prey back inside the arena and only loses
+    // interest after everyone stays out of its reach for a stretch.
+    const tgtOutside = _monNearestShip(this.position, true);
+    let tgt = tgtOutside;
+    if (tgtOutside) {
       this.aggro = true;
       this._deAggroT = 0;
     } else if (this.aggro) {
-      if (!playerFlying) {
-        this.aggro = false;
-      } else if (distToPlayer > MONSTER_ZAP_RANGE * 1.6) {
+      tgt = _monNearestShip(this.position, false);  // baited: hunt the nearest ship anywhere
+      if (!tgt || tgt.dist > MONSTER_ZAP_RANGE * 1.6) {
         this._deAggroT += dt;
         if (this._deAggroT > 12) this.aggro = false;
       } else {
         this._deAggroT = 0;
       }
     }
-    const chasing = this.aggro && playerFlying;
+    const chasing = this.aggro && tgt;
     if (chasing) {
       // Inevitable convergence on the trespasser: surge across the void,
       // then the slow menacing creep for the final approach.
-      const desired = _monScratchA.subVectors(player.position, this.position);
-      const dist = distToPlayer;
+      const desired = _monScratchA.subVectors(tgt.pos, this.position);
+      const dist = tgt.dist;
       const spd = (dist > 4000)
         ? Math.min(MONSTER_FAR_SPD, MONSTER_CHASE_SPD + (dist - 4000) * 0.08)
         : MONSTER_CHASE_SPD;
       if (dist > 1) desired.multiplyScalar(spd / dist);
       this.velocity.lerp(desired, Math.min(1, dt * 0.9));
-      // Electric zap when close: bolt + crackle + damage.
+      // Electric zap when close. Damage applies only when the victim is
+      // OUR player ; a remote victim's own client runs the identical zap
+      // locally off the synced aggro flag + positions, so it hurts there.
       this.zapTimer -= dt;
       if (dist < MONSTER_ZAP_RANGE && this.zapTimer <= 0) {
         this.zapTimer = MONSTER_ZAP_EVERY * (0.85 + Math.random() * 0.3);
-        this._zap(dist);
+        this._zap(tgt.pos, tgt.isLocal);
       }
     } else {
       // Aimless drift around the home patch: retarget every 6-12 s,
@@ -24213,20 +24306,40 @@ class OutskirtsMonster {
       this.velocity.lerp(desired, Math.min(1, dt * 0.5));
       this.zapTimer = Math.max(this.zapTimer - dt, 0.2);
     }
-    // Contact shock: flying into a leviathan is a mistake. Zap on touch
-    // (own short cooldown, works even on a peaceful drifter) plus a shove
-    // so the ship doesn't ghost through the body.
-    if (playerFlying && distToPlayer < this.collisionRadius + 90 && this._touchCd <= 0) {
-      this._touchCd = 0.6;
-      this._zap(distToPlayer);
-      const shove = _monScratchA.subVectors(player.position, this.position);
-      const sl = shove.length();
-      if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
-    }
+    this._contactShock();
     this.position.addScaledVector(this.velocity, dt);
     this.mesh.position.copy(this.position);
     if (chasing) {
       // Face the prey ; slow menace, no snap.
+      this.mesh.lookAt(tgt.pos);
+    } else {
+      this.mesh.rotation.x += this.rotVel.x * dt;
+      this.mesh.rotation.y += this.rotVel.y * dt;
+      this.mesh.rotation.z += this.rotVel.z * dt;
+    }
+  }
+
+  // Non-owner peers: glide to the owner's snapshot positions, zap OUR
+  // player locally when the synced beast is aggroed and close (each
+  // client hurts only itself ; no damage routing needed), no AI of our own.
+  _updateProxy(dt) {
+    if (this._netX != null) {
+      _monScratchA.set(this._netX, this._netY, this._netZ);
+      const d = this.position.distanceTo(_monScratchA);
+      if (d > 4000) this.position.copy(_monScratchA);          // teleport-correct big gaps
+      else if (d > 1) this.position.lerp(_monScratchA, Math.min(1, dt * 4));
+    }
+    const playerFlying = (typeof player !== 'undefined') && player &&
+      player.shipState !== 'dead' && player.shipState !== 'spawning';
+    const dist = playerFlying ? this.position.distanceTo(player.position) : Infinity;
+    this.zapTimer -= dt;
+    if (this.aggro && playerFlying && dist < MONSTER_ZAP_RANGE && this.zapTimer <= 0) {
+      this.zapTimer = MONSTER_ZAP_EVERY * (0.85 + Math.random() * 0.3);
+      this._zap(player.position, true);
+    }
+    this._contactShock();
+    this.mesh.position.copy(this.position);
+    if (this.aggro && playerFlying && dist < MONSTER_ZAP_RANGE * 3) {
       this.mesh.lookAt(player.position);
     } else {
       this.mesh.rotation.x += this.rotVel.x * dt;
@@ -24235,10 +24348,28 @@ class OutskirtsMonster {
     }
   }
 
-  _zap(dist) {
-    const from = _monScratchA.copy(player.position).sub(this.position).normalize()
+  // Contact shock: flying into a leviathan is a mistake. Zap on touch
+  // (own short cooldown, works even on a peaceful drifter) plus a shove
+  // so the ship doesn't ghost through the body. Local-player only ;
+  // every client runs this against its own ship.
+  _contactShock() {
+    if (typeof player === 'undefined' || !player || !player.position) return;
+    if (player.shipState === 'dead' || player.shipState === 'spawning') return;
+    if (this._touchCd > 0) return;
+    const dist = this.position.distanceTo(player.position);
+    if (dist < this.collisionRadius + 90) {
+      this._touchCd = 0.6;
+      this._zap(player.position, true);
+      const shove = _monScratchA.subVectors(player.position, this.position);
+      const sl = shove.length();
+      if (sl > 0.001 && player.velocity) player.velocity.addScaledVector(shove.multiplyScalar(1 / sl), 380);
+    }
+  }
+
+  _zap(toPos, applyDamage) {
+    const from = _monScratchA.copy(toPos).sub(this.position).normalize()
       .multiplyScalar(this.collisionRadius * 0.8).add(this.position);
-    const to = _monScratchB.copy(player.position);
+    const to = _monScratchB.copy(toPos);
     to.x += (Math.random() - 0.5) * 25;
     to.y += (Math.random() - 0.5) * 25;
     to.z += (Math.random() - 0.5) * 25;
@@ -24247,13 +24378,15 @@ class OutskirtsMonster {
         spawnLightningBolt(from, to, 0x99e0ff, 0.22, 3, 2.5, true);
         spawnLightningBolt(from, to, 0xddf4ff, 0.12, 1, 1.2, true);
       }
-      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(player.position, 10, 1.0, 260, 0x99e0ff, 0xffffff);
+      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(to, 10, 1.0, 260, 0x99e0ff, 0xffffff);
       if (typeof spawnDynamicLight === 'function') spawnDynamicLight(from, 0x99e0ff, 3.0, 800, 0.18);
       if (typeof playSpatialSound === 'function') {
         playSpatialSound('stun', this.position.clone(), { refDistance: 500, maxDistance: 4000, rolloffFactor: 0.9 });
       }
     } catch (_) {}
-    try { playerTakeDamage(MONSTER_ZAP_DMG, this); } catch (_) {}
+    if (applyDamage) {
+      try { playerTakeDamage(MONSTER_ZAP_DMG, this); } catch (_) {}
+    }
   }
 }
 
@@ -24265,7 +24398,9 @@ function _initMonsters() {
     new THREE.Vector3( 0, 0, 1), new THREE.Vector3( 0, 0,-1),
   ];
   for (let i = 0; i < MONSTER_DEFS.length; i++) {
-    game.monsters.push(new OutskirtsMonster(MONSTER_DEFS[i], faces[i % faces.length]));
+    const m = new OutskirtsMonster(MONSTER_DEFS[i], faces[i % faces.length]);
+    m.monId = i;   // stable cross-client id: every client builds this same list in this same order
+    game.monsters.push(m);
   }
   _loadNextMonsterModel();
   // Warm the Champion Shell model too, so the sphere doesn't hitch-parse
@@ -24576,6 +24711,24 @@ function updateMonsters(dt) {
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
     if (m.alive) m.update(dt);
+  }
+  // Owner broadcasts position/aggro/hp snapshots so every peer's proxies
+  // glide in step. ~6.7 Hz ; 6 rows of 6 small ints, negligible traffic.
+  if (typeof net !== 'undefined' && net && net.active && net.sendEvent && _monAuthority()) {
+    updateMonsters._syncT = (updateMonsters._syncT || 0) - dt;
+    if (updateMonsters._syncT <= 0) {
+      updateMonsters._syncT = 0.15;
+      const rows = [];
+      for (const m of game.monsters) {
+        if (m.monId == null || m.monId < 0 || !m.alive) continue;
+        rows.push([m.monId,
+          Math.round(m.position.x), Math.round(m.position.y), Math.round(m.position.z),
+          m.aggro ? 1 : 0, Math.round(m.health)]);
+      }
+      if (rows.length) {
+        try { net.sendEvent({ type: 'mon_state', m: rows }); } catch (_) {}
+      }
+    }
   }
 }
 
