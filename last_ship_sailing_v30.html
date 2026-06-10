@@ -24784,7 +24784,9 @@ function _loadNextMonsterModel() {
     MONSTER_BASE_URL + m.def.key + '.glb',
     gltf => {
       try { m.attachModel(gltf.scene); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
-      setTimeout(_loadNextMonsterModel, 1200);
+      // 2.5 s breather between parses spreads the main-thread cost so no
+      // single second eats more than one model's decode.
+      setTimeout(_loadNextMonsterModel, 2500);
     },
     undefined,
     err => {
@@ -25087,6 +25089,14 @@ function updateMonsters(dt) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   if (!game || (game.state !== 'playing' && game.state !== 'warmup' && game.state !== 'roundEnd')) return;
   if (!_monstersInit) {
+    // Deferred init: GLB parsing runs on the main thread, and kicking it
+    // off during the round-open seconds was measured as a dip to ~48 fps
+    // even on a desktop GPU. Wait until the round proper has been running
+    // ~6 s ; the monsters live in the outskirts, so nobody sees them
+    // arrive late.
+    if (game.state !== 'playing') return;
+    updateMonsters._delayT = (updateMonsters._delayT || 0) + dt;
+    if (updateMonsters._delayT < 6) return;
     _monstersInit = true;
     try { _initMonsters(); } catch (e) { console.warn('[monsters] init failed:', e); }
     return;
@@ -25107,6 +25117,42 @@ function updateMonsters(dt) {
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
     if (m.alive) m.update(dt);
+  }
+  // Separation: monsters chasing the same prey were stacking inside each
+  // other (no monster-vs-monster spacing existed). Pairwise repulsion
+  // spring keeps them in a loose pack instead of a single chimera ;
+  // authority-side only, proxies inherit via snapshots. Entries without
+  // a velocity (the Champion Shell) are skipped.
+  if (_monAuthority()) {
+    const arr = game.monsters;
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      if (!a.alive || !a.mesh || !a.velocity) continue;
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        if (!b.alive || !b.mesh || !b.velocity) continue;
+        const dx = b.position.x - a.position.x;
+        const dy = b.position.y - a.position.y;
+        const dz = b.position.z - a.position.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        const minD = (a.collisionRadius + b.collisionRadius) * 1.05;
+        if (d2 < minD * minD && d2 > 1) {
+          const d = Math.sqrt(d2);
+          // Spring strength scales with overlap depth ; firm enough to
+          // untangle an existing stack within a couple of seconds.
+          const k = (1 - d / minD) * 900 * dt;
+          const inv = 1 / d;
+          a.velocity.x -= dx * inv * k; a.velocity.y -= dy * inv * k; a.velocity.z -= dz * inv * k;
+          b.velocity.x += dx * inv * k; b.velocity.y += dy * inv * k; b.velocity.z += dz * inv * k;
+        } else if (d2 <= 1) {
+          // Perfectly co-located (the stacked case): no direction to push,
+          // so kick them apart randomly and let the spring take over.
+          a.velocity.x += (Math.random() - 0.5) * 220;
+          a.velocity.y += (Math.random() - 0.5) * 220;
+          a.velocity.z += (Math.random() - 0.5) * 220;
+        }
+      }
+    }
   }
   // Owner broadcasts position/aggro/hp snapshots so every peer's proxies
   // glide in step. ~6.7 Hz ; 6 rows of 6 small ints, negligible traffic.
@@ -34108,6 +34154,10 @@ function updateAbilities(dt) {
         }
         const proj = new Projectile(_pbOrigin, vel, 200, 100, 'player', LSS.CLASS_COLORS.PUNCTURE);
         proj.smokeTrail = true;
+        // Lift the impact size past the silent small-explosion tier (12)
+        // so every barrage hit gets the full fireball + spatial boom.
+        // Damage and splash radius unchanged.
+        proj.sizeMult = 2;
         proj.removeHaze();
         game.projectiles.push(proj);
       }
@@ -53944,7 +53994,6 @@ _loadPersistedSoundRecipes();
 // audible event. Gaps are picked per-type so the rate-limit is invisible
 // during normal play.
 const _SOUND_MIN_GAP = {
-  barrage_missile_pop: 0.06, // was unthrottled ; Mega Barrage volleys could stack dozens in one frame
   // Weapon fire: cap a hair below each weapon's natural fire rate so the
   // local player's stream always passes ; concurrent enemy streams get
   // folded into the same audible burst instead of doubling the load.
