@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v27</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v27","short_name":"LSS%20v27","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"landscape","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v30</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v30","short_name":"LSS%20v30","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"landscape","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -24474,26 +24474,32 @@ class OutskirtsMonster {
 
   attachModel(obj3d) {
     if (!this.alive || !obj3d || typeof scene === 'undefined') return;
-    // Self-illuminate: the outskirts have almost no scene lighting, so
-    // stock GLB PBR materials render near-black out there. Route each
-    // material's own texture/color through its emissive channel ; the
-    // creature reads in the void without needing lights.
+    // Full-bright textured materials (perf): the GLBs ship with PBR
+    // MeshStandardMaterial, which pays per-pixel lighting math we don't
+    // even want — the creatures were already being emissive-driven so
+    // they read in the unlit void. MeshBasicMaterial(map) gives the
+    // identical full-bright look at a fraction of the fragment cost
+    // (this was a measured chunk of the mobile framerate regression).
     obj3d.traverse(node => {
       if (!node.isMesh || !node.material) return;
       const mats = Array.isArray(node.material) ? node.material : [node.material];
+      const out = [];
       for (const mat of mats) {
-        if (!mat || !mat.emissive) continue;
+        if (!mat) { out.push(mat); continue; }
         try {
-          if (mat.map) {
-            mat.emissiveMap = mat.map;
-            mat.emissive.setRGB(1, 1, 1);
-            mat.emissiveIntensity = 0.5;
-          } else {
-            mat.emissive.copy(mat.color || new THREE.Color(0x888888)).multiplyScalar(0.55);
+          const flat = new THREE.MeshBasicMaterial({
+            map: mat.map || null,
+            color: (mat.color && mat.map) ? 0xffffff : ((mat.color && mat.color.getHex()) || 0x888888),
+          });
+          if (!mat.map) {
+            // Untextured part: keep its tint, brightened for the void.
+            flat.color.multiplyScalar(0.85);
           }
-          mat.needsUpdate = true;
-        } catch (_) {}
+          out.push(flat);
+          if (mat.dispose) { try { mat.dispose(); } catch (_) {} }
+        } catch (_) { out.push(mat); }
       }
+      node.material = Array.isArray(node.material) ? out : out[0];
     });
     // Normalize: every kid-designed monster comes in at its own scale ;
     // fit the longest axis to MONSTER_SIZE and recentre on origin.
@@ -24561,6 +24567,14 @@ class OutskirtsMonster {
     if (!this.alive || !this.mesh) return;
     this._hitFxTimer -= dt;
     this._touchCd -= dt;
+    // Distance culling: a 520-unit creature beyond ~13k is a few pixels,
+    // but its full mesh still costs vertex + draw-call time every frame.
+    // Hide it ; AI still simulates so it arrives like before.
+    if (typeof camera !== 'undefined' && camera && camera.position) {
+      const _camD2 = this.position.distanceToSquared(camera.position);
+      const vis = _camD2 < 13000 * 13000;
+      if (this.mesh.visible !== vis) this.mesh.visible = vis;
+    }
     if (!_monAuthority()) { this._updateProxy(dt); return; }
     // ---- authority sim (solo, or the stasis owner in multiplayer) ----
     // Aggro rules: ANY ship (local player or network peer) stepping
@@ -24926,22 +24940,25 @@ function _preloadChampionShellModel() {
 }
 
 function _champSelfIlluminate(obj3d) {
+  // Same full-bright conversion as the monsters: MeshBasicMaterial(map)
+  // replaces the GLB's PBR materials. NOTE: these are CLONE materials
+  // (the proto's are untouched), so disposing the replaced clones is safe.
   obj3d.traverse(node => {
     if (!node.isMesh || !node.material) return;
     const mats = Array.isArray(node.material) ? node.material : [node.material];
+    const out = [];
     for (const mat of mats) {
-      if (!mat || !mat.emissive) continue;
+      if (!mat) { out.push(mat); continue; }
       try {
-        if (mat.map) {
-          mat.emissiveMap = mat.map;
-          mat.emissive.setRGB(1, 1, 1);
-          mat.emissiveIntensity = 0.5;
-        } else {
-          mat.emissive.copy(mat.color || new THREE.Color(0x888888)).multiplyScalar(0.55);
-        }
-        mat.needsUpdate = true;
-      } catch (_) {}
+        const flat = new THREE.MeshBasicMaterial({
+          map: mat.map || null,
+          color: (mat.color && mat.map) ? 0xffffff : ((mat.color && mat.color.getHex()) || 0x9966cc),
+        });
+        out.push(flat);
+        if (mat.dispose) { try { mat.dispose(); } catch (_) {} }
+      } catch (_) { out.push(mat); }
     }
+    node.material = Array.isArray(node.material) ? out : out[0];
   });
 }
 
@@ -38911,6 +38928,26 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // them if they opt in, and mouse fire is only suppressed when touch
     // controls are enabled.
     if (_enabled) input.touchSuppressMouse = true;
+    // Mobile GPU relief: cap the render pixel ratio at 1.5. DPR-3 phones
+    // were pushing 9 megapixel-class fragment loads through bloom ; 1.5
+    // is visually fine at phone sizes and roughly quarters that. Retries
+    // until the renderer exists (it boots after this module).
+    if (_enabled) {
+      const _capPR = (tries) => {
+        try {
+          const r = (typeof renderer !== 'undefined' && renderer) ? renderer : window.renderer;
+          if (r && r.setPixelRatio && r.getPixelRatio) {
+            if (r.getPixelRatio() > 1.5) {
+              r.setPixelRatio(1.5);
+              r.setSize(window.innerWidth, window.innerHeight);
+            }
+            return;
+          }
+        } catch (_) {}
+        if (tries > 0) setTimeout(() => _capPR(tries - 1), 1000);
+      };
+      setTimeout(() => _capPR(20), 1500);
+    }
   }
 
 
