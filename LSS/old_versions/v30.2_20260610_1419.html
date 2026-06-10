@@ -2427,6 +2427,29 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   #lobby-settings-btn-main { min-height: 44px !important; }
 }
 
+/* ---- Mobile: ship-select LANDSCAPE fit ----
+   Short viewports could not reach CONFIRM & LAUNCH: the preview info
+   column centered its content and overflowed invisibly (the body is
+   scroll-locked on touch devices). Cap the heavy rows, make the info
+   column its own scroll area, and slim the paddings. */
+@media (max-height: 620px) {
+  #ship-preview { padding: 6px 10px !important; gap: 12px !important; min-height: 0 !important; }
+  #ship-preview-model { min-height: 0 !important; }
+  #ship-preview-info {
+    width: 290px !important; min-height: 0 !important;
+    overflow-y: auto !important; -webkit-overflow-scrolling: touch;
+    justify-content: flex-start !important; padding: 2px 6px !important;
+  }
+  #ship-preview-header { margin-bottom: 6px !important; }
+  #ship-preview-name { font-size: 17px !important; letter-spacing: 3px !important; }
+  #ship-preview-stats { margin: 6px 0 8px !important; gap: 4px 10px !important; }
+  #ship-preview-confirm, #ship-preview-confirm-vr {
+    margin-top: 8px !important; padding: 9px 20px !important; font-size: 11px !important;
+  }
+  #teammates-strip { max-height: 74px; overflow: hidden; }
+  #ship-select-header { padding: 4px 12px 3px !important; }
+}
+
 /* ---- Mobile: ship-select (short or narrow) ---- */
 @media (max-height: 560px), (max-width: 760px) {
   #ship-select-header { padding: 6px 14px 5px !important; }
@@ -2774,6 +2797,24 @@ window.lssAutoFullscreen = function () {
 function _bootLSS() {
 
 // ---- GAME CONSTANTS ----
+
+// ---- BUILD VERSION ----
+// Bump the decimal on every change batch (backup goes to
+// LSS/old_versions/ first). Printed on the lobby + tab title so a stale
+// cached build is obvious at a glance.
+const LSS_BUILD = '30.2';
+try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
+try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
+try {
+  const _vb = document.createElement('div');
+  _vb.id = 'lss-version-badge';
+  _vb.textContent = 'v' + LSS_BUILD;
+  _vb.style.cssText = 'position:fixed;left:10px;bottom:8px;z-index:160;' +
+    "font-family:'Rajdhani',monospace;font-size:11px;letter-spacing:2px;" +
+    'color:rgba(150,200,255,0.55);pointer-events:none;';
+  if (document.body) document.body.appendChild(_vb);
+  else document.addEventListener('DOMContentLoaded', () => document.body.appendChild(_vb));
+} catch (_) {}
 
 const LSS = {
   MAX_PLAYERS: 12, TEAM_FLEET_A: 2, TEAM_FLEET_B: 3,
@@ -10949,8 +10990,17 @@ try {
 } catch (_) {}
 
 (function () {
-  let _stored = 'high';
-  try { _stored = localStorage.getItem('lss_quality') || 'high'; } catch (_) {}
+  // Mobile-aware default: phones/tablets (coarse pointer + touch) start
+  // on LOW instead of HIGH the first time they run. A quality the user
+  // explicitly picked in Settings is always respected.
+  const _isMobileGPU = (navigator.maxTouchPoints > 0) &&
+    (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  let _stored = null;
+  try { _stored = localStorage.getItem('lss_quality'); } catch (_) {}
+  if (!_stored) {
+    _stored = _isMobileGPU ? 'low' : 'high';
+    try { localStorage.setItem('lss_quality', _stored); } catch (_) {}
+  }
   if (_stored === 'potato') {
     _stored = 'low';
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
@@ -10958,6 +11008,10 @@ try {
   let _dprCap;
   if (_stored === 'ultra') {
     _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
+  } else if (_isMobileGPU) {
+    // DPR-3 phones at cap 2 still pushed ~2x the fragments they can
+    // afford through bloom ; 1.5 is visually fine at phone sizes.
+    _dprCap = Math.min(window.devicePixelRatio, 1.5);
   } else {
     _dprCap = Math.min(window.devicePixelRatio, 2);
   }
@@ -15912,17 +15966,21 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   let engineMesh;
   const name = chassisData.name;
   if (name === 'Frigate') {
-    const glowGeo = new THREE.CircleGeometry(h * 0.35, 12);
+    // NO FLAT SHAPES: engine glows are squashed 3D orbs, not discs.
+    const glowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
+    glowGeo.scale(1, 1, 0.55);
     const g1 = addGlow(glowGeo, engineGlowMat, -w * 0.5, -h * 0.15, tailZ);
     const g2 = addGlow(glowGeo, engineGlowMat,  w * 0.5, -h * 0.15, tailZ);
     addPlume(-w * 0.5, -h * 0.15, tailZ, h * 0.32, l * 1.4, plumeMat);
     addPlume( w * 0.5, -h * 0.15, tailZ, h * 0.32, l * 1.4, plumeMat);
     engineMesh = g1;
   } else if (name === 'Corvette') {
-    const glowGeo = new THREE.CircleGeometry(h * 0.6, 16);
+    const glowGeo = new THREE.SphereGeometry(h * 0.6, 14, 10);
+    glowGeo.scale(1, 1, 0.55);
     const g = addGlow(glowGeo, engineGlowMat, 0, 0, tailZ);
     addPlume(0, 0, tailZ, h * 0.55, l * 1.8, plumeMat);
-    const thrGeo = new THREE.CircleGeometry(h * 0.12, 8);
+    const thrGeo = new THREE.SphereGeometry(h * 0.12, 8, 6);
+    thrGeo.scale(1, 1, 0.6);
     [-1, 1].forEach(sx => [-1, 1].forEach(sy => {
       addGlow(thrGeo, thrusterMat, sx * w * 0.7, sy * h * 0.5, tailZ - h * 0.3);
       addPlume(sx * w * 0.7, sy * h * 0.5, tailZ - h * 0.3, h * 0.10, l * 0.45, plumeMatCool);
@@ -15930,14 +15988,16 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     engineMesh = g;
   } else {
     // Dreadnought
-    const bigGlowGeo = new THREE.CircleGeometry(h * 0.35, 12);
+    const bigGlowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
+    bigGlowGeo.scale(1, 1, 0.55);
     const big = [];
     [-1, 0, 1].forEach(i => {
       const m = addGlow(bigGlowGeo, engineGlowMat, i * w * 0.5, 0, tailZ);
       big.push(m);
       addPlume(i * w * 0.5, 0, tailZ, h * 0.32, l * 1.6, plumeMat);
     });
-    const smGlowGeo = new THREE.CircleGeometry(h * 0.15, 8);
+    const smGlowGeo = new THREE.SphereGeometry(h * 0.15, 8, 6);
+    smGlowGeo.scale(1, 1, 0.6);
     [-1.5, -0.5, 0.5, 1.5].forEach(i => {
       addGlow(smGlowGeo, thrusterMat, i * w * 0.35, h * 0.5, tailZ - h * 0.15);
       addPlume(i * w * 0.35, h * 0.5, tailZ - h * 0.15, h * 0.13, l * 0.55, plumeMatCool);
@@ -20031,7 +20091,8 @@ async function _warmupCombatShadersBody() {
 const _EXPL_SPHERE_LG  = new THREE.SphereGeometry(1, 8, 6);     // flash, fire
 const _EXPL_SPHERE_SM  = new THREE.SphereGeometry(1, 6, 4);     // explosion core
 const _EXPL_SPHERE_TINY= new THREE.SphereGeometry(1, 4, 3);     // impact sparks
-const _EXPL_PLANE      = new THREE.PlaneGeometry(1, 1);          // flare billboard
+const _EXPL_PLANE      = new THREE.PlaneGeometry(1, 1);          // (retired from explosions ; kept for pool compat)
+const _EXPL_SPHERE_MED = new THREE.SphereGeometry(1, 12, 8);    // flash/flare/fire/core 3D orbs
 const _EXPL_RING_FLAT  = new THREE.TorusGeometry(0.5, 0.05, 6, 48); // (v6.7) thin torus instead of RingGeometry so the camera-facing shockwave still has real volume from any oblique angle. Major radius 0.5 / tube 0.05 gives the same 0.45-0.55 visible band as the old flat ring.
 const _EXPL_TORUS_PRI  = new THREE.TorusGeometry(0.5, 0.10, 8, 32); // primary shockwave torus
 const _EXPL_TORUS_SEC  = new THREE.TorusGeometry(0.5, 0.07, 8, 32); // secondary shockwave torus
@@ -20060,47 +20121,37 @@ function _makeExplosionMesh(type) {
   let geo, matOpts;
   switch (type) {
     case 'flash':
-      // (Descent 3 style) Camera-facing billboard quad with the ember radial-
-      // falloff texture instead of a sphere. A 3D sphere always reads as a
-      // hard ball over whatever you hit (especially noticeable when a
-      // projectile destroys at a ship's center). A camera-facing soft disc
-      // reads as a real burst of light from any viewing angle.
-      geo = _EXPL_PLANE;
+      // NO FLAT SHAPES rule: real 3D orb instead of a camera-facing disc.
+      // Additive blending + no depth-write keeps it reading as a burst of
+      // light (not a hard ball), and the volumetric LayeredFX fireball
+      // cluster spawned alongside carries the body of the blast.
+      geo = _EXPL_SPHERE_MED;
       matOpts = {
-        color: 0xffffff, transparent: true, opacity: 1.0,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-        map: _emberFalloffTexture,
+        color: 0xffffff, transparent: true, opacity: 0.95,
+        blending: THREE.AdditiveBlending, depthWrite: false,
       };
       break;
     case 'flare':
-      geo = _EXPL_PLANE;
-      // The flare always camera-faces (lookAt(camera.position) at
-      // spawn), but without a soft falloff texture the plane reads as a
-      // warm-colored SQUARE that screams "90s sprite". Mapping the ember
-      // radial-gradient texture turns it into a soft sun-flare disc.
+      geo = _EXPL_SPHERE_MED;
+      // 3D halo orb (no flat shapes). Lower opacity: additive spheres
+      // stack brighter than the old textured discs.
       matOpts = {
-        color: 0xffeec0, transparent: true, opacity: 0.95,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-        map: _emberFalloffTexture,
+        color: 0xffeec0, transparent: true, opacity: 0.45,
+        blending: THREE.AdditiveBlending, depthWrite: false,
       };
       break;
     case 'fire':
-      // Same Descent 3 treatment: camera-facing billboard with ember
-      // texture, color tinted orange. Replaces the old _EXPL_SPHERE_LG
-      // 3D ball that was clearly geometric on top of every ship hit.
-      geo = _EXPL_PLANE;
+      geo = _EXPL_SPHERE_MED;
       matOpts = {
-        color: 0xff6600, transparent: true, opacity: 0.85,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-        map: _emberFalloffTexture,
+        color: 0xff6600, transparent: true, opacity: 0.6,
+        blending: THREE.AdditiveBlending, depthWrite: false,
       };
       break;
     case 'core':
-      geo = _EXPL_PLANE;
+      geo = _EXPL_SPHERE_MED;
       matOpts = {
-        color: 0xff2200, transparent: true, opacity: 0.6,
-        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-        map: _emberFalloffTexture,
+        color: 0xff2200, transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false,
       };
       break;
     case 'flatShock':
@@ -20627,24 +20678,22 @@ function spawnExplosion(pos, size) {
     const flashMesh = _acquireExplosionMesh('flash');
     flashMesh.position.copy(pos);
     flashMesh.scale.setScalar(size * 0.45);
-    flashMesh.lookAt(camera.position);
     flashMesh.material.color.setHex(0xffffff);
     flashMesh.material.opacity = 0.85;
     game.effects.push({
       mesh: flashMesh, lifetime: 0.08, age: 0,
-      type: 'explosionFlash', pooled: true, billboard: true,
+      type: 'explosionFlash', pooled: true, billboard: false,
       baseScale: size * 0.45
     });
     if (_accent) {
       const fireMesh = _acquireExplosionMesh('fire');
       fireMesh.position.copy(pos);
       fireMesh.scale.setScalar(size * 0.7);
-      fireMesh.lookAt(camera.position);
       fireMesh.material.color.setHex(0xff6600);
       fireMesh.material.opacity = 0.72;
       game.effects.push({
         mesh: fireMesh, lifetime: 0.20, age: 0,
-        type: 'explosionFire', pooled: true, billboard: true,
+        type: 'explosionFire', pooled: true, billboard: false,
         maxSize: size * 1.55, baseScale: size * 0.7
       });
       if (typeof v8SpawnSparks === 'function') {
@@ -20781,37 +20830,33 @@ function spawnExplosion(pos, size) {
   const flashMesh = _acquireExplosionMesh('flash');
   flashMesh.position.copy(pos);
   flashMesh.scale.setScalar(size * 0.55);
-  flashMesh.lookAt(camera.position);
   flashMesh.material.color.setHex(0xffffff);
   flashMesh.material.opacity = 1.0;
-  game.effects.push({ mesh: flashMesh, lifetime: 0.12, age: 0, type: 'explosionFlash', pooled: true, billboard: true, baseScale: size * 0.55 });
+  game.effects.push({ mesh: flashMesh, lifetime: 0.12, age: 0, type: 'explosionFlash', pooled: true, billboard: false, baseScale: size * 0.55 });
 
   // --- Phase 1b: Cinematic billboarded "lens flare" disc that faces the camera ---
   const flareMesh = _acquireExplosionMesh('flare');
   flareMesh.position.copy(pos);
   flareMesh.scale.setScalar(size * 1.6);
-  flareMesh.lookAt(camera.position);
   flareMesh.material.color.setHex(0xffeec0);
   flareMesh.material.opacity = 0.95;
-  game.effects.push({ mesh: flareMesh, lifetime: 0.22, age: 0, type: 'explosionFlash', pooled: true, billboard: true, baseScale: size * 1.6 });
+  game.effects.push({ mesh: flareMesh, lifetime: 0.22, age: 0, type: 'explosionFlash', pooled: true, billboard: false, baseScale: size * 1.6 });
 
   // --- Phase 2: Expanding fireball (orange-red, multi-layer, camera-facing) ---
   const fireMesh = _acquireExplosionMesh('fire');
   fireMesh.position.copy(pos);
   fireMesh.scale.setScalar(size);
-  fireMesh.lookAt(camera.position);
   fireMesh.material.color.setHex(0xff6600);
   fireMesh.material.opacity = 0.85;
-  game.effects.push({ mesh: fireMesh, lifetime: 0.5, age: 0, type: 'explosionFire', pooled: true, billboard: true, maxSize: size * 2.5, baseScale: size });
+  game.effects.push({ mesh: fireMesh, lifetime: 0.5, age: 0, type: 'explosionFire', pooled: true, billboard: false, maxSize: size * 2.5, baseScale: size });
 
   // Inner darker core (red, slightly delayed expansion, also billboarded).
   const coreMesh = _acquireExplosionMesh('core');
   coreMesh.position.copy(pos);
   coreMesh.scale.setScalar(size * 0.7);
-  coreMesh.lookAt(camera.position);
   coreMesh.material.color.setHex(0xff2200);
   coreMesh.material.opacity = 0.6;
-  game.effects.push({ mesh: coreMesh, lifetime: 0.35, age: 0, type: 'explosionFire', pooled: true, billboard: true, maxSize: size * 1.8, baseScale: size * 0.7 });
+  game.effects.push({ mesh: coreMesh, lifetime: 0.35, age: 0, type: 'explosionFire', pooled: true, billboard: false, maxSize: size * 1.8, baseScale: size * 0.7 });
 
   // --- Phase 3: (removed) Shockwave torus rings ---
   // The flat camera-facing torus + volumetric ringShock + secondary
@@ -24784,7 +24829,9 @@ function _loadNextMonsterModel() {
     MONSTER_BASE_URL + m.def.key + '.glb',
     gltf => {
       try { m.attachModel(gltf.scene); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
-      setTimeout(_loadNextMonsterModel, 1200);
+      // 2.5 s breather between parses spreads the main-thread cost so no
+      // single second eats more than one model's decode.
+      setTimeout(_loadNextMonsterModel, 2500);
     },
     undefined,
     err => {
@@ -25087,6 +25134,14 @@ function updateMonsters(dt) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   if (!game || (game.state !== 'playing' && game.state !== 'warmup' && game.state !== 'roundEnd')) return;
   if (!_monstersInit) {
+    // Deferred init: GLB parsing runs on the main thread, and kicking it
+    // off during the round-open seconds was measured as a dip to ~48 fps
+    // even on a desktop GPU. Wait until the round proper has been running
+    // ~6 s ; the monsters live in the outskirts, so nobody sees them
+    // arrive late.
+    if (game.state !== 'playing') return;
+    updateMonsters._delayT = (updateMonsters._delayT || 0) + dt;
+    if (updateMonsters._delayT < 6) return;
     _monstersInit = true;
     try { _initMonsters(); } catch (e) { console.warn('[monsters] init failed:', e); }
     return;
@@ -25107,6 +25162,42 @@ function updateMonsters(dt) {
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
     if (m.alive) m.update(dt);
+  }
+  // Separation: monsters chasing the same prey were stacking inside each
+  // other (no monster-vs-monster spacing existed). Pairwise repulsion
+  // spring keeps them in a loose pack instead of a single chimera ;
+  // authority-side only, proxies inherit via snapshots. Entries without
+  // a velocity (the Champion Shell) are skipped.
+  if (_monAuthority()) {
+    const arr = game.monsters;
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      if (!a.alive || !a.mesh || !a.velocity) continue;
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        if (!b.alive || !b.mesh || !b.velocity) continue;
+        const dx = b.position.x - a.position.x;
+        const dy = b.position.y - a.position.y;
+        const dz = b.position.z - a.position.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        const minD = (a.collisionRadius + b.collisionRadius) * 1.05;
+        if (d2 < minD * minD && d2 > 1) {
+          const d = Math.sqrt(d2);
+          // Spring strength scales with overlap depth ; firm enough to
+          // untangle an existing stack within a couple of seconds.
+          const k = (1 - d / minD) * 900 * dt;
+          const inv = 1 / d;
+          a.velocity.x -= dx * inv * k; a.velocity.y -= dy * inv * k; a.velocity.z -= dz * inv * k;
+          b.velocity.x += dx * inv * k; b.velocity.y += dy * inv * k; b.velocity.z += dz * inv * k;
+        } else if (d2 <= 1) {
+          // Perfectly co-located (the stacked case): no direction to push,
+          // so kick them apart randomly and let the spring take over.
+          a.velocity.x += (Math.random() - 0.5) * 220;
+          a.velocity.y += (Math.random() - 0.5) * 220;
+          a.velocity.z += (Math.random() - 0.5) * 220;
+        }
+      }
+    }
   }
   // Owner broadcasts position/aggro/hp snapshots so every peer's proxies
   // glide in step. ~6.7 Hz ; 6 rows of 6 small ints, negligible traffic.
@@ -34108,6 +34199,10 @@ function updateAbilities(dt) {
         }
         const proj = new Projectile(_pbOrigin, vel, 200, 100, 'player', LSS.CLASS_COLORS.PUNCTURE);
         proj.smokeTrail = true;
+        // Lift the impact size past the silent small-explosion tier (12)
+        // so every barrage hit gets the full fireball + spatial boom.
+        // Damage and splash radius unchanged.
+        proj.sizeMult = 2;
         proj.removeHaze();
         game.projectiles.push(proj);
       }
@@ -53944,7 +54039,6 @@ _loadPersistedSoundRecipes();
 // audible event. Gaps are picked per-type so the rate-limit is invisible
 // during normal play.
 const _SOUND_MIN_GAP = {
-  barrage_missile_pop: 0.06, // was unthrottled ; Mega Barrage volleys could stack dozens in one frame
   // Weapon fire: cap a hair below each weapon's natural fire rate so the
   // local player's stream always passes ; concurrent enemy streams get
   // folded into the same audible burst instead of doubling the load.
