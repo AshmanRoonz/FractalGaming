@@ -2251,19 +2251,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
               </svg>
               SOUND LAB
             </a>
-            <a href="LSS/music_lab.html" target="_blank" rel="noopener" style="
-              background:rgba(15,30,40,0.6);border:1px solid rgba(120,200,255,0.35);
-              color:#cce8ff;padding:9px 12px;font-family:'Rajdhani','Orbitron',sans-serif;font-size:11px;
-              text-decoration:none;letter-spacing:2px;transition:all 0.2s;border-radius:6px;
-              display:flex;align-items:center;gap:8px;"
-              onmouseover="this.style.background='rgba(40,70,100,0.7)';this.style.borderColor='#7cf'"
-              onmouseout="this.style.background='rgba(15,30,40,0.6)';this.style.borderColor='rgba(120,200,255,0.35)'">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 18V5l12-2v13"/>
-                <circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
-              </svg>
-              MUSIC LAB
-            </a>
             <a href="LSS/fx_lab.html" target="_blank" rel="noopener" style="
               background:rgba(15,30,40,0.6);border:1px solid rgba(120,200,255,0.35);
               color:#cce8ff;padding:9px 12px;font-family:'Rajdhani','Orbitron',sans-serif;font-size:11px;
@@ -2799,7 +2786,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.48';
+const LSS_BUILD = '30.47';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -55910,7 +55897,6 @@ const MUSIC_STYLES = {
 // override if present. Falls back to PATTERN_RIFFS if the style doesn't
 // override that pattern.
 function _musicGetRiffCfg(patternId) {
-  if (music._cfgRiffs && music._cfgRiffs[patternId]) return music._cfgRiffs[patternId];
   const styleId = music.styleId || 'cosmic';
   const style = MUSIC_STYLES[styleId];
   if (style && style.riff && style.riff[patternId]) return style.riff[patternId];
@@ -55941,21 +55927,6 @@ function musicSetStyle(name) {
   // Bump bpmTarget by the new scale so the tempo follows the style.
   music.bpmTarget = music.bpmTarget * music.bpmScale / (music._lastBpmScale || 1.0);
   music._lastBpmScale = music.bpmScale;
-  // Music Lab config wins over style switching: the lab bakes the user's
-  // key/mode/waves into its export, so any later musicSetStyle (settings
-  // restore at boot, style dropdown) re-overlays the tuned values.
-  if (music._labCfg && music._labCfg.style) {
-    const s = music._labCfg.style;
-    if (typeof s.keyMidi === 'number')  music.keyMidi = s.keyMidi;
-    if (s.mode === 'aeolian' || s.mode === 'phrygian') {
-      music.mode = s.mode;
-      music.scale = (s.mode === 'phrygian') ? MUSIC_SCALE_PHRYGIAN : MUSIC_SCALE_AEOLIAN;
-    }
-    if (typeof s.bpmScale === 'number') { music.bpmScale = s.bpmScale; music._lastBpmScale = s.bpmScale; }
-    if (typeof s.leadWave === 'string') music.leadWave = s.leadWave;
-    if (typeof s.bassWave === 'string') music.bassWave = s.bassWave;
-    if (typeof s.padWave === 'string')  music.padWave  = s.padWave;
-  }
 }
 
 // Generate a list of {sub16, semi, vel} notes for the given bar+pattern. The
@@ -56073,7 +56044,7 @@ function _musicAdvanceHarmony(phraseBar) {
   if (phraseBar === 0) {
     // Top of the phrase: come home most of the time so the 8-bar arc has
     // a gravitational center the ear can hold on to.
-    deg = (Math.random() < ((typeof music.homePull === 'number') ? music.homePull : 0.70)) ? 0 : deg;
+    deg = (Math.random() < 0.70) ? 0 : deg;
   } else if (phraseBar === 7) {
     // Cadence bar: dominant-function setup for the next phrase top.
     const c = graph.cadence;
@@ -56111,7 +56082,6 @@ function _musicSnapToChord(semi) {
 // is the memorability piece: every match has a theme that develops with
 // the harmony instead of a stream of unrelated riff notes.
 function _musicEnsureMotif() {
-  if (music._motifKey === 'cfg' && music.motif) return;   // Music Lab locked motif
   const seedSrc = (typeof net !== 'undefined' && net && typeof net.worldSeed === 'number')
     ? net.worldSeed : null;
   const key = seedSrc != null ? ('net' + seedSrc) : ('m' + (music._motifMatchTag || ''));
@@ -56200,21 +56170,20 @@ function _musicScheduleBeat(beatIdx, beatTime) {
       // breathe (thinner hats), bar 7 beat 4 is a snare fill, and the top
       // of every phrase lands on a crash. Round/match-end patterns keep
       // their scripted drums untouched.
-      const _lg = music.layerGains || {};
       const hit = ptn.drum(sub, beatIdx, music.intensity);
       if (hit) {
         for (const h of hit) {
           if (_dynHarm && _phraseBar <= 1 && h.note === 42 && (stepInBar % 4) === 2) continue;
-          _musicSynthDrum(h.note, (h.g != null ? h.g : 1.0) * (_lg.drums != null ? _lg.drums : 1), subTime, out);
+          _musicSynthDrum(h.note, h.g != null ? h.g : 1.0, subTime, out);
         }
       }
       if (_dynHarm && !music.drumsSuspended) {
         if (_phraseBar === 7 && beatInBarLocal === 3) {
           // 16th-note snare fill walking up in velocity into the downbeat.
-          _musicSynthDrum(38, (0.45 + s * 0.16) * (_lg.drums != null ? _lg.drums : 1), subTime, out);
+          _musicSynthDrum(38, 0.45 + s * 0.16, subTime, out);
         }
         if (_phraseBar === 0 && beatInBarLocal === 0 && s === 0 && music.patternId !== 'doomed') {
-          _musicSynthDrum(49, 0.40 * (_lg.drums != null ? _lg.drums : 1), subTime, out);
+          _musicSynthDrum(49, 0.40, subTime, out);
         }
       }
       // Riff lead note for this 16th (if any). On dynamic-harmony patterns
@@ -56227,8 +56196,7 @@ function _musicScheduleBeat(beatIdx, beatTime) {
             const dur = secPerBeat * 0.45;  // tight 16th-ish lead, fades fast
             const semi = (_dynHarm && (stepInBar % 4) === 0) ? _musicSnapToChord(n.semi) : n.semi;
             _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + semi),
-                            n.vel * ((music.layerGains && music.layerGains.riff != null) ? music.layerGains.riff : 1),
-                            subTime, out, dur);
+                            n.vel, subTime, out, dur);
           }
         }
       }
@@ -56261,7 +56229,7 @@ function _musicScheduleBeat(beatIdx, beatTime) {
       }
       const freq = _musicMidiHz(music.keyMidi + semi);
       const dur = secPerBeat * (ptn.bassDurBeats || 1);
-      _musicSynthBass(freq, 0.9 * ((music.layerGains && music.layerGains.bass != null) ? music.layerGains.bass : 1), beatTime, out, dur);
+      _musicSynthBass(freq, 0.9, beatTime, out, dur);
     }
   }
 
@@ -56275,9 +56243,8 @@ function _musicScheduleBeat(beatIdx, beatTime) {
     const chordOffsets = _musicChord(music.harmDegree || 0, music.harmQuality || 'min');
     const voicing = _musicVoicePad(chordOffsets);
     const dur = secPerBeat * 1.5;
-    const _pg = (music.layerGains && music.layerGains.pad != null) ? music.layerGains.pad : 1;
     for (const m of voicing) {
-      _musicSynthPad(_musicMidiHz(m), 0.7 * _pg, beatTime, out, dur);
+      _musicSynthPad(_musicMidiHz(m), 0.7, beatTime, out, dur);
     }
     music.lastPadVoicing = voicing;
   } else if (!_dynHarm && ptn.chords && ptn.chordsBars) {
@@ -56360,73 +56327,6 @@ function musicStart() {
 function musicStop() {
   if (music.schedTimer) clearInterval(music.schedTimer);
   music.schedTimer = null;
-}
-
-// === MUSIC LAB CONFIG (v30.48) ===
-// The Music Lab (LSS/music_lab.html) exports a config blob to localStorage ;
-// the game applies it at boot (and live via window.applyMusicLabConfig).
-// Everything is optional - an empty config leaves factory behavior intact.
-function applyMusicLabConfig(cfg) {
-  if (!cfg || typeof cfg !== 'object') return false;
-  try {
-    if (cfg.style && typeof cfg.style === 'object') {
-      const s = cfg.style;
-      if (typeof s.keyMidi === 'number')  music.keyMidi  = s.keyMidi;
-      if (s.mode === 'aeolian' || s.mode === 'phrygian') {
-        music.mode = s.mode;
-        music.scale = (s.mode === 'phrygian') ? MUSIC_SCALE_PHRYGIAN : MUSIC_SCALE_AEOLIAN;
-      }
-      if (typeof s.bpmScale === 'number') music.bpmScale = s.bpmScale;
-      if (typeof s.leadWave === 'string') music.leadWave = s.leadWave;
-      if (typeof s.bassWave === 'string') music.bassWave = s.bassWave;
-      if (typeof s.padWave === 'string')  music.padWave  = s.padWave;
-    }
-    if (cfg.layerGains && typeof cfg.layerGains === 'object') {
-      music.layerGains = Object.assign({ drums: 1, bass: 1, pad: 1, riff: 1 }, cfg.layerGains);
-    }
-    if (typeof cfg.homePull === 'number') music.homePull = Math.max(0, Math.min(1, cfg.homePull));
-    if (cfg.harmony && typeof cfg.harmony === 'object') {
-      for (const m of ['aeolian', 'phrygian']) {
-        if (cfg.harmony[m] && MUSIC_HARMONY[m]) {
-          if (cfg.harmony[m].transitions) MUSIC_HARMONY[m].transitions = cfg.harmony[m].transitions;
-          if (cfg.harmony[m].qualities)   MUSIC_HARMONY[m].qualities   = cfg.harmony[m].qualities;
-          if (cfg.harmony[m].cadence)     MUSIC_HARMONY[m].cadence     = cfg.harmony[m].cadence;
-        }
-      }
-    }
-    if (cfg.dynPatterns && typeof cfg.dynPatterns === 'object') {
-      for (const k of ['warmup', 'combat', 'doomed']) {
-        if (typeof cfg.dynPatterns[k] === 'boolean') _MUSIC_DYN_PATTERNS[k] = cfg.dynPatterns[k];
-      }
-    }
-    if (cfg.riffs && typeof cfg.riffs === 'object') music._cfgRiffs = cfg.riffs;
-    if (cfg.bpmTargets && typeof cfg.bpmTargets === 'object') music._cfgBpmTargets = cfg.bpmTargets;
-    if (cfg.motif && Array.isArray(cfg.motif.degrees)) {
-      music.motif = cfg.motif;
-      music._motifKey = 'cfg';
-    } else if (cfg.motif === null) {
-      music._motifKey = null;   // back to per-match seeding
-    }
-    return true;
-  } catch (e) {
-    console.warn('[music-lab] config apply failed:', e);
-    return false;
-  }
-}
-function _loadMusicLabConfig() {
-  try {
-    const raw = localStorage.getItem('lss_music_config');
-    if (!raw) return;
-    const cfg = JSON.parse(raw);
-    if (applyMusicLabConfig(cfg)) {
-      music._labCfg = cfg;   // remembered so style switches re-overlay it
-      console.log('[music-lab] applied saved config');
-    }
-  } catch (e) { console.warn('[music-lab] config load failed:', e); }
-}
-_loadMusicLabConfig();
-if (typeof window !== 'undefined') {
-  window.applyMusicLabConfig = applyMusicLabConfig;
 }
 
 // === PUBLIC API ===
@@ -56521,10 +56421,6 @@ function musicSetPattern(id, opts) {
   music.pendingLeadNotes = [];
   if (opts && typeof opts.intensity === 'number') {
     music.intensity = Math.max(0, Math.min(music.ceiling, opts.intensity));
-  }
-  // Music Lab override: per-pattern BPM target replaces the caller's ask.
-  if (music._cfgBpmTargets && typeof music._cfgBpmTargets[id] === 'number') {
-    opts = Object.assign({}, opts, { bpmTarget: music._cfgBpmTargets[id], bpm: opts && opts.bpm != null ? music._cfgBpmTargets[id] : undefined });
   }
   // Style's bpmScale multiplies whatever the pattern asks for.
   const scale = music.bpmScale || 1.0;
