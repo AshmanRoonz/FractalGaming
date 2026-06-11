@@ -2061,14 +2061,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
               onmouseover="this.style.background='rgba(90,65,20,0.6)';this.style.color='#fff'"
               onmouseout="this.style.background='rgba(60,45,15,0.3)';this.style.color='#ffcc66'">CREATE / JOIN</button>
           </div>
-          <button id="btn-opensolo" onclick="startOpenSolo()" type="button" title="Host an open room and fight bots while you wait — challengers drop in and take a bot's seat" style="
-            background:rgba(20,40,30,0.5);border:1px solid rgba(120,255,170,0.45);
-            color:#bff0d0;padding:10px 14px;font-family:'Rajdhani','Orbitron',sans-serif;font-size:12px;
-            cursor:pointer;letter-spacing:3px;transition:all 0.2s;border-radius:6px;font-weight:bold;"
-            onmouseover="this.style.background='rgba(35,80,55,0.7)';this.style.borderColor='#7fa';this.style.color='#fff'"
-            onmouseout="this.style.background='rgba(20,40,30,0.5)';this.style.borderColor='rgba(120,255,170,0.45)';this.style.color='#bff0d0'">
-            PLAY WHILE WAITING &#9876;
-          </button>
           <div id="lobby-status" style="font-size:10px;color:#666;min-height:14px;letter-spacing:1px;text-align:center;font-family:'Rajdhani','Orbitron',sans-serif;"></div>
           <div id="lobby-peers" style="font-size:10px;color:#66bb66;min-height:14px;text-align:center;font-family:'Rajdhani','Orbitron',sans-serif;"></div>
         </div>
@@ -2085,7 +2077,17 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
                   letter-spacing:3px;transition:all 0.2s;font-weight:bold;"
                   onmouseover="this.style.background='rgba(40,70,100,0.7)';this.style.borderColor='#7cf';this.style.color='#fff'"
                   onmouseout="this.style.background='rgba(15,30,40,0.6)';this.style.borderColor='rgba(120,200,255,0.45)';this.style.color='#cce8ff'">
-            START SINGLE PLAYER
+            PLAY SOLO + BOTS
+          </button>
+          <button id="btn-opensolo" onclick="startOpenSolo()" type="button" title="Solo vs bots in a public room — players can drop in and take a bot's seat" style="
+                  flex:1 1 0;min-height:54px;
+                  background:rgba(20,40,30,0.6);border:1px solid rgba(120,255,170,0.45);
+                  color:#bff0d0;border-radius:10px;cursor:pointer;
+                  font-family:'Rajdhani','Orbitron',sans-serif;font-size:13px;
+                  letter-spacing:3px;transition:all 0.2s;font-weight:bold;"
+                  onmouseover="this.style.background='rgba(35,80,55,0.7)';this.style.borderColor='#7fa';this.style.color='#fff'"
+                  onmouseout="this.style.background='rgba(20,40,30,0.6)';this.style.borderColor='rgba(120,255,170,0.45)';this.style.color='#bff0d0'">
+            OPEN SOLO &#9876;
           </button>
           <button id="btn-howto" onclick="openHowToPlay()" type="button" style="
             flex:1 1 0;min-height:54px;
@@ -2096,6 +2098,16 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
             onmouseover="this.style.background='rgba(40,70,110,0.7)';this.style.color='#fff'"
             onmouseout="this.style.background='rgba(20,35,55,0.5)';this.style.color='#9fd4ff'">
             HOW TO PLAY
+          </button>
+          <button id="btn-test" onclick="startTest()" type="button" style="
+                  flex:1 1 0;min-height:54px;
+                  background:rgba(15,30,40,0.6);border:1px solid rgba(120,200,255,0.45);
+                  color:#cce8ff;border-radius:10px;cursor:pointer;
+                  font-family:'Rajdhani','Orbitron',sans-serif;font-size:13px;
+                  letter-spacing:3px;transition:all 0.2s;font-weight:bold;"
+                  onmouseover="this.style.background='rgba(40,70,100,0.7)';this.style.borderColor='#7cf';this.style.color='#fff'"
+                  onmouseout="this.style.background='rgba(15,30,40,0.6)';this.style.borderColor='rgba(120,200,255,0.45)';this.style.color='#cce8ff'">
+            TEST MODE
           </button>
         </div>
 
@@ -2784,7 +2796,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.58';
+const LSS_BUILD = '30.56';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -12673,44 +12685,6 @@ function restoreProceduralEnvironment() {
 // =====================================================================
 const _equirectSky = { texture: null, url: null, loading: false };
 
-// (v30.58) Sky DOME instead of scene.background for the equirect skybox.
-// scene.background renders as a dedicated FULL-SCREEN pass at the start of
-// every frame — every pixel samples the 4096x2048 texture, and then the
-// world overdraws ~98% of it (cave maps especially). A camera-following
-// dome rendered AFTER the opaque world (renderOrder 4, depthTest on,
-// depthWrite off) lets early-Z kill every occluded fragment: the sky now
-// costs only the pixels it actually shows through. Sandwich-terrain maps
-// keep their flat atmosphere color (already cheap) ; the dome hides there.
-let _skyDome = null;
-function _skyDomeEnsure() {
-  if (_skyDome) return _skyDome;
-  const geo = new THREE.SphereGeometry(20000, 48, 24);   // inside camera far (25000)
-  const mat = new THREE.MeshBasicMaterial({
-    side: THREE.BackSide, depthWrite: false, fog: false,
-  });
-  _skyDome = new THREE.Mesh(geo, mat);
-  _skyDome.frustumCulled = false;
-  _skyDome.renderOrder = 4;            // after the opaque world ; before transparents
-  _skyDome.matrixAutoUpdate = false;
-  _skyDome.visible = false;
-  _skyDome.onBeforeRender = function () {
-    // Pin to the camera so the sky never parallaxes or clips.
-    this.position.copy(camera.position);
-    this.updateMatrix();
-    this.updateMatrixWorld(true);
-  };
-  scene.add(_skyDome);
-  return _skyDome;
-}
-function _skyDomeRefresh() {
-  const dome = _skyDomeEnsure();
-  const atmosphereOn = !!(game && game.sandwichTerrain && game.sandwichTerrain.ON);
-  const tex = _equirectSky.texture;
-  dome.material.map = tex || null;
-  dome.material.needsUpdate = true;
-  dome.visible = !!tex && !atmosphereOn;
-}
-
 const _skyboxPresets = {
   blue:        _skyboxBaseUrl + 'blue.jpg',
   purple:      _skyboxBaseUrl + 'purple.jpg',
@@ -12787,8 +12761,7 @@ function setEquirectangularSky(url) {
     }
     _equirectSky.texture = tex;
     _equirectSky.url = url;
-    scene.background = null;          // dome renders the sky now (see above)
-    _skyDomeRefresh();
+    scene.background = tex;
     _equirectSky.loading = false;
     // Graceful swap : new texture is now live ; safe to
     // dispose the old one. Wrapped in try because the texture may have
@@ -12817,7 +12790,6 @@ function clearSky() {
   _equirectSky.texture = null;
   _equirectSky.url = null;
   scene.background = null;
-  try { _skyDomeRefresh(); } catch (_) {}
 }
 
 function hideStarfield() {
@@ -14883,7 +14855,6 @@ function _swApplyAtmosphere() {
   if (!T || !T.ON) {
     if (game._swSavedFog !== undefined) { scene.fog = game._swSavedFog; game._swSavedFog = undefined; }
     if (game._swSavedBg !== undefined) { scene.background = game._swSavedBg; game._swSavedBg = undefined; }
-    try { _skyDomeRefresh(); } catch (_) {}   // texture sky returns through the dome
     return;
   }
   if (game._swSavedFog === undefined) game._swSavedFog = (scene.fog !== undefined ? scene.fog : null);
@@ -14891,8 +14862,7 @@ function _swApplyAtmosphere() {
   const P = _SW_BIOMES[T.biome] || _SW_BIOMES.grassy;
   const sky = new THREE.Color(P.sky);
   scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 1e-4);
-  scene.background = sky;              // flat color: effectively a clear, cheap
-  try { _skyDomeRefresh(); } catch (_) {}   // hide the texture dome under the atmosphere
+  scene.background = sky;
 }
 
 // Drop every built chunk (map change / terrain off), restoring atmosphere too.
@@ -40630,16 +40600,6 @@ function buildSettingsPage() {
     </div><!-- /tab-panel: performance -->
 
     <div class="settings-tab-panel" data-tab-panel="theme">
-    <div class="settings-section">
-      <h3>Test Mode</h3>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Fly the map with passive bots (they maneuver but never fire) and live theme controls. For tuning themes, walls, and clouds without getting shot.</label>
-      </div>
-      <div class="setting-row" style="margin-top:6px;">
-        <button id="set-test-mode-btn" style="flex:1; padding:10px 14px; background:rgba(15,30,40,0.8); border:1px solid rgba(120,200,255,0.45); color:#cce8ff; cursor:pointer; border-radius:6px; font-family:'Rajdhani','Orbitron',sans-serif; letter-spacing:3px; font-weight:bold;"
-          onclick="try { closeSettings(); } catch (_) {} try { startTest(); } catch (_) {}">ENTER TEST MODE</button>
-      </div>
-    </div>
     <div class="settings-section">
       <h3>Cloud Colors</h3>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
