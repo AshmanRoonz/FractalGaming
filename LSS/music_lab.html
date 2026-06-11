@@ -152,6 +152,9 @@ const music = {
   lastChordKey: null,
   // Bookkeeping for the lead phrase queue (kill-triggered notes).
   pendingLeadNotes: [],         // [{atBeat, note, dur, vel}]
+  // Default layer mix. Drums ship hot (1.25x): they were always the layer
+  // that got buried under pad + riff. The Music Lab can override all four.
+  layerGains: { drums: 1.25, bass: 1, pad: 1, riff: 1 },
 };
 // ---- _musicMidiHz ----
 function _musicMidiHz(midi) { return 440 * Math.pow(2, (midi - 69) / 12); }
@@ -333,7 +336,8 @@ function _musicSynthBass(freq, g, when, out, durSec) {
   };
 }
 // ---- _musicSynthPad ----
-function _musicSynthPad(freq, g, when, out, durSec) {
+function _musicSynthPad(freq, g, when, out, durSec, opts) {
+  const _fast = !!(opts && opts.fast);
   const ctx = music.ctx;
   if (!ctx) return null;
   const padWave = music.padWave || 'sawtooth';
@@ -358,8 +362,8 @@ function _musicSynthPad(freq, g, when, out, durSec) {
   lp.Q.value = 0.85;
   // Filter envelope : pad "blooms in" — cutoff opens from 700 → 1500
   // over the attack, giving the pad warmth-into-air motion.
-  lp.frequency.setValueAtTime(700, when);
-  lp.frequency.linearRampToValueAtTime(1500, when + 0.8);
+  lp.frequency.setValueAtTime(_fast ? 1800 : 700, when);
+  lp.frequency.linearRampToValueAtTime(_fast ? 2600 : 1500, when + (_fast ? 0.06 : 0.8));
   // Slow LFO modulating cutoff for evolving movement (0.3–0.7 Hz, ±300 Hz).
   const lfo = ctx.createOscillator();
   lfo.type = 'sine';
@@ -380,14 +384,14 @@ function _musicSynthPad(freq, g, when, out, durSec) {
   // Master amp envelope : slow attack, slow release (pad behavior).
   const amp = ctx.createGain();
   amp.gain.setValueAtTime(0, when);
-  amp.gain.linearRampToValueAtTime(0.15 * g, when + 0.5);
+  amp.gain.linearRampToValueAtTime(0.15 * g, when + (_fast ? 0.04 : 0.5));
   lp.connect(amp).connect(out);
   o1.start(when); o2.start(when);
   oSub.start(when); oFifth.start(when);
   lfo.start(when);
   const stopAt = when + (durSec != null ? durSec : 2.0);
   amp.gain.setValueAtTime(0.15 * g, stopAt);
-  amp.gain.linearRampToValueAtTime(0, stopAt + 0.5);
+  amp.gain.linearRampToValueAtTime(0, stopAt + (_fast ? 0.18 : 0.5));
   try {
     o1.stop(stopAt + 0.55);
     o2.stop(stopAt + 0.55);
@@ -479,14 +483,15 @@ function _musicChord(degree, quality) {
   if (quality === 'min7')  return [root, root + 3, root + 7, root + 10];
   if (quality === 'dim')   return [root, root + 3, root + 6];
   if (quality === 'dim7')  return [root, root + 3, root + 6, root + 9];
+  if (quality === 'pow5')  return [root, root + 7, root + 12];   // power chord: no 3rd, no 7th, no church
   if (quality === 'sus2')  return [root, root + 2, root + 7];
   if (quality === 'sus4')  return [root, root + 5, root + 7];
   if (quality === 'add9')  return [root, root + 3, root + 7, root + 14];
   return [root, root + 3, root + 7]; // 'min' default
 }
 // ---- _musicVoicePad ----
-function _musicVoicePad(chord) {
-  const baseMidi = music.keyMidi + 24;
+function _musicVoicePad(chord, baseOffset) {
+  const baseMidi = music.keyMidi + (typeof baseOffset === 'number' ? baseOffset : 24);
   if (!music.lastPadVoicing) {
     return chord.map(n => baseMidi + n);
   }
@@ -527,6 +532,25 @@ const RIFF_CONTOURS = {
   pentatonic_a:   [0, 2, 4, 7, 9, 7, 4, 2],        // ascending then descending pentatonic
   doomed_creep:   [0, 1, 0, -2, 0, 1, 3, 1],       // crawls around the b2 (Phrygian sting)
 };
+// ---- CONTOUR_POOLS ----
+const CONTOUR_POOLS = {
+  hover_root:   ['hover_root', 'pentatonic_a', 'hover_root', 'zigzag'],
+  rising:       ['rising', 'pentatonic_a', 'zigzag', 'falling'],
+  falling:      ['falling', 'zigzag', 'riff_minor', 'rising'],
+  zigzag:       ['zigzag', 'pentatonic_a', 'riff_minor', 'rising'],
+  riff_minor:   ['riff_minor', 'zigzag', 'pentatonic_a', 'falling'],
+  riff_blues:   ['riff_blues', 'riff_minor', 'zigzag', 'doomed_creep'],
+  pentatonic_a: ['pentatonic_a', 'zigzag', 'rising', 'riff_minor'],
+  doomed_creep: ['doomed_creep', 'falling', 'riff_blues', 'doomed_creep'],
+};
+// ---- _musicRotateContour ----
+function _musicRotateContour(barAbs) {
+  const cfg = _musicGetRiffCfg(music.patternId);
+  if (!cfg) { music._activeContour = null; return; }
+  const pool = CONTOUR_POOLS[cfg.contour] || [cfg.contour];
+  const idx = Math.floor(barAbs / 4) % pool.length;
+  music._activeContour = pool[idx];
+}
 // ---- PATTERN_RIFFS ----
 const PATTERN_RIFFS = {
   lobby:    { rhythm: 'hover_quarters', contour: 'hover_root',   barsPerCycle: 2, octaveAdd: 0 },
@@ -759,6 +783,21 @@ function musicSetStyle(name) {
   // Bump bpmTarget by the new scale so the tempo follows the style.
   music.bpmTarget = music.bpmTarget * music.bpmScale / (music._lastBpmScale || 1.0);
   music._lastBpmScale = music.bpmScale;
+  // Music Lab config wins over style switching: the lab bakes the user's
+  // key/mode/waves into its export, so any later musicSetStyle (settings
+  // restore at boot, style dropdown) re-overlays the tuned values.
+  if (music._labCfg && music._labCfg.style) {
+    const s = music._labCfg.style;
+    if (typeof s.keyMidi === 'number')  music.keyMidi = s.keyMidi;
+    if (s.mode === 'aeolian' || s.mode === 'phrygian') {
+      music.mode = s.mode;
+      music.scale = (s.mode === 'phrygian') ? MUSIC_SCALE_PHRYGIAN : MUSIC_SCALE_AEOLIAN;
+    }
+    if (typeof s.bpmScale === 'number') { music.bpmScale = s.bpmScale; music._lastBpmScale = s.bpmScale; }
+    if (typeof s.leadWave === 'string') music.leadWave = s.leadWave;
+    if (typeof s.bassWave === 'string') music.bassWave = s.bassWave;
+    if (typeof s.padWave === 'string')  music.padWave  = s.padWave;
+  }
 }
 // ---- _musicGetRiffCfg ----
 function _musicGetRiffCfg(patternId) {
@@ -773,7 +812,7 @@ function _musicGenerateRiffBar(patternId, barInCycle) {
   const cfg = _musicGetRiffCfg(patternId);
   if (!cfg) return null;
   const rhythm = RIFF_RHYTHMS[cfg.rhythm];
-  const contour = RIFF_CONTOURS[cfg.contour];
+  const contour = RIFF_CONTOURS[music._activeContour || cfg.contour] || RIFF_CONTOURS[cfg.contour];
   if (!rhythm || !contour) return null;
   // Walk through every step in the bar, advancing contour index on each note.
   // For multi-bar cycles, the contour offset starts where the previous bar
@@ -800,7 +839,7 @@ function _musicGenerateRiffBar(patternId, barInCycle) {
 // ---- MUSIC_HARMONY ----
 const MUSIC_HARMONY = {
   aeolian: {
-    qualities: { 0: 'min7', 2: 'maj7', 3: 'min7', 4: 'min7', 5: 'maj7', 6: 'maj' },
+    qualities: { 0: 'min', 2: 'maj', 3: 'min', 4: 'min', 5: 'maj', 6: 'maj' },
     transitions: {
       0: [[5, 0.32], [3, 0.22], [6, 0.20], [2, 0.16], [4, 0.10]],
       2: [[6, 0.34], [5, 0.30], [3, 0.20], [0, 0.16]],
@@ -812,7 +851,7 @@ const MUSIC_HARMONY = {
     cadence: [6, 4],   // bar-7 pull: VII or v, then home
   },
   phrygian: {
-    qualities: { 0: 'min', 1: 'maj', 3: 'min7', 4: 'min', 5: 'maj7', 6: 'min7' },
+    qualities: { 0: 'min', 1: 'maj', 3: 'min', 4: 'min', 5: 'maj', 6: 'min' },
     transitions: {
       0: [[1, 0.36], [6, 0.22], [3, 0.20], [5, 0.14], [4, 0.08]],
       1: [[0, 0.58], [6, 0.24], [3, 0.18]],
@@ -826,6 +865,12 @@ const MUSIC_HARMONY = {
 };
 // ---- _MUSIC_DYN_PATTERNS ----
 const _MUSIC_DYN_PATTERNS = { warmup: true, combat: true, doomed: true };
+// ---- MUSIC_PATTERN_FEEL ----
+const MUSIC_PATTERN_FEEL = {
+  combat: { power: true, padBase: 12, padSync: true, bassChug: true, kickDrive: true, riffOct: -12, riffDur: 0.30, accentVel: 1.0 },
+  doomed: { power: true, padBase: 12, riffDur: 0.40, accentVel: 0.95 },
+  warmup: { padBase: 24 },
+};
 // ---- _musicAdvanceHarmony ----
 function _musicAdvanceHarmony(phraseBar) {
   const graph = MUSIC_HARMONY[music.mode] || MUSIC_HARMONY.aeolian;
@@ -1123,6 +1168,7 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   const _dynHarm = !!_MUSIC_DYN_PATTERNS[music.patternId];
   if (beatInBarLocal === 0) {
     if (!music._riffCycleBar) music._riffCycleBar = 0;
+    _musicRotateContour(Math.floor(beatIdx / 4));
     music._barRiffNotes = _musicGenerateRiffBar(music.patternId, music._riffCycleBar);
     const cfg = _musicGetRiffCfg(music.patternId);
     if (cfg) {
@@ -1160,6 +1206,11 @@ function _musicScheduleBeat(beatIdx, beatTime) {
         }
       }
       if (_dynHarm && !music.drumsSuspended) {
+        const _kFeel = MUSIC_PATTERN_FEEL[music.patternId] || {};
+        if (_kFeel.kickDrive && s === 2 && music.intensity >= 1.5) {
+          // Offbeat 8th kicks: the double-pedal engine under combat.
+          _musicSynthDrum(36, 0.62 * (_lg.drums != null ? _lg.drums : 1), subTime, out);
+        }
         if (_phraseBar === 7 && beatInBarLocal === 3) {
           // 16th-note snare fill walking up in velocity into the downbeat.
           _musicSynthDrum(38, (0.45 + s * 0.16) * (_lg.drums != null ? _lg.drums : 1), subTime, out);
@@ -1175,10 +1226,14 @@ function _musicScheduleBeat(beatIdx, beatTime) {
       if (music._barRiffNotes) {
         for (const n of music._barRiffNotes) {
           if (n.sub16 === stepInBar) {
-            const dur = secPerBeat * 0.45;  // tight 16th-ish lead, fades fast
-            const semi = (_dynHarm && (stepInBar % 4) === 0) ? _musicSnapToChord(n.semi) : n.semi;
+            const _rFeel = MUSIC_PATTERN_FEEL[music.patternId] || {};
+            const dur = secPerBeat * (_rFeel.riffDur || 0.45);
+            let semi = (_dynHarm && (stepInBar % 4) === 0) ? _musicSnapToChord(n.semi) : n.semi;
+            semi += (_rFeel.riffOct || 0);
+            let vel = n.vel;
+            if (_rFeel.accentVel && vel > 0.7) vel = _rFeel.accentVel;
             _musicSynthLead(_musicMidiHz(music.keyMidi + 24 + semi),
-                            n.vel * ((music.layerGains && music.layerGains.riff != null) ? music.layerGains.riff : 1),
+                            vel * ((music.layerGains && music.layerGains.riff != null) ? music.layerGains.riff : 1),
                             subTime, out, dur);
           }
         }
@@ -1211,8 +1266,16 @@ function _musicScheduleBeat(beatIdx, beatTime) {
         semi = music.harmRootSemi + bassNote + (((beatIdx % 4) === 2 && bassNote === 0 && Math.random() < 0.35) ? 7 : 0);
       }
       const freq = _musicMidiHz(music.keyMidi + semi);
-      const dur = secPerBeat * (ptn.bassDurBeats || 1);
-      _musicSynthBass(freq, 0.9 * ((music.layerGains && music.layerGains.bass != null) ? music.layerGains.bass : 1), beatTime, out, dur);
+      const _bFeel = MUSIC_PATTERN_FEEL[music.patternId] || {};
+      const _bg = 0.9 * ((music.layerGains && music.layerGains.bass != null) ? music.layerGains.bass : 1);
+      if (_bFeel.bassChug) {
+        // Chug: two tight 8th hits per beat instead of one sustained note.
+        _musicSynthBass(freq, _bg, beatTime, out, secPerBeat * 0.42);
+        _musicSynthBass(freq, _bg * 0.8, beatTime + secPerBeat * 0.5, out, secPerBeat * 0.38);
+      } else {
+        const dur = secPerBeat * (ptn.bassDurBeats || 1);
+        _musicSynthBass(freq, _bg, beatTime, out, dur);
+      }
     }
   }
 
@@ -1220,17 +1283,29 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   // short ~1.5-beat sustain so chords don't drone across the riff. The pad
   // becomes a rhythmic instrument that breathes with the beat instead of a
   // wash. Voice-leading still picks the closest voicing for smooth changes.
+  const _feel = MUSIC_PATTERN_FEEL[music.patternId] || {};
   if (_dynHarm && (beatIdx % 4) === 0) {
     // Graph-driven pad stab: the chord _musicAdvanceHarmony just picked,
-    // voice-led from the previous voicing exactly like the static path.
-    const chordOffsets = _musicChord(music.harmDegree || 0, music.harmQuality || 'min');
-    const voicing = _musicVoicePad(chordOffsets);
-    const dur = secPerBeat * 1.5;
+    // voice-led from the previous voicing. Aggressive patterns swap the
+    // chord for a low power-chord stab — tight and dark, not organ wash.
+    const _q = _feel.power ? 'pow5' : (music.harmQuality || 'min');
+    const chordOffsets = _musicChord(music.harmDegree || 0, _q);
+    const voicing = _musicVoicePad(chordOffsets, _feel.padBase);
+    const dur = secPerBeat * (_feel.power ? 0.8 : 1.5);
     const _pg = (music.layerGains && music.layerGains.pad != null) ? music.layerGains.pad : 1;
     for (const m of voicing) {
-      _musicSynthPad(_musicMidiHz(m), 0.7 * _pg, beatTime, out, dur);
+      _musicSynthPad(_musicMidiHz(m), 0.7 * _pg, beatTime, out, dur, _feel.power ? { fast: true } : null);
     }
     music.lastPadVoicing = voicing;
+  } else if (_dynHarm && _feel.padSync && (beatIdx % 4) === 2) {
+    // Syncopated half-bar restab on the 'and' of 3 — the push that makes
+    // a power-chord bed drive instead of sitting there.
+    const chordOffsets = _musicChord(music.harmDegree || 0, 'pow5');
+    const voicing = _musicVoicePad(chordOffsets, _feel.padBase);
+    const _pg = (music.layerGains && music.layerGains.pad != null) ? music.layerGains.pad : 1;
+    for (const m of voicing) {
+      _musicSynthPad(_musicMidiHz(m), 0.45 * _pg, beatTime + secPerBeat * 0.5, out, secPerBeat * 0.5, { fast: true });
+    }
   } else if (!_dynHarm && ptn.chords && ptn.chordsBars) {
     const totalBars = ptn.chordsBars.reduce((a, b) => a + b, 0);
     const barInLoop = (Math.floor(beatIdx / 4)) % totalBars;
@@ -1369,6 +1444,7 @@ function musicSetPattern(id, opts) {
   // Reset riff cycle bar so each pattern starts at its first phrase.
   music._riffCycleBar = 0;
   music._barRiffNotes = null;
+  music._activeContour = null;   // contour rotation restarts from the base shape
   // Clear any pending lead notes from a prior pattern (kills don't echo across rounds).
   music.pendingLeadNotes = [];
   if (opts && typeof opts.intensity === 'number') {
@@ -1390,7 +1466,6 @@ function musicSetPattern(id, opts) {
   // Start the scheduler if not running.
   musicStart();
 }
-
 // ============================ LAB SHIMS ============================
 const audio = { ctx: null, musicGain: null, musicStyle: 'cosmic', initialized: false };
 let net = null;
