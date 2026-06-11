@@ -3064,7 +3064,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.61';
+const LSS_BUILD = '30.60';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -3905,20 +3905,11 @@ function _lobbyMyPresence() {
     status:    stateMap[gameState] || 'browsing',
     ship:      (typeof player !== 'undefined' && player && typeof player.loadoutKey === 'string') ? player.loadoutKey : null,
     team:      (typeof player !== 'undefined' && player && (player.team === 'A' || player.team === 'B')) ? player.team : null,
-    roomId:    myRoom ? myRoom.code
-               : ((typeof net !== 'undefined' && net && net.active && typeof net.roomCode === 'string') ? net.roomCode : null),
-    // (v30.61) Open-solo hosts advertise themselves as scoopable : they are
-    // mid-match against bots, which is exactly when a challenger can drop in.
-    openSolo:  !!(typeof net !== 'undefined' && net && net.openSolo === true),
-    roomFull:  myRoom
-      ? (myRoom.players && myRoom.players.length >= myRoom.maxSize)
-      : ((typeof net !== 'undefined' && net && net.openSolo === true && net.peers)
-          ? (net.peers.size + 1) >= 6 : false),
+    roomId:    myRoom ? myRoom.code : null,
+    roomFull:  myRoom ? (myRoom.players && myRoom.players.length >= myRoom.maxSize) : false,
     matchSize: myRoom
       ? { current: myRoom.players.length, max: myRoom.maxSize }
-      : ((typeof net !== 'undefined' && net && net.active && net.peers)
-          ? { current: net.peers.size + 1, max: 6 }
-          : { current: 1, max: 6 }),
+      : { current: 1, max: 6 },
     lastSeen:  Date.now(),
   };
 }
@@ -3928,11 +3919,6 @@ function _lobbyMyPresence() {
 // lobby UI can sort + status-tag rows the same way.
 function _lobbyComputeFlags(p) {
   if (!p) return { available: false, scoopable: false };
-  // (v30.61) PLAY WHILE WAITING : joinable mid-round, bots hold the seats.
-  if (p.openSolo) {
-    if (p.roomFull) return { available: false, scoopable: false };
-    return { available: true, scoopable: true };
-  }
   if (p.mode === 'solo') return { available: true, scoopable: false };
   if (p.mode === 'multi') {
     if (p.roomFull) return { available: false, scoopable: false };
@@ -4259,7 +4245,7 @@ async function _lobbyTrysteroJoinIfNeeded(code) {
 function _lobbyRowHTML(p, isSelf) {
   const name      = _lobbyEscapeText(p.username || 'unknown');
   const ship      = _lobbyEscapeText(p.ship || '—');
-  const modeLabel = p.openSolo ? 'Open Solo' : ((p.mode === 'multi') ? 'MP' : 'Solo');
+  const modeLabel = (p.mode === 'multi') ? 'MP' : 'Solo';
   const statusTxt = p.available
     ? (p.scoopable ? 'open' : 'invite-only')
     : 'busy';
@@ -4273,17 +4259,6 @@ function _lobbyRowHTML(p, isSelf) {
   // state is reflected client-side after a 429 response by stashing the
   // retryAfter expiry in _lobbyState.cooldowns ; the button reads from
   // that map at render time.
-  // (v30.61) JOIN : hop straight into their room (drop-in takes a bot seat).
-  let joinBtn = '';
-  if (!isSelf && p.scoopable && p.roomId) {
-    joinBtn = '<button type="button" data-join-code="' + _lobbyEscapeText(p.roomId)
-      + '" onclick="_lobbyJoinPlayer(this.dataset.joinCode)"'
-      + ' style="background:rgba(102,187,102,0.12);border:1px solid rgba(102,187,102,0.55);color:#9fe2b0;'
-      + 'padding:2px 8px;font-family:\'Courier New\',monospace;font-size:10px;'
-      + 'letter-spacing:1px;cursor:pointer;border-radius:2px;transition:all 0.2s;"'
-      + ' onmouseover="this.style.background=\'rgba(102,187,102,0.3)\'"'
-      + ' onmouseout="this.style.background=\'rgba(102,187,102,0.12)\'">JOIN</button>';
-  }
   let inviteBtn = '';
   if (!isSelf && p.available) {
     const now = Date.now();
@@ -4317,7 +4292,6 @@ function _lobbyRowHTML(p, isSelf) {
     + '</div>'
     + '<span style="color:#888;font-size:10px;letter-spacing:1px;">' + ship + ' &middot; ' + modeLabel + '</span>'
     + '<span style="color:' + statusColor + ';font-size:10px;letter-spacing:1px;width:60px;text-align:right;">' + statusTxt + '</span>'
-    + joinBtn
     + inviteBtn
     + '</div>';
 }
@@ -4380,24 +4354,6 @@ async function _lobbySendInvite(toId) {
   _lobbyRefresh();
 }
 window._lobbySendInvite = _lobbySendInvite;
-
-// (v30.61) Join a lobby player's open room directly : autofill the room
-// code field and reuse the exact manual CREATE / JOIN path, which already
-// handles the drop-in handshake (dropin_state -> world sync -> ship select).
-function _lobbyJoinPlayer(code) {
-  if (!code) return;
-  try {
-    const el = document.getElementById('room-code');
-    if (el) el.value = String(code).toUpperCase();
-  } catch (_) {}
-  try {
-    const r = joinRoom();
-    if (r && typeof r.catch === 'function') r.catch((e) => console.warn('[lobby] join failed:', e));
-  } catch (e) {
-    console.warn('[lobby] join failed:', e);
-  }
-}
-window._lobbyJoinPlayer = _lobbyJoinPlayer;
 
 // Invite-toast reconciliation. Each list-poll passes the
 // current pending invite array ; we open toasts for new IDs, leave open
