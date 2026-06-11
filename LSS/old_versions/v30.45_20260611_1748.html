@@ -2786,7 +2786,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.46';
+const LSS_BUILD = '30.45';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -11074,8 +11074,7 @@ try {
   }
   let _dprCap;
   if (_stored === 'ultra') {
-    // Keep in sync with applyQualityPreset's ultra branch (1.75x / 2.6).
-    _dprCap = Math.min(window.devicePixelRatio * 1.75, 2.6);
+    _dprCap = Math.min(window.devicePixelRatio * 1.5, 2.5);
   } else if (_isMobileGPU) {
     // DPR-3 phones at cap 2 still pushed ~2x the fragments they can
     // afford through bloom ; 1.5 is visually fine at phone sizes.
@@ -13343,10 +13342,10 @@ const QUALITY = {
     if (this.level === 'low')    return 1;
     if (this.level === 'medium') return 2;
     if (this.level === 'high')   return 3;
-    // Ultra: 8 octaves (was 6). FBM cost scales linearly per octave per
-    // PIXEL, which is exactly the kind of bill the idle desktop GPU is
-    // here to pay ; turbulence detail keeps improving visibly to ~8.
-    if (this.level === 'ultra')  return 8;
+    // 4 -> 6 octaves. FBM cost scales linearly per octave
+    // (one extra noise sample per pixel) so this is cheap-ish in absolute
+    // terms but doubles the detail in turbulence/plume texture.
+    if (this.level === 'ultra')  return 6;
     return 3;
   },
   smokeMax() {
@@ -13358,9 +13357,9 @@ const QUALITY = {
     if (this.level === 'low')    return 5;
     if (this.level === 'medium') return 8;
     if (this.level === 'high')   return 12;
-    // Ultra: 36 (was 28). Cluster fights stack deep layered residue ;
-    // overdraw is GPU fill-rate, which is the budget we're spending.
-    if (this.level === 'ultra')  return 36;
+    // 18 -> 28. Cluster fights leave more lingering plumes ;
+    // explosion residue overlaps instead of single-plume-at-a-time.
+    if (this.level === 'ultra')  return 28;
     return 12;
   },
   particleRate() {
@@ -13372,9 +13371,9 @@ const QUALITY = {
     if (this.level === 'low')    return 0.4;
     if (this.level === 'medium') return 0.7;
     if (this.level === 'high')   return 1.0;
-    // Ultra: 2.6x (was 2.0x). The Points cloud renders any count in ONE
-    // draw call, so density is nearly free on the CPU side too.
-    if (this.level === 'ultra')  return 2.6;
+    // 1.5x -> 2.0x. More debris, more sparks, denser explosion
+    // cores. v8 instanced pools handle the count without extra draw calls.
+    if (this.level === 'ultra')  return 2.0;
     return 1.0;
   },
   heatTrails() {
@@ -13383,9 +13382,9 @@ const QUALITY = {
     if (this.level === 'low')    return 0.0;
     if (this.level === 'medium') return 0.6;
     if (this.level === 'high')   return 1.0;
-    // Ultra: 1.8x (was 1.5x). Exhaust ribbons read vividly at speed ;
-    // pairs with the raised particle rate.
-    if (this.level === 'ultra')  return 1.8;
+    // 1.2x -> 1.5x. Engine exhaust trails read more vividly
+    // behind fast-moving ships ; pairs with the increased particle rate.
+    if (this.level === 'ultra')  return 1.5;
     return 1.0;
   },
   // Per-sprite cloud churn animation : adds 3 sin() calls per slot
@@ -13434,10 +13433,7 @@ function applyQualityPreset(level) {
       if (QUALITY.isPotato()) {
         _cap = 0.75;
       } else if (QUALITY.isUltra()) {
-        // 1.75x supersample (was 1.5x): on a DPR-1 monitor that's ~3x the
-        // pixels of native — honest GPU spend the desktop card shrugs at,
-        // and the crispest the additive FX stack has ever looked.
-        _cap = Math.min(window.devicePixelRatio * 1.75, 2.6);
+        _cap = Math.min(window.devicePixelRatio * 1.5, 2.5);
       } else {
         _cap = Math.min(window.devicePixelRatio, 2);
       }
@@ -27015,13 +27011,7 @@ function spawnSiphonHelix(from, to, color, lifetime) {
 if (typeof window !== 'undefined') window.spawnSiphonHelix = spawnSiphonHelix;
 
 
-const MAX_PARTICLES = 800;   // buffer size ; runtime cap below is quality-aware
-// Live particle cap: ultra gets the full 800-slot buffer (the Points cloud
-// draws any count in one call) ; every other tier keeps the long-standing
-// 500 so nothing changes off-ultra.
-function _particleCap() {
-  return (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 800 : 500;
-}
+const MAX_PARTICLES = 500;
 const _sharedParticleGeo = new THREE.SphereGeometry(1, 4, 3); // shared; scale per particle
 
 // Soft radial-falloff texture for ember sprites: generated once, shared by every ember.
@@ -27180,9 +27170,8 @@ function updateParticles(dt) {
     _particlePoints.visible = false;
     return;
   }
-  // Cap particle count: cull oldest when over budget (quality-aware)
-  const _pCap = _particleCap();
-  while (game.particles.length > _pCap) cullOldestParticle();
+  // Cap particle count: cull oldest when over budget
+  while (game.particles.length > MAX_PARTICLES) cullOldestParticle();
 
   const arenaLimit = LSS.ARENA_SIZE;
   // Match Sprite-scaling screen size: uScale = cot(fov/2) * halfBufferHeightPx.
