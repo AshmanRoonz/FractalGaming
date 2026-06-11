@@ -2782,7 +2782,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.39';
+const LSS_BUILD = '30.38';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -19485,7 +19485,6 @@ async function _warmupCombatShadersBody() {
     group.add(new THREE.Mesh(_TRACER_BEAM_GEO, _TRACER_BEAM_MAT_PROTO));
     group.add(new THREE.Mesh(_TRACER_TAIL_INNER_GEO, _TRACER_TAIL_INNER_MAT_PROTO));
     group.add(new THREE.Mesh(_TRACER_TAIL_OUTER_GEO, _TRACER_TAIL_OUTER_MAT_PROTO));
-    group.add(new THREE.Mesh(_TRACER_BACK_GEO, _TRACER_BACK_MAT_PROTO));
 
     // Line variants (trails, outlines, impact arcs).
     const lineGeo = new THREE.BufferGeometry();
@@ -25895,15 +25894,6 @@ const _TRACER_TAIL_INNER_GEO = new THREE.CylinderGeometry(3.50, 2.50, 1, _TRC_SE
 _TRACER_TAIL_INNER_GEO.rotateX(Math.PI / 2);
 const _TRACER_TAIL_OUTER_GEO = new THREE.CylinderGeometry(9.00, 6.50, 1, _TRC_SEG.outer, 1);
 _TRACER_TAIL_OUTER_GEO.rotateX(Math.PI / 2);
-// (v30.39) Dark backing cylinder: the additive layers above can only ADD
-// light, so on bright skies (Snow / Grassy) tracers washed out to nothing.
-// A normal-blend dark-tinted tube between beam and inner-haze widths gives
-// every shot a guaranteed silhouette on white backgrounds. Deliberately
-// NOT in the vertex-fade list below: a black vertex fade only works under
-// additive blending ; under normal blending it would paint a black noodle
-// at the muzzle.
-const _TRACER_BACK_GEO = new THREE.CylinderGeometry(2.2, 1.6, 1, _TRC_SEG.beam, 1);
-_TRACER_BACK_GEO.rotateX(Math.PI / 2);
 
 // Per-vertex fade-in attribute on the shared tracer cylinders. After the
 // rotateX(PI/2) above, the cylinder's length axis is local +Z; vertices at
@@ -26357,7 +26347,6 @@ const _TRACER_CORE_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, tr
 const _TRACER_BEAM_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, blending: THREE.AdditiveBlending, vertexColors: true });
 const _TRACER_TAIL_INNER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
 const _TRACER_TAIL_OUTER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
-const _TRACER_BACK_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.NormalBlending, depthWrite: false });
 
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
@@ -26427,7 +26416,7 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
   // Helper: build one of the four shapes from pooled geo + cloned prototype
   // material, scaled so the unit cylinder (length 1 along local +Z after the
   // rotateX done at pool-build time) covers the full from->to segment.
-  function _makeShape(geo, matProto, col, opacity, lifetime, type, ro) {
+  function _makeShape(geo, matProto, col, opacity, lifetime, type) {
     const m = matProto.clone();
     m.color = new THREE.Color(col);
     m.opacity = opacity;
@@ -26442,7 +26431,7 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     // Render after the wall (renderOrder=0) so the tracer cylinder always
     // composites on top of the wall instead of being overwritten when the
     // wall's bounding-sphere-center sort puts it later in the queue.
-    mesh.renderOrder = (typeof ro === 'number') ? ro : 1;
+    mesh.renderOrder = 1;
     scene.add(mesh);
     // Store endpoints so updateEffects can retract the
     // muzzle end forward over the lifetime (see _vxTracerRetract). All
@@ -26455,12 +26444,6 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     });
   }
 
-  // --- Dark backing (normal blend): silhouette on bright skies. Color is
-  // the weapon color crushed to ~12% so each ship keeps its identity in
-  // the outline. Slightly longer than the beam so the contrast lingers
-  // through the bright window before retract.
-  const _backCol = new THREE.Color(color).multiplyScalar(0.12);
-  _makeShape(_TRACER_BACK_GEO, _TRACER_BACK_MAT_PROTO, _backCol, 0.55, 0.22, 'tracer', 0.9);
   // --- Hot core (white-hot pinprick, very short-lived: the "shot" itself) ---
   _makeShape(_TRACER_CORE_GEO, _TRACER_CORE_MAT_PROTO, 0xffffff, 1.0, 0.10, 'tracer');
   // --- Beam (weapon color, thin filament) ---

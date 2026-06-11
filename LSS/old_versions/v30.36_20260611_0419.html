@@ -2782,7 +2782,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.39';
+const LSS_BUILD = '30.36';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -19485,7 +19485,6 @@ async function _warmupCombatShadersBody() {
     group.add(new THREE.Mesh(_TRACER_BEAM_GEO, _TRACER_BEAM_MAT_PROTO));
     group.add(new THREE.Mesh(_TRACER_TAIL_INNER_GEO, _TRACER_TAIL_INNER_MAT_PROTO));
     group.add(new THREE.Mesh(_TRACER_TAIL_OUTER_GEO, _TRACER_TAIL_OUTER_MAT_PROTO));
-    group.add(new THREE.Mesh(_TRACER_BACK_GEO, _TRACER_BACK_MAT_PROTO));
 
     // Line variants (trails, outlines, impact arcs).
     const lineGeo = new THREE.BufferGeometry();
@@ -25895,15 +25894,6 @@ const _TRACER_TAIL_INNER_GEO = new THREE.CylinderGeometry(3.50, 2.50, 1, _TRC_SE
 _TRACER_TAIL_INNER_GEO.rotateX(Math.PI / 2);
 const _TRACER_TAIL_OUTER_GEO = new THREE.CylinderGeometry(9.00, 6.50, 1, _TRC_SEG.outer, 1);
 _TRACER_TAIL_OUTER_GEO.rotateX(Math.PI / 2);
-// (v30.39) Dark backing cylinder: the additive layers above can only ADD
-// light, so on bright skies (Snow / Grassy) tracers washed out to nothing.
-// A normal-blend dark-tinted tube between beam and inner-haze widths gives
-// every shot a guaranteed silhouette on white backgrounds. Deliberately
-// NOT in the vertex-fade list below: a black vertex fade only works under
-// additive blending ; under normal blending it would paint a black noodle
-// at the muzzle.
-const _TRACER_BACK_GEO = new THREE.CylinderGeometry(2.2, 1.6, 1, _TRC_SEG.beam, 1);
-_TRACER_BACK_GEO.rotateX(Math.PI / 2);
 
 // Per-vertex fade-in attribute on the shared tracer cylinders. After the
 // rotateX(PI/2) above, the cylinder's length axis is local +Z; vertices at
@@ -26357,7 +26347,6 @@ const _TRACER_CORE_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, tr
 const _TRACER_BEAM_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, blending: THREE.AdditiveBlending, vertexColors: true });
 const _TRACER_TAIL_INNER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
 const _TRACER_TAIL_OUTER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
-const _TRACER_BACK_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.NormalBlending, depthWrite: false });
 
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
@@ -26427,7 +26416,7 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
   // Helper: build one of the four shapes from pooled geo + cloned prototype
   // material, scaled so the unit cylinder (length 1 along local +Z after the
   // rotateX done at pool-build time) covers the full from->to segment.
-  function _makeShape(geo, matProto, col, opacity, lifetime, type, ro) {
+  function _makeShape(geo, matProto, col, opacity, lifetime, type) {
     const m = matProto.clone();
     m.color = new THREE.Color(col);
     m.opacity = opacity;
@@ -26442,7 +26431,7 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     // Render after the wall (renderOrder=0) so the tracer cylinder always
     // composites on top of the wall instead of being overwritten when the
     // wall's bounding-sphere-center sort puts it later in the queue.
-    mesh.renderOrder = (typeof ro === 'number') ? ro : 1;
+    mesh.renderOrder = 1;
     scene.add(mesh);
     // Store endpoints so updateEffects can retract the
     // muzzle end forward over the lifetime (see _vxTracerRetract). All
@@ -26455,12 +26444,6 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     });
   }
 
-  // --- Dark backing (normal blend): silhouette on bright skies. Color is
-  // the weapon color crushed to ~12% so each ship keeps its identity in
-  // the outline. Slightly longer than the beam so the contrast lingers
-  // through the bright window before retract.
-  const _backCol = new THREE.Color(color).multiplyScalar(0.12);
-  _makeShape(_TRACER_BACK_GEO, _TRACER_BACK_MAT_PROTO, _backCol, 0.55, 0.22, 'tracer', 0.9);
   // --- Hot core (white-hot pinprick, very short-lived: the "shot" itself) ---
   _makeShape(_TRACER_CORE_GEO, _TRACER_CORE_MAT_PROTO, 0xffffff, 1.0, 0.10, 'tracer');
   // --- Beam (weapon color, thin filament) ---
@@ -26847,7 +26830,7 @@ function spawnLightningBolt(from, to, color, lifetime, branches, thickness, esse
 function spawnSiphonHelix(from, to, color, lifetime) {
   if (typeof scene === 'undefined' || typeof THREE === 'undefined') return;
   color = (color != null) ? color : 0x4169E1;
-  const _life = (typeof lifetime === 'number' && lifetime > 0) ? lifetime : 1.0;
+  const _life = (typeof lifetime === 'number' && lifetime > 0) ? lifetime : 0.55;
   const dir = new THREE.Vector3().subVectors(to, from);
   const len = dir.length();
   if (len < 8) return;
@@ -26910,27 +26893,8 @@ function spawnSiphonHelix(from, to, color, lifetime) {
   meshA.frustumCulled = false; meshB.frustumCulled = false;
   meshA.renderOrder = 1010;    meshB.renderOrder = 1010;
   scene.add(meshA); scene.add(meshB);
-  // Dark backing pair: NORMAL blending, deep navy. Additive layers can
-  // only ADD light, so against a bright sky (Snow/Grassy themes) they
-  // wash out to nothing — this was exactly the "barely visible" report.
-  // A dark normal-blend strand under the bright core guarantees contrast
-  // on white backgrounds and disappears politely against dark space.
-  const _BACK_OP = 0.55;
-  const geoA0 = new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 5.0, 5, false);
-  const geoB0 = new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 5.0, 5, false);
-  const matA0 = new THREE.MeshBasicMaterial({
-    color: 0x0a0a2e, transparent: true, opacity: _BACK_OP,
-    blending: THREE.NormalBlending,
-    depthTest: false, depthWrite: false, side: THREE.FrontSide,
-  });
-  const matB0 = matA0.clone();
-  const meshA0 = new THREE.Mesh(geoA0, matA0);
-  const meshB0 = new THREE.Mesh(geoB0, matB0);
-  meshA0.frustumCulled = false; meshB0.frustumCulled = false;
-  meshA0.renderOrder = 1008;   meshB0.renderOrder = 1008;
-  scene.add(meshA0); scene.add(meshB0);
   // Halo pair: same curves, fat radius, faint pure class color.
-  const _GLOW_OP = 0.30;
+  const _GLOW_OP = 0.22;
   const geoA2 = new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 8.0, 5, false);
   const geoB2 = new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 8.0, 5, false);
   const matA2 = new THREE.MeshBasicMaterial({
@@ -26948,7 +26912,6 @@ function spawnSiphonHelix(from, to, color, lifetime) {
     game.effects.push({
       meshA, meshB, matA, matB, geoA, geoB,
       meshA2, meshB2, matA2, matB2, geoA2, geoB2, _glowOp: _GLOW_OP,
-      meshA0, meshB0, matA0, matB0, geoA0, geoB0, _backOp: _BACK_OP,
       lifetime: _life, age: 0, type: 'siphonHelix',
     });
   }
@@ -27217,13 +27180,6 @@ function _disposeOrReleaseEffect(e) {
   if (e.type === 'vortexLaserBeam') {
     scene.remove(e.mesh);
     if (e.mesh.material) e.mesh.material.dispose();
-    // Backing-core child (normal-blend dark cylinder) carries its own
-    // material ; the geometry is the shared global, leave it alone.
-    if (e.mesh.children && e.mesh.children.length) {
-      for (const ch of e.mesh.children) {
-        if (ch.material && ch.material.dispose) { try { ch.material.dispose(); } catch (_) {} }
-      }
-    }
     return;
   }
   // Fractal lightning bolt : whole bolt is one slot, halo
@@ -27231,16 +27187,14 @@ function _disposeOrReleaseEffect(e) {
   // disposed inside _releaseLightningSlot ; meshes + materials stay live
   // in the pool for the next acquire.
   if (e.type === 'siphonHelix') {
-    for (const k of ['meshA', 'meshB', 'meshA2', 'meshB2', 'meshA0', 'meshB0']) {
+    for (const k of ['meshA', 'meshB', 'meshA2', 'meshB2']) {
       if (e[k] && e[k].parent) e[k].parent.remove(e[k]);
     }
-    for (const k of ['geoA', 'geoB', 'geoA2', 'geoB2', 'geoA0', 'geoB0',
-                     'matA', 'matB', 'matA2', 'matB2', 'matA0', 'matB0']) {
+    for (const k of ['geoA', 'geoB', 'geoA2', 'geoB2', 'matA', 'matB', 'matA2', 'matB2']) {
       if (e[k] && e[k].dispose) { try { e[k].dispose(); } catch (_) {} }
     }
     e.meshA = e.meshB = e.matA = e.matB = e.geoA = e.geoB = null;
     e.meshA2 = e.meshB2 = e.matA2 = e.matB2 = e.geoA2 = e.geoB2 = null;
-    e.meshA0 = e.meshB0 = e.matA0 = e.matB0 = e.geoA0 = e.geoB0 = null;
     return; // (v27) helix has no e.mesh ; skip the generic dispose tail
   }
   else if (e.type === 'lightning') {
@@ -27671,14 +27625,9 @@ function updateEffects(dt) {
       // _layeredFXTick. Quadratic ease-out keeps the snappy attack +
       // smooth dissolve via uIntensity.
       const u = e.mesh.material && e.mesh.material.uniforms;
-      const fade = (1 - t) * (1 - t);
       if (u && u.uIntensity) {
+        const fade = (1 - t) * (1 - t);
         u.uIntensity.value = fade * 1.15;
-      }
-      if (e.mesh.children && e.mesh.children.length) {
-        for (const ch of e.mesh.children) {
-          if (ch.material && 'opacity' in ch.material) ch.material.opacity = 0.6 * fade;
-        }
       }
     }
     // --- Debris chunks: fly outward, spin, fade ---
@@ -27741,8 +27690,6 @@ function updateEffects(dt) {
       if (e.matB) e.matB.opacity = ease;
       if (e.matA2) e.matA2.opacity = (e._glowOp || 0.22) * ease;
       if (e.matB2) e.matB2.opacity = (e._glowOp || 0.22) * ease;
-      if (e.matA0) e.matA0.opacity = (e._backOp || 0.55) * ease;
-      if (e.matB0) e.matB0.opacity = (e._backOp || 0.55) * ease;
     }
     else if (e.type === 'lightning') {
       const k = Math.max(0, 1 - t);
@@ -32218,21 +32165,6 @@ function executeAbility(slot, ability) {
       beamMesh.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
       beamMesh.frustumCulled = false;
       beamMesh.renderOrder = 2;
-      // Dark normal-blend backing core: the translucent shader beam washes
-      // out over bright skies (it can only tint what's behind it). A deep
-      // violet inner cylinder at 65% radius gives the beam a guaranteed
-      // silhouette on white backgrounds ; against dark space it hides
-      // inside the glow. Child of the beam so transform + lifetime ride
-      // along for free (shared global geometry — never disposed).
-      const _beamBackMat = new THREE.MeshBasicMaterial({
-        color: 0x140a30, transparent: true, opacity: 0.6,
-        blending: THREE.NormalBlending, depthWrite: false,
-      });
-      const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
-      _beamBack.scale.set(0.65, 1.0, 0.65);
-      _beamBack.renderOrder = 1;
-      _beamBack.frustumCulled = false;
-      beamMesh.add(_beamBack);
       scene.add(beamMesh);
       game.effects.push({
         mesh: beamMesh,
@@ -32606,24 +32538,7 @@ function executeAbility(slot, ability) {
         // The cluster was unreliable : pool exhaustion + strip-fx gate
         // + cockpit depth occlusion all dropped bolts. Helix is one
         // mesh pair with depthTest off, always visible.
-        // (v30.37) Release punch-up: the single 0.55 s helix was easy to
-        // miss mid-fight. Three staggered pulses keep the conduit alive
-        // for ~1.3 s, light flashes anchor both ends, and the drain point
-        // sparks. The target position is captured so the late pulses
-        // land where the zap actually hit even if the bot flies on.
-        spawnSiphonHelix(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 1.0);
-        {
-          const _shO = siphonOrigin.clone();
-          const _shT = bestBot.position.clone();
-          setTimeout(() => { try { spawnSiphonHelix(_shO, _shT, LSS.CLASS_COLORS.SYPHON, 0.8); } catch (_) {} }, 130);
-          setTimeout(() => { try { spawnSiphonHelix(_shO, _shT, LSS.CLASS_COLORS.SYPHON, 0.65); } catch (_) {} }, 270);
-          if (typeof spawnDynamicLight === 'function') {
-            spawnDynamicLight(_shO, 0x4169E1, 3.0, 500, 0.30);
-            spawnDynamicLight(_shT, 0x6080ff, 4.5, 750, 0.45);
-          }
-          if (typeof spawnImpactSparks === 'function') { try { spawnImpactSparks(_shT, 8); } catch (_) {} }
-          if (typeof triggerScreenShake === 'function') triggerScreenShake(2.0);
-        }
+        spawnSiphonHelix(siphonOrigin, bestBot.position, LSS.CLASS_COLORS.SYPHON, 0.55);
         // Broadcast so peers spawn their own helix from the same coords.
         if (net && net.active && net.sendEvent) {
           net.sendEvent({
