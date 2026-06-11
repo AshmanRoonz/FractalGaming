@@ -2799,7 +2799,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.49';
+const LSS_BUILD = '30.48';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -55286,9 +55286,6 @@ const music = {
   lastChordKey: null,
   // Bookkeeping for the lead phrase queue (kill-triggered notes).
   pendingLeadNotes: [],         // [{atBeat, note, dur, vel}]
-  // Default layer mix. Drums ship hot (1.25x): they were always the layer
-  // that got buried under pad + riff. The Music Lab can override all four.
-  layerGains: { drums: 1.25, bass: 1, pad: 1, riff: 1 },
 };
 
 // Convert MIDI note number to Hz.
@@ -55684,29 +55681,6 @@ const RIFF_CONTOURS = {
   doomed_creep:   [0, 1, 0, -2, 0, 1, 3, 1],       // crawls around the b2 (Phrygian sting)
 };
 
-// Contour rotation (v30.49). Per Ashman: the riff sounds NEAT when the
-// contour develops across bars — so instead of looping one contour
-// forever, every 4 bars the active contour advances through a pool of
-// related shapes (pool[0] is always the configured base, so each pattern
-// still opens with its own identity). Resets on pattern change.
-const CONTOUR_POOLS = {
-  hover_root:   ['hover_root', 'pentatonic_a', 'hover_root', 'zigzag'],
-  rising:       ['rising', 'pentatonic_a', 'zigzag', 'falling'],
-  falling:      ['falling', 'zigzag', 'riff_minor', 'rising'],
-  zigzag:       ['zigzag', 'pentatonic_a', 'riff_minor', 'rising'],
-  riff_minor:   ['riff_minor', 'zigzag', 'pentatonic_a', 'falling'],
-  riff_blues:   ['riff_blues', 'riff_minor', 'zigzag', 'doomed_creep'],
-  pentatonic_a: ['pentatonic_a', 'zigzag', 'rising', 'riff_minor'],
-  doomed_creep: ['doomed_creep', 'falling', 'riff_blues', 'doomed_creep'],
-};
-function _musicRotateContour(barAbs) {
-  const cfg = _musicGetRiffCfg(music.patternId);
-  if (!cfg) { music._activeContour = null; return; }
-  const pool = CONTOUR_POOLS[cfg.contour] || [cfg.contour];
-  const idx = Math.floor(barAbs / 4) % pool.length;
-  music._activeContour = pool[idx];
-}
-
 // Pattern â†’ riff config. Octave is added on top of keyMidi+24 (lead register).
 // barsPerCycle lets a riff span more than one bar before repeating (e.g. 2 bars
 // of "call" then "response").
@@ -55991,7 +55965,7 @@ function _musicGenerateRiffBar(patternId, barInCycle) {
   const cfg = _musicGetRiffCfg(patternId);
   if (!cfg) return null;
   const rhythm = RIFF_RHYTHMS[cfg.rhythm];
-  const contour = RIFF_CONTOURS[music._activeContour || cfg.contour] || RIFF_CONTOURS[cfg.contour];
+  const contour = RIFF_CONTOURS[cfg.contour];
   if (!rhythm || !contour) return null;
   // Walk through every step in the bar, advancing contour index on each note.
   // For multi-bar cycles, the contour offset starts where the previous bar
@@ -56198,7 +56172,6 @@ function _musicScheduleBeat(beatIdx, beatTime) {
   const _dynHarm = !!_MUSIC_DYN_PATTERNS[music.patternId];
   if (beatInBarLocal === 0) {
     if (!music._riffCycleBar) music._riffCycleBar = 0;
-    _musicRotateContour(Math.floor(beatIdx / 4));
     music._barRiffNotes = _musicGenerateRiffBar(music.patternId, music._riffCycleBar);
     const cfg = _musicGetRiffCfg(music.patternId);
     if (cfg) {
@@ -56409,7 +56382,7 @@ function applyMusicLabConfig(cfg) {
       if (typeof s.padWave === 'string')  music.padWave  = s.padWave;
     }
     if (cfg.layerGains && typeof cfg.layerGains === 'object') {
-      music.layerGains = Object.assign({ drums: 1.25, bass: 1, pad: 1, riff: 1 }, cfg.layerGains);
+      music.layerGains = Object.assign({ drums: 1, bass: 1, pad: 1, riff: 1 }, cfg.layerGains);
     }
     if (typeof cfg.homePull === 'number') music.homePull = Math.max(0, Math.min(1, cfg.homePull));
     if (cfg.harmony && typeof cfg.harmony === 'object') {
@@ -56544,7 +56517,6 @@ function musicSetPattern(id, opts) {
   // Reset riff cycle bar so each pattern starts at its first phrase.
   music._riffCycleBar = 0;
   music._barRiffNotes = null;
-  music._activeContour = null;   // contour rotation restarts from the base shape
   // Clear any pending lead notes from a prior pattern (kills don't echo across rounds).
   music.pendingLeadNotes = [];
   if (opts && typeof opts.intensity === 'number') {
