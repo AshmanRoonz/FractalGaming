@@ -2782,7 +2782,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.44';
+const LSS_BUILD = '30.39';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -7833,24 +7833,6 @@ function _getVortexCoreBeamGeometry() {
   // gives a smooth silhouette ; openEnded skips end caps that would look
   // like flat discs floating in space.
   _VORTEX_CORE_BEAM_GEO = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true);
-  // RGBA color attribute: alpha ramps 0 -> 1 from the muzzle (-Y) end over
-  // the first 30% of length. Consumed only by the normal-blend backing
-  // core (vertexColors: true) ; the LayeredFX shader beam never binds the
-  // attribute, so its visuals are untouched.
-  {
-    const p = _VORTEX_CORE_BEAM_GEO.attributes.position.array;
-    const n = p.length / 3;
-    const rgba = new Float32Array(n * 4);
-    for (let i = 0; i < n; i++) {
-      const y = p[i * 3 + 1];
-      let a;
-      if (y <= -0.50) a = 0;
-      else if (y >= -0.20) a = 1;
-      else { const k = (y + 0.50) / 0.30; a = k * k * (3 - 2 * k); }
-      rgba[i * 4] = 1; rgba[i * 4 + 1] = 1; rgba[i * 4 + 2] = 1; rgba[i * 4 + 3] = a;
-    }
-    _VORTEX_CORE_BEAM_GEO.setAttribute('color', new THREE.BufferAttribute(rgba, 4));
-  }
   return _VORTEX_CORE_BEAM_GEO;
 }
 
@@ -24957,9 +24939,7 @@ class OutskirtsMonster {
       if (typeof v8SpawnSparks === 'function') v8SpawnSparks(to, 10, 1.0, 260, 0x99e0ff, 0xffffff);
       if (typeof spawnDynamicLight === 'function') spawnDynamicLight(from, 0x99e0ff, 3.0, 800, 0.18);
       if (typeof playSpatialSound === 'function') {
-        // monster_zap: the first of the per-monster recipes (made with
-        // Ashman's son) ; lives in DEFAULT_SOUND_LIBRARY under MONSTER.
-        playSpatialSound('monster_zap', this.position.clone(), { refDistance: 500, maxDistance: 4000, rolloffFactor: 0.9 });
+        playSpatialSound('stun', this.position.clone(), { refDistance: 500, maxDistance: 4000, rolloffFactor: 0.9 });
       }
     } catch (_) {}
     if (applyDamage) {
@@ -25915,29 +25895,15 @@ const _TRACER_TAIL_INNER_GEO = new THREE.CylinderGeometry(3.50, 2.50, 1, _TRC_SE
 _TRACER_TAIL_INNER_GEO.rotateX(Math.PI / 2);
 const _TRACER_TAIL_OUTER_GEO = new THREE.CylinderGeometry(9.00, 6.50, 1, _TRC_SEG.outer, 1);
 _TRACER_TAIL_OUTER_GEO.rotateX(Math.PI / 2);
-// (v30.39-41) Solid-color backing cylinder: normal-blend vivid core so
-// shots read as energy bolts on bright skies (additive alone washes out
-// there). The muzzle-end fade can't reuse the RGB-black trick the
-// additive layers use (black PAINTS under normal blending), so this
-// geometry carries an RGBA color attribute instead: RGB stays white
-// (material color passes through) while ALPHA ramps 0 -> 1 over the same
-// window the additive layers fade across.
+// (v30.39) Dark backing cylinder: the additive layers above can only ADD
+// light, so on bright skies (Snow / Grassy) tracers washed out to nothing.
+// A normal-blend dark-tinted tube between beam and inner-haze widths gives
+// every shot a guaranteed silhouette on white backgrounds. Deliberately
+// NOT in the vertex-fade list below: a black vertex fade only works under
+// additive blending ; under normal blending it would paint a black noodle
+// at the muzzle.
 const _TRACER_BACK_GEO = new THREE.CylinderGeometry(2.2, 1.6, 1, _TRC_SEG.beam, 1);
 _TRACER_BACK_GEO.rotateX(Math.PI / 2);
-{
-  const _bp = _TRACER_BACK_GEO.attributes.position.array;
-  const _bn = _bp.length / 3;
-  const _brgba = new Float32Array(_bn * 4);
-  for (let i = 0; i < _bn; i++) {
-    const z = _bp[i * 3 + 2];
-    let a;
-    if (z <= -0.50) a = 0;
-    else if (z >= -0.20) a = 1;
-    else { const k = (z + 0.50) / 0.30; a = k * k * (3 - 2 * k); }
-    _brgba[i * 4] = 1; _brgba[i * 4 + 1] = 1; _brgba[i * 4 + 2] = 1; _brgba[i * 4 + 3] = a;
-  }
-  _TRACER_BACK_GEO.setAttribute('color', new THREE.BufferAttribute(_brgba, 4));
-}
 
 // Per-vertex fade-in attribute on the shared tracer cylinders. After the
 // rotateX(PI/2) above, the cylinder's length axis is local +Z; vertices at
@@ -26391,7 +26357,7 @@ const _TRACER_CORE_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, tr
 const _TRACER_BEAM_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1.0, blending: THREE.AdditiveBlending, vertexColors: true });
 const _TRACER_TAIL_INNER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
 const _TRACER_TAIL_OUTER_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending, depthWrite: false, vertexColors: true });
-const _TRACER_BACK_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.NormalBlending, depthWrite: false, vertexColors: true });
+const _TRACER_BACK_MAT_PROTO = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, blending: THREE.NormalBlending, depthWrite: false });
 
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
@@ -26489,14 +26455,12 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     });
   }
 
-  // --- Solid color core (normal blend): a vivid, near-opaque tube in the
-  // weapon color. Additive layers can't show against a bright sky, and a
-  // dark silhouette reads as a shadow-beam — but a saturated colored core
-  // REPLACES the sky pixels, so the shot stays an energy bolt on white
-  // backgrounds while the additive haze stacks white-hot over it in the
-  // dark. Slightly deepened so the glow layers have headroom on top.
-  const _backCol = new THREE.Color(color).multiplyScalar(0.8);
-  _makeShape(_TRACER_BACK_GEO, _TRACER_BACK_MAT_PROTO, _backCol, 0.85, 0.22, 'tracer', 0.9);
+  // --- Dark backing (normal blend): silhouette on bright skies. Color is
+  // the weapon color crushed to ~12% so each ship keeps its identity in
+  // the outline. Slightly longer than the beam so the contrast lingers
+  // through the bright window before retract.
+  const _backCol = new THREE.Color(color).multiplyScalar(0.12);
+  _makeShape(_TRACER_BACK_GEO, _TRACER_BACK_MAT_PROTO, _backCol, 0.55, 0.22, 'tracer', 0.9);
   // --- Hot core (white-hot pinprick, very short-lived: the "shot" itself) ---
   _makeShape(_TRACER_CORE_GEO, _TRACER_CORE_MAT_PROTO, 0xffffff, 1.0, 0.10, 'tracer');
   // --- Beam (weapon color, thin filament) ---
@@ -26946,33 +26910,18 @@ function spawnSiphonHelix(from, to, color, lifetime) {
   meshA.frustumCulled = false; meshB.frustumCulled = false;
   meshA.renderOrder = 1010;    meshB.renderOrder = 1010;
   scene.add(meshA); scene.add(meshB);
-  // Solid-color backing pair: NORMAL blending, vivid royal blue. Additive
-  // layers can only ADD light, so against a bright sky they wash out — and
-  // a DARK backing read as a shadow-beam ("multiply" look). A saturated
-  // colored strand replaces the sky pixels instead: energy-bolt blue on
-  // white backgrounds, extra body underneath the glow in the dark.
-  const _BACK_OP = 0.75;
+  // Dark backing pair: NORMAL blending, deep navy. Additive layers can
+  // only ADD light, so against a bright sky (Snow/Grassy themes) they
+  // wash out to nothing — this was exactly the "barely visible" report.
+  // A dark normal-blend strand under the bright core guarantees contrast
+  // on white backgrounds and disappears politely against dark space.
+  const _BACK_OP = 0.55;
   const geoA0 = new THREE.TubeGeometry(curveA, Math.min(100, numPoints * 2), 5.0, 5, false);
   const geoB0 = new THREE.TubeGeometry(curveB, Math.min(100, numPoints * 2), 5.0, 5, false);
-  // Muzzle-end alpha fade (RGBA vertex colors ; TubeGeometry uv.x runs
-  // 0 -> 1 along the strand, 0 = the gun end).
-  const _alphaFadeByU = (geo) => {
-    const uv = geo.attributes.uv;
-    const n = geo.attributes.position.count;
-    const rgba = new Float32Array(n * 4);
-    for (let i = 0; i < n; i++) {
-      const u = uv ? uv.getX(i) : 1;
-      const k = Math.min(1, Math.max(0, u / 0.25));
-      const a = k * k * (3 - 2 * k);
-      rgba[i * 4] = 1; rgba[i * 4 + 1] = 1; rgba[i * 4 + 2] = 1; rgba[i * 4 + 3] = a;
-    }
-    geo.setAttribute('color', new THREE.BufferAttribute(rgba, 4));
-  };
-  _alphaFadeByU(geoA0); _alphaFadeByU(geoB0);
   const matA0 = new THREE.MeshBasicMaterial({
-    color: 0x2a3fd4, transparent: true, opacity: _BACK_OP,
+    color: 0x0a0a2e, transparent: true, opacity: _BACK_OP,
     blending: THREE.NormalBlending,
-    depthTest: false, depthWrite: false, side: THREE.FrontSide, vertexColors: true,
+    depthTest: false, depthWrite: false, side: THREE.FrontSide,
   });
   const matB0 = matA0.clone();
   const meshA0 = new THREE.Mesh(geoA0, matA0);
@@ -27728,7 +27677,7 @@ function updateEffects(dt) {
       }
       if (e.mesh.children && e.mesh.children.length) {
         for (const ch of e.mesh.children) {
-          if (ch.material && 'opacity' in ch.material) ch.material.opacity = 0.5 * fade;
+          if (ch.material && 'opacity' in ch.material) ch.material.opacity = 0.6 * fade;
         }
       }
     }
@@ -32269,15 +32218,15 @@ function executeAbility(slot, ability) {
       beamMesh.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
       beamMesh.frustumCulled = false;
       beamMesh.renderOrder = 2;
-      // Vivid normal-blend backing core: the translucent shader beam washes
-      // out over bright skies. A saturated violet inner cylinder at 65%
-      // radius keeps the beam reading as ENERGY on white backgrounds (a
-      // dark one read as a shadow-beam) ; against dark space it adds body
+      // Dark normal-blend backing core: the translucent shader beam washes
+      // out over bright skies (it can only tint what's behind it). A deep
+      // violet inner cylinder at 65% radius gives the beam a guaranteed
+      // silhouette on white backgrounds ; against dark space it hides
       // inside the glow. Child of the beam so transform + lifetime ride
       // along for free (shared global geometry — never disposed).
       const _beamBackMat = new THREE.MeshBasicMaterial({
-        color: 0x6a22dd, transparent: true, opacity: 0.5,
-        blending: THREE.NormalBlending, depthWrite: false, vertexColors: true,
+        color: 0x140a30, transparent: true, opacity: 0.6,
+        blending: THREE.NormalBlending, depthWrite: false,
       });
       const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
       _beamBack.scale.set(0.65, 1.0, 0.65);
@@ -54232,61 +54181,6 @@ const DEFAULT_SOUND_LIBRARY = {
         }
       ],
       "recipeGain": 1
-    },
-    {
-      "name": "monster_zap",
-      "description": "creepy monster zap sound",
-      "category": "MONSTER",
-      "layers": [
-        {
-          "kind": "noise",
-          "duration": 1.29,
-          "volume": 0.575,
-          "startOffset": 0.18,
-          "filterFreq": 1500,
-          "filterQ": 0.76,
-          "varDur": 0.32,
-          "varVol": 0.2,
-          "varFreq": 0.2,
-          "chance": 0.65,
-          "spacing": 0.165,
-          "count": 4,
-          "spacingVar": 0.65,
-          "countDecay": 0.08,
-          "reverseEnvelope": true
-        },
-        {
-          "kind": "tri",
-          "wave": "sawtooth",
-          "freqs": [
-            68,
-            68,
-            68
-          ],
-          "rampFreqs": [
-            56,
-            68,
-            68
-          ],
-          "vol": 0.2,
-          "dur": 1.355,
-          "rampTime": 0.05,
-          "startOffset": 0,
-          "envelope": {
-            "attack": 0.72,
-            "hold": 0.511,
-            "decay": 3
-          },
-          "pitchVar": 0.09,
-          "durVar": 0.03,
-          "volVar": 0.1,
-          "chance": 0.7,
-          "count": 3,
-          "spacing": 0.2,
-          "spacingVar": 0.15
-        }
-      ],
-      "recipeGain": 1
     }
   ]
 };
@@ -54507,7 +54401,7 @@ if (typeof window !== 'undefined') window.reloadDefaultSoundLibrary = reloadDefa
 // off. Frequency mapping matches the old linear ramp 1:1, so a clean
 // 0-to-full charge sounds identical to before.
 const _RAIL_FREQ_START = [69, 63, 60];
-const _RAIL_FREQ_END   = [590, 530, 500];   // top end lowered per Ashman's tuning
+const _RAIL_FREQ_END   = [690, 630, 600];
 function _startRailgunChargeSound(initialCharge) {
   if (!audio || !audio.initialized || !audio.ctx) return null;
   resumeAudio();
@@ -54649,27 +54543,9 @@ function _loadPersistedSoundRecipes() {
       for (const r of parsed.recipes) {
         if (r && r.name && Array.isArray(r.layers)) map[r.name] = r;
       }
-      // (v30.44) Merge NEW factory recipes into an existing save. The
-      // persisted set used to be taken as-is, so any recipe added to
-      // DEFAULT_SOUND_LIBRARY after a player's first run simply never
-      // existed for them (monster_zap played silence on every machine
-      // with an old save). Names the player already has are left alone —
-      // their Sound Lab edits win — only missing names are seeded.
-      let merged = false;
-      try {
-        if (DEFAULT_SOUND_LIBRARY && Array.isArray(DEFAULT_SOUND_LIBRARY.recipes)) {
-          for (const dr of DEFAULT_SOUND_LIBRARY.recipes) {
-            if (dr && dr.name && Array.isArray(dr.layers) && !map[dr.name]) {
-              map[dr.name] = dr;
-              parsed.recipes.push(dr);
-              merged = true;
-            }
-          }
-        }
-      } catch(e) {}
       if (Object.keys(map).length) audio.labRecipes = map;
-      // Persist the cleaned/merged copy so this is a one-shot migration.
-      if (sanitized || merged) {
+      // Persist the cleaned copy so this is a one-shot migration.
+      if (sanitized) {
         try { localStorage.setItem('lss_sound_recipes', JSON.stringify(parsed)); } catch(e) {}
       }
     }
@@ -54687,7 +54563,6 @@ _loadPersistedSoundRecipes();
 // audible event. Gaps are picked per-type so the rate-limit is invisible
 // during normal play.
 const _SOUND_MIN_GAP = {
-  monster_zap:     0.12,
   // Weapon fire: cap a hair below each weapon's natural fire rate so the
   // local player's stream always passes ; concurrent enemy streams get
   // folded into the same audible burst instead of doubling the load.
