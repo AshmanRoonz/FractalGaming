@@ -2786,7 +2786,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.55';
+const LSS_BUILD = '30.54';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -46778,22 +46778,12 @@ function buildRoomGraphLevel(level) {
 // bounding sphere (+margin) or inside a basin gas cloud. Ships were
 // occasionally spawning embedded in scenery.
 function _spawnPointClear(x, y, z) {
-  return _spawnClearanceScore(x, y, z).score >= 0;
-}
-
-// Clearance score: the minimum (distance - keepout radius) across every
-// rock cluster and basin cloud. >= 0 means the point is clear ; negative
-// means embedded, and HOW negative says how deep. Also returns the worst
-// violator so a failed spawn search can push the point out of it.
-function _spawnClearanceScore(x, y, z) {
-  let score = Infinity, worst = null, worstR = 0;
   if (game.clusters) {
     for (const c of game.clusters) {
       if (!c || !c.alive || !c.position) continue;
       const r = (c.clusterScale || 0) * 1.1 + 120;
       const dx = c.position.x - x, dy = c.position.y - y, dz = c.position.z - z;
-      const s = Math.sqrt(dx * dx + dy * dy + dz * dz) - r;
-      if (s < score) { score = s; worst = c.position; worstR = r; }
+      if (dx * dx + dy * dy + dz * dz < r * r) return false;
     }
   }
   if (game.dots) {
@@ -46802,11 +46792,10 @@ function _spawnClearanceScore(x, y, z) {
       const r = (d.radius || 0) + 100;
       const p = d.anchor.position;
       const dx = p.x - x, dy = p.y - y, dz = p.z - z;
-      const s = Math.sqrt(dx * dx + dy * dy + dz * dz) - r;
-      if (s < score) { score = s; worst = p; worstR = r; }
+      if (dx * dx + dy * dy + dz * dz < r * r) return false;
     }
   }
-  return { score, worst, worstR };
+  return true;
 }
 
 function getValidSpawnPoint(team, spread) {
@@ -46825,38 +46814,18 @@ function getValidSpawnPoint(team, spread) {
     if (pool.length === 0) pool = pts.slice(Math.floor(pts.length * 0.75));
   }
 
-  // Up to 40 attempts at a clear point. The old code fell back to the
-  // LAST random candidate when every attempt failed — which is exactly
-  // how players spawned inside rocks on cluster-crowded maps. Now every
-  // attempt is SCORED (distance past the nearest keepout) ; a clear
-  // point returns immediately, and if nothing clears, the least-embedded
-  // candidate gets pushed radially out of its worst violator, with a
-  // worldSDF check so the push can't trade a rock for a wall.
-  let bestX = 0, bestY = 0, bestZ = 0, bestScore = -Infinity;
-  for (let attempt = 0; attempt < 40; attempt++) {
+  // Up to 24 attempts at a clear point (fresh corridor point + jitter
+  // each try) ; falls back to the last candidate so spawning never fails
+  // outright even on a map drowning in clouds.
+  let x = 0, y = 0, z = 0;
+  for (let attempt = 0; attempt < 24; attempt++) {
     const base = pool[Math.floor(Math.random() * pool.length)];
-    const x = base.x + (Math.random() - 0.5) * spread;
-    const y = base.y + (Math.random() - 0.5) * spread;
-    const z = base.z + (Math.random() - 0.5) * spread;
-    const r = _spawnClearanceScore(x, y, z);
-    if (r.score >= 0) return new THREE.Vector3(x, y, z);
-    if (r.score > bestScore) { bestScore = r.score; bestX = x; bestY = y; bestZ = z; }
+    x = base.x + (Math.random() - 0.5) * spread;
+    y = base.y + (Math.random() - 0.5) * spread;
+    z = base.z + (Math.random() - 0.5) * spread;
+    if (_spawnPointClear(x, y, z)) break;
   }
-  // Push the best candidate out of its worst violator.
-  const fin = _spawnClearanceScore(bestX, bestY, bestZ);
-  if (fin.worst && fin.score < 0) {
-    let dx = bestX - fin.worst.x, dy = bestY - fin.worst.y, dz = bestZ - fin.worst.z;
-    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-    const want = fin.worstR + 30;
-    const px = fin.worst.x + (dx / d) * want;
-    const py = fin.worst.y + (dy / d) * want;
-    const pz = fin.worst.z + (dz / d) * want;
-    // Only take the pushed point if it's still in open space.
-    if (typeof worldSDF !== 'function' || worldSDF(px, py, pz) < -60) {
-      return new THREE.Vector3(px, py, pz);
-    }
-  }
-  return new THREE.Vector3(bestX, bestY, bestZ);
+  return new THREE.Vector3(x, y, z);
 }
 
 // ---- CINEMATIC OVERLAYS ----
