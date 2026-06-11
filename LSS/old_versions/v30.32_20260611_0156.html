@@ -2782,7 +2782,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.34';
+const LSS_BUILD = '30.32';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -31356,20 +31356,18 @@ function updateWeapon(dt) {
 
   // Puncture Railgun charge: hold alt-fire to charge over 2.5s, boosted damage
   if (player.loadoutKey === 'PUNCTURE') {
-    // Level-driven charge tone (see _startRailgunChargeSound). The tone
-    // lives whenever there's charge to express: while aiming it climbs,
-    // after release-without-firing it slides back DOWN with the decaying
-    // charge, and a mid-hold shot restarts it from zero alongside the
-    // recharge. Starting mid-charge resumes at the matching pitch.
-    const _wantTone = aiming || player.railgunCharge > 0.02;
-    if (_wantTone && !player._railgunChargeAudio) {
-      try { player._railgunChargeAudio = _startRailgunChargeSound(player.railgunCharge); } catch (e) {}
-    } else if (!_wantTone && player._railgunChargeAudio) {
-      try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (e) {}
-      player._railgunChargeAudio = null;
-    }
-    if (player._railgunChargeAudio && typeof player._railgunChargeAudio.set === 'function') {
-      try { player._railgunChargeAudio.set(player.railgunCharge); } catch (e) {}
+    if (aiming && !player._railgunChargingPrev) {
+      try {
+        if (player._railgunChargeAudio) _stopRailgunChargeSound(player._railgunChargeAudio);
+        player._railgunChargeAudio = _startRailgunChargeSound();
+      } catch (e) {}
+    } else if (!aiming && player._railgunChargingPrev) {
+      // Released alt-fire ; cut the rising sound at whatever pitch it was
+      // so the audio matches the actual charge level the player held to.
+      try {
+        if (player._railgunChargeAudio) _stopRailgunChargeSound(player._railgunChargeAudio);
+        player._railgunChargeAudio = null;
+      } catch (e) {}
     }
     player._railgunChargingPrev = aiming;
     if (aiming) {
@@ -54285,25 +54283,20 @@ function reloadDefaultSoundLibrary() {
 }
 if (typeof window !== 'undefined') window.reloadDefaultSoundLibrary = reloadDefaultSoundLibrary;
 
-// Railgun charge tone, LEVEL-DRIVEN (v30.34): pitch is a pure function of
-// player.railgunCharge rather than a fire-and-forget 2.5 s scheduled ramp.
-// The per-frame set(charge) call glides three sine partials to the
-// frequency for the CURRENT charge, so the tone picks up exactly where it
-// left off when re-aiming mid-charge, keeps singing through fire-while-
-// held recharges, and runs BACKWARDS as a released (unshot) charge bleeds
-// off. Frequency mapping matches the old linear ramp 1:1, so a clean
-// 0-to-full charge sounds identical to before.
-const _RAIL_FREQ_START = [69, 63, 60];
-const _RAIL_FREQ_END   = [690, 630, 600];
-function _startRailgunChargeSound(initialCharge) {
+function _startRailgunChargeSound() {
   if (!audio || !audio.initialized || !audio.ctx) return null;
   resumeAudio();
   const ctx = audio.ctx;
   const now = ctx.currentTime;
-  const c0 = Math.min(1, Math.max(0, initialCharge || 0));
+  const dur      = 2.5;
+  const rampTime = 2.495;
   const attack   = 0.228;
+  const hold     = 2.0;
+  const decay    = 2.235;
   const finalVol = 0.415 * 0.39;          // recipe vol * recipeGain
-  const spacing  = 0.035;
+  const freqStart = [69, 63, 60];
+  const freqEnd   = [690, 630, 600];
+  const spacing   = 0.035;
   const oscs  = [];
   const gains = [];
   const dest = audio.sfxBus || audio.masterGain || ctx.destination;
@@ -54311,39 +54304,21 @@ function _startRailgunChargeSound(initialCharge) {
     const t0 = now + i * spacing;
     const osc = ctx.createOscillator();
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(
-      _RAIL_FREQ_START[i] + (_RAIL_FREQ_END[i] - _RAIL_FREQ_START[i]) * c0, t0);
+    osc.frequency.setValueAtTime(freqStart[i], t0);
+    osc.frequency.linearRampToValueAtTime(freqEnd[i], t0 + rampTime);
     const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, t0);
     g.gain.linearRampToValueAtTime(finalVol, t0 + attack);
+    g.gain.setValueAtTime(finalVol, t0 + attack + hold);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + attack + hold + decay);
     osc.connect(g);
     g.connect(dest);
     osc.start(t0);
+    osc.stop(t0 + attack + hold + decay + 0.05);
     oscs.push(osc);
     gains.push(g);
   }
-  return {
-    oscs, gains, baseVol: finalVol, startTime: now, _lastVol: finalVol,
-    set(charge) {
-      const c = Math.min(1, Math.max(0, charge));
-      const t = ctx.currentTime;
-      for (let i = 0; i < 3; i++) {
-        try {
-          this.oscs[i].frequency.setTargetAtTime(
-            _RAIL_FREQ_START[i] + (_RAIL_FREQ_END[i] - _RAIL_FREQ_START[i]) * c, t, 0.03);
-        } catch (_) {}
-      }
-      // Pegged at full: settle to a softer ready-hum instead of a
-      // constant full-volume screech ; dips back below full restore it.
-      const want = (c >= 0.995) ? this.baseVol * 0.45 : this.baseVol;
-      if (this._lastVol !== want) {
-        this._lastVol = want;
-        for (const g of this.gains) {
-          try { g.gain.setTargetAtTime(want, t, 0.12); } catch (_) {}
-        }
-      }
-    },
-  };
+  return { oscs, gains, startTime: now };
 }
 
 function _stopRailgunChargeSound(handle) {
