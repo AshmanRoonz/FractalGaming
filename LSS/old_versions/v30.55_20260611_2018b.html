@@ -2079,16 +2079,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
                   onmouseout="this.style.background='rgba(15,30,40,0.6)';this.style.borderColor='rgba(120,200,255,0.45)';this.style.color='#cce8ff'">
             PLAY SOLO + BOTS
           </button>
-          <button id="btn-opensolo" onclick="startOpenSolo()" type="button" title="Solo vs bots in a public room — players can drop in and take a bot's seat" style="
-                  flex:1 1 0;min-height:54px;
-                  background:rgba(20,40,30,0.6);border:1px solid rgba(120,255,170,0.45);
-                  color:#bff0d0;border-radius:10px;cursor:pointer;
-                  font-family:'Rajdhani','Orbitron',sans-serif;font-size:13px;
-                  letter-spacing:3px;transition:all 0.2s;font-weight:bold;"
-                  onmouseover="this.style.background='rgba(35,80,55,0.7)';this.style.borderColor='#7fa';this.style.color='#fff'"
-                  onmouseout="this.style.background='rgba(20,40,30,0.6)';this.style.borderColor='rgba(120,255,170,0.45)';this.style.color='#bff0d0'">
-            OPEN SOLO &#9876;
-          </button>
           <button id="btn-howto" onclick="openHowToPlay()" type="button" style="
             flex:1 1 0;min-height:54px;
             background:rgba(20,35,55,0.5);border:1px solid rgba(120,200,255,0.5);
@@ -2796,7 +2786,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.56';
+const LSS_BUILD = '30.55';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -3344,9 +3334,6 @@ const net = {
   myPeerId: null,
   peers: new Map(),           // peerId -> { state, mesh, lastUpdate, interpolation, ready }
   networkPlayers: [],         // NetworkPlayer instances (mirrors game.entities for bots)
-  openSolo: false,            // host flag: this room is an open solo (bots + drop-ins)
-  openSoloHostId: null,       // host's peerId (known on every peer via dropin_state)
-  _dropin: null,              // joiner: mid-match drop-in briefing from the host
 
   // Trystero actions (set up on room join)
   sendState: null,            // broadcast own state
@@ -4968,11 +4955,6 @@ async function joinRoom() {
         }
         // Create or update their NetworkPlayer
         updateNetworkPlayer(peerId, data);
-        // Open-solo: the challenger takes a bot's seat on their team,
-        // mid-round, with a phase-out puff where the bot stood.
-        if (net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
-          try { _dropinReplaceBot(data.team); } catch (_) {}
-        }
         // A peer just committed in ship-select; if everyone now has a
         // loadout, this triggers the synced launchAt proposal.
         checkAllLoadoutsReady();
@@ -5044,18 +5026,6 @@ async function joinRoom() {
       // cluster placements until next round.
       if (game.clusters && game.clusters.length > 0) {
         broadcastWorldObjects();
-      }
-
-      // Open-solo: brief the challenger on the match in progress so they
-      // can build the same world and drop straight in (no launch
-      // handshake). Roster follows so their bot proxies appear.
-      if (net.openSolo && game.state !== 'select' && net.sendEvent) {
-        try {
-          net.sendEvent({ type: 'dropin_state', host: net.myPeerId,
-            map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
-            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 });
-          if (typeof _botSendRoster === 'function') _botSendRoster();
-        } catch (_) {}
       }
     });
 
@@ -5131,35 +5101,6 @@ function _cancelRoomForLocalPlay() {
     if (typeof _lobbyRefresh === 'function') _lobbyRefresh();
   } catch (_) {}
 }
-
-// OPEN SOLO (v30.56): play vs bots in a REAL room. The match shows up on
-// the Live Rooms list (heartbeat needs Discord sign-in) and anyone with
-// the code can drop in mid-round, taking a bot's seat on the enemy team.
-async function startOpenSolo() {
-  game.testMode = false;
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const code = Array.from({ length: 4 }, () => alphabet[(Math.random() * alphabet.length) | 0]).join('');
-  const inp = document.getElementById('room-code');
-  if (inp) inp.value = code;
-  try { await joinRoom(); } catch (e) { console.warn('[open-solo] room create failed:', e); }
-  if (!net.active) {
-    const ls = document.getElementById('lobby-status');
-    if (ls) { ls.textContent = 'COULD NOT OPEN A ROOM — STARTING OFFLINE SOLO'; ls.style.color = '#ffaa00'; }
-    startSolo();
-    return;
-  }
-  net.openSolo = true;
-  net.openSoloHostId = net.myPeerId;
-  net.solo = false;
-  player.team = LSS.TEAM_FLEET_A;
-  // Pre-seed the world build: drop-ins replay this exact seed to land in
-  // an identical arena. (The zero-peer launch path never proposes one.)
-  net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
-  const ls = document.getElementById('lobby-status');
-  if (ls) { ls.textContent = 'OPEN ROOM ' + code + ' — CHALLENGERS CAN DROP IN'; ls.style.color = '#7dffa8'; }
-  enterShipSelect();
-}
-if (typeof window !== 'undefined') window.startOpenSolo = startOpenSolo;
 
 function startSolo() {
   _cancelRoomForLocalPlay();   // cancel any created/pending room, then go local
@@ -5812,26 +5753,6 @@ function checkAllLoadoutsReady() {
   if (!net.active) return;
   if (typeof _countdownActive !== 'undefined' && _countdownActive) return; // already launching
   if (!player.loadoutKey) return;                                          // we haven't picked yet
-  // Open-solo host mid-match: a challenger committing must never restart
-  // the host's round via the launch handshake. (Between-round ship-select
-  // still coordinates launches normally.)
-  if (net.openSolo && (game.state === 'playing' || game.state === 'roundEnd')) return;
-  // Open-solo challenger: the match is already running on the host. Skip
-  // the launch handshake entirely — adopt the briefed round state, run the
-  // cinematic + short countdown, and fly into the live round.
-  if (net._dropin && net.openSoloHostId && net.myPeerId !== net.openSoloHostId) {
-    const d = net._dropin;
-    net._dropin = null;   // one-shot
-    game.currentRound = d.round || 1;
-    game.scoreA = d.scoreA || 0;
-    game.scoreB = d.scoreB || 0;
-    try { hideLoadingOverlay(); } catch (_) {}
-    _lssRunCinematicThen(() => {
-      _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
-      launchCountdown(LSS.SHORT_COUNTDOWN);
-    });
-    return;
-  }
 
   // Refresh the waiting overlay (peer count may have just changed).
   showShipSelectWaiting();
@@ -5975,16 +5896,6 @@ function applyWorldSync(mapKey, seed) {
 
 function assignTeamFromPeerOrder() {
   if (typeof player === 'undefined' || !net.myPeerId) return;
-  // Open-solo rooms: the host holds Fleet A ; challengers fill the enemy
-  // fleet first (3 seats), overflow joins Fleet A. Deterministic on every
-  // peer: non-host ids sorted.
-  if (net.openSoloHostId) {
-    if (net.myPeerId === net.openSoloHostId) { player.team = LSS.TEAM_FLEET_A; return; }
-    const others = [net.myPeerId, ...nonJudgePeerIds()].filter(id => id !== net.openSoloHostId).sort();
-    const idx = Math.max(0, others.indexOf(net.myPeerId));
-    player.team = (idx < 3) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
-    return;
-  }
   // Judges aren't players, so they don't take a team slot.
   const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
   const myIndex = allIds.indexOf(net.myPeerId);
@@ -6946,58 +6857,6 @@ function handleNetEvent(evt, fromPeerId) {
         if (typeof row[5] === 'number') m.health = row[5];
       }
     }
-    return;
-  }
-  // ---- Open-solo drop-in: networked bots ----
-  if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
-    if (!net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
-    return;
-  }
-  if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
-    if (!net.openSolo) {
-      for (const r of evt.m) {
-        if (!Array.isArray(r) || r.length < 7) continue;
-        const b = _botProxyById(r[0]);
-        if (!b) continue;
-        b._netX = r[1]; b._netY = r[2]; b._netZ = r[3];
-        b.health = r[4]; b.shield = r[5];
-        const aliveNow = !!r[6];
-        if (!aliveNow && b.alive) { try { b.die(null); } catch (_) { b.alive = false; } }
-      }
-    }
-    return;
-  }
-  if (evt.type === 'bot_dmg' && typeof evt.i === 'number') {
-    if (net.openSolo) {
-      const b = game.entities.find(x => (x instanceof Bot) && !x.isProxy && x.id === evt.i);
-      if (b && b.alive) { try { b.takeDamage(Math.max(0, +evt.d || 0), 'net', null); } catch (_) {} }
-    }
-    return;
-  }
-  if (evt.type === 'bot_fire') {
-    if (!net.openSolo && typeof spawnTracer === 'function') {
-      try {
-        _bfA.set(+evt.ox || 0, +evt.oy || 0, +evt.oz || 0);
-        _bfB.set(+evt.ex || 0, +evt.ey || 0, +evt.ez || 0);
-        spawnTracer(_bfA, _bfB, evt.c || 0xffdd44, 0.8);
-        const fb = _botProxyById(evt.i);
-        if (fb) { fb.isFiring = true; fb.fireFlashTimer = 0.15; }
-      } catch (_) {}
-    }
-    return;
-  }
-  // Joiner briefing: the open-solo host describes the match in progress.
-  if (evt.type === 'dropin_state') {
-    net.openSoloHostId = evt.host || null;
-    net._dropin = evt;
-    try { applyWorldSync(evt.map, evt.seed >>> 0); } catch (e) { console.warn('[dropin] world sync failed:', e); }
-    try {
-      const ls = document.getElementById('lobby-status');
-      if (ls) { ls.textContent = 'MATCH IN PROGRESS — PICK A SHIP AND DROP IN'; ls.style.color = '#7dffa8'; }
-    } catch (_) {}
-    // Straight to the hangar: a challenger shouldn't need to find a
-    // second button after following an invite.
-    try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
     return;
   }
   // Authority blinked a monster ; snap the proxy (so interpolation doesn't
@@ -16823,10 +16682,6 @@ class Bot {
     const loadout = LOADOUTS[loadoutKey];
     const chassisData = CHASSIS[loadout.chassis];
     this.id = id;
-    // Drop-in proxies: on non-host peers the bot is a shell that lerps to
-    // the host's bot_state snapshots ; no AI, no firing, no local damage.
-    this.isProxy = false;
-    this._netX = null; this._netY = 0; this._netZ = 0;
     this.loadoutKey = loadoutKey;
     this.loadout = loadout;
     this.chassis = chassisData;
@@ -16982,30 +16837,8 @@ class Bot {
     return nextRoom;
   }
 
-  // Non-host peers: glide to the host's snapshots. Mirrors the monster
-  // proxy pattern: position lerp with a gap-snap, mesh sync, flash decay.
-  _updateProxyBot(dt) {
-    if (this._netX != null) {
-      _botProxyTarget.set(this._netX, this._netY, this._netZ);
-      const d = this.position.distanceTo(_botProxyTarget);
-      if (d > 2500) this.position.copy(_botProxyTarget);
-      else if (d > 0.5) this.position.lerp(_botProxyTarget, Math.min(1, dt * 8));
-      if (d > 3) this.targetDir.copy(_botProxyTarget).sub(this.position).normalize();
-    }
-    if (this.mesh) {
-      this.mesh.position.copy(this.position);
-      if (this.targetDir.lengthSq() > 0.01) {
-        _botProxyTarget.copy(this.position).add(this.targetDir);
-        this.mesh.lookAt(_botProxyTarget);
-      }
-    }
-    if (this.fireFlashTimer > 0) { this.fireFlashTimer -= dt; if (this.fireFlashTimer <= 0) this.isFiring = false; }
-    this.spawnProtection = Math.max(0, (this.spawnProtection || 0) - dt);
-  }
-
   update(dt) {
     if (!this.alive) return;
-    if (this.isProxy) { this._updateProxyBot(dt); return; }
     // Bots are locked in place during pre-round warmup.
     if (game.state === 'warmup') {
       if (this.velocity) this.velocity.set(0, 0, 0);
@@ -17735,16 +17568,6 @@ class Bot {
     const wallDist = raycastLevel(this.position, _botFireDir, dist + 10, true);
     if (wallDist < dist - 5) return; // wall blocks the shot
     this.isFiring = true; this.fireFlashTimer = 0.15; // for animation
-    // Open-solo: locally-simulated bot fire is invisible to drop-in peers ;
-    // ship the tracer line so challengers can see who is shooting at them.
-    if (typeof net !== 'undefined' && net && net.active && net.openSolo && net.sendEvent && target && target.position) {
-      try {
-        net.sendEvent({ type: 'bot_fire', i: this.id,
-          ox: Math.round(this.position.x), oy: Math.round(this.position.y), oz: Math.round(this.position.z),
-          ex: Math.round(target.position.x), ey: Math.round(target.position.y), ez: Math.round(target.position.z),
-          c: (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44 });
-      } catch (_) {}
-    }
     const weapon = this.loadout.weapon;
     // Distance-based accuracy: better up close, worse at range
     const rangeRatio = Math.max(0, 1 - dist / weapon.range);
@@ -17844,14 +17667,6 @@ class Bot {
 
   takeDamage(amount, attacker, hitPoint) {
     if (!this.alive || this.spawnProtection > 0) return 0;
-    if (this.isProxy) {
-      // Route to the bot authority (open-solo host) like mon_dmg ; HP
-      // truth flows back via bot_state snapshots.
-      if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
-        try { net.sendEvent({ type: 'bot_dmg', i: this.id, d: Math.round(amount) }); } catch (_) {}
-      }
-      return amount;   // caller hitmarkers still fire
-    }
 
     if (this.shield > 0) {
       if (amount <= this.shield) { this.shield -= amount; }
@@ -30183,7 +29998,7 @@ function commitLoadout(key) {
       // Multiplayer is humans only; bots removed. Skip the local bot
       // fleet so the match is just the connected peers. Solo still spawns
       // the full bot fleet as before.
-      if (!net.active || net.openSolo) spawnBots();
+      if (!net.active) spawnBots();
     };
     if (net.active && typeof net.worldSeed === 'number') {
       const roundSeed = getRoundSeed(1);
@@ -30340,109 +30155,12 @@ function commitLoadout(key) {
   });
 }
 
-// ---- OPEN-SOLO NETWORKED BOTS (v30.56) ----
-// The open-solo host simulates bots locally (exactly like offline solo) and
-// streams them to drop-in peers: a roster (who exists) + ~8 Hz state
-// snapshots (where/health). Peers run lightweight Bot proxies that lerp to
-// snapshots ; their weapon hits route back via bot_dmg. The host's bots
-// already target NetworkPlayers naturally because joiners live in
-// game.entities like everything else.
-const _botProxyTarget = new THREE.Vector3();
-const _bfA = new THREE.Vector3();
-const _bfB = new THREE.Vector3();
-
-function _botNetSync(dt) {
-  if (!net || !net.active || !net.openSolo || !net.sendEvent) return;
-  _botNetSync._t = (_botNetSync._t || 0) - dt;
-  if (_botNetSync._t > 0) return;
-  _botNetSync._t = 0.12;
-  const rows = [];
-  for (const b of game.entities) {
-    if (!(b instanceof Bot) || b.isProxy) continue;
-    rows.push([b.id,
-      Math.round(b.position.x), Math.round(b.position.y), Math.round(b.position.z),
-      Math.round(b.health), Math.round(b.shield), b.alive ? 1 : 0]);
-  }
-  if (rows.length) { try { net.sendEvent({ type: 'bot_state', m: rows }); } catch (_) {} }
-}
-
-function _botSendRoster() {
-  if (!net || !net.active || !net.openSolo || !net.sendEvent) return;
-  const bots = [];
-  for (const b of game.entities) {
-    if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
-    bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A' });
-  }
-  try { net.sendEvent({ type: 'bot_roster', bots }); } catch (_) {}
-}
-
-function _botProxyById(id) {
-  if (!game || !game.entities) return null;
-  for (const b of game.entities) {
-    if (b instanceof Bot && b.isProxy && b.id === id) return b;
-  }
-  return null;
-}
-
-function _botApplyRoster(rows) {
-  if (!game || !game.entities) return;
-  const want = new Map(rows.map(r => [r.i, r]));
-  for (let i = game.entities.length - 1; i >= 0; i--) {
-    const b = game.entities[i];
-    if (!(b instanceof Bot) || !b.isProxy) continue;
-    if (!want.has(b.id)) {
-      // Removed from roster: replaced by a human or round-reset. Phase-out
-      // puff so it doesn't just blink away.
-      if (b.alive && typeof spawnFXBurst === 'function') {
-        try { spawnFXBurst('cloud', b.position, 60, 0.6, { startScale: 1.0, endScale: 0.2 }); } catch (_) {}
-      }
-      try { b.destroy(); } catch (_) {}
-      game.entities.splice(i, 1);
-    } else {
-      want.delete(b.id);
-    }
-  }
-  for (const r of want.values()) {
-    try {
-      const team = (r.t === 'B') ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
-      const b = new Bot(r.k, team, r.i);
-      b.isProxy = true;
-      game.entities.push(b);
-    } catch (e) { console.warn('[dropin] proxy spawn failed:', e); }
-  }
-}
-
-// The host removes one bot from the challenger's team so the human takes
-// its slot mid-round. Prefers an alive bot ; broadcast keeps every peer's
-// roster in step.
-function _dropinReplaceBot(team) {
-  if (!net || !net.openSolo) return;
-  for (let i = 0; i < game.entities.length; i++) {
-    const b = game.entities[i];
-    if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
-    if (b.team !== team) continue;
-    try {
-      if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', b.position, 70, 0.7, { startScale: 1.0, endScale: 0.2 });
-      if (typeof playSpatialSound === 'function') playSpatialSound('phase_dash', b.position.clone(), { refDistance: 400, maxDistance: 5000 });
-    } catch (_) {}
-    try { b.destroy(); } catch (_) {}
-    game.entities.splice(i, 1);
-    break;
-  }
-  _botSendRoster();
-  try { if (window.Overlays) Overlays.banner('A CHALLENGER APPROACHES', 'A pilot took a bot\'s seat'); } catch (_) {}
-}
-
 function spawnBots() {
   // Snapshot existing bot match stats by loadoutKey so respawning between
   // rounds does not wipe the scoreboard. Fresh-match callers have no
   // existing entities, so the map is empty and new bots start at zero.
   const _prevStats = {};
-  // Only recycle BOTS. NetworkPlayers (open-solo challengers) live in the
-  // same entities list and must survive round transitions — wiping them
-  // here is how the host went blind to a connected human.
   for (const bot of game.entities) {
-    if (!(bot instanceof Bot)) continue;
     if (bot.loadoutKey) {
       _prevStats[bot.loadoutKey] = {
         kills: bot.kills || 0,
@@ -30451,14 +30169,7 @@ function spawnBots() {
     }
     bot.destroy();
   }
-  game.entities = game.entities.filter(e => !(e instanceof Bot));
-  // Defensive re-seat: any NetworkPlayer that fell out of entities (older
-  // wipe paths, edge races) gets restored so it stays targetable/visible.
-  if (net.active && Array.isArray(net.networkPlayers)) {
-    for (const np of net.networkPlayers) {
-      if (np && game.entities.indexOf(np) < 0) game.entities.push(np);
-    }
-  }
+  game.entities = [];
 
   const applyPrev = (bot) => {
     const p = _prevStats[bot.loadoutKey];
@@ -30480,18 +30191,8 @@ function spawnBots() {
     }
     game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
   }
-  // Open-solo: humans hold seats. Every connected challenger on a team
-  // means one fewer bot on that team, so the 3v3 (2 friendly + you vs 3)
-  // shape survives any mix of silicon and flesh.
-  let _enemyN = 3, _friendN = 2;
-  if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-    const _hB = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-    const _hA = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-    _enemyN = Math.max(0, 3 - _hB);
-    _friendN = Math.max(0, 2 - _hA);
-  }
   const enemyLoadouts = game._botShipDeal.enemy;
-  for (let i = 0; i < _enemyN; i++) {
+  for (let i = 0; i < 3; i++) {
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
     const sp = getValidSpawnPoint('B');
     bot.position.copy(sp);
@@ -30500,15 +30201,12 @@ function spawnBots() {
   }
 
   const friendlyLoadouts = game._botShipDeal.friendly;
-  for (let i = 0; i < _friendN; i++) {
+  for (let i = 0; i < 2; i++) {
     const bot = new Bot(friendlyLoadouts[i], LSS.TEAM_FLEET_A, i + 10);
     const sp = getValidSpawnPoint('A');
     bot.position.copy(sp);
     applyPrev(bot);
     game.entities.push(bot);
-  }
-  if (net.active && net.openSolo && typeof _botSendRoster === 'function') {
-    try { _botSendRoster(); } catch (_) {}
   }
   // Snap each bot's MESH onto its assigned spawn right now. The Bot constructor
   // seeds a random position and adds the mesh to the scene immediately; during
@@ -36425,7 +36123,7 @@ function updateRoundSystem(dt) {
         player.coreActive = false;
         player.coreTimer = 0;
         respawnPlayer();
-        if (!net.active || net.openSolo) spawnBots();   // (v6.7) no bots in multiplayer
+        if (!net.active) spawnBots();   // (v6.7) no bots in multiplayer
         // Release pointer lock and re-show ship-select with the current pick
         // highlighted; the player can swap ships or wait for the auto-launch.
         if (document.exitPointerLock) {
@@ -48841,7 +48539,6 @@ function gameLoop(timestamp) {
     }
   }
 
-  if (typeof _botNetSync === 'function') _botNetSync(dt);
   updateDynamicObjects(dt);
   updateMonsters(dt);
   updateOrganics(dt);
