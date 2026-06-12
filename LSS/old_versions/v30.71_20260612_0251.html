@@ -3089,7 +3089,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.73';
+const LSS_BUILD = '30.71';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -32602,19 +32602,6 @@ function fireHitscan(origin, dir, w) {
     });
   }
 
-  // (v30.72) PUNCTURE railgun : the charge is consumed by the SHOT, hit or
-  // MISS. It used to be consumed only inside the hit branches, so a whiffed
-  // charged shot quietly kept its full charge for the next trigger pull.
-  let _railShotMul = 1.0;
-  if (player.loadoutKey === 'PUNCTURE' && player.railgunCharge > 0) {
-    _railShotMul = 1.0 + player.railgunCharge * 3.0;
-    player.railgunCharge = 0;
-    if (player._railgunChargeAudio) {
-      try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
-      player._railgunChargeAudio = null;
-    }
-  }
-
   // Check destructible obstacles (hitscan can damage them too)
   let bestObstacle = null, bestObstDist = Infinity;
   for (const obj of game.dynamicObjects) {
@@ -32677,8 +32664,15 @@ function fireHitscan(origin, dir, w) {
   if (isPiercing && pierceHits.length > 0) {
     pierceHits.sort((a, b) => a.proj - b.proj);
     // Railgun charge applies to every pierced target (one beam, one shot).
-    // (v30.72) Consumed at fire time above ; just read the multiplier.
-    const chargeMul = _railShotMul;
+    let chargeMul = 1.0;
+    if (player.railgunCharge > 0) {
+      chargeMul = 1.0 + player.railgunCharge * 3.0;
+      player.railgunCharge = 0;
+      if (player._railgunChargeAudio) {
+        try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+        player._railgunChargeAudio = null;
+      }
+    }
     for (let i = 0; i < pierceHits.length; i++) {
       const h = pierceHits[i];
       const bot = h.bot;
@@ -32732,7 +32726,17 @@ function fireHitscan(origin, dir, w) {
 
   // If obstacle is closer than any bot, hit the obstacle instead
   if (bestObstacle && bestObstDist < bestDist) {
-    let finalDmg = w.damage * _railShotMul; // (v30.72) charge consumed at fire time
+    let finalDmg = w.damage;
+    if (player.loadoutKey === 'PUNCTURE' && player.railgunCharge > 0) {
+      finalDmg *= 1.0 + player.railgunCharge * 3.0;
+      player.railgunCharge = 0;
+      // Charge consumed ; cut the rising-pitch sound so it doesn't
+      // keep ramping after the shot lands.
+      if (player._railgunChargeAudio) {
+        try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+        player._railgunChargeAudio = null;
+      }
+    }
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
     const dealt = bestObstacle.takeDamage(finalDmg);
     if (dealt > 0) {
@@ -32755,9 +32759,18 @@ function fireHitscan(origin, dir, w) {
     if (player.loadoutKey === 'VORTEX' && player.vortexAdsActive) {
       finalDmg *= 1.75;
     }
-    // Puncture Railgun charge: up to 4x at full charge. (v30.72) Consumed
-    // at fire time, hit or miss ; this just applies the multiplier.
-    finalDmg *= _railShotMul;
+    // Puncture Railgun charge: up to 4x damage at full charge (3s to fully charge)
+    if (player.loadoutKey === 'PUNCTURE' && player.railgunCharge > 0) {
+      finalDmg *= 1.0 + player.railgunCharge * 3.0; // 1x at 0 charge, 4x at full
+      player.railgunCharge = 0; // consume charge on hit
+      // Cut the charging sound the same instant the charge is
+      // consumed, otherwise the rising-pitch tail keeps ramping after
+      // the shot has already landed.
+      if (player._railgunChargeAudio) {
+        try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
+        player._railgunChargeAudio = null;
+      }
+    }
     // Syphon upgrade tier damage multiplier (Tier 3 XO-16 Accelerator: +25%)
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
     // Syphon Arc Rounds (Tier 1): +50% damage vs shielded targets, Plasma Shields, Body Shields
@@ -55699,7 +55712,7 @@ if (typeof window !== 'undefined') window.reloadDefaultSoundLibrary = reloadDefa
 // off. Frequency mapping matches the old linear ramp 1:1, so a clean
 // 0-to-full charge sounds identical to before.
 const _RAIL_FREQ_START = [69, 63, 60];
-const _RAIL_FREQ_END   = [490, 430, 400];   // top end lowered per Ashman's tuning (x2)
+const _RAIL_FREQ_END   = [590, 530, 500];   // top end lowered per Ashman's tuning
 function _startRailgunChargeSound(initialCharge) {
   if (!audio || !audio.initialized || !audio.ctx) return null;
   resumeAudio();
