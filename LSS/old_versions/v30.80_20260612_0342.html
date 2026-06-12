@@ -3090,7 +3090,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.86';
+const LSS_BUILD = '30.80';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -24424,39 +24424,20 @@ function spawnDynamicObjects(rooms) {
   if (typeof disposeAllDetachedGasPockets === 'function') disposeAllDetachedGasPockets();
 
   // Place cluster obstacles in non-spawn rooms (center, flanking, etc.)
-  // (v30.81) HARD RULE : no rock may generate inside (or poking into) a
-  // spawn sphere. Rooms can overlap and clusters have real reach, so the
-  // old non-spawn-room filter still let rocks lean into spawn spheres.
-  // Every peer runs the same seeded RNG sequence, so the retry loop stays
-  // deterministic across the mesh.
-  const spawnRooms = rooms.filter(r => r.team);
-  const _clearOfSpawnSpheres = (px, py, pz, clusterScale) => {
-    for (const sr of spawnRooms) {
-      const keep = sr.r + clusterScale * 2.2 + 40;
-      const dx = px - sr.x, dy = py - sr.y, dz = pz - sr.z;
-      if (dx * dx + dy * dy + dz * dz < keep * keep) return false;
-    }
-    return true;
-  };
   const nonSpawnRooms = rooms.filter(r => !r.team);
   for (const rm of nonSpawnRooms) {
     const count = 2 + Math.floor(Math.random() * 2); // 2-3 clusters per room
     for (let i = 0; i < count; i++) {
-      let placed = false;
-      for (let attempt = 0; attempt < 8 && !placed; attempt++) {
-        const angle = Math.random() * Math.PI * 2;
-        const dist = rm.r * (0.15 + Math.random() * 0.45);
-        const yOff = (Math.random() - 0.5) * rm.r * 0.6;
-        const px = rm.x + Math.cos(angle) * dist;
-        const py = rm.y + yOff;
-        const pz = rm.z + Math.sin(angle) * dist;
-        const clusterScale = 55 + Math.random() * 80; // bigger rock clusters
-        if (!_clearOfSpawnSpheres(px, py, pz, clusterScale)) continue;
-        game.clusters.push(new ClusterObstacle(new THREE.Vector3(px, py, pz), clusterScale));
-        placed = true;
-      }
-      // All 8 attempts landed in a spawn sphere : this room hugs a spawn ;
-      // skip the cluster rather than ever spawning someone inside a rock.
+      const angle = Math.random() * Math.PI * 2;
+      const dist = rm.r * (0.15 + Math.random() * 0.45);
+      const yOff = (Math.random() - 0.5) * rm.r * 0.6;
+      const pos = new THREE.Vector3(
+        rm.x + Math.cos(angle) * dist,
+        rm.y + yOff,
+        rm.z + Math.sin(angle) * dist
+      );
+      const clusterScale = 55 + Math.random() * 80; // bigger rock clusters
+      game.clusters.push(new ClusterObstacle(pos, clusterScale));
     }
   }
 
@@ -24466,9 +24447,9 @@ function spawnDynamicObjects(rooms) {
   for (let c = 0; c < crateCount && tunnelPoints.length > 0; c++) {
     const idx = Math.floor(Math.random() * tunnelPoints.length);
     const pt = tunnelPoints.splice(idx, 1)[0];
+    const pos = new THREE.Vector3(pt.x, pt.y, pt.z);
     const clusterScale = 40 + Math.random() * 50;
-    if (!_clearOfSpawnSpheres(pt.x, pt.y, pt.z, clusterScale)) continue; // tunnel mouth in a spawn sphere
-    game.clusters.push(new ClusterObstacle(new THREE.Vector3(pt.x, pt.y, pt.z), clusterScale));
+    game.clusters.push(new ClusterObstacle(pos, clusterScale));
   }
 
   // Assign stable netIds so cluster destruction events can target the
@@ -27213,11 +27194,8 @@ function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
 // player.position) which is fine for ships whose tracers visually converge
 // through the painted barrels of the older two-gun cockpits.
 const _PLAYER_MAIN_MUZZLE_FRAC = {
-  PUNCTURE: { x: 0.62, y: 0.60 },  // Sodium Railgun : single cannon, upper-right
-  // (v30.86) Barrel MOUTHS, not gun silhouette tops : measured as the gun
-  // art's opaque pixel nearest screen center, where the barrel points.
-  TRACKER:  { x: 0.347, y: 0.61 }, // Tracking Bolt : single gun, lower-left
-  PYRO:     { x: 0.42,  y: 0.57 }, // Thermite : single gun, lower-left
+  PUNCTURE: { x: 0.62, y: 0.60 }, // Sodium Railgun : single cannon, upper-right of frame
+  TRACKER:  { x: 0.31, y: 0.58 }, // Tracking Bolt : single gun, lower-left of frame
 };
 
 // (v30.78) Per-ship overrides for the dual-barrel tracer tips. Ships whose
@@ -27231,12 +27209,6 @@ const _PLAYER_LAUNCHER_FRACS = {
   TRACKER: [
     { x: 0.38, y: 0.29 },
     { x: 0.62, y: 0.29 },
-  ],
-  // (v30.86) Rocket Salvo pods : two top launchers painted in
-  // SYPHON-M.png ; pod MOUTHS = overlay pixels nearest screen center.
-  SYPHON: [
-    { x: 0.355, y: 0.31 },
-    { x: 0.643, y: 0.31 },
   ],
   // Mega Barrage core (Puncture). Two side pods painted in core_PUNCTURE.png
   // at the upper-left and upper-right. Used for the per-tick rocket spawn.
@@ -32524,20 +32496,21 @@ function fireWeapon() {
   const origin = player.position.clone();
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
 
-  // (v30.86) TRACKER + PYRO : the bolt leaves the painted BARREL MOUTH
-  // (the early "behind the gun" look came from anchoring at the gun art's
-  // top silhouette pixel, i.e. its rear edge) and converges on the
-  // crosshair, trail cone starting right at the barrel.
+  // (v30.77) TRACKER : the bolt + its muzzle flash leave from the painted
+  // gun (lower-left of the cockpit frame) and converge on the crosshair,
+  // instead of erupting from screen center and washing the whole view.
   let _fwOrigin = origin;
   let _fwDir = forward;
-  if (w.mode === 'projectile' &&
-      (player.loadoutKey === 'TRACKER' || player.loadoutKey === 'PYRO') &&
-      typeof _computeScreenMuzzleWorld === 'function' && _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey]) {
-    const _mf = _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey];
-    const _gp = _computeScreenMuzzleWorld(_mf.x, _mf.y);
+  if (player.loadoutKey === 'TRACKER' && w.mode === 'projectile' &&
+      typeof _computeScreenMuzzleWorld === 'function' && _PLAYER_MAIN_MUZZLE_FRAC.TRACKER) {
+    const _tf = _PLAYER_MAIN_MUZZLE_FRAC.TRACKER;
+    const _gp = _computeScreenMuzzleWorld(_tf.x, _tf.y);
     if (_gp) {
       _fwDir = origin.clone().addScaledVector(forward, 1200).sub(_gp).normalize();
-      _fwOrigin = _gp.addScaledVector(_fwDir, 50);
+      // (v30.79) Push the spawn forward along the flight line so the bolt
+      // first becomes visible around the circumpunct HUD circle instead of
+      // at the gun's painted base (it read as firing from BEHIND the gun).
+      _fwOrigin = _gp.addScaledVector(_fwDir, 150);
     }
   }
 
@@ -32575,9 +32548,9 @@ function fireWeapon() {
   // NUM_POINT_LIGHTS warmup in warmupCombatShaders) and reused forever.
   const flashPos = _fwOrigin.clone().add(_fwDir.clone().multiplyScalar(30));
   const flashColor = w.mode === 'hitscan' ? 0xffdd44 : 0xff8833;
-  // (v30.77) Tracker + Pyro flashes are dimmer/tighter at the pop-in
-  // point ; the old center-screen 3.0 / 400 light washed the whole view.
-  if ((player.loadoutKey === 'TRACKER' || player.loadoutKey === 'PYRO') && w.mode === 'projectile') {
+  // (v30.77) Tracker's flash hugs the gun and is dimmer/tighter ; the old
+  // center-screen 3.0-intensity / 400-range light washed the whole view.
+  if (player.loadoutKey === 'TRACKER' && w.mode === 'projectile') {
     spawnDynamicLight(flashPos, flashColor, 1.6, 240, 0.07);
   } else {
     spawnDynamicLight(flashPos, flashColor, 3.0, 400, 0.08);
@@ -32610,7 +32583,7 @@ function fireWeapon() {
   if (player.loadoutKey === 'PYRO' && w.mode === 'projectile') {
     const fireColors = [0xff4400, 0xff6600, 0xff8833];
     for (let i = 0; i < 4; i++) {
-      const pVel = _fwDir.clone().multiplyScalar(250 + Math.random() * 150);
+      const pVel = forward.clone().multiplyScalar(250 + Math.random() * 150);
       pVel.x += (Math.random() - 0.5) * 100;
       pVel.y += (Math.random() - 0.5) * 100;
       pVel.z += (Math.random() - 0.5) * 100;
@@ -33526,21 +33499,8 @@ function executeAbility(slot, ability) {
       // Loud heavy-ordnance launch sound : sub kick + body
       // whoosh + thrust roar so it's clearly audible above combat.
       try { playSound('cluster_missile_fire'); } catch (_) {}
-      // (v30.82) Launch from the painted railgun muzzle (upper-right of the
-      // frame), converging on the crosshair ; it used to erupt from the
-      // camera ("from my face").
-      let _cmOrigin = player.position.clone();
-      let _cmDir = forward.clone();
-      const _cmFrac = (typeof _PLAYER_MAIN_MUZZLE_FRAC !== 'undefined') ? _PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE : null;
-      if (_cmFrac && typeof _computeScreenMuzzleWorld === 'function') {
-        const _cmGp = _computeScreenMuzzleWorld(_cmFrac.x, _cmFrac.y);
-        if (_cmGp) {
-          _cmDir = player.position.clone().addScaledVector(forward, 1200).sub(_cmGp).normalize();
-          _cmOrigin = _cmGp.addScaledVector(_cmDir, 40);
-        }
-      }
-      const vel = _cmDir.multiplyScalar(1000);
-      const proj = new Projectile(_cmOrigin, vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
+      const vel = forward.clone().multiplyScalar(1000);
+      const proj = new Projectile(player.position.clone(), vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
       proj.smokeTrail = true;
       proj.removeHaze();
       proj.isCluster = true; // on impact, creates sustained explosion zone
@@ -33648,9 +33608,6 @@ function executeAbility(slot, ability) {
           splash:     100,
           color:      LSS.CLASS_COLORS.SYPHON,
           smokeTrail: true,
-          // (v30.85) Alternate between the two painted top launchers.
-          originFrac: _PLAYER_LAUNCHER_FRACS.SYPHON[r % 2],
-          originAdvance: 50,    // just clear of the painted pod art
         });
       }
       _enqueueStaggeredRocketSalvo(player, _rsQueue, 0.035);
@@ -35116,12 +35073,6 @@ function _drainStaggeredRocketSalvo(dt) {
     origin = _computeScreenMuzzleWorld(cfg.originFrac.x, cfg.originFrac.y) || player.position.clone();
   } else {
     origin = player.position.clone();
-  }
-  // (v30.84) Optional pop-in : advance the spawn along the live aim so the
-  // rocket first appears inside the HUD circle instead of at the camera.
-  if (typeof cfg.originAdvance === 'number' && cfg.originAdvance > 0) {
-    const _af = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    origin.addScaledVector(_af, cfg.originAdvance);
   }
   let velocity = cfg.velocity;
   if (typeof cfg.speed === 'number' && cfg.spread) {
