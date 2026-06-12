@@ -1854,13 +1854,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
 <div id="ov-gun-shield"></div>
 <div id="ov-thermal-shield"></div>
 
-<button id="clip-save-btn" type="button" style="display:none;
-  position:fixed; bottom:16%; left:50%; transform:translateX(-50%); z-index:66;
-  background:rgba(20,40,30,0.85); border:1px solid rgba(120,255,170,0.7); color:#bff0d0;
-  padding:12px 26px; font-family:'Courier New',monospace; font-size:14px; font-weight:bold;
-  letter-spacing:3px; cursor:pointer; border-radius:6px;"
-  onclick="window._clipSaveClick && window._clipSaveClick()">&#11015; SAVE CLIP ; LAST ROUND</button>
-
 <div id="ov-banner">
   <div class="ban-line top"></div>
   <div class="ban-text">ROUND START</div>
@@ -3089,7 +3082,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.69';
+const LSS_BUILD = '30.67';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -3598,8 +3591,6 @@ const input = {
   vrStripFx: false,
   // Top-right FPS readout toggle. Persisted ; updated each gameLoop tick.
   showFps: false,
-  // (v30.68) Round clip recorder (MediaRecorder on the game canvas).
-  clipRec: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
   // effect in VR (the headset's native per-eye FOV applies). 60-120.
   fovDeg: 120,
@@ -36645,12 +36636,6 @@ function updateRoundSystem(dt) {
     // in-game view.
     if (game.warmupTimer <= 0 && !selectActive) {
       game.state = 'playing';
-      // (v30.68) Fresh clip segment each round : SAVE CLIP = this round.
-      try {
-        if (typeof input !== 'undefined' && input.clipRec && typeof _clipStop === 'function') {
-          _clipStop(true); _clipStart();
-        }
-      } catch (_) {}
       // Anchor to wall-clock at the warmup→playing transition.
       _anchorTimer('roundTimer', LSS.ROUND_TIME);
       // Spawn the round's cosmic anomaly. Drifts from outside the
@@ -37074,196 +37059,11 @@ function updateRoundSystem(dt) {
 // the matchEnd handler after the 10-second scoreboard pause. Keeps the same
 // shape as a cold start so the very next commitLoadout sees midMatch === false
 // and runs the full fresh-match branch (map build, bot spawn, score reset).
-// ---- (v30.68) ROUND CLIP RECORDER ----
-// Opt-in (Settings -> Clip Recorder). Records the game canvas + the master
-// audio buses with MediaRecorder ; a fresh segment starts at every round
-// start, so "save" always means "this round". F9 saves mid-round ; the
-// SAVE CLIP button appears on the round-end banner. Output: .webm download.
-const _clip = { rec: null, chunks: [], stream: null, audioTap: null, active: false,
-                comp: null, ctx: null, imgCache: null, _compT: 0 };
-// Cockpit overlay DOM layers baked into the clip, bottom-to-top. All four
-// are fixed full-viewport divs with a single cover/center background-image
-// (see #gun-layer / #ability-overlay-frame / #core-overlay-frame /
-// #cockpit-frame CSS), so a cover-fit drawImage reproduces them exactly.
-const _CLIP_LAYER_IDS = ['gun-layer', 'ability-overlay-frame', 'core-overlay-frame', 'cockpit-frame'];
-function _clipDrawLayer(ctx, el, sx) {
-  if (!el) return;
-  const cs = getComputedStyle(el);
-  if (cs.display === 'none') return;
-  const op = parseFloat(cs.opacity);
-  if (!(op > 0.01)) return;
-  const bg = cs.backgroundImage;
-  if (!bg || bg === 'none') return;
-  const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
-  if (!m) return;
-  const url = m[1];
-  let img = _clip.imgCache.get(url);
-  if (!img) {
-    img = new Image();
-    img.src = url;
-    _clip.imgCache.set(url, img);
-  }
-  if (!img.complete || !img.naturalWidth) return;
-  const r = el.getBoundingClientRect();   // includes recoil/slide transforms
-  const rx = r.left * sx, ry = r.top * sx, rw = r.width * sx, rh = r.height * sx;
-  const s = Math.max(rw / img.naturalWidth, rh / img.naturalHeight); // cover
-  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-  ctx.globalAlpha = Math.min(1, op);
-  ctx.drawImage(img, rx + (rw - dw) / 2, ry + (rh - dh) / 2, dw, dh);
-  ctx.globalAlpha = 1;
-}
-// Runs right after renderFrame() (the WebGL back buffer is only readable
-// in the same task as the render with preserveDrawingBuffer off).
-function _clipCompositeTick(dt) {
-  if (!_clip.active || !_clip.ctx) return;
-  _clip._compT -= dt;
-  if (_clip._compT > 0) return;
-  _clip._compT = 1 / 32;
-  const srcC = renderer.domElement;
-  const c = _clip.comp;
-  if (c.width !== srcC.width || c.height !== srcC.height) {
-    c.width = srcC.width; c.height = srcC.height;
-  }
-  const ctx = _clip.ctx;
-  try { ctx.drawImage(srcC, 0, 0); } catch (_) { return; }
-  const sx = c.width / Math.max(1, window.innerWidth);
-  for (const id of _CLIP_LAYER_IDS) {
-    try { _clipDrawLayer(ctx, document.getElementById(id), sx); } catch (_) {}
-  }
-}
-function _clipSupported() {
-  try {
-    return !!(typeof MediaRecorder !== 'undefined' && renderer && renderer.domElement
-              && renderer.domElement.captureStream);
-  } catch (_) { return false; }
-}
-function _clipMime() {
-  const cands = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
-  for (const c of cands) {
-    try { if (MediaRecorder.isTypeSupported(c)) return c; } catch (_) {}
-  }
-  return '';
-}
-function _clipStart() {
-  if (_clip.active || !_clipSupported() || !input.clipRec) return;
-  try {
-    if (!_clip.comp) {
-      _clip.comp = document.createElement('canvas');
-      _clip.ctx = _clip.comp.getContext('2d');
-      _clip.imgCache = new Map();
-    }
-    _clip.comp.width = renderer.domElement.width;
-    _clip.comp.height = renderer.domElement.height;
-    _clip._compT = 0;
-    try { _clip.ctx.drawImage(renderer.domElement, 0, 0); } catch (_) {}
-    const stream = _clip.comp.captureStream(30);
-    // Tap the master audio buses (sfx/music + the 5.1 spatial master) into
-    // the recording. Fan-out connect ; the speakers keep their own path.
-    try {
-      if (typeof audio !== 'undefined' && audio && audio.ctx && !_clip.audioTap) {
-        _clip.audioTap = audio.ctx.createMediaStreamDestination();
-        if (audio.masterGain) audio.masterGain.connect(_clip.audioTap);
-        if (audio.spatial51Master) audio.spatial51Master.connect(_clip.audioTap);
-      }
-      if (_clip.audioTap) {
-        for (const t of _clip.audioTap.stream.getAudioTracks()) stream.addTrack(t);
-      }
-    } catch (_) {}
-    const mime = _clipMime();
-    const opts = { videoBitsPerSecond: 5000000 };
-    if (mime) opts.mimeType = mime;
-    _clip.chunks = [];
-    _clip.rec = new MediaRecorder(stream, opts);
-    _clip.stream = stream;
-    _clip.rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) _clip.chunks.push(e.data); };
-    _clip.rec.start(1000);
-    _clip.active = true;
-  } catch (e) {
-    console.warn('[clip] recorder start failed:', e);
-    _clip.active = false;
-  }
-}
-function _clipStop(discard) {
-  if (!_clip.active || !_clip.rec) { _clip.active = false; return; }
-  const rec = _clip.rec;
-  _clip.rec = null;
-  _clip.active = false;
-  try {
-    rec.onstop = () => {
-      if (!discard && _clip.chunks.length) {
-        try {
-          const blob = new Blob(_clip.chunks, { type: rec.mimeType || 'video/webm' });
-          const d = new Date();
-          const pad = (n) => String(n).padStart(2, '0');
-          const name = 'LSS_clip_' + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
-                     + '_' + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds()) + '.webm';
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = name;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (_) {} }, 4000);
-        } catch (e) { console.warn('[clip] save failed:', e); }
-      }
-      _clip.chunks = [];
-    };
-    try { rec.requestData(); } catch (_) {}
-    rec.stop();
-  } catch (e) {
-    console.warn('[clip] stop failed:', e);
-    _clip.chunks = [];
-  }
-  try { if (_clip.stream) for (const t of _clip.stream.getVideoTracks()) t.stop(); } catch (_) {}
-  _clip.stream = null;
-}
-function _clipSave() {
-  if (!_clip.active) return false;
-  _clipStop(false);
-  // Re-arm so the rest of the round (or the next one) keeps recording.
-  setTimeout(() => {
-    try {
-      if (input.clipRec && (game.state === 'playing' || game.state === 'warmup' ||
-          game.state === 'roundEnd' || game.state === 'matchEnd')) _clipStart();
-    } catch (_) {}
-  }, 250);
-  return true;
-}
-function _clipApplyEnabled() {
-  if (input.clipRec) {
-    if (game.state === 'playing' || game.state === 'warmup' ||
-        game.state === 'roundEnd' || game.state === 'matchEnd') _clipStart();
-  } else {
-    _clipStop(true);
-    const el = document.getElementById('clip-save-btn');
-    if (el) el.style.display = 'none';
-  }
-}
-function _clipBtnTick() {
-  const el = document.getElementById('clip-save-btn');
-  if (!el) return;
-  const want = ((game.state === 'roundEnd' || game.state === 'matchEnd') &&
-                _clip.active && input.clipRec) ? 'block' : 'none';
-  if (el.style.display !== want) el.style.display = want;
-}
-window._clipSaveClick = function () {
-  try { _clipSave(); } catch (_) {}
-  const el = document.getElementById('clip-save-btn');
-  if (el) el.style.display = 'none';
-};
-document.addEventListener('keydown', (e) => {
-  if (e.code === 'F9') {
-    e.preventDefault();
-    try { _clipSave(); } catch (_) {}
-  }
-});
-
 function returnToRootMenu() {
   // Stop posting room heartbeats and DELETE our room
   // entry from KV so it disappears from rooms.html immediately.
   if (typeof stopRoomHeartbeat === 'function') stopRoomHeartbeat();
   if (net) { net.roomCode = null; }
-  // (v30.68) Drop any in-flight clip recording (discard, no download).
-  try { if (typeof _clipStop === 'function') _clipStop(true); } catch (_) {}
 
   if (typeof _clearLaunchCountdown === 'function') {
     try { _clearLaunchCountdown(); } catch (_) {}
@@ -41094,7 +40894,6 @@ function _refreshSettingsValues() {
   }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
-  setChk('set-clip-rec', !!input.clipRec);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
   // re-syncs the display text + Rebind button label for every row.
@@ -41360,13 +41159,6 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Show FPS Counter</label>
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
-      </div>
-      <div class="setting-row">
-        <label>Clip Recorder</label>
-        <input type="checkbox" id="set-clip-rec" ${input.clipRec ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Records each round. F9 (or the SAVE CLIP button when the round ends) downloads it as a .webm video. Costs a little performance while on.</label>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Small amber readout in the top-right corner. Updates 4x/second from a rolling 60-frame average. Auto-hides in VR.</label>
@@ -42662,12 +42454,6 @@ function buildSettingsPage() {
     input.showFps = !!showFpsChk.checked;
     saveSettings();
   });
-  const clipRecChk = overlay.querySelector('#set-clip-rec');
-  if (clipRecChk) clipRecChk.addEventListener('change', () => {
-    input.clipRec = !!clipRecChk.checked;
-    saveSettings();
-    try { _clipApplyEnabled(); } catch (_) {}
-  });
     const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
   if (vrStripSel) vrStripSel.addEventListener('change', () => {
     input.vrStripFx = !!vrStripSel.checked;
@@ -43348,7 +43134,6 @@ function saveSettings() {
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
-      clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
       audioSfx: audio.userVol.sfx,
@@ -45187,7 +44972,6 @@ function loadSettings() {
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
-    if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
       if (typeof camera !== 'undefined' && camera) {
@@ -49667,7 +49451,6 @@ function gameLoop(timestamp) {
   }
 
   if (typeof _botNetSync === 'function') _botNetSync(dt);
-  if (typeof _clipBtnTick === 'function') _clipBtnTick();
   updateDynamicObjects(dt);
   updateMonsters(dt);
   updateOrganics(dt);
@@ -49709,11 +49492,6 @@ function gameLoop(timestamp) {
   }
 
   renderFrame();
-  // (v30.69) Clip recorder composite : must run in the same task as the
-  // render (the WebGL buffer is cleared after the browser composites).
-  if (typeof _clipCompositeTick === 'function') {
-    try { _clipCompositeTick(dt); } catch (_) {}
-  }
 }
 
 // ---- WEB AUDIO SOUND SYSTEM ----

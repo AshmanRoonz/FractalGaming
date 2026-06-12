@@ -3089,7 +3089,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.69';
+const LSS_BUILD = '30.68';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -37079,58 +37079,7 @@ function updateRoundSystem(dt) {
 // audio buses with MediaRecorder ; a fresh segment starts at every round
 // start, so "save" always means "this round". F9 saves mid-round ; the
 // SAVE CLIP button appears on the round-end banner. Output: .webm download.
-const _clip = { rec: null, chunks: [], stream: null, audioTap: null, active: false,
-                comp: null, ctx: null, imgCache: null, _compT: 0 };
-// Cockpit overlay DOM layers baked into the clip, bottom-to-top. All four
-// are fixed full-viewport divs with a single cover/center background-image
-// (see #gun-layer / #ability-overlay-frame / #core-overlay-frame /
-// #cockpit-frame CSS), so a cover-fit drawImage reproduces them exactly.
-const _CLIP_LAYER_IDS = ['gun-layer', 'ability-overlay-frame', 'core-overlay-frame', 'cockpit-frame'];
-function _clipDrawLayer(ctx, el, sx) {
-  if (!el) return;
-  const cs = getComputedStyle(el);
-  if (cs.display === 'none') return;
-  const op = parseFloat(cs.opacity);
-  if (!(op > 0.01)) return;
-  const bg = cs.backgroundImage;
-  if (!bg || bg === 'none') return;
-  const m = bg.match(/url\(["']?([^"')]+)["']?\)/);
-  if (!m) return;
-  const url = m[1];
-  let img = _clip.imgCache.get(url);
-  if (!img) {
-    img = new Image();
-    img.src = url;
-    _clip.imgCache.set(url, img);
-  }
-  if (!img.complete || !img.naturalWidth) return;
-  const r = el.getBoundingClientRect();   // includes recoil/slide transforms
-  const rx = r.left * sx, ry = r.top * sx, rw = r.width * sx, rh = r.height * sx;
-  const s = Math.max(rw / img.naturalWidth, rh / img.naturalHeight); // cover
-  const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-  ctx.globalAlpha = Math.min(1, op);
-  ctx.drawImage(img, rx + (rw - dw) / 2, ry + (rh - dh) / 2, dw, dh);
-  ctx.globalAlpha = 1;
-}
-// Runs right after renderFrame() (the WebGL back buffer is only readable
-// in the same task as the render with preserveDrawingBuffer off).
-function _clipCompositeTick(dt) {
-  if (!_clip.active || !_clip.ctx) return;
-  _clip._compT -= dt;
-  if (_clip._compT > 0) return;
-  _clip._compT = 1 / 32;
-  const srcC = renderer.domElement;
-  const c = _clip.comp;
-  if (c.width !== srcC.width || c.height !== srcC.height) {
-    c.width = srcC.width; c.height = srcC.height;
-  }
-  const ctx = _clip.ctx;
-  try { ctx.drawImage(srcC, 0, 0); } catch (_) { return; }
-  const sx = c.width / Math.max(1, window.innerWidth);
-  for (const id of _CLIP_LAYER_IDS) {
-    try { _clipDrawLayer(ctx, document.getElementById(id), sx); } catch (_) {}
-  }
-}
+const _clip = { rec: null, chunks: [], stream: null, audioTap: null, active: false };
 function _clipSupported() {
   try {
     return !!(typeof MediaRecorder !== 'undefined' && renderer && renderer.domElement
@@ -37147,16 +37096,7 @@ function _clipMime() {
 function _clipStart() {
   if (_clip.active || !_clipSupported() || !input.clipRec) return;
   try {
-    if (!_clip.comp) {
-      _clip.comp = document.createElement('canvas');
-      _clip.ctx = _clip.comp.getContext('2d');
-      _clip.imgCache = new Map();
-    }
-    _clip.comp.width = renderer.domElement.width;
-    _clip.comp.height = renderer.domElement.height;
-    _clip._compT = 0;
-    try { _clip.ctx.drawImage(renderer.domElement, 0, 0); } catch (_) {}
-    const stream = _clip.comp.captureStream(30);
+    const stream = renderer.domElement.captureStream(30);
     // Tap the master audio buses (sfx/music + the 5.1 spatial master) into
     // the recording. Fan-out connect ; the speakers keep their own path.
     try {
@@ -49709,11 +49649,6 @@ function gameLoop(timestamp) {
   }
 
   renderFrame();
-  // (v30.69) Clip recorder composite : must run in the same task as the
-  // render (the WebGL buffer is cleared after the browser composites).
-  if (typeof _clipCompositeTick === 'function') {
-    try { _clipCompositeTick(dt); } catch (_) {}
-  }
 }
 
 // ---- WEB AUDIO SOUND SYSTEM ----
