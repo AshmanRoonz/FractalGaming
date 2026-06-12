@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.06';
+const LSS_BUILD = '31.05';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -15448,15 +15448,7 @@ function _swBuildShell(x0, z0, isCeil, T) {
       const _jit = step * 0.40;
       const x = gx0 + (_stHash2(_gi * 1.7, _gj * 2.3) - 0.5) * _jit;
       const z = gz0 + (_stHash2(_gi * 3.1 + 5.0, _gj * 1.1 + 9.0) - 0.5) * _jit;
-      let y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
-      // (2026-06-12c) Rim seal; see _swRimPinch. Ground rises / ceiling
-      // drops toward the shared midline as the margin runs out, so the
-      // shells meet in a closed clamshell at the world edge.
-      const _pinch = _swRimPinch(x, z, T);
-      if (_pinch > 0) {
-        const _other = isCeil ? _stGroundYCarved(x, z, T) : _stCeilYCarved(x, z, T);
-        y += ((y + _other) * 0.5 - y) * _pinch;
-      }
+      const y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
       verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
       if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
       cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
@@ -15529,35 +15521,7 @@ function resetSandwichTerrain() {
 // builds/disposes every time anything moved (~8ms/frame on terrain maps,
 // the round drops to ~50fps). With the clamp, init fills the footprint
 // once and the per-frame streamer has nothing left to do.
-const _SW_FOOT_MARGIN = 4;   // chunks of backdrop kept beyond the footprint
-// (2026-06-12c) Rim seal: across the outer ~two-thirds of the margin ring
-// the ground and ceiling shells pinch toward their shared midline until
-// they meet, closing the sandwich at the edge: no gap to fly through or
-// see out of. Build-time vertex math only; no extra triangles, no
-// per-frame cost. The monsters outside are the actual deterrent; this
-// just makes the world read as sealed.
-function _swRimPinch(x, z, T) {
-  const F = T && T.FOOT;
-  if (!F) return 0;
-  const M = _SW_CHUNK * _SW_FOOT_MARGIN;
-  const dx = Math.max(F.minX - x, 0, x - F.maxX);
-  const dz = Math.max(F.minZ - z, 0, z - F.maxZ);
-  const d = Math.max(dx, dz);
-  if (d <= 0) return 0;
-  // (2026-06-12e) The tuned mountain heights are NOT to be altered
-  // anywhere inside the playable square (user direction). The seal is a
-  // sheer cliff face exactly at the wall ring: pinch goes 0 -> 1 across
-  // ~3 grid cells (72u) starting at the physics wall, so the skyline is
-  // byte-identical to the tuned heights right up to the boundary and the
-  // world visibly closes as a vertical face at the square's edge.
-  const wall = _SW_CHUNK * (_SW_FOOT_MARGIN - 0.5);
-  const t = (d - wall) / (_SW_CHUNK * 0.08);
-  const k = Math.max(0, Math.min(1, t));
-  return k * k * (3 - 2 * k);
-}
-// World-edge wall distance: how far beyond the footprint the SUDDEN clamp
-// sits. Matches the fully-sealed ring (M - 0.5 chunks).
-function _swWallDist() { return _SW_CHUNK * (_SW_FOOT_MARGIN - 0.5); }
+const _SW_FOOT_MARGIN = 2;   // chunks of backdrop kept beyond the footprint
 function _swChunkAllowed(cx, cz, T) {
   const F = T && T.FOOT;
   if (!F) return true;       // no footprint metadata: legacy endless behavior
@@ -25682,36 +25646,6 @@ function _monNearestShip(fromPos, requireOutside) {
   return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal } : null;
 }
 
-// (2026-06-12c) Nearest ship hugging the rim: INSIDE the arena but beyond
-// MONSTER_EDGE_NEAR of the radius. Edge-menace rolls use this; fully
-// outside ships are handled by the stronger requireOutside path above.
-const MONSTER_EDGE_NEAR = 0.85;
-function _monNearestEdgeShip(fromPos) {
-  const a = _monsterArenaInfo();
-  const Rbase = _monsterArenaRadius();
-  const inner = Rbase * MONSTER_EDGE_NEAR;
-  const outer = Rbase + 150;
-  let bestPos = null, bestD = Infinity, bestLocal = false;
-  if (typeof player !== 'undefined' && player && player.position &&
-      player.shipState !== 'dead' && player.shipState !== 'spawning') {
-    const dc = player.position.distanceTo(a.center);
-    if (dc > inner && dc <= outer) {
-      const d = fromPos.distanceTo(player.position);
-      if (d < bestD) { bestD = d; bestPos = player.position; bestLocal = true; }
-    }
-  }
-  if (typeof net !== 'undefined' && net && net.active && Array.isArray(net.networkPlayers)) {
-    for (const np of net.networkPlayers) {
-      if (!np || !np.alive || !np.position) continue;
-      const dc = np.position.distanceTo(a.center);
-      if (dc <= inner || dc > outer) continue;
-      const d = fromPos.distanceTo(np.position);
-      if (d < bestD) { bestD = d; bestPos = np.position; bestLocal = false; }
-    }
-  }
-  return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal } : null;
-}
-
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -25925,22 +25859,8 @@ class OutskirtsMonster {
     // monster FOLLOWS its prey back inside the arena and only loses
     // interest after everyone stays out of its reach for a stretch.
     const tgtOutside = (game.state === 'playing') ? _monNearestShip(this.position, true) : null;
-    // (2026-06-12c) Edge menace: a ship hugging the arena rim (inside, but
-    // beyond MONSTER_EDGE_NEAR of the radius) gives each leviathan a small
-    // periodic chance to take interest. Going fully outside is still a
-    // guaranteed mark; the rim is a dice roll that keeps the boundary
-    // feeling dangerous instead of decorative.
-    let _edgeBait = null;
-    if (!tgtOutside && !this.aggro && game.state === 'playing') {
-      this._edgeRollT = (this._edgeRollT || 0) - dt;
-      if (this._edgeRollT <= 0) {
-        this._edgeRollT = 1.0;
-        const _near = (typeof _monNearestEdgeShip === 'function') ? _monNearestEdgeShip(this.position) : null;
-        if (_near && Math.random() < 0.04) _edgeBait = _near;
-      }
-    }
-    let tgt = tgtOutside || _edgeBait;
-    if (tgtOutside || _edgeBait) {
+    let tgt = tgtOutside;
+    if (tgtOutside) {
       this.aggro = true;
       this._deAggroT = 0;
     } else if (this.aggro) {
@@ -25958,15 +25878,8 @@ class OutskirtsMonster {
       // then the slow menacing creep for the final approach.
       const desired = _monScratchA.subVectors(tgt.pos, this.position);
       const dist = tgt.dist;
-      // (2026-06-12c) Trespassers get rushed: when the prey is fully
-      // OUTSIDE the arena, the surge starts closer and runs ~40% hotter
-      // with a steeper ramp. Rim-baited prey (inside) still gets the
-      // classic slow-menace approach.
-      const _rushing = !!tgtOutside;
-      const _surgeAt = _rushing ? 2500 : 4000;
-      const _farCap = _rushing ? MONSTER_FAR_SPD * 1.4 : MONSTER_FAR_SPD;
-      const spd = (dist > _surgeAt)
-        ? Math.min(_farCap, MONSTER_CHASE_SPD + (dist - _surgeAt) * (_rushing ? 0.12 : 0.08))
+      const spd = (dist > 4000)
+        ? Math.min(MONSTER_FAR_SPD, MONSTER_CHASE_SPD + (dist - 4000) * 0.08)
         : MONSTER_CHASE_SPD;
       if (dist > 1) desired.multiplyScalar(spd / dist);
       this.velocity.lerp(desired, Math.min(1, dt * 0.9));
@@ -32892,31 +32805,6 @@ function updatePlayerMovement(dt) {
     }
   }
 
-  // (2026-06-12d) Terrain maps: SUDDEN wall at the clamshell seal ring.
-  // No gradual push (user direction): position snaps to the wall and the
-  // outward velocity component zeroes, like hitting rock. Vertical is
-  // clamped to the carved ground / ceiling height at the ship's x/z so
-  // there's no squeezing out through the shells either.
-  const _swT = game.sandwichTerrain;
-  if (_swT && _swT.ON && _swT.FOOT && typeof _swWallDist === 'function') {
-    const W = _swWallDist();
-    const F = _swT.FOOT;
-    const minX = F.minX - W, maxX = F.maxX + W;
-    const minZ = F.minZ - W, maxZ = F.maxZ + W;
-    if (player.position.x < minX)      { player.position.x = minX; if (player.velocity.x < 0) player.velocity.x = 0; }
-    else if (player.position.x > maxX) { player.position.x = maxX; if (player.velocity.x > 0) player.velocity.x = 0; }
-    if (player.position.z < minZ)      { player.position.z = minZ; if (player.velocity.z < 0) player.velocity.z = 0; }
-    else if (player.position.z > maxZ) { player.position.z = maxZ; if (player.velocity.z > 0) player.velocity.z = 0; }
-    try {
-      const _pad = 26;
-      const _gY = _stGroundYCarved(player.position.x, player.position.z, _swT) + _pad;
-      const _cY = _stCeilYCarved(player.position.x, player.position.z, _swT) - _pad;
-      if (_cY > _gY) {
-        if (player.position.y < _gY)      { player.position.y = _gY; if (player.velocity.y < 0) player.velocity.y = 0; }
-        else if (player.position.y > _cY) { player.position.y = _cY; if (player.velocity.y > 0) player.velocity.y = 0; }
-      }
-    } catch (_) {}
-  }
   // Boundary clamp + soft push. Unrolled from a forEach over ['x','y','z']:
   // the array literal + arrow function were allocating every frame, and the
   // per-axis bracket access defeats the JIT's field-offset optimization.
@@ -60692,125 +60580,4 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     // Also blank the FINISH input so the next race lobby starts fresh.
     try {
       const fin = document.getElementById('gmaps-loc-finish-input');
-      if (fin) fin.value = '';
-    } catch (_) {}
-    setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
-    // Re-enable the input that may have been locked by a peer's set.
-    try { const inp = document.getElementById('gmaps-loc-input'); if (inp) inp.disabled = false; } catch(_) {}
-    // Broadcast detach so peers also clear and unlock.
-    if (net && net.active && net.sendEvent) {
-      net.sendEvent({ type: 'map_change', mapKey: game.selectedMap, gmapsOverlay: null, mode: LSS.MODE || 'classic' });
-    }
-  });
-
-  // Race-mode toggle: flip LSS.MODE and rebroadcast the current
-  // map_change so peers stay in sync. When flipping ON, if the current
-  // map isn't a race_* map, auto-select Pole Position so race mode is
-  // a one-click experience.
-  // Race mode can only be flipped from a FRESH ship-select (cold boot or
-  // back from the lobby). The between-round swap screen reuses this panel,
-  // and toggling race rules mid-match half-converts the world (speeds
-  // normalize, maps re-filter, walls switch) under a live round.
-  function _raceModeLocked() {
-    return typeof game !== 'undefined' && game &&
-           (game.state === 'playing' || game.state === 'roundEnd' ||
-            (game.state === 'warmup' && (game.currentRound | 0) > 1));
-  }
-  function _refreshRaceModeLock() {
-    const b = document.getElementById('race-mode-toggle');
-    if (!b) return;
-    const locked = _raceModeLocked();
-    b.style.opacity = locked ? '0.35' : '';
-    b.style.pointerEvents = locked ? 'none' : '';
-    b.title = locked ? 'Race mode is locked during a match' : 'Toggle Race Mode';
-  }
-  if (typeof window !== 'undefined') window._refreshRaceModeLock = _refreshRaceModeLock;
-  const raceBtn = document.getElementById('race-mode-toggle');
-  if (raceBtn) {
-    raceBtn.addEventListener('click', () => {
-      if (_raceModeLocked()) return;   // belt + suspenders over pointer-events
-      const on = raceBtn.dataset.on !== '1';
-      raceBtn.dataset.on = on ? '1' : '0';
-      raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
-      raceBtn.classList.toggle('active', on);
-      LSS.MODE = on ? 'race' : 'classic';
-      // Rebuild the carousel so the dots / arrows reflect the new
-      // mode's filtered map list. buildMapSelector also re-snaps the
-      // selection if the previous map is no longer eligible.
-      if (typeof buildMapSelector === 'function') {
-        try { buildMapSelector(); } catch (_) {}
-      }
-      // Toggle the FINISH input + relabel the panel for race mode.
-      try {
-        const lbl = document.getElementById('gmaps-overlay-label');
-        const fin = document.getElementById('gmaps-loc-finish-input');
-        const startInp = document.getElementById('gmaps-loc-input');
-        if (on) {
-          if (lbl) lbl.textContent = 'RACE: START -> FINISH';
-          if (fin) fin.style.display = '';
-          if (startInp) startInp.placeholder = 'Start location (e.g. Stanley Park)';
-        } else {
-          if (lbl) lbl.textContent = 'DROP ON LOCATION';
-          if (fin) fin.style.display = 'none';
-          if (startInp) startInp.placeholder = 'Empire State Building';
-        }
-      } catch (_) {}
-      // Convenience: when flipping ON, also set the race-default walls
-      // to Datamosh Cube (preset 22). User-tested choice ; reads well
-      // through the gmaps city overlay and doesn't glitch on cycle.
-      // User can still cycle off with P.
-      if (on && typeof setWallPattern === 'function') {
-        try { setWallPattern(22); } catch (_) {}
-      }
-      // Convenience: when flipping ON, force-select Pole Position
-      // (currently the only race map). selectMap broadcasts map_change
-      // with the mode tagged along.
-      if (on && typeof selectMap === 'function' && MAP_DATA && MAP_DATA.race_pole_position) {
-        if (game.selectedMap !== 'race_pole_position') {
-          selectMap('race_pole_position');
-          return;
-        }
-      }
-      if (net && net.active && net.sendEvent && game.selectedMap) {
-        const ov = game.pendingGmapsOverlay;
-        net.sendEvent({
-          type: 'map_change',
-          mapKey: game.selectedMap,
-          gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
-          mode: LSS.MODE
-        });
-      }
-    });
-  }
-})();
-
-window.lssGmaps = {
-  state: _lssGmaps,
-  cities: _lssGmapsCities,
-  setKey: _lssGmapsSetKey,
-  getKey: _lssGmapsGetKey,
-  clearKey: _lssGmapsClearKey,
-  prompt: _lssGmapsPromptKey,
-  setScale: _lssGmapsSetScaleLive,
-  attachCity: _lssGmapsAttachCity,
-  attachLatLng: _lssGmapsAttachAtLatLng,
-  location: _lssGmapsLocation,
-  refinePivot: _lssGmapsRefinePivot,
-  detachCity: _lssGmapsDetachCity,
-  testKey: _lssGmapsTestKey
-};
-
-
-} // end _bootLSS
-
-// v8VR: kick off the game once the THREE module bootstrap has run.
-// If the event already fired before this listener was added (race), boot now.
-if (window.LSS_ENGINE_READY) {
-  _bootLSS();
-} else {
-  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
-}
-
-</script>
-</body>
-</html>
+      if (fin) fi
