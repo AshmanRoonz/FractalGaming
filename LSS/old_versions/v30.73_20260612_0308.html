@@ -3089,7 +3089,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.74';
+const LSS_BUILD = '30.73';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18279,30 +18279,6 @@ class Bot {
     _botFireDir.copy(dir).normalize();
     const wallDist = raycastLevel(this.position, _botFireDir, dist + 10, true);
     if (wallDist < dist - 5) return; // wall blocks the shot
-    // (v30.74) Enemy particle walls block bot fire : the tracer clamps to
-    // the wall, the wall sponges the damage, and the impact ripples. This
-    // is what makes Tracker's wall visibly STOP incoming gunfire.
-    if (typeof _wallBlockSegment === 'function' && target && target.position) {
-      const _bWall = _wallBlockSegment(this.position, target.position, this.team);
-      if (_bWall) {
-        this.isFiring = true; this.fireFlashTimer = 0.15;
-        const _bwCol = (typeof chassisFlashColor === 'function')
-          ? chassisFlashColor(this.loadout.name) : 0xffdd44;
-        if (typeof net !== 'undefined' && net && net.active && net.openSolo && net.sendEvent) {
-          try {
-            net.sendEvent({ type: 'bot_fire', i: this.id,
-              ox: Math.round(this.position.x), oy: Math.round(this.position.y), oz: Math.round(this.position.z),
-              ex: Math.round(_bWall.x), ey: Math.round(_bWall.y), ez: Math.round(_bWall.z),
-              c: _bwCol });
-          } catch (_) {}
-        }
-        const _bwPt = new THREE.Vector3(_bWall.x, _bWall.y, _bWall.z);
-        if (typeof spawnTracer === 'function') spawnTracer(this.position, _bwPt, _bwCol, 0.9);
-        const _bwDmg = (this.loadout.weapon && this.loadout.weapon.damage ? this.loadout.weapon.damage : 200) * 0.6;
-        _wallHitRipple(_bWall.eff, _bWall.x, _bWall.y, _bWall.z, _bwDmg);
-        return;
-      }
-    }
     this.isFiring = true; this.fireFlashTimer = 0.15; // for animation
     // Open-solo: locally-simulated bot fire is invisible to drop-in peers ;
     // ship the tracer line so challengers can see who is shooting at them.
@@ -32564,62 +32540,6 @@ function fireWeapon() {
   }
 }
 
-// (v30.74) Particle-wall hitscan blocking. Finds the nearest enemy wall
-// intersection on a from->to segment, or null. One-way rule : a wall never
-// blocks its own team's fire, so the owner shoots out through it freely.
-const _wbDir = new THREE.Vector3();
-const _wbRel = new THREE.Vector3();
-const _wbX   = new THREE.Vector3();
-const _wbY   = new THREE.Vector3();
-const _wbPt  = new THREE.Vector3();
-const _wbEnd = new THREE.Vector3();
-const _wbUp  = new THREE.Vector3(0, 1, 0);
-function _wallBlockSegment(from, to, shooterTeam) {
-  if (typeof game === 'undefined' || !game.worldEffects || game.worldEffects.length === 0) return null;
-  _wbDir.subVectors(to, from);
-  const segLen = _wbDir.length();
-  if (segLen < 0.001) return null;
-  _wbDir.multiplyScalar(1 / segLen);
-  let best = null;
-  for (const eff of game.worldEffects) {
-    if (!eff || eff.type !== 'particle_wall' || eff.hp <= 0) continue;
-    if (shooterTeam !== undefined && eff.team === shooterTeam) continue;
-    const n = eff.direction;
-    if (!n) continue;
-    const denom = _wbDir.dot(n);
-    if (Math.abs(denom) < 0.0001) continue;            // parallel to the wall
-    _wbRel.subVectors(eff.position, from);
-    const t = _wbRel.dot(n) / denom;
-    if (t < 0 || t > segLen) continue;                 // crossing not on segment
-    _wbPt.copy(from).addScaledVector(_wbDir, t);
-    // Wall-local extents : the wall box is 400 wide x 300 tall.
-    _wbX.crossVectors(_wbUp, n);
-    if (_wbX.lengthSq() < 0.001) _wbX.set(1, 0, 0); else _wbX.normalize();
-    _wbY.crossVectors(n, _wbX).normalize();
-    _wbRel.subVectors(_wbPt, eff.position);
-    if (Math.abs(_wbRel.dot(_wbX)) > 200 || Math.abs(_wbRel.dot(_wbY)) > 150) continue;
-    if (!best || t < best.dist) {
-      best = { eff, dist: t, x: _wbPt.x, y: _wbPt.y, z: _wbPt.z };
-    }
-  }
-  return best;
-}
-// Shared shield-style feedback for a particle-wall hit : sponge the damage
-// into wall HP, flash + expanding ring + sparks at the impact point.
-function _wallHitRipple(eff, px, py, pz, dmg) {
-  if (!eff) return;
-  eff.hp = Math.max(0, (eff.hp || 0) - Math.max(0, dmg || 0));
-  const p = new THREE.Vector3(px, py, pz);
-  try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(p, 0xffaa44, 3.0, 380, 0.16); } catch (_) {}
-  try {
-    if (typeof spawnFXBurst === 'function') {
-      spawnFXBurst('shockwave_ring', p, 90, 0.38, { startScale: 0.2, endScale: 1.0 });
-    }
-  } catch (_) {}
-  try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(p, 5); } catch (_) {}
-  if (eff.hp <= 0) { eff.hp = 0; eff.timer = 0; }
-}
-
 function fireHitscan(origin, dir, w) {
   // Apply weapon spread (Blaster Gatling Cannon has mode-dependent spread)
   let aimDir = dir.clone();
@@ -32630,15 +32550,7 @@ function fireHitscan(origin, dir, w) {
     aimDir.normalize();
   }
   // Check level geometry first
-  let levelDist = raycastLevel(origin, aimDir, w.range);
-  // (v30.74) Enemy particle walls block hitscan like level geometry : the
-  // beam (and everything behind the wall) clamps to the crossing point.
-  let _pwHit = null;
-  if (typeof _wallBlockSegment === 'function') {
-    _wbEnd.copy(origin).addScaledVector(aimDir, Math.min(w.range, levelDist));
-    _pwHit = _wallBlockSegment(origin, _wbEnd, player.team);
-    if (_pwHit && _pwHit.dist < levelDist) levelDist = _pwHit.dist;
-  }
+  const levelDist = raycastLevel(origin, aimDir, w.range);
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
   // If the hitscan terminated at a wall (not at max
   // range), spawn a force-field ripple at the impact point. If a ship
@@ -32701,13 +32613,6 @@ function fireHitscan(origin, dir, w) {
       try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
       player._railgunChargeAudio = null;
     }
-  }
-
-  // (v30.74) Beam stopped at an enemy particle wall : the wall sponges the
-  // full (charge-boosted) damage and ripples like a shield hit.
-  if (_pwHit && _pwHit.dist <= levelDist + 0.001) {
-    _wallHitRipple(_pwHit.eff, _pwHit.x, _pwHit.y, _pwHit.z, w.damage * _railShotMul);
-    return;
   }
 
   // Check destructible obstacles (hitscan can damage them too)
