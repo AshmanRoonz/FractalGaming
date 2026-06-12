@@ -2730,24 +2730,6 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   background: transparent !important; border: none !important;
 }
 
-/* ---- READY call-to-action : after connecting, the CREATE / JOIN slot
-   morphs into the ready toggle ; make it impossible to miss ---- */
-#btn-join.lss-ready-cta {
-  color: #7dffa8 !important;
-  text-shadow: 0 0 14px rgba(125,255,168,0.4);
-  animation: lssReadyPulse 1.1s ease-in-out infinite !important;
-}
-#btn-join.lss-ready-cta:hover { color: #b2ffd0 !important; }
-#btn-join.lss-ready-on {
-  color: #66cc66 !important;
-  animation: none !important;
-  text-shadow: 0 0 10px rgba(102,204,102,0.35);
-}
-@keyframes lssReadyPulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.5; }
-}
-
 /* ---- short windows : compact the stack ---- */
 @media (max-height: 780px) and (min-width: 901px) {
   #lobby-wordmark { top: 22px; }
@@ -3082,7 +3064,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.62';
+const LSS_BUILD = '30.61';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -5387,15 +5369,6 @@ async function joinRoom() {
           if (typeof _botSendRoster === 'function') _botSendRoster();
         } catch (_) {}
       }
-      // (v30.62) Open-solo host still in the hangar : pull the newcomer
-      // straight in too (no READY dance ; bots fill the empty seats).
-      if (net.openSolo && game.state === 'select' && net.sendEvent) {
-        try {
-          net.sendEvent({ type: 'open_solo_start',
-            host: net.openSoloHostId || net.myPeerId,
-            seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0 }, peerId);
-        } catch (_) {}
-      }
     });
 
     // Peer leaves
@@ -5434,8 +5407,7 @@ async function joinRoom() {
     setTimeout(() => {
       const btn = document.getElementById('btn-join');
       btn.disabled = false;
-      btn.textContent = 'CLICK WHEN READY';
-      btn.classList.add('lss-ready-cta');
+      btn.textContent = 'READY';
       btn.onclick = () => toggleReady();
     }, 500);
 
@@ -5477,28 +5449,6 @@ function _cancelRoomForLocalPlay() {
 // the code can drop in mid-round, taking a bot's seat on the enemy team.
 async function startOpenSolo() {
   game.testMode = false;
-  // (v30.62) Already connected to a room ? Don't spin up a NEW code — that
-  // was splitting parties into separate matches. The whole room starts the
-  // bot match together instead, still open for drop-ins.
-  if (net.active && net.room) {
-    net.openSolo = true;
-    net.openSoloHostId = net.myPeerId;
-    net.solo = false;
-    net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
-    if (net.peers && net.peers.size > 0 && net.sendEvent) {
-      try {
-        net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
-          seed: net.worldSeed >>> 0 });
-      } catch (_) {}
-    }
-    const ls = document.getElementById('lobby-status');
-    if (ls) {
-      ls.textContent = 'OPEN ROOM ' + (net.roomCode || '') + ' \u2014 BOT MATCH ; CHALLENGERS CAN DROP IN';
-      ls.style.color = '#7dffa8';
-    }
-    enterShipSelect();
-    return;
-  }
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const code = Array.from({ length: 4 }, () => alphabet[(Math.random() * alphabet.length) | 0]).join('');
   const inp = document.getElementById('room-code');
@@ -6055,16 +6005,13 @@ function toggleReady() {
 function updateReadyButton() {
   const btn = document.getElementById('btn-join');
   if (!btn) return;
-  btn.classList.add('lss-ready-cta');
   if (net.myReady) {
-    btn.classList.add('lss-ready-on');
-    btn.textContent = 'READY \u2713 ; CLICK TO CANCEL';
+    btn.textContent = 'READY ; CLICK TO CANCEL';
     btn.style.background = 'rgba(102,204,102,0.25)';
     btn.style.borderColor = '#66cc66';
     btn.style.color = '#66cc66';
   } else {
-    btn.classList.remove('lss-ready-on');
-    btn.textContent = 'CLICK WHEN READY';
+    btn.textContent = 'READY';
     btn.style.background = 'rgba(255,170,0,0.15)';
     btn.style.borderColor = '#ffaa00';
     btn.style.color = '#ffaa00';
@@ -7349,27 +7296,6 @@ function handleNetEvent(evt, fromPeerId) {
         if (fb) { fb.isFiring = true; fb.fireFlashTimer = 0.15; }
       } catch (_) {}
     }
-    return;
-  }
-  // (v30.62) A roommate hit PLAY WHILE WAITING : the whole room starts
-  // the bot match together. Deterministic host if several click at once :
-  // the lowest peerId wins (same tie-break style as the launch proposer).
-  if (evt.type === 'open_solo_start') {
-    const evtHost = evt.host || peerId;
-    if (net.openSolo && net.openSoloHostId &&
-        String(net.openSoloHostId) <= String(evtHost)) return;
-    net.openSolo = true;
-    net.openSoloHostId = evtHost;
-    net.solo = false;
-    if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
-    try {
-      const ls = document.getElementById('lobby-status');
-      if (ls) { ls.textContent = 'BOT MATCH STARTING \u2014 PICK A SHIP'; ls.style.color = '#7dffa8'; }
-    } catch (_) {}
-    try {
-      const sel = document.getElementById('ship-select');
-      if (!sel || !sel.classList.contains('active')) enterShipSelect();
-    } catch (_) {}
     return;
   }
   // Joiner briefing: the open-solo host describes the match in progress.
