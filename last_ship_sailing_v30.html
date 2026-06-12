@@ -3090,7 +3090,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.92';
+const LSS_BUILD = '30.94';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -28545,7 +28545,7 @@ function updateEffects(dt) {
       }
       if (e.mesh.children && e.mesh.children.length) {
         for (const ch of e.mesh.children) {
-          if (ch.material && 'opacity' in ch.material) ch.material.opacity = 0.5 * fade;
+          if (ch.material && 'opacity' in ch.material) ch.material.opacity = 0.85 * fade;
         }
       }
     }
@@ -33326,9 +33326,15 @@ function executeAbility(slot, ability) {
       const beamMat = _makeFXMaterial('core_beam');
       if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
       const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
-      beamMesh.position.copy(beamMid);
+      // (v30.93) The LayeredFX tube has no vertex fade, so its near rim sat
+      // as a hard circle in the cockpit. Start the shader tube 18% down the
+      // beam ; the vertex-faded backing below spans the full length and
+      // covers the gap, so the beam now fades in from the muzzle.
+      const _vbLen = range * 0.92;
+      const _vbMid = _vlOrigin.clone().addScaledVector(_vlDir, range * 0.08 + _vbLen * 0.5);
+      beamMesh.position.copy(_vbMid);
       beamMesh.quaternion.setFromUnitVectors(_mvUp, _vlDir);
-      beamMesh.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
+      beamMesh.scale.set(BEAM_RADIUS, _vbLen, BEAM_RADIUS);
       beamMesh.frustumCulled = false;
       beamMesh.renderOrder = 2;
       // Vivid normal-blend backing core: the translucent shader beam washes
@@ -33338,11 +33344,14 @@ function executeAbility(slot, ability) {
       // inside the glow. Child of the beam so transform + lifetime ride
       // along for free (shared global geometry — never disposed).
       const _beamBackMat = new THREE.MeshBasicMaterial({
-        color: 0x6a22dd, transparent: true, opacity: 0.5,
+        color: 0x8a3cf0, transparent: true, opacity: 0.85,
         blending: THREE.NormalBlending, depthWrite: false, vertexColors: true,
       });
       const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
-      _beamBack.scale.set(0.65, 1.0, 0.65);
+      // Counter-scale the child so the backing still spans the FULL beam
+      // (muzzle fade included) while the parent shader tube starts late.
+      _beamBack.scale.set(0.8, range / _vbLen, 0.8);
+      _beamBack.position.y = (range * 0.5 - (range * 0.08 + _vbLen * 0.5)) / _vbLen;
       _beamBack.renderOrder = 1;
       _beamBack.frustumCulled = false;
       beamMesh.add(_beamBack);
@@ -33359,7 +33368,7 @@ function executeAbility(slot, ability) {
       // so the visual mass roughly matches the old 5-pair stack.
       const _vlMuzzle = _vlOrigin;
       if (typeof _spawnSingleTracer === 'function') {
-        _spawnSingleTracer(_vlMuzzle, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.3);
+        _spawnSingleTracer(_vlMuzzle, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.6);
       }
       // Network broadcast : one tracer instead of two. Peers receive the
       // origin in world space (muzzle position is camera-local, but for a
