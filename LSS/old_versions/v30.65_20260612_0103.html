@@ -3082,7 +3082,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.67';
+const LSS_BUILD = '30.65';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6573,12 +6573,6 @@ class NetworkPlayer {
         ? PILOT_PERKS.cloak.cloakOpacity : 0.01;
       _setShipMeshOpacity(this.mesh, wantCloak ? cloakOp : 1.0);
     }
-    // (v30.67) Vortex charge warning arcs from the broadcast soak level.
-    if (this.alive && s.va > 0 && typeof _vortexChargeArcs === 'function') {
-      _vortexChargeArcs(this, this.position,
-        ((this.chassis && this.chassis.hullLength) || 60) * 0.7,
-        Math.min(1, s.va / 9), dt);
-    }
     this._updateAbilityShieldVisual(s, dt);
   }
 
@@ -6835,7 +6829,6 @@ const _broadcastState = {
   abilityShield: false,
   spawnProt: 0,
   cloak: false,
-  va: 0,
 };
 function broadcastPlayerState(dt) {
   if (!net.active || !net.sendState) return;
@@ -6878,9 +6871,6 @@ function broadcastPlayerState(dt) {
   s.cloak = !!(player.perkCloakActive
             && PILOT_PERKS[player.perkId]
             && PILOT_PERKS[player.perkId].cloakDuration);
-  // (v30.67) Vortex Shield soak level 0-9 ; peers draw warning arcs from it.
-  s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
-    ? Math.round(_vortexChargeFrac() * 9) : 0;
 
   const msg = JSON.stringify(s);
   net.bytesSent += msg.length;
@@ -7627,12 +7617,6 @@ function handleNetEvent(evt, fromPeerId) {
       : (peerForWidth && peerForWidth.loadoutKey);
     if (_shooterLoadout === 'PUNCTURE') {
       _spawnRailgunSpiral(from, to, evt.color || 0xeeff66);
-    } else if (evt.b === 1) {
-      // (v30.66) Shooter had the VORTEX ADS boost live ; mirror the
-      // fat white-hot beam so the boost is visible to its victims too.
-      const _bCol = new THREE.Color(evt.color || 0xffff44)
-        .lerp(new THREE.Color(0xffffff), 0.35).getHex();
-      spawnTracer(from, to, _bCol, 1.85);
     } else {
       spawnTracer(from, to, evt.color || 0xffff44, peerWScale);
     }
@@ -32574,13 +32558,7 @@ function fireHitscan(origin, dir, w) {
       : origin;
     _spawnRailgunSpiral(localFrom, end, tracerColor);
   } else {
-    // (v30.66) VORTEX ADS boost : the 1.75x-damage beam should READ as
-    // boosted — fatter strand, color pushed toward white-hot.
-    const _vAds = (player.loadoutKey === 'VORTEX' && player.vortexAdsActive);
-    const _vCol = _vAds
-      ? new THREE.Color(tracerColor).lerp(new THREE.Color(0xffffff), 0.35).getHex()
-      : tracerColor;
-    spawnTracer(origin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : 1.0));
+    spawnTracer(origin, end, tracerColor, isChaingun ? 0.55 : 1.0);
   }
   if (net.active && net.sendEvent) {
     net.sendEvent({
@@ -32589,7 +32567,6 @@ function fireHitscan(origin, dir, w) {
       ex: end.x,    ey: end.y,    ez: end.z,
       color: tracerColor,
       lo: player.loadoutKey,
-      b: (player.loadoutKey === 'VORTEX' && player.vortexAdsActive) ? 1 : 0,
     });
   }
 
@@ -35017,48 +34994,6 @@ const _abTmpC = new THREE.Vector3();
 const _abTmpD = new THREE.Vector3();
 const _abProbeMid = new THREE.Vector3();
 
-// (v30.67) VORTEX charge arcs : purple electricity that grows with the
-// damage the Vortex Shield has soaked. Drawn around the local player AND
-// driven on peers via the s.va broadcast so everyone sees the danger
-// build. `holder` carries the per-entity spawn-cadence timer (_vArcT).
-const _vArcA = new THREE.Vector3();
-const _vArcB = new THREE.Vector3();
-function _vortexChargeArcs(holder, center, hullR, intensity, dt) {
-  if (!holder || !center || intensity <= 0.03) return;
-  holder._vArcT = (holder._vArcT || 0) - dt;
-  if (holder._vArcT > 0) return;
-  holder._vArcT = 1 / (5 + 17 * intensity);   // 5/s low charge -> 22/s maxed
-  const R1 = hullR * (1.05 + Math.random() * 0.55);
-  const R2 = hullR * (1.05 + Math.random() * 0.55);
-  const a1 = Math.random() * Math.PI * 2;
-  const p1 = (Math.random() - 0.5) * Math.PI;
-  const a2 = a1 + 0.6 + Math.random() * 2.0;
-  const p2 = (Math.random() - 0.5) * Math.PI;
-  _vArcA.set(
-    center.x + Math.cos(a1) * Math.cos(p1) * R1,
-    center.y + Math.sin(p1) * R1,
-    center.z + Math.sin(a1) * Math.cos(p1) * R1);
-  _vArcB.set(
-    center.x + Math.cos(a2) * Math.cos(p2) * R2,
-    center.y + Math.sin(p2) * R2,
-    center.z + Math.sin(a2) * Math.cos(p2) * R2);
-  if (typeof spawnLightningBolt === 'function') {
-    spawnLightningBolt(_vArcA, _vArcB, 0xaa55ff,
-      0.10 + 0.10 * intensity,
-      1 + Math.round(intensity * 2),
-      1.1 + 2.4 * intensity,
-      false);
-  }
-}
-// 0..1 charge read shared by the local draw + the state broadcast.
-function _vortexChargeFrac() {
-  if (!player || player.loadoutKey !== 'VORTEX') return 0;
-  let f = Math.min(1, (player.vortexStored || 0) / 1200);
-  // Actively absorbing bumps the read so the crackle visibly REACTS.
-  if (f > 0 && (player.vortexRecentAbsorb || 0) > 50) f = Math.min(1, f + 0.15);
-  return f;
-}
-
 function _releaseVortexShieldBurst(playBurstSound) {
   if (!player || player.vortexStored <= 0 || !player.position || !camera) return;
   if (playBurstSound !== false) playBurstSound = true;
@@ -36480,14 +36415,6 @@ function updateAbilities(dt) {
   // VORTEX energy regen: always regens, no delay
   if (player.loadoutKey === 'VORTEX') {
     player.vortexEnergy = Math.min(player.vortexMaxEnergy, player.vortexEnergy + player.vortexEnergyRegen * dt);
-    // (v30.67) Purple charge arcs while the shield holds soaked damage.
-    if (player.shipState !== 'dead') {
-      const _vcf = _vortexChargeFrac();
-      if (_vcf > 0) {
-        _vortexChargeArcs(player, player.position,
-          ((player.chassis && player.chassis.hullLength) || 60) * 0.7, _vcf, dt);
-      }
-    }
   }
 
   // Blaster Range Mode: 1s transition delay
