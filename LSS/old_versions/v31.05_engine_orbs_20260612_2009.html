@@ -16846,33 +16846,22 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     if (m) _thrusterNodes.push({ n: +m[1], node: o });
   });
   _thrusterNodes.sort((a, b) => a.n - b.n);
-  let _markerGlowMat = null;
   if (_thrusterNodes.length) {
     group.updateMatrixWorld(true);
     // (2026-06-12) No plume cones on marker-driven ships: a stretched cone
     // reads as forward thrust even when the ship strafes or flies
     // backwards, which looked wrong the moment plumes became visible.
-    // Each marker instead gets a small ROUND glow orb in the ship's THEME
-    // color (LSS.CLASS_COLORS, same palette as weapons/shields: Pyro red,
-    // Vortex purple, Blaster cyan, ...), NOT the team color.
-    // animateShipMesh drives these like any engine glow: uIntensity
-    // 0.5->1.5 with throttle and a UNIFORM scale pulse (0.7->1.6 +
-    // flicker), so the orb brightens and swells under burn yet reads
-    // correctly from every flight direction.
-    const _classColor = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null)
-      ? LSS.CLASS_COLORS[loadoutKey] : teamColor;
-    _markerGlowMat = _makeFXMaterial('engine_disc');
-    if (_markerGlowMat.uniforms.uBaseColor) _markerGlowMat.uniforms.uBaseColor.value.set(_classColor);
-    // (2026-06-12) Brighter than the stock disc preset (2.4): the orbs are
-    // the only engine visual now, so they carry the full thrust read.
-    if (_markerGlowMat.uniforms.uBrightness) _markerGlowMat.uniforms.uBrightness.value = 3.6;
-    group.userData.shaderEngineMats = (group.userData.shaderEngineMats || []).concat([_markerGlowMat]);
+    // Each marker instead gets a small ROUND glow orb in the ship's theme
+    // color (engine_disc preset, uBaseColor = team color). animateShipMesh
+    // already drives these: uIntensity 0.5->1.5 with throttle and a
+    // UNIFORM scale pulse (0.7->1.6 + flicker), so the orb brightens and
+    // swells under burn yet reads correctly from every flight direction.
     const glowGeo = new THREE.SphereGeometry(h * 0.30, 12, 8);
     const _wp = new THREE.Vector3();
     for (const t of _thrusterNodes) {
       t.node.getWorldPosition(_wp);
       const p = group.worldToLocal(_wp.clone());
-      const g = addGlow(glowGeo, _markerGlowMat, p.x, p.y, p.z);
+      const g = addGlow(glowGeo, engineGlowMat, p.x, p.y, p.z);
       if (!engineMesh) engineMesh = g;
     }
   } else if (name === 'Frigate') {
@@ -16931,7 +16920,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const engineGlows = [];
   const enginePlumes = [];
   group.traverse(child => {
-    if (child.material === engineGlowMat || child.material === thrusterMat || (_markerGlowMat && child.material === _markerGlowMat)) engineGlows.push(child);
+    if (child.material === engineGlowMat || child.material === thrusterMat) engineGlows.push(child);
     if (child.userData && child.userData.isPlume) enginePlumes.push(child);
   });
   // Hide engine glow discs + plume cones in Potato. The
@@ -60423,180 +60412,4 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     }
 
     // Broadcast to peers so they apply the same overlay. We re-send
-    // map_change with the current selectedMap so the existing receiver path
-    // handles both the map AND the overlay in one shot.
-    if (net && net.active && net.sendEvent) {
-      net.sendEvent({
-        type: 'map_change',
-        mapKey: game.selectedMap,
-        gmapsOverlay: { lat, lng, name: displayName },
-        // Tag the active mode along with the overlay broadcast.
-        mode: LSS.MODE || 'classic'
-      });
-    }
-    const sel = game.selectedMap;
-    const isGmaps = sel && MAP_DATA[sel] && MAP_DATA[sel].type === 'gmaps';
-    if (isGmaps) {
-      // gmaps_user is selected ; rewrite its lat/lng so the carousel
-      // shows the right name now too.
-      const e = MAP_DATA[sel];
-      e.lat = lat; e.lng = lng;
-      e.name = shortName;
-      e.description = 'Pure city flight. Lat ' + lat.toFixed(4) + ', Lng ' + lng.toFixed(4) + '.';
-      // Force re-render of the map name in the lobby card.
-      const wasKey = sel; game.selectedMap = null; selectMap(wasKey);
-      setStatus('Pure-city map selected: ' + shortName + '. LAUNCH to drop in.', 'ok');
-    } else {
-      const tunnelName = (MAP_DATA[sel] && MAP_DATA[sel].name) || sel;
-      setStatus('Will overlay ' + shortName + ' under "' + tunnelName + '" on LAUNCH.', 'ok');
-    }
-  }
-    goBtn.addEventListener('click', doDrop);
-  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); doDrop(); } });
-  detBtn.addEventListener('click', () => {
-    stopPulse();
-    _lssGmapsDetachCity();
-    game.pendingGmapsOverlay = null;
-    // Re-enable the preset cycle now that gmaps is gone.
-    if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
-    // Also clear race-custom route on DETACH.
-    game.pendingRaceRoute = null;
-    game.raceNoTimer = false;
-    if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
-    // Restore the default arena clamp.
-    if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
-    if (typeof LSS._origCameraFar === 'number') {
-      camera.far = LSS._origCameraFar;
-      camera.updateProjectionMatrix();
-    }
-    if (scene.fog && typeof LSS._origFogDensity === 'number') {
-      scene.fog.density = LSS._origFogDensity;
-    }
-    if (game.selectedMap === 'race_custom') {
-      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
-    }
-    // Also blank the FINISH input so the next race lobby starts fresh.
-    try {
-      const fin = document.getElementById('gmaps-loc-finish-input');
-      if (fin) fin.value = '';
-    } catch (_) {}
-    setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
-    // Re-enable the input that may have been locked by a peer's set.
-    try { const inp = document.getElementById('gmaps-loc-input'); if (inp) inp.disabled = false; } catch(_) {}
-    // Broadcast detach so peers also clear and unlock.
-    if (net && net.active && net.sendEvent) {
-      net.sendEvent({ type: 'map_change', mapKey: game.selectedMap, gmapsOverlay: null, mode: LSS.MODE || 'classic' });
-    }
-  });
-
-  // Race-mode toggle: flip LSS.MODE and rebroadcast the current
-  // map_change so peers stay in sync. When flipping ON, if the current
-  // map isn't a race_* map, auto-select Pole Position so race mode is
-  // a one-click experience.
-  // Race mode can only be flipped from a FRESH ship-select (cold boot or
-  // back from the lobby). The between-round swap screen reuses this panel,
-  // and toggling race rules mid-match half-converts the world (speeds
-  // normalize, maps re-filter, walls switch) under a live round.
-  function _raceModeLocked() {
-    return typeof game !== 'undefined' && game &&
-           (game.state === 'playing' || game.state === 'roundEnd' ||
-            (game.state === 'warmup' && (game.currentRound | 0) > 1));
-  }
-  function _refreshRaceModeLock() {
-    const b = document.getElementById('race-mode-toggle');
-    if (!b) return;
-    const locked = _raceModeLocked();
-    b.style.opacity = locked ? '0.35' : '';
-    b.style.pointerEvents = locked ? 'none' : '';
-    b.title = locked ? 'Race mode is locked during a match' : 'Toggle Race Mode';
-  }
-  if (typeof window !== 'undefined') window._refreshRaceModeLock = _refreshRaceModeLock;
-  const raceBtn = document.getElementById('race-mode-toggle');
-  if (raceBtn) {
-    raceBtn.addEventListener('click', () => {
-      if (_raceModeLocked()) return;   // belt + suspenders over pointer-events
-      const on = raceBtn.dataset.on !== '1';
-      raceBtn.dataset.on = on ? '1' : '0';
-      raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
-      raceBtn.classList.toggle('active', on);
-      LSS.MODE = on ? 'race' : 'classic';
-      // Rebuild the carousel so the dots / arrows reflect the new
-      // mode's filtered map list. buildMapSelector also re-snaps the
-      // selection if the previous map is no longer eligible.
-      if (typeof buildMapSelector === 'function') {
-        try { buildMapSelector(); } catch (_) {}
-      }
-      // Toggle the FINISH input + relabel the panel for race mode.
-      try {
-        const lbl = document.getElementById('gmaps-overlay-label');
-        const fin = document.getElementById('gmaps-loc-finish-input');
-        const startInp = document.getElementById('gmaps-loc-input');
-        if (on) {
-          if (lbl) lbl.textContent = 'RACE: START -> FINISH';
-          if (fin) fin.style.display = '';
-          if (startInp) startInp.placeholder = 'Start location (e.g. Stanley Park)';
-        } else {
-          if (lbl) lbl.textContent = 'DROP ON LOCATION';
-          if (fin) fin.style.display = 'none';
-          if (startInp) startInp.placeholder = 'Empire State Building';
-        }
-      } catch (_) {}
-      // Convenience: when flipping ON, also set the race-default walls
-      // to Datamosh Cube (preset 22). User-tested choice ; reads well
-      // through the gmaps city overlay and doesn't glitch on cycle.
-      // User can still cycle off with P.
-      if (on && typeof setWallPattern === 'function') {
-        try { setWallPattern(22); } catch (_) {}
-      }
-      // Convenience: when flipping ON, force-select Pole Position
-      // (currently the only race map). selectMap broadcasts map_change
-      // with the mode tagged along.
-      if (on && typeof selectMap === 'function' && MAP_DATA && MAP_DATA.race_pole_position) {
-        if (game.selectedMap !== 'race_pole_position') {
-          selectMap('race_pole_position');
-          return;
-        }
-      }
-      if (net && net.active && net.sendEvent && game.selectedMap) {
-        const ov = game.pendingGmapsOverlay;
-        net.sendEvent({
-          type: 'map_change',
-          mapKey: game.selectedMap,
-          gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
-          mode: LSS.MODE
-        });
-      }
-    });
-  }
-})();
-
-window.lssGmaps = {
-  state: _lssGmaps,
-  cities: _lssGmapsCities,
-  setKey: _lssGmapsSetKey,
-  getKey: _lssGmapsGetKey,
-  clearKey: _lssGmapsClearKey,
-  prompt: _lssGmapsPromptKey,
-  setScale: _lssGmapsSetScaleLive,
-  attachCity: _lssGmapsAttachCity,
-  attachLatLng: _lssGmapsAttachAtLatLng,
-  location: _lssGmapsLocation,
-  refinePivot: _lssGmapsRefinePivot,
-  detachCity: _lssGmapsDetachCity,
-  testKey: _lssGmapsTestKey
-};
-
-
-} // end _bootLSS
-
-// v8VR: kick off the game once the THREE module bootstrap has run.
-// If the event already fired before this listener was added (race), boot now.
-if (window.LSS_ENGINE_READY) {
-  _bootLSS();
-} else {
-  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
-}
-
-</script>
-</body>
-</html>
+    // map_change with the current selectedMap so t

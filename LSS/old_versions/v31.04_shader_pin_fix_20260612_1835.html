@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.05';
+const LSS_BUILD = '31.04';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6818,10 +6818,7 @@ class NetworkPlayer {
   }
 
   destroy() {
-    // (leak fix 2026-06-12) Peer is gone for good; dispose the whole ship
-    // group's per-build resources, not just unlink it.
-    if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
-    else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
+    if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
     // Clean up any chassis-specific shield meshes attached to this
     // network player. Without this, they'd leak in the scene when the peer
     // leaves or swaps loadouts. Helper makes this a one-liner per mesh.
@@ -16777,11 +16774,6 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
       });
       child.material = newMats.length === 1 ? newMats[0] : newMats;
       child.castShadow = false; child.receiveShadow = false;
-      // (leak fix 2026-06-12) Geometry is SHARED with the cached prototype
-      // (proto.clone(true) clones nodes, not geometry). _disposeShipGroup
-      // must never dispose these; flag them so it can tell shared GLB
-      // geometry apart from per-build glow/plume/shield geometry.
-      child.userData._sharedGLBGeo = true;
     }
   });
   group.add(model);
@@ -16834,48 +16826,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
 
   let engineMesh;
   const name = chassisData.name;
-  // (2026-06-12) Marker-driven engine layout. If the GLB carries thrusterN
-  // empties (placed with glb_editor.html's Place Thrusters mode), build one
-  // engine glow + plume per marker at the marker's exact position and skip
-  // the legacy hardcoded per-chassis layout below. Marker positions live in
-  // the model's local space; the group isn't in the scene yet, but
-  // updateMatrixWorld composes the detached subtree fine.
-  const _thrusterNodes = [];
-  model.traverse(o => {
-    const m = /^thruster(\d+)$/.exec(o.name || '');
-    if (m) _thrusterNodes.push({ n: +m[1], node: o });
-  });
-  _thrusterNodes.sort((a, b) => a.n - b.n);
-  let _markerGlowMat = null;
-  if (_thrusterNodes.length) {
-    group.updateMatrixWorld(true);
-    // (2026-06-12) No plume cones on marker-driven ships: a stretched cone
-    // reads as forward thrust even when the ship strafes or flies
-    // backwards, which looked wrong the moment plumes became visible.
-    // Each marker instead gets a small ROUND glow orb in the ship's THEME
-    // color (LSS.CLASS_COLORS, same palette as weapons/shields: Pyro red,
-    // Vortex purple, Blaster cyan, ...), NOT the team color.
-    // animateShipMesh drives these like any engine glow: uIntensity
-    // 0.5->1.5 with throttle and a UNIFORM scale pulse (0.7->1.6 +
-    // flicker), so the orb brightens and swells under burn yet reads
-    // correctly from every flight direction.
-    const _classColor = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null)
-      ? LSS.CLASS_COLORS[loadoutKey] : teamColor;
-    _markerGlowMat = _makeFXMaterial('engine_disc');
-    if (_markerGlowMat.uniforms.uBaseColor) _markerGlowMat.uniforms.uBaseColor.value.set(_classColor);
-    // (2026-06-12) Brighter than the stock disc preset (2.4): the orbs are
-    // the only engine visual now, so they carry the full thrust read.
-    if (_markerGlowMat.uniforms.uBrightness) _markerGlowMat.uniforms.uBrightness.value = 3.6;
-    group.userData.shaderEngineMats = (group.userData.shaderEngineMats || []).concat([_markerGlowMat]);
-    const glowGeo = new THREE.SphereGeometry(h * 0.30, 12, 8);
-    const _wp = new THREE.Vector3();
-    for (const t of _thrusterNodes) {
-      t.node.getWorldPosition(_wp);
-      const p = group.worldToLocal(_wp.clone());
-      const g = addGlow(glowGeo, _markerGlowMat, p.x, p.y, p.z);
-      if (!engineMesh) engineMesh = g;
-    }
-  } else if (name === 'Frigate') {
+  if (name === 'Frigate') {
     // NO FLAT SHAPES: engine glows are squashed 3D orbs, not discs.
     const glowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
     glowGeo.scale(1, 1, 0.55);
@@ -16931,7 +16882,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const engineGlows = [];
   const enginePlumes = [];
   group.traverse(child => {
-    if (child.material === engineGlowMat || child.material === thrusterMat || (_markerGlowMat && child.material === _markerGlowMat)) engineGlows.push(child);
+    if (child.material === engineGlowMat || child.material === thrusterMat) engineGlows.push(child);
     if (child.userData && child.userData.isPlume) enginePlumes.push(child);
   });
   // Hide engine glow discs + plume cones in Potato. The
@@ -16967,34 +16918,6 @@ if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') {
 // If a ship was built before its model finished loading (procedural fallback),
 // call this with the owner (player / bot / network player) to swap in the model
 // mesh once the cache is ready. The owner must have .mesh, .chassis, .loadoutKey.
-// (leak fix 2026-06-12) Dispose a permanently discarded ship group's
-// per-build resources. Ship groups are rebuilt on GLB swap-in, loadout
-// change, and peer/bot teardown; the old group was only scene.remove()d,
-// leaking every per-build geometry (engine glow orbs, plume cones, shield
-// sphere, running light) and every per-build material clone (~40 cone
-// geometries per 30s of bot combat in the 2026-06-12 GL trace). Geometry
-// belonging to the shared GLB prototype is flagged _sharedGLBGeo at build
-// time and is never disposed here. Materials are always per-build clones,
-// so all are disposed; material.dispose() never touches shared textures.
-// Do NOT call this for meshes that revive by re-adding the same group
-// (NetworkPlayer.die -> dead-to-alive re-add); only for permanent discards.
-function _disposeShipGroup(group) {
-  if (!group) return;
-  try {
-    if (group.parent) group.parent.remove(group);
-    group.traverse((o) => {
-      if (!(o.isMesh || o.isSprite || o.isLine || o.isPoints)) return;
-      if (o.geometry && !(o.userData && o.userData._sharedGLBGeo)) {
-        try { o.geometry.dispose(); } catch (_) {}
-      }
-      const mats = Array.isArray(o.material) ? o.material : [o.material];
-      for (const m of mats) {
-        if (m && m.dispose) { try { m.dispose(); } catch (_) {} }
-      }
-    });
-  } catch (_) {}
-}
-
 function swapToModelMeshWhenReady(owner, teamColor) {
   if (!shipModelCache.ready) return;
   if (!owner) return;
@@ -17028,8 +16951,7 @@ function swapToModelMeshWhenReady(owner, teamColor) {
     const wasAwaitingGlb = !!(oldMesh.userData && oldMesh.userData.awaitingGlb);
     const visible = wasAwaitingGlb ? true : oldMesh.visible;
     const botRef = oldMesh.userData && oldMesh.userData.bot;
-    // (leak fix 2026-06-12) Dispose the replaced group, don't just unlink it.
-    _disposeShipGroup(oldMesh);
+    if (oldMesh.parent) oldMesh.parent.remove(oldMesh);
     owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey);
     owner.mesh.position.copy(pos);
     owner.mesh.quaternion.copy(quat);
@@ -18717,12 +18639,7 @@ class Bot {
     }
   }
 
-  destroy() {
-    // (leak fix 2026-06-12) Bots are torn down for good here (match end /
-    // entity wipe); dispose the ship group's per-build resources too.
-    if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
-    else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
-  }
+  destroy() { if (this.mesh && this.mesh.parent) scene.remove(this.mesh); }
 }
 
 // ---- PROJECTILE SYSTEM ----
@@ -19955,49 +19872,6 @@ class Projectile {
       spawnWallRipple(this.position, _rc);
     }
   }
-}
-
-// (fix 2026-06-12) Silent projectile despawn for round/match transitions.
-// The round-restart cleanup wiped effects/particles/dots/worldEffects but
-// left game.projectiles untouched, and the match-end path reset only the
-// array reference ; a shot in flight when the round ended (e.g. a Pyro trap
-// lob) survived the rebuild as a frozen orphan mesh hanging mid-air through
-// the next round. destroy() is the wrong tool for cleanup: it intentionally
-// spawns the impact explosion / thermite flame / wall ripple, which would
-// pop a fireworks show at the FIGHT countdown. This strips the scene
-// objects exactly like destroy() does, and nothing else.
-function _despawnProjectileSilent(p) {
-  if (!p) return;
-  p.alive = false;
-  try {
-    if (p.mesh && p.mesh.parent) {
-      scene.remove(p.mesh);
-      if (p.mesh.material && p.mesh.material.dispose) p.mesh.material.dispose();
-    }
-    if (p.trail && p.trail.parent) {
-      scene.remove(p.trail);
-      if (p.trail.geometry) p.trail.geometry.dispose();
-      if (p.trail.material) p.trail.material.dispose();
-    }
-    if (p.glowMesh && p.glowMesh.parent) {
-      scene.remove(p.glowMesh);
-      if (p.glowMesh.material && p.glowMesh.material.dispose) p.glowMesh.material.dispose();
-    }
-    if (p.hazeMesh && p.hazeMesh.parent) {
-      scene.remove(p.hazeMesh);
-      if (p.hazeMesh.material && p.hazeMesh.material.dispose) p.hazeMesh.material.dispose();
-    }
-    if (p.smokeCone && p.smokeCone.parent) {
-      scene.remove(p.smokeCone);
-      if (p.smokeCone.material && p.smokeCone.material.dispose) { try { p.smokeCone.material.dispose(); } catch (_) {} }
-      p.smokeCone = null;
-    }
-    if (p.trailRibbon && p.trailRibbon.parent) {
-      scene.remove(p.trailRibbon);
-      if (p.trailRibbon.geometry) p.trailRibbon.geometry.dispose();
-      if (p.trailRibbon.material) p.trailRibbon.material.dispose();
-    }
-  } catch (_) {}
 }
 
 // Spawn a small lingering pyro flame at the given position. Lasts 2 seconds,
@@ -22847,23 +22721,8 @@ class DestructibleObstacle {
   _fragmentExplode() {
     if (!this.alive) return;
     this.alive = false;
-    // (leak fix 2026-06-12) Dispose, not just unlink. Every fragment
-    // detonation orphaned its unique geometry + material (cluster atoms:
-    // _makeRockGeometry + _makeAtomFractalMaterial clone ; plain obstacles:
-    // per-build geo + MeshStandardMaterial). Bot combat pops several
-    // fragments per second, growing renderer.info.memory.geometries by
-    // hundreds per minute until VRAM pressure produced the 144->60->30
-    // staircase in long sessions. _disposeVRRockMesh removes from parent
-    // and disposes geometry + material (array-safe).
-    if (typeof _disposeVRRockMesh === 'function') {
-      _disposeVRRockMesh(this.mesh);
-      _disposeVRRockMesh(this.edgeMesh);
-      this.mesh = null;
-      this.edgeMesh = null;
-    } else {
-      if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
-      if (this.edgeMesh && this.edgeMesh.parent) scene.remove(this.edgeMesh);
-    }
+    if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
+    if (this.edgeMesh && this.edgeMesh.parent) scene.remove(this.edgeMesh);
     spawnExplosion(this.position, Math.max(3, Math.ceil(this.scale / 10)));
     if (typeof spawnDynamicLight === 'function') {
       spawnDynamicLight(this.position, 0xffaa55, 1.6, 200, 0.25);
@@ -23782,20 +23641,9 @@ class ClusterObstacle {
 
   respawn() {
     // Clear any lingering child meshes / references
-    // (leak fix 2026-06-12) Dispose surviving children, not just unlink.
-    // _buildChildren below mints brand-new unique rock geometries +
-    // fractal-material clones on every respawn cycle ; the old ones were
-    // orphaned here and accumulated for the whole session.
     for (const c of this.children) {
-      if (typeof _disposeVRRockMesh === 'function') {
-        _disposeVRRockMesh(c.mesh);
-        _disposeVRRockMesh(c.edgeMesh);
-        c.mesh = null;
-        c.edgeMesh = null;
-      } else {
-        if (c.mesh && c.mesh.parent) scene.remove(c.mesh);
-        if (c.edgeMesh && c.edgeMesh.parent) scene.remove(c.edgeMesh);
-      }
+      if (c.mesh && c.mesh.parent) scene.remove(c.mesh);
+      if (c.edgeMesh && c.edgeMesh.parent) scene.remove(c.edgeMesh);
       const idx = game.dynamicObjects.indexOf(c);
       if (idx >= 0) game.dynamicObjects.splice(idx, 1);
     }
@@ -37204,11 +37052,7 @@ function spawnDashBoosters(shipMesh, dashWorldDir, color) {
   shipMesh.updateMatrixWorld(true);
   const back = dashWorldDir.clone().normalize().multiplyScalar(-1);
   const length = 240;
-  // (2026-06-12) Marker-driven ships have glow orbs instead of plume
-  // cones; dash streaks fire from the orbs in that case so they still
-  // originate at the engine nozzles rather than the ship center.
-  let plumes = (shipMesh.userData && shipMesh.userData.enginePlumes) || [];
-  if (plumes.length === 0) plumes = (shipMesh.userData && shipMesh.userData.engineGlows) || [];
+  const plumes = (shipMesh.userData && shipMesh.userData.enginePlumes) || [];
   if (plumes.length === 0) {
     const from = new THREE.Vector3();
     shipMesh.getWorldPosition(from);
@@ -37622,16 +37466,6 @@ function updateRoundSystem(dt) {
         // Wipe all live Dots (ambient cloud anchors and any other
         // dot-system effects) so the next round starts clean.
         if (typeof disposeAllDots === 'function') disposeAllDots();
-        // (fix 2026-06-12) Despawn in-flight projectiles between rounds.
-        // game.projectiles was the one live-entity list this cleanup never
-        // touched, so a shot airborne at the horn (e.g. Pyro trap lob)
-        // persisted into the next round as a frozen orphan mesh.
-        if (game.projectiles && game.projectiles.length) {
-          for (const proj of game.projectiles) {
-            try { _despawnProjectileSilent(proj); } catch (_) {}
-          }
-          game.projectiles = [];
-        }
         // Fractal plants are disposed + respawned INSIDE
         // buildNextRound above. Disposing again here (post-spawn) was
         // wiping the freshly-spawned plants ; removed.
@@ -37991,11 +37825,6 @@ function returnToRootMenu() {
   // the world, but these references live on game until then).
   for (const bot of game.entities) { try { bot.destroy(); } catch (e) {} }
   game.entities = [];
-  // (fix 2026-06-12) Strip projectile meshes from the scene, not just the
-  // array reference ; orphans were surviving into the menu backdrop.
-  for (const proj of game.projectiles) {
-    try { if (typeof _despawnProjectileSilent === 'function') _despawnProjectileSilent(proj); } catch (_) {}
-  }
   game.projectiles = [];
   game.particles = [];
   if (typeof _ptsGeo !== 'undefined') { _ptsGeo.setDrawRange(0, 0); _particlePoints.visible = false; }
@@ -41922,7 +41751,7 @@ function _refreshSettingsValues() {
   setChk('set-music-mute-lobby', audio && audio.musicMuteLobby);
 
   // Spatial audio.
-  let reverbWet = 0.6;
+  let reverbWet = 0.4;
   if (audio) {
     if (audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') {
       reverbWet = audio.reverbGain.gain.value;
@@ -42381,12 +42210,12 @@ function buildSettingsPage() {
         <div class="value-display" id="val-vol-sfx">${audio.userVol.sfx.toFixed(2)}</div>
       </div>
       <div class="setting-row">
-        <label>Ship Engine Volume</label>
+        <label>Ambient bed</label>
         <input type="range" id="set-vol-ambient" min="0" max="1.5" step="0.05" value="${audio.userVol.ambient}">
         <div class="value-display" id="val-vol-ambient">${audio.userVol.ambient.toFixed(2)}</div>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Headphones recommended: the ship engine bed is a phi-cascade binaural layer; speakers collapse the stereo beat.</label>
+        <label style="flex:1;">Headphones recommended: ambient bed is a phi-cascade binaural layer; speakers collapse the stereo beat.</label>
       </div>
     </div>
 
@@ -42458,8 +42287,8 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row">
         <label>Reverb wet</label>
-        <input type="range" id="set-reverb-wet" min="0" max="1" step="0.05" value="${(audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value.toFixed(2) : '0.60'}">
-        <div class="value-display" id="val-reverb-wet">${(audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value.toFixed(2) : '0.60'}</div>
+        <input type="range" id="set-reverb-wet" min="0" max="1" step="0.05" value="${(audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value.toFixed(2) : '0.40'}">
+        <div class="value-display" id="val-reverb-wet">${(audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value.toFixed(2) : '0.40'}</div>
       </div>
       <div class="setting-row">
         <label>Ambient duck on impacts</label>
@@ -44144,15 +43973,8 @@ function saveSettings() {
       annPitch:   announcer.pitch,
       annRate:    announcer.rate,
       annVolume:  announcer.volume,
-      // (2026-06-12) Persist the one-time default-migration flags through
-      // full-blob saves. Any value written by this build is deliberate /
-      // already-migrated, so re-running the load-time migration on it would
-      // be wrong (e.g. user intentionally returns SFX to 1.0).
-      audioSfxMigrated15: true,
-      annVolumeMigrated20: true,
-      reverbWetMigrated60: true,
       // v8VR: spatial audio prefs.
-      reverbWet: (audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value : (audio.reverbWet != null ? audio.reverbWet : 0.60),
+      reverbWet: (audio.reverbGain && audio.reverbGain.gain && typeof audio.reverbGain.gain.value === 'number') ? audio.reverbGain.gain.value : (audio.reverbWet != null ? audio.reverbWet : 0.40),
       ambientDuckEnabled: audio.ambientDuckEnabled !== false,
       wallPattern: (typeof game.wallPattern === 'number') ? game.wallPattern : 0,
       wallBlackBase: !!game.wallBlackBase,
@@ -44303,7 +44125,7 @@ const BAKED_DEFAULTS = {
   "vrStripFx": false,
   "fovDeg": 120,
   "audioMaster": 1,
-  "audioSfx": 1.5,
+  "audioSfx": 1,
   "audioAmbient": 0.85,
   "audioMusic": 0.4,
   "musicEnabled": true,
@@ -44314,8 +44136,8 @@ const BAKED_DEFAULTS = {
   "annVoice": "Microsoft Imani Online (Natural) - English (Tanzania)",
   "annPitch": 1,
   "annRate": 1.5,
-  "annVolume": 0.2,
-  "reverbWet": 0.6,
+  "annVolume": 0.3,
+  "reverbWet": 0.4000000059604645,
   "ambientDuckEnabled": true,
   // New defaults baked from Ashman's
   // exported lss_settings_20260522.json. skyboxChoice seeds the background
@@ -44402,7 +44224,7 @@ const SHIPPED_DEFAULTS = {
   "vrStripFx": true,
   "fovDeg": 120,
   "audioMaster": 1,
-  "audioSfx": 1.5,
+  "audioSfx": 1,
   "audioAmbient": 0.85,
   "audioMusic": 0.2,
   "musicEnabled": true,
@@ -44413,8 +44235,8 @@ const SHIPPED_DEFAULTS = {
   "annVoice": "Microsoft Imani Online (Natural) - English (Tanzania)",
   "annPitch": 1,
   "annRate": 1.5,
-  "annVolume": 0.2,
-  "reverbWet": 0.6,
+  "annVolume": 0.3,
+  "reverbWet": 0.4000000059604645,
   "ambientDuckEnabled": true,
   "wallPattern": 37,
   "wallBlackBase": false,
@@ -45982,19 +45804,7 @@ function loadSettings() {
     }
     // Audio volumes (applied later when initAudio creates the gain nodes)
     if (data.audioMaster !== undefined) audio.userVol.master = data.audioMaster;
-    if (data.audioSfx !== undefined) {
-      // (2026-06-12) Default SFX bumped 1.0 -> 1.5. Migrate saves still
-      // sitting on the old default once; a deliberate later choice of 1.0
-      // (after this flag is set) is respected. Same pattern as annVolume.
-      const _oldDefaultSfx = data.audioSfxMigrated15 !== true &&
-        Math.abs(data.audioSfx - 1.0) < 0.0001;
-      audio.userVol.sfx = _oldDefaultSfx ? 1.5 : data.audioSfx;
-      if (_oldDefaultSfx) {
-        data.audioSfx = 1.5;
-        data.audioSfxMigrated15 = true;
-        try { localStorage.setItem('lss_settings', JSON.stringify(data)); } catch (_) {}
-      }
-    }
+    if (data.audioSfx !== undefined) audio.userVol.sfx = data.audioSfx;
     if (data.audioAmbient !== undefined) audio.userVol.ambient = data.audioAmbient;
     // Reactive band: music slider + on/off + ceiling + lobby mute.
     // The audio.musicGain node may not exist yet on first load (initAudio
@@ -46015,17 +45825,12 @@ function loadSettings() {
       if (typeof data.annPitch  === 'number') announcer.pitch  = data.annPitch;
       if (typeof data.annRate   === 'number') announcer.rate   = data.annRate;
       if (typeof data.annVolume === 'number') {
-        // (2026-06-12) Default voice volume now 0.20. Migrate every prior
-        // default (0.9 / 0.8 legacy, 0.30 from the last migration) once;
-        // the Migrated20 flag marks later values as deliberate choices.
-        const _oldDefaultAnnVol = data.annVolumeMigrated20 !== true &&
-          (Math.abs(data.annVolume - 0.9) < 0.0001 ||
-           Math.abs(data.annVolume - 0.8) < 0.0001 ||
-           Math.abs(data.annVolume - 0.3) < 0.0001);
-        announcer.volume = _oldDefaultAnnVol ? 0.20 : data.annVolume;
+        const _oldDefaultAnnVol = data.annVolumeMigrated30 !== true &&
+          (Math.abs(data.annVolume - 0.9) < 0.0001 || Math.abs(data.annVolume - 0.8) < 0.0001);
+        announcer.volume = _oldDefaultAnnVol ? 0.30 : data.annVolume;
         if (_oldDefaultAnnVol) {
-          data.annVolume = 0.20;
-          data.annVolumeMigrated20 = true;
+          data.annVolume = 0.30;
+          data.annVolumeMigrated30 = true;
           try { localStorage.setItem('lss_settings', JSON.stringify(data)); } catch (_) {}
         }
       }
@@ -46044,20 +45849,9 @@ function loadSettings() {
     // time (initAudio runs later), so we stash on `audio.reverbWet` and
     // the post-init pass below copies it onto the live gain node.
     if (typeof data.reverbWet === 'number') {
-      // (2026-06-12) Default reverb wet bumped 0.40 -> 0.60. Migrate saves
-      // still on the old default once (old saves stored the float32-rounded
-      // 0.4000000059604645, hence the loose epsilon).
-      const _oldDefaultReverb = data.reverbWetMigrated60 !== true &&
-        Math.abs(data.reverbWet - 0.4) < 0.001;
-      const _wetLoaded = _oldDefaultReverb ? 0.60 : data.reverbWet;
-      audio.reverbWet = _wetLoaded;
+      audio.reverbWet = data.reverbWet;
       if (audio.reverbGain && audio.reverbGain.gain) {
-        try { audio.reverbGain.gain.value = _wetLoaded; } catch (_) {}
-      }
-      if (_oldDefaultReverb) {
-        data.reverbWet = 0.60;
-        data.reverbWetMigrated60 = true;
-        try { localStorage.setItem('lss_settings', JSON.stringify(data)); } catch (_) {}
+        try { audio.reverbGain.gain.value = data.reverbWet; } catch (_) {}
       }
     }
     if (data.ambientDuckEnabled !== undefined) audio.ambientDuckEnabled = !!data.ambientDuckEnabled;
@@ -49164,7 +48958,7 @@ const announcer = {
   voiceName: null,         // persisted voice name (resolves to .voice on init)
   rate: 1.5,               // base / fallback rate; dynamic rates below override
   pitch: 1.0,              // natural pitch; lower the slider for more robotic feel
-  volume: 0.20,
+  volume: 0.30,
   globalGap: 600,          // ms between any two lines (anti-chain)
   cooldowns: {},
   _lastSpokenAt: 0,
@@ -50423,12 +50217,8 @@ function gameLoop(timestamp) {
   for (const bot of game.entities) {
     bot.update(dt);
     // Animate bot ship: engine glow + gun recoil
-    // (fix 2026-06-12) chassis.maxSpeed never existed (the field is
-    // flightSpeed), so speed/undefined fed NaN into every plume scale and
-    // engine plumes have been invisible since they were added. Same fix at
-    // all four animateShipMesh call sites.
     const botSpeed = bot.velocity ? bot.velocity.length() : 0;
-    const botMaxSpeed = bot.chassis ? (bot.chassis.flightSpeed || bot.chassis.maxSpeed || 400) : 400;
+    const botMaxSpeed = bot.chassis ? bot.chassis.maxSpeed : 400;
     animateShipMesh(bot.mesh, botSpeed, botMaxSpeed, bot.isFiring, dt, !!bot.doomed);
     // Damage-state particles for bots and network players. Healthy
     // ships emit nothing (early-return inside emitDamageState).
@@ -50438,7 +50228,7 @@ function gameLoop(timestamp) {
     for (const np of net.networkPlayers) {
       if (!np || !np.mesh || !np.alive) continue;
       const npSpeed = np.velocity ? np.velocity.length() : 0;
-      const npMaxSpeed = np.chassis ? (np.chassis.flightSpeed || np.chassis.maxSpeed || 400) : 400;
+      const npMaxSpeed = np.chassis ? np.chassis.maxSpeed : 400;
       animateShipMesh(np.mesh, npSpeed, npMaxSpeed, !!np.isFiring, dt, !!np.doomed);
     }
   }
@@ -50450,7 +50240,7 @@ function gameLoop(timestamp) {
   for (const bot of game.entities) {
     if (!bot.alive) continue;
     const botSpeed = bot.velocity ? bot.velocity.length() : 0;
-    const botMaxSpeed = bot.chassis ? (bot.chassis.flightSpeed || bot.chassis.maxSpeed || 400) : 400;
+    const botMaxSpeed = bot.chassis ? bot.chassis.maxSpeed : 400;
     // Heat-trail blur: throttled emitter, scales rate with speed so cruising
     // bots get a steady wake and parked bots get nothing.
     if (_vrThrottleTier < 1 && bot.alive && bot.velocity && typeof spawnHeatTrail === 'function') {
@@ -50470,7 +50260,7 @@ function gameLoop(timestamp) {
   // Animate player ship (visible in 3rd person / death cam)
   if (player.mesh) {
     const pSpeed = player.velocity ? player.velocity.length() : 0;
-    const pMaxSpeed = player.chassis ? (player.chassis.flightSpeed || player.chassis.maxSpeed || 400) : 400;
+    const pMaxSpeed = player.chassis ? player.chassis.maxSpeed : 400;
     animateShipMesh(player.mesh, pSpeed, pMaxSpeed, player.isFiring, dt, !!player.doomed);
     // Damage-state particles on the local player too (visible from
     // third-person / death cam, and other peers see them on our broadcast
@@ -50599,7 +50389,7 @@ const audio = {
   // multiplier below is 0.30, giving ~0.030 effective gain so the band sits
   // well under SFX out of the box. Ambient defaults to 0.85 (Ashman's preference);
   // the binaural bed reads cleanly under the SFX punch at that level.
-  userVol: { master: 1.0, sfx: 1.5, ambient: 0.85, music: 0.10 },
+  userVol: { master: 1.0, sfx: 1.0, ambient: 0.85, music: 0.10 },
   // Music bus + glue. Parallel to ambientGain ; both bypass the
   // SFX-bus voice budget so combat fire never starves the drums.
   musicGain: null,
@@ -50713,8 +50503,8 @@ function initAudio() {
     audio.dryGain.connect(audio.sfxBus);
 
     audio.reverbGain = audio.ctx.createGain();
-    // v8VR: honor any reverb wet level loaded from settings; default 0.60.
-    const _wetDefault = (typeof audio.reverbWet === 'number') ? audio.reverbWet : 0.60;
+    // v8VR: honor any reverb wet level loaded from settings; default 0.40.
+    const _wetDefault = (typeof audio.reverbWet === 'number') ? audio.reverbWet : 0.40;
     audio.reverbGain.gain.value = (typeof isStandaloneQuest === 'function' && isStandaloneQuest())
       ? Math.min(_wetDefault, 0.12)
       : _wetDefault;
@@ -60353,250 +60143,4 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     } else {
       try {
         const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q);
-        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
-        if (!resp.ok) throw new Error('Geocoder HTTP ' + resp.status);
-        const arr = await resp.json();
-        if (!Array.isArray(arr) || arr.length === 0) {
-          setStatus('No match for: ' + q, 'err'); return;
-        }
-        lat = parseFloat(arr[0].lat); lng = parseFloat(arr[0].lon);
-        displayName = arr[0].display_name || q;
-      } catch (e) {
-        setStatus('Geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
-        return;
-      }
-    }
-    // Store the typed location ; LAUNCH will use it.
-    game.pendingGmapsOverlay = { lat, lng, name: displayName };
-    // Custom Location and Map Preset are mutually
-    // exclusive ; setting a location clears any active preset so
-    // the lobby UI doesn't lie about what's about to launch.
-    game.mapPreset = '';
-    if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
-    const shortName = displayName.length > 60 ? displayName.slice(0, 57) + '...' : displayName;
-
-    // Race-mode branch : if the FINISH input is also filled,
-    // geocode it and procgen a race route.
-    const finInp = document.getElementById('gmaps-loc-finish-input');
-    if (LSS.MODE === 'race' && finInp && (finInp.value || '').trim()) {
-      const fq = finInp.value.trim();
-      let flat, flng, fname;
-      const fcm = fq.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-      if (fcm) {
-        flat = parseFloat(fcm[1]); flng = parseFloat(fcm[2]);
-        fname = 'Custom (' + flat.toFixed(4) + ', ' + flng.toFixed(4) + ')';
-      } else {
-        try {
-          const furl = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(fq);
-          const fresp = await fetch(furl, { headers: { 'Accept': 'application/json' } });
-          if (!fresp.ok) throw new Error('Geocoder HTTP ' + fresp.status);
-          const farr = await fresp.json();
-          if (!Array.isArray(farr) || farr.length === 0) {
-            setStatus('No match for finish: ' + fq, 'err'); return;
-          }
-          flat = parseFloat(farr[0].lat); flng = parseFloat(farr[0].lon);
-          fname = farr[0].display_name || fq;
-        } catch (e) {
-          setStatus('Finish geocoder failed: ' + (e && e.message ? e.message : 'unknown'), 'err');
-          return;
-        }
-      }
-      const raceFinish = { lat: flat, lng: flng, name: fname };
-      const procgen = _buildRaceCustomMap({ lat, lng, name: displayName }, raceFinish);
-      MAP_DATA.race_custom = procgen;
-      game.pendingRaceRoute = {
-        start: { lat, lng, name: displayName },
-        finish: raceFinish,
-      };
-      // No round timer for custom-location races.
-      game.raceNoTimer = true;
-      setStatus('Race route armed : ' + shortName + ' -> ' + (fname.length > 40 ? fname.slice(0, 37) + '...' : fname), 'ok');
-      // Force-select race_custom (bypassing the echo guard).
-      try {
-        if (typeof selectMap === 'function') {
-          game.selectedMap = '__force_race_custom__';
-          selectMap('race_custom');
-        }
-      } catch(_) {}
-      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
-      return;
-    }
-
-    // Broadcast to peers so they apply the same overlay. We re-send
-    // map_change with the current selectedMap so the existing receiver path
-    // handles both the map AND the overlay in one shot.
-    if (net && net.active && net.sendEvent) {
-      net.sendEvent({
-        type: 'map_change',
-        mapKey: game.selectedMap,
-        gmapsOverlay: { lat, lng, name: displayName },
-        // Tag the active mode along with the overlay broadcast.
-        mode: LSS.MODE || 'classic'
-      });
-    }
-    const sel = game.selectedMap;
-    const isGmaps = sel && MAP_DATA[sel] && MAP_DATA[sel].type === 'gmaps';
-    if (isGmaps) {
-      // gmaps_user is selected ; rewrite its lat/lng so the carousel
-      // shows the right name now too.
-      const e = MAP_DATA[sel];
-      e.lat = lat; e.lng = lng;
-      e.name = shortName;
-      e.description = 'Pure city flight. Lat ' + lat.toFixed(4) + ', Lng ' + lng.toFixed(4) + '.';
-      // Force re-render of the map name in the lobby card.
-      const wasKey = sel; game.selectedMap = null; selectMap(wasKey);
-      setStatus('Pure-city map selected: ' + shortName + '. LAUNCH to drop in.', 'ok');
-    } else {
-      const tunnelName = (MAP_DATA[sel] && MAP_DATA[sel].name) || sel;
-      setStatus('Will overlay ' + shortName + ' under "' + tunnelName + '" on LAUNCH.', 'ok');
-    }
-  }
-    goBtn.addEventListener('click', doDrop);
-  inp.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); doDrop(); } });
-  detBtn.addEventListener('click', () => {
-    stopPulse();
-    _lssGmapsDetachCity();
-    game.pendingGmapsOverlay = null;
-    // Re-enable the preset cycle now that gmaps is gone.
-    if (typeof _updateSkyUI === 'function') { try { _updateSkyUI(); } catch (_) {} }
-    // Also clear race-custom route on DETACH.
-    game.pendingRaceRoute = null;
-    game.raceNoTimer = false;
-    if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
-    // Restore the default arena clamp.
-    if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
-    if (typeof LSS._origCameraFar === 'number') {
-      camera.far = LSS._origCameraFar;
-      camera.updateProjectionMatrix();
-    }
-    if (scene.fog && typeof LSS._origFogDensity === 'number') {
-      scene.fog.density = LSS._origFogDensity;
-    }
-    if (game.selectedMap === 'race_custom') {
-      if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch(_) {} }
-    }
-    // Also blank the FINISH input so the next race lobby starts fresh.
-    try {
-      const fin = document.getElementById('gmaps-loc-finish-input');
-      if (fin) fin.value = '';
-    } catch (_) {}
-    setStatus('Overlay cleared. Pick a tunnel map and LAUNCH for plain combat.', 'ok');
-    // Re-enable the input that may have been locked by a peer's set.
-    try { const inp = document.getElementById('gmaps-loc-input'); if (inp) inp.disabled = false; } catch(_) {}
-    // Broadcast detach so peers also clear and unlock.
-    if (net && net.active && net.sendEvent) {
-      net.sendEvent({ type: 'map_change', mapKey: game.selectedMap, gmapsOverlay: null, mode: LSS.MODE || 'classic' });
-    }
-  });
-
-  // Race-mode toggle: flip LSS.MODE and rebroadcast the current
-  // map_change so peers stay in sync. When flipping ON, if the current
-  // map isn't a race_* map, auto-select Pole Position so race mode is
-  // a one-click experience.
-  // Race mode can only be flipped from a FRESH ship-select (cold boot or
-  // back from the lobby). The between-round swap screen reuses this panel,
-  // and toggling race rules mid-match half-converts the world (speeds
-  // normalize, maps re-filter, walls switch) under a live round.
-  function _raceModeLocked() {
-    return typeof game !== 'undefined' && game &&
-           (game.state === 'playing' || game.state === 'roundEnd' ||
-            (game.state === 'warmup' && (game.currentRound | 0) > 1));
-  }
-  function _refreshRaceModeLock() {
-    const b = document.getElementById('race-mode-toggle');
-    if (!b) return;
-    const locked = _raceModeLocked();
-    b.style.opacity = locked ? '0.35' : '';
-    b.style.pointerEvents = locked ? 'none' : '';
-    b.title = locked ? 'Race mode is locked during a match' : 'Toggle Race Mode';
-  }
-  if (typeof window !== 'undefined') window._refreshRaceModeLock = _refreshRaceModeLock;
-  const raceBtn = document.getElementById('race-mode-toggle');
-  if (raceBtn) {
-    raceBtn.addEventListener('click', () => {
-      if (_raceModeLocked()) return;   // belt + suspenders over pointer-events
-      const on = raceBtn.dataset.on !== '1';
-      raceBtn.dataset.on = on ? '1' : '0';
-      raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
-      raceBtn.classList.toggle('active', on);
-      LSS.MODE = on ? 'race' : 'classic';
-      // Rebuild the carousel so the dots / arrows reflect the new
-      // mode's filtered map list. buildMapSelector also re-snaps the
-      // selection if the previous map is no longer eligible.
-      if (typeof buildMapSelector === 'function') {
-        try { buildMapSelector(); } catch (_) {}
-      }
-      // Toggle the FINISH input + relabel the panel for race mode.
-      try {
-        const lbl = document.getElementById('gmaps-overlay-label');
-        const fin = document.getElementById('gmaps-loc-finish-input');
-        const startInp = document.getElementById('gmaps-loc-input');
-        if (on) {
-          if (lbl) lbl.textContent = 'RACE: START -> FINISH';
-          if (fin) fin.style.display = '';
-          if (startInp) startInp.placeholder = 'Start location (e.g. Stanley Park)';
-        } else {
-          if (lbl) lbl.textContent = 'DROP ON LOCATION';
-          if (fin) fin.style.display = 'none';
-          if (startInp) startInp.placeholder = 'Empire State Building';
-        }
-      } catch (_) {}
-      // Convenience: when flipping ON, also set the race-default walls
-      // to Datamosh Cube (preset 22). User-tested choice ; reads well
-      // through the gmaps city overlay and doesn't glitch on cycle.
-      // User can still cycle off with P.
-      if (on && typeof setWallPattern === 'function') {
-        try { setWallPattern(22); } catch (_) {}
-      }
-      // Convenience: when flipping ON, force-select Pole Position
-      // (currently the only race map). selectMap broadcasts map_change
-      // with the mode tagged along.
-      if (on && typeof selectMap === 'function' && MAP_DATA && MAP_DATA.race_pole_position) {
-        if (game.selectedMap !== 'race_pole_position') {
-          selectMap('race_pole_position');
-          return;
-        }
-      }
-      if (net && net.active && net.sendEvent && game.selectedMap) {
-        const ov = game.pendingGmapsOverlay;
-        net.sendEvent({
-          type: 'map_change',
-          mapKey: game.selectedMap,
-          gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
-          mode: LSS.MODE
-        });
-      }
-    });
-  }
-})();
-
-window.lssGmaps = {
-  state: _lssGmaps,
-  cities: _lssGmapsCities,
-  setKey: _lssGmapsSetKey,
-  getKey: _lssGmapsGetKey,
-  clearKey: _lssGmapsClearKey,
-  prompt: _lssGmapsPromptKey,
-  setScale: _lssGmapsSetScaleLive,
-  attachCity: _lssGmapsAttachCity,
-  attachLatLng: _lssGmapsAttachAtLatLng,
-  location: _lssGmapsLocation,
-  refinePivot: _lssGmapsRefinePivot,
-  detachCity: _lssGmapsDetachCity,
-  testKey: _lssGmapsTestKey
-};
-
-
-} // end _bootLSS
-
-// v8VR: kick off the game once the THREE module bootstrap has run.
-// If the event already fired before this listener was added (race), boot now.
-if (window.LSS_ENGINE_READY) {
-  _bootLSS();
-} else {
-  window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
-}
-
-</script>
-</body>
-</html>
+     
