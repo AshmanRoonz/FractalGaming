@@ -3082,7 +3082,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '30.63';
+const LSS_BUILD = '30.62';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -5357,19 +5357,6 @@ async function joinRoom() {
         });
       }
 
-      // (v30.63) Identity hello : introduce ourselves to the newcomer
-      // immediately, so their fleet strip shows our card BEFORE anyone
-      // commits (loadout broadcasts used to be the only identity carrier).
-      if (net.sendEvent) {
-        try {
-          const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
-          net.sendEvent({ type: 'hello',
-            discord_id:     _hdu ? _hdu.id : undefined,
-            discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
-            discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
-        } catch (_) {}
-      }
-
       // Re-announce our ready state so the joiner sees it immediately.
       if (net.myReady && net.sendEvent) {
         net.sendEvent({ type: 'ready', ready: true });
@@ -6369,24 +6356,6 @@ function assignTeamFromPeerOrder() {
   player.team = (myIndex % 2 === 0) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
 }
 
-// (v30.63) Same assignment rules, but for ANY peer id. The rule is
-// deterministic on every client, so the fleet strip can place a peer's
-// card on the correct side BEFORE their loadout broadcast announces a team.
-function _teamForPeerId(id) {
-  if (!id || typeof net === 'undefined' || !net.myPeerId) return undefined;
-  if (net.openSoloHostId) {
-    if (id === net.openSoloHostId) return LSS.TEAM_FLEET_A;
-    const others = [net.myPeerId, ...nonJudgePeerIds()].filter(x => x !== net.openSoloHostId).sort();
-    const idx = others.indexOf(id);
-    if (idx < 0) return undefined;
-    return (idx < 3) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
-  }
-  const ids = [net.myPeerId, ...nonJudgePeerIds()].sort();
-  const i = ids.indexOf(id);
-  if (i < 0) return undefined;
-  return (i % 2 === 0) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
-}
-
 // mulberry32: small, fast, well-distributed seedable RNG. Two peers seeded
 // with the same 32-bit integer produce identical sequences, so calls to
 // Math.random() during the world build land identical corridors / obstacles
@@ -7382,20 +7351,6 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
-  // (v30.63) Identity hello from a roommate ; lets the fleet strip show
-  // their card before they commit a loadout.
-  if (evt.type === 'hello') {
-    const peer = net.peers.get(peerId);
-    if (peer) {
-      if (evt.discord_id) {
-        peer.discord_id     = evt.discord_id;
-        peer.discord_name   = evt.discord_name;
-        peer.discord_avatar = evt.discord_avatar;
-      }
-      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
-    }
-    return;
-  }
   // (v30.62) A roommate hit PLAY WHILE WAITING : the whole room starts
   // the bot match together. Deterministic host if several click at once :
   // the lowest peerId wins (same tie-break style as the launch proposer).
@@ -7407,9 +7362,6 @@ function handleNetEvent(evt, fromPeerId) {
     net.openSoloHostId = evtHost;
     net.solo = false;
     if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
-    // (v30.63) Adopt our open-solo team NOW so the fleet strip sorts
-    // everyone onto the correct side before any loadout commits.
-    try { if (typeof assignTeamFromPeerOrder === 'function') assignTeamFromPeerOrder(); } catch (_) {}
     try {
       const ls = document.getElementById('lobby-status');
       if (ls) { ls.textContent = 'BOT MATCH STARTING \u2014 PICK A SHIP'; ls.style.color = '#7dffa8'; }
@@ -39690,19 +39642,15 @@ function updateTeammatesStrip() {
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
       if (_peerIsJudge(peer)) continue; // judges aren't shown on the strip
-      // (v30.63) Pre-commit peers have no broadcast team yet ; compute
-      // where they WILL land so their card shows from the moment they
-      // enter the hangar, marked PICKING until they confirm.
-      const pTeam = (peer.team !== undefined && peer.team !== null)
-        ? peer.team : _teamForPeerId(peerId);
-      if (pTeam === undefined || pTeam === null) continue;
-      if (pTeam !== myTeam) continue;
+      if (peer.team === undefined) continue;
+      if (peer.team !== myTeam) continue;
       const peerAvatar = peer.discord_id
         ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
         : null;
       yourList.appendChild(makeChip({
         name: peer.discord_name || 'PEER',
-        ship: peer.loadoutKey || 'PICKING',
+        ship: peer.loadoutKey || '---',
+        isEmpty: !peer.loadoutKey,
         showPip: true,
         isReady: !!peer.loadoutKey,
         discordAvatarUrl: peerAvatar,
@@ -39733,17 +39681,16 @@ function updateTeammatesStrip() {
   if (inMultiplayer && net.peers) {
     for (const [peerId, peer] of net.peers.entries()) {
       if (_peerIsJudge(peer)) continue; // judges aren't shown on the strip
-      const pTeam = (peer.team !== undefined && peer.team !== null)
-        ? peer.team : _teamForPeerId(peerId);
-      if (pTeam === undefined || pTeam === null) continue;
-      if (pTeam !== otherTeam) continue;
+      if (peer.team === undefined) continue;
+      if (peer.team !== otherTeam) continue;
       const peerAvatar = peer.discord_id
         ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
         : null;
       enemyList.appendChild(makeChip({
         name: peer.discord_name || 'PEER',
-        ship: peer.loadoutKey || 'PICKING',
+        ship: peer.loadoutKey || '---',
         isEnemy: true,
+        isEmpty: !peer.loadoutKey,
         showPip: true,
         isReady: !!peer.loadoutKey,
         discordAvatarUrl: peerAvatar,
