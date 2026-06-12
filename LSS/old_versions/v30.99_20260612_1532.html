@@ -3105,7 +3105,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.02';
+const LSS_BUILD = '30.99';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -15218,32 +15218,17 @@ function _stRouteAt(x,z,T){
 // Kept for callers that only want the openness weight.
 function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
 // Carved heightfield: blend natural mountain toward a flat arena floor / dome.
-// (v31.0) WALL PINCH : outside the carved route (where the cosmic maps had
-// solid walls), the floor peaks rise and the ceiling peaks drop toward each
-// other, so the old wall volumes read as closed-in massifs instead of a
-// wide-open gap. Partial by design — WALL_PINCH 0.45 closes ~45% of the
-// gap and leaves a crack of sky, per Ashman ("not a complete pinch").
-// The pinch weight is (1 - route openness), so it fades out smoothly right
-// where the carve takes over and the lanes/arenas stay untouched.
 function _stGroundYCarved(x,z,T){
   const g=_stGroundY(x,z,T); const r=_stRouteAt(x,z,T);
-  const ro=Math.max(0,Math.min(1,r.o));
-  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
-  const mid=(g+_stCeilY(x,z,T))*0.5;
-  const g2=g+(mid-g)*PINCH*(1-ro);
-  if(ro<=0) return g2;
+  if(r.o<=0) return g;
   const floor=r.ty-(T.ARENA_DROP||320);   // flat arena/lane floor below the route
-  return g2+(floor-g2)*ro;
+  return g+(floor-g)*r.o;
 }
 function _stCeilYCarved(x,z,T){
   const c=_stCeilY(x,z,T); const r=_stRouteAt(x,z,T);
-  const ro=Math.max(0,Math.min(1,r.o));
-  const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
-  const mid=(_stGroundY(x,z,T)+c)*0.5;
-  const c2=c+(mid-c)*PINCH*(1-ro);
-  if(ro<=0) return c2;
+  if(r.o<=0) return c;
   const roof=r.ty+(T.ARENA_RISE||420);     // domed ceiling above the route
-  return c2+(roof-c2)*ro;
+  return c+(roof-c)*r.o;
 }
 // Carved gap SDF: open between the carved floor and carved ceiling.
 function _stGapSDFCarved(px,py,pz,T){
@@ -15624,18 +15609,7 @@ function worldSDF(px,py,pz) {
   // walls. Collision/containment/raycast all run against the carved gap so ships
   // fly the open canyon + the map's clear lane, blocked only by rock.
   const _stT = game.sandwichTerrain;
-  if (_stT && _stT.ON) {
-    // (v31.02) The carved-gap SDF measures VERTICAL clearance only, which
-    // is wrong sideways : standing beside a tall pillar it reports your own
-    // column's clearance, so rays/dashes stepped clean THROUGH pillars, and
-    // once inside one, the huge vertical "depth" ejected you to the
-    // pillar's top or bottom edge in one shove. Clamp the trusted range :
-    // open-air steps advance at most 220u (rays can't skip a pillar), and
-    // contact pushes resolve in <=90u nudges, so hits slide laterally like
-    // a normal wall instead of teleporting vertically.
-    const _f = _stGapSDFCarved(px,py,pz,_stT);
-    return _f > 0 ? Math.min(_f, 90) : Math.max(_f, -220);
-  }
+  if (_stT && _stT.ON) return _stGapSDFCarved(px,py,pz,_stT);
   const sk = game.sdfSmoothK || 45;
   const blendReach = sk * 3;  // local in case sdfSmoothK overridden per round
   // 1) Room-only SDF (smooth blend between rooms)
@@ -48411,15 +48385,7 @@ function getValidSpawnPoint(team, spread) {
     const pz = fin.worst.z + (dz / d) * want;
     // Only take the pushed point if it's still in open space.
     if (typeof worldSDF !== 'function' || worldSDF(px, py, pz) < -60) {
-      // (v31.01) Sandwich maps : the air between the mountain sheets reads
-      // "open" to the SDF even far OUTSIDE the playable routes, which is
-      // how octahedron spawned a player in the outskirts. A pushed point
-      // must also sit inside a carved route.
-      const _stT2 = (typeof game !== 'undefined') ? game.sandwichTerrain : null;
-      if (!(_stT2 && _stT2.ON) ||
-          (typeof _stRouteAt === 'function' && _stRouteAt(px, pz, _stT2).o > 0.5)) {
-        return new THREE.Vector3(px, py, pz);
-      }
+      return new THREE.Vector3(px, py, pz);
     }
   }
   return new THREE.Vector3(bestX, bestY, bestZ);
