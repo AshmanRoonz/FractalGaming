@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.17';
+const LSS_BUILD = '31.20';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17817,7 +17817,18 @@ class Bot {
       if (this.velocity) this.velocity.set(0, 0, 0);
       // Keep the mesh parked on the (correct) spawn even while frozen, so
       // enemies never show at a stale spot during the pre-round countdown.
-      if (this.mesh && this.position) this.mesh.position.copy(this.position);
+      if (this.mesh && this.position) {
+        this.mesh.position.copy(this.position);
+        // (v31.20) Face the ENEMY fleet during the 3-2-1 so both teams
+        // square off (was all parked facing one default way ; you had to
+        // turn around at FIGHT). Level look (own height) so no pitch.
+        // Falls back to the arena center if no enemy ships are up yet.
+        try {
+          var _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(this.team) : null;
+          if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
+          if (_tgt) this.mesh.lookAt(_tgt.x, this.position.y, _tgt.z);
+        } catch (_) {}
+      }
       return;
     }
 
@@ -25731,6 +25742,51 @@ function _monNearestEdgeShip(fromPos) {
   return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal } : null;
 }
 
+// (v31.20) Average world position of every ALIVE ship NOT on myTeam
+// (bots + local player + network peers). Aims the spawn / warmup lineup
+// at the enemy fleet so both sides square off. null if no enemy ships yet.
+const _enemyCentroidScratch = new THREE.Vector3();
+function _enemyFleetCentroid(myTeam) {
+  let n = 0, sx = 0, sy = 0, sz = 0;
+  if (game && game.entities) {
+    for (const b of game.entities) {
+      if (!b || !b.alive || !b.position || b.team === myTeam) continue;
+      if (b.team !== 'A' && b.team !== 'B' && b.team !== LSS.TEAM_FLEET_A && b.team !== LSS.TEAM_FLEET_B) continue;
+      sx += b.position.x; sy += b.position.y; sz += b.position.z; n++;
+    }
+  }
+  if (typeof player !== 'undefined' && player && player.position &&
+      player.team !== myTeam && player.shipState !== 'dead') {
+    sx += player.position.x; sy += player.position.y; sz += player.position.z; n++;
+  }
+  if (typeof net !== 'undefined' && net && net.active && Array.isArray(net.networkPlayers)) {
+    for (const np of net.networkPlayers) {
+      if (!np || !np.alive || !np.position || np.team === myTeam) continue;
+      sx += np.position.x; sy += np.position.y; sz += np.position.z; n++;
+    }
+  }
+  if (n === 0) return null;
+  return _enemyCentroidScratch.set(sx / n, sy / n, sz / n);
+}
+
+// (v31.20) Point the player's view at the enemy fleet on spawn so they
+// don't have to turn around when FIGHT starts. Yaw only, level pitch.
+// Camera = setFromEuler(player.euler, YXZ) ; forward at yaw y is
+// (-sin y, 0, -cos y), so y = atan2(px-tx, pz-tz) aims at the target.
+function _facePlayerAtEnemy() {
+  try {
+    if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
+    let _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(player.team) : null;
+    if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
+    if (!_tgt) return;
+    const dx = player.position.x - _tgt.x, dz = player.position.z - _tgt.z;
+    if (dx * dx + dz * dz > 1) {
+      player.euler.y = Math.atan2(dx, dz);
+      player.euler.x = 0;
+    }
+  } catch (_) {}
+}
+
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -31405,6 +31461,9 @@ function commitLoadout(key) {
       // fleet so the match is just the connected peers. Solo still spawns
       // the full bot fleet as before.
       if (!net.active || net.openSolo) spawnBots();
+      // (v31.20) Bots exist now ; aim the player at the enemy fleet so the
+      // spawn-in faces the fight (was facing a default way, had to turn).
+      if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
     };
     if (net.active && typeof net.worldSeed === 'number') {
       const roundSeed = getRoundSeed(1);
@@ -32087,6 +32146,11 @@ function respawnPlayer() {
   // Spawn at a valid corridor position in the player's team territory
   const sp = getValidSpawnPoint(player.team === LSS.TEAM_FLEET_B ? 'B' : 'A');
   player.position.copy(sp);
+  // (v31.20) Face the arena center on spawn so the player looks at the enemy
+  // fleet instead of having to turn around when FIGHT starts. Yaw only ;
+  // level pitch. (Camera = setFromEuler(player.euler), YXZ ; forward at
+  // yaw y is (-sin y, 0, -cos y), so y = atan2(px-cx, pz-cz) aims at center.)
+  if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
 }
 
 // ---- PLAYER MOVEMENT ----
@@ -32486,8 +32550,11 @@ function _lssStartSpectatorCinematic() {
   _cinematic.ships = [];
   // Quaternion : rotate the model so its "nose forward" (mesh -Z, after
   // baked faceRotY) aligns with our world "forward" direction.
+  // (v31.18) faceRotY flipped the model 180deg (v31.17 backwards-flight fix),
+  // which reversed this lineup pose too ; negate the target so the cinematic
+  // + spawn lineup faces the right way again.
   const _qFaceForward = new THREE.Quaternion().setFromUnitVectors(
-    new THREE.Vector3(0, 0, -1), new THREE.Vector3(fwdX, 0, fwdZ).normalize()
+    new THREE.Vector3(0, 0, -1), new THREE.Vector3(-fwdX, 0, -fwdZ).normalize()
   );
 
   function _pushShip(rec, slotX, slotY, slotZ, quat) {
@@ -37563,6 +37630,11 @@ function updateRoundSystem(dt) {
     // in-game view.
     if (game.warmupTimer <= 0 && !selectActive) {
       game.state = 'playing';
+      // (v31.20) Final facing at FIGHT : the player's real spawn position is
+      // settled by now (they warp in as the ticker ends), so aim them at the
+      // enemy fleet here too ; the buildWorld-time call can go stale if the
+      // position shifted between commit and FIGHT.
+      try { if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy(); } catch (_) {}
       // (v30.99) Re-pin the touch sticks at FIGHT ; Chrome's viewport can
       // mis-report through the fullscreen settle right at round start.
       try {
