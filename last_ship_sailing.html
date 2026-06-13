@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.10';
+const LSS_BUILD = '31.15';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -7443,7 +7443,7 @@ function handleNetEvent(evt, fromPeerId) {
           const _len = Math.max(1, _bfD.length());
           _bfD.multiplyScalar(1 / _len);
           const _isPyro = !!(fb && fb.loadoutKey === 'PYRO');
-          const _fireCols = _isPyro ? [0xff4400, 0xff6600, 0xff8833] : [_col, _col, _col];
+          const _useEmber = _isPyro;
           for (let fi = 0; fi < 6; fi++) {
             const _spd = 420 + Math.random() * 280;
             game.particles.push({
@@ -7453,7 +7453,7 @@ function handleNetEvent(evt, fromPeerId) {
                           z: _bfD.z * _spd + (Math.random() - 0.5) * 120 },
               life: 0.30 + Math.random() * 0.25,
               maxLife: 0.55,
-              color: _fireCols[fi % 3],
+              color: _useEmber ? _emberColor() : _col,
               size: 5 + Math.random() * 4,
             });
           }
@@ -20111,7 +20111,7 @@ function spawnPyroFlame(pos) {
       velocity: dir.multiplyScalar(speed),
       life: 0.30 + Math.random() * 0.20,
       maxLife: 0.5,
-      color: fireColors[Math.floor(Math.random() * fireColors.length)],
+      color: _emberColor(),
       size: 4 + Math.random() * 4,
     });
   }
@@ -28377,15 +28377,49 @@ const _sharedParticleGeo = new THREE.SphereGeometry(1, 4, 3); // shared; scale p
 // Soft radial-falloff texture for ember sprites: generated once, shared by every ember.
 // Camera-facing quad via THREE.Sprite + radial gradient gives embers soft edges instead of
 // polygonal sphere silhouettes, and the additive blending reads as light rather than geometry.
+// (v31.11) ykob fire_ball ember-color recipe : instead of picking from a
+// fixed 3-4 colour list (which made Pyro fire read as flat orange bands),
+// each particle gets its own hue across the red -> orange-yellow ramp
+// (HSL hue 0..45 deg, 85-100% sat, ~55% light), the trick that gives the
+// reference fireball its rich living-ember look. Cached small palette so
+// we don't build a THREE.Color per particle (those were the per-frame
+// allocations we just spent a session killing).
+const _EMBER_RAMP = (function () {
+  const out = [];
+  for (let i = 0; i < 24; i++) {
+    const t = i / 23;
+    // (v31.12) Full visible spread : deep crimson (hue -8 => wraps to 352)
+    // through orange to bright gold (hue 52). Additive blending sums the
+    // dense core toward white anyway, so we push the ENDS apart hard to
+    // keep visible ember variety after the wash.
+    let hue = -8 + t * 60;                         // -8 (crimson) -> 52 (gold)
+    if (hue < 0) hue += 360;
+    const sat = 0.92 + 0.08 * (1 - t);
+    const lig = 0.48 + 0.16 * t;                   // gold end markedly brighter
+    out.push(new THREE.Color().setHSL(hue / 360, sat, lig).getHex());
+  }
+  return out;
+})();
+function _emberColor() {
+  // (v31.12) Light hot-bias only (was r*r ; that buried the yellows). The
+  // 1.4 exponent keeps the core warm while letting plenty of gold show.
+  const r = Math.random();
+  return _EMBER_RAMP[(Math.pow(r, 1.4) * 24) | 0];
+}
+
 const _emberFalloffTexture = (function() {
   const size = 64;
   const canvas = document.createElement('canvas');
   canvas.width = size; canvas.height = size;
   const ctx = canvas.getContext('2d');
   const g = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+  // (v31.14) Hot concentrated core (full white out to 12%) so additive
+  // stacking blooms a bright centre, then a long gentle tail for a glowing
+  // halo. Reads as a live ember instead of a flat blob at zero extra cost.
   g.addColorStop(0.00, 'rgba(255,255,255,1.00)');
-  g.addColorStop(0.25, 'rgba(255,255,255,0.70)');
-  g.addColorStop(0.55, 'rgba(255,255,255,0.20)');
+  g.addColorStop(0.12, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.30, 'rgba(255,255,255,0.45)');
+  g.addColorStop(0.62, 'rgba(255,255,255,0.14)');
   g.addColorStop(1.00, 'rgba(255,255,255,0.00)');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
@@ -28433,7 +28467,13 @@ const _ptsMat = new THREE.ShaderMaterial({
     '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
     // Same screen-size math as Sprite scaling: worldSize * cot(fov/2) *
     // halfDrawingBufferHeight / depth (uScale bakes the first two).
-    '  gl_PointSize = aSize * uScale / max(1.0, -mv.z);',
+    // (v31.15) Clamp the on-screen size : without this a particle a few
+    // units from the camera (every Pyro thermite ember spawns near the
+    // cockpit) ballooned to a 1500-4800px sprite — ONE additive particle
+    // overdrawing the whole screen, which is what tanked Pyro fights to
+    // ~37fps. 190px is bigger than any ember ever needs and kills the
+    // close-up fill spike with zero change at normal combat range.
+    '  gl_PointSize = min(190.0, aSize * uScale / max(1.0, -mv.z));',
     '  gl_Position = projectionMatrix * mv;',
     '}',
   ].join('\n'),
@@ -33204,7 +33244,9 @@ function fireWeapon() {
 
   // PYRO specific: extra fire particles for projectile weapons
   if (player.loadoutKey === 'PYRO' && w.mode === 'projectile') {
-    const fireColors = [0xff4400, 0xff6600, 0xff8833];
+    // (v31.14) Original footprint, no added light : same draw cost as the
+    // pre-experiment build. The look upgrade is the ember COLOUR ramp plus
+    // the richer shared sprite (see _emberFalloffTexture) ; both free.
     for (let i = 0; i < 4; i++) {
       const pVel = _fwDir.clone().multiplyScalar(250 + Math.random() * 150);
       pVel.x += (Math.random() - 0.5) * 100;
@@ -33215,7 +33257,7 @@ function fireWeapon() {
         velocity: pVel,
         life: 0.15 + Math.random() * 0.1,
         maxLife: 0.25,
-        color: fireColors[Math.floor(Math.random() * fireColors.length)],
+        color: _emberColor(),
         size: 4 + Math.random() * 3
       });
     }
@@ -36550,7 +36592,7 @@ function updateAbilities(dt) {
             velocity: pVel,
             life: 0.4 + Math.random() * 0.3,
             maxLife: 0.7,
-            color: fireColors[Math.floor(Math.random() * fireColors.length)],
+            color: _emberColor(),
             size: 4 + Math.random() * 4
           });
         }
@@ -36582,7 +36624,7 @@ function updateAbilities(dt) {
             velocity: pVel,
             life: 0.30 + Math.random() * 0.25,
             maxLife: 0.55,
-            color: fireColors[Math.floor(Math.random() * fireColors.length)],
+            color: _emberColor(),
             size: 3 + Math.random() * 3,
           });
         }
@@ -36933,7 +36975,7 @@ function updateAbilities(dt) {
               velocity: pVel,
               life: 0.5 + Math.random() * 0.3,
               maxLife: 0.8,
-              color: fireColors[Math.floor(Math.random() * fireColors.length)],
+              color: _emberColor(),
               size: 5 + Math.random() * 4
             });
           }
