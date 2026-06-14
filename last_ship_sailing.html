@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.49';
+const LSS_BUILD = '31.54';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -30648,7 +30648,7 @@ function _applyGunLayer(el, slot) {
   // behind-layers move in lockstep.
   const sx = (_overlayShift && _overlayShift.x) || 0;
   const sy = (_overlayShift && _overlayShift.y) || 0;
-  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + sy.toFixed(2) + '%)';
+  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + sy.toFixed(2) + '%) scale(1.14)';
 }
 
 // ============================================================================
@@ -31015,7 +31015,7 @@ function tickCoreOverlayFrame() {
   if (!el.classList.contains('active')) el.classList.add('active');
   const sx = (_overlayShift && _overlayShift.x) || 0;
   const sy = (_overlayShift && _overlayShift.y) || 0;
-  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + (yOffset + sy).toFixed(2) + '%)';
+  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + (yOffset + sy).toFixed(2) + '%) scale(1.14)';
 }
 
 const _overlayShift = {
@@ -31272,7 +31272,7 @@ function tickAbilityOverlayFrame() {
   // direction of the player's turn (see _updateOverlayShift below).
   const sx = (_overlayShift && _overlayShift.x) || 0;
   const sy = (_overlayShift && _overlayShift.y) || 0;
-  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + (yOffset + sy).toFixed(2) + '%)';
+  el.style.transform = 'translate(' + sx.toFixed(2) + '%, ' + (yOffset + sy).toFixed(2) + '%) scale(1.14)';
 }
 
 // Commit a loadout: fully set up the player ship, build the map, spawn bots, and
@@ -36364,7 +36364,7 @@ function updateAbilities(dt) {
         // next 0.08 write is another rising edge.
         player.muzzleFlashTimer = 0.08;
         // Alternate side so the painted guns kick L/R/L/R during the core
-        // (gunRecoilL/R drives the per-side recoil offset in drawGun).
+        // (gunRecoilL/R drives the per-side recoil offset for the cockpit PNG gun-cycle).
         player.muzzleFlashSide = 1 - (player.muzzleFlashSide || 0);
         if (player.muzzleFlashSide === 0) player.gunRecoilL = 1.0;
         else                              player.gunRecoilR = 1.0;
@@ -38169,7 +38169,8 @@ function _clipDrawLayer(ctx, el, sx) {
   if (!img.complete || !img.naturalWidth) return;
   const r = el.getBoundingClientRect();   // includes recoil/slide transforms
   const rx = r.left * sx, ry = r.top * sx, rw = r.width * sx, rh = r.height * sx;
-  const s = Math.max(rw / img.naturalWidth, rh / img.naturalHeight); // cover
+  let s = Math.max(rw / img.naturalWidth, rh / img.naturalHeight); // cover
+  if (el.id !== 'cockpit-frame') s *= 1.14; // overscan every swaying overlay (gun + core + ability) past the +/-4% sway (x AND y) so no PNG edge shows; cockpit-frame is static so it stays true-cover
   const dw = img.naturalWidth * s, dh = img.naturalHeight * s;
   ctx.globalAlpha = Math.min(1, op);
   ctx.drawImage(img, rx + (rw - dw) / 2, ry + (rh - dh) / 2, dw, dh);
@@ -39954,87 +39955,6 @@ function drawCircumpunctHUD() {
   player.muzzleFlashTimer = Math.max(0, player.muzzleFlashTimer - (1/60));
   player.gunRecoilL = Math.max(0, player.gunRecoilL - (1/60) * 12);
   player.gunRecoilR = Math.max(0, player.gunRecoilR - (1/60) * 12);
-
-  // Gun dimensions: wide base anchored in corners, barrel points toward center
-  const gunLen = H * 0.45;       // how far the gun extends up from bottom
-  const gunBaseW = W * 0.18;     // width of the gun at the bottom (screen edge)
-  const gunTipW = W * 0.04;      // narrow barrel tip
-  // Angle: barrels aim slightly wider than center (not dead center)
-  const tipInset = W * 0.22;     // how far from center the barrel tip sits
-  // Global arm offsets (user-tuned): push the whole gun assembly down and out so
-  // less cockpit furniture covers the view.
-  const ARM_DOWN_SHIFT = 100;
-  const ARM_OUT_SHIFT = 50;
-
-  const gunAccentCol = player.team === 'A' ? 'rgba(60,200,120,' : 'rgba(200,80,60,';
-
-  function drawGun(side, recoil) {
-    const recoilAmt = recoil * 22;
-    const sway = Math.sin(t * 1.2 + side * Math.PI) * 2;
-
-    ctx.save();
-
-    // Anchor points: bottom corner (wide) to upper-inner (narrow barrel tip)
-    // Left gun: bottom-left corner -> up and inward
-    // Right gun: bottom-right corner -> up and inward
-    const baseY = H + 20 + recoilAmt + sway + ARM_DOWN_SHIFT; // bottom (pushed further off-screen)
-    let tipY = H - gunLen + recoilAmt + sway + ARM_DOWN_SHIFT; // top of gun (barrel end)
-
-    // Slide guns outward so ~2/3 of the base hangs off-screen (+ extra user offset)
-    const gunSlide = gunBaseW * 0.66 + ARM_OUT_SHIFT;
-    let baseOuterX, baseInnerX, tipOuterX, tipInnerX;
-    if (side === 0) {
-      // Left gun (shifted left)
-      baseOuterX = -10 - gunSlide;
-      baseInnerX = gunBaseW - 10 - gunSlide;
-      tipOuterX = tipInset - gunTipW - gunSlide * 0.35;
-      tipInnerX = tipInset - gunSlide * 0.35;
-    } else {
-      // Right gun (shifted right)
-      baseOuterX = W + 10 + gunSlide;
-      baseInnerX = W - gunBaseW + 10 + gunSlide;
-      tipOuterX = W - tipInset + gunTipW + gunSlide * 0.35;
-      tipInnerX = W - tipInset + gunSlide * 0.35;
-    }
-
-    // If a titan cockpit frame PNG is loaded AND alpha-detection found the two
-    // painted barrel tips, override the procedural tip positions so the muzzle
-    // flash fires from where the frame's painted gun actually points. We skip
-    // drawing the procedural gun body/seams/dot in this case because the frame's
-    // painted art is what should be visible; only the flash remains on top.
-    const fm = player.cockpitFrameMuzzle;
-    const useFrame = !!(fm && fm.left && fm.right
-      && Number.isFinite(fm.left.x) && Number.isFinite(fm.left.y)
-      && Number.isFinite(fm.right.x) && Number.isFinite(fm.right.y)
-      && fm.imgW && fm.imgH);
-    if (useFrame) {
-      const tip = side === 0 ? fm.left : fm.right;
-      const scr = frameImgToScreen(tip.x, tip.y, fm.imgW, fm.imgH, W, H);
-      // Apply recoil+sway (same feel as procedural gun) so flash still kicks.
-      const tipCX = scr.x;
-      const tipCY = scr.y + recoilAmt + sway;
-      // Half-width around the painted-barrel axis: give the muzzle a small
-      // extent so dirX/perpX compute a stable orientation and the flash has
-      // a believable footprint rather than collapsing to a point.
-      const halfW = Math.max(10, W * 0.012);
-      tipOuterX = tipCX - (side === 0 ? halfW : -halfW);
-      tipInnerX = tipCX + (side === 0 ? halfW : -halfW);
-      tipY = tipCY;
-    }
-
-    // Procedural arms/gun bodies removed ; cockpit art now comes from the
-    // per-titan frame PNG overlay (see updateCockpitFrame). Visual feedback
-    // on the player's ship is now: (1) the per-side recoil kick via
-    // gunRecoilL/R driving the cockpit PNG's alternating gun-fire cycle
-    // frames (which IS the muzzle flash), (2) the 3D tracer beam in
-    // spawnTracer with its retract+haze tail. (v24 round 9) The unused
-    // flashActive parameter and its void marker are gone too.
-
-    ctx.restore();
-  }
-
-  drawGun(0, player.gunRecoilL);
-  drawGun(1, player.gunRecoilR);
 
   // HUD center muzzle flash removed. The per-ship cockpit PNG
   // gun-cycle (driven by muzzleFlashTimer rising edges in updateCockpitFrame
