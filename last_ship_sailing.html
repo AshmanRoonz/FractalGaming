@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.56';
+const LSS_BUILD = '31.61';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -27806,7 +27806,10 @@ function _pinCombatEffectPrograms() {
           for (let i = 0; i < _kids.length; i += 6) {
             const _slice = _kids.slice(i, i + 6);
             for (const k of _slice) _holder.add(k);
-            renderer.compile(scene, camera);
+            { const _cTM = renderer.toneMapping; const _cNO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+              try { renderer.toneMapping = _cNO; renderer.compile(scene, camera); } catch (_) {}
+              try { renderer.toneMapping = _cTM; } catch (_) {}
+              renderer.compile(scene, camera); }
             for (const k of _slice) _fxPinGroup.add(k);
             await _warmupYield();
           }
@@ -27818,14 +27821,20 @@ function _pinCombatEffectPrograms() {
       return;
     }
     scene.add(_fxPinGroup);
-    renderer.compile(scene, camera);
+    {
+      const _pTM = renderer.toneMapping;
+      const _pNO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+      try { renderer.toneMapping = _pNO; renderer.compile(scene, camera); } catch (_) {}
+      try { renderer.toneMapping = _pTM; } catch (_) {}
+      renderer.compile(scene, camera);
+    }
     scene.remove(_fxPinGroup);
   } catch (_) {
     try { if (_fxPinGroup && _fxPinGroup.parent) _fxPinGroup.parent.remove(_fxPinGroup); } catch (__) {}
   }
 }
 
-let _didWarmRealFX = false;
+let _warmedRound = -1;
 function _warmRealCombatFX() {
   // Pin reconstruction misses the real in-combat programs: LayeredFX / smoke
   // carry an onBeforeCompile hook that shifts the program cache key, burst
@@ -27835,18 +27844,20 @@ function _warmRealCombatFX() {
   // updateRoundSystem, behind the countdown overlay), then render to force every
   // real program to compile here instead of mid-fight. All spawns are visual-only
   // (no networked traps), use tiny lifetimes, and age out invisibly.
-  if (_didWarmRealFX) return;
+  const _wr = (typeof game !== 'undefined' && game && game.currentRound != null) ? game.currentRound : 0;
+  if (_warmedRound === _wr) return;
   try {
     if (typeof renderer === 'undefined' || !renderer ||
         typeof scene === 'undefined' || !scene ||
         typeof camera === 'undefined' || !camera) return;
     if (typeof game === 'undefined' || !game || !Array.isArray(game.effects)) return;
     if (typeof THREE === 'undefined') return;
-    _didWarmRealFX = true;
+    _warmedRound = _wr;
     const fp = camera.position.clone(); fp.y -= 50000;
     const fp2 = fp.clone(); fp2.x += 60;
     const V = (x, y, z) => new THREE.Vector3(x, y, z);
     const W = (fn) => { try { fn(); } catch (_) {} };
+    const _meshBefore = new Set(); scene.traverse(o => { if (o.isMesh) _meshBefore.add(o); });
     W(() => { if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(fp, 40); });
     W(() => { if (typeof _spawnFireCloudCluster === 'function') _spawnFireCloudCluster(fp, { count: 2, radius: 48, alpha: 0.6 }); });
     W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.05, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); } });
@@ -27868,7 +27879,25 @@ function _warmRealCombatFX() {
     W(() => { if (typeof spawnSiphonHelix === 'function') spawnSiphonHelix(fp, fp2, 0x88ddff, 0.05); });
     W(() => { if (typeof v8SpawnDebris === 'function') v8SpawnDebris(fp, 6, 1, 80); });
     W(() => { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(fp, 6, 1, 80, 0xff8822, 0xfff8a0); });
-    W(() => { renderer.compile(scene, camera); if (!(renderer.xr && renderer.xr.isPresenting)) renderer.render(scene, camera); });
+    // The warm meshes sit far off-screen and several are frustumCulled, so a
+    // plain render would cull them and never issue the draw that forces the
+    // final link + GPU buffer upload. Uncull just the meshes we added so the
+    // render draws (and fully compiles) them, still invisibly off-screen.
+    try { scene.traverse(o => { if (o.isMesh && !_meshBefore.has(o)) o.frustumCulled = false; }); } catch (_) {}
+    W(() => {
+      if (renderer.xr && renderer.xr.isPresenting) { renderer.compile(scene, camera); return; }
+      // Combat renders the scene to an HDR target where three.js strips the
+      // tone-mapping chunk, yielding a DIFFERENT (~3577-char smaller) program
+      // than a tone-mapped screen render. Force tone mapping OFF for one
+      // compile+draw (matches the in-combat target) then restore it for a
+      // second (any direct-to-screen path), so neither variant compiles mid-fight.
+      const _prevTM = renderer.toneMapping;
+      const _NO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+      try { renderer.toneMapping = _NO; renderer.compile(scene, camera); renderer.render(scene, camera); } catch (_) {}
+      try { renderer.toneMapping = _prevTM; } catch (_) {}
+      renderer.compile(scene, camera);
+      renderer.render(scene, camera);
+    });
   } catch (_) {}
 }
 
@@ -37707,6 +37736,13 @@ function updateRoundSystem(dt) {
         }
       }
     }
+    // Pre-warm the real combat-FX programs ~2s before FIGHT, in the fully-built
+    // round environment, so the first-fire shader compiles land behind the
+    // countdown instead of stuttering a few seconds into combat. Once-guarded,
+    // so only round 1 pays it (programs persist for later rounds).
+    if (prev > 2 && game.warmupTimer <= 2 && typeof _warmRealCombatFX === 'function') {
+      try { _warmRealCombatFX(); } catch (_) {}
+    }
     // (audio 2026-05) Gate the warmup -> playing transition on ship-select
     // having actually hidden. warmupTimer reaches 0 at the same wall-clock
     // moment that launchCountdown's "LAUNCH" tick fires (both scheduled
@@ -37719,6 +37755,7 @@ function updateRoundSystem(dt) {
     // down the panel ; the announcement now lands cleanly inside the
     // in-game view.
     if (game.warmupTimer <= 0 && !selectActive) {
+      if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
       // (v31.20) Final facing at FIGHT : the player's real spawn position is
       // settled by now (they warp in as the ticker ends), so aim them at the
