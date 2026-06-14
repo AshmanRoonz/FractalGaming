@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.54';
+const LSS_BUILD = '31.56';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -27825,6 +27825,53 @@ function _pinCombatEffectPrograms() {
   }
 }
 
+let _didWarmRealFX = false;
+function _warmRealCombatFX() {
+  // Pin reconstruction misses the real in-combat programs: LayeredFX / smoke
+  // carry an onBeforeCompile hook that shifts the program cache key, burst
+  // geometries differ from the unit-sphere pin, and the LEVEL environment (fog)
+  // only exists after buildNextRound. So run the ACTUAL visual spawn paths once,
+  // far off-screen, IN the live round environment (called right after the pin in
+  // updateRoundSystem, behind the countdown overlay), then render to force every
+  // real program to compile here instead of mid-fight. All spawns are visual-only
+  // (no networked traps), use tiny lifetimes, and age out invisibly.
+  if (_didWarmRealFX) return;
+  try {
+    if (typeof renderer === 'undefined' || !renderer ||
+        typeof scene === 'undefined' || !scene ||
+        typeof camera === 'undefined' || !camera) return;
+    if (typeof game === 'undefined' || !game || !Array.isArray(game.effects)) return;
+    if (typeof THREE === 'undefined') return;
+    _didWarmRealFX = true;
+    const fp = camera.position.clone(); fp.y -= 50000;
+    const fp2 = fp.clone(); fp2.x += 60;
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+    const W = (fn) => { try { fn(); } catch (_) {} };
+    W(() => { if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(fp, 40); });
+    W(() => { if (typeof _spawnFireCloudCluster === 'function') _spawnFireCloudCluster(fp, { count: 2, radius: 48, alpha: 0.6 }); });
+    W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.05, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); } });
+    W(() => { if (typeof spawnSupershapeBurst === 'function') spawnSupershapeBurst('fireball', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); });
+    W(() => { if (typeof _makeSmokeMaterial === 'function' && typeof _SMOKE_GEO !== 'undefined') { const _sm = new THREE.Mesh(_SMOKE_GEO, _makeSmokeMaterial(0x222018, 0.85)); _sm.position.copy(fp); scene.add(_sm); game.effects.push({ mesh: _sm, lifetime: 0.02, age: 0, type: 'shaderSmoke', baseScale: 1 }); } });
+    W(() => { if (typeof spawnTracer === 'function') spawnTracer(fp, fp2, 0xffffff, 1); });
+    W(() => { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(fp, 6); });
+    W(() => { if (typeof spawnPelletBurst === 'function') spawnPelletBurst(fp, V(1, 0, 0), 100); });
+    W(() => { if (typeof spawnHullBurst === 'function') spawnHullBurst(fp, 0xff8844, 20); });
+    W(() => { if (typeof spawnShieldHit === 'function') spawnShieldHit(fp, 30, 0x66ccff, null); });
+    W(() => { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(fp, fp2, 0xaaccff, 0.02, 1, 1); });
+    W(() => { if (typeof spawnDarkLightningBolt === 'function') spawnDarkLightningBolt(fp, fp2, 0.02, 1); });
+    W(() => { if (typeof spawnPyroFlame === 'function') spawnPyroFlame(fp); });
+    W(() => { if (typeof spawnFlameChainVisual === 'function') spawnFlameChainVisual(fp, V(1, 0, 0), 200, 'A'); });
+    W(() => { if (typeof spawnDamageSmoke === 'function') spawnDamageSmoke(fp, 0.5); });
+    W(() => { if (typeof spawnElectricSmoke === 'function') spawnElectricSmoke(fp, 40, {}); });
+    W(() => { if (typeof spawnDot === 'function') spawnDot(fp, {}); });
+    W(() => { if (typeof spawnRockChunks === 'function') spawnRockChunks(fp, 0x888888, 1); });
+    W(() => { if (typeof spawnSiphonHelix === 'function') spawnSiphonHelix(fp, fp2, 0x88ddff, 0.05); });
+    W(() => { if (typeof v8SpawnDebris === 'function') v8SpawnDebris(fp, 6, 1, 80); });
+    W(() => { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(fp, 6, 1, 80, 0xff8822, 0xfff8a0); });
+    W(() => { renderer.compile(scene, camera); if (!(renderer.xr && renderer.xr.isPresenting)) renderer.render(scene, camera); });
+  } catch (_) {}
+}
+
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
   if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) {
@@ -37982,6 +38029,7 @@ function updateRoundSystem(dt) {
         // "burst of lag at the opening of battle". Now it runs once, here,
         // hidden inside the 10s countdown, and the FIGHT site is gone.
         if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
+        try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
         // Reset stasis fields
         game.stasisFields.forEach(f => { if (f.alive) f.destroy(); });
         game.stasisFields = [];
