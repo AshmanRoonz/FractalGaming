@@ -3041,13 +3041,11 @@ window.lssAutoFullscreen = function () {
             // rotation, then releases ~2.5s later so the player keeps free
             // auto-rotation afterward (the held lock fed Chrome's viewport
             // bugs and was Ashman's call to drop).
+            // (v31.63) HOLD landscape for the whole match (was released after
+            // 2.5s, which let auto-rotate-OFF phones snap back to portrait).
+            // Released on return to menu ; see game.state = 'select'.
             var p = screen.orientation.lock('landscape');
             if (p && p.catch) p.catch(function () {});
-            setTimeout(function () {
-              try {
-                if (typeof screen.orientation.unlock === 'function') screen.orientation.unlock();
-              } catch (_) {}
-            }, 2500);
           }
         } catch (_) {}
       }, 350);
@@ -3114,7 +3112,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.62';
+const LSS_BUILD = '31.63';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -38643,6 +38641,9 @@ function returnToRootMenu() {
   // Flip state first; _menuActive / Tab-intercept / gamepad hold all gate on
   // this, and the scoreboard's forced-visible condition checks it too.
   game.state = 'select';
+  // (v31.63) Release the held landscape lock back to the OS now that we're
+  // out of the match, so menu/auto-rotate behave normally.
+  try { if (screen.orientation && typeof screen.orientation.unlock === 'function') screen.orientation.unlock(); } catch (_) {}
 
   // Pointer lock was already released at matchEnd, but belt-and-suspenders.
   if (document.exitPointerLock) {
@@ -61082,6 +61083,38 @@ if (window.LSS_ENGINE_READY) {
   window.addEventListener('lss-engine-ready', _bootLSS, { once: true });
 }
 
+</script>
+<script>
+// (v31.63) Discreet rotate-to-landscape button. Some mobile browsers (Opera,
+// iOS Safari) ignore the fullscreen + orientation-lock flow, leaving the game
+// squished in portrait. Show a small pill in portrait that, on tap (a user
+// gesture, which these APIs require), re-requests fullscreen + landscape lock.
+(function () {
+  if (!(('ontouchstart' in window) || ((navigator.maxTouchPoints | 0) > 0))) return;
+  function mk() {
+    if (document.getElementById('lss-rotate-hint')) return;
+    if (!document.body) { setTimeout(mk, 200); return; }
+    var b = document.createElement('button');
+    b.id = 'lss-rotate-hint';
+    b.setAttribute('aria-label', 'Rotate to landscape');
+    b.innerHTML = '<span style="font-size:16px;line-height:1">\u27F3</span> Rotate to landscape';
+    b.style.cssText = 'position:fixed;z-index:99999;left:50%;bottom:14px;transform:translateX(-50%);padding:8px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.3);background:rgba(0,0,0,0.55);color:#ffd24a;font:600 13px system-ui,-apple-system,sans-serif;display:none;align-items:center;gap:6px;box-shadow:0 2px 10px rgba(0,0,0,0.45);-webkit-tap-highlight-color:transparent';
+    b.addEventListener('click', function () {
+      try { if (typeof window.lssRequestFullscreen === 'function') window.lssRequestFullscreen(); } catch (_) {}
+      setTimeout(function () {
+        try { if (screen.orientation && typeof screen.orientation.lock === 'function') { var p = screen.orientation.lock('landscape'); if (p && p.catch) p.catch(function () {}); } } catch (_) {}
+      }, 200);
+    });
+    document.body.appendChild(b);
+    function upd() { b.style.display = (window.innerHeight > window.innerWidth) ? 'inline-flex' : 'none'; }
+    upd();
+    window.addEventListener('resize', upd);
+    window.addEventListener('orientationchange', function () { setTimeout(upd, 300); setTimeout(upd, 800); });
+    if (window.visualViewport && window.visualViewport.addEventListener) window.visualViewport.addEventListener('resize', upd);
+    setInterval(upd, 1000);
+  }
+  mk();
+})();
 </script>
 </body>
 </html>
