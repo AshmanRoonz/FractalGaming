@@ -3114,7 +3114,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '31.61';
+const LSS_BUILD = '31.62';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -27859,7 +27859,6 @@ function _warmRealCombatFX() {
     const W = (fn) => { try { fn(); } catch (_) {} };
     const _meshBefore = new Set(); scene.traverse(o => { if (o.isMesh) _meshBefore.add(o); });
     W(() => { if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(fp, 40); });
-    W(() => { if (typeof _spawnFireCloudCluster === 'function') _spawnFireCloudCluster(fp, { count: 2, radius: 48, alpha: 0.6 }); });
     W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.05, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); } });
     W(() => { if (typeof spawnSupershapeBurst === 'function') spawnSupershapeBurst('fireball', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); });
     W(() => { if (typeof _makeSmokeMaterial === 'function' && typeof _SMOKE_GEO !== 'undefined') { const _sm = new THREE.Mesh(_SMOKE_GEO, _makeSmokeMaterial(0x222018, 0.85)); _sm.position.copy(fp); scene.add(_sm); game.effects.push({ mesh: _sm, lifetime: 0.02, age: 0, type: 'shaderSmoke', baseScale: 1 }); } });
@@ -50772,6 +50771,7 @@ function gameLoop(timestamp) {
   updatePlayerStasis(dt);
   if (deathCam.active) {
     updateDeathCam(dt);
+    if (typeof _deathCamTickFire === 'function') _deathCamTickFire(dt);
   } else {
     updatePlayerMovement(dt);
     updateWeapon(dt);
@@ -59430,6 +59430,35 @@ function _livingTeammates() {
     if (b && b.alive && b.team === player.team) out.push(b);
   }
   return out;
+}
+
+function _deathCamTickFire(dt) {
+  // The death-cam path skips updateAbilities, which is where world effects
+  // (pyro fire) normally fade + expire + clean up their meshes. Without this,
+  // the volumetric flame freezes on screen the instant you die. Tick just the
+  // transient fire here so it fades out and removes itself during the death cam.
+  if (typeof game === 'undefined' || !game || !game.worldEffects || typeof scene === 'undefined') return;
+  const we = game.worldEffects;
+  const t2 = (typeof game.time === 'number') ? game.time : 0;
+  for (let e = we.length - 1; e >= 0; e--) {
+    const eff = we[e];
+    if (!eff || (eff.type !== 'pyro_flame' && eff.type !== 'explFireCloud')) continue;
+    eff.timer -= dt;
+    const dur = eff.duration || (eff.type === 'pyro_flame' ? 2.0 : 0.5);
+    const fadeT = Math.max(0, eff.timer / dur);
+    if (eff.fireMeshes) {
+      for (const m of eff.fireMeshes) {
+        if (m && m.material && m.material.uniforms) {
+          if (m.material.uniforms.time) m.material.uniforms.time.value = t2;
+          if (m.material.uniforms.uBaseAlpha) m.material.uniforms.uBaseAlpha.value = (eff.type === 'pyro_flame' ? 0.55 : 0.85) * fadeT * fadeT;
+        }
+      }
+    }
+    if (eff.timer <= 0) {
+      if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
+      we.splice(e, 1);
+    }
+  }
 }
 
 function startDeathCam(attacker) {
