@@ -3098,7 +3098,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.12';
+const LSS_BUILD = '32.8';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -26731,13 +26731,13 @@ function _monsterRoundReset() {
   }
 }
 
-let _monSummonAccum = 0;
+let _monOutsideT = 0, _monSummonedCount = 0;
 function _monSummon(m) {
   if (!m || typeof player === 'undefined' || !player || !player.position) return;
   const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.6, Math.random() - 0.5);
   if (dir.lengthSq() < 0.01) dir.set(1, 0, 0);
   dir.normalize();
-  const dist = ((typeof window !== 'undefined' && window._monSummonDist) || 650) + Math.random() * 450;
+  const dist = 1600 + Math.random() * 900;
   const sx = m.position.x, sy = m.position.y, sz = m.position.z;
   m.position.copy(player.position).addScaledVector(dir, dist);
   m.dormant = false; m.aggro = true; m._deAggroT = 0;
@@ -26749,54 +26749,34 @@ function _monSummon(m) {
 }
 function _monRecall(m) {
   if (!m) return;
-  try { if (typeof m._tpFx === 'function' && m.mesh && m.mesh.visible) m._tpFx(m.position.x, m.position.y, m.position.z); } catch (_) {}
   m.dormant = true; m.aggro = false; m._deAggroT = 0;
   if (m.mesh) m.mesh.visible = false;
 }
-function _monNearestSeedDist() {
-  if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player || !player.position) return -1;
-  const p = player.position;
-  let best = Infinity;
-  const sph = game.levelSpheres || [];
-  for (let i = 0; i < sph.length; i++) {
-    const s = sph[i];
-    const d = Math.sqrt((p.x-s.cx)*(p.x-s.cx) + (p.y-s.cy)*(p.y-s.cy) + (p.z-s.cz)*(p.z-s.cz)) - s.r;
-    if (d < best) best = d;
-  }
-  const cyl = game.levelCylinders || [];
-  for (let i = 0; i < cyl.length; i++) {
-    const c = cyl[i];
-    const abx = c.bx-c.ax, aby = c.by-c.ay, abz = c.bz-c.az;
-    const ab2 = abx*abx + aby*aby + abz*abz || 1;
-    let t = ((p.x-c.ax)*abx + (p.y-c.ay)*aby + (p.z-c.az)*abz) / ab2;
-    if (t < 0) t = 0; else if (t > 1) t = 1;
-    const dx = p.x-(c.ax+abx*t), dy = p.y-(c.ay+aby*t), dz = p.z-(c.az+abz*t);
-    const d = Math.sqrt(dx*dx + dy*dy + dz*dz) - c.r;
-    if (d < best) best = d;
-  }
-  return best === Infinity ? -1 : best;
-}
 function _updateMonsterSummon(dt) {
-  // (v32.12) Spawn-on-demand WITHOUT recall : lured monsters PERSIST so you can
-  // drag them onto the map (that's the fun). Every 5s the local player stays
-  // outside the carve, one more dormant monster warps in beside the ship and
-  // stays (chasing / lureable) until it's killed or the round resets. Going
-  // back inside just stops NEW ones spawning ; it never removes the ones out.
+  // (v32.5) Monsters stay dormant until the local player lingers OUTSIDE the
+  // carved arena. Every 5s outside, one random dormant monster teleports in
+  // beside the ship. Returning inside recalls them all and resets the timer.
   if (typeof game === 'undefined' || !game || !game.monsters || game.state !== 'playing') {
-    _monSummonAccum = 0; return;
+    _monOutsideT = 0; _monSummonedCount = 0; return;
   }
   if (typeof _monAuthority === 'function' && !_monAuthority()) return;
   if (typeof player === 'undefined' || !player || !player.position) return;
-  const _seedDist = _monNearestSeedDist();
-  const _outThresh = (typeof window !== 'undefined' && window._monOutThresh) || 300;
-  const outside = (player.shipState !== 'dead' && player.shipState !== 'spawning') && _seedDist > _outThresh;
-  try { window.__monDbg = { outside, seedDist: Math.round(_seedDist), thresh: _outThresh, accum: +_monSummonAccum.toFixed(1) }; } catch (_) {}
-  if (!outside) { _monSummonAccum = 0; return; }
-  _monSummonAccum += dt;
-  if (_monSummonAccum >= 5) {
-    _monSummonAccum -= 5;
+  const outside = (typeof _playerOutsideArena === 'function') ? _playerOutsideArena() : false;
+  try { window.__monDbg = { outside, outsideT: +_monOutsideT.toFixed(2), summoned: _monSummonedCount }; } catch (_) {}
+  if (!outside) {
+    if (_monSummonedCount > 0) {
+      for (const m of game.monsters) { if (m && !m.dormant && typeof m._rehome === 'function') _monRecall(m); }
+    }
+    _monOutsideT = 0; _monSummonedCount = 0;
+    return;
+  }
+  _monOutsideT += dt;
+  const due = Math.floor(_monOutsideT / 5);
+  while (_monSummonedCount < due) {
     const pool = game.monsters.filter(m => m && m.alive && m.dormant && typeof m._rehome === 'function');
-    if (pool.length) _monSummon(pool[Math.floor(Math.random() * pool.length)]);
+    if (!pool.length) break;
+    _monSummon(pool[Math.floor(Math.random() * pool.length)]);
+    _monSummonedCount++;
   }
 }
 

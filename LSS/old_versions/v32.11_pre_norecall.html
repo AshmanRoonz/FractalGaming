@@ -3098,7 +3098,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.12';
+const LSS_BUILD = '32.11';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -26731,7 +26731,7 @@ function _monsterRoundReset() {
   }
 }
 
-let _monSummonAccum = 0;
+let _monOutsideT = 0, _monSummonedCount = 0, _monInsideT = 0;
 function _monSummon(m) {
   if (!m || typeof player === 'undefined' || !player || !player.position) return;
   const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.6, Math.random() - 0.5);
@@ -26777,26 +26777,37 @@ function _monNearestSeedDist() {
   return best === Infinity ? -1 : best;
 }
 function _updateMonsterSummon(dt) {
-  // (v32.12) Spawn-on-demand WITHOUT recall : lured monsters PERSIST so you can
-  // drag them onto the map (that's the fun). Every 5s the local player stays
-  // outside the carve, one more dormant monster warps in beside the ship and
-  // stays (chasing / lureable) until it's killed or the round resets. Going
-  // back inside just stops NEW ones spawning ; it never removes the ones out.
+  // (v32.5) Monsters stay dormant until the local player lingers OUTSIDE the
+  // carved arena. Every 5s outside, one random dormant monster teleports in
+  // beside the ship. Returning inside recalls them all and resets the timer.
   if (typeof game === 'undefined' || !game || !game.monsters || game.state !== 'playing') {
-    _monSummonAccum = 0; return;
+    _monOutsideT = 0; _monSummonedCount = 0; _monInsideT = 0; return;
   }
   if (typeof _monAuthority === 'function' && !_monAuthority()) return;
   if (typeof player === 'undefined' || !player || !player.position) return;
   const _seedDist = _monNearestSeedDist();
   const _outThresh = (typeof window !== 'undefined' && window._monOutThresh) || 300;
   const outside = (player.shipState !== 'dead' && player.shipState !== 'spawning') && _seedDist > _outThresh;
-  try { window.__monDbg = { outside, seedDist: Math.round(_seedDist), thresh: _outThresh, accum: +_monSummonAccum.toFixed(1) }; } catch (_) {}
-  if (!outside) { _monSummonAccum = 0; return; }
-  _monSummonAccum += dt;
-  if (_monSummonAccum >= 5) {
-    _monSummonAccum -= 5;
+  try { window.__monDbg = { outside, seedDist: Math.round(_seedDist), thresh: _outThresh, outsideT: +_monOutsideT.toFixed(2), summoned: _monSummonedCount }; } catch (_) {}
+  if (!outside) {
+    // (v32.11) Grace period : monsters chase you back inside and only warp
+    // away after ~4s in bounds, instead of vanishing the instant you cross
+    // the (fuzzy) boundary. Brief dips near the edge no longer pop them.
+    _monInsideT += dt;
+    if (_monInsideT >= 4 && _monSummonedCount > 0) {
+      for (const m of game.monsters) { if (m && !m.dormant && typeof m._rehome === 'function') _monRecall(m); }
+      _monOutsideT = 0; _monSummonedCount = 0;
+    }
+    return;
+  }
+  _monInsideT = 0;
+  _monOutsideT += dt;
+  const due = Math.floor(_monOutsideT / 5);
+  while (_monSummonedCount < due) {
     const pool = game.monsters.filter(m => m && m.alive && m.dormant && typeof m._rehome === 'function');
-    if (pool.length) _monSummon(pool[Math.floor(Math.random() * pool.length)]);
+    if (!pool.length) break;
+    _monSummon(pool[Math.floor(Math.random() * pool.length)]);
+    _monSummonedCount++;
   }
 }
 
