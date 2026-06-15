@@ -100,6 +100,19 @@
     </div>
 
     <div class="section">
+      <h2>Animation</h2>
+      <div id="anim-status" class="hint">No file loaded.</div>
+      <select id="anim-select" style="width:100%;display:none;margin-top:6px;"></select>
+      <div id="anim-controls" style="display:none;margin-top:6px;">
+        <button id="btn-anim-play">⏸ Pause</button>
+        <label style="display:block;margin-top:6px;"><input type="checkbox" id="anim-inplace" checked> In-place (strip walk root motion)</label>
+        <label>Speed <span id="anim-speed-val">1.00×</span>
+          <input type="range" id="anim-speed" min="0" max="3" step="0.05" value="1">
+        </label>
+      </div>
+    </div>
+
+    <div class="section">
       <h2>View</h2>
       <button id="btn-reset-view">Reset Camera</button>
       <label>Background
@@ -136,6 +149,8 @@ const selectedInfo = document.getElementById('selected-info');
 
 let scene, camera, renderer, controls;
 let loadedRoot = null;
+let _mixer = null, _curAnimAction = null, _animClips = [], _animPaused = false, _curClipIdx = null;
+const _animClock = new THREE.Clock();
 let selectedMesh = null;
 const meshes = [];
 
@@ -204,8 +219,104 @@ function onResize() {
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
+  const _dt = _animClock.getDelta();
+  if (_mixer) _mixer.update(_dt);
   renderer.render(scene, camera);
 }
+
+// ---- Animation playback (verify rigged GLBs from Meshy etc.) ----
+function _resetAnims() {
+  if (_mixer) { try { _mixer.stopAllAction(); } catch (_) {} }
+  _mixer = null; _curAnimAction = null; _animClips = []; _animPaused = false;
+  const sel = document.getElementById('anim-select');
+  const ctrls = document.getElementById('anim-controls');
+  const status = document.getElementById('anim-status');
+  if (sel) { sel.innerHTML = ''; sel.style.display = 'none'; }
+  if (ctrls) ctrls.style.display = 'none';
+  if (status) status.textContent = 'No file loaded.';
+}
+function setupAnimations(clips) {
+  _resetAnims();
+  _animClips = clips || [];
+  const sel = document.getElementById('anim-select');
+  const ctrls = document.getElementById('anim-controls');
+  const status = document.getElementById('anim-status');
+  if (!_animClips.length) { if (status) status.textContent = 'No animations in this file (mesh has no rig/clips).'; return; }
+  _mixer = new THREE.AnimationMixer(loadedRoot);
+  _animClips.forEach((c, i) => {
+    const o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = (c.name || ('clip ' + i)) + '  (' + (c.duration || 0).toFixed(2) + 's)';
+    sel.appendChild(o);
+  });
+  if (status) status.textContent = _animClips.length + ' clip' + (_animClips.length > 1 ? 's' : '') + ' found.';
+  sel.style.display = 'block';
+  ctrls.style.display = 'block';
+  playClip(0);
+}
+function playClip(i) {
+  if (!_mixer || !_animClips[i]) return;
+  _curClipIdx = i;
+  if (_curAnimAction) _curAnimAction.stop();
+  const raw = _animClips[i];
+  const inPlaceEl = document.getElementById('anim-inplace');
+  const clip = (inPlaceEl && inPlaceEl.checked) ? _inPlaceClip(raw) : raw;
+  const act = _mixer.clipAction(clip);
+  act.reset(); act.setLoop(THREE.LoopRepeat, Infinity); act.clampWhenFinished = false; act.paused = false; act.play();
+  _curAnimAction = act; _animPaused = false;
+  const status = document.getElementById('anim-status');
+  if (status) status.textContent = _animClips.length + ' clip' + (_animClips.length > 1 ? 's' : '') + ' found. Playing: ' + (_animClips[i].name || ('clip ' + i));
+  _updatePlayBtn();
+}
+function _updatePlayBtn() {
+  const b = document.getElementById('btn-anim-play');
+  if (b) b.textContent = _animPaused ? '\u25B6 Play' : '\u23F8 Pause';
+}
+// Strip root motion so a walk/run loops on the spot instead of drifting
+// forward and snapping back. Finds the .position track with the largest
+// horizontal travel (the root/hips bone) and flattens its X/Z to constant,
+// keeping any vertical bob. Naming-agnostic, so it works on any rig.
+function _inPlaceClip(raw) {
+  if (!raw._inplaceClip) raw._inplaceClip = _stripRootMotion(raw);
+  return raw._inplaceClip;
+}
+function _stripRootMotion(clip) {
+  const c = clip.clone();
+  let best = -1, bestRange = 0;
+  c.tracks.forEach((t, idx) => {
+    if (!/\.position$/.test(t.name)) return;
+    const v = t.values;
+    let minx = Infinity, maxx = -Infinity, minz = Infinity, maxz = -Infinity;
+    for (let i = 0; i < v.length; i += 3) {
+      if (v[i] < minx) minx = v[i]; if (v[i] > maxx) maxx = v[i];
+      if (v[i + 2] < minz) minz = v[i + 2]; if (v[i + 2] > maxz) maxz = v[i + 2];
+    }
+    const range = (maxx - minx) + (maxz - minz);
+    if (range > bestRange) { bestRange = range; best = idx; }
+  });
+  if (best >= 0 && bestRange > 0.001) {
+    const v = c.tracks[best].values, x0 = v[0], z0 = v[2];
+    for (let i = 0; i < v.length; i += 3) { v[i] = x0; v[i + 2] = z0; }
+  }
+  return c;
+}
+(function _wireAnimUI() {
+  const sel = document.getElementById('anim-select');
+  const playBtn = document.getElementById('btn-anim-play');
+  const speed = document.getElementById('anim-speed');
+  if (sel) sel.addEventListener('change', (e) => playClip(+e.target.value));
+  const inplace = document.getElementById('anim-inplace');
+  if (inplace) inplace.addEventListener('change', () => { if (_mixer && _curClipIdx != null) playClip(_curClipIdx); });
+  if (playBtn) playBtn.addEventListener('click', () => {
+    if (!_curAnimAction) return;
+    _animPaused = !_animPaused; _curAnimAction.paused = _animPaused; _updatePlayBtn();
+  });
+  if (speed) speed.addEventListener('input', (e) => {
+    const v = +e.target.value;
+    const vv = document.getElementById('anim-speed-val'); if (vv) vv.textContent = v.toFixed(2) + '\u00D7';
+    if (_mixer) _mixer.timeScale = v;
+  });
+})();
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
@@ -343,6 +454,7 @@ function rebuildThrusterList() {
 }
 
 function clearScene() {
+  if (typeof _resetAnims === 'function') _resetAnims();
   if (loadedRoot) {
     scene.remove(loadedRoot);
     loadedRoot.traverse((o) => {
@@ -386,6 +498,7 @@ function loadGLB(arrayBuffer, name) {
 
     fitCameraToObject(loadedRoot);
     rebuildMeshList();
+    setupAnimations(gltf.animations);
 
     // Re-detect thruster markers saved by a previous editing session, so a
     // tagged GLB can be reopened and its markers adjusted.

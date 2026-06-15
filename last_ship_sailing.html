@@ -3098,7 +3098,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.1';
+const LSS_BUILD = '32.7';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -25814,6 +25814,7 @@ class OutskirtsMonster {
     this.velocity = new THREE.Vector3(0, 0, 0);
     this.mesh = null;               // attached when the GLB finishes loading
     this.zapTimer = Math.random() * MONSTER_ZAP_EVERY;
+    this.dormant = true;       // (v32.5) summon-on-demand: hidden until summoned outside the arena
     this.aggro = false;        // set when a ship exits the arena ; persists if baited inside
     this._deAggroT = 0;
     this._touchCd = 0;
@@ -25845,7 +25846,7 @@ class OutskirtsMonster {
     this._roamR = Math.max(700, R * 0.22);
   }
 
-  attachModel(obj3d) {
+  attachModel(obj3d, clips) {
     if (!this.alive || !obj3d || typeof scene === 'undefined') return;
     // Full-bright textured materials (perf): the GLBs ship with PBR
     // MeshStandardMaterial, which pays per-pixel lighting math we don't
@@ -25887,6 +25888,18 @@ class OutskirtsMonster {
     group.position.copy(this.position);
     scene.add(group);
     this.mesh = group;
+    // (v32.3) Skeletal animation: rigged monster GLBs carry a looping walk/sway
+    // clip ; play it in place (root motion stripped) while the AI moves the
+    // body. Static GLBs have no clips, so this stays a no-op.
+    try {
+      if (clips && clips.length && THREE.AnimationMixer) {
+        this._mixer = new THREE.AnimationMixer(obj3d);
+        const act = this._mixer.clipAction(_monStripRootMotion(clips[0]));
+        act.setLoop(THREE.LoopRepeat, Infinity);
+        act.timeScale = 0.85 + Math.random() * 0.35;
+        act.play();
+      }
+    } catch (_) {}
   }
 
   takeDamage(dmg, attacker, hitPoint) {
@@ -25981,6 +25994,7 @@ class OutskirtsMonster {
 
   update(dt) {
     if (!this.alive || !this.mesh) return;
+    if (this.dormant) { if (this.mesh.visible) this.mesh.visible = false; return; }
     this._hitFxTimer -= dt;
     this._touchCd -= dt;
     // Distance culling: a 520-unit creature beyond ~13k is a few pixels,
@@ -25991,6 +26005,7 @@ class OutskirtsMonster {
       const vis = _camD2 < 13000 * 13000;
       if (this.mesh.visible !== vis) this.mesh.visible = vis;
     }
+    if (this._mixer && this.mesh.visible) this._mixer.update(dt);
     if (!_monAuthority()) { this._updateProxy(dt); return; }
     // ---- authority sim (solo, or the stasis owner in multiplayer) ----
     // Between rounds nobody is prey. During the roundEnd/warmup window the
@@ -26057,10 +26072,14 @@ class OutskirtsMonster {
       // classic slow-menace approach.
       const _rushing = !!tgtOutside;
       const _surgeAt = _rushing ? 2500 : 4000;
-      const _farCap = _rushing ? MONSTER_FAR_SPD * 1.4 : MONSTER_FAR_SPD;
+      const _farCap = _rushing ? MONSTER_FAR_SPD * 1.6 : MONSTER_FAR_SPD;
+      // (v32.2) Trespass surge bumped a notch : prey fully OUTSIDE the carved
+      // arena gets closed on a little faster (steeper ramp + quicker final
+      // creep) so leaving the arena feels more urgent.
+      const _chaseBase = _rushing ? MONSTER_CHASE_SPD * 1.25 : MONSTER_CHASE_SPD;
       const spd = (dist > _surgeAt)
-        ? Math.min(_farCap, MONSTER_CHASE_SPD + (dist - _surgeAt) * (_rushing ? 0.12 : 0.08))
-        : MONSTER_CHASE_SPD;
+        ? Math.min(_farCap, _chaseBase + (dist - _surgeAt) * (_rushing ? 0.15 : 0.08))
+        : _chaseBase;
       if (dist > 1) desired.multiplyScalar(spd / dist);
       this.velocity.lerp(desired, Math.min(1, dt * 0.9));
       // Occasional Slayer-style blink toward the prey. Long approaches get
@@ -26249,9 +26268,15 @@ class OutskirtsMonster {
       if (typeof v8SpawnSparks === 'function') v8SpawnSparks(to, 10, 1.0, 260, 0x99e0ff, 0xffffff);
       if (typeof spawnDynamicLight === 'function') spawnDynamicLight(from, 0x99e0ff, 3.0, 800, 0.18);
       if (typeof playSpatialSound === 'function') {
-        // monster_zap: the first of the per-monster recipes (made with
-        // Ashman's son) ; lives in DEFAULT_SOUND_LIBRARY under MONSTER.
-        playSpatialSound('monster_zap', this.position.clone(), { refDistance: 500, maxDistance: 4000, rolloffFactor: 0.9 });
+        // monster_zap recipe (made with Ashman's son). (v32.5) Play it less
+        // often and on an irregular per-monster cadence (was every zap) so the
+        // pack doesn't drone : random 2-5.5s gaps + a coin flip.
+        const _now = (typeof game !== 'undefined' && game) ? game.time : 0;
+        if (this._monSndNext == null) this._monSndNext = _now + Math.random() * 2;
+        if (_now >= this._monSndNext && Math.random() < 0.75) {
+          this._monSndNext = _now + 2.0 + Math.random() * 3.5;
+          playSpatialSound('monster_zap', this.position.clone(), { refDistance: 500, maxDistance: 4000, rolloffFactor: 0.9 });
+        }
       }
     } catch (_) {}
     if (applyDamage) {
@@ -26281,6 +26306,32 @@ function _initMonsters() {
 // The GLBs are 20-45 MB each ; load strictly one at a time with a breather
 // between parses so six big main-thread GLTF parses don't stack into one
 // long hitch at match start.
+function _monStripRootMotion(clip) {
+  // (v32.3) Make a rigged walk animate IN PLACE while the AI drives the body:
+  // flatten the X/Z of the .position track with the largest horizontal travel
+  // (the root/hips bone) to constant, keep vertical bob. Returns a clone.
+  try {
+    const c = clip.clone();
+    let best = -1, bestRange = 0;
+    c.tracks.forEach((t, idx) => {
+      if (!/\.position$/.test(t.name)) return;
+      const v = t.values;
+      let minx = Infinity, maxx = -Infinity, minz = Infinity, maxz = -Infinity;
+      for (let i = 0; i < v.length; i += 3) {
+        if (v[i] < minx) minx = v[i]; if (v[i] > maxx) maxx = v[i];
+        if (v[i + 2] < minz) minz = v[i + 2]; if (v[i + 2] > maxz) maxz = v[i + 2];
+      }
+      const range = (maxx - minx) + (maxz - minz);
+      if (range > bestRange) { bestRange = range; best = idx; }
+    });
+    if (best >= 0 && bestRange > 0.001) {
+      const v = c.tracks[best].values, x0 = v[0], z0 = v[2];
+      for (let i = 0; i < v.length; i += 3) { v[i] = x0; v[i + 2] = z0; }
+    }
+    return c;
+  } catch (_) { return clip; }
+}
+
 function _loadNextMonsterModel() {
   if (!game.monsters || _monsterLoadIdx >= game.monsters.length) return;
   const m = game.monsters[_monsterLoadIdx++];
@@ -26294,7 +26345,7 @@ function _loadNextMonsterModel() {
     // browser's disk cache can't serve a stale GLB after we re-optimize.
     MONSTER_BASE_URL + m.def.key + '.glb?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0'),
     gltf => {
-      try { m.attachModel(gltf.scene); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
+      try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
       // 2.5 s breather between parses spreads the main-thread cost so no
       // single second eats more than one model's decode.
       setTimeout(_loadNextMonsterModel, 2500);
@@ -26656,6 +26707,7 @@ function _monsterRoundReset() {
   for (const m of game.monsters) {
     if (typeof m._rehome !== 'function') continue;   // ChampionShell shares the array
     m._rehome();
+    m.dormant = true; m.aggro = false; if (m.mesh) m.mesh.visible = false;
     if (!m.alive) {
       m.alive = true;
       if (m.mesh) {
@@ -26676,6 +26728,77 @@ function _monsterRoundReset() {
     m.zapTimer = Math.random() * ((typeof MONSTER_ZAP_EVERY === 'number') ? MONSTER_ZAP_EVERY : 1.25);
     m._tpCd = 10 + Math.random() * 8;
     m._netX = null;   // proxies: wait for the authority's fresh snapshot
+  }
+}
+
+let _monOutsideT = 0, _monSummonedCount = 0;
+function _monSummon(m) {
+  if (!m || typeof player === 'undefined' || !player || !player.position) return;
+  const dir = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.6, Math.random() - 0.5);
+  if (dir.lengthSq() < 0.01) dir.set(1, 0, 0);
+  dir.normalize();
+  const dist = 1600 + Math.random() * 900;
+  const sx = m.position.x, sy = m.position.y, sz = m.position.z;
+  m.position.copy(player.position).addScaledVector(dir, dist);
+  m.dormant = false; m.aggro = true; m._deAggroT = 0;
+  m.zapTimer = Math.random() * ((typeof MONSTER_ZAP_EVERY === 'number') ? MONSTER_ZAP_EVERY : 1.25);
+  m._tpCd = 2 + Math.random() * 3;
+  if (m.velocity) m.velocity.set(0, 0, 0);
+  if (m.mesh) { m.mesh.position.copy(m.position); m.mesh.visible = true; }
+  try { if (typeof m._tpFx === 'function') m._tpFx(sx, sy, sz); } catch (_) {}
+}
+function _monRecall(m) {
+  if (!m) return;
+  m.dormant = true; m.aggro = false; m._deAggroT = 0;
+  if (m.mesh) m.mesh.visible = false;
+}
+function _playerInCarve() {
+  if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player || !player.position) return true;
+  const p = player.position, MARG = 1.15;
+  const spheres = game.levelSpheres || [];
+  for (let i = 0; i < spheres.length; i++) {
+    const s = spheres[i], r = s.r * MARG;
+    const dx = p.x - s.cx, dy = p.y - s.cy, dz = p.z - s.cz;
+    if (dx * dx + dy * dy + dz * dz < r * r) return true;
+  }
+  const cyls = game.levelCylinders || [];
+  for (let i = 0; i < cyls.length; i++) {
+    const c = cyls[i], r = c.r * MARG;
+    const abx = c.bx - c.ax, aby = c.by - c.ay, abz = c.bz - c.az;
+    const apx = p.x - c.ax, apy = p.y - c.ay, apz = p.z - c.az;
+    const ab2 = abx * abx + aby * aby + abz * abz || 1;
+    let t = (apx * abx + apy * aby + apz * abz) / ab2;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+    const dx = p.x - (c.ax + abx * t), dy = p.y - (c.ay + aby * t), dz = p.z - (c.az + abz * t);
+    if (dx * dx + dy * dy + dz * dz < r * r) return true;
+  }
+  return false;
+}
+function _updateMonsterSummon(dt) {
+  // (v32.5) Monsters stay dormant until the local player lingers OUTSIDE the
+  // carved arena. Every 5s outside, one random dormant monster teleports in
+  // beside the ship. Returning inside recalls them all and resets the timer.
+  if (typeof game === 'undefined' || !game || !game.monsters || game.state !== 'playing') {
+    _monOutsideT = 0; _monSummonedCount = 0; return;
+  }
+  if (typeof _monAuthority === 'function' && !_monAuthority()) return;
+  if (typeof player === 'undefined' || !player || !player.position) return;
+  const outside = (player.shipState !== 'dead' && player.shipState !== 'spawning') && !_playerInCarve();
+  try { window.__monDbg = { outside, outsideT: +_monOutsideT.toFixed(2), summoned: _monSummonedCount, inCarve: _playerInCarve() }; } catch (_) {}
+  if (!outside) {
+    if (_monSummonedCount > 0) {
+      for (const m of game.monsters) { if (m && !m.dormant && typeof m._rehome === 'function') _monRecall(m); }
+    }
+    _monOutsideT = 0; _monSummonedCount = 0;
+    return;
+  }
+  _monOutsideT += dt;
+  const due = Math.floor(_monOutsideT / 5);
+  while (_monSummonedCount < due) {
+    const pool = game.monsters.filter(m => m && m.alive && m.dormant && typeof m._rehome === 'function');
+    if (!pool.length) break;
+    _monSummon(pool[Math.floor(Math.random() * pool.length)]);
+    _monSummonedCount++;
   }
 }
 
@@ -26715,6 +26838,7 @@ function updateMonsters(dt) {
     updateMonsters._homeKey = _arenaNow.key;
     _monsterRoundReset();
   }
+  if (typeof _updateMonsterSummon === 'function') _updateMonsterSummon(dt);
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
     if (m.alive) m.update(dt);
@@ -36105,6 +36229,21 @@ function _tickFireDOTs(dt) {
       }
     }
   }
+  if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
+    for (let mi = 0; mi < game.monsters.length; mi++) {
+      const mon = game.monsters[mi];
+      if (!mon || !mon.alive || !mon.position || !mon.onFireTimer || mon.onFireTimer <= 0) continue;
+      const dps = mon.onFireDps || 200;
+      try {
+        const dealt = mon.takeDamage(dps * dt, mon.onFireSource || 'player', mon.position);
+        if (dealt > 0 && mon.onFireSource === 'player' && typeof player !== 'undefined' && player) {
+          player.damageDealt = (player.damageDealt || 0) + dealt;
+        }
+      } catch (_) {}
+      mon.onFireTimer -= dt;
+      if (mon.onFireTimer <= 0) { mon.onFireTimer = 0; mon.onFireDps = 0; mon.onFireSource = null; }
+    }
+  }
 }
 window._tickFireDOTs = _tickFireDOTs;
 
@@ -36335,6 +36474,28 @@ function updateAbilities(dt) {
           bot.onFireTimer = Math.max(bot.onFireTimer || 0, 3.0);
           bot.onFireDps   = Math.max(bot.onFireDps   || 0, 320);
           bot.onFireSource = 'player';
+        }
+      }
+      // (v32.4) Fire Shield cone also burns the outskirts monsters (was ships-only).
+      if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.position) continue;
+          const dx = mon.position.x - player.position.x;
+          const dy = mon.position.y - player.position.y;
+          const dz = mon.position.z - player.position.z;
+          const along = dx * forward.x + dy * forward.y + dz * forward.z;
+          if (along < 0 || along > reach) continue;
+          const px = dx - forward.x * along, py = dy - forward.y * along, pz = dz - forward.z * along;
+          const perpLen = Math.sqrt(px * px + py * py + pz * pz);
+          const along01 = along / reach;
+          const coneR = baseRadius + (tipRadius - baseRadius) * along01 + (mon.collisionRadius || 0);
+          if (perpLen > coneR) continue;
+          const dmgPerSec = maxDPS * (1 - along01) * (0.5 + 0.5 * (1 - (perpLen / coneR)));
+          const dealt = mon.takeDamage(dmgPerSec * dt, 'player', mon.position);
+          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
+          mon.onFireTimer = Math.max(mon.onFireTimer || 0, 3.0);
+          mon.onFireDps   = Math.max(mon.onFireDps   || 0, 320);
+          mon.onFireSource = 'player';
         }
       }
       // Fire Shield is a fire source: ignite Explosive Gas anywhere
@@ -37122,6 +37283,19 @@ function updateAbilities(dt) {
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
         }
+          // (v32.4) Burning gas / firewall zone also damages outskirts monsters.
+          if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
+            for (const mon of game.monsters) {
+              if (!mon.alive || !mon.position) continue;
+              if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
+                const dealt = mon.takeDamage(eff.igniteDmgPerSec * dt, eff.owner, mon.position);
+                if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt;
+                mon.onFireTimer = Math.max(mon.onFireTimer || 0, 2.0);
+                mon.onFireDps   = Math.max(mon.onFireDps   || 0, eff.igniteDmgPerSec || 200);
+                mon.onFireSource = (eff.owner === 'player') ? 'player' : (eff.owner || 'player');
+              }
+            }
+          }
         // Also damage player if they are standing in an enemy trap
         if (eff.team !== player.team && player.shipState !== 'dead') {
           if (player.position.distanceTo(eff.position) < eff.radius) {
