@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Grassy Cavern — corridor</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; cursor: crosshair; }
+  #fps {
+    position: fixed; top: 10px; left: 10px; z-index: 10; pointer-events: none;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bfe0a0;
+    background: rgba(10,16,24,0.5); padding: 4px 8px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+<div id="fps">–</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute,
+         hash, instanceIndex, time, sin, vec3, vec2, normalize, cameraPosition, reflector, texture, uniform } from 'three/tsl';
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const smooth = w => w * w * (3 - 2 * w);
+
+// ============================================================================
+// Sandwich terrain shaped into a CLAMSHELL CORRIDOR: open ahead (-Z), walls on
+//   the sides (X) and the back (+Z) where the floor rises + ceiling drops to
+//   pinch shut. Built from fixed PERSISTENT segments — once drawn it stays.
+// ============================================================================
+const SPACING = 300, BASE_FREQ = 1 / SPACING, WARP_FREQ = 1 / (SPACING * 2.2), WARP = 80, EXPO = 1.75;
+const YFLOOR = -450, GROUND_AMP = 460;
+const YCEIL  =  780, CEIL_AMP   = 440;
+const WL = -300;                                          // water level (valleys flood)
+const CORRIDOR_HALF = 1600, WALLW = 420, XHALF = 2200;   // open band half-width, wall ramp, full half-extent
+const SEGLEN = 700, DIVX = 150, DIVZ = 46, BACK = 300;
+const BACKW = 210;
+const AHEAD = 14, BEHIND = 1;                            // load further so the deeper fog still hides the edge
+const VERT_BUDGET = 1600;
+const FOGC = 0x9fb4c6;
+
+function hash2(x, z) { const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return n - Math.floor(n); }
+function noise2(x, z) {
+  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  const a = hash2(xi, zi), b = hash2(xi + 1, zi), c = hash2(xi, zi + 1), d = hash2(xi + 1, zi + 1);
+  const ab = a + (b - a) * u, cd = c + (d - c) * u;
+  return (ab + (cd - ab) * v) * 2 - 1;
+}
+function ridged(x, z, seed) {
+  let sum = 0, amp = 1, freq = BASE_FREQ, prev = 1, norm = 0;
+  for (let o = 0; o < 5; o++) {
+    const n = noise2(x * freq + seed * 19.3, z * freq + seed * 7.1);
+    let r = 1 - Math.abs(n); r *= r;
+    sum += r * amp * prev; prev = r; norm += amp; freq *= 2; amp *= 0.5;
+  }
+  return Math.pow(sum / norm, EXPO);
+}
+function groundBase(x, z) {
+  const wx = x + WARP * noise2(x * WARP_FREQ, z * WARP_FREQ);
+  const wz = z + WARP * noise2(x * WARP_FREQ + 31.7, z * WARP_FREQ + 17.3);
+  const detail = noise2(x * 0.05, z * 0.05) * 7 + noise2(x * 0.12, z * 0.12) * 3;
+  return YFLOOR + GROUND_AMP * ridged(wx, wz, 1.7) + detail;
+}
+function ceilBase(x, z) {
+  const ax = x + 4000, az = z - 4000;
+  const wx = ax + WARP * noise2(ax * WARP_FREQ, az * WARP_FREQ);
+  const wz = az + WARP * noise2(ax * WARP_FREQ + 31.7, az * WARP_FREQ + 17.3);
+  return YCEIL - CEIL_AMP * ridged(wx, wz, 5.9);
+}
+function patch(x, z) {                                    // lushness variation for grass
+  const n = noise2(x * 0.0016 + 5.1, z * 0.0016 - 2.3) * 0.62 + noise2(x * 0.0041 + 11.0, z * 0.0041 + 7.0) * 0.38;
+  return clamp((n + 1) * 0.5, 0, 1);
+}
+function wallAmt(x, z) {
+  const side = (Math.abs(x) - CORRIDOR_HALF) / WALLW;
+  const back = (z - 30) / BACKW;
+  return clamp(Math.max(side, back), 0, 1);
+}
+function groundY(x, z) {
+  const w = smooth(wallAmt(x, z)), g = groundBase(x, z);
+  if (w <= 0) return g;
+  return g + ((g + ceilBase(x, z)) * 0.5 - g) * w;       // floor rises to the seal
+}
+function ceilY(x, z) {
+  const w = smooth(wallAmt(x, z)), c = ceilBase(x, z);
+  if (w <= 0) return c;
+  return c + ((groundBase(x, z) + c) * 0.5 - c) * w;     // ceiling drops to the seal
+}
+const GX = (XHALF * 2) / DIVX, GZ = SEGLEN / DIVZ;
+function meshHeight(x, z, zc) {                           // triangulated floor height so grass sits flush
+  const i = Math.floor((x + XHALF) / GX), j = Math.floor((z - (zc - SEGLEN / 2)) / GZ);
+  const x0 = -XHALF + i * GX, z0 = (zc - SEGLEN / 2) + j * GZ;
+  const u = (x - x0) / GX, v = (z - z0) / GZ;
+  const a = groundY(x0, z0), b = groundY(x0 + GX, z0), c = groundY(x0, z0 + GZ), d = groundY(x0 + GX, z0 + GZ);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+
+// ============================================================================
+// Renderer / scene / camera / light
+// ============================================================================
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(FOGC);
+scene.fog = new THREE.FogExp2(FOGC, 0.00020);   // very deep view down the corridor
+
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 1, 13000);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, groundY(0, -150) + 150, -150);
+
+scene.add(new THREE.AmbientLight(0x8fa6c0, 0.4));
+const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x4a5a2e, 0.65);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.25);
+sun.position.set(0.5, 1.0, 0.3);
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0xbcd0ff, 0.35);
+rim.position.set(-0.5, 0.2, -0.6);
+scene.add(rim);
+
+// ============================================================================
+// Terrain materials — ground: mossy grass with per-pixel mottle; ceiling: rock
+// ============================================================================
+const C = {
+  grassLo: new THREE.Color(0x3c5722), grassHi: new THREE.Color(0x82c456),
+  rock: new THREE.Color(0x6c7178), snow: new THREE.Color(0xeef4f8),
+  ceilLo: new THREE.Color(0x242a32), ceilHi: new THREE.Color(0x59616c),
+};
+const _c = new THREE.Color();
+const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
+{
+  const wp = positionWorld;
+  const mottle = mx_noise_float(wp.mul(0.012)).mul(0.20)
+    .add(mx_noise_float(wp.mul(0.05)).mul(0.14))
+    .add(mx_noise_float(wp.mul(0.16)).mul(0.10)).add(0.92);
+  const fuzz = mx_noise_float(wp.mul(0.6)).mul(0.18).add(0.88)
+    .mul(mx_noise_float(wp.mul(2.2)).mul(0.22).add(0.86));
+  const base = attribute('color').mul(mottle).mul(fuzz);
+  const mossCol = mix(color(0x2f5a22), color(0x67ab3b), mx_noise_float(wp.mul(0.09)).mul(0.5).add(0.5));
+  const lowF = float(1).sub(smoothstep(float(YFLOOR), float(YFLOOR + GROUND_AMP * 0.7), wp.y));
+  const mossAmt = smoothstep(0.34, 0.62, mx_noise_float(wp.mul(0.02))).mul(0.55).mul(lowF);
+  groundMat.colorNode = mix(base, mossCol.mul(fuzz), mossAmt);
+}
+const ceilMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
+
+// ============================================================================
+// Grass blades — instanced per segment, gusting shader sway. The material sets a
+//   positionNode, which keeps instance transforms as vertex data (no 1024 cap).
+// ============================================================================
+const GRASS_PER_SEG = 7000;   // curved blades read fuller, so fewer needed
+// blade template (local): a CURVED, tapered, multi-segment strip => reads as a real grass blade
+const BL_SEGS = 5;
+const BL_V = [], BL_C = [], BL_H = [], BL_I = [];
+{
+  const baseC = [0.12, 0.24, 0.09], midC = [0.30, 0.52, 0.18], tipC = [0.62, 0.80, 0.36];
+  const lerp3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const CURVE = 0.42, BASEW = 0.26;
+  for (let s = 0; s <= BL_SEGS; s++) {
+    const t = s / BL_SEGS, w = BASEW * Math.pow(1 - t, 0.6), cx = CURVE * t * t;     // taper + forward arc
+    const col = t < 0.5 ? lerp3(baseC, midC, t * 2) : lerp3(midC, tipC, (t - 0.5) * 2);
+    if (s < BL_SEGS) { BL_V.push([cx - w, t, 0], [cx + w, t, 0]); BL_C.push(col, col); BL_H.push(t, t); }
+    else { BL_V.push([cx, t, 0]); BL_C.push(col); BL_H.push(t); }   // single tip vertex
+  }
+  for (let s = 0; s < BL_SEGS - 1; s++) { const a = s * 2; BL_I.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const a = (BL_SEGS - 1) * 2; BL_I.push(a, a + 1, a + 2);          // last segment tapers to the tip
+}
+const NV = BL_V.length, NI = BL_I.length;
+// grass is MERGED geometry (one plain vertex buffer per segment), NOT InstancedMesh,
+//   so there are no per-instance matrices => no 1024 uniform cap => it can be dense.
+//   Sway is per-blade in the shader via a phase + heightFrac attribute.
+const grassMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide });
+{
+  const hf = attribute('heightFrac'), ph = attribute('phase');
+  const gust = float(0.6).add(float(0.4).mul(sin(time.mul(0.4).add(ph))));
+  const sway = sin(time.mul(1.5).add(ph)).mul(4.0).mul(gust).add(sin(time.mul(3.3).add(ph.mul(1.7))).mul(1.3));
+  grassMat.positionNode = positionLocal.add(vec3(sway.mul(hf.mul(hf)), float(0), float(0)));   // tip swings, root stays
+  grassMat.colorNode = attribute('color');
+  grassMat.normalNode = vec3(0, 1, 0);   // grass catches top light (no per-vertex normals)
+}
+
+// ============================================================================
+// REACTIVE WAVE SIM (cymatics) — a CPU wave grid in a window that follows you,
+//   masked into real basins by the terrain (ripples bounce off the shorelines).
+//   spawnRipple(x,z,amp) injects a splash; it shows on top of the cosmetic water.
+// ============================================================================
+const WG = 200, WSIZE = 4400, wgScale = WSIZE / WG, WRANGE = 6.0;
+let wcur = new Float32Array(WG * WG), wprev = new Float32Array(WG * WG), wmask = new Uint8Array(WG * WG);
+let wcur2 = new Float32Array(WG * WG), wprev2 = new Float32Array(WG * WG), wmask2 = new Uint8Array(WG * WG);
+let wdepth = new Float32Array(WG * WG), wdepth2 = new Float32Array(WG * WG);   // water depth (WL - ground) per cell
+let wcx = 0, wcz = 0;
+const cellX = (i) => wcx + (i - WG / 2 + 0.5) * wgScale, cellZ = (j) => wcz + (j - WG / 2 + 0.5) * wgScale;
+function computeMaskFull() { for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) { const d = WL - groundY(cellX(i), cellZ(j)); const k = j * WG + i; wmask[k] = d > 2 ? 1 : 0; wdepth[k] = d; } }
+function rollAll(dCol, dRow) {
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const si = i + dCol, sj = j + dRow, k = j * WG + i;
+    if (si >= 0 && si < WG && sj >= 0 && sj < WG) { const sk = sj * WG + si; wcur2[k] = wcur[sk]; wprev2[k] = wprev[sk]; wmask2[k] = wmask[sk]; wdepth2[k] = wdepth[sk]; }
+    else { wcur2[k] = 0; wprev2[k] = 0; const d = WL - groundY(cellX(i), cellZ(j)); wmask2[k] = d > 2 ? 1 : 0; wdepth2[k] = d; }
+  }
+  let t = wcur; wcur = wcur2; wcur2 = t; t = wprev; wprev = wprev2; wprev2 = t; let m = wmask; wmask = wmask2; wmask2 = m; let dd = wdepth; wdepth = wdepth2; wdepth2 = dd;
+}
+const C2 = 0.20, WDAMP = 0.996;
+function stepWave() {
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i;
+    if (!wmask[k]) { wprev[k] = 0; continue; }
+    const c = wcur[k];
+    const Ln = (i > 0 && wmask[k - 1]) ? wcur[k - 1] : c, Rn = (i < WG - 1 && wmask[k + 1]) ? wcur[k + 1] : c;
+    const Dn = (j > 0 && wmask[k - WG]) ? wcur[k - WG] : c, Un = (j < WG - 1 && wmask[k + WG]) ? wcur[k + WG] : c;
+    wprev[k] = (2 * c - wprev[k] + C2 * (Ln + Rn + Dn + Un - 4 * c)) * WDAMP;
+  }
+  const tmp = wcur; wcur = wprev; wprev = tmp;
+}
+const waveData = new Uint8Array(WG * WG * 4);
+const waveTex = new THREE.DataTexture(waveData, WG, WG);
+waveTex.wrapS = waveTex.wrapT = THREE.ClampToEdgeWrapping;
+waveTex.minFilter = waveTex.magFilter = THREE.LinearFilter;
+function uploadWave() {
+  for (let k = 0; k < WG * WG; k++) { const o = k * 4; waveData[o] = Math.max(0, Math.min(255, (wcur[k] / WRANGE * 0.5 + 0.5) * 255)); waveData[o + 1] = Math.max(0, Math.min(255, (Math.max(0, wdepth[k]) / 60) * 255)); waveData[o + 3] = wmask[k] ? 255 : 0; }
+  waveTex.needsUpdate = true;
+}
+wcx = Math.round(camera.position.x / wgScale) * wgScale; wcz = Math.round(camera.position.z / wgScale) * wgScale;
+computeMaskFull();
+const windowCenter = uniform(vec2(wcx, wcz));
+function spawnRipple(wx, wz, amp) {       // a missile / impact calls this
+  const i = Math.round((wx - wcx) / wgScale + WG / 2 - 0.5), j = Math.round((wz - wcz) / wgScale + WG / 2 - 0.5);
+  if (i >= 0 && i < WG && j >= 0 && j < WG) { const k = j * WG + i; if (wmask[k]) wcur[k] += amp; }
+}
+let rippleT = 0, splashT = 2, waveAcc = 0;
+function updateCymatics(dt) {
+  const nscx = Math.round(camera.position.x / wgScale) * wgScale, nscz = Math.round(camera.position.z / wgScale) * wgScale;
+  if (nscx !== wcx || nscz !== wcz) {
+    const dCol = Math.round((nscx - wcx) / wgScale), dRow = Math.round((nscz - wcz) / wgScale);
+    wcx = nscx; wcz = nscz;
+    if (Math.abs(dCol) < WG && Math.abs(dRow) < WG) rollAll(dCol, dRow); else { computeMaskFull(); wcur.fill(0); wprev.fill(0); }
+    windowCenter.value.set(wcx, wcz);
+  }
+  rippleT -= dt;
+  if (rippleT <= 0) { rippleT = 0.4 + Math.random() * 0.6; for (let n = 0; n < 2; n++) { const i = (Math.random() * WG) | 0, j = (Math.random() * WG) | 0, k = j * WG + i; if (wmask[k]) wcur[k] += 1.2; } }
+  splashT -= dt;
+  if (splashT <= 0) { splashT = 1.5 + Math.random() * 2.5; spawnRipple(camera.position.x + (Math.random() - 0.5) * 1300, camera.position.z + (Math.random() - 0.5) * 1300, 7.5); }  // demo splashes
+  waveAcc += Math.min(0.05, dt);
+  let s = 0; while (waveAcc >= 1 / 30 && s < 2) { stepWave(); waveAcc -= 1 / 30; s++; }
+  uploadWave();
+}
+
+// ============================================================================
+// Water — cosmetic noise ripples + mirror reflection (reaches the mountains),
+//   with the reactive wave-sim ripples added on top near the player.
+// ============================================================================
+const water = (() => {
+  const geo = new THREE.PlaneGeometry(24000, 24000, 1, 1);   // huge => reaches the fog horizon (no moving edge)
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const wp = positionWorld, t = time;
+  // flowing ripple from layered noise (irregular, varies everywhere — no tiled grid)
+  const ripH = (p) => mx_noise_float(vec3(p.x.mul(0.028), p.y.mul(0.028), t.mul(0.4))).mul(0.6)
+    .add(mx_noise_float(vec3(p.x.mul(0.075).add(5.0), p.y.mul(0.075), t.mul(0.7))).mul(0.4));
+  const e = 3.0;
+  const hC = ripH(wp.xz), hX = ripH(wp.xz.add(vec2(e, 0))), hZ = ripH(wp.xz.add(vec2(0, e)));
+  // REACTIVE: sample the wave sim near the player and add its ripple tilt to the normal
+  const luv = wp.xz.sub(windowCenter).div(WSIZE).add(0.5);
+  const ed = float(1 / WG), dec = (n) => n.mul(2).sub(1).mul(WRANGE);
+  const sL = dec(texture(waveTex, luv.sub(vec2(ed, float(0)))).x), sR = dec(texture(waveTex, luv.add(vec2(ed, float(0)))).x);
+  const sD = dec(texture(waveTex, luv.sub(vec2(float(0), ed))).x), sU = dec(texture(waveTex, luv.add(vec2(float(0), ed))).x);
+  const simW = float(1).sub(smoothstep(float(WSIZE * 0.34), float(WSIZE * 0.48), wp.xz.sub(windowCenter).length()));
+  const sx = sL.sub(sR).mul(0.14).mul(simW), sz = sD.sub(sU).mul(0.14).mul(simW);
+  const Nf = normalize(vec3(hC.sub(hX).mul(3.0).add(sx), float(1.0), hC.sub(hZ).mul(3.0).add(sz)));   // noise + reactive sim ripples
+  // planar MIRROR reflection across y = WL, rippled by the wave normal
+  const reflection = reflector({ resolution: 0.2 });
+  reflection.target.rotateX(-Math.PI / 2);
+  reflection.target.position.y = WL;
+  scene.add(reflection.target);
+  reflection.uvNode = reflection.uvNode.add(Nf.xz.mul(0.06));
+  const V = normalize(cameraPosition.sub(wp));
+  const ndv = Nf.dot(V).max(0);
+  const fres = float(0.04).add(float(0.6).mul(float(1).sub(ndv).pow(5)));
+  let body = mix(color(0x0c3a5a), reflection.rgb, fres);
+  const L = normalize(vec3(0.5, 1.0, 0.3)), Hh = normalize(L.add(V));
+  const spec = Nf.dot(Hh).max(0).pow(200).mul(0.6);                                   // tight sun glints, not a dot grid
+  // MENISCUS: the sim stores real water depth (water level - ground) in G; the lip sits
+  //   where that depth -> 0, i.e. exactly on the shoreline. Near the player only.
+  const wdep = texture(waveTex, luv).y.mul(60);                                        // decode depth (0..60 units)
+  const men = float(1).sub(smoothstep(float(2), float(24), wdep)).mul(simW);
+  const colN = body.add(color(0xffffff).mul(spec)).add(color(0xa8cad8).mul(men.mul(men).mul(0.22)));   // subtle meniscus lip
+  const rad = wp.xz.sub(cameraPosition.xz).length();
+  const fade = smoothstep(float(7000), float(9500), rad);   // fade to the horizon mist, matching the mountains
+  mat.colorNode = mix(colN, color(FOGC), fade);
+  mat.opacityNode = mix(float(0.66), float(0.97), fres).mul(float(1).sub(fade));
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false; mesh.renderOrder = 1;
+  return mesh;
+})();
+scene.add(water);
+
+// ============================================================================
+// Persistent segment streaming
+// ============================================================================
+const segments = new Map();
+const shellQueue = [], grassQueue = [];
+const queued = new Set();
+let job = null;
+function want(i, isCeil) { const key = i + (isCeil ? '_c' : '_g'); if (queued.has(key)) return; queued.add(key); shellQueue.push({ i, isCeil }); }
+function wantGrass(i) { const key = i + '_gr'; if (queued.has(key)) return; queued.add(key); grassQueue.push({ i }); }
+function startShell(i, isCeil) {
+  const geo = new THREE.PlaneGeometry(XHALF * 2, SEGLEN, DIVX, DIVZ);
+  geo.rotateX(isCeil ? Math.PI / 2 : -Math.PI / 2);
+  geo.translate(0, 0, BACK - i * SEGLEN - SEGLEN / 2);
+  const pos = geo.attributes.position;
+  return { i, isCeil, geo, pos, colors: new Float32Array(pos.count * 3), normals: new Float32Array(pos.count * 3), k: 0, n: pos.count };
+}
+function fillShell(j, count) {
+  const pos = j.pos, colors = j.colors, normals = j.normals, isCeil = j.isCeil, h = isCeil ? ceilY : groundY, e = 6;
+  const end = Math.min(j.n, j.k + count);
+  for (let k = j.k; k < end; k++) {
+    const x = pos.getX(k), z = pos.getZ(k);
+    const y = h(x, z);
+    pos.setY(k, y);
+    const gx = h(x + e, z) - h(x - e, z), gz = h(x, z + e) - h(x, z - e);
+    let nx, ny, nz;
+    if (isCeil) {
+      nx = gx; ny = -2 * e; nz = gz;
+      const t = clamp((y - (YCEIL - CEIL_AMP)) / CEIL_AMP, 0, 1);
+      _c.copy(C.ceilLo).lerp(C.ceilHi, t);
+    } else {
+      nx = -gx; ny = 2 * e; nz = -gz;
+      const flat = (2 * e) / Math.hypot(gx, gz, 2 * e);
+      const t = clamp((y - YFLOOR) / GROUND_AMP, 0, 1);
+      const pc = patch(x, z);
+      _c.copy(C.grassLo).lerp(C.grassHi, clamp((flat - 0.4) / 0.4, 0, 1) * clamp(pc + 0.2, 0, 1));
+      _c.lerp(C.rock, clamp((0.6 - flat) / 0.3, 0, 1));
+      if (t > 0.76) _c.lerp(C.snow, Math.min(1, (t - 0.76) / 0.24) * flat);
+    }
+    const inv = 1 / Math.hypot(nx, ny, nz);
+    normals[k * 3] = nx * inv; normals[k * 3 + 1] = ny * inv; normals[k * 3 + 2] = nz * inv;
+    colors[k * 3] = _c.r; colors[k * 3 + 1] = _c.g; colors[k * 3 + 2] = _c.b;
+  }
+  j.k = end;
+}
+function finishShell(j) {
+  j.geo.setAttribute('color', new THREE.BufferAttribute(j.colors, 3));
+  j.geo.setAttribute('normal', new THREE.BufferAttribute(j.normals, 3));
+  const mesh = new THREE.Mesh(j.geo, j.isCeil ? ceilMat : groundMat);
+  scene.add(mesh);
+  let seg = segments.get(j.i); if (!seg) { seg = {}; segments.set(j.i, seg); }
+  if (j.isCeil) seg.c = mesh; else seg.g = mesh;
+}
+
+const GTRIES = GRASS_PER_SEG * 5;
+function startGrass(i) {
+  const maxV = GRASS_PER_SEG * NV, maxI = GRASS_PER_SEG * NI;
+  return { grass: true, i, zc: BACK - i * SEGLEN - SEGLEN / 2, tries: 0, k: 0,
+    pos: new Float32Array(maxV * 3), col: new Float32Array(maxV * 3),
+    hf: new Float32Array(maxV), ph: new Float32Array(maxV), idx: new Uint32Array(maxI) };
+}
+function fillGrass(j, attempts) {
+  const zHalf = SEGLEN / 2, e = 6;
+  for (let a = 0; a < attempts && j.k < GRASS_PER_SEG && j.tries < GTRIES; a++) {
+    j.tries++;
+    const x = (Math.random() * 2 - 1) * (CORRIDOR_HALF - 30);
+    const z = j.zc + (Math.random() * 2 - 1) * zHalf;
+    if (wallAmt(x, z) > 0.06) continue;
+    const gy = groundBase(x, z);
+    if (gy < WL + 5) continue;                                // underwater
+    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
+    const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
+    if (flat < 0.55) continue;                                // steep => bare rock
+    if ((gy - YFLOOR) / GROUND_AMP > 0.72) continue;          // snowline
+    const pc = patch(x, z);
+    if (pc < 0.4) continue;                                   // grey ground
+    const H = 26 * (0.55 + pc * 0.75), W = 8 * (0.7 + Math.random() * 0.5);
+    const baseY = meshHeight(x, z, j.zc) - 0.8, yaw = Math.random() * 6.283, cyw = Math.cos(yaw), syw = Math.sin(yaw);
+    const phase = Math.random() * 6.283, vo = j.k * NV;
+    for (let v = 0; v < NV; v++) {
+      const lx = BL_V[v][0] * W, ly = BL_V[v][1] * H, lz = BL_V[v][2] * W, o = (vo + v) * 3;
+      j.pos[o] = x + (lx * cyw - lz * syw); j.pos[o + 1] = baseY + ly; j.pos[o + 2] = z + (lx * syw + lz * cyw);
+      j.col[o] = BL_C[v][0]; j.col[o + 1] = BL_C[v][1]; j.col[o + 2] = BL_C[v][2];
+      j.hf[vo + v] = BL_H[v]; j.ph[vo + v] = phase;
+    }
+    const io = j.k * NI;
+    for (let t = 0; t < NI; t++) j.idx[io + t] = vo + BL_I[t];
+    j.k++;
+  }
+}
+function finishGrass(j) {
+  const nv = j.k * NV, ni = j.k * NI;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(j.pos.subarray(0, nv * 3)), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(j.col.subarray(0, nv * 3)), 3));
+  g.setAttribute('heightFrac', new THREE.BufferAttribute(new Float32Array(j.hf.subarray(0, nv)), 1));
+  g.setAttribute('phase', new THREE.BufferAttribute(new Float32Array(j.ph.subarray(0, nv)), 1));
+  g.setIndex(new THREE.BufferAttribute(new Uint32Array(j.idx.subarray(0, ni)), 1));
+  if (nv > 0) g.computeBoundingSphere();
+  const mesh = new THREE.Mesh(g, grassMat);
+  scene.add(mesh);
+  let seg = segments.get(j.i); if (!seg) { seg = {}; segments.set(j.i, seg); }
+  seg.gr = mesh;
+}
+const GRASS_LOD_Z = 3800;                                     // grass renders out to where the fog hides it
+function updateLOD() {
+  const cz = camera.position.z;
+  for (const [i, seg] of segments) {
+    if (!seg.gr) continue;
+    seg.gr.visible = Math.abs(cz - (BACK - i * SEGLEN - SEGLEN / 2)) < GRASS_LOD_Z;
+  }
+}
+function planSegments() {
+  const pseg = Math.floor((BACK - camera.position.z) / SEGLEN);
+  for (let i = Math.max(0, pseg - BEHIND); i <= pseg + AHEAD; i++) { want(i, false); want(i, true); wantGrass(i); }
+}
+function pump(budget) {
+  let used = 0;
+  while (used < budget) {
+    if (!job) {
+      if (shellQueue.length) { const r = shellQueue.shift(); job = startShell(r.i, r.isCeil); }
+      else if (grassQueue.length) job = startGrass(grassQueue.shift().i);
+      else break;
+    }
+    if (job.grass) {
+      const step = Math.min(budget - used, GTRIES - job.tries);
+      fillGrass(job, step); used += step;
+      if (job.k >= GRASS_PER_SEG || job.tries >= GTRIES) { finishGrass(job); job = null; }
+    } else {
+      const step = Math.min(budget - used, job.n - job.k);
+      fillShell(job, step); used += step;
+      if (job.k >= job.n) { finishShell(job); job = null; }
+    }
+  }
+}
+
+// ============================================================================
+// First-person flycam
+// ============================================================================
+const look = { yaw: 0, pitch: 0 };
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+const cv = renderer.domElement;
+cv.addEventListener('click', () => { if (!document.pointerLockElement) cv.requestPointerLock(); });
+addEventListener('mousemove', e => { if (document.pointerLockElement === cv) { look.yaw -= e.movementX * 0.0022; look.pitch -= e.movementY * 0.0022; } });
+const DEAD = 0.12;
+const dz = v => Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
+const fwd = new THREE.Vector3(), rt = new THREE.Vector3(), mv = new THREE.Vector3();
+function updateControls(dt) {
+  let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
+  if (gp) {
+    mx = dz(gp.axes[0] || 0); my = dz(gp.axes[1] || 0);
+    lx = dz(gp.axes[2] || 0); ly = dz(gp.axes[3] || 0);
+    up = ((gp.buttons[7] && gp.buttons[7].value) || 0) - ((gp.buttons[6] && gp.buttons[6].value) || 0);
+    boost = (gp.buttons[0] && gp.buttons[0].pressed) ? 1 : 0;
+  }
+  if (keys['KeyW']) my = -1; if (keys['KeyS']) my = 1;
+  if (keys['KeyA']) mx = -1; if (keys['KeyD']) mx = 1;
+  if (keys['ArrowLeft']) lx = -1; if (keys['ArrowRight']) lx = 1;
+  if (keys['ArrowUp']) ly = -1; if (keys['ArrowDown']) ly = 1;
+  if (keys['Space']) up = 1; if (keys['ShiftLeft'] || keys['ControlLeft']) up = -1;
+  if (keys['ShiftRight']) boost = 1;
+
+  const LOOK = 2.4;
+  look.yaw -= lx * LOOK * dt;
+  look.pitch = Math.max(-1.45, Math.min(1.45, look.pitch - ly * LOOK * dt));
+  camera.rotation.set(look.pitch, look.yaw, 0);
+
+  const SPEED = 380 * (1 + boost * 2.0);
+  fwd.set(0, 0, -1).applyEuler(camera.rotation);
+  rt.set(1, 0, 0).applyEuler(camera.rotation);
+  mv.set(0, 0, 0).addScaledVector(fwd, -my).addScaledVector(rt, mx);
+  mv.y += up;
+  const px = camera.position.x, pz = camera.position.z;
+  camera.position.addScaledVector(mv, SPEED * dt);
+
+  // COLLISION: query the same CPU terrain field the water uses — stay in the open
+  //   void (above the floor, below the ceiling). Walls pinch shut => blocked.
+  const M = 22;
+  let fl = groundY(camera.position.x, camera.position.z) + M;
+  let ce = ceilY(camera.position.x, camera.position.z) - M;
+  if (ce - fl < 24) {                       // pinched (a wall) => undo the horizontal move
+    camera.position.x = px; camera.position.z = pz;
+    fl = groundY(px, pz) + M; ce = ceilY(px, pz) - M;
+  }
+  camera.position.y = Math.max(fl, Math.min(ce, camera.position.y));
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+planSegments();
+pump(Infinity);                    // build the opening stretch up front
+await renderer.compileAsync(scene, camera);
+
+const fpsEl = document.getElementById('fps');
+let fpsAcc = 0, fpsFrames = 0;
+let last = performance.now();
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
+  updateControls(dt);
+  planSegments();
+  pump(VERT_BUDGET);
+  updateLOD();
+  updateCymatics(dt);
+  water.position.set(camera.position.x, WL, camera.position.z);
+  renderer.render(scene, camera);
+  fpsAcc += dt; fpsFrames++;
+  if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }
+});
+</script>
+</body>
+</html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         

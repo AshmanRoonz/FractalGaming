@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Modal Water Lab — basin eigenmodes (cymatics)</title>
+<style>
+  html,body{margin:0;height:100%;background:#070b12;overflow:hidden;color:#cfe0f0;
+    font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;}
+  #wrap{display:flex;height:100%;}
+  #stage{flex:1;position:relative;}
+  canvas{position:absolute;inset:0;width:100%;height:100%;image-rendering:auto;cursor:crosshair;}
+  #panel{width:250px;padding:14px;background:#0c1320;border-left:1px solid #1d2a3e;overflow:auto;}
+  #panel h1{font-size:14px;color:#8fd0ff;margin:0 0 4px;}
+  #panel p{color:#8ea4bd;margin:0 0 12px;}
+  .row{margin:9px 0;}
+  .row label{display:flex;justify-content:space-between;color:#a9c2db;}
+  .row input[type=range]{width:100%;}
+  .v{color:#7fffd4;}
+  button{width:100%;margin-top:6px;padding:7px;background:#16263c;color:#cfe0f0;border:1px solid #2a435f;border-radius:6px;cursor:pointer;}
+  button:hover{background:#1d3350;}
+  #overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    background:rgba(6,10,18,.85);color:#8fd0ff;font-size:15px;z-index:5;}
+  #hint{position:absolute;left:12px;top:12px;background:rgba(8,14,24,.6);padding:8px 10px;
+    border:1px solid #1d2a3e;border-radius:8px;pointer-events:none;}
+  #freqs{font-size:10px;color:#7e8ba0;white-space:pre-wrap;margin-top:8px;max-height:180px;overflow:auto;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hint"><b style="color:#8fd0ff">Modal Water</b><br>click the basin to splash · the surface is a sum of its eigenmodes</div>
+    <div id="overlay">computing basin modes…</div>
+  </div>
+  <div id="panel">
+    <h1>Eigenmode water</h1>
+    <p>The basin's natural standing-wave shapes (Chladni modes) are solved once, then the live surface is a sum of ringing oscillators.</p>
+    <div class="row"><label>Wave speed <span class="v" id="spd_v"></span></label><input id="spd" type="range" min="20" max="200" value="90"></div>
+    <div class="row"><label>Damping <span class="v" id="dmp_v"></span></label><input id="dmp" type="range" min="0" max="100" value="22"></div>
+    <div class="row"><label>Splash strength <span class="v" id="amp_v"></span></label><input id="amp" type="range" min="10" max="100" value="55"></div>
+    <button id="viewToggle">view: LIVE SURFACE</button>
+    <div class="row" id="modeRow" style="display:none"><label>mode # <span class="v" id="mode_v"></span></label><input id="mode" type="range" min="0" max="1" value="1"></div>
+    <button id="rebuild">new basin</button>
+    <button id="reset">calm the water</button>
+    <div id="freqs"></div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// MODAL WATER — solve a basin's Laplacian eigenmodes (standing-wave / Chladni
+//   shapes), then synthesize the live surface as a sum of damped oscillators,
+//   one per mode. Eigen-solve = warmup; runtime = a few dozen numbers.
+//   Subspace iteration on the diffusion operator H = I + αL converges to the
+//   lowest-frequency modes (largest H-eigenvalues), no external libraries.
+// ============================================================================
+const G = 76;                       // grid resolution
+const N = G * G;
+const M = 24;                       // number of modes to solve for
+const ALPHA = 0.20;                 // diffusion step (H = I + ALPHA*L)
+const IK = (i, j) => j * G + i;
+
+let mask = new Uint8Array(N);       // 1 = water cell
+let phi = [];                       // mode shapes (Float32Array each, normalized)
+let lam = new Float32Array(M);      // eigenvalues (<=0)
+let omega = new Float32Array(M);    // angular frequencies
+let amp = new Float32Array(M), vel = new Float32Array(M);   // live oscillator state
+let height = new Float32Array(N);   // reconstructed surface
+let waterCells = [];                // list of water cell indices
+
+// ---- basin: an irregular connected lake from blobby noise -------------------
+function hash2(x, z){ const n=Math.sin(x*127.1+z*311.7)*43758.5453; return n-Math.floor(n); }
+function vnoise(x,z){ const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);
+  const a=hash2(xi,zi),b=hash2(xi+1,zi),c=hash2(xi,zi+1),d=hash2(xi+1,zi+1);
+  return (a+(b-a)*u)+((c+(d-c)*u)-(a+(b-a)*u))*v; }
+function buildBasin(seed){
+  mask.fill(0);
+  const cx=G*0.5, cz=G*0.5, R=G*0.42;
+  for(let j=0;j<G;j++)for(let i=0;i<G;i++){
+    const dx=(i-cx)/R, dz=(j-cz)/R, r=Math.hypot(dx,dz);
+    const wob=vnoise(i*0.12+seed, j*0.12-seed)*0.55 + vnoise(i*0.05-seed, j*0.05+seed)*0.45;
+    mask[IK(i,j)] = (r < 0.55 + (wob-0.5)*0.9) ? 1 : 0;
+  }
+  // keep only the largest connected component (one body)
+  const lab=new Int32Array(N).fill(-1); let best=-1,bestN=0,nb=0;
+  for(let s=0;s<N;s++){ if(!mask[s]||lab[s]>=0) continue; const id=nb++; let cnt=0; const st=[s];
+    while(st.length){ const k=st.pop(); if(lab[k]>=0) continue; lab[k]=id; cnt++;
+      const i=k%G,j=(k/G)|0;
+      if(i>0&&mask[k-1]&&lab[k-1]<0)st.push(k-1); if(i<G-1&&mask[k+1]&&lab[k+1]<0)st.push(k+1);
+      if(j>0&&mask[k-G]&&lab[k-G]<0)st.push(k-G); if(j<G-1&&mask[k+G]&&lab[k+G]<0)st.push(k+G); }
+    if(cnt>bestN){bestN=cnt;best=id;} }
+  for(let s=0;s<N;s++) mask[s] = (lab[s]===best)?1:0;
+  waterCells = []; for(let s=0;s<N;s++) if(mask[s]) waterCells.push(s);
+}
+
+// ---- L (Neumann Laplacian) and H = I + ALPHA*L applied to a vector ----------
+function applyL(x, out){
+  for(const k of waterCells){
+    const i=k%G,j=(k/G)|0; const c=x[k]; let s=0;
+    if(i>0&&mask[k-1]) s+=x[k-1]-c; if(i<G-1&&mask[k+1]) s+=x[k+1]-c;
+    if(j>0&&mask[k-G]) s+=x[k-G]-c; if(j<G-1&&mask[k+G]) s+=x[k+G]-c;
+    out[k]=s;
+  }
+}
+const _tmpL=new Float32Array(N);
+function applyH(x){ applyL(x,_tmpL); for(const k of waterCells) x[k]=x[k]+ALPHA*_tmpL[k]; }
+function dot(a,b){ let s=0; for(const k of waterCells) s+=a[k]*b[k]; return s; }
+function norml(a){ const n=Math.sqrt(dot(a,a))||1; const inv=1/n; for(const k of waterCells) a[k]*=inv; return n; }
+
+// ---- subspace iteration: M vectors, diffuse + Gram-Schmidt => lowest modes --
+function computeModes(){
+  // random start
+  const V=[]; for(let m=0;m<M;m++){ const v=new Float32Array(N);
+    for(const k of waterCells) v[k]=Math.random()*2-1; V.push(v); }
+  const ITER=140;
+  for(let it=0; it<ITER; it++){
+    for(let m=0;m<M;m++){ applyH(V[m]); applyH(V[m]); applyH(V[m]); }   // smooth (amplify low modes)
+    // modified Gram-Schmidt orthonormalize
+    for(let m=0;m<M;m++){
+      for(let p=0;p<m;p++){ const d=dot(V[m],V[p]); const vp=V[p],vm=V[m]; for(const k of waterCells) vm[k]-=d*vp[k]; }
+      norml(V[m]);
+    }
+  }
+  phi=V;
+  // eigenvalues via Rayleigh quotient, then sort ascending |λ| (low freq first)
+  const order=[];
+  for(let m=0;m<M;m++){ applyL(V[m],_tmpL); order.push({m, l: dot(V[m],_tmpL)}); }   // l = φ·Lφ (≤0)
+  order.sort((a,b)=> b.l - a.l);    // closest to 0 first
+  const sp=[], sl=new Float32Array(M);
+  for(let m=0;m<M;m++){ sp.push(V[order[m].m]); sl[m]=order[m].l; }
+  phi=sp; lam=sl;
+  updateOmega();
+}
+function updateOmega(){
+  const c = +document.getElementById('spd').value / 1000;
+  for(let m=0;m<M;m++) omega[m]=Math.sqrt(Math.max(0,-lam[m]))*c*60;
+}
+
+// ---- runtime: excite + integrate the modal oscillators ----------------------
+function excite(cellK, strength){
+  for(let m=0;m<M;m++) vel[m] += strength * phi[m][cellK];   // project the impulse onto each mode
+}
+function stepModal(dt){
+  const g0 = +document.getElementById('dmp').value/100 * 0.9;
+  for(let m=0;m<M;m++){
+    vel[m] += (-omega[m]*omega[m]*amp[m]) * dt;
+    vel[m] *= Math.exp(-(g0 + omega[m]*0.012) * dt);   // higher modes damp faster (realistic)
+    amp[m] += vel[m] * dt;
+  }
+}
+function reconstruct(){
+  height.fill(0);
+  for(let m=0;m<M;m++){ const a=amp[m], p=phi[m]; if(Math.abs(a)<1e-5) continue;
+    for(const k of waterCells) height[k]+=a*p[k]; }
+}
+
+// ============================================================================
+// Render (canvas heatmap) + input
+// ============================================================================
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+let cw=0,ch=0,cell=0,ox=0,oy=0;
+function resize(){ const r=cv.parentElement.getBoundingClientRect(); cv.width=cw=r.width; cv.height=ch=r.height;
+  cell=Math.min(cw,ch)/G; ox=(cw-cell*G)/2; oy=(ch-cell*G)/2; }
+addEventListener('resize',resize);
+
+let viewLive=true, viewMode=1;
+function fieldVal(k){ return viewLive ? height[k]*0.9 : phi[k] ? phi[viewMode] ? phi[viewMode][k]*4.0 : 0 : 0; }
+function draw(){
+  ctx.fillStyle='#070b12'; ctx.fillRect(0,0,cw,ch);
+  const fld = viewLive ? height : (phi[viewMode]||height);
+  const gain = viewLive ? 0.9 : 4.0;
+  for(let j=0;j<G;j++)for(let i=0;i<G;i++){
+    const k=IK(i,j); if(!mask[k]) continue;
+    let v=fld[k]*gain; v=Math.max(-1,Math.min(1,v));
+    // diverging map: trough = deep navy, node = teal, crest = bright cyan/white
+    let r,g,b;
+    if(v>=0){ r=20+v*180; g=120+v*120; b=150+v*105; }
+    else { const t=-v; r=8+t*8; g=40-t*30; b=70+t*40; }
+    ctx.fillStyle=`rgb(${r|0},${g|0},${b|0})`;
+    ctx.fillRect(ox+i*cell, oy+j*cell, cell+1, cell+1);
+  }
+}
+
+function canvasToCell(ev){
+  const r=cv.getBoundingClientRect();
+  const i=Math.floor((ev.clientX-r.left-ox)/cell), j=Math.floor((ev.clientY-r.top-oy)/cell);
+  if(i<0||i>=G||j<0||j>=G) return -1; const k=IK(i,j); return mask[k]?k:-1;
+}
+cv.addEventListener('pointerdown', e=>{ const k=canvasToCell(e); if(k>=0) excite(k, +document.getElementById('amp').value/100*4); });
+
+// ---- UI ----
+function setLabels(){ for(const id of ['spd','dmp','amp']) document.getElementById(id+'_v').textContent=document.getElementById(id).value; }
+document.getElementById('spd').oninput=()=>{ setLabels(); updateOmega(); };
+document.getElementById('dmp').oninput=setLabels;
+document.getElementById('amp').oninput=setLabels;
+document.getElementById('viewToggle').onclick=()=>{ viewLive=!viewLive;
+  document.getElementById('viewToggle').textContent='view: '+(viewLive?'LIVE SURFACE':'MODE SHAPE');
+  document.getElementById('modeRow').style.display=viewLive?'none':'block'; };
+const modeSlider=document.getElementById('mode'); modeSlider.max=M-1;
+modeSlider.oninput=()=>{ viewMode=+modeSlider.value; document.getElementById('mode_v').textContent=viewMode; };
+document.getElementById('reset').onclick=()=>{ amp.fill(0); vel.fill(0); };
+document.getElementById('rebuild').onclick=()=> warmupAndRun(Math.random()*100);
+
+function showFreqs(){
+  let s='λ (eigenvalue)  →  ω\n';
+  for(let m=0;m<M;m++) s+= m.toString().padStart(2)+'  '+lam[m].toFixed(3).padStart(7)+'   '+omega[m].toFixed(2)+'\n';
+  document.getElementById('freqs').textContent=s;
+}
+
+// ============================================================================
+// Warmup (the heavy eigen-solve) then run
+// ============================================================================
+let started=false;
+function warmupAndRun(seed){
+  document.getElementById('overlay').style.display='flex';
+  amp.fill(0); vel.fill(0);
+  setTimeout(()=>{                       // let the overlay paint before we block
+    buildBasin(seed);
+    computeModes();
+    showFreqs();
+    document.getElementById('overlay').style.display='none';
+    if(!started){ started=true; let last=performance.now();
+      (function loop(now){ const dt=Math.min(0.05,(now-last)/1000); last=now;
+        stepModal(dt); reconstruct(); draw(); requestAnimationFrame(loop); })(performance.now());
+    }
+  }, 60);
+}
+resize(); setLabels();
+warmupAndRun(7.0);
+</script>
+</body>
+</html>

@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wind Tank — two-way flow prototype</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #070b12; overflow: hidden;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cfe0f0; }
+  #wrap { display: flex; height: 100%; }
+  #stage { flex: 1; position: relative; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #panel { width: 250px; padding: 14px; background: #0c1320; border-left: 1px solid #1d2a3e; overflow:auto; }
+  #panel h1 { font-size: 14px; color: #8fd0ff; margin: 0 0 4px; }
+  #panel p { color: #8ea4bd; margin: 0 0 12px; }
+  .row { margin: 9px 0; }
+  .row label { display:flex; justify-content:space-between; color:#a9c2db; }
+  .row input[type=range] { width: 100%; }
+  .row .v { color:#7fffd4; }
+  button { width:100%; margin-top:6px; padding:7px; background:#16263c; color:#cfe0f0;
+    border:1px solid #2a435f; border-radius:6px; cursor:pointer; }
+  button:hover { background:#1d3350; }
+  label.chk { display:flex; gap:8px; align-items:center; color:#a9c2db; cursor:pointer; }
+  #hint { position:absolute; left:12px; top:12px; background:rgba(8,14,24,.6); padding:8px 10px;
+    border:1px solid #1d2a3e; border-radius:8px; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hint"><b style="color:#8fd0ff">Wind Tank</b><br>drag to stir the field · boats are carried by it &amp; stir it back<br><span id="windreadout" style="color:#7fffd4"></span></div>
+  </div>
+  <div id="panel">
+    <h1>Two-way flow</h1>
+    <p>One velocity field. Boats inject wake into it and get pushed by it. Deterministic fixed timestep.</p>
+    <div class="row"><label>Viscosity <span class="v" id="visc_v"></span></label><input id="visc" type="range" min="0" max="100" value="49"></div>
+    <div class="row"><label>Boat wake (stir) <span class="v" id="wake_v"></span></label><input id="wake" type="range" min="0" max="100" value="75"></div>
+    <div class="row"><label>Field → boat push <span class="v" id="coup_v"></span></label><input id="coup" type="range" min="0" max="100" value="72"></div>
+    <div class="row"><label>Wind (peak) <span class="v" id="wind_v"></span></label><input id="wind" type="range" min="0" max="100" value="14"></div>
+    <div class="row"><label>Gusts (peak) <span class="v" id="gust_v"></span></label><input id="gust" type="range" min="0" max="100" value="28"></div>
+    <div class="row"><label class="chk"><input id="showArrows" type="checkbox" checked> show field arrows</label></div>
+    <div class="row"><label class="chk"><input id="showDye" type="checkbox" checked> show dye (flow ink)</label></div>
+    <button id="addBoat">+ add boat</button>
+    <button id="reset">reset field</button>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// Stable-fluids velocity solver (Jos Stam, "Real-Time Fluid Dynamics for Games")
+//   unconditionally stable: diffuse -> project -> advect -> project.
+//   We treat this single velocity field as the shared WIND/CURRENT. Boats read
+//   it (it pushes them) and write it (their wake stirs it) -> two-way coupling.
+//   Pure + fixed timestep => deterministic given the same inputs (networkable).
+// ============================================================================
+const N = 80;                       // interior grid resolution
+const W = N + 2, SIZE = W * W;
+const IX = (i, j) => i + W * j;
+
+let u = new Float32Array(SIZE),  v = new Float32Array(SIZE);
+let u0 = new Float32Array(SIZE), v0 = new Float32Array(SIZE);
+let dens = new Float32Array(SIZE), dens0 = new Float32Array(SIZE);
+
+function setBnd(b, x) {
+  for (let i = 1; i <= N; i++) {
+    x[IX(0, i)]     = b === 1 ? -x[IX(1, i)] : x[IX(1, i)];
+    x[IX(N + 1, i)] = b === 1 ? -x[IX(N, i)] : x[IX(N, i)];
+    x[IX(i, 0)]     = b === 2 ? -x[IX(i, 1)] : x[IX(i, 1)];
+    x[IX(i, N + 1)] = b === 2 ? -x[IX(i, N)] : x[IX(i, N)];
+  }
+  x[IX(0, 0)]         = 0.5 * (x[IX(1, 0)] + x[IX(0, 1)]);
+  x[IX(0, N + 1)]     = 0.5 * (x[IX(1, N + 1)] + x[IX(0, N)]);
+  x[IX(N + 1, 0)]     = 0.5 * (x[IX(N, 0)] + x[IX(N + 1, 1)]);
+  x[IX(N + 1, N + 1)] = 0.5 * (x[IX(N, N + 1)] + x[IX(N + 1, N)]);
+}
+function linSolve(b, x, x0, a, c) {
+  const invc = 1 / c;
+  for (let k = 0; k < 18; k++) {
+    for (let j = 1; j <= N; j++)
+      for (let i = 1; i <= N; i++)
+        x[IX(i, j)] = (x0[IX(i, j)] + a * (x[IX(i-1, j)] + x[IX(i+1, j)] + x[IX(i, j-1)] + x[IX(i, j+1)])) * invc;
+    setBnd(b, x);
+  }
+}
+function diffuse(b, x, x0, diff, dt) {
+  const a = dt * diff * N * N;
+  linSolve(b, x, x0, a, 1 + 4 * a);
+}
+function advect(b, d, d0, uu, vv, dt) {
+  const dt0 = dt * N;
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    let x = i - dt0 * uu[IX(i, j)], y = j - dt0 * vv[IX(i, j)];
+    if (x < 0.5) x = 0.5; if (x > N + 0.5) x = N + 0.5;
+    if (y < 0.5) y = 0.5; if (y > N + 0.5) y = N + 0.5;
+    const i0 = x | 0, i1 = i0 + 1, j0 = y | 0, j1 = j0 + 1;
+    const s1 = x - i0, s0 = 1 - s1, t1 = y - j0, t0 = 1 - t1;
+    d[IX(i, j)] = s0 * (t0 * d0[IX(i0, j0)] + t1 * d0[IX(i0, j1)]) +
+                  s1 * (t0 * d0[IX(i1, j0)] + t1 * d0[IX(i1, j1)]);
+  }
+  setBnd(b, d);
+}
+function project(uu, vv, p, div) {
+  const h = 1 / N;
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    div[IX(i, j)] = -0.5 * h * (uu[IX(i+1, j)] - uu[IX(i-1, j)] + vv[IX(i, j+1)] - vv[IX(i, j-1)]);
+    p[IX(i, j)] = 0;
+  }
+  setBnd(0, div); setBnd(0, p);
+  linSolve(0, p, div, 1, 4);
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    uu[IX(i, j)] -= 0.5 * (p[IX(i+1, j)] - p[IX(i-1, j)]) / h;
+    vv[IX(i, j)] -= 0.5 * (p[IX(i, j+1)] - p[IX(i, j-1)]) / h;
+  }
+  setBnd(1, uu); setBnd(2, vv);
+}
+function velStep(visc, dt) {
+  // add forces already accumulated in u0/v0
+  for (let k = 0; k < SIZE; k++) { u[k] += dt * u0[k]; v[k] += dt * v0[k]; }
+  let t;
+  t = u0; u0 = u; u = t;  diffuse(1, u, u0, visc, dt);
+  t = v0; v0 = v; v = t;  diffuse(2, v, v0, visc, dt);
+  project(u, v, u0, v0);
+  t = u0; u0 = u; u = t;
+  t = v0; v0 = v; v = t;
+  advect(1, u, u0, u0, v0, dt);
+  advect(2, v, v0, u0, v0, dt);
+  project(u, v, u0, v0);
+}
+function densStep(diff, dt) {
+  for (let k = 0; k < SIZE; k++) dens[k] += dt * dens0[k];
+  let t = dens0; dens0 = dens; dens = t;
+  diffuse(0, dens, dens0, diff, dt);
+  t = dens0; dens0 = dens; dens = t;
+  advect(0, dens, dens0, u, v, dt);
+  for (let k = 0; k < SIZE; k++) dens[k] *= 0.992;   // ink fades
+}
+function clearForces() { u0.fill(0); v0.fill(0); dens0.fill(0); }
+function addForce(i, j, fx, fy, d) {
+  if (i < 1 || i > N || j < 1 || j > N) return;
+  const k = IX(i, j); u0[k] += fx; v0[k] += fy; dens0[k] += d;
+}
+
+// ---- bilinear sample of the field at grid coords (px,py in [0..N+1]) --------
+function sampleField(px, py, arr) {
+  let x = Math.max(0.5, Math.min(N + 0.5, px)), y = Math.max(0.5, Math.min(N + 0.5, py));
+  const i0 = x | 0, j0 = y | 0, i1 = i0 + 1, j1 = j0 + 1;
+  const s1 = x - i0, s0 = 1 - s1, t1 = y - j0, t0 = 1 - t1;
+  return s0 * (t0 * arr[IX(i0, j0)] + t1 * arr[IX(i0, j1)]) +
+         s1 * (t0 * arr[IX(i1, j0)] + t1 * arr[IX(i1, j1)]);
+}
+
+// ============================================================================
+// Boats: pushed by the field, and they stir it back (the two-way loop)
+// ============================================================================
+let boats = [];
+function addBoat(gx, gy) { boats.push({ x: gx, y: gy, vx: 0, vy: 0, hx: 1, hy: 0 }); }
+[ [N*0.3, N*0.4], [N*0.6, N*0.55], [N*0.45, N*0.7], [N*0.7, N*0.3], [N*0.25, N*0.65] ]
+  .forEach(p => addBoat(p[0], p[1]));
+
+// ============================================================================
+// Deterministic fixed-step simulation
+// ============================================================================
+const DT = 1 / 60;
+let P = {};
+function readUI() {
+  P.visc  = +visc.value / 100 * 0.0008;
+  P.wake  = +wake.value / 100 * 9;       // how hard boats stir the field
+  P.coup  = +coup.value / 100 * 4.5;     // how hard the field pushes boats
+  P.wind  = +wind.value / 100 * 2.2;     // prevailing wind force (+x)
+  P.gust  = +gust.value / 100;           // gust amplitude
+  for (const id of ['visc','wake','coup','wind','gust'])
+    document.getElementById(id + '_v').textContent = document.getElementById(id).value;
+}
+
+let simTime = 0, windInfo = 0;
+function step() {
+  clearForces();
+
+  // DYNAMIC prevailing wind: direction slowly wanders, magnitude breathes
+  const windAng = Math.sin(simTime * 0.05) * 0.9 + Math.cos(simTime * 0.017) * 0.6;
+  const windMag = P.wind * (0.45 + 0.55 * Math.sin(simTime * 0.03));
+  const wX = Math.cos(windAng) * windMag, wZ = Math.sin(windAng) * windMag;
+  // DYNAMIC gusts: episodic surges that sweep across the tank ALONG the wind
+  // (envelope is mostly low with occasional peaks => calm, then a gust rolls through)
+  const env = Math.max(0, Math.sin(simTime * 0.13) * Math.sin(simTime * 0.047 + 1.3));
+  const gA = P.gust * (0.12 + env * 1.8);
+  const gc = Math.cos(windAng), gs = Math.sin(windAng);
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    const front = Math.sin((i * gc + j * gs) * 0.16 - simTime * 1.1);   // gust front travels downwind
+    const g = gA * front;
+    u0[IX(i, j)] += wX + g * gc * 1.5;
+    v0[IX(i, j)] += wZ + g * gs * 1.5;
+  }
+  windInfo = windMag + gA;   // for the HUD readout
+
+  // mouse stirring
+  if (mouse.down && mouse.pi >= 1 && mouse.pi <= N && mouse.pj >= 1 && mouse.pj <= N) {
+    const fx = (mouse.pi - mouse.lpi) * 30, fy = (mouse.pj - mouse.lpj) * 30;
+    addForce(mouse.pi | 0, mouse.pj | 0, fx, fy, 60);
+    mouse.lpi = mouse.pi; mouse.lpj = mouse.pj;
+  }
+
+  // boats stir the field (wake), proportional to how fast they move through it
+  for (const b of boats) {
+    const gi = b.x | 0, gj = b.y | 0;
+    addForce(gi, gj, b.vx * P.wake, b.vy * P.wake, 22);
+  }
+
+  velStep(P.visc, DT);
+  densStep(0.00002, DT);
+
+  // field pushes the boats: drag toward local fluid velocity (in grid units/sec)
+  for (const b of boats) {
+    const fu = sampleField(b.x, b.y, u) * N, fv = sampleField(b.x, b.y, v) * N;
+    b.vx += (fu - b.vx) * P.coup * DT;
+    b.vy += (fv - b.vy) * P.coup * DT;
+    b.x += b.vx * DT; b.y += b.vy * DT;
+    // soft walls: bounce + damp
+    if (b.x < 1) { b.x = 1; b.vx = Math.abs(b.vx) * 0.4; }
+    if (b.x > N) { b.x = N; b.vx = -Math.abs(b.vx) * 0.4; }
+    if (b.y < 1) { b.y = 1; b.vy = Math.abs(b.vy) * 0.4; }
+    if (b.y > N) { b.y = N; b.vy = -Math.abs(b.vy) * 0.4; }
+    const sp = Math.hypot(b.vx, b.vy);
+    if (sp > 0.001) { b.hx = b.vx / sp; b.hy = b.vy / sp; }   // heading follows motion
+  }
+  simTime += DT;
+}
+
+// ============================================================================
+// Rendering (canvas 2D)
+// ============================================================================
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+let cw = 0, ch = 0, cell = 0, ox = 0, oy = 0;
+function resize() {
+  const r = c.parentElement.getBoundingClientRect();
+  c.width = cw = r.width; c.height = ch = r.height;
+  cell = Math.min(cw, ch) / N;
+  ox = (cw - cell * N) / 2; oy = (ch - cell * N) / 2;
+}
+addEventListener('resize', resize);
+const G2P = (gx, gy) => [ox + (gx - 0.5) * cell, oy + (gy - 0.5) * cell];
+
+function draw() {
+  ctx.fillStyle = '#0a1018'; ctx.fillRect(0, 0, cw, ch);
+  // dye (flow ink)
+  if (showDye.checked) {
+    for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+      const d = dens[IX(i, j)];
+      if (d < 0.01) continue;
+      const a = Math.min(0.9, d * 0.5);
+      ctx.fillStyle = `rgba(120,190,255,${a})`;
+      ctx.fillRect(ox + (i - 1) * cell, oy + (j - 1) * cell, cell + 1, cell + 1);
+    }
+  }
+  // field arrows
+  if (showArrows.checked) {
+    ctx.strokeStyle = 'rgba(150,210,255,0.35)'; ctx.lineWidth = 1;
+    const stepN = 3;
+    ctx.beginPath();
+    for (let j = 1; j <= N; j += stepN) for (let i = 1; i <= N; i += stepN) {
+      const [px, py] = G2P(i, j);
+      const a = u[IX(i, j)] * N * cell * 0.12, b = v[IX(i, j)] * N * cell * 0.12;
+      const len = Math.hypot(a, b); if (len < 0.5) continue;
+      ctx.moveTo(px, py); ctx.lineTo(px + a, py + b);
+    }
+    ctx.stroke();
+  }
+  // boats
+  for (const bt of boats) {
+    const [px, py] = G2P(bt.x, bt.y);
+    const ang = Math.atan2(bt.hy, bt.hx);
+    ctx.save(); ctx.translate(px, py); ctx.rotate(ang);
+    ctx.fillStyle = '#ffb13b'; ctx.strokeStyle = '#5a2e00'; ctx.lineWidth = 1.5;
+    const s = Math.max(7, cell * 0.9);
+    ctx.beginPath(); ctx.moveTo(s, 0); ctx.lineTo(-s * 0.7, s * 0.6); ctx.lineTo(-s * 0.7, -s * 0.6); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ============================================================================
+// Input + loop
+// ============================================================================
+const mouse = { down: false, pi: 0, pj: 0, lpi: 0, lpj: 0 };
+function toGrid(ev) {
+  const r = c.getBoundingClientRect();
+  const x = (ev.clientX - r.left - ox) / cell + 0.5;
+  const y = (ev.clientY - r.top  - oy) / cell + 0.5;
+  return [x, y];
+}
+c.addEventListener('pointerdown', e => {
+  mouse.down = true; [mouse.pi, mouse.pj] = toGrid(e); mouse.lpi = mouse.pi; mouse.lpj = mouse.pj;
+  c.setPointerCapture(e.pointerId);
+});
+c.addEventListener('pointermove', e => { if (mouse.down) [mouse.pi, mouse.pj] = toGrid(e); });
+addEventListener('pointerup', () => mouse.down = false);
+
+document.getElementById('addBoat').onclick = () => addBoat(N * 0.5, N * 0.5);
+document.getElementById('reset').onclick = () => { u.fill(0); v.fill(0); dens.fill(0); };
+
+let acc = 0, last = performance.now();
+function frame(now) {
+  readUI();
+  acc += Math.min(0.05, (now - last) / 1000); last = now;
+  while (acc >= DT) { step(); acc -= DT; }   // fixed-step => deterministic
+  const lvl = Math.min(1, windInfo / 0.7), bars = Math.round(lvl * 6);
+  document.getElementById('windreadout').textContent =
+    'wind/gust: ' + '▮'.repeat(bars) + '▯'.repeat(6 - bars) + (lvl > 0.7 ? '  GUST!' : '');
+  draw();
+  requestAnimationFrame(frame);
+}
+resize(); readUI(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

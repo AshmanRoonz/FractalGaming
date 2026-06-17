@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Endless Cavern — GPU chunks</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #9fb4c6; cursor: crosshair; }
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 10;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #2c3a48; background: rgba(255,255,255,0.35); border-radius: 8px;
+    padding: 6px 12px; backdrop-filter: blur(6px); pointer-events: none;
+    transition: opacity 1.2s ease; opacity: 1;
+  }
+</style>
+</head>
+<body>
+<div id="hint">gamepad: left stick fly · right stick look · triggers up/down — or WASD + mouse (click to capture)</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { float, vec2, vec3, positionLocal, positionWorld, cameraPosition,
+         mx_noise_float, mix, clamp, smoothstep, normalize, color, time, varying } from 'three/tsl';
+
+// ============================================================================
+// PERSISTENT GPU CHUNKS. The world is divided into fixed tiles. Each tile is a
+//   plane whose vertices are baked at their TRUE world position, displaced in
+//   the shader by a noise height field. A tile is generated once, stays locked
+//   in world space (never moves, never redraws), and only unloads when far.
+//   Fly back and the same tile is regenerated identically => persistence.
+// ============================================================================
+const SPACING = 260, BASE_FREQ = 1 / SPACING, WARP_FREQ = 1 / (SPACING * 2.2), WARP = 70, EXPO = 1.7;
+const YMID = 0, GAP = 300, GAP_CEIL = 560;
+const YFLOOR = YMID - GAP;            // ground base (valleys)
+const YCEIL  = YMID + GAP_CEIL;       // ceiling base (headroom)
+const GROUND_AMP = 300, CEIL_AMP = 280;
+const WL = -170;                      // sea level
+
+const CHUNK = 1100, CSEG = 64;        // tile size + resolution (~17 units / quad)
+const RAD = 3;                        // load chunks well BEYOND view (7x7) so nothing pops in
+const FADE0 = 2050, FADE1 = 2650;     // visible range sits INSIDE the loaded radius (3*1100)
+const FOGC = 0x9fb4c6;
+
+// ---- TSL noise helpers (px,pz are WORLD coords baked into the chunk geometry) -
+function ridged(px, pz, seed) {
+  let sum = null, ampSum = 0, amp = 1, freq = BASE_FREQ;
+  let prev = float(1);
+  for (let o = 0; o < 4; o++) {
+    const n = mx_noise_float(vec3(px.mul(freq).add(seed * 19.3), pz.mul(freq).add(seed * 7.1), float(o * 0.37)));
+    let r = float(1).sub(n.abs()); r = r.mul(r);
+    const term = r.mul(prev).mul(amp);
+    sum = sum ? sum.add(term) : term;
+    prev = r; ampSum += amp; freq *= 2; amp *= 0.5;
+  }
+  return sum.div(ampSum).pow(EXPO);
+}
+function groundHeight(px, pz) {
+  const wxn = mx_noise_float(vec3(px.mul(WARP_FREQ), pz.mul(WARP_FREQ), float(0)));
+  const wzn = mx_noise_float(vec3(px.mul(WARP_FREQ).add(31.7), pz.mul(WARP_FREQ).add(17.3), float(0)));
+  const wx = px.add(wxn.mul(WARP)), wz = pz.add(wzn.mul(WARP));
+  return ridged(wx, wz, 1.7).mul(GROUND_AMP).add(YFLOOR);
+}
+function ceilHeight(px, pz) {
+  const ax = px.add(4000), az = pz.sub(4000);
+  const wxn = mx_noise_float(vec3(ax.mul(WARP_FREQ), az.mul(WARP_FREQ), float(0)));
+  const wzn = mx_noise_float(vec3(ax.mul(WARP_FREQ).add(31.7), az.mul(WARP_FREQ).add(17.3), float(0)));
+  const wx = ax.add(wxn.mul(WARP)), wz = az.add(wzn.mul(WARP));
+  return float(YCEIL).sub(ridged(wx, wz, 5.9).mul(CEIL_AMP));
+}
+function heightAt(isCeil, px, pz) { return isCeil ? ceilHeight(px, pz) : groundHeight(px, pz); }
+
+// ============================================================================
+// Renderer / scene / camera
+// ============================================================================
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(FOGC);
+scene.fog = new THREE.FogExp2(FOGC, 0.0006);
+
+const camera = new THREE.PerspectiveCamera(64, innerWidth / innerHeight, 1, 7000);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, 130, 0);
+
+scene.add(new THREE.AmbientLight(0x6076a0, 0.32));                  // cool sky fill
+const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x4a5a2e, 0.55);   // blue sky over grassy ground
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff0d6, 1.45);             // warm key => dramatic relief
+sun.position.set(0.55, 0.8, 0.3);
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0xbcd0ff, 0.35);            // cool back-fill for depth
+rim.position.set(-0.5, 0.3, -0.6);
+scene.add(rim);
+
+// ----- First-person flycam — LSS controls
+const look = { yaw: 0, pitch: 0 };
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+const cv = renderer.domElement;
+cv.addEventListener('click', () => { if (!document.pointerLockElement) cv.requestPointerLock(); });
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement === cv) { look.yaw -= e.movementX * 0.0022; look.pitch -= e.movementY * 0.0022; }
+});
+const _hintEl = document.getElementById('hint');
+let _hintTimer = 6;
+const DEAD = 0.12;
+const dz = v => Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
+const _fwd = new THREE.Vector3(), _rt = new THREE.Vector3(), _mv = new THREE.Vector3();
+function updateControls(dt) {
+  let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
+  if (gp) {
+    mx = dz(gp.axes[0] || 0); my = dz(gp.axes[1] || 0);
+    lx = dz(gp.axes[2] || 0); ly = dz(gp.axes[3] || 0);
+    up = ((gp.buttons[7] && gp.buttons[7].value) || 0) - ((gp.buttons[6] && gp.buttons[6].value) || 0);
+    boost = (gp.buttons[0] && gp.buttons[0].pressed) ? 1 : 0;
+  }
+  if (keys['KeyW']) my = -1; if (keys['KeyS']) my = 1;
+  if (keys['KeyA']) mx = -1; if (keys['KeyD']) mx = 1;
+  if (keys['ArrowLeft']) lx = -1; if (keys['ArrowRight']) lx = 1;
+  if (keys['ArrowUp']) ly = -1; if (keys['ArrowDown']) ly = 1;
+  if (keys['Space']) up = 1; if (keys['ShiftLeft'] || keys['ControlLeft']) up = -1;
+  if (keys['ShiftRight']) boost = 1;
+
+  const LOOK = 2.4;
+  look.yaw -= lx * LOOK * dt;
+  look.pitch = Math.max(-1.45, Math.min(1.45, look.pitch - ly * LOOK * dt));
+  camera.rotation.set(look.pitch, look.yaw, 0);
+
+  const SPEED = 420 * (1 + boost * 2.0);
+  _fwd.set(0, 0, -1).applyEuler(camera.rotation);
+  _rt.set(1, 0, 0).applyEuler(camera.rotation);
+  _mv.set(0, 0, 0).addScaledVector(_fwd, -my).addScaledVector(_rt, mx);
+  _mv.y += up;
+  camera.position.addScaledVector(_mv, SPEED * dt);
+
+  if (_hintTimer > 0) { _hintTimer -= dt; if (_hintTimer <= 0 && _hintEl) _hintEl.style.opacity = 0; }
+}
+
+// ============================================================================
+// Terrain materials (shared by every chunk; the geometry carries world coords)
+// ============================================================================
+function groundColor(wx, wz, H, nrm, ao) {
+  const slope = clamp(nrm.y, 0, 1);                              // 1 flat, 0 cliff
+  const t = clamp(H.sub(YFLOOR).div(GROUND_AMP), 0, 1);         // 0 valley, 1 peak
+  // patch + a slow large-scale variation so it isn't one flat green
+  const pc = mx_noise_float(vec3(wx.mul(0.0016).add(5.1), wz.mul(0.0016).sub(2.3), float(0))).mul(0.5).add(0.5);
+  const biome = mx_noise_float(vec3(wx.mul(0.00045), wz.mul(0.00045), float(9.2))).mul(0.5).add(0.5);
+  let grass = mix(color(0x35551f), color(0x5fae4e), smoothstep(0.30, 0.62, pc));
+  grass = mix(grass, color(0x93d268), smoothstep(0.62, 0.97, pc));
+  grass = mix(grass, color(0x6f9a3a), biome.sub(0.5).mul(0.5).add(0.5));    // warmer/cooler greens by region
+  let base = mix(color(0x5d6157), grass, smoothstep(0.40, 0.70, slope));    // steep => rock
+  base = mix(base, color(0xeef4f8), smoothstep(0.74, 0.93, t).mul(slope));  // peaks => snow
+  const mottle = mx_noise_float(vec3(wx.mul(0.02), wz.mul(0.02), float(0))).mul(0.16).add(0.92);
+  return base.mul(mottle).mul(ao);
+}
+function ceilColor(H, ao) {
+  const t = clamp(H.sub(YMID).div(YCEIL - YMID), 0, 1);
+  return mix(color(0x565f69), color(0x242830), t).mul(ao);
+}
+function terrainMaterial(isCeil) {
+  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide });
+  const wx = positionLocal.x, wz = positionLocal.z;            // baked world coords
+  const H = heightAt(isCeil, wx, wz);
+  mat.positionNode = vec3(positionLocal.x, H, positionLocal.z);
+  const e = 7.0;
+  const hL = heightAt(isCeil, wx.sub(e), wz), hR = heightAt(isCeil, wx.add(e), wz);
+  const hD = heightAt(isCeil, wx, wz.sub(e)), hU = heightAt(isCeil, wx, wz.add(e));
+  let nrm = normalize(vec3(hL.sub(hR), float(2 * e), hD.sub(hU)));
+  if (isCeil) nrm = nrm.mul(-1);
+  mat.normalNode = nrm;
+  // cheap cavity AO from curvature: concave pockets (valleys, crevices) darken
+  const curv = hL.add(hR).add(hD).add(hU).sub(H.mul(4));
+  const ao = clamp(float(1).sub(curv.max(0).mul(0.004)), 0.5, 1.0);
+  const col = varying(isCeil ? ceilColor(H, ao) : groundColor(wx, wz, H, nrm, ao));
+  const rad = positionWorld.xz.sub(cameraPosition.xz).length();
+  const fade = smoothstep(float(FADE0), float(FADE1), rad);
+  mat.colorNode = mix(col, color(FOGC), fade);
+  return mat;
+}
+const groundMat = terrainMaterial(false);
+const ceilMat = terrainMaterial(true);
+
+// ============================================================================
+// CHUNK MANAGER — fixed tiles around the player; generate near, drop far.
+// ============================================================================
+const loaded = new Map();
+function makeChunkMesh(ix, iz, isCeil) {
+  const geo = new THREE.PlaneGeometry(CHUNK, CHUNK, CSEG, CSEG);
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(ix * CHUNK, 0, iz * CHUNK);     // bake the tile's true world position
+  const mesh = new THREE.Mesh(geo, isCeil ? ceilMat : groundMat);
+  // displaced geometry confuses the flat bounding sphere => it can wrongly cull
+  // when you turn. Give it a generous manual bounds so tiles never vanish.
+  geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(ix * CHUNK, YMID, iz * CHUNK), CHUNK * 1.1);
+  mesh.frustumCulled = true;                    // correct manual bounds => safe to cull, stays cheap
+  return mesh;
+}
+function updateChunks(budget) {
+  const cix = Math.round(camera.position.x / CHUNK), ciz = Math.round(camera.position.z / CHUNK);
+  for (let ring = 0; ring <= RAD && budget > 0; ring++) {
+    for (let dz = -RAD; dz <= RAD && budget > 0; dz++) for (let dx = -RAD; dx <= RAD && budget > 0; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue;   // nearest rings first
+      const ix = cix + dx, iz = ciz + dz, key = ix + ',' + iz;
+      if (!loaded.has(key)) {
+        const g = makeChunkMesh(ix, iz, false); scene.add(g);
+        const c = makeChunkMesh(ix, iz, true);  scene.add(c);
+        loaded.set(key, { g, c });
+        budget--;
+      }
+    }
+  }
+  for (const [key, ch] of loaded) {             // unload far (with hysteresis)
+    const p = key.split(','), ix = +p[0], iz = +p[1];
+    if (Math.abs(ix - cix) > RAD + 1 || Math.abs(iz - ciz) > RAD + 1) {
+      scene.remove(ch.g); scene.remove(ch.c);
+      ch.g.geometry.dispose(); ch.c.geometry.dispose();
+      loaded.delete(key);
+    }
+  }
+}
+
+// ============================================================================
+// SEA — one flat translucent plane following the player (featureless => no
+//   artifact). Terrain peaks poke through; valleys flood.
+// ============================================================================
+const water = (() => {
+  const geo = new THREE.PlaneGeometry(6500, 6500, 1, 1);
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const V = normalize(cameraPosition.sub(positionWorld));
+  const ndv = V.y.max(0);
+  const fres = float(0.04).add(float(0.55).mul(float(1).sub(ndv).pow(5)));
+  let body = mix(color(0x14506e), color(0x3b86a0), fres);
+  const sparkle = mx_noise_float(vec3(positionWorld.x.mul(0.03), positionWorld.z.mul(0.03), time.mul(0.5))).mul(0.5).add(0.5);
+  body = body.add(color(0xdfeefc).mul(sparkle.pow(28).mul(0.25)));
+  const rad = positionWorld.xz.sub(cameraPosition.xz).length();
+  const fade = smoothstep(float(FADE0), float(FADE1), rad);
+  mat.colorNode = mix(body, color(FOGC), fade);
+  mat.opacityNode = float(0.82).mul(float(1).sub(fade));
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false; mesh.renderOrder = 1;
+  return mesh;
+})();
+scene.add(water);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+updateChunks(999);                              // fill the initial ring before warmup
+await renderer.compileAsync(scene, camera);
+
+let _last = performance.now();
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - _last) / 1000); _last = now;
+  updateControls(dt);
+  updateChunks(3);                              // stream a few tiles/frame, well ahead of view
+  water.position.set(camera.position.x, WL, camera.position.z);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
