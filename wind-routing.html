@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Wind Routing — air flows around the mountains</title>
+<style>
+  html,body{margin:0;height:100%;background:#070b12;overflow:hidden;color:#cfe0f0;
+    font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;}
+  #wrap{display:flex;height:100%;}
+  #stage{flex:1;position:relative;}
+  canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair;}
+  #panel{width:250px;padding:14px;background:#0c1320;border-left:1px solid #1d2a3e;overflow:auto;}
+  #panel h1{font-size:14px;color:#8fd0ff;margin:0 0 4px;}
+  #panel p{color:#8ea4bd;margin:0 0 12px;}
+  .row{margin:9px 0;}
+  .row label{display:flex;justify-content:space-between;color:#a9c2db;}
+  .row input[type=range]{width:100%;}
+  .v{color:#7fffd4;}
+  label.chk{display:flex;gap:8px;align-items:center;color:#a9c2db;cursor:pointer;}
+  button{width:100%;margin-top:6px;padding:7px;background:#16263c;color:#cfe0f0;border:1px solid #2a435f;border-radius:6px;cursor:pointer;}
+  button:hover{background:#1d3350;}
+  #hint{position:absolute;left:12px;top:12px;background:rgba(8,14,24,.6);padding:8px 10px;border:1px solid #1d2a3e;border-radius:8px;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="c"></canvas>
+    <div id="hint"><b style="color:#8fd0ff">Wind Routing</b><br>wind flows L→R and routes around the mountains (grey) · drag the ship · click to fire a rocket gust</div>
+  </div>
+  <div id="panel">
+    <h1>One air, bounded</h1>
+    <p>An incompressible air sim. Solid obstacles (mountains, the ship) force the flow to stream around them — the air is one medium, shaped by the geometry.</p>
+    <div class="row"><label>Wind <span class="v" id="wind_v"></span></label><input id="wind" type="range" min="0" max="100" value="60"></div>
+    <div class="row"><label>Gusts <span class="v" id="gust_v"></span></label><input id="gust" type="range" min="0" max="100" value="0"></div>
+    <div class="row"><label>Viscosity <span class="v" id="visc_v"></span></label><input id="visc" type="range" min="0" max="100" value="45"></div>
+    <div class="row"><label class="chk"><input id="showArrows" type="checkbox" checked> field arrows</label></div>
+    <div class="row"><label class="chk"><input id="showDye" type="checkbox" checked> dye (streamlines)</label></div>
+    <button id="newPeaks">new mountains</button>
+    <button id="reset">reset flow</button>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+// Stable-fluids (Jos Stam) with SOLID OBSTACLES. The pressure projection makes
+//   the field divergence-free AROUND the solids, so wind routes around the
+//   mountains (and the ship). The air is ONE connected medium, bounded by the
+//   geometry. Fixed-step + no RNG in the step => deterministic / networkable.
+// ============================================================================
+const N = 110, W = N + 2, SIZE = W * W;
+const IX = (i, j) => i + W * j;
+let u = new Float32Array(SIZE), v = new Float32Array(SIZE);
+let u0 = new Float32Array(SIZE), v0 = new Float32Array(SIZE);
+let dens = new Float32Array(SIZE), dens0 = new Float32Array(SIZE);
+const solid = new Uint8Array(SIZE);     // 1 = obstacle (mountain or ship)
+const mtn = new Uint8Array(SIZE);       // static mountains (ship is added on top each frame)
+
+function clearSolids() { for (let k = 0; k < SIZE; k++) if (solid[k]) { u[k] = 0; v[k] = 0; } }
+
+function setBnd(b, x) {
+  for (let i = 1; i <= N; i++) {
+    x[IX(0, i)]     = b === 1 ? -x[IX(1, i)] : x[IX(1, i)];
+    x[IX(N + 1, i)] = b === 1 ? -x[IX(N, i)] : x[IX(N, i)];
+    x[IX(i, 0)]     = b === 2 ? -x[IX(i, 1)] : x[IX(i, 1)];
+    x[IX(i, N + 1)] = b === 2 ? -x[IX(i, N)] : x[IX(i, N)];
+  }
+}
+function diffuse(b, x, x0, diff, dt) {
+  const a = dt * diff * N * N, c = 1 + 4 * a;
+  for (let k = 0; k < 14; k++) {
+    for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+      const ij = IX(i, j); if (solid[ij]) continue;
+      x[ij] = (x0[ij] + a * (x[IX(i-1,j)] + x[IX(i+1,j)] + x[IX(i,j-1)] + x[IX(i,j+1)])) / c;
+    }
+    setBnd(b, x);
+  }
+}
+function advect(b, d, d0, uu, vv, dt) {
+  const dt0 = dt * N;
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    const ij = IX(i, j); if (solid[ij]) { d[ij] = 0; continue; }
+    let x = i - dt0 * uu[ij], y = j - dt0 * vv[ij];
+    if (x < 0.5) x = 0.5; if (x > N + 0.5) x = N + 0.5;
+    if (y < 0.5) y = 0.5; if (y > N + 0.5) y = N + 0.5;
+    const i0 = x | 0, i1 = i0 + 1, j0 = y | 0, j1 = j0 + 1;
+    const s1 = x - i0, s0 = 1 - s1, t1 = y - j0, t0 = 1 - t1;
+    d[ij] = s0 * (t0 * d0[IX(i0,j0)] + t1 * d0[IX(i0,j1)]) + s1 * (t0 * d0[IX(i1,j0)] + t1 * d0[IX(i1,j1)]);
+  }
+  setBnd(b, d);
+}
+// obstacle-aware pressure projection: solid neighbours act as walls (Neumann)
+function project(uu, vv, p, div) {
+  const h = 1 / N;
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    const ij = IX(i, j); p[ij] = 0;
+    if (solid[ij]) { div[ij] = 0; continue; }
+    div[ij] = -0.5 * h * (uu[IX(i+1,j)] - uu[IX(i-1,j)] + vv[IX(i,j+1)] - vv[IX(i,j-1)]);
+  }
+  setBnd(0, div);
+  for (let k = 0; k < 30; k++) {
+    for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+      const ij = IX(i, j); if (solid[ij]) continue;
+      let sum = 0, cnt = 0;
+      const nb = [IX(i-1,j), IX(i+1,j), IX(i,j-1), IX(i,j+1)];
+      for (const n of nb) { if (!solid[n]) { sum += p[n]; cnt++; } }
+      p[ij] = (div[ij] + sum) / Math.max(cnt, 1);
+    }
+    setBnd(0, p);
+  }
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    const ij = IX(i, j); if (solid[ij]) continue;
+    const pR = solid[IX(i+1,j)] ? p[ij] : p[IX(i+1,j)];   // Neumann: no push into solids
+    const pL = solid[IX(i-1,j)] ? p[ij] : p[IX(i-1,j)];
+    const pU = solid[IX(i,j+1)] ? p[ij] : p[IX(i,j+1)];
+    const pD = solid[IX(i,j-1)] ? p[ij] : p[IX(i,j-1)];
+    uu[ij] -= 0.5 * (pR - pL) / h;
+    vv[ij] -= 0.5 * (pU - pD) / h;
+  }
+  setBnd(1, uu); setBnd(2, vv);
+}
+function velStep(visc, dt) {
+  for (let k = 0; k < SIZE; k++) { u[k] += dt * u0[k]; v[k] += dt * v0[k]; }
+  clearSolids();
+  let t;
+  t = u0; u0 = u; u = t; diffuse(1, u, u0, visc, dt);
+  t = v0; v0 = v; v = t; diffuse(2, v, v0, visc, dt);
+  clearSolids(); project(u, v, u0, v0);
+  t = u0; u0 = u; u = t; t = v0; v0 = v; v = t;
+  advect(1, u, u0, u0, v0, dt); advect(2, v, v0, u0, v0, dt);
+  clearSolids(); project(u, v, u0, v0);
+  for (let k = 0; k < SIZE; k++) { u[k] *= 0.99; v[k] *= 0.99; }   // dissipation => steady state, no blow-up
+}
+function densStep(diff, dt) {
+  for (let k = 0; k < SIZE; k++) dens[k] += dt * dens0[k];
+  let t = dens0; dens0 = dens; dens = t; diffuse(0, dens, dens0, diff, dt);
+  t = dens0; dens0 = dens; dens = t; advect(0, dens, dens0, u, v, dt);
+  for (let k = 0; k < SIZE; k++) dens[k] *= 0.995;   // ink lingers so streamlines read clearly
+}
+function clearForces() { u0.fill(0); v0.fill(0); dens0.fill(0); }
+
+// ---- mountains (static solids) ----
+function buildPeaks(seed) {
+  mtn.fill(0);
+  const peaks = 3;
+  for (let p = 0; p < peaks; p++) {
+    const cx = N * (0.3 + Math.random() * 0.45), cy = N * (0.25 + Math.random() * 0.5), r = N * (0.11 + Math.random() * 0.07);
+    for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++)
+      if ((i - cx) ** 2 + (j - cy) ** 2 < r * r) mtn[IX(i, j)] = 1;
+  }
+}
+
+// ---- ship (a moving obstacle that pushes the air) ----
+const ship = { x: N * 0.3, y: N * 0.5, px: N * 0.3, py: N * 0.5, r: 3.5, dragging: false };
+
+// ============================================================================
+// Fixed-step sim
+// ============================================================================
+const DT = 1 / 60;
+let P = {}, simTime = 0;
+function readUI() {
+  P.wind = +wind.value / 100 * 1.3;
+  P.gust = +gust.value / 100 * 0.6;
+  P.visc = +visc.value / 100 * 0.004;   // higher viscosity => laminar flow that clearly bends
+  for (const id of ['wind', 'gust', 'visc']) document.getElementById(id + '_v').textContent = document.getElementById(id).value;
+}
+function step() {
+  clearForces();
+  // rebuild solids = mountains + ship disk
+  solid.set(mtn);
+  const sxi = ship.x | 0, syi = ship.y | 0, R = Math.ceil(ship.r);
+  const svx = (ship.x - ship.px) / DT, svy = (ship.y - ship.py) / DT;
+  for (let dj = -R; dj <= R; dj++) for (let di = -R; di <= R; di++) {
+    const i = sxi + di, j = syi + dj; if (i < 1 || i > N || j < 1 || j > N) continue;
+    if (di * di + dj * dj <= ship.r * ship.r) { solid[IX(i, j)] = 1; u0[IX(i, j)] += svx * 2; v0[IX(i, j)] += svy * 2; dens0[IX(i, j)] += 40; }
+  }
+  ship.px = ship.x; ship.py = ship.y;
+  // prevailing wind (L->R) + travelling gusts, injected as a body force on fluid
+  const gA = P.gust;
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    const ij = IX(i, j); if (solid[ij]) continue;
+    u0[ij] += P.wind + gA * Math.sin(j * 0.18 + simTime * 0.9) * 1.4;
+    v0[ij] += gA * Math.sin(i * 0.2 - simTime * 0.7) * 0.7;
+  }
+  for (let j = 1; j <= N; j++) { const k = IX(2, j); if (!solid[k]) dens0[k] += 6; }   // inflow smoke => visible streamlines
+  // mouse stir
+  if (mouse.down && !mouse.fired && mouse.pi >= 1 && mouse.pi <= N) {
+    const fx = (mouse.pi - mouse.lpi) * 28, fy = (mouse.pj - mouse.lpj) * 28;
+    const k = IX(mouse.pi | 0, mouse.pj | 0); if (!solid[k]) { u0[k] += fx; v0[k] += fy; dens0[k] += 50; }
+    mouse.lpi = mouse.pi; mouse.lpj = mouse.pj;
+  }
+  velStep(P.visc, DT);
+  densStep(0.00001, DT);
+  simTime += DT;
+}
+
+// ============================================================================
+// Render
+// ============================================================================
+const c = document.getElementById('c'), ctx = c.getContext('2d');
+let cw = 0, ch = 0, cell = 0, ox = 0, oy = 0;
+function resize() { const r = c.parentElement.getBoundingClientRect(); c.width = cw = r.width; c.height = ch = r.height;
+  cell = Math.min(cw, ch) / N; ox = (cw - cell * N) / 2; oy = (ch - cell * N) / 2; }
+addEventListener('resize', resize);
+const G2P = (gx, gy) => [ox + (gx - 0.5) * cell, oy + (gy - 0.5) * cell];
+
+function draw() {
+  ctx.fillStyle = '#0a1018'; ctx.fillRect(0, 0, cw, ch);
+  if (showDye.checked) {
+    for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+      const d = dens[IX(i, j)]; if (d < 0.01) continue;
+      ctx.fillStyle = `rgba(130,195,255,${Math.min(0.9, d * 0.5)})`;
+      ctx.fillRect(ox + (i - 1) * cell, oy + (j - 1) * cell, cell + 1, cell + 1);
+    }
+  }
+  // mountains
+  for (let j = 1; j <= N; j++) for (let i = 1; i <= N; i++) {
+    if (!mtn[IX(i, j)]) continue;
+    ctx.fillStyle = '#39414e'; ctx.fillRect(ox + (i - 1) * cell, oy + (j - 1) * cell, cell + 1, cell + 1);
+  }
+  if (showArrows.checked) {
+    ctx.strokeStyle = 'rgba(150,210,255,0.4)'; ctx.lineWidth = 1; ctx.beginPath();
+    for (let j = 2; j <= N; j += 3) for (let i = 2; i <= N; i += 3) {
+      if (solid[IX(i, j)]) continue;
+      const [px, py] = G2P(i, j);
+      const a = u[IX(i, j)] * N * cell * 0.1, b = v[IX(i, j)] * N * cell * 0.1;
+      if (Math.hypot(a, b) < 0.5) continue;
+      ctx.moveTo(px, py); ctx.lineTo(px + a, py + b);
+    }
+    ctx.stroke();
+  }
+  // ship
+  const [shx, shy] = G2P(ship.x, ship.y);
+  ctx.fillStyle = '#ffb13b'; ctx.strokeStyle = '#5a2e00'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(shx, shy, ship.r * cell, 0, 7); ctx.fill(); ctx.stroke();
+}
+
+// ============================================================================
+// Input + loop
+// ============================================================================
+const mouse = { down: false, fired: false, pi: 0, pj: 0, lpi: 0, lpj: 0 };
+function toGrid(ev) { const r = c.getBoundingClientRect();
+  return [(ev.clientX - r.left - ox) / cell + 0.5, (ev.clientY - r.top - oy) / cell + 0.5]; }
+c.addEventListener('pointerdown', e => {
+  const [gx, gy] = toGrid(e); mouse.down = true; mouse.pi = gx; mouse.pj = gy; mouse.lpi = gx; mouse.lpj = gy;
+  if (Math.hypot(gx - ship.x, gy - ship.y) < ship.r + 2) { ship.dragging = true; mouse.fired = true; }   // grab ship
+  else {                                                                                                  // fire a rocket gust
+    mouse.fired = true;
+    const k = IX(gx | 0, gy | 0);
+    if (gx >= 1 && gx <= N && gy >= 1 && gy <= N && !mtn[k]) {
+      const ang = Math.random() * 6.28;
+      for (let dj = -2; dj <= 2; dj++) for (let di = -2; di <= 2; di++) {
+        const i = (gx | 0) + di, j = (gy | 0) + dj; if (i < 1 || i > N || j < 1 || j > N) continue;
+        u0[IX(i, j)] += Math.cos(ang) * 140; v0[IX(i, j)] += Math.sin(ang) * 140; dens0[IX(i, j)] += 120;
+      }
+    }
+  }
+  c.setPointerCapture(e.pointerId);
+});
+c.addEventListener('pointermove', e => { const [gx, gy] = toGrid(e); mouse.pi = gx; mouse.pj = gy;
+  if (ship.dragging) { ship.x = Math.max(2, Math.min(N - 1, gx)); ship.y = Math.max(2, Math.min(N - 1, gy)); } });
+addEventListener('pointerup', () => { mouse.down = false; mouse.fired = false; ship.dragging = false; });
+
+document.getElementById('newPeaks').onclick = () => buildPeaks(Math.random());
+document.getElementById('reset').onclick = () => { u.fill(0); v.fill(0); dens.fill(0); };
+
+let acc = 0, last = performance.now();
+function frame(now) {
+  readUI();
+  acc += Math.min(0.05, (now - last) / 1000); last = now;
+  while (acc >= DT) { step(); acc -= DT; }
+  draw();
+  requestAnimationFrame(frame);
+}
+buildPeaks(3); resize(); readUI(); requestAnimationFrame(frame);
+</script>
+</body>
+</html>

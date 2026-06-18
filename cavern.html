@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cavern — corridor</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; cursor: crosshair; }
+  #fps {
+    position: fixed; top: 10px; left: 10px; z-index: 10; pointer-events: none;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bfe0a0;
+    background: rgba(10,16,24,0.5); padding: 4px 8px; border-radius: 6px;
+  }
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 10;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #cde0f0; background: rgba(10,16,24,0.5); border-radius: 8px;
+    padding: 6px 12px; backdrop-filter: blur(6px); pointer-events: none;
+    transition: opacity 1.2s ease; opacity: 1;
+  }
+</style>
+</head>
+<body>
+<div id="fps">–</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute, hash, instanceIndex } from 'three/tsl';
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const smooth = w => w * w * (3 - 2 * w);
+
+// ============================================================================
+// Procedural sandwich terrain (floor + ceiling mountains), shaped into a
+//   CORRIDOR: open ahead (-Z), walled on the two sides (X) and the back (+Z).
+// ============================================================================
+const SPACING = 320, BASE_FREQ = 1 / SPACING, WARP_FREQ = 1 / (SPACING * 2.2), WARP = 90, EXPO = 1.8;
+const YFLOOR = -450, GROUND_AMP = 450;
+const YCEIL  =  760, CEIL_AMP   = 430;
+// corridor shape — wide open canyon
+const CORRIDOR_HALF = 2700, WALLW = 450, XHALF = 3400;    // open band half-width in X, wall ramp, full half-extent
+const SEGLEN = 700, DIVX = 150, DIVZ = 44, BACK = 300;    // long segments => infrequent builds (smooth)
+const BACKW = 210;                                       // back-wall ramp: seals fully inside the spawn segment
+const AHEAD = 7, BEHIND = 1;                              // segments to keep loaded ahead / behind
+const VERT_BUDGET = 1200;                                // vertices built per frame (lower => gentler, smoother)
+
+function hash2(x, z) { const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return n - Math.floor(n); }
+function noise2(x, z) {
+  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  const a = hash2(xi, zi), b = hash2(xi + 1, zi), c = hash2(xi, zi + 1), d = hash2(xi + 1, zi + 1);
+  const ab = a + (b - a) * u, cd = c + (d - c) * u;
+  return (ab + (cd - ab) * v) * 2 - 1;
+}
+function ridged(x, z, seed) {
+  let sum = 0, amp = 1, freq = BASE_FREQ, prev = 1, norm = 0;
+  for (let o = 0; o < 5; o++) {
+    const n = noise2(x * freq + seed * 19.3, z * freq + seed * 7.1);
+    let r = 1 - Math.abs(n); r *= r;
+    sum += r * amp * prev; prev = r; norm += amp; freq *= 2; amp *= 0.5;
+  }
+  return Math.pow(sum / norm, EXPO);
+}
+function groundBase(x, z) {
+  const wx = x + WARP * noise2(x * WARP_FREQ, z * WARP_FREQ);
+  const wz = z + WARP * noise2(x * WARP_FREQ + 31.7, z * WARP_FREQ + 17.3);
+  const detail = noise2(x * 0.05, z * 0.05) * 7 + noise2(x * 0.12, z * 0.12) * 3;
+  return YFLOOR + GROUND_AMP * ridged(wx, wz, 1.7) + detail;
+}
+function ceilBase(x, z) {
+  const ax = x + 4000, az = z - 4000;
+  const wx = ax + WARP * noise2(ax * WARP_FREQ, az * WARP_FREQ);
+  const wz = az + WARP * noise2(ax * WARP_FREQ + 31.7, az * WARP_FREQ + 17.3);
+  return YCEIL - CEIL_AMP * ridged(wx, wz, 5.9);
+}
+// wall: 0 in the open corridor, 1 where it should seal (sides + back)
+function wallAmt(x, z) {
+  const side = (Math.abs(x) - CORRIDOR_HALF) / WALLW;
+  const back = (z - 30) / BACKW;                          // z > 30 is behind the start => seals quickly
+  return clamp(Math.max(side, back), 0, 1);
+}
+// at the walls the floor RISES and the ceiling DROPS to meet in the middle => sealed.
+//   (open corridor is w=0, so most vertices skip the extra work)
+function groundY(x, z) {
+  const w = smooth(wallAmt(x, z));
+  const g = groundBase(x, z);
+  if (w <= 0) return g;
+  const mid = (g + ceilBase(x, z)) * 0.5;
+  return g + (mid - g) * w;
+}
+function ceilY(x, z) {
+  const w = smooth(wallAmt(x, z));
+  const c = ceilBase(x, z);
+  if (w <= 0) return c;
+  const mid = (groundBase(x, z) + c) * 0.5;
+  return c + (mid - c) * w;
+}
+// height of the RENDERED (triangulated) floor at (x,z) within segment centred on zc,
+//   so grass sits flush instead of floating above faceted convex peaks.
+const GX = (XHALF * 2) / DIVX, GZ = SEGLEN / DIVZ;
+function meshHeight(x, z, zc) {
+  const i = Math.floor((x + XHALF) / GX), j = Math.floor((z - (zc - SEGLEN / 2)) / GZ);
+  const x0 = -XHALF + i * GX, z0 = (zc - SEGLEN / 2) + j * GZ;
+  const u = (x - x0) / GX, v = (z - z0) / GZ;
+  const a = groundY(x0, z0), b = groundY(x0 + GX, z0), c = groundY(x0, z0 + GZ), d = groundY(x0 + GX, z0 + GZ);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+// biome fields: large patches that decide forest vs clearing, and grassy vs rocky
+function forestF(x, z) { return noise2(x * 0.0011 + 3.1, z * 0.0011 - 1.7) * 0.5 + 0.5; }   // 0 clearing .. 1 dense
+function rockF(x, z) { return noise2(x * 0.0017 - 5.0, z * 0.0017 + 8.0) * 0.5 + 0.5; }      // 0 grassy .. 1 rocky
+
+// ============================================================================
+// Renderer / scene / camera
+// ============================================================================
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fa6bc);
+scene.fog = new THREE.FogExp2(0x8fa6bc, 0.00072);
+
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 1, 9000);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, groundY(0, -150) + 130, -150);     // inside, looking down the path (-Z)
+
+scene.add(new THREE.AmbientLight(0x6a7e9c, 0.35));
+const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x47592f, 0.6);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff0d6, 1.4);
+sun.position.set(0.5, 1.0, 0.3);
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0xbcd0ff, 0.35);
+rim.position.set(-0.5, 0.2, -0.6);
+scene.add(rim);
+
+// ============================================================================
+// Terrain segments along the path. Each segment is built once, stays fixed,
+//   unloads when far behind. New ones build a couple shells per frame in the
+//   background, far ahead of the player, so the path never pops or hitches.
+// ============================================================================
+const C = {
+  grassLo: new THREE.Color(0x3c5722), grassHi: new THREE.Color(0x77b84e),
+  rock: new THREE.Color(0x6c7178), snow: new THREE.Color(0xeef4f8),
+  ceilLo: new THREE.Color(0x242a32), ceilHi: new THREE.Color(0x59616c),
+};
+const _c = new THREE.Color();
+// single-sided: we're always INSIDE, so the outer faces are never seen => cull them.
+// ground uses a node material: per-pixel mottle + fuzzy moss so it reads as real
+//   mossy rock instead of flat-shaded poster paint.
+const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
+{
+  const wp = positionWorld;
+  const mottle = mx_noise_float(wp.mul(0.012)).mul(0.20)
+    .add(mx_noise_float(wp.mul(0.05)).mul(0.14))
+    .add(mx_noise_float(wp.mul(0.16)).mul(0.10)).add(0.92);     // multi-scale variation
+  const fuzz = mx_noise_float(wp.mul(0.6)).mul(0.18).add(0.88)
+    .mul(mx_noise_float(wp.mul(2.2)).mul(0.22).add(0.86));      // fine mossy grain
+  const base = attribute('color').mul(mottle).mul(fuzz);
+  const mossCol = mix(color(0x2c4a1e), color(0x5e8b3c), mx_noise_float(wp.mul(0.09)).mul(0.5).add(0.5));
+  const lowF = float(1).sub(smoothstep(float(YFLOOR), float(YFLOOR + GROUND_AMP * 0.7), wp.y)); // low ground, not peaks
+  const mossAmt = smoothstep(0.34, 0.62, mx_noise_float(wp.mul(0.02))).mul(0.5).mul(lowF);
+  const mossed = mix(base, mossCol.mul(fuzz), mossAmt);
+  // rocky biome patches: grey out the low flat ground in big patches (bare/rocky areas)
+  const rocky = smoothstep(float(0.52), float(0.74), mx_noise_float(wp.mul(0.0017))).mul(lowF);
+  groundMat.colorNode = mix(mossed, color(0x6f7068).mul(mottle), rocky.mul(0.65));
+}
+const ceilMat   = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
+
+// ---- pine trees: a trunk + stacked foliage cones, merged into one instanced mesh
+const GRASS_PER_SEG = 1000;                                  // <= 1024 per instanced mesh (WebGPU uniform cap)
+function paintGeo(g, rgb, vary) {
+  const n = g.attributes.position.count, col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { const v = vary ? (0.8 + Math.random() * 0.4) : 1; col[i*3]=rgb[0]*v; col[i*3+1]=rgb[1]*v; col[i*3+2]=rgb[2]*v; }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return g;
+}
+function mergeGeos(geos) {
+  let vc = 0, ic = 0;
+  for (const g of geos) { vc += g.attributes.position.count; ic += g.index.count; }
+  const pos = new Float32Array(vc * 3), col = new Float32Array(vc * 3), idx = new Uint32Array(ic);
+  let vo = 0, io = 0;
+  for (const g of geos) {
+    pos.set(g.attributes.position.array, vo * 3); col.set(g.attributes.color.array, vo * 3);
+    const gi = g.index.array; for (let k = 0; k < gi.length; k++) idx[io + k] = gi[k] + vo;
+    vo += g.attributes.position.count; io += gi.length;
+  }
+  const m = new THREE.BufferGeometry();
+  m.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  m.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  m.setIndex(new THREE.BufferAttribute(idx, 1));
+  m.computeVertexNormals();
+  return m;
+}
+// ---- procedural conifer: tapered trunk + whorls of drooping branches that
+//   shorten toward the top (the cone silhouette EMERGES), each branch bearing
+//   needle sprays. Grown from a seed like DNA -> a tree.
+const BROWN = [0.27, 0.18, 0.10], NEEDLE = [0.10, 0.30, 0.15], TIPCOL = [0.42, 0.66, 0.30];
+const _yAxis = new THREE.Vector3(0, 1, 0), _q = new THREE.Quaternion(), _m4 = new THREE.Matrix4(), _one = new THREE.Vector3(1, 1, 1);
+const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+const mixC = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+function addTube(parts, p0, p1, r0, r1, sides, col) {        // tapered limb between two points
+  const dir = V3(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z), len = dir.length();
+  if (len < 1e-4) return;
+  const geo = new THREE.CylinderGeometry(r1, r0, len, sides, 1, true);
+  _q.setFromUnitVectors(_yAxis, dir.normalize());
+  _m4.compose(V3((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, (p0.z + p1.z) / 2), _q, _one);
+  geo.applyMatrix4(_m4);
+  parts.push(paintGeo(geo, col));
+}
+function addNeedleFan(parts, p, dir, size, col, rnd) {       // a spray of needle spikes
+  const spikes = 4, verts = [], cols = [], idx = [];
+  const up = Math.abs(dir.y) > 0.9 ? V3(1, 0, 0) : _yAxis;
+  const s1 = new THREE.Vector3().crossVectors(dir, up).normalize();
+  const s2 = new THREE.Vector3().crossVectors(dir, s1).normalize();
+  for (let i = 0; i < spikes; i++) {
+    const a = (i / spikes) * 6.283 + rnd() * 0.6, spread = 0.7;
+    const d = dir.clone().add(s1.clone().multiplyScalar(Math.cos(a) * spread)).add(s2.clone().multiplyScalar(Math.sin(a) * spread)).normalize();
+    const tip = V3(p.x + d.x * size, p.y + d.y * size, p.z + d.z * size);
+    const perp = new THREE.Vector3().crossVectors(d, up).normalize().multiplyScalar(size * 0.06);
+    const o = verts.length / 3;
+    verts.push(p.x - perp.x, p.y - perp.y, p.z - perp.z, p.x + perp.x, p.y + perp.y, p.z + perp.z, tip.x, tip.y, tip.z);
+    cols.push(col[0], col[1], col[2], col[0], col[1], col[2], TIPCOL[0], TIPCOL[1], TIPCOL[2]);
+    idx.push(o, o + 1, o + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  g.setIndex(idx);
+  parts.push(g);
+}
+function makeConifer(seed, opts) {                            // one genome, many species via params
+  const o = opts || {}, H = o.H || 2.6, whorls = o.whorls || 10, droop0 = o.droop0 || 0.3, lenF = o.lenF || 1.0, ndl = o.needle || NEEDLE;
+  const parts = [];
+  let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  addTube(parts, V3(0, 0, 0), V3(0, H * 0.6, 0), 0.075, 0.03, 6, BROWN);     // trunk (two tapered sections)
+  addTube(parts, V3(0, H * 0.6, 0), V3(0, H, 0), 0.03, 0.01, 5, BROWN);
+  for (let w = 0; w < whorls; w++) {
+    const t = w / (whorls - 1), y = H * (0.16 + t * 0.8);
+    const len = ((1 - t) * 1.0 + 0.14) * lenF, droop = droop0 + (1 - t) * 0.5; // shorter + less droopy up top
+    const n = 5 + (rnd() * 2 | 0), a0 = rnd() * 6.283;
+    for (let b = 0; b < n; b++) {
+      const ang = a0 + (b / n) * 6.283 + (rnd() - 0.5) * 0.4;
+      const dx = Math.cos(ang), dz = Math.sin(ang);
+      const base = V3(0, y, 0), tip = V3(dx * len, y - droop * len * 0.55, dz * len);
+      addTube(parts, base, tip, 0.02 * (1 - t * 0.5), 0.004, 4, mixC(BROWN, ndl, 0.6));
+      const ndir = V3(dx, -droop, dz).normalize();
+      addNeedleFan(parts, base.clone().lerp(tip, 0.5), ndir, len * 0.30, ndl, rnd);
+      addNeedleFan(parts, tip, ndir, len * 0.28, ndl, rnd);
+    }
+  }
+  addNeedleFan(parts, V3(0, H, 0), _yAxis, 0.4, ndl, rnd);                    // crown tuft
+  return mergeGeos(parts);
+}
+function makePineLo() {                                       // cheap far LOD: a fuller low-poly conifer
+  const parts = [];
+  const trunk = new THREE.CylinderGeometry(0.04, 0.07, 0.5, 5); trunk.translate(0, 0.25, 0);
+  parts.push(paintGeo(trunk, BROWN));
+  const cones = [[0.46, 0.95, 0.30], [0.38, 0.88, 0.72], [0.30, 0.82, 1.12], [0.22, 0.76, 1.5], [0.13, 0.7, 1.88]];
+  for (const [r, h, y] of cones) { const c = new THREE.ConeGeometry(r, h, 6); c.translate(0, y + h / 2, 0); parts.push(paintGeo(c, NEEDLE, true)); }
+  return mergeGeos(parts);                                    // tall, stacked => reads as a pine in the haze
+}
+const pineGeo = makeConifer(99, { H: 2.9, whorls: 9, droop0: 0.24, lenF: 0.92 });                       // tall, sparse
+const firGeo  = makeConifer(7,  { H: 1.85, whorls: 18, droop0: 0.62, lenF: 1.4, needle: [0.07, 0.21, 0.17] }); // short, fat, bushy, dark blue-green
+const treeLo  = makePineLo();                                // shared cheap LOD for both species
+// shading: subtle clumpy needle noise + per-tree light/dark tint
+const grassMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide });
+{
+  const needle = mx_noise_float(positionLocal.mul(3.0)).mul(0.16).add(0.92);   // local space => no instance-matrix uniform
+  const treeTint = hash(instanceIndex).mul(0.34).add(0.82);
+  grassMat.colorNode = attribute('color').mul(needle).mul(treeTint);
+}
+
+const segments = new Map();        // i -> { g, c, gr }
+const shellQueue = [], grassQueue = [];
+const queued = new Set();
+let job = null;
+function want(i, isCeil) {
+  const key = i + (isCeil ? '_c' : '_g');
+  if (queued.has(key)) return; queued.add(key); shellQueue.push({ i, isCeil });
+}
+function wantGrass(i) {
+  const key = i + '_gr';
+  if (queued.has(key)) return; queued.add(key); grassQueue.push({ i });
+}
+function startShell(i, isCeil) {
+  const geo = new THREE.PlaneGeometry(XHALF * 2, SEGLEN, DIVX, DIVZ);
+  geo.rotateX(isCeil ? Math.PI / 2 : -Math.PI / 2);
+  geo.translate(0, 0, BACK - i * SEGLEN - SEGLEN / 2);    // place this segment along -Z
+  const pos = geo.attributes.position;
+  return { i, isCeil, geo, pos, colors: new Float32Array(pos.count * 3), normals: new Float32Array(pos.count * 3), k: 0, n: pos.count };
+}
+function fillShell(j, count) {                            // fill `count` more vertices (height + colour + analytic normal)
+  const pos = j.pos, colors = j.colors, normals = j.normals, isCeil = j.isCeil, h = isCeil ? ceilY : groundY, e = 6;
+  const end = Math.min(j.n, j.k + count);
+  for (let k = j.k; k < end; k++) {
+    const x = pos.getX(k), z = pos.getZ(k);
+    const y = h(x, z);
+    pos.setY(k, y);
+    const gx = h(x + e, z) - h(x - e, z), gz = h(x, z + e) - h(x, z - e);   // height gradient
+    let nx, ny, nz;
+    if (isCeil) {
+      nx = gx; ny = -2 * e; nz = gz;                                        // ceiling faces down
+      const t = clamp((y - (YCEIL - CEIL_AMP)) / CEIL_AMP, 0, 1);
+      _c.copy(C.ceilLo).lerp(C.ceilHi, t);
+    } else {
+      nx = -gx; ny = 2 * e; nz = -gz;
+      const flat = (2 * e) / Math.hypot(gx, gz, 2 * e);
+      const t = clamp((y - YFLOOR) / GROUND_AMP, 0, 1);
+      _c.copy(C.grassLo).lerp(C.grassHi, clamp((flat - 0.45) / 0.4, 0, 1));
+      _c.lerp(C.rock, clamp((0.62 - flat) / 0.3, 0, 1));
+      if (t > 0.78) _c.lerp(C.snow, Math.min(1, (t - 0.78) / 0.22) * flat);
+    }
+    const inv = 1 / Math.hypot(nx, ny, nz);
+    normals[k * 3] = nx * inv; normals[k * 3 + 1] = ny * inv; normals[k * 3 + 2] = nz * inv;
+    colors[k * 3] = _c.r; colors[k * 3 + 1] = _c.g; colors[k * 3 + 2] = _c.b;
+  }
+  j.k = end;
+}
+function finishShell(j) {
+  j.geo.setAttribute('color', new THREE.BufferAttribute(j.colors, 3));
+  j.geo.setAttribute('normal', new THREE.BufferAttribute(j.normals, 3));   // analytic => no normal-recompute lump
+  const mesh = new THREE.Mesh(j.geo, j.isCeil ? ceilMat : groundMat);
+  scene.add(mesh);
+  let seg = segments.get(j.i); if (!seg) { seg = { g: null, c: null }; segments.set(j.i, seg); }
+  if (j.isCeil) seg.c = mesh; else seg.g = mesh;
+}
+function planSegments() {
+  const pseg = Math.floor((BACK - camera.position.z) / SEGLEN);
+  // request the stretch around the player; NOTHING is ever unloaded => persistent.
+  for (let i = Math.max(0, pseg - BEHIND); i <= pseg + AHEAD; i++) { want(i, false); want(i, true); wantGrass(i); }
+}
+
+// ---- grass per segment: scatter blades on the corridor floor, persistent ----
+const _gd = new THREE.Object3D();
+const GTRIES = GRASS_PER_SEG * 5;
+function startGrass(i) {
+  return { grass: true, i, zc: BACK - i * SEGLEN - SEGLEN / 2, tries: 0, k: 0,
+    hi: new THREE.InstancedMesh(pineGeo, grassMat, GRASS_PER_SEG),
+    lo: new THREE.InstancedMesh(treeLo, grassMat, GRASS_PER_SEG) };
+}
+function fillGrass(j, attempts) {
+  const zHalf = SEGLEN / 2, e = 6;
+  for (let a = 0; a < attempts && j.k < GRASS_PER_SEG && j.tries < GTRIES; a++) {
+    j.tries++;
+    const x = (Math.random() * 2 - 1) * (CORRIDOR_HALF - 40);
+    const z = j.zc + (Math.random() * 2 - 1) * zHalf;
+    if (wallAmt(x, z) > 0.08) continue;                       // not on the walls
+    const y = groundBase(x, z);
+    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
+    const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
+    if (flat < 0.6) continue;                                 // fairly flat ground => no peaks
+    if ((y - YFLOOR) / GROUND_AMP > 0.62) continue;           // above the treeline => bare
+    if (forestF(x, z) < 0.4) continue;                        // clearing => open patch
+    const clump = noise2(x * 0.008 + 50, z * 0.008 - 20) * 0.5 + 0.5;
+    if (Math.random() > clump * clump * 1.35) continue;       // cluster into clumps, gaps between
+    if (rockF(x, z) > 0.72 && Math.random() < 0.7) continue;  // rocky ground => sparse
+    const S = 27 * (0.55 + Math.random() * 0.95);             // size variety
+    _gd.position.set(x, meshHeight(x, z, j.zc) - 2, z);       // sit on the mesh surface
+    _gd.rotation.set(0, Math.random() * 6.283, 0);
+    _gd.scale.set(S, S, S); _gd.updateMatrix();
+    j.hi.setMatrixAt(j.k, _gd.matrix); j.lo.setMatrixAt(j.k, _gd.matrix); j.k++;
+  }
+}
+function finishGrass(j) {
+  j.hi.count = j.k; j.lo.count = j.k;
+  j.hi.instanceMatrix.needsUpdate = true; j.lo.instanceMatrix.needsUpdate = true;
+  if (j.k > 0) { j.hi.computeBoundingSphere(); j.lo.computeBoundingSphere(); }
+  j.lo.visible = false;
+  scene.add(j.hi); scene.add(j.lo);
+  let seg = segments.get(j.i); if (!seg) { seg = { g: null, c: null }; segments.set(j.i, seg); }
+  seg.hi = j.hi; seg.lo = j.lo;
+}
+const LOD_Z = 1350;                                          // detailed within this z-distance, cones beyond
+function updateLOD() {
+  const cz = camera.position.z;
+  for (const [i, seg] of segments) {
+    if (!seg.lo) continue;
+    const near = Math.abs(cz - (BACK - i * SEGLEN - SEGLEN / 2)) < LOD_Z;
+    seg.hi.visible = near; seg.lo.visible = !near;
+  }
+}
+function pump(budget) {                                   // spread building across frames
+  let used = 0;
+  while (used < budget) {
+    if (!job) {
+      if (shellQueue.length) { const r = shellQueue.shift(); job = startShell(r.i, r.isCeil); }
+      else if (grassQueue.length) job = startGrass(grassQueue.shift().i);
+      else break;
+    }
+    if (job.grass) {
+      const step = Math.min(budget - used, GTRIES - job.tries);
+      fillGrass(job, step); used += step;
+      if (job.k >= GRASS_PER_SEG || job.tries >= GTRIES) { finishGrass(job); job = null; }
+    } else {
+      const step = Math.min(budget - used, job.n - job.k);
+      fillShell(job, step); used += step;
+      if (job.k >= job.n) { finishShell(job); job = null; }
+    }
+  }
+}
+
+// ============================================================================
+// First-person flycam
+// ============================================================================
+const look = { yaw: 0, pitch: 0 };
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+const cv = renderer.domElement;
+cv.addEventListener('click', () => { if (!document.pointerLockElement) cv.requestPointerLock(); });
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement === cv) { look.yaw -= e.movementX * 0.0022; look.pitch -= e.movementY * 0.0022; }
+});
+const DEAD = 0.12;
+const dz = v => Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
+const fwd = new THREE.Vector3(), rt = new THREE.Vector3(), mv = new THREE.Vector3();
+function updateControls(dt) {
+  let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
+  if (gp) {
+    mx = dz(gp.axes[0] || 0); my = dz(gp.axes[1] || 0);
+    lx = dz(gp.axes[2] || 0); ly = dz(gp.axes[3] || 0);
+    up = ((gp.buttons[7] && gp.buttons[7].value) || 0) - ((gp.buttons[6] && gp.buttons[6].value) || 0);
+    boost = (gp.buttons[0] && gp.buttons[0].pressed) ? 1 : 0;
+  }
+  if (keys['KeyW']) my = -1; if (keys['KeyS']) my = 1;
+  if (keys['KeyA']) mx = -1; if (keys['KeyD']) mx = 1;
+  if (keys['ArrowLeft']) lx = -1; if (keys['ArrowRight']) lx = 1;
+  if (keys['ArrowUp']) ly = -1; if (keys['ArrowDown']) ly = 1;
+  if (keys['Space']) up = 1; if (keys['ShiftLeft'] || keys['ControlLeft']) up = -1;
+  if (keys['ShiftRight']) boost = 1;
+
+  const LOOK = 2.4;
+  look.yaw -= lx * LOOK * dt;
+  look.pitch = Math.max(-1.45, Math.min(1.45, look.pitch - ly * LOOK * dt));
+  camera.rotation.set(look.pitch, look.yaw, 0);
+
+  const SPEED = 400 * (1 + boost * 2.0);
+  fwd.set(0, 0, -1).applyEuler(camera.rotation);
+  rt.set(1, 0, 0).applyEuler(camera.rotation);
+  mv.set(0, 0, 0).addScaledVector(fwd, -my).addScaledVector(rt, mx);
+  mv.y += up;
+  camera.position.addScaledVector(mv, SPEED * dt);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+planSegments();
+pump(Infinity);                    // build the initial stretch up front
+await renderer.compileAsync(scene, camera);
+
+const fpsEl = document.getElementById('fps');
+let fpsAcc = 0, fpsFrames = 0;
+let last = performance.now();
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
+  updateControls(dt);
+  planSegments();
+  pump(VERT_BUDGET);               // spread shell building across frames (smooth)
+  updateLOD();                     // detailed pines near, cheap cones far
+  renderer.render(scene, camera);
+  fpsAcc += dt; fpsFrames++;
+  if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }
+});
+</script>
+</body>
+</html>
