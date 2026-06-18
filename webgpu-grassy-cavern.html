@@ -29,7 +29,8 @@
 <script type="module">
 import * as THREE from 'three';
 import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute,
-         hash, instanceIndex, time, sin, vec3, vec2, normalize, cameraPosition, reflector, texture, uniform } from 'three/tsl';
+         hash, instanceIndex, time, sin, vec3, vec2, vec4, normalize, cameraPosition, reflector, texture, uniform,
+         refract, reflect, viewportSharedTexture, screenUV, cameraViewMatrix } from 'three/tsl';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const smooth = w => w * w * (3 - 2 * w);
@@ -144,6 +145,7 @@ const C = {
   ceilLo: new THREE.Color(0x242a32), ceilHi: new THREE.Color(0x59616c),
 };
 const _c = new THREE.Color();
+let groundBaseNode;     // captured so caustics + underwater tint can layer on top after the sim exists
 const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
 {
   const wp = positionWorld;
@@ -156,7 +158,8 @@ const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, rough
   const mossCol = mix(color(0x2f5a22), color(0x67ab3b), mx_noise_float(wp.mul(0.09)).mul(0.5).add(0.5));
   const lowF = float(1).sub(smoothstep(float(YFLOOR), float(YFLOOR + GROUND_AMP * 0.7), wp.y));
   const mossAmt = smoothstep(0.34, 0.62, mx_noise_float(wp.mul(0.02))).mul(0.55).mul(lowF);
-  groundMat.colorNode = mix(base, mossCol.mul(fuzz), mossAmt);
+  groundBaseNode = mix(base, mossCol.mul(fuzz), mossAmt);
+  groundMat.colorNode = groundBaseNode;
 }
 const ceilMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
 
@@ -276,9 +279,10 @@ const water = (() => {
   geo.rotateX(-Math.PI / 2);
   const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
   const wp = positionWorld, t = time;
-  // flowing ripple from layered noise (irregular, varies everywhere — no tiled grid)
-  const ripH = (p) => mx_noise_float(vec3(p.x.mul(0.028), p.y.mul(0.028), t.mul(0.4))).mul(0.6)
-    .add(mx_noise_float(vec3(p.x.mul(0.075).add(5.0), p.y.mul(0.075), t.mul(0.7))).mul(0.4));
+  // windless lake => GLASS. Only the faintest, slow micro-texture so the mirror isn't unnaturally
+  //   perfect; all real motion comes from the reactive sim (splashes / things hitting the water).
+  const ripH = (p) => mx_noise_float(vec3(p.x.mul(0.02), p.y.mul(0.02), t.mul(0.1))).mul(0.10)
+    .add(mx_noise_float(vec3(p.x.mul(0.06).add(5.0), p.y.mul(0.06), t.mul(0.2))).mul(0.06));
   const e = 3.0;
   const hC = ripH(wp.xz), hX = ripH(wp.xz.add(vec2(e, 0))), hZ = ripH(wp.xz.add(vec2(0, e)));
   // REACTIVE: sample the wave sim near the player and add its ripple tilt to the normal
@@ -288,13 +292,13 @@ const water = (() => {
   const sD = dec(texture(waveTex, luv.sub(vec2(float(0), ed))).x), sU = dec(texture(waveTex, luv.add(vec2(float(0), ed))).x);
   const simW = float(1).sub(smoothstep(float(WSIZE * 0.34), float(WSIZE * 0.48), wp.xz.sub(windowCenter).length()));
   const sx = sL.sub(sR).mul(0.14).mul(simW), sz = sD.sub(sU).mul(0.14).mul(simW);
-  const Nf = normalize(vec3(hC.sub(hX).mul(3.0).add(sx), float(1.0), hC.sub(hZ).mul(3.0).add(sz)));   // noise + reactive sim ripples
-  // planar MIRROR reflection across y = WL, rippled by the wave normal
-  const reflection = reflector({ resolution: 0.2 });
+  const Nf = normalize(vec3(hC.sub(hX).mul(1.0).add(sx), float(1.0), hC.sub(hZ).mul(1.0).add(sz)));   // near-flat glass + reactive sim ripples
+  // planar MIRROR reflection across y = WL — higher res + low distortion = a crisp calm-lake mirror
+  const reflection = reflector({ resolution: 0.4 });
   reflection.target.rotateX(-Math.PI / 2);
   reflection.target.position.y = WL;
   scene.add(reflection.target);
-  reflection.uvNode = reflection.uvNode.add(Nf.xz.mul(0.06));
+  reflection.uvNode = reflection.uvNode.add(Nf.xz.mul(0.02));
   const V = normalize(cameraPosition.sub(wp));
   const ndv = Nf.dot(V).max(0);
   const fres = float(0.04).add(float(0.6).mul(float(1).sub(ndv).pow(5)));
@@ -303,30 +307,30 @@ const water = (() => {
   //   low-res mirror texture, so fade them out and leave a translucent blue underside.
   const aboveF = smoothstep(float(WL - 6), float(WL + 6), cameraPosition.y);
   const L = normalize(vec3(0.5, 1.0, 0.3)), Hh = normalize(L.add(V));
-  // above water: reflective surface. below water: deep blue with the SAME ripple normal
-  //   shimmering through it (ambient + reactive ripples stay visible, like caustics) so
-  //   the surface still looks alive from underneath instead of a flat reflective mirror.
   const aboveBody = mix(color(0x0c3a5a), reflection.rgb, fres);
-  // below water: real Snell's law + Fresnel. n_water=1.333, n_air=1.0 => critical angle
-  //   ~48.6deg, so the whole world above collapses into a ~97deg cone overhead (Snell's
-  //   window) and everything outside is total internal reflection (the dark deep). The
-  //   ripple normal Nf sets the local incidence angle, so the ripples bend the window edge
-  //   and distort the transmitted light exactly the way refraction does.
-  const cosI = Nf.dot(V).abs();                                          // cos of the incidence angle, in water
-  const sinT2 = float(1.7769).mul(float(1).sub(cosI.mul(cosI)));         // (n_w/n_a)^2 * sin^2(theta_i)  (Snell)
-  const window = float(1).sub(smoothstep(float(0.80), float(1.0), sinT2)); // 1 inside the cone, 0 at TIR (sinT2>=1)
-  const R0 = float(0.02);                                                // Fresnel reflectance at normal incidence
-  const fresB = R0.add(float(1).sub(R0).mul(float(1).sub(cosI).pow(5))); // Schlick: more reflective at grazing angles
-  const trans = window.mul(float(1).sub(fresB));                         // fraction of light transmitted through
-  const aboveLight = color(FOGC).mul(float(0.68).add(Nf.dot(L).max(0).mul(0.62))); // the bright world above
-  const underBody = mix(color(0x06203a), aboveLight, trans);            // TIR deep -> transmitted window
+  // below water: REAL refraction. refract() is the vector form of Snell's law -- it bends
+  //   the incident view ray through the rippled normal with eta = n_water/n_air = 1.333,
+  //   and returns the ZERO vector past the critical angle (~48.6deg), so total internal
+  //   reflection / Snell's window fall straight out of the math. We project the bent ray's
+  //   deviation into screen space and sample the already-rendered scene there, so the
+  //   ripples physically DISPLACE the light coming through the surface.
+  const I = V.negate();                                          // incident ray: camera -> surface point
+  const Nor = Nf.mul(Nf.dot(V).sign());                          // surface normal oriented toward the viewer
+  const Tr = refract(I, Nor, float(1.333));                      // Snell's law, vector form (water -> air)
+  const tir = Tr.dot(Tr);                                        // == 0 at total internal reflection
+  const defl = cameraViewMatrix.mul(vec4(Tr.sub(I), 0)).xy;      // how far the refracted ray bends, in screen axes
+  const refrImg = viewportSharedTexture(screenUV.add(defl.mul(0.22))).rgb; // transmitted world above, displaced
+  // Outside Snell's window the underside is a MIRROR (total internal reflection): reflect the
+  //   view ray off the rippled surface and sample the underwater scene, so it mirrors the
+  //   lakebed below you and wobbles with the ripples.
+  const Rr = reflect(I, Nor);                                    // reflected ray (bounces back down into the water)
+  const drefl = cameraViewMatrix.mul(vec4(Rr.sub(I), 0)).xy;     // its screen-space deviation
+  const reflImg = viewportSharedTexture(screenUV.add(drefl.mul(0.22))).rgb; // the mirrored underwater scene
+  const win = smoothstep(float(0.0), float(0.05), tir);          // 1 inside Snell's window, 0 in the TIR mirror ring
+  const underBody = mix(reflImg.mul(color(0x9fc4d6)), refrImg.mul(color(0xcfe6ef)), win); // mirror -> refraction
   let body = mix(underBody, aboveBody, aboveF);
   const spec = Nf.dot(Hh).max(0).pow(200).mul(0.6).mul(aboveF);                       // tight sun glints, not a dot grid
-  // MENISCUS: the sim stores real water depth (water level - ground) in G; the lip sits
-  //   where that depth -> 0, i.e. exactly on the shoreline. Near the player only.
-  const wdep = texture(waveTex, luv).y.mul(60);                                        // decode depth (0..60 units)
-  const men = float(1).sub(smoothstep(float(2), float(24), wdep)).mul(simW).mul(aboveF);
-  const colN = body.add(color(0xffffff).mul(spec)).add(color(0xa8cad8).mul(men.mul(men).mul(0.22)));   // subtle meniscus lip
+  const colN = body.add(color(0xffffff).mul(spec));
   const rad = wp.xz.sub(cameraPosition.xz).length();
   const fade = smoothstep(float(7000), float(9500), rad);   // fade to the horizon mist, matching the mountains
   mat.colorNode = mix(colN, color(FOGC), fade);
@@ -538,12 +542,25 @@ planSegments();
 pump(Infinity);                    // build the opening stretch up front
 await renderer.compileAsync(scene, camera);
 
+// MEDIUM: above the waterline it's grey cavern air; below it, water swallows light fast.
+//   Blend the single fog's colour + density by how deep the eye is (no object swap => no
+//   transition hitch), so the medium fades smoothly through the surface.
+const airFogC = new THREE.Color(FOGC), waterFogC = new THREE.Color(0x0e4250);
+const AIR_DENS = 0.00020, WATER_DENS = 0.0012;
+function updateMedium() {
+  const u = clamp((WL + 2 - camera.position.y) / 16, 0, 1);   // 0 above the surface -> 1 fully submerged
+  scene.fog.color.copy(airFogC).lerp(waterFogC, u);
+  scene.fog.density = AIR_DENS + (WATER_DENS - AIR_DENS) * u;
+  scene.background.lerpColors(airFogC, waterFogC, u);
+}
+
 const fpsEl = document.getElementById('fps');
 let fpsAcc = 0, fpsFrames = 0;
 let last = performance.now();
 renderer.setAnimationLoop(() => {
   const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
   updateControls(dt);
+  updateMedium();
   planSegments();
   pump(VERT_BUDGET);
   updateLOD();
