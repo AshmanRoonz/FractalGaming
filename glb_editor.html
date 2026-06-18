@@ -43,6 +43,10 @@
   .gun-item span { flex: 1; color: #33ddff; }
   .gun-item button { padding: 2px 8px; font-size: 11px; background: #22323a; border-color: #335a5a; }
   .gun-item button:hover { background: #2a4a5a; }
+  .cockpit-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: #2a2a2a; border-radius: 4px; font-size: 12px; }
+  .cockpit-item span { flex: 1; color: #88ff44; }
+  .cockpit-item button { padding: 2px 8px; font-size: 11px; background: #243a22; border-color: #3a5a33; }
+  .cockpit-item button:hover { background: #2f4a2a; }
   .hint { font-size: 11px; color: #666; line-height: 1.4; }
   #status { position: absolute; bottom: 12px; left: 12px; padding: 6px 12px; background: rgba(0,0,0,0.6); border-radius: 4px; font-size: 12px; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
   #status.show { opacity: 1; }
@@ -85,6 +89,14 @@
       <p class="hint">Toggle on, then click the hull at each gun muzzle. Markers save into the GLB as empty nodes named gun1, gun2, ... so the game knows where to fire from. Esc exits placement.</p>
       <div class="mesh-list" id="gun-list"></div>
       <button id="btn-clear-guns" disabled>Clear All Guns</button>
+    </div>
+
+    <div class="section">
+      <h2>Cockpit</h2>
+      <button id="btn-place-cockpit" disabled>Place Cockpit: OFF</button>
+      <p class="hint">Toggle on, then click the hull where the cockpit sits. Markers save into the GLB as empty nodes named cockpit1, cockpit2, ... so the game knows where the pilot/canopy is. Esc exits placement.</p>
+      <div class="mesh-list" id="cockpit-list"></div>
+      <button id="btn-clear-cockpits" disabled>Clear All Cockpits</button>
     </div>
 
     <div class="section">
@@ -173,8 +185,9 @@ const meshes = [];
 // never exported.
 const thrusterMarkers = [];
 const gunMarkers = [];
+const cockpitMarkers = [];
 const gizmoGroup = new THREE.Group();
-let placeMode = null; // null | 'thruster' | 'gun'
+let placeMode = null; // null | 'thruster' | 'gun' | 'cockpit'
 let modelMaxDim = 1;
 
 function showStatus(msg, ms = 2000) {
@@ -283,7 +296,7 @@ function playClip(i) {
 }
 function _updatePlayBtn() {
   const b = document.getElementById('btn-anim-play');
-  if (b) b.textContent = _animPaused ? '\u25B6 Play' : '\u23F8 Pause';
+  if (b) b.textContent = _animPaused ? '▶ Play' : '⏸ Pause';
 }
 // Strip root motion so a walk/run loops on the spot instead of drifting
 // forward and snapping back. Finds the .position track with the largest
@@ -326,7 +339,7 @@ function _stripRootMotion(clip) {
   });
   if (speed) speed.addEventListener('input', (e) => {
     const v = +e.target.value;
-    const vv = document.getElementById('anim-speed-val'); if (vv) vv.textContent = v.toFixed(2) + '\u00D7';
+    const vv = document.getElementById('anim-speed-val'); if (vv) vv.textContent = v.toFixed(2) + '×';
     if (_mixer) _mixer.timeScale = v;
   });
 })();
@@ -358,20 +371,27 @@ function pickAt(e) {
   if (hits.length === 0) return;
   if (placeMode === 'thruster') { addMarkerAt('thruster', hits[0].point); return; }
   if (placeMode === 'gun') { addMarkerAt('gun', hits[0].point); return; }
+  if (placeMode === 'cockpit') { addMarkerAt('cockpit', hits[0].point); return; }
   selectMesh(hits[0].object);
 }
 
-// ---- Marker logic (thrusters + guns, same mechanism) ----
+// ---- Marker logic (thrusters + guns + cockpit, same mechanism) ----
 // Thruster markers export as nodes named thruster1, thruster2, ...
 // Gun markers export as nodes named gun1, gun2, ... (muzzle origins).
-// Both are bare Object3D nodes under loadedRoot, so the game reads their
+// Cockpit markers export as nodes named cockpit1, cockpit2, ...
+// All are bare Object3D nodes under loadedRoot, so the game reads their
 // positions straight from the model.
-function markersFor(type) { return type === 'gun' ? gunMarkers : thrusterMarkers; }
+function markersFor(type) {
+  if (type === 'gun') return gunMarkers;
+  if (type === 'cockpit') return cockpitMarkers;
+  return thrusterMarkers;
+}
 
 function setPlaceMode(mode) {
-  placeMode = mode; // null | 'thruster' | 'gun'
+  placeMode = mode; // null | 'thruster' | 'gun' | 'cockpit'
   const tb = document.getElementById('btn-place-thruster');
   const gb = document.getElementById('btn-place-gun');
+  const cb = document.getElementById('btn-place-cockpit');
   if (tb) {
     tb.textContent = 'Place Thrusters: ' + (mode === 'thruster' ? 'ON (click hull)' : 'OFF');
     tb.classList.toggle('active-mode', mode === 'thruster');
@@ -379,6 +399,10 @@ function setPlaceMode(mode) {
   if (gb) {
     gb.textContent = 'Place Guns: ' + (mode === 'gun' ? 'ON (click hull)' : 'OFF');
     gb.classList.toggle('active-mode', mode === 'gun');
+  }
+  if (cb) {
+    cb.textContent = 'Place Cockpit: ' + (mode === 'cockpit' ? 'ON (click hull)' : 'OFF');
+    cb.classList.toggle('active-mode', mode === 'cockpit');
   }
   renderer.domElement.style.cursor = mode ? 'crosshair' : '';
 }
@@ -464,12 +488,14 @@ function rebuildGizmos() {
   };
   build(thrusterMarkers, '#ff8800', 'T');
   build(gunMarkers, '#33ddff', 'G');
+  build(cockpitMarkers, '#88ff44', 'C');
   rebuildLists();
 }
 
 function rebuildLists() {
   buildMarkerList('thruster', 'thruster-list', 'btn-clear-thrusters', 'thruster-item');
   buildMarkerList('gun', 'gun-list', 'btn-clear-guns', 'gun-item');
+  buildMarkerList('cockpit', 'cockpit-list', 'btn-clear-cockpits', 'cockpit-item');
 }
 
 function buildMarkerList(type, listId, clearBtnId, itemClass) {
@@ -514,6 +540,7 @@ function clearScene() {
   updateSelectedInfo();
   thrusterMarkers.length = 0;
   gunMarkers.length = 0;
+  cockpitMarkers.length = 0;
   setPlaceMode(null);
   rebuildGizmos();
 }
@@ -541,30 +568,37 @@ function loadGLB(arrayBuffer, name) {
     rebuildMeshList();
     setupAnimations(gltf.animations);
 
-    // Re-detect thruster + gun markers saved by a previous editing session,
-    // so a tagged GLB can be reopened and its markers adjusted.
-    const foundT = [], foundG = [];
+    // Re-detect thruster + gun + cockpit markers saved by a previous editing
+    // session, so a tagged GLB can be reopened and its markers adjusted.
+    const foundT = [], foundG = [], foundC = [];
     loadedRoot.traverse((o) => {
       let m = /^thruster(\d+)$/.exec(o.name || '');
       if (m) { foundT.push({ n: +m[1], node: o }); return; }
       m = /^gun(\d+)$/.exec(o.name || '');
-      if (m) foundG.push({ n: +m[1], node: o });
+      if (m) { foundG.push({ n: +m[1], node: o }); return; }
+      m = /^cockpit(\d+)$/.exec(o.name || '');
+      if (m) foundC.push({ n: +m[1], node: o });
     });
     foundT.sort((a, b) => a.n - b.n);
     foundG.sort((a, b) => a.n - b.n);
+    foundC.sort((a, b) => a.n - b.n);
     for (const f of foundT) thrusterMarkers.push(f.node);
     for (const f of foundG) gunMarkers.push(f.node);
+    for (const f of foundC) cockpitMarkers.push(f.node);
     renumber('thruster');
     renumber('gun');
+    renumber('cockpit');
     rebuildGizmos();
 
     dropHint.classList.add('hidden');
     document.getElementById('btn-save').disabled = false;
     document.getElementById('btn-place-thruster').disabled = false;
     document.getElementById('btn-place-gun').disabled = false;
+    document.getElementById('btn-place-cockpit').disabled = false;
     const parts = [`${meshes.length} surface${meshes.length === 1 ? '' : 's'}`];
     if (foundT.length) parts.push(foundT.length + ' thruster' + (foundT.length === 1 ? '' : 's'));
     if (foundG.length) parts.push(foundG.length + ' gun' + (foundG.length === 1 ? '' : 's'));
+    if (foundC.length) parts.push(foundC.length + ' cockpit' + (foundC.length === 1 ? '' : 's'));
     showStatus(`Loaded: ${name} (${parts.join(', ')})`);
   }, (err) => {
     console.error(err);
@@ -769,6 +803,17 @@ document.getElementById('btn-clear-guns').addEventListener('click', () => {
   if (!gunMarkers.length) return;
   clearMarkers('gun');
   showStatus('All guns cleared');
+});
+
+// Cockpit placement
+document.getElementById('btn-place-cockpit').addEventListener('click', () => {
+  if (!loadedRoot) { showStatus('Load a GLB first'); return; }
+  setPlaceMode(placeMode === 'cockpit' ? null : 'cockpit');
+});
+document.getElementById('btn-clear-cockpits').addEventListener('click', () => {
+  if (!cockpitMarkers.length) return;
+  clearMarkers('cockpit');
+  showStatus('All cockpits cleared');
 });
 
 // Reset camera
