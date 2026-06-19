@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GPU Cloud — particles sized by density (WebGPU)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #20364f; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #eaf2ff; background: rgba(10,20,34,0.45);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.5; }
+  #hud b { color: #bcd6ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>GPU Cloud</b> — particles big where dense (blob into solid), small at the wispy edges<br>
+  <span class="k">drag</span> orbit · <span class="k">wheel</span> zoom · <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { Fn, uv, positionWorld, instancedArray, instanceIndex, vec2, vec3, float, uniform,
+         mx_noise_float, clamp, smoothstep, mix, color, normalize, length, hash, step, sqrt } from 'three/tsl';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 1, 14000);
+camera.position.set(0, 160, 760);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 170, -200); controls.enableDamping = true;
+
+// sky dome (vertical gradient)
+{
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(7000, 32, 16), new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false }));
+  const up = normalize(positionWorld).y;
+  sky.material.colorNode = mix(color(0x2a4f72), color(0xa6c9ec), smoothstep(-0.15, 0.6, up));
+  scene.add(sky);
+}
+
+const drift = uniform(vec3(0, 0, 0));
+const SUN = new THREE.Vector3(0.35, 0.8, 0.45).normalize();
+
+// ---- live tunables ----
+const P = { size: 90, tightness: 0.5, contrast: 3.4, feature: 1.0, opacity: 0.5, merge: 0.3, count: 350000, spread: 0.6 };
+const uSize = uniform(P.size), uCover = uniform(P.tightness), uContrast = uniform(P.contrast), uScale = uniform(P.feature), uOpacity = uniform(P.opacity), uMerge = uniform(P.merge);
+
+// ===========================================================================
+// fbm density field -> the cloud shape. Particles sample it at their position;
+//   where it's high they grow big and opaque (dense core merges into solid),
+//   where it thins they shrink to small faint wisps.
+// ===========================================================================
+const fbm = Fn(([q]) => {
+  let s = float(0), a = 0.55, f = 1.0;
+  for (let i = 0; i < 5; i++) { s = s.add(mx_noise_float(q.mul(f)).mul(a)); f *= 2.0; a *= 0.5; }
+  return s.mul(0.5).add(0.5);                       // ~0..1
+});
+function densityAt(p) {                              // p = world position node -> 0..1 cloud density
+  const q = p.mul(0.006).mul(uScale).add(drift);
+  const n = fbm(q);
+  const band = smoothstep(0.0, 60.0, p.y.sub(70.0)).mul(smoothstep(0.0, 80.0, float(360.0).sub(p.y)));   // a horizontal cloud layer
+  const horiz = smoothstep(1.0, 0.4, length(p.xz).mul(0.0012));    // fade out far from center
+  return clamp(n.sub(uCover).mul(uContrast), 0, 1).mul(band).mul(horiz);
+}
+
+// ---- (re)build the particle cloud (tighter spread = denser packing) ----
+let cloud = null;
+function buildCloud() {
+  if (cloud) { scene.remove(cloud); cloud.material.dispose(); }
+  const COUNT = P.count | 0, S = P.spread;
+  const pos = new Float32Array(COUNT * 3);
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < COUNT; i++) {
+    pos[i*3]   = (rnd()*2 - 1) * 900 * S;
+    pos[i*3+1] = 215 + (rnd()*2 - 1) * 135 * S;
+    pos[i*3+2] = -200 + (rnd()*2 - 1) * 900 * S;
+  }
+  const posBuf = instancedArray(pos, 'vec3');                 // world-sized camera-facing billboards
+  const mat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending });
+  const center = posBuf.element(instanceIndex);
+  const dC = densityAt(center);
+  mat.positionNode = center;
+  // MERGE / LOD: in dense regions keep fewer particles, scale survivors up to cover the same area (less overdraw)
+  const keepP = mix(float(1.0), uMerge, dC);                  // dense -> keep a smaller fraction
+  const keep = float(1).sub(smoothstep(keepP.sub(0.16), keepP.add(0.16), hash(instanceIndex)));  // SMOOTH fade across the cull threshold (no pop)
+  mat.scaleNode = dC.mul(uSize).div(sqrt(keepP)).add(1.5).mul(keep);   // BIG in the core, bigger when merged, fades out when culled
+  const disc = smoothstep(0.5, 0.02, uv().sub(vec2(0.5, 0.5)).length());
+  const litY = clamp(center.y.sub(120.0).mul(0.006).add(0.55), 0.25, 1.0);
+  mat.colorNode = mix(color(0x6f7d92), color(0xf6f9ff), litY);
+  mat.opacityNode = dC.mul(disc).mul(uOpacity).mul(keep);
+  cloud = new THREE.Sprite(mat); cloud.count = COUNT; cloud.frustumCulled = false; scene.add(cloud);
+}
+buildCloud();
+
+const gui = new GUI({ title: 'cloud' });
+gui.add(P, 'size', 5, 260, 1).onChange(v => uSize.value = v).name('particle size');
+gui.add(P, 'tightness', 0.2, 0.85, 0.01).onChange(v => uCover.value = v);
+gui.add(P, 'contrast', 0.5, 8, 0.1).onChange(v => uContrast.value = v).name('edge sharpness');
+gui.add(P, 'feature', 0.3, 3, 0.05).onChange(v => uScale.value = v).name('feature size');
+gui.add(P, 'opacity', 0.05, 1, 0.01).onChange(v => uOpacity.value = v);
+gui.add(P, 'merge', 0.1, 1.0, 0.02).onChange(v => uMerge.value = v).name('merge (1=off)');
+gui.add(P, 'count', 20000, 700000, 10000).onFinishChange(buildCloud).name('particle count');
+gui.add(P, 'spread', 0.2, 1.6, 0.02).onFinishChange(buildCloud).name('spread (packing)');
+
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const fpsEl = document.getElementById('fps');
+let last = performance.now(), facc = 0, fn = 0, T = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last)/1000); last = now; T += dt;
+  drift.value.set(T*0.012, 0, T*0.005);     // the cloud slowly evolves + drifts
+  controls.update();
+  renderer.render(scene, camera);
+  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn/facc)} fps · ${P.count.toLocaleString()} pts`; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gardner Clouds — texture-modulated translucent puffs (WebGPU)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #20364f; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #eaf2ff; background: rgba(10,20,34,0.45);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.5; }
+  #hud b { color: #bcd6ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Gardner clouds</b> — ellipsoids, alpha &amp; shading modulated by a fractal sine texture (no volume)<br>
+  <span class="k">drag</span> orbit · <span class="k">wheel</span> zoom · <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Fn, positionWorld, normalWorld, cameraPosition, vec3, vec4, float, uniform,
+         sin, abs, clamp, smoothstep, mix, max, dot, normalize, pow, color, positionLocal } from 'three/tsl';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 1, 12000);
+camera.position.set(0, 120, 620);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 140, 0); controls.enableDamping = true;
+
+const SUN = new THREE.Vector3(0.4, 0.7, 0.55).normalize();
+const sunU = uniform(vec3(SUN.x, SUN.y, SUN.z));
+const drift = uniform(vec3(0, 0, 0));   // wind offset, advanced each frame
+
+// ---- sky dome: simple vertical gradient ----
+{
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(6000, 32, 16), new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false }));
+  const up = normalize(positionWorld).y;
+  sky.material.colorNode = mix(color(0x244a6e), color(0x9fc4ea), smoothstep(-0.1, 0.55, up)).add(
+                           mix(color(0x000000), color(0x3a2a18), smoothstep(0.0, -0.4, up)));
+  scene.add(sky);
+}
+
+// ===========================================================================
+// GARDNER TEXTURE: T = [Σ Ci sin(Fi·x + Pxi)] · [Σ Ci sin(Fi·y + Pyi)], frequencies
+//   doubling, amplitudes ×0.707 (1/f), phases cross-coupled X↔Y + a Z term for 3D.
+//   It modulates BOTH the alpha (soft amorphous edges) and the shading.
+// ===========================================================================
+const OCT = 7, F0 = 0.012, HP = Math.PI/2;
+const gardner = Fn(([p]) => {
+  let sx = float(0), sy = float(0);
+  let f = F0, fprev = F0, c = 1.0;
+  for (let i = 0; i < OCT; i++) {
+    const fi = float(f), fp = float(fprev);
+    const px = i === 0 ? float(0) : float(HP).mul(sin(p.y.mul(fp)));
+    const py = i === 0 ? float(0) : float(HP).mul(sin(p.x.mul(fp)));
+    const pz = py.add(sin(p.z.mul(f * 0.5)));        // 3D variation
+    sx = sx.add(sin(p.x.mul(fi).add(px)).mul(c));
+    sy = sy.add(sin(p.y.mul(fi).add(pz)).mul(c));
+    fprev = f; f *= 2; c *= 0.707;
+  }
+  return sx.mul(sy).mul(0.16);                        // ~[-1.3, 1.3]
+});
+
+// cloud material: a sphere scaled into an ellipsoid; the texture carves a soft puff out of it
+const COVER = uniform(0.28);     // higher = puffier / more filled
+const CONTRAST = uniform(1.7);
+function makeCloudMat(tint) {
+  const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.NormalBlending });
+  const sp = positionWorld.add(drift).mul(1.0);                 // sample in world space (so they share a drifting field)
+  const T = gardner(sp);
+  const dens = clamp(T.add(COVER).mul(CONTRAST), 0, 1);          // texture -> density 0..1
+  const V = normalize(cameraPosition.sub(positionWorld));
+  const rim = smoothstep(0.0, 0.6, abs(dot(normalWorld, V)));    // fade the silhouette -> soft puff, not a hard ellipsoid
+  m.opacityNode = dens.mul(rim).mul(0.98);
+  // shading: lit top, shadowed base; texture adds variation; thin edges brighten (powder/silver hint)
+  const litF = dot(normalWorld, sunU).mul(0.5).add(0.5);
+  const body = mix(color(0x4a5d77), color(0xf3f7ff), pow(litF, float(1.3)));
+  const edge = float(1).sub(dens).mul(0.5);                      // thinner -> brighter rim
+  m.colorNode = body.mul(float(0.75).add(T.mul(0.25))).add(color(0xffffff).mul(edge).mul(litF));
+  return m;
+}
+
+// scatter a band of cloud ellipsoids
+const sphereGeo = new THREE.SphereGeometry(1, 20, 14);
+const mat = makeCloudMat();
+function addCloud(x, y, z, rx, ry, rz) {
+  const c = new THREE.Mesh(sphereGeo, mat); c.position.set(x, y, z); c.scale.set(rx, ry, rz);
+  c.frustumCulled = false; c.renderOrder = 2; scene.add(c);
+}
+let seed = 1; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+for (let i = 0; i < 9; i++) {
+  const x = (rnd()*2-1) * 700, z = -200 - rnd()*900, y = 110 + rnd()*120;
+  const s = 120 + rnd()*180;
+  addCloud(x, y, z, s*(1.3+rnd()*0.6), s*(0.6+rnd()*0.3), s*(1.1+rnd()*0.5));
+}
+
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const fpsEl = document.getElementById('fps');
+let last = performance.now(), facc = 0, fn = 0, T = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last)/1000); last = now; T += dt;
+  drift.value.set(Math.sin(T*0.03)*30 - T*6, 0, T*4);   // slow wind through the field
+  controls.update();
+  renderer.render(scene, camera);
+  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn/facc)} fps`; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

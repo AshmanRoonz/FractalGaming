@@ -29,7 +29,7 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute,
+import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute, instancedArray, uv, cross,
          hash, instanceIndex, time, sin, vec3, vec2, vec4, normalize, cameraPosition, reflector, texture, uniform,
          refract, reflect, viewportSharedTexture, screenUV, cameraViewMatrix,
          Fn, Loop, If, Break, texture3D, normalWorld, normalLocal } from 'three/tsl';
@@ -974,6 +974,62 @@ function updateShipWake(dt) {
   _prevShip.copy(ship.position);
 }
 
+// ============================================================================
+// CLOUDS — graduated from the gpu_cloud lab. Particle sprites sized by a density
+//   field: big & solid in the dense core, small & wispy at the edges, with a
+//   merge-LOD that keeps fewer/bigger sprites where it's thick. A camera-following
+//   window samples a world-anchored field, so clouds drift in the upper cavern air
+//   wherever you fly. (Exact look params carried over from the lab.)
+// ============================================================================
+const CL = { size: 97, tightness: 0.47, contrast: 3.9, feature: 1.5, opacity: 0.05, merge: 0.1, count: 200000 };
+const cloudFollow = uniform(vec3(0, 0, 0)), cloudDrift = uniform(vec3(0, 0, 0)), shipPos = uniform(vec3(0, 0, 0)), shipVel = uniform(vec3(0, 0, 0));
+const clFbm = Fn(([q]) => { let s = float(0), a = 0.55, f = 1.0; for (let i = 0; i < 5; i++) { s = s.add(mx_noise_float(q.mul(f)).mul(a)); f *= 2.0; a *= 0.5; } return s.mul(0.5).add(0.5); });
+function cloudDensity(p) {
+  const q = p.mul(0.006 * CL.feature).add(cloudDrift);
+  const n = clFbm(q);
+  const high = smoothstep(380.0, 470.0, p.y).mul(smoothstep(740.0, 640.0, p.y));    // ceiling layer
+  const low = smoothstep(-340.0, -300.0, p.y).mul(smoothstep(-150.0, -250.0, p.y)); // patchy mist hugging the water (WL = -300)
+  return n.sub(CL.tightness).mul(CL.contrast).clamp(0, 1).mul(high.add(low).clamp(0, 1));
+}
+{
+  const CHX = 2600, CHZ = 4600, N = CL.count;   // much deeper window so clouds recede into the distance
+  const cpos = new Float32Array(N * 3);
+  let cs = 11; const cr = () => (cs = (cs * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.42 ? (-330 + cr()*160) : (400 + cr()*320); }   // ~42% low water-mist, rest high
+  const cBuf = instancedArray(cpos, 'vec3');
+  const cMat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending, fog: true });
+  // WORLD-ANCHORED: snap each particle to the copy of itself nearest the camera (wrap every 2*CH).
+  //   Clouds stay fixed in the world (they churn via drift, not with your camera); a particle only
+  //   jumps when it falls a full window behind (hidden in the fog).
+  const wbase = cBuf.element(instanceIndex);
+  const period = vec3(2 * CHX, 1e9, 2 * CHZ);
+  const world = wbase.add(cloudFollow.sub(wbase).div(period).round().mul(period));
+  // SHIP INTERACTION: the hull shoves nearby cloud aside and thins it -> a parting opens around the ship
+  // ambient TURBULENCE: an animated noise flow advects each particle -> the cloud churns and swirls
+  const tp = world.mul(0.004).add(cloudDrift.mul(2.0));
+  const turb = vec3(mx_noise_float(tp), mx_noise_float(tp.add(vec3(31.7, 11.3, 5.9))).mul(0.5), mx_noise_float(tp.add(vec3(7.1, 23.4, 14.8)))).mul(52.0);
+  // the SHIP blows nearby cloud: drags it along its motion, shoves it outward, and swirls it around the hull
+  const toShip = world.sub(shipPos);
+  const sd = toShip.length().max(1.0);
+  const dir = toShip.div(sd);
+  const fall = smoothstep(580.0, 0.0, sd);
+  const blow = shipVel.mul(0.12).add(dir.mul(160.0)).add(cross(vec3(0.0, 1.0, 0.0), dir).mul(210.0)).mul(fall);
+  const center = world.add(turb).add(blow);
+  // window-edge fade -> dissolve into haze instead of popping; plus a thin hole right at the hull
+  const edge = smoothstep(CHX, CHX * 0.78, world.x.sub(cloudFollow.x).abs()).mul(smoothstep(CHZ, CHZ * 0.84, world.z.sub(cloudFollow.z).abs()));
+  const carve = smoothstep(300.0, 0.0, sd);
+  const dC = cloudDensity(world).mul(float(1.0).sub(carve).clamp(0, 1)).mul(edge);
+  cMat.positionNode = center;
+  const keepP = mix(float(1.0), float(CL.merge), dC);
+  const keep = float(1).sub(smoothstep(keepP.sub(0.16), keepP.add(0.16), hash(instanceIndex)));
+  cMat.scaleNode = dC.mul(CL.size).div(keepP.sqrt()).add(1.5).mul(keep);
+  const disc = smoothstep(0.5, 0.02, uv().sub(vec2(0.5, 0.5)).length());
+  cMat.colorNode = mix(color(0x9fb2c8), color(0xf7faff), dC.clamp(0, 1).mul(0.55).add(0.45));
+  cMat.opacityNode = dC.mul(disc).mul(CL.opacity);
+  const cloudSprites = new THREE.Sprite(cMat); cloudSprites.count = N; cloudSprites.frustumCulled = false; cloudSprites.renderOrder = 3; scene.add(cloudSprites);
+}
+
+const _cloudPrevShip = new THREE.Vector3();
 const fpsEl = document.getElementById('fps');
 let fpsAcc = 0, fpsFrames = 0;
 let last = performance.now();
@@ -988,6 +1044,11 @@ renderer.setAnimationLoop(() => {
   updateBalls(dt);
   updateCymatics(dt);
   water.position.set(camera.position.x, WL, camera.position.z);
+  cloudFollow.value.set(camera.position.x, 0, camera.position.z);   // window follows you; particles wrap to a world grid so clouds stay put
+  cloudDrift.value.set(now * 0.000018, now * 0.000005, now * 0.000011);   // world-space churn (independent of the camera)
+  shipPos.value.copy(ship.position);                                       // the ship blows the clouds it flies through
+  shipVel.value.copy(ship.position).sub(_cloudPrevShip).multiplyScalar(1 / Math.max(dt, 1e-3));
+  _cloudPrevShip.copy(ship.position);
   renderer.render(scene, camera);
   fpsAcc += dt; fpsFrames++;
   if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }

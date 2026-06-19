@@ -29,7 +29,7 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute,
+import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute, instancedArray, uv,
          hash, instanceIndex, time, sin, vec3, vec2, vec4, normalize, cameraPosition, reflector, texture, uniform,
          refract, reflect, viewportSharedTexture, screenUV, cameraViewMatrix,
          Fn, Loop, If, Break, texture3D, normalWorld, normalLocal } from 'three/tsl';
@@ -301,10 +301,11 @@ function updateWake(sx, sz, dirX, dirZ, amp) {       // dir = unit track directi
 }
 // ---- SPRAY: where the surface peaks high AND fast (crests breaking, e.g. the collapsing wake walls),
 //   it throws DROPLETS. They fall under gravity and ripple where they land — a real single touch.
-const DROPS = 4000;
+const DROPS = 80000;
 const dPos = new Float32Array(DROPS * 3).fill(-1e6), dVel = new Float32Array(DROPS * 3), dOn = new Uint8Array(DROPS);
 let dHead = 0;
 const dSize = new Float32Array(DROPS).fill(4);
+const dBase = new Float32Array(DROPS).fill(8);   // per-drop intrinsic size (varied at emit: chunky globs + fine mist)
 const dGeo = new THREE.BufferGeometry();
 dGeo.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
 dGeo.setAttribute('size', new THREE.BufferAttribute(dSize, 1));
@@ -316,6 +317,7 @@ function emitDrop(x, y, z, vx, vy, vz) {     // launch one droplet (it falls und
   const d = dHead; dHead = (dHead + 1) % DROPS;
   dPos[d * 3] = x; dPos[d * 3 + 1] = y; dPos[d * 3 + 2] = z;
   dVel[d * 3] = vx; dVel[d * 3 + 1] = vy; dVel[d * 3 + 2] = vz;
+  dBase[d] = Math.random() < 0.18 ? (16 + Math.random() * 18) : (4 + Math.random() * 7);   // ~18% chunky globs, rest fine mist
   dOn[d] = 1;
 }
 // AIRFLOW around the ship: the moving hull pushes the surrounding medium in a DIPOLE (potential flow
@@ -347,13 +349,13 @@ function waterImpact(x, z, speed, exiting) {
     wcur[k] = clamp(wcur[k] + amp * (1 - dn * dn), -34, 34);
   }
   // THE SPLASH is a dense burst of white SPRAY thrown up + out (just fast droplets, no meshes)
-  const pu = Math.min(p, 2), n = Math.floor(30 + p * 85);
+  const pu = Math.min(p, 2), n = Math.floor(200 + p * 560);
   for (let s = 0; s < n; s++) {
-    const ang = Math.random() * 6.283, rad = Math.random(), out = (15 + rad * 45) * (0.5 + p * 0.6);
-    emitDrop(x + Math.cos(ang) * rad * 9, WL + 3, z + Math.sin(ang) * rad * 9, Math.cos(ang) * out, (60 + Math.random() * 80) * pu, Math.sin(ang) * out);
+    const ang = Math.random() * 6.283, rad = Math.random(), out = (22 + rad * 85) * (0.5 + p * 0.6);
+    emitDrop(x + Math.cos(ang) * rad * 24, WL + 3, z + Math.sin(ang) * rad * 24, Math.cos(ang) * out, (60 + Math.random() * 80) * pu, Math.sin(ang) * out);
   }
   if (!exiting) {                                            // WORTHINGTON JET: a tight column spikes straight UP after the cavity, then arcs back down (projectile)
-    const jets = Math.floor(4 + p * 8);
+    const jets = Math.floor(24 + p * 52);
     for (let s = 0; s < jets; s++)
       emitDrop(x + (Math.random() - 0.5) * 4, WL + 2, z + (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 10, (140 + Math.random() * 110) * pu, (Math.random() - 0.5) * 10);
   }
@@ -364,8 +366,11 @@ function updateDrops(dt) {
     const a = shipAirFlow(dPos[i * 3], dPos[i * 3 + 1], dPos[i * 3 + 2]), C = 6 * _airInf * dt;   // swept by the airflow near the ship
     dVel[i * 3] += (a.x - dVel[i * 3]) * C; dVel[i * 3 + 1] += (a.y - dVel[i * 3 + 1]) * C - 700 * dt; dVel[i * 3 + 2] += (a.z - dVel[i * 3 + 2]) * C;   // + gravity
     dPos[i * 3] += dVel[i * 3] * dt; dPos[i * 3 + 1] += dVel[i * 3 + 1] * dt; dPos[i * 3 + 2] += dVel[i * 3 + 2] * dt;
-    const ddx = dPos[i * 3] - ship.position.x, ddy = dPos[i * 3 + 1] - ship.position.y, ddz = dPos[i * 3 + 2] - ship.position.z;
-    dSize[i] = 3 + 9 * (1 - Math.min(1, Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) / 280));   // chunky near the ship, fine far away
+    const h = Math.max(0, dPos[i * 3 + 1] - WL);                          // height above the water surface
+    const hf = 1 - Math.min(1, h / 70);
+    dSize[i] = dBase[i] * (0.3 + 1.1 * hf * hf);                          // blobbed + big at the surface, shrinking & breaking apart as it rises
+    const fine = clamp(1 - dBase[i] / 18, 0, 1);                          // smaller drops atomize more readily
+    if (Math.random() < (1 - hf) * (3 + 9 * fine) * dt) { dOn[i] = 0; dPos[i * 3 + 1] = -1e6; continue; }   // evaporate/atomize higher up (no ripple)
     if (dPos[i * 3 + 1] <= WL) { spawnRipple(dPos[i * 3], dPos[i * 3 + 2], 1.0); dOn[i] = 0; dPos[i * 3 + 1] = -1e6; }   // lands -> ripples
   }
   dGeo.attributes.position.needsUpdate = true; dGeo.attributes.size.needsUpdate = true;
@@ -796,7 +801,6 @@ const ROLL_DUR = 0.85, ROLL_COOL = 0.5, MAX_BANK = 0.38, ROLL_DODGE = 300;   // 
 const DASH_SPEED = 820;   // held L3 / F = a CONTINUOUS forward dash
 function triggerRoll(dir) { if (rollT <= 0 && rollCool <= 0) { rollT = ROLL_DUR; rollDir = dir; rollCool = ROLL_DUR + ROLL_COOL; } }
 function updateControls(dt) {
-  smashCD -= dt;   // [SMASH]
   let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0, dash = 0;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
@@ -840,23 +844,11 @@ function updateControls(dt) {
   const M = 34;                              // bigger margin than the bare camera: the ship has size
   let fl = groundY(ship.position.x, ship.position.z) + M;
   let ce = ceilY(ship.position.x, ship.position.z) - M;
-  if (ce - fl < 48) {                        // pinched (a wall) => undo the horizontal move + SMASH rock [SMASH]
+  if (ce - fl < 48) {                        // pinched (a wall) => undo the horizontal move
     ship.position.x = px; ship.position.z = pz;
     fl = groundY(px, pz) + M; ce = ceilY(px, pz) - M;
-    const drive = Math.max(0, -my) + (dash ? 1 : 0) + Math.abs(mx) * 0.5;     // [SMASH] how hard you ram the wall
-    if (smashCD <= 0 && drive > 0.1) {
-      const power = 80 + SPEED * 0.22 + boost * 140;
-      emitDebris(px + fwd.x * 46, ship.position.y + fwd.y * 46, pz + fwd.z * 46, -fwd.x, 0.25, -fwd.z, power, 5 + (boost ? 6 : 0));
-      smashCD = 0.05;
-    }
   }
-  const preY = ship.position.y;                                          // [SMASH] gouge floor/ceiling on impact
-  ship.position.y = Math.max(fl, Math.min(ce, preY));
-  if (smashCD <= 0) {
-    const p = 70 + SPEED * 0.18 + boost * 120;
-    if (preY < fl - 1.5)      { emitDebris(ship.position.x, fl, ship.position.z, (Math.random()-.5)*0.4, 1, (Math.random()-.5)*0.4, p, 5 + (boost?5:0)); smashCD = 0.05; }
-    else if (preY > ce + 1.5) { emitDebris(ship.position.x, ce, ship.position.z, (Math.random()-.5)*0.4, -1, (Math.random()-.5)*0.4, p, 5); smashCD = 0.05; }
-  }
+  ship.position.y = Math.max(fl, Math.min(ce, ship.position.y));
 
   // WATER RESISTANCE: nose/keel in the water DRAGS the ship (anti-gravity hull, so it doesn't sink).
   const noseY = ship.position.y + fwd.y * 22;                          // the nose dips when you pitch down
@@ -944,10 +936,10 @@ function updateShipWake(dt) {
     displaceWater(ship.position.x, ship.position.z, 30, WL + cutDepth, dy, dt, speed > 1 ? vx / speed : 0, speed > 1 ? vz / speed : 0);
     if (speed > 30) {                                                          // the moment you touch water while driving: spray OUT THE BACK + UP + out the sides (the T)
       const inv = 1 / speed, fx = vx * inv, fz = vz * inv, px = -fz, pz = fx, sp = Math.min(1.7, speed / 480);
-      const n = Math.floor(14 + sp * 58);                                      // denser + taller the faster you go (the rooster tail grows out of this)
+      const n = Math.floor(100 + sp * 360);                                      // denser + taller the faster you go (the rooster tail grows out of this)
       for (let s = 0; s < n; s++) {
-        const side = Math.random() < 0.5 ? 1 : -1, lat = (4 + Math.random() * 20) * side, back = 6 + Math.random() * 28;
-        const outV = (28 + Math.random() * 42) * (0.6 + sp), upV = (55 + Math.random() * 75) * (0.5 + sp * 1.3), backV = (20 + Math.random() * 38) * (0.5 + sp);
+        const side = Math.random() < 0.5 ? 1 : -1, lat = (8 + Math.random() * 46) * side, back = 8 + Math.random() * 52;
+        const outV = (40 + Math.random() * 82) * (0.6 + sp), upV = (55 + Math.random() * 75) * (0.5 + sp * 1.3), backV = (20 + Math.random() * 38) * (0.5 + sp);
         emitDrop(ship.position.x - fx * back + px * lat, WL + 3, ship.position.z - fz * back + pz * lat,
                  px * side * outV - fx * backV, upV, pz * side * outV - fz * backV);
       }
@@ -963,7 +955,7 @@ function updateShipWake(dt) {
   _fw.set(0, 0, -1).applyQuaternion(ship.quaternion);
   const noseY = ship.position.y + _fw.y * 22;
   if (noseY < WL && speed > 60 && top > WL) {                                    // only while the body is still breaking the surface (not fully under)
-    const noseX = ship.position.x + _fw.x * 22, noseZ = ship.position.z + _fw.z * 22, n = Math.min(9, 2 + (speed / 60 | 0));
+    const noseX = ship.position.x + _fw.x * 22, noseZ = ship.position.z + _fw.z * 22, n = Math.min(52, 8 + (speed / 28 | 0));
     for (let s = 0; s < n; s++)
       emitDrop(noseX + (Math.random() - 0.5) * 16, WL + 4, noseZ + (Math.random() - 0.5) * 16,
                -_fw.x * (40 + Math.random() * 50) + (Math.random() - 0.5) * 24, 75 + Math.random() * 55,
@@ -983,62 +975,51 @@ function updateShipWake(dt) {
 }
 
 // ============================================================================
-// [SMASH] SMASHY MATTER — ram rock and it bursts into real chunks that fly, tumble,
-//   bounce on the same terrain field the ship reads, and settle into a heap.
+// CLOUDS — graduated from the gpu_cloud lab. Particle sprites sized by a density
+//   field: big & solid in the dense core, small & wispy at the edges, with a
+//   merge-LOD that keeps fewer/bigger sprites where it's thick. A camera-following
+//   window samples a world-anchored field, so clouds drift in the upper cavern air
+//   wherever you fly. (Exact look params carried over from the lab.)
 // ============================================================================
-let smashCD = 0;
-const DEB_MAX = 360, DEB_G = 900;
-const debMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0, metalness: 0.0, flatShading: true });
-const debMesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0), debMat, DEB_MAX);
-debMesh.frustumCulled = false; debMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(debMesh);
-debMesh.setColorAt(0, new THREE.Color(0x6b5836)); debMesh.instanceColor.needsUpdate = true;   // allocate the per-chunk colour buffer
-const deb = [];
-for (let i = 0; i < DEB_MAX; i++) deb.push({ x:0, y:-9e5, z:0, vx:0, vy:0, vz:0, sx:1, sy:1, sz:1, life:0, q:new THREE.Quaternion(), ax:0, ay:0, az:0, col:new THREE.Color() });
-let debHead = 0;
-const _dm = new THREE.Matrix4(), _dq = new THREE.Quaternion(), _dp = new THREE.Vector3(), _dscl = new THREE.Vector3(), _dax = new THREE.Vector3(), _dE = new THREE.Euler();
-const GROUND_COLS = [0x5b4a2e, 0x6b5836, 0x44521f, 0x73603c], ROCK_COLS = [0x6e7178, 0x5a5e64, 0x7c8088, 0x55585e];
-function emitDebris(x, y, z, nx, ny, nz, power, count, rock) {
-  const pal = rock ? ROCK_COLS : GROUND_COLS;
-  for (let i = 0; i < count; i++) {
-    const d = deb[debHead]; debHead = (debHead + 1) % DEB_MAX;
-    const ang = Math.random()*6.283, rad = 8 + Math.random()*30;                  // fan around the impact, not one point
-    d.x = x + Math.cos(ang)*rad; d.y = y + (Math.random()-.3)*16; d.z = z + Math.sin(ang)*rad;
-    const lateral = power * (0.7 + Math.random()*0.9);
-    d.vx = nx*power*0.4 + Math.cos(ang)*lateral;                                   // mostly OUTWARD so it scatters off the hull
-    d.vy = ny*power*0.7 + Math.random()*power*0.5 + 40;
-    d.vz = nz*power*0.4 + Math.sin(ang)*lateral;
-    const r = 3 + Math.random()*Math.random()*11;                                  // smaller rubble; big chunks rare
-    d.sx = r*(0.7+Math.random()*0.6); d.sy = r*(0.45+Math.random()*0.5); d.sz = r*(0.7+Math.random()*0.6);  // angular flattish shards
-    d.life = 3 + Math.random()*3.5;
-    d.q.setFromEuler(_dE.set(Math.random()*6.28, Math.random()*6.28, Math.random()*6.28));
-    d.ax = (Math.random()-.5)*8; d.ay = (Math.random()-.5)*8; d.az = (Math.random()-.5)*8;
-    d.col.setHex(pal[(Math.random()*pal.length)|0]).offsetHSL(0, 0, (Math.random()-.5)*0.12);
-  }
+const CL = { size: 97, tightness: 0.47, contrast: 3.9, feature: 1.5, opacity: 0.05, merge: 0.1, count: 240000 };
+const cloudFollow = uniform(vec3(0, 0, 0)), cloudDrift = uniform(vec3(0, 0, 0)), shipPos = uniform(vec3(0, 0, 0));
+const clFbm = Fn(([q]) => { let s = float(0), a = 0.55, f = 1.0; for (let i = 0; i < 5; i++) { s = s.add(mx_noise_float(q.mul(f)).mul(a)); f *= 2.0; a *= 0.5; } return s.mul(0.5).add(0.5); });
+function cloudDensity(p) {
+  const q = p.mul(0.006 * CL.feature).add(cloudDrift);
+  const n = clFbm(q);
+  const band = smoothstep(380.0, 470.0, p.y).mul(smoothstep(740.0, 640.0, p.y));   // a soft layer high in the cavern air
+  return n.sub(CL.tightness).mul(CL.contrast).clamp(0, 1).mul(band);
 }
-function updateDebris(dt) {
-  for (let i = 0; i < DEB_MAX; i++) {
-    const d = deb[i];
-    if (d.life > 0) {
-      d.life -= dt;
-      d.vy -= DEB_G * dt;
-      d.x += d.vx*dt; d.y += d.vy*dt; d.z += d.vz*dt;
-      const rr = (d.sx + d.sz) * 0.25;
-      const gy = groundY(d.x, d.z) + rr;
-      if (d.y < gy) { d.y = gy; if (d.vy < 0) d.vy = -d.vy*0.24; d.vx*=0.55; d.vz*=0.55; if (Math.abs(d.vy) < 26) d.vy = 0; }
-      const cy = ceilY(d.x, d.z) - rr;
-      if (d.y > cy) { d.y = cy; if (d.vy > 0) d.vy = -d.vy*0.24; }
-      const al = Math.hypot(d.ax, d.ay, d.az) || 1e-5;
-      _dq.setFromAxisAngle(_dax.set(d.ax/al, d.ay/al, d.az/al), al*dt); d.q.multiply(_dq);
-      _dp.set(d.x, d.y, d.z); _dscl.set(d.sx, d.sy, d.sz);
-      _dm.compose(_dp, d.q, _dscl);
-      debMesh.setColorAt(i, d.col);
-    } else {
-      _dm.makeScale(0, 0, 0);
-    }
-    debMesh.setMatrixAt(i, _dm);
-  }
-  debMesh.instanceMatrix.needsUpdate = true;
-  if (debMesh.instanceColor) debMesh.instanceColor.needsUpdate = true;
+{
+  const CHX = 2600, CHZ = 4600, N = CL.count;   // much deeper window so clouds recede into the distance
+  const cpos = new Float32Array(N * 3);
+  let cs = 11; const cr = () => (cs = (cs * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+1] = 400 + cr()*320; cpos[i*3+2] = (cr()*2-1)*CHZ; }
+  const cBuf = instancedArray(cpos, 'vec3');
+  const cMat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending, fog: true });
+  // WORLD-ANCHORED: snap each particle to the copy of itself nearest the camera (wrap every 2*CH).
+  //   Clouds stay fixed in the world (they churn via drift, not with your camera); a particle only
+  //   jumps when it falls a full window behind (hidden in the fog).
+  const wbase = cBuf.element(instanceIndex);
+  const period = vec3(2 * CHX, 1e9, 2 * CHZ);
+  const world = wbase.add(cloudFollow.sub(wbase).div(period).round().mul(period));
+  // SHIP INTERACTION: the hull shoves nearby cloud aside and thins it -> a parting opens around the ship
+  const CARVE_R = 380, PUSH = 240;
+  const toShip = world.sub(shipPos);
+  const sd = toShip.length().max(1.0);
+  const infl = smoothstep(CARVE_R, CARVE_R * 0.25, sd);                  // 1 near the hull -> 0 by CARVE_R
+  const center = world.add(toShip.div(sd).mul(infl).mul(PUSH));          // push particles outward near the ship
+  // soft fade toward the window edge -> clouds dissolve into the haze instead of popping in at the wrap boundary
+  const edge = smoothstep(CHX, CHX * 0.78, world.x.sub(cloudFollow.x).abs()).mul(smoothstep(CHZ, CHZ * 0.84, world.z.sub(cloudFollow.z).abs()));
+  const dC = cloudDensity(world).mul(float(1.0).sub(infl).clamp(0, 1)).mul(edge);  // fade near ship + at the far edge
+  cMat.positionNode = center;
+  const keepP = mix(float(1.0), float(CL.merge), dC);
+  const keep = float(1).sub(smoothstep(keepP.sub(0.16), keepP.add(0.16), hash(instanceIndex)));
+  cMat.scaleNode = dC.mul(CL.size).div(keepP.sqrt()).add(1.5).mul(keep);
+  const disc = smoothstep(0.5, 0.02, uv().sub(vec2(0.5, 0.5)).length());
+  cMat.colorNode = mix(color(0x9fb2c8), color(0xf7faff), dC.clamp(0, 1).mul(0.55).add(0.45));
+  cMat.opacityNode = dC.mul(disc).mul(CL.opacity);
+  const cloudSprites = new THREE.Sprite(cMat); cloudSprites.count = N; cloudSprites.frustumCulled = false; cloudSprites.renderOrder = 3; scene.add(cloudSprites);
 }
 
 const fpsEl = document.getElementById('fps');
@@ -1055,6 +1036,9 @@ renderer.setAnimationLoop(() => {
   updateBalls(dt);
   updateCymatics(dt);
   water.position.set(camera.position.x, WL, camera.position.z);
+  cloudFollow.value.set(camera.position.x, 0, camera.position.z);   // window follows you; particles wrap to a world grid so clouds stay put
+  cloudDrift.value.set(now * 0.000018, now * 0.000005, now * 0.000011);   // world-space churn (independent of the camera)
+  shipPos.value.copy(ship.position);                                       // the ship parts the clouds it flies through
   renderer.render(scene, camera);
   fpsAcc += dt; fpsFrames++;
   if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }
