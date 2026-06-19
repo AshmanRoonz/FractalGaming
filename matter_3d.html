@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Matter 3D — a world (rock · water · cloud, one engine)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; }
+  #hud { position: fixed; top: 8px; left: 8px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.6);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.5; }
+  #hud b { color: #9fd0ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Matter 3D — a world</b> · rock, water, cloud: one substrate at different bindings<br>
+  move mouse = drive the <b>vibranium ship</b> through it · <span class="k">right-drag</span> orbit · <span class="k">wheel</span> zoom · <span class="k">R</span> rebuild<br>
+  <span id="stat"></span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0e14);
+scene.fog = new THREE.FogExp2(0x0a0e14, 0.010);
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 600);
+camera.position.set(22, 17, 38);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 6, 0); controls.enableDamping = true; controls.dampingFactor = 0.08;
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x33312c, 0.7));
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.6); sun.position.set(14, 26, 10); scene.add(sun);
+scene.add(new THREE.AmbientLight(0x405066, 0.4));
+
+// ===========================================================================
+// THE WORLD: one basin. ground at y=0, invisible walls at +-HX / +-HZ contain
+//   water; everything lives in the same box.
+// ===========================================================================
+const HX = 11, HZ = 11, CY = 26, PR = 0.52, S = 1.0, GY = PR;
+const ground = new THREE.Mesh(new THREE.CircleGeometry(140, 48), new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; scene.add(ground);
+const boxHelp = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(2*HX, CY, 2*HZ)), new THREE.LineBasicMaterial({ color: 0x1c2630 }));
+boxHelp.position.set(0, CY/2, 0); scene.add(boxHelp);
+
+// ROCK is the only material panel-tunable (the "seed"). Water + gas have fixed sensible seeds.
+const M = { iterations: 12, fracture: 0.06, cohesion: 0.0, damping: 0.99, gravity: 22, groundFric: 0.55, pinned: true };
+const R = { isolation: 80, ballStr: 0.62, ballSub: 18 };
+// per-material constants: gravity multiplier, bonded?, cohesion, damping, thermal jitter
+const MATS = [
+  { name: 'rock',  gravMul: 1.0,   bonded: true,  cohesion: 0.0,  damping: 0.99, jit: 0.0,  color: 0x73777d },
+  { name: 'water', gravMul: 1.0,   bonded: false, cohesion: 0.78, damping: 0.90, jit: 0.0,  color: 0x2f7fd0 },
+  { name: 'gas',   gravMul: -0.05, bonded: false, cohesion: 0.28, damping: 0.95, jit: 0.4,  color: 0xeef3f8 },
+];
+const WORLD = { water: 460, gas: 300, cloudThr: 3.5, showPoints: false };
+
+const TAU = Math.PI * 2;
+// sized big enough for any rebuild
+let N = 0;
+const CAP = 4000;
+const pos = new Float32Array(CAP * 3), prev = new Float32Array(CAP * 3), vel = new Float32Array(CAP * 3), inv = new Float32Array(CAP);
+const mat = new Uint8Array(CAP), gmul = new Float32Array(CAP), jit = new Float32Array(CAP), dens = new Float32Array(CAP);
+// resonance (rock only): a phase per particle, coupled through bonds, driven by the base
+const pph = new Float32Array(CAP), pom = new Float32Array(CAP), pcoh = new Float32Array(CAP), pdrv = new Uint8Array(CAP);
+const _ss = new Float32Array(CAP), _cc = new Float32Array(CAP), _cs = new Float32Array(CAP), _cn = new Float32Array(CAP);
+const RZ = { on: false, freq: 0.05, sync: 0.14, vib: 3.5, rebondCos: 0.55, rebondRate: 24 };
+let driveTheta = 0;
+// rock bonds as a fixed pool so they can re-nucleate
+const BCAP = 20000;
+const bA = new Int32Array(BCAP), bB = new Int32Array(BCAP), bRest = new Float32Array(BCAP), bAlive = new Uint8Array(BCAP), bStr = new Float32Array(BCAP);
+let nB = 0;
+
+function setParticle(k, x, y, z, m) {
+  pos[k*3] = x; pos[k*3+1] = y; pos[k*3+2] = z;
+  prev[k*3] = x; prev[k*3+1] = y; prev[k*3+2] = z;
+  vel[k*3] = vel[k*3+1] = vel[k*3+2] = 0;
+  mat[k] = m; gmul[k] = MATS[m].gravMul; jit[k] = MATS[m].jit; inv[k] = 1; dens[k] = 0;
+  pph[k] = Math.random() * TAU; pom[k] = (Math.random()-0.5) * 0.015; pcoh[k] = 0; pdrv[k] = 0;
+}
+
+function buildWorld() {
+  let k = 0;
+  // --- rock mound on the +x half, a bonded lattice rooted to the ground ---
+  const NXr = 7, NYr = 11, NZr = 7, rxc = 4.0;
+  let rockStart = k;
+  for (let j = 0; j < NYr; j++) for (let iz = 0; iz < NZr; iz++) for (let ix = 0; ix < NXr; ix++) {
+    const x = rxc + (ix - (NXr-1)/2) * S, y = GY + j * S, z = (iz - (NZr-1)/2) * S;
+    const jt = 0.28;
+    setParticle(k, x + (Math.random()-.5)*jt, y + (Math.random()-.5)*jt, z + (Math.random()-.5)*jt, 0);
+    if (M.pinned && j === 0) inv[k] = 0;       // rooted base
+    pdrv[k] = (j === 0) ? 1 : 0;               // base layer is the shaker
+    k++;
+  }
+  let rockEnd = k;
+  // --- water pool on the -x half: a clean grid at rest-spacing (no initial overlap = no explosion) ---
+  const sp = 2 * PR * 1.02, x0 = -HX + 1.0, x1 = -1.6, z0 = -(HZ - 1.4), z1 = (HZ - 1.4);
+  let placed = 0;
+  for (let y = GY; placed < WORLD.water; y += sp)
+    for (let z = z0; z <= z1 && placed < WORLD.water; z += sp)
+      for (let x = x0; x <= x1 && placed < WORLD.water; x += sp) {
+        setParticle(k++, x + (Math.random()-.5)*0.08, y + (Math.random()-.5)*0.08, z + (Math.random()-.5)*0.08, 1); placed++;
+      }
+  // --- gas aloft, in a few drifting clusters (puffs), not a uniform ceiling layer ---
+  const NC = 5, ctr = [];
+  for (let c = 0; c < NC; c++) ctr.push([ (Math.random()*2-1)*(HX-3.5), 17 + Math.random()*(CY-20), (Math.random()*2-1)*(HZ-3.5) ]);
+  for (let i = 0; i < WORLD.gas; i++) {
+    const c = ctr[(Math.random()*NC)|0];
+    let x = c[0] + (Math.random()-.5)*5, y = c[1] + (Math.random()-.5)*4, z = c[2] + (Math.random()-.5)*5;
+    x = Math.max(-HX+0.6, Math.min(HX-0.6, x)); y = Math.max(15, Math.min(CY-0.6, y)); z = Math.max(-HZ+0.6, Math.min(HZ-0.6, z));
+    setParticle(k++, x, y, z, 2);
+  }
+  N = k;
+  // rock bonds (rock-rock neighbours only)
+  bAlive.fill(0); bStr.fill(0); nB = 0; const BR = 1.6 * S;
+  for (let a = rockStart; a < rockEnd; a++) for (let b = a + 1; b < rockEnd; b++) {
+    const dx = pos[a*3]-pos[b*3], dy = pos[a*3+1]-pos[b*3+1], dz = pos[a*3+2]-pos[b*3+2], d = Math.hypot(dx, dy, dz);
+    if (d < BR) { bA[nB]=a; bB[nB]=b; bRest[nB]=d; bAlive[nB]=1; nB++; }
+  }
+}
+buildWorld();
+
+// ===========================================================================
+// RENDER: three smooth marching-cubes skins over the SAME box, one per visible
+//   material. Each keeps matter_3d's tight, solid look at its own tuning.
+//   Thin air adds no ball -> no surface; gas only skins where it CONDENSES (cloud).
+// ===========================================================================
+const FMIN = new THREE.Vector3(-HX, 0, -HZ), FSIZE = new THREE.Vector3(2*HX, CY, 2*HZ);
+function makeField(res, color, rough, opacity) {
+  const m = new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0.0, flatShading: true, transparent: opacity < 1, opacity });
+  const f = new MarchingCubes(res, m, false, false, 160000);
+  f.position.set(FMIN.x + FSIZE.x/2, FMIN.y + FSIZE.y/2, FMIN.z + FSIZE.z/2);
+  f.scale.set(FSIZE.x/2, FSIZE.y/2, FSIZE.z/2); f.frustumCulled = false; scene.add(f);
+  return f;
+}
+const rockMC  = makeField(40, MATS[0].color, 1.0, 1.0);
+const waterMC = makeField(36, MATS[1].color, 0.25, 0.92);
+const cloudMC = makeField(30, MATS[2].color, 1.0, 0.85);
+const WCLOUD = { iso: 22, str: 0.55, sub: 16, wiso: 55, wstr: 0.58, wsub: 18 };
+
+// phase-coloured points (rock standing wave), optional
+const ptGeo = new THREE.BufferGeometry();
+const ptPos = new Float32Array(CAP * 3), ptCol = new Float32Array(CAP * 3);
+ptGeo.setAttribute('position', new THREE.BufferAttribute(ptPos, 3));
+ptGeo.setAttribute('color', new THREE.BufferAttribute(ptCol, 3));
+const points = new THREE.Points(ptGeo, new THREE.PointsMaterial({ size: 0.42, vertexColors: true }));
+points.visible = false; scene.add(points);
+const _tc = new THREE.Color();
+
+// the vibranium ship: a glowing sphere you drive through the world
+const SMR = 2.3;
+const smasher = new THREE.Mesh(new THREE.IcosahedronGeometry(SMR, 2), new THREE.MeshStandardMaterial({ color: 0x18324a, emissive: 0x35e0ff, emissiveIntensity: 0.9, roughness: 0.3, metalness: 0.6 }));
+scene.add(smasher);
+let smX = 0, smY = 80, smZ = 0, smPX = smX, smPY = smY, smPZ = smZ, shipActive = false;
+smasher.visible = false;
+
+const ray = new THREE.Raycaster(), plane = new THREE.Plane(), planePt = new THREE.Vector3(), hit = new THREE.Vector3(), mouse = new THREE.Vector2(0, 0);
+addEventListener('mousemove', e => { mouse.x = (e.clientX / innerWidth) * 2 - 1; mouse.y = -(e.clientY / innerHeight) * 2 + 1; shipActive = true; smasher.visible = true; });
+addEventListener('keydown', e => { if (e.key === 'r' || e.key === 'R') rebuildWorld(); });
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// ===========================================================================
+// PBD step, material-aware: predict (per-material gravity + jitter), rock bonds
+//   (+fracture), non-penetration (all), cohesion (same-material), ship + bounds.
+// ===========================================================================
+const REST2 = (PR * 1.9) ** 2, COH2 = 1.5 * 1.5, MIND = Math.sqrt(REST2);
+// fast INTEGER spatial grid (counting-sort buckets) — no string keys, no Map.
+const CS = PR * 2.0;
+const GMINX = -HX - CS, GMINY = -CS, GMINZ = -HZ - CS;
+const GW = (((2*HX + 2*CS)/CS)|0) + 2, GH = (((CY + 2*CS)/CS)|0) + 2, GD = (((2*HZ + 2*CS)/CS)|0) + 2;
+const NCELL = GW * GH * GD, GWH = GW * GH;
+const cellCnt = new Int32Array(NCELL), cellStart = new Int32Array(NCELL), cellCur = new Int32Array(NCELL), partIdx = new Int32Array(CAP);
+function cellCoord(v, mn, mx) { let i = ((v - mn)/CS)|0; if (i<0) i=0; else if (i>=mx) i=mx-1; return i; }
+function cellIndex(o) { return cellCoord(pos[o],GMINX,GW) + cellCoord(pos[o+1],GMINY,GH)*GW + cellCoord(pos[o+2],GMINZ,GD)*GWH; }
+function buildGrid() {
+  cellCnt.fill(0);
+  for (let i=0;i<N;i++) cellCnt[cellIndex(i*3)]++;
+  let s=0; for (let c=0;c<NCELL;c++){ cellStart[c]=s; cellCur[c]=s; s+=cellCnt[c]; }
+  for (let i=0;i<N;i++){ const c=cellIndex(i*3); partIdx[cellCur[c]++]=i; }
+}
+function step(dt) {
+  smX; // ship velocity for splashing
+  const smvx = (smX - smPX) / dt, smvy = (smY - smPY) / dt, smvz = (smZ - smPZ) / dt;
+  smPX = smX; smPY = smY; smPZ = smZ;
+  // predict
+  for (let i = 0; i < N; i++) {
+    if (inv[i] === 0) continue;
+    const o = i * 3;
+    vel[o + 1] -= M.gravity * gmul[i] * dt;
+    if (jit[i]) { vel[o] += (Math.random()-.5)*jit[i]; vel[o+1] += (Math.random()-.5)*jit[i]; vel[o+2] += (Math.random()-.5)*jit[i]; }
+    if (RZ.on && mat[i] === 0 && !pdrv[i]) vel[o] += RZ.vib * Math.sin(pph[i]) * dt;
+    prev[o] = pos[o]; prev[o + 1] = pos[o + 1]; prev[o + 2] = pos[o + 2];
+    pos[o] += vel[o] * dt; pos[o + 1] += vel[o + 1] * dt; pos[o + 2] += vel[o + 2] * dt;
+  }
+  // the ship breaks every rock bond it passes through (permanent fracture)
+  const br2 = (SMR + PR) * (SMR + PR);
+  for (let e = 0; e < nB; e++) {
+    if (!bAlive[e]) continue;
+    const a = bA[e] * 3, b = bB[e] * 3;
+    const mxp = (pos[a] + pos[b]) * 0.5, myp = (pos[a + 1] + pos[b + 1]) * 0.5, mzp = (pos[a + 2] + pos[b + 2]) * 0.5;
+    const ex = mxp - smX, ey = myp - smY, ez = mzp - smZ;
+    if (ex * ex + ey * ey + ez * ez < br2) bAlive[e] = 0;
+  }
+  const rr = SMR + PR, ITERS = M.iterations | 0;
+  buildGrid();   // broadphase ONCE per substep
+  for (let it = 0; it < ITERS; it++) {
+    // rock bonds, with fracture on overstretch (or sustained resonance strain)
+    for (let e = 0; e < nB; e++) {
+      if (!bAlive[e]) continue;
+      const ia = bA[e], ib = bB[e], a = ia * 3, b = ib * 3;
+      const wa = inv[ia], wb = inv[ib], ws = wa + wb;
+      if (ws === 0) continue;
+      const dx = pos[b] - pos[a], dy = pos[b + 1] - pos[a + 1], dz = pos[b + 2] - pos[a + 2];
+      const d = Math.hypot(dx, dy, dz) || 1e-5;
+      if ((RZ.on ? bStr[e] : (d - bRest[e]) / bRest[e]) > M.fracture) { bAlive[e] = 0; continue; }
+      const diff = (d - bRest[e]) / d;
+      const cx = dx * diff, cy = dy * diff, cz = dz * diff;
+      pos[a] += cx * (wa / ws); pos[a + 1] += cy * (wa / ws); pos[a + 2] += cz * (wa / ws);
+      pos[b] -= cx * (wb / ws); pos[b + 1] -= cy * (wb / ws); pos[b + 2] -= cz * (wb / ws);
+    }
+    // non-penetration (all) + cohesion (same material) — uses the per-substep hash
+    for (let i = 0; i < N; i++) {
+      if (inv[i] === 0) continue;
+      const o = i * 3, mi = mat[i], coh = mi === 0 ? M.cohesion : MATS[mi].cohesion;
+      const ix = cellCoord(pos[o],GMINX,GW), iy = cellCoord(pos[o+1],GMINY,GH), iz = cellCoord(pos[o+2],GMINZ,GD);
+      for (let oz = -1; oz <= 1; oz++) { const cz = iz+oz; if (cz<0||cz>=GD) continue;
+        for (let oy = -1; oy <= 1; oy++) { const cy = iy+oy; if (cy<0||cy>=GH) continue;
+          for (let ox = -1; ox <= 1; ox++) { const cx = ix+ox; if (cx<0||cx>=GW) continue;
+            const c = cx + cy*GW + cz*GWH, st = cellStart[c], en = st + cellCnt[c];
+            for (let k = st; k < en; k++) {
+              const q = partIdx[k]; if (q <= i) continue;
+              const p = q * 3;
+              const dx = pos[p] - pos[o], dy = pos[p + 1] - pos[o + 1], dz = pos[p + 2] - pos[o + 2];
+              const d2 = dx * dx + dy * dy + dz * dz;
+              if (d2 < 1e-6) continue;
+              if (d2 < REST2) {                                  // repel: non-penetration, all pairs
+                const d = Math.sqrt(d2), corr = (MIND - d) / d * 0.5, wq = inv[q], ws2 = 1 + wq;
+                const ccx = dx * corr, ccy = dy * corr, ccz = dz * corr;
+                pos[o] -= ccx / ws2; pos[o + 1] -= ccy / ws2; pos[o + 2] -= ccz / ws2;
+                if (wq) { pos[p] += ccx * (wq / ws2); pos[p + 1] += ccy * (wq / ws2); pos[p + 2] += ccz * (wq / ws2); }
+              } else if (coh > 0 && mat[q] === mi && d2 < COH2) { // attract: cohesion, same material only
+                const d = Math.sqrt(d2), corr = (MIND - d) / d * 0.5 * coh, wq = inv[q], ws2 = 1 + wq;
+                const ccx = dx * corr, ccy = dy * corr, ccz = dz * corr;
+                pos[o] -= ccx / ws2; pos[o + 1] -= ccy / ws2; pos[o + 2] -= ccz / ws2;
+                if (wq) { pos[p] += ccx * (wq / ws2); pos[p + 1] += ccy * (wq / ws2); pos[p + 2] += ccz * (wq / ws2); }
+              }
+            }
+          }
+        }
+      }
+    }
+    // ship push-out + world bounds
+    for (let i = 0; i < N; i++) {
+      if (inv[i] === 0) continue;
+      const o = i * 3;
+      const dx = pos[o] - smX, dy = pos[o + 1] - smY, dz = pos[o + 2] - smZ, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < rr * rr && d2 > 1e-6) {
+        const d = Math.sqrt(d2), push = (rr - d) / d;
+        pos[o] += dx * push; pos[o + 1] += dy * push; pos[o + 2] += dz * push;
+        vel[o] += smvx * 0.05 * dt; vel[o+1] += smvy * 0.05 * dt; vel[o+2] += smvz * 0.05 * dt;
+      }
+      if (pos[o] < -HX) pos[o] = -HX; if (pos[o] > HX) pos[o] = HX;
+      if (pos[o + 2] < -HZ) pos[o + 2] = -HZ; if (pos[o + 2] > HZ) pos[o + 2] = HZ;
+      if (pos[o + 1] < GY) pos[o + 1] = GY; if (pos[o + 1] > CY) pos[o + 1] = CY;
+    }
+  }
+  // recover velocity
+  for (let i = 0; i < N; i++) {
+    if (inv[i] === 0) continue;
+    const o = i * 3, dmp = mat[i] === 0 ? M.damping : MATS[mat[i]].damping;
+    vel[o] = (pos[o] - prev[o]) / dt * dmp;
+    vel[o + 1] = (pos[o + 1] - prev[o + 1]) / dt * dmp;
+    vel[o + 2] = (pos[o + 2] - prev[o + 2]) / dt * dmp;
+    if (mat[i] === 0 && pos[o + 1] <= GY + 1e-3) { vel[o] *= M.groundFric; vel[o + 2] *= M.groundFric; }
+  }
+}
+
+// ---- fluid density (water + gas): sizes water droplets and gates cloud visibility ----
+const dcell = new Map(), DCS = 2.0, DR2 = 2.3 * 2.3;
+function fluidDensity() {
+  dcell.clear();
+  for (let i = 0; i < N; i++) { const m = mat[i]; if (m !== 1 && m !== 2) continue; const o = i*3; const k = ((pos[o]/DCS)|0)+'_'+((pos[o+1]/DCS)|0)+'_'+((pos[o+2]/DCS)|0); let c = dcell.get(k); if (!c) dcell.set(k, c=[]); c.push(i); }
+  for (let i = 0; i < N; i++) {
+    const mi = mat[i]; if (mi !== 1 && mi !== 2) { dens[i] = 0; continue; }
+    const o = i*3, bx=(pos[o]/DCS)|0, by=(pos[o+1]/DCS)|0, bz=(pos[o+2]/DCS)|0; let n = 0;
+    for (let ox=-1;ox<=1;ox++) for (let oy=-1;oy<=1;oy++) for (let oz=-1;oz<=1;oz++) { const c = dcell.get((bx+ox)+'_'+(by+oy)+'_'+(bz+oz)); if (!c) continue; for (let m=0;m<c.length;m++){ const j=c[m]; if(j===i)continue; if(mat[j]!==mi)continue; const p=j*3; const d2=(pos[p]-pos[o])**2+(pos[p+1]-pos[o+1])**2+(pos[p+2]-pos[o+2])**2; if(d2<DR2)n++; } }
+    dens[i] = n;
+  }
+}
+const sstep = (a,b,x) => { const t = Math.max(0, Math.min(1, (x-a)/(b-a))); return t*t*(3-2*t); };
+
+// mode: 0 solid, 1 water (droplet size scales with local density), 2 cloud (gated by density)
+function skin(mc, matId, iso, str, sub, mode) {
+  mc.isolation = iso; mc.reset();
+  for (let i = 0; i < N; i++) {
+    if (mat[i] !== matId) continue;
+    const o = i * 3;
+    const nx = (pos[o]-FMIN.x)/FSIZE.x, ny = (pos[o+1]-FMIN.y)/FSIZE.y, nz = (pos[o+2]-FMIN.z)/FSIZE.z;
+    if (nx <= 0.01 || nx >= 0.99 || ny <= 0.01 || ny >= 0.99 || nz <= 0.01 || nz >= 0.99) continue;
+    let s = str;
+    if (mode === 2) { const c = sstep(WORLD.cloudThr - 1, WORLD.cloudThr + 3, dens[i]); if (c < 0.05) continue; s = str * c; }
+    else if (mode === 1) { s = str * (0.3 + 0.7 * sstep(1, 7, dens[i])); }   // lone splash = small droplet, deep pool = full
+    mc.addBall(nx, ny, nz, s, sub);
+  }
+  mc.update();
+}
+
+// ===========================================================================
+// RESONANCE (rock): drive phase from the base, couple through live bonds, track
+//   sustained strain, re-bond in-phase neighbours. Off by default.
+// ===========================================================================
+function resonanceStep() {
+  if (!RZ.on) return;
+  driveTheta = (driveTheta + TAU * RZ.freq) % TAU;
+  for (let i = 0; i < N; i++) { _ss[i]=0; _cc[i]=0; _cs[i]=0; _cn[i]=0; }
+  for (let e = 0; e < nB; e++) { if (!bAlive[e]) continue; const i = bA[e], j = bB[e], di = pph[j] - pph[i];
+    _ss[i] += Math.sin(di); _ss[j] -= Math.sin(di);
+    _cc[i] += Math.cos(pph[j]); _cs[i] += Math.sin(pph[j]); _cn[i]++;
+    _cc[j] += Math.cos(pph[i]); _cs[j] += Math.sin(pph[i]); _cn[j]++;
+    const a = i*3, b = j*3, d = Math.hypot(pos[b]-pos[a], pos[b+1]-pos[a+1], pos[b+2]-pos[a+2]);
+    bStr[e] = bStr[e]*0.92 + Math.abs((d - bRest[e]) / bRest[e]) * 0.08;
+  }
+  for (let i = 0; i < N; i++) {
+    if (mat[i] !== 0) continue;
+    if (pdrv[i]) { pph[i] = driveTheta; pcoh[i] = 1; continue; }
+    const c = _cn[i] || 1;
+    pph[i] = (pph[i] + pom[i] + RZ.sync * _ss[i] / c + TAU) % TAU;
+    pcoh[i] = Math.hypot(_cc[i], _cs[i]) / c;
+  }
+  rebondPass();
+}
+const _rb = new Map();
+function rebondPass() {
+  if (RZ.rebondRate <= 0) return;
+  const bset = new Set(); for (let e = 0; e < nB; e++) if (bAlive[e]) bset.add(bA[e] * CAP + bB[e]);
+  _rb.clear(); const CSz = 1.6;
+  for (let i = 0; i < N; i++) { if (mat[i] !== 0) continue; const o=i*3; const kk=((pos[o]/CSz)|0)+'_'+((pos[o+1]/CSz)|0)+'_'+((pos[o+2]/CSz)|0); let c=_rb.get(kk); if(!c)_rb.set(kk,c=[]); c.push(i); }
+  let made = 0, free = 0;
+  for (let i = 0; i < N && made < RZ.rebondRate; i++) { if (mat[i] !== 0) continue; const o=i*3, bx=(pos[o]/CSz)|0, by=(pos[o+1]/CSz)|0, bz=(pos[o+2]/CSz)|0;
+    for (let ox=-1;ox<=1 && made<RZ.rebondRate;ox++) for (let oy=-1;oy<=1;oy++) for (let oz=-1;oz<=1;oz++) { const c=_rb.get((bx+ox)+'_'+(by+oy)+'_'+(bz+oz)); if(!c)continue;
+      for (let m=0;m<c.length;m++){ const j=c[m]; if(j<=i)continue; if(bset.has(i*CAP+j))continue;
+        const dx=pos[j*3]-pos[o],dy=pos[j*3+1]-pos[o+1],dz=pos[j*3+2]-pos[o+2],d=Math.hypot(dx,dy,dz);
+        if(d>1.5*S)continue; if(Math.cos(pph[i]-pph[j])<RZ.rebondCos)continue;
+        let slot=-1; while(free<nB){ if(!bAlive[free]){slot=free;break;} free++; } if(slot<0){ if(nB<BCAP)slot=nB++; else { made=RZ.rebondRate; break; } }
+        bA[slot]=i;bB[slot]=j;bRest[slot]=d;bAlive[slot]=1;bStr[slot]=0;bset.add(i*CAP+j);made++;
+      } } }
+}
+
+// ---- presets + panel ----
+const statEl = document.getElementById('stat');
+const PRESETS = {
+  Rock:  { iterations: 12, fracture: 0.06, cohesion: 0.0,  damping: 0.99, gravity: 22, groundFric: 0.55, pinned: true,  color: 0x73777d, isolation: 80, ballStr: 0.62, ballSub: 18 },
+  Metal: { iterations: 14, fracture: 0.5,  cohesion: 0.05, damping: 0.95, gravity: 26, groundFric: 0.6,  pinned: true,  color: 0x9aa3ad, isolation: 80, ballStr: 0.62, ballSub: 18 },
+  Jello: { iterations: 4,  fracture: 2.0,  cohesion: 0.0,  damping: 0.9,  gravity: 18, groundFric: 0.7,  pinned: true,  color: 0x53c06a, isolation: 78, ballStr: 0.70, ballSub: 16 },
+  Sand:  { iterations: 2,  fracture: 0.02, cohesion: 0.12, damping: 0.78, gravity: 24, groundFric: 0.45, pinned: false, color: 0xc2a878, isolation: 92, ballStr: 0.55, ballSub: 20 },
+};
+const ui = { preset: 'Rock' };
+function applyPreset(name) {
+  const p = PRESETS[name]; if (!p) return;
+  M.iterations = p.iterations; M.fracture = p.fracture; M.cohesion = p.cohesion; M.damping = p.damping; M.gravity = p.gravity; M.groundFric = p.groundFric; M.pinned = p.pinned;
+  R.isolation = p.isolation; R.ballStr = p.ballStr; R.ballSub = p.ballSub;
+  rockMC.material.color.setHex(p.color); rebuildWorld();
+  gui.controllersRecursive().forEach(c => c.updateDisplay());
+}
+const gui = new GUI({ title: 'Rock seed + world' });
+gui.add(ui, 'preset', Object.keys(PRESETS)).name('rock preset').onChange(applyPreset);
+gui.add(M, 'iterations', 1, 16, 1).name('stiffness');
+gui.add(M, 'fracture', 0.005, 2, 0.005).name('fracture strain');
+gui.add(M, 'cohesion', 0, 1.5, 0.01).name('cohesion / re-bond');
+gui.add(M, 'damping', 0.7, 1, 0.005).name('liveliness');
+gui.add(M, 'gravity', 0, 40, 1);
+gui.add(M, 'pinned').name('rooted base').onChange(rebuildWorld);
+const fw = gui.addFolder('World');
+fw.add(WORLD, 'water', 0, 1400, 20).name('water amount').onFinishChange(rebuildWorld);
+fw.add(WORLD, 'gas', 0, 1200, 20).name('gas amount').onFinishChange(rebuildWorld);
+fw.add(WORLD, 'cloudThr', 0, 8, 0.5).name('cloud density ≥');
+const fr = gui.addFolder('Look');
+fr.add(R, 'isolation', 20, 140, 1).name('rock tightness');
+fr.add(R, 'ballStr', 0.2, 2, 0.02).name('rock blob');
+fr.add(WCLOUD, 'wiso', 20, 120, 1).name('water tightness');
+fr.add(WCLOUD, 'iso', 8, 80, 1).name('cloud softness');
+const frz = gui.addFolder('Resonance (rock)');
+frz.add(RZ, 'on').name('resonance ON').onChange(v => { points.visible = v; });
+frz.add(RZ, 'freq', 0.005, 0.2, 0.001).name('drive frequency');
+frz.add(RZ, 'sync', 0, 0.4, 0.005).name('phase coupling');
+frz.add(RZ, 'vib', 0, 20, 0.5).name('vibration');
+frz.add(RZ, 'rebondRate', 0, 80, 1).name('re-bond rate');
+gui.add({ rebuild: () => rebuildWorld() }, 'rebuild').name('rebuild (or press R)');
+
+// pre-settle the world before first paint (ship parked) so it opens calm
+// warmup: run real physics so it falls & pools, but bleed energy hard each step so it settles (no fountain)
+function warm(steps) { const ro = RZ.on; RZ.on = false; for (let s = 0; s < steps; s++) { step(1/120); for (let i = 0; i < N*3; i++) vel[i] *= 0.4; } RZ.on = ro; }
+function rebuildWorld() { buildWorld(); warm(150); }
+warm(240);
+
+let acc = 0, last = performance.now(), frame = 0, msAvg = 0;
+renderer.setAnimationLoop(() => {
+  const t0 = performance.now();
+  const now = performance.now(), dt = Math.min(0.033, (now - last) / 1000); last = now;
+  if (shipActive) {
+    camera.getWorldDirection(plane.normal); planePt.set(0, 7, 0); plane.setFromNormalAndCoplanarPoint(plane.normal, planePt);
+    ray.setFromCamera(mouse, camera);
+    if (ray.ray.intersectPlane(plane, hit)) { smX += (hit.x - smX) * 0.35; smY += (hit.y - smY) * 0.35; smZ += (hit.z - smZ) * 0.35; }
+    smasher.position.set(smX, smY, smZ);
+  }
+
+  const _p0 = performance.now();
+  acc += dt; let s = 0; while (acc >= 1/120 && s < 4) { step(1/120); acc -= 1/120; s++; }
+  const _p1 = performance.now();
+  resonanceStep();
+  fluidDensity();
+  const _p2 = performance.now();
+  if (RZ.on) { for (let i = 0; i < N; i++) { if (mat[i] !== 0) { ptCol[i*3]=ptCol[i*3+1]=ptCol[i*3+2]=0; continue; } ptPos[i*3]=pos[i*3]; ptPos[i*3+1]=pos[i*3+1]; ptPos[i*3+2]=pos[i*3+2];
+    _tc.setHSL(pph[i]/TAU, 0.85, 0.28 + 0.42*pcoh[i]); ptCol[i*3]=_tc.r; ptCol[i*3+1]=_tc.g; ptCol[i*3+2]=_tc.b; }
+    ptGeo.attributes.position.needsUpdate = true; ptGeo.attributes.color.needsUpdate = true; }
+
+  const _s0 = performance.now();
+  skin(rockMC, 0, R.isolation, R.ballStr, R.ballSub, 0);
+  const _s1 = performance.now();
+  skin(waterMC, 1, WCLOUD.wiso, WCLOUD.wstr, WCLOUD.wsub, 1);
+  const _s2 = performance.now();
+  skin(cloudMC, 2, WCLOUD.iso, WCLOUD.str, WCLOUD.sub, 2);
+  const _s3 = performance.now();
+  window.__prof = { phys:_p1-_p0, dens:_p2-_p1, rock:_s1-_s0, water:_s2-_s1, cloud:_s3-_s2 };
+
+  controls.update();
+  renderer.render(scene, camera);
+  msAvg = msAvg * 0.9 + (performance.now() - t0) * 0.1; window.__ms = msAvg;
+  if ((frame++ & 15) === 0) { let alive = 0; for (let e = 0; e < nB; e++) alive += bAlive[e]; statEl.textContent = `particles: ${N}   rock bonds: ${alive} / ${nB}   ·   ${msAvg.toFixed(1)} ms/frame (${Math.round(1000/Math.max(1,msAvg))} fps cap)`; }
+});
+</script>
+</body>
+</html>

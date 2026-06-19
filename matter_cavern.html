@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Matter Cavern — WebGPU scene (foundation)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05070b; }
+  #hud { position: fixed; top: 10px; left: 10px; z-index: 10; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #bfe0a0; background: rgba(10,16,24,0.5);
+    padding: 5px 9px; border-radius: 6px; line-height: 1.55; }
+  #hud b { color: #9fd0ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Matter Cavern</b> — WebGPU foundation<br>
+  <span class="k">gamepad</span>: L-stick move/throttle · R-stick steer · A/B down/up · RB boost &nbsp;|&nbsp; <span class="k">keys</span>: WASD + arrows, Space/Shift, F dash<br>
+  <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const FOGC = 0x0b1119;
+
+// ---- cheap value noise (for the rocky floor + formation placement) ----
+function hash2(x, z) { const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return n - Math.floor(n); }
+function noise2(x, z) {
+  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+  const u = xf*xf*(3-2*xf), v = zf*zf*(3-2*zf);
+  const a = hash2(xi, zi), b = hash2(xi+1, zi), c = hash2(xi, zi+1), d = hash2(xi+1, zi+1);
+  const ab = a + (b-a)*u, cd = c + (d-c)*u;
+  return (ab + (cd-ab)*v);
+}
+function fbm2(x, z) { let s=0, a=0.5, f=1; for (let o=0;o<4;o++){ s += a*noise2(x*f, z*f); f*=2; a*=0.5; } return s; }
+const FLOOR = (x, z) => (fbm2(x*0.0016, z*0.0016) - 0.5) * 220 + (fbm2(x*0.006+9, z*0.006-4)-0.5)*55;   // rolling rocky floor
+const CEIL  = (x, z) => 520 + (fbm2(x*0.0018+5, z*0.0018+7) - 0.5) * 240;                                // bumpy ceiling
+
+// ============================================================================
+// Renderer / scene / camera / light  (WebGPU)
+// ============================================================================
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(FOGC);
+scene.fog = new THREE.FogExp2(FOGC, 0.00055);     // enclosed cave feel, but you can see the space
+const camera = new THREE.PerspectiveCamera(65, innerWidth/innerHeight, 1, 9000);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, 120, 300);
+
+scene.add(new THREE.AmbientLight(0x4a5d78, 0.6));
+scene.add(new THREE.HemisphereLight(0x8aa3c8, 0x2c2620, 0.95));
+const fill = new THREE.DirectionalLight(0xcfe0ff, 0.6); fill.position.set(0.3, 1, 0.2); scene.add(fill);
+const glow = new THREE.PointLight(0x6fa8ff, 0.8, 3200, 1.4); glow.position.set(0, 380, 0); scene.add(glow);
+
+// ============================================================================
+// Cavern shell: a rocky floor + ceiling mesh (noise-displaced grids) and
+//   scattered rock formations (instanced) between them. Static -> WebGPU-safe.
+// ============================================================================
+const EXT = 2600, DIV = 90, rockMat = new THREE.MeshStandardMaterial({ color: 0x73787f, roughness: 1.0, metalness: 0.0, flatShading: true });
+function shell(heightFn, flip) {
+  const g = new THREE.PlaneGeometry(EXT*2, EXT*2, DIV, DIV); g.rotateX(-Math.PI/2);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) { const x = p.getX(i), z = p.getZ(i); p.setY(i, heightFn(x, z)); }
+  g.computeVertexNormals();
+  const m = new THREE.Mesh(g, rockMat); m.material = rockMat; scene.add(m); return m;
+}
+shell(FLOOR, false);
+shell(CEIL, true);
+
+// formations: stalagmites from the floor + stalactites from the ceiling
+const cone = new THREE.ConeGeometry(1, 2, 7, 1); // unit cone, base radius 1, height 2
+const formMat = new THREE.MeshStandardMaterial({ color: 0x7a7e85, roughness: 1.0, flatShading: true });
+const FN = 1400;
+const forms = new THREE.InstancedMesh(cone, formMat, FN);
+const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _s = new THREE.Vector3(), _p = new THREE.Vector3(), _e = new THREE.Euler();
+let fi = 0;
+function placeForms() {
+  for (let n = 0; n < FN; n++) {
+    const x = (Math.random()*2-1) * EXT*0.92, z = (Math.random()*2-1) * EXT*0.92;
+    const ceiling = Math.random() < 0.42;
+    const baseY = ceiling ? CEIL(x, z) : FLOOR(x, z);
+    const h = 40 + Math.random()*Math.random()*260, r = h * (0.18 + Math.random()*0.18);
+    _p.set(x, baseY + (ceiling ? -h/2 : h/2), z);
+    _e.set(0, Math.random()*6.28, ceiling ? Math.PI : 0); _q.setFromEuler(_e);
+    _s.set(r, h/2, r);
+    _m4.compose(_p, _q, _s); forms.setMatrixAt(fi++, _m4);
+  }
+  forms.instanceMatrix.needsUpdate = true;
+}
+placeForms(); scene.add(forms);
+
+// ============================================================================
+// The ship (vibranium craft) + a forward headlight, and a chase camera.
+// ============================================================================
+const ship = new THREE.Group();
+const hullMat = new THREE.MeshStandardMaterial({ color: 0x1b3346, roughness: 0.35, metalness: 0.7, emissive: 0x0a2740, emissiveIntensity: 0.6 });
+const trimMat = new THREE.MeshStandardMaterial({ color: 0x18324a, emissive: 0x36e0ff, emissiveIntensity: 1.4, roughness: 0.3, metalness: 0.5 });
+const nose = new THREE.Mesh(new THREE.ConeGeometry(7, 26, 16), hullMat); nose.rotation.x = -Math.PI/2; nose.position.z = -6; ship.add(nose);
+const body = new THREE.Mesh(new THREE.CapsuleGeometry(7, 16, 8, 16), hullMat); body.rotation.x = Math.PI/2; body.position.z = 6; ship.add(body);
+const fin = new THREE.Mesh(new THREE.BoxGeometry(28, 1.5, 9), trimMat); fin.position.z = 12; ship.add(fin);
+const ring = new THREE.Mesh(new THREE.TorusGeometry(7.5, 1.2, 8, 24), trimMat); ring.position.z = 13; ship.add(ring);
+ship.position.set(0, 140, 200); scene.add(ship);
+
+const head = new THREE.SpotLight(0xdff0ff, 6.0, 2200, 0.62, 0.5, 1.2); head.position.set(0, 2, -4);
+const headTarget = new THREE.Object3D(); headTarget.position.set(0, 0, -200); ship.add(head); ship.add(headTarget); head.target = headTarget;
+const wingL = new THREE.PointLight(0x36e0ff, 0.7, 240, 2.0); wingL.position.set(0, 0, 14); ship.add(wingL);
+
+// ============================================================================
+// Gamepad + keyboard flycam (ported from caverns): steer the ship, chase cam rides behind.
+// ============================================================================
+const look = { yaw: 0, pitch: 0 };
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+const DEAD = 0.12, dz = v => Math.abs(v) < DEAD ? 0 : (v - Math.sign(v)*DEAD) / (1 - DEAD);
+const fwd = new THREE.Vector3(), rt = new THREE.Vector3(), mv = new THREE.Vector3(), CAM_OFF = new THREE.Vector3();
+let bank = 0;
+function updateControls(dt) {
+  let mx=0, my=0, lx=0, ly=0, up=0, boost=0, dash=0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
+  if (gp) {
+    mx = dz(gp.axes[0]||0); my = dz(gp.axes[1]||0); lx = dz(gp.axes[2]||0); ly = dz(gp.axes[3]||0);
+    const A = gp.buttons[0]&&gp.buttons[0].pressed, B = gp.buttons[1]&&gp.buttons[1].pressed;
+    up = (B?1:0) - (A?1:0);
+    boost = (gp.buttons[5]&&gp.buttons[5].pressed) ? 1 : 0;
+    if (gp.buttons[10]&&gp.buttons[10].pressed) dash = 1;
+  }
+  if (keys['KeyW']) my=-1; if (keys['KeyS']) my=1; if (keys['KeyA']) mx=-1; if (keys['KeyD']) mx=1;
+  if (keys['ArrowLeft']) lx=-1; if (keys['ArrowRight']) lx=1; if (keys['ArrowUp']) ly=-1; if (keys['ArrowDown']) ly=1;
+  if (keys['Space']) up=1; if (keys['ShiftLeft']||keys['ControlLeft']) up=-1;
+  if (keys['ShiftRight']) boost=1; if (keys['KeyF']) dash=1;
+
+  const LOOK = 2.2;
+  look.yaw -= lx * LOOK * dt;
+  look.pitch = clamp(look.pitch - ly * LOOK * dt, -1.4, 1.4);
+  ship.rotation.set(look.pitch, look.yaw, 0);
+
+  const SPEED = 300 * (1 + boost*1.8);
+  fwd.set(0,0,-1).applyEuler(ship.rotation);
+  rt.set(1,0,0).applyEuler(ship.rotation);
+  mv.set(0,0,0).addScaledVector(fwd, -my).addScaledVector(rt, mx); mv.y += up;
+  ship.position.addScaledVector(mv, SPEED*dt);
+  if (dash) ship.position.addScaledVector(fwd, 760*dt);
+
+  // keep the hull inside the cavern shell (above floor, below ceiling)
+  const fl = FLOOR(ship.position.x, ship.position.z) + 30, ce = CEIL(ship.position.x, ship.position.z) - 30;
+  ship.position.y = clamp(ship.position.y, fl, ce);
+  ship.position.x = clamp(ship.position.x, -EXT*0.96, EXT*0.96);
+  ship.position.z = clamp(ship.position.z, -EXT*0.96, EXT*0.96);
+
+  // bank into strafes (visual)
+  bank += (-mx*0.4 - bank) * Math.min(1, dt*6);
+  ship.rotation.z = bank;
+
+  // chase cam behind + above
+  ship.updateMatrixWorld(true);
+  CAM_OFF.set(0, 34, 120).applyQuaternion(ship.quaternion);
+  camera.position.copy(ship.position).add(CAM_OFF);
+  camera.quaternion.copy(ship.quaternion);
+  const tFov = 65 + boost*14;
+  if (Math.abs(camera.fov - tFov) > 0.05) { camera.fov += (tFov - camera.fov)*Math.min(1, dt*4); camera.updateProjectionMatrix(); }
+}
+
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const fpsEl = document.getElementById('fps');
+let last = performance.now(), facc = 0, fn = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.033, (now-last)/1000); last = now;
+  updateControls(dt);
+  renderer.render(scene, camera);
+  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = Math.round(fn/facc) + ' fps'; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cloud Lab — 3D gas simulation (WebGPU)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; }
+  #hud { position: fixed; top: 8px; left: 8px; z-index: 10; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.55);
+    padding: 5px 9px; border-radius: 6px; }
+  #hud b { color: #9fd0ff; }
+</style>
+</head>
+<body>
+<div id="hud"><b>Gas Lab</b> — a 3D fluid sim, churned by a flying probe (the "ship") · drag orbit, scroll zoom · <span id="fps">–</span></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { Fn, Loop, If, Break, float, vec3, vec4, uniform, texture3D,
+         positionWorld, cameraPosition, screenUV, smoothstep, mix, hash, time } from 'three/tsl';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+// ---------------------------------------------------------------------------
+// Renderer / scene / camera / sky
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 1, 12000);
+camera.position.set(0, 200, 820);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 170, 0); controls.enableDamping = true; controls.dampingFactor = 0.08;
+
+function skyTexture(top, mid, bot) {
+  const c = document.createElement('canvas'); c.width = 1; c.height = 64;
+  const ctx = c.getContext('2d'); const g = ctx.createLinearGradient(0, 0, 0, 64);
+  g.addColorStop(0, top); g.addColorStop(0.5, mid); g.addColorStop(1, bot);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, 1, 64);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const skyMat = new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, fog: false });
+skyMat.map = skyTexture('#3f6ea5', '#9fc0dd', '#dfe9f0');
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(6000, 32, 16), skyMat));
+
+// ---------------------------------------------------------------------------
+// 3D FLUID GRID (Stam stable-fluids): velocity + density, vorticity churn,
+//   Jacobi pressure projection. All velocities are in GRID cells / second.
+// ---------------------------------------------------------------------------
+const NX = 32, NY = 24, NZ = 32, NXY = NX * NY, NC = NX * NY * NZ;
+const IDX = (i, j, k) => i + j * NX + k * NXY;
+const vx = new Float32Array(NC), vy = new Float32Array(NC), vz = new Float32Array(NC);
+const vx0 = new Float32Array(NC), vy0 = new Float32Array(NC), vz0 = new Float32Array(NC);
+const dens = new Float32Array(NC), dens0 = new Float32Array(NC);
+const pre = new Float32Array(NC), divg = new Float32Array(NC);
+const cuX = new Float32Array(NC), cuY = new Float32Array(NC), cuZ = new Float32Array(NC), cuM = new Float32Array(NC);
+// domain in world space
+const DOM_MIN = new THREE.Vector3(-300, 0, -300), DOM_SIZE = new THREE.Vector3(600, 360, 600);
+const g2w = (gx, gy, gz) => new THREE.Vector3(
+  DOM_MIN.x + gx / (NX - 1) * DOM_SIZE.x, DOM_MIN.y + gy / (NY - 1) * DOM_SIZE.y, DOM_MIN.z + gz / (NZ - 1) * DOM_SIZE.z);
+
+// seed a soft central blob of gas so there is something to stir
+for (let k = 0; k < NZ; k++) for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+  const dx = (i - NX / 2) / (NX * 0.32), dy = (j - NY * 0.5) / (NY * 0.4), dz = (k - NZ / 2) / (NZ * 0.32);
+  dens[IDX(i, j, k)] = Math.max(0, 1 - (dx * dx + dy * dy + dz * dz)) * 0.8;
+}
+
+function sampleField(F, x, y, z) {
+  x = clamp(x, 0, NX - 1.001); y = clamp(y, 0, NY - 1.001); z = clamp(z, 0, NZ - 1.001);
+  const i = x | 0, j = y | 0, k = z | 0, fx = x - i, fy = y - j, fz = z - k;
+  const b = i + j * NX + k * NXY;
+  const c000 = F[b], c100 = F[b + 1], c010 = F[b + NX], c110 = F[b + NX + 1];
+  const c001 = F[b + NXY], c101 = F[b + NXY + 1], c011 = F[b + NXY + NX], c111 = F[b + NXY + NX + 1];
+  const x00 = c000 + (c100 - c000) * fx, x10 = c010 + (c110 - c010) * fx;
+  const x01 = c001 + (c101 - c001) * fx, x11 = c011 + (c111 - c011) * fx;
+  const y0 = x00 + (x10 - x00) * fy, y1 = x01 + (x11 - x01) * fy;
+  return y0 + (y1 - y0) * fz;
+}
+function advect(dst, src, ux, uy, uz, dt) {
+  for (let k = 1; k < NZ - 1; k++) for (let j = 1; j < NY - 1; j++) for (let i = 1; i < NX - 1; i++) {
+    const c = IDX(i, j, k);
+    dst[c] = sampleField(src, i - dt * ux[c], j - dt * uy[c], k - dt * uz[c]);
+  }
+}
+function project(iters) {
+  for (let k = 1; k < NZ - 1; k++) for (let j = 1; j < NY - 1; j++) for (let i = 1; i < NX - 1; i++) {
+    const c = IDX(i, j, k);
+    divg[c] = -0.5 * (vx[c + 1] - vx[c - 1] + vy[c + NX] - vy[c - NX] + vz[c + NXY] - vz[c - NXY]);
+    pre[c] = 0;
+  }
+  for (let it = 0; it < iters; it++)
+    for (let k = 1; k < NZ - 1; k++) for (let j = 1; j < NY - 1; j++) for (let i = 1; i < NX - 1; i++) {
+      const c = IDX(i, j, k);
+      pre[c] = (divg[c] + pre[c - 1] + pre[c + 1] + pre[c - NX] + pre[c + NX] + pre[c - NXY] + pre[c + NXY]) / 6;
+    }
+  for (let k = 1; k < NZ - 1; k++) for (let j = 1; j < NY - 1; j++) for (let i = 1; i < NX - 1; i++) {
+    const c = IDX(i, j, k);
+    vx[c] -= 0.5 * (pre[c + 1] - pre[c - 1]); vy[c] -= 0.5 * (pre[c + NX] - pre[c - NX]); vz[c] -= 0.5 * (pre[c + NXY] - pre[c - NXY]);
+  }
+}
+function vorticity(dt, eps) {
+  for (let k = 1; k < NZ - 1; k++) for (let j = 1; j < NY - 1; j++) for (let i = 1; i < NX - 1; i++) {
+    const c = IDX(i, j, k);
+    cuX[c] = 0.5 * (vz[c + NX] - vz[c - NX] - (vy[c + NXY] - vy[c - NXY]));
+    cuY[c] = 0.5 * (vx[c + NXY] - vx[c - NXY] - (vz[c + 1] - vz[c - 1]));
+    cuZ[c] = 0.5 * (vy[c + 1] - vy[c - 1] - (vx[c + NX] - vx[c - NX]));
+    cuM[c] = Math.hypot(cuX[c], cuY[c], cuZ[c]);
+  }
+  for (let k = 1; k < NZ - 1; k++) for (let j = 1; j < NY - 1; j++) for (let i = 1; i < NX - 1; i++) {
+    const c = IDX(i, j, k);
+    let nx = 0.5 * (cuM[c + 1] - cuM[c - 1]), ny = 0.5 * (cuM[c + NX] - cuM[c - NX]), nz = 0.5 * (cuM[c + NXY] - cuM[c - NXY]);
+    const l = Math.hypot(nx, ny, nz) + 1e-5; nx /= l; ny /= l; nz /= l;
+    const f = eps * dt;
+    vx[c] += f * (ny * cuZ[c] - nz * cuY[c]); vy[c] += f * (nz * cuX[c] - nx * cuZ[c]); vz[c] += f * (nx * cuY[c] - ny * cuX[c]);
+  }
+}
+// the PROBE = stand-in for the ship: an emitter that flies a path and shoves the gas
+const probeMesh = new THREE.Mesh(new THREE.SphereGeometry(14, 16, 12), new THREE.MeshBasicMaterial({ color: 0xff5a3c }));
+scene.add(probeMesh);
+let probeT = 0; const probeG = new THREE.Vector3(NX / 2, NY / 2, NZ / 2), probePrev = probeG.clone();
+function updateProbe(dt) {
+  probeT += dt * P.probeSpeed;
+  const gx = NX / 2 + Math.sin(probeT * 0.9) * NX * 0.32;
+  const gy = NY * 0.5 + Math.sin(probeT * 0.61 + 1.3) * NY * 0.30;
+  const gz = NZ / 2 + Math.cos(probeT * 0.7) * NZ * 0.32;
+  probeG.set(gx, gy, gz);
+  const vX = (gx - probePrev.x) / Math.max(1e-3, dt), vY = (gy - probePrev.y) / Math.max(1e-3, dt), vZ = (gz - probePrev.z) / Math.max(1e-3, dt);
+  probePrev.copy(probeG);
+  if (!P.probeOn) { const w = g2w(gx, gy, gz); probeMesh.position.copy(w); return; }
+  const R = P.probeRadius, R2 = R * R;
+  const ci = gx | 0, cj = gy | 0, ck = gz | 0, cr = Math.ceil(R);
+  for (let k = ck - cr; k <= ck + cr; k++) for (let j = cj - cr; j <= cj + cr; j++) for (let i = ci - cr; i <= ci + cr; i++) {
+    if (i < 1 || i >= NX - 1 || j < 1 || j >= NY - 1 || k < 1 || k >= NZ - 1) continue;
+    const d2 = (i - gx) ** 2 + (j - gy) ** 2 + (k - gz) ** 2; if (d2 > R2) continue;
+    const w = 1 - Math.sqrt(d2) / R, c = IDX(i, j, k);
+    vx[c] += vX * P.probePush * w * dt; vy[c] += vY * P.probePush * w * dt; vz[c] += vZ * P.probePush * w * dt;
+    if (P.probeInject > 0) dens[c] = Math.min(1.4, dens[c] + P.probeInject * w * dt);
+  }
+  probeMesh.position.copy(g2w(gx, gy, gz));
+}
+function addForcesAndSource(dt) {
+  const cx = NX / 2, cy = NY * 0.42, cz = NZ / 2, sr = NX * 0.18, sr2 = sr * sr;
+  for (let c = 0; c < NC; c++) { if (P.buoyancy) vy[c] += P.buoyancy * dens[c] * dt; dens[c] *= (1 - P.dissipation * dt); }
+  if (P.source > 0) {
+    const ci = cx | 0, cj = cy | 0, ck = cz | 0, cr = Math.ceil(sr);
+    for (let k = ck - cr; k <= ck + cr; k++) for (let j = cj - cr; j <= cj + cr; j++) for (let i = ci - cr; i <= ci + cr; i++) {
+      if (i < 1 || i >= NX - 1 || j < 1 || j >= NY - 1 || k < 1 || k >= NZ - 1) continue;
+      const d2 = (i - cx) ** 2 + (j - cy) ** 2 + (k - cz) ** 2; if (d2 > sr2) continue;
+      dens[IDX(i, j, k)] = Math.min(1.2, dens[IDX(i, j, k)] + P.source * (1 - Math.sqrt(d2) / sr) * dt);
+    }
+  }
+}
+function clearBounds() {
+  for (let k = 0; k < NZ; k++) for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+    if (i === 0 || i === NX - 1 || j === 0 || j === NY - 1 || k === 0 || k === NZ - 1) { const c = IDX(i, j, k); vx[c] = vy[c] = vz[c] = 0; }
+  }
+}
+function simStep(dt) {
+  updateProbe(dt);
+  addForcesAndSource(dt);
+  if (P.vorticity > 0) vorticity(dt, P.vorticity);
+  clearBounds(); project(P.projIters | 0);
+  vx0.set(vx); vy0.set(vy); vz0.set(vz);
+  advect(vx, vx0, vx0, vy0, vz0, dt); advect(vy, vy0, vx0, vy0, vz0, dt); advect(vz, vz0, vx0, vy0, vz0, dt);
+  clearBounds(); project((P.projIters / 2) | 0);
+  dens0.set(dens); advect(dens, dens0, vx, vy, vz, dt);
+}
+// upload density -> 3D texture
+const densBytes = new Uint8Array(NC);
+const densTex = new THREE.Data3DTexture(densBytes, NX, NY, NZ);
+densTex.format = THREE.RedFormat; densTex.type = THREE.UnsignedByteType;
+densTex.minFilter = densTex.magFilter = THREE.LinearFilter;
+densTex.wrapS = densTex.wrapT = densTex.wrapR = THREE.ClampToEdgeWrapping;
+densTex.unpackAlignment = 1; densTex.needsUpdate = true;
+function uploadDensity() { for (let c = 0; c < NC; c++) densBytes[c] = Math.min(255, dens[c] * 255 | 0); densTex.needsUpdate = true; }
+
+// ---------------------------------------------------------------------------
+// Volume raymarch of the SIMULATED density
+// ---------------------------------------------------------------------------
+const U = {
+  densScale: uniform(2.4), absorb: uniform(0.12), densK: uniform(24),
+  sunInt: uniform(1.5), ambInt: uniform(0.6), silver: uniform(0.5), baseDark: uniform(0.5),
+  phaseG1: uniform(0.55), phaseG2: uniform(-0.25), steps: uniform(80), lightSteps: uniform(6),
+  domMin: uniform(new THREE.Vector3().copy(DOM_MIN)), domSize: uniform(new THREE.Vector3().copy(DOM_SIZE)),
+  sunDir: uniform(new THREE.Vector3(0.4, 0.86, 0.3)),
+  sunCol: uniform(new THREE.Color(0xfff2dd)), ambCol: uniform(new THREE.Color(0x9fb6cf)), tint: uniform(new THREE.Color(0xffffff)),
+};
+const MAX_STEPS = 140, MAX_LIGHT = 12;
+const boxMin = vec3(DOM_MIN.x, DOM_MIN.y, DOM_MIN.z), boxMax = vec3(DOM_MIN.x + DOM_SIZE.x, DOM_MIN.y + DOM_SIZE.y, DOM_MIN.z + DOM_SIZE.z);
+const sampleDensity = Fn(([p]) => texture3D(densTex, p.sub(U.domMin).div(U.domSize)).r.mul(U.densScale));
+const lightMarch = Fn(([p]) => {
+  const acc = float(0).toVar(), lp = p.toVar(), stepL = float(22.0);
+  Loop(MAX_LIGHT, ({ i }) => {
+    If(float(i).greaterThanEqual(U.lightSteps), () => { Break(); });
+    lp.addAssign(U.sunDir.mul(stepL)); acc.addAssign(sampleDensity(lp).max(0).mul(stepL).mul(0.02));
+  });
+  const beer = acc.mul(U.absorb).negate().exp();
+  const powder = float(1).sub(acc.mul(U.absorb.mul(2)).negate().exp());
+  return mix(beer, beer.mul(powder), 0.5);
+});
+const cloudMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.BackSide });
+const shaded = Fn(() => {
+  const ro = cameraPosition, rd = positionWorld.sub(ro).normalize();
+  const invd = vec3(1.0).div(rd);
+  const ta = boxMin.sub(ro).mul(invd), tb = boxMax.sub(ro).mul(invd);
+  const tmin = ta.min(tb), tmax = ta.max(tb);
+  const tNear = tmin.x.max(tmin.y).max(tmin.z).max(0.0), tFar = tmax.x.min(tmax.y).min(tmax.z);
+  const hit = tFar.sub(tNear).max(0).sign();
+  const stepLen = tFar.sub(tNear).max(0).div(U.steps);
+  const jitter = hash(screenUV.x.mul(1973.0).add(screenUV.y.mul(919.0)).add(time));
+  const cosT = rd.dot(U.sunDir);
+  const hg = (g) => float(1).sub(g.mul(g)).div(float(4 * Math.PI).mul(float(1).add(g.mul(g)).sub(g.mul(2).mul(cosT)).max(1e-3).pow(1.5)));
+  const phase = hg(U.phaseG1).mul(0.7).add(hg(U.phaseG2).mul(0.3));
+  const col = vec3(0).toVar(), acc = float(0).toVar();
+  const p = ro.add(rd.mul(tNear.add(stepLen.mul(jitter)))).toVar();
+  Loop(MAX_STEPS, ({ i }) => {
+    If(float(i).greaterThanEqual(U.steps), () => { Break(); });
+    If(acc.greaterThan(0.99), () => { Break(); });
+    const dens = sampleDensity(p);
+    If(dens.greaterThan(0.002), () => {
+      const light = lightMarch(p);
+      const altN = p.y.sub(U.domMin.y).div(U.domSize.y).clamp(0, 1);
+      const lit = U.sunCol.mul(U.sunInt).mul(light.mul(phase)).add(U.ambCol.mul(U.ambInt)).mul(mix(U.baseDark, float(1.0), altN)).mul(U.tint);
+      const a = float(1).sub(dens.mul(stepLen).mul(U.absorb.mul(U.densK)).negate().exp());
+      col.addAssign(lit.mul(a).mul(acc.oneMinus())); acc.addAssign(a.mul(acc.oneMinus()));
+    });
+    p.addAssign(rd.mul(stepLen));
+  });
+  return vec4(col.div(acc.max(1e-4)), acc.mul(hit));
+})();
+cloudMat.colorNode = shaded.rgb; cloudMat.opacityNode = shaded.a;
+const cloudBox = new THREE.Mesh(new THREE.BoxGeometry(DOM_SIZE.x, DOM_SIZE.y, DOM_SIZE.z), cloudMat);
+cloudBox.position.set(DOM_MIN.x + DOM_SIZE.x / 2, DOM_MIN.y + DOM_SIZE.y / 2, DOM_MIN.z + DOM_SIZE.z / 2);
+cloudBox.frustumCulled = false; scene.add(cloudBox);
+
+// ---------------------------------------------------------------------------
+// GUI
+// ---------------------------------------------------------------------------
+const P = {
+  vorticity: 14, dissipation: 0.20, buoyancy: 0, source: 0.7, projIters: 18,
+  probeOn: true, probeSpeed: 1.0, probePush: 12, probeRadius: 4, probeInject: 0,
+  densScale: 2.4, absorb: 0.12, densK: 24, sunInt: 1.5, ambInt: 0.6, silver: 0.5, baseDark: 0.5,
+  phaseG1: 0.55, phaseG2: -0.25, steps: 80, lightSteps: 6, sunAz: 40, sunEl: 55,
+  sunCol: '#fff2dd', ambCol: '#9fb6cf', tint: '#ffffff', showProbe: true,
+};
+function setSun() { const az = P.sunAz * Math.PI / 180, el = P.sunEl * Math.PI / 180; U.sunDir.value.set(Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)).normalize(); }
+setSun();
+const lnk = (f, k, a, b, s) => f.add(P, k, a, b, s).onChange(v => { if (U[k]) U[k].value = v; });
+const gui = new GUI({ title: 'Gas Lab' });
+const fSim = gui.addFolder('Fluid sim');
+fSim.add(P, 'vorticity', 0, 40, 1).name('vorticity (churn)');
+fSim.add(P, 'dissipation', 0, 2, 0.01); fSim.add(P, 'buoyancy', -10, 30, 0.5);
+fSim.add(P, 'source', 0, 3, 0.05).name('gas source'); fSim.add(P, 'projIters', 0, 30, 1).name('pressure iters (perf)');
+const fProbe = gui.addFolder('Probe (the ship)');
+fProbe.add(P, 'probeOn').name('stirring on'); fProbe.add(P, 'probeSpeed', 0, 3, 0.05);
+fProbe.add(P, 'probePush', 0, 40, 1).name('push strength'); fProbe.add(P, 'probeRadius', 1, 10, 0.5);
+fProbe.add(P, 'probeInject', 0, 3, 0.05).name('emit gas'); fProbe.add(P, 'showProbe').onChange(v => probeMesh.visible = v);
+const fRender = gui.addFolder('Render');
+lnk(fRender, 'densScale', 0, 6, 0.1); lnk(fRender, 'absorb', 0.01, 0.5, 0.01); lnk(fRender, 'densK', 5, 80, 1);
+lnk(fRender, 'sunInt', 0, 4, 0.05); lnk(fRender, 'ambInt', 0, 2, 0.05); lnk(fRender, 'silver', 0, 2, 0.05); lnk(fRender, 'baseDark', 0, 1, 0.02);
+lnk(fRender, 'phaseG1', 0, 0.95, 0.01); lnk(fRender, 'phaseG2', -0.95, 0, 0.01);
+lnk(fRender, 'steps', 10, 140, 1); lnk(fRender, 'lightSteps', 1, 12, 1);
+fRender.add(P, 'sunAz', 0, 360, 1).onChange(setSun); fRender.add(P, 'sunEl', 2, 90, 1).onChange(setSun);
+const fCol = gui.addFolder('Colors');
+fCol.addColor(P, 'sunCol').onChange(v => U.sunCol.value.set(v)); fCol.addColor(P, 'ambCol').onChange(v => U.ambCol.value.set(v)); fCol.addColor(P, 'tint').onChange(v => U.tint.value.set(v));
+gui.add({ dump: () => { const o = {}; for (const k in P) if (typeof P[k] !== 'function' && typeof P[k] !== 'boolean') o[k] = P[k]; const s = JSON.stringify(o); console.log('GAS PRESET:', s); navigator.clipboard?.writeText(s); } }, 'dump').name('Copy settings → clipboard');
+
+// ---------------------------------------------------------------------------
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+const fpsEl = document.getElementById('fps'); let facc = 0, frames = 0, last = performance.now(), simAcc = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
+  controls.update();
+  simAcc += dt; let s = 0; while (simAcc >= 1 / 30 && s < 2) { simStep(1 / 30); simAcc -= 1 / 30; s++; }   // fixed-step sim, max 2/frame
+  uploadDensity();
+  renderer.render(scene, camera);
+  facc += dt; frames++; if (facc >= 0.5) { fpsEl.textContent = Math.round(frames / facc) + ' fps'; facc = 0; frames = 0; }
+});
+</script>
+</body>
+</html>

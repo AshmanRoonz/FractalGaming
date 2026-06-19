@@ -21,7 +21,8 @@
   "imports": {
     "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
     "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
-    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
   }
 }
 </script>
@@ -29,7 +30,10 @@
 <script type="module">
 import * as THREE from 'three';
 import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute,
-         hash, instanceIndex, time, sin, vec3, vec2, normalize, cameraPosition, reflector } from 'three/tsl';
+         hash, instanceIndex, time, sin, vec3, vec2, vec4, normalize, cameraPosition, reflector, texture, uniform,
+         refract, reflect, viewportSharedTexture, screenUV, cameraViewMatrix,
+         Fn, Loop, If, Break, texture3D, normalWorld, normalLocal } from 'three/tsl';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const smooth = w => w * w * (3 - 2 * w);
@@ -144,6 +148,7 @@ const C = {
   ceilLo: new THREE.Color(0x242a32), ceilHi: new THREE.Color(0x59616c),
 };
 const _c = new THREE.Color();
+let groundBaseNode;     // captured so caustics + underwater tint can layer on top after the sim exists
 const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
 {
   const wp = positionWorld;
@@ -156,7 +161,8 @@ const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, rough
   const mossCol = mix(color(0x2f5a22), color(0x67ab3b), mx_noise_float(wp.mul(0.09)).mul(0.5).add(0.5));
   const lowF = float(1).sub(smoothstep(float(YFLOOR), float(YFLOOR + GROUND_AMP * 0.7), wp.y));
   const mossAmt = smoothstep(0.34, 0.62, mx_noise_float(wp.mul(0.02))).mul(0.55).mul(lowF);
-  groundMat.colorNode = mix(base, mossCol.mul(fuzz), mossAmt);
+  groundBaseNode = mix(base, mossCol.mul(fuzz), mossAmt);
+  groundMat.colorNode = groundBaseNode;
 }
 const ceilMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
 
@@ -164,12 +170,31 @@ const ceilMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 
 // Grass blades — instanced per segment, gusting shader sway. The material sets a
 //   positionNode, which keeps instance transforms as vertex data (no 1024 cap).
 // ============================================================================
-const GRASS_PER_SEG = 11000;
-// blade template (local): 5 verts, dark root -> bright tip, with a heightFrac per vert
-const BL_V = [[-0.28,0,0],[0.28,0,0],[-0.16,0.5,0],[0.16,0.5,0],[0,1,0]];
-const BL_C = [[0.13,0.26,0.10],[0.13,0.26,0.10],[0.27,0.45,0.16],[0.27,0.45,0.16],[0.56,0.74,0.34]];
-const BL_H = [0,0,0.5,0.5,1];
-const BL_I = [0,1,2, 1,3,2, 2,3,4];
+const GRASS_PER_SEG = 7000;   // curved blades read fuller, so fewer needed
+// blade template (local): a CURVED, tapered, multi-segment strip with a central
+//   MIDRIB vein (a slightly darker center line, like a real grass blade) up to the tip.
+const BL_SEGS = 5;
+const BL_V = [], BL_C = [], BL_H = [], BL_I = [];
+{
+  const baseC = [0.12, 0.24, 0.09], midC = [0.30, 0.52, 0.18], tipC = [0.62, 0.80, 0.36];
+  const lerp3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const CURVE = 0.42, BASEW = 0.26;
+  for (let s = 0; s <= BL_SEGS; s++) {
+    const t = s / BL_SEGS, w = BASEW * Math.pow(1 - t, 0.6), cx = CURVE * t * t;     // taper + forward arc
+    const edge = t < 0.5 ? lerp3(baseC, midC, t * 2) : lerp3(midC, tipC, (t - 0.5) * 2);
+    const vein = [edge[0] * 0.74, edge[1] * 0.78, edge[2] * 0.74];                   // darker midrib
+    if (s < BL_SEGS) { BL_V.push([cx - w, t, 0], [cx, t, 0], [cx + w, t, 0]); BL_C.push(edge, vein, edge); BL_H.push(t, t, t); }
+    else { BL_V.push([cx, t, 0]); BL_C.push(vein); BL_H.push(t); }                   // tip (on the vein line)
+  }
+  for (let s = 0; s < BL_SEGS - 1; s++) {
+    const a = s * 3, b = (s + 1) * 3;
+    BL_I.push(a, a + 1, b, a + 1, b + 1, b);            // left half (edge..vein)
+    BL_I.push(a + 1, a + 2, b + 1, a + 2, b + 2, b + 1); // right half (vein..edge)
+  }
+  const a = (BL_SEGS - 1) * 3, tip = BL_SEGS * 3;
+  BL_I.push(a, a + 1, tip, a + 1, a + 2, tip);          // last segment tapers to the tip
+}
+const NV = BL_V.length, NI = BL_I.length;
 // grass is MERGED geometry (one plain vertex buffer per segment), NOT InstancedMesh,
 //   so there are no per-instance matrices => no 1024 uniform cap => it can be dense.
 //   Sway is per-blade in the shader via a phase + heightFrac attribute.
@@ -184,42 +209,297 @@ const grassMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughn
 }
 
 // ============================================================================
-// Water — one flat translucent plane at WL following the player. Valleys flood,
-//   ridges poke through. Fresnel + sparkle, fading into the fog.
+// REACTIVE WAVE SIM (cymatics) — a CPU wave grid in a window that follows you,
+//   masked into real basins by the terrain (ripples bounce off the shorelines).
+//   spawnRipple(x,z,amp) injects a splash; it shows on top of the cosmetic water.
+// ============================================================================
+const WG = 200, WSIZE = 4400, wgScale = WSIZE / WG, WRANGE = 16.0;   // height range (deep cut + high walls show)
+let wcur = new Float32Array(WG * WG), wprev = new Float32Array(WG * WG), wmask = new Uint8Array(WG * WG);
+let wcur2 = new Float32Array(WG * WG), wprev2 = new Float32Array(WG * WG), wmask2 = new Uint8Array(WG * WG);
+let wdepth = new Float32Array(WG * WG), wdepth2 = new Float32Array(WG * WG);   // water depth (WL - ground) per cell
+let cclear = new Float32Array(WG * WG), cclear2 = new Float32Array(WG * WG);   // CLOUD-clearing field: ship carves it, it diffuses + refills
+let wcx = 0, wcz = 0;
+const cellX = (i) => wcx + (i - WG / 2 + 0.5) * wgScale, cellZ = (j) => wcz + (j - WG / 2 + 0.5) * wgScale;
+function computeMaskFull() { for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) { const d = WL - groundY(cellX(i), cellZ(j)); const k = j * WG + i; wmask[k] = d > 2 ? 1 : 0; wdepth[k] = d; } }
+function rollAll(dCol, dRow) {
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const si = i + dCol, sj = j + dRow, k = j * WG + i;
+    if (si >= 0 && si < WG && sj >= 0 && sj < WG) { const sk = sj * WG + si; wcur2[k] = wcur[sk]; wprev2[k] = wprev[sk]; wmask2[k] = wmask[sk]; wdepth2[k] = wdepth[sk]; cclear2[k] = cclear[sk]; }
+    else { wcur2[k] = 0; wprev2[k] = 0; cclear2[k] = 0; const d = WL - groundY(cellX(i), cellZ(j)); wmask2[k] = d > 2 ? 1 : 0; wdepth2[k] = d; }
+  }
+  let t = wcur; wcur = wcur2; wcur2 = t; t = wprev; wprev = wprev2; wprev2 = t; let m = wmask; wmask = wmask2; wmask2 = m; let dd = wdepth; wdepth = wdepth2; wdepth2 = dd; let cc = cclear; cclear = cclear2; cclear2 = cc;
+}
+const C2 = 0.20, WDAMP = 0.982;   // more damping => ripple energy stays focused near the source and tapers off with distance
+function stepWave() {
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i;
+    if (!wmask[k]) { wprev[k] = 0; continue; }
+    const c = wcur[k];
+    const Ln = (i > 0 && wmask[k - 1]) ? wcur[k - 1] : c, Rn = (i < WG - 1 && wmask[k + 1]) ? wcur[k + 1] : c;
+    const Dn = (j > 0 && wmask[k - WG]) ? wcur[k - WG] : c, Un = (j < WG - 1 && wmask[k + WG]) ? wcur[k + WG] : c;
+    wprev[k] = (2 * c - wprev[k] + C2 * (Ln + Rn + Dn + Un - 4 * c)) * WDAMP;
+  }
+  const tmp = wcur; wcur = wprev; wprev = tmp;
+}
+const CLOUD_Y = 560;
+function carveCloud(x, z, fwdX, fwdZ, near) {   // the hull OPENS a body-shaped rift in the cloud field
+  if (near <= 0.02) return;
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  const R = 95, cr = Math.ceil(R / wgScale), px = -fwdZ, pz = fwdX;
+  for (let dj = -cr; dj <= cr; dj++) for (let di = -cr; di <= cr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const dx = cellX(i) - x, dz = cellZ(j) - z, al = dx * fwdX + dz * fwdZ, pe = dx * px + dz * pz;
+    const e = (al / (R * 1.5)) ** 2 + (pe / (R * 0.5)) ** 2;     // elongated ellipse = the ship's body, not a circle
+    if (e < 1) { const k = j * WG + i; cclear[k] = Math.max(cclear[k], (1 - e) * near); }
+  }
+}
+function stepCloud() {   // the clouds swirl back in (diffuse) + refill (decay) => the rift closes behind the ship
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i, c = cclear[k];
+    const L = i > 0 ? cclear[k - 1] : c, Rn = i < WG - 1 ? cclear[k + 1] : c, D = j > 0 ? cclear[k - WG] : c, U = j < WG - 1 ? cclear[k + WG] : c;
+    cclear2[k] = (c * 0.62 + (L + Rn + D + U) * 0.095) * 0.965;
+  }
+  const t = cclear; cclear = cclear2; cclear2 = t;
+}
+const waveData = new Uint8Array(WG * WG * 4);
+const waveTex = new THREE.DataTexture(waveData, WG, WG);
+waveTex.wrapS = waveTex.wrapT = THREE.ClampToEdgeWrapping;
+waveTex.minFilter = waveTex.magFilter = THREE.LinearFilter;
+const cloudData = new Uint8Array(WG * WG * 4);
+const cloudTex = new THREE.DataTexture(cloudData, WG, WG);
+cloudTex.wrapS = cloudTex.wrapT = THREE.ClampToEdgeWrapping;
+cloudTex.minFilter = cloudTex.magFilter = THREE.LinearFilter;
+function uploadWave() {
+  for (let k = 0; k < WG * WG; k++) { const o = k * 4; waveData[o] = Math.max(0, Math.min(255, (wcur[k] / WRANGE * 0.5 + 0.5) * 255)); waveData[o + 1] = Math.max(0, Math.min(255, (Math.max(0, wdepth[k]) / 60) * 255)); waveData[o + 2] = Math.max(0, Math.min(255, (wake[k] / WAKERANGE * 0.5 + 0.5) * 255)); waveData[o + 3] = wmask[k] ? 255 : 0; cloudData[o] = Math.max(0, Math.min(255, cclear[k] * 255)); }
+  waveTex.needsUpdate = true; cloudTex.needsUpdate = true;
+}
+wcx = Math.round(camera.position.x / wgScale) * wgScale; wcz = Math.round(camera.position.z / wgScale) * wgScale;
+computeMaskFull();
+const windowCenter = uniform(vec2(wcx, wcz));
+function spawnRipple(wx, wz, amp) {       // a missile / impact calls this
+  const i = Math.round((wx - wcx) / wgScale + WG / 2 - 0.5), j = Math.round((wz - wcz) / wgScale + WG / 2 - 0.5);
+  if (i >= 0 && i < WG && j >= 0 && j < WG) { const k = j * WG + i; if (wmask[k]) wcur[k] += amp; }
+}
+// ---- KELVIN WAKE: the closed-form deep-water wake of the moving ship. A wave at angle θ to the
+//   track is stationary in the ship frame iff its wavenumber is k(θ)=k0/cos²θ (deep-water
+//   dispersion); summing those stationary waves over θ reproduces the ~19.5° Kelvin wedge with its
+//   transverse + divergent waves. Evaluated in the ship frame on the sim grid -> wave texture B chan.
+const wake = new Float32Array(WG * WG), WAKERANGE = 4, WAKE_NTH = 14, WAKE_K0 = 2 * Math.PI / 90;
+const wkC = [], wkS = [], wkK = [], wkA = [];
+for (let m = 0; m < WAKE_NTH; m++) { const th = -0.78 + 1.56 * (m + 0.5) / WAKE_NTH, c = Math.cos(th); wkC.push(c); wkS.push(Math.sin(th)); wkK.push(WAKE_K0 / (c * c)); wkA.push(c * c); }
+function updateWake(sx, sz, dirX, dirZ, amp) {       // dir = unit track direction, amp 0..1
+  const px = -dirZ, pz = dirX;                       // cross-track axis
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i, rx = cellX(i) - sx, rz = cellZ(j) - sz, xi = rx * dirX + rz * dirZ;
+    if (!wmask[k] || xi > 0 || rx * rx + rz * rz > 1800 * 1800) { wake[k] = 0; continue; }   // ONLY behind the actual velocity
+    const behind = Math.min(1, -xi / 50);                    // fade in just behind the source, so it flips with reverse
+    const eta = rx * px + rz * pz, dist = Math.hypot(rx, rz);
+    let h = 0;
+    for (let m = 0; m < WAKE_NTH; m++) h += wkA[m] * Math.cos(wkK[m] * (wkC[m] * xi + wkS[m] * eta));
+    wake[k] = (h / WAKE_NTH) * amp * 6 * behind / (1 + dist / 600);   // trails + dissipates behind the ship
+  }
+}
+// ---- SPRAY: where the surface peaks high AND fast (crests breaking, e.g. the collapsing wake walls),
+//   it throws DROPLETS. They fall under gravity and ripple where they land — a real single touch.
+const DROPS = 4000;
+const dPos = new Float32Array(DROPS * 3).fill(-1e6), dVel = new Float32Array(DROPS * 3), dOn = new Uint8Array(DROPS);
+let dHead = 0;
+const dSize = new Float32Array(DROPS).fill(4);
+const dGeo = new THREE.BufferGeometry();
+dGeo.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
+dGeo.setAttribute('size', new THREE.BufferAttribute(dSize, 1));
+const dropMat = new THREE.PointsNodeMaterial({ transparent: true, depthWrite: false, fog: true });   // node material => per-drop size
+dropMat.colorNode = color(0xf4faff); dropMat.opacityNode = float(0.95); dropMat.sizeNode = attribute('size');   // chunky near the ship, fine far away
+const drops = new THREE.Points(dGeo, dropMat);
+drops.frustumCulled = false; scene.add(drops);
+function emitDrop(x, y, z, vx, vy, vz) {     // launch one droplet (it falls under gravity and ripples where it lands)
+  const d = dHead; dHead = (dHead + 1) % DROPS;
+  dPos[d * 3] = x; dPos[d * 3 + 1] = y; dPos[d * 3 + 2] = z;
+  dVel[d * 3] = vx; dVel[d * 3 + 1] = vy; dVel[d * 3 + 2] = vz;
+  dOn[d] = 1;
+}
+// AIRFLOW around the ship: the moving hull pushes the surrounding medium in a DIPOLE (potential flow
+//   around a sphere), so air above and water below both stream AROUND it. Spray + bubbles ride this
+//   field => they curve around the hull instead of going straight. (Closed form of wind-routing.html
+//   for one moving obstacle.) shipAirFlow fills _air and _airInf (0 far -> 1 at the surface).
+const shipVel = new THREE.Vector3(), _air = new THREE.Vector3(), SHIP_A = 36, SHIP_A3 = SHIP_A * SHIP_A * SHIP_A;
+let _airInf = 0;
+function shipAirFlow(px, py, pz) {
+  let rx = px - ship.position.x, ry = py - ship.position.y, rz = pz - ship.position.z;
+  let d2 = rx * rx + ry * ry + rz * rz; const dm = SHIP_A * 0.6; if (d2 < dm * dm) d2 = dm * dm;
+  const d = Math.sqrt(d2), inv = 1 / d, rxh = rx * inv, ryh = ry * inv, rzh = rz * inv;
+  const Vd = shipVel.x * rxh + shipVel.y * ryh + shipVel.z * rzh, fall = SHIP_A3 / (2 * d2 * d);
+  _airInf = Math.min(1, SHIP_A3 / (d2 * d));
+  _air.set(fall * (3 * Vd * rxh - shipVel.x), fall * (3 * Vd * ryh - shipVel.y), fall * (3 * Vd * rzh - shipVel.z));
+  return _air;
+}
+// WATER IMPACT: punching through the surface. Entry kicks a cavity (the sim rebounds into a crown)
+//   + throws a ring of spray; exit pulls a bump up + sheets spray off. Scaled by the impact speed.
+function waterImpact(x, z, speed, exiting) {
+  const p = Math.min(2.6, speed / 130); if (p < 0.15) return;
+  // only a GENTLE ripple into the sim — anything bigger just radiates as waves across the basin
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5), rr = 2;
+  const amp = (exiting ? 3 : -4) * p;
+  for (let dj = -rr; dj <= rr; dj++) for (let di = -rr; di <= rr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const k = j * WG + i; if (!wmask[k]) continue;
+    const dn = Math.hypot(di, dj) / rr; if (dn > 1) continue;
+    wcur[k] = clamp(wcur[k] + amp * (1 - dn * dn), -34, 34);
+  }
+  // THE SPLASH is a dense burst of white SPRAY thrown up + out (just fast droplets, no meshes)
+  const pu = Math.min(p, 2), n = Math.floor(30 + p * 85);
+  for (let s = 0; s < n; s++) {
+    const ang = Math.random() * 6.283, rad = Math.random(), out = (15 + rad * 45) * (0.5 + p * 0.6);
+    emitDrop(x + Math.cos(ang) * rad * 9, WL + 3, z + Math.sin(ang) * rad * 9, Math.cos(ang) * out, (60 + Math.random() * 80) * pu, Math.sin(ang) * out);
+  }
+  if (!exiting) {                                            // WORTHINGTON JET: a tight column spikes straight UP after the cavity, then arcs back down (projectile)
+    const jets = Math.floor(4 + p * 8);
+    for (let s = 0; s < jets; s++)
+      emitDrop(x + (Math.random() - 0.5) * 4, WL + 2, z + (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 10, (140 + Math.random() * 110) * pu, (Math.random() - 0.5) * 10);
+  }
+}
+function updateDrops(dt) {
+  for (let i = 0; i < DROPS; i++) {
+    if (!dOn[i]) continue;
+    const a = shipAirFlow(dPos[i * 3], dPos[i * 3 + 1], dPos[i * 3 + 2]), C = 6 * _airInf * dt;   // swept by the airflow near the ship
+    dVel[i * 3] += (a.x - dVel[i * 3]) * C; dVel[i * 3 + 1] += (a.y - dVel[i * 3 + 1]) * C - 700 * dt; dVel[i * 3 + 2] += (a.z - dVel[i * 3 + 2]) * C;   // + gravity
+    dPos[i * 3] += dVel[i * 3] * dt; dPos[i * 3 + 1] += dVel[i * 3 + 1] * dt; dPos[i * 3 + 2] += dVel[i * 3 + 2] * dt;
+    const ddx = dPos[i * 3] - ship.position.x, ddy = dPos[i * 3 + 1] - ship.position.y, ddz = dPos[i * 3 + 2] - ship.position.z;
+    dSize[i] = 3 + 9 * (1 - Math.min(1, Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz) / 280));   // chunky near the ship, fine far away
+    if (dPos[i * 3 + 1] <= WL) { spawnRipple(dPos[i * 3], dPos[i * 3 + 2], 1.0); dOn[i] = 0; dPos[i * 3 + 1] = -1e6; }   // lands -> ripples
+  }
+  dGeo.attributes.position.needsUpdate = true; dGeo.attributes.size.needsUpdate = true;
+}
+// ---- BUBBLES: when the ship is SUBMERGED, the same disturbance trails bubbles off the hull. They
+//   rise (buoyancy) to the surface, wobbling, and pop into a small ripple when they break the top.
+const BUBBLES = 700;
+const bPos = new Float32Array(BUBBLES * 3).fill(-1e6), bVel = new Float32Array(BUBBLES * 3), bOn = new Uint8Array(BUBBLES);
+let bHead = 0;
+const bGeo = new THREE.BufferGeometry(); bGeo.setAttribute('position', new THREE.BufferAttribute(bPos, 3));
+const bubbles = new THREE.Points(bGeo, new THREE.PointsMaterial({ color: 0xcfe6f2, size: 4, sizeAttenuation: true, transparent: true, opacity: 0.5, depthWrite: false, fog: true }));
+bubbles.frustumCulled = false; scene.add(bubbles);
+function emitBubble(x, y, z) {
+  const b = bHead; bHead = (bHead + 1) % BUBBLES;
+  bPos[b * 3] = x; bPos[b * 3 + 1] = y; bPos[b * 3 + 2] = z;
+  bVel[b * 3] = (Math.random() - 0.5) * 10; bVel[b * 3 + 1] = 22 + Math.random() * 26; bVel[b * 3 + 2] = (Math.random() - 0.5) * 10;
+  bOn[b] = 1;
+}
+function updateBubbles(dt) {
+  for (let i = 0; i < BUBBLES; i++) {
+    if (!bOn[i]) continue;
+    const a = shipAirFlow(bPos[i * 3], bPos[i * 3 + 1], bPos[i * 3 + 2]), C = 8 * _airInf * dt;   // water routes around the hull the same way
+    bVel[i * 3] += (a.x - bVel[i * 3]) * C; bVel[i * 3 + 1] += (a.y - bVel[i * 3 + 1]) * C + 32 * dt; bVel[i * 3 + 2] += (a.z - bVel[i * 3 + 2]) * C;   // + buoyant rise
+    bPos[i * 3] += bVel[i * 3] * dt; bPos[i * 3 + 1] += bVel[i * 3 + 1] * dt; bPos[i * 3 + 2] += bVel[i * 3 + 2] * dt;
+    if (bPos[i * 3 + 1] >= WL) { spawnRipple(bPos[i * 3], bPos[i * 3 + 2], 0.5); bOn[i] = 0; bPos[i * 3 + 1] = -1e6; }   // breaks the surface -> pops
+  }
+  bGeo.attributes.position.needsUpdate = true;
+}
+let rippleT = 0, splashT = 2, waveAcc = 0;
+function updateCymatics(dt) {
+  const nscx = Math.round(camera.position.x / wgScale) * wgScale, nscz = Math.round(camera.position.z / wgScale) * wgScale;
+  if (nscx !== wcx || nscz !== wcz) {
+    const dCol = Math.round((nscx - wcx) / wgScale), dRow = Math.round((nscz - wcz) / wgScale);
+    wcx = nscx; wcz = nscz;
+    if (Math.abs(dCol) < WG && Math.abs(dRow) < WG) rollAll(dCol, dRow); else { computeMaskFull(); wcur.fill(0); wprev.fill(0); }
+    windowCenter.value.set(wcx, wcz);
+  }
+  // windless glass: no ambient/demo disturbances. The water is still until an object touches it.
+  waveAcc += Math.min(0.05, dt);
+  let s = 0; while (waveAcc >= 1 / 30 && s < 2) { stepWave(); waveAcc -= 1 / 30; s++; }
+  updateDrops(dt);         // drops arc down under gravity and ripple where they land
+  updateBubbles(dt);       // submerged bubbles rise and pop at the surface
+  uploadWave();
+}
+
+// ============================================================================
+// Water — cosmetic noise ripples + mirror reflection (reaches the mountains),
+//   with the reactive wave-sim ripples added on top near the player.
 // ============================================================================
 const water = (() => {
-  const geo = new THREE.PlaneGeometry(7000, 7000, 1, 1);
+  const geo = new THREE.PlaneGeometry(24000, 24000, 300, 300);   // subdivided so the whole body can rise & fall
   geo.rotateX(-Math.PI / 2);
   const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
   const wp = positionWorld, t = time;
-  // flowing ripple from layered noise (irregular, varies everywhere — no tiled grid)
-  const ripH = (p) => mx_noise_float(vec3(p.x.mul(0.028), p.y.mul(0.028), t.mul(0.4))).mul(0.6)
-    .add(mx_noise_float(vec3(p.x.mul(0.075).add(5.0), p.y.mul(0.075), t.mul(0.7))).mul(0.4));
+  // windless lake => GLASS. Only the faintest, slow micro-texture so the mirror isn't unnaturally
+  //   perfect; all real motion comes from the reactive sim (splashes / things hitting the water).
+  const ripH = (p) => mx_noise_float(vec3(p.x.mul(0.02), p.y.mul(0.02), t.mul(0.1))).mul(0.10)
+    .add(mx_noise_float(vec3(p.x.mul(0.06).add(5.0), p.y.mul(0.06), t.mul(0.2))).mul(0.06));
   const e = 3.0;
   const hC = ripH(wp.xz), hX = ripH(wp.xz.add(vec2(e, 0))), hZ = ripH(wp.xz.add(vec2(0, e)));
-  const Nf = normalize(vec3(hC.sub(hX).mul(3.0), float(1.0), hC.sub(hZ).mul(3.0)));   // ripple normal
-  // planar MIRROR reflection across y = WL, rippled by the wave normal
-  const reflection = reflector({ resolution: 0.2 });
+  // REACTIVE: sample the wave sim near the player and add its ripple tilt to the normal
+  const luv = wp.xz.sub(windowCenter).div(WSIZE).add(0.5);
+  const ed = float(1 / WG), dec = (n) => n.mul(2).sub(1).mul(WRANGE);
+  const sL = dec(texture(waveTex, luv.sub(vec2(ed, float(0)))).x), sR = dec(texture(waveTex, luv.add(vec2(ed, float(0)))).x);
+  const sD = dec(texture(waveTex, luv.sub(vec2(float(0), ed))).x), sU = dec(texture(waveTex, luv.add(vec2(float(0), ed))).x);
+  const simW = float(1).sub(smoothstep(float(WSIZE * 0.34), float(WSIZE * 0.48), wp.xz.sub(windowCenter).length()));
+  const sx = sL.sub(sR).mul(0.14).mul(simW), sz = sD.sub(sU).mul(0.14).mul(simW);
+  // KELVIN WAKE (B channel): the closed-form wedge, its slope tilts the surface normal so it shows in the mirror
+  const decW = (n) => n.mul(2).sub(1).mul(WAKERANGE);
+  const kL = decW(texture(waveTex, luv.sub(vec2(ed, float(0)))).z), kR = decW(texture(waveTex, luv.add(vec2(ed, float(0)))).z);
+  const kD = decW(texture(waveTex, luv.sub(vec2(float(0), ed))).z), kU = decW(texture(waveTex, luv.add(vec2(float(0), ed))).z);
+  const wkx = kL.sub(kR).mul(0.5).mul(simW), wkz = kD.sub(kU).mul(0.5).mul(simW);
+  const Nf = normalize(vec3(hC.sub(hX).mul(1.0).add(sx).add(wkx), float(1.0), hC.sub(hZ).mul(1.0).add(sz).add(wkz)));   // glass + reactive ripples + Kelvin wake
+  // CALM WHOLE-BODY DISPLACEMENT: the surface is real geometry again. A gentle long swell makes the
+  //   whole body breathe; the reactive sim ripples + Kelvin wake add localised relief. Amplitudes are
+  //   kept small (the previous pass was too big). This is the surface a pressure source will push on.
+  const dispFade = float(1).sub(smoothstep(float(WSIZE * 0.40), float(WSIZE * 0.49), wp.xz.sub(windowCenter).length()));
+  const swell = mx_noise_float(vec3(wp.x.mul(0.0035), wp.z.mul(0.0035), t.mul(0.12))).mul(2.2)
+    .add(mx_noise_float(vec3(wp.x.mul(0.008).add(9.0), wp.z.mul(0.008), t.mul(0.18))).mul(1.1));
+  const simDisp = texture(waveTex, luv).x.mul(2).sub(1).mul(WRANGE);          // reactive ripples (R)
+  const wakeDisp = texture(waveTex, luv).z.mul(2).sub(1).mul(WAKERANGE);      // Kelvin wake (B)
+  const dispH = swell.add(simDisp.add(wakeDisp).mul(dispFade));
+  mat.positionNode = positionLocal.add(vec3(float(0), dispH, float(0)));
+  // planar MIRROR reflection across y = WL — higher res + low distortion = a crisp calm-lake mirror
+  const reflection = reflector({ resolution: 0.7 });   // higher-res mirror => the reflected mountains aren't jagged
   reflection.target.rotateX(-Math.PI / 2);
   reflection.target.position.y = WL;
   scene.add(reflection.target);
-  reflection.uvNode = reflection.uvNode.add(Nf.xz.mul(0.06));
+  reflection.uvNode = reflection.uvNode.add(Nf.xz.mul(0.02));
   const V = normalize(cameraPosition.sub(wp));
   const ndv = Nf.dot(V).max(0);
   const fres = float(0.04).add(float(0.6).mul(float(1).sub(ndv).pow(5)));
-  let body = mix(color(0x0c3a5a), reflection.rgb, fres);
+  // aboveF = 1 above the waterline, 0 when submerged. Reflection, specular and the
+  //   meniscus are above-water effects; from underneath they go white and show the
+  //   low-res mirror texture, so fade them out and leave a translucent blue underside.
+  const aboveF = smoothstep(float(WL - 6), float(WL + 6), cameraPosition.y);
   const L = normalize(vec3(0.5, 1.0, 0.3)), Hh = normalize(L.add(V));
-  const spec = Nf.dot(Hh).max(0).pow(200).mul(0.6);                                   // tight sun glints, not a dot grid
+  const aboveBody = mix(color(0x0c3a5a), reflection.rgb, fres);
+  // below water: REAL refraction. refract() is the vector form of Snell's law -- it bends
+  //   the incident view ray through the rippled normal with eta = n_water/n_air = 1.333,
+  //   and returns the ZERO vector past the critical angle (~48.6deg), so total internal
+  //   reflection / Snell's window fall straight out of the math. We project the bent ray's
+  //   deviation into screen space and sample the already-rendered scene there, so the
+  //   ripples physically DISPLACE the light coming through the surface.
+  const I = V.negate();                                          // incident ray: camera -> surface point
+  const Nor = Nf.mul(Nf.dot(V).sign());                          // surface normal oriented toward the viewer
+  const Tr = refract(I, Nor, float(1.333));                      // Snell's law, vector form (water -> air)
+  const tir = Tr.dot(Tr);                                        // == 0 at total internal reflection
+  const defl = cameraViewMatrix.mul(vec4(Tr.sub(I), 0)).xy;      // how far the refracted ray bends, in screen axes
+  const refrImg = viewportSharedTexture(screenUV.add(defl.mul(0.22))).rgb; // transmitted world above, displaced
+  // Outside Snell's window the underside is a MIRROR (total internal reflection): reflect the
+  //   view ray off the rippled surface and sample the underwater scene, so it mirrors the
+  //   lakebed below you and wobbles with the ripples.
+  const Rr = reflect(I, Nor);                                    // reflected ray (bounces back down into the water)
+  const drefl = cameraViewMatrix.mul(vec4(Rr.sub(I), 0)).xy;     // its screen-space deviation
+  const reflImg = viewportSharedTexture(screenUV.add(drefl.mul(0.22))).rgb; // the mirrored underwater scene
+  const win = smoothstep(float(0.0), float(0.05), tir);          // 1 inside Snell's window, 0 in the TIR mirror ring
+  const underBody = mix(reflImg.mul(color(0x9fc4d6)), refrImg.mul(color(0xcfe6ef)), win); // mirror -> refraction
+  let body = mix(underBody, aboveBody, aboveF);
+  const spec = Nf.dot(Hh).max(0).pow(200).mul(0.6).mul(aboveF);                       // tight sun glints, not a dot grid
   const colN = body.add(color(0xffffff).mul(spec));
   const rad = wp.xz.sub(cameraPosition.xz).length();
-  const fade = smoothstep(float(6000), float(8000), rad);
+  const fade = smoothstep(float(7000), float(9500), rad);   // fade to the horizon mist, matching the mountains
   mat.colorNode = mix(colN, color(FOGC), fade);
-  mat.opacityNode = mix(float(0.66), float(0.97), fres).mul(float(1).sub(fade));
+  // above water: fresnel-driven opacity; submerged: a thin translucent blue so you see up through it
+  mat.opacityNode = mix(float(0.4), mix(float(0.66), float(0.97), fres), aboveF).mul(float(1).sub(fade));
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false; mesh.renderOrder = 1;
   return mesh;
 })();
 scene.add(water);
+
+// (clouds, surface fog, and the volumetric gas system have been removed — clean scene)
+
 
 // ============================================================================
 // Persistent segment streaming
@@ -276,7 +556,7 @@ function finishShell(j) {
 
 const GTRIES = GRASS_PER_SEG * 5;
 function startGrass(i) {
-  const maxV = GRASS_PER_SEG * 5, maxI = GRASS_PER_SEG * 9;
+  const maxV = GRASS_PER_SEG * NV, maxI = GRASS_PER_SEG * NI;
   return { grass: true, i, zc: BACK - i * SEGLEN - SEGLEN / 2, tries: 0, k: 0,
     pos: new Float32Array(maxV * 3), col: new Float32Array(maxV * 3),
     hf: new Float32Array(maxV), ph: new Float32Array(maxV), idx: new Uint32Array(maxI) };
@@ -298,20 +578,20 @@ function fillGrass(j, attempts) {
     if (pc < 0.4) continue;                                   // grey ground
     const H = 26 * (0.55 + pc * 0.75), W = 8 * (0.7 + Math.random() * 0.5);
     const baseY = meshHeight(x, z, j.zc) - 0.8, yaw = Math.random() * 6.283, cyw = Math.cos(yaw), syw = Math.sin(yaw);
-    const phase = Math.random() * 6.283, vo = j.k * 5;
-    for (let v = 0; v < 5; v++) {
+    const phase = Math.random() * 6.283, vo = j.k * NV;
+    for (let v = 0; v < NV; v++) {
       const lx = BL_V[v][0] * W, ly = BL_V[v][1] * H, lz = BL_V[v][2] * W, o = (vo + v) * 3;
       j.pos[o] = x + (lx * cyw - lz * syw); j.pos[o + 1] = baseY + ly; j.pos[o + 2] = z + (lx * syw + lz * cyw);
       j.col[o] = BL_C[v][0]; j.col[o + 1] = BL_C[v][1]; j.col[o + 2] = BL_C[v][2];
       j.hf[vo + v] = BL_H[v]; j.ph[vo + v] = phase;
     }
-    const io = j.k * 9;
-    for (let t = 0; t < 9; t++) j.idx[io + t] = vo + BL_I[t];
+    const io = j.k * NI;
+    for (let t = 0; t < NI; t++) j.idx[io + t] = vo + BL_I[t];
     j.k++;
   }
 }
 function finishGrass(j) {
-  const nv = j.k * 5, ni = j.k * 9;
+  const nv = j.k * NV, ni = j.k * NI;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(j.pos.subarray(0, nv * 3)), 3));
   g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(j.col.subarray(0, nv * 3)), 3));
@@ -357,6 +637,147 @@ function pump(budget) {
 }
 
 // ============================================================================
+// SHIP — drop in the blaster and fly it from the cockpit. The markers (cockpit1,
+//   thruster1/2, gun1/2) are empty nodes baked into the GLB; the model's forward is -X,
+//   so we spin it to face the rig's -Z. The camera rides the cockpit1 marker every frame.
+// ============================================================================
+const SHIP_SCALE = 24;                        // ~1.9-unit model -> ~45-unit ship
+let ship, cockpit, bankGroup;   // bankGroup holds the model and takes the bank/roll, so the camera (which follows ship) never tilts
+const thrusters = [], guns = [], thrusterFlames = [];
+{
+  const gltf = await new GLTFLoader().loadAsync('./ships/blaster.glb');
+  const model = gltf.scene;
+  model.scale.setScalar(SHIP_SCALE);
+  model.rotation.y = -Math.PI / 2;            // model -X (forward) -> rig -Z (forward)
+  cockpit = model.getObjectByName('cockpit1');
+  for (const n of ['thruster1', 'thruster2']) { const o = model.getObjectByName(n); if (o) thrusters.push(o); }
+  for (const n of ['gun1', 'gun2']) { const o = model.getObjectByName(n); if (o) guns.push(o); }
+  ship = new THREE.Group();
+  ship.rotation.order = 'YXZ';
+  bankGroup = new THREE.Group();              // rolls/banks the model only; the ship rig (and camera) stay level
+  bankGroup.add(model);
+  ship.add(bankGroup);
+  ship.position.set(0, groundY(0, -150) + 150, -150);
+  scene.add(ship);
+
+  // Engine FX at each thruster marker: a backward FLAME (forward thrust, boost = much bigger)
+  //   and a glowing retro RING (reverse). Sizes/brightness are driven from the controls.
+  ship.updateMatrixWorld(true);
+  // plume cone with baked vertex colour + ALPHA: white-hot at the nozzle, fading down its length
+  //   to a soft transparent blue tip. Additive + double-sided => soft volumetric edges, not a solid cone.
+  const coneGeo = new THREE.ConeGeometry(1, 1, 18, 1, true); coneGeo.rotateX(Math.PI / 2); coneGeo.translate(0, 0, 0.5);
+  {
+    const pos = coneGeo.attributes.position, n = pos.count, col = new Float32Array(n * 4);
+    const cHot = new THREE.Color(0xffffff), cMid = new THREE.Color(0x4aa6ff), cTip = new THREE.Color(0x123c9c), _cc = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      const t = Math.min(1, Math.max(0, pos.getZ(i)));
+      if (t < 0.45) _cc.copy(cHot).lerp(cMid, t / 0.45); else _cc.copy(cMid).lerp(cTip, (t - 0.45) / 0.55);
+      col[i * 4] = _cc.r; col[i * 4 + 1] = _cc.g; col[i * 4 + 2] = _cc.b; col[i * 4 + 3] = Math.pow(1 - t, 1.3);
+    }
+    coneGeo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  }
+  const ringGeo = new THREE.TorusGeometry(1, 0.16, 8, 24);
+  const mkFx = (vc) => new THREE.MeshBasicMaterial({ color: vc ? 0xffffff : 0xcfe6ff, vertexColors: vc, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const _v = new THREE.Vector3();
+  for (const th of thrusters) {
+    const lp = ship.worldToLocal(th.getWorldPosition(_v)).clone();
+    const plume = new THREE.Mesh(coneGeo, mkFx(true));
+    const ring = new THREE.Mesh(ringGeo, mkFx(false));
+    for (const m of [plume, ring]) { m.frustumCulled = false; m.position.copy(lp); bankGroup.add(m); }   // bank with the model
+    thrusterFlames.push({ plume, ring });
+  }
+}
+
+// ============================================================================
+// BUOYANT BALLS — press [B] to drop one. It falls, splashes, then bobs on the surface
+//   and rides the waves like Evan Wallace's ball; the sim carries its ripples to the shores.
+//   Over dry ground it simply lands.
+// ============================================================================
+const balls = [];
+const BALL_R = 14, BALL_MAX = 40;
+const ballGeo = new THREE.SphereGeometry(BALL_R, 24, 16);
+function waveHeightAt(x, z) {                  // world surface height at (x,z), or null if no water there
+  const i = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), j = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  if (i >= 0 && i < WG && j >= 0 && j < WG) { const k = j * WG + i; if (wmask[k]) return WL + wcur[k]; }
+  return null;
+}
+function dropBall() {
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.7, 0.5), roughness: 0.35, metalness: 0.05 });
+  const mesh = new THREE.Mesh(ballGeo, mat); mesh.frustumCulled = false;
+  const b = { mesh, x: ship.position.x, z: ship.position.z, y: ship.position.y - 30, vy: -40, wasWet: false };
+  mesh.position.set(b.x, b.y, b.z); scene.add(mesh); balls.push(b);
+  if (balls.length > BALL_MAX) { const old = balls.shift(); scene.remove(old.mesh); old.mesh.material.dispose(); }
+}
+addEventListener('keydown', e => { if (e.code === 'KeyB') dropBall(); });
+const BALL_G = 900, RHO_REL = 0.55;     // ball density / water density => floats ~55% submerged (Archimedes)
+// OBJECT -> FLUID COUPLING (Archimedes displacement): an object pushes aside the water it occupies.
+//   We press the surface down to the hull across its footprint and let it follow the object's vertical
+//   motion, so the wave sim makes a wake as it moves and the water flows back / clings as it lifts out.
+function displaceWater(x, z, R, bottomY, vy, dt, dirX = 0, dirZ = 0) {   // CUT a hole; displaced water -> rim walls
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  const cr = Math.ceil(R * 1.7 / wgScale), ease = Math.min(1, dt * 14), follow = clamp(vy * dt, -6, 6);   // stronger vertical cling (sucks water up on exit)
+  const press = Math.min(0, Math.max(-30, bottomY - WL));   // depth the object cuts into the surface (<=0)
+  const moving = dirX * dirX + dirZ * dirZ > 0.01;
+  let displaced = 0; const rim = [];
+  for (let dj = -cr; dj <= cr; dj++) for (let di = -cr; di <= cr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const k = j * WG + i; if (!wmask[k]) continue;
+    const rdx = cellX(i) - x, rdz = cellZ(j) - z, dn = Math.hypot(rdx, rdz) / R;
+    if (dn <= 1) {                                          // under the object: carve down to the hull
+      const w = 1 - dn * dn, d = (press * w - wcur[k]) * ease;
+      wcur[k] += d + follow * w * 0.8;                      // cut + the surface follows it vertically (cling on rise)
+      if (d < 0) displaced -= d;                            // water pushed OUT of the hole this frame
+      wcur[k] = clamp(wcur[k], -34, 34);
+    } else if (dn <= 1.7) rim.push({ k, dx: rdx, dz: rdz });
+  }
+  if (rim.length && displaced > 0) {                        // CONSERVE volume: the cut water becomes raised walls.
+    let wsum = 0;                                           //   Moving => bias it PERPENDICULAR + BEHIND (the T-top wake arms).
+    for (const r of rim) {
+      if (moving) { const rl = Math.hypot(r.dx, r.dz) || 1, al = (r.dx * dirX + r.dz * dirZ) / rl; r.w = 0.15 + (1 - Math.abs(al)) * (al < 0 ? 1.0 : 0.4); }
+      else r.w = 1;
+      wsum += r.w;
+    }
+    const vol = displaced * 0.95;
+    for (const r of rim) wcur[r.k] = clamp(wcur[r.k] + vol * r.w / wsum, -34, 34);
+  }
+}
+function pushUpWater(x, z, R, amt, dt) {     // raise a dome of water (bow wave: volume shoved up & out at the leading edge)
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  const cr = Math.ceil(R / wgScale), ease = Math.min(1, dt * 6);
+  for (let dj = -cr; dj <= cr; dj++) for (let di = -cr; di <= cr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const k = j * WG + i; if (!wmask[k]) continue;
+    const dn = Math.hypot(cellX(i) - x, cellZ(j) - z) / R; if (dn > 1) continue;
+    const w = 1 - dn * dn;
+    wcur[k] += (amt * w - wcur[k]) * ease * w;   // ease the surface up; the sim pushes it away / around
+    wcur[k] = clamp(wcur[k], -24, 24);
+  }
+}
+function updateBalls(dt) {
+  for (const b of balls) {
+    const surf = waveHeightAt(b.x, b.z);                               // local water surface, or null over dry ground
+    if (surf !== null) {
+      const d = clamp(surf - (b.y - BALL_R), 0, 2 * BALL_R);           // submerged depth: bottom -> surface
+      const frac = (d * d * (3 * BALL_R - d)) / (4 * BALL_R ** 3);     // submerged volume fraction (spherical cap / sphere)
+      if (frac > 0.01 && !b.wasWet) waterImpact(b.x, b.z, Math.abs(b.vy), false);   // the ball punches in -> crown + spray
+      b.wasWet = frac > 0.01;
+      b.vy += BALL_G * (frac / RHO_REL - 1) * dt;                      // Archimedes: F_b - F_g, as acceleration
+      if (frac > 0) b.vy *= (1 - clamp(3 * frac * dt, 0, 0.4));        // drag in water settles the bob
+      if (frac > 0.002) {                                              // the ball is a pressure source too
+        const rW = Math.sqrt(Math.max(BALL_R * BALL_R * 0.3, BALL_R * BALL_R - (b.y - surf) ** 2));   // waterline radius
+        displaceWater(b.x, b.z, rW, b.y - BALL_R, b.vy, dt);
+      }
+    } else {
+      b.vy -= BALL_G * dt; b.wasWet = false;
+      const gy = groundY(b.x, b.z) + BALL_R;
+      if (b.y <= gy) { b.y = gy; b.vy = 0; }                           // rest on dry ground
+    }
+    b.y += b.vy * dt;
+    b.mesh.position.y = b.y;
+  }
+}
+
+// ============================================================================
 // First-person flycam
 // ============================================================================
 const look = { yaw: 0, pitch: 0 };
@@ -368,16 +789,24 @@ cv.addEventListener('click', () => { if (!document.pointerLockElement) cv.reques
 addEventListener('mousemove', e => { if (document.pointerLockElement === cv) { look.yaw -= e.movementX * 0.0022; look.pitch -= e.movementY * 0.0022; } });
 const DEAD = 0.12;
 const dz = v => Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
-const fwd = new THREE.Vector3(), rt = new THREE.Vector3(), mv = new THREE.Vector3();
+const fwd = new THREE.Vector3(), rt = new THREE.Vector3(), mv = new THREE.Vector3(), CAM_OFF = new THREE.Vector3();
+let flameLevel = 0, ringLevel = 0, boostLevel = 0;   // smoothed engine FX levels (boostLevel feeds thruster water pressure)
+let bank = 0, rollT = 0, rollDir = 1, rollCool = 0, rollArmed = false;
+const ROLL_DUR = 0.85, ROLL_COOL = 0.5, MAX_BANK = 0.38, ROLL_DODGE = 300;   // wide, long barrel roll with a big sideways dash
+const DASH_SPEED = 820;   // held L3 / F = a CONTINUOUS forward dash
+function triggerRoll(dir) { if (rollT <= 0 && rollCool <= 0) { rollT = ROLL_DUR; rollDir = dir; rollCool = ROLL_DUR + ROLL_COOL; } }
 function updateControls(dt) {
-  let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0;
+  let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0, dash = 0;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
   if (gp) {
     mx = dz(gp.axes[0] || 0); my = dz(gp.axes[1] || 0);
     lx = dz(gp.axes[2] || 0); ly = dz(gp.axes[3] || 0);
-    up = ((gp.buttons[7] && gp.buttons[7].value) || 0) - ((gp.buttons[6] && gp.buttons[6].value) || 0);
-    boost = (gp.buttons[0] && gp.buttons[0].pressed) ? 1 : 0;
+    const A = gp.buttons[0] && gp.buttons[0].pressed, B = gp.buttons[1] && gp.buttons[1].pressed;
+    up = (B ? 1 : 0) - (A ? 1 : 0);                                  // B = rise, A = descend
+    boost = (gp.buttons[5] && gp.buttons[5].pressed) ? 1 : 0;        // RB = boost
+    if (gp.buttons[10] && gp.buttons[10].pressed) dash = 1;           // L3 (held) = dash
+    // RT (7) = shoot, LT (6) = defensive — reserved, wired later
   }
   if (keys['KeyW']) my = -1; if (keys['KeyS']) my = 1;
   if (keys['KeyA']) mx = -1; if (keys['KeyD']) mx = 1;
@@ -385,30 +814,84 @@ function updateControls(dt) {
   if (keys['ArrowUp']) ly = -1; if (keys['ArrowDown']) ly = 1;
   if (keys['Space']) up = 1; if (keys['ShiftLeft'] || keys['ControlLeft']) up = -1;
   if (keys['ShiftRight']) boost = 1;
+  if (keys['KeyF']) dash = 1;                                          // keyboard dash (held)
+  const wantRoll = dash && Math.abs(mx) > 0.4;                         // DASH + strafe L/R (on press) = a wide barrel roll that way, dashing sideways
+  if (wantRoll && !rollArmed) triggerRoll(Math.sign(mx));
+  rollArmed = wantRoll;
 
+  // Steer the SHIP (mouse/stick = yaw + pitch); the camera will ride the cockpit below.
   const LOOK = 2.4;
   look.yaw -= lx * LOOK * dt;
   look.pitch = Math.max(-1.45, Math.min(1.45, look.pitch - ly * LOOK * dt));
-  camera.rotation.set(look.pitch, look.yaw, 0);
+  ship.rotation.set(look.pitch, look.yaw, 0);
 
   const SPEED = 380 * (1 + boost * 2.0);
-  fwd.set(0, 0, -1).applyEuler(camera.rotation);
-  rt.set(1, 0, 0).applyEuler(camera.rotation);
+  fwd.set(0, 0, -1).applyEuler(ship.rotation);
+  rt.set(1, 0, 0).applyEuler(ship.rotation);
   mv.set(0, 0, 0).addScaledVector(fwd, -my).addScaledVector(rt, mx);
   mv.y += up;
-  const px = camera.position.x, pz = camera.position.z;
-  camera.position.addScaledVector(mv, SPEED * dt);
+  const px = ship.position.x, pz = ship.position.z;
+  ship.position.addScaledVector(mv, SPEED * dt);
+  if (dash) ship.position.addScaledVector(fwd, DASH_SPEED * dt);   // continuous forward dash while L3/F is held
 
-  // COLLISION: query the same CPU terrain field the water uses — stay in the open
+  // COLLISION: query the same CPU terrain field the water uses — keep the hull in the open
   //   void (above the floor, below the ceiling). Walls pinch shut => blocked.
-  const M = 22;
-  let fl = groundY(camera.position.x, camera.position.z) + M;
-  let ce = ceilY(camera.position.x, camera.position.z) - M;
-  if (ce - fl < 24) {                       // pinched (a wall) => undo the horizontal move
-    camera.position.x = px; camera.position.z = pz;
+  const M = 34;                              // bigger margin than the bare camera: the ship has size
+  let fl = groundY(ship.position.x, ship.position.z) + M;
+  let ce = ceilY(ship.position.x, ship.position.z) - M;
+  if (ce - fl < 48) {                        // pinched (a wall) => undo the horizontal move
+    ship.position.x = px; ship.position.z = pz;
     fl = groundY(px, pz) + M; ce = ceilY(px, pz) - M;
   }
-  camera.position.y = Math.max(fl, Math.min(ce, camera.position.y));
+  ship.position.y = Math.max(fl, Math.min(ce, ship.position.y));
+
+  // WATER RESISTANCE: nose/keel in the water DRAGS the ship (anti-gravity hull, so it doesn't sink).
+  const noseY = ship.position.y + fwd.y * 22;                          // the nose dips when you pitch down
+  const sub = Math.max(WL - noseY, WL - (ship.position.y - 8));        // nose OR keel submersion
+  if (sub > 0) {
+    const f = Math.min(1, sub / 45);
+    ship.position.x = px + (ship.position.x - px) * (1 - 0.5 * f);     // bleed off the horizontal move
+    ship.position.z = pz + (ship.position.z - pz) * (1 - 0.5 * f);
+  }
+
+  // BANKING + STAR FOX BARREL ROLL (Ace Starship feel). Bank into turns (from the turn RATE, so mouse
+  //   AND stick both bank) and into strafes; a bumper / Q-E snaps a full 360° roll. Visual only — the
+  //   roll is about the forward axis so it doesn't change your heading.
+  rollCool -= dt;
+  let rollSpin = 0;
+  if (rollT > 0) {
+    rollSpin = -rollDir * 6.2832 * (1 - rollT / ROLL_DUR);                       // a full 360deg barrel roll
+    ship.position.addScaledVector(rt, rollDir * ROLL_DODGE * dt);               // Star Fox dodge: slide sideways during the roll
+    ship.position.y = Math.max(fl, Math.min(ce, ship.position.y));
+    rollT -= dt;
+  }
+  const bankTarget = -mx * MAX_BANK;                                            // bank into the strafe (Ace Starship feel)
+  bank += (bankTarget - bank) * Math.min(1, dt * 6);
+  bankGroup.rotation.z = bank + rollSpin;                                       // ONLY the model banks/rolls; the rig + camera stay level
+
+  // CHASE CAM: sit behind + above the ship (these models are built to be seen from outside),
+  //   following its heading. The pull-back also removes the point-blank overdraw that halved FPS.
+  ship.updateMatrixWorld(true);
+  CAM_OFF.set(0, 50, 180).applyQuaternion(ship.quaternion);   // +Y up, +Z behind (pulled back so the ship sits forward in view)
+  camera.position.copy(ship.position).add(CAM_OFF);
+  camera.quaternion.copy(ship.quaternion);                    // yaw/pitch only (no roll) => the view never tilts
+  const targetFov = 65 + boost * 16;                          // boost widens the FOV for a speed rush (Ace Starship)
+  if (Math.abs(camera.fov - targetFov) > 0.05) { camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 4); camera.updateProjectionMatrix(); }
+
+  // ENGINE FX: forward throttle grows the flame (boost = much bigger); reverse lights a retro ring.
+  const fwdT = Math.max(0, -my), revT = Math.max(0, my);
+  const kk = Math.min(1, dt * 8);
+  flameLevel += (fwdT - flameLevel) * kk;
+  ringLevel += (revT - ringLevel) * kk;
+  boostLevel = boost;
+  const flick = 0.9 + Math.sin(performance.now() * 0.05) * 0.06 + Math.sin(performance.now() * 0.013) * 0.04;
+  const fLen = (4 + flameLevel * 22 + boost * 10) * flick, fWid = 1.125 + flameLevel * 0.525 + boost * 0.2;
+  const fOp = (0.35 + flameLevel * 0.55 + boost * 0.3) * (1 - ringLevel);   // reverse suppresses the forward flame
+  const rSize = 0.85, rOp = ringLevel * (0.9 + boost * 0.2) * flick;         // reverse boost just glows a bit brighter
+  for (const f of thrusterFlames) {
+    f.plume.scale.set(fWid, fWid, fLen); f.plume.material.opacity = fOp;
+    f.ring.scale.set(rSize, rSize, rSize); f.ring.material.opacity = rOp;
+  }
 }
 
 addEventListener('resize', () => {
@@ -421,15 +904,84 @@ planSegments();
 pump(Infinity);                    // build the opening stretch up front
 await renderer.compileAsync(scene, camera);
 
+// MEDIUM: above the waterline it's grey cavern air; below it, water swallows light fast.
+//   Blend the single fog's colour + density by how deep the eye is (no object swap => no
+//   transition hitch), so the medium fades smoothly through the surface.
+const airFogC = new THREE.Color(FOGC), waterFogC = new THREE.Color(0x0e4250);
+const AIR_DENS = 0.00020, WATER_DENS = 0.0012;
+function updateMedium() {
+  const u = clamp((WL + 2 - camera.position.y) / 16, 0, 1);       // 0 above the surface -> 1 fully submerged
+  scene.fog.color.copy(airFogC).lerp(waterFogC, u);
+  scene.fog.density = AIR_DENS + (WATER_DENS - AIR_DENS) * u;
+  scene.background.lerpColors(airFogC, waterFogC, u);
+}
+
+// SHIP <-> WATER: skim the surface to throw a speed-scaled wake; punch through it for a splash.
+//   spawnRipple only injects where the sim says there's actually water (a basin), so dry ground stays dry.
+const _prevShip = new THREE.Vector3().copy(ship.position), _tp = new THREE.Vector3(), _fw = new THREE.Vector3();
+function updateShipWake(dt) {
+  const idt = 1 / Math.max(1e-3, dt);
+  const vx = (ship.position.x - _prevShip.x) * idt, vz = (ship.position.z - _prevShip.z) * idt, dy = (ship.position.y - _prevShip.y) * idt;
+  const speed = Math.hypot(vx, vz);
+  shipVel.set(vx, dy, vz);                                                      // drives the airflow the spray/bubbles ride
+  const above = ship.position.y - WL, prevAbove = _prevShip.y - WL;
+  const keel = ship.position.y - 8, top = ship.position.y + 8;
+  if (keel < WL && top > WL) {                                                  // STRADDLING the surface: the hull parts the water -> cut a trench + spray
+    const cutDepth = Math.max(-30, Math.min(-(5 + speed * 0.06), keel - WL));
+    displaceWater(ship.position.x, ship.position.z, 30, WL + cutDepth, dy, dt, speed > 1 ? vx / speed : 0, speed > 1 ? vz / speed : 0);
+    if (speed > 30) {                                                          // the moment you touch water while driving: spray OUT THE BACK + UP + out the sides (the T)
+      const inv = 1 / speed, fx = vx * inv, fz = vz * inv, px = -fz, pz = fx, sp = Math.min(1.7, speed / 480);
+      const n = Math.floor(14 + sp * 58);                                      // denser + taller the faster you go (the rooster tail grows out of this)
+      for (let s = 0; s < n; s++) {
+        const side = Math.random() < 0.5 ? 1 : -1, lat = (4 + Math.random() * 20) * side, back = 6 + Math.random() * 28;
+        const outV = (28 + Math.random() * 42) * (0.6 + sp), upV = (55 + Math.random() * 75) * (0.5 + sp * 1.3), backV = (20 + Math.random() * 38) * (0.5 + sp);
+        emitDrop(ship.position.x - fx * back + px * lat, WL + 3, ship.position.z - fz * back + pz * lat,
+                 px * side * outV - fx * backV, upV, pz * side * outV - fz * backV);
+      }
+    }
+  } else if (top < WL && top > WL - 55) {                                       // FULLY SUBMERGED but near the top: bulge the surface UP, fading with depth (NO spray)
+    pushUpWater(ship.position.x, ship.position.z, 34, (1 - (WL - top) / 55) * (7 + speed * 0.03), dt);
+  }
+  if (above < -4 && speed > 20) {                                                // SUBMERGED: a trail of bubbles rises off the hull
+    const n = Math.min(6, 1 + (speed / 120 | 0));
+    for (let s = 0; s < n; s++) emitBubble(ship.position.x + (Math.random() - 0.5) * 44, ship.position.y + (Math.random() - 0.5) * 22, ship.position.z + (Math.random() - 0.5) * 44);
+  }
+  // NOSE DIPPED IN: the bow wave washes spray UP and BACK over the canopy (airflow then curls it around)
+  _fw.set(0, 0, -1).applyQuaternion(ship.quaternion);
+  const noseY = ship.position.y + _fw.y * 22;
+  if (noseY < WL && speed > 60 && top > WL) {                                    // only while the body is still breaking the surface (not fully under)
+    const noseX = ship.position.x + _fw.x * 22, noseZ = ship.position.z + _fw.z * 22, n = Math.min(9, 2 + (speed / 60 | 0));
+    for (let s = 0; s < n; s++)
+      emitDrop(noseX + (Math.random() - 0.5) * 16, WL + 4, noseZ + (Math.random() - 0.5) * 16,
+               -_fw.x * (40 + Math.random() * 50) + (Math.random() - 0.5) * 24, 75 + Math.random() * 55,
+               -_fw.z * (40 + Math.random() * 50) + (Math.random() - 0.5) * 24);
+  }
+  for (const th of thrusters) {                                                  // thruster exhaust cuts the surface too
+    th.getWorldPosition(_tp);
+    const h = _tp.y - WL;
+    if (h < 160) {
+      const thrust = (flameLevel + boostLevel * 1.6) * (1 - clamp(h / 160, 0, 1));
+      if (thrust > 0.02) displaceWater(_tp.x, _tp.z, 24, WL - thrust * 16, 0, dt);
+    }
+  }
+  if (above < 0 && prevAbove >= 0) waterImpact(ship.position.x, ship.position.z, Math.abs(dy), false);       // punching IN -> crown + spray
+  else if (above > 0 && prevAbove <= 0) waterImpact(ship.position.x, ship.position.z, Math.abs(dy), true);   // breaking OUT -> water sheets off
+  _prevShip.copy(ship.position);
+}
+
 const fpsEl = document.getElementById('fps');
 let fpsAcc = 0, fpsFrames = 0;
 let last = performance.now();
 renderer.setAnimationLoop(() => {
   const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
   updateControls(dt);
+  updateMedium();
   planSegments();
   pump(VERT_BUDGET);
   updateLOD();
+  updateShipWake(dt);
+  updateBalls(dt);
+  updateCymatics(dt);
   water.position.set(camera.position.x, WL, camera.position.z);
   renderer.render(scene, camera);
   fpsAcc += dt; fpsFrames++;

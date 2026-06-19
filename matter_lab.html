@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Matter Lab — one substance, the cycle</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05070c; cursor: crosshair; }
+  canvas { display: block; }
+  #hud { position: fixed; top: 8px; left: 8px; pointer-events: none; z-index: 5;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.6);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.55; }
+  #hud b { color: #9fd0ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud">
+  <b>Matter Lab</b> — one substance: land, water, cloud, all on the energy axis<br>
+  mouse = <b>fovea</b> · heat emerges from compression: dense cores melt &amp; rise, thin surface cools &amp; sinks<br>
+  <span class="k">1</span> freeze (ice/land) <span class="k">2</span> water <span class="k">3</span> heat (cloud) · <span class="k">left-drag</span> apply · <span class="k">right-drag</span> add · <span class="k">b</span> braid<br>
+  <span id="stat"></span>
+</div>
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const W = cv.width = innerWidth, H = cv.height = innerHeight;
+const TAU = Math.PI * 2, clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v, wrapPi = a => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU; return a; };
+const aff = T => clamp01(1.15 - 1.5 * T);            // affinity (coherence potential): cold=1 (solid), ~0.43=liquid, hot=0 (gas)
+
+// ---- heat is NOT imposed: it EMERGES from compression. Packing many parts/seeds into a
+//   small space (high local density / overlap) heats them; a part with few neighbours is
+//   exposed and radiates away (cools). Gravity does the compressing, so a hot dense core /
+//   cool thin crust and the whole convective cycle are self-driven, not painted on.
+const K_HEAT = 0.0011, K_COOL = 0.006, SURF = 6;       // live: density heats, surface (few neighbours) cools
+const K_HEATC = 0.006, K_COOLC = 0.012;                // committed: many packed seeds heat; exposed cells cool
+
+// ===========================================================================
+// COMMITTED GRID — coarse seed world. Stores temperature, coherence, braid memory.
+// ===========================================================================
+const CW = 26, cols = Math.ceil(W / CW), rows = Math.ceil(H / CW), NCELL = cols * rows, CAP = 9;
+const cMass = new Float32Array(NCELL), cVx = new Float32Array(NCELL), cVy = new Float32Array(NCELL);
+const cTemp = new Float32Array(NCELL), cCoh = new Float32Array(NCELL), cWind = new Float32Array(NCELL);
+const CIDX = (i, j) => j * cols + i;
+for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+  const idx = CIDX(i, j), n = Math.sin(i * 0.5) * Math.cos(j * 0.6) + Math.sin(i * 0.13 + j * 0.21);
+  if (j >= rows - 4) { cMass[idx] = CAP; cTemp[idx] = 0.02; cCoh[idx] = 0.85; }                       // frozen land
+  if (j > rows - 11 && j < rows - 4 && n > 0.5) { cMass[idx] = CAP * 0.85; cTemp[idx] = 0.42; cCoh[idx] = 0.4; }   // liquid water
+}
+function commitInto(idx, vx, vy, T, coh, wind, m) {
+  const nm = cMass[idx] + m, w0 = cMass[idx];
+  cVx[idx] = (cVx[idx] * w0 + vx * m) / nm; cVy[idx] = (cVy[idx] * w0 + vy * m) / nm;
+  cTemp[idx] = (cTemp[idx] * w0 + T * m) / nm; cCoh[idx] = (cCoh[idx] * w0 + coh * m) / nm;
+  cWind[idx] += Math.abs(wind); cMass[idx] = nm;
+}
+
+// ===========================================================================
+// LIVE PARTICLES — phase (resonance) + entangled partner & winding (braid) + temperature.
+// ===========================================================================
+const MAXP = 4500;
+const px = new Float32Array(MAXP), py = new Float32Array(MAXP), pvx = new Float32Array(MAXP), pvy = new Float32Array(MAXP);
+const pT = new Float32Array(MAXP), pth = new Float32Array(MAXP), pw = new Float32Array(MAXP);
+const pwind = new Float32Array(MAXP), ppang = new Float32Array(MAXP), coh = new Float32Array(MAXP);
+const ppart = new Int32Array(MAXP).fill(-1);
+let np = 0;
+const omegaFor = T => 0.05 + (Math.random() - 0.5) * 0.42 * (0.12 + T * 1.25);                        // cold: tight (locks); hot: wide (won't)
+function addParticle(x, y, vx, vy, T, phase) {
+  if (np >= MAXP) return; const k = np++;
+  px[k] = x; py[k] = y; pvx[k] = vx; pvy[k] = vy; pT[k] = T; pth[k] = phase; pw[k] = omegaFor(T);
+  pwind[k] = 0; ppang[k] = 0; coh[k] = 0; ppart[k] = -1;
+}
+function removeParticle(k) {
+  const pk = ppart[k]; if (pk >= 0) ppart[pk] = -1; np--;
+  if (k !== np) {
+    px[k] = px[np]; py[k] = py[np]; pvx[k] = pvx[np]; pvy[k] = pvy[np]; pT[k] = pT[np];
+    pth[k] = pth[np]; pw[k] = pw[np]; pwind[k] = pwind[np]; ppang[k] = ppang[np]; coh[k] = coh[np]; ppart[k] = ppart[np];
+    const pm = ppart[k]; if (pm >= 0) ppart[pm] = k;
+  }
+}
+
+let mx = W / 2, my = H / 2, mdown = 0, brush = 0.0, showBraid = true;
+const R_IN = 150, R_OUT = 230;
+cv.addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; });
+cv.addEventListener('mousedown', e => { mdown = e.button === 2 ? 2 : 1; e.preventDefault(); });
+addEventListener('mouseup', () => mdown = 0);
+cv.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('keydown', e => { if (e.key === '1') brush = 0.0; if (e.key === '2') brush = 0.42; if (e.key === '3') brush = 0.9; if (e.key === 'b') showBraid = !showBraid; });
+
+function instantiate() {
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const idx = CIDX(i, j); if (cMass[idx] <= 0.05) continue;
+    const cx = i * CW + CW / 2, cy = j * CW + CW / 2;
+    if ((cx - mx) ** 2 + (cy - my) ** 2 > R_IN * R_IN || np > MAXP - 16) continue;
+    const count = Math.max(1, Math.round(cMass[idx])), base = (i * 7 + j * 13) % TAU, spread = (1 - cCoh[idx]) * Math.PI;
+    for (let c = 0; c < count; c++) {
+      const a = i * 7 + j * 13 + c * 2.399, rr = (c * 0.37) % 1;
+      addParticle(cx + Math.cos(a) * rr * CW * 0.5, cy + Math.sin(a) * rr * CW * 0.5, cVx[idx], cVy[idx], cTemp[idx], base + (Math.random() - 0.5) * spread * 2);
+    }
+    cMass[idx] = 0; cVx[idx] = 0; cVy[idx] = 0;
+  }
+}
+function commit() {
+  for (let k = np - 1; k >= 0; k--) {
+    if ((px[k] - mx) ** 2 + (py[k] - my) ** 2 <= R_OUT * R_OUT) continue;
+    const i = Math.max(0, Math.min(cols - 1, px[k] / CW | 0)), j = Math.max(0, Math.min(rows - 1, py[k] / CW | 0));
+    commitInto(CIDX(i, j), pvx[k], pvy[k], pT[k], coh[k], pwind[k], 1); removeParticle(k);
+  }
+}
+
+// ===========================================================================
+// PHYSICS — phases sync (Kuramoto), cohesion gated by phase alignment (coherence
+//   binds), entangled partners accrue winding (braid), temperature sets the spread.
+// ===========================================================================
+const H_R = 16, R0 = 10, K_REP = 0.55, K_COH = 0.24, K_VIS = 0.10, K_SYNC = 0.07, K_PAIR = 0.04, GRAV = 0.05, DAMP = 0.985, THERM = 0.75;
+const buckets = new Map(), dth = new Float32Array(MAXP), comp = new Float32Array(MAXP);
+const bkey = (x, y) => ((x / H_R) | 0) + ',' + ((y / H_R) | 0);
+const al0 = d => { const c = Math.cos(d); return c > 0 ? c : 0; };
+function physics() {
+  buckets.clear();
+  for (let k = 0; k < np; k++) { const key = bkey(px[k], py[k]); let b = buckets.get(key); if (!b) buckets.set(key, b = []); b.push(k); }
+  for (let k = 0; k < np; k++) {
+    const bx = (px[k] / H_R) | 0, by = (py[k] / H_R) | 0; let fx = 0, fy = 0, sSin = 0, cCos = 0, cSin = 0, cnt = 0, cmp = 0;
+    for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+      const b = buckets.get((bx + ox) + ',' + (by + oy)); if (!b) continue;
+      for (let m = 0; m < b.length; m++) {
+        const q = b[m]; if (q === k) continue;
+        const dx = px[k] - px[q], dy = py[k] - py[q], d2 = dx * dx + dy * dy;
+        if (d2 > H_R * H_R || d2 < 1e-4) continue;
+        const d = Math.sqrt(d2), nx = dx / d, ny = dy / d, dphi = pth[q] - pth[k], a = al0(dphi);
+        if (d < R0) { const f = (R0 - d) * K_REP; fx += nx * f; fy += ny * f; cmp += (R0 - d); }        // overlap = compression
+        else { const f = (d - R0) / (H_R - R0) * K_COH * a; fx -= nx * f; fy -= ny * f; }              // cohesion gated by phase alignment
+        fx += (pvx[q] - pvx[k]) * K_VIS * a; fy += (pvy[q] - pvy[k]) * K_VIS * a;
+        sSin += Math.sin(dphi); cCos += Math.cos(pth[q]); cSin += Math.sin(pth[q]); cnt++;
+      }
+    }
+    fy += GRAV * (aff(pT[k]) - 0.42);                                                                  // cold heavy, hot buoyant
+    dth[k] = pw[k] + (cnt ? K_SYNC * sSin / cnt : 0);
+    coh[k] = cnt ? Math.hypot(cCos, cSin) / cnt : 0;
+    comp[k] = K_HEAT * cmp - K_COOL * Math.max(0, 1 - cnt / SURF) - 0.0004;                            // compression heats; exposure (few neighbours) cools
+    pvx[k] = (pvx[k] + fx) * DAMP; pvy[k] = (pvy[k] + fy) * DAMP;
+  }
+  for (let k = 0; k < np; k++) {
+    let q = ppart[k];
+    if (q < 0) { q = findFreePartner(k); if (q >= 0) { ppart[k] = q; ppart[q] = k; ppang[k] = Math.atan2(py[q] - py[k], px[q] - px[k]); ppang[q] = ppang[k] + Math.PI; } continue; }
+    const dx = px[q] - px[k], dy = py[q] - py[k], d = Math.hypot(dx, dy) || 1e-3, f = (d - R0 * 1.3) * K_PAIR;
+    pvx[k] += dx / d * f; pvy[k] += dy / d * f;
+    const a = Math.atan2(dy, dx); pwind[k] += wrapPi(a - ppang[k]); ppang[k] = a;
+    if (d > H_R * 2.2) { ppart[k] = -1; ppart[q] = -1; }
+  }
+  for (let k = 0; k < np; k++) {
+    pT[k] = clamp01(pT[k] + comp[k]);                                                                  // emergent heat: compression vs radiation
+    const jit = THERM * pT[k]; pvx[k] += (Math.random() - 0.5) * jit; pvy[k] += (Math.random() - 0.5) * jit;   // temperature IS agitation: hot jiggles, spreads, then cools
+    pth[k] = (pth[k] + dth[k]) % TAU; px[k] += pvx[k]; py[k] += pvy[k];
+    if (px[k] < 2) { px[k] = 2; pvx[k] *= -0.3; } if (px[k] > W - 2) { px[k] = W - 2; pvx[k] *= -0.3; }
+    if (py[k] < 2) { py[k] = 2; pvy[k] *= -0.3; } if (py[k] > H - 2) { py[k] = H - 2; pvy[k] *= -0.3; }
+  }
+  if (mdown === 1) for (let k = 0; k < np; k++) if ((px[k] - mx) ** 2 + (py[k] - my) ** 2 < 4000) { pT[k] += (brush - pT[k]) * 0.3; pw[k] = omegaFor(pT[k]); }
+  if (mdown === 2) for (let c = 0; c < 4; c++) addParticle(mx + (Math.random() - 0.5) * 30, my + (Math.random() - 0.5) * 30, 0, 0, brush, Math.random() * TAU);
+}
+function findFreePartner(k) {
+  const bx = (px[k] / H_R) | 0, by = (py[k] / H_R) | 0; let best = -1, bd = H_R * H_R;
+  for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) {
+    const b = buckets.get((bx + ox) + ',' + (by + oy)); if (!b) continue;
+    for (let m = 0; m < b.length; m++) { const q = b[m]; if (q === k || ppart[q] >= 0) continue; const d2 = (px[k] - px[q]) ** 2 + (py[k] - py[q]) ** 2; if (d2 < bd) { bd = d2; best = q; } }
+  }
+  return best;
+}
+
+let perAcc = 0;
+function peripherySettle() {                                                                          // unobserved world keeps thermally + gravitationally evolving
+  for (let idx = 0; idx < NCELL; idx++) if (cMass[idx] > 0.05) {                                       // dense (many packed seeds) heat; exposed (empty cell above) radiate
+    const j = (idx / cols) | 0, exposed = (j === 0 || cMass[idx - cols] < 2) ? 1 : 0.25;
+    cTemp[idx] = clamp01(cTemp[idx] + K_HEATC * (cMass[idx] / CAP) - K_COOLC * exposed);
+  }
+  for (let j = rows - 2; j >= 0; j--) for (let i = 0; i < cols; i++) {
+    const idx = CIDX(i, j); if (cMass[idx] <= 0.05 || aff(cTemp[idx]) >= 0.7) continue;                // solids hold; liquid/gas drift down
+    const below = CIDX(i, j + 1), space = CAP - cMass[below]; if (space <= 0.05) continue;
+    const t = Math.min(cMass[idx], space, 0.6);
+    commitInto(below, cVx[idx], cVy[idx] + 0.4, cTemp[idx], cCoh[idx], 0, t); cMass[idx] -= t;
+  }
+}
+
+// ===========================================================================
+function tempRGB(T) {                                                                                  // blue = cold, white = warm, red = hot
+  const cold = [40, 96, 224], mid = [238, 242, 246], hot = [232, 52, 28];
+  if (T < 0.5) { const t = T * 2; return [cold[0] + (mid[0] - cold[0]) * t, cold[1] + (mid[1] - cold[1]) * t, cold[2] + (mid[2] - cold[2]) * t]; }
+  const t = (T - 0.5) * 2; return [mid[0] + (hot[0] - mid[0]) * t, mid[1] + (hot[1] - mid[1]) * t, mid[2] + (hot[2] - mid[2]) * t];
+}
+let frame = 0;
+function loop() {
+  instantiate(); physics(); commit();
+  if (++perAcc >= 6) { peripherySettle(); perAcc = 0; }
+
+  ctx.fillStyle = '#05070c'; ctx.fillRect(0, 0, W, H);
+
+  for (let idx = 0; idx < NCELL; idx++) {
+    const m = cMass[idx]; if (m <= 0.05) continue;
+    const i = idx % cols, j = (idx / cols) | 0, c = tempRGB(cTemp[idx]), wm = Math.min(0.45, cWind[idx] / 45);
+    ctx.fillStyle = `rgba(${(c[0]*(1-wm)+255*wm)|0},${(c[1]*(1-wm)+255*wm)|0},${(c[2]*(1-wm)+255*wm)|0},${Math.min(0.6, m / CAP * 0.6)})`;
+    ctx.fillRect(i * CW, j * CW, CW, CW);
+  }
+  if (showBraid) { ctx.lineWidth = 1;
+    for (let k = 0; k < np; k++) { const q = ppart[k]; if (q < k) continue; const tw = Math.min(1, Math.abs(pwind[k]) / TAU);
+      ctx.strokeStyle = `rgba(${180+tw*75|0},${160-tw*60|0},255,${0.08+tw*0.3})`; ctx.beginPath(); ctx.moveTo(px[k], py[k]); ctx.lineTo(px[q], py[q]); ctx.stroke(); }
+  }
+  for (let k = 0; k < np; k++) {
+    const a = aff(pT[k]), c = tempRGB(pT[k]), br = 0.62 + coh[k] * 0.38;
+    ctx.fillStyle = `rgba(${c[0]*br|0},${c[1]*br|0},${c[2]*br|0},${0.5 + a * 0.5})`;                   // gas (low aff) is wispy/translucent
+    ctx.beginPath(); ctx.arc(px[k], py[k], a > 0.7 ? 3 : 2.5, 0, TAU); ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(159,208,255,0.3)'; ctx.setLineDash([5, 6]); ctx.beginPath(); ctx.arc(mx, my, R_IN, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+
+  if ((frame++ & 15) === 0) { let cc = 0, cs = 0; for (let k = 0; k < np; k++) { cc += Math.cos(pth[k]); cs += Math.sin(pth[k]); }
+    statEl.textContent = `parts: ${np}   coherence: ${(np ? Math.hypot(cc, cs) / np : 0).toFixed(2)}   brush: ${brush < 0.1 ? 'freeze' : brush < 0.6 ? 'water' : 'heat'}`; }
+  requestAnimationFrame(loop);
+}
+const statEl = document.getElementById('stat');
+loop();
+</script>
+</body>
+</html>

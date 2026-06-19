@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Morpho Lab — resonance ⇄ bonds</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05070c; cursor: crosshair; }
+  canvas { display: block; }
+  #hud { position: fixed; top: 8px; left: 8px; z-index: 5;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.62);
+    padding: 8px 11px; border-radius: 7px; line-height: 1.7; }
+  #hud b { color: #9fd0ff; } .row { display:flex; align-items:center; gap:8px; }
+  .row label { width: 120px; color:#9fb0c8; } .row input { width: 150px; } .row span { width: 42px; color:#ffd27f; text-align:right; }
+  #hud .note { color:#7f93ac; margin-top:4px; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud">
+  <div><b>Morpho Lab</b> — the bonds carry the wave; the wave reshapes the bonds</div>
+  <div class="row"><label>frequency</label><input id="freq" type="range" min="0.004" max="0.09" step="0.001" value="0.028"><span id="freqv"></span></div>
+  <div class="row"><label>wave speed</label><input id="c2" type="range" min="0.05" max="0.32" step="0.005" value="0.2"><span id="c2v"></span></div>
+  <div class="row"><label>damping</label><input id="damp" type="range" min="0.001" max="0.06" step="0.001" value="0.005"><span id="dampv"></span></div>
+  <div class="row"><label>fracture strain</label><input id="frac" type="range" min="0.03" max="1.2" step="0.01" value="0.35"><span id="fracv"></span></div>
+  <div class="row"><label>re-knit (in-phase)</label><input id="nuc" type="range" min="0.005" max="0.4" step="0.005" value="0.08"><span id="nucv"></span></div>
+  <div class="note">click = strike it · <b>R</b> reset bonds · cracks (cyan) open at antinodes, heal where calm/in-phase</div>
+</div>
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let W = cv.width = innerWidth, H = cv.height = innerHeight;
+const clamp = (v,a,b)=> v<a?a:v>b?b:v;
+const $ = id => document.getElementById(id);
+
+// ---- the membrane: a grid of particles whose out-of-plane displacement u is the vibration ----
+const GX = 64, GY = 42, NC = GX * GY, ID = (x,y)=> y*GX+x;
+const u = new Float32Array(NC), uv = new Float32Array(NC), amp = new Float32Array(NC);
+// bonds: horizontal (x,y)-(x+1,y) and vertical (x,y)-(x,y+1). alive + heal timer.
+const NH = (GX-1)*GY, NV = GX*(GY-1);
+const hAlive = new Uint8Array(NH).fill(1), vAlive = new Uint8Array(NV).fill(1);
+const hHeal = new Float32Array(NH), vHeal = new Float32Array(NV);
+const hStrain = new Float32Array(NH), vStrain = new Float32Array(NV);   // sustained (time-averaged) strain per bond
+const HID = (x,y)=> y*(GX-1)+x, VID = (x,y)=> y*GX+x;
+function resetBonds(){ hAlive.fill(1); vAlive.fill(1); hHeal.fill(0); vHeal.fill(0); hStrain.fill(0); vStrain.fill(0); }
+const pinned = (x,y)=> x===0||y===0||x===GX-1||y===GY-1;     // pinned rim => clean standing modes
+const DRX = GX>>1, DRY = GY>>1;                               // central driver (a point source)
+
+let drivePhase = 0, HEAL_FRAMES = 35;
+function step(f, C2, DAMP, FRAC, NUC) {
+  // drive the centre
+  drivePhase += 2 * Math.PI * f;
+  // wave update on the LIVE bond graph (cut a bond => the wave can't cross it = a crack)
+  for (let y = 1; y < GY-1; y++) for (let x = 1; x < GX-1; x++) {
+    const c = ID(x,y);
+    let s = 0;
+    if (hAlive[HID(x-1,y)]) s += u[c-1] - u[c];
+    if (hAlive[HID(x,y)])   s += u[c+1] - u[c];
+    if (vAlive[VID(x,y-1)]) s += u[c-GX] - u[c];
+    if (vAlive[VID(x,y)])   s += u[c+GX] - u[c];
+    uv[c] += C2 * s - DAMP * uv[c];
+  }
+  for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++) uv[ID(DRX+dx,DRY+dy)] += 0.25 * Math.sin(drivePhase);   // soft 3x3 force driver pumps energy in
+  for (let i = 0; i < NC; i++) { const x=i%GX, y=(i/GX)|0; if (pinned(x,y)) { u[i]=0; uv[i]=0; } else u[i] += uv[i]; }
+  for (let i = 0; i < NC; i++) amp[i] = Math.max(amp[i]*0.96, Math.abs(u[i]));   // running amplitude (for "is it really vibrating")
+  // bond rewiring: fracture where the wave strains a link; re-knit where the two ends stay in phase
+  for (let y = 0; y < GY; y++) for (let x = 0; x < GX-1; x++) { const e = HID(x,y), a = ID(x,y), b = ID(x+1,y);
+    const s = Math.abs(u[a]-u[b]); hStrain[e] = hStrain[e]*0.93 + s*0.07;     // sustained antinode strain, not transient peaks (stops the runaway)
+    if (hAlive[e]) { if (hStrain[e] > FRAC) { hAlive[e]=0; hHeal[e]=0; } }
+    else { if (s < NUC) { hHeal[e]++; if (hHeal[e] > HEAL_FRAMES) { hAlive[e]=1; hStrain[e]=0; } } else hHeal[e]=0; }
+  }
+  for (let y = 0; y < GY-1; y++) for (let x = 0; x < GX; x++) { const e = VID(x,y), a = ID(x,y), b = ID(x,y+1);
+    const s = Math.abs(u[a]-u[b]); vStrain[e] = vStrain[e]*0.93 + s*0.07;
+    if (vAlive[e]) { if (vStrain[e] > FRAC) { vAlive[e]=0; vHeal[e]=0; } }
+    else { if (s < NUC) { vHeal[e]++; if (vHeal[e] > HEAL_FRAMES) { vAlive[e]=1; vStrain[e]=0; } } else vHeal[e]=0; }
+  }
+}
+
+// ---- view ----
+let cs, ox, oy;
+function layout(){ cs = Math.min((W-20)/GX, (H-20)/GY); ox = (W - cs*GX)/2; oy = (H - cs*GY)/2; }
+layout();
+function cellColor(v){ v = clamp(v, -1, 1);
+  if (v >= 0) { const t = v; return `rgb(${18+t*235|0},${22+t*55|0},${28+t*16|0})`; }     // node->black, antinode+ -> red/orange
+  const t = -v; return `rgb(${24+t*22|0},${34+t*86|0},${30+t*220|0})`;                    // antinode- -> blue
+}
+function render(){
+  ctx.fillStyle = '#05070c'; ctx.fillRect(0,0,W,H);
+  for (let y=0;y<GY;y++) for (let x=0;x<GX;x++){ ctx.fillStyle = cellColor(u[ID(x,y)]*3.0); ctx.fillRect(ox+x*cs, oy+y*cs, cs+1, cs+1); }
+  // cracks (dead bonds) glow cyan = the emergent fracture structure
+  ctx.strokeStyle = 'rgba(90,230,255,0.85)'; ctx.lineWidth = Math.max(1, cs*0.16); ctx.beginPath();
+  for (let y=0;y<GY;y++) for (let x=0;x<GX-1;x++) if (!hAlive[HID(x,y)]) { const px=ox+(x+1)*cs, py=oy+y*cs; ctx.moveTo(px, py-cs*0.5); ctx.lineTo(px, py+cs*0.5); }
+  for (let y=0;y<GY-1;y++) for (let x=0;x<GX;x++) if (!vAlive[VID(x,y)]) { const px=ox+x*cs, py=oy+(y+1)*cs; ctx.moveTo(px-cs*0.5, py); ctx.lineTo(px+cs*0.5, py); }
+  ctx.stroke();
+}
+
+cv.addEventListener('mousedown', e => { const x=clamp(((e.clientX-ox)/cs)|0,1,GX-2), y=clamp(((e.clientY-oy)/cs)|0,1,GY-2);
+  for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){ const c=ID(clamp(x+dx,0,GX-1),clamp(y+dy,0,GY-1)); u[c]+= (1-Math.hypot(dx,dy)/3)*2.5; } });
+addEventListener('keydown', e => { if (e.key==='r'||e.key==='R') resetBonds(); });
+addEventListener('resize', ()=>{ W=cv.width=innerWidth; H=cv.height=innerHeight; layout(); });
+
+const rd = (id, vid) => { const v = parseFloat($(id).value); $(vid).textContent = v; return v; };
+function loop(){
+  const f = rd('freq','freqv'), C2 = rd('c2','c2v'), DAMP = rd('damp','dampv'), FRAC = rd('frac','fracv'), NUC = rd('nuc','nucv');
+  for (let s=0;s<3;s++) step(f, C2, DAMP, FRAC, NUC);     // a few sim steps per frame
+  render();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Matter World — one substrate, many materials</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070b12; }
+  #hud { position: fixed; top: 8px; left: 8px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.6);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.5; }
+  #hud b { color: #9fd0ff; } .k { color:#ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Matter World</b> — rock, water, and gas, all the same engine at different bindings<br>
+  move mouse = the <b>probe</b> (push it through) · <span class="k">right-drag</span> orbit · <span class="k">wheel</span> zoom · <span class="k">R</span> reset
+</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping; document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x070b12); scene.fog = new THREE.FogExp2(0x070b12, 0.018);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 400); camera.position.set(16, 13, 22);
+const controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0, 4, 0); controls.enableDamping = true;
+controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x2a2e26, 0.8));
+const sun = new THREE.DirectionalLight(0xfff2d8, 1.4); sun.position.set(10, 20, 6); scene.add(sun);
+
+// ===========================================================================
+// WORLD bounds + materials. Each particle has a material; the material is the seed.
+// ===========================================================================
+const HX = 9, HZ = 9, CY = 20, PR = 0.5;
+// material params: gravity sign, bonded?, cohesion, ground/drag friction, thermal jitter
+const MAT = [
+  { col: 0x6f7479, grav: 1.0,  bond: true,  cohere: 0.0,  damp: 0.86, jit: 0.0, vis: true },   // 0 ROCK  (bonded, rigid, heavy)
+  { col: 0x2f7fd0, grav: 1.0,  bond: false, cohere: 0.45, damp: 0.92, jit: 0.04, vis: true },  // 1 WATER (cohesive, flows, pools)
+  { col: 0xeef3f8, grav: -0.45,bond: false, cohere: 0.12, damp: 0.95, jit: 0.5, vis: false },  // 2 GAS/AIR (invisible thin; VISIBLE as cloud where it condenses dense)
+];
+const seeds = [];
+function fill(mat, n, x0,x1, y0,y1, z0,z1, grid) {
+  if (grid) { for (let y=y0; y<=y1; y+=1) for (let z=z0; z<=z1; z+=1) for (let x=x0; x<=x1; x+=1) seeds.push([x+(Math.random()-.5)*0.2, y+(Math.random()-.5)*0.2, z+(Math.random()-.5)*0.2, mat]); }
+  else for (let i=0;i<n;i++) seeds.push([x0+Math.random()*(x1-x0), y0+Math.random()*(y1-y0), z0+Math.random()*(z1-z0), mat]);
+}
+fill(0, 0, -8,8, 0.5,2.5, -8,8, true);                 // rock floor slab (bonded grid)
+fill(1, 900, -8,1, 3,8, -7,7, false);                  // a basin of water on one side
+fill(2, 500, -8,8, 11,16, -7,7, false);                // gas up high
+const N = seeds.length;
+const pos = new Float32Array(N*3), prev = new Float32Array(N*3), vel = new Float32Array(N*3), mat = new Uint8Array(N), im = new Float32Array(N);
+function seedWorld(){
+  for (let i=0;i<N;i++){ const s=seeds[i]; pos[i*3]=s[0]; pos[i*3+1]=s[1]; pos[i*3+2]=s[2]; prev[i*3]=s[0]; prev[i*3+1]=s[1]; prev[i*3+2]=s[2];
+    vel[i*3]=vel[i*3+1]=vel[i*3+2]=0; mat[i]=s[3]; im[i]=1; }
+}
+seedWorld();
+// rock bonds (only rock-rock neighbours)
+let bA, bB, bRest, bAlive, nB=0;
+function buildBonds(){ const A=[],B=[],R=[]; const BR=1.5;
+  for (let a=0;a<N;a++){ if(mat[a]!==0)continue; for(let b=a+1;b<N;b++){ if(mat[b]!==0)continue;
+    const dx=pos[a*3]-pos[b*3], dy=pos[a*3+1]-pos[b*3+1], dz=pos[a*3+2]-pos[b*3+2], d=Math.hypot(dx,dy,dz); if(d<BR){A.push(a);B.push(b);R.push(d);} } }
+  nB=A.length; bA=Int32Array.from(A); bB=Int32Array.from(B); bRest=Float32Array.from(R); bAlive=new Uint8Array(nB).fill(1);
+}
+buildBonds();
+
+// ---- render: ONE field, surfaced once. There is one whole; every material is a
+//   constraint on it. We add every particle into a single marching-cubes field with
+//   its material's COLOUR, so the surface is a single skin coloured by whatever
+//   constraint dominates locally (rigid=grey, cohesive=blue, condensed=white). Thin
+//   air adds nothing (no constraint -> no surface).
+const FMIN = new THREE.Vector3(-HX, 0, -HZ), FSIZE = new THREE.Vector3(2*HX, CY, 2*HZ);
+const fieldMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.0 });
+const field = new MarchingCubes(46, fieldMat, false, true, 220000);   // enableColors = true
+field.position.set(FMIN.x+FSIZE.x/2, FMIN.y+FSIZE.y/2, FMIN.z+FSIZE.z/2);
+field.scale.set(FSIZE.x/2, FSIZE.y/2, FSIZE.z/2); field.isolation = 40; field.frustumCulled = false; scene.add(field);
+// per-ball metaball: small radius so the surface HUGS the particle cloud (not the box walls).
+// radius_norm = sqrt(SB/SUB) -> keep ~0.10 of the box so neighbours merge but it doesn't saturate.
+const SB = 0.16, SUB = 12;
+const _bc = new THREE.Color();
+function updateField(){
+  field.reset();
+  for(let i=0;i<N;i++){ const o=i*3, nx=(pos[o]-FMIN.x)/FSIZE.x, ny=(pos[o+1]-FMIN.y)/FSIZE.y, nz=(pos[o+2]-FMIN.z)/FSIZE.z;
+    if(nx<=0.02||nx>=0.98||ny<=0.02||ny>=0.98||nz<=0.02||nz>=0.98) continue;
+    let str = SB;
+    if(mat[i]===2){ const s=sstep(2,7,dens[i]); if(s<0.05) continue; str = SB*s; }   // only CONDENSED air constrains the field
+    _bc.setHex(MAT[mat[i]].col);
+    field.addBall(nx,ny,nz, str, SUB, _bc);   // the ball carries its material's colour into the shared skin
+  }
+  field.update();
+}
+
+// probe
+const PR_R = 2.2; const probe = new THREE.Mesh(new THREE.IcosahedronGeometry(PR_R, 2), new THREE.MeshStandardMaterial({ color:0x16324a, emissive:0x35e0ff, emissiveIntensity:0.8, roughness:0.3 }));
+scene.add(probe); let pX=0,pY=8,pZ=14, ppX=pX,ppY=pY,ppZ=pZ, pvX=0,pvY=0,pvZ=0;
+const ray=new THREE.Raycaster(), plane=new THREE.Plane(), planePt=new THREE.Vector3(), hit=new THREE.Vector3(), mouse=new THREE.Vector2(0,0);
+addEventListener('mousemove', e=>{ mouse.x=(e.clientX/innerWidth)*2-1; mouse.y=-(e.clientY/innerHeight)*2+1; });
+addEventListener('keydown', e=>{ if(e.key==='r'||e.key==='R'){ seedWorld(); buildBonds(); } });
+addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+// ===========================================================================
+// PBD: predict (per-material gravity + jitter), bonds (rock), collision (all),
+//   cohesion (water), bounds + probe. Same engine, the material sets the rules.
+// ===========================================================================
+const G=20, ITER=4, FRAC=0.4, REST=PR*1.9, REST2=REST*REST, COH2=(PR*3.0)**2, GY=PR, CS=PR*2.2;
+const cell=new Map(); const key=(x,y,z)=>((x/CS)|0)+'_'+((y/CS)|0)+'_'+((z/CS)|0);
+function step(dt){
+  pvX=(pX-ppX)/dt; pvY=(pY-ppY)/dt; pvZ=(pZ-ppZ)/dt; ppX=pX; ppY=pY; ppZ=pZ;
+  for(let i=0;i<N;i++){ const o=i*3, m=MAT[mat[i]];
+    vel[o+1]-=G*m.grav*dt;
+    if(m.jit) { vel[o]+=(Math.random()-.5)*m.jit*dt; vel[o+1]+=(Math.random()-.5)*m.jit*dt; vel[o+2]+=(Math.random()-.5)*m.jit*dt; }
+    prev[o]=pos[o];prev[o+1]=pos[o+1];prev[o+2]=pos[o+2];
+    pos[o]+=vel[o]*dt; pos[o+1]+=vel[o+1]*dt; pos[o+2]+=vel[o+2]*dt;
+  }
+  const rr=PR_R+PR;
+  for(let it=0;it<ITER;it++){
+    // rock bonds (+ fracture)
+    for(let e=0;e<nB;e++){ if(!bAlive[e])continue; const a=bA[e]*3,b=bB[e]*3;
+      let dx=pos[b]-pos[a],dy=pos[b+1]-pos[a+1],dz=pos[b+2]-pos[a+2]; const d=Math.hypot(dx,dy,dz)||1e-5;
+      if((d-bRest[e])/bRest[e]>FRAC){bAlive[e]=0;continue;}
+      const c=(d-bRest[e])/d*0.5; pos[a]+=dx*c;pos[a+1]+=dy*c;pos[a+2]+=dz*c; pos[b]-=dx*c;pos[b+1]-=dy*c;pos[b+2]-=dz*c;
+    }
+    // collision + cohesion (all particles)
+    cell.clear();
+    for(let i=0;i<N;i++){const o=i*3;const kk=key(pos[o],pos[o+1],pos[o+2]);let c=cell.get(kk);if(!c)cell.set(kk,c=[]);c.push(i);}
+    for(let i=0;i<N;i++){ const o=i*3,bx=(pos[o]/CS)|0,by=(pos[o+1]/CS)|0,bz=(pos[o+2]/CS)|0, coh=MAT[mat[i]].cohere;
+      for(let ox=-1;ox<=1;ox++)for(let oy=-1;oy<=1;oy++)for(let oz=-1;oz<=1;oz++){const c=cell.get((bx+ox)+'_'+(by+oy)+'_'+(bz+oz));if(!c)continue;
+        for(let m2=0;m2<c.length;m2++){const j=c[m2];if(j<=i)continue;const p=j*3;
+          let dx=pos[p]-pos[o],dy=pos[p+1]-pos[o+1],dz=pos[p+2]-pos[o+2];const d2=dx*dx+dy*dy+dz*dz;if(d2<1e-6)continue;
+          if(d2<REST2){ const d=Math.sqrt(d2),cc=(REST-d)/d*0.5; dx*=cc;dy*=cc;dz*=cc; pos[o]-=dx;pos[o+1]-=dy;pos[o+2]-=dz; pos[p]+=dx;pos[p+1]+=dy;pos[p+2]+=dz; }
+          else if(coh>0 && mat[j]===mat[i] && d2<COH2){ const d=Math.sqrt(d2),cc=(REST-d)/d*0.5*coh; dx*=cc;dy*=cc;dz*=cc; pos[o]-=dx;pos[o+1]-=dy;pos[o+2]-=dz; pos[p]+=dx;pos[p+1]+=dy;pos[p+2]+=dz; }
+        } }
+    }
+    // bounds + probe
+    for(let i=0;i<N;i++){ const o=i*3;
+      if(pos[o]<-HX)pos[o]=-HX; if(pos[o]>HX)pos[o]=HX; if(pos[o+2]<-HZ)pos[o+2]=-HZ; if(pos[o+2]>HZ)pos[o+2]=HZ;
+      if(pos[o+1]<GY)pos[o+1]=GY; if(pos[o+1]>CY)pos[o+1]=CY;
+      let dx=pos[o]-pX,dy=pos[o+1]-pY,dz=pos[o+2]-pZ,d2=dx*dx+dy*dy+dz*dz;
+      if(d2<rr*rr&&d2>1e-6){ const d=Math.sqrt(d2),push=(rr-d)/d; pos[o]+=dx*push;pos[o+1]+=dy*push;pos[o+2]+=dz*push; }
+    }
+  }
+  for(let i=0;i<N;i++){ const o=i*3,dmp=MAT[mat[i]].damp;
+    vel[o]=(pos[o]-prev[o])/dt*dmp; vel[o+1]=(pos[o+1]-prev[o+1])/dt*dmp; vel[o+2]=(pos[o+2]-prev[o+2])/dt*dmp;
+  }
+}
+
+// ---- gas density -> visibility: gas is invisible (thin air) until it condenses dense enough to be CLOUD ----
+const dens = new Float32Array(N), dcell = new Map(), DCS = 2.0, DR2 = 2.3*2.3;
+function gasDensity(){
+  dcell.clear();
+  for(let i=0;i<N;i++){ if(mat[i]!==2)continue; const o=i*3; const k=((pos[o]/DCS)|0)+'_'+((pos[o+1]/DCS)|0)+'_'+((pos[o+2]/DCS)|0); let c=dcell.get(k); if(!c)dcell.set(k,c=[]); c.push(i); }
+  for(let i=0;i<N;i++){ if(mat[i]!==2){ dens[i]=0; continue; } const o=i*3,bx=(pos[o]/DCS)|0,by=(pos[o+1]/DCS)|0,bz=(pos[o+2]/DCS)|0; let n=0;
+    for(let ox=-1;ox<=1;ox++)for(let oy=-1;oy<=1;oy++)for(let oz=-1;oz<=1;oz++){ const c=dcell.get((bx+ox)+'_'+(by+oy)+'_'+(bz+oz)); if(!c)continue; for(let m2=0;m2<c.length;m2++){ const j=c[m2]; if(j===i)continue; const p=j*3; const d2=(pos[p]-pos[o])**2+(pos[p+1]-pos[o+1])**2+(pos[p+2]-pos[o+2])**2; if(d2<DR2)n++; } }
+    dens[i]=n;
+  }
+}
+const sstep=(a,b,x)=>{const t=Math.max(0,Math.min(1,(x-a)/(b-a)));return t*t*(3-2*t);};
+let acc=0,last=performance.now();
+renderer.setAnimationLoop(()=>{
+  const now=performance.now(), dt=Math.min(0.033,(now-last)/1000); last=now;
+  camera.getWorldDirection(plane.normal); planePt.set(0,5,0); plane.setFromNormalAndCoplanarPoint(plane.normal, planePt);
+  ray.setFromCamera(mouse,camera); if(ray.ray.intersectPlane(plane,hit)){ pX+=(hit.x-pX)*0.3; pY+=(hit.y-pY)*0.3; pZ+=(hit.z-pZ)*0.3; }
+  probe.position.set(pX,pY,pZ);
+  acc+=dt; let s=0; while(acc>=1/120&&s<4){ step(1/120); acc-=1/120; s++; }
+  gasDensity(); updateField();
+  controls.update(); renderer.render(scene,camera);
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Molecule Lab — the cymatics of water</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #06080d; cursor: crosshair; }
+  canvas { display: block; }
+  #hud { position: fixed; top: 8px; left: 8px; z-index: 5;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.62);
+    padding: 8px 11px; border-radius: 7px; line-height: 1.7; }
+  #hud b { color: #9fd0ff; } .k { color:#ffd27f; }
+  .row { display:flex; align-items:center; gap:8px; } .row label { width: 92px; color:#9fb0c8; } .row input { width: 200px; } .row span { width: 50px; color:#ffd27f; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hud">
+  <div><b>Molecule Lab</b> — a water molecule (O + 2H) of particles and bonds, driven to ring</div>
+  <div class="row"><label>frequency</label><input id="freq" type="range" min="0.015" max="0.26" step="0.0005" value="0.015"><span id="freqv"></span></div>
+  <div class="row"><label><input id="sweep" type="checkbox" checked> auto-sweep</label> <span style="color:#7f93ac">— traces the spectrum; 3 peaks = water's 3 modes</span></div>
+  <div class="k" id="mode" style="margin-top:4px"></div>
+</div>
+<script>
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let W = cv.width = innerWidth, H = cv.height = innerHeight;
+const $ = id => document.getElementById(id), TAU = Math.PI*2;
+
+// ---- the molecule: O at the vertex, two H at 104.5°, springs O-H, O-H, and a weak H-H (gives the bend its restoring force) ----
+const mass = [16, 1, 1], invM = mass.map(m=>1/m);
+const A = 52.25 * Math.PI/180, L = 1.0;                 // half-angle, bond length (world units)
+const rest = [[0,0], [-Math.sin(A)*L, Math.cos(A)*L], [Math.sin(A)*L, Math.cos(A)*L]];   // O, H1, H2
+const pos = rest.map(p=>[p[0],p[1]]), vel = [[0,0],[0,0],[0,0]];
+const rHH = 2*Math.sin(A)*L;
+const springs = [ [0,1,0.55,L], [0,2,0.55,L], [1,2,0.10,rHH] ];     // k_OH stiff, k_HH weak (sets the bend below the stretches)
+// a generic asymmetric driving pattern (overlaps all three modes), net force removed so it doesn't translate
+let F = [[0.1,0.05],[0.6,-0.4],[-0.45,0.55]];
+(()=>{   // make the drive purely INTERNAL: remove net force AND net torque, so it only excites vibration (no rigid shove at f~0)
+  let sx=0,sy=0; for(let i=0;i<3;i++){sx+=F[i][0];sy+=F[i][1];} for(let i=0;i<3;i++){F[i][0]-=sx/3;F[i][1]-=sy/3;}
+  let Mt=0,cx=0,cy=0; for(let i=0;i<3;i++){Mt+=mass[i];cx+=mass[i]*rest[i][0];cy+=mass[i]*rest[i][1];} cx/=Mt;cy/=Mt;
+  let tau=0,I=0; for(let i=0;i<3;i++){const rx=rest[i][0]-cx,ry=rest[i][1]-cy; tau+=rx*F[i][1]-ry*F[i][0]; I+=mass[i]*(rx*rx+ry*ry);}
+  const w=tau/I; for(let i=0;i<3;i++){const rx=rest[i][0]-cx,ry=rest[i][1]-cy; F[i][0]+=mass[i]*w*ry; F[i][1]-=mass[i]*w*rx;}
+})();
+let phase = 0, DAMP = 0.992;
+const SUB = 6, DT = 1/SUB;
+function physics(f, drive) {
+  for (let s=0;s<SUB;s++) {
+    phase += TAU * f * DT;
+    const fx=[0,0,0], fy=[0,0,0];
+    for (const [i,j,k,r] of springs) { const dx=pos[j][0]-pos[i][0], dy=pos[j][1]-pos[i][1], d=Math.hypot(dx,dy)||1e-6, fmag=k*(d-r), ux=dx/d, uy=dy/d;
+      fx[i]+=fmag*ux; fy[i]+=fmag*uy; fx[j]-=fmag*ux; fy[j]-=fmag*uy; }
+    const dr = drive * Math.sin(phase);
+    for (let i=0;i<3;i++){ fx[i]+=F[i][0]*dr; fy[i]+=F[i][1]*dr;
+      vel[i][0]=(vel[i][0]+fx[i]*invM[i]*DT)*DAMP; vel[i][1]=(vel[i][1]+fy[i]*invM[i]*DT)*DAMP;
+      pos[i][0]+=vel[i][0]*DT; pos[i][1]+=vel[i][1]*DT; }
+  }
+}
+function amplitude(){ let a=0; for(let i=0;i<3;i++){ a += Math.hypot(pos[i][0]-rest[i][0], pos[i][1]-rest[i][1]) * mass[i]; } return a; }
+
+// ---- spectrum buffer ----
+const NB = 260, spec = new Float32Array(NB), FMAX = 0.26;
+let sweepF = 0.015, settle = 0, ampAcc = 0, ampN = 0;
+function recordSpectrum(f){ const bin = Math.min(NB-1, Math.max(0, (f/FMAX*NB)|0)); spec[bin] = Math.max(spec[bin]*0.6, ampAvg); }
+
+let ampAvg = 0;
+function loop(){
+  let f = parseFloat($('freq').value);
+  if ($('sweep').checked) { sweepF += 0.00018; if (sweepF > FMAX) { sweepF = 0.015; } f = sweepF; $('freq').value = f; }
+  $('freqv').textContent = f.toFixed(3);
+  physics(f, 0.9);
+  ampAvg = ampAvg*0.9 + amplitude()*0.1;
+  if ($('sweep').checked) recordSpectrum(f);
+
+  // ---- render ----
+  ctx.fillStyle = '#06080d'; ctx.fillRect(0,0,W,H);
+  const cx = W*0.5, cy = H*0.40, SC = Math.min(W,H)*0.16;
+  const sp = i => [cx + pos[i][0]*SC, cy + pos[i][1]*SC];
+  // bonds
+  ctx.strokeStyle = 'rgba(150,170,200,0.6)'; ctx.lineWidth = 5;
+  for (const [i,j,k] of springs) { if (k < 0.2) continue; const a=sp(i), b=sp(j); ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke(); }
+  // atoms
+  const atom = (i, r, col) => { const p = sp(i); ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p[0],p[1],r,0,TAU); ctx.fill(); };
+  atom(1, SC*0.22, '#e6edf4'); atom(2, SC*0.22, '#e6edf4'); atom(0, SC*0.40, '#e0563a');
+  ctx.fillStyle = '#9fb0c8'; ctx.font = '13px ui-monospace'; const o=sp(0); ctx.fillText('O', o[0]-5, o[1]+5);
+  const h1=sp(1), h2=sp(2); ctx.fillText('H', h1[0]-5, h1[1]+5); ctx.fillText('H', h2[0]-5, h2[1]+5);
+
+  // ---- spectrum strip ----
+  const sx0 = W*0.12, sx1 = W*0.88, sy = H*0.86, sh = 150;
+  ctx.strokeStyle = 'rgba(120,150,190,0.4)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(sx0, sy); ctx.lineTo(sx1, sy); ctx.stroke();
+  let mx = 1e-6; for (let i=0;i<NB;i++) mx = Math.max(mx, spec[i]);
+  ctx.strokeStyle = '#5ae6ff'; ctx.lineWidth = 2; ctx.beginPath();
+  for (let i=0;i<NB;i++){ const x = sx0 + (i/(NB-1))*(sx1-sx0), y = sy - (spec[i]/mx)*sh; if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); }
+  ctx.stroke();
+  // current frequency marker
+  const fx = sx0 + (f/FMAX)*(sx1-sx0); ctx.strokeStyle = 'rgba(255,210,127,0.8)'; ctx.beginPath(); ctx.moveTo(fx, sy-sh); ctx.lineTo(fx, sy+8); ctx.stroke();
+  ctx.fillStyle = '#7f93ac'; ctx.font = '12px ui-monospace';
+  ctx.fillText('frequency  →   (low: bend · mid: symmetric stretch · high: asymmetric stretch)', sx0, sy+26);
+  ctx.fillText('amplitude', sx0-4, sy-sh-8);
+
+  requestAnimationFrame(loop);
+}
+addEventListener('resize', ()=>{ W=cv.width=innerWidth; H=cv.height=innerHeight; });
+loop();
+</script>
+</body>
+</html>
