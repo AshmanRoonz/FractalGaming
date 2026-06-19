@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Engine — Phase 1: one world, all phases couple (WebGPU SPH)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05070d; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.5);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.55; max-width: 46ch; }
+  #hud b { color: #9fd0ff; } .k { color: #ffd27f; } .p { color: #7fffc4; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Engine · Phase 1</b> — solid · liquid · gas · plasma in ONE coupled world<br>
+  <span class="k">drag</span> orbit · <span class="k">wheel</span> zoom · hold <span class="k">SPACE</span> + move = stir&nbsp;+&nbsp;heat · <span class="k">R</span> reset<br>
+  <span class="p">everything exchanges pressure, heat &amp; momentum through one grid</span> · <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { Fn, instancedArray, instanceIndex, vertexIndex, uniform, If, Loop,
+         int, uint, float, vec2, vec3, color, mix, clamp, smoothstep, cross,
+         hash, mx_noise_float, atomicAdd, atomicStore, atomicLoad, uv } from 'three/tsl';
+
+// ===========================================================================
+//  PHASE 1 of the FractalGaming particle engine (successor to engine.html).
+//  Every particle — whatever its phase — lives in ONE uniform spatial grid and
+//  interacts with every neighbour through the same passes: SPH pressure (so
+//  phases collide & displace each other and layer by density), viscosity,
+//  same-phase cohesion (surface tension / a soft solid), heat diffusion across
+//  ALL phases, and temperature buoyancy. A draggable pusher stirs wakes &
+//  vortices into everything at once. Solids here are "soft" (cohesive SPH);
+//  true rigid/elastic solids want PBD bonds (see matter_3d.html) or MLS-MPM —
+//  that's the documented next phase.
+// ===========================================================================
+
+// ---- world + grid ----------------------------------------------------------
+const BOX = 32, HEIGHT = 64;                 // domain: x,z in [-BOX,BOX], y in [0,HEIGHT]
+const G = 22;                                 // grid cells per axis
+const H = (2 * BOX) / G;                       // smoothing radius == cell size (~2.91)
+const INVH = 1 / H;
+const H2 = H * H;
+const NUMCELLS = G * G * G;                     // 10648
+const CAP = 64;                                 // max particles stored per cell
+const N = 36000;                                // particle count (balanced default)
+
+// SPH kernel constants (Müller 2003), precomputed for this H
+const K6     = 315 / (64 * Math.PI * Math.pow(H, 9));   // poly6
+const KSPIKY = 45  / (Math.PI * Math.pow(H, 6));        // spiky gradient
+const KVISC  = 45  / (Math.PI * Math.pow(H, 6));        // viscosity laplacian
+
+// phase ids: 0 solid · 1 liquid · 2 gas · 3 plasma
+
+// ---- renderer / scene ------------------------------------------------------
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x05070d);
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 5000);
+camera.position.set(78, 60, 104);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 24, 0); controls.enableDamping = true;
+
+// floor + cage
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(2 * BOX, 2 * BOX),
+  new THREE.MeshBasicMaterial({ color: 0x0c1119 }));
+ground.rotation.x = -Math.PI / 2; scene.add(ground);
+const cage = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(2 * BOX, HEIGHT, 2 * BOX)),
+  new THREE.LineBasicMaterial({ color: 0x1b2738 }));
+cage.position.y = HEIGHT / 2; scene.add(cage);
+
+// the pusher (stand-in for a ship / hand — stirs every phase)
+const pusherMesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 2),
+  new THREE.MeshBasicMaterial({ color: 0x35e0ff, wireframe: true }));
+scene.add(pusherMesh);
+
+// ---- GPU state buffers ------------------------------------------------------
+const positions  = instancedArray(N, 'vec3');
+const velocities = instancedArray(N, 'vec3');
+const dens       = instancedArray(N, 'float');
+const temp       = instancedArray(N, 'float');
+const rest       = instancedArray(N, 'float');   // per-particle rest density (from phase)
+const phase      = instancedArray(N, 'uint');
+const cellCount  = instancedArray(NUMCELLS, 'uint').toAtomic();  // particles per cell
+const cellTable  = instancedArray(NUMCELLS * CAP, 'uint');       // particle ids per cell
+
+// ---- uniforms (all live-tunable) -------------------------------------------
+const uDt        = uniform(1 / 120);
+const uTime      = uniform(0);
+const uGravity   = uniform(30);
+const uStiff     = uniform(120);   // pressure stiffness k
+const uVisc      = uniform(8);
+const uCohesion  = uniform(6);
+const uBuoy      = uniform(14);    // temperature buoyancy
+const uHeat      = uniform(6);     // heat diffusion rate
+const uAmbient   = uniform(0);
+const uCooling   = uniform(0.4);
+const uFloorHeat = uniform(0);     // hot plate at floor centre (convection)
+const uTurb      = uniform(2.0);   // ambient curl-noise for gas/plasma
+const uDamping   = uniform(0.985);
+const uMaxSpeed  = uniform(60);
+const uSize      = uniform(2.4);
+
+const uPusherPos    = uniform(vec3(0, 24, 0));
+const uPusherVel    = uniform(vec3(0, 0, 0));
+const uPusherRadius = uniform(8);
+const uPusherPush   = uniform(26);
+const uPusherSwirl  = uniform(38);
+const uPusherDrag   = uniform(1.0);
+const uPusherActive = uniform(1);
+const uBrushHeat    = uniform(0);
+
+// ---------------------------------------------------------------------------
+//  INIT: lay the world out in phases so coupling shows immediately —
+//  a liquid pool, solid chunks dropped above it, gas filling the top, and a
+//  hot plasma blob low-centre that rises and heats whatever it touches.
+// ---------------------------------------------------------------------------
+const computeInit = Fn(() => {
+  const hx = hash(instanceIndex);
+  const hy = hash(instanceIndex.add(1));
+  const hz = hash(instanceIndex.add(2));
+  const frac = float(instanceIndex).div(N);
+
+  const ph   = uint(1).toVar();                                   // liquid (default)
+  const rho0 = float(0.60).toVar();
+  const tmp  = float(0.0).toVar();
+  const pos  = vec3(hx.mul(60).sub(30), hy.mul(22).add(1.0), hz.mul(60).sub(30)).toVar();
+
+  If(frac.greaterThan(0.50), () => {                              // solid chunks up high
+    ph.assign(uint(0)); rho0.assign(0.70); tmp.assign(0.0);
+    pos.assign(vec3(hx.mul(22).sub(11), hy.mul(12).add(34.0), hz.mul(22).sub(11)));
+  });
+  If(frac.greaterThan(0.62), () => {                              // gas fills the top
+    ph.assign(uint(2)); rho0.assign(0.15); tmp.assign(0.30);
+    pos.assign(vec3(hx.mul(60).sub(30), hy.mul(34).add(26.0), hz.mul(60).sub(30)));
+  });
+  If(frac.greaterThan(0.90), () => {                             // plasma blob, hot, low-centre
+    ph.assign(uint(3)); rho0.assign(0.12); tmp.assign(1.0);
+    pos.assign(vec3(hx.mul(10).sub(5), hy.mul(8).add(2.0), hz.mul(10).sub(5)));
+  });
+
+  positions.element(instanceIndex).assign(pos);
+  velocities.element(instanceIndex).assign(vec3(0, 0, 0));
+  dens.element(instanceIndex).assign(float(0));
+  temp.element(instanceIndex).assign(tmp);
+  rest.element(instanceIndex).assign(rho0);
+  phase.element(instanceIndex).assign(ph);
+})().compute(N);
+await renderer.computeAsync(computeInit);
+
+// ---- grid helpers ----------------------------------------------------------
+// search-centre cell (clamped to [1,G-2] so the 3x3x3 stencil never leaves the grid)
+function searchCell(p) {
+  const cx = int(p.x.add(BOX).mul(INVH)).max(int(1)).min(int(G - 2));
+  const cy = int(p.y.mul(INVH)).max(int(1)).min(int(G - 2));
+  const cz = int(p.z.add(BOX).mul(INVH)).max(int(1)).min(int(G - 2));
+  return [cx, cy, cz];
+}
+// iterate every particle j in the 27 neighbour cells, calling body(j)
+function forEachNeighbour(cx, cy, cz, body) {
+  Loop({ start: int(0), end: int(3), type: 'int', condition: '<', name: 'oz' }, ({ oz }) => {
+    const nz = cz.add(oz).sub(int(1));
+    Loop({ start: int(0), end: int(3), type: 'int', condition: '<', name: 'oy' }, ({ oy }) => {
+      const ny = cy.add(oy).sub(int(1));
+      Loop({ start: int(0), end: int(3), type: 'int', condition: '<', name: 'ox' }, ({ ox }) => {
+        const nx = cx.add(ox).sub(int(1));
+        const cu = uint(nz.mul(int(G * G)).add(ny.mul(int(G))).add(nx));
+        const cnt = atomicLoad(cellCount.element(cu)).min(uint(CAP));
+        const base = cu.mul(uint(CAP));
+        Loop({ start: uint(0), end: uint(CAP), type: 'uint', condition: '<', name: 's' }, ({ s }) => {
+          If(s.lessThan(cnt), () => { body(cellTable.element(base.add(s))); });
+        });
+      });
+    });
+  });
+}
+
+// ---- PASS 1: clear grid counts --------------------------------------------
+const clearGrid = Fn(() => {
+  atomicStore(cellCount.element(instanceIndex), uint(0));
+})().compute(NUMCELLS);
+
+// ---- PASS 2: bin each particle into its cell ------------------------------
+const buildGrid = Fn(() => {
+  const p = positions.element(instanceIndex);
+  const cx = int(p.x.add(BOX).mul(INVH)).max(int(0)).min(int(G - 1));
+  const cy = int(p.y.mul(INVH)).max(int(0)).min(int(G - 1));
+  const cz = int(p.z.add(BOX).mul(INVH)).max(int(0)).min(int(G - 1));
+  const cu = uint(cz.mul(int(G * G)).add(cy.mul(int(G))).add(cx));
+  const slot = uint(0).toVar();
+  atomicAdd(cellCount.element(cu), uint(1), slot);
+  If(slot.lessThan(uint(CAP)), () => {
+    cellTable.element(cu.mul(uint(CAP)).add(slot)).assign(instanceIndex);
+  });
+})().compute(N);
+
+// ---- PASS 3: SPH density (poly6) ------------------------------------------
+const computeDensity = Fn(() => {
+  const pi = positions.element(instanceIndex);
+  const [cx, cy, cz] = searchCell(pi);
+  const d = float(0).toVar();
+  forEachNeighbour(cx, cy, cz, (j) => {
+    const rij = pi.sub(positions.element(j));
+    const r2 = rij.dot(rij);
+    If(r2.lessThan(H2), () => {
+      const hr = float(H2).sub(r2);
+      d.addAssign(float(K6).mul(hr).mul(hr).mul(hr));
+    });
+  });
+  dens.element(instanceIndex).assign(d.max(1e-4));
+})().compute(N);
+
+// ---- PASS 4: forces — pressure, viscosity, cohesion, heat, buoyancy, push -
+const computeForces = Fn(() => {
+  const pi = positions.element(instanceIndex);
+  const vi = velocities.element(instanceIndex);
+  const di = dens.element(instanceIndex).max(1e-4);
+  const ti = temp.element(instanceIndex);
+  const ri = rest.element(instanceIndex);
+  const ph = phase.element(instanceIndex);
+  const piP = uStiff.mul(di.sub(ri).max(0.0));        // own pressure (repulsive only)
+
+  // per-phase behaviour (liquid = defaults)
+  const gravMul = float(1.0).toVar();
+  const buoyMul = float(0.2).toVar();
+  const turbMul = float(0.0).toVar();
+  const viscMul = float(1.0).toVar();
+  const cohMul  = float(1.0).toVar();
+  If(ph.equal(uint(0)), () => { viscMul.assign(2.0); cohMul.assign(2.5); buoyMul.assign(0.1); });
+  If(ph.equal(uint(2)), () => { gravMul.assign(0.15); buoyMul.assign(1.0); turbMul.assign(1.0); viscMul.assign(0.4); cohMul.assign(0.0); });
+  If(ph.equal(uint(3)), () => { gravMul.assign(0.10); buoyMul.assign(1.6); turbMul.assign(1.2); viscMul.assign(0.3); cohMul.assign(0.0); });
+
+  const fPress = vec3(0, 0, 0).toVar();
+  const fVisc  = vec3(0, 0, 0).toVar();
+  const fCoh   = vec3(0, 0, 0).toVar();
+  const dTemp  = float(0).toVar();
+
+  const [cx, cy, cz] = searchCell(pi);
+  forEachNeighbour(cx, cy, cz, (j) => {
+    const pj = positions.element(j);
+    const rij = pi.sub(pj);
+    const r2 = rij.dot(rij);
+    If(r2.lessThan(H2), () => {
+      If(r2.greaterThan(1e-6), () => {
+        const r = r2.sqrt();
+        const dir = rij.div(r);                          // unit vector i <- j
+        const dj = dens.element(j).max(1e-4);
+        const pjP = uStiff.mul(dj.sub(rest.element(j)).max(0.0));
+        const hr = float(H).sub(r);
+        // pressure (spiky gradient) — pushes phases apart, makes them collide/layer
+        const gW = float(KSPIKY).mul(hr).mul(hr);
+        fPress.addAssign(dir.mul(piP.add(pjP)).mul(0.5).mul(gW).div(dj));
+        // viscosity (laplacian) — smooths relative motion / drag
+        fVisc.addAssign(velocities.element(j).sub(vi).mul(float(KVISC).mul(hr)).div(dj));
+        // cohesion (same phase only) — surface tension / soft-solid binding
+        If(phase.element(j).equal(ph), () => {
+          const w6 = float(K6).mul(float(H2).sub(r2)).mul(float(H2).sub(r2)).mul(float(H2).sub(r2));
+          fCoh.addAssign(dir.mul(-1.0).mul(uCohesion.mul(cohMul)).mul(w6));
+        });
+        // heat diffuses across EVERY phase — plasma warms gas warms liquid...
+        dTemp.addAssign(temp.element(j).sub(ti).mul(hr));
+      });
+    });
+  });
+
+  const invDi = float(1).div(di);
+  const acc = fPress.add(fVisc.mul(uVisc.mul(viscMul))).add(fCoh).mul(invDi).toVar();
+
+  // gravity + temperature buoyancy (vertical)
+  acc.y.addAssign(uGravity.mul(-1.0).mul(gravMul));
+  acc.y.addAssign(uBuoy.mul(ti.sub(uAmbient)).mul(buoyMul));
+
+  // ambient curl-noise — keeps gas/plasma alive & wispy (chill-style liveliness)
+  const np = pi.mul(0.05).add(vec3(uTime.mul(0.2), uTime.mul(0.13), uTime.mul(0.17)));
+  const tno = vec3(mx_noise_float(np),
+                   mx_noise_float(np.add(vec3(11.2, 3.4, 7.1))),
+                   mx_noise_float(np.add(vec3(2.7, 9.5, 4.3))));
+  acc.addAssign(tno.mul(uTurb.mul(turbMul)));
+
+  // pusher: swirl + push + drag on EVERYTHING nearby -> wakes & vortices
+  const toP = pi.sub(uPusherPos);
+  const dP = toP.length().max(1e-3);
+  const dirP = toP.div(dP);
+  const inR = smoothstep(uPusherRadius, 0.0, dP);
+  acc.addAssign(cross(vec3(0, 1, 0), dirP).mul(uPusherSwirl)
+                .add(dirP.mul(uPusherPush))
+                .add(uPusherVel.mul(uPusherDrag))
+                .mul(inR).mul(uPusherActive));
+
+  // integrate velocity (clamped) — Jacobi style, single buffer
+  const vNew = vi.add(acc.mul(uDt)).mul(uDamping);
+  const sp = vNew.length().max(1e-3);
+  velocities.element(instanceIndex).assign(vNew.mul(uMaxSpeed.div(sp).min(1.0)));
+
+  // temperature update (diffusion + stir-brush heat)
+  temp.element(instanceIndex).assign(
+    ti.add(dTemp.mul(uHeat).add(inR.mul(uPusherActive).mul(uBrushHeat)).mul(uDt)));
+})().compute(N);
+
+// ---- PASS 5: integrate position + boundaries + floor heat / cooling -------
+const computeIntegrate = Fn(() => {
+  const pos = positions.element(instanceIndex);
+  const vel = velocities.element(instanceIndex);
+  pos.addAssign(vel.mul(uDt));
+
+  If(pos.y.lessThan(0.0), () => { pos.y.assign(0.0); vel.y.assign(vel.y.abs().mul(0.30)); vel.x.mulAssign(0.9); vel.z.mulAssign(0.9); });
+  If(pos.y.greaterThan(HEIGHT), () => { pos.y.assign(HEIGHT); vel.y.assign(vel.y.abs().mul(-0.30)); });
+  If(pos.x.lessThan(-BOX), () => { pos.x.assign(-BOX); vel.x.assign(vel.x.abs().mul(0.40)); });
+  If(pos.x.greaterThan(BOX), () => { pos.x.assign(BOX); vel.x.assign(vel.x.abs().mul(-0.40)); });
+  If(pos.z.lessThan(-BOX), () => { pos.z.assign(-BOX); vel.z.assign(vel.z.abs().mul(0.40)); });
+  If(pos.z.greaterThan(BOX), () => { pos.z.assign(BOX); vel.z.assign(vel.z.abs().mul(-0.40)); });
+  // keep strictly inside so grid indexing is always valid
+  pos.assign(clamp(pos, vec3(-BOX + 0.02, 0.02, -BOX + 0.02), vec3(BOX - 0.02, HEIGHT - 0.02, BOX - 0.02)));
+
+  // hot plate at the floor centre -> rising plumes (convection), + relax to ambient
+  const t = temp.element(instanceIndex);
+  const onFloor = smoothstep(8.0, 0.0, pos.y).mul(smoothstep(14.0, 0.0, pos.xz.length()));
+  t.addAssign(onFloor.mul(uFloorHeat).mul(uDt));
+  t.addAssign(uAmbient.sub(t).mul(uCooling).mul(uDt));
+})().compute(N);
+
+// ---------------------------------------------------------------------------
+//  RENDER: soft camera-facing sprites. Colour & size by phase / density /
+//  temperature. Gas & plasma read soft and volumetric; liquid & solid denser.
+// ---------------------------------------------------------------------------
+const pPos   = positions.element(instanceIndex);
+const pPhase = float(phase.element(instanceIndex));
+const pTemp  = temp.element(instanceIndex);
+const pDens  = dens.element(instanceIndex);
+
+// one-hot weights from the exact integer phase id (no equality nodes needed)
+const wSolid  = float(1).sub(pPhase.sub(0).abs().min(1));
+const wLiquid = float(1).sub(pPhase.sub(1).abs().min(1));
+const wGas    = float(1).sub(pPhase.sub(2).abs().min(1));
+const wPlasma = float(1).sub(pPhase.sub(3).abs().min(1));
+
+const cSolid  = color(0x8a8f96);
+const cLiquid = mix(color(0x1c4f86), color(0x46b0ff), clamp(pDens.mul(1.4), 0, 1));
+const cGas    = color(0xaebfd0);
+const cPlasma = mix(color(0xff5a1f), color(0x7fd4ff), clamp(pTemp.sub(0.8).mul(1.1), 0, 1)).add(color(0x301000));
+
+const baseCol = cSolid.mul(wSolid).add(cLiquid.mul(wLiquid)).add(cGas.mul(wGas)).add(cPlasma.mul(wPlasma));
+const glow = float(1).add(pTemp.mul(wPlasma).mul(2.2)).add(pTemp.mul(wGas).mul(0.4));
+
+const sizeMul = float(0.8).mul(wSolid).add(float(1.0).mul(wLiquid)).add(float(2.2).mul(wGas)).add(float(1.8).mul(wPlasma));
+const opaMul  = float(1.0).mul(wSolid).add(float(0.92).mul(wLiquid)).add(float(0.18).mul(wGas)).add(float(0.5).mul(wPlasma));
+const disc    = smoothstep(0.5, 0.04, uv().sub(vec2(0.5, 0.5)).length());
+
+const mat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending });
+mat.positionNode = pPos;
+mat.scaleNode = uSize.mul(sizeMul).mul(clamp(pDens.mul(1.6), 0.5, 1.4).add(0.3));
+mat.colorNode = baseCol.mul(glow);
+mat.opacityNode = opaMul.mul(disc);
+const cloud = new THREE.Sprite(mat); cloud.count = N; cloud.frustumCulled = false; scene.add(cloud);
+
+// ---- GUI -------------------------------------------------------------------
+const P = {
+  gravity: 30, stiffness: 120, viscosity: 8, cohesion: 6, buoyancy: 14,
+  heat: 6, cooling: 0.4, floorHeat: 0, turbulence: 2.0, damping: 0.985,
+  size: 2.4, substeps: 2,
+  pushRadius: 8, push: 26, swirl: 38, brushHeat: 3.0,
+};
+const gui = new GUI({ title: 'engine · phase 1' });
+const f1 = gui.addFolder('forces');
+f1.add(P, 'gravity', 0, 120, 1).onChange(v => uGravity.value = v);
+f1.add(P, 'stiffness', 10, 500, 5).onChange(v => uStiff.value = v).name('pressure k');
+f1.add(P, 'viscosity', 0, 40, 0.5).onChange(v => uVisc.value = v);
+f1.add(P, 'cohesion', 0, 30, 0.5).onChange(v => uCohesion.value = v).name('cohesion / tension');
+f1.add(P, 'damping', 0.9, 1.0, 0.001).onChange(v => uDamping.value = v);
+const f2 = gui.addFolder('heat · buoyancy');
+f2.add(P, 'buoyancy', 0, 50, 1).onChange(v => uBuoy.value = v).name('temp buoyancy');
+f2.add(P, 'heat', 0, 30, 0.5).onChange(v => uHeat.value = v).name('heat diffusion');
+f2.add(P, 'cooling', 0, 3, 0.05).onChange(v => uCooling.value = v);
+f2.add(P, 'floorHeat', 0, 30, 0.5).onChange(v => uFloorHeat.value = v).name('floor plate');
+f2.add(P, 'turbulence', 0, 12, 0.2).onChange(v => uTurb.value = v).name('gas turbulence');
+const f3 = gui.addFolder('pusher · render');
+f3.add(P, 'pushRadius', 2, 24, 0.5).onChange(v => uPusherRadius.value = v).name('pusher radius');
+f3.add(P, 'push', 0, 120, 1).onChange(v => uPusherPush.value = v).name('push out');
+f3.add(P, 'swirl', 0, 160, 1).onChange(v => uPusherSwirl.value = v).name('swirl (vortex)');
+f3.add(P, 'brushHeat', 0, 12, 0.5).onChange(v => uBrushHeat.value = v).name('stir heat');
+f3.add(P, 'size', 0.5, 8, 0.1).onChange(v => uSize.value = v).name('particle size');
+f3.add(P, 'substeps', 1, 4, 1).name('substeps');
+
+// ---- interaction: drag orbits; hold SPACE to stir + heat with the mouse ----
+const ndc = new THREE.Vector2();
+const ray = new THREE.Raycaster();
+const plane = new THREE.Plane();
+const camDir = new THREE.Vector3();
+const hit = new THREE.Vector3();
+let stir = false, haveHit = false;
+addEventListener('pointermove', e => { ndc.x = (e.clientX / innerWidth) * 2 - 1; ndc.y = -((e.clientY / innerHeight) * 2 - 1); });
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { stir = true; controls.enableRotate = false; }
+  if (e.key === 'r' || e.key === 'R') renderer.computeAsync(computeInit);
+});
+addEventListener('keyup', e => { if (e.code === 'Space') { stir = false; controls.enableRotate = true; } });
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// ---- loop ------------------------------------------------------------------
+const fpsEl = document.getElementById('fps');
+const target = new THREE.Vector3(0, 24, 0);
+const cur = new THREE.Vector3(0, 24, 0);
+const prev = new THREE.Vector3(0, 24, 0);
+let last = performance.now(), facc = 0, fn = 0, T = 0;
+
+renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  const dt = Math.min(0.020, (now - last) / 1000); last = now; T += dt;
+
+  // choose the pusher target: mouse ray while stirring, else an auto sweep
+  if (stir) {
+    camera.getWorldDirection(camDir);
+    plane.setFromNormalAndCoplanarPoint(camDir, controls.target);
+    ray.setFromCamera(ndc, camera);
+    if (ray.ray.intersectPlane(plane, hit)) { target.copy(hit); haveHit = true; }
+    uBrushHeat.value = P.brushHeat;
+  } else {
+    target.set(Math.sin(T * 0.5) * 22, 26 + Math.sin(T * 0.8) * 14, Math.cos(T * 0.37) * 18);
+    uBrushHeat.value = 0;
+  }
+  target.set(
+    THREE.MathUtils.clamp(target.x, -BOX + 2, BOX - 2),
+    THREE.MathUtils.clamp(target.y, 2, HEIGHT - 2),
+    THREE.MathUtils.clamp(target.z, -BOX + 2, BOX - 2));
+  cur.lerp(target, 0.25);
+  uPusherVel.value.copy(cur).sub(prev).multiplyScalar(1 / Math.max(dt, 1e-3));
+  uPusherPos.value.copy(cur);
+  prev.copy(cur);
+  pusherMesh.position.copy(cur);
+  pusherMesh.scale.setScalar(P.pushRadius);
+
+  // physics substeps (full grid rebuild each substep)
+  const sub = P.substeps | 0;
+  uDt.value = dt / sub;
+  uTime.value = T;
+  for (let s = 0; s < sub; s++) {
+    renderer.compute(clearGrid);
+    renderer.compute(buildGrid);
+    renderer.compute(computeDensity);
+    renderer.compute(computeForces);
+    renderer.compute(computeIntegrate);
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn / facc)} fps · ${N.toLocaleString()} particles`; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

@@ -989,7 +989,7 @@ const cloudShipPos = uniform(vec3(0, 0, 0)), cloudShipVel = uniform(vec3(0, 0, 0
 // POTENTIAL-FLOW air: clouds advect along the analytic incompressible flow around the moving ship (3D dipole).
 //   Closed form of the wind-routing fluid for a single moving body -> real air-around-object, every
 //   direction the same (over/under/around), tight to the hull, settling behind. uShipR = hull size.
-const uShipR = uniform(220.0), uSwirl = uniform(2.6), uPush = uniform(0.9), uDrag = uniform(0.35), uDamp = uniform(0.965), uReturn = uniform(0.999), uAmbient = uniform(2.0), clDt = uniform(1 / 60);   // momentum VORTEX wake; uReturn~1 = clouds flow freely (not anchored); uAmbient low = ship is the only current
+const uShipR = uniform(70.0), uFlowScale = uniform(2.0), uRelax = uniform(0.955), uAmbient = uniform(6.0), clDt = uniform(1 / 60);
 // terrain routing (graduated from the wind-routing lab): lift air out of rock + slide it around peaks
 const clHugMargin = uniform(35.0), clSlide = uniform(0.6), clHugBand = uniform(170.0);
 let cloudUpdateNode = null;
@@ -998,7 +998,7 @@ function cloudDensity(p) {
   const q = p.mul(0.006 * CL.feature).add(cloudDrift);
   const n = clFbm(q);
   const high = smoothstep(380.0, 470.0, p.y).mul(smoothstep(740.0, 640.0, p.y));    // ceiling layer
-  const low = smoothstep(-305.0, -298.0, p.y).mul(smoothstep(-190.0, -275.0, p.y)); // fog hugging the water: densest right at WL=-300, thinning up by ~-190
+  const low = smoothstep(-340.0, -300.0, p.y).mul(smoothstep(-150.0, -250.0, p.y)); // patchy mist hugging the water (WL = -300)
   return n.sub(CL.tightness).mul(CL.contrast).clamp(0, 1).mul(high.add(low).clamp(0, 1));
 }
 // METABALL CLOUD (graduated from the metaball lab): particles splat into a shared density buffer that
@@ -1011,7 +1011,7 @@ const uCloudSplat = uniform(100.0), uCloudIso = uniform(1.04), uCloudSoft = unif
   const CHX = 2600, CHZ = 4600, N = CL.count;   // much deeper window so clouds recede into the distance
   const cpos = new Float32Array(N * 3);
   let cs = 11; const cr = () => (cs = (cs * 16807) % 2147483647) / 2147483647;
-  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.42 ? (-300 + cr()*80) : (400 + cr()*320); }   // ~42% low fog (kept near the water surface), rest high
+  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.42 ? (-330 + cr()*160) : (400 + cr()*320); }   // ~42% low water-mist, rest high
   const cBuf = instancedArray(cpos, 'vec3');   // home grid (pre-wrap)
   const cOff = instancedArray(N, 'vec3');      // displacement from home (carries velocity; zero-initialized)
   const cVel = instancedArray(N, 'vec3');      // per-particle velocity -> persistent vortex wakes, no snap-back
@@ -1024,26 +1024,20 @@ const uCloudSplat = uniform(100.0), uCloudIso = uniform(1.04), uCloudSoft = unif
   //   Offset is relative to home, so it survives the world-anchor wrap untouched.
   cloudUpdateNode = Fn(() => {
     const base = cBuf.element(instanceIndex);
-    const home = base.add(cloudFollow.sub(base).div(period).round().mul(period));        // world-grid home = the OFF-SCREEN reset point (not a leash in view)
+    const home = base.add(cloudFollow.sub(base).div(period).round().mul(period));        // wrapped world home
     const off = cOff.element(instanceIndex);
-    const vel = cVel.element(instanceIndex);                                              // per-particle momentum -> the spin persists
     const pos = home.add(off);
-    // VORTEX WAKE from the ship (the only air-current source right now). Potential flow is irrotational;
-    //   this adds the missing CURL: a tangential swirl around the ship's path that particles carry with them.
+    // 3D POTENTIAL FLOW around the moving hull (incompressible dipole): v = a^3/(2 r^3) * (3(U.r^)r^ - U)
     const r = pos.sub(cloudShipPos);
-    const dist = r.length().max(8.0);
+    const dist = r.length().max(uShipR);                                                 // clamp to hull radius (no blow-up inside)
     const rh = r.div(dist);
-    const infl = uShipR.div(dist).clamp(0.0, 1.0); const infl3 = infl.mul(infl).mul(infl);   // tight influence bubble around the hull
-    const U = cloudShipVel; const sp = U.length().max(1.0); const axis = U.div(sp);
-    const swirl = axis.cross(rh).mul(sp.mul(infl3).mul(uSwirl));                          // tangential spin around the wake axis = the vortex
-    const push  = rh.mul(sp.mul(infl3).mul(uPush));                                       // air parts outward as the hull pushes through
-    const drag  = axis.mul(sp.mul(infl3).mul(uDrag));                                     // a little carried into the wake, then released
-    const np = home.mul(0.012).add(cloudDrift.mul(3.0));
+    const a3 = uShipR.mul(uShipR).mul(uShipR);
+    const k = a3.div(dist.mul(dist).mul(dist)).mul(0.5);
+    const vFlow = rh.mul(cloudShipVel.dot(rh).mul(3.0)).sub(cloudShipVel).mul(k).mul(uFlowScale);   // air parts around the ship, closes behind
+    const np = home.mul(0.012).add(cloudDrift.mul(3.0));                                  // gentle world-anchored life
     const tf = vec3(mx_noise_float(np), mx_noise_float(np.add(vec3(17.3, 5.1, 9.7))).mul(0.5), mx_noise_float(np.add(vec3(3.2, 21.4, 7.8)))).mul(uAmbient);
-    vel.addAssign(swirl.add(push).add(drag).add(tf).mul(clDt));
-    off.addAssign(vel.mul(clDt));                                                         // advect freely with the current
-    vel.mulAssign(uDamp);                                                                 // vortices slowly spin down
-    off.mulAssign(uReturn);                                                               // ~free-flowing: only a whisper of pull home; real reset is the off-screen wrap
+    off.addAssign(vFlow.add(tf).mul(clDt));
+    off.mulAssign(uRelax);                                                               // air settles back to rest once the ship has passed
   })().compute(N);
   // WORLD-ANCHORED render: snap each particle's home to the copy nearest the camera (wrap every 2*CH),
   //   then add its simulated offset. Clouds stay fixed in the world; a home only jumps a full window
@@ -1071,10 +1065,7 @@ const uCloudSplat = uniform(100.0), uCloudIso = uniform(1.04), uCloudSoft = unif
   //  so the old lift/slide is redundant and was what shoved clouds up the walls.)
   cMat.positionNode = center;
   // each particle drops a soft blob into the density buffer (additive), weighted by its cloud density
-  const isLowCloud = smoothstep(0.0, -200.0, world.y);                 // 1 = low fog (near the water), 0 = high cloud
-  const hiScale = vec2(uCloudSplat, uCloudSplat);
-  const lowScale = vec2(uCloudSplat.mul(1.9), uCloudSplat.mul(0.32));  // wide & flat = fog pancake lying on the water
-  cMat.scaleNode = mix(hiScale, lowScale, isLowCloud);
+  cMat.scaleNode = uCloudSplat;
   const disc = smoothstep(0.5, 0.0, uv().sub(vec2(0.5, 0.5)).length());
   cMat.colorNode = vec3(dC.mul(uCloudGain));
   cMat.opacityNode = disc;
