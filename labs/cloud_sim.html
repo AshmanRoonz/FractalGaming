@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cloud Sim — GPU particles with velocity (persistent vortex wake)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #20364f; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #eaf2ff; background: rgba(10,20,34,0.45);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.5; }
+  #hud b { color: #bcd6ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Cloud Sim</b> — particles carry velocity; the disturber leaves a wake that lingers &amp; dissipates (no snap-back)<br>
+  <span class="k">drag</span> orbit · <span class="k">wheel</span> zoom · <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { Fn, instancedArray, instanceIndex, uv, positionWorld, vec2, vec3, float, uniform,
+         hash, mx_noise_float, smoothstep, mix, color, normalize, cross, length } from 'three/tsl';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 1, 12000);
+camera.position.set(0, 240, 760);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 190, 0); controls.enableDamping = true;
+{
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(7000, 32, 16), new THREE.MeshBasicNodeMaterial({ side: THREE.BackSide, depthWrite: false }));
+  sky.material.colorNode = mix(color(0x2a4f72), color(0xa6c9ec), smoothstep(-0.15, 0.6, normalize(positionWorld).y));
+  scene.add(sky);
+}
+
+// ---- live params ----
+const P = { turb: 9.5, push: 1, swirl: 20, drag: 1, radius: 75, spring: 0.05, damp: 0.995, size: 70, opacity: 0.5 };
+const uTurb = uniform(P.turb), uPush = uniform(P.push), uSwirl = uniform(P.swirl), uDrag = uniform(P.drag),
+      uRad = uniform(P.radius), uSpring = uniform(P.spring), uDamp = uniform(P.damp);
+const uDt = uniform(1/60), uTime = uniform(0);
+const uDistPos = uniform(vec3(0, 190, 0)), uDistVel = uniform(vec3(0, 0, 0));
+
+// ---- GPU buffers: home (where the cloud is), live position, velocity ----
+const N = 120000;
+const bases = instancedArray(N, 'vec3');
+const positions = instancedArray(N, 'vec3');
+const velocities = instancedArray(N, 'vec3');
+
+// fbm cloud shape sampled at HOME -> the cloud holds its form; particles displace within it
+const fbm = Fn(([q]) => { let s = float(0), a = 0.55, f = 1.0; for (let i = 0; i < 4; i++) { s = s.add(mx_noise_float(q.mul(f)).mul(a)); f *= 2.0; a *= 0.5; } return s.mul(0.5).add(0.5); });
+const densityAt = Fn(([p]) => {
+  const n = fbm(p.mul(0.011));
+  const q = vec3(p.x, p.y.sub(190.0), p.z);                // recenter y on cloud height
+  const r = length(q.div(vec3(360.0, 120.0, 360.0)));      // ellipsoid confine
+  return n.sub(0.46).mul(2.6).clamp(0, 1).mul(smoothstep(1.05, 0.45, r));
+});
+
+const computeInit = Fn(() => {
+  const h = vec3(hash(instanceIndex).sub(0.5).mul(720.0), hash(instanceIndex.add(1)).mul(170.0).add(105.0), hash(instanceIndex.add(2)).sub(0.5).mul(720.0));
+  bases.element(instanceIndex).assign(h);
+  positions.element(instanceIndex).assign(h);
+  velocities.element(instanceIndex).assign(vec3(0, 0, 0));
+})().compute(N);
+await renderer.computeAsync(computeInit);
+
+const computeUpdate = Fn(() => {
+  const pos = positions.element(instanceIndex);
+  const vel = velocities.element(instanceIndex);
+  const home = bases.element(instanceIndex);
+  // ambient turbulence (animated noise force -> gentle life)
+  const np = pos.mul(0.012).add(vec3(uTime.mul(0.15), uTime.mul(0.05), uTime.mul(0.10)));
+  const tf = vec3(mx_noise_float(np), mx_noise_float(np.add(vec3(17.3, 5.1, 9.7))), mx_noise_float(np.add(vec3(3.2, 21.4, 7.8)))).mul(uTurb);
+  // disturber: outward shove + tangential SWIRL (the vortex) + drag along its motion
+  const toD = pos.sub(uDistPos);
+  const d = length(toD).max(0.001);
+  const dirN = toD.div(d);
+  const inrange = smoothstep(uRad, 0.0, d);
+  const force = cross(vec3(0.0, 1.0, 0.0), dirN).mul(uSwirl).add(dirN.mul(uPush)).add(uDistVel.mul(uDrag)).mul(inrange);
+  // weak spring toward home so the cloud holds shape over time (disturbances still persist for seconds)
+  const spring = home.sub(pos).mul(uSpring);
+  vel.addAssign(tf.add(force).add(spring).mul(uDt));
+  vel.mulAssign(uDamp);
+  pos.addAssign(vel.mul(uDt));
+})().compute(N);
+
+// ---- render: sprites at the LIVE position, sized by density at HOME ----
+const mat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending });
+const home = bases.element(instanceIndex);
+const dC = densityAt(home);
+mat.positionNode = positions.element(instanceIndex);
+mat.scaleNode = dC.mul(uniform(P.size)).add(1.0);
+const disc = smoothstep(0.5, 0.03, uv().sub(vec2(0.5, 0.5)).length());
+mat.colorNode = mix(color(0x7e8ea4), color(0xf6f9ff), dC.clamp(0, 1).mul(0.5).add(0.5));
+mat.opacityNode = dC.mul(disc).mul(uniform(P.opacity));
+const cloud = new THREE.Sprite(mat); cloud.count = N; cloud.frustumCulled = false; scene.add(cloud);
+
+// the disturber (stand-in for the ship), auto-swept through the cloud
+const disturber = new THREE.Mesh(new THREE.IcosahedronGeometry(22, 2), new THREE.MeshBasicMaterial({ color: 0x35e0ff }));
+scene.add(disturber);
+
+const gui = new GUI({ title: 'wake' });
+gui.add(P, 'swirl', 0, 220, 1).onChange(v => uSwirl.value = v).name('swirl (vortex)');
+gui.add(P, 'push', 0, 120, 1).onChange(v => uPush.value = v).name('push out');
+gui.add(P, 'drag', 0, 8, 0.1).onChange(v => uDrag.value = v).name('drag along');
+gui.add(P, 'radius', 40, 320, 5).onChange(v => uRad.value = v);
+gui.add(P, 'spring', 0.05, 3, 0.05).onChange(v => uSpring.value = v).name('return home');
+gui.add(P, 'damp', 0.85, 0.995, 0.005).onChange(v => uDamp.value = v).name('damping');
+gui.add(P, 'turb', 0, 30, 0.5).onChange(v => uTurb.value = v).name('ambient turb');
+
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const fpsEl = document.getElementById('fps');
+let last = performance.now(), facc = 0, fn = 0, T = 0;
+const _dp = new THREE.Vector3(), _prev = new THREE.Vector3(0, 190, 0);
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.033, (now - last)/1000); last = now; T += dt;
+  // sweep the disturber through the cloud
+  _dp.set(Math.sin(T * 0.55) * 300, 190 + Math.sin(T * 0.9) * 40, Math.cos(T * 0.37) * 200);
+  disturber.position.copy(_dp);
+  uDistPos.value.copy(_dp);
+  uDistVel.value.copy(_dp).sub(_prev).multiplyScalar(1 / Math.max(dt, 1e-3));
+  _prev.copy(_dp);
+  uDt.value = dt; uTime.value = T;
+  renderer.compute(computeUpdate);
+  controls.update();
+  renderer.render(scene, camera);
+  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn/facc)} fps · ${N.toLocaleString()} pts`; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

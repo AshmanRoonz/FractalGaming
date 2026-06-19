@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Metaball Cloud — particles fuse into one soft surface</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1622; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #eaf2ff; background: rgba(10,20,34,0.45);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.5; }
+  #hud b { color: #bcd6ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Metaball Cloud</b> — particles feed a shared density field; dense parts cross the threshold and <i>fuse</i>, thin parts wisp off (like water)<br>
+  <span class="k">drag</span> orbit · <span class="k">wheel</span> zoom · <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+import { Fn, instancedArray, instanceIndex, uv, vec2, vec3, vec4, float, uniform,
+         mx_noise_float, smoothstep, mix, color, normalize, clamp, screenUV, texture } from 'three/tsl';
+
+const renderer = new THREE.WebGPURenderer({ antialias: false });
+renderer.setPixelRatio(1);                       // density pass is its own buffer; keep the math simple
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const camera = new THREE.PerspectiveCamera(56, innerWidth/innerHeight, 1, 14000);
+camera.position.set(0, 210, 780);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 200, -120); controls.enableDamping = true;
+
+// ---- density buffer (half-res, float so splats can accumulate past 1) ----
+const DS = 0.25;
+let RW = Math.max(2, Math.floor(innerWidth * DS)), RH = Math.max(2, Math.floor(innerHeight * DS));
+const densityRT = new THREE.RenderTarget(RW, RH, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: false });
+const uTexel = uniform(vec2(1/RW, 1/RH));
+
+// ---- params ----
+const P = { iso: 1.04, soft: 1.0, splat: 70, gain: 0.05, light: 0.2, grad: 1, count: 100000 };
+const uIso = uniform(P.iso), uSoft = uniform(P.soft), uSplat = uniform(P.splat), uGain = uniform(P.gain),
+      uLight = uniform(P.light), uGrad = uniform(P.grad);
+const uSun = uniform(vec3(0.45, 0.7, 0.5));
+const drift = uniform(vec3(0, 0, 0));
+
+// fbm cloud field -> where particles count more (dense clumps) vs less (thin edges)
+const fbm = Fn(([q]) => { let s = float(0), a = 0.55, f = 1.0; for (let i = 0; i < 5; i++) { s = s.add(mx_noise_float(q.mul(f)).mul(a)); f *= 2.0; a *= 0.5; } return s.mul(0.5).add(0.5); });
+function densityAt(p) {
+  const n = fbm(p.mul(0.006).add(drift));
+  const band = smoothstep(0.0, 70.0, p.y.sub(80.0)).mul(smoothstep(0.0, 90.0, float(360.0).sub(p.y)));
+  const horiz = smoothstep(1.0, 0.45, p.xz.length().mul(0.0013));
+  return clamp(n.sub(0.42).mul(2.6), 0, 1).mul(band).mul(horiz);
+}
+
+// ---- the splatting particles (additive into the density buffer) ----
+const densityScene = new THREE.Scene();
+let cloud = null;
+function buildCloud() {
+  if (cloud) { densityScene.remove(cloud); cloud.material.dispose(); }
+  const N = P.count | 0;
+  const pos = new Float32Array(N * 3);
+  let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < N; i++) { pos[i*3] = (rnd()*2-1)*560; pos[i*3+1] = 215 + (rnd()*2-1)*95; pos[i*3+2] = -120 + (rnd()*2-1)*560; }
+  const posBuf = instancedArray(pos, 'vec3');
+  const m = new THREE.SpriteNodeMaterial({ transparent: true, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending });
+  const p = posBuf.element(instanceIndex);
+  const w = densityAt(p);                                  // this particle's contribution weight
+  m.positionNode = p;
+  m.scaleNode = uSplat;
+  const splat = smoothstep(0.5, 0.0, uv().sub(vec2(0.5, 0.5)).length());   // soft round kernel
+  m.colorNode = vec3(uGain.mul(w));                        // additive: framebuffer.r += gain*w*splat
+  m.opacityNode = splat;
+  cloud = new THREE.Sprite(m); cloud.count = N; cloud.frustumCulled = false; densityScene.add(cloud);
+}
+buildCloud();
+
+// ---- fullscreen pass: read the field, threshold into ONE soft iso-surface, shade it ----
+const fsScene = new THREE.Scene();
+const fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const quadMat = new THREE.MeshBasicNodeMaterial({ depthTest: false, depthWrite: false });
+quadMat.colorNode = Fn(() => {
+  const su = screenUV;
+  const D = (q) => texture(densityRT.texture, q).r;
+  const o = uTexel.mul(uGrad);
+  const d  = D(su);
+  const dl = D(su.sub(vec2(o.x, 0.0))), dr = D(su.add(vec2(o.x, 0.0)));
+  const db = D(su.sub(vec2(0.0, o.y))), dt = D(su.add(vec2(0.0, o.y)));
+  const nrm = normalize(vec3(dl.sub(dr).mul(uLight), db.sub(dt).mul(uLight), float(1.0)));   // fake normal from the field's slope
+  const lam = clamp(nrm.dot(normalize(uSun)), 0.0, 1.0).mul(0.7).add(0.35);
+  const cloudCol = mix(color(0x66758f), color(0xffffff), clamp(lam, 0, 1));
+  const a = smoothstep(uIso.sub(uSoft), uIso.add(uSoft), d);                                  // the metaball threshold = the fusing
+  const sky = mix(color(0x2f4d6c), color(0xaccdec), clamp(su.y, 0, 1));
+  return mix(sky, cloudCol, a);
+})();
+const fsQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMat); fsQuad.frustumCulled = false; fsScene.add(fsQuad);
+
+const gui = new GUI({ title: 'metaball' });
+gui.add(P, 'iso', 0.05, 2.0, 0.01).onChange(v => uIso.value = v).name('threshold (fuse level)');
+gui.add(P, 'soft', 0.02, 1.0, 0.01).onChange(v => uSoft.value = v).name('edge softness');
+gui.add(P, 'splat', 10, 140, 1).onChange(v => uSplat.value = v).name('splat size');
+gui.add(P, 'gain', 0.05, 2.0, 0.05).onChange(v => uGain.value = v).name('density gain');
+gui.add(P, 'light', 0.2, 5, 0.1).onChange(v => uLight.value = v).name('relief / shading');
+gui.add(P, 'grad', 1, 12, 1).onChange(v => uGrad.value = v).name('shade spread');
+gui.add(P, 'count', 20000, 600000, 10000).onFinishChange(buildCloud).name('particle count');
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  RW = Math.max(2, Math.floor(innerWidth * DS)); RH = Math.max(2, Math.floor(innerHeight * DS));
+  densityRT.setSize(RW, RH); uTexel.value.set(1/RW, 1/RH);
+}
+addEventListener('resize', resize);
+
+const fpsEl = document.getElementById('fps');
+let last = performance.now(), facc = 0, fn = 0, T = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last)/1000); last = now; T += dt;
+  drift.value.set(T * 0.02, 0, T * 0.008);          // the field evolves -> blobs form, fuse, and pull apart
+  controls.update();
+  // 1) splat particles into the density buffer
+  renderer.setRenderTarget(densityRT);
+  renderer.setClearColor(0x000000, 1); renderer.clear();
+  renderer.render(densityScene, camera);
+  // 2) draw the single shaded iso-surface to the screen
+  renderer.setRenderTarget(null);
+  renderer.render(fsScene, fsCam);
+  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn/facc)} fps · ${P.count.toLocaleString()} pts`; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

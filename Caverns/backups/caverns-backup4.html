@@ -257,7 +257,7 @@ function stepCloud() {   // the clouds swirl back in (diffuse) + refill (decay) 
   for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
     const k = j * WG + i, c = cclear[k];
     const L = i > 0 ? cclear[k - 1] : c, Rn = i < WG - 1 ? cclear[k + 1] : c, D = j > 0 ? cclear[k - WG] : c, U = j < WG - 1 ? cclear[k + WG] : c;
-    cclear2[k] = (c * 0.70 + (L + Rn + D + U) * 0.075) * 0.99;   // smoother + slower heal -> a soft lingering wake
+    cclear2[k] = (c * 0.80 + (L + Rn + D + U) * 0.05) * 0.99;   // slower heal -> the wake lingers as a trail
   }
   const t = cclear; cclear = cclear2; cclear2 = t;
 }
@@ -270,7 +270,7 @@ const cloudTex = new THREE.DataTexture(cloudData, WG, WG);
 cloudTex.wrapS = cloudTex.wrapT = THREE.ClampToEdgeWrapping;
 cloudTex.minFilter = cloudTex.magFilter = THREE.LinearFilter;
 function uploadWave() {
-  for (let k = 0; k < WG * WG; k++) { const o = k * 4; waveData[o] = Math.max(0, Math.min(255, (wcur[k] / WRANGE * 0.5 + 0.5) * 255)); waveData[o + 1] = Math.max(0, Math.min(255, (Math.max(0, wdepth[k]) / 60) * 255)); waveData[o + 2] = Math.max(0, Math.min(255, (wake[k] / WAKERANGE * 0.5 + 0.5) * 255)); waveData[o + 3] = wmask[k] ? 255 : 0; cloudData[o] = Math.max(0, Math.min(255, cclear[k] * 255)); cloudData[o + 1] = Math.max(0, Math.min(255, ((WL - wdepth[k]) + 500) / 600 * 255)); }
+  for (let k = 0; k < WG * WG; k++) { const o = k * 4; waveData[o] = Math.max(0, Math.min(255, (wcur[k] / WRANGE * 0.5 + 0.5) * 255)); waveData[o + 1] = Math.max(0, Math.min(255, (Math.max(0, wdepth[k]) / 60) * 255)); waveData[o + 2] = Math.max(0, Math.min(255, (wake[k] / WAKERANGE * 0.5 + 0.5) * 255)); waveData[o + 3] = wmask[k] ? 255 : 0; cloudData[o] = Math.max(0, Math.min(255, cclear[k] * 255)); }
   waveTex.needsUpdate = true; cloudTex.needsUpdate = true;
 }
 wcx = Math.round(camera.position.x / wgScale) * wgScale; wcz = Math.round(camera.position.z / wgScale) * wgScale;
@@ -954,7 +954,7 @@ function updateShipWake(dt) {
   }
   // NOSE DIPPED IN: the bow wave washes spray UP and BACK over the canopy (airflow then curls it around)
   _fw.set(0, 0, -1).applyQuaternion(ship.quaternion);
-  carveCloud(ship.position.x, ship.position.z, _fw.x, _fw.z, Math.min(1, 0.4 + speed / 280));   // ship rips a rift in the cloud at any height; it heals like the water wake
+  carveCloud(ship.position.x, ship.position.z, _fw.x, _fw.z, Math.max(0, Math.min(1, (60 - ship.position.y) / 240)) * Math.min(1, 0.4 + speed / 280));   // ship rips a rift in the cloud-mist; it heals like the water wake
   const noseY = ship.position.y + _fw.y * 22;
   if (noseY < WL && speed > 60 && top > WL) {                                    // only while the body is still breaking the surface (not fully under)
     const noseX = ship.position.x + _fw.x * 22, noseZ = ship.position.z + _fw.z * 22, n = Math.min(52, 8 + (speed / 28 | 0));
@@ -983,126 +983,57 @@ function updateShipWake(dt) {
 //   window samples a world-anchored field, so clouds drift in the upper cavern air
 //   wherever you fly. (Exact look params carried over from the lab.)
 // ============================================================================
-const CL = { size: 140, tightness: 0.55, contrast: 2.8, feature: 0.5, opacity: 0.12, merge: 0.7, count: 160000 };
-const cloudFollow = uniform(vec3(0, 0, 0)), cloudDrift = uniform(vec3(0, 0, 0)), cloudShipY = uniform(0.0);
-const cloudShipPos = uniform(vec3(0, 0, 0)), cloudShipVel = uniform(vec3(0, 0, 0));
-// POTENTIAL-FLOW air: clouds advect along the analytic incompressible flow around the moving ship (3D dipole).
-//   Closed form of the wind-routing fluid for a single moving body -> real air-around-object, every
-//   direction the same (over/under/around), tight to the hull, settling behind. uShipR = hull size.
-const uShipR = uniform(70.0), uFlowScale = uniform(2.0), uResponse = uniform(8.0), uReturn = uniform(1.0), clDt = uniform(1 / 60);
-// terrain routing (graduated from the wind-routing lab): lift air out of rock + slide it around peaks
-const clHugMargin = uniform(35.0), clSlide = uniform(0.6), clHugBand = uniform(170.0);
-let cloudUpdateNode = null;
+const CL = { size: 97, tightness: 0.47, contrast: 3.9, feature: 1.5, opacity: 0.05, merge: 0.1, count: 200000 };
+const cloudFollow = uniform(vec3(0, 0, 0)), cloudDrift = uniform(vec3(0, 0, 0)), shipPos = uniform(vec3(0, 0, 0)), cloudShipVel = uniform(vec3(0, 0, 0));
 const clFbm = Fn(([q]) => { let s = float(0), a = 0.55, f = 1.0; for (let i = 0; i < 5; i++) { s = s.add(mx_noise_float(q.mul(f)).mul(a)); f *= 2.0; a *= 0.5; } return s.mul(0.5).add(0.5); });
 function cloudDensity(p) {
   const q = p.mul(0.006 * CL.feature).add(cloudDrift);
   const n = clFbm(q);
   const high = smoothstep(380.0, 470.0, p.y).mul(smoothstep(740.0, 640.0, p.y));    // ceiling layer
-  const low = smoothstep(-290.0, -280.0, p.y).mul(smoothstep(-250.0, -270.0, p.y)); // THIN pancake mist just above the water surface (WL = -300)
+  const low = smoothstep(-340.0, -300.0, p.y).mul(smoothstep(-150.0, -250.0, p.y)); // patchy mist hugging the water (WL = -300)
   return n.sub(CL.tightness).mul(CL.contrast).clamp(0, 1).mul(high.add(low).clamp(0, 1));
 }
-// METABALL CLOUD (graduated from the metaball lab): particles splat into a shared density buffer that
-//   is thresholded into one soft surface, so dense parts FUSE and thin parts wisp. Rendered as an
-//   overlay AFTER the main scene so the water pipeline is untouched.
-const cloudScene = new THREE.Scene();
-const uCloudSplat = uniform(100.0), uCloudSplatLow = uniform(55.0), uCloudIso = uniform(1.04), uCloudSoft = uniform(1.0),
-      uCloudGain = uniform(0.8), uCloudLight = uniform(0.2), uCloudGrad = uniform(1.0);
 {
   const CHX = 2600, CHZ = 4600, N = CL.count;   // much deeper window so clouds recede into the distance
   const cpos = new Float32Array(N * 3);
   let cs = 11; const cr = () => (cs = (cs * 16807) % 2147483647) / 2147483647;
-  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.32 ? (-283 + cr()*28) : (400 + cr()*320); }   // ~32% low water-mist (thin, ABOVE the clamp floor so it doesn't pile), rest high
-  const cBuf = instancedArray(cpos, 'vec3');   // home grid (pre-wrap)
-  const cOff = instancedArray(N, 'vec3');      // displacement from home (carries velocity; zero-initialized)
-  const cVel = instancedArray(N, 'vec3');      // per-particle velocity -> persistent vortex wakes, no snap-back
-  const period = vec3(2 * CHX, 1e9, 2 * CHZ);
-  const cMat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending });
-  // GPU WAKE SIM — each frame every particle carries velocity. The ship shoves the ones near it
-  //   (tangential SWIRL = the vortex, outward PUSH, DRAG along its motion); ambient turbulence
-  //   churns the whole field; a weak SPRING eases each particle back home. Disturbances PERSIST
-  //   as vortices and slowly dissipate -> the hull cuts a real, lingering wake (no snap-back).
-  //   Offset is relative to home, so it survives the world-anchor wrap untouched.
-  cloudUpdateNode = Fn(() => {
-    const base = cBuf.element(instanceIndex);
-    const home = base.add(cloudFollow.sub(base).div(period).round().mul(period));        // wrapped world home
-    const off = cOff.element(instanceIndex);
-    const pos = home.add(off);
-    // 3D POTENTIAL FLOW around the moving hull (incompressible dipole): v = a^3/(2 r^3) * (3(U.r^)r^ - U)
-    const r = pos.sub(cloudShipPos);
-    const dist = r.length().max(uShipR);                                                 // clamp to hull radius (no blow-up inside)
-    const rh = r.div(dist);
-    const a3 = uShipR.mul(uShipR).mul(uShipR);
-    const k = a3.div(dist.mul(dist).mul(dist)).mul(0.5);
-    const vFlow = rh.mul(cloudShipVel.dot(rh).mul(3.0)).sub(cloudShipVel).mul(k).mul(uFlowScale);   // air parts around the ship, closes behind
-    const vel = cVel.element(instanceIndex);
-    // No wind in the tunnel: the air doesn't move on its own. It takes on the ship's flow velocity
-    //   (with inertia, so it coasts and swirls rather than snapping), then eases back to rest.
-    vel.addAssign(vFlow.sub(vel).mul(uResponse).mul(clDt));
-    off.addAssign(vel.mul(clDt));
-    off.subAssign(off.mul(uReturn).mul(clDt));
-  })().compute(N);
-  // WORLD-ANCHORED render: snap each particle's home to the copy nearest the camera (wrap every 2*CH),
-  //   then add its simulated offset. Clouds stay fixed in the world; a home only jumps a full window
-  //   behind the camera (hidden in fog), and the offset rides along unchanged.
+  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.42 ? (-330 + cr()*160) : (400 + cr()*320); }   // ~42% low water-mist, rest high
+  const cBuf = instancedArray(cpos, 'vec3');
+  const cMat = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.NormalBlending, fog: true });
+  // WORLD-ANCHORED: snap each particle to the copy of itself nearest the camera (wrap every 2*CH).
+  //   Clouds stay fixed in the world (they churn via drift, not with your camera); a particle only
+  //   jumps when it falls a full window behind (hidden in the fog).
   const wbase = cBuf.element(instanceIndex);
+  const period = vec3(2 * CHX, 1e9, 2 * CHZ);
   const world = wbase.add(cloudFollow.sub(wbase).div(period).round().mul(period));
-  const centerRaw = world.add(cOff.element(instanceIndex));   // the dipole flow falls off as 1/r^3, so it's naturally tight to the hull (no extra fade)
-  const center = vec3(centerRaw.x, centerRaw.y.max(-285.0), centerRaw.z);   // floor just above the water; pancake splats are thin so they can sit this low without dipping under
+  // SHIP WAKE — like the water: the hull rips a rift into the world-anchored cloud-clearing field
+  //   (carveCloud); it trails behind and heals (stepCloud). The cloud CUTS open (density emptied),
+  //   PARTS to the sides (shoved down the rift's gradient -> walls along the channel), and the wake
+  //   region CHURNS harder. World-anchored, not following you. Low water-mist only.
+  const cuv = world.xz.sub(windowCenter).div(WSIZE).add(0.5);
+  const clear = texture(cloudTex, cuv).r;
+  const lowness = smoothstep(60.0, -200.0, world.y);                                  // 1 at water-mist level, 0 up high
+  const te = float(1.0 / 200.0);                                                       // one texel of the WG=200 field, in uv
+  const gx = texture(cloudTex, cuv.add(vec2(te, 0.0))).r.sub(texture(cloudTex, cuv.sub(vec2(te, 0.0))).r);
+  const gz = texture(cloudTex, cuv.add(vec2(0.0, te))).r.sub(texture(cloudTex, cuv.sub(vec2(0.0, te))).r);
+  const part = vec3(gx.negate(), float(0.0), gz.negate()).mul(760.0).mul(lowness);     // shove cloud OUT of the channel into walls
+  const tp = world.mul(0.004).add(cloudDrift.mul(2.0));
+  const turbAmp = float(38.0).add(clear.mul(lowness).mul(150.0));                       // ambient churn, much harder inside the wake
+  const turb = vec3(mx_noise_float(tp), mx_noise_float(tp.add(vec3(31.7, 11.3, 5.9))).mul(0.5), mx_noise_float(tp.add(vec3(7.1, 23.4, 14.8)))).mul(turbAmp);
+  const center = world.add(turb).add(part);
   const edge = smoothstep(CHX, CHX * 0.78, world.x.sub(cloudFollow.x).abs()).mul(smoothstep(CHZ, CHZ * 0.84, world.z.sub(cloudFollow.z).abs()));
-  const dC = cloudDensity(world).mul(edge);   // ceiling occlusion is handled by the depth prepass (no shimmering density cull needed)
-  // TERRAIN ROUTING (graduated from the wind-routing lab): the air is shaped by the mountains.
-  //   Sample the camera-window heightfield (cloudTex.G = groundY) and lift each particle out of
-  //   any rock it would clip, then slide it down-slope so it streams AROUND the peak instead of
-  //   through it. Terrain is static, so this render-time deflection is stable (no snap-back).
-  const trUv = center.xz.sub(windowCenter).div(WSIZE).add(0.5);
-  const trIn = smoothstep(0.44, 0.30, center.xz.sub(windowCenter).div(WSIZE).length());    // fade routing out well INSIDE the window so gradient samples never hit the clamped edge
-  const decGY = (s) => s.mul(600.0).sub(500.0);
-  const gY = decGY(texture(cloudTex, trUv).g);
-  const clr = center.y.sub(gY);
-  const lift = gY.add(clHugMargin).sub(center.y).max(0.0).mul(trIn);                        // raise up out of the mountain
-  const trTe = float(1.0 / WG);
-  const ghx = decGY(texture(cloudTex, trUv.add(vec2(trTe, 0.0))).g).sub(decGY(texture(cloudTex, trUv.sub(vec2(trTe, 0.0))).g));
-  const ghz = decGY(texture(cloudTex, trUv.add(vec2(0.0, trTe))).g).sub(decGY(texture(cloudTex, trUv.sub(vec2(0.0, trTe))).g));
-  const hug = smoothstep(clHugBand, 0.0, clr).mul(trIn);                                    // strongest right at the slope -> streams AROUND the peak
-  // (terrain routing removed — the depth prepass now occludes clouds behind/inside mountains for real,
-  //  so the old lift/slide is redundant and was what shoved clouds up the walls.)
+  const dC = cloudDensity(world).mul(float(1.0).sub(clear.mul(lowness)).clamp(0, 1)).mul(edge);
   cMat.positionNode = center;
-  // each particle drops a soft blob into the density buffer (additive), weighted by its cloud density
-  const isLowCloud = smoothstep(100.0, -120.0, world.y);          // 1 = low mist, 0 = high cloud
-  const hiScale = vec2(uCloudSplat, uCloudSplat);
-  const lowScale = vec2(uCloudSplatLow.mul(1.7), uCloudSplatLow.mul(0.42));   // wide & short = pancake mist on the water
-  cMat.scaleNode = mix(hiScale, lowScale, isLowCloud);
-  const disc = smoothstep(0.5, 0.0, uv().sub(vec2(0.5, 0.5)).length());
-  cMat.colorNode = vec3(dC.mul(uCloudGain));
-  cMat.opacityNode = disc;
-  const cloudSprites = new THREE.Sprite(cMat); cloudSprites.count = N; cloudSprites.frustumCulled = false; cloudScene.add(cloudSprites);
+  const keepP = mix(float(1.0), float(CL.merge), dC);
+  const keep = float(1).sub(smoothstep(keepP.sub(0.16), keepP.add(0.16), hash(instanceIndex)));
+  cMat.scaleNode = dC.mul(CL.size).div(keepP.sqrt()).add(1.5).mul(keep);
+  const disc = smoothstep(0.5, 0.02, uv().sub(vec2(0.5, 0.5)).length());
+  cMat.colorNode = mix(color(0x9fb2c8), color(0xf7faff), dC.clamp(0, 1).mul(0.55).add(0.45));
+  cMat.opacityNode = dC.mul(disc).mul(CL.opacity);
+  const cloudSprites = new THREE.Sprite(cMat); cloudSprites.count = N; cloudSprites.frustumCulled = false; cloudSprites.renderOrder = 3; scene.add(cloudSprites);
 }
-// ---- density buffer + composite pass (threshold -> one shaded soft cloud surface, drawn over the scene) ----
-const CDS = 0.5;
-let CRW = Math.max(2, Math.floor(innerWidth * CDS)), CRH = Math.max(2, Math.floor(innerHeight * CDS));
-const cloudRT = new THREE.RenderTarget(CRW, CRH, { type: THREE.HalfFloatType, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true });
-const uCloudTexel = uniform(vec2(1 / CRW, 1 / CRH));
-const uCloudSun = uniform(vec3(0.45, 0.7, 0.5));
-const cloudComposite = new THREE.Scene();
-const cloudFsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-const cloudCompMat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthTest: false, depthWrite: false });
-cloudCompMat.toneMapped = false;
-{
-  const su = screenUV;
-  const D = (q) => texture(cloudRT.texture, q).r;
-  const o = uCloudTexel.mul(uCloudGrad);
-  const d = D(su);
-  const dl = D(su.sub(vec2(o.x, 0.0))), dr = D(su.add(vec2(o.x, 0.0)));
-  const db = D(su.sub(vec2(0.0, o.y))), dt = D(su.add(vec2(0.0, o.y)));
-  const nrm = normalize(vec3(dl.sub(dr).mul(uCloudLight), db.sub(dt).mul(uCloudLight), float(1.0)));
-  const lam = nrm.dot(normalize(uCloudSun)).clamp(0.0, 1.0).mul(0.7).add(0.35);
-  cloudCompMat.colorNode = mix(color(0x6b7a92), color(0xffffff), lam.clamp(0, 1));
-  cloudCompMat.opacityNode = smoothstep(uCloudIso.sub(uCloudSoft), uCloudIso.add(uCloudSoft), d);
-}
-const cloudQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), cloudCompMat); cloudQuad.frustumCulled = false; cloudComposite.add(cloudQuad);
 
 const _cloudPrevShip = new THREE.Vector3();
-const _cloudClear = new THREE.Color();
 const fpsEl = document.getElementById('fps');
 let fpsAcc = 0, fpsFrames = 0;
 let last = performance.now();
@@ -1119,28 +1050,7 @@ renderer.setAnimationLoop(() => {
   water.position.set(camera.position.x, WL, camera.position.z);
   cloudFollow.value.set(camera.position.x, 0, camera.position.z);   // window follows you; particles wrap to a world grid so clouds stay put
   cloudDrift.value.set(now * 0.000018, now * 0.000005, now * 0.000011);   // world-space churn (independent of the camera)
-  cloudShipY.value = ship.position.y;                                      // the layer at the ship's height is the one that reacts
-  cloudShipPos.value.copy(ship.position);
-  cloudShipVel.value.copy(ship.position).sub(_cloudPrevShip).multiplyScalar(1 / Math.max(dt, 1e-3));
-  _cloudPrevShip.copy(ship.position);
-  clDt.value = dt;
-  if (cloudUpdateNode) renderer.compute(cloudUpdateNode);                  // advance the persistent-vortex cloud sim
   renderer.render(scene, camera);
-  // metaball cloud: splat particles into the density buffer, then composite the thresholded surface over the scene
-  renderer.getClearColor(_cloudClear); const _cloudAlpha = renderer.getClearAlpha();
-  renderer.autoClear = false;
-  renderer.setRenderTarget(cloudRT);
-  renderer.setClearColor(0x000000, 1);
-  renderer.clear(true, true, false);            // clear the density buffer's color + depth
-  water.visible = false;                         // depth prepass = occluders only (skip water + its reflector)
-  renderer.render(scene, camera);                // fills cloudRT depth with the terrain/ship in front of the camera
-  water.visible = true;
-  renderer.clear(true, false, false);            // wipe color, KEEP the terrain depth
-  renderer.render(cloudScene, camera);           // splats depth-test against the terrain -> anything behind a mountain is rejected
-  renderer.setRenderTarget(null);
-  renderer.render(cloudComposite, cloudFsCam);   // threshold + shade the surviving field over the scene
-  renderer.autoClear = true;
-  renderer.setClearColor(_cloudClear, _cloudAlpha);
   fpsAcc += dt; fpsFrames++;
   if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }
 });

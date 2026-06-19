@@ -989,7 +989,7 @@ const cloudShipPos = uniform(vec3(0, 0, 0)), cloudShipVel = uniform(vec3(0, 0, 0
 // POTENTIAL-FLOW air: clouds advect along the analytic incompressible flow around the moving ship (3D dipole).
 //   Closed form of the wind-routing fluid for a single moving body -> real air-around-object, every
 //   direction the same (over/under/around), tight to the hull, settling behind. uShipR = hull size.
-const uShipR = uniform(70.0), uFlowScale = uniform(2.0), uResponse = uniform(8.0), uReturn = uniform(1.0), clDt = uniform(1 / 60);
+const uShipR = uniform(70.0), uFlowScale = uniform(2.0), uRelax = uniform(0.955), uAmbient = uniform(6.0), clDt = uniform(1 / 60);
 // terrain routing (graduated from the wind-routing lab): lift air out of rock + slide it around peaks
 const clHugMargin = uniform(35.0), clSlide = uniform(0.6), clHugBand = uniform(170.0);
 let cloudUpdateNode = null;
@@ -998,20 +998,20 @@ function cloudDensity(p) {
   const q = p.mul(0.006 * CL.feature).add(cloudDrift);
   const n = clFbm(q);
   const high = smoothstep(380.0, 470.0, p.y).mul(smoothstep(740.0, 640.0, p.y));    // ceiling layer
-  const low = smoothstep(-290.0, -280.0, p.y).mul(smoothstep(-250.0, -270.0, p.y)); // THIN pancake mist just above the water surface (WL = -300)
+  const low = smoothstep(-340.0, -300.0, p.y).mul(smoothstep(-150.0, -250.0, p.y)); // patchy mist hugging the water (WL = -300)
   return n.sub(CL.tightness).mul(CL.contrast).clamp(0, 1).mul(high.add(low).clamp(0, 1));
 }
 // METABALL CLOUD (graduated from the metaball lab): particles splat into a shared density buffer that
 //   is thresholded into one soft surface, so dense parts FUSE and thin parts wisp. Rendered as an
 //   overlay AFTER the main scene so the water pipeline is untouched.
 const cloudScene = new THREE.Scene();
-const uCloudSplat = uniform(100.0), uCloudSplatLow = uniform(55.0), uCloudIso = uniform(1.04), uCloudSoft = uniform(1.0),
+const uCloudSplat = uniform(100.0), uCloudIso = uniform(1.04), uCloudSoft = uniform(1.0),
       uCloudGain = uniform(0.8), uCloudLight = uniform(0.2), uCloudGrad = uniform(1.0);
 {
   const CHX = 2600, CHZ = 4600, N = CL.count;   // much deeper window so clouds recede into the distance
   const cpos = new Float32Array(N * 3);
   let cs = 11; const cr = () => (cs = (cs * 16807) % 2147483647) / 2147483647;
-  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.32 ? (-283 + cr()*28) : (400 + cr()*320); }   // ~32% low water-mist (thin, ABOVE the clamp floor so it doesn't pile), rest high
+  for (let i = 0; i < N; i++) { cpos[i*3] = (cr()*2-1)*CHX; cpos[i*3+2] = (cr()*2-1)*CHZ; cpos[i*3+1] = cr() < 0.42 ? (-330 + cr()*160) : (400 + cr()*320); }   // ~42% low water-mist, rest high
   const cBuf = instancedArray(cpos, 'vec3');   // home grid (pre-wrap)
   const cOff = instancedArray(N, 'vec3');      // displacement from home (carries velocity; zero-initialized)
   const cVel = instancedArray(N, 'vec3');      // per-particle velocity -> persistent vortex wakes, no snap-back
@@ -1034,22 +1034,19 @@ const uCloudSplat = uniform(100.0), uCloudSplatLow = uniform(55.0), uCloudIso = 
     const a3 = uShipR.mul(uShipR).mul(uShipR);
     const k = a3.div(dist.mul(dist).mul(dist)).mul(0.5);
     const vFlow = rh.mul(cloudShipVel.dot(rh).mul(3.0)).sub(cloudShipVel).mul(k).mul(uFlowScale);   // air parts around the ship, closes behind
-    const vel = cVel.element(instanceIndex);
-    // No wind in the tunnel: the air doesn't move on its own. It takes on the ship's flow velocity
-    //   (with inertia, so it coasts and swirls rather than snapping), then eases back to rest.
-    vel.addAssign(vFlow.sub(vel).mul(uResponse).mul(clDt));
-    off.addAssign(vel.mul(clDt));
-    off.subAssign(off.mul(uReturn).mul(clDt));
+    const np = home.mul(0.012).add(cloudDrift.mul(3.0));                                  // gentle world-anchored life
+    const tf = vec3(mx_noise_float(np), mx_noise_float(np.add(vec3(17.3, 5.1, 9.7))).mul(0.5), mx_noise_float(np.add(vec3(3.2, 21.4, 7.8)))).mul(uAmbient);
+    off.addAssign(vFlow.add(tf).mul(clDt));
+    off.mulAssign(uRelax);                                                               // air settles back to rest once the ship has passed
   })().compute(N);
   // WORLD-ANCHORED render: snap each particle's home to the copy nearest the camera (wrap every 2*CH),
   //   then add its simulated offset. Clouds stay fixed in the world; a home only jumps a full window
   //   behind the camera (hidden in fog), and the offset rides along unchanged.
   const wbase = cBuf.element(instanceIndex);
   const world = wbase.add(cloudFollow.sub(wbase).div(period).round().mul(period));
-  const centerRaw = world.add(cOff.element(instanceIndex));   // the dipole flow falls off as 1/r^3, so it's naturally tight to the hull (no extra fade)
-  const center = vec3(centerRaw.x, centerRaw.y.max(-285.0), centerRaw.z);   // floor just above the water; pancake splats are thin so they can sit this low without dipping under
+  const center = world.add(cOff.element(instanceIndex));   // the dipole flow falls off as 1/r^3, so it's naturally tight to the hull (no extra fade)
   const edge = smoothstep(CHX, CHX * 0.78, world.x.sub(cloudFollow.x).abs()).mul(smoothstep(CHZ, CHZ * 0.84, world.z.sub(cloudFollow.z).abs()));
-  const dC = cloudDensity(world).mul(edge);   // ceiling occlusion is handled by the depth prepass (no shimmering density cull needed)
+  const dC = cloudDensity(world).mul(edge);
   // TERRAIN ROUTING (graduated from the wind-routing lab): the air is shaped by the mountains.
   //   Sample the camera-window heightfield (cloudTex.G = groundY) and lift each particle out of
   //   any rock it would clip, then slide it down-slope so it streams AROUND the peak instead of
@@ -1068,10 +1065,7 @@ const uCloudSplat = uniform(100.0), uCloudSplatLow = uniform(55.0), uCloudIso = 
   //  so the old lift/slide is redundant and was what shoved clouds up the walls.)
   cMat.positionNode = center;
   // each particle drops a soft blob into the density buffer (additive), weighted by its cloud density
-  const isLowCloud = smoothstep(100.0, -120.0, world.y);          // 1 = low mist, 0 = high cloud
-  const hiScale = vec2(uCloudSplat, uCloudSplat);
-  const lowScale = vec2(uCloudSplatLow.mul(1.7), uCloudSplatLow.mul(0.42));   // wide & short = pancake mist on the water
-  cMat.scaleNode = mix(hiScale, lowScale, isLowCloud);
+  cMat.scaleNode = uCloudSplat;
   const disc = smoothstep(0.5, 0.0, uv().sub(vec2(0.5, 0.5)).length());
   cMat.colorNode = vec3(dC.mul(uCloudGain));
   cMat.opacityNode = disc;
