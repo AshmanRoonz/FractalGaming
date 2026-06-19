@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Engine — GPU particles (Phase 0)</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #070b12; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.5);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.55; }
+  #hud b { color: #9fd0ff; } .k { color: #ffd27f; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Engine</b> — Phase 0: GPU particles (compute → buffer → render)<br>
+  <span class="k">drag</span> orbit · <span class="k">wheel</span> zoom · <span class="k">R</span> reset · <span id="fps">–</span>
+</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { Fn, instancedArray, instanceIndex, vertexIndex, vec3, float, uniform, If, hash, color, mix, clamp } from 'three/tsl';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x070b12);
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 4000);
+camera.position.set(70, 55, 100);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 14, 0); controls.enableDamping = true;
+
+// world bounds (a box the particles fall and pile inside)
+const BOX = 40, CEIL = 90;
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(BOX*2, BOX*2), new THREE.MeshBasicMaterial({ color: 0x121822 }));
+ground.rotation.x = -Math.PI/2; scene.add(ground);
+const cage = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(BOX*2, CEIL, BOX*2)), new THREE.LineBasicMaterial({ color: 0x1f2c3c }));
+cage.position.y = CEIL/2; scene.add(cage);
+
+// ===========================================================================
+// GPU PARTICLES — state lives in storage buffers; a compute pass moves them;
+//   the render reads straight from the buffer. (A3: this struct is the unit we
+//   will later treat as a composite at a coarser scale — same layout, bigger mass.)
+// ===========================================================================
+const COUNT = 180000;
+const positions = instancedArray(COUNT, 'vec3');
+const velocities = instancedArray(COUNT, 'vec3');
+
+const seedY = uniform(40.0);   // reset spawn height band
+const computeInit = Fn(() => {
+  const pos = positions.element(instanceIndex);
+  const vel = velocities.element(instanceIndex);
+  const rx = hash(instanceIndex).sub(0.5).mul(BOX*1.9);
+  const ry = hash(instanceIndex.add(1)).mul(seedY).add(20.0);
+  const rz = hash(instanceIndex.add(2)).sub(0.5).mul(BOX*1.9);
+  pos.assign(vec3(rx, ry, rz));
+  vel.assign(vec3(0, 0, 0));
+})().compute(COUNT);
+await renderer.computeAsync(computeInit);
+
+const dt = uniform(1/60);
+const computeUpdate = Fn(() => {
+  const pos = positions.element(instanceIndex);
+  const vel = velocities.element(instanceIndex);
+  vel.y.addAssign(float(-70).mul(dt));                 // gravity
+  pos.addAssign(vel.mul(dt));
+  // floor
+  If(pos.y.lessThan(0.0), () => { pos.y.assign(0.0); vel.y.assign(vel.y.abs().mul(0.30)); vel.x.mulAssign(0.86); vel.z.mulAssign(0.86); });
+  // walls (x)
+  If(pos.x.lessThan(float(-BOX)), () => { pos.x.assign(float(-BOX)); vel.x.assign(vel.x.abs().mul(0.5)); });
+  If(pos.x.greaterThan(float(BOX)), () => { pos.x.assign(float(BOX)); vel.x.assign(vel.x.abs().mul(0.5).negate()); });
+  // walls (z)
+  If(pos.z.lessThan(float(-BOX)), () => { pos.z.assign(float(-BOX)); vel.z.assign(vel.z.abs().mul(0.5)); });
+  If(pos.z.greaterThan(float(BOX)), () => { pos.z.assign(float(BOX)); vel.z.assign(vel.z.abs().mul(0.5).negate()); });
+})().compute(COUNT);
+
+// render straight from the buffer
+const geo = new THREE.BufferGeometry();
+geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(COUNT*3), 3));
+const pmat = new THREE.PointsNodeMaterial();
+pmat.positionNode = positions.element(vertexIndex);   // index per-point (not per-instance)
+pmat.sizeNode = float(2.5);
+const spd = velocities.element(vertexIndex).length();
+pmat.colorNode = mix(color(0x6fb3ff), color(0xffffff), clamp(spd.mul(0.03), 0, 1));
+const points = new THREE.Points(geo, pmat);
+points.frustumCulled = false;
+scene.add(points);
+
+addEventListener('keydown', e => { if (e.key === 'r' || e.key === 'R') renderer.computeAsync(computeInit); });
+addEventListener('resize', () => { camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+const fpsEl = document.getElementById('fps');
+let last = performance.now(), facc = 0, fn = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), d = Math.min(0.033, (now - last)/1000); last = now;
+  dt.value = d;
+  controls.update();
+  renderer.compute(computeUpdate);
+  renderer.render(scene, camera);
+  facc += d; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn/facc)} fps · ${COUNT.toLocaleString()} particles`; facc = 0; fn = 0; }
+});
+</script>
+</body>
+</html>

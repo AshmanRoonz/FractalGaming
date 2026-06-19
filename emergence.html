@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Emergence — code-seeds interacting</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; cursor: crosshair; }
+  #hud { position: fixed; top: 10px; left: 12px; z-index: 5; pointer-events: none;
+    font: 12px ui-monospace, Menlo, monospace; color: #cfe0ff; background: rgba(8,12,20,0.5);
+    padding: 6px 10px; border-radius: 6px; line-height: 1.55; }
+  #hud b { color: #9fd0ff; } .k { color: #ffd27f; }
+  #start { position: fixed; inset: 0; z-index: 9; display: flex; align-items: center; justify-content: center;
+    background: rgba(5,6,10,0.6); color: #dfeaff; font: 16px ui-monospace, Menlo, monospace; cursor: pointer; }
+  #start span { padding: 14px 22px; border: 1px solid #2a3a52; border-radius: 10px; background: rgba(12,18,30,0.7); }
+</style>
+</head>
+<body>
+<div id="hud">
+  <b>Emergence</b> — code-seeds interacting; some crosses into sight &amp; sound<br>
+  <span class="k">click</span> = drop a seed · the field normalizes to wholes · weak seeds re-seed near strong ones
+</div>
+<div id="start"><span>click to begin (sight + sound)</span></div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { Fn, uv, vec2, vec3, vec4, float, uniform, dot, exp, max, min, abs, fract, smoothstep, mix, clamp } from 'three/tsl';
+
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+// ===========================================================================
+// THE SUBSTRATE: N code-seeds. Each is just parameters (position, amplitude,
+//   phase, hue). They INTERACT (drift, attract at mid-range, repel up close,
+//   amplify each other when near = resonance). The field is the NORMALIZED sum
+//   of their influence — partition of unity — and the wholes are its level sets.
+// ===========================================================================
+const NSEED = 9;
+const PALETTE = [0x39d0c8, 0xff5da2, 0xffc24b, 0x6ad06a, 0x5aa0ff, 0xb487ff, 0xff8a5a, 0x4be0a0, 0xe85cff];
+const aspect = uniform(innerWidth / innerHeight);
+const seedU = [];                              // vec4 per seed: xy = pos, z = amplitude, w = unused
+for (let i = 0; i < NSEED; i++) seedU.push(uniform(new THREE.Vector4(Math.random(), Math.random(), 0, 0)));
+const hueU = PALETTE.map(h => { const c = new THREE.Color(h); return uniform(new THREE.Vector3(c.r, c.g, c.b)); });
+const R2 = uniform(0.018);                     // influence radius² (gaussian)
+const THRESH = uniform(0.30);                  // emergence threshold: below it stays latent (dark)
+
+// the seed state lives in JS; the shader just reads it and renders the emergence.
+const seeds = [];
+for (let i = 0; i < NSEED; i++) seeds.push({
+  x: Math.random()*0.8+0.1, y: Math.random()*0.8+0.1, vx: 0, vy: 0,
+  base: 0.5 + Math.random()*0.5, freq: 0.4 + Math.random()*0.9, phase: Math.random()*6.28, amp: 0, hue: i,
+});
+
+// ===========================================================================
+// EMERGENCE INTO SIGHT: per pixel, accumulate seed influence, normalize to get
+//   the whole's colour, and only let it become visible where the field crosses
+//   the threshold. Contour lines trace the level sets.
+// ===========================================================================
+const field = Fn(() => {
+  const p = uv();
+  const wsum = float(0).toVar();
+  const csum = vec3(0, 0, 0).toVar();
+  for (let i = 0; i < NSEED; i++) {
+    const s = seedU[i];
+    const dx = p.x.sub(s.x).mul(aspect), dy = p.y.sub(s.y);
+    const d2 = dx.mul(dx).add(dy.mul(dy));
+    const infl = s.z.mul(exp(d2.div(R2).negate()));
+    wsum.addAssign(infl);
+    csum.addAssign(hueU[i].mul(infl));
+  }
+  const col = csum.div(max(wsum, float(0.0001)));          // NORMALIZED -> partition of unity (the whole's colour)
+  const emerge = smoothstep(THRESH, THRESH.add(0.35), wsum);
+  const contour = smoothstep(0.42, 0.5, abs(fract(wsum.mul(3.0)).sub(0.5)));  // level-set stripes
+  const lit = col.mul(float(0.35).add(emerge.mul(1.05))).add(col.mul(contour.mul(emerge).mul(0.5)));
+  const bg = vec3(0.015, 0.022, 0.04);
+  return vec4(mix(bg, lit, emerge), 1.0);
+});
+
+const mat = new THREE.MeshBasicNodeMaterial();
+mat.colorNode = field();
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+
+// ===========================================================================
+// EMERGENCE INTO SOUND: one voice per seed. Pitch from a pentatonic scale by
+//   index (so it stays consonant), gain from the seed's amplitude — a voice is
+//   only audible while its whole has emerged. Re-seeding shifts a voice's pitch.
+// ===========================================================================
+let actx = null, master = null; const voices = [];
+const SCALE = [0, 2, 4, 7, 9, 12, 14, 16, 19];           // major pentatonic degrees
+const semis = n => 220 * Math.pow(2, n / 12);
+function startAudio() {
+  if (actx) return;
+  actx = new (window.AudioContext || window.webkitAudioContext)();
+  master = actx.createGain(); master.gain.value = 0.0; master.connect(actx.destination);
+  master.gain.setTargetAtTime(0.22, actx.currentTime, 0.6);
+  for (let i = 0; i < NSEED; i++) {
+    const osc = actx.createOscillator(); osc.type = i % 2 ? 'triangle' : 'sine';
+    osc.frequency.value = semis(SCALE[i]);
+    const g = actx.createGain(); g.gain.value = 0;
+    osc.connect(g); g.connect(master); osc.start();
+    voices.push({ osc, g });
+  }
+}
+function voiceFreq(i) { return semis(SCALE[i % SCALE.length] + (seeds[i].x - 0.5) * 5); }   // detune by position
+
+// ===========================================================================
+// THE INTERACTION: seeds drift, repel close / attract mid, and amplify when they
+//   cluster (resonance). Periodically the weakest re-seeds near the strongest
+//   whole — new seeds emerge from where the field is already strong.
+// ===========================================================================
+let reseedT = 0;
+function step(dt, t) {
+  for (let i = 0; i < NSEED; i++) {
+    const a = seeds[i]; let fx = 0, fy = 0, neigh = 0;
+    for (let j = 0; j < NSEED; j++) {
+      if (j === i) continue; const b = seeds[j];
+      let dx = b.x - a.x, dy = b.y - a.y; const d = Math.hypot(dx, dy) || 1e-4;
+      const ux = dx / d, uy = dy / d;
+      if (d < 0.12) { fx -= ux * (0.12 - d) * 6; fy -= uy * (0.12 - d) * 6; }       // repel up close
+      else if (d < 0.42) { fx += ux * 0.5; fy += uy * 0.5; }                         // attract mid-range
+      neigh += Math.exp(-(d * d) / 0.05);                                            // resonance proximity
+    }
+    fx += Math.sin(t * 0.3 + a.phase) * 0.4; fy += Math.cos(t * 0.27 + a.phase * 1.3) * 0.4;  // wander
+    a.vx = (a.vx + fx * dt) * 0.9; a.vy = (a.vy + fy * dt) * 0.9;
+    a.x += a.vx * dt; a.y += a.vy * dt;
+    if (a.x < 0.05) { a.x = 0.05; a.vx = Math.abs(a.vx); } if (a.x > 0.95) { a.x = 0.95; a.vx = -Math.abs(a.vx); }
+    if (a.y < 0.05) { a.y = 0.05; a.vy = Math.abs(a.vy); } if (a.y > 0.95) { a.y = 0.95; a.vy = -Math.abs(a.vy); }
+    const pulse = 0.5 + 0.5 * Math.sin(t * a.freq + a.phase);
+    a.amp = a.base * pulse * (0.5 + 0.7 * Math.min(1.6, neigh));                      // louder/brighter when clustered
+    seedU[i].value.set(a.x, a.y, a.amp, 0);
+  }
+  // re-seed the weakest near the strongest (new seeds emerge from strong wholes)
+  reseedT -= dt;
+  if (reseedT <= 0) {
+    reseedT = 2.5;
+    let wi = 0, si = 0; for (let i = 1; i < NSEED; i++) { if (seeds[i].amp < seeds[wi].amp) wi = i; if (seeds[i].amp > seeds[si].amp) si = i; }
+    const s = seeds[si];
+    seeds[wi].x = clampJS(s.x + (Math.random()-0.5)*0.12, 0.05, 0.95);
+    seeds[wi].y = clampJS(s.y + (Math.random()-0.5)*0.12, 0.05, 0.95);
+    seeds[wi].vx = seeds[wi].vy = 0; seeds[wi].phase = Math.random()*6.28; seeds[wi].freq = 0.4 + Math.random()*0.9;
+    if (actx) voices[wi].osc.frequency.setTargetAtTime(voiceFreq(wi), actx.currentTime, 0.1);
+  }
+  // sound follows the seeds
+  if (actx) for (let i = 0; i < NSEED; i++) {
+    const g = clampJS(seeds[i].amp * 0.16, 0, 0.3);
+    voices[i].g.gain.setTargetAtTime(g, actx.currentTime, 0.08);
+    voices[i].osc.frequency.setTargetAtTime(voiceFreq(i), actx.currentTime, 0.2);
+  }
+}
+const clampJS = (v, a, b) => v < a ? a : v > b ? b : v;
+
+// drop a seed where you click (re-seed by hand)
+let dropNext = 0;
+addEventListener('pointerdown', e => {
+  const x = e.clientX / innerWidth, y = 1 - e.clientY / innerHeight;
+  const i = dropNext % NSEED; dropNext++;
+  seeds[i].x = clampJS(x, 0.05, 0.95); seeds[i].y = clampJS(y, 0.05, 0.95);
+  seeds[i].vx = seeds[i].vy = 0; seeds[i].base = 0.8 + Math.random()*0.5;
+});
+document.getElementById('start').addEventListener('click', () => {
+  startAudio(); document.getElementById('start').style.display = 'none';
+}, { once: true });
+addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); aspect.value = innerWidth / innerHeight; });
+
+let last = performance.now(), T = 0;
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
+  step(dt, T);
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
