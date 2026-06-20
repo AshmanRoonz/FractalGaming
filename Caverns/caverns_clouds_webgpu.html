@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>caverns · eml clouds — WebGPU rebuild</title>
+<style>
+  html,body{margin:0;height:100%;background:#05080c;color:#cfe;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  #panel{position:fixed;top:10px;left:10px;width:296px;max-height:calc(100% - 20px);overflow:auto;
+    background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px 12px 14px;backdrop-filter:blur(7px);
+    transition:transform .2s ease}
+  #panel.hidden{transform:translateX(-110%)}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .grp{border-top:1px solid #16222e;padding:8px 0 2px;margin-top:6px}
+  .grp .t{color:#7fb;font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;opacity:.85}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 96px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 46px;text-align:right;color:#bdf}
+  .row.chk label{flex:1}
+  .eml{font-size:14px;color:#ffd56b;background:#11202b;border:1px solid #24384a;border-radius:6px;padding:7px 8px;margin:4px 0 2px}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4a60}
+  #hud{position:fixed;top:10px;right:12px;text-align:right;background:rgba(10,16,24,.55);border:1px solid #1d2b3a;
+    border-radius:8px;padding:8px 11px;backdrop-filter:blur(5px);min-width:150px}
+  #hud .big{font-size:22px;color:#aef;line-height:1.1}
+  #hud .lbl{color:#6a8;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+  #hud .pad{margin-top:6px;font-size:11px;color:#7fb}
+  #hud .pad.off{color:#a66}
+  #help{position:fixed;bottom:10px;left:12px;color:#6f8ba0;font-size:11px;background:rgba(10,16,24,.5);
+    border:1px solid #16222e;border-radius:8px;padding:7px 10px;backdrop-filter:blur(5px);max-width:62%}
+  #help b{color:#9cd}
+  .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px}
+  #togglePanel{position:fixed;top:10px;left:10px;z-index:5}
+  #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:40px;
+    background:#0a0e14;color:#fcd;text-align:center;font-size:15px;line-height:1.6}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<button id="togglePanel" style="display:none">≡ tune</button>
+
+<div id="panel">
+  <h1>caverns · eml clouds · WebGPU</h1>
+  <p class="sub">grassy corridor + flooded basin + carved cumulus — one raymarched pipeline</p>
+  <div class="eml">density = fill·d − ( e^(k·n) − L·ln(d) )</div>
+  <div class="hint">The cavern floor/ceiling and the volumetric cloud-gas are all raymarched from the same analytic noise the original caverns used. Fly the corridor; the gas rolls through the open void above the water.</div>
+
+  <div class="grp"><div class="t">scene · what's drawn</div>
+    <div class="row chk"><label for="terrainOn">cavern corridor</label><input type="checkbox" id="terrainOn" checked></div>
+    <div class="row chk"><label for="waterOn">flooded water</label><input type="checkbox" id="waterOn" checked></div>
+    <div class="row chk"><label for="cloudOn">cloud-gas</label><input type="checkbox" id="cloudOn" checked></div>
+  </div>
+
+  <div class="grp"><div class="t">light · time &amp; weather</div>
+    <div class="row"><label>time of day</label><input id="tod" type="range" min="0" max="24" step="0.02" value="16.24"><span class="v" id="tod_v"></span></div>
+    <div class="row"><label>weather</label><input id="weather" type="range" min="0" max="1" step="0.005" value="0.34"><span class="v" id="weather_v"></span></div>
+    <div class="row"><label>wind</label><input id="wind" type="range" min="0" max="3" step="0.01" value="0.6"><span class="v" id="wind_v"></span></div>
+    <div class="row"><label>god rays</label><input id="god" type="range" min="0" max="2.5" step="0.01" value="2.5"><span class="v" id="god_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">eml carve</div>
+    <div class="row chk"><label for="expOn">e^(k·n) term on</label><input type="checkbox" id="expOn" checked></div>
+    <div class="row"><label>k (noise→exp)</label><input id="kNoise" type="range" min="0" max="4" step="0.01" value="2.18"><span class="v" id="kNoise_v"></span></div>
+    <div class="row"><label>exp gain</label><input id="expGain" type="range" min="0" max="1.5" step="0.005" value="0.01"><span class="v" id="expGain_v"></span></div>
+    <div class="row chk"><label for="lnOn">−ln(d) term on</label><input type="checkbox" id="lnOn" checked></div>
+    <div class="row"><label>L (ln gain)</label><input id="lnGain" type="range" min="0" max="1.5" step="0.005" value="0.01"><span class="v" id="lnGain_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">cloud-gas body</div>
+    <div class="row"><label>core fill</label><input id="fill" type="range" min="0" max="3" step="0.01" value="2.15"><span class="v" id="fill_v"></span></div>
+    <div class="row"><label>altitude</label><input id="alt" type="range" min="-300" max="1200" step="1" value="429"><span class="v" id="alt_v"></span></div>
+    <div class="row"><label>layer depth</label><input id="thick" type="range" min="50" max="1200" step="1" value="453"><span class="v" id="thick_v"></span></div>
+    <div class="row"><label>coverage scl</label><input id="covscale" type="range" min="0.2" max="3" step="0.01" value="0.59"><span class="v" id="covscale_v"></span></div>
+    <div class="row"><label>detail scl</label><input id="detail" type="range" min="0.5" max="6" step="0.01" value="4.99"><span class="v" id="detail_v"></span></div>
+    <div class="row"><label>iso / cutoff</label><input id="iso" type="range" min="0" max="1.2" step="0.005" value="0.13"><span class="v" id="iso_v"></span></div>
+    <div class="row"><label>opacity</label><input id="dens" type="range" min="0.2" max="8" step="0.01" value="1.35"><span class="v" id="dens_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">flight</div>
+    <div class="row"><label>top speed</label><input id="speed" type="range" min="80" max="1400" step="10" value="1400"><span class="v" id="speed_v"></span></div>
+    <div class="row"><label>quality</label><input id="quality" type="range" min="0.4" max="1.4" step="0.05" value="1.4"><span class="v" id="quality_v"></span></div>
+    <div class="row"><label>resolution</label><input id="res" type="range" min="0.4" max="1.0" step="0.05" value="1.0"><span class="v" id="res_v"></span></div>
+    <div class="row" style="gap:6px"><button id="resetCam">reset position</button><button id="reset">defaults</button></div>
+  </div>
+  <div class="hint">Click the view to capture the mouse. <b>W A S D</b> move · <b>Space</b>/<b>Shift(L)</b> up·down · mouse = look · <b>Shift(R)</b> boost · arrows = look · <b>H</b> hide panel. Gamepad: left stick move, right stick look, RB boost, A/B down/up. The corridor walls pinch shut — collision keeps you in the void.</div>
+</div>
+
+<div id="hud">
+  <div class="lbl">speed</div><div class="big" id="hSpd">0</div>
+  <div class="lbl" style="margin-top:6px">altitude</div><div class="big" id="hAlt">0</div>
+  <div class="pad off" id="hPad">no gamepad</div>
+</div>
+
+<div id="help"><b>Click the view</b> then fly with W/A/S/D + mouse (or a gamepad). Press <b>H</b> to hide the panel.</div>
+<div class="fps" id="fps"></div>
+<div id="err"></div>
+
+<script type="text/wgsl" id="wgsl">
+struct Uniforms {
+  res      : vec4<f32>,   // xy = pixels, z = time, w = quality
+  camPos   : vec4<f32>,   // xyz pos
+  camFwd   : vec4<f32>,
+  camRight : vec4<f32>,
+  camUp    : vec4<f32>,
+  sun      : vec4<f32>,   // xyz dir (toward sun), w = sun intensity
+  sky0     : vec4<f32>,   // horizon
+  sky1     : vec4<f32>,   // zenith
+  sunCol   : vec4<f32>,   // light color, w = god-ray strength
+  p0       : vec4<f32>,   // k, expGain, lnGain, fill
+  p1       : vec4<f32>,   // cloud altitude, thickness, covScale, detailScale
+  p2       : vec4<f32>,   // iso, dens, coverage(weather), windSpeed
+  p3       : vec4<f32>,   // expOn, lnOn, ambStrength, waterLevel
+  p4       : vec4<f32>,   // terrainOn, waterOn, fogDensity, cloudOn
+  p5       : vec4<f32>,   // fogColor.rgb, underwater
+};
+
+@group(0) @binding(0) var<uniform> U : Uniforms;
+
+// ---- caverns terrain constants (mirrors the JS so render + collision agree) ----
+const YFLOOR : f32 = -450.0;
+const GROUND_AMP : f32 = 460.0;
+const YCEIL : f32 = 780.0;
+const CEIL_AMP : f32 = 440.0;
+const T_BASE_FREQ : f32 = 0.0033333333;   // 1/300
+const T_WARP_FREQ : f32 = 0.0015151515;   // 1/660
+const T_WARP : f32 = 80.0;
+const T_EXPO : f32 = 1.75;
+const CORRIDOR_HALF : f32 = 1600.0;
+const WALLW : f32 = 420.0;
+const BACKW : f32 = 210.0;
+// forcefield DOME = a smooth arched vault over the corridor (replaces the old rocky ceiling
+//   as the play-space boundary). Elliptical arch across X, running along the corridor in Z,
+//   dropping to seal against the floor at the walls / back via wallAmt — same boundary, clean shape.
+const ARCH_EDGE : f32 = 150.0;    // ceiling height at the corridor edge (spring line)
+const ARCH_RISE : f32 = 560.0;    // extra height at the centre (apex = EDGE + RISE)
+const ARCH_HALF : f32 = 1600.0;   // half-width of the arch (matches CORRIDOR_HALF)
+
+// ---------- hash / value noise / fbm (clouds) ----------
+fn hash(p : vec3<f32>) -> f32 {
+  var q = fract(p * 0.3183099 + vec3<f32>(0.1, 0.2, 0.3));
+  q *= 17.0;
+  return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+fn hash21(p : vec2<f32>) -> f32 {           // stable per-pixel value for dithering (no time term)
+  var q = fract(p * vec2<f32>(123.34, 456.21));
+  q += dot(q, q + 45.32);
+  return fract(q.x * q.y);
+}
+fn vnoise(x : vec3<f32>) -> f32 {
+  let i = floor(x);
+  var f = fract(x);
+  f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);   // quintic smootherstep => no grid creasing
+  let n000 = hash(i + vec3<f32>(0.0, 0.0, 0.0));
+  let n100 = hash(i + vec3<f32>(1.0, 0.0, 0.0));
+  let n010 = hash(i + vec3<f32>(0.0, 1.0, 0.0));
+  let n110 = hash(i + vec3<f32>(1.0, 1.0, 0.0));
+  let n001 = hash(i + vec3<f32>(0.0, 0.0, 1.0));
+  let n101 = hash(i + vec3<f32>(1.0, 0.0, 1.0));
+  let n011 = hash(i + vec3<f32>(0.0, 1.0, 1.0));
+  let n111 = hash(i + vec3<f32>(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+             mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+fn fbm(p : vec3<f32>) -> f32 {
+  var s = 0.0; var a = 0.55; var f = 1.0;
+  for (var i = 0; i < 5; i = i + 1) {
+    s = s + a * vnoise(p * f);
+    f = f * 2.0; a = a * 0.5;
+  }
+  return s;
+}
+fn fbm3(p : vec3<f32>) -> f32 {
+  var s = 0.0; var a = 0.6; var f = 1.0;
+  for (var i = 0; i < 3; i = i + 1) {
+    s = s + a * vnoise(p * f);
+    f = f * 2.0; a = a * 0.5;
+  }
+  return s;
+}
+
+// ---------- caverns analytic terrain (ported 1:1 from caverns.html) ----------
+fn thash2(p : vec2<f32>) -> f32 { let n = sin(p.x * 127.1 + p.y * 311.7) * 43758.5453; return n - floor(n); }
+fn tnoise2(p : vec2<f32>) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let a = thash2(i);
+  let b = thash2(i + vec2<f32>(1.0, 0.0));
+  let c = thash2(i + vec2<f32>(0.0, 1.0));
+  let d = thash2(i + vec2<f32>(1.0, 1.0));
+  let ab = a + (b - a) * u.x; let cd = c + (d - c) * u.x;
+  return (ab + (cd - ab) * u.y) * 2.0 - 1.0;
+}
+fn tridged(p : vec2<f32>, seed : f32) -> f32 {
+  var sum = 0.0; var amp = 1.0; var freq = T_BASE_FREQ; var prev = 1.0; var norm = 0.0;
+  for (var o = 0; o < 5; o = o + 1) {
+    let n = tnoise2(vec2<f32>(p.x * freq + seed * 19.3, p.y * freq + seed * 7.1));
+    var r = 1.0 - abs(n); r = r * r;
+    sum = sum + r * amp * prev; prev = r; norm = norm + amp; freq = freq * 2.0; amp = amp * 0.5;
+  }
+  return pow(sum / norm, T_EXPO);
+}
+fn groundBase(p : vec2<f32>) -> f32 {
+  let wx = p.x + T_WARP * tnoise2(p * T_WARP_FREQ);
+  let wz = p.y + T_WARP * tnoise2(p * T_WARP_FREQ + vec2<f32>(31.7, 17.3));
+  let detail = tnoise2(p * 0.05) * 7.0 + tnoise2(p * 0.12) * 3.0;
+  return YFLOOR + GROUND_AMP * tridged(vec2<f32>(wx, wz), 1.7) + detail;
+}
+fn ceilBase(p : vec2<f32>) -> f32 {
+  let a = p + vec2<f32>(4000.0, -4000.0);
+  let wx = a.x + T_WARP * tnoise2(a * T_WARP_FREQ);
+  let wz = a.y + T_WARP * tnoise2(a * T_WARP_FREQ + vec2<f32>(31.7, 17.3));
+  return YCEIL - CEIL_AMP * tridged(vec2<f32>(wx, wz), 5.9);
+}
+fn wallAmt(p : vec2<f32>) -> f32 {
+  let side = (abs(p.x) - CORRIDOR_HALF) / WALLW;
+  let back = (p.y - 30.0) / BACKW;
+  return clamp(max(side, back), 0.0, 1.0);
+}
+fn tsmooth(w : f32) -> f32 { return w * w * (3.0 - 2.0 * w); }
+fn groundY(p : vec2<f32>) -> f32 {
+  let w = tsmooth(wallAmt(p)); let g = groundBase(p);
+  if (w <= 0.0) { return g; }
+  return g + ((g + ceilBase(p)) * 0.5 - g) * w;
+}
+fn ceilY(p : vec2<f32>) -> f32 {
+  let w = tsmooth(wallAmt(p)); let c = ceilBase(p);
+  if (w <= 0.0) { return c; }
+  return c + ((groundBase(p) + c) * 0.5 - c) * w;
+}
+fn tpatch(p : vec2<f32>) -> f32 {
+  let n = tnoise2(p * 0.0016 + vec2<f32>(5.1, -2.3)) * 0.62 + tnoise2(p * 0.0041 + vec2<f32>(11.0, 7.0)) * 0.38;
+  return clamp((n + 1.0) * 0.5, 0.0, 1.0);
+}
+
+// ---------- cloud-gas density (the eml carve) ----------
+fn heightGrad(h : f32) -> f32 {
+  let bottom = smoothstep(0.0, 0.18, h);
+  let top    = 1.0 - smoothstep(0.55, 1.0, h);
+  return clamp(bottom * top, 0.0, 1.0);
+}
+fn cloud(p : vec3<f32>, cheap : bool) -> f32 {
+  let altitude = U.p1.x;
+  let thick    = U.p1.y;
+  let bottom   = altitude - thick * 0.5;
+  let h = clamp((p.y - bottom) / thick, 0.0, 1.0);
+  if (h <= 0.0 || h >= 1.0) { return 0.0; }
+  let wind = vec3<f32>(U.res.z * U.p2.w, 0.0, U.res.z * U.p2.w * 0.35);
+  let covScale = U.p1.z * 0.012;
+  let nLow = fbm3(p * covScale + wind);     // 3-octave coverage (cheaper; low-freq anyway)
+  let weather = U.p2.z;
+  let cov = smoothstep(0.0, 1.0, clamp((nLow - (1.0 - weather)) / 0.42, 0.0, 1.0));   // softer edges, less speckle
+  let d = clamp(cov * heightGrad(h), 1e-3, 1.0);
+  let detScale = U.p1.w * 0.05;
+  let n = clamp(fbm3(p * detScale + wind * 2.0), 0.0, 1.0);   // 3-octave carve detail (cheaper)
+  let expTerm = U.p3.x * U.p0.y * (exp(U.p0.x * n) - 1.0);
+  let lnTerm  = U.p3.y * U.p0.z * (-log(d));
+  let eml = expTerm + lnTerm;
+  var dens = U.p0.w * d - eml;
+  dens = dens - U.p2.x;
+  return max(dens, 0.0);
+}
+
+fn hg(cosT : f32, g : f32) -> f32 {
+  let g2 = g * g;
+  return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
+}
+
+fn skyColor(rd : vec3<f32>) -> vec3<f32> {
+  let t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+  var col = mix(U.sky0.xyz, U.sky1.xyz, pow(t, 0.8));
+  let sd = max(dot(rd, U.sun.xyz), 0.0);
+  let glow = pow(sd, 8.0) * 0.4 + pow(sd, 280.0) * 6.0;
+  col += U.sunCol.xyz * glow * U.sun.w;
+  return col;
+}
+
+// cloud slab [bottom,top] intersection for an arbitrary ray -> (t0, t1)
+fn cloudSlabRange(ro : vec3<f32>, rd : vec3<f32>) -> vec2<f32> {
+  let altitude = U.p1.x; let thick = U.p1.y;
+  let yb = altitude - thick * 0.5; let yt = altitude + thick * 0.5;
+  if (abs(rd.y) < 1e-4) {
+    if (ro.y > yb && ro.y < yt) { return vec2<f32>(0.0, 3000.0); }
+    return vec2<f32>(1.0, 0.0);
+  }
+  let ta = (yb - ro.y) / rd.y; let tb = (yt - ro.y) / rd.y;
+  let t0 = max(min(ta, tb), 0.0); let t1 = max(ta, tb);
+  return vec2<f32>(t0, max(t0, t1));
+}
+
+// volumetric march -> premultiplied colour in .xyz, transmittance in .w
+fn marchClouds(ro : vec3<f32>, rd : vec3<f32>, t0in : f32, t1in : f32, coarse : bool, pix : vec2<f32>) -> vec4<f32> {
+  let sun = U.sun.xyz;
+  var T = 1.0; var col = vec3<f32>(0.0);
+  let cosT = dot(rd, sun);
+  let phase = mix(hg(cosT, 0.18), hg(cosT, 0.74), 0.55);
+  let godk = U.sunCol.w * U.p2.y;
+  let thick = U.p1.y;
+  let quality = U.res.w;
+  let maxDist = 5000.0; let fadeStart = maxDist * 0.5;
+  let nearStep = max(thick * (0.075 / quality), 2.0);
+  let jitter = hash21(pix);                 // stable per-pixel dither => no temporal grain shimmer
+  var t = t0in + nearStep * jitter;
+  let maxIter = select(i32(140.0 * quality), 40, coarse);
+  let lsteps = 2;
+  for (var i = 0; i < maxIter; i = i + 1) {
+    if (T < 0.02 || t > t1in) { break; }
+    let p = ro + rd * t;
+    let dt = max(nearStep, t * 0.012);
+    let dens = cloud(p, false) * U.p2.y;
+    if (dens > 0.003) {
+      let fade = 1.0 - smoothstep(fadeStart, maxDist, t);
+      var ls = 0.0;
+      let lstep = thick * 0.12;
+      for (var j = 1; j <= lsteps; j = j + 1) {
+        let lp = p + sun * (lstep * f32(j));
+        ls += cloud(lp, true) * U.p2.y;
+      }
+      let lightT = exp(-ls * lstep * 0.85);
+      let powder = 1.0 - exp(-dens * 2.0);
+      let sunLight = U.sunCol.xyz * U.sun.w * lightT * phase * godk * powder;
+      let ambient = mix(U.sky0.xyz, U.sky1.xyz, 0.6) * U.p3.z * 1.6;   // softer fill, less harsh grain in shadow
+      let lit = sunLight + ambient;
+      let a = (1.0 - exp(-dens * dt * 0.04)) * fade;
+      col += T * a * lit;
+      T *= 1.0 - a;
+    }
+    t += dt;
+  }
+  return vec4<f32>(col, T);
+}
+
+// ---------- distance level-of-detail terrain: fade noise octaves below a pixel (kills tip shimmer) ----------
+// fw = world-space pixel footprint at the sample; octaves finer than the footprint are smoothed away
+fn tridgedLOD(p : vec2<f32>, seed : f32, fw : f32) -> f32 {
+  var sum = 0.0; var amp = 1.0; var freq = T_BASE_FREQ; var prev = 1.0; var norm = 0.0;
+  for (var o = 0; o < 5; o = o + 1) {
+    let fade = smoothstep(fw * 3.0, fw * 7.0, 1.0 / freq);   // 1 if octave coarser than footprint, 0 if finer
+    if (fade <= 0.002) {                                      // this + all finer octaves are sub-pixel: skip the costly noise
+      for (var k = o; k < 5; k = k + 1) { sum = sum + amp * prev; prev = 1.0; norm = norm + amp; amp = amp * 0.5; }
+      break;
+    }
+    let n = tnoise2(vec2<f32>(p.x * freq + seed * 19.3, p.y * freq + seed * 7.1));
+    var r = 1.0 - abs(n); r = r * r;
+    r = mix(1.0, r, fade);                                   // smooth ridge detail finer than a pixel
+    sum = sum + r * amp * prev; prev = r; norm = norm + amp; freq = freq * 2.0; amp = amp * 0.5;
+  }
+  return pow(sum / norm, T_EXPO);
+}
+fn groundBaseLOD(p : vec2<f32>, fw : f32) -> f32 {
+  let wx = p.x + T_WARP * tnoise2(p * T_WARP_FREQ);
+  let wz = p.y + T_WARP * tnoise2(p * T_WARP_FREQ + vec2<f32>(31.7, 17.3));
+  let dfade = smoothstep(fw * 3.0, fw * 7.0, 12.0);          // fade the fine detail bumps with distance
+  let detail = (tnoise2(p * 0.05) * 7.0 + tnoise2(p * 0.12) * 3.0) * dfade;
+  return YFLOOR + GROUND_AMP * tridgedLOD(vec2<f32>(wx, wz), 1.7, fw) + detail;
+}
+fn groundYLOD(p : vec2<f32>, fw : f32) -> f32 {
+  let w = tsmooth(wallAmt(p)); let g = groundBaseLOD(p, fw);
+  if (w <= 0.0) { return g; }
+  return g + ((g + ceilBase(p)) * 0.5 - g) * w;
+}
+
+// ---------- terrain: conservative heightfield SDF sphere-trace (floor only) ----------
+// step = vertical gap / Lipschitz bound = the largest provably-safe Euclidean step (won't skip the surface)
+const LIP : f32 = 3.5;            // bounds the floor's max slope sqrt(1+slope^2); higher = safer steps, less peak-skip flicker
+const FWK : f32 = 0.0045;         // pixel-footprint growth per unit distance (LOD aggressiveness)
+fn marchFloor(ro : vec3<f32>, rd : vec3<f32>, tmax : f32) -> vec2<f32> {
+  var t = 1.0; var prevT = t;
+  let maxI = i32(150.0 * U.res.w);
+  for (var i = 0; i < maxI; i = i + 1) {
+    let p = ro + rd * t;
+    let f = p.y - groundYLOD(p.xz, t * FWK);   // >0 above floor, <0 below
+    if (f < 0.0) {
+      var lo = prevT; var hi = t;
+      for (var b = 0; b < 6; b = b + 1) {
+        let mid = (lo + hi) * 0.5;
+        let pm = ro + rd * mid;
+        if ((pm.y - groundYLOD(pm.xz, mid * FWK)) < 0.0) { hi = mid; } else { lo = mid; }
+      }
+      return vec2<f32>(hi, 1.0);
+    }
+    prevT = t;
+    t += min(max(2.0, f / LIP), t * 0.03 + 8.0);    // tighter SDF step => thin peak tips aren't skipped
+    if (t > tmax) { break; }
+  }
+  return vec2<f32>(tmax, 0.0);
+}
+fn floorNormal(xz : vec2<f32>) -> vec3<f32> {
+  let e = 4.0;
+  let gx = groundY(xz + vec2<f32>(e, 0.0)) - groundY(xz - vec2<f32>(e, 0.0));
+  let gz = groundY(xz + vec2<f32>(0.0, e)) - groundY(xz - vec2<f32>(0.0, e));
+  return normalize(vec3<f32>(-gx, 2.0 * e, -gz));
+}
+// LOD normal: widen the sampling with the pixel footprint so distant slopes don't shimmer
+fn floorNormalLOD(xz : vec2<f32>, fw : f32) -> vec3<f32> {
+  let e = max(4.0, fw);
+  let gx = groundYLOD(xz + vec2<f32>(e, 0.0), fw) - groundYLOD(xz - vec2<f32>(e, 0.0), fw);
+  let gz = groundYLOD(xz + vec2<f32>(0.0, e), fw) - groundYLOD(xz - vec2<f32>(0.0, e), fw);
+  return normalize(vec3<f32>(-gx, 2.0 * e, -gz));
+}
+fn ceilNormal(xz : vec2<f32>) -> vec3<f32> {
+  let e = 4.0;
+  let gx = ceilY(xz + vec2<f32>(e, 0.0)) - ceilY(xz - vec2<f32>(e, 0.0));
+  let gz = ceilY(xz + vec2<f32>(0.0, e)) - ceilY(xz - vec2<f32>(0.0, e));
+  return normalize(vec3<f32>(gx, -2.0 * e, gz));
+}
+// soft terrain self-shadow: sphere-trace toward the sun; penumbra from how closely rays graze ridges
+fn floorShadow(p : vec3<f32>, ld : vec3<f32>) -> f32 {
+  var res = 1.0; var t = 8.0;
+  for (var i = 0; i < 13; i = i + 1) {
+    let sp = p + ld * t;
+    let h = sp.y - groundY(sp.xz);
+    if (h < 0.0) { return 0.0; }
+    res = min(res, 9.0 * h / t);
+    t += max(11.0, h * 0.8);
+    if (t > 1200.0) { break; }
+  }
+  return clamp(res, 0.0, 1.0);
+}
+// cheap heightfield ambient occlusion: nearby terrain rising into the local hemisphere darkens crevices
+fn floorAO(p : vec3<f32>, n : vec3<f32>) -> f32 {
+  var ao = 0.0; var sca = 1.0;
+  for (var i = 1; i <= 4; i = i + 1) {
+    let hr = 11.0 * f32(i);
+    let d = (p + n * hr).y - groundY((p + n * hr).xz);
+    ao += (hr - d) * sca;
+    sca *= 0.6;
+  }
+  return clamp(1.0 - ao * 0.035, 0.4, 1.0);   // floor so crevices darken but never go black
+}
+// sunlight transmittance through the cloud-gas above a point (the gas shadows the ground + water)
+fn cloudShadow(p : vec3<f32>) -> f32 {
+  if (U.p4.w < 0.5) { return 1.0; }
+  let ld = U.sun.xyz;
+  var sh = 0.0; let step = U.p1.y * 0.28;
+  for (var j = 1; j <= 3; j = j + 1) {
+    sh += cloud(p + ld * (step * f32(j) + 20.0), true) * U.p2.y;
+  }
+  return exp(-sh * step * 0.45);
+}
+fn shadeTerrain(p : vec3<f32>, id : f32) -> vec3<f32> {
+  let sun = U.sun.xyz;
+  let dist = length(p - U.camPos.xyz);
+  let fw = dist * FWK;
+  let detFade = clamp(1.0 - dist * 0.0009, 0.0, 1.0);   // fade micro-detail with distance
+  var n : vec3<f32>;
+  var base : vec3<f32>;
+  if (id > 1.5) {
+    n = ceilNormal(p.xz);
+    let t = clamp((p.y - (YCEIL - CEIL_AMP)) / CEIL_AMP, 0.0, 1.0);
+    base = mix(vec3<f32>(0.141, 0.165, 0.196), vec3<f32>(0.349, 0.380, 0.424), t);   // ceilLo -> ceilHi
+  } else {
+    n = floorNormalLOD(p.xz, fw);
+    let flat = n.y;
+    let t = clamp((p.y - YFLOOR) / GROUND_AMP, 0.0, 1.0);
+    let pc = tpatch(p.xz);
+    var grass = mix(vec3<f32>(0.235, 0.341, 0.133), vec3<f32>(0.510, 0.769, 0.337),
+                    clamp((flat - 0.4) / 0.4, 0.0, 1.0) * clamp(pc + 0.2, 0.0, 1.0));   // grassLo -> grassHi
+    let rock = mix(vec3<f32>(0.26, 0.255, 0.27), vec3<f32>(0.40, 0.37, 0.34), tnoise2(p.xz * 0.03) * 0.5 + 0.5); // varied, darker rock
+    base = mix(grass, rock, clamp((0.6 - flat) / 0.3, 0.0, 1.0));
+    if (t > 0.88) { base = mix(base, vec3<f32>(0.92, 0.95, 0.97), min(1.0, (t - 0.88) / 0.12) * flat * flat); }  // snow only on flat high caps
+    let m = tnoise2(p.xz * 0.05) * 0.10 + 0.95;
+    base = base * m;
+    let lowF = 1.0 - smoothstep(YFLOOR, YFLOOR + GROUND_AMP * 0.7, p.y);
+    let moss = mix(vec3<f32>(0.184, 0.353, 0.133), vec3<f32>(0.404, 0.671, 0.231), 0.5);
+    base = mix(base, moss, smoothstep(0.34, 0.62, tnoise2(p.xz * 0.02) * 0.5 + 0.5) * 0.45 * lowF);
+  }
+  // break up the plastic look: gentle albedo mottle + subtle micro normal relief
+  base = base * (fbm3(p * 0.012) * 0.22 + 0.88);
+  let bn = vnoise(p * 0.05);
+  let bx = vnoise(p * 0.05 + vec3<f32>(0.9, 0.0, 0.0)) - bn;
+  let bz = vnoise(p * 0.05 + vec3<f32>(0.0, 0.0, 0.9)) - bn;
+  n = normalize(n + vec3<f32>(-bx, 0.0, -bz) * (0.6 * detFade));   // fade micro-relief with distance (no far shimmer)
+  let dif = max(dot(n, sun), 0.0);
+  let amb = mix(U.sky0.xyz, U.sky1.xyz, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+  let ao = floorAO(p, n);
+  var sh = 1.0;
+  if (dif > 0.01) { sh = floorShadow(p, sun) * cloudShadow(p); }   // only worth tracing where the sun reaches
+  return base * (amb * 0.5 * ao + U.sunCol.xyz * U.sun.w * dif * 0.9 * sh) + base * 0.12 * ao;
+}
+
+// ---------- forcefield DOME = arched vault ceiling (the play-space boundary) ----------
+// vault height over the corridor at world (x,z); seals down to the floor at walls/back
+fn domeCeil(p : vec2<f32>) -> f32 {
+  let nx = clamp(p.x / ARCH_HALF, -1.0, 1.0);
+  let arch = ARCH_EDGE + ARCH_RISE * sqrt(max(0.0, 1.0 - nx * nx));
+  let w = tsmooth(wallAmt(p));                           // wallAmt is pure arithmetic (cheap)
+  if (w <= 0.001) { return arch; }                       // open corridor => skip the costly groundBase seal
+  let seal = groundBase(p) + 60.0;                       // pinch onto the floor at the boundary
+  return arch + (min(arch, seal) - arch) * w;
+}
+// where the view ray pierces the vault -> t, or -1
+fn domeCross(ro : vec3<f32>, rd : vec3<f32>, tmax : f32) -> f32 {
+  var t = 1.0; var prevT = t;
+  let maxI = i32(70.0 * U.res.w);            // smooth analytic vault => far fewer steps needed
+  for (var i = 0; i < maxI; i = i + 1) {
+    let p = ro + rd * t;
+    let g = p.y - domeCeil(p.xz);                        // <0 below the vault, >0 once pierced
+    if (g > 0.0) {
+      var lo = prevT; var hi = t;
+      for (var b = 0; b < 6; b = b + 1) {
+        let mid = (lo + hi) * 0.5;
+        let pm = ro + rd * mid;
+        if ((pm.y - domeCeil(pm.xz)) > 0.0) { hi = mid; } else { lo = mid; }
+      }
+      return hi;
+    }
+    prevT = t;
+    let dt = max(3.0, min((-g) * 0.6, t * 0.02 + 10.0));
+    t += dt;
+    if (t > tmax) { break; }
+  }
+  return -1.0;
+}
+// glowing lattice on the vault -> rgb glow, .w = line coverage (0 = open sky between the ribs)
+fn forcefield(p : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  let nx = clamp(p.x / ARCH_HALF, -1.0, 1.0);
+  let theta = asin(nx);                                  // -PI/2..PI/2 across the arch (even spacing)
+  let ARCN = 11.0;                                       // ribs across the arch
+  let RIB = 240.0;                                       // spacing of rings along the corridor (Z)
+  let u = theta / 3.14159265 * ARCN;
+  let v = p.z / RIB;
+  let du = 0.5 - abs(fract(u) - 0.5);                    // 0 on an along-corridor stringer
+  let dv = 0.5 - abs(fract(v) - 0.5);                    // 0 on an across-arch ring
+  let lwf = 0.05;
+  var wire = max(1.0 - smoothstep(0.0, lwf, du), 1.0 - smoothstep(0.0, lwf, dv));
+  let e = 4.0;
+  let gx = domeCeil(p.xz + vec2<f32>(e, 0.0)) - domeCeil(p.xz - vec2<f32>(e, 0.0));
+  let gz = domeCeil(p.xz + vec2<f32>(0.0, e)) - domeCeil(p.xz - vec2<f32>(0.0, e));
+  let n = normalize(vec3<f32>(gx, -2.0 * e, gz));
+  let fres = pow(1.0 - abs(dot(n, rd)), 2.0);            // grazing rim glows brighter
+  let pulse = 0.65 + 0.35 * sin(U.res.z * 2.0 + theta * 5.0 + p.z * 0.01);
+  let col = vec3<f32>(0.35, 0.95, 1.0) * pulse * (0.55 + fres * 0.9);
+  let edgeFade = smoothstep(1.0, 0.84, abs(nx));         // dissolve where the vault meets the walls
+  return vec4<f32>(col, wire * edgeFade);
+}
+
+// ---------- water ----------
+fn waterNormal(xz : vec2<f32>) -> vec3<f32> {
+  let tm = U.res.z * 0.2;
+  let e = 2.5; let s = 0.05;
+  let h0 = fbm3(vec3<f32>(xz.x * s, xz.y * s, tm));
+  let hx = fbm3(vec3<f32>((xz.x + e) * s, xz.y * s, tm));
+  let hz = fbm3(vec3<f32>(xz.x * s, (xz.y + e) * s, tm));
+  return normalize(vec3<f32>((h0 - hx) * 2.0, 1.0, (h0 - hz) * 2.0));
+}
+fn shadeWater(ro : vec3<f32>, rd : vec3<f32>, tw : f32) -> vec3<f32> {
+  let p = ro + rd * tw;
+  let n = waterNormal(p.xz);
+  let V = -rd;
+  let ndv = max(dot(n, V), 0.0);
+  let fres = 0.04 + 0.6 * pow(1.0 - ndv, 5.0);
+  let r = normalize(reflect(rd, n));
+  var refl = skyColor(r);
+  if (U.p4.w > 0.5 && r.y > 0.0) {                  // mirror the cloud-gas too
+    let slab = cloudSlabRange(p, r);
+    if (slab.y > slab.x) {
+      let cc = marchClouds(p, r, slab.x, slab.y, true, p.xz * 0.5);
+      refl = cc.xyz + refl * cc.w;
+    }
+  }
+  let deep = vec3<f32>(0.047, 0.227, 0.353);        // 0x0c3a5a
+  var body = mix(deep, refl, fres);
+  let hh = normalize(U.sun.xyz + V);
+  let spec = pow(max(dot(n, hh), 0.0), 200.0) * 0.6 * cloudShadow(p);   // gas dims the sun glints
+  return body + vec3<f32>(1.0) * spec;
+}
+
+struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) uv : vec2<f32> };
+
+@vertex
+fn vs(@builtin(vertex_index) vid : u32) -> VSOut {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0,-1.0), vec2<f32>(3.0,-1.0), vec2<f32>(-1.0,3.0));
+  var o : VSOut;
+  o.pos = vec4<f32>(p[vid], 0.0, 1.0);
+  o.uv = p[vid];
+  return o;
+}
+
+fn aces(x : vec3<f32>) -> vec3<f32> {   // filmic tonemap (Narkowicz) — more contrast & highlight rolloff
+  let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4<f32> {
+  let aspect = U.res.x / U.res.y;
+  let uv = vec2<f32>(in.uv.x * aspect, in.uv.y);
+  let ro = U.camPos.xyz;
+  let rd = normalize(U.camFwd.xyz * 1.5 + U.camRight.xyz * uv.x + U.camUp.xyz * uv.y);
+  let FAR = 9000.0;
+
+  // ---- backdrop: floor, then water plane over it, else open sky ----
+  var bg = skyColor(rd);
+  var bgT = FAR;
+  var hitSolid = false;
+  if (U.p4.x > 0.5) {
+    let tr = marchFloor(ro, rd, FAR);
+    if (tr.y > 0.5) { bg = shadeTerrain(ro + rd * tr.x, 1.0); bgT = tr.x; hitSolid = true; }
+  }
+  if (U.p4.y > 0.5 && abs(rd.y) > 1e-5) {
+    let WL = U.p3.w;
+    let tw = (WL - ro.y) / rd.y;
+    if (tw > 0.0 && tw < bgT) {
+      let wp = ro + rd * tw;
+      if (groundY(wp.xz) < WL + 1.0) {                // only where the basin actually floods
+        bg = shadeWater(ro, rd, tw); bgT = tw; hitSolid = true;
+      }
+    }
+  }
+
+  // aerial perspective: distant terrain fades into the sky => depth + low-contrast silhouettes (hides tip shimmer)
+  if (hitSolid) {
+    let aerial = clamp(1.0 - exp(-bgT * 0.00045), 0.0, 1.0);
+    let hazeCol = mix(skyColor(rd), U.p5.xyz, U.p5.w);   // sky tint above water; murk tint when submerged
+    bg = mix(bg, hazeCol, aerial * 0.7);
+  }
+
+  // FORCEFIELD DOME is invisible now — the boundary is still enforced by collision (JS domeCeil);
+  //   the glowing wireframe is no longer drawn. (domeCross/forcefield kept for easy re-enable.)
+
+  // ---- cloud-gas over the backdrop ----
+  var outc = bg;
+  if (U.p4.w > 0.5) {
+    let slab = cloudSlabRange(ro, rd);
+    let t0 = slab.x;
+    let t1 = min(slab.y, bgT);
+    if (t1 > t0) {
+      let cc = marchClouds(ro, rd, t0, t1, false, in.pos.xy);
+      outc = cc.xyz + bg * cc.w;
+    }
+  }
+
+  var col = aces(outc * 0.7);                           // exposure + filmic curve
+  let lum = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+  col = mix(vec3<f32>(lum), col, 1.18);                 // gentle saturation lift
+  col = pow(col, vec3<f32>(1.0 / 2.2));                 // gamma encode
+  return vec4<f32>(col, 1.0);
+}
+</script>
+
+<script type="text/wgsl" id="fxaa">
+@group(0) @binding(0) var tex : texture_2d<f32>;
+@group(0) @binding(1) var smp : sampler;
+struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) uv : vec2<f32> };
+@vertex
+fn vs(@builtin(vertex_index) vid : u32) -> VSOut {
+  var p = array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0), vec2<f32>(3.0,-1.0), vec2<f32>(-1.0,3.0));
+  var o : VSOut; o.pos = vec4<f32>(p[vid], 0.0, 1.0); o.uv = p[vid]; return o;
+}
+fn lum(c : vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
+// classic FXAA (Lottes) edge-directed blur — smooths the raymarch silhouettes
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(tex));
+  let rcp = 1.0 / dims;
+  let uv = in.pos.xy * rcp;
+  let SPAN_MAX = 8.0; let REDUCE_MUL = 1.0 / 8.0; let REDUCE_MIN = 1.0 / 128.0;
+  let mC = textureSampleLevel(tex, smp, uv, 0.0).rgb;
+  let nw = textureSampleLevel(tex, smp, uv + vec2<f32>(-rcp.x, -rcp.y), 0.0).rgb;
+  let ne = textureSampleLevel(tex, smp, uv + vec2<f32>( rcp.x, -rcp.y), 0.0).rgb;
+  let sw = textureSampleLevel(tex, smp, uv + vec2<f32>(-rcp.x,  rcp.y), 0.0).rgb;
+  let se = textureSampleLevel(tex, smp, uv + vec2<f32>( rcp.x,  rcp.y), 0.0).rgb;
+  let lNW = lum(nw); let lNE = lum(ne); let lSW = lum(sw); let lSE = lum(se); let lM = lum(mC);
+  let lMin = min(lM, min(min(lNW, lNE), min(lSW, lSE)));
+  let lMax = max(lM, max(max(lNW, lNE), max(lSW, lSE)));
+  var dir = vec2<f32>(-((lNW + lNE) - (lSW + lSE)), ((lNW + lSW) - (lNE + lSE)));
+  let dirReduce = max((lNW + lNE + lSW + lSE) * 0.25 * REDUCE_MUL, REDUCE_MIN);
+  let rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
+  dir = clamp(dir * rcpDirMin, vec2<f32>(-SPAN_MAX), vec2<f32>(SPAN_MAX)) * rcp;
+  let rgbA = 0.5 * (textureSampleLevel(tex, smp, uv + dir * (1.0 / 3.0 - 0.5), 0.0).rgb
+                  + textureSampleLevel(tex, smp, uv + dir * (2.0 / 3.0 - 0.5), 0.0).rgb);
+  let rgbB = rgbA * 0.5 + 0.25 * (textureSampleLevel(tex, smp, uv + dir * -0.5, 0.0).rgb
+                                + textureSampleLevel(tex, smp, uv + dir *  0.5, 0.0).rgb);
+  let lB = lum(rgbB);
+  var outc = rgbB;
+  if (lB < lMin || lB > lMax) { outc = rgbA; }
+  return vec4<f32>(outc, 1.0);
+}
+</script>
+
+<script>
+const cv = document.getElementById('c');
+const errEl = document.getElementById('err');
+function fail(msg){ errEl.style.display='flex'; errEl.innerHTML = msg; }
+
+// ---------------- controls / sliders ----------------
+const ids = ['tod','weather','wind','god','kNoise','expGain','lnGain','fill','alt','thick',
+  'covscale','detail','iso','dens','speed','quality','res'];
+const el = {};
+ids.forEach(id=>{ el[id]=document.getElementById(id);
+  const vv=document.getElementById(id+'_v');
+  const fmt=()=>{ let n=+el[id].value; vv.textContent = (id==='alt'||id==='thick'||id==='speed')?n.toFixed(0):n.toFixed(2); };
+  el[id].addEventListener('input',fmt); fmt();
+});
+const expOn=document.getElementById('expOn'), lnOn=document.getElementById('lnOn');
+const terrainOn=document.getElementById('terrainOn'), waterOn=document.getElementById('waterOn'), cloudOn=document.getElementById('cloudOn');
+
+const defaults={tod:16.24,weather:0.34,wind:0.6,god:2.5,kNoise:2.18,expGain:0.01,lnGain:0.01,
+  fill:2.15,alt:429,thick:453,covscale:0.59,detail:4.99,iso:0.13,dens:1.35,speed:1400,quality:1.4,res:1.0};
+document.getElementById('reset').onclick=()=>{ for(const k in defaults){ el[k].value=defaults[k]; el[k].dispatchEvent(new Event('input')); }
+  expOn.checked=lnOn.checked=terrainOn.checked=waterOn.checked=cloudOn.checked=true; };
+
+// ---------------- caverns terrain (ported 1:1 for camera start + collision) ----------------
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const YFLOOR=-450, GROUND_AMP=460, YCEIL=780, CEIL_AMP=440, WL=-300;
+const T_BASE_FREQ=1/300, T_WARP_FREQ=1/660, T_WARP=80, T_EXPO=1.75;
+const CORRIDOR_HALF=1600, WALLW=420, BACKW=210;
+function thash2(x,z){ const n=Math.sin(x*127.1+z*311.7)*43758.5453; return n-Math.floor(n); }
+function tnoise2(x,z){
+  const xi=Math.floor(x), zi=Math.floor(z), xf=x-xi, zf=z-zi;
+  const u=xf*xf*(3-2*xf), v=zf*zf*(3-2*zf);
+  const a=thash2(xi,zi), b=thash2(xi+1,zi), c=thash2(xi,zi+1), d=thash2(xi+1,zi+1);
+  const ab=a+(b-a)*u, cd=c+(d-c)*u;
+  return (ab+(cd-ab)*v)*2-1;
+}
+function tridged(x,z,seed){
+  let sum=0, amp=1, freq=T_BASE_FREQ, prev=1, norm=0;
+  for(let o=0;o<5;o++){ const n=tnoise2(x*freq+seed*19.3, z*freq+seed*7.1); let r=1-Math.abs(n); r*=r; sum+=r*amp*prev; prev=r; norm+=amp; freq*=2; amp*=0.5; }
+  return Math.pow(sum/norm, T_EXPO);
+}
+function groundBase(x,z){
+  const wx=x+T_WARP*tnoise2(x*T_WARP_FREQ, z*T_WARP_FREQ);
+  const wz=z+T_WARP*tnoise2(x*T_WARP_FREQ+31.7, z*T_WARP_FREQ+17.3);
+  const detail=tnoise2(x*0.05,z*0.05)*7+tnoise2(x*0.12,z*0.12)*3;
+  return YFLOOR+GROUND_AMP*tridged(wx,wz,1.7)+detail;
+}
+function ceilBase(x,z){
+  const ax=x+4000, az=z-4000;
+  const wx=ax+T_WARP*tnoise2(ax*T_WARP_FREQ, az*T_WARP_FREQ);
+  const wz=az+T_WARP*tnoise2(ax*T_WARP_FREQ+31.7, az*T_WARP_FREQ+17.3);
+  return YCEIL-CEIL_AMP*tridged(wx,wz,5.9);
+}
+function wallAmt(x,z){ const side=(Math.abs(x)-CORRIDOR_HALF)/WALLW, back=(z-30)/BACKW; return clamp(Math.max(side,back),0,1); }
+const tsmooth=w=>w*w*(3-2*w);
+function groundY(x,z){ const w=tsmooth(wallAmt(x,z)), g=groundBase(x,z); if(w<=0)return g; return g+((g+ceilBase(x,z))*0.5-g)*w; }
+function ceilY(x,z){ const w=tsmooth(wallAmt(x,z)), c=ceilBase(x,z); if(w<=0)return c; return c+((groundBase(x,z)+c)*0.5-c)*w; }
+const ARCH_EDGE=150, ARCH_RISE=560, ARCH_HALF=1600;
+function domeCeil(x,z){ const nx=clamp(x/ARCH_HALF,-1,1); const arch=ARCH_EDGE+ARCH_RISE*Math.sqrt(Math.max(0,1-nx*nx)); const w=tsmooth(wallAmt(x,z)); const seal=groundBase(x,z)+60; return arch+(Math.min(arch,seal)-arch)*w; }
+
+// ---------------- time-of-day -> sun + palette ----------------
+function lerp(a,b,t){return a+(b-a)*t;}
+function mix3(a,b,t){return [lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];}
+function daystate(tod, weather){
+  const ang=(tod-6)/12*Math.PI, elev=Math.sin(ang), az=(tod/24)*Math.PI*2+0.6;
+  const ce=Math.cos(Math.asin(clamp(elev,-1,1)));
+  const dir=[Math.cos(az)*ce, clamp(elev,-0.25,1), Math.sin(az)*ce];
+  const L=Math.hypot(dir[0],dir[1],dir[2])||1; dir[0]/=L;dir[1]/=L;dir[2]/=L;
+  const night={h:[0.03,0.05,0.10], z:[0.01,0.02,0.05], s:[0.25,0.30,0.45], i:0.15};
+  const golden={h:[0.95,0.55,0.32], z:[0.20,0.27,0.45], s:[1.0,0.62,0.34], i:1.5};
+  const day={h:[0.62,0.74,0.92], z:[0.18,0.40,0.78], s:[1.0,0.97,0.90], i:1.7};
+  let sky0,sky1,sunc,inten;
+  if(elev<0){ const k=clamp((elev+0.25)/0.25,0,1); sky0=mix3(night.h,golden.h,k); sky1=mix3(night.z,golden.z,k); sunc=mix3(night.s,golden.s,k); inten=lerp(night.i,golden.i,k); }
+  else if(elev<0.35){ const k=clamp(elev/0.35,0,1); sky0=mix3(golden.h,day.h,k); sky1=mix3(golden.z,day.z,k); sunc=mix3(golden.s,day.s,k); inten=lerp(golden.i,day.i,k); }
+  else { sky0=day.h.slice(); sky1=day.z.slice(); sunc=day.s.slice(); inten=day.i; }
+  const w=clamp((weather-0.5)*2,0,1);
+  sky0=mix3(sky0,[0.30,0.33,0.38],w*0.5); sky1=mix3(sky1,[0.22,0.25,0.30],w*0.5); inten*=lerp(1.0,0.7,w);
+  return {dir, intensity:inten, sky0, sky1, sunCol:sunc};
+}
+
+// ---------------- flycam (caverns-style FPS, with collision) ----------------
+const cam = { pos:[0, 0, -150], yaw:0, pitch:0, speed:0 };
+function resetCam(){ cam.pos=[0, groundY(0,-150)+150, -150]; cam.yaw=0; cam.pitch=0; cam.speed=0; }
+resetCam();
+document.getElementById('resetCam').onclick=resetCam;
+
+const keys={};
+addEventListener('keydown',e=>{ if(e.key==='h'||e.key==='H'){ togglePanel(); return; } keys[e.code]=true; });
+addEventListener('keyup',e=>keys[e.code]=false);
+cv.addEventListener('click',()=>{ if(!document.pointerLockElement) cv.requestPointerLock(); });
+addEventListener('mousemove',e=>{ if(document.pointerLockElement===cv){ cam.yaw-=e.movementX*0.0022; cam.pitch-=e.movementY*0.0022; cam.pitch=clamp(cam.pitch,-1.45,1.45); } });
+
+const panel=document.getElementById('panel');
+const togBtn=document.getElementById('togglePanel');
+function togglePanel(){ const hidden=panel.classList.toggle('hidden'); togBtn.style.display=hidden?'block':'none'; }
+togBtn.onclick=togglePanel;
+
+const hPad=document.getElementById('hPad');
+addEventListener('gamepadconnected',()=>{ hPad.textContent='gamepad ✓'; hPad.classList.remove('off'); });
+addEventListener('gamepaddisconnected',()=>{ hPad.textContent='no gamepad'; hPad.classList.add('off'); });
+function dz(v,d){ d=d||0.12; return Math.abs(v)<d?0:(v-Math.sign(v)*d)/(1-d); }
+
+function camBasis(){
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch), cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const fwd=[-sy*cp, sp, -cy*cp];
+  // right = normalize(cross(fwd, worldUp)); up = cross(right, fwd)
+  let rx=-fwd[2], ry=0, rz=fwd[0];                       // cross(fwd,(0,1,0))
+  const rl=Math.hypot(rx,ry,rz)||1; rx/=rl; ry/=rl; rz/=rl;
+  const ux=ry*fwd[2]-rz*fwd[1], uy=rz*fwd[0]-rx*fwd[2], uz=rx*fwd[1]-ry*fwd[0]; // cross(right,fwd)
+  return {fwd, right:[rx,ry,rz], up:[ux,uy,uz]};
+}
+function updateCamera(dt){
+  let mvF=0, mvR=0, mvU=0, boost=0;
+  if(keys['KeyW'])mvF+=1; if(keys['KeyS'])mvF-=1;
+  if(keys['KeyD'])mvR+=1; if(keys['KeyA'])mvR-=1;
+  if(keys['Space'])mvU+=1; if(keys['ShiftLeft']||keys['ControlLeft'])mvU-=1;
+  if(keys['ShiftRight'])boost=1;
+  const LOOK=1.6;
+  if(keys['ArrowLeft'])cam.yaw+=LOOK*dt; if(keys['ArrowRight'])cam.yaw-=LOOK*dt;
+  if(keys['ArrowUp'])cam.pitch+=LOOK*dt; if(keys['ArrowDown'])cam.pitch-=LOOK*dt;
+  const gps=navigator.getGamepads?navigator.getGamepads():[]; let gp=null; for(const g of gps){ if(g){gp=g;break;} }
+  if(gp){
+    cam.yaw   -= dz(gp.axes[2]||0)*LOOK*dt*1.6;
+    cam.pitch -= dz(gp.axes[3]||0)*LOOK*dt*1.6;
+    mvR += dz(gp.axes[0]||0); mvF -= dz(gp.axes[1]||0);
+    if(gp.buttons[1]&&gp.buttons[1].pressed)mvU+=1;     // B = up
+    if(gp.buttons[0]&&gp.buttons[0].pressed)mvU-=1;     // A = down
+    if(gp.buttons[5]&&gp.buttons[5].pressed)boost=1;    // RB = boost
+  }
+  cam.pitch=clamp(cam.pitch,-1.45,1.45);
+  const basis=camBasis();
+  const SPEED=(+el.speed.value)*(1+boost*2.0);
+  const px=cam.pos[0], pz=cam.pos[2], py=cam.pos[1];
+  for(let i=0;i<3;i++) cam.pos[i]+=(basis.fwd[i]*mvF + basis.right[i]*mvR)*SPEED*dt;
+  cam.pos[1]+=mvU*SPEED*dt;
+  // collision: floor blocks below, the forcefield vault caps you above (same as the old ceiling)
+  const M=34;
+  let fl=groundY(cam.pos[0],cam.pos[2])+M;
+  let ce=domeCeil(cam.pos[0],cam.pos[2])-M;
+  if(ce-fl<48){ cam.pos[0]=px; cam.pos[2]=pz; fl=groundY(px,pz)+M; ce=domeCeil(px,pz)-M; }  // pinched (wall/back) => undo the move
+  cam.pos[1]=Math.max(fl,Math.min(ce,cam.pos[1]));
+  const moved=Math.hypot(cam.pos[0]-px, cam.pos[1]-py, cam.pos[2]-pz);
+  cam.speed = moved/Math.max(1e-3,dt);
+  return basis;
+}
+
+// ---------------- WebGPU ----------------
+(async function init(){
+  if(!('gpu' in navigator)){
+    fail('WebGPU is not available in this browser.<br><br>Open in <b>Chrome/Edge 113+</b> (or Safari 18+). On Chrome you can enable <b>chrome://flags/#enable-unsafe-webgpu</b>.');
+    return;
+  }
+  let adapter;
+  try { adapter = await navigator.gpu.requestAdapter({powerPreference:'high-performance'}); }
+  catch(e){ adapter=null; }
+  if(!adapter){ fail('No WebGPU adapter found (GPU may be blocked).'); return; }
+  const device = await adapter.requestDevice();
+  device.addEventListener('uncapturederror', e=>console.error('WGPU error:', e.error.message));
+
+  const ctx = cv.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({device, format, alphaMode:'opaque'});
+
+  const code = document.getElementById('wgsl').textContent;
+  const module = device.createShaderModule({code});
+  const info = await module.getCompilationInfo();
+  const errs = info.messages.filter(m=>m.type==='error');
+  if(errs.length){
+    console.error('WGSL compile errors:', errs);
+    fail('Shader compile error:<br><br>'+errs.map(m=>`line ${m.lineNum}: ${m.message}`).join('<br>'));
+    return;
+  }
+  const fxModule = device.createShaderModule({code: document.getElementById('fxaa').textContent});
+  const fxInfo = await fxModule.getCompilationInfo();
+  const fxErrs = fxInfo.messages.filter(m=>m.type==='error');
+  if(fxErrs.length){
+    console.error('FXAA WGSL errors:', fxErrs);
+    fail('FXAA shader error:<br><br>'+fxErrs.map(m=>`line ${m.lineNum}: ${m.message}`).join('<br>'));
+    return;
+  }
+  const SCENE_FMT = 'rgba8unorm';
+
+  // uniform buffer: 16 vec4<f32> = 256 bytes
+  const FLOATS = 16*4;
+  const uData = new Float32Array(FLOATS);
+  const uBuf = device.createBuffer({size: uData.byteLength, usage: GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+
+  const pipeline = device.createRenderPipeline({
+    layout:'auto',
+    vertex:{module, entryPoint:'vs'},
+    fragment:{module, entryPoint:'fs', targets:[{format: SCENE_FMT}]},   // scene -> offscreen texture
+    primitive:{topology:'triangle-list'},
+  });
+  const bind = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries:[{binding:0, resource:{buffer:uBuf}}],
+  });
+  // FXAA resolve pass: offscreen scene texture -> swapchain
+  const fxPipeline = device.createRenderPipeline({
+    layout:'auto',
+    vertex:{module:fxModule, entryPoint:'vs'},
+    fragment:{module:fxModule, entryPoint:'fs', targets:[{format}]},
+    primitive:{topology:'triangle-list'},
+  });
+  const samp = device.createSampler({magFilter:'linear', minFilter:'linear'});
+
+  let RENDER_SCALE = +el.res.value;
+  let W=0,H=0, sceneTex=null, sceneView=null, fxBind=null;
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio||1, 1.0) * RENDER_SCALE;   // internal render resolution (perf lever)
+    W = Math.max(2, Math.floor(innerWidth*dpr));
+    H = Math.max(2, Math.floor(innerHeight*dpr));
+    cv.width=W; cv.height=H;
+    if(sceneTex) sceneTex.destroy();
+    sceneTex = device.createTexture({size:[W,H], format:SCENE_FMT, usage: GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+    sceneView = sceneTex.createView();
+    fxBind = device.createBindGroup({layout: fxPipeline.getBindGroupLayout(0), entries:[{binding:0,resource:sceneView},{binding:1,resource:samp}]});
+  }
+  addEventListener('resize',resize); resize();
+  el.res.addEventListener('input', ()=>{ RENDER_SCALE = +el.res.value; resize(); });   // live resolution control
+
+  const fpsEl=document.getElementById('fps');
+  const hSpd=document.getElementById('hSpd'), hAlt=document.getElementById('hAlt');
+  let last=performance.now(), fcount=0, facc=0;
+
+  // medium fog: grey cavern air above the waterline, dark teal below
+  const AIR=[0.624,0.706,0.776], WATER=[0.055,0.259,0.314];
+  const AIR_DENS=0.00020, WATER_DENS=0.0012;
+
+  function frame(now){
+    let dt=(now-last)/1000; last=now; if(dt>0.05)dt=0.05;
+    facc+=dt; if(++fcount>=20){ fpsEl.textContent=(fcount/facc).toFixed(0)+' fps'; fcount=0; facc=0; }
+
+    const basis = updateCamera(dt);
+    const ds = daystate(+el.tod.value, +el.weather.value);
+
+    // medium blend by eye depth (smooth through the surface, no swap)
+    const sub = clamp((WL+2 - cam.pos[1])/16, 0, 1);
+    const fogCol=[ lerp(AIR[0],WATER[0],sub), lerp(AIR[1],WATER[1],sub), lerp(AIR[2],WATER[2],sub) ];
+    const fogDens = AIR_DENS + (WATER_DENS-AIR_DENS)*sub;
+
+    let o=0; const set=(...v)=>{ for(const x of v) uData[o++]=x; };
+    set(W, H, now/1000, +el.quality.value);                       // res
+    set(cam.pos[0], cam.pos[1], cam.pos[2], 0);                   // camPos
+    set(basis.fwd[0],basis.fwd[1],basis.fwd[2],0);                // camFwd
+    set(basis.right[0],basis.right[1],basis.right[2],0);          // camRight
+    set(basis.up[0],basis.up[1],basis.up[2],0);                   // camUp
+    set(ds.dir[0],ds.dir[1],ds.dir[2], ds.intensity);            // sun
+    set(ds.sky0[0],ds.sky0[1],ds.sky0[2],0);                     // sky0
+    set(ds.sky1[0],ds.sky1[1],ds.sky1[2],0);                     // sky1
+    set(ds.sunCol[0],ds.sunCol[1],ds.sunCol[2], +el.god.value); // sunCol + godray
+    set(+el.kNoise.value, +el.expGain.value, +el.lnGain.value, +el.fill.value); // p0
+    set(+el.alt.value, +el.thick.value, +el.covscale.value, +el.detail.value);  // p1
+    set(+el.iso.value, +el.dens.value, +el.weather.value, +el.wind.value*0.6);  // p2
+    set(expOn.checked?1:0, lnOn.checked?1:0, 0.5, WL);          // p3 (waterLevel in w)
+    set(terrainOn.checked?1:0, waterOn.checked?1:0, fogDens, cloudOn.checked?1:0); // p4
+    set(fogCol[0],fogCol[1],fogCol[2], sub);                    // p5
+
+    device.queue.writeBuffer(uBuf, 0, uData);
+
+    const enc = device.createCommandEncoder();
+    // pass 1: render the scene into the offscreen texture
+    const pass = enc.beginRenderPass({
+      colorAttachments:[{view: sceneView, loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}],
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+    // pass 2: FXAA resolve to the swapchain
+    const pass2 = enc.beginRenderPass({
+      colorAttachments:[{view: ctx.getCurrentTexture().createView(), loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}],
+    });
+    pass2.setPipeline(fxPipeline);
+    pass2.setBindGroup(0, fxBind);
+    pass2.draw(3);
+    pass2.end();
+    device.queue.submit([enc.finish()]);
+
+    hSpd.textContent = Math.round(cam.speed);
+    hAlt.textContent = Math.round(cam.pos[1]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
