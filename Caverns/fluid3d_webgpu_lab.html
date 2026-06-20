@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fluid 3D WebGPU lab — Navier-Stokes smoke</title>
+<style>
+  html,body{margin:0;height:100%;background:#04070b;overflow:hidden;font:13px ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab}
+  #hud{position:fixed;top:8px;left:10px;background:rgba(8,14,22,.8);border:1px solid #1d2b3a;border-radius:8px;padding:8px 10px}
+  .err{position:fixed;top:0;left:0;right:0;padding:14px;background:#3a1015;color:#fbb;white-space:pre-wrap;display:none;z-index:9;font-size:12px}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">3D Navier-Stokes smoke (WebGPU/TSL) — <span id="st">…</span> · auto-emitting; drag to orbit</div>
+<div id="err" class="err"></div>
+<script type="module">
+import * as THREE from 'three';
+import { Fn, vec2, vec3, vec4, float, texture, screenUV, uniform, mix, max, normalize, Loop, If, Break } from 'three/tsl';
+
+const errEl = document.getElementById('err'), st = document.getElementById('st');
+function fail(m){ errEl.style.display='block'; errEl.textContent = String(m && m.stack || m); throw m; }
+window.addEventListener('error', e => fail(e.error || e.message));
+window.addEventListener('unhandledrejection', e => fail(e.reason));
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGPURenderer({ canvas, antialias:false });
+renderer.setSize(innerWidth, innerHeight);
+await renderer.init();
+
+// 3D grid packed in 2D. Velocity (rgb) and density (r) live in SEPARATE targets (no alpha needed).
+const RES = 32, TILES_X = 8, TILES_Y = 4, TW = RES*TILES_X, TH = RES*TILES_Y;
+const opt = () => ({ type: THREE.HalfFloatType, format: THREE.RGBAFormat, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthBuffer:false });
+const velRT=new THREE.RenderTarget(TW,TH,opt()), velS=new THREE.RenderTarget(TW,TH,opt());
+const denRT=new THREE.RenderTarget(TW,TH,opt()), denS=new THREE.RenderTarget(TW,TH,opt());
+const prsRT=new THREE.RenderTarget(TW,TH,opt()), prsS=new THREE.RenderTarget(TW,TH,opt());
+const divRT=new THREE.RenderTarget(TW,TH,opt()), curlRT=new THREE.RenderTarget(TW,TH,opt());
+for (const rt of [velRT,velS,denRT,denS,prsRT,prsS,divRT,curlRT]) { renderer.setRenderTarget(rt); renderer.setClearColor(0x000000,0); renderer.clear(true,false,false); }
+renderer.setRenderTarget(null);
+
+const fsCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+function pass(node3){ const m=new THREE.MeshBasicNodeMaterial(); m.colorNode=node3; m.depthTest=false; m.depthWrite=false; m.toneMapped=false; m.blending=THREE.NoBlending;
+  const s=new THREE.Scene(); const mesh=new THREE.Mesh(new THREE.PlaneGeometry(2,2),m); mesh.frustumCulled=false; s.add(mesh); return s; }
+function run(scene,dst){ renderer.setRenderTarget(dst); renderer.render(scene,fsCam); }
+
+const uDt=uniform(0.10), uBuoy=uniform(1.2), uVort=uniform(3.0), uTime=uniform(0.0), uSliceZ=uniform(16.0), uMode=uniform(0.0);
+const uCamPos=uniform(vec3(0,0,3)), uCamFwd=uniform(vec3(0,0,-1)), uCamRight=uniform(vec3(1,0,0)), uCamUp=uniform(vec3(0,1,0)), uAspect=uniform(1.0);
+
+const cell2uv=(c)=>{ const z=c.z; const tx=z.sub(z.div(TILES_X).floor().mul(TILES_X)); const ty=z.div(TILES_X).floor();
+  return vec2( tx.mul(RES).add(c.x).add(0.5).div(TW), ty.mul(RES).add(c.y).add(0.5).div(TH) ); };
+const fragCell=()=>{ const tx=screenUV.x.mul(TW).floor(), ty=screenUV.y.mul(TH).floor();
+  const tlx=tx.div(RES).floor(), tly=ty.div(RES).floor();
+  return vec3( tx.sub(tlx.mul(RES)), ty.sub(tly.mul(RES)), tly.mul(TILES_X).add(tlx) ); };
+const cell=(rt,c)=>texture(rt.texture, cell2uv(c.clamp(0.0,RES-1)));
+const tri=(rt,pos)=>{ const p=pos.sub(0.5); const i=p.floor(); const f=p.fract();
+  const c000=cell(rt,i),c100=cell(rt,i.add(vec3(1,0,0))),c010=cell(rt,i.add(vec3(0,1,0))),c110=cell(rt,i.add(vec3(1,1,0)));
+  const c001=cell(rt,i.add(vec3(0,0,1))),c101=cell(rt,i.add(vec3(1,0,1))),c011=cell(rt,i.add(vec3(0,1,1))),c111=cell(rt,i.add(vec3(1,1,1)));
+  const x0=mix(c000,c100,f.x),x1=mix(c010,c110,f.x),x2=mix(c001,c101,f.x),x3=mix(c011,c111,f.x);
+  return mix(mix(x0,x1,f.y),mix(x2,x3,f.y),f.z); };
+
+// velocity advection (self) -> velS
+const advVel=pass(Fn(()=>{ const c=fragCell(); const v=cell(velRT,c).xyz; const back=c.add(0.5).sub(v.mul(uDt));
+  return tri(velRT,back).xyz.mul(0.999); })());
+// density advection (by velocity) -> denS
+const advDen=pass(Fn(()=>{ const c=fragCell(); const v=cell(velRT,c).xyz; const back=c.add(0.5).sub(v.mul(uDt));
+  return vec3(tri(denRT,back).x.mul(0.985)); })());
+// forces on velocity: source jet + buoyancy -> velS
+const forceVel=pass(Fn(()=>{ const c=fragCell(); const v=cell(velRT,c).xyz; const p=c.add(0.5).div(RES);
+  const d=p.sub(vec3(0.5,0.14,0.5)).mul(vec3(1,1.3,1)).length(); const src=d.mul(d).mul(160.0).negate().exp();
+  const sw=vec3(uTime.mul(2.0).sin(),0.0,uTime.mul(1.7).cos()).mul(src.mul(0.4));
+  const den=cell(denRT,c).x;
+  return vec3(v.x.add(sw.x), v.y.add(src.mul(2.0)).add(den.mul(uBuoy)), v.z.add(sw.z)); })());
+// density source -> denS
+const forceDen=pass(Fn(()=>{ const c=fragCell(); const p=c.add(0.5).div(RES);
+  const d=p.sub(vec3(0.5,0.14,0.5)).mul(vec3(1,1.3,1)).length(); const src=d.mul(d).mul(160.0).negate().exp();
+  return vec3(cell(denRT,c).x.max(src)); })());
+const divS=pass(Fn(()=>{ const c=fragCell();
+  const dv=cell(velRT,c.add(vec3(1,0,0))).x.sub(cell(velRT,c.add(vec3(-1,0,0))).x)
+    .add(cell(velRT,c.add(vec3(0,1,0))).y.sub(cell(velRT,c.add(vec3(0,-1,0))).y))
+    .add(cell(velRT,c.add(vec3(0,0,1))).z.sub(cell(velRT,c.add(vec3(0,0,-1))).z)).mul(0.5);
+  return vec3(dv); })());
+const jac=(src)=>pass(Fn(()=>{ const c=fragCell(); const P=(o)=>cell(src,c.add(o)).x;
+  return vec3( P(vec3(1,0,0)).add(P(vec3(-1,0,0))).add(P(vec3(0,1,0))).add(P(vec3(0,-1,0))).add(P(vec3(0,0,1))).add(P(vec3(0,0,-1))).sub(cell(divRT,c).x).div(6.0) ); })());
+const jacA=jac(prsRT), jacB=jac(prsS);
+const subg=pass(Fn(()=>{ const c=fragCell(); const P=(o)=>cell(prsRT,c.add(o)).x;
+  const g=vec3(P(vec3(1,0,0)).sub(P(vec3(-1,0,0))),P(vec3(0,1,0)).sub(P(vec3(0,-1,0))),P(vec3(0,0,1)).sub(P(vec3(0,0,-1)))).mul(0.5);
+  return cell(velRT,c).xyz.sub(g); })());
+const curlS=pass(Fn(()=>{ const c=fragCell(); const N=(o)=>cell(velRT,c.add(o)).xyz;
+  const x1=N(vec3(-1,0,0)),x2=N(vec3(1,0,0)),y1=N(vec3(0,-1,0)),y2=N(vec3(0,1,0)),z1=N(vec3(0,0,-1)),z2=N(vec3(0,0,1));
+  return vec3(y2.z.sub(y1.z).sub(z2.y.sub(z1.y)),z2.x.sub(z1.x).sub(x2.z.sub(x1.z)),x2.y.sub(x1.y).sub(y2.x.sub(y1.x))).mul(0.5); })());
+const vortS=pass(Fn(()=>{ const c=fragCell(); const M=(o)=>cell(curlRT,c.add(o)).xyz.length();
+  const g=vec3(M(vec3(1,0,0)).sub(M(vec3(-1,0,0))),M(vec3(0,1,0)).sub(M(vec3(0,-1,0))),M(vec3(0,0,1)).sub(M(vec3(0,0,-1)))).mul(0.5);
+  const Nn=g.div(g.length().max(1e-4)); return cell(velRT,c).xyz.add(Nn.cross(cell(curlRT,c).xyz).mul(uVort).mul(uDt)); })());
+const copyVel=pass(texture(velS.texture,screenUV).xyz), copyDen=pass(texture(denS.texture,screenUV).xyz), copyPrs=pass(texture(prsS.texture,screenUV).xyz);
+
+// volumetric render (sample denRT)
+const dispScene=pass(Fn(()=>{ const ndc=screenUV.mul(2.0).sub(1.0);
+  const rd=normalize(uCamFwd.mul(1.5).add(uCamRight.mul(ndc.x.mul(uAspect))).add(uCamUp.mul(ndc.y))); const ro=uCamPos;
+  const inv=vec3(1.0).div(rd); const t0=vec3(-1.0).sub(ro).mul(inv), t1=vec3(1.0).sub(ro).mul(inv);
+  const tmn=t0.min(t1), tmx=t0.max(t1); const tn=tmn.x.max(tmn.y).max(tmn.z).max(0.0), tf=tmx.x.min(tmx.y).min(tmx.z);
+  const sky=mix(vec3(0.03,0.06,0.10),vec3(0.06,0.11,0.17),screenUV.y);
+  const T=float(1.0).toVar(); const col=vec3(0.0).toVar(); const step=float(2.0/64.0);
+  const t=tn.add(step.mul(screenUV.x.mul(53.0).add(screenUV.y.mul(97.0)).sin().mul(43.0).fract())).toVar();
+  const sun=normalize(vec3(0.5,0.8,0.3));
+  Loop(64,()=>{ If(t.greaterThan(tf).or(T.lessThan(0.02)),()=>{Break();});
+    const wp=ro.add(rd.mul(t)); const g=wp.add(1.0).mul(0.5).mul(RES); const dens=tri(denRT,g).x;
+    If(dens.greaterThan(0.01),()=>{ const sh=tri(denRT, wp.add(sun.mul(0.12)).add(1.0).mul(0.5).mul(RES)).x;
+      const light=sh.mul(-1.5).exp(); const base=mix(vec3(0.34,0.42,0.55),vec3(1.0,0.97,0.92),light);
+      const a=float(1.0).sub(dens.mul(step).mul(8.0).negate().exp()); col.addAssign(T.mul(a).mul(base)); T.mulAssign(float(1.0).sub(a)); });
+    t.addAssign(step); });
+  return mix(sky,col,T.oneMinus()); })());
+const sliceScene=pass(Fn(()=>{ const c=vec3(screenUV.x.mul(RES),screenUV.y.mul(RES),uSliceZ);
+  const dn=cell(denRT,c).x; const sp=cell(velRT,c).xyz.length();
+  return vec3(sp.mul(0.25),dn,dn.mul(0.4)).add(vec3(0.02,0.02,0.05)); })());
+
+let az=0.7, el=0.2, drag=false, px=0, py=0;
+canvas.addEventListener('mousedown',e=>{drag=true;px=e.clientX;py=e.clientY;});
+addEventListener('mouseup',()=>drag=false);
+addEventListener('mousemove',e=>{ if(!drag)return; az-=(e.clientX-px)*0.006; el=Math.max(-1.3,Math.min(1.3,el+(e.clientY-py)*0.006)); px=e.clientX;py=e.clientY; });
+addEventListener('keydown',e=>{ if(e.key==='s') uMode.value=1-uMode.value; });   // toggle slice/volume
+addEventListener('resize',()=>renderer.setSize(innerWidth,innerHeight));
+function updateCam(){ az+=0.002; const cx=Math.cos(az),sx=Math.sin(az),cy=Math.cos(el),sy=Math.sin(el),d=3.0;
+  const cp=[sx*cy*d,sy*d,cx*cy*d]; uCamPos.value.set(...cp);
+  let f=[-cp[0],-cp[1],-cp[2]]; let fl=Math.hypot(...f); f=f.map(v=>v/fl);
+  let r=[f[2],0,-f[0]]; let rl=Math.hypot(...r)||1; r=r.map(v=>v/rl);
+  const u=[r[1]*f[2]-r[2]*f[1],r[2]*f[0]-r[0]*f[2],r[0]*f[1]-r[1]*f[0]];
+  uCamFwd.value.set(...f); uCamRight.value.set(...r); uCamUp.value.set(...u); uAspect.value=innerWidth/innerHeight; }
+
+let t0=performance.now(), fc=0;
+renderer.setAnimationLoop(()=>{
+  uTime.value=performance.now()*0.001; updateCam();
+  for(let sub=0;sub<3;sub++){
+    run(advVel,velS); run(copyVel,velRT);
+    run(advDen,denS); run(copyDen,denRT);
+    run(forceVel,velS); run(copyVel,velRT);
+    run(forceDen,denS); run(copyDen,denRT);
+    run(curlS,curlRT); run(vortS,velS); run(copyVel,velRT);
+    run(divS,divRT);
+    for(let i=0;i<16;i++){ run(jacA,prsS); run(jacB,prsRT); }
+    run(subg,velS); run(copyVel,velRT);
+  }
+  renderer.setRenderTarget(null); renderer.render(uMode.value>0.5?sliceScene:dispScene, fsCam);
+  fc++; if(performance.now()-t0>500){ st.textContent=Math.round(fc/((performance.now()-t0)/1000))+' fps · press S = slice'; t0=performance.now(); fc=0; }
+});
+</script>
+</body>
+</html>

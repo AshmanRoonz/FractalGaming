@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>particle cloud BREAK lab — concentration / H2O model</title>
+<style>
+  html,body{margin:0;height:100%;background:#0a0e13;overflow:hidden;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  /* the metaball trick: soft white blobs, then blur + hard contrast fuses crowded particles into solid cloud */
+  #clouds{position:fixed;inset:0;width:100%;height:100%;filter:blur(6px) contrast(14);background:#0a0e13}
+  #ui{position:fixed;inset:0;width:100%;height:100%;pointer-events:none}
+  #panel{position:fixed;top:10px;left:10px;width:266px;background:rgba(12,18,26,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px;backdrop-filter:blur(6px)}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 92px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 40px;text-align:right;color:#bdf}
+  .row.chk label{flex:1}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px}
+</style>
+</head>
+<body>
+<canvas id="clouds"></canvas>
+<canvas id="ui"></canvas>
+<div id="panel">
+  <h1>particle cloud BREAK lab</h1>
+  <p class="sub">density = crowding, not a painted field</p>
+  <div class="hint"><b>Move your mouse through a cloud</b> (the disk is the "ship"). Tiny particles get shoved, the local concentration drops, and the cloud tears, then the pieces drift and stay torn. That's the H2O model: each particle carries itself, density is just how many are in one spot.</div>
+  <div class="row"><label>push</label><input id="push" type="range" min="0" max="4000" step="10" value="1600"><span class="v" id="push_v"></span></div>
+  <div class="row"><label>swirl</label><input id="swirl" type="range" min="0" max="3000" step="10" value="900"><span class="v" id="swirl_v"></span></div>
+  <div class="row"><label>ship size</label><input id="rad" type="range" min="20" max="220" step="2" value="90"><span class="v" id="rad_v"></span></div>
+  <div class="row"><label>particle r</label><input id="psize" type="range" min="4" max="26" step="1" value="13"><span class="v" id="psize_v"></span></div>
+  <div class="row"><label>drag</label><input id="drag" type="range" min="0.80" max="0.99" step="0.005" value="0.92"><span class="v" id="drag_v"></span></div>
+  <div class="row"><label>reform</label><input id="reform" type="range" min="0" max="0.03" step="0.0005" value="0.0"><span class="v" id="reform_v"></span></div>
+  <div class="row"><label>threshold</label><input id="thresh" type="range" min="4" max="30" step="1" value="14"><span class="v" id="thresh_v"></span></div>
+  <div class="row" style="gap:6px;pointer-events:auto"><button id="reseed">reseed clouds</button><button id="settle">settle</button></div>
+  <div class="hint">reform = 0 means torn cloud stays torn forever (pure break). Nudge it up and the pieces slowly re-amalgamate toward home, like water beading back together.</div>
+</div>
+<div class="fps" id="fps"></div>
+
+<script>
+const cc = document.getElementById('clouds'), cx = cc.getContext('2d');
+const uc = document.getElementById('ui'), ux = uc.getContext('2d');
+let W, H;
+function resize(){ W = innerWidth; H = innerHeight; for (const c of [cc, uc]) { c.width = W; c.height = H; } makeSprite(); }
+addEventListener('resize', resize);
+
+// --- soft particle sprite (a fuzzy dot); crowds of these SUM into solid density ---
+let sprite, SPR;
+function makeSprite(){
+  const r = +el.psize.value; SPR = r;
+  const s = document.createElement('canvas'); s.width = s.height = r*2;
+  const g = s.getContext('2d');
+  const grd = g.createRadialGradient(r, r, 0, r, r, r);
+  grd.addColorStop(0, 'rgba(255,255,255,0.9)');
+  grd.addColorStop(0.5, 'rgba(255,255,255,0.35)');
+  grd.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grd; g.fillRect(0, 0, r*2, r*2);
+  sprite = s;
+}
+
+// --- value-noise fbm (CPU) to decide WHERE clouds are: particles cluster where the field is dense ---
+function hash(x, y){ let h = Math.sin(x*127.1 + y*311.7) * 43758.5453; return h - Math.floor(h); }
+function vnoise(x, y){
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf*xf*(3-2*xf), v = yf*yf*(3-2*yf);
+  const a = hash(xi, yi), b = hash(xi+1, yi), c = hash(xi+1, yi+1), d = hash(xi, yi+1);
+  return a*(1-u)*(1-v) + b*u*(1-v) + d*(1-u)*v + c*u*v;
+}
+function fbm(x, y){ let s=0,a=0.6,f=1; for(let i=0;i<4;i++){ s+=a*vnoise(x*f,y*f); f*=2; a*=0.5; } return s; }
+
+// --- particles ---
+const N = 5200;
+let P = null;
+let seed = 1;
+function seedClouds(){
+  P = new Float32Array(N * 6);   // x,y,vx,vy,hx,hy  (hx,hy = home, for optional reform)
+  const sc = 0.0016 + seed*0.0;  // noise scale
+  let i = 0, guard = 0;
+  while (i < N && guard < N*60){
+    guard++;
+    const x = Math.random()*W, y = Math.random()*H*0.92 + H*0.04;
+    // cluster: accept mostly where the field is dense -> pre-amalgamated cloud shapes
+    const dens = fbm(x*sc + seed*10, y*sc - seed*7);
+    if (Math.random() < (dens - 0.42) * 2.6){
+      const o = i*6; P[o]=x; P[o+1]=y; P[o+2]=0; P[o+3]=0; P[o+4]=x; P[o+5]=y; i++;
+    }
+  }
+  // if rejection under-filled, top up uniformly
+  for (; i < N; i++){ const o=i*6, x=Math.random()*W, y=Math.random()*H; P[o]=x;P[o+1]=y;P[o+2]=0;P[o+3]=0;P[o+4]=x;P[o+5]=y; }
+}
+
+// --- controls ---
+const ids = ['push','swirl','rad','psize','drag','reform','thresh'];
+const el = {}; ids.forEach(id => { el[id] = document.getElementById(id); const vv = document.getElementById(id+'_v');
+  const upd = () => vv.textContent = (+el[id].value).toFixed(id==='reform'?4:(id==='drag'?3:0));
+  el[id].addEventListener('input', upd); upd(); });
+el.psize.addEventListener('input', makeSprite);
+el.thresh.addEventListener('input', () => { cc.style.filter = `blur(6px) contrast(${el.thresh.value})`; });
+document.getElementById('reseed').onclick = () => { seed = Math.random()*100; seedClouds(); };
+document.getElementById('settle').onclick = () => { for (let i=0;i<N;i++){ const o=i*6; P[o]=P[o+4]; P[o+1]=P[o+5]; P[o+2]=0; P[o+3]=0; } };
+
+// --- mouse "ship" ---
+let mx = -1e3, my = -1e3, pmx = -1e3, pmy = -1e3;
+addEventListener('mousemove', e => { mx = e.clientX; my = e.clientY; });
+addEventListener('mouseleave', () => { mx = my = -1e3; });
+
+resize(); seedClouds();
+cc.style.filter = `blur(6px) contrast(${el.thresh.value})`;
+
+let t0 = performance.now(), fc = 0, fa = 0; const fpsEl = document.getElementById('fps');
+function frame(now){
+  const dt = Math.min(0.04, (now - t0)/1000); t0 = now; fa += dt;
+  if (++fc >= 20){ fpsEl.textContent = (fc/fa).toFixed(0) + ' fps'; fc = 0; fa = 0; }
+  const PUSH = +el.push.value, SWIRL = +el.swirl.value, R = +el.rad.value, DRAG = +el.drag.value, REFORM = +el.reform.value;
+  const shipVX = mx - pmx, shipVY = my - pmy; pmx = mx; pmy = my;     // ship velocity (for the swirl direction)
+  const R2 = R*R;
+  for (let i = 0; i < N; i++){
+    const o = i*6;
+    let x = P[o], y = P[o+1], vx = P[o+2], vy = P[o+3];
+    // ship wake: shove particles OUT of the disk -> local concentration drops -> the cloud tears
+    const dx = x - mx, dy = y - my, d2 = dx*dx + dy*dy;
+    if (d2 < R2){
+      const d = Math.sqrt(d2) || 1, nx = dx/d, ny = dy/d, fall = 1 - d/R;
+      vx += nx * PUSH * fall * dt;                       // radial push (divergence = the break)
+      vy += ny * PUSH * fall * dt;
+      vx += -ny * SWIRL * fall * dt * Math.sign(shipVX||1);  // tangential swirl = the vortex
+      vy +=  nx * SWIRL * fall * dt * Math.sign(shipVX||1);
+    }
+    // weak reform toward home (0 = stays torn forever)
+    if (REFORM > 0){ vx += (P[o+4]-x)*REFORM; vy += (P[o+5]-y)*REFORM; }
+    vx *= DRAG; vy *= DRAG;
+    x += vx; y += vy;
+    P[o]=x; P[o+1]=y; P[o+2]=vx; P[o+3]=vy;
+  }
+  // render the density field: additive soft sprites; crowded -> bright -> (blur+contrast) fuses to solid cloud
+  cx.globalCompositeOperation = 'source-over';
+  cx.fillStyle = '#0a0e13'; cx.fillRect(0, 0, W, H);
+  cx.globalCompositeOperation = 'lighter';
+  const r = SPR;
+  for (let i = 0; i < N; i++){ const o = i*6; cx.drawImage(sprite, P[o]-r, P[o+1]-r); }
+  // ship marker on the overlay
+  ux.clearRect(0,0,W,H);
+  if (mx > -1e2){ ux.strokeStyle = 'rgba(120,200,255,0.55)'; ux.lineWidth = 2; ux.beginPath(); ux.arc(mx, my, R, 0, 6.283); ux.stroke();
+    ux.fillStyle = 'rgba(180,220,255,0.9)'; ux.beginPath(); ux.arc(mx, my, 5, 0, 6.283); ux.fill(); }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

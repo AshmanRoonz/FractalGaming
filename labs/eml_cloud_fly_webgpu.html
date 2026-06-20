@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eml cloud flight — WebGPU</title>
+<style>
+  html,body{margin:0;height:100%;background:#05080c;color:#cfe;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  #panel{position:fixed;top:10px;left:10px;width:292px;max-height:calc(100% - 20px);overflow:auto;
+    background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px 12px 14px;backdrop-filter:blur(7px);
+    transition:transform .2s ease}
+  #panel.hidden{transform:translateX(-110%)}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .grp{border-top:1px solid #16222e;padding:8px 0 2px;margin-top:6px}
+  .grp .t{color:#7fb;font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;opacity:.85}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 96px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 46px;text-align:right;color:#bdf}
+  .row.chk label{flex:1}
+  .eml{font-size:14px;color:#ffd56b;background:#11202b;border:1px solid #24384a;border-radius:6px;padding:7px 8px;margin:4px 0 2px}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4a60}
+  #hud{position:fixed;top:10px;right:12px;text-align:right;background:rgba(10,16,24,.55);border:1px solid #1d2b3a;
+    border-radius:8px;padding:8px 11px;backdrop-filter:blur(5px);min-width:150px}
+  #hud .big{font-size:22px;color:#aef;line-height:1.1}
+  #hud .lbl{color:#6a8;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+  #hud .pad{margin-top:6px;font-size:11px;color:#7fb}
+  #hud .pad.off{color:#a66}
+  #help{position:fixed;bottom:10px;left:12px;color:#6f8ba0;font-size:11px;background:rgba(10,16,24,.5);
+    border:1px solid #16222e;border-radius:8px;padding:7px 10px;backdrop-filter:blur(5px);max-width:62%}
+  #help b{color:#9cd}
+  .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px}
+  #togglePanel{position:fixed;top:10px;left:10px;z-index:5}
+  #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:40px;
+    background:#0a0e14;color:#fcd;text-align:center;font-size:15px;line-height:1.6}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<button id="togglePanel" style="display:none">≡ tune</button>
+
+<div id="panel">
+  <h1>eml cloud flight · WebGPU</h1>
+  <p class="sub">infinite carved cumulus · fly with a gamepad</p>
+  <div class="eml">density = fill·d − ( e^(k·n) − L·ln(d) )</div>
+  <div class="hint">d = local cloud depth (1 core → 0 skin) from coverage × height. The e^(k·n) term chews texture; the −ln(d) term bites the skin, leaving solid cores and wispy eroded edges. The field tiles forever — fly anywhere.</div>
+
+  <div class="grp"><div class="t">sky · time &amp; weather</div>
+    <div class="row"><label>time of day</label><input id="tod" type="range" min="0" max="24" step="0.02" value="7.4"><span class="v" id="tod_v"></span></div>
+    <div class="row"><label>weather</label><input id="weather" type="range" min="0" max="1" step="0.005" value="0.5"><span class="v" id="weather_v"></span></div>
+    <div class="row"><label>wind</label><input id="wind" type="range" min="0" max="3" step="0.01" value="0.6"><span class="v" id="wind_v"></span></div>
+    <div class="row"><label>god rays</label><input id="god" type="range" min="0" max="2.5" step="0.01" value="1.3"><span class="v" id="god_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">eml carve</div>
+    <div class="row chk"><label for="expOn">e^(k·n) term on</label><input type="checkbox" id="expOn" checked></div>
+    <div class="row"><label>k (noise→exp)</label><input id="kNoise" type="range" min="0" max="4" step="0.01" value="1.7"><span class="v" id="kNoise_v"></span></div>
+    <div class="row"><label>exp gain</label><input id="expGain" type="range" min="0" max="1.5" step="0.005" value="0.38"><span class="v" id="expGain_v"></span></div>
+    <div class="row chk"><label for="lnOn">−ln(d) term on</label><input type="checkbox" id="lnOn" checked></div>
+    <div class="row"><label>L (ln gain)</label><input id="lnGain" type="range" min="0" max="1.5" step="0.005" value="0.34"><span class="v" id="lnGain_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">cloud body</div>
+    <div class="row"><label>core fill</label><input id="fill" type="range" min="0" max="3" step="0.01" value="1.6"><span class="v" id="fill_v"></span></div>
+    <div class="row"><label>altitude</label><input id="alt" type="range" min="20" max="220" step="1" value="90"><span class="v" id="alt_v"></span></div>
+    <div class="row"><label>layer depth</label><input id="thick" type="range" min="15" max="160" step="1" value="70"><span class="v" id="thick_v"></span></div>
+    <div class="row"><label>coverage scl</label><input id="covscale" type="range" min="0.2" max="3" step="0.01" value="1.0"><span class="v" id="covscale_v"></span></div>
+    <div class="row"><label>detail scl</label><input id="detail" type="range" min="0.5" max="6" step="0.01" value="2.4"><span class="v" id="detail_v"></span></div>
+    <div class="row"><label>iso / cutoff</label><input id="iso" type="range" min="0" max="1.2" step="0.005" value="0.12"><span class="v" id="iso_v"></span></div>
+    <div class="row"><label>opacity</label><input id="dens" type="range" min="0.2" max="8" step="0.01" value="3.2"><span class="v" id="dens_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">solids · cloud flow</div>
+    <div class="row chk"><label for="solidsOn">solids on</label><input type="checkbox" id="solidsOn" checked></div>
+    <div class="row chk"><label for="leadOrb">lead orb (rides ahead of you)</label><input type="checkbox" id="leadOrb" checked></div>
+    <div class="row"><label>object size</label><input id="objsize" type="range" min="0.4" max="2.2" step="0.01" value="1.0"><span class="v" id="objsize_v"></span></div>
+    <div class="row"><label>clearance</label><input id="clearance" type="range" min="0.2" max="1.6" step="0.01" value="0.85"><span class="v" id="clearance_v"></span></div>
+    <div class="row"><label>swirl</label><input id="swirl" type="range" min="0" max="2" step="0.01" value="0.9"><span class="v" id="swirl_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">flight</div>
+    <div class="row"><label>top speed</label><input id="speed" type="range" min="10" max="220" step="1" value="70"><span class="v" id="speed_v"></span></div>
+    <div class="row"><label>quality</label><input id="quality" type="range" min="0.5" max="1.5" step="0.05" value="1.0"><span class="v" id="quality_v"></span></div>
+    <div class="row" style="gap:6px"><button id="resetCam">reset position</button><button id="reset">defaults</button></div>
+  </div>
+  <div class="hint">Gamepad: left stick = pitch/yaw · right stick = roll/look · RT = throttle · LT = brake · A = boost. Keyboard: <b>W A S D</b> fly · <b>Q/E</b> roll · mouse-drag = look · <b>Shift</b> boost · <b>H</b> hide panel. The <b>lead orb</b> rides ahead of you — fly into the deck to plow a hole through it.</div>
+</div>
+
+<div id="hud">
+  <div class="lbl">speed</div><div class="big" id="hSpd">0</div>
+  <div class="lbl" style="margin-top:6px">altitude</div><div class="big" id="hAlt">0</div>
+  <div class="pad off" id="hPad">no gamepad</div>
+</div>
+
+<div id="help"><b>Click the view</b> then use a gamepad or W/A/S/D + mouse to fly. Press <b>H</b> to hide the panel.</div>
+<div class="fps" id="fps"></div>
+<div id="err"></div>
+
+<script type="text/wgsl" id="wgsl">
+struct Uniforms {
+  res      : vec4<f32>,   // xy = pixels, z = time, w = quality
+  camPos   : vec4<f32>,   // xyz pos
+  camFwd   : vec4<f32>,
+  camRight : vec4<f32>,
+  camUp    : vec4<f32>,
+  sun      : vec4<f32>,   // xyz dir (toward sun), w = sun intensity
+  sky0     : vec4<f32>,   // horizon
+  sky1     : vec4<f32>,   // zenith
+  sunCol   : vec4<f32>,   // light color, w = god-ray strength
+  p0       : vec4<f32>,   // k, expGain, lnGain, fill
+  p1       : vec4<f32>,   // altitude, thickness, covScale, detailScale
+  p2       : vec4<f32>,   // iso, dens, coverage(weather), windSpeed
+  p3       : vec4<f32>,   // expOn, lnOn, ambStrength, _
+  objMeta  : vec4<f32>,   // x=count, y=clearance, z=swirl, w=solidsOn
+  objs     : array<vec4<f32>, 8>,  // xyz = center, w = radius
+};
+
+@group(0) @binding(0) var<uniform> U : Uniforms;
+
+// ---------- hash / value noise / fbm ----------
+fn hash(p : vec3<f32>) -> f32 {
+  var q = fract(p * 0.3183099 + vec3<f32>(0.1, 0.2, 0.3));
+  q *= 17.0;
+  return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+fn vnoise(x : vec3<f32>) -> f32 {
+  let i = floor(x);
+  var f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  let n000 = hash(i + vec3<f32>(0.0, 0.0, 0.0));
+  let n100 = hash(i + vec3<f32>(1.0, 0.0, 0.0));
+  let n010 = hash(i + vec3<f32>(0.0, 1.0, 0.0));
+  let n110 = hash(i + vec3<f32>(1.0, 1.0, 0.0));
+  let n001 = hash(i + vec3<f32>(0.0, 0.0, 1.0));
+  let n101 = hash(i + vec3<f32>(1.0, 0.0, 1.0));
+  let n011 = hash(i + vec3<f32>(0.0, 1.0, 1.0));
+  let n111 = hash(i + vec3<f32>(1.0, 1.0, 1.0));
+  return mix(mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+             mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y), f.z);
+}
+fn fbm(p : vec3<f32>) -> f32 {
+  var s = 0.0; var a = 0.55; var f = 1.0;
+  for (var i = 0; i < 5; i = i + 1) {
+    s = s + a * vnoise(p * f);
+    f = f * 2.0; a = a * 0.5;
+  }
+  return s; // ~0..1
+}
+fn fbm3(p : vec3<f32>) -> f32 {   // cheaper 3-octave for light march
+  var s = 0.0; var a = 0.6; var f = 1.0;
+  for (var i = 0; i < 3; i = i + 1) {
+    s = s + a * vnoise(p * f);
+    f = f * 2.0; a = a * 0.5;
+  }
+  return s;
+}
+
+// height profile of the cloud slab: 0 at bottom, fattens, tapers at top
+fn heightGrad(h : f32) -> f32 {
+  let bottom = smoothstep(0.0, 0.18, h);
+  let top    = 1.0 - smoothstep(0.55, 1.0, h);
+  return clamp(bottom * top, 0.0, 1.0);
+}
+
+// ---------- solid-object interaction ----------
+// returns clearance multiplier in .w and a swirl displacement in .xyz
+fn objField(p : vec3<f32>) -> vec4<f32> {
+  var clearance = 1.0;
+  var swirl = vec3<f32>(0.0);
+  if (U.objMeta.w > 0.5) {
+    let nobj = i32(U.objMeta.x);
+    for (var i = 0; i < nobj; i = i + 1) {
+      let o = U.objs[i];
+      let rel = p - o.xyz;
+      let dist = max(length(rel), 1e-3);
+      let sdf = dist - o.w;                       // signed distance to surface
+      let shell = o.w * U.objMeta.y;              // clearance thickness
+      clearance = clearance * smoothstep(0.0, shell, sdf);
+      // tangential + outward push that falls off with distance -> wisps curl around
+      let infl = 1.0 - smoothstep(0.0, o.w * 2.4, sdf);
+      let dir = rel / dist;
+      let tang = normalize(cross(dir, vec3<f32>(0.0, 1.0, 0.0)) + vec3<f32>(1e-4, 0.0, 0.0));
+      swirl = swirl + (tang * 0.7 + dir * 0.55) * infl * o.w * U.objMeta.z;
+    }
+  }
+  return vec4<f32>(swirl, clearance);
+}
+
+// ---------- infinite cloud density (the eml carve) ----------
+fn cloud(p : vec3<f32>, cheap : bool) -> f32 {
+  let altitude = U.p1.x;
+  let thick    = U.p1.y;
+  let bottom   = altitude - thick * 0.5;
+  let h = clamp((p.y - bottom) / thick, 0.0, 1.0);
+  if (h <= 0.0 || h >= 1.0) { return 0.0; }
+
+  // bend the cloud around any solids, and carve a pocket near their surface
+  let ofield = objField(p);
+  let ps = p + ofield.xyz;
+  let clearance = ofield.w;
+
+  let wind = vec3<f32>(U.res.z * U.p2.w, 0.0, U.res.z * U.p2.w * 0.35);
+
+  // low-freq coverage field
+  let covScale = U.p1.z * 0.012;
+  let nLow = select(fbm(ps * covScale + wind), fbm3(ps * covScale + wind), cheap);
+  let weather = U.p2.z;                      // 0..1
+  let cov = clamp((nLow - (1.0 - weather)) / 0.32, 0.0, 1.0);
+
+  let d = clamp(cov * heightGrad(h), 1e-3, 1.0);   // "depth" — 1 in cores
+
+  // eml carve
+  let detScale = U.p1.w * 0.05;
+  let n = clamp(select(fbm(ps * detScale + wind * 2.0), fbm3(ps * detScale + wind * 2.0), cheap), 0.0, 1.0);
+  let expTerm = U.p3.x * U.p0.y * (exp(U.p0.x * n) - 1.0);
+  let lnTerm  = U.p3.y * U.p0.z * (-log(d));
+  let eml = expTerm + lnTerm;
+
+  var dens = U.p0.w * d - eml;   // fill*d - carve
+  dens = dens - U.p2.x;          // iso
+  return max(dens, 0.0) * clearance;
+}
+
+// Henyey-Greenstein phase
+fn hg(cosT : f32, g : f32) -> f32 {
+  let g2 = g * g;
+  return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
+}
+
+struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) uv : vec2<f32> };
+
+@vertex
+fn vs(@builtin(vertex_index) vid : u32) -> VSOut {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0,-1.0), vec2<f32>(3.0,-1.0), vec2<f32>(-1.0,3.0));
+  var o : VSOut;
+  o.pos = vec4<f32>(p[vid], 0.0, 1.0);
+  o.uv = p[vid];
+  return o;
+}
+
+fn skyColor(rd : vec3<f32>) -> vec3<f32> {
+  let t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+  var col = mix(U.sky0.xyz, U.sky1.xyz, pow(t, 0.8));
+  // sun disk + glow
+  let sd = max(dot(rd, U.sun.xyz), 0.0);
+  let glow = pow(sd, 8.0) * 0.4 + pow(sd, 280.0) * 6.0;
+  col += U.sunCol.xyz * glow * U.sun.w;
+  return col;
+}
+
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4<f32> {
+  let aspect = U.res.x / U.res.y;
+  let uv = vec2<f32>(in.uv.x * aspect, in.uv.y);
+
+  let ro = U.camPos.xyz;
+  let rd = normalize(U.camFwd.xyz * 1.5 + U.camRight.xyz * uv.x + U.camUp.xyz * uv.y);
+
+  let sun = U.sun.xyz;
+
+  // ---- solid objects: nearest ray-sphere hit, shaded; becomes the backdrop ----
+  var tSolid = 1e30;
+  var sN = vec3<f32>(0.0);
+  var sHit = false;
+  if (U.objMeta.w > 0.5) {
+    let nobj = i32(U.objMeta.x);
+    for (var i = 0; i < nobj; i = i + 1) {
+      let o = U.objs[i];
+      let oc = ro - o.xyz;
+      let b = dot(oc, rd);
+      let c = dot(oc, oc) - o.w * o.w;
+      let hh = b * b - c;
+      if (hh > 0.0) {
+        let tt = -b - sqrt(hh);
+        if (tt > 0.0 && tt < tSolid) {
+          tSolid = tt;
+          sN = normalize((ro + rd * tt) - o.xyz);
+          sHit = true;
+        }
+      }
+    }
+  }
+
+  var bg = skyColor(rd);
+  if (sHit) {
+    let dif = max(dot(sN, sun), 0.0);
+    let amb = mix(U.sky0.xyz, U.sky1.xyz, clamp(sN.y * 0.5 + 0.5, 0.0, 1.0));
+    let base = vec3<f32>(0.60, 0.63, 0.70);
+    var sc = base * (amb * 0.55 + U.sunCol.xyz * U.sun.w * dif);
+    let fres = pow(1.0 - max(dot(sN, -rd), 0.0), 3.0);
+    sc = sc + fres * 0.35 * U.sunCol.xyz * U.sun.w;
+    bg = sc;
+  }
+
+  // intersect cloud slab [bottom, top]
+  let altitude = U.p1.x;
+  let thick = U.p1.y;
+  let yb = altitude - thick * 0.5;
+  let yt = altitude + thick * 0.5;
+
+  let quality = U.res.w;
+  let maxDist = 2600.0;        // far cull — clouds beyond this dissolve into haze
+  let fadeStart = maxDist * 0.5;
+
+  var t0 = 0.0;
+  var t1 = 0.0;
+  if (abs(rd.y) < 1e-4) {
+    if (ro.y > yb && ro.y < yt) { t0 = 0.0; t1 = maxDist; } else { return vec4<f32>(bg, 1.0); }
+  } else {
+    let ta = (yb - ro.y) / rd.y;
+    let tb = (yt - ro.y) / rd.y;
+    t0 = max(min(ta, tb), 0.0);
+    t1 = max(ta, tb);
+  }
+  if (t1 <= 0.0) { return vec4<f32>(bg, 1.0); }
+  t1 = min(t1, maxDist);
+  t1 = min(t1, tSolid);              // don't march clouds behind a solid
+  if (t1 <= t0) { return vec4<f32>(bg, 1.0); }
+
+  var T = 1.0;
+  var col = vec3<f32>(0.0);
+
+  let cosT = dot(rd, sun);
+  let phase = mix(hg(cosT, 0.18), hg(cosT, 0.74), 0.55);  // back + strong forward (silver lining)
+  let godk = U.sunCol.w * U.p2.y;
+
+  // distance-adaptive marching: fine near the camera, coarse (but faded) far away.
+  let nearStep = max(thick * (0.05 / quality), 1.5);
+  let jitter = hash(vec3<f32>(in.pos.xy, U.res.z * 60.0));
+  var t = t0 + nearStep * jitter;            // jitter scaled to the SMALL near step
+  let maxIter = i32(256.0 * quality);
+
+  for (var i = 0; i < maxIter; i = i + 1) {
+    if (T < 0.02 || t > t1) { break; }
+    let p = ro + rd * t;
+    let dt = max(nearStep, t * 0.012);        // ~constant screen-space sample rate
+    let dens = cloud(p, false) * U.p2.y;
+    if (dens > 0.003) {
+      // smooth far haze so distant samples can't punch through as specks
+      let fade = 1.0 - smoothstep(fadeStart, maxDist, t);
+      // light march toward sun (cheap)
+      var ls = 0.0;
+      let lstep = thick * 0.12;
+      for (var j = 1; j <= 4; j = j + 1) {
+        let lp = p + sun * (lstep * f32(j));
+        ls += cloud(lp, true) * U.p2.y;
+      }
+      let lightT = exp(-ls * lstep * 0.85);
+      // beer-powder for fluffy edges
+      let powder = 1.0 - exp(-dens * 2.0);
+      let sunLight = U.sunCol.xyz * U.sun.w * lightT * phase * godk * powder;
+      let ambient = mix(U.sky0.xyz, U.sky1.xyz, 0.6) * U.p3.z;
+      let lit = sunLight + ambient;
+
+      let a = (1.0 - exp(-dens * dt * 0.04)) * fade;
+      col += T * a * lit;
+      T *= 1.0 - a;
+    }
+    t += dt;
+  }
+
+  var outc = col + bg * T;
+  // subtle tonemap + gamma
+  outc = outc / (1.0 + outc * 0.55);
+  outc = pow(outc, vec3<f32>(0.85));
+  return vec4<f32>(outc, 1.0);
+}
+</script>
+
+<script>
+const cv = document.getElementById('c');
+const errEl = document.getElementById('err');
+function fail(msg){ errEl.style.display='flex'; errEl.innerHTML = msg; }
+
+// ---------------- controls / sliders ----------------
+const ids = ['tod','weather','wind','god','kNoise','expGain','lnGain','fill','alt','thick',
+  'covscale','detail','iso','dens','objsize','clearance','swirl','speed','quality'];
+const el = {};
+ids.forEach(id=>{ el[id]=document.getElementById(id);
+  const vv=document.getElementById(id+'_v');
+  const fmt=()=>{ let n=+el[id].value; vv.textContent = (id==='alt'||id==='thick'||id==='speed')?n.toFixed(0):n.toFixed(2); };
+  el[id].addEventListener('input',fmt); fmt();
+});
+const expOn=document.getElementById('expOn'), lnOn=document.getElementById('lnOn');
+const solidsOn=document.getElementById('solidsOn'), leadOrb=document.getElementById('leadOrb');
+
+const defaults={tod:7.4,weather:0.5,wind:0.6,god:1.3,kNoise:1.7,expGain:0.38,lnGain:0.34,
+  fill:1.6,alt:90,thick:70,covscale:1.0,detail:2.4,iso:0.12,dens:3.2,
+  objsize:1.0,clearance:0.85,swirl:0.9,speed:70,quality:1.0};
+document.getElementById('reset').onclick=()=>{ for(const k in defaults){ el[k].value=defaults[k]; el[k].dispatchEvent(new Event('input')); }
+  expOn.checked=lnOn.checked=solidsOn.checked=leadOrb.checked=true; };
+
+// world-anchored solid objects (x, y, z, radius) — clouds drift past & flow around them
+const baseObjs = [
+  [ 120,  92, -120, 38],
+  [-170,  82,   70, 30],
+  [  40, 102,  250, 46],
+  [-260,  96, -210, 34],
+  [ 300,  86,  150, 42],
+];
+function buildObjs(fwd){
+  const sz = +el.objsize.value;
+  const out = [];
+  for(const o of baseObjs){ out.push([o[0], o[1], o[2], o[3]*sz]); }
+  if(leadOrb.checked){
+    out.push([cam.pos[0]+fwd[0]*95, cam.pos[1]+fwd[1]*95+4, cam.pos[2]+fwd[2]*95, 32*sz]);
+  }
+  return out.slice(0,8);
+}
+
+// ---------------- time-of-day → sun + palette (computed on CPU) ----------------
+function lerp(a,b,t){return a+(b-a)*t;}
+function mix3(a,b,t){return [lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];}
+function clamp(x,a,b){return Math.max(a,Math.min(b,x));}
+
+// returns {dir:[x,y,z], intensity, sky0, sky1, sunCol}
+function daystate(tod, weather){
+  // sun elevation: below horizon at night, peak at noon
+  const ang = (tod-6)/12*Math.PI;           // 6->0, 12->pi/2, 18->pi
+  const elev = Math.sin(ang);               // -1..1
+  const az = (tod/24)*Math.PI*2 + 0.6;
+  const ce = Math.cos(Math.asin(clamp(elev,-1,1)));
+  const dir=[Math.cos(az)*ce, clamp(elev,-0.25,1), Math.sin(az)*ce];
+  // normalize
+  const L=Math.hypot(dir[0],dir[1],dir[2])||1; dir[0]/=L;dir[1]/=L;dir[2]/=L;
+
+  // palettes keyed on elevation
+  const night = {h:[0.03,0.05,0.10], z:[0.01,0.02,0.05], s:[0.25,0.30,0.45], i:0.15};
+  const golden= {h:[0.95,0.55,0.32], z:[0.20,0.27,0.45], s:[1.0,0.62,0.34], i:1.5};
+  const day   = {h:[0.62,0.74,0.92], z:[0.18,0.40,0.78], s:[1.0,0.97,0.90], i:1.7};
+
+  let sky0,sky1,sunc,inten;
+  if(elev < 0){ // night→dawn fade across horizon
+    const k=clamp((elev+0.25)/0.25,0,1); // -0.25..0 -> 0..1
+    sky0=mix3(night.h,golden.h,k); sky1=mix3(night.z,golden.z,k);
+    sunc=mix3(night.s,golden.s,k); inten=lerp(night.i,golden.i,k);
+  } else if(elev < 0.35){ // golden→day
+    const k=clamp(elev/0.35,0,1);
+    sky0=mix3(golden.h,day.h,k); sky1=mix3(golden.z,day.z,k);
+    sunc=mix3(golden.s,day.s,k); inten=lerp(golden.i,day.i,k);
+  } else {
+    sky0=day.h.slice(); sky1=day.z.slice(); sunc=day.s.slice(); inten=day.i;
+  }
+  // weather darkens & desaturates the sky a touch
+  const w=clamp((weather-0.5)*2,0,1);
+  sky0=mix3(sky0,[0.30,0.33,0.38],w*0.5);
+  sky1=mix3(sky1,[0.22,0.25,0.30],w*0.5);
+  inten*=lerp(1.0,0.7,w);
+  return {dir, intensity:inten, sky0, sky1, sunCol:sunc};
+}
+
+// ---------------- flight camera ----------------
+const cam = {
+  pos:[0, 40, -260],
+  yaw: 0.0, pitch: 0.0, roll: 0.0,
+  vel: 0.0,
+};
+function resetCam(){ cam.pos=[0,40,-260]; cam.yaw=0; cam.pitch=0.05; cam.roll=0; cam.vel=0; }
+resetCam();
+document.getElementById('resetCam').onclick=resetCam;
+
+// keyboard
+const keys={};
+addEventListener('keydown',e=>{
+  if(e.key==='h'||e.key==='H'){ togglePanel(); return; }
+  keys[e.code]=true;
+});
+addEventListener('keyup',e=>keys[e.code]=false);
+
+// mouse-look (drag)
+let dragging=false, px=0, py=0;
+cv.addEventListener('mousedown',e=>{dragging=true;px=e.clientX;py=e.clientY;});
+addEventListener('mouseup',()=>dragging=false);
+addEventListener('mousemove',e=>{ if(!dragging)return;
+  cam.yaw   -= (e.clientX-px)*0.0026;
+  cam.pitch -= (e.clientY-py)*0.0026;
+  cam.pitch = clamp(cam.pitch, -1.45, 1.45);
+  px=e.clientX; py=e.clientY;
+});
+
+// panel toggle
+const panel=document.getElementById('panel');
+const togBtn=document.getElementById('togglePanel');
+function togglePanel(){ const hidden=panel.classList.toggle('hidden'); togBtn.style.display=hidden?'block':'none'; }
+togBtn.onclick=togglePanel;
+
+// gamepad
+const hPad=document.getElementById('hPad');
+addEventListener('gamepadconnected',()=>{ hPad.textContent='gamepad ✓'; hPad.classList.remove('off'); });
+addEventListener('gamepaddisconnected',()=>{ hPad.textContent='no gamepad'; hPad.classList.add('off'); });
+function dz(v,d){ return Math.abs(v)<d?0:(v-Math.sign(v)*d)/(1-d); }
+
+function updateCamera(dt){
+  const topSpeed=+el.speed.value;
+  let pitchRate=0, yawRate=0, rollRate=0, throttle=0, boost=1;
+
+  const gps=navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp=null; for(const g of gps){ if(g){gp=g;break;} }
+  if(gp){
+    const a=gp.axes;
+    yawRate   = dz(a[0]||0,0.12);
+    pitchRate = dz(a[1]||0,0.12);
+    rollRate  = dz(a[2]||0,0.12);
+    // triggers: standard mapping buttons[7]=RT, [6]=LT
+    const rt = gp.buttons[7]?gp.buttons[7].value:0;
+    const lt = gp.buttons[6]?gp.buttons[6].value:0;
+    throttle = rt - lt*0.8;
+    if(gp.buttons[0] && gp.buttons[0].pressed) boost=2.2;     // A
+    // d-pad / face for altitude tweak handled via pitch normally
+  }
+  // keyboard fallback / additive
+  if(keys['KeyA']) yawRate  -= 1;
+  if(keys['KeyD']) yawRate  += 1;
+  if(keys['KeyW']) pitchRate -= 1;
+  if(keys['KeyS']) pitchRate += 1;
+  if(keys['KeyQ']) rollRate -= 1;
+  if(keys['KeyE']) rollRate += 1;
+  if(keys['ShiftLeft']||keys['ShiftRight']) boost=2.2;
+  // throttle: hold forward by default with W? we keep auto-cruise + RT
+  let kbThrottle=0;
+  if(keys['KeyW']||keys['ArrowUp']) kbThrottle+=1;
+  if(keys['KeyS']||keys['ArrowDown']) kbThrottle-=0.7;
+  throttle = clamp(throttle + kbThrottle, -1, 1);
+
+  // integrate orientation
+  cam.yaw   += yawRate   * 1.1 * dt;
+  cam.pitch += -pitchRate * 1.1 * dt;
+  cam.pitch  = clamp(cam.pitch, -1.45, 1.45);
+  cam.roll  += (rollRate*0.9 - cam.roll*2.2) * dt;  // self-centering roll
+
+  // target speed: cruise baseline + throttle, with boost
+  const cruise = topSpeed*0.45;
+  const target = clamp(cruise + throttle*topSpeed, -topSpeed*0.5, topSpeed)*boost;
+  cam.vel += (target - cam.vel) * clamp(dt*1.8,0,1);
+
+  // basis
+  const cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch);
+  const fwd=[ sy*cp, sp, cy*cp ];
+  let right=[ cy, 0, -sy ];
+  // apply roll to up/right
+  const cr=Math.cos(cam.roll), sr=Math.sin(cam.roll);
+  let up=[ fwd[1]*right[2]-fwd[2]*right[1], fwd[2]*right[0]-fwd[0]*right[2], fwd[0]*right[1]-fwd[1]*right[0] ];
+  // roll rotates right/up around fwd
+  const r2=[ right[0]*cr+up[0]*sr, right[1]*cr+up[1]*sr, right[2]*cr+up[2]*sr ];
+  const u2=[ -right[0]*sr+up[0]*cr, -right[1]*sr+up[1]*cr, -right[2]*sr+up[2]*cr ];
+  right=r2; up=u2;
+
+  cam.pos[0]+=fwd[0]*cam.vel*dt;
+  cam.pos[1]+=fwd[1]*cam.vel*dt;
+  cam.pos[2]+=fwd[2]*cam.vel*dt;
+  // soft floor so you don't fall forever
+  if(cam.pos[1] < 2){ cam.pos[1]=2; }
+
+  return {fwd,right,up};
+}
+
+// ---------------- WebGPU ----------------
+(async function init(){
+  if(!('gpu' in navigator)){
+    fail('WebGPU is not available in this browser.<br><br>Open in <b>Chrome/Edge 113+</b> (or Safari 18+). If you are on Chrome, enable <b>chrome://flags/#enable-unsafe-webgpu</b>.');
+    return;
+  }
+  let adapter;
+  try { adapter = await navigator.gpu.requestAdapter({powerPreference:'high-performance'}); }
+  catch(e){ adapter=null; }
+  if(!adapter){ fail('No WebGPU adapter found (GPU may be blocked).'); return; }
+  const device = await adapter.requestDevice();
+  device.addEventListener('uncapturederror', e=>console.error('WGPU error:', e.error.message));
+
+  const ctx = cv.getContext('webgpu');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({device, format, alphaMode:'opaque'});
+
+  const code = document.getElementById('wgsl').textContent;
+  const module = device.createShaderModule({code});
+  const info = await module.getCompilationInfo();
+  const errs = info.messages.filter(m=>m.type==='error');
+  if(errs.length){
+    console.error('WGSL compile errors:', errs);
+    fail('Shader compile error:<br><br>'+errs.map(m=>`line ${m.lineNum}: ${m.message}`).join('<br>'));
+    return;
+  }
+
+  // uniform buffer: 22 vec4<f32> (13 params + objMeta + 8 objects) = 352 bytes
+  const FLOATS = 22*4;
+  const uData = new Float32Array(FLOATS);
+  const uBuf = device.createBuffer({size: uData.byteLength, usage: GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+
+  const pipeline = device.createRenderPipeline({
+    layout:'auto',
+    vertex:{module, entryPoint:'vs'},
+    fragment:{module, entryPoint:'fs', targets:[{format}]},
+    primitive:{topology:'triangle-list'},
+  });
+  const bind = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries:[{binding:0, resource:{buffer:uBuf}}],
+  });
+
+  let W=0,H=0;
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio||1, 1.5);
+    W = Math.max(2, Math.floor(innerWidth*dpr));
+    H = Math.max(2, Math.floor(innerHeight*dpr));
+    cv.width=W; cv.height=H;
+  }
+  addEventListener('resize',resize); resize();
+
+  const fpsEl=document.getElementById('fps');
+  const hSpd=document.getElementById('hSpd'), hAlt=document.getElementById('hAlt');
+  let last=performance.now(), fcount=0, facc=0;
+
+  function frame(now){
+    let dt=(now-last)/1000; last=now; if(dt>0.05)dt=0.05;
+    facc+=dt; if(++fcount>=20){ fpsEl.textContent=(fcount/facc).toFixed(0)+' fps'; fcount=0; facc=0; }
+
+    const basis = updateCamera(dt);
+    const ds = daystate(+el.tod.value, +el.weather.value);
+
+    // pack uniforms
+    let o=0;
+    const set=(...v)=>{ for(const x of v) uData[o++]=x; };
+    set(W, H, now/1000, +el.quality.value);                       // res
+    set(cam.pos[0], cam.pos[1], cam.pos[2], 0);                   // camPos
+    set(basis.fwd[0],basis.fwd[1],basis.fwd[2],0);                // camFwd
+    set(basis.right[0],basis.right[1],basis.right[2],0);          // camRight
+    set(basis.up[0],basis.up[1],basis.up[2],0);                   // camUp
+    set(ds.dir[0],ds.dir[1],ds.dir[2], ds.intensity);            // sun
+    set(ds.sky0[0],ds.sky0[1],ds.sky0[2],0);                     // sky0
+    set(ds.sky1[0],ds.sky1[1],ds.sky1[2],0);                     // sky1
+    set(ds.sunCol[0],ds.sunCol[1],ds.sunCol[2], +el.god.value); // sunCol + godray
+    set(+el.kNoise.value, +el.expGain.value, +el.lnGain.value, +el.fill.value); // p0
+    set(+el.alt.value, +el.thick.value, +el.covscale.value, +el.detail.value);  // p1
+    set(+el.iso.value, +el.dens.value, +el.weather.value, +el.wind.value*0.6);  // p2
+    set(expOn.checked?1:0, lnOn.checked?1:0, 0.5, 0);            // p3
+
+    // solids
+    const objList = buildObjs(basis.fwd);
+    const solids = solidsOn.checked ? 1 : 0;
+    set(objList.length, +el.clearance.value, +el.swirl.value, solids);          // objMeta
+    for(let i=0;i<8;i++){
+      const o = objList[i];
+      if(o){ set(o[0],o[1],o[2],o[3]); } else { set(0,0,0,0); }
+    }
+
+    device.queue.writeBuffer(uBuf, 0, uData);
+
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments:[{view: ctx.getCurrentTexture().createView(), loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}],
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([enc.finish()]);
+
+    hSpd.textContent = Math.round(Math.abs(cam.vel));
+    hAlt.textContent = Math.round(cam.pos[1]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fluid 3D nested lab — ship tears world-anchored clouds</title>
+<style>
+  html,body{margin:0;height:100%;background:#070b11;overflow:hidden;font:13px ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab}
+  #hud{position:fixed;top:8px;left:10px;background:rgba(8,14,22,.82);border:1px solid #1d2b3a;border-radius:8px;padding:8px 10px;max-width:62ch}
+  #hud b{color:#8fd}
+  .err{position:fixed;top:0;left:0;right:0;padding:14px;background:#3a1015;color:#fbb;white-space:pre-wrap;display:none;z-index:9;font-size:12px}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><b>nested fluid</b> · <span id="st">…</span><br>coarse grid (whole area) + fine grid follows the ship · the ship tears the ambient clouds · drag to orbit</div>
+<div id="err" class="err"></div>
+<script type="module">
+import * as THREE from 'three';
+import { Fn, vec2, vec3, vec4, float, texture, screenUV, uniform, mix, max, min, clamp, smoothstep, normalize, dot, floor, fract, Loop, If, Break } from 'three/tsl';
+
+const errEl=document.getElementById('err'), st=document.getElementById('st');
+function fail(m){ errEl.style.display='block'; errEl.textContent=String(m&&m.stack||m); throw m; }
+addEventListener('error',e=>fail(e.error||e.message)); addEventListener('unhandledrejection',e=>fail(e.reason));
+
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGPURenderer({canvas,antialias:false});
+renderer.setSize(innerWidth,innerHeight); await renderer.init();
+
+const RES=32, TILES_X=8, TILES_Y=4, TW=RES*TILES_X, TH=RES*TILES_Y;
+const fsCam=new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+const quad=new THREE.PlaneGeometry(2,2);
+function pass(node3){ const m=new THREE.MeshBasicNodeMaterial(); m.colorNode=node3; m.depthTest=false; m.depthWrite=false; m.toneMapped=false; m.blending=THREE.NoBlending;
+  const s=new THREE.Scene(); const me=new THREE.Mesh(quad,m); me.frustumCulled=false; s.add(me); return s; }
+function run(scene,dst){ renderer.setRenderTarget(dst); renderer.render(scene,fsCam); }
+
+// ---- shared addressing (3D grid packed in 2D) ----
+const cell2uv=(c)=>{ const z=c.z; const tx=z.sub(z.div(TILES_X).floor().mul(TILES_X)); const ty=z.div(TILES_X).floor();
+  return vec2( tx.mul(RES).add(c.x).add(0.5).div(TW), ty.mul(RES).add(c.y).add(0.5).div(TH) ); };
+const fragCell=()=>{ const tx=screenUV.x.mul(TW).floor(), ty=screenUV.y.mul(TH).floor();
+  const tlx=tx.div(RES).floor(), tly=ty.div(RES).floor();
+  return vec3( tx.sub(tlx.mul(RES)), ty.sub(tly.mul(RES)), tly.mul(TILES_X).add(tlx) ); };
+const cellT=(tex,c)=>texture(tex, cell2uv(c.clamp(0.0,RES-1)));
+const triT=(tex,pos)=>{ const p=pos.sub(0.5); const i=p.floor(); const f=p.fract();
+  const n=(o)=>cellT(tex,i.add(o));
+  const x0=mix(n(vec3(0,0,0)),n(vec3(1,0,0)),f.x), x1=mix(n(vec3(0,1,0)),n(vec3(1,1,0)),f.x),
+        x2=mix(n(vec3(0,0,1)),n(vec3(1,0,1)),f.x), x3=mix(n(vec3(0,1,1)),n(vec3(1,1,1)),f.x);
+  return mix(mix(x0,x1,f.y),mix(x2,x3,f.y),f.z); };
+
+// ---- procedural ambient cloud field (world space) ----
+const hash=Fn(([p])=> p.dot(vec3(127.1,311.7,74.7)).sin().mul(43758.5453).fract() );
+const vnoise=Fn(([p])=>{ const i=p.floor(), f=p.fract(); const u=f.mul(f).mul(f.mul(-2.0).add(3.0));
+  const n=(o)=>hash(i.add(o));
+  const x0=mix(n(vec3(0,0,0)),n(vec3(1,0,0)),u.x), x1=mix(n(vec3(0,1,0)),n(vec3(1,1,0)),u.x),
+        x2=mix(n(vec3(0,0,1)),n(vec3(1,0,1)),u.x), x3=mix(n(vec3(0,1,1)),n(vec3(1,1,1)),u.x);
+  return mix(mix(x0,x1,u.y),mix(x2,x3,u.y),u.z); });
+const fbm=Fn(([p])=>{ const a=vnoise(p), b=vnoise(p.mul(2.03).add(11.0)), c=vnoise(p.mul(4.01).add(31.0));
+  return a.mul(0.6).add(b.mul(0.28)).add(c.mul(0.12)); });
+// ambient cloud density at a world position (discrete puffs with gaps, so tears are visible)
+const ambient=Fn(([wp])=>{ const n=fbm(wp.mul(0.006)); return n.sub(0.58).mul(5.0).clamp(0.0,1.0); });
+
+const uTime=uniform(0.0), uShip=uniform(vec3(0,0,0)), uShipVel=uniform(vec3(0,0,0));
+
+// ---- one fluid grid, world-anchored ----
+function makeFluid(worldSize, srcRate, stir){
+  const opt=()=>({type:THREE.HalfFloatType,format:THREE.RGBAFormat,minFilter:THREE.NearestFilter,magFilter:THREE.NearestFilter,depthBuffer:false});
+  const velRT=new THREE.RenderTarget(TW,TH,opt()), velS=new THREE.RenderTarget(TW,TH,opt());
+  const denRT=new THREE.RenderTarget(TW,TH,opt()), denS=new THREE.RenderTarget(TW,TH,opt());
+  const prsRT=new THREE.RenderTarget(TW,TH,opt()), prsS=new THREE.RenderTarget(TW,TH,opt());
+  const divRT=new THREE.RenderTarget(TW,TH,opt()), curlRT=new THREE.RenderTarget(TW,TH,opt());
+  for(const rt of [velRT,velS,denRT,denS,prsRT,prsS,divRT,curlRT]){ renderer.setRenderTarget(rt); renderer.setClearColor(0x000000,0); renderer.clear(true,false,false); }
+  const uCenter=uniform(vec3(0,0,0)), uSize=uniform(worldSize);
+  const dt=0.10;
+  // world position of a cell center
+  const cellWorld=(c)=> uCenter.add( c.add(0.5).div(RES).sub(0.5).mul(uSize) );
+  const vel=velRT.texture, den=denRT.texture;
+
+  const advVel=pass(Fn(()=>{ const c=fragCell(); const v=cellT(vel,c).xyz; return triT(vel,c.add(0.5).sub(v.mul(dt))).xyz.mul(0.99); })());  // velocity dissipates -> calm away from the ship
+  const advDen=pass(Fn(()=>{ const c=fragCell(); const v=cellT(vel,c).xyz; return vec3(triT(den,c.add(0.5).sub(v.mul(dt))).x.min(1.3)); })());  // conservative (no decay) -> undisturbed settles to ambient
+  // density relaxes toward ambient (clouds "already there", slowly heal when torn)
+  const srcDen=pass(Fn(()=>{ const c=fragCell(); const amb=ambient(cellWorld(c)); const d=cellT(den,c).x;
+    return vec3( d.add(amb.sub(d).mul(srcRate)) ); })());
+  // forces: ship stirs the fine grid (radial push + swirl, in cell units), + gentle buoyancy by density
+  const forceVel=pass(Fn(()=>{ const c=fragCell(); const v=cellT(vel,c).xyz; const wp=cellWorld(c);
+    const toShip=wp.sub(uShip); const r=toShip.length(); const rad=float(stir).mul(0.0);
+    const reach=uSize.mul(0.22);   // ship influence radius (world)
+    const fall=r.div(reach).mul(r.div(reach)).negate().exp().mul(float(stir));
+    const nrm=toShip.div(r.max(0.001));
+    const cellPerWorld=float(RES).div(uSize);
+    const push=nrm.mul(fall).mul(1.5);                          // shove clouds out of the hull -> tear
+    const wake=uShipVel.mul(fall).mul(0.6);                     // drag along the ship's motion
+    const swirl=nrm.cross(vec3(0,1,0)).mul(fall).mul(0.9);      // curl around it
+    const force=push.add(wake).add(swirl).mul(cellPerWorld);
+    return v.add(force); })());  // no global buoyancy: only the ship stirs, so the rest of the box stays = ambient
+  const divS=pass(Fn(()=>{ const c=fragCell();
+    const dv=cellT(vel,c.add(vec3(1,0,0))).x.sub(cellT(vel,c.add(vec3(-1,0,0))).x)
+      .add(cellT(vel,c.add(vec3(0,1,0))).y.sub(cellT(vel,c.add(vec3(0,-1,0))).y))
+      .add(cellT(vel,c.add(vec3(0,0,1))).z.sub(cellT(vel,c.add(vec3(0,0,-1))).z)).mul(0.5);
+    return vec3(dv); })());
+  const jac=(src)=>pass(Fn(()=>{ const c=fragCell(); const P=(o)=>cellT(src,c.add(o)).x;
+    return vec3( P(vec3(1,0,0)).add(P(vec3(-1,0,0))).add(P(vec3(0,1,0))).add(P(vec3(0,-1,0))).add(P(vec3(0,0,1))).add(P(vec3(0,0,-1))).sub(cellT(divRT.texture,c).x).div(6.0) ); })());
+  const jacA=jac(prsRT.texture), jacB=jac(prsS.texture);
+  const subg=pass(Fn(()=>{ const c=fragCell(); const P=(o)=>cellT(prsRT.texture,c.add(o)).x;
+    const g=vec3(P(vec3(1,0,0)).sub(P(vec3(-1,0,0))),P(vec3(0,1,0)).sub(P(vec3(0,-1,0))),P(vec3(0,0,1)).sub(P(vec3(0,0,-1)))).mul(0.5);
+    return cellT(vel,c).xyz.sub(g); })());
+  const curlS=pass(Fn(()=>{ const c=fragCell(); const N=(o)=>cellT(vel,c.add(o)).xyz;
+    const x1=N(vec3(-1,0,0)),x2=N(vec3(1,0,0)),y1=N(vec3(0,-1,0)),y2=N(vec3(0,1,0)),z1=N(vec3(0,0,-1)),z2=N(vec3(0,0,1));
+    return vec3(y2.z.sub(y1.z).sub(z2.y.sub(z1.y)),z2.x.sub(z1.x).sub(x2.z.sub(x1.z)),x2.y.sub(x1.y).sub(y2.x.sub(y1.x))).mul(0.5); })());
+  const vortS=pass(Fn(()=>{ const c=fragCell(); const M=(o)=>cellT(curlRT.texture,c.add(o)).xyz.length();
+    const g=vec3(M(vec3(1,0,0)).sub(M(vec3(-1,0,0))),M(vec3(0,1,0)).sub(M(vec3(0,-1,0))),M(vec3(0,0,1)).sub(M(vec3(0,0,-1)))).mul(0.5);
+    const Nn=g.div(g.length().max(1e-4)); return cellT(vel,c).xyz.add(Nn.cross(cellT(curlRT.texture,c).xyz).mul(1.0).mul(dt)); })());
+  const cpV=pass(texture(velS.texture,screenUV).xyz), cpD=pass(texture(denS.texture,screenUV).xyz), cpP=pass(texture(prsS.texture,screenUV).xyz);
+
+  function step(){
+    run(advVel,velS); run(cpV,velRT);
+    run(advDen,denS); run(cpD,denRT);
+    run(srcDen,denS); run(cpD,denRT);
+    if(stir>0){ run(forceVel,velS); run(cpV,velRT); }
+    run(curlS,curlRT); run(vortS,velS); run(cpV,velRT);
+    run(divS,divRT);
+    for(let i=0;i<12;i++){ run(jacA,prsS); run(jacB,prsRT); }
+    run(subg,velS); run(cpV,velRT);
+  }
+  return { step, denTex:denRT.texture, velTex:velRT.texture, uCenter, uSize };
+}
+
+// distance = procedural ambient sampled directly in the render (an "infinite-res" coarse layer, no solver cost).
+// up close = one real fluid sim that follows the ship, seeded from ambient, torn by the ship.
+const fine = makeFluid(240.0, 0.025, 1.0);  // box around ship; low src rate => tears persist, slowly heal
+
+// ---- camera ----
+const uCamPos=uniform(vec3(0,0,600)), uCamFwd=uniform(vec3(0,0,-1)), uCamRight=uniform(vec3(1,0,0)), uCamUp=uniform(vec3(0,1,0)), uAspect=uniform(1.0);
+
+// ---- dual-resolution volumetric render ----
+const sampleGrid=(tex,center,size,wp)=>{ const g01=wp.sub(center).div(size).add(0.5); const inside=g01.greaterThan(vec3(0.0)).all().and(g01.lessThan(vec3(1.0)).all());
+  return inside.select( triT(tex, g01.mul(RES)).x, float(0.0) ); };
+const insideBox=(center,size,wp)=>{ const g=wp.sub(center).abs(); return g.lessThan(vec3(size.mul(0.5))).all(); };
+// feathered blend: fade the sim into ambient across the box faces so the grid box is invisible
+const densityAt=(wp)=>{ const g=wp.sub(fine.uCenter).div(fine.uSize).add(0.5);
+  const dface=min(min(g.x,min(g.y,g.z)), min(g.x.oneMinus(),min(g.y.oneMinus(),g.z.oneMinus())));  // dist to nearest face
+  const w=smoothstep(0.0,0.22,dface);
+  const fineV=triT(fine.denTex, g.clamp(0.001,0.999).mul(RES)).x;
+  return mix(ambient(wp), fineV, w); };
+
+const dispScene=pass(Fn(()=>{ const ndc=screenUV.mul(2.0).sub(1.0);
+  const rd=normalize(uCamFwd.mul(1.4).add(uCamRight.mul(ndc.x.mul(uAspect))).add(uCamUp.mul(ndc.y))); const ro=uCamPos;
+  const half=float(330.0); const inv=vec3(1.0).div(rd);
+  const t0=uShip.sub(half).sub(ro).mul(inv), t1=uShip.add(half).sub(ro).mul(inv);
+  const tmn=t0.min(t1), tmx=t0.max(t1); const tn=tmn.x.max(tmn.y).max(tmn.z).max(0.0), tf=tmx.x.min(tmx.y).min(tmx.z);
+  const sky=mix(vec3(0.05,0.08,0.12),vec3(0.09,0.14,0.20),screenUV.y);
+  const T=float(1.0).toVar(); const col=vec3(0.0).toVar();
+  const step=float(660.0/96.0);
+  const t=tn.add(step.mul(screenUV.x.mul(53.0).add(screenUV.y.mul(97.0)).sin().mul(43.0).fract())).toVar();
+  const sun=normalize(vec3(0.5,0.8,0.3));
+  Loop(96,()=>{ If(t.greaterThan(tf).or(T.lessThan(0.02)),()=>{Break();});
+    const wp=ro.add(rd.mul(t));
+    const mg=wp.sub(uShip).div(660.0).add(0.5);   // 0..1 across the march box (so clouds fade at its faces, no hard clip)
+    const mfade=smoothstep(0.0,0.12, min(min(mg.x,min(mg.y,mg.z)), min(mg.x.oneMinus(),min(mg.y.oneMinus(),mg.z.oneMinus()))));
+    const dens=densityAt(wp).mul(mfade);
+    If(dens.greaterThan(0.01),()=>{ const sh=densityAt(wp.add(sun.mul(22.0)));
+      const light=sh.mul(-1.4).exp(); const base=mix(vec3(0.30,0.38,0.52),vec3(1.0,0.97,0.92),light);
+      const a=float(1.0).sub(dens.mul(0.22).negate().exp()); col.addAssign(T.mul(a).mul(base)); T.mulAssign(float(1.0).sub(a)); });
+    t.addAssign(step); });
+  // ship marker: cyan glow at the ship's world position, dimmed by clouds in front of it
+  const tS=uShip.sub(ro).dot(rd).max(0.0); const dS=ro.add(rd.mul(tS)).sub(uShip).length();
+  const glow=dS.mul(dS).mul(-0.006).exp();
+  return mix(sky,col,T.oneMinus()).add(vec3(0.35,0.75,1.0).mul(glow.mul(0.9).mul(T.mul(0.6).add(0.4)))); })());
+
+// ---- orbit + ship motion ----
+let az=0.6, el=0.18, drag=false, px=0, py=0;
+canvas.addEventListener('mousedown',e=>{drag=true;px=e.clientX;py=e.clientY;});
+addEventListener('mouseup',()=>drag=false);
+addEventListener('mousemove',e=>{ if(!drag)return; az-=(e.clientX-px)*0.006; el=Math.max(-1.2,Math.min(1.2,el+(e.clientY-py)*0.006)); px=e.clientX;py=e.clientY; });
+addEventListener('resize',()=>renderer.setSize(innerWidth,innerHeight));
+
+const ship=new THREE.Vector3(), shipPrev=new THREE.Vector3();
+function updateShip(tm){ shipPrev.copy(ship);
+  ship.set(Math.sin(tm*0.5)*130, Math.sin(tm*0.37)*40+10, Math.cos(tm*0.41)*130);
+  uShip.value.copy(ship); uShipVel.value.copy(ship).sub(shipPrev).multiplyScalar(60);
+  fine.uCenter.value.copy(ship);            // fine grid follows the ship
+}
+function updateCam(){ az+=0.0016; const cx=Math.cos(az),sx=Math.sin(az),cy=Math.cos(el),sy=Math.sin(el),d=560.0;
+  const cp=[sx*cy*d,sy*d+40,cx*cy*d]; uCamPos.value.set(...cp);
+  let f=[-cp[0],-cp[1]+40,-cp[2]]; let fl=Math.hypot(...f); f=f.map(v=>v/fl);
+  let r=[f[2],0,-f[0]]; let rl=Math.hypot(...r)||1; r=r.map(v=>v/rl);
+  const u=[r[1]*f[2]-r[2]*f[1],r[2]*f[0]-r[0]*f[2],r[0]*f[1]-r[1]*f[0]];
+  uCamFwd.value.set(...f); uCamRight.value.set(...r); uCamUp.value.set(...u); uAspect.value=innerWidth/innerHeight; }
+
+let t0=performance.now(), fc=0;
+renderer.setAnimationLoop(()=>{
+  const tm=performance.now()*0.001; uTime.value=tm; updateShip(tm); updateCam();
+  for(let sub=0;sub<2;sub++){ fine.step(); }
+  renderer.setRenderTarget(null); renderer.render(dispScene, fsCam);
+  fc++; if(performance.now()-t0>500){ st.textContent=Math.round(fc/((performance.now()-t0)/1000))+' fps'; t0=performance.now(); fc=0; }
+});
+</script>
+</body>
+</html>

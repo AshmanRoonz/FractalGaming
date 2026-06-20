@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fluid WebGPU lab — 2D Navier-Stokes</title>
+<style>
+  html,body{margin:0;height:100%;background:#06090d;overflow:hidden;font:13px ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  #hud{position:fixed;top:8px;left:10px;background:rgba(8,14,22,.8);border:1px solid #1d2b3a;border-radius:8px;padding:8px 10px}
+  .err{position:fixed;top:0;left:0;right:0;padding:14px;background:#3a1015;color:#fbb;white-space:pre-wrap;display:none;z-index:9;font-size:12px}
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js"
+  }
+}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">2D Navier-Stokes (WebGPU/TSL) — <span id="st">…</span> · drag to stir</div>
+<div id="err" class="err"></div>
+<script type="module">
+import * as THREE from 'three';
+import { Fn, vec2, vec3, vec4, float, texture, screenUV, uniform, mix, clamp, max, abs, length } from 'three/tsl';
+
+const errEl = document.getElementById('err'), st = document.getElementById('st');
+function fail(m){ errEl.style.display='block'; errEl.textContent = String(m && m.stack || m); throw m; }
+window.addEventListener('error', e => fail(e.error || e.message));
+window.addEventListener('unhandledrejection', e => fail(e.reason));
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGPURenderer({ canvas, antialias:false });
+renderer.setSize(innerWidth, innerHeight);
+await renderer.init();
+st.textContent = 'init';
+
+const W = 480, H = 270;
+const TX = 1/W, TY = 1/H;
+const opt = () => ({ type: THREE.HalfFloatType, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer:false });
+const velRT = new THREE.RenderTarget(W,H,opt()), velS = new THREE.RenderTarget(W,H,opt());  // R,G = velocity, B = dye
+const prsRT = new THREE.RenderTarget(W,H,opt()), prsS = new THREE.RenderTarget(W,H,opt());  // R = pressure
+const divRT = new THREE.RenderTarget(W,H,opt());                                            // R = divergence
+const curlRT = new THREE.RenderTarget(W,H,opt());                                           // R = curl
+
+const fsCam = new THREE.OrthographicCamera(-1,1,1,-1,0,1);
+function pass(colorNode){ const m = new THREE.MeshBasicNodeMaterial(); m.colorNode = colorNode; m.depthTest=false; m.depthWrite=false; m.toneMapped=false;
+  const s = new THREE.Scene(); const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2,2), m); mesh.frustumCulled=false; s.add(mesh); return s; }
+function run(scene, dst){ renderer.setRenderTarget(dst); renderer.render(scene, fsCam); }
+
+const uMouse = uniform(vec2(0.5,0.5)), uMVel = uniform(vec2(0,0)), uDown = uniform(0.0), uDt = uniform(0.016);
+
+const S = (rt, off) => texture(rt.texture, screenUV.add(off));   // sample with offset
+const L = (rt) => S(rt, vec2(-TX,0)), R = (rt) => S(rt, vec2(TX,0)), B = (rt) => S(rt, vec2(0,-TY)), Tp = (rt) => S(rt, vec2(0,TY));
+
+// advect velocity + dye (semi-Lagrangian)
+const advectScene = pass(Fn(() => {
+  const vel = texture(velRT.texture, screenUV).xy;
+  const back = screenUV.sub(vel.mul(vec2(TX,TY)).mul(uDt).mul(60.0));
+  const q = texture(velRT.texture, back);
+  return vec4(q.xy.mul(0.999), q.z.mul(0.994), 1.0);   // slight viscosity + dye fade
+})());
+// forces: mouse splat (velocity + dye) + buoyancy
+const splatScene = pass(Fn(() => {
+  const f = texture(velRT.texture, screenUV);
+  const d = screenUV.sub(uMouse).mul(vec2(W/H, 1.0)).length();
+  const fall = d.mul(d).mul(700.0).negate().exp();         // gaussian
+  const vel = f.xy.add(uMVel.mul(fall).mul(uDown).mul(0.9));
+  const dye = f.z.add(fall.mul(uDown).mul(0.9));
+  const buoy = vec2(0.0, f.z.mul(0.10));                   // dye rises
+  return vec4(vel.add(buoy), dye, 1.0);
+})());
+// divergence of velocity
+const divScene = pass(Fn(() => vec4(R(velRT).x.sub(L(velRT).x).add(Tp(velRT).y.sub(B(velRT).y)).mul(0.5), 0,0,1) )());
+// jacobi pressure (two materials to ping-pong without a copy)
+const jacobiA = pass(Fn(() => vec4( L(prsRT).x.add(R(prsRT).x).add(B(prsRT).x).add(Tp(prsRT).x).sub(texture(divRT.texture,screenUV).x).mul(0.25), 0,0,1) )());
+const jacobiB = pass(Fn(() => { const Lp=texture(prsS.texture,screenUV.add(vec2(-TX,0))).x, Rp=texture(prsS.texture,screenUV.add(vec2(TX,0))).x, Bp=texture(prsS.texture,screenUV.add(vec2(0,-TY))).x, Tpp=texture(prsS.texture,screenUV.add(vec2(0,TY))).x;
+  return vec4( Lp.add(Rp).add(Bp).add(Tpp).sub(texture(divRT.texture,screenUV).x).mul(0.25), 0,0,1); })());
+// subtract pressure gradient -> divergence-free velocity
+const subGradScene = pass(Fn(() => {
+  const grad = vec2(R(prsRT).x.sub(L(prsRT).x), Tp(prsRT).x.sub(B(prsRT).x)).mul(0.5);
+  const v = texture(velRT.texture, screenUV);
+  return vec4(v.xy.sub(grad), v.z, 1.0);
+})());
+// curl, then vorticity confinement
+const curlScene = pass(Fn(() => vec4( R(velRT).y.sub(L(velRT).y).sub(Tp(velRT).x.sub(B(velRT).x)).mul(0.5), 0,0,1) )());
+const vortScene = pass(Fn(() => {
+  const cL = abs(texture(curlRT.texture, screenUV.add(vec2(-TX,0))).x);
+  const cR = abs(texture(curlRT.texture, screenUV.add(vec2(TX,0))).x);
+  const cB = abs(texture(curlRT.texture, screenUV.add(vec2(0,-TY))).x);
+  const cT = abs(texture(curlRT.texture, screenUV.add(vec2(0,TY))).x);
+  const c = texture(curlRT.texture, screenUV).x;
+  let g = vec2(cR.sub(cL), cT.sub(cB)).mul(0.5);
+  const l = g.length().max(1e-5); g = g.div(l);
+  const force = vec2(g.y, g.x.negate()).mul(c).mul(0.6);   // perpendicular, scaled by curl
+  const v = texture(velRT.texture, screenUV);
+  return vec4(v.xy.add(force.mul(uDt).mul(60.0)), v.z, 1.0);
+})());
+// copy helpers (scratch -> main)
+const copyVel = pass(texture(velS.texture, screenUV));
+const copyPrs = pass(texture(prsS.texture, screenUV));
+// display the dye with a soft color ramp
+const dispScene = pass(Fn(() => { const dye = clamp(texture(velRT.texture, screenUV).z, 0.0, 1.0);
+  return mix(vec3(0.02,0.05,0.09), vec3(1.0,0.97,0.92), dye); })());
+
+addEventListener('mousemove', e => { const nx=e.clientX/innerWidth, ny=1-e.clientY/innerHeight; uMVel.value.set((nx-uMouse.value.x)*8, (ny-uMouse.value.y)*8); uMouse.value.set(nx,ny); });
+addEventListener('mousedown', () => uDown.value=1.0); addEventListener('mouseup', () => uDown.value=0.0);
+addEventListener('resize', () => renderer.setSize(innerWidth, innerHeight));
+
+let t0 = performance.now(), fc = 0;
+renderer.setAnimationLoop(() => {
+  uDt.value = 0.016;
+  run(advectScene, velS); run(copyVel, velRT);
+  run(splatScene, velS); run(copyVel, velRT);
+  run(curlScene, curlRT);
+  run(vortScene, velS); run(copyVel, velRT);
+  run(divScene, divRT);
+  for (let i=0;i<24;i++){ run(jacobiA, prsS); run(jacobiB, prsRT); }   // ping-pong: A reads prsRT->prsS, B reads prsS->prsRT
+  run(subGradScene, velS); run(copyVel, velRT);
+  renderer.setRenderTarget(null); renderer.render(dispScene, fsCam);
+  uMVel.value.multiplyScalar(0.8);
+  fc++; if (performance.now()-t0>500){ st.textContent = Math.round(fc/((performance.now()-t0)/1000))+' fps'; t0=performance.now(); fc=0; }
+});
+</script>
+</body>
+</html>

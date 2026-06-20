@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gather-CA · parameter substances (WebGPU)</title>
+<style>
+  html,body{margin:0;height:100%;background:#04060a;overflow:hidden;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  canvas{display:block;width:100vw;height:100vh}
+  #panel{position:fixed;top:10px;left:10px;width:256px;background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px;backdrop-filter:blur(6px)}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .row{display:flex;gap:6px;margin:6px 0;flex-wrap:wrap}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:4px 8px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4860}
+  button.on{background:#2f6d4a;border-color:#46a06c;color:#dffce8}
+  .mat{display:flex;align-items:center;gap:5px;padding:3px 7px}
+  .mat .sw{width:11px;height:11px;border-radius:3px;box-shadow:0 0 5px currentColor}
+  .mat.sel{outline:2px solid #6fd8ff}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  .stat{color:#bdf}
+  #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:40px;background:#080c12;color:#f99;font-size:14px;white-space:pre-wrap;text-align:left}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="panel">
+  <h1>gather-CA · substances</h1>
+  <p class="sub">one rule reads parameters · denser sinks</p>
+  <div class="row">
+    <button id="pour">pour: off</button>
+    <button id="reset">reset</button>
+    <button id="clear">clear</button>
+  </div>
+  <div class="row" id="mats"></div>
+  <div class="stat">grid: <span id="gdim"></span></div>
+  <div class="stat">movable matter: <span id="grains">—</span></div>
+  <div class="stat" id="fps">— fps</div>
+  <div class="hint">pick a substance, <b>pour</b> to drop it (drag orbit · wheel zoom). Each substance is just a row of numbers; the same gather rule sorts them all by density. Solids (rock, glass) stay put.</div>
+</div>
+<div id="err"></div>
+
+<script type="module">
+const fail=(m)=>{const e=document.getElementById('err');e.style.display='flex';e.textContent='WebGPU error:\n\n'+m;console.error(m);};
+
+async function main(){
+  if(!navigator.gpu){ fail('navigator.gpu missing — needs Chrome 113+ with WebGPU.'); return; }
+  const adapter=await navigator.gpu.requestAdapter();
+  if(!adapter){ fail('No GPU adapter.'); return; }
+  const device=await adapter.requestDevice();
+  device.addEventListener?.('uncapturederror',e=>console.error('WGPU',e.error?.message||e));
+
+  const canvas=document.getElementById('gl');
+  const ctx=canvas.getContext('webgpu');
+  const format=navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({device,format,alphaMode:'opaque'});
+
+  const G=96, NC=G*G*G;
+  document.getElementById('gdim').textContent=`${G}³ = ${NC.toLocaleString()} cells`;
+
+  // ---- substance table: a substance is a ROW of parameters, not a name ----
+  // phase: 0 gas, 1 liquid, 2 granular, 3 solid(static)
+  const GAS=0,LIQUID=1,GRANULAR=2,SOLID=3;
+  const SUBS=[
+    // name      r     g     b     density  emission opacity phase
+    ['air',     0.30,0.40,0.50,   1,       0.0,     0.00,   GAS],
+    ['sand',    0.86,0.56,0.22,   60,      0.0,     0.92,   GRANULAR],
+    ['rock',    0.32,0.33,0.37,   255,     0.0,     0.95,   SOLID],
+    ['water',   0.18,0.50,0.96,   30,      0.0,     0.50,   LIQUID],
+    ['oil',     0.42,0.28,0.10,   20,      0.05,    0.62,   LIQUID],
+    ['smoke',   0.55,0.60,0.66,   0,       0.0,     0.06,   GAS],
+    ['glass',   0.35,0.55,0.72,   255,     0.0,     0.09,   SOLID],
+  ];
+  const ID={air:0,sand:1,rock:2,water:3,oil:4,smoke:5,glass:6};
+  const NSUB=SUBS.length;
+  const subBuf=device.createBuffer({size:NSUB*32,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST});
+  { const ab=new ArrayBuffer(NSUB*32), dv=new DataView(ab);
+    SUBS.forEach((s,i)=>{ const o=i*32;
+      dv.setFloat32(o,s[1],true);dv.setFloat32(o+4,s[2],true);dv.setFloat32(o+8,s[3],true);dv.setFloat32(o+12,s[4],true);
+      dv.setFloat32(o+16,s[5],true);dv.setFloat32(o+20,s[6],true);dv.setUint32(o+24,s[7],true);dv.setUint32(o+28,0,true);
+    });
+    device.queue.writeBuffer(subBuf,0,ab);
+  }
+
+  const cellBytes=NC*4;
+  const cellsA=device.createBuffer({size:cellBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const cellsB=device.createBuffer({size:cellBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const curv  =device.createBuffer({size:cellBytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST}); // metric hook, flat for now
+  const params=device.createBuffer({size:112,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const subU  =device.createBuffer({size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const countBuf =device.createBuffer({size:4,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const countRead=device.createBuffer({size:4,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+
+  // ---- initial scene: an unstable stack so the one rule visibly sorts it ----
+  const initData=new Uint32Array(NC);
+  const sph=(x,y,z,cx,cy,cz,r)=>{const dx=x-cx,dy=y-cy,dz=z-cz;return dx*dx+dy*dy+dz*dz<=r*r;};
+  function buildScene(loaded){
+    initData.fill(ID.air);
+    for(let z=0;z<G;z++)for(let y=0;y<G;y++)for(let x=0;x<G;x++){
+      const i=x+y*G+z*G*G;
+      if(y<2){ initData[i]=ID.rock; continue; }                         // floor
+      if(x===0||x===G-1||z===0||z===G-1){ initData[i]=ID.glass; continue; } // glass walls
+      if(!loaded) continue;
+      if(y>=3 && y<=30) initData[i]=ID.water;                            // reservoir
+      if(y>=48 && y<=58 && x>=22 && x<=74 && z>=22 && z<=74) initData[i]=ID.sand; // slab above water
+      if(sph(x,y,z,G*0.5,9,G*0.5,7)) initData[i]=ID.oil;                 // oil blob submerged -> rises
+      if(sph(x,y,z,G*0.36,14,G*0.6,5)) initData[i]=ID.air;               // bubble -> rises
+      if(sph(x,y,z,G*0.64,8,G*0.4,4)) initData[i]=ID.smoke;              // smoke -> rises fast
+    }
+    device.queue.writeBuffer(cellsA,0,initData);
+    device.queue.writeBuffer(cellsB,0,initData);
+    cur=0;
+  }
+
+  // ---- shaders ----
+  const COMMON=`
+  struct Sub { color:vec3<f32>, density:f32, emission:f32, opacity:f32, phase:u32, pad:u32 };
+  fn movable(s:ptr<function,Sub>)->bool { return (*s).phase != 3u; }
+  `;
+
+  const simWGSL=`
+  struct Sub { color:vec3<f32>, density:f32, emission:f32, opacity:f32, phase:u32, pad:u32 };
+  struct SubU { g:u32, offY:u32, tick:u32, pad:u32 };
+  @group(0) @binding(0) var<storage, read> cellsIn: array<u32>;
+  @group(0) @binding(1) var<storage, read_write> cellsOut: array<u32>;
+  @group(0) @binding(2) var<uniform> U: SubU;
+  @group(0) @binding(3) var<storage, read> subs: array<Sub>;
+  fn gc(x:i32,y:i32,z:i32,g:i32)->u32{
+    if(x<0||y<0||z<0||x>=g||y>=g||z>=g){ return 2u; } // out of range = rock (solid, static)
+    return cellsIn[u32(x + y*g + z*g*g)];
+  }
+  fn mov(id:u32)->bool { return subs[id].phase != 3u; }
+  @compute @workgroup_size(4,4,4)
+  fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+    let g=i32(U.g);
+    let x=i32(gid.x); let y=i32(gid.y); let z=i32(gid.z);
+    if(x>=g||y>=g||z>=g){ return; }
+    let off=i32(U.offY);
+    var outv = cellsIn[u32(x + y*g + z*g*g)];
+    if(y>=off){
+      let r=y-off;
+      let bottomY=off+(r/2)*2;      // each cell resolves its own vertical pair (gather)
+      let topY=bottomY+1;
+      let bv=gc(x,bottomY,z,g);
+      let tv=gc(x,topY,z,g);
+      var nb=bv; var nt=tv;
+      // THE rule: a denser movable cell sinks below a lighter movable cell. one line, every substance.
+      if(mov(bv) && mov(tv) && subs[tv].density > subs[bv].density){ nb=tv; nt=bv; }
+      if(y==bottomY){ outv=nb; } else if(y==topY){ outv=nt; }
+    }
+    cellsOut[u32(x + y*g + z*g*g)] = outv;
+  }`;
+
+  const PARAMS=`
+  struct Params {
+    camPos:vec3<f32>, gridSize:f32,
+    camRight:vec3<f32>, tanHalfFov:f32,
+    camUp:vec3<f32>, aspect:f32,
+    camFwd:vec3<f32>, time:f32,
+    res:vec2<f32>, tick:u32, bendOn:u32,
+    brushPos:vec3<f32>, brushRadius:f32,
+    brushMat:u32, brushActive:u32, p0:u32, p1:u32,
+  };`;
+
+  const stampWGSL=`
+  struct Sub { color:vec3<f32>, density:f32, emission:f32, opacity:f32, phase:u32, pad:u32 };
+  ${PARAMS}
+  @group(0) @binding(0) var<storage, read_write> cells: array<u32>;
+  @group(0) @binding(1) var<uniform> P: Params;
+  @group(0) @binding(2) var<storage, read> subs: array<Sub>;
+  @compute @workgroup_size(4,4,4)
+  fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+    if(P.brushActive==0u){ return; }
+    let g=i32(P.gridSize);
+    let x=i32(gid.x); let y=i32(gid.y); let z=i32(gid.z);
+    if(x>=g||y>=g||z>=g){ return; }
+    let c=vec3<f32>(f32(x)+0.5,f32(y)+0.5,f32(z)+0.5);
+    if(distance(c,P.brushPos)<=P.brushRadius){
+      let i=u32(x+y*g+z*g*g);
+      let bm=P.brushMat;
+      if(subs[bm].phase==3u){ cells[i]=bm; }            // solids overwrite anything (draw structures)
+      else if(bm==0u){ cells[i]=0u; }                   // air = eraser
+      else { if(cells[i]==0u){ cells[i]=bm; } }          // fluids/granular only displace air
+    }
+  }`;
+
+  const countWGSL=`
+  struct Sub { color:vec3<f32>, density:f32, emission:f32, opacity:f32, phase:u32, pad:u32 };
+  ${PARAMS}
+  @group(0) @binding(0) var<storage, read> cells: array<u32>;
+  @group(0) @binding(1) var<storage, read_write> cnt: atomic<u32>;
+  @group(0) @binding(2) var<uniform> P: Params;
+  @group(0) @binding(3) var<storage, read> subs: array<Sub>;
+  @compute @workgroup_size(4,4,4)
+  fn main(@builtin(global_invocation_id) gid:vec3<u32>){
+    let g=i32(P.gridSize);
+    let x=i32(gid.x); let y=i32(gid.y); let z=i32(gid.z);
+    if(x>=g||y>=g||z>=g){ return; }
+    let m=cells[u32(x+y*g+z*g*g)];
+    if(m!=0u && subs[m].phase!=3u){ atomicAdd(&cnt,1u); } // movable, non-air matter
+  }`;
+
+  const renderWGSL=`
+  struct Sub { color:vec3<f32>, density:f32, emission:f32, opacity:f32, phase:u32, pad:u32 };
+  ${PARAMS}
+  @group(0) @binding(0) var<storage, read> cellsIn: array<u32>;
+  @group(0) @binding(1) var<uniform> P: Params;
+  @group(0) @binding(2) var<storage, read> curv: array<f32>;
+  @group(0) @binding(3) var<storage, read> subs: array<Sub>;
+  fn gm(ci:vec3<i32>, g:i32)->u32{
+    if(ci.x<0||ci.y<0||ci.z<0||ci.x>=g||ci.y>=g||ci.z>=g){ return 0u; }
+    return cellsIn[u32(ci.x + ci.y*g + ci.z*g*g)];
+  }
+  @vertex fn vs(@builtin(vertex_index) vi:u32)->@builtin(position) vec4<f32>{
+    var p=array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0),vec2<f32>(3.0,-1.0),vec2<f32>(-1.0,3.0));
+    return vec4<f32>(p[vi],0.0,1.0);
+  }
+  @fragment fn fs(@builtin(position) fc:vec4<f32>)->@location(0) vec4<f32>{
+    let g=i32(P.gridSize); let res=P.res;
+    let uv=vec2<f32>((fc.x/res.x)*2.0-1.0,(1.0-fc.y/res.y)*2.0-1.0);
+    let aspect=res.x/res.y;
+    let dir=normalize(P.camFwd + uv.x*aspect*P.tanHalfFov*P.camRight + uv.y*P.tanHalfFov*P.camUp);
+    let ro=P.camPos;
+    let bmin=vec3<f32>(0.0); let bmax=vec3<f32>(P.gridSize);
+    let invd=1.0/dir; let ta=(bmin-ro)*invd; let tb=(bmax-ro)*invd;
+    let tmn=min(ta,tb); let tmx=max(ta,tb);
+    var tEnter=max(max(tmn.x,tmn.y),tmn.z); let tExit=min(min(tmx.x,tmx.y),tmx.z);
+    let bg=vec3<f32>(0.02,0.03,0.055);
+    if(tExit<=max(tEnter,0.0)){ return vec4<f32>(bg,1.0); }
+    tEnter=max(tEnter,0.0);
+    var t=tEnter; let dt=0.6; var col=vec3<f32>(0.0); var T=1.0;
+    loop{
+      if(t>tExit || T<0.02){ break; }
+      let p=ro+dir*t; let ci=vec3<i32>(floor(p)); let m=gm(ci,g);
+      if(m!=0u){
+        let s=subs[m]; let a=s.opacity;
+        if(a>0.003){
+          let above=gm(ci+vec3<i32>(0,1,0),g);
+          let openTop = (above==0u) || (subs[above].opacity<0.05);
+          let topf=select(0.72,1.0,openTop);
+          let cv=curv[u32(clamp(ci.x,0,g-1)+clamp(ci.y,0,g-1)*g+clamp(ci.z,0,g-1)*g*g)];
+          var sc=s.color*topf + s.color*s.emission*3.0 + vec3<f32>(0.2,0.4,1.0)*cv; // emission + metric hook (cv=0)
+          col += T*a*sc; T*=(1.0-a);
+        }
+      }
+      t+=dt;
+    }
+    col += T*bg;
+    return vec4<f32>(col,1.0);
+  }`;
+
+  const mk=(code)=>device.createShaderModule({code});
+  const simMod=mk(simWGSL), stampMod=mk(stampWGSL), countMod=mk(countWGSL), renderMod=mk(renderWGSL);
+
+  const RS={type:'read-only-storage'}, S={type:'storage'}, U={type:'uniform'};
+  const simBGL=device.createBindGroupLayout({entries:[
+    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:RS},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:S},
+    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:U},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:RS}]});
+  const stampBGL=device.createBindGroupLayout({entries:[
+    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:S},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:U},
+    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:RS}]});
+  const countBGL=device.createBindGroupLayout({entries:[
+    {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:RS},{binding:1,visibility:GPUShaderStage.COMPUTE,buffer:S},
+    {binding:2,visibility:GPUShaderStage.COMPUTE,buffer:U},{binding:3,visibility:GPUShaderStage.COMPUTE,buffer:RS}]});
+  const renderBGL=device.createBindGroupLayout({entries:[
+    {binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:RS},{binding:1,visibility:GPUShaderStage.FRAGMENT,buffer:U},
+    {binding:2,visibility:GPUShaderStage.FRAGMENT,buffer:RS},{binding:3,visibility:GPUShaderStage.FRAGMENT,buffer:RS}]});
+
+  const simPipe=device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[simBGL]}),compute:{module:simMod,entryPoint:'main'}});
+  const stampPipe=device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[stampBGL]}),compute:{module:stampMod,entryPoint:'main'}});
+  const countPipe=device.createComputePipeline({layout:device.createPipelineLayout({bindGroupLayouts:[countBGL]}),compute:{module:countMod,entryPoint:'main'}});
+  const renderPipe=device.createRenderPipeline({layout:device.createPipelineLayout({bindGroupLayouts:[renderBGL]}),
+    vertex:{module:renderMod,entryPoint:'vs'},fragment:{module:renderMod,entryPoint:'fs',targets:[{format}]},primitive:{topology:'triangle-list'}});
+
+  const simBG=[
+    device.createBindGroup({layout:simBGL,entries:[{binding:0,resource:{buffer:cellsA}},{binding:1,resource:{buffer:cellsB}},{binding:2,resource:{buffer:subU}},{binding:3,resource:{buffer:subBuf}}]}),
+    device.createBindGroup({layout:simBGL,entries:[{binding:0,resource:{buffer:cellsB}},{binding:1,resource:{buffer:cellsA}},{binding:2,resource:{buffer:subU}},{binding:3,resource:{buffer:subBuf}}]}),
+  ];
+  const stampBG=[
+    device.createBindGroup({layout:stampBGL,entries:[{binding:0,resource:{buffer:cellsA}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:subBuf}}]}),
+    device.createBindGroup({layout:stampBGL,entries:[{binding:0,resource:{buffer:cellsB}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:subBuf}}]}),
+  ];
+  const countBG=[
+    device.createBindGroup({layout:countBGL,entries:[{binding:0,resource:{buffer:cellsA}},{binding:1,resource:{buffer:countBuf}},{binding:2,resource:{buffer:params}},{binding:3,resource:{buffer:subBuf}}]}),
+    device.createBindGroup({layout:countBGL,entries:[{binding:0,resource:{buffer:cellsB}},{binding:1,resource:{buffer:countBuf}},{binding:2,resource:{buffer:params}},{binding:3,resource:{buffer:subBuf}}]}),
+  ];
+  const renderBG=[
+    device.createBindGroup({layout:renderBGL,entries:[{binding:0,resource:{buffer:cellsA}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:curv}},{binding:3,resource:{buffer:subBuf}}]}),
+    device.createBindGroup({layout:renderBGL,entries:[{binding:0,resource:{buffer:cellsB}},{binding:1,resource:{buffer:params}},{binding:2,resource:{buffer:curv}},{binding:3,resource:{buffer:subBuf}}]}),
+  ];
+
+  // ---- camera ----
+  let theta=0.9, phi=1.12, radius=G*1.7; const target=[G/2,G/2,G/2];
+  let cur=0, tick=0;
+  buildScene(true);
+
+  // ---- substance picker UI ----
+  let selected=ID.sand;
+  const matsEl=document.getElementById('mats');
+  const paint=['sand','water','oil','smoke','rock','air'];
+  const matBtns={};
+  paint.forEach(name=>{
+    const s=SUBS[ID[name]];
+    const b=document.createElement('div'); b.className='mat'+(ID[name]===selected?' sel':'');
+    b.innerHTML=`<span class="sw" style="background:rgb(${s[1]*255|0},${s[2]*255|0},${s[3]*255|0});color:rgb(${s[1]*255|0},${s[2]*255|0},${s[3]*255|0})"></span>${name==='air'?'erase':name}`;
+    b.style.cursor='pointer'; b.onclick=()=>{ selected=ID[name]; for(const k in matBtns) matBtns[k].classList.toggle('sel',k===name); };
+    matBtns[name]=b; matsEl.appendChild(b);
+  });
+
+  // ---- input ----
+  let pour=false, dragging=false, lx=0, ly=0;
+  const pourBtn=document.getElementById('pour');
+  function setPour(v){ pour=v; pourBtn.classList.toggle('on',pour); pourBtn.textContent='pour: '+(pour?'on':'off'); }
+  pourBtn.onclick=()=>setPour(!pour);
+  document.getElementById('reset').onclick=()=>buildScene(true);
+  document.getElementById('clear').onclick=()=>buildScene(false);
+  canvas.addEventListener('mousedown',e=>{dragging=true;lx=e.clientX;ly=e.clientY;});
+  addEventListener('mouseup',()=>dragging=false);
+  addEventListener('mousemove',e=>{ if(!dragging)return; theta-=(e.clientX-lx)*0.006; phi-=(e.clientY-ly)*0.006; phi=Math.max(0.08,Math.min(Math.PI-0.08,phi)); lx=e.clientX; ly=e.clientY; });
+  canvas.addEventListener('wheel',e=>{ radius*=(1+e.deltaY*0.001); radius=Math.max(G*0.6,Math.min(G*5,radius)); e.preventDefault(); },{passive:false});
+  addEventListener('keydown',e=>{
+    if(e.code==='KeyP')setPour(!pour);
+    else if(e.code==='KeyR')buildScene(true);
+    else if(e.code==='KeyC')buildScene(false);
+    else { const n=parseInt(e.key); if(n>=1&&n<=paint.length){ const nm=paint[n-1]; selected=ID[nm]; for(const k in matBtns) matBtns[k].classList.toggle('sel',k===nm); } }
+  });
+
+  // ---- params ----
+  const pbuf=new ArrayBuffer(112), dv=new DataView(pbuf);
+  function writeParams(time){
+    const sp=Math.sin(phi),cp=Math.cos(phi),st=Math.sin(theta),ct=Math.cos(theta);
+    const d=[sp*ct,cp,sp*st];
+    const camPos=[target[0]+radius*d[0],target[1]+radius*d[1],target[2]+radius*d[2]];
+    const fwd=[-d[0],-d[1],-d[2]];
+    let rt=[fwd[2],0,-fwd[0]]; const rl=Math.hypot(rt[0],rt[1],rt[2])||1; rt=[rt[0]/rl,rt[1]/rl,rt[2]/rl];
+    const up=[rt[1]*fwd[2]-rt[2]*fwd[1],rt[2]*fwd[0]-rt[0]*fwd[2],rt[0]*fwd[1]-rt[1]*fwd[0]];
+    const tanHF=Math.tan(60*Math.PI/360), res=[canvas.width,canvas.height];
+    const bx=G/2+Math.cos(time*0.9)*G*0.16, bz=G/2+Math.sin(time*0.9)*G*0.16;
+    dv.setFloat32(0,camPos[0],true);dv.setFloat32(4,camPos[1],true);dv.setFloat32(8,camPos[2],true);dv.setFloat32(12,G,true);
+    dv.setFloat32(16,rt[0],true);dv.setFloat32(20,rt[1],true);dv.setFloat32(24,rt[2],true);dv.setFloat32(28,tanHF,true);
+    dv.setFloat32(32,up[0],true);dv.setFloat32(36,up[1],true);dv.setFloat32(40,up[2],true);dv.setFloat32(44,res[0]/res[1],true);
+    dv.setFloat32(48,fwd[0],true);dv.setFloat32(52,fwd[1],true);dv.setFloat32(56,fwd[2],true);dv.setFloat32(60,time,true);
+    dv.setFloat32(64,res[0],true);dv.setFloat32(68,res[1],true);dv.setUint32(72,tick>>>0,true);dv.setUint32(76,0,true);
+    dv.setFloat32(80,bx,true);dv.setFloat32(84,G-5,true);dv.setFloat32(88,bz,true);dv.setFloat32(92,4.0,true);
+    dv.setUint32(96,selected>>>0,true);dv.setUint32(100,pour?1:0,true);dv.setUint32(104,0,true);dv.setUint32(108,0,true);
+    device.queue.writeBuffer(params,0,pbuf);
+  }
+  const sab=new ArrayBuffer(16), sdv=new DataView(sab);
+  function writeSub(off){ sdv.setUint32(0,G,true);sdv.setUint32(4,off,true);sdv.setUint32(8,tick>>>0,true); device.queue.writeBuffer(subU,0,sab); }
+
+  function resize(){ canvas.width=Math.floor(innerWidth); canvas.height=Math.floor(innerHeight); }
+  addEventListener('resize',resize); resize();
+
+  const WG=Math.ceil(G/4), SUBSTEPS=2;
+  let last=performance.now(), fc=0, facc=0, countBusy=false, framei=0;
+  const grainsEl=document.getElementById('grains'), fpsEl=document.getElementById('fps');
+
+  function frame(now){
+    const dt=(now-last)/1000; last=now; facc+=dt;
+    if(++fc>=20){ fpsEl.textContent=(fc/facc).toFixed(0)+' fps'; fc=0; facc=0; }
+    writeParams(now/1000);
+
+    if(pour){ const enc=device.createCommandEncoder(); const p=enc.beginComputePass();
+      p.setPipeline(stampPipe); p.setBindGroup(0,stampBG[cur]); p.dispatchWorkgroups(WG,WG,WG); p.end(); device.queue.submit([enc.finish()]); }
+
+    for(let s=0;s<SUBSTEPS;s++){
+      writeSub(tick&1);
+      const enc=device.createCommandEncoder(); const p=enc.beginComputePass();
+      p.setPipeline(simPipe); p.setBindGroup(0,simBG[cur]); p.dispatchWorkgroups(WG,WG,WG); p.end();
+      device.queue.submit([enc.finish()]); cur=1-cur; tick++;
+    }
+
+    if((framei++ %12)===0 && !countBusy){
+      countBusy=true; device.queue.writeBuffer(countBuf,0,new Uint32Array([0]));
+      const enc=device.createCommandEncoder(); const p=enc.beginComputePass();
+      p.setPipeline(countPipe); p.setBindGroup(0,countBG[cur]); p.dispatchWorkgroups(WG,WG,WG); p.end();
+      enc.copyBufferToBuffer(countBuf,0,countRead,0,4); device.queue.submit([enc.finish()]);
+      countRead.mapAsync(GPUMapMode.READ).then(()=>{ const v=new Uint32Array(countRead.getMappedRange())[0]; grainsEl.textContent=v.toLocaleString(); countRead.unmap(); countBusy=false; }).catch(()=>{countBusy=false;});
+    }
+
+    const enc=device.createCommandEncoder();
+    const pass=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),clearValue:{r:0.008,g:0.012,b:0.02,a:1},loadOp:'clear',storeOp:'store'}]});
+    pass.setPipeline(renderPipe); pass.setBindGroup(0,renderBG[cur]); pass.draw(3); pass.end();
+    device.queue.submit([enc.finish()]);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  console.log('gather-CA substances running: G='+G+' NSUB='+NSUB);
+}
+main().catch(e=>fail(e.stack||String(e)));
+</script>
+</body>
+</html>

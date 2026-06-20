@@ -32,9 +32,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
-import { Fn, instancedArray, instanceIndex, vertexIndex, uniform, If, Loop,
+import { Fn, instancedArray, instanceIndex, uniform, If, Loop,
          int, uint, float, vec2, vec3, color, mix, clamp, smoothstep, cross,
-         hash, mx_noise_float, atomicAdd, atomicStore, atomicLoad, uv } from 'three/tsl';
+         hash, mx_noise_float, atomicAdd, atomicStore, uv } from 'three/tsl';
 
 // ===========================================================================
 //  PHASE 1 of the FractalGaming particle engine (successor to engine.html).
@@ -99,7 +99,6 @@ const positions  = instancedArray(N, 'vec3');
 const velocities = instancedArray(N, 'vec3');
 const dens       = instancedArray(N, 'float');
 const temp       = instancedArray(N, 'float');
-const rest       = instancedArray(N, 'float');   // per-particle rest density (from phase)
 const phase      = instancedArray(N, 'uint');
 const cellCount  = instancedArray(NUMCELLS, 'uint').toAtomic();  // particles per cell
 const cellTable  = instancedArray(NUMCELLS * CAP, 'uint');       // particle ids per cell
@@ -163,7 +162,6 @@ const computeInit = Fn(() => {
   velocities.element(instanceIndex).assign(vec3(0, 0, 0));
   dens.element(instanceIndex).assign(float(0));
   temp.element(instanceIndex).assign(tmp);
-  rest.element(instanceIndex).assign(rho0);
   phase.element(instanceIndex).assign(ph);
 })().compute(N);
 await renderer.computeAsync(computeInit);
@@ -185,10 +183,10 @@ function forEachNeighbour(cx, cy, cz, body) {
       Loop({ start: int(0), end: int(3), type: 'int', condition: '<', name: 'ox' }, ({ ox }) => {
         const nx = cx.add(ox).sub(int(1));
         const cu = uint(nz.mul(int(G * G)).add(ny.mul(int(G))).add(nx));
-        const cnt = atomicLoad(cellCount.element(cu)).min(uint(CAP));
         const base = cu.mul(uint(CAP));
         Loop({ start: uint(0), end: uint(CAP), type: 'uint', condition: '<', name: 's' }, ({ s }) => {
-          If(s.lessThan(cnt), () => { body(cellTable.element(base.add(s))); });
+          const j = cellTable.element(base.add(s));
+          If(j.lessThan(uint(N)), () => { body(j); });   // id >= N means empty slot
         });
       });
     });
@@ -199,6 +197,10 @@ function forEachNeighbour(cx, cy, cz, body) {
 const clearGrid = Fn(() => {
   atomicStore(cellCount.element(instanceIndex), uint(0));
 })().compute(NUMCELLS);
+
+const clearTable = Fn(() => {            // mark every slot empty (id >= N) each frame
+  cellTable.element(instanceIndex).assign(uint(N));
+})().compute(NUMCELLS * CAP);
 
 // ---- PASS 2: bin each particle into its cell ------------------------------
 const buildGrid = Fn(() => {
@@ -230,14 +232,23 @@ const computeDensity = Fn(() => {
   dens.element(instanceIndex).assign(d.max(1e-4));
 })().compute(N);
 
+// rest density per phase (kept in-shader -> fewer storage buffers, safe on 8-buffer GPUs)
+function restOf(ph) {
+  const r = float(0.60).toVar();
+  If(ph.equal(uint(0)), () => r.assign(0.70));
+  If(ph.equal(uint(2)), () => r.assign(0.15));
+  If(ph.equal(uint(3)), () => r.assign(0.12));
+  return r;
+}
+
 // ---- PASS 4: forces — pressure, viscosity, cohesion, heat, buoyancy, push -
 const computeForces = Fn(() => {
   const pi = positions.element(instanceIndex);
   const vi = velocities.element(instanceIndex);
   const di = dens.element(instanceIndex).max(1e-4);
   const ti = temp.element(instanceIndex);
-  const ri = rest.element(instanceIndex);
   const ph = phase.element(instanceIndex);
+  const ri = restOf(ph);
   const piP = uStiff.mul(di.sub(ri).max(0.0));        // own pressure (repulsive only)
 
   // per-phase behaviour (liquid = defaults)
@@ -265,7 +276,7 @@ const computeForces = Fn(() => {
         const r = r2.sqrt();
         const dir = rij.div(r);                          // unit vector i <- j
         const dj = dens.element(j).max(1e-4);
-        const pjP = uStiff.mul(dj.sub(rest.element(j)).max(0.0));
+        const pjP = uStiff.mul(dj.sub(restOf(phase.element(j))).max(0.0));
         const hr = float(H).sub(r);
         // pressure (spiky gradient) — pushes phases apart, makes them collide/layer
         const gW = float(KSPIKY).mul(hr).mul(hr);
@@ -407,7 +418,7 @@ const ray = new THREE.Raycaster();
 const plane = new THREE.Plane();
 const camDir = new THREE.Vector3();
 const hit = new THREE.Vector3();
-let stir = false, haveHit = false;
+let stir = false;
 addEventListener('pointermove', e => { ndc.x = (e.clientX / innerWidth) * 2 - 1; ndc.y = -((e.clientY / innerHeight) * 2 - 1); });
 addEventListener('keydown', e => {
   if (e.code === 'Space') { stir = true; controls.enableRotate = false; }
@@ -421,7 +432,7 @@ const fpsEl = document.getElementById('fps');
 const target = new THREE.Vector3(0, 24, 0);
 const cur = new THREE.Vector3(0, 24, 0);
 const prev = new THREE.Vector3(0, 24, 0);
-let last = performance.now(), facc = 0, fn = 0, T = 0;
+let last = performance.now(), facc = 0, fcount = 0, T = 0;
 
 renderer.setAnimationLoop(() => {
   const now = performance.now();
@@ -432,7 +443,7 @@ renderer.setAnimationLoop(() => {
     camera.getWorldDirection(camDir);
     plane.setFromNormalAndCoplanarPoint(camDir, controls.target);
     ray.setFromCamera(ndc, camera);
-    if (ray.ray.intersectPlane(plane, hit)) { target.copy(hit); haveHit = true; }
+    if (ray.ray.intersectPlane(plane, hit)) target.copy(hit);
     uBrushHeat.value = P.brushHeat;
   } else {
     target.set(Math.sin(T * 0.5) * 22, 26 + Math.sin(T * 0.8) * 14, Math.cos(T * 0.37) * 18);
@@ -455,6 +466,7 @@ renderer.setAnimationLoop(() => {
   uTime.value = T;
   for (let s = 0; s < sub; s++) {
     renderer.compute(clearGrid);
+    renderer.compute(clearTable);
     renderer.compute(buildGrid);
     renderer.compute(computeDensity);
     renderer.compute(computeForces);
@@ -463,7 +475,8 @@ renderer.setAnimationLoop(() => {
 
   controls.update();
   renderer.render(scene, camera);
-  facc += dt; fn++; if (facc >= 0.5) { fpsEl.textContent = `${Math.round(fn / facc)} fps · ${N.toLocaleString()} particles`; facc = 0; fn = 0; }
+  facc += dt; fcount++;
+  if (facc >= 0.5) { fpsEl.textContent = Math.round(fcount / facc) + ' fps · ' + N.toLocaleString() + ' particles'; facc = 0; fcount = 0; }
 });
 </script>
 </body>

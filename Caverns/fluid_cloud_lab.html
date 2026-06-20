@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fluid CLOUD lab — lit volumetric clouds (Navier-Stokes)</title>
+<style>
+  html,body{margin:0;height:100%;background:#02060a;overflow:hidden;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  #panel{position:fixed;top:10px;left:10px;width:262px;background:rgba(8,14,22,.84);border:1px solid #1d2b3a;border-radius:10px;padding:12px;backdrop-filter:blur(6px)}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 86px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 38px;text-align:right;color:#bdf}
+  .row.chk label{flex:1}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px}
+  .err{position:fixed;top:0;left:0;right:0;padding:14px;background:#3a1015;color:#fbb;font-size:12px;white-space:pre-wrap;display:none;z-index:9}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="err" class="err"></div>
+<div id="panel">
+  <h1>fluid CLOUD lab</h1>
+  <p class="sub">lit volumetric clouds · real fluid (after saharan · Chill)</p>
+  <div class="hint">A true 3D fluid: a velocity+smoke grid that's advected, made incompressible (pressure solve), and given curl (vorticity confinement). <b>Drag in the view to grab the ball and seed cloud;</b> the gas is buoyant so it rises and billows, sun-lit so it self-shadows like real cumulus. Carried by the flow, so it tears and swirls, not pushed paint.</div>
+  <div class="row"><label>ball size</label><input id="radius" type="range" min="0.4" max="2.2" step="0.01" value="1.0"><span class="v" id="radius_v"></span></div>
+  <div class="row"><label>power</label><input id="power" type="range" min="0" max="3" step="0.01" value="0.7"><span class="v" id="power_v"></span></div>
+  <div class="row"><label>buoyancy</label><input id="buoyancy" type="range" min="0" max="3" step="0.01" value="1.1"><span class="v" id="buoyancy_v"></span></div>
+  <div class="row"><label>vorticity</label><input id="vorticity" type="range" min="0" max="2.5" step="0.01" value="1.0"><span class="v" id="vorticity_v"></span></div>
+  <div class="row"><label>ventilation</label><input id="ventilation" type="range" min="0" max="2" step="0.01" value="0.15"><span class="v" id="ventilation_v"></span></div>
+  <div class="row"><label>sun</label><input id="sun" type="range" min="0" max="6.28" step="0.01" value="0.9"><span class="v" id="sun_v"></span></div>
+  <div class="row"><label>evaporation</label><input id="evap" type="range" min="0" max="1" step="0.01" value="0.5"><span class="v" id="evap_v"></span></div>
+  <div class="row chk"><label for="spin">auto-orbit camera</label><input type="checkbox" id="spin" checked></div>
+  <div class="row" style="gap:6px"><button id="reset">reset smoke</button></div>
+  <div class="hint">vorticity = how much it curls/billows. power = jet strength. ventilation = a room draft that slowly clears the smoke.</div>
+</div>
+<div class="fps" id="fps"></div>
+
+<script>
+const cv = document.getElementById('c'), errEl = document.getElementById('err');
+const gl = cv.getContext('webgl2', { antialias:false, alpha:false });
+function fail(m){ errEl.style.display='block'; errEl.textContent = m; throw new Error(m); }
+if (!gl) fail('WebGL2 not available.');
+if (!gl.getExtension('EXT_color_buffer_float')) fail('EXT_color_buffer_float not supported (need float render targets).');
+
+const RES3 = 64, RES2 = 512;                 // 64^3 grid packed into a 512^2 float texture
+const SH2 = 9, SH3 = 6;                       // log2(512), log2(64)
+
+// ---------- GLSL ----------
+const VERT = `#version 300 es
+in vec2 aPos; out vec2 vUv;
+void main(){ vUv = aPos*0.5+0.5; gl_Position = vec4(aPos,0.,1.); }`;
+
+// common header: 3D-in-2D addressing + helpers + uniforms
+const HEAD = `#version 300 es
+precision highp float; precision highp int; precision highp sampler2D;
+uniform sampler2D texVelVof, texAdvectTmp, texDivPrsWgt;
+uniform float uRadius, uPower, uVentilation, uVorticity, uTime, uBuoyancy, uSun, uEvap, uEmit;
+uniform vec3 uCenter, uPCenter;
+const int RES2=${RES2}, RES3=${RES3}, SH2=${SH2}, MASK3=${RES3-1}, MASK2=${RES2-1};
+const ivec2 SHIFT2 = ivec2(0, ${SH2});
+const ivec3 SHIFT3 = ivec3(0, ${SH3}, ${2*SH3});
+const float INVRES3 = ${1/RES3};
+in vec2 vUv; out vec4 oColor;
+ivec3 g_i3d; vec3 g_p;
+
+ivec3 uvToIndex3D(vec2 uv){
+  ivec2 t = ivec2(uv*float(RES2)) << SHIFT2;
+  int index = t.x | t.y;
+  return ivec3(index) >> SHIFT3 & MASK3;
+}
+ivec2 index3DTo2D(ivec3 i3d){
+  ivec3 t = (i3d & MASK3) << SHIFT3;
+  int index = t.x | t.y | t.z;
+  return ivec2(index) >> SHIFT2 & MASK2;
+}
+vec4 fetch3D(sampler2D tex, ivec3 i3d){ return texelFetch(tex, index3DTo2D(i3d), 0); }
+vec4 trilinear(sampler2D tex, vec3 pp){
+  vec3 f3d = pp*float(RES3) - 0.5;
+  vec3 fr = fract(f3d);
+  ivec3 i1 = ivec3(floor(f3d)) & MASK3;
+  ivec3 i2 = (i1+1) & MASK3;
+  vec4 c000=fetch3D(tex,ivec3(i1.x,i1.y,i1.z));
+  vec4 c001=fetch3D(tex,ivec3(i1.x,i1.y,i2.z));
+  vec4 c010=fetch3D(tex,ivec3(i1.x,i2.y,i1.z));
+  vec4 c011=fetch3D(tex,ivec3(i1.x,i2.y,i2.z));
+  vec4 c100=fetch3D(tex,ivec3(i2.x,i1.y,i1.z));
+  vec4 c101=fetch3D(tex,ivec3(i2.x,i1.y,i2.z));
+  vec4 c110=fetch3D(tex,ivec3(i2.x,i2.y,i1.z));
+  vec4 c111=fetch3D(tex,ivec3(i2.x,i2.y,i2.z));
+  vec4 c00=mix(c000,c001,fr.z), c01=mix(c010,c011,fr.z), c10=mix(c100,c101,fr.z), c11=mix(c110,c111,fr.z);
+  vec4 c0=mix(c00,c01,fr.y), c1=mix(c10,c11,fr.y);
+  return mix(c0,c1,fr.x);
+}
+vec3 safeNorm(vec3 v){ float l2=dot(v,v); return l2==0.0?vec3(0):v*inversesqrt(l2); }
+vec4 advect(sampler2D velTex, sampler2D tex, vec2 uv, float velScale){
+  ivec3 i3d = uvToIndex3D(uv);
+  vec3 vel = texture(velTex, uv).xyz;
+  vec3 pp = (vec3(i3d)+0.5 - vel*velScale)*INVRES3;
+  return trilinear(tex, pp);
+}
+void baseInit(){ g_i3d = uvToIndex3D(vUv); g_p = (vec3(g_i3d)+0.5)*INVRES3; }
+`;
+
+const F_INIT = HEAD + `void main(){ baseInit(); oColor = vec4(0); }`;
+
+const F_ADVECT_PREDICT = HEAD + `uniform bool uForward;
+void main(){ baseInit();
+  if (uForward) oColor = advect(texVelVof, texVelVof, vUv, 1.0);
+  else          oColor = advect(texVelVof, texAdvectTmp, vUv, -1.0);
+}`;
+
+const F_ADVECT_CORRECT = HEAD + `
+void main(){ baseInit();
+  vec3 p = g_p;
+  bool isWall = any(lessThan(min(p, 1.0-p), vec3(2.0*INVRES3)));
+  vec4 mask = vec4(0,0,0, isWall?1.0:0.0);
+  vec4 v1 = texture(texVelVof, vUv);
+  vec4 v2 = texture(texAdvectTmp, vUv);
+  vec4 error = 0.5*(v2 - v1);
+  vec4 res = advect(texVelVof, texVelVof, vUv, 1.0) - error*mask;   // MacCormack
+  res.w = clamp(res.w, 0.0, 1.0);
+  res *= vec4(1,1,1,0.995);                                          // slow fade
+  if (!isWall){
+    vec3 p1 = uPCenter, p2 = uCenter, diff = p2-p1;
+    float diff2 = dot(diff,diff);
+    vec3 nearest;
+    if (diff2==0.0) nearest = p2;
+    else { float t = clamp(dot(p-p1,diff),0.0,diff2)/diff2; nearest = mix(p1,p2,t); }
+    float l = length(nearest - p);
+    vec3 vel = (p2-p1)*float(RES3)*0.5;
+    if (uEmit > 0.5){                                               // only emit/stir while grabbing
+      if (l < uRadius){
+        float ang = uTime*2.0, ang2 = uTime*1.7;
+        res.xyz = (vec3(0.0, 1.0*(sin(ang2)*0.5+1.0), 0.0) + vec3(cos(ang),0.0,sin(ang))*0.4)*uPower;
+        res.w = 1.0;
+      }
+      if (l < uRadius*1.2) res.xyz += vel;
+    }
+    res.y += res.w * uBuoyancy * 0.08;                              // buoyant rise (cloud convection)
+    // EVAPORATION off the water: a SUBTLE, EVEN release across the whole surface -> a thin rising haze
+    float fb = smoothstep(0.13, 0.03, p.y);                                  // thin band just above the water
+    float varn = 0.75 + 0.25*fract(sin(dot(floor(p.xz*30.0), vec2(12.9,78.2)) + uTime*0.2)*43758.5); // faint shimmer, not clumps
+    float evap = fb * uEvap * 0.03 * varn;                                   // small, everywhere
+    res.w = min(1.0, res.w + evap);
+    res.y += evap * 1.5;
+  }
+  vec2 flow = 0.5*uVentilation*(p.y-0.5)*normalize(vec2(0.5)-p.xz);
+  if (any(lessThan(min(p.xz, vec2(1.0)-p.xz), vec2(INVRES3)))) res.xz = flow;
+  oColor = res;
+}`;
+
+const F_VORTICITY = HEAD + `
+vec3 curl(ivec3 i){
+  ivec2 d = ivec2(1,0);
+  vec3 x1=fetch3D(texVelVof,i-d.xyy).xyz, x2=fetch3D(texVelVof,i+d.xyy).xyz;
+  vec3 y1=fetch3D(texVelVof,i-d.yxy).xyz, y2=fetch3D(texVelVof,i+d.yxy).xyz;
+  vec3 z1=fetch3D(texVelVof,i-d.yyx).xyz, z2=fetch3D(texVelVof,i+d.yyx).xyz;
+  return 0.5*vec3((y2.z-y1.z)-(z2.y-z1.y),(z2.x-z1.x)-(x2.z-x1.z),(x2.y-x1.y)-(y2.x-y1.x));
+}
+vec3 curlDir(ivec3 i){
+  ivec2 d = ivec2(1,0);
+  float x1=length(curl(i-d.xyy)), x2=length(curl(i+d.xyy));
+  float y1=length(curl(i-d.yxy)), y2=length(curl(i+d.yxy));
+  float z1=length(curl(i-d.yyx)), z2=length(curl(i+d.yyx));
+  return safeNorm(vec3(x2-x1,y2-y1,z2-z1));
+}
+void main(){ baseInit();
+  vec4 res = texture(texVelVof, vUv);
+  if (any(greaterThan(abs(g_p*2.0-1.0), vec3(0.95)))){ oColor = res; return; }
+  res.xyz += uVorticity * cross(curlDir(g_i3d), curl(g_i3d));
+  oColor = res;
+}`;
+
+const F_DIV = HEAD + `
+void main(){ baseInit();
+  float prs = texture(texDivPrsWgt, vUv).y * 0.9;
+  ivec2 d = ivec2(1,0); ivec3 i = g_i3d;
+  float div = 0.0;
+  div -= fetch3D(texVelVof,i-d.xyy).x; div += fetch3D(texVelVof,i+d.xyy).x;
+  div -= fetch3D(texVelVof,i-d.yxy).y; div += fetch3D(texVelVof,i+d.yxy).y;
+  div -= fetch3D(texVelVof,i-d.yyx).z; div += fetch3D(texVelVof,i+d.yyx).z;
+  float weight = any(lessThan(min(g_p,1.0-g_p), vec3(INVRES3))) ? 0.0 : 1.0;
+  oColor = vec4(div, prs, weight, 1.0);
+}`;
+
+const F_POISSON = HEAD + `uniform int uParity;
+void main(){ baseInit();
+  ivec3 i = g_i3d;
+  if (((i.x ^ i.y ^ i.z ^ uParity) & 1) == 0){ oColor = texture(texDivPrsWgt, vUv); return; }
+  vec4 res = texture(texDivPrsWgt, vUv);
+  vec2 nd = vec2(-res.x, 0.0); ivec2 d = ivec2(1,0); vec2 pw;
+  pw=fetch3D(texDivPrsWgt,i-d.xyy).yz; nd+=vec2(pw.x*pw.y, pw.y);
+  pw=fetch3D(texDivPrsWgt,i+d.xyy).yz; nd+=vec2(pw.x*pw.y, pw.y);
+  pw=fetch3D(texDivPrsWgt,i-d.yxy).yz; nd+=vec2(pw.x*pw.y, pw.y);
+  pw=fetch3D(texDivPrsWgt,i+d.yxy).yz; nd+=vec2(pw.x*pw.y, pw.y);
+  pw=fetch3D(texDivPrsWgt,i-d.yyx).yz; nd+=vec2(pw.x*pw.y, pw.y);
+  pw=fetch3D(texDivPrsWgt,i+d.yyx).yz; nd+=vec2(pw.x*pw.y, pw.y);
+  nd.y = max(1.0, nd.y);
+  float np = nd.x/nd.y;
+  res.y += (np - res.y)*1.3;          // SOR
+  oColor = res;
+}`;
+
+const F_PRESSURE = HEAD + `
+float pressureAt(float orig, ivec3 i){ vec2 pw = fetch3D(texDivPrsWgt,i).yz; return mix(orig, pw.x, pw.y); }
+void main(){ baseInit();
+  ivec2 d = ivec2(1,0); ivec3 i = g_i3d;
+  vec2 pw = texture(texDivPrsWgt, vUv).yz;
+  vec4 res = texture(texVelVof, vUv);
+  if (pw.y == 0.0){ res.w = 0.0; }
+  else {
+    float pc = pw.x;
+    vec3 delta = -0.5*vec3(
+      pressureAt(pc,i+d.xyy)-pressureAt(pc,i-d.xyy),
+      pressureAt(pc,i+d.yxy)-pressureAt(pc,i-d.yxy),
+      pressureAt(pc,i+d.yyx)-pressureAt(pc,i-d.yyx));
+    res.xyz += delta;
+  }
+  oColor = res;
+}`;
+
+// volumetric raymarch render (fullscreen, ray-box)
+const F_RENDER = HEAD + `uniform vec3 uCamPos, uCamFwd, uCamRight, uCamUp; uniform float uAspect;
+void main(){
+  vec2 ndc = vUv*2.0-1.0;
+  vec3 rd = normalize(uCamFwd*1.5 + uCamRight*ndc.x*uAspect + uCamUp*ndc.y);
+  vec3 ro = uCamPos;
+  vec3 invd = 1.0/rd;
+  vec3 t0 = (vec3(-1.0)-ro)*invd, t1 = (vec3(1.0)-ro)*invd;
+  vec3 tmn = min(t0,t1), tmx = max(t0,t1);
+  float tn = max(max(tmn.x,tmn.y),tmn.z), tf = min(min(tmx.x,tmx.y),tmx.z);
+  vec3 sky = mix(vec3(0.62,0.76,0.95), vec3(0.16,0.36,0.66), clamp(vUv.y*1.15,0.0,1.0)); // sky
+  if (tf < max(tn,0.0)){ oColor = vec4(sky,1.0); return; }
+  vec3 sunDir = normalize(vec3(cos(uSun), 0.65, sin(uSun)));
+  float t0c = max(tn,0.0);
+  float step = (tf - t0c)/80.0;
+  float t = t0c + step*fract(sin(dot(gl_FragCoord.xy, vec2(12.9898,78.233)))*43758.5453);
+  float T = 1.0; vec3 col = vec3(0.0);
+  for (int k=0;k<80;k++){
+    if (t > tf || T < 0.02) break;
+    vec3 wp = ro + rd*t;
+    vec3 local = clamp((wp+1.0)*0.5, 0.0, 1.0);
+    float dens = trilinear(texVelVof, local).w;
+    if (dens > 0.01){
+      float sh = 0.0; vec3 lp = local;            // light-march toward the sun => self-shadowing
+      for (int j=0;j<5;j++){ lp += sunDir*0.055; sh += trilinear(texVelVof, clamp(lp,0.0,1.0)).w; }
+      float light = exp(-sh*0.85);
+      vec3 lit = mix(vec3(0.34,0.42,0.58), vec3(1.0,0.96,0.9), light);  // shadow -> sunlit
+      float a = 1.0 - exp(-dens*step*42.0);
+      col += T*a*lit; T *= 1.0 - a;
+    }
+    t += step;
+  }
+  oColor = vec4(mix(sky, col, 1.0 - T), 1.0);
+}`;
+
+// ---------- GL helpers ----------
+function compile(type, src){ const s=gl.createShader(type); gl.shaderSource(s, src.trim()); gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) fail(gl.getShaderInfoLog(s)+'\n\n'+src.split('\n').slice(0,40).map((l,i)=>(i+1)+': '+l).join('\n')); return s; }
+function program(fsrc){ const p=gl.createProgram(); gl.attachShader(p,compile(gl.VERTEX_SHADER,VERT)); gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fsrc)); gl.bindAttribLocation(p,0,'aPos'); gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS)) fail(gl.getProgramInfoLog(p)); return p; }
+
+const progs = { init:program(F_INIT), adP:program(F_ADVECT_PREDICT), adC:program(F_ADVECT_CORRECT),
+  vort:program(F_VORTICITY), div:program(F_DIV), pois:program(F_POISSON), prs:program(F_PRESSURE), render:program(F_RENDER) };
+
+// fullscreen triangle
+const vbo = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+
+function makeTex(){ const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+  gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,RES2,RES2,0,gl.RGBA,gl.FLOAT,null);
+  for(const p of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D,p,gl.NEAREST);
+  for(const w of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D,w,gl.CLAMP_TO_EDGE);
+  const f=gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER,f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,t,0);
+  return {t,f}; }
+function pingpong(){ return { a:makeTex(), b:makeTex(), swap(){ const x=this.a; this.a=this.b; this.b=x; } }; }
+const velVof = pingpong(), tmp = pingpong(), divPrs = pingpong();
+
+// uniform setter
+function setCommon(p){
+  gl.uniform1i(gl.getUniformLocation(p,'texVelVof'), 0);
+  gl.uniform1i(gl.getUniformLocation(p,'texAdvectTmp'), 1);
+  gl.uniform1i(gl.getUniformLocation(p,'texDivPrsWgt'), 2);
+  gl.uniform1f(gl.getUniformLocation(p,'uRadius'), ballRadius);
+  gl.uniform1f(gl.getUniformLocation(p,'uPower'), +el.power.value);
+  gl.uniform1f(gl.getUniformLocation(p,'uVorticity'), 0.06*+el.vorticity.value);
+  gl.uniform1f(gl.getUniformLocation(p,'uVentilation'), +el.ventilation.value);
+  gl.uniform1f(gl.getUniformLocation(p,'uTime'), frame/60);
+  gl.uniform1f(gl.getUniformLocation(p,'uBuoyancy'), +el.buoyancy.value);
+  gl.uniform1f(gl.getUniformLocation(p,'uSun'), +el.sun.value);
+  gl.uniform1f(gl.getUniformLocation(p,'uEvap'), +el.evap.value);
+  gl.uniform1f(gl.getUniformLocation(p,'uEmit'), dragging?1:0);
+  gl.uniform3f(gl.getUniformLocation(p,'uCenter'), center[0],center[1],center[2]);
+  gl.uniform3f(gl.getUniformLocation(p,'uPCenter'), pcenter[0],pcenter[1],pcenter[2]);
+}
+function bindSrc(){ gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, velVof.a.t);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tmp.a.t);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, divPrs.a.t); }
+function pass(target, p, extra){ gl.useProgram(p); bindSrc(); setCommon(p); if(extra) extra(p);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, target.b.f); gl.viewport(0,0,RES2,RES2); gl.drawArrays(gl.TRIANGLES,0,3); target.swap(); }
+
+// ---------- controls ----------
+const ids=['radius','power','buoyancy','vorticity','ventilation','sun','evap'];
+const el={}; ids.forEach(id=>{el[id]=document.getElementById(id);const vv=document.getElementById(id+'_v');
+  const upd=()=>vv.textContent=(+el[id].value).toFixed(2); el[id].addEventListener('input',upd); upd();});
+const spin=document.getElementById('spin');
+let ballRadius = 0.08;
+const center=[0.5,0.5,0.5], pcenter=[0.5,0.5,0.5];
+document.getElementById('reset').onclick=()=>{ gl.useProgram(progs.init); gl.bindFramebuffer(gl.FRAMEBUFFER, velVof.b.f); gl.viewport(0,0,RES2,RES2); gl.drawArrays(gl.TRIANGLES,0,3); velVof.swap(); };
+
+// camera orbit + ball grab
+let az=0.7, elv=0.35, dragging=false, px=0, py=0, mnx=0, mny=0;
+cv.addEventListener('mousedown',e=>{dragging=true; px=e.clientX; py=e.clientY; mnx=e.clientX; mny=e.clientY;});
+addEventListener('mouseup',()=>dragging=false);
+addEventListener('mousemove',e=>{ mnx=e.clientX; mny=e.clientY; px=e.clientX; py=e.clientY; });
+
+// init
+gl.useProgram(progs.init); gl.bindFramebuffer(gl.FRAMEBUFFER, velVof.b.f); gl.viewport(0,0,RES2,RES2); gl.drawArrays(gl.TRIANGLES,0,3); velVof.swap();
+
+function resize(){ cv.width=innerWidth; cv.height=innerHeight; }
+addEventListener('resize',resize); resize();
+
+let frame=0, t0=performance.now(), fc=0, fa=0; const fpsEl=document.getElementById('fps');
+let camPos=[0,0,3], camFwd=[0,0,-1], camRight=[1,0,0], camUp=[0,1,0];
+function updateCam(){
+  if (spin.checked && !dragging) az += 0.0032;
+  const cx=Math.cos(az), sx=Math.sin(az), cy=Math.cos(elv), sy=Math.sin(elv);
+  const d=3.0;
+  camPos=[ sx*cy*d, sy*d, cx*cy*d ];
+  const tgt=[0,-0.15,0];
+  let f=[tgt[0]-camPos[0],tgt[1]-camPos[1],tgt[2]-camPos[2]]; let fl=Math.hypot(...f); f=f.map(v=>v/fl);
+  let r=[f[2]*0-f[1]*0, 0,0]; // compute right = normalize(cross(f, up0))
+  const up0=[0,1,0];
+  r=[f[1]*up0[2]-f[2]*up0[1], f[2]*up0[0]-f[0]*up0[2], f[0]*up0[1]-f[1]*up0[0]];
+  let rl=Math.hypot(...r); r=r.map(v=>v/rl);
+  const u=[r[1]*f[2]-r[2]*f[1], r[2]*f[0]-r[0]*f[2], r[0]*f[1]-r[1]*f[0]];
+  camFwd=f; camRight=r; camUp=u;
+}
+function grabBall(){
+  // while dragging, move the ball on the plane through origin facing the camera, from the mouse ray
+  pcenter[0]=center[0]; pcenter[1]=center[1]; pcenter[2]=center[2];
+  if (!dragging) return;
+  const ndcx=(mnx/cv.width)*2-1, ndcy=1-(mny/cv.height)*2;
+  const aspect=cv.width/cv.height;
+  let rd=[camFwd[0]*1.5+camRight[0]*ndcx*aspect+camUp[0]*ndcy,
+          camFwd[1]*1.5+camRight[1]*ndcx*aspect+camUp[1]*ndcy,
+          camFwd[2]*1.5+camRight[2]*ndcx*aspect+camUp[2]*ndcy];
+  const rl=Math.hypot(...rd); rd=rd.map(v=>v/rl);
+  // intersect plane through origin with normal = camFwd
+  const denom = camFwd[0]*rd[0]+camFwd[1]*rd[1]+camFwd[2]*rd[2];
+  const tt = -(camFwd[0]*camPos[0]+camFwd[1]*camPos[1]+camFwd[2]*camPos[2])/denom;
+  let w=[camPos[0]+rd[0]*tt, camPos[1]+rd[1]*tt, camPos[2]+rd[2]*tt];
+  // world [-1,1] -> local [0,1], clamp inside
+  const m=ballRadius*1.2;
+  center[0]=Math.min(1-m,Math.max(m,(w[0]+1)*0.5));
+  center[1]=Math.min(1-m,Math.max(m,(w[1]+1)*0.5));
+  center[2]=Math.min(1-m,Math.max(m,(w[2]+1)*0.5));
+}
+
+function loop(now){
+  const dt=(now-t0)/1000; t0=now; fa+=dt; if(++fc>=20){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps'; fc=0; fa=0; }
+  frame++;
+  ballRadius = 0.08*+el.radius.value;
+  updateCam();
+  grabBall();
+
+  // --- simulation step (pressure project -> advect -> vorticity) ---
+  pass(divPrs, progs.div);
+  for(let i=0;i<4;i++) pass(divPrs, progs.pois, p=>gl.uniform1i(gl.getUniformLocation(p,'uParity'), i&1));
+  pass(velVof, progs.prs);
+  pass(tmp, progs.adP, p=>gl.uniform1i(gl.getUniformLocation(p,'uForward'), 1));
+  pass(tmp, progs.adP, p=>gl.uniform1i(gl.getUniformLocation(p,'uForward'), 0));
+  pass(velVof, progs.adC);
+  pass(velVof, progs.vort);
+
+  // --- render ---
+  gl.useProgram(progs.render); bindSrc(); setCommon(progs.render);
+  gl.uniform3f(gl.getUniformLocation(progs.render,'uCamPos'), camPos[0],camPos[1],camPos[2]);
+  gl.uniform3f(gl.getUniformLocation(progs.render,'uCamFwd'), camFwd[0],camFwd[1],camFwd[2]);
+  gl.uniform3f(gl.getUniformLocation(progs.render,'uCamRight'), camRight[0],camRight[1],camRight[2]);
+  gl.uniform3f(gl.getUniformLocation(progs.render,'uCamUp'), camUp[0],camUp[1],camUp[2]);
+  gl.uniform1f(gl.getUniformLocation(progs.render,'uAspect'), cv.width/cv.height);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0,0,cv.width,cv.height); gl.drawArrays(gl.TRIANGLES,0,3);
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

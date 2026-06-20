@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>particle field 3D — fly through the full medium</title>
+<style>
+  html,body{margin:0;height:100%;background:#04060a;overflow:hidden;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe;cursor:crosshair}
+  canvas{display:block}
+  #ui{position:fixed;inset:0;pointer-events:none}
+  #panel{position:fixed;top:10px;left:10px;width:262px;background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px;backdrop-filter:blur(6px);pointer-events:auto;max-height:calc(100vh - 24px);overflow:auto}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 86px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 42px;text-align:right;color:#bdf}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4860}
+  .legend{margin-top:10px;font-size:11px;line-height:1.7}
+  .legend span{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px;box-shadow:0 0 6px currentColor}
+  #hud{position:fixed;top:12px;right:14px;text-align:right;text-shadow:0 0 8px #000}
+  #medium{font-size:22px;font-weight:700;letter-spacing:1px}
+  #mediumsub{font-size:11px;color:#7d97ab;margin-top:1px}
+  #speed{font-size:11px;color:#7d97ab;margin-top:6px}
+  .fps{position:fixed;bottom:8px;right:12px;color:#577;font-size:11px;text-shadow:0 0 6px #000}
+  #cross{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+  #cross:before,#cross:after{content:"";position:absolute;background:rgba(150,210,255,.5)}
+  #cross:before{width:2px;height:16px;left:-1px;top:-8px}
+  #cross:after{height:2px;width:16px;top:-1px;left:-8px}
+  #lock{position:fixed;left:50%;top:62%;transform:translateX(-50%);background:rgba(10,16,24,.85);border:1px solid #2a5366;border-radius:8px;padding:10px 16px;color:#bff;pointer-events:none;transition:opacity .3s}
+  #ctrls{position:fixed;bottom:8px;left:12px;color:#5f7d92;font-size:10.5px;text-shadow:0 0 6px #000;max-width:48vw}
+  b{color:#bff}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="ui">
+  <div id="panel">
+    <h1>particle field 3D</h1>
+    <p class="sub">no empty space — every point is matter</p>
+    <div class="row"><label>push</label><input id="push" type="range" min="0" max="2600" step="10" value="1100"><span class="v" id="push_v"></span></div>
+    <div class="row"><label>swirl</label><input id="swirl" type="range" min="0" max="2600" step="10" value="1300"><span class="v" id="swirl_v"></span></div>
+    <div class="row"><label>reform</label><input id="reform" type="range" min="0" max="3" step="0.05" value="1"><span class="v" id="reform_v"></span></div>
+    <div class="row"><label>field R</label><input id="rad" type="range" min="50" max="260" step="5" value="135"><span class="v" id="rad_v"></span></div>
+    <div class="row"><label>density</label><input id="dens" type="range" min="12000" max="110000" step="2000" value="52000"><span class="v" id="dens_v"></span></div>
+    <div class="row"><label>bloom</label><input id="bloom" type="range" min="0" max="2.2" step="0.05" value="0.95"><span class="v" id="bloom_v"></span></div>
+    <div class="row" style="gap:6px"><button id="reseed">reseed biomes</button><button id="recenter">recenter</button></div>
+    <div class="legend">
+      <div><span style="color:#5fb6d8">●</span>water — tears, then beads back</div>
+      <div><span style="color:#caa86a">●</span>dust — scatters &amp; lingers</div>
+      <div><span style="color:#ff6fd8">●</span>plasma — swirls &amp; pushes back</div>
+      <div><span style="color:#f5a83a">●</span>land — solid, you bump off it</div>
+      <div><span style="color:#5a7488">●</span>air — invisible, glows when squeezed</div>
+    </div>
+    <div class="hint">Fly into a cloud: tiny particles get shoved, the local crowd thins, and the medium tears. Each type carries itself; density is just how many share a spot.</div>
+  </div>
+</div>
+<div id="hud">
+  <div id="medium">—</div>
+  <div id="mediumsub">surrounding medium</div>
+  <div id="speed"></div>
+</div>
+<div id="cross"></div>
+<div id="lock">click to fly &nbsp;·&nbsp; <b>WASD</b> move · <b>mouse</b> look · <b>space/shift</b> up·down · <b>wheel</b> speed</div>
+<div id="ctrls">gamepad: left stick move · right stick look · RB / LB up·down · RT boost</div>
+<div class="fps" id="fps"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ---------------------------------------------------------------------------
+// renderer / scene / camera
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:false, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setClearColor(0x04060a, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(72, 1, 0.5, 4000);
+camera.rotation.order = 'YXZ';
+camera.position.set(0,0,0);
+
+let W=0,H=0,uPointScale=600;
+function resize(){
+  W=innerWidth; H=innerHeight;
+  renderer.setSize(W,H,false);
+  camera.aspect=W/H; camera.updateProjectionMatrix();
+  composer.setSize(W,H);
+  bloom.setSize(W,H);
+  // pixels per world-unit at unit distance, for point sizing
+  uPointScale = H / (2*Math.tan(camera.fov*Math.PI/360));
+  mat.uniforms.uPointScale.value = uPointScale;
+}
+addEventListener('resize', resize);
+
+// ---------------------------------------------------------------------------
+// 3D value-noise fbm — decides the biome (which matter) at any point in space
+// ---------------------------------------------------------------------------
+function hash3(x,y,z){ const h=Math.sin(x*127.1+y*311.7+z*74.7)*43758.5453; return h-Math.floor(h); }
+function vnoise3(x,y,z){
+  const xi=Math.floor(x), yi=Math.floor(y), zi=Math.floor(z);
+  const xf=x-xi, yf=y-yi, zf=z-zi;
+  const u=xf*xf*(3-2*xf), v=yf*yf*(3-2*yf), w=zf*zf*(3-2*zf);
+  const c000=hash3(xi,yi,zi),     c100=hash3(xi+1,yi,zi);
+  const c010=hash3(xi,yi+1,zi),   c110=hash3(xi+1,yi+1,zi);
+  const c001=hash3(xi,yi,zi+1),   c101=hash3(xi+1,yi,zi+1);
+  const c011=hash3(xi,yi+1,zi+1), c111=hash3(xi+1,yi+1,zi+1);
+  const x00=c000+(c100-c000)*u, x10=c010+(c110-c010)*u;
+  const x01=c001+(c101-c001)*u, x11=c011+(c111-c011)*u;
+  const y0=x00+(x10-x00)*v, y1=x01+(x11-x01)*v;
+  return y0+(y1-y0)*w;
+}
+function fbm3(x,y,z){ let s=0,a=0.6,f=1; for(let i=0;i<4;i++){ s+=a*vnoise3(x*f,y*f,z*f); f*=2; a*=0.5; } return s; }
+
+// biome seed offsets (reseeded by button)
+let s1=11.3, s2=57.1, s3=98.7, s4=140.2;
+// type ids
+const AIR=0, DUST=1, WATER=2, PLASMA=3, LAND=4;
+function biomeAt(x,y,z){
+  const land = fbm3(x*0.00090+s1, y*0.00090+s1, z*0.00090+s1);
+  if (land > 0.60) return LAND;
+  const water = fbm3(x*0.00120+s2, y*0.00115+s2, z*0.00120+s2);
+  if (water > 0.58) return WATER;
+  const plasma = fbm3(x*0.00150+s3, y*0.00150+s3, z*0.00140+s3);
+  if (plasma > 0.62) return PLASMA;
+  const dust = fbm3(x*0.00130+s4, y*0.00130+s4, z*0.00130+s4);
+  if (dust > 0.55) return DUST;
+  return AIR;                         // air fills everything else -> space is full
+}
+
+// ---------------------------------------------------------------------------
+// per-type look + behaviour
+// ---------------------------------------------------------------------------
+//                  AIR          DUST         WATER        PLASMA        LAND
+const COL_R = [0.32, 0.74, 0.30, 1.00, 0.97];
+const COL_G = [0.46, 0.58, 0.74, 0.32, 0.60];
+const COL_B = [0.58, 0.40, 0.96, 0.86, 0.22];
+const BASE  = [0.05, 0.55, 0.72, 0.80, 0.95];   // base brightness (air ~ invisible)
+const EXG   = [0.95, 0.45, 0.55, 0.85, 0.10];   // how much disturbance lights it up
+const SIZEW = [7.0,  9.0,  11.5, 9.5,  16.0];   // world radius
+const DRAGT = [0.86, 0.90, 0.93, 0.91, 0.50];   // velocity retention / frame-ish
+const REFRM = [0.40, 0.08, 1.00, 0.55, 2.50];   // pull back to home (×reform slider)
+const PUSHM = [0.35, 1.15, 1.00, 0.80, 0.05];   // how hard the ship shoves it
+const SWRLM = [0.10, 0.35, 0.85, 1.40, 0.00];   // tangential vortex strength
+
+// ---------------------------------------------------------------------------
+// particle buffers (max sized; active count = density slider)
+// ---------------------------------------------------------------------------
+const MAXN = 110000;
+const L = 900;            // half-size of the live box around the camera
+const pos   = new Float32Array(MAXN*3);
+const vel   = new Float32Array(MAXN*3);
+const home  = new Float32Array(MAXN*3);
+const pcol  = new Float32Array(MAXN*3);
+const psize = new Float32Array(MAXN);
+const ptype = new Uint8Array(MAXN);
+const excite= new Float32Array(MAXN);
+let N = 52000;
+
+const geom = new THREE.BufferGeometry();
+const aPos  = new THREE.BufferAttribute(pos,3);  aPos.setUsage(THREE.DynamicDrawUsage);
+const aCol  = new THREE.BufferAttribute(pcol,3); aCol.setUsage(THREE.DynamicDrawUsage);
+const aSize = new THREE.BufferAttribute(psize,1);aSize.setUsage(THREE.DynamicDrawUsage);
+geom.setAttribute('position', aPos);
+geom.setAttribute('pcolor',   aCol);
+geom.setAttribute('psize',    aSize);
+geom.setDrawRange(0, N);
+
+const mat = new THREE.ShaderMaterial({
+  uniforms:{
+    uPointScale:{value:uPointScale},
+    uCamPos:{value:new THREE.Vector3()},
+    uFadeStart:{value:L*0.55},
+    uFadeEnd:{value:L*0.97}
+  },
+  vertexShader:`
+    uniform float uPointScale; uniform vec3 uCamPos; uniform float uFadeStart; uniform float uFadeEnd;
+    attribute vec3 pcolor; attribute float psize;
+    varying vec3 vColor;
+    void main(){
+      vec4 mv = modelViewMatrix * vec4(position,1.0);
+      float dist = -mv.z;
+      gl_Position = projectionMatrix * mv;
+      gl_PointSize = clamp(psize * uPointScale / max(dist,1.0), 1.0, 90.0);
+      float wd = length(position - uCamPos);
+      float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, wd);
+      vColor = pcolor * fade;
+    }`,
+  fragmentShader:`
+    precision mediump float;
+    varying vec3 vColor;
+    void main(){
+      vec2 d = gl_PointCoord - vec2(0.5);
+      float soft = smoothstep(0.5, 0.0, length(d));
+      if (soft <= 0.0) discard;
+      gl_FragColor = vec4(vColor, soft);
+    }`,
+  transparent:true, depthTest:false, depthWrite:false,
+  blending:THREE.AdditiveBlending
+});
+const points = new THREE.Points(geom, mat);
+points.frustumCulled = false;
+scene.add(points);
+
+// ---------------------------------------------------------------------------
+// post: bloom for the cosmic glow
+// ---------------------------------------------------------------------------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene,camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(1,1), 0.95, 0.6, 0.0);
+composer.addPass(bloom);
+
+// ---------------------------------------------------------------------------
+// (re)build the field
+// ---------------------------------------------------------------------------
+function setColor(i){
+  const t=ptype[i], o=i*3, b=BASE[t]+excite[i]*EXG[t];
+  pcol[o]  =COL_R[t]*b; pcol[o+1]=COL_G[t]*b; pcol[o+2]=COL_B[t]*b;
+  psize[i]=SIZEW[t];
+}
+function placeParticle(i, cx, cy, cz){
+  // random point in the live box centred on (cx,cy,cz)
+  const x=cx+(Math.random()*2-1)*L, y=cy+(Math.random()*2-1)*L, z=cz+(Math.random()*2-1)*L;
+  let t=biomeAt(x,y,z);
+  // keep a clear pocket around the spawn origin so we never wake up inside rock
+  if (t===LAND && (x*x+y*y+z*z)<160*160) t=AIR;
+  const o=i*3;
+  pos[o]=x; pos[o+1]=y; pos[o+2]=z;
+  home[o]=x; home[o+1]=y; home[o+2]=z;
+  vel[o]=0; vel[o+1]=0; vel[o+2]=0;
+  ptype[i]=t; excite[i]=0;
+  setColor(i);
+}
+function seedField(){
+  const c=camera.position;
+  for (let i=0;i<N;i++) placeParticle(i, c.x, c.y, c.z);
+  aPos.needsUpdate=aCol.needsUpdate=aSize.needsUpdate=true;
+}
+
+// ---------------------------------------------------------------------------
+// controls — free fly (keyboard + mouse) and gamepad
+// ---------------------------------------------------------------------------
+let yaw=0, pitch=0, locked=false;
+const keys={};
+addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='Space') e.preventDefault(); });
+addEventListener('keyup',   e=>{ keys[e.code]=false; });
+canvas.addEventListener('click', ()=> canvas.requestPointerLock());
+document.addEventListener('pointerlockchange', ()=>{
+  locked = document.pointerLockElement===canvas;
+  document.getElementById('lock').style.opacity = locked? '0':'1';
+});
+addEventListener('mousemove', e=>{
+  if(!locked) return;
+  yaw   -= e.movementX*0.0023;
+  pitch -= e.movementY*0.0023;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch));
+});
+let maxSpeed=240;
+addEventListener('wheel', e=>{ maxSpeed = Math.max(40, Math.min(1400, maxSpeed*(e.deltaY<0?1.12:0.89))); }, {passive:true});
+
+const camVel=new THREE.Vector3();
+const fwd=new THREE.Vector3(), right=new THREE.Vector3(), upv=new THREE.Vector3();
+const camPush=new THREE.Vector3();           // collected land collision + plasma pushback
+
+function readGamepad(move, look){
+  const pads=navigator.getGamepads ? navigator.getGamepads() : [];
+  const gp=pads && pads[0];
+  if(!gp) return 1;
+  const dz=v=>Math.abs(v)<0.14?0:v;
+  move.x += dz(gp.axes[0]||0);
+  move.z += dz(gp.axes[1]||0);            // forward = -z handled by caller sign
+  look.x += dz(gp.axes[2]||0);
+  look.y += dz(gp.axes[3]||0);
+  if(gp.buttons[5]&&gp.buttons[5].pressed) move.y += 1;   // RB up
+  if(gp.buttons[4]&&gp.buttons[4].pressed) move.y -= 1;   // LB down
+  const boost = (gp.buttons[7]&&gp.buttons[7].value>0.3) ? 1+gp.buttons[7].value*2.5 : 1;
+  return boost;
+}
+
+// ---------------------------------------------------------------------------
+// UI wiring
+// ---------------------------------------------------------------------------
+const el={};
+['push','swirl','reform','rad','dens','bloom'].forEach(id=>{
+  el[id]=document.getElementById(id);
+  const v=document.getElementById(id+'_v');
+  const fmt=()=>{ const n=+el[id].value; v.textContent = id==='reform'?n.toFixed(2):(id==='dens'?(n/1000)+'k':n.toFixed(0)); };
+  el[id].addEventListener('input', fmt); fmt();
+});
+el.bloom.addEventListener('input', ()=> bloom.strength=+el.bloom.value);
+el.dens.addEventListener('input', ()=>{
+  const want=+el.dens.value;
+  if(want>N){ const c=camera.position; for(let i=N;i<want;i++) placeParticle(i,c.x,c.y,c.z); }
+  N=want; geom.setDrawRange(0,N);
+  aPos.needsUpdate=aCol.needsUpdate=aSize.needsUpdate=true;
+});
+document.getElementById('reseed').onclick=()=>{
+  s1=Math.random()*200; s2=Math.random()*200; s3=Math.random()*200; s4=Math.random()*200;
+  seedField();
+};
+document.getElementById('recenter').onclick=()=>{
+  camera.position.set(0,0,0); camVel.set(0,0,0); yaw=0; pitch=0; seedField();
+};
+
+// ---------------------------------------------------------------------------
+// medium readout
+// ---------------------------------------------------------------------------
+const NAMES=['AIR','DUST','WATER','PLASMA','LAND'];
+const HUD_COL=['#5a7488','#caa86a','#5fb6d8','#ff6fd8','#f5a83a'];
+const medEl=document.getElementById('medium'), spEl=document.getElementById('speed');
+
+// ---------------------------------------------------------------------------
+// main loop
+// ---------------------------------------------------------------------------
+resize(); seedField();
+bloom.strength=+el.bloom.value;
+
+let t0=performance.now(), fc=0, fa=0; const fpsEl=document.getElementById('fps');
+const tmp=new THREE.Vector3(), n=new THREE.Vector3(), tang=new THREE.Vector3(), travel=new THREE.Vector3();
+
+function frame(now){
+  const dt=Math.min(0.033,(now-t0)/1000); t0=now; fa+=dt;
+  if(++fc>=20){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps'; fc=0; fa=0; }
+
+  // ---- orientation + input ----
+  const mv={x:0,y:0,z:0}, lk={x:0,y:0};
+  const boost = readGamepad(mv, lk);
+  yaw -= lk.x*0.045; pitch -= lk.y*0.045;
+  pitch=Math.max(-1.5,Math.min(1.5,pitch));
+  camera.rotation.set(pitch, yaw, 0);
+  camera.getWorldDirection(fwd);
+  right.crossVectors(fwd, camera.up).normalize();
+  upv.crossVectors(right, fwd).normalize();
+
+  let ix=mv.x, iy=mv.y, iz=mv.z;
+  if(keys['KeyW']) iz-=1; if(keys['KeyS']) iz+=1;
+  if(keys['KeyA']) ix-=1; if(keys['KeyD']) ix+=1;
+  if(keys['Space']) iy+=1; if(keys['ShiftLeft']||keys['ShiftRight']) iy-=1;
+  const accel=maxSpeed*4*boost;
+  camVel.addScaledVector(fwd,  -iz*accel*dt);
+  camVel.addScaledVector(right, ix*accel*dt);
+  camVel.addScaledVector(upv,   iy*accel*dt);
+
+  // ---- particle pass: ship interaction, reform, drag, wrap ----
+  const PUSH=+el.push.value, SWIRL=+el.swirl.value, REFORM=+el.reform.value, R=+el.rad.value, R2=R*R;
+  const cx=camera.position.x, cy=camera.position.y, cz=camera.position.z;
+  travel.copy(camVel); const tsp=travel.length(); if(tsp>1) travel.multiplyScalar(1/tsp); else travel.copy(fwd);
+  camPush.set(0,0,0);
+  const landR=70;
+
+  for(let i=0;i<N;i++){
+    const o=i*3;
+    let x=pos[o], y=pos[o+1], z=pos[o+2];
+    let rx=x-cx, ry=y-cy, rz=z-cz;
+    // wrap the live box around the camera -> endless field; re-roll biome on wrap
+    let wrapped=false;
+    if(rx> L){x-=2*L;wrapped=true;} else if(rx<-L){x+=2*L;wrapped=true;}
+    if(ry> L){y-=2*L;wrapped=true;} else if(ry<-L){y+=2*L;wrapped=true;}
+    if(rz> L){z-=2*L;wrapped=true;} else if(rz<-L){z+=2*L;wrapped=true;}
+    if(wrapped){
+      let t=biomeAt(x,y,z);
+      pos[o]=x;pos[o+1]=y;pos[o+2]=z; home[o]=x;home[o+1]=y;home[o+2]=z;
+      vel[o]=vel[o+1]=vel[o+2]=0; ptype[i]=t; excite[i]=0; setColor(i);
+      continue;
+    }
+    const t=ptype[i];
+    let vx=vel[o], vy=vel[o+1], vz=vel[o+2];
+    rx=x-cx; ry=y-cy; rz=z-cz;
+    const d2=rx*rx+ry*ry+rz*rz;
+    let ex=excite[i]*0.90;
+
+    if(d2<R2){
+      const d=Math.sqrt(d2)||1, inv=1/d, nx=rx*inv, ny=ry*inv, nz=rz*inv, fall=1-d/R;
+      if(t===LAND){
+        // solid: barely moves, and shoves the ship back out
+        if(d<landR){ const pen=(landR-d); camPush.x+=nx*pen; camPush.y+=ny*pen; camPush.z+=nz*pen; }
+        vx+=nx*PUSH*0.05*fall*dt; vy+=ny*PUSH*0.05*fall*dt; vz+=nz*PUSH*0.05*fall*dt;
+        ex+=fall*0.5;
+      } else {
+        const pf=PUSH*PUSHM[t]*fall*dt;
+        vx+=nx*pf; vy+=ny*pf; vz+=nz*pf;
+        // tangential swirl around the ship's travel axis -> a vortex in your wake
+        tang.set(travel.y*nz-travel.z*ny, travel.z*nx-travel.x*nz, travel.x*ny-travel.y*nx);
+        const sf=SWIRL*SWRLM[t]*fall*dt;
+        vx+=tang.x*sf; vy+=tang.y*sf; vz+=tang.z*sf;
+        ex+=fall*(t===AIR?1.6:1.0);
+        if(t===PLASMA){ // plasma resists you: pushes the ship away
+          const pb=fall*fall*220; camPush.x-=nx*pb*dt; camPush.y-=ny*pb*dt; camPush.z-=nz*pb*dt;
+        }
+      }
+    }
+    // reform toward home (water beads back; dust barely; land snaps)
+    const rk=REFRM[t]*REFORM*dt;
+    if(rk>0){ vx+=(home[o]-x)*rk; vy+=(home[o+1]-y)*rk; vz+=(home[o+2]-z)*rk; }
+    // drag
+    const dr=Math.pow(DRAGT[t], dt*60);
+    vx*=dr; vy*=dr; vz*=dr;
+    x+=vx*dt; y+=vy*dt; z+=vz*dt;
+    pos[o]=x; pos[o+1]=y; pos[o+2]=z;
+    vel[o]=vx; vel[o+1]=vy; vel[o+2]=vz;
+    excite[i]=ex;
+    // colour from base brightness + excitement
+    const b=BASE[t]+ex*EXG[t], c=i*3;
+    pcol[c]=COL_R[t]*b; pcol[c+1]=COL_G[t]*b; pcol[c+2]=COL_B[t]*b;
+  }
+  aPos.needsUpdate=true; aCol.needsUpdate=true;
+
+  // ---- apply collision / pushback to the ship, then move ----
+  camVel.add(camPush.multiplyScalar(6));
+  if(camVel.length()>maxSpeed*boost) camVel.setLength(maxSpeed*boost);
+  camera.position.addScaledVector(camVel, dt);
+  camVel.multiplyScalar(Math.pow(0.86, dt*60));
+  // hard eject if still overlapping land core
+  if(camPush.lengthSq()>0){ tmp.copy(camPush).setLength(Math.min(camPush.length(),8)); camera.position.add(tmp); }
+
+  mat.uniforms.uCamPos.value.copy(camera.position);
+
+  // ---- HUD ----
+  const here=biomeAt(camera.position.x, camera.position.y, camera.position.z);
+  medEl.textContent=NAMES[here]; medEl.style.color=HUD_COL[here];
+  spEl.textContent = camVel.length().toFixed(0)+' u/s  ·  cruise '+maxSpeed.toFixed(0);
+
+  composer.render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
