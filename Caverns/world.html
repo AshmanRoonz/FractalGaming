@@ -1,0 +1,1322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Endless Procedural World</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0e14; cursor: crosshair; }
+  #fps {
+    position: fixed; top: 10px; left: 10px; z-index: 10; pointer-events: none;
+    font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #bfe0a0;
+    background: rgba(10,16,24,0.5); padding: 4px 8px; border-radius: 6px;
+  }
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 10;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #cde0f0;
+    background: rgba(10,16,24,0.5); border-radius: 8px; padding: 6px 12px;
+    backdrop-filter: blur(6px); pointer-events: none; transition: opacity 1.2s ease; opacity: 1;
+  }
+</style>
+</head>
+<body>
+<div id="fps">–</div>
+<div id="hint">click to look · WASD move · Space/Ctrl up/down · Shift boost · F dash · B drop ball · gamepad supported</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.171.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.171.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, float, attribute,
+         hash, instanceIndex, time, sin, vec3, vec2, vec4, normalize, cameraPosition, reflector, texture, uniform,
+         refract, reflect, viewportSharedTexture, screenUV, cameraViewMatrix,
+         Fn, Loop, If, Break, texture3D, normalWorld, normalLocal } from 'three/tsl';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const smooth = w => w * w * (3 - 2 * w);
+
+// ============================================================================
+// ENDLESS PROCEDURAL OVERWORLD — open sky in every direction, no ceiling.
+//   A 2D grid of terrain CHUNKS streams in around the player and unloads when
+//   far away. The height field layers broad continents, ridged mountains,
+//   rolling hills and fine detail; low basins flood below the water level into
+//   lakes. Biome fields decide forest vs clearing and grassy vs rocky.
+// ============================================================================
+const WL = -300;                                         // water level: basins below this flood into lakes
+const FOGC = 0xa8c8e8;                                    // daytime sky / horizon haze
+const VERT_BUDGET = 1500;                                 // build-cost spent per frame (spread => smaller hitches)
+
+// --- chunk grid (raise the radii for more draw distance; costs memory + build) ---
+const CHUNK = 1200, DIV = 32, STEP = CHUNK / DIV;         // chunk size + subdivisions (STEP = vertex spacing)
+const GROUND_RADIUS = 8;                                  // terrain shells stream out to here (then fog hides the edge)
+const KEEP_RADIUS = GROUND_RADIUS + 1;                    // unload chunks past this
+const TREE_LO_RADIUS = 4, TREE_HI_RADIUS = 2;            // far cones vs near detailed trees
+const GRASS_RADIUS = 2, WATERFALL_RADIUS = 5;            // plants only near (waterfalls removed)
+
+// --- terrain shaping constants ----------------------------------------------
+const SPACING = 340, BASE_FREQ = 1 / SPACING, WARP_FREQ = 1 / (SPACING * 2.4), WARP = 120, EXPO = 1.9;
+const MOUNT_AMP = 1500;                                   // peak height of full mountains
+const YFLOOR = -300, GROUND_AMP = 700;                    // reference span for shading / moss (not hard limits)
+
+function hash2(x, z) { const n = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return n - Math.floor(n); }
+function noise2(x, z) {
+  const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+  const a = hash2(xi, zi), b = hash2(xi + 1, zi), c = hash2(xi, zi + 1), d = hash2(xi + 1, zi + 1);
+  const ab = a + (b - a) * u, cd = c + (d - c) * u;
+  return (ab + (cd - ab) * v) * 2 - 1;
+}
+function ridged(x, z, seed) {
+  let sum = 0, amp = 1, freq = BASE_FREQ, prev = 1, norm = 0;
+  for (let o = 0; o < 6; o++) {
+    const n = noise2(x * freq + seed * 19.3, z * freq + seed * 7.1);
+    let r = 1 - Math.abs(n); r *= r;
+    sum += r * amp * prev; prev = r; norm += amp; freq *= 2; amp *= 0.5;
+  }
+  return Math.pow(sum / norm, EXPO);
+}
+function fbm(x, z, oct, freq, seed) {                     // plain fractal noise, -1..1
+  let sum = 0, amp = 1, norm = 0;
+  for (let o = 0; o < oct; o++) { sum += noise2(x * freq + seed, z * freq - seed) * amp; norm += amp; freq *= 2; amp *= 0.5; }
+  return sum / norm;
+}
+// large-scale fields ---------------------------------------------------------
+function continent(x, z) { return fbm(x, z, 3, 0.00016, 12.3); }                 // -1 deep basin .. +1 highland
+function mountainMask(x, z) { let m = fbm(x, z, 2, 0.00030, -7.0) * 0.5 + 0.5; m = clamp((m - 0.5) / 0.34, 0, 1); return m * m * (3 - 2 * m); }
+function forestF(x, z) { return fbm(x, z, 2, 0.0011, 3.1) * 0.5 + 0.5; }          // 0 clearing .. 1 dense forest
+function rockF(x, z) { return fbm(x, z, 2, 0.0017, -5.0) * 0.5 + 0.5; }           // 0 grassy .. 1 rocky
+function patch(x, z) { const n = fbm(x, z, 2, 0.0016, 5.1); return clamp((n + 1) * 0.5, 0, 1); } // grass lushness
+
+function groundBase(x, z) {
+  const wx = x + WARP * noise2(x * WARP_FREQ, z * WARP_FREQ);
+  const wz = z + WARP * noise2(x * WARP_FREQ + 31.7, z * WARP_FREQ + 17.3);
+  const cont = continent(wx, wz);
+  const mm = mountainMask(wx, wz);
+  const ridge = ridged(wx, wz, 1.7);                                            // 0..1 sharp peaks
+  const hills = fbm(wx, wz, 3, 0.0016, 5.0) * 0.5 + 0.5;                         // 0..1 rolling
+  const detail = noise2(x * 0.05, z * 0.05) * 8 + noise2(x * 0.12, z * 0.12) * 4;
+  const lowland = 1 - mm;                                                        // water carves valleys/plains, not sheer peaks
+  let h = -150;                                                                  // base plain (just above water)
+  h += cont * 250;                                                               // broad highlands / lowlands
+  h += Math.min(0, cont) * 430;                                                  // deepen the low basins -> big lakes
+  h += Math.min(0, cont + 0.2) * 320;                                            // extra-deep troughs in the lowest land
+  h += hills * 170 * (0.5 + 0.5 * (cont * 0.5 + 0.5));                           // hills, gentler in basins
+  h += ridge * MOUNT_AMP * mm;                                                   // mountains only in mountain zones
+  // RIVER NETWORK: three warped noise bands; where a band crosses zero it carves a winding waterway.
+  //   wide thresholds => broad rivers whose surface clearly reads as water (not a narrow slot canyon).
+  const r1 = fbm(wx, wz, 3, 0.00030, 21.0), r2 = fbm(wx + 1000, wz - 1000, 3, 0.00048, -8.0), r3 = fbm(wx - 2000, wz + 500, 3, 0.0007, 33.0);
+  const ch1 = Math.max(0, 1 - Math.abs(r1) / 0.11), ch2 = Math.max(0, 1 - Math.abs(r2) / 0.085), ch3 = Math.max(0, 1 - Math.abs(r3) / 0.06);
+  let river = Math.max(ch1, ch2, ch3); river = river * river * (3 - 2 * river);  // smooth channel profile
+  h -= river * 300 * lowland;                                                    // cut broad channels below the water line
+  h += detail;
+  return h;
+}
+function groundY(x, z) { return groundBase(x, z); }                              // (kept name; water sim + ship use it)
+function meshHeight(x, z) {                                                      // bilinear on the chunk lattice so props sit flush
+  const i = Math.floor(x / STEP), j = Math.floor(z / STEP);
+  const x0 = i * STEP, z0 = j * STEP, u = (x - x0) / STEP, v = (z - z0) / STEP;
+  const a = groundY(x0, z0), b = groundY(x0 + STEP, z0), c = groundY(x0, z0 + STEP), d = groundY(x0 + STEP, z0 + STEP);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+
+// ============================================================================
+// Renderer / scene / camera / light
+// ============================================================================
+const renderer = new THREE.WebGPURenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(FOGC);
+scene.fog = new THREE.FogExp2(FOGC, 0.00016);   // open-sky haze; raise density for a shorter view
+
+const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 1, 16000);
+camera.rotation.order = 'YXZ';
+const START_X = 0, START_Z = 0, START_Y = Math.max(groundY(START_X, START_Z) + 280, WL + 420);
+camera.position.set(START_X, START_Y, START_Z);
+
+scene.add(new THREE.AmbientLight(0xbcd0e6, 0.6));
+const hemi = new THREE.HemisphereLight(0xdcefff, 0x5a6e3a, 1.05);   // bright sky fill so shaded slopes aren't black
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xfff4e0, 1.7);
+sun.position.set(0.5, 1.0, 0.3);
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0xbcd0ff, 0.4);
+rim.position.set(-0.5, 0.2, -0.6);
+scene.add(rim);
+renderer.toneMappingExposure = 1.12;
+
+// ============================================================================
+// Terrain materials — ground: mossy grass with per-pixel mottle; ceiling: rock
+// ============================================================================
+const C = {
+  grassLo: new THREE.Color(0x3c5722), grassHi: new THREE.Color(0x82c456),
+  rock: new THREE.Color(0x6c7178), snow: new THREE.Color(0xeef4f8),
+  ceilLo: new THREE.Color(0x242a32), ceilHi: new THREE.Color(0x59616c),
+};
+const _c = new THREE.Color();
+let groundBaseNode;     // captured so caustics + underwater tint can layer on top after the sim exists
+const groundMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
+{
+  const wp = positionWorld;
+  const mottle = mx_noise_float(wp.mul(0.012)).mul(0.20)
+    .add(mx_noise_float(wp.mul(0.05)).mul(0.14))
+    .add(mx_noise_float(wp.mul(0.16)).mul(0.10)).add(0.92);
+  const fuzz = mx_noise_float(wp.mul(0.6)).mul(0.18).add(0.88)
+    .mul(mx_noise_float(wp.mul(2.2)).mul(0.22).add(0.86));
+  const base = attribute('color').mul(mottle).mul(fuzz);
+  const mossCol = mix(color(0x2f5a22), color(0x67ab3b), mx_noise_float(wp.mul(0.09)).mul(0.5).add(0.5));
+  const lowF = float(1).sub(smoothstep(float(YFLOOR), float(YFLOOR + GROUND_AMP * 0.7), wp.y));
+  const mossAmt = smoothstep(0.34, 0.62, mx_noise_float(wp.mul(0.02))).mul(0.55).mul(lowF);
+  groundBaseNode = mix(base, mossCol.mul(fuzz), mossAmt);
+  groundMat.colorNode = groundBaseNode;
+}
+const ceilMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
+
+// ============================================================================
+// Grass blades — instanced per segment, gusting shader sway. The material sets a
+//   positionNode, which keeps instance transforms as vertex data (no 1024 cap).
+// ============================================================================
+const GRASS_PER_SEG = 1600;   // grass blades per chunk (merged geo => no instance cap)
+// blade template (local): a CURVED, tapered, multi-segment strip with a central
+//   MIDRIB vein (a slightly darker center line, like a real grass blade) up to the tip.
+const BL_SEGS = 5;
+const BL_V = [], BL_C = [], BL_H = [], BL_I = [];
+{
+  const baseC = [0.12, 0.24, 0.09], midC = [0.30, 0.52, 0.18], tipC = [0.62, 0.80, 0.36];
+  const lerp3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const CURVE = 0.42, BASEW = 0.26;
+  for (let s = 0; s <= BL_SEGS; s++) {
+    const t = s / BL_SEGS, w = BASEW * Math.pow(1 - t, 0.6), cx = CURVE * t * t;     // taper + forward arc
+    const edge = t < 0.5 ? lerp3(baseC, midC, t * 2) : lerp3(midC, tipC, (t - 0.5) * 2);
+    const vein = [edge[0] * 0.74, edge[1] * 0.78, edge[2] * 0.74];                   // darker midrib
+    if (s < BL_SEGS) { BL_V.push([cx - w, t, 0], [cx, t, 0], [cx + w, t, 0]); BL_C.push(edge, vein, edge); BL_H.push(t, t, t); }
+    else { BL_V.push([cx, t, 0]); BL_C.push(vein); BL_H.push(t); }                   // tip (on the vein line)
+  }
+  for (let s = 0; s < BL_SEGS - 1; s++) {
+    const a = s * 3, b = (s + 1) * 3;
+    BL_I.push(a, a + 1, b, a + 1, b + 1, b);            // left half (edge..vein)
+    BL_I.push(a + 1, a + 2, b + 1, a + 2, b + 2, b + 1); // right half (vein..edge)
+  }
+  const a = (BL_SEGS - 1) * 3, tip = BL_SEGS * 3;
+  BL_I.push(a, a + 1, tip, a + 1, a + 2, tip);          // last segment tapers to the tip
+}
+const NV = BL_V.length, NI = BL_I.length;
+// grass is MERGED geometry (one plain vertex buffer per segment), NOT InstancedMesh,
+//   so there are no per-instance matrices => no 1024 uniform cap => it can be dense.
+//   Sway is per-blade in the shader via a phase + heightFrac attribute.
+const grassMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide });
+{
+  const hf = attribute('heightFrac'), ph = attribute('phase');
+  const gust = float(0.6).add(float(0.4).mul(sin(time.mul(0.4).add(ph))));
+  const sway = sin(time.mul(1.5).add(ph)).mul(4.0).mul(gust).add(sin(time.mul(3.3).add(ph.mul(1.7))).mul(1.3));
+  grassMat.positionNode = positionLocal.add(vec3(sway.mul(hf.mul(hf)), float(0), float(0)));   // tip swings, root stays
+  grassMat.colorNode = attribute('color');
+  grassMat.normalNode = vec3(0, 1, 0);   // grass catches top light (no per-vertex normals)
+}
+
+// ============================================================================
+// REACTIVE WAVE SIM (cymatics) — a CPU wave grid in a window that follows you,
+//   masked into real basins by the terrain (ripples bounce off the shorelines).
+//   spawnRipple(x,z,amp) injects a splash; it shows on top of the cosmetic water.
+// ============================================================================
+const WG = 150, WSIZE = 4400, wgScale = WSIZE / WG, WRANGE = 16.0;   // wave-sim grid (lower => cheaper CPU step)
+let wcur = new Float32Array(WG * WG), wprev = new Float32Array(WG * WG), wmask = new Uint8Array(WG * WG);
+let wcur2 = new Float32Array(WG * WG), wprev2 = new Float32Array(WG * WG), wmask2 = new Uint8Array(WG * WG);
+let wdepth = new Float32Array(WG * WG), wdepth2 = new Float32Array(WG * WG);   // water depth (WL - ground) per cell
+let cclear = new Float32Array(WG * WG), cclear2 = new Float32Array(WG * WG);   // CLOUD-clearing field: ship carves it, it diffuses + refills
+let wcx = 0, wcz = 0;
+const cellX = (i) => wcx + (i - WG / 2 + 0.5) * wgScale, cellZ = (j) => wcz + (j - WG / 2 + 0.5) * wgScale;
+function computeMaskFull() { for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) { const d = WL - groundY(cellX(i), cellZ(j)); const k = j * WG + i; wmask[k] = d > 2 ? 1 : 0; wdepth[k] = d; } }
+function rollAll(dCol, dRow) {
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const si = i + dCol, sj = j + dRow, k = j * WG + i;
+    if (si >= 0 && si < WG && sj >= 0 && sj < WG) { const sk = sj * WG + si; wcur2[k] = wcur[sk]; wprev2[k] = wprev[sk]; wmask2[k] = wmask[sk]; wdepth2[k] = wdepth[sk]; cclear2[k] = cclear[sk]; }
+    else { wcur2[k] = 0; wprev2[k] = 0; cclear2[k] = 0; const d = WL - groundY(cellX(i), cellZ(j)); wmask2[k] = d > 2 ? 1 : 0; wdepth2[k] = d; }
+  }
+  let t = wcur; wcur = wcur2; wcur2 = t; t = wprev; wprev = wprev2; wprev2 = t; let m = wmask; wmask = wmask2; wmask2 = m; let dd = wdepth; wdepth = wdepth2; wdepth2 = dd; let cc = cclear; cclear = cclear2; cclear2 = cc;
+}
+const C2 = 0.20, WDAMP = 0.982;   // more damping => ripple energy stays focused near the source and tapers off with distance
+function stepWave() {
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i;
+    if (!wmask[k]) { wprev[k] = 0; continue; }
+    const c = wcur[k];
+    const Ln = (i > 0 && wmask[k - 1]) ? wcur[k - 1] : c, Rn = (i < WG - 1 && wmask[k + 1]) ? wcur[k + 1] : c;
+    const Dn = (j > 0 && wmask[k - WG]) ? wcur[k - WG] : c, Un = (j < WG - 1 && wmask[k + WG]) ? wcur[k + WG] : c;
+    wprev[k] = (2 * c - wprev[k] + C2 * (Ln + Rn + Dn + Un - 4 * c)) * WDAMP;
+  }
+  const tmp = wcur; wcur = wprev; wprev = tmp;
+}
+const CLOUD_Y = 560;
+function carveCloud(x, z, fwdX, fwdZ, near) {   // the hull OPENS a body-shaped rift in the cloud field
+  if (near <= 0.02) return;
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  const R = 95, cr = Math.ceil(R / wgScale), px = -fwdZ, pz = fwdX;
+  for (let dj = -cr; dj <= cr; dj++) for (let di = -cr; di <= cr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const dx = cellX(i) - x, dz = cellZ(j) - z, al = dx * fwdX + dz * fwdZ, pe = dx * px + dz * pz;
+    const e = (al / (R * 1.5)) ** 2 + (pe / (R * 0.5)) ** 2;     // elongated ellipse = the ship's body, not a circle
+    if (e < 1) { const k = j * WG + i; cclear[k] = Math.max(cclear[k], (1 - e) * near); }
+  }
+}
+function stepCloud() {   // the clouds swirl back in (diffuse) + refill (decay) => the rift closes behind the ship
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i, c = cclear[k];
+    const L = i > 0 ? cclear[k - 1] : c, Rn = i < WG - 1 ? cclear[k + 1] : c, D = j > 0 ? cclear[k - WG] : c, U = j < WG - 1 ? cclear[k + WG] : c;
+    cclear2[k] = (c * 0.62 + (L + Rn + D + U) * 0.095) * 0.965;
+  }
+  const t = cclear; cclear = cclear2; cclear2 = t;
+}
+const waveData = new Uint8Array(WG * WG * 4);
+const waveTex = new THREE.DataTexture(waveData, WG, WG);
+waveTex.wrapS = waveTex.wrapT = THREE.ClampToEdgeWrapping;
+waveTex.minFilter = waveTex.magFilter = THREE.LinearFilter;
+const cloudData = new Uint8Array(WG * WG * 4);
+const cloudTex = new THREE.DataTexture(cloudData, WG, WG);
+cloudTex.wrapS = cloudTex.wrapT = THREE.ClampToEdgeWrapping;
+cloudTex.minFilter = cloudTex.magFilter = THREE.LinearFilter;
+function uploadWave() {
+  for (let k = 0; k < WG * WG; k++) { const o = k * 4; waveData[o] = Math.max(0, Math.min(255, (wcur[k] / WRANGE * 0.5 + 0.5) * 255)); waveData[o + 1] = Math.max(0, Math.min(255, (Math.max(0, wdepth[k]) / 60) * 255)); waveData[o + 2] = Math.max(0, Math.min(255, (wake[k] / WAKERANGE * 0.5 + 0.5) * 255)); waveData[o + 3] = wmask[k] ? 255 : 0; cloudData[o] = Math.max(0, Math.min(255, cclear[k] * 255)); }
+  waveTex.needsUpdate = true; cloudTex.needsUpdate = true;
+}
+wcx = Math.round(camera.position.x / wgScale) * wgScale; wcz = Math.round(camera.position.z / wgScale) * wgScale;
+computeMaskFull();
+const windowCenter = uniform(vec2(wcx, wcz));
+function spawnRipple(wx, wz, amp) {       // a missile / impact calls this
+  const i = Math.round((wx - wcx) / wgScale + WG / 2 - 0.5), j = Math.round((wz - wcz) / wgScale + WG / 2 - 0.5);
+  if (i >= 0 && i < WG && j >= 0 && j < WG) { const k = j * WG + i; if (wmask[k]) wcur[k] += amp; }
+}
+// ---- KELVIN WAKE: the closed-form deep-water wake of the moving ship. A wave at angle θ to the
+//   track is stationary in the ship frame iff its wavenumber is k(θ)=k0/cos²θ (deep-water
+//   dispersion); summing those stationary waves over θ reproduces the ~19.5° Kelvin wedge with its
+//   transverse + divergent waves. Evaluated in the ship frame on the sim grid -> wave texture B chan.
+const wake = new Float32Array(WG * WG), WAKERANGE = 4, WAKE_NTH = 14, WAKE_K0 = 2 * Math.PI / 90;
+const wkC = [], wkS = [], wkK = [], wkA = [];
+for (let m = 0; m < WAKE_NTH; m++) { const th = -0.78 + 1.56 * (m + 0.5) / WAKE_NTH, c = Math.cos(th); wkC.push(c); wkS.push(Math.sin(th)); wkK.push(WAKE_K0 / (c * c)); wkA.push(c * c); }
+function updateWake(sx, sz, dirX, dirZ, amp) {       // dir = unit track direction, amp 0..1
+  const px = -dirZ, pz = dirX;                       // cross-track axis
+  for (let j = 0; j < WG; j++) for (let i = 0; i < WG; i++) {
+    const k = j * WG + i, rx = cellX(i) - sx, rz = cellZ(j) - sz, xi = rx * dirX + rz * dirZ;
+    if (!wmask[k] || xi > 0 || rx * rx + rz * rz > 1800 * 1800) { wake[k] = 0; continue; }   // ONLY behind the actual velocity
+    const behind = Math.min(1, -xi / 50);                    // fade in just behind the source, so it flips with reverse
+    const eta = rx * px + rz * pz, dist = Math.hypot(rx, rz);
+    let h = 0;
+    for (let m = 0; m < WAKE_NTH; m++) h += wkA[m] * Math.cos(wkK[m] * (wkC[m] * xi + wkS[m] * eta));
+    wake[k] = (h / WAKE_NTH) * amp * 6 * behind / (1 + dist / 600);   // trails + dissipates behind the ship
+  }
+}
+// ---- SPRAY: where the surface peaks high AND fast (crests breaking, e.g. the collapsing wake walls),
+//   it throws DROPLETS. They fall under gravity and ripple where they land — a real single touch.
+const DROPS = 80000;
+const dPos = new Float32Array(DROPS * 3).fill(-1e6), dVel = new Float32Array(DROPS * 3), dOn = new Uint8Array(DROPS);
+let dHead = 0, dLive = 0;
+const dSize = new Float32Array(DROPS).fill(4);
+const dBase = new Float32Array(DROPS).fill(8);   // per-drop intrinsic size (varied at emit: chunky globs + fine mist)
+const dGeo = new THREE.BufferGeometry();
+dGeo.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
+dGeo.setAttribute('size', new THREE.BufferAttribute(dSize, 1));
+const dropMat = new THREE.PointsNodeMaterial({ transparent: true, depthWrite: false, fog: true });   // node material => per-drop size
+dropMat.colorNode = color(0xf4faff); dropMat.opacityNode = float(0.95); dropMat.sizeNode = attribute('size');   // chunky near the ship, fine far away
+const drops = new THREE.Points(dGeo, dropMat);
+drops.frustumCulled = false; scene.add(drops);
+function emitDrop(x, y, z, vx, vy, vz) {     // launch one droplet (it falls under gravity and ripples where it lands)
+  const d = dHead; dHead = (dHead + 1) % DROPS;
+  dPos[d * 3] = x; dPos[d * 3 + 1] = y; dPos[d * 3 + 2] = z;
+  dVel[d * 3] = vx; dVel[d * 3 + 1] = vy; dVel[d * 3 + 2] = vz;
+  dBase[d] = Math.random() < 0.18 ? (16 + Math.random() * 18) : (4 + Math.random() * 7);   // ~18% chunky globs, rest fine mist
+  if (!dOn[d]) dLive++; dOn[d] = 1;
+}
+// AIRFLOW around the ship: the moving hull pushes the surrounding medium in a DIPOLE (potential flow
+//   around a sphere), so air above and water below both stream AROUND it. Spray + bubbles ride this
+//   field => they curve around the hull instead of going straight. (Closed form of wind-routing.html
+//   for one moving obstacle.) shipAirFlow fills _air and _airInf (0 far -> 1 at the surface).
+const shipVel = new THREE.Vector3(), _air = new THREE.Vector3(), SHIP_A = 36, SHIP_A3 = SHIP_A * SHIP_A * SHIP_A;
+let _airInf = 0;
+function shipAirFlow(px, py, pz) {
+  let rx = px - ship.position.x, ry = py - ship.position.y, rz = pz - ship.position.z;
+  let d2 = rx * rx + ry * ry + rz * rz; const dm = SHIP_A * 0.6; if (d2 < dm * dm) d2 = dm * dm;
+  const d = Math.sqrt(d2), inv = 1 / d, rxh = rx * inv, ryh = ry * inv, rzh = rz * inv;
+  const Vd = shipVel.x * rxh + shipVel.y * ryh + shipVel.z * rzh, fall = SHIP_A3 / (2 * d2 * d);
+  _airInf = Math.min(1, SHIP_A3 / (d2 * d));
+  _air.set(fall * (3 * Vd * rxh - shipVel.x), fall * (3 * Vd * ryh - shipVel.y), fall * (3 * Vd * rzh - shipVel.z));
+  return _air;
+}
+// WATER IMPACT: punching through the surface. Entry kicks a cavity (the sim rebounds into a crown)
+//   + throws a ring of spray; exit pulls a bump up + sheets spray off. Scaled by the impact speed.
+function waterImpact(x, z, speed, exiting) {
+  const p = Math.min(2.6, speed / 130); if (p < 0.15) return;
+  // only a GENTLE ripple into the sim — anything bigger just radiates as waves across the basin
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5), rr = 2;
+  const amp = (exiting ? 3 : -4) * p;
+  for (let dj = -rr; dj <= rr; dj++) for (let di = -rr; di <= rr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const k = j * WG + i; if (!wmask[k]) continue;
+    const dn = Math.hypot(di, dj) / rr; if (dn > 1) continue;
+    wcur[k] = clamp(wcur[k] + amp * (1 - dn * dn), -34, 34);
+  }
+  // THE SPLASH is a dense burst of white SPRAY thrown up + out (just fast droplets, no meshes)
+  const pu = Math.min(p, 2), n = Math.floor(200 + p * 560);
+  for (let s = 0; s < n; s++) {
+    const ang = Math.random() * 6.283, rad = Math.random(), out = (22 + rad * 85) * (0.5 + p * 0.6);
+    emitDrop(x + Math.cos(ang) * rad * 24, WL + 3, z + Math.sin(ang) * rad * 24, Math.cos(ang) * out, (60 + Math.random() * 80) * pu, Math.sin(ang) * out);
+  }
+  if (!exiting) {                                            // WORTHINGTON JET: a tight column spikes straight UP after the cavity, then arcs back down (projectile)
+    const jets = Math.floor(24 + p * 52);
+    for (let s = 0; s < jets; s++)
+      emitDrop(x + (Math.random() - 0.5) * 4, WL + 2, z + (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 10, (140 + Math.random() * 110) * pu, (Math.random() - 0.5) * 10);
+  }
+}
+function updateDrops(dt) {
+  if (dLive <= 0) return;                 // nothing splashing => skip the whole sweep
+  for (let i = 0; i < DROPS; i++) {
+    if (!dOn[i]) continue;
+    const a = shipAirFlow(dPos[i * 3], dPos[i * 3 + 1], dPos[i * 3 + 2]), C = 6 * _airInf * dt;   // swept by the airflow near the ship
+    dVel[i * 3] += (a.x - dVel[i * 3]) * C; dVel[i * 3 + 1] += (a.y - dVel[i * 3 + 1]) * C - 700 * dt; dVel[i * 3 + 2] += (a.z - dVel[i * 3 + 2]) * C;   // + gravity
+    dPos[i * 3] += dVel[i * 3] * dt; dPos[i * 3 + 1] += dVel[i * 3 + 1] * dt; dPos[i * 3 + 2] += dVel[i * 3 + 2] * dt;
+    const h = Math.max(0, dPos[i * 3 + 1] - WL);                          // height above the water surface
+    const hf = 1 - Math.min(1, h / 70);
+    dSize[i] = dBase[i] * (0.3 + 1.1 * hf * hf);                          // blobbed + big at the surface, shrinking & breaking apart as it rises
+    const fine = clamp(1 - dBase[i] / 18, 0, 1);                          // smaller drops atomize more readily
+    if (Math.random() < (1 - hf) * (3 + 9 * fine) * dt) { dOn[i] = 0; dLive--; dPos[i * 3 + 1] = -1e6; continue; }   // evaporate/atomize higher up (no ripple)
+    if (dPos[i * 3 + 1] <= WL) { spawnRipple(dPos[i * 3], dPos[i * 3 + 2], 1.0); dOn[i] = 0; dLive--; dPos[i * 3 + 1] = -1e6; }   // lands -> ripples
+  }
+  dGeo.attributes.position.needsUpdate = true; dGeo.attributes.size.needsUpdate = true;
+}
+// ---- BUBBLES: when the ship is SUBMERGED, the same disturbance trails bubbles off the hull. They
+//   rise (buoyancy) to the surface, wobbling, and pop into a small ripple when they break the top.
+const BUBBLES = 700;
+const bPos = new Float32Array(BUBBLES * 3).fill(-1e6), bVel = new Float32Array(BUBBLES * 3), bOn = new Uint8Array(BUBBLES);
+let bHead = 0, bLive = 0;
+const bGeo = new THREE.BufferGeometry(); bGeo.setAttribute('position', new THREE.BufferAttribute(bPos, 3));
+const bubbles = new THREE.Points(bGeo, new THREE.PointsMaterial({ color: 0xcfe6f2, size: 4, sizeAttenuation: true, transparent: true, opacity: 0.5, depthWrite: false, fog: true }));
+bubbles.frustumCulled = false; scene.add(bubbles);
+function emitBubble(x, y, z) {
+  const b = bHead; bHead = (bHead + 1) % BUBBLES;
+  bPos[b * 3] = x; bPos[b * 3 + 1] = y; bPos[b * 3 + 2] = z;
+  bVel[b * 3] = (Math.random() - 0.5) * 10; bVel[b * 3 + 1] = 22 + Math.random() * 26; bVel[b * 3 + 2] = (Math.random() - 0.5) * 10;
+  if (!bOn[b]) bLive++; bOn[b] = 1;
+}
+function updateBubbles(dt) {
+  if (bLive <= 0) return;
+  for (let i = 0; i < BUBBLES; i++) {
+    if (!bOn[i]) continue;
+    const a = shipAirFlow(bPos[i * 3], bPos[i * 3 + 1], bPos[i * 3 + 2]), C = 8 * _airInf * dt;   // water routes around the hull the same way
+    bVel[i * 3] += (a.x - bVel[i * 3]) * C; bVel[i * 3 + 1] += (a.y - bVel[i * 3 + 1]) * C + 32 * dt; bVel[i * 3 + 2] += (a.z - bVel[i * 3 + 2]) * C;   // + buoyant rise
+    bPos[i * 3] += bVel[i * 3] * dt; bPos[i * 3 + 1] += bVel[i * 3 + 1] * dt; bPos[i * 3 + 2] += bVel[i * 3 + 2] * dt;
+    if (bPos[i * 3 + 1] >= WL) { spawnRipple(bPos[i * 3], bPos[i * 3 + 2], 0.5); bOn[i] = 0; bLive--; bPos[i * 3 + 1] = -1e6; }   // breaks the surface -> pops
+  }
+  bGeo.attributes.position.needsUpdate = true;
+}
+let rippleT = 0, splashT = 2, waveAcc = 0;
+function updateCymatics(dt) {
+  const nscx = Math.round(camera.position.x / wgScale) * wgScale, nscz = Math.round(camera.position.z / wgScale) * wgScale;
+  if (nscx !== wcx || nscz !== wcz) {
+    const dCol = Math.round((nscx - wcx) / wgScale), dRow = Math.round((nscz - wcz) / wgScale);
+    wcx = nscx; wcz = nscz;
+    if (Math.abs(dCol) < WG && Math.abs(dRow) < WG) rollAll(dCol, dRow); else { computeMaskFull(); wcur.fill(0); wprev.fill(0); }
+    windowCenter.value.set(wcx, wcz);
+  }
+  // windless glass: no ambient/demo disturbances. The water is still until an object touches it.
+  waveAcc += Math.min(0.05, dt);
+  let s = 0; while (waveAcc >= 1 / 30 && s < 2) { stepWave(); waveAcc -= 1 / 30; s++; }
+  updateDrops(dt);         // drops arc down under gravity and ripple where they land
+  updateBubbles(dt);       // submerged bubbles rise and pop at the surface
+  uploadWave();
+}
+
+// ============================================================================
+// Water — cosmetic noise ripples + mirror reflection (reaches the mountains),
+//   with the reactive wave-sim ripples added on top near the player.
+// ============================================================================
+const water = (() => {
+  const geo = new THREE.PlaneGeometry(24000, 24000, 300, 300);   // subdivided so the whole body can rise & fall
+  geo.rotateX(-Math.PI / 2);
+  const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const wp = positionWorld, t = time;
+  // windless lake => GLASS. Only the faintest, slow micro-texture so the mirror isn't unnaturally
+  //   perfect; all real motion comes from the reactive sim (splashes / things hitting the water).
+  const ripH = (p) => mx_noise_float(vec3(p.x.mul(0.02), p.y.mul(0.02), t.mul(0.1))).mul(0.10)
+    .add(mx_noise_float(vec3(p.x.mul(0.06).add(5.0), p.y.mul(0.06), t.mul(0.2))).mul(0.06));
+  const e = 3.0;
+  const hC = ripH(wp.xz), hX = ripH(wp.xz.add(vec2(e, 0))), hZ = ripH(wp.xz.add(vec2(0, e)));
+  // REACTIVE: sample the wave sim near the player and add its ripple tilt to the normal
+  const luv = wp.xz.sub(windowCenter).div(WSIZE).add(0.5);
+  const ed = float(1 / WG), dec = (n) => n.mul(2).sub(1).mul(WRANGE);
+  const sL = dec(texture(waveTex, luv.sub(vec2(ed, float(0)))).x), sR = dec(texture(waveTex, luv.add(vec2(ed, float(0)))).x);
+  const sD = dec(texture(waveTex, luv.sub(vec2(float(0), ed))).x), sU = dec(texture(waveTex, luv.add(vec2(float(0), ed))).x);
+  const simW = float(1).sub(smoothstep(float(WSIZE * 0.34), float(WSIZE * 0.48), wp.xz.sub(windowCenter).length()));
+  const sx = sL.sub(sR).mul(0.14).mul(simW), sz = sD.sub(sU).mul(0.14).mul(simW);
+  // KELVIN WAKE (B channel): the closed-form wedge, its slope tilts the surface normal so it shows in the mirror
+  const decW = (n) => n.mul(2).sub(1).mul(WAKERANGE);
+  const kL = decW(texture(waveTex, luv.sub(vec2(ed, float(0)))).z), kR = decW(texture(waveTex, luv.add(vec2(ed, float(0)))).z);
+  const kD = decW(texture(waveTex, luv.sub(vec2(float(0), ed))).z), kU = decW(texture(waveTex, luv.add(vec2(float(0), ed))).z);
+  const wkx = kL.sub(kR).mul(0.5).mul(simW), wkz = kD.sub(kU).mul(0.5).mul(simW);
+  const Nf = normalize(vec3(hC.sub(hX).mul(1.0).add(sx).add(wkx), float(1.0), hC.sub(hZ).mul(1.0).add(sz).add(wkz)));   // glass + reactive ripples + Kelvin wake
+  // CALM WHOLE-BODY DISPLACEMENT: the surface is real geometry again. A gentle long swell makes the
+  //   whole body breathe; the reactive sim ripples + Kelvin wake add localised relief. Amplitudes are
+  //   kept small (the previous pass was too big). This is the surface a pressure source will push on.
+  const dispFade = float(1).sub(smoothstep(float(WSIZE * 0.40), float(WSIZE * 0.49), wp.xz.sub(windowCenter).length()));
+  const swell = mx_noise_float(vec3(wp.x.mul(0.0035), wp.z.mul(0.0035), t.mul(0.12))).mul(2.2)
+    .add(mx_noise_float(vec3(wp.x.mul(0.008).add(9.0), wp.z.mul(0.008), t.mul(0.18))).mul(1.1));
+  const simDisp = texture(waveTex, luv).x.mul(2).sub(1).mul(WRANGE);          // reactive ripples (R)
+  const wakeDisp = texture(waveTex, luv).z.mul(2).sub(1).mul(WAKERANGE);      // Kelvin wake (B)
+  const dispH = swell.add(simDisp.add(wakeDisp).mul(dispFade));
+  mat.positionNode = positionLocal.add(vec3(float(0), dispH, float(0)));
+  // planar MIRROR reflection across y = WL — higher res + low distortion = a crisp calm-lake mirror
+  const reflection = reflector({ resolution: 0.3 });   // the lake mirror re-renders the whole world, so keep it low-res
+  reflection.target.rotateX(-Math.PI / 2);
+  reflection.target.position.y = WL;
+  scene.add(reflection.target);
+  reflection.uvNode = reflection.uvNode.add(Nf.xz.mul(0.02));
+  const V = normalize(cameraPosition.sub(wp));
+  const ndv = Nf.dot(V).max(0);
+  const fres = float(0.04).add(float(0.6).mul(float(1).sub(ndv).pow(5)));
+  // aboveF = 1 above the waterline, 0 when submerged. Reflection, specular and the
+  //   meniscus are above-water effects; from underneath they go white and show the
+  //   low-res mirror texture, so fade them out and leave a translucent blue underside.
+  const aboveF = smoothstep(float(WL - 6), float(WL + 6), cameraPosition.y);
+  const L = normalize(vec3(0.5, 1.0, 0.3)), Hh = normalize(L.add(V));
+  const aboveBody = mix(color(0x0c3a5a), reflection.rgb, fres);
+  // below water: REAL refraction. refract() is the vector form of Snell's law -- it bends
+  //   the incident view ray through the rippled normal with eta = n_water/n_air = 1.333,
+  //   and returns the ZERO vector past the critical angle (~48.6deg), so total internal
+  //   reflection / Snell's window fall straight out of the math. We project the bent ray's
+  //   deviation into screen space and sample the already-rendered scene there, so the
+  //   ripples physically DISPLACE the light coming through the surface.
+  const I = V.negate();                                          // incident ray: camera -> surface point
+  const Nor = Nf.mul(Nf.dot(V).sign());                          // surface normal oriented toward the viewer
+  const Tr = refract(I, Nor, float(1.333));                      // Snell's law, vector form (water -> air)
+  const tir = Tr.dot(Tr);                                        // == 0 at total internal reflection
+  const defl = cameraViewMatrix.mul(vec4(Tr.sub(I), 0)).xy;      // how far the refracted ray bends, in screen axes
+  const refrImg = viewportSharedTexture(screenUV.add(defl.mul(0.22))).rgb; // transmitted world above, displaced
+  // Outside Snell's window the underside is a MIRROR (total internal reflection): reflect the
+  //   view ray off the rippled surface and sample the underwater scene, so it mirrors the
+  //   lakebed below you and wobbles with the ripples.
+  const Rr = reflect(I, Nor);                                    // reflected ray (bounces back down into the water)
+  const drefl = cameraViewMatrix.mul(vec4(Rr.sub(I), 0)).xy;     // its screen-space deviation
+  const reflImg = viewportSharedTexture(screenUV.add(drefl.mul(0.22))).rgb; // the mirrored underwater scene
+  const win = smoothstep(float(0.0), float(0.05), tir);          // 1 inside Snell's window, 0 in the TIR mirror ring
+  const underBody = mix(reflImg.mul(color(0x9fc4d6)), refrImg.mul(color(0xcfe6ef)), win); // mirror -> refraction
+  let body = mix(underBody, aboveBody, aboveF);
+  const spec = Nf.dot(Hh).max(0).pow(200).mul(0.6).mul(aboveF);                       // tight sun glints, not a dot grid
+  const colN = body.add(color(0xffffff).mul(spec));
+  const rad = wp.xz.sub(cameraPosition.xz).length();
+  const fade = smoothstep(float(7000), float(9500), rad);   // fade to the horizon mist, matching the mountains
+  mat.colorNode = mix(colN, color(FOGC), fade);
+  // above water: fresnel-driven opacity; submerged: a thin translucent blue so you see up through it
+  mat.opacityNode = mix(float(0.4), mix(float(0.66), float(0.97), fres), aboveF).mul(float(1).sub(fade));
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false; mesh.renderOrder = 1;
+  return mesh;
+})();
+scene.add(water);
+
+// (clouds, surface fog, and the volumetric gas system have been removed — clean scene)
+
+
+// ============================================================================
+// 2D CHUNK STREAMING — terrain + grass + trees + plants + waterfalls stream in
+//   around the player and unload when far away. Work is spread across frames.
+//   Trees use the conifer genome from cavern_trees.html plus broadleaf / bush /
+//   flower variants; waterfalls trace the fall line down steep mountains.
+// ============================================================================
+const chunks = new Map();                  // "cx,cz" -> chunk record
+const activeFalls = [];                     // loaded waterfalls (they feed ripples into the lake sim)
+const buildQueue = [];
+let job = null;
+const ckey = (cx, cz) => cx + ',' + cz;
+function chunkRng(cx, cz) { let s = ((cx * 73856093) ^ (cz * 19349663) ^ 0x9e3779b9) >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+const _gd = new THREE.Object3D();
+
+// ---- tree / plant geometry (grown from a seed, merged into one mesh) --------
+const BROWN = [0.27, 0.18, 0.10], NEEDLE = [0.10, 0.30, 0.15], TIPCOL = [0.42, 0.66, 0.30], LEAF = [0.20, 0.44, 0.16];
+const _yAxis = new THREE.Vector3(0, 1, 0), _q = new THREE.Quaternion(), _m4 = new THREE.Matrix4(), _one = new THREE.Vector3(1, 1, 1);
+const V3 = (x, y, z) => new THREE.Vector3(x, y, z);
+const mixC = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+function paintGeo(g, rgb, vary) {
+  const n = g.attributes.position.count, col = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) { const v = vary ? (0.8 + Math.random() * 0.4) : 1; col[i * 3] = rgb[0] * v; col[i * 3 + 1] = rgb[1] * v; col[i * 3 + 2] = rgb[2] * v; }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return g;
+}
+function mergeGeos(geos) {
+  let vc = 0, ic = 0;
+  for (const g of geos) { const vn = g.attributes.position.count; vc += vn; ic += g.index ? g.index.count : vn; }
+  const pos = new Float32Array(vc * 3), col = new Float32Array(vc * 3), idx = new Uint32Array(ic);
+  let vo = 0, io = 0;
+  for (const g of geos) {
+    const vn = g.attributes.position.count;
+    pos.set(g.attributes.position.array, vo * 3); col.set(g.attributes.color.array, vo * 3);
+    if (g.index) { const gi = g.index.array; for (let k = 0; k < gi.length; k++) idx[io + k] = gi[k] + vo; io += gi.length; }
+    else { for (let k = 0; k < vn; k++) idx[io + k] = vo + k; io += vn; }   // non-indexed (e.g. IcosahedronGeometry)
+    vo += vn;
+  }
+  const m = new THREE.BufferGeometry();
+  m.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  m.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  m.setIndex(new THREE.BufferAttribute(idx, 1));
+  m.computeVertexNormals();
+  return m;
+}
+function addTube(parts, p0, p1, r0, r1, sides, col) {
+  const dir = V3(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z), len = dir.length();
+  if (len < 1e-4) return;
+  const geo = new THREE.CylinderGeometry(r1, r0, len, sides, 1, true);
+  _q.setFromUnitVectors(_yAxis, dir.normalize());
+  _m4.compose(V3((p0.x + p1.x) / 2, (p0.y + p1.y) / 2, (p0.z + p1.z) / 2), _q, _one);
+  geo.applyMatrix4(_m4);
+  parts.push(paintGeo(geo, col));
+}
+function addNeedleFan(parts, p, dir, size, col, rnd) {
+  const spikes = 4, verts = [], cols = [], idx = [];
+  const up = Math.abs(dir.y) > 0.9 ? V3(1, 0, 0) : _yAxis;
+  const s1 = new THREE.Vector3().crossVectors(dir, up).normalize();
+  const s2 = new THREE.Vector3().crossVectors(dir, s1).normalize();
+  for (let i = 0; i < spikes; i++) {
+    const a = (i / spikes) * 6.283 + rnd() * 0.6, spread = 0.7;
+    const d = dir.clone().add(s1.clone().multiplyScalar(Math.cos(a) * spread)).add(s2.clone().multiplyScalar(Math.sin(a) * spread)).normalize();
+    const tip = V3(p.x + d.x * size, p.y + d.y * size, p.z + d.z * size);
+    const perp = new THREE.Vector3().crossVectors(d, up).normalize().multiplyScalar(size * 0.06);
+    const o = verts.length / 3;
+    verts.push(p.x - perp.x, p.y - perp.y, p.z - perp.z, p.x + perp.x, p.y + perp.y, p.z + perp.z, tip.x, tip.y, tip.z);
+    cols.push(col[0], col[1], col[2], col[0], col[1], col[2], TIPCOL[0], TIPCOL[1], TIPCOL[2]);
+    idx.push(o, o + 1, o + 2);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  g.setIndex(idx);
+  parts.push(g);
+}
+function makeConifer(seed, opts) {                            // one genome, many species via params
+  const o = opts || {}, H = o.H || 2.6, whorls = o.whorls || 10, droop0 = o.droop0 || 0.3, lenF = o.lenF || 1.0, ndl = o.needle || NEEDLE;
+  const parts = [];
+  let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  addTube(parts, V3(0, 0, 0), V3(0, H * 0.6, 0), 0.075, 0.03, 6, BROWN);
+  addTube(parts, V3(0, H * 0.6, 0), V3(0, H, 0), 0.03, 0.01, 5, BROWN);
+  for (let w = 0; w < whorls; w++) {
+    const t = w / (whorls - 1), y = H * (0.16 + t * 0.8);
+    const len = ((1 - t) * 1.0 + 0.14) * lenF, droop = droop0 + (1 - t) * 0.5;
+    const n = 5 + (rnd() * 2 | 0), a0 = rnd() * 6.283;
+    for (let b = 0; b < n; b++) {
+      const ang = a0 + (b / n) * 6.283 + (rnd() - 0.5) * 0.4;
+      const dx = Math.cos(ang), dz = Math.sin(ang);
+      const base = V3(0, y, 0), tip = V3(dx * len, y - droop * len * 0.55, dz * len);
+      addTube(parts, base, tip, 0.02 * (1 - t * 0.5), 0.004, 4, mixC(BROWN, ndl, 0.6));
+      const ndir = V3(dx, -droop, dz).normalize();
+      addNeedleFan(parts, base.clone().lerp(tip, 0.5), ndir, len * 0.30, ndl, rnd);
+      addNeedleFan(parts, tip, ndir, len * 0.28, ndl, rnd);
+    }
+  }
+  addNeedleFan(parts, V3(0, H, 0), _yAxis, 0.4, ndl, rnd);
+  return mergeGeos(parts);
+}
+function makePineLo() {                                       // cheap far conifer: stacked cones
+  const parts = [];
+  const trunk = new THREE.CylinderGeometry(0.04, 0.07, 0.5, 5); trunk.translate(0, 0.25, 0);
+  parts.push(paintGeo(trunk, BROWN));
+  const cones = [[0.46, 0.95, 0.30], [0.38, 0.88, 0.72], [0.30, 0.82, 1.12], [0.22, 0.76, 1.5], [0.13, 0.7, 1.88]];
+  for (const [r, h, y] of cones) { const c = new THREE.ConeGeometry(r, h, 6); c.translate(0, y + h / 2, 0); parts.push(paintGeo(c, NEEDLE, true)); }
+  return mergeGeos(parts);
+}
+function makeBroadleaf(seed) {                                // trunk + clustered leafy blobs
+  let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  const parts = [], up = V3(0, 1, 0);
+  // GROW a branching deciduous tree: a limb is a tapered tube; while it still has depth it
+  //   FORKS into 2-3 child limbs that spread outward + keep climbing; spent tips bear a small
+  //   leaf cluster. One genome -> a whole tree, the same way makeConifer grows a pine.
+  function grow(p, dir, len, r, depth) {
+    const end = V3(p.x + dir.x * len, p.y + dir.y * len, p.z + dir.z * len);
+    addTube(parts, p, end, r, r * 0.66, depth > 1 ? 5 : 4, BROWN);
+    if (depth <= 0) {                                              // leafy cluster at the branch tip
+      const blob = new THREE.IcosahedronGeometry(0.55 + rnd() * 0.3, 0); blob.scale(1, 0.85, 1);
+      blob.translate(end.x, end.y, end.z); parts.push(paintGeo(blob, LEAF, true));
+      return;
+    }
+    const s1 = new THREE.Vector3().crossVectors(dir, Math.abs(dir.y) > 0.9 ? V3(1, 0, 0) : up).normalize();
+    const s2 = new THREE.Vector3().crossVectors(dir, s1).normalize();
+    const n = 2 + (rnd() * 2 | 0);
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * 6.283 + rnd() * 0.8, spread = 0.45 + rnd() * 0.45;
+      const nd = dir.clone().add(s1.clone().multiplyScalar(Math.cos(a) * spread)).add(s2.clone().multiplyScalar(Math.sin(a) * spread));
+      nd.y += 0.28; nd.normalize();                               // children keep growing generally upward
+      grow(end, nd, len * (0.62 + rnd() * 0.18), r * 0.64, depth - 1);
+    }
+  }
+  grow(V3(0, 0, 0), up, 1.3 + rnd() * 0.5, 0.17, 2);   // depth 2 => light tree (~6-9 leaf puffs), cheap enough to instance
+  return mergeGeos(parts);
+}
+function makeBroadleafLo() {
+  const parts = [];
+  const t = new THREE.CylinderGeometry(0.06, 0.1, 0.7, 4); t.translate(0, 0.35, 0); parts.push(paintGeo(t, BROWN));
+  const c = new THREE.IcosahedronGeometry(0.95, 0); c.translate(0, 1.2, 0); parts.push(paintGeo(c, LEAF, true));   // detail 0 far blob
+  return mergeGeos(parts);
+}
+function makeBush() {
+  const parts = [];
+  for (let i = 0; i < 2; i++) { const b = new THREE.IcosahedronGeometry(0.42 + Math.random() * 0.24, 0); b.translate((Math.random() - 0.5) * 0.55, 0.3 + Math.random() * 0.2, (Math.random() - 0.5) * 0.55); parts.push(paintGeo(b, [0.16, 0.34, 0.12], true)); }
+  return mergeGeos(parts);
+}
+function makeFlower() {
+  const parts = [];
+  const st = new THREE.CylinderGeometry(0.02, 0.03, 0.6, 4); st.translate(0, 0.3, 0); parts.push(paintGeo(st, [0.3, 0.5, 0.2]));
+  const bloom = new THREE.IcosahedronGeometry(0.16, 0); bloom.translate(0, 0.64, 0); parts.push(paintGeo(bloom, [1, 1, 1]));
+  return mergeGeos(parts);
+}
+const pineGeo = makeConifer(99, { H: 2.9, whorls: 9, droop0: 0.24, lenF: 0.92 });                       // tall, sparse
+const firGeo  = makeConifer(7,  { H: 1.85, whorls: 18, droop0: 0.62, lenF: 1.4, needle: [0.07, 0.21, 0.17] }); // short, bushy, dark
+const broadGeo = makeBroadleaf(42);
+const coniferLoGeo = makePineLo();
+const broadLoGeo = makeBroadleafLo();
+const bushGeo = makeBush();
+const flowerGeo = makeFlower();
+const FLOWER_HUES = [0xff5d73, 0xffd23f, 0xff924c, 0xc77dff, 0xffffff, 0xff8fab, 0xfff3b0].map(h => new THREE.Color(h));
+
+// foliage shading: clumpy needle/leaf noise + per-instance light/dark tint
+const foliageMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide });
+{
+  const needle = mx_noise_float(positionLocal.mul(3.0)).mul(0.16).add(0.92);
+  const treeTint = hash(instanceIndex).mul(0.34).add(0.82);
+  foliageMat.colorNode = attribute('color').mul(needle).mul(treeTint);
+}
+const flowerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.0 });
+
+// ---- waterfall + mist materials (shared; everything is in world space) ------
+const waterfallMat = new THREE.MeshBasicNodeMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false, fog: true });
+{
+  const wp = positionWorld;
+  const streak = mx_noise_float(vec3(wp.x.mul(0.05), wp.y.mul(0.025).add(time.mul(2.4)), wp.z.mul(0.05))).mul(0.5).add(0.5);
+  const foam = smoothstep(0.45, 0.9, mx_noise_float(vec3(wp.x.mul(0.11), wp.y.mul(0.05).add(time.mul(3.4)), wp.z.mul(0.11))).mul(0.5).add(0.5));
+  waterfallMat.colorNode = mix(color(0x5f8fb8), color(0xeaf6ff), streak.mul(0.55).add(foam.mul(0.6)).min(float(1.0)));
+  waterfallMat.opacityNode = float(0.6).add(foam.mul(0.32));
+}
+const mistMat = new THREE.PointsNodeMaterial({ transparent: true, depthWrite: false, fog: true });
+mistMat.colorNode = color(0xeaf4ff); mistMat.sizeNode = float(24); mistMat.opacityNode = float(0.2);
+
+// ---- ground ----------------------------------------------------------------
+const Csand = new THREE.Color(0xcdbd8e), Crock2 = new THREE.Color(0x6c7178), Csnow2 = new THREE.Color(0xeef4f8);
+const CgrassLo2 = new THREE.Color(0x3c5722), CgrassHi2 = new THREE.Color(0x82c456), Cmud = new THREE.Color(0x47432f);
+function startGround(c) {
+  const geo = new THREE.PlaneGeometry(CHUNK, CHUNK, DIV, DIV);
+  geo.rotateX(-Math.PI / 2);
+  geo.translate(c.cx * CHUNK, 0, c.cz * CHUNK);
+  const pos = geo.attributes.position;
+  return { type: 'ground', c, geo, pos, colors: new Float32Array(pos.count * 3), normals: new Float32Array(pos.count * 3), k: 0, n: pos.count };
+}
+function fillGround(j, count) {
+  const pos = j.pos, colors = j.colors, normals = j.normals, e = 6;
+  const end = Math.min(j.n, j.k + count);
+  for (let k = j.k; k < end; k++) {
+    const x = pos.getX(k), z = pos.getZ(k), y = groundY(x, z);
+    pos.setY(k, y);
+    const gx = groundY(x + e, z) - groundY(x - e, z), gz = groundY(x, z + e) - groundY(x, z - e);
+    const nx = -gx, ny = 2 * e, nz = -gz, inv = 1 / Math.hypot(nx, ny, nz);
+    normals[k * 3] = nx * inv; normals[k * 3 + 1] = ny * inv; normals[k * 3 + 2] = nz * inv;
+    const flat = (2 * e) / Math.hypot(gx, gz, 2 * e), pc = patch(x, z);
+    _c.copy(CgrassLo2).lerp(CgrassHi2, clamp((flat - 0.45) / 0.4, 0, 1) * clamp(pc + 0.2, 0, 1));
+    _c.lerp(Crock2, clamp((0.62 - flat) / 0.32, 0, 1) * clamp(rockF(x, z) + 0.2, 0, 1));
+    if (y < WL + 34) _c.lerp(Csand, clamp((WL + 34 - y) / 46, 0, 1));            // sandy shoreline
+    if (y < WL - 4) _c.lerp(Cmud, clamp((WL - 4 - y) / 130, 0, 1));              // lakebed
+    if (y > 470) _c.lerp(Csnow2, clamp((y - 470) / 320, 0, 1) * Math.max(flat, 0.35)); // snow caps
+    colors[k * 3] = _c.r; colors[k * 3 + 1] = _c.g; colors[k * 3 + 2] = _c.b;
+  }
+  j.k = end;
+}
+function finishGround(j) {
+  j.geo.setAttribute('color', new THREE.BufferAttribute(j.colors, 3));
+  j.geo.setAttribute('normal', new THREE.BufferAttribute(j.normals, 3));
+  const mesh = new THREE.Mesh(j.geo, groundMat); scene.add(mesh); j.c.ground = mesh;
+}
+
+// ---- grass blades (merged geometry, no instance cap) -----------------------
+const GRASS_PER_CHUNK = GRASS_PER_SEG, GTRIES = GRASS_PER_CHUNK * 5;
+function startGrass(c) {
+  const maxV = GRASS_PER_CHUNK * NV, maxI = GRASS_PER_CHUNK * NI;
+  return { type: 'grass', c, tries: 0, k: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2,
+    pos: new Float32Array(maxV * 3), col: new Float32Array(maxV * 3), hf: new Float32Array(maxV), ph: new Float32Array(maxV), idx: new Uint32Array(maxI) };
+}
+function fillGrass(j, attempts) {
+  const e = 6;
+  for (let a = 0; a < attempts && j.k < GRASS_PER_CHUNK && j.tries < GTRIES; a++) {
+    j.tries++;
+    const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK;
+    const gy = groundBase(x, z);
+    if (gy < WL + 6 || gy > 360) continue;                    // not underwater, below the grass treeline
+    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
+    const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
+    if (flat < 0.55) continue;                                // steep => bare rock
+    const pc = patch(x, z); if (pc < 0.35) continue;          // grey ground
+    if (rockF(x, z) > 0.72 && Math.random() < 0.7) continue;  // rocky biome => sparse
+    const clump = noise2(x * 0.008 + 50, z * 0.008 - 20) * 0.5 + 0.5;
+    if (Math.random() > clump * clump * 1.3) continue;        // cluster into clumps
+    const H = 26 * (0.55 + pc * 0.75), W = 8 * (0.7 + Math.random() * 0.5);
+    const baseY = meshHeight(x, z) - 0.8, yaw = Math.random() * 6.283, cyw = Math.cos(yaw), syw = Math.sin(yaw);
+    const phase = Math.random() * 6.283, vo = j.k * NV;
+    for (let v = 0; v < NV; v++) {
+      const lx = BL_V[v][0] * W, ly = BL_V[v][1] * H, lz = BL_V[v][2] * W, o = (vo + v) * 3;
+      j.pos[o] = x + (lx * cyw - lz * syw); j.pos[o + 1] = baseY + ly; j.pos[o + 2] = z + (lx * syw + lz * cyw);
+      j.col[o] = BL_C[v][0]; j.col[o + 1] = BL_C[v][1]; j.col[o + 2] = BL_C[v][2];
+      j.hf[vo + v] = BL_H[v]; j.ph[vo + v] = phase;
+    }
+    const io = j.k * NI;
+    for (let t = 0; t < NI; t++) j.idx[io + t] = vo + BL_I[t];
+    j.k++;
+  }
+}
+function finishGrass(j) {
+  const nv = j.k * NV, ni = j.k * NI, g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(j.pos.subarray(0, nv * 3)), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(j.col.subarray(0, nv * 3)), 3));
+  g.setAttribute('heightFrac', new THREE.BufferAttribute(new Float32Array(j.hf.subarray(0, nv)), 1));
+  g.setAttribute('phase', new THREE.BufferAttribute(new Float32Array(j.ph.subarray(0, nv)), 1));
+  g.setIndex(new THREE.BufferAttribute(new Uint32Array(j.idx.subarray(0, ni)), 1));
+  if (nv > 0) g.computeBoundingSphere();
+  const mesh = new THREE.Mesh(g, grassMat); scene.add(mesh); j.c.grass = mesh;
+}
+
+// ---- trees (instanced per species, with cheap far LOD) ---------------------
+const TREE_TRIES = 500;
+function buildInst(geo, list) {
+  const n = Math.min(1024, list.length), im = new THREE.InstancedMesh(geo, foliageMat, n);   // <=1024 (WebGPU uniform cap)
+  for (let i = 0; i < n; i++) im.setMatrixAt(i, list[i]);
+  im.instanceMatrix.needsUpdate = true; im.count = n; if (n) im.computeBoundingSphere();
+  return im;
+}
+function startTrees(c) { return { type: 'trees', c, tries: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2, pine: [], fir: [], broad: [], loCone: [], loBlob: [] }; }
+function fillTrees(j, attempts) {
+  const e = 6;
+  for (let a = 0; a < attempts && j.tries < TREE_TRIES; a++) {
+    j.tries++;
+    const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK, y = groundBase(x, z);
+    if (y < WL + 22 || y > 500) continue;                     // above water, below the treeline
+    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
+    const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
+    if (flat < 0.62) continue;                                // not on cliffs
+    const fr = forestF(x, z); if (fr < 0.34) continue;        // clearings stay open
+    const clump = noise2(x * 0.006 - 13, z * 0.006 + 9) * 0.5 + 0.5;
+    if (Math.random() > clump * fr * 1.5) continue;
+    if (rockF(x, z) > 0.7 && Math.random() < 0.6) continue;
+    const r = Math.random(); let sp;                          // species by elevation (cold up high)
+    if (y > 300) sp = r < 0.62 ? 'fir' : 'pine';
+    else if (y > 120) sp = r < 0.4 ? 'pine' : (r < 0.7 ? 'fir' : 'broad');
+    else sp = r < 0.62 ? 'broad' : (r < 0.85 ? 'pine' : 'fir');
+    const S = 22 * (0.6 + Math.random() * 0.9);
+    _gd.position.set(x, meshHeight(x, z) - 2, z);
+    _gd.rotation.set(0, Math.random() * 6.283, 0);
+    _gd.scale.set(S, S, S); _gd.updateMatrix();
+    const m = _gd.matrix.clone();
+    if (sp === 'broad') { j.broad.push(m); j.loBlob.push(m); }
+    else { j[sp].push(m); j.loCone.push(m); }
+  }
+}
+function finishTrees(j) {
+  const c = j.c; c.treesHi = []; c.treesLo = [];
+  if (j.pine.length) { const m = buildInst(pineGeo, j.pine); scene.add(m); c.treesHi.push(m); }
+  if (j.fir.length) { const m = buildInst(firGeo, j.fir); scene.add(m); c.treesHi.push(m); }
+  if (j.broad.length) { const m = buildInst(broadGeo, j.broad); scene.add(m); c.treesHi.push(m); }
+  if (j.loCone.length) { const m = buildInst(coniferLoGeo, j.loCone); scene.add(m); c.treesLo.push(m); }
+  if (j.loBlob.length) { const m = buildInst(broadLoGeo, j.loBlob); scene.add(m); c.treesLo.push(m); }
+  for (const m of c.treesLo) m.visible = false;
+}
+
+// ---- bushes + flowers ------------------------------------------------------
+const PLANT_TRIES = 400;
+function startPlants(c) { return { type: 'plants', c, tries: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2, bush: [], flower: [], fcol: [] }; }
+function fillPlants(j, attempts) {
+  const e = 6;
+  for (let a = 0; a < attempts && j.tries < PLANT_TRIES; a++) {
+    j.tries++;
+    const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK, y = groundBase(x, z);
+    if (y < WL + 8 || y > 340) continue;
+    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
+    const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
+    if (flat < 0.62) continue;
+    const pc = patch(x, z); if (pc < 0.4) continue;
+    _gd.position.set(x, meshHeight(x, z) - 1.5, z); _gd.rotation.set(0, Math.random() * 6.283, 0);
+    const S = 11 * (0.6 + Math.random() * 0.8); _gd.scale.set(S, S, S); _gd.updateMatrix(); j.bush.push(_gd.matrix.clone());   // flowers (the little dots) removed
+  }
+}
+function finishPlants(j) {
+  const c = j.c;
+  if (j.bush.length) { const m = buildInst(bushGeo, j.bush); scene.add(m); c.bushes = m; }
+  if (j.flower.length) {
+    const n = Math.min(1024, j.flower.length), m = new THREE.InstancedMesh(flowerGeo, flowerMat, n);
+    for (let i = 0; i < n; i++) { m.setMatrixAt(i, j.flower[i]); m.setColorAt(i, j.fcol[i]); }
+    m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    m.count = n; if (n) m.computeBoundingSphere(); scene.add(m); c.flowers = m;
+  }
+}
+
+// ---- waterfalls (trace the fall line down a steep mountain into a lake) -----
+function startFalls(c) { return { type: 'falls', c, done: false }; }
+function buildFalls(j) {
+  const c = j.c; c.falls = [];
+  const rng = chunkRng(c.cx, c.cz), x0 = c.cx * CHUNK - CHUNK / 2, z0 = c.cz * CHUNK - CHUNK / 2, e = 8;
+  let best = null;                                            // steepest high point in a coarse scan
+  for (let sj = 0; sj < 6; sj++) for (let si = 0; si < 6; si++) {
+    const x = x0 + (si + 0.5) / 6 * CHUNK, z = z0 + (sj + 0.5) / 6 * CHUNK, y = groundBase(x, z);
+    if (y < WL + 260) continue;
+    const gx = groundBase(x + e, z) - groundBase(x - e, z), gz = groundBase(x, z + e) - groundBase(x, z - e), g = Math.hypot(gx, gz) / (2 * e);
+    if (g < 0.85) continue;                                   // need a real cliff
+    const score = g * (y - WL);
+    if (!best || score > best.score) best = { x, z, y, score };
+  }
+  if (!best || rng() > 0.5) { j.done = true; return; }        // not every steep chunk gets one
+  let px = best.x, pz = best.z; const path = [];              // walk downhill to trace the fall line
+  for (let s = 0; s < 70; s++) {
+    const yy = groundBase(px, pz); path.push([px, yy, pz]);
+    if (yy <= WL + 4) break;
+    const gx = groundBase(px + e, pz) - groundBase(px - e, pz), gz = groundBase(px, pz + e) - groundBase(px, pz - e), slope = Math.hypot(gx, gz) / (2 * e);
+    if (slope < 0.3) break;                                   // flattened out => stream ends
+    const inv = 1 / Math.hypot(gx, gz); px -= gx * inv * STEP * 0.85; pz -= gz * inv * STEP * 0.85;
+  }
+  if (path.length < 5) { j.done = true; return; }
+  const W = 34 + rng() * 46, verts = [], uvs = [], idx = []; let len = 0;   // ribbon along the path
+  for (let i = 0; i < path.length; i++) {
+    const p = path[i], pn = path[Math.min(path.length - 1, i + 1)], pp = path[Math.max(0, i - 1)];
+    let tx = pn[0] - pp[0], tz = pn[2] - pp[2]; const tl = Math.hypot(tx, tz) || 1; tx /= tl; tz /= tl;
+    const nx = -tz, nz = tx;                                  // horizontal perpendicular
+    if (i > 0) len += Math.hypot(p[0] - path[i - 1][0], p[1] - path[i - 1][1], p[2] - path[i - 1][2]);
+    const y = p[1] + 4;
+    verts.push(p[0] - nx * W * 0.5, y, p[2] - nz * W * 0.5, p[0] + nx * W * 0.5, y, p[2] + nz * W * 0.5);
+    uvs.push(0, len / 120, 1, len / 120);
+  }
+  for (let i = 0; i < path.length - 1; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  g.setIndex(idx); g.computeVertexNormals();
+  const mesh = new THREE.Mesh(g, waterfallMat); mesh.frustumCulled = false; mesh.renderOrder = 2; scene.add(mesh);
+  const base = path[path.length - 1], MN = 40, mp = new Float32Array(MN * 3);   // mist puff at the base
+  for (let i = 0; i < MN; i++) { const a = Math.random() * 6.283, r = Math.random() * W * 0.8; mp[i * 3] = base[0] + Math.cos(a) * r; mp[i * 3 + 1] = base[1] + Math.random() * 70; mp[i * 3 + 2] = base[2] + Math.sin(a) * r; }
+  const mg = new THREE.BufferGeometry(); mg.setAttribute('position', new THREE.BufferAttribute(mp, 3));
+  const mist = new THREE.Points(mg, mistMat); mist.frustumCulled = false; scene.add(mist);
+  const fall = { mesh, mist, x: base[0], z: base[2] };
+  c.falls.push(fall); activeFalls.push(fall);
+  j.done = true;
+}
+let fallRippleT = 0;
+function updateWaterfalls(dt) {
+  fallRippleT -= dt;
+  if (fallRippleT > 0) return;
+  fallRippleT = 0.12;
+  for (const f of activeFalls) if (groundY(f.x, f.z) < WL - 2) spawnRipple(f.x, f.z, 1.6);   // splash where it hits the lake
+}
+
+// ---- streaming: request near->far, unload far, build a slice each frame -----
+const chunkMeshes = (c) => [c.ground, c.grass, c.bushes, c.flowers, ...(c.treesHi || []), ...(c.treesLo || [])];
+function ensureJobs(c, ring) {
+  if (!c.reqGround) { c.reqGround = true; buildQueue.push({ type: 'ground', c }); }
+  // trees removed (all types)
+  // all ground cover removed (grass blades, bushes, flowers) — only the terrain's grassy texture remains
+  // waterfalls removed
+}
+function unloadChunk(key, c) {
+  c.alive = false;
+  for (const m of chunkMeshes(c)) { if (!m) continue; scene.remove(m); if ((m === c.ground || m === c.grass) && m.geometry) m.geometry.dispose(); if (m.dispose) m.dispose(); }
+  if (c.falls) for (const f of c.falls) { scene.remove(f.mesh); f.mesh.geometry.dispose(); scene.remove(f.mist); f.mist.geometry.dispose(); const i = activeFalls.indexOf(f); if (i >= 0) activeFalls.splice(i, 1); }
+  chunks.delete(key);
+}
+function planSegments() {
+  const pcx = Math.round(camera.position.x / CHUNK), pcz = Math.round(camera.position.z / CHUNK);
+  for (let ring = 0; ring <= GROUND_RADIUS; ring++)              // nearest rings first => spawn area builds first
+    for (let dz = -ring; dz <= ring; dz++) for (let dx = -ring; dx <= ring; dx++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) !== ring) continue;
+      const cx = pcx + dx, cz = pcz + dz, key = ckey(cx, cz);
+      let c = chunks.get(key); if (!c) { c = { cx, cz, alive: true }; chunks.set(key, c); }
+      ensureJobs(c, ring);
+    }
+  for (const [key, c] of chunks) if (Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) > KEEP_RADIUS) unloadChunk(key, c);
+}
+function updateLOD() {
+  const pcx = Math.round(camera.position.x / CHUNK), pcz = Math.round(camera.position.z / CHUNK);
+  for (const [, c] of chunks) {
+    const near = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) <= TREE_HI_RADIUS;
+    if (c.treesHi) for (const m of c.treesHi) m.visible = near;
+    if (c.treesLo) for (const m of c.treesLo) m.visible = !near;
+  }
+}
+function pump(budget) {
+  let used = 0;
+  while (used < budget) {
+    if (!job) {
+      if (!buildQueue.length) break;
+      const r = buildQueue.shift();
+      if (!r.c.alive) continue;
+      job = r.type === 'ground' ? startGround(r.c) : r.type === 'grass' ? startGrass(r.c) : r.type === 'trees' ? startTrees(r.c) : r.type === 'plants' ? startPlants(r.c) : startFalls(r.c);
+    }
+    if (!job.c.alive) { job = null; continue; }
+    if (job.type === 'ground') { const step = Math.min(budget - used, job.n - job.k); fillGround(job, step); used += step; if (job.k >= job.n) { finishGround(job); job = null; } }
+    else if (job.type === 'grass') { const step = Math.min(budget - used, GTRIES - job.tries); fillGrass(job, step); used += step; if (job.k >= GRASS_PER_CHUNK || job.tries >= GTRIES) { finishGrass(job); job = null; } }
+    else if (job.type === 'trees') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), TREE_TRIES - job.tries); fillTrees(job, step); used += step * 5; if (job.tries >= TREE_TRIES) { finishTrees(job); job = null; } }   // a placement attempt costs ~5 terrain verts
+    else if (job.type === 'plants') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), PLANT_TRIES - job.tries); fillPlants(job, step); used += step * 5; if (job.tries >= PLANT_TRIES) { finishPlants(job); job = null; } }
+    else { buildFalls(job); used += 300; job = null; }
+  }
+}
+
+// ============================================================================
+// SHIP — drop in the blaster and fly it from the cockpit. The markers (cockpit1,
+//   thruster1/2, gun1/2) are empty nodes baked into the GLB; the model's forward is -X,
+//   so we spin it to face the rig's -Z. The camera rides the cockpit1 marker every frame.
+// ============================================================================
+const SHIP_SCALE = 24;                        // ~1.9-unit model -> ~45-unit ship
+let ship, cockpit, bankGroup;   // bankGroup holds the model and takes the bank/roll, so the camera (which follows ship) never tilts
+const thrusters = [], guns = [], thrusterFlames = [];
+{
+  const gltf = await new GLTFLoader().loadAsync('./ships/blaster.glb');
+  const model = gltf.scene;
+  model.scale.setScalar(SHIP_SCALE);
+  model.rotation.y = -Math.PI / 2;            // model -X (forward) -> rig -Z (forward)
+  cockpit = model.getObjectByName('cockpit1');
+  for (const n of ['thruster1', 'thruster2']) { const o = model.getObjectByName(n); if (o) thrusters.push(o); }
+  for (const n of ['gun1', 'gun2']) { const o = model.getObjectByName(n); if (o) guns.push(o); }
+  ship = new THREE.Group();
+  ship.rotation.order = 'YXZ';
+  bankGroup = new THREE.Group();              // rolls/banks the model only; the ship rig (and camera) stay level
+  bankGroup.add(model);
+  ship.add(bankGroup);
+  ship.position.set(START_X, START_Y, START_Z);
+  scene.add(ship);
+
+  // Engine FX at each thruster marker: a backward FLAME (forward thrust, boost = much bigger)
+  //   and a glowing retro RING (reverse). Sizes/brightness are driven from the controls.
+  ship.updateMatrixWorld(true);
+  // plume cone with baked vertex colour + ALPHA: white-hot at the nozzle, fading down its length
+  //   to a soft transparent blue tip. Additive + double-sided => soft volumetric edges, not a solid cone.
+  const coneGeo = new THREE.ConeGeometry(1, 1, 18, 1, true); coneGeo.rotateX(Math.PI / 2); coneGeo.translate(0, 0, 0.5);
+  {
+    const pos = coneGeo.attributes.position, n = pos.count, col = new Float32Array(n * 4);
+    const cHot = new THREE.Color(0xffffff), cMid = new THREE.Color(0x4aa6ff), cTip = new THREE.Color(0x123c9c), _cc = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      const t = Math.min(1, Math.max(0, pos.getZ(i)));
+      if (t < 0.45) _cc.copy(cHot).lerp(cMid, t / 0.45); else _cc.copy(cMid).lerp(cTip, (t - 0.45) / 0.55);
+      col[i * 4] = _cc.r; col[i * 4 + 1] = _cc.g; col[i * 4 + 2] = _cc.b; col[i * 4 + 3] = Math.pow(1 - t, 1.3);
+    }
+    coneGeo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  }
+  const ringGeo = new THREE.TorusGeometry(1, 0.16, 8, 24);
+  const mkFx = (vc) => new THREE.MeshBasicMaterial({ color: vc ? 0xffffff : 0xcfe6ff, vertexColors: vc, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false, side: THREE.DoubleSide });
+  const _v = new THREE.Vector3();
+  for (const th of thrusters) {
+    const lp = ship.worldToLocal(th.getWorldPosition(_v)).clone();
+    const plume = new THREE.Mesh(coneGeo, mkFx(true));
+    const ring = new THREE.Mesh(ringGeo, mkFx(false));
+    for (const m of [plume, ring]) { m.frustumCulled = false; m.position.copy(lp); bankGroup.add(m); }   // bank with the model
+    thrusterFlames.push({ plume, ring });
+  }
+}
+
+// ============================================================================
+// BUOYANT BALLS — press [B] to drop one. It falls, splashes, then bobs on the surface
+//   and rides the waves like Evan Wallace's ball; the sim carries its ripples to the shores.
+//   Over dry ground it simply lands.
+// ============================================================================
+const balls = [];
+const BALL_R = 14, BALL_MAX = 40;
+const ballGeo = new THREE.SphereGeometry(BALL_R, 24, 16);
+function waveHeightAt(x, z) {                  // world surface height at (x,z), or null if no water there
+  const i = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), j = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  if (i >= 0 && i < WG && j >= 0 && j < WG) { const k = j * WG + i; if (wmask[k]) return WL + wcur[k]; }
+  return null;
+}
+function dropBall() {
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(Math.random(), 0.7, 0.5), roughness: 0.35, metalness: 0.05 });
+  const mesh = new THREE.Mesh(ballGeo, mat); mesh.frustumCulled = false;
+  const b = { mesh, x: ship.position.x, z: ship.position.z, y: ship.position.y - 30, vy: -40, wasWet: false };
+  mesh.position.set(b.x, b.y, b.z); scene.add(mesh); balls.push(b);
+  if (balls.length > BALL_MAX) { const old = balls.shift(); scene.remove(old.mesh); old.mesh.material.dispose(); }
+}
+addEventListener('keydown', e => { if (e.code === 'KeyB') dropBall(); });
+const BALL_G = 900, RHO_REL = 0.55;     // ball density / water density => floats ~55% submerged (Archimedes)
+// OBJECT -> FLUID COUPLING (Archimedes displacement): an object pushes aside the water it occupies.
+//   We press the surface down to the hull across its footprint and let it follow the object's vertical
+//   motion, so the wave sim makes a wake as it moves and the water flows back / clings as it lifts out.
+function displaceWater(x, z, R, bottomY, vy, dt, dirX = 0, dirZ = 0) {   // CUT a hole; displaced water -> rim walls
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  const cr = Math.ceil(R * 1.7 / wgScale), ease = Math.min(1, dt * 14), follow = clamp(vy * dt, -6, 6);   // stronger vertical cling (sucks water up on exit)
+  const press = Math.min(0, Math.max(-30, bottomY - WL));   // depth the object cuts into the surface (<=0)
+  const moving = dirX * dirX + dirZ * dirZ > 0.01;
+  let displaced = 0; const rim = [];
+  for (let dj = -cr; dj <= cr; dj++) for (let di = -cr; di <= cr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const k = j * WG + i; if (!wmask[k]) continue;
+    const rdx = cellX(i) - x, rdz = cellZ(j) - z, dn = Math.hypot(rdx, rdz) / R;
+    if (dn <= 1) {                                          // under the object: carve down to the hull
+      const w = 1 - dn * dn, d = (press * w - wcur[k]) * ease;
+      wcur[k] += d + follow * w * 0.8;                      // cut + the surface follows it vertically (cling on rise)
+      if (d < 0) displaced -= d;                            // water pushed OUT of the hole this frame
+      wcur[k] = clamp(wcur[k], -34, 34);
+    } else if (dn <= 1.7) rim.push({ k, dx: rdx, dz: rdz });
+  }
+  if (rim.length && displaced > 0) {                        // CONSERVE volume: the cut water becomes raised walls.
+    let wsum = 0;                                           //   Moving => bias it PERPENDICULAR + BEHIND (the T-top wake arms).
+    for (const r of rim) {
+      if (moving) { const rl = Math.hypot(r.dx, r.dz) || 1, al = (r.dx * dirX + r.dz * dirZ) / rl; r.w = 0.15 + (1 - Math.abs(al)) * (al < 0 ? 1.0 : 0.4); }
+      else r.w = 1;
+      wsum += r.w;
+    }
+    const vol = displaced * 0.95;
+    for (const r of rim) wcur[r.k] = clamp(wcur[r.k] + vol * r.w / wsum, -34, 34);
+  }
+}
+function pushUpWater(x, z, R, amt, dt) {     // raise a dome of water (bow wave: volume shoved up & out at the leading edge)
+  const ci = Math.round((x - wcx) / wgScale + WG / 2 - 0.5), cj = Math.round((z - wcz) / wgScale + WG / 2 - 0.5);
+  const cr = Math.ceil(R / wgScale), ease = Math.min(1, dt * 6);
+  for (let dj = -cr; dj <= cr; dj++) for (let di = -cr; di <= cr; di++) {
+    const i = ci + di, j = cj + dj; if (i < 0 || i >= WG || j < 0 || j >= WG) continue;
+    const k = j * WG + i; if (!wmask[k]) continue;
+    const dn = Math.hypot(cellX(i) - x, cellZ(j) - z) / R; if (dn > 1) continue;
+    const w = 1 - dn * dn;
+    wcur[k] += (amt * w - wcur[k]) * ease * w;   // ease the surface up; the sim pushes it away / around
+    wcur[k] = clamp(wcur[k], -24, 24);
+  }
+}
+function updateBalls(dt) {
+  for (const b of balls) {
+    const surf = waveHeightAt(b.x, b.z);                               // local water surface, or null over dry ground
+    if (surf !== null) {
+      const d = clamp(surf - (b.y - BALL_R), 0, 2 * BALL_R);           // submerged depth: bottom -> surface
+      const frac = (d * d * (3 * BALL_R - d)) / (4 * BALL_R ** 3);     // submerged volume fraction (spherical cap / sphere)
+      if (frac > 0.01 && !b.wasWet) waterImpact(b.x, b.z, Math.abs(b.vy), false);   // the ball punches in -> crown + spray
+      b.wasWet = frac > 0.01;
+      b.vy += BALL_G * (frac / RHO_REL - 1) * dt;                      // Archimedes: F_b - F_g, as acceleration
+      if (frac > 0) b.vy *= (1 - clamp(3 * frac * dt, 0, 0.4));        // drag in water settles the bob
+      if (frac > 0.002) {                                              // the ball is a pressure source too
+        const rW = Math.sqrt(Math.max(BALL_R * BALL_R * 0.3, BALL_R * BALL_R - (b.y - surf) ** 2));   // waterline radius
+        displaceWater(b.x, b.z, rW, b.y - BALL_R, b.vy, dt);
+      }
+    } else {
+      b.vy -= BALL_G * dt; b.wasWet = false;
+      const gy = groundY(b.x, b.z) + BALL_R;
+      if (b.y <= gy) { b.y = gy; b.vy = 0; }                           // rest on dry ground
+    }
+    b.y += b.vy * dt;
+    b.mesh.position.y = b.y;
+  }
+}
+
+// ============================================================================
+// First-person flycam
+// ============================================================================
+const look = { yaw: 0, pitch: 0 };
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+const cv = renderer.domElement;
+cv.addEventListener('click', () => { if (!document.pointerLockElement) cv.requestPointerLock(); });
+addEventListener('mousemove', e => { if (document.pointerLockElement === cv) { look.yaw -= e.movementX * 0.0022; look.pitch -= e.movementY * 0.0022; } });
+const DEAD = 0.12;
+const dz = v => Math.abs(v) < DEAD ? 0 : (v - Math.sign(v) * DEAD) / (1 - DEAD);
+const fwd = new THREE.Vector3(), rt = new THREE.Vector3(), mv = new THREE.Vector3(), CAM_OFF = new THREE.Vector3();
+let flameLevel = 0, ringLevel = 0, boostLevel = 0;   // smoothed engine FX levels (boostLevel feeds thruster water pressure)
+let bank = 0, rollT = 0, rollDir = 1, rollCool = 0, rollArmed = false;
+const ROLL_DUR = 0.85, ROLL_COOL = 0.5, MAX_BANK = 0.38, ROLL_DODGE = 300;   // wide, long barrel roll with a big sideways dash
+const DASH_SPEED = 820;   // held L3 / F = a CONTINUOUS forward dash
+function triggerRoll(dir) { if (rollT <= 0 && rollCool <= 0) { rollT = ROLL_DUR; rollDir = dir; rollCool = ROLL_DUR + ROLL_COOL; } }
+function updateControls(dt) {
+  let mx = 0, my = 0, lx = 0, ly = 0, up = 0, boost = 0, dash = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null; for (const g of pads) { if (g && g.connected) { gp = g; break; } }
+  if (gp) {
+    mx = dz(gp.axes[0] || 0); my = dz(gp.axes[1] || 0);
+    lx = dz(gp.axes[2] || 0); ly = dz(gp.axes[3] || 0);
+    const A = gp.buttons[0] && gp.buttons[0].pressed, B = gp.buttons[1] && gp.buttons[1].pressed;
+    up = (B ? 1 : 0) - (A ? 1 : 0);                                  // B = rise, A = descend
+    boost = (gp.buttons[5] && gp.buttons[5].pressed) ? 1 : 0;        // RB = boost
+    if (gp.buttons[10] && gp.buttons[10].pressed) dash = 1;           // L3 (held) = dash
+    // RT (7) = shoot, LT (6) = defensive — reserved, wired later
+  }
+  if (keys['KeyW']) my = -1; if (keys['KeyS']) my = 1;
+  if (keys['KeyA']) mx = -1; if (keys['KeyD']) mx = 1;
+  if (keys['ArrowLeft']) lx = -1; if (keys['ArrowRight']) lx = 1;
+  if (keys['ArrowUp']) ly = -1; if (keys['ArrowDown']) ly = 1;
+  if (keys['Space']) up = 1; if (keys['ShiftLeft'] || keys['ControlLeft']) up = -1;
+  if (keys['ShiftRight']) boost = 1;
+  if (keys['KeyF']) dash = 1;                                          // keyboard dash (held)
+  const wantRoll = dash && Math.abs(mx) > 0.4;                         // DASH + strafe L/R (on press) = a wide barrel roll that way, dashing sideways
+  if (wantRoll && !rollArmed) triggerRoll(Math.sign(mx));
+  rollArmed = wantRoll;
+
+  // Steer the SHIP (mouse/stick = yaw + pitch); the camera will ride the cockpit below.
+  const LOOK = 2.4;
+  look.yaw -= lx * LOOK * dt;
+  look.pitch = Math.max(-1.45, Math.min(1.45, look.pitch - ly * LOOK * dt));
+  ship.rotation.set(look.pitch, look.yaw, 0);
+
+  const SPEED = 380 * (1 + boost * 2.0);
+  fwd.set(0, 0, -1).applyEuler(ship.rotation);
+  rt.set(1, 0, 0).applyEuler(ship.rotation);
+  mv.set(0, 0, 0).addScaledVector(fwd, -my).addScaledVector(rt, mx);
+  mv.y += up;
+  const px = ship.position.x, pz = ship.position.z;
+  ship.position.addScaledVector(mv, SPEED * dt);
+  if (dash) ship.position.addScaledVector(fwd, DASH_SPEED * dt);   // continuous forward dash while L3/F is held
+
+  // COLLISION: query the same CPU terrain field the water uses — keep the hull in the open
+  //   void (above the floor, below the ceiling). Walls pinch shut => blocked.
+  const M = 34;                              // the ship has size: keep its hull above the ground
+  const fl = groundY(ship.position.x, ship.position.z) + M;
+  if (ship.position.y < fl) ship.position.y = fl;   // open sky above — no ceiling to bump
+
+  // WATER RESISTANCE: nose/keel in the water DRAGS the ship (anti-gravity hull, so it doesn't sink).
+  const noseY = ship.position.y + fwd.y * 22;                          // the nose dips when you pitch down
+  const sub = Math.max(WL - noseY, WL - (ship.position.y - 8));        // nose OR keel submersion
+  if (sub > 0) {
+    const f = Math.min(1, sub / 45);
+    ship.position.x = px + (ship.position.x - px) * (1 - 0.5 * f);     // bleed off the horizontal move
+    ship.position.z = pz + (ship.position.z - pz) * (1 - 0.5 * f);
+  }
+
+  // BANKING + STAR FOX BARREL ROLL (Ace Starship feel). Bank into turns (from the turn RATE, so mouse
+  //   AND stick both bank) and into strafes; a bumper / Q-E snaps a full 360° roll. Visual only — the
+  //   roll is about the forward axis so it doesn't change your heading.
+  rollCool -= dt;
+  let rollSpin = 0;
+  if (rollT > 0) {
+    rollSpin = -rollDir * 6.2832 * (1 - rollT / ROLL_DUR);                       // a full 360deg barrel roll
+    ship.position.addScaledVector(rt, rollDir * ROLL_DODGE * dt);               // Star Fox dodge: slide sideways during the roll
+    ship.position.y = Math.max(fl, ship.position.y);
+    rollT -= dt;
+  }
+  const bankTarget = -mx * MAX_BANK;                                            // bank into the strafe (Ace Starship feel)
+  bank += (bankTarget - bank) * Math.min(1, dt * 6);
+  bankGroup.rotation.z = bank + rollSpin;                                       // ONLY the model banks/rolls; the rig + camera stay level
+
+  // CHASE CAM: sit behind + above the ship (these models are built to be seen from outside),
+  //   following its heading. The pull-back also removes the point-blank overdraw that halved FPS.
+  ship.updateMatrixWorld(true);
+  CAM_OFF.set(0, 50, 180).applyQuaternion(ship.quaternion);   // +Y up, +Z behind (pulled back so the ship sits forward in view)
+  camera.position.copy(ship.position).add(CAM_OFF);
+  camera.quaternion.copy(ship.quaternion);                    // yaw/pitch only (no roll) => the view never tilts
+  const targetFov = 65 + boost * 16;                          // boost widens the FOV for a speed rush (Ace Starship)
+  if (Math.abs(camera.fov - targetFov) > 0.05) { camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 4); camera.updateProjectionMatrix(); }
+
+  // ENGINE FX: forward throttle grows the flame (boost = much bigger); reverse lights a retro ring.
+  const fwdT = Math.max(0, -my), revT = Math.max(0, my);
+  const kk = Math.min(1, dt * 8);
+  flameLevel += (fwdT - flameLevel) * kk;
+  ringLevel += (revT - ringLevel) * kk;
+  boostLevel = boost;
+  const flick = 0.9 + Math.sin(performance.now() * 0.05) * 0.06 + Math.sin(performance.now() * 0.013) * 0.04;
+  const fLen = (4 + flameLevel * 22 + boost * 10) * flick, fWid = 1.125 + flameLevel * 0.525 + boost * 0.2;
+  const fOp = (0.35 + flameLevel * 0.55 + boost * 0.3) * (1 - ringLevel);   // reverse suppresses the forward flame
+  const rSize = 0.85, rOp = ringLevel * (0.9 + boost * 0.2) * flick;         // reverse boost just glows a bit brighter
+  for (const f of thrusterFlames) {
+    f.plume.scale.set(fWid, fWid, fLen); f.plume.material.opacity = fOp;
+    f.ring.scale.set(rSize, rSize, rSize); f.ring.material.opacity = rOp;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+planSegments();
+pump(60000);                       // build the spawn area up front; the rest streams in over the next frames
+await renderer.compileAsync(scene, camera);
+
+// MEDIUM: above the waterline it's grey cavern air; below it, water swallows light fast.
+//   Blend the single fog's colour + density by how deep the eye is (no object swap => no
+//   transition hitch), so the medium fades smoothly through the surface.
+const airFogC = new THREE.Color(FOGC), waterFogC = new THREE.Color(0x0e4250);
+const AIR_DENS = 0.00020, WATER_DENS = 0.0012;
+function updateMedium() {
+  const u = clamp((WL + 2 - camera.position.y) / 16, 0, 1);       // 0 above the surface -> 1 fully submerged
+  scene.fog.color.copy(airFogC).lerp(waterFogC, u);
+  scene.fog.density = AIR_DENS + (WATER_DENS - AIR_DENS) * u;
+  scene.background.lerpColors(airFogC, waterFogC, u);
+}
+
+// SHIP <-> WATER: skim the surface to throw a speed-scaled wake; punch through it for a splash.
+//   spawnRipple only injects where the sim says there's actually water (a basin), so dry ground stays dry.
+const _prevShip = new THREE.Vector3().copy(ship.position), _tp = new THREE.Vector3(), _fw = new THREE.Vector3();
+function updateShipWake(dt) {
+  const idt = 1 / Math.max(1e-3, dt);
+  const vx = (ship.position.x - _prevShip.x) * idt, vz = (ship.position.z - _prevShip.z) * idt, dy = (ship.position.y - _prevShip.y) * idt;
+  const speed = Math.hypot(vx, vz);
+  shipVel.set(vx, dy, vz);                                                      // drives the airflow the spray/bubbles ride
+  const above = ship.position.y - WL, prevAbove = _prevShip.y - WL;
+  const keel = ship.position.y - 8, top = ship.position.y + 8;
+  if (keel < WL && top > WL) {                                                  // STRADDLING the surface: the hull parts the water -> cut a trench + spray
+    const cutDepth = Math.max(-30, Math.min(-(5 + speed * 0.06), keel - WL));
+    displaceWater(ship.position.x, ship.position.z, 30, WL + cutDepth, dy, dt, speed > 1 ? vx / speed : 0, speed > 1 ? vz / speed : 0);
+    if (speed > 30) {                                                          // the moment you touch water while driving: spray OUT THE BACK + UP + out the sides (the T)
+      const inv = 1 / speed, fx = vx * inv, fz = vz * inv, px = -fz, pz = fx, sp = Math.min(1.7, speed / 480);
+      const n = Math.floor(100 + sp * 360);                                      // denser + taller the faster you go (the rooster tail grows out of this)
+      for (let s = 0; s < n; s++) {
+        const side = Math.random() < 0.5 ? 1 : -1, lat = (8 + Math.random() * 46) * side, back = 8 + Math.random() * 52;
+        const outV = (40 + Math.random() * 82) * (0.6 + sp), upV = (55 + Math.random() * 75) * (0.5 + sp * 1.3), backV = (20 + Math.random() * 38) * (0.5 + sp);
+        emitDrop(ship.position.x - fx * back + px * lat, WL + 3, ship.position.z - fz * back + pz * lat,
+                 px * side * outV - fx * backV, upV, pz * side * outV - fz * backV);
+      }
+    }
+  } else if (top < WL && top > WL - 55) {                                       // FULLY SUBMERGED but near the top: bulge the surface UP, fading with depth (NO spray)
+    pushUpWater(ship.position.x, ship.position.z, 34, (1 - (WL - top) / 55) * (7 + speed * 0.03), dt);
+  }
+  if (above < -4 && speed > 20) {                                                // SUBMERGED: a trail of bubbles rises off the hull
+    const n = Math.min(6, 1 + (speed / 120 | 0));
+    for (let s = 0; s < n; s++) emitBubble(ship.position.x + (Math.random() - 0.5) * 44, ship.position.y + (Math.random() - 0.5) * 22, ship.position.z + (Math.random() - 0.5) * 44);
+  }
+  // NOSE DIPPED IN: the bow wave washes spray UP and BACK over the canopy (airflow then curls it around)
+  _fw.set(0, 0, -1).applyQuaternion(ship.quaternion);
+  const noseY = ship.position.y + _fw.y * 22;
+  if (noseY < WL && speed > 60 && top > WL) {                                    // only while the body is still breaking the surface (not fully under)
+    const noseX = ship.position.x + _fw.x * 22, noseZ = ship.position.z + _fw.z * 22, n = Math.min(52, 8 + (speed / 28 | 0));
+    for (let s = 0; s < n; s++)
+      emitDrop(noseX + (Math.random() - 0.5) * 16, WL + 4, noseZ + (Math.random() - 0.5) * 16,
+               -_fw.x * (40 + Math.random() * 50) + (Math.random() - 0.5) * 24, 75 + Math.random() * 55,
+               -_fw.z * (40 + Math.random() * 50) + (Math.random() - 0.5) * 24);
+  }
+  for (const th of thrusters) {                                                  // thruster exhaust cuts the surface too
+    th.getWorldPosition(_tp);
+    const h = _tp.y - WL;
+    if (h < 160) {
+      const thrust = (flameLevel + boostLevel * 1.6) * (1 - clamp(h / 160, 0, 1));
+      if (thrust > 0.02) displaceWater(_tp.x, _tp.z, 24, WL - thrust * 16, 0, dt);
+    }
+  }
+  if (above < 0 && prevAbove >= 0) waterImpact(ship.position.x, ship.position.z, Math.abs(dy), false);       // punching IN -> crown + spray
+  else if (above > 0 && prevAbove <= 0) waterImpact(ship.position.x, ship.position.z, Math.abs(dy), true);   // breaking OUT -> water sheets off
+  _prevShip.copy(ship.position);
+}
+
+const fpsEl = document.getElementById('fps');
+setTimeout(() => { const h = document.getElementById('hint'); if (h) h.style.opacity = '0'; }, 7000);
+let fpsAcc = 0, fpsFrames = 0;
+let last = performance.now();
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
+  updateControls(dt);
+  updateMedium();
+  planSegments();
+  pump(VERT_BUDGET);
+  updateLOD();
+  updateShipWake(dt);
+  updateBalls(dt);
+  updateCymatics(dt);
+  updateWaterfalls(dt);
+  water.position.set(camera.position.x, WL, camera.position.z);
+  renderer.render(scene, camera);
+  fpsAcc += dt; fpsFrames++;
+  if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }
+});
+</script>
+</body>
+</html>
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   

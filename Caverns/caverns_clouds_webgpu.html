@@ -46,9 +46,9 @@
 
 <div id="panel">
   <h1>caverns · eml clouds · WebGPU</h1>
-  <p class="sub">grassy corridor + flooded basin + carved cumulus — one raymarched pipeline</p>
+  <p class="sub">endless world · plains, mountains, lakes &amp; rivers + carved cumulus — one raymarched pipeline</p>
   <div class="eml">density = fill·d − ( e^(k·n) − L·ln(d) )</div>
-  <div class="hint">The cavern floor/ceiling and the volumetric cloud-gas are all raymarched from the same analytic noise the original caverns used. Fly the corridor; the gas rolls through the open void above the water.</div>
+  <div class="hint">Endless procedural terrain and volumetric cloud-gas, raymarched together with distance LOD. Fly anywhere; biomes shift from grassy plains to mountains, the sea floods the lowlands into lakes and river channels, and mist pools in the valleys.</div>
 
   <div class="grp"><div class="t">scene · what's drawn</div>
     <div class="row chk"><label for="terrainOn">cavern corridor</label><input type="checkbox" id="terrainOn" checked></div>
@@ -73,8 +73,8 @@
 
   <div class="grp"><div class="t">cloud-gas body</div>
     <div class="row"><label>core fill</label><input id="fill" type="range" min="0" max="3" step="0.01" value="2.15"><span class="v" id="fill_v"></span></div>
-    <div class="row"><label>altitude</label><input id="alt" type="range" min="-300" max="1200" step="1" value="429"><span class="v" id="alt_v"></span></div>
-    <div class="row"><label>layer depth</label><input id="thick" type="range" min="50" max="1200" step="1" value="453"><span class="v" id="thick_v"></span></div>
+    <div class="row"><label>altitude</label><input id="alt" type="range" min="-300" max="3000" step="1" value="1600"><span class="v" id="alt_v"></span></div>
+    <div class="row"><label>layer depth</label><input id="thick" type="range" min="50" max="1600" step="1" value="650"><span class="v" id="thick_v"></span></div>
     <div class="row"><label>coverage scl</label><input id="covscale" type="range" min="0.2" max="3" step="0.01" value="0.59"><span class="v" id="covscale_v"></span></div>
     <div class="row"><label>detail scl</label><input id="detail" type="range" min="0.5" max="6" step="0.01" value="4.99"><span class="v" id="detail_v"></span></div>
     <div class="row"><label>iso / cutoff</label><input id="iso" type="range" min="0" max="1.2" step="0.005" value="0.13"><span class="v" id="iso_v"></span></div>
@@ -85,6 +85,7 @@
     <div class="row"><label>top speed</label><input id="speed" type="range" min="80" max="1400" step="10" value="1400"><span class="v" id="speed_v"></span></div>
     <div class="row"><label>quality</label><input id="quality" type="range" min="0.4" max="1.4" step="0.05" value="1.4"><span class="v" id="quality_v"></span></div>
     <div class="row"><label>resolution</label><input id="res" type="range" min="0.4" max="1.0" step="0.05" value="1.0"><span class="v" id="res_v"></span></div>
+    <div class="row chk"><label for="taaOn">temporal accumulate</label><input type="checkbox" id="taaOn" checked></div>
     <div class="row" style="gap:6px"><button id="resetCam">reset position</button><button id="reset">defaults</button></div>
   </div>
   <div class="hint">Click the view to capture the mouse. <b>W A S D</b> move · <b>Space</b>/<b>Shift(L)</b> up·down · mouse = look · <b>Shift(R)</b> boost · arrows = look · <b>H</b> hide panel. Gamepad: left stick move, right stick look, RB boost, A/B down/up. The corridor walls pinch shut — collision keeps you in the void.</div>
@@ -117,28 +118,13 @@ struct Uniforms {
   p3       : vec4<f32>,   // expOn, lnOn, ambStrength, waterLevel
   p4       : vec4<f32>,   // terrainOn, waterOn, fogDensity, cloudOn
   p5       : vec4<f32>,   // fogColor.rgb, underwater
+  p6       : vec4<f32>,   // xy = sub-pixel jitter (clip space), zw unused
 };
 
 @group(0) @binding(0) var<uniform> U : Uniforms;
 
-// ---- caverns terrain constants (mirrors the JS so render + collision agree) ----
-const YFLOOR : f32 = -450.0;
-const GROUND_AMP : f32 = 460.0;
-const YCEIL : f32 = 780.0;
-const CEIL_AMP : f32 = 440.0;
-const T_BASE_FREQ : f32 = 0.0033333333;   // 1/300
-const T_WARP_FREQ : f32 = 0.0015151515;   // 1/660
-const T_WARP : f32 = 80.0;
-const T_EXPO : f32 = 1.75;
-const CORRIDOR_HALF : f32 = 1600.0;
-const WALLW : f32 = 420.0;
-const BACKW : f32 = 210.0;
-// forcefield DOME = a smooth arched vault over the corridor (replaces the old rocky ceiling
-//   as the play-space boundary). Elliptical arch across X, running along the corridor in Z,
-//   dropping to seal against the floor at the walls / back via wallAmt — same boundary, clean shape.
-const ARCH_EDGE : f32 = 150.0;    // ceiling height at the corridor edge (spring line)
-const ARCH_RISE : f32 = 560.0;    // extra height at the centre (apex = EDGE + RISE)
-const ARCH_HALF : f32 = 1600.0;   // half-width of the arch (matches CORRIDOR_HALF)
+// ---- open-world terrain constant (mirrors the JS so render + collision agree) ----
+const SEA : f32 = 0.0;    // global sea level: land below this floods => oceans, lakes, river channels
 
 // ---------- hash / value noise / fbm (clouds) ----------
 fn hash(p : vec3<f32>) -> f32 {
@@ -195,43 +181,44 @@ fn tnoise2(p : vec2<f32>) -> f32 {
   let ab = a + (b - a) * u.x; let cd = c + (d - c) * u.x;
   return (ab + (cd - ab) * u.y) * 2.0 - 1.0;
 }
-fn tridged(p : vec2<f32>, seed : f32) -> f32 {
-  var sum = 0.0; var amp = 1.0; var freq = T_BASE_FREQ; var prev = 1.0; var norm = 0.0;
-  for (var o = 0; o < 5; o = o + 1) {
-    let n = tnoise2(vec2<f32>(p.x * freq + seed * 19.3, p.y * freq + seed * 7.1));
-    var r = 1.0 - abs(n); r = r * r;
-    sum = sum + r * amp * prev; prev = r; norm = norm + amp; freq = freq * 2.0; amp = amp * 0.5;
+// fBm and ridged noise with LOD: octaves finer than the pixel footprint (fw) are dropped (no far shimmer)
+fn fbm2(p : vec2<f32>, baseFreq : f32, oct : i32, fw : f32) -> f32 {
+  var s = 0.0; var a = 0.5; var f = baseFreq;
+  for (var i = 0; i < oct; i = i + 1) {
+    let fade = smoothstep(fw * 3.0, fw * 7.0, 1.0 / f);
+    if (fade <= 0.002) { break; }
+    s = s + a * tnoise2(p * f) * fade;
+    f = f * 2.0; a = a * 0.5;
   }
-  return pow(sum / norm, T_EXPO);
+  return s;                                                  // ~ -1..1
 }
-fn groundBase(p : vec2<f32>) -> f32 {
-  let wx = p.x + T_WARP * tnoise2(p * T_WARP_FREQ);
-  let wz = p.y + T_WARP * tnoise2(p * T_WARP_FREQ + vec2<f32>(31.7, 17.3));
-  let detail = tnoise2(p * 0.05) * 7.0 + tnoise2(p * 0.12) * 3.0;
-  return YFLOOR + GROUND_AMP * tridged(vec2<f32>(wx, wz), 1.7) + detail;
+fn ridged2(p : vec2<f32>, baseFreq : f32, oct : i32, fw : f32) -> f32 {
+  var s = 0.0; var a = 0.5; var f = baseFreq; var prev = 1.0;
+  for (var i = 0; i < oct; i = i + 1) {
+    let fade = smoothstep(fw * 3.0, fw * 7.0, 1.0 / f);
+    if (fade <= 0.002) { break; }
+    var r = 1.0 - abs(tnoise2(p * f)); r = r * r;
+    s = s + a * r * prev * fade; prev = r;
+    f = f * 2.0; a = a * 0.5;
+  }
+  return s;                                                  // 0 .. ~1 (sharp ridges)
 }
-fn ceilBase(p : vec2<f32>) -> f32 {
-  let a = p + vec2<f32>(4000.0, -4000.0);
-  let wx = a.x + T_WARP * tnoise2(a * T_WARP_FREQ);
-  let wz = a.y + T_WARP * tnoise2(a * T_WARP_FREQ + vec2<f32>(31.7, 17.3));
-  return YCEIL - CEIL_AMP * tridged(vec2<f32>(wx, wz), 5.9);
+// endless biome terrain height. fw = world-space pixel footprint (LOD).
+fn terrainH(p : vec2<f32>, fw : f32) -> f32 {
+  let cont = fbm2(p, 1.0 / 5200.0, 4, fw) * 300.0 + 40.0;                          // broad continents (some below sea)
+  let mt = clamp(fbm2(p + vec2<f32>(1000.0, -2000.0), 1.0 / 3000.0, 3, fw) * 0.7 + 0.45, 0.0, 1.0);
+  let m = smoothstep(0.45, 0.75, mt);                                              // mountainness 0..1
+  let hills = fbm2(p, 1.0 / 520.0, 5, fw) * 70.0;                                  // rolling plains
+  let mtn = ridged2(p + vec2<f32>(500.0, 800.0), 1.0 / 900.0, 5, fw) * 1000.0;     // sharp mountains
+  var h = cont + mix(hills, hills * 0.3 + mtn, m);
+  // rivers: domain-warped winding channels carved down toward the sea, mostly in lowlands
+  let warp = vec2<f32>(fbm2(p, 1.0 / 2600.0, 2, fw), fbm2(p + vec2<f32>(57.0, 19.0), 1.0 / 2600.0, 2, fw)) * 600.0;
+  let meander = fbm2(p + warp, 1.0 / 2100.0, 3, fw);
+  let riverAmt = smoothstep(0.05, 0.0, abs(meander)) * (1.0 - m * 0.7);
+  h = mix(h, min(h, SEA - 8.0), riverAmt);
+  return h;
 }
-fn wallAmt(p : vec2<f32>) -> f32 {
-  let side = (abs(p.x) - CORRIDOR_HALF) / WALLW;
-  let back = (p.y - 30.0) / BACKW;
-  return clamp(max(side, back), 0.0, 1.0);
-}
-fn tsmooth(w : f32) -> f32 { return w * w * (3.0 - 2.0 * w); }
-fn groundY(p : vec2<f32>) -> f32 {
-  let w = tsmooth(wallAmt(p)); let g = groundBase(p);
-  if (w <= 0.0) { return g; }
-  return g + ((g + ceilBase(p)) * 0.5 - g) * w;
-}
-fn ceilY(p : vec2<f32>) -> f32 {
-  let w = tsmooth(wallAmt(p)); let c = ceilBase(p);
-  if (w <= 0.0) { return c; }
-  return c + ((groundBase(p) + c) * 0.5 - c) * w;
-}
+fn groundY(p : vec2<f32>) -> f32 { return terrainH(p, 0.0); }
 fn tpatch(p : vec2<f32>) -> f32 {
   let n = tnoise2(p * 0.0016 + vec2<f32>(5.1, -2.3)) * 0.62 + tnoise2(p * 0.0041 + vec2<f32>(11.0, 7.0)) * 0.38;
   return clamp((n + 1.0) * 0.5, 0.0, 1.0);
@@ -270,12 +257,15 @@ fn hg(cosT : f32, g : f32) -> f32 {
   return (1.0 - g2) / (4.0 * 3.14159265 * pow(1.0 + g2 - 2.0 * g * cosT, 1.5));
 }
 
-fn skyColor(rd : vec3<f32>) -> vec3<f32> {
+fn skyBase(rd : vec3<f32>) -> vec3<f32> {   // sky gradient only (no sun) — safe to haze terrain toward
   let t = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-  var col = mix(U.sky0.xyz, U.sky1.xyz, pow(t, 0.8));
+  return mix(U.sky0.xyz, U.sky1.xyz, pow(t, 0.8));
+}
+fn skyColor(rd : vec3<f32>) -> vec3<f32> {
+  var col = skyBase(rd);
   let sd = max(dot(rd, U.sun.xyz), 0.0);
   let glow = pow(sd, 8.0) * 0.4 + pow(sd, 280.0) * 6.0;
-  col += U.sunCol.xyz * glow * U.sun.w;
+  col += U.sunCol.xyz * glow * U.sun.w;       // sun disk + glow only on actual sky pixels
   return col;
 }
 
@@ -292,10 +282,12 @@ fn cloudSlabRange(ro : vec3<f32>, rd : vec3<f32>) -> vec2<f32> {
   return vec2<f32>(t0, max(t0, t1));
 }
 
-// volumetric march -> premultiplied colour in .xyz, transmittance in .w
-fn marchClouds(ro : vec3<f32>, rd : vec3<f32>, t0in : f32, t1in : f32, coarse : bool, pix : vec2<f32>) -> vec4<f32> {
+// volumetric march -> premultiplied colour, transmittance, and extinction-weighted distance (TAA reprojection)
+struct CloudResult { col : vec3<f32>, T : f32, depth : f32 };
+fn marchClouds(ro : vec3<f32>, rd : vec3<f32>, t0in : f32, t1in : f32, coarse : bool, pix : vec2<f32>) -> CloudResult {
   let sun = U.sun.xyz;
   var T = 1.0; var col = vec3<f32>(0.0);
+  var wdepth = 0.0; var wsum = 0.0;
   let cosT = dot(rd, sun);
   let phase = mix(hg(cosT, 0.18), hg(cosT, 0.74), 0.55);
   let godk = U.sunCol.w * U.p2.y;
@@ -326,43 +318,19 @@ fn marchClouds(ro : vec3<f32>, rd : vec3<f32>, t0in : f32, t1in : f32, coarse : 
       let ambient = mix(U.sky0.xyz, U.sky1.xyz, 0.6) * U.p3.z * 1.6;   // softer fill, less harsh grain in shadow
       let lit = sunLight + ambient;
       let a = (1.0 - exp(-dens * dt * 0.04)) * fade;
-      col += T * a * lit;
+      let w = T * a;                 // this sample's contribution to the final colour
+      col += w * lit;
+      wdepth += t * w; wsum += w;    // extinction-weighted distance along the ray
       T *= 1.0 - a;
     }
     t += dt;
   }
-  return vec4<f32>(col, T);
+  let depth = select(t1in, wdepth / wsum, wsum > 1e-4);
+  return CloudResult(col, T, depth);
 }
 
-// ---------- distance level-of-detail terrain: fade noise octaves below a pixel (kills tip shimmer) ----------
-// fw = world-space pixel footprint at the sample; octaves finer than the footprint are smoothed away
-fn tridgedLOD(p : vec2<f32>, seed : f32, fw : f32) -> f32 {
-  var sum = 0.0; var amp = 1.0; var freq = T_BASE_FREQ; var prev = 1.0; var norm = 0.0;
-  for (var o = 0; o < 5; o = o + 1) {
-    let fade = smoothstep(fw * 3.0, fw * 7.0, 1.0 / freq);   // 1 if octave coarser than footprint, 0 if finer
-    if (fade <= 0.002) {                                      // this + all finer octaves are sub-pixel: skip the costly noise
-      for (var k = o; k < 5; k = k + 1) { sum = sum + amp * prev; prev = 1.0; norm = norm + amp; amp = amp * 0.5; }
-      break;
-    }
-    let n = tnoise2(vec2<f32>(p.x * freq + seed * 19.3, p.y * freq + seed * 7.1));
-    var r = 1.0 - abs(n); r = r * r;
-    r = mix(1.0, r, fade);                                   // smooth ridge detail finer than a pixel
-    sum = sum + r * amp * prev; prev = r; norm = norm + amp; freq = freq * 2.0; amp = amp * 0.5;
-  }
-  return pow(sum / norm, T_EXPO);
-}
-fn groundBaseLOD(p : vec2<f32>, fw : f32) -> f32 {
-  let wx = p.x + T_WARP * tnoise2(p * T_WARP_FREQ);
-  let wz = p.y + T_WARP * tnoise2(p * T_WARP_FREQ + vec2<f32>(31.7, 17.3));
-  let dfade = smoothstep(fw * 3.0, fw * 7.0, 12.0);          // fade the fine detail bumps with distance
-  let detail = (tnoise2(p * 0.05) * 7.0 + tnoise2(p * 0.12) * 3.0) * dfade;
-  return YFLOOR + GROUND_AMP * tridgedLOD(vec2<f32>(wx, wz), 1.7, fw) + detail;
-}
-fn groundYLOD(p : vec2<f32>, fw : f32) -> f32 {
-  let w = tsmooth(wallAmt(p)); let g = groundBaseLOD(p, fw);
-  if (w <= 0.0) { return g; }
-  return g + ((g + ceilBase(p)) * 0.5 - g) * w;
-}
+// distance level-of-detail wrapper (LOD now lives inside fbm2/ridged2 via the footprint fw)
+fn groundYLOD(p : vec2<f32>, fw : f32) -> f32 { return terrainH(p, fw); }
 
 // ---------- terrain: conservative heightfield SDF sphere-trace (floor only) ----------
 // step = vertical gap / Lipschitz bound = the largest provably-safe Euclidean step (won't skip the surface)
@@ -401,12 +369,6 @@ fn floorNormalLOD(xz : vec2<f32>, fw : f32) -> vec3<f32> {
   let gx = groundYLOD(xz + vec2<f32>(e, 0.0), fw) - groundYLOD(xz - vec2<f32>(e, 0.0), fw);
   let gz = groundYLOD(xz + vec2<f32>(0.0, e), fw) - groundYLOD(xz - vec2<f32>(0.0, e), fw);
   return normalize(vec3<f32>(-gx, 2.0 * e, -gz));
-}
-fn ceilNormal(xz : vec2<f32>) -> vec3<f32> {
-  let e = 4.0;
-  let gx = ceilY(xz + vec2<f32>(e, 0.0)) - ceilY(xz - vec2<f32>(e, 0.0));
-  let gz = ceilY(xz + vec2<f32>(0.0, e)) - ceilY(xz - vec2<f32>(0.0, e));
-  return normalize(vec3<f32>(gx, -2.0 * e, gz));
 }
 // soft terrain self-shadow: sphere-trace toward the sun; penumbra from how closely rays graze ridges
 fn floorShadow(p : vec3<f32>, ld : vec3<f32>) -> f32 {
@@ -447,28 +409,19 @@ fn shadeTerrain(p : vec3<f32>, id : f32) -> vec3<f32> {
   let dist = length(p - U.camPos.xyz);
   let fw = dist * FWK;
   let detFade = clamp(1.0 - dist * 0.0009, 0.0, 1.0);   // fade micro-detail with distance
-  var n : vec3<f32>;
-  var base : vec3<f32>;
-  if (id > 1.5) {
-    n = ceilNormal(p.xz);
-    let t = clamp((p.y - (YCEIL - CEIL_AMP)) / CEIL_AMP, 0.0, 1.0);
-    base = mix(vec3<f32>(0.141, 0.165, 0.196), vec3<f32>(0.349, 0.380, 0.424), t);   // ceilLo -> ceilHi
-  } else {
-    n = floorNormalLOD(p.xz, fw);
-    let flat = n.y;
-    let t = clamp((p.y - YFLOOR) / GROUND_AMP, 0.0, 1.0);
-    let pc = tpatch(p.xz);
-    var grass = mix(vec3<f32>(0.235, 0.341, 0.133), vec3<f32>(0.510, 0.769, 0.337),
-                    clamp((flat - 0.4) / 0.4, 0.0, 1.0) * clamp(pc + 0.2, 0.0, 1.0));   // grassLo -> grassHi
-    let rock = mix(vec3<f32>(0.26, 0.255, 0.27), vec3<f32>(0.40, 0.37, 0.34), tnoise2(p.xz * 0.03) * 0.5 + 0.5); // varied, darker rock
-    base = mix(grass, rock, clamp((0.6 - flat) / 0.3, 0.0, 1.0));
-    if (t > 0.88) { base = mix(base, vec3<f32>(0.92, 0.95, 0.97), min(1.0, (t - 0.88) / 0.12) * flat * flat); }  // snow only on flat high caps
-    let m = tnoise2(p.xz * 0.05) * 0.10 + 0.95;
-    base = base * m;
-    let lowF = 1.0 - smoothstep(YFLOOR, YFLOOR + GROUND_AMP * 0.7, p.y);
-    let moss = mix(vec3<f32>(0.184, 0.353, 0.133), vec3<f32>(0.404, 0.671, 0.231), 0.5);
-    base = mix(base, moss, smoothstep(0.34, 0.62, tnoise2(p.xz * 0.02) * 0.5 + 0.5) * 0.45 * lowF);
-  }
+  var n = floorNormalLOD(p.xz, fw);
+  let flat = n.y;                                       // 1 = flat ground, -> 0 = steep cliff
+  let alt = p.y - SEA;
+  let pc = tpatch(p.xz);
+  // biome palette: sand shores -> grass plains -> rock slopes -> snow caps
+  let grass = mix(vec3<f32>(0.20, 0.34, 0.13), vec3<f32>(0.45, 0.66, 0.27), clamp(pc + 0.2, 0.0, 1.0));
+  let rock  = mix(vec3<f32>(0.28, 0.27, 0.28), vec3<f32>(0.42, 0.38, 0.34), tnoise2(p.xz * 0.03) * 0.5 + 0.5);
+  var base = mix(grass, rock, clamp((0.62 - flat) / 0.35, 0.0, 1.0));     // steep => rock
+  let snowAmt = smoothstep(540.0, 920.0, alt) * smoothstep(0.5, 0.78, flat);
+  base = mix(base, vec3<f32>(0.92, 0.95, 0.97), snowAmt);                 // snow on high, fairly flat ground
+  let beach = (1.0 - smoothstep(SEA + 1.0, SEA + 14.0, alt)) * clamp(flat, 0.0, 1.0);
+  base = mix(base, vec3<f32>(0.76, 0.70, 0.50), beach);                   // sandy shoreline
+  base = base * (tnoise2(p.xz * 0.05) * 0.10 + 0.95);                     // local mottle
   // break up the plastic look: gentle albedo mottle + subtle micro normal relief
   base = base * (fbm3(p * 0.012) * 0.22 + 0.88);
   let bn = vnoise(p * 0.05);
@@ -483,61 +436,7 @@ fn shadeTerrain(p : vec3<f32>, id : f32) -> vec3<f32> {
   return base * (amb * 0.5 * ao + U.sunCol.xyz * U.sun.w * dif * 0.9 * sh) + base * 0.12 * ao;
 }
 
-// ---------- forcefield DOME = arched vault ceiling (the play-space boundary) ----------
-// vault height over the corridor at world (x,z); seals down to the floor at walls/back
-fn domeCeil(p : vec2<f32>) -> f32 {
-  let nx = clamp(p.x / ARCH_HALF, -1.0, 1.0);
-  let arch = ARCH_EDGE + ARCH_RISE * sqrt(max(0.0, 1.0 - nx * nx));
-  let w = tsmooth(wallAmt(p));                           // wallAmt is pure arithmetic (cheap)
-  if (w <= 0.001) { return arch; }                       // open corridor => skip the costly groundBase seal
-  let seal = groundBase(p) + 60.0;                       // pinch onto the floor at the boundary
-  return arch + (min(arch, seal) - arch) * w;
-}
-// where the view ray pierces the vault -> t, or -1
-fn domeCross(ro : vec3<f32>, rd : vec3<f32>, tmax : f32) -> f32 {
-  var t = 1.0; var prevT = t;
-  let maxI = i32(70.0 * U.res.w);            // smooth analytic vault => far fewer steps needed
-  for (var i = 0; i < maxI; i = i + 1) {
-    let p = ro + rd * t;
-    let g = p.y - domeCeil(p.xz);                        // <0 below the vault, >0 once pierced
-    if (g > 0.0) {
-      var lo = prevT; var hi = t;
-      for (var b = 0; b < 6; b = b + 1) {
-        let mid = (lo + hi) * 0.5;
-        let pm = ro + rd * mid;
-        if ((pm.y - domeCeil(pm.xz)) > 0.0) { hi = mid; } else { lo = mid; }
-      }
-      return hi;
-    }
-    prevT = t;
-    let dt = max(3.0, min((-g) * 0.6, t * 0.02 + 10.0));
-    t += dt;
-    if (t > tmax) { break; }
-  }
-  return -1.0;
-}
-// glowing lattice on the vault -> rgb glow, .w = line coverage (0 = open sky between the ribs)
-fn forcefield(p : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
-  let nx = clamp(p.x / ARCH_HALF, -1.0, 1.0);
-  let theta = asin(nx);                                  // -PI/2..PI/2 across the arch (even spacing)
-  let ARCN = 11.0;                                       // ribs across the arch
-  let RIB = 240.0;                                       // spacing of rings along the corridor (Z)
-  let u = theta / 3.14159265 * ARCN;
-  let v = p.z / RIB;
-  let du = 0.5 - abs(fract(u) - 0.5);                    // 0 on an along-corridor stringer
-  let dv = 0.5 - abs(fract(v) - 0.5);                    // 0 on an across-arch ring
-  let lwf = 0.05;
-  var wire = max(1.0 - smoothstep(0.0, lwf, du), 1.0 - smoothstep(0.0, lwf, dv));
-  let e = 4.0;
-  let gx = domeCeil(p.xz + vec2<f32>(e, 0.0)) - domeCeil(p.xz - vec2<f32>(e, 0.0));
-  let gz = domeCeil(p.xz + vec2<f32>(0.0, e)) - domeCeil(p.xz - vec2<f32>(0.0, e));
-  let n = normalize(vec3<f32>(gx, -2.0 * e, gz));
-  let fres = pow(1.0 - abs(dot(n, rd)), 2.0);            // grazing rim glows brighter
-  let pulse = 0.65 + 0.35 * sin(U.res.z * 2.0 + theta * 5.0 + p.z * 0.01);
-  let col = vec3<f32>(0.35, 0.95, 1.0) * pulse * (0.55 + fres * 0.9);
-  let edgeFade = smoothstep(1.0, 0.84, abs(nx));         // dissolve where the vault meets the walls
-  return vec4<f32>(col, wire * edgeFade);
-}
+// (corridor walls + forcefield dome removed — this is an open world now)
 
 // ---------- water ----------
 fn waterNormal(xz : vec2<f32>) -> vec3<f32> {
@@ -560,7 +459,7 @@ fn shadeWater(ro : vec3<f32>, rd : vec3<f32>, tw : f32) -> vec3<f32> {
     let slab = cloudSlabRange(p, r);
     if (slab.y > slab.x) {
       let cc = marchClouds(p, r, slab.x, slab.y, true, p.xz * 0.5);
-      refl = cc.xyz + refl * cc.w;
+      refl = cc.col + refl * cc.T;
     }
   }
   let deep = vec3<f32>(0.047, 0.227, 0.353);        // 0x0c3a5a
@@ -589,7 +488,8 @@ fn aces(x : vec3<f32>) -> vec3<f32> {   // filmic tonemap (Narkowicz) — more c
 @fragment
 fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let aspect = U.res.x / U.res.y;
-  let uv = vec2<f32>(in.uv.x * aspect, in.uv.y);
+  let cuv = in.uv + U.p6.xy;                      // sub-pixel jitter for temporal supersampling
+  let uv = vec2<f32>(cuv.x * aspect, cuv.y);
   let ro = U.camPos.xyz;
   let rd = normalize(U.camFwd.xyz * 1.5 + U.camRight.xyz * uv.x + U.camUp.xyz * uv.y);
   let FAR = 9000.0;
@@ -616,22 +516,27 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   // aerial perspective: distant terrain fades into the sky => depth + low-contrast silhouettes (hides tip shimmer)
   if (hitSolid) {
     let aerial = clamp(1.0 - exp(-bgT * 0.00045), 0.0, 1.0);
-    let hazeCol = mix(skyColor(rd), U.p5.xyz, U.p5.w);   // sky tint above water; murk tint when submerged
+    let hazeCol = mix(skyBase(rd), U.p5.xyz, U.p5.w);    // sun-less sky tint (so the sun doesn't bleed through land)
     bg = mix(bg, hazeCol, aerial * 0.7);
+    // valley / ground fog: mist pools in the lowlands and over the water, thickening with distance
+    let hy = (ro + rd * bgT).y;
+    let valley = clamp((SEA + 120.0 - hy) / 150.0, 0.0, 1.0) * (1.0 - exp(-bgT * 0.0006));
+    bg = mix(bg, U.p5.xyz, valley * 0.45);
   }
 
-  // FORCEFIELD DOME is invisible now — the boundary is still enforced by collision (JS domeCeil);
-  //   the glowing wireframe is no longer drawn. (domeCross/forcefield kept for easy re-enable.)
+  // (open world: no ceiling boundary; sky is open above the terrain)
 
   // ---- cloud-gas over the backdrop ----
   var outc = bg;
+  var outDepth = bgT;
   if (U.p4.w > 0.5) {
     let slab = cloudSlabRange(ro, rd);
     let t0 = slab.x;
     let t1 = min(slab.y, bgT);
     if (t1 > t0) {
       let cc = marchClouds(ro, rd, t0, t1, false, in.pos.xy);
-      outc = cc.xyz + bg * cc.w;
+      outc = cc.col + bg * cc.T;
+      outDepth = mix(bgT, cc.depth, 1.0 - cc.T);   // reproject thick cloud on its own distance, thin cloud on the backdrop
     }
   }
 
@@ -639,7 +544,7 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
   let lum = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
   col = mix(vec3<f32>(lum), col, 1.18);                 // gentle saturation lift
   col = pow(col, vec3<f32>(1.0 / 2.2));                 // gamma encode
-  return vec4<f32>(col, 1.0);
+  return vec4<f32>(col, outDepth);                      // rgb = display colour, a = reprojection depth (cloud-aware)
 }
 </script>
 
@@ -683,6 +588,64 @@ fn fs(in : VSOut) -> @location(0) vec4<f32> {
 }
 </script>
 
+<script type="text/wgsl" id="taa">
+@group(0) @binding(0) var sceneT : texture_2d<f32>;
+@group(0) @binding(1) var histT : texture_2d<f32>;
+@group(0) @binding(2) var smp : sampler;
+struct TaaU {
+  curPos : vec4<f32>, curFwd : vec4<f32>, curRight : vec4<f32>, curUp : vec4<f32>,
+  prevPos : vec4<f32>, prevFwd : vec4<f32>, prevRight : vec4<f32>, prevUp : vec4<f32>,
+  params : vec4<f32>,   // x = aspect, y = alpha, z = focal (1.5), w unused
+};
+@group(0) @binding(3) var<uniform> tu : TaaU;
+struct VSOut { @builtin(position) pos : vec4<f32>, @location(0) uv : vec2<f32> };
+@vertex
+fn vs(@builtin(vertex_index) vid : u32) -> VSOut {
+  var p = array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0), vec2<f32>(3.0,-1.0), vec2<f32>(-1.0,3.0));
+  var o : VSOut; o.pos = vec4<f32>(p[vid], 0.0, 1.0); o.uv = p[vid]; return o;
+}
+// Reprojected temporal accumulation. Reconstruct this pixel's world point from depth, project it into
+//   the PREVIOUS camera to fetch the matching history sample, then clamp that history to the current
+//   3x3 neighbourhood (handles disocclusion). Aligned accumulation super-samples the silhouettes => no
+//   tip shimmer while moving. Jitter (applied in the scene pass) gives the sub-pixel samples to average.
+@fragment
+fn fs(in : VSOut) -> @location(0) vec4<f32> {
+  let dims = vec2<f32>(textureDimensions(sceneT));
+  let rcp = 1.0 / dims;
+  let uv = in.pos.xy * rcp;
+  let texel = textureSampleLevel(sceneT, smp, uv, 0.0);
+  let cur = texel.rgb;
+  let depth = texel.a;
+  var mn = cur; var mx = cur;
+  for (var dy = -1; dy <= 1; dy = dy + 1) {
+    for (var dx = -1; dx <= 1; dx = dx + 1) {
+      let c = textureSampleLevel(sceneT, smp, uv + vec2<f32>(f32(dx), f32(dy)) * rcp, 0.0).rgb;
+      mn = min(mn, c); mx = max(mx, c);
+    }
+  }
+  let aspect = tu.params.x; let focal = tu.params.z;
+  // current pixel ray (clip space, y up — matches the scene pass)
+  let clip = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+  let rd = normalize(tu.curFwd.xyz * focal + tu.curRight.xyz * (clip.x * aspect) + tu.curUp.xyz * clip.y);
+  let P = tu.curPos.xyz + rd * depth;
+  // project P into the previous camera
+  let v = P - tu.prevPos.xyz;
+  let zc = dot(v, tu.prevFwd.xyz);
+  var a = tu.params.y;
+  if (zc > 0.0001) {
+    let pclipx = focal * dot(v, tu.prevRight.xyz) / (zc * aspect);
+    let pclipy = focal * dot(v, tu.prevUp.xyz) / zc;
+    let puv = vec2<f32>(pclipx * 0.5 + 0.5, (1.0 - pclipy) * 0.5);
+    if (puv.x >= 0.0 && puv.x <= 1.0 && puv.y >= 0.0 && puv.y <= 1.0) {
+      let h = textureSampleLevel(histT, smp, puv, 0.0).rgb;
+      let histC = clamp(h, mn, mx);
+      return vec4<f32>(mix(cur, histC, a), 1.0);
+    }
+  }
+  return vec4<f32>(cur, 1.0);   // offscreen / behind camera (disocclusion) => use the current frame
+}
+</script>
+
 <script>
 const cv = document.getElementById('c');
 const errEl = document.getElementById('err');
@@ -699,17 +662,19 @@ ids.forEach(id=>{ el[id]=document.getElementById(id);
 });
 const expOn=document.getElementById('expOn'), lnOn=document.getElementById('lnOn');
 const terrainOn=document.getElementById('terrainOn'), waterOn=document.getElementById('waterOn'), cloudOn=document.getElementById('cloudOn');
+const taaChk=document.getElementById('taaOn');
+let frameCount=0;
+function halton(i,b){let f=1,r=0;while(i>0){f/=b;r+=f*(i%b);i=Math.floor(i/b);}return r;}
 
 const defaults={tod:16.24,weather:0.34,wind:0.6,god:2.5,kNoise:2.18,expGain:0.01,lnGain:0.01,
-  fill:2.15,alt:429,thick:453,covscale:0.59,detail:4.99,iso:0.13,dens:1.35,speed:1400,quality:1.4,res:1.0};
+  fill:2.15,alt:1600,thick:650,covscale:0.59,detail:4.99,iso:0.13,dens:1.35,speed:1400,quality:1.4,res:1.0};
 document.getElementById('reset').onclick=()=>{ for(const k in defaults){ el[k].value=defaults[k]; el[k].dispatchEvent(new Event('input')); }
-  expOn.checked=lnOn.checked=terrainOn.checked=waterOn.checked=cloudOn.checked=true; };
+  expOn.checked=lnOn.checked=terrainOn.checked=waterOn.checked=cloudOn.checked=taaChk.checked=true; };
 
 // ---------------- caverns terrain (ported 1:1 for camera start + collision) ----------------
 const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
-const YFLOOR=-450, GROUND_AMP=460, YCEIL=780, CEIL_AMP=440, WL=-300;
-const T_BASE_FREQ=1/300, T_WARP_FREQ=1/660, T_WARP=80, T_EXPO=1.75;
-const CORRIDOR_HALF=1600, WALLW=420, BACKW=210;
+const SEA=0, WL=SEA;
+function smoothstep(e0,e1,x){ const t=clamp((x-e0)/(e1-e0),0,1); return t*t*(3-2*t); }
 function thash2(x,z){ const n=Math.sin(x*127.1+z*311.7)*43758.5453; return n-Math.floor(n); }
 function tnoise2(x,z){
   const xi=Math.floor(x), zi=Math.floor(z), xf=x-xi, zf=z-zi;
@@ -718,29 +683,23 @@ function tnoise2(x,z){
   const ab=a+(b-a)*u, cd=c+(d-c)*u;
   return (ab+(cd-ab)*v)*2-1;
 }
-function tridged(x,z,seed){
-  let sum=0, amp=1, freq=T_BASE_FREQ, prev=1, norm=0;
-  for(let o=0;o<5;o++){ const n=tnoise2(x*freq+seed*19.3, z*freq+seed*7.1); let r=1-Math.abs(n); r*=r; sum+=r*amp*prev; prev=r; norm+=amp; freq*=2; amp*=0.5; }
-  return Math.pow(sum/norm, T_EXPO);
+function fbm2(x,z,baseFreq,oct){ let s=0,a=0.5,f=baseFreq; for(let i=0;i<oct;i++){ s+=a*tnoise2(x*f,z*f); f*=2; a*=0.5; } return s; }
+function ridged2(x,z,baseFreq,oct){ let s=0,a=0.5,f=baseFreq,prev=1; for(let i=0;i<oct;i++){ let r=1-Math.abs(tnoise2(x*f,z*f)); r*=r; s+=a*r*prev; prev=r; f*=2; a*=0.5; } return s; }
+// endless biome terrain height (mirrors the WGSL terrainH at full detail, for collision + camera)
+function terrainH(x,z){
+  const cont=fbm2(x,z,1/5200,4)*300+40;
+  const mt=clamp(fbm2(x+1000,z-2000,1/3000,3)*0.7+0.45,0,1);
+  const m=smoothstep(0.45,0.75,mt);
+  const hills=fbm2(x,z,1/520,5)*70;
+  const mtn=ridged2(x+500,z+800,1/900,5)*1000;
+  let h=cont+(hills+(hills*0.3+mtn-hills)*m);
+  const wx=fbm2(x,z,1/2600,2)*600, wz=fbm2(x+57,z+19,1/2600,2)*600;
+  const meander=fbm2(x+wx,z+wz,1/2100,3);
+  const riverAmt=smoothstep(0.05,0,Math.abs(meander))*(1-m*0.7);
+  h += (Math.min(h,SEA-8)-h)*riverAmt;
+  return h;
 }
-function groundBase(x,z){
-  const wx=x+T_WARP*tnoise2(x*T_WARP_FREQ, z*T_WARP_FREQ);
-  const wz=z+T_WARP*tnoise2(x*T_WARP_FREQ+31.7, z*T_WARP_FREQ+17.3);
-  const detail=tnoise2(x*0.05,z*0.05)*7+tnoise2(x*0.12,z*0.12)*3;
-  return YFLOOR+GROUND_AMP*tridged(wx,wz,1.7)+detail;
-}
-function ceilBase(x,z){
-  const ax=x+4000, az=z-4000;
-  const wx=ax+T_WARP*tnoise2(ax*T_WARP_FREQ, az*T_WARP_FREQ);
-  const wz=az+T_WARP*tnoise2(ax*T_WARP_FREQ+31.7, az*T_WARP_FREQ+17.3);
-  return YCEIL-CEIL_AMP*tridged(wx,wz,5.9);
-}
-function wallAmt(x,z){ const side=(Math.abs(x)-CORRIDOR_HALF)/WALLW, back=(z-30)/BACKW; return clamp(Math.max(side,back),0,1); }
-const tsmooth=w=>w*w*(3-2*w);
-function groundY(x,z){ const w=tsmooth(wallAmt(x,z)), g=groundBase(x,z); if(w<=0)return g; return g+((g+ceilBase(x,z))*0.5-g)*w; }
-function ceilY(x,z){ const w=tsmooth(wallAmt(x,z)), c=ceilBase(x,z); if(w<=0)return c; return c+((groundBase(x,z)+c)*0.5-c)*w; }
-const ARCH_EDGE=150, ARCH_RISE=560, ARCH_HALF=1600;
-function domeCeil(x,z){ const nx=clamp(x/ARCH_HALF,-1,1); const arch=ARCH_EDGE+ARCH_RISE*Math.sqrt(Math.max(0,1-nx*nx)); const w=tsmooth(wallAmt(x,z)); const seal=groundBase(x,z)+60; return arch+(Math.min(arch,seal)-arch)*w; }
+function groundY(x,z){ return terrainH(x,z); }
 
 // ---------------- time-of-day -> sun + palette ----------------
 function lerp(a,b,t){return a+(b-a)*t;}
@@ -764,7 +723,7 @@ function daystate(tod, weather){
 
 // ---------------- flycam (caverns-style FPS, with collision) ----------------
 const cam = { pos:[0, 0, -150], yaw:0, pitch:0, speed:0 };
-function resetCam(){ cam.pos=[0, groundY(0,-150)+150, -150]; cam.yaw=0; cam.pitch=0; cam.speed=0; }
+function resetCam(){ cam.pos=[0, Math.max(groundY(0,0)+140, SEA+380), 0]; cam.yaw=0; cam.pitch=-0.05; cam.speed=0; }
 resetCam();
 document.getElementById('resetCam').onclick=resetCam;
 
@@ -817,12 +776,10 @@ function updateCamera(dt){
   const px=cam.pos[0], pz=cam.pos[2], py=cam.pos[1];
   for(let i=0;i<3;i++) cam.pos[i]+=(basis.fwd[i]*mvF + basis.right[i]*mvR)*SPEED*dt;
   cam.pos[1]+=mvU*SPEED*dt;
-  // collision: floor blocks below, the forcefield vault caps you above (same as the old ceiling)
-  const M=34;
-  let fl=groundY(cam.pos[0],cam.pos[2])+M;
-  let ce=domeCeil(cam.pos[0],cam.pos[2])-M;
-  if(ce-fl<48){ cam.pos[0]=px; cam.pos[2]=pz; fl=groundY(px,pz)+M; ce=domeCeil(px,pz)-M; }  // pinched (wall/back) => undo the move
-  cam.pos[1]=Math.max(fl,Math.min(ce,cam.pos[1]));
+  // collision: open world => floor blocks below, free sky above
+  const M=20;
+  const fl=groundY(cam.pos[0],cam.pos[2])+M;
+  cam.pos[1]=Math.max(fl, cam.pos[1]);
   const moved=Math.hypot(cam.pos[0]-px, cam.pos[1]-py, cam.pos[2]-pz);
   cam.speed = moved/Math.max(1e-3,dt);
   return basis;
@@ -862,7 +819,15 @@ function updateCamera(dt){
     fail('FXAA shader error:<br><br>'+fxErrs.map(m=>`line ${m.lineNum}: ${m.message}`).join('<br>'));
     return;
   }
-  const SCENE_FMT = 'rgba8unorm';
+  const taaModule = device.createShaderModule({code: document.getElementById('taa').textContent});
+  const taaInfo = await taaModule.getCompilationInfo();
+  const taaErrs = taaInfo.messages.filter(m=>m.type==='error');
+  if(taaErrs.length){
+    console.error('TAA WGSL errors:', taaErrs);
+    fail('TAA shader error:<br><br>'+taaErrs.map(m=>`line ${m.lineNum}: ${m.message}`).join('<br>'));
+    return;
+  }
+  const SCENE_FMT = 'rgba16float';   // HDR + depth in alpha (needed for TAA reprojection)
 
   // uniform buffer: 16 vec4<f32> = 256 bytes
   const FLOATS = 16*4;
@@ -887,9 +852,17 @@ function updateCamera(dt){
     primitive:{topology:'triangle-list'},
   });
   const samp = device.createSampler({magFilter:'linear', minFilter:'linear'});
+  // TAA resolve pipeline (scene + history -> accumulated)
+  const taaPipeline = device.createRenderPipeline({
+    layout:'auto',
+    vertex:{module:taaModule, entryPoint:'vs'},
+    fragment:{module:taaModule, entryPoint:'fs', targets:[{format: SCENE_FMT}]},
+    primitive:{topology:'triangle-list'},
+  });
+  const taaUBuf = device.createBuffer({size:144, usage: GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
 
-  let RENDER_SCALE = +el.res.value;
-  let W=0,H=0, sceneTex=null, sceneView=null, fxBind=null;
+  let RENDER_SCALE = +el.res.value, _prev=null;
+  let W=0,H=0, sceneTex=null, sceneView=null, hist=[null,null], histView=[null,null], hi=0;
   function resize(){
     const dpr = Math.min(window.devicePixelRatio||1, 1.0) * RENDER_SCALE;   // internal render resolution (perf lever)
     W = Math.max(2, Math.floor(innerWidth*dpr));
@@ -898,7 +871,11 @@ function updateCamera(dt){
     if(sceneTex) sceneTex.destroy();
     sceneTex = device.createTexture({size:[W,H], format:SCENE_FMT, usage: GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
     sceneView = sceneTex.createView();
-    fxBind = device.createBindGroup({layout: fxPipeline.getBindGroupLayout(0), entries:[{binding:0,resource:sceneView},{binding:1,resource:samp}]});
+    for(let k=0;k<2;k++){
+      if(hist[k]) hist[k].destroy();
+      hist[k] = device.createTexture({size:[W,H], format:SCENE_FMT, usage: GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+      histView[k] = hist[k].createView();
+    }
   }
   addEventListener('resize',resize); resize();
   el.res.addEventListener('input', ()=>{ RENDER_SCALE = +el.res.value; resize(); });   // live resolution control
@@ -939,26 +916,39 @@ function updateCamera(dt){
     set(expOn.checked?1:0, lnOn.checked?1:0, 0.5, WL);          // p3 (waterLevel in w)
     set(terrainOn.checked?1:0, waterOn.checked?1:0, fogDens, cloudOn.checked?1:0); // p4
     set(fogCol[0],fogCol[1],fogCol[2], sub);                    // p5
+    const jx=(halton(frameCount+1,2)-0.5)*2/W, jy=(halton(frameCount+1,3)-0.5)*2/H; frameCount++;
+    set(taaChk.checked?jx:0, taaChk.checked?jy:0, 0, 0);        // p6 jitter (off when TAA disabled)
 
     device.queue.writeBuffer(uBuf, 0, uData);
 
+    // TAA reprojection uniforms: current + previous camera, so history follows the geometry
+    const alpha = taaChk.checked ? 0.9 : 0.0;
+    const aspect = W/H;
+    const td = new Float32Array(36); let q=0;
+    const put3=(arr)=>{ td[q++]=arr[0]; td[q++]=arr[1]; td[q++]=arr[2]; td[q++]=0; };
+    const pv = _prev || {p:cam.pos, f:basis.fwd, r:basis.right, u:basis.up};
+    put3(cam.pos); put3(basis.fwd); put3(basis.right); put3(basis.up);
+    put3(pv.p); put3(pv.f); put3(pv.r); put3(pv.u);
+    td[q++]=aspect; td[q++]=alpha; td[q++]=1.5; td[q++]=0;
+    device.queue.writeBuffer(taaUBuf, 0, td);
+    _prev = {p:cam.pos.slice(), f:basis.fwd.slice(), r:basis.right.slice(), u:basis.up.slice()};
+
+    const prevV = histView[hi]; hi ^= 1; const curV = histView[hi];
+    const taaBind = device.createBindGroup({layout: taaPipeline.getBindGroupLayout(0), entries:[
+      {binding:0,resource:sceneView},{binding:1,resource:prevV},{binding:2,resource:samp},{binding:3,resource:{buffer:taaUBuf}}]});
+    const fxBind = device.createBindGroup({layout: fxPipeline.getBindGroupLayout(0), entries:[
+      {binding:0,resource:curV},{binding:1,resource:samp}]});
+
     const enc = device.createCommandEncoder();
     // pass 1: render the scene into the offscreen texture
-    const pass = enc.beginRenderPass({
-      colorAttachments:[{view: sceneView, loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}],
-    });
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bind);
-    pass.draw(3);
-    pass.end();
-    // pass 2: FXAA resolve to the swapchain
-    const pass2 = enc.beginRenderPass({
-      colorAttachments:[{view: ctx.getCurrentTexture().createView(), loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}],
-    });
-    pass2.setPipeline(fxPipeline);
-    pass2.setBindGroup(0, fxBind);
-    pass2.draw(3);
-    pass2.end();
+    const pass = enc.beginRenderPass({colorAttachments:[{view: sceneView, loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}]});
+    pass.setPipeline(pipeline); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
+    // pass 2: temporal accumulate (scene + history -> current history slot)
+    const passT = enc.beginRenderPass({colorAttachments:[{view: curV, loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}]});
+    passT.setPipeline(taaPipeline); passT.setBindGroup(0, taaBind); passT.draw(3); passT.end();
+    // pass 3: FXAA resolve to the swapchain
+    const pass2 = enc.beginRenderPass({colorAttachments:[{view: ctx.getCurrentTexture().createView(), loadOp:'clear', clearValue:{r:0,g:0,b:0,a:1}, storeOp:'store'}]});
+    pass2.setPipeline(fxPipeline); pass2.setBindGroup(0, fxBind); pass2.draw(3); pass2.end();
     device.queue.submit([enc.finish()]);
 
     hSpd.textContent = Math.round(cam.speed);

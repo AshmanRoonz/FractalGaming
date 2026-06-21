@@ -1,0 +1,458 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Information-Field Engine: Ships on Water</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #070b12; color: #cdd9e5;
+    font: 14px/1.5 -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 18px; max-width: 1080px; margin: 0 auto;
+  }
+  h1 { font-size: 19px; margin: 0 0 2px; color: #eaf2fb; }
+  .sub { color: #7d8aa0; margin: 0 0 14px; font-size: 13px; }
+  #stage { position: relative; border-radius: 10px; overflow: hidden;
+           box-shadow: 0 6px 30px rgba(0,0,0,.5); background:#06121f; }
+  canvas { display: block; width: 100%; height: 460px; }
+  .vlabel { position: absolute; top: 8px; font-size: 11px; letter-spacing:.04em;
+            text-transform: uppercase; color: #aebfd4; background: rgba(6,12,20,.55);
+            padding: 3px 8px; border-radius: 6px; pointer-events: none; }
+  #labA { left: 8px; } #labB { left: 50%; margin-left: 8px; }
+  #divider { position:absolute; top:0; bottom:0; left:50%; width:1px;
+             background: rgba(170,190,220,.25); pointer-events:none; }
+  #field { position: absolute; top: 34px; left: 8px; display: none;
+           background: rgba(4,8,14,.82); border: 1px solid #1c2a3d; border-radius: 8px;
+           padding: 8px 10px; font: 11px/1.45 ui-monospace, Menlo, monospace;
+           color: #8fe3b0; white-space: pre; pointer-events: none; max-width: 46%; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+              margin: 12px 0; }
+  button { background: #16273c; color: #dce8f6; border: 1px solid #28415f;
+           border-radius: 7px; padding: 7px 13px; font-size: 13px; cursor: pointer; }
+  button:hover { background: #1d3450; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.rec { border-color:#7a3030; color:#ffd7d2; }
+  label.chk { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select:none; }
+  #status { font: 12px/1.4 ui-monospace, monospace; color: #9fb2c9; margin-left: auto; }
+  #status b { color: #eaf2fb; }
+  .match-yes { color: #5fd38a; } .match-no { color: #ff6b6b; }
+  .map { margin-top: 16px; border-top: 1px solid #16222f; padding-top: 12px;
+         font-size: 12.5px; color: #98a6bb; }
+  .map b { color: #cdd9e5; }
+  .map div { margin: 4px 0; }
+  code { color: #ffd98a; }
+  #note { color:#c08a4a; font-size:12px; margin-top:8px; min-height: 16px; }
+</style>
+
+<h1>Information-Field Engine — Ships on Water</h1>
+<p class="sub">A live demo of the spec. One deterministic field, two observers, replays as proof.
+Drive with <code>W</code> / <code>A</code> / <code>D</code> (or arrow keys). Click the canvas first to give it focus.</p>
+
+<div id="stage" tabindex="0">
+  <canvas id="cv"></canvas>
+  <div class="vlabel" id="labA">Observer A · wide</div>
+  <div class="vlabel" id="labB">Observer B · chase cam</div>
+  <div id="divider"></div>
+  <div id="field"></div>
+</div>
+
+<div class="controls">
+  <button id="btnRec" class="rec">● Record</button>
+  <button id="btnReplay" disabled>▶ Stop &amp; Replay</button>
+  <label class="chk"><input type="checkbox" id="cbField"> Show field data</label>
+  <label class="chk"><input type="checkbox" id="cbWake" checked> Show wake (cosmetic)</label>
+  <span id="status"></span>
+</div>
+<div id="note"></div>
+
+<div class="map">
+  <div><b>What each part demonstrates from the spec:</b></div>
+  <div>• <b>Two panels, one world</b> — Evolution runs once; Observation is detached and duplicated. <b>(C2)</b></div>
+  <div>• <b>Record → Replay</b> — the world re-evolves from the input log alone; the state hash matches bit-for-bit. Replays are the canary. <b>(C3)</b></div>
+  <div>• <b>Wake</b> — a cosmetic layer using randomness, excluded from the hash. It looks different on every replay while the ships stay identical. <b>(C4)</b></div>
+  <div>• <b>Show field data</b> — the truth is the integer field on the left; the water you see is only a reconstructed observation of it. <b>(C1, C5)</b></div>
+</div>
+
+<script>
+"use strict";
+// =====================================================================
+// EVOLUTION AXIS — deterministic integer core. No floats in the core.
+// (Verified bit-for-bit in Node before this UI was built.)
+// =====================================================================
+const ANG = 1024;
+const SIN = new Int32Array(ANG), COS = new Int32Array(ANG);
+for (let i = 0; i < ANG; i++) {
+  SIN[i] = Math.round(Math.sin((i/ANG)*2*Math.PI)*4096)|0; // float used at build only
+  COS[i] = Math.round(Math.cos((i/ANG)*2*Math.PI)*4096)|0;
+}
+const TURN=14, THRUST=22, DRAG_SHIFT=6, NSHIP=5;
+const I_THRUST=1, I_LEFT=2, I_RIGHT=4, LIM=8000;
+
+function makeWorld() {
+  const ships=[];
+  for (let s=0;s<NSHIP;s++) ships.push({
+    x:((s*1800)-3600)|0, y:(((s*7)%5)*900-1800)|0, vx:0, vy:0, h:((s*137)%ANG)|0 });
+  return { tick:0, ships };
+}
+function currentAt(x,y,tick){
+  const a=((y>>7)+(tick>>2))&(ANG-1), b=((x>>7)-(tick>>2))&(ANG-1);
+  return { cx: SIN[a]>>5, cy: COS[b]>>5 };
+}
+function aiInput(s,tick){
+  let inp=I_THRUST; const phase=(tick+s*211)%480;
+  if (phase<120) inp|=I_LEFT; else if (phase<200) inp|=I_RIGHT;
+  return inp;
+}
+function step(w, playerInput){
+  const ships=w.ships;
+  for (let s=0;s<ships.length;s++){
+    const sh=ships[s];
+    const inp=(s===0)?playerInput:aiInput(s,w.tick);
+    if (inp&I_LEFT)  sh.h=(sh.h-TURN+ANG)&(ANG-1);
+    if (inp&I_RIGHT) sh.h=(sh.h+TURN)&(ANG-1);
+    if (inp&I_THRUST){ sh.vx+=(COS[sh.h]*THRUST)>>12; sh.vy+=(SIN[sh.h]*THRUST)>>12; }
+    const cur=currentAt(sh.x,sh.y,w.tick);
+    sh.vx+=cur.cx; sh.vy+=cur.cy;
+    sh.vx-=sh.vx>>DRAG_SHIFT; sh.vy-=sh.vy>>DRAG_SHIFT;
+    sh.x+=sh.vx>>4; sh.y+=sh.vy>>4;
+    if (sh.x> LIM) sh.x-=2*LIM; if (sh.x<-LIM) sh.x+=2*LIM;
+    if (sh.y> LIM) sh.y-=2*LIM; if (sh.y<-LIM) sh.y+=2*LIM;
+  }
+  w.tick++;
+}
+function hashWorld(w){
+  let h=0x811c9dc5|0;
+  const mix=v=>{ h=(h^(v|0))>>>0; h=Math.imul(h,0x01000193)>>>0; };
+  mix(w.tick);
+  for (const sh of w.ships){ mix(sh.x); mix(sh.y); mix(sh.vx); mix(sh.vy); mix(sh.h); }
+  return h>>>0;
+}
+
+// =====================================================================
+// COSMETIC LAYER (C4) — floats + randomness, never hashed, free to diverge.
+// =====================================================================
+const MAXWAKE=460;
+let wake=[];
+function spawnWake(w){
+  for (let s=0;s<w.ships.length;s++){
+    const sh=w.ships[s];
+    const speed=Math.abs(sh.vx)+Math.abs(sh.vy);
+    if (speed<400) continue;
+    // stern position, in float display units
+    const ang=(sh.h/ANG)*2*Math.PI;
+    const bx=sh.x - Math.cos(ang)*230, by=sh.y - Math.sin(ang)*230;
+    wake.push({
+      x: bx + (Math.random()-0.5)*120,
+      y: by + (Math.random()-0.5)*120,
+      vx:(Math.random()-0.5)*40, vy:(Math.random()-0.5)*40, life:1 });
+  }
+  for (const p of wake){ p.x+=p.vx; p.y+=p.vy; p.life-=0.018; }
+  wake = wake.filter(p=>p.life>0);
+  if (wake.length>MAXWAKE) wake.splice(0, wake.length-MAXWAKE);
+}
+
+// =====================================================================
+// SIM DRIVER — fixed timestep, record / replay state machine.
+// =====================================================================
+let world = makeWorld();
+let mode = "LIVE";              // LIVE | REC | REPLAY
+let log = [];                   // input per tick
+let recHashes = [];             // authoritative hash chain captured at record time
+let rIdx = 0, matchAll = true;
+const keys = Object.create(null);
+
+function curInput(){
+  let inp=0;
+  if (keys["w"]||keys["arrowup"])   inp|=I_THRUST;
+  if (keys["a"]||keys["arrowleft"]) inp|=I_LEFT;
+  if (keys["d"]||keys["arrowright"])inp|=I_RIGHT;
+  return inp;
+}
+function resetTo(seedMode){
+  world = makeWorld(); wake=[]; rIdx=0;
+  if (seedMode==="REC"){ log=[]; recHashes=[]; matchAll=true; }
+  if (seedMode==="REPLAY"){ matchAll=true; }
+}
+function startRecord(){ resetTo("REC"); mode="REC"; }
+function startReplay(){
+  if (!log.length) return;
+  resetTo("REPLAY"); mode="REPLAY";
+}
+function simTick(){
+  if (mode==="REC"){
+    const inp=curInput(); log.push(inp); step(world, inp); recHashes.push(hashWorld(world));
+  } else if (mode==="REPLAY"){
+    const inp=log[rIdx]; step(world, inp);
+    if (hashWorld(world)!==recHashes[rIdx]) matchAll=false;
+    rIdx++;
+    if (rIdx>=log.length) mode="LIVE";        // hand control back, world continues
+  } else {
+    step(world, curInput());
+  }
+  spawnWake(world);
+}
+
+// =====================================================================
+// OBSERVATION AXIS — WebGPU renderer, with a Canvas2D fallback.
+// Two observers = two cameras over the SAME state, in one pass.
+// =====================================================================
+const canvas = document.getElementById("cv");
+const stage  = document.getElementById("stage");
+let DPR=1, W=0, H=0;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 2);
+  W = Math.floor(canvas.clientWidth*DPR);
+  H = Math.floor(canvas.clientHeight*DPR);
+  canvas.width=W; canvas.height=H;
+  if (gpu) gpu.ctx.configure({device:gpu.device, format:gpu.format, alphaMode:"opaque"});
+}
+function cams(){
+  const p = world.ships[0];
+  return {
+    A: { x:0, y:0, scale:0.000190 },           // wide, fixed
+    B: { x:p.x, y:p.y, scale:0.000560 },        // chase the player
+  };
+}
+// instance buffer payload: ships (type 0/1) then wake (type 2, z=life)
+function buildInstances(){
+  const n = NSHIP + wake.length;
+  const arr = new Float32Array(n*4);
+  for (let s=0;s<NSHIP;s++){
+    const sh=world.ships[s], o=s*4;
+    arr[o]=sh.x; arr[o+1]=sh.y; arr[o+2]=(sh.h/ANG)*2*Math.PI; arr[o+3]=(s===0)?0:1;
+  }
+  for (let i=0;i<wake.length;i++){
+    const p=wake[i], o=(NSHIP+i)*4;
+    arr[o]=p.x; arr[o+1]=p.y; arr[o+2]=p.life; arr[o+3]=2;
+  }
+  return { arr, n };
+}
+
+// ---------- WebGPU ----------
+let gpu=null;
+const WGSL_WATER = `
+struct Cam { c: vec4<f32>, m: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Cam;
+struct VOut { @builtin(position) pos: vec4<f32>, @location(0) world: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) vi:u32) -> VOut {
+  var p = array<vec2<f32>,3>(vec2(-1.,-1.), vec2(3.,-1.), vec2(-1.,3.));
+  var o: VOut; let ndc=p[vi]; o.pos=vec4(ndc,0.,1.);
+  let aspect=cam.m.x; let scale=cam.c.z;
+  o.world = vec2(cam.c.x + ndc.x*aspect/scale, cam.c.y + ndc.y/scale);
+  return o;
+}
+@fragment fn fs(i: VOut) -> @location(0) vec4<f32> {
+  let w=i.world; let t=cam.c.w;
+  let a = sin(w.x*0.0016 + t*0.7) + sin(w.y*0.0013 - t*0.5);
+  let b = sin((w.x+w.y)*0.0011 + t*0.9);
+  let hgt = (a*0.5 + b*0.5);
+  let deep = vec3(0.04,0.16,0.30); let shallow = vec3(0.10,0.42,0.60);
+  var col = mix(deep, shallow, clamp(hgt*0.5+0.5,0.,1.));
+  let foam = smoothstep(0.86,1.0, sin(w.y*0.02 + sin(w.x*0.01+t)*2.0)*0.5+0.5);
+  col += vec3(foam*0.16);
+  return vec4(col,1.0);
+}`;
+const WGSL_SHIP = `
+struct Cam { c: vec4<f32>, m: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<storage, read> ships: array<vec4<f32>>;
+struct SOut { @builtin(position) pos: vec4<f32>, @location(0) col: vec4<f32> };
+@vertex fn vs(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32) -> SOut {
+  let s = ships[ii];
+  var pts = array<vec2<f32>,3>(vec2(0.,0.), vec2(0.,0.), vec2(0.,0.));
+  var col: vec4<f32>; var ang=0.0; var doRot=false;
+  if (s.w < 1.5) {
+    pts = array<vec2<f32>,3>(vec2(360.,0.), vec2(-200.,150.), vec2(-200.,-150.));
+    ang = s.z; doRot = true;
+    col = select(vec4(0.95,0.40,0.32,1.0), vec4(1.0,0.86,0.33,1.0), s.w < 0.5);
+  } else {
+    let life = s.z; let sz = 60.0*(0.4+life);
+    pts = array<vec2<f32>,3>(vec2(0.,sz), vec2(sz*0.87,-sz*0.5), vec2(-sz*0.87,-sz*0.5));
+    col = vec4(0.80,0.93,1.0, life*0.5);
+  }
+  var l = pts[vi];
+  if (doRot) { let c=cos(ang); let sn=sin(ang); l = vec2(l.x*c - l.y*sn, l.x*sn + l.y*c); }
+  let worldP = vec2(s.x, s.y) + l;
+  let aspect=cam.m.x; let scale=cam.c.z;
+  let ndc = vec2((worldP.x-cam.c.x)*scale/aspect, (worldP.y-cam.c.y)*scale);
+  var o: SOut; o.pos=vec4(ndc,0.,1.); o.col=col; return o;
+}
+@fragment fn fs(i: SOut) -> @location(0) vec4<f32> { return i.col; }`;
+
+async function initGPU(){
+  if (!navigator.gpu) return null;
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) return null;
+  const device = await adapter.requestDevice();
+  const ctx = canvas.getContext("webgpu");
+  if (!ctx) return null;
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode:"opaque" });
+
+  const waterMod = device.createShaderModule({ code: WGSL_WATER });
+  const shipMod  = device.createShaderModule({ code: WGSL_SHIP });
+  const waterPipe = device.createRenderPipeline({
+    layout:"auto",
+    vertex:{ module:waterMod, entryPoint:"vs" },
+    fragment:{ module:waterMod, entryPoint:"fs", targets:[{format}] },
+    primitive:{ topology:"triangle-list" } });
+  const blend = { color:{srcFactor:"src-alpha",dstFactor:"one-minus-src-alpha",operation:"add"},
+                  alpha:{srcFactor:"one",dstFactor:"one-minus-src-alpha",operation:"add"} };
+  const shipPipe = device.createRenderPipeline({
+    layout:"auto",
+    vertex:{ module:shipMod, entryPoint:"vs" },
+    fragment:{ module:shipMod, entryPoint:"fs", targets:[{format, blend}] },
+    primitive:{ topology:"triangle-list" } });
+
+  const camA = device.createBuffer({ size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+  const camB = device.createBuffer({ size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+  const shipBuf = device.createBuffer({ size:(NSHIP+MAXWAKE)*16, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+
+  const wBG = c => device.createBindGroup({ layout:waterPipe.getBindGroupLayout(0),
+                  entries:[{binding:0,resource:{buffer:c}}] });
+  const sBG = c => device.createBindGroup({ layout:shipPipe.getBindGroupLayout(0),
+                  entries:[{binding:0,resource:{buffer:c}},{binding:1,resource:{buffer:shipBuf}}] });
+
+  return { device, ctx, format, waterPipe, shipPipe, camA, camB, shipBuf,
+           wBGA:wBG(camA), wBGB:wBG(camB), sBGA:sBG(camA), sBGB:sBG(camB) };
+}
+
+let clock=0;
+function renderGPU(){
+  const { device, ctx } = gpu;
+  const c = cams();
+  const left = Math.floor(W/2), right = W-left;
+  const aspL = left/H, aspR = right/H;
+  device.queue.writeBuffer(gpu.camA, 0, new Float32Array([c.A.x,c.A.y,c.A.scale,clock, aspL,0,0,0]));
+  device.queue.writeBuffer(gpu.camB, 0, new Float32Array([c.B.x,c.B.y,c.B.scale,clock, aspR,0,0,0]));
+  const inst = buildInstances();
+  device.queue.writeBuffer(gpu.shipBuf, 0, inst.arr);
+
+  const view = ctx.getCurrentTexture().createView();
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginRenderPass({ colorAttachments:[{
+    view, loadOp:"clear", storeOp:"store", clearValue:{r:0.02,g:0.06,b:0.12,a:1} }] });
+
+  const drawVP = (x,w,wBG,sBG) => {
+    pass.setViewport(x,0,w,H,0,1);
+    pass.setScissorRect(x,0,w,H);
+    pass.setPipeline(gpu.waterPipe); pass.setBindGroup(0,wBG); pass.draw(3,1);
+    pass.setPipeline(gpu.shipPipe);  pass.setBindGroup(0,sBG); pass.draw(3,inst.n);
+  };
+  drawVP(0,left, gpu.wBGA, gpu.sBGA);
+  drawVP(left,right, gpu.wBGB, gpu.sBGB);
+  pass.end();
+  device.queue.submit([enc.finish()]);
+}
+
+// ---------- Canvas2D fallback ----------
+let ctx2=null;
+function render2D(){
+  if (!ctx2) ctx2 = canvas.getContext("2d");
+  const g=ctx2; const c=cams();
+  const left=Math.floor(W/2);
+  const vps=[{x:0,w:left,cam:c.A},{x:left,w:W-left,cam:c.B}];
+  for (const vp of vps){
+    g.save();
+    g.beginPath(); g.rect(vp.x,0,vp.w,H); g.clip();
+    g.fillStyle="#0b3450"; g.fillRect(vp.x,0,vp.w,H);
+    const scale = vp.cam.scale*0.5*H;            // world units -> pixels (matches GPU)
+    const cx=vp.x+vp.w/2, cy=H/2;
+    const w2s=(wx,wy)=>[cx+(wx-vp.cam.x)*scale, cy-(wy-vp.cam.y)*scale]; // y up
+    // current field arrows (visualising the field itself)
+    g.strokeStyle="rgba(150,200,235,.22)"; g.lineWidth=1;
+    const stepPx=46*DPR;
+    for (let px=vp.x; px<vp.x+vp.w; px+=stepPx) for (let py=0; py<H; py+=stepPx){
+      const wx=vp.cam.x+(px-cx)/scale, wy=vp.cam.y+(py-cy)/scale;
+      const cur=currentAt(Math.round(wx),Math.round(wy),world.tick);
+      const m=Math.hypot(cur.cx,cur.cy)||1; const len=12*DPR;
+      g.beginPath(); g.moveTo(px,py); g.lineTo(px+cur.cx/m*len, py+cur.cy/m*len); g.stroke();
+    }
+    // wake
+    for (const p of wake){ const [sx,sy]=w2s(p.x,p.y);
+      g.fillStyle=`rgba(205,238,255,${p.life*0.5})`;
+      g.beginPath(); g.arc(sx,sy,3*DPR*(0.5+p.life),0,7); g.fill(); }
+    // ships
+    for (let s=0;s<NSHIP;s++){
+      const sh=world.ships[s]; const [sx,sy]=w2s(sh.x,sh.y);
+      const ang=(sh.h/ANG)*2*Math.PI;
+      g.save(); g.translate(sx,sy); g.rotate(-ang);
+      g.fillStyle=(s===0)?"#ffdb54":"#f26651";
+      const L=360*scale, B=150*scale;
+      g.beginPath(); g.moveTo(L,0); g.lineTo(-B*1.33,B); g.lineTo(-B*1.33,-B); g.closePath(); g.fill();
+      g.restore();
+    }
+    g.restore();
+  }
+}
+
+// =====================================================================
+// MAIN LOOP — fixed-timestep evolution, then one observation per frame.
+// =====================================================================
+const STEP_MS = 1000/60;
+let acc=0, last=performance.now();
+const fieldEl=document.getElementById("field");
+const statusEl=document.getElementById("status");
+const noteEl=document.getElementById("note");
+
+function updateField(){
+  if (fieldEl.style.display==="none") return;
+  let t = `tick      ${world.tick}\nhash      0x${hashWorld(world).toString(16).padStart(8,"0")}\nwake(cos) ${wake.length}\n\n`;
+  t += `# authoritative integer field (the real world)\n`;
+  for (let s=0;s<NSHIP;s++){ const sh=world.ships[s];
+    t += `ship${s} ${s===0?"(you)":"     "}  x=${String(sh.x).padStart(6)} y=${String(sh.y).padStart(6)} h=${String(sh.h).padStart(4)} v=(${sh.vx},${sh.vy})\n`; }
+  fieldEl.textContent=t;
+}
+function updateStatus(){
+  let m = mode==="REC" ? "<b style='color:#ff8a8a'>● RECORDING</b>"
+        : mode==="REPLAY" ? "<b style='color:#7fd0ff'>▶ REPLAYING</b>"
+        : "<b>LIVE</b>";
+  let mt = "";
+  if (mode==="REPLAY" || (mode==="LIVE" && recHashes.length && rIdx>0)){
+    mt = matchAll ? " · <span class='match-yes'>hash MATCH ✓</span>"
+                  : " · <span class='match-no'>hash MISMATCH ✗</span>";
+  }
+  statusEl.innerHTML = `${m} · tick ${world.tick} · log ${log.length}${mt}`;
+}
+
+function frame(now){
+  acc += now-last; last=now;
+  let steps=0;
+  while (acc>=STEP_MS && steps<6){ simTick(); acc-=STEP_MS; steps++; }
+  clock += (now-(frame._p||now))/1000; frame._p=now;
+  try {
+    if (gpu) renderGPU(); else render2D();
+  } catch(e){
+    if (gpu){ gpu=null; noteEl.textContent="WebGPU error during render — switched to Canvas2D. ("+e.message+")"; }
+  }
+  updateField(); updateStatus();
+  requestAnimationFrame(frame);
+}
+
+// ---- wiring ----
+document.getElementById("btnRec").onclick = ()=>{
+  startRecord();
+  document.getElementById("btnReplay").disabled=false;
+};
+document.getElementById("btnReplay").onclick = ()=>{
+  if (mode==="REC"){ /* stop recording, then replay */ }
+  startReplay();
+};
+document.getElementById("cbField").onchange = e=>{ fieldEl.style.display = e.target.checked?"block":"none"; };
+let wakeOn=true;
+document.getElementById("cbWake").onchange = e=>{ wakeOn=e.target.checked; if(!wakeOn) wake=[]; };
+const _spawn = spawnWake;
+spawnWake = function(w){ if (wakeOn) _spawn(w); };
+
+addEventListener("keydown", e=>{ keys[e.key.toLowerCase()]=true;
+  if (["arrowup","arrowdown","arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault(); });
+addEventListener("keyup",   e=>{ keys[e.key.toLowerCase()]=false; });
+stage.addEventListener("click", ()=>stage.focus());
+
+(async ()=>{
+  try { gpu = await initGPU(); } catch(e){ gpu=null; }
+  noteEl.textContent = gpu ? "Rendering with WebGPU."
+    : "WebGPU unavailable in this browser — using the Canvas2D fallback (same simulation).";
+  resize(); addEventListener("resize", resize);
+  requestAnimationFrame(frame);
+})();
+</script>

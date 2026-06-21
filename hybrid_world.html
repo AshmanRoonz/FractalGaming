@@ -1,0 +1,487 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hybrid World — rasterized terrain + raymarched clouds</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#0a1018; overflow:hidden;
+    font:13px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; color:#cdd9e5; }
+  #cv { position:fixed; inset:0; width:100%; height:100%; display:block; }
+  #hud { position:fixed; top:12px; left:12px; background:rgba(7,12,20,.55);
+    border:1px solid #1c2a3d; border-radius:9px; padding:10px 12px;
+    font:12px/1.5 ui-monospace, Menlo, monospace; pointer-events:none; max-width:320px; }
+  #hud b { color:#eaf2fb; } #hud .k { color:#7fb0d8; }
+  #hud .hint { color:#8aa0b8; margin-top:7px; font-size:11px; }
+  #lock { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(5,9,15,.55); cursor:pointer; text-align:center; }
+  #lock div { background:rgba(12,20,30,.9); border:1px solid #28415f; border-radius:12px; padding:22px 30px; max-width:460px; }
+  #lock h2 { margin:0 0 8px; font-size:17px; color:#eaf2fb; }
+  #lock p { margin:5px 0; color:#a9bace; }
+  #cross { position:fixed; left:50%; top:50%; width:14px; height:14px; margin:-7px 0 0 -7px; pointer-events:none; opacity:.5; }
+  #cross:before,#cross:after { content:""; position:absolute; background:#dfeaf7; }
+  #cross:before { left:6px; top:0; width:2px; height:14px; }
+  #cross:after { top:6px; left:0; height:2px; width:14px; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; padding:30px; }
+  #err div { background:#1a0f10; border:1px solid #5a2a2a; border-radius:12px; padding:22px 26px; max-width:520px; color:#ffd7d2; }
+</style>
+
+<canvas id="cv"></canvas>
+<div id="cross"></div>
+<div id="hud">
+  <div><b>Hybrid World</b> · raster terrain + raymarched clouds</div>
+  <div><span class="k">alt above ground</span> <span id="alt">—</span></div>
+  <div><span class="k">speed</span> <span id="spd">—</span> · <span id="fps">—</span> fps</div>
+  <div class="hint">WASD move · mouse look · Space up · C/Ctrl down · Shift boost · Esc release</div>
+</div>
+<div id="lock"><div>
+  <h2>Hybrid World</h2>
+  <p>The terrain is real rasterized geometry (fast); the clouds are volumetric, raymarched and composited against the depth buffer so the mountains hide them.</p>
+  <p><b>Click to enter</b> · then WASD + mouse to fly.</p>
+</div></div>
+<div id="err"><div id="errmsg"></div></div>
+
+<script>
+"use strict";
+// =====================================================================
+// CPU terrain field — used only for the camera ground clamp.
+// Bit-identical hash to the WGSL version so render + collision agree.
+// =====================================================================
+const SEED = 1337, SEA = 0.0;
+function hashI(x,z,s){
+  let h=Math.imul(x|0,374761393)+Math.imul(z|0,668265263)+Math.imul(s|0,0x9E3779B1|0);
+  h=Math.imul(h^(h>>>13),1274126177); h^=h>>>16; return (h>>>0)/4294967296;
+}
+function vnoise(x,z,s){
+  const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const a=hashI(xi,zi,s),b=hashI(xi+1,zi,s),c=hashI(xi,zi+1,s),d=hashI(xi+1,zi+1,s);
+  const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);
+  return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v;            // 0..1
+}
+function fbmL(wx,wz,s,oct,scale,q){ let f=0,amp=0.5,fr=1,nm=0; for(let o=0;o<oct;o++){ const wl=1/(scale*fr); const fade=q<=0?1:smoothstep(2.5*q,6*q,wl); f+=amp*vnoise(wx*scale*fr,wz*scale*fr,s+o*101)*fade; nm+=amp; amp*=0.5; fr*=2; } return f/nm; }
+function ridgeL(wx,wz,s,oct,scale,q){ let f=0,amp=0.5,fr=1,prev=1; for(let o=0;o<oct;o++){ const wl=1/(scale*fr); const fade=q<=0?1:smoothstep(2.5*q,6*q,wl); let r=1-Math.abs(vnoise(wx*scale*fr,wz*scale*fr,s+o*101)*2-1); r*=r; f+=amp*r*prev*fade; prev=r; amp*=0.5; fr*=2; } return f; }
+function heightAt(wx,wz,q){ q=q||0;
+  const cont=fbmL(wx,wz,SEED,4,0.00016,q);
+  const mtn0=fbmL(wx,wz,SEED+50,3,0.00035,q);
+  const m=smoothstep(0.45,0.72,mtn0);
+  const hills=(fbmL(wx,wz,SEED+10,5,0.004,q)-0.5)*2*55;
+  const mount=ridgeL(wx,wz,SEED+20,5,0.0012,q)*620;
+  return (cont-0.45)*420 + hills + mount*m;
+}
+function smoothstep(e0,e1,x){ const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0))); return t*t*(3-2*t); }
+
+// =====================================================================
+// Radial LOD mesh — camera-centred polar grid: fine rings near you,
+// quadratically larger rings to the horizon. Circular => no square edge.
+// =====================================================================
+// Geometry clipmap: LEVELS concentric grids, cell size doubling each level. Each vertex carries
+//   (ix, iz, level); the shader places it on that level's world lattice (snapped to the camera) and
+//   morphs the outer ring to the next level. Inner quarter of each outer level is hollow (the finer
+//   level fills it), so there is no overdraw and the levels nest.
+const C0=8.0, GRID=48, LEVELS=7;   // finest cell, quads per side, level count -> ~12k unit reach
+function buildClipmap(){
+  const verts=[], idx=[], half=GRID/2;
+  for(let L=0;L<LEVELS;L++){
+    const vstart=verts.length/3;
+    for(let j=0;j<=GRID;j++) for(let i=0;i<=GRID;i++) verts.push(i-half, j-half, L);
+    const vid=(i,j)=>vstart + j*(GRID+1)+i;
+    for(let j=0;j<GRID;j++) for(let i=0;i<GRID;i++){
+      if(L>0){ const cx=(i+0.5)-half, cz=(j+0.5)-half; if(Math.abs(cx)<half/2 && Math.abs(cz)<half/2) continue; } // hollow centre
+      const a=vid(i,j),b=vid(i+1,j),c=vid(i,j+1),d=vid(i+1,j+1);
+      idx.push(a,c,b, b,c,d);
+    }
+  }
+  return { verts:new Float32Array(verts), idx:new Uint32Array(idx) };
+}
+
+// =====================================================================
+// Math — column-major mat4, zero-to-one depth (WebGPU).
+// =====================================================================
+function perspectiveZO(o,fovy,asp,n,f){ const t=1/Math.tan(fovy/2);
+  o[0]=t/asp;o[1]=0;o[2]=0;o[3]=0; o[4]=0;o[5]=t;o[6]=0;o[7]=0; o[8]=0;o[9]=0;o[11]=-1;
+  o[12]=0;o[13]=0;o[15]=0; const nf=1/(n-f); o[10]=f*nf; o[14]=f*n*nf; return o; }
+function lookAt(o,ex,ey,ez,cx,cy,cz,ux,uy,uz){
+  let z0=ex-cx,z1=ey-cy,z2=ez-cz,l=1/Math.hypot(z0,z1,z2); z0*=l;z1*=l;z2*=l;
+  let x0=uy*z2-uz*z1,x1=uz*z0-ux*z2,x2=ux*z1-uy*z0; l=Math.hypot(x0,x1,x2);
+  if(!l){x0=x1=x2=0;}else{l=1/l;x0*=l;x1*=l;x2*=l;}
+  let y0=z1*x2-z2*x1,y1=z2*x0-z0*x2,y2=z0*x1-z1*x0;
+  o[0]=x0;o[1]=y0;o[2]=z0;o[3]=0; o[4]=x1;o[5]=y1;o[6]=z1;o[7]=0; o[8]=x2;o[9]=y2;o[10]=z2;o[11]=0;
+  o[12]=-(x0*ex+x1*ey+x2*ez); o[13]=-(y0*ex+y1*ey+y2*ez); o[14]=-(z0*ex+z1*ey+z2*ez); o[15]=1; return o; }
+function mul(o,a,b){ for(let c=0;c<4;c++){ const b0=b[c*4],b1=b[c*4+1],b2=b[c*4+2],b3=b[c*4+3];
+  o[c*4]=a[0]*b0+a[4]*b1+a[8]*b2+a[12]*b3; o[c*4+1]=a[1]*b0+a[5]*b1+a[9]*b2+a[13]*b3;
+  o[c*4+2]=a[2]*b0+a[6]*b1+a[10]*b2+a[14]*b3; o[c*4+3]=a[3]*b0+a[7]*b1+a[11]*b2+a[15]*b3; } return o; }
+function invert(o,a){ const a00=a[0],a01=a[1],a02=a[2],a03=a[3],a10=a[4],a11=a[5],a12=a[6],a13=a[7],
+  a20=a[8],a21=a[9],a22=a[10],a23=a[11],a30=a[12],a31=a[13],a32=a[14],a33=a[15];
+  const b00=a00*a11-a01*a10,b01=a00*a12-a02*a10,b02=a00*a13-a03*a10,b03=a01*a12-a02*a11,
+  b04=a01*a13-a03*a11,b05=a02*a13-a03*a12,b06=a20*a31-a21*a30,b07=a20*a32-a22*a30,
+  b08=a20*a33-a23*a30,b09=a21*a32-a22*a31,b10=a21*a33-a23*a31,b11=a22*a33-a23*a32;
+  let det=b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06; if(!det)return o; det=1/det;
+  o[0]=(a11*b11-a12*b10+a13*b09)*det; o[1]=(a02*b10-a01*b11-a03*b09)*det;
+  o[2]=(a31*b05-a32*b04+a33*b03)*det; o[3]=(a22*b04-a21*b05-a23*b03)*det;
+  o[4]=(a12*b08-a10*b11-a13*b07)*det; o[5]=(a00*b11-a02*b08+a03*b07)*det;
+  o[6]=(a32*b02-a30*b05-a33*b01)*det; o[7]=(a20*b05-a22*b02+a23*b01)*det;
+  o[8]=(a10*b10-a11*b08+a13*b06)*det; o[9]=(a01*b08-a00*b10-a03*b06)*det;
+  o[10]=(a30*b04-a31*b02+a33*b00)*det; o[11]=(a21*b02-a20*b04-a23*b00)*det;
+  o[12]=(a11*b07-a10*b09-a12*b06)*det; o[13]=(a00*b09-a01*b07+a02*b06)*det;
+  o[14]=(a31*b01-a30*b03-a32*b00)*det; o[15]=(a20*b03-a21*b01+a22*b00)*det; return o; }
+
+const cam={ x:0, y:300, z:0, yaw:0, pitch:-0.12 };
+const keys=Object.create(null); let locked=false;
+
+// =====================================================================
+// WGSL — shared uniform + terrain field (bit-identical hash to CPU)
+// =====================================================================
+const UNI=`
+struct U {
+  vp:mat4x4<f32>, invVP:mat4x4<f32>,
+  camPos:vec4<f32>,    // xyz, w=time
+  sun:vec4<f32>,       // xyz dir, w=sun intensity
+  skyTop:vec4<f32>, skyHor:vec4<f32>, sunCol:vec4<f32>,
+  cloud0:vec4<f32>,    // altitude, thickness, coverage, density
+  cloud1:vec4<f32>,    // covScale, detailScale, godray, windPhase
+  fogp:vec4<f32>       // near, far, sea, _
+};
+@group(0) @binding(0) var<uniform> u:U;`;
+
+const FIELD=`
+fn hashI(xi:i32, zi:i32, s:i32)->f32 {
+  var h:u32 = u32(xi)*374761393u + u32(zi)*668265263u + u32(s)*2654435761u;
+  h = (h ^ (h>>13u)) * 1274126177u; h = h ^ (h>>16u);
+  return f32(h)/4294967296.0;
+}
+fn vn(x:f32, z:f32, s:i32)->f32 {
+  let xi=i32(floor(x)); let zi=i32(floor(z));
+  let xf=x-floor(x); let zf=z-floor(z);
+  let a=hashI(xi,zi,s); let b=hashI(xi+1,zi,s); let c=hashI(xi,zi+1,s); let d=hashI(xi+1,zi+1,s);
+  let u2=xf*xf*(3.0-2.0*xf); let v2=zf*zf*(3.0-2.0*zf);
+  return a+(b-a)*u2+(c-a)*v2+(a-b-c+d)*u2*v2;
+}
+// fBm / ridged with cell-based LOD: octaves whose world wavelength is finer than the vertex's
+//   snap cell q are faded out, so the height is band-limited to the mesh sampling rate (no peak aliasing).
+fn fbmL(wx:f32, wz:f32, s:i32, oct:i32, scale:f32, q:f32)->f32 {
+  var f=0.0; var amp=0.5; var fr=1.0; var nm=0.0;
+  for(var o=0;o<oct;o++){
+    let wl=1.0/(scale*fr);
+    let fade=select(smoothstep(2.5*q,6.0*q,wl), 1.0, q<=0.0);
+    f+=amp*vn(wx*scale*fr, wz*scale*fr, s+o*101)*fade; nm+=amp; amp=amp*0.5; fr=fr*2.0;
+  }
+  return f/nm;
+}
+fn ridgeL(wx:f32, wz:f32, s:i32, oct:i32, scale:f32, q:f32)->f32 {
+  var f=0.0; var amp=0.5; var fr=1.0; var prev=1.0;
+  for(var o=0;o<oct;o++){
+    let wl=1.0/(scale*fr);
+    let fade=select(smoothstep(2.5*q,6.0*q,wl), 1.0, q<=0.0);
+    var r=1.0-abs(vn(wx*scale*fr, wz*scale*fr, s+o*101)*2.0-1.0); r=r*r;
+    f+=amp*r*prev*fade; prev=r; amp=amp*0.5; fr=fr*2.0;
+  }
+  return f;
+}
+const SEED:i32 = 1337;
+fn heightAt(wx:f32, wz:f32, q:f32)->f32 {
+  let cont=fbmL(wx,wz,SEED,4,0.00016,q);
+  let mtn0=fbmL(wx,wz,SEED+50,3,0.00035,q);
+  let m=smoothstep(0.45,0.72,mtn0);
+  let hills=(fbmL(wx,wz,SEED+10,5,0.004,q)-0.5)*2.0*55.0;
+  let mount=ridgeL(wx,wz,SEED+20,5,0.0012,q)*620.0;
+  return (cont-0.45)*420.0 + hills + mount*m;
+}`;
+
+// ---- SKY (fullscreen) ----
+const SKY=UNI+`
+struct O{ @builtin(position) pos:vec4<f32>, @location(0) ndc:vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) vi:u32)->O{
+  var p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
+  var o:O; o.pos=vec4(p[vi],0.,1.); o.ndc=p[vi]; return o; }
+fn skyCol(dir:vec3<f32>)->vec3<f32>{
+  let up=clamp(dir.y*0.5+0.5,0.,1.);
+  var col=mix(u.skyHor.xyz,u.skyTop.xyz,pow(up,0.8));
+  let sd=clamp(dot(dir,normalize(u.sun.xyz)),0.,1.);
+  col+=u.sunCol.xyz*pow(sd,520.0)*1.6;
+  col+=u.sunCol.xyz*pow(sd,14.0)*0.18;
+  return col; }
+@fragment fn fs(i:O)->@location(0) vec4<f32>{
+  let far=u.invVP*vec4(i.ndc,1.0,1.0);
+  let dir=normalize(far.xyz/far.w - u.camPos.xyz);
+  return vec4(skyCol(dir),1.0); }`;
+
+// ---- TERRAIN (displaced radial mesh) ----
+const TERR=UNI+FIELD+`
+struct O{ @builtin(position) pos:vec4<f32>, @location(0) world:vec3<f32>, @location(1) nrm:vec3<f32> };
+const C0:f32=8.0; const GRIDF:f32=48.0;
+@vertex fn vs(@location(0) g:vec3<f32>)->O{
+  // CDLOD geometry clipmap: vertex g=(ix,iz,level). Place on this level's world lattice, snapped to
+  //   the camera in 2*cell steps so the lattice is fixed in world space (no swimming), then morph the
+  //   outer ring toward the next coarser level so the LOD transition is seamless.
+  let L=g.z; let cL=C0*exp2(L); let snapC=cL*2.0;
+  let ox=floor(u.camPos.x/snapC)*snapC; let oz=floor(u.camPos.z/snapC)*snapC;
+  var wx=ox+g.x*cL; var wz=oz+g.y*cL;
+  let dist=length(vec2(wx,wz)-u.camPos.xz);
+  let r1=(GRIDF*0.5)*cL; let ms=r1*0.66;
+  let mK=clamp((dist-ms)/(r1-ms),0.0,1.0);                 // 0 inside the level, ->1 at its outer edge
+  let oddx=g.x - floor(g.x*0.5)*2.0; let oddz=g.y - floor(g.y*0.5)*2.0;   // 0/1 = odd grid line
+  wx-=oddx*cL*mK; wz-=oddz*cL*mK;                          // collapse odd lines onto the coarser grid
+  let q=cL*(1.0+mK);                                       // LOD footprint -> 2*cL at the boundary (matches next level)
+  let h=heightAt(wx,wz,q);
+  let d=max(0.6, q);
+  let hl=heightAt(wx-d,wz,q); let hr=heightAt(wx+d,wz,q);
+  let hd=heightAt(wx,wz-d,q); let hu=heightAt(wx,wz+d,q);
+  let n=normalize(vec3((hl-hr)/(2.0*d), 1.0, (hd-hu)/(2.0*d)));
+  let world=vec3(wx,h,wz);
+  var o:O; o.pos=u.vp*vec4(world,1.0); o.world=world; o.nrm=n; return o; }
+@fragment fn fs(i:O)->@location(0) vec4<f32>{
+  let n=normalize(i.nrm); let sun=normalize(u.sun.xyz);
+  let diff=clamp(dot(n,sun),0.,1.); let sea=u.fogp.z; let h=i.world.y;
+  let slope=1.0-clamp(n.y,0.,1.);
+  let sand=vec3(0.76,0.70,0.50); let grass=vec3(0.22,0.44,0.16);
+  let rock=vec3(0.34,0.32,0.30); let snow=vec3(0.92,0.94,0.97);
+  var col=mix(sand,grass,smoothstep(sea+1.0,sea+22.0,h));
+  col=mix(col,rock,smoothstep(260.0,440.0,h));
+  let snowAmt=smoothstep(520.0,760.0,h)*smoothstep(0.6,0.35,slope);
+  col=mix(col,snow,snowAmt);
+  col=mix(col,rock,smoothstep(0.40,0.7,slope));                 // cliffs are rock
+  col=mix(col*vec3(0.5,0.58,0.66),col,smoothstep(sea-12.0,sea,h)); // wet darkening near shore
+  let amb=mix(u.skyHor.xyz,u.skyTop.xyz,clamp(n.y*0.5+0.5,0.,1.))*0.45;
+  var lit=col*(amb + u.sunCol.xyz*u.sun.w*diff*0.95);
+  let dist=length(i.world-u.camPos.xyz);
+  let fog=clamp((dist-u.fogp.x)/(u.fogp.y-u.fogp.x),0.,1.);
+  lit=mix(lit, u.skyHor.xyz, fog);
+  return vec4(lit,1.0); }`;
+
+// ---- WATER (camera-centred quad at sea level) ----
+const WAT=UNI+`
+struct O{ @builtin(position) pos:vec4<f32>, @location(0) world:vec3<f32> };
+@vertex fn vs(@builtin(vertex_index) vi:u32)->O{
+  var q=array<vec2<f32>,6>(vec2(-1.,-1.),vec2(1.,-1.),vec2(1.,1.),vec2(-1.,-1.),vec2(1.,1.),vec2(-1.,1.));
+  let e=9000.0; let wxz=u.camPos.xz+q[vi]*e;
+  let p=vec3(wxz.x,u.fogp.z,wxz.y);
+  var o:O; o.pos=u.vp*vec4(p,1.); o.world=p; return o; }
+@fragment fn fs(i:O)->@location(0) vec4<f32>{
+  let t=u.camPos.w; let w=i.world.xz;
+  let nx=sin(w.x*0.06+t*1.2)*0.05+sin((w.x+w.y)*0.04-t)*0.04;
+  let nz=cos(w.y*0.05-t*1.0)*0.05+sin((w.x-w.y)*0.05+t*0.8)*0.04;
+  let n=normalize(vec3(nx,1.,nz));
+  let view=normalize(u.camPos.xyz-i.world); let sun=normalize(u.sun.xyz);
+  let spec=pow(clamp(dot(view,reflect(-sun,n)),0.,1.),80.0);
+  let fres=pow(1.0-clamp(dot(view,n),0.,1.),3.0);
+  var col=mix(vec3(0.02,0.16,0.27),vec3(0.09,0.36,0.48),clamp(view.y,0.,1.));
+  col=mix(col,u.skyHor.xyz,fres*0.6); col+=u.sunCol.xyz*spec*0.9;
+  let dist=length(i.world-u.camPos.xyz);
+  let fog=clamp((dist-u.fogp.x)/(u.fogp.y-u.fogp.x),0.,1.);
+  col=mix(col,u.skyHor.xyz,fog);
+  return vec4(col,clamp(0.6+fres*0.35,0.,0.94)); }`;
+
+// ---- CLOUD COMPOSITE (raymarch volumetric eml clouds, occluded by scene depth) ----
+const CLOUD=UNI+`
+@group(0) @binding(1) var sceneT:texture_2d<f32>;
+@group(0) @binding(2) var depthT:texture_depth_2d;
+struct O{ @builtin(position) pos:vec4<f32>, @location(0) ndc:vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) vi:u32)->O{
+  var p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
+  var o:O; o.pos=vec4(p[vi],0.,1.); o.ndc=p[vi]; return o; }
+// 3D value noise for the volume
+fn h3(p:vec3<f32>)->f32 { var q=fract(p*0.3183099+vec3(0.1,0.2,0.3)); q*=17.0; return fract(q.x*q.y*q.z*(q.x+q.y+q.z)); }
+fn vn3(x:vec3<f32>)->f32 {
+  let i=floor(x); var f=fract(x); f=f*f*f*(f*(f*6.0-15.0)+10.0);
+  let n000=h3(i); let n100=h3(i+vec3(1.,0.,0.)); let n010=h3(i+vec3(0.,1.,0.)); let n110=h3(i+vec3(1.,1.,0.));
+  let n001=h3(i+vec3(0.,0.,1.)); let n101=h3(i+vec3(1.,0.,1.)); let n011=h3(i+vec3(0.,1.,1.)); let n111=h3(i+vec3(1.,1.,1.));
+  return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y), mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y), f.z); }
+fn fbm3(p:vec3<f32>)->f32 { var s=0.0; var a=0.6; var f=1.0; for(var i=0;i<3;i++){ s+=a*vn3(p*f); f*=2.0; a*=0.5; } return s; }
+fn hgrad(hh:f32)->f32 { let b=smoothstep(0.0,0.18,hh); let t=1.0-smoothstep(0.55,1.0,hh); return clamp(b*t,0.0,1.0); }
+fn cloud(p:vec3<f32>)->f32 {
+  let alt=u.cloud0.x; let thick=u.cloud0.y; let bottom=alt-thick*0.5;
+  let hh=clamp((p.y-bottom)/thick,0.0,1.0);
+  if(hh<=0.0||hh>=1.0){ return 0.0; }
+  let wind=vec3(u.cloud1.w, 0.0, u.cloud1.w*0.35);
+  let nLow=fbm3(p*(u.cloud1.x*0.012)+wind);
+  let cov=smoothstep(0.0,1.0,clamp((nLow-(1.0-u.cloud0.z))/0.42,0.0,1.0));
+  let dd=clamp(cov*hgrad(hh),1e-3,1.0);
+  let n=clamp(fbm3(p*(u.cloud1.y*0.05)+wind*2.0),0.0,1.0);
+  let eml=0.38*(exp(1.7*n)-1.0) + 0.34*(-log(dd));    // e^(k n) carve - L ln(d)
+  var dens=1.6*dd-eml-0.12;
+  return max(dens,0.0); }
+fn skyCol2(dir:vec3<f32>)->vec3<f32>{
+  let up=clamp(dir.y*0.5+0.5,0.,1.);
+  return mix(u.skyHor.xyz,u.skyTop.xyz,pow(up,0.8)); }
+@fragment fn fs(i:O)->@location(0) vec4<f32>{
+  let dim=vec2<f32>(textureDimensions(sceneT));
+  let pix=vec2<i32>(i.pos.xy);
+  let scene=textureLoad(sceneT,pix,0).rgb;
+  let d=textureLoad(depthT,pix,0);
+  // reconstruct world position / scene distance from depth
+  let wp=u.invVP*vec4(i.ndc, d, 1.0);
+  let world=wp.xyz/wp.w;
+  let ro=u.camPos.xyz;
+  let rd=normalize(world-ro);
+  var sceneDist=length(world-ro);
+  if(d>=0.9999){ sceneDist=1e9; }                    // sky => no occluder
+  // cloud slab intersection
+  let alt=u.cloud0.x; let thick=u.cloud0.y;
+  let yb=alt-thick*0.5; let yt=alt+thick*0.5;
+  var t0=0.0; var t1=0.0;
+  if(abs(rd.y)<1e-4){ if(ro.y>yb && ro.y<yt){ t0=0.0; t1=6000.0; } else { return vec4(scene,1.0); } }
+  else { let ta=(yb-ro.y)/rd.y; let tb=(yt-ro.y)/rd.y; t0=max(min(ta,tb),0.0); t1=max(ta,tb); }
+  t1=min(t1, sceneDist); t1=min(t1, 6000.0);
+  if(t1<=t0){ return vec4(scene,1.0); }
+  // march
+  let sun=normalize(u.sun.xyz);
+  let cosT=dot(rd,sun);
+  let g=0.55; let g2=g*g;
+  let phase=(1.0-g2)/(4.0*3.14159*pow(1.0+g2-2.0*g*cosT,1.5));
+  var T=1.0; var col=vec3(0.0);
+  let nearStep=max(thick*0.06, 3.0);
+  let jit=h3(vec3(i.pos.xy, u.camPos.w*60.0));
+  var t=t0+nearStep*jit;
+  for(var s=0;s<120;s++){
+    if(T<0.03 || t>t1){ break; }
+    let p=ro+rd*t;
+    let dt=max(nearStep, t*0.02);
+    let dens=cloud(p)*u.cloud0.w;
+    if(dens>0.003){
+      var ls=0.0; let lstep=thick*0.13;
+      for(var j=1;j<=3;j++){ ls+=cloud(p+sun*(lstep*f32(j)))*u.cloud0.w; }
+      let lightT=exp(-ls*lstep*0.9);
+      let powder=1.0-exp(-dens*2.0);
+      let sunLight=u.sunCol.xyz*u.sun.w*lightT*(0.4+phase*u.cloud1.z)*powder;
+      let amb=mix(u.skyHor.xyz,u.skyTop.xyz,0.6)*0.8;
+      let a=1.0-exp(-dens*dt*0.05);
+      col+=T*a*(sunLight+amb); T*=1.0-a;
+    }
+    t+=dt;
+  }
+  return vec4(col+scene*T, 1.0); }`;
+
+// =====================================================================
+// Boot / render
+// =====================================================================
+const canvas=document.getElementById("cv");
+let device,ctx,format,sceneTex,sceneView,depthTex,depthView,uniBuf,bgScene,bgTerr,bgWat,bgCloud,
+    pipeSky,pipeTerr,pipeWat,pipeCloud,vbuf,ibuf,idxCount;
+let W=1,H=1,DPR=1;
+const uni=new Float32Array(64);   // 16+16+ (8 vec4) = 32 + 32 = 64 floats
+const vp=new Float32Array(16),iv=new Float32Array(16),proj=new Float32Array(16),view=new Float32Array(16);
+const SCENE_FMT="rgba16float", DEPTH_FMT="depth32float";
+
+function fail(m){ const l=document.getElementById("lock"); if(l)l.style.display="none";
+  document.getElementById("err").style.display="flex"; document.getElementById("errmsg").innerHTML=m; }
+function makeTargets(){
+  if(sceneTex) sceneTex.destroy(); if(depthTex) depthTex.destroy();
+  sceneTex=device.createTexture({size:[W,H],format:SCENE_FMT,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+  sceneView=sceneTex.createView();
+  depthTex=device.createTexture({size:[W,H],format:DEPTH_FMT,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+  depthView=depthTex.createView();
+  bgCloud=device.createBindGroup({layout:pipeCloud.getBindGroupLayout(0),
+    entries:[{binding:0,resource:{buffer:uniBuf}},{binding:1,resource:sceneView},{binding:2,resource:depthView}]});
+}
+function resize(){ DPR=Math.min(window.devicePixelRatio||1,1.5);
+  W=Math.max(1,Math.floor(canvas.clientWidth*DPR)); H=Math.max(1,Math.floor(canvas.clientHeight*DPR));
+  canvas.width=W; canvas.height=H; if(device){ ctx.configure({device,format,alphaMode:"opaque"}); makeTargets(); } }
+
+async function init(){
+  if(!navigator.gpu) return fail("This browser has no WebGPU. Open it in Chrome or Edge to explore the world.");
+  const adapter=await navigator.gpu.requestAdapter({powerPreference:"high-performance"}); if(!adapter) return fail("No WebGPU adapter available.");
+  device=await adapter.requestDevice();
+  device.addEventListener("uncapturederror",e=>console.error("WGPU:",e.error.message));
+  ctx=canvas.getContext("webgpu"); format=navigator.gpu.getPreferredCanvasFormat();
+
+  uniBuf=device.createBuffer({size:uni.byteLength,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+  const ds={depthWriteEnabled:true,depthCompare:"less",format:DEPTH_FMT};
+  const dsNo={depthWriteEnabled:false,depthCompare:"less",format:DEPTH_FMT};
+  const dsSky={depthWriteEnabled:false,depthCompare:"always",format:DEPTH_FMT};
+  const blend={color:{srcFactor:"src-alpha",dstFactor:"one-minus-src-alpha",operation:"add"},
+               alpha:{srcFactor:"one",dstFactor:"one-minus-src-alpha",operation:"add"}};
+  const mk=code=>device.createShaderModule({code});
+
+  pipeSky=device.createRenderPipeline({layout:"auto",
+    vertex:{module:mk(SKY),entryPoint:"vs"},
+    fragment:{module:mk(SKY),entryPoint:"fs",targets:[{format:SCENE_FMT}]},
+    primitive:{topology:"triangle-list"},depthStencil:dsSky});
+  pipeTerr=device.createRenderPipeline({layout:"auto",
+    vertex:{module:mk(TERR),entryPoint:"vs",buffers:[{arrayStride:12,attributes:[{shaderLocation:0,offset:0,format:"float32x3"}]}]},
+    fragment:{module:mk(TERR),entryPoint:"fs",targets:[{format:SCENE_FMT}]},
+    primitive:{topology:"triangle-list",cullMode:"none"},depthStencil:ds});
+  pipeWat=device.createRenderPipeline({layout:"auto",
+    vertex:{module:mk(WAT),entryPoint:"vs"},
+    fragment:{module:mk(WAT),entryPoint:"fs",targets:[{format:SCENE_FMT,blend}]},
+    primitive:{topology:"triangle-list"},depthStencil:dsNo});
+  pipeCloud=device.createRenderPipeline({layout:"auto",
+    vertex:{module:mk(CLOUD),entryPoint:"vs"},
+    fragment:{module:mk(CLOUD),entryPoint:"fs",targets:[{format}]},
+    primitive:{topology:"triangle-list"}});
+
+  bgScene=device.createBindGroup({layout:pipeSky.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}}]});
+  bgTerr=device.createBindGroup({layout:pipeTerr.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}}]});
+  bgWat=device.createBindGroup({layout:pipeWat.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}}]});
+
+  const T=buildClipmap();
+  vbuf=device.createBuffer({size:T.verts.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST}); device.queue.writeBuffer(vbuf,0,T.verts);
+  ibuf=device.createBuffer({size:T.idx.byteLength,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST}); device.queue.writeBuffer(ibuf,0,T.idx); idxCount=T.idx.length;
+
+  resize(); addEventListener("resize",resize);
+  // pointer lock + input
+  document.getElementById("lock").addEventListener("click",()=>canvas.requestPointerLock());
+  document.addEventListener("pointerlockchange",()=>{ locked=document.pointerLockElement===canvas;
+    document.getElementById("lock").style.display=locked?"none":"flex"; });
+  addEventListener("mousemove",e=>{ if(!locked)return; cam.yaw-=e.movementX*0.0024; cam.pitch=Math.max(-1.5,Math.min(1.5,cam.pitch-e.movementY*0.0024)); });
+  addEventListener("keydown",e=>{ keys[e.code]=true; if(e.code==="Escape")document.exitPointerLock&&document.exitPointerLock(); });
+  addEventListener("keyup",e=>{ keys[e.code]=false; });
+
+  cam.y=Math.max(heightAt(cam.x,cam.z)+60, SEA+300);
+  requestAnimationFrame(frame);
+}
+
+let last=performance.now(), facc=0, fcnt=0, fps=0;
+const altEl=document.getElementById("alt"), spdEl=document.getElementById("spd"), fpsEl=document.getElementById("fps");
+function frame(now){
+  let dt=(now-last)/1000; last=now; if(dt>0.05)dt=0.05;
+  facc+=dt; if(++fcnt>=15){ fps=Math.round(fcnt/facc); fcnt=0; facc=0; fpsEl.textContent=fps; }
+  // movement
+  const cy=Math.cos(cam.yaw),sy=Math.sin(cam.yaw),cp=Math.cos(cam.pitch),sp=Math.sin(cam.pitch);
+  const fwd=[-sy*cp, sp, -cy*cp];
+  let rx=-fwd[2],rz=fwd[0]; const rl=Math.hypot(rx,rz)||1; rx/=rl; rz/=rl;
+  let mF=0,mR=0,mU=0,boost=keys["ShiftLeft"]||keys["ShiftRight"]?2.6:1;
+  if(keys["KeyW"])mF+=1; if(keys["KeyS"])mF-=1; if(keys["KeyD"])mR+=1; if(keys["KeyA"])mR-=1;
+  if(keys["Space"])mU+=1; if(keys["KeyC"]||keys["ControlLeft"])mU-=1;
+  const SP=320*boost;
+  const px=cam.x,py=cam.y,pz=cam.z;
+  cam.x+=(fwd[0]*mF+rx*mR)*SP*dt; cam.z+=(fwd[2]*mF+rz*mR)*SP*dt; cam.y+=(fwd[1]*mF+mU)*SP*dt;
+  const fl=heightAt(cam.x,cam.z)+12; if(cam.y<fl)cam.y=fl;
+  const spd=Math.round(Math.hypot(cam.x-px,cam.y-py,cam.z-pz)/Math.max(1e-3,dt));
+  altEl.textContent=Math.round(cam.y-heightAt(cam.x,cam.z)); spdEl.textContent=spd;
+
+  // sun / sky / day
+  const sunDir=[0.42,0.62,0.30]; const sl=Math.hypot(...sunDir); sunDir.forEach((v,i)=>sunDir[i]=v/sl);
+  // matrices
+  const asp=W/H;
+  perspectiveZO(proj, 1.15, asp, 1.0, 16000.0);
+  lookAt(view, cam.x,cam.y,cam.z, cam.x+fwd[0],cam.y+fwd[1],cam.z+fwd[2], 0,1,0);
+  mul(vp, proj, view); invert(iv, vp);
+  // pack uniform
+  uni.set(vp,0); uni.set(iv,16);
+  const t=now/1000;
+  uni[32]=cam.x; uni[33]=cam.y; uni[34]=cam.z; uni[35]=t;
+  uni[36]=sunDir[0]; uni[37]=sunDir[1]; uni[38]=sunDir[2]; uni[39]=1.45;
+  uni[40]=0.60; uni[41]=0.74; uni[42]=0.92; uni[43]=0;          // skyTop
+  uni[44]=0.74; uni[45]=0.82; uni[46]=0.90; uni[47]=0;          // skyHor
+  uni[48]=1.0; uni[49]=0.96; uni[50]=0.88; uni[51]=0;           // sunCol
+  uni[52]=1500; uni[53]=650; uni[54]=0.48; uni[55]=1.6;         // cloud0: alt,thick,coverage,density
+  uni[56]=1.0; uni[57]=2.4; uni[58]=1.3; uni[59]=t*0.6*0.6;     // cloud1: covScale,detailScale,godray,windPhase
+  uni[60]=2200; uni[61]=9000; uni[62]=SEA; uni[63]=0;           // fogp: near,far,sea
+  device.queue.writeBuffer(uniBuf,0,uni);
+
+  const enc=device.createCommandEncoder();
+  // pass 1: rasterize scene -> sceneTex (+ depth)
+  const p1=enc.beginRenderPass({
+    colorAttachments:[{view:sceneView,loadOp:"clear",clearValue:{r:0,g:0,b:0,a:1},storeOp:"store"}],
+    depthStencilAttachment:{view:depthView,depthClearValue:1.0,depthLoadOp:"clear",depthStoreOp:"store"}});
+  p1.setPipeline(pipeSky); p1.setBindGroup(0,bgScene); p1.draw(3);
+  p1.setPipeline(pipeTerr); p1.setBindGroup(0,bgTerr); p1.setVertexBuffer(0,vbuf); p1.setIndexBuffer(ibuf,"uint32"); p1.drawIndexed(idxCount);
+  if(cam.y>SEA-50){ p1.setPipeline(pipeWat); p1.setBindGroup(0,bgWat); p1.draw(6); }
+  p1.end();
+  // pass 2: raymarch clouds, composite to swapchain
+  const p2=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:"clear",clearValue:{r:0,g:0,b:0,a:1},storeOp:"store"}]});
+  p2.setPipeline(pipeCloud); p2.setBindGroup(0,bgCloud); p2.draw(3); p2.end();
+  device.queue.submit([enc.finish()]);
+  requestAnimationFrame(frame);
+}
+init();
+</script>
