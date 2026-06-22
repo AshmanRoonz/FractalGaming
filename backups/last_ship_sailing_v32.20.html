@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v32.21</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.21","short_name":"LSS%20v32.21","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v32.20</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.20","short_name":"LSS%20v32.20","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3108,7 +3108,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.21';
+const LSS_BUILD = '32.20';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -7653,17 +7653,6 @@ function handleNetEvent(evt, fromPeerId) {
     const peerLoadout  = peerForWidth && peerForWidth.loadoutKey ? LOADOUTS[peerForWidth.loadoutKey] : null;
     const peerFireRate = peerLoadout && peerLoadout.weapon ? peerLoadout.weapon.fireRate : 0.5;
     const peerWScale   = (peerFireRate <= 0.10) ? 0.55 : 1.0;
-    // (v32.21) Originate the peer's tracer/flash at their real GLB gun muzzle
-    // (gun1/gun2) instead of the networked hull-center origin. Cosmetic ; the
-    // hit-claim path is unaffected. Overrides `from` in place when we have the
-    // shooter's mesh + markers ; otherwise keeps the networked origin.
-    if (peerForWidth && peerForWidth.mesh && typeof shipMuzzleWorld === 'function') {
-      const _pmn = peerForWidth.mesh.userData && peerForWidth.mesh.userData.muzzleNodes;
-      if (_pmn && _pmn.length) {
-        peerForWidth._muzzleShot = (peerForWidth._muzzleShot | 0) + 1;
-        shipMuzzleWorld(peerForWidth.mesh, peerForWidth._muzzleShot, from);
-      }
-    }
     // Dispatch Puncture peer shots through the railgun spiral
     // spawner so the visual matches what the firing player sees. Read
     // the loadout from the broadcast event first (added in v11d) and
@@ -7699,15 +7688,6 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'pellet_burst' && typeof evt.ox === 'number') {
     const origin = new THREE.Vector3(evt.ox, evt.oy, evt.oz);
     const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
-    // (v32.21) Originate the spread burst at the shooter's real GLB gun muzzle.
-    const _pbPeer = net.peers.get(fromPeerId);
-    if (_pbPeer && _pbPeer.mesh && typeof shipMuzzleWorld === 'function') {
-      const _pbmn = _pbPeer.mesh.userData && _pbPeer.mesh.userData.muzzleNodes;
-      if (_pbmn && _pbmn.length) {
-        _pbPeer._muzzleShot = (_pbPeer._muzzleShot | 0) + 1;
-        shipMuzzleWorld(_pbPeer.mesh, _pbPeer._muzzleShot, origin);
-      }
-    }
     spawnPelletBurst(origin, dir, evt.range || 600);
     return;
   }
@@ -10459,18 +10439,6 @@ function spawnNetworkProjectile(data, fromPeerId) {
   // Spawn a visual-only projectile from a network peer's fire event
   if (!data || !data.ox) return;
   const origin = new THREE.Vector3(data.ox, data.oy, data.oz);
-  // (v32.21) Originate remote projectile + its muzzle flash at the shooter's
-  // real GLB gun muzzle (gun1/gun2) instead of the networked hull center.
-  {
-    const _npPeer = net.peers.get(fromPeerId);
-    if (_npPeer && _npPeer.mesh && typeof shipMuzzleWorld === 'function') {
-      const _npmn = _npPeer.mesh.userData && _npPeer.mesh.userData.muzzleNodes;
-      if (_npmn && _npmn.length) {
-        _npPeer._muzzleShot = (_npPeer._muzzleShot | 0) + 1;
-        shipMuzzleWorld(_npPeer.mesh, _npPeer._muzzleShot, origin);
-      }
-    }
-  }
   const vel = new THREE.Vector3(data.vx, data.vy, data.vz);
   const color = data.color || 0xffaa00;
   // Reuse existing Projectile class but mark as network (no local damage;
@@ -16925,27 +16893,6 @@ function _addShipRunningLight(group, hullW, hullH, hullL) {
   return lightGroup;
 }
 
-// (v32.21) GLB weapon-muzzle markers. Each ship GLB carries empty marker nodes
-// named gun1 / gun2 (and thruster* at the engines) placed at each barrel by the
-// model author. buildModelShipMesh stashes the gun markers on
-// group.userData.muzzleNodes ; shipMuzzleWorld() returns the world position of
-// one (alternating by shot count) so bot + multiplayer gunfire VISUALLY
-// originates at the real guns. Cosmetic only ; damage / hit-claim is untouched.
-// Falls back to the hull-center world position for procedural ships or any
-// model without markers. getWorldPosition refreshes the matrix chain, so it is
-// correct under the ship's current position / rotation / faceRotY / scale.
-const _muzzleWorldScratch = new THREE.Vector3();
-function shipMuzzleWorld(mesh, shot, out) {
-  out = out || _muzzleWorldScratch;
-  const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
-  if (nodes && nodes.length) {
-    const i = ((shot | 0) % nodes.length + nodes.length) % nodes.length;
-    return nodes[i].getWorldPosition(out);
-  }
-  if (mesh && mesh.getWorldPosition) return mesh.getWorldPosition(out);
-  return out.set(0, 0, 0);
-}
-
 function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const group = new THREE.Group();
   const proto = shipModelCache.loaded[loadoutKey];
@@ -16992,13 +16939,6 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   });
   group.add(model);
   group.userData.hullMats = hullMats;
-  // (v32.21) Stash the GLB weapon-muzzle marker nodes (gun1, gun2, ...) so bot
-  // + peer gunfire can originate at the real barrels (see shipMuzzleWorld).
-  // They are empty nodes inside `model`, so they ride the ship transform.
-  const _muzzleNodes = [];
-  model.traverse(n => { if (/^gun\d+$/i.test(n.name || '')) _muzzleNodes.push(n); });
-  _muzzleNodes.sort((a, b) => (a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)));
-  group.userData.muzzleNodes = _muzzleNodes;
 
   // Engine + plume materials. (v14c) Engine glow disc + plume cones now
   // use the LayeredFX 'engine_disc' / 'engine_plume' presets ; per-instance
@@ -18739,12 +18679,7 @@ class Bot {
     // ---- BOT FIRING VFX ----
     // Scratch vectors, not clones: this path fires for every bot at its
     // weapon cadence and the callees below all copy what they need.
-    // (v32.21) Fire from the ship's real GLB gun muzzle (gun1/gun2 marker),
-    // alternating per shot, instead of the hull center. Visual only ; the
-    // damage above is unchanged. Falls back to center if the model has no marks.
-    const fireOrigin = (this.mesh && typeof shipMuzzleWorld === 'function')
-      ? shipMuzzleWorld(this.mesh, this._muzzleShot = (this._muzzleShot | 0) + 1, _botFireOrigin)
-      : _botFireOrigin.copy(this.position);
+    const fireOrigin = _botFireOrigin.copy(this.position);
     const fireDir = _botFireDir; // already normalized above
 
     // Color scheme per loadout. Pulled from chassisFlashColor() so bot
