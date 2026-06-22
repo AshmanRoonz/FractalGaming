@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v32.15</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.15","short_name":"LSS%20v32.15","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v31</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v30","short_name":"LSS%20v30","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3098,7 +3098,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.15';
+const LSS_BUILD = '32.13';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -16371,14 +16371,6 @@ function _makeProceduralShipNormalMap() {
   const tex = new THREE.DataTexture(data, SIZE, SIZE, THREE.RGBAFormat);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.repeat.set(2, 2);
-  // (v32.14) DataTexture defaults to NearestFilter + no mipmaps + anisotropy 1,
-  // so this repeat(2,2) panel-noise normal map sparkles / aliases on distant
-  // hulls. Trilinear + mipmaps + max anisotropy kills the shimmer ; the source
-  // is only 256x256 so the extra mip chain is ~85KB of VRAM.
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.generateMipmaps = true;
-  tex.anisotropy = (typeof renderer !== 'undefined' && renderer && renderer.capabilities) ? renderer.capabilities.getMaxAnisotropy() : 1;
   tex.needsUpdate = true;
   if ('colorSpace' in tex) tex.colorSpace = THREE.NoColorSpace || 'no-color';
   _PROCEDURAL_SHIP_NORMALMAP = tex;
@@ -16766,13 +16758,16 @@ function bakeShipThumbnails() {
         console.warn('[v9b] thumb bake failed for', key, e && e.message);
       }
       scene.remove(model);
-      // (v32.14 leak fix) Do NOT dispose here: proto.clone(true) SHARES both
-      // geometry AND materials with the cached prototype (clone copies node
-      // references, not GPU resources). Disposing them frees buffers/programs
-      // that every later-built ship of this key still uses ; this is the same
-      // shared-resource hazard _disposeShipGroup guards against via the
-      // _sharedGLBGeo flag. The clone's wrapper Object3D/Mesh nodes are plain
-      // GC ; there is nothing per-bake to free.
+      // Dispose clone meshes/materials so we don't leak.
+      model.traverse((child) => {
+        if (child.isMesh) {
+          if (child.geometry && child.geometry.dispose) child.geometry.dispose();
+          if (child.material) {
+            const mats = Array.isArray(child.material) ? child.material : [child.material];
+            for (const m of mats) { if (m && m.dispose) m.dispose(); }
+          }
+        }
+      });
     }
     _shipThumbsBaked = true;
     // Refresh the strip if it's already up so the fresh thumbs appear without
@@ -25580,38 +25575,6 @@ const MONSTER_DEFS = [
   { key: 'StoneShroud',  gut1: 0x8a8a92, gut2: 0x5a8a4a },
   { key: 'VoidGazer',    gut1: 0x8a3aca, gut2: 0x2a1a4a },
 ];
-
-// (v32.15) Cheap fresnel rim for the unlit full-bright monster materials.
-// The leviathans use MeshBasicMaterial(map) on purpose (full-bright in the
-// void at a fraction of MeshStandard's fragment cost ; a measured mobile win),
-// which reads flat/cardboard because nothing shades the form. This patches a
-// single fresnel term into the existing MeshBasic shader via onBeforeCompile,
-// so skinning / map / vertexColors all stay intact and the silhouette gains a
-// bioluminescent edge with no per-pixel lighting and no scene lights at all.
-// Validated against three r0.165 (project_vertex + opaque_fragment chunks).
-function _addBasicRim(mat, rimColorHex, strength) {
-  if (!mat) return mat;
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uRimColor    = { value: new THREE.Color(rimColorHex) };
-    shader.uniforms.uRimStrength = { value: strength };
-    shader.uniforms.uRimPower    = { value: 2.4 };
-    shader.vertexShader = 'varying vec3 vRimN;\nvarying vec3 vRimV;\n' + shader.vertexShader;
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <project_vertex>',
-      '#include <project_vertex>\n  vRimN = normalize(normalMatrix * normal);\n  vRimV = normalize(-mvPosition.xyz);'
-    );
-    shader.fragmentShader = 'uniform vec3 uRimColor;\nuniform float uRimStrength;\nuniform float uRimPower;\nvarying vec3 vRimN;\nvarying vec3 vRimV;\n' + shader.fragmentShader;
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <opaque_fragment>',
-      '#include <opaque_fragment>\n  { float _rim = pow(1.0 - clamp(dot(normalize(vRimN), normalize(vRimV)), 0.0, 1.0), uRimPower);\n    gl_FragColor.rgb += uRimColor * (_rim * uRimStrength); }'
-    );
-  };
-  // Identical GLSL across rim materials ; share one program (uniform values
-  // stay per-material). Combined with the material's own defines (USE_MAP etc).
-  mat.customProgramCacheKey = () => 'basicRim';
-  return mat;
-}
-
 const MONSTER_BASE_URL   = 'LSS/objects/';
 const MONSTER_HEALTH     = 12500; // Dreadnought-class
 const MONSTER_SIZE       = 520;   // normalized longest-axis size, world units
@@ -25891,13 +25854,6 @@ class OutskirtsMonster {
     // they read in the unlit void. MeshBasicMaterial(map) gives the
     // identical full-bright look at a fraction of the fragment cost
     // (this was a measured chunk of the mobile framerate regression).
-    // (v32.15) Per-creature bioluminescent rim color: the monster's own gut
-    // palette, lightened, so each leviathan's silhouette glows in its identity
-    // color. Desktop only ; mobile keeps the pure-flat path the perf pass tuned.
-    const _rimOn  = (typeof _LSS_IS_MOBILE === 'undefined') || !_LSS_IS_MOBILE;
-    const _rimCol = (this.def && this.def.gut1 != null)
-      ? new THREE.Color(this.def.gut1).lerp(new THREE.Color(0xffffff), 0.55).getHex()
-      : 0x9fc8ff;
     obj3d.traverse(node => {
       if (!node.isMesh || !node.material) return;
       const mats = Array.isArray(node.material) ? node.material : [node.material];
@@ -25913,7 +25869,6 @@ class OutskirtsMonster {
             // Untextured part: keep its tint, brightened for the void.
             flat.color.multiplyScalar(0.85);
           }
-          if (_rimOn && typeof _addBasicRim === 'function') _addBasicRim(flat, _rimCol, 0.6);
           out.push(flat);
           if (mat.dispose) { try { mat.dispose(); } catch (_) {} }
         } catch (_) { out.push(mat); }
@@ -49638,69 +49593,33 @@ const hitFX = {
   },
 };
 
-// (v32.15) Frame-driven flash decay. The old path snapped every material to
-// white, then restored it in ONE binary setTimeout(ms) step — a visible
-// on/off pop that blew out hulls and ignored hit weight. Now the flash level
-// eases from `intensity` back to 0 across the frame loop (updateHitFlashes),
-// so a tap glints and a kill blooms, scaled by the TIER flash weight callers
-// already pass. Original colors are restored exactly when the level hits 0.
-const _HITFLASH_WHITE = new THREE.Color(1, 1, 1);
-const _activeHitFlashes = new Set();
-function _applyHitFlash(root) {
-  const st = root.__v8flash;
-  if (!st) return;
-  const k = st.level;   // current 0..intensity, decays each frame
-  for (const s of st.stash) {
-    if (s.emissive) s.mat.emissive.copy(s.emissive).lerp(_HITFLASH_WHITE, k);
-    else s.mat.color.copy(s.color).lerp(_HITFLASH_WHITE, k);
-  }
-}
-function _restoreHitFlash(root) {
-  const st = root.__v8flash;
-  if (!st) return;
-  for (const s of st.stash) {
-    if (s.emissive) s.mat.emissive.copy(s.emissive);
-    else s.mat.color.copy(s.color);
-  }
-  root.__v8flash = null;
-}
+// Stash a brief white-flash override on every material in `root`. After
+// `ms` we restore. Idempotent enough that repeated hits just keep the
+// flash visible; the timeout resets each call.
 function _hitFlashMesh(root, ms, intensity) {
   if (!root) return;
-  const I = Math.min(1, intensity);
-  const dur = Math.max(0.12, (ms || 70) / 1000);
-  let st = root.__v8flash;
-  if (!st) {
-    const stash = [];
+  const stash = root.__v8flashStash || (root.__v8flashStash = []);
+  if (stash.length === 0) {
     root.traverse((obj) => {
       if (!obj.isMesh || !obj.material) return;
       const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
       mats.forEach((m) => {
         if (!m || !m.color) return;
         stash.push({ mat: m, color: m.color.clone(), emissive: m.emissive ? m.emissive.clone() : null });
+        const lift = Math.min(1, intensity);
+        if (m.emissive) m.emissive.setRGB(lift, lift, lift);
+        else m.color.setRGB(1, 1, 1);
       });
     });
-    if (stash.length === 0) return;
-    st = root.__v8flash = { level: I, dur: dur, stash: stash };
-  } else {
-    // Re-hit before the previous flash faded : top the level back up.
-    st.level = Math.max(st.level, I);
-    st.dur   = Math.max(st.dur, dur);
   }
-  _activeHitFlashes.add(root);
-  _applyHitFlash(root);   // show on the same frame the hit lands
-}
-// Decay every active flash toward 0. Called once per frame from gameLoop with
-// the hitstop-scaled dt, so the white flash lingers during a kill's time
-// dilation instead of fading while the world is frozen.
-function updateHitFlashes(dt) {
-  if (_activeHitFlashes.size === 0) return;
-  for (const root of _activeHitFlashes) {
-    const st = root.__v8flash;
-    if (!st) { _activeHitFlashes.delete(root); continue; }
-    st.level -= dt / st.dur;
-    if (st.level <= 0) { _restoreHitFlash(root); _activeHitFlashes.delete(root); }
-    else _applyHitFlash(root);
-  }
+  clearTimeout(root.__v8flashTimer);
+  root.__v8flashTimer = setTimeout(() => {
+    stash.forEach((s) => {
+      if (s.emissive) s.mat.emissive.copy(s.emissive);
+      else s.mat.color.copy(s.color);
+    });
+    root.__v8flashStash = null;
+  }, ms);
 }
 
 // Fire the gamepad rumble using the most-supported API: GamepadHapticActuator
@@ -51024,9 +50943,6 @@ function gameLoop(timestamp) {
   if (player.perkId && player.shipState !== 'dead') {
     _tickPerkEffects(dt);
   }
-  // (v32.15) Decay active hull hit-flashes (hitstop-scaled dt so a kill's
-  // flash lingers through the time-dilation rather than fading mid-freeze).
-  if (typeof updateHitFlashes === 'function') updateHitFlashes(dt);
   __pmark('player+weapons'); // (perf debug)
   if (typeof _v8updateCinemaFlyover === 'function') _v8updateCinemaFlyover(_wallDt);
   if (typeof _v8updateRoundKillCam === 'function')   _v8updateRoundKillCam(_wallDt);
