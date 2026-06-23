@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v32.65</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.65","short_name":"LSS%20v32.65","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v32.61</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.61","short_name":"LSS%20v32.61","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3139,7 +3139,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.65';
+const LSS_BUILD = '32.61';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -5638,6 +5638,35 @@ const CampaignMode = {
         const e = game.entities[i];
         if (e && e.hoardModelKey) { try { e.destroy(); } catch (_) {} game.entities.splice(i, 1); }
       }
+    }
+    try { this._spawnCampaignClouds(); } catch (_) {}
+  },
+  // (v32.57) Decorative cloud puffs scattered along the open travel corridor, so
+  // the journey between arenas has soft CLOUDS (not just rock peaks) to fly
+  // through. Cosmetic only — Math.random placement never affects gameplay/sync
+  // (same licence as the warp-out FX puffs). Each puff floats in the open "crack"
+  // between the floor + ceiling mountains, sampled via the terrain functions.
+  _spawnCampaignClouds() {
+    if (typeof spawnFXBurst !== 'function' || typeof THREE === 'undefined') return;
+    if (typeof CAMPAIGN_LEG_HALF_Z === 'undefined') return;
+    const T = (typeof game !== 'undefined') ? game.sandwichTerrain : null;
+    const span = CAMPAIGN_LEG_HALF_Z - 3500;        // stay clear of the two arenas
+    const N = 9;
+    for (let i = 0; i < N; i++) {
+      const z = -span + (2 * span) * (i + 0.5) / N + (Math.random() - 0.5) * 1500;
+      const x = (Math.random() - 0.5) * 2600;
+      let y = (Math.random() - 0.5) * 300;
+      try {
+        if (T && typeof _stGroundYCarved === 'function' && typeof _stCeilYCarved === 'function') {
+          const fy = _stGroundYCarved(x, z, T), cy = _stCeilYCarved(x, z, T);
+          y = (fy + cy) * 0.5 + (Math.random() - 0.5) * Math.max(60, (cy - fy) * 0.25);
+        }
+      } catch (_) {}
+      const radius = 300 + Math.random() * 240;
+      try {
+        spawnFXBurst('cloud', new THREE.Vector3(x, y, z), radius, 600,
+          { startScale: 1.0, endScale: 1.3, segs: 20 });
+      } catch (_) {}
     }
   },
   update(dt) {
@@ -15919,13 +15948,6 @@ let _starfieldPoints = null;
 
 // ---- ARENA BOUNDARY GRID ----
 
-// (v32.62) The boundary grid is a translucent line-box at the OUTER arena bounds
-// (±ARENA_SIZE), well beyond the terrain footprint. It was a bounds aid for the
-// old empty-void arena, but now that the mountains are the scenery it just pokes
-// out past them / through the open Broken-Sim ceiling against the skybox. Collect
-// the meshes so _swApplyAtmosphere can hide them whenever sandwich terrain is ON
-// (kept only for the legacy no-terrain void mode, where it's still the only bound).
-const _arenaGridMeshes = [];
 (function createArenaGrid() {
   const tier = (typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : 0;
   if (tier >= 3) return;
@@ -15945,16 +15967,10 @@ const _arenaGridMeshes = [];
         }
       }
       const geo = new THREE.BufferGeometry().setFromPoints(lines);
-      const seg = new THREE.LineSegments(geo, gridMat);
-      seg.userData = { isArenaGrid: true };
-      _arenaGridMeshes.push(seg);
-      scene.add(seg);
+      scene.add(new THREE.LineSegments(geo, gridMat));
     }
   }
 })();
-function _setArenaGridVisible(v) {
-  for (let i = 0; i < _arenaGridMeshes.length; i++) { try { _arenaGridMeshes[i].visible = !!v; } catch (_) {} }
-}
 
 // ---- LEVEL GEOMETRY ----
 
@@ -16322,13 +16338,12 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uCam:{value:new THREE.Vector3()}, uFadeA:{value:1600}, uFadeB:{value:2500},
                uColGrass:{value:new THREE.Color(0x5fae4e)}, uColRock:{value:new THREE.Color(0x6b6f74)},
                uColSnow:{value:new THREE.Color(0xeef2f5)}, uColMoss:{value:new THREE.Color(0x3f5e26)},
-               uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50}, uRocky:{value:0}, uGlitch:{value:0} };
+               uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50}, uRocky:{value:0} };
 function _swSyncFX() {
   const T = game.sandwichTerrain; if (!T) return;
   _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
   _swU.uLava.value = (T.biome === 'volcanic') ? 1 : 0;
   _swU.uRocky.value = (T.biome === 'rocky') ? 1 : 0;
-  _swU.uGlitch.value = (T.biome === 'brokensim') ? 1 : 0;   // (v32.63) failing-sim ceiling
   const _P = _swPal(T);
   _swU.uColGrass.value.set(_P.tGrass !== undefined ? _P.tGrass : 0x5fae4e);
   _swU.uColRock.value.set(_P.tRock !== undefined ? _P.tRock : 0x6b6f74);
@@ -16349,21 +16364,20 @@ function _swPatchTerrainMat(m, isCeil) {
     sh.uniforms.uColSnow=_swU.uColSnow; sh.uniforms.uColMoss=_swU.uColMoss;
     sh.uniforms.uSlopeGrass=_swU.uSlopeGrass; sh.uniforms.uSlopeRock=_swU.uSlopeRock; sh.uniforms.uRocky=_swU.uRocky;
     sh.uniforms.uCeil={value:isCeil?1:0};
-    sh.uniforms.uGlitch=_swU.uGlitch;
     sh.vertexShader='varying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;');
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
       +sh.fragmentShader;
     // ground surface: grass on gentle slopes, bare rock on steep faces, snow on peaks, with a mossy mottle
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
-      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(0.92+0.14*strata);\n vec3 terr=mix(rock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n diffuseColor.rgb=terr;\n }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(0.92+0.14*strata);\n vec3 terr=mix(rock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n diffuseColor.rgb=terr;\n }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
-      '#include <emissivemap_fragment>\n if(uLava>0.5 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow;\n }\n if(uRocky>0.5 && uCeil<0.5){ vec3 ffn=normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow; }\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }');
+      '#include <emissivemap_fragment>\n if(uLava>0.5 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow;\n }\n if(uRocky>0.5 && uCeil<0.5){ vec3 ffn=normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow; }');
   };
   return m;
 }
@@ -16472,6 +16486,10 @@ function _swBuildShell(x0, z0, isCeil, T) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.userData = { isSandwichTerrain: true };
   mesh.renderOrder = -2;
+  // (v32.61) Broken Simulation : the ceiling mountains are HIDDEN so the top
+  // reads as open (the forcefield + purple sky show through). Collision is left
+  // untouched, so ships stay contained — the open top is purely visual.
+  if (isCeil && T && T.biome === 'brokensim') mesh.visible = false;
   scene.add(mesh);
   return mesh;
 }
@@ -16492,11 +16510,9 @@ function _swApplyAtmosphere() {
     if (game._swSavedFog !== undefined) { scene.fog = game._swSavedFog; game._swSavedFog = undefined; }
     if (game._swSavedBg !== undefined) { scene.background = game._swSavedBg; game._swSavedBg = undefined; }
     try { _clearBrokenSimForcefield(); } catch (_) {}   // (v32.61) drop the forcefield with the terrain
-    try { _setArenaGridVisible(true); } catch (_) {}     // (v32.62) void mode keeps the bounds grid
     try { _skyDomeRefresh(); } catch (_) {}   // texture sky returns through the dome
     return;
   }
-  try { _setArenaGridVisible(false); } catch (_) {}      // (v32.62) hide the bounds grid behind the mountains
   if (game._swSavedFog === undefined) game._swSavedFog = (scene.fog !== undefined ? scene.fog : null);
   if (game._swSavedBg === undefined) game._swSavedBg = (scene.background !== undefined ? scene.background : null);
   const P = _SW_BIOMES[T.biome] || _SW_BIOMES.grassy;
@@ -16506,11 +16522,9 @@ function _swApplyAtmosphere() {
   // (v32.61) Broken Simulation : show the purple skybox through the open ceiling
   // plus a forcefield ceiling. Thinner fog so the sky reads instead of a flat haze.
   if (T.biome === 'brokensim') {
-    // (v32.63) The "forcefield" is the ceiling mountains themselves, rendered as a
-    // FAILING simulation (glitch holes to the sky + corrupted colour, in _swPatchTerrainMat
-    // gated on uGlitch+uCeil). No separate forcefield mesh. Thinner fog so the sky reads.
     scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 0.4e-4);
     try { setSky('purple'); } catch (_) {}
+    try { _ensureBrokenSimForcefield(T); } catch (_) {}
   } else {
     try { _clearBrokenSimForcefield(); } catch (_) {}
   }
@@ -26015,31 +26029,6 @@ function spawnDynamicObjects(rooms) {
     const clusterScale = 40 + Math.random() * 50;
     if (!_clearOfSpawnSpheres(pt.x, pt.y, pt.z, clusterScale)) continue; // tunnel mouth in a spawn sphere
     game.clusters.push(new ClusterObstacle(new THREE.Vector3(pt.x, pt.y, pt.z), clusterScale));
-  }
-
-  // (v32.65) Campaign : the open travel corridor between the arenas has no rooms
-  // or tunnels, so it got no rock clusters — and thus none of the real arena gas
-  // clouds (the journey had only the throwaway FX puffs, now removed). Scatter
-  // clusters along the +z path in the open crack, using the SAME ClusterObstacle
-  // the arenas use, so each carries its GasCloud atom-smoke : the exact "clouds
-  // by the rocks" (with the rock dots that push the clouds around).
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
-    const _ct = game.sandwichTerrain;
-    const _cspan = CAMPAIGN_LEG_HALF_Z - 3500;   // stay clear of the two arenas
-    const _cN = 13;
-    for (let i = 0; i < _cN; i++) {
-      const cz = -_cspan + (2 * _cspan) * (i + 0.5) / _cN + (Math.random() - 0.5) * 1400;
-      const cx = (Math.random() - 0.5) * 2200;
-      let cy = (Math.random() - 0.5) * 280;
-      try {
-        if (_ct && typeof _stGroundYCarved === 'function' && typeof _stCeilYCarved === 'function') {
-          const _fy = _stGroundYCarved(cx, cz, _ct), _cyl = _stCeilYCarved(cx, cz, _ct);
-          cy = (_fy + _cyl) * 0.5 + (Math.random() - 0.5) * Math.max(80, (_cyl - _fy) * 0.3);
-        }
-      } catch (_) {}
-      const _cScale = 40 + Math.random() * 60;
-      try { game.clusters.push(new ClusterObstacle(new THREE.Vector3(cx, cy, cz), _cScale)); } catch (_) {}
-    }
   }
 
   // Assign stable netIds so cluster destruction events can target the
