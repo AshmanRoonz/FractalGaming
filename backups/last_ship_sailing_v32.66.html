@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v32.69</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.69","short_name":"LSS%20v32.69","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v32.66</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.66","short_name":"LSS%20v32.66","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3139,7 +3139,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.69';
+const LSS_BUILD = '32.66';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -26808,31 +26808,6 @@ function _addBasicRim(mat, rimColorHex, strength) {
   return mat;
 }
 
-// (v32.69) Wet-flesh "guts" shader for the death gibs (a MeshBasicMaterial). Mirrors
-// _addBasicRim's onBeforeCompile pattern : deepens the base toward the dark-organ
-// colour, adds a translucent fresnel SSS rim in the fresh-flesh colour (the wet
-// glistening edge), a sharp wet specular glint, and dark vein/clot mottling — so the
-// flat colour blobs read as torn, wet, organic guts. One shared program (cache key).
-function _addGutsShader(mat, gut1Hex, gut2Hex) {
-  if (!mat) return mat;
-  mat.onBeforeCompile = (shader) => {
-    shader.uniforms.uGut1 = { value: new THREE.Color(gut1Hex) };
-    shader.uniforms.uGut2 = { value: new THREE.Color(gut2Hex) };
-    shader.vertexShader = 'varying vec3 vGN;\nvarying vec3 vGV;\nvarying vec3 vGP;\n' + shader.vertexShader;
-    shader.vertexShader = shader.vertexShader.replace(
-      '#include <project_vertex>',
-      '#include <project_vertex>\n  vGN = normalize(normalMatrix * normal);\n  vGV = normalize(-mvPosition.xyz);\n  vGP = position;'
-    );
-    shader.fragmentShader = 'uniform vec3 uGut1;\nuniform vec3 uGut2;\nvarying vec3 vGN;\nvarying vec3 vGV;\nvarying vec3 vGP;\nfloat _gh(vec3 p){return fract(sin(dot(p,vec3(12.9898,78.233,37.719)))*43758.5453);}\n' + shader.fragmentShader;
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <opaque_fragment>',
-      '#include <opaque_fragment>\n  { vec3 N=normalize(vGN); vec3 V=normalize(vGV); float fac=clamp(dot(N,V),0.0,1.0);\n    float fres=pow(1.0-fac,2.2);\n    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGut2*0.8, 0.3);\n    gl_FragColor.rgb += uGut1 * fres * 0.9;\n    float spec=pow(fac,26.0); gl_FragColor.rgb += vec3(1.0,0.9,0.9)*spec*0.7;\n    float vein=smoothstep(0.5,0.6,_gh(floor(vGP*4.0))); gl_FragColor.rgb = mix(gl_FragColor.rgb, uGut2*0.35, vein*0.55); }'
-    );
-  };
-  mat.customProgramCacheKey = () => 'gutsFlesh';
-  return mat;
-}
-
 const MONSTER_BASE_URL   = 'LSS/objects/';
 const MONSTER_HEALTH     = 12500; // Dreadnought-class
 const MONSTER_SIZE       = 520;   // normalized longest-axis size, world units
@@ -27656,8 +27631,6 @@ function spawnMonsterGuts(pos, size, def) {
     // brighter (fresh tears).
     col.multiplyScalar(0.7 + Math.random() * 0.55);
     const mat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 1.0 });
-    // (v32.69) Wet-flesh shader so the gibs read as guts (skip on potato tier).
-    try { if (typeof QUALITY === 'undefined' || !QUALITY.isPotato || !QUALITY.isPotato()) _addGutsShader(mat, def.gut1, def.gut2); } catch (_) {}
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(
       pos.x + (Math.random() - 0.5) * size * 0.3,
@@ -29792,11 +29765,8 @@ function spawnTracer(from, to, color, widthScale) {
     _spawnSingleTracer(rightMuzzle, to, color, 0.85 * wScale, 0.30);
     return;
   }
-  // Bot / far-field shots: single tracer. (v32.68) Pass tailMul=0.4 so the
-  // long-lived wide outer haze collapses — an INCOMING enemy laser was reading as
-  // a soft flashlight CONE (the 9-radius haze lingered ~0.42s); a short haze keeps
-  // the sharp colored core + thin beam so it reads as a laser BOLT instead.
-  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4);
+  // Bot / far-field shots: single tracer as before.
+  _spawnSingleTracer(from, to, color, 1.0 * wScale);
 }
 
 // Lightning bolt: jagged line from A to B using a single merged BufferGeometry (1 draw call)
@@ -34506,7 +34476,7 @@ function updatePlayerMovement(dt) {
     // Kill any residual velocity so we don't drift mid-lockout.
     player.velocity.set(0, 0, 0);
     // Still allow looking around but no movement
-    if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign'))) {
+    if ((input.locked || input.touchActive) && !game.testMode) {
       player.euler.y -= input.mouseDX * input.sensitivity;
       player.euler.x -= input.mouseDY * input.sensitivity;
     }
@@ -34535,7 +34505,7 @@ function updatePlayerMovement(dt) {
   // (lssdev test mode) Mouse is reserved for the floating Theme dev UI ;
   // gate ship-look on !game.testMode so the player can move the cursor
   // over settings without rotating the ship.
-  if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign'))) {
+  if ((input.locked || input.touchActive) && !game.testMode) {
     player.euler.y -= input.mouseDX * input.sensitivity;
     player.euler.x -= input.mouseDY * input.sensitivity;
   }
