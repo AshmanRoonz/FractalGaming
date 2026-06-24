@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.23</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.23","short_name":"LSS%20v33.23","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.22</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.22","short_name":"LSS%20v33.22","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3275,7 +3275,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.23';
+const LSS_BUILD = '33.22';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6131,9 +6131,7 @@ const FreeFlightMode = {
     // (P1b) The persistent cyan RIFT — the optional gateway into the corrupted simulator
     // (the campaign). Spawn it once in the rift glade, keep it spinning, and when the
     // player flies INTO it, warp into The Approach mid-flight (no ship-select bounce).
-    // (v33.23) the rift→campaign warp is SOLO-only : in a multiplayer FFA room, one player flying
-    // the rift must not drag the whole room into campaign. No portal spawns when networked.
-    if (!game.bossPortal && !this._enteringCampaign && !net.active) {
+    if (!game.bossPortal && !this._enteringCampaign) {
       const pos = new THREE.Vector3(0, 200, 3200);   // the 'hub_rift' glade, a flight ahead of spawn
       this._riftPos = pos.clone();
       if (typeof _spawnBossPortal === 'function') _spawnBossPortal(pos);
@@ -6181,7 +6179,7 @@ const FreeFlightMode = {
     if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2);   // -> warmup rebuild builds The Approach
   },
   onTeardown() {
-    try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; } catch (_) {}   // (v33.23) clear the FFA flag
+    try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; } catch (_) {}
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v33.12) restore the combat round/FLEET HUD
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   // (v33.14) reset 3rd-person on the way out
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   // drop the hub rift on the way out
@@ -6266,30 +6264,16 @@ function _toggleThirdPerson() {
 // world with no enemies. Endless like campaign (testMode + raceNoTimer) but no bots /
 // no win-gate. Solo for P1 (no co-op handshake). Mirrors startCampaign's solo path.
 function startFreeFlight() {
+  _cancelRoomForLocalPlay();
+  net.active = false;
+  net.solo = true;
   LSS.MODE = 'freeflight';
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   // (v33.12) hide the combat round/FLEET HUD in the hub
-  game.testMode = false;      // (v33.02) NOT test mode — endlessness is keyed on LSS.MODE==='freeflight' (win-block + warmup-skip)
+  game.testMode = false;      // (v33.02) NOT test mode — endlessness is keyed on LSS.MODE==='freeflight' (win-block + warmup-skip), so the dev Theme panel + test-mode look/fire carve-outs never engage in the hub
   game.raceNoTimer = true;    // no 80s round clock / HUD timer
   game.currentRound = 1;
   game.selectedMap = 'hub_overworld';
   try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   // warm the rift ring (P1b)
-  // (v33.23) DROP-IN MULTIPLAYER : if a room code is entered (or we're already in a room), host a
-  // networked FFA hub via the shared #room-code input — the exact idiom Campaign/Race use. The P2P
-  // transport (NetworkPlayer sync + hit-claim damage) is mode-agnostic ; FFA is the unique-team in
-  // _startHostedMode + the rift gated to solo. Empty code = the original SOLO sandbox (unchanged).
-  let _code = '';
-  try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
-  if ((net.active && net.room) || _code) {
-    net.freeflight = true;
-    _startHostedMode().then(function (ok) {
-      if (!ok) { net.freeflight = false; _cancelRoomForLocalPlay(); net.active = false; net.solo = true; enterShipSelect(); }
-    });
-    return;
-  }
-  net.freeflight = false;
-  _cancelRoomForLocalPlay();
-  net.active = false;
-  net.solo = true;
   enterShipSelect();
 }
 if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
@@ -6905,26 +6889,9 @@ function _applyModeClientSetup(mode) {
     // authoritative (amStasisOwner) and the hoard arrives as proxies via bot_roster.
     net.campaign = true;
     try { if (typeof _campInitState === 'function') _campInitState(); } catch (_) {}
-  } else if (mode === 'freeflight') {
-    // (v33.23) Drop-in FFA hub JOINER : adopt the hub map + endless flags. Unique FFA team so this
-    // client is hostile to every peer (the `bot.team === player.team` gate fails for all of them).
-    net.freeflight = true;
-    try { document.body.classList.add('lss-freeflight'); } catch (_) {}
-    game.testMode = false; game.raceNoTimer = true; game.selectedMap = 'hub_overworld';
-    try { if (typeof player !== 'undefined' && player && typeof _ffaTeamForPeer === 'function') player.team = _ffaTeamForPeer(net.myPeerId); } catch (_) {}
   }
 }
 
-// (v33.23) FFA TEAM : in free-flight multiplayer everyone is mutually hostile. Give each client a
-// UNIQUE team id derived from its peerId (>= 100, so it never equals TEAM_FLEET_A=2 / B=3). Then the
-// `bot.team === player.team` friendly-fire gate fails for EVERY remote peer = true free-for-all,
-// WITHOUT touching the ~20 scattered combat damage gates. Incoming hits (handleHitClaim) have no team
-// check, so they apply regardless. Combat/classic/campaign are untouched (they never set this).
-function _ffaTeamForPeer(pid) {
-  let h = 5381; const s = String(pid || ('x' + (Math.random() * 1e9 | 0)));
-  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
-  return 100 + (h % 1000000);
-}
 // (v32.75) Host (or reuse) a P2P room and start a drop-in match in the CURRENT
 // LSS.MODE, so players who enter the same room code join together on whatever mode
 // the host launched (race today ; campaign next). Mirrors startOpenSolo's room logic
@@ -6965,7 +6932,7 @@ async function _startHostedMode() {
   net.openSolo = true;
   net.openSoloHostId = net.myPeerId;
   net.solo = false;
-  if (typeof player !== 'undefined' && player) player.team = (LSS.MODE === 'freeflight') ? _ffaTeamForPeer(net.myPeerId) : LSS.TEAM_FLEET_A;   // (v33.23) unique team in FFA freeflight
+  if (typeof player !== 'undefined' && player) player.team = LSS.TEAM_FLEET_A;
   net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
   const ls = document.getElementById('lobby-status');
   if (ls) { ls.textContent = 'ROOM ' + code + ' — CHALLENGERS CAN DROP IN'; ls.style.color = '#7dffa8'; }
