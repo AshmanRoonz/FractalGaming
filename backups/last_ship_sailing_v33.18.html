@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.20</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.20","short_name":"LSS%20v33.20","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.18</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.18","short_name":"LSS%20v33.18","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3275,7 +3275,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.20';
+const LSS_BUILD = '33.18';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17586,8 +17586,7 @@ function _swWaterReflectShader() {
       THREE.UniformsLib.fog,
       { color: { value: null }, tDiffuse: { value: null }, textureMatrix: { value: null },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 },   // (v33.12) uFade crossfades the mirror out across the surface band
-        uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 }, uRippleScale: { value: 0 },   // (v33.18) GPGPU interaction heightmap
-        uMaskTex: { value: null } },   // (v33.20) shoreline land/water mask
+        uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 }, uRippleScale: { value: 0 } },   // (v33.18) GPGPU interaction heightmap
     ]),
     vertexShader: [
       'uniform mat4 textureMatrix;',
@@ -17607,7 +17606,6 @@ function _swWaterReflectShader() {
       '#define RIPPLE_RES 128.0',   // (v33.18) keep in sync with _SW_RIPPLE_RES
       'uniform vec3 color;', 'uniform sampler2D tDiffuse;', 'uniform float uTime;', 'uniform vec3 uCam;', 'uniform float uFade;',
       'uniform sampler2D uRippleTex;', 'uniform vec2 uRippleCenter;', 'uniform float uRippleBounds;', 'uniform float uRippleScale;',   // (v33.18) GPGPU interaction heightmap
-      'uniform sampler2D uMaskTex;',   // (v33.20) R = water mask, G = depth (shoreline gating + foam)
       'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_fragment>',
       'void main(){',
       '  float t = uTime; vec2 q = vWP.xz;',
@@ -17615,35 +17613,22 @@ function _swWaterReflectShader() {
       // reflection does not alias into a checkerboard ; full ripples only up close.
       '  float dist = length(vWP - uCam);',
       '  float fade = clamp(1.0 - (dist - 500.0) / 5000.0, 0.05, 1.0);',
-      // FAINT ambient micro-ripple (the windless far-field outside the sim window). The cymatic
-      // SIM (below) is the dominant wave source on the lake itself, so these are kept subtle.
+      // low-frequency animated ripple normal (world-space) = the moving wave surface
       '  vec3 N = vec3(0.0,1.0,0.0);',
-      '  N.x += (0.016*sin(q.x*0.010+t*1.3) + 0.011*sin(q.y*0.017-t*0.9)) * fade;',
-      '  N.z += (0.016*sin(q.y*0.011+t*1.1) + 0.011*sin(q.x*0.019+t*1.5)) * fade;',
-      // (v33.18/20) CYMATIC SIM : the heightmap GRADIENT is the PRIMARY surface normal in-window
-      // (never the vertex height — the plane stays flat, v33.10 lesson). Gated by the shoreline
-      // MASK so ripples fade to flat at the beach. A shallow-water crest term adds shoreline FOAM.
-      '  float foam = 0.0;',
+      '  N.x += (0.05*sin(q.x*0.010+t*1.3) + 0.03*sin(q.y*0.017-t*0.9)) * fade;',
+      '  N.z += (0.05*sin(q.y*0.011+t*1.1) + 0.03*sin(q.x*0.019+t*1.5)) * fade;',
+      // (v33.18) GPGPU INTERACTION : perturb the normal by the heightmap GRADIENT (never the
+      // vertex height) so ship wake / impact ripples distort the mirror locally while it stays flat.
       '  if (uRippleScale > 0.0) {',
       '    vec2 rUV = (vWP.xz - uRippleCenter) / uRippleBounds + 0.5;',
-      '    if (rUV.x > 0.001 && rUV.x < 0.999 && rUV.y > 0.001 && rUV.y < 0.999) {',
-      // (v33.20) SMOOTH the square window border : the sim only covers a ±2000u box around the ship,
-      // so a HARD cutoff there shows as a straight line on the water at grazing angles. Fade the
-      // ripple + foam to zero across the outer ~12% of the window so the boundary is invisible.
-      '      vec2 wf = smoothstep(vec2(0.0), vec2(0.12), rUV) * (vec2(1.0) - smoothstep(vec2(0.88), vec2(1.0), rUV));',
-      '      float winFade = wf.x * wf.y;',
-      '      vec4 mask = texture2D(uMaskTex, rUV);',   // R = water (0 shore .. 1), G = depth norm
+      '    if (rUV.x > 0.02 && rUV.x < 0.98 && rUV.y > 0.02 && rUV.y < 0.98) {',
       '      float cs = 1.0 / RIPPLE_RES;',
-      '      float hC = texture2D(uRippleTex, rUV).x;',
       '      float hL = texture2D(uRippleTex, rUV - vec2(cs,0.0)).x;',
       '      float hR = texture2D(uRippleTex, rUV + vec2(cs,0.0)).x;',
       '      float hD = texture2D(uRippleTex, rUV - vec2(0.0,cs)).x;',
       '      float hU = texture2D(uRippleTex, rUV + vec2(0.0,cs)).x;',
-      '      float rg = mask.r * fade * winFade;',   // fade = v33.10 anti-alias ; winFade = soft window border
-      '      N.x += clamp((hL - hR) * uRippleScale, -1.4, 1.4) * rg;',
-      '      N.z += clamp((hD - hU) * uRippleScale, -1.4, 1.4) * rg;',
-      '      float shore = 1.0 - smoothstep(0.0, 0.18, mask.g);',   // 1 at the beach, 0 in deep water
-      '      foam = clamp(hC * 22.0, 0.0, 1.0) * shore * mask.r * winFade;',   // wave crests whiten the shallows
+      '      N.x += clamp((hL - hR) * uRippleScale, -0.8, 0.8) * fade;',
+      '      N.z += clamp((hD - hU) * uRippleScale, -0.8, 0.8) * fade;',
       '    }',
       '  }',
       '  N = normalize(N);',
@@ -17653,7 +17638,6 @@ function _swWaterReflectShader() {
       '  float fres = pow(clamp(1.0 - max(dot(-V,N),0.0),0.0,1.0), 4.0);',
       '  fres = clamp(0.14 + 0.86*fres, 0.0, 1.0);',
       '  vec3 outc = mix(color, refl, fres);',
-      '  outc = mix(outc, vec3(0.82,0.91,0.96), foam * 0.6);',   // (v33.20) shoreline crest foam
       '  gl_FragColor = vec4(outc, 0.93 * uFade);',
       '  #include <fog_fragment>',
       '}',
@@ -17675,29 +17659,21 @@ const _swRipple = {
   center: new THREE.Vector2(0, 0),   // world XZ of the window centre (x=worldX, y=worldZ)
   acc: 0, step: 1 / 60,              // fixed ~60Hz compute cadence (the game can run 120fps)
   pending: [],                       // ring buffer of {x,z,r,a} window-local seeds, cap 8
-  bounds: _SW_RIPPLE_BOUNDS, scale: 0,
-  maskTex: null, maskData: null      // (v33.20) land/water mask (R=water, G=depth) for the cymatic boundary
+  bounds: _SW_RIPPLE_BOUNDS, scale: 0
 };
 const _SW_RIPPLE_FRAG = [
   '#include <common>',               // provides PI ; GPUComputationRenderer provides `heightmap` + the `resolution` define
   'uniform float viscosity;',
   'uniform vec4 uSeeds[8];',         // xy = window-local world offset, z = radius, w = amplitude
   'uniform int uSeedCount;',
-  'uniform sampler2D uMaskTex;',     // (v33.20) R = water mask (terrain < WL), G = depth
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
   '  vec4 h = texture2D(heightmap, uv);',
-  // (v33.20) LAND/WATER MASK = the cymatic constraint. A land cell carries no water (flat).
-  // A water cell treats any non-water NEIGHBOUR as a REFLECTING (Neumann) wall by substituting
-  // its own height — so ripples bounce off the shoreline and interfere into standing waves,
-  // exactly like world.html. Without this the sim just leaked out of an open square window.
-  '  if (texture2D(uMaskTex, uv).x < 0.5) { gl_FragColor = vec4(0.0); return; }',
-  '  float hC = h.x;',
-  '  float n = (texture2D(uMaskTex, uv + vec2(0.0,  cellSize.y)).x < 0.5) ? hC : texture2D(heightmap, uv + vec2(0.0,  cellSize.y)).x;',
-  '  float s = (texture2D(uMaskTex, uv + vec2(0.0, -cellSize.y)).x < 0.5) ? hC : texture2D(heightmap, uv + vec2(0.0, -cellSize.y)).x;',
-  '  float e = (texture2D(uMaskTex, uv + vec2( cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, uv + vec2( cellSize.x, 0.0)).x;',
-  '  float w = (texture2D(uMaskTex, uv + vec2(-cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, uv + vec2(-cellSize.x, 0.0)).x;',
+  '  float n = texture2D(heightmap, uv + vec2(0.0,  cellSize.y)).x;',
+  '  float s = texture2D(heightmap, uv + vec2(0.0, -cellSize.y)).x;',
+  '  float e = texture2D(heightmap, uv + vec2( cellSize.x, 0.0)).x;',
+  '  float w = texture2D(heightmap, uv + vec2(-cellSize.x, 0.0)).x;',
   '  float nh = ((n + s + e + w) * 0.5 - h.y) * viscosity;',   // discrete wave equation (prev height in .y)
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   '  for (int i = 0; i < 8; i++){',
@@ -17706,11 +17682,6 @@ const _SW_RIPPLE_FRAG = [
   '    float ph = clamp(length(wpos - sd.xy) * PI / sd.z, 0.0, PI);',
   '    nh += (cos(ph) + 1.0) * sd.w;',   // inject a smooth circular ripple (+ up, - dent)
   '  }',
-  // (v33.20) ABSORB at the window edge : the heightmap is a finite texture, so waves were REFLECTING
-  // off its square border and bouncing back as "square patches". Damp the height toward 0 across the
-  // outer band so waves leaving the window are swallowed, not mirrored. (Shorelines still reflect.)
-  '  vec2 ed = min(uv, 1.0 - uv);',
-  '  nh *= smoothstep(0.0, 0.06, min(ed.x, ed.y));',
   '  h.y = h.x;',                     // roll current -> previous
   '  h.x = nh;',                      // store new current
   '  gl_FragColor = h;',
@@ -17725,31 +17696,17 @@ function _swRippleInit() {
     const tex = gpu.createTexture();   // all-zero = flat water at rest
     const v = gpu.addVariable('heightmap', _SW_RIPPLE_FRAG, tex);
     gpu.setVariableDependencies(v, [v]);
-    // (v33.20) LINEAR-filter the heightmap RTs (GPUComputationRenderer defaults to Nearest). The
-    // sim samples neighbours at exact texel centres (linear == nearest there, so stability is
-    // unchanged), but the REFLECT shader reads the gradient at arbitrary points — with Nearest the
-    // height STEPS at every 31u texel edge, drawing hard perpendicular grid lines on the water when
-    // looking straight down. Linear interpolation makes the wave field smooth = no grid.
-    v.minFilter = THREE.LinearFilter; v.magFilter = THREE.LinearFilter;
     v.material.defines = v.material.defines || {};
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
-    v.material.uniforms.viscosity = { value: 0.972 };    // (v33.20) DAMPING : energy must DIE OUT after a disturbance (user: "the ripples keep going too"). Lower = faster decay.
+    v.material.uniforms.viscosity = { value: 0.985 };    // wave persistence (closer to 1 = calmer/longer-lived)
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
-    // (v33.20) land/water mask texture (R = water, G = depth) — the cymatic shoreline boundary.
-    const maskData = new Float32Array(RES * RES * 4);
-    const maskTex = new THREE.DataTexture(maskData, RES, RES, THREE.RGBAFormat, THREE.FloatType);
-    maskTex.minFilter = THREE.LinearFilter; maskTex.magFilter = THREE.LinearFilter;
-    maskTex.wrapS = maskTex.wrapT = THREE.ClampToEdgeWrapping; maskTex.needsUpdate = true;
-    v.material.uniforms.uMaskTex = { value: maskTex };
-    _swRipple.maskData = maskData; _swRipple.maskTex = maskTex;
     const err = gpu.init();
     if (err) { try { console.warn('[water] GPGPU init failed, analytic fallback:', err); } catch (_) {} return; }
     _swRipple.gpu = gpu; _swRipple.heightVar = v; _swRipple.acc = 0; _swRipple.pending.length = 0;
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   // reflection-normal perturbation strength (tuned in preview)
-    _swRippleBakeMask();    // (v33.20) initial shoreline mask for the current window
   } catch (e) { try { console.warn('[water] GPGPU init exception, analytic fallback:', e); } catch (_) {} _swRipple.gpu = null; }
 }
 // Inject a ripple where something touches the surface. world XZ -> window-local; out-of-window seeds dropped.
@@ -17760,32 +17717,6 @@ function _swRippleSeed(wx, wz, radius, amp) {
   R.pending.push({ x: lx, z: lz, r: Math.max(20, radius), a: amp });
   if (R.pending.length > 8) R.pending.shift();   // newest wins
 }
-// (v33.20) Bake the LAND/WATER MASK over the ripple window from the terrain heightfield, so the
-// sim reflects ripples off shorelines (-> cymatic standing waves) instead of an open square edge.
-// R = water mask (terrainHeight < WL), G = depth (foam/shore). 128^2 _stGroundYCarved calls, but
-// only re-baked when the window RECENTRES (the ship moved >25% of the window) so the cost amortises.
-function _swRippleBakeMask() {
-  const R = _swRipple;
-  if (!R.maskData || typeof _stGroundYCarved !== 'function') return;
-  const T = game._hubWaterT; if (!T) return;
-  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
-  const RES = _SW_RIPPLE_RES, B = _SW_RIPPLE_BOUNDS;
-  const cx = R.center.x, cz = R.center.y, data = R.maskData;
-  let k = 0;
-  for (let j = 0; j < RES; j++) {
-    const wz = cz + ((j + 0.5) / RES - 0.5) * B;
-    for (let i = 0; i < RES; i++) {
-      const wx = cx + ((i + 0.5) / RES - 0.5) * B;
-      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
-      const d = WL - gy;                               // > 0 = water depth at this cell
-      data[k] = (d > 2.0) ? 1.0 : 0.0;                 // R = binary water mask (LinearFilter softens the shore)
-      data[k + 1] = Math.max(0, Math.min(1, d / 400)); // G = depth norm (foam / shading)
-      data[k + 2] = 0; data[k + 3] = 1;
-      k += 4;
-    }
-  }
-  if (R.maskTex) R.maskTex.needsUpdate = true;
-}
 // Per-frame driver — runs in the master tick BEFORE renderer.render.
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
@@ -17794,25 +17725,15 @@ function _swRippleTick(dt) {
   const px = player.position.x, pz = player.position.z;
   // recenter the window on the ship past a 25%-of-window move (avoid per-frame texel scroll)
   const ddx = px - R.center.x, ddz = pz - R.center.y, rr = R.bounds * 0.25;
-  if (ddx * ddx + ddz * ddz > rr * rr) { R.center.set(px, pz); _swRippleBakeMask(); }   // (v33.20) re-mask on recenter
-  // SHIP WAKE : the ONLY ambient ripple source — the water is STILL until something touches it
-  // (world.html is windless). Seed ONLY when the ship is actually MOVING low over the surface ; a
-  // hovering ship leaves the water flat, and (critically) re-seeding ONE fixed point would build a
-  // sharp spike whose x/z gradient reads as the "X" under the ship. Amplitude is purely speed-driven
-  // so it ramps from nothing, and a moving ship lays a TRAIL of seeds (a wake), never a single spike.
+  if (ddx * ddx + ddz * ddz > rr * rr) R.center.set(px, pz);
+  // SHIP WAKE : flying low over the surface disturbs the water under the ship (speed + proximity scaled)
   const w = game._hubWater;
   if (w) {
     const above = player.position.y - w.userData.WL;
-    const sp = player.velocity ? Math.hypot(player.velocity.x, player.velocity.z) : 0;
-    if (above > -40 && above < 220 && sp > 35) {
-      // only drop a seed once the ship has travelled ~one texel (~31u) since the last, so the wake is
-      // a spaced TRAIL, never a single texel accumulating into a spike (the spike's cross-gradient = the X).
-      const lwx = R.wakeX, moved = (lwx === undefined) ? 1e9 : ((px - lwx) * (px - lwx) + (pz - R.wakeZ) * (pz - R.wakeZ));
-      if (moved > 30 * 30) {
-        const prox = 1.0 - Math.min(1, Math.max(0, above) / 220);   // closer to surface = stronger
-        _swRippleSeed(px, pz, 100 + 70 * prox, 0.05 * Math.min(1, sp / 480) * prox);
-        R.wakeX = px; R.wakeZ = pz;
-      }
+    if (above > -40 && above < 240) {
+      const sp = player.velocity ? Math.hypot(player.velocity.x, player.velocity.z) : 0;
+      const prox = 1.0 - Math.min(1, Math.max(0, above) / 240);   // closer to surface = stronger
+      _swRippleSeed(px, pz, 70 + 60 * prox, 0.018 + 0.085 * Math.min(1, sp / 600) * prox);
     }
   }
   R.acc += dt;
@@ -17832,21 +17753,17 @@ function _swRippleTick(dt) {
     wu.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
     wu.uRippleCenter.value.set(R.center.x, R.center.y);
     wu.uRippleScale.value = R.scale;
-    if (wu.uMaskTex) wu.uMaskTex.value = R.maskTex;   // (v33.20) shoreline mask for ripple gating + foam
   }
 }
 function _swRippleDispose() {
   const R = _swRipple;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
-  try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   // (v33.20) free the mask DataTexture
   R.gpu = null; R.heightVar = null; R.scale = 0; R.pending.length = 0; R.acc = 0;
-  R.maskTex = null; R.maskData = null;
 }
 function _swBuildHubWater(T) {
   if (game._hubWater) return game._hubWater;
   if (typeof THREE === 'undefined' || !scene) return null;
   const WL = (T && T.WL != null) ? T.WL : ((T && T.YFLOOR != null) ? T.YFLOOR : 0);
-  game._hubWaterT = T; game._hubWaterWL = WL;   // (v33.20) stash for the land/water mask bake (_swRippleBakeMask)
   const geo = new THREE.PlaneGeometry(48000, 48000, 32, 32);
   const _canReflect = (typeof THREE.Reflector === 'function')
     && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())
@@ -19470,11 +19387,6 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const w = chassisData.hullWidth * 0.5;
   const h = chassisData.hullHeight * 0.5;
   const l = chassisData.hullLength * 0.5;
-  // (v33.19) Engine ORB radius is chassis-INDEPENDENT so a big hull (Dreadnought = BLASTER,
-  // hullHeight 45) doesn't get oversized thruster orbs vs a small hull (Corvette = VORTEX,
-  // hullHeight 30). ho ~= Corvette's h, so every ship's orbs land at ~Vortex's size. Orb
-  // PLACEMENT + plumes still use the real hull (w/h/l/tailZ) ; only the round-orb radii use ho.
-  const ho = 15;
 
   function addGlow(geo, mat, x, y, z) {
     const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); group.add(m); return m;
@@ -19526,7 +19438,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     // the only engine visual now, so they carry the full thrust read.
     if (_markerGlowMat.uniforms.uBrightness) _markerGlowMat.uniforms.uBrightness.value = 3.6;
     group.userData.shaderEngineMats = (group.userData.shaderEngineMats || []).concat([_markerGlowMat]);
-    const glowGeo = new THREE.SphereGeometry(ho * 0.30, 12, 8);
+    const glowGeo = new THREE.SphereGeometry(h * 0.30, 12, 8);
     const _wp = new THREE.Vector3();
     for (const t of _thrusterNodes) {
       t.node.getWorldPosition(_wp);
@@ -19536,7 +19448,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     }
   } else if (name === 'Frigate') {
     // NO FLAT SHAPES: engine glows are squashed 3D orbs, not discs.
-    const glowGeo = new THREE.SphereGeometry(ho * 0.35, 12, 8);
+    const glowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
     glowGeo.scale(1, 1, 0.55);
     const g1 = addGlow(glowGeo, engineGlowMat, -w * 0.5, -h * 0.15, tailZ);
     const g2 = addGlow(glowGeo, engineGlowMat,  w * 0.5, -h * 0.15, tailZ);
@@ -19544,11 +19456,11 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     addPlume( w * 0.5, -h * 0.15, tailZ, h * 0.32, l * 1.4, plumeMat);
     engineMesh = g1;
   } else if (name === 'Corvette') {
-    const glowGeo = new THREE.SphereGeometry(ho * 0.6, 14, 10);
+    const glowGeo = new THREE.SphereGeometry(h * 0.6, 14, 10);
     glowGeo.scale(1, 1, 0.55);
     const g = addGlow(glowGeo, engineGlowMat, 0, 0, tailZ);
     addPlume(0, 0, tailZ, h * 0.55, l * 1.8, plumeMat);
-    const thrGeo = new THREE.SphereGeometry(ho * 0.12, 8, 6);
+    const thrGeo = new THREE.SphereGeometry(h * 0.12, 8, 6);
     thrGeo.scale(1, 1, 0.6);
     [-1, 1].forEach(sx => [-1, 1].forEach(sy => {
       addGlow(thrGeo, thrusterMat, sx * w * 0.7, sy * h * 0.5, tailZ - h * 0.3);
@@ -19557,7 +19469,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
     engineMesh = g;
   } else {
     // Dreadnought
-    const bigGlowGeo = new THREE.SphereGeometry(ho * 0.35, 12, 8);
+    const bigGlowGeo = new THREE.SphereGeometry(h * 0.35, 12, 8);
     bigGlowGeo.scale(1, 1, 0.55);
     const big = [];
     [-1, 0, 1].forEach(i => {
@@ -19565,7 +19477,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
       big.push(m);
       addPlume(i * w * 0.5, 0, tailZ, h * 0.32, l * 1.6, plumeMat);
     });
-    const smGlowGeo = new THREE.SphereGeometry(ho * 0.15, 8, 6);
+    const smGlowGeo = new THREE.SphereGeometry(h * 0.15, 8, 6);
     smGlowGeo.scale(1, 1, 0.6);
     [-1.5, -0.5, 0.5, 1.5].forEach(i => {
       addGlow(smGlowGeo, thrusterMat, i * w * 0.35, h * 0.5, tailZ - h * 0.15);
@@ -34632,39 +34544,6 @@ function cycleCampaignShip(dir) {
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
 }
 
-// (v33.19) HUB free-flight ship cycle : D-pad LEFT/RIGHT steps through ALL ships (the hub
-// is a sandbox — no campaign unlock gating). Live-swap at the current position, carrying
-// motion forward. Mirrors cycleCampaignShip but cycles over Object.keys(LOADOUTS) and is
-// gated to LSS.MODE==='freeflight' (so it and cycleCampaignShip can never both fire).
-function cycleHubShip(dir) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || game.state !== 'playing') return;
-  if (!player || player.shipState === 'dead') return;
-  const keys = (typeof LOADOUTS !== 'undefined') ? Object.keys(LOADOUTS) : [];
-  if (keys.length < 2) return;
-  const _now = (game && typeof game.time === 'number') ? game.time : 0;
-  if (_now - (player._lastShipSwap || -9) < 0.6) return;   // anti-spam : each swap rebuilds the mesh + kit
-  let idx = keys.indexOf(player.loadoutKey);
-  if (idx < 0) idx = 0;
-  const nextKey = keys[((idx + (dir | 0)) % keys.length + keys.length) % keys.length];   // wrap-around
-  if (!nextKey || nextKey === player.loadoutKey || !LOADOUTS[nextKey]) return;
-  const _pos = player.position ? player.position.clone() : new THREE.Vector3();
-  const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
-  const _eul = player.euler ? player.euler.clone() : null;
-  player._lastShipSwap = _now;
-  game._liveSwap = true;
-  try { commitLoadout(nextKey); } catch (_) {}
-  game._liveSwap = false;
-  // commitLoadout reset position/heal/spawn-protect — restore so the swap is in-place.
-  if (player.position) player.position.copy(_pos);
-  if (player.mesh) player.mesh.position.copy(_pos);
-  if (player.velocity) player.velocity.copy(_vel);
-  if (_eul && player.euler) player.euler.copy(_eul);
-  player.shipState = 'flying';
-  player.spawnProtection = 0;
-  try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
-  try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
-}
-
 function commitLoadout(key) {
   (function _v12mValidate() {
     const sel = game.selectedMap;
@@ -36774,29 +36653,9 @@ function fireWeapon() {
   // (the early "behind the gun" look came from anchoring at the gun art's
   // top silhouette pixel, i.e. its rear edge) and converges on the
   // crosshair, trail cone starting right at the barrel.
-  // (v33.19) THIRD-PERSON (hub) : shots leave the ship MODEL's real GLB gun barrels
-  // (gun1/gun2 marker empties), alternating L/R per shot, re-aimed to converge on the
-  // reticle so close-range aim isn't thrown by the barrel offset. This drives ALL fire
-  // modes (beam/projectile/spread) + the muzzle flash. First person is unchanged
-  // (camera origin). Visual only — fireHitscan/Projectile/Spread hit math is untouched.
-  // Mirrors how bots/peers already originate fire at shipMuzzleWorld() (v32.21).
-  let _hitOrigin = origin;
-  let _hitForward = forward;
-  if (game.thirdPerson && player.mesh && typeof shipMuzzleWorld === 'function') {
-    const _mn = player.mesh.userData && player.mesh.userData.muzzleNodes;
-    if (_mn && _mn.length) {
-      player._muzzleShot = (player._muzzleShot | 0) + 1;
-      const _gm = shipMuzzleWorld(player.mesh, player._muzzleShot, new THREE.Vector3());
-      _hitForward = origin.clone().addScaledVector(forward, 1600).sub(_gm).normalize();
-      _hitOrigin = _gm;
-    }
-  }
-
-  let _fwOrigin = _hitOrigin;
-  let _fwDir = _hitForward;
-  // (v30.86) TRACKER + PYRO 1st-person : the bolt leaves the painted BARREL MOUTH and
-  // converges on the crosshair. Skipped in 3rd person (the GLB markers above win).
-  if (!game.thirdPerson && w.mode === 'projectile' &&
+  let _fwOrigin = origin;
+  let _fwDir = forward;
+  if (w.mode === 'projectile' &&
       (player.loadoutKey === 'TRACKER' || player.loadoutKey === 'PYRO') &&
       typeof _computeScreenMuzzleWorld === 'function' && _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey]) {
     const _mf = _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey];
@@ -36812,9 +36671,9 @@ function fireWeapon() {
   // network projectile receive paths below.
   emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir);
 
-  if (w.mode === 'hitscan') fireHitscan(_hitOrigin, _hitForward, w);
+  if (w.mode === 'hitscan') fireHitscan(origin, forward, w);
   else if (w.mode === 'projectile') fireProjectile(_fwOrigin, _fwDir, w);
-  else if (w.mode === 'spread') fireSpread(_hitOrigin, _hitForward, w);
+  else if (w.mode === 'spread') fireSpread(origin, forward, w);
 
   // muzzleFlashTimer ticks the cockpit PNG gun-cycle rising
   // edge (see tickGunLayer / updateCockpitFrame) which IS the muzzle flash.
@@ -42765,16 +42624,6 @@ function pollGamepad() {
   // was switching ships while the player strafed. The digital d-pad is kept separate.
   input.gpDpadLeftBtn  = _gpDpadLeftBtn;
   input.gpDpadRightBtn = _gpDpadRightBtn;
-  // (v33.19) D-pad LEFT/RIGHT cycles the player's SHIP in the HUB (free-flight sandbox).
-  // Edge-triggered with its OWN latches (no sharing with the campaign cycle at the gameplay
-  // block) ; gated to freeflight + playing. cycleHubShip self-gates on 'freeflight' and
-  // cycleCampaignShip on 'campaign', so the two are mutually exclusive — no conflict.
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game.state === 'playing') {
-    if (_gpDpadLeftBtn && !input._hubShipLPrev) { try { cycleHubShip(-1); } catch (_) {} }
-    else if (_gpDpadRightBtn && !input._hubShipRPrev) { try { cycleHubShip(1); } catch (_) {} }
-  }
-  input._hubShipLPrev = _gpDpadLeftBtn;
-  input._hubShipRPrev = _gpDpadRightBtn;
   // LB/RB read directly (buttons 4/5). Used for perk cycling
   // in ship-select; falls through harmlessly elsewhere.
   input.gpLB = !!(gp.buttons[4] && (gp.buttons[4].pressed || gp.buttons[4].value > input.triggerThreshold));
@@ -45466,8 +45315,6 @@ document.addEventListener('keydown', e => {
   if (e.repeat) return; // prevent key repeat from double-firing abilities
   const k = e.key.toLowerCase();
   if (k === 'v') { try { _toggleThirdPerson(); } catch (_) {} }   // (v33.14) toggle 1st/3rd person (hub)
-  if (k === '[') { try { cycleHubShip(-1); } catch (_) {} }   // (v33.19) hub ship cycle (keyboard parity for d-pad L/R)
-  if (k === ']') { try { cycleHubShip(1); } catch (_) {} }
   const kb = input.kbBindings;
   if (kb) {
     // Hold-prime abilities route through abilityInputPress, which
