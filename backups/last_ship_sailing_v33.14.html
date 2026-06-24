@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.15</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.15","short_name":"LSS%20v33.15","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.14</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.14","short_name":"LSS%20v33.14","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3273,7 +3273,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.15';
+const LSS_BUILD = '33.14';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6251,7 +6251,6 @@ if (typeof window !== 'undefined') window._campTick = function (dt) { try { Camp
 // the water Reflector then mirrors for free. First-person otherwise (camera at the eye, own
 // ship hidden, cockpit overlays shown). Hub-only for now (combat aim stays first-person).
 const _tpOff = new THREE.Vector3();
-const _tpRight = new THREE.Vector3();
 function _toggleThirdPerson() {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;   // hub only
   game.thirdPerson = !game.thirdPerson;
@@ -36306,14 +36305,6 @@ function updatePlayerMovement(dt) {
     camera.position.add(_tpOff);
     player.mesh.position.copy(player.position);
     player.mesh.quaternion.copy(camera.quaternion);
-    player.mesh.rotateY(Math.PI);   // (v33.14) model nose is +Z ; face it forward (was rear-first)
-    // (v33.14) BANK into strafes/turns (world.html feel) : roll the model around its forward
-    // axis from the lateral velocity. The camera/rig stay level ; only the model tilts.
-    _tpRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
-    const _lat = player.velocity ? player.velocity.dot(_tpRight) : 0;
-    const _bankTarget = Math.max(-1, Math.min(1, _lat / 220)) * 0.5;   // ~28deg max bank
-    game._tpBank = (game._tpBank || 0) + (_bankTarget - (game._tpBank || 0)) * Math.min(1, dt * 6);
-    player.mesh.rotateZ(game._tpBank);
     if (!player.mesh.visible) player.mesh.visible = true;
   } else if (player.mesh && player.mesh.visible && LSS.MODE === 'freeflight') {
     player.mesh.visible = false;   // returned to first person : hide own ship
@@ -41108,11 +41099,6 @@ function dash() {
     player.mesh.quaternion.copy(camera.quaternion);
   }
   const dashColor = 0xaaeeff;
-  // (v33.14) In THIRD-PERSON we DO see our own ship, so spawn the dash streak locally too
-  // (the same boosters peers draw from the broadcast below). First person still suppresses it.
-  if (game.thirdPerson && player.mesh && typeof spawnDashBoosters === 'function') {
-    try { spawnDashBoosters(player.mesh, dashDir, dashColor); } catch (_) {}
-  }
   // Do NOT spawn the dash trail locally. The local view is first-person with
   // the camera sitting at player.position, so a trail originating at the engine
   // plumes starts right at the camera and smears across / beside the view
@@ -42442,12 +42428,6 @@ function pollGamepad() {
   // below whenever a menu is active, so there's no double-fire.
   const _gpDpadUpBtn   = !!(gp.buttons[12] && (gp.buttons[12].pressed || gp.buttons[12].value > input.triggerThreshold));
   const _gpDpadDownBtn = !!(gp.buttons[13] && (gp.buttons[13].pressed || gp.buttons[13].value > input.triggerThreshold));
-  // (v33.14) D-pad DOWN (the DIGITAL button only, NOT the sticks) toggles 1st/3rd person in
-  // the hub. Vertical move is on L3/R3, so the d-pad is free. Edge-triggered, gameplay only.
-  if (_gpDpadDownBtn && !input._tpDpadPrev && typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game.state === 'playing') {
-    try { _toggleThirdPerson(); } catch (_) {}
-  }
-  input._tpDpadPrev = _gpDpadDownBtn;
   const _gpStickUp   = (gp.axes[1] !== undefined && gp.axes[1] < -0.6);
   const _gpStickDown = (gp.axes[1] !== undefined && gp.axes[1] >  0.6);
   input.gpDpadUp   = _gpDpadUpBtn   || _gpStickUp;
@@ -54795,22 +54775,17 @@ function gameLoop(timestamp) {
     // third-person / death cam, and other peers see them on our broadcast
     // position via their NetworkPlayer iteration).
     if (_vrThrottleTier < 2) emitDamageState(player, dt);
-    // Spawn-protection bubble on the local player too (visible in death cam / third-person).
-    // (v33.14) In the free-flight HUB the user wants NO always-on shield bubble — the shield
-    // should only flash when actually hit (which never happens in the combat-free hub). So
-    // force the shield intensity to 0 there ; combat keeps the spawn-protection bubble.
-    if (player.mesh && player.mesh.userData && player.mesh.userData.shieldMesh) {
+    // Spawn-protection bubble on the local player too (visible in
+    // death cam / third-person). Same fade curve as the broadcast version.
+    if (player.mesh && player.mesh.userData && player.mesh.userData.shieldMesh && player.spawnProtection > 0) {
+      const frac = Math.min(1, player.spawnProtection / (LSS.SPAWN_PROTECTION || 3));
+      // Drive the energy-shield shader's intensity. setShieldIntensity
+      // handles both the new ShaderMaterial and any legacy MeshBasicMaterial.
       const m = player.mesh.userData.shieldMesh.material;
-      if (LSS.MODE === 'freeflight') {
-        if (m.uniforms && m.uniforms.intensity) m.uniforms.intensity.value = 0;
-        else if ('opacity' in m) m.opacity = 0;
-      } else if (player.spawnProtection > 0) {
-        const frac = Math.min(1, player.spawnProtection / (LSS.SPAWN_PROTECTION || 3));
-        if (m.uniforms && m.uniforms.intensity) {
-          m.uniforms.intensity.value = Math.max(m.uniforms.intensity.value, 1.0 * frac);
-        } else {
-          m.opacity = Math.max(m.opacity || 0, 0.30 * frac);
-        }
+      if (m.uniforms && m.uniforms.intensity) {
+        m.uniforms.intensity.value = Math.max(m.uniforms.intensity.value, 1.0 * frac);
+      } else {
+        m.opacity = Math.max(m.opacity || 0, 0.30 * frac);
       }
     }
     // Heat-trail blur on the player too (visible in third-person / death cam)
