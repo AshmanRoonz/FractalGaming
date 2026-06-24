@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v32.99</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.99","short_name":"LSS%20v32.99","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v32.96</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v32.96","short_name":"LSS%20v32.96","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3221,7 +3221,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '32.99';
+const LSS_BUILD = '32.96';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -3649,10 +3649,6 @@ const input = {
   gpCycleWallPattern: false, gpCycleWallPatternPrev: false,
   gpDpadUp: false, gpDpadUpPrev: false,
   gpDpadDown: false, gpDpadDownPrev: false,
-  gpDpadLeft: false, gpDpadLeftPrev: false,    // menu nav (button OR left-stick)
-  gpDpadRight: false, gpDpadRightPrev: false,
-  gpDpadLeftBtn: false, gpDpadLeftBtnPrev: false,    // (v32.99) digital-d-pad-ONLY (no stick) — drives the in-game ship cycle
-  gpDpadRightBtn: false, gpDpadRightBtnPrev: false,
   gpLB: false, gpLBPrev: false,
   gpRB: false, gpRBPrev: false,
   gpMoveX: 0, gpMoveY: 0,
@@ -5767,27 +5763,14 @@ const CampaignMode = {
     // forever. Instead, after a brief beat, respawn at the START of the leg (the
     // spawn arena ; respawnPlayer forces that position in campaign).
     if (player && player.shipState === 'dead') {
-      // (v32.98) Death in campaign : after a brief DESTROYED beat, drop to the
-      // ship-select screen ONCE so the player can re-pick a pilot perk and/or a
-      // different UNLOCKED ship. commitLoadout sees game._campReentry and respawns
-      // them into the LIVE leg at the spawn arena (no world rebuild) — the sim +
-      // renderFrame keep running underneath. In co-op the host keeps owning the PvE
-      // and the player rejoins automatically (their s.dead flips false on respawn ;
-      // they spawn at the start and must catch up). _campReentryShown is the one-shot
-      // guard (this update runs every frame while dead).
-      if (!game._campReentryShown) {
-        c._deathT = (c._deathT || 0) + dt;
-        if (c._deathT >= 2.0) {
-          c._deathT = 0;
-          game._campReentry = true;
-          game._campReentryShown = true;
-          try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
-        }
+      c._deathT = (c._deathT || 0) + dt;
+      if (c._deathT >= 2.0) {
+        c._deathT = 0;
+        try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
       }
-      return;   // hold the journey while dead / re-picking
+      return;   // hold the journey while dead
     }
     c._deathT = 0;
-    game._campReentryShown = false;   // (v32.98) reset the death-reentry one-shot once alive again
     // (v32.76) Co-op authority : in a networked campaign ONLY one peer (amStasisOwner,
     // the lowest peerId) runs the PvE — spawns the hoard waves + boss, decides phase
     // transitions + the portal/advance — and the rest proxy it via bot_roster/bot_state
@@ -6031,7 +6014,6 @@ function _campInitState() {
   game.testMode = true;       // endless session : the win block is testMode-gated
   game.raceNoTimer = true;    // drop the 80s round clock (endByTimer checks !raceNoTimer)
   game.currentRound = 1;
-  game._campReentry = false; game._campReentryShown = false; game._liveSwap = false;   // (v32.97/98) clear stale death-reentry / live-swap latches
   // (v32.54) Select the first campaign LEG. Campaign legs live in MAP_DATA under
   // a camp_ prefix ; the ship-select carousel lists only the unlocked ones, and
   // getNextMap() builds whichever leg is selected. 'camp_approach' === the
@@ -6945,7 +6927,6 @@ let _mapSelectorRendered = false;
 
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
-  if (typeof game !== 'undefined' && game && game._campReentry) return;   // (v32.98) death-reentry : can't switch legs mid-journey (would re-theme the live leg)
   // (v27) MP lock : once any peer has committed in ship-select, refuse
   // to switch maps. The map already-matches case still falls through so
   // a peer receiving the world-sync mapKey can re-paint the UI.
@@ -33591,47 +33572,6 @@ function _v12mLobbyError(msg) {
   alert(msg);
 }
 
-// (v32.97) LIVE in-flight ship cycle for campaign : D-pad LEFT/RIGHT steps through the
-// player's UNLOCKED ships and applies the chosen one AT THE CURRENT POSITION, carrying
-// damage forward (so it's a tactical swap, not a free heal/respawn). Reuses the full
-// commitLoadout player-side application via the game._liveSwap flag (which makes
-// commitLoadout skip the world rebuild + warmup/launchCountdown and bail early).
-function cycleCampaignShip(dir) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign' || !game.campaign || game.state !== 'playing') return;
-  if (!player || player.shipState === 'dead') return;
-  const keys = game.campaign.unlockedLoadouts;
-  if (!Array.isArray(keys) || keys.length < 2) return;
-  // Anti-spam : a mashed d-pad can't rapid-swap (each swap rebuilds the mesh + kit).
-  const _now = (game && typeof game.time === 'number') ? game.time : 0;
-  if (_now - (player._lastShipSwap || -9) < 0.6) return;
-  let idx = keys.indexOf(player.loadoutKey);
-  if (idx < 0) idx = 0;
-  const nextKey = keys[((idx + (dir | 0)) % keys.length + keys.length) % keys.length];
-  if (!nextKey || nextKey === player.loadoutKey || typeof LOADOUTS === 'undefined' || !LOADOUTS[nextKey]) return;
-  // Preserve position / orientation / motion + the current damage fraction.
-  const _pos = player.position ? player.position.clone() : new THREE.Vector3();
-  const _vel = player.velocity ? player.velocity.clone() : new THREE.Vector3();
-  const _eul = player.euler ? player.euler.clone() : null;
-  const _hpFrac = (player.maxHealth > 0) ? (player.health / player.maxHealth) : 1;
-  const _shFrac = (player.maxShield > 0) ? (player.shield / player.maxShield) : 1;
-  player._lastShipSwap = _now;
-  game._liveSwap = true;
-  try { commitLoadout(nextKey); } catch (_) {}
-  game._liveSwap = false;
-  // commitLoadout full-healed + reset position to (0,0,0) + granted spawn-protection —
-  // undo all three so a swap can't be abused as a free respawn. Stay put, carry damage.
-  if (player.position) player.position.copy(_pos);
-  if (player.mesh) player.mesh.position.copy(_pos);
-  if (player.velocity) player.velocity.copy(_vel);
-  if (_eul && player.euler) player.euler.copy(_eul);
-  player.health = Math.max(1, Math.min(player.maxHealth, Math.round(player.maxHealth * _hpFrac)));
-  player.shield = Math.max(0, Math.min(player.maxShield, Math.round(player.maxShield * _shFrac)));
-  player.shipState = 'flying';
-  player.spawnProtection = 0;
-  try { if (typeof _quickEquipRefresh === 'function') _quickEquipRefresh(); } catch (_) {}
-  try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
-}
-
 function commitLoadout(key) {
   (function _v12mValidate() {
     const sel = game.selectedMap;
@@ -33760,7 +33700,7 @@ function commitLoadout(key) {
   player.euler = new THREE.Euler(0, 0, 0, 'YXZ');
   // Match stats (kills/deaths/damage) only reset on a fresh match. Between
   // rounds they accumulate so the scoreboard reflects the whole match.
-  if (!midMatch && !game._liveSwap) {   // (v32.97) a live in-flight ship-swap keeps your run stats
+  if (!midMatch) {
     player.kills = 0;
     player.deaths = 0;
     player.damageDealt = 0;
@@ -33831,29 +33771,6 @@ function commitLoadout(key) {
   document.getElementById('weapon-name').textContent = loadout.weapon.name;
 
   buildAbilityHUD();
-
-  // (v32.97) LIVE SHIP SWAP (campaign D-pad cycle) : everything above (chassis /
-  // weapon / abilities / mesh rebuild) is exactly what we want, but the leg is
-  // already live — bail BEFORE the world-rebuild + warmup/launchCountdown fork.
-  // cycleCampaignShip() restores position/velocity + carries damage forward (no
-  // heal, no free spawn-protection) right after this returns. game.state stays
-  // 'playing'.
-  if (game._liveSwap) return;
-
-  // (v32.98) CAMPAIGN DEATH-REENTRY : the player died, re-picked a ship/perk on the
-  // ship-select screen, and confirmed. The leg is still live — apply the new ship
-  // (done above) then respawn into it at the spawn arena. respawnPlayer forces the
-  // -Z spawn + full heal + spawn-protection + clears the death-cam ; game.state stays
-  // 'playing' (no world rebuild, no warmup/launchCountdown). Co-op rejoin is automatic
-  // (the s.dead broadcast flips false on respawn).
-  if (game._campReentry) {
-    game._campReentry = false;
-    try { const _sel = document.getElementById('ship-select'); if (_sel) _sel.classList.remove('active'); } catch (_) {}
-    try { _xrMenuForceHidden = true; } catch (_) {}
-    try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
-    return;
-  }
-
   // NOTE: ship-select stays visible here; launchCountdown() hides it when the
   // 3-2-1-LAUNCH ticker finishes and the player actually warps into the arena.
   // Pointer lock is also deferred to that moment.
@@ -41617,8 +41534,6 @@ function pollGamepad() {
   input.gpDpadDownPrev = input.gpDpadDown;
   input.gpDpadLeftPrev = input.gpDpadLeft;
   input.gpDpadRightPrev = input.gpDpadRight;
-  input.gpDpadLeftBtnPrev = input.gpDpadLeftBtn;     // (v32.99) edge-detect for the d-pad-only ship cycle
-  input.gpDpadRightBtnPrev = input.gpDpadRightBtn;
   // Shoulder buttons LB/RB for cycling the perk picker in
   // ship-select. Bumpers are unused during menu nav so they're safe to
   // dedicate to perk navigation.
@@ -41660,11 +41575,6 @@ function pollGamepad() {
   const _gpStickRight = (gp.axes[0] !== undefined && gp.axes[0] >  0.6);
   input.gpDpadLeft  = _gpDpadLeftBtn  || _gpStickLeft;
   input.gpDpadRight = _gpDpadRightBtn || _gpStickRight;
-  // (v32.99) D-pad BUTTON-ONLY (no left-stick fallback) for the in-game campaign ship
-  // cycle. axes[0] is the STRAFE axis, so the menu-nav gpDpadLeft/Right (button|stick)
-  // was switching ships while the player strafed. The digital d-pad is kept separate.
-  input.gpDpadLeftBtn  = _gpDpadLeftBtn;
-  input.gpDpadRightBtn = _gpDpadRightBtn;
   // LB/RB read directly (buttons 4/5). Used for perk cycling
   // in ship-select; falls through harmlessly elsewhere.
   input.gpLB = !!(gp.buttons[4] && (gp.buttons[4].pressed || gp.buttons[4].value > input.triggerThreshold));
@@ -41896,11 +41806,6 @@ function pollGamepad() {
     if (input.gpAbility2 && !input.gpAbility2Prev) abilityInputPress(2);
     if (!input.gpAbility2 && input.gpAbility2Prev) abilityInputRelease(2);
     if (input.gpCore && !input.gpCorePrev) activateCore();
-    // (v32.97) Campaign : the DIGITAL D-pad LEFT/RIGHT cycles your UNLOCKED ships
-    // in-flight. (v32.99) Use the BUTTON-ONLY reads — NOT gpDpadLeft/Right, which fold
-    // in the left stick (= the strafe axis) and were swapping ships while strafing.
-    if (input.gpDpadLeftBtn && !input.gpDpadLeftBtnPrev) cycleCampaignShip(-1);
-    else if (input.gpDpadRightBtn && !input.gpDpadRightBtnPrev) cycleCampaignShip(1);
   }
 }
 
