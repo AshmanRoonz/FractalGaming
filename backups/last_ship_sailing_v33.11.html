@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.13</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.13","short_name":"LSS%20v33.13","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.11</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.11","short_name":"LSS%20v33.11","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -383,9 +383,6 @@ body.vr-active #fps-counter { display: none !important; }
   z-index: 10; pointer-events: none; color: #fff; text-align: center;
   font-family: 'Rajdhani', sans-serif; font-size: 12px; letter-spacing: 1px;
 }
-/* (v33.12) the free-flight HUB has no rounds/teams ; hide the combat round bar + countdown. */
-body.lss-freeflight #round-info,
-body.lss-freeflight #ov-countdown { display: none !important; }
 #round-timer {
   font-family: 'Orbitron', sans-serif; font-size: 34px; font-weight: 700;
   letter-spacing: 2px;
@@ -3267,7 +3264,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.13';
+const LSS_BUILD = '33.11';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6172,7 +6169,6 @@ const FreeFlightMode = {
   },
   onTeardown() {
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; } catch (_) {}
-    try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v33.12) restore the combat round/FLEET HUD
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   // drop the hub rift on the way out
     try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   // (v33.04) drop the hub water on the way out
     this._enteringCampaign = false; this._riftPos = null; this._deathT = 0;
@@ -6246,7 +6242,6 @@ function startFreeFlight() {
   net.active = false;
   net.solo = true;
   LSS.MODE = 'freeflight';
-  try { document.body.classList.add('lss-freeflight'); } catch (_) {}   // (v33.12) hide the combat round/FLEET HUD in the hub
   game.testMode = false;      // (v33.02) NOT test mode — endlessness is keyed on LSS.MODE==='freeflight' (win-block + warmup-skip), so the dev Theme panel + test-mode look/fire carve-outs never engage in the hub
   game.raceNoTimer = true;    // no 80s round clock / HUD timer
   game.currentRound = 1;
@@ -17184,52 +17179,21 @@ const _swGd = new THREE.Object3D();
 // true continuous apex), so trees/grass placed at the continuous height floated above the
 // surface. Sampling on the same lattice lands them on the rendered facet.
 const _SW_GRID = _SW_CHUNK / _SW_CELLS;
-// (v33.13) The mesh JITTERS each grid vertex by ±step*0.40 in X/Z (de-grid, see _swBuildShell)
-// and samples height at the JITTERED point, then triangulates each cell into 2 triangles. To
-// land foliage exactly on the RENDERED facet (no float on peaks, no over-sink near cliffs) we
-// replicate the jitter for the 4 cell corners and BARYCENTRIC-interpolate the height of the
-// actual triangle the point falls in. (Un-jittered bilinear floated up to ~16u on peaks ;
-// min-of-corners over-sank up to ~34u near cliff edges — this exact facet does neither.)
 function _stGroundYGrid(x, z, T) {
-  const g = _SW_GRID, J = g * 0.40;
-  const gi = Math.floor(x / g), gj = Math.floor(z / g);
-  const fx = x / g - gi, fz = z / g - gj;
-  const corner = (ci, cj) => {
-    const jx = ci * g + (_stHash2(ci * 1.7, cj * 2.3) - 0.5) * J;
-    const jz = cj * g + (_stHash2(ci * 3.1 + 5.0, cj * 1.1 + 9.0) - 0.5) * J;
-    return { x: jx, z: jz, h: _stGroundYCarved(jx, jz, T) };
-  };
-  const c00 = corner(gi, gj), c10 = corner(gi + 1, gj), c01 = corner(gi, gj + 1), c11 = corner(gi + 1, gj + 1);
-  // mesh splits the quad along the c10–c01 diagonal (idx a,c,b / b,c,d in _swBuildShell)
-  let V0, V1, V2;
-  if (fx + fz <= 1.0) { V0 = c00; V1 = c01; V2 = c10; } else { V0 = c10; V1 = c01; V2 = c11; }
-  const d = (V1.z - V2.z) * (V0.x - V2.x) + (V2.x - V1.x) * (V0.z - V2.z);
-  if (Math.abs(d) < 1e-6) return (V0.h + V1.h + V2.h) / 3;
-  const w0 = ((V1.z - V2.z) * (x - V2.x) + (V2.x - V1.x) * (z - V2.z)) / d;
-  const w1 = ((V2.z - V0.z) * (x - V2.x) + (V0.x - V2.x) * (z - V2.z)) / d;
-  return w0 * V0.h + w1 * V1.h + (1 - w0 - w1) * V2.h;
+  const g = _SW_GRID;
+  const gx = Math.floor(x / g) * g, gz = Math.floor(z / g) * g;
+  const fx = (x - gx) / g, fz = (z - gz) / g;
+  const h00 = _stGroundYCarved(gx, gz, T),     h10 = _stGroundYCarved(gx + g, gz, T);
+  const h01 = _stGroundYCarved(gx, gz + g, T), h11 = _stGroundYCarved(gx + g, gz + g, T);
+  return (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz;
 }
 function _swBladeGeoGet(){ if(_swBladeGeo)return _swBladeGeo; const h=64,w=8;
-  // (v33.12) blade with a darker central MIDRIB (vein) running from the base up to ~85%
-  // (stops short of the tip) so the flat blade reads as a real grass leaf rather than a
-  // plain triangle. 8 verts : base L/C/R, mid L/C/R, vein-top C, tip C ; the centre column
-  // (1,4,6) is tinted darker so the rib shows as a line down the middle.
-  const v=new Float32Array([
-    -w/2,0,0,  0,0,0,  w/2,0,0,                         // 0,1,2  base  L,C,R
-    -w*0.30,h*0.55,0,  0,h*0.55,0,  w*0.30,h*0.55,0,     // 3,4,5  mid   L,C,R
-    0,h*0.85,0,                                          // 6      vein-top centre
-    0,h,0 ]);                                            // 7      tip
+  const v=new Float32Array([-w/2,0,0, w/2,0,0, -w*0.30,h*0.55,0, w*0.30,h*0.55,0, 0,h,0]);
   const base=[0.15,0.30,0.12], mid=[0.27,0.45,0.16], tip=[0.55,0.66,0.30];
-  const vBase=[0.09,0.17,0.07], vMid=[0.15,0.26,0.10], vTop=[0.20,0.33,0.13];   // darker midrib
-  const col=new Float32Array([
-    base[0],base[1],base[2],  vBase[0],vBase[1],vBase[2],  base[0],base[1],base[2],
-    mid[0],mid[1],mid[2],     vMid[0],vMid[1],vMid[2],     mid[0],mid[1],mid[2],
-    vTop[0],vTop[1],vTop[2],
-    tip[0],tip[1],tip[2] ]);
+  const col=new Float32Array([base[0],base[1],base[2], base[0],base[1],base[2], mid[0],mid[1],mid[2], mid[0],mid[1],mid[2], tip[0],tip[1],tip[2]]);
   const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
   g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
-  g.setIndex([0,1,3, 1,4,3,  1,2,4, 2,5,4,  3,4,6, 3,6,7,  4,5,6, 5,6,7]);
-  g.computeVertexNormals(); _swBladeGeo=g; return g; }
+  g.setIndex([0,1,2, 1,3,2, 2,3,4]); g.computeVertexNormals(); _swBladeGeo=g; return g; }
 function _swGrassMatGet(){ if(_swGrassMat)return _swGrassMat;
   const m=new THREE.MeshStandardMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.onBeforeCompile=(sh)=>{ sh.uniforms.uTime=_swU.uTime; sh.uniforms.uCam=_swU.uCam; sh.uniforms.uFadeA=_swU.uFadeA; sh.uniforms.uFadeB=_swU.uFadeB;
@@ -17289,18 +17253,11 @@ function _swGenTree(opt){
   function tri(a,b,c,col){ vtx(a,col); vtx(b,col); vtx(c,col); }
   function ringPt(center,q,r,j,seg){ const a=j/seg*Math.PI*2; return vT.set(Math.cos(a)*r,0,Math.sin(a)*r).applyQuaternion(q).clone().add(center); }
   function leafCard(center,q,sz){
-    // (v33.12) THREE crossed billboard planes (was 2) for a fuller canopy, each with a
-    // VERTICAL GRADIENT (darker at the base, lighter at the tip) + per-card hue jitter
-    // toward warm yellow-green so the foliage reads as layered leaves, not flat paper.
-    const hj=rng(), warm=0.7+rng()*0.5;
-    const cTop=[Math.min(1,leafC[0]*(0.9+hj*0.6)*warm), Math.min(1,leafC[1]*(0.9+hj*0.4)), Math.min(1,leafC[2]*(0.75+hj*0.3))];
-    const cBot=[cTop[0]*0.5, cTop[1]*0.5, cTop[2]*0.5];
-    const cr=[[-sz,0,0],[sz,0,0],[sz,sz*1.6,0],[-sz,sz*1.6,0]];
-    const emit=(qq)=>{ const w=cr.map(p=>vT.set(p[0],p[1],p[2]).applyQuaternion(qq).clone().add(center));
-      vtx(w[0],cBot); vtx(w[1],cBot); vtx(w[2],cTop); vtx(w[0],cBot); vtx(w[2],cTop); vtx(w[3],cTop); };
-    emit(q);
-    emit(q.clone().multiply(qTmp.setFromAxisAngle(Y,1.0472)));   // +60 deg
-    emit(q.clone().multiply(qTmp.setFromAxisAngle(Y,2.0944)));   // +120 deg
+    const c=[leafC[0]*(0.8+rng()*0.4),leafC[1]*(0.8+rng()*0.4),leafC[2]*(0.8+rng()*0.4)];
+    const cr=[[-sz,0,0],[sz,0,0],[sz,sz*1.5,0],[-sz,sz*1.5,0]];
+    const w=cr.map(p=>vT.set(p[0],p[1],p[2]).applyQuaternion(q).clone().add(center)); tri(w[0],w[1],w[2],c); tri(w[0],w[2],w[3],c);
+    const q2=q.clone().multiply(qTmp.setFromAxisAngle(Y,Math.PI/2));
+    const w2=cr.map(p=>vT.set(p[0],p[1],p[2]).applyQuaternion(q2).clone().add(center)); tri(w2[0],w2[1],w2[2],c); tri(w2[0],w2[2],w2[3],c);
   }
   function branch(origin,orient,length,radius,level){
     const sec=opt.sections[level]||4, seg=opt.segments[level]||4, taper=opt.taper[level]!=null?opt.taper[level]:0.7;
@@ -17342,11 +17299,9 @@ function _swTreeGeoGet(){
   // ez-tree presets (dgreenheck/ez-tree), poly-reduced for instancing. angle/start are
   // level-keyed objects (1-based) ; length/radius/sections/segments/taper/twist/gnarliness/children are 0-based arrays.
   const presets=[
-    // (v33.12) higher-fidelity ez-tree presets : +1 branch level (finer twigs), rounder
-    // trunks (more segments), and denser/smaller leaves so the canopy reads full, not paper.
-    { seed:1011, levels:3, children:[6,4,3], angle:{1:54,2:58,3:50}, length:[34,12,7,5], radius:[1.4,0.85,0.55,0.4], sections:[7,5,4,3], segments:[8,6,5,4], start:{1:0.45,2:0.1,3:0.15}, taper:[0.73,0.45,0.55,0.7], twist:[-0.2,0.4,0.3,0], gnarliness:[0,-0.1,-0.13,-0.15], force:0.02, leaf:[0.20,0.44,0.16], leaf_count:10, leaf_size:1.8, leaf_start:0.2, leaf_angle:42, leaf_var:0.6 },
-    { seed:2022, evergreen:true, levels:2, children:[22,4], angle:{1:108,2:64}, length:[54,24,9], radius:[1.05,0.34,0.18], sections:[9,6,3], segments:[8,5,4], start:{1:0.14,2:0.2}, taper:[0.7,0.85,0.9], twist:[0,0,0], gnarliness:[0.05,0.06,0.06], force:-0.003, leaf:[0.15,0.39,0.18], leaf_count:9, leaf_size:2.0, leaf_start:0.1, leaf_angle:58, leaf_var:0.3 },
-    { seed:3033, levels:3, children:[7,4,3], angle:{1:70,2:32,3:28}, length:[48,8,7,5], radius:[0.7,0.4,0.45,0.4], sections:[8,6,4,3], segments:[7,5,4,4], start:{1:0.55,2:0.35,3:0.2}, taper:[0.4,0.15,0.5,0.7], twist:[0,0,0,0], gnarliness:[0.05,0.1,0.1,0.1], force:0.015, leaf:[0.30,0.52,0.22], leaf_count:11, leaf_size:1.9, leaf_start:0.12, leaf_angle:30, leaf_var:0.6 },
+    { seed:1011, levels:2, children:[5,3], angle:{1:54,2:58}, length:[34,11,12], radius:[1.4,0.85,0.6], sections:[5,3,2], segments:[6,4,3], start:{1:0.45,2:0.1}, taper:[0.73,0.45,0.7], twist:[-0.2,0.4,0], gnarliness:[0,-0.1,-0.13], force:0.02, leaf:[0.20,0.44,0.16], leaf_count:6, leaf_size:3.4, leaf_start:0.2, leaf_angle:42, leaf_var:0.6 },
+    { seed:2022, evergreen:true, levels:1, children:[16], angle:{1:108}, length:[54,24], radius:[1.05,0.34], sections:[7,5], segments:[6,4], start:{1:0.14}, taper:[0.7,0.85], twist:[0,0], gnarliness:[0.05,0.06], force:-0.003, leaf:[0.15,0.39,0.18], leaf_count:6, leaf_size:2.6, leaf_start:0.1, leaf_angle:58, leaf_var:0.3 },
+    { seed:3033, levels:2, children:[6,3], angle:{1:70,2:32}, length:[48,7,11], radius:[0.7,0.4,0.55], sections:[6,4,3], segments:[5,4,3], start:{1:0.55,2:0.35}, taper:[0.4,0.15,0.7], twist:[0,0,0], gnarliness:[0.05,0.1,0.1], force:0.015, leaf:[0.30,0.52,0.22], leaf_count:7, leaf_size:2.8, leaf_start:0.12, leaf_angle:30, leaf_var:0.6 },
   ];
   _swTreeGeos=presets.map(p=>_swGenTree(p)); return _swTreeGeos;
 }
@@ -17563,7 +17518,7 @@ function _swWaterReflectShader() {
     uniforms: THREE.UniformsUtils.merge([
       THREE.UniformsLib.fog,
       { color: { value: null }, tDiffuse: { value: null }, textureMatrix: { value: null },
-        uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 } },   // (v33.12) uFade crossfades the mirror out across the surface band
+        uTime: { value: 0 }, uCam: { value: new THREE.Vector3() } },
     ]),
     vertexShader: [
       'uniform mat4 textureMatrix;',
@@ -17580,7 +17535,7 @@ function _swWaterReflectShader() {
       '}',
     ].join('\n'),
     fragmentShader: [
-      'uniform vec3 color;', 'uniform sampler2D tDiffuse;', 'uniform float uTime;', 'uniform vec3 uCam;', 'uniform float uFade;',
+      'uniform vec3 color;', 'uniform sampler2D tDiffuse;', 'uniform float uTime;', 'uniform vec3 uCam;',
       'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_fragment>',
       'void main(){',
       '  float t = uTime; vec2 q = vWP.xz;',
@@ -17599,7 +17554,7 @@ function _swWaterReflectShader() {
       '  float fres = pow(clamp(1.0 - max(dot(-V,N),0.0),0.0,1.0), 4.0);',
       '  fres = clamp(0.14 + 0.86*fres, 0.0, 1.0);',
       '  vec3 outc = mix(color, refl, fres);',
-      '  gl_FragColor = vec4(outc, 0.93 * uFade);',
+      '  gl_FragColor = vec4(outc, 0.93);',
       '  #include <fog_fragment>',
       '}',
     ].join('\n'),
@@ -17626,7 +17581,7 @@ function _swBuildHubWater(T) {
     mesh.material.fog = true;
     mesh.material.needsUpdate = true;
     // translucent UNDERSIDE plane for the underwater (v33.09) view (the Reflector is top-only)
-    const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   // (v33.12) closer to the mirror tint so the surface crossfade has nothing to pop
+    const undMat = new THREE.MeshBasicMaterial({ color: 0x0c3d4f, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });
     const und = new THREE.Mesh(geo.clone(), undMat);
     und.rotation.x = -Math.PI / 2; und.renderOrder = 2; und.frustumCulled = false; und.matrixAutoUpdate = false;
     und.position.set(camera.position.x, WL, camera.position.z); und.updateMatrix();
@@ -17658,29 +17613,18 @@ function _swBuildHubWater(T) {
 function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   const WL = w.userData.WL;
+  const above = camera.position.y > WL;
   w.position.set(camera.position.x, WL, camera.position.z);
   w.updateMatrix(); w.updateMatrixWorld(true);
-  // (v33.12) CROSSFADE the planar mirror (above) and the translucent underside (below)
-  // across a band around WL instead of a hard pop at the exact surface — crossing the
-  // waterline used to flip between two differently-tinted sheets ("two layers"). Both are
-  // transparent + depthWrite:false, so dissolving them is free. The band ~matches the
-  // underwater fog/CSS ±12u hysteresis so the tint + fog ease together. Reflector still
-  // skips its RT once fully below (w.visible=false).
+  // (v33.10) the planar mirror only renders from above the surface ; the underside plane
+  // carries the underwater view. Toggle by camera height (Reflector skips its RT when hidden).
   const und = game._hubWaterUnder;
   if (und) {
     und.position.set(camera.position.x, WL, camera.position.z);
     und.updateMatrix(); und.updateMatrixWorld(true);
-    const BAND = 14;
-    const tt = Math.max(0, Math.min(1, (camera.position.y - WL + BAND) / (2 * BAND)));   // 0 fully under .. 1 fully above
-    if (game._swWaterT === undefined || Math.abs(tt - game._swWaterT) > 0.002) {
-      game._swWaterT = tt;
-      w.visible = tt > 0.001;
-      und.visible = tt < 0.999;
-      if (w.material && w.material.uniforms && w.material.uniforms.uFade) w.material.uniforms.uFade.value = tt;
-      if (und.material) und.material.opacity = 0.85 * (1 - tt);
-    }
+    if (w.visible !== above) w.visible = above;
+    if (und.visible !== !above) und.visible = !above;
   }
-  // (potato fallback : a single DoubleSide plane, no underside — it stays visible both ways.)
 }
 
 // (v33.09) UNDERWATER look for the mossy hub. When the camera dips below the water plane
@@ -25831,12 +25775,6 @@ class ClusterObstacle {
     // gas envelops the atom more visibly, sprite count 13 → 17 so the
     // body of the cloud reads thicker, alpha up from 0.75 to 0.80.
     const radius = (child.scale || child.radius || 20) * 4.4;
-    // (v33.12) HUB : don't anchor rock-atom smoke under the lake — lift the anchor to the
-    // shoreline so it steams at the waterline instead of glowing beneath the mirror.
-    if (game._hubWater) {
-      const _minY = game._hubWater.userData.WL + radius * 0.5;
-      if (child.position.y < _minY) child.position.y = _minY;
-    }
     const cloud = new GasCloud(billboardCloudSystem, child.position, {
       boundsRadius:   radius,
       spriteScale:    radius * 1.55,
@@ -27704,20 +27642,6 @@ function updateDetachedGasPockets(dt) {
     // far from any wake source eventually decay to a complete stop and
     // look frozen on the map.
     p.velocity.multiplyScalar(Math.pow(0.97, dt));
-
-    // (v33.12) In the mossy HUB, keep drifting cloud pockets ABOVE the lake surface —
-    // a cloud sinking under the translucent water plane reads as a glitch. Lift the centre
-    // to the shoreline and bounce its downward drift. Gated on the hub water existing, so
-    // classic/race + the underwater-diving feature are untouched.
-    if (game._hubWater) {
-      const _wl = game._hubWater.userData.WL;
-      const _minY = _wl + (p.gasCloud ? (p.gasCloud.boundsRadius || 0) : 0) * 0.5;
-      if (center.y < _minY) {
-        center.y = _minY;
-        if (p.velocity.y < 0) p.velocity.y = 0;
-        if (p._driftVelocity && p._driftVelocity.y < 0) p._driftVelocity.y = -p._driftVelocity.y;
-      }
-    }
 
     // (Phase 2 / v15a shockwave-only) Wall repulsion via worldSDF. SDF
     // semantics: negative = inside playable space, positive = inside
@@ -41100,9 +41024,7 @@ function updateRoundSystem(dt) {
     const selectActive = document.getElementById('ship-select') &&
                          document.getElementById('ship-select').classList.contains('active');
     // Cinematic 3-2-1 countdown in the final seconds of warmup.
-    // (v33.12) the free-flight HUB has no rounds — skip the "ROUND N" countdown.
-    const _ffHubCD = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
-    if (window.Overlays && !selectActive && !_ffHubCD) {
+    if (window.Overlays && !selectActive) {
       for (let n = 3; n >= 1; n--) {
         if (prev > n && game.warmupTimer <= n) {
           Overlays.countdown(n, 'ROUND ' + (game.currentRound || 1));
