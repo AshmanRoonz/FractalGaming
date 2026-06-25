@@ -13248,6 +13248,27 @@ if (typeof navigator !== 'undefined' && navigator.gpu && navigator.gpu.requestAd
   } catch (e) { /* WebGPU may be locked behind a flag; that's fine */ }
 }
 let renderer;
+// (v33.46) DEFENSIVE COLORSPACE GUARD. A texture occasionally reaches GPU upload with an undefined
+// colorSpace (a water render-target/texture path, free-flight only) and three's ColorManagement
+// .getPrimaries/.getTransfer then read a prop of undefined and THROW inside renderBufferDirect. In
+// flatscreen the rAF loop just drops that frame ; in WebXR a throw inside setAnimationLoop FREEZES the
+// headset -> which is exactly why VR works in every mode EXCEPT free-flight (the only mode with water).
+// Make the lookup non-fatal : unknown/undefined colorSpace falls back to sRGB instead of crashing.
+try {
+  var _CM = (typeof THREE !== 'undefined') && THREE.ColorManagement;
+  if (_CM && !_CM.__lssGuard) {
+    _CM.__lssGuard = true;
+    ['getPrimaries', 'getTransfer'].forEach(function (fn) {
+      if (typeof _CM[fn] === 'function') {
+        var _orig = _CM[fn].bind(_CM);
+        _CM[fn] = function (cs) {
+          try { var r = _orig(cs); if (r === undefined || r === null) throw 0; return r; }
+          catch (e) { return _orig(THREE.SRGBColorSpace); }
+        };
+      }
+    });
+  }
+} catch (_) {}
 try {
   renderer = new THREE.WebGLRenderer({
     antialias: true,
