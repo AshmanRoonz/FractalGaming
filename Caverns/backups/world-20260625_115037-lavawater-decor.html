@@ -136,11 +136,6 @@ function groundBase(x, z) {
   const mm = mountainMask(wx, wz);
   const ridge = ridged(wx, wz, 1.7);                                            // 0..1 sharp peaks
   const hills = fbm(wx, wz, 3, 0.0016, 5.0) * 0.5 + 0.5;                         // 0..1 rolling
-  // VARIETY: wide-base ROUNDED MASSIF (|fbm| billows = smooth domes) + a regional STYLE field that blends
-  //   sharp ridges <-> rounded massifs, so not every range is spiky and some are broad wide-based mountains.
-  const massif = Math.abs(fbm(wx, wz, 4, 0.00085, 12.0));                        // 0..~0.7 smooth wide humps
-  const mstyle = clamp(fbm(wx, wz, 2, 0.00009, 88.0) * 0.85 + 0.5, 0, 1);        // 0 rounded .. 1 sharp, per region
-  const mtn = ridge * mstyle + (massif * 0.62 + hills * 0.1) * (1 - mstyle);     // blended profile, avg ~matched to ridge so overall height/water is preserved (variety, not a global lift)
   const detail = noise2(x * 0.05, z * 0.05) * 8 + noise2(x * 0.12, z * 0.12) * 4;
   const lowland = 1 - mm;                                                        // water carves valleys/plains, not sheer peaks
   let h = -150;                                                                  // base plain (just above water)
@@ -148,7 +143,7 @@ function groundBase(x, z) {
   h += Math.min(0, cont) * 430;                                                  // deepen the low basins -> big lakes
   h += Math.min(0, cont + 0.2) * 320;                                            // extra-deep troughs in the lowest land
   h += hills * 170 * (0.5 + 0.5 * (cont * 0.5 + 0.5));                           // hills, gentler in basins
-  h += mtn * MOUNT_AMP * mm;                                                     // mountains only in mountain zones (blended sharp/rounded for variety)
+  h += ridge * MOUNT_AMP * mm;                                                   // mountains only in mountain zones
   // RIVER NETWORK: three warped noise bands; where a band crosses zero it carves a winding waterway.
   //   wide thresholds => broad rivers whose surface clearly reads as water (not a narrow slot canyon).
   const r1 = fbm(wx, wz, 3, 0.00030, 21.0), r2 = fbm(wx + 1000, wz - 1000, 3, 0.00048, -8.0), r3 = fbm(wx - 2000, wz + 500, 3, 0.0007, 33.0);
@@ -159,10 +154,7 @@ function groundBase(x, z) {
   // BIOME reshaping (alpine towers, volcanic jag, fungal mounds, cavern basin)
   biomeAt(x, z, _bwHeight);
   const wAlp = _bwHeight[B_ALP], wVol = _bwHeight[B_VOL], wFun = _bwHeight[B_FUN], wCav = _bwHeight[B_CAV];
-  // ALPINE: tall WIDE-based snowy massifs. Gate on a HARDENED weight (smoothstep) so the broad soft-argmax
-  //   tail (wAlp>0 over ~3/4 of the world) doesn't lift the whole map / drain lakes / strip vegetation —
-  //   the lift only happens where alpine actually dominates, like the old ridge^2 stayed ~0 off the peaks.
-  if (wAlp > 0.45) { const aW = smooth(clamp((wAlp - 0.45) / 0.3, 0, 1)); h += aW * (mtn * 1900 + hills * 240 + 340); }
+  if (wAlp > 0.001) h += wAlp * (ridge * ridge * 2700 + hills * 280 + 360);                 // ALPINE: towering snowy peaks + raised highland
   if (wVol > 0.001) h += wVol * (ridge * 1150 - 230 + Math.min(0, cont) * 240);             // VOLCANIC: jagged ridges, sunken lava flats in the lows
   if (wFun > 0.001) h += wFun * (hills * 240 + noise2(x * 0.0016 + 3, z * 0.0016 - 7) * 220); // FUNGAL: rolling alien mounds
   if (wCav > 0.001) h -= wCav * (180 + 200 * (0.5 + 0.5 * hills));                           // CAVERN: gently sunken floor (the ceiling makes the room)
@@ -766,36 +758,31 @@ function makePineLo() {                                       // cheap far conif
   for (const [r, h, y] of cones) { const c = new THREE.ConeGeometry(r, h, 6); c.translate(0, y + h / 2, 0); parts.push(paintGeo(c, NEEDLE, true)); }
   return mergeGeos(parts);
 }
-function makeBroadleaf(seed) {                                // recursive eztree-style deciduous tree
+function makeBroadleaf(seed) {                                // trunk + clustered leafy blobs
   let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
   const parts = [], up = V3(0, 1, 0);
-  // GROW a branching deciduous tree (eztree.dev-style): a limb is a tapered tube that FORKS into child
-  //   limbs spreading outward + climbing; outer limbs droop; spent tips bear a CLUSTER of leaf blobs and
-  //   the mid-canopy carries a little foliage too, so the crown reads full rather than a few puffs.
-  function leafClump(c, scale) {
-    const k = 2 + (rnd() * 2 | 0);
-    for (let b = 0; b < k; b++) {
-      const blob = new THREE.IcosahedronGeometry(scale * (0.7 + rnd() * 0.5), 0); blob.scale(1, 0.82, 1);
-      blob.translate(c.x + (rnd() - 0.5) * scale, c.y + (rnd() - 0.3) * scale * 0.8, c.z + (rnd() - 0.5) * scale);
-      parts.push(paintGeo(blob, LEAF, true));
-    }
-  }
+  // GROW a branching deciduous tree: a limb is a tapered tube; while it still has depth it
+  //   FORKS into 2-3 child limbs that spread outward + keep climbing; spent tips bear a small
+  //   leaf cluster. One genome -> a whole tree, the same way makeConifer grows a pine.
   function grow(p, dir, len, r, depth) {
     const end = V3(p.x + dir.x * len, p.y + dir.y * len, p.z + dir.z * len);
-    addTube(parts, p, end, r, r * 0.7, depth > 1 ? 6 : 4, BROWN);
-    if (depth <= 0) { leafClump(end, 0.5 + rnd() * 0.28); return; }     // leafy cluster at the tip
+    addTube(parts, p, end, r, r * 0.66, depth > 1 ? 5 : 4, BROWN);
+    if (depth <= 0) {                                              // leafy cluster at the branch tip
+      const blob = new THREE.IcosahedronGeometry(0.55 + rnd() * 0.3, 0); blob.scale(1, 0.85, 1);
+      blob.translate(end.x, end.y, end.z); parts.push(paintGeo(blob, LEAF, true));
+      return;
+    }
     const s1 = new THREE.Vector3().crossVectors(dir, Math.abs(dir.y) > 0.9 ? V3(1, 0, 0) : up).normalize();
     const s2 = new THREE.Vector3().crossVectors(dir, s1).normalize();
-    const n = (depth >= 2 && rnd() < 0.5) ? 3 : 2;                      // more forks low, fewer high
+    const n = 2 + (rnd() * 2 | 0);
     for (let i = 0; i < n; i++) {
-      const a = (i / n) * 6.283 + rnd() * 0.7, spread = 0.4 + rnd() * 0.5;
+      const a = (i / n) * 6.283 + rnd() * 0.8, spread = 0.45 + rnd() * 0.45;
       const nd = dir.clone().add(s1.clone().multiplyScalar(Math.cos(a) * spread)).add(s2.clone().multiplyScalar(Math.sin(a) * spread));
-      nd.y += 0.24 - depth * 0.05; nd.normalize();                      // outer limbs droop a touch
-      grow(end, nd, len * (0.66 + rnd() * 0.14), r * 0.62, depth - 1);
+      nd.y += 0.28; nd.normalize();                               // children keep growing generally upward
+      grow(end, nd, len * (0.62 + rnd() * 0.18), r * 0.64, depth - 1);
     }
-    if (depth === 1) leafClump(end, 0.38);                              // a little mid-canopy foliage
   }
-  grow(V3(0, 0, 0), up, 1.5 + rnd() * 0.5, 0.18, 3);   // depth 3 => fuller crown, still cheap enough to instance
+  grow(V3(0, 0, 0), up, 1.3 + rnd() * 0.5, 0.17, 2);   // depth 2 => light tree (~6-9 leaf puffs), cheap enough to instance
   return mergeGeos(parts);
 }
 function makeBroadleafLo() {
@@ -891,36 +878,6 @@ function makeGlowMat(cA, cB) {
 }
 const mushroomMat = makeGlowMat(0x28f28c, 0x46c8ff);          // teal -> cyan (fungal)
 const crystalMat = makeGlowMat(0x40d9ff, 0xb366ff);           // cyan -> violet (cavern)
-// REACTIVE CAVE PLANTS — luminous tendril clusters that RETRACT into their base when the ship gets close
-//   (the retract is a cheap CPU scale in updateReactivePlants; these are individual meshes, not instanced,
-//   so the glow material varies by world position instead of instanceIndex).
-function makeGlowMatSolo(cA, cB) {
-  const m = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.5, metalness: 0.0, side: THREE.DoubleSide });
-  const emit = attribute('emit'), wp = positionWorld;
-  const breathe = float(0.5).add(sin(time.mul(1.4).add(wp.x.mul(0.02)).add(wp.z.mul(0.017))).mul(0.5));
-  const gcol = mix(color(cA), color(cB), mx_noise_float(wp.mul(0.05)).mul(0.5).add(0.5));
-  m.colorNode = attribute('color');
-  m.emissiveNode = gcol.mul(emit).mul(breathe).mul(1.7);
-  return m;
-}
-function makeCavePlant(seed) {                                // a base bulb + splaying luminous tendrils
-  let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-  const parts = [], flags = [];
-  const bulb = new THREE.SphereGeometry(0.22, 8, 6); bulb.scale(1, 0.7, 1); bulb.translate(0, 0.16, 0);
-  parts.push(paintGeo(bulb, [0.4, 0.12, 0.3], true)); flags.push(1);
-  const n = 5 + (rnd() * 4 | 0);
-  for (let i = 0; i < n; i++) {
-    const h = 0.7 + rnd() * 0.8;
-    const t = new THREE.ConeGeometry(0.05, h, 4); t.translate(0, h * 0.5, 0);
-    const tilt = 0.3 + rnd() * 0.55, a = (i / n) * 6.2832 + rnd() * 0.5;
-    _q.setFromEuler(new THREE.Euler(Math.cos(a) * tilt, 0, Math.sin(a) * tilt, 'XYZ'));
-    _m4.compose(V3(0, 0.2, 0), _q, _one); t.applyMatrix4(_m4);
-    parts.push(paintGeo(t, [0.5, 0.16, 0.42], true)); flags.push(1);
-  }
-  return mergeGeosEmit(parts, flags);
-}
-const cavePlantGeo = makeCavePlant(7);
-const cavePlantMat = makeGlowMatSolo(0xff3aa0, 0xc060ff);     // magenta -> violet (alien cave flora)
 
 // ---- waterfall + mist materials (shared; everything is in world space) ------
 const waterfallMat = new THREE.MeshBasicNodeMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false, fog: true });
@@ -987,7 +944,7 @@ function finishGround(j) {
 }
 
 // ---- grass blades (merged geometry, no instance cap) -----------------------
-const GRASS_PER_CHUNK = GRASS_PER_SEG, GTRIES = GRASS_PER_CHUNK * 3;   // tries to place GRASS_PER_CHUNK blades (×3 headroom; was ×5 = wasteful)
+const GRASS_PER_CHUNK = GRASS_PER_SEG, GTRIES = GRASS_PER_CHUNK * 5;
 function startGrass(c) {
   const maxV = GRASS_PER_CHUNK * NV, maxI = GRASS_PER_CHUNK * NI;
   return { type: 'grass', c, tries: 0, k: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2,
@@ -1000,7 +957,6 @@ function fillGrass(j, attempts) {
     const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK;
     const gy = groundBase(x, z);
     if (gy < WL + 6 || gy > 360) continue;                    // not underwater, below the grass treeline
-    biomeAt(x, z, _bwShade); if (_bwShade[B_DEF] + _bwShade[B_ALP] * 0.5 < 0.45) continue;   // grass only in the green world
     const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
     const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
     if (flat < 0.55) continue;                                // steep => bare rock
@@ -1048,7 +1004,6 @@ function fillTrees(j, attempts) {
     j.tries++;
     const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK, y = groundBase(x, z);
     if (y < WL + 22 || y > 500) continue;                     // above water, below the treeline
-    biomeAt(x, z, _bwShade); if (_bwShade[B_DEF] + _bwShade[B_ALP] * 0.5 < 0.45) continue;   // trees only in the green / lower-alpine world
     const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
     const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
     if (flat < 0.62) continue;                                // not on cliffs
@@ -1088,7 +1043,6 @@ function fillPlants(j, attempts) {
     j.tries++;
     const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK, y = groundBase(x, z);
     if (y < WL + 8 || y > 340) continue;
-    biomeAt(x, z, _bwShade); if (_bwShade[B_DEF] + _bwShade[B_ALP] * 0.5 < 0.45) continue;   // bushes only in the green world
     const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
     const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
     if (flat < 0.62) continue;
@@ -1116,7 +1070,7 @@ function buildInstMat(geo, list, mat) {
   im.instanceMatrix.needsUpdate = true; im.count = n; if (n) im.computeBoundingSphere();
   return im;
 }
-function startDecor(c) { return { type: 'decor', c, tries: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2, mush: [[], [], []], cryF: [[], [], []], cryC: [[], [], []], plants: [] }; }
+function startDecor(c) { return { type: 'decor', c, tries: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2, mush: [[], [], []], cryF: [[], [], []], cryC: [[], [], []] }; }
 function fillDecor(j, attempts) {
   const e = 6;
   for (let a = 0; a < attempts && j.tries < DECOR_TRIES; a++) {
@@ -1137,21 +1091,17 @@ function fillDecor(j, attempts) {
         _gd.rotation.set(0, Math.random() * 6.2832, 0); _gd.scale.set(S, S * (0.8 + Math.random() * 0.5), S); _gd.updateMatrix();
         j.mush[k].push(_gd.matrix.clone());
       }
-    } else {                                                      // CAVERN: crystals (floor + hanging) + reactive cave plants
+    } else {                                                      // crystal shards (cavern): floor + a few hanging from the lid
       const k = Math.random() * 3 | 0, S = 14 + Math.random() * 30;
       _gd.position.set(x, my - 2, z); _gd.rotation.set((Math.random() - 0.5) * 0.3, Math.random() * 6.2832, (Math.random() - 0.5) * 0.3); _gd.scale.set(S, S * (0.9 + Math.random() * 0.8), S); _gd.updateMatrix();
       j.cryF[k].push(_gd.matrix.clone());
-      const cy = ceilingY(x, z), underLid = cy < 1e8 && cy > my + 120;   // a real rock lid overhead => truly inside a cave
-      if (underLid && Math.random() < 0.5) {                      // stalactite crystal hanging from the lid
-        const k2 = Math.random() * 3 | 0, S2 = 12 + Math.random() * 26;
-        _gd.position.set(x, cy + 2, z); _gd.rotation.set(Math.PI + (Math.random() - 0.5) * 0.3, Math.random() * 6.2832, (Math.random() - 0.5) * 0.3); _gd.scale.set(S2, S2 * (0.9 + Math.random() * 0.8), S2); _gd.updateMatrix();
-        j.cryC[k2].push(_gd.matrix.clone());
-      }
-      if (underLid && j.plants.length < 8 && Math.random() < 0.4) {   // a REACTIVE cave plant (hides when the ship nears); capped per chunk — each is its own draw call
-        const baseS = 15 + Math.random() * 20, mesh = new THREE.Mesh(cavePlantGeo, cavePlantMat);
-        mesh.position.set(x, my - 1, z); mesh.rotation.y = Math.random() * 6.2832; mesh.scale.set(baseS, baseS, baseS);
-        mesh.userData.baseS = baseS; mesh.frustumCulled = true;
-        j.plants.push(mesh);
+      if (Math.random() < 0.5) {                                  // stalactite crystal hanging from the rock lid
+        const cy = ceilingY(x, z);
+        if (cy < 1e8 && cy > my + 120) {
+          const k2 = Math.random() * 3 | 0, S2 = 12 + Math.random() * 26;
+          _gd.position.set(x, cy + 2, z); _gd.rotation.set(Math.PI + (Math.random() - 0.5) * 0.3, Math.random() * 6.2832, (Math.random() - 0.5) * 0.3); _gd.scale.set(S2, S2 * (0.9 + Math.random() * 0.8), S2); _gd.updateMatrix();
+          j.cryC[k2].push(_gd.matrix.clone());
+        }
       }
     }
   }
@@ -1162,20 +1112,6 @@ function finishDecor(j) {
     if (j.mush[k].length) { const m = buildInstMat(mushroomGeos[k], j.mush[k], mushroomMat); scene.add(m); c.decor.push(m); }
     if (j.cryF[k].length) { const m = buildInstMat(crystalGeos[k], j.cryF[k], crystalMat); scene.add(m); c.decor.push(m); }
     if (j.cryC[k].length) { const m = buildInstMat(crystalGeos[k], j.cryC[k], crystalMat); scene.add(m); c.decor.push(m); }
-  }
-  if (j.plants.length) { for (const m of j.plants) scene.add(m); c.plantMeshes = j.plants; }
-}
-// CPU reaction: cave plants near the ship retract into their base (only the ship's 3x3 chunk neighbourhood
-//   is scanned each frame, so this is a handful of cheap scale writes — no buffer churn).
-function updateReactivePlants() {
-  const pcx = Math.round(ship.position.x / CHUNK), pcz = Math.round(ship.position.z / CHUNK), sx = ship.position.x, sz = ship.position.z;
-  for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-    const c = chunks.get((pcx + dx) + ',' + (pcz + dz)); if (!c || !c.plantMeshes) continue;
-    for (const m of c.plantMeshes) {
-      const open = clamp((Math.hypot(m.position.x - sx, m.position.z - sz) - 65) / 110, 0, 1);   // 0 hidden (near) .. 1 open
-      const s = m.userData.baseS;
-      m.scale.set(s * (0.12 + 0.88 * open), s * (0.22 + 0.78 * open), s * (0.12 + 0.88 * open));   // shrink + sink as the ship nears
-    }
   }
 }
 
@@ -1268,16 +1204,13 @@ function finishCeiling(j) {
 }
 
 // ---- streaming: request near->far, unload far, build a slice each frame -----
-const chunkMeshes = (c) => [c.ground, c.ceiling, c.grass, c.bushes, c.flowers, ...(c.decor || []), ...(c.plantMeshes || []), ...(c.treesHi || []), ...(c.treesLo || [])];
+const chunkMeshes = (c) => [c.ground, c.ceiling, c.grass, c.bushes, c.flowers, ...(c.decor || []), ...(c.treesHi || []), ...(c.treesLo || [])];
 function ensureJobs(c, ring) {
   if (!c.reqGround) { c.reqGround = true; buildQueue.push({ type: 'ground', c }); }
-  if ((!c.reqVeg || !c.reqGrass || !c.reqCeil || !c.reqDecor) && ring <= Math.max(TREE_LO_RADIUS, CEIL_RADIUS, DECOR_RADIUS)) {
+  if ((!c.reqCeil || !c.reqDecor) && ring <= Math.max(CEIL_RADIUS, DECOR_RADIUS)) {
     biomeAt(c.cx * CHUNK, c.cz * CHUNK, _bwCam);
-    const green = _bwCam[B_DEF] + _bwCam[B_ALP] * 0.5 > 0.4;    // green / lower-alpine world gets vegetation
-    if (!c.reqVeg && ring <= TREE_LO_RADIUS) { c.reqVeg = true; if (green) buildQueue.push({ type: 'trees', c }); }   // procedural trees (farther draw radius)
-    if (!c.reqGrass && ring <= GRASS_RADIUS) { c.reqGrass = true; if (green) { buildQueue.push({ type: 'grass', c }); buildQueue.push({ type: 'plants', c }); } }   // grass + bushes (near only; own flag so flown-in chunks reach ring<=2)
     if (!c.reqCeil && ring <= CEIL_RADIUS) { c.reqCeil = true; if (_bwCam[B_CAV] > 0.2) buildQueue.push({ type: 'ceiling', c }); }   // rock lid over caverns
-    if (!c.reqDecor && ring <= DECOR_RADIUS) { c.reqDecor = true; if (_bwCam[B_FUN] > 0.3 || _bwCam[B_CAV] > 0.3) buildQueue.push({ type: 'decor', c }); }   // glowing mushrooms / crystals / cave plants
+    if (!c.reqDecor && ring <= DECOR_RADIUS) { c.reqDecor = true; if (_bwCam[B_FUN] > 0.3 || _bwCam[B_CAV] > 0.3) buildQueue.push({ type: 'decor', c }); }   // glowing mushrooms / crystals
   }
 }
 function unloadChunk(key, c) {
@@ -1318,7 +1251,7 @@ function pump(budget) {
     if (job.type === 'ground') { const step = Math.min(budget - used, job.n - job.k); fillGround(job, step); used += step; if (job.k >= job.n) { finishGround(job); job = null; } }
     else if (job.type === 'ceiling') { const step = Math.min(Math.max(1, (budget - used) / 4 | 0), job.n - job.k); fillCeiling(job, step); used += step * 4; if (job.k >= job.n) { finishCeiling(job); job = null; } }
     else if (job.type === 'decor') { const step = Math.min(Math.max(1, (budget - used) / 12 | 0), DECOR_TRIES - job.tries); fillDecor(job, step); used += step * 12; if (job.tries >= DECOR_TRIES) { finishDecor(job); job = null; } }   // a placement attempt is heavy (groundBase + biomeAt + meshHeight + ceilingY) -> bill ~12 so it spreads across frames
-    else if (job.type === 'grass') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), GTRIES - job.tries); fillGrass(job, step); used += step * 5; if (job.k >= GRASS_PER_CHUNK || job.tries >= GTRIES) { finishGrass(job); job = null; } }   // a placement attempt is ~5 groundBase, same as trees -> bill ×5 so it doesn't starve terrain
+    else if (job.type === 'grass') { const step = Math.min(budget - used, GTRIES - job.tries); fillGrass(job, step); used += step; if (job.k >= GRASS_PER_CHUNK || job.tries >= GTRIES) { finishGrass(job); job = null; } }
     else if (job.type === 'trees') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), TREE_TRIES - job.tries); fillTrees(job, step); used += step * 5; if (job.tries >= TREE_TRIES) { finishTrees(job); job = null; } }   // a placement attempt costs ~5 terrain verts
     else if (job.type === 'plants') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), PLANT_TRIES - job.tries); fillPlants(job, step); used += step * 5; if (job.tries >= PLANT_TRIES) { finishPlants(job); job = null; } }
     else { buildFalls(job); used += 300; job = null; }
@@ -1596,11 +1529,9 @@ pump(60000);                       // build the spawn area up front; the rest st
 // pre-warm the décor materials so compileAsync validates their node shaders at load (not lazily on first
 //   draw in a far-off fungal/cavern region) — a TSL error here rejects this await and is caught immediately.
 const _pmWarm = new THREE.InstancedMesh(mushroomGeos[0], mushroomMat, 1), _pcWarm = new THREE.InstancedMesh(crystalGeos[0], crystalMat, 1);
-const _ptWarm = new THREE.InstancedMesh(broadGeo, foliageMat, 1), _cpWarm = new THREE.Mesh(cavePlantGeo, cavePlantMat);
-_pmWarm.setMatrixAt(0, _m4.identity()); _pcWarm.setMatrixAt(0, _m4.identity()); _ptWarm.setMatrixAt(0, _m4.identity());
-_pmWarm.position.y = _pcWarm.position.y = _ptWarm.position.y = _cpWarm.position.y = -1e5; scene.add(_pmWarm, _pcWarm, _ptWarm, _cpWarm);
+_pmWarm.setMatrixAt(0, _m4.identity()); _pcWarm.setMatrixAt(0, _m4.identity()); _pmWarm.position.y = _pcWarm.position.y = -1e5; scene.add(_pmWarm, _pcWarm);
 await renderer.compileAsync(scene, camera);
-scene.remove(_pmWarm, _pcWarm, _ptWarm, _cpWarm); _pmWarm.dispose(); _pcWarm.dispose(); _ptWarm.dispose();
+scene.remove(_pmWarm, _pcWarm); _pmWarm.dispose(); _pcWarm.dispose();
 
 // MEDIUM: above the waterline it's grey cavern air; below it, water swallows light fast.
 //   Blend the single fog's colour + density by how deep the eye is (no object swap => no
@@ -1707,15 +1638,12 @@ window.__biomeAt = (x, z) => { biomeAt(x, z, _bwCam); return Array.from(_bwCam);
 window.__find = (b) => { for (let r = 600; r < 80000; r += 500) for (let a = 0; a < 6.2832; a += 0.45) { const x = Math.cos(a) * r, z = Math.sin(a) * r; biomeAt(x, z, _bwCam); if (_bwCam[b] > 0.6) return { x: Math.round(x), z: Math.round(z), w: +_bwCam[b].toFixed(2) }; } return null; };
 window.__tp = (x, z) => { ship.position.set(x, groundY(x, z) + 360, z); look.yaw = 0; look.pitch = -0.2; };
 window.__water = (k, v) => { ({ peakLift: uPeakLift, foamLo: uFoamLo, foamHi: uFoamHi, lava: uLavaMix }[k]).value = v; };   // live water tuning
-window.__groundY = (x, z) => groundY(x, z);
-window.__queue = () => { const t = {}; for (const r of buildQueue) t[r.type] = (t[r.type] || 0) + 1; return { len: buildQueue.length, types: t, cur: job ? job.type : null }; };
-window.__plantTest = () => { const pcx = Math.round(ship.position.x / CHUNK), pcz = Math.round(ship.position.z / CHUNK); let best = null; for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) { const c = chunks.get((pcx + dx) + ',' + (pcz + dz)); if (!c || !c.plantMeshes) continue; for (const m of c.plantMeshes) { const d = Math.hypot(m.position.x - ship.position.x, m.position.z - ship.position.z); if (!best || d < best.d) best = { d: Math.round(d), scale: +m.scale.x.toFixed(2), baseS: +m.userData.baseS.toFixed(1), px: Math.round(m.position.x), pz: Math.round(m.position.z) }; } } return best; };
 window.__dbg = () => {
   const out = { camB: window.__biomeAt(camera.position.x, camera.position.z).map(v => +v.toFixed(2)), fog: '#' + scene.fog.color.getHexString(), dens: +scene.fog.density.toFixed(5), sunC: '#' + sun.color.getHexString(), camY: Math.round(camera.position.y) };
   const pcx = Math.round(camera.position.x / CHUNK), pcz = Math.round(camera.position.z / CHUNK), c = chunks.get(pcx + ',' + pcz);
   if (c && c.ground) { const g = c.ground.geometry.getAttribute('glow'); const mx = [0, 0, 0]; for (let i = 0; i < g.count; i++) { mx[0] = Math.max(mx[0], g.getX(i)); mx[1] = Math.max(mx[1], g.getY(i)); mx[2] = Math.max(mx[2], g.getZ(i)); } out.glowMax = mx.map(v => +v.toFixed(2)); out.hasCeil = !!c.ceiling; }
-  let dm = 0, di = 0, ceil = 0, tr = 0, ti = 0, pl = 0, gr = 0; for (const [, cc] of chunks) { if (cc.decor) for (const m of cc.decor) { dm++; di += m.count; } if (cc.ceiling) ceil++; if (cc.treesHi) for (const m of cc.treesHi) { tr++; ti += m.count; } if (cc.plantMeshes) pl += cc.plantMeshes.length; if (cc.grass) gr++; }
-  out.decorMeshes = dm; out.decorInst = di; out.ceilChunks = ceil; out.treeMeshes = tr; out.treeInst = ti; out.cavePlants = pl; out.grassChunks = gr; out.lava = +uLavaMix.value.toFixed(2);
+  let dm = 0, di = 0, ceil = 0; for (const [, cc] of chunks) { if (cc.decor) for (const m of cc.decor) { dm++; di += m.count; } if (cc.ceiling) ceil++; }
+  out.decorMeshes = dm; out.decorInst = di; out.ceilChunks = ceil; out.lava = +uLavaMix.value.toFixed(2);
   return out;
 };
 const fpsEl = document.getElementById('fps');
@@ -1733,7 +1661,6 @@ function frameTick(dt) {
   updateBalls(dt);
   updateCymatics(dt);
   updateWaterfalls(dt);
-  updateReactivePlants();          // cave plants retract from the approaching ship
   water.position.set(camera.position.x, WL, camera.position.z);
   renderer.render(scene, camera);
 }

@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.49</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.49","short_name":"LSS%20v33.49","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.48</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.48","short_name":"LSS%20v33.48","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3279,7 +3279,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.49';
+const LSS_BUILD = '33.48';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17260,9 +17260,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // (spacing,1,spacing)) from this level's height atlas, then write WORLD-space vWY/vWPos so the
       // moss/slope/snow FS below (which samples vWPos.xz + vWY) matches the streamed-chunk terrain.
       sh.uniforms.uClipAtlas = clipAtlas;
-      sh.uniforms.uClipOrigin = m._clipOrigin || (m._clipOrigin = { value: new THREE.Vector2() });   // (S3) toroidal scroll offset (cells = gI mod R)
-      const _cn = _CLIP_N.toFixed(1), _cr = (_CLIP_N + 1).toFixed(1);
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n transformed.y = _ch - aSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');   // (S3) toroidal: vert i reads texel (gI+i) mod R (NEAREST+Repeat) so only the new edge re-bakes on snap ; (S2b) aSkirt drops perimeter verts into crack-hiding walls
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n float _ch = texture2D(uClipAtlas, uv).x;\n transformed.y = _ch - aSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');   // (S2b) aSkirt>0 drops perimeter verts straight down into a vertical wall that hides LOD-boundary cracks
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;');
     }
@@ -18473,46 +18471,22 @@ function _clipGeo(hole) {
 function _clipMat() {
   const m = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
   m._clipAtlas = { value: null };                 // this level's height atlas (set in _clipBakeLevel)
-  m._clipOrigin = { value: new THREE.Vector2(0, 0) };   // (S3) toroidal scroll offset in cells (gI mod R)
   _swPatchTerrainMat(m, false, m._clipAtlas);     // ground material + clipmap displacement branch
   return m;
 }
 
-// (S3) FULL bake : fill the whole atlas under the TOROIDAL invariant — texel (gx mod R, gz mod R)
-// always holds the carved height at GLOBAL cell (gx,gz), independent of where the window sits. Used
-// on first show + on a >1-level jump. The VS reads texel (gI+i) mod R for vert i, so the window can
-// slide by re-baking only its leading edge (see _clipBakeEdge).
+// Bake one level's R32F height atlas (N+1)^2 from the real carved heightfield over its world extent.
 function _clipBakeLevel(L) {
   const T = game.sandwichTerrain; if (!T) return;
-  const N = _CLIP_N, R = N + 1, sp = L.spacing;
-  L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;   // global min-corner cell index
+  const N = _CLIP_N, R = N + 1, span = L.span, step = span / N, x0 = L.cx - span * 0.5, z0 = L.cz - span * 0.5;
   const d = L.data;
-  for (let jj = 0; jj <= N; jj++) { const gz = L.gIz + jj, trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; d[trow + (((gx % R) + R) % R)] = _stGroundYCarved(gx * sp, wz, T); } }
+  for (let j = 0; j < R; j++) { const wz = z0 + j * step, row = j * R; for (let i = 0; i < R; i++) d[row + i] = _stGroundYCarved(x0 + i * step, wz, T); }
   if (!L.tex) {
     L.tex = new THREE.DataTexture(d, R, R, THREE.RedFormat, THREE.FloatType);
-    L.tex.minFilter = L.tex.magFilter = THREE.NearestFilter;   // (S3) vert==texel ; NEAREST keeps the toroidal wrap seam-free (no cross-seam blur)
-    L.tex.wrapS = L.tex.wrapT = THREE.RepeatWrapping; L.tex.generateMipmaps = false;   // WebGL2 NPOT-Repeat OK
+    L.tex.minFilter = L.tex.magFilter = THREE.LinearFilter;
+    L.tex.wrapS = L.tex.wrapT = THREE.ClampToEdgeWrapping; L.tex.generateMipmaps = false;
     L.mat._clipAtlas.value = L.tex;
   }
-  L.mat._clipOrigin.value.set(((L.gIx % R) + R) % R, ((L.gIz % R) + R) % R);
-  L.tex.needsUpdate = true;
-}
-
-// (S3) INCREMENTAL bake : after the centre snaps, re-sample ONLY the newly-revealed columns + rows
-// into their toroidal texels (which overwrite the cells that just fell off the trailing edge). The
-// rest of the atlas already holds correct global-cell heights. ~(dCols+dRows)*R noise calls instead
-// of R*R per snap = the snap-hitch + "terrain redraws on the horizon" fix.
-function _clipBakeEdge(L, ogx, ogz) {
-  const T = game.sandwichTerrain; if (!T) return;
-  const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
-  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx >= ogx && gx <= ogx + N) continue;   // new columns × all rows
-    const tcol = ((gx % R) + R) % R, wx = gx * sp;
-    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _stGroundYCarved(wx, gz * sp, T); } }
-  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz >= ogz && gz <= ogz + N) continue;   // new rows × all columns
-    const trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _stGroundYCarved(gx * sp, wz, T); } }
-  L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
   L.tex.needsUpdate = true;
 }
 
@@ -18537,18 +18511,10 @@ function _clipBuild() {
 // vertex lines), re-bake + reposition when the snapped centre changes (usually only L0 moves).
 function _clipUpdate(px, pz) {
   if (!_clipmap.on || !_clipmap.levels) return;
-  const N = _CLIP_N;
   for (const L of _clipmap.levels) {
     const stp = 2 * L.spacing;
     const ncx = Math.round(px / stp) * stp, ncz = Math.round(pz / stp) * stp;
-    if (ncx !== L.cx || ncz !== L.cz) {
-      const ogx = L.gIx, ogz = L.gIz, first = (ogx === undefined);
-      L.cx = ncx; L.cz = ncz;
-      L.gIx = Math.round(ncx / L.spacing) - N / 2; L.gIz = Math.round(ncz / L.spacing) - N / 2;
-      if (first || Math.abs(L.gIx - ogx) > N || Math.abs(L.gIz - ogz) > N) _clipBakeLevel(L);   // first show / teleport-jump > 1 level → full bake
-      else _clipBakeEdge(L, ogx, ogz);                                                          // normal flight snap → re-bake only the new edge
-      L.mesh.position.set(ncx, 0, ncz);
-    }
+    if (ncx !== L.cx || ncz !== L.cz) { L.cx = ncx; L.cz = ncz; _clipBakeLevel(L); L.mesh.position.set(ncx, 0, ncz); }
   }
 }
 
@@ -28088,7 +28054,7 @@ function spawnDynamicObjects(rooms) {
     }
     return true;
   };
-  const nonSpawnRooms = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') ? [] : rooms.filter(r => !r.team);   // (hub) free-flight overworld gets NO floating rock clusters (rocks+atom-smoke+dots) — replaced by drifting basin clouds below
+  const nonSpawnRooms = rooms.filter(r => !r.team);
   for (const rm of nonSpawnRooms) {
     const count = 2 + Math.floor(Math.random() * 2); // 2-3 clusters per room
     for (let i = 0; i < count; i++) {
@@ -28155,34 +28121,7 @@ function spawnDynamicObjects(rooms) {
   // Spawn pooled gas in spheres that don't have a
   // tunnel draining downward from them — gas would naturally settle at
   // the bottom of those "basin" rooms.
-  if (typeof _spawnBasinClouds === 'function' && !(typeof LSS !== 'undefined' && LSS.MODE === 'freeflight')) _spawnBasinClouds();   // (hub) skip the 6 room-pool basins — the spread field below gives better open-hub coverage
-  // (hub) The free-flight overworld replaces its rock clusters + room-pool basins with a single
-  // SPREAD field of drifting basin-style GasClouds over the terrain for atmosphere —
-  // the SAME GasCloud the arena basins use, just no rocks. The O(n^2) gas chemistry is gated off for
-  // the hub in updateDynamicObjects, so these only drift (cheap) — no hitch.
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem && typeof GasCloud === 'function'
-      && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && (typeof QUALITY === 'undefined' || typeof QUALITY.basinClouds !== 'function' || QUALITY.basinClouds())) {
-    try {
-      if (!game.detachedGasPockets) game.detachedGasPockets = [];
-      const _hbT = game.sandwichTerrain, _hbCarve = _hbT && typeof _stGroundYCarved === 'function';
-      const _hbN = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 60 : 42;
-      const _hbSpread = 17000;   // scattered over ~±17k around the hub centre
-      for (let i = 0; i < _hbN; i++) {
-        const _hbx = (Math.random() - 0.5) * 2 * _hbSpread, _hbz = (Math.random() - 0.5) * 2 * _hbSpread;
-        let _hby = 700 + Math.random() * 1700;
-        if (_hbCarve) { try { _hby = _stGroundYCarved(_hbx, _hbz, _hbT) + 280 + Math.random() * 1500; } catch (_) {} }   // hover above the ground / between peaks
-        const _hbSize = 190 + Math.random() * 230, _hbV = 0.62 + Math.random() * 0.22;
-        const _hbSeed = new THREE.Color(_hbV, _hbV * 0.98, _hbV * 0.95);
-        const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(_hbx, _hby, _hbz), {
-          boundsRadius: _hbSize, spriteScale: _hbSize * 1.5, spriteScaleVar: 0.50,
-          alpha: 0.5, color: _getEffectiveCloudColor(_hbSeed), baseColor: _hbSeed, colorJitter: 0.18,
-          segments: (typeof getVRGasSegments === 'function') ? getVRGasSegments(9, 'basinSegments') : 9,
-        });
-        const _hbVel = new THREE.Vector3((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 8);
-        _pushDetachedGasPocket({ gasCloud: _hbCloud, velocity: _hbVel });
-      }
-    } catch (e) { console.warn('[hub-clouds] spawn failed', e); }
-  }
+  if (typeof _spawnBasinClouds === 'function') _spawnBasinClouds();
   // Voxel cave skin for rooms. Toggle / tunables on game
   // object ; defaults to on. See VoxelRoomSystem above for console knobs.
   if (typeof game.voxelRoomsEnabled !== 'boolean') game.voxelRoomsEnabled = true;
@@ -30555,14 +30494,13 @@ function updateDynamicObjects(dt) {
   // detached gas pockets within range gets a small attractive impulse,
   // so clouds gradually cluster together over time. Runs BEFORE the
   // drift pass so this frame's impulse is integrated into position.
-  const _ffHubGas = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');   // (hub) skip the O(n^2) gas-pocket attraction + chemistry — the hub's drifting clouds don't need them, and they were a hitch source
-  if (!_ffHubGas && typeof _applyCloudAttraction === 'function') _applyCloudAttraction(dt);
+  if (typeof _applyCloudAttraction === 'function') _applyCloudAttraction(dt);
   // Drift any free-floating gas pockets after clusters tick.
   updateDetachedGasPockets(dt);
   // Pairwise chemistry between gas pockets (and pockets vs
   // cluster centers). Boosts uIntensity on participants ; spawns lightning
   // arcs at random intervals.
-  if (!_ffHubGas && typeof updateGasChemistry === 'function') updateGasChemistry(dt);
+  if (typeof updateGasChemistry === 'function') updateGasChemistry(dt);
   // Prune dead cluster children out of game.dynamicObjects
   for (let i = game.dynamicObjects.length - 1; i >= 0; i--) {
     const obj = game.dynamicObjects[i];
