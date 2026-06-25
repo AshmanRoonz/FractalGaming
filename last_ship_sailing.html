@@ -17141,6 +17141,7 @@ function _stGapSDFCarved(px,py,pz,T){
 const _SW_CHUNK = 900;       // world units per chunk
 const _SW_CELLS = 40;        // grid cells per chunk side (higher = finer detail)
 const _SW_VIEW  = 5;         // chunk radius kept built around the ship
+function _swHubView() { return window.__hubView || ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ? 9 : 16); }   // (v33.46) device-aware draw radius : huge on PC (render is cheap -> no mid-flight streaming), moderate on Quest ; window.__hubView overrides
 const _SW_HUB_VIEW = 11;      // (v33.02) endless mossy HUB: a wider built radius (8*900=7200u, well inside camera.far 25000) so there's far more terrain ; the denser hub fog (below) swallows the build edge so you never see the streamed-chunk ring
 const _SW_BUILD_PER_FRAME = 2;
 
@@ -17237,8 +17238,9 @@ function _swSyncFX() {
   // Grass fades out smoothly well before the loaded edge so there's no hard ring.
   _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58;
   _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92;
-  _swU.uTreeFadeA.value = _SW_TREE_VIEW * _SW_CHUNK * 0.62;   // (v33.04) trees fade later than grass (wider tree view)
-  _swU.uTreeFadeB.value = _SW_TREE_VIEW * _SW_CHUNK * 0.94;
+  var _swTV = (typeof game !== 'undefined' && game.sandwichBiome === 'mossy' && typeof _swHubView === 'function') ? _swHubView() : _SW_TREE_VIEW;   // (v33.46) hub: trees fade at the terrain radius
+  _swU.uTreeFadeA.value = _swTV * _SW_CHUNK * 0.62;
+  _swU.uTreeFadeB.value = _swTV * _SW_CHUNK * 0.94;
 }
 function _swPatchTerrainMat(m, isCeil, clipAtlas) {
   m.onBeforeCompile = (sh) => {
@@ -17602,7 +17604,7 @@ function _swApplyAtmosphere() {
     // fogged out (~90% by the build ring) — you never see the "edge of the cube". The old
     // 0.5e-4 was ~20x too thin to hide the 7200u edge. scene.background stays P.sky (same
     // hue) so the faded horizon dissolves into a matching sky.
-    const _hubEdge = (window.__hubView || _SW_HUB_VIEW) * _SW_CHUNK;   // (v33.46) fog matches the (tunable) built radius so the edge stays hidden
+    const _hubEdge = (_swHubView()) * _SW_CHUNK;   // (v33.46) fog matches the (tunable) built radius so the edge stays hidden
     scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog ? game.sandwichFog * 1e-4 : Math.sqrt(Math.log(10)) / _hubEdge));
     try { _clearBrokenSimForcefield(); } catch (_) {}
     try { setSky('sky'); } catch (_) {}   // (v33.06) photographic daytime sky (sky.jpg) for the natural daylit overworld
@@ -18506,7 +18508,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
   const chunks = game.sandwichChunks;
   const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
-  const _VIEW = (T && T.biome === 'mossy') ? (window.__hubView || _SW_HUB_VIEW) : _SW_VIEW;   // (v33.02) wider built radius for the endless hub ; (v33.46) tunable via window.__hubView
+  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : _SW_VIEW;   // (v33.02) wider built radius for the endless hub ; (v33.46) tunable via window.__hubView
   // (v33.07) THE HUB streams a DISC, not a square. We still scan the bounding box
   // of chunks but skip the four CORNERS (Euclidean radius test), so the resident
   // terrain's outer boundary is a CIRCLE — from high up it reads as a natural hazy
@@ -18564,7 +18566,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   let tBuilt = 0;
   for (const [key, c] of chunks) {
     const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
-    const nearT = Math.max(Math.abs(cx - scx), Math.abs(cz - scz)) <= _SW_TREE_VIEW;
+    const nearT = Math.max(Math.abs(cx - scx), Math.abs(cz - scz)) <= ((T && T.biome === 'mossy') ? _swHubView() : _SW_TREE_VIEW);   // (v33.46) hub trees track the terrain radius (no pop-in)
     if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
       c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
     } else if ((!nearT || !wantTrees) && c.treesBuilt) {
