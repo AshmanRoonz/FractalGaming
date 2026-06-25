@@ -13712,6 +13712,7 @@ renderer.xr.addEventListener('sessionend', () => {
   renderer.xr.enabled = false;
   try {
     renderer.setRenderTarget(null);
+    try { var _vlSz = new THREE.Vector2(); renderer.getSize(_vlSz); renderer.setViewport(0, 0, _vlSz.x, _vlSz.y); renderer.setScissorTest(false); } catch (_) {}   // (v33.46) reset the stereo half-viewport so the flat page doesn't show a one-eye black band for a frame on exit
     window.dispatchEvent(new Event('resize'));
     _xrEnsureAnimationLoop('sessionend-flat');
   } catch (e) {
@@ -36832,7 +36833,7 @@ function updatePlayerMovement(dt) {
         // also yaws ship right.
         player.euler.y -= yaw * sens * dt;
         const pitchDir = input.vrHeadAim.invertPitch ? -1 : 1;
-        if (!(typeof LSS !== 'undefined' && LSS.MODE === 'freeflight')) player.euler.x += pitch * sens * dt * pitchDir;   // (v33.40) hub: no head-aim PITCH nudge (it integrated head-up into ship pitch at ~24deg/s to the 81deg clamp = 'stare at the ceiling') ; yaw nudge stays
+        player.euler.x += pitch * sens * dt * pitchDir;   // (v33.46) head-aim pitch RE-ENABLED in free-flight (the old 'stare at the ceiling' was the XR framebuffer bug, now fixed ; user wants up/down head-look)
       }
     } catch (_) { /* ignore: missing xr camera or matrix; nudge is best-effort */ }
   }
@@ -45349,17 +45350,17 @@ function previewLoadout(key) {
           const fv = document.getElementById('vr-enter-btn');
           if (fv && !fv.disabled) fv.click();
         } catch (e) { console.warn('[vr-launch] vr-enter-btn.click failed', e); }
-        // (2) Defer commitLoadout so the requestSession promise can be
-        // dispatched and the XR runtime can start initializing while
-        // the main thread is still free. The 50ms slack is enough for
-        // the browser to hand off to the XR runtime ; commitLoadout
-        // then runs (still synchronous, still blocks ~3 s), but the
-        // headset compositor is already engaged and will keep showing
-        // a valid frame instead of a stuck one.
-        setTimeout(() => {
-          try { commitLoadout(key); }
-          catch (e) { console.warn('[vr-launch] commitLoadout failed', e); }
-        }, 50);
+        // (2) (v33.46) Build the world ONLY ONCE THE XR SESSION IS PRESENTING. The ~3s synchronous build
+        // (in free-flight: the Reflector RT + GPUComputationRenderer init, which issue their own
+        // setRenderTarget/render calls) was racing setSession's XRWebGLLayer creation and corrupting the
+        // just-built XR framebuffer, so the LAUNCH button started flat instead of in the headset (only
+        // free-flight, the only mode that builds water). Wait for sessionstart ; fall back to a timer if the
+        // session never starts so the user isn't left worldless.
+        let _vlBuilt = false;
+        const _vlBuild = () => { if (_vlBuilt) return; _vlBuilt = true; try { commitLoadout(key); } catch (e) { console.warn('[vr-launch] commitLoadout failed', e); } };
+        const _vlOnStart = () => { try { renderer.xr.removeEventListener('sessionstart', _vlOnStart); } catch (_) {} setTimeout(_vlBuild, 0); };
+        try { renderer.xr.addEventListener('sessionstart', _vlOnStart); } catch (_) {}
+        setTimeout(_vlBuild, 1600);
       });
     } else {
       vrBtn.style.display = 'none';
