@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.48</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.48","short_name":"LSS%20v33.48","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.47</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.47","short_name":"LSS%20v33.47","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3279,7 +3279,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.48';
+const LSS_BUILD = '33.47';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17281,26 +17281,6 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
   return m;
 }
 
-// (v33.48 perf) ONE shared terrain material per shell type (ground / ceiling) instead of a
-// fresh MeshStandardMaterial + onBeforeCompile for EVERY streamed chunk. Every uniform the
-// shader reads is global (_swU.*) + uCeil (fixed per shell), so all chunks of a given type
-// render identically from one material. Marked _swShared so _swDisposeChunk leaves it alive
-// when a chunk unloads (disposing a shared material would blank every other chunk).
-let _swTerrainMats = null;
-function _swTerrainMatShared(isCeil) {
-  if (!_swTerrainMats) _swTerrainMats = {};
-  const k = isCeil ? 1 : 0;
-  if (!_swTerrainMats[k]) {
-    const mm = _swPatchTerrainMat(new THREE.MeshStandardMaterial({
-      vertexColors: true, flatShading: true, roughness: 1.0, metalness: 0.0,
-      side: THREE.FrontSide,
-    }), isCeil);
-    mm._swShared = true;
-    _swTerrainMats[k] = mm;
-  }
-  return _swTerrainMats[k];
-}
-
 // ---- procedural grass (instanced wind-swaying blades, grassy biome) ----
 const _SW_GRASS_VIEW = 3;
 const _SW_TREE_VIEW = 5;   // (v33.04) instanced trees read farther than grass but still fade before the fogged build edge
@@ -17565,12 +17545,11 @@ function _swBuildShell(x0, z0, isCeil, T) {
   geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
   geo.setIndex(idx);
-  // (v33.48 perf) NO computeVertexNormals: the terrain material is flatShading:true and the
-  // moss/slope/snow/lava shader derives its normal from dFdx/dFdy(vWPos) in the FRAGMENT
-  // shader — the per-vertex normal attribute is never read by anything (and hub collision
-  // uses the height function, not mesh raycasting). Skipping it removes the per-chunk normal
-  // pass + a ~20KB/chunk normal buffer alloc+upload. Graphics-identical.
-  const mat = _swTerrainMatShared(isCeil);
+  geo.computeVertexNormals();
+  const mat = _swPatchTerrainMat(new THREE.MeshStandardMaterial({
+    vertexColors: true, flatShading: true, roughness: 1.0, metalness: 0.0,
+    side: THREE.FrontSide,
+  }), isCeil);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.userData = { isSandwichTerrain: true };
   mesh.renderOrder = -2;
@@ -17581,7 +17560,7 @@ function _swBuildShell(x0, z0, isCeil, T) {
 function _swDisposeChunk(c) {
   for (const m of [c.ground, c.ceiling]) {
     if (!m) continue;   // (v33.00) mossy hub has no ceiling shell
-    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}   // (v33.48) shared terrain material is reused across all chunks — never dispose it on unload
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); } catch (_) {}
   }
   _swRemoveGrass(c.grass);
   _swRemoveTrees(c.trees);

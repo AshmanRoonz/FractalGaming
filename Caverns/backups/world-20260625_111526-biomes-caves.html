@@ -387,9 +387,6 @@ function uploadWave() {
 wcx = Math.round(camera.position.x / wgScale) * wgScale; wcz = Math.round(camera.position.z / wgScale) * wgScale;
 computeMaskFull();
 const windowCenter = uniform(vec2(wcx, wcz));
-// water tuning (live-tunable): uLavaMix 0=water 1=lava (set per frame from the camera's volcanic weight);
-//   uPeakLift exaggerates the central rebound column; uFoamLo/Hi gate the spray ONLY to that tall central peak.
-const uLavaMix = uniform(0.0), uPeakLift = uniform(1.5), uFoamLo = uniform(9.0), uFoamHi = uniform(24.0);
 function spawnRipple(wx, wz, amp) {       // a missile / impact calls this
   const i = Math.round((wx - wcx) / wgScale + WG / 2 - 0.5), j = Math.round((wz - wcz) / wgScale + WG / 2 - 0.5);
   if (i >= 0 && i < WG && j >= 0 && j < WG) { const k = j * WG + i; if (wmask[k]) wcur[k] += amp; }
@@ -424,7 +421,7 @@ const dGeo = new THREE.BufferGeometry();
 dGeo.setAttribute('position', new THREE.BufferAttribute(dPos, 3));
 dGeo.setAttribute('size', new THREE.BufferAttribute(dSize, 1));
 const dropMat = new THREE.PointsNodeMaterial({ transparent: true, depthWrite: false, fog: true });   // node material => per-drop size
-dropMat.colorNode = mix(color(0xdfeeff), color(0xffb45a), uLavaMix); dropMat.opacityNode = float(0.95); dropMat.sizeNode = attribute('size');   // cool watery white (hot ejecta over lava); chunky near the ship, fine far away
+dropMat.colorNode = color(0xdfeeff); dropMat.opacityNode = float(0.95); dropMat.sizeNode = attribute('size');   // cool watery white; chunky near the ship, fine far away
 const drops = new THREE.Points(dGeo, dropMat);
 drops.frustumCulled = false; scene.add(drops);
 function emitDrop(x, y, z, vx, vy, vz) {     // launch one droplet (it falls under gravity and ripples where it lands)
@@ -568,12 +565,7 @@ const water = (() => {
     .add(mx_noise_float(vec3(wp.x.mul(0.008).add(9.0), wp.z.mul(0.008), t.mul(0.18))).mul(1.1));
   const simDisp = texture(waveTex, luv).x.mul(2).sub(1).mul(WRANGE);          // reactive ripples (R)
   const wakeDisp = texture(waveTex, luv).z.mul(2).sub(1).mul(WAKERANGE);      // Kelvin wake (B)
-  // CENTRAL REBOUND (the opposite reaction): a drop's cavity springs back into a tall central column.
-  //   Emphasise the POSITIVE peak nonlinearly so the highest part of the ripple towers, while the small
-  //   travelling ripples stay low. peakLift is what the foam keys on, so spray sits only on that column.
-  const posD = simDisp.max(float(0));
-  const peakLift = posD.mul(posD).mul(float(1 / WRANGE)).mul(uPeakLift);      // quadratic: tall crests tower, small ripples ~unchanged
-  const dispH = swell.add(simDisp.add(peakLift).add(wakeDisp).mul(dispFade));
+  const dispH = swell.add(simDisp.add(wakeDisp).mul(dispFade));
   mat.positionNode = positionLocal.add(vec3(float(0), dispH, float(0)));
   // planar MIRROR reflection across y = WL — higher res + low distortion = a crisp calm-lake mirror
   const reflection = reflector({ resolutionScale: 0.3 });   // the lake mirror re-renders the whole world, so keep it low-res (r185: resolution -> resolutionScale)
@@ -612,30 +604,23 @@ const water = (() => {
   const underBody = mix(reflImg.mul(color(0x9fc4d6)), refrImg.mul(color(0xcfe6ef)), win); // mirror -> refraction
   let body = mix(underBody, aboveBody, aboveF);
   const spec = Nf.dot(Hh).max(0).pow(200).mul(0.6).mul(aboveF);                       // tight sun glints, not a dot grid
-  // CENTRAL-PEAK SPRAY-BREAKUP — only the highest raised part of a fresh disturbance (the splash column)
-  //   sprays into droplets; the rest of the lake stays clean mirror. Keyed on the boosted positive peak,
-  //   NOT every ripple/wake across the surface.
-  const peakH = posD.add(peakLift);
-  const peakF = smoothstep(uFoamLo, uFoamHi, peakH).mul(simW).mul(aboveF);            // 0 except on the tall central column
-  const sprayN = mx_noise_float(vec3(wp.x.mul(0.06).add(t.mul(0.8)), wp.z.mul(0.06).sub(t.mul(0.55)), t.mul(0.35))).mul(0.6)
-    .add(mx_noise_float(vec3(wp.x.mul(0.16), wp.z.mul(0.16), t.mul(0.25).add(11.0))).mul(0.4));
-  const specks = smoothstep(0.42, 0.62, sprayN.mul(0.5).add(0.5));
-  const foamA = peakF.mul(mix(float(0.9), specks, peakF));                            // dissolves into discrete specks at the very top
-  // LAVA WATER — in volcanic regions the "water" is molten. uLavaMix (updateBiome) crossfades the whole
-  //   local surface to glowing lava: dark crust with bright animated cracks; the splash crown -> hot ejecta.
-  const lavaN = mx_noise_float(vec3(wp.x.mul(0.012), wp.z.mul(0.012), t.mul(0.05))).mul(0.5).add(0.5)
-    .add(mx_noise_float(vec3(wp.x.mul(0.04).add(t.mul(0.13)), wp.z.mul(0.04), t.mul(0.07))).mul(0.3));
-  const lavaBody = mix(color(0x330b03), mix(color(0xff4a10), color(0xffd24a), smoothstep(0.78, 1.05, lavaN)), smoothstep(0.5, 0.95, lavaN));
-  const waterCol = body.add(color(0xffffff).mul(spec));
-  const surf = mix(waterCol, lavaBody, uLavaMix);
-  const foamCol = mix(color(0xeaf6ff), color(0xffe28a), uLavaMix);                    // hot ejecta over lava
-  const colN = surf.mul(float(1).sub(foamA)).add(foamCol.mul(foamA));
+  // CREST FOAM + SPRAY-BREAKUP (ported from last_ship_sailing): where the reactive surface peaks high,
+  //   paint foam; at the strongest crests dissolve it into animated droplet specks so the wave tops
+  //   "spray and break apart" instead of reading as one solid white cap.
+  const crestH = simDisp.add(wakeDisp).abs();
+  const crest = smoothstep(float(2.5), float(9.0), crestH).mul(simW).mul(aboveF);
+  const sprayN = mx_noise_float(vec3(wp.x.mul(0.05).add(t.mul(0.7)), wp.z.mul(0.05).sub(t.mul(0.5)), t.mul(0.3))).mul(0.6)
+    .add(mx_noise_float(vec3(wp.x.mul(0.13), wp.z.mul(0.13), t.mul(0.2).add(11.0))).mul(0.4));
+  const specks = smoothstep(0.40, 0.62, sprayN.mul(0.5).add(0.5));
+  const breakHi = smoothstep(float(5.0), float(9.0), crestH).mul(aboveF);
+  const foamA = crest.mul(mix(float(0.85), specks, breakHi));                         // strong crests -> broken specks, calm crests -> sheet foam
+  const colN = body.add(color(0xffffff).mul(spec)).mul(float(1).sub(foamA)).add(color(0xeaf6ff).mul(foamA));
   const rad = wp.xz.sub(cameraPosition.xz).length();
   const fade = smoothstep(float(7000), float(9500), rad);   // fade to the horizon mist, matching the mountains
   mat.colorNode = mix(colN, color(FOGC), fade);
-  // above water: fresnel-driven opacity (foam + lava read near-opaque); submerged: a thin translucent blue.
-  const waterOp = mix(float(0.4), mix(float(0.66), float(0.97), fres), aboveF).max(foamA);
-  mat.opacityNode = mix(waterOp, float(1.0), uLavaMix).mul(float(1).sub(fade));
+  // above water: fresnel-driven opacity; submerged: a thin translucent blue so you see up through it.
+  //   Foam crests read as near-opaque white on top of that.
+  mat.opacityNode = mix(float(0.4), mix(float(0.66), float(0.97), fres), aboveF).max(foamA).mul(float(1).sub(fade));
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false; mesh.renderOrder = 1;
   return mesh;
@@ -811,65 +796,6 @@ const foliageMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roug
   foliageMat.colorNode = attribute('color').mul(needle).mul(treeTint);
 }
 const flowerMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.0 });
-
-// ---- BIOME DÉCOR — glowing fungal mushrooms + crystal shards (instanced, emissive) -----------
-//   A per-vertex `emit` attribute (0 = dark stem/base, 1 = glowing cap/shard) gates the emissive so
-//   only the light-emitting parts glow; a per-instance breathe animates them.
-function mergeGeosEmit(geos, emit) {
-  let vc = 0, ic = 0;
-  for (const g of geos) { const vn = g.attributes.position.count; vc += vn; ic += g.index ? g.index.count : vn; }
-  const pos = new Float32Array(vc * 3), col = new Float32Array(vc * 3), em = new Float32Array(vc), idx = new Uint32Array(ic);
-  let vo = 0, io = 0;
-  for (let gi = 0; gi < geos.length; gi++) {
-    const g = geos[gi], vn = g.attributes.position.count, ev = emit[gi] || 0;
-    pos.set(g.attributes.position.array, vo * 3); col.set(g.attributes.color.array, vo * 3);
-    for (let k = 0; k < vn; k++) em[vo + k] = ev;
-    if (g.index) { const a = g.index.array; for (let k = 0; k < a.length; k++) idx[io + k] = a[k] + vo; io += a.length; }
-    else { for (let k = 0; k < vn; k++) idx[io + k] = vo + k; io += vn; }
-    vo += vn;
-  }
-  const m = new THREE.BufferGeometry();
-  m.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  m.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  m.setAttribute('emit', new THREE.BufferAttribute(em, 1));
-  m.setIndex(new THREE.BufferAttribute(idx, 1));
-  m.computeVertexNormals();
-  return m;
-}
-function makeMushroom(seed) {                                  // dark stem + glowing dome cap
-  let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-  const H = 0.7 + rnd() * 0.6, capR = 0.3 + rnd() * 0.22;
-  const stem = new THREE.CylinderGeometry(0.055, 0.11, H, 6); stem.translate(0, H * 0.5, 0);
-  const cap = new THREE.SphereGeometry(capR, 10, 6, 0, 6.2832, 0, 1.45); cap.scale(1, 0.62, 1); cap.translate(0, H, 0);
-  return mergeGeosEmit([paintGeo(stem, [0.72, 0.74, 0.66]), paintGeo(cap, [0.14, 0.5, 0.42], true)], [0, 1]);
-}
-function makeCrystal(seed) {                                   // a cluster of tilted glowing shards
-  let s = seed >>> 0; const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-  const parts = [], flags = [], n = 3 + (rnd() * 4 | 0);
-  for (let i = 0; i < n; i++) {
-    const r = 0.08 + rnd() * 0.10, h = 0.7 + rnd() * 1.1;
-    const shard = new THREE.ConeGeometry(r, h, 5); shard.translate(0, h * 0.5, 0);
-    const tilt = rnd() * 0.6, a = rnd() * 6.2832;
-    _q.setFromEuler(new THREE.Euler(Math.cos(a) * tilt, rnd() * 6.2832, Math.sin(a) * tilt, 'XYZ'));
-    _m4.compose(V3((rnd() - 0.5) * 0.4, 0, (rnd() - 0.5) * 0.4), _q, _one);
-    shard.applyMatrix4(_m4);
-    parts.push(paintGeo(shard, [0.3, 0.55, 0.78], true)); flags.push(1);
-  }
-  return mergeGeosEmit(parts, flags);
-}
-const mushroomGeos = [makeMushroom(11), makeMushroom(27), makeMushroom(53)];
-const crystalGeos = [makeCrystal(3), makeCrystal(19), makeCrystal(41)];
-function makeGlowMat(cA, cB) {
-  const m = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.0, side: THREE.DoubleSide });
-  const emit = attribute('emit'), h = hash(instanceIndex);
-  const breathe = float(0.55).add(sin(time.mul(1.2).add(h.mul(9.0))).mul(0.45));
-  const gcol = mix(color(cA), color(cB), h);
-  m.colorNode = attribute('color').mul(h.mul(0.3).add(0.75));
-  m.emissiveNode = gcol.mul(emit).mul(breathe).mul(1.5);
-  return m;
-}
-const mushroomMat = makeGlowMat(0x28f28c, 0x46c8ff);          // teal -> cyan (fungal)
-const crystalMat = makeGlowMat(0x40d9ff, 0xb366ff);           // cyan -> violet (cavern)
 
 // ---- waterfall + mist materials (shared; everything is in world space) ------
 const waterfallMat = new THREE.MeshBasicNodeMaterial({ transparent: true, side: THREE.DoubleSide, depthWrite: false, fog: true });
@@ -1054,59 +980,6 @@ function finishPlants(j) {
   }
 }
 
-// ---- biome décor placement (fungal mushrooms / cavern crystals; streamed near the player) ----
-const DECOR_RADIUS = 4, DECOR_TRIES = 240;
-function buildInstMat(geo, list, mat) {
-  const n = Math.min(1024, list.length), im = new THREE.InstancedMesh(geo, mat, n);
-  for (let i = 0; i < n; i++) im.setMatrixAt(i, list[i]);
-  im.instanceMatrix.needsUpdate = true; im.count = n; if (n) im.computeBoundingSphere();
-  return im;
-}
-function startDecor(c) { return { type: 'decor', c, tries: 0, x0: c.cx * CHUNK - CHUNK / 2, z0: c.cz * CHUNK - CHUNK / 2, mush: [[], [], []], cryF: [[], [], []], cryC: [[], [], []] }; }
-function fillDecor(j, attempts) {
-  const e = 6;
-  for (let a = 0; a < attempts && j.tries < DECOR_TRIES; a++) {
-    j.tries++;
-    const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK, y = groundBase(x, z);
-    if (y < WL + 10 || y > 900) continue;                         // above water, below the high peaks
-    biomeAt(x, z, _bwShade);
-    const wFun = _bwShade[B_FUN], wCav = _bwShade[B_CAV];
-    if (wFun < 0.45 && wCav < 0.45) continue;                     // only the alien / cavern biomes get décor
-    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
-    if ((2 * e) / Math.hypot(yx, yz, 2 * e) < 0.5) continue;       // not on cliffs
-    const my = meshHeight(x, z);
-    if (wFun >= wCav) {                                            // glowing mushroom cluster (fungal)
-      const k = Math.random() * 3 | 0, cnt = 1 + (Math.random() * 3 | 0);
-      for (let m = 0; m < cnt; m++) {
-        const S = 10 + Math.random() * 16;
-        _gd.position.set(x + (Math.random() - 0.5) * 42, my - 1, z + (Math.random() - 0.5) * 42);
-        _gd.rotation.set(0, Math.random() * 6.2832, 0); _gd.scale.set(S, S * (0.8 + Math.random() * 0.5), S); _gd.updateMatrix();
-        j.mush[k].push(_gd.matrix.clone());
-      }
-    } else {                                                      // crystal shards (cavern): floor + a few hanging from the lid
-      const k = Math.random() * 3 | 0, S = 14 + Math.random() * 30;
-      _gd.position.set(x, my - 2, z); _gd.rotation.set((Math.random() - 0.5) * 0.3, Math.random() * 6.2832, (Math.random() - 0.5) * 0.3); _gd.scale.set(S, S * (0.9 + Math.random() * 0.8), S); _gd.updateMatrix();
-      j.cryF[k].push(_gd.matrix.clone());
-      if (Math.random() < 0.5) {                                  // stalactite crystal hanging from the rock lid
-        const cy = ceilingY(x, z);
-        if (cy < 1e8 && cy > my + 120) {
-          const k2 = Math.random() * 3 | 0, S2 = 12 + Math.random() * 26;
-          _gd.position.set(x, cy + 2, z); _gd.rotation.set(Math.PI + (Math.random() - 0.5) * 0.3, Math.random() * 6.2832, (Math.random() - 0.5) * 0.3); _gd.scale.set(S2, S2 * (0.9 + Math.random() * 0.8), S2); _gd.updateMatrix();
-          j.cryC[k2].push(_gd.matrix.clone());
-        }
-      }
-    }
-  }
-}
-function finishDecor(j) {
-  const c = j.c; c.decor = [];
-  for (let k = 0; k < 3; k++) {
-    if (j.mush[k].length) { const m = buildInstMat(mushroomGeos[k], j.mush[k], mushroomMat); scene.add(m); c.decor.push(m); }
-    if (j.cryF[k].length) { const m = buildInstMat(crystalGeos[k], j.cryF[k], crystalMat); scene.add(m); c.decor.push(m); }
-    if (j.cryC[k].length) { const m = buildInstMat(crystalGeos[k], j.cryC[k], crystalMat); scene.add(m); c.decor.push(m); }
-  }
-}
-
 // ---- waterfalls (trace the fall line down a steep mountain into a lake) -----
 function startFalls(c) { return { type: 'falls', c, done: false }; }
 function buildFalls(j) {
@@ -1196,13 +1069,13 @@ function finishCeiling(j) {
 }
 
 // ---- streaming: request near->far, unload far, build a slice each frame -----
-const chunkMeshes = (c) => [c.ground, c.ceiling, c.grass, c.bushes, c.flowers, ...(c.decor || []), ...(c.treesHi || []), ...(c.treesLo || [])];
+const chunkMeshes = (c) => [c.ground, c.ceiling, c.grass, c.bushes, c.flowers, ...(c.treesHi || []), ...(c.treesLo || [])];
 function ensureJobs(c, ring) {
   if (!c.reqGround) { c.reqGround = true; buildQueue.push({ type: 'ground', c }); }
-  if ((!c.reqCeil || !c.reqDecor) && ring <= Math.max(CEIL_RADIUS, DECOR_RADIUS)) {
+  if (!c.reqCeil && ring <= CEIL_RADIUS) {                 // cavern chunks also stream a rock lid overhead
+    c.reqCeil = true;
     biomeAt(c.cx * CHUNK, c.cz * CHUNK, _bwCam);
-    if (!c.reqCeil && ring <= CEIL_RADIUS) { c.reqCeil = true; if (_bwCam[B_CAV] > 0.2) buildQueue.push({ type: 'ceiling', c }); }   // rock lid over caverns
-    if (!c.reqDecor && ring <= DECOR_RADIUS) { c.reqDecor = true; if (_bwCam[B_FUN] > 0.3 || _bwCam[B_CAV] > 0.3) buildQueue.push({ type: 'decor', c }); }   // glowing mushrooms / crystals
+    if (_bwCam[B_CAV] > 0.2) buildQueue.push({ type: 'ceiling', c });
   }
 }
 function unloadChunk(key, c) {
@@ -1237,12 +1110,11 @@ function pump(budget) {
       if (!buildQueue.length) break;
       const r = buildQueue.shift();
       if (!r.c.alive) continue;
-      job = r.type === 'ground' ? startGround(r.c) : r.type === 'ceiling' ? startCeiling(r.c) : r.type === 'decor' ? startDecor(r.c) : r.type === 'grass' ? startGrass(r.c) : r.type === 'trees' ? startTrees(r.c) : r.type === 'plants' ? startPlants(r.c) : startFalls(r.c);
+      job = r.type === 'ground' ? startGround(r.c) : r.type === 'ceiling' ? startCeiling(r.c) : r.type === 'grass' ? startGrass(r.c) : r.type === 'trees' ? startTrees(r.c) : r.type === 'plants' ? startPlants(r.c) : startFalls(r.c);
     }
     if (!job.c.alive) { job = null; continue; }
     if (job.type === 'ground') { const step = Math.min(budget - used, job.n - job.k); fillGround(job, step); used += step; if (job.k >= job.n) { finishGround(job); job = null; } }
     else if (job.type === 'ceiling') { const step = Math.min(Math.max(1, (budget - used) / 4 | 0), job.n - job.k); fillCeiling(job, step); used += step * 4; if (job.k >= job.n) { finishCeiling(job); job = null; } }
-    else if (job.type === 'decor') { const step = Math.min(Math.max(1, (budget - used) / 6 | 0), DECOR_TRIES - job.tries); fillDecor(job, step); used += step * 6; if (job.tries >= DECOR_TRIES) { finishDecor(job); job = null; } }   // a placement attempt costs ~6 terrain verts
     else if (job.type === 'grass') { const step = Math.min(budget - used, GTRIES - job.tries); fillGrass(job, step); used += step; if (job.k >= GRASS_PER_CHUNK || job.tries >= GTRIES) { finishGrass(job); job = null; } }
     else if (job.type === 'trees') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), TREE_TRIES - job.tries); fillTrees(job, step); used += step * 5; if (job.tries >= TREE_TRIES) { finishTrees(job); job = null; } }   // a placement attempt costs ~5 terrain verts
     else if (job.type === 'plants') { const step = Math.min(Math.max(1, (budget - used) / 5 | 0), PLANT_TRIES - job.tries); fillPlants(job, step); used += step * 5; if (job.tries >= PLANT_TRIES) { finishPlants(job); job = null; } }
@@ -1518,12 +1390,7 @@ addEventListener('resize', () => {
 
 planSegments();
 pump(60000);                       // build the spawn area up front; the rest streams in over the next frames
-// pre-warm the décor materials so compileAsync validates their node shaders at load (not lazily on first
-//   draw in a far-off fungal/cavern region) — a TSL error here rejects this await and is caught immediately.
-const _pmWarm = new THREE.InstancedMesh(mushroomGeos[0], mushroomMat, 1), _pcWarm = new THREE.InstancedMesh(crystalGeos[0], crystalMat, 1);
-_pmWarm.setMatrixAt(0, _m4.identity()); _pcWarm.setMatrixAt(0, _m4.identity()); _pmWarm.position.y = _pcWarm.position.y = -1e5; scene.add(_pmWarm, _pcWarm);
 await renderer.compileAsync(scene, camera);
-scene.remove(_pmWarm, _pcWarm); _pmWarm.dispose(); _pcWarm.dispose();
 
 // MEDIUM: above the waterline it's grey cavern air; below it, water swallows light fast.
 //   Blend the single fog's colour + density by how deep the eye is (no object swap => no
@@ -1548,7 +1415,6 @@ let _insideCaveAmt = 0;
 function _accR(out, table) { out.setRGB(0, 0, 0); for (let i = 0; i < B_N; i++) { const w = _bwCam[i]; out.r += table[i].r * w; out.g += table[i].g * w; out.b += table[i].b * w; } }
 function updateBiome(dt) {
   biomeAt(camera.position.x, camera.position.z, _bwCam);
-  uLavaMix.value += (clamp(_bwCam[B_VOL], 0, 1) - uLavaMix.value) * Math.min(1, dt * 2.5);   // local water turns molten in volcanic regions
   let dens = 0, ambI = 0, sunI = 0, hemiI = 0;
   for (let i = 0; i < B_N; i++) { const w = _bwCam[i]; dens += BIOME_DENS[i] * w; ambI += BIOME_AMB_I[i] * w; sunI += BIOME_SUN_I[i] * w; hemiI += BIOME_HEMI_I[i] * w; }
   _accR(_fA, BIOME_FOG); _accR(_ambC, BIOME_AMB); _accR(_sunC, BIOME_SUN); _accR(_hsC, BIOME_HEMI_SKY); _accR(_hgC, BIOME_HEMI_GND);
@@ -1628,20 +1494,18 @@ window.__biomes = (on) => { BIOMES_ON = on !== false; for (const [k, c] of [...c
 window.__biomeAt = (x, z) => { biomeAt(x, z, _bwCam); return Array.from(_bwCam); };   // [default,alpine,volcanic,fungal,cavern]
 window.__find = (b) => { for (let r = 600; r < 80000; r += 500) for (let a = 0; a < 6.2832; a += 0.45) { const x = Math.cos(a) * r, z = Math.sin(a) * r; biomeAt(x, z, _bwCam); if (_bwCam[b] > 0.6) return { x: Math.round(x), z: Math.round(z), w: +_bwCam[b].toFixed(2) }; } return null; };
 window.__tp = (x, z) => { ship.position.set(x, groundY(x, z) + 360, z); look.yaw = 0; look.pitch = -0.2; };
-window.__water = (k, v) => { ({ peakLift: uPeakLift, foamLo: uFoamLo, foamHi: uFoamHi, lava: uLavaMix }[k]).value = v; };   // live water tuning
 window.__dbg = () => {
   const out = { camB: window.__biomeAt(camera.position.x, camera.position.z).map(v => +v.toFixed(2)), fog: '#' + scene.fog.color.getHexString(), dens: +scene.fog.density.toFixed(5), sunC: '#' + sun.color.getHexString(), camY: Math.round(camera.position.y) };
   const pcx = Math.round(camera.position.x / CHUNK), pcz = Math.round(camera.position.z / CHUNK), c = chunks.get(pcx + ',' + pcz);
   if (c && c.ground) { const g = c.ground.geometry.getAttribute('glow'); const mx = [0, 0, 0]; for (let i = 0; i < g.count; i++) { mx[0] = Math.max(mx[0], g.getX(i)); mx[1] = Math.max(mx[1], g.getY(i)); mx[2] = Math.max(mx[2], g.getZ(i)); } out.glowMax = mx.map(v => +v.toFixed(2)); out.hasCeil = !!c.ceiling; }
-  let dm = 0, di = 0, ceil = 0; for (const [, cc] of chunks) { if (cc.decor) for (const m of cc.decor) { dm++; di += m.count; } if (cc.ceiling) ceil++; }
-  out.decorMeshes = dm; out.decorInst = di; out.ceilChunks = ceil; out.lava = +uLavaMix.value.toFixed(2);
   return out;
 };
 const fpsEl = document.getElementById('fps');
 setTimeout(() => { const h = document.getElementById('hint'); if (h) h.style.opacity = '0'; }, 7000);
 let fpsAcc = 0, fpsFrames = 0;
 let last = performance.now();
-function frameTick(dt) {
+renderer.setAnimationLoop(() => {
+  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
   updateControls(dt);
   updateBiome(dt);
   updateMedium();
@@ -1654,11 +1518,6 @@ function frameTick(dt) {
   updateWaterfalls(dt);
   water.position.set(camera.position.x, WL, camera.position.z);
   renderer.render(scene, camera);
-}
-window.__force = (n, dt) => { for (let i = 0; i < (n || 1); i++) frameTick(dt || 0.016); };   // drive frames headlessly when the preview tab is hidden (rAF paused)
-renderer.setAnimationLoop(() => {
-  const now = performance.now(), dt = Math.min(0.05, (now - last) / 1000); last = now;
-  frameTick(dt);
   fpsAcc += dt; fpsFrames++;
   if (fpsAcc >= 0.5) { fpsEl.textContent = Math.round(fpsFrames / fpsAcc) + ' fps'; fpsAcc = 0; fpsFrames = 0; }
 });
