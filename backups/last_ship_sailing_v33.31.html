@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.32</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.32","short_name":"LSS%20v33.32","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.31</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.31","short_name":"LSS%20v33.31","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3279,7 +3279,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.32';
+const LSS_BUILD = '33.31';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17713,10 +17713,7 @@ function _swWaterReflectShader() {
       '      N.x += clamp((hL - hR) * uRippleScale, -1.4, 1.4) * rg;',
       '      N.z += clamp((hD - hU) * uRippleScale, -1.4, 1.4) * rg;',
       '      float shore = 1.0 - smoothstep(0.0, 0.18, mask.g);',   // 1 at the beach, 0 in deep water
-      // (v33.32) FOAM = shoreline crests (gated by `shore`) OR open-water WAKE crests (any cell where the
-      // sim height crest is high) — so the moving ship leaves a visible white foam wake, not just at beaches.
-      '      float wakeFoam = clamp((abs(hC) - 0.045) * 15.0, 0.0, 1.0);',
-      '      foam = max(clamp(hC * 22.0, 0.0, 1.0) * shore, wakeFoam) * mask.r * winFade;',
+      '      foam = clamp(hC * 22.0, 0.0, 1.0) * shore * mask.r * winFade;',   // wave crests whiten the shallows
       '    }',
       '  }',
       '  N = normalize(N);',
@@ -17851,30 +17848,6 @@ function _swRippleSeed(wx, wz, radius, amp) {
   R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: amp });
   if (R.pending.length > 8) R.pending.shift();   // newest wins
 }
-// (v33.32) Visible water SPLASH spray : a burst of white/cyan droplets that arc UP and fall back (the
-// particle update applies p.grav). Additive Points, so it reads as bright spray. `power` (~0.4..2.5)
-// scales the upward kick ; `n` the droplet count. No-op underwater or when the particle budget is tight
-// (combat FX keep priority). Pairs with the GPGPU ripple seed for a real splash (spray) + wake (ripple).
-const _swSplashTmp = new THREE.Vector3();
-function _swSpawnSplash(x, wl, z, n, power) {
-  if (!game.particles || game._swSubmerged) return;
-  const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
-  if (game.particles.length > cap - n - 2) return;
-  for (let i = 0; i < n; i++) {
-    const ang = Math.random() * 6.2832;
-    const out = (28 + Math.random() * 52) * (0.6 + 0.4 * power);
-    const up = (80 + Math.random() * 120) * power;
-    _swSplashTmp.set(Math.cos(ang) * out, up, Math.sin(ang) * out);
-    game.particles.push({
-      position: new THREE.Vector3(x + (Math.random() - 0.5) * 36, wl + 4, z + (Math.random() - 0.5) * 36),
-      velocity: _swSplashTmp.clone(),
-      life: 0.42 + Math.random() * 0.5, maxLife: 0.92,
-      color: (Math.random() < 0.45) ? 0xeaf7ff : 0xffffff,
-      size: 1.8 + Math.random() * 2.6,
-      grav: 300 + Math.random() * 140,
-    });
-  }
-}
 // (v33.21) WEAPON SPLASH : given a 3D segment (a hitscan beam, or a projectile's last->now step),
 // if it CROSSES the water surface, seed a ripple at the crossing point. Hub-only (no-op without the
 // GPGPU water). Lets bullets/bolts/beams/explosions splash the lake exactly where they hit it.
@@ -17883,9 +17856,7 @@ function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp) {
   const WL = w.userData.WL;
   if ((y0 - WL) * (y1 - WL) > 0.0) return;   // both endpoints the same side of the surface : no crossing
   const dy = y1 - y0, t = (Math.abs(dy) < 1e-6) ? 0.5 : (WL - y0) / dy;
-  const _hx = x0 + (x1 - x0) * t, _hz = z0 + (z1 - z0) * t;
-  _swRippleSeed(_hx, _hz, radius, amp);
-  _swSpawnSplash(_hx, WL, _hz, 4, 0.6 + Math.min(1.2, amp * 4.0));   // (v33.32) visible spray where the shot hits the water
+  _swRippleSeed(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, radius, amp);
 }
 // (v33.20) Bake the LAND/WATER MASK over the ripple window from the terrain heightfield, so the
 // sim reflects ripples off shorelines (-> cymatic standing waves) instead of an open square edge.
@@ -17957,7 +17928,6 @@ function _swRippleTick(dt) {
         const touching = above < 30;                                    // hull in/at the water
         const amp = (touching ? 0.14 : 0.05) * Math.min(1, sp / 480) * (0.4 + 0.6 * prox);
         _swRippleSeed(px, pz, 110 + 80 * prox, amp);
-        if (touching && sp > 100) _swSpawnSplash(px, WL, pz, 2, 0.45 + 0.0022 * sp);   // (v33.32) kicked-up spray skimming the surface
         R.wakeX = px; R.wakeZ = pz;
       }
     }
@@ -17967,11 +17937,9 @@ function _swRippleTick(dt) {
     if (above < 0 && prevAbove >= 0) {
       const p = Math.min(2.2, dyv / 130);
       _swRippleSeed(px, pz, 200 + 60 * p, 0.20 + 0.12 * p);
-      _swSpawnSplash(px, WL, pz, 10 + Math.round(p * 7), 1.0 + 0.5 * p);   // (v33.32) big entry-crown spray
     } else if (above > 0 && prevAbove <= 0) {
       const p = Math.min(2.2, dyv / 130);
       _swRippleSeed(px, pz, 170 + 50 * p, 0.15 + 0.09 * p);
-      _swSpawnSplash(px, WL, pz, 7 + Math.round(p * 5), 0.8 + 0.4 * p);    // (v33.32) exit-crown spray
     }
     R.prevAbove = above;
   }
@@ -32279,7 +32247,6 @@ function updateParticles(dt) {
       continue;
     }
     const _pv = p.velocity;
-    if (p.grav) _pv.y -= p.grav * dt;   // (v33.32) optional gravity (water splash spray arcs up then falls back)
     pos.x += _pv.x * dt;
     pos.y += _pv.y * dt;
     pos.z += _pv.z * dt;
