@@ -18495,18 +18495,26 @@ window.__clipTest = function (on) {
   } catch (e) { console.warn('[clip] err', e); }
 };
 
-function updateSandwichStream(px, pz, budget) {
+function _swHubLoadingOverlay(show) {
+  let el = document.getElementById('hub-loading');
+  if (!el) {
+    if (!show) return;
+    el = document.createElement('div');
+    el.id = 'hub-loading';
+    el.style.cssText = 'position:fixed;inset:0;z-index:450;background:radial-gradient(circle at 50% 42%,#0c3242,#02101a 80%);display:flex;flex-direction:column;align-items:center;justify-content:center;color:#79d3bb;font-family:monospace;letter-spacing:4px;pointer-events:none;';
+    el.innerHTML = '<div style="font-size:22px;margin-bottom:16px;">ENTERING THE OVERWORLD</div><div style="width:220px;height:4px;background:#0e3a48;border-radius:2px;overflow:hidden;"><div style="height:100%;width:40%;background:#79d3bb;animation:hubLoadSlide 1.1s ease-in-out infinite;"></div></div><style>@keyframes hubLoadSlide{0%{margin-left:-45%}100%{margin-left:105%}}</style>';
+    document.body.appendChild(el);
+  }
+  el.style.display = show ? 'flex' : 'none';
+}
+
+function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const T = game.sandwichTerrain;
   if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
   const chunks = game.sandwichChunks;
   const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
-  const _vrNowSW = (typeof isXRPresenting === 'function') && isXRPresenting();
-  const _VIEW = (T && T.biome === 'mossy') ? (_vrNowSW ? 5 : _SW_HUB_VIEW) : _SW_VIEW;   // (v33.46) VR perf: tighter hub radius in the headset
-  if (T && T.biome === 'mossy' && scene.fog && scene.fog.isFogExp2 && !game._swSubmerged) {   // (v33.46) match the fog to the (VR-reduced) view so the streamed-chunk edge stays hidden
-    const _fd = (game.sandwichFog ? game.sandwichFog * 1e-4 : Math.sqrt(Math.log(10)) / (_VIEW * _SW_CHUNK));
-    if (Math.abs(scene.fog.density - _fd) > 1e-6) scene.fog.density = _fd;
-  }   // (v33.02) wider built radius for the endless hub
+  const _VIEW = (T && T.biome === 'mossy') ? _SW_HUB_VIEW : _SW_VIEW;   // (v33.02) wider built radius for the endless hub
   // (v33.07) THE HUB streams a DISC, not a square. We still scan the bounding box
   // of chunks but skip the four CORNERS (Euclidean radius test), so the resident
   // terrain's outer boundary is a CIRCLE — from high up it reads as a natural hazy
@@ -18553,7 +18561,7 @@ function updateSandwichStream(px, pz, budget) {
   for (const [key, c] of chunks) {
     const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
     const near = Math.max(Math.abs(cx - scx), Math.abs(cz - scz)) <= _SW_GRASS_VIEW;
-    if (near && wantGrass && !c.grassBuilt && gBuilt < 1) {
+    if (near && wantGrass && !c.grassBuilt && gBuilt < (gLim || 1)) {
       c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
     } else if ((!near || !wantGrass) && c.grassBuilt) {
       _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false;
@@ -18565,12 +18573,13 @@ function updateSandwichStream(px, pz, budget) {
   for (const [key, c] of chunks) {
     const ci = key.indexOf(','); const cx = +key.slice(0, ci), cz = +key.slice(ci + 1);
     const nearT = Math.max(Math.abs(cx - scx), Math.abs(cz - scz)) <= _SW_TREE_VIEW;
-    if (nearT && wantTrees && !c.treesBuilt && tBuilt < 1) {
+    if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
       c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
     } else if ((!nearT || !wantTrees) && c.treesBuilt) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false;
     }
   }
+  return lim + gBuilt + tBuilt;   // (v33.46) total built this call (drives the preload done-detection)
 }
 
 // Called at level build: reset, then synchronously fill the map footprint (plus a
@@ -18604,6 +18613,9 @@ function initSandwichTerrain() {
       }
     }
   } catch (e) { console.warn('[sandwich] init terrain failed:', e); }
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {   // (v33.46) preload the whole visible overworld behind a loading screen ; nothing pops/hitches once you have control
+    game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0);
+  }
 }
 
 // Console toggle: setSandwichTerrain(false) to fly the original empty-void tubes,
@@ -41962,7 +41974,7 @@ function updateRoundSystem(dt) {
   // Test mode : skip the warmup countdown entirely and go straight
   // to 'playing'. Player can fly immediately after ship select ; no 3-2-1.
   if (game.state === 'warmup' && (game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight'))) {   // (v33.02) freeflight is endless without testMode — skip the countdown here too
-    game.warmupTimer = 0;
+    game.warmupTimer = ((typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') && game._swPreloading) ? 0.1 : 0;   // (v33.46) hold in warmup while the overworld preloads behind the loading screen, then release to 'playing'
   }
   if (game.state === 'warmup') {
     const prev = game.warmupTimer;
@@ -55519,7 +55531,15 @@ function gameLoop(timestamp) {
       // Fade grass around the SHIP (known-good world position) so near grass is
       // always at full height ; camera ref can be a stale/lobby cam at origin.
       _swU.uCam.value.set(player.position.x, player.position.y, player.position.z);
-      updateSandwichStream(player.position.x, player.position.z);
+      if (game._swPreloading) {
+        var _plBuilt = updateSandwichStream(player.position.x, player.position.z, 28, 14, 14);   // (v33.46) PRELOAD: bake the whole visible radius (ground+grass+trees) up-front so nothing streams/hitches in flight
+        game._swPreloadFrames = (game._swPreloadFrames || 0) + 1;
+        game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
+        if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} }   // done (nothing left to build) OR hard cap ~7s so it can never strand the player
+        else { try { _swHubLoadingOverlay(true); } catch (_) {} }
+      } else {
+        updateSandwichStream(player.position.x, player.position.z);
+      }
       try { _swUpdateHubWater(); } catch (_) {}   // (v33.04) recenter the hub water on the camera
       try { _swRippleTick(dt); } catch (_) {}   // (v33.18) advance the GPGPU ripple sim (before renderer.render)
       try { _swUpdateUnderwater(); } catch (_) {}   // (v33.09) underwater wash when the camera dips below WL
