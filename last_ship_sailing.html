@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.32</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.32","short_name":"LSS%20v33.32","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.37</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.37","short_name":"LSS%20v33.37","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3279,7 +3279,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.32';
+const LSS_BUILD = '33.37';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -11660,6 +11660,8 @@ const _pelletWobble = new THREE.Vector3();
 const _pelletJitter = new THREE.Vector3();
 function spawnPelletBurst(origin, dir, distance) {
   if (!origin || !dir) return;
+  // (v33.34) splash the lake where a shotgun/pellet burst crosses the surface (hub) — Slayer etc.
+  if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { const _d = distance || 800; _swWaterCrossSplash(origin.x, origin.y, origin.z, origin.x + dir.x * _d, origin.y + dir.y * _d, origin.z + dir.z * _d, 90, 0.14); } catch (_) {} }
   const partCount = 48;
   const palette = [0xeeffee, 0xaaffbb, 0x66ff88, 0x44ff66, 0x22cc44, 0xddffdd];
   const baseSpeed = Math.min(3500, Math.max(1500, (distance || 800) * 2.5));
@@ -17715,7 +17717,7 @@ function _swWaterReflectShader() {
       '      float shore = 1.0 - smoothstep(0.0, 0.18, mask.g);',   // 1 at the beach, 0 in deep water
       // (v33.32) FOAM = shoreline crests (gated by `shore`) OR open-water WAKE crests (any cell where the
       // sim height crest is high) — so the moving ship leaves a visible white foam wake, not just at beaches.
-      '      float wakeFoam = clamp((abs(hC) - 0.045) * 15.0, 0.0, 1.0);',
+      '      float wakeFoam = clamp((abs(hC) - 0.028) * 16.0, 0.0, 1.0);',   // (v33.34) lower threshold so the WAKE trail actually foams, not just fresh seed points
       '      foam = max(clamp(hC * 22.0, 0.0, 1.0) * shore, wakeFoam) * mask.r * winFade;',
       '    }',
       '  }',
@@ -17733,7 +17735,14 @@ function _swWaterReflectShader() {
       '  vec3 H = normalize(sunDir - V);',
       '  float spec = pow(max(dot(N, H), 0.0), 200.0) * 0.6 * amb;',
       '  outc += vec3(1.0, 0.98, 0.92) * spec;',
-      '  outc = mix(outc, vec3(0.82,0.91,0.96), foam * 0.6);',   // (v33.20) shoreline crest foam
+      // (v33.33) Foam was too FLAT-WHITE. Make it (a) more TRANSPARENT (0.6 -> 0.40 mix), (b) a cooler,
+      // less-pure white, and (c) shaded by a slow CAUSTIC shimmer so it reads as rippling light on the
+      // surface rather than a solid white cap.
+      // (v33.34) The v33.33 caustic was sin(x)*sin(y) — a PRODUCT of perpendicular sines = a literal
+      // CHECKERBOARD, which showed up strongly wherever foam was dense. Replace with a SUM of three
+      // sines at DIFFERENT ANGLES (an interference pattern, no axis-aligned grid) for an organic shimmer.
+      '  float caustic = 0.66 + 0.13 * (sin(q.x*0.045 + q.y*0.022 + t*1.5) + sin(q.y*0.041 - q.x*0.028 - t*1.05) + sin((q.x + q.y)*0.030 + t*0.8));',
+      '  outc = mix(outc, vec3(0.68,0.80,0.88), foam * 0.40 * caustic);',
       '  gl_FragColor = vec4(outc, 0.93 * uFade);',
       '  #include <fog_fragment>',
       '}',
@@ -17784,7 +17793,7 @@ const _SW_RIPPLE_FRAG = [
   // (v33.24) discrete wave equation in explicit Courant form. `(n+s+e+w)*0.5 - h.y` was C2=0.5 —
   // the 2D stability LIMIT = MAX propagation speed (ripples raced out unrealistically fast). Drop
   // the wave-speed^2 to 0.13 so ripples spread at a believable pace (prev height in .y ; well stable).
-  '  float nh = (2.0 * hC - h.y + 0.13 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
+  '  float nh = (2.0 * hC - h.y + 0.05 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
@@ -17861,16 +17870,23 @@ function _swSpawnSplash(x, wl, z, n, power) {
   const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
   if (game.particles.length > cap - n - 2) return;
   for (let i = 0; i < n; i++) {
+    // (v33.34) Shape it like a real splash : ~35% of droplets form a tall narrow CENTRAL COLUMN, the
+    // rest a wide low radial CROWN. (Was a uniform radial burst that read flat.)
+    const column = (i < n * 0.35);
     const ang = Math.random() * 6.2832;
-    const out = (28 + Math.random() * 52) * (0.6 + 0.4 * power);
-    const up = (80 + Math.random() * 120) * power;
+    const out = (column ? (6 + Math.random() * 18) : (32 + Math.random() * 60)) * (0.6 + 0.4 * power);
+    const up = (column ? (150 + Math.random() * 140) : (60 + Math.random() * 100)) * power;
+    const spread = column ? 12 : 34;
     _swSplashTmp.set(Math.cos(ang) * out, up, Math.sin(ang) * out);
     game.particles.push({
-      position: new THREE.Vector3(x + (Math.random() - 0.5) * 36, wl + 4, z + (Math.random() - 0.5) * 36),
+      position: new THREE.Vector3(x + (Math.random() - 0.5) * spread, wl + 4, z + (Math.random() - 0.5) * spread),
       velocity: _swSplashTmp.clone(),
-      life: 0.42 + Math.random() * 0.5, maxLife: 0.92,
-      color: (Math.random() < 0.45) ? 0xeaf7ff : 0xffffff,
-      size: 1.8 + Math.random() * 2.6,
+      life: 0.42 + Math.random() * 0.55, maxLife: 0.97,
+      // (v33.33) Spray was too BRIGHT-WHITE. The Points material is ADDITIVE (colour = the brightness it
+      // adds), so a muted cool blue-white reads as misty water spray instead of a glowing white blob, and
+      // a smaller size makes each droplet less of a white mass.
+      color: (Math.random() < 0.5) ? 0x7ba6c4 : 0xa6c8de,
+      size: 1.3 + Math.random() * 1.7,
       grav: 300 + Math.random() * 140,
     });
   }
@@ -17955,7 +17971,7 @@ function _swRippleTick(dt) {
       if (moved > 30 * 30) {
         const prox = 1.0 - Math.min(1, Math.abs(above) / 220);
         const touching = above < 30;                                    // hull in/at the water
-        const amp = (touching ? 0.14 : 0.05) * Math.min(1, sp / 480) * (0.4 + 0.6 * prox);
+        const amp = (touching ? 0.22 : 0.08) * Math.min(1, sp / 480) * (0.4 + 0.6 * prox);   // (v33.34) stronger wake so the trail reads
         _swRippleSeed(px, pz, 110 + 80 * prox, amp);
         if (touching && sp > 100) _swSpawnSplash(px, WL, pz, 2, 0.45 + 0.0022 * sp);   // (v33.32) kicked-up spray skimming the surface
         R.wakeX = px; R.wakeZ = pz;
@@ -17967,11 +17983,11 @@ function _swRippleTick(dt) {
     if (above < 0 && prevAbove >= 0) {
       const p = Math.min(2.2, dyv / 130);
       _swRippleSeed(px, pz, 200 + 60 * p, 0.20 + 0.12 * p);
-      _swSpawnSplash(px, WL, pz, 10 + Math.round(p * 7), 1.0 + 0.5 * p);   // (v33.32) big entry-crown spray
+      _swSpawnSplash(px, WL, pz, 16 + Math.round(p * 12), 1.1 + 0.5 * p);   // (v33.32/34) big entry-crown spray
     } else if (above > 0 && prevAbove <= 0) {
       const p = Math.min(2.2, dyv / 130);
       _swRippleSeed(px, pz, 170 + 50 * p, 0.15 + 0.09 * p);
-      _swSpawnSplash(px, WL, pz, 7 + Math.round(p * 5), 0.8 + 0.4 * p);    // (v33.32) exit-crown spray
+      _swSpawnSplash(px, WL, pz, 11 + Math.round(p * 8), 0.85 + 0.4 * p);    // (v33.32/34) exit-crown spray
     }
     R.prevAbove = above;
   }
@@ -18089,6 +18105,70 @@ function _swBuildHubWater(T) {
   mesh.updateMatrix();
   scene.add(mesh);
   game._hubWater = mesh;
+  // (v33.35) build the displaced wave overlay AFTER game._hubWater is set (the overlay shares its ripple
+  // uniforms). No-op on the potato path (no uRippleTex on the basic material).
+  try { _swBuildHubWaterOverlay(WL); } catch (e) { try { console.warn('[water] overlay build failed', e); } catch (_) {} }
+  return mesh;
+}
+// (v33.35) DISPLACED WAVE OVERLAY (Approach B). The flat THREE.Reflector mirror is kept UNTOUCHED
+// (mirror + first-person ship reflection intact). On top of it, over the GPGPU sim window (±2000u,
+// follows the ship), we lay a SEPARATE subdivided plane whose vertices are VTF-displaced from the
+// live ripple heightmap (uRippleTex) — so wake/ripples/splashes get real 3D RELIEF + foam crests
+// while calm water stays nearly transparent and the mirror shows through. RT-VTF de-risked 2026-06-25.
+function _swBuildHubWaterOverlay(WL) {
+  if (!game._hubWater || !game._hubWater.material || !game._hubWater.material.uniforms.uRippleTex) return null;
+  const span = _SW_RIPPLE_BOUNDS, seg = 128;   // cover the sim window at ~31u/segment (matches the 128^2 sim texel)
+  const geo = new THREE.PlaneGeometry(span, span, seg, seg);
+  geo.rotateX(-Math.PI / 2);                    // XY plane -> XZ ground plane
+  const ru = game._hubWater.material.uniforms;  // SHARE the Reflector's live ripple uniforms (set each frame in _swRippleTick)
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uRippleTex: ru.uRippleTex, uRippleCenter: ru.uRippleCenter, uRippleBounds: ru.uRippleBounds,
+      uTime: _swU.uTime, uCam: _swU.uCam, uDispScale: { value: 340.0 },
+    },
+    vertexShader: [
+      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale;',
+      'varying float vCrest; varying vec3 vWPos; varying vec3 vN;',
+      'void main(){',
+      '  vec3 wp = (modelMatrix * vec4(position, 1.0)).xyz;',                 // world XZ (mesh follows the camera)
+      '  vec2 rUV = (wp.xz - uRippleCenter) / uRippleBounds + 0.5;',
+      '  vec2 wf = smoothstep(vec2(0.0), vec2(0.12), rUV) * (vec2(1.0) - smoothstep(vec2(0.88), vec2(1.0), rUV));',
+      '  float winFade = wf.x * wf.y;',                                        // soft window edge (no hard square)
+      '  float h = texture2D(uRippleTex, rUV).x * winFade;',                   // VTF the GPGPU heightmap (de-risked)
+      '  float cs = 1.0 / 128.0;',
+      '  float hl = texture2D(uRippleTex, rUV - vec2(cs,0.0)).x; float hr = texture2D(uRippleTex, rUV + vec2(cs,0.0)).x;',
+      '  float hd = texture2D(uRippleTex, rUV - vec2(0.0,cs)).x; float hu = texture2D(uRippleTex, rUV + vec2(0.0,cs)).x;',
+      '  vN = normalize(vec3((hl - hr) * uDispScale, 8.0, (hd - hu) * uDispScale));',   // surface normal from the sim gradient
+      '  vCrest = abs(h);',
+      '  vec3 pp = position; pp.y += h * uDispScale;',                         // raise/dent the vertex into real 3D relief
+      '  vec4 wp2 = modelMatrix * vec4(pp, 1.0);',
+      '  vWPos = wp2.xyz;',
+      '  gl_Position = projectionMatrix * viewMatrix * wp2;',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'uniform vec3 uCam;',
+      'varying float vCrest; varying vec3 vWPos; varying vec3 vN;',
+      'void main(){',
+      '  vec3 V = normalize(vWPos - uCam);',
+      '  float fres = pow(clamp(1.0 - max(dot(-V, vN), 0.0), 0.0, 1.0), 3.0);',
+      '  float crest = smoothstep(0.02, 0.14, vCrest);',                       // 0 calm .. 1 strong crest
+      '  vec3 col = mix(vec3(0.14,0.34,0.45), vec3(0.82,0.92,0.98), crest);',  // cool water -> foam-white crests
+      // (v33.35) Alpha is PURELY crest-driven : calm water is fully transparent so the planar mirror is
+      // EXACTLY unchanged ; only disturbed water (ripples/wake/splash crests) shows the 3D relief + foam.
+      '  float a = clamp(crest * (0.85 + fres * 0.10), 0.0, 0.95);',
+      '  gl_FragColor = vec4(col, a);',
+      '}',
+    ].join('\n'),
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false,   // (v33.36) fog:true CRASHED: a raw ShaderMaterial with fog:true but no fog uniforms merged -> three refreshFogUniforms reads fogColor.value of undefined every frame ; overlay crests live in the near 4000u sim window so scene fog is negligible
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(camera.position.x, WL + 1.0, camera.position.z);   // +1u so troughs don't z-fight the flat mirror at WL
+  mesh.renderOrder = 0;            // (v33.17) keep at/below water ro 0 — under the FX (ro>=1)
+  mesh.frustumCulled = false; mesh.matrixAutoUpdate = false; mesh.updateMatrix();
+  mesh.userData = { isHubWater: true };
+  scene.add(mesh);
+  game._hubWaterOverlay = mesh;
   return mesh;
 }
 function _swUpdateHubWater() {
@@ -18096,6 +18176,13 @@ function _swUpdateHubWater() {
   const WL = w.userData.WL;
   w.position.set(camera.position.x, WL, camera.position.z);
   w.updateMatrix(); w.updateMatrixWorld(true);
+  // (v33.35) the displaced wave overlay follows the camera (it covers the sim window) ; hide it when
+  // the mirror surface hides (submerged) so it isn't a floating sheet from below.
+  const ov = game._hubWaterOverlay;
+  if (ov) {
+    ov.position.set(camera.position.x, WL + 1.0, camera.position.z);
+    ov.updateMatrix(); ov.updateMatrixWorld(true);
+  }
   // (v33.12) CROSSFADE the planar mirror (above) and the translucent underside (below)
   // across a band around WL instead of a hard pop at the exact surface — crossing the
   // waterline used to flip between two differently-tinted sheets ("two layers"). Both are
@@ -18180,6 +18267,14 @@ function _swDisposeHubWater() {
       if (game._hubWaterUnder.material) game._hubWaterUnder.material.dispose();
     } catch (_) {}
     game._hubWaterUnder = null;
+  }
+  if (game && game._hubWaterOverlay) {   // (v33.35) the displaced wave overlay
+    try {
+      if (game._hubWaterOverlay.parent) scene.remove(game._hubWaterOverlay);
+      if (game._hubWaterOverlay.geometry) game._hubWaterOverlay.geometry.dispose();
+      if (game._hubWaterOverlay.material) game._hubWaterOverlay.material.dispose();
+    } catch (_) {}
+    game._hubWaterOverlay = null;
   }
 }
 
@@ -24849,7 +24944,7 @@ function spawnExplosion(pos, size) {
   // (v33.21) big water splash when an explosion goes off at/near the lake surface (hub)
   if (game._hubWater && pos) {
     const _wl = game._hubWater.userData.WL;
-    if (Math.abs(pos.y - _wl) < 110 + size * 3) { try { _swRippleSeed(pos.x, pos.z, 170 + size * 4, 0.18); } catch (_) {} }
+    if (Math.abs(pos.y - _wl) < 110 + size * 3) { try { _swRippleSeed(pos.x, pos.z, 140 + size * 2, 0.11); } catch (_) {} }
   }
   // Burst guard: a missile into a rock cluster destroys many rocks in one
   // frame, and each full explosion spawns fireball + smoke + debris + a light.
@@ -38786,6 +38881,8 @@ function executeAbility(slot, ability) {
 
 function firePowerShot() {
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  // (v33.34) splash the lake where the Blaster Charge Shot crosses the surface (hub)
+  if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(player.position.x, player.position.y, player.position.z, player.position.x + forward.x * 1500, player.position.y + forward.y * 1500, player.position.z + forward.z * 1500, 110, 0.12); } catch (_) {} }
   if (player.blasterMode === 'close') {
     // Close-range Charge Shot: shotgun blast (12 pellets, wide spread, knockback)
     const range = 1200;
