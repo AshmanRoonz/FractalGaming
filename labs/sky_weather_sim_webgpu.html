@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sky Weather Sim — WebGPU (three.js r185 TSL)</title>
+<style>
+  html,body{margin:0;height:100%;background:#05080c;color:#cfe;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;overflow:hidden}
+  #c{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:crosshair}
+  #panel{position:fixed;top:10px;left:10px;width:300px;max-height:calc(100% - 20px);overflow:auto;
+    background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px 12px 14px;backdrop-filter:blur(7px);
+    transition:transform .2s ease;z-index:4}
+  #panel.hidden{transform:translateX(-112%)}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .grp{border-top:1px solid #16222e;padding:8px 0 2px;margin-top:6px}
+  .grp .t{color:#7fb;font-size:11px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;opacity:.85}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 96px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 44px;text-align:right;color:#bdf}
+  .row.chk label{flex:1}
+  select{flex:1;background:#11202b;color:#bff;border:1px solid #24384a;border-radius:6px;padding:5px}
+  .eml{font-size:13px;color:#ffd56b;background:#11202b;border:1px solid #24384a;border-radius:6px;padding:7px 8px;margin:4px 0 2px}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4a60}
+  #hud{position:fixed;top:10px;right:12px;text-align:right;background:rgba(10,16,24,.55);border:1px solid #1d2b3a;
+    border-radius:8px;padding:8px 11px;backdrop-filter:blur(5px);min-width:150px;z-index:4}
+  #hud .big{font-size:22px;color:#aef;line-height:1.1}
+  #hud .lbl{color:#6a8;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+  #hud .pad{margin-top:6px;font-size:11px;color:#7fb}
+  #hud .pad.off{color:#a66}
+  #help{position:fixed;bottom:10px;left:12px;color:#6f8ba0;font-size:11px;background:rgba(10,16,24,.5);
+    border:1px solid #16222e;border-radius:8px;padding:7px 10px;backdrop-filter:blur(5px);max-width:62%;z-index:4}
+  #help b{color:#9cd}
+  .fps{position:fixed;bottom:8px;right:10px;color:#577;font-size:11px;z-index:4}
+  #togglePanel{position:fixed;top:10px;left:10px;z-index:5}
+  #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:40px;
+    background:#0a0e14;color:#fcd;text-align:center;font-size:15px;line-height:1.6;z-index:9}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="togglePanel" style="display:none">≡ tune</button>
+
+<div id="panel">
+  <h1>sky weather sim · WebGPU</h1>
+  <p class="sub">volumetric clouds · storms · gamepad flight · three.js r185 TSL</p>
+  <div class="eml">density = fill·d − ( e^(k·n) − L·ln d )</div>
+  <div class="hint">d = cloud depth (coverage × height profile). The e^(k·n) term erodes texture; −ln d bites the skin → solid cores, wispy edges. The field tiles forever.</div>
+
+  <div class="grp"><div class="t">cloud type &amp; sky</div>
+    <div class="row"><label>cloud type</label>
+      <select id="ctype">
+        <option value="cumulus">Fair cumulus</option>
+        <option value="stratocumulus">Stratocumulus</option>
+        <option value="stratus">Stratus (overcast)</option>
+        <option value="cirrus">Cirrus (high wispy)</option>
+        <option value="cumulonimbus">Cumulonimbus (storm)</option>
+      </select></div>
+    <div class="row"><label>time of day</label><input id="tod" type="range" min="0" max="24" step="0.02" value="7.6"><span class="v" id="tod_v"></span></div>
+    <div class="row"><label>weather</label><input id="weather" type="range" min="0" max="1" step="0.005" value="0.45"><span class="v" id="weather_v"></span></div>
+    <div class="row"><label>wind</label><input id="wind" type="range" min="0" max="3" step="0.01" value="0.6"><span class="v" id="wind_v"></span></div>
+    <div class="row"><label>god rays</label><input id="god" type="range" min="0" max="2.5" step="0.01" value="1.3"><span class="v" id="god_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">storm &amp; lightning</div>
+    <div class="row"><label>storm</label><input id="storm" type="range" min="0" max="1" step="0.005" value="0.0"><span class="v" id="storm_v"></span></div>
+    <div class="row chk"><label for="lightOn">lightning on</label><input type="checkbox" id="lightOn"></div>
+    <div class="row"><label>strike rate</label><input id="lrate" type="range" min="0.1" max="3" step="0.01" value="1.0"><span class="v" id="lrate_v"></span></div>
+    <div class="row" style="gap:6px"><button id="strikeNow">⚡ strike now</button></div>
+  </div>
+
+  <div class="grp"><div class="t">cloud body</div>
+    <div class="row"><label>core fill</label><input id="fill" type="range" min="0" max="3" step="0.01" value="1.7"><span class="v" id="fill_v"></span></div>
+    <div class="row"><label>altitude</label><input id="alt" type="range" min="40" max="220" step="1" value="110"><span class="v" id="alt_v"></span></div>
+    <div class="row"><label>layer depth</label><input id="thick" type="range" min="20" max="180" step="1" value="90"><span class="v" id="thick_v"></span></div>
+    <div class="row"><label>coverage scl</label><input id="covscale" type="range" min="0.2" max="3" step="0.01" value="1.0"><span class="v" id="covscale_v"></span></div>
+    <div class="row"><label>detail scl</label><input id="detail" type="range" min="0.5" max="6" step="0.01" value="2.4"><span class="v" id="detail_v"></span></div>
+    <div class="row"><label>iso / cutoff</label><input id="iso" type="range" min="0" max="1.2" step="0.005" value="0.14"><span class="v" id="iso_v"></span></div>
+    <div class="row"><label>opacity</label><input id="dens" type="range" min="0.2" max="8" step="0.01" value="3.0"><span class="v" id="dens_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">eml carve</div>
+    <div class="row chk"><label for="expOn">e^(k·n) term on</label><input type="checkbox" id="expOn" checked></div>
+    <div class="row"><label>k (noise→exp)</label><input id="kNoise" type="range" min="0" max="4" step="0.01" value="1.7"><span class="v" id="kNoise_v"></span></div>
+    <div class="row"><label>exp gain</label><input id="expGain" type="range" min="0" max="1.5" step="0.005" value="0.38"><span class="v" id="expGain_v"></span></div>
+    <div class="row chk"><label for="lnOn">−ln(d) term on</label><input type="checkbox" id="lnOn" checked></div>
+    <div class="row"><label>L (ln gain)</label><input id="lnGain" type="range" min="0" max="1.5" step="0.005" value="0.34"><span class="v" id="lnGain_v"></span></div>
+  </div>
+
+  <div class="grp"><div class="t">flight</div>
+    <div class="row"><label>top speed</label><input id="speed" type="range" min="20" max="260" step="1" value="90"><span class="v" id="speed_v"></span></div>
+    <div class="row"><label>quality</label><input id="quality" type="range" min="0.5" max="1.5" step="0.05" value="1.0"><span class="v" id="quality_v"></span></div>
+    <div class="row" style="gap:6px"><button id="resetCam">reset position</button><button id="reset">defaults</button></div>
+  </div>
+  <div class="hint">Gamepad: left stick = pitch/yaw · right stick = look · RB = boost · L3/F = dash · dash+strafe = barrel roll. Keyboard: <b>W/S</b> throttle · <b>A/D</b> yaw · <b>arrows</b> look · <b>Space/Shift</b> climb/dive · <b>Shift-R</b> boost · <b>H</b> hide panel · <b>L</b> strike.</div>
+</div>
+
+<div id="hud">
+  <div class="lbl">speed</div><div class="big" id="hSpd">0</div>
+  <div class="lbl" style="margin-top:6px">altitude</div><div class="big" id="hAlt">0</div>
+  <div class="pad off" id="hPad">no gamepad</div>
+</div>
+
+<div id="help"><b>Click the view</b> then fly with a gamepad or W/A/S/D + arrows. Press <b>H</b> to hide the panel, <b>L</b> to trigger lightning.</div>
+<div class="fps" id="fps"></div>
+<div id="err"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+    "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.webgpu.js",
+    "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.185.0/build/three.tsl.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three/webgpu';
+import {
+  Fn, Loop, If, Break, uniform, screenUV, float, vec2, vec3, vec4,
+  mx_noise_float, pass, smoothstep, clamp, mix, max, min, exp, pow, abs, dot, normalize, cross, sin, cos, sqrt, length, floor, fract
+} from 'three/tsl';
+import { bloom } from 'three/addons/tsl/display/BloomNode.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const errEl = document.getElementById('err');
+function fail(msg){ errEl.style.display='flex'; errEl.innerHTML = msg; }
+const clampJS = (v,a,b)=>Math.max(a,Math.min(b,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+const mix3=(a,b,t)=>[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];
+
+if(!('gpu' in navigator)){
+  fail('WebGPU is not available in this browser.<br><br>Open in <b>Chrome / Edge 113+</b> (or Safari 18+). On Chrome you can enable <b>chrome://flags/#enable-unsafe-webgpu</b>.');
+  throw new Error('no webgpu');
+}
+
+// ---------------------------------------------------------------------------
+// controls / sliders
+// ---------------------------------------------------------------------------
+const ids = ['tod','weather','wind','god','storm','lrate','fill','alt','thick','covscale','detail','iso','dens','kNoise','expGain','lnGain','speed','quality'];
+const el = {};
+ids.forEach(id=>{ el[id]=document.getElementById(id);
+  const vv=document.getElementById(id+'_v');
+  const fmt=()=>{ let n=+el[id].value; vv.textContent=(id==='alt'||id==='thick'||id==='speed')?n.toFixed(0):n.toFixed(2); };
+  el[id].addEventListener('input',fmt); fmt();
+});
+const expOn=document.getElementById('expOn'), lnOn=document.getElementById('lnOn'), lightOn=document.getElementById('lightOn');
+const ctypeSel=document.getElementById('ctype');
+
+const TYPE_PRESETS = {
+  cumulus:       {alt:110,thick:90, covscale:1.00,detail:2.4,fill:1.70,iso:0.14,dens:3.0,kNoise:1.7,expGain:0.38,lnGain:0.34,weather:0.45,god:1.3,anvil:0.0,wisp:0.0,baseDark:0.10,storm:0.0,light:false},
+  stratocumulus: {alt:95, thick:55, covscale:1.40,detail:2.0,fill:1.50,iso:0.12,dens:3.2,kNoise:1.5,expGain:0.30,lnGain:0.40,weather:0.60,god:0.9,anvil:0.0,wisp:0.0,baseDark:0.22,storm:0.0,light:false},
+  stratus:       {alt:70, thick:40, covscale:0.60,detail:1.4,fill:1.20,iso:0.05,dens:3.6,kNoise:1.2,expGain:0.20,lnGain:0.50,weather:0.82,god:0.5,anvil:0.0,wisp:0.0,baseDark:0.32,storm:0.0,light:false},
+  cirrus:        {alt:190,thick:42, covscale:1.80,detail:3.6,fill:0.90,iso:0.18,dens:1.7,kNoise:2.1,expGain:0.50,lnGain:0.22,weather:0.55,god:1.6,anvil:0.0,wisp:1.0,baseDark:0.0, storm:0.0,light:false},
+  cumulonimbus:  {alt:100,thick:160,covscale:0.92,detail:2.2,fill:1.92,iso:0.10,dens:3.7,kNoise:1.7,expGain:0.34,lnGain:0.34,weather:0.90,god:1.0,anvil:1.0,wisp:0.0,baseDark:0.62,storm:0.85,light:true},
+};
+// extra shaping params not on sliders (driven by preset)
+const shape = { anvil:0.0, wisp:0.0, baseDark:0.10 };
+
+function applyPreset(name){
+  const p = TYPE_PRESETS[name]; if(!p) return;
+  for(const k of ['alt','thick','covscale','detail','fill','iso','dens','kNoise','expGain','lnGain','weather','god','storm']){
+    if(el[k]!==undefined && p[k]!==undefined){ el[k].value=p[k]; el[k].dispatchEvent(new Event('input')); }
+  }
+  shape.anvil=p.anvil; shape.wisp=p.wisp; shape.baseDark=p.baseDark;
+  lightOn.checked=!!p.light;
+}
+ctypeSel.addEventListener('change',()=>applyPreset(ctypeSel.value));
+
+const defaults={tod:7.6,weather:0.45,wind:0.6,god:1.3,storm:0.0,lrate:1.0,fill:1.7,alt:110,thick:90,
+  covscale:1.0,detail:2.4,iso:0.14,dens:3.0,kNoise:1.7,expGain:0.38,lnGain:0.34,speed:90,quality:1.0};
+document.getElementById('reset').onclick=()=>{ for(const k in defaults){ el[k].value=defaults[k]; el[k].dispatchEvent(new Event('input')); }
+  expOn.checked=lnOn.checked=true; ctypeSel.value='cumulus'; applyPreset('cumulus'); };
+
+// ---------------------------------------------------------------------------
+// time-of-day → sun + sky palette (CPU)
+// ---------------------------------------------------------------------------
+function daystate(tod, weather){
+  const ang=(tod-6)/12*Math.PI;
+  const elev=Math.sin(ang);
+  const az=(tod/24)*Math.PI*2 + 0.6;
+  const ce=Math.cos(Math.asin(clampJS(elev,-1,1)));
+  const dir=[Math.cos(az)*ce, clampJS(elev,-0.25,1), Math.sin(az)*ce];
+  const L=Math.hypot(dir[0],dir[1],dir[2])||1; dir[0]/=L;dir[1]/=L;dir[2]/=L;
+  const night ={h:[0.03,0.05,0.10], z:[0.01,0.02,0.05], s:[0.25,0.30,0.45], i:0.15};
+  const golden={h:[0.95,0.55,0.32], z:[0.20,0.27,0.45], s:[1.0,0.62,0.34], i:1.5};
+  const day   ={h:[0.62,0.74,0.92], z:[0.18,0.40,0.78], s:[1.0,0.97,0.90], i:1.7};
+  let sky0,sky1,sunc,inten;
+  if(elev<0){ const k=clampJS((elev+0.25)/0.25,0,1);
+    sky0=mix3(night.h,golden.h,k); sky1=mix3(night.z,golden.z,k); sunc=mix3(night.s,golden.s,k); inten=lerp(night.i,golden.i,k);
+  } else if(elev<0.35){ const k=clampJS(elev/0.35,0,1);
+    sky0=mix3(golden.h,day.h,k); sky1=mix3(golden.z,day.z,k); sunc=mix3(golden.s,day.s,k); inten=lerp(golden.i,day.i,k);
+  } else { sky0=day.h.slice(); sky1=day.z.slice(); sunc=day.s.slice(); inten=day.i; }
+  const w=clampJS((weather-0.5)*2,0,1);
+  sky0=mix3(sky0,[0.30,0.33,0.38],w*0.55); sky1=mix3(sky1,[0.22,0.25,0.30],w*0.55);
+  inten*=lerp(1.0,0.62,w);
+  return {dir,intensity:inten,sky0,sky1,sunCol:sunc};
+}
+
+// ===========================================================================
+// renderer / scene / camera
+// ===========================================================================
+const FAR = 6000, CLOUD_MAX = 3000;
+const cv = document.getElementById('c');
+const renderer = new THREE.WebGPURenderer({ canvas:cv, antialias:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+await renderer.init();
+
+const scene = new THREE.Scene();
+scene.background = null;
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 1, FAR);
+camera.rotation.order='YXZ';
+camera.position.set(0,110,300);
+
+// lights for the ship
+const sunLight = new THREE.DirectionalLight(0xffffff, 2.4);
+sunLight.position.set(0.4,1,0.3);
+scene.add(sunLight);
+const hemi = new THREE.HemisphereLight(0xbcd6ff, 0x404048, 0.7);
+scene.add(hemi);
+const boltLight = new THREE.PointLight(0xbfe0ff, 0, 1400, 1.6);
+boltLight.position.set(0,140,0);
+scene.add(boltLight);
+
+// ===========================================================================
+// uniforms shared with the cloud shader
+// ===========================================================================
+const U = {
+  time:    uniform(0),
+  ro:      uniform(new THREE.Vector3()),
+  fwd:     uniform(new THREE.Vector3(0,0,-1)),
+  right:   uniform(new THREE.Vector3(1,0,0)),
+  up:      uniform(new THREE.Vector3(0,1,0)),
+  tanFov:  uniform(Math.tan(70*Math.PI/180/2)),
+  aspect:  uniform(innerWidth/innerHeight),
+  far:     uniform(FAR),
+  sunDir:  uniform(new THREE.Vector3(0.4,1,0.3).normalize()),
+  sunCol:  uniform(new THREE.Color(1,0.97,0.9)),
+  sunInt:  uniform(1.7),
+  sky0:    uniform(new THREE.Color(0.62,0.74,0.92)),
+  sky1:    uniform(new THREE.Color(0.18,0.40,0.78)),
+  alt:     uniform(110),
+  thick:   uniform(90),
+  covScale:uniform(1.0),
+  detScale:uniform(2.4),
+  weather: uniform(0.45),
+  wind:    uniform(0.6),
+  k:       uniform(1.7),
+  expGain: uniform(0.38),
+  lnGain:  uniform(0.34),
+  fill:    uniform(1.7),
+  iso:     uniform(0.14),
+  opacity: uniform(3.0),
+  god:     uniform(1.3),
+  amb:     uniform(0.5),
+  expOn:   uniform(1),
+  lnOn:    uniform(1),
+  anvil:   uniform(0.0),
+  wisp:    uniform(0.0),
+  baseDark:uniform(0.10),
+  quality: uniform(1.0),
+  storm0:  uniform(new THREE.Vector4(0,0,0,0)),  // xyz center, w intensity
+  storm1:  uniform(new THREE.Vector4(0,0,0,0)),
+  storm2:  uniform(new THREE.Vector4(0,0,0,0)),
+  bolt:    uniform(new THREE.Vector4(0,140,0,0)),// xyz pos, w glow intensity
+  boltCol: uniform(new THREE.Color(0.65,0.80,1.0)),
+};
+const STORM_R = 520;
+
+// ---------------------------------------------------------------------------
+// noise helpers (value-noise fbm via MaterialX noise)
+// ---------------------------------------------------------------------------
+const n01 = Fn(([p]) => mx_noise_float(p).mul(0.5).add(0.5));   // ~0..1
+
+const fbm = Fn(([p]) => {
+  const s=float(0).toVar(), a=float(0.55).toVar(), f=float(1).toVar(), q=p.toVar();
+  Loop(5, () => { s.addAssign(a.mul(n01(q.mul(f)))); f.mulAssign(2.0); a.mulAssign(0.5); });
+  return s;
+});
+const fbm3 = Fn(([p]) => {
+  const s=float(0).toVar(), a=float(0.6).toVar(), f=float(1).toVar(), q=p.toVar();
+  Loop(3, () => { s.addAssign(a.mul(n01(q.mul(f)))); f.mulAssign(2.0); a.mulAssign(0.5); });
+  return s;
+});
+
+// vertical profile: 0 at base, fattens, tapers at top (anvil widens the top band)
+const heightGrad = Fn(([h]) => {
+  const bottom = smoothstep(0.0, 0.18, h);
+  const topEdge = mix(float(0.55), float(0.92), U.anvil);
+  const top = float(1.0).sub(smoothstep(topEdge, float(1.0), h));
+  const flare = U.anvil.mul(smoothstep(0.45,0.78,h)).mul(smoothstep(1.0,0.82,h)).mul(0.5);
+  return bottom.mul(top).add(flare).clamp(0.0,1.0);
+});
+
+// storm influence at a world position (0..1)
+const stormAt = Fn(([p]) => {
+  const s = float(0).toVar();
+  for (const cell of [U.storm0, U.storm1, U.storm2]) {
+    const d = length(p.xz.sub(cell.xyz.xz));
+    const a = smoothstep(float(STORM_R), float(STORM_R).mul(0.25), d).mul(cell.w);
+    s.assign(max(s, a));
+  }
+  return s.clamp(0.0,1.0);
+});
+
+// the eml carve — cloud density at a world point
+const cloudDensity = Fn(([pIn]) => {
+  const altitude=U.alt, thick=U.thick;
+  const bottom = altitude.sub(thick.mul(0.5));
+  const h = pIn.y.sub(bottom).div(thick).clamp(0.0,1.0).toVar();
+  const out = float(0).toVar();
+  If(h.greaterThan(0.001).and(h.lessThan(0.999)), () => {
+    // cirrus wisp: stretch the sampling so detail streaks horizontally
+    const stretch = vec3(float(1.0).sub(U.wisp.mul(0.7)), float(1.0).add(U.wisp.mul(0.6)), float(1.0).add(U.wisp.mul(0.2)));
+    const p = pIn.mul(stretch).toVar();
+    const wind = vec3(U.time.mul(U.wind), float(0.0), U.time.mul(U.wind).mul(0.35));
+    const storm = stormAt(pIn);
+    // low-freq coverage
+    const covScale = U.covScale.mul(0.012);
+    const nLow = fbm(p.mul(covScale).add(wind));
+    const weatherL = U.weather.add(storm.mul(0.35)).clamp(0.0,1.0);
+    const cov = nLow.sub(float(1.0).sub(weatherL)).div(0.32).clamp(0.0,1.0);
+    const d = cov.mul(heightGrad(h)).clamp(0.001,1.0).toVar();
+    // detail erosion
+    const detScale = U.detScale.mul(0.05);
+    const n = fbm(p.mul(detScale).add(wind.mul(2.0))).clamp(0.0,1.0);
+    const expTerm = U.expOn.mul(U.expGain).mul(exp(U.k.mul(n)).sub(1.0));
+    const lnTerm  = U.lnOn.mul(U.lnGain).mul(d.log().negate());
+    let dens = U.fill.mul(d).sub(expTerm).sub(lnTerm).sub(U.iso);
+    out.assign(max(dens, 0.0));
+  });
+  return out;
+});
+// cheap density (3-octave) for the light march
+const cloudDensityCheap = Fn(([pIn]) => {
+  const altitude=U.alt, thick=U.thick;
+  const bottom = altitude.sub(thick.mul(0.5));
+  const h = pIn.y.sub(bottom).div(thick).clamp(0.0,1.0).toVar();
+  const out = float(0).toVar();
+  If(h.greaterThan(0.001).and(h.lessThan(0.999)), () => {
+    const wind = vec3(U.time.mul(U.wind), float(0.0), U.time.mul(U.wind).mul(0.35));
+    const storm = stormAt(pIn);
+    const covScale = U.covScale.mul(0.012);
+    const nLow = fbm3(pIn.mul(covScale).add(wind));
+    const weatherL = U.weather.add(storm.mul(0.35)).clamp(0.0,1.0);
+    const cov = nLow.sub(float(1.0).sub(weatherL)).div(0.32).clamp(0.0,1.0);
+    const d = cov.mul(heightGrad(h)).clamp(0.001,1.0);
+    const detScale = U.detScale.mul(0.05);
+    const n = fbm3(pIn.mul(detScale).add(wind.mul(2.0))).clamp(0.0,1.0);
+    const expTerm = U.expOn.mul(U.expGain).mul(exp(U.k.mul(n)).sub(1.0));
+    const lnTerm  = U.lnOn.mul(U.lnGain).mul(d.log().negate());
+    let dens = U.fill.mul(d).sub(expTerm).sub(lnTerm).sub(U.iso);
+    out.assign(max(dens, 0.0));
+  });
+  return out;
+});
+
+// Henyey-Greenstein phase
+const hg = Fn(([cosT, g]) => {
+  const g2 = g.mul(g);
+  return float(1.0).sub(g2).div( pow( float(1.0).add(g2).sub(g.mul(2.0).mul(cosT)), 1.5 ).mul(4.0*Math.PI) );
+});
+
+// sky gradient + sun disk/glow for a view ray
+const skyColor = Fn(([rd]) => {
+  const t = rd.y.mul(0.5).add(0.5).clamp(0.0,1.0);
+  const col = mix(U.sky0, U.sky1, pow(t, 0.8)).toVar();
+  const sd = max(dot(rd, U.sunDir), 0.0);
+  const glow = pow(sd, 8.0).mul(0.4).add(pow(sd, 280.0).mul(6.0));
+  col.addAssign(vec3(U.sunCol).mul(glow).mul(U.sunInt));
+  return col;
+});
+
+// ===========================================================================
+// render pipeline: scene pass (ship + lightning) -> depth-aware cloud composite
+// ===========================================================================
+const scenePass = pass(scene, camera);
+const sceneColor = scenePass.getTextureNode();
+const sceneViewZ = scenePass.getViewZNode();   // eye-space Z (negative in front)
+
+const cloudComposite = Fn(() => {
+  const ndc = screenUV.mul(2.0).sub(1.0).toVar();
+  const rd = U.fwd
+      .add(U.right.mul(ndc.x.mul(U.aspect).mul(U.tanFov)))
+      .add(U.up.mul(ndc.y.mul(U.tanFov)))
+      .normalize().toVar();
+  const ro = vec3(U.ro).toVar();
+
+  // scene geometry distance along the ray (ship). background pixels sit at the far plane.
+  const eyeDist = sceneViewZ.negate().toVar();                 // positive
+  const cosA = max(dot(rd, U.fwd), 0.001);
+  const tScene = eyeDist.div(cosA).toVar();
+  const isGeom = eyeDist.lessThan(float(FAR*0.92));
+
+  const bg = vec3(0.0).toVar();
+  // where the ship is, that opaque colour is the backdrop; elsewhere the sky, plus any
+  // additive scene elements (the lightning bolt) so they aren't discarded.
+  If(isGeom, () => { bg.assign(sceneColor.rgb); }).Else(() => { bg.assign(skyColor(rd).add(sceneColor.rgb)); });
+
+  // cloud slab [yb, yt]
+  const yb = U.alt.sub(U.thick.mul(0.5));
+  const yt = U.alt.add(U.thick.mul(0.5));
+  const t0 = float(0).toVar();
+  const t1 = float(0).toVar();
+  If(abs(rd.y).lessThan(0.0001), () => {
+    If(ro.y.greaterThan(yb).and(ro.y.lessThan(yt)), () => { t0.assign(0.0); t1.assign(CLOUD_MAX); })
+      .Else(() => { t0.assign(0.0); t1.assign(-1.0); });
+  }).Else(() => {
+    const ta = yb.sub(ro.y).div(rd.y);
+    const tb = yt.sub(ro.y).div(rd.y);
+    t0.assign(max(min(ta,tb), 0.0));
+    t1.assign(max(ta,tb));
+  });
+  t1.assign(min(t1, float(CLOUD_MAX)));
+  t1.assign(min(t1, tScene));    // don't draw cloud behind the ship
+
+  const outc = vec3(0.0).toVar();
+  outc.assign(bg);
+
+  If(t1.greaterThan(t0), () => {
+    const T = float(1.0).toVar();
+    const col = vec3(0.0).toVar();
+    const cosT = dot(rd, U.sunDir);
+    const phase = mix(hg(cosT, float(0.18)), hg(cosT, float(0.74)), 0.55);
+    const godk = U.god.mul(U.opacity);
+    const fadeStart = float(CLOUD_MAX*0.5);
+
+    const nearStep = max(U.thick.mul(float(0.05).div(U.quality)), 1.5).toVar();
+    const jit = n01(vec3(screenUV.mul(1000.0), U.time.mul(60.0)));
+    const t = t0.add(nearStep.mul(jit)).toVar();
+    const ambBase = mix(U.sky0, U.sky1, 0.6).mul(U.amb);
+
+    // distance-adaptive march: fine near the camera, coarse (and faded) far away.
+    Loop(200, () => {
+      If(T.lessThan(0.02), () => { Break(); });
+      If(t.greaterThan(t1), () => { Break(); });
+      const p = ro.add(rd.mul(t)).toVar();
+      const dt = max(nearStep, t.mul(0.012)).toVar();
+      const dens = cloudDensity(p).mul(U.opacity).toVar();
+      If(dens.greaterThan(0.003), () => {
+        const fade = float(1.0).sub(smoothstep(fadeStart, float(CLOUD_MAX), t));
+        // light march toward the sun (cheap 3-octave density)
+        const ls = float(0).toVar();
+        const lstep = U.thick.mul(0.12);
+        const lj = float(1.0).toVar();
+        Loop(4, () => {
+          const lp = p.add(U.sunDir.mul(lstep.mul(lj)));
+          ls.addAssign(cloudDensityCheap(lp).mul(U.opacity));
+          lj.addAssign(1.0);
+        });
+        const lightT = exp(ls.mul(lstep).mul(-0.85)).toVar();
+        // storm bases go dark
+        const hLoc = p.y.sub(yb).div(U.thick).clamp(0.0,1.0);
+        const dark = mix(float(1.0), float(0.22), U.baseDark.mul(stormAt(p)).mul(float(1.0).sub(hLoc)));
+        const powder = float(1.0).sub(exp(dens.mul(-2.0)));
+        const sunCol3 = vec3(U.sunCol).mul(U.sunInt).mul(lightT).mul(phase).mul(godk).mul(powder);
+        // lightning glow lights the cloud volumetrically near the bolt
+        const bd = length(p.sub(U.bolt.xyz));
+        const glow = U.bolt.w.mul(exp(bd.mul(-0.0045)));
+        const emis = vec3(U.boltCol).mul(glow).mul(dens.add(0.15));
+        const lit = sunCol3.add(ambBase).mul(dark).add(emis);
+        const a = float(1.0).sub(exp(dens.mul(dt).mul(-0.04))).mul(fade).toVar();
+        col.addAssign(T.mul(a).mul(lit));
+        T.assign(T.mul(float(1.0).sub(a)));
+      });
+      t.addAssign(dt);
+    });
+    outc.assign(col.add(bg.mul(T)));
+  });
+
+  return outc;
+});
+
+const post = new (THREE.RenderPipeline || THREE.PostProcessing)(renderer);
+const cloudNode = cloudComposite();
+let outputNode = cloudNode;
+try {
+  const bloomPass = bloom(cloudNode, 0.55, 0.42, 0.0);
+  outputNode = cloudNode.add(bloomPass);
+} catch(e){ console.warn('bloom unavailable, skipping', e); }
+post.outputNode = outputNode;
+
+// ===========================================================================
+// SHIP — caverns flight model (chase cam, banking, barrel roll, engine FX)
+// ===========================================================================
+const SHIP_SCALE = 3.0;
+let ship, bankGroup;
+const thrusters=[], thrusterFlames=[];
+try {
+  const gltf = await new GLTFLoader().loadAsync('../Caverns/ships/blaster.glb');
+  const model = gltf.scene;
+  model.scale.setScalar(SHIP_SCALE);
+  model.rotation.y = -Math.PI/2;             // model -X forward -> rig -Z forward
+  for(const n of ['thruster1','thruster2']){ const o=model.getObjectByName(n); if(o) thrusters.push(o); }
+  ship = new THREE.Group(); ship.rotation.order='YXZ';
+  bankGroup = new THREE.Group(); bankGroup.add(model); ship.add(bankGroup);
+  ship.position.set(0,110,300);
+  scene.add(ship);
+  ship.updateMatrixWorld(true);
+  // engine plume + retro ring
+  const coneGeo=new THREE.ConeGeometry(1,1,18,1,true); coneGeo.rotateX(Math.PI/2); coneGeo.translate(0,0,0.5);
+  { const posA=coneGeo.attributes.position, n=posA.count, col=new Float32Array(n*4);
+    const cHot=new THREE.Color(0xffffff),cMid=new THREE.Color(0x4aa6ff),cTip=new THREE.Color(0x123c9c),_c=new THREE.Color();
+    for(let i=0;i<n;i++){ const tt=Math.min(1,Math.max(0,posA.getZ(i)));
+      if(tt<0.45)_c.copy(cHot).lerp(cMid,tt/0.45); else _c.copy(cMid).lerp(cTip,(tt-0.45)/0.55);
+      col[i*4]=_c.r;col[i*4+1]=_c.g;col[i*4+2]=_c.b;col[i*4+3]=Math.pow(1-tt,1.3); }
+    coneGeo.setAttribute('color',new THREE.BufferAttribute(col,4)); }
+  const ringGeo=new THREE.TorusGeometry(1,0.16,8,24);
+  const mkFx=(vc)=>new THREE.MeshBasicMaterial({color:vc?0xffffff:0xcfe6ff,vertexColors:vc,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false,fog:false,side:THREE.DoubleSide});
+  const _v=new THREE.Vector3();
+  for(const th of thrusters){
+    const lp=ship.worldToLocal(th.getWorldPosition(_v)).clone();
+    const plume=new THREE.Mesh(coneGeo,mkFx(true)); const ring=new THREE.Mesh(ringGeo,mkFx(false));
+    for(const m of [plume,ring]){ m.frustumCulled=false; m.position.copy(lp); bankGroup.add(m); }
+    thrusterFlames.push({plume,ring});
+  }
+} catch(e){
+  console.warn('ship model failed, using fallback', e);
+  ship=new THREE.Group(); ship.rotation.order='YXZ'; bankGroup=new THREE.Group(); ship.add(bankGroup);
+  const body=new THREE.Mesh(new THREE.ConeGeometry(2,9,5), new THREE.MeshStandardMaterial({color:0x9fb3c8,metalness:0.5,roughness:0.4}));
+  body.rotation.x=Math.PI/2; bankGroup.add(body);
+  const wing=new THREE.Mesh(new THREE.BoxGeometry(11,0.4,3), new THREE.MeshStandardMaterial({color:0x6a7f96,metalness:0.4,roughness:0.5}));
+  wing.position.z=1.5; bankGroup.add(wing);
+  ship.position.set(0,110,300); scene.add(ship);
+}
+
+// ===========================================================================
+// flight controls (ported from caverns, terrain/water stripped)
+// ===========================================================================
+const look={yaw:0,pitch:0};
+const keys={};
+addEventListener('keydown',e=>{ if(e.code==='KeyH'){ togglePanel(); return; } if(e.code==='KeyL'){ strike(); return; } keys[e.code]=true; });
+addEventListener('keyup',e=>keys[e.code]=false);
+cv.addEventListener('click',()=>{ if(!document.pointerLockElement) cv.requestPointerLock(); });
+addEventListener('mousemove',e=>{ if(document.pointerLockElement===cv){ look.yaw-=e.movementX*0.0022; look.pitch-=e.movementY*0.0022; look.pitch=clampJS(look.pitch,-1.45,1.45); } });
+
+const hPad=document.getElementById('hPad');
+addEventListener('gamepadconnected',()=>{ hPad.textContent='gamepad ✓'; hPad.classList.remove('off'); });
+addEventListener('gamepaddisconnected',()=>{ hPad.textContent='no gamepad'; hPad.classList.add('off'); });
+const DEAD=0.12;
+const dz=v=>Math.abs(v)<DEAD?0:(v-Math.sign(v)*DEAD)/(1-DEAD);
+
+const fwd=new THREE.Vector3(), rt=new THREE.Vector3(), mv=new THREE.Vector3(), CAM_OFF=new THREE.Vector3();
+let velF=0, bank=0, rollT=0, rollDir=1, rollCool=0, rollArmed=false, flameLevel=0, ringLevel=0;
+const ROLL_DUR=0.85, ROLL_COOL=0.5, MAX_BANK=0.38, ROLL_DODGE=60;
+
+function resetCam(){ ship.position.set(0,110,300); look.yaw=0; look.pitch=0.04; velF=0; bank=0; }
+document.getElementById('resetCam').onclick=resetCam;
+
+function triggerRoll(dir){ if(rollT<=0 && rollCool<=0){ rollT=ROLL_DUR; rollDir=dir; rollCool=ROLL_DUR+ROLL_COOL; } }
+
+function updateControls(dt){
+  const topSpeed=+el.speed.value;
+  let mx=0,my=0,lx=0,ly=0,up=0,boost=0,dash=0;
+  const pads=navigator.getGamepads?navigator.getGamepads():[];
+  let gp=null; for(const g of pads){ if(g&&g.connected){gp=g;break;} }
+  if(gp){
+    mx=dz(gp.axes[0]||0); my=dz(gp.axes[1]||0);
+    lx=dz(gp.axes[2]||0); ly=dz(gp.axes[3]||0);
+    const A=gp.buttons[0]&&gp.buttons[0].pressed, B=gp.buttons[1]&&gp.buttons[1].pressed;
+    up=(B?1:0)-(A?1:0);
+    boost=(gp.buttons[5]&&gp.buttons[5].pressed)?1:0;
+    if(gp.buttons[7]) boost=Math.max(boost, gp.buttons[7].value*0.9);
+    if(gp.buttons[10]&&gp.buttons[10].pressed) dash=1;
+  }
+  if(keys['KeyW']) my=-1; if(keys['KeyS']) my=1;
+  if(keys['KeyA']) mx=-1; if(keys['KeyD']) mx=1;
+  if(keys['ArrowLeft']) lx=-1; if(keys['ArrowRight']) lx=1;
+  if(keys['ArrowUp']) ly=-1; if(keys['ArrowDown']) ly=1;
+  if(keys['Space']) up=1; if(keys['ShiftLeft']||keys['ControlLeft']) up=-1;
+  if(keys['ShiftRight']) boost=1;
+  if(keys['KeyF']) dash=1;
+
+  const wantRoll = dash && Math.abs(mx)>0.4;
+  if(wantRoll && !rollArmed) triggerRoll(Math.sign(mx));
+  rollArmed=wantRoll;
+
+  const LOOK=2.0;
+  look.yaw -= lx*LOOK*dt;
+  look.pitch = clampJS(look.pitch - ly*LOOK*dt, -1.45, 1.45);
+  ship.rotation.set(look.pitch, look.yaw, 0);
+
+  // throttle: forward stick / W keeps a cruise + dash; my<0 forward
+  const fwdT=Math.max(0,-my), revT=Math.max(0,my);
+  const cruise=topSpeed*0.5;
+  const target=clampJS(cruise + (fwdT-revT*0.7)*topSpeed, -topSpeed*0.4, topSpeed)*(1+boost*1.4);
+  velF += (target-velF)*clampJS(dt*1.8,0,1);
+
+  fwd.set(0,0,-1).applyEuler(ship.rotation);
+  rt.set(1,0,0).applyEuler(ship.rotation);
+  mv.set(0,0,0).addScaledVector(fwd, 1).addScaledVector(rt, mx*0.0); // forward base
+  ship.position.addScaledVector(fwd, velF*dt);
+  ship.position.addScaledVector(rt, mx*topSpeed*0.5*dt);             // strafe via left stick X
+  ship.position.y += up*topSpeed*0.6*dt;
+  if(dash) ship.position.addScaledVector(fwd, topSpeed*1.6*dt);
+
+  // keep within a generous sky band
+  ship.position.y = clampJS(ship.position.y, 8, 360);
+
+  // banking + barrel roll (visual)
+  rollCool-=dt;
+  let rollSpin=0;
+  if(rollT>0){ rollSpin=-rollDir*Math.PI*2*(1-rollT/ROLL_DUR); ship.position.addScaledVector(rt, rollDir*ROLL_DODGE*dt); rollT-=dt; }
+  const bankTarget=-mx*MAX_BANK - lx*MAX_BANK*0.6;
+  bank += (bankTarget-bank)*Math.min(1,dt*6);
+  bankGroup.rotation.z = bank + rollSpin;
+
+  // chase cam
+  ship.updateMatrixWorld(true);
+  CAM_OFF.set(0,7,26).applyQuaternion(ship.quaternion);
+  camera.position.copy(ship.position).add(CAM_OFF);
+  camera.quaternion.copy(ship.quaternion);
+  const targetFov=70+boost*15;
+  if(Math.abs(camera.fov-targetFov)>0.05){ camera.fov+=(targetFov-camera.fov)*Math.min(1,dt*4); camera.updateProjectionMatrix(); }
+
+  // engine FX
+  const kk=Math.min(1,dt*8);
+  flameLevel += (Math.max(fwdT, velF/topSpeed*0.6)-flameLevel)*kk;
+  ringLevel  += (revT-ringLevel)*kk;
+  const flick=0.9+Math.sin(performance.now()*0.05)*0.06+Math.sin(performance.now()*0.013)*0.04;
+  const fLen=(4+flameLevel*22+boost*10)*flick, fWid=1.1+flameLevel*0.5+boost*0.2;
+  const fOp=(0.35+flameLevel*0.55+boost*0.3)*(1-ringLevel), rOp=ringLevel*(0.9+boost*0.2)*flick;
+  for(const f of thrusterFlames){
+    f.plume.scale.set(fWid,fWid,fLen); f.plume.material.opacity=fOp;
+    f.ring.scale.set(0.85,0.85,0.85); f.ring.material.opacity=rOp;
+  }
+}
+
+// panel toggle
+const panel=document.getElementById('panel'), togBtn=document.getElementById('togglePanel');
+function togglePanel(){ const hidden=panel.classList.toggle('hidden'); togBtn.style.display=hidden?'block':'none'; }
+togBtn.onclick=togglePanel;
+
+// ===========================================================================
+// STORMS + LIGHTNING
+// ===========================================================================
+const storms=[];   // {x,z, life}
+function syncStorms(stormAmt){
+  const want = stormAmt>0.02 ? Math.min(3, 1+Math.floor(stormAmt*2.5)) : 0;
+  while(storms.length<want){
+    storms.push({ x:ship.position.x+(Math.random()-0.5)*1600, z:ship.position.z+(Math.random()-0.5)*1600 });
+  }
+  while(storms.length>want) storms.pop();
+  const slots=[U.storm0,U.storm1,U.storm2];
+  for(let i=0;i<3;i++){
+    if(i<storms.length){ const s=storms[i]; slots[i].value.set(s.x,+el.alt.value,s.z, stormAmt); }
+    else slots[i].value.set(0,0,0,0);
+  }
+  // drift storms slowly with the wind, recycle if far behind the ship
+  const w=+el.wind.value;
+  for(const s of storms){
+    s.x += w*8*0.016; s.z += w*3*0.016;
+    if(Math.hypot(s.x-ship.position.x, s.z-ship.position.z)>2600){
+      s.x=ship.position.x+(Math.random()-0.5)*600 + fwd.x*1600;
+      s.z=ship.position.z+(Math.random()-0.5)*600 + fwd.z*1600;
+    }
+  }
+}
+
+// bolt geometry — a jagged polyline + forks, additive
+const MAX_PTS=64;
+const boltGeo=new THREE.BufferGeometry();
+boltGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_PTS*3), 3));
+const boltMat=new THREE.LineBasicMaterial({color:0xcfe6ff, transparent:true, opacity:0, blending:THREE.AdditiveBlending, depthWrite:false, depthTest:false});
+const boltLine=new THREE.LineSegments(boltGeo, boltMat); boltLine.frustumCulled=false; scene.add(boltLine);
+let boltLife=0, boltDur=0;
+
+function strike(){
+  if(!storms.length){ // strike near the ship anyway
+    storms.push({x:ship.position.x+(Math.random()-0.5)*800, z:ship.position.z-400}); }
+  const s = storms[Math.floor(Math.random()*storms.length)];
+  const topY = +el.alt.value + (+el.thick.value)*0.35;
+  const baseY = +el.alt.value - (+el.thick.value)*0.5 - 10;
+  // main channel: jagged from top down past the cloud base
+  const segs=12; const pts=[];
+  let x=s.x, y=topY, z=s.z;
+  pts.push(new THREE.Vector3(x,y,z));
+  for(let i=1;i<=segs;i++){
+    const f=i/segs;
+    x += (Math.random()-0.5)*60;
+    z += (Math.random()-0.5)*60;
+    y = topY + (baseY-topY)*f - Math.random()*10;
+    pts.push(new THREE.Vector3(x,y,z));
+  }
+  // turn the point list into line segments (pairs) + a couple of forks
+  const verts=[];
+  for(let i=0;i<pts.length-1;i++){ verts.push(pts[i],pts[i+1]); }
+  for(let k=0;k<2;k++){
+    const i=2+Math.floor(Math.random()*(pts.length-4));
+    let fx=pts[i].x, fy=pts[i].y, fz=pts[i].z;
+    let px=fx,py=fy,pz=fz;
+    const fs=3+Math.floor(Math.random()*3);
+    for(let j=0;j<fs;j++){
+      px=fx; py=fy; pz=fz;
+      fx += (Math.random()-0.5)*70; fy -= 20+Math.random()*25; fz += (Math.random()-0.5)*70;
+      verts.push(new THREE.Vector3(px,py,pz), new THREE.Vector3(fx,fy,fz));
+    }
+  }
+  const arr=boltGeo.attributes.position.array;
+  const nSeg=Math.min(verts.length, MAX_PTS);
+  for(let i=0;i<nSeg;i++){ arr[i*3]=verts[i].x; arr[i*3+1]=verts[i].y; arr[i*3+2]=verts[i].z; }
+  for(let i=nSeg;i<MAX_PTS;i++){ arr[i*3]=verts[nSeg-1].x; arr[i*3+1]=verts[nSeg-1].y; arr[i*3+2]=verts[nSeg-1].z; }
+  boltGeo.attributes.position.needsUpdate=true;
+  boltGeo.setDrawRange(0, nSeg);
+  // flash state
+  boltDur=0.16+Math.random()*0.10; boltLife=boltDur;
+  U.bolt.value.set(s.x, (topY+baseY)*0.5, s.z, 2.2);
+  boltLight.position.set(s.x, topY, s.z);
+}
+document.getElementById('strikeNow').onclick=strike;
+
+let nextStrike=1.5;
+function updateLightning(dt, stormAmt){
+  // schedule
+  if(lightOn.checked && stormAmt>0.02){
+    nextStrike -= dt*(+el.lrate.value)*(0.4+stormAmt);
+    if(nextStrike<=0){ strike(); nextStrike = 0.5 + Math.random()*2.4; }
+  }
+  // animate the live bolt: flicker opacity, decay the volumetric glow + point light
+  if(boltLife>0){
+    boltLife-=dt;
+    const f=Math.max(0,boltLife/boltDur);
+    const flick=(Math.random()<0.5?1:0.4);
+    boltMat.opacity = f*flick;
+    U.bolt.value.w = 2.2*f*f;
+    boltLight.intensity = 900*f*f;
+    if(boltLife<=0){ boltMat.opacity=0; U.bolt.value.w=0; boltLight.intensity=0; }
+  }
+}
+
+// ===========================================================================
+// frame loop
+// ===========================================================================
+addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  U.aspect.value=innerWidth/innerHeight;
+});
+
+const fpsEl=document.getElementById('fps'), hSpd=document.getElementById('hSpd'), hAlt=document.getElementById('hAlt');
+let last=performance.now(), fcount=0, facc=0;
+const _f=new THREE.Vector3(), _r=new THREE.Vector3(), _u=new THREE.Vector3();
+
+function pushUniforms(now){
+  // sky / sun
+  const ds=daystate(+el.tod.value, +el.weather.value);
+  U.sunDir.value.set(ds.dir[0],ds.dir[1],ds.dir[2]);
+  U.sunInt.value=ds.intensity;
+  U.sunCol.value.setRGB(ds.sunCol[0],ds.sunCol[1],ds.sunCol[2]);
+  U.sky0.value.setRGB(ds.sky0[0],ds.sky0[1],ds.sky0[2]);
+  U.sky1.value.setRGB(ds.sky1[0],ds.sky1[1],ds.sky1[2]);
+  sunLight.position.set(ds.dir[0],ds.dir[1],ds.dir[2]);
+  sunLight.color.setRGB(Math.min(1,ds.sunCol[0]),Math.min(1,ds.sunCol[1]),Math.min(1,ds.sunCol[2]));
+  sunLight.intensity=1.2+ds.intensity*0.8;
+  hemi.color.setRGB(ds.sky1[0]+0.2,ds.sky1[1]+0.2,ds.sky1[2]+0.25);
+
+  // camera basis
+  _f.set(0,0,-1).applyQuaternion(camera.quaternion);
+  _r.set(1,0,0).applyQuaternion(camera.quaternion);
+  _u.set(0,1,0).applyQuaternion(camera.quaternion);
+  U.ro.value.copy(camera.position);
+  U.fwd.value.copy(_f); U.right.value.copy(_r); U.up.value.copy(_u);
+  U.tanFov.value=Math.tan(camera.fov*Math.PI/180/2);
+
+  // cloud params
+  U.time.value=now/1000;
+  U.alt.value=+el.alt.value; U.thick.value=+el.thick.value;
+  U.covScale.value=+el.covscale.value; U.detScale.value=+el.detail.value;
+  U.weather.value=+el.weather.value; U.wind.value=+el.wind.value*0.6;
+  U.k.value=+el.kNoise.value; U.expGain.value=+el.expGain.value; U.lnGain.value=+el.lnGain.value;
+  U.fill.value=+el.fill.value; U.iso.value=+el.iso.value; U.opacity.value=+el.dens.value;
+  U.god.value=+el.god.value; U.quality.value=+el.quality.value;
+  U.expOn.value=expOn.checked?1:0; U.lnOn.value=lnOn.checked?1:0;
+  U.anvil.value=shape.anvil; U.wisp.value=shape.wisp; U.baseDark.value=shape.baseDark;
+}
+
+function frame(now){
+  let dt=(now-last)/1000; last=now; if(dt>0.05)dt=0.05;
+  facc+=dt; if(++fcount>=20){ fpsEl.textContent=(fcount/facc).toFixed(0)+' fps'; fcount=0; facc=0; }
+
+  updateControls(dt);
+  const stormAmt = Math.max(+el.storm.value, shape.baseDark>0.5 ? +el.weather.value*0.8 : 0);
+  syncStorms(stormAmt);
+  updateLightning(dt, stormAmt);
+  pushUniforms(now);
+
+  post.render();
+
+  hSpd.textContent=Math.round(Math.abs(velF));
+  hAlt.textContent=Math.round(ship.position.y);
+}
+renderer.setAnimationLoop(frame);
+
+// start on the fair-cumulus preset
+applyPreset('cumulus');
+</script>
+</body>
+</html>
