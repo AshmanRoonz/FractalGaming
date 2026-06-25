@@ -55,13 +55,13 @@ const smooth = w => w * w * (3 - 2 * w);
 // ============================================================================
 const WL = -300;                                         // water level: basins below this flood into lakes
 const FOGC = 0xa8c8e8;                                    // daytime sky / horizon haze
-let VERT_BUDGET = 1000;                                   // build-cost spent per frame (spread => smaller hitches); window.__budget(n) to tune live
+const VERT_BUDGET = 1500;                                 // build-cost spent per frame (spread => smaller hitches)
 
 // --- chunk grid (raise the radii for more draw distance; costs memory + build) ---
 const CHUNK = 1200, DIV = 32, STEP = CHUNK / DIV;         // chunk size + subdivisions (STEP = vertex spacing)
 const GROUND_RADIUS = 8;                                  // terrain shells stream out to here (then fog hides the edge)
 const KEEP_RADIUS = GROUND_RADIUS + 1;                    // unload chunks past this
-const TREE_LO_RADIUS = 3, TREE_HI_RADIUS = 2;            // far cones vs near detailed trees (LO was 4 — fewer streamed trees)
+const TREE_LO_RADIUS = 4, TREE_HI_RADIUS = 2;            // far cones vs near detailed trees
 const GRASS_RADIUS = 2, WATERFALL_RADIUS = 5;            // plants only near (waterfalls removed)
 
 // --- terrain shaping constants ----------------------------------------------
@@ -293,8 +293,6 @@ scene.fog = new THREE.FogExp2(FOGC, 0.00016);   // open-sky haze; raise density 
 
 const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 1, 16000);
 camera.rotation.order = 'YXZ';
-camera.layers.enable(1);   // FOLIAGE_LAYER: trees/décor/grass live on layer 1 so the water reflector (layer 0 only) can skip them
-let _reflBase = null;      // the water reflector's base node (set in the water IIFE) — used to keep its virtual cameras off layer 1
 const START_X = 0, START_Z = 0, START_Y = Math.max(groundY(START_X, START_Z) + 280, WL + 420);
 camera.position.set(START_X, START_Y, START_Z);
 
@@ -376,7 +374,7 @@ const ceilMat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughne
 // Grass blades — instanced per segment, gusting shader sway. The material sets a
 //   positionNode, which keeps instance transforms as vertex data (no 1024 cap).
 // ============================================================================
-const GRASS_PER_SEG = 700;   // grass blades per chunk (merged geo => no instance cap); was 1600 (perf)
+const GRASS_PER_SEG = 1600;   // grass blades per chunk (merged geo => no instance cap)
 // blade template (local): a CURVED, tapered, multi-segment strip with a central
 //   MIDRIB vein (a slightly darker center line, like a real grass blade) up to the tip.
 const BL_SEGS = 5;
@@ -679,8 +677,7 @@ const water = (() => {
   const dispH = swell.add(simDisp.add(peakLift).add(wakeDisp).mul(dispFade));
   mat.positionNode = positionLocal.add(vec3(float(0), dispH, float(0)));
   // planar MIRROR reflection across y = WL — higher res + low distortion = a crisp calm-lake mirror
-  const reflection = reflector({ resolutionScale: 0.2 });   // the lake mirror re-renders the whole world, so keep it low-res (r185: resolution -> resolutionScale)
-  _reflBase = reflection.reflector;   // exposed so the loop can force its virtual cameras to layer 0 (skip foliage in the reflection)
+  const reflection = reflector({ resolutionScale: 0.3 });   // the lake mirror re-renders the whole world, so keep it low-res (r185: resolution -> resolutionScale)
   reflection.target.rotateX(-Math.PI / 2);
   reflection.target.position.y = WL;
   scene.add(reflection.target);
@@ -884,7 +881,7 @@ function makeBroadleaf(seed) {                                // recursive eztre
     }
     if (depth === 1) leafClump(end, 0.38);                              // a little mid-canopy foliage
   }
-  grow(V3(0, 0, 0), up, 1.5 + rnd() * 0.5, 0.18, 2);   // depth 2 => ~5x fewer tris than depth 3 (perf); leafClumps keep the crown full
+  grow(V3(0, 0, 0), up, 1.5 + rnd() * 0.5, 0.18, 3);   // depth 3 => fuller crown, still cheap enough to instance
   return mergeGeos(parts);
 }
 function makeBroadleafLo() {
@@ -1040,13 +1037,14 @@ function fillGround(j, count) {
   const pos = j.pos, colors = j.colors, normals = j.normals, glow = j.glow, e = 6;
   const end = Math.min(j.n, j.k + count);
   for (let k = j.k; k < end; k++) {
-    const x = pos.getX(k), z = pos.getZ(k), y = groundY(x, z);   // groundY fills _bwHeight with the biome at (x,z)
+    const x = pos.getX(k), z = pos.getZ(k), y = groundY(x, z);
     pos.setY(k, y);
-    const wDef = _bwHeight[B_DEF], wAlp = _bwHeight[B_ALP], wVol = _bwHeight[B_VOL], wFun = _bwHeight[B_FUN], wCav = _bwHeight[B_CAV];   // reuse it — no second biomeAt
-    const gx = groundY(x + e, z) - y, gz = groundY(x, z + e) - y;   // FORWARD difference (reuses y) => 2 groundBase for the normal, not 4 (and clobbers _bwHeight, already read)
-    const nx = -gx, ny = e, nz = -gz, inv = 1 / Math.hypot(nx, ny, nz);
+    const gx = groundY(x + e, z) - groundY(x - e, z), gz = groundY(x, z + e) - groundY(x, z - e);
+    const nx = -gx, ny = 2 * e, nz = -gz, inv = 1 / Math.hypot(nx, ny, nz);
     normals[k * 3] = nx * inv; normals[k * 3 + 1] = ny * inv; normals[k * 3 + 2] = nz * inv;
-    const flat = e / Math.hypot(gx, gz, e), pc = patch(x, z);
+    const flat = (2 * e) / Math.hypot(gx, gz, 2 * e), pc = patch(x, z);
+    biomeAt(x, z, _bwShade);
+    const wDef = _bwShade[B_DEF], wAlp = _bwShade[B_ALP], wVol = _bwShade[B_VOL], wFun = _bwShade[B_FUN], wCav = _bwShade[B_CAV];
     // default green-world shading
     _c.copy(CgrassLo2).lerp(CgrassHi2, clamp((flat - 0.45) / 0.4, 0, 1) * clamp(pc + 0.2, 0, 1));
     _c.lerp(Crock2, clamp((0.62 - flat) / 0.32, 0, 1) * clamp(rockF(x, z) + 0.2, 0, 1));
@@ -1086,11 +1084,11 @@ function fillGrass(j, attempts) {
   for (let a = 0; a < attempts && j.k < GRASS_PER_CHUNK && j.tries < GTRIES; a++) {
     j.tries++;
     const x = j.x0 + Math.random() * CHUNK, z = j.z0 + Math.random() * CHUNK;
-    const gy = groundBase(x, z);   // fills _bwHeight with the biome at (x,z)
+    const gy = groundBase(x, z);
     if (gy < WL + 6 || gy > 360) continue;                    // not underwater, below the grass treeline
-    if (_bwHeight[B_DEF] + _bwHeight[B_ALP] * 0.5 < 0.45) continue;   // grass only in the green world (reuse biome, no 2nd biomeAt)
-    const yx = groundBase(x + e, z) - gy, yz = groundBase(x, z + e) - gy;   // forward diff (2 groundBase, not 4)
-    const flat = e / Math.hypot(yx, yz, e);
+    biomeAt(x, z, _bwShade); if (_bwShade[B_DEF] + _bwShade[B_ALP] * 0.5 < 0.45) continue;   // grass only in the green world
+    const yx = groundBase(x + e, z) - groundBase(x - e, z), yz = groundBase(x, z + e) - groundBase(x, z - e);
+    const flat = (2 * e) / Math.hypot(yx, yz, 2 * e);
     if (flat < 0.55) continue;                                // steep => bare rock
     const pc = patch(x, z); if (pc < 0.35) continue;          // grey ground
     if (rockF(x, z) > 0.72 && Math.random() < 0.7) continue;  // rocky biome => sparse
@@ -1118,7 +1116,7 @@ function finishGrass(j) {
   g.setAttribute('phase', new THREE.BufferAttribute(new Float32Array(j.ph.subarray(0, nv)), 1));
   g.setIndex(new THREE.BufferAttribute(new Uint32Array(j.idx.subarray(0, ni)), 1));
   if (nv > 0) g.computeBoundingSphere();
-  const mesh = new THREE.Mesh(g, grassMat); mesh.layers.set(1); scene.add(mesh); j.c.grass = mesh;   // foliage layer (skipped by the water reflection)
+  const mesh = new THREE.Mesh(g, grassMat); scene.add(mesh); j.c.grass = mesh;
 }
 
 // ---- trees (instanced per species, with cheap far LOD) ---------------------
@@ -1127,7 +1125,6 @@ function buildInst(geo, list) {
   const n = Math.min(1024, list.length), im = new THREE.InstancedMesh(geo, foliageMat, n);   // <=1024 (WebGPU uniform cap)
   for (let i = 0; i < n; i++) im.setMatrixAt(i, list[i]);
   im.instanceMatrix.needsUpdate = true; im.count = n; if (n) im.computeBoundingSphere();
-  im.layers.set(1);   // foliage layer (skipped by the water reflection)
   return im;
 }
 // (tree placement runs on the GPU now — see gpuBuildTrees / the _gpuTree* compute kernel)
@@ -1162,12 +1159,11 @@ function finishPlants(j) {
 }
 
 // ---- biome décor placement (fungal mushrooms / cavern crystals; streamed near the player) ----
-const DECOR_RADIUS = 3, DECOR_TRIES = 240;   // was 4 (fewer décor chunks streamed = fewer draw calls)
+const DECOR_RADIUS = 4, DECOR_TRIES = 240;
 function buildInstMat(geo, list, mat) {
   const n = Math.min(1024, list.length), im = new THREE.InstancedMesh(geo, mat, n);
   for (let i = 0; i < n; i++) im.setMatrixAt(i, list[i]);
   im.instanceMatrix.needsUpdate = true; im.count = n; if (n) im.computeBoundingSphere();
-  im.layers.set(1);   // décor layer (skipped by the water reflection)
   return im;
 }
 // (décor placement runs on the GPU now — see gpuBuildDecor / the _gpuDec* compute kernel)
@@ -1756,7 +1752,7 @@ window.__gpuGroundTest = async (ox, oz) => {
 };
 // GPU tree-placement test: rejection-sample candidates on the GPU, atomic-append survivor xz, read back,
 //   then CPU-validate that survivors pass the CPU gates (proves GPU placement agrees with the CPU world).
-const _gpuTreeCAND = 768, _gpuTreeCAP = 384;   // candidates/survivors per chunk (was 1024/512) — density vs perf
+const _gpuTreeCAND = 1024, _gpuTreeCAP = 512;
 const _gpuTreeCounter = instancedArray(1, 'uint'), _gpuTreeAtom = _gpuTreeCounter.toAtomic(), _gpuTreeOut = instancedArray(_gpuTreeCAP, 'vec2');
 const _gpuTreeX0 = uniform(float(0)), _gpuTreeZ0 = uniform(float(0)), _gpuTreeSeed = uniform(float(0));
 const _gpuTreeReset = Fn(() => { atomicStore(_gpuTreeAtom.element(0), uint(0)); })().compute(1);
@@ -1818,8 +1814,8 @@ async function gpuBuildTrees(c) {
   await renderer.computeAsync(_gpuTreeReset);
   await renderer.computeAsync(_gpuTreePlace);
   if (!c.alive || c.treesHi) return;
-  const [_cb, _xb] = await Promise.all([renderer.getArrayBufferAsync(_gpuTreeCounter.value), renderer.getArrayBufferAsync(_gpuTreeOut.value)]);   // one GPU stall, not two
-  const cnt = new Uint32Array(_cb)[0], xz = new Float32Array(_xb);
+  const cnt = new Uint32Array(await renderer.getArrayBufferAsync(_gpuTreeCounter.value))[0];
+  const xz = new Float32Array(await renderer.getArrayBufferAsync(_gpuTreeOut.value));
   if (!c.alive || c.treesHi) return;
   const n = Math.min(cnt, _gpuTreeCAP), pine = [], fir = [], broad = [], loCone = [], loBlob = [];
   for (let i = 0; i < n; i++) {
@@ -1847,8 +1843,8 @@ async function gpuBuildDecor(c) {
   await renderer.computeAsync(_gpuDecReset);
   await renderer.computeAsync(_gpuDecPlace);
   if (!c.alive || c.decor) return;
-  const [_cb, _xb] = await Promise.all([renderer.getArrayBufferAsync(_gpuDecCounter.value), renderer.getArrayBufferAsync(_gpuDecOut.value)]);   // one GPU stall, not two
-  const cnt = new Uint32Array(_cb)[0], xz = new Float32Array(_xb);
+  const cnt = new Uint32Array(await renderer.getArrayBufferAsync(_gpuDecCounter.value))[0];
+  const xz = new Float32Array(await renderer.getArrayBufferAsync(_gpuDecOut.value));
   if (!c.alive || c.decor) return;
   const n = Math.min(cnt, _gpuDecCAP), mush = [[], [], []], cryF = [[], [], []], cryC = [[], [], []], plants = [];
   for (let i = 0; i < n; i++) {
@@ -1871,7 +1867,7 @@ async function gpuBuildDecor(c) {
       cryF[k].push(_gd.matrix.clone());
       const cy = ceilingY(x, z), underLid = cy < 1e8 && cy > my + 120;
       if (underLid && h2 < 0.5) { const k2 = (h3 * 3) | 0, S2 = 12 + h4 * 26; _gd.position.set(x, cy + 2, z); _gd.rotation.set(Math.PI + (h1 - 0.5) * 0.3, h2 * 6.2832, (h3 - 0.5) * 0.3); _gd.scale.set(S2, S2 * (0.9 + h1 * 0.8), S2); _gd.updateMatrix(); cryC[k2].push(_gd.matrix.clone()); }
-      if (underLid && h4 < 0.4 && plants.length < 8) { const baseS = 15 + h1 * 20, mesh = new THREE.Mesh(cavePlantGeo, cavePlantMat); mesh.position.set(x, my - 1, z); mesh.rotation.y = h2 * 6.2832; mesh.scale.set(baseS, baseS, baseS); mesh.userData.baseS = baseS; mesh.frustumCulled = true; mesh.layers.set(1); plants.push(mesh); }
+      if (underLid && h4 < 0.4 && plants.length < 8) { const baseS = 15 + h1 * 20, mesh = new THREE.Mesh(cavePlantGeo, cavePlantMat); mesh.position.set(x, my - 1, z); mesh.rotation.y = h2 * 6.2832; mesh.scale.set(baseS, baseS, baseS); mesh.userData.baseS = baseS; mesh.frustumCulled = true; plants.push(mesh); }
     }
   }
   c.decor = [];
@@ -1882,9 +1878,8 @@ async function gpuBuildDecor(c) {
   }
   if (plants.length) { for (const m of plants) scene.add(m); c.plantMeshes = plants; }
 }
-let _gpuPropsOff = false;
 function pumpGpuProps() {                                          // one GPU placement build at a time (trees first, then décor)
-  if (_gpuTreeBusy || _gpuPropsOff) return;
+  if (_gpuTreeBusy) return;
   let c = null, kind = null;
   while (_gpuTreeWork.length) { const cc = _gpuTreeWork.shift(); if (cc.alive && !cc.treesHi) { c = cc; kind = 'tree'; break; } }
   if (!c) while (_gpuDecorWork.length) { const cc = _gpuDecorWork.shift(); if (cc.alive && !cc.decor) { c = cc; kind = 'decor'; break; } }
@@ -1904,46 +1899,21 @@ const fpsEl = document.getElementById('fps');
 setTimeout(() => { const h = document.getElementById('hint'); if (h) h.style.opacity = '0'; }, 7000);
 let fpsAcc = 0, fpsFrames = 0;
 let last = performance.now();
-const _PF = {};
-function _pf(k, t0) { const d = performance.now() - t0; const p = _PF[k] || (_PF[k] = { s: 0, m: 0, n: 0 }); p.s += d; if (d > p.m) p.m = d; p.n++; }
-window.__prof = () => { const r = {}; for (const k in _PF) { const p = _PF[k]; r[k] = { avg: +(p.s / p.n).toFixed(2), max: +p.m.toFixed(2) }; } return r; };
-window.__profReset = () => { for (const k in _PF) delete _PF[k]; };
-window.__info = () => { const r = renderer.info.render, m = renderer.info.memory; return { drawCalls: r.drawCalls, triangles: r.triangles, geometries: m.geometries, textures: m.textures }; };
-window.__budget = (n) => { VERT_BUDGET = n; };
-window.__gpuProps = (on) => { _gpuPropsOff = on === false; };
-window.__flyFps = async (cmds) => { const f = () => +(document.getElementById('fps') || {}).textContent.replace(/\D/g, '') || 0; if (cmds) cmds(); window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyW' })); window.dispatchEvent(new KeyboardEvent('keydown', { code: 'ShiftRight' })); const s = []; for (let i = 0; i < 5; i++) { await new Promise(r => setTimeout(r, 600)); s.push(f()); } window.dispatchEvent(new KeyboardEvent('keyup', { code: 'KeyW' })); window.dispatchEvent(new KeyboardEvent('keyup', { code: 'ShiftRight' })); return Math.round(s.reduce((a, b) => a + b, 0) / s.length); };
-window.__diag = () => {
-  const snap = () => { renderer.render(scene, camera); const r = renderer.info.render; return { tri: Math.round(r.triangles / 1e6), draws: r.drawCalls }; };
-  const full = snap();
-  water.visible = false;                       // kill the reflector for clean main-scene attribution
-  const noReflector = snap();
-  const hide = (pred) => { const h = []; for (const [, c] of chunks) for (const m of pred(c)) if (m && m.visible) { h.push(m); m.visible = false; } return h; };
-  const tg = hide(c => [...(c.treesHi || []), ...(c.treesLo || [])]); const noTrees = snap();
-  const dg = hide(c => c.decor || []); const noDecor = snap();
-  const gg = hide(c => [c.grass, c.bushes]); const noGrass = snap();
-  const pg = hide(c => c.plantMeshes || []); const noPlants = snap();
-  const gr = hide(c => [c.ground, c.ceiling]); const noGround = snap();
-  for (const m of [...tg, ...dg, ...gg, ...pg, ...gr]) m.visible = true; water.visible = true;
-  return { full, noReflector, '-trees': noTrees, '-decor': noDecor, '-grass': noGrass, '-caveplants': noPlants, '-ground': noGround };
-};
 function frameTick(dt) {
-  const _f0 = performance.now(); let t;
-  t = performance.now(); updateControls(dt); _pf('controls', t);
-  t = performance.now(); updateBiome(dt); _pf('biome', t);
+  updateControls(dt);
+  updateBiome(dt);
   updateMedium();
-  t = performance.now(); planSegments(); _pf('plan', t);
-  t = performance.now(); pump(VERT_BUDGET); _pf('pump', t);
+  planSegments();
+  pump(VERT_BUDGET);
   pumpGpuProps();                  // GPU-compute tree + décor placement (async, off the CPU thread)
   updateLOD();
-  t = performance.now(); updateShipWake(dt); _pf('wake', t);
+  updateShipWake(dt);
   updateBalls(dt);
-  t = performance.now(); updateCymatics(dt); _pf('water', t);
+  updateCymatics(dt);
   updateWaterfalls(dt);
   updateReactivePlants();          // cave plants retract from the approaching ship
   water.position.set(camera.position.x, WL, camera.position.z);
-  if (_reflBase && _reflBase.virtualCameras && _reflBase.virtualCameras.get) { const vc = _reflBase.virtualCameras.get(camera); if (vc) vc.layers.mask = 1; }   // reflection renders layer 0 (terrain/sky) only — skip foliage
-  t = performance.now(); renderer.render(scene, camera); _pf('render', t);
-  _pf('FRAME', _f0);
+  renderer.render(scene, camera);
 }
 window.__force = (n, dt) => { for (let i = 0; i < (n || 1); i++) frameTick(dt || 0.016); };   // drive frames headlessly when the preview tab is hidden (rAF paused)
 renderer.setAnimationLoop(() => {
