@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.30</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.30","short_name":"LSS%20v33.30","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.24</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.24","short_name":"LSS%20v33.24","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -18,15 +18,11 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  overflow: hidden; background: #000;
+  overflow: hidden; background: #000; cursor: none;
   font-family: 'Rajdhani', 'Inter', 'Helvetica Neue', system-ui, sans-serif;
   font-weight: 500; letter-spacing: 0.02em;
 }
-/* (v33.28) Hide the OS cursor only over the WebGL canvas (look-control). It used to be on
-   `body`, which suppressed the cursor across the WHOLE document — so the ENTER popup + menus
-   had an invisible mouse and the button was "hard to find". The cursor now stays visible over
-   every HTML overlay/menu/popup; gameplay pointer-lock hides it natively anyway. */
-canvas { display: block; cursor: none; }
+canvas { display: block; }
 /* Title style: tighter sci-fi geometric face for screens that read as headers
    (ship-select header, big countdown numbers, end-of-match titles). */
 .lss-title { font-family: 'Orbitron', 'Rajdhani', sans-serif; font-weight: 700; }
@@ -3279,7 +3275,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.30';
+const LSS_BUILD = '33.24';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6261,7 +6257,7 @@ if (typeof window !== 'undefined') window._campTick = function (dt) { try { Camp
 const _tpOff = new THREE.Vector3();
 const _tpRight = new THREE.Vector3();
 function _toggleThirdPerson() {
-  if (typeof LSS === 'undefined') return;   // (v33.28) 3rd-person is now an option in ALL modes (was hub-only)
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;   // hub only
   game.thirdPerson = !game.thirdPerson;
   try { document.body.classList.toggle('lss-thirdperson', !!game.thirdPerson); } catch (_) {}
   if (!game.thirdPerson && player && player.mesh) player.mesh.visible = false;   // back to first person
@@ -13779,17 +13775,6 @@ renderer.xr.addEventListener('sessionend', () => {
     if (!supported) {
       btn.title = 'No WebXR-capable display detected. Connect a headset (e.g., Quest Link, SteamVR) and reload.';
     }
-    // (v33.29) The probe is ASYNC : campaign/free-flight reach ship-select immediately (multiplayer
-    // awaits joinRoom, so its probe is already resolved) — so when VR becomes available, REFRESH an
-    // open ship-select so the "LAUNCH IN VR" button appears there too (it was gated on this probe).
-    if (supported) {
-      try {
-        if (typeof previewLoadout === 'function' && _previewedKey) {
-          const _sp = document.getElementById('ship-preview-confirm');
-          if (_sp && _sp.offsetParent !== null) previewLoadout(_previewedKey);
-        }
-      } catch (_) {}
-    }
   }).catch((e) => {
     btn.disabled = true;
     btn.textContent = 'VR BLOCKED';
@@ -13815,8 +13800,7 @@ function _xrUpdateRejoinButton() {
   const rb = document.getElementById('vr-rejoin-btn');
   if (!rb) return;
   const fv = document.getElementById('vr-enter-btn');
-  const _vrLabel = fv ? (fv.textContent || '') : '';   // (v33.29) !disabled is the support signal ; exclude only explicit unsupported labels
-  const vrAvailable = !!(fv && !fv.disabled && !/UNSUPPORTED|NOT AVAILABLE|BLOCKED/i.test(_vrLabel));
+  const vrAvailable = !!(fv && !fv.disabled && fv.textContent === 'ENTER VR');
   const presenting = !!(typeof renderer !== 'undefined' && renderer.xr && renderer.xr.isPresenting);
   // Only show during gameplay : game.state === 'playing' or 'warmup'.
   const inCombat = (typeof game !== 'undefined') && (game.state === 'playing' || game.state === 'warmup');
@@ -17212,7 +17196,7 @@ function _swSyncFX() {
   _swU.uTreeFadeA.value = _SW_TREE_VIEW * _SW_CHUNK * 0.62;   // (v33.04) trees fade later than grass (wider tree view)
   _swU.uTreeFadeB.value = _SW_TREE_VIEW * _SW_CHUNK * 0.94;
 }
-function _swPatchTerrainMat(m, isCeil, clipAtlas) {
+function _swPatchTerrainMat(m, isCeil) {
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uTime=_swU.uTime; sh.uniforms.uYMid=_swU.uYMid; sh.uniforms.uAMP=_swU.uAMP;
     sh.uniforms.uSnow=_swU.uSnow; sh.uniforms.uLava=_swU.uLava;
@@ -17225,15 +17209,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uGold=_swU.uGold;
     sh.uniforms.uCrystal=_swU.uCrystal;
     sh.uniforms.uMossy=_swU.uMossy;
-    if (clipAtlas) {
-      // (clipmap S4) VTF-displace the fixed ring grid (verts are in CELL units, mesh scale
-      // (spacing,1,spacing)) from this level's height atlas, then write WORLD-space vWY/vWPos so the
-      // moss/slope/snow FS below (which samples vWPos.xz + vWY) matches the streamed-chunk terrain.
-      sh.uniforms.uClipAtlas = clipAtlas;
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nvarying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n transformed.y = texture2D(uClipAtlas, uv).x;\n vWY = transformed.y;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
-    } else {
-      sh.vertexShader='varying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;');
-    }
+    sh.vertexShader='varying float vWY; varying vec3 vWPos;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;');
     sh.fragmentShader='varying float vWY; varying vec3 vWPos;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
@@ -17672,21 +17648,11 @@ function _swWaterReflectShader() {
       // reflection does not alias into a checkerboard ; full ripples only up close.
       '  float dist = length(vWP - uCam);',
       '  float fade = clamp(1.0 - (dist - 500.0) / 5000.0, 0.05, 1.0);',
-      // (v33.25) AMBIENT GLOBAL SHIMMER : a gentle, low-frequency surface texture over the WHOLE body
-      // of water — NOT distance-faded to nothing like the cymatic ripples (the old `* fade` killed it
-      // on far water, so a big lake looked like a small rippling patch + a dead-flat mirror = "multiple
-      // bodies"). `amb` keeps far water at >=30% shimmer so the whole lake reads as ONE living body ;
-      // the cymatic SIM (below) layers the active touch-ripples on top near the ship. Low spatial
-      // frequency (~450-850u wavelength) = far below the texel grid, so no checkerboard aliasing.
-      '  float amb = clamp(1.0 - (dist - 3000.0) / 22000.0, 0.30, 1.0);',
+      // FAINT ambient micro-ripple (the windless far-field outside the sim window). The cymatic
+      // SIM (below) is the dominant wave source on the lake itself, so these are kept subtle.
       '  vec3 N = vec3(0.0,1.0,0.0);',
-      // (v33.30) ORGANIC SWELL : domain-warp the swell coords with a slow low-freq wobble so the
-      // surface reads as organic noise rather than an obvious sin lattice (the world.html look), plus
-      // a 3rd finer octave. Still multiplied by the `amb` (>=0.30) envelope so the whole body breathes
-      // as one (the v33.25 one-body lesson — swap the wave SOURCE, keep the envelope).
-      '  vec2 qw = q + 95.0*vec2(sin(q.y*0.0021 - t*0.35), sin(q.x*0.0019 + t*0.31));',
-      '  N.x += (0.028*sin(qw.x*0.0075+t*1.05) + 0.018*sin(qw.y*0.0125-t*0.80) + 0.010*sin(qw.y*0.0270+t*1.6)) * amb;',
-      '  N.z += (0.028*sin(qw.y*0.0085+t*0.95) + 0.018*sin(qw.x*0.0140+t*1.25) + 0.010*sin(qw.x*0.0290-t*1.5)) * amb;',
+      '  N.x += (0.016*sin(q.x*0.010+t*1.3) + 0.011*sin(q.y*0.017-t*0.9)) * fade;',
+      '  N.z += (0.016*sin(q.y*0.011+t*1.1) + 0.011*sin(q.x*0.019+t*1.5)) * fade;',
       // (v33.18/20) CYMATIC SIM : the heightmap GRADIENT is the PRIMARY surface normal in-window
       // (never the vertex height — the plane stays flat, v33.10 lesson). Gated by the shoreline
       // MASK so ripples fade to flat at the beach. A shallow-water crest term adds shoreline FOAM.
@@ -17723,13 +17689,6 @@ function _swWaterReflectShader() {
       '  float fres = pow(clamp(1.0 - max(dot(-V,N),0.0),0.0,1.0), 4.0);',
       '  fres = clamp(0.14 + 0.86*fres, 0.0, 1.0);',
       '  vec3 outc = mix(color, refl, fres);',
-      // (v33.30) SUN SPECULAR : a tight pow(200) glint riding the cymatic crests (the world.html
-      // look — what makes ripples catch the light). `amb`-damped so far water keeps a little glint
-      // without aliasing into sparkle. Blinn-Phong half-vector from the sun + the existing view dir V.
-      '  vec3 sunDir = normalize(vec3(0.29, 0.86, 0.43));',
-      '  vec3 H = normalize(sunDir - V);',
-      '  float spec = pow(max(dot(N, H), 0.0), 200.0) * 0.6 * amb;',
-      '  outc += vec3(1.0, 0.98, 0.92) * spec;',
       '  outc = mix(outc, vec3(0.82,0.91,0.96), foam * 0.6);',   // (v33.20) shoreline crest foam
       '  gl_FragColor = vec4(outc, 0.93 * uFade);',
       '  #include <fog_fragment>',
@@ -17835,13 +17794,9 @@ function _swRippleInit() {
 // Inject a ripple where something touches the surface. world XZ -> window-local; out-of-window seeds dropped.
 function _swRippleSeed(wx, wz, radius, amp) {
   const R = _swRipple; if (!R.gpu) return;
-  const half = R.bounds * 0.5;
-  // (v33.28) Store ABSOLUTE world XZ, not a window-local offset. The window can RECENTER
-  // (in _swRippleTick) between this push and when the seed is consumed ; storing the offset
-  // against the push-time center made the ripple land at wx+(centerNew-centerOld) — "close
-  // around, not where I shot". The offset is now recomputed at apply time against the live center.
-  if (Math.abs(wx - R.center.x) > half || Math.abs(wz - R.center.y) > half) return;   // coarse cull vs current window
-  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: amp });
+  const lx = wx - R.center.x, lz = wz - R.center.y, half = R.bounds * 0.5;
+  if (Math.abs(lx) > half || Math.abs(lz) > half) return;
+  R.pending.push({ x: lx, z: lz, r: Math.max(20, radius), a: amp });
   if (R.pending.length > 8) R.pending.shift();   // newest wins
 }
 // (v33.21) WEAPON SPLASH : given a 3D segment (a hitscan beam, or a projectile's last->now step),
@@ -17930,19 +17885,8 @@ function _swRippleTick(dt) {
   if (R.acc >= R.step) {
     R.acc = 0;
     const u = R.heightVar.material.uniforms;
-    // (v33.28) Recompute each pending seed's window-local offset against the CURRENT center
-    // (after the recenter above) — the same center the sim frag's wpos and the reflect shader's
-    // uRippleCenter use this frame — so the deposit lands exactly where it was seeded. Re-cull
-    // seeds a recenter pushed out of window instead of clamping them to a wrong spot.
-    const _cx = R.center.x, _cz = R.center.y, _half = R.bounds * 0.5;
-    let n = 0;
-    for (let i = 0; i < R.pending.length && n < 8; i++) {
-      const sd = R.pending[i];
-      const lx = sd.wx - _cx, lz = sd.wz - _cz;
-      if (Math.abs(lx) > _half || Math.abs(lz) > _half) continue;
-      u.uSeeds.value[n].set(lx, lz, sd.r, sd.a);
-      n++;
-    }
+    const n = Math.min(8, R.pending.length);
+    for (let i = 0; i < n; i++) { const sd = R.pending[i]; u.uSeeds.value[i].set(sd.x, sd.z, sd.r, sd.a); }
     u.uSeedCount.value = n;
     R.pending.length = 0;
     R.gpu.compute();
@@ -18185,122 +18129,6 @@ function _swChunkAllowed(cx, cz, T) {
          cz >= Math.floor(F.minZ / _SW_CHUNK) - _SW_FOOT_MARGIN &&
          cz <= Math.floor(F.maxZ / _SW_CHUNK) + _SW_FOOT_MARGIN;
 }
-
-// ============ GEOMETRY CLIPMAP — STAGE 2 (concentric LOD rings) — DEV-ONLY WIP ============
-// DEFAULT OFF, console-only (__clipTest(true/false)), NOT wired into the game loop. Builds N FIXED
-// concentric LOD levels centred on the ship: L0 a solid fine grid, L1..L5 hollow square RINGS each
-// DOUBLING the cell spacing (the inner quarter is a hole the finer level fills), out to the horizon.
-// Each level is displaced in the VERTEX shader (VTF) from its OWN R32F height atlas baked off the
-// real _stGroundYCarved — FIXED buffers, ZERO per-frame geometry allocation (the chunk-streamer's
-// stutter root cause). Per-level SYNC rebake on snap (S3 = toroidal+worker). Cracks at ring
-// boundaries are EXPECTED here (S2b adds skirts). Later: S4 port the real _swPatchTerrainMat, S5
-// geomorph, S6 replace the hub streamer. To inspect: hide the chunk terrain (isSandwichTerrain).
-const _CLIP_N = 128;          // CELLS per level side (129 verts) ; rings omit the central N/2 = 64-cell hole
-const _CLIP_LEVELS = 6;       // L0..L5 ; level k spacing = _CLIP_M0 * 2^k
-const _CLIP_M0 = 16;          // finest cell spacing (u) : L0 ~16u/cell ±1024u ; L5 ~512u/cell ±32768u (horizon)
-const _clipmap = { levels: null, solidGeo: null, ringGeo: null, on: false, raf: 0 };
-
-// One centred (N+1)^2 vertex grid in CELL units (y=0), uv 0..1 ; `hole` = central cells omitted from
-// the index buffer (0 = solid L0 ; N/2 = hollow ring). All verts kept (unused hole verts harmless),
-// so solid + ring share an identical vertex layout and the finer level seats into the coarser hole.
-function _clipGeo(hole) {
-  const N = _CLIP_N, R = N + 1;
-  const pos = new Float32Array(R * R * 3), uv = new Float32Array(R * R * 2);
-  for (let j = 0; j < R; j++) for (let i = 0; i < R; i++) {
-    const k = j * R + i;
-    pos[k * 3] = i - N * 0.5; pos[k * 3 + 1] = 0; pos[k * 3 + 2] = j - N * 0.5;
-    uv[k * 2] = i / N; uv[k * 2 + 1] = j / N;
-  }
-  const idx = [];
-  const h0 = (N - hole) * 0.5, h1 = (N + hole) * 0.5;
-  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-    if (hole > 0 && i >= h0 && i < h1 && j >= h0 && j < h1) continue;   // skip the central hole cells
-    const a = j * R + i, b = a + 1, c = a + R, d = c + 1;
-    idx.push(a, c, b, b, c, d);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  g.setIndex(idx);
-  return g;
-}
-
-// (S4) The clipmap uses the REAL ground terrain material (_swPatchTerrainMat : moss/slope/snow/foam
-// + scene lighting + fog), with the VTF height displacement injected into its vertex shader. So a
-// clipmap level is visually IDENTICAL to a streamed chunk — same shader, same colours, same fog.
-function _clipMat() {
-  const m = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
-  m._clipAtlas = { value: null };                 // this level's height atlas (set in _clipBakeLevel)
-  _swPatchTerrainMat(m, false, m._clipAtlas);     // ground material + clipmap displacement branch
-  return m;
-}
-
-// Bake one level's R32F height atlas (N+1)^2 from the real carved heightfield over its world extent.
-function _clipBakeLevel(L) {
-  const T = game.sandwichTerrain; if (!T) return;
-  const N = _CLIP_N, R = N + 1, span = L.span, step = span / N, x0 = L.cx - span * 0.5, z0 = L.cz - span * 0.5;
-  const d = L.data;
-  for (let j = 0; j < R; j++) { const wz = z0 + j * step, row = j * R; for (let i = 0; i < R; i++) d[row + i] = _stGroundYCarved(x0 + i * step, wz, T); }
-  if (!L.tex) {
-    L.tex = new THREE.DataTexture(d, R, R, THREE.RedFormat, THREE.FloatType);
-    L.tex.minFilter = L.tex.magFilter = THREE.LinearFilter;
-    L.tex.wrapS = L.tex.wrapT = THREE.ClampToEdgeWrapping; L.tex.generateMipmaps = false;
-    L.mat._clipAtlas.value = L.tex;
-  }
-  L.tex.needsUpdate = true;
-}
-
-function _clipBuild() {
-  if (_clipmap.levels) return;
-  try { _swSyncFX(); } catch (_) {}    // (S4) populate the shared _swU terrain uniforms (colours, snow line, YMid/AMP, fades)
-  _clipmap.solidGeo = _clipGeo(0);
-  _clipmap.ringGeo = _clipGeo(_CLIP_N / 2);
-  _clipmap.levels = [];
-  for (let k = 0; k < _CLIP_LEVELS; k++) {
-    const spacing = _CLIP_M0 * Math.pow(2, k);
-    const mat = _clipMat();
-    const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
-    mesh.scale.set(spacing, 1, spacing);
-    mesh.frustumCulled = false; mesh.renderOrder = -2; mesh.userData = { isClipmap: true };
-    mesh.visible = false; scene.add(mesh);
-    _clipmap.levels.push({ k: k, spacing: spacing, span: _CLIP_N * spacing, mesh: mesh, mat: mat, tex: null, data: new Float32Array((_CLIP_N + 1) * (_CLIP_N + 1)), cx: 1e9, cz: 1e9 });
-  }
-}
-
-// Per-frame follow : snap each level to a multiple of 2x its spacing (coarse verts land on fine
-// vertex lines), re-bake + reposition when the snapped centre changes (usually only L0 moves).
-function _clipUpdate(px, pz) {
-  if (!_clipmap.on || !_clipmap.levels) return;
-  for (const L of _clipmap.levels) {
-    const stp = 2 * L.spacing;
-    const ncx = Math.round(px / stp) * stp, ncz = Math.round(pz / stp) * stp;
-    if (ncx !== L.cx || ncz !== L.cz) { L.cx = ncx; L.cz = ncz; _clipBakeLevel(L); L.mesh.position.set(ncx, 0, ncz); }
-  }
-}
-
-window.__clipTest = function (on) {
-  try {
-    if (on) {
-      if (!game || game.state !== 'playing') { console.warn('[clip] enter free-flight first'); return; }
-      _clipBuild();
-      for (const L of _clipmap.levels) {
-        const stp = 2 * L.spacing;
-        L.cx = Math.round(player.position.x / stp) * stp; L.cz = Math.round(player.position.z / stp) * stp;
-        _clipBakeLevel(L); L.mesh.position.set(L.cx, 0, L.cz); L.mesh.visible = true;
-      }
-      _clipmap.on = true;
-      if (_clipmap.raf) cancelAnimationFrame(_clipmap.raf);
-      (function follow() { if (!_clipmap.on) return; try { _clipUpdate(player.position.x, player.position.z); } catch (_) {} _clipmap.raf = requestAnimationFrame(follow); })();
-      console.log('[clip] S2 ON —', _clipmap.levels.length, 'levels');
-    } else {
-      _clipmap.on = false;
-      if (_clipmap.raf) { cancelAnimationFrame(_clipmap.raf); _clipmap.raf = 0; }
-      if (_clipmap.levels) for (const L of _clipmap.levels) L.mesh.visible = false;
-      console.log('[clip] OFF');
-    }
-  } catch (e) { console.warn('[clip] err', e); }
-};
-
 function updateSandwichStream(px, pz, budget) {
   const T = game.sandwichTerrain;
   if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
@@ -36829,7 +36657,7 @@ function updatePlayerMovement(dt) {
   // and SHOWS the ship in the main view ; FIRST person hides it from the main (cockpit) view, but
   // the Reflector's onBeforeRender wrap still reflects it. Collision/movement use player.position,
   // so the camera offset is purely visual.
-  if (player.mesh) {   // (v33.28) ship rig runs in ALL modes so 3rd-person works everywhere (was freeflight-only)
+  if (player.mesh && LSS.MODE === 'freeflight') {
     player.mesh.position.copy(player.position);
     player.mesh.quaternion.copy(camera.quaternion);
     player.mesh.rotateY(Math.PI);   // model nose is +Z ; face it forward (was rear-first)
@@ -36840,10 +36668,7 @@ function updatePlayerMovement(dt) {
     const _bankTarget = Math.max(-1, Math.min(1, _lat / 220)) * 0.5;   // ~28deg max bank
     game._tpBank = (game._tpBank || 0) + (_bankTarget - (game._tpBank || 0)) * Math.min(1, dt * 6);
     player.mesh.rotateZ(game._tpBank);
-    // (v33.28) Force first-person while presenting in VR : the chase offset gets lifted onto the
-    // xrDolly and teleports the headset back = a broken/nauseating view. _vrNow gates 3rd-person off.
-    const _vrNow = (typeof isXRPresenting === 'function') && isXRPresenting();
-    if (game.thirdPerson && !_vrNow) {
+    if (game.thirdPerson) {
       _tpOff.set(0, 42, 150).applyQuaternion(camera.quaternion);
       camera.position.add(_tpOff);
       if (!player.mesh.visible) player.mesh.visible = true;   // shown in the main view (3rd person)
@@ -42999,7 +42824,7 @@ function pollGamepad() {
   const _gpDpadDownBtn = !!(gp.buttons[13] && (gp.buttons[13].pressed || gp.buttons[13].value > input.triggerThreshold));
   // (v33.14) D-pad DOWN (the DIGITAL button only, NOT the sticks) toggles 1st/3rd person in
   // the hub. Vertical move is on L3/R3, so the d-pad is free. Edge-triggered, gameplay only.
-  if (_gpDpadDownBtn && !input._tpDpadPrev && game.state === 'playing') {   // (v33.28) 3rd-person toggle in all modes (was freeflight-only); _toggleThirdPerson self-guards
+  if (_gpDpadDownBtn && !input._tpDpadPrev && typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game.state === 'playing') {
     try { _toggleThirdPerson(); } catch (_) {}
   }
   input._tpDpadPrev = _gpDpadDownBtn;
@@ -45065,13 +44890,8 @@ function previewLoadout(key) {
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
     const floatingVR = document.getElementById('vr-enter-btn');
-    // (v33.28) Offer the VR launch button in EVERY mode (campaign / free-flight included). Use
-    // !disabled as the support signal instead of an exact 'ENTER VR' label match, so a transient
-    // label ('STARTING...', 'EXIT VR') can't momentarily suppress the button. Unsupported states
-    // set the button disabled with an explicit label, which we still exclude.
-    const _vrLabel = floatingVR ? (floatingVR.textContent || '') : '';
-    const _vrUnsupported = /UNSUPPORTED|NOT AVAILABLE|BLOCKED/i.test(_vrLabel);
-    const vrAvailable = !!(floatingVR && !floatingVR.disabled && !_vrUnsupported);
+    const vrAvailable = !!(floatingVR && !floatingVR.disabled
+                            && floatingVR.textContent === 'ENTER VR');
     if (vrAvailable) {
       vrBtn.style.display = 'inline-block';
       const newVR = vrBtn.cloneNode(true);
@@ -46273,8 +46093,8 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // (v33.22) the ship-cycle + view-toggle buttons only do anything in the free-flight HUB ; hide
     // them in combat so they're not dead controls. (Their handlers also self-gate, but hiding is cleaner.)
     const _ffHub = show && (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
-    const _shp = document.getElementById('tc-ship'); if (_shp) _shp.style.display = _ffHub ? '' : 'none';   // ship-cycle stays hub-only
-    const _vw = document.getElementById('tc-view'); if (_vw) _vw.style.display = show ? '' : 'none';   // (v33.28) view-toggle ◳ in all modes
+    const _shp = document.getElementById('tc-ship'); if (_shp) _shp.style.display = _ffHub ? '' : 'none';
+    const _vw = document.getElementById('tc-view'); if (_vw) _vw.style.display = _ffHub ? '' : 'none';
   }, 250);
 
   // Console / future-settings API.
