@@ -16643,6 +16643,10 @@ function renderFrame() {
       if (typeof _syncVRLiteMaterialUniforms === 'function') _syncVRLiteMaterialUniforms();
       // Quest WebXR owns the XR framebuffer here. Calling setRenderTarget(null)
       // rebinds the flat browser canvas and leaves the headset black.
+      // (v33.46) Belt-and-braces : re-assert the XR-layer render target right before the stereo render so
+      // ANY stray setRenderTarget(null) earlier in the master tick (water GPGPU compute, etc.) can't leave
+      // both eyes painting to the flat canvas instead of the headset.
+      try { if (renderer.xr && renderer.xr.getRenderTarget) renderer.setRenderTarget(renderer.xr.getRenderTarget()); } catch (_) {}
       renderer.render(scene, camera);
     } catch (renderErr) {
       if (!renderFrame._xrRenderErrLogged) {
@@ -18039,8 +18043,15 @@ function _swRippleTick(dt) {
     }
     u.uSeedCount.value = n;
     R.pending.length = 0;
+    // (v33.46) VR FIX (the reason VR worked in every mode EXCEPT free-flight): WebXRManager binds the
+    // XR-layer render target ONCE at frame start ; the GPGPU compute (+ its inner setRenderTarget calls)
+    // plus the OLD unconditional setRenderTarget(null) here stole that binding, and three r165's
+    // renderer.render() does NOT re-bind the XR layer -> the stereo frame painted to the flat CANVAS, not
+    // the headset. Capture + restore the bound target around compute : it is the XR-layer RT in VR and
+    // null in flatscreen (so flat behaviour is identical). Same save/restore idiom used by the postFX path.
+    const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
-    if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(null);   // belt-and-braces vs RT-state bugs
+    if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(_xrPrevRT);
   }
   // hand the freshest height texture + window params to the Reflector material
   const wu = w && w.material && w.material.uniforms;
