@@ -1444,38 +1444,6 @@ window.__clip = (on) => {
 };
 
 // ============================================================================
-// FOLIAGE-CLIPMAP DE-RISK (STEP 0, default-OFF: window.__fclipTest()) — proves the ONE
-//   unproven primitive the whole GPU-resident foliage plan rests on: a RENDER InstancedMesh
-//   whose positionNode reads a per-instance transform from a storage buffer that a COMPUTE
-//   kernel wrote, with NO getArrayBufferAsync readback. Every instancedArray in the file so
-//   far is read BACK to the CPU; none feeds the vertex stage. If this draws (boxes sit on the
-//   clipmap terrain, pop-free on recenter, 0 render errors flying) the architecture is green.
-// ============================================================================
-const FCT_POOL = 256, FCT_W = 16;                         // 16x16 grid of boxes
-const _fctBuf = instancedArray(FCT_POOL, 'vec4');         // per-instance (x, y, z, scale) — written by compute, read by the draw
-const _fctOx = uniform(0), _fctOz = uniform(0);
-const _fctFill = Fn(() => {                               // one thread per instance; deterministic cell -> slot (no atomic)
-  const ix = instanceIndex.mod(FCT_W), iz = instanceIndex.div(FCT_W);
-  const x = _fctOx.add(float(ix).sub(FCT_W / 2).mul(60)), z = _fctOz.add(float(iz).sub(FCT_W / 2).mul(60));
-  _fctBuf.element(instanceIndex).assign(vec4(x, gGroundBase(x, z), z, 8.0));   // Y straight from the GPU height field = sits on the clipmap (scale 8 = tall de-risk towers)
-})().compute(FCT_POOL);
-const _fctGeo = new THREE.BoxGeometry(6, 30, 6); _fctGeo.translate(0, 15, 0);   // base at origin so it stands ON the ground
-const _fctMat = new THREE.MeshStandardNodeMaterial({ color: 0xff00ff, roughness: 1.0, metalness: 0.0 });
-{ const r = _fctBuf.element(instanceIndex); _fctMat.positionNode = positionLocal.mul(r.w).add(vec3(r.x, r.y, r.z)); }   // THE primitive: vertex stage reads the compute-written buffer
-const _fctMesh = new THREE.InstancedMesh(_fctGeo, _fctMat, FCT_POOL);
-_fctMesh.count = FCT_POOL; _fctMesh.frustumCulled = false; _fctMesh.visible = false;
-for (let i = 0; i < FCT_POOL; i++) _fctMesh.setMatrixAt(i, _m4.identity());   // identity instance matrices (positionNode does all placement); else zero-matrix collapse
-_fctMesh.instanceMatrix.needsUpdate = true; scene.add(_fctMesh);
-window.__fclipTest = async (on) => {                       // dispatch the compute, show the boxes, confirm the buffer was written (readback here is ONLY the proof, NOT the draw path)
-  _fctOx.value = camera.position.x; _fctOz.value = camera.position.z;
-  await renderer.computeAsync(_fctFill);
-  _fctMesh.visible = on !== false;
-  const b = new Float32Array(await renderer.getArrayBufferAsync(_fctBuf.value));
-  return { visible: _fctMesh.visible, pool: FCT_POOL, sample: Array.from(b.slice(0, 12)).map(v => +v.toFixed(1)) };
-};
-window.__fclipMove = async (d) => { const s = d || 180; _fctOx.value += s; _fctOz.value += s; await renderer.computeAsync(_fctFill); return { ox: _fctOx.value, oz: _fctOz.value }; };   // re-dispatch with a shifted origin -> grid must move with NO realloc/flicker (pop-free recenter)
-
-// ============================================================================
 // SHIP — drop in the blaster and fly it from the cockpit. The markers (cockpit1,
 //   thruster1/2, gun1/2) are empty nodes baked into the GLB; the model's forward is -X,
 //   so we spin it to face the rig's -Z. The camera rides the cockpit1 marker every frame.
@@ -1903,7 +1871,7 @@ window.__gpuGroundTest = async (ox, oz) => {
 // GPU tree-placement test: rejection-sample candidates on the GPU, atomic-append survivor xz, read back,
 //   then CPU-validate that survivors pass the CPU gates (proves GPU placement agrees with the CPU world).
 const _gpuTreeCAND = 768, _gpuTreeCAP = 384;   // candidates/survivors per chunk (was 1024/512) — density vs perf
-const _gpuTreeCounter = instancedArray(1, 'uint'), _gpuTreeAtom = _gpuTreeCounter.toAtomic(), _gpuTreeOut = instancedArray(_gpuTreeCAP, 'vec4');   // (x, y=gGroundBase, z, _) — vec4 (not vec3) dodges the WebGPU storage vec3->16B stride padding
+const _gpuTreeCounter = instancedArray(1, 'uint'), _gpuTreeAtom = _gpuTreeCounter.toAtomic(), _gpuTreeOut = instancedArray(_gpuTreeCAP, 'vec2');
 const _gpuTreeX0 = uniform(float(0)), _gpuTreeZ0 = uniform(float(0)), _gpuTreeSeed = uniform(float(0));
 const _gpuTreeReset = Fn(() => { atomicStore(_gpuTreeAtom.element(0), uint(0)); })().compute(1);
 const _gpuTreePlace = Fn(() => {
@@ -1919,7 +1887,7 @@ const _gpuTreePlace = Fn(() => {
   const clump = gNoise2(x.mul(0.006).sub(13), z.mul(0.006).add(9)).mul(0.5).add(0.5);
   const r2 = gHash2(fi.add(17.7), _gpuTreeSeed.add(3.3));
   const ok = y.greaterThan(WL + 22).and(y.lessThan(500)).and(green.greaterThan(0.45)).and(flat.greaterThan(0.62)).and(fr.greaterThan(0.34)).and(r2.lessThan(clump.mul(fr).mul(1.5)));
-  If(ok, () => { const slot = atomicAdd(_gpuTreeAtom.element(0), uint(1)).toVar(); If(slot.lessThan(_gpuTreeCAP), () => { _gpuTreeOut.element(slot).assign(vec4(x, y, z, 0)); }); });   // store the GPU-computed height too (free — y already exists for the gate)
+  If(ok, () => { const slot = atomicAdd(_gpuTreeAtom.element(0), uint(1)).toVar(); If(slot.lessThan(_gpuTreeCAP), () => { _gpuTreeOut.element(slot).assign(vec2(x, z)); }); });
 })().compute(_gpuTreeCAND);
 // GPU décor placement kernel — same pattern as trees, but the gates are the fungal/cavern décor gates.
 const _gpuDecCAP = 512;
@@ -1946,7 +1914,7 @@ window.__gpuTreeTest = async (cx, cz) => {
     const xz = new Float32Array(await renderer.getArrayBufferAsync(_gpuTreeOut.value));
     const n = Math.min(cnt, _gpuTreeCAP); let cpuValid = 0; const sample = [];
     for (let i = 0; i < n; i++) {
-      const x = xz[i * 4], z = xz[i * 4 + 2], y = groundBase(x, z); biomeAt(x, z, _bwShade);   // _gpuTreeOut is vec4 now (stride 4); recompute CPU y for the GPU-vs-CPU agreement check
+      const x = xz[i * 2], z = xz[i * 2 + 1], y = groundBase(x, z); biomeAt(x, z, _bwShade);
       const green = _bwShade[B_DEF] + _bwShade[B_ALP] * 0.5;
       if (y > WL + 22 && y < 500 && green > 0.45) cpuValid++;
       if (sample.length < 5) sample.push({ x: Math.round(x), z: Math.round(z), y: Math.round(y) });
@@ -1969,12 +1937,12 @@ async function gpuBuildTrees(c) {
   if (!c.alive || c.treesHi) return;
   const n = Math.min(cnt, _gpuTreeCAP), pine = [], fir = [], broad = [], loCone = [], loBlob = [];
   for (let i = 0; i < n; i++) {
-    const x = xz[i * 4], y = xz[i * 4 + 1], z = xz[i * 4 + 2];      // y straight from the GPU buffer (gGroundBase, already computed for the gate) — NO CPU groundBase/meshHeight storm on the readback frame, and trees sit on the EXACT clipmap surface
+    const x = xz[i * 2], z = xz[i * 2 + 1], y = groundBase(x, z);
     if (y < WL + 22 || y > 500) continue;                          // CPU re-validate (drops the ~1% borderline survivors)
     const r = hash2(x * 0.07 + 1, z * 0.07), rs = hash2(x * 0.11, z * 0.13 + 3), rr = hash2(x + 5, z * 0.19);
     let sp; if (y > 300) sp = r < 0.62 ? 'fir' : 'pine'; else if (y > 120) sp = r < 0.4 ? 'pine' : (r < 0.7 ? 'fir' : 'broad'); else sp = r < 0.62 ? 'broad' : (r < 0.85 ? 'pine' : 'fir');
     const S = 22 * (0.6 + rs * 0.9);
-    _gd.position.set(x, y - 2, z); _gd.rotation.set(0, rr * 6.2832, 0); _gd.scale.set(S, S, S); _gd.updateMatrix();   // GPU height (matches the clipmap); no meshHeight call
+    _gd.position.set(x, meshHeight(x, z) - 2, z); _gd.rotation.set(0, rr * 6.2832, 0); _gd.scale.set(S, S, S); _gd.updateMatrix();
     const m = _gd.matrix.clone();
     if (sp === 'broad') { broad.push(m); loBlob.push(m); } else { (sp === 'pine' ? pine : fir).push(m); loCone.push(m); }
   }
