@@ -40,7 +40,6 @@ import { positionWorld, positionLocal, mx_noise_float, mix, color, smoothstep, f
          hash, instanceIndex, time, sin, vec3, vec2, vec4, normalize, cameraPosition, reflector, texture, uniform,
          refract, reflect, viewportSharedTexture, screenUV, cameraViewMatrix,
          Fn, Loop, If, Break, texture3D, normalWorld, normalLocal,
-         positionGeometry, varying,
          instancedArray, atomicAdd, atomicStore, uint, int } from 'three/tsl';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
@@ -322,8 +321,8 @@ const _c = new THREE.Color();
 // BIOME EMISSIVE GLOW — the per-vertex `glow` attribute (x=lava, y=fungal, z=crystal) gates
 //   three animated emissive looks ported from last_ship_sailing's biome shaders. Where glow is 0
 //   (the default green world) the terms multiply out to black, so only the themed regions light up.
-function glowEmissive(wp = positionWorld, G = attribute('glow')) {
-  const t = time;   // wp = world pos node, G = vec3(lava, fungal, crystal) gate (per-vertex attr on chunks, procedural on the clipmap)
+function glowEmissive() {
+  const wp = positionWorld, t = time, G = attribute('glow');
   // LAVA (G.x): pulsing red->orange veins
   const lvN = mx_noise_float(wp.mul(0.03).add(7.0)).mul(0.5).add(0.5);
   const lvVein = smoothstep(0.38, 0.70, lvN);
@@ -1291,7 +1290,7 @@ function finishCeiling(j) {
 // ---- streaming: request near->far, unload far, build a slice each frame -----
 const chunkMeshes = (c) => [c.ground, c.ceiling, c.grass, c.bushes, c.flowers, ...(c.decor || []), ...(c.plantMeshes || []), ...(c.treesHi || []), ...(c.treesLo || [])];
 function ensureJobs(c, ring) {
-  if (!CLIP_ON && !c.reqGround) { c.reqGround = true; buildQueue.push({ type: 'ground', c }); }   // ground is the GPU clipmap unless reverted via __clip(false)
+  if (!c.reqGround) { c.reqGround = true; buildQueue.push({ type: 'ground', c }); }
   if ((!c.reqVeg || !c.reqGrass || !c.reqCeil || !c.reqDecor) && ring <= Math.max(TREE_LO_RADIUS, CEIL_RADIUS, DECOR_RADIUS)) {
     biomeAt(c.cx * CHUNK, c.cz * CHUNK, _bwCam);
     const green = _bwCam[B_DEF] + _bwCam[B_ALP] * 0.5 > 0.4;    // green / lower-alpine world gets vegetation
@@ -1343,113 +1342,6 @@ function pump(budget) {
     else { buildFalls(job); used += 300; job = null; }
   }
 }
-
-// ============================================================================
-// GEOMETRY CLIPMAP (GPU procedural) — the real fix for choppy streaming. Instead of
-//   allocating + CPU-filling + uploading a fresh PlaneGeometry per chunk as you fly
-//   (alloc/GC/upload hitches), we keep a FIXED set of concentric ring grids centred on
-//   the camera and displace their vertices in the VERTEX SHADER straight from gGroundBase
-//   (the GPU port of the CPU height field). Zero per-frame allocation, zero streaming —
-//   recentering is just snapping a per-level origin uniform. Near rings are fine, far
-//   rings double their cell size each level so one mesh set reaches the true horizon.
-//   The CPU groundY stays the gameplay/physics/prop source of truth; this is the visual.
-//   Reconstruction-kernel view: each ring samples the noise field at exactly the
-//   resolution it needs — a multiresolution reconstruction of the surface on demand.
-// ============================================================================
-const CLIP_N = 128;                 // cells per level edge (mult of 4 for the centre hole)
-const CLIP_LEVELS = 4;              // L0 fine (±1920u) .. L3 (±15360u) — sized to the fog horizon; outer levels would just be fog-hidden waste
-const CLIP_M0 = 30;                 // level-0 cell size (world u); level k = CLIP_M0 * 2^k
-let CLIP_ON = true;                 // the ground is now the GPU clipmap by default; window.__clip(false) reverts to per-chunk streaming (A/B)
-const clipMeshes = [];
-// One ring-grid geometry per level: a (N+1)^2 lattice of integer cell coords centred on 0;
-//   level 0 is solid, levels 1+ skip the central N/2 x N/2 cells (the finer level fills it).
-function buildClipGeo(level) {
-  const N = CLIP_N, V = N + 1, pos = new Float32Array(V * V * 3), aSkirt = new Float32Array(V * V);
-  for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
-    const o = (j * V + i) * 3; pos[o] = i - N / 2; pos[o + 1] = 0; pos[o + 2] = j - N / 2;
-    if (i === 0 || i === N || j === 0 || j === N) aSkirt[j * V + i] = 1;   // outer rim drops a skirt wall
-  }
-  const idx = [], lo = N / 4, hi = 3 * N / 4;
-  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-    if (level > 0 && i >= lo && i < hi && j >= lo && j < hi) continue;     // central hole (finer level covers it)
-    const a = j * V + i, b = a + 1, c = a + V, d = c + 1;
-    idx.push(a, c, b, b, c, d);
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  g.setAttribute('aSkirt', new THREE.BufferAttribute(aSkirt, 1));
-  g.setIndex(idx);
-  return g;
-}
-// procedural ground colour (the partition-of-unity blend from groundMat, fed by world pos + slope
-//   instead of baked vertex attributes — the clipmap has no per-vertex colour buffer)
-function clipGroundColor(wp, slopeY) {
-  const mottle = mx_noise_float(wp.mul(0.012)).mul(0.20)
-    .add(mx_noise_float(wp.mul(0.05)).mul(0.14))
-    .add(mx_noise_float(wp.mul(0.16)).mul(0.10)).add(0.92);
-  const fuzz = mx_noise_float(wp.mul(0.6)).mul(0.18).add(0.88)
-    .mul(mx_noise_float(wp.mul(2.2)).mul(0.22).add(0.86));
-  const slope = slopeY.clamp(0, 1), y = wp.y;
-  const cGrass = mix(color(0x3c5722), color(0x82c456), mx_noise_float(wp.mul(0.018).add(5.0)).mul(0.5).add(0.5));
-  const sGrass = slope.mul(3.0), sRock = slope.oneMinus().mul(4.0).add(0.3);
-  const sSand = smoothstep(float(WL - 8), float(WL + 30), y).oneMinus().mul(3.5);
-  const sSnow = smoothstep(float(430), float(560), y).mul(slope.max(0.35)).mul(4.0);
-  const eG = sGrass.div(uPuTemp).exp(), eR = sRock.div(uPuTemp).exp(), eA = sSand.div(uPuTemp).exp(), eS = sSnow.div(uPuTemp).exp();
-  const inv = eG.add(eR).add(eA).add(eS).reciprocal();
-  const puCol = cGrass.mul(eG.mul(inv)).add(color(0x6c7178).mul(eR.mul(inv))).add(color(0xcdbd8e).mul(eA.mul(inv))).add(color(0xeef4f8).mul(eS.mul(inv)));
-  const mossCol = mix(color(0x2f5a22), color(0x67ab3b), mx_noise_float(wp.mul(0.09)).mul(0.5).add(0.5));
-  const lowF = float(1).sub(smoothstep(float(YFLOOR), float(YFLOOR + GROUND_AMP * 0.7), y));
-  const mossAmt = smoothstep(0.34, 0.62, mx_noise_float(wp.mul(0.02))).mul(0.55).mul(lowF);
-  return mix(puCol, mossCol, mossAmt).mul(mottle).mul(fuzz);
-}
-// per-level material: vertex displaces the grid from gGroundBase + builds an analytic normal;
-//   fragment reuses the PU colour + the biome glow (gate computed procedurally, not from a vertex attr)
-function makeClipMat(level) {
-  const uCell = uniform(CLIP_M0 * Math.pow(2, level)), uOx = uniform(0), uOz = uniform(0), uSkirt = uniform(CLIP_M0 * Math.pow(2, level) * 4);
-  const lp = positionGeometry;
-  const wx = lp.x.mul(uCell).add(uOx), wz = lp.z.mul(uCell).add(uOz);
-  const h = gGroundBase(wx, wz);
-  const d = uCell;
-  const hX = gGroundBase(wx.add(d), wz), hZ = gGroundBase(wx, wz.add(d));
-  const nrm = vec3(h.sub(hX), d, h.sub(hZ)).normalize();
-  const skirt = attribute('aSkirt').mul(uSkirt);                 // rim verts drop straight down to hide LOD-seam cracks
-  const vWp = varying(vec3(wx, h, wz));
-  const vN = varying(nrm);
-  const mat = new THREE.MeshStandardNodeMaterial({ roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
-  mat.positionNode = vec3(wx, h.sub(skirt), wz);
-  mat.normalNode = vN;
-  mat.colorNode = clipGroundColor(vWp, vN.y);
-  // procedural glow gate: vol->lava (hotter in the lows), fun->fungal, cav->crystal (matches fillGround)
-  const b = gBiome(wx, wz);
-  const lowG = float(WL + 280).sub(h).div(460).clamp(0, 1);
-  const G = vec3(b.vol.mul(lowG.mul(0.75).add(0.45)), b.fun.mul(0.95), b.cav.mul(0.9));
-  mat.emissiveNode = glowEmissive(vWp, varying(G));
-  mat.userData = { uCell: uCell.value, uOx, uOz, level };
-  return mat;
-}
-for (let L = 0; L < CLIP_LEVELS; L++) {
-  const m = new THREE.Mesh(buildClipGeo(L), makeClipMat(L));
-  m.frustumCulled = false; m.visible = CLIP_ON; m.renderOrder = -1;   // behind transparent water/FX
-  if (L >= 2) m.layers.set(1);   // far rings live on the foliage layer so the water reflector (layer 0 only) skips them — distant terrain has no useful reflection
-  scene.add(m); clipMeshes.push(m);
-}
-function updateClipmap() {
-  if (!CLIP_ON) return;
-  const cx = camera.position.x, cz = camera.position.z;
-  for (const m of clipMeshes) {
-    const u = m.material.userData, cell = u.uCell, snap = cell * 2;   // snap to 2 cells so the centre hole stays aligned to the parent
-    u.uOx.value = Math.round(cx / snap) * snap;
-    u.uOz.value = Math.round(cz / snap) * snap;
-  }
-}
-function setChunkGroundVisible(v) { for (const [, c] of chunks) if (c.ground) c.ground.visible = v; }
-window.__clip = (on) => {
-  CLIP_ON = on !== false;
-  for (const m of clipMeshes) m.visible = CLIP_ON;
-  if (CLIP_ON) updateClipmap();
-  if (on === 'only') setChunkGroundVisible(false); else setChunkGroundVisible(true);   // 'only' hides the streamed ground to A/B against the clipmap
-  return { CLIP_ON, levels: clipMeshes.length, hidChunks: on === 'only' };
-};
 
 // ============================================================================
 // SHIP — drop in the blaster and fly it from the cockpit. The markers (cockpit1,
@@ -2057,7 +1949,6 @@ function frameTick(dt) {
   updateMedium();
   t = performance.now(); planSegments(); _pf('plan', t);
   t = performance.now(); pump(VERT_BUDGET); _pf('pump', t);
-  updateClipmap();                 // recenter the GPU clipmap rings (no-op while CLIP_ON is false)
   pumpGpuProps();                  // GPU-compute tree + décor placement (async, off the CPU thread)
   updateLOD();
   t = performance.now(); updateShipWake(dt); _pf('wake', t);
