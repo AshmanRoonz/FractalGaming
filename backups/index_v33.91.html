@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.94</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.94","short_name":"LSS%20v33.94","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.91</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.91","short_name":"LSS%20v33.91","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3006,7 +3006,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '33.94';
+const LSS_BUILD = '33.91';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17432,8 +17432,7 @@ function _swTreeGeoGet(){
   
   
   
-  
-  const _full = (typeof QUALITY!=='undefined' && QUALITY.isUltra && QUALITY.isUltra());
+  const _full = !((typeof isStandaloneQuest==='function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE));
   const lite=[
     
     
@@ -17461,18 +17460,10 @@ function _swTreeMatGet(){
       '#include <begin_vertex>\n vec3 ip=vec3(instanceMatrix[3][0],instanceMatrix[3][1],instanceMatrix[3][2]);\n float ph=ip.x*0.05+ip.z*0.05;\n float vph=ph+transformed.x*0.08+transformed.z*0.08+transformed.y*0.05;\n float canopy=max(0.0,transformed.y-18.0);\n float cf=canopy*canopy*0.0012+canopy*0.015;\n float gust=0.6+0.4*sin(uTime*0.13+ph*0.3);\n float swayX=(sin(uTime*0.9+vph)*0.85+sin(uTime*1.9+vph*1.7)*0.4)*gust;\n float swayZ=(sin(uTime*0.8+vph*1.2+1.7)*0.7+sin(uTime*2.3+vph*1.5)*0.3)*gust;\n transformed.x+=swayX*cf;\n transformed.z+=swayZ*cf;\n transformed.y+=sin(uTime*3.1+vph*2.0)*cf*0.22;\n float tfade=1.0-smoothstep(uTreeFadeA,uTreeFadeB,distance(ip.xz,uCam.xz));\n transformed*=tfade;'); };
   _swTreeMat=m; return m;
 }
-
-
-
-function _swForestAt(x, z) {
-  if (typeof _stNoise2 !== 'function') return 0;
-  const n = (_stNoise2(x * 0.00035 + 11.0, z * 0.00035 - 7.0) + 1) * 0.5;   
-  return Math.max(0, Math.min(1, (n - 0.5) / 0.28));                         
-}
 function _swBuildTrees(x0,z0,T){
   if(game.sandwichTrees===false || T.biome!=='mossy') return null;
   const _full = !((typeof isStandaloneQuest==='function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE));   
-  const spacing=_full?155:175, N=Math.max(2,Math.round(_SW_CHUNK/spacing)), step=_SW_CHUNK/N;   
+  const spacing=_full?155:170, N=Math.max(2,Math.round(_SW_CHUNK/spacing)), step=_SW_CHUNK/N;
   const eps=6, SR=_swU.uSlopeRock.value, SG=_swU.uSlopeGrass.value;
   const variants=_swTreeGeoGet(), buckets=variants.map(()=>[]);
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
@@ -17486,10 +17477,9 @@ function _swBuildTrees(x0,z0,T){
     const fl=Math.max(0,Math.min(1,(ny-SR)/Math.max(0.001,SG-SR)));
     if(fl<0.62) continue;                          
     if(_stPatch(x,z)<0.45) continue;               
-    const forest=_swForestAt(x,z);                 
-    const _td=(typeof window!=='undefined' && window.__treeDensity!=null)?window.__treeDensity:1;
-    const dens=((forest>0.28)?(0.16+forest*(_full?0.36:0.24)):0.012)*_td;
-    if(Math.random() > dens) continue;
+    const clu=(_stNoise2(x*0.0008+50.0,z*0.0008-30.0)+1)*0.5;   
+    if(clu<(_full?0.5:0.55)) continue;              
+    if(Math.random() > (clu-0.5)*(_full?2.5:1.9)) continue;     
     const vi=Math.floor(_stHash2(Math.floor(x*0.7),Math.floor(z*0.7))*variants.length)%variants.length;
     buckets[vi].push(x,y,z);
   }
@@ -18520,12 +18510,13 @@ function _critterTerrainMaybeBake(cx, cz) {
 
 function _boidsVelFrag(count, mode) {
   const water = (mode === 'water');
-  const aliW = water ? '1.0' : '1.0', cohW = water ? '0.9' : '0.8';   
+  const SR = water ? '60.0' : '110.0', NR = water ? '210.0' : '320.0';
+  const cohK = water ? '0.020' : '0.014';
   const lines = [
     '#define BIRD_COUNT ' + count,
     'uniform float uTime; uniform float uDelta;',
     'uniform vec3 uShip; uniform vec3 uCenter; uniform float uBoundsR;',
-    water ? 'uniform float uSurfaceY; uniform float uSurfMargin; uniform float uMinDepth;' : 'uniform float uYMin; uniform float uYMax; uniform float uWL;',
+    water ? 'uniform float uSurfaceY; uniform float uSurfMargin;' : 'uniform float uYMin; uniform float uYMax;',
     'uniform float uAvoid; uniform float uSep; uniform float uAli; uniform float uCoh; uniform float speedLimit;',
     'uniform sampler2D uTerrTex; uniform vec2 uTerrCenter; uniform float uTerrBounds; uniform float uTerrMargin;',
     water ? '' : 'uniform sampler2D uHomeTex; uniform float uStartleR; uniform float uPerchK; uniform float uLaunch; uniform float uDecay; uniform float uRise;',
@@ -18533,78 +18524,62 @@ function _boidsVelFrag(count, mode) {
     'void main(){',
     '  vec2 uv = gl_FragCoord.xy / resolution.xy;',
     '  vec3 pos = texture2D(texturePosition, uv).xyz;',
-    '  vec4 velw = texture2D(textureVelocity, uv); vec3 vel = velw.xyz;',
+    '  vec4 velw = texture2D(textureVelocity, uv);',
+    '  vec3 vel = velw.xyz;',
     water ? '' : '  float e = clamp(velw.w, 0.0, 1.0);',                  
     water ? '' : '  vec4 homew = texture2D(uHomeTex, uv); vec3 home = homew.xyz; float perched = homew.w;',
+    
     water ? '' : '  float dHome = distance(home.xz, uShip.xz); float dBird = distance(pos, uShip);',
     water ? '' : '  float tgt = max(1.0 - smoothstep(uStartleR * 0.85, uStartleR, dHome), 1.0 - smoothstep(uStartleR * 0.85, uStartleR, dBird));',
-    water ? '' : '  e = (tgt > e + 0.01) ? min(1.0, e + uDelta * uRise) : max(0.0, e - uDelta * uDecay);',
-    water ? '' : '  float fly = max(smoothstep(0.05, 0.6, e), 1.0 - perched);',
+    water ? '' : '  e = (tgt > e + 0.01) ? min(1.0, e + uDelta * uRise) : max(0.0, e - uDelta * uDecay);',   
+    water ? '' : '  float fly = max(smoothstep(0.05, 0.6, e), 1.0 - perched);',   
     
-    
-    '  const float TAU = 6.28318530718;',
-    water ? '  const float SEPD = 32.0, ALID = 26.0, COHD = 30.0;' : '  const float SEPD = 60.0, ALID = 95.0, COHD = 130.0;',
-    '  const float ZR = SEPD + ALID + COHD; const float ZSQ = ZR * ZR;',
-    '  const float sepT = SEPD / ZR; const float aliT = (SEPD + ALID) / ZR;',
-    '  vec3 acc = vec3(0.0);',
+    '  const float SEP_R2 = ' + SR + '*' + SR + '; const float NEI_R2 = ' + NR + '*' + NR + ';',
+    '  vec3 sep = vec3(0.0), ali = vec3(0.0), coh = vec3(0.0); float nSep = 0.0, nNei = 0.0;',
     '  for (int i = 0; i < BIRD_COUNT; i++){',
     water ? '' : '    if (fly > 0.001) {',                                 
     '    vec2 nuv = (vec2(mod(float(i), resolution.x), floor(float(i)/resolution.x)) + 0.5) / resolution.xy;',
     '    vec3 op = texture2D(texturePosition, nuv).xyz;',
-    '    vec3 dir = op - pos; float dist = length(dir);',
-    '    if (dist > 0.0001 && dist < ZR){',
-    '      float percent = (dist * dist) / ZSQ;',
-    '      if (percent < sepT){',                                          
-    '        float f = min(sepT / percent - 1.0, 10.0);',
-    '        acc -= normalize(dir) * f * uSep;',
-    '      } else if (percent < aliT){',                                   
-    '        float adj = (percent - sepT) / (aliT - sepT);',
-    '        vec3 bv = texture2D(textureVelocity, nuv).xyz;',
-    '        float f = 1.0 - 0.5 * cos(adj * TAU);',
-    '        acc += normalize(bv + vec3(0.0001)) * f * uAli * ' + aliW + ';',
-    '      } else {',                                                      
-    '        float adj = (percent - aliT) / (1.0 - aliT);',
-    '        float f = 0.5 + 0.5 * cos(adj * TAU);',
-    '        acc += normalize(dir) * f * uCoh * ' + cohW + ';',
-    '      }',
+    '    vec3 d = pos - op; float dist2 = dot(d,d);',
+    '    if (dist2 > 0.0001 && dist2 < NEI_R2){',
+    '      if (dist2 < SEP_R2){ sep += normalize(d) / max(sqrt(dist2), 1.0); nSep += 1.0; }',
+    '      ali += texture2D(textureVelocity, nuv).xyz; coh += op; nNei += 1.0;',
     '    }',
     water ? '' : '    }',
     '  }',
-    water ? '' : '  acc *= fly;',                                         
+    '  vec3 acc = vec3(0.0);',
     '  float gY = terrAt(pos.xz); float clr = pos.y - gY;',
     
+    water ? '  if (nSep > 0.0) acc += (sep / nSep) * uSep;' : '',
+    water ? '  if (nNei > 0.0){ acc += (ali / nNei) * uAli; acc += ((coh / nNei) - pos) * uCoh * ' + cohK + '; }' : '',
     water ? '  vec3 toShip = pos - uShip; float sd = length(toShip);' : '',
-    water ? '  if (sd < 200.0){ float f = 1.0 - sd / 200.0; acc += normalize(toShip + vec3(0.0001)) * f * f * uAvoid * 50.0; }' : '',
+    water ? '  if (sd < 180.0){ float f = 1.0 - sd / 180.0; acc += normalize(toShip + vec3(0.0001)) * f * f * uAvoid * 40.0; }' : '',
     water ? '  vec3 toC = uCenter - pos; float cd = length(toC);' : '',
     water ? '  if (cd > uBoundsR) acc += normalize(toC) * (cd - uBoundsR) * 0.10;' : '',
-    water ? '  float depth = uSurfaceY - gY;' : '',                       
-    water ? '  vec2 gr = vec2(terrAt(pos.xz + vec2(160.0,0.0)) - terrAt(pos.xz - vec2(160.0,0.0)), terrAt(pos.xz + vec2(0.0,160.0)) - terrAt(pos.xz - vec2(0.0,160.0)));' : '',   
-    water ? '  float shallow = 1.0 - smoothstep(uMinDepth, uMinDepth * 2.2, depth);' : '',   
-    water ? '  acc.xz -= normalize(gr + vec2(0.0001)) * (0.6 + shallow * shallow * 16.0);' : '',   
-    water ? '  float ceilY = max(uSurfaceY - uSurfMargin, gY + 30.0);' : '',                  
-    water ? '  if (pos.y > ceilY) acc.y -= (pos.y - ceilY) * 0.5;' : '',                      
-    water ? '  if (clr < uTerrMargin && depth > uMinDepth) acc.y += (gY + uTerrMargin - pos.y) * 0.25;' : '',   
-    water ? '  acc.y -= shallow * 6.0;' : '',                                                 
+    water ? '  if (clr < uTerrMargin){ acc.y += (uTerrMargin - clr) * 0.16; vec2 gr = vec2(terrAt(pos.xz + vec2(120.0,0.0)) - terrAt(pos.xz - vec2(120.0,0.0)), terrAt(pos.xz + vec2(0.0,120.0)) - terrAt(pos.xz - vec2(0.0,120.0))); acc.xz -= normalize(gr + vec2(0.0001)) * (uTerrMargin - clr) * 0.06; }' : '',
+    water ? '  if (pos.y > uSurfaceY - uSurfMargin) acc.y -= (pos.y - (uSurfaceY - uSurfMargin)) * 0.20;' : '',
+    water ? '  vec2 wg = vec2(terrAt(pos.xz + vec2(170.0,0.0)) - terrAt(pos.xz - vec2(170.0,0.0)), terrAt(pos.xz + vec2(0.0,170.0)) - terrAt(pos.xz - vec2(0.0,170.0)));' : '',
+    water ? '  acc.xz -= wg * 0.012;' : '',
     
-    water ? '' : '  vec3 toShipDir = pos - uShip; float sd = length(toShipDir);',
-    water ? '' : '  if (sd < uStartleR){ float f = 1.0 - sd / uStartleR; acc += normalize(toShipDir + vec3(0.0001)) * f * f * uAvoid * 130.0; }',
+    water ? '' : '  if (nSep > 0.0) acc += (sep / nSep) * uSep * fly;',    
+    water ? '' : '  if (nNei > 0.0){ acc += (ali / nNei) * uAli * fly; acc += ((coh / nNei) - pos) * uCoh * ' + cohK + ' * fly; }',
     water ? '' : '  vec3 toHome = home - pos; float calm = 1.0 - e;',
-    water ? '' : '  acc.xz += toHome.xz * 0.010 * fly;',                  
-    water ? '' : '  acc += toHome * (0.01 + 0.06 * calm) * uPerchK * perched;',   
-    water ? '' : '  acc.y += e * uLaunch;',
+    water ? '' : '  acc += toHome * (0.006 + 0.05 * calm) * uPerchK * perched;',   
+    water ? '' : '  acc.y += e * uLaunch;',                                
+    water ? '' : '  vec3 toShip = pos - uShip; float sd = length(toShip);',
+    water ? '' : '  if (sd < uStartleR){ float f = 1.0 - sd / uStartleR; acc += normalize(toShip + vec3(0.0001)) * f * f * uAvoid * 120.0; }',
     water ? '' : '  float hd = length(toHome.xz);',
     water ? '' : '  if (hd > uBoundsR) acc.xz -= normalize((pos - home).xz + vec2(0.0001)) * (hd - uBoundsR) * 0.06;',
-    water ? '' : '  float floorY = max(gY, uWL - 20.0); float clrF = pos.y - floorY;',   
-    water ? '' : '  if (clrF < uTerrMargin){ acc.y += (uTerrMargin - clrF) * 0.22 * fly; vec2 gr = vec2(terrAt(pos.xz + vec2(120.0,0.0)) - terrAt(pos.xz - vec2(120.0,0.0)), terrAt(pos.xz + vec2(0.0,120.0)) - terrAt(pos.xz - vec2(0.0,120.0))); acc.xz -= normalize(gr + vec2(0.0001)) * (uTerrMargin - clrF) * 0.06 * fly; }',
+    water ? '' : '  if (clr < uTerrMargin){ acc.y += (uTerrMargin - clr) * 0.22 * fly; vec2 gr = vec2(terrAt(pos.xz + vec2(120.0,0.0)) - terrAt(pos.xz - vec2(120.0,0.0)), terrAt(pos.xz + vec2(0.0,120.0)) - terrAt(pos.xz - vec2(0.0,120.0))); acc.xz -= normalize(gr + vec2(0.0001)) * (uTerrMargin - clr) * 0.06 * fly; }',
     water ? '' : '  if (pos.y > uYMax) acc.y -= (pos.y - uYMax) * 0.10;',
     
     '  vel += acc * uDelta * 60.0;',
-    water ? '' : '  vel *= mix(0.88, 0.995, max(e, 1.0 - perched));',      
+    water ? '' : '  vel *= mix(0.86, 0.995, max(e, 1.0 - perched));',      
     '  float sp = length(vel);',
     '  if (sp > speedLimit) vel = vel / sp * speedLimit;',
-    water ? '  if (sp < speedLimit * 0.35) vel = vel / max(sp, 0.001) * (speedLimit * 0.35);' : '  float minSp = speedLimit * 0.30 * fly; if (sp < minSp) vel = vel / max(sp, 0.001) * minSp;',
+    water ? '  if (sp < speedLimit * 0.30) vel = vel / max(sp, 0.001) * (speedLimit * 0.30);' : '  float minSp = speedLimit * 0.28 * fly; if (sp < minSp) vel = vel / max(sp, 0.001) * minSp;',
     water ? '  if (pos.y < gY + uTerrMargin * 0.5 && vel.y < 0.0) vel.y = 0.0;' : '',   
-    '  gl_FragColor = vec4(vel, ' + (water ? '1.0' : 'e') + ');',
+    water ? '  gl_FragColor = vec4(vel, 1.0);' : '  gl_FragColor = vec4(vel, e);',      
     '}',
   ];
   return lines.filter(function (s) { return s !== ''; }).join('\n');
@@ -18613,17 +18588,16 @@ const _birdFlock = { gpu: null, posVar: null, velVar: null, mesh: null, geo: nul
 
 
 
-if (typeof window !== 'undefined' && window.__birds === undefined) window.__birds = { on: 1, avoid: 1.0, sep: 4.0, ali: 0.6, coh: 0.4, maxSpeed: 520, boundsR: 800, throttle: 0, terr: 280, startleR: 700, calm: 0.35, launch: 140, perch: 1.0, rehome: 3000 };   
-if (typeof window !== 'undefined' && window.__fish === undefined) window.__fish = { on: 1, sep: 1.5, ali: 0.7, coh: 1.1, maxSpeed: 200, boundsR: 1000, avoid: 1.0, throttle: 0, terr: 60, surf: 120, minDepth: 250 };
+if (typeof window !== 'undefined' && window.__birds === undefined) window.__birds = { on: 1, avoid: 1.0, sep: 1.4, ali: 0.9, coh: 0.9, maxSpeed: 520, boundsR: 800, throttle: 0, terr: 280, startleR: 700, calm: 0.35, launch: 140, perch: 1.0, rehome: 3000 };
+if (typeof window !== 'undefined' && window.__fish === undefined) window.__fish = { on: 1, sep: 1.5, ali: 0.7, coh: 1.1, maxSpeed: 200, boundsR: 1000, avoid: 1.0, throttle: 0, terr: 60, surf: 60 };
 const _BIRD_POS_FRAG = [
   'uniform float uDelta;',
   'void main(){',
   '  vec2 uv = gl_FragCoord.xy / resolution.xy;',
-  '  vec4 tmp = texture2D(texturePosition, uv); vec3 pos = tmp.xyz; float phase = tmp.w;',
+  '  vec3 pos = texture2D(texturePosition, uv).xyz;',
   '  vec3 vel = texture2D(textureVelocity, uv).xyz;',
-  '  phase = mod(phase + uDelta * (6.0 + length(vel.xz) * 0.06 + max(vel.y, 0.0) * 0.12), 62.83);',   
   '  pos += vel * uDelta;',
-  '  gl_FragColor = vec4(pos, phase);',
+  '  gl_FragColor = vec4(pos, 1.0);',
   '}',
 ].join('\n');
 const _BIRD_VS = [
@@ -18632,8 +18606,7 @@ const _BIRD_VS = [
   'varying float vShade;',
   '#include <fog_pars_vertex>',
   'void main(){',
-  '  vec4 tmpPos = texture2D(texturePosition, reference);',                            
-  '  vec3 wp = tmpPos.xyz; float phase = tmpPos.w;',
+  '  vec3 wp  = texture2D(texturePosition, reference).xyz;',                          
   '  vec4 velw = texture2D(textureVelocity, reference);',
   '  vec3 vel = velw.xyz; float e = clamp(velw.w, 0.0, 1.0);',                        
   '  float spd = length(vel);',
@@ -18642,7 +18615,8 @@ const _BIRD_VS = [
   '  vec3 up = cross(fwd, right);',
   '  vec3 lp = position;',
   '  float isTip = step(3.5, birdVertex)*step(birdVertex,4.5) + step(6.5, birdVertex)*step(birdVertex,7.5);',  
-  '  lp.y += isTip * sin(phase) * 13.0 * smoothstep(20.0, 120.0, spd);',               
+  '  float flap = sin(uTime * 14.0 + reference.x * 50.0 + reference.y * 30.0);',       
+  '  lp.y += isTip * flap * 14.0 * (0.12 + 0.88 * e);',                               
   '  vec3 worldPos = wp + right*lp.x + up*lp.y + fwd*lp.z;',                            
   '  vec3 toCam = normalize(cameraPosition - worldPos);',
   '  vShade = 0.5 + 0.5 * clamp(dot(up, toCam), -1.0, 1.0);',                          
@@ -18652,42 +18626,44 @@ const _BIRD_VS = [
   '}',
 ].join('\n');
 const _BIRD_FS = [
-  'uniform vec3 uColorTop; uniform vec3 uColorBelly; uniform float uFade;',
+  'uniform vec3 uColorTop; uniform vec3 uColorBelly;',
   'varying float vShade;',
   '#include <fog_pars_fragment>',
   'void main(){',
-  '  gl_FragColor = vec4(mix(uColorBelly, uColorTop, vShade), uFade);',   
+  '  gl_FragColor = vec4(mix(uColorBelly, uColorTop, vShade), 1.0);',
   '  #include <fog_fragment>',
   '}',
 ].join('\n');
 
 
 
-
 function _birdComputePerches(cx, cz, count, T) {
   const out = new Float32Array(count * 4);
   const WL = (T && T.WL != null) ? T.WL : 0;
-  const NC = ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 140 : 300;
-  let bx = cx, bz = cz, bY = WL + 100, bScore = -1;
+  const cands = [];
+  const NC = ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 140 : 320;   
   for (let s = 0; s < NC; s++) {
-    const a = Math.random() * 6.2831853, r = 260 + Math.sqrt(Math.random()) * 1900;     
+    const a = Math.random() * 6.2831853, r = 480 + Math.sqrt(Math.random()) * 1700;     
     const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
     let gy; try { gy = _stGroundYCarved(x, z, T); } catch (_) { gy = WL; }
     if (gy < WL + 25) continue;                                                          
     if (T && T.AMP) { const tt = (gy - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15); if (tt > ((T.snowLine != null) ? T.snowLine : 0.7)) continue; }   
-    let f; try { f = _swForestAt(x, z); } catch (_) { f = 0; }
-    if (f > bScore) { bScore = f; bx = x; bz = z; bY = gy; }                              
+    let clu; try { clu = (_stNoise2(x * 0.0008 + 50.0, z * 0.0008 - 30.0) + 1) * 0.5; } catch (_) { clu = 0; }
+    if (clu < 0.52) continue;                                                            
+    cands.push([x, z, gy, clu]);
   }
-  const denseEnough = bScore > 0.32;                                                     
-  const patchR = 280 + Math.max(0, bScore) * 520;                                         
+  cands.sort(function (a, b) { return b[3] - a[3]; });
+  const groves = cands.slice(0, Math.max(1, Math.min(cands.length, 16)));
   for (let i = 0; i < count; i++) {
     const k = i * 4;
-    const a = Math.random() * 6.2831853, r = Math.sqrt(Math.random()) * patchR;          
-    const px = bx + Math.cos(a) * r, pz = bz + Math.sin(a) * r;
-    let gy; try { gy = _stGroundYCarved(px, pz, T); } catch (_) { gy = bY; }
-    let f; try { f = _swForestAt(px, pz); } catch (_) { f = bScore; }
-    const inForest = (denseEnough && f > 0.30 && gy > WL + 20) ? 1 : 0;                   
-    out[k] = px; out[k + 1] = (inForest ? gy + 78 + Math.random() * 52 : Math.max(WL + 460, gy + 380)); out[k + 2] = pz; out[k + 3] = inForest;   
+    if (groves.length) {
+      const g = groves[(Math.random() * groves.length) | 0];
+      const px = g[0] + (Math.random() - 0.5) * 150, pz = g[1] + (Math.random() - 0.5) * 150;
+      out[k] = px; out[k + 1] = g[2] + 60 + Math.random() * 70; out[k + 2] = pz; out[k + 3] = 1;   
+    } else {
+      const a = Math.random() * 6.2831853, r = Math.sqrt(Math.random()) * 700;          
+      out[k] = cx + Math.cos(a) * r; out[k + 1] = WL + 500; out[k + 2] = cz + Math.sin(a) * r; out[k + 3] = 0;
+    }
   }
   return out;
 }
@@ -18697,7 +18673,7 @@ function _birdApplyPerches(F, homes) {
   for (let i = 0; i < count; i++) {
     const k = i * 4;
     hd[k] = homes[k]; hd[k + 1] = homes[k + 1]; hd[k + 2] = homes[k + 2]; hd[k + 3] = homes[k + 3];
-    pd[k] = homes[k]; pd[k + 1] = homes[k + 1]; pd[k + 2] = homes[k + 2]; pd[k + 3] = Math.random() * 6.2831853;   
+    pd[k] = homes[k]; pd[k + 1] = homes[k + 1]; pd[k + 2] = homes[k + 2]; pd[k + 3] = 1;          
     vd[k] = (Math.random() - 0.5) * 6; vd[k + 1] = 0; vd[k + 2] = (Math.random() - 0.5) * 6; vd[k + 3] = 0;   
   }
   F.homeTex.needsUpdate = true; F.posSeed.needsUpdate = true; F.velSeed.needsUpdate = true;
@@ -18721,10 +18697,10 @@ function _birdFlockInit(T) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;   
   
   
-  let texW = 26;                                                                          
-  if (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) texW = 30;  
-  if (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) texW = 16;          
-  else if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) texW = 12;            
+  let texW = 36;                                                                          
+  if (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) texW = 44;  
+  if (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) texW = 24;          
+  else if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) texW = 18;            
   if (typeof window !== 'undefined' && window.__birdCfg && window.__birdCfg.count) texW = Math.max(8, Math.round(Math.sqrt(window.__birdCfg.count)));
   const count = texW * texW;
   const WL = (T && T.WL != null) ? T.WL : 0, ymid = (T && T.YMID != null) ? T.YMID : 0, amp = (T && T.AMP != null) ? T.AMP : 400;
@@ -18751,7 +18727,7 @@ function _birdFlockInit(T) {
     const vu = velVar.material.uniforms;
     vu.uTime = { value: 0 }; vu.uDelta = { value: 0.016 };
     vu.uShip = { value: new THREE.Vector3(cx, cy, cz) }; vu.uCenter = { value: new THREE.Vector3(cx, cy, cz) };
-    vu.uBoundsR = { value: (B && B.boundsR != null) ? B.boundsR : 800 }; vu.uYMin = { value: uYMin }; vu.uYMax = { value: uYMax }; vu.uWL = { value: WL };
+    vu.uBoundsR = { value: (B && B.boundsR != null) ? B.boundsR : 800 }; vu.uYMin = { value: uYMin }; vu.uYMax = { value: uYMax };
     vu.uAvoid = { value: 1.0 }; vu.uSep = { value: 1.4 }; vu.uAli = { value: 0.9 }; vu.uCoh = { value: 0.9 }; vu.speedLimit = { value: 520 };
     vu.uTerrTex = { value: _CT ? _CT.tex : null }; vu.uTerrCenter = { value: new THREE.Vector2((_CT ? _CT.cx : cx), (_CT ? _CT.cz : cz)) };
     vu.uTerrBounds = { value: _CT ? _CT.bounds : _CRITTER_TERR_BOUNDS }; vu.uTerrMargin = { value: (B && B.terr != null) ? B.terr : 280 };
@@ -18778,7 +18754,7 @@ function _birdFlockInit(T) {
     const mat = new THREE.ShaderMaterial({
       uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
         texturePosition: { value: null }, textureVelocity: { value: null }, uTime: { value: 0 },
-        uColorTop: { value: new THREE.Color(0x2a2f3a) }, uColorBelly: { value: new THREE.Color(0x9aa6b4) }, uFade: { value: 1.0 },
+        uColorTop: { value: new THREE.Color(0x2a2f3a) }, uColorBelly: { value: new THREE.Color(0x9aa6b4) },
       }]),
       vertexShader: _BIRD_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide,
     });
@@ -18848,21 +18824,22 @@ function _birdFlockDispose() {
 
 
 
-const _fishSchool = { gpu: null, posVar: null, velVar: null, mesh: null, geo: null, mat: null, count: 0, texW: 0, frame: 0, acc: 0, WL: 0, T: null, seedTex: null, seedX: 1e9, seedZ: 1e9, shown: false, fadeT: 0 };
+const _fishSchool = { gpu: null, posVar: null, velVar: null, mesh: null, geo: null, mat: null, count: 0, texW: 0, frame: 0, acc: 0, WL: 0, T: null, seedTex: null, seedX: 1e9, seedZ: 1e9, shown: false };
 const _FISH_VS = [
   'attribute vec2 reference; attribute float birdVertex;',
   'uniform sampler2D texturePosition; uniform sampler2D textureVelocity; uniform float uTime;',
   'varying float vShade;',
   '#include <fog_pars_vertex>',
   'void main(){',
-  '  vec4 tmpPos = texture2D(texturePosition, reference); vec3 wp = tmpPos.xyz; float phase = tmpPos.w;',
+  '  vec3 wp  = texture2D(texturePosition, reference).xyz;',
   '  vec3 vel = texture2D(textureVelocity, reference).xyz;',
   '  vec3 fwd = normalize(vel + vec3(0.0,0.0,0.0001));',
   '  vec3 right = normalize(cross(vec3(0.0,1.0,0.0), fwd) + vec3(0.0001,0.0,0.0));',
   '  vec3 up = cross(fwd, right);',
   '  vec3 lp = position;',
   '  float tail = step(5.5, birdVertex);',                                  
-  '  lp.x += tail * sin(phase) * 5.0;',                                     
+  '  float wag = sin(uTime * 9.0 + reference.x * 40.0 + reference.y * 22.0);',
+  '  lp.x += tail * wag * 5.0;',                                            
   '  vec3 worldPos = wp + right*lp.x + up*lp.y + fwd*lp.z;',
   '  vec3 toCam = normalize(cameraPosition - worldPos);',
   '  vShade = 0.55 + 0.45 * clamp(dot(up, toCam), -1.0, 1.0);',             
@@ -18891,9 +18868,8 @@ function _fishFillSeed(F, cx, cz, WL, T) {
     const k = i * 4, ang = Math.random() * 6.2831853, rad = Math.sqrt(Math.random()) * _spread;
     const x = cx + Math.cos(ang) * rad, z = cz + Math.sin(ang) * rad;
     let bed; try { bed = _stGroundYCarved(x, z, T); } catch (_) { bed = WL - 400; }
-    const surf = (B.surf != null) ? B.surf : 120;
-    const top = WL - surf, bot = Math.max(bed + 50, WL - 380);
-    data[k] = x; data[k + 1] = (bot < top) ? (bot + Math.random() * (top - bot)) : (WL - surf - 20); data[k + 2] = z; data[k + 3] = Math.random() * 6.2831853;   
+    const top = WL - 50, bot = Math.max(bed + 40, WL - 360);
+    data[k] = x; data[k + 1] = (bot < top) ? (bot + Math.random() * (top - bot)) : (WL - 80); data[k + 2] = z; data[k + 3] = 1;
   }
   F.seedTex.needsUpdate = true; F.seedX = cx; F.seedZ = cz;
 }
@@ -18933,7 +18909,7 @@ function _fishSchoolInit(T) {
     vu.uTime = { value: 0 }; vu.uDelta = { value: 0.016 };
     vu.uShip = { value: new THREE.Vector3(cx, WL, cz) }; vu.uCenter = { value: new THREE.Vector3(cx, WL - 160, cz) };
     vu.uBoundsR = { value: (B && B.boundsR != null) ? B.boundsR : 1000 };
-    vu.uSurfaceY = { value: WL }; vu.uSurfMargin = { value: (B && B.surf != null) ? B.surf : 120 }; vu.uMinDepth = { value: (B && B.minDepth != null) ? B.minDepth : 250 };
+    vu.uSurfaceY = { value: WL }; vu.uSurfMargin = { value: (B && B.surf != null) ? B.surf : 60 };
     vu.uAvoid = { value: 1.0 }; vu.uSep = { value: 1.5 }; vu.uAli = { value: 0.7 }; vu.uCoh = { value: 1.1 }; vu.speedLimit = { value: (B && B.maxSpeed != null) ? B.maxSpeed : 200 };
     vu.uTerrTex = { value: _CT ? _CT.tex : null }; vu.uTerrCenter = { value: new THREE.Vector2((_CT ? _CT.cx : cx), (_CT ? _CT.cz : cz)) };
     vu.uTerrBounds = { value: _CT ? _CT.bounds : _CRITTER_TERR_BOUNDS }; vu.uTerrMargin = { value: (B && B.terr != null) ? B.terr : 60 };
@@ -18959,9 +18935,9 @@ function _fishSchoolInit(T) {
     const mat = new THREE.ShaderMaterial({
       uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
         texturePosition: { value: null }, textureVelocity: { value: null }, uTime: { value: 0 },
-        uColorTop: { value: new THREE.Color(0x4a6b76) }, uColorBelly: { value: new THREE.Color(0xbcd0d8) }, uFade: { value: 1.0 },
+        uColorTop: { value: new THREE.Color(0x4a6b76) }, uColorBelly: { value: new THREE.Color(0xbcd0d8) },
       }]),
-      vertexShader: _FISH_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide, transparent: true, depthWrite: true,   
+      vertexShader: _FISH_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide,
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false; mesh.position.set(0, 0, 0); mesh.visible = false;
@@ -18981,16 +18957,12 @@ function _fishSchoolTick(dt) {
   const B = (typeof window !== 'undefined' && window.__fish) ? window.__fish : {};
   if (B.on === 0) { if (F.mesh) F.mesh.visible = false; return; }
   const near = _fishNearWater(F.WL, F.T);
-  if (!near) { if (F.mesh) F.mesh.visible = false; F.shown = false; F.fadeT = 0; return; }   
-  if (!F.shown) {   
-    if (player && player.position) {
-      const ddx = player.position.x - F.seedX, ddz = player.position.z - F.seedZ;
-      if (ddx * ddx + ddz * ddz > 1800 * 1800) _fishReseed(player.position.x, player.position.z);
-    }
-    F.fadeT = 0;
+  if (!near) { if (F.mesh) F.mesh.visible = false; F.shown = false; return; }   
+  if (player && player.position) {                                             
+    const ddx = player.position.x - F.seedX, ddz = player.position.z - F.seedZ;
+    if (ddx * ddx + ddz * ddz > 2200 * 2200) _fishReseed(player.position.x, player.position.z);
   }
   if (F.mesh) F.mesh.visible = true; F.shown = true;
-  F.fadeT = Math.min(1, (F.fadeT || 0) + dt * 1.2);   
   const _t = _swU ? _swU.uTime.value : 0;
   const vu = F.velVar.material.uniforms;
   if (player && player.position) { vu.uShip.value.copy(player.position); vu.uCenter.value.set(player.position.x, F.WL - 160, player.position.z); }
@@ -19001,8 +18973,7 @@ function _fishSchoolTick(dt) {
   vu.uCoh.value = (B.coh != null) ? B.coh : 1.1;
   vu.speedLimit.value = (B.maxSpeed != null) ? B.maxSpeed : 200;
   vu.uBoundsR.value = (B.boundsR != null) ? B.boundsR : 1000;
-  vu.uSurfMargin.value = (B.surf != null) ? B.surf : 120;
-  vu.uMinDepth.value = (B.minDepth != null) ? B.minDepth : 250;
+  vu.uSurfMargin.value = (B.surf != null) ? B.surf : 60;
   vu.uTerrMargin.value = (B.terr != null) ? B.terr : 60;
   if (player && player.position) _critterTerrainMaybeBake(player.position.x, player.position.z);
   if (_critterTerrain.tex) { vu.uTerrTex.value = _critterTerrain.tex; vu.uTerrCenter.value.set(_critterTerrain.cx, _critterTerrain.cz); }
@@ -19020,7 +18991,6 @@ function _fishSchoolTick(dt) {
   mu.texturePosition.value = F.gpu.getCurrentRenderTarget(F.posVar).texture;
   mu.textureVelocity.value = F.gpu.getCurrentRenderTarget(F.velVar).texture;
   mu.uTime.value = _t;
-  mu.uFade.value = F.fadeT;   
 }
 function _fishSchoolDispose() {
   const F = _fishSchool;
