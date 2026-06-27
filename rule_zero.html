@@ -17,7 +17,8 @@
      color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
   canvas{display:block;position:absolute;inset:0;width:100vw;height:100vh}
   #field{z-index:0;pointer-events:none}            /* the real GPU compute field, behind */
-  #stage{z-index:1;cursor:crosshair}               /* the rule-tree, on top */
+  #paint{z-index:1;pointer-events:none}            /* the screen medium — rules paint here */
+  #stage{z-index:2;cursor:crosshair}               /* the rule-tree, on top */
   #panel{
     position:fixed;z-index:10;left:14px;top:14px;width:320px;max-width:calc(100vw - 28px);
     max-height:calc(100vh - 28px);overflow:auto;padding:13px 14px;border-radius:15px;
@@ -57,6 +58,7 @@
 </head>
 <body>
 <canvas id="field"></canvas>
+<canvas id="paint"></canvas>
 <canvas id="stage"></canvas>
 <div id="panel">
   <h1>Rule 0 · Substrate Potential</h1>
@@ -111,6 +113,8 @@
 const canvas = document.getElementById('stage');
 const ctx = canvas.getContext('2d');
 const fieldCanvas = document.getElementById('field');
+const paintCanvas = document.getElementById('paint');
+const pctx = paintCanvas.getContext('2d');
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 const chipsEl = document.getElementById('chips');
 const potEl = document.getElementById('pot');
@@ -260,7 +264,7 @@ function makeRule(name, rootKey, parent, depth){
 }
 
 function seedSubstrate(){
-  rules = []; ruleId = 0; _fbBorn = 0; _abBorn = 0;
+  rules = []; ruleId = 0; _fbBorn = 0; _abBorn = 0; _scBorn = 0;
   // Rule 0 itself sits at the Center.
   const root = makeRule('Rule 0 · substrate', 'cpu', null, 0);
   root.isRoot = true; root.x = 0; root.y = 0;
@@ -415,6 +419,7 @@ function resize(){
   H = canvas.clientHeight || window.innerHeight || 720;
   canvas.width = Math.floor(W*DPR); canvas.height=Math.floor(H*DPR);
   fieldCanvas.width = canvas.width; fieldCanvas.height = canvas.height;   // GPU field shares the framebuffer size
+  paintCanvas.width = canvas.width; paintCanvas.height = canvas.height;   // the screen medium shares it too
   ctx.setTransform(DPR,0,0,DPR,0,0);
   cx = W/2; cy = H/2;
   scale = Math.min(W,H) / 1000;
@@ -520,6 +525,10 @@ function draw(t){
     }
     if (r.audioBorn && !dorm){                                   // born FROM the engine hearing itself
       ctx.strokeStyle='rgba(255,143,199,0.85)'; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.arc(r.x,r.y,rad+3.2,0,6.283); ctx.stroke();
+    }
+    if (r.screenBorn && !dorm){                                  // born FROM the engine seeing its own painting
+      ctx.strokeStyle='rgba(97,243,255,0.85)'; ctx.lineWidth=1.4;
       ctx.beginPath(); ctx.arc(r.x,r.y,rad+3.2,0,6.283); ctx.stroke();
     }
     if (r.isRoot){
@@ -848,6 +857,64 @@ function birthFromField(peaks){
   }
 }
 
+// ===================================================================
+//  THE SCREEN MEDIUM — the third load-bearing medium. Each screen-domain rule
+//  paints a glowing brushstroke (SAME act: gene -> hue/size/pulse) into a fading
+//  paint buffer, composing a generative image over the field. It also FEEDS BACK:
+//  bright emergent regions birth new screen rules. Gate screen off -> no painters
+//  -> the image fades to nothing.
+// ===================================================================
+const SCREEN_BORN_CAP = 60;
+let _scBorn = 0, _pTmp=null, _pTmpCtx=null;
+function tickPaint(){
+  if (!pctx) return;
+  pctx.setTransform(1,0,0,1,0,0);
+  pctx.globalCompositeOperation='source-over';
+  pctx.fillStyle='rgba(4,7,14,0.035)'; pctx.fillRect(0,0,paintCanvas.width,paintCanvas.height);   // slow fade = living trails
+  if (!effective('screen')) return;
+  pctx.setTransform(DPR,0,0,DPR,0,0); pctx.translate(cx,cy); pctx.scale(scale,scale);
+  pctx.globalCompositeOperation='lighter';
+  const t=frame*0.02;
+  for (const r of rules){
+    if (r.rootKey!=='screen' || r.dormant) continue;                  // the act: only screen rules paint
+    const g=r.gene, pulse=0.4+0.6*(0.5+0.5*Math.sin(t*g.freq+g.phase));
+    const hue=(180 + hashf(r.id)*150)|0;                              // cyan -> violet -> pink
+    const rad=6 + g.rad*2.6*(0.8+0.4*pulse);
+    pctx.fillStyle=`hsla(${hue},88%,63%,${clamp(0.14+g.amp*pulse*3.0,0,0.55).toFixed(3)})`;
+    pctx.beginPath(); pctx.arc(r.x,r.y,rad,0,6.283); pctx.fill();
+  }
+  pctx.globalCompositeOperation='source-over';
+}
+function paintFeedback(){
+  if (!pctx || !effective('screen') || _scBorn>=SCREEN_BORN_CAP || rules.length>1500) return;
+  const G=44;
+  if (!_pTmp){ _pTmp=document.createElement('canvas'); _pTmp.width=G; _pTmp.height=G; _pTmpCtx=_pTmp.getContext('2d',{willReadFrequently:true}); }
+  _pTmpCtx.drawImage(paintCanvas,0,0,G,G);
+  const d=_pTmpCtx.getImageData(0,0,G,G).data, bri=new Float32Array(G*G);
+  for (let i=0;i<G*G;i++) bri[i]=(d[i*4]+d[i*4+1]+d[i*4+2])/765;
+  const peaks=[];
+  for (let y=1;y<G-1;y++) for (let x=1;x<G-1;x++){ const b=bri[y*G+x]; if(b<0.3)continue; let mx=true;
+    for(let oy=-1;oy<=1&&mx;oy++)for(let ox=-1;ox<=1;ox++){ if((ox||oy)&&bri[(y+oy)*G+x+ox]>b){mx=false;break;} }
+    if(mx) peaks.push({px:(x+0.5)/G, py:(y+0.5)/G, b}); }
+  peaks.sort((a,b)=>b.b-a.b);
+  birthFromPaint(peaks.slice(0,2));
+}
+function birthFromPaint(peaks){
+  for (const pk of peaks){
+    if (_scBorn>=SCREEN_BORN_CAP || rules.length>1500) break;
+    const wx=(pk.px*W - cx)/scale, wy=(pk.py*H - cy)/scale;            // paint canvas -> world
+    if (Math.hypot(wx,wy) > 460) continue;
+    let parent=rules[0], pd=1e9, scND=1e9;
+    for (const r of rules){ const dd=Math.hypot(r.x-wx,r.y-wy); if(dd<pd){pd=dd;parent=r;} if(r.screenBorn&&dd<scND)scND=dd; }
+    if (scND < 32) continue;                                           // dedupe vs other screen-born rules
+    const child=makeRule('seen · '+pk.b.toFixed(2),'screen',parent,Math.min(MAX_DEPTH,(parent?parent.depth:1)+1));
+    child.x=wx+(Math.random()-0.5)*6; child.y=wy+(Math.random()-0.5)*6; child.angle=Math.atan2(wy,wx); child.screenBorn=true;
+    child.gene.amp=clamp(pk.b*0.08,0.02,0.1);
+    if(parent)parent.children.push(child.id);
+    rules.push(child); _scBorn++;
+  }
+}
+
 function tickField(){
   const st = fieldStatus();
   const on = st.ready && effective('gpu') && !Field.failing;
@@ -1117,7 +1184,7 @@ function tickSenses(){
 
 // debug: read the live field buffer back off the GPU to prove the compute is real & evolving
 window.__field = Field;
-window.__dbg = ()=>({ rules: rules.length, fieldBorn: rules.filter(r=>r.fieldBorn).length, audioBorn: rules.filter(r=>r.audioBorn).length,
+window.__dbg = ()=>({ rules: rules.length, fieldBorn: rules.filter(r=>r.fieldBorn).length, audioBorn: rules.filter(r=>r.audioBorn).length, screenBorn: rules.filter(r=>r.screenBorn).length, screenRules: rules.filter(r=>r.rootKey==='screen'&&!r.dormant).length,
   singers: rules.filter(r=>(r.rootKey==='audio'||r.rootKey==='voice') && !r.dormant && effective(r.rootKey)).length,
   voiceOn: Senses.mouth.on, poolGains: (Senses.mouth.pool||[]).map(v=>+v.g.gain.value.toFixed(3)),
   maxDepth: Math.max(...rules.map(r=>r.depth)) });
@@ -1151,6 +1218,8 @@ function loop(t){
     relax();
     draw(t);
     tickField();                                  // the GPU/Field lineage, when mature, computes for real
+    tickPaint();                                  // the screen medium — rules paint a generative image
+    if (frame % 50 === 40) paintFeedback();       // its bright regions birth new screen rules
   } catch(e){ window.__loopErr = (e&&e.stack)? e.stack.slice(0,500) : String(e); }
   schedule();
 }
