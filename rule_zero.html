@@ -19,7 +19,7 @@
   #field{z-index:0;pointer-events:none}            /* the real GPU compute field, behind */
   #stage{z-index:1;cursor:crosshair}               /* the rule-tree, on top */
   #panel{
-    position:fixed;left:14px;top:14px;width:320px;max-width:calc(100vw - 28px);
+    position:fixed;z-index:10;left:14px;top:14px;width:320px;max-width:calc(100vw - 28px);
     max-height:calc(100vh - 28px);overflow:auto;padding:13px 14px;border-radius:15px;
     background:var(--panel);border:1px solid rgba(97,243,255,0.18);
     backdrop-filter:blur(11px);box-shadow:0 0 30px rgba(0,0,0,.45);user-select:none}
@@ -50,7 +50,7 @@
   .brow{display:grid;grid-template-columns:auto 1fr auto;gap:9px;align-items:center;margin:4px 0 2px;
     font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
   .brow input[type=range]{width:100%;accent-color:var(--accent2)}
-  #legend{position:fixed;right:14px;bottom:14px;font-size:11px;color:var(--muted);
+  #legend{position:fixed;z-index:10;right:14px;bottom:14px;font-size:11px;color:var(--muted);
     background:var(--panel);border:1px solid rgba(97,243,255,.14);border-radius:10px;padding:8px 11px;backdrop-filter:blur(8px)}
   b{color:var(--text)}
 </style>
@@ -68,7 +68,9 @@
     <div class="sec-t">Substrate · what exists here</div>
     <div id="chips"></div>
     <div class="tiny">Click a capability to <b>force it off</b> and watch the rules it feeds go dormant.
-    CPU &amp; Time are locked on — nothing runs without them.</div>
+    CPU &amp; Time are locked on. <b>Camera · Mic · Voice</b> are the senses — tap to grant (the permission prompt
+    <i>is</i> the gate). <b>Eyes</b> seed life into the field where you move · <b>ears</b> drive the breath ·
+    <b>voice</b> sings the world. Everything stays <b>local</b> — nothing leaves your machine.</div>
   </div>
 
   <div class="sec">
@@ -124,6 +126,10 @@ const CAPS = [
   { key:'input',   label:'Input · contact',     domain:'boundary', color:'#49c7ff', angle:  158 },
   { key:'memory',  label:'Memory · continuity', domain:'memory',   color:'#ffcf6b', angle:  208 },
   { key:'network', label:'Network · reach',     domain:'boundary', color:'#9aa6ff', angle:  250 },
+  // the sensory membrane — perception (in) and expression (out). PERMISSION IS THE GATE.
+  { key:'camera',  label:'Camera · eyes',       domain:'boundary', color:'#86ff9e', angle:  -28, gated:true },
+  { key:'mic',     label:'Mic · ears',          domain:'boundary', color:'#ff8fc7', angle:   92, gated:true },
+  { key:'voice',   label:'Voice · breath out',  domain:'flow',     color:'#ffb24d', angle:  300, gated:true },
 ];
 const CAP = Object.fromEntries(CAPS.map(c => [c.key, c]));
 
@@ -138,14 +144,23 @@ const SPAWN = {
   input:  ['pointer','keyboard','gamepad','feedback loop'],
   memory: ['cpu objects','gpu buffers','audio buffers','persistence'],
   network:['peers','sync','stream'],
+  camera: ['frame grab','motion field','brightness map','optical flow','gaze'],
+  mic:    ['level meter','spectrum','onset','pitch track','rhythm'],
+  voice:  ['oscillator','envelope','chord','timbre','utterance'],
 };
 
 // ---- Rule 0: detect the real substrate ----
-const substrate = {};         // key -> { present, forcedOff }
-function effective(key){ const s = substrate[key]; return !!(s && s.present && !s.forcedOff); }
+const substrate = {};         // key -> { present, forcedOff, granted }
+// a gated capability (camera/mic/voice) is only effective once its gate is opened (permission granted).
+function effective(key){
+  const s = substrate[key];
+  if (!s || !s.present || s.forcedOff) return false;
+  if (CAP[key] && CAP[key].gated && !s.granted) return false;
+  return true;
+}
 
 async function probe(){
-  const set = (k,v)=> substrate[k] = { present:!!v, forcedOff: substrate[k]?.forcedOff || false };
+  const set = (k,v)=> substrate[k] = { present:!!v, forcedOff: substrate[k]?.forcedOff || false, granted: substrate[k]?.granted || false };
   set('cpu', true);
   set('time', true);                                            // rAF + performance.now always
   set('screen', !!document.createElement('canvas').getContext);
@@ -156,6 +171,18 @@ async function probe(){
   set('gpu', false);
   if (navigator.gpu) {
     try { const a = await navigator.gpu.requestAdapter(); set('gpu', !!a); } catch(_) {}
+  }
+  // sensory membrane — detect that a device EXISTS without opening the gate (no permission yet).
+  const md = navigator.mediaDevices;
+  const canMedia = !!(md && md.getUserMedia);
+  set('camera', canMedia); set('mic', canMedia);
+  set('voice', !!(window.AudioContext || window.webkitAudioContext));
+  if (md && md.enumerateDevices){
+    try {
+      const ds = await md.enumerateDevices();
+      set('camera', ds.some(d=>d.kind==='videoinput') && canMedia);
+      set('mic',    ds.some(d=>d.kind==='audioinput') && canMedia);
+    } catch(_){}
   }
   CAPS.forEach(c => { if (!(c.key in substrate)) set(c.key, false); });
 }
@@ -185,10 +212,44 @@ const MAX_DEPTH = 5;
 const STABLE_FRAMES = 42;       // a condition must persist this long before it may beget
 let frame = 0;
 
-function makeRule(name, rootKey, parent, depth){
+// ---- THE GENOME — the only thing that differs between rules. A rule is DATA (a gene)
+//      run by ONE evaluator (the act, below). Rule 0 holds the seed gene; EML mutates it
+//      as it carves. Domain bias is data (a table), not branching code. Fractal by construction.
+const DOMAIN_GENE = {
+  cpu:    { amp:0.05, freq:0.4, rad:5, pol: 1 },
+  gpu:    { amp:0.07, freq:0.8, rad:4, pol: 1 },
+  time:   { amp:0.04, freq:1.6, rad:3, pol: 1 },
+  audio:  { amp:0.05, freq:2.4, rad:3, pol:-1 },
+  screen: { amp:0.06, freq:0.6, rad:4, pol: 1 },
+  input:  { amp:0.05, freq:1.0, rad:3, pol:-1 },
+  memory: { amp:0.04, freq:0.2, rad:6, pol: 1 },
+  network:{ amp:0.04, freq:0.9, rad:4, pol:-1 },
+  camera: { amp:0.07, freq:0.5, rad:4, pol: 1 },
+  mic:    { amp:0.05, freq:2.0, rad:3, pol:-1 },
+  voice:  { amp:0.05, freq:3.0, rad:3, pol: 1 },
+};
+function hashf(n){ const x = Math.sin(n*43758.5453)*10000; return x - Math.floor(x); }   // deterministic 0..1
+function makeGene(rootKey, parentGene, depth, seedN){
+  const base = DOMAIN_GENE[rootKey] || DOMAIN_GENE.cpu;
+  if (!parentGene || depth<=1){                                  // Rule 0 + each domain's cap node = a fresh seed gene
+    return { amp:base.amp, freq:base.freq*(0.7+hashf(seedN)*0.6), phase:hashf(seedN*1.7)*6.283, rad:base.rad, pol:base.pol };
+  }
+  const mut = (v,s)=> v*(1 + (hashf(seedN*7.1+v)-0.5)*s);        // EML carve = inherit + differentiate
   return {
-    id: ++ruleId, name, rootKey, depth,
+    amp:  clamp(mut(parentGene.amp,0.5), 0.012, 0.11),
+    freq: clamp(mut(parentGene.freq,0.6), 0.05, 6),
+    phase: parentGene.phase + hashf(seedN*3.3)*2.0,
+    rad:  Math.max(2, parentGene.rad*0.78),                      // deeper => finer sources (self-similar)
+    pol:  (hashf(seedN*9.7) < 0.42) ? -1 : 1,                    // some feed (make wholes), some carve (the gate)
+  };
+}
+
+function makeRule(name, rootKey, parent, depth){
+  const id = ++ruleId;
+  return {
+    id, name, rootKey, depth,
     parent: parent ? parent.id : null,
+    gene: makeGene(rootKey, parent ? parent.gene : null, depth, id),
     children: [], born: frame, stable: 0,
     breathing:false, breath:0, cands:null, room:0,   // EML/softmax breath state
     // layout (filled by relax); seed near parent
@@ -228,7 +289,10 @@ function ruleById(id){ return rules.find(r=>r.id===id); }
 //                    Center), hot carves MANY (a Field). Partition of unity.
 //  Every whole does this at every scale: everything is fractal of that.
 // ===================================================================
-let temperature = 0.55;                              // Center(0) <-> Field(1) — the breath dial
+let temperature = 0.55;                              // Center(0) <-> Field(1) — the breath dial (slider base)
+let micTemp = 0;                                     // ears push the dial: louder = hotter
+let _voiceBirths = 0;                                // rule-births the voice still has to chime
+function activeTemp(){ return clamp(temperature + micTemp, 0, 1); }   // the breath the engine actually uses
 const EXHALE = 12;                                   // frames spent carving before converging
 
 // EML — exp minus log. Expand a fit into energy; the -log CARVES the ground away.
@@ -270,12 +334,14 @@ function convergeBreath(r, additions){
   const cands = r.cands || [];
   r.breathing = false; r.cands = null;
   if (!cands.length){ return; }
-  const probs = softmax(cands.map(c=>c.logit), temperature);
+  const T = activeTemp();
+  const probs = softmax(cands.map(c=>c.logit), T);
   cands.forEach((c,i)=>c.prob=probs[i]);
   // temperature = how many parts the whole carves: cold -> 1 (a One), hot -> many (a Field)
   const maxWin = Math.max(1, Math.min(r.room, branchCapFor(r.depth)));
-  const nWin = clamp(Math.round(1 + temperature*(maxWin-1)), 1, maxWin);
+  const nWin = clamp(Math.round(1 + T*(maxWin-1)), 1, maxWin);
   const order = cands.map((c,i)=>i).sort((a,b)=>cands[b].prob-cands[a].prob).slice(0, nWin);
+  _voiceBirths += order.length;                      // let the voice mark these births
   for (const wi of order){
     const c = cands[wi];
     const child = makeRule(c.nm, r.rootKey, r, r.depth+1);
@@ -450,15 +516,30 @@ function draw(t){
       ctx.fillText(r.name, r.x, r.y - rad - 5);
     }
   }
+
+  // --- the EYE: a small live disc of what the camera sees, set in the Boundary ---
+  if (effective('camera') && Senses.cam.thumb){
+    const a = -28*Math.PI/180, R = 432, sz = 66;
+    const ex = Math.cos(a)*R, ey = Math.sin(a)*R;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(ex,ey,sz*0.5,0,6.283); ctx.clip();
+    ctx.translate(ex,ey); ctx.scale(-1,1);                       // mirror, like a reflection
+    try { ctx.drawImage(Senses.cam.thumb, -sz/2,-sz/2, sz,sz); } catch(_){}
+    ctx.restore();
+    ctx.strokeStyle = hexA(CAP.camera.color, 0.65); ctx.lineWidth=1.6;
+    ctx.beginPath(); ctx.arc(ex,ey,sz*0.5,0,6.283); ctx.stroke();
+  }
   ctx.restore();
 
   // counts
   const live = rules.filter(r=>!r.dormant && effective(r.rootKey)).length;
   const dorm = rules.length - live;
   const breathing = rules.filter(r=>r.breathing).length;
-  const regime = temperature<0.34 ? 'center · carving one' : temperature>0.66 ? 'field · carving many' : 'balanced';
+  const T = activeTemp();
+  const regime = T<0.34 ? 'center · carving one' : T>0.66 ? 'field · carving many' : 'balanced';
+  const sensing = [effective('camera')&&'eyes', effective('mic')&&'ears', effective('voice')&&'voice'].filter(Boolean).join(' + ') || 'no senses';
   ctx.fillStyle='rgba(143,176,189,0.9)'; ctx.font='12px ui-monospace,Consolas,monospace'; ctx.textAlign='left';
-  ctx.fillText(`rules: ${rules.length}   live: ${live}   dormant: ${dorm}   maxDepth: ${Math.max(...rules.map(r=>r.depth))}   breathing: ${breathing}   T=${temperature.toFixed(2)} (${regime})`, 16, H-18);
+  ctx.fillText(`rules: ${rules.length}   live: ${live}   maxDepth: ${Math.max(...rules.map(r=>r.depth))}   breathing: ${breathing}   T=${T.toFixed(2)} (${regime})   ${sensing}`, 16, H-18);
 }
 
 function hexA(hex,a){
@@ -473,15 +554,21 @@ function renderChips(){
     const s = substrate[c.key]||{present:false};
     const div = document.createElement('div');
     const cls = ['chip'];
-    if (!s.present) cls.push('absent');
-    else if (c.lock) cls.push('locked');
-    else if (s.forcedOff) cls.push('off');
+    let st;
+    if (!s.present) { cls.push('absent'); st='absent'; }
+    else if (c.lock) { cls.push('locked'); st='locked on'; }
+    else if (c.gated) {                                          // a sense: permission is the gate
+      if (!s.granted){ cls.push('off'); st='tap to grant'; }
+      else st = {camera:'seeing', mic:'hearing', voice:'voicing'}[c.key] || 'open';
+    }
+    else if (s.forcedOff) { cls.push('off'); st='forced off'; }
+    else st='on';
     div.className = cls.join(' ');
-    const st = !s.present ? 'absent' : (c.lock ? 'locked on' : (s.forcedOff ? 'forced off' : 'on'));
     div.innerHTML = `<span class="dot" style="color:${c.color}"></span>
       <span class="nm">${c.label}</span><span class="st">${st}</span>`;
     if (s.present && !c.lock){
-      div.onclick = ()=>{ s.forcedOff = !s.forcedOff; renderChips(); renderPot(); };
+      if (c.gated) div.onclick = ()=>{ s.granted ? closeSense(c.key) : openSense(c.key); renderPot(); };
+      else div.onclick = ()=>{ s.forcedOff = !s.forcedOff; renderChips(); renderPot(); };
     }
     chipsEl.appendChild(div);
   }
@@ -522,10 +609,11 @@ const Field = { inited:false, failing:false, device:null, gctx:null,
   intensity:0, evolve:false, emerge:false };
 
 const fieldComputeWGSL = /* wgsl */`
-struct FP { feed:f32, kill:f32, dA:f32, dB:f32, dt:f32, n:f32, pad0:f32, pad1:f32 };
+struct FP { feed:f32, kill:f32, dA:f32, dB:f32, dt:f32, n:f32, stimGain:f32, pad1:f32 };
 @group(0) @binding(0) var<uniform> fp: FP;
 @group(0) @binding(1) var<storage, read> src: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> stim: array<f32>;   // every rule writes here (the universal act)
 fn samp(x:i32, y:i32) -> vec2<f32> {
   let n = i32(fp.n);
   let xx = (x + n) % n; let yy = (y + n) % n;
@@ -536,6 +624,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>){
   let n = u32(fp.n);
   if (gid.x >= n || gid.y >= n) { return; }
   let x = i32(gid.x); let y = i32(gid.y);
+  let idx = gid.y * n + gid.x;
   let c = samp(x,y);
   var lap = vec2<f32>(0.0, 0.0);
   lap = lap + (samp(x-1,y) + samp(x+1,y) + samp(x,y-1) + samp(x,y+1)) * 0.2;
@@ -543,9 +632,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>){
   lap = lap - c;
   let A = c.x; let B = c.y;
   let reac = A * B * B;
-  let nA = A + (fp.dA * lap.x - reac + fp.feed * (1.0 - A)) * fp.dt;
-  let nB = B + (fp.dB * lap.y + reac - (fp.kill + fp.feed) * B) * fp.dt;
-  dst[gid.y * n + gid.x] = vec2<f32>(clamp(nA, 0.0, 1.0), clamp(nB, 0.0, 1.0));
+  // the rules' source term: + feeds life (makes wholes), - carves it away (the gate)
+  let s = stim[idx] * fp.stimGain * fp.dt;
+  let nA = A + (fp.dA * lap.x - reac + fp.feed * (1.0 - A)) * fp.dt - max(s, 0.0) * A;
+  let nB = B + (fp.dB * lap.y + reac - (fp.kill + fp.feed) * B) * fp.dt + s;
+  dst[idx] = vec2<f32>(clamp(nA, 0.0, 1.0), clamp(nB, 0.0, 1.0));
 }`;
 
 const fieldRenderWGSL = /* wgsl */`
@@ -607,14 +698,19 @@ async function initField(){
     device.queue.writeBuffer(Field.bufs[0], 0, seed);
     device.queue.writeBuffer(Field.bufs[1], 0, seed);
 
+    // the STIM medium: one f32 per cell. Every rule writes its act here each frame (one upload).
+    Field.stim = device.createBuffer({ size: cells*4, usage: GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+    Field.stimCPU = new Float32Array(cells);
+
     Field.params  = device.createBuffer({ size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
     Field.rparams = device.createBuffer({ size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(Field.params, 0, new Float32Array([0.0367, 0.0649, 0.16, 0.08, 1.0, N, 0, 0])); // feed,kill,dA,dB,dt,n — "mitosis": blobs grow & divide (cells)
+    device.queue.writeBuffer(Field.params, 0, new Float32Array([0.0367, 0.0649, 0.16, 0.08, 1.0, N, 0.7, 0])); // feed,kill,dA,dB,dt,n,stimGain
 
     const cLayout = device.createBindGroupLayout({ entries:[
       {binding:0, visibility:GPUShaderStage.COMPUTE, buffer:{type:'uniform'}},
       {binding:1, visibility:GPUShaderStage.COMPUTE, buffer:{type:'read-only-storage'}},
       {binding:2, visibility:GPUShaderStage.COMPUTE, buffer:{type:'storage'}},
+      {binding:3, visibility:GPUShaderStage.COMPUTE, buffer:{type:'read-only-storage'}},
     ]});
     const rLayout = device.createBindGroupLayout({ entries:[
       {binding:0, visibility:GPUShaderStage.FRAGMENT, buffer:{type:'uniform'}},
@@ -634,8 +730,8 @@ async function initField(){
       primitive:{ topology:'triangle-list' },
     });
     Field.cbg = [
-      device.createBindGroup({layout:cLayout, entries:[{binding:0,resource:{buffer:Field.params}},{binding:1,resource:{buffer:Field.bufs[0]}},{binding:2,resource:{buffer:Field.bufs[1]}}]}),
-      device.createBindGroup({layout:cLayout, entries:[{binding:0,resource:{buffer:Field.params}},{binding:1,resource:{buffer:Field.bufs[1]}},{binding:2,resource:{buffer:Field.bufs[0]}}]}),
+      device.createBindGroup({layout:cLayout, entries:[{binding:0,resource:{buffer:Field.params}},{binding:1,resource:{buffer:Field.bufs[0]}},{binding:2,resource:{buffer:Field.bufs[1]}},{binding:3,resource:{buffer:Field.stim}}]}),
+      device.createBindGroup({layout:cLayout, entries:[{binding:0,resource:{buffer:Field.params}},{binding:1,resource:{buffer:Field.bufs[1]}},{binding:2,resource:{buffer:Field.bufs[0]}},{binding:3,resource:{buffer:Field.stim}}]}),
     ];
     Field.rbg = [
       device.createBindGroup({layout:rLayout, entries:[{binding:0,resource:{buffer:Field.rparams}},{binding:1,resource:{buffer:Field.bufs[0]}}]}),
@@ -651,6 +747,31 @@ function fieldStatus(){
   return { ready: depth>=2, evolve: depth>=3, emerge: depth>=4 };
 }
 
+// ---- THE ACT — the ONE operation every rule runs (Rule 0's inherited capacity).
+//      A rule is data (a gene); this is the single evaluator. It splats the rule's
+//      pulsing source into the shared field at the rule's position: + feeds life
+//      (softmax/whole), - carves it away (EML/gate). No per-type code — same act for all,
+//      gated by the substrate. This is what makes the tree LOAD-BEARING and fractal.
+function rasterizeActs(){
+  const N = FIELD_N, stim = Field.stimCPU; if (!stim) return;
+  stim.fill(0);
+  const t = frame * 0.02, R = 470;                     // world radius mapped onto the field disc
+  for (const r of rules){
+    if (r.dormant || !effective(r.rootKey)) continue;  // GATE: only what the substrate supports may act
+    const g = r.gene; if (!g) continue;
+    const cxF = clamp(r.x/(2*R)+0.5, 0, 1) * N;
+    const cyF = clamp(r.y/(2*R)+0.5, 0, 1) * N;
+    const amp = g.amp * (0.5 + 0.5*Math.sin(t*g.freq + g.phase)) * g.pol;   // the rule's pulse
+    const rad = g.rad, r2 = rad*rad || 1;
+    const x0=Math.max(0,(cxF-rad)|0), x1=Math.min(N-1,(cxF+rad)|0);
+    const y0=Math.max(0,(cyF-rad)|0), y1=Math.min(N-1,(cyF+rad)|0);
+    for (let y=y0;y<=y1;y++) for (let x=x0;x<=x1;x++){
+      const dx=x-cxF, dy=y-cyF, d2=dx*dx+dy*dy; if (d2>r2) continue;
+      stim[y*N+x] += amp * Math.exp(-d2/(r2*0.5));
+    }
+  }
+}
+
 function tickField(){
   const st = fieldStatus();
   const on = st.ready && effective('gpu') && !Field.failing;
@@ -664,8 +785,10 @@ function tickField(){
   if (Field.evolve && effective('gpu') && Field.intensity > 0.02){
     // FRACTAL: the same breath dial that carves rule-parts also carves the cells here.
     //   cold (center) -> cells merge into wholes ; hot (field) -> more carving (higher kill).
-    const feed = 0.034 + temperature*0.006, kill = 0.061 + temperature*0.005;
-    dev.queue.writeBuffer(Field.params, 0, new Float32Array([feed, kill, 0.16, 0.08, 1.0, FIELD_N, 0, 0]));
+    const feed = 0.034 + activeTemp()*0.006, kill = 0.061 + activeTemp()*0.005;
+    dev.queue.writeBuffer(Field.params, 0, new Float32Array([feed, kill, 0.16, 0.08, 1.0, FIELD_N, 0.15, 0]));
+    rasterizeActs();                                   // EVERY rule writes its act into the stim medium
+    dev.queue.writeBuffer(Field.stim, 0, Field.stimCPU);
     const enc = dev.createCommandEncoder();
     for (let s = 0; s < 10; s++){
       const pass = enc.beginComputePass();
@@ -676,6 +799,16 @@ function tickField(){
       Field.cur = 1 - Field.cur;                 // after the swap, Field.cur indexes the freshest buffer
     }
     dev.queue.submit([enc.finish()]);
+  }
+
+  // EYES seed the field: wherever you MOVE, the camera injects life (B) into the tissue.
+  if (effective('camera') && Senses.cam.seeds.length && Field.bufs[Field.cur]){
+    const N = FIELD_N; let n = 0;
+    for (const sd of Senses.cam.seeds){
+      if (n++ > 140) break;
+      const gx = clamp((sd.u*N)|0, 0, N-1), gy = clamp((sd.v*N)|0, 0, N-1);
+      dev.queue.writeBuffer(Field.bufs[Field.cur], (gy*N+gx)*8, new Float32Array([0.2, sd.b]));
+    }
   }
 
   // RENDER the field as a disc masked to the boundary circle, behind the rule tree.
@@ -690,6 +823,128 @@ function tickField(){
   }
   pass.end();
   dev.queue.submit([enc2.finish()]);
+}
+
+// ===================================================================
+//  THE SENSORY MEMBRANE — eyes, ears, voice across the Boundary.
+//  Perception flows IN (camera, mic), expression flows OUT (voice).
+//  Each is gated by permission — the prompt IS the gate you open.
+//  Everything stays LOCAL: the feeds drive the field and the breath and
+//  never leave the browser.
+// ===================================================================
+const Senses = {
+  cam:   { stream:null, video:null, w:48, h:36, prev:null, ctx:null, thumb:null, seeds:[] },
+  ear:   { ctx:null, analyser:null, freq:null, time:null, stream:null, level:0, centroid:0 },
+  mouth: { ctx:null, master:null, voices:[], on:false },
+};
+
+// --- EYES: webcam -> motion -> seeds life into the field ----------
+async function openEyes(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video:{ width:160, height:120 }, audio:false });
+    const v = document.createElement('video'); v.muted=true; v.playsInline=true; v.srcObject=stream; await v.play();
+    const c = document.createElement('canvas'); c.width=Senses.cam.w; c.height=Senses.cam.h;
+    Senses.cam.stream=stream; Senses.cam.video=v; Senses.cam.thumb=c;
+    Senses.cam.ctx=c.getContext('2d',{willReadFrequently:true});
+    substrate.camera.granted=true; substrate.camera.forcedOff=false;
+  } catch(e){ substrate.camera.granted=false; console.warn('eyes denied:', e.name||e); }
+  renderChips();
+}
+function closeEyes(){
+  const s=Senses.cam; if (s.stream) s.stream.getTracks().forEach(t=>t.stop());
+  s.stream=s.video=s.prev=null; s.seeds=[]; substrate.camera.granted=false; renderChips();
+}
+function tickEyes(){
+  const s=Senses.cam; s.seeds=[];
+  if (!effective('camera') || !s.video || s.video.readyState<2) return;
+  const W=s.w, H=s.h; s.ctx.drawImage(s.video,0,0,W,H);
+  const px = s.ctx.getImageData(0,0,W,H).data;
+  const cur = new Float32Array(W*H);
+  for (let i=0;i<W*H;i++) cur[i]=(px[i*4]+px[i*4+1]+px[i*4+2])/765;
+  if (s.prev){
+    for (let y=0;y<H;y++) for (let x=0;x<W;x++){
+      const i=y*W+x, mo=Math.abs(cur[i]-s.prev[i]);
+      if (mo>0.10) s.seeds.push({ u:1-x/W, v:y/H, b:Math.min(0.95,mo*3) });   // mirror x (feels like a mirror)
+    }
+  }
+  s.prev=cur;
+}
+
+// --- EARS: mic -> level/centroid -> drives the breath ------------
+async function openEars(){
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
+    const AC = window.AudioContext||window.webkitAudioContext;
+    const ctx = Senses.ear.ctx || new AC(); if (ctx.state==='suspended') await ctx.resume();
+    const an = ctx.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.8;
+    ctx.createMediaStreamSource(stream).connect(an);
+    Senses.ear.ctx=ctx; Senses.ear.analyser=an; Senses.ear.stream=stream;
+    Senses.ear.freq=new Uint8Array(an.frequencyBinCount); Senses.ear.time=new Uint8Array(an.fftSize);
+    substrate.mic.granted=true; substrate.mic.forcedOff=false;
+  } catch(e){ substrate.mic.granted=false; console.warn('ears denied:', e.name||e); }
+  renderChips();
+}
+function closeEars(){
+  const e=Senses.ear; if (e.stream) e.stream.getTracks().forEach(t=>t.stop());
+  e.stream=e.analyser=null; e.level=0; e.centroid=0; substrate.mic.granted=false; renderChips();
+}
+function tickEars(){
+  const e=Senses.ear;
+  if (!effective('mic') || !e.analyser){ e.level += (0-e.level)*0.1; return; }
+  e.analyser.getByteTimeDomainData(e.time);
+  let rms=0; for (let i=0;i<e.time.length;i++){ const v=(e.time[i]-128)/128; rms+=v*v; }
+  e.level += (Math.sqrt(rms/e.time.length)-e.level)*0.4;
+  e.analyser.getByteFrequencyData(e.freq);
+  let num=0,den=0; for (let i=0;i<e.freq.length;i++){ num+=i*e.freq[i]; den+=e.freq[i]; }
+  e.centroid = den>0 ? (num/den)/e.freq.length : 0;
+}
+
+// --- VOICE: the engine sings its own state ----------------------
+async function openVoice(){
+  try {
+    const AC = window.AudioContext||window.webkitAudioContext;
+    const ctx = Senses.mouth.ctx || Senses.ear.ctx || new AC(); if (ctx.state==='suspended') await ctx.resume();
+    const master = ctx.createGain(); master.gain.value=0.0; master.connect(ctx.destination);
+    const voices = [0,1,2].map(i=>{
+      const o=ctx.createOscillator(); o.type = i===2?'triangle':'sine';
+      const g=ctx.createGain(); g.gain.value = i===0?0.6:(i===1?0.3:0.18);
+      o.connect(g); g.connect(master); o.start(); return { o, g };
+    });
+    Senses.mouth.ctx=ctx; Senses.mouth.master=master; Senses.mouth.voices=voices; Senses.mouth.on=true;
+    substrate.voice.granted=true; substrate.voice.forcedOff=false;
+  } catch(e){ substrate.voice.granted=false; console.warn('voice denied:', e.name||e); }
+  renderChips();
+}
+function closeVoice(){
+  const m=Senses.mouth; if (m.master){ try{ m.master.gain.setTargetAtTime(0, m.ctx.currentTime, 0.1); }catch(_){} }
+  m.on=false; substrate.voice.granted=false; renderChips();
+}
+function tickVoice(){
+  const m=Senses.mouth;
+  if (!effective('voice') || !m.on || !m.master) return;
+  const ctx=m.ctx, t=ctx.currentTime;
+  const maturity = clamp((Math.max(1,...rules.map(r=>r.depth))-1)/4, 0, 1);
+  const base = 110 * Math.pow(2, maturity*0.9 + (Senses.ear.level||0)*0.6);     // pitch climbs as the world matures
+  const breathing = rules.filter(r=>r.breathing).length;
+  m.master.gain.setTargetAtTime(clamp(0.015 + breathing*0.004 + (Field.intensity||0)*0.03, 0, 0.16), t, 0.2);
+  const ratios=[1, 1.5, 2.0];
+  m.voices.forEach((vv,i)=> vv.o.frequency.setTargetAtTime(base*ratios[i]*(1+(activeTemp()-0.5)*0.04), t, 0.15));
+  if (_voiceBirths>0){                                                          // chime on emergence
+    const o=ctx.createOscillator(), g=ctx.createGain();
+    o.type='sine'; o.frequency.value=base*3*(1+Math.random()*0.4); o.connect(g); g.connect(m.master);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.10,t+0.02); g.gain.exponentialRampToValueAtTime(0.001,t+0.5);
+    o.start(t); o.stop(t+0.55); _voiceBirths=0;
+  }
+}
+
+function openSense(k){ ({camera:openEyes, mic:openEars, voice:openVoice}[k]||(()=>{}))(); }
+function closeSense(k){ ({camera:closeEyes, mic:closeEars, voice:closeVoice}[k]||(()=>{}))(); }
+
+function tickSenses(){
+  tickEyes(); tickEars(); tickVoice();
+  // ears -> the breath dial: louder = hotter (carve many / Field), quiet = cooler (make wholes / Center)
+  const target = effective('mic') ? clamp((Senses.ear.level-0.04)*2.2, -0.2, 0.5) : 0;
+  micTemp += (target - micTemp)*0.08;
 }
 
 // debug: read the live field buffer back off the GPU to prove the compute is real & evolving
@@ -718,6 +973,7 @@ function loop(t){
   try {
     if (canvas.clientWidth !== W || canvas.clientHeight !== H) resize();   // self-correct if viewport changed
     frame++; window.__frame=frame;
+    tickSenses();                                 // eyes/ears/voice — perception in, expression out
     // grow on a calm cadence so you can watch rules beget rules
     acc++; if (acc%5===0) { growStep(); }
     relax();
