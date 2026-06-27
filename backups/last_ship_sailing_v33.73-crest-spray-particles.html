@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.81</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.81","short_name":"LSS%20v33.81","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.73</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.73","short_name":"LSS%20v33.73","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3290,7 +3290,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.81';
+const LSS_BUILD = '33.73';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18301,33 +18301,26 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl) {
 // dear over open water). The SAME EML softmax that breaks up the surface in the shader weights how much
 // spray a crest throws : a small crest -> nothing, a big rebound/impact crest -> a burst of soft mist
 // (big/slow/soft sprites) + finer droplets (small/fast). Routed to the v33.46 alpha buffer (soft, no dome).
-function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
+function _swCrestSpray(x, wl, z, crestAmp, vx, vz) {
   if (!game.particles || game._swSubmerged) return;
-  const peak = Math.max(0, Math.min(1, (crestAmp - 0.04) / 0.26));           // crest strength -> 0..1 (low threshold : even modest crests spray)
+  const peak = Math.max(0, Math.min(1, (crestAmp - 0.12) / 0.42));            // crest strength -> 0..1
   if (peak <= 0.001) return;
   const eW = Math.max(Math.exp(1.2) - Math.log(1 + (1 - Math.min(peak * 4, 1)) * 2.5) - 1, 0);   // surface phase
   const eM = Math.max(Math.exp(peak * 7) - Math.log(1 + (1 - Math.min(peak * 7, 1)) * 5) - 1, 0); // spray/mist phase
   const mistW = eM / (eW + eM + 1e-4);                                        // EML partition : 0 calm .. ->1 breaking
   const knob = (window.__water && window.__water.crestSpray != null) ? window.__water.crestSpray : 1.0;
-  let n = Math.round((2 + 14 * mistW) * peak * knob * (window.__splashN != null ? window.__splashN : 1));
-  n = Math.max(0, Math.min(22, n));
+  let n = Math.round((1 + 11 * mistW) * knob * (window.__splashN != null ? window.__splashN : 1));
+  n = Math.max(0, Math.min(18, n));
   if (n <= 0) return;
   const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
   if (game.particles.length > cap - n - 2) return;
-  // SPAWN HEIGHT : the displaced surface is RAISED at the crest (matches the VS soft-ceiling), so birth the
-  // droplets ABOVE that height — otherwise they spawn inside/under the water and you never see them. (v33.74)
-  const dispS = (window.__water && window.__water.disp != null) ? window.__water.disp : 180;
-  const gainS = (window.__water && window.__water.gain != null) ? window.__water.gain : 180;
-  const _hx = crestAmp * gainS / Math.max(dispS, 0.01);
-  const crestY = (crestYOverride !== undefined) ? crestYOverride : dispS * (_hx / (1 + Math.abs(_hx)));   // surface rule passes the REAL crest world-lift ; __crestTest estimates it from crestAmp
-  const spawnY = wl + 12 + crestY * 0.55;                                     // born just over the breaking crest
   for (let i = 0; i < n; i++) {
     const mist = Math.random() < 0.55;                                       // ~half wispy mist, ~half discrete droplets
     const ang = Math.random() * 6.2832, out = (mist ? 6 : 14) + Math.random() * Math.random() * (mist ? 38 : 70);
     const up = mist ? (35 + Math.random() * 75) : (95 + Math.random() * 160);
     _swSplV.set(Math.cos(ang) * out + (vx || 0) * 0.12, up, Math.sin(ang) * out + (vz || 0) * 0.12);
     game.particles.push({
-      position: new THREE.Vector3(x + (Math.random() - 0.5) * 34, spawnY, z + (Math.random() - 0.5) * 34),
+      position: new THREE.Vector3(x + (Math.random() - 0.5) * 34, wl + 6, z + (Math.random() - 0.5) * 34),
       velocity: _swSplV.clone(),
       life: mist ? (0.55 + Math.random() * 0.95) : (0.3 + Math.random() * 0.6), maxLife: 1.5,
       color: (Math.random() < 0.5) ? 0x9fc0d8 : 0xc8dcea,
@@ -18337,15 +18330,6 @@ function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
     });
   }
 }
-// (v33.74) DEV PROBE — fire a strong crest-spray burst at the ship so you can confirm the droplet particles
-// actually RENDER, independent of the wake firing conditions. Console: window.__crestTest()  (or __crestTest(0.6))
-window.__crestTest = function (amp) {
-  const w = game._hubWater; if (!w) { console.log('[crestTest] no hub water — enter free-flight first'); return; }
-  const px = player ? player.position.x : 0, pz = player ? player.position.z : 0;
-  const before = game.particles ? game.particles.length : -1;
-  _swCrestSpray(px, w.userData.WL, pz, amp != null ? amp : 0.45, 0, 0);
-  console.log('[crestTest] fired at', px.toFixed(0), pz.toFixed(0), '| particles', before, '->', game.particles.length, '| __waterDisp=' + (window.__waterDisp || 0));
-};
 // (v33.21) WEAPON SPLASH : given a 3D segment (a hitscan beam, or a projectile's last->now step),
 // if it CROSSES the water surface, seed a ripple at the crossing point. Hub-only (no-op without the
 // GPGPU water). Lets bullets/bolts/beams/explosions splash the lake exactly where they hit it.
@@ -18417,7 +18401,7 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL) {
   const baseR = (sign > 0 ? 1.0 : 0.85) * fp.BEAM * 1.6;             // crown mouth ~ hull beam
   const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1);
   _swRippleSeed(px, pz, baseR + 50 * p, baseA);                       // central crown
-  if (typeof window !== 'undefined' && window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   // (v33.75) fallback only — the SURFACE RULE sprays this crown when crestBreak is on
+  if (typeof window !== 'undefined' && window.__waterDisp) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   // (v33.72) 3D droplets/mist off the impact crown
   if (vh > 60) {                                                      // ANGLED CUT : lean the gash along V
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
     const lead = fp.half * Math.min(1.4, vh / 240);
@@ -18474,15 +18458,6 @@ function _swRippleTick(dt) {
     if (W3.spray === undefined) W3.spray = 1.0;      // spray amount trim
     if (W3.kelvin === undefined) W3.kelvin = 0.34;   // tan(19.47deg)~0.3536 : wake half-angle
     if (W3.cut === undefined) W3.cut = 1.0;          // angled-cut bias strength (used by the droplet-spray path)
-    // (v33.75) CREST-BREAKING SURFACE RULE — breaking is a property of the wave SURFACE, not a scripted spawn.
-    if (W3.crestBreak === undefined) W3.crestBreak = 1;      // master : 1 = the surface rule sprays breaking crests (replaces the old wake/impact event spawns) ; 0 = off (event spawns return)
-    if (W3.breakPeak === undefined) W3.breakPeak = 0.22;     // normalized crest height (vDisp 0..1) a crest must exceed to break
-    if (W3.breakSlope === undefined) W3.breakSlope = 0.06;   // normalized steepness (|grad vDisp| over a 2-texel span) — must be PITCHING, not a smooth swell
-    if (W3.breakRate === undefined) W3.breakRate = 0.5;      // per-breaking-texel emit probability scale (lower = sparser shimmer along the crest line)
-    if (W3.breakBudget === undefined) W3.breakBudget = 8;    // max crest-emit CALLS per scan (hard perf cap ; each call = a small burst)
-    if (W3.breakEvery === undefined) W3.breakEvery = 2;      // readback every Nth sim-step (2 = ~30Hz ; raise to cut readback cost)
-    if (W3.jetLean === undefined) W3.jetLean = 1.0;          // how hard the spray jets DOWN the wave's forward face
-    if (W3.crestDebug === undefined) W3.crestDebug = 0;      // 1 = console-log scan stats every ~2s
     const fp = _swShipFootprint();
     const mass = fp.heft * W3.mass;                  // per-ship heft x global multiplier
     const _spInv = sp > 1e-3 ? 1 / sp : 0;
@@ -18507,7 +18482,7 @@ function _swRippleTick(dt) {
         _swRippleSeed(px - hx * fp.half * 0.9, pz - hz * fp.half * 0.9, Math.max(20, fp.BEAM * 0.85), -amp * 0.85);   // STERN trough (held dip)
         const crestD = fp.half + fp.BEAM * 0.45 + Math.min(sp * 0.10, fp.LEN);   // peak sits further astern the faster you go
         _swRippleSeed(px - hx * crestD, pz - hz * crestD, Math.max(20, fp.BEAM * 0.8), amp * (0.45 + 0.95 * spd));   // STERN rebound CREST (speed-scaled peak)
-        if (window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px - hx * crestD, WL, pz - hz * crestD, amp * (0.45 + 0.95 * spd), player.velocity.x, player.velocity.z);   // (v33.75) fallback only — the SURFACE RULE sprays this crest when crestBreak is on
+        if (window.__waterDisp) _swCrestSpray(px - hx * crestD, WL, pz - hz * crestD, amp * (0.45 + 0.95 * spd), player.velocity.x, player.velocity.z);   // (v33.72) 3D droplets/mist off the rooster-tail crest
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   // port shoulder
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   // starboard shoulder
@@ -18555,72 +18530,6 @@ function _swRippleTick(dt) {
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
     if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(_xrPrevRT);
-    // (v33.75) CREST-BREAKING SURFACE RULE — breaking is now a PROPERTY OF THE SURFACE, not a scripted spawn.
-    // Read the freshest wave heightfield back to the CPU and shed real 3D spray at every texel whose crest is
-    // BOTH tall (vDisp > breakPeak) AND steep (|grad vDisp| > breakSlope = the wave is pitching). This covers
-    // the ship wake, weapon splashes, AND two wakes interfering into a bigger breaker — all from one rule.
-    // Reuses the _swCrestSpray emitter. Gated to the displaced-water path (only surface that shows relief),
-    // skipped in VR, kept off the critical path (reads the ALTERNATE/idle ping-pong target = no read-after-
-    // write stall), and rate-limited (every breakEvery-th sim step + a hard per-scan emit budget).
-    const _Wc = window.__water || {};
-    if (w && window.__waterDisp && _Wc.crestBreak !== 0 && !game._swSubmerged && !R._crErr &&
-        !((typeof isXRPresenting === 'function') && isXRPresenting()) &&
-        renderer && renderer.readRenderTargetPixels && R.gpu.getAlternateRenderTarget) {
-      R._crStep = (R._crStep || 0) + 1;
-      const _every = Math.max(1, (_Wc.breakEvery | 0) || 2);
-      if (R._crStep % _every === 0) {
-        const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
-        if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
-        const buf = R._crBuf;
-        const _prevRT = renderer.getRenderTarget();
-        try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
-        catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
-        if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
-        if (!R._crErr) {
-          const dispS = (_Wc.disp != null) ? _Wc.disp : 180, gainS = (_Wc.gain != null) ? _Wc.gain : 180;
-          const g2d = gainS / Math.max(dispS, 0.01);
-          const bPeak = (_Wc.breakPeak != null) ? _Wc.breakPeak : 0.22;
-          const bSlope = (_Wc.breakSlope != null) ? _Wc.breakSlope : 0.06;
-          const bRate = (_Wc.breakRate != null) ? _Wc.breakRate : 0.5;
-          const budget = Math.max(1, (_Wc.breakBudget | 0) || 8);
-          const jet = (_Wc.jetLean != null) ? _Wc.jetLean : 1.0;
-          const cx = R.center.x, cz = R.center.y, invR = 1 / RES;
-          const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
-          const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  // CPU twin of the VS soft-ceiling*winFade -> normalized crest (vDisp)
-          let emitted = 0, nBreak = 0, maxV = 0;
-          R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    // rotate the start row so the budget spreads across the whole crest field over frames
-          for (let jj = 0; jj < RES - 2 && emitted < budget; jj++) {
-            const j = 1 + ((jj + R._crScan) % (RES - 2));
-            const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
-            const rowB = j * RES;
-            for (let i = 1; i < RES - 1; i++) {
-              const h = buf[(rowB + i) * 4];
-              if (h < 0.12) continue;                                          // cheap reject : troughs + calm water can't break (positive peaks only)
-              const rvX = (i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
-              const t = ed <= 0 ? 0 : (ed >= 0.12 ? 1 : ed / 0.12), wf = t * t * (3 - 2 * t);   // winFade = smoothstep(0,0.12,edge), matches the VS
-              const vD = sc(h, wf);
-              if (vD < bPeak) continue;
-              const gx = sc(buf[(rowB + i + 1) * 4], wf) - sc(buf[(rowB + i - 1) * 4], wf);
-              const gz = sc(buf[((j + 1) * RES + i) * 4], wf) - sc(buf[((j - 1) * RES + i) * 4], wf);
-              const slope = Math.sqrt(gx * gx + gz * gz);
-              if (slope < bSlope) continue;
-              nBreak++; if (vD > maxV) maxV = vD;
-              const exceed = Math.min(1, (vD - bPeak) / Math.max(0.001, 1 - bPeak)) * Math.min(1, slope / Math.max(0.001, bSlope * 2));
-              if (Math.random() > bRate * (0.3 + 0.7 * exceed)) continue;      // stochastic : shimmer ALONG the crest line, weighted by how broken it is
-              const wx = cx + (rvX - 0.5) * B, wz = cz + (rvY - 0.5) * B;
-              const dispWorld = dispS * vD;                                    // the real world crest lift (matches the visible mesh)
-              const ejx = -gx * jet * 2600 + svx * 0.10, ejz = -gz * jet * 2600 + svz * 0.10;   // jet leans DOWN the forward face + a little ship drift
-              _swCrestSpray(wx, WLc, wz, vD * 0.26 + 0.04, ejx, ejz, dispWorld);   // map vD -> emitter peak ; pass the REAL crest height
-              if (++emitted >= budget) break;
-            }
-          }
-          if (_Wc.crestDebug) {
-            R._crDbg = (R._crDbg || 0) + 1;
-            if (R._crDbg % 30 === 0) { try { console.log('[crestBreak] breaking texels:', nBreak, (nBreak > budget ? '(budget-capped, raise breakBudget)' : ''), '| emitted:', emitted, '| max vDisp:', maxV.toFixed(3), '| peak gate:', bPeak); } catch (_) {} }
-          }
-        }
-      }
-    }
   }
   // hand the freshest height texture + window params to the Reflector material
   const wu = w && w.material && w.material.uniforms;
@@ -18636,11 +18545,7 @@ function _swRippleTick(dt) {
     const WL2 = w ? w.userData.WL : (game._hubWaterWL || 0);
     const dm = _swBuildHubWaterDispGet(WL2);
     if (dm) {
-      // (v33.76) show the displaced surface only ABOVE water + flatscreen ; underwater/VR fall back to the flat
-      // Reflector (its from-below Snell window / cheap VR water). The flat mirror's colorWrite mask + RT-keep-alive
-      // is owned by _swUpdateHubWater (runs just before this) so the reflection RT the disp mesh samples stays fresh.
-      const _vrR = (typeof isXRPresenting === 'function') && isXRPresenting();
-      dm.visible = !game._swSubmerged && !_vrR;
+      dm.visible = true; if (w) w.visible = false;
       dm.position.set(px, WL2, pz);   // follow the ship ; waves stay world-anchored via the rUV lookup
       const du = dm.material.uniforms;
       du.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
@@ -18654,20 +18559,6 @@ function _swRippleTick(dt) {
       if (W2.mist !== undefined) du.uMist.value = W2.mist;                     // mist haze off the peaks
       if (W2.peakLo !== undefined) du.uPeakLo.value = W2.peakLo;               // crest height where breakup starts (lower = more peaks break)
       if (W2.sprayFreq !== undefined) du.uSprayFreq.value = W2.sprayFreq;      // droplet speck size
-      // (v33.76) P4 : feed the Reflector's live planar-mirror RT + the WORLD-space projective matrix so the disp
-      // mesh samples the real reflection. uReflMatrix = textureMatrix * inverse(Reflector.matrixWorld) consumes
-      // the UNDISPLACED world pos (the disp mesh has a different, ship-following modelMatrix than the flat mirror).
-      const wm = w && w.material && w.material.uniforms;
-      if (wm && wm.tDiffuse && wm.textureMatrix) {
-        du.tDiffuse.value = wm.tDiffuse.value;
-        if (w._invMW) du.uReflMatrix.value.copy(wm.textureMatrix.value).multiply(w._invMW);
-        du.uReflLive.value = _vrR ? 0.0 : 1.0;                                 // VR : Reflector skips its RT -> sky-tint fallback
-      } else {
-        du.uReflLive.value = 0.0;                                             // potato / no Reflector RT -> sky-tint fallback (never samples a null texture)
-      }
-      du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            // 0 = old fake-sky look, 1 = full real reflection
-      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; // slope-shear strength (reflection bend over crests)
-      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 1.7;   // (v33.80) reflection brightness GAIN (raise if still dark, lower if washed out)
     }
   } else if (_hubWaterDisp && _hubWaterDisp.visible) {
     _hubWaterDisp.visible = false;   // disp turned off mid-session : restore the Reflector (its own update re-shows it)
@@ -18698,17 +18589,14 @@ function _swBuildHubWaterDispGet(WL) {
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
         uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
-        uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 },
-        // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 1.7 } }
+        uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 } }
     ]),
     vertexShader: [
-      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
-      'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv;',
+      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain;',
+      'varying vec3 vWP; varying vec3 vN; varying float vDisp;',
       '#include <fog_pars_vertex>',
       'void main(){',
       '  vec3 wp0 = (modelMatrix * vec4(position,1.0)).xyz;',                        // undisplaced world pos (XZ for the ripple lookup)
-      '  vReflUv = uReflMatrix * vec4(wp0, 1.0);',                                   // (v33.76) projective reflection coord from the UNDISPLACED pos -> the mirror does NOT bob with the waves (v33.10 lesson)
       '  vec2 rUV = (wp0.xz - uRippleCenter) / uRippleBounds + 0.5;',
       '  float inWin = step(0.0, rUV.x)*step(rUV.x,1.0)*step(0.0,rUV.y)*step(rUV.y,1.0);',
       '  float edge = min(min(rUV.x, 1.0-rUV.x), min(rUV.y, 1.0-rUV.y));',
@@ -18731,36 +18619,22 @@ function _swBuildHubWaterDispGet(WL) {
     ].join('\n'),
     fragmentShader: [
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
-      'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright;',   // (v33.76) P4 real reflection
-      'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv;',
+      'varying vec3 vWP; varying vec3 vN; varying float vDisp;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
       'void main(){',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
-      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            // (v33.80) softer (was 4.0) so reflection shows at MODERATE angles, not only near-grazing
-      '  fres = clamp(0.16 + 0.78*fres, 0.0, 0.95);',                                 // healthy reflective range (uReflBright now gains the reflection itself, below)
+      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 4.0);',
+      '  fres = clamp(0.02 + 0.55*fres, 0.0, 0.62);',                                 // (v33.70) CAPPED so grazing never WHITES out ; the teal base + wave shading stay visible
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             // lit by the surface normal -> the wave SHAPE (trough/swell) reads as light/shadow
       '  vec3 H = normalize(sunDir + V);',
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                // tight sun glint, not a broad whiteout
       '  vec3 base = color * diff;',
-      // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT, slope-sheared by the wave
-      // normal so it bends over crests WITHOUT mirror-bob (projection is from the UNDISPLACED wp0). Matches the
-      // flat shader's 0.04 shear + grazing taper + distance fade ; falls back to the muted sky tint when the RT
-      // is stale (uReflLive=0 in VR/potato) or the grazing sample lands off-mirror (black-out guard).
-      '  vec3 skyT = vec3(0.32,0.47,0.66);',
-      '  float graze = 1.0 - clamp(abs(V.y), 0.0, 1.0);',                             // 0 looking straight down .. 1 grazing
-      '  float rfade = clamp(1.0 - length(uCam.xz - vWP.xz) / 2600.0, 0.0, 1.0);',    // taper the perturbation on far water (anti-alias, like the flat shader fade)
-      '  vec4 ruv = vReflUv;',
-      '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', // wave-normal slope-shear
-      '  vec3 reflTex = texture2DProj(tDiffuse, ruv).rgb;',
-      '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.04 && graze > 0.5) reflTex = skyT;',   // grazing black-out guard -> sky tint
-      '  reflTex = vec3(1.0) - exp(-max(reflTex, 0.0) * uReflBright);',               // (v33.81) EXPOSURE tone-curve : brightens the DARK reflection but ROLLS OFF brights so the grazing sky can NOT blow out to white (the washout). uReflBright = exposure.
-      '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                // uReflLive=0 (VR/potato/stale RT) -> muted sky tint (the old look)
-      '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    // uReflMix knob : 0 = old fake-sky, 1 = full real reflection
-      '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',   // analytic glint dimmed when the real reflected sun takes over (no double-sun)
+      '  vec3 sky = vec3(0.32,0.47,0.66);',                                           // (v33.70) MUTED blue (was near-white = the grazing whiteout) ; P4 mirror replaces this with the real reflection',
+      '  vec3 c = mix(base, sky, fres) + vec3(1.0,0.98,0.92)*spec*0.3;',
       // (v33.72) EML CREST -> DROPLETS + MIST : the wave PEAKS break up. An EML softmax partitions the
       // surface-water phase vs the spray/mist phase by crest height (smooth, no popping) ; the crest foam
       // DISSOLVES into animated value-noise droplet SPECKS at the breaking tops, and a soft MIST haze lifts
@@ -18818,12 +18692,8 @@ function _swBuildHubWater(T) {
     // grazes the low hull and X-rays its internal panels. Both vanish if the ship reflects as a flat DARK
     // matte (no detail to alias, no panels to X-ray). Built once ; swapped in only for the reflection pass
     // below, restored immediately (try/finally) so the MAIN cockpit/chase view is never touched.
-    const _shipReflMat = new THREE.MeshBasicMaterial({ color: 0x3a4a63, fog: true });   // (v33.77) lifted from near-black 0x141a28 so the ship silhouette is VISIBLE in the reflection (still flat = no panel aliasing/wireframe)
-    // (v33.79) the SHIELD bubble (userData.shieldMesh — a near-transparent child sphere, invisible in the main
-    // view) must NOT reflect : the OPAQUE dark override would otherwise paint it as a solid dark sphere in the
-    // mirror (the "ship is a blob" bug). Skip it in the material override (+ hide it for the pass below).
-    let _reflSkipSet = null;
-    const _shipReflOverride = function (o) { if (_reflSkipSet && _reflSkipSet.indexOf(o) >= 0) return; if (o.isMesh && o.material && !o._reflSaved) { o._reflSaved = o.material; o.material = _shipReflMat; } };
+    const _shipReflMat = new THREE.MeshBasicMaterial({ color: 0x141a28, fog: true });
+    const _shipReflOverride = function (o) { if (o.isMesh && o.material && !o._reflSaved) { o._reflSaved = o.material; o.material = _shipReflMat; } };
     const _shipReflRestore = function (o) { if (o._reflSaved) { o.material = o._reflSaved; o._reflSaved = null; } };
     const _reflOBR = mesh.onBeforeRender;
     mesh._reflFrame = 0;
@@ -18842,21 +18712,13 @@ function _swBuildHubWater(T) {
       const ship = (typeof player !== 'undefined' && player) ? player.mesh : null;
       const _rwl = game._hubWater ? game._hubWater.userData.WL : -1e9;
       const _rab = (player && player.position) ? (player.position.y - _rwl) : 1e9;
-      const _rmax = (window.__water && window.__water.reflShipMax != null) ? window.__water.reflShipMax : 2500;   // (v33.78) the hub WL is ~-720 but you cruise at y~50-200 = ~800u ABOVE the lake, so 80/200 never passed ; 2500 reflects the ship at real flying heights (flat silhouette stays alias-free ; a far ship just reflects small)
+      const _rmax = (window.__water && window.__water.reflShipMax != null) ? window.__water.reflShipMax : 80;
       const wasVis = ship ? ship.visible : false;
       const _showShip = !!(ship && _rab < _rmax);
       if (ship) ship.visible = _showShip;
-      // (v33.79) collect the shield meshes (main bubble + any active ability hull-hug shields) and HIDE them for the
-      // reflection pass — only the ship BODY should reflect. Restored in finally (before the main render = cockpit untouched).
-      const _shields = [];
-      if (ship && ship.userData && ship.userData.shieldMesh) _shields.push(ship.userData.shieldMesh);
-      if (typeof player !== 'undefined' && player) { const _ak = ['_gunShieldMesh', '_thermalShieldMesh', '_vortexShieldMesh', '_swordBlockMesh']; for (let _i = 0; _i < _ak.length; _i++) { if (player[_ak[_i]]) _shields.push(player[_ak[_i]]); } }
-      const _shieldsWas = _shields.map(function (m) { return m.visible; });
-      for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
-      _reflSkipSet = _shields;
-      if (_showShip) ship.traverse(_shipReflOverride);   // (v33.68) flat dark silhouette for the reflection pass (kills the wireframe) ; (v33.79) shield skipped
+      if (_showShip) ship.traverse(_shipReflOverride);   // (v33.68) flat dark silhouette for the reflection pass (kills the wireframe)
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
-      finally { if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis; }
+      finally { if (_showShip) ship.traverse(_shipReflRestore); if (ship) ship.visible = wasVis; }
     };
     // translucent UNDERSIDE plane for the underwater (v33.09) view (the Reflector is top-only)
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   // (v33.12) closer to the mirror tint so the surface crossfade has nothing to pop
@@ -19194,25 +19056,7 @@ function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   // (v33.69) PHASE 1 : when the displaced-water surface is active, keep the flat Reflector HIDDEN so the two
   // coplanar water planes don't z-fight. The displaced mesh (in _swRippleTick) is the water then.
-  // (v33.76) P4 REAL REFLECTION : when the displaced surface is active ABOVE water on flatscreen, keep the flat
-  // Reflector in the render list so its reflection RT KEEPS REFRESHING (the disp mesh samples it), but MASK its
-  // color (colorWrite=false) so the flat mirror isn't drawn (it would poke through wave troughs). onBeforeRender
-  // still fires with colorWrite=false (r165 renderObject calls it before the colorWrite gate), so the RT stays
-  // fresh at no extra render cost. When SUBMERGED or in VR, fall through to the normal flat-water path (its
-  // from-below Snell window / cheap VR water still render). Cache inverse(matrixWorld) for the disp projection.
-  if (typeof window !== 'undefined' && window.__waterDisp && !game._swSubmerged &&
-      !((typeof isXRPresenting === 'function') && isXRPresenting())) {
-    const WLd = w.userData.WL;
-    w.visible = true;
-    w.frustumCulled = false;   // guarantee onBeforeRender fires (RT refresh) even when the camera looks away from the plane
-    if (w.material) w.material.colorWrite = false;
-    w.position.set(camera.position.x, WLd, camera.position.z);
-    w.updateMatrix(); w.updateMatrixWorld(true);
-    if (!w._invMW) w._invMW = new THREE.Matrix4();
-    w._invMW.copy(w.matrixWorld).invert();   // textureMatrix * inv(world) -> disp mesh projects WORLD coords (no mirror-bob)
-    return;
-  }
-  if (w.material && w.material.colorWrite === false) w.material.colorWrite = true;   // restore the flat mirror (disp off / submerged / VR)
+  if (typeof window !== 'undefined' && window.__waterDisp) { w.visible = false; return; }
   const WL = w.userData.WL;
   w.position.set(camera.position.x, WL, camera.position.z);
   w.updateMatrix(); w.updateMatrixWorld(true);

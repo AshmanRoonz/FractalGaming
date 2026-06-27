@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.81</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.81","short_name":"LSS%20v33.81","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.79</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.79","short_name":"LSS%20v33.79","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3290,7 +3290,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.81';
+const LSS_BUILD = '33.79';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18667,7 +18667,7 @@ function _swRippleTick(dt) {
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            // 0 = old fake-sky look, 1 = full real reflection
       du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; // slope-shear strength (reflection bend over crests)
-      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 1.7;   // (v33.80) reflection brightness GAIN (raise if still dark, lower if washed out)
+      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 1.0;   // (v33.77) reflection brightness / Fresnel strength (raise if too dark, lower if washed out)
     }
   } else if (_hubWaterDisp && _hubWaterDisp.visible) {
     _hubWaterDisp.visible = false;   // disp turned off mid-session : restore the Reflector (its own update re-shows it)
@@ -18700,7 +18700,7 @@ function _swBuildHubWaterDispGet(WL) {
         uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
         uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 },
         // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 1.7 } }
+        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 1.0 } }
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -18739,8 +18739,8 @@ function _swBuildHubWaterDispGet(WL) {
       'void main(){',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
-      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            // (v33.80) softer (was 4.0) so reflection shows at MODERATE angles, not only near-grazing
-      '  fres = clamp(0.16 + 0.78*fres, 0.0, 0.95);',                                 // healthy reflective range (uReflBright now gains the reflection itself, below)
+      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 4.0);',
+      '  fres = clamp((0.10 + 0.82*fres) * uReflBright, 0.0, 0.94);',                 // (v33.77) brighter : let the REAL reflection (incl. sky at grazing) dominate, not the dark teal base ; uReflBright knob tunes it
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             // lit by the surface normal -> the wave SHAPE (trough/swell) reads as light/shadow
       '  vec3 H = normalize(sunDir + V);',
@@ -18757,7 +18757,6 @@ function _swBuildHubWaterDispGet(WL) {
       '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', // wave-normal slope-shear
       '  vec3 reflTex = texture2DProj(tDiffuse, ruv).rgb;',
       '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.04 && graze > 0.5) reflTex = skyT;',   // grazing black-out guard -> sky tint
-      '  reflTex = vec3(1.0) - exp(-max(reflTex, 0.0) * uReflBright);',               // (v33.81) EXPOSURE tone-curve : brightens the DARK reflection but ROLLS OFF brights so the grazing sky can NOT blow out to white (the washout). uReflBright = exposure.
       '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                // uReflLive=0 (VR/potato/stale RT) -> muted sky tint (the old look)
       '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    // uReflMix knob : 0 = old fake-sky, 1 = full real reflection
       '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',   // analytic glint dimmed when the real reflected sun takes over (no double-sun)

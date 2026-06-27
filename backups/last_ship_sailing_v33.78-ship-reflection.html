@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.81</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.81","short_name":"LSS%20v33.81","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.78</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.78","short_name":"LSS%20v33.78","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3290,7 +3290,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.81';
+const LSS_BUILD = '33.78';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18667,7 +18667,7 @@ function _swRippleTick(dt) {
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            // 0 = old fake-sky look, 1 = full real reflection
       du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; // slope-shear strength (reflection bend over crests)
-      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 1.7;   // (v33.80) reflection brightness GAIN (raise if still dark, lower if washed out)
+      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 1.0;   // (v33.77) reflection brightness / Fresnel strength (raise if too dark, lower if washed out)
     }
   } else if (_hubWaterDisp && _hubWaterDisp.visible) {
     _hubWaterDisp.visible = false;   // disp turned off mid-session : restore the Reflector (its own update re-shows it)
@@ -18700,7 +18700,7 @@ function _swBuildHubWaterDispGet(WL) {
         uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
         uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 },
         // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 1.7 } }
+        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 1.0 } }
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -18739,8 +18739,8 @@ function _swBuildHubWaterDispGet(WL) {
       'void main(){',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
-      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            // (v33.80) softer (was 4.0) so reflection shows at MODERATE angles, not only near-grazing
-      '  fres = clamp(0.16 + 0.78*fres, 0.0, 0.95);',                                 // healthy reflective range (uReflBright now gains the reflection itself, below)
+      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 4.0);',
+      '  fres = clamp((0.10 + 0.82*fres) * uReflBright, 0.0, 0.94);',                 // (v33.77) brighter : let the REAL reflection (incl. sky at grazing) dominate, not the dark teal base ; uReflBright knob tunes it
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             // lit by the surface normal -> the wave SHAPE (trough/swell) reads as light/shadow
       '  vec3 H = normalize(sunDir + V);',
@@ -18757,7 +18757,6 @@ function _swBuildHubWaterDispGet(WL) {
       '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', // wave-normal slope-shear
       '  vec3 reflTex = texture2DProj(tDiffuse, ruv).rgb;',
       '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.04 && graze > 0.5) reflTex = skyT;',   // grazing black-out guard -> sky tint
-      '  reflTex = vec3(1.0) - exp(-max(reflTex, 0.0) * uReflBright);',               // (v33.81) EXPOSURE tone-curve : brightens the DARK reflection but ROLLS OFF brights so the grazing sky can NOT blow out to white (the washout). uReflBright = exposure.
       '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                // uReflLive=0 (VR/potato/stale RT) -> muted sky tint (the old look)
       '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    // uReflMix knob : 0 = old fake-sky, 1 = full real reflection
       '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',   // analytic glint dimmed when the real reflected sun takes over (no double-sun)
@@ -18819,11 +18818,7 @@ function _swBuildHubWater(T) {
     // matte (no detail to alias, no panels to X-ray). Built once ; swapped in only for the reflection pass
     // below, restored immediately (try/finally) so the MAIN cockpit/chase view is never touched.
     const _shipReflMat = new THREE.MeshBasicMaterial({ color: 0x3a4a63, fog: true });   // (v33.77) lifted from near-black 0x141a28 so the ship silhouette is VISIBLE in the reflection (still flat = no panel aliasing/wireframe)
-    // (v33.79) the SHIELD bubble (userData.shieldMesh — a near-transparent child sphere, invisible in the main
-    // view) must NOT reflect : the OPAQUE dark override would otherwise paint it as a solid dark sphere in the
-    // mirror (the "ship is a blob" bug). Skip it in the material override (+ hide it for the pass below).
-    let _reflSkipSet = null;
-    const _shipReflOverride = function (o) { if (_reflSkipSet && _reflSkipSet.indexOf(o) >= 0) return; if (o.isMesh && o.material && !o._reflSaved) { o._reflSaved = o.material; o.material = _shipReflMat; } };
+    const _shipReflOverride = function (o) { if (o.isMesh && o.material && !o._reflSaved) { o._reflSaved = o.material; o.material = _shipReflMat; } };
     const _shipReflRestore = function (o) { if (o._reflSaved) { o.material = o._reflSaved; o._reflSaved = null; } };
     const _reflOBR = mesh.onBeforeRender;
     mesh._reflFrame = 0;
@@ -18846,17 +18841,9 @@ function _swBuildHubWater(T) {
       const wasVis = ship ? ship.visible : false;
       const _showShip = !!(ship && _rab < _rmax);
       if (ship) ship.visible = _showShip;
-      // (v33.79) collect the shield meshes (main bubble + any active ability hull-hug shields) and HIDE them for the
-      // reflection pass — only the ship BODY should reflect. Restored in finally (before the main render = cockpit untouched).
-      const _shields = [];
-      if (ship && ship.userData && ship.userData.shieldMesh) _shields.push(ship.userData.shieldMesh);
-      if (typeof player !== 'undefined' && player) { const _ak = ['_gunShieldMesh', '_thermalShieldMesh', '_vortexShieldMesh', '_swordBlockMesh']; for (let _i = 0; _i < _ak.length; _i++) { if (player[_ak[_i]]) _shields.push(player[_ak[_i]]); } }
-      const _shieldsWas = _shields.map(function (m) { return m.visible; });
-      for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
-      _reflSkipSet = _shields;
-      if (_showShip) ship.traverse(_shipReflOverride);   // (v33.68) flat dark silhouette for the reflection pass (kills the wireframe) ; (v33.79) shield skipped
+      if (_showShip) ship.traverse(_shipReflOverride);   // (v33.68) flat dark silhouette for the reflection pass (kills the wireframe)
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
-      finally { if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis; }
+      finally { if (_showShip) ship.traverse(_shipReflRestore); if (ship) ship.visible = wasVis; }
     };
     // translucent UNDERSIDE plane for the underwater (v33.09) view (the Reflector is top-only)
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   // (v33.12) closer to the mirror tint so the surface crossfade has nothing to pop

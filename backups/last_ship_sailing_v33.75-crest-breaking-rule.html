@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.81</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.81","short_name":"LSS%20v33.81","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.75</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.75","short_name":"LSS%20v33.75","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3290,7 +3290,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.81';
+const LSS_BUILD = '33.75';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18636,11 +18636,7 @@ function _swRippleTick(dt) {
     const WL2 = w ? w.userData.WL : (game._hubWaterWL || 0);
     const dm = _swBuildHubWaterDispGet(WL2);
     if (dm) {
-      // (v33.76) show the displaced surface only ABOVE water + flatscreen ; underwater/VR fall back to the flat
-      // Reflector (its from-below Snell window / cheap VR water). The flat mirror's colorWrite mask + RT-keep-alive
-      // is owned by _swUpdateHubWater (runs just before this) so the reflection RT the disp mesh samples stays fresh.
-      const _vrR = (typeof isXRPresenting === 'function') && isXRPresenting();
-      dm.visible = !game._swSubmerged && !_vrR;
+      dm.visible = true; if (w) w.visible = false;
       dm.position.set(px, WL2, pz);   // follow the ship ; waves stay world-anchored via the rUV lookup
       const du = dm.material.uniforms;
       du.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
@@ -18654,20 +18650,6 @@ function _swRippleTick(dt) {
       if (W2.mist !== undefined) du.uMist.value = W2.mist;                     // mist haze off the peaks
       if (W2.peakLo !== undefined) du.uPeakLo.value = W2.peakLo;               // crest height where breakup starts (lower = more peaks break)
       if (W2.sprayFreq !== undefined) du.uSprayFreq.value = W2.sprayFreq;      // droplet speck size
-      // (v33.76) P4 : feed the Reflector's live planar-mirror RT + the WORLD-space projective matrix so the disp
-      // mesh samples the real reflection. uReflMatrix = textureMatrix * inverse(Reflector.matrixWorld) consumes
-      // the UNDISPLACED world pos (the disp mesh has a different, ship-following modelMatrix than the flat mirror).
-      const wm = w && w.material && w.material.uniforms;
-      if (wm && wm.tDiffuse && wm.textureMatrix) {
-        du.tDiffuse.value = wm.tDiffuse.value;
-        if (w._invMW) du.uReflMatrix.value.copy(wm.textureMatrix.value).multiply(w._invMW);
-        du.uReflLive.value = _vrR ? 0.0 : 1.0;                                 // VR : Reflector skips its RT -> sky-tint fallback
-      } else {
-        du.uReflLive.value = 0.0;                                             // potato / no Reflector RT -> sky-tint fallback (never samples a null texture)
-      }
-      du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            // 0 = old fake-sky look, 1 = full real reflection
-      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; // slope-shear strength (reflection bend over crests)
-      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 1.7;   // (v33.80) reflection brightness GAIN (raise if still dark, lower if washed out)
     }
   } else if (_hubWaterDisp && _hubWaterDisp.visible) {
     _hubWaterDisp.visible = false;   // disp turned off mid-session : restore the Reflector (its own update re-shows it)
@@ -18698,17 +18680,14 @@ function _swBuildHubWaterDispGet(WL) {
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
         uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
-        uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 },
-        // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 1.7 } }
+        uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 } }
     ]),
     vertexShader: [
-      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
-      'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv;',
+      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain;',
+      'varying vec3 vWP; varying vec3 vN; varying float vDisp;',
       '#include <fog_pars_vertex>',
       'void main(){',
       '  vec3 wp0 = (modelMatrix * vec4(position,1.0)).xyz;',                        // undisplaced world pos (XZ for the ripple lookup)
-      '  vReflUv = uReflMatrix * vec4(wp0, 1.0);',                                   // (v33.76) projective reflection coord from the UNDISPLACED pos -> the mirror does NOT bob with the waves (v33.10 lesson)
       '  vec2 rUV = (wp0.xz - uRippleCenter) / uRippleBounds + 0.5;',
       '  float inWin = step(0.0, rUV.x)*step(rUV.x,1.0)*step(0.0,rUV.y)*step(rUV.y,1.0);',
       '  float edge = min(min(rUV.x, 1.0-rUV.x), min(rUV.y, 1.0-rUV.y));',
@@ -18731,36 +18710,22 @@ function _swBuildHubWaterDispGet(WL) {
     ].join('\n'),
     fragmentShader: [
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
-      'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright;',   // (v33.76) P4 real reflection
-      'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv;',
+      'varying vec3 vWP; varying vec3 vN; varying float vDisp;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
       'void main(){',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
-      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            // (v33.80) softer (was 4.0) so reflection shows at MODERATE angles, not only near-grazing
-      '  fres = clamp(0.16 + 0.78*fres, 0.0, 0.95);',                                 // healthy reflective range (uReflBright now gains the reflection itself, below)
+      '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 4.0);',
+      '  fres = clamp(0.02 + 0.55*fres, 0.0, 0.62);',                                 // (v33.70) CAPPED so grazing never WHITES out ; the teal base + wave shading stay visible
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             // lit by the surface normal -> the wave SHAPE (trough/swell) reads as light/shadow
       '  vec3 H = normalize(sunDir + V);',
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                // tight sun glint, not a broad whiteout
       '  vec3 base = color * diff;',
-      // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT, slope-sheared by the wave
-      // normal so it bends over crests WITHOUT mirror-bob (projection is from the UNDISPLACED wp0). Matches the
-      // flat shader's 0.04 shear + grazing taper + distance fade ; falls back to the muted sky tint when the RT
-      // is stale (uReflLive=0 in VR/potato) or the grazing sample lands off-mirror (black-out guard).
-      '  vec3 skyT = vec3(0.32,0.47,0.66);',
-      '  float graze = 1.0 - clamp(abs(V.y), 0.0, 1.0);',                             // 0 looking straight down .. 1 grazing
-      '  float rfade = clamp(1.0 - length(uCam.xz - vWP.xz) / 2600.0, 0.0, 1.0);',    // taper the perturbation on far water (anti-alias, like the flat shader fade)
-      '  vec4 ruv = vReflUv;',
-      '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', // wave-normal slope-shear
-      '  vec3 reflTex = texture2DProj(tDiffuse, ruv).rgb;',
-      '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.04 && graze > 0.5) reflTex = skyT;',   // grazing black-out guard -> sky tint
-      '  reflTex = vec3(1.0) - exp(-max(reflTex, 0.0) * uReflBright);',               // (v33.81) EXPOSURE tone-curve : brightens the DARK reflection but ROLLS OFF brights so the grazing sky can NOT blow out to white (the washout). uReflBright = exposure.
-      '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                // uReflLive=0 (VR/potato/stale RT) -> muted sky tint (the old look)
-      '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    // uReflMix knob : 0 = old fake-sky, 1 = full real reflection
-      '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',   // analytic glint dimmed when the real reflected sun takes over (no double-sun)
+      '  vec3 sky = vec3(0.32,0.47,0.66);',                                           // (v33.70) MUTED blue (was near-white = the grazing whiteout) ; P4 mirror replaces this with the real reflection',
+      '  vec3 c = mix(base, sky, fres) + vec3(1.0,0.98,0.92)*spec*0.3;',
       // (v33.72) EML CREST -> DROPLETS + MIST : the wave PEAKS break up. An EML softmax partitions the
       // surface-water phase vs the spray/mist phase by crest height (smooth, no popping) ; the crest foam
       // DISSOLVES into animated value-noise droplet SPECKS at the breaking tops, and a soft MIST haze lifts
@@ -18818,12 +18783,8 @@ function _swBuildHubWater(T) {
     // grazes the low hull and X-rays its internal panels. Both vanish if the ship reflects as a flat DARK
     // matte (no detail to alias, no panels to X-ray). Built once ; swapped in only for the reflection pass
     // below, restored immediately (try/finally) so the MAIN cockpit/chase view is never touched.
-    const _shipReflMat = new THREE.MeshBasicMaterial({ color: 0x3a4a63, fog: true });   // (v33.77) lifted from near-black 0x141a28 so the ship silhouette is VISIBLE in the reflection (still flat = no panel aliasing/wireframe)
-    // (v33.79) the SHIELD bubble (userData.shieldMesh — a near-transparent child sphere, invisible in the main
-    // view) must NOT reflect : the OPAQUE dark override would otherwise paint it as a solid dark sphere in the
-    // mirror (the "ship is a blob" bug). Skip it in the material override (+ hide it for the pass below).
-    let _reflSkipSet = null;
-    const _shipReflOverride = function (o) { if (_reflSkipSet && _reflSkipSet.indexOf(o) >= 0) return; if (o.isMesh && o.material && !o._reflSaved) { o._reflSaved = o.material; o.material = _shipReflMat; } };
+    const _shipReflMat = new THREE.MeshBasicMaterial({ color: 0x141a28, fog: true });
+    const _shipReflOverride = function (o) { if (o.isMesh && o.material && !o._reflSaved) { o._reflSaved = o.material; o.material = _shipReflMat; } };
     const _shipReflRestore = function (o) { if (o._reflSaved) { o.material = o._reflSaved; o._reflSaved = null; } };
     const _reflOBR = mesh.onBeforeRender;
     mesh._reflFrame = 0;
@@ -18842,21 +18803,13 @@ function _swBuildHubWater(T) {
       const ship = (typeof player !== 'undefined' && player) ? player.mesh : null;
       const _rwl = game._hubWater ? game._hubWater.userData.WL : -1e9;
       const _rab = (player && player.position) ? (player.position.y - _rwl) : 1e9;
-      const _rmax = (window.__water && window.__water.reflShipMax != null) ? window.__water.reflShipMax : 2500;   // (v33.78) the hub WL is ~-720 but you cruise at y~50-200 = ~800u ABOVE the lake, so 80/200 never passed ; 2500 reflects the ship at real flying heights (flat silhouette stays alias-free ; a far ship just reflects small)
+      const _rmax = (window.__water && window.__water.reflShipMax != null) ? window.__water.reflShipMax : 80;
       const wasVis = ship ? ship.visible : false;
       const _showShip = !!(ship && _rab < _rmax);
       if (ship) ship.visible = _showShip;
-      // (v33.79) collect the shield meshes (main bubble + any active ability hull-hug shields) and HIDE them for the
-      // reflection pass — only the ship BODY should reflect. Restored in finally (before the main render = cockpit untouched).
-      const _shields = [];
-      if (ship && ship.userData && ship.userData.shieldMesh) _shields.push(ship.userData.shieldMesh);
-      if (typeof player !== 'undefined' && player) { const _ak = ['_gunShieldMesh', '_thermalShieldMesh', '_vortexShieldMesh', '_swordBlockMesh']; for (let _i = 0; _i < _ak.length; _i++) { if (player[_ak[_i]]) _shields.push(player[_ak[_i]]); } }
-      const _shieldsWas = _shields.map(function (m) { return m.visible; });
-      for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
-      _reflSkipSet = _shields;
-      if (_showShip) ship.traverse(_shipReflOverride);   // (v33.68) flat dark silhouette for the reflection pass (kills the wireframe) ; (v33.79) shield skipped
+      if (_showShip) ship.traverse(_shipReflOverride);   // (v33.68) flat dark silhouette for the reflection pass (kills the wireframe)
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
-      finally { if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis; }
+      finally { if (_showShip) ship.traverse(_shipReflRestore); if (ship) ship.visible = wasVis; }
     };
     // translucent UNDERSIDE plane for the underwater (v33.09) view (the Reflector is top-only)
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   // (v33.12) closer to the mirror tint so the surface crossfade has nothing to pop
@@ -19194,25 +19147,7 @@ function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   // (v33.69) PHASE 1 : when the displaced-water surface is active, keep the flat Reflector HIDDEN so the two
   // coplanar water planes don't z-fight. The displaced mesh (in _swRippleTick) is the water then.
-  // (v33.76) P4 REAL REFLECTION : when the displaced surface is active ABOVE water on flatscreen, keep the flat
-  // Reflector in the render list so its reflection RT KEEPS REFRESHING (the disp mesh samples it), but MASK its
-  // color (colorWrite=false) so the flat mirror isn't drawn (it would poke through wave troughs). onBeforeRender
-  // still fires with colorWrite=false (r165 renderObject calls it before the colorWrite gate), so the RT stays
-  // fresh at no extra render cost. When SUBMERGED or in VR, fall through to the normal flat-water path (its
-  // from-below Snell window / cheap VR water still render). Cache inverse(matrixWorld) for the disp projection.
-  if (typeof window !== 'undefined' && window.__waterDisp && !game._swSubmerged &&
-      !((typeof isXRPresenting === 'function') && isXRPresenting())) {
-    const WLd = w.userData.WL;
-    w.visible = true;
-    w.frustumCulled = false;   // guarantee onBeforeRender fires (RT refresh) even when the camera looks away from the plane
-    if (w.material) w.material.colorWrite = false;
-    w.position.set(camera.position.x, WLd, camera.position.z);
-    w.updateMatrix(); w.updateMatrixWorld(true);
-    if (!w._invMW) w._invMW = new THREE.Matrix4();
-    w._invMW.copy(w.matrixWorld).invert();   // textureMatrix * inv(world) -> disp mesh projects WORLD coords (no mirror-bob)
-    return;
-  }
-  if (w.material && w.material.colorWrite === false) w.material.colorWrite = true;   // restore the flat mirror (disp off / submerged / VR)
+  if (typeof window !== 'undefined' && window.__waterDisp) { w.visible = false; return; }
   const WL = w.userData.WL;
   w.position.set(camera.position.x, WL, camera.position.z);
   w.updateMatrix(); w.updateMatrixWorld(true);
