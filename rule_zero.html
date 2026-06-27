@@ -137,21 +137,9 @@ const CAPS = [
 ];
 const CAP = Object.fromEntries(CAPS.map(c => [c.key, c]));
 
-// the kinds of PROCESS each capability can spawn — note: NOT content rules
-// ("make terrain"), but substrate-level processes (what can compute / express / persist).
-const SPAWN = {
-  cpu:    ['branching logic','scheduler','asset loader','world structure','child-rule factory'],
-  time:   ['delta time','animation','step integrator','tween'],
-  gpu:    ['parallel field','emergence scores','particle field','procedural texture','sim step'],
-  audio:  ['oscillator','envelope','rhythm','spatial mix','signal field'],
-  screen: ['render surface','mesh output','shader output','compositor'],
-  input:  ['pointer','keyboard','gamepad','feedback loop'],
-  memory: ['cpu objects','gpu buffers','audio buffers','persistence'],
-  network:['peers','sync','stream'],
-  camera: ['frame grab','motion field','brightness map','optical flow','gaze'],
-  mic:    ['level meter','spectrum','onset','pitch track','rhythm'],
-  voice:  ['oscillator','envelope','chord','timbre','utterance'],
-};
+// NOTE: there is no authored catalog of rule-types. A rule is just a GENE. New rules are
+// VARIATIONS (mutated genes) of the rule that carves them; what's stable persists and the
+// rest is selected away. The engine figures out its own rules; we don't list them.
 
 // ---- Rule 0: detect the real substrate ----
 const substrate = {};         // key -> { present, forcedOff, granted }
@@ -219,41 +207,33 @@ let frame = 0;
 // ---- THE GENOME — the only thing that differs between rules. A rule is DATA (a gene)
 //      run by ONE evaluator (the act, below). Rule 0 holds the seed gene; EML mutates it
 //      as it carves. Domain bias is data (a table), not branching code. Fractal by construction.
-const DOMAIN_GENE = {
-  cpu:    { amp:0.05, freq:0.4, rad:5, pol: 1 },
-  gpu:    { amp:0.07, freq:0.8, rad:4, pol: 1 },
-  time:   { amp:0.04, freq:1.6, rad:3, pol: 1 },
-  audio:  { amp:0.05, freq:2.4, rad:3, pol:-1 },
-  screen: { amp:0.06, freq:0.6, rad:4, pol: 1 },
-  input:  { amp:0.05, freq:1.0, rad:3, pol:-1 },
-  memory: { amp:0.04, freq:0.2, rad:6, pol: 1 },
-  network:{ amp:0.04, freq:0.9, rad:4, pol:-1 },
-  camera: { amp:0.07, freq:0.5, rad:4, pol: 1 },
-  mic:    { amp:0.05, freq:2.0, rad:3, pol:-1 },
-  voice:  { amp:0.05, freq:3.0, rad:3, pol: 1 },
-};
 function hashf(n){ const x = Math.sin(n*43758.5453)*10000; return x - Math.floor(x); }   // deterministic 0..1
-function makeGene(rootKey, parentGene, depth, seedN){
-  const base = DOMAIN_GENE[rootKey] || DOMAIN_GENE.cpu;
-  if (!parentGene || depth<=1){                                  // Rule 0 + each domain's cap node = a fresh seed gene
-    return { amp:base.amp, freq:base.freq*(0.7+hashf(seedN)*0.6), phase:hashf(seedN*1.7)*6.283, rad:base.rad, pol:base.pol };
-  }
-  const mut = (v,s)=> v*(1 + (hashf(seedN*7.1+v)-0.5)*s);        // EML carve = inherit + differentiate
+// a fresh seed gene (Rule 0 + each substrate cap node start here; everything after is variation)
+function seedGene(seedN){
+  return { amp:0.05, freq:0.4+hashf(seedN)*2.2, phase:hashf(seedN*1.7)*6.283, rad:3+hashf(seedN*2.9)*3, pol: hashf(seedN*9.7)<0.4?-1:1 };
+}
+// VARIATION — the only way new genes come to be: a mutated copy of the parent's gene.
+function mutateGene(g, seedN){
+  const mut=(v,s)=> v*(1+(hashf(seedN*7.1+v*97)-0.5)*s);
   return {
-    amp:  clamp(mut(parentGene.amp,0.5), 0.012, 0.11),
-    freq: clamp(mut(parentGene.freq,0.6), 0.05, 6),
-    phase: parentGene.phase + hashf(seedN*3.3)*2.0,
-    rad:  Math.max(2, parentGene.rad*0.78),                      // deeper => finer sources (self-similar)
-    pol:  (hashf(seedN*9.7) < 0.42) ? -1 : 1,                    // some feed (make wholes), some carve (the gate)
+    amp:  clamp(mut(g.amp,0.5), 0.012, 0.12),
+    freq: clamp(mut(g.freq,0.6), 0.05, 6),
+    phase: g.phase + hashf(seedN*3.3)*2.0,
+    rad:  Math.max(2, g.rad*0.8*(1+(hashf(seedN*5.1)-0.5)*0.3)),   // tends finer, but can drift
+    pol:  (hashf(seedN*9.7) < 0.42) ? -1 : 1,
+    pitch: g.pitch,                                                // audio rules inherit their locked pitch
   };
 }
+// the engine's OWN names for its rules — generated pseudo-words, not a menu we wrote
+const SYL=['ka','ti','ru','mo','ne','sa','lo','vi','za','qu','en','ix','ur','om','el','ny'];
+function geneName(id){ return SYL[(id*3)%SYL.length] + SYL[(id*7)%SYL.length]; }
 
-function makeRule(name, rootKey, parent, depth){
+function makeRule(name, rootKey, parent, depth, gene){
   const id = ++ruleId;
   return {
-    id, name, rootKey, depth,
+    id, name: name || geneName(id), rootKey, depth,
     parent: parent ? parent.id : null,
-    gene: makeGene(rootKey, parent ? parent.gene : null, depth, id),
+    gene: gene || (parent ? mutateGene(parent.gene, id) : seedGene(id)),
     children: [], born: frame, stable: 0,
     breathing:false, breath:0, cands:null, room:0,   // EML/softmax breath state
     // layout (filled by relax); seed near parent
@@ -311,23 +291,20 @@ function softmax(logits, T){
 }
 function branchCapFor(depth){ return depth<=1 ? 4 : (depth===2 ? 3 : 2); }
 
-// EXHALE: carve the candidate parts a whole could differentiate into.
+// EXHALE: carve candidate VARIATIONS of the whole — mutated genes, not menu items.
 function carveCandidates(r){
-  const lib = SPAWN[r.rootKey] || ['rule'];
-  const used = new Set(r.children.map(id=>ruleById(id)?.name).filter(Boolean));
-  const pool = lib.filter(nm=>!used.has(nm));
-  if (r.depth>=1) pool.push(r.rootKey + ' · scale ' + (r.depth+1));   // emergent deeper scale
-  if (!pool.length){ return; }
-  const sub = substrate[r.rootKey];
-  const strength = (sub && sub.present && !sub.forcedOff) ? 1 : 0;
+  const K = 5;                                                   // a few variations to consider
+  const strength = effective(r.rootKey) ? 1 : 0;
   const rad = 120 + r.depth*78 + 70;
-  const cands = pool.map((nm,i)=>{
-    // fit = how well this part fits the whole's conditions; ground = baseline to carve away
-    const fit = 0.6 + strength*1.1 + (Math.sin(r.id*13.1 + i*7.7)*0.5+0.5)*1.3 - r.depth*0.18;
+  const cands = [];
+  for (let i=0;i<K;i++){
+    const gene = mutateGene(r.gene, r.id*101 + i*7 + frame);     // a variation of the parent
+    // fit = how viable this variation looks; ground = baseline to carve away
+    const fit = 0.6 + strength*1.1 + (gene.amp*9 + hashf(r.id*13.1 + i*7.7)*1.0) - r.depth*0.18;
     const ground = 1 + r.depth*0.25 + i*0.05;
-    const ang = r.angle + (i - (pool.length-1)/2) * (r.depth===1 ? 0.42 : 0.3);
-    return { nm, logit: eml(fit, ground), ang, x: Math.cos(ang)*rad, y: Math.sin(ang)*rad, prob:0, winner:false };
-  });
+    const ang = r.angle + (i - (K-1)/2) * (r.depth===1 ? 0.42 : 0.3);
+    cands.push({ gene, logit: eml(fit, ground), ang, x: Math.cos(ang)*rad, y: Math.sin(ang)*rad, prob:0 });
+  }
   r.cands = cands;
   r.room = Math.max(0, branchCapFor(r.depth) - r.children.length);
   r.breath = EXHALE; r.breathing = true;
@@ -348,7 +325,7 @@ function convergeBreath(r, additions){
   _voiceBirths += order.length;                      // let the voice mark these births
   for (const wi of order){
     const c = cands[wi];
-    const child = makeRule(c.nm, r.rootKey, r, r.depth+1);
+    const child = makeRule(null, r.rootKey, r, r.depth+1, c.gene);   // the surviving variation becomes a real rule
     child.angle = c.ang;
     child.x = c.x + (Math.random()-0.5)*8; child.y = c.y + (Math.random()-0.5)*8;
     child._parentRef = r; r.children.push(-1);
@@ -374,6 +351,38 @@ function growStep(){
     const idx = p.children.indexOf(-1); if (idx>=0) p.children[idx] = c.id;
     rules.push(c);
   }
+}
+
+// SELECTION — what's stable persists; the rest dissolves. Rules can DIE, so the population
+// figures ITSELF out instead of just piling up. Fitness rewards contribution + persistence +
+// having reproduced; the root, the substrate cap-nodes, the young, and rules mid-breath are spared.
+const TARGET_RULES = 380;
+function select(){
+  if (rules.length <= TARGET_RULES) return;
+  const grace = 70, cullable = [];
+  for (const r of rules){
+    if (r.isRoot || r.capNode || r.breathing) continue;
+    if (frame - r.born < grace) continue;                        // give the young a chance
+    const gated = effective(r.rootKey) ? 1 : 0.2;
+    r._fit = r.gene.amp*8*gated + r.stable*0.012 + r.children.length*1.6;   // contribution + persistence + reproduction
+    cullable.push(r);
+  }
+  cullable.sort((a,b)=> a._fit - b._fit);                         // lowest fitness dies first
+  const toCull = Math.min(cullable.length, rules.length - TARGET_RULES);
+  if (toCull<=0) return;
+  const doomed = new Set(); for (let i=0;i<toCull;i++) doomed.add(cullable[i].id);
+  for (const r of rules){                                         // reattach orphans to nearest surviving ancestor
+    if (doomed.has(r.id) || r.parent==null) continue;
+    if (doomed.has(r.parent)){
+      let p=ruleById(r.parent), guard=0;
+      while (p && doomed.has(p.id) && guard++<24) p=ruleById(p.parent);
+      r.parent = p ? p.id : (rules[0]?rules[0].id:null);
+    }
+  }
+  rules = rules.filter(r=> !doomed.has(r.id));
+  const byId = new Map(rules.map(r=>[r.id,r]));                   // rebuild children arrays
+  for (const r of rules) r.children = [];
+  for (const r of rules){ if (r.parent!=null){ const p=byId.get(r.parent); if(p) p.children.push(r.id); } }
 }
 
 // ---- gentle force relax so the tree breathes and doesn't overlap ----
@@ -806,7 +815,7 @@ const FIELD_BORN_CAP = 70;
 let _fbReading = false, _fbBorn = 0;
 async function fieldFeedback(){
   if (_fbReading || !Field.device || !Field.bufs[Field.cur]) return;
-  if (rules.length > 1500 || _fbBorn >= FIELD_BORN_CAP) return;
+  if (rules.length > 1500) return;                               // selection bounds the rest
   _fbReading = true;
   try {
     const N = FIELD_N, bytes = N*N*8, fbCur = Field.cur;        // freeze the index -> coherent snapshot
@@ -838,7 +847,7 @@ function findEmergentPeaks(arr, N){
 function birthFromField(peaks){
   const R = 470;
   for (const pk of peaks){
-    if (_fbBorn >= FIELD_BORN_CAP || rules.length > 1500) break;
+    if (rules.length > 1500) break;
     const wx = (pk.u-0.5)*2*R, wy = (pk.v-0.5)*2*R;
     if (Math.hypot(wx,wy) > R*0.96) continue;
     let parent=rules[0], pd=1e9, fbND=1e9;
@@ -886,7 +895,7 @@ function tickPaint(){
   pctx.globalCompositeOperation='source-over';
 }
 function paintFeedback(){
-  if (!pctx || !effective('screen') || _scBorn>=SCREEN_BORN_CAP || rules.length>1500) return;
+  if (!pctx || !effective('screen') || rules.length>1500) return;
   const G=44;
   if (!_pTmp){ _pTmp=document.createElement('canvas'); _pTmp.width=G; _pTmp.height=G; _pTmpCtx=_pTmp.getContext('2d',{willReadFrequently:true}); }
   _pTmpCtx.drawImage(paintCanvas,0,0,G,G);
@@ -901,7 +910,7 @@ function paintFeedback(){
 }
 function birthFromPaint(peaks){
   for (const pk of peaks){
-    if (_scBorn>=SCREEN_BORN_CAP || rules.length>1500) break;
+    if (rules.length>1500) break;
     const wx=(pk.px*W - cx)/scale, wy=(pk.py*H - cy)/scale;            // paint canvas -> world
     if (Math.hypot(wx,wy) > 460) continue;
     let parent=rules[0], pd=1e9, scND=1e9;
@@ -1137,7 +1146,7 @@ function tickVoice(){
 function audioFeedback(){
   const m = Senses.mouth;
   if (!effective('voice') || !m.on || !m.selfAnalyser || !m.specAvg) return;
-  if (_abBorn >= AUDIO_BORN_CAP || rules.length > 1500) return;
+  if (rules.length > 1500) return;
   m.selfAnalyser.getByteFrequencyData(m.spec);
   const spec=m.spec, avg=m.specAvg;
   for (let i=0;i<avg.length;i++) avg[i] += (spec[i]-avg[i])*0.25;   // smooth -> only SUSTAINED pitches survive
@@ -1153,7 +1162,7 @@ function audioFeedback(){
 }
 function birthFromAudio(peaks){
   for (const pk of peaks){
-    if (_abBorn>=AUDIO_BORN_CAP || rules.length>1500) break;
+    if (rules.length>1500) break;
     if (pk.freq<60 || pk.freq>4000) continue;
     const pitch = quantizePitch(pk.freq);
     let dup=false;                                                  // one rule per emergent pitch (~1 semitone)
@@ -1214,7 +1223,7 @@ function loop(t){
     frame++; window.__frame=frame;
     tickSenses();                                 // eyes/ears/voice — perception in, expression out
     // grow on a calm cadence so you can watch rules beget rules
-    acc++; if (acc%5===0) { growStep(); }
+    acc++; if (acc%5===0) { growStep(); select(); }   // breathe out variations, select what survives
     relax();
     draw(t);
     tickField();                                  // the GPU/Field lineage, when mature, computes for real
