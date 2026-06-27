@@ -260,7 +260,7 @@ function makeRule(name, rootKey, parent, depth){
 }
 
 function seedSubstrate(){
-  rules = []; ruleId = 0;
+  rules = []; ruleId = 0; _fbBorn = 0; _abBorn = 0;
   // Rule 0 itself sits at the Center.
   const root = makeRule('Rule 0 · substrate', 'cpu', null, 0);
   root.isRoot = true; root.x = 0; root.y = 0;
@@ -373,22 +373,32 @@ function growStep(){
 }
 
 // ---- gentle force relax so the tree breathes and doesn't overlap ----
+//      spatial-hash broad-phase: each rule only checks rules in its own + 8 neighbour cells,
+//      so this is ~O(n) not O(n^2) (matters at the 1500-rule cap).
+const RELAX_CELL = 30;
 function relax(){
+  const grid = new Map();                                       // numeric cell key -> [rule indices]
+  const ckey = (x,y)=> (Math.floor(x/RELAX_CELL)+512)*1024 + (Math.floor(y/RELAX_CELL)+512);
+  for (let i=0;i<rules.length;i++){ const a=rules[i]; const k=ckey(a.x,a.y); let arr=grid.get(k); if(!arr){arr=[];grid.set(k,arr);} arr.push(i); }
   for (let i=0;i<rules.length;i++){
     const a = rules[i];
     if (a.isRoot){ a.x=0; a.y=0; continue; }
-    for (let j=i+1;j<rules.length;j++){
-      const b = rules[j];
-      let dx=a.x-b.x, dy=a.y-b.y; let d2=dx*dx+dy*dy;
-      const min=(a.r+b.r+10);
-      if (d2 < min*min && d2>0.001){
-        const d=Math.sqrt(d2); const f=(min-d)/d*0.5;
-        dx*=f; dy*=f; if(!b.isRoot){b.x-=dx;b.y-=dy;} if(!a.isRoot){a.x+=dx;a.y+=dy;}
+    const gx=Math.floor(a.x/RELAX_CELL), gy=Math.floor(a.y/RELAX_CELL);
+    for (let oy=-1;oy<=1;oy++) for (let ox=-1;ox<=1;ox++){
+      const arr=grid.get((gx+ox+512)*1024+(gy+oy+512)); if(!arr) continue;
+      for (const j of arr){
+        if (j<=i) continue;                                     // each pair once
+        const b = rules[j];
+        let dx=a.x-b.x, dy=a.y-b.y; let d2=dx*dx+dy*dy;
+        const min=(a.r+b.r+10);
+        if (d2 < min*min && d2>0.001){
+          const d=Math.sqrt(d2); const f=(min-d)/d*0.5;
+          dx*=f; dy*=f; if(!b.isRoot){b.x-=dx;b.y-=dy;} if(!a.isRoot){a.x+=dx;a.y+=dy;}
+        }
       }
     }
     // soft pull toward ideal radius along its angle (keeps domain sectors clean)
     const idealR = 120 + (a.depth-1)*78;
-    const cur = Math.hypot(a.x,a.y)||1;
     const tx = Math.cos(a.angle)*idealR, ty=Math.sin(a.angle)*idealR;
     a.x += (tx-a.x)*0.012; a.y += (ty-a.y)*0.012;
   }
@@ -504,6 +514,14 @@ function draw(t){
     ctx.fillStyle = dorm ? 'rgba(120,140,160,0.22)' : c.color;
     ctx.beginPath(); ctx.arc(r.x,r.y,rad,0,6.283); ctx.fill();
     ctx.shadowBlur=0;
+    if (r.fieldBorn && !dorm){                                   // born FROM the field (the loop closing)
+      ctx.strokeStyle='rgba(230,255,255,0.75)'; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.arc(r.x,r.y,rad+3.2,0,6.283); ctx.stroke();
+    }
+    if (r.audioBorn && !dorm){                                   // born FROM the engine hearing itself
+      ctx.strokeStyle='rgba(255,143,199,0.85)'; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.arc(r.x,r.y,rad+3.2,0,6.283); ctx.stroke();
+    }
     if (r.isRoot){
       ctx.fillStyle='rgba(4,7,14,0.9)';
       ctx.beginPath(); ctx.arc(0,0,5,0,6.283); ctx.fill();   // the central point (circumpunct dot)
@@ -568,7 +586,7 @@ function renderChips(){
       <span class="nm">${c.label}</span><span class="st">${st}</span>`;
     if (s.present && !c.lock){
       if (c.gated) div.onclick = ()=>{ s.granted ? closeSense(c.key) : openSense(c.key); renderPot(); };
-      else div.onclick = ()=>{ s.forcedOff = !s.forcedOff; renderChips(); renderPot(); };
+      else div.onclick = ()=>{ s.forcedOff = !s.forcedOff; if (c.key==='gpu' && !s.forcedOff) _fbBorn=0; renderChips(); renderPot(); };
     }
     chipsEl.appendChild(div);
   }
@@ -772,6 +790,64 @@ function rasterizeActs(){
   }
 }
 
+// ---- CLOSE THE LOOP — the field's own emergent cells carve NEW rules back into the tree.
+//      substrate -> rules -> field -> EMERGENCE -> new generators -> field ... (the manifesto's
+//      "emergent structures become new generators", made literal). Bounded so it can't run away.
+const FIELD_BORN_CAP = 70;
+let _fbReading = false, _fbBorn = 0;
+async function fieldFeedback(){
+  if (_fbReading || !Field.device || !Field.bufs[Field.cur]) return;
+  if (rules.length > 1500 || _fbBorn >= FIELD_BORN_CAP) return;
+  _fbReading = true;
+  try {
+    const N = FIELD_N, bytes = N*N*8, fbCur = Field.cur;        // freeze the index -> coherent snapshot
+    if (!Field.stagingBuf) Field.stagingBuf = Field.device.createBuffer({ size:bytes, usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ });
+    const stg = Field.stagingBuf;                               // one persistent buffer, reused (no per-call churn)
+    const enc = Field.device.createCommandEncoder(); enc.copyBufferToBuffer(Field.bufs[fbCur],0,stg,0,bytes);
+    Field.device.queue.submit([enc.finish()]);
+    await stg.mapAsync(GPUMapMode.READ);
+    const arr = new Float32Array(stg.getMappedRange().slice(0)); stg.unmap();
+    birthFromField(findEmergentPeaks(arr, N));
+  } catch(_){}
+  _fbReading = false;
+}
+function findEmergentPeaks(arr, N){
+  const G = 28, grid = new Float32Array(G*G), peaks = [];
+  for (let gy=0; gy<G; gy++) for (let gx=0; gx<G; gx++){          // coarse max-pool -> find clusters
+    let mx=0; const x0=(gx*N/G)|0, x1=((gx+1)*N/G)|0, y0=(gy*N/G)|0, y1=((gy+1)*N/G)|0;
+    for (let y=y0;y<y1;y++) for (let x=x0;x<x1;x++){ const b=arr[(y*N+x)*2+1]; if(b>mx)mx=b; }
+    grid[gy*G+gx]=mx;
+  }
+  for (let gy=1; gy<G-1; gy++) for (let gx=1; gx<G-1; gx++){
+    const b = grid[gy*G+gx]; if (b < 0.45) continue;             // only strong, settled cells
+    let isMax=true;
+    for (let dy=-1;dy<=1&&isMax;dy++) for (let dx=-1;dx<=1;dx++){ if((dx||dy) && grid[(gy+dy)*G+gx+dx] > b){ isMax=false; break; } }
+    if (isMax) peaks.push({ u:(gx+0.5)/G, v:(gy+0.5)/G, b });
+  }
+  return peaks.sort((a,b)=>b.b-a.b).slice(0, 3);
+}
+function birthFromField(peaks){
+  const R = 470;
+  for (const pk of peaks){
+    if (_fbBorn >= FIELD_BORN_CAP || rules.length > 1500) break;
+    const wx = (pk.u-0.5)*2*R, wy = (pk.v-0.5)*2*R;
+    if (Math.hypot(wx,wy) > R*0.96) continue;
+    let parent=rules[0], pd=1e9, fbND=1e9;
+    for (const r of rules){
+      const d=Math.hypot(r.x-wx,r.y-wy);
+      if (d<pd){ pd=d; parent=r; }                              // attach to the nearest rule in the tree
+      if (r.fieldBorn && d<fbND) fbND=d;
+    }
+    if (fbND < 30) continue;                                     // dedupe only against other field-born rules
+    const child = makeRule('field · '+pk.b.toFixed(2), 'gpu', parent, Math.min(MAX_DEPTH,(parent?parent.depth:0)+1));
+    child.x = wx + (Math.random()-0.5)*6; child.y = wy + (Math.random()-0.5)*6;
+    child.angle = Math.atan2(wy, wx); child.fieldBorn = true;
+    child.gene.amp = clamp(pk.b*0.08, 0.02, 0.1);                // seeded by the field's own strength
+    if (parent) parent.children.push(child.id);
+    rules.push(child); _fbBorn++;
+  }
+}
+
 function tickField(){
   const st = fieldStatus();
   const on = st.ready && effective('gpu') && !Field.failing;
@@ -800,6 +876,9 @@ function tickField(){
     }
     dev.queue.submit([enc.finish()]);
   }
+
+  // CLOSE THE LOOP: every so often, read the field back and let its emergent cells birth rules.
+  if (Field.evolve && effective('gpu') && frame % 50 === 0) fieldFeedback();
 
   // EYES seed the field: wherever you MOVE, the camera injects life (B) into the tissue.
   if (effective('camera') && Senses.cam.seeds.length && Field.bufs[Field.cur]){
@@ -834,8 +913,8 @@ function tickField(){
 // ===================================================================
 const Senses = {
   cam:   { stream:null, video:null, w:48, h:36, prev:null, ctx:null, thumb:null, seeds:[] },
-  ear:   { ctx:null, analyser:null, freq:null, time:null, stream:null, level:0, centroid:0 },
-  mouth: { ctx:null, master:null, voices:[], on:false },
+  ear:   { ctx:null, analyser:null, source:null, freq:null, time:null, stream:null, level:0, centroid:0 },
+  mouth: { ctx:null, master:null, comp:null, pool:null, selfAnalyser:null, spec:null, specAvg:null, on:false },
 };
 
 // --- EYES: webcam -> motion -> seeds life into the field ----------
@@ -876,9 +955,10 @@ async function openEars(){
     const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:false });
     const AC = window.AudioContext||window.webkitAudioContext;
     const ctx = Senses.ear.ctx || new AC(); if (ctx.state==='suspended') await ctx.resume();
+    if (Senses.ear.source){ try{ Senses.ear.source.disconnect(); }catch(_){} }   // re-grant safety
     const an = ctx.createAnalyser(); an.fftSize=1024; an.smoothingTimeConstant=0.8;
-    ctx.createMediaStreamSource(stream).connect(an);
-    Senses.ear.ctx=ctx; Senses.ear.analyser=an; Senses.ear.stream=stream;
+    const src = ctx.createMediaStreamSource(stream); src.connect(an);
+    Senses.ear.ctx=ctx; Senses.ear.analyser=an; Senses.ear.source=src; Senses.ear.stream=stream;
     Senses.ear.freq=new Uint8Array(an.frequencyBinCount); Senses.ear.time=new Uint8Array(an.fftSize);
     substrate.mic.granted=true; substrate.mic.forcedOff=false;
   } catch(e){ substrate.mic.granted=false; console.warn('ears denied:', e.name||e); }
@@ -886,7 +966,8 @@ async function openEars(){
 }
 function closeEars(){
   const e=Senses.ear; if (e.stream) e.stream.getTracks().forEach(t=>t.stop());
-  e.stream=e.analyser=null; e.level=0; e.centroid=0; substrate.mic.granted=false; renderChips();
+  if (e.source){ try{ e.source.disconnect(); }catch(_){} }
+  e.stream=e.analyser=e.source=null; e.level=0; e.centroid=0; substrate.mic.granted=false; renderChips();
 }
 function tickEars(){
   const e=Senses.ear;
@@ -900,40 +981,126 @@ function tickEars(){
 }
 
 // --- VOICE: the engine sings its own state ----------------------
+// AUDIO is a SECOND load-bearing medium: each audio-domain rule (audio/voice) drives one
+// partial through the SAME act — its gene becomes a pitch/amplitude/pan. The chord you hear
+// IS the set of audio rules acting; carve more and it thickens, gate audio off and it falls silent.
+const VOICE_POLY = 12;
+const PENTA = [0,2,4,7,9];
+const AUDIO_BORN_CAP = 40;
+let _abBorn = 0;                                                 // rules born from the engine hearing itself
+function ruleFreq(r){
+  if (r.gene.pitch) return r.gene.pitch;                         // audio-born rules are locked to their emergent pitch
+  const oct = 1 + Math.min(3, r.depth);
+  const semi = PENTA[Math.floor(hashf(r.id*1.7)*5)] + 12*oct;
+  return 55 * Math.pow(2, semi/12);                              // A1-rooted pentatonic
+}
+// snap a frequency to the nearest pentatonic pitch (A-rooted) so the loop stays harmonious
+function quantizePitch(freq){
+  const midi = 69 + 12*Math.log2(freq/440);
+  const pc = ((Math.round(midi)%12)+12)%12, oct = Math.round(midi)-pc;
+  let best=PENTA[0], bd=99; for (const s of PENTA){ const d=Math.min((pc-s+12)%12,(s-pc+12)%12); if(d<bd){bd=d;best=s;} }
+  return 440 * Math.pow(2, (oct+best-69)/12);
+}
+function teardownVoiceGraph(){
+  const m=Senses.mouth;
+  if (m.pool){ m.pool.forEach(v=>{ try{ v.o.stop(); v.o.disconnect(); v.g.disconnect(); if(v.p) v.p.disconnect(); }catch(_){} }); }
+  if (m.master){ try{ m.master.disconnect(); }catch(_){} }
+  if (m.comp){ try{ m.comp.disconnect(); }catch(_){} }
+  if (m.selfAnalyser){ try{ m.selfAnalyser.disconnect(); }catch(_){} }
+  m.pool=null; m.master=null; m.comp=null; m.selfAnalyser=null;
+}
 async function openVoice(){
   try {
     const AC = window.AudioContext||window.webkitAudioContext;
     const ctx = Senses.mouth.ctx || Senses.ear.ctx || new AC(); if (ctx.state==='suspended') await ctx.resume();
-    const master = ctx.createGain(); master.gain.value=0.0; master.connect(ctx.destination);
-    const voices = [0,1,2].map(i=>{
-      const o=ctx.createOscillator(); o.type = i===2?'triangle':'sine';
-      const g=ctx.createGain(); g.gain.value = i===0?0.6:(i===1?0.3:0.18);
-      o.connect(g); g.connect(master); o.start(); return { o, g };
+    teardownVoiceGraph();                                        // never stack graphs on re-grant
+    const comp = ctx.createDynamicsCompressor();                 // keep the sum from clipping
+    const master = ctx.createGain(); master.gain.value=0.0; master.connect(comp); comp.connect(ctx.destination);
+    const selfAnalyser = ctx.createAnalyser(); selfAnalyser.fftSize=2048; selfAnalyser.smoothingTimeConstant=0.85;
+    comp.connect(selfAnalyser);                                  // the engine HEARS its own voice (a tap, not routed onward)
+    const pool = Array.from({length:VOICE_POLY}, (_,i)=>{
+      const o=ctx.createOscillator(); o.type = i%3===2?'triangle':'sine';
+      const g=ctx.createGain(); g.gain.value=0;
+      const p = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+      o.connect(g); if (p){ g.connect(p); p.connect(master); } else g.connect(master);
+      o.start(); return { o, g, p, ruleId:-1 };
     });
-    Senses.mouth.ctx=ctx; Senses.mouth.master=master; Senses.mouth.voices=voices; Senses.mouth.on=true;
+    Senses.mouth.ctx=ctx; Senses.mouth.master=master; Senses.mouth.comp=comp; Senses.mouth.pool=pool; Senses.mouth.on=true;
+    Senses.mouth.selfAnalyser=selfAnalyser;
+    Senses.mouth.spec=new Uint8Array(selfAnalyser.frequencyBinCount); Senses.mouth.specAvg=new Float32Array(selfAnalyser.frequencyBinCount);
+    _abBorn = 0;                                                 // fresh budget each time the voice opens
     substrate.voice.granted=true; substrate.voice.forcedOff=false;
   } catch(e){ substrate.voice.granted=false; console.warn('voice denied:', e.name||e); }
   renderChips();
 }
 function closeVoice(){
-  const m=Senses.mouth; if (m.master){ try{ m.master.gain.setTargetAtTime(0, m.ctx.currentTime, 0.1); }catch(_){} }
+  const m=Senses.mouth;
+  if (m.master){ try{ m.master.gain.setTargetAtTime(0, m.ctx.currentTime, 0.08); }catch(_){} }
+  teardownVoiceGraph();                                          // stop + disconnect the 12 oscillators, compressor, master
   m.on=false; substrate.voice.granted=false; renderChips();
 }
 function tickVoice(){
   const m=Senses.mouth;
-  if (!effective('voice') || !m.on || !m.master) return;
-  const ctx=m.ctx, t=ctx.currentTime;
-  const maturity = clamp((Math.max(1,...rules.map(r=>r.depth))-1)/4, 0, 1);
-  const base = 110 * Math.pow(2, maturity*0.9 + (Senses.ear.level||0)*0.6);     // pitch climbs as the world matures
-  const breathing = rules.filter(r=>r.breathing).length;
-  m.master.gain.setTargetAtTime(clamp(0.015 + breathing*0.004 + (Field.intensity||0)*0.03, 0, 0.16), t, 0.2);
-  const ratios=[1, 1.5, 2.0];
-  m.voices.forEach((vv,i)=> vv.o.frequency.setTargetAtTime(base*ratios[i]*(1+(activeTemp()-0.5)*0.04), t, 0.15));
-  if (_voiceBirths>0){                                                          // chime on emergence
+  if (!effective('voice') || !m.on || !m.master || !m.pool) return;
+  const ctx=m.ctx, t=ctx.currentTime, T = frame*0.02;
+  // the sounding rules = the audio lineage (audio + voice domains), loudest first
+  const singers = rules.filter(r=>!r.dormant && (r.rootKey==='audio'||r.rootKey==='voice') && effective(r.rootKey))
+                       .sort((a,b)=> b.gene.amp - a.gene.amp).slice(0, VOICE_POLY);
+  m.master.gain.setTargetAtTime(clamp(0.05 + (Field.intensity||0)*0.04, 0, 0.5), t, 0.2);
+  m.pool.forEach((vv,i)=>{
+    const r = singers[i];
+    if (!r){ vv.g.gain.setTargetAtTime(0, t, 0.2); return; }
+    const pulse = 0.4 + 0.6*(0.5+0.5*Math.sin(T*r.gene.freq + r.gene.phase));   // same pulse as the field act
+    vv.o.frequency.setTargetAtTime(ruleFreq(r)*(1+(activeTemp()-0.5)*0.03), t, 0.12);
+    vv.g.gain.setTargetAtTime(0.05*pulse, t, 0.12);
+    if (vv.p) vv.p.pan.setTargetAtTime(clamp(r.x/470,-1,1), t, 0.2);
+  });
+  if (_voiceBirths>0){                                                          // a chime marks each emergence
     const o=ctx.createOscillator(), g=ctx.createGain();
-    o.type='sine'; o.frequency.value=base*3*(1+Math.random()*0.4); o.connect(g); g.connect(m.master);
-    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.10,t+0.02); g.gain.exponentialRampToValueAtTime(0.001,t+0.5);
+    o.type='sine'; o.frequency.value=880*(1+Math.random()*0.5); o.connect(g); g.connect(m.master);
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(0.08,t+0.02); g.gain.exponentialRampToValueAtTime(0.001,t+0.5);
     o.start(t); o.stop(t+0.55); _voiceBirths=0;
+  }
+}
+
+// --- CLOSE THE AUDIO LOOP — the engine hears its OWN voice; the pitches that have EMERGED
+//     from the rules' composition (sustained peaks in its own output spectrum) birth new audio
+//     rules tuned to them. Symmetric with the field loop: every medium both receives the act
+//     AND feeds back. Bounded so it can't run away.
+function audioFeedback(){
+  const m = Senses.mouth;
+  if (!effective('voice') || !m.on || !m.selfAnalyser || !m.specAvg) return;
+  if (_abBorn >= AUDIO_BORN_CAP || rules.length > 1500) return;
+  m.selfAnalyser.getByteFrequencyData(m.spec);
+  const spec=m.spec, avg=m.specAvg;
+  for (let i=0;i<avg.length;i++) avg[i] += (spec[i]-avg[i])*0.25;   // smooth -> only SUSTAINED pitches survive
+  const binHz = m.ctx.sampleRate / m.selfAnalyser.fftSize, peaks=[];
+  for (let i=3;i<avg.length-3;i++){
+    const v=avg[i];
+    if (v<70) continue;                                             // a sustained, audible standing pitch (0..255)
+    if (v<=avg[i-1] || v<avg[i+1] || v<avg[i-2] || v<avg[i+2]) continue;   // a local maximum = a standing pitch
+    peaks.push({ freq:i*binHz, mag:v/255 });
+  }
+  peaks.sort((a,b)=>b.mag-a.mag);
+  birthFromAudio(peaks.slice(0,2));
+}
+function birthFromAudio(peaks){
+  for (const pk of peaks){
+    if (_abBorn>=AUDIO_BORN_CAP || rules.length>1500) break;
+    if (pk.freq<60 || pk.freq>4000) continue;
+    const pitch = quantizePitch(pk.freq);
+    let dup=false;                                                  // one rule per emergent pitch (~1 semitone)
+    for (const r of rules){ if (r.audioBorn && r.gene.pitch && Math.abs(Math.log2(r.gene.pitch/pitch))<0.04){ dup=true; break; } }
+    if (dup) continue;
+    let parent=rules[0], best=-1;                                   // attach near the loudest audio rule
+    for (const r of rules){ if((r.rootKey==='audio'||r.rootKey==='voice') && !r.dormant && r.gene.amp>best){ best=r.gene.amp; parent=r; } }
+    const child = makeRule('heard · '+Math.round(pitch)+'Hz', 'audio', parent, Math.min(MAX_DEPTH,(parent?parent.depth:1)+1));
+    child.gene.pitch = pitch;                                       // it SINGS the pitch it was born from (reinforces it)
+    child.gene.amp = clamp(0.03 + pk.mag*0.06, 0.02, 0.1);
+    child.x = parent.x + (Math.random()-0.5)*40; child.y = parent.y + (Math.random()-0.5)*40;
+    child.angle = parent.angle; child.audioBorn = true;
+    if (parent) parent.children.push(child.id);
+    rules.push(child); _abBorn++;
   }
 }
 
@@ -942,6 +1109,7 @@ function closeSense(k){ ({camera:closeEyes, mic:closeEars, voice:closeVoice}[k]|
 
 function tickSenses(){
   tickEyes(); tickEars(); tickVoice();
+  if (frame % 50 === 25) audioFeedback();                         // the engine hears itself -> births audio rules
   // ears -> the breath dial: louder = hotter (carve many / Field), quiet = cooler (make wholes / Center)
   const target = effective('mic') ? clamp((Senses.ear.level-0.04)*2.2, -0.2, 0.5) : 0;
   micTemp += (target - micTemp)*0.08;
@@ -949,6 +1117,10 @@ function tickSenses(){
 
 // debug: read the live field buffer back off the GPU to prove the compute is real & evolving
 window.__field = Field;
+window.__dbg = ()=>({ rules: rules.length, fieldBorn: rules.filter(r=>r.fieldBorn).length, audioBorn: rules.filter(r=>r.audioBorn).length,
+  singers: rules.filter(r=>(r.rootKey==='audio'||r.rootKey==='voice') && !r.dormant && effective(r.rootKey)).length,
+  voiceOn: Senses.mouth.on, poolGains: (Senses.mouth.pool||[]).map(v=>+v.g.gain.value.toFixed(3)),
+  maxDepth: Math.max(...rules.map(r=>r.depth)) });
 window.__fieldStats = async function(){
   if (!Field.device || !Field.bufs[0]) return { ready:false };
   const N=FIELD_N, bytes=N*N*8;
