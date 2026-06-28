@@ -63,8 +63,10 @@
 <div id="panel">
   <h1>Rule 0 · Substrate Potential</h1>
   <p class="sub">Before any world, the engine asks what its machine can <i>do</i>. That possibility-space
-  is the soil. Then <b>Rule 1</b>: any stable condition becomes a generator — it <b>breathes</b>: EML carves out
-  candidate parts (each ringed by its gate), softmax converges them into wholes. The same breath at every scale.</p>
+  is the soil. <b>Rule 1</b>: stable conditions become generators that <b>breathe</b> out variations of themselves.
+  <b>Rule 2 · Resonance</b>: a rule persists not because you like it, but because its rhythm <i>couples</i> with yours
+  across the boundary — at a healthy tension, neither collapsed nor noise. <b>Rule 3 · Memory</b>: what resonated is
+  remembered, and the system resumes from it. It isn't self-aware — it's <i>relation</i>-aware.</p>
 
   <div class="sec">
     <div class="sec-t">Substrate · what exists here</div>
@@ -258,6 +260,17 @@ function seedSubstrate(){
     root.children.push(rl.id);
     rules.push(rl);
   }
+  // Rule 3 — RESUME from memory: re-seed the resonant attractors that coupled best last time.
+  for (const a of loadResonantAttractors().slice(0, 40)){
+    const parent = rules.find(rr=>rr.capNode && rr.rootKey===a.rootKey) || root;
+    const rl = makeRule(null, a.rootKey, parent, Math.min(MAX_DEPTH, a.depth||2), a.gene);
+    rl.angle = (typeof a.angle==='number') ? a.angle : parent.angle;
+    const rad = 120 + (rl.depth-1)*78;
+    rl.x = Math.cos(rl.angle)*rad; rl.y = Math.sin(rl.angle)*rad;
+    rl.fromMemory = true; rl.localResonance = a.resonance||0;
+    parent.children.push(rl.id);
+    rules.push(rl);
+  }
 }
 
 function ruleById(id){ return rules.find(r=>r.id===id); }
@@ -363,8 +376,7 @@ function select(){
   for (const r of rules){
     if (r.isRoot || r.capNode || r.breathing) continue;
     if (frame - r.born < grace) continue;                        // give the young a chance
-    const gated = effective(r.rootKey) ? 1 : 0.2;
-    r._fit = r.gene.amp*8*gated + r.stable*0.012 + r.children.length*1.6;   // contribution + persistence + reproduction
+    r._fit = ruleFitness(r);                                     // RELATIONAL fitness — coupling, not approval
     cullable.push(r);
   }
   cullable.sort((a,b)=> a._fit - b._fit);                         // lowest fitness dies first
@@ -470,6 +482,12 @@ function draw(t){
   ctx.beginPath(); ctx.arc(0,0,470,0,6.283); ctx.stroke();
   ctx.strokeStyle='rgba(97,243,255,0.07)';
   ctx.beginPath(); ctx.arc(0,0,120,0,6.283); ctx.stroke();
+  // the BOUNDARY glows with shared resonance — the coupling between the two wholes, made visible
+  const reso = Resonance.shared.resonance;
+  if (reso > 0.01){
+    ctx.strokeStyle = `rgba(124,255,178,${0.06 + reso*0.5})`; ctx.lineWidth = 1 + reso*4;
+    ctx.beginPath(); ctx.arc(0,0,470,0,6.283); ctx.stroke();
+  }
 
   // --- Flow ring: the clock(s). Frame clock always; a faster mark if audio. ---
   const flowOn = pot.keepsTime;
@@ -540,6 +558,10 @@ function draw(t){
       ctx.strokeStyle='rgba(97,243,255,0.85)'; ctx.lineWidth=1.4;
       ctx.beginPath(); ctx.arc(r.x,r.y,rad+3.2,0,6.283); ctx.stroke();
     }
+    if (r.fromMemory && !dorm){                                  // a resonant attractor REMEMBERED from before
+      ctx.strokeStyle='rgba(255,207,107,0.85)'; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.arc(r.x,r.y,rad+3.6,0,6.283); ctx.stroke();
+    }
     if (r.isRoot){
       ctx.fillStyle='rgba(4,7,14,0.9)';
       ctx.beginPath(); ctx.arc(0,0,5,0,6.283); ctx.fill();   // the central point (circumpunct dot)
@@ -575,7 +597,7 @@ function draw(t){
   const regime = T<0.34 ? 'center · carving one' : T>0.66 ? 'field · carving many' : 'balanced';
   const sensing = [effective('camera')&&'eyes', effective('mic')&&'ears', effective('voice')&&'voice'].filter(Boolean).join(' + ') || 'no senses';
   ctx.fillStyle='rgba(143,176,189,0.9)'; ctx.font='12px ui-monospace,Consolas,monospace'; ctx.textAlign='left';
-  ctx.fillText(`rules: ${rules.length}   live: ${live}   maxDepth: ${Math.max(...rules.map(r=>r.depth))}   breathing: ${breathing}   T=${T.toFixed(2)} (${regime})   ${sensing}`, 16, H-18);
+  ctx.fillText(`rules: ${rules.length}   maxDepth: ${Math.max(...rules.map(r=>r.depth))}   T=${T.toFixed(2)} (${regime})   ${sensing}   resonance: ${(Resonance.shared.resonance*100).toFixed(0)}%   presence: ${(Resonance.user.presence*100).toFixed(0)}%`, 16, H-18);
 }
 
 function hexA(hex,a){
@@ -900,7 +922,8 @@ function paintFeedback(){
   if (!_pTmp){ _pTmp=document.createElement('canvas'); _pTmp.width=G; _pTmp.height=G; _pTmpCtx=_pTmp.getContext('2d',{willReadFrequently:true}); }
   _pTmpCtx.drawImage(paintCanvas,0,0,G,G);
   const d=_pTmpCtx.getImageData(0,0,G,G).data, bri=new Float32Array(G*G);
-  for (let i=0;i<G*G;i++) bri[i]=(d[i*4]+d[i*4+1]+d[i*4+2])/765;
+  let _sb=0; for (let i=0;i<G*G;i++){ bri[i]=(d[i*4]+d[i*4+1]+d[i*4+2])/765; _sb+=bri[i]; }
+  _screenBri = Math.min(1, (_sb/(G*G))*4);                       // the screen medium's pulse, for resonance
   const peaks=[];
   for (let y=1;y<G-1;y++) for (let x=1;x<G-1;x++){ const b=bri[y*G+x]; if(b<0.3)continue; let mx=true;
     for(let oy=-1;oy<=1&&mx;oy++)for(let ox=-1;ox<=1;ox++){ if((ox||oy)&&bri[(y+oy)*G+x+ox]>b){mx=false;break;} }
@@ -1196,6 +1219,8 @@ window.__field = Field;
 window.__dbg = ()=>({ rules: rules.length, fieldBorn: rules.filter(r=>r.fieldBorn).length, audioBorn: rules.filter(r=>r.audioBorn).length, screenBorn: rules.filter(r=>r.screenBorn).length, screenRules: rules.filter(r=>r.rootKey==='screen'&&!r.dormant).length,
   singers: rules.filter(r=>(r.rootKey==='audio'||r.rootKey==='voice') && !r.dormant && effective(r.rootKey)).length,
   voiceOn: Senses.mouth.on, poolGains: (Senses.mouth.pool||[]).map(v=>+v.g.gain.value.toFixed(3)),
+  fromMemory: rules.filter(r=>r.fromMemory).length,
+  resonance:+Resonance.shared.resonance.toFixed(3), presence:+Resonance.user.presence.toFixed(3), coherence:+Resonance.shared.coherence.toFixed(3),
   maxDepth: Math.max(...rules.map(r=>r.depth)) });
 window.__fieldStats = async function(){
   if (!Field.device || !Field.bufs[0]) return { ready:false };
@@ -1215,6 +1240,92 @@ window.__fieldStats = async function(){
            minB:+minB.toFixed(3), maxB:+maxB.toFixed(3), meanB:+(sum/n).toFixed(4), midRangeFrac:+(mid/n).toFixed(4) };
 };
 
+// ===================================================================
+//  RULE 2 · RESONANCE — a rule persists not because "the user likes it" but because it
+//  COUPLES well across the boundary: its rhythm meets the user's rhythm at a HEALTHY tension
+//  (not collapsed into sameness, not flung into noise). The system is not self-aware; it is
+//  RELATION-aware — it tracks the shape of the coupling between two wholes, never a reward.
+// ===================================================================
+const Resonance = {
+  user:   { motion:0, voice:0, timing:0, presence:0 },
+  system: { rulePulse:0, fieldPulse:0, screenPulse:0 },
+  shared: { coherence:0, tension:0, resonance:0 },
+};
+let _inputPulse = 0, _screenBri = 0;
+function smooth(o,n,rate){ return o + (n-o)*rate; }
+function bumpInput(){ _inputPulse = Math.min(1, _inputPulse + 0.35); }   // the user's touch enters the loop
+window.addEventListener('pointermove', bumpInput, {passive:true});
+window.addEventListener('pointerdown', bumpInput);
+window.addEventListener('keydown', bumpInput);
+
+function updateResonance(){
+  _inputPulse *= 0.93;
+  // user-side rhythms (only real when the corresponding sense is open)
+  const userMotion = effective('camera') ? Math.min(1,(Senses.cam.seeds?.length||0)/40) : 0;
+  const userVoice  = effective('mic') ? clamp((Senses.ear.level||0)*4,0,1) : 0;
+  const userTiming = _inputPulse;
+  Resonance.user.motion = smooth(Resonance.user.motion, userMotion, 0.06);
+  Resonance.user.voice  = smooth(Resonance.user.voice,  userVoice,  0.06);
+  Resonance.user.timing = smooth(Resonance.user.timing, userTiming, 0.06);
+  Resonance.user.presence = clamp(Resonance.user.motion + Resonance.user.voice + Resonance.user.timing, 0, 1);
+
+  // system-side rhythms
+  let rp=0, nLive=0;
+  for (const r of rules){ if (r.gene && !r.dormant){ rp += Math.abs(Math.sin(frame*0.02*r.gene.freq + r.gene.phase)); nLive++; } }
+  rp = nLive ? rp/nLive : 0;
+  Resonance.system.rulePulse   = smooth(Resonance.system.rulePulse, rp, 0.06);
+  Resonance.system.fieldPulse  = smooth(Resonance.system.fieldPulse, Field.intensity||0, 0.06);
+  Resonance.system.screenPulse = smooth(Resonance.system.screenPulse, effective('screen')?_screenBri:0, 0.06);
+
+  const userWhole   = Resonance.user.motion*0.35 + Resonance.user.voice*0.35 + Resonance.user.timing*0.30;
+  const systemWhole = Resonance.system.rulePulse*0.40 + Resonance.system.fieldPulse*0.30 + Resonance.system.screenPulse*0.30;
+  const tension = Math.abs(userWhole - systemWhole);
+  const healthy = 1 - Math.abs(tension - 0.35);                  // resonance peaks at a HEALTHY difference, not sameness
+  Resonance.shared.coherence = 1 - tension;
+  Resonance.shared.tension   = tension;
+  Resonance.shared.resonance = clamp((1-tension)*0.65 + healthy*0.35, 0, 1);
+
+  // per-rule LOCAL resonance — how well THIS rule's pulse couples with the user (without overpowering)
+  for (const r of rules){
+    if (!r.gene) continue;
+    const rpr = Math.abs(Math.sin(frame*0.02*r.gene.freq + r.gene.phase));
+    const t = Math.abs(rpr - userWhole);
+    const res = clamp((1-t)*0.65 + (1-Math.abs(t-0.35))*0.35, 0, 1);
+    r.localResonance = smooth(r.localResonance||0, res, 0.04);
+  }
+}
+
+// fitness is now RELATIONAL: contribution + persistence + fertility + how well it couples with the
+// user (weighted by how PRESENT the user is — coupling only matters when there's something to couple with).
+function ruleFitness(r){
+  const gated = effective(r.rootKey) ? 1 : 0.2;
+  return r.gene.amp*8*gated + r.stable*0.012 + r.children.length*1.6
+       + (r.localResonance||0) * 12 * Resonance.user.presence;
+}
+
+// ===================================================================
+//  RULE 3 · MEMORY — persisted resonance becomes memory. We don't save "favourites"; we save
+//  RESONANT ATTRACTORS (the genomes that coupled best), and reload them so the system RESUMES
+//  from what resonated last time. Gated by the memory substrate.
+// ===================================================================
+const LEARN_KEY = 'rule_zero_resonant_attractors_v1';
+function saveResonantAttractors(){
+  if (!effective('memory')) return;
+  try {
+    const attractors = rules.filter(r=>!r.isRoot && !r.capNode && !r.dormant && r.gene)
+      .sort((a,b)=> ruleFitness(b)-ruleFitness(a)).slice(0, 80)
+      .map(r=>({ rootKey:r.rootKey, depth:r.depth, angle:+r.angle.toFixed(3), gene:r.gene, resonance:+(r.localResonance||0).toFixed(3) }));
+    if (attractors.length < 8) return;                          // don't clobber rich memory with a sparse snapshot
+    localStorage.setItem(LEARN_KEY, JSON.stringify({ kind:'resonant_attractors', t:frame, attractors }));
+  } catch(_){}
+}
+function loadResonantAttractors(){
+  if (!effective('memory')) return [];
+  try { const j=JSON.parse(localStorage.getItem(LEARN_KEY)||'null'); return (j&&j.attractors)||[]; } catch(_){ return []; }
+}
+window.addEventListener('visibilitychange', ()=>{ if (document.hidden) saveResonantAttractors(); });   // persist on the way out
+window.addEventListener('pagehide', saveResonantAttractors);
+
 let acc=0;
 window.__frame=0; window.__loopErr=null;
 function loop(t){
@@ -1222,8 +1333,10 @@ function loop(t){
     if (canvas.clientWidth !== W || canvas.clientHeight !== H) resize();   // self-correct if viewport changed
     frame++; window.__frame=frame;
     tickSenses();                                 // eyes/ears/voice — perception in, expression out
+    updateResonance();                            // Rule 2 — track the coupling between the two wholes
     // grow on a calm cadence so you can watch rules beget rules
-    acc++; if (acc%5===0) { growStep(); select(); }   // breathe out variations, select what survives
+    acc++; if (acc%5===0) { growStep(); select(); }   // breathe out variations, select what RESONATES
+    if (frame % 600 === 0) saveResonantAttractors();  // Rule 3 — persist the resonant attractors
     relax();
     draw(t);
     tickField();                                  // the GPU/Field lineage, when mature, computes for real
