@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.94</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.94","short_name":"LSS%20v33.94","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.98</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.98","short_name":"LSS%20v33.98","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3006,7 +3006,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '33.94';
+const LSS_BUILD = '33.98';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17858,6 +17858,9 @@ function _swWaterReflectShader() {
 
 const _SW_RIPPLE_RES = 128;          
 const _SW_RIPPLE_BOUNDS = 4000;      
+const _SW_MASK_RES = 96;             
+const _SW_FARMASK_RES = 96;          
+const _SW_FARMASK_BOUNDS = 24000;    
 const _swRipple = {
   gpu: null, heightVar: null,
   center: new THREE.Vector2(0, 0),   
@@ -17865,7 +17868,8 @@ const _swRipple = {
   pending: [],                       
   bounds: _SW_RIPPLE_BOUNDS, scale: 0,
   scrollX: 0, scrollZ: 0,            
-  maskTex: null, maskData: null      
+  maskTex: null, maskData: null,     
+  farTex: null, farData: null, farCenter: new THREE.Vector2(NaN, NaN)   
 };
 const _SW_RIPPLE_FRAG = [
   '#include <common>',               
@@ -17933,18 +17937,25 @@ function _swRippleInit() {
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
     
-    const maskData = new Float32Array(RES * RES * 4);
-    const maskTex = new THREE.DataTexture(maskData, RES, RES, THREE.RGBAFormat, THREE.FloatType);
+    const maskData = new Float32Array(_SW_MASK_RES * _SW_MASK_RES * 4);   
+    const maskTex = new THREE.DataTexture(maskData, _SW_MASK_RES, _SW_MASK_RES, THREE.RGBAFormat, THREE.FloatType);
     maskTex.minFilter = THREE.LinearFilter; maskTex.magFilter = THREE.LinearFilter;
     maskTex.wrapS = maskTex.wrapT = THREE.ClampToEdgeWrapping; maskTex.needsUpdate = true;
     v.material.uniforms.uMaskTex = { value: maskTex };
     _swRipple.maskData = maskData; _swRipple.maskTex = maskTex;
+    
+    const farData = new Float32Array(_SW_FARMASK_RES * _SW_FARMASK_RES * 4);
+    const farTex = new THREE.DataTexture(farData, _SW_FARMASK_RES, _SW_FARMASK_RES, THREE.RGBAFormat, THREE.FloatType);
+    farTex.minFilter = THREE.LinearFilter; farTex.magFilter = THREE.LinearFilter;
+    farTex.wrapS = farTex.wrapT = THREE.ClampToEdgeWrapping; farTex.needsUpdate = true;
+    _swRipple.farData = farData; _swRipple.farTex = farTex;
     const err = gpu.init();
     if (err) { try { console.warn('[water] GPGPU init failed, analytic fallback:', err); } catch (_) {} return; }
     _swRipple.gpu = gpu; _swRipple.heightVar = v; _swRipple.acc = 0; _swRipple.pending.length = 0;
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   
     _swRippleBakeMask();    
+    _swRipple.farCenter.set(_swRipple.center.x, _swRipple.center.y); _swRippleBakeFarMask();   
     
     
     
@@ -18133,7 +18144,7 @@ function _swRippleBakeMask() {
   if (!R.maskData || typeof _stGroundYCarved !== 'function') return;
   const T = game._hubWaterT; if (!T) return;
   const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
-  const RES = _SW_RIPPLE_RES, B = _SW_RIPPLE_BOUNDS;
+  const RES = _SW_MASK_RES, B = _SW_RIPPLE_BOUNDS;   
   const cx = R.center.x, cz = R.center.y, data = R.maskData;
   let k = 0;
   for (let j = 0; j < RES; j++) {
@@ -18149,6 +18160,32 @@ function _swRippleBakeMask() {
     }
   }
   if (R.maskTex) R.maskTex.needsUpdate = true;
+}
+
+
+
+
+function _swRippleBakeFarMask() {
+  const R = _swRipple;
+  if (!R.farData || typeof _stGroundYCarved !== 'function') return;
+  const T = game._hubWaterT; if (!T) return;
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
+  const RES = _SW_FARMASK_RES, B = _SW_FARMASK_BOUNDS;
+  const cx = R.farCenter.x, cz = R.farCenter.y, data = R.farData;
+  let k = 0;
+  for (let j = 0; j < RES; j++) {
+    const wz = cz + ((j + 0.5) / RES - 0.5) * B;
+    for (let i = 0; i < RES; i++) {
+      const wx = cx + ((i + 0.5) / RES - 0.5) * B;
+      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
+      const d = WL - gy;                               
+      data[k] = 0;
+      data[k + 1] = Math.max(0, Math.min(1, d / 400)); 
+      data[k + 2] = 0; data[k + 3] = 1;
+      k += 4;
+    }
+  }
+  if (R.farTex) R.farTex.needsUpdate = true;
 }
 
 
@@ -18200,7 +18237,11 @@ function _swRippleTick(dt) {
   if (game._xrBlurred) return;   
   
   if (!player || !player.position) return;
-  const px = player.position.x, pz = player.position.z;
+  
+  
+  
+  const _cineW = (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
+  const px = _cineW ? camera.position.x : player.position.x, pz = _cineW ? camera.position.z : player.position.z;
   
   const ddx = px - R.center.x, ddz = pz - R.center.y, rr = R.bounds * 0.25;
   if (ddx * ddx + ddz * ddz > rr * rr) {
@@ -18216,6 +18257,16 @@ function _swRippleTick(dt) {
     R.center.set(ncx, ncz);
     R.acc = R.step;                 
     _swRippleBakeMask();            
+  }
+  
+  
+  {
+    const FARSTEP = 4000;
+    const dfx = px - R.farCenter.x, dfz = pz - R.farCenter.y;
+    if (isNaN(R.farCenter.x) || dfx * dfx + dfz * dfz > FARSTEP * FARSTEP) {
+      R.farCenter.set(px, pz);
+      _swRippleBakeFarMask();
+    }
   }
   
   
@@ -18436,6 +18487,9 @@ function _swRippleTick(dt) {
       du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; 
       du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 2.4;   
       du.uMaskTex.value = R.maskTex;                                          
+      du.uFarMaskTex.value = R.farTex;                                        
+      du.uFarCenter.value.set(R.farCenter.x, R.farCenter.y);
+      du.uFarBounds.value = _SW_FARMASK_BOUNDS;
       du.uShoreSoft.value = (W2.shoreSoft != null) ? W2.shoreSoft : 0.05;     
       du.uShoreFade.value = (W2.shoreFade != null) ? W2.shoreFade : 1.0;      
     }
@@ -18447,8 +18501,10 @@ function _swRippleDispose() {
   const R = _swRipple;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
   try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   
+  try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
   R.gpu = null; R.heightVar = null; R.scale = 0; R.pending.length = 0; R.acc = 0;
   R.maskTex = null; R.maskData = null;
+  R.farTex = null; R.farData = null; R.farCenter.set(NaN, NaN);                   
 }
 
 
@@ -18609,7 +18665,7 @@ function _boidsVelFrag(count, mode) {
   ];
   return lines.filter(function (s) { return s !== ''; }).join('\n');
 }
-const _birdFlock = { gpu: null, posVar: null, velVar: null, mesh: null, geo: null, mat: null, count: 0, texW: 0, frame: 0, acc: 0, homeTex: null, posSeed: null, velSeed: null, homeCx: 1e9, homeCz: 1e9, T: null };
+const _birdFlock = { gpu: null, posVar: null, velVar: null, mesh: null, geo: null, mat: null, count: 0, texW: 0, frame: 0, acc: 0, homeTex: null, posSeed: null, velSeed: null, homeCx: 1e9, homeCz: 1e9, T: null, fadeT: 0 };
 
 
 
@@ -18642,7 +18698,7 @@ const _BIRD_VS = [
   '  vec3 up = cross(fwd, right);',
   '  vec3 lp = position;',
   '  float isTip = step(3.5, birdVertex)*step(birdVertex,4.5) + step(6.5, birdVertex)*step(birdVertex,7.5);',  
-  '  lp.y += isTip * sin(phase) * 13.0 * smoothstep(20.0, 120.0, spd);',               
+  '  lp.y += isTip * sin(phase) * 13.0 * max(smoothstep(20.0, 120.0, spd), e);',       
   '  vec3 worldPos = wp + right*lp.x + up*lp.y + fwd*lp.z;',                            
   '  vec3 toCam = normalize(cameraPosition - worldPos);',
   '  vShade = 0.5 + 0.5 * clamp(dot(up, toCam), -1.0, 1.0);',                          
@@ -18684,10 +18740,20 @@ function _birdComputePerches(cx, cz, count, T) {
     const k = i * 4;
     const a = Math.random() * 6.2831853, r = Math.sqrt(Math.random()) * patchR;          
     const px = bx + Math.cos(a) * r, pz = bz + Math.sin(a) * r;
-    let gy; try { gy = _stGroundYCarved(px, pz, T); } catch (_) { gy = bY; }
-    let f; try { f = _swForestAt(px, pz); } catch (_) { f = bScore; }
-    const inForest = (denseEnough && f > 0.30 && gy > WL + 20) ? 1 : 0;                   
-    out[k] = px; out[k + 1] = (inForest ? gy + 78 + Math.random() * 52 : Math.max(WL + 460, gy + 380)); out[k + 2] = pz; out[k + 3] = inForest;   
+    
+    
+    let inForest = 0, hy;
+    if (denseEnough) {
+      let f, patch;
+      try { f = _swForestAt(px, pz); } catch (_) { f = 0; }
+      try { patch = (typeof _stPatch === 'function') ? _stPatch(px, pz) : 1; } catch (_) { patch = 1; }
+      if (f > 0.42 && patch > 0.5) {
+        let gy; try { gy = _stGroundYCarved(px, pz, T); } catch (_) { gy = bY; }
+        if (gy > WL + 80) { inForest = 1; hy = gy + 80 + Math.random() * 45; }            
+      }
+    }
+    if (!inForest) hy = Math.max(WL + 520, bY + 360);                                     
+    out[k] = px; out[k + 1] = hy; out[k + 2] = pz; out[k + 3] = inForest;
   }
   return out;
 }
@@ -18710,6 +18776,7 @@ function _birdRehome(cx, cz) {
     _birdApplyPerches(F, _birdComputePerches(cx, cz, F.count, F.T || game._hubWaterT));
     F.gpu.renderTexture(F.posSeed, F.gpu.getCurrentRenderTarget(F.posVar));
     F.gpu.renderTexture(F.velSeed, F.gpu.getCurrentRenderTarget(F.velVar));
+    F.fadeT = 0;   
   } catch (_) {}
 }
 function _birdFlockInit(T) {
@@ -18778,14 +18845,14 @@ function _birdFlockInit(T) {
     const mat = new THREE.ShaderMaterial({
       uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
         texturePosition: { value: null }, textureVelocity: { value: null }, uTime: { value: 0 },
-        uColorTop: { value: new THREE.Color(0x2a2f3a) }, uColorBelly: { value: new THREE.Color(0x9aa6b4) }, uFade: { value: 1.0 },
+        uColorTop: { value: new THREE.Color(0x2a2f3a) }, uColorBelly: { value: new THREE.Color(0x9aa6b4) }, uFade: { value: 0.0 },
       }]),
-      vertexShader: _BIRD_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide,
+      vertexShader: _BIRD_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide, transparent: true, depthWrite: true,   
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false; mesh.position.set(0, 0, 0);   
     scene.add(mesh);
-    F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.count = count; F.texW = texW; F.frame = 0; F.acc = 0;
+    F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.count = count; F.texW = texW; F.frame = 0; F.acc = 0; F.fadeT = 0;   
   } catch (e) { try { console.warn('[birds] init exception', e); } catch (_) {} try { if (gpu && gpu.dispose) gpu.dispose(); } catch (_) {} _birdFlock.gpu = null; }
 }
 function _birdFlockTick(dt) {
@@ -18833,6 +18900,8 @@ function _birdFlockTick(dt) {
   mu.texturePosition.value = F.gpu.getCurrentRenderTarget(F.posVar).texture;
   mu.textureVelocity.value = F.gpu.getCurrentRenderTarget(F.velVar).texture;
   mu.uTime.value = _t;
+  F.fadeT = Math.min(1, (F.fadeT || 0) + dt * 1.8);   
+  mu.uFade.value = F.fadeT;
 }
 function _birdFlockDispose() {
   const F = _birdFlock;
@@ -19051,7 +19120,8 @@ function _swBuildHubWaterDispGet(WL) {
         uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 },
         
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 2.4 },
-        uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 } }   
+        uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 },   
+        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -19085,6 +19155,7 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade;',   
+      'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
@@ -19135,7 +19206,14 @@ function _swBuildHubWaterDispGet(WL) {
       
       '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',
       '  float shoreA = smoothstep(0.0, max(uShoreSoft, 0.001), shDepth);',
-      '  float shoreFoam = (1.0 - smoothstep(0.0, 0.16, shDepth)) * vWinFade * (0.35 + 0.65 * spd);',   
+      
+      
+      '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
+      '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',   
+      '  float farDepth = mix(1.0, texture2D(uFarMaskTex, clamp(fUv, 0.001, 0.999)).g, fIn);',
+      '  float farFoam = (1.0 - smoothstep(0.0, 0.16, farDepth)) * fIn * (0.35 + 0.65 * spd) * edgeFade;',   
+      '  float nearFoam = (1.0 - smoothstep(0.0, 0.16, shDepth)) * vWinFade * (0.35 + 0.65 * spd);',   
+      '  float shoreFoam = max(nearFoam, farFoam * (1.0 - vWinFade));',                  
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFade);',                            
       '  gl_FragColor = vec4(c, 0.93 * mix(1.0, shoreA, uShoreFade) * edgeFade);',   
       '  #include <fog_fragment>',
@@ -38092,6 +38170,7 @@ function _lssStartSpectatorCinematic() {
   if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
   if (typeof game === 'undefined' || !game) return false;
   if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return false;
+  try { _setArenaGridVisible(false); } catch (_) {}   
 
   const TA = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_A !== 'undefined') ? LSS.TEAM_FLEET_A : 2;
   const TB = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_B !== 'undefined') ? LSS.TEAM_FLEET_B : 3;
@@ -38416,6 +38495,7 @@ function updatePlayerMovement(dt) {
     input.mouseDX = 0; input.mouseDY = 0;
     camera.quaternion.setFromEuler(player.euler);
     camera.position.copy(player.position);
+    _lssApplyShipRig(dt);   
     return;
   }
 
@@ -38732,6 +38812,12 @@ function updatePlayerMovement(dt) {
   
   
   
+  _lssApplyShipRig(dt);
+}
+
+
+
+function _lssApplyShipRig(dt) {
   if (player.mesh) {   
     player.mesh.position.copy(player.position);
     player.mesh.quaternion.copy(camera.quaternion);
@@ -45853,31 +45939,28 @@ function drawCircumpunctHUD() {
 
   
   
-  const r8 = 460;
-  const qAngles = [0, Math.PI / 2, Math.PI, Math.PI * 1.5];
-  const rot3 = t * 0.03;
-
-  
-  
-  
-  ctx.fillStyle = _HUD_C.w_005;
-  ctx.strokeStyle = _HUD_C.w_01;
-  ctx.lineWidth = 1;
-  const _tHalf = t * 0.5;
-  for (let qi = 0; qi < 4; qi++) {
-    const qa = qAngles[qi] + rot3;
-    const _qc = Math.cos(qa), _qs = Math.sin(qa);
-    const qx = cx + _qc * r8;
-    const qy = cy + _qs * r8;
-    const size = 28 + Math.sin(_tHalf + qi) * 6;
-    const _half = size * 0.5;
-
-    ctx.save();
-    ctx.translate(qx, qy);
-    ctx.rotate(qa + Math.PI / 4);
-    ctx.fillRect(-_half, -_half, size, size);
-    ctx.strokeRect(-_half, -_half, size, size);
-    ctx.restore();
+  if (typeof window !== 'undefined' && window.__hudSquares) {
+    const r8 = 460;
+    const qAngles = [0, Math.PI / 2, Math.PI, Math.PI * 1.5];
+    const rot3 = t * 0.03;
+    ctx.fillStyle = _HUD_C.w_005;
+    ctx.strokeStyle = _HUD_C.w_01;
+    ctx.lineWidth = 1;
+    const _tHalf = t * 0.5;
+    for (let qi = 0; qi < 4; qi++) {
+      const qa = qAngles[qi] + rot3;
+      const _qc = Math.cos(qa), _qs = Math.sin(qa);
+      const qx = cx + _qc * r8;
+      const qy = cy + _qs * r8;
+      const size = 28 + Math.sin(_tHalf + qi) * 6;
+      const _half = size * 0.5;
+      ctx.save();
+      ctx.translate(qx, qy);
+      ctx.rotate(qa + Math.PI / 4);
+      ctx.fillRect(-_half, -_half, size, size);
+      ctx.strokeRect(-_half, -_half, size, size);
+      ctx.restore();
+    }
   }
 
   
@@ -57164,20 +57247,25 @@ function gameLoop(timestamp) {
       _swU.uTime.value += dt;
       
       
-      _swU.uCam.value.set(player.position.x, player.position.y, player.position.z);
+      
+      
+      const _cineActive = (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
+      const _fX = _cineActive ? camera.position.x : player.position.x;
+      const _fZ = _cineActive ? camera.position.z : player.position.z;
+      _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
       if (game._clipWantHub) {   
         if (!_clipmap.on) {
-          try { _clipBuild(); for (const _L of _clipmap.levels) { const _st = 2 * _L.spacing; _L.cx = Math.round(player.position.x / _st) * _st; _L.cz = Math.round(player.position.z / _st) * _st; _clipBakeLevel(_L); _L.mesh.position.set(_L.cx, 0, _L.cz); _L.mesh.visible = true; } _clipmap.on = true; if (game.sandwichChunks) for (const _c of game.sandwichChunks.values()) { if (_c.ground) { try { if (_c.ground.parent) scene.remove(_c.ground); if (_c.ground.geometry) _c.ground.geometry.dispose(); } catch (_) {} _c.ground = null; } } } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }   
-        } else { try { _clipUpdate(player.position.x, player.position.z); } catch (_) {} }
+          try { _clipBuild(); for (const _L of _clipmap.levels) { const _st = 2 * _L.spacing; _L.cx = Math.round(_fX / _st) * _st; _L.cz = Math.round(_fZ / _st) * _st; _clipBakeLevel(_L); _L.mesh.position.set(_L.cx, 0, _L.cz); _L.mesh.visible = true; } _clipmap.on = true; if (game.sandwichChunks) for (const _c of game.sandwichChunks.values()) { if (_c.ground) { try { if (_c.ground.parent) scene.remove(_c.ground); if (_c.ground.geometry) _c.ground.geometry.dispose(); } catch (_) {} _c.ground = null; } } } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }   
+        } else { try { _clipUpdate(_fX, _fZ); } catch (_) {} }
       }
       if (game._swPreloading) {
-        var _plBuilt = updateSandwichStream(player.position.x, player.position.z, 28, 14, 14);   
+        var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);   
         game._swPreloadFrames = (game._swPreloadFrames || 0) + 1;
         game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
         if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
       } else {   
-        updateSandwichStream(player.position.x, player.position.z, (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') ? 1 : undefined);   
+        updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') ? 1 : undefined);   
       }
       try { _swUpdateHubWater(); } catch (_) {}   
       try { _swRippleTick(dt); } catch (_) {}   

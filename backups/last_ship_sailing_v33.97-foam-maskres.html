@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v33.98</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.98","short_name":"LSS%20v33.98","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v33.97</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v33.97","short_name":"LSS%20v33.97","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3290,7 +3290,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '33.98';
+const LSS_BUILD = '33.97';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18143,8 +18143,6 @@ function _swWaterReflectShader() {
 const _SW_RIPPLE_RES = 128;          // heightmap texels/side (keep in sync with RIPPLE_RES in the frag below)
 const _SW_RIPPLE_BOUNDS = 4000;      // world units the heightmap window spans (±2000 around the ship)
 const _SW_MASK_RES = 96;             // (v33.97) shoreline/depth MASK texels/side — DECOUPLED from the sim res so the re-bake is 96²=9216 carved calls (was 128²=16384) every recenter: kills most of the "foam loads/pops in" hitch. Mask is sampled by continuous world-UV + LinearFilter so res is look-invariant (texel ~42u vs ~31u). If a residual hitch remains, amortize the bake (verified design on file); if the surf line softens, raise to 112.
-const _SW_FARMASK_RES = 96;          // (v33.98 LOD foam) COARSE FAR depth mask texels/side — a 2nd mask spanning the whole visible water disc so shoreline foam EXISTS EVERYWHERE (coarse far), killing the "foam pops in at the window edge" the near ±2000u mask can't reach. Sampled by world-UV + LinearFilter (look-invariant). foam = max(nearFoam, farFoam*(1-winFade)) so the fine near mask wins close-in (crisp surf line) and the coarse far mask is only the base beyond the window = a smooth "low-res far, high-res close" LOD crossfade, not a pop.
-const _SW_FARMASK_BOUNDS = 24000;    // (v33.98) ±12000u world span for the FAR mask — over-covers the ~14500u fog edge (edgeFade fully dissolves water by then) so a far lake never runs out of foam before it visually fades. 96²/24000u ≈ 250u/texel : plenty for a SOFT far surf line only ever seen at distance.
 const _swRipple = {
   gpu: null, heightVar: null,
   center: new THREE.Vector2(0, 0),   // world XZ of the window centre (x=worldX, y=worldZ)
@@ -18152,8 +18150,7 @@ const _swRipple = {
   pending: [],                       // ring buffer of {wx,wz,r,a} ABSOLUTE-world seeds, cap 8
   bounds: _SW_RIPPLE_BOUNDS, scale: 0,
   scrollX: 0, scrollZ: 0,            // (v33.31) pending one-step wavefield scroll (uv units) to re-anchor ripples across a recenter
-  maskTex: null, maskData: null,     // (v33.20) land/water mask (R=water, G=depth) for the cymatic boundary
-  farTex: null, farData: null, farCenter: new THREE.Vector2(NaN, NaN)   // (v33.98 LOD foam) coarse far depth mask + its window centre (NaN forces the first bake)
+  maskTex: null, maskData: null      // (v33.20) land/water mask (R=water, G=depth) for the cymatic boundary
 };
 const _SW_RIPPLE_FRAG = [
   '#include <common>',               // provides PI ; GPUComputationRenderer provides `heightmap` + the `resolution` define
@@ -18227,19 +18224,12 @@ function _swRippleInit() {
     maskTex.wrapS = maskTex.wrapT = THREE.ClampToEdgeWrapping; maskTex.needsUpdate = true;
     v.material.uniforms.uMaskTex = { value: maskTex };
     _swRipple.maskData = maskData; _swRipple.maskTex = maskTex;
-    // (v33.98 LOD foam) COARSE FAR depth mask — same format/filter as the near mask, but a much bigger window so far lakes already carry foam (no window-edge pop).
-    const farData = new Float32Array(_SW_FARMASK_RES * _SW_FARMASK_RES * 4);
-    const farTex = new THREE.DataTexture(farData, _SW_FARMASK_RES, _SW_FARMASK_RES, THREE.RGBAFormat, THREE.FloatType);
-    farTex.minFilter = THREE.LinearFilter; farTex.magFilter = THREE.LinearFilter;
-    farTex.wrapS = farTex.wrapT = THREE.ClampToEdgeWrapping; farTex.needsUpdate = true;
-    _swRipple.farData = farData; _swRipple.farTex = farTex;
     const err = gpu.init();
     if (err) { try { console.warn('[water] GPGPU init failed, analytic fallback:', err); } catch (_) {} return; }
     _swRipple.gpu = gpu; _swRipple.heightVar = v; _swRipple.acc = 0; _swRipple.pending.length = 0;
     _swRipple.center.set((player && player.position) ? player.position.x : 0, (player && player.position) ? player.position.z : 0);
     _swRipple.scale = 64;   // reflection-normal perturbation strength (tuned in preview)
     _swRippleBakeMask();    // (v33.20) initial shoreline mask for the current window
-    _swRipple.farCenter.set(_swRipple.center.x, _swRipple.center.y); _swRippleBakeFarMask();   // (v33.98) seed the far mask so the first frame already has coarse shoreline foam (no first-flight pop)
     // (v33.83) DEFAULT the displaced water ON now that the GPGPU sim is confirmed up (reflection tier only).
     // The user committed to it ; set window.__waterDisp = 0 to A/B back to the flat Reflector. Only defaulted
     // after a SUCCESSFUL init so the flat mirror is never masked with no disp mesh to replace it.
@@ -18445,32 +18435,6 @@ function _swRippleBakeMask() {
   }
   if (R.maskTex) R.maskTex.needsUpdate = true;
 }
-// (v33.98 LOD foam) Bake the COARSE FAR depth mask over the ±12000u window centred on R.farCenter. Identical body to
-// _swRippleBakeMask but its own (coarser) RES/BOUNDS/centre, and only the G=depth channel matters (the far path reads .g).
-// Same per-cell cost (9216 carved calls) but fired ~8× rarer (every FARSTEP=4000u of travel) — far foam is coarse so the
-// centre can lag thousands of units with no visible shift. G uses the SAME depth encoding (d/400) so the near/far max() is seamless.
-function _swRippleBakeFarMask() {
-  const R = _swRipple;
-  if (!R.farData || typeof _stGroundYCarved !== 'function') return;
-  const T = game._hubWaterT; if (!T) return;
-  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
-  const RES = _SW_FARMASK_RES, B = _SW_FARMASK_BOUNDS;
-  const cx = R.farCenter.x, cz = R.farCenter.y, data = R.farData;
-  let k = 0;
-  for (let j = 0; j < RES; j++) {
-    const wz = cz + ((j + 0.5) / RES - 0.5) * B;
-    for (let i = 0; i < RES; i++) {
-      const wx = cx + ((i + 0.5) / RES - 0.5) * B;
-      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
-      const d = WL - gy;                               // > 0 = water depth at this cell
-      data[k] = 0;
-      data[k + 1] = Math.max(0, Math.min(1, d / 400)); // G = depth norm (the ONLY channel the far foam path reads)
-      data[k + 2] = 0; data[k + 3] = 1;
-      k += 4;
-    }
-  }
-  if (R.farTex) R.farTex.needsUpdate = true;
-}
 // (v33.67) Per-ship water FOOTPRINT from the real chassis hull dims (collisionRadius = hullLength*0.45,
 // matches the physics at the player-collision site). Replaces the old global HALF=70 / mass=1.6 so a SMALL
 // hull (Frigate: Slayer/Puncture) cuts a TIGHT, low wake and a big hull (Dreadnought) a broad one — fixing
@@ -18521,11 +18485,7 @@ function _swRippleTick(dt) {
   if (game._xrBlurred) return;   // (v33.86) freeze the water sim while the VR system overlay is up (anti-flicker)
   // (v33.38) DON'T freeze the wave sim while submerged: the surface is still visible from BELOW (looking up), so keep stepping the GPGPU sim every frame. The wake block below already self-skips seeding when the hull is deep (above > -60 gate) and _swSpawnSplash self-guards on _swSubmerged, so no spurious underwater spray.
   if (!player || !player.position) return;
-  // (v33.98) during the intro cinematic the ship is FROZEN at spawn while the camera flies — track the CAMERA
-  // so the ripple/shoreline-foam window follows the flyover instead of being left as a disturbed square back at
-  // spawn (the "water glitch during the cinematic"). The wake block below still keys off the (frozen) ship, so no spurious wake.
-  const _cineW = (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
-  const px = _cineW ? camera.position.x : player.position.x, pz = _cineW ? camera.position.z : player.position.z;
+  const px = player.position.x, pz = player.position.z;
   // recenter the window on the ship past a 25%-of-window move (avoid per-frame texel scroll)
   const ddx = px - R.center.x, ddz = pz - R.center.y, rr = R.bounds * 0.25;
   if (ddx * ddx + ddz * ddz > rr * rr) {
@@ -18541,16 +18501,6 @@ function _swRippleTick(dt) {
     R.center.set(ncx, ncz);
     R.acc = R.step;                 // run the scroll on the sim step this frame (no 1-frame teleport flash)
     _swRippleBakeMask();            // (v33.20) re-mask on recenter
-  }
-  // (v33.98 LOD foam) re-bake the COARSE FAR mask on a much larger cadence (every FARSTEP=4000u of travel, ~8× rarer than
-  // the near recenter). Separate centre, intentionally lazy — far foam is coarse so the window can drift without a visible shift.
-  {
-    const FARSTEP = 4000;
-    const dfx = px - R.farCenter.x, dfz = pz - R.farCenter.y;
-    if (isNaN(R.farCenter.x) || dfx * dfx + dfz * dfz > FARSTEP * FARSTEP) {
-      R.farCenter.set(px, pz);
-      _swRippleBakeFarMask();
-    }
   }
   // SHIP WAKE : the ONLY ambient ripple source — the water is STILL until something touches it
   // (world.html is windless). Seed ONLY when the ship is actually MOVING low over the surface ; a
@@ -18771,9 +18721,6 @@ function _swRippleTick(dt) {
       du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; // slope-shear strength (reflection bend over crests)
       du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 2.4;   // (v33.87) reflection exposure (1.7->2.4 : the raw-rendered reflection read "like a dark shadow" when calm ; brighter now, the bounded exp-curve still can't blow out the sky). window.__water.reflBright to tune.
       du.uMaskTex.value = R.maskTex;                                          // (v33.82) baked land/water depth mask -> soft shoreline
-      du.uFarMaskTex.value = R.farTex;                                        // (v33.98 LOD foam) coarse far depth mask -> base foam everywhere (no window-edge pop)
-      du.uFarCenter.value.set(R.farCenter.x, R.farCenter.y);
-      du.uFarBounds.value = _SW_FARMASK_BOUNDS;
       du.uShoreSoft.value = (W2.shoreSoft != null) ? W2.shoreSoft : 0.05;     // soft-shore band width (normalized depth ; bigger = wider fade)
       du.uShoreFade.value = (W2.shoreFade != null) ? W2.shoreFade : 1.0;      // 0 = hard waterline (old), 1 = full soft fade
     }
@@ -18785,10 +18732,8 @@ function _swRippleDispose() {
   const R = _swRipple;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
   try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   // (v33.20) free the mask DataTexture
-  try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      // (v33.98) free the far mask DataTexture
   R.gpu = null; R.heightVar = null; R.scale = 0; R.pending.length = 0; R.acc = 0;
   R.maskTex = null; R.maskData = null;
-  R.farTex = null; R.farData = null; R.farCenter.set(NaN, NaN);                   // (v33.98) NaN reset so a hub re-entry re-bakes cleanly
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // (v33.89) GPGPU BIRD FLOCK — ambient boids over the hub, reusing the water's
@@ -18982,7 +18927,7 @@ const _BIRD_VS = [
   '  vec3 up = cross(fwd, right);',
   '  vec3 lp = position;',
   '  float isTip = step(3.5, birdVertex)*step(birdVertex,4.5) + step(6.5, birdVertex)*step(birdVertex,7.5);',  // wing-tip verts 4 + 7
-  '  lp.y += isTip * sin(phase) * 13.0 * max(smoothstep(20.0, 120.0, spd), e);',       // (v33.98) flap while flying OR still excited (e>0) -> keeps flapping all the way back DOWN to the trees ; only the fully-settled (spd~0 AND e~0) fold
+  '  lp.y += isTip * sin(phase) * 13.0 * smoothstep(20.0, 120.0, spd);',               // (v33.94) ALWAYS flap when flying (any airborne bird is above min-speed) ; only the truly-perched (spd~0) fold
   '  vec3 worldPos = wp + right*lp.x + up*lp.y + fwd*lp.z;',                            // local silhouette -> world via the heading basis
   '  vec3 toCam = normalize(cameraPosition - worldPos);',
   '  vShade = 0.5 + 0.5 * clamp(dot(up, toCam), -1.0, 1.0);',                          // belly (seen from below) -> back (from above)
@@ -19404,8 +19349,7 @@ function _swBuildHubWaterDispGet(WL) {
         uSprayBreak: { value: 1.0 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.45 }, uSprayFreq: { value: 0.05 },
         // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 2.4 },
-        uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 },   // (v33.82) shoreline soft-fade
-        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 } }   // (v33.98 LOD foam) coarse far depth mask : base foam everywhere
+        uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 } }   // (v33.82) shoreline soft-fade
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -19439,7 +19383,6 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright;',   // (v33.76) P4 real reflection
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade;',   // (v33.82) shoreline softening
-      'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   // (v33.98 LOD foam) coarse far depth mask sampled by world-UV (base foam everywhere, no window-edge pop)
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
@@ -19490,14 +19433,7 @@ function _swBuildHubWaterDispGet(WL) {
       // far water (window edge) opaque ; a null mask samples white -> depth 1 -> opaque (safe). uShoreFade=0 = old hard edge.
       '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',
       '  float shoreA = smoothstep(0.0, max(uShoreSoft, 0.001), shDepth);',
-      // (v33.98 LOD foam) "low-res far, high-res close" : the near mask (fine, ±2000u) gives a CRISP surf line inside its
-      // window; a 2nd COARSE far mask (world-UV, ±12000u) gives BASE foam everywhere beyond so distant lakes don't pop in.
-      '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
-      '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',   // 0 outside the far window -> depth 1 (deep, no spurious horizon foam)
-      '  float farDepth = mix(1.0, texture2D(uFarMaskTex, clamp(fUv, 0.001, 0.999)).g, fIn);',
-      '  float farFoam = (1.0 - smoothstep(0.0, 0.16, farDepth)) * fIn * (0.35 + 0.65 * spd) * edgeFade;',   // coarse base surf line, dissolves into the haze via edgeFade (no horizon ring)
-      '  float nearFoam = (1.0 - smoothstep(0.0, 0.16, shDepth)) * vWinFade * (0.35 + 0.65 * spd);',   // (unchanged) crisp window-gated near surf line
-      '  float shoreFoam = max(nearFoam, farFoam * (1.0 - vWinFade));',                  // (v33.98) fine near wins inside the window (far fully suppressed there = never fattens the crisp line); coarse far is the base beyond — smooth LOD crossfade, no pop
+      '  float shoreFoam = (1.0 - smoothstep(0.0, 0.16, shDepth)) * vWinFade * (0.35 + 0.65 * spd);',   // (v33.83) wider + value-noise-broken = a SOFT textured surf line, not a hard white band
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFade);',                            // LIT foam (foamCol) + lower strength (was 0.45 flat white)
       '  gl_FragColor = vec4(c, 0.93 * mix(1.0, shoreA, uShoreFade) * edgeFade);',   // (v33.84) * edgeFade : water fades into the distant haze, no hard square boundary
       '  #include <fog_fragment>',
