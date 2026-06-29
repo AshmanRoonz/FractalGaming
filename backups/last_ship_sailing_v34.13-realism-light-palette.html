@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v34.15</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.15","short_name":"LSS%20v34.15","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v34.13</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.13","short_name":"LSS%20v34.13","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"landscape","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3217,25 +3217,29 @@ window.lssAutoFullscreen = function () {
     if (!(document.fullscreenElement || document.webkitFullscreenElement)) {
       _fsP = window.lssRequestFullscreen();
     }
-    // (v34.15) Landscape lock moved out -> window._lssLockLandscape : LOCKED at enterShipSelect, UNLOCKED at
-    // gameplay start. So SHIP-SELECT is forced landscape on mobile, but GAMEPLAY is NOT forced. lssAutoFullscreen
-    // now only requests fullscreen.
-    void _fsP;
-  } catch (_) {}
-};
-// (v34.15) Mobile orientation control. want=true -> (coarse-pointer/touch only) ensure fullscreen then lock
-// landscape ; want=false -> release. iOS Safari has no screen.orientation.lock -> silent no-op. Desktop/VR excluded.
-window._lssLockLandscape = function (want) {
-  try {
-    var touch = (navigator.maxTouchPoints > 0) && (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-    if (!touch) return;
-    var so = screen.orientation; if (!so) return;
-    if (want) {
-      var doLock = function () { try { if (typeof so.lock === 'function') { var lp = so.lock('landscape'); if (lp && typeof lp.catch === 'function') lp.catch(function () {}); } } catch (_) {} };
-      if (document.fullscreenElement || document.webkitFullscreenElement) { doLock(); }
-      else { var p = (window.lssRequestFullscreen ? window.lssRequestFullscreen() : null); if (p && typeof p.then === 'function') { p.then(doLock, doLock); } else { doLock(); } }
-    } else {
-      if (typeof so.unlock === 'function') so.unlock();
+    // (v33.99) MOBILE LANDSCAPE LOCK at ship-select. lssAutoFullscreen runs on the
+    // play-button user gesture that leads straight into ship-select, and we just
+    // requested fullscreen above, so this is the one permitted moment to lock
+    // (Android Chrome requires fullscreen + a gesture). We lock ONCE and never
+    // unlock (the post-match unlock in returnToShipSelect was removed) so the
+    // session stays landscape. iOS Safari has no screen.orientation.lock -> the
+    // typeof guard makes it a silent no-op ; desktop/VR are excluded by the
+    // coarse-pointer touch check. _LSS_IS_MOBILE lives in the module scope, not
+    // this plain <script>, so the same detection is inlined here (ES5).
+    var _touch = (navigator.maxTouchPoints > 0) &&
+      (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    if (_touch) {
+      var _lock = function () {
+        try {
+          var so = screen.orientation;
+          if (so && typeof so.lock === 'function') {
+            var lp = so.lock('landscape');
+            if (lp && typeof lp.catch === 'function') lp.catch(function () {});
+          }
+        } catch (_) {}
+      };
+      if (_fsP && typeof _fsP.then === 'function') { _fsP.then(_lock, _lock); }
+      else { _lock(); }
     }
   } catch (_) {}
 };
@@ -3304,7 +3308,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '34.15';
+const LSS_BUILD = '34.13';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -7065,7 +7069,6 @@ function _updateShipSelectRoom() {
 }
 
 function enterShipSelect() {
-  try { if (window._lssLockLandscape) window._lssLockLandscape(true); } catch (_) {}   // (v34.15) ship-select = forced landscape on mobile
   document.getElementById('lobby').style.display = 'none';
   const sel = document.getElementById('ship-select');
   sel.classList.add('active');
@@ -16339,8 +16342,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     lensDirt: { value: 0.55 },          // procedural dirt response strength
     exposure: { value: 1.05 },
     time: { value: 0.0 },
-    godrayStrength: { value: 0.40 },
-    gradeSat: { value: 1.0 }, gradeContrast: { value: 1.0 }, gradeWarmth: { value: 1.0 }, gradeLift: { value: 0.0 }
+    godrayStrength: { value: 0.40 }
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
@@ -16362,7 +16364,6 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     uniform float time;
     // Generic-emitter god-ray strength uniform.
     uniform float godrayStrength;
-    uniform float gradeSat, gradeContrast, gradeWarmth, gradeLift;
     varying vec2 vUv;
 
     // Narkowicz 2015 ACES filmic tonemap (cheap, cinematic)
@@ -16481,16 +16482,10 @@ postFX.compositeMat = new THREE.ShaderMaterial({
       // ACES filmic tonemap (cinematic highlight rolloff)
       col = acesFilmic(col);
 
-      // Color grade (v34.14): green-weighted DESATURATION + S-curve contrast + shadow lift, THEN the cool/warm tint.
-      // Identity at gradeSat=1, gradeContrast=1, gradeLift=0, gradeWarmth=1.
+      // Color grade: lift shadows toward cool teal, push highlights warm
       float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-      float greenBias = clamp((col.g - max(col.r, col.b)) * 1.5, 0.0, 1.0);     // foliage loses chroma more than sky/skin
-      float desat = clamp((1.0 - gradeSat) * (1.0 + greenBias * 0.4), 0.0, 1.0);
-      col = mix(col, vec3(lum), desat);
-      col = clamp(mix(vec3(0.5), col, gradeContrast), 0.0, 4.0);               // filmic S-curve about 0.5
-      col = col + gradeLift * (1.0 - col);                                      // raised black floor (hazy air)
-      vec3 shadowsTint = mix(vec3(1.0), vec3(0.78, 0.94, 1.05), gradeWarmth);   // cool
-      vec3 highlightsTint = mix(vec3(1.0), vec3(1.06, 1.02, 0.92), gradeWarmth);// warm
+      vec3 shadowsTint = vec3(0.78, 0.94, 1.05);  // cool
+      vec3 highlightsTint = vec3(1.06, 1.02, 0.92); // warm
       vec3 graded = col * mix(shadowsTint, highlightsTint, smoothstep(0.0, 0.7, lum));
       col = mix(col, graded, 0.55);
 
@@ -16765,15 +16760,6 @@ function renderPostFX() {
   }
 
   postFX.compositeMat.uniforms.time.value = game.time;
-  { // (v34.14) hub colour grade : desaturate the cartoon greens + filmic contrast/lift. Combat = neutral (1/1/1/0).
-    const _isHub = !!(game.sandwichTerrain && game.sandwichTerrain.biome === 'mossy');
-    const _gr = window.__grade || {}; const _cm = postFX.compositeMat.uniforms;
-    _cm.gradeSat.value      = (_gr.sat      != null) ? _gr.sat      : (_isHub ? 0.88  : 1.0);
-    _cm.gradeContrast.value = (_gr.contrast != null) ? _gr.contrast : (_isHub ? 1.06  : 1.0);
-    _cm.gradeWarmth.value   = (_gr.warmth   != null) ? _gr.warmth   : 1.0;
-    _cm.gradeLift.value     = (_gr.lift     != null) ? _gr.lift     : (_isHub ? 0.015 : 0.0);
-    if (window.__exposure != null) _cm.exposure.value = window.__exposure;
-  }
 
   // 1. Render scene to offscreen target
   renderer.setRenderTarget(postFX.rtScene);
@@ -16849,26 +16835,7 @@ function _shouldUseCineFXFrame() {
   }
   return true;
 }
-// (v34.14) The VR + potato render paths do a bare renderer.render with NO composite/grade = genuinely raw.
-// Give just those paths ACES tonemapping directly (the only stereo-safe tonemap). Hub-only, change-guarded.
-function _lssHubDirectTonemap() {
-  const hub = !!(game.sandwichTerrain && game.sandwichTerrain.biome === 'mossy');
-  const raw = hub && ((typeof isXRPresenting === 'function' && isXRPresenting()) || (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()));
-  const want = raw ? 1 : 0;
-  if (_lssHubDirectTonemap._on === want) return;
-  if (raw) {
-    _lssHubDirectTonemap._savedTM = renderer.toneMapping;
-    _lssHubDirectTonemap._savedEx = renderer.toneMappingExposure;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = (window.__exposure != null ? window.__exposure : 0.95);
-  } else if (_lssHubDirectTonemap._on === 1) {
-    renderer.toneMapping = (_lssHubDirectTonemap._savedTM != null ? _lssHubDirectTonemap._savedTM : THREE.NoToneMapping);
-    renderer.toneMappingExposure = (_lssHubDirectTonemap._savedEx != null ? _lssHubDirectTonemap._savedEx : 1.0);
-  }
-  _lssHubDirectTonemap._on = want;
-}
 function renderFrame() {
-  try { _lssHubDirectTonemap(); } catch (_) {}
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -17516,8 +17483,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uCam:{value:new THREE.Vector3()}, uFadeA:{value:1600}, uFadeB:{value:2500}, uTreeFadeA:{value:3000}, uTreeFadeB:{value:4200},
                uColGrass:{value:new THREE.Color(0x5fae4e)}, uColRock:{value:new THREE.Color(0x6b6f74)},
                uColSnow:{value:new THREE.Color(0xeef2f5)}, uColMoss:{value:new THREE.Color(0x3f5e26)},
-               uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50}, uRocky:{value:0}, uGlitch:{value:0}, uGold:{value:0}, uCrystal:{value:0}, uMossy:{value:0},
-               uAerial:{value:0.0}, uAerialStart:{value:1200}, uAerialFar:{value:6500}, uAerialColor:{value:new THREE.Color(0xb4c8da)} };
+               uSlopeGrass:{value:0.82}, uSlopeRock:{value:0.50}, uRocky:{value:0}, uGlitch:{value:0}, uGold:{value:0}, uCrystal:{value:0}, uMossy:{value:0} };
 function _swSyncFX() {
   const T = game.sandwichTerrain; if (!T) return;
   _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
@@ -17527,14 +17493,6 @@ function _swSyncFX() {
   _swU.uGold.value = (T.biome === 'goldmine') ? 1 : 0;      // (v32.84) gold-ore veins embedded in the rock
   _swU.uCrystal.value = (T.biome === 'crystalcave') ? 1 : 0; // (v32.85) glowing crystal veins (cyan↔violet)
   _swU.uMossy.value = (T.biome === 'mossy') ? 1 : 0;          // (v33.01) moss patches climbing the mountain faces
-  { const _ag = window.__aerial || {}; const _at = ((typeof isStandaloneQuest==='function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE)) ? 0.6 : 1.0;   // (v34.14) aerial-perspective haze
-    if (T.biome === 'mossy') {
-      _swU.uAerial.value = (_ag.strength != null ? _ag.strength : 0.55 * _at);
-      _swU.uAerialStart.value = (_ag.start != null ? _ag.start : 1200);
-      _swU.uAerialFar.value = (_ag.far != null ? _ag.far : _swHubView() * _SW_CHUNK * 0.85);
-      if (scene.fog && scene.fog.color) _swU.uAerialColor.value.copy(scene.fog.color);
-    } else { _swU.uAerial.value = 0; }
-  }
   const _P = _swPal(T);
   _swU.uColGrass.value.set(_P.tGrass !== undefined ? _P.tGrass : 0x5fae4e);
   _swU.uColRock.value.set(_P.tRock !== undefined ? _P.tRock : 0x6b6f74);
@@ -17565,13 +17523,6 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uSmooth = clipAtlas ? (window.__smoothClipU || (window.__smoothClipU = { value: 1.0 })) : (window.__smoothStreamU || (window.__smoothStreamU = { value: 0.0 }));
     sh.uniforms.uCam = _swU.uCam;
     sh.uniforms.uDetail = (window.__terrainDetailU || (window.__terrainDetailU = { value: 1.0 }));
-    sh.uniforms.uAerial=_swU.uAerial; sh.uniforms.uAerialStart=_swU.uAerialStart; sh.uniforms.uAerialFar=_swU.uAerialFar; sh.uniforms.uAerialColor=_swU.uAerialColor;
-    if (!window.__terrainAOU) { var _aoDef=0.55, _satDef=0.40;
-      if ((typeof QUALITY!=='undefined' && QUALITY.isPotato && QUALITY.isPotato()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE) || (typeof isStandaloneQuest==='function' && isStandaloneQuest())) { _aoDef=0.0; _satDef=0.28; }
-      else if (!(typeof QUALITY!=='undefined' && QUALITY.isUltra && QUALITY.isUltra())) { _aoDef=0.40; }
-      window.__terrainAOU={value:_aoDef}; window.__terrainSatU={value:_satDef};
-    }
-    sh.uniforms.uAO=window.__terrainAOU; sh.uniforms.uSat=window.__terrainSatU;
     if (clipAtlas) {
       // (clipmap S4) VTF-displace the fixed ring grid (verts are in CELL units, mesh scale
       // (spacing,1,spacing)) from this level's height atlas, then write WORLD-space vWY/vWPos so the
@@ -17586,7 +17537,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
@@ -17594,7 +17545,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       +sh.fragmentShader;
     // ground surface: grass on gentle slopes, bare rock on steep faces, snow on peaks, with a mossy mottle
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
-      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(0.92+0.14*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n diffuseColor.rgb=terr;\n }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(0.92+0.14*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n diffuseColor.rgb=terr;\n }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
@@ -20427,8 +20378,6 @@ function _clipMat() {
 window.__smoothTerrain = function (on) { const u = (window.__smoothClipU || (window.__smoothClipU = { value: 1.0 })); if (on === undefined) return u.value; u.value = on ? 1.0 : 0.0; return u.value; };
 // (v34.12) live strength for the fractal surface detail (0 = off / smooth-only, 1 = default, higher = rougher).
 window.__terrainDetail = function (v) { const u = (window.__terrainDetailU || (window.__terrainDetailU = { value: 1.0 })); if (v === undefined) return u.value; u.value = Math.max(0.0, v); return u.value; };
-window.__terrainAO  = function (v) { const u = (window.__terrainAOU  || (window.__terrainAOU  = { value: 0.55 })); if (v === undefined) return u.value; u.value = Math.max(0, Math.min(2, v)); return u.value; };
-window.__terrainSat = function (v) { const u = (window.__terrainSatU || (window.__terrainSatU = { value: 0.40 })); if (v === undefined) return u.value; u.value = Math.max(0, Math.min(1, v)); return u.value; };
 
 // (S3) FULL bake : fill the whole atlas under the TOROIDAL invariant — texel (gx mod R, gz mod R)
 // always holds the carved height at GLOBAL cell (gx,gz), independent of where the window sits. Used
@@ -37644,7 +37593,6 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
-    try { if (window._lssLockLandscape) window._lssLockLandscape(false); } catch (_) {}   // (v34.15) gameplay is NOT orientation-forced
     // (perf 2026-06-12) Pin combat-effect programs in the live scene env.
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
     // Reactive band: fresh match start, kick off warmup pattern.
@@ -44207,7 +44155,6 @@ function updateRoundSystem(dt) {
     if (game.warmupTimer <= 0 && !selectActive) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
-      try { if (window._lssLockLandscape) window._lssLockLandscape(false); } catch (_) {}   // (v34.15) gameplay is NOT orientation-forced
       try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}   // (v32.95) end warp-speed — the next leg is live (no-op outside campaign)
       // (v32.13) No view snap at FIGHT. The spawn-time facing already aims
       // the player at the enemy during the 3-2-1, so re-facing here just
