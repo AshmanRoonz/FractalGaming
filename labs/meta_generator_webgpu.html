@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>meta-generator — a generator of field-generators · webgpu</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body{margin:0;height:100%;background:#05070c;overflow:hidden;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe}
+  #gpu{display:block;width:100vw;height:100vh;cursor:pointer}
+  #bar{position:fixed;top:0;left:0;right:0;display:flex;align-items:center;gap:12px;padding:8px 12px;background:linear-gradient(#05070ccc,#05070c00);pointer-events:none}
+  #bar .grp{pointer-events:auto;display:flex;align-items:center;gap:8px}
+  #bar h1{font-size:13px;margin:0;color:#8fd;font-weight:700}
+  #bar .sub{color:#6a8;font-size:11px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 11px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4860}
+  input[type=text]{background:#0c1620;border:1px solid #25415a;border-radius:6px;color:#cfe;font:inherit;padding:5px 7px;width:120px}
+  #seedwrap{color:#7d97ab}
+  .fps{margin-left:auto;color:#577}
+  #legend{position:fixed;bottom:8px;left:12px;color:#8aa0b8;font-size:11px;display:flex;gap:14px;flex-wrap:wrap;text-shadow:0 0 6px #000}
+  #legend span{display:inline-flex;align-items:center;gap:5px}
+  #legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+  #hint{position:fixed;bottom:8px;right:12px;color:#5f7d92;font-size:11px;text-shadow:0 0 6px #000}
+  #inspect{position:fixed;top:44px;right:12px;width:270px;max-height:calc(100vh - 90px);overflow:auto;background:rgba(8,13,20,.9);border:1px solid #223449;border-radius:9px;padding:11px 12px;display:none}
+  #inspect h2{margin:0 0 3px;font-size:12px;color:#8fd}
+  #inspect .k{color:#7fd1c6;font-size:11px;margin-bottom:8px}
+  #inspect ol{margin:0;padding-left:26px;font-size:11px;line-height:1.55;color:#b8c9da}
+  #inspect ol b{color:#e6b3ff}
+  #inspect .share{margin-top:9px;color:#7d97ab;font-size:10.5px;word-break:break-all}
+  #fail{position:fixed;inset:0;display:none;place-items:center;text-align:center;padding:24px;background:#05070c;font:15px/1.6 ui-sans-serif,system-ui}
+  #fail code{color:#7cc0ff}
+</style>
+</head>
+<body>
+<canvas id="gpu"></canvas>
+<div id="bar">
+  <div class="grp"><h1>meta-generator</h1><span class="sub">a generator of field-generators · reseed = new biosphere</span></div>
+  <div class="grp"><button id="reseed">⟳ reseed biosphere</button>
+    <span id="seedwrap">seed <input id="seed" type="text" value=""></span>
+    <button id="go">grow</button></div>
+  <span class="fps" id="fps"></span>
+</div>
+<div id="legend">
+  <span><i style="background:#6bb872"></i>height</span>
+  <span><i style="background:#8ca8d9"></i>density</span>
+  <span><i style="background:#d99a66"></i>color</span>
+  <span><i style="background:#80ccd9"></i>flow</span>
+  <span><i style="background:#e6b359"></i>emissive</span>
+</div>
+<div id="hint">click a specimen to enlarge + inspect · click again to return</div>
+<div id="inspect"><h2 id="ispec_t">specimen</h2><div class="k" id="ispec_k"></div><ol id="ispec_ops"></ol><div class="share" id="ispec_share"></div></div>
+<div id="fail"><div><h2>WebGPU not available</h2><p>This needs <code>navigator.gpu</code> — a recent Chrome/Edge over http(s)/localhost.</p></div></div>
+
+<script type="module">
+// ===========================================================================
+// meta-generator — a procedural generator that generates procedural generators
+// ---------------------------------------------------------------------------
+// STAGE 1: the Field-VM backbone (the WHOLE-field generator).
+//
+// A "generator" is DATA: a topologically-sorted DAG of opcodes ending in one
+// interpret-root that fixes its KIND (height|density|color|flow|emissive).
+// ONE WGSL "Field VM" is compiled once and evaluates ANY genome from a storage
+// buffer — so reseed / regrow = writeBuffer, never a shader recompile. The whole
+// gallery is ONE instanced draw; each tile's genome index is its instance_index.
+//
+// Generation is pure integer/float CPU math => same seed = same biosphere on
+// every machine (share the seed OR the genome bytecode). Coherence is by
+// construction (every genome routes >=1 structuring op into its head).
+//
+// Honest scope: this generates new FIELD-generators — a rich quality-diversity
+// space, but a fixed alphabet into 5 fixed heads is "new parameters-of-structure"
+// more than "new kinds". Genuine new-kinds needs the evolvable L-system PART
+// layer (stage 2) — see labs/meta_generator_design/DESIGN.md.
+//
+// Validity (baked in per the adversarial critique): fixed MAX_OCT masked octave
+// loop (no runtime loop bound); scrub catches Inf as well as NaN; coord-emitting
+// ops clamped to world range; serializer enforces topo order / no forward refs /
+// exactly one root; ONE explicit shared bind-group layout (not layout:'auto');
+// per-tile index via instance_index (no mid-pass uniform rewrite); small reg file.
+// ===========================================================================
+
+const failEl = document.getElementById('fail');
+function fail(msg){ failEl.style.display='grid'; if(msg) failEl.querySelector('p').textContent=msg; console.error(msg); }
+let booted=false;
+addEventListener('unhandledrejection', e=>{ const m=(e.reason&&e.reason.message)||String(e.reason); if(!booted) fail('Startup error: '+m); else console.warn('[ignored]',m); });
+if(!navigator.gpu){ fail(); throw new Error('no webgpu'); }
+
+const adapter = await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+if(!adapter){ fail('No GPU adapter — enable hardware acceleration.'); throw new Error('no adapter'); }
+const device = await adapter.requestDevice();
+device.addEventListener?.('uncapturederror', e=>console.error('[webgpu]', e.error.message));
+const canvas = document.getElementById('gpu');
+const ctx = canvas.getContext('webgpu');
+const format = navigator.gpu.getPreferredCanvasFormat();
+ctx.configure({ device, format, alphaMode:'opaque' });
+
+async function shader(label, code){
+  const m = device.createShaderModule({ label, code });
+  const info = await m.getCompilationInfo();
+  for(const msg of info.messages){
+    const where=`${label}:${msg.lineNum}:${msg.linePos}`;
+    if(msg.type==='error') console.error('[wgsl error]',where,msg.message);
+    else if(msg.type==='warning') console.warn('[wgsl warn]',where,msg.message);
+  }
+  return m;
+}
+
+// ---- constants -----------------------------------------------------------
+const COLS=8, ROWS=6, N_TILES=COLS*ROWS;   // 48 specimens
+const MAX_OPS=24;                           // bytecode slots per genome (also register file size)
+const KINDS=['height','density','color','flow','emissive'];
+
+// opcode ids (must match the WGSL switch)
+const OP = { CONST:0, COORD:1, DIST:2, FBM:10, RIDGE:11, WORLEY:12,
+  WARP:20, RADIAL:21, MIRROR:22, ADD:30, SUB:31, MUL:32, MIX:33, MIN:34, MAX:35, SMOOTHMIN:36,
+  SMOOTHBAND:38, TERRACE:40, POW:41, THRESHOLD:42, PULSE:43,
+  AS_HEIGHT:70, AS_DENSITY:71, AS_COLOR:72, AS_FLOW:73, AS_EMISSIVE:75 };
+const OPNAME = Object.fromEntries(Object.entries(OP).map(([k,v])=>[v,k]));
+
+// ===========================================================================
+// CPU meta-generator — deterministic integer PCG (mirrors the labs' hashU/rnd)
+// ===========================================================================
+function hashU(n){ n=n>>>0; n=(Math.imul(n,747796405)+2891336453)>>>0; n=(Math.imul((n>>>((n>>>28)+4))^n,277803737))>>>0; return ((n>>>22)^n)>>>0; }
+function makeRng(seed){ let s=seed>>>0; const nx=()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return (hashU(s)&0xffffff)/16777215; };
+  return { nx, f:(a,b)=>a+(b-a)*nx(), i:(n)=>Math.min(n-1,Math.floor(nx()*n)), pick:(a)=>a[Math.min(a.length-1,Math.floor(nx()*a.length))] }; }
+
+// grow one generator (a DAG). Structured grammar => always coherent & valid:
+// COORD -> optional coord transforms -> 1..3 noise -> combine -> optional remap -> interpret root.
+function grow(seed){
+  const R=makeRng(seed);
+  const ops=[];
+  const push=(op,a=0,b=0,c=0,k0=0,k1=0,k2=0)=>{ ops.push({op,a,b,c,k0,k1,k2}); return ops.length-1; };
+  push(OP.COORD);                                   // slot 0
+  let coord=0;
+  const nT=R.i(3);                                  // 0..2 coord transforms
+  for(let i=0;i<nT;i++){
+    const t=R.pick([OP.WARP,OP.RADIAL,OP.MIRROR]);
+    if(t===OP.WARP) coord=push(OP.WARP,coord,0,0,R.f(0.12,0.85));
+    else if(t===OP.RADIAL) coord=push(OP.RADIAL,coord,0,0,R.f(2,8));
+    else coord=push(OP.MIRROR,coord);
+  }
+  const noise=[];
+  const nN=1+R.i(3);                                // 1..3 noise fields
+  for(let i=0;i<nN;i++){
+    const nop=R.pick([OP.FBM,OP.RIDGE,OP.WORLEY]);
+    noise.push(push(nop,coord,0,0,R.f(0.5,3.2),R.f(2,6)));
+  }
+  let cur=noise[0];
+  for(let i=1;i<noise.length;i++){
+    const cop=R.pick([OP.ADD,OP.MUL,OP.MIX,OP.MIN,OP.MAX,OP.SMOOTHMIN]);
+    if(cop===OP.MIX) cur=push(OP.MIX,cur,noise[i],noise[R.i(noise.length)]);
+    else if(cop===OP.SMOOTHMIN) cur=push(OP.SMOOTHMIN,cur,noise[i],0,R.f(0.08,0.5));
+    else cur=push(cop,cur,noise[i]);
+  }
+  const nRm=R.i(2);                                 // 0..1 remaps (avoid over-flattening)
+  for(let i=0;i<nRm;i++){
+    const rop=R.pick([OP.TERRACE,OP.POW,OP.THRESHOLD,OP.SMOOTHBAND]);
+    if(rop===OP.TERRACE) cur=push(OP.TERRACE,cur,0,0,R.f(2,7),R.f(0.3,2.0));
+    else if(rop===OP.POW) cur=push(OP.POW,cur,0,0,R.f(0.5,2.6));
+    else if(rop===OP.THRESHOLD) cur=push(OP.THRESHOLD,cur,0,0,R.f(0.3,0.7));
+    else { const a=R.f(0.12,0.5); cur=push(OP.SMOOTHBAND,cur,0,0,a,a+R.f(0.1,0.4)); }
+  }
+  const kind=R.i(5);
+  const fieldSlot = cur;                            // scalar field feeding the head (for the fitness gate)
+  let root;
+  if(kind===0) root=push(OP.AS_HEIGHT,cur,0,0,R.f(0.7,1.3),R.f(-0.1,0.3));
+  else if(kind===1) root=push(OP.AS_DENSITY,cur,0,0,R.f(0.2,0.7));
+  else if(kind===2) root=push(OP.AS_COLOR,cur);
+  else if(kind===3) root=push(OP.AS_FLOW,coord);   // flow reads coords, not the scalar field
+  else root=push(OP.AS_EMISSIVE,cur);
+  // IQ palette: a + b*cos(2pi*(c*x + d))
+  const pal=[
+    [R.f(0.4,0.6),R.f(0.4,0.6),R.f(0.4,0.6),0],
+    [R.f(0.2,0.5),R.f(0.2,0.5),R.f(0.2,0.5),0],
+    [R.f(0.5,1.6),R.f(0.5,1.6),R.f(0.5,1.6),0],
+    [R.f(0,1),R.f(0,1),R.f(0,1),0],
+  ];
+  return { seed:seed>>>0, kind, nOps:ops.length, root, fieldSlot:(kind===3?-1:fieldSlot), pal, ops };
+}
+
+// ---- fitness gate: a CPU field-mirror (deterministic) rejects flat/dead genomes ----
+// This is the edge-of-chaos coherence gate the critique asked for, kept CPU-side so
+// the same seed picks the same specimens on every machine. (QD/novelty = stage 2.)
+function smooth(e0,e1,x){ const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0+1e-6))); return t*t*(3-2*t); }
+function jhash(xi,zi,s){ let h=(Math.imul(xi|0,374761393)+Math.imul(zi|0,668265263)+Math.imul(s|0,-1640531527))>>>0; h=Math.imul(h^(h>>>13),1274126177); h^=h>>>16; return (h>>>0)/4294967296; }
+function jvn(x,z,s){ const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const a=jhash(xi,zi,s),b=jhash(xi+1,zi,s),c=jhash(xi,zi+1,s),d=jhash(xi+1,zi+1,s);
+  const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf); return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v; }
+function jfbm(x,z,s,oc){ let f=0,amp=0.5,fr=1,nm=0; for(let o=0;o<6;o++){ const on=(o<oc-0.5)?1:0; f+=amp*on*jvn(x*fr,z*fr,s+o*101); nm+=amp*on; amp*=0.5; fr*=2; } return f/Math.max(nm,1e-4); }
+function jrid(x,z,s,oc){ let f=0,amp=0.5,fr=1,prev=1,nm=0; for(let o=0;o<6;o++){ const on=(o<oc-0.5)?1:0; let r=1-Math.abs(jvn(x*fr,z*fr,s+o*101)*2-1); r*=r; f+=amp*on*r*prev; prev=on?r:1; nm+=amp*on; amp*=0.5; fr*=2; } return f/Math.max(nm,1e-4); }
+function cc2(a){ return [Math.max(-8,Math.min(8,a[0])), Math.max(-8,Math.min(8,a[1]))]; }
+function evalField(g,x,y){
+  const reg=[], sd=g.seed|0;
+  for(let i=0;i<g.ops.length;i++){ const o=g.ops[i];
+    const A=reg[o.a]||[0,0,0,0], B=reg[o.b]||[0,0,0,0], C=reg[o.c]||[0,0,0,0]; let r=[0,0,0,0];
+    switch(o.op){
+      case 1: r=[x,y,0,0]; break;
+      case 2: r=[Math.hypot(x,y),0,0,0]; break;
+      case 0: r=[o.k0,o.k0,o.k0,o.k0]; break;
+      case 10:{ const s=cc2(A); const v=jfbm(s[0]*o.k0,s[1]*o.k0,sd+o.a*13,Math.max(1,Math.min(6,o.k1))); r=[v,v,v,v]; break; }
+      case 11:{ const s=cc2(A); const v=jrid(s[0]*o.k0,s[1]*o.k0,sd+o.a*13,Math.max(1,Math.min(6,o.k1))); r=[v,v,v,v]; break; }
+      case 12:{ const s=cc2(A); const v=jfbm(s[0]*o.k0,s[1]*o.k0,sd+o.a*7,3); r=[v,v,v,v]; break; }   // worley ~ noise (gate proxy)
+      case 20:{ const a=cc2(A); const q1=jfbm(a[0]+5.2,a[1]+1.3,sd+7,4),q2=jfbm(a[0]+2.8,a[1]+9.2,sd+31,4); const n=cc2([a[0]+(q1-0.5)*2*o.k0,a[1]+(q2-0.5)*2*o.k0]); r=[n[0],n[1],0,0]; break; }
+      case 21:{ const an=Math.atan2(A[1],A[0]+(A[0]<0?-1e-6:1e-6)); const rr=Math.hypot(A[0],A[1]); const sg=2*Math.PI/Math.max(o.k0,1); const fa=Math.abs(an-Math.round(an/sg)*sg); const n=cc2([Math.cos(fa)*rr,Math.sin(fa)*rr]); r=[n[0],n[1],0,0]; break; }
+      case 22: r=[Math.abs(A[0]),Math.abs(A[1]),0,0]; break;
+      case 30: r=[A[0]+B[0],A[1]+B[1],0,0]; break;
+      case 31: r=[A[0]-B[0],A[1]-B[1],0,0]; break;
+      case 32: r=[A[0]*B[0],A[1]*B[1],0,0]; break;
+      case 33:{ const t=Math.max(0,Math.min(1,C[0])); r=[A[0]+(B[0]-A[0])*t,0,0,0]; break; }
+      case 34: r=[Math.min(A[0],B[0]),0,0,0]; break;
+      case 35: r=[Math.max(A[0],B[0]),0,0,0]; break;
+      case 36:{ const k=Math.max(o.k0,1e-3); const h=Math.max(0,Math.min(1,0.5+0.5*(B[0]-A[0])/k)); const val=(B[0]+(A[0]-B[0])*h)-k*h*(1-h); r=[val,val,val,val]; break; }
+      case 38:{ const s=smooth(Math.min(o.k0,o.k1),Math.max(o.k0,o.k1),A[0]); r=[s,s,s,s]; break; }
+      case 40:{ const s=Math.max(o.k0,1); const x0=Math.max(-4,Math.min(4,A[0])); const fr=x0*s-Math.floor(x0*s); const val=(Math.floor(x0*s)+Math.pow(Math.max(0,Math.min(1,fr)),Math.max(o.k1,1e-3)))/s; r=[val,val,val,val]; break; }
+      case 41:{ const val=Math.pow(Math.max(0,Math.min(1,A[0])),Math.max(o.k0,1e-3)); r=[val,val,val,val]; break; }
+      case 42:{ const val=A[0]>=o.k0?1:0; r=[val,val,val,val]; break; }
+      default: r=[A[0],A[1],A[2],A[3]]; break;                    // interpret roots: passthrough for the gate
+    }
+    reg[i]=r;
+  }
+  return reg;
+}
+function accept(g){
+  if(g.fieldSlot<0) return true;                                  // flow is always textured
+  const N=8, vals=[]; let mean=0;
+  for(let j=0;j<N;j++) for(let i=0;i<N;i++){
+    const reg=evalField(g,(i/(N-1)*2-1)*2.4,(j/(N-1)*2-1)*2.4);
+    const v=(reg[g.fieldSlot]||[0])[0]; vals.push(v); mean+=v;
+  }
+  mean/=vals.length; let vari=0; for(const v of vals) vari+=(v-mean)*(v-mean); vari/=vals.length;
+  if(g.kind===0 && vari<0.006) return false;                      // height needs relief
+  if(vari<0.004) return false;                                    // reject frozen/near-constant
+  if(g.kind===1){ const k0=Math.max(0.05,Math.min(0.95,g.ops[g.root].k0)); let cov=0; for(const v of vals) cov+=smooth(1-k0,1,v); cov/=vals.length; if(cov<0.06||cov>0.96) return false; } // density not blank/solid
+  if(g.kind===4){ let m=0; for(const v of vals) m+=Math.max(0,Math.min(1,v)); m/=vals.length; if(m<0.14) return false; } // emissive not too dim
+  return true;
+}
+
+// grow a whole biosphere (deterministic; reroll duds through the gate)
+let genomes=[];
+function growBiosphere(bseed){
+  genomes=[];
+  for(let t=0;t<N_TILES;t++){
+    const bs=hashU((bseed>>>0) ^ Math.imul(t+1,0x9e3779b9));
+    let g=grow(bs), tries=0;
+    while(!accept(g) && tries<16){ tries++; g=grow(hashU(bs ^ Math.imul(tries,0x85ebca6b))); }
+    genomes.push(g);
+  }
+}
+
+// ---- serialize genomes into GPU buffers ----------------------------------
+// Instr: op:u32, a:i32,b:i32,c:i32, k0,k1,k2,pad:f32  (32 bytes)
+// Genome: seed:u32, kind:u32, nOps:u32, root:u32, pal[4]:vec4f  (80 bytes)
+const INSTR_BYTES=32, GEN_BYTES=80;
+const progBytes=new ArrayBuffer(N_TILES*MAX_OPS*INSTR_BYTES);
+const genBytes =new ArrayBuffer(N_TILES*GEN_BYTES);
+function serialize(){
+  const pv=new DataView(progBytes), gv=new DataView(genBytes);
+  for(let t=0;t<N_TILES;t++){
+    const g=genomes[t];
+    // instructions (topo order guaranteed by construction: op i only reads j<i)
+    for(let i=0;i<MAX_OPS;i++){
+      const o=(t*MAX_OPS+i)*INSTR_BYTES;
+      const ins = i<g.ops.length ? g.ops[i] : {op:0,a:0,b:0,c:0,k0:0,k1:0,k2:0};
+      pv.setUint32(o,    ins.op, true);
+      pv.setInt32 (o+4,  ins.a,  true);
+      pv.setInt32 (o+8,  ins.b,  true);
+      pv.setInt32 (o+12, ins.c,  true);
+      pv.setFloat32(o+16,ins.k0, true);
+      pv.setFloat32(o+20,ins.k1, true);
+      pv.setFloat32(o+24,ins.k2, true);
+      pv.setFloat32(o+28,0,      true);
+    }
+    const go=t*GEN_BYTES;
+    gv.setUint32(go,    g.seed>>>0, true);
+    gv.setUint32(go+4,  g.kind,     true);
+    gv.setUint32(go+8,  g.nOps,     true);
+    gv.setUint32(go+12, g.root,     true);
+    for(let p=0;p<4;p++) for(let c=0;c<4;c++) gv.setFloat32(go+16+p*16+c*4, g.pal[p][c], true);
+  }
+  device.queue.writeBuffer(progBuf,0,progBytes);
+  device.queue.writeBuffer(genBuf,0,genBytes);
+}
+const progBuf=device.createBuffer({ size:progBytes.byteLength, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+const genBuf =device.createBuffer({ size:genBytes.byteLength,  usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+
+// ===========================================================================
+// WGSL — the Field VM (compiled ONCE; evaluates any genome as data)
+// ===========================================================================
+const WGSL = /* wgsl */`
+const COLS:u32 = ${COLS}u;  const ROWS:u32 = ${ROWS}u;
+const MAX_OPS:u32 = ${MAX_OPS}u;
+const WS:f32 = 2.4;                              // field sampling half-extent
+
+struct U { res:vec2f, time:f32, selected:f32, mode:f32, p0:f32, p1:f32, p2:f32 };
+struct Instr { op:u32, a:i32, b:i32, c:i32, k0:f32, k1:f32, k2:f32, pad:f32 };
+struct Genome { seed:u32, kind:u32, nOps:u32, root:u32, pal:array<vec4f,4> };
+@group(0) @binding(0) var<uniform> u:U;
+@group(0) @binding(1) var<storage,read> prog:array<Instr>;
+@group(0) @binding(2) var<storage,read> gen:array<Genome>;
+
+// ---- value noise + fBm/ridged with FIXED, amplitude-masked octave loop ----
+fn hashI(xi:i32, zi:i32, s:i32)->f32 {
+  var h:u32 = u32(xi)*374761393u + u32(zi)*668265263u + u32(s)*2654435761u;
+  h=(h ^ (h>>13u))*1274126177u; h=h ^ (h>>16u);
+  return f32(h)/4294967296.0;
+}
+fn vn(x:f32, z:f32, s:i32)->f32 {
+  let xi=i32(floor(x)); let zi=i32(floor(z)); let xf=x-floor(x); let zf=z-floor(z);
+  let a=hashI(xi,zi,s); let b=hashI(xi+1,zi,s); let c=hashI(xi,zi+1,s); let d=hashI(xi+1,zi+1,s);
+  let u2=xf*xf*(3.0-2.0*xf); let v2=zf*zf*(3.0-2.0*zf);
+  return a+(b-a)*u2+(c-a)*v2+(a-b-c+d)*u2*v2;
+}
+fn fbmN(x:f32, z:f32, s:i32, octf:f32)->f32 {
+  var f=0.0; var amp=0.5; var fr=1.0; var nm=0.0;
+  for(var o=0;o<6;o++){ let on=step(f32(o), octf-0.5);           // 1 while o<octf, else 0
+    f+=amp*on*vn(x*fr,z*fr,s+o*101); nm+=amp*on; amp=amp*0.5; fr=fr*2.0; }
+  return f/max(nm,1e-4);
+}
+fn ridgeN(x:f32, z:f32, s:i32, octf:f32)->f32 {
+  var f=0.0; var amp=0.5; var fr=1.0; var prev=1.0; var nm=0.0;
+  for(var o=0;o<6;o++){ let on=step(f32(o), octf-0.5);
+    var r=1.0-abs(vn(x*fr,z*fr,s+o*101)*2.0-1.0); r=r*r;
+    f+=amp*on*r*prev; prev=mix(1.0,r,on); nm+=amp*on; amp=amp*0.5; fr=fr*2.0; }
+  return f/max(nm,1e-4);
+}
+fn h22(p:vec2f)->vec2f { return fract(sin(vec2f(dot(p,vec2f(127.1,311.7)), dot(p,vec2f(269.5,183.3))))*43758.5453); }
+fn worley2(p:vec2f, s:f32)->vec2f {
+  let ip=floor(p); let fp=fract(p); var f1=8.0; var f2=8.0;
+  for(var j=-1;j<=1;j++){ for(var i=-1;i<=1;i++){
+    let g=vec2f(f32(i),f32(j)); let o=h22(ip+g+vec2f(s)); let d=length(g+o-fp);
+    if(d<f1){ f2=f1; f1=d; } else if(d<f2){ f2=d; } } }
+  return vec2f(f1,f2);
+}
+fn cc(v:vec2f)->vec2f { return clamp(v, vec2f(-8.0), vec2f(8.0)); }   // clamp coord-emitting ops
+fn scrub(v:vec4f)->vec4f { return clamp(select(vec4f(0.0), v, v==v), vec4f(-1e18), vec4f(1e18)); } // NaN->0, Inf->clamped
+fn pal(gi:u32, x:f32)->vec3f {
+  let a=gen[gi].pal[0].xyz; let b=gen[gi].pal[1].xyz; let c=gen[gi].pal[2].xyz; let d=gen[gi].pal[3].xyz;
+  return clamp(a + b*cos(6.2831853*(c*clamp(x,0.0,1.0)+d)), vec3f(0.0), vec3f(1.0));
+}
+fn kindColor(k:u32)->vec3f {
+  switch(k){ case 0u:{return vec3f(0.42,0.72,0.45);} case 1u:{return vec3f(0.55,0.66,0.85);}
+    case 2u:{return vec3f(0.85,0.6,0.4);} case 3u:{return vec3f(0.5,0.8,0.85);}
+    default:{return vec3f(0.9,0.7,0.35);} }
+}
+
+// THE VM: a uniform full-length loop, NOP-masked, no recursion, no stack.
+fn evalGenome(gi:u32, p0:vec2f, t:f32)->vec4f {
+  let base=gi*MAX_OPS;
+  let nOps=gen[gi].nOps;
+  let sd=i32(gen[gi].seed);
+  var reg:array<vec4f, ${MAX_OPS}>;
+  for(var i:u32=0u; i<MAX_OPS; i=i+1u){
+    let ins=prog[base+i];
+    let A=reg[u32(clamp(ins.a,0,i32(MAX_OPS)-1))];
+    let B=reg[u32(clamp(ins.b,0,i32(MAX_OPS)-1))];
+    let C=reg[u32(clamp(ins.c,0,i32(MAX_OPS)-1))];
+    var r=vec4f(0.0);
+    switch(ins.op){
+      case 0u:  { r=vec4f(ins.k0); }
+      case 1u:  { r=vec4f(p0.x, p0.y, t, 0.0); }
+      case 2u:  { r=vec4f(length(p0),0.0,0.0,0.0); }
+      case 10u: { let s=cc(A.xy); r=vec4f(fbmN(s.x*ins.k0, s.y*ins.k0, sd+ins.a*13, clamp(ins.k1,1.0,6.0))); }
+      case 11u: { let s=cc(A.xy); r=vec4f(ridgeN(s.x*ins.k0, s.y*ins.k0, sd+ins.a*13, clamp(ins.k1,1.0,6.0))); }
+      case 12u: { let w=worley2(cc(A.xy)*ins.k0, f32(sd)*0.11+f32(ins.a)); r=vec4f(w.x, w.y, w.y-w.x, 0.0); }
+      case 20u: { let a=cc(A.xy); let q1=fbmN(a.x+5.2,a.y+1.3,sd+7,4.0); let q2=fbmN(a.x+2.8,a.y+9.2,sd+31,4.0);
+                  r=vec4f(cc(a+(vec2f(q1,q2)-0.5)*2.0*ins.k0), 0.0, 0.0); }
+      case 21u: { let a=A.xy; let an=atan2(a.y, a.x+select(1e-6,-1e-6,a.x<0.0)); let rr=length(a);
+                  let sg=6.2831853/max(ins.k0,1.0); let fa=abs(an-floor(an/sg+0.5)*sg);
+                  r=vec4f(cc(vec2f(cos(fa),sin(fa))*rr), 0.0, 0.0); }
+      case 22u: { r=vec4f(abs(A.xy), 0.0, 0.0); }
+      case 30u: { r=A+B; }  case 31u: { r=A-B; }  case 32u: { r=A*B; }
+      case 33u: { r=mix(A,B,clamp(C.x,0.0,1.0)); }
+      case 34u: { r=min(A,B); }  case 35u: { r=max(A,B); }
+      case 36u: { let k=max(ins.k0,1e-3); let h=clamp(0.5+0.5*(B.x-A.x)/k,0.0,1.0); r=vec4f(mix(B.x,A.x,h)-k*h*(1.0-h)); }
+      case 38u: { r=vec4f(smoothstep(min(ins.k0,ins.k1), max(ins.k0,ins.k1)+1e-4, A.x)); }
+      case 40u: { let s=max(ins.k0,1.0); let x=clamp(A.x,-4.0,4.0); r=vec4f((floor(x*s)+pow(clamp(fract(x*s),0.0,1.0),max(ins.k1,1e-3)))/s); }
+      case 41u: { r=vec4f(pow(clamp(A.x,0.0,1.0), max(ins.k0,1e-3))); }
+      case 42u: { r=vec4f(step(ins.k0, A.x)); }
+      case 43u: { r=vec4f(sin(t*ins.k0)*0.5+0.5); }
+      // ---- interpret roots (fix the KIND) ----
+      case 70u: { r=vec4f(ins.k1 + (A.x-0.5)*2.0*ins.k0); }                 // AS_HEIGHT
+      case 71u: { r=vec4f(smoothstep(1.0-clamp(ins.k0,0.05,0.95),1.0,A.x)); } // AS_DENSITY
+      case 72u: { r=vec4f(pal(gi, A.x), 1.0); }                              // AS_COLOR
+      case 73u: { let a=cc(A.xy); let e=0.06;                                // AS_FLOW (curl of fbm)
+                  let gx=fbmN(a.x+e,a.y,sd+41,4.0)-fbmN(a.x-e,a.y,sd+41,4.0);
+                  let gy=fbmN(a.x,a.y+e,sd+41,4.0)-fbmN(a.x,a.y-e,sd+41,4.0);
+                  r=vec4f(normalize(vec2f(-gy,gx)+vec2f(1e-6)), 0.0, 0.0); }
+      case 75u: { r=vec4f(pal(gi, A.x)*pow(clamp(A.x,0.0,1.0),2.0), 1.0); }  // AS_EMISSIVE
+      default:  { r=A; }
+    }
+    reg[i]=scrub(select(vec4f(0.0), r, i<nOps));   // inactive slots are pure no-ops => uniform flow
+  }
+  return scrub(reg[u32(clamp(gen[gi].root,0u,MAX_OPS-1u))]);
+}
+
+// ---- gallery: ONE instanced draw; instance_index -> tile -> genome ----
+struct VS { @builtin(position) pos:vec4f, @location(0) uv:vec2f, @location(1) @interpolate(flat) gi:u32 };
+@vertex fn vs(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32)->VS {
+  var corner=array<vec2f,6>(vec2f(0,0),vec2f(1,0),vec2f(0,1),vec2f(0,1),vec2f(1,0),vec2f(1,1));
+  let c=corner[vi];
+  var o:VS;
+  if(u.mode>0.5){                                 // fullscreen: one specimen
+    o.pos=vec4f(c*2.0-1.0, 0.0, 1.0); o.uv=c; o.gi=u32(u.selected); return o;
+  }
+  let ci=ii%COLS; let ri=ii/COLS;
+  let cw=2.0/f32(COLS); let ch=2.0/f32(ROWS); let g=0.006;
+  let x0=-1.0+f32(ci)*cw; let y0=1.0-f32(ri+1u)*ch;
+  o.pos=vec4f(x0+g + c.x*(cw-2.0*g), y0+g + c.y*(ch-2.0*g), 0.0, 1.0);
+  o.uv=c; o.gi=ii; return o;
+}
+@fragment fn fs(in:VS)->@location(0) vec4f {
+  let gi=in.gi;
+  // aspect-correct so the field is undistorted inside a non-square tile
+  var asp:f32; if(u.mode>0.5){ asp=u.res.x/u.res.y; } else { asp=(u.res.x/f32(COLS))/(u.res.y/f32(ROWS)); }
+  var p=(in.uv*2.0-1.0)*WS;
+  if(asp>1.0){ p.x*=asp; } else { p.y/=max(asp,1e-3); }
+  let t=u.time;
+  let v=evalGenome(gi,p,t);
+  var col=vec3f(0.0);
+  switch(gen[gi].kind){
+    case 0u: {                                     // height -> hillshade
+      let e=0.05*WS;
+      let hx=evalGenome(gi,p+vec2f(e,0.0),t).x; let hy=evalGenome(gi,p+vec2f(0.0,e),t).x;
+      let n=normalize(vec3f((v.x-hx)*2.4, e*1.0, (v.x-hy)*2.4));
+      let sun=normalize(vec3f(0.5,0.75,0.42)); let lam=clamp(dot(n,sun),0.0,1.0);
+      col=pal(gi, clamp(v.x*0.5+0.5,0.0,1.0))*(0.22+0.95*lam);
+    }
+    case 1u: { let d=clamp(v.x,0.0,1.0); col=mix(vec3f(0.03,0.04,0.06), pal(gi,0.72), smoothstep(0.05,0.92,d)); col+=pal(gi,0.9)*pow(d,4.0)*0.6; }
+    case 2u: { col=v.xyz; }
+    case 3u: { let dir=v.xy; let a=dot(p, vec2f(-dir.y,dir.x))*9.0 - t*1.1; let s=0.5+0.5*sin(a); col=mix(pal(gi,0.18),pal(gi,0.85),s)*(0.45+0.55*length(v.xy)); }
+    default: { col=v.xyz*1.3; }                    // emissive
+  }
+  // frame tinted by kind; brighten the selected tile
+  let edge=min(min(in.uv.x,1.0-in.uv.x), min(in.uv.y,1.0-in.uv.y));
+  let bw=smoothstep(0.0,0.016,edge);
+  var sel=0.0; if(u.mode<0.5 && gi==u32(u.selected)){ sel=1.0; }
+  let frame=mix(kindColor(gen[gi].kind)*0.85, vec3f(1.0), sel);
+  col=mix(frame, col, select(bw,1.0,u.mode>0.5));
+  col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);   // ACES-ish
+  return vec4f(pow(clamp(col,vec3f(0.0),vec3f(1.0)), vec3f(1.0/2.2)), 1.0);
+}`;
+
+const mod = await shader('field-vm', WGSL);
+
+// ---- explicit shared bind-group layout (NOT layout:'auto' per head) ------
+const bgl = device.createBindGroupLayout({ entries:[
+  { binding:0, visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT, buffer:{type:'uniform'} },
+  { binding:1, visibility:GPUShaderStage.FRAGMENT, buffer:{type:'read-only-storage'} },
+  { binding:2, visibility:GPUShaderStage.FRAGMENT, buffer:{type:'read-only-storage'} },
+]});
+const uniBuf=device.createBuffer({ size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+const uni=new Float32Array(8);
+const bind=device.createBindGroup({ layout:bgl, entries:[
+  { binding:0, resource:{buffer:uniBuf} }, { binding:1, resource:{buffer:progBuf} }, { binding:2, resource:{buffer:genBuf} } ]});
+const pipe=device.createRenderPipeline({
+  layout: device.createPipelineLayout({ bindGroupLayouts:[bgl] }),
+  vertex:{ module:mod, entryPoint:'vs' },
+  fragment:{ module:mod, entryPoint:'fs', targets:[{format}] },
+  primitive:{ topology:'triangle-list' } });
+
+// ===========================================================================
+// state, resize, UI
+// ===========================================================================
+let selected=-1, mode=0;
+function resize(){ const dpr=Math.min(devicePixelRatio,1.5); canvas.width=Math.floor(innerWidth*dpr); canvas.height=Math.floor(innerHeight*dpr); }
+addEventListener('resize', resize); resize();
+
+const seedEl=document.getElementById('seed'), fpsEl=document.getElementById('fps');
+const insp=document.getElementById('inspect');
+function argStr(ins){ const k=[]; if(ins.k0)k.push('k0='+ins.k0.toFixed(2)); if(ins.k1)k.push('k1='+ins.k1.toFixed(2));
+  const src=[]; if(ins.op>=30) src.push('#'+ins.a); if([30,31,32,33,34,35,36].includes(ins.op)) src.push('#'+ins.b);
+  return [...src,...k].join(' '); }
+function showInspector(gi){
+  const g=genomes[gi]; if(!g){ insp.style.display='none'; return; }
+  document.getElementById('ispec_t').textContent='specimen #'+gi;
+  document.getElementById('ispec_k').textContent='kind: '+KINDS[g.kind].toUpperCase()+' · '+g.nOps+' ops · genome seed '+g.seed;
+  const ol=document.getElementById('ispec_ops'); ol.innerHTML='';
+  g.ops.forEach((ins,i)=>{ const li=document.createElement('li');
+    li.innerHTML='<b>'+(OPNAME[ins.op]||('op'+ins.op))+'</b> '+argStr(ins)+(i===g.root?' ◂ root':''); ol.appendChild(li); });
+  document.getElementById('ispec_share').textContent='biosphere #'+curSeed+'  ·  share via URL hash';
+  insp.style.display='block';
+}
+
+let curSeed=0;
+function setBiosphere(bseed){
+  curSeed=bseed>>>0; seedEl.value=curSeed;
+  growBiosphere(curSeed); serialize();
+  selected=-1; mode=0; insp.style.display='none';
+  location.hash='seed='+curSeed;
+}
+document.getElementById('reseed').onclick=()=> setBiosphere(hashU((curSeed^0xabcd1234)>>>0));
+document.getElementById('go').onclick=()=>{ const v=parseInt(seedEl.value,10); if(!isNaN(v)) setBiosphere(v>>>0); };
+seedEl.addEventListener('keydown',e=>{ if(e.key==='Enter') document.getElementById('go').click(); });
+
+canvas.addEventListener('click', e=>{
+  if(mode===1){ mode=0; selected=-1; insp.style.display='none'; return; }
+  const r=canvas.getBoundingClientRect();
+  const col=Math.floor((e.clientX-r.left)/r.width*COLS);
+  const row=Math.floor((e.clientY-r.top)/r.height*ROWS);
+  const idx=row*COLS+col;
+  if(idx>=0 && idx<N_TILES){ selected=idx; mode=1; showInspector(idx); }
+});
+
+// initial biosphere from URL hash or a fixed default (reproducible)
+const hm=(location.hash.match(/seed=(\d+)/)); setBiosphere(hm?(+hm[1]>>>0):1234567);
+
+// ===========================================================================
+// render loop
+// ===========================================================================
+let t0=performance.now(), fc=0, fa=0;
+function frame(now){
+  const dt=Math.min(0.05,(now-t0)/1000); t0=now; fa+=dt;
+  if(++fc>=20){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps'; fc=0; fa=0; }
+  uni[0]=canvas.width; uni[1]=canvas.height; uni[2]=now/1000; uni[3]=selected; uni[4]=mode; uni[5]=0; uni[6]=0; uni[7]=0;
+  device.queue.writeBuffer(uniBuf,0,uni);
+  const enc=device.createCommandEncoder();
+  const pass=enc.beginRenderPass({ colorAttachments:[{ view:ctx.getCurrentTexture().createView(),
+    loadOp:'clear', clearValue:{r:0.02,g:0.028,b:0.045,a:1}, storeOp:'store' }] });
+  pass.setPipeline(pipe); pass.setBindGroup(0,bind);
+  pass.draw(6, mode===1 ? 1 : N_TILES);          // ONE instanced draw renders the whole gallery
+  pass.end();
+  device.queue.submit([enc.finish()]);
+  booted=true;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// dev-only inspection handle
+if(new URLSearchParams(location.search).has('dev')) window.__mg={ get genomes(){return genomes;}, setBiosphere, get sel(){return selected;} };
+</script>
+</body>
+</html>

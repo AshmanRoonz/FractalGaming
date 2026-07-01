@@ -1,0 +1,765 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>particle break world — webgpu · explore + connect</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body{margin:0;height:100%;background:#04060a;overflow:hidden;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe;cursor:crosshair}
+  #gpu{display:block;width:100vw;height:100vh}
+  #ui{position:fixed;inset:0;pointer-events:none}
+  #panel{position:fixed;top:10px;left:10px;width:248px;background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px;backdrop-filter:blur(6px);pointer-events:auto;max-height:calc(100vh - 24px);overflow:auto}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 78px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 44px;text-align:right;color:#bdf}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4860}
+  input[type=text]{background:#0c1620;border:1px solid #25415a;border-radius:6px;color:#cfe;font:inherit;padding:5px 7px;width:96px}
+  .net{margin-top:11px;border-top:1px solid #1d2b3a;padding-top:9px}
+  .net h2{font-size:11px;margin:0 0 6px;color:#7fd1c6;letter-spacing:.5px;text-transform:uppercase}
+  #netstat{font-size:10.5px;color:#7d97ab;margin-top:6px;min-height:14px}
+  .legend{margin-top:10px;font-size:11px;line-height:1.7}
+  .legend span{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px;box-shadow:0 0 6px currentColor}
+  #hud{position:fixed;top:12px;right:14px;text-align:right;text-shadow:0 0 8px #000}
+  #medium{font-size:22px;font-weight:700;letter-spacing:1px}
+  #mediumsub{font-size:11px;color:#7d97ab;margin-top:1px}
+  #speed{font-size:11px;color:#7d97ab;margin-top:6px}
+  .fps{position:fixed;bottom:8px;right:12px;color:#577;font-size:11px;text-shadow:0 0 6px #000}
+  #cross{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+  #cross:before,#cross:after{content:"";position:absolute;background:rgba(150,210,255,.5)}
+  #cross:before{width:2px;height:16px;left:-1px;top:-8px}
+  #cross:after{height:2px;width:16px;top:-1px;left:-8px}
+  #lock{position:fixed;left:50%;top:62%;transform:translateX(-50%);background:rgba(10,16,24,.85);border:1px solid #2a5366;border-radius:8px;padding:10px 16px;color:#bff;pointer-events:none;transition:opacity .3s}
+  #ctrls{position:fixed;bottom:8px;left:12px;color:#5f7d92;font-size:10.5px;text-shadow:0 0 6px #000;max-width:52vw}
+  b{color:#bff}
+  #fail{position:fixed;inset:0;display:none;place-items:center;font:15px/1.6 ui-sans-serif,system-ui,sans-serif;color:#cdd9e5;text-align:center;padding:24px;background:#04060a}
+  #fail a{color:#7cc0ff}
+</style>
+</head>
+<body>
+<canvas id="gpu"></canvas>
+<div id="ui">
+  <div id="panel">
+    <h1>particle break world</h1>
+    <p class="sub">3D medium · density = crowding · webgpu</p>
+    <div class="row"><label>push</label><input id="push" type="range" min="0" max="2600" step="10" value="1100"><span class="v" id="push_v"></span></div>
+    <div class="row"><label>swirl</label><input id="swirl" type="range" min="0" max="2600" step="10" value="1300"><span class="v" id="swirl_v"></span></div>
+    <div class="row"><label>reform</label><input id="reform" type="range" min="0" max="3" step="0.05" value="1"><span class="v" id="reform_v"></span></div>
+    <div class="row"><label>field R</label><input id="rad" type="range" min="50" max="280" step="5" value="140"><span class="v" id="rad_v"></span></div>
+    <div class="row"><label>density</label><input id="dens" type="range" min="20000" max="400000" step="10000" value="160000"><span class="v" id="dens_v"></span></div>
+    <div class="row" style="gap:6px"><button id="reseed">reseed world</button><button id="recenter">recenter</button></div>
+    <div class="legend">
+      <div><span style="color:#5fb6d8">●</span>water — tears, then beads back</div>
+      <div><span style="color:#caa86a">●</span>dust — scatters &amp; lingers</div>
+      <div><span style="color:#ff6fd8">●</span>plasma — swirls &amp; pushes back</div>
+      <div><span style="color:#f5a83a">●</span>land — solid mass you bump</div>
+      <div><span style="color:#5a7488">●</span>air — invisible, glows when squeezed</div>
+    </div>
+    <div class="net">
+      <h2>connect (trystero p2p)</h2>
+      <div class="row" style="gap:6px"><input id="room" type="text" value="WORLD" maxlength="24"><button id="connect">join</button></div>
+      <div id="netstat">offline · same room code = same world</div>
+    </div>
+    <div class="hint">Same room code seeds the same deterministic world, so the tears and wakes you carve match for everyone in it.</div>
+  </div>
+</div>
+<div id="hud">
+  <div id="medium">—</div>
+  <div id="mediumsub">surrounding medium</div>
+  <div id="speed"></div>
+</div>
+<div id="cross"></div>
+<div id="lock">click to fly &nbsp;·&nbsp; <b>WASD</b> move · <b>mouse</b> look · <b>space/shift</b> up·down · <b>wheel</b> speed</div>
+<div id="ctrls">gamepad: left stick move · right stick look · RB / LB up·down · RT boost</div>
+<div class="fps" id="fps"></div>
+<div id="fail">
+  <div>
+    <h2>WebGPU not available</h2>
+    <p>This browser/context did not expose <code>navigator.gpu</code>. Use a recent Chrome/Edge, and serve over <code>http(s)://</code> or <code>localhost</code> (not <code>file://</code>).</p>
+  </div>
+</div>
+
+<script type="module">
+// ===========================================================================
+// particle break world — webgpu
+// The 2D "particle cloud BREAK" algorithm (density = crowding, each particle
+// carries itself, a moving body tears the medium and it stays torn) lifted into
+// 3D on a from-scratch WebGPU core: hand-built mat4, agent-buffer particles in a
+// compute kernel, additive billboard lens. No three.js.
+//
+// Multiplayer: the world is a pure function of a seed taken from the room code,
+// so peers never sync the field. They sync only their ship pose; every peer
+// feeds every ship into the same deterministic kernel, and reform-toward-home
+// anchors the medium back to the shared seeded state, so the tears converge.
+// ===========================================================================
+
+const failEl = document.getElementById('fail');
+function fail(msg){ failEl.style.display='grid'; if(msg) failEl.querySelector('p').textContent=msg; console.error(msg); }
+let booted = false;
+// Only treat a rejection as fatal if it happens before the engine is up; once
+// running, a stray rejection (e.g. pointer-lock denied inside an iframe) is just
+// logged, never shown to the user.
+addEventListener('unhandledrejection', e => {
+  const m = (e.reason && e.reason.message) || String(e.reason);
+  if (!booted) fail('Startup error: ' + m); else console.warn('[ignored]', m);
+});
+
+if (!navigator.gpu) { fail(); throw new Error('no webgpu'); }
+
+// ---- L0 device -----------------------------------------------------------
+const adapter = await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+if (!adapter) { fail('No GPU adapter — enable hardware acceleration.'); throw new Error('no adapter'); }
+const device = await adapter.requestDevice();
+device.addEventListener?.('uncapturederror', e => console.error('[webgpu]', e.error.message));
+
+const canvas = document.getElementById('gpu');
+const ctx = canvas.getContext('webgpu');
+const format = navigator.gpu.getPreferredCanvasFormat();
+ctx.configure({ device, format, alphaMode:'opaque' });
+
+// surface WGSL compile diagnostics to the console (key for headless verifying)
+async function shader(label, code){
+  const m = device.createShaderModule({ label, code });
+  const info = await m.getCompilationInfo();
+  for (const msg of info.messages){
+    const where = `${label}:${msg.lineNum}:${msg.linePos}`;
+    if (msg.type==='error') console.error('[wgsl error]', where, msg.message);
+    else if (msg.type==='warning') console.warn('[wgsl warn]', where, msg.message);
+  }
+  return m;
+}
+
+// ---- constants -----------------------------------------------------------
+const MAXN     = 400000;     // allocated particle slots
+const MAXSHIPS = 12;         // local ship + up to 11 peers
+const WORLD_HALF = 1200;     // half-size of the shared world box
+let   activeN  = 160000;     // live particles (density slider)
+
+// type ids must match the WGSL palette below
+const AIR=0, DUST=1, WATER=2, PLASMA=3, LAND=4;
+const TYPE_NAMES = ['AIR','DUST','WATER','PLASMA','LAND'];
+const HUD_COL = ['#5a7488','#caa86a','#5fb6d8','#ff6fd8','#f5a83a'];
+
+// ---- GPU buffers ---------------------------------------------------------
+// pos  : vec4(x,y,z, excite)
+// vel  : vec4(vx,vy,vz, type)
+// home : vec4(hx,hy,hz, _)   (seeded rest position; the determinism anchor)
+const mkStorage = n => device.createBuffer({ size:n*4*4, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+const posBuf  = mkStorage(MAXN);
+const velBuf  = mkStorage(MAXN);
+const homeBuf = mkStorage(MAXN);
+
+// params uniform (16 floats): push,swirl,reform,dt | drag,_,count,worldHalf | seed,time,_,_ | ...
+const paramsBuf = device.createBuffer({ size:16*4, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+const paramsF32 = new Float32Array(16);
+
+// ships storage (read-only): per ship 2x vec4 -> (px,py,pz,R),(vx,vy,vz,active)
+const shipsBuf = device.createBuffer({ size:MAXSHIPS*2*4*4, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });
+const shipsF32 = new Float32Array(MAXSHIPS*2*4);
+
+// camera uniform: mat4 vp | camPos.xyz+fadeStart | camRight.xyz+fadeEnd | camUp.xyz+_
+const camBuf = device.createBuffer({ size:32*4, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+const camF32 = new Float32Array(32);
+
+// ---- shared WGSL prelude (palette + noise, used by seed & compute) -------
+const PRELUDE = /* wgsl */`
+fn col_r(t:u32)->f32{ var a=array<f32,5>(0.32,0.74,0.30,1.00,0.97); return a[t]; }
+fn col_g(t:u32)->f32{ var a=array<f32,5>(0.46,0.58,0.74,0.32,0.60); return a[t]; }
+fn col_b(t:u32)->f32{ var a=array<f32,5>(0.58,0.40,0.96,0.86,0.22); return a[t]; }
+fn base_b(t:u32)->f32{ var a=array<f32,5>(0.05,0.55,0.72,0.80,0.95); return a[t]; }
+fn exg(t:u32)->f32{ var a=array<f32,5>(0.95,0.45,0.55,0.85,0.10); return a[t]; }
+fn sizew(t:u32)->f32{ var a=array<f32,5>(7.0,9.0,11.5,9.5,16.0); return a[t]; }
+fn dragt(t:u32)->f32{ var a=array<f32,5>(0.86,0.90,0.93,0.91,0.50); return a[t]; }
+fn refrm(t:u32)->f32{ var a=array<f32,5>(0.40,0.08,1.00,0.55,2.50); return a[t]; }
+fn pushm(t:u32)->f32{ var a=array<f32,5>(0.35,1.15,1.00,0.80,0.05); return a[t]; }
+fn swrlm(t:u32)->f32{ var a=array<f32,5>(0.10,0.35,0.85,1.40,0.00); return a[t]; }
+
+// integer hash (pcg-ish) -> [0,1)
+fn hashU(n0:u32)->u32{
+  var n=n0; n=n*747796405u+2891336453u;
+  n=((n>>((n>>28u)+4u))^n)*277803737u; n=(n>>22u)^n; return n;
+}
+fn rnd(n:u32)->f32{ return f32(hashU(n)&0xffffffu)/16777215.0; }
+
+// 3D value-noise fbm — decides the biome (which matter) at any point in space
+fn h3(p:vec3f)->f32{ return fract(sin(dot(p, vec3f(127.1,311.7,74.7)))*43758.5453); }
+fn vnoise3(p:vec3f)->f32{
+  let i=floor(p); let f=fract(p); let u=f*f*(3.0-2.0*f);
+  let c000=h3(i+vec3f(0,0,0)); let c100=h3(i+vec3f(1,0,0));
+  let c010=h3(i+vec3f(0,1,0)); let c110=h3(i+vec3f(1,1,0));
+  let c001=h3(i+vec3f(0,0,1)); let c101=h3(i+vec3f(1,0,1));
+  let c011=h3(i+vec3f(0,1,1)); let c111=h3(i+vec3f(1,1,1));
+  let x00=mix(c000,c100,u.x); let x10=mix(c010,c110,u.x);
+  let x01=mix(c001,c101,u.x); let x11=mix(c011,c111,u.x);
+  return mix(mix(x00,x10,u.y), mix(x01,x11,u.y), u.z);
+}
+fn fbm3(p:vec3f)->f32{ var s=0.0; var a=0.6; var f=1.0; for(var i=0;i<4;i++){ s+=a*vnoise3(p*f); f*=2.0; a*=0.5; } return s; }
+
+fn biomeAt(p:vec3f, seed:f32)->u32{
+  let so = seed*0.013;
+  if (fbm3(p*0.00090 + vec3f(so+11.3))   > 0.60) { return 4u; } // LAND
+  if (fbm3(p*0.00120 + vec3f(so+57.1))   > 0.58) { return 2u; } // WATER
+  if (fbm3(p*0.00150 + vec3f(so+98.7))   > 0.62) { return 3u; } // PLASMA
+  if (fbm3(p*0.00130 + vec3f(so+140.2))  > 0.55) { return 1u; } // DUST
+  return 0u;                                                    // AIR fills the rest
+}
+
+struct Params {
+  a : vec4f,   // push, swirl, reform, dt
+  b : vec4f,   // drag(unused), _, count, worldHalf
+  c : vec4f,   // seed, time, _, _
+  d : vec4f,
+};
+`;
+
+// ---- seed pass (deterministic world from a seed) -------------------------
+const seedModule = await shader('seed', PRELUDE + /* wgsl */`
+@group(0) @binding(0) var<storage,read_write> pos  : array<vec4f>;
+@group(0) @binding(1) var<storage,read_write> vel  : array<vec4f>;
+@group(0) @binding(2) var<storage,read_write> home : array<vec4f>;
+@group(0) @binding(3) var<uniform> P : Params;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u){
+  let i = gid.x;
+  if (i >= arrayLength(&pos)) { return; }
+  let WH = P.b.w;
+  let seed = P.c.x;
+  let sk = u32(seed)*9781u + 12345u;
+  let hp = vec3f(
+    (rnd(i*3u+0u+sk)*2.0-1.0)*WH,
+    (rnd(i*3u+1u+sk)*2.0-1.0)*WH,
+    (rnd(i*3u+2u+sk)*2.0-1.0)*WH
+  );
+  var t = biomeAt(hp, seed);
+  // keep a clear pocket at the origin so you never spawn inside rock
+  if (t==4u && dot(hp,hp) < 200.0*200.0) { t = 0u; }
+  pos[i]  = vec4f(hp, 0.0);
+  vel[i]  = vec4f(0.0, 0.0, 0.0, f32(t));
+  home[i] = vec4f(hp, 0.0);
+}
+`);
+const seedPipeline = device.createComputePipeline({ layout:'auto', compute:{ module:seedModule, entryPoint:'main' } });
+const seedBind = device.createBindGroup({ layout:seedPipeline.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:posBuf } },
+  { binding:1, resource:{ buffer:velBuf } },
+  { binding:2, resource:{ buffer:homeBuf } },
+  { binding:3, resource:{ buffer:paramsBuf } },
+]});
+
+// ---- break-physics compute kernel ----------------------------------------
+const stepModule = await shader('step', PRELUDE + /* wgsl */`
+@group(0) @binding(0) var<storage,read_write> pos  : array<vec4f>;
+@group(0) @binding(1) var<storage,read_write> vel  : array<vec4f>;
+@group(0) @binding(2) var<storage,read>       home : array<vec4f>;
+@group(0) @binding(3) var<uniform> P : Params;
+@group(0) @binding(4) var<storage,read> ships : array<vec4f>;  // 2 vec4 per ship
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u){
+  let i = gid.x;
+  if (i >= u32(P.b.z)) { return; }            // P.b.z = active count
+
+  let PUSH=P.a.x; let SWIRL=P.a.y; let REFORM=P.a.z; let dt=P.a.w;
+  let count = u32(P.b.z);
+  let nShips = arrayLength(&ships) / 2u;
+
+  var p = pos[i].xyz;
+  var ex = pos[i].w * pow(0.90, dt*60.0);     // excitement cools over time
+  var v = vel[i].xyz;
+  let t = u32(vel[i].w);
+  let hp = home[i].xyz;
+
+  // every ship in the mesh disturbs the medium identically for every peer
+  for (var k:u32=0u; k<nShips; k=k+1u){
+    let s0 = ships[k*2u];
+    let s1 = ships[k*2u+1u];
+    if (s1.w < 0.5) { continue; }             // inactive slot
+    let sp = s0.xyz; let R = s0.w; let sv = s1.xyz;
+    let r = p - sp; let d2 = dot(r,r);
+    if (d2 < R*R){
+      let d = sqrt(d2) + 1e-4; let n = r / d; let fall = 1.0 - d/R;
+      if (t==4u){
+        // land: solid mass, barely shoved
+        v += n * PUSH * 0.05 * fall * dt;
+        ex += fall * 0.5;
+      } else {
+        v += n * (PUSH * pushm(t) * fall * dt);
+        // tangential swirl around the ship's travel axis -> a wake vortex
+        var axis = sv; let sl = length(axis);
+        if (sl > 1e-3) { axis = axis / sl; } else { axis = vec3f(0.0,1.0,0.0); }
+        let tang = cross(axis, n);
+        v += tang * (SWIRL * swrlm(t) * fall * dt);
+        if (t==0u){ ex += fall*1.6; } else { ex += fall; }
+      }
+    }
+  }
+
+  // reform toward home (water beads back; land snaps; this also re-anchors the
+  // field to the shared seeded state, healing any cross-GPU drift)
+  let rk = refrm(t) * REFORM * dt;
+  v += (hp - p) * rk;
+
+  // viscous drag (frame-rate independent)
+  v *= pow(dragt(t), dt*60.0);
+  p += v * dt;
+
+  pos[i] = vec4f(p, min(ex, 3.0));
+  vel[i] = vec4f(v, f32(t));
+}
+`);
+const stepPipeline = device.createComputePipeline({ layout:'auto', compute:{ module:stepModule, entryPoint:'main' } });
+const stepBind = device.createBindGroup({ layout:stepPipeline.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:posBuf } },
+  { binding:1, resource:{ buffer:velBuf } },
+  { binding:2, resource:{ buffer:homeBuf } },
+  { binding:3, resource:{ buffer:paramsBuf } },
+  { binding:4, resource:{ buffer:shipsBuf } },
+]});
+
+// ---- particle lens (additive billboards) ---------------------------------
+const RENDER_PALETTE = /* wgsl */`
+fn col_r(t:u32)->f32{ var a=array<f32,5>(0.32,0.74,0.30,1.00,0.97); return a[t]; }
+fn col_g(t:u32)->f32{ var a=array<f32,5>(0.46,0.58,0.74,0.32,0.60); return a[t]; }
+fn col_b(t:u32)->f32{ var a=array<f32,5>(0.58,0.40,0.96,0.86,0.22); return a[t]; }
+fn base_b(t:u32)->f32{ var a=array<f32,5>(0.05,0.55,0.72,0.80,0.95); return a[t]; }
+fn exg(t:u32)->f32{ var a=array<f32,5>(0.95,0.45,0.55,0.85,0.10); return a[t]; }
+fn sizew(t:u32)->f32{ var a=array<f32,5>(7.0,9.0,11.5,9.5,16.0); return a[t]; }
+struct Cam { vp:mat4x4f, camPos:vec4f, camRight:vec4f, camUp:vec4f };
+`;
+const drawModule = await shader('draw', RENDER_PALETTE + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam : Cam;
+@group(0) @binding(1) var<storage,read> pos : array<vec4f>;
+@group(0) @binding(2) var<storage,read> vel : array<vec4f>;
+
+struct VsOut { @builtin(position) clip:vec4f, @location(0) corner:vec2f, @location(1) color:vec3f };
+
+@vertex
+fn vs(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32)->VsOut {
+  var corners = array<vec2f,6>(
+    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+    vec2f(-1,1),  vec2f(1,-1), vec2f(1,1));
+  let c = corners[vi];
+
+  let pw = pos[ii].xyz;
+  let ex = pos[ii].w;
+  let t  = u32(vel[ii].w);
+  let sz = sizew(t);
+
+  let world = pw + (cam.camRight.xyz * c.x + cam.camUp.xyz * c.y) * sz;
+
+  var o : VsOut;
+  o.clip = cam.vp * vec4f(world, 1.0);
+  o.corner = c;
+
+  let wd = length(pw - cam.camPos.xyz);
+  let fade = 1.0 - smoothstep(cam.camPos.w, cam.camRight.w, wd);
+  let b = base_b(t) + ex * exg(t);
+  o.color = vec3f(col_r(t), col_g(t), col_b(t)) * b * fade;
+  return o;
+}
+
+@fragment
+fn fs(in:VsOut)->@location(0) vec4f {
+  let a = smoothstep(1.0, 0.0, length(in.corner));   // soft round sprite
+  if (a <= 0.001) { discard; }
+  return vec4f(in.color * a, a);
+}
+`);
+const ADD_BLEND = { color:{srcFactor:'one',dstFactor:'one',operation:'add'},
+                    alpha:{srcFactor:'one',dstFactor:'one',operation:'add'} };
+const drawPipeline = device.createRenderPipeline({
+  layout:'auto',
+  vertex:{ module:drawModule, entryPoint:'vs' },
+  fragment:{ module:drawModule, entryPoint:'fs', targets:[{ format, blend:ADD_BLEND }] },
+  primitive:{ topology:'triangle-list' },
+});
+const drawBind = device.createBindGroup({ layout:drawPipeline.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:camBuf } },
+  { binding:1, resource:{ buffer:posBuf } },
+  { binding:2, resource:{ buffer:velBuf } },
+]});
+
+// ---- avatar lens (remote players) ----------------------------------------
+const avatarModule = await shader('avatar', RENDER_PALETTE + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam : Cam;
+@group(0) @binding(1) var<storage,read> ships : array<vec4f>;
+
+struct VsOut { @builtin(position) clip:vec4f, @location(0) corner:vec2f, @location(1) color:vec3f };
+
+fn peerColor(k:u32)->vec3f{
+  let h = f32(k)*0.61803;
+  return 0.5 + 0.5*cos(6.2831853*(vec3f(0.0,0.33,0.66)+h));
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32)->VsOut {
+  var corners = array<vec2f,6>(
+    vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1),
+    vec2f(-1,1),  vec2f(1,-1), vec2f(1,1));
+  let c = corners[vi];
+  let k = ii + 1u;                       // skip slot 0 (the local ship)
+  let s0 = ships[k*2u];
+  let s1 = ships[k*2u+1u];
+  var o : VsOut;
+  if (s1.w < 0.5) { o.clip = vec4f(0.0,0.0,2.0,1.0); o.corner=c; o.color=vec3f(0.0); return o; } // cull behind far plane
+  let world = s0.xyz + (cam.camRight.xyz*c.x + cam.camUp.xyz*c.y) * 34.0;
+  o.clip = cam.vp * vec4f(world, 1.0);
+  o.corner = c;
+  o.color = peerColor(k) * 2.2;
+  return o;
+}
+
+@fragment
+fn fs(in:VsOut)->@location(0) vec4f {
+  let r = length(in.corner);
+  let halo = smoothstep(1.0, 0.0, r) * 0.5;
+  let core = smoothstep(0.34, 0.0, r);
+  let a = halo + core;
+  if (a <= 0.001) { discard; }
+  return vec4f(in.color*halo + vec3f(0.9,0.97,1.0)*core, a);
+}
+`);
+const avatarPipeline = device.createRenderPipeline({
+  layout:'auto',
+  vertex:{ module:avatarModule, entryPoint:'vs' },
+  fragment:{ module:avatarModule, entryPoint:'fs', targets:[{ format, blend:ADD_BLEND }] },
+  primitive:{ topology:'triangle-list' },
+});
+const avatarBind = device.createBindGroup({ layout:avatarPipeline.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:camBuf } },
+  { binding:1, resource:{ buffer:shipsBuf } },
+]});
+
+// ===========================================================================
+// hand-built column-major mat4 (own math, no three.js)
+// ===========================================================================
+function perspective(fovy, aspect, near, far){
+  const f = 1/Math.tan(fovy/2), nf = 1/(near-far);
+  const m = new Float32Array(16);
+  m[0]=f/aspect; m[5]=f; m[10]=far*nf; m[11]=-1; m[14]=near*far*nf;
+  return m;
+}
+function lookAt(ex,ey,ez, cx,cy,cz, ux,uy,uz){
+  let zx=ex-cx, zy=ey-cy, zz=ez-cz;
+  let zl=Math.hypot(zx,zy,zz)||1; zx/=zl; zy/=zl; zz/=zl;
+  let xx=uy*zz-uz*zy, xy=uz*zx-ux*zz, xz=ux*zy-uy*zx;
+  let xl=Math.hypot(xx,xy,xz)||1; xx/=xl; xy/=xl; xz/=xl;
+  const yx=zy*xz-zz*xy, yy=zz*xx-zx*xz, yz=zx*xy-zy*xx;
+  const m=new Float32Array(16);
+  m[0]=xx; m[1]=yx; m[2]=zx; m[3]=0;
+  m[4]=xy; m[5]=yy; m[6]=zy; m[7]=0;
+  m[8]=xz; m[9]=yz; m[10]=zz; m[11]=0;
+  m[12]=-(xx*ex+xy*ey+xz*ez);
+  m[13]=-(yx*ex+yy*ey+yz*ez);
+  m[14]=-(zx*ex+zy*ey+zz*ez);
+  m[15]=1;
+  return m;
+}
+function mul(a,b){ // a*b, column-major
+  const o=new Float32Array(16);
+  for(let c=0;c<4;c++) for(let r=0;r<4;r++){
+    o[c*4+r] = a[0*4+r]*b[c*4+0] + a[1*4+r]*b[c*4+1] + a[2*4+r]*b[c*4+2] + a[3*4+r]*b[c*4+3];
+  }
+  return o;
+}
+
+// ===========================================================================
+// camera + free-fly input
+// ===========================================================================
+const cam = { x:0, y:0, z:0, yaw:0, pitch:0, vx:0, vy:0, vz:0 };
+let maxSpeed = 260;
+
+const keys = {};
+addEventListener('keydown', e=>{ keys[e.code]=true; if(e.code==='Space') e.preventDefault(); });
+addEventListener('keyup',   e=>{ keys[e.code]=false; });
+
+let locked=false;
+// Pointer lock is blocked inside a cross-origin iframe (e.g. a preview panel).
+// Detect that and emulate look-on-click there; in a normal top-level tab we use
+// real pointer lock so the cursor is hidden and confined.
+const framed = (()=>{ try { return window.self !== window.top; } catch(_) { return true; } })();
+canvas.addEventListener('click', ()=>{
+  if (framed) { locked = true; document.getElementById('lock').style.opacity='0'; return; }
+  const r = canvas.requestPointerLock(); if(r && r.catch) r.catch(()=>{});
+});
+document.addEventListener('pointerlockchange', ()=>{
+  locked = document.pointerLockElement===canvas;
+  document.getElementById('lock').style.opacity = locked? '0':'1';
+});
+document.addEventListener('pointerlockerror', ()=>{}, false);
+addEventListener('mousemove', e=>{
+  if(!locked) return;
+  cam.yaw   -= e.movementX*0.0022;
+  cam.pitch -= e.movementY*0.0022;
+  cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch));
+});
+addEventListener('wheel', e=>{ maxSpeed = Math.max(40, Math.min(1600, maxSpeed*(e.deltaY<0?1.12:0.89))); }, {passive:true});
+
+function readGamepad(){
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const gp = pads && pads[0];
+  if(!gp) return { mx:0,my:0,mz:0, lx:0,ly:0, boost:1 };
+  const dz = v => Math.abs(v)<0.14 ? 0 : v;
+  const b = (i)=> gp.buttons[i] && gp.buttons[i].pressed ? 1 : 0;
+  return {
+    mx: dz(gp.axes[0]||0),
+    mz: dz(gp.axes[1]||0),               // stick up (-) = forward
+    my: b(5) - b(4),                      // RB up, LB down
+    lx: dz(gp.axes[2]||0),
+    ly: dz(gp.axes[3]||0),
+    boost: (gp.buttons[7] && gp.buttons[7].value>0.3) ? 1+gp.buttons[7].value*2.2 : 1,
+  };
+}
+
+// ===========================================================================
+// UI wiring
+// ===========================================================================
+const el = {};
+['push','swirl','reform','rad','dens'].forEach(id=>{
+  el[id]=document.getElementById(id);
+  const v=document.getElementById(id+'_v');
+  const fmt=()=>{ const n=+el[id].value; v.textContent = id==='reform'?n.toFixed(2):(id==='dens'?(n/1000)+'k':n.toFixed(0)); };
+  el[id].addEventListener('input', fmt); fmt();
+});
+el.dens.addEventListener('input', ()=>{ activeN = Math.min(MAXN, +el.dens.value); });
+document.getElementById('recenter').onclick = ()=>{ cam.x=cam.y=cam.z=0; cam.vx=cam.vy=cam.vz=0; cam.yaw=0; cam.pitch=0; };
+
+// ===========================================================================
+// world seeding (deterministic from a 32-bit-ish seed)
+// ===========================================================================
+function hashStr(s){ let h=2166136261>>>0; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return (h>>>0)%8000000; }
+let worldSeed = hashStr('WORLD');
+
+function seedWorld(){
+  paramsF32[8]=worldSeed; paramsF32[7]=WORLD_HALF;
+  device.queue.writeBuffer(paramsBuf, 0, paramsF32);
+  const enc = device.createCommandEncoder();
+  const pass = enc.beginComputePass();
+  pass.setPipeline(seedPipeline); pass.setBindGroup(0, seedBind);
+  pass.dispatchWorkgroups(Math.ceil(MAXN/64));
+  pass.end();
+  device.queue.submit([enc.finish()]);
+}
+document.getElementById('reseed').onclick = ()=>{
+  // a manual reseed nudges the seed but keeps it shareable via the room code
+  worldSeed = (worldSeed*16807 + 12345) % 8000000;
+  seedWorld();
+};
+
+// ===========================================================================
+// multiplayer (trystero p2p over torrent trackers)
+// ===========================================================================
+const peers = new Map();   // id -> { pos:[x,y,z], vel:[x,y,z], tpos, tvel, last }
+let room=null, sendState=null, selfId=null, broadcastAcc=0;
+const netstat = document.getElementById('netstat');
+
+document.getElementById('connect').onclick = connectRoom;
+document.getElementById('room').addEventListener('keydown', e=>{ if(e.key==='Enter') connectRoom(); });
+
+async function connectRoom(){
+  const code = (document.getElementById('room').value || 'WORLD').trim().toUpperCase();
+  if(!code) return;
+  // same code = same world, with or without anyone else present
+  worldSeed = hashStr(code);
+  seedWorld();
+  if(room){ try{ room.leave(); }catch(_){} peers.clear(); }
+  netstat.textContent = 'connecting to mesh…'; netstat.style.color='#ffaa00';
+  try{
+    const trystero = await import('https://esm.sh/trystero@0.22.0/torrent');
+    selfId = trystero.selfId;
+    room = trystero.joinRoom({ appId:'fractal-particle-world-v1' }, code);
+    const [ss, onState] = room.makeAction('state');
+    sendState = ss;
+    onState((data, id)=>{
+      let p = peers.get(id);
+      if(!p){ p={ pos:[...data.p], vel:[...data.v], tpos:[...data.p], tvel:[...data.v], last:0 }; peers.set(id,p); }
+      p.tpos = data.p; p.tvel = data.v; p.last = performance.now();
+    });
+    room.onPeerJoin(id=>{ updateNet(); });
+    room.onPeerLeave(id=>{ peers.delete(id); updateNet(); });
+    netstat.style.color='#66cc66';
+    updateNet();
+  }catch(err){
+    console.error(err);
+    netstat.textContent = 'connect failed: '+err.message; netstat.style.color='#ff6666';
+  }
+}
+function updateNet(){
+  const n = peers.size;
+  const id = selfId ? selfId.slice(0,6) : '——';
+  netstat.textContent = `room "${(document.getElementById('room').value||'').toUpperCase()}" · you ${id} · ${n} peer${n===1?'':'s'}`;
+  netstat.style.color = '#66cc66';
+}
+
+// ===========================================================================
+// per-frame ship table: slot 0 = me, slots 1.. = interpolated peers
+// ===========================================================================
+function fillShips(dt){
+  shipsF32.fill(0);
+  const R = +el.rad.value;
+  // local
+  shipsF32[0]=cam.x; shipsF32[1]=cam.y; shipsF32[2]=cam.z; shipsF32[3]=R;
+  shipsF32[4]=cam.vx; shipsF32[5]=cam.vy; shipsF32[6]=cam.vz; shipsF32[7]=1;
+  let k=1;
+  const now = performance.now();
+  for(const [id,p] of peers){
+    if(k>=MAXSHIPS) break;
+    if(now - p.last > 5000) continue;             // stale peer, skip
+    const a = Math.min(1, dt*12);
+    for(let j=0;j<3;j++){ p.pos[j]+=(p.tpos[j]-p.pos[j])*a; p.vel[j]+=(p.tvel[j]-p.vel[j])*a; }
+    const o=k*8;
+    shipsF32[o]=p.pos[0]; shipsF32[o+1]=p.pos[1]; shipsF32[o+2]=p.pos[2]; shipsF32[o+3]=R;
+    shipsF32[o+4]=p.vel[0]; shipsF32[o+5]=p.vel[1]; shipsF32[o+6]=p.vel[2]; shipsF32[o+7]=1;
+    k++;
+  }
+  device.queue.writeBuffer(shipsBuf, 0, shipsF32);
+}
+
+// ===========================================================================
+// CPU-side biome readout for the HUD (mirrors the WGSL biomeAt)
+// ===========================================================================
+function jsH3(x,y,z){ const v=Math.sin(x*127.1+y*311.7+z*74.7)*43758.5453; return v-Math.floor(v); }
+function jsVnoise(x,y,z){
+  const xi=Math.floor(x),yi=Math.floor(y),zi=Math.floor(z), xf=x-xi,yf=y-yi,zf=z-zi;
+  const u=xf*xf*(3-2*xf),v=yf*yf*(3-2*yf),w=zf*zf*(3-2*zf);
+  const L=(a,b,t)=>a+(b-a)*t;
+  const c000=jsH3(xi,yi,zi),c100=jsH3(xi+1,yi,zi),c010=jsH3(xi,yi+1,zi),c110=jsH3(xi+1,yi+1,zi);
+  const c001=jsH3(xi,yi,zi+1),c101=jsH3(xi+1,yi,zi+1),c011=jsH3(xi,yi+1,zi+1),c111=jsH3(xi+1,yi+1,zi+1);
+  return L(L(L(c000,c100,u),L(c010,c110,u),v), L(L(c001,c101,u),L(c011,c111,u),v), w);
+}
+function jsFbm(x,y,z){ let s=0,a=0.6,f=1; for(let i=0;i<4;i++){ s+=a*jsVnoise(x*f,y*f,z*f); f*=2; a*=0.5; } return s; }
+function biomeJS(x,y,z){
+  const so=worldSeed*0.013;
+  if(jsFbm(x*0.00090+so+11.3, y*0.00090+so+11.3, z*0.00090+so+11.3)>0.60) return LAND;
+  if(jsFbm(x*0.00120+so+57.1, y*0.00120+so+57.1, z*0.00120+so+57.1)>0.58) return WATER;
+  if(jsFbm(x*0.00150+so+98.7, y*0.00150+so+98.7, z*0.00150+so+98.7)>0.62) return PLASMA;
+  if(jsFbm(x*0.00130+so+140.2,y*0.00130+so+140.2,z*0.00130+so+140.2)>0.55) return DUST;
+  return AIR;
+}
+
+// ===========================================================================
+// resize
+// ===========================================================================
+let proj = perspective(72*Math.PI/180, 1, 0.5, 6000);
+function resize(){
+  const w = Math.floor(innerWidth*Math.min(devicePixelRatio,1.5));
+  const h = Math.floor(innerHeight*Math.min(devicePixelRatio,1.5));
+  canvas.width=w; canvas.height=h;
+  proj = perspective(72*Math.PI/180, w/h, 0.5, 6000);
+}
+addEventListener('resize', resize); resize();
+
+// ===========================================================================
+// main loop
+// ===========================================================================
+seedWorld();
+
+const FIXED = 1/60;          // fixed sim step (deterministic across frame rates)
+let acc = 0;
+let t0 = performance.now(), fc=0, fa=0;
+const fpsEl=document.getElementById('fps'), medEl=document.getElementById('medium'),
+      subEl=document.getElementById('mediumsub'), spEl=document.getElementById('speed');
+
+function frame(now){
+  let dt = Math.min(0.05, (now - t0)/1000); t0 = now; fa+=dt;
+  if(++fc>=20){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps'; fc=0; fa=0; }
+
+  // ---- input -> orientation ----
+  const gp = readGamepad();
+  cam.yaw   -= gp.lx*2.6*dt;
+  cam.pitch -= gp.ly*2.6*dt;
+  cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch));
+
+  const cp=Math.cos(cam.pitch), sp=Math.sin(cam.pitch), cy=Math.cos(cam.yaw), sy=Math.sin(cam.yaw);
+  const fwd=[ cp*sy, sp, -cp*cy ];
+  // right = normalize(cross(fwd, worldUp)) ; camUp = cross(right, fwd)
+  let Rx = fwd[1]*0 - fwd[2]*1;     // fwd x (0,1,0)
+  let Ry = fwd[2]*0 - fwd[0]*0;
+  let Rz = fwd[0]*1 - fwd[1]*0;
+  const rl = Math.hypot(Rx,Ry,Rz)||1; Rx/=rl; Ry/=rl; Rz/=rl;
+  const Ux = Ry*fwd[2]-Rz*fwd[1], Uy = Rz*fwd[0]-Rx*fwd[2], Uz = Rx*fwd[1]-Ry*fwd[0];
+
+  // ---- input -> movement ----  (strafe along right, forward along fwd, lift along world up)
+  let ix=gp.mx, iy=gp.my, iz=-gp.mz;
+  if(keys['KeyW']) iz+=1; if(keys['KeyS']) iz-=1;
+  if(keys['KeyD']) ix+=1; if(keys['KeyA']) ix-=1;
+  if(keys['Space']) iy+=1; if(keys['ShiftLeft']||keys['ShiftRight']) iy-=1;
+  const accel = maxSpeed*4*gp.boost;
+  cam.vx += (Rx*ix + fwd[0]*iz)*accel*dt;
+  cam.vy += (fwd[1]*iz + iy)*accel*dt;
+  cam.vz += (Rz*ix + fwd[2]*iz)*accel*dt;
+
+  const spd = Math.hypot(cam.vx,cam.vy,cam.vz);
+  const cap = maxSpeed*gp.boost;
+  if(spd>cap){ const s=cap/spd; cam.vx*=s; cam.vy*=s; cam.vz*=s; }
+  cam.x += cam.vx*dt; cam.y += cam.vy*dt; cam.z += cam.vz*dt;
+  const drag = Math.pow(0.86, dt*60);
+  cam.vx*=drag; cam.vy*=drag; cam.vz*=drag;
+
+  // ---- ships (local + peers) ----
+  fillShips(dt);
+
+  // ---- broadcast my pose to the mesh (~15 Hz) ----
+  if (sendState){
+    broadcastAcc += dt;
+    if (broadcastAcc >= 1/15){
+      broadcastAcc = 0;
+      const r1 = v => Math.round(v*10)/10;
+      sendState({ p:[r1(cam.x), r1(cam.y), r1(cam.z)], v:[r1(cam.vx), r1(cam.vy), r1(cam.vz)],
+                  y:Math.round(cam.yaw*1000)/1000, t:Math.round(cam.pitch*1000)/1000 });
+    }
+  }
+
+  // ---- camera uniform ----
+  const view = lookAt(cam.x,cam.y,cam.z, cam.x+fwd[0],cam.y+fwd[1],cam.z+fwd[2], 0,1,0);
+  const vp = mul(proj, view);
+  camF32.set(vp, 0);
+  camF32[16]=cam.x; camF32[17]=cam.y; camF32[18]=cam.z; camF32[19]=WORLD_HALF*0.5; // fadeStart
+  camF32[20]=Rx;   camF32[21]=Ry;   camF32[22]=Rz;   camF32[23]=WORLD_HALF*0.95;   // camRight + fadeEnd
+  camF32[24]=Ux;   camF32[25]=Uy;   camF32[26]=Uz;   camF32[27]=0;
+  device.queue.writeBuffer(camBuf, 0, camF32);
+
+  // ---- fixed-step physics ----
+  paramsF32[0]=+el.push.value; paramsF32[1]=+el.swirl.value; paramsF32[2]=+el.reform.value; paramsF32[3]=FIXED;
+  paramsF32[6]=activeN; paramsF32[7]=WORLD_HALF; paramsF32[8]=worldSeed; paramsF32[9]=now/1000;
+  acc += dt;
+  let steps = 0;
+  const enc = device.createCommandEncoder();
+  while(acc >= FIXED && steps < 4){
+    device.queue.writeBuffer(paramsBuf, 0, paramsF32);
+    const cpass = enc.beginComputePass();
+    cpass.setPipeline(stepPipeline); cpass.setBindGroup(0, stepBind);
+    cpass.dispatchWorkgroups(Math.ceil(activeN/64));
+    cpass.end();
+    acc -= FIXED; steps++;
+  }
+
+  // ---- render ----
+  const rpass = enc.beginRenderPass({ colorAttachments:[{
+    view: ctx.getCurrentTexture().createView(),
+    clearValue:{ r:0.016, g:0.024, b:0.039, a:1 }, loadOp:'clear', storeOp:'store',
+  }]});
+  rpass.setPipeline(drawPipeline); rpass.setBindGroup(0, drawBind);
+  rpass.draw(6, activeN);
+  if(peers.size>0){ rpass.setPipeline(avatarPipeline); rpass.setBindGroup(0, avatarBind); rpass.draw(6, MAXSHIPS-1); }
+  rpass.end();
+  device.queue.submit([enc.finish()]);
+
+  // ---- HUD ----
+  const here = biomeJS(cam.x, cam.y, cam.z);
+  medEl.textContent = TYPE_NAMES[here]; medEl.style.color = HUD_COL[here];
+  spEl.textContent = spd.toFixed(0)+' u/s  ·  cruise '+maxSpeed.toFixed(0);
+
+  booted = true;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,734 @@
+﻿[
+    {
+        "name":  "hashI2",
+        "category":  "noise",
+        "signature":  "(xi:i32,zi:i32,s:i32)-\u003ef32",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn hashI(xi:i32, zi:i32, s:i32)-\u003ef32 {\n  var h:u32 = u32(xi)*374761393u + u32(zi)*668265263u + u32(s)*2654435761u;\n  h = (h ^ (h\u003e\u003e13u)) * 1274126177u; h = h ^ (h\u003e\u003e16u);\n  return f32(h)/4294967296.0;\n}",
+        "role":  "deterministic 0..1 lattice hash; the atom every 2D noise is built on (bit-identical to hybrid_world/field_particle CPU mirror)"
+    },
+    {
+        "name":  "hashU",
+        "category":  "noise",
+        "signature":  "(n:u32)-\u003eu32",
+        "params":  [
+                       "stream"
+                   ],
+        "wgsl":  "fn hashU(n0:u32)-\u003eu32{ var n=n0; n=n*747796405u+2891336453u; n=((n\u003e\u003e((n\u003e\u003e28u)+4u))^n)*277803737u; n=(n\u003e\u003e22u)^n; return n; }\nfn rnd(n:u32)-\u003ef32{ return f32(hashU(n)\u00260xffffffu)/16777215.0; }",
+        "role":  "PCG-style integer hash for per-index random streams (particle scatter, stamp jitter, seed derivation)"
+    },
+    {
+        "name":  "hash3",
+        "category":  "noise",
+        "signature":  "(p:vec3f)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn hash3(p:vec3f)-\u003ef32 { var q=fract(p*0.3183099+vec3f(0.1,0.2,0.3)); q*=17.0; return fract(q.x*q.y*q.z*(q.x+q.y+q.z)); }",
+        "role":  "3D lattice hash (hybrid_world\u0027s h3); cheaper/dependency-free feeder for 3D value noise"
+    },
+    {
+        "name":  "valueNoise2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32)-\u003ef32",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn vn(x:f32, z:f32, s:i32)-\u003ef32 {\n  let xi=i32(floor(x)); let zi=i32(floor(z));\n  let xf=x-floor(x); let zf=z-floor(z);\n  let a=hashI(xi,zi,s); let b=hashI(xi+1,zi,s); let c=hashI(xi,zi+1,s); let d=hashI(xi+1,zi+1,s);\n  let u2=xf*xf*(3.0-2.0*xf); let v2=zf*zf*(3.0-2.0*zf);\n  return a+(b-a)*u2+(c-a)*v2+(a-b-c+d)*u2*v2;\n}\nfn valueNoise2(p:vec2f,s:i32)-\u003ef32{ return vn(p.x,p.y,s); }",
+        "role":  "smooth 0..1 base field; the canonical 2D primitive reused verbatim across all three labs"
+    },
+    {
+        "name":  "valueNoise3",
+        "category":  "noise",
+        "signature":  "(p:vec3f)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn vn3(x:vec3f)-\u003ef32 {\n  let i=floor(x); var f=fract(x); f=f*f*f*(f*(f*6.0-15.0)+10.0);\n  let n000=hash3(i); let n100=hash3(i+vec3f(1,0,0)); let n010=hash3(i+vec3f(0,1,0)); let n110=hash3(i+vec3f(1,1,0));\n  let n001=hash3(i+vec3f(0,0,1)); let n101=hash3(i+vec3f(1,0,1)); let n011=hash3(i+vec3f(0,1,1)); let n111=hash3(i+vec3f(1,1,1));\n  return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y), mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y), f.z);\n}",
+        "role":  "volumetric base field for clouds/biome/density; quintic-fade version from hybrid_world\u0027s cloud volume"
+    },
+    {
+        "name":  "perlin2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32)-\u003ef32",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn grad2(ix:i32,iz:i32,s:i32)-\u003evec2f{ let a=hashI(ix,iz,s)*6.2831853; return vec2f(cos(a),sin(a)); }\nfn perlin2(p:vec2f,s:i32)-\u003ef32{\n  let i=floor(p); let f=p-i; let u=f*f*f*(f*(f*6.0-15.0)+10.0);\n  let ix=i32(i.x); let iz=i32(i.y);\n  let g00=grad2(ix,iz,s); let g10=grad2(ix+1,iz,s); let g01=grad2(ix,iz+1,s); let g11=grad2(ix+1,iz+1,s);\n  let d00=dot(g00,f); let d10=dot(g10,f-vec2f(1,0)); let d01=dot(g01,f-vec2f(0,1)); let d11=dot(g11,f-vec2f(1,1));\n  return mix(mix(d00,d10,u.x),mix(d01,d11,u.x),u.y)*0.5+0.5;\n}",
+        "role":  "gradient noise (signed, zero mean before bias) - smoother lobes than value noise, better for warp fields"
+    },
+    {
+        "name":  "simplex2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32)-\u003ef32",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn simplex2(pin:vec2f,s:i32)-\u003ef32{\n  let K1=0.366025404; let K2=0.211324865;\n  let i=floor(pin+(pin.x+pin.y)*K1);\n  let a=pin-i+(i.x+i.y)*K2;\n  let o=select(vec2f(0.0,1.0),vec2f(1.0,0.0),a.x\u003ea.y);\n  let b=a-o+K2; let c=a-1.0+2.0*K2;\n  var h=max(vec3f(0.5)-vec3f(dot(a,a),dot(b,b),dot(c,c)),vec3f(0.0)); h=h*h*h*h;\n  let ii=i32(i.x); let jj=i32(i.y);\n  let n=h.x*(hashI(ii,jj,s)*2.0-1.0)\n      + h.y*(hashI(ii+i32(o.x),jj+i32(o.y),s)*2.0-1.0)\n      + h.z*(hashI(ii+1,jj+1,s)*2.0-1.0);\n  return clamp(n*35.0*0.5+0.5,0.0,1.0);\n}",
+        "role":  "gradient noise on a simplex lattice - no axis-aligned artifacts, isotropic; best for flow-like organic fields"
+    },
+    {
+        "name":  "worley2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32)-\u003evec2f",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn worley2(p:vec2f,s:i32)-\u003evec2f{\n  let g=floor(p); let f=p-g;\n  var f1=8.0; var f2=8.0;\n  for(var j=-1;j\u003c=1;j++){ for(var i=-1;i\u003c=1;i++){\n    let o=vec2f(f32(i),f32(j));\n    let fp=vec2f(hashI(i32(g.x)+i,i32(g.y)+j,s), hashI(i32(g.x)+i,i32(g.y)+j,s+7919));\n    let d=length(o+fp-f);\n    if(d\u003cf1){ f2=f1; f1=d; } else if(d\u003cf2){ f2=d; }\n  }}\n  return vec2f(f1,f2);\n}",
+        "role":  "cellular/Voronoi distance (F1,F2). F1=cell fill, F2-F1=crack/edge network -\u003e rock cracks, scales, veins, cracked coastlines"
+    },
+    {
+        "name":  "worley3",
+        "category":  "noise",
+        "signature":  "(p:vec3f)-\u003evec2f",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn worley3(p:vec3f)-\u003evec2f{\n  let g=floor(p); let f=p-g;\n  var f1=8.0; var f2=8.0;\n  for(var k=-1;k\u003c=1;k++){ for(var j=-1;j\u003c=1;j++){ for(var i=-1;i\u003c=1;i++){\n    let o=vec3f(f32(i),f32(j),f32(k));\n    let fp=fract(hash3(g+o)*vec3f(1.0,1.7,2.3)+0.5);\n    let d=length(o+fp-f);\n    if(d\u003cf1){ f2=f1; f1=d; } else if(d\u003cf2){ f2=d; }\n  }}}\n  return vec2f(f1,f2);\n}",
+        "role":  "volumetric cellular - foam/bubble structure in clouds, crystal packing in geology, cell membranes in creatures"
+    },
+    {
+        "name":  "fbm2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32,oct:i32,scale:f32)-\u003ef32",
+        "params":  [
+                       "seed",
+                       "octaves",
+                       "baseScale"
+                   ],
+        "wgsl":  "fn fbm2(p:vec2f, s:i32, oct:i32, scale:f32)-\u003ef32 {\n  var f=0.0; var amp=0.5; var fr=1.0; var nm=0.0;\n  for(var o=0;o\u003coct;o++){ f+=amp*vn(p.x*scale*fr, p.y*scale*fr, s+o*101); nm+=amp; amp=amp*0.5; fr=fr*2.0; }\n  return f/nm;\n}",
+        "role":  "multi-octave sum -\u003e continents/hills/base relief. The workhorse; identical recurrence (s+o*101, amp*0.5, fr*2) to existing labs"
+    },
+    {
+        "name":  "fbm3",
+        "category":  "noise",
+        "signature":  "(p:vec3f,oct:i32)-\u003ef32",
+        "params":  [
+                       "octaves"
+                   ],
+        "wgsl":  "fn fbm3(p:vec3f, oct:i32)-\u003ef32 { var s=0.0; var a=0.6; var f=1.0; var nm=0.0; for(var o=0;o\u003coct;o++){ s+=a*vn3(p*f); nm+=a; f*=2.0; a*=0.5; } return s/nm; }",
+        "role":  "volumetric fBm -\u003e cloud density, 3D biome selection, nebula/gas - matches hybrid_world cloud fbm3"
+    },
+    {
+        "name":  "ridged2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32,oct:i32,scale:f32)-\u003ef32",
+        "params":  [
+                       "seed",
+                       "octaves",
+                       "baseScale"
+                   ],
+        "wgsl":  "fn ridged2(p:vec2f, s:i32, oct:i32, scale:f32)-\u003ef32 {\n  var f=0.0; var amp=0.5; var fr=1.0; var prev=1.0;\n  for(var o=0;o\u003coct;o++){ var r=1.0-abs(vn(p.x*scale*fr, p.y*scale*fr, s+o*101)*2.0-1.0); r=r*r;\n    f+=amp*r*prev; prev=r; amp=amp*0.5; fr=fr*2.0; }\n  return f;\n}",
+        "role":  "sharp mountain crests / eroded ridgelines; the invert-abs-square-feedback trick, verbatim from both terrain labs"
+    },
+    {
+        "name":  "billow2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32,oct:i32,scale:f32)-\u003ef32",
+        "params":  [
+                       "seed",
+                       "octaves",
+                       "baseScale"
+                   ],
+        "wgsl":  "fn billow2(p:vec2f, s:i32, oct:i32, scale:f32)-\u003ef32 {\n  var f=0.0; var amp=0.5; var fr=1.0; var nm=0.0;\n  for(var o=0;o\u003coct;o++){ let n=abs(vn(p.x*scale*fr,p.y*scale*fr,s+o*101)*2.0-1.0); f+=amp*n; nm+=amp; amp=amp*0.5; fr=fr*2.0; }\n  return f/nm;\n}",
+        "role":  "puffy rounded lobes (abs of signed noise, no inversion) -\u003e boulders, cumulus bases, cellular dunes; ridged\u0027s complement"
+    },
+    {
+        "name":  "turbulence2",
+        "category":  "noise",
+        "signature":  "(p:vec2f,s:i32,oct:i32,scale:f32)-\u003ef32",
+        "params":  [
+                       "seed",
+                       "octaves",
+                       "baseScale"
+                   ],
+        "wgsl":  "fn turbulence2(p:vec2f, s:i32, oct:i32, scale:f32)-\u003ef32 {\n  var f=0.0; var amp=0.5; var fr=1.0; var nm=0.0;\n  for(var o=0;o\u003coct;o++){ f+=amp*abs(vn(p.x*scale*fr,p.y*scale*fr,s+o*101)*2.0-1.0); nm+=amp; amp=amp*0.5; fr=fr*2.0; }\n  return f/nm;\n}",
+        "role":  "|noise| fBm - marble/flame veining, wispy atmosphere filaments; feeds domain-warp offsets"
+    },
+    {
+        "name":  "domainWarp",
+        "category":  "warp",
+        "signature":  "(p:vec2f,s:i32,amp:f32,scale:f32)-\u003evec2f",
+        "params":  [
+                       "seed",
+                       "warpAmp",
+                       "warpScale"
+                   ],
+        "wgsl":  "fn domainWarp(p:vec2f, s:i32, amp:f32, scale:f32)-\u003evec2f {\n  let qx=fbm2(p, s+11, 4, scale);\n  let qz=fbm2(p+vec2f(5.2,1.3), s+29, 4, scale);\n  return p + (vec2f(qx,qz)-0.5)*2.0*amp;\n}",
+        "role":  "offset sample position by a noise field -\u003e the single most important coherence op; turns blobs into flows, ridges, swirls (Perlin\u0027s warp)"
+    },
+    {
+        "name":  "domainWarp3",
+        "category":  "warp",
+        "signature":  "(p:vec3f,amp:f32)-\u003evec3f",
+        "params":  [
+                       "warpAmp"
+                   ],
+        "wgsl":  "fn domainWarp3(p:vec3f, amp:f32)-\u003evec3f {\n  let qx=fbm3(p+vec3f(0.0,0.0,0.0),3);\n  let qy=fbm3(p+vec3f(3.7,1.1,4.3),3);\n  let qz=fbm3(p+vec3f(1.9,7.2,2.6),3);\n  return p + (vec3f(qx,qy,qz)-0.5)*2.0*amp;\n}",
+        "role":  "volumetric warp -\u003e swirling gas, twisted cave walls, marbled creature flesh, cloud advection distortion"
+    },
+    {
+        "name":  "warpRecursive",
+        "category":  "warp",
+        "signature":  "(p:vec2f,s:i32)-\u003ef32",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn warpRecursive(p:vec2f, s:i32)-\u003ef32 {\n  let q=vec2f(fbm2(p,s,4,1.0), fbm2(p+vec2f(5.2,1.3),s,4,1.0));\n  let r=vec2f(fbm2(p+q*4.0+vec2f(1.7,9.2),s,4,1.0), fbm2(p+q*4.0+vec2f(8.3,2.8),s,4,1.0));\n  return fbm2(p+r*4.0, s, 4, 1.0);\n}",
+        "role":  "fBm(p + fBm(p + fBm(p))) - two-level recursive warp -\u003e the classic \u0027fluid/organic mystery\u0027 look, structured coherence for free"
+    },
+    {
+        "name":  "scale",
+        "category":  "remap",
+        "signature":  "(p:vec3f,k:f32)-\u003evec3f",
+        "params":  [
+                       "factor"
+                   ],
+        "wgsl":  "fn opScale(p:vec3f, k:f32)-\u003evec3f { return p*k; }",
+        "role":  "uniform frequency change - the exponent knob a meta-generator turns to pick feature size"
+    },
+    {
+        "name":  "rotate2",
+        "category":  "remap",
+        "signature":  "(p:vec2f,a:f32)-\u003evec2f",
+        "params":  [
+                       "angle"
+                   ],
+        "wgsl":  "fn rotate2(p:vec2f, a:f32)-\u003evec2f { let c=cos(a); let s=sin(a); return vec2f(c*p.x-s*p.y, s*p.x+c*p.y); }",
+        "role":  "orient anisotropy - directional dunes, strata dip, wind-aligned clouds; also decorrelates octaves when applied per-octave"
+    },
+    {
+        "name":  "tile",
+        "category":  "remap",
+        "signature":  "(p:vec2f,period:f32)-\u003evec2f",
+        "params":  [
+                       "period"
+                   ],
+        "wgsl":  "fn opTile(p:vec2f, period:f32)-\u003evec2f { return (fract(p/period+0.5)-0.5)*period; }",
+        "role":  "wrap space into a repeating cell -\u003e seamless textures, periodic worlds, infinite tiling from a finite recipe"
+    },
+    {
+        "name":  "mirror",
+        "category":  "symmetry",
+        "signature":  "(p:vec2f)-\u003evec2f",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opMirror(p:vec2f)-\u003evec2f { return abs(p); }",
+        "role":  "reflect across axes -\u003e bilateral symmetry (creature bodies, leaves, crystal twins)"
+    },
+    {
+        "name":  "radialSymmetry",
+        "category":  "symmetry",
+        "signature":  "(p:vec2f,n:f32)-\u003evec2f",
+        "params":  [
+                       "fold"
+                   ],
+        "wgsl":  "fn radialSym(p:vec2f, n:f32)-\u003evec2f {\n  var a=atan2(p.y,p.x); let r=length(p);\n  let seg=6.2831853/n;\n  a=abs(a - floor(a/seg+0.5)*seg);\n  return vec2f(cos(a),sin(a))*r;\n}",
+        "role":  "N-fold rotational fold -\u003e flowers, snowflakes, radiolaria, mandala biomes; a meta-gen dial (n=5 flower, n=6 snow)"
+    },
+    {
+        "name":  "kaleidoscope",
+        "category":  "symmetry",
+        "signature":  "(p:vec2f,n:f32,twist:f32)-\u003evec2f",
+        "params":  [
+                       "fold",
+                       "twist"
+                   ],
+        "wgsl":  "fn kaleido(p:vec2f, n:f32, twist:f32)-\u003evec2f {\n  var a=atan2(p.y,p.x); let r=length(p);\n  let seg=6.2831853/n;\n  a=a - floor(a/seg)*seg; a=abs(a-seg*0.5);\n  a=a + twist*log(r+1.0);\n  return vec2f(cos(a),sin(a))*r;\n}",
+        "role":  "folded wedge + radius-dependent twist -\u003e exotic ornamental phenomena, spiral galaxies, shell whorls"
+    },
+    {
+        "name":  "add",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opAdd(a:f32,b:f32)-\u003ef32 { return a+b; }",
+        "role":  "superpose two fields - continent + detail layering (the fundamental fBm assembly step)"
+    },
+    {
+        "name":  "mul",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opMul(a:f32,b:f32)-\u003ef32 { return a*b; }",
+        "role":  "gate one field by another -\u003e mountains only where a mask is high (the mount*m pattern in existing heightAt)"
+    },
+    {
+        "name":  "sub",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opSub(a:f32,b:f32)-\u003ef32 { return a-b; }",
+        "role":  "carve one field from another - rivers cut into terrain, erosion channels, cloud holes"
+    },
+    {
+        "name":  "mix",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32,t:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opMix(a:f32,b:f32,t:f32)-\u003ef32 { return mix(a,b,clamp(t,0.0,1.0)); }",
+        "role":  "blend two generators by a third field -\u003e biome transitions, the core of every \u0027mix(sand,grass,...)\u0027 in the labs"
+    },
+    {
+        "name":  "min",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opMin(a:f32,b:f32)-\u003ef32 { return min(a,b); }",
+        "role":  "union of valleys / intersection of solids; SDF-boolean glue and \u0027lowest wins\u0027 terrain floors (lakes)"
+    },
+    {
+        "name":  "max",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opMax(a:f32,b:f32)-\u003ef32 { return max(a,b); }",
+        "role":  "highest-wins overlay -\u003e plateau clamping, mesa tops, keeping the tallest of competing mountain systems"
+    },
+    {
+        "name":  "powShape",
+        "category":  "combine",
+        "signature":  "(a:f32,k:f32)-\u003ef32",
+        "params":  [
+                       "exponent"
+                   ],
+        "wgsl":  "fn opPow(a:f32,k:f32)-\u003ef32 { return pow(clamp(a,0.0,1.0),k); }",
+        "role":  "reshape contrast/valley-floor flatness; k\u003e1 flattens lows \u0026 sharpens peaks, k\u003c1 plateaus - controls terrain \u0027character\u0027"
+    },
+    {
+        "name":  "smoothMin",
+        "category":  "combine",
+        "signature":  "(a:f32,b:f32,k:f32)-\u003ef32",
+        "params":  [
+                       "blend"
+                   ],
+        "wgsl":  "fn smin(a:f32,b:f32,k:f32)-\u003ef32 { let h=clamp(0.5+0.5*(b-a)/k,0.0,1.0); return mix(b,a,h)-k*h*(1.0-h); }",
+        "role":  "blended union - organic merges between blobs (creature limbs, fused rock, metaball terrain) with no hard seam"
+    },
+    {
+        "name":  "threshold",
+        "category":  "threshold",
+        "signature":  "(x:f32,e:f32)-\u003ef32",
+        "params":  [
+                       "edge"
+                   ],
+        "wgsl":  "fn opStep(x:f32,e:f32)-\u003ef32 { return step(e,x); }",
+        "role":  "hard cut -\u003e coastlines (land/sea), binary spawn masks, cell walls; the sharpest interpretation of a scalar field"
+    },
+    {
+        "name":  "smoothBand",
+        "category":  "threshold",
+        "signature":  "(x:f32,e0:f32,e1:f32)-\u003ef32",
+        "params":  [
+                       "lo",
+                       "hi"
+                   ],
+        "wgsl":  "fn opSmooth(x:f32,e0:f32,e1:f32)-\u003ef32 { return smoothstep(e0,e1,x); }",
+        "role":  "soft mask 0..1 - the mountain mask m=smoothstep(0.45,0.72,mtn0), beach fade, snow line; the universal soft selector"
+    },
+    {
+        "name":  "contourBands",
+        "category":  "threshold",
+        "signature":  "(x:f32,n:f32)-\u003ef32",
+        "params":  [
+                       "count"
+                   ],
+        "wgsl":  "fn opBands(x:f32,n:f32)-\u003ef32 { let g=x*n; return (floor(g)+smoothstep(0.4,0.6,fract(g)))/n; }",
+        "role":  "quantize into stepped terraces -\u003e rice-paddy terrain, sedimentary strata, topographic contour rings, cel shading"
+    },
+    {
+        "name":  "isoLine",
+        "category":  "threshold",
+        "signature":  "(x:f32,level:f32,w:f32)-\u003ef32",
+        "params":  [
+                       "level",
+                       "width"
+                   ],
+        "wgsl":  "fn opIso(x:f32,level:f32,w:f32)-\u003ef32 { let d=abs(x-level); return 1.0-smoothstep(0.0,w,d); }",
+        "role":  "bright ridge at a single value -\u003e shorelines, contour lines, cell membranes, river-at-sealevel highlighting"
+    },
+    {
+        "name":  "gradient2",
+        "category":  "gradient",
+        "signature":  "(p:vec2f,eps:f32)-\u003evec2f",
+        "params":  [
+                       "eps"
+                   ],
+        "wgsl":  "fn grad2f(p:vec2f, eps:f32)-\u003evec2f {\n  let hx=fbm2(p+vec2f(eps,0.0),1337,5,1.0)-fbm2(p-vec2f(eps,0.0),1337,5,1.0);\n  let hz=fbm2(p+vec2f(0.0,eps),1337,5,1.0)-fbm2(p-vec2f(0.0,eps),1337,5,1.0);\n  return vec2f(hx,hz)/(2.0*eps);\n}",
+        "role":  "central-difference slope of a field -\u003e surface normals, steepness masks (cliffs=rock), the basis of flow/erosion"
+    },
+    {
+        "name":  "normalFromHeight",
+        "category":  "gradient",
+        "signature":  "(p:vec2f,d:f32,heightFn)-\u003evec3f",
+        "params":  [
+                       "eps"
+                   ],
+        "wgsl":  "// heightAt is the generator being sampled; d is the finite-difference footprint\nfn normalFromHeight(wx:f32, wz:f32, d:f32)-\u003evec3f {\n  let hl=heightAt(wx-d,wz,d); let hr=heightAt(wx+d,wz,d);\n  let hd=heightAt(wx,wz-d,d); let hu=heightAt(wx,wz+d,d);\n  return normalize(vec3f((hl-hr)/(2.0*d), 1.0, (hd-hu)/(2.0*d)));\n}",
+        "role":  "world-space normal from any height generator - lifted verbatim from both terrain labs\u0027 vertex shaders; feeds lighting"
+    },
+    {
+        "name":  "curl2",
+        "category":  "gradient",
+        "signature":  "(p:vec2f,eps:f32)-\u003evec2f",
+        "params":  [
+                       "eps"
+                   ],
+        "wgsl":  "fn curl2(p:vec2f, eps:f32)-\u003evec2f {\n  let n1=fbm2(p+vec2f(0.0,eps),733,4,1.0); let n2=fbm2(p-vec2f(0.0,eps),733,4,1.0);\n  let n3=fbm2(p+vec2f(eps,0.0),733,4,1.0); let n4=fbm2(p-vec2f(eps,0.0),733,4,1.0);\n  return vec2f((n1-n2)/(2.0*eps), -(n3-n4)/(2.0*eps));\n}",
+        "role":  "divergence-free flow field (perp of gradient) -\u003e swirling wind, hair/fur direction, particle advection that never sinks/sources"
+    },
+    {
+        "name":  "downhill",
+        "category":  "gradient",
+        "signature":  "(p:vec2f)-\u003evec2f",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn downhill(wx:f32, wz:f32, d:f32)-\u003evec2f {\n  let hl=heightAt(wx-d,wz,d); let hr=heightAt(wx+d,wz,d);\n  let hd=heightAt(wx,wz-d,d); let hu=heightAt(wx,wz+d,d);\n  return -vec2f(hr-hl, hu-hd);\n}",
+        "role":  "steepest-descent direction on terrain -\u003e river routing, debris rolling, lava flow, water accumulation seeds"
+    },
+    {
+        "name":  "sdSphere",
+        "category":  "sdf",
+        "signature":  "(p:vec3f,r:f32)-\u003ef32",
+        "params":  [
+                       "radius"
+                   ],
+        "wgsl":  "fn sdSphere(p:vec3f, r:f32)-\u003ef32 { return length(p)-r; }",
+        "role":  "signed-distance ball - the base primitive for metaball creatures, boulders, planetoids, cloud cores"
+    },
+    {
+        "name":  "sdBox",
+        "category":  "sdf",
+        "signature":  "(p:vec3f,b:vec3f)-\u003ef32",
+        "params":  [
+                       "halfExtent"
+                   ],
+        "wgsl":  "fn sdBox(p:vec3f, b:vec3f)-\u003ef32 { let q=abs(p)-b; return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0); }",
+        "role":  "signed box - crystals, architecture, blocky geology, cave chambers when subtracted"
+    },
+    {
+        "name":  "sdTorus",
+        "category":  "sdf",
+        "signature":  "(p:vec3f,t:vec2f)-\u003ef32",
+        "params":  [
+                       "radii"
+                   ],
+        "wgsl":  "fn sdTorus(p:vec3f, t:vec2f)-\u003ef32 { let q=vec2f(length(p.xz)-t.x, p.y); return length(q)-t.y; }",
+        "role":  "ring primitive - arches, orbital structures, exotic-phenomenon rings, creature mouth/eye sockets"
+    },
+    {
+        "name":  "sdCapsule",
+        "category":  "sdf",
+        "signature":  "(p:vec3f,a:vec3f,b:vec3f,r:f32)-\u003ef32",
+        "params":  [
+                       "radius"
+                   ],
+        "wgsl":  "fn sdCapsule(p:vec3f, a:vec3f, b:vec3f, r:f32)-\u003ef32 { let pa=p-a; let ba=b-a; let h=clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0); return length(pa-ba*h)-r; }",
+        "role":  "segment-with-radius - creature limbs, tree trunks, tentacles; smin-unioned into skeletons"
+    },
+    {
+        "name":  "sdOpUnion",
+        "category":  "sdf",
+        "signature":  "(a:f32,b:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn opU(a:f32,b:f32)-\u003ef32 { return min(a,b); }\nfn opSub3(a:f32,b:f32)-\u003ef32 { return max(a,-b); }\nfn opInter(a:f32,b:f32)-\u003ef32 { return max(a,b); }",
+        "role":  "CSG booleans (union/subtract/intersect) on SDFs -\u003e caves carved from rock, compound creatures, arch-through-mountain"
+    },
+    {
+        "name":  "sdSmoothUnion",
+        "category":  "sdf",
+        "signature":  "(a:f32,b:f32,k:f32)-\u003ef32",
+        "params":  [
+                       "blend"
+                   ],
+        "wgsl":  "fn opSU(a:f32,b:f32,k:f32)-\u003ef32 { let h=clamp(0.5+0.5*(b-a)/k,0.0,1.0); return mix(b,a,h)-k*h*(1.0-h); }",
+        "role":  "blended CSG union -\u003e organic metaball bodies where limbs fuse smoothly into a torso; the creature-builder\u0027s core"
+    },
+    {
+        "name":  "sdfDisplace",
+        "category":  "sdf",
+        "signature":  "(d:f32,p:vec3f,amp:f32)-\u003ef32",
+        "params":  [
+                       "amp"
+                   ],
+        "wgsl":  "fn sdfDisplace(d:f32, p:vec3f, amp:f32)-\u003ef32 { return d + (fbm3(p,4)-0.5)*2.0*amp; }",
+        "role":  "add fBm to a smooth SDF surface -\u003e bumpy asteroids, warty skin, eroded crystal, lumpy clouds from a clean primitive"
+    },
+    {
+        "name":  "reactionDiffusion",
+        "category":  "iterate",
+        "signature":  "(uv:texture,params)-\u003evec2f  [MULTI-PASS]",
+        "params":  [
+                       "feed",
+                       "kill",
+                       "dA",
+                       "dB"
+                   ],
+        "wgsl":  "// PING-PONG COMPUTE PASS (Gray-Scott). state: rg=(A,B) in a storage texture; run 20-100x per frame.\n// bindings: src (read) A,B ; dst (write) A,B ; laplacian via 3x3 stencil.\nfn rdStep(A:f32,B:f32,lapA:f32,lapB:f32,feed:f32,kill:f32,dA:f32,dB:f32)-\u003evec2f {\n  let react=A*B*B;\n  let nA=A + (dA*lapA - react + feed*(1.0-A));\n  let nB=B + (dB*lapB + react - (kill+feed)*B);\n  return vec2f(clamp(nA,0.0,1.0), clamp(nB,0.0,1.0));\n}",
+        "role":  "ITERATED: grows spots/stripes/mazes/coral from noise seed -\u003e animal coats, coral, lichen, alien skin. NEEDS ping-pong state texture + many passes (cannot be a pure p-\u003ef32 sample)"
+    },
+    {
+        "name":  "cellularAutomata",
+        "category":  "iterate",
+        "signature":  "(grid:texture)-\u003ef32  [MULTI-PASS]",
+        "params":  [
+                       "birth",
+                       "survive"
+                   ],
+        "wgsl":  "// PING-PONG COMPUTE PASS. state: r=alive 0/1. Conway/cave-gen (B678/S345678 for caves).\nfn caStep(self:f32, neigh:i32, birthMask:u32, surviveMask:u32)-\u003ef32 {\n  let alive=self\u003e0.5;\n  let b=(birthMask\u003e\u003eu32(neigh))\u00261u;\n  let s=(surviveMask\u003e\u003eu32(neigh))\u00261u;\n  if(alive){ return select(0.0,1.0,s==1u); }\n  return select(0.0,1.0,b==1u);\n}",
+        "role":  "ITERATED: smooths noise into connected cave systems / dungeon rooms / island archipelagos. NEEDS neighbour-reading ping-pong grid, several passes"
+    },
+    {
+        "name":  "hydraulicErosion",
+        "category":  "iterate",
+        "signature":  "(height,water)-\u003ef32  [MULTI-PASS]",
+        "params":  [
+                       "rain",
+                       "evap",
+                       "capacity",
+                       "solubility"
+                   ],
+        "wgsl":  "// PING-PONG COMPUTE PASS over height+water+sediment grids. One droplet/virtual-pipe step:\nfn erodeStep(h:f32, hDown:f32, sediment:f32, capacity:f32, deposit:f32, dissolve:f32)-\u003evec2f {\n  let slope=max(h-hDown,0.0);\n  let cap=capacity*slope;\n  let move=select(-dissolve*(cap-sediment), deposit*(sediment-cap), sediment\u003ecap);\n  return vec2f(h+move, sediment-move); // new height, new carried sediment\n}",
+        "role":  "ITERATED: cuts realistic V-valleys, gullies, alluvial fans, sediment deltas into a raw fBm terrain. NEEDS height+sediment ping-pong grids over many steps"
+    },
+    {
+        "name":  "flowAccumulation",
+        "category":  "iterate",
+        "signature":  "(height)-\u003ef32  [MULTI-PASS]",
+        "params":  [
+                       "iterations"
+                   ],
+        "wgsl":  "// PING-PONG COMPUTE PASS: each cell pushes its water to its lowest neighbour; accumulate over passes.\nfn flowStep(myWater:f32, incoming:f32)-\u003ef32 { return myWater*0.02 + incoming; } // steady rain + upstream\n// direction chosen by downhill(); after N passes high accum = river channels",
+        "role":  "ITERATED: derives drainage networks / river width from terrain -\u003e where rivers carve \u0026 where lakes pool. NEEDS multi-pass scatter to downhill neighbour"
+    },
+    {
+        "name":  "particleDeposit",
+        "category":  "iterate",
+        "signature":  "(field\u003c-\u003eparticles)  [MULTI-PASS/ATOMIC]",
+        "params":  [
+                       "dig",
+                       "heal"
+                   ],
+        "wgsl":  "// ATOMIC SCATTER/GATHER (from field_particle_join): particles carve \u0026 deposit fixed-point mass.\nfn gather(cell:i32, dig:f32){ atomicSub(\u0026depo[cell], i32(dig*FIXSCALE)); }\nfn scatter(cell:i32, dig:f32){ atomicAdd(\u0026depo[cell], i32(dig*FIXSCALE)); }\n// resolve pass: h = height + depo/FIXSCALE; then h += (base-h)*clamp(heal*dt,0,1);",
+        "role":  "ITERATED: the field\u003c-\u003eparticle join already in labs. Erosion/dunes/piles as conserved mass transfer + heal-to-seed. NEEDS atomic depo grid + resolve pass"
+    },
+    {
+        "name":  "scatterMask",
+        "category":  "scatter",
+        "signature":  "(p:vec2f,density:f32,s:i32)-\u003ef32",
+        "params":  [
+                       "density",
+                       "seed"
+                   ],
+        "wgsl":  "fn scatterMask(p:vec2f, density:f32, s:i32)-\u003ef32 {\n  let cell=floor(p); let f=p-cell;\n  let r0=hashI(i32(cell.x),i32(cell.y),s);\n  if(r0\u003edensity){ return 0.0; }\n  let jx=hashI(i32(cell.x),i32(cell.y),s+1); let jz=hashI(i32(cell.x),i32(cell.y),s+2);\n  let d=length(f-vec2f(jx,jz));\n  return 1.0-smoothstep(0.0,0.4,d);\n}",
+        "role":  "blue-noise-ish point placement -\u003e tree/rock/creature spawn points, star fields, crater centers; density is the meta-gen dial"
+    },
+    {
+        "name":  "stamp",
+        "category":  "scatter",
+        "signature":  "(p:vec2f,s:i32,sdfFn)-\u003ef32",
+        "params":  [
+                       "seed",
+                       "cellScale"
+                   ],
+        "wgsl":  "fn stamp(p:vec2f, s:i32, cellScale:f32)-\u003ef32 {\n  let g=p/cellScale; let cell=floor(g); let f=g-cell-0.5;\n  let jx=hashI(i32(cell.x),i32(cell.y),s)-0.5;\n  let jz=hashI(i32(cell.x),i32(cell.y),s+3)-0.5;\n  let rot=hashI(i32(cell.x),i32(cell.y),s+7)*6.2831853;\n  let local=rotate2(f-vec2f(jx,jz), rot);\n  return length(local)-0.25; // replace with any SDF: stamps a jittered/rotated instance per cell\n}",
+        "role":  "instance a primitive per grid cell with per-cell jitter+rotation+scale -\u003e scattered boulders, craters, buildings, scales, leaves"
+    },
+    {
+        "name":  "maskCombine",
+        "category":  "scatter",
+        "signature":  "(base:f32,mask:f32,stamp:f32)-\u003ef32",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn maskCombine(base:f32, mask:f32, stampVal:f32)-\u003ef32 { return mix(base, stampVal, clamp(mask,0.0,1.0)); }",
+        "role":  "apply a stamp only where a mask permits -\u003e craters only on plains, trees only below snowline (biome-gated scatter)"
+    },
+    {
+        "name":  "remapCurve",
+        "category":  "remap",
+        "signature":  "(x:f32,e0:f32,e1:f32,o0:f32,o1:f32)-\u003ef32",
+        "params":  [
+                       "inLo",
+                       "inHi",
+                       "outLo",
+                       "outHi"
+                   ],
+        "wgsl":  "fn remap(x:f32,e0:f32,e1:f32,o0:f32,o1:f32)-\u003ef32 { return o0+(clamp(x,e0,e1)-e0)*(o1-o0)/(e1-e0); }",
+        "role":  "linear range remap - the universal adaptor between operators; normalizes any field into the range the next op expects"
+    },
+    {
+        "name":  "terrace",
+        "category":  "remap",
+        "signature":  "(x:f32,steps:f32,sharp:f32)-\u003ef32",
+        "params":  [
+                       "steps",
+                       "sharpness"
+                   ],
+        "wgsl":  "fn terrace(x:f32, steps:f32, sharp:f32)-\u003ef32 { let s=x*steps; let f=fract(s); let k=floor(s); return (k+pow(f,sharp))/steps; }",
+        "role":  "nonlinear stepping with adjustable riser sharpness -\u003e geological strata, paddy fields, mesa layers (finer control than contourBands)"
+    },
+    {
+        "name":  "gain",
+        "category":  "remap",
+        "signature":  "(x:f32,k:f32)-\u003ef32",
+        "params":  [
+                       "gain"
+                   ],
+        "wgsl":  "fn gain(x:f32,k:f32)-\u003ef32 { let a=0.5*pow(2.0*select(x,1.0-x,x\u003e=0.5),k); return select(a,1.0-a,x\u003e=0.5); }",
+        "role":  "S-curve / contrast around 0.5 -\u003e punchy vs washed-out fields; a single tunable character knob for any 0..1 generator"
+    },
+    {
+        "name":  "palette",
+        "category":  "remap",
+        "signature":  "(t:f32,a,b,c,d:vec3f)-\u003evec3f",
+        "params":  [
+                       "a",
+                       "b",
+                       "c",
+                       "d"
+                   ],
+        "wgsl":  "fn palette(t:f32, a:vec3f, b:vec3f, c:vec3f, d:vec3f)-\u003evec3f { return a + b*cos(6.2831853*(c*t+d)); }",
+        "role":  "IQ cosine palette: 4 vec3 constants -\u003e an infinite family of coherent color ramps. The meta-gen INVENTS biome palettes by choosing a,b,c,d from seed"
+    },
+    {
+        "name":  "colorRamp",
+        "category":  "remap",
+        "signature":  "(h:f32,slope:f32)-\u003evec3f",
+        "params":  [
+                       "seaLevel",
+                       "snowLine"
+                   ],
+        "wgsl":  "fn colorRamp(h:f32, slope:f32, sea:f32)-\u003evec3f {\n  let sand=vec3f(0.76,0.70,0.50); let grass=vec3f(0.22,0.44,0.16);\n  let rock=vec3f(0.34,0.32,0.30); let snow=vec3f(0.92,0.94,0.97);\n  var col=mix(sand,grass,smoothstep(sea+1.0,sea+22.0,h));\n  col=mix(col,rock,smoothstep(260.0,440.0,h));\n  col=mix(col,snow,smoothstep(520.0,760.0,h)*smoothstep(0.6,0.35,slope));\n  col=mix(col,rock,smoothstep(0.40,0.7,slope));\n  return col;\n}",
+        "role":  "height+slope -\u003e terrain color; the exact ramp from both terrain labs, parameterized so meta-gen can swap the stops/palette"
+    },
+    {
+        "name":  "timeAdvance",
+        "category":  "time",
+        "signature":  "(p:vec3f,t:f32,vel:vec3f)-\u003evec3f",
+        "params":  [
+                       "velocity"
+                   ],
+        "wgsl":  "fn timeAdvance(p:vec3f, t:f32, vel:vec3f)-\u003evec3f { return p + vel*t; }",
+        "role":  "translate sample space by t*wind -\u003e the \u0027+time = weather\u0027 thesis: same field, scrolled -\u003e moving clouds/water (u.camPos.w carries t)"
+    },
+    {
+        "name":  "pulse",
+        "category":  "time",
+        "signature":  "(t:f32,freq:f32)-\u003ef32",
+        "params":  [
+                       "freq"
+                   ],
+        "wgsl":  "fn pulse(t:f32, freq:f32)-\u003ef32 { return sin(t*freq)*0.5+0.5; }",
+        "role":  "periodic 0..1 driver -\u003e pulsing bioluminescence, tides, day/night, breathing creatures; animates any static generator"
+    },
+    {
+        "name":  "flowNoise",
+        "category":  "time",
+        "signature":  "(p:vec2f,t:f32,s:i32)-\u003ef32",
+        "params":  [
+                       "seed"
+                   ],
+        "wgsl":  "fn flowNoise(p:vec2f, t:f32, s:i32)-\u003ef32 {\n  let flow=curl2(p*0.5, 0.01)*t*0.3;\n  return fbm2(p+flow, s, 4, 1.0);\n}",
+        "role":  "advect a noise field along its own curl over time -\u003e living, roiling surfaces (lava, plasma, storm cells) that stay coherent"
+    },
+    {
+        "name":  "asHeight",
+        "category":  "interpret",
+        "signature":  "(x:f32,amp:f32,base:f32)-\u003ef32",
+        "params":  [
+                       "amplitude",
+                       "base"
+                   ],
+        "wgsl":  "fn asHeight(x:f32, amp:f32, base:f32)-\u003ef32 { return base + (x-0.5)*2.0*amp; }",
+        "role":  "INTERPRET scalar as vertical displacement -\u003e terrain surface. The (cont-0.45)*420 pattern generalized"
+    },
+    {
+        "name":  "asDensity",
+        "category":  "interpret",
+        "signature":  "(x:f32,coverage:f32,heightGrad:f32)-\u003ef32",
+        "params":  [
+                       "coverage"
+                   ],
+        "wgsl":  "fn asDensity(x:f32, coverage:f32, hGrad:f32)-\u003ef32 { let c=smoothstep(0.0,1.0,clamp((x-(1.0-coverage))/0.42,0.0,1.0)); return max(c*hGrad,0.0); }",
+        "role":  "INTERPRET scalar as volumetric opacity for raymarching -\u003e clouds/gas/nebula. Exact cloud-coverage remap from hybrid_world"
+    },
+    {
+        "name":  "asColor",
+        "category":  "interpret",
+        "signature":  "(x:f32,grad:vec2f)-\u003evec3f",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn asColor(x:f32, grad:vec2f)-\u003evec3f { return palette(x, vec3f(0.5), vec3f(0.5), vec3f(1.0,1.0,1.0), vec3f(0.0,0.33,0.67)); }",
+        "role":  "INTERPRET scalar(+gradient) as albedo -\u003e biome/creature/mineral color via palette; gradient can drive slope-shading"
+    },
+    {
+        "name":  "asFlow",
+        "category":  "interpret",
+        "signature":  "(p:vec2f)-\u003evec2f",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn asFlow(p:vec2f)-\u003evec2f { return normalize(curl2(p,0.01)+1e-6); }",
+        "role":  "INTERPRET field as a 2D direction map -\u003e wind, current, fur/hair grain, particle advection velocity"
+    },
+    {
+        "name":  "asVelocity",
+        "category":  "interpret",
+        "signature":  "(p:vec3f,t:f32)-\u003evec3f",
+        "params":  [
+
+                   ],
+        "wgsl":  "fn asVelocity(p:vec3f, t:f32)-\u003evec3f { let f=curl2(p.xz*0.3, 0.02); return vec3f(f.x, (fbm3(p+vec3f(0.0,t,0.0),3)-0.5), f.y)*2.0; }",
+        "role":  "INTERPRET field as a 3D velocity for particles (the PART) -\u003e swarms, dust, sparks that follow the field\u0027s curl coherently"
+    },
+    {
+        "name":  "asSpawnMask",
+        "category":  "interpret",
+        "signature":  "(x:f32,thresh:f32)-\u003ef32",
+        "params":  [
+                       "threshold"
+                   ],
+        "wgsl":  "fn asSpawnMask(x:f32, thresh:f32)-\u003ef32 { return step(thresh,x); }",
+        "role":  "INTERPRET field as a binary placement mask -\u003e where creatures/props/particles are born; couples generator to the scatter pool"
+    },
+    {
+        "name":  "asEmissive",
+        "category":  "interpret",
+        "signature":  "(x:f32,col:vec3f,t:f32)-\u003evec3f",
+        "params":  [
+                       "glowColor"
+                   ],
+        "wgsl":  "fn asEmissive(x:f32, col:vec3f, t:f32)-\u003evec3f { return col*pow(clamp(x,0.0,1.0),3.0)*(0.6+0.4*pulse(t,2.0)); }",
+        "role":  "INTERPRET field as self-illumination -\u003e lava cracks, bioluminescent veins, magic runes, star cores; feeds HDR bloom in the labs\u0027 rgba16f pipeline"
+    },
+    {
+        "name":  "asNormal",
+        "category":  "interpret",
+        "signature":  "(grad:vec2f,strength:f32)-\u003evec3f",
+        "params":  [
+                       "strength"
+                   ],
+        "wgsl":  "fn asNormal(grad:vec2f, strength:f32)-\u003evec3f { return normalize(vec3f(-grad.x*strength, 1.0, -grad.y*strength)); }",
+        "role":  "INTERPRET a field\u0027s gradient as a surface normal for lighting -\u003e detail bumps without geometry (bark, scales, ripples)"
+    }
+]

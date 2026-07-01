@@ -4,7 +4,7 @@
 
 Author: Ashman Roonz
 Status: Living design spec
-Last updated: 2026-06-20
+Last updated: 2026-06-30
 
 ---
 
@@ -38,7 +38,7 @@ Either physical processor may perform either function. Authority lives on the Ev
 
 ## 3. Core commitments
 
-These six commitments are the spec. Everything else is implementation detail.
+These eight commitments are the spec. Everything else is implementation detail.
 
 ### C1. Truth is never stored in observer-projected form
 
@@ -78,6 +78,22 @@ Reconstruction can only integrate the history Evolution chose to keep. Infinite 
 
 **Buys:** predictable memory budget; temporal techniques have a defined, guaranteed input.
 
+### C7. The Evolution axis is a field↔particle duality joined by scatter/gather
+
+Authoritative state on the Evolution axis is never a single representation. It is held two ways at once — a continuous field (grids, SDFs, height fields, densities) and discrete excitations (particles, entities, agents) — and these are the same state at two scales, not two systems. The operator that moves state between them is first-class, not an afterthought: **gather** hands a patch of field to particles (a struck mountain sheds rock); **scatter** deposits particles back into the field (the rock settles into new ground). One transfer runs both ways, so the thing that removes mass is the thing that conserves it. And because the step that perturbs the field is the same step that heals it toward its seeded rest, interaction *is* regeneration: there is no simulator bolted onto a generator, only one update iterated.
+
+*Test:* if a thing and the stuff it is made of can never exchange — if a mountain cannot become debris and debris cannot become ground — the duality has been collapsed to one representation, and destruction, deposition, and phase change will forever be special-cased.
+
+**Buys:** destructible and depositable worlds with no bespoke systems; continuum effects (fluids, terrain, gas) and discrete effects (debris, crowds, projectiles) in one pipeline; structural conservation instead of scripted cleanup. This is how PIC/FLIP/MPM already work; naming the transfer as primary makes destruction a transfer, not an exception.
+
+### C8. Editable state is a bounded delta over the regenerable base
+
+The base world is a pure function of the seed (C3): infinite, unstored, recomputable. Edits — craters, builds, floods — are not a new world; they are a **delta** against what the seed would have produced. Untouched space is Δ=0 and costs nothing; a carved region is `base + Δ`. Because Δ is produced only by the deterministic core from the input stream, persistence and replay are the same artifact: the input log that re-evolves the world also re-derives every edit, and the retention contract (C6) bounds how much of Δ is materialized at once. Far, untouched regions fall back to pure function.
+
+*Test:* if remembering a player's change costs more than storing the inputs that caused it, truth has leaked out of the deterministic core into stored, observer-shaped state.
+
+**Buys:** enormous editable worlds at seed-only storage cost — pay memory only for what was touched; persistence, replay, and netcode share one mechanism (the input/delta log); edits sync for the very reason terrain never needs syncing.
+
 ---
 
 ## 4. What falls out for free
@@ -93,6 +109,9 @@ Under these commitments, the following are not features to build; they are the s
 | Multi-resolution / re-render | The same state observed at a different sampling rate |
 | VR / split-screen | Multiple Observations of one Evolution |
 | Deterministic bug repro | Re-evolution from the reporter's input log |
+| Destruction / deposition | A conserved scatter/gather transfer between the field and particle views |
+| Persistent player edits | A bounded delta over the analytic base, carried by the same input log |
+| Phase change (melt, freeze, erode) | State crossing the field↔particle boundary under a rule |
 
 If a proposed feature in this list is hard to implement, that is a signal a commitment above has been violated somewhere.
 
@@ -126,6 +145,8 @@ The original intuitive language maps to real techniques. Keep the right column; 
 | Illusion core / GPU | The Observation function | Rendering creates perception, not reality | Observation runs on any processor, and it reconstructs, not just samples |
 | CPU maintains reality | The Evolution function | Truth is advanced under rules | Evolution runs on any processor, including the GPU |
 | Screen is fundamental | Screen is the lossy readout | Forces state-first thinking | The screen is the *least* fundamental layer, being the most lossy |
+| Part and whole / particle and wave | Discrete excitations and the continuous field as two views of one Evolution-axis state | Objects and their medium are one substrate | The join is an operator (scatter/gather), not a coincidence; the two views are kept consistent deliberately |
+| The centered self | The Observation function — a viewpoint that samples the field into a percept | Perception reconstructs from a vantage; it is not the world | Many observers share one field; the field owes allegiance to none of them |
 
 ---
 
@@ -150,6 +171,7 @@ Determinism is a tax, not a free property. Pay it only in the core (C3, C4). Con
 4. Add the Observation layer as a pure reader of state plus a retained history window (C6).
 5. Add networking last: transmit inputs and rules, add reconciliation for the core only.
 6. Layer reconstruction-based rendering (temporal accumulation, upscaling) onto the Observation layer.
+7. Add the field↔particle transfer (scatter/gather) and the edit delta. Prove a carve→debris→deposit cycle conserves mass and that the resulting crater is a delta the input log alone re-derives.
 
 If step 2 is painful, stop and fix the architecture before going further. Replays are the canary for the whole design.
 
@@ -157,4 +179,4 @@ If step 2 is painful, stop and fix the architecture before going further. Replay
 
 ## 10. One-line summary
 
-Evolve an observer-independent field deterministically, keep truth out of rendered form, and treat every frame as one detachable, reconstructed observation; then replays, rollback, servers, and multi-view are all the same thing.
+Evolve an observer-independent field deterministically, keep truth out of rendered form, and treat every frame as one detachable, reconstructed observation; then replays, rollback, servers, and multi-view are all the same thing. Hold that field as a particle↔continuum duality and every edit as a delta over the seed, and destruction, persistence, and netcode become the same thing too.

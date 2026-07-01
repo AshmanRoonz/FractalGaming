@@ -1,0 +1,881 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>field ⇄ particle — breakable, reforming terrain · webgpu</title>
+<style>
+  :root { color-scheme: dark; }
+  html,body{margin:0;height:100%;background:#060a12;overflow:hidden;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;color:#cfe;cursor:crosshair}
+  #gpu{display:block;width:100vw;height:100vh}
+  #ui{position:fixed;inset:0;pointer-events:none}
+  #panel{position:fixed;top:10px;left:10px;width:250px;background:rgba(10,16,24,.82);border:1px solid #1d2b3a;border-radius:10px;padding:12px;backdrop-filter:blur(6px);pointer-events:auto;max-height:calc(100vh - 24px);overflow:auto}
+  #panel h1{font-size:13px;margin:0 0 2px;color:#8fd}
+  #panel .sub{color:#6a8;font-size:11px;margin:0 0 10px}
+  .row{display:flex;align-items:center;gap:8px;margin:5px 0}
+  .row label{flex:0 0 82px;color:#9bd}
+  .row input[type=range]{flex:1;min-width:0;accent-color:#3fd8b0}
+  .row .v{flex:0 0 42px;text-align:right;color:#bdf}
+  .hint{color:#69859a;font-size:10.5px;margin-top:8px}
+  button{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:6px;padding:5px 9px;cursor:pointer;font:inherit}
+  button:hover{background:#1d4860}
+  input[type=text]{background:#0c1620;border:1px solid #25415a;border-radius:6px;color:#cfe;font:inherit;padding:5px 7px;width:96px}
+  .net{margin-top:11px;border-top:1px solid #1d2b3a;padding-top:9px}
+  .net h2{font-size:11px;margin:0 0 6px;color:#7fd1c6;letter-spacing:.5px;text-transform:uppercase}
+  #netstat{font-size:10.5px;color:#7d97ab;margin-top:6px;min-height:14px}
+  .legend{margin-top:10px;font-size:11px;line-height:1.7}
+  .legend b{color:#bff}
+  #hud{position:fixed;top:12px;right:14px;text-align:right;text-shadow:0 0 8px #000}
+  #mode{font-size:20px;font-weight:700;letter-spacing:1px}
+  #modesub{font-size:11px;color:#7d97ab;margin-top:1px}
+  #stat{font-size:11px;color:#7d97ab;margin-top:6px}
+  .fps{position:fixed;bottom:8px;right:12px;color:#577;font-size:11px;text-shadow:0 0 6px #000}
+  #cross{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+  #cross:before,#cross:after{content:"";position:absolute;background:rgba(150,210,255,.5)}
+  #cross:before{width:2px;height:16px;left:-1px;top:-8px}
+  #cross:after{height:2px;width:16px;top:-1px;left:-8px}
+  #lock{position:fixed;left:50%;top:64%;transform:translateX(-50%);background:rgba(10,16,24,.85);border:1px solid #2a5366;border-radius:8px;padding:10px 16px;color:#bff;pointer-events:none;transition:opacity .3s}
+  #ctrls{position:fixed;bottom:8px;left:12px;color:#5f7d92;font-size:10.5px;text-shadow:0 0 6px #000;max-width:52vw}
+  #fail{position:fixed;inset:0;display:none;place-items:center;font:15px/1.6 ui-sans-serif,system-ui,sans-serif;color:#cdd9e5;text-align:center;padding:24px;background:#060a12}
+  #fail code{color:#7cc0ff}
+</style>
+</head>
+<body>
+<canvas id="gpu"></canvas>
+<div id="ui">
+  <div id="panel">
+    <h1>field ⇄ particle</h1>
+    <p class="sub">breakable, reforming terrain · webgpu</p>
+    <div class="row"><label>dig</label><input id="dig" type="range" min="0" max="6" step="0.1" value="2.4"><span class="v" id="dig_v"></span></div>
+    <div class="row"><label>blast</label><input id="blast" type="range" min="60" max="900" step="10" value="360"><span class="v" id="blast_v"></span></div>
+    <div class="row"><label>reach R</label><input id="rad" type="range" min="30" max="220" step="5" value="90"><span class="v" id="rad_v"></span></div>
+    <div class="row"><label>heal</label><input id="heal" type="range" min="0" max="1.5" step="0.02" value="0"><span class="v" id="heal_v"></span></div>
+    <div class="row"><label>debris</label><input id="dens" type="range" min="40000" max="500000" step="20000" value="240000"><span class="v" id="dens_v"></span></div>
+    <div class="row" style="gap:6px"><button id="reseed">reseed</button><button id="recenter">recenter</button></div>
+    <div class="legend">
+      <div>fly <b>into</b> a hill — it <b>gathers</b> into debris</div>
+      <div>debris falls, <b>scatters</b> back into ground</div>
+      <div><b>heal 0</b> = craters persist (a delta) · <b>heal &gt;0</b> = reforms to seed</div>
+    </div>
+    <div class="net">
+      <h2>connect (trystero p2p)</h2>
+      <div class="row" style="gap:6px"><input id="room" type="text" value="WORLD" maxlength="24"><button id="connect">join</button></div>
+      <div id="netstat">offline · same room code = same seeded world</div>
+    </div>
+    <div class="hint">Same room code seeds the same terrain. Peers sync only ship pose; every ship carves every peer's local field (edits stay local — see notes at top of source).</div>
+  </div>
+</div>
+<div id="hud">
+  <div id="mode">—</div>
+  <div id="modesub">terrain vs seed</div>
+  <div id="stat"></div>
+</div>
+<div id="cross"></div>
+<div id="lock">click to fly &nbsp;·&nbsp; <b>WASD</b> move · <b>mouse</b> look · <b>space/shift</b> up·down · <b>wheel</b> speed</div>
+<div id="ctrls">gamepad: left stick move · right stick look · RB / LB up·down · RT boost</div>
+<div class="fps" id="fps"></div>
+<div id="fail">
+  <div>
+    <h2>WebGPU not available</h2>
+    <p>This browser/context did not expose <code>navigator.gpu</code>. Use a recent Chrome/Edge, and serve over <code>http(s)://</code> or <code>localhost</code> (not <code>file://</code>).</p>
+  </div>
+</div>
+
+<script type="module">
+// ===========================================================================
+// field ⇄ particle join — webgpu
+//
+// One state, two representations, and the operator that moves between them:
+//
+//   WHOLE  — an editable height field (stored grid, seeded from analytic noise).
+//   PART   — a pool of debris particles (discrete excitations of that field).
+//   CENTER — a free-fly ship/camera that both observes and perturbs.
+//
+//   GATHER (field -> particle): where the ship penetrates the surface, terrain
+//     height is carved down and debris particles are born carrying that mass.
+//   SCATTER (particle -> field): when a debris particle settles, it deposits its
+//     mass back into the height field. Craters + piles are the same conserved
+//     transfer running in two directions.
+//
+//   INTERACTION = REGENERATION: the same compute step that carves also heals the
+//     field toward its seeded rest (the "heal" slider). heal 0 keeps every edit
+//     as a persistent delta over the seed; heal > 0 reforms to the pure function.
+//
+// Determinism / multiplayer note: the base terrain is a pure function of the
+// room-code seed, so peers never sync the field — only ship poses. Every ship
+// carves every peer's LOCAL field. Because GPU float math is not bit-identical
+// across machines, the *edits* (deltas) can drift between peers; keeping them in
+// lockstep is the C3/C8 job — sync the carve events (the delta log), not the GPU
+// buffers. This lab demonstrates the transfer + persistence; shared-edit
+// reconciliation is the next commitment, deliberately left out here.
+// ===========================================================================
+
+const failEl = document.getElementById('fail');
+function fail(msg){ failEl.style.display='grid'; if(msg) failEl.querySelector('p').textContent=msg; console.error(msg); }
+let booted = false;
+addEventListener('unhandledrejection', e => {
+  const m = (e.reason && e.reason.message) || String(e.reason);
+  if (!booted) fail('Startup error: ' + m); else console.warn('[ignored]', m);
+});
+if (!navigator.gpu) { fail(); throw new Error('no webgpu'); }
+
+// ---- device --------------------------------------------------------------
+const adapter = await navigator.gpu.requestAdapter({ powerPreference:'high-performance' });
+if (!adapter) { fail('No GPU adapter — enable hardware acceleration.'); throw new Error('no adapter'); }
+const device = await adapter.requestDevice();
+device.addEventListener?.('uncapturederror', e => console.error('[webgpu]', e.error.message));
+
+const canvas = document.getElementById('gpu');
+const ctx = canvas.getContext('webgpu');
+const format = navigator.gpu.getPreferredCanvasFormat();
+ctx.configure({ device, format, alphaMode:'opaque' });
+
+async function shader(label, code){
+  const m = device.createShaderModule({ label, code });
+  const info = await m.getCompilationInfo();
+  for (const msg of info.messages){
+    const where = `${label}:${msg.lineNum}:${msg.linePos}`;
+    if (msg.type==='error') console.error('[wgsl error]', where, msg.message);
+    else if (msg.type==='warning') console.warn('[wgsl warn]', where, msg.message);
+  }
+  return m;
+}
+
+// ---- constants -----------------------------------------------------------
+const HN       = 256;            // height-field vertices per side
+const NCELL    = HN*HN;          // stored field cells
+const WORLD    = 3200.0;         // world extent (units) covered by the field
+const WHALF    = WORLD*0.5;
+const CELL     = WORLD/(HN-1);   // world units per grid step
+const MAXN     = 500000;         // allocated debris slots
+const MAXSHIPS = 12;             // local ship + up to 11 peers
+const FIXED    = 1/60;           // deterministic sim step
+const FIXSCALE = 4096.0;         // fixed-point scale for atomic height deposits
+let   activeN  = 240000;         // live debris (density slider)
+let   seedOff  = 0;              // CPU mirror of the GPU terrain seed offset (for the camera clamp)
+
+// ===========================================================================
+// shared WGSL: analytic terrain field (value-noise fBm + ridged), grid helpers
+// (heightAt is the same family used across the other FractalGaming world labs)
+// ===========================================================================
+const FIELD = /* wgsl */`
+const HN:i32 = ${HN};
+const HNu:u32 = ${HN}u;
+const WHALF:f32 = ${WHALF};
+const CELL:f32 = ${CELL};
+const SEEDW:i32 = 1337;
+
+fn hashI(xi:i32, zi:i32, s:i32)->f32 {
+  var h:u32 = u32(xi)*374761393u + u32(zi)*668265263u + u32(s)*2654435761u;
+  h = (h ^ (h>>13u)) * 1274126177u; h = h ^ (h>>16u);
+  return f32(h)/4294967296.0;
+}
+fn vn(x:f32, z:f32, s:i32)->f32 {
+  let xi=i32(floor(x)); let zi=i32(floor(z));
+  let xf=x-floor(x); let zf=z-floor(z);
+  let a=hashI(xi,zi,s); let b=hashI(xi+1,zi,s); let c=hashI(xi,zi+1,s); let d=hashI(xi+1,zi+1,s);
+  let u2=xf*xf*(3.0-2.0*xf); let v2=zf*zf*(3.0-2.0*zf);
+  return a+(b-a)*u2+(c-a)*v2+(a-b-c+d)*u2*v2;
+}
+fn fbm(wx:f32, wz:f32, s:i32, oct:i32, scale:f32)->f32 {
+  var f=0.0; var amp=0.5; var fr=1.0; var nm=0.0;
+  for(var o=0;o<oct;o++){ f+=amp*vn(wx*scale*fr, wz*scale*fr, s+o*101); nm+=amp; amp=amp*0.5; fr=fr*2.0; }
+  return f/nm;
+}
+fn ridge(wx:f32, wz:f32, s:i32, oct:i32, scale:f32)->f32 {
+  var f=0.0; var amp=0.5; var fr=1.0; var prev=1.0;
+  for(var o=0;o<oct;o++){ var r=1.0-abs(vn(wx*scale*fr, wz*scale*fr, s+o*101)*2.0-1.0); r=r*r;
+    f+=amp*r*prev; prev=r; amp=amp*0.5; fr=fr*2.0; }
+  return f;
+}
+fn heightAt(wx:f32, wz:f32)->f32 {
+  let cont=fbm(wx,wz,SEEDW,4,0.00020);
+  let mtn0=fbm(wx,wz,SEEDW+50,3,0.00040);
+  let m=smoothstep(0.45,0.72,mtn0);
+  let hills=(fbm(wx,wz,SEEDW+10,5,0.0045)-0.5)*2.0*46.0;
+  let mount=ridge(wx,wz,SEEDW+20,5,0.0016)*560.0;
+  return (cont-0.45)*360.0 + hills + mount*m;
+}
+// grid <-> world
+fn gx(w:f32)->f32 { return (w + WHALF)/CELL; }              // world -> grid coord [0,HN-1]
+fn worldX(gi:i32)->f32 { return -WHALF + f32(gi)*CELL; }
+fn cellOf(wx:f32, wz:f32)->i32 {                             // nearest cell, or -1 if outside
+  let fx=gx(wx); let fz=gx(wz);
+  if(fx<0.0 || fx>f32(HN-1) || fz<0.0 || fz>f32(HN-1)){ return -1; }
+  let ix=i32(round(fx)); let iz=i32(round(fz));
+  return iz*HN + ix;
+}
+`;
+
+// bilinear read of the stored height field (needs a `heights` binding in scope)
+const SAMPLE = /* wgsl */`
+fn sampleH(wx:f32, wz:f32)->f32 {
+  let fx=clamp(gx(wx),0.0,f32(HN-1)-0.001);
+  let fz=clamp(gx(wz),0.0,f32(HN-1)-0.001);
+  let ix=u32(floor(fx)); let iz=u32(floor(fz));
+  let tx=fx-floor(fx); let tz=fz-floor(fz);
+  let h00=heights[iz*HNu+ix];       let h10=heights[iz*HNu+ix+1u];
+  let h01=heights[(iz+1u)*HNu+ix];  let h11=heights[(iz+1u)*HNu+ix+1u];
+  return mix(mix(h00,h10,tx), mix(h01,h11,tx), tz);
+}
+`;
+
+// params uniform, shared by all compute passes
+const PARAMS = /* wgsl */`
+struct Params {
+  a : vec4f,   // dig(chunk height), blast, reach R, dt
+  b : vec4f,   // debrisCount, gravity, settleSpeed, heal
+  c : vec4f,   // shipCount, time, restitution, _
+};
+`;
+
+// ===========================================================================
+// GPU buffers
+// ===========================================================================
+const mkStorage = bytes => device.createBuffer({ size:bytes, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC });
+
+const heightBuf = mkStorage(NCELL*4);          // f32 : current (edited) height field  — the WHOLE
+const baseBuf   = mkStorage(NCELL*4);          // f32 : analytic seed height (heal target, delta readout)
+const depoBuf   = mkStorage(NCELL*4);          // atomic<i32> : per-cell carve/deposit accumulator (fixed point)
+
+const posBuf  = mkStorage(MAXN*16);            // vec4(x,y,z, excite)          — the PART
+const velBuf  = mkStorage(MAXN*16);            // vec4(vx,vy,vz, state)  state: 0 dormant, 1 flying
+const homeBuf = mkStorage(MAXN*16);            // vec4(hx,hy,hz, _) current rest position
+
+const shipsBuf = mkStorage(MAXSHIPS*2*16);     // 2×vec4 per ship: (px,py,pz,R),(vx,vy,vz,active)
+const shipsF32 = new Float32Array(MAXSHIPS*2*4);
+
+const paramsBuf = device.createBuffer({ size:12*4, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+const paramsF32 = new Float32Array(12);
+
+const uniBuf = device.createBuffer({ size:64*4, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
+const uni = new Float32Array(64);              // vp, invVP, camPos, camRight, camUp, sun, skyTop, skyHor, sunCol, fog
+
+// ===========================================================================
+// seed passes — build the field from the seed, distribute dormant debris
+// ===========================================================================
+const seedFieldMod = await shader('seedField', FIELD + PARAMS + /* wgsl */`
+@group(0) @binding(0) var<storage,read_write> heights : array<f32>;
+@group(0) @binding(1) var<storage,read_write> base    : array<f32>;
+@group(0) @binding(2) var<storage,read_write> depo    : array<atomic<i32>>;
+@group(0) @binding(3) var<uniform> P : Params;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u){
+  let c = gid.x;
+  if (c >= u32(HN*HN)) { return; }
+  let ix = i32(c % HNu); let iz = i32(c / HNu);
+  let so = f32((u32(P.c.w) % 4096u) * 37u);        // seed -> integer world offset (exact in f32)
+  let h = heightAt(worldX(ix)+so, worldX(iz)+so);
+  heights[c] = h; base[c] = h;
+  atomicStore(&depo[c], 0);
+}
+`);
+const seedFieldPipe = device.createComputePipeline({ layout:'auto', compute:{ module:seedFieldMod, entryPoint:'main' } });
+const seedFieldBind = device.createBindGroup({ layout:seedFieldPipe.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:heightBuf } },
+  { binding:1, resource:{ buffer:baseBuf } },
+  { binding:2, resource:{ buffer:depoBuf } },
+  { binding:3, resource:{ buffer:paramsBuf } },
+]});
+
+const seedPartMod = await shader('seedPart', FIELD + PARAMS + /* wgsl */`
+@group(0) @binding(0) var<storage,read_write> pos  : array<vec4f>;
+@group(0) @binding(1) var<storage,read_write> vel  : array<vec4f>;
+@group(0) @binding(2) var<storage,read_write> home : array<vec4f>;
+@group(0) @binding(3) var<uniform> P : Params;
+
+fn hashU(n0:u32)->u32{ var n=n0; n=n*747796405u+2891336453u; n=((n>>((n>>28u)+4u))^n)*277803737u; n=(n>>22u)^n; return n; }
+fn rnd(n:u32)->f32{ return f32(hashU(n)&0xffffffu)/16777215.0; }
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u){
+  let i = gid.x;
+  if (i >= arrayLength(&pos)) { return; }
+  let sk = u32(P.c.w)*9781u;                    // reseed reshuffles debris scatter
+  let so = f32((u32(P.c.w) % 4096u) * 37u);     // same terrain offset as the field pass
+  let hx = (rnd(i*3u+11u+sk)*2.0-1.0)*WHALF*0.985;
+  let hz = (rnd(i*3u+23u+sk)*2.0-1.0)*WHALF*0.985;
+  let hy = heightAt(hx+so, hz+so);
+  home[i] = vec4f(hx, hy, hz, 0.0);
+  pos[i]  = vec4f(hx, hy, hz, 0.0);
+  vel[i]  = vec4f(0.0, 0.0, 0.0, 0.0);          // state 0 = dormant, resting on the surface
+}
+`);
+const seedPartPipe = device.createComputePipeline({ layout:'auto', compute:{ module:seedPartMod, entryPoint:'main' } });
+const seedPartBind = device.createBindGroup({ layout:seedPartPipe.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:posBuf } },
+  { binding:1, resource:{ buffer:velBuf } },
+  { binding:2, resource:{ buffer:homeBuf } },
+  { binding:3, resource:{ buffer:paramsBuf } },
+]});
+
+// ===========================================================================
+// step kernel — GATHER on impact, ballistic flight, SCATTER on settle
+// ===========================================================================
+const stepMod = await shader('step', FIELD + SAMPLE + PARAMS + /* wgsl */`
+@group(0) @binding(0) var<storage,read_write> pos    : array<vec4f>;
+@group(0) @binding(1) var<storage,read_write> vel    : array<vec4f>;
+@group(0) @binding(2) var<storage,read_write> home   : array<vec4f>;
+@group(0) @binding(3) var<storage,read>       heights: array<f32>;
+@group(0) @binding(4) var<storage,read_write> depo   : array<atomic<i32>>;
+@group(0) @binding(5) var<uniform> P : Params;
+@group(0) @binding(6) var<storage,read> ships : array<vec4f>;
+
+const FIXSCALE:f32 = ${FIXSCALE};
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u){
+  let i = gid.x;
+  if (i >= u32(P.b.x)) { return; }              // P.b.x = active debris count
+
+  let DIG=P.a.x; let BLAST=P.a.y; let REACH=P.a.z; let dt=P.a.w;
+  let GRAV=P.b.y; let SETTLE=P.b.z;
+  let nShips = u32(P.c.x);
+
+  var p  = pos[i].xyz;
+  var ex = pos[i].w * pow(0.82, dt*60.0);       // glow cools
+  var v  = vel[i].xyz;
+  var st = vel[i].w;
+  var hm = home[i].xyz;
+
+  if (st < 0.5) {
+    // ---- DORMANT: sit on the surface; wake if a ship reaches my rest cell ----
+    for (var k:u32=0u; k<nShips; k=k+1u){
+      let s0 = ships[k*2u]; let s1 = ships[k*2u+1u];
+      if (s1.w < 0.5) { continue; }
+      let sp = s0.xyz; let R = s0.w;
+      let rr = hm - sp; let d2 = dot(rr, rr);
+      let surf = sampleH(sp.x, sp.z);
+      // only carve when the ship is actually intersecting the ground near here
+      if (d2 < R*R && sp.y < surf + R*0.6) {
+        let d = sqrt(max(d2,1e-4)); let n = rr / d; let fall = 1.0 - d/R;
+        // GATHER: remove this parcel of the field, hand it to the particle
+        let cell = cellOf(hm.x, hm.z);
+        if (cell >= 0) { atomicSub(&depo[cell], i32(DIG * FIXSCALE)); }
+        // launch: outward from the ship + upward + a share of the ship's motion
+        let up = vec3f(0.0, 1.0, 0.0);
+        v = n*(BLAST*0.6*fall) + up*(BLAST*(0.5+0.5*fall)) + s1.xyz*0.35;
+        ex = 1.0; st = 1.0;
+        break;
+      }
+    }
+    if (st < 0.5) { p = hm; }                    // stayed asleep — pinned to rest
+  } else {
+    // ---- FLYING: ballistic, collide with the field, SCATTER when it rests ----
+    v.y -= GRAV*dt;
+    v *= pow(0.985, dt*60.0);                    // air drag
+    p += v*dt;
+    let surf = sampleH(p.x, p.z);
+    if (p.y <= surf + 1.5) {
+      p.y = surf + 1.5;
+      let sp2 = dot(v, v);
+      if (sp2 < SETTLE*SETTLE) {
+        // SCATTER: deposit the parcel back into the field, go dormant here
+        let cell = cellOf(p.x, p.z);
+        if (cell >= 0) { atomicAdd(&depo[cell], i32(DIG * FIXSCALE)); }
+        hm = vec3f(p.x, surf, p.z);
+        p = hm; v = vec3f(0.0); ex = 0.0; st = 0.0;
+      } else {
+        // bounce/slide with heavy loss so debris settles quickly
+        v.y = -v.y*0.24;
+        v.x *= 0.55; v.z *= 0.55;
+      }
+    }
+  }
+
+  pos[i]  = vec4f(p, min(ex, 3.0));
+  vel[i]  = vec4f(v, st);
+  home[i] = vec4f(hm, 0.0);
+}
+`);
+const stepPipe = device.createComputePipeline({ layout:'auto', compute:{ module:stepMod, entryPoint:'main' } });
+const stepBind = device.createBindGroup({ layout:stepPipe.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:posBuf } },
+  { binding:1, resource:{ buffer:velBuf } },
+  { binding:2, resource:{ buffer:homeBuf } },
+  { binding:3, resource:{ buffer:heightBuf } },
+  { binding:4, resource:{ buffer:depoBuf } },
+  { binding:5, resource:{ buffer:paramsBuf } },
+  { binding:6, resource:{ buffer:shipsBuf } },
+]});
+
+// ===========================================================================
+// resolve kernel — apply accumulated carve/deposit to the field, then heal.
+// This is the "interaction = regeneration" step: the edit and the reform to
+// the seeded rest are one update.
+// ===========================================================================
+const resolveMod = await shader('resolve', FIELD + PARAMS + /* wgsl */`
+@group(0) @binding(0) var<storage,read_write> heights : array<f32>;
+@group(0) @binding(1) var<storage,read>       base    : array<f32>;
+@group(0) @binding(2) var<storage,read_write> depo    : array<atomic<i32>>;
+@group(0) @binding(3) var<uniform> P : Params;
+
+const FIXSCALE:f32 = ${FIXSCALE};
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid:vec3u){
+  let c = gid.x;
+  if (c >= u32(HN*HN)) { return; }
+  let dt = P.a.w; let HEAL = P.b.w;
+  let d = f32(atomicExchange(&depo[c], 0)) / FIXSCALE;   // read + clear this step's transfer
+  var h = heights[c] + d;
+  // regenerate toward the seeded base. HEAL 0 -> the delta persists forever.
+  h += (base[c] - h) * clamp(HEAL*dt, 0.0, 1.0);
+  heights[c] = h;
+}
+`);
+const resolvePipe = device.createComputePipeline({ layout:'auto', compute:{ module:resolveMod, entryPoint:'main' } });
+const resolveBind = device.createBindGroup({ layout:resolvePipe.getBindGroupLayout(0), entries:[
+  { binding:0, resource:{ buffer:heightBuf } },
+  { binding:1, resource:{ buffer:baseBuf } },
+  { binding:2, resource:{ buffer:depoBuf } },
+  { binding:3, resource:{ buffer:paramsBuf } },
+]});
+
+// ===========================================================================
+// render: sky, terrain (reads the live height field in the vertex shader),
+// debris billboards, peer avatars
+// ===========================================================================
+const UNI = /* wgsl */`
+struct U {
+  vp:mat4x4<f32>, invVP:mat4x4<f32>,
+  camPos:vec4f,     // xyz, w=time
+  camRight:vec4f,   // xyz, w=fadeStart
+  camUp:vec4f,      // xyz, w=fadeEnd
+  sun:vec4f,        // xyz dir, w=intensity
+  skyTop:vec4f, skyHor:vec4f, sunCol:vec4f,
+  fog:vec4f         // near, far, _, _
+};
+@group(0) @binding(0) var<uniform> u:U;
+`;
+
+const skyMod = await shader('sky', UNI + /* wgsl */`
+struct O{ @builtin(position) pos:vec4f, @location(0) ndc:vec2f };
+@vertex fn vs(@builtin(vertex_index) vi:u32)->O{
+  var p=array<vec2f,3>(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.));
+  var o:O; o.pos=vec4f(p[vi],0.,1.); o.ndc=p[vi]; return o; }
+fn skyCol(dir:vec3f)->vec3f{
+  let up=clamp(dir.y*0.5+0.5,0.,1.);
+  var col=mix(u.skyHor.xyz,u.skyTop.xyz,pow(up,0.8));
+  let sd=clamp(dot(dir,normalize(u.sun.xyz)),0.,1.);
+  col+=u.sunCol.xyz*pow(sd,520.0)*1.6;
+  col+=u.sunCol.xyz*pow(sd,14.0)*0.18;
+  return col; }
+@fragment fn fs(i:O)->@location(0) vec4f{
+  let far=u.invVP*vec4f(i.ndc,1.0,1.0);
+  let dir=normalize(far.xyz/far.w - u.camPos.xyz);
+  return vec4f(skyCol(dir),1.0); }
+`);
+
+const terrMod = await shader('terrain', UNI + FIELD + /* wgsl */`
+@group(0) @binding(1) var<storage,read> heights : array<f32>;
+struct O{ @builtin(position) pos:vec4f, @location(0) world:vec3f, @location(1) nrm:vec3f };
+@vertex fn vs(@location(0) g:vec2f)->O{
+  let ix=i32(g.x); let iz=i32(g.y);
+  let idx=u32(iz*HN+ix);
+  let h=heights[idx];
+  let wx=worldX(ix); let wz=worldX(iz);
+  // central-difference normal from neighbouring stored heights
+  let l=heights[u32(iz*HN + max(ix-1,0))];      let r=heights[u32(iz*HN + min(ix+1,HN-1))];
+  let d=heights[u32(max(iz-1,0)*HN + ix)];      let up=heights[u32(min(iz+1,HN-1)*HN + ix)];
+  let n=normalize(vec3f((l-r)/(2.0*CELL), 1.0, (d-up)/(2.0*CELL)));
+  let world=vec3f(wx,h,wz);
+  var o:O; o.pos=u.vp*vec4f(world,1.0); o.world=world; o.nrm=n; return o; }
+@fragment fn fs(i:O)->@location(0) vec4f{
+  let n=normalize(i.nrm); let sun=normalize(u.sun.xyz);
+  let diff=clamp(dot(n,sun),0.,1.); let h=i.world.y;
+  let slope=1.0-clamp(n.y,0.,1.);
+  let sand=vec3f(0.76,0.70,0.50); let grass=vec3f(0.24,0.45,0.17);
+  let rock=vec3f(0.34,0.32,0.30); let snow=vec3f(0.92,0.94,0.97);
+  var col=mix(sand,grass,smoothstep(2.0,26.0,h));
+  col=mix(col,rock,smoothstep(220.0,400.0,h));
+  let snowAmt=smoothstep(460.0,700.0,h)*smoothstep(0.6,0.35,slope);
+  col=mix(col,snow,snowAmt);
+  col=mix(col,rock,smoothstep(0.42,0.72,slope));       // cliffs are rock
+  let amb=mix(u.skyHor.xyz,u.skyTop.xyz,clamp(n.y*0.5+0.5,0.,1.))*0.45;
+  var lit=col*(amb + u.sunCol.xyz*u.sun.w*diff*0.95);
+  let dist=length(i.world-u.camPos.xyz);
+  let fog=clamp((dist-u.fog.x)/(u.fog.y-u.fog.x),0.,1.);
+  lit=mix(lit, u.skyHor.xyz, fog);
+  return vec4f(lit,1.0); }
+`);
+
+const debrisMod = await shader('debris', UNI + /* wgsl */`
+@group(0) @binding(1) var<storage,read> pos : array<vec4f>;
+@group(0) @binding(2) var<storage,read> vel : array<vec4f>;
+struct O{ @builtin(position) clip:vec4f, @location(0) corner:vec2f, @location(1) color:vec3f };
+@vertex fn vs(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32)->O{
+  var corners=array<vec2f,6>(vec2f(-1,-1),vec2f(1,-1),vec2f(-1,1),vec2f(-1,1),vec2f(1,-1),vec2f(1,1));
+  let c=corners[vi];
+  let pw=pos[ii].xyz; let ex=pos[ii].w; let st=vel[ii].w;
+  var o:O;
+  if (st < 0.5 && ex < 0.02) {                  // dormant + cool -> hide (it's part of the ground)
+    o.clip=vec4f(0.,0.,2.,1.); o.corner=c; o.color=vec3f(0.); return o;
+  }
+  let sz = 8.0 + ex*5.0;
+  let world = pw + (u.camRight.xyz*c.x + u.camUp.xyz*c.y)*sz;
+  o.clip=u.vp*vec4f(world,1.0); o.corner=c;
+  let dust=vec3f(0.72,0.55,0.34);
+  let hot =vec3f(1.0,0.66,0.28);
+  o.color = mix(dust, hot, clamp(ex,0.,1.)) * (1.3+ex*1.6);
+  return o; }
+@fragment fn fs(i:O)->@location(0) vec4f{
+  let a=smoothstep(1.0,0.12,length(i.corner));
+  if(a<=0.003){ discard; }
+  return vec4f(i.color*a, a); }        // premultiplied for additive
+`);
+
+const avatarMod = await shader('avatar', UNI + /* wgsl */`
+@group(0) @binding(1) var<storage,read> ships : array<vec4f>;
+struct O{ @builtin(position) clip:vec4f, @location(0) corner:vec2f, @location(1) color:vec3f };
+fn peerColor(k:u32)->vec3f{ let h=f32(k)*0.61803; return 0.5+0.5*cos(6.2831853*(vec3f(0.,0.33,0.66)+h)); }
+@vertex fn vs(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32)->O{
+  var corners=array<vec2f,6>(vec2f(-1,-1),vec2f(1,-1),vec2f(-1,1),vec2f(-1,1),vec2f(1,-1),vec2f(1,1));
+  let c=corners[vi]; let k=ii+1u;
+  let s0=ships[k*2u]; let s1=ships[k*2u+1u];
+  var o:O;
+  if(s1.w<0.5){ o.clip=vec4f(0.,0.,2.,1.); o.corner=c; o.color=vec3f(0.); return o; }
+  let world=s0.xyz + (u.camRight.xyz*c.x + u.camUp.xyz*c.y)*22.0;
+  o.clip=u.vp*vec4f(world,1.0); o.corner=c; o.color=peerColor(k)*2.0; return o; }
+@fragment fn fs(i:O)->@location(0) vec4f{
+  let r=length(i.corner);
+  let halo=smoothstep(1.0,0.0,r)*0.5; let core=smoothstep(0.34,0.0,r);
+  let a=halo+core; if(a<=0.003){ discard; }
+  return vec4f(i.color*halo + vec3f(0.9,0.97,1.0)*core, a); }
+`);
+
+// ---- pipelines -----------------------------------------------------------
+const SCENE_FMT="rgba16float", DEPTH_FMT="depth32float";
+const dsWrite={depthWriteEnabled:true,depthCompare:"less",format:DEPTH_FMT};
+const dsRead ={depthWriteEnabled:false,depthCompare:"less",format:DEPTH_FMT};
+const dsSky  ={depthWriteEnabled:false,depthCompare:"always",format:DEPTH_FMT};
+const ALPHA={color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},
+             alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'}};
+
+const pipeSky = device.createRenderPipeline({ layout:'auto',
+  vertex:{module:skyMod,entryPoint:'vs'}, fragment:{module:skyMod,entryPoint:'fs',targets:[{format:SCENE_FMT}]},
+  primitive:{topology:'triangle-list'}, depthStencil:dsSky });
+const pipeTerr = device.createRenderPipeline({ layout:'auto',
+  vertex:{module:terrMod,entryPoint:'vs',buffers:[{arrayStride:8,attributes:[{shaderLocation:0,offset:0,format:'float32x2'}]}]},
+  fragment:{module:terrMod,entryPoint:'fs',targets:[{format:SCENE_FMT}]},
+  primitive:{topology:'triangle-list',cullMode:'none'}, depthStencil:dsWrite });
+const ADD={color:{srcFactor:'one',dstFactor:'one',operation:'add'},alpha:{srcFactor:'one',dstFactor:'one',operation:'add'}};
+const pipeDebris = device.createRenderPipeline({ layout:'auto',
+  vertex:{module:debrisMod,entryPoint:'vs'}, fragment:{module:debrisMod,entryPoint:'fs',targets:[{format:SCENE_FMT,blend:ADD}]},
+  primitive:{topology:'triangle-list'}, depthStencil:dsRead });
+const pipeAvatar = device.createRenderPipeline({ layout:'auto',
+  vertex:{module:avatarMod,entryPoint:'vs'}, fragment:{module:avatarMod,entryPoint:'fs',targets:[{format:SCENE_FMT,blend:ALPHA}]},
+  primitive:{topology:'triangle-list'}, depthStencil:dsRead });
+
+// tonemap the hdr scene to the swapchain
+const tmMod = await shader('tonemap', /* wgsl */`
+@group(0) @binding(0) var tex : texture_2d<f32>;
+struct O{ @builtin(position) pos:vec4f };
+@vertex fn vs(@builtin(vertex_index) vi:u32)->O{
+  var p=array<vec2f,3>(vec2f(-1.,-1.),vec2f(3.,-1.),vec2f(-1.,3.));
+  var o:O; o.pos=vec4f(p[vi],0.,1.); return o; }
+@fragment fn fs(@builtin(position) fc:vec4f)->@location(0) vec4f{
+  let c=textureLoad(tex, vec2i(fc.xy), 0).rgb;      // fragment coord == scene texel (same size)
+  let x=c*0.9;
+  let m=(x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14);   // ACES-ish
+  return vec4f(pow(clamp(m,vec3f(0.),vec3f(1.)), vec3f(1.0/2.2)), 1.0); }
+`);
+const pipeTM = device.createRenderPipeline({ layout:'auto',
+  vertex:{module:tmMod,entryPoint:'vs'}, fragment:{module:tmMod,entryPoint:'fs',targets:[{format}]},
+  primitive:{topology:'triangle-list'} });
+
+// ---- bind groups tied to the shared uniform ------------------------------
+const bgSky   = device.createBindGroup({layout:pipeSky.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}}]});
+const bgTerr  = device.createBindGroup({layout:pipeTerr.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}},{binding:1,resource:{buffer:heightBuf}}]});
+const bgDebris= device.createBindGroup({layout:pipeDebris.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}},{binding:1,resource:{buffer:posBuf}},{binding:2,resource:{buffer:velBuf}}]});
+const bgAvatar= device.createBindGroup({layout:pipeAvatar.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniBuf}},{binding:1,resource:{buffer:shipsBuf}}]});
+
+// ---- render targets ------------------------------------------------------
+let sceneTex,sceneView,depthTex,depthView,bgTM,W=1,H=1;
+function makeTargets(){
+  if(sceneTex) sceneTex.destroy(); if(depthTex) depthTex.destroy();
+  sceneTex=device.createTexture({size:[W,H],format:SCENE_FMT,usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING});
+  sceneView=sceneTex.createView();
+  depthTex=device.createTexture({size:[W,H],format:DEPTH_FMT,usage:GPUTextureUsage.RENDER_ATTACHMENT});
+  depthView=depthTex.createView();
+  bgTM=device.createBindGroup({layout:pipeTM.getBindGroupLayout(0),entries:[{binding:0,resource:sceneView}]});
+}
+function resize(){
+  W=Math.max(1,Math.floor(innerWidth*Math.min(devicePixelRatio,1.5)));
+  H=Math.max(1,Math.floor(innerHeight*Math.min(devicePixelRatio,1.5)));
+  canvas.width=W; canvas.height=H; makeTargets();
+}
+addEventListener('resize', resize);
+
+// ---- terrain grid mesh (vertices carry grid coords) ----------------------
+function buildGrid(){
+  const verts=new Float32Array(HN*HN*2);
+  let o=0; for(let z=0;z<HN;z++) for(let x=0;x<HN;x++){ verts[o++]=x; verts[o++]=z; }
+  const idx=new Uint32Array((HN-1)*(HN-1)*6);
+  let k=0; for(let z=0;z<HN-1;z++) for(let x=0;x<HN-1;x++){
+    const a=z*HN+x, b=a+1, c=a+HN, d=c+1;
+    idx[k++]=a; idx[k++]=c; idx[k++]=b; idx[k++]=b; idx[k++]=c; idx[k++]=d;
+  }
+  const vb=device.createBuffer({size:verts.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST}); device.queue.writeBuffer(vb,0,verts);
+  const ib=device.createBuffer({size:idx.byteLength,usage:GPUBufferUsage.INDEX|GPUBufferUsage.COPY_DST}); device.queue.writeBuffer(ib,0,idx);
+  return { vb, ib, count:idx.length };
+}
+const grid = buildGrid();
+
+// ===========================================================================
+// hand-built column-major mat4 (no three.js)
+// ===========================================================================
+function perspectiveZO(fovy,asp,n,f){ const t=1/Math.tan(fovy/2), o=new Float32Array(16);
+  o[0]=t/asp;o[5]=t;o[11]=-1; const nf=1/(n-f); o[10]=f*nf; o[14]=f*n*nf; return o; }
+function lookAt(ex,ey,ez,cx,cy,cz,ux,uy,uz){
+  let z0=ex-cx,z1=ey-cy,z2=ez-cz,l=1/(Math.hypot(z0,z1,z2)||1); z0*=l;z1*=l;z2*=l;
+  let x0=uy*z2-uz*z1,x1=uz*z0-ux*z2,x2=ux*z1-uy*z0; l=Math.hypot(x0,x1,x2)||1; l=1/l; x0*=l;x1*=l;x2*=l;
+  const y0=z1*x2-z2*x1,y1=z2*x0-z0*x2,y2=z0*x1-z1*x0; const o=new Float32Array(16);
+  o[0]=x0;o[1]=y0;o[2]=z0; o[4]=x1;o[5]=y1;o[6]=z1; o[8]=x2;o[9]=y2;o[10]=z2;
+  o[12]=-(x0*ex+x1*ey+x2*ez); o[13]=-(y0*ex+y1*ey+y2*ez); o[14]=-(z0*ex+z1*ey+z2*ez); o[15]=1; return o; }
+function mul(a,b){ const o=new Float32Array(16);
+  for(let c=0;c<4;c++){ const b0=b[c*4],b1=b[c*4+1],b2=b[c*4+2],b3=b[c*4+3];
+    o[c*4]=a[0]*b0+a[4]*b1+a[8]*b2+a[12]*b3; o[c*4+1]=a[1]*b0+a[5]*b1+a[9]*b2+a[13]*b3;
+    o[c*4+2]=a[2]*b0+a[6]*b1+a[10]*b2+a[14]*b3; o[c*4+3]=a[3]*b0+a[7]*b1+a[11]*b2+a[15]*b3; } return o; }
+function invert(a){ const o=new Float32Array(16);
+  const a00=a[0],a01=a[1],a02=a[2],a03=a[3],a10=a[4],a11=a[5],a12=a[6],a13=a[7],
+  a20=a[8],a21=a[9],a22=a[10],a23=a[11],a30=a[12],a31=a[13],a32=a[14],a33=a[15];
+  const b00=a00*a11-a01*a10,b01=a00*a12-a02*a10,b02=a00*a13-a03*a10,b03=a01*a12-a02*a11,
+  b04=a01*a13-a03*a11,b05=a02*a13-a03*a12,b06=a20*a31-a21*a30,b07=a20*a32-a22*a30,
+  b08=a20*a33-a23*a30,b09=a21*a32-a22*a31,b10=a21*a33-a23*a31,b11=a22*a33-a23*a32;
+  let det=b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06; if(!det)return o; det=1/det;
+  o[0]=(a11*b11-a12*b10+a13*b09)*det; o[1]=(a02*b10-a01*b11-a03*b09)*det;
+  o[2]=(a31*b05-a32*b04+a33*b03)*det; o[3]=(a22*b04-a21*b05-a23*b03)*det;
+  o[4]=(a12*b08-a10*b11-a13*b07)*det; o[5]=(a00*b11-a02*b08+a03*b07)*det;
+  o[6]=(a32*b02-a30*b05-a33*b01)*det; o[7]=(a20*b05-a22*b02+a23*b01)*det;
+  o[8]=(a10*b10-a11*b08+a13*b06)*det; o[9]=(a01*b08-a00*b10-a03*b06)*det;
+  o[10]=(a30*b04-a31*b02+a33*b00)*det; o[11]=(a21*b02-a20*b04-a23*b00)*det;
+  o[12]=(a11*b07-a10*b09-a12*b06)*det; o[13]=(a00*b09-a01*b07+a02*b06)*det;
+  o[14]=(a31*b01-a30*b03-a32*b00)*det; o[15]=(a20*b03-a21*b01+a22*b00)*det; return o; }
+
+// CPU mirror of heightAt — used only for the soft ground clamp on the free-fly camera
+function jHashI(x,z,s){ let h=(Math.imul(x|0,374761393)+Math.imul(z|0,668265263)+Math.imul(s|0,-1640531527))>>>0;
+  h=Math.imul(h^(h>>>13),1274126177); h^=h>>>16; return (h>>>0)/4294967296; }
+function jVn(x,z,s){ const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
+  const a=jHashI(xi,zi,s),b=jHashI(xi+1,zi,s),c=jHashI(xi,zi+1,s),d=jHashI(xi+1,zi+1,s);
+  const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf); return a+(b-a)*u+(c-a)*v+(a-b-c+d)*u*v; }
+function jFbm(x,z,s,oct,sc){ let f=0,amp=0.5,fr=1,nm=0; for(let o=0;o<oct;o++){ f+=amp*jVn(x*sc*fr,z*sc*fr,s+o*101); nm+=amp; amp*=0.5; fr*=2; } return f/nm; }
+function jRidge(x,z,s,oct,sc){ let f=0,amp=0.5,fr=1,prev=1; for(let o=0;o<oct;o++){ let r=1-Math.abs(jVn(x*sc*fr,z*sc*fr,s+o*101)*2-1); r*=r; f+=amp*r*prev; prev=r; amp*=0.5; fr*=2; } return f; }
+function jHeight(x,z){ x+=seedOff; z+=seedOff; const cont=jFbm(x,z,1337,4,0.00020); const mtn0=jFbm(x,z,1387,3,0.00040);
+  const m=Math.max(0,Math.min(1,(mtn0-0.45)/0.27)); const ms=m*m*(3-2*m);
+  const hills=(jFbm(x,z,1347,5,0.0045)-0.5)*2*46; const mount=jRidge(x,z,1357,5,0.0016)*560;
+  return (cont-0.45)*360 + hills + mount*ms; }
+
+// ===========================================================================
+// camera + input (free fly)
+// ===========================================================================
+const cam={ x:0, y:0, z:0, yaw:0, pitch:-0.15, vx:0, vy:0, vz:0 };
+cam.y = jHeight(0,0) + 220;
+let maxSpeed=300;
+const keys={};
+addEventListener('keydown',e=>{ keys[e.code]=true; if(e.code==='Space')e.preventDefault(); });
+addEventListener('keyup',e=>{ keys[e.code]=false; });
+let locked=false;
+const framed=(()=>{ try{ return window.self!==window.top; }catch(_){ return true; } })();
+canvas.addEventListener('click',()=>{
+  if(framed){ locked=true; document.getElementById('lock').style.opacity='0'; return; }
+  const r=canvas.requestPointerLock(); if(r&&r.catch)r.catch(()=>{}); });
+document.addEventListener('pointerlockchange',()=>{ locked=document.pointerLockElement===canvas;
+  document.getElementById('lock').style.opacity=locked?'0':'1'; });
+document.addEventListener('pointerlockerror',()=>{},false);
+addEventListener('mousemove',e=>{ if(!locked)return; cam.yaw-=e.movementX*0.0022; cam.pitch-=e.movementY*0.0022;
+  cam.pitch=Math.max(-1.5,Math.min(1.5,cam.pitch)); });
+addEventListener('wheel',e=>{ maxSpeed=Math.max(50,Math.min(1800,maxSpeed*(e.deltaY<0?1.12:0.89))); },{passive:true});
+function readGamepad(){
+  const pads=navigator.getGamepads?navigator.getGamepads():[]; const gp=pads&&pads[0];
+  if(!gp) return {mx:0,my:0,mz:0,lx:0,ly:0,boost:1};
+  const dz=v=>Math.abs(v)<0.14?0:v; const b=i=>gp.buttons[i]&&gp.buttons[i].pressed?1:0;
+  return { mx:dz(gp.axes[0]||0), mz:dz(gp.axes[1]||0), my:b(5)-b(4), lx:dz(gp.axes[2]||0), ly:dz(gp.axes[3]||0),
+    boost:(gp.buttons[7]&&gp.buttons[7].value>0.3)?1+gp.buttons[7].value*2.2:1 }; }
+
+// ===========================================================================
+// UI
+// ===========================================================================
+const el={};
+['dig','blast','rad','heal','dens'].forEach(id=>{
+  el[id]=document.getElementById(id); const v=document.getElementById(id+'_v');
+  const fmt=()=>{ const n=+el[id].value; v.textContent = id==='dens'?(n/1000)+'k':(id==='heal'||id==='dig')?n.toFixed(1):n.toFixed(0); };
+  el[id].addEventListener('input',fmt); fmt();
+});
+el.dens.addEventListener('input',()=>{ activeN=Math.min(MAXN,+el.dens.value); });
+document.getElementById('recenter').onclick=()=>{ cam.x=0; cam.z=0; cam.y=jHeight(0,0)+220; cam.vx=cam.vy=cam.vz=0; cam.yaw=0; cam.pitch=-0.15; };
+
+// ===========================================================================
+// world seeding
+// ===========================================================================
+function hashStr(s){ let h=2166136261>>>0; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return (h>>>0)%8000000; }
+let worldSeed=hashStr('WORLD');   // note: analytic heightAt uses a fixed SEEDW; the room seed drives debris scatter + (future) biome params
+function seedWorld(){
+  seedOff = (worldSeed % 4096) * 37;         // CPU mirror of the GPU terrain offset
+  paramsF32[11]=worldSeed;                    // P.c.w — drives terrain offset + debris scatter
+  device.queue.writeBuffer(paramsBuf,0,paramsF32);
+  const enc=device.createCommandEncoder();
+  const pf=enc.beginComputePass(); pf.setPipeline(seedFieldPipe); pf.setBindGroup(0,seedFieldBind); pf.dispatchWorkgroups(Math.ceil(NCELL/64)); pf.end();
+  const pp=enc.beginComputePass(); pp.setPipeline(seedPartPipe); pp.setBindGroup(0,seedPartBind); pp.dispatchWorkgroups(Math.ceil(MAXN/64)); pp.end();
+  device.queue.submit([enc.finish()]);
+}
+document.getElementById('reseed').onclick=()=>{ worldSeed=(worldSeed*16807+12345)%8000000; seedWorld(); };
+
+// ===========================================================================
+// multiplayer (trystero p2p) — ship-pose presence only
+// ===========================================================================
+const peers=new Map();
+let room=null, sendState=null, selfId=null, broadcastAcc=0;
+const netstat=document.getElementById('netstat');
+document.getElementById('connect').onclick=connectRoom;
+document.getElementById('room').addEventListener('keydown',e=>{ if(e.key==='Enter')connectRoom(); });
+async function connectRoom(){
+  const code=(document.getElementById('room').value||'WORLD').trim().toUpperCase(); if(!code)return;
+  worldSeed=hashStr(code); seedWorld();
+  if(room){ try{ room.leave(); }catch(_){} peers.clear(); }
+  netstat.textContent='connecting to mesh…'; netstat.style.color='#ffaa00';
+  try{
+    const trystero=await import('https://esm.sh/trystero@0.22.0/torrent');
+    selfId=trystero.selfId;
+    room=trystero.joinRoom({appId:'fractal-field-particle-v1'}, code);
+    const [ss,onState]=room.makeAction('state'); sendState=ss;
+    onState((data,id)=>{ let p=peers.get(id);
+      if(!p){ p={pos:[...data.p],vel:[...data.v],tpos:[...data.p],tvel:[...data.v],last:0}; peers.set(id,p); }
+      p.tpos=data.p; p.tvel=data.v; p.last=performance.now(); });
+    room.onPeerJoin(()=>updateNet()); room.onPeerLeave(id=>{ peers.delete(id); updateNet(); });
+    updateNet();
+  }catch(err){ console.error(err); netstat.textContent='connect failed: '+err.message; netstat.style.color='#ff6666'; }
+}
+function updateNet(){ const n=peers.size; const id=selfId?selfId.slice(0,6):'——';
+  netstat.textContent=`room "${(document.getElementById('room').value||'').toUpperCase()}" · you ${id} · ${n} peer${n===1?'':'s'}`; netstat.style.color='#66cc66'; }
+
+function fillShips(dt){
+  shipsF32.fill(0);
+  const R=+el.rad.value;
+  shipsF32[0]=cam.x; shipsF32[1]=cam.y; shipsF32[2]=cam.z; shipsF32[3]=R;
+  shipsF32[4]=cam.vx; shipsF32[5]=cam.vy; shipsF32[6]=cam.vz; shipsF32[7]=1;
+  let k=1; const now=performance.now();
+  for(const [id,p] of peers){
+    if(k>=MAXSHIPS) break; if(now-p.last>5000) continue;
+    const a=Math.min(1,dt*12);
+    for(let j=0;j<3;j++){ p.pos[j]+=(p.tpos[j]-p.pos[j])*a; p.vel[j]+=(p.tvel[j]-p.vel[j])*a; }
+    const o=k*8;
+    shipsF32[o]=p.pos[0]; shipsF32[o+1]=p.pos[1]; shipsF32[o+2]=p.pos[2]; shipsF32[o+3]=R;
+    shipsF32[o+4]=p.vel[0]; shipsF32[o+5]=p.vel[1]; shipsF32[o+6]=p.vel[2]; shipsF32[o+7]=1;
+    k++;
+  }
+  device.queue.writeBuffer(shipsBuf,0,shipsF32);
+  return k;   // ship count
+}
+
+// ===========================================================================
+// main loop
+// ===========================================================================
+resize();
+seedWorld();
+let proj=perspectiveZO(1.15, W/H, 1.0, 14000.0);
+addEventListener('resize',()=>{ proj=perspectiveZO(1.15, W/H, 1.0, 14000.0); });
+
+let acc=0, t0=performance.now(), fc=0, fa=0;
+const fpsEl=document.getElementById('fps'), modeEl=document.getElementById('mode'),
+      subEl=document.getElementById('modesub'), statEl=document.getElementById('stat');
+
+function frame(now){
+  let dt=Math.min(0.05,(now-t0)/1000); t0=now; fa+=dt;
+  if(++fc>=20){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps'; fc=0; fa=0; }
+
+  // ---- orientation ----
+  const gp=readGamepad();
+  cam.yaw+=gp.lx*2.6*dt; cam.pitch-=gp.ly*2.6*dt; cam.pitch=Math.max(-1.5,Math.min(1.5,cam.pitch));  // right-stick X: push right = look right
+  const cp=Math.cos(cam.pitch),sp=Math.sin(cam.pitch),cy=Math.cos(cam.yaw),sy=Math.sin(cam.yaw);
+  const fwd=[cp*sy, sp, -cp*cy];
+  // right = normalize(cross(fwd, worldUp)), worldUp=(0,1,0) -> horizontal
+  let Rx=-fwd[2], Rz=fwd[0]; const rl=Math.hypot(Rx,Rz)||1; Rx/=rl; Rz/=rl;
+  // camUp = cross(right, fwd)  (right horizontal unit, fwd unit)
+  const upX=-Rz*fwd[1], upY=Rz*fwd[0]-Rx*fwd[2], upZ=Rx*fwd[1];
+
+  // ---- movement ----
+  let ix=gp.mx, iy=gp.my, iz=-gp.mz;
+  if(keys['KeyW'])iz+=1; if(keys['KeyS'])iz-=1; if(keys['KeyD'])ix+=1; if(keys['KeyA'])ix-=1;
+  if(keys['Space'])iy+=1; if(keys['ShiftLeft']||keys['ShiftRight'])iy-=1;
+  const accel=maxSpeed*4*gp.boost;
+  cam.vx+=(Rx*ix+fwd[0]*iz)*accel*dt; cam.vy+=(fwd[1]*iz+iy)*accel*dt; cam.vz+=(Rz*ix+fwd[2]*iz)*accel*dt;
+  const spd=Math.hypot(cam.vx,cam.vy,cam.vz), cap=maxSpeed*gp.boost;
+  if(spd>cap){ const s=cap/spd; cam.vx*=s; cam.vy*=s; cam.vz*=s; }
+  cam.x+=cam.vx*dt; cam.y+=cam.vy*dt; cam.z+=cam.vz*dt;
+  const drag=Math.pow(0.86,dt*60); cam.vx*=drag; cam.vy*=drag; cam.vz*=drag;
+  // soft floor: let the ship dig in a little (shallower than the carve reach, so surface
+  // debris stays inside range and keeps shedding), but not fall through the world
+  const analytic=jHeight(cam.x,cam.z); const floor=analytic-Math.min(40,(+el.rad.value)*0.5);
+  if(cam.y<floor){ cam.y=floor; if(cam.vy<0)cam.vy=0; }
+
+  // ---- ships + broadcast ----
+  const shipCount=fillShips(dt);
+  if(sendState){ broadcastAcc+=dt; if(broadcastAcc>=1/15){ broadcastAcc=0; const r=v=>Math.round(v*10)/10;
+    sendState({p:[r(cam.x),r(cam.y),r(cam.z)], v:[r(cam.vx),r(cam.vy),r(cam.vz)]}); } }
+
+  // ---- camera uniform ----
+  const view=lookAt(cam.x,cam.y,cam.z, cam.x+fwd[0],cam.y+fwd[1],cam.z+fwd[2], 0,1,0);
+  const vp=mul(proj,view), ivp=invert(vp);
+  uni.set(vp,0); uni.set(ivp,16);
+  const t=now/1000;
+  uni[32]=cam.x; uni[33]=cam.y; uni[34]=cam.z; uni[35]=t;
+  uni[36]=Rx; uni[37]=0; uni[38]=Rz; uni[39]=WHALF*0.4;                 // camRight + fadeStart
+  uni[40]=upX; uni[41]=upY; uni[42]=upZ; uni[43]=WHALF*1.4;             // camUp + fadeEnd
+  const sd=[0.42,0.66,0.30]; const sl=Math.hypot(...sd); sd.forEach((v,i)=>sd[i]=v/sl);
+  uni[44]=sd[0]; uni[45]=sd[1]; uni[46]=sd[2]; uni[47]=1.5;             // sun
+  uni[48]=0.55; uni[49]=0.70; uni[50]=0.92; uni[51]=0;                  // skyTop
+  uni[52]=0.74; uni[53]=0.82; uni[54]=0.90; uni[55]=0;                  // skyHor
+  uni[56]=1.0; uni[57]=0.96; uni[58]=0.88; uni[59]=0;                   // sunCol
+  uni[60]=1800; uni[61]=8000; uni[62]=0; uni[63]=0;                     // fog near/far
+  device.queue.writeBuffer(uniBuf,0,uni);
+
+  // ---- sim params ----
+  paramsF32[0]=+el.dig.value; paramsF32[1]=+el.blast.value; paramsF32[2]=+el.rad.value; paramsF32[3]=FIXED;
+  paramsF32[4]=activeN; paramsF32[5]=620; paramsF32[6]=14; paramsF32[7]=+el.heal.value;   // count, gravity, settleSpeed, heal
+  paramsF32[8]=shipCount; paramsF32[9]=t; paramsF32[10]=0.24; paramsF32[11]=0;
+
+  // ---- fixed-step sim: step (gather/fly/scatter) then resolve (apply + heal) ----
+  acc+=dt; let steps=0;
+  const enc=device.createCommandEncoder();
+  while(acc>=FIXED && steps<3){
+    device.queue.writeBuffer(paramsBuf,0,paramsF32);
+    const cs=enc.beginComputePass();
+    cs.setPipeline(stepPipe); cs.setBindGroup(0,stepBind); cs.dispatchWorkgroups(Math.ceil(activeN/64));
+    cs.setPipeline(resolvePipe); cs.setBindGroup(0,resolveBind); cs.dispatchWorkgroups(Math.ceil(NCELL/64));
+    cs.end();
+    acc-=FIXED; steps++;
+  }
+
+  // ---- render: scene (hdr) then tonemap to swapchain ----
+  const p1=enc.beginRenderPass({
+    colorAttachments:[{view:sceneView,loadOp:'clear',clearValue:{r:0,g:0,b:0,a:1},storeOp:'store'}],
+    depthStencilAttachment:{view:depthView,depthClearValue:1.0,depthLoadOp:'clear',depthStoreOp:'store'}});
+  p1.setPipeline(pipeSky); p1.setBindGroup(0,bgSky); p1.draw(3);
+  p1.setPipeline(pipeTerr); p1.setBindGroup(0,bgTerr); p1.setVertexBuffer(0,grid.vb); p1.setIndexBuffer(grid.ib,'uint32'); p1.drawIndexed(grid.count);
+  p1.setPipeline(pipeDebris); p1.setBindGroup(0,bgDebris); p1.draw(6,activeN);
+  if(peers.size>0){ p1.setPipeline(pipeAvatar); p1.setBindGroup(0,bgAvatar); p1.draw(6,MAXSHIPS-1); }
+  p1.end();
+  const p2=enc.beginRenderPass({colorAttachments:[{view:ctx.getCurrentTexture().createView(),loadOp:'clear',clearValue:{r:0,g:0,b:0,a:1},storeOp:'store'}]});
+  p2.setPipeline(pipeTM); p2.setBindGroup(0,bgTM); p2.draw(3); p2.end();
+  device.queue.submit([enc.finish()]);
+
+  // ---- HUD ----
+  const alt=Math.round(cam.y-analytic);
+  modeEl.textContent = (+el.heal.value>0.001) ? 'HEALING' : 'PERSISTENT';
+  modeEl.style.color = (+el.heal.value>0.001) ? '#7fd1c6' : '#f5a83a';
+  subEl.textContent = (+el.heal.value>0.001) ? 'edits reform to seed' : 'edits persist as a delta';
+  statEl.textContent = `alt ${alt}  ·  ${spd.toFixed(0)} u/s  ·  cruise ${maxSpeed.toFixed(0)}`;
+
+  booted=true;
+  requestAnimationFrame(frame);
+}
+// dev-only test handle (never active without ?dev in the URL)
+if (new URLSearchParams(location.search).has('dev')) {
+  window.__lab = { cam, el, jHeight, get seedOff(){ return seedOff; },
+    device, heightBuf, baseBuf, velBuf, posBuf, NCELL, get activeN(){ return activeN; } };
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
