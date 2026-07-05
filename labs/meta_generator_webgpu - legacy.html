@@ -48,7 +48,7 @@
   <span><i style="background:#e6b359"></i>emissive</span>
 </div>
 <div id="hint">click a specimen to enlarge + inspect · click again to return</div>
-<div id="inspect"><h2 id="ispec_t">specimen</h2><div class="k" id="ispec_k"></div><ol id="ispec_ops"></ol><div class="k" id="ispec_lk" style="border-top:1px solid #223449;padding-top:7px"></div><div class="share" id="ispec_share"></div></div>
+<div id="inspect"><h2 id="ispec_t">specimen</h2><div class="k" id="ispec_k"></div><ol id="ispec_ops"></ol><div class="share" id="ispec_share"></div></div>
 <div id="fail"><div><h2>WebGPU not available</h2><p>This needs <code>navigator.gpu</code> — a recent Chrome/Edge over http(s)/localhost.</p></div></div>
 
 <script type="module">
@@ -247,153 +247,6 @@ function growBiosphere(bseed){
   }
 }
 
-// ===========================================================================
-// STAGE 2 — the evolvable L-system PART layer (a generator of KINDS)
-// Each specimen also grows an ORGANISM: a bounded deterministic parametric
-// L-system whose PRODUCTION RULE differs (apical/monopodial, dichotomous fork,
-// rachis+pinna, radial, weeping, vine) — not just its knobs — so reseed makes
-// new KINDS, not scaled trees. CPU-expanded once per biosphere into capsule
-// segments, each colored by sampling the field (the WHOLE) at its base point.
-// Placement is tile-uv (aspect-free); color samples the field at stage-1's
-// exact single-axis aspect-warped coord so PART matches the WHOLE it stands on.
-// ===========================================================================
-const WS=2.4;                          // matches the WGSL field extent
-const SEG_CAP=170;                     // hard per-specimen segment ceiling (bound)
-const UP=Math.PI/2, DOWN=-Math.PI/2;   // tile-uv: +v is up (toward tile top)
-const RULE_NAMES=['monopodial tree','dichotomous coral','rachis fern','radial burst','weeping','vine'];
-function wrap(a){ return a-2*Math.PI*Math.floor((a+Math.PI)/(2*Math.PI)); }
-function rotateToward(h,t,k){ const d=wrap(t-h); return wrap(h+d*Math.max(-1,Math.min(1,k))); }
-function hnode(tile,nid,seed,salt){ return jhash((nid^Math.imul(salt,0x9e3779b9))|0,(tile+salt)|0,(seed^salt)|0); } // stable node-id hash (refactor-proof)
-function iqPalCPU(pal,x){ const cl=(v)=>Math.max(0,Math.min(1,v)); const f=(i)=>cl(pal[0][i]+pal[1][i]*Math.cos(6.2831853*(pal[2][i]*cl(x)+pal[3][i]))); return [f(0),f(1),f(2)]; } // mirrors WGSL pal()
-function archTint(r){ return [[0.46,0.72,0.42],[0.92,0.55,0.42],[0.42,0.76,0.62],[0.86,0.74,0.42],[0.55,0.62,0.86],[0.72,0.85,0.5]][r]||[0.7,0.7,0.7]; }
-
-function drawLGenome(R){
-  const rule=R.i(6); const g={rule};
-  g.baseU=R.f(0.32,0.68); g.baseV=R.f(0.06,0.18); g.axiomN=1; g.axiomSpread=R.f(0,0.5); g.rootAngle=UP+R.f(-0.18,0.18);
-  g.len0=R.f(0.11,0.19); g.lenDecay=R.f(0.68,0.82); g.thick0=R.f(0.008,0.018); g.thickDecay=R.f(0.6,0.82);
-  g.angBase=R.f(0.35,0.7); g.angJitter=R.f(0.05,0.28); g.curl=R.f(-0.1,0.1); g.gravity=R.f(-0.02,0.06); g.wobble=R.f(0,0.16);
-  g.branchN=2; g.branchProb=R.f(0.82,1.0); g.depthCap=5+R.i(3);
-  if(rule===0){ g.branchN=2+R.i(2); g.angBase=R.f(0.4,0.72); g.lenDecay=R.f(0.72,0.82); }                                                   // monopodial tree
-  else if(rule===1){ g.branchN=2; g.angBase=R.f(0.3,0.6); g.lenDecay=R.f(0.68,0.8); g.thickDecay=R.f(0.72,0.86); g.curl=R.f(-0.18,0.18); g.rootAngle=UP+R.f(-0.5,0.5); } // dichotomous coral
-  else if(rule===2){ g.branchN=2; g.angBase=R.f(0.7,1.1); g.lenDecay=R.f(0.86,0.93); g.curl=R.f(0.02,0.16); g.gravity=R.f(0.02,0.1); g.depthCap=5+R.i(3); } // rachis fern
-  else if(rule===3){ g.axiomN=6+R.i(6); g.axiomSpread=R.f(3.0,6.283); g.baseU=R.f(0.42,0.58); g.baseV=R.f(0.4,0.6); g.rootAngle=R.f(0,6.283); g.branchN=1+R.i(2); g.angBase=R.f(0.2,0.5); g.len0=R.f(0.09,0.15); g.depthCap=3+R.i(3); } // radial burst
-  else if(rule===4){ g.baseV=R.f(0.84,0.94); g.rootAngle=DOWN+R.f(-0.2,0.2); g.gravity=R.f(0.1,0.22); g.branchN=2+R.i(2); g.angBase=R.f(0.3,0.6); g.lenDecay=R.f(0.72,0.84); } // weeping
-  else { g.branchN=1; g.angBase=R.f(0.5,0.95); g.curl=R.f(0.1,0.28); g.branchProb=R.f(0.35,0.65); g.lenDecay=R.f(0.9,0.96); g.depthCap=7+R.i(4); g.baseU=R.f(0.14,0.34); g.baseV=R.f(0.42,0.72); g.rootAngle=R.f(-0.5,0.5); } // vine
-  g.depthCap=Math.max(3,Math.min(8,g.depthCap)); g.branchN=Math.max(1,Math.min(4,g.branchN)); g.axiomN=Math.max(1,Math.min(7,g.axiomN));
-  g.len0=Math.max(0.05,Math.min(0.24,g.len0)); g.thick0=Math.max(0.004,Math.min(0.02,g.thick0));
-  g.depthTint=R.f(0.15,0.5); g.fieldMix=R.f(0.55,0.9); g.palShift=R.f(0,1); g.emissiveTip=R.f(0.05,0.5);
-  // --- growth-steering genes (emergence: the WHOLE shapes the PART) ---
-  g.kPhoto=R.f(0.05,0.34); g.kField=R.f(0.05,0.44); g.kCrowd=R.f(0.05,0.36);
-  // --- life + shading genes (per-organism variety) ---
-  g.lifeLen=32+30*R.nx();                        // seconds per full bud->wither cycle (staggered)
-  g.styleSeed=R.nx(); g.effectFlags=1+R.i(7); g.moodId=R.i(6); g.veinFreq=6+R.i(10);
-  return g;
-}
-
-function growLSystem(lseed, tileIdx, fieldG){
-  const R=makeRng(lseed); const g=drawLGenome(R); g.lseed=lseed>>>0;
-  const segs=[]; const stack=[];
-  // --- emergence substrate: an 8x8 canopy-occupancy grid + a field sampler (the nutrient landscape) ---
-  const steer=(window.__steerOn!==false) && !!fieldG;
-  const occ=new Float32Array(64); const SUN=Math.atan2(0.82,0.55);
-  const Fs=(ax,ay)=>{ const r=evalField(fieldG, (ax*2-1)*WS, (ay*2-1)*WS); const sl=(fieldG.fieldSlot>=0?fieldG.fieldSlot:fieldG.root); return (r[sl]||[0])[0]; };
-  for(let a=0;a<g.axiomN;a++){
-    const frac=(g.axiomN===1)?0:(a/(g.axiomN-1)-0.5);
-    const head=wrap(g.rootAngle + (g.rule===3 ? a*6.2831853/g.axiomN : frac*g.axiomSpread));
-    stack.push({x:g.baseU,y:g.baseV,head,len:g.len0,thick:g.thick0,depth:0,nid:((a+1)*2654435761)>>>0});
-  }
-  let n=0;
-  while(stack.length>0 && n<SEG_CAP){
-    const s=stack.pop();
-    const w=g.wobble*(hnode(tileIdx,s.nid,lseed,3)*2-1);
-    let head=wrap(s.head+g.curl+w); head=rotateToward(head,DOWN,g.gravity);       // gravity pulls heading toward DOWN
-    const x1=Math.max(0.02,Math.min(0.98, s.x+Math.cos(head)*s.len));
-    const y1=Math.max(0.02,Math.min(0.98, s.y+Math.sin(head)*s.len));
-    const isTip=(s.depth>=g.depthCap-1);
-    if((x1-s.x)*(x1-s.x)+(y1-s.y)*(y1-s.y) > 1e-8){                                // guard: never emit a zero-length capsule
-      segs.push({ax:s.x,ay:s.y,bx:x1,by:y1,thick:s.thick,depth:s.depth,birthT:s.depth/Math.max(1,g.depthCap),tip:isTip}); n++;
-    }
-    if(isTip || n>=SEG_CAP) continue;
-    const emit=(ch,lm,tm,ci,force)=>{
-      let h=wrap(ch), lg=1.0;
-      if(steer){
-        const cx=Math.max(0,Math.min(7,x1*8|0)), cy=Math.max(0,Math.min(7,y1*8|0));
-        if(!force && hnode(tileIdx,s.nid,lseed,10+ci) > g.branchProb) return;   // keep the body; competition is directional (steer away), not culling
-        const light=1-occ[cx+Math.min(7,cy+1)*8];                                                                // shaded by the cell above
-        const gx=Fs(x1+0.03,y1)-Fs(x1-0.03,y1), gy=Fs(x1,y1+0.03)-Fs(x1,y1-0.03), fert=Math.max(0,Math.min(1,0.5+0.5*Fs(x1,y1)));
-        const ox=occ[Math.min(7,cx+1)+cy*8]-occ[Math.max(0,cx-1)+cy*8], oy=occ[cx+Math.min(7,cy+1)*8]-occ[cx+Math.max(0,cy-1)*8];
-        h=rotateToward(h, SUN, g.kPhoto*(1-light));                          // 1 phototropism (bend to light)
-        h=rotateToward(h, Math.atan2(gy,gx), g.kField*fert);                 // 3 field-gradient (grow up-nutrient)
-        h=rotateToward(h, Math.atan2(-oy,-ox), g.kCrowd);                    // 2 crowding (into open space)
-        lg=(0.62+0.38*light)*(0.72+0.56*fert); occ[cx+cy*8]+=1;              // light+fertility gate length; deposit
-      } else if(!force && hnode(tileIdx,s.nid,lseed,10+ci)>g.branchProb) return;
-      stack.push({x:x1,y:y1,head:wrap(h),len:s.len*lm*lg,thick:s.thick*tm,depth:s.depth+1,nid:(Math.imul(s.nid,0x9e3779b9)+ci*0x85ebca6b+1)>>>0}); };
-    const jit=(ci)=> g.angJitter*(hnode(tileIdx,s.nid,lseed,20+ci)*2-1);
-    if(g.rule===0){                                                                // MONOPODIAL: dominant apical axis + laterals
-      emit(head+jit(0)*0.4, Math.min(0.95,g.lenDecay+0.1), g.thickDecay, 0, true);
-      for(let c=1;c<g.branchN;c++){ const side=(g.branchN<=2)?((c%2)?1:-1):((c/(g.branchN-1))*2-1); emit(head+side*g.angBase+jit(c), g.lenDecay*0.72, g.thickDecay*0.82, c); }
-    } else if(g.rule===1){                                                         // DICHOTOMOUS: equal fork, no trunk
-      emit(head+g.angBase+jit(0), g.lenDecay, g.thickDecay, 0);
-      emit(head-g.angBase+jit(1), g.lenDecay, g.thickDecay, 1);
-    } else if(g.rule===2){                                                         // RACHIS: long axis + alternating short pinnae
-      emit(head+jit(0)*0.25, Math.min(0.96,g.lenDecay), g.thickDecay, 0, true);
-      const side=(s.depth%2===0)?1:-1; emit(head+side*g.angBase+jit(1), g.lenDecay*0.42, g.thickDecay*0.7, 1);
-    } else if(g.rule===3){                                                         // RADIAL: light re-branch of each ray
-      for(let c=0;c<g.branchN;c++){ const side=(g.branchN<=1)?0:((c/(g.branchN-1))*2-1); emit(head+side*g.angBase+jit(c), g.lenDecay, g.thickDecay, c); }
-    } else if(g.rule===4){                                                         // WEEPING: fork; gravity already bent head down
-      emit(head+g.angBase+jit(0), g.lenDecay, g.thickDecay, 0);
-      emit(head-g.angBase*0.6+jit(1), g.lenDecay, g.thickDecay, 1);
-      if(g.branchN>2) emit(head+g.angBase*0.15+jit(2), g.lenDecay, g.thickDecay*0.9, 2);
-    } else {                                                                       // VINE: continue + rare alternating tendril
-      emit(head+jit(0)*0.5, Math.min(0.97,g.lenDecay), g.thickDecay, 0, true);
-      emit(head+((s.depth%2)?1:-1)*g.angBase+jit(1), g.lenDecay*0.4, g.thickDecay*0.7, 1);
-    }
-  }
-  return { genome:g, segments:segs };
-}
-
-let Lgenomes=[], Lsegs=[], segStart=[0], segCount=[], segTotal=0, growStart=0;
-function growLBiosphere(bseed){
-  Lgenomes=[]; Lsegs=[]; segStart=[0]; segCount=[];
-  for(let t=0;t<N_TILES;t++){
-    const out=growLSystem(hashU((bseed>>>0) ^ Math.imul(t+1,0x2545f491)), t, genomes[t]);   // pass the field genome so growth steers by it
-    out.segments.sort((p,q)=>p.depth-q.depth);                                   // trunks draw under branches (order = depth)
-    Lgenomes.push(out.genome); Lsegs.push(out.segments);
-    segCount[t]=out.segments.length; segStart[t+1]=segStart[t]+out.segments.length;
-  }
-  segTotal=segStart[N_TILES];
-}
-function packSegs(){                                                              // once per reseed
-  const arr=new Float32Array(segTotal*12);
-  const cw=canvas.width||8, ch=canvas.height||6; const asp=(cw/COLS)/(ch/ROWS);   // stage-1 grid aspect
-  let o=0;
-  for(let t=0;t<N_TILES;t++){
-    const g=genomes[t], Lg=Lgenomes[t];
-    for(const s of Lsegs[t]){
-      let px=(s.ax*2-1)*WS, py=(s.ay*2-1)*WS; if(asp>1){ px*=asp; } else { py/=Math.max(asp,1e-3); }  // stage-1 single-axis aspect warp
-      let rgb;
-      if(g.kind===2){ const c=evalField(g,px,py)[g.root]||[0,0,0]; rgb=[c[0],c[1],c[2]]; }             // color-kind: field IS the color
-      else { const reg=evalField(g,px,py); const slot=(g.fieldSlot>=0?g.fieldSlot:g.root); const fv=((reg[slot]||[0])[0]);
-        let idx=(fv*0.5+0.5)*Lg.fieldMix + (s.depth/Math.max(1,Lg.depthCap))*Lg.depthTint + Lg.palShift; idx=idx-Math.floor(idx);
-        const b=iqPalCPU(g.pal, idx), at=archTint(Lg.rule);
-        rgb=[at[0]+(b[0]-at[0])*Lg.fieldMix, at[1]+(b[1]-at[1])*Lg.fieldMix, at[2]+(b[2]-at[2])*Lg.fieldMix]; }
-      if(s.tip){ rgb=[Math.min(1,rgb[0]+Lg.emissiveTip),Math.min(1,rgb[1]+Lg.emissiveTip),Math.min(1,rgb[2]+Lg.emissiveTip)]; }
-      arr[o]=s.ax; arr[o+1]=s.ay; arr[o+2]=s.bx; arr[o+3]=s.by;
-      arr[o+4]=rgb[0]; arr[o+5]=rgb[1]; arr[o+6]=rgb[2]; arr[o+7]=s.birthT;
-      arr[o+8]=s.thick; arr[o+9]=t; arr[o+10]=s.depth; arr[o+11]=s.birthT; o+=12;
-    }
-  }
-  if(o>0) device.queue.writeBuffer(segBuf,0,arr.buffer,0,o*4);
-  const clk=new Float32Array(N_TILES*4);                                                         // per-organism life clock + style word
-  for(let t=0;t<N_TILES;t++){ const Lg=Lgenomes[t];
-    clk[t*4]=(hashU((curSeed>>>0) ^ Math.imul(t+1,0x11FE0001))&0xffff)/65535;                    // seedPhase (staggers the 48)
-    clk[t*4+1]=Lg.lifeLen;
-    clk[t*4+2]=(Lg.effectFlags&15) + (Lg.moodId&15)*16 + (Math.round(Lg.veinFreq)&255)*256;      // packed effect flags + mood + veinFreq
-    clk[t*4+3]=Lg.styleSeed;
-  }
-  device.queue.writeBuffer(tileClkBuf,0,clk.buffer);
-}
-
 // ---- serialize genomes into GPU buffers ----------------------------------
 // Instr: op:u32, a:i32,b:i32,c:i32, k0,k1,k2,pad:f32  (32 bytes)
 // Genome: seed:u32, kind:u32, nOps:u32, root:u32, pal[4]:vec4f  (80 bytes)
@@ -589,115 +442,20 @@ struct VS { @builtin(position) pos:vec4f, @location(0) uv:vec2f, @location(1) @i
 
 const mod = await shader('field-vm', WGSL);
 
-// ---- explicit shared bind-group layout (NOT layout:'auto'); binding 3 = L-system segs ----
+// ---- explicit shared bind-group layout (NOT layout:'auto' per head) ------
 const bgl = device.createBindGroupLayout({ entries:[
   { binding:0, visibility:GPUShaderStage.VERTEX|GPUShaderStage.FRAGMENT, buffer:{type:'uniform'} },
   { binding:1, visibility:GPUShaderStage.FRAGMENT, buffer:{type:'read-only-storage'} },
   { binding:2, visibility:GPUShaderStage.FRAGMENT, buffer:{type:'read-only-storage'} },
-  { binding:3, visibility:GPUShaderStage.VERTEX,   buffer:{type:'read-only-storage'} },
-  { binding:4, visibility:GPUShaderStage.VERTEX,   buffer:{type:'read-only-storage'} },   // per-tile life clock + style
 ]});
-const plo = device.createPipelineLayout({ bindGroupLayouts:[bgl] });
 const uniBuf=device.createBuffer({ size:32, usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST });
 const uni=new Float32Array(8);
-const segBuf=device.createBuffer({ size:N_TILES*SEG_CAP*48, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST }); // Seg=48 bytes
-const tileClkBuf=device.createBuffer({ size:N_TILES*16, usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST });     // vec4/tile: seedPhase,lifeLen,style,styleSeed
 const bind=device.createBindGroup({ layout:bgl, entries:[
-  { binding:0, resource:{buffer:uniBuf} }, { binding:1, resource:{buffer:progBuf} },
-  { binding:2, resource:{buffer:genBuf} }, { binding:3, resource:{buffer:segBuf} }, { binding:4, resource:{buffer:tileClkBuf} } ]});
-const pipe=device.createRenderPipeline({ layout:plo,             // field VM (unchanged; simply never declares binding 3)
+  { binding:0, resource:{buffer:uniBuf} }, { binding:1, resource:{buffer:progBuf} }, { binding:2, resource:{buffer:genBuf} } ]});
+const pipe=device.createRenderPipeline({
+  layout: device.createPipelineLayout({ bindGroupLayouts:[bgl] }),
   vertex:{ module:mod, entryPoint:'vs' },
   fragment:{ module:mod, entryPoint:'fs', targets:[{format}] },
-  primitive:{ topology:'triangle-list' } });
-
-// ---- L-system capsule pipeline: tile-uv placement (aspect-free), field-colored ----
-const CAP_WGSL = /* wgsl */`
-const COLS:u32=${COLS}u; const ROWS:u32=${ROWS}u; const GUT:f32=0.006;
-struct U { res:vec2f, time:f32, selected:f32, mode:f32, p0:f32, p1:f32, p2:f32 };
-struct Seg { a:vec2f, b:vec2f, col:vec4f, mt:vec4f };
-@group(0) @binding(0) var<uniform> u:U;
-@group(0) @binding(3) var<storage,read> segs:array<Seg>;
-@group(0) @binding(4) var<storage,read> tileClk:array<vec4f>;      // (seedPhase, lifeLen, packedStyle, styleSeed)
-struct VSc { @builtin(position) pos:vec4f, @location(0) local:vec2f, @location(1) @interpolate(flat) col:vec4f,
-  @location(2) grow:f32, @location(3) @interpolate(flat) bodyHalf:f32,
-  @location(4) @interpolate(flat) sty:vec4f, @location(5) ad:vec4f };   // sty=(flags,mood,veinFreq,styleSeed); ad=(axialT,birthT,depth,age)
-fn tileUVtoNDC(c:vec2f, tile:u32)->vec2f {
-  if(u.mode>0.5){ return c*2.0-vec2f(1.0); }
-  let ci=tile%COLS; let ri=tile/COLS; let cw=2.0/f32(COLS); let ch=2.0/f32(ROWS);
-  let x0=-1.0+f32(ci)*cw; let y0=1.0-f32(ri+1u)*ch;
-  return vec2f(x0+GUT + c.x*(cw-2.0*GUT), y0+GUT + c.y*(ch-2.0*GUT));
-}
-fn growCurve(age:f32)->f32 { return smoothstep(0.0,0.42,age)*1.05*(1.0-smoothstep(0.80,1.0,age)); }  // bud->grow->mature->wither, then re-buds
-@vertex fn vsCap(@builtin(vertex_index) vi:u32, @builtin(instance_index) ii:u32)->VSc {
-  let s=segs[ii];
-  let tile=u32(s.mt.y+0.5); let thick0=max(s.mt.x,1e-4); let depth=s.mt.z; let birthT=s.mt.w;
-  let clk=tileClk[tile];
-  let age=fract((u.time - u.p0)/max(clk.y,1e-3) + clk.x);           // per-organism life clock 0..1, STAGGERED across the 48
-  let front=growCurve(age);
-  let growPhase=clamp((front - birthT)/0.14, 0.0, 1.0);            // moving reveal front — trunk unfurls first, replays every cycle
-  let matureK=smoothstep(0.0,0.14, age - birthT*0.4);             // plumps over the first seconds of visible life
-  let witherK=1.0 - smoothstep(0.82,1.0, age);
-  let thick=thick0 * clamp(matureK,0.25,1.0) * (0.82+0.18*witherK);   // thin young, fat mature, shrink in decline
-  let lenGrow=0.6 + 0.4*smoothstep(front-0.14, front, birthT);    // freshest tips still elongating at the front
-  let aUV=s.a; let bUV=mix(s.a, mix(s.a,s.b,lenGrow), growPhase);
-  let dir=bUV-aUV; let len=max(length(dir),1e-5); let ndir=dir/len; let perp=vec2f(-ndir.y,ndir.x);
-  let sway=sin(u.time*0.7 + f32(tile)*1.3 + depth*0.6) * (thick0*(0.3+depth*0.9)) * (1.0-matureK*0.4);  // gentler, stiffens with age
-  let bTip=bUV + perp*sway - vec2f(0.0, (1.0-witherK)*thick0*depth*0.35);   // wither droop
-  var cornX=array<f32,6>(0.0,1.0,0.0, 0.0,1.0,1.0);
-  var cornY=array<f32,6>(-1.0,-1.0,1.0, 1.0,-1.0,1.0);
-  let ex=cornX[vi]; let ey=cornY[vi];
-  let endUV=mix(aUV,bTip,ex);
-  let thHere=thick*mix(1.0,0.5,ex);
-  let posUV=endUV + perp*(ey*thHere) + ndir*((ex*2.0-1.0)*thick);
-  var o:VSc; o.pos=vec4f(tileUVtoNDC(posUV, tile), 0.0, 1.0);
-  o.bodyHalf=(len*0.5)/max(thick,1e-5);
-  o.local=vec2f((ex*2.0-1.0)*(o.bodyHalf+1.0), ey);
-  o.col=s.col; o.grow=growPhase;
-  let ps=u32(clk.z+0.5); o.sty=vec4f(f32(ps&15u), f32((ps>>4u)&15u), f32(ps>>8u), clk.w);
-  o.ad=vec4f(ex, birthT, depth, age);
-  return o;
-}
-fn hueRot(c:vec3f, a:f32)->vec3f {                                // luma-preserving YIQ hue rotate
-  let U=cos(a); let W=sin(a);
-  let m = mat3x3f(vec3f(0.299,0.587,0.114),vec3f(0.299,0.587,0.114),vec3f(0.299,0.587,0.114))
-        + U*mat3x3f(vec3f(0.701,-0.587,-0.114),vec3f(-0.299,0.413,-0.114),vec3f(-0.300,-0.588,0.886))
-        + W*mat3x3f(vec3f(0.168,0.330,-0.497),vec3f(-0.328,0.035,0.292),vec3f(1.250,-1.050,-0.203));
-  return clamp(m*c, vec3f(0.0), vec3f(1.0));
-}
-@fragment fn fsCap(in:VSc)->@location(0) vec4f {
-  let qx=in.local.x - clamp(in.local.x, -in.bodyHalf, in.bodyHalf);
-  let dist=length(vec2f(qx, in.local.y));
-  let e=fwidth(dist)+1e-4;
-  let inside=1.0-smoothstep(1.0-e,1.0,dist);
-  if(inside<=0.002){ discard; }
-  let radial=1.0-clamp(dist,0.0,1.0); let across=in.local.y;
-  let axialT=in.ad.x; let birthT=in.ad.y; let depth=in.ad.z; let age=in.ad.w;
-  let flags=u32(in.sty.x+0.5); let mood=in.sty.y; let veinFreq=max(in.sty.z,3.0); let styleSeed=in.sty.w;
-  var rgb=in.col.rgb;                                              // dark old wood at the base
-  let tip=hueRot(rgb, 0.14+0.14*styleSeed);
-  let ageAxis=clamp(axialT*0.55 + (1.0-birthT)*0.45, 0.0, 1.0);
-  rgb=mix(rgb, tip, smoothstep(0.0,1.0,ageAxis));                 // young bright growth toward tips & crown
-  rgb=hueRot(rgb, (mood-2.5)*0.34 + (u.p1-0.5)*0.5);             // per-organism mood + gallery SEASON (u.p1)
-  rgb=mix(rgb, vec3f(dot(rgb,vec3f(0.3,0.59,0.11))*0.7), smoothstep(0.80,1.0,age)*0.7);   // WITHER: desaturate & darken
-  rgb=mix(vec3f(dot(rgb,vec3f(0.33)))*1.25, rgb, smoothstep(0.0,0.08,age));                // BUD: pale
-  let accent=hueRot(rgb, 3.14159);
-  if((flags&1u)!=0u){ rgb += accent*axialT*(0.5+0.5*sin(u.time*2.0+styleSeed*6.283+depth))*radial*0.7; }   // bioluminescent tips
-  if((flags&2u)!=0u){ let fr=pow(1.0-abs(across),3.0); rgb=mix(rgb, hueRot(accent, sin(fr*8.0+u.time*0.4)), fr*0.5); } // iridescence
-  if((flags&4u)!=0u){ let v=0.5+0.5*sin(in.local.x*veinFreq+across*2.0); rgb*=mix(0.84,1.14, smoothstep(0.45,0.55,v)); } // veins
-  let bloom=smoothstep(0.60,0.68,age)*(1.0-smoothstep(0.76,0.82,age));                     // FLOWER window
-  if(birthT>0.7){ rgb=mix(rgb, hueRot(accent,0.5)+vec3f(0.25), bloom*radial); }             // tips bloom
-  let core=1.0-smoothstep(0.0,0.55,dist); let rim=smoothstep(0.6,1.0,dist);
-  rgb=mix(rgb, vec3f(1.0), core*0.4);
-  rgb=mix(rgb, in.col.rgb*0.12, rim);
-  rgb=clamp(rgb, vec3f(0.0), vec3f(1.5));
-  return vec4f(rgb, inside*clamp(in.grow*1.3,0.0,1.0)*(1.0-smoothstep(0.93,1.0,age)*0.5));
-}`;
-const capMod = await shader('l-capsule', CAP_WGSL);
-const capPipe = device.createRenderPipeline({ layout:plo,
-  vertex:{ module:capMod, entryPoint:'vsCap' },
-  fragment:{ module:capMod, entryPoint:'fsCap', targets:[{ format, blend:{
-    color:{srcFactor:'src-alpha',dstFactor:'one-minus-src-alpha',operation:'add'},
-    alpha:{srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'} } }] },
   primitive:{ topology:'triangle-list' } });
 
 // ===========================================================================
@@ -719,29 +477,20 @@ function showInspector(gi){
   const ol=document.getElementById('ispec_ops'); ol.innerHTML='';
   g.ops.forEach((ins,i)=>{ const li=document.createElement('li');
     li.innerHTML='<b>'+(OPNAME[ins.op]||('op'+ins.op))+'</b> '+argStr(ins)+(i===g.root?' ◂ root':''); ol.appendChild(li); });
-  const Lg=Lgenomes[gi], lk=document.getElementById('ispec_lk');
-  if(Lg){ const deg=r=>Math.round(r*180/Math.PI);
-    lk.innerHTML='<b style="color:#9ad6c0">PART · '+RULE_NAMES[Lg.rule].toUpperCase()+'</b> — '+segCount[gi]+' segments · L-seed '+Lg.lseed+
-      '<br>axiomN '+Lg.axiomN+' · branchN '+Lg.branchN+' · depth '+Lg.depthCap+' · angle '+deg(Lg.angBase)+'° · lenDecay '+Lg.lenDecay.toFixed(2)+
-      ' · curl '+deg(Lg.curl)+'° · gravity '+Lg.gravity.toFixed(2)+' · fieldMix '+Lg.fieldMix.toFixed(2); }
-  document.getElementById('ispec_share').innerHTML='biosphere #'+curSeed+' · seed reproduces field + organism<br><a href="world_navigator_webgpu.html#world='+curSeed+'_'+gi+'" target="_blank" style="color:#8fd;text-decoration:none">▶ fly over (terrain)</a> &nbsp;·&nbsp; <a href="world_volumetric_webgpu.html#world='+curSeed+'_'+gi+'" target="_blank" style="color:#8fd;text-decoration:none">▶ fly inside (volume)</a>';
+  document.getElementById('ispec_share').textContent='biosphere #'+curSeed+'  ·  share via URL hash';
   insp.style.display='block';
 }
 
 let curSeed=0;
 function setBiosphere(bseed){
   curSeed=bseed>>>0; seedEl.value=curSeed;
-  growBiosphere(curSeed); serialize();                 // WHOLE: field-generators
-  growLBiosphere(curSeed); packSegs();                 // PART: organisms grown in them
-  growStart=performance.now()/1000;                    // replay the grow-in reveal
+  growBiosphere(curSeed); serialize();
   selected=-1; mode=0; insp.style.display='none';
   location.hash='seed='+curSeed;
 }
 document.getElementById('reseed').onclick=()=> setBiosphere(hashU((curSeed^0xabcd1234)>>>0));
 document.getElementById('go').onclick=()=>{ const v=parseInt(seedEl.value,10); if(!isNaN(v)) setBiosphere(v>>>0); };
 seedEl.addEventListener('keydown',e=>{ if(e.key==='Enter') document.getElementById('go').click(); });
-// [E] toggles growth-steering (emergence) off/on and re-grows — the A/B that PROVES the field shapes the organisms
-addEventListener('keydown',e=>{ if(e.code==='KeyE' && e.target.tagName!=='INPUT'){ window.__steerOn=(window.__steerOn===false); growLBiosphere(curSeed); packSegs(); growStart=performance.now()/1000; } });
 
 canvas.addEventListener('click', e=>{
   if(mode===1){ mode=0; selected=-1; insp.style.display='none'; return; }
@@ -762,16 +511,13 @@ let t0=performance.now(), fc=0, fa=0;
 function frame(now){
   const dt=Math.min(0.05,(now-t0)/1000); t0=now; fa+=dt;
   if(++fc>=20){ fpsEl.textContent=(fc/fa).toFixed(0)+' fps'; fc=0; fa=0; }
-  uni[0]=canvas.width; uni[1]=canvas.height; uni[2]=now/1000; uni[3]=selected; uni[4]=mode; uni[5]=growStart; uni[6]=0.5+0.5*Math.sin(now/1000*0.06); uni[7]=0;  // uni[6]=slow gallery SEASON
+  uni[0]=canvas.width; uni[1]=canvas.height; uni[2]=now/1000; uni[3]=selected; uni[4]=mode; uni[5]=0; uni[6]=0; uni[7]=0;
   device.queue.writeBuffer(uniBuf,0,uni);
   const enc=device.createCommandEncoder();
   const pass=enc.beginRenderPass({ colorAttachments:[{ view:ctx.getCurrentTexture().createView(),
     loadOp:'clear', clearValue:{r:0.02,g:0.028,b:0.045,a:1}, storeOp:'store' }] });
   pass.setPipeline(pipe); pass.setBindGroup(0,bind);
-  pass.draw(6, mode===1 ? 1 : N_TILES);          // field VM: whole gallery in ONE instanced draw
-  if(segTotal>0){ pass.setPipeline(capPipe);      // organisms on top (same pass, same bind group)
-    if(mode===1 && selected>=0){ pass.draw(6, segCount[selected], 0, segStart[selected]); }  // just the selected organism
-    else if(mode!==1){ pass.draw(6, segTotal); } }                                            // every organism, ONE instanced draw
+  pass.draw(6, mode===1 ? 1 : N_TILES);          // ONE instanced draw renders the whole gallery
   pass.end();
   device.queue.submit([enc.finish()]);
   booted=true;
@@ -780,7 +526,7 @@ function frame(now){
 requestAnimationFrame(frame);
 
 // dev-only inspection handle
-if(new URLSearchParams(location.search).has('dev')) window.__mg={ get genomes(){return genomes;}, get Lgenomes(){return Lgenomes;}, get segCount(){return segCount;}, get segTotal(){return segTotal;}, setBiosphere, get sel(){return selected;} };
+if(new URLSearchParams(location.search).has('dev')) window.__mg={ get genomes(){return genomes;}, setBiosphere, get sel(){return selected;} };
 </script>
 </body>
 </html>
