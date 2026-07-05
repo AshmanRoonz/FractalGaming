@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skybox Seam Fixer</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel2: #1f2630;
+      --text: #e6edf3;
+      --muted: #9da7b3;
+      --accent: #58a6ff;
+      --good: #3fb950;
+      --warn: #d29922;
+      --border: #30363d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap {
+      max-width: 1450px;
+      margin: 0 auto;
+      padding: 18px;
+    }
+    h1 {
+      font-size: 28px;
+      margin: 0 0 8px;
+    }
+    p {
+      color: var(--muted);
+      line-height: 1.45;
+      margin: 0 0 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      margin: 12px 0;
+    }
+    .dropzone {
+      border: 2px dashed #4b5563;
+      border-radius: 14px;
+      padding: 18px;
+      text-align: center;
+      background: var(--panel2);
+      transition: 0.15s ease;
+    }
+    .dropzone.dragover {
+      border-color: var(--accent);
+      background: #152238;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      align-items: end;
+      margin-top: 12px;
+    }
+    label {
+      display: block;
+      font-size: 14px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    input[type="range"], input[type="number"], input[type="file"], button {
+      width: 100%;
+    }
+    input[type="number"], input[type="file"], button {
+      background: #0b1220;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 14px;
+    }
+    button {
+      cursor: pointer;
+      background: #13233b;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary { background: #12335d; }
+    button.good { background: #143019; }
+    .two {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .three {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 1100px) {
+      .two, .three { grid-template-columns: 1fr; }
+    }
+    .canvasbox {
+      background: #0b1220;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+    }
+    .canvas-title {
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      background: #000;
+      border-radius: 8px;
+    }
+    .small { font-size: 13px; color: var(--muted); }
+    .status {
+      font-size: 14px;
+      margin-top: 10px;
+      color: #b7c5d6;
+    }
+    code {
+      background: #0b1220;
+      padding: 2px 6px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .pill {
+      display: inline-block;
+      font-size: 12px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      margin-right: 8px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Skybox Seam Fixer</h1>
+    <p>
+      Load a <strong>2:1 equirectangular skybox</strong>, shift the seam to the center, blend it, then export the repaired image.
+      This is meant as a quick practical fixer for AI skyboxes that almost work but have a visible left/right wrap seam.
+    </p>
+
+    <div class="panel">
+      <div id="dropzone" class="dropzone">
+        <strong>Drop a skybox PNG/JPG here</strong> or choose a file below.
+        <div class="small" style="margin-top:8px;">Best for equirectangular images like 2048×1024, 4096×2048, etc.</div>
+      </div>
+      <div class="controls">
+        <div>
+          <label for="fileInput">Skybox image</label>
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" />
+        </div>
+        <div>
+          <label for="blendWidth">Blend width in pixels</label>
+          <input id="blendWidth" type="range" min="8" max="512" step="2" value="96" />
+          <div class="small">Current: <span id="blendWidthVal">96</span> px</div>
+        </div>
+        <div>
+          <label for="tileRepeats">Wrap preview repeats</label>
+          <input id="tileRepeats" type="range" min="2" max="4" step="1" value="2" />
+          <div class="small">Current: <span id="tileRepeatsVal">2</span> copies</div>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="fixBtn" class="primary">Apply seam fix</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="downloadBtn" class="good">Download fixed PNG</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button id="resetBtn">Reset to original</button>
+        </div>
+      </div>
+      <div id="status" class="status">No image loaded yet.</div>
+      <div style="margin-top:8px;">
+        <span class="pill">1. Load image</span>
+        <span class="pill">2. Check wrap preview</span>
+        <span class="pill">3. Apply seam fix</span>
+        <span class="pill">4. Re-check and export</span>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="panel canvasbox">
+        <div class="canvas-title">Original image</div>
+        <canvas id="originalCanvas"></canvas>
+      </div>
+      <div class="panel canvasbox">
+        <div class="canvas-title">Fixed image</div>
+        <canvas id="fixedCanvas"></canvas>
+      </div>
+    </div>
+
+    <div class="three">
+      <div class="panel canvasbox">
+        <div class="canvas-title">Original seam join preview (right edge → left edge)</div>
+        <canvas id="originalEdgeCanvas" height="160"></canvas>
+      </div>
+      <div class="panel canvasbox">
+        <div class="canvas-title">Fixed seam join preview (right edge → left edge)</div>
+        <canvas id="fixedEdgeCanvas" height="160"></canvas>
+      </div>
+      <div class="panel canvasbox">
+        <div class="canvas-title">Wrapped tiling preview</div>
+        <canvas id="wrapCanvas" height="220"></canvas>
+      </div>
+    </div>
+
+    <div class="panel">
+      <p>
+        <strong>How it works:</strong> the app horizontally shifts the image by half its width so the wrap seam lands in the middle,
+        blends across that center strip, then shifts the image back. This keeps the seam-fix localized where the wrap happens.
+      </p>
+      <p>
+        <strong>Tip:</strong> if the result looks smeared, lower the blend width. If the seam is still obvious, raise it.
+        Dramatic objects crossing the seam, like the sun or a rainbow endpoint, are harder to repair perfectly.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('fileInput');
+    const dropzone = document.getElementById('dropzone');
+    const blendWidthInput = document.getElementById('blendWidth');
+    const blendWidthVal = document.getElementById('blendWidthVal');
+    const tileRepeatsInput = document.getElementById('tileRepeats');
+    const tileRepeatsVal = document.getElementById('tileRepeatsVal');
+    const fixBtn = document.getElementById('fixBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const statusEl = document.getElementById('status');
+
+    const originalCanvas = document.getElementById('originalCanvas');
+    const fixedCanvas = document.getElementById('fixedCanvas');
+    const originalEdgeCanvas = document.getElementById('originalEdgeCanvas');
+    const fixedEdgeCanvas = document.getElementById('fixedEdgeCanvas');
+    const wrapCanvas = document.getElementById('wrapCanvas');
+
+    const originalCtx = originalCanvas.getContext('2d');
+    const fixedCtx = fixedCanvas.getContext('2d');
+    const originalEdgeCtx = originalEdgeCanvas.getContext('2d');
+    const fixedEdgeCtx = fixedEdgeCanvas.getContext('2d');
+    const wrapCtx = wrapCanvas.getContext('2d');
+
+    let originalImageBitmap = null;
+    let originalOffscreen = document.createElement('canvas');
+    let fixedOffscreen = document.createElement('canvas');
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function mod(n, m) {
+      return ((n % m) + m) % m;
+    }
+
+    function syncLabels() {
+      blendWidthVal.textContent = blendWidthInput.value;
+      tileRepeatsVal.textContent = tileRepeatsInput.value;
+    }
+    syncLabels();
+
+    blendWidthInput.addEventListener('input', () => {
+      syncLabels();
+      renderPreviews();
+    });
+    tileRepeatsInput.addEventListener('input', () => {
+      syncLabels();
+      renderPreviews();
+    });
+
+    function fitCanvasDisplay(canvas, srcW, srcH, maxW = 1200, maxH = 380) {
+      const scale = Math.min(maxW / srcW, maxH / srcH, 1);
+      canvas.width = Math.max(1, Math.round(srcW * scale));
+      canvas.height = Math.max(1, Math.round(srcH * scale));
+    }
+
+    function drawScaled(offscreen, visibleCanvas, ctx) {
+      fitCanvasDisplay(visibleCanvas, offscreen.width, offscreen.height);
+      ctx.clearRect(0, 0, visibleCanvas.width, visibleCanvas.height);
+      ctx.drawImage(offscreen, 0, 0, visibleCanvas.width, visibleCanvas.height);
+    }
+
+    function drawEdgeComparison(srcCanvas, targetCanvas, targetCtx) {
+      const srcW = srcCanvas.width;
+      const srcH = srcCanvas.height;
+      if (!srcW || !srcH) return;
+
+      const strip = clamp(Math.round(srcW * 0.03), 16, 96);
+      const joinCanvas = document.createElement('canvas');
+      joinCanvas.width = strip * 2;
+      joinCanvas.height = srcH;
+      const jctx = joinCanvas.getContext('2d');
+      jctx.drawImage(srcCanvas, srcW - strip, 0, strip, srcH, 0, 0, strip, srcH);
+      jctx.drawImage(srcCanvas, 0, 0, strip, srcH, strip, 0, strip, srcH);
+
+      targetCanvas.width = Math.max(320, strip * 6);
+      targetCanvas.height = 160;
+      targetCtx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+      targetCtx.imageSmoothingEnabled = false;
+      targetCtx.drawImage(joinCanvas, 0, 0, targetCanvas.width, targetCanvas.height);
+
+      const seamX = Math.round(targetCanvas.width / 2);
+      targetCtx.strokeStyle = '#ff4da6';
+      targetCtx.lineWidth = 2;
+      targetCtx.beginPath();
+      targetCtx.moveTo(seamX + 0.5, 0);
+      targetCtx.lineTo(seamX + 0.5, targetCanvas.height);
+      targetCtx.stroke();
+
+      targetCtx.fillStyle = 'rgba(0,0,0,0.55)';
+      targetCtx.fillRect(6, 6, 145, 20);
+      targetCtx.fillStyle = '#fff';
+      targetCtx.font = '12px system-ui, sans-serif';
+      targetCtx.fillText('pink line = wrap seam', 12, 20);
+    }
+
+    function drawWrapPreview(srcCanvas) {
+      const srcW = srcCanvas.width;
+      const srcH = srcCanvas.height;
+      if (!srcW || !srcH) return;
+
+      const repeats = parseInt(tileRepeatsInput.value, 10);
+      wrapCanvas.width = 900;
+      wrapCanvas.height = 220;
+      wrapCtx.clearRect(0, 0, wrapCanvas.width, wrapCanvas.height);
+
+      const drawH = wrapCanvas.height;
+      const drawWPerTile = Math.round(drawH * (srcW / srcH));
+      const totalW = drawWPerTile * repeats;
+      const startX = Math.round((wrapCanvas.width - totalW) / 2);
+
+      for (let i = 0; i < repeats; i++) {
+        const x = startX + i * drawWPerTile;
+        wrapCtx.drawImage(srcCanvas, x, 0, drawWPerTile, drawH);
+        if (i < repeats - 1) {
+          wrapCtx.strokeStyle = '#ff4da6';
+          wrapCtx.lineWidth = 2;
+          wrapCtx.beginPath();
+          wrapCtx.moveTo(x + drawWPerTile + 0.5, 0);
+          wrapCtx.lineTo(x + drawWPerTile + 0.5, drawH);
+          wrapCtx.stroke();
+        }
+      }
+
+      wrapCtx.fillStyle = 'rgba(0,0,0,0.55)';
+      wrapCtx.fillRect(8, 8, 200, 20);
+      wrapCtx.fillStyle = '#fff';
+      wrapCtx.font = '12px system-ui, sans-serif';
+      wrapCtx.fillText('joined tiles, seam marked in pink', 14, 22);
+    }
+
+    function renderPreviews() {
+      if (!originalOffscreen.width) return;
+      drawScaled(originalOffscreen, originalCanvas, originalCtx);
+      drawScaled(fixedOffscreen, fixedCanvas, fixedCtx);
+      drawEdgeComparison(originalOffscreen, originalEdgeCanvas, originalEdgeCtx);
+      drawEdgeComparison(fixedOffscreen, fixedEdgeCanvas, fixedEdgeCtx);
+      drawWrapPreview(fixedOffscreen.width ? fixedOffscreen : originalOffscreen);
+    }
+
+    function copyCanvas(src, dest) {
+      dest.width = src.width;
+      dest.height = src.height;
+      const dctx = dest.getContext('2d');
+      dctx.clearRect(0, 0, dest.width, dest.height);
+      dctx.drawImage(src, 0, 0);
+    }
+
+    function shiftHorizontalWrap(srcCanvas, dx) {
+      const out = document.createElement('canvas');
+      out.width = srcCanvas.width;
+      out.height = srcCanvas.height;
+      const octx = out.getContext('2d');
+      const w = srcCanvas.width;
+      const h = srcCanvas.height;
+      const shift = mod(dx, w);
+      octx.drawImage(srcCanvas, 0, 0, w - shift, h, shift, 0, w - shift, h);
+      octx.drawImage(srcCanvas, w - shift, 0, shift, h, 0, 0, shift, h);
+      return out;
+    }
+
+    function seamBlendCenter(srcCanvas, blendWidth) {
+      const w = srcCanvas.width;
+      const h = srcCanvas.height;
+      const bw = clamp(Math.round(blendWidth), 2, Math.floor(w / 4));
+      const start = Math.floor(w / 2 - bw / 2);
+      const end = start + bw;
+
+      const srcCtx = srcCanvas.getContext('2d');
+      const srcData = srcCtx.getImageData(0, 0, w, h);
+      const out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      const outCtx = out.getContext('2d');
+      const outData = new ImageData(new Uint8ClampedArray(srcData.data), w, h);
+
+      for (let y = 0; y < h; y++) {
+        for (let i = 0; i < bw; i++) {
+          const x = start + i;
+          const t = bw <= 1 ? 0.5 : i / (bw - 1);
+          const leftSampleX = mod(start - bw + i, w);
+          const rightSampleX = mod(end + i, w);
+
+          const di = (y * w + x) * 4;
+          const li = (y * w + leftSampleX) * 4;
+          const ri = (y * w + rightSampleX) * 4;
+
+          outData.data[di]     = Math.round(srcData.data[li]     * (1 - t) + srcData.data[ri]     * t);
+          outData.data[di + 1] = Math.round(srcData.data[li + 1] * (1 - t) + srcData.data[ri + 1] * t);
+          outData.data[di + 2] = Math.round(srcData.data[li + 2] * (1 - t) + srcData.data[ri + 2] * t);
+          outData.data[di + 3] = Math.round(srcData.data[li + 3] * (1 - t) + srcData.data[ri + 3] * t);
+        }
+      }
+
+      outCtx.putImageData(outData, 0, 0);
+      return out;
+    }
+
+    function applySeamFix() {
+      if (!originalOffscreen.width) {
+        setStatus('Load an image first.');
+        return;
+      }
+      const w = originalOffscreen.width;
+      const blendWidth = clamp(parseInt(blendWidthInput.value, 10), 2, Math.floor(w / 4));
+
+      const shifted = shiftHorizontalWrap(originalOffscreen, Math.floor(w / 2));
+      const blended = seamBlendCenter(shifted, blendWidth);
+      const restored = shiftHorizontalWrap(blended, Math.ceil(w / 2));
+
+      copyCanvas(restored, fixedOffscreen);
+      renderPreviews();
+      setStatus(`Applied seam fix with ${blendWidth}px blend width.`);
+    }
+
+    async function loadFile(file) {
+      if (!file || !file.type.startsWith('image/')) {
+        setStatus('Please load a valid image file.');
+        return;
+      }
+      const bitmap = await createImageBitmap(file);
+      originalImageBitmap = bitmap;
+      originalOffscreen.width = bitmap.width;
+      originalOffscreen.height = bitmap.height;
+      fixedOffscreen.width = bitmap.width;
+      fixedOffscreen.height = bitmap.height;
+
+      const octx = originalOffscreen.getContext('2d');
+      const fctx = fixedOffscreen.getContext('2d');
+      octx.clearRect(0, 0, bitmap.width, bitmap.height);
+      fctx.clearRect(0, 0, bitmap.width, bitmap.height);
+      octx.drawImage(bitmap, 0, 0);
+      fctx.drawImage(bitmap, 0, 0);
+
+      const ratio = (bitmap.width / bitmap.height).toFixed(3);
+      setStatus(`Loaded ${file.name} — ${bitmap.width}×${bitmap.height} (aspect ratio ${ratio}:1).`);
+      renderPreviews();
+    }
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (file) await loadFile(file);
+    });
+
+    ['dragenter', 'dragover'].forEach(evt => {
+      dropzone.addEventListener(evt, e => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.add('dragover');
+      });
+    });
+    ['dragleave', 'drop'].forEach(evt => {
+      dropzone.addEventListener(evt, e => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.remove('dragover');
+      });
+    });
+    dropzone.addEventListener('drop', async e => {
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file) await loadFile(file);
+    });
+
+    fixBtn.addEventListener('click', applySeamFix);
+
+    resetBtn.addEventListener('click', () => {
+      if (!originalOffscreen.width) return;
+      copyCanvas(originalOffscreen, fixedOffscreen);
+      renderPreviews();
+      setStatus('Reset fixed image back to the original.');
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      if (!fixedOffscreen.width) {
+        setStatus('Nothing to download yet.');
+        return;
+      }
+      const a = document.createElement('a');
+      a.href = fixedOffscreen.toDataURL('image/png');
+      a.download = 'skybox_seam_fixed.png';
+      a.click();
+      setStatus('Downloaded fixed image as PNG.');
+    });
+  </script>
+</body>
+</html>

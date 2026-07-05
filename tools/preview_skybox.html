@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Skybox Seam Viewer</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #060812;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    color: white;
+  }
+  #gl {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    display: block;
+    cursor: grab;
+  }
+  #gl:active { cursor: grabbing; }
+  #panel {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    width: min(420px, calc(100vw - 24px));
+    padding: 12px;
+    border: 1px solid rgba(255,255,255,.15);
+    border-radius: 14px;
+    background: rgba(5,8,18,.78);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    z-index: 5;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    letter-spacing: .2px;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+    margin-top: 8px;
+  }
+  button, label.fileButton {
+    border: 1px solid rgba(255,255,255,.16);
+    background: rgba(255,255,255,.09);
+    color: white;
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+  button:hover, label.fileButton:hover { background: rgba(255,255,255,.16); }
+  input[type="file"] { display: none; }
+  input[type="range"] { width: 160px; }
+  .hint {
+    margin-top: 8px;
+    color: rgba(255,255,255,.72);
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  .stat {
+    font-size: 12px;
+    color: rgba(255,255,255,.82);
+  }
+  #stripWrap {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    border: 1px solid rgba(255,255,255,.15);
+    border-radius: 14px;
+    background: rgba(5,8,18,.78);
+    backdrop-filter: blur(10px);
+    box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    overflow: hidden;
+    z-index: 4;
+  }
+  #stripHeader {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: center;
+    padding: 8px 10px;
+    font-size: 12px;
+    color: rgba(255,255,255,.78);
+    border-bottom: 1px solid rgba(255,255,255,.11);
+  }
+  #strip {
+    width: 100%;
+    height: 138px;
+    display: block;
+    background: #0b1022;
+  }
+  #drop {
+    position: fixed;
+    inset: 0;
+    display: none;
+    place-items: center;
+    z-index: 10;
+    background: rgba(0,0,0,.62);
+    border: 4px dashed rgba(255,255,255,.55);
+    font-size: 24px;
+    font-weight: 700;
+  }
+  .pill {
+    border: 1px solid rgba(255,255,255,.14);
+    border-radius: 999px;
+    padding: 3px 8px;
+    background: rgba(255,255,255,.08);
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="drop">Drop skybox image here</div>
+
+<div id="panel">
+  <h1>Skybox Seam Viewer</h1>
+  <div class="row">
+    <label class="fileButton">Load 2:1 skybox<input id="file" type="file" accept="image/*"></label>
+    <button id="centerSeam">Center seam</button>
+    <button id="reset">Reset view</button>
+    <button id="guide">Seam guide: ON</button>
+  </div>
+  <div class="row">
+    <span class="stat">FOV</span>
+    <input id="fov" type="range" min="45" max="120" value="80">
+    <span id="fovVal" class="stat">80°</span>
+  </div>
+  <div class="hint">
+    Drag to look around. Mouse wheel zooms. Use <b>Center seam</b> to put the horizontal wrap seam in the middle of the screen. The bottom strip shows <b>right edge → left edge</b>, so the center line is the side-to-side join.
+  </div>
+</div>
+
+<div id="stripWrap">
+  <div id="stripHeader">
+    <span>2D edge strip seam check</span>
+    <span id="score" class="pill">Load an image</span>
+  </div>
+  <canvas id="strip"></canvas>
+</div>
+
+<script>
+(() => {
+  const glCanvas = document.getElementById('gl');
+  const stripCanvas = document.getElementById('strip');
+  const stripCtx = stripCanvas.getContext('2d', { willReadFrequently: true });
+  const fileInput = document.getElementById('file');
+  const centerSeamBtn = document.getElementById('centerSeam');
+  const resetBtn = document.getElementById('reset');
+  const guideBtn = document.getElementById('guide');
+  const fovSlider = document.getElementById('fov');
+  const fovVal = document.getElementById('fovVal');
+  const score = document.getElementById('score');
+  const drop = document.getElementById('drop');
+
+  const gl = glCanvas.getContext('webgl', { antialias: false, preserveDrawingBuffer: false });
+  if (!gl) {
+    alert('WebGL is not available in this browser.');
+    return;
+  }
+
+  const vertSrc = `
+    attribute vec2 aPos;
+    varying vec2 vUv;
+    void main() {
+      vUv = aPos * 0.5 + 0.5;
+      gl_Position = vec4(aPos, 0.0, 1.0);
+    }
+  `;
+
+  const fragSrc = `
+    precision highp float;
+    varying vec2 vUv;
+    uniform sampler2D uTex;
+    uniform float uYaw;
+    uniform float uPitch;
+    uniform float uFov;
+    uniform float uAspect;
+    uniform float uHasTex;
+    uniform float uGuide;
+    const float PI = 3.141592653589793;
+
+    vec3 rotX(vec3 p, float a) {
+      float c = cos(a), s = sin(a);
+      return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z);
+    }
+    vec3 rotY(vec3 p, float a) {
+      float c = cos(a), s = sin(a);
+      return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z);
+    }
+
+    void main() {
+      vec2 p = vUv * 2.0 - 1.0;
+      p.x *= uAspect;
+      float t = tan(radians(uFov) * 0.5);
+      vec3 dir = normalize(vec3(p.x * t, p.y * t, 1.0));
+      dir = rotX(dir, uPitch);
+      dir = rotY(dir, uYaw);
+
+      float lon = atan(dir.x, dir.z);
+      float lat = asin(clamp(dir.y, -1.0, 1.0));
+      float u = fract(0.5 + lon / (2.0 * PI));
+      float v = clamp(0.5 - lat / PI, 0.0, 1.0);
+
+      vec3 col;
+      if (uHasTex > 0.5) {
+        col = texture2D(uTex, vec2(u, v)).rgb;
+      } else {
+        col = mix(vec3(0.02,0.04,0.10), vec3(0.25,0.45,0.90), 1.0 - v);
+        col += 0.08 * sin(40.0 * u) * vec3(0.2,0.6,1.0);
+      }
+
+      if (uGuide > 0.5) {
+        float seamDist = PI - abs(lon);
+        float line = 1.0 - smoothstep(0.0, 0.012, seamDist);
+        col = mix(col, vec3(1.0, 0.05, 0.75), line * 0.75);
+      }
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `;
+
+  function compile(type, src) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, src);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(shader));
+    }
+    return shader;
+  }
+
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl.VERTEX_SHADER, vertSrc));
+  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(gl.getProgramInfoLog(program));
+  }
+  gl.useProgram(program);
+
+  const pos = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, pos);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1, -1, 1,
+    -1, 1,  1,-1,  1, 1
+  ]), gl.STATIC_DRAW);
+
+  const aPos = gl.getAttribLocation(program, 'aPos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const uniforms = {
+    tex: gl.getUniformLocation(program, 'uTex'),
+    yaw: gl.getUniformLocation(program, 'uYaw'),
+    pitch: gl.getUniformLocation(program, 'uPitch'),
+    fov: gl.getUniformLocation(program, 'uFov'),
+    aspect: gl.getUniformLocation(program, 'uAspect'),
+    hasTex: gl.getUniformLocation(program, 'uHasTex'),
+    guide: gl.getUniformLocation(program, 'uGuide')
+  };
+
+  const texture = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.uniform1i(uniforms.tex, 0);
+
+  let yaw = Math.PI;
+  let pitch = 0;
+  let fov = 80;
+  let hasTex = false;
+  let showGuide = true;
+  let dragging = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const w = Math.floor(innerWidth * dpr);
+    const h = Math.floor(innerHeight * dpr);
+    if (glCanvas.width !== w || glCanvas.height !== h) {
+      glCanvas.width = w;
+      glCanvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+
+    const stripRect = stripCanvas.getBoundingClientRect();
+    const sw = Math.floor(stripRect.width * dpr);
+    const sh = Math.floor(stripRect.height * dpr);
+    if (stripCanvas.width !== sw || stripCanvas.height !== sh) {
+      stripCanvas.width = sw;
+      stripCanvas.height = sh;
+      if (currentImage) drawStrip(currentImage);
+    }
+  }
+
+  function render() {
+    resize();
+    gl.useProgram(program);
+    gl.uniform1f(uniforms.yaw, yaw);
+    gl.uniform1f(uniforms.pitch, pitch);
+    gl.uniform1f(uniforms.fov, fov);
+    gl.uniform1f(uniforms.aspect, glCanvas.width / glCanvas.height);
+    gl.uniform1f(uniforms.hasTex, hasTex ? 1 : 0);
+    gl.uniform1f(uniforms.guide, showGuide ? 1 : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(render);
+  }
+
+  function loadImage(img) {
+    currentImage = img;
+    hasTex = true;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    drawStrip(img);
+  }
+
+  let currentImage = null;
+
+  function openFile(file) {
+    if (!file || !file.type.startsWith('image/')) return;
+    const img = new Image();
+    img.onload = () => {
+      loadImage(img);
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(file);
+  }
+
+  function drawStrip(img) {
+    resize();
+    const w = stripCanvas.width;
+    const h = stripCanvas.height;
+    stripCtx.clearRect(0,0,w,h);
+
+    const edge = Math.max(8, Math.min(96, Math.floor(img.width * 0.025)));
+    const leftW = Math.floor(w / 2);
+    const rightW = w - leftW;
+
+    // Left half = right edge of image. Right half = left edge of image.
+    stripCtx.imageSmoothingEnabled = true;
+    stripCtx.drawImage(img, img.width - edge, 0, edge, img.height, 0, 0, leftW, h);
+    stripCtx.drawImage(img, 0, 0, edge, img.height, leftW, 0, rightW, h);
+
+    // Center seam marker.
+    stripCtx.fillStyle = 'rgba(255, 0, 180, 0.95)';
+    stripCtx.fillRect(leftW - 1, 0, 2, h);
+
+    // Edge labels.
+    stripCtx.font = `${Math.max(12, Math.floor(h * 0.09))}px system-ui, sans-serif`;
+    stripCtx.fillStyle = 'rgba(255,255,255,.9)';
+    stripCtx.fillText('RIGHT EDGE', 12, 22);
+    stripCtx.fillText('LEFT EDGE', leftW + 12, 22);
+
+    updateScore(img);
+  }
+
+  function updateScore(img) {
+    const test = document.createElement('canvas');
+    const maxH = 512;
+    test.width = img.width;
+    test.height = Math.min(maxH, img.height);
+    const ctx = test.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, test.width, test.height);
+    const data = ctx.getImageData(0, 0, test.width, test.height).data;
+    const W = test.width;
+    const H = test.height;
+
+    let edgeDiff = 0;
+    let gradDiff = 0;
+    for (let y = 0; y < H; y++) {
+      const a = (y * W + (W - 1)) * 4;
+      const b = (y * W + 0) * 4;
+      const a2 = (y * W + Math.max(0, W - 2)) * 4;
+      const b2 = (y * W + Math.min(W - 1, 1)) * 4;
+      for (let c = 0; c < 3; c++) {
+        edgeDiff += Math.abs(data[a+c] - data[b+c]);
+        const gradA = data[a+c] - data[a2+c];
+        const gradB = data[b2+c] - data[b+c];
+        gradDiff += Math.abs(gradA - gradB);
+      }
+    }
+    edgeDiff = edgeDiff / (H * 3);
+    gradDiff = gradDiff / (H * 3);
+
+    let verdict = 'Likely seamless';
+    if (edgeDiff > 18 || gradDiff > 25) verdict = 'Seam likely visible';
+    else if (edgeDiff > 8 || gradDiff > 14) verdict = 'Possible soft seam';
+
+    const ratio = img.width / img.height;
+    const ratioText = Math.abs(ratio - 2) < 0.03 ? '2:1 OK' : `not 2:1 (${ratio.toFixed(2)}:1)`;
+    score.textContent = `${verdict} | edge ${edgeDiff.toFixed(1)} | gradient ${gradDiff.toFixed(1)} | ${ratioText}`;
+  }
+
+  fileInput.addEventListener('change', e => openFile(e.target.files[0]));
+
+  glCanvas.addEventListener('pointerdown', e => {
+    dragging = true;
+    glCanvas.setPointerCapture(e.pointerId);
+    lastX = e.clientX;
+    lastY = e.clientY;
+  });
+  glCanvas.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    yaw -= dx * 0.005;
+    pitch += dy * 0.005;
+    const limit = Math.PI * 0.49;
+    pitch = Math.max(-limit, Math.min(limit, pitch));
+  });
+  glCanvas.addEventListener('pointerup', e => {
+    dragging = false;
+    try { glCanvas.releasePointerCapture(e.pointerId); } catch {}
+  });
+
+  glCanvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    fov = Math.max(45, Math.min(120, fov + e.deltaY * 0.04));
+    fovSlider.value = Math.round(fov);
+    fovVal.textContent = `${Math.round(fov)}°`;
+  }, { passive: false });
+
+  fovSlider.addEventListener('input', () => {
+    fov = Number(fovSlider.value);
+    fovVal.textContent = `${fov}°`;
+  });
+
+  centerSeamBtn.addEventListener('click', () => {
+    yaw = Math.PI;
+    pitch = 0;
+    showGuide = true;
+    guideBtn.textContent = 'Seam guide: ON';
+  });
+
+  resetBtn.addEventListener('click', () => {
+    yaw = 0;
+    pitch = 0;
+    fov = 80;
+    fovSlider.value = 80;
+    fovVal.textContent = '80°';
+  });
+
+  guideBtn.addEventListener('click', () => {
+    showGuide = !showGuide;
+    guideBtn.textContent = `Seam guide: ${showGuide ? 'ON' : 'OFF'}`;
+  });
+
+  window.addEventListener('dragover', e => {
+    e.preventDefault();
+    drop.style.display = 'grid';
+  });
+  window.addEventListener('dragleave', e => {
+    if (e.clientX <= 0 || e.clientY <= 0 || e.clientX >= innerWidth || e.clientY >= innerHeight) {
+      drop.style.display = 'none';
+    }
+  });
+  window.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.style.display = 'none';
+    openFile(e.dataTransfer.files[0]);
+  });
+
+  window.addEventListener('resize', resize);
+  render();
+})();
+</script>
+</body>
+</html>
