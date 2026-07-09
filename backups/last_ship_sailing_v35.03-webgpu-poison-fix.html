@@ -3478,7 +3478,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '35.06';
+const LSS_BUILD = '35.03';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 // =====================================================================
@@ -14141,54 +14141,6 @@ document.body.appendChild(renderer.domElement);
     console.log('[v8VR GPU] vendor:   ', vendor);
     console.log('[v8VR GPU] renderer: ', rendererStr);
     console.log('[v8VR GPU] api:      ', version);
-    // (v35.06) ON-SCREEN DIAGNOSTIC BADGE — temporary lag-hunt instrument.
-    // Shows backend / adapter / quality / live fps without the console.
-    // Turns RED on a software adapter (SwiftShader/llvmpipe) — Chrome can
-    // hand WebGPU a software device even when WebGL got the real GPU, which
-    // plays "awful". Click the badge to dismiss.
-    try {
-      const _badge = document.createElement('div');
-      _badge.id = 'lss-perf-badge';
-      _badge.style.cssText = 'position:fixed;left:8px;bottom:26px;z-index:99998;font:11px/1.5 Consolas,monospace;' +
-        'background:rgba(4,8,18,0.82);color:#9fe8ff;padding:6px 9px;border:1px solid #1d4a66;border-radius:4px;' +
-        'pointer-events:auto;cursor:pointer;white-space:pre;';
-      _badge.title = 'click to hide';
-      _badge.addEventListener('click', () => _badge.remove());
-      document.body.appendChild(_badge);
-      const _sw = /swiftshader|llvmpipe|software|basic render/i.test((vendor + ' ' + rendererStr));
-      if (_sw) _badge.style.cssText += 'background:rgba(120,10,10,0.92);color:#ffdddd;border-color:#ff5555;font-weight:bold;';
-      let _fc = 0; const _tick = () => { _fc++; requestAnimationFrame(_tick); }; requestAnimationFrame(_tick);
-      let _lastC = 0, _lastT = performance.now();
-      setInterval(() => {
-        try {
-          const now = performance.now(); const fps = Math.round((_fc - _lastC) * 1000 / Math.max(1, now - _lastT));
-          _lastC = _fc; _lastT = now;
-          const q = (typeof QUALITY !== 'undefined' && QUALITY.level) ? QUALITY.level : '?';
-          const dpr = (renderer && renderer.getPixelRatio) ? renderer.getPixelRatio().toFixed(2) : '?';
-          const cw = renderer && renderer.domElement ? renderer.domElement.width + 'x' + renderer.domElement.height : '?';
-          // (v35.07) extended env diagnostics: mobile heuristics, view radius,
-          // fog/haze state, float32-filterable — the "grey world in a small
-          // circle" fingerprints one of these.
-          let extra = '';
-          try {
-            const mob = (typeof _LSS_IS_MOBILE !== 'undefined') ? _LSS_IS_MOBILE : '?';
-            const tp = navigator.maxTouchPoints;
-            const coarse = window.matchMedia ? window.matchMedia('(pointer: coarse)').matches : '?';
-            extra += 'mobile   ' + mob + '  (touchPts ' + tp + ', coarse ' + coarse + ')\n';
-          } catch (_) {}
-          try { extra += 'hubView  ' + ((typeof _swHubView === 'function') ? _swHubView() : '?') + ' chunks\n'; } catch (_) {}
-          try { const f = (typeof scene !== 'undefined' && scene && scene.fog) ? scene.fog : null; extra += 'fog      ' + (f ? ((f.isFogExp2 ? 'exp2 d=' + f.density.toFixed(5) : 'lin ' + Math.round(f.near) + '-' + Math.round(f.far)) + ' #' + f.color.getHexString()) : 'none') + '\n'; } catch (_) {}
-          try { if (typeof _swU !== 'undefined') extra += 'aerial   ' + _swU.uAerial.value.toFixed(2) + '  start ' + Math.round(_swU.uAerialStart.value) + '  far ' + Math.round(_swU.uAerialFar.value) + '\n'; } catch (_) {}
-          try { const dev = window.__lssRenderer && window.__lssRenderer.backend && window.__lssRenderer.backend.device; if (dev && dev.features) extra += 'f32filt  ' + dev.features.has('float32-filterable') + '\n'; } catch (_) {}
-          _badge.textContent =
-            'backend  ' + (window.__lssBackend || '?') + (_sw ? '  !! SOFTWARE ADAPTER !!' : '') + '\n' +
-            'gpu      ' + ((vendor || '?') + ' ' + (rendererStr || '')).slice(0, 46) + '\n' +
-            'quality  ' + q + '   dpr ' + dpr + '   buf ' + cw + '\n' +
-            extra +
-            'fps      ' + fps;
-        } catch (_) {}
-      }, 500);
-    } catch (_) {}
     // Heuristic warning when the iGPU appears to have been picked despite
     // our powerPreference hint. Common iGPU markers: Intel UHD/HD/Iris,
     // Radeon RX Vega APU strings, AMD Vega Mobile.
@@ -16860,16 +16812,7 @@ postFX.brightMat = (function () {
   const m = new THREE.MeshBasicNodeMaterial();
   const tDif = _tslTexUniform(_tslBlackTex());
   const threshold = $.uniform(0.1), softKnee = $.uniform(0.9);   // (v32.19) baked bloom defaults
-  // (v35.05) V FLIPPED here to make the bloom chain's inversion count EVEN.
-  // Every raw clip-space quad pass into an RT inverts once (write row and
-  // uv-sample row run opposite); bright+blurH+blurV = THREE inversions, so
-  // the bloom reached the composite upside-down relative to rtScene — a
-  // vertically mirrored "ghost + fog" over gameplay (the cinematic path
-  // skips bloom, which is why cinematics looked correct). Flipping the
-  // FIRST tap makes bright a clean round-trip; the two blur passes cancel
-  // each other; composite's uniform flip then aligns scene and bloom.
-  const u0 = $.uv();
-  const c = tDif.sampleAt($.vec2(u0.x, u0.y.oneMinus()));
+  const c = tDif.sampleAt($.uv());
   const brightness = $.max(c.r, $.max(c.g, c.b));
   // Soft-knee: smooth ramp around threshold instead of hard cutoff
   const knee = threshold.mul(softKnee).add(1e-5);
@@ -16938,15 +16881,7 @@ postFX.compositeMat = (function () {
     gradeSat: $.uniform(1.0), gradeContrast: $.uniform(1.0), gradeWarmth: $.uniform(1.0), gradeLift: $.uniform(0.0),
   };
   const out = $.Fn(() => {
-    // (v35.04) V FLIPPED at sampling: the scene lands in rtScene in WebGPU
-    // render-target orientation, which is vertically inverted relative to
-    // this raw quad's uv attribute — the world (and its bloom) painted
-    // upside down while the DOM HUD stayed upright. Flipping the BASE uv
-    // puts every downstream tap (scene, bloom, god-rays) and the radial
-    // vignette/warp math in one consistent image space. (Flipping the quad's
-    // vertices instead is a no-op: the uv attribute flips along with them.)
-    const uv0 = $.uv();
-    const vUv = $.vec2(uv0.x, uv0.y.oneMinus());
+    const vUv = $.uv();
     const center = vUv.sub(0.5).toVar();
     const dist = $.length(center).toVar();
     const warpedUv = vUv.toVar();
@@ -20023,34 +19958,24 @@ function _swRippleTick(dt) {
     // skipped in VR, kept off the critical path (reads the ALTERNATE/idle ping-pong target = no read-after-
     // write stall), and rate-limited (every breakEvery-th sim step + a hard per-scan emit budget).
     const _Wc = window.__water || {};
-    // (v35.06) crestBreak now OPT-IN (was opt-out): even one 128x128 GPU
-    // readback costs ~40ms of queue serialization on the WebGPU backend —
-    // a visible stutter at any cadence. With the rule off, the (v33.75)
-    // stern-crest fallback in the wake seeder still sprays the rooster
-    // tail, so the look survives. window.__water.crestBreak = 1 re-enables
-    // the full surface rule (with the 2Hz throttle below).
-    if (w && window.__waterDisp && _Wc.crestBreak === 1 && !game._swSubmerged && !R._crErr &&
+    if (w && window.__waterDisp && _Wc.crestBreak !== 0 && !game._swSubmerged && !R._crErr &&
         !((typeof isXRPresenting === 'function') && isXRPresenting()) &&
         renderer && renderer.readRenderTargetPixelsAsync && R.gpu.getAlternateRenderTarget) {
       R._crStep = (R._crStep || 0) + 1;
-      // (v35.06) THE "moving = 6fps" FIX. readRenderTargetPixelsAsync is
-      // brutally expensive on the WebGPU backend — each call serializes the
-      // queue (measured: p90 55ms with the old 30Hz cadence vs 11ms with the
-      // rule off, sustained thrust). The spray rule was designed for stale
-      // data anyway, so read at ~2Hz instead of every 2nd sim step (default
-      // breakEvery 2 -> 30 ≈ 0.5s between reads) and read the STABLE display
-      // RT (already blitted each tick; no ping-pong contention). Spray
-      // emission points refresh twice a second — droplets live ~1s, so the
-      // visual is intact. window.__water.breakEvery still overrides.
-      const _every = Math.max(1, (_Wc.breakEvery | 0) || 30);
+      const _every = Math.max(1, (_Wc.breakEvery | 0) || 2);
       if (R._crStep % _every === 0) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
         if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
         const buf = R._crBuf;
+        // (v35.00) WebGPU readback is ASYNC. Kick a read (never more than one
+        // in flight) that lands in _crBuf a frame or two later; the scan below
+        // then runs on the freshest COMPLETED read. The old sync path already
+        // read the one-step-stale ALTERNATE target, so the rule was designed
+        // for stale data — an extra frame of latency is invisible.
         if (!R._crPending) {
           R._crPending = 1;
           try {
-            renderer.readRenderTargetPixelsAsync(_swRippleStableRT(), 0, 0, RES, RES)
+            renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES)
               .then((arr) => {
                 try { if (arr && arr.length === buf.length) { buf.set(arr); R._crHave = 1; } } catch (_) {}
                 R._crPending = 0;

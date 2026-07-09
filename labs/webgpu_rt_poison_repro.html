@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>WebGPU RT poison repro</title>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.webgpu.min.js",
+  "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.webgpu.min.js",
+  "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.tsl.min.js"
+} }
+</script>
+<style>body{background:#111;color:#ddd;font:13px monospace;padding:12px} canvas{border:1px solid #444}</style>
+</head>
+<body>
+<div id="log">booting…</div>
+<script type="module">
+import * as THREE from 'three';
+const log = (m) => { document.getElementById('log').innerHTML += '<br>' + m; };
+
+// Factors under test (flip via ?factors=loop,shim,xr,msaa or default all-on)
+const q = new URLSearchParams(location.search);
+const F = (q.get('factors') || 'loop,shim,xr,msaa,shadow,pixratio,dshim,postfx').split(',').filter(Boolean);
+const has = (k) => F.indexOf(k) >= 0;
+log('factors: ' + F.join(', '));
+
+if (has('dshim')) {   // the game's deferred-dispose prototype patch
+  const pend = new Set();
+  const og = THREE.BufferGeometry.prototype.dispose, om = THREE.Material.prototype.dispose;
+  THREE.BufferGeometry.prototype.dispose = function () { pend.add({ k: 'g', r: this }); };
+  THREE.Material.prototype.dispose = function () { pend.add({ k: 'm', r: this }); };
+  setInterval(() => { for (const it of Array.from(pend)) { pend.delete(it); try { (it.k === 'g' ? og : om).call(it.r); } catch (_) {} } }, 1200);
+}
+
+const renderer = new THREE.WebGPURenderer({ antialias: has('msaa') });
+await renderer.init();
+if (has('pixratio')) renderer.setPixelRatio(1.25);
+renderer.setSize(300, 200);
+renderer.setClearColor(0x0a0520);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+// main scene (mimics the game's always-running canvas pass)
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x223344);
+const spin = new THREE.Mesh(new THREE.TorusKnotGeometry(0.6, 0.2, 64, 8), new THREE.MeshStandardMaterial({ color: 0x88aaff }));
+scene.add(spin);
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+// Orientation markers: GREEN floor slab at the BOTTOM, YELLOW "sun" at the TOP.
+const floorSlab = new THREE.Mesh(new THREE.BoxGeometry(4, 0.3, 2), new THREE.MeshBasicMaterial({ color: 0x00cc44 }));
+floorSlab.position.y = -1.4; scene.add(floorSlab);
+const sunBall = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 12), new THREE.MeshBasicMaterial({ color: 0xffdd00 }));
+sunBall.position.set(0, 1.4, 0); scene.add(sunBall);
+const camera = new THREE.PerspectiveCamera(50, 1.5, 0.1, 50); camera.position.z = 3;
+
+if (has('shadow')) {
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(2, 3, 2); sun.castShadow = true;
+  scene.add(sun);
+  spin.castShadow = true;
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(8, 8), new THREE.MeshStandardMaterial({ color: 0x445544 }));
+  floor.rotation.x = -Math.PI / 2; floor.position.y = -1.2; floor.receiveShadow = true;
+  scene.add(floor);
+}
+
+if (has('shim')) {
+  if (typeof renderer.compile !== 'function' && typeof renderer.compileAsync === 'function') {
+    renderer.compile = function (s, c, t) { try { this.compileAsync(s, c, t).catch(() => {}); } catch (_) {} };
+  }
+}
+
+// per-frame postFX-style chain: world -> rtScene, quad(rtScene) -> canvas
+let pf = null;
+if (has('postfx')) {
+  const TSLmod = await import('three/tsl');
+  // mismatch=1 -> rtScene in CSS pixels while the canvas drawing buffer is
+  // CSS*pixelRatio (exactly the game's _getBloomRTSize vs setPixelRatio split)
+  const _mm = q.get('mismatch') === '1' ? 1 : (has('pixratio') ? 1.25 : 1);
+  const rtScene = new THREE.RenderTarget(Math.floor(300 * _mm), Math.floor(200 * _mm),
+    { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat });
+  log('rtScene ' + rtScene.width + 'x' + rtScene.height + ' vs drawingBuffer ' + (300 * (has('pixratio') ? 1.25 : 1)) + 'x' + (200 * (has('pixratio') ? 1.25 : 1)));
+  const quadGeo = new THREE.PlaneGeometry(2, 2);
+  const quadMat = new THREE.MeshBasicNodeMaterial();
+  const u0 = TSLmod.uv();
+  const tap = TSLmod.texture(rtScene.texture, TSLmod.vec2(u0.x, u0.y.oneMinus()));   // V-flip: raw quads bypass three's canvas-pass Y-flip
+  quadMat.vertexNode = TSLmod.vec4(TSLmod.positionGeometry, 1.0);
+  quadMat.fragmentNode = tap;
+  quadMat.depthTest = false; quadMat.depthWrite = false;
+  const quad = new THREE.Mesh(quadGeo, quadMat);
+  const passScene = new THREE.Scene(); passScene.add(quad);
+  const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  pf = { rtScene, passScene, quadCam };
+}
+
+if (has('loop')) {
+  renderer.setAnimationLoop(() => {
+    spin.rotation.y += 0.02;
+    if (pf) {
+      renderer.setRenderTarget(pf.rtScene);
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      renderer.render(pf.passScene, pf.quadCam);
+    } else {
+      renderer.render(scene, camera);
+    }
+  });
+}
+
+async function cubeTest(label) {
+  const rt = new THREE.RenderTarget(64, 64);
+  const sc = new THREE.Scene(); sc.background = new THREE.Color(0x0000ff);
+  sc.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xff0000 })));
+  const cam = new THREE.PerspectiveCamera(50, 1, 0.1, 10); cam.position.z = 3;
+  const prev = renderer.getRenderTarget();
+  renderer.setRenderTarget(rt); renderer.render(sc, cam); renderer.setRenderTarget(prev);
+  await new Promise(r => setTimeout(r, 200));
+  const a = await renderer.readRenderTargetPixelsAsync(rt, 32, 32, 1, 1);
+  const drawn = a[0] > 200;
+  log(label + ': center=' + [a[0], a[1], a[2]].join(',') + ' -> ' + (drawn ? 'DRAWN ✓' : 'MISSING ✗'));
+  return drawn;
+}
+
+await new Promise(r => setTimeout(r, 600));           // let the loop tick a while
+await cubeTest('T1 baseline fresh-RT draw');
+
+if (has('shim')) {
+  renderer.compile(scene, camera);                     // fire-and-forget async compile (the game's warmup idiom)
+  await new Promise(r => setTimeout(r, 100));          // race window: compile in flight
+  await cubeTest('T2 fresh-RT draw WHILE compileAsync in flight');
+  await new Promise(r => setTimeout(r, 1500));         // let compile finish
+  await cubeTest('T3 fresh-RT draw AFTER compileAsync settled');
+}
+if (has('xr')) {
+  renderer.xr.enabled = true; renderer.xr.enabled = false;   // the reflector's per-frame toggle
+  await cubeTest('T4 fresh-RT draw after xr.enabled toggle');
+}
+if (has('pmrem')) {
+  // hub-entry idiom: build a PMREM environment while the loop renders
+  const pm = new THREE.PMREMGenerator(renderer);
+  const envScene = new THREE.Scene(); envScene.background = new THREE.Color(0x336699);
+  const envRT = pm.fromScene(envScene, 0.04);
+  scene.environment = envRT.texture;
+  log('pmrem generated mid-loop');
+  await new Promise(r => setTimeout(r, 500));
+  await cubeTest('T4b fresh-RT draw AFTER PMREM fromScene');
+  pm.dispose();
+}
+
+// repeat baseline at the end — has ANYTHING stuck?
+await cubeTest('T5 final fresh-RT draw');
+
+// T6: renderer.setSize while the animation loop runs (the game's resize path)
+renderer.setSize(340, 220);
+if (pf) {   // recreate the postfx RT like the game does
+  const old = pf.rtScene;
+  pf.rtScene = new THREE.RenderTarget(340, 220, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat });
+  setTimeout(() => { try { old.dispose(); } catch (_) {} }, 1500);
+}
+await new Promise(r => setTimeout(r, 800));
+await cubeTest('T6 fresh-RT draw AFTER mid-loop renderer.setSize');
+await new Promise(r => setTimeout(r, 1500));
+await cubeTest('T7 fresh-RT draw 1.5s later');
+log('done.');
+</script>
+</body>
+</html>
