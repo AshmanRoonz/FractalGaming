@@ -3478,7 +3478,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '35.12';
+const LSS_BUILD = '35.08';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 // =====================================================================
@@ -14155,32 +14155,6 @@ document.body.appendChild(renderer.domElement);
       _badge.title = 'click to hide';
       _badge.addEventListener('click', () => _badge.remove());
       document.body.appendChild(_badge);
-      // (v35.12) DEV compile tracker — counts TSL→pipeline builds so a HITCH during real
-      // play names the material that compiled (the "some FX aren't in warmup" hunt). A
-      // node material only re-enters build() when its pipeline isn't cached, so a jump in
-      // the (3s:N) counter at the instant of a stutter = an un-warmed effect compiling on
-      // first use. Remove with the badge before shipping.
-      try {
-        const _tmpNM = new THREE.MeshBasicNodeMaterial();
-        let _bp = Object.getPrototypeOf(_tmpNM);
-        while (_bp && !Object.prototype.hasOwnProperty.call(_bp, 'build')) _bp = Object.getPrototypeOf(_bp);
-        if (_bp && !_bp.__lssCompileTrack) {
-          _bp.__lssCompileTrack = true;
-          window.__lssCompiles = { total: 0, recent: [], last: '', names: {} };
-          const _ob = _bp.build;
-          _bp.build = function (bld) {
-            try {
-              const C = window.__lssCompiles; C.total++;
-              const nm = (this.name || this.type) + '#' + this.id; C.last = nm;
-              C.names[nm] = (C.names[nm] || 0) + 1;
-              C.recent.push(performance.now());
-              if (C.recent.length > 300) C.recent.shift();
-            } catch (_) {}
-            return _ob.call(this, bld);
-          };
-        }
-        try { _tmpNM.dispose(); } catch (_) {}
-      } catch (_) {}
       const _sw = /swiftshader|llvmpipe|software|basic render/i.test((vendor + ' ' + rendererStr));
       if (_sw) _badge.style.cssText += 'background:rgba(120,10,10,0.92);color:#ffdddd;border-color:#ff5555;font-weight:bold;';
       let _fc = 0; const _tick = () => { _fc++; requestAnimationFrame(_tick); }; requestAnimationFrame(_tick);
@@ -14211,15 +14185,11 @@ document.body.appendChild(renderer.domElement);
           // fps low + cpu high => CPU-bound (logic/encode/upload on this tab)
           let cost = '';
           try { if (window.__loopMsEma != null) cost = 'cpu/frm  ' + window.__loopMsEma.toFixed(1) + ' ms' + ((window.__loopSpikes && window.__loopSpikes.length) ? ('   spikes ' + window.__loopSpikes.slice(-5).join(',')) : '') + '\n'; } catch (_) {}
-          // (v35.12) compile line: total + last-3s rate + the material that last compiled.
-          // A hitch that coincides with a jump in (3s:N) is an un-warmed FX; the name says which.
-          let comp = '';
-          try { const C = window.__lssCompiles; if (C) { const cut = performance.now() - 3000; const r3 = C.recent.filter(t => t > cut).length; comp = 'compiles ' + C.total + '  (3s:' + r3 + ')  ' + (C.last || '').slice(0, 24) + '\n'; } } catch (_) {}
           _badge.textContent =
             'backend  ' + (window.__lssBackend || '?') + (_sw ? '  !! SOFTWARE ADAPTER !!' : '') + '\n' +
             'gpu      ' + ((vendor || '?') + ' ' + (rendererStr || '')).slice(0, 46) + '\n' +
             'quality  ' + q + '   dpr ' + dpr + '   buf ' + cw + '\n' +
-            extra + cost + comp +
+            extra + cost +
             'fps      ' + fps;
         } catch (_) {}
       }, 500);
@@ -16887,32 +16857,6 @@ postFX.rtBlurV = new THREE.WebGLRenderTarget(
 postFX.quadGeo = new THREE.PlaneGeometry(2, 2);
 postFX.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
-// (v35.10) SCENE TONE — on WebGL, renderer.toneMapping (ACES filmic, exposure 0.78) ran
-// inside every scene-pass material, so postFX.rtScene held TONE-MAPPED colors and the
-// bloom+composite chain shaped an already-filmic image. r180 WebGPU applies tone mapping
-// only on the canvas pass — render-target passes come out LINEAR — so the ported chain fed
-// on unbounded linear light: the sky/haze clipped to pure white and the distance washed
-// into a milky wall with a hard edge (the "fog wall" report; a WebGL A/B at the same
-// coordinates keeps deep blues + saturated terrain). This is three's exact ACES filmic fit
-// (Stephen Hill, incl. the /0.6 input scale), applied at the chain's two scene taps
-// (bright pass + composite). Tune live: window.__sceneTone(0.78).
-const _pfxSceneExposure = TSL.uniform(0.78);
-window.__sceneTone = function (v) { _pfxSceneExposure.value = +v || 0.78; return _pfxSceneExposure.value; };
-function _pfxSceneTone(c) {
-  const $ = TSL;
-  const v = c.mul(_pfxSceneExposure.div(0.6));   // three: color *= toneMappingExposure / 0.6
-  const a = $.vec3(
-    v.dot($.vec3(0.59719, 0.35458, 0.04823)),
-    v.dot($.vec3(0.07600, 0.90834, 0.01566)),
-    v.dot($.vec3(0.02840, 0.13383, 0.83777)));
-  const f = a.mul(a.add(0.0245786)).sub(0.000090537)
-    .div(a.mul(a.mul(0.983729).add(0.4329510)).add(0.238081));
-  return $.clamp($.vec3(
-    f.dot($.vec3(1.60475, -0.53108, -0.07367)),
-    f.dot($.vec3(-0.10208, 1.10813, -0.00605)),
-    f.dot($.vec3(-0.00327, -0.07276, 1.07602))), 0.0, 1.0);
-}
-
 // Brightness threshold extraction shader (soft knee for smoother bloom)
 // (v35.00) TSL node material — same math, fragmentNode = raw output (no
 // tonemap/colorspace, matching the old raw ShaderMaterial into an RT).
@@ -16930,7 +16874,7 @@ postFX.brightMat = (function () {
   // FIRST tap makes bright a clean round-trip; the two blur passes cancel
   // each other; composite's uniform flip then aligns scene and bloom.
   const u0 = $.uv();
-  const c = _pfxSceneTone(tDif.sampleAt($.vec2(u0.x, u0.y.oneMinus())).rgb);   // (v35.10) tone-map the scene tap — the WebGL bloom thresholded ACES'd colors (see _pfxSceneTone)
+  const c = tDif.sampleAt($.vec2(u0.x, u0.y.oneMinus()));
   const brightness = $.max(c.r, $.max(c.g, c.b));
   // Soft-knee: smooth ramp around threshold instead of hard cutoff
   const knee = threshold.mul(softKnee).add(1e-5);
@@ -16938,7 +16882,7 @@ postFX.brightMat = (function () {
   const soft = soft0.mul(soft0).div(knee.mul(4.0).add(1e-5));
   const contribution = $.max(soft, brightness.sub(threshold)).div($.max(brightness, 1e-5));
   m.vertexNode = $.vec4($.positionGeometry, 1.0);   // clip-space quad
-  m.fragmentNode = $.vec4(c.mul(contribution), 1.0);
+  m.fragmentNode = $.vec4(c.rgb.mul(contribution), 1.0);
   m.depthTest = false; m.depthWrite = false; m.fog = false;
   tDif.attach(m);   // (v35.00c) rebind-on-swap
   m.uniforms = { tDiffuse: tDif.record, threshold: threshold, softKnee: softKnee };
@@ -17035,12 +16979,12 @@ postFX.compositeMat = (function () {
     const col = $.vec3(0.0, 0.0, 0.0).toVar();
     $.If(U.chromAb.greaterThan(0.001), () => {
       const abAmount = U.chromAb.mul(dist).mul(0.025).add(dist.mul(0.0008));
-      col.assign($.vec3(   // (v35.10) scene taps tone-mapped — see _pfxSceneTone
-        _pfxSceneTone(tScene.sampleAt(warpedUv.add(center.mul(abAmount))).rgb).r,
-        _pfxSceneTone(tScene.sampleAt(warpedUv).rgb).g,
-        _pfxSceneTone(tScene.sampleAt(warpedUv.sub(center.mul(abAmount))).rgb).b));
+      col.assign($.vec3(
+        tScene.sampleAt(warpedUv.add(center.mul(abAmount))).r,
+        tScene.sampleAt(warpedUv).g,
+        tScene.sampleAt(warpedUv.sub(center.mul(abAmount))).b));
     }).Else(() => {
-      col.assign(_pfxSceneTone(tScene.sampleAt(warpedUv).rgb));   // (v35.10) scene tap tone-mapped — see _pfxSceneTone
+      col.assign(tScene.sampleAt(warpedUv).rgb);
     });
     // Bloom add (lens-dirt path removed ; see lensDirt comment above).
     col.addAssign(tBloom.sampleAt(warpedUv).rgb.mul(U.bloomStrength));
@@ -18626,99 +18570,32 @@ const _SW_GRASS_VIEW = 3;
 const _SW_TREE_VIEW = 5;   // (v33.04) instanced trees read farther than grass but still fade before the fogged build edge
 let _swBladeGeo=null, _swGrassMat=null;
 let _swTreeGeos=null, _swTreeMat=null;
-// (v35.09) FOLIAGE INSTANCING, WEBGPU-NATIVE — r180 folds object.uuid into the render
-// cache key for ANY InstancedMesh (three/src RenderObject.getMaterialCacheKey), so every
-// per-chunk InstancedMesh of the SHARED grass/tree material recompiled the full TSL shader
-// 2-3× (main+mirror+shadow, ≈40-100ms each). Streaming chunks in flight was therefore a
-// permanent compile storm (the "6-20fps as soon as I move" report; the WebGL build flew the
-// same cold corridor at 133fps — its programs compiled once). Foliage now draws as a PLAIN
-// Mesh over an InstancedBufferGeometry that shares the blade/tree base attributes by
-// reference and carries the instance transform as four NAMED vec4 instanced attributes
-// (swImA..D). Named attributes resolve per-geometry BY NAME at bind time (the
-// RenderObject.getAttributes fallback), and a plain Mesh puts no uuid in the cache key —
-// so ALL chunks share ONE compiled shader per pass; a new chunk costs a buffer write only.
-// Retired meshes still PARK in _swFoliagePools (buffer/bind-group reuse). Parked meshes are
-// NEVER disposed: the wrapper references the SHARED base buffers, and geometry.dispose()
-// would destroy those for every other chunk (pool size is bounded by the peak resident set).
-const _SW_GRASS_CAP = 5120, _SW_TREE_CAP = 48;
-const _swFoliagePools = new Map();   // base-geometry uuid -> parked Mesh[]
-function _swFoliageGeo(baseGeo, cap) {
-  const g = new THREE.InstancedBufferGeometry();
-  g.setIndex(baseGeo.getIndex());
-  for (const name in baseGeo.attributes) g.setAttribute(name, baseGeo.attributes[name]);
-  g.setAttribute('swImA', new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4));
-  g.setAttribute('swImB', new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4));
-  g.setAttribute('swImC', new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4));
-  g.setAttribute('swImD', new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4));
-  g.userData._swBase = baseGeo.uuid; g.userData._swCap = cap;
-  return g;
-}
-function _swFoliageMat4() {   // the shared materials read the instance transform from the named attributes
-  const $ = TSL;
-  return $.mat4($.attribute('swImA', 'vec4'), $.attribute('swImB', 'vec4'), $.attribute('swImC', 'vec4'), $.attribute('swImD', 'vec4'));
-}
-function _swFoliageWrite(g, k, e) {   // e = Matrix4.elements (column-major); columns -> swImA..D
-  const o = k * 4;
-  const a = g.getAttribute('swImA').array, b = g.getAttribute('swImB').array, c = g.getAttribute('swImC').array, d = g.getAttribute('swImD').array;
-  a[o] = e[0]; a[o + 1] = e[1]; a[o + 2] = e[2]; a[o + 3] = e[3];
-  b[o] = e[4]; b[o + 1] = e[5]; b[o + 2] = e[6]; b[o + 3] = e[7];
-  c[o] = e[8]; c[o + 1] = e[9]; c[o + 2] = e[10]; c[o + 3] = e[11];
-  d[o] = e[12]; d[o + 1] = e[13]; d[o + 2] = e[14]; d[o + 3] = e[15];
-}
-function _swFoliageCommit(g, count) {
-  g.getAttribute('swImA').needsUpdate = true; g.getAttribute('swImB').needsUpdate = true;
-  g.getAttribute('swImC').needsUpdate = true; g.getAttribute('swImD').needsUpdate = true;
-  g.instanceCount = count;
-}
-function _swFoliageTake(baseGeo, mat, count, stdCap) {
-  const arr = _swFoliagePools.get(baseGeo.uuid);
+// (v35.08) FOLIAGE MESH POOL — r180 WebGPU runs the full TSL shader build PER NEW RENDER
+// OBJECT (object identity is part of the render cache key; measured in-game: every new
+// InstancedMesh of the SHARED grass/tree material = 2-3 shader builds ≈ 40-100ms across the
+// main, mirror and shadow passes, while RE-ADDING the same mesh = 0). The chunk streamer
+// creates/destroys foliage meshes continuously in flight, so on WebGPU that was a permanent
+// compile storm (the "6-20fps as soon as I move" report; the WebGL build flew the same cold
+// corridor at 133fps). Retired chunk meshes now PARK here and get their instance matrices
+// rewritten on reuse — the hot path does zero shader work. Fresh meshes over-allocate to a
+// standard capacity so any parked mesh can serve any later chunk (draw count = im.count).
+const _SW_GRASS_CAP = 5120, _SW_TREE_CAP = 48, _SW_FOLIAGE_POOL_MAX = 24;
+const _swFoliagePools = new Map();   // geometry.uuid -> parked InstancedMesh[]
+function _swFoliageTake(geo, mat, count, stdCap) {
+  const arr = _swFoliagePools.get(geo.uuid);
   if (arr) for (let i = arr.length - 1; i >= 0; i--) {
-    if (arr[i].geometry.userData._swCap >= count) { const m = arr[i]; arr.splice(i, 1); return m; }
+    if (arr[i].instanceMatrix.count >= count) { const im = arr[i]; arr.splice(i, 1); return im; }
   }
-  return new THREE.Mesh(_swFoliageGeo(baseGeo, Math.max(stdCap, Math.ceil(count * 1.25))), mat);
+  return new THREE.InstancedMesh(geo, mat, Math.max(stdCap, Math.ceil(count * 1.25)));
 }
-function _swFoliagePark(m) {
-  if (!m || !m.geometry || !m.geometry.userData._swBase) return;
-  try { if (m.parent) m.parent.remove(m); } catch (_) {}
-  const key = m.geometry.userData._swBase;
-  let arr = _swFoliagePools.get(key); if (!arr) { arr = []; _swFoliagePools.set(key, arr); }
-  m.geometry.instanceCount = 0; arr.push(m);
-}
-// (v35.09) SHADER PREWARM — one hidden 1-instance mesh per foliage kind, rendered for a few
-// frames during the countdown/cinematic then parked. Because every chunk of a kind now
-// shares one shader, these five meshes precompile the ENTIRE foliage pipeline set (main +
-// mirror + shadow) before the player ever moves.
-let _swPrewarmState = null;
-function _swFoliagePrewarmTick() {
-  let P = _swPrewarmState;
-  if (!P) {
-    const jobs = [];
-    try {
-      jobs.push({ geo: _swBladeGeoGet(), mat: _swGrassMatGet(), cap: _SW_GRASS_CAP, shadow: false });
-      const tMat = _swTreeMatGet();
-      for (const tGeo of _swTreeGeoGet()) jobs.push({ geo: tGeo, mat: tMat, cap: _SW_TREE_CAP, shadow: true });
-    } catch (_) { game._swPoolWarm = true; return; }
-    P = _swPrewarmState = { jobs: jobs, live: [], i: 0, tick: 0 };
-  }
-  P.tick++;
-  if (P.i < P.jobs.length) {
-    const j = P.jobs[P.i++];
-    const m = _swFoliageTake(j.geo, j.mat, 1, j.cap);
-    const px = (typeof player !== 'undefined' && player && player.position) ? player.position.x : 0;
-    const pz = (typeof player !== 'undefined' && player && player.position) ? player.position.z : 0;
-    _swGd.position.set(px, -750, pz); _swGd.rotation.set(0, 0, 0); _swGd.scale.set(0.01, 0.01, 0.01); _swGd.updateMatrix();
-    _swFoliageWrite(m.geometry, 0, _swGd.matrix.elements);
-    _swFoliageCommit(m.geometry, 1);
-    m.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(px, -750, pz), 10);
-    m.frustumCulled = false; m.castShadow = j.shadow; m.receiveShadow = true;
-    m.userData = { isSandwichTerrain: true };
-    scene.add(m);
-    P.live.push({ m: m, at: P.tick });
-  }
-  for (let k = P.live.length - 1; k >= 0; k--) {
-    if (P.tick - P.live[k].at >= 6) { _swFoliagePark(P.live[k].m); P.live.splice(k, 1); }
-  }
-  if (P.i >= P.jobs.length && !P.live.length) { _swPrewarmState = null; game._swPoolWarm = true; try { console.log('[foliage] shader prewarm done'); } catch (_) {} }
+function _swFoliagePark(im, stdCap) {
+  if (!im) return;
+  try { if (im.parent) im.parent.remove(im); } catch (_) {}
+  if (im.instanceMatrix.count < stdCap) { try { im.dispose(); } catch (_) {} return; }   // undersized stray: don't let it clog the pool
+  let arr = _swFoliagePools.get(im.geometry.uuid);
+  if (!arr) { arr = []; _swFoliagePools.set(im.geometry.uuid, arr); }
+  if (arr.length >= _SW_FOLIAGE_POOL_MAX) { try { im.dispose(); } catch (_) {} return; }
+  im.count = 0; arr.push(im);
 }
 const _swGd = new THREE.Object3D();
 // (v33.11) Sample the ground at the terrain MESH's grid resolution (bilinear over the
@@ -18787,9 +18664,9 @@ function _swGrassMatGet(){ if(_swGrassMat)return _swGrassMat;
   // Blade-space math preserved exactly : read the instance matrix (ip = instanceMatrix[3].xyz, like
   // the GLSL did), sway the RAW blade-local vertex, then apply the instance transform ourselves —
   // the pipeline's own instancing runs BEFORE positionNode, whose output replaces it (see _swInstMat4).
-  m.positionNode=$.Fn(()=>{
-    const M=_swFoliageMat4();        // (v35.09) named-attribute instance transform — ONE shared shader across all chunks (see _swFoliageGeo)
-    $.normalLocal.assign($.normalize($.mat3(M).mul($.normalLocal)));   // instance-rotate the normal (InstancedMesh's InstanceNode used to do this)
+  m.positionNode=$.Fn((builder)=>{
+    const M=_swInstMat4(builder);
+    if(!M) return $.positionLocal;   // non-instanced draw (not expected) : leave untouched
     const ip=M.element(3).xyz;       // vec3 ip = instanceMatrix[3].xyz
     const p=$.positionGeometry;
     const wOff=$.sin(ip.x.mul(0.0032).add(1.7)).mul(2.0).add($.sin(ip.z.mul(0.0036).sub(0.6)).mul(2.0));
@@ -18841,20 +18718,17 @@ function _swBuildGrass(x0,z0,T){
   }
   if(pts.length<4) return null;
   const count=pts.length/4;
-  const im=_swFoliageTake(_swBladeGeoGet(),_swGrassMatGet(),count,_SW_GRASS_CAP);   // (v35.09) shared-shader instancing — see _swFoliageGeo
+  const im=_swFoliageTake(_swBladeGeoGet(),_swGrassMatGet(),count,_SW_GRASS_CAP);   // (v35.08) pooled — see _swFoliagePools
   im.receiveShadow = true;   // (v34.30) blades darken under ship/tree/cloud... er, cast shadows
-  let yMin=1e9,yMax=-1e9;
   for(let k=0;k<count;k++){ const hf=pts[k*4+3];
     _swGd.position.set(pts[k*4],pts[k*4+1]-0.8,pts[k*4+2]);   // (v33.11) sink blade base to absorb mesh-jitter residual
     _swGd.rotation.set(0,Math.random()*6.283,0);
     const s=hf*(0.7+Math.random()*0.5); _swGd.scale.set(s,s,s);
-    _swGd.updateMatrix(); _swFoliageWrite(im.geometry,k,_swGd.matrix.elements);
-    const py=pts[k*4+1]; if(py<yMin)yMin=py; if(py>yMax)yMax=py; }
-  _swFoliageCommit(im.geometry,count);
-  im.geometry.boundingSphere=new THREE.Sphere(new THREE.Vector3(x0+_SW_CHUNK*0.5,(yMin+yMax)*0.5,z0+_SW_CHUNK*0.5),Math.hypot(_SW_CHUNK*0.72,(yMax-yMin)*0.5+60));
+    _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
+  im.count=count; im.instanceMatrix.needsUpdate=true; im.boundingSphere=null;   // (v35.08) draw count + fresh cull sphere on the recycled mesh
   im.frustumCulled=true; im.userData={isSandwichTerrain:true}; scene.add(im); return im;
 }
-function _swRemoveGrass(im){ if(im){ try{ _swFoliagePark(im); }catch(_){ try{ if(im.parent)scene.remove(im); }catch(__){} } } }
+function _swRemoveGrass(im){ if(im){ try{ _swFoliagePark(im,_SW_GRASS_CAP); }catch(_){ try{ if(im.parent)scene.remove(im); if(im.dispose)im.dispose(); }catch(__){} } } }
 // (v33.05) REAL ez-tree trees (github.com/dgreenheck/ez-tree recipes) — a faithful port
 // of its recursive-branch algorithm : a tapered TRUNK forks into branches (and
 // sub-branches) that bend with twist + gnarliness + gravitropism (force toward/away from
@@ -18957,9 +18831,9 @@ function _swTreeMatGet(){
   const $=TSL;
   const m=new THREE.MeshStandardNodeMaterial({vertexColors:true,color:0xffffff,roughness:1,metalness:0,side:THREE.DoubleSide});
   m.envMapIntensity = 0.18;
-  m.positionNode=$.Fn(()=>{
-    const M=_swFoliageMat4();        // (v35.09) named-attribute instance transform — ONE shared shader across all chunks (see _swFoliageGeo)
-    $.normalLocal.assign($.normalize($.mat3(M).mul($.normalLocal)));   // instance-rotate the normal (InstancedMesh's InstanceNode used to do this)
+  m.positionNode=$.Fn((builder)=>{
+    const M=_swInstMat4(builder);
+    if(!M) return $.positionLocal;   // non-instanced draw (not expected) : leave untouched
     const ip=M.element(3).xyz;       // vec3 ip = instanceMatrix[3].xyz
     const p=$.positionGeometry;
     const ph=ip.x.mul(0.05).add(ip.z.mul(0.05));
@@ -19015,18 +18889,15 @@ function _swBuildTrees(x0,z0,T){
   }
   const meshes=[];
   for(let v=0;v<variants.length;v++){ const pts=buckets[v]; if(pts.length<3) continue;
-    const count=pts.length/3, im=_swFoliageTake(variants[v],_swTreeMatGet(),count,_SW_TREE_CAP);   // (v35.09) shared-shader instancing — see _swFoliageGeo
-    let yMin=1e9,yMax=-1e9;
+    const count=pts.length/3, im=_swFoliageTake(variants[v],_swTreeMatGet(),count,_SW_TREE_CAP);   // (v35.08) pooled — see _swFoliagePools
     for(let k=0;k<count;k++){ _swGd.position.set(pts[k*3],pts[k*3+1]-6,pts[k*3+2]); _swGd.rotation.set(0,Math.random()*6.283,0);   // (v33.11) sink trunk base to absorb mesh-jitter residual (no float on peaks)
-      const s=2.6+Math.random()*1.4; _swGd.scale.set(s,s,s); _swGd.updateMatrix(); _swFoliageWrite(im.geometry,k,_swGd.matrix.elements);
-      const py=pts[k*3+1]; if(py<yMin)yMin=py; if(py>yMax)yMax=py; }
-    _swFoliageCommit(im.geometry,count);
-    im.geometry.boundingSphere=new THREE.Sphere(new THREE.Vector3(x0+_SW_CHUNK*0.5,(yMin+yMax)*0.5+120,z0+_SW_CHUNK*0.5),Math.hypot(_SW_CHUNK*0.72,(yMax-yMin)*0.5+320));
+      const s=2.6+Math.random()*1.4; _swGd.scale.set(s,s,s); _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
+    im.count=count; im.instanceMatrix.needsUpdate=true; im.boundingSphere=null;   // (v35.08) draw count + fresh cull sphere on the recycled mesh
     im.frustumCulled=true; im.castShadow=true; im.receiveShadow=true; im.userData={isSandwichTerrain:true}; scene.add(im); meshes.push(im);   // (v34.27) trees cast/catch the weather sun
   }
   return meshes.length?meshes:null;
 }
-function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ _swFoliagePark(im); }catch(_){ try{ if(im && im.parent)scene.remove(im); }catch(__){} } } } }
+function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ _swFoliagePark(im,_SW_TREE_CAP); }catch(_){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); }catch(__){} } } } }
 
 function _swBuildShell(x0, z0, isCeil, T) {
   const n = _SW_CELLS, step = _SW_CHUNK / n;
@@ -19144,7 +19015,7 @@ function _swApplyAtmosphere() {
     try { _wxInit(T); } catch (e) { console.warn('[weather] init failed:', e); }   // (v34.27) our own sky: clouds, sun, rainbow, shadows
     try { _birdFlockInit(T); } catch (_) {}   // (v33.89) GPGPU bird flock — scene/camera/renderer live, same frame as the water
     try { _fishSchoolInit(T); } catch (_) {}   // (v33.90) GPGPU fish school — reuses the boids engine + shared terrain field
-    game._swSubmerged = false; game._swAboveFog = null; game._swAboveFogSaved = null;   // (v33.09/v35.11) re-detect underwater over the FRESH hub fog (this branch just rebuilt scene.fog)
+    game._swSubmerged = false; game._swAboveFog = null;   // (v33.09) re-detect underwater over the FRESH hub fog (this branch just rebuilt scene.fog)
     try { _lssApplyHubLighting(true); } catch (_) {}   // (v34.13) dimensional hub lighting
   } else {
     try { _clearBrokenSimForcefield(); } catch (_) {}
@@ -21836,23 +21707,14 @@ function _swUpdateHubWater() {
 // in. Surfacing reverts ALL of it. HUD-safe (CSS z8 < cockpit/HUD/reticle), classic-safe
 // (only ever active when the hub water plane exists), mobile-safe (no post pass), and
 // allocation-free per frame (one reused FogExp2 ; scalar density mutation).
-// (v35.11) Submerged fog colour/density constants. The fog is applied by MUTATING the
-// existing scene.fog IN PLACE (never by swapping the object) — see _swUpdateUnderwater.
-const _SW_SUB_FOG_COLOR = 0x0a3a44;
-const _swSubFogDensity = (depth01) => 0.0016 + 0.0010 * depth01;   // 0.0016 (surface) → 0.0026 (deep)
+function _swSubmergedFogGet() {
+  if (!game._swSubmergedFog) game._swSubmergedFog = new THREE.FogExp2(0x0a3a44, 0.0018);
+  return game._swSubmergedFog;
+}
 function _swExitUnderwater() {
   if (!game._swSubmerged) return;
   game._swSubmerged = false;
-  // (v35.11) restore the above-water fog VALUES in place — NEVER reassign scene.fog. On
-  // WebGPU r180 the fog node identity IS the fog object, so swapping it (even same FogExp2
-  // type) recompiles EVERY fog-enabled material's pipeline = the multi-hundred-ms "0fps
-  // entering/leaving water" freeze the user reported. Mutating color+density on the one
-  // object is a uniform write (measured: 0 pipeline builds vs 73 for the object swap).
-  if (scene.fog && game._swAboveFogSaved) {
-    scene.fog.color.setHex(game._swAboveFogSaved.color);
-    if (scene.fog.isFogExp2) scene.fog.density = game._swAboveFogSaved.density;
-  }
-  game._swAboveFogSaved = null;
+  if (game._swAboveFog) { scene.fog = game._swAboveFog; game._swAboveFog = null; }
   try { _skyDomeRefresh(); } catch (_) {}   // re-derives dome.visible + horizon haze from biome+fog
   try { if (window.Overlays && Overlays.underwater) Overlays.underwater(false); } catch (_) {}
 }
@@ -21865,13 +21727,8 @@ function _swUpdateUnderwater() {
   else if (sub && below < -12) sub = false;
   if (sub && !game._swSubmerged) {                   // ENTER
     game._swSubmerged = true;
-    if (scene.fog && scene.fog.isFogExp2) {          // (v35.11) mutate in place — see _swExitUnderwater
-      game._swAboveFogSaved = { color: scene.fog.color.getHex(), density: scene.fog.density };
-      scene.fog.color.setHex(_SW_SUB_FOG_COLOR);
-      scene.fog.density = _swSubFogDensity(0);
-    } else {
-      game._swAboveFogSaved = null;                  // no FogExp2 to mutate (non-hub) — CSS wash still carries the look
-    }
+    game._swAboveFog = scene.fog || null;            // save the live above-water hub fog
+    scene.fog = _swSubmergedFogGet();
     // (v33.09) Keep the sky DOME visible — looking UP through the water you should still see
     // the (water + overlay tinted) sky/surface. The dense teal fog + CSS wash carry the
     // underwater feel without blanking the sky.
@@ -21879,9 +21736,9 @@ function _swUpdateUnderwater() {
   } else if (!sub && game._swSubmerged) {            // EXIT
     _swExitUnderwater();
   }
-  if (game._swSubmerged) {                           // depth cue : darker + murkier deeper (no alloc, no recompile)
+  if (game._swSubmerged) {                           // depth cue : darker + murkier deeper (no alloc)
     const depth01 = Math.max(0, Math.min(1, below / 1200));
-    if (scene.fog && scene.fog.isFogExp2) scene.fog.density = _swSubFogDensity(depth01);
+    _swSubmergedFogGet().density = 0.0016 + 0.0010 * depth01;
     try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, depth01); } catch (_) {}
   }
 }
@@ -22811,23 +22668,16 @@ function _hcMakeMeshes(city) {
     for (let v = 0; v < variants.length; v++) {
       const pts = buckets[v]; if (pts.length < 4) continue;
       const count = pts.length / 4;
-      const im = new THREE.Mesh(_swFoliageGeo(variants[v], count), tmat);   // (v35.09) named-attribute instancing — shares the chunk-tree shader (see _swFoliageGeo)
-      let xMin = 1e9, xMax = -1e9, yMin = 1e9, yMax = -1e9, zMin = 1e9, zMax = -1e9;
+      const im = new THREE.InstancedMesh(variants[v], tmat, count);
       for (let k = 0; k < count; k++) {
         const s = (2.6 + _stHash2(pts[k * 4] * 1.3, pts[k * 4 + 2] * 1.7) * 1.4) * pts[k * 4 + 3];
         D.position.set(pts[k * 4], pts[k * 4 + 1] - 4, pts[k * 4 + 2]);
         D.rotation.set(0, _stHash2(pts[k * 4] * 3.1, pts[k * 4 + 2] * 2.3) * 6.283, 0);
         D.scale.set(s, s, s);
         D.updateMatrix();
-        _swFoliageWrite(im.geometry, k, D.matrix.elements);
-        if (D.position.x < xMin) xMin = D.position.x; if (D.position.x > xMax) xMax = D.position.x;
-        if (D.position.y < yMin) yMin = D.position.y; if (D.position.y > yMax) yMax = D.position.y;
-        if (D.position.z < zMin) zMin = D.position.z; if (D.position.z > zMax) zMax = D.position.z;
+        im.setMatrixAt(k, D.matrix);
       }
-      _swFoliageCommit(im.geometry, count);
-      im.geometry.boundingSphere = new THREE.Sphere(
-        new THREE.Vector3((xMin + xMax) * 0.5, (yMin + yMax) * 0.5 + 120, (zMin + zMax) * 0.5),
-        Math.hypot(Math.max(xMax - xMin, zMax - zMin) * 0.72 + 60, (yMax - yMin) * 0.5 + 320));
+      im.instanceMatrix.needsUpdate = true;
       im.frustumCulled = true;
       im.castShadow = true; im.receiveShadow = true;
       im.userData.isHubCity = true;
@@ -23188,9 +23038,7 @@ function _hubCityFrame(dt) {
   }
   _hcTrafficUpdate();
   // proximity ambience: fog shifts toward deep neon-night as you approach
-  // (v35.11) yield while submerged — _swUpdateUnderwater owns scene.fog.color underwater
-  // (dense teal); without this the per-frame city tint stomped it back to daylight blue.
-  if (!game._swSubmerged && hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
+  if (hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
     const d = Math.hypot(player.position.x - HUB_CITY.x, player.position.z - HUB_CITY.z);
     const R = HUB_CITY.genome.radius;
     let k = 1 - (d - R) / (R * 0.5);
@@ -23954,8 +23802,6 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
   const chunks = game.sandwichChunks;
-  if (T.biome === 'mossy' && !game._swPoolWarm) { try { _swFoliagePrewarmTick(); } catch (_) { game._swPoolWarm = true; } }   // (v35.08) foliage pool prewarm — see _swFoliagePrewarmTick
-
   const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
   const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : _SW_VIEW;   // (v33.02) wider built radius for the endless hub ; (v33.46) tunable via window.__hubView
   // (v33.07) THE HUB streams a DISC, not a square. We still scan the bounding box

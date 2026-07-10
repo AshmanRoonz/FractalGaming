@@ -3478,7 +3478,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '35.12';
+const LSS_BUILD = '35.10';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 // =====================================================================
@@ -14155,32 +14155,6 @@ document.body.appendChild(renderer.domElement);
       _badge.title = 'click to hide';
       _badge.addEventListener('click', () => _badge.remove());
       document.body.appendChild(_badge);
-      // (v35.12) DEV compile tracker — counts TSL→pipeline builds so a HITCH during real
-      // play names the material that compiled (the "some FX aren't in warmup" hunt). A
-      // node material only re-enters build() when its pipeline isn't cached, so a jump in
-      // the (3s:N) counter at the instant of a stutter = an un-warmed effect compiling on
-      // first use. Remove with the badge before shipping.
-      try {
-        const _tmpNM = new THREE.MeshBasicNodeMaterial();
-        let _bp = Object.getPrototypeOf(_tmpNM);
-        while (_bp && !Object.prototype.hasOwnProperty.call(_bp, 'build')) _bp = Object.getPrototypeOf(_bp);
-        if (_bp && !_bp.__lssCompileTrack) {
-          _bp.__lssCompileTrack = true;
-          window.__lssCompiles = { total: 0, recent: [], last: '', names: {} };
-          const _ob = _bp.build;
-          _bp.build = function (bld) {
-            try {
-              const C = window.__lssCompiles; C.total++;
-              const nm = (this.name || this.type) + '#' + this.id; C.last = nm;
-              C.names[nm] = (C.names[nm] || 0) + 1;
-              C.recent.push(performance.now());
-              if (C.recent.length > 300) C.recent.shift();
-            } catch (_) {}
-            return _ob.call(this, bld);
-          };
-        }
-        try { _tmpNM.dispose(); } catch (_) {}
-      } catch (_) {}
       const _sw = /swiftshader|llvmpipe|software|basic render/i.test((vendor + ' ' + rendererStr));
       if (_sw) _badge.style.cssText += 'background:rgba(120,10,10,0.92);color:#ffdddd;border-color:#ff5555;font-weight:bold;';
       let _fc = 0; const _tick = () => { _fc++; requestAnimationFrame(_tick); }; requestAnimationFrame(_tick);
@@ -14211,15 +14185,11 @@ document.body.appendChild(renderer.domElement);
           // fps low + cpu high => CPU-bound (logic/encode/upload on this tab)
           let cost = '';
           try { if (window.__loopMsEma != null) cost = 'cpu/frm  ' + window.__loopMsEma.toFixed(1) + ' ms' + ((window.__loopSpikes && window.__loopSpikes.length) ? ('   spikes ' + window.__loopSpikes.slice(-5).join(',')) : '') + '\n'; } catch (_) {}
-          // (v35.12) compile line: total + last-3s rate + the material that last compiled.
-          // A hitch that coincides with a jump in (3s:N) is an un-warmed FX; the name says which.
-          let comp = '';
-          try { const C = window.__lssCompiles; if (C) { const cut = performance.now() - 3000; const r3 = C.recent.filter(t => t > cut).length; comp = 'compiles ' + C.total + '  (3s:' + r3 + ')  ' + (C.last || '').slice(0, 24) + '\n'; } } catch (_) {}
           _badge.textContent =
             'backend  ' + (window.__lssBackend || '?') + (_sw ? '  !! SOFTWARE ADAPTER !!' : '') + '\n' +
             'gpu      ' + ((vendor || '?') + ' ' + (rendererStr || '')).slice(0, 46) + '\n' +
             'quality  ' + q + '   dpr ' + dpr + '   buf ' + cw + '\n' +
-            extra + cost + comp +
+            extra + cost +
             'fps      ' + fps;
         } catch (_) {}
       }, 500);
@@ -19144,7 +19114,7 @@ function _swApplyAtmosphere() {
     try { _wxInit(T); } catch (e) { console.warn('[weather] init failed:', e); }   // (v34.27) our own sky: clouds, sun, rainbow, shadows
     try { _birdFlockInit(T); } catch (_) {}   // (v33.89) GPGPU bird flock — scene/camera/renderer live, same frame as the water
     try { _fishSchoolInit(T); } catch (_) {}   // (v33.90) GPGPU fish school — reuses the boids engine + shared terrain field
-    game._swSubmerged = false; game._swAboveFog = null; game._swAboveFogSaved = null;   // (v33.09/v35.11) re-detect underwater over the FRESH hub fog (this branch just rebuilt scene.fog)
+    game._swSubmerged = false; game._swAboveFog = null;   // (v33.09) re-detect underwater over the FRESH hub fog (this branch just rebuilt scene.fog)
     try { _lssApplyHubLighting(true); } catch (_) {}   // (v34.13) dimensional hub lighting
   } else {
     try { _clearBrokenSimForcefield(); } catch (_) {}
@@ -21836,23 +21806,14 @@ function _swUpdateHubWater() {
 // in. Surfacing reverts ALL of it. HUD-safe (CSS z8 < cockpit/HUD/reticle), classic-safe
 // (only ever active when the hub water plane exists), mobile-safe (no post pass), and
 // allocation-free per frame (one reused FogExp2 ; scalar density mutation).
-// (v35.11) Submerged fog colour/density constants. The fog is applied by MUTATING the
-// existing scene.fog IN PLACE (never by swapping the object) — see _swUpdateUnderwater.
-const _SW_SUB_FOG_COLOR = 0x0a3a44;
-const _swSubFogDensity = (depth01) => 0.0016 + 0.0010 * depth01;   // 0.0016 (surface) → 0.0026 (deep)
+function _swSubmergedFogGet() {
+  if (!game._swSubmergedFog) game._swSubmergedFog = new THREE.FogExp2(0x0a3a44, 0.0018);
+  return game._swSubmergedFog;
+}
 function _swExitUnderwater() {
   if (!game._swSubmerged) return;
   game._swSubmerged = false;
-  // (v35.11) restore the above-water fog VALUES in place — NEVER reassign scene.fog. On
-  // WebGPU r180 the fog node identity IS the fog object, so swapping it (even same FogExp2
-  // type) recompiles EVERY fog-enabled material's pipeline = the multi-hundred-ms "0fps
-  // entering/leaving water" freeze the user reported. Mutating color+density on the one
-  // object is a uniform write (measured: 0 pipeline builds vs 73 for the object swap).
-  if (scene.fog && game._swAboveFogSaved) {
-    scene.fog.color.setHex(game._swAboveFogSaved.color);
-    if (scene.fog.isFogExp2) scene.fog.density = game._swAboveFogSaved.density;
-  }
-  game._swAboveFogSaved = null;
+  if (game._swAboveFog) { scene.fog = game._swAboveFog; game._swAboveFog = null; }
   try { _skyDomeRefresh(); } catch (_) {}   // re-derives dome.visible + horizon haze from biome+fog
   try { if (window.Overlays && Overlays.underwater) Overlays.underwater(false); } catch (_) {}
 }
@@ -21865,13 +21826,8 @@ function _swUpdateUnderwater() {
   else if (sub && below < -12) sub = false;
   if (sub && !game._swSubmerged) {                   // ENTER
     game._swSubmerged = true;
-    if (scene.fog && scene.fog.isFogExp2) {          // (v35.11) mutate in place — see _swExitUnderwater
-      game._swAboveFogSaved = { color: scene.fog.color.getHex(), density: scene.fog.density };
-      scene.fog.color.setHex(_SW_SUB_FOG_COLOR);
-      scene.fog.density = _swSubFogDensity(0);
-    } else {
-      game._swAboveFogSaved = null;                  // no FogExp2 to mutate (non-hub) — CSS wash still carries the look
-    }
+    game._swAboveFog = scene.fog || null;            // save the live above-water hub fog
+    scene.fog = _swSubmergedFogGet();
     // (v33.09) Keep the sky DOME visible — looking UP through the water you should still see
     // the (water + overlay tinted) sky/surface. The dense teal fog + CSS wash carry the
     // underwater feel without blanking the sky.
@@ -21879,9 +21835,9 @@ function _swUpdateUnderwater() {
   } else if (!sub && game._swSubmerged) {            // EXIT
     _swExitUnderwater();
   }
-  if (game._swSubmerged) {                           // depth cue : darker + murkier deeper (no alloc, no recompile)
+  if (game._swSubmerged) {                           // depth cue : darker + murkier deeper (no alloc)
     const depth01 = Math.max(0, Math.min(1, below / 1200));
-    if (scene.fog && scene.fog.isFogExp2) scene.fog.density = _swSubFogDensity(depth01);
+    _swSubmergedFogGet().density = 0.0016 + 0.0010 * depth01;
     try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, depth01); } catch (_) {}
   }
 }
@@ -23188,9 +23144,7 @@ function _hubCityFrame(dt) {
   }
   _hcTrafficUpdate();
   // proximity ambience: fog shifts toward deep neon-night as you approach
-  // (v35.11) yield while submerged — _swUpdateUnderwater owns scene.fog.color underwater
-  // (dense teal); without this the per-frame city tint stomped it back to daylight blue.
-  if (!game._swSubmerged && hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
+  if (hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
     const d = Math.hypot(player.position.x - HUB_CITY.x, player.position.z - HUB_CITY.z);
     const R = HUB_CITY.genome.radius;
     let k = 1 - (d - R) / (R * 0.5);
