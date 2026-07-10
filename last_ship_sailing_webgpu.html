@@ -10910,7 +10910,7 @@ function _acquireSmokeConeMaterial(hotColorHex) {
 }
 function _releaseSmokeConeMaterial(m) {
   if (!m) return;
-  if (_smokeConeMatPool.length < 24) _smokeConeMatPool.push(m);
+  if (_smokeConeMatPool.length < 48) _smokeConeMatPool.push(m);   // (v35.13) 24 -> 48 : Mega Barrage peaks above 24 concurrent rocket trails
   else { try { m.dispose(); } catch (_) {} }
 }
 
@@ -27660,7 +27660,7 @@ class Projectile {
     this.trailTimer = 0;
 
     // --- Inner glow halo (wider, softer; post-bloom catches it) ---
-    const glowMat = _makeFXMaterial('proj_glow');
+    const glowMat = _acquireFXBurstMaterial('proj_glow');   // (v35.13) pooled — was a fresh TSL build()/pipeline per shot (the WebGPU combat compile storm)
     if (glowMat.uniforms.uBaseColor) glowMat.uniforms.uBaseColor.value.set(this.trailColor);
     if (glowMat.uniforms.uPosScale)  glowMat.uniforms.uPosScale.value = 1.0 / 7.0;
     this.glowMesh = new THREE.Mesh(_SHARED_PROJ_GLOW_GEO, glowMat);
@@ -27783,7 +27783,7 @@ class Projectile {
     // (v27) Cone-cloud trail mesh : material is per-projectile (custom
     // hotColor) so it disposes ; geometry is the shared singleton so
     // we just unlink the mesh from the scene without disposing geo.
-    if (this.smokeCone) {
+    if (this.smokeCone && !this.smokeTrail) {   // (v35.13) only tear down when the trail is OFF. Was unconditional per-frame release+reacquire — on WebGPU the empty-pool reacquire ran a fresh TSL build() every projectile (combat compile storm). Now the cone persists across frames and only cycles the pool on genuine spawn/death.
       if (this.smokeCone.parent) scene.remove(this.smokeCone);
       _releaseSmokeConeMaterial(this.smokeCone.material);
       this.smokeCone = null;
@@ -28653,7 +28653,7 @@ class Projectile {
     }
     if (this.glowMesh && this.glowMesh.parent) {
       scene.remove(this.glowMesh);
-      this.glowMesh.material.dispose();
+      if (typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(this.glowMesh.material); else this.glowMesh.material.dispose();   // (v35.13) release to pool
     }
     if (this.hazeMesh && this.hazeMesh.parent) {
       scene.remove(this.hazeMesh);
@@ -28661,9 +28661,8 @@ class Projectile {
     }
     if (this.smokeCone && this.smokeCone.parent) {
       scene.remove(this.smokeCone);
-      if (this.smokeCone.material && this.smokeCone.material.dispose) {
-        try { this.smokeCone.material.dispose(); } catch (_) {}
-      }
+      if (typeof _releaseSmokeConeMaterial === 'function') _releaseSmokeConeMaterial(this.smokeCone.material);   // (v35.13) release to pool (was dispose = pool drain -> per-projectile rebuild)
+      else if (this.smokeCone.material && this.smokeCone.material.dispose) { try { this.smokeCone.material.dispose(); } catch (_) {} }
       this.smokeCone = null;
     }
     if (this.trailRibbon && this.trailRibbon.parent) {
@@ -28725,7 +28724,7 @@ function _despawnProjectileSilent(p) {
     }
     if (p.glowMesh && p.glowMesh.parent) {
       scene.remove(p.glowMesh);
-      if (p.glowMesh.material && p.glowMesh.material.dispose) p.glowMesh.material.dispose();
+      if (typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(p.glowMesh.material); else if (p.glowMesh.material && p.glowMesh.material.dispose) p.glowMesh.material.dispose();   // (v35.13) release to pool
     }
     if (p.hazeMesh && p.hazeMesh.parent) {
       scene.remove(p.hazeMesh);
@@ -28733,7 +28732,8 @@ function _despawnProjectileSilent(p) {
     }
     if (p.smokeCone && p.smokeCone.parent) {
       scene.remove(p.smokeCone);
-      if (p.smokeCone.material && p.smokeCone.material.dispose) { try { p.smokeCone.material.dispose(); } catch (_) {} }
+      if (typeof _releaseSmokeConeMaterial === 'function') _releaseSmokeConeMaterial(p.smokeCone.material);   // (v35.13) release to pool
+      else if (p.smokeCone.material && p.smokeCone.material.dispose) { try { p.smokeCone.material.dispose(); } catch (_) {} }
       p.smokeCone = null;
     }
     if (p.trailRibbon && p.trailRibbon.parent) {
@@ -31900,6 +31900,21 @@ function _makeAtomFractalMaterial(baseColor) {
   return mat;
 }
 
+// (v35.13) SIGNATURE CACHE by rock hue. Cluster children + rock chunks all use one of
+// ~6 palette colours (OBSTACLE_COLORS + grey), but each spawn used to mint a fresh
+// MeshBasicNodeMaterial = a full TSL build()/pipeline per rock (100-500 builds/match on
+// WebGPU — a big share of the combat compile storm). uOpacity is a constant 1.0 and
+// time/uVRLite are global (lockstep across all rocks anyway), so ONE shared material per
+// colour is visually identical (the IFS/FBM noise is world-position based, so each rock
+// still looks unique). Meshes tagged userData._sharedFractalMat MUST NOT dispose the material.
+const _atomFractalMatByColor = new Map();   // hexInt -> shared MeshBasicNodeMaterial
+function _acquireAtomFractalMaterial(baseColor) {
+  const key = baseColor | 0;
+  let m = _atomFractalMatByColor.get(key);
+  if (!m) { m = _makeAtomFractalMaterial(key); _atomFractalMatByColor.set(key, m); }
+  return m;
+}
+
 // Spawn N small rock chunks at pos, exploding outward. Each chunk
 // reuses the fractal material so it visually belongs to the parent atom.
 // Chunks live in game.effects with type 'rockChunk' ; updateEffects ticks
@@ -31918,9 +31933,10 @@ function spawnRockChunks(pos, baseColor, parentScale) {
       for (let _g = 0; _g < 8; _g++) window._rockGeoPool.push(_makeRockGeometry(0, _g * 97.31 + 3.7));
     }
     const geo = window._rockGeoPool[(Math.random() * window._rockGeoPool.length) | 0];                    // detail=0 ; cheaper for chunks
-    const mat = _makeAtomFractalMaterial(baseColor);
+    const mat = _acquireAtomFractalMaterial(baseColor);        // (v35.13) shared-by-colour ; was a fresh TSL build per chunk
     const mesh = new THREE.Mesh(geo, mat);
     mesh.userData._sharedGeo = true;                            // shared pooled geo ; disposal must not free it
+    mesh.userData._sharedFractalMat = true;                    // (v35.13) shared material ; disposal must not free it
     mesh.position.copy(pos);
     const chunkScale = parentScale * (0.20 + Math.random() * 0.25);
     mesh.scale.setScalar(chunkScale);
@@ -32111,7 +32127,8 @@ class ClusterObstacle {
         const _rockSeed = Math.random() * 1000;
         child._rockSeed = _rockSeed;
         child.mesh.geometry = _makeRockGeometry(1, _rockSeed);
-        child.mesh.material = _makeAtomFractalMaterial(this.baseColor);
+        child.mesh.material = _acquireAtomFractalMaterial(this.baseColor);   // (v35.13) shared-by-colour ; was a fresh TSL build per child rock
+        child.mesh.userData._sharedFractalMat = true;
         child.mesh.scale.setScalar(childScale);
         // Remove the edgeMesh ; the fractal pattern is busy enough.
         if (child.edgeMesh) {
@@ -32150,7 +32167,8 @@ class ClusterObstacle {
         const _rockSeed = (cc.seed != null) ? cc.seed : Math.random() * 1000;
         child._rockSeed = _rockSeed;
         child.mesh.geometry = _makeRockGeometry(1, _rockSeed);
-        child.mesh.material = _makeAtomFractalMaterial(this.baseColor);
+        child.mesh.material = _acquireAtomFractalMaterial(this.baseColor);   // (v35.13) shared-by-colour
+        child.mesh.userData._sharedFractalMat = true;
         child.mesh.scale.setScalar(cc.scale);
         if (child.edgeMesh) {
           if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
@@ -33378,6 +33396,7 @@ function _disposeVRRockMesh(mesh) {
   if (!(mesh.userData && mesh.userData._sharedGeo) && mesh.geometry && mesh.geometry.dispose) {
     try { mesh.geometry.dispose(); } catch (_) {}
   }
+  if (mesh.userData && mesh.userData._sharedFractalMat) return;   // (v35.13) shared colour-cached fractal material — geometry freed above, but the material is reused across every rock of this hue; never dispose it
   const mat = mesh.material;
   if (Array.isArray(mat)) {
     for (const m of mat) {
@@ -38234,7 +38253,7 @@ function _disposeOrReleaseEffect(e) {
     if (e.mesh) {
       if (typeof scene !== 'undefined' && e.mesh.parent) scene.remove(e.mesh);
       if (!(e.mesh.userData && e.mesh.userData._sharedGeo) && e.mesh.geometry && e.mesh.geometry.dispose) e.mesh.geometry.dispose();
-      _lssRetainMat(e.mesh.material);
+      if (!(e.mesh.userData && e.mesh.userData._sharedFractalMat)) _lssRetainMat(e.mesh.material);   // (v35.13) shared colour-cached fractal material — never retain/dispose it
     }
     return;
   }
