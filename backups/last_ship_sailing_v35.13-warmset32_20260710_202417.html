@@ -3487,7 +3487,7 @@ function _bootLSS() {
 // Bump the decimal on every change batch (backup goes to
 // LSS/old_versions/ first). Printed on the lobby + tab title so a stale
 // cached build is obvious at a glance.
-const LSS_BUILD = '35.16';
+const LSS_BUILD = '35.13';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 // =====================================================================
@@ -10095,7 +10095,7 @@ function handleNetEvent(evt, fromPeerId) {
         const _vlbRadius = (typeof evt.radius === 'number') ? evt.radius :   80;
         const _vlbLife   = (typeof evt.life   === 'number') ? evt.life   : 0.45;
         const _vlbMid    = _vlbOrigin.clone().addScaledVector(_vlbDir, _vlbRange * 0.5);
-        const _vlbMat    = (typeof _acquireFXBurstMaterial === 'function') ? _acquireFXBurstMaterial('core_beam') : _makeFXMaterial('core_beam');   // (v35.16) pooled (network laser mirror)
+        const _vlbMat    = _makeFXMaterial('core_beam');
         if (_vlbMat.uniforms.uPosScale) _vlbMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _vlbRadius);
         const _vlbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vlbMat);
         _vlbMesh.position.copy(_vlbMid);
@@ -10564,49 +10564,7 @@ function _makeFireCloudMaterial(o){o=o||{};
   })();
   m.colorNode=rgba.rgb;m.opacityNode=rgba.a;
   m.uniforms={time:uTime,uRadius:uRadius,uOctaves:uOctaves,uScale:uScale,uRise:uRise,uDisp:uDisp,uGain:uGain,uBaseAlpha:uBaseAlpha,uC0:uC0,uC1:uC1,uC2:uC2,uC3:uC3};
-  return m;}function _spawnFireCloudCluster(pos,opts){opts=opts||{};if(typeof scene==="undefined"||!scene)return null;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=opts.count||3;const R=opts.radius||44;const out=[];for(let i=0;i<n;i++){const mat=_acquireFireCloudMaterial(opts);const m=new THREE.Mesh(window._fireCloudGeo,mat);const t=n>1?i/(n-1):0;const r=R*(1.0-t*0.45);m.scale.setScalar(r);m.position.set(pos.x+(Math.random()-.5)*R*0.4,pos.y+t*R*0.5,pos.z+(Math.random()-.5)*R*0.4);m.userData._fcBaseY=m.position.y;m.userData._fcR=r;m.renderOrder=1;m.frustumCulled=true;scene.add(m);out.push(m)}return out;}function _spawnExplosionFireCloud(pos,size){if(typeof game==="undefined"||!game||!game.worldEffects)return;if(typeof _makeFireCloudMaterial!=="function"||typeof scene==="undefined"||!scene)return;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=size>26?2:1;const fm=[];for(let i=0;i<n;i++){const mat=_acquireFireCloudMaterial({radius:size*2.2,alpha:.85,oct:5,gain:1.0,rise:2.0,c0:0x200400,c1:0xcc2200,c2:0xff6a18,c3:0xffe39a});const m=new THREE.Mesh(window._fireCloudGeo,mat);m.position.set(pos.x+(Math.random()-.5)*size*.5,pos.y+(Math.random()-.5)*size*.5,pos.z+(Math.random()-.5)*size*.5);m.scale.setScalar(size*(.7+i*.3));m.renderOrder=1;m.frustumCulled=true;scene.add(m);fm.push(m)}game.worldEffects.push({type:"explFireCloud",position:pos.clone(),timer:.5,duration:.5,fireMeshes:fm,_explSize:size})}
-// (v35.14) FIRE-CLOUD MATERIAL POOL — on WebGPU every fresh MeshBasicNodeMaterial pays a full
-// TSL build + pipeline compile (~20-50ms x main/mirror passes) on its first render, and
-// explosions minted 1-2 fresh clouds EACH (pyro impacts 3, firewalls 5-10) = the measured
-// 136-compiles / 26fps / 1105ms-frame combat storm. Every fire-cloud option is a UNIFORM on
-// one shared graph (only `additive:false` forks the blend state — the incendiary-gas variant,
-// which stays unpooled), so recycled materials are fully interchangeable: acquire re-applies
-// every option, release returns them to the free list. Seeded by _pinCombatEffectPrograms so
-// the K pool pipelines build behind the round countdown, never mid-fight.
-const _fireCloudMatPool = [];
-function _applyFireCloudOptions(m, o) {
-  o = o || {};
-  const u = m.uniforms;
-  u.time.value = 0;
-  u.uRadius.value = o.radius || 40;
-  u.uOctaves.value = o.oct || 5;
-  u.uScale.value = o.scale || 2.0;
-  u.uRise.value = (o.rise != null ? o.rise : 1.3);
-  u.uDisp.value = (o.disp != null ? o.disp : 0.55);
-  u.uGain.value = (o.gain != null ? o.gain : 1.5);
-  u.uBaseAlpha.value = (o.alpha != null ? o.alpha : 0.55);
-  u.uC0.value.setHex(o.c0 != null ? o.c0 : 0x3a0a02);
-  u.uC1.value.setHex(o.c1 != null ? o.c1 : 0xcc2a00);
-  u.uC2.value.setHex(o.c2 != null ? o.c2 : 0xff6a18);
-  u.uC3.value.setHex(o.c3 != null ? o.c3 : 0xffe39a);
-  const _blend = (o.additive === false ? THREE.NormalBlending : THREE.AdditiveBlending);
-  if (m.blending !== _blend) { m.blending = _blend; m.needsUpdate = true; }   // only the rare gas variant would hit this; pooled callers are all additive
-  return m;
-}
-function _acquireFireCloudMaterial(o) {
-  const m = _fireCloudMatPool.length ? _applyFireCloudOptions(_fireCloudMatPool.pop(), o) : _makeFireCloudMaterial(o);
-  m.userData._fireCloudPool = true;
-  return m;
-}
-function _releaseFireCloudMaterial(m) {
-  if (!m) return;
-  if (!m.userData || !m.userData._fireCloudPool || !m.uniforms) {   // unpooled stragglers (gas variant, pre-pool leftovers) keep the old retain path
-    if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else { try { m.dispose(); } catch (_) {} }
-    return;
-  }
-  if (_fireCloudMatPool.length < 64) _fireCloudMatPool.push(m);
-  else { try { m.dispose(); } catch (_) {} }
-}
+  return m;}function _spawnFireCloudCluster(pos,opts){opts=opts||{};if(typeof scene==="undefined"||!scene)return null;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=opts.count||3;const R=opts.radius||44;const out=[];for(let i=0;i<n;i++){const mat=_makeFireCloudMaterial(opts);const m=new THREE.Mesh(window._fireCloudGeo,mat);const t=n>1?i/(n-1):0;const r=R*(1.0-t*0.45);m.scale.setScalar(r);m.position.set(pos.x+(Math.random()-.5)*R*0.4,pos.y+t*R*0.5,pos.z+(Math.random()-.5)*R*0.4);m.userData._fcBaseY=m.position.y;m.userData._fcR=r;m.renderOrder=1;m.frustumCulled=true;scene.add(m);out.push(m)}return out;}function _spawnExplosionFireCloud(pos,size){if(typeof game==="undefined"||!game||!game.worldEffects)return;if(typeof _makeFireCloudMaterial!=="function"||typeof scene==="undefined"||!scene)return;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=size>26?2:1;const fm=[];for(let i=0;i<n;i++){const mat=_makeFireCloudMaterial({radius:size*2.2,alpha:.85,oct:5,gain:1.0,rise:2.0,c0:0x200400,c1:0xcc2200,c2:0xff6a18,c3:0xffe39a});const m=new THREE.Mesh(window._fireCloudGeo,mat);m.position.set(pos.x+(Math.random()-.5)*size*.5,pos.y+(Math.random()-.5)*size*.5,pos.z+(Math.random()-.5)*size*.5);m.scale.setScalar(size*(.7+i*.3));m.renderOrder=1;m.frustumCulled=true;scene.add(m);fm.push(m)}game.worldEffects.push({type:"explFireCloud",position:pos.clone(),timer:.5,duration:.5,fireMeshes:fm,_explSize:size})}
 // (fire eats clouds) Fire pulls nearby ambient gas in and consumes it at the
 // bright core (eat radius < visual radius hides the removal). Client-side, reads
 // synced fire + seed-built gas, so it is consistent in multiplayer.
@@ -10876,36 +10834,6 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
   return mat;
 }
 
-// (v35.13) Recycle the actual smoke NodeMaterial objects. Explosion, impact,
-// and cluster plumes all use the same graph; only uniform values differ. The
-// old retain-one-signature path kept a backend program alive but still built a
-// fresh TSL graph/bind group for every puff during combat.
-const _smokeMatPool = [];
-function _acquireSmokeMaterial(initialColor, baseAlpha) {
-  let mat = _smokeMatPool.pop();
-  if (!mat) mat = _makeSmokeMaterial(initialColor, baseAlpha);
-  mat.name = 'LSS Shader Smoke';
-  const u = mat.uniforms || {};
-  if (u.uColor && u.uColor.value && u.uColor.value.setHex) u.uColor.value.setHex(initialColor == null ? 0x222018 : initialColor);
-  if (u.uBaseAlpha) u.uBaseAlpha.value = baseAlpha == null ? 0.85 : baseAlpha;
-  if (u.time) u.time.value = 0;
-  if (u.uDisplaceAmount) u.uDisplaceAmount.value = 0.45;
-  if (u.uDisplaceFreq) u.uDisplaceFreq.value = 1.4;
-  if (u.uLightStrength && u.uLightStrength.value) {
-    const a = u.uLightStrength.value; for (let i = 0; i < a.length; i++) a[i] = 0;
-  }
-  return mat;
-}
-function _releaseSmokeMaterial(mat) {
-  if (!mat || mat === window._SMOKE_MAT_PROTO) return;
-  const u = mat.uniforms || {};
-  if (u.uLightStrength && u.uLightStrength.value) {
-    const a = u.uLightStrength.value; for (let i = 0; i < a.length; i++) a[i] = 0;
-  }
-  if (_smokeMatPool.length < 48) _smokeMatPool.push(mat);   // (v35.16) 32 -> 48 : bots-fight concurrency drained 32
-  else { try { mat.dispose(); } catch (_) {} }
-}
-
 let _VORTEX_CORE_BEAM_GEO = null;
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
@@ -10978,24 +10906,21 @@ const _smokeConeCoolCol = new THREE.Color(0x2a2638); // dim violet-grey
 // the TSL port ; the same math now lives as a node graph inside
 // _makeSmokeConeMaterial below (original GLSL in the v34 backup).
 
-// (v35.13) Share one immutable-uniform cone material per projectile color.
-// All live cones write the same global uTime and differ only by mesh transform;
-// a per-rocket material pool still required 24-48 separate WebGPU node builds.
-const _smokeConeMatByColor = new Map();
+// Pool: one fresh ShaderMaterial per rocket was steady allocation during
+// missile fights (Tracker volleys, Mega Barrage). Reuse + retint instead.
+const _smokeConeMatPool = [];
 function _acquireSmokeConeMaterial(hotColorHex) {
-  const key = (hotColorHex || 0xff8844) >>> 0;
-  let m = _smokeConeMatByColor.get(key);
-  if (!m) {
-    m = _makeSmokeConeMaterial(key);
-    m.userData._projSharedSmokeCone = true;
-    _smokeConeMatByColor.set(key, m);
+  const m = _smokeConeMatPool.pop();
+  if (m) {
+    try { m.uniforms.uHotColor.value.set(hotColorHex || 0xff8844); } catch (_) {}
+    return m;
   }
-  return m;
+  return _makeSmokeConeMaterial(hotColorHex);
 }
 function _releaseSmokeConeMaterial(m) {
   if (!m) return;
-  if (m.userData && m.userData._projSharedSmokeCone) return;   // page-lifetime color cache
-  try { m.dispose(); } catch (_) {}
+  if (_smokeConeMatPool.length < 48) _smokeConeMatPool.push(m);   // (v35.13) 24 -> 48 : Mega Barrage peaks above 24 concurrent rocket trails
+  else { try { m.dispose(); } catch (_) {} }
 }
 
 function _makeSmokeConeMaterial(hotColorHex) {
@@ -12054,76 +11979,8 @@ function _releaseFXBurstMaterial(mat) {
   _ACTIVE_LAYERED_FX.delete(mat);
   let pool = _fxBurstMatPool.get(name);
   if (!pool) { pool = []; _fxBurstMatPool.set(name, pool); }
-  const cap = (name === 'fireball_purple' || name === 'fireball_cyan') ? 32 : 64;
-  if (pool.length < cap) pool.push(mat);
+  if (pool.length < 64) pool.push(mat);
   else { try { mat.dispose(); } catch (_) {} }
-}
-
-// Build spare TSL graphs during the loading phase, but do not force-render
-// every copy. One visible prototype per preset warms the shared backend
-// pipeline; these preallocated material objects remove the much larger JS
-// graph-construction/GC burst when several explosions overlap.
-function _seedFXBurstMaterialPool(presetName, targetCount) {
-  let pool = _fxBurstMatPool.get(presetName);
-  if (!pool) { pool = []; _fxBurstMatPool.set(presetName, pool); }
-  const made = [];
-  while (pool.length + made.length < targetCount) made.push(_makeFXMaterial(presetName));
-  for (const m of made) _releaseFXBurstMaterial(m);
-}
-
-async function _warmMaterialInstancesBatched(materials, geometry, batchSize) {
-  if (!materials || !materials.length || !geometry || !renderer || !scene || !camera) return;
-  const n = Math.max(1, batchSize | 0);
-  // r180's awaited render path guarantees async WebGPU pipeline creation is
-  // complete. Pause the normal animation callback while awaiting it so no live
-  // frame overlaps this loading-only encoder (the compileAsync corruption case).
-  const canPauseLoop = !!(renderer.setAnimationLoop && !(renderer.xr && renderer.xr.isPresenting));
-  if (canPauseLoop) renderer.setAnimationLoop(null);
-  // (v35.14) The batched renderAsync below only builds the MAIN-camera pipeline variant.
-  // The water-reflector MIRROR pass runs solely inside the live game loop, so materials
-  // warmed here still compiled their mirror variants on first REAL combat draw (storm
-  // bench: 148 bolt-material builds mid-fight AFTER main-pass warming). Fix: park the
-  // warm meshes (invisible at y=-1e6 but frustumCulled=false = encoded by EVERY pass)
-  // and leave them in the scene for a few live frames after the loop resumes — the
-  // loop's own mirror pass builds the mirror variants behind the loading overlay —
-  // then sweep them out.
-  const _lingerMeshes = [];
-  try {
-    for (let i = 0; i < materials.length; i += n) {
-      const meshes = [];
-      try {
-        const lim = Math.min(materials.length, i + n);
-        for (let j = i; j < lim; j++) {
-          const m = new THREE.Mesh(geometry, materials[j]);
-          m.position.set((j - i) * 3, -1e6, j * 3);
-          m.frustumCulled = false;
-          scene.add(m); meshes.push(m);
-        }
-        if (typeof renderer.renderAsync === 'function') await renderer.renderAsync(scene, camera);
-        else renderer.render(scene, camera);
-      } catch (_) {
-        // Non-fatal: an unwarmed slot simply pays its first-draw cost later.
-      } finally {
-        for (const m of meshes) _lingerMeshes.push(m);   // removed after the linger window below
-      }
-      if (typeof _warmupYield === 'function') await _warmupYield();
-    }
-  } finally {
-    if (canPauseLoop) renderer.setAnimationLoop((typeof _lssSafeGameLoop === 'function') ? _lssSafeGameLoop : gameLoop);
-    setTimeout(() => {
-      for (const m of _lingerMeshes) { try { if (m.parent) m.parent.remove(m); } catch (_) {} }
-    }, 700);   // ~several live frames at any fps — mirror pass encodes the parked meshes, then they go
-  }
-}
-
-let _liveFXBurstCount = 0;
-function _liveFXBurstCap() {
-  const q = (typeof QUALITY !== 'undefined' && QUALITY.level) ? QUALITY.level : 'high';
-  if (q === 'low' || q === 'potato') return 12;
-  if (q === 'medium') return 18;
-  if (q === 'ultra') return 40;
-  if (q === 'mega') return 64;
-  return 24;   // high: secondary volumetric lobes; the complete pooled explosion stack remains uncapped
 }
 
 function spawnFXBurst(presetName, pos, radius, life, opts) {
@@ -12132,12 +11989,6 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
   // presence ; returning null keeps that branch consistent.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return null;
   if (!pos || !scene) return null;
-  // (v35.13) Each burst is a separate three-layer volumetric draw. Seven bots
-  // can otherwise sustain 100-200 overlapping secondary lobes: even fully
-  // warmed shaders fall to single digits from fill/draw cost. Drop only the
-  // excess LayeredFX lobe; spawnExplosion's pooled core/flash, shader smoke,
-  // fire cloud, debris, lights, sound, and gameplay all still execute.
-  if (_liveFXBurstCount >= _liveFXBurstCap()) return null;
   opts = opts || {};
   const startScale = (opts.startScale != null) ? opts.startScale : 0.15;
   const endScale   = (opts.endScale   != null) ? opts.endScale   : 1.0;
@@ -12189,9 +12040,7 @@ function spawnFXBurst(presetName, pos, radius, life, opts) {
       _wakeRadius: radius * 1.5 + 120,
       baseScale: 1.0,
       maxSize: 1.0 + (endScale - startScale),
-      _countedLayered: true,
     });
-    _liveFXBurstCount++;
   }
   return mesh;
 }
@@ -12449,7 +12298,7 @@ function _buildFlameChainFlameLicks(effData, pos, dir, length) {
     // reads as a row of distinct flames rather than uniform blobs.
     const radius = 80 + Math.random() * 30;
     // (fire-cloud) Flame Chain licks use the volumetric fire shader.
-    const mat = _acquireFireCloudMaterial({ radius: radius, alpha: 0.6, oct: 5 });   // (v35.14) pooled
+    const mat = _makeFireCloudMaterial({ radius: radius, alpha: 0.6, oct: 5 });
     const geo = _getFXBurstGeometry(16, 10);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.scale.setScalar(radius);
@@ -14354,31 +14203,7 @@ document.body.appendChild(renderer.domElement);
       } catch (_) {}
       const _sw = /swiftshader|llvmpipe|software|basic render/i.test((vendor + ' ' + rendererStr));
       if (_sw) _badge.style.cssText += 'background:rgba(120,10,10,0.92);color:#ffdddd;border-color:#ff5555;font-weight:bold;';
-      // (v35.15) HITCH FLIGHT RECORDER — hitches are too fast to screenshot live, so
-      // every frame gap > 80ms is captured automatically: how big, when, how many node
-      // pipelines compiled in the preceding 2.5s (and the last one's name). The badge
-      // shows the 3 worst-recent entries persistently — screenshot ANY time after play.
-      // b:0 on a hitch = NOT a shader compile (streaming/GC/upload) — equally diagnostic.
-      let _fc = 0, _hlT = performance.now();
-      window.__hitchLog = [];
-      const _tick = () => {
-        _fc++;
-        const _hn = performance.now(); const _hdt = _hn - _hlT; _hlT = _hn;
-        if (_hdt > 80) {
-          try {
-            // Only record DURING PLAY — warmup/loading intentionally stalls behind the
-            // overlay (pool prewarms) and would drown the log in by-design entries.
-            if (typeof game !== 'undefined' && game && game.state === 'playing') {
-              const C = window.__lssCompiles; const cut = _hn - 2500;
-              const nb = C ? C.recent.filter(t => t > cut).length : -1;
-              window.__hitchLog.push({ at: _hn, ms: Math.round(_hdt), b: nb, m: (nb > 0 && C) ? String(C.last || '').slice(0, 22) : '' });
-              if (window.__hitchLog.length > 10) window.__hitchLog.shift();
-            }
-          } catch (_) {}
-        }
-        requestAnimationFrame(_tick);
-      };
-      requestAnimationFrame(_tick);
+      let _fc = 0; const _tick = () => { _fc++; requestAnimationFrame(_tick); }; requestAnimationFrame(_tick);
       let _lastC = 0, _lastT = performance.now();
       setInterval(() => {
         try {
@@ -14409,16 +14234,11 @@ document.body.appendChild(renderer.domElement);
           // Node graph builds: total + last-3s rate + last synchronous build cost/name.
           let comp = '';
           try { const C = window.__lssCompiles; if (C) { const cut = performance.now() - 3000; const r3 = C.recent.filter(t => t > cut).length; comp = 'nodebuild ' + C.total + '  (3s:' + r3 + ')  ' + (C.lastMs || 0).toFixed(1) + 'ms  ' + (C.last || '').slice(0, 20) + '\n'; } } catch (_) {}
-          // (v35.15) flight-recorded hitches: "<ms> <age>s ago b:<compiles in prior 2.5s> <mat>"
-          // — b:0 means the freeze was NOT a shader compile (streaming/GC/upload instead).
-          let hl = '';
-          try { const H = window.__hitchLog; if (H && H.length) { const nowH = performance.now();
-            hl = 'hitches  ' + H.slice(-3).reverse().map(h => h.ms + 'ms ' + Math.round((nowH - h.at) / 1000) + 's-ago b:' + h.b + (h.m ? ' ' + h.m : '')).join('\n         ') + '\n'; } } catch (_) {}
           _badge.textContent =
             'backend  ' + (window.__lssBackend || '?') + (_sw ? '  !! SOFTWARE ADAPTER !!' : '') + '\n' +
             'gpu      ' + ((vendor || '?') + ' ' + (rendererStr || '')).slice(0, 46) + '\n' +
             'quality  ' + q + '   dpr ' + dpr + '   buf ' + cw + '\n' +
-            extra + cost + comp + hl +
+            extra + cost + comp +
             'fps      ' + fps;
         } catch (_) {}
       }, 500);
@@ -27783,24 +27603,6 @@ const _SHARED_PROJ_CORE_GEO = new THREE.SphereGeometry(2.2, 8, 6);
 const _SHARED_PROJ_GLOW_GEO = new THREE.SphereGeometry(7, 16, 12);
 const _SHARED_PROJ_HAZE_GEO = new THREE.SphereGeometry(15, 10, 8);
 
-// One LayeredFX glow graph per weapon color. Its time is the global game clock
-// and pulse/size/fade are mesh transforms, so simultaneous same-color shots do
-// not need separate uniform sets or WebGPU node builds.
-const _projectileGlowMatByColor = new Map();
-function _getProjectileGlowMaterial(colorHex) {
-  const key = (colorHex || 0xffaa00) >>> 0;
-  let m = _projectileGlowMatByColor.get(key);
-  if (!m) {
-    m = _makeFXMaterial('proj_glow');
-    m.name = 'LSS Projectile Glow';
-    if (m.uniforms.uBaseColor) m.uniforms.uBaseColor.value.set(key);
-    if (m.uniforms.uPosScale) m.uniforms.uPosScale.value = 1.0 / 7.0;
-    m.userData._projSharedGlow = true;
-    _projectileGlowMatByColor.set(key, m);
-  }
-  return m;
-}
-
 // (v35.13) WEBGPU PROJECTILE MATERIAL POOLS. A projectile used to allocate
 // four fresh legacy materials (core, line, haze, ribbon) in addition to its
 // expensive LayeredFX glow. WebGPURenderer converts each fresh material into
@@ -27924,7 +27726,9 @@ class Projectile {
     this.trailTimer = 0;
 
     // --- Inner glow halo (wider, softer; post-bloom catches it) ---
-    const glowMat = _getProjectileGlowMaterial(this.trailColor);   // (v35.13) shared by color — one TSL graph, any number of shots
+    const glowMat = _acquireFXBurstMaterial('proj_glow');   // (v35.13) pooled — was a fresh TSL build()/pipeline per shot (the WebGPU combat compile storm)
+    if (glowMat.uniforms.uBaseColor) glowMat.uniforms.uBaseColor.value.set(this.trailColor);
+    if (glowMat.uniforms.uPosScale)  glowMat.uniforms.uPosScale.value = 1.0 / 7.0;
     this.glowMesh = new THREE.Mesh(_SHARED_PROJ_GLOW_GEO, glowMat);
     this.glowMesh.position.copy(origin);
     this.glowMesh.renderOrder = 1;
@@ -28198,10 +28002,13 @@ class Projectile {
       }
       if (this.mesh)        this.mesh.material.opacity        = this._baseOpacityCore   * _fadeIn;
       if (this.glowMesh) {
-        // Shared glow materials cannot carry a per-projectile brightness fade.
-        // Store it for the mesh-scale path below (same visual envelope, no
-        // shared-uniform contention between projectiles at different ages).
-        this._glowFade = _fadeIn;
+        const gu = this.glowMesh.material.uniforms;
+        if (gu && gu.uBrightness) {
+          if (gu._fxBaseBrightness == null) gu._fxBaseBrightness = gu.uBrightness.value;
+          gu.uBrightness.value = gu._fxBaseBrightness * _fadeIn;
+        } else if (typeof this.glowMesh.material.opacity === 'number') {
+          this.glowMesh.material.opacity = this._baseOpacityGlow * _fadeIn;
+        }
       }
       if (this.hazeMesh)    this.hazeMesh.material.opacity    = this._baseOpacityHaze   * _fadeIn;
       if (this.trail)       this.trail.material.opacity       = this._baseOpacityTrail  * _fadeIn;
@@ -28223,7 +28030,7 @@ class Projectile {
     if (this.glowMesh) {
       this.glowMesh.position.copy(this.position);
       const haloFlicker = 1 + Math.sin(this.age * 22) * 0.18 + (Math.random() - 0.5) * 0.18;
-      this.glowMesh.scale.setScalar(haloFlicker * _szM * (this._glowFade == null ? 1 : this._glowFade));
+      this.glowMesh.scale.setScalar(haloFlicker * _szM);
       if (this.glowMesh.material && this.glowMesh.material.uniforms && this.glowMesh.material.uniforms.time) {
         this.glowMesh.material.uniforms.time.value = (typeof game !== 'undefined' && game.time) ? game.time : this.age;
       }
@@ -28909,9 +28716,7 @@ class Projectile {
     }
     if (this.glowMesh) {
       if (this.glowMesh.parent) scene.remove(this.glowMesh);
-      if (!(this.glowMesh.material.userData && this.glowMesh.material.userData._projSharedGlow)) {
-        if (typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(this.glowMesh.material); else this.glowMesh.material.dispose();
-      }
+      if (typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(this.glowMesh.material); else this.glowMesh.material.dispose();   // (v35.13) release to pool
       this.glowMesh = null;
     }
     if (this.hazeMesh) {
@@ -28987,9 +28792,7 @@ function _despawnProjectileSilent(p) {
     }
     if (p.glowMesh) {
       if (p.glowMesh.parent) scene.remove(p.glowMesh);
-      if (!(p.glowMesh.material.userData && p.glowMesh.material.userData._projSharedGlow)) {
-        if (typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(p.glowMesh.material); else if (p.glowMesh.material && p.glowMesh.material.dispose) p.glowMesh.material.dispose();
-      }
+      if (typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(p.glowMesh.material); else if (p.glowMesh.material && p.glowMesh.material.dispose) p.glowMesh.material.dispose();   // (v35.13) release to pool
       p.glowMesh = null;
     }
     if (p.hazeMesh) {
@@ -29694,46 +29497,7 @@ async function _warmupCombatShadersBody() {
     // resident so compile sees them. See _EXPL_POOL at the EFFECTS block.
     try {
       if (typeof _warmupExplosionPool === 'function') _warmupExplosionPool();
-      // (v35.14) WebGPU: scene-resident + invisible is NOT enough — renderer.compile is a
-      // documented no-op on this backend, so the pooled explosion materials only built
-      // their pipelines on the FIRST REAL EXPLOSION (storm bench: ~110 unnamed builds x2
-      // passes mid-fight). Deepen the pools to real burst depth, then force-DRAW every
-      // pooled material behind the loading overlay via the batched warm renderer.
-      if (typeof _EXPL_POOL !== 'undefined' && typeof _acquireExplosionMesh === 'function' && typeof _releaseExplosionMesh === 'function') {
-        const _deepen = { flash: 12, flare: 12, fire: 12, core: 12, smoke: 12, chunk: 24, spark: 24, sparkFlash: 12, puff: 12, flatShock: 8, ringShock: 8, ring2Shock: 6, potatoSphere: 4 };
-        const _acq = [];
-        for (const k in _deepen) { if (!_EXPL_POOL[k]) continue; for (let i = _EXPL_POOL[k].length; i < _deepen[k]; i++) _acq.push(_acquireExplosionMesh(k)); }
-        for (const m of _acq) _releaseExplosionMesh(m);
-        if (typeof _warmMaterialInstancesBatched === 'function') {
-          const _mats = []; const _seen = new Set();
-          for (const k in _EXPL_POOL) { for (const m of _EXPL_POOL[k]) { if (m && m.material && !_seen.has(m.material)) { _seen.add(m.material); _mats.push(m.material); } } }
-          const _warmSph = (typeof _EXPL_SPHERE_MED !== 'undefined') ? _EXPL_SPHERE_MED : new THREE.SphereGeometry(0.5, 8, 6);
-          await _warmMaterialInstancesBatched(_mats, _warmSph, 8);
-        }
-      }
-    } catch (_e2) { try { console.warn('[warmup] explosion pool warm-draw failed:', _e2); } catch (__) {} }
-
-    try {
-      // (v35.14) LIGHTNING BOLT POOLS: 96 slots x2 materials (halo+core, + the dark pool)
-      // are created at page boot with .visible=false — but WebGPU never builds a pipeline
-      // for an undrawn material (renderer.compile is a no-op here), so the first combat
-      // arcs compiled 100+ bolt materials MID-FIGHT (storm bench: 120 builds in 5s = the
-      // residual hitching after the FX pools were fixed). Force-draw every pooled bolt
-      // material behind the loading overlay. Warm geometry carries EXACTLY position+uv
-      // like the real tube geometry so the compiled pipeline layout matches.
-      if (typeof _warmMaterialInstancesBatched === 'function') {
-        const _boltMats = [];
-        if (typeof _lightningPool !== 'undefined') { for (const s of _lightningPool) { if (s) { if (s.haloMat) _boltMats.push(s.haloMat); if (s.coreMat) _boltMats.push(s.coreMat); } } }
-        if (typeof _darkLightningPool !== 'undefined') { for (const s of _darkLightningPool) { if (s && s.mat) _boltMats.push(s.mat); } }
-        if (_boltMats.length) {
-          const _boltGeo = new THREE.BufferGeometry();
-          _boltGeo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 1,0,0, 0,1,0], 3));
-          _boltGeo.setAttribute('uv', new THREE.Float32BufferAttribute([0,0, 1,0, 0,1], 2));
-          _boltGeo.setIndex([0, 1, 2]);
-          await _warmMaterialInstancesBatched(_boltMats, _boltGeo, 12);
-        }
-      }
-    } catch (_e3) { try { console.warn('[warmup] lightning pool warm-draw failed:', _e3); } catch (__) {} }
+    } catch (_) { /* pool warmup is non-fatal; game still runs, just takes one stall */ }
 
     try {
       if (typeof EFFECT_PRESETS !== 'undefined' && typeof _makeLayeredFXMaterial === 'function') {
@@ -29810,34 +29574,30 @@ async function _warmupCombatShadersBody() {
             _layeredFXWarmupMeshes.push(_scWarmMesh);
           }
         } catch (_) {}
-        // (v35.13) Warm the ACTUAL page-lifetime projectile materials. Glow and
-        // smoke cone are shared by class color, so seven variants cover any
-        // barrage concurrency without 24-48 duplicate TSL graphs.
+        // (v35.13) CONCURRENCY WARM: one prototype only warms one material
+        // object. WebGPU builds a node graph/bind group for every fresh
+        // material instance, and Mega Barrage can keep >24 projectile glows
+        // + smoke cones alive simultaneously. Render a full 48-slot reserve
+        // behind the loading overlay, then return those exact warmed materials
+        // to the runtime pools during cleanup below. Combat only pops them.
         try {
-          // (v35.14 FIX) `CLASS_COLORS` was an UNDECLARED bare identifier (the table lives at
-          // LSS.CLASS_COLORS) -> ReferenceError on the first line of this try -> the silent
-          // catch below ATE the entire FX seeding block (proj glow/cone warms, projectile
-          // pools, cloud x48 / fireball x48 / smoke x32 seeds AND their batched warm-draws)
-          // in EVERY mode. Nothing Codex seeded ever ran; combat still compiled mid-fight.
-          const _classColorTable = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS : {};
-          const _projWarmColors = Array.from(new Set(Object.values(_classColorTable).concat([0xffffff])));
-          if (typeof _getProjectileGlowMaterial === 'function' && typeof _SHARED_PROJ_GLOW_GEO !== 'undefined') {
-            for (let _pi = 0; _pi < _projWarmColors.length; _pi++) {
-              const _pm = _getProjectileGlowMaterial(_projWarmColors[_pi]);
+          const _projWarmSlots = 32;   // measured barrage reserve; 48 made the loading pass itself a multi-second compile storm
+          if (typeof _makeFXMaterial === 'function' && typeof _SHARED_PROJ_GLOW_GEO !== 'undefined') {
+            for (let _pi = 0; _pi < _projWarmSlots; _pi++) {
+              const _pm = _makeFXMaterial('proj_glow');
               const _px = new THREE.Mesh(_SHARED_PROJ_GLOW_GEO, _pm);
               _px.position.set(0, -1e6, _pi * 2); _px.frustumCulled = false;
               _px.userData._layeredFXWarmup = true;
-              _px.userData._sharedProjectileFXWarm = true;
               scene.add(_px); _layeredFXWarmupMeshes.push(_px);
             }
           }
-          if (typeof _acquireSmokeConeMaterial === 'function' && typeof _getSmokeConeGeometry === 'function') {
-            for (let _pi = 0; _pi < _projWarmColors.length; _pi++) {
-              const _pm = _acquireSmokeConeMaterial(_projWarmColors[_pi]);
+          if (typeof _makeSmokeConeMaterial === 'function' && typeof _getSmokeConeGeometry === 'function') {
+            for (let _pi = 0; _pi < _projWarmSlots; _pi++) {
+              const _pm = _makeSmokeConeMaterial(0xffffff);
               const _px = new THREE.Mesh(_getSmokeConeGeometry(), _pm);
               _px.position.set(0, -1e6, 120 + _pi * 2); _px.frustumCulled = false;
               _px.userData._layeredFXWarmup = true;
-              _px.userData._sharedProjectileFXWarm = true;
+              _px.userData._smokeConePoolWarm = true;
               scene.add(_px); _layeredFXWarmupMeshes.push(_px);
             }
           }
@@ -29854,33 +29614,7 @@ async function _warmupCombatShadersBody() {
               for (const _pm of _mats) _releaseProjectileMaterial(_pm);
             }
           }
-          if (typeof _seedFXBurstMaterialPool === 'function') {
-            _seedFXBurstMaterialPool('cloud', 48);          // above High's 42-live global ceiling
-            _seedFXBurstMaterialPool('fireball', 48);
-            _seedFXBurstMaterialPool('fireball_purple', 16);
-            _seedFXBurstMaterialPool('fireball_cyan', 16);
-          }
-          if (typeof _acquireSmokeMaterial === 'function' && typeof _releaseSmokeMaterial === 'function') {
-            const _smokeWarm = [];
-            for (let _si = 0; _si < 48; _si++) _smokeWarm.push(_acquireSmokeMaterial(0x222018, 0.85));   // (v35.16) 32 -> 48
-            for (const _sm of _smokeWarm) _releaseSmokeMaterial(_sm);
-          }
-          if (typeof _warmMaterialInstancesBatched === 'function') {
-            const _fxWarmDraw = [];
-            const _takePool = function (name, count) {
-              const p = _fxBurstMatPool.get(name) || [];
-              // Runtime acquire() uses pop(): warm from the BACK so the exact
-              // next-to-be-consumed objects are hot, not the dormant front.
-              for (let i = 0; i < Math.min(count, p.length); i++) _fxWarmDraw.push(p[p.length - 1 - i]);
-            };
-            _takePool('cloud', 48);
-            _takePool('fireball', 48);
-            _takePool('fireball_purple', 16);
-            _takePool('fireball_cyan', 16);
-            await _warmMaterialInstancesBatched(_fxWarmDraw, _warmGeo, 6);
-            await _warmMaterialInstancesBatched(_smokeMatPool.slice(-48), _SMOKE_GEO, 6);
-          }
-        } catch (_e) { try { console.warn('[warmup] FX pool seeding failed:', _e); } catch (__) {} }   // (v35.14) LOUD — a silent throw here previously disabled all FX seeding
+        } catch (_) {}
         try {
           if (typeof _makeGasCloudMaterial === 'function') {
             // (perf 2026-06-12) _keepMaterial, same reasoning as the smoke
@@ -30037,10 +29771,7 @@ async function _warmupCombatShadersBody() {
           // materials to the runtime pool. Disposing them here releases the
           // compiled WebGL program, which moves the hitch back to the first
           // real explosion in combat.
-          if (m.material && m.userData && m.userData._sharedProjectileFXWarm) {
-            // Page-lifetime color cache: remove only the warm mesh.
-          }
-          else if (m.material && m.userData && m.userData._projectileMatPoolWarm &&
+          if (m.material && m.userData && m.userData._projectileMatPoolWarm &&
               typeof _releaseProjectileMaterial === 'function') {
             _releaseProjectileMaterial(m.material);
           }
@@ -31094,10 +30825,10 @@ function spawnExplosion(pos, size) {
       // Force-expire the oldest so the new one fits within the cap.
       const old = game.effects[oldestSmokeIdx];
       if (old.mesh && old.mesh.parent) scene.remove(old.mesh);
-      if (old.mesh && old.mesh.material) _releaseSmokeMaterial(old.mesh.material);
+      if (old.mesh && old.mesh.material && old.mesh.material.dispose) old.mesh.material.dispose();
       game.effects.splice(oldestSmokeIdx, 1);
     }
-    const smokeMat = _acquireSmokeMaterial(0x222018, 0.85);
+    const smokeMat = _makeSmokeMaterial(0x222018, 0.85);
     // Override the shader's uOctaves to track the live quality
     // preset. Low = 1, Medium = 2, High = 3. Existing smoke materials
     // keep their bake-time octave count ; only newly spawned plumes
@@ -32693,10 +32424,10 @@ class ClusterObstacle {
         if (smokeAlive >= SMOKE_MAX && oldestIdx >= 0) {
           const old = game.effects[oldestIdx];
           if (old.mesh && old.mesh.parent) scene.remove(old.mesh);
-          if (old.mesh && old.mesh.material) _releaseSmokeMaterial(old.mesh.material);
+          if (old.mesh && old.mesh.material && old.mesh.material.dispose) old.mesh.material.dispose();
           game.effects.splice(oldestIdx, 1);
         }
-        const smokeMat = _acquireSmokeMaterial(0x080812, 1.0);
+        const smokeMat = _makeSmokeMaterial(0x080812, 1.0);
         if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
           smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
         }
@@ -32797,7 +32528,7 @@ class ClusterObstacle {
             const _ef = game.effects[_ei];
             if (_ef && _ef.type === 'shaderSmoke' && _ef.parentCluster === this) {
               if (_ef.mesh && _ef.mesh.parent) scene.remove(_ef.mesh);
-              if (_ef.mesh && _ef.mesh.material) _releaseSmokeMaterial(_ef.mesh.material);
+              if (_ef.mesh && _ef.mesh.material && _ef.mesh.material.dispose) _ef.mesh.material.dispose();
               game.effects.splice(_ei, 1);
             }
           }
@@ -37435,19 +37166,6 @@ function _pinCombatEffectPrograms() {
         if (typeof _makeFireCloudMaterial === 'function') {
           _tp(() => _makeFireCloudMaterial({ radius: 48, alpha: 0.6, oct: 5 }));
           _tp(() => _makeFireCloudMaterial({ radius: 350, alpha: 0.55, additive: false, oct: 5 }));
-          // (v35.14) SEED the fire-cloud pool: K pre-built materials pinned here render
-          // during the 2 warm frames behind the countdown, so their pipelines exist before
-          // any explosion. Pin removal only detaches (never disposes) — the pool keeps them.
-          if (typeof _fireCloudMatPool !== 'undefined') {
-            while (_fireCloudMatPool.length < 16) {
-              try {
-                const _fcm = _makeFireCloudMaterial({ radius: 48, alpha: 0.6, oct: 5 });
-                _fcm.userData._fireCloudPool = true;
-                _add(_sph, _fcm);
-                _fireCloudMatPool.push(_fcm);
-              } catch (_) { break; }
-            }
-          }
         }
         if (typeof _makeFXMaterial === 'function') _tp(() => _makeFXMaterial('fireball')); // covers all 12 LayeredFX presets (one program)
         if (typeof _makeExplosionOrbMaterial === 'function') _tp(() => _makeExplosionOrbMaterial(0xff8844, 0.8));
@@ -37570,12 +37288,9 @@ function _warmRealCombatFX() {
     const W = (fn) => { try { fn(); } catch (_) {} };
     const _meshBefore = new Set(); scene.traverse(o => { if (o.isMesh) _meshBefore.add(o); });
     W(() => { if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(fp, 40); });
-    // (v35.13) 0.02-0.05s expired before the next render when this warmup
-    // runs from the launch handler. Keep probes alive across several loading
-    // frames; they remain 50k units below the arena and never become visible.
-    W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.45, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.45, { startScale: 0.3, endScale: 1 }); } });
-    W(() => { if (typeof spawnSupershapeBurst === 'function') spawnSupershapeBurst('fireball', fp, 80, 0.45, { startScale: 0.3, endScale: 1 }); });
-    W(() => { if (typeof _acquireSmokeMaterial === 'function' && typeof _SMOKE_GEO !== 'undefined') { const _sm = new THREE.Mesh(_SMOKE_GEO, _acquireSmokeMaterial(0x222018, 0.85)); _sm.position.copy(fp); scene.add(_sm); game.effects.push({ mesh: _sm, lifetime: 0.45, age: 0, type: 'shaderSmoke', baseScale: 1 }); } });
+    W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.05, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); } });
+    W(() => { if (typeof spawnSupershapeBurst === 'function') spawnSupershapeBurst('fireball', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); });
+    W(() => { if (typeof _makeSmokeMaterial === 'function' && typeof _SMOKE_GEO !== 'undefined') { const _sm = new THREE.Mesh(_SMOKE_GEO, _makeSmokeMaterial(0x222018, 0.85)); _sm.position.copy(fp); scene.add(_sm); game.effects.push({ mesh: _sm, lifetime: 0.02, age: 0, type: 'shaderSmoke', baseScale: 1 }); } });
     W(() => { if (typeof spawnTracer === 'function') spawnTracer(fp, fp2, 0xffffff, 1); });
     W(() => { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(fp, 6); });
     W(() => { if (typeof spawnPelletBurst === 'function') spawnPelletBurst(fp, V(1, 0, 0), 100); });
@@ -37583,18 +37298,6 @@ function _warmRealCombatFX() {
     W(() => { if (typeof spawnShieldHit === 'function') spawnShieldHit(fp, 30, 0x66ccff, null); });
     W(() => { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(fp, fp2, 0xaaccff, 0.02, 1, 1); });
     W(() => { if (typeof spawnDarkLightningBolt === 'function') spawnDarkLightningBolt(fp, fp2, 0.02, 1); });
-    // (v35.14) The single bolt above warms ONE of the 96 pool slots — every OTHER slot's
-    // halo+core materials still compiled mid-fight on their first live draw (storm bench:
-    // ~148 bolt builds/5s AFTER canvas-target warm-draws, because the live loop renders
-    // into the postFX and mirror RTs whose pipelines are per-target). Cycle EVERY slot
-    // through a real spawn here so all pool bolt materials build in the true live
-    // contexts behind the countdown. branches=0 keeps the one-time tube builds cheap.
-    W(() => { if (typeof spawnLightningBolt === 'function' && typeof _LIGHTNING_POOL_SIZE !== 'undefined') { for (let _bi = 1; _bi < _LIGHTNING_POOL_SIZE; _bi++) { const _o = fp.clone(); _o.x += (_bi % 12) * 40; _o.z += ((_bi / 12) | 0) * 40; const _o2 = _o.clone(); _o2.y += 40; spawnLightningBolt(_o, _o2, 0xaaccff, 0.06, 0, 1); } } });
-    W(() => { if (typeof spawnDarkLightningBolt === 'function' && typeof _darkLightningPool !== 'undefined') { for (let _bi = 1; _bi < _darkLightningPool.length; _bi++) { const _o = fp.clone(); _o.x -= _bi * 30; const _o2 = _o.clone(); _o2.y += 30; spawnDarkLightningBolt(_o, _o2, 0.06, 0); } } });
-    // (v35.14) Same pool-depth treatment for the explosion mesh pool: several real
-    // explosions cycle the flash/flare/fire/core/shock/smoke/chunk/spark layers so
-    // their orb materials build in the live contexts too, not on the first real kill.
-    W(() => { if (typeof spawnExplosion === 'function') { for (let _ei = 0; _ei < 6; _ei++) { const _o = fp.clone(); _o.z += 200 + _ei * 120; spawnExplosion(_o, 30); } } });
     W(() => { if (typeof spawnPyroFlame === 'function') spawnPyroFlame(fp); });
     W(() => { if (typeof spawnFlameChainVisual === 'function') spawnFlameChainVisual(fp, V(1, 0, 0), 200, 'A'); });
     W(() => { if (typeof spawnDamageSmoke === 'function') spawnDamageSmoke(fp, 0.5); });
@@ -38666,19 +38369,6 @@ const MAX_EFFECTS = 350;
 function _lssRetainMat(mat) {
   if (!mat) return;
   if (Array.isArray(mat)) { for (const m of mat) _lssRetainMat(m); return; }
-  // (v35.16) POOL-TAGGED MATERIALS GO HOME, NOT TO THE GRAVEYARD. The signature below
-  // keys on vertexShader/fragmentShader string lengths that DON'T EXIST on NodeMaterials
-  // (all collapse to one signature), so every retained "duplicate" node material was
-  // DISPOSED — every death path that retains (round-end sweeps, vortex beams, misc
-  // cleanup) silently drained the FX pools, and the next combat spawn paid a fresh
-  // TSL build + pipeline compile = the constant in-fight hitches on v35.13-15.
-  try {
-    if (mat.userData) {
-      if (mat.userData.presetName && typeof _releaseFXBurstMaterial === 'function') { _releaseFXBurstMaterial(mat); return; }
-      if (mat.userData._fireCloudPool && typeof _releaseFireCloudMaterial === 'function') { _releaseFireCloudMaterial(mat); return; }
-    }
-    if (mat.name === 'LSS Shader Smoke' && typeof _releaseSmokeMaterial === 'function') { _releaseSmokeMaterial(mat); return; }
-  } catch (_) {}
   try {
     if (!window._fxRetain) window._fxRetain = {};
     const sig = (mat.type || 'M') + '|' + (mat.vertexShader ? mat.vertexShader.length : 0) +
@@ -38738,7 +38428,7 @@ function _disposeOrReleaseEffect(e) {
   // uniforms) and must be disposed.
   if (e.type === 'shaderSmoke') {
     scene.remove(e.mesh);
-    _releaseSmokeMaterial(e.mesh.material);
+    _lssRetainMat(e.mesh.material);
     return;
   }
   // Vortex Laser beams share the global _VORTEX_CORE_BEAM_GEO ;
@@ -38810,7 +38500,6 @@ function _disposeOrReleaseEffect(e) {
   // burst pool. spawnSupershapeBurst owns a unique geometry (no _fxSharedGeo)
   // so that one still disposes its geometry.
   if (e.type === 'fx_burst') {
-    if (e._countedLayered) { _liveFXBurstCount = Math.max(0, _liveFXBurstCount - 1); e._countedLayered = false; }
     if (e.mesh) {
       if (e.mesh.parent) scene.remove(e.mesh);
       if (!e._fxSharedGeo && e.mesh.geometry && e.mesh.geometry.dispose) {
@@ -40208,11 +39897,11 @@ function spawnImpactSparks(pos, count) {
       if (smokeAlive >= SMOKE_MAX && oldestIdx >= 0) {
         const old = game.effects[oldestIdx];
         if (old.mesh && old.mesh.parent) scene.remove(old.mesh);
-        if (old.mesh && old.mesh.material) _releaseSmokeMaterial(old.mesh.material);
+        if (old.mesh && old.mesh.material && old.mesh.material.dispose) old.mesh.material.dispose();
         game.effects.splice(oldestIdx, 1);
       }
       // Warm dirty-gray smoke; still readable as smoke through ACES.
-      const smokeMat = _acquireSmokeMaterial(0x554a3a, 0.55);
+      const smokeMat = _makeSmokeMaterial(0x554a3a, 0.55);
       if (smokeMat.uniforms && smokeMat.uniforms.uOctaves && typeof QUALITY !== 'undefined') {
         smokeMat.uniforms.uOctaves.value = QUALITY.smokeOctaves();
       }
@@ -41650,10 +41339,6 @@ function commitLoadout(key) {
     game.scoreA = 0;
     game.scoreB = 0;
     game.currentRound = 1;
-    // (v35.13) Run the real-spawn WebGPU warmup NOW, while PREPARING ARENA
-    // is still up and before the launch countdown. It used to run at the
-    // warmup→FIGHT edge, putting these exact first draws into combat frame 1.
-    if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
     // Stamp match-start time + clear last-posted-id so a
     // new match's results post fresh to the backend. Also reset the
     // solo match id so single-player matches get unique D1 entries.
@@ -44340,7 +44025,7 @@ function executeAbility(slot, ability) {
       const BEAM_RADIUS = 4; // (v32.49) tiny — bright circle sits at the muzzle, hugs the tracer
       const beamLife = 0.22; // (v32.50) snappy — dissolves muzzle->target, doesn't linger
       const beamMid = _vlOrigin.clone().addScaledVector(_vlDir, range * 0.5);
-      const beamMat = (typeof _acquireFXBurstMaterial === 'function') ? _acquireFXBurstMaterial('core_beam') : _makeFXMaterial('core_beam');   // (v35.16) pooled — was a fresh build per laser cast
+      const beamMat = _makeFXMaterial('core_beam');
       if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
       const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
       // (v32.49) Slim cylinder whose bright "circle" sits AT the muzzle (matching
@@ -45828,7 +45513,7 @@ function _ensureThermalFlameMeshes(ship, chassis) {
   const radius = hLen * 1.10;
   const geo = new THREE.SphereGeometry(radius, 32, 24);
   // (fire-cloud) Thermal shield uses the volumetric fire shader.
-  const mat = _acquireFireCloudMaterial({ radius: radius, alpha: 0.5, oct: 5, c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a });   // (v35.14) pooled
+  const mat = _makeFireCloudMaterial({ radius: radius, alpha: 0.5, oct: 5, c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a });
   mat.userData._fireCloud = true;
   // Brighter than default so the inner walls read strongly against
   // close-camera view.
@@ -45887,7 +45572,7 @@ function _disposeThermalShieldFlameSpheres(ship) {
     if (!m) return;
     if (m.parent) scene.remove(m);
     if (m.geometry) m.geometry.dispose();
-    if (m.material) { if (typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); else if (m.material.dispose) m.material.dispose(); }
+    if (m.material) { if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else if (m.material.dispose) m.material.dispose(); }
   };
   if (ship.thermalFlameMesh) { _rm(ship.thermalFlameMesh); ship.thermalFlameMesh = null; }
   if (ship.thermalFlameMeshes) { for (const m of ship.thermalFlameMeshes) _rm(m); ship.thermalFlameMeshes = null; }
@@ -47971,7 +47656,7 @@ function updateAbilities(dt) {
       if (eff.fireMeshes) {
         for (const m of eff.fireMeshes) {
           if (m && m.parent) scene.remove(m);
-          if (m && m.material && typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material);
+          if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material);
         }
         eff.fireMeshes = null;
       }
@@ -47998,7 +47683,7 @@ function updateAbilities(dt) {
           const _shared = m.userData && m.userData._fxSharedGeo;
           if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
           if (m.material) {
-            if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); }
+            if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); }
             else if (_shared) _releaseFXBurstMaterial(m.material);
             else if (m.material.dispose) m.material.dispose();
           }
@@ -48616,7 +48301,7 @@ function updateRoundSystem(dt) {
         // round-end transitions. Now we walk every known per-effect mesh
         // reference and remove + dispose each one.
         for (const eff of game.worldEffects) {
-          if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); } eff.fireMeshes = null; }
+          if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
           if (eff.mesh && eff.mesh.parent) {
             scene.remove(eff.mesh);
             if (eff.mesh.geometry) eff.mesh.geometry.dispose();
@@ -48648,7 +48333,7 @@ function updateRoundSystem(dt) {
               const _shared = m.userData && m.userData._fxSharedGeo;
               if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
               if (m.material) {
-                if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); }
+                if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); }
                 else if (_shared) _releaseFXBurstMaterial(m.material);
                 else if (m.material.dispose) m.material.dispose();
               }
@@ -49056,7 +48741,7 @@ function returnToRootMenu() {
   }
 
   for (const eff of game.worldEffects) {
-    if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); } eff.fireMeshes = null; }
+    if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
     if (eff.mesh && eff.mesh.parent) {
       scene.remove(eff.mesh);
       if (eff.mesh.geometry) eff.mesh.geometry.dispose();
@@ -49090,7 +48775,7 @@ function returnToRootMenu() {
         const _shared = m.userData && m.userData._fxSharedGeo;
         if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
         if (m.material) {
-          if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); }
+          if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); }
           else if (_shared) _releaseFXBurstMaterial(m.material);
           else if (m.material.dispose) m.material.dispose();
         }
@@ -57794,8 +57479,8 @@ function spawnSupershapeBurst(presetName, pos, radius, life, opts) {
   opts = opts || {};
   const startScale = (opts.startScale != null) ? opts.startScale : 0.20;
   const endScale   = (opts.endScale   != null) ? opts.endScale   : 1.0;
-  const mat = (typeof _acquireFXBurstMaterial === 'function')
-    ? _acquireFXBurstMaterial(presetName)   // (v35.16) pooled — was a fresh TSL build per supershape burst (every big explosion)
+  const mat = (typeof _makeFXMaterial === 'function')
+    ? _makeFXMaterial(presetName)
     : new THREE.MeshBasicMaterial({ color: 0xff7722, transparent: true, opacity: 0.85 });
   if (mat.uniforms && mat.uniforms.uPosScale) {
     mat.uniforms.uPosScale.value = 1.0 / Math.max(1, radius);
@@ -70988,7 +70673,7 @@ function _deathCamTickFire(dt) {
       }
     }
     if (eff.timer <= 0) {
-      if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _releaseFireCloudMaterial(m.material); } eff.fireMeshes = null; }
+      if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
       we.splice(e, 1);
     }
   }
