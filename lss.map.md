@@ -9,6 +9,7 @@
 - **To find a subsystem:** scan the Section Map below (it's in file order, grouped into PARTs), grab the `Jump:` anchor, search for it in `index.html`.
 - **To keep this current:** when you add/remove/rename a subsystem, update its entry here. Keep entries **coarse** (subsystem-level, not per-function). To refresh the `~L` hints after big edits, grep each anchor.
 - **Sibling of** `index.html` in the repo root. This is a doc — it changes nothing at runtime and preserves the single-file build.
+- **Companion:** [`index-working.html`](index-working.html) is the *current* 34.62 code with ~93.6% of the stripped comments restored (from the 34.37 snapshot `last_ship_sailing.html`), proven code-byte-identical to `index.html`. Use it as a **reading copy** — this map is the high-level index; `index-working.html` is the line-level detail. The shipping `index.html` stays comment-stripped/lean.
 
 ---
 
