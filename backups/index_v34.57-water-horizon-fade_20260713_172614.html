@@ -3041,7 +3041,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.60';
+const LSS_BUILD = '34.57';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -19520,7 +19520,6 @@ function _swBuildHubWaterDispGet(WL) {
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
         uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
-        uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
         uSprayBreak: { value: 1.4 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.32 }, uSprayFreq: { value: 0.05 },
         
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 2.4 },
@@ -19560,7 +19559,6 @@ function _swBuildHubWaterDispGet(WL) {
     ].join('\n'),
     fragmentShader: [
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
-      'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uFoamLod;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   
@@ -19630,10 +19628,9 @@ function _swBuildHubWaterDispGet(WL) {
       '  float depthShape = mix(farDepth, nearDepth, lod);',                                        
       '  float foamVis = max(lod, fIn * edgeFade);',                                                
       '  float shoreFoam = (1.0 - smoothstep(0.0, 0.16, depthShape)) * (0.35 + 0.65 * spd) * foamVis;',
-      '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',
-      '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
-      '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
-      '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
+      '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',                            
+      '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',   
+      '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',   
       '  #include <fog_fragment>',
       '}',
     ].join('\n'),
@@ -19828,19 +19825,13 @@ window.__refl = function (on) {
 
 
 window.__waterHorizon = function (str, a, b) {
-  let hit = 0;
-  const apply = (m) => {
-    const u = m && m.material && m.material.uniforms;
-    if (!u || !u.uWHorizStr) return;
-    if (str != null) u.uWHorizStr.value = str;
-    if (a != null) u.uWHorizA.value = a;
-    if (b != null) u.uWHorizB.value = b;
-    hit++;
-  };
-  apply(game._hubWater);
-  if (typeof _hubWaterDisp !== 'undefined') apply(_hubWaterDisp);
-  if (!hit) return 'no hub water (enter freeflight)';
-  return { planes: hit, strength: str, fadeStart: a, fadeEnd: b };
+  const w = game._hubWater;
+  const u = w && w.material && w.material.uniforms;
+  if (!u || !u.uWHorizStr) return 'no reflective hub water (enter freeflight)';
+  if (str != null) u.uWHorizStr.value = str;
+  if (a != null) u.uWHorizA.value = a;
+  if (b != null) u.uWHorizB.value = b;
+  return { strength: u.uWHorizStr.value, fadeStart: u.uWHorizA.value, fadeEnd: u.uWHorizB.value };
 };
 window.__reflBench = function (framesPerPhase) {
   const N = framesPerPhase || 180;
@@ -21604,8 +21595,6 @@ function _wxMakeDome() {
       uZenith: { value: new THREE.Color(0x2e64c8) },
       uHorizon: { value: new THREE.Color(0xb8d4ea) },
       uHaze: { value: new THREE.Color(0x9fc8e8) },
-      uBelow: { value: new THREE.Color(0x9fc8e8) },
-      uBelowBlend: { value: 0.10 },
     },
     vertexShader: `
       varying vec3 vDir;
@@ -21615,8 +21604,7 @@ function _wxMakeDome() {
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
-      uniform vec3 uSunDir, uZenith, uHorizon, uHaze, uBelow;
-      uniform float uBelowBlend;
+      uniform vec3 uSunDir, uZenith, uHorizon, uHaze;
       varying vec3 vDir;
       void main() {
         float up = clamp(vDir.y, -0.12, 1.0);
@@ -21625,8 +21613,7 @@ function _wxMakeDome() {
         col += vec3(1.0, 0.82, 0.55) * sunAmt * 0.35;
         float hazeAmt = 1.0 - smoothstep(0.0, 0.22, up);
         col = mix(col, uHaze, hazeAmt * 0.9);
-        float _below = smoothstep(uBelowBlend, -uBelowBlend, vDir.y);
-        col = mix(col, uBelow, _below * 0.95);
+        if (vDir.y < 0.0) col = mix(col, uHaze, 0.95);
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
@@ -21636,32 +21623,6 @@ function _wxMakeDome() {
   return dome;
 }
 
-
-if (typeof window !== 'undefined') {
-
-  window.__domeHide = function (hide) {
-    if (!_WX || !_WX.dome) return 'no weather dome (enter freeflight hub)';
-    _WX.dome.visible = (hide === false);
-    return _WX.dome.visible ? 'dome VISIBLE' : 'dome HIDDEN';
-  };
-
-  window.__skyDome = function (zenith, horizon, haze, below, blend) {
-    if (!_WX || !_WX.dome || !_WX.dome.material || !_WX.dome.material.uniforms) return 'no weather dome (enter freeflight hub)';
-    const u = _WX.dome.material.uniforms;
-    if (zenith != null && u.uZenith) u.uZenith.value.set(zenith);
-    if (horizon != null && u.uHorizon) u.uHorizon.value.set(horizon);
-    if (haze != null && u.uHaze) u.uHaze.value.set(haze);
-    if (below != null && u.uBelow) u.uBelow.value.set(below);
-    if (blend != null && u.uBelowBlend) u.uBelowBlend.value = blend;
-    return {
-      zenith: '#' + u.uZenith.value.getHexString(),
-      horizon: '#' + u.uHorizon.value.getHexString(),
-      haze: '#' + u.uHaze.value.getHexString(),
-      below: u.uBelow ? '#' + u.uBelow.value.getHexString() : 'n/a',
-      blend: u.uBelowBlend ? u.uBelowBlend.value : 'n/a',
-    };
-  };
-}
 
 function _wxMakeSun() {
   const mk = (size, frag) => {
