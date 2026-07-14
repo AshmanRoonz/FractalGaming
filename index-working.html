@@ -1148,7 +1148,7 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
 }
-#map-window-preview svg { width: 100%; height: 100%; display: block; }
+#map-window-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
 #map-window-preview .map-preview-placeholder {
   font-size: 11px; color: #888; letter-spacing: 1px;
 }
@@ -7228,80 +7228,18 @@ function selectMap(mapKey) {
 function _renderMapPreview(mapData) {
   const wrap = document.getElementById('map-window-preview');
   if (!wrap) return;
-  if (!mapData || !Array.isArray(mapData.rooms) || mapData.rooms.length === 0) {
-    // Placeholder for maps without structural data (gmaps, race custom).
-    const label = (mapData && mapData.type === 'gmaps') ? 'CITY OVERLAY'
-                : (mapData && mapData.name) ? mapData.name.toUpperCase()
-                : 'PREVIEW UNAVAILABLE';
-    wrap.innerHTML = '<div class="map-preview-placeholder">' + label + '</div>';
+  // Image thumbnail when the map provides one (classic arenas).
+  if (mapData && mapData.thumb) {
+    const alt = String(mapData.name || 'map').replace(/[<>"]/g, '');
+    wrap.innerHTML = '<img class="map-thumb-img" src="' + mapData.thumb +
+      '" alt="' + alt + '" draggable="false">';
     return;
   }
-  const rooms = mapData.rooms;
-  const tunnels = Array.isArray(mapData.tunnels) ? mapData.tunnels : [];
-  // Extent pass : compute min/max x + z including each room's radius.
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  for (const r of rooms) {
-    const rad = (typeof r.r === 'number') ? r.r : 1;
-    if (r.x - rad < minX) minX = r.x - rad;
-    if (r.x + rad > maxX) maxX = r.x + rad;
-    if (r.z - rad < minZ) minZ = r.z - rad;
-    if (r.z + rad > maxZ) maxZ = r.z + rad;
-  }
-  // Tunnel endpoints in case any extend outside the room bounds.
-  for (const t of tunnels) {
-    if (!Array.isArray(t.path)) continue;
-    for (const p of t.path) {
-      if (p.x < minX) minX = p.x;
-      if (p.x > maxX) maxX = p.x;
-      if (p.z < minZ) minZ = p.z;
-      if (p.z > maxZ) maxZ = p.z;
-    }
-  }
-  // 6% pad so the silhouettes don't kiss the box edges.
-  const w = Math.max(1, maxX - minX);
-  const h = Math.max(1, maxZ - minZ);
-  const pad = Math.max(w, h) * 0.06;
-  const vx = minX - pad, vy = minZ - pad, vw = w + pad * 2, vh = h + pad * 2;
-  // Color picker. Match the in-game team colors.
-  const colorFor = (room) => {
-    if (room.champion === true) return '#ffaa00';
-    if (room.team === 'A') return '#ff4a4a';
-    if (room.team === 'B') return '#44bb44';
-    return '#7a8aaa';
-  };
-  const stroke = 'rgba(255,170,0,0.55)';
-  const parts = [];
-  parts.push('<svg viewBox="' + vx + ' ' + vy + ' ' + vw + ' ' + vh + '" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">');
-  // Background fill of the play volume so rooms read as cavities in a
-  // dimmer arena outline. Simple rect ; the rooms + tunnels paint on top.
-  parts.push('<rect x="' + vx + '" y="' + vy + '" width="' + vw + '" height="' + vh + '" fill="rgba(0,0,0,0)" />');
-  // Tunnels first so rooms sit on top of them.
-  const tunnelWidth = Math.max(vw, vh) * 0.012;
-  for (const t of tunnels) {
-    if (!Array.isArray(t.path) || t.path.length < 2) continue;
-    let d = '';
-    for (let i = 0; i < t.path.length; i++) {
-      const p = t.path[i];
-      d += (i === 0 ? 'M ' : 'L ') + p.x + ' ' + p.z + ' ';
-    }
-    parts.push('<path d="' + d.trim() + '" fill="none" stroke="' + stroke + '" stroke-width="' + tunnelWidth + '" stroke-linecap="round" stroke-linejoin="round" />');
-  }
-  // (v32.54) Campaign legs have NO carved tunnel (open mountainous travel) ; draw
-  // a faint dashed connector between the first + last arena so the preview reads
-  // as a journey rather than two stray dots.
-  if (mapData._previewJourney && rooms.length >= 2) {
-    const ja = rooms[0], jb = rooms[rooms.length - 1];
-    const jdash = Math.max(vw, vh) * 0.03;
-    parts.push('<line x1="' + ja.x + '" y1="' + ja.z + '" x2="' + jb.x + '" y2="' + jb.z + '" stroke="rgba(255,170,0,0.40)" stroke-width="' + (Math.max(vw, vh) * 0.008) + '" stroke-dasharray="' + jdash + ' ' + jdash + '" stroke-linecap="round" />');
-  }
-  // Rooms : filled circles with a faint outline.
-  for (const r of rooms) {
-    const rr = (typeof r.r === 'number') ? r.r : Math.min(vw, vh) * 0.06;
-    const fill = colorFor(r);
-    parts.push('<circle cx="' + r.x + '" cy="' + r.z + '" r="' + rr + '" fill="' + fill + '" fill-opacity="0.65" stroke="' + fill + '" stroke-width="' + (rr * 0.10) + '" />');
-  }
-  parts.push('</svg>');
-  wrap.innerHTML = parts.join('');
+  // No thumbnail (custom / gmaps / race / campaign) : text placeholder.
+  const label = (mapData && mapData.type === 'gmaps') ? 'CITY OVERLAY'
+              : (mapData && mapData.name) ? mapData.name.toUpperCase()
+              : 'PREVIEW UNAVAILABLE';
+  wrap.innerHTML = '<div class="map-preview-placeholder">' + label + '</div>';
 }
 
 // Cycle to the prev (-1) or next (+1) map, wrapping at either end.
@@ -56912,6 +56850,7 @@ const SU = 150;
 const MAP_DATA = {
   hourglass: {
     name: 'The Nexus',
+    thumb: 'LSS/map_thumbs/nexus.png',
     description: 'Ring layout. Six chambers. Every room connects to two others; no dead ends.',
     defaultTheme: 'Rocky',
     // Cool indigo ring with a warm gold hub (the council-chamber feel).
@@ -56960,6 +56899,7 @@ const MAP_DATA = {
   // 7 rooms; spawns at z = +/- 9*SU; spans roughly +/-9 along z.
   spine: {
     name: 'The Spine',
+    thumb: 'LSS/map_thumbs/spine.png',
     description: 'Long axis with parallel bypasses. Center is the killing line; flank through the arcs.',
     defaultTheme: 'Volcanic',
     // Industrial gunmetal with crimson accents (the kill-corridor feel).
@@ -56998,6 +56938,7 @@ const MAP_DATA = {
   // 7 rooms; spawns at x = +/- 8*SU.
   infinity: {
     name: 'The Infinity',
+    thumb: 'LSS/map_thumbs/infinity.png',
     description: 'Two rings joined at a pinch. Hold the center, halve the map.',
     defaultTheme: 'Snow',
     // Teal lobe (left) and magenta lobe (right) with a hot orange center pinch.
@@ -57034,6 +56975,7 @@ const MAP_DATA = {
   // three-to-four exits. Compact and flat -- no verticality, no open sprawl.
   tower: {
     name: 'The Square',
+    thumb: 'LSS/map_thumbs/square.png',
     description: 'Enclosed square. Opposite-corner spawns around a central hub; perimeter loop plus spokes, no dead ends.',
     defaultTheme: 'Gold Mine',
     // Amber/bronze mine palette; warm hub, ore-dark corners.
@@ -57068,6 +57010,7 @@ const MAP_DATA = {
   // 7 rooms; horizontal span +/- 8*SU on z.
   cross: {
     name: 'The Cross',
+    thumb: 'LSS/map_thumbs/cross.png',
     description: 'Compact crucible. Four arms cut by diagonals; nowhere to hide.',
     defaultTheme: 'Grassy',
     // Grassy earth-and-gold palette (close-range brawl feel). Room order:
@@ -57107,6 +57050,7 @@ const MAP_DATA = {
   // Flat and compact -- replaces the old open, laggy Arc.
   arc: {
     name: 'The Delta',
+    thumb: 'LSS/map_thumbs/delta.png',
     description: 'Tight triangle. Neutral apex, two base spawns, central hub. Fast and close; no long sightlines.',
     defaultTheme: 'Crystal Cavern',
     // Neon violet/cyan crystal glow.
@@ -57132,77 +57076,12 @@ const MAP_DATA = {
   },
 
   // ----------------------------------------------------------------------
-  // The Box (Mossy): four-corner ring with an open middle. Opposite-corner
-  // spawns; a perimeter loop plus crossed diagonals, no central hub, so the
-  // middle is a contested open crossing. Flat and compact.
-  octahedron: {
-    name: 'The Box',
-    description: 'Four-corner ring, open middle. Opposite-corner spawns; perimeter plus crossed diagonals, no hub.',
-    defaultTheme: 'Mossy',
-    // Deep mossy greens.
-    palette: [
-      0x1a3018, 0x224020, 0x1a2c14, 0x284a24, 0x1e381a, 0x224020, 0x1a2c14, 0x203a1c
-    ],
-    rooms: [
-      { id: 'spawn_a', team: 'A',  x: -SU * 6,   y: 0, z: -SU * 6,   r: SU * 2.2 }, 
-      { id: 'ne',      team: null, x:  SU * 6,   y: 0, z: -SU * 6,   r: SU * 1.9 }, 
-      { id: 'spawn_b', team: 'B',  x:  SU * 6,   y: 0, z:  SU * 6,   r: SU * 2.2 }, 
-      { id: 'sw',      team: null, x: -SU * 6,   y: 0, z:  SU * 6,   r: SU * 1.9 }, 
-    ],
-    tunnels: [
-      
-      { path: [{x: -SU*6, y: 0, z: -SU*6}, {x:  SU*6, y: 0, z: -SU*6}]}, 
-      { path: [{x:  SU*6, y: 0, z: -SU*6}, {x:  SU*6, y: 0, z:  SU*6}]}, 
-      { path: [{x:  SU*6, y: 0, z:  SU*6}, {x: -SU*6, y: 0, z:  SU*6}]}, 
-      { path: [{x: -SU*6, y: 0, z:  SU*6}, {x: -SU*6, y: 0, z: -SU*6}]}, 
-      
-      { path: [{x: -SU*6, y: 0, z: -SU*6}, {x:  SU*6, y: 0, z:  SU*6}]}, 
-      { path: [{x:  SU*6, y: 0, z: -SU*6}, {x: -SU*6, y: 0, z:  SU*6}]}, 
-    ]
-  },
-
-  // ----------------------------------------------------------------------
-  // The Pentagon (Volcanic): flat five-room ring around a hub. Two spawns on
-  // the upper shoulders (mirror-symmetric); circle the ring or cut through the
-  // center. Flat and compact -- replaces the old vertical bipyramid.
-  pentagon: {
-    name: 'The Pentagon',
-    description: 'Flat five-room ring around a hub. Mirror spawns on the shoulders; circle the ring or cut the center.',
-    defaultTheme: 'Volcanic',
-    // Crimson/gunmetal forge palette.
-    palette: [
-      0x1c1818, 0x281a1a, 0x2a1c1c, 0x381616, 0x281818, 0x202020, 0x301818, 0x401818
-    ],
-    rooms: [
-      { id: 'center',  team: null, x:  0,             y: 0, z:  0,            r: SU * 2.4 },
-      { id: 'p_top',   team: null, x:  0,             y: 0, z: -SU * 7,       r: SU * 1.8 }, 
-      { id: 'spawn_b', team: 'B',  x:  SU * 6.658,    y: 0, z: -SU * 2.163,   r: SU * 2.1 }, 
-      { id: 'p_br',    team: null, x:  SU * 4.115,    y: 0, z:  SU * 5.663,   r: SU * 1.8 }, 
-      { id: 'p_bl',    team: null, x: -SU * 4.115,    y: 0, z:  SU * 5.663,   r: SU * 1.8 }, 
-      { id: 'spawn_a', team: 'A',  x: -SU * 6.658,    y: 0, z: -SU * 2.163,   r: SU * 2.1 }, 
-    ],
-    tunnels: [
-      
-      { path: [{x: 0, y: 0, z: -SU*7}, {x: SU*6.658, y: 0, z: -SU*2.163}]}, 
-      { path: [{x: SU*6.658, y: 0, z: -SU*2.163}, {x: SU*4.115, y: 0, z: SU*5.663}]}, 
-      { path: [{x: SU*4.115, y: 0, z: SU*5.663}, {x: -SU*4.115, y: 0, z: SU*5.663}]}, 
-      { path: [{x: -SU*4.115, y: 0, z: SU*5.663}, {x: -SU*6.658, y: 0, z: -SU*2.163}]}, 
-      { path: [{x: -SU*6.658, y: 0, z: -SU*2.163}, {x: 0, y: 0, z: -SU*7}]}, 
-      
-      { path: [{x: 0, y: 0, z: -SU*7}, {x: 0, y: 0, z: 0}]}, 
-      { path: [{x: SU*6.658, y: 0, z: -SU*2.163}, {x: 0, y: 0, z: 0}]}, 
-      { path: [{x: SU*4.115, y: 0, z: SU*5.663}, {x: 0, y: 0, z: 0}]}, 
-      { path: [{x: -SU*4.115, y: 0, z: SU*5.663}, {x: 0, y: 0, z: 0}]}, 
-      { path: [{x: -SU*6.658, y: 0, z: -SU*2.163}, {x: 0, y: 0, z: 0}]}, 
-    ]
-  },
-
-  // ----------------------------------------------------------------------
   // The Diamond (Broken Simulation): rotated four-point ring. North/south
   // spawns, east/west flanks, a central hub; diamond perimeter plus spokes.
   // Flat and compact.
   gyre: {
     name: 'The Diamond',
+    thumb: 'LSS/map_thumbs/diamond.png',
     description: 'Rotated four-point ring. North/south spawns, east/west flanks, central hub. Circle or cut across.',
     defaultTheme: 'Broken Simulation',
     // Grey/violet digital-glitch palette.
