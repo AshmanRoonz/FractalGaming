@@ -3042,7 +3042,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.63';
+const LSS_BUILD = '34.64';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -41124,9 +41124,24 @@ function _lssApplyShipRig(dt) {
       game._tpBoom = (_bSafe < _bCur) ? _bSafe : Math.min(_bLen, _bCur + (_bSafe - _bCur) * Math.min(1, dt * 4));
       if (game._tpBoom < _bLen - 0.01) _tpOff.multiplyScalar(game._tpBoom / _bLen);
       camera.position.add(_tpOff);
-      if (!player.mesh.visible) player.mesh.visible = true;   
+      if (!player.mesh.visible) player.mesh.visible = true;
     } else if (player.mesh.visible) {
-      player.mesh.visible = false;   
+      player.mesh.visible = false;
+    }
+    // (v34.64) First-person bank: roll the camera by the same smoothed bank the ship
+    // model gets above, so banking reads in cockpit view too (horizon tilts). Sign is
+    // inverted vs the mesh rotateZ because the mesh frame is Y-flipped (rotateY(PI)
+    // above conjugates a Z-roll to its negative). Safe against accumulation: BOTH
+    // callers (main path ~L40843, warmup/stasis path ~L40774) rebuild camera.quaternion
+    // from player.euler (roll-free, YXZ) every frame before calling this. Gated off in
+    // XR — the headset owns camera orientation; artificial roll is nauseating there.
+    // The post-rig net broadcast (~L8402) sends the rolled quat: _npFlipY conjugates it
+    // back to +bank on receivers, so peers finally see FP pilots bank — verified no
+    // double-apply (NetworkPlayer only slerps targetQuat*_npFlipY, adds no bank).
+    // Live-tune: window.__fpBank = scale factor (0 disables, 1 matches ship model).
+    // Default 0.5 (user-tuned): full model bank felt like too much tilt in cockpit.
+    if (!game.thirdPerson && !_vrNow && game._tpBank) {
+      camera.rotateZ(-game._tpBank * (window.__fpBank != null ? window.__fpBank : 0.5));
     }
   }
 }
