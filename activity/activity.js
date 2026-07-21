@@ -1,8 +1,9 @@
 // LSS Discord Activity stub.
 //
 // This file runs inside Discord's iframe at:
-//   https://1500305353210855615.discordsays.com/
-// which proxies to lss.fractalreality.ca/activity/index.html.
+//   https://1500305353210855615.discordsays.com/activity/
+// (the game's head shim redirect.js bounces the root mapping here when the
+// page is served through the Activity proxy).
 //
 // Discord's iframe enforces a strict CSP that blocks inline scripts,
 // inline event handlers (onclick=), external CDN fonts/scripts, and
@@ -13,20 +14,31 @@
 // navigation through Discord's parent window instead.
 //
 // What this file does:
-//   1. Loads the Discord Embedded App SDK (locally hosted in this
-//      folder so it satisfies the script-src 'self' CSP rule).
-//   2. Initializes the SDK with our Application ID, awaits ready().
-//   3. Wires the ENGAGE button to open the full game in a new browser
-//      window via discordSdk.commands.openExternalLink(). Forwards the
-//      Discord iframe context (instance_id, channel_id, etc.) as
-//      ?discord_* URL params so the game can use them later.
-//   4. Falls back to plain window.open() if loaded outside Discord
-//      (so direct-browser testing of /activity/ still works).
+//   1. Loads the Discord Embedded App SDK (vendored locally as
+//      discord-sdk.js — @discord/embedded-app-sdk@2.5.0, esm.sh bundle —
+//      so it satisfies the script-src 'self' CSP rule).
+//   2. Initializes the SDK with our Application ID and awaits ready()
+//      WITH A TIMEOUT. A 2026-07 field test showed ready() can hang
+//      forever (no error, no resolve) — the old code awaited it
+//      unconditionally, so ENGAGE clicks died silently. Now init
+//      settles within SDK_READY_TIMEOUT_MS no matter what, and if
+//      ready() straggles in late we adopt the SDK for the next click.
+//   3. Logs a capped handshake trace of window "message" events so a
+//      hang shows WHAT the client actually sent (or that it sent
+//      nothing) — paste the console when reporting issues.
+//   4. Wires ENGAGE to a fallback chain that always ends with something
+//      clickable: SDK openExternalLink → window.open → a plain visible
+//      <a target="_blank"> link under the button.
+//
+// Outside Discord (no frame_id/instance_id in the URL) the SDK is
+// skipped entirely and window.open handles it, so direct-browser
+// testing of /activity/ still works.
 
 import { DiscordSDK } from './discord-sdk.js';
 
 const APPLICATION_ID = '1500305353210855615';
 const GAME_URL       = 'https://lss.fractalreality.ca/';
+const SDK_READY_TIMEOUT_MS = 5000;
 
 // Discord forwards context as URL params on the iframe URL. We pass
 // these through to the popup so the game can act on them later
@@ -37,9 +49,34 @@ const FORWARD_PARAMS = [
 ];
 
 // Built once on boot; null while pending, the SDK once ready, or false
-// if init failed (we fall back to window.open in that case).
+// if init failed/timed out (fallback chain handles it from there).
 let _sdk = null;
 let _sdkPromise = null; // resolves once init has settled (success or fail)
+
+// ---- handshake trace ------------------------------------------------
+// The Embedded App SDK talks to the client via postMessage frames of the
+// shape [opcode, payload]. Logging the first dozen incoming messages
+// tells us whether the client ever answered our HELLO — the difference
+// between "SDK too old / protocol mismatch" (frames arrive, ready()
+// still hangs) and "no RPC bridge in this context" (silence).
+let _msgSeen = 0;
+window.addEventListener('message', (ev) => {
+  if (_msgSeen >= 12) return;
+  _msgSeen++;
+  let tag;
+  try {
+    const d = ev.data;
+    if (Array.isArray(d)) {
+      const p = d[1] || {};
+      tag = 'op=' + d[0] + (p.evt ? ' evt=' + p.evt : '') + (p.cmd ? ' cmd=' + p.cmd : '');
+    } else if (d && typeof d === 'object') {
+      tag = 'keys=' + Object.keys(d).slice(0, 5).join(',');
+    } else {
+      tag = String(d).slice(0, 60);
+    }
+  } catch (_) { tag = '(unreadable)'; }
+  console.log('[lss-activity][trace] message #' + _msgSeen + ' from', ev.origin, '->', tag);
+});
 
 function buildGameUrl() {
   const src = new URLSearchParams(window.location.search);
@@ -59,6 +96,27 @@ function setStatus(text, kind) {
   el.className = 'status' + (kind ? ' ' + kind : '');
 }
 
+// Last-resort escape hatch: a real anchor the user can click/tap. Some
+// embed contexts (e.g. the desktop popout) allow user-gesture anchor
+// navigation where scripted window.open is blocked. Element-level
+// styles are fine under the iframe CSP (style-src has unsafe-inline).
+function showManualLink(url) {
+  let a = document.getElementById('manual-link');
+  if (!a) {
+    a = document.createElement('a');
+    a.id = 'manual-link';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.style.cssText = 'display:inline-block;margin-top:14px;color:#ffaa00;' +
+      'font-size:13px;letter-spacing:2px;text-decoration:underline;cursor:pointer;';
+    const btn = document.getElementById('engage-btn');
+    if (btn && btn.parentNode) btn.parentNode.insertBefore(a, btn.nextSibling);
+    else document.body.appendChild(a);
+  }
+  a.href = url;
+  a.textContent = 'TAP HERE TO OPEN THE GAME IN YOUR BROWSER';
+}
+
 function inDiscordIframe() {
   // Heuristic: we're inside Discord's iframe if the URL has frame_id
   // or instance_id (Discord injects these on launch). Outside Discord
@@ -74,16 +132,31 @@ async function initSdk() {
     _sdk = false;
     return;
   }
-  console.log('[lss-activity] Initializing Discord SDK with appId', APPLICATION_ID);
+  console.log('[lss-activity] Initializing Discord SDK (bundle 2.5.0) with appId', APPLICATION_ID);
   try {
     const sdk = new DiscordSDK(APPLICATION_ID);
-    await sdk.ready();
+    const ready = sdk.ready();
+    // Adopt a straggler: if ready() resolves after our timeout already
+    // marked the SDK unavailable, upgrade in place so the NEXT click
+    // takes the SDK path.
+    ready.then(() => {
+      if (_sdk === false) {
+        _sdk = sdk;
+        console.log('[lss-activity] ready() resolved AFTER timeout; SDK adopted for next click.');
+      }
+    }).catch(() => {});
+    await Promise.race([
+      ready,
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error('ready() did not resolve within ' + SDK_READY_TIMEOUT_MS + 'ms')),
+        SDK_READY_TIMEOUT_MS)),
+    ]);
     _sdk = sdk;
     console.log('[lss-activity] Discord SDK ready.');
   } catch (err) {
     console.error('[lss-activity] Discord SDK init failed:', err);
-    _sdk = false;
-    setStatus('Discord SDK unavailable ; will try direct popup.', 'warn');
+    if (_sdk === null) _sdk = false;
+    setStatus('Discord link is slow or blocked ; using fallback.', 'warn');
   }
 }
 
@@ -92,8 +165,7 @@ async function onEngage() {
   console.log('[lss-activity] ENGAGE clicked ; target url:', url);
 
   // Wait for SDK init to settle before deciding which path to take.
-  // Without this, an early click would fall through to window.open
-  // even though the SDK was about to be ready.
+  // initSdk() is timeout-bounded, so this can no longer hang the click.
   if (_sdkPromise) {
     setStatus('Connecting to Discord...', 'warn');
     try { await _sdkPromise; } catch (_) {}
@@ -116,26 +188,28 @@ async function onEngage() {
   }
 
   // Fallback: plain window.open. Works when /activity/ is loaded
-  // outside Discord (regular browser tab); blocked inside Discord's
-  // sandboxed iframe but worth trying as a last resort.
-  const win = window.open(url, 'lss_game');
-  if (!win) {
-    setStatus(
-      'Pop-up blocked. Allow pop-ups for this site, then click ENGAGE again.',
-      'error'
-    );
+  // outside Discord (regular browser tab) and in some embed contexts.
+  let win = null;
+  try { win = window.open(url, '_blank', 'noopener'); } catch (_) {}
+  if (win) {
+    setStatus('Game opened in a new window. You can close this Activity panel.', 'ok');
+    try { win.focus(); } catch (_) {}
     return;
   }
-  setStatus('Game opened in a new window. You can close this Activity panel.', 'ok');
-  try { win.focus(); } catch (_) {}
+
+  // Final fallback: give the user a real link to click. A direct
+  // user-gesture anchor navigation survives contexts that block
+  // scripted popups.
+  console.warn('[lss-activity] window.open blocked ; showing manual link.');
+  showManualLink(url);
+  setStatus('Pop-up blocked here. Use the link below instead:', 'warn');
 }
 
 function init() {
   const btn = document.getElementById('engage-btn');
   if (btn) btn.addEventListener('click', onEngage);
-  // Kick off SDK init in parallel ; onEngage will await this promise
-  // so an early click doesn't fall through to the fallback before the
-  // SDK has had a chance to load.
+  // Kick off SDK init in parallel ; onEngage awaits this promise, and
+  // initSdk is timeout-bounded so the button always settles.
   _sdkPromise = initSdk();
 }
 
