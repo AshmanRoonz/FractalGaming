@@ -133,6 +133,26 @@ async function initSdk() {
     return;
   }
   console.log('[lss-activity] Initializing Discord SDK (bundle 2.5.0) with appId', APPLICATION_ID);
+  // Handshake fix, proven from the 2026-07-21 field trace: the SDK derives
+  // its postMessage target origin from document.referrer —
+  //   [source, sourceOrigin] = [parent.opener ?? parent, referrer || "*"]
+  // When redirect.js lands us here via location.replace, the referrer is
+  // OUR OWN *.discordsays.com origin, not the Discord client's — so the
+  // SDK's HANDSHAKE frame is silently dropped by the browser's
+  // targetOrigin check and ready() waits forever (the client's op=3 HELLO
+  // still arrives, which proved the RPC bridge itself works). Blanking the
+  // referrer makes the SDK fall back to "*", which delivers to whatever
+  // origin the embedding client really has (stable/PTB/canary/mobile).
+  // A real discord.com referrer (direct load — e.g. if the portal mapping
+  // ever points straight at /activity) is left alone: exact-origin
+  // targeting is strictly better when it's already correct.
+  try {
+    const refHost = new URL(document.referrer || 'about:blank').hostname;
+    if (/\.discordsays\.com$/.test(refHost)) {
+      Object.defineProperty(document, 'referrer', { get: () => '', configurable: true });
+      console.log('[lss-activity] discordsays self-referrer blanked so the SDK handshake targets "*".');
+    }
+  } catch (_) {}
   try {
     const sdk = new DiscordSDK(APPLICATION_ID);
     const ready = sdk.ready();
