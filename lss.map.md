@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v34.62**).
+> Companion map to the single-file WebGL game `index.html` (build **v34.64**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -62,9 +62,10 @@
 ### ═══ PART 0 — Boot, config & core singletons (~3036–3597) ═══
 
 #### Boot entry & config tables — `~L3036`
-**Jump:** `function _bootLSS()` · also `const LSS_BUILD = '34.62'` (~L3044)
+**Jump:** `function _bootLSS()` · also `const LSS_BUILD = '34.64'` (~L3044)
 Opens the single closure; sets version badge; defines static gameplay config.
 - **Symbols:** `LSS` (MAX_PLAYERS, ARENA_SIZE 25000, ROUND_TIME…), `LSS_API_BASE`, `LSS_DISCORD`, `CHASSIS`, `PILOT_PERKS`, `LOADOUTS`; `window.LSS_BUILD`
+- **⚠** `<head>` loads `activity/redirect.js` FIRST (before fonts/importmap): on `*.discordsays.com` (Discord Activity proxy) it bounces `/` → `/activity/` launcher stub, because the Discord client CSP blocks the game's CDN imports. No-op on every other origin — keep it the first script.
 
 #### Core singletons: game / player / input — `~L3296`
 **Jump:** `const game = {` · `const player = {` (~L3375) · `const input = {` (~L3449)
