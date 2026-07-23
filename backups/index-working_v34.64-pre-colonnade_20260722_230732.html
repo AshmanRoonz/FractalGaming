@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v34.65</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.65","short_name":"LSS%20v34.65","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v34.24</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.24","short_name":"LSS%20v34.24","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3059,7 +3059,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.65';
+const LSS_BUILD = '34.64';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17283,7 +17283,7 @@ function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
 // gap and leaves a crack of sky, per Ashman ("not a complete pinch").
 // The pinch weight is (1 - route openness), so it fades out smoothly right
 // where the carve takes over and the lanes/arenas stay untouched.
-function _stGroundYCarvedBase(x,z,T){
+function _stGroundYCarved(x,z,T){
   const g=_stGroundY(x,z,T); const r=_stRouteAt(x,z,T);
   const ro=Math.max(0,Math.min(1,r.o));
   const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
@@ -17293,82 +17293,16 @@ function _stGroundYCarvedBase(x,z,T){
   const floor=r.ty-(T.ARENA_DROP||320);   
   return g2+(floor-g2)*ro;
 }
-function _stCeilYCarvedBase(x,z,T){
-  if(T && T._openTop) return 1e9;
+function _stCeilYCarved(x,z,T){
+  if(T && T._openTop) return 1e9;   
   const c=_stCeilY(x,z,T); const r=_stRouteAt(x,z,T);
   const ro=Math.max(0,Math.min(1,r.o));
   const PINCH=(T.WALL_PINCH!=null?T.WALL_PINCH:0.45);
   const mid=(_stGroundY(x,z,T)+c)*0.5;
   const c2=c+(mid-c)*PINCH*(1-ro);
   if(ro<=0) return c2;
-  const roof=r.ty+(T.ARENA_RISE||420);
+  const roof=r.ty+(T.ARENA_RISE||420);     
   return c2+(roof-c2)*ro;
-}
-// ---- (v34.65) PILLAR KARST FIELD — "The Colonnade" terrain style ----
-// Worley-cell pillar field: each occupied cell owns one jittered feature point
-// where BOTH carved surfaces blend toward (and 'overlap' past) the local
-// midline, fusing floor and ceiling into a full rock column. Pure function of
-// (x,z) + T.PILLARS (seeded per round in buildRoomGraphLevel), so every client
-// renders + collides against the same columns via the shared carved trio here.
-// Weight fades to zero inside spawn rooms (circle entries) and along tunnel
-// lanes (capsule entries) via T.PILLARS.clear, so spawns stay open and lanes
-// stay flyable — a pillar NEAR a lane shrinks into a broken stump (floor bump
-// + hanging stub) instead of plugging the passage.
-function _stPillarAt(x,z,T){
-  const P=T.PILLARS; if(!P) return 0;
-  const cs=P.cell||820, soft=P.soft||160, jit=(P.jitter!=null?P.jitter:0.62);
-  const ix=Math.floor(x/cs), iz=Math.floor(z/cs);
-  let w=0;
-  for(let dj=-1;dj<=1;dj++) for(let di=-1;di<=1;di++){
-    const cxi=ix+di, czi=iz+dj;
-    // Per-cell hashes (ox/oz = per-round seed offsets): occupancy first — a
-    // 'drop' fraction of cells stay empty so the field breaks into open halls.
-    if(_stHash2(cxi*26.651+P.ox*0.71, czi*67.131+P.oz*1.37) < (P.drop!=null?P.drop:0.2)) continue;
-    const px=(cxi+0.5+(_stHash2(cxi*12.9898+P.ox, czi*78.233+P.oz)-0.5)*jit)*cs;
-    const pz=(czi+0.5+(_stHash2(cxi*39.346+P.oz, czi*11.135+P.ox)-0.5)*jit)*cs;
-    const pr=(P.r||150)*(0.72+0.56*_stHash2(cxi*3.7+P.oz, czi*9.1+P.ox));
-    const d=Math.hypot(x-px,z-pz);
-    const e=1-_stSmooth(pr,pr+soft,d);
-    if(e>w) w=e;
-  }
-  if(w<=0) return 0;
-  const CL=P.clear;
-  if(CL) for(let i=0;i<CL.length;i++){
-    const c=CL[i]; let d;
-    if(c.ax!==undefined){
-      // Lane capsule: XZ distance to the tunnel segment.
-      const dx=c.bx-c.ax, dz=c.bz-c.az, l2=dx*dx+dz*dz;
-      let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
-      d=Math.hypot(x-(c.ax+dx*t), z-(c.az+dz*t));
-    } else {
-      d=Math.hypot(x-c.x, z-c.z);
-    }
-    w*=_stSmooth(c.r, c.r+(c.soft||240), d);
-    if(w<=0) return 0;
-  }
-  return w;
-}
-// Pillar-aware carved surfaces. With no T.PILLARS these fall straight through
-// to the Base functions above (every existing map + the hub takes that path,
-// unchanged). With pillars, floor rises / ceiling drops toward mid±overlap by
-// the pillar weight — past the midline on purpose so the fused core is solid
-// rock (no coincident-plane sliver), matching _stGapSDFCarved's identical
-// adjustment so mesh and collision agree exactly.
-function _stGroundYCarved(x,z,T){
-  const g=_stGroundYCarvedBase(x,z,T);
-  if(!T.PILLARS || T._openTop) return g;
-  const pw=_stPillarAt(x,z,T); if(pw<=0) return g;
-  const c=_stCeilYCarvedBase(x,z,T);
-  const ov=(T.PILLARS.overlap||80);
-  return g+(((g+c)*0.5+ov)-g)*pw;
-}
-function _stCeilYCarved(x,z,T){
-  const c=_stCeilYCarvedBase(x,z,T);
-  if(!T.PILLARS || T._openTop) return c;
-  const pw=_stPillarAt(x,z,T); if(pw<=0) return c;
-  const g=_stGroundYCarvedBase(x,z,T);
-  const ov=(T.PILLARS.overlap||80);
-  return c+(((g+c)*0.5-ov)-c)*pw;
 }
 // Carved gap SDF: open between the carved floor and carved ceiling.
 function _stGapSDFCarved(px,py,pz,T){
@@ -17384,16 +17318,7 @@ function _stGapSDFCarved(px,py,pz,T){
     g2=g2+((r.ty-(T.ARENA_DROP||320))-g2)*ro;
     c2=c2+((r.ty+(T.ARENA_RISE||420))-c2)*ro;
   }
-  // Pillar fuse — the SAME adjustment the carved-surface wrappers apply, so
-  // collision matches the rendered columns exactly.
-  if(T.PILLARS && !T._openTop){
-    const pwp=_stPillarAt(px,pz,T);
-    if(pwp>0){
-      const ov=(T.PILLARS.overlap||80), m2=(g2+c2)*0.5;
-      g2+=((m2+ov)-g2)*pwp; c2+=((m2-ov)-c2)*pwp;
-    }
-  }
-  return T._openTop ? (g2-py) : Math.max(g2-py, py-c2);
+  return T._openTop ? (g2-py) : Math.max(g2-py, py-c2);   
 }
 
 // ---- SANDWICH TERRAIN ROCK MESH (separate from the cosmic tube walls) ----
@@ -57218,89 +57143,8 @@ const MAP_DATA = {
       
       { path: [{x: 0, y: 0, z: -SU*7}, {x: 0, y: 0, z: 0}]}, 
       { path: [{x: SU*7, y: 0, z: 0}, {x: 0, y: 0, z: 0}]}, 
-      { path: [{x: 0, y: 0, z: SU*7}, {x: 0, y: 0, z: 0}]},
-      { path: [{x: -SU*7, y: 0, z: 0}, {x: 0, y: 0, z: 0}]},
-    ]
-  },
-
-  // ----------------------------------------------------------------------
-  // The Colonnade (Crystal Cavern): pillar-karst cathedral. Three overlapping
-  // great halls form one continuous nave between the spawns, flanked by a
-  // raised east aisle and a sunken west aisle for the loop routes. The
-  // `terrain.pillars` field (see _stPillarAt) fuses floor to ceiling into
-  // seeded rock columns throughout the halls — cover IS the columns, and the
-  // seed re-rolls every round so no two rounds share a column layout. Lane
-  // capsules keep a guaranteed clear slot down every route's axis (pillars
-  // near a lane decay into broken stumps), and spawn circles stay fully open.
-  colonnade: {
-    name: 'The Colonnade',
-    description: 'Pillar-karst cathedral. Great halls held up by rock columns — new columns every round. Orbit a pillar or die in the open.',
-    defaultTheme: 'Crystal Cavern',
-    terrain: {
-      wallPinch: 0.32,
-      pillars: { cell: 560, r: 130, soft: 150, drop: 0.18, jitter: 0.62, overlap: 80 },
-    },
-    // Violet/cyan crystal family with a warm gold heart at the great hall.
-    palette: [
-      0x2a1848, 0x1a3a50, 0x4a3818, 0x1a3a50, 0x2a1848, 0x301a50, 0x183848, 0x2a1a48
-    ],
-    rooms: [
-      { id: 'spawn_a',    team: 'A',  x: 0,       y: 0,       z: -SU * 9,   r: SU * 2.2 },
-      { id: 'nave_n',     team: null, x: 0,       y: 0,       z: -SU * 4.5, r: SU * 2.6 },
-      { id: 'great_hall', team: null, x: 0,       y: 0,       z: 0,         r: SU * 3.0 },
-      { id: 'nave_s',     team: null, x: 0,       y: 0,       z: SU * 4.5,  r: SU * 2.6 },
-      { id: 'spawn_b',    team: 'B',  x: 0,       y: 0,       z: SU * 9,    r: SU * 2.2 },
-      { id: 'aisle_e',    team: null, x: SU * 6,  y: SU * 1,  z: 0,         r: SU * 2.0 },
-      { id: 'aisle_w',    team: null, x: -SU * 6, y: -SU * 1, z: 0,         r: SU * 2.0 },
-    ],
-    tunnels: [
-      // The nave spine (the halls overlap into one grand gallery; the lane
-      // keepout guarantees a clear slot straight down the middle).
-      { path: [{x: 0, y: 0, z: -SU*9},   {x: 0, y: 0, z: -SU*4.5}]},
-      { path: [{x: 0, y: 0, z: -SU*4.5}, {x: 0, y: 0, z: 0}]},
-      { path: [{x: 0, y: 0, z: 0},       {x: 0, y: 0, z: SU*4.5}]},
-      { path: [{x: 0, y: 0, z: SU*4.5},  {x: 0, y: 0, z: SU*9}]},
-      // East aisle loop (raised) + west aisle loop (sunken).
-      { path: [{x: 0, y: 0, z: -SU*9},   {x: SU*6,  y: SU*1,  z: 0}]},
-      { path: [{x: SU*6,  y: SU*1,  z: 0},  {x: 0, y: 0, z: SU*9}]},
-      { path: [{x: 0, y: 0, z: -SU*9},   {x: -SU*6, y: -SU*1, z: 0}]},
-      { path: [{x: -SU*6, y: -SU*1, z: 0}, {x: 0, y: 0, z: SU*9}]},
-      // Aisle cross-cuts into the great hall.
-      { path: [{x: SU*6,  y: SU*1,  z: 0},  {x: 0, y: 0, z: 0}]},
-      { path: [{x: -SU*6, y: -SU*1, z: 0},  {x: 0, y: 0, z: 0}]},
-    ]
-  },
-
-  // ----------------------------------------------------------------------
-  // The Shifting Deep (procedural): the room graph is generated per round by
-  // _lssGenShiftingDeep from the match seed — symmetric rooms, spanning
-  // tunnels + loop edges, and a biome roulette. The rooms/tunnels below are
-  // ONLY the carousel-preview sample and a last-resort fallback if the
-  // generator throws; every actual round generates its own layout.
-  shifting_deep: {
-    name: 'The Shifting Deep',
-    procedural: 'shifting_deep',
-    description: 'The cavern re-renders itself every round — new halls, new tunnels, new rock. Learn fast; it will never be the same twice.',
-    defaultTheme: 'Broken Simulation',
-    // Grey/violet corrupted-simulation palette (the lobby look; each round's
-    // biome roulette restyles the terrain in-game).
-    palette: [
-      0x2a2838, 0x282a40, 0x303040, 0x242235, 0x2c2a3a, 0x282a40, 0x303040, 0x242838
-    ],
-    rooms: [
-      { id: 'spawn_a', team: 'A',  x: -SU * 8, y: 0,       z: -SU * 2, r: SU * 2.2 },
-      { id: 'deep_1a', team: null, x: -SU * 3, y: SU * 1,  z:  SU * 4, r: SU * 2.0 },
-      { id: 'center',  team: null, x: 0,       y: 0,       z: 0,       r: SU * 2.5 },
-      { id: 'deep_1b', team: null, x:  SU * 3, y: -SU * 1, z: -SU * 4, r: SU * 2.0 },
-      { id: 'spawn_b', team: 'B',  x:  SU * 8, y: 0,       z:  SU * 2, r: SU * 2.2 },
-    ],
-    tunnels: [
-      { path: [{x: -SU*8, y: 0, z: -SU*2}, {x: -SU*3, y: SU*1, z: SU*4}]},
-      { path: [{x: -SU*8, y: 0, z: -SU*2}, {x: 0, y: 0, z: 0}]},
-      { path: [{x: -SU*3, y: SU*1, z: SU*4}, {x: 0, y: 0, z: 0}]},
-      { path: [{x:  SU*8, y: 0, z:  SU*2}, {x:  SU*3, y: -SU*1, z: -SU*4}]},
-      { path: [{x:  SU*8, y: 0, z:  SU*2}, {x: 0, y: 0, z: 0}]},
-      { path: [{x:  SU*3, y: -SU*1, z: -SU*4}, {x: 0, y: 0, z: 0}]},
+      { path: [{x: 0, y: 0, z: SU*7}, {x: 0, y: 0, z: 0}]}, 
+      { path: [{x: -SU*7, y: 0, z: 0}, {x: 0, y: 0, z: 0}]}, 
     ]
   },
 
@@ -57492,158 +57336,6 @@ const CAMPAIGN_LEGS = [
   { key: 'camp_brokensim', name: 'The Broken Simulation' },
   { locked: true, name: 'More legs unlock as you journey on' },
 ];
-// ---- (v34.65) THE SHIFTING DEEP — seeded per-round map generator ----
-// Generates the room graph itself from the shared match seed + round number:
-// 180°-rotationally-symmetric room placement (fair for both teams), a
-// Kruskal-style spanning pass over length-sorted candidate edges with
-// MIRRORED acceptance (the graph stays symmetric), then a loop pass until
-// every room has 2+ exits (the no-dead-end rule the hand-built maps follow).
-// Every peer derives the identical layout — the seed is worldSeed + round —
-// and every round re-rolls, so the cavern re-renders itself between rounds.
-// A biome roulette rides the same seed via level._biomeOverride -> T.biome.
-function _lssGenShiftingDeep(base) {
-  const seed = (((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x51F7C0DE) +
-                (((game.currentRound | 0) + 1) * 0x9E3779B9)) >>> 0;
-  const rnd = mulberry32(seed);
-  const R = (a, b) => a + (b - a) * rnd();
-
-  // 1) Spawns on a seeded axis, exactly opposite each other (y mirrors too).
-  const ang = R(0, Math.PI * 2);
-  const D = SU * R(7.5, 9);
-  const sy = SU * R(-1, 1);
-  const rooms = [
-    { id: 'spawn_a', team: 'A', x: Math.cos(ang) * D,  y: sy,  z: Math.sin(ang) * D,  r: SU * 2.2 },
-    { id: 'spawn_b', team: 'B', x: -Math.cos(ang) * D, y: -sy, z: -Math.sin(ang) * D, r: SU * 2.2 },
-  ];
-
-  // 2) Neutral rooms: 2-3 mirrored pairs + usually a centre hub. Rejection-
-  // sample pair positions in the mid annulus, keeping every room apart (and
-  // each pair apart from its own mirror across the origin).
-  const pairsN = 2 + ((rnd() < 0.5) ? 1 : 0);
-  const minSep = SU * 3.1;
-  const clearOf = (x, z) => rooms.every(rm => Math.hypot(x - rm.x, z - rm.z) > minSep);
-  for (let p = 0; p < pairsN; p++) {
-    let px = 0, pz = 0, ok = false;
-    for (let attempt = 0; attempt < 40 && !ok; attempt++) {
-      const a2 = R(0, Math.PI * 2), d2 = SU * R(3.4, 7.2);
-      px = Math.cos(a2) * d2; pz = Math.sin(a2) * d2;
-      ok = clearOf(px, pz) && clearOf(-px, -pz) && Math.hypot(px * 2, pz * 2) > minSep;
-    }
-    if (!ok) continue;
-    const ry = SU * R(-2, 2), rr = SU * R(1.7, 2.3);
-    rooms.push({ id: 'deep_' + (p + 1) + 'a', team: null, x: px,  y: ry,  z: pz,  r: rr });
-    rooms.push({ id: 'deep_' + (p + 1) + 'b', team: null, x: -px, y: -ry, z: -pz, r: rr });
-  }
-  if (rnd() < 0.8 && rooms.length <= 6) rooms.push({ id: 'center', team: null, x: 0, y: 0, z: 0, r: SU * R(2.2, 2.8) });
-  // Degenerate-guard: if pair placement somehow all failed, force a centre so
-  // the spawns still connect through something.
-  if (rooms.length < 4 && !rooms.some(rm => rm.id === 'center')) {
-    rooms.push({ id: 'center', team: null, x: 0, y: 0, z: 0, r: SU * 2.5 });
-  }
-
-  // Mirror lookup by position (pairs are exact negations; centre & the spawn
-  // pair map onto themselves/each other).
-  const N = rooms.length;
-  const mirrorOf = (i) => {
-    const rm = rooms[i]; let best = i, bd = Infinity;
-    for (let j = 0; j < N; j++) {
-      const d = Math.hypot(rooms[j].x + rm.x, rooms[j].z + rm.z) + Math.abs(rooms[j].y + rm.y);
-      if (d < bd) { bd = d; best = j; }
-    }
-    return best;
-  };
-
-  // 3) Edges. Candidates = all pairs except a direct spawn-to-spawn tube,
-  // length-capped, with a per-round length jitter so tie-breaks shuffle.
-  const cand = [];
-  for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
-    if (rooms[i].team && rooms[j].team) continue;
-    const dx = rooms[i].x - rooms[j].x, dy = rooms[i].y - rooms[j].y, dz = rooms[i].z - rooms[j].z;
-    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    // Cap is deliberately generous — the hand-built maps run tunnels up to
-    // ~1600u (colonnade spawn->aisle); too tight a cap starves edge-of-map
-    // spawns of candidates and they dead-end.
-    if (len > SU * 11) continue;
-    cand.push({ i, j, len: len * R(0.9, 1.1) });
-  }
-  cand.sort((a, b) => a.len - b.len);
-  const parent = new Array(N).fill(0).map((_, i2) => i2);
-  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
-  const deg = new Array(N).fill(0);
-  const used = new Set();
-  const ekey = (i, j) => (i < j ? i + '_' + j : j + '_' + i);
-  const takeEdge = (i, j) => {
-    const k = ekey(i, j);
-    if (i === j || used.has(k)) return;
-    used.add(k); deg[i]++; deg[j]++;
-    const a = find(i), b = find(j); if (a !== b) parent[a] = b;
-  };
-  // Spanning pass (mirrored acceptance keeps the layout symmetric).
-  for (const e of cand) {
-    if (find(e.i) === find(e.j)) continue;
-    takeEdge(e.i, e.j);
-    takeEdge(mirrorOf(e.i), mirrorOf(e.j));
-  }
-  // Connectivity guarantee: bridge any remaining components via the shortest
-  // cross-component pair, ignoring the length cap.
-  for (let guard = 0; guard < N; guard++) {
-    const roots = new Set(); for (let i = 0; i < N; i++) roots.add(find(i));
-    if (roots.size <= 1) break;
-    let bi = -1, bj = -1, bl = Infinity;
-    for (let i = 0; i < N; i++) for (let j = i + 1; j < N; j++) {
-      if (find(i) === find(j)) continue;
-      if (rooms[i].team && rooms[j].team) continue;
-      const l = Math.hypot(rooms[i].x - rooms[j].x, rooms[i].z - rooms[j].z);
-      if (l < bl) { bl = l; bi = i; bj = j; }
-    }
-    if (bi < 0) break;
-    takeEdge(bi, bj); takeEdge(mirrorOf(bi), mirrorOf(bj));
-  }
-  // Loop pass: no dead ends — every room ends with 2+ exits (edge cap sane).
-  for (const e of cand) {
-    if (used.size >= N * 2 + 4) break;
-    if (deg[e.i] >= 2 && deg[e.j] >= 2) continue;
-    takeEdge(e.i, e.j);
-    takeEdge(mirrorOf(e.i), mirrorOf(e.j));
-  }
-  // Degree floor: any room STILL below 2 exits (its candidates all consumed
-  // or out of cap range) takes its nearest unused neighbour with no length
-  // cap at all. Spawn-to-spawn stays forbidden; mirrored to keep symmetry.
-  for (let i = 0; i < N; i++) {
-    if (deg[i] >= 2) continue;
-    let bj = -1, bl = Infinity;
-    for (let j = 0; j < N; j++) {
-      if (j === i || used.has(ekey(i, j))) continue;
-      if (rooms[i].team && rooms[j].team) continue;
-      const l = Math.hypot(rooms[i].x - rooms[j].x, rooms[i].z - rooms[j].z);
-      if (l < bl) { bl = l; bj = j; }
-    }
-    if (bj < 0) continue;
-    takeEdge(i, bj); takeEdge(mirrorOf(i), mirrorOf(bj));
-  }
-
-  // 4) Tunnels from the edge set (insertion order is deterministic).
-  const tunnels = [];
-  used.forEach((k) => {
-    const parts = k.split('_');
-    const a = rooms[+parts[0]], b = rooms[+parts[1]];
-    tunnels.push({ path: [{ x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }] });
-  });
-
-  // 5) Biome roulette — the terrain look shifts with the layout each round.
-  const BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
-  const biome = BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
-
-  console.log('[shifting-deep] seed=' + seed + ' rooms=' + rooms.length + ' tunnels=' + tunnels.length + ' biome=' + biome);
-  return {
-    procedural: 'shifting_deep',
-    name: base.name, thumb: base.thumb, description: base.description,
-    defaultTheme: base.defaultTheme, palette: base.palette,
-    _biomeOverride: biome,
-    rooms, tunnels,
-  };
-}
-
 function getNextMap() {
   // (v32.54) Campaign builds the SELECTED leg (the unlocked pick from the
   // ship-select carousel). Legs are MAP_DATA entries under a camp_ prefix ; fall
@@ -57818,14 +57510,6 @@ function buildRoomGraphLevel(level) {
     try { _lssGmaps.cleanup(); } catch (_) {}
     _lssGmaps.cleanup = null; _lssGmaps.active = false;
   }
-  // (v34.65) The Shifting Deep: the room graph is GENERATED from the shared
-  // match seed + round number, fresh every round. Regeneration is idempotent
-  // per (worldSeed, round), so mid-round rebuilds (biome/terrain toggles)
-  // reproduce the identical layout instead of re-rolling it.
-  if (level && level.procedural === 'shifting_deep' && typeof _lssGenShiftingDeep === 'function') {
-    try { level = _lssGenShiftingDeep(MAP_DATA.shifting_deep || level); }
-    catch (e) { console.warn('[shifting-deep] generate failed, using static fallback:', e); }
-  }
   // Nuke old geometry
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
   game.mapMeshes = [];
@@ -57991,37 +57675,6 @@ function buildRoomGraphLevel(level) {
     
     
     const _isHubMap = (game.sandwichBiome === 'mossy');
-    // (v34.65) Per-map terrain-style overrides (MAP_DATA <key>.terrain):
-    // wallPinch overrides WALL_PINCH ; pillars declares a pillar-karst field
-    // (The Colonnade). The pillar seed re-rolls every round from the shared
-    // match seed + round number, so column placement shifts round-to-round yet
-    // every peer (and any mid-lobby biome rebuild) derives the identical field.
-    const _tOv = (level && level.terrain) ? level.terrain : null;
-    let _pillars = null;
-    if (_tOv && _tOv.pillars && !_isHubMap) {
-      const _pd = _tOv.pillars;
-      const _pSeed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) +
-                      (((game.currentRound | 0) + 1) * 0x9E3779B9)) >>> 0;
-      const _pr = mulberry32(_pSeed);
-      // Clearance keepouts: team-spawn circles + tunnel-lane capsules. Rooms
-      // themselves are NOT cleared — pillars in the halls are the whole point;
-      // the lane capsules running to each room centre guarantee a fly-path.
-      const _clear = [];
-      for (const rm of rooms) if (rm.team) _clear.push({ x: rm.x, z: rm.z, r: rm.r + 140, soft: 300 });
-      // Lane slot: NARROW on purpose (not the full lane radius) — a ship-width
-      // corridor down each route's axis stays hard-open, while pillars may
-      // crowd the lane edges into slalom posts. laneClear/laneSoft per map.
-      const _lc = (_pd.laneClear != null ? _pd.laneClear : 100), _ls = (_pd.laneSoft != null ? _pd.laneSoft : 170);
-      for (const seg of cylSegs) _clear.push({ ax: seg.a.x, az: seg.a.z, bx: seg.b.x, bz: seg.b.z, r: _lc, soft: _ls });
-      _pillars = {
-        cell: _pd.cell || 820, r: _pd.r || 150, soft: _pd.soft || 160,
-        jitter: (_pd.jitter != null ? _pd.jitter : 0.62),
-        drop: (_pd.drop != null ? _pd.drop : 0.2),
-        overlap: _pd.overlap || 80,
-        ox: Math.floor(_pr() * 4096), oz: Math.floor(_pr() * 4096),
-        clear: _clear,
-      };
-    }
     game.sandwichTerrain = {
       ON: true,
       OCTAVES: 5, LACUNARITY: 2.0, GAIN: 0.5, EXPONENT: 1.75,
@@ -58035,8 +57688,7 @@ function buildRoomGraphLevel(level) {
       // 0.45 ~55%-open crack. The open-cavern race 'The Straightaway' uses a
       // GENTLER pinch so the caverns stay flowy + wide enough for fast race ships
       // (RACE_SPEED 900) + the AI to weave through without ramming/jamming.
-      WALL_PINCH: _isHubMap ? 0 : ((_tOv && typeof _tOv.wallPinch === 'number') ? _tOv.wallPinch : ((typeof game !== 'undefined' && game.selectedMap === 'race_straightaway') ? 0.24 : undefined)),
-      PILLARS: _pillars,
+      WALL_PINCH: _isHubMap ? 0 : ((typeof game !== 'undefined' && game.selectedMap === 'race_straightaway') ? 0.24 : undefined),
       CLEAR_SOFT: 120,          
       ARENA_DROP: 640,          
       ARENA_RISE: 760,          
@@ -58044,7 +57696,7 @@ function buildRoomGraphLevel(level) {
       _openTop: _isHubMap,   
       HUB: _isHubMap,        
       WL: yMid - GAP_HALF - 120,   
-      biome: (level && level._biomeOverride) || game.sandwichBiome || 'grassy',
+      biome: game.sandwichBiome || 'grassy',   
       snowLine: 0.68,
     };
   } else {

@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v34.64**).
+> Companion map to the single-file WebGL game `index.html` (build **v34.65**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -189,6 +189,12 @@ Camera + renderer creation + the *entire* WebXR/VR subsystem: dolly/controllers,
 **Jump:** `function _swBuildShell` (~L17839) · `function _swBuildGrass` (~L17645)
 - **Symbols:** `_swBuildGrass`/`_swRemoveGrass`, `_swGenTree`, `_swForestAt`, `_swBuildTrees`, `_swBuildShell`, `_swDisposeChunk`, `_swApplyAtmosphere`
 - **⚠** Grass off by default (perf); `getVRLevelGridRes` budgets foliage.
+
+#### Pillar-karst field (The Colonnade terrain style) — `~L17330`
+**Jump:** `function _stPillarAt` · `function _stGroundYCarvedBase` (the pillar-aware wrappers keep the old `_stGroundYCarved`/`_stCeilYCarved` names)
+(v34.65) Worley-cell pillar field: where `T.PILLARS` is set (per-map via `MAP_DATA.<key>.terrain.pillars`), both carved surfaces blend past the local midline and fuse into floor-to-ceiling rock columns. Same math in the carved trio + `_stGapSDFCarved`, so mesh and collision agree. Seed re-rolls per round (worldSeed + currentRound, built in `buildRoomGraphLevel`); `T.PILLARS.clear` holds spawn-circle + narrow lane-capsule keepouts (lanes stay flyable; near-lane pillars decay into stumps).
+- **Symbols:** `_stPillarAt`, `_stGroundYCarvedBase`/`_stCeilYCarvedBase`, `T.PILLARS` (cell/r/soft/drop/jitter/overlap/ox/oz/clear), `MAP_DATA.<key>.terrain.{pillars,wallPinch}`
+- **⚠** All existing maps pass `T.PILLARS` unset → wrappers fall straight through to Base (behavior-identical). `_openTop` (hub) skips pillars.
 
 #### Terrain clipmap LOD + edge audio + streaming lifecycle — `~L22015`
 **Jump:** `function _clipBuild` (~L22233) · `function _clipUpdate` (~L22263) · `function updateSandwichStream` (~L22324)
@@ -496,9 +502,10 @@ Networked capture-point objects + ownership/serialization.
 - **Symbols:** `_FOG_BASE_DENSITY`, `updateRoomFog`, `enterStasis`, `updatePlayerStasis`, `checkExecutions`
 
 #### Map data + level geometry + spawns — `~L56881`
-**Jump:** `const MAP_DATA` (~L56896) · `function buildRoomGraphLevel` (~L57438)
-- **Symbols:** `MAP_DATA`, `CAMPAIGN_LEG_MAP`, `getNextMap`, `buildRoomGraphLevel`, `getValidSpawnPoint`
+**Jump:** `const MAP_DATA` (~L56896) · `function buildRoomGraphLevel` (~L57438) · `function _lssGenShiftingDeep`
+- **Symbols:** `MAP_DATA`, `CAMPAIGN_LEG_MAP`, `getNextMap`, `_lssGenShiftingDeep`, `buildRoomGraphLevel`, `getValidSpawnPoint`
 - **⚠** `buildRoomGraphLevel` builds the whole arena mesh; `getValidSpawnPoint` scores clearance to avoid wall-spawns.
+- **(v34.65) New maps:** `colonnade` (The Colonnade — pillar-karst cathedral; `terrain: { pillars, wallPinch }` drives the pillar field, see PART 7) and `shifting_deep` (The Shifting Deep — `procedural: 'shifting_deep'` makes `buildRoomGraphLevel` regenerate the room graph EVERY ROUND via `_lssGenShiftingDeep`: 180°-symmetric rooms, mirrored-Kruskal spanning + loop edges + degree-floor (min 2 exits), biome roulette via `level._biomeOverride` → `T.biome`; the static rooms in its MAP_DATA entry are only the carousel preview/fallback). Both derive seeds from (worldSeed, currentRound) — peer-identical, idempotent per round, re-rolled between rounds.
 
 ### ═══ PART 21 — Overlays, announcer, combat HUD feedback (~57991–59509) ═══
 
