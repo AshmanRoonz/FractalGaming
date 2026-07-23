@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v34.66**).
+> Companion map to the single-file WebGL game `index.html` (build **v34.67**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
