@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v34.65**).
+> Companion map to the single-file WebGL game `index.html` (build **v34.66**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -181,9 +181,10 @@ Camera + renderer creation + the *entire* WebXR/VR subsystem: dolly/controllers,
 - **⚠** TWO byte-identical copies (worker ~17041, main ~17208) + a THIRD `worldSDF` at ~22496 — keep in sync.
 
 #### Sandwich terrain config, biomes & shader-world material — `~L17375`
-**Jump:** `const _swU = {` (~L17450) · `const _SW_BIOMES = {` (~L17385)
-- **Symbols:** `_SW_CHUNK`(900), `_SW_BIOMES`, `_swU` (uTime/uYMid/uAMP/uSnow/uLavaGlow…), `_swPatchTerrainMat`, `_swTerrainMatShared`
+**Jump:** `const _swU = {` (~L17450) · `const _SW_BIOMES = {` (~L17385) · `const _SW_BIOME_LOOK = {`
+- **Symbols:** `_SW_CHUNK`(900), `_SW_BIOMES`, `_SW_BIOME_LOOK`, `_swU` (uTime/uYMid/uAMP/uSnow/uLavaGlow/uStrata/uRim…), `_swPatchTerrainMat`, `_swTerrainMatShared`
 - **⚠** `_swU` uniforms shared by all terrain materials; mutated by setters + clipmap.
+- **(v34.66) `_SW_BIOME_LOOK`** = the zero-cost visual pass, all data: per-biome `fogMul` (arena FogExp2 scale), `aerial` (arena distance-haze uniforms, both shells — hub keeps its own branch), `mood` (key/ambient/hemi tint via `_lssApplyArenaMood`/`_lssRestoreArenaMood` next to `_lssApplyHubLighting`), `grade` (postFX composite; mossy entry = the exact pre-pass hub constants), `strata` (rock band strength, 0.14 = pre-pass), `rim` (fresnel silhouette), `veins` (scales uGold/uCrystal emissive). Terrain mats also set `dithering:true` (built-in debanding). Ceiling shell gained in-shader mottle+strata+AO+aerial (arena-only in practice — the hub draws no ceiling).
 
 #### Sandwich terrain foliage & shell geometry — `~L17575`
 **Jump:** `function _swBuildShell` (~L17839) · `function _swBuildGrass` (~L17645)
