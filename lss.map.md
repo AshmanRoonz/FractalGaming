@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v34.67**).
+> Companion map to the single-file WebGL game `index.html` (build **v34.69**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -99,8 +99,9 @@ Mode descriptors + full single-player campaign: waves, bosses, escorts, hoard-bo
 - **⚠** References `Bot` (defined ~L24485) — forward ref; `NEMESIS_SHIP='stryder'`.
 
 #### Match-start flows & ship-select entry — `~L6829`
-**Jump:** `function startSolo` · `function enterShipSelect` (~L6988)
-- **Symbols:** `startSolo`, `startTest`, `startRace`, `_startHostedMode`, `enterShipSelect`
+**Jump:** `function startSolo` · `function enterShipSelect` (~L6988) · `function startAssault`
+- **Symbols:** `startSolo`, `startTest`, `startRace`, `startAssault`, `_startHostedMode`, `enterShipSelect`
+- **(v34.68) ASSAULT mode** (`LSS.MODE==='assault'`, `#btn-assault`): Protect/Attack the Champion Field on `assault_` maps (side-'A' rooms = defender/champion end). The field + shell spawn at round start; only the ATTACKING fleet can claim/charge (`LSS.ASSAULT_CHARGE_TIME` hold, decays when vacated); timer expiry (`LSS.ASSAULT_ROUND_TIME`) = defender round win; roles swap each round (`_assaultAttackerFleet()` = pure function of currentRound, zero sync). Unlimited respawns: fleet-wipe round end disabled + bot reinforcements top fleets back up (authority-side, roster rebroadcast). Match end: `_assaultMatchWinner()` net-capture spread (2*caps−attackRounds ≥ `ASSAULT_NET_SPREAD`, higher net, evaluated only at equal attack rounds) via `game.assaultLedger` (booked by the round-end authority AND `round_end` receivers, BEFORE currentRound increments). Spawn sides role-mapped via `_assaultSpawnSide` at all five `getValidSpawnPoint` call sites. Defender bots hold a guard post off the field when unengaged (waypoint shortcut skips dogfight AI — only used when idle); attacker bots keep the champion beeline.
 
 #### Map selector UI — `~L7015`
 **Jump:** `function buildMapSelector` · `function selectMap` (~L7150)
