@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v34.93</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.93","short_name":"LSS%20v34.93","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v34.96</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.96","short_name":"LSS%20v34.96","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3147,7 +3147,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.93';
+const LSS_BUILD = '34.96';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -6151,9 +6151,21 @@ const FreeFlightMode = {
     // (v34.93) Zone-rift cavern state dies with the freeflight session.
     try {
       if (typeof _hzPortalsDispose === 'function') _hzPortalsDispose();
+      // Mid-cavern quit: restore the biome selector to the shipped post-hub
+      // value so the next mode's preset flow starts from the usual state.
+      if (game._cavern) game.sandwichBiome = 'mossy';
+      try { if (game._cavern && game._cavern.ring) game._cavern.ring.destroy(); } catch (_) {}
       game._cavern = null; game._cavernSalt = 0; game._cavernBiome = null;
-      _HZ_CAVERN._returnPos = null; _HZ_CAVERN.cool = 0;
+      _HZ_CAVERN._returnPos = null; _HZ_CAVERN.coolBySector = {};
       if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; if (window.Overlays && Overlays.warp) Overlays.warp(false); }
+    } catch (_) {}
+    // (v34.94) Hub-only ship-upgrade stats must not leak into other modes:
+    // restore the never-chassis-reset fields to their base values.
+    try {
+      if (typeof player !== 'undefined' && player) {
+        player.vortexMaxEnergy = 1000; player.vortexEnergyRegen = 150;
+        if (player.chassis && player.chassis.maxDashes) player.maxDashes = player.chassis.maxDashes;
+      }
     } catch (_) {}
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
@@ -18394,7 +18406,7 @@ function _hubZoneTick(px, pz, dt) {
 // cavern centre, and land back at the portal with an Aegis XP bonus. Reuses
 // the rift's roundEnd->warmup rebuild machinery; MODE stays 'freeflight'
 // throughout so Aegis XP + the freeflight respawn loop keep working inside.
-const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, cool: 0, _pre: false, _returnPos: null };
+const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, COOLDOWN: 120, coolBySector: {}, _pre: false, _returnPos: null };
 function _hzPortalsDispose() {
   if (_HZ_CAVERN.portals) { for (const p of _HZ_CAVERN.portals) { try { p.ring.destroy(); } catch (_) {} } }
   _HZ_CAVERN.portals = null;
@@ -18459,6 +18471,12 @@ function _hzEnterCavern(p) {
                    _noSpawnT: 0, _arrived: false };
   game._cavernSalt = salt;
   game._cavernBiome = p.biome;
+  // CRITICAL: buildRoomGraphLevel derives the whole hub-vs-arena param set
+  // from game.sandwichBiome ('mossy' => open-top/no-FOOT/no-pinch HUB terrain).
+  // The hub leaves it 'mossy'; without this the "cavern" builds with hub
+  // params — a 3200u-high open sky instead of a rock ceiling.
+  try { const _sd = MAP_DATA.shifting_deep; if (_sd && _sd.defaultTheme && typeof applyMapPreset === 'function') applyMapPreset(_sd.defaultTheme); } catch (_) {}
+  game.sandwichBiome = p.biome;   // after the preset — presets also write it
   try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
   try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
   try { if (window.Overlays) Overlays.banner('ZONE RIFT', 'Entering the ' + p.biome + ' deep...'); } catch (_) {}
@@ -18469,8 +18487,14 @@ function _hzEnterCavern(p) {
 function _hzReturnToHub() {
   const cv = game._cavern;
   if (!cv) return;
+  // Kill the in-cavern rift-home ring NOW — it would otherwise linger in the
+  // scene across the rebuild and haunt the next cavern as a dead ring.
+  try { if (cv.ring) cv.ring.destroy(); } catch (_) {}
+  cv.ring = null;
   game._cavern = null; game._cavernSalt = 0; game._cavernBiome = null;
-  _HZ_CAVERN.cool = 8;
+  game.sandwichBiome = 'mossy';   // restore the hub param derivation
+  // This zone's rift needs 2 minutes to restabilize before re-entry.
+  _HZ_CAVERN.coolBySector[cv.sector] = _HZ_CAVERN.COOLDOWN;
   _HZ_CAVERN._returnPos = cv.returnPos;
   try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
   try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
@@ -18528,7 +18552,9 @@ function _hzCavernFrame(dt) {
 }
 function _hzPortalsFrame(dt) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
-  if (_HZ_CAVERN.cool > 0) _HZ_CAVERN.cool -= dt;
+  // Per-sector re-entry cooldowns tick everywhere in freeflight (hub + rifts).
+  const _cbs = _HZ_CAVERN.coolBySector;
+  for (const s in _cbs) { _cbs[s] -= dt; if (_cbs[s] <= 0) delete _cbs[s]; }
   if (game._cavern) { _hzCavernFrame(dt); return; }
   const T = game.sandwichTerrain;
   if (!T || !T.ON || T.biome !== 'mossy') return;
@@ -18557,11 +18583,15 @@ function _hzPortalsFrame(dt) {
   }
   let near = false;
   for (const p of _HZ_CAVERN.portals) {
+    // A rift on cooldown is GONE — ring hidden, no proximity, no entry.
+    const _cooling = (_cbs[p.sector] || 0) > 0;
+    if (p.ring && p.ring.mesh) p.ring.mesh.visible = !_cooling;
+    if (_cooling) continue;
     try { p.ring.update(dt); } catch (_) {}
     if (!player || !player.position || player.shipState === 'dead') continue;
     const d = player.position.distanceTo(p.pos);
     if (d < 900) near = true;
-    if (d < 340 && _HZ_CAVERN.cool <= 0) { _hzEnterCavern(p); return; }
+    if (d < 340) { _hzEnterCavern(p); return; }
   }
   if (near && !_HZ_CAVERN._pre) { _HZ_CAVERN._pre = true; try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {} }
   else if (!near && _HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {} }
@@ -21933,6 +21963,7 @@ function _aegisApply() {
   const r = AEGIS.rankFromXp(st.xp).rank;
   if (r >= 5)  { player.maxHealth += 2500; player.health += 2500; }
   if (r >= 14) { player.maxShield += 2500; player.shield += 2500; }
+  try { if (typeof _aegisShipUpgrades === 'function') _aegisShipUpgrades(); } catch (_) {}
 }
 function _aegisAwardXp(amount) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
@@ -21946,7 +21977,17 @@ function _aegisAwardXp(amount) {
     let sub = 'Aegis merits earned';
     if (after === 5) { sub = 'Chassis Upgrade: +2,500 max health'; }
     else if (after === 14) { sub = 'Shield Upgrade: +2,500 max shield'; }
-    else if (isUp) { sub = 'Ship upgrade unlocked (coming online soon)'; }
+    else if (isUp) {
+      // Name the unlocked ship upgrade; live ones take effect immediately.
+      let nm = null, live = false;
+      try {
+        const tr = (AEGIS.TREES && AEGIS.TREES[player.loadoutKey] || []).find(r0 => r0[0] === after);
+        if (tr) nm = tr[1];
+        live = (AEGIS.LIVE && AEGIS.LIVE[player.loadoutKey] || []).indexOf(after) >= 0;
+      } catch (_) {}
+      sub = nm ? ((live ? 'Upgrade online: ' : 'Upgrade unlocked (soon): ') + nm) : 'Ship upgrade unlocked';
+      try { if (live) _aegisShipUpgrades(); } catch (_) {}
+    }
     if (window.Overlays) { try { Overlays.banner('AEGIS RANK ' + after, sub); } catch (_) {} }
     try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
     // Universal upgrades take effect immediately on the live ship.
@@ -21956,6 +21997,63 @@ function _aegisAwardXp(amount) {
   try { _aegisMenuRefresh(); } catch (_) {}
 }
 function _aegisAwardKill() { _aegisAwardXp(AEGIS.XP_PER_KILL); }
+
+// ---- (v34.94) Ship-specific Aegis upgrades — WAVE 1 ----
+// Stat effects live in _aegisShipUpgrades (ABSOLUTE assignments so repeated
+// applies — spawn, D-pad swap, mid-flight rank-up — never stack); event
+// effects hook Bot.takeDamage/Bot.die/dash/core/sonar/railgun sites and gate
+// on _aegisUpFor (freeflight-only, so MP balance is untouched). AEGIS.LIVE
+// drives the panel's (SOON) markers; unlisted ranks are design-only for now.
+AEGIS.LIVE = {
+  VORTEX: [8, 17, 20], PYRO: [2, 11, 17], PUNCTURE: [8],
+  SLAYER: [8, 17, 20], TRACKER: [8, 11, 17], BLASTER: [], SYPHON: [2],
+};
+function _aegisUpFor(rank) {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return false;
+  try { return AEGIS.rankFromXp(_aegisShipState().xp).rank >= rank; } catch (_) { return false; }
+}
+function _aegisShipUpgrades() {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
+  const k = player.loadoutKey;
+  if (k === 'VORTEX') {
+    // Rank 8 Energy Storage / rank 17 Energy Regen.
+    player.vortexMaxEnergy = _aegisUpFor(8) ? 1400 : 1000;
+    player.vortexEnergyRegen = _aegisUpFor(17) ? 187.5 : 150;
+    if (player.vortexEnergy > player.vortexMaxEnergy) player.vortexEnergy = player.vortexMaxEnergy;
+  } else if (k === 'TRACKER') {
+    // Rank 11 Extended Ammo: 40mm capacity doubled.
+    const base = (player.loadout && player.loadout.weapon && player.loadout.weapon.clipSize) || player.maxClip;
+    player.maxClip = base * (_aegisUpFor(11) ? 2 : 1);
+    if (player.clipAmmo > player.maxClip) player.clipAmmo = player.maxClip;
+    else if (_aegisUpFor(11)) player.clipAmmo = player.maxClip;
+  } else if (k === 'PYRO') {
+    // Rank 2 Double Threat / rank 17 Triple Threat: extra launcher shots
+    // before the reload.
+    const base = (player.loadout && player.loadout.weapon && player.loadout.weapon.clipSize) || player.maxClip;
+    player.maxClip = base + (_aegisUpFor(17) ? 2 : (_aegisUpFor(2) ? 1 : 0));
+    if (player.clipAmmo > player.maxClip) player.clipAmmo = player.maxClip;
+  } else if (k === 'SLAYER') {
+    // Rank 8 Ghost in the Machine: an extra dash charge.
+    const chD = (player.chassis && player.chassis.maxDashes) || player.maxDashes || 3;
+    player.maxDashes = chD + (_aegisUpFor(8) ? 1 : 0);
+    if (player.dashCharges > player.maxDashes) player.dashCharges = player.maxDashes;
+    else if (_aegisUpFor(8)) player.dashCharges = player.maxDashes;
+  }
+}
+// Player-outgoing damage tweaks + on-hit effects. Called from Bot.takeDamage
+// when the attacker is the player; returns the (possibly boosted) amount.
+function _aegisDmgOut(amount, bot) {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return amount;
+  const k = player.loadoutKey;
+  if (k === 'PYRO' && _aegisUpFor(11)) amount *= 1.25;                     // Roaring Flames
+  if (k === 'TRACKER' && _aegisUpFor(8) && bot && bot.id != null &&
+      player.trackerLocks && player.trackerLocks[bot.id]) amount *= 1.25;  // Sonar Weak Points
+  if (k === 'SYPHON' && _aegisUpFor(2))                                    // Energized Zapper
+    player.shield = Math.min(player.maxShield, player.shield + player.maxShield * 0.01);
+  if (k === 'SLAYER' && _aegisUpFor(20) && player.coreActive)              // Blademaster (shield gen)
+    player.shield = Math.min(player.maxShield, player.shield + amount * 0.15);
+  return amount;
+}
 
 // ---- Aegis skill trees (AEGIS_ships.md) + menu chip / panel UI ----
 // Five ship-specific upgrades per ship at ranks 2/8/11/17/20; the rank 5/14
@@ -22061,7 +22159,7 @@ function _aegisPanelRender() {
     + '<div style="flex:1"></div>'
     + '<button onclick="window._aegisPanelClose&&_aegisPanelClose()" style="background:transparent;border:1px solid rgba(255,210,77,0.4);color:#ffd24d;border-radius:6px;font-size:14px;padding:4px 14px;cursor:pointer;letter-spacing:2px;font-family:inherit;">CLOSE &#10005;</button>'
     + '</div>'
-    + '<div style="font-size:12px;color:#8f96ad;letter-spacing:1px;margin-bottom:18px;">Per-ship Free Flight progression &mdash; destroy ships in the hub to earn 100 XP per kill. Ranks 5 and 14 are live; ship-specific upgrades come online soon.</div>'
+    + '<div style="font-size:12px;color:#8f96ad;letter-spacing:1px;margin-bottom:18px;">Per-ship Free Flight progression &mdash; destroy ships in the hub and its zone-rift caverns to earn 100 XP per kill (+300 per cleared cavern). Unlocked upgrades are active in Free Flight; rows marked SOON come online in future builds.</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;">';
   for (const k of keys) {
     const xp = (a[k] && a[k].xp) || 0;
@@ -22083,14 +22181,17 @@ function _aegisPanelRender() {
       + '<div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#c9982a,#ffd24d);"></div></div>'
       + '<div style="font-size:10px;color:#8f96ad;letter-spacing:1px;margin-bottom:9px;">'
       + (ri.need ? (ri.into + ' / ' + ri.need + ' XP to rank ' + (ri.rank + 1)) : 'MAX RANK') + '</div>';
+    const liveList = (AEGIS.LIVE && AEGIS.LIVE[k]) || [];
     for (const [rr, nm, fx] of rows) {
       const got = ri.rank >= rr;
       const isNext = rr === nextRank;
+      const isLive = !!AEGIS.UNIVERSAL[rr] || liveList.indexOf(rr) >= 0;
       const rowCol = got ? '#ffd24d' : (isNext ? '#dfe6f5' : '#5a6072');
       const fxCol = got ? '#b9a86d' : (isNext ? '#8f96ad' : '#494f60');
       html += '<div style="display:flex;gap:9px;padding:3px 0;align-items:baseline;">'
         + '<div style="flex:0 0 26px;text-align:right;font-size:10px;letter-spacing:1px;color:' + rowCol + ';font-weight:bold;">' + rr + '</div>'
-        + '<div style="flex:0 0 auto;font-size:11px;color:' + rowCol + ';font-weight:bold;letter-spacing:1px;">' + (got ? '&#x2726; ' : '') + nm + '</div>'
+        + '<div style="flex:0 0 auto;font-size:11px;color:' + rowCol + ';font-weight:bold;letter-spacing:1px;">' + (got ? '&#x2726; ' : '') + nm
+        + (isLive ? '' : ' <span style="font-size:8px;letter-spacing:1px;opacity:0.55;">SOON</span>') + '</div>'
         + '<div style="flex:1;font-size:10px;color:' + fxCol + ';">' + fx + '</div>'
         + '</div>';
     }
@@ -23479,9 +23580,25 @@ function initSandwichTerrain() {
     }
   } catch (e) { console.warn('[sandwich] init terrain failed:', e); }
   try { _hubCityInit(); } catch (e) { console.warn('[hubcity] init failed:', e); }
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {   
-    game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';   
-    if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; }   
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {
+    game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';
+    if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; }
+    // (v34.96) Force a FRESH full clipmap bake for THIS build. A hub rebuild
+    // (e.g. returning from a zone-rift cavern) otherwise reuses the previous
+    // build's baked height rings — stale ghost mountains with no collision
+    // that pop in/out as edges incrementally re-bake.
+    try { if (typeof _clipmap !== 'undefined') _clipmap.on = false; } catch (_) {}
+  } else if (T && T.biome !== 'mossy') {
+    // (v34.96) Arena/cavern build: the hub clipmap must be fully OFF — its
+    // rings would keep rendering stale hub heights over the arena terrain
+    // (and suppress real chunk grounds via the _clipmap.on stream gate).
+    try {
+      game._clipWantHub = false;
+      if (typeof _clipmap !== 'undefined') {
+        _clipmap.on = false;
+        if (_clipmap.levels) for (const _L of _clipmap.levels) { if (_L.mesh) _L.mesh.visible = false; }
+      }
+    } catch (_) {}
   }
 }
 
@@ -26730,7 +26847,13 @@ class Bot {
       if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
         try { net.sendEvent({ type: 'bot_dmg', i: this.id, d: Math.round(amount) }); } catch (_) {}
       }
-      return amount;   
+      return amount;
+    }
+
+    // (v34.94) Aegis hub upgrades: player-outgoing damage tweaks + on-hit
+    // effects (freeflight-only; _aegisDmgOut gates itself).
+    if (attacker === 'player' && typeof _aegisDmgOut === 'function') {
+      try { amount = _aegisDmgOut(amount, this); } catch (_) {}
     }
 
     if (this.shield > 0) {
@@ -26810,6 +26933,13 @@ class Bot {
       player.kills++;
       // Aegis XP for hub-cavern bot kills (self-gated to freeflight).
       try { if (typeof _aegisAwardKill === 'function') _aegisAwardKill(); } catch (_) {}
+      // (v34.94) VORTEX Reflex Cannon: kills extend an active Laser Cannon core.
+      try {
+        if (player.loadoutKey === 'VORTEX' && player.coreActive && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) {
+          const _cd = (player.loadout && player.loadout.core && player.loadout.core.duration) || 8;
+          player.coreTimer = Math.min(_cd, (player.coreTimer || 0) + 2.5);
+        }
+      } catch (_) {}
       player.coreMeter = Math.min(100, player.coreMeter + 15);
       addKillFeed('You', this.loadout.name);
       showKillMarker();
@@ -40264,6 +40394,15 @@ function cycleCampaignShip(dir) {
 function cycleHubShip(dir) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || game.state !== 'playing') return;
   if (!player || player.shipState === 'dead') return;
+  // (v34.95) Combat lockout: XP banks to the SELECTED ship, so mid-fight
+  // swapping matters — no switch until 5s have passed without taking damage.
+  if (player.lastDamageTime && (game.time - player.lastDamageTime) < 5) {
+    if (!player._swapDenyT || game.time - player._swapDenyT > 2) {
+      player._swapDenyT = game.time;
+      try { if (window.Overlays && Overlays.banner) Overlays.banner('IN COMBAT', 'Ship swap locked — avoid damage for 5 seconds'); } catch (_) {}
+    }
+    return;
+  }
   const keys = (typeof LOADOUTS !== 'undefined') ? Object.keys(LOADOUTS) : [];
   if (keys.length < 2) return;
   const _now = (game && typeof game.time === 'number') ? game.time : 0;
@@ -42375,7 +42514,8 @@ function updateWeapon(dt) {
     }
     player._railgunChargingPrev = aiming;
     if (aiming) {
-      player.railgunCharge = Math.min(1.0, player.railgunCharge + dt / 2.5); 
+      // (v34.94) PUNCTURE Quick Charge (Aegis 8): the railgun charges faster.
+      player.railgunCharge = Math.min(1.0, player.railgunCharge + dt / ((typeof _aegisUpFor === 'function' && _aegisUpFor(8) && player.loadoutKey === 'PUNCTURE') ? 1.6 : 2.5));
     } else if (!aiming && player.railgunCharge > 0 && player.railgunCharge < 0.05) {
       player.railgunCharge = 0; 
     }
@@ -44376,7 +44516,8 @@ function activateCore() {
   // Syphon: block activation if already at max tier (3)
   if (player.loadout && player.loadout.core.name === 'AI Nanobots' && player.syphonTier >= 3) return;
   player.coreActive = true;
-  player.coreTimer = player.loadout.core.duration;
+  // (v34.94) SLAYER Blademaster (Aegis 20): Core duration doubled.
+  player.coreTimer = player.loadout.core.duration * ((player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 2 : 1);
   player.coreMeter = 0;
 
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -45194,16 +45335,19 @@ function _spawnSonarPulse(pos, owner) {
   mesh.scale.setScalar(0.01);
   mesh.renderOrder = 2;
   scene.add(mesh);
+  // (v34.94) TRACKER Signal Strength (Aegis 17): the player's pulses last 2x.
+  const _sDur = SONAR_PULSE_DURATION *
+    ((owner === player && player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) ? 2 : 1);
   game.worldEffects.push({
     type: 'sonar_pulse',
     position: pos.clone(),
     owner: owner,
     radius: 0,
     maxRadius: SONAR_PULSE_MAX_RADIUS,
-    duration: SONAR_PULSE_DURATION,
+    duration: _sDur,
     elapsed: 0,
-    timer: SONAR_PULSE_DURATION + 0.2,    
-    locked: new Set(),                    
+    timer: _sDur + 0.2,
+    locked: new Set(),
     mesh: mesh,
   });
   // Tactile audio: dedicated beacon-detonation cue at the impact point so
@@ -47111,6 +47255,8 @@ function dash() {
   player.velocity.copy(dashDir.clone().multiplyScalar(ch.dashSpeed));
   player.dashActive = true;
   player.dashTimer = ch.dashDuration;
+  // (v34.94) SLAYER Wraith (Aegis 17): Phase Dash travels further.
+  if (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) player.dashTimer *= 1.5;
   player.dashCharges--;
   player.shipState = 'dashing';
   if (player.dashCooldownTimer <= 0) player.dashCooldownTimer = ch.dashCooldown;
