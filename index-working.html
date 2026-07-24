@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v34.81</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.81","short_name":"LSS%20v34.81","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v34.82</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.82","short_name":"LSS%20v34.82","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3129,7 +3129,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.81';
+const LSS_BUILD = '34.82';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -5158,9 +5158,15 @@ async function postMatchResultToBackend() {
   }
   _lastPostedMatchId = matchId;
 
-  const winningTeam = (game.scoreA >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_A
-                    : (game.scoreB >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_B
-                    : null;
+  let winningTeam = (game.scoreA >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_A
+                  : (game.scoreB >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_B
+                  : null;
+  // (v34.82) Assault matches end on the net-capture spread rule, not the
+  // first-to-N score gate — the ledger is the winner authority there.
+  if (typeof _isAssault === 'function' && _isAssault() && typeof _assaultMatchWinner === 'function') {
+    const _aw = _assaultMatchWinner();
+    if (_aw) winningTeam = _aw;
+  }
   const participants = _gatherMatchParticipants(winningTeam);
 
   const payload = {
@@ -5168,6 +5174,9 @@ async function postMatchResultToBackend() {
     started_at:   game._matchStartedAtMs || (Date.now() - Math.floor((game.matchEndTimer || 0) * 1000)),
     ended_at:     Date.now(),
     map_key:      game.selectedMap || 'unknown',
+    // (v34.82) Game mode rides along so the backend/leaderboard can segment
+    // classic vs race vs assault (extra field; ignored by older backends).
+    mode:         (typeof LSS !== 'undefined' && LSS.MODE) || 'classic',
     winning_team: winningTeam,
     duration_sec: game._matchDurationSec || null,
     participants,
@@ -46737,14 +46746,19 @@ function updateRoundSystem(dt) {
             postMatchResultToBackend();
           }
         } catch (_) {}
+        // (v34.82) Winner derivation is mode-aware: assault ends on the
+        // net-capture spread rule (ledger authority), not first-to-N score.
+        let _mWinTeam = game.scoreA >= LSS.ROUNDS_TO_WIN ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
+        if (typeof _isAssault === 'function' && _isAssault() && typeof _assaultMatchWinner === 'function') {
+          const _aw = _assaultMatchWinner();
+          if (_aw) _mWinTeam = _aw;
+        }
         if (window.Overlays) {
-          const winner = game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A' : 'FLEET B';
-          Overlays.banner('VICTORY', winner + ' WINS');
+          Overlays.banner('VICTORY', (_mWinTeam === LSS.TEAM_FLEET_A ? 'FLEET A' : 'FLEET B') + ' WINS');
         }
         // v8VR: ship-AI declares victory or defeat depending on the player's team.
         // Same `playerWon` value drives the (v8_1VR) reactive-band match-end pattern.
-        const _playerWonMatch = (game.scoreA >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_A) ||
-                                (game.scoreB >= LSS.ROUNDS_TO_WIN && player.team === LSS.TEAM_FLEET_B);
+        const _playerWonMatch = (player.team === _mWinTeam);
         if (typeof ANN !== 'undefined') {
           if (_playerWonMatch) ANN.victory(); else ANN.defeat();
         }
@@ -69420,13 +69434,14 @@ function updateScoreboard() {
   if (!scoreboardVisible || !player.loadout) { sb.classList.remove('visible'); return; }
   sb.classList.add('visible');
 
-  const teamA = game.entities.filter(b => b.team === LSS.TEAM_FLEET_A);
-  const teamB = game.entities.filter(b => b.team === LSS.TEAM_FLEET_B);
-
-  // Sort each team by kills descending (player pinned at the top of their own team).
-  teamA.sort((a, b) => (b.kills || 0) - (a.kills || 0));
-  teamB.sort((a, b) => (b.kills || 0) - (a.kills || 0));
-
+  // (v34.82) Mode-coherent scoreboard.
+  // - campaign / freeflight: PLAYERS ONLY (the campaign hoard put 50+ enemy
+  //   rows on the board and overflowed it — kills are what matters).
+  // - classic / race / assault: fleets, with connected humans merged INTO
+  //   their fleet section (was a trailing [NET] list), YOU pinned in YOUR
+  //   fleet (was always Fleet A), assault corpse-pile hidden (reinforcement
+  //   bots accumulate as dead entities all round) + ATTACKING/DEFENDING tags.
+  const _sbMode = (typeof LSS !== 'undefined' && LSS.MODE) || 'classic';
   const statusOf = (e) => !e.alive ? 'DEAD' : e.doomed ? 'DOOMED' : 'ALIVE';
   const row = (name, status, kills, dmg, isPlayer) => (
     '<div class="sb-row' + (isPlayer ? ' player-row' : '') + '">' +
@@ -69436,27 +69451,45 @@ function updateScoreboard() {
     '<div class="sb-stat">' + Math.floor(dmg || 0) + '</div>' +
     '</div>'
   );
+  const pStatus = player.shipState === 'dead' ? 'DEAD' : player.doomed ? 'DOOMED' : 'ALIVE';
+  const _youName = 'YOU (' + (player.loadout ? player.loadout.name : '?') + ')';
 
   let html = '<h2>SCOREBOARD</h2>';
   html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div><div class="sb-stat-header">DAMAGE</div></div>';
 
-  // FLEET A (player's team)
-  html += '<div class="sb-team-header sb-team-a">FLEET A (' + game.scoreA + ' rounds)</div>';
-  const pStatus = player.shipState === 'dead' ? 'DEAD' : player.doomed ? 'DOOMED' : 'ALIVE';
-  html += row('YOU (' + (player.loadout ? player.loadout.name : '?') + ')', pStatus, player.kills, player.damageDealt, true);
-  for (const bot of teamA) {
-    html += row(bot.loadout.name, statusOf(bot), bot.kills, bot.damageDealt, false);
-  }
-
-  // FLEET B (enemy team)
-  html += '<div class="sb-team-header sb-team-b">FLEET B (' + game.scoreB + ' rounds)</div>';
-  for (const bot of teamB) {
-    html += row(bot.loadout.name, statusOf(bot), bot.kills, bot.damageDealt, false);
-  }
-
-  // Network players (stats track through their own Bot-like objects if present)
-  for (const np of net.networkPlayers) {
-    html += row('[NET] ' + (np.loadout ? np.loadout.name : '?'), statusOf(np), np.kills, np.damageDealt, false);
+  if (_sbMode === 'campaign' || _sbMode === 'freeflight') {
+    html += '<div class="sb-team-header sb-team-a">PILOTS' +
+            (_sbMode === 'campaign' ? ' — WAVE ' + (game.currentRound || 1) : '') + '</div>';
+    const prows = [{ n: _youName, s: pStatus, k: player.kills || 0, d: player.damageDealt || 0, me: true }];
+    for (const np of net.networkPlayers) {
+      prows.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false });
+    }
+    prows.sort((a, b) => b.k - a.k);
+    for (const p of prows) html += row(p.n, p.s, p.k, p.d, p.me);
+  } else {
+    const _asltSB = (_sbMode === 'assault');
+    const mkList = (team) => {
+      const list = [];
+      for (const b of game.entities) {
+        if (b.team !== team) continue;
+        if (_asltSB && !b.alive) continue;
+        list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0, me: false });
+      }
+      for (const np of net.networkPlayers) {
+        if (np.team !== team) continue;
+        list.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false });
+      }
+      list.sort((a, b) => b.k - a.k);
+      return list;
+    };
+    const _atkF = (_asltSB && typeof _assaultAttackerFleet === 'function') ? _assaultAttackerFleet() : null;
+    const tag = (team) => (!_asltSB || !_atkF) ? '' : (team === _atkF ? ' — ATTACKING' : ' — DEFENDING');
+    html += '<div class="sb-team-header sb-team-a">FLEET A' + tag(LSS.TEAM_FLEET_A) + ' (' + game.scoreA + ' rounds)</div>';
+    if (player.team !== LSS.TEAM_FLEET_B) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
+    for (const p of mkList(LSS.TEAM_FLEET_A)) html += row(p.n, p.s, p.k, p.d, false);
+    html += '<div class="sb-team-header sb-team-b">FLEET B' + tag(LSS.TEAM_FLEET_B) + ' (' + game.scoreB + ' rounds)</div>';
+    if (player.team === LSS.TEAM_FLEET_B) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
+    for (const p of mkList(LSS.TEAM_FLEET_B)) html += row(p.n, p.s, p.k, p.d, false);
   }
 
   // Personal summary footer
