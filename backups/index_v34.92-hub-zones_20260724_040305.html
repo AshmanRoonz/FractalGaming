@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v34.93</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.93","short_name":"LSS%20v34.93","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v34.92</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.92","short_name":"LSS%20v34.92","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3113,7 +3113,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.93';
+const LSS_BUILD = '34.92';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -5437,12 +5437,12 @@ const FreeFlightMode = {
         if (game._campHubArmT >= 2.5 && !_vidActive) game._campRiftArmed = true;
       }
     }
-    if (!this._riftConsumed && !game.bossPortal && !this._enteringCampaign && !net.active && !game._cavern && (!game._campJourney || game._campRiftArmed)) {
-      const pos = new THREE.Vector3(0, 200, 3200);
+    if (!this._riftConsumed && !game.bossPortal && !this._enteringCampaign && !net.active && (!game._campJourney || game._campRiftArmed)) {
+      const pos = new THREE.Vector3(0, 200, 3200);   
       this._riftPos = pos.clone();
       if (typeof _spawnBossPortal === 'function') _spawnBossPortal(pos);
     }
-    if (game.bossPortal && !game._cavern) {
+    if (game.bossPortal) {
       try { game.bossPortal.update(dt); } catch (_) {}
       if (!this._riftConsumed && !this._enteringCampaign && player && player.position) {
         const _rd = player.position.distanceTo(game.bossPortal.position);
@@ -5454,7 +5454,6 @@ const FreeFlightMode = {
         this._enterCampaignFromHub();
       }
     }
-    try { if (typeof _hzPortalsFrame === 'function') _hzPortalsFrame(dt); } catch (_) {}
   },
   _enterCampaignFromHub() {
     if (this._riftConsumed) return;   
@@ -5485,12 +5484,6 @@ const FreeFlightMode = {
     if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2);   
   },
   onTeardown() {
-    try {
-      if (typeof _hzPortalsDispose === 'function') _hzPortalsDispose();
-      game._cavern = null; game._cavernSalt = 0; game._cavernBiome = null;
-      _HZ_CAVERN._returnPos = null; _HZ_CAVERN.cool = 0;
-      if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; if (window.Overlays && Overlays.warp) Overlays.warp(false); }
-    } catch (_) {}
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
@@ -15315,171 +15308,6 @@ function _hubZoneTick(px, pz, dt) {
   }
 }
 
-const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, cool: 0, _pre: false, _returnPos: null };
-function _hzPortalsDispose() {
-  if (_HZ_CAVERN.portals) { for (const p of _HZ_CAVERN.portals) { try { p.ring.destroy(); } catch (_) {} } }
-  _HZ_CAVERN.portals = null;
-}
-function _hzCavernGenome(salt) {
-  const rnd = mulberry32((salt ^ 0xC0FFEE) >>> 0);
-  const doctrines = [
-    { key: 'rush',    name: 'RUSH DOCTRINE',  n: [6, 8],  hp: 0.85, spd: 1.55, lockAll: true  },
-    { key: 'pack',    name: 'PACK HUNTERS',   n: [5, 7],  hp: 1.0,  spd: 1.33, lockAll: false },
-    { key: 'heavies', name: 'HEAVY PICKETS',  n: [4, 5],  hp: 2.0,  spd: 1.05, lockAll: false },
-    { key: 'swarm',   name: 'SWARM PROTOCOL', n: [9, 12], hp: 0.55, spd: 1.45, lockAll: true  },
-    { key: 'phantom', name: 'PHANTOM CELL',   n: [5, 6],  hp: 0.8,  spd: 1.65, lockAll: false },
-  ];
-  const d = doctrines[Math.floor(rnd() * doctrines.length)];
-  const count = d.n[0] + Math.floor(rnd() * (d.n[1] - d.n[0] + 1));
-  return { doctrine: d, count, rnd };
-}
-function _hzSpawnCavernBots() {
-  const cv = game._cavern;
-  if (!cv || cv.spawned || typeof Bot === 'undefined') return;
-  cv.spawned = true;
-  const g = _hzCavernGenome(cv.salt);
-  cv.target = g.count;
-  cv.doctrineName = g.doctrine.name;
-  const keys = (typeof _campWaveShips === 'function') ? _campWaveShips(3) : [];
-  if (!keys.length) { cv._noSpawn = true; return; }
-  const picks = []; for (let i = 0; i < g.count; i++) picks.push(keys[i % keys.length]);
-  Promise.all(picks.map(k => loadHoardModel(k))).then((protos) => {
-    if (game._cavern !== cv) return;
-    let spawnedN = 0;
-    for (let i = 0; i < picks.length; i++) {
-      if (!protos[i]) continue;
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9000 + i), picks[i]); } catch (_) { continue; }
-      try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, picks[i]); } catch (_) {}
-      bot._cavernBot = true;
-      bot.maxHealth = Math.max(200, Math.round(bot.maxHealth * g.doctrine.hp)); bot.health = bot.maxHealth;
-      try { if (typeof _campBoostSpeed === 'function' && g.doctrine.spd !== 1.33) _campBoostSpeed(bot, g.doctrine.spd / 1.33); } catch (_) {}
-      let sp = null; try { sp = getValidSpawnPoint('B'); } catch (_) {}
-      const pos = sp ? sp.clone() : new THREE.Vector3(0, 0, 0);
-      pos.x += (g.rnd() - 0.5) * 1100; pos.y += (g.rnd() - 0.5) * 400; pos.z += (g.rnd() - 0.5) * 1100;
-      bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-      if (g.doctrine.lockAll) bot.aiTarget = player;
-      game.entities.push(bot);
-      spawnedN++;
-    }
-    cv.target = spawnedN || cv.target;
-    try { if (window.Overlays) Overlays.banner('HOSTILES: ' + g.doctrine.name, 'Destroy all ' + cv.target + ' ships, then take the rift home'); } catch (_) {}
-    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
-  }).catch(() => { cv._noSpawn = true; });
-}
-function _hzEnterCavern(p) {
-  if (game._cavern || (net && net.active)) return;
-  _hzPortalsDispose();
-  if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; }
-  const salt = (Math.random() * 0xffffffff) >>> 0;
-  game._cavern = { biome: p.biome, sector: p.sector, salt: salt, spawned: false, done: false,
-                   remaining: -1, target: 0, returnPos: (player && player.position) ? player.position.clone() : null,
-                   _noSpawnT: 0, _arrived: false };
-  game._cavernSalt = salt;
-  game._cavernBiome = p.biome;
-  try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
-  try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
-  try { if (window.Overlays) Overlays.banner('ZONE RIFT', 'Entering the ' + p.biome + ' deep...'); } catch (_) {}
-  game.selectedMap = 'shifting_deep';
-  game.state = 'roundEnd';
-  try { if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2); } catch (_) {}
-}
-function _hzReturnToHub() {
-  const cv = game._cavern;
-  if (!cv) return;
-  game._cavern = null; game._cavernSalt = 0; game._cavernBiome = null;
-  _HZ_CAVERN.cool = 8;
-  _HZ_CAVERN._returnPos = cv.returnPos;
-  try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
-  try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
-  try { if (window.Overlays) Overlays.banner('RIFT HOME', 'Returning to the overworld...'); } catch (_) {}
-  game.selectedMap = 'hub_overworld';
-  game.state = 'roundEnd';
-  try { if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2); } catch (_) {}
-}
-function _hzCavernFrame(dt) {
-  const cv = game._cavern;
-  if (!cv || game.state !== 'playing') return;
-  if (!cv._arrived) { cv._arrived = true; try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {} }
-  if (!cv.spawned) { _hzSpawnCavernBots(); return; }
-  if (cv.done) {
-    if (cv.ring) {
-      try { cv.ring.update(dt); } catch (_) {}
-      if (player && player.position && player.shipState !== 'dead' &&
-          player.position.distanceTo(cv.ring.position) < 340) _hzReturnToHub();
-    }
-    return;
-  }
-  let alive = 0, seen = 0;
-  for (const e of game.entities) { if (e && e._cavernBot) { seen++; if (e.alive) alive++; } }
-  cv.remaining = seen ? alive : -1;
-  if (!seen) { cv._noSpawnT += dt; if (cv._noSpawnT < 20 && !cv._noSpawn) return; }
-  if ((seen && !alive) || cv._noSpawn || cv._noSpawnT >= 20) {
-    cv.done = true;
-    const cleared = seen > 0;
-    try {
-      if (window.Overlays) Overlays.banner(cleared ? 'CAVERN CLEARED' : 'RIFT UNSTABLE',
-        cleared ? ('+' + AEGIS.CAVERN_BONUS + ' Aegis XP — the rift home is open at the centre') : 'The rift home is open at the centre');
-    } catch (_) {}
-    if (cleared) { try { if (typeof _aegisAwardXp === 'function') _aegisAwardXp(AEGIS.CAVERN_BONUS); } catch (_) {} }
-    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
-    const rp = new THREE.Vector3(0, 0, 0);
-    try {
-      const rd = game.sdfRoomData;
-      if (Array.isArray(rd) && rd.length) {
-        let best = null, bd = Infinity;
-        for (const rm of rd) {
-          if (rm.id === 'center') { best = rm; break; }
-          const d = Math.hypot(rm.x, rm.z);
-          if (d < bd) { bd = d; best = rm; }
-        }
-        if (best) rp.set(best.x, best.y, best.z);
-      }
-    } catch (_) {}
-    try { cv.ring = new BossPortal(rp); } catch (_) {}
-  }
-}
-function _hzPortalsFrame(dt) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
-  if (_HZ_CAVERN.cool > 0) _HZ_CAVERN.cool -= dt;
-  if (game._cavern) { _hzCavernFrame(dt); return; }
-  const T = game.sandwichTerrain;
-  if (!T || !T.ON || T.biome !== 'mossy') return;
-  if (net && net.active) { _hzPortalsDispose(); return; }   // solo-only, like the rift
-  if (game.state !== 'playing') return;
-  if (_HZ_CAVERN._returnPos && player && player.position) {
-    player.position.copy(_HZ_CAVERN._returnPos);
-    player.velocity.set(0, 0, 0);
-    if (player.mesh) player.mesh.position.copy(_HZ_CAVERN._returnPos);
-    _HZ_CAVERN._returnPos = null;
-    try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}
-  }
-  if (!_HZ_CAVERN.portals) {
-    _HZ_CAVERN.portals = [];
-    const Z = _HUB_ZONES, n = Z.sectors.length, SEC = (Math.PI * 2) / n;
-    for (let i = 0; i < n; i++) {
-      const a = (i + 0.5) * SEC;
-      const x = HUB_CITY.x + Math.cos(a) * _HZ_CAVERN.DIST;
-      const z = HUB_CITY.z + Math.sin(a) * _HZ_CAVERN.DIST;
-      let y = 1200; try { y = _stGroundYCarved(x, z, T) + _HZ_CAVERN.ALT; } catch (_) {}
-      const pos = new THREE.Vector3(x, y, z);
-      let ring = null; try { ring = new BossPortal(pos); } catch (_) {}
-      if (ring) _HZ_CAVERN.portals.push({ ring: ring, biome: Z.sectors[i], sector: i, pos: pos });
-    }
-  }
-  let near = false;
-  for (const p of _HZ_CAVERN.portals) {
-    try { p.ring.update(dt); } catch (_) {}
-    if (!player || !player.position || player.shipState === 'dead') continue;
-    const d = player.position.distanceTo(p.pos);
-    if (d < 900) near = true;
-    if (d < 340 && _HZ_CAVERN.cool <= 0) { _hzEnterCavern(p); return; }
-  }
-  if (near && !_HZ_CAVERN._pre) { _HZ_CAVERN._pre = true; try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {} }
-  else if (!near && _HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {} }
-}
-if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i) => { const p = _HZ_CAVERN.portals && _HZ_CAVERN.portals[i]; if (p) _hzEnterCavern(p); } };
-
 function _swApplyAtmosphere() {
   const T = game.sandwichTerrain;
   if (!T || !T.ON) {
@@ -18385,7 +18213,6 @@ const _hcSunVTmp = new THREE.Vector3();
 
 const AEGIS = {
   XP_PER_KILL: 100,
-  CAVERN_BONUS: 300,
   MAX_RANK: 20,
   stepXp(r) { return 300 + r * 180; },
   rankFromXp(xp) {
@@ -18417,11 +18244,11 @@ function _aegisApply() {
   if (r >= 5)  { player.maxHealth += 2500; player.health += 2500; }
   if (r >= 14) { player.maxShield += 2500; player.shield += 2500; }
 }
-function _aegisAwardXp(amount) {
+function _aegisAwardKill() {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
   const st = _aegisShipState();
   const before = AEGIS.rankFromXp(st.xp).rank;
-  st.xp += amount;
+  st.xp += AEGIS.XP_PER_KILL;
   const after = AEGIS.rankFromXp(st.xp).rank;
   _aegisSave();
   if (after > before) {
@@ -18437,7 +18264,6 @@ function _aegisAwardXp(amount) {
   }
   try { _aegisMenuRefresh(); } catch (_) {}
 }
-function _aegisAwardKill() { _aegisAwardXp(AEGIS.XP_PER_KILL); }
 
 AEGIS.UNIVERSAL = {
   5:  ['Chassis Upgrade', '+2,500 max health.'],
@@ -21745,7 +21571,6 @@ class Bot {
     this.velocity.multiplyScalar(1 - this.chassis.deceleration * dt / Math.max(speed, 1));
 
     if ((this.hoardModelKey && LSS.MODE === 'campaign') ||
-        (this.hoardModelKey && this._cavernBot) ||
         (LSS.MODE === 'race' && game.selectedMap === 'race_straightaway')) _campHoardTerrainNav(this, dt);
 
     const botCollR = this.chassis.hullLength * 0.5;
@@ -22358,7 +22183,6 @@ class Bot {
     delete player.enemyToneLocks[this.id];
     if (attacker === 'player') {
       player.kills++;
-      try { if (typeof _aegisAwardKill === 'function') _aegisAwardKill(); } catch (_) {}
       player.coreMeter = Math.min(100, player.coreMeter + 15);
       addKillFeed('You', this.loadout.name);
       showKillMarker();
@@ -39981,16 +39805,6 @@ function drawCircumpunctHUD() {
       hudFont('700 9px Orbitron, Courier New');
       ctx.fillText('AEGIS ' + _ai.rank + (_ai.need ? ('  ·  ' + _ai.into + '/' + _ai.need + ' XP') : '  ·  MAX'), cx, cy + r1 + 41);
     } catch (_) {}
-    if (game._cavern && game._cavern.spawned) {
-      try {
-        const cv = game._cavern;
-        hudFont('700 11px Orbitron, Courier New');
-        ctx.fillStyle = 'rgba(255,210,77,0.9)';
-        ctx.fillText(cv.done ? 'RIFT HOME OPEN — FLY TO THE CENTRE'
-          : (cv.remaining >= 0 ? ('HOSTILES REMAINING: ' + cv.remaining + ' / ' + cv.target) : 'SCANNING FOR HOSTILES...'),
-          cx, cy - r1 - 46);
-      } catch (_) {}
-    }
   }
 
   const r2 = 190;
@@ -48323,8 +48137,8 @@ const CAMPAIGN_LEGS = [
   { locked: true, name: 'More legs unlock as you journey on' },
 ];
 function _lssGenShiftingDeep(base) {
-  const seed = ((((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x51F7C0DE) +
-                (((game.currentRound | 0) + 1) * 0x9E3779B9)) ^ ((game._cavernSalt || 0) >>> 0)) >>> 0;
+  const seed = (((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x51F7C0DE) +
+                (((game.currentRound | 0) + 1) * 0x9E3779B9)) >>> 0;
   const rnd = mulberry32(seed);
   const R = (a, b) => a + (b - a) * rnd();
 
@@ -48431,9 +48245,7 @@ function _lssGenShiftingDeep(base) {
   });
 
   const BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
-  const biome = (game._cavernBiome && BIOMES.indexOf(game._cavernBiome) >= 0)
-    ? game._cavernBiome
-    : BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
+  const biome = BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
 
   console.log('[shifting-deep] seed=' + seed + ' rooms=' + rooms.length + ' tunnels=' + tunnels.length + ' biome=' + biome);
   return {
