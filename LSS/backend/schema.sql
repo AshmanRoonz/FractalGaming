@@ -85,13 +85,17 @@ CREATE TABLE IF NOT EXISTS matches (
   -- insert time from the participants list (humans = real Discord IDs;
   -- bots/peers without identities use synthetic prefixes).
   mode              TEXT    NOT NULL DEFAULT 'solo',
-  human_count       INTEGER NOT NULL DEFAULT 1
+  human_count       INTEGER NOT NULL DEFAULT 1,
+  -- game_mode = 'classic' | 'race' | 'assault' (migration 004). Sent by the
+  -- game client (v34.82+) ; inferred from map_key prefix for older clients.
+  game_mode         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_matches_started   ON matches(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_matches_validated ON matches(validated);
 CREATE INDEX IF NOT EXISTS idx_matches_map       ON matches(map_key);
 CREATE INDEX IF NOT EXISTS idx_matches_mode      ON matches(mode);
+CREATE INDEX IF NOT EXISTS idx_matches_gamemode  ON matches(game_mode);
 
 -- ----------------------------------------------------------------------
 -- Match participants: one row per (match, participant, reporter).

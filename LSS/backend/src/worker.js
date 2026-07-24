@@ -356,10 +356,19 @@ async function handlePostMatch(request, env, origin) {
   const humanCount = body.participants.filter(p => isHumanDiscordId(p.discord_id)).length;
   const mode = humanCount >= 2 ? 'multiplayer' : 'solo';
 
+  // Game mode (migration 004): trust the client's declared mode when it's a
+  // known value (v34.82+ clients send it) ; otherwise infer from the map_key
+  // prefix, which is unambiguous (race_/assault_ maps only run in their mode).
+  const gmRaw = String(body.mode || '').toLowerCase();
+  const gameMode = (gmRaw === 'classic' || gmRaw === 'race' || gmRaw === 'assault') ? gmRaw
+    : String(body.map_key).startsWith('race_')    ? 'race'
+    : String(body.map_key).startsWith('assault_') ? 'assault'
+    : 'classic';
+
   // Insert / update the match row (idempotent on match_id).
   await env.DB.prepare(`
-    INSERT INTO matches (id, started_at, ended_at, map_key, winning_team, duration_sec, participant_count, mode, human_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO matches (id, started_at, ended_at, map_key, winning_team, duration_sec, participant_count, mode, human_count, game_mode)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO NOTHING
   `).bind(
     String(body.match_id),
@@ -371,6 +380,7 @@ async function handlePostMatch(request, env, origin) {
     body.participants.length,
     mode,
     humanCount,
+    gameMode,
   ).run();
 
   // Insert / replace this reporter's view of every participant.
@@ -457,10 +467,56 @@ async function handleGetLeaderboard(request, env, origin) {
   // mode = multiplayer (default) | solo | combined.
   const modeRaw  = (url.searchParams.get('mode') || 'multiplayer').toLowerCase();
   const mode     = (modeRaw === 'solo' || modeRaw === 'combined') ? modeRaw : 'multiplayer';
+  // gamemode = all (default) | classic | race | assault (migration 004).
+  const gmParam  = (url.searchParams.get('gamemode') || 'all').toLowerCase();
+  const gamemode = (gmParam === 'classic' || gmParam === 'race' || gmParam === 'assault') ? gmParam : 'all';
 
-  const cacheKey = `leaderboard:${mode}:${slice}:${sort}:${loadout}:${map}:${limit}`;
+  const cacheKey = `leaderboard:${mode}:${gamemode}:${slice}:${sort}:${loadout}:${map}:${limit}`;
   const cached   = await env.CACHE.get(cacheKey, 'json');
-  if (cached) return jsonResponse(200, { mode, entries: cached, cached: true }, env, origin);
+  if (cached) return jsonResponse(200, { mode, gamemode, entries: cached, cached: true }, env, origin);
+
+  // Game-mode-filtered boards can't use the denormalized players columns
+  // (those only split solo/mp) — aggregate live from validated matches.
+  // Self-reported rows only (reported_by = discord_id), matching the
+  // /player recent-matches convention, so multi-reporter matches don't
+  // double-count. The KV cache absorbs the query cost.
+  if (gamemode !== 'all') {
+    const aggSortCol = ({
+      wins:    'wins_',
+      kills:   'kills_',
+      matches: 'matches_',
+      damage:  'damage_',
+    })[sort] || 'wins_';
+    const modeClause = (mode === 'combined') ? '' : 'AND m.mode = ?';
+    const stmt = env.DB.prepare(`
+      SELECT p.discord_id, p.username, p.display_name, p.avatar_hash,
+             COUNT(*)             AS matches_,
+             SUM(mp.is_winner)    AS wins_,
+             SUM(mp.kills)        AS kills_,
+             SUM(mp.deaths)       AS deaths_,
+             SUM(mp.damage_dealt) AS damage_,
+             MAX(mp.kills)        AS max_kills_,
+             MIN(mp.kills)        AS min_kills_,
+             MAX(mp.deaths)       AS max_deaths_,
+             MIN(mp.deaths)       AS min_deaths_,
+             MAX(mp.damage_dealt) AS max_damage_,
+             MIN(mp.damage_dealt) AS min_damage_
+      FROM matches m
+      JOIN match_participants mp ON mp.match_id = m.id AND mp.reported_by = mp.discord_id
+      JOIN players p ON p.discord_id = mp.discord_id
+      WHERE m.validated = 1 AND m.game_mode = ? ${modeClause}
+      GROUP BY mp.discord_id
+      ORDER BY ${aggSortCol} DESC, kills_ DESC
+      LIMIT ?
+    `);
+    const bound = (mode === 'combined')
+      ? stmt.bind(gamemode, limit)
+      : stmt.bind(gamemode, mode, limit);
+    const aggResult = await bound.all();
+    const aggEntries = (aggResult.results || []).map(p => decoratePlayerStats(p));
+    await env.CACHE.put(cacheKey, JSON.stringify(aggEntries), { expirationTtl: LEADERBOARD_TTL_SEC });
+    return jsonResponse(200, { mode, gamemode, entries: aggEntries, cached: false }, env, origin);
+  }
 
   // Pick the column-prefix that matches the requested mode.
   // mode=multiplayer (default): mp_*  , mode=solo: solo_*, mode=combined: total_*.
