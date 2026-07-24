@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Last Ship Sailing v34.82</title>
-<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.82","short_name":"LSS%20v34.82","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
+<title>Last Ship Sailing v34.85</title>
+<link rel="manifest" href='data:application/manifest+json,{"name":"Last%20Ship%20Sailing%20v34.85","short_name":"LSS%20v34.85","description":"Zero-gravity%20ship%20combat%2C%20WebXR-capable.","start_url":".","display":"fullscreen","orientation":"any","background_color":"%23000000","theme_color":"%230a0520","categories":["games"],"prefer_related_applications":false}'>
 <meta name="theme-color" content="#0a0520">
 <meta name="application-name" content="Last Ship Sailing">
 <meta name="mobile-web-app-capable" content="yes">
@@ -3129,7 +3129,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '34.82';
+const LSS_BUILD = '34.85';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -48363,14 +48363,23 @@ function drawCircumpunctHUD() {
 
     // (v34.79) Ability NAME instead of the Q/E/F key letter (per user — each
     // ship's abilities differ, the name is the useful label).
+    // (v34.85) The two SIDE slots curve their name along the arc (same
+    // treatment as the HEALTH/SHIELD labels); the top slot stays straight —
+    // horizontal reads best at 12 o'clock.
     const labelOuter = barOuter + 18;
-    const lx = cx + ax * labelOuter;
-    const ly = cy + ay * labelOuter;
-    ctx.fillStyle = (ready || isActive) ? _HUD_C.w_092 : _HUD_C.w_055;
-    hudFont('700 9px Orbitron, Courier New');
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(ab.name || bar.key).toUpperCase(), lx, ly);
+    const _abName = String(ab.name || bar.key).toUpperCase();
+    const _abCol = (ready || isActive) ? _HUD_C.w_092 : _HUD_C.w_055;
+    if (bar.tickI === 5) {
+      const lx = cx + ax * labelOuter;
+      const ly = cy + ay * labelOuter;
+      ctx.fillStyle = _abCol;
+      hudFont('700 9px Orbitron, Courier New');
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(_abName, lx, ly);
+    } else {
+      _hudArcText(_abName, labelOuter, angle, false, _abCol, '700 9px Orbitron, Courier New');
+    }
   }
 
   // ---- LAYER 2c: CORE CHARGE BAR (2026-05 retune) ----
@@ -51347,6 +51356,7 @@ function _refreshSettingsValues() {
     setRange('set-vol-music', 'val-vol-music', audio.userVol.music, 2);
   }
   setChk('set-music-enabled', audio && audio.musicEnabled);
+  setSel('set-music-source', (audio && audio.musicSource) || 'tracks');
   setSel('set-music-style', (audio && audio.musicStyle) || 'battle');
   setSel('set-music-ceiling', (audio && audio.musicCeiling) || 'normal');
   setChk('set-music-mute-lobby', audio && audio.musicMuteLobby);
@@ -51841,6 +51851,13 @@ function buildSettingsPage() {
         <div class="value-display" id="val-vol-music">${audio.userVol.music.toFixed(2)}</div>
       </div>
       <div class="setting-row">
+        <label>Music Source</label>
+        <select id="set-music-source" style="flex:1; min-width:0; max-width:60%;">
+          <option value="tracks" ${(audio.musicSource || 'tracks') === 'tracks' ? 'selected' : ''}>Soundtrack (mp3 tracks)</option>
+          <option value="generative" ${audio.musicSource === 'generative' ? 'selected' : ''}>Generated (synth engine)</option>
+        </select>
+      </div>
+      <div class="setting-row">
         <label>Style</label>
         <select id="set-music-style" style="flex:1; min-width:0; max-width:60%;">
           <option value="cosmic" ${(audio.musicStyle || 'battle') === 'cosmic' ? 'selected' : ''}>Cosmic (C#2 Aeolian, triangle lead)</option>
@@ -52139,6 +52156,22 @@ function buildSettingsPage() {
     musicCeilingSel.addEventListener('change', e => {
       audio.musicCeiling = e.target.value;
       if (typeof musicSetCeiling === 'function') musicSetCeiling(audio.musicCeiling);
+      saveSettings();
+    });
+  }
+  const musicSourceSel = overlay.querySelector('#set-music-source');
+  if (musicSourceSel) {
+    musicSourceSel.addEventListener('change', e => {
+      audio.musicSource = (e.target.value === 'generative') ? 'generative' : 'tracks';
+      if (audio.musicSource === 'generative') {
+        // Kill the tracks, wake the synth at the right pattern for the moment.
+        if (typeof _mp3Stop === 'function') _mp3Stop();
+        if (typeof musicSetEnabled === 'function') musicSetEnabled(audio.musicEnabled !== false);
+        if (typeof musicSyncToGameState === 'function') { try { musicSyncToGameState(); } catch (_) {} }
+      } else {
+        // Silence the synth; the tick gate takes over and starts the tracks.
+        if (typeof musicStop === 'function') { try { musicStop(); } catch (_) {} }
+      }
       saveSettings();
     });
   }
@@ -53578,6 +53611,7 @@ function saveSettings() {
       // Reactive band settings.
       audioMusic: audio.userVol.music != null ? audio.userVol.music : 0.45,
       musicEnabled: audio.musicEnabled !== false,
+      musicSource: audio.musicSource || 'tracks',
       musicCeiling: audio.musicCeiling || 'normal',
       musicMuteLobby: !!audio.musicMuteLobby,
       musicStyle: audio.musicStyle || 'battle',
@@ -55478,6 +55512,7 @@ function loadSettings() {
     if (typeof data.musicCeiling === 'string') audio.musicCeiling = data.musicCeiling;
     if (data.musicMuteLobby !== undefined) audio.musicMuteLobby = !!data.musicMuteLobby;
     if (typeof data.musicStyle === 'string') audio.musicStyle = data.musicStyle;
+    if (data.musicSource === 'generative' || data.musicSource === 'tracks') audio.musicSource = data.musicSource;
     // v8VR: ship-AI announcer prefs. The voice itself is resolved later
     // by announcerInit / pickVoice once the SpeechSynthesis voice list
     // is ready; we stash the saved name on `announcer.voiceName` and the
@@ -68702,6 +68737,9 @@ function _musicScheduleBeat(beatIdx, beatTime) {
 }
 
 function _musicTick() {
+  // (v34.83) Soundtrack mode: never schedule synth beats, whatever timer
+  // called us (musicTickFromMain is gated too; this covers schedTimer paths).
+  if (typeof _mp3SourceActive === 'function' && _mp3SourceActive()) return;
   if (!music.enabled) return;
   if (!musicEnsureCtx()) return;
   const ctx = music.ctx;
@@ -69207,7 +69245,97 @@ function musicSyncToGameState() {
 
 // Per-frame updater called from updateAmbientBed (already runs every frame).
 // Handles BPM ramp during 'playing' and end-of-round timer-tied phrases.
+// ---- (v34.83) SOUNDTRACK MUSIC (MP3 tracks) ----
+// Default music is now real tracks from LSS/music/: the welcome theme loops
+// through load + lobby/ship-select; the battle playlist starts when a match
+// leaves the lobby (the launch cinematic) and ALTERNATES through its list for
+// the whole match (add future mp3s to MUSIC_TRACKS.battle and they join the
+// rotation). The generative synth engine stays fully intact behind
+// Settings > Sound > Music Source = "Generated" (audio.musicSource).
+const MUSIC_TRACKS = {
+  menu:   ['LSS/music/welcome_to_LSS.mp3'],
+  battle: ['LSS/music/battle_in_LSS.mp3', 'LSS/music/heavy_battle_in_LSS.mp3'],
+};
+const mp3Music = { el: null, ctxName: null, idx: 0, wantPlay: false };
+if (typeof window !== 'undefined') window.__mp3 = mp3Music;
+function _mp3SourceActive() {
+  return ((typeof audio !== 'undefined' && audio.musicSource) || 'tracks') === 'tracks';
+}
+function _mp3Vol() {
+  const v = (typeof audio !== 'undefined' && audio.userVol && audio.userVol.music != null) ? audio.userVol.music : 1;
+  return Math.max(0, Math.min(1, v * 0.7));
+}
+function _mp3Stop() {
+  if (mp3Music.el) { try { mp3Music.el.pause(); } catch (_) {} }
+  mp3Music.el = null;
+  mp3Music.ctxName = null;
+  mp3Music.wantPlay = false;
+}
+function _mp3StartCurrent() {
+  const list = MUSIC_TRACKS[mp3Music.ctxName];
+  if (!list || !list.length) return;
+  const el = new Audio(list[mp3Music.idx % list.length]);
+  el.volume = _mp3Vol();
+  // Single-track contexts loop seamlessly; multi-track contexts advance on
+  // 'ended' so the battle playlist alternates for the whole match.
+  el.loop = (list.length === 1);
+  el.addEventListener('ended', () => {
+    if (mp3Music.el !== el) return;
+    mp3Music.idx++;
+    _mp3StartCurrent();
+  });
+  mp3Music.el = el;
+  el.play().catch(() => { mp3Music.wantPlay = true; });
+}
+function _mp3Play(ctxName) {
+  if (mp3Music.ctxName === ctxName) return;
+  _mp3Stop();
+  mp3Music.ctxName = ctxName;
+  mp3Music.idx = 0;
+  _mp3StartCurrent();
+}
+// Autoplay policies block play() before the first user gesture — retry there.
+function _mp3GestureRetry() {
+  if (mp3Music.wantPlay && mp3Music.el) {
+    mp3Music.wantPlay = false;
+    mp3Music.el.play().catch(() => { mp3Music.wantPlay = true; });
+  }
+}
+if (typeof document !== 'undefined') {
+  document.addEventListener('pointerdown', _mp3GestureRetry);
+  document.addEventListener('keydown', _mp3GestureRetry);
+}
+// Per-frame sync (driven from musicTickFromMain's tracks gate): pick the
+// context from game state + keep volume tracking the music slider live.
+function _mp3SyncToState() {
+  if (typeof audio !== 'undefined' && audio.musicEnabled === false) { _mp3Stop(); return; }
+  const _ff = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
+  const inMenu = (game.state === 'select') || _ff;
+  if (inMenu && typeof audio !== 'undefined' && audio.musicMuteLobby && game.state === 'select') { _mp3Stop(); return; }
+  _mp3Play(inMenu ? 'menu' : 'battle');
+  if (mp3Music.el) {
+    const v = _mp3Vol();
+    if (Math.abs(mp3Music.el.volume - v) > 0.005) mp3Music.el.volume = v;
+  }
+}
+// (v34.84) The mp3 sync runs on its OWN interval: gameLoop's music pump only
+// runs in-game (the loop's tail is skipped on the menu), which left the
+// welcome theme silent on the home/lobby screen. 500ms covers context
+// switches + volume tracking, works from boot, and keeps ticking even when
+// rAF is throttled. The in-game per-frame call remains for smooth volume.
+setInterval(() => {
+  if (!_mp3SourceActive()) return;
+  if (typeof game === 'undefined' || !game) return;
+  try { _mp3SyncToState(); } catch (_) {}
+}, 500);
+
 function musicTickFromMain(dt) {
+  // (v34.83) Soundtrack mode: mp3 tracks replace the synth engine entirely —
+  // sync the track player and skip the generative pump (no beats scheduled).
+  if (_mp3SourceActive()) {
+    if (typeof game !== 'undefined') { try { _mp3SyncToState(); } catch (_) {} }
+    return;
+  }
   if (!music.enabled) return;
   if (typeof game === 'undefined') return;
   if (game.state === 'playing' && typeof game.roundTimer === 'number') {
