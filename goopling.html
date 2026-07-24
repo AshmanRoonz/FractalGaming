@@ -26,6 +26,7 @@
   #pwrap{width:150px;height:5px;background:rgba(255,255,255,.09);border-radius:3px;margin-top:5px;overflow:hidden}
   #pbar{height:100%;width:0%;background:#3fd8b0;border-radius:3px;transition:width .25s}
   #stagebar{margin-top:4px;font-size:10px;color:#69859a;letter-spacing:.5px}
+  #peers{display:none;margin-top:4px;font-size:10.5px;color:#8fd;cursor:pointer;pointer-events:auto}
   #hudR{margin-left:auto;display:flex;gap:6px;pointer-events:auto}
   #hudR button{background:rgba(12,24,32,.72);color:#bff;border:1px solid rgba(60,90,120,.4);border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit;font-size:13px}
   #toast{position:fixed;top:24%;left:0;right:0;text-align:center;pointer-events:none}
@@ -34,11 +35,16 @@
   .tmsg b{color:#8fd}
   @keyframes tin{0%{opacity:0;transform:translateY(10px) scale(.94)}12%{opacity:1;transform:none}78%{opacity:1}100%{opacity:0;transform:translateY(-8px)}}
   #intro{position:fixed;inset:0;display:grid;place-items:center;background:radial-gradient(ellipse at 50% 40%,rgba(10,20,30,.55),rgba(4,6,10,.92));z-index:5}
-  #intro .card{text-align:center;padding:26px 30px;max-width:340px}
+  #intro .card{text-align:center;padding:26px 30px;max-width:360px}
   #intro h1{font-size:34px;margin:0 0 2px;color:#7ff0cf;letter-spacing:4px;text-shadow:0 0 24px rgba(80,255,200,.45)}
   #intro .sub{color:#7d97ab;font-size:12px;margin-bottom:16px}
-  #intro .how{color:#9bc;text-align:left;font-size:12.5px;line-height:1.9;margin:0 auto 18px;display:inline-block}
+  #intro .how{color:#9bc;text-align:left;font-size:12.5px;line-height:1.9;margin:0 auto 16px;display:inline-block}
   #intro .how b{color:#8fd}
+  #roomrow{display:flex;gap:6px;justify-content:center;margin:0 0 14px}
+  #roomcode{background:#0c1620;border:1px solid #25415a;border-radius:8px;color:#cfe;font:inherit;font-size:13px;letter-spacing:2px;
+    padding:8px 10px;width:130px;text-align:center;text-transform:uppercase}
+  #roomcode::placeholder{color:#456;letter-spacing:1px}
+  #mkroom{background:#122c3a;color:#9dd;border:1px solid #25415a;border-radius:8px;padding:8px 10px;font:inherit;font-size:12px;cursor:pointer}
   #go{background:#16384a;color:#bff;border:1px solid #2a5366;border-radius:10px;padding:12px 30px;font:inherit;font-size:15px;letter-spacing:2px;cursor:pointer}
   #go:active{transform:scale(.97)}
   #startover{margin-top:12px;color:#5f7d92;font-size:11px;text-decoration:underline;cursor:pointer;display:none}
@@ -55,6 +61,7 @@
     <div id="bname"></div>
     <div id="pwrap"><div id="pbar"></div></div>
     <div id="stagebar"></div>
+    <div id="peers"></div>
   </div>
   <div id="hudR"><button id="mute">♪</button><button id="reset">⟳</button></div>
 </div>
@@ -65,10 +72,11 @@
   <div class="how">
     <b>hold &amp; drag</b> — slosh through the goop<br>
     <b>move slowly</b> — feed on it · grow<br>
-    <b>grow</b> — evolve new appendages<br>
+    <b>pinch / wheel</b> — zoom in &amp; out<br>
     <b>avoid clots</b> — until you can pop them<br>
     <b>double-tap</b> — pulse burst
   </div><br>
+  <div id="roomrow"><input id="roomcode" placeholder="room code" maxlength="12" autocomplete="off" spellcheck="false"><button id="mkroom">✦ new</button></div>
   <button id="go">BEGIN</button>
   <div id="startover">start over from biome 1</div>
 </div></div>
@@ -81,8 +89,12 @@
 // goop = thousands of soft particles fused by blur+contrast (the metaball trick);
 // your finger is the ship: fast = shove/tear the goop, slow = feed on it.
 // colors + textures per biome come from a mini meta-generator (seeded IQ cosine
-// palettes + a small grammar of fbm/ridge/worley/bands with warp/mirror/radial),
+// palettes + a grammar of fbm/ridge/worley/bands with warp/mirror/radial),
 // ported from labs/meta_generator_webgpu.html.
+// The arena is a FIXED 1440x1080 world seen through a pinch-zoom camera, so
+// every peer in a room shares the exact same deterministic goop field.
+// Multiplayer: trystero (nostr) mesh + trystero-consensus helpers (elder
+// proposer election + convergent forward-only biome counter).
 // ============================================================================
 
 // ---------- deterministic RNG + noise (ported from the meta-generator) ------
@@ -98,6 +110,33 @@ function ridge(x,z,s,oc){ let f=0,amp=.5,fr=1,pv=1,nm=0; for(let o=0;o<oc;o++){ 
 function worl(x,z,s){ const ix=Math.floor(x),iz=Math.floor(z),fx=x-ix,fz=z-iz; let f1=8;
   for(let j=-1;j<=1;j++) for(let i=-1;i<=1;i++){ const ox=jhash(ix+i,iz+j,s),oz=jhash(ix+i,iz+j,s^0x5bd1e995);
     const dx=i+ox-fx,dz=j+oz-fz,d=Math.sqrt(dx*dx+dz*dz); if(d<f1)f1=d; } return 1-Math.min(1,f1); }
+
+// ---------- trystero-consensus helpers (inlined; MIT, by Ashman Roonz) ------
+// from ../trystero-consensus/index.js — electProposer + createConvergentState
+function electProposer(selfId,peerIds,{compare}={}){ const cmp=compare||((a,b)=>(a<b?-1:a>b?1:0));
+  return [selfId,...peerIds].sort(cmp)[0]; }
+const _convReducers={ average:v=>v.reduce((a,b)=>a+b,0)/v.length,
+  max:v=>v.reduce((a,b)=>(b>a?b:a),v[0]), min:v=>v.reduce((a,b)=>(b<a?b:a),v[0]),
+  latest:v=>v[v.length-1] };
+function createConvergentState({fields,staleMs=2000,now=()=>performance.now()}={}){
+  if(!fields||typeof fields!=='object') throw new Error('createConvergentState requires a `fields` map');
+  const peers=new Map();
+  const reducerFor=r=>typeof r==='function'?r:_convReducers[r];
+  const isLive=(snap,at)=>at-snap.at<=staleMs;
+  return {
+    ingest(peerId,values,at=now()){ peers.set(peerId,{values:values||{},at}); return this; },
+    drop(peerId){ peers.delete(peerId); return this; },
+    contributors(at=now()){ const live=[]; for(const [pid,snap] of peers) if(isLive(snap,at)) live.push(pid); return live; },
+    merge(local,at=now()){ const out={};
+      for(const field of Object.keys(fields)){ const reduce=reducerFor(fields[field]); const values=[];
+        if(local[field]!==undefined&&local[field]!==null) values.push(local[field]);
+        for(const snap of peers.values()){ if(!isLive(snap,at)) continue;
+          const v=snap.values[field]; if(v!==undefined&&v!==null) values.push(v); }
+        out[field]=values.length>=2?reduce(values):local[field]; }
+      return out; },
+    prune(at=now()){ for(const [pid,snap] of peers) if(!isLive(snap,at)) peers.delete(pid); return this; }
+  };
+}
 
 // ---------- IQ cosine palette + color helpers -------------------------------
 function palRGB(P,x){ const cl=v=>v<0?0:v>1?1:v; x=x-Math.floor(x);
@@ -156,86 +195,92 @@ function texSample(g,u,v,t,asp){
   }
 }
 
+// ---------- world + camera --------------------------------------------------
+// fixed world so every peer simulates the SAME arena; the camera is per-player
+const WORLD={W:1440,H:1080};
+const cam={x:WORLD.W/2,y:WORLD.H/2,z:1};
+let zFit=1,zMin=.3,zMax=2.6,lastBlurZ=-1;
+function s2w(sx,sy){ return [cam.x+(sx-W/2)/cam.z, cam.y+(sy-H/2)/cam.z]; }
+function setZoom(z,ax,ay){ // zoom keeping screen point (ax,ay) fixed on its world point
+  const [wx,wy]=s2w(ax,ay); cam.z=Math.max(zMin,Math.min(zMax,z));
+  cam.x=wx-(ax-W/2)/cam.z; cam.y=wy-(ay-H/2)/cam.z; clampCam(); }
+function clampCam(){
+  const hw=W/(2*cam.z),hh=H/(2*cam.z),m=30;
+  cam.x = hw*2>=WORLD.W+m*2 ? WORLD.W/2 : Math.max(hw-m,Math.min(WORLD.W-hw+m,cam.x));
+  cam.y = hh*2>=WORLD.H+m*2 ? WORLD.H/2 : Math.max(hh-m,Math.min(WORLD.H-hh+m,cam.y));
+}
+function applyBlur(){ if(Math.abs(cam.z-lastBlurZ)<lastBlurZ*.03) return; lastBlurZ=cam.z;
+  gooC.style.filter=`blur(${Math.max(2.5,Math.min(12,7*cam.z)).toFixed(1)}px) contrast(15)`; }
+
 // ---------- canvases --------------------------------------------------------
 const bgC=document.getElementById('bg'),  bgX=bgC.getContext('2d');
 const gooC=document.getElementById('goo'),gooX=gooC.getContext('2d');
 const texC=document.getElementById('tex'),texX=texC.getContext('2d');
 const fxC=document.getElementById('fx'),  fxX=fxC.getContext('2d');
 let W=0,H=0,DPR=1,GR=0.55;              // css size, dpr for fx, goo backing res factor
+const TS=0.5;                            // tex screen-canvas backing res factor
 function resize(){
-  const ow=W,oh=H;
   W=innerWidth; H=innerHeight; DPR=Math.min(devicePixelRatio||1,2);
   gooC.width=Math.max(2,W*GR|0); gooC.height=Math.max(2,H*GR|0);
+  texC.width=Math.max(2,W*TS|0); texC.height=Math.max(2,H*TS|0);
   fxC.width=W*DPR|0; fxC.height=H*DPR|0;
   bgC.width=128; bgC.height=Math.max(8,128*H/W|0);
-  if(ow&&P&&(ow!==W||oh!==H)){ const sx=W/ow,sy=H/oh;
-    for(let i=0;i<alive;i++){ const o=i*6; P[o]*=sx; P[o+1]*=sy; P[o+4]*=sx; P[o+5]*=sy; }
-    ship.x*=sx; ship.y*=sy; }
-  TEX.resize(); flowInit();
+  zFit=Math.min(W/WORLD.W,H/WORLD.H); zMin=zFit*.95; zMax=2.6;
+  cam.z=Math.max(zMin,Math.min(zMax,cam.z)); clampCam(); lastBlurZ=-1; applyBlur();
 }
-addEventListener('resize',()=>{ resize(); TEX.full(); });
+addEventListener('resize',resize);
 
-// ---------- biome texture renderer (progressive rows; crossfade on switch) --
-const TEX={ W:176,H:99, img:null, off:null, offX:null, prev:null, prevX:null,
-  row:0, fadeT:-1, t:0,
-  resize(){ this.H=Math.max(24,Math.round(this.W*H/Math.max(1,W))); texC.width=this.W; texC.height=this.H;
-    this.off=this.off||document.createElement('canvas'); this.off.width=this.W; this.off.height=this.H; this.offX=this.off.getContext('2d');
-    this.prev=this.prev||document.createElement('canvas'); this.prev.width=this.W; this.prev.height=this.H; this.prevX=this.prev.getContext('2d');
-    this.img=this.offX.createImageData(this.W,this.H); this.row=0; },
-  // render a slice of rows into img; when complete, blit to offscreen + composite
+// ---------- biome texture (world-anchored; progressive rows; crossfades) ----
+const TEXW=176, TEXH=Math.round(TEXW*WORLD.H/WORLD.W);   // 176x132, covers the world
+const TEX={ img:null, cur:null, curX:null, prev:null, prevX:null, row:0, fadeT:-1, t:0,
+  init(){ this.cur=document.createElement('canvas'); this.cur.width=TEXW; this.cur.height=TEXH; this.curX=this.cur.getContext('2d');
+    this.prev=document.createElement('canvas'); this.prev.width=TEXW; this.prev.height=TEXH; this.prevX=this.prev.getContext('2d');
+    this.img=this.curX.createImageData(TEXW,TEXH); },
   step(g,rows){
-    const d=this.img.data, asp=W/Math.max(1,H), t=this.t;
+    const d=this.img.data, asp=WORLD.W/WORLD.H, t=this.t;
     for(let n=0;n<rows;n++){
-      const y=this.row; if(y>=this.H){ break; }
-      const v=y/this.H;
-      for(let x=0;x<this.W;x++){
-        const f=texSample(g,x/this.W,v,t,asp);
+      const y=this.row; if(y>=TEXH) break;
+      const v=y/TEXH;
+      for(let x=0;x<TEXW;x++){
+        const f=texSample(g,x/TEXW,v,t,asp);
         const c=palRGB(g.P, f*g.span+g.off+palPhase);
-        const o=(y*this.W+x)*4;
+        const o=(y*TEXW+x)*4;
         d[o]=c[0]*255; d[o+1]=c[1]*255; d[o+2]=c[2]*255; d[o+3]=255;
       }
       this.row++;
     }
-    if(this.row>=this.H){ this.row=0; this.t=nowS;
-      this.offX.putImageData(this.img,0,0); this.composite(); this.bg(); }
+    if(this.row>=TEXH){ this.row=0; this.t=nowS; this.curX.putImageData(this.img,0,0); }
   },
-  composite(){ texX.globalAlpha=1; texX.drawImage(this.off,0,0);
-    if(this.fadeT>=0){ const u=(nowS-this.fadeT)/1.5;
-      if(u<1){ texX.globalAlpha=1-u; texX.drawImage(this.prev,0,0); texX.globalAlpha=1; }
-      else this.fadeT=-1; } },
-  bg(){ bgX.fillStyle='#04060a'; bgX.fillRect(0,0,bgC.width,bgC.height);
-    bgX.globalAlpha=.34; bgX.drawImage(texC,0,0,bgC.width,bgC.height); bgX.globalAlpha=1;
-    const g=bgX.createRadialGradient(bgC.width/2,bgC.height/2,bgC.height*.2,bgC.width/2,bgC.height/2,bgC.width*.72);
-    g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,'rgba(0,0,5,0.7)'); bgX.fillStyle=g; bgX.fillRect(0,0,bgC.width,bgC.height); },
-  beginFade(){ this.prevX.drawImage(texC,0,0); this.fadeT=nowS; this.row=0; },
-  full(){ if(!gen)return; const r=this.row; this.row=0; this.step(gen,this.H); if(r) this.row=0; } // synchronous full render
+  beginFade(){ this.prevX.drawImage(this.cur,0,0); this.fadeT=nowS; this.row=0; },
+  full(g){ this.row=0; this.step(g,TEXH); }   // synchronous full render
 };
 let palPhase=0;
 
 // ---------- particles (the goop) — same layout as the lab: x,y,vx,vy,hx,hy --
-let P=null, alive=0, N0=0, QUOTA=0;
+// seeded rng (NOT Math.random) so every peer in a room grows identical clouds
+const N0=6500;
+let P=null, alive=0, QUOTA=Math.round(N0*.7);
 function seedClouds(g){
-  N0=Math.max(3000,Math.min(6200,Math.round(4600*Math.min(1.35,Math.max(.55,(W*H)/921600)))));
   P=new Float32Array(N0*6);
-  const sc=0.0016, s=(g.seed%1000)*0.13;
+  const R=makeRng(g.seed^0xC10D5), sc=0.0016, s=(g.seed%1000)*0.13;
   let i=0,guard=0;
   while(i<N0&&guard<N0*60){ guard++;
-    const x=Math.random()*W, y=Math.random()*H*.92+H*.04;
+    const x=R.nx()*WORLD.W, y=R.nx()*WORLD.H*.92+WORLD.H*.04;
     const dens=fbm(x*sc+s*10,y*sc-s*7,g.seed,4);
-    if(Math.random()<(dens-.42)*2.6){ const o=i*6; P[o]=x;P[o+1]=y;P[o+2]=0;P[o+3]=0;P[o+4]=x;P[o+5]=y; i++; } }
-  for(;i<N0;i++){ const o=i*6,x=Math.random()*W,y=Math.random()*H; P[o]=x;P[o+1]=y;P[o+2]=0;P[o+3]=0;P[o+4]=x;P[o+5]=y; }
-  alive=N0; QUOTA=Math.round(N0*.7);
+    if(R.nx()<(dens-.42)*2.6){ const o=i*6; P[o]=x;P[o+1]=y;P[o+2]=0;P[o+3]=0;P[o+4]=x;P[o+5]=y; i++; } }
+  for(;i<N0;i++){ const o=i*6,x=R.nx()*WORLD.W,y=R.nx()*WORLD.H; P[o]=x;P[o+1]=y;P[o+2]=0;P[o+3]=0;P[o+4]=x;P[o+5]=y; }
+  alive=N0;
 }
 function scatterFromHome(){ // spawn-in: puff particles out (inside bounds), they condense back home
   for(let i=0;i<alive;i++){ const o=i*6,a=Math.random()*6.2832,r=120+Math.random()*260;
-    P[o]=Math.max(-60,Math.min(W+60,P[o+4]+Math.cos(a)*r));
-    P[o+1]=Math.max(-60,Math.min(H+60,P[o+5]+Math.sin(a)*r));
+    P[o]=Math.max(-60,Math.min(WORLD.W+60,P[o+4]+Math.cos(a)*r));
+    P[o+1]=Math.max(-60,Math.min(WORLD.H+60,P[o+5]+Math.sin(a)*r));
     P[o+2]=0; P[o+3]=0; } }
 function kill(i){ const a=(--alive)*6,o=i*6;
   P[o]=P[a]; P[o+1]=P[a+1]; P[o+2]=P[a+2]; P[o+3]=P[a+3]; P[o+4]=P[a+4]; P[o+5]=P[a+5]; }
 
 // soft particle sprite (fuzzy white dot; crowds SUM into solid density)
-let sprite=null; const SPR=12;
+let sprite=null; const SPR=13;
 function makeSprite(){ const r=SPR,s=document.createElement('canvas'); s.width=s.height=r*2;
   const g=s.getContext('2d'),grd=g.createRadialGradient(r,r,0,r,r,r);
   grd.addColorStop(0,'rgba(255,255,255,0.9)'); grd.addColorStop(.5,'rgba(255,255,255,0.35)'); grd.addColorStop(1,'rgba(255,255,255,0)');
@@ -246,19 +291,22 @@ function glowSprite(rgb){ const r=32,s=document.createElement('canvas'); s.width
   g.fillStyle=grd; g.fillRect(0,0,r*2,r*2); return s; }
 let gFood=null,gDanger=null;
 
-// ---------- ambient flow field (curl noise grid; the goop sloshes around you)
-const FG={c:22,r:14,A:null,B:null,t0:0,per:4.5,ph:0};
-function flowInit(){ FG.r=Math.max(6,Math.round(FG.c*H/Math.max(1,W))); FG.A=new Float32Array(FG.c*FG.r*2); FG.B=new Float32Array(FG.c*FG.r*2);
-  if(gen){ flowGen(FG.A); FG.ph++; flowGen(FG.B); FG.t0=nowS; } }
-function flowGen(buf){ const g=gen,e=.22,s=g.seed^0x51ab;
+// ---------- ambient flow field (curl noise grid; the goop sloshes around) ---
+// phase is derived from time-since-biome-start so peers see near-identical currents
+const FG={c:24,r:18,A:null,B:null,per:4.5,ph:-1,biomeT:0};
+function flowInit(){ FG.A=new Float32Array(FG.c*FG.r*2); FG.B=new Float32Array(FG.c*FG.r*2);
+  FG.biomeT=nowS; FG.ph=-1; flowTick(); }
+function flowGen(buf,ph){ const g=gen,e=.22,s=g.seed^0x51ab;
   for(let j=0;j<FG.r;j++) for(let i=0;i<FG.c;i++){
-    const x=i/FG.c*g.flowSc*2, y=j/FG.r*g.flowSc*2, tt=FG.ph*.6;
+    const x=i/FG.c*g.flowSc*2, y=j/FG.r*g.flowSc*2, tt=ph*.6;
     const gx=fbm(x+e,y+tt,s,3)-fbm(x-e,y+tt,s,3), gy=fbm(x,y+e+tt,s,3)-fbm(x,y-e+tt,s,3);
     const l=Math.hypot(gx,gy)||1, o=(j*FG.c+i)*2;
     buf[o]=-gy/l*g.flowStr; buf[o+1]=gx/l*g.flowStr; } }
-function flowAt(x,y,out){ const u=(nowS-FG.t0)/FG.per;
-  if(u>=1){ const T=FG.A; FG.A=FG.B; FG.B=T; FG.ph++; flowGen(FG.B); FG.t0=nowS; return flowAt(x,y,out); }
-  let fx=x/W*(FG.c-1), fy=y/H*(FG.r-1);
+function flowTick(){ const ph=Math.floor((nowS-FG.biomeT)/FG.per);
+  if(ph!==FG.ph){ FG.ph=ph; flowGen(FG.A,ph); flowGen(FG.B,ph+1); } }
+function flowAt(x,y,out){
+  const u=((nowS-FG.biomeT)/FG.per)%1;
+  let fx=x/WORLD.W*(FG.c-1), fy=y/WORLD.H*(FG.r-1);
   fx=fx<0?0:fx>FG.c-1.001?FG.c-1.001:fx; fy=fy<0?0:fy>FG.r-1.001?FG.r-1.001:fy;
   const i0=fx|0,j0=fy|0,tx=fx-i0,ty=fy-j0;
   const o00=(j0*FG.c+i0)*2,o10=o00+2,o01=o00+FG.c*2,o11=o01+2,A=FG.A,B=FG.B;
@@ -270,38 +318,37 @@ function flowAt(x,y,out){ const u=(nowS-FG.t0)/FG.per;
 const _fl=[0,0];
 
 // ---------- ship + evolutions ----------------------------------------------
-const REF=4200;                                    // evolution pacing reference (device-independent)
+const REF=4200;                                    // evolution pacing reference
 const EVOS=[
   {frac:.12, name:'CILIA',     desc:'feed while moving faster'},
   {frac:.34, name:'VORTEX',    desc:'nearby goop is drawn in'},
   {frac:.66, name:'SPIKES',    desc:'pop clots into nutrients'},
   {frac:1.05,name:'TENTACLES', desc:'reach out to distant goop'},
   {frac:1.55,name:'BLOOM',     desc:'total absorption'}];
-const ship={x:0,y:0,vx:0,vy:0,R:30,tx:null,ty:null,down:false};
-let mass=60, totalEaten=0, eatenBiome=0, stage=0;
+const ship={x:WORLD.W/2,y:WORLD.H/2,vx:0,vy:0,R:30,tx:null,ty:null,down:false};
+let mass=60, totalEaten=0, eatenBiome=0, stage=0, feedFlag=false;
 let biomeIdx=0, masterSeed=0, gen=null;
-let phase='intro', phaseT=0, invulnT=-9, flashT=-9, pulseT=-9, spikeT=-9, hintT=0;
+let phase='intro', phaseT=0, invulnT=-9, flashT=-9, pulseT=-9, spikeT=-9, hintT=0, hazGraceT=0;
 let eatCombo=0, comboT=0;
-function Rtarget(){ return Math.min(140,Math.min(W,H)*.24, 18+30*Math.sqrt(mass/300)); }
+function Rtarget(){ return Math.min(150, 18+30*Math.sqrt(mass/300)); }
 function checkEvos(){ let n=0; for(const e of EVOS) if(totalEaten>=e.frac*REF) n++;
   if(n>stage){ stage=n; const e=EVOS[n-1];
     toast(`<b>EVOLVED — ${e.name}</b><br><span style="font-size:11px;color:#9bc">${e.desc}</span>`);
     sndEvolve(); ringFx(ship.x,ship.y,ship.R,ship.R*3.4,gen.shipCol,.8); try{navigator.vibrate&&navigator.vibrate(30);}catch(_){}
-    stageHud(); save(); } }
+    netEvt({t:'evolve',x:ship.x,y:ship.y}); stageHud(); save(); } }
 function stageHud(){ let s=''; for(let i=0;i<EVOS.length;i++) s+=i<stage?'◉ ':'○ ';
   document.getElementById('stagebar').textContent=s+(stage>0?EVOS[stage-1].name:'PROTOCELL'); }
 
-// ---------- hazards (clots) -------------------------------------------------
+// ---------- hazards (clots; seeded spawn = same start on every peer) --------
 let HZ=[];
-function makeHazards(){ HZ=[]; const n=Math.min(8,2+biomeIdx);
-  for(let k=0;k<n;k++){ let x,y,tries=0;
-    do{ x=40+Math.random()*(W-80); y=40+Math.random()*(H-80); tries++; }
-    while(Math.hypot(x-ship.x,y-ship.y)<260&&tries<40);
-    HZ.push({x,y,vx:0,vy:0,r:22+Math.random()*14,ph:Math.random()*7,dead:-9}); } }
+function makeHazards(){ HZ=[]; const n=Math.min(8,2+biomeIdx), R=makeRng(hashU(gen.seed^0x4A771));
+  for(let k=0;k<n;k++)
+    HZ.push({x:60+R.nx()*(WORLD.W-120), y:60+R.nx()*(WORLD.H-120), vx:0,vy:0, r:22+R.nx()*14, ph:R.nx()*7, dead:-9});
+  hazGraceT=nowS+2.5; }
 
 // ---------- fx pools --------------------------------------------------------
 const streaks=[],rings=[];
-function streakFx(x,y){ if(streaks.length<160) streaks.push({x,y,t:nowS}); }
+function streakFx(x,y,tx2,ty2){ if(streaks.length<160) streaks.push({x,y,tx:tx2,ty:ty2,t:nowS}); }
 function ringFx(x,y,r0,r1,col,life){ if(rings.length<40) rings.push({x,y,r0,r1,col,t:nowS,life}); }
 
 // ---------- audio (tiny synth; unlocked on first gesture) -------------------
@@ -328,7 +375,9 @@ function toast(html){ const d=document.createElement('div'); d.className='tmsg';
 function hudBiome(){ document.getElementById('bname').textContent=`biome ${biomeIdx+1} — ${gen.name}`;
   document.getElementById('pbar').style.background=css(gen.shipCol,1); }
 let lastPct=-1;
-function hudProgress(){ const p=Math.min(100,Math.round(eatenBiome/QUOTA*100));
+function sharedEaten(){ let t=eatenBiome;
+  for(const p of NET.peers.values()) if(p.fresh&&p.b===biomeIdx) t+=p.e||0; return t; }
+function hudProgress(){ const p=Math.min(100,Math.round(sharedEaten()/QUOTA*100));
   if(p!==lastPct){ lastPct=p; document.getElementById('pbar').style.width=p+'%'; } }
 
 // ---------- save ------------------------------------------------------------
@@ -341,7 +390,7 @@ function enterBiome(i,fresh){
   biomeIdx=i; gen=growBiome(biomeSeed(i));
   gFood=glowSprite(gen.shipCol); gDanger=glowSprite(gen.danger);
   seedClouds(gen); eatenBiome=0; lastPct=-1; flowInit();
-  if(fresh){ ship.x=W/2; ship.y=H/2; ship.vx=ship.vy=0; }
+  if(fresh){ ship.x=WORLD.W/2; ship.y=WORLD.H/2; ship.vx=ship.vy=0; cam.x=ship.x; cam.y=ship.y; clampCam(); }
   makeHazards(); hudBiome(); hudProgress(); stageHud();
   document.querySelector('meta[name=theme-color]').content=css(lit(gen.shipCol,.25),1);
 }
@@ -355,33 +404,156 @@ function finishClear(){ biomeIdx++;
   hudBiome(); hudProgress(); toast(`<b>BIOME ${biomeIdx+1}</b> — ${gen.name}`);
   phase='spawn'; phaseT=nowS; save();
 }
+function jumpToBiome(b){ // multiplayer fast-forward: the room moved on, follow it
+  if(b<=biomeIdx) return;
+  if(phase==='clear'&&b===biomeIdx+1) return;      // already transitioning there
+  biomeIdx=b; gen=growBiome(biomeSeed(b));
+  gFood=glowSprite(gen.shipCol); gDanger=glowSprite(gen.danger);
+  TEX.beginFade(); TEX.full(gen);
+  seedClouds(gen); scatterFromHome(); eatenBiome=0; lastPct=-1; flowInit(); makeHazards();
+  hudBiome(); hudProgress(); toast(`<b>BIOME ${biomeIdx+1}</b> — ${gen.name}`);
+  if(phase!=='intro'){ phase='spawn'; phaseT=nowS; } save();
+}
 
-// ---------- input -----------------------------------------------------------
-let lastTapT=-9,lastTapX=0,lastTapY=0;
-function pointerPos(e){ return [e.clientX,e.clientY]; }
-function setTarget(x,y,touch){ const off=touch?Math.max(0,64-ship.R*.35):0; ship.tx=x; ship.ty=y-off; }
+// ---------- multiplayer (trystero mesh + consensus helpers) -----------------
+// loose-sync co-op: every peer runs the same seeded world locally and applies
+// friends' wakes/eats to its own goop; quota progress is the SUM of everyone's
+// reported eats; the biome counter converges forward-only ('max'); the room's
+// seed comes from the ELDER peer (earliest join time — election is by joinT,
+// so a newcomer can never overwrite an established room).
+const NET={on:false,code:null,room:null,selfId:null,peers:new Map(),conv:null,
+  sendShip:null,sendCfg:null,sendEvt:null,timer:0,joinT:0};
+function peerColFor(id){ let h=0; for(let i=0;i<id.length;i++) h=(Math.imul(h,31)+id.charCodeAt(i))>>>0;
+  return hueRot(gen?gen.shipCol:[.5,.9,.8], 40+(h%280), 1.1, 1.0); }
+function updatePeersHud(){ const el=document.getElementById('peers'), n=NET.peers.size;
+  if(!NET.on){ el.style.display='none'; return; }
+  el.style.display='block'; el.textContent=`⬡ room ${NET.code} · ${n+1} goopling${n?'s':''} — tap to copy invite`; }
+function netEvt(d){ if(NET.on&&NET.sendEvt) try{ NET.sendEvt(d); }catch(_){} }
+const num=(v,lo,hi)=>typeof v==='number'&&isFinite(v)?Math.max(lo,Math.min(hi,v)):lo;
+async function netJoin(code){
+  if(NET.on) return true;
+  code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);
+  if(!code) return false;
+  let T;
+  try{ T=await import('https://esm.sh/trystero@0.22.0/nostr'); }
+  catch(_){ toast('P2P unavailable — playing solo'); return false; }
+  try{
+    NET.room=T.joinRoom({appId:'goopling-v1'},'goopling-'+code);
+    NET.selfId=T.selfId; NET.code=code; NET.on=true; NET.joinT=Date.now();
+    NET.conv=createConvergentState({fields:{biome:'max'},staleMs:3500});
+    const room=NET.room;
+    const [sendShip,onShip]=room.makeAction('ship');
+    const [sendCfg,onCfg]=room.makeAction('cfg');
+    const [sendEvt,onEvt]=room.makeAction('evt');
+    NET.sendShip=sendShip; NET.sendCfg=sendCfg; NET.sendEvt=sendEvt;
+    onShip((d,id)=>{ if(!d||typeof d!=='object') return;
+      let p=NET.peers.get(id);
+      if(!p){ p={cx:num(d.x,0,WORLD.W),cy:num(d.y,0,WORLD.H),col:peerColFor(id)}; NET.peers.set(id,p);
+        toast('<b>a goopling joined</b>'); updatePeersHud(); }
+      p.x=num(d.x,-200,WORLD.W+200); p.y=num(d.y,-200,WORLD.H+200);
+      p.vx=num(d.vx,-4000,4000); p.vy=num(d.vy,-4000,4000);
+      p.R=num(d.R,10,200); p.st=num(d.st,0,5)|0; p.e=num(d.e,0,N0)|0; p.b=num(d.b,0,99999)|0;
+      p.f=!!d.f; p.jt=num(d.jt,0,9e15); p.last=nowS; p.fresh=true;
+      NET.conv.ingest(id,{biome:p.b});
+    });
+    onCfg((d,id)=>{ if(!d||typeof d!=='object') return;
+      // trust only a cfg from a peer OLDER than me (the room elder replays state)
+      if(num(d.jt,0,9e15)>=NET.joinT) return;
+      const sd=(num(d.seed,0,4294967295))>>>0, b=num(d.biome,0,99999)|0;
+      if(sd!==masterSeed){ masterSeed=sd; biomeIdx=-1; jumpToBiome(b); }
+      else if(b>biomeIdx) jumpToBiome(b);
+    });
+    onEvt((d,id)=>{ if(!d||typeof d!=='object'||!NET.peers.has(id)) return;
+      const x=num(d.x,0,WORLD.W),y=num(d.y,0,WORLD.H),p=NET.peers.get(id);
+      if(d.t==='pulse') ringFx(x,y,20,300,p.col,.55);
+      else if(d.t==='pop') ringFx(x,y,6,110,gen.danger,.5);
+      else if(d.t==='evolve') ringFx(x,y,30,180,p.col,.8);
+    });
+    room.onPeerJoin(id=>{ // elder (earliest joinT among my known peers + me) replays room state
+      const ids=[...NET.peers.keys()];
+      const elder=electProposer(NET.selfId,ids,{compare:(a,b)=>{
+        const ja=a===NET.selfId?NET.joinT:(NET.peers.get(a)?.jt??9e15);
+        const jb=b===NET.selfId?NET.joinT:(NET.peers.get(b)?.jt??9e15);
+        return ja-jb||(a<b?-1:a>b?1:0); }});
+      if(elder===NET.selfId) try{ sendCfg({seed:masterSeed,biome:biomeIdx,jt:NET.joinT},id); }catch(_){}
+      updatePeersHud(); });
+    room.onPeerLeave(id=>{ NET.peers.delete(id); NET.conv.drop(id);
+      toast('a goopling drifted away'); updatePeersHud(); });
+    NET.timer=setInterval(()=>{
+      if(phase==='intro') return;
+      try{ sendShip({x:Math.round(ship.x*10)/10,y:Math.round(ship.y*10)/10,
+        vx:Math.round(ship.vx),vy:Math.round(ship.vy),R:Math.round(ship.R),
+        st:stage,e:eatenBiome,b:biomeIdx,f:feedFlag,jt:NET.joinT}); }catch(_){}
+      for(const [id,p] of NET.peers) if(nowS-p.last>4){ p.fresh=false; }
+      const m=NET.conv.merge({biome:biomeIdx});
+      if(m.biome>biomeIdx) jumpToBiome(m.biome|0);
+    },90);
+    updatePeersHud();
+    history.replaceState(null,'','?room='+code);
+    toast(`<b>room ${code}</b> — share this page's link`);
+    return true;
+  }catch(_){ NET.on=false; toast('P2P join failed — playing solo'); return false; }
+}
+document.getElementById('peers').onclick=()=>{ if(!NET.code) return;
+  const url=location.origin+location.pathname+'?room='+NET.code;
+  try{ navigator.clipboard.writeText(url).then(()=>toast('invite link copied')); }
+  catch(_){ toast(url); } };
+
+// ---------- input: steer / pinch-zoom / wheel -------------------------------
+const ptrs=new Map();
+let lastTapT=-9,lastTapX=0,lastTapY=0,pinch=null,pinchEndT=-9;
+function setTargetScreen(sx,sy,touch){
+  const [wx,wy]=s2w(sx,sy);
+  const off=touch?Math.max(0,64-ship.R*cam.z*.35)/cam.z:0;
+  ship.tx=wx; ship.ty=wy-off;
+}
+function pinchInfo(){ const it=[...ptrs.values()];
+  return { d:Math.hypot(it[0].x-it[1].x,it[0].y-it[1].y)||1,
+           mx:(it[0].x+it[1].x)/2, my:(it[0].y+it[1].y)/2 }; }
 addEventListener('pointerdown',e=>{ if(phase==='intro') return;
-  if(e.target.closest&&e.target.closest('#hudR')) return;
+  if(e.target.closest&&e.target.closest('#hudR,#hudL')) return;
   initAudio(); if(AC&&AC.state==='suspended') AC.resume();
-  const [x,y]=pointerPos(e); ship.down=true; setTarget(x,y,e.pointerType!=='mouse');
+  ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY,t:e.pointerType});
+  if(ptrs.size===2){ // pinch begins: stop steering, anchor the midpoint
+    ship.down=false; ship.tx=ship.ty=null;
+    const pi=pinchInfo(); pinch={d:pi.d,wx:s2w(pi.mx,pi.my)[0],wy:s2w(pi.mx,pi.my)[1]};
+    return; }
+  if(ptrs.size>2) return;
+  ship.down=true; setTargetScreen(e.clientX,e.clientY,e.pointerType!=='mouse');
   const n=nowS;
-  if(n-lastTapT<.32 && Math.hypot(x-lastTapX,y-lastTapY)<80) doPulse();
-  lastTapT=n; lastTapX=x; lastTapY=y; });
+  if(n-lastTapT<.32 && Math.hypot(e.clientX-lastTapX,e.clientY-lastTapY)<80 && n-pinchEndT>.5) doPulse();
+  lastTapT=n; lastTapX=e.clientX; lastTapY=e.clientY; });
 addEventListener('pointermove',e=>{ if(phase==='intro') return;
+  const p=ptrs.get(e.pointerId); if(p){ p.x=e.clientX; p.y=e.clientY; }
+  if(ptrs.size>=2&&pinch){ const pi=pinchInfo();
+    cam.z=Math.max(zMin,Math.min(zMax,cam.z*pi.d/pinch.d)); pinch.d=pi.d;
+    cam.x=pinch.wx-(pi.mx-W/2)/cam.z; cam.y=pinch.wy-(pi.my-H/2)/cam.z;   // anchored world point stays under the midpoint
+    clampCam(); applyBlur(); return; }
   if(!ship.down&&e.pointerType!=='mouse') return;
-  const [x,y]=pointerPos(e); setTarget(x,y,e.pointerType!=='mouse'); });
-addEventListener('pointerup',()=>{ ship.down=false; ship.tx=ship.ty=null; });
-addEventListener('pointercancel',()=>{ ship.down=false; ship.tx=ship.ty=null; });
-addEventListener('touchstart',e=>{ if(!(e.target.closest&&e.target.closest('#hudR,#intro'))) e.preventDefault(); },{passive:false});
+  if(ptrs.size<=1) setTargetScreen(e.clientX,e.clientY,e.pointerType!=='mouse'); });
+function dropPtr(e){ ptrs.delete(e.pointerId);
+  if(ptrs.size===1&&pinch){ pinch=null; pinchEndT=nowS;   // one finger left: it steers again
+    const it=[...ptrs.values()][0]; ship.down=true; setTargetScreen(it.x,it.y,it.t!=='mouse'); }
+  else if(ptrs.size===0){ if(pinch){ pinch=null; pinchEndT=nowS; }
+    ship.down=false; ship.tx=ship.ty=null; } }
+addEventListener('pointerup',dropPtr);
+addEventListener('pointercancel',dropPtr);
+addEventListener('wheel',e=>{ if(phase==='intro') return; e.preventDefault();
+  const z=cam.z*Math.exp(-e.deltaY*0.0016);
+  setZoom(z,e.clientX,e.clientY); applyBlur(); },{passive:false});
+addEventListener('touchstart',e=>{ if(!(e.target.closest&&e.target.closest('#hudR,#hudL,#intro'))) e.preventDefault(); },{passive:false});
 addEventListener('contextmenu',e=>e.preventDefault());
-addEventListener('keydown',e=>{ if(e.code==='Space') doPulse(); });
+addEventListener('keydown',e=>{ if(e.code==='Space') doPulse();
+  if(e.key==='+'||e.key==='=') { setZoom(cam.z*1.15,W/2,H/2); applyBlur(); }
+  if(e.key==='-') { setZoom(cam.z/1.15,W/2,H/2); applyBlur(); } });
 function doPulse(){ if(nowS-pulseT<2.2||phase!=='play') return; pulseT=nowS; sndPulse();
   const PR=ship.R*4.4,PR2=PR*PR;
   for(let i=0;i<alive;i++){ const o=i*6,dx=P[o]-ship.x,dy=P[o+1]-ship.y,d2=dx*dx+dy*dy;
     if(d2<PR2){ const d=Math.sqrt(d2)||1,f=(1-d/PR)*2400/d; P[o+2]+=dx*f*.016; P[o+3]+=dy*f*.016; } }
   for(const h of HZ){ const dx=h.x-ship.x,dy=h.y-ship.y,d=Math.hypot(dx,dy)||1;
     if(d<PR){ h.vx+=dx/d*(1-d/PR)*420; h.vy+=dy/d*(1-d/PR)*420; } }
-  ringFx(ship.x,ship.y,ship.R*.8,PR,gen.shipCol,.55); try{navigator.vibrate&&navigator.vibrate(15);}catch(_){}}
+  ringFx(ship.x,ship.y,ship.R*.8,PR,gen.shipCol,.55); netEvt({t:'pulse',x:ship.x,y:ship.y});
+  try{navigator.vibrate&&navigator.vibrate(15);}catch(_){}}
 
 // mute / reset buttons
 document.getElementById('mute').onclick=()=>{ muted=!muted; if(master) master.gain.value=muted?0:.5;
@@ -394,35 +566,45 @@ document.getElementById('reset').onclick=()=>{ const n=nowS;
 // ---------- update ----------------------------------------------------------
 let nowS=0;
 function update(dt){
-  nowS+=dt; palPhase+=gen.palDrift*dt;
+  nowS+=dt; palPhase+=gen.palDrift*dt; flowTick();
   const drag=Math.exp(-4.5*dt);
   // ship spring toward finger (sloshy)
   const RT=Rtarget(); ship.R+=(RT-ship.R)*Math.min(1,3*dt);
   if(ship.tx!=null){ ship.vx+=((ship.tx-ship.x)*80-ship.vx*11)*dt; ship.vy+=((ship.ty-ship.y)*80-ship.vy*11)*dt; }
   else{ flowAt(ship.x,ship.y,_fl); ship.vx+=(_fl[0]*.4-ship.vx*1.4)*dt; ship.vy+=(_fl[1]*.4-ship.vy*1.4)*dt; }
   ship.x+=ship.vx*dt; ship.y+=ship.vy*dt;
-  ship.x=Math.max(10,Math.min(W-10,ship.x)); ship.y=Math.max(10,Math.min(H-10,ship.y));
+  ship.x=Math.max(10,Math.min(WORLD.W-10,ship.x)); ship.y=Math.max(10,Math.min(WORLD.H-10,ship.y));
   const spd=Math.hypot(ship.vx,ship.vy);
+  // camera follows the ship unless the player is pinching
+  if(!pinch){ cam.x+=(ship.x-cam.x)*Math.min(1,4*dt); cam.y+=(ship.y-cam.y)*Math.min(1,4*dt); clampCam(); }
   // wake + feeding parameters (the lab's push/swirl, scaled by ship size + speed)
   const R=ship.R, PR=R*1.55, PR2=PR*PR;
-  const sSc=Math.pow(R/64,.55)*(.12+.88*Math.min(1,spd/300)); // near-still = permeable membrane (feed), moving = shove
+  const sSc=Math.pow(R/64,.55)*(.07+.93*Math.min(1,spd/300)); // near-still = permeable membrane (feed), moving = shove
   const PUSH=1250*sSc, SWIRL=700*sSc, sgn=Math.sign(ship.vx||1);
   const cilia=stage>=1,vortex=stage>=2,spikes=stage>=3,tent=stage>=4,bloom=stage>=5;
-  const eatR=R*1.05+(cilia?R*.22:0), eatR2=eatR*eatR;
+  const eatR=R*1.18+(cilia?R*.22:0), eatR2=eatR*eatR;
   const vEat=bloom?1e9:(cilia?400:210);
-  const canEat=phase==='play'&&(spd<vEat);
+  const canEat=phase==='play'&&(spd<vEat); feedFlag=canEat;
   const eatCap=Math.max(1,Math.round((4+stage*4+(bloom?20:0))*dt*60)); // rate is per-second, not per-frame
   const pullR=R*3.2,pullR2=pullR*pullR,PULL=bloom?900:520;
   let eats=0;
   const clearing=phase==='clear';
+  // friends' wakes: precompute per-peer force params from their telemetry
+  const RP=[];
+  if(NET.on) for(const p of NET.peers.values()){ if(!p.fresh||p.b!==biomeIdx) continue;
+    const pspd=Math.hypot(p.vx||0,p.vy||0);
+    const psc=Math.pow((p.R||30)/64,.55)*(.12+.88*Math.min(1,pspd/300));
+    RP.push({x:p.cx,y:p.cy,R:p.R||30,pr2:(p.R*1.55)**2,er2:((p.R||30)*1.18+(p.st>=1?(p.R||30)*.22:0))**2,
+      push:1250*psc,swirl:700*psc,sgn:Math.sign(p.vx||1),f:p.f&&phase==='play',eats:0,
+      cap:Math.max(1,Math.round(8*dt*60))}); }
   for(let i=0;i<alive;i++){
     const o=i*6; let x=P[o],y=P[o+1],vx=P[o+2],vy=P[o+3];
     flowAt(x,y,_fl); vx+=_fl[0]*dt; vy+=_fl[1]*dt;
     const dx=x-ship.x,dy=y-ship.y,d2=dx*dx+dy*dy;
-    if(clearing){ // biome clear: everything streams into you
+    if(clearing){ // biome clear: everything streams into you (mass bonus, not evolution credit)
       const d=Math.sqrt(d2)||1;
       vx-=dx/d*2600*dt; vy-=dy/d*2600*dt;
-      if(d<R){ kill(i); i--; mass+=1; totalEaten++; streakFx(x,y); continue; }
+      if(d<R){ kill(i); i--; mass+=.3; streakFx(x,y); continue; }
     } else if(d2<PR2){
       const d=Math.sqrt(d2)||1,nx=dx/d,ny=dy/d,fall=1-d/PR;
       // feed first: slow ship + close = absorb; otherwise the wake shoves goop out
@@ -434,6 +616,16 @@ function update(dt){
       const d=Math.sqrt(d2)||1,f=PULL*(1-d/pullR);
       vx+=(-dx/d*.85-dy/d*.35)*f*dt; vy+=(-dy/d*.85+dx/d*.35)*f*dt;
     }
+    // friends slosh and feed on the same goop (their eats are cosmetic here;
+    // their own reported counts carry the shared progress)
+    let dead=false;
+    for(let k=0;k<RP.length;k++){ const q=RP[k];
+      const qx=x-q.x,qy=y-q.y,q2=qx*qx+qy*qy;
+      if(q2<q.pr2){ const d=Math.sqrt(q2)||1,nx2=qx/d,ny2=qy/d,fall=1-d/(q.R*1.55);
+        if(q.f&&q.eats<q.cap&&q2<q.er2){ kill(i); i--; q.eats++; streakFx(x,y,q.x,q.y); dead=true; break; }
+        vx+=nx2*q.push*fall*dt; vy+=ny2*q.push*fall*dt;
+        vx+=-ny2*q.swirl*fall*dt*q.sgn; vy+=nx2*q.swirl*fall*dt*q.sgn; } }
+    if(dead) continue;
     // hazard clots displace goop a little (they feel solid)
     for(let k=0;k<HZ.length;k++){ const h=HZ[k]; if(h.dead>0) continue;
       const hx=x-h.x,hy=y-h.y,hr=h.r+16,hd2=hx*hx+hy*hy;
@@ -443,31 +635,36 @@ function update(dt){
     if(!clearing){ const rf=(phase==='spawn'?.06:.006)*dt*60;
       vx+=(P[o+4]-x)*rf; vy+=(P[o+5]-y)*rf; }
     // soft walls (penetration capped so far-out particles don't slingshot)
-    if(x<14)vx+=Math.min(60,14-x)*260*dt; else if(x>W-14)vx-=Math.min(60,x-W+14)*260*dt;
-    if(y<14)vy+=Math.min(60,14-y)*260*dt; else if(y>H-14)vy-=Math.min(60,y-H+14)*260*dt;
+    if(x<14)vx+=Math.min(60,14-x)*260*dt; else if(x>WORLD.W-14)vx-=Math.min(60,x-WORLD.W+14)*260*dt;
+    if(y<14)vy+=Math.min(60,14-y)*260*dt; else if(y>WORLD.H-14)vy-=Math.min(60,y-WORLD.H+14)*260*dt;
     const dg=phase==='spawn'?drag*Math.exp(-6*dt):drag;
     vx*=dg; vy*=dg; x+=vx*dt*60; y+=vy*dt*60;
     P[o]=x;P[o+1]=y;P[o+2]=vx;P[o+3]=vy;
   }
   if(nowS-comboT>.6) eatCombo=0;
+  // remote ship interpolation (render + force positions ease toward telemetry)
+  if(NET.on) for(const p of NET.peers.values()){ if(p.cx===undefined){ p.cx=p.x; p.cy=p.y; }
+    const k=Math.min(1,10*dt); p.cx+=((p.x||0)-p.cx)*k; p.cy+=((p.y||0)-p.cy)*k; }
   // tentacles: seek far goop positions, slurp near tips
   if(tent&&phase==='play') updateTentacles(dt);
   // hazards
   if(phase==='play') for(const h of HZ){
     if(h.dead>0){ if(nowS-h.dead>6){ h.dead=-9; let tr=0;
-      do{ h.x=40+Math.random()*(W-80); h.y=40+Math.random()*(H-80); tr++; }while(Math.hypot(h.x-ship.x,h.y-ship.y)<300&&tr<40); }
+      do{ h.x=60+Math.random()*(WORLD.W-120); h.y=60+Math.random()*(WORLD.H-120); tr++; }while(Math.hypot(h.x-ship.x,h.y-ship.y)<300&&tr<40); }
       continue; }
     flowAt(h.x,h.y,_fl);
     h.vx+=(_fl[0]*.8+Math.sin(nowS*.7+h.ph)*14-h.vx)*dt*1.2;
     h.vy+=(_fl[1]*.8+Math.cos(nowS*.6+h.ph)*14-h.vy)*dt*1.2;
     h.x+=h.vx*dt; h.y+=h.vy*dt;
-    if(h.x<h.r)h.vx+=(h.r-h.x)*8*dt; if(h.x>W-h.r)h.vx-=(h.x-W+h.r)*8*dt;
-    if(h.y<h.r)h.vy+=(h.r-h.y)*8*dt; if(h.y>H-h.r)h.vy-=(h.y-H+h.r)*8*dt;
+    if(h.x<h.r)h.vx+=(h.r-h.x)*8*dt; if(h.x>WORLD.W-h.r)h.vx-=(h.x-WORLD.W+h.r)*8*dt;
+    if(h.y<h.r)h.vy+=(h.r-h.y)*8*dt; if(h.y>WORLD.H-h.r)h.vy-=(h.y-WORLD.H+h.r)*8*dt;
+    if(nowS<hazGraceT) continue;                      // spawn grace: no collisions yet
     const d=Math.hypot(h.x-ship.x,h.y-ship.y);
     if(d<h.r+ship.R*.85){
       if(spikes&&nowS-spikeT>4){ spikeT=nowS; h.dead=nowS; sndPop();
         mass+=25; eatenBiome+=18; ringFx(h.x,h.y,6,h.r*3.2,gen.danger,.5);
-        toast('<b>CLOT POPPED</b> +25'); try{navigator.vibrate&&navigator.vibrate(20);}catch(_){}}
+        toast('<b>CLOT POPPED</b> +25'); netEvt({t:'pop',x:h.x,y:h.y});
+        try{navigator.vibrate&&navigator.vibrate(20);}catch(_){}}
       else if(nowS-invulnT>1.6){ invulnT=nowS; flashT=nowS; sndHurt();
         mass=Math.max(40,mass*.88-15);
         const dx=ship.x-h.x,dy=ship.y-h.y,dd=Math.hypot(dx,dy)||1;
@@ -475,13 +672,13 @@ function update(dt){
         ringFx(ship.x,ship.y,ship.R,ship.R*2.6,gen.danger,.6); try{navigator.vibrate&&navigator.vibrate(80);}catch(_){}}
     }
   }
-  // progression
-  if(phase==='play'&&eatenBiome>=QUOTA) startClear();
-  if(phase==='clear'&&(alive===0||nowS-phaseT>2.6)){ for(let i=alive-1;i>=0;i--){ mass+=1; totalEaten++; } alive=0; finishClear(); }
+  // progression (quota is shared across the room)
+  if(phase==='play'&&sharedEaten()>=QUOTA) startClear();
+  if(phase==='clear'&&(alive===0||nowS-phaseT>2.6)){ mass+=Math.min(alive,N0*.06)*.3; alive=0; finishClear(); }
   if(phase==='spawn'&&nowS-phaseT>1.4) phase='play';
   checkEvos(); hudProgress();
-  // texture keeps regrowing a few rows per frame (living texture, ~8 fps refresh)
-  TEX.step(gen,Math.max(2,TEX.H/14|0));
+  // texture keeps regrowing a few rows per frame (living texture)
+  TEX.step(gen,Math.max(2,TEXH/14|0));
 }
 
 // tentacles state
@@ -506,27 +703,49 @@ function updateTentacles(dt){
 
 // ---------- render ----------------------------------------------------------
 function render(){
+  const z=cam.z, ox=W/2-cam.x*z, oy=H/2-cam.y*z;
   // goop density canvas (metaball trick: black fill + additive white sprites)
   gooX.setTransform(GR,0,0,GR,0,0);
   gooX.globalCompositeOperation='source-over';
   gooX.fillStyle='#000'; gooX.fillRect(0,0,W,H);
   gooX.globalCompositeOperation='lighter';
-  const r=SPR;
-  for(let i=0;i<alive;i++){ const o=i*6; gooX.drawImage(sprite,P[o]-r,P[o+1]-r); }
-  // fx overlay
+  gooX.setTransform(GR*z,0,0,GR*z,GR*ox,GR*oy);
+  const r=SPR, vx0=cam.x-W/(2*z)-r*2, vx1=cam.x+W/(2*z)+r*2, vy0=cam.y-H/(2*z)-r*2, vy1=cam.y+H/(2*z)+r*2;
+  for(let i=0;i<alive;i++){ const o=i*6,x=P[o],y=P[o+1];
+    if(x>vx0&&x<vx1&&y>vy0&&y<vy1) gooX.drawImage(sprite,x-r,y-r); }
+  // biome texture: world-anchored multiply layer (white = neutral outside world)
+  texX.setTransform(TS,0,0,TS,0,0); texX.globalAlpha=1;
+  texX.fillStyle='#fff'; texX.fillRect(0,0,W,H);
+  texX.setTransform(TS*z,0,0,TS*z,TS*ox,TS*oy);
+  if(TEX.cur){ texX.drawImage(TEX.cur,0,0,TEXW,TEXH,0,0,WORLD.W,WORLD.H);
+    if(TEX.fadeT>=0){ const u=(nowS-TEX.fadeT)/1.5;
+      if(u<1){ texX.globalAlpha=1-u; texX.drawImage(TEX.prev,0,0,TEXW,TEXH,0,0,WORLD.W,WORLD.H); texX.globalAlpha=1; }
+      else TEX.fadeT=-1; } }
+  // ambient background: the same texture, dim, through the same camera + vignette
+  const bs=bgC.width/W;
+  bgX.setTransform(1,0,0,1,0,0); bgX.globalAlpha=1;
+  bgX.fillStyle='#04060a'; bgX.fillRect(0,0,bgC.width,bgC.height);
+  bgX.setTransform(bs*z,0,0,bs*z,bs*ox,bs*oy); bgX.globalAlpha=.32;
+  if(TEX.cur) bgX.drawImage(TEX.cur,0,0,TEXW,TEXH,0,0,WORLD.W,WORLD.H);
+  bgX.setTransform(1,0,0,1,0,0); bgX.globalAlpha=1;
+  const vg=bgX.createRadialGradient(bgC.width/2,bgC.height/2,bgC.height*.2,bgC.width/2,bgC.height/2,bgC.width*.72);
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,5,0.7)'); bgX.fillStyle=vg; bgX.fillRect(0,0,bgC.width,bgC.height);
+  // fx overlay: world-space pass
   const x=fxX; x.setTransform(DPR,0,0,DPR,0,0); x.clearRect(0,0,W,H);
   if(phase==='intro') return;
-  const R=ship.R,sc=gen.shipCol,dc=gen.danger;
-  // streaks: eaten goop sucked into the ship
+  x.setTransform(DPR*z,0,0,DPR*z,DPR*ox,DPR*oy);
+  const sc=gen.shipCol,dc=gen.danger;
+  // streaks: eaten goop sucked toward its eater
   x.globalCompositeOperation='lighter';
   for(let i=streaks.length-1;i>=0;i--){ const s=streaks[i],u=(nowS-s.t)/.3;
     if(u>=1){ streaks.splice(i,1); continue; }
-    const e=u*u*(3-2*u),px=s.x+(ship.x-s.x)*e,py=s.y+(ship.y-s.y)*e;
+    const tx2=s.tx===undefined?ship.x:s.tx, ty2=s.ty===undefined?ship.y:s.ty;
+    const e=u*u*(3-2*u),px=s.x+(tx2-s.x)*e,py=s.y+(ty2-s.y)*e;
     x.globalAlpha=.8*(1-u*.5); x.drawImage(gFood,px-10,py-10,20,20);
     x.globalAlpha=.9; x.fillStyle='#fff'; x.beginPath(); x.arc(px,py,2.2*(1-u*.6),0,6.2832); x.fill(); }
   x.globalAlpha=1;
   // hazards (pulsing spiked clots)
-  for(const h of HZ){ if(h.dead>0) continue; if(phase!=='play') break;
+  if(phase==='play') for(const h of HZ){ if(h.dead>0) continue;
     const pu=.85+.15*Math.sin(nowS*3+h.ph);
     x.globalAlpha=.75; x.drawImage(gDanger,h.x-h.r*2.4,h.y-h.r*2.4,h.r*4.8,h.r*4.8);
     x.globalAlpha=1; x.beginPath();
@@ -535,7 +754,11 @@ function render(){
     x.closePath(); x.fillStyle=css(dc,.2); x.fill(); x.strokeStyle=css(dc,.85); x.lineWidth=1.6; x.stroke();
     x.fillStyle=css(dc,.9); x.beginPath(); x.arc(h.x,h.y,3.4*pu,0,6.2832); x.fill(); }
   x.globalCompositeOperation='source-over';
-  drawShip(x,R,sc);
+  // friends first (under my ship), then me
+  if(NET.on) for(const p of NET.peers.values()){ if(!p.fresh||p.b!==biomeIdx) continue;
+    drawShipAt(x,{x:p.cx,y:p.cy,vx:p.vx||0,vy:p.vy||0,R:p.R||30,stage:p.st|0,col:p.col,inv:false,remote:true}); }
+  drawShipAt(x,{x:ship.x,y:ship.y,vx:ship.vx,vy:ship.vy,R:ship.R,stage,col:sc,
+    inv:nowS-invulnT<1.6&&((nowS*14)|0)%2===0,remote:false});
   // rings
   x.globalCompositeOperation='lighter';
   for(let i=rings.length-1;i>=0;i--){ const g0=rings[i],u=(nowS-g0.t)/g0.life;
@@ -543,21 +766,20 @@ function render(){
     x.strokeStyle=css(g0.col,.55*(1-u)); x.lineWidth=3*(1-u)+1;
     x.beginPath(); x.arc(g0.x,g0.y,g0.r0+(g0.r1-g0.r0)*u,0,6.2832); x.stroke(); }
   x.globalCompositeOperation='source-over';
-  // damage vignette
+  // screen-space pass: world edge, damage vignette, hint
+  x.setTransform(DPR,0,0,DPR,0,0);
   const fu=(nowS-flashT)/.55;
   if(fu<1){ const g=x.createRadialGradient(W/2,H/2,Math.min(W,H)*.3,W/2,H/2,Math.max(W,H)*.72);
     g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,css(dc,.5*(1-fu)));
     x.fillStyle=g; x.fillRect(0,0,W,H); }
-  // early hint
   if(hintT>0&&nowS<hintT&&phase==='play'){ x.globalAlpha=Math.min(1,hintT-nowS);
     x.fillStyle='rgba(180,220,255,.55)'; x.font='12px ui-monospace,monospace'; x.textAlign='center';
-    x.fillText('hold & drag — move slowly to feed',ship.x,ship.y+R+26); x.globalAlpha=1; }
+    x.fillText('hold & drag — move slowly to feed · pinch to zoom',ship.x*z+ox,(ship.y+ship.R+26)*z+oy+16); x.globalAlpha=1; }
 }
-function drawShip(x,R,sc){
-  const spd=Math.hypot(ship.vx,ship.vy),va=Math.atan2(ship.vy,ship.vx);
-  const cilia=stage>=1,vortex=stage>=2,spikes=stage>=3,tent=stage>=4,bloom=stage>=5;
-  const inv=nowS-invulnT<1.6&&((nowS*14)|0)%2===0;
-  x.save(); x.translate(ship.x,ship.y); x.rotate(va);
+function drawShipAt(x,S){
+  const spd=Math.hypot(S.vx,S.vy),va=Math.atan2(S.vy,S.vx),R=S.R,sc=S.col;
+  const cilia=S.stage>=1,vortex=S.stage>=2,spikes=S.stage>=3,tent=S.stage>=4,bloom=S.stage>=5;
+  x.save(); x.translate(S.x,S.y); x.rotate(va);
   const sq=Math.min(.16,spd*.0004); x.scale(1+sq,1-sq*.6); x.rotate(-va);
   // vortex swirl arcs behind the membrane
   if(vortex){ x.globalCompositeOperation='lighter';
@@ -566,17 +788,17 @@ function drawShip(x,R,sc){
       x.beginPath(); x.arc(0,0,R*(1.35+.4*k),a0,a0+1.9); x.stroke(); }
     x.globalCompositeOperation='source-over'; }
   if(bloom){ x.globalCompositeOperation='lighter'; x.globalAlpha=.5+.2*Math.sin(nowS*2.6);
-    x.drawImage(gFood,-R*2.6,-R*2.6,R*5.2,R*5.2); x.globalAlpha=1; x.globalCompositeOperation='source-over'; }
+    x.drawImage(S.remote?glowCache(sc):gFood,-R*2.6,-R*2.6,R*5.2,R*5.2); x.globalAlpha=1; x.globalCompositeOperation='source-over'; }
   // membrane: radial fbm wobble (organic blob boundary)
   const K=26,amp=R*.07*(1+.35*Math.sin(nowS*2.1)),tt=nowS*.33;
   x.beginPath();
   for(let i=0;i<=K;i++){ const a=i/K*6.2832,cx2=Math.cos(a),cy2=Math.sin(a);
     const n=vn(cx2*1.35+tt+9,cy2*1.35+tt*.8+4,gen.seed&1023);
-    const rr=R*(1+ (n-.5)*2*(amp/R));
+    const rr=R*(1+(n-.5)*2*(amp/R));
     const px=cx2*rr,py=cy2*rr; i?x.lineTo(px,py):x.moveTo(px,py); }
   x.closePath();
-  x.fillStyle=css(inv?gen.danger:sc,.30); x.fill();
-  x.strokeStyle=css(lit(sc,1.35),.85); x.lineWidth=2; x.stroke();
+  x.fillStyle=css(S.inv?gen.danger:sc,S.remote?.22:.30); x.fill();
+  x.strokeStyle=css(lit(sc,1.35),S.remote?.6:.85); x.lineWidth=2; x.stroke();
   // cilia fringe
   if(cilia){ const nC=Math.min(46,(R*.55)|0); x.strokeStyle=css(sc,.55); x.lineWidth=1.4;
     x.beginPath();
@@ -585,8 +807,8 @@ function drawShip(x,R,sc){
       x.moveTo(Math.cos(a)*r0,Math.sin(a)*r0);
       x.lineTo(Math.cos(a+.06)*r1,Math.sin(a+.06)*r1); }
     x.stroke(); }
-  // spikes (retract while recharging)
-  if(spikes){ const cd=Math.min(1,(nowS-spikeT)/4),len=4+14*cd;
+  // spikes (retract while recharging; remotes always show them)
+  if(spikes){ const cd=S.remote?1:Math.min(1,(nowS-spikeT)/4),len=4+14*cd;
     x.fillStyle=css(lit(sc,1.2),.8);
     for(let i=0;i<9;i++){ const a=i/9*6.2832+nowS*.45;
       const bx=Math.cos(a),by=Math.sin(a),px2=-by,py2=bx;
@@ -596,29 +818,33 @@ function drawShip(x,R,sc){
       x.lineTo(bx*(R+2+len),by*(R+2+len));
       x.closePath(); x.fill(); } }
   x.restore();
-  // tentacles (drawn in world space)
-  if(tent){ x.strokeStyle=css(sc,.7); x.lineCap='round';
+  // tentacles (local ship only; drawn in world space)
+  if(tent&&!S.remote){ x.strokeStyle=css(sc,.7); x.lineCap='round';
     for(let k=0;k<2;k++){ const T=tents[k];
-      const a=Math.atan2(T.y-ship.y,T.x-ship.x);
-      const bx=ship.x+Math.cos(a)*R*.95,by=ship.y+Math.sin(a)*R*.95;
+      const a=Math.atan2(T.y-S.y,T.x-S.x);
+      const bx=S.x+Math.cos(a)*R*.95,by=S.y+Math.sin(a)*R*.95;
       const mx=(bx+T.x)/2-Math.sin(a)*Math.sin(nowS*3.2+k*2.6)*24;
       const my=(by+T.y)/2+Math.cos(a)*Math.sin(nowS*3.2+k*2.6)*24;
       x.lineWidth=4; x.beginPath(); x.moveTo(bx,by); x.quadraticCurveTo(mx,my,T.x,T.y); x.stroke();
       x.fillStyle=css(lit(sc,1.3),.9); x.beginPath(); x.arc(T.x,T.y,5,0,6.2832); x.fill(); } }
   // nucleus-eye looking along velocity (+ blink)
   const eR=R*.3,off=Math.min(R*.22,spd*.06);
-  const ex=ship.x+Math.cos(va)*off,ey=ship.y+Math.sin(va)*off;
-  const blink=jhash((nowS*.55)|0,7,gen.seed)<.09?.14:1;
+  const ex=S.x+Math.cos(va)*off,ey=S.y+Math.sin(va)*off;
+  const blink=jhash((nowS*.55)|0,S.remote?13:7,gen.seed)<.09?.14:1;
   x.save(); x.translate(ex,ey); x.scale(1,blink);
   x.fillStyle=css(lit(sc,1.5),.9); x.beginPath(); x.arc(0,0,eR,0,6.2832); x.fill();
   x.fillStyle='rgba(8,12,18,.9)'; x.beginPath();
   x.arc(Math.cos(va)*eR*.35,Math.sin(va)*eR*.35*blink,eR*.42,0,6.2832); x.fill();
   x.restore();
   // organelles: one orbiting mote per evolution stage
-  for(let i=0;i<stage;i++){ const a=nowS*(.35+i*.14)+i*2.4,rr=R*.58;
+  for(let i=0;i<S.stage;i++){ const a=nowS*(.35+i*.14)+i*2.4,rr=R*.58;
     x.fillStyle=css(sc,.65); x.beginPath();
-    x.arc(ship.x+Math.cos(a)*rr,ship.y+Math.sin(a)*rr,3.2+i*.4,0,6.2832); x.fill(); }
+    x.arc(S.x+Math.cos(a)*rr,S.y+Math.sin(a)*rr,3.2+i*.4,0,6.2832); x.fill(); }
 }
+const _glowCache=new Map();
+function glowCache(rgb){ const k=rgb.map(v=>Math.round(v*40)).join(',');
+  if(!_glowCache.has(k)){ if(_glowCache.size>16) _glowCache.clear(); _glowCache.set(k,glowSprite(rgb)); }
+  return _glowCache.get(k); }
 
 // ---------- main loop -------------------------------------------------------
 let t0=performance.now(),fc=0,fa=0,fpsAvg=60,degraded=false;
@@ -626,7 +852,7 @@ const fpsEl=document.getElementById('fps');
 function frame(now){
   const dt=Math.min(.05,(now-t0)/1000); t0=now; fa+=dt;
   if(++fc>=30){ fpsAvg=fc/fa; fpsEl.textContent=fpsAvg.toFixed(0)+' fps'; fc=0; fa=0;
-    if(!degraded&&nowS>8&&fpsAvg<40){ degraded=true; GR=.42; resize(); TEX.full(); toast('⚡ perf mode'); } }
+    if(!degraded&&nowS>8&&fpsAvg<40){ degraded=true; GR=.42; resize(); toast('⚡ perf mode'); } }
   if(phase!=='intro'){ update(dt); }
   render();
   requestAnimationFrame(frame);
@@ -634,19 +860,24 @@ function frame(now){
 
 // ---------- test hooks (BB.tick-style; work with a hidden pane) -------------
 window.GG={
-  get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,N0,stage,biomeIdx,gen,ship,HZ,fps:fpsAvg}; },
+  get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,N0,stage,biomeIdx,gen,ship,HZ,cam,fps:fpsAvg,
+    shared:sharedEaten(),net:{on:NET.on,code:NET.code,peers:NET.peers.size,selfId:NET.selfId}}; },
   tick(dt=1/60,n=1){ for(let i=0;i<n;i++) update(dt); render(); },
-  pt(x2,y2,down=true){ if(down){ ship.down=true; setTarget(x2,y2,false); } else { ship.down=false; ship.tx=ship.ty=null; } },
+  pt(x2,y2,down=true){ if(down){ ship.down=true; setTargetScreen(x2,y2,false); } else { ship.down=false; ship.tx=ship.ty=null; } },
+  ptWorld(x2,y2){ ship.down=true; ship.tx=x2; ship.ty=y2; },
+  zoom(z,ax,ay){ setZoom(z,ax===undefined?W/2:ax,ay===undefined?H/2:ay); applyBlur(); return cam.z; },
   grant(m){ totalEaten+=m; mass+=m; checkEvos(); },
   clearBiome(){ eatenBiome=QUOTA; },
-  hurt(){ const h=HZ[0]; if(h){ h.x=ship.x; h.y=ship.y; h.dead=-9; invulnT=-9; } },
+  hurt(){ const h=HZ[0]; if(h){ h.x=ship.x; h.y=ship.y; h.dead=-9; invulnT=-9; hazGraceT=0; } },
   seed(v){ masterSeed=v>>>0; enterBiome(0,true); },
   pulse(){ pulseT=-9; doPulse(); },
+  join(code){ return netJoin(code); },
+  net:NET,
 };
 
 // ---------- boot ------------------------------------------------------------
 function boot(){
-  makeSprite();
+  makeSprite(); TEX.init();
   const q=new URLSearchParams(location.search);
   const sv=q.get('fresh')?null:loadSave();
   masterSeed=q.get('seed')?(+q.get('seed')>>>0):(sv?sv.seed>>>0:(Math.random()*4294967295)>>>0);
@@ -656,10 +887,17 @@ function boot(){
     document.getElementById('go').textContent=`RESUME — BIOME ${(sv.biome||0)+1}`; }
   let n=0; for(const e of EVOS) if(totalEaten>=e.frac*REF) n++; stage=n;
   resize();
+  cam.z=Math.max(zMin,Math.min(zMax,Math.max(.65,Math.min(1.1,zFit*1.55))));
   enterBiome(sv?sv.biome||0:0,true);
-  TEX.full();
+  TEX.full(gen);
+  const rc=document.getElementById('roomcode');
+  if(q.get('room')) rc.value=q.get('room').toUpperCase().slice(0,12);
+  document.getElementById('mkroom').onclick=()=>{ let s='';
+    for(let i=0;i<4;i++) s+='ABCDEFGHJKMNPQRSTUVWXYZ23456789'[Math.random()*31|0];
+    rc.value=s; };
   document.getElementById('go').onclick=()=>{ initAudio(); if(AC&&AC.state==='suspended')AC.resume();
     document.getElementById('intro').style.display='none';
+    if(rc.value.trim()) netJoin(rc.value);
     phase='spawn'; phaseT=nowS; scatterFromHome(); hintT=nowS+9;
     toast(`<b>BIOME ${biomeIdx+1}</b> — ${gen.name}`); };
   document.getElementById('startover').onclick=(e)=>{ e.stopPropagation();
