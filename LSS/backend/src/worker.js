@@ -535,13 +535,17 @@ async function handleGetLeaderboard(request, env, origin) {
     damage:   damageCol,
   })[sort] || winsCol;
 
-  // Per-match peak / floor column names mirror the mode prefix.
-  const maxKillsCol  = colPrefix + 'max_kills_match';
-  const minKillsCol  = colPrefix + 'min_kills_match';
-  const maxDeathsCol = colPrefix + 'max_deaths_match';
-  const minDeathsCol = colPrefix + 'min_deaths_match';
-  const maxDamageCol = colPrefix + 'max_damage_match';
-  const minDamageCol = colPrefix + 'min_damage_match';
+  // Per-match peak / floor column names. NOTE: combined peaks are the
+  // UNPREFIXED columns (max_kills_match etc.) — there is no total_max_* in
+  // the schema. Using colPrefix here 500'd every mode=combined request
+  // since launch ("no such column: total_max_kills_match").
+  const peakPrefix   = mode === 'solo' ? 'solo_' : mode === 'combined' ? '' : 'mp_';
+  const maxKillsCol  = peakPrefix + 'max_kills_match';
+  const minKillsCol  = peakPrefix + 'min_kills_match';
+  const maxDeathsCol = peakPrefix + 'max_deaths_match';
+  const minDeathsCol = peakPrefix + 'min_deaths_match';
+  const maxDamageCol = peakPrefix + 'max_damage_match';
+  const minDamageCol = peakPrefix + 'min_damage_match';
 
   // Per-loadout / per-map / time-slice filters not yet wired ; v1
   // returns global all-time top-N for the chosen mode.
