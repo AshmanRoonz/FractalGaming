@@ -3107,7 +3107,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.06';
+const LSS_BUILD = '35.07';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -42314,18 +42314,21 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   let _moveDragging = false;
 
   let _lsBox = { w: 0, h: 0, l: 0, t: 0 };
+  let _lsDbg = null;   // last _visBox source snapshot — feeds the tc-dbg strip
   function _visBox() {
     const iw = window.innerWidth, ih = window.innerHeight;
-    let w = iw, h = ih, l = 0, t = 0;
+    let w = iw, h = ih, l = 0, t = 0, vw = 0, vh = 0, branch = 'inner';
     try {
       const vv = window.visualViewport;
       if (vv && vv.width) {
-        const vw = Math.round(vv.width), vh = Math.round(vv.height);
+        vw = Math.round(vv.width); vh = Math.round(vv.height);
         const vl = Math.max(0, Math.round(vv.offsetLeft || 0));
         const vt = Math.max(0, Math.round(vv.offsetTop || 0));
         if ((iw >= ih) === (vw >= vh)) {
+          branch = 'agree';
           w = Math.min(iw, vw); h = Math.min(ih, vh); l = vl; t = vt;
         } else {
+          branch = 'transposed';
           let realLand = (iw >= ih);
           try {
             const so = screen.orientation;
@@ -42336,7 +42339,36 @@ document.addEventListener('contextmenu', e => e.preventDefault());
         }
       }
     } catch (_) {}
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        const sw = screen.width, sh = screen.height;
+        if (sw && sh) {
+          if ((w >= h) !== (sw >= sh)) { w = sw; h = sh; l = 0; t = 0; branch = 'fs-transposed'; }
+          else if (w > sw || h > sh) { w = Math.min(w, sw); h = Math.min(h, sh); branch = 'fs-clamped'; }
+        }
+      }
+    } catch (_) {}
+    _lsDbg = { iw: iw, ih: ih, vw: vw, vh: vh, br: branch, w: w, h: h, l: l, t: t };
     return { w: w, h: h, l: l, t: t };
+  }
+  const _tcDbgForced = /[?&]tcdbg=1/.test(location.search);
+  let _tcDbgUntil = 0;
+  function _tcDbgUpdate() {
+    const el = document.getElementById('tc-dbg');
+    if (!el) return;
+    if (_tcDbgForced) { try { _visBox(); } catch (_) {} }   // live refresh in forced mode
+    const d = _lsDbg;
+    if (!d) { el.style.display = 'none'; return; }
+    if (d.br !== 'agree' && d.br !== 'inner') _tcDbgUntil = performance.now() + 12000;
+    const show = _tcDbgForced || performance.now() < _tcDbgUntil;
+    el.style.display = show ? 'block' : 'none';
+    if (!show) return;
+    let scr = '?', fs = '?';
+    try { scr = screen.width + 'x' + screen.height + ' ' + ((screen.orientation && screen.orientation.type) || ''); } catch (_) {}
+    try { fs = (document.fullscreenElement || document.webkitFullscreenElement) ? 'FS' : 'win'; } catch (_) {}
+    el.textContent = 'in ' + d.iw + 'x' + d.ih + '  vv ' + d.vw + 'x' + d.vh +
+      '\nscr ' + scr + ' ' + fs +
+      '\nbox ' + d.w + 'x' + d.h + '+' + d.l + ',' + d.t + ' [' + d.br + ']';
   }
   function _layoutSticks() {
     if (!root) return;
@@ -42359,6 +42391,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       place('tc-look', W * 0.76 - S, H - 3 * vm - S, S, S);
       place('tc-move-zone', 0, H * 0.40, W * 0.42, H * 0.60);
       place('tc-look-zone', W * 0.50, H * 0.12, W * 0.50, H * 0.88);
+      try { _tcDbgUpdate(); } catch (_) {}
     } catch (_) {}
   }
   function _layoutSticksSoon() {
@@ -42415,6 +42448,12 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     lookEl.style.pointerEvents = 'none';
     const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl, shipEl, viewEl];
     for (const e of els) root.appendChild(e);
+    const dbgEl = document.createElement('div');
+    dbgEl.id = 'tc-dbg';
+    dbgEl.style.cssText = 'position:absolute;left:1vmin;top:9vmin;z-index:12;pointer-events:none;'
+      + 'font:600 10px/1.35 monospace;color:#9fe8ff;background:rgba(0,20,30,0.55);'
+      + 'padding:2px 6px;border-radius:4px;display:none;white-space:pre;';
+    root.appendChild(dbgEl);
     document.body.appendChild(root);
     _refreshTouchLabels();
 
@@ -42567,7 +42606,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       if (!show) { _zeroTouchInputs(); if (_dragReset) { try { _dragReset(); } catch (_) {} } }
       if (show) _layoutSticksSoon();
     }
-    if (show) _refreshTouchLabels();
+    if (show) { _refreshTouchLabels(); try { _tcDbgUpdate(); } catch (_) {} }
     const _ffHub = show && (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
     const _shp = document.getElementById('tc-ship'); if (_shp) _shp.style.display = _ffHub ? '' : 'none';   
     const _vw = document.getElementById('tc-view'); if (_vw) _vw.style.display = show ? '' : 'none';   
