@@ -22012,8 +22012,8 @@ function _aegisAwardKill() { _aegisAwardXp(AEGIS.XP_PER_KILL); }
 // on _aegisUpFor (freeflight-only, so MP balance is untouched). AEGIS.LIVE
 // drives the panel's (SOON) markers; unlisted ranks are design-only for now.
 AEGIS.LIVE = {
-  VORTEX: [8, 17, 20], PYRO: [2, 11, 17], PUNCTURE: [8, 17],
-  SLAYER: [8, 17, 20], TRACKER: [8, 11, 17], BLASTER: [], SYPHON: [2, 17],
+  VORTEX: [8, 17, 20], PYRO: [2, 11, 17], PUNCTURE: [2, 8, 11, 17, 20],
+  SLAYER: [8, 11, 17, 20], TRACKER: [8, 11, 17], BLASTER: [11], SYPHON: [2, 17],
 };
 function _aegisUpFor(rank) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return false;
@@ -41137,7 +41137,13 @@ function playerTakeDamage(amount, attacker, projectile) {
   // Absorption (SLAYER): 70% damage reduction (85% during Mega Stun Bolt); blocks Stun Bolt damage but not slow
   if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Absorption') {
     const swordCoreActive = player.coreActive && player.loadout && player.loadout.core.name === 'Mega Stun Bolt';
-    amount *= swordCoreActive ? 0.15 : 0.30;
+    const _absMul = swordCoreActive ? 0.15 : 0.30;
+    // (v34.98) SLAYER Kinetic Transfer (Aegis 11, hub-only): the BLOCKED
+    // portion of incoming damage charges Core.
+    if (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(11)) {
+      player.coreMeter = Math.min(100, (player.coreMeter || 0) + amount * (1 - _absMul) / 120);
+    }
+    amount *= _absMul;
   }
   // Body Shield (BLASTER): frontal shield with HP pool; absorbs damage until depleted (destroyed by Stun Bolt above)
   if (player.abilityActive[1] && player.abilities[1] && player.abilities[1].name === 'Body Shield' && player.gunShieldHP > 0) {
@@ -41152,6 +41158,11 @@ function playerTakeDamage(amount, attacker, projectile) {
     // blocked while HP > 0 ; the shield doesn't leak partial damage when
     // HP would underflow on a single big hit ; it just cracks open.
     player.gunShieldHP -= amount;
+    // (v34.98) BLASTER Redirect (Aegis 11, hub-only): damage absorbed by the
+    // Body/Gun Shield recharges the ship's shield.
+    if (player.loadoutKey === 'BLASTER' && typeof _aegisUpFor === 'function' && _aegisUpFor(11)) {
+      player.shield = Math.min(player.maxShield, player.shield + amount * 0.3);
+    }
     if (player.gunShieldHP <= 0) {
       player.gunShieldHP = 0;
       player.gunShieldTimer = 0;
@@ -43417,6 +43428,11 @@ function activateAbility(slot) {
     let cd = ability.cooldown;
     // Syphon tier 3: 30% cooldown reduction
     if (player.syphonCooldownMult < 1) cd *= player.syphonCooldownMult;
+    // (v34.98) PUNCTURE Trap Mastery (Aegis 11, hub-only): two charges of
+    // Tether Traps — on the single-slot cooldown system this is a halved
+    // Stasis Trap cooldown (double trap uptime).
+    if (ability.name === 'Stasis Trap' && player.loadoutKey === 'PUNCTURE' &&
+        typeof _aegisUpFor === 'function' && _aegisUpFor(11)) cd *= 0.5;
     player.abilityCooldowns[slot] = cd;
   }
 }
@@ -43742,6 +43758,22 @@ function executeAbility(slot, ability) {
       // via NetworkPlayer.takeDamage hit claims; the missing piece is the
       // visual zone effect, which is the effect_spawn follow-up).
       broadcastAbilityProjectile(proj);
+      // (v34.98) PUNCTURE Twin Cluster (Aegis 20, hub-only): a second missile
+      // launched alongside. NOTE _cmDir was scaled into `vel` above — derive
+      // the lateral offset from vel, not _cmDir.
+      if (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) {
+        const _tcRight = new THREE.Vector3().crossVectors(vel, new THREE.Vector3(0, 1, 0)).normalize();
+        const _tcVel = vel.clone().addScaledVector(_tcRight, 60);
+        const proj2 = new Projectile(_cmOrigin.clone().addScaledVector(_tcRight, 30), _tcVel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
+        proj2.smokeTrail = true;
+        proj2.removeHaze();
+        proj2.isCluster = true;
+        proj2.clusterDmg = 500;
+        proj2.clusterDuration = 5;
+        proj2.sizeMult = 3.0;
+        game.projectiles.push(proj2);
+        broadcastAbilityProjectile(proj2);
+      }
     }
     // SLAYER: Stun Bolt (electric projectile, pierces ships, drops green
     // lightning chain along its path. Mega Stun Bolt boost applies as before.)
@@ -46801,7 +46833,19 @@ function updateAbilities(dt) {
         // immobilization is enforced by game.playerRootTimer in
         // updatePlayerMovement ; zeroing velocity here is belt-and-braces.
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
-        if (eff.rootTimer <= 0) eff.timer = 0; 
+        if (eff.rootTimer <= 0) {
+          eff.timer = 0;
+          // (v34.98) PUNCTURE Explosive Traps (Aegis 2, hub-only): the
+          // player's Tether Traps explode when the root breaks.
+          if (eff.owner === 'player' && player.loadoutKey === 'PUNCTURE' &&
+              typeof _aegisUpFor === 'function' && _aegisUpFor(2)) {
+            try { if (typeof spawnExplosion === 'function') spawnExplosion(eff.position.clone(), 1.6); } catch (_) {}
+            try {
+              if (eff.rootTarget && eff.rootTarget !== player && eff.rootTarget.takeDamage) eff.rootTarget.takeDamage(1200, 'player');
+            } catch (_) {}
+            try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', eff.position.clone()); } catch (_) {}
+          }
+        }
       }
       // ---- Visible effects so the trap reads as an active ensnare ----
       // The bare octahedron looks like a static debug widget ; layer in:
