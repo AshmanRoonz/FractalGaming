@@ -3154,7 +3154,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.03';
+const LSS_BUILD = '35.04';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -51997,9 +51997,15 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '  color: rgba(190, 235, 255, 0.75); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
     '  text-transform: uppercase; }',
     '#touch-controls .tc.tc-pressed { background: rgba(120, 220, 255, 0.22); border-color: rgba(170, 240, 255, 0.7); }',
-    '.tc-rect { width: 17vmin; height: 17vmin; border-radius: 1.2vmin; }',
-    '.tc-diamond { width: 9.5vmin; height: 9.5vmin; transform: rotate(45deg); border-radius: 1.2vmin; }',
-    '.tc-diamond > span { transform: rotate(-45deg); }',
+    // (v35.04) Buttons carry their loadout name inside : small key kicker on
+    // top (RT / LB / R ...), weapon or ability name under it. Rects widened
+    // 17 -> 24vmin (and shortened to 15vmin so four fit down the right edge).
+    '.tc-rect { width: 24vmin; height: 15vmin; border-radius: 1.2vmin; }',
+    '#touch-controls .tc-named { flex-direction: column; gap: 0.5vmin; }',
+    '#touch-controls .tc-named > span:first-child { font-size: 1.7vmin; opacity: 0.55; letter-spacing: 0.18em; }',
+    '#touch-controls .tc-name { font-size: 2.5vmin; line-height: 1.12; padding: 0 1.2vmin; text-align: center; }',
+    // Sticks + capture zones : sizes/positions here are only a pre-layout
+    // fallback — _layoutSticks() pins them in px every pass (v35.04).
     '#tc-move, #tc-look { border-radius: 50%; width: 30vmin; height: 30vmin; }',
     '#tc-move { left: 2.5vmin; bottom: 3vmin; }',
     // Look pad pulled in toward the middle of the screen (was hugging the
@@ -52008,7 +52014,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;',
     '  margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(120, 220, 255, 0.18);',
     '  border: 1px solid rgba(170, 240, 255, 0.55); pointer-events: none; }',
-    '#tc-core { left: 50%; bottom: 2vmin; transform: translateX(-50%); width: 22vmin; height: 7vmin; border-radius: 1.2vmin; }',
+    '#tc-core { left: 50%; bottom: 2vmin; transform: translateX(-50%); width: 24vmin; height: 9vmin; border-radius: 1.2vmin; }',
     '.tc-chip { width: 11vmin; height: 11vmin; border-radius: 50%; font-size: 4vmin; }',
     '.tc-top { width: 7vmin; height: 7vmin; border-radius: 1.2vmin; font-size: 3vmin; }',
     // Invisible capture zones (genre standard: stick responds to the whole
@@ -52020,47 +52026,118 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#touch-controls #tc-look-zone { left: 50%; top: 12%; right: 0; bottom: 0; background: none; border: none; }',
   ].join('\n');
 
-  function _el(id, cls, label, style) {
+  // (v35.04) Optional 5th arg `name` : buttons that map to a loadout slot
+  // render two lines — the key kicker (`label`) on top, the weapon/ability
+  // name in a `.tc-name` span under it. _refreshTouchLabels() rewrites the
+  // name spans whenever the loadout changes.
+  function _el(id, cls, label, style, name) {
     const d = document.createElement('div');
     if (id) d.id = id;
     d.className = 'tc ' + (cls || '');
     const s = document.createElement('span');
     s.textContent = label || '';
     d.appendChild(s);
+    if (name) {
+      d.classList.add('tc-named');
+      const n = document.createElement('span');
+      n.className = 'tc-name';
+      n.textContent = name;
+      d.appendChild(n);
+    }
     if (style) for (const k in style) d.style[k] = style[k];
     return d;
   }
 
+  // Rewrites the .tc-name spans from the live loadout. Dirty-checked on a
+  // composed signature so the 250 ms poll can call it for free ; catches
+  // ship-select commits, campaign weapon swaps and hub ship cycling alike.
+  let _tlSig = '';
+  function _refreshTouchLabels() {
+    let lo = null;
+    try { lo = (typeof player !== 'undefined' && player) ? player.loadout : null; } catch (_) {}
+    const wep  = (lo && lo.weapon && lo.weapon.name) || 'FIRE';
+    const abN  = i => (lo && lo.abilities && lo.abilities[i] && lo.abilities[i].name) || ('ABILITY ' + (i + 1));
+    const core = (lo && lo.core && lo.core.name) || 'CORE';
+    const sig = wep + '|' + abN(0) + '|' + abN(1) + '|' + abN(2) + '|' + core;
+    if (sig === _tlSig) return;
+    _tlSig = sig;
+    const put = (id, txt) => {
+      const el = document.getElementById(id);
+      const n = el && el.querySelector('.tc-name');
+      if (n) n.textContent = txt;
+    };
+    put('tc-rt', wep);
+    put('tc-lb', abN(0));
+    put('tc-rb', abN(1));
+    put('tc-fd', abN(2));
+    put('tc-core', core);
+  }
+
   let root = null, moveEl = null, knobEl = null;
+  // Set inside _build() ; the visibility poll calls it on hide to clear a
+  // drag the browser never finished (see v35.04 note in _layoutSticks).
+  let _dragReset = null;
 
   // (v30.99) Chrome/Android : the sticks were positioned with CSS vw/%
   // units, and Chrome's layout viewport can mis-report around the
   // fullscreen settle at round start ("FIGHT"), flipping JUST the sticks
   // into a portrait-ish layout (corner-anchored vmin buttons survived).
-  // Pin sticks + capture zones from MEASURED pixels instead, re-applied
-  // with delayed retries (same pattern that fixed the canvas sizing).
-  let _lsAppliedW = 0, _lsAppliedH = 0;
+  // (v31.64 flipped them to CSS units, betting the browser self-corrects ;
+  // it doesn't always.)
+  // (v35.04) The long-standing "sticks slide off screen after the intro
+  // cinematic" on mobile Chrome : round start releases the ship-select
+  // orientation lock and settles fullscreen WHILE the cinematic has this
+  // overlay hidden. Chrome's layout viewport can come out of that settle
+  // taller than what's actually visible, so everything bottom-anchored in
+  // CSS vh/vmin sat below the real screen — and nothing re-pinned on
+  // reveal (the drift poll skips while hidden, and the resize retries had
+  // already synced the "applied" size while the overlay was display:none).
+  // Fix, three parts :
+  //   1. _visBox() = the CONSERVATIVE visible box : intersection of the
+  //      visualViewport and innerWidth/Height claims. Whichever source is
+  //      lying, the box never extends past the real screen edge.
+  //   2. The overlay ROOT is pinned to that box in px each pass, and the
+  //      sticks + capture zones are placed in px inside it. Corner buttons
+  //      keep CSS vmin offsets — they anchor inside the pinned root, so
+  //      worst-case their margins are briefly off, never off-screen.
+  //   3. The visibility poll re-pins on every hidden->shown flip (the
+  //      cinematic reveal), and the 1.2 s drift poll compares the full box
+  //      (size AND offsets) so late viewport settles self-heal.
+  let _lsBox = { w: 0, h: 0, l: 0, t: 0 };
+  function _visBox() {
+    let w = window.innerWidth, h = window.innerHeight, l = 0, t = 0;
+    try {
+      const vv = window.visualViewport;
+      if (vv && vv.width) {
+        w = Math.min(w, Math.round(vv.width));
+        h = Math.min(h, Math.round(vv.height));
+        l = Math.max(0, Math.round(vv.offsetLeft || 0));
+        t = Math.max(0, Math.round(vv.offsetTop || 0));
+      }
+    } catch (_) {}
+    return { w: w, h: h, l: l, t: t };
+  }
   function _layoutSticks() {
     if (!root) return;
     try {
-      // (v31.64) Position the sticks + capture zones in CSS viewport units
-      // (vmin/vw/vh) rather than JS-measured pixels. Chrome mis-reports
-      // visualViewport as portrait through the round-start fullscreen settle,
-      // which left the px-positioned sticks stuck in a portrait layout. CSS
-      // units are recomputed by the browser from the live viewport every frame,
-      // so the sticks always track the real orientation and self-correct once it
-      // settles ; no guard or re-pin needed. (Buttons already survived this way.)
-      const vv = window.visualViewport;
-      _lsAppliedW = Math.round((vv && vv.width) || window.innerWidth);
-      _lsAppliedH = Math.round((vv && vv.height) || window.innerHeight);
-      const me = document.getElementById('tc-move');
-      const le = document.getElementById('tc-look');
-      const mz = document.getElementById('tc-move-zone');
-      const lz = document.getElementById('tc-look-zone');
-      if (me) { me.style.left = '2.5vmin'; me.style.bottom = '3vmin'; me.style.width = '30vmin'; me.style.height = '30vmin'; }
-      if (le) { le.style.right = '24vw'; le.style.bottom = '3vmin'; le.style.width = '30vmin'; le.style.height = '30vmin'; }
-      if (mz) { mz.style.left = '0px'; mz.style.bottom = '0px'; mz.style.width = '42vw'; mz.style.height = '60vh'; }
-      if (lz) { lz.style.left = '50vw'; lz.style.top = '12vh'; lz.style.right = '0px'; lz.style.bottom = '0px'; }
+      const b = _visBox();
+      _lsBox = b;
+      const W = b.w, H = b.h, vm = Math.min(W, H) / 100;
+      root.style.left = b.l + 'px'; root.style.top = b.t + 'px';
+      root.style.width = W + 'px'; root.style.height = H + 'px';
+      root.style.right = 'auto'; root.style.bottom = 'auto';
+      const place = (id, x, y, w, h) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.style.left = Math.round(x) + 'px'; el.style.top = Math.round(y) + 'px';
+        el.style.width = Math.round(w) + 'px'; el.style.height = Math.round(h) + 'px';
+        el.style.right = 'auto'; el.style.bottom = 'auto';
+      };
+      const S = 30 * vm;   // stick diameter
+      place('tc-move', 2.5 * vm, H - 3 * vm - S, S, S);
+      place('tc-look', W * 0.76 - S, H - 3 * vm - S, S, S);
+      place('tc-move-zone', 0, H * 0.40, W * 0.42, H * 0.60);
+      place('tc-look-zone', W * 0.50, H * 0.12, W * 0.50, H * 0.88);
     } catch (_) {}
   }
   function _layoutSticksSoon() {
@@ -52074,14 +52151,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // (v31.03) Chrome/Android can settle the fullscreen viewport WITHOUT ever
   // firing a final resize event (the sticks flipped at FIGHT and stayed
   // wrong until the Android BACK button forced a resize). Poll-and-verify :
-  // if the measured viewport drifts from the last APPLIED one, re-pin.
+  // if the measured box drifts from the last APPLIED one, re-pin.
   setInterval(function () {
     if (!root || root.style.display === 'none') return;
     try {
-      const vv = window.visualViewport;
-      const W = Math.round((vv && vv.width) || window.innerWidth);
-      const H = Math.round((vv && vv.height) || window.innerHeight);
-      if (Math.abs(W - _lsAppliedW) > 2 || Math.abs(H - _lsAppliedH) > 2) _layoutSticks();
+      const b = _visBox();
+      if (Math.abs(b.w - _lsBox.w) > 2 || Math.abs(b.h - _lsBox.h) > 2 ||
+          Math.abs(b.l - _lsBox.l) > 2 || Math.abs(b.t - _lsBox.t) > 2) _layoutSticks();
     } catch (_) {}
   }, 1200);
 
@@ -52100,26 +52176,22 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     moveEl.appendChild(knobEl);
     const lookEl = _el('tc-look', '', 'look');
 
-    // Edge buttons, gamepad-named per the mockup: Lt = left trigger (ADS
-    // zoom, stays put), Lb = left button (ability0 / Q), Rt = right
-    // trigger (fire), Rb = right button (ability1 / E). Rt + Rb now stack
-    // in the right-edge COLUMN below the top ability row, with the gyro
-    // toggle as the column's third slot.
-    // Top-right corner cluster: all 7 combat buttons in a rotated-L
-    // hugging the corner. Top arm (right-to-left): Rt in the corner, then
-    // F, R, E, Q diamonds. Right arm (downward): Rb, then G. Settings ⚙
-    // nests in the middle of the L's elbow.
-    const ltEl = _el('tc-lt', 'tc-rect', 'Lt', { left: '1vmin', top: '22%' });
-    const lbEl = _el('tc-lb', 'tc-rect', 'Lb', { right: '1vmin', top: '38.5vmin' });
-    const rtEl = _el('tc-rt', 'tc-rect', 'Rt', { right: '1vmin', top: '1.5vmin' });
-    const rbEl = _el('tc-rb', 'tc-rect', 'Rb', { right: '1vmin', top: '20vmin' });
+    // (v35.04) Edge buttons carry their loadout names now (the gamepad key
+    // kicker stays as a small hint above the name). Right-edge COLUMN, top
+    // to bottom : RT = fire (weapon name), RB = ability1, LB = ability0,
+    // F = ability2 — every combat slot labeled with what it actually does.
+    // The old top-arm Q/E diamonds duplicated LB/RB and are gone ; R
+    // remains as a labeled RELOAD chip just left of the column corner.
+    // Lt (ADS zoom) keeps its spot on the left edge.
+    const ltEl = _el('tc-lt', 'tc-rect', 'LT', { left: '1vmin', top: '22%' }, 'ZOOM');
+    const rtEl = _el('tc-rt', 'tc-rect', 'RT', { right: '1vmin', top: '1.5vmin' }, 'FIRE');
+    const rbEl = _el('tc-rb', 'tc-rect', 'RB', { right: '1vmin', top: '18.5vmin' }, 'ABILITY 2');
+    const lbEl = _el('tc-lb', 'tc-rect', 'LB', { right: '1vmin', top: '35.5vmin' }, 'ABILITY 1');
+    const fdEl = _el('tc-fd', 'tc-rect', 'F',  { right: '1vmin', top: '52.5vmin' }, 'ABILITY 3');
 
-    const qdEl = _el('tc-qd', 'tc-diamond', 'Q', { right: '59vmin', top: '3vmin' });
-    const edEl = _el('tc-ed', 'tc-diamond', 'E', { right: '46vmin', top: '3vmin' });
-    const rdEl = _el('tc-rd', 'tc-diamond', 'R', { right: '33vmin', top: '3vmin' });
-    const fdEl = _el('tc-fd', 'tc-diamond', 'F', { right: '20vmin', top: '3vmin' });
+    const rdEl = _el('tc-rd', 'tc-rect', 'R', { right: '26.5vmin', top: '1.5vmin', width: '16vmin', height: '9vmin' }, 'RELOAD');
 
-    const coreEl = _el('tc-core', '', 'core');
+    const coreEl = _el('tc-core', '', 'CORE', null, 'CORE');
 
     // Vertical thrust chips beside the move stick.
     const upEl = _el('tc-up', 'tc-chip', '▲', { left: '34vmin', bottom: '15vmin' });
@@ -52139,9 +52211,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const lookZone = _el('tc-look-zone', '', '');
     moveEl.style.pointerEvents = 'none';
     lookEl.style.pointerEvents = 'none';
-    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, qdEl, edEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl, shipEl, viewEl];
+    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl, shipEl, viewEl];
     for (const e of els) root.appendChild(e);
     document.body.appendChild(root);
+    _refreshTouchLabels();
 
     // (v30.99) Measured-pixel stick layout ; re-applies whenever the
     // viewport settles after rotates / fullscreen transitions.
@@ -52173,9 +52246,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     _hold(rtEl, () => { input.touchFire = true; },    () => { input.touchFire = false; });
     _hold(ltEl, () => { input.touchAltFire = true; }, () => { input.touchAltFire = false; });
     _hold(lbEl, () => _abPress(0), () => _abRelease(0));
-    _hold(qdEl, () => _abPress(0), () => _abRelease(0));
     _hold(rbEl, () => _abPress(1), () => _abRelease(1));
-    _hold(edEl, () => _abPress(1), () => _abRelease(1));
     _hold(fdEl, () => _abPress(2), () => _abRelease(2));
     _hold(rdEl, () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = true; },
                 () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = false; });
@@ -52200,9 +52271,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       _moveR = r.width / 2;
       _moveCx = ev.clientX;
       _moveCy = ev.clientY;
+      // (v35.04) left/TOP, not left/bottom : _layoutSticks pins the stick
+      // with an inline top, and with height set the browser ignores a
+      // competing bottom (over-constrained), so a bottom write here would
+      // leave the circle stuck at home while the knob math ran.
       const rr = root.getBoundingClientRect();
       moveEl.style.left = (_moveCx - rr.left - _moveR) + 'px';
-      moveEl.style.bottom = (rr.bottom - _moveCy - _moveR) + 'px';
+      moveEl.style.top = (_moveCy - rr.top - _moveR) + 'px';
       _dashArmed = true;
       _moveTo(ev.clientX, ev.clientY);
     });
@@ -52234,7 +52309,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       input.touchMoveX = 0; input.touchMoveY = 0;
       _dashArmed = true;
       knobEl.style.transform = '';
-      moveEl.style.left = ''; moveEl.style.bottom = ''; 
+      // (v35.04) Re-pin instead of clearing to the stylesheet fallback —
+      // the stick's home position is px-managed by _layoutSticks now.
+      _layoutSticks();
     };
     moveZone.addEventListener('pointerup', _moveEnd);
     moveZone.addEventListener('pointercancel', _moveEnd);
@@ -52264,6 +52341,19 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     };
     lookZone.addEventListener('pointerup', _lookEnd);
     lookZone.addEventListener('pointercancel', _lookEnd);
+
+    // (v35.04) Called by the visibility poll when the overlay hides.
+    // display:none releases pointer capture WITHOUT delivering pointerup
+    // on Chrome, so a drag in flight when the cinematic hid the overlay
+    // used to leave the stick parked at its last dragged px position (and
+    // the pointer ids latched). Clear it all and re-home.
+    _dragReset = function () {
+      _movePid = null; _lookPid = null;
+      _dashArmed = true;
+      knobEl.style.transform = '';
+      lookEl.classList.remove('tc-pressed');
+      _layoutSticks();
+    };
 
     // Stop browser pan/zoom gestures on the 3D canvas itself.
     try { if (renderer && renderer.domElement) renderer.domElement.style.touchAction = 'none'; } catch (_) {}
@@ -52299,8 +52389,15 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     if (show !== cur) {
       root.style.display = show ? 'block' : 'none';
       input.touchActive = show;
-      if (!show) _zeroTouchInputs();
+      if (!show) { _zeroTouchInputs(); if (_dragReset) { try { _dragReset(); } catch (_) {} } }
+      // (v35.04) Re-pin on EVERY reveal : the intro cinematic hides the
+      // overlay exactly while round start releases the orientation lock
+      // and Chrome settles fullscreen, so whatever layout the overlay was
+      // hidden with is stale by the time it comes back. This was the
+      // "sticks slide off screen after the cinematic" bug on mobile.
+      if (show) _layoutSticksSoon();
     }
+    if (show) _refreshTouchLabels();
     // (v33.22) the ship-cycle + view-toggle buttons only do anything in the free-flight HUB ; hide
     // them in combat so they're not dead controls. (Their handlers also self-gate, but hiding is cleaner.)
     const _ffHub = show && (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');

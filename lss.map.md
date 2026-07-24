@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v34.69**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.04**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -428,7 +428,11 @@ Tear down session, dispose world objects, reset state, restore UI.
 - **Symbols:** `_xrSynthGamepad`, `_mergedGamepadState`, `pollGamepad`
 - **⚠** Merges physical + VR controllers into one virtual pad.
 
-#### Circumpunct radial HUD (canvas) — `~L47620`
+#### Touch controls overlay (mobile) — `~L42220`
+**Jump:** `const _touchForced` · `window.LSS_TOUCH`
+Self-contained IIFE: on-screen sticks + labeled buttons for phones (`?touch=1` forces on desktop). Floating-origin move stick (over-travel = dash), right-half look zone, right-edge button COLUMN labeled with live loadout names (RT=weapon, RB=ability1, LB=ability0, F=ability2, via `_refreshTouchLabels` in the 250 ms visibility poll), R=RELOAD chip, LT=ZOOM, core button = core name.
+- **Symbols:** `_visBox`, `_layoutSticks`/`_layoutSticksSoon` (`window._lssLayoutSticks`), `_refreshTouchLabels`, `_dragReset`, `window.LSS_TOUCH`
+- **⚠ (v35.04)** `_layoutSticks` pins the overlay ROOT + sticks/zones in px to the CONSERVATIVE visible box (intersection of visualViewport and inner W/H) — Chrome's layout viewport can come out of the round-start fullscreen/orientation settle taller than the real screen while the intro cinematic hides the overlay (CSS vh/vmin bottom-anchoring then lands off-screen = the old "sticks gone after cinematic" bug). The visibility poll re-pins on EVERY hidden→shown flip and resets interrupted drags on hide (display:none never delivers pointerup on Chrome). Don't revert sticks to CSS-unit positioning.
 **Jump:** `function drawCircumpunctHUD` (~L47687)
 Central circular reticle (health arc, ability ring) on the `circumpunct-hud` canvas.
 - **Symbols:** `hudCanvas`, `_HUD_TICK_COUNT`, `drawCircumpunctHUD`
