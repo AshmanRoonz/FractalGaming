@@ -3059,20 +3059,7 @@ window.lssAutoFullscreen = function () {
     void _fsP;
   } catch (_) {}
 };
-window._lssLockLandscape = function (want) {
-  try {
-    var touch = (navigator.maxTouchPoints > 0) && (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-    if (!touch) return;
-    var so = screen.orientation; if (!so) return;
-    if (want) {
-      var doLock = function () { try { if (typeof so.lock === 'function') { var lp = so.lock('landscape'); if (lp && typeof lp.catch === 'function') lp.catch(function () {}); } } catch (_) {} };
-      if (document.fullscreenElement || document.webkitFullscreenElement) { doLock(); }
-      else { var p = (window.lssRequestFullscreen ? window.lssRequestFullscreen() : null); if (p && typeof p.then === 'function') { p.then(doLock, doLock); } else { doLock(); } }
-    } else {
-      if (typeof so.unlock === 'function') so.unlock();
-    }
-  } catch (_) {}
-};
+window._lssLockLandscape = function () {};
 </script>
 <script type="module">
   import * as THREE from 'three';
@@ -3120,7 +3107,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.05';
+const LSS_BUILD = '35.06';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -33499,7 +33486,6 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
-    try { if (window._lssLockLandscape) window._lssLockLandscape(false); } catch (_) {}   
     
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
     if (typeof musicSetPattern === 'function') {
@@ -38732,7 +38718,6 @@ function updateRoundSystem(dt) {
     if (game.warmupTimer <= 0 && !selectActive) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
-      try { if (window._lssLockLandscape) window._lssLockLandscape(false); } catch (_) {}   
       try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}   
       
       
@@ -42326,17 +42311,29 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
   let root = null, moveEl = null, knobEl = null;
   let _dragReset = null;
+  let _moveDragging = false;
 
   let _lsBox = { w: 0, h: 0, l: 0, t: 0 };
   function _visBox() {
-    let w = window.innerWidth, h = window.innerHeight, l = 0, t = 0;
+    const iw = window.innerWidth, ih = window.innerHeight;
+    let w = iw, h = ih, l = 0, t = 0;
     try {
       const vv = window.visualViewport;
       if (vv && vv.width) {
-        w = Math.min(w, Math.round(vv.width));
-        h = Math.min(h, Math.round(vv.height));
-        l = Math.max(0, Math.round(vv.offsetLeft || 0));
-        t = Math.max(0, Math.round(vv.offsetTop || 0));
+        const vw = Math.round(vv.width), vh = Math.round(vv.height);
+        const vl = Math.max(0, Math.round(vv.offsetLeft || 0));
+        const vt = Math.max(0, Math.round(vv.offsetTop || 0));
+        if ((iw >= ih) === (vw >= vh)) {
+          w = Math.min(iw, vw); h = Math.min(ih, vh); l = vl; t = vt;
+        } else {
+          let realLand = (iw >= ih);
+          try {
+            const so = screen.orientation;
+            if (so && typeof so.type === 'string') realLand = so.type.indexOf('landscape') === 0;
+            else if (screen.width && screen.height) realLand = screen.width >= screen.height;
+          } catch (_) {}
+          if ((vw >= vh) === realLand) { w = vw; h = vh; l = vl; t = vt; }
+        }
       }
     } catch (_) {}
     return { w: w, h: h, l: l, t: t };
@@ -42358,7 +42355,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
         el.style.right = 'auto'; el.style.bottom = 'auto';
       };
       const S = 30 * vm;   // stick diameter
-      place('tc-move', 2.5 * vm, H - 3 * vm - S, S, S);
+      if (!_moveDragging) place('tc-move', 2.5 * vm, H - 3 * vm - S, S, S);
       place('tc-look', W * 0.76 - S, H - 3 * vm - S, S, S);
       place('tc-move-zone', 0, H * 0.40, W * 0.42, H * 0.60);
       place('tc-look-zone', W * 0.50, H * 0.12, W * 0.50, H * 0.88);
@@ -42427,6 +42424,11 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     if (window.visualViewport) {
       try { window.visualViewport.addEventListener('resize', _layoutSticksSoon); } catch (_) {}
     }
+    try {
+      if (screen.orientation && screen.orientation.addEventListener) {
+        screen.orientation.addEventListener('change', _layoutSticksSoon);
+      }
+    } catch (_) {}
 
     function _hold(el, press, release) {
       el.addEventListener('pointerdown', ev => {
@@ -42464,6 +42466,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       ev.preventDefault(); ev.stopPropagation();
       try { moveZone.setPointerCapture(ev.pointerId); } catch (_) {}
       _movePid = ev.pointerId;
+      _moveDragging = true;
       const r = moveEl.getBoundingClientRect();
       _moveR = r.width / 2;
       _moveCx = ev.clientX;
@@ -42493,6 +42496,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const _moveEnd = ev => {
       if (ev.pointerId !== _movePid) return;
       _movePid = null;
+      _moveDragging = false;
       input.touchMoveX = 0; input.touchMoveY = 0;
       _dashArmed = true;
       knobEl.style.transform = '';
@@ -42526,6 +42530,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
     _dragReset = function () {
       _movePid = null; _lookPid = null;
+      _moveDragging = false;
       _dashArmed = true;
       knobEl.style.transform = '';
       lookEl.classList.remove('tc-pressed');

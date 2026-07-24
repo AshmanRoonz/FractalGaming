@@ -3068,28 +3068,20 @@ window.lssAutoFullscreen = function () {
     if (!(document.fullscreenElement || document.webkitFullscreenElement)) {
       _fsP = window.lssRequestFullscreen();
     }
-    // (v34.15) Landscape lock moved out -> window._lssLockLandscape : LOCKED at enterShipSelect, UNLOCKED at
-    // gameplay start. So SHIP-SELECT is forced landscape on mobile, but GAMEPLAY is NOT forced. lssAutoFullscreen
-    // now only requests fullscreen.
+    // (v35.06) Orientation locking removed entirely (see _lssLockLandscape
+    // below) ; lssAutoFullscreen only requests fullscreen.
     void _fsP;
   } catch (_) {}
 };
-// (v34.15) Mobile orientation control. want=true -> (coarse-pointer/touch only) ensure fullscreen then lock
-// landscape ; want=false -> release. iOS Safari has no screen.orientation.lock -> silent no-op. Desktop/VR excluded.
-window._lssLockLandscape = function (want) {
-  try {
-    var touch = (navigator.maxTouchPoints > 0) && (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
-    if (!touch) return;
-    var so = screen.orientation; if (!so) return;
-    if (want) {
-      var doLock = function () { try { if (typeof so.lock === 'function') { var lp = so.lock('landscape'); if (lp && typeof lp.catch === 'function') lp.catch(function () {}); } } catch (_) {} };
-      if (document.fullscreenElement || document.webkitFullscreenElement) { doLock(); }
-      else { var p = (window.lssRequestFullscreen ? window.lssRequestFullscreen() : null); if (p && typeof p.then === 'function') { p.then(doLock, doLock); } else { doLock(); } }
-    } else {
-      if (typeof so.unlock === 'function') so.unlock();
-    }
-  } catch (_) {}
-};
+// (v34.15 -> v35.06) Mobile orientation control REMOVED. The lock('landscape')
+// at ship-select plus unlock() at warmup/FIGHT meant the OS re-evaluated
+// orientation mid-match — on phones with auto-rotate off that rotated the
+// viewport right while a thumb was on the sticks, teleporting the touch
+// controls off screen (the long-standing Chrome/Android glitch). The game now
+// simply follows the phone's own rotation at all times ; fullscreen requests
+// (lssAutoFullscreen / lssRequestFullscreen) are unaffected. Kept as a no-op
+// because call sites and older notes still reference it.
+window._lssLockLandscape = function () {};
 </script>
 <script type="module">
   import * as THREE from 'three';
@@ -3154,7 +3146,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.05';
+const LSS_BUILD = '35.06';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -40773,7 +40765,10 @@ function commitLoadout(key) {
     broadcastWorldObjects();
 
     game.state = 'warmup';
-    try { if (window._lssLockLandscape) window._lssLockLandscape(false); } catch (_) {}   
+    // (v35.06) Orientation lock/unlock removed entirely (see
+    // _lssLockLandscape). The unlock that used to sit here re-evaluated
+    // orientation at warmup — mid-touch — and could rotate the viewport,
+    // which moved the touch sticks off screen on Chrome/Android.
     
     if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
     // Reactive band: fresh match start, kick off warmup pattern.
@@ -47509,7 +47504,9 @@ function updateRoundSystem(dt) {
     if (game.warmupTimer <= 0 && !selectActive) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
-      try { if (window._lssLockLandscape) window._lssLockLandscape(false); } catch (_) {}   
+      // (v35.06) Orientation unlock removed (locking is gone entirely —
+      // see _lssLockLandscape). The unlock that fired here rotated the
+      // viewport at FIGHT, mid-touch, on Chrome/Android.
       try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}   
       
       
@@ -52082,6 +52079,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // Set inside _build() ; the visibility poll calls it on hide to clear a
   // drag the browser never finished (see v35.04 note in _layoutSticks).
   let _dragReset = null;
+  // (v35.06) True while a floating-origin move-stick drag is in flight.
+  // Module scope so _layoutSticks can leave the dragged stick alone — the
+  // FIGHT-moment re-layout used to yank the circle home mid-drag.
+  let _moveDragging = false;
 
   // (v30.99) Chrome/Android : the sticks were positioned with CSS vw/%
   // units, and Chrome's layout viewport can mis-report around the
@@ -52110,14 +52111,36 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   //      (size AND offsets) so late viewport settles self-heal.
   let _lsBox = { w: 0, h: 0, l: 0, t: 0 };
   function _visBox() {
-    let w = window.innerWidth, h = window.innerHeight, l = 0, t = 0;
+    const iw = window.innerWidth, ih = window.innerHeight;
+    let w = iw, h = ih, l = 0, t = 0;
     try {
       const vv = window.visualViewport;
       if (vv && vv.width) {
-        w = Math.min(w, Math.round(vv.width));
-        h = Math.min(h, Math.round(vv.height));
-        l = Math.max(0, Math.round(vv.offsetLeft || 0));
-        t = Math.max(0, Math.round(vv.offsetTop || 0));
+        const vw = Math.round(vv.width), vh = Math.round(vv.height);
+        const vl = Math.max(0, Math.round(vv.offsetLeft || 0));
+        const vt = Math.max(0, Math.round(vv.offsetTop || 0));
+        if ((iw >= ih) === (vw >= vh)) {
+          // Same orientation claim : overhang lies (URL bar, fullscreen
+          // exit) inflate ONE axis — per-axis min stays inside the real
+          // screen whichever source is lying.
+          w = Math.min(iw, vw); h = Math.min(ih, vh); l = vl; t = vt;
+        } else {
+          // (v35.06) TRANSPOSED claims : one source still reports the
+          // pre-rotation viewport (Chrome/Android does this around
+          // rotation + fullscreen settles, sometimes without ever firing
+          // a final resize — so it can persist). Per-axis min here would
+          // build a bogus SQUARE box and pin the sticks mid-screen /
+          // off-edge. Ask the OS which orientation is real and take that
+          // source whole.
+          let realLand = (iw >= ih);
+          try {
+            const so = screen.orientation;
+            if (so && typeof so.type === 'string') realLand = so.type.indexOf('landscape') === 0;
+            else if (screen.width && screen.height) realLand = screen.width >= screen.height;
+          } catch (_) {}
+          if ((vw >= vh) === realLand) { w = vw; h = vh; l = vl; t = vt; }
+          // else : keep innerWidth/Height (already in w/h, offsets 0).
+        }
       }
     } catch (_) {}
     return { w: w, h: h, l: l, t: t };
@@ -52139,7 +52162,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
         el.style.right = 'auto'; el.style.bottom = 'auto';
       };
       const S = 30 * vm;   // stick diameter
-      place('tc-move', 2.5 * vm, H - 3 * vm - S, S, S);
+      // Mid-drag the move stick owns its own position (floating origin) ;
+      // release re-homes it via _moveEnd -> _layoutSticks.
+      if (!_moveDragging) place('tc-move', 2.5 * vm, H - 3 * vm - S, S, S);
       place('tc-look', W * 0.76 - S, H - 3 * vm - S, S, S);
       place('tc-move-zone', 0, H * 0.40, W * 0.42, H * 0.60);
       place('tc-look-zone', W * 0.50, H * 0.12, W * 0.50, H * 0.88);
@@ -52229,6 +52254,15 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     if (window.visualViewport) {
       try { window.visualViewport.addEventListener('resize', _layoutSticksSoon); } catch (_) {}
     }
+    // (v35.06) screen.orientation fires reliably on Chrome/Android rotations
+    // even when the window-level resize/orientationchange events get eaten
+    // by fullscreen transitions (the canvas resize path already listens to
+    // it ; the sticks were missing it).
+    try {
+      if (screen.orientation && screen.orientation.addEventListener) {
+        screen.orientation.addEventListener('change', _layoutSticksSoon);
+      }
+    } catch (_) {}
 
     // ---- hold buttons: press/release semantics ----
     function _hold(el, press, release) {
@@ -52272,6 +52306,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       ev.preventDefault(); ev.stopPropagation();
       try { moveZone.setPointerCapture(ev.pointerId); } catch (_) {}
       _movePid = ev.pointerId;
+      _moveDragging = true;
       const r = moveEl.getBoundingClientRect();
       _moveR = r.width / 2;
       _moveCx = ev.clientX;
@@ -52311,6 +52346,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const _moveEnd = ev => {
       if (ev.pointerId !== _movePid) return;
       _movePid = null;
+      _moveDragging = false;
       input.touchMoveX = 0; input.touchMoveY = 0;
       _dashArmed = true;
       knobEl.style.transform = '';
@@ -52354,6 +52390,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // the pointer ids latched). Clear it all and re-home.
     _dragReset = function () {
       _movePid = null; _lookPid = null;
+      _moveDragging = false;
       _dashArmed = true;
       knobEl.style.transform = '';
       lookEl.classList.remove('tc-pressed');

@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v35.04**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.06**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -433,6 +433,7 @@ Tear down session, dispose world objects, reset state, restore UI.
 Self-contained IIFE: on-screen sticks + labeled buttons for phones (`?touch=1` forces on desktop). Floating-origin move stick (over-travel = dash), right-half look zone, right-edge button COLUMN labeled with live loadout names (RT=weapon, RB=ability1, LB=ability0, F=ability2, via `_refreshTouchLabels` in the 250 ms visibility poll), R=RELOAD chip, LT=ZOOM, core button = core name.
 - **Symbols:** `_visBox`, `_layoutSticks`/`_layoutSticksSoon` (`window._lssLayoutSticks`), `_refreshTouchLabels`, `_dragReset`, `window.LSS_TOUCH`
 - **⚠ (v35.04)** `_layoutSticks` pins the overlay ROOT + sticks/zones in px to the CONSERVATIVE visible box (intersection of visualViewport and inner W/H) — Chrome's layout viewport can come out of the round-start fullscreen/orientation settle taller than the real screen while the intro cinematic hides the overlay (CSS vh/vmin bottom-anchoring then lands off-screen = the old "sticks gone after cinematic" bug). The visibility poll re-pins on EVERY hidden→shown flip and resets interrupted drags on hide (display:none never delivers pointerup on Chrome). Don't revert sticks to CSS-unit positioning.
+- **⚠ (v35.06)** Orientation locking REMOVED game-wide: `window._lssLockLandscape` is a kept-as-no-op stub (~L3079). The old lock-at-ship-select + unlock-at-warmup/FIGHT cycle made Chrome/Android re-evaluate orientation mid-match — on auto-rotate-off phones that rotated the viewport right while a thumb was on the sticks. Don't reintroduce mid-session `screen.orientation.lock/unlock`. `_visBox` now arbitrates TRANSPOSED viewport claims (vv says portrait while inner says landscape or vice versa — Chrome's rotation-settle lie, can persist with no final resize event): per-axis min would build a bogus square box, so it asks `screen.orientation.type` which orientation is real and takes that source whole. Sticks module also listens to `screen.orientation` `change` (window-level resize events get eaten by fullscreen transitions), and `_layoutSticks` leaves `tc-move` alone mid-drag (`_moveDragging`).
 **Jump:** `function drawCircumpunctHUD` (~L47687)
 Central circular reticle (health arc, ability ring) on the `circumpunct-hud` canvas.
 - **Symbols:** `hudCanvas`, `_HUD_TICK_COUNT`, `drawCircumpunctHUD`
