@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v35.10**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.11**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -202,6 +202,7 @@ Camera + renderer creation + the *entire* WebXR/VR subsystem: dolly/controllers,
 **Jump:** `function _clipBuild` (~L22233) · `function _clipUpdate` (~L22263) · `function updateSandwichStream` (~L22324)
 - **Symbols:** `_swStartDragHiss`, `_CLIP_N`/`_clipmap`, `_clipGeo`, `_clipMat`, `_clipBakeLevel`, `_clipBuild`, `_clipUpdate`, `updateSandwichStream`, `initSandwichTerrain`, `setSandwich*`, `sandwichDebug`; `window.__smoothTerrain`, `window.__terrainDetail`, `window.__terrainAO`, `window.__terrainSat`, `window.__clipTest`, `window.__clipDetail`
 - **⚠** NAME COLLISION with the `_clip` video recorder (~L46572). Different systems.
+- **⚠ (v35.11) Clipmap seam invariant:** each ring geomorphs its outer band toward the parent's coarse surface, and the morph MUST complete at the parent ring's inner hole edge = child-cell radius `N/2-4` (the ring geo is `_clipGeo(N/2-4)`), NOT at the window edge `N/2`. The old `(rd-48)/16` band finished 4 cells late, so the parent's fully-coarse surface poked through the ~75%-morphed child along the seam rectangle = the hub's "big triangles in a row". Band is now `(rd-N/4)/(N/4-4)` (starts 32, ends 60 for N=128 — wider band also halves the visible travel-morph rate). `_CLIP_SKIRT` 1500→220 (skirts only plug transient re-bake gaps; exposed 1500u walls read as giant dark triangle rows). Live A/B: `__clipMorph(0|1)`, `__clipSkirt(0..1)`. If `_clipGeo`'s hole inset (the `-4`) ever changes, the band end must move with it.
 
 #### Level collision & raycast — `~L22495`
 **Jump:** `function worldSDF` (~L22496) · `function resolveCollision` (~L22629)

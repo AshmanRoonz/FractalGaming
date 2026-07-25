@@ -3217,7 +3217,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.10';
+const LSS_BUILD = '35.11';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -17926,8 +17926,23 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       sh.uniforms.uClipOrigin = m._clipOrigin || (m._clipOrigin = { value: new THREE.Vector2() });   
       sh.uniforms.uClipSkirt = (window.__clipSkirtU || (window.__clipSkirtU = { value: 1.0 }));   
       sh.uniforms.uClipMorph = (window.__clipMorphU || (window.__clipMorphU = { value: 1.0 }));   
+      // (v35.11) Geomorph band retune. The old band ((rd-48)/16 -> 1.0 at the
+      // window edge 64) finished 4 cells TOO LATE: the parent ring's inner
+      // hole edge sits at child-cell radius N/2-4 (=60), so in the 60..64
+      // overlap the parent drew its fully-coarse surface under a child that
+      // was only ~75% morphed — wherever coarse > fine, parent triangles
+      // (2x size) poked through in a row along the seam rectangle (the
+      // long-standing "big visible triangles in a row" in the hub).
+      // Now the morph COMPLETES at the parent's hole edge (_cme=60), and the
+      // band STARTS at N/4 (=32) instead of 48 — twice the ramp distance, so
+      // the always-moving LOD morph ("mountains changing as you fly") is
+      // half as fast per meter travelled and much less noticeable.
+      // Live A/B: __clipMorph(0|1), __clipSkirt(0..1). Same fetch count.
       const _cn = _CLIP_N.toFixed(1), _cr = (_CLIP_N + 1).toFixed(1);
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n float _rd=max(abs(_fi-64.0),abs(_fj-64.0));float _gm=clamp((_rd-48.0)/16.0,0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;float _h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;float _h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;float _h11=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je+2.0)+uClipOrigin+0.5)/129.0)).x;_ch=mix(_ch,mix(mix(_h00,_h10,_wx),mix(_h01,_h11,_wx),_wz),_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
+      const _chn = (_CLIP_N * 0.5).toFixed(1);            // window half-width (64)
+      const _cms = (_CLIP_N * 0.25).toFixed(1);           // morph band start (32)
+      const _cmw = (_CLIP_N * 0.25 - 4).toFixed(1);       // band width: ends at N/2-4 (28)
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n float _rd=max(abs(_fi-'+_chn+'),abs(_fj-'+_chn+'));float _gm=clamp((_rd-'+_cms+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;float _h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;float _h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;float _h11=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je+2.0)+uClipOrigin+0.5)/129.0)).x;_ch=mix(_ch,mix(mix(_h00,_h10,_wx),mix(_h01,_h11,_wx),_wz),_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
@@ -23356,7 +23371,12 @@ const _clipmap = { levels: null, solidGeo: null, ringGeo: null, on: false, raf: 
 
 
 
-const _CLIP_SKIRT = 1500;   
+// (v35.11) 1500 -> 220. Skirts only need to plug the transient 1-frame seam
+// gaps while neighbouring levels re-bake on different snap cadences ; with the
+// morph now completing AT the parent's hole edge (see the VS note) the steady-
+// state gap is ~0. When a 1500u wall DID get exposed on a hillside it read as
+// a huge row of dark triangles — 220u covers every real gap and vanishes.
+const _CLIP_SKIRT = 220;
 function _clipGeo(hole) {
   const N = _CLIP_N, R = N + 1;
   
