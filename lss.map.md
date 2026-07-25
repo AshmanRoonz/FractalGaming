@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v35.13**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.14**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -243,7 +243,8 @@ Instanced towers/dishes/holos, air-traffic ships (OBB avoidance), collision + ra
 Sky dome, sun, volumetric clouds, rainbow, day-lighting env, toggleable shadows.
 - **Symbols:** `_WX`, `_WX_SHADOW_EXT`, `_wxMakeDome`, `_wxMakeSun`, `_wxMakeClouds`, `_wxMakeBow`, `_wxShadowsOn`/`_wxShadowsOff`, `_wxBuildTerrProxy`/`_wxUpdateTerrProxy`, `_wxInit`/`_wxFrame`
 - **⚠** The sky dome's below-horizon blend + cloud edge falloff were tuned in v34.60–62; shadows here drive the 2048² shadow map.
-- **⚠ (v35.13) Shadow stability invariants:** (1) the ortho window is TEXEL-SNAPPED in `_wxFrame` — the target moves in whole shadow-texel steps in the light's plane (raw per-frame follow made every shadow edge shimmer = "flickering corners"); (2) the terrain shadow proxy re-bakes on its OWN fixed world lattice (`(2*_WX_SHADOW_EXT)/_WX_PROXY_N` cells) — recentering on raw player position made the whole mountain-shadow field morph every ~120u of travel; (3) window half-extent lives in `_WX_SHADOW_EXT` (6800, was 4200 — shadows "loaded in too close") and normalBias (4.8) scales with texel size. Keep all three coupled when retuning.
+- **⚠ (v35.13) Shadow stability invariants:** (1) the ortho window is TEXEL-SNAPPED in `_wxFrame` — the target moves in whole shadow-texel steps in the light's plane (raw per-frame follow made every shadow edge shimmer = "flickering corners"); (2) the terrain shadow proxy re-bakes on its OWN fixed world lattice (`(2*_WX_SHADOW_EXT)/_WX_PROXY_N` cells) — recentering on raw player position made the whole mountain-shadow field morph every ~120u of travel; (3) window half-extent lives in `_WX_SHADOW_EXT` (6800, was 4200 — shadows "loaded in too close") and normalBias (4.8) scales with texel size. Keep all three coupled when retuning. Live knob: `__shadowExt(u)`.
+- **⚠ (v35.14) Proxy rebake is INCREMENTAL:** on a cell crossing `_wxUpdateTerrProxy` SHIFTS the stored lattice heights by the cell delta and samples only the newly exposed rows/cols (~R calls); the full (N+1)² `_stGroundYCarved` resample (~11k calls, a rhythmic per-130u hub hitch = "stuttering") runs only on first show or a >N/4-cell jump. The shift copy is verified bit-exact. Don't turn this back into a full resample.
 
 ### ═══ PART 11 — Ship models & FX (~23094–24484) ═══
 

@@ -3219,7 +3219,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.13';
+const LSS_BUILD = '35.14';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18380,16 +18380,18 @@ function _swBuildTrees(x0,z0,T){
     set[vi].push(x,y,z);
   }
   const meshes=[];
-  const emit=(geo,mat,pts,yOff,s0,s1,minPts)=>{
+  const emit=(geo,mat,pts,yOff,s0,s1,minPts,noShadow)=>{
     if(pts.length<(minPts||3)) return;
     const count=pts.length/3, im=new THREE.InstancedMesh(geo,mat,count);
     for(let k=0;k<count;k++){ _swGd.position.set(pts[k*3],pts[k*3+1]+yOff,pts[k*3+2]); _swGd.rotation.set(0,Math.random()*6.283,0);
       const s=s0+Math.random()*s1; _swGd.scale.set(s,s,s); _swGd.updateMatrix(); im.setMatrixAt(k,_swGd.matrix); }
-    im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.castShadow=true; im.receiveShadow=true; im.userData={isSandwichTerrain:true}; scene.add(im); meshes.push(im);
+    im.instanceMatrix.needsUpdate=true; im.frustumCulled=true; im.castShadow=!noShadow; im.receiveShadow=true; im.userData={isSandwichTerrain:true}; scene.add(im); meshes.push(im);
   };
   for(let v=0;v<sets.std.length;v++)   emit(sets.std[v],   _swTreeMatGet(),   buckets.std[v],   -6,   2.6,1.4);
   for(let v=0;v<sets.snow.length;v++)  emit(sets.snow[v],  _swTreeMatGet(),   buckets.snow[v],  -6,   2.4,1.3);
-  for(let v=0;v<sets.shroom.length;v++)emit(sets.shroom[v],_swShroomMatGet(), buckets.shroom[v],-1.5, 1.6,2.0, 9);
+  // (v35.14) mushrooms are emissive glow flora — casting shadows added
+  // shadow-pass draws across the blue zones for near-zero visual gain.
+  for(let v=0;v<sets.shroom.length;v++)emit(sets.shroom[v],_swShroomMatGet(), buckets.shroom[v],-1.5, 1.6,2.0, 9, true);
   return meshes.length?meshes:null;
 }
 function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); }catch(_){} } } }
@@ -23266,20 +23268,47 @@ function _wxUpdateTerrProxy() {
   // the raw player position, so every ~120u rebake resampled the heightfield
   // at a shifted phase — the whole mountain-shadow field subtly MORPHED each
   // rebake (travel flicker). On a fixed world lattice, overlapping cells
-  // sample identical points every time; rebakes only reveal new border rows.
-  const cell = (2 * _WX_SHADOW_EXT) / _WX_PROXY_N;
+  // sample identical points every time.
+  const N = _WX_PROXY_N, R = N + 1;
+  const cell = (2 * _WX_SHADOW_EXT) / N;
   const sx = Math.round(p.x / cell) * cell, sz = Math.round(p.z / cell) * cell;
-  const dx = sx - _WX.proxyAt.x, dz = sz - _WX.proxyAt.z;
-  if (dx * dx + dz * dz < 1) return;
+  if (sx === _WX.proxyAt.x && sz === _WX.proxyAt.z) return;
   const T = game.sandwichTerrain;
   if (!T || !T.ON || typeof _stGroundYCarved !== 'function') return;
-  _WX.proxyAt.x = sx; _WX.proxyAt.z = sz;
   const pos = mesh.geometry.getAttribute('position');
-  for (let i = 0; i < pos.count; i++) {
-    const wx = sx + pos.getX(i), wz = sz + pos.getZ(i);
+  const a = pos.array;
+  const sample = (i) => {
+    const wx = sx + a[i * 3], wz = sz + a[i * 3 + 2];
     let h = -800;
     try { h = _stGroundYCarved(wx, wz, T); } catch (_) {}
-    pos.setY(i, h - 6);
+    a[i * 3 + 1] = h - 6;
+  };
+  // (v35.14) INCREMENTAL rebake — the stutter fix. The full (N+1)² height
+  // resample (~11k _stGroundYCarved calls) ran synchronously on every cell
+  // crossing (~every 130u of travel) = a rhythmic hub hitch. The lattice
+  // makes overlapping cells bit-identical between bakes, so: SHIFT the
+  // stored heights by the cell delta and sample ONLY the newly exposed
+  // rows/columns (~R samples per crossing, ~50x cheaper). Full bake only on
+  // first show or a teleport-sized jump.
+  const shX = Math.round((sx - _WX.proxyAt.x) / cell), shZ = Math.round((sz - _WX.proxyAt.z) / cell);
+  const first = !(Math.abs(_WX.proxyAt.x) < 1e8);
+  _WX.proxyAt.x = sx; _WX.proxyAt.z = sz;
+  if (first || Math.abs(shX) > N / 4 || Math.abs(shZ) > N / 4) {
+    for (let i = 0; i < pos.count; i++) sample(i);
+  } else {
+    // dest(ix,iz) <- src(ix+shX, iz+shZ); iterate toward the source so
+    // in-place copies never read an already-overwritten Y.
+    const xs = shX > 0, zs = shZ > 0;
+    for (let iz = zs ? 0 : R - 1; zs ? iz < R : iz >= 0; zs ? iz++ : iz--) {
+      const srcZ = iz + shZ, rowOk = srcZ >= 0 && srcZ < R;
+      for (let ix = xs ? 0 : R - 1; xs ? ix < R : ix >= 0; xs ? ix++ : ix--) {
+        const srcX = ix + shX;
+        const di = (iz * R + ix) * 3 + 1;
+        if (rowOk && srcX >= 0 && srcX < R) a[di] = a[(srcZ * R + srcX) * 3 + 1];
+        else a[di] = 1e9;   // newly exposed — mark for sampling
+      }
+    }
+    for (let i = 0; i < pos.count; i++) if (a[i * 3 + 1] === 1e9) sample(i);
   }
   pos.needsUpdate = true;
   mesh.position.set(sx, 0, sz);
@@ -23358,6 +23387,20 @@ function _wxShadowsOn() {
     return true;
   } catch (_) { return false; }
 }
+// (v35.14) Live A/B knob for the shadow window on real GPUs:
+// __shadowExt() reads, __shadowExt(5200) shrinks, __shadowExt(6800) = shipped.
+// normalBias scales with the implied texel size so acne stays away.
+window.__shadowExt = function (v) {
+  try {
+    const sc = dirLight.shadow.camera;
+    if (typeof v === 'number' && v > 500) {
+      sc.left = -v; sc.right = v; sc.top = v; sc.bottom = -v;
+      dirLight.shadow.normalBias = 4.8 * (v / _WX_SHADOW_EXT);
+      sc.updateProjectionMatrix();
+    }
+    return sc.right;
+  } catch (_) { return 0; }
+};
 function _wxShadowsOff() {
   try {
     dirLight.castShadow = false;
@@ -23722,10 +23765,14 @@ function _clipBuild() {
     const spacing = _CLIP_M0 * Math.pow(2, k);
     const mat = _clipMat();
     if (mat._clipSpacingU) mat._clipSpacingU.value = spacing;   
-    // (v35.13) Stronger separation: finer levels win the depth tie decisively
-    // in the 4-cell ring-overlap band (post-v35.11 the two surfaces there are
-    // COPLANAR by design — weak offsets let them shimmer at distance).
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -2.0; mat.polygonOffsetUnits = -3 * (_CLIP_LEVELS - k);
+    // (v35.14) REVERTED to the original -1 / -(L-k) offsets. The v35.13
+    // "stronger separation" (-2 / -3x) pulled the whole clipmap toward the
+    // camera in depth far enough that it started winning ties against the
+    // nearly-coplanar CITY GROUND PLANE — the pad under the city flickered.
+    // The hub's flicker was the unsnapped shadow window all along (fixed in
+    // _wxFrame); the ring-overlap surfaces are morph-identical and resolve
+    // fine with the gentle offsets.
+    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k);
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);
