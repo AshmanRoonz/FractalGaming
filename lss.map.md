@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v35.09**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.10**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -457,6 +457,8 @@ Central circular reticle (health arc, ability ring) on the `circumpunct-hud` can
 #### Ship-select / loadout / perk / difficulty UI — `~L49314`
 **Jump:** `function buildShipSelect` (~L49316)
 - **Symbols:** `buildShipSelect`, `previewLoadout`, `_renderPerkPicker`, `_renderDifficultyPicker`, `selectLoadout`, `updateTeammatesStrip`
+- **(v35.10) Redesign:** left ship LIST is gone → horizontal `#ship-carousel` chip rail (`.ship-chip`, ‹ › wrap-cycle arrows) under the hero stage; big `#ship-hero` nameplate under the rotating GLB; stat rows are segmented bars normalized to the roster max; perk grid = 3-col `#perks-grid`; no empty state (auto-previews prior/first loadout). Gamepad D-pad + XR confirm paths now query `.ship-chip`.
+- **⚠ (v35.10)** `#ship-preview-canvas` MUST stay `position:absolute` and the `#ship-preview`/`#ship-preview-model` chain MUST keep base `min-height:0` — the preview canvas's DPR-scaled backbuffer otherwise feeds flex min-height and ratchets the layout to ~700k px on any dpr>1 screen (latent for years; the old max-height:620 media query masked it). Also `body:has(#ship-select.active)` hides `#minimap`/`#crosshair` — the radar's opaque backing bled through the 95%-alpha backdrop as a "mystery dark box".
 
 #### Launch countdown + loading overlay + pointer lock — `~L49777`
 **Jump:** `function launchCountdown` (~L49832)
