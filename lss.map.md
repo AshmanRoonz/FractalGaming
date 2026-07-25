@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v35.11**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.12**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -189,8 +189,9 @@ Camera + renderer creation + the *entire* WebXR/VR subsystem: dolly/controllers,
 
 #### Sandwich terrain foliage & shell geometry — `~L17575`
 **Jump:** `function _swBuildShell` (~L17839) · `function _swBuildGrass` (~L17645)
-- **Symbols:** `_swBuildGrass`/`_swRemoveGrass`, `_swGenTree`, `_swForestAt`, `_swBuildTrees`, `_swBuildShell`, `_swDisposeChunk`, `_swApplyAtmosphere`
+- **Symbols:** `_swBuildGrass`/`_swRemoveGrass`, `_swGenTree`, `_swGenMushroom`, `_swForestAt`, `_hzZoneForFoliage`, `_hzFungusAt`, `_swFoliageMat`, `_swBuildTrees`, `_swBuildShell`, `_swDisposeChunk`, `_swApplyAtmosphere`
 - **⚠** Grass off by default (perf); `getVRLevelGridRes` budgets foliage.
+- **(v35.12) Zone foliage:** `_swBuildTrees` is hub-zone-aware via `_hzZoneForFoliage` (same radial+angular math as `_hubZoneTick`): snow sector → snow-dusted tree set (white canopy, cold bark, climbs 0.16 past the snowLine, 0.65× density); crystalcave/rocky sectors → `_swGenMushroom` bioluminescent mushrooms (blue emissive `_swShroomMatGet`), clustered on `_hzFungusAt` (JS port of the FS fungus noise). **Perf guard:** ONE mushroom variant per chunk + emit skips clusters <3 instances — per-variant buckets were emitting hundreds of 1-instance InstancedMeshes (extra draws on the GPU-bound hub). Geometry cache `_swTreeGeos` is now `{std, snow, shroom}` sets.
 
 #### Pillar-karst field (The Colonnade terrain style) — `~L17330`
 **Jump:** `function _stPillarAt` · `function _stGroundYCarvedBase` (the pillar-aware wrappers keep the old `_stGroundYCarved`/`_stCeilYCarved` names)
@@ -459,6 +460,7 @@ Central circular reticle (health arc, ability ring) on the `circumpunct-hud` can
 **Jump:** `function buildShipSelect` (~L49316)
 - **Symbols:** `buildShipSelect`, `previewLoadout`, `_renderPerkPicker`, `_renderDifficultyPicker`, `selectLoadout`, `updateTeammatesStrip`
 - **(v35.10) Redesign:** left ship LIST is gone → horizontal `#ship-carousel` chip rail (`.ship-chip`, ‹ › wrap-cycle arrows) under the hero stage; big `#ship-hero` nameplate under the rotating GLB; stat rows are segmented bars normalized to the roster max; perk grid = 3-col `#perks-grid`; no empty state (auto-previews prior/first loadout). Gamepad D-pad + XR confirm paths now query `.ship-chip`.
+- **(v35.12)** Gamepad axes match the horizontal rail: D-pad/stick LEFT/RIGHT cycles ships, UP/DOWN cycles the map (was swapped). Carousel arrows hug the chip row (`justify-content:center`, track `flex:0 1 auto`).
 - **⚠ (v35.10)** `#ship-preview-canvas` MUST stay `position:absolute` and the `#ship-preview`/`#ship-preview-model` chain MUST keep base `min-height:0` — the preview canvas's DPR-scaled backbuffer otherwise feeds flex min-height and ratchets the layout to ~700k px on any dpr>1 screen (latent for years; the old max-height:620 media query masked it). Also `body:has(#ship-select.active)` hides `#minimap`/`#crosshair` — the radar's opaque backing bled through the 95%-alpha backdrop as a "mystery dark box".
 
 #### Launch countdown + loading overlay + pointer lock — `~L49777`
