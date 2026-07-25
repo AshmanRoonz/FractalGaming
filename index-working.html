@@ -3160,7 +3160,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.08';
+const LSS_BUILD = '35.09';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -47528,10 +47528,13 @@ function updateRoundSystem(dt) {
       
       
       
-      try {
-        if (typeof window !== 'undefined' && window._lssLayoutSticks &&
-            typeof input !== 'undefined' && input.touchActive) window._lssLayoutSticks();
-      } catch (_) {}
+      // (v35.09) The v30.99-era "re-pin the sticks at FIGHT" call is GONE.
+      // It was the ONLY code that rewrote stick geometry at the exact
+      // movement-unlock frame — the frame the field reports kept naming.
+      // Whatever the metrics read during that frame's churn got baked into
+      // the sticks right then. The overlay's reveal re-pin, resize /
+      // orientation listeners and the 1.2 s verify poll own stick layout
+      // now ; nothing repositions the overlay at this transition anymore.
       // (v30.68) Fresh clip segment each round : SAVE CLIP = this round.
       try {
         if (typeof input !== 'undefined' && input.clipRec && typeof _clipStop === 'function') {
@@ -51578,6 +51581,13 @@ function launchCountdown(duration) {
 // actionable: the next user gesture relocks fine. Wrap every call so
 // the rejection is swallowed and the synchronous path is guarded too.
 function _safeRequestPointerLock() {
+  // (v35.09) NEVER grab pointer lock while touch controls drive input.
+  // On Android Chrome a granted lock (any tap-gesture path could grant it —
+  // closeSettings()' relock had no touch gate) swallows ALL touch-derived
+  // pointer events: zones and buttons go dead, and the lock persists until
+  // FULLSCREEN EXIT — the exact "can't move or look until leaving
+  // fullscreen" field failure. Pointer lock is meaningless for touch play.
+  try { if (typeof input !== 'undefined' && input && (input.touchActive || input.touchSuppressMouse)) return; } catch (_) {}
   if (!renderer || !renderer.domElement) return;
   const el = renderer.domElement;
   if (!el.isConnected) return; 
@@ -52242,8 +52252,25 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     if (!root || root.style.display === 'none') return;
     try {
       const b = _visBox();
-      if (Math.abs(b.w - _lsBox.w) > 2 || Math.abs(b.h - _lsBox.h) > 2 ||
-          Math.abs(b.l - _lsBox.l) > 2 || Math.abs(b.t - _lsBox.t) > 2) _layoutSticks();
+      let repin = Math.abs(b.w - _lsBox.w) > 2 || Math.abs(b.h - _lsBox.h) > 2 ||
+                  Math.abs(b.l - _lsBox.l) > 2 || Math.abs(b.t - _lsBox.t) > 2;
+      // (v35.09) Verify the sticks are PHYSICALLY inside the visible box,
+      // not just that the sources drifted. This catches any actor that
+      // moved them — whatever wrote them last, known or not — and snaps
+      // them home within ~1.2 s. (Move stick exempt mid-drag: the floating
+      // origin legitimately parks it under the thumb.)
+      if (!repin) {
+        const off = (id) => {
+          const el = document.getElementById(id);
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          if (!r.width && !r.height) return false;   // not laid out
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          return cx < b.l - 2 || cy < b.t - 2 || cx > b.l + b.w + 2 || cy > b.t + b.h + 2;
+        };
+        repin = (!_moveDragging && off('tc-move')) || off('tc-look');
+      }
+      if (repin) _layoutSticks();
     } catch (_) {}
   }, 1200);
 
