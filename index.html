@@ -3180,7 +3180,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.12';
+const LSS_BUILD = '35.13';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -15051,9 +15051,10 @@ function _swBuildGrass(x0,z0,T){
   const eps=6, SR=_swU.uSlopeRock.value, SG=_swU.uSlopeGrass.value;   
   const CR=game.sandwichGrassClump||34;   
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
-    const ax=x0+(i+Math.random())*step, az=z0+(j+Math.random())*step, ay=_stGroundYGrid(ax,az,T);   
+    const ax=x0+(i+Math.random())*step, az=z0+(j+Math.random())*step, ay=_stGroundYGrid(ax,az,T);
     if(T.HUB && _hubCityExcludes(ax,az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax,az))) continue;
-    if(T.WL!=null && ay<T.WL+4) continue;        
+    if(T.HUB && _hzZoneForFoliage(ax,az)) continue;
+    if(T.WL!=null && ay<T.WL+4) continue;
     const t=(ay-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
     if(t>(T.snowLine||0.7)) continue;          
     
@@ -15284,6 +15285,7 @@ function _swBuildTrees(x0,z0,T){
       const forest=_swForestAt(x,z);
       dens=((forest>0.28)?(0.16+forest*(_full?0.36:0.24)):0.012)*_td;
       if(kind==='snow') dens*=0.65;   // sparser treeline
+      else if(zn) dens*=Math.max(0.06, 1-zn.zs*0.85);
     }
     if(Math.random() > dens) continue;
     const set=buckets[kind];
@@ -15466,12 +15468,11 @@ function _hubZoneTick(px, pz, dt) {
     try { _skyHazeU.uHazeColor.value.copy(_hzSky); } catch (_) {}
   }
   if (Z.VEG) {
-    const veg = Math.max(0.03, 1 - zs);
-    _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58 * veg;
-    _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92 * veg;
+    _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58;
+    _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92;
     const tv = (typeof _swHubView === 'function') ? _swHubView() : _SW_TREE_VIEW;
-    _swU.uTreeFadeA.value = tv * _SW_CHUNK * 0.62 * veg;
-    _swU.uTreeFadeB.value = tv * _SW_CHUNK * 0.94 * veg;
+    _swU.uTreeFadeA.value = tv * _SW_CHUNK * 0.62;
+    _swU.uTreeFadeB.value = tv * _SW_CHUNK * 0.94;
   }
   if (typeof _WX !== 'undefined' && _WX.on && _WX.dome) {
     const du = _WX.dome.material.uniforms;
@@ -18251,6 +18252,20 @@ function _hubCityBuild(g) {
     a2.strokeStyle = 'rgba(74,60,38,0.8)'; a2.lineWidth = 2.0;
     a2.beginPath(); a2.arc(toPx(px), toPz(pz), rr2, 0, 6.283); a2.stroke();
   }
+  a2.globalCompositeOperation = 'multiply';
+  for (const o of solids) {
+    if (o.y0 > PY + 60) continue;   // skybridges / raised decks don't pool
+    const bx = toPx(o.cx), bz = toPz(o.cz);
+    const br = (Math.max(o.hw, o.hd) * 1.45) / (2 * EXT) * CS;
+    if (br < 1.2) continue;
+    const gAO = a2.createRadialGradient(bx, bz, br * 0.35, bx, bz, br);
+    gAO.addColorStop(0, 'rgb(72,72,80)');
+    gAO.addColorStop(0.7, 'rgb(152,152,158)');
+    gAO.addColorStop(1, 'rgb(255,255,255)');
+    a2.fillStyle = gAO;
+    a2.beginPath(); a2.arc(bx, bz, br, 0, 6.283); a2.fill();
+  }
+  a2.globalCompositeOperation = 'source-over';
   e2.fillStyle = '#000'; e2.fillRect(0, 0, CS, CS);
 
   const CELL = 256;
@@ -18358,6 +18373,17 @@ function _hcTowerMat() {
 {
   float hcMode = vHcP.x, hcRnd = vHcP.y;
   if (vHcN.y > 0.5) diffuseColor.rgb *= 0.55;
+  if (abs(vHcN.y) < 0.5) {
+    // (v35.13) Weathering: an irregular dark grime band where the shell
+    // meets the ground/joint below it, plus long vertical rain streaks.
+    // Kills the razor-clean base line and the flat plastic facade look.
+    bool wOnX = abs(vHcN.x) > 0.5;
+    float wu = (wOnX ? vHcL.z : vHcL.x) + (wOnX ? vHcS.z : vHcS.x) * 0.5;
+    float gr = hcH21(vec2(floor(wu / 47.0), hcRnd * 53.0));
+    float baseAO = smoothstep(0.0, 60.0 + 90.0 * gr, vHcL.y);
+    float streak = 0.86 + 0.26 * hcH21(vec2(floor(wu / 13.0), hcRnd * 17.0));
+    diffuseColor.rgb *= mix(0.32, 1.0, baseAO) * streak;
+  }
   if (hcMode > 0.5 && abs(vHcN.y) < 0.5) {
     bool onX = abs(vHcN.x) > 0.5;
     float su = onX ? vHcS.z : vHcS.x;
@@ -18373,6 +18399,9 @@ function _hcTowerMat() {
         float fc = dot(vHcN, vec3(2.0, 3.0, 5.0));
         float h = hcH21(cell + vec2(fc * 17.0, hcRnd * 337.0));
         float lit = step(h, 0.30 + 0.38 * fract(hcRnd * 7.77));
+        // (v35.13) whole-floor clustering: ~1 in 4 floors goes dark as a
+        // band — real towers light by tenancy, not per-window dice.
+        lit *= step(0.24, hcH21(vec2(cell.y, hcRnd * 23.0)));
         float fl = step(0.93, hcH21(cell + vec2(fc, floor(uHcT * (0.4 + fract(hcRnd * 3.1) * 0.8)))));
         lit = clamp(lit + fl - 2.0 * fl * lit, 0.0, 1.0);
         diffuseColor.rgb = mix(vec3(0.018, 0.026, 0.040), vec3(0.045, 0.06, 0.09), step(1.5, hcMode))
@@ -19488,8 +19517,9 @@ function _wxMakeBow() {
   return bow;
 }
 
+const _WX_PROXY_N = 104;   // (v35.13) 88 -> 104: keeps cell size ~same as the wider window
 function _wxBuildTerrProxy() {
-  const EXT = 4200, N = 88;
+  const EXT = _WX_SHADOW_EXT, N = _WX_PROXY_N;
   const geo = new THREE.PlaneGeometry(EXT * 2, EXT * 2, N, N);
   geo.rotateX(-Math.PI / 2);
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
@@ -19503,20 +19533,22 @@ function _wxUpdateTerrProxy() {
   const mesh = _WX.terrProxy;
   if (!mesh || !player || !player.position) return;
   const p = player.position;
-  const dx = p.x - _WX.proxyAt.x, dz = p.z - _WX.proxyAt.z;
-  if (dx * dx + dz * dz < 120 * 120) return;
+  const cell = (2 * _WX_SHADOW_EXT) / _WX_PROXY_N;
+  const sx = Math.round(p.x / cell) * cell, sz = Math.round(p.z / cell) * cell;
+  const dx = sx - _WX.proxyAt.x, dz = sz - _WX.proxyAt.z;
+  if (dx * dx + dz * dz < 1) return;
   const T = game.sandwichTerrain;
   if (!T || !T.ON || typeof _stGroundYCarved !== 'function') return;
-  _WX.proxyAt.x = p.x; _WX.proxyAt.z = p.z;
+  _WX.proxyAt.x = sx; _WX.proxyAt.z = sz;
   const pos = mesh.geometry.getAttribute('position');
   for (let i = 0; i < pos.count; i++) {
-    const wx = p.x + pos.getX(i), wz = p.z + pos.getZ(i);
+    const wx = sx + pos.getX(i), wz = sz + pos.getZ(i);
     let h = -800;
     try { h = _stGroundYCarved(wx, wz, T); } catch (_) {}
     pos.setY(i, h - 6);
   }
   pos.needsUpdate = true;
-  mesh.position.set(p.x, 0, p.z);
+  mesh.position.set(sx, 0, sz);
   mesh.geometry.computeBoundingSphere();
 }
 
@@ -19559,6 +19591,7 @@ function _wxMakeDayEnv() {
   } catch (_) { return null; }
 }
 
+const _WX_SHADOW_EXT = 6800;
 function _wxShadowsOn() {
   if (!_wxFull() || (typeof isXRPresenting === 'function' && isXRPresenting())) return false;
   try {
@@ -19569,10 +19602,10 @@ function _wxShadowsOn() {
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.set(2048, 2048);
     const sc = dirLight.shadow.camera;
-    sc.left = -4200; sc.right = 4200; sc.top = 4200; sc.bottom = -4200;
+    sc.left = -_WX_SHADOW_EXT; sc.right = _WX_SHADOW_EXT; sc.top = _WX_SHADOW_EXT; sc.bottom = -_WX_SHADOW_EXT;
     sc.near = 500; sc.far = 16000;
     dirLight.shadow.bias = -0.0006;
-    dirLight.shadow.normalBias = 3.0;
+    dirLight.shadow.normalBias = 4.8;
     sc.updateProjectionMatrix();
     if (!dirLight.target.parent) scene.add(dirLight.target);
     sc.layers.enable(7);
@@ -19667,8 +19700,19 @@ function _wxFrame(dt) {
   if (_WX.shadowsOn && player && player.position) {
     _wxUpdateTerrProxy();
     const p = player.position;
-    dirLight.position.set(p.x + sd.x * 9000, p.y + sd.y * 9000, p.z + sd.z * 9000);
-    dirLight.target.position.set(p.x, p.y, p.z);
+    if (!_WX.snapR) {
+      _WX.snapR = new THREE.Vector3().crossVectors(sd, new THREE.Vector3(0, 1, 0)).normalize();
+      _WX.snapU = new THREE.Vector3().crossVectors(_WX.snapR, sd).normalize();
+    }
+    const texel = (2 * _WX_SHADOW_EXT) / 2048;
+    const r = _WX.snapR, u = _WX.snapU;
+    const pr = p.x * r.x + p.y * r.y + p.z * r.z;
+    const pu = p.x * u.x + p.y * u.y + p.z * u.z;
+    const dr = pr - Math.round(pr / texel) * texel;
+    const du = pu - Math.round(pu / texel) * texel;
+    const tx = p.x - r.x * dr - u.x * du, ty = p.y - r.y * dr - u.y * du, tz = p.z - r.z * dr - u.z * du;
+    dirLight.position.set(tx + sd.x * 9000, ty + sd.y * 9000, tz + sd.z * 9000);
+    dirLight.target.position.set(tx, ty, tz);
     dirLight.target.updateMatrixWorld();
   }
 }
@@ -19883,7 +19927,7 @@ function _clipBuild() {
     const spacing = _CLIP_M0 * Math.pow(2, k);
     const mat = _clipMat();
     if (mat._clipSpacingU) mat._clipSpacingU.value = spacing;   
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k);   
+    mat.polygonOffset = true; mat.polygonOffsetFactor = -2.0; mat.polygonOffsetUnits = -3 * (_CLIP_LEVELS - k);
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);

@@ -1,6 +1,6 @@
 # `lss.map.md` — architecture & navigation map for `index.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v35.12**).
+> Companion map to the single-file WebGL game `index.html` (build **v35.13**).
 > The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
 
 ## How to use this file
@@ -192,6 +192,7 @@ Camera + renderer creation + the *entire* WebXR/VR subsystem: dolly/controllers,
 - **Symbols:** `_swBuildGrass`/`_swRemoveGrass`, `_swGenTree`, `_swGenMushroom`, `_swForestAt`, `_hzZoneForFoliage`, `_hzFungusAt`, `_swFoliageMat`, `_swBuildTrees`, `_swBuildShell`, `_swDisposeChunk`, `_swApplyAtmosphere`
 - **⚠** Grass off by default (perf); `getVRLevelGridRes` budgets foliage.
 - **(v35.12) Zone foliage:** `_swBuildTrees` is hub-zone-aware via `_hzZoneForFoliage` (same radial+angular math as `_hubZoneTick`): snow sector → snow-dusted tree set (white canopy, cold bark, climbs 0.16 past the snowLine, 0.65× density); crystalcave/rocky sectors → `_swGenMushroom` bioluminescent mushrooms (blue emissive `_swShroomMatGet`), clustered on `_hzFungusAt` (JS port of the FS fungus noise). **Perf guard:** ONE mushroom variant per chunk + emit skips clusters <3 instances — per-variant buckets were emitting hundreds of 1-instance InstancedMeshes (extra draws on the GPU-bound hub). Geometry cache `_swTreeGeos` is now `{std, snow, shroom}` sets.
+- **⚠ (v35.13) Zone veg is BUILD-time, not fade-time:** `_hubZoneTick`'s VEG block no longer multiplies the fade distances by (1−zs) — that collapsed the foliage draw range to ~100u deep in zones ("trees load in too close"). Instead: `_swBuildGrass` skips deep-zone samples entirely (mossy grass = heartland flora), and stock trees in UNTHEMED sectors (volcanic/goldmine/brokensim) thin via `dens*=(1−zs*0.85)` at build. Shader fades stay full-range everywhere — don't reintroduce the veg multiplier.
 
 #### Pillar-karst field (The Colonnade terrain style) — `~L17330`
 **Jump:** `function _stPillarAt` · `function _stGroundYCarvedBase` (the pillar-aware wrappers keep the old `_stGroundYCarved`/`_stCeilYCarved` names)
@@ -234,13 +235,15 @@ GPUComputationRenderer flocking — bird/boid FBO passes + fish schools.
 #### Hub city procedural generation — `~L20356`
 **Jump:** `const HUB_CITY = {` · `function _hubCityBuild` (~L20408)
 Instanced towers/dishes/holos, air-traffic ships (OBB avoidance), collision + raycast.
-- **Symbols:** `HUB_CITY`, `_hubCityBuild`, `_hcInstMesh`, `_hcTrafficInit`/`_hcTrafficUpdate`, `_hubCityCollide`, `_hubCityRayHit`, `_hubCityFrame`
+- **Symbols:** `HUB_CITY`, `_hubCityBuild`, `_hcInstMesh`, `_hcTowerMat`, `_hcTrafficInit`/`_hcTrafficUpdate`, `_hubCityCollide`, `_hubCityRayHit`, `_hubCityFrame`
+- **(v35.13) Grounding pass:** `_hcTowerMat` facades get an irregular ground-contact grime band (`baseAO` over the bottom 60–150u, per-column noise) + vertical weather streaks + whole-floor window-lit clustering (~1 in 4 floors dark); the ground ALBEDO canvas gets multiply-blended contact-shadow pools under every grounded solid (skips `y0 > padY+60` skybridges). All three target the "buildings look fake / base too clean" read.
 
 #### Weather system — `~L21583`
 **Jump:** `const _WX = {` · `function _wxInit` (~L21922)
 Sky dome, sun, volumetric clouds, rainbow, day-lighting env, toggleable shadows.
-- **Symbols:** `_WX`, `_wxMakeDome`, `_wxMakeSun`, `_wxMakeClouds`, `_wxMakeBow`, `_wxShadowsOn`/`_wxShadowsOff`, `_wxInit`/`_wxFrame`
+- **Symbols:** `_WX`, `_WX_SHADOW_EXT`, `_wxMakeDome`, `_wxMakeSun`, `_wxMakeClouds`, `_wxMakeBow`, `_wxShadowsOn`/`_wxShadowsOff`, `_wxBuildTerrProxy`/`_wxUpdateTerrProxy`, `_wxInit`/`_wxFrame`
 - **⚠** The sky dome's below-horizon blend + cloud edge falloff were tuned in v34.60–62; shadows here drive the 2048² shadow map.
+- **⚠ (v35.13) Shadow stability invariants:** (1) the ortho window is TEXEL-SNAPPED in `_wxFrame` — the target moves in whole shadow-texel steps in the light's plane (raw per-frame follow made every shadow edge shimmer = "flickering corners"); (2) the terrain shadow proxy re-bakes on its OWN fixed world lattice (`(2*_WX_SHADOW_EXT)/_WX_PROXY_N` cells) — recentering on raw player position made the whole mountain-shadow field morph every ~120u of travel; (3) window half-extent lives in `_WX_SHADOW_EXT` (6800, was 4200 — shadows "loaded in too close") and normalBias (4.8) scales with texel size. Keep all three coupled when retuning.
 
 ### ═══ PART 11 — Ship models & FX (~23094–24484) ═══
 

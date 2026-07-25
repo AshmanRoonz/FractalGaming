@@ -3219,7 +3219,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.12';
+const LSS_BUILD = '35.13';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 try {
@@ -18076,9 +18076,12 @@ function _swBuildGrass(x0,z0,T){
   const eps=6, SR=_swU.uSlopeRock.value, SG=_swU.uSlopeGrass.value;   
   const CR=game.sandwichGrassClump||34;   
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
-    const ax=x0+(i+Math.random())*step, az=z0+(j+Math.random())*step, ay=_stGroundYGrid(ax,az,T);   
+    const ax=x0+(i+Math.random())*step, az=z0+(j+Math.random())*step, ay=_stGroundYGrid(ax,az,T);
     if(T.HUB && _hubCityExcludes(ax,az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax,az))) continue;
-    if(T.WL!=null && ay<T.WL+4) continue;        
+    // (v35.13) Mossy grass is heartland flora — deep zones (snow, crystal,
+    // volcanic...) grow their own ground cover instead of green blades.
+    if(T.HUB && _hzZoneForFoliage(ax,az)) continue;
+    if(T.WL!=null && ay<T.WL+4) continue;
     const t=(ay-(T.YMID-T.AMP*0.5))/(T.AMP*1.15);
     if(t>(T.snowLine||0.7)) continue;          
     
@@ -18366,6 +18369,10 @@ function _swBuildTrees(x0,z0,T){
       const forest=_swForestAt(x,z);
       dens=((forest>0.28)?(0.16+forest*(_full?0.36:0.24)):0.012)*_td;
       if(kind==='snow') dens*=0.65;   // sparser treeline
+      // (v35.13) Unthemed deep sectors (volcanic / goldmine / brokensim):
+      // stock green trees thin out at BUILD time (replaces the removed
+      // shader-fade veg collapse, which made all zone foliage pop at ~100u).
+      else if(zn) dens*=Math.max(0.06, 1-zn.zs*0.85);
     }
     if(Math.random() > dens) continue;
     const set=buckets[kind];
@@ -18586,12 +18593,16 @@ function _hubZoneTick(px, pz, dt) {
     try { _skyHazeU.uHazeColor.value.copy(_hzSky); } catch (_) {}
   }
   if (Z.VEG) {
-    const veg = Math.max(0.03, 1 - zs);
-    _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58 * veg;
-    _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92 * veg;
+    // (v35.13) The old veg multiplier collapsed the fade range to ~3% deep
+    // in a zone — snow trees / mushrooms (v35.12) only materialized ~100u
+    // from the ship ("trees load in too close"). Zones now manage their own
+    // foliage at BUILD time (grass skips deep zones, stock trees thin out in
+    // unthemed sectors), so the shader fade keeps its full range everywhere.
+    _swU.uFadeA.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.58;
+    _swU.uFadeB.value = _SW_GRASS_VIEW * _SW_CHUNK * 0.92;
     const tv = (typeof _swHubView === 'function') ? _swHubView() : _SW_TREE_VIEW;
-    _swU.uTreeFadeA.value = tv * _SW_CHUNK * 0.62 * veg;
-    _swU.uTreeFadeB.value = tv * _SW_CHUNK * 0.94 * veg;
+    _swU.uTreeFadeA.value = tv * _SW_CHUNK * 0.62;
+    _swU.uTreeFadeB.value = tv * _SW_CHUNK * 0.94;
   }
   // The hub sky is the WEATHER dome (the equirect dome is hidden while
   // game.hubWeather is on) — morph its gradient endpoints too. Its uHaze
@@ -21791,6 +21802,23 @@ function _hubCityBuild(g) {
     a2.strokeStyle = 'rgba(74,60,38,0.8)'; a2.lineWidth = 2.0;
     a2.beginPath(); a2.arc(toPx(px), toPz(pz), rr2, 0, 6.283); a2.stroke();
   }
+  // (v35.13) Contact-shadow pools: a soft dark AO gradient on the ground
+  // around every grounded solid's footprint. The pad used to meet each
+  // tower with a razor-clean line ("too clean") — this visually seats them.
+  a2.globalCompositeOperation = 'multiply';
+  for (const o of solids) {
+    if (o.y0 > PY + 60) continue;   // skybridges / raised decks don't pool
+    const bx = toPx(o.cx), bz = toPz(o.cz);
+    const br = (Math.max(o.hw, o.hd) * 1.45) / (2 * EXT) * CS;
+    if (br < 1.2) continue;
+    const gAO = a2.createRadialGradient(bx, bz, br * 0.35, bx, bz, br);
+    gAO.addColorStop(0, 'rgb(72,72,80)');
+    gAO.addColorStop(0.7, 'rgb(152,152,158)');
+    gAO.addColorStop(1, 'rgb(255,255,255)');
+    a2.fillStyle = gAO;
+    a2.beginPath(); a2.arc(bx, bz, br, 0, 6.283); a2.fill();
+  }
+  a2.globalCompositeOperation = 'source-over';
   e2.fillStyle = '#000'; e2.fillRect(0, 0, CS, CS);
 
   // ── collision spatial hash ──
@@ -21912,6 +21940,17 @@ function _hcTowerMat() {
 {
   float hcMode = vHcP.x, hcRnd = vHcP.y;
   if (vHcN.y > 0.5) diffuseColor.rgb *= 0.55;
+  if (abs(vHcN.y) < 0.5) {
+    // (v35.13) Weathering: an irregular dark grime band where the shell
+    // meets the ground/joint below it, plus long vertical rain streaks.
+    // Kills the razor-clean base line and the flat plastic facade look.
+    bool wOnX = abs(vHcN.x) > 0.5;
+    float wu = (wOnX ? vHcL.z : vHcL.x) + (wOnX ? vHcS.z : vHcS.x) * 0.5;
+    float gr = hcH21(vec2(floor(wu / 47.0), hcRnd * 53.0));
+    float baseAO = smoothstep(0.0, 60.0 + 90.0 * gr, vHcL.y);
+    float streak = 0.86 + 0.26 * hcH21(vec2(floor(wu / 13.0), hcRnd * 17.0));
+    diffuseColor.rgb *= mix(0.32, 1.0, baseAO) * streak;
+  }
   if (hcMode > 0.5 && abs(vHcN.y) < 0.5) {
     bool onX = abs(vHcN.x) > 0.5;
     float su = onX ? vHcS.z : vHcS.x;
@@ -21927,6 +21966,9 @@ function _hcTowerMat() {
         float fc = dot(vHcN, vec3(2.0, 3.0, 5.0));
         float h = hcH21(cell + vec2(fc * 17.0, hcRnd * 337.0));
         float lit = step(h, 0.30 + 0.38 * fract(hcRnd * 7.77));
+        // (v35.13) whole-floor clustering: ~1 in 4 floors goes dark as a
+        // band — real towers light by tenancy, not per-window dice.
+        lit *= step(0.24, hcH21(vec2(cell.y, hcRnd * 23.0)));
         float fl = step(0.93, hcH21(cell + vec2(fc, floor(uHcT * (0.4 + fract(hcRnd * 3.1) * 0.8)))));
         lit = clamp(lit + fl - 2.0 * fl * lit, 0.0, 1.0);
         diffuseColor.rgb = mix(vec3(0.018, 0.026, 0.040), vec3(0.045, 0.06, 0.09), step(1.5, hcMode))
@@ -23204,8 +23246,9 @@ function _wxMakeBow() {
 // heightfield mesh on LAYER 7, which only the sun's shadow camera has
 // enabled — invisible to every view camera, but it casts true mountain
 // shadows onto the moss. Rebaked when the player travels ~120u.
+const _WX_PROXY_N = 104;   // (v35.13) 88 -> 104: keeps cell size ~same as the wider window
 function _wxBuildTerrProxy() {
-  const EXT = 4200, N = 88;
+  const EXT = _WX_SHADOW_EXT, N = _WX_PROXY_N;
   const geo = new THREE.PlaneGeometry(EXT * 2, EXT * 2, N, N);
   geo.rotateX(-Math.PI / 2);
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
@@ -23219,20 +23262,27 @@ function _wxUpdateTerrProxy() {
   const mesh = _WX.terrProxy;
   if (!mesh || !player || !player.position) return;
   const p = player.position;
-  const dx = p.x - _WX.proxyAt.x, dz = p.z - _WX.proxyAt.z;
-  if (dx * dx + dz * dz < 120 * 120) return;
+  // (v35.13) Snap the proxy to its OWN cell lattice. It used to recenter on
+  // the raw player position, so every ~120u rebake resampled the heightfield
+  // at a shifted phase — the whole mountain-shadow field subtly MORPHED each
+  // rebake (travel flicker). On a fixed world lattice, overlapping cells
+  // sample identical points every time; rebakes only reveal new border rows.
+  const cell = (2 * _WX_SHADOW_EXT) / _WX_PROXY_N;
+  const sx = Math.round(p.x / cell) * cell, sz = Math.round(p.z / cell) * cell;
+  const dx = sx - _WX.proxyAt.x, dz = sz - _WX.proxyAt.z;
+  if (dx * dx + dz * dz < 1) return;
   const T = game.sandwichTerrain;
   if (!T || !T.ON || typeof _stGroundYCarved !== 'function') return;
-  _WX.proxyAt.x = p.x; _WX.proxyAt.z = p.z;
+  _WX.proxyAt.x = sx; _WX.proxyAt.z = sz;
   const pos = mesh.geometry.getAttribute('position');
   for (let i = 0; i < pos.count; i++) {
-    const wx = p.x + pos.getX(i), wz = p.z + pos.getZ(i);
+    const wx = sx + pos.getX(i), wz = sz + pos.getZ(i);
     let h = -800;
     try { h = _stGroundYCarved(wx, wz, T); } catch (_) {}
     pos.setY(i, h - 6);
   }
   pos.needsUpdate = true;
-  mesh.position.set(p.x, 0, p.z);
+  mesh.position.set(sx, 0, sz);
   mesh.geometry.computeBoundingSphere();
 }
 
@@ -23281,6 +23331,12 @@ function _wxMakeDayEnv() {
 }
 
 // ── shadow rig : dirLight becomes the sun, ortho window follows the player ──
+// (v35.13) Window half-extent 4200 -> 6800 : building/mountain shadows used
+// to pop into existence only ~4km out ("shadows load in too close"). The map
+// stays 2048² (perf-locked), so texels grow 4.1u -> 6.6u — normalBias scales
+// up with them to keep acne away. One shared const so the texel-snap in
+// _wxFrame and the terrain proxy stay in sync with the window.
+const _WX_SHADOW_EXT = 6800;
 function _wxShadowsOn() {
   if (!_wxFull() || (typeof isXRPresenting === 'function' && isXRPresenting())) return false;
   try {
@@ -23291,10 +23347,10 @@ function _wxShadowsOn() {
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.set(2048, 2048);
     const sc = dirLight.shadow.camera;
-    sc.left = -4200; sc.right = 4200; sc.top = 4200; sc.bottom = -4200;
+    sc.left = -_WX_SHADOW_EXT; sc.right = _WX_SHADOW_EXT; sc.top = _WX_SHADOW_EXT; sc.bottom = -_WX_SHADOW_EXT;
     sc.near = 500; sc.far = 16000;
     dirLight.shadow.bias = -0.0006;
-    dirLight.shadow.normalBias = 3.0;
+    dirLight.shadow.normalBias = 4.8;
     sc.updateProjectionMatrix();
     if (!dirLight.target.parent) scene.add(dirLight.target);
     sc.layers.enable(7);
@@ -23393,12 +23449,28 @@ function _wxFrame(dt) {
     _WX.dome.material.uniforms.uHaze.value.copy(scene.fog.color);
     if (scene.fog.density) cu.uFogD.value = scene.fog.density * 1.35;
   }
-  // shadow window follows the player, light direction stays constant
+  // shadow window follows the player, light direction stays constant.
+  // (v35.13) TEXEL-SNAPPED: the window used to slide with the raw player
+  // position every frame, so every shadow edge (building corners, ridges)
+  // shimmered/flickered as the 2048-map texels crawled. Snap the target to
+  // whole shadow-texel steps in the light's own plane — the window now moves
+  // in texel quanta and shadow edges hold still while you fly.
   if (_WX.shadowsOn && player && player.position) {
     _wxUpdateTerrProxy();
     const p = player.position;
-    dirLight.position.set(p.x + sd.x * 9000, p.y + sd.y * 9000, p.z + sd.z * 9000);
-    dirLight.target.position.set(p.x, p.y, p.z);
+    if (!_WX.snapR) {
+      _WX.snapR = new THREE.Vector3().crossVectors(sd, new THREE.Vector3(0, 1, 0)).normalize();
+      _WX.snapU = new THREE.Vector3().crossVectors(_WX.snapR, sd).normalize();
+    }
+    const texel = (2 * _WX_SHADOW_EXT) / 2048;
+    const r = _WX.snapR, u = _WX.snapU;
+    const pr = p.x * r.x + p.y * r.y + p.z * r.z;
+    const pu = p.x * u.x + p.y * u.y + p.z * u.z;
+    const dr = pr - Math.round(pr / texel) * texel;
+    const du = pu - Math.round(pu / texel) * texel;
+    const tx = p.x - r.x * dr - u.x * du, ty = p.y - r.y * dr - u.y * du, tz = p.z - r.z * dr - u.z * du;
+    dirLight.position.set(tx + sd.x * 9000, ty + sd.y * 9000, tz + sd.z * 9000);
+    dirLight.target.position.set(tx, ty, tz);
     dirLight.target.updateMatrixWorld();
   }
 }
@@ -23650,7 +23722,10 @@ function _clipBuild() {
     const spacing = _CLIP_M0 * Math.pow(2, k);
     const mat = _clipMat();
     if (mat._clipSpacingU) mat._clipSpacingU.value = spacing;   
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k);   
+    // (v35.13) Stronger separation: finer levels win the depth tie decisively
+    // in the 4-cell ring-overlap band (post-v35.11 the two surfaces there are
+    // COPLANAR by design — weak offsets let them shimmer at distance).
+    mat.polygonOffset = true; mat.polygonOffsetFactor = -2.0; mat.polygonOffsetUnits = -3 * (_CLIP_LEVELS - k);
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);
