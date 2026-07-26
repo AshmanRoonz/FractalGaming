@@ -51,8 +51,8 @@
   .fps{position:fixed;bottom:calc(6px + env(safe-area-inset-bottom));right:10px;color:#456;font-size:10px;pointer-events:none}
   /* ---- customization menu ---- */
   #menu{position:fixed;inset:0;display:none;place-items:center;background:rgba(3,6,10,.72);z-index:7;overflow:auto;padding:14px}
-  #menu .panel{width:min(430px,94vw);max-height:calc(100vh - 40px);overflow:auto;background:rgba(9,15,22,.96);
-    border:1px solid rgba(90,180,150,.35);border-radius:14px;padding:16px 18px;backdrop-filter:blur(8px)}
+  #menu .panel{width:min(430px,94vw);max-height:calc(100vh - 40px);overflow:auto;background:rgba(7,12,18,.97);
+    border:1px solid rgba(90,180,150,.35);border-radius:14px;padding:16px 18px}
   #menu h2{margin:0;font-size:15px;color:#7ff0cf;letter-spacing:3px}
   #menu h3{margin:16px 0 6px;font-size:10.5px;color:#69859a;letter-spacing:2px}
   #menu .row{display:flex;align-items:center;gap:8px;margin:5px 0}
@@ -105,8 +105,8 @@
     <b>hold &amp; drag</b> — slosh through the goop<br>
     <b>move slowly</b> — feed on it · grow<br>
     <b>pinch / wheel</b> — zoom in &amp; out<br>
-    <b>avoid clots</b> — until you can pop them<br>
-    <b>double-tap</b> — pulse burst<br>
+    <b>microbes bite</b> — double-tap: pulse pops them<br>
+    <b>ride the streams</b> — pop clots for parts<br>
     <b>🧬</b> — customize · save · trade gooplings
   </div><br>
   <div id="roomrow"><input id="roomcode" placeholder="room code" maxlength="12" autocomplete="off" spellcheck="false"><button id="mkroom">✦ new</button></div>
@@ -121,6 +121,7 @@
     <div id="menuTopR">
       <div class="row"><label>name</label><input id="g_name" type="text" maxlength="14" style="flex:1"></div>
       <div class="row"><label>lineage</label><span id="traitwords" style="flex:1;color:#8fd;font-size:10.5px;letter-spacing:1px"></span><button id="reroll" title="reroll lineage">🎲</button></div>
+      <div class="row"><label>parts</label><span id="partlist" style="flex:1;color:#9bd;font-size:10.5px"></span></div>
       <div class="row"><label>hue</label><input id="g_hue" type="range" min="0" max="359" step="1"><span class="v" id="g_hue_v"></span></div>
       <div class="row"><label>eyes</label><div class="seg" id="g_eyes">
         <button data-n="1">1</button><button data-n="2">2</button><button data-n="3">3</button></div>
@@ -238,6 +239,8 @@ function growBiome(seed){
   g.P.c[boost]=R.f(1.1,2.0);
   g.span=R.f(.55,.95); g.off=R.nx();
   g.flowStr=R.f(30,75); g.flowSc=R.f(1.3,2.4);                     // ambient current
+  g.streamStr=R.i(4)?R.f(210,340):0;                               // plasma streams (3 of 4 biomes)
+  g.streamW=R.f(.035,.06); g.streamSc=1/R.f(2600,4200); g.streamDir=R.i(2)?1:-1;
   g.name=R.pick(SYL_A)+' '+R.pick(SYL_B);
   // derived: ship color = brightest palette sample; danger = its complement
   let best=[.5,.8,.7],bl=0;
@@ -295,11 +298,14 @@ function deriveTraits(d,st){
   const mag=[R.f(.10,.20),R.f(.06,.14),0,0,-R.f(.04,.08),-R.f(.05,.10)];
   const s=.4+.6*Math.min(1,(st||0)/5), m={speed:1,hunger:1,reach:1,pull:1,pulse:1,guts:1};
   pool.forEach((k,i)=>m[k]=Math.max(.8,Math.min(1.25,1+(mag[i]||0)*s)));
-  t.m=m; t.words=[TRAIT_WORD[pool[0]],TRAIT_WORD[pool[1]]];
+  t.m=m; t.sail=1; t.words=[TRAIT_WORD[pool[0]],TRAIT_WORD[pool[1]]];
   return t;
 }
 let TR=null; const DEFAULT_TR=deriveTraits({seed:1},5);
-function refreshTR(){ TR=deriveTraits(dna,stage); }
+function refreshTR(){ TR=deriveTraits(dna,stage);
+  if(typeof parts!=='undefined') for(const p of parts){ const def=PARTS[p.id]; if(!def) continue;
+    if(def.g==='sail') TR.sail*=1+def.v;
+    else TR.m[def.g]=Math.min(1.6,TR.m[def.g]*(1+def.v)); } }
 function dnaCode(d){ return 'GPL1.'+btoa(JSON.stringify(d)); }
 function dnaFromCode(s){ try{ s=String(s).trim(); if(!s.startsWith('GPL1.')) return null;
   return cleanDNA(JSON.parse(atob(s.slice(5)))); }catch(_){ return null; } }
@@ -511,15 +517,32 @@ function glowCache(rgb){ const k=rgb.map(v=>Math.round(v*40)).join(',');
   return _glowCache.get(k); }
 
 // ---------- ambient flow (world-anchored curl-noise window that follows you) -
-const FG={cell:130,c:26,r:18,ox:0,oy:0,A:null,B:null,per:4.5,ph:-1,t0:0};
+const FG={cell:130,c:26,r:18,ox:0,oy:0,A:null,B:null,MA:null,per:4.5,ph:-1,t0:0};
 function flowInit(){ FG.A=new Float32Array(FG.c*FG.r*2); FG.B=new Float32Array(FG.c*FG.r*2);
+  FG.MA=new Float32Array(FG.c*FG.r*3);              // stream mask + direction (for visuals)
   FG.t0=nowS; FG.ph=-1; FG.ox=1e9; flowTick(); }
-function flowGen(buf,ph){ const g=gen,e=.22,s=g.seed^0x51ab,fsc=g.flowSc/650;
+function flowGen(buf,ph){ const g=gen,e=.22,s=g.seed^0x51ab,fsc=g.flowSc/650,isA=buf===FG.A;
   for(let j=0;j<FG.r;j++) for(let i=0;i<FG.c;i++){
     const x=(FG.ox+i*FG.cell)*fsc, y=(FG.oy+j*FG.cell)*fsc, tt=ph*.6;
     const gx=fbm(x+e,y+tt,s,3)-fbm(x-e,y+tt,s,3), gy=fbm(x,y+e+tt,s,3)-fbm(x,y-e+tt,s,3);
     const l=Math.hypot(gx,gy)||1, o=(j*FG.c+i)*2;
-    buf[o]=-gy/l*g.flowStr; buf[o+1]=gx/l*g.flowStr; } }
+    let vx=-gy/l*g.flowStr, vy=gx/l*g.flowStr, m=0,tdx=0,tdy=0;
+    // plasma streams: static rivers along iso-lines of a slow noise field —
+    // strong tangential push, the MicroBot bloodstream feel
+    if(g.streamStr){
+      const wx=FG.ox+i*FG.cell, wy=FG.oy+j*FG.cell, sk=s^0x57e4, sscl=g.streamSc;
+      const S0=fbm(wx*sscl,wy*sscl,sk,3), b=Math.abs(S0-.5);
+      if(b<g.streamW*2){
+        const gx2=fbm((wx+260)*sscl,wy*sscl,sk,3)-fbm((wx-260)*sscl,wy*sscl,sk,3);
+        const gy2=fbm(wx*sscl,(wy+260)*sscl,sk,3)-fbm(wx*sscl,(wy-260)*sscl,sk,3);
+        const gl=Math.hypot(gx2,gy2)||1e-6;
+        m=Math.max(0,1-b/g.streamW); m=m*m*(3-2*m);
+        tdx=-gy2/gl*g.streamDir; tdy=gx2/gl*g.streamDir;
+        vx+=tdx*m*g.streamStr; vy+=tdy*m*g.streamStr;
+      }
+    }
+    buf[o]=vx; buf[o+1]=vy;
+    if(isA){ const o3=(j*FG.c+i)*3; FG.MA[o3]=m; FG.MA[o3+1]=tdx; FG.MA[o3+2]=tdy; } } }
 function flowTick(){
   const ph=Math.floor((nowS-FG.t0)/FG.per);
   const nx=Math.floor((cam.x-FG.c*FG.cell/2)/FG.cell)*FG.cell;
@@ -560,9 +583,85 @@ function stageHud(){ let s=''; for(let i=0;i<5;i++) s+=i<stage?'◉ ':'○ ';
 let HZ=[];
 function placeHaz(h){ const a=Math.random()*6.2832, r=520+Math.random()*900;
   h.x=ship.x+Math.cos(a)*r; h.y=ship.y+Math.sin(a)*r; h.vx=h.vy=0; }
-function makeHazards(){ HZ=[]; const n=Math.min(8,2+biomeIdx);
+function makeHazards(){ HZ=[]; MB=[]; PU=[]; const n=Math.min(8,2+biomeIdx);
   for(let k=0;k<n;k++){ const h={x:0,y:0,vx:0,vy:0,r:22+Math.random()*14,ph:Math.random()*7,dead:-9}; placeHaz(h); HZ.push(h); }
   hazGraceT=nowS+2.5; }
+
+// ---------- MicroBot tributes: attachable parts + microbe swarms ------------
+// parts drop from popped clots/splitters and SOCKET where you grab them —
+// visible on the membrane, each nudging how this goopling handles
+const PARTS={ flag:{n:'FLAGELLUM',d:'swims faster',g:'speed',v:.15},
+  lens:{n:'LENS EYE',d:'longer reach',g:'reach',v:.13},
+  mag:{n:'MAGNET NODULE',d:'stronger vortex pull',g:'pull',v:.18},
+  plate:{n:'CHITIN PLATE',d:'tougher membrane',g:'guts',v:.2},
+  barb:{n:'RESONANT BARB',d:'bigger pulse burst',g:'pulse',v:.16},
+  sail:{n:'PLASMA SAIL',d:'streams carry you harder',g:'sail',v:.5} };
+const PART_IDS=Object.keys(PARTS);
+let parts=[];                                        // equipped [{id,ang}] max 3
+let PU=[];                                           // floating part pickups
+function dropPart(x,y){ if(PU.length>5) return;
+  PU.push({x,y,id:PART_IDS[(Math.random()*PART_IDS.length)|0],t0:nowS}); }
+function addPart(id,ang){
+  parts.push({id,ang});
+  if(parts.length>3){ const old=parts.shift(); toast(`${PARTS[old.id].n} sloughed off`); }
+  refreshTR(); save(); netMeta(); sndPart();
+  toast(`<b>${PARTS[id].n}</b> attached — ${PARTS[id].d}`);
+  ringFx(ship.x,ship.y,ship.R,ship.R*2.2,myCol(),.6);
+  try{navigator.vibrate&&navigator.vibrate(25);}catch(_){}}
+function sndPart(){ [0,7,12].forEach((s,i)=>setTimeout(()=>beep(420*Math.pow(2,s/12),430*Math.pow(2,s/12),.14,'triangle',.16),i*70)); }
+// microbes: corrupted little critters that school toward you and nibble;
+// pulse pops swarmers, splitters burst into more — spikes shred on contact
+let MB=[], mbAcc=0, nibbleT=-9;
+function spawnMb(type){ const a=Math.random()*6.2832, r=750+Math.random()*650;
+  MB.push({x:ship.x+Math.cos(a)*r, y:ship.y+Math.sin(a)*r, vx:0,vy:0, type,
+    r:type?21+Math.random()*6:8+Math.random()*4, ph:Math.random()*7, dartT:nowS+1+Math.random()*3}); }
+function spawnFood(x,y,n){ const cx=Math.floor(x/CH),cy=Math.floor(y/CH);
+  for(let k=0;k<n&&alive<N_CAP-60;k++){ const a=Math.random()*6.2832,r=6+Math.random()*30;
+    const o=(alive++)*8, px=x+Math.cos(a)*r, py=y+Math.sin(a)*r;
+    P[o]=px;P[o+1]=py;P[o+2]=Math.cos(a)*3;P[o+3]=Math.sin(a)*3;P[o+4]=px;P[o+5]=py;P[o+6]=cx;P[o+7]=cy; } }
+function killMb(m,i,splitless){
+  MB.splice(i,1); beep(m.type?540:760,200,.12,'square',.13);
+  spawnFood(m.x,m.y,m.type?10:5);
+  if(m.type&&!splitless){ for(let k=0;k<3;k++){ spawnMb(0); const nm=MB[MB.length-1];
+      nm.x=m.x+Math.cos(k*2.09)*18; nm.y=m.y+Math.sin(k*2.09)*18;
+      nm.vx=Math.cos(k*2.09)*160; nm.vy=Math.sin(k*2.09)*160; } }
+  if(Math.random()<(m.type?.25:.04)) dropPart(m.x,m.y);
+  ringFx(m.x,m.y,4,m.r*3,gen.danger,.4);
+}
+function updateMicrobes(dt){
+  mbAcc+=dt;
+  if(mbAcc>.8){ mbAcc=0;
+    const wantSw=Math.min(14,2+biomeIdx*2), wantSp=biomeIdx>=2?Math.min(4,1+((biomeIdx-2)>>1)):0;
+    let sw=0,sp=0; for(const m of MB) m.type?sp++:sw++;
+    if(sw<wantSw) spawnMb(0); if(sp<wantSp) spawnMb(1); }
+  const spikes=has('spikes'), bloom=has('bloom');
+  for(let i=MB.length-1;i>=0;i--){ const m=MB[i];
+    const dx=ship.x-m.x, dy=ship.y-m.y, d=Math.hypot(dx,dy)||1;
+    if(d>2600){ MB.splice(i,1); continue; }
+    flowAt(m.x,m.y,_fl);
+    let ax=_fl[0]*.5+dx/d*(m.type?95:230), ay=_fl[1]*.5+dy/d*(m.type?95:230);
+    if(!m.type&&nowS>m.dartT){ if(nowS>m.dartT+.35) m.dartT=nowS+2+Math.random()*2.5;
+      else { ax+=dx/d*900; ay+=dy/d*900; } }
+    for(const o of MB){ if(o===m) continue; const sx=m.x-o.x, sy=m.y-o.y, sd2=sx*sx+sy*sy;
+      if(sd2<900&&sd2>0){ const sd=Math.sqrt(sd2); ax+=sx/sd*140; ay+=sy/sd*140; } }
+    m.vx+=(ax+Math.sin(nowS*3+m.ph)*30)*dt; m.vy+=(ay+Math.cos(nowS*2.6+m.ph)*30)*dt;
+    const vm=m.type?75+biomeIdx*6:185+biomeIdx*9, vl=Math.hypot(m.vx,m.vy);
+    if(vl>vm){ m.vx*=vm/vl; m.vy*=vm/vl; }
+    m.x+=m.vx*dt; m.y+=m.vy*dt;
+    if(d<m.r+ship.R*.9){
+      if(bloom&&!m.type){ killMb(m,i); continue; }
+      if(spikes){ killMb(m,i); continue; }            // spikes shred microbes freely
+      mass=Math.max(40,mass-(m.type?9:4.5)*dt*60*(2-TR.m.guts)*.14);
+      nibbleT=nowS;
+      m.vx-=dx/d*260; m.vy-=dy/d*260;                 // bounce off the membrane
+    }
+  }
+  // part pickups: bob, expire, collect at the angle you grab them
+  for(let i=PU.length-1;i>=0;i--){ const u=PU[i];
+    if(nowS-u.t0>45||Math.hypot(u.x-ship.x,u.y-ship.y)>2600){ PU.splice(i,1); continue; }
+    const d=Math.hypot(u.x-ship.x,u.y-ship.y);
+    if(d<ship.R+16){ addPart(u.id, Math.atan2(u.y-ship.y,u.x-ship.x)); PU.splice(i,1); } }
+}
 
 // ---------- fx pools --------------------------------------------------------
 const streaks=[],rings=[];
@@ -599,7 +698,7 @@ function hudProgress(){ const p=Math.min(100,Math.round(sharedEaten()/QUOTA*100)
   if(p!==lastPct){ lastPct=p; document.getElementById('pbar').style.width=p+'%'; } }
 
 // ---------- save: progression + the stable of named gooplings ---------------
-function save(){ try{ localStorage.setItem('goopling_v1',JSON.stringify({seed:masterSeed,biome:biomeIdx,mass,eaten:totalEaten,mute:muted,dna})); }catch(_){} }
+function save(){ try{ localStorage.setItem('goopling_v1',JSON.stringify({seed:masterSeed,biome:biomeIdx,mass,eaten:totalEaten,mute:muted,dna,parts})); }catch(_){} }
 function loadSave(){ try{ return JSON.parse(localStorage.getItem('goopling_v1')||'null'); }catch(_){ return null; } }
 function loadStable(){ try{ const s=JSON.parse(localStorage.getItem('goopling_stable_v1')||'[]');
   return Array.isArray(s)?s.map(cleanDNA):[]; }catch(_){ return []; } }
@@ -656,7 +755,8 @@ function updatePeersHud(){ const el=document.getElementById('peers'), n=NET.peer
   if(!NET.on){ el.style.display='none'; return; }
   el.style.display='block'; el.textContent=`⬡ room ${NET.code} · ${n+1} goopling${n?'s':''} — tap to copy invite`; }
 function netEvt(d){ if(NET.on&&NET.sendEvt) try{ NET.sendEvt(d); }catch(_){} }
-function netMeta(to){ if(NET.on&&NET.sendMeta) try{ NET.sendMeta({dna,jt:NET.joinT},to); }catch(_){} }
+function netMeta(to){ if(NET.on&&NET.sendMeta) try{
+  NET.sendMeta({dna,parts:parts.map(p=>({id:p.id,ang:+(p.ang||0).toFixed(2)})),jt:NET.joinT},to); }catch(_){} }
 const num=(v,lo,hi)=>typeof v==='number'&&isFinite(v)?Math.max(lo,Math.min(hi,v)):lo;
 async function netJoin(code){
   if(NET.on) return true;
@@ -689,6 +789,8 @@ async function netJoin(code){
     onMeta((d,id)=>{ if(!d||typeof d!=='object') return;
       const p=NET.peers.get(id)||{}; p.dna=cleanDNA(d.dna); p.jt=num(d.jt,0,9e15);
       p.tr=deriveTraits(p.dna,5);                    // lineage visuals for rendering them
+      p.parts=Array.isArray(d.parts)?d.parts.slice(0,3)
+        .filter(q=>q&&PARTS[q.id]).map(q=>({id:q.id,ang:num(q.ang,-7,7)})):[];
       NET.peers.set(id,p); });
     onCfg((d,id)=>{ if(!d||typeof d!=='object') return;
       if(num(d.jt,0,9e15)>=NET.joinT) return;      // only an elder's replay counts
@@ -792,6 +894,8 @@ function doPulse(){ if(nowS-pulseT<2.2||phase!=='play') return; pulseT=nowS; snd
     if(d2<PR2){ const d=Math.sqrt(d2)||1,f=(1-d/PR)*PF/d; P[o+2]+=dx*f*.016; P[o+3]+=dy*f*.016; } }
   for(const h of HZ){ const dx=h.x-ship.x,dy=h.y-ship.y,d=Math.hypot(dx,dy)||1;
     if(d<PR){ h.vx+=dx/d*(1-d/PR)*420; h.vy+=dy/d*(1-d/PR)*420; } }
+  for(let i=MB.length-1;i>=0;i--){ const m=MB[i],d=Math.hypot(m.x-ship.x,m.y-ship.y);
+    if(d<PR*.95) killMb(m,i); }                      // the pulse is your weapon vs microbes
   ringFx(ship.x,ship.y,ship.R*.8,PR,myCol(),.55); netEvt({t:'pulse',x:ship.x,y:ship.y});
   try{navigator.vibrate&&navigator.vibrate(15);}catch(_){}}
 
@@ -813,7 +917,9 @@ function update(dt){
   const RT=Rtarget(); ship.R+=(RT-ship.R)*Math.min(1,3*dt);
   const K80=80*TR.m.speed;
   if(ship.tx!=null){ ship.vx+=((ship.tx-ship.x)*K80-ship.vx*11)*dt; ship.vy+=((ship.ty-ship.y)*K80-ship.vy*11)*dt; }
-  else{ flowAt(ship.x,ship.y,_fl); ship.vx+=(_fl[0]*.4-ship.vx*1.4)*dt; ship.vy+=(_fl[1]*.4-ship.vy*1.4)*dt; }
+  else{ ship.vx-=ship.vx*1.4*dt; ship.vy-=ship.vy*1.4*dt; }
+  // the current carries you always (plasma streams sweep even while steering)
+  flowAt(ship.x,ship.y,_fl); ship.vx+=_fl[0]*.9*TR.sail*dt; ship.vy+=_fl[1]*.9*TR.sail*dt;
   ship.x+=ship.vx*dt; ship.y+=ship.vy*dt;                          // no walls — the goop goes on forever
   const spd=Math.hypot(ship.vx,ship.vy);
   if(!pinch){ cam.x+=(ship.x-cam.x)*Math.min(1,4*dt); cam.y+=(ship.y-cam.y)*Math.min(1,4*dt); }
@@ -880,6 +986,7 @@ function update(dt){
     if(!isFinite(p.cx)){ p.cx=p.x; p.cy=p.y; }
     const k=Math.min(1,10*dt); p.cx+=(p.x-p.cx)*k; p.cy+=(p.y-p.cy)*k; }
   if(tent&&phase==='play') updateTentacles(dt);
+  if(phase==='play') updateMicrobes(dt);
   if(phase==='play') for(const h of HZ){
     if(h.dead>0){ if(nowS-h.dead>6){ h.dead=-9; placeHaz(h); } continue; }
     flowAt(h.x,h.y,_fl);
@@ -892,6 +999,7 @@ function update(dt){
     if(d<h.r+ship.R*.85){
       if(spikes&&nowS-spikeT>4){ spikeT=nowS; h.dead=nowS; sndPop();
         mass+=25; eatenBiome+=18; ringFx(h.x,h.y,6,h.r*3.2,gen.danger,.5);
+        if(Math.random()<.35) dropPart(h.x,h.y);
         toast('<b>CLOT POPPED</b> +25'); netEvt({t:'pop',x:h.x,y:h.y});
         try{navigator.vibrate&&navigator.vibrate(20);}catch(_){}}
       else if(nowS-invulnT>1.6){ invulnT=nowS; flashT=nowS; sndHurt();
@@ -977,6 +1085,19 @@ function render(){
     x.globalAlpha=.8*(1-u*.5); x.drawImage(gFood,px-10,py-10,20,20);
     x.globalAlpha=.9; x.fillStyle='#fff'; x.beginPath(); x.arc(px,py,2.2*(1-u*.6),0,6.2832); x.fill(); }
   x.globalAlpha=1;
+  // plasma streams: drifting chevrons along the current (mask baked in the flow grid)
+  if(gen.streamStr&&phase!=='intro'){ x.strokeStyle=css(lit(sc,1.35),.5); x.lineWidth=2.2; x.lineCap='round';
+    x.beginPath();
+    for(let j=0;j<FG.r;j++) for(let i=0;i<FG.c;i++){ const o3=(j*FG.c+i)*3, m=FG.MA[o3];
+      if(m<.3) continue;
+      const wx=FG.ox+i*FG.cell, wy=FG.oy+j*FG.cell;
+      if(wx<vx0||wx>vx1||wy<vy0||wy>vy1) continue;
+      const dxs=FG.MA[o3+1], dys=FG.MA[o3+2];
+      const hsh=jhash(i,j,gen.seed)*FG.cell;
+      const tr2=((nowS*150+hsh)%FG.cell)-FG.cell/2, ln=15*m;
+      const px=wx+dxs*tr2, py=wy+dys*tr2;
+      x.moveTo(px-dxs*ln,py-dys*ln); x.lineTo(px+dxs*ln,py+dys*ln); }
+    x.stroke(); x.globalAlpha=1; }
   if(phase==='play') for(const h of HZ){ if(h.dead>0) continue;
     const pu=.85+.15*Math.sin(nowS*3+h.ph);
     x.globalAlpha=.75; x.drawImage(gDanger,h.x-h.r*2.4,h.y-h.r*2.4,h.r*4.8,h.r*4.8);
@@ -985,15 +1106,40 @@ function render(){
       const px=h.x+Math.cos(an)*rr,py=h.y+Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
     x.closePath(); x.fillStyle=css(dc,.2); x.fill(); x.strokeStyle=css(dc,.85); x.lineWidth=1.6; x.stroke();
     x.fillStyle=css(dc,.9); x.beginPath(); x.arc(h.x,h.y,3.4*pu,0,6.2832); x.fill(); }
+  // microbes: darting corrupted critters
+  if(phase==='play') for(const m of MB){
+    if(m.x<vx0||m.x>vx1||m.y<vy0||m.y>vy1) continue;
+    const va2=Math.atan2(m.vy,m.vx);
+    x.globalAlpha=.55; x.drawImage(gDanger,m.x-m.r*1.8,m.y-m.r*1.8,m.r*3.6,m.r*3.6); x.globalAlpha=1;
+    x.beginPath();
+    for(let a=0;a<=12;a++){ const an=a/12*6.2832,rr=m.r*(1+.22*Math.sin(an*(m.type?5:3)+nowS*6+m.ph));
+      const px=m.x+Math.cos(an+va2)*rr,py=m.y+Math.sin(an+va2)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
+    x.closePath(); x.fillStyle=css(dc,m.type?.42:.34); x.fill();
+    x.strokeStyle=css(lit(dc,1.3),.9); x.lineWidth=1.3; x.stroke();
+    if(m.type){ x.fillStyle=css(lit(dc,1.4),.8);
+      for(let k=0;k<3;k++){ const a=nowS*2+k*2.09;
+        x.beginPath(); x.arc(m.x+Math.cos(a)*m.r*.45,m.y+Math.sin(a)*m.r*.45,2.6,0,6.2832); x.fill(); } } }
+  // floating part pickups
+  if(phase==='play') for(const u of PU){
+    const bob=Math.sin(nowS*2.4+u.t0)*4, pr=9+Math.sin(nowS*3.1+u.t0)*1.5;
+    x.globalCompositeOperation='lighter';
+    x.globalAlpha=.8; x.drawImage(gFood,u.x-22,u.y+bob-22,44,44); x.globalAlpha=1;
+    x.globalCompositeOperation='source-over';
+    x.beginPath();
+    for(let k=0;k<=6;k++){ const a=k/6*6.2832+nowS*.8;
+      const px=u.x+Math.cos(a)*pr,py=u.y+bob+Math.sin(a)*pr; k?x.lineTo(px,py):x.moveTo(px,py); }
+    x.closePath(); x.fillStyle=css(lit(sc,1.5),.85); x.fill();
+    x.strokeStyle=css(sc,.9); x.lineWidth=1.4;
+    x.beginPath(); x.arc(u.x,u.y+bob,pr+5+Math.sin(nowS*4)*2,0,6.2832); x.stroke(); }
   x.globalCompositeOperation='source-over';
   // friends first (under my ship), then me
   if(NET.on) for(const [id,p] of NET.peers){ if(!p.fresh||p.b!==biomeIdx||!isFinite(p.cx)) continue;
     const pd=p.dna||defaultDNA();
     drawShipAt(x,{x:p.cx,y:p.cy,vx:p.vx||0,vy:p.vy||0,R:p.R||30,st:p.st|0,dna:pd,tr:p.tr||DEFAULT_TR,
-      col:peerCol(p,id),inv:false,remote:true,
+      col:peerCol(p,id),inv:false,remote:true,parts:p.parts||[],
       hasFn:a=>{const i2=pd.lo.indexOf(a); return i2>=0&&i2<(p.st|0);}}); }
-  drawShipAt(x,{x:ship.x,y:ship.y,vx:ship.vx,vy:ship.vy,R:ship.R,st:stage,dna,tr:TR,col:sc,
-    inv:nowS-invulnT<1.6&&((nowS*14)|0)%2===0,remote:false,hasFn:has});
+  drawShipAt(x,{x:ship.x,y:ship.y,vx:ship.vx,vy:ship.vy,R:ship.R,st:stage,dna,tr:TR,col:sc,parts,
+    inv:(nowS-invulnT<1.6||nowS-nibbleT<.2)&&((nowS*14)|0)%2===0,remote:false,hasFn:has});
   x.globalCompositeOperation='lighter';
   for(let i=rings.length-1;i>=0;i--){ const g0=rings[i],u=(nowS-g0.t)/g0.life;
     if(u>=1){ rings.splice(i,1); continue; }
@@ -1095,6 +1241,30 @@ function drawShipAt(x,S){
       const ex2=S.x+Math.cos(a)*len,ey2=S.y+Math.sin(a)*len;
       const mx=(bx+ex2)/2-Math.sin(a)*Math.sin(nowS*3+k*2)*18, my=(by+ey2)/2+Math.cos(a)*Math.sin(nowS*3+k*2)*18;
       x.beginPath(); x.moveTo(bx,by); x.quadraticCurveTo(mx,my,ex2,ey2); x.stroke(); } }
+  // socketed parts: visible where they were grabbed (the MicroBot touch)
+  if(S.parts&&S.parts.length){ for(const pp of S.parts){ const a=pp.ang||0, def=PARTS[pp.id]; if(!def) continue;
+    const bx=S.x+Math.cos(a)*R, by=S.y+Math.sin(a)*R, ux=Math.cos(a), uy=Math.sin(a), px2=-uy, py2=ux;
+    if(pp.id==='flag'){ x.strokeStyle=css(lit(sc,1.3),.85); x.lineCap='round';
+      x.beginPath(); x.moveTo(bx,by);
+      for(let t=1;t<=5;t++){ const tt2=t/5, wob=Math.sin(nowS*6+tt2*7)*7*tt2;
+        x.lineTo(bx+ux*tt2*R*1.15+px2*wob, by+uy*tt2*R*1.15+py2*wob); }
+      x.lineWidth=3; x.stroke(); }
+    else if(pp.id==='lens'){ x.fillStyle=css(lit(sc,1.5),.95);
+      x.beginPath(); x.arc(bx+ux*5,by+uy*5,5.5,0,6.2832); x.fill();
+      x.fillStyle='rgba(8,12,18,.9)'; x.beginPath(); x.arc(bx+ux*6.5,by+uy*6.5,2.4,0,6.2832); x.fill(); }
+    else if(pp.id==='mag'){ x.strokeStyle=css(lit(sc,1.4),.9); x.lineWidth=3;
+      x.beginPath(); x.arc(bx+ux*6,by+uy*6,6,a+.6,a+5.68); x.stroke(); }
+    else if(pp.id==='plate'){ x.strokeStyle=css(lit(sc,1.45),.8); x.lineWidth=5.5;
+      x.beginPath(); x.arc(S.x,S.y,R*1.06,a-.5,a+.5); x.stroke(); }
+    else if(pp.id==='barb'){ x.strokeStyle=css(lit(sc,1.35),.9); x.lineWidth=2; x.lineCap='round';
+      for(let k=-1;k<=1;k++){ const aa=a+k*.14;
+        x.beginPath(); x.moveTo(S.x+Math.cos(aa)*R,S.y+Math.sin(aa)*R);
+        x.lineTo(S.x+Math.cos(aa)*(R+16+(k?0:6)),S.y+Math.sin(aa)*(R+16+(k?0:6))); x.stroke(); } }
+    else if(pp.id==='sail'){ x.fillStyle=css(lit(sc,1.25),.5);
+      x.beginPath(); x.moveTo(bx+px2*5,by+py2*5); x.lineTo(bx-px2*5,by-py2*5);
+      const fl=Math.sin(nowS*3.4)*4;
+      x.lineTo(bx+ux*R*.8+px2*fl,by+uy*R*.8+py2*fl); x.closePath(); x.fill(); }
+  } }
   // eyes (1-3, gene pupil size) looking along velocity, with blink
   const n=d0.eyes, eR=R*.3/(1+.22*(n-1)), off=Math.min(R*.22,spd*.06);
   const blink=jhash((nowS*.55)|0,S.remote?13:7,gen.seed)<.09?.14:1;
@@ -1135,6 +1305,7 @@ function syncMenuUI(){
   $('saveNm').textContent=dna.name;
   const t=deriveTraits(dna,stage);
   $('traitwords').textContent=t.words.join(' · ')+' — deepens as it evolves';
+  $('partlist').textContent=parts.length?parts.map(p=>PARTS[p.id].n).join(' · '):'none yet — pop clots & splitters';
 }
 $('g_name').oninput=e=>{ dna.name=cleanDNA({...dna,name:e.target.value}).name; $('saveNm').textContent=dna.name; };
 $('g_hue').oninput=e=>{ dna.hue=+e.target.value; $('g_hue_v').textContent=dna.hue; gFood=glowSprite(myCol()); hudBiome(); };
@@ -1203,7 +1374,7 @@ prevC.onclick=()=>{ previewStage=previewStage>=5?-1:previewStage+1; };
 function renderPreview(){
   const s=prevC.width, c=prevX; c.setTransform(1,0,0,1,0,0); c.clearRect(0,0,s,s);
   const st=previewStage<0?stage:previewStage;
-  const S={x:s/2,y:s/2+4,vx:20,vy:-6,R:s*.26,st,dna,tr:deriveTraits(dna,st),col:myCol(),inv:false,remote:false,preview:true,
+  const S={x:s/2,y:s/2+4,vx:20,vy:-6,R:s*.26,st,dna,tr:deriveTraits(dna,st),col:myCol(),inv:false,remote:false,preview:true,parts,
     hasFn:a=>{const i=dna.lo.indexOf(a); return i>=0&&i<st;}};
   drawShipAt(c,S);
   c.setTransform(1,0,0,1,0,0); c.fillStyle='rgba(150,200,220,.5)'; c.font=`${s*.075}px ui-monospace,monospace`;
@@ -1225,6 +1396,7 @@ function frame(now){
 // ---------- test hooks (BB.tick-style; work with a hidden pane) -------------
 window.GG={
   get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,stage,biomeIdx,gen,ship,HZ,cam,dna,stable,tr:TR,fps:fpsAvg,
+    mb:MB.length, pu:PU.length, parts:parts.map(p=>p.id),
     chunks:loaded.size, far:FAR.cache.size, shared:sharedEaten(),net:{on:NET.on,code:NET.code,peers:NET.peers.size,selfId:NET.selfId,offers:NET.offers.length}}; },
   tick(dt=1/60,n=1){ for(let i=0;i<n;i++) update(dt); render(); },
   pt(x2,y2,down=true){ if(down){ ship.down=true; setTargetScreen(x2,y2,false); } else { ship.down=false; ship.tx=ship.ty=null; } },
@@ -1239,6 +1411,9 @@ window.GG={
   join(code){ return netJoin(code); },
   setDna(patch){ dna=cleanDNA({...dna,...patch}); dnaChanged(); return dna; },
   reroll(){ dna.seed=rollSeed(); refreshTR(); return TR.words; },
+  givePart(id,ang=0){ if(PARTS[id]) addPart(id,ang); return parts.map(p=>p.id); },
+  dropAt(x2,y2){ dropPart(x2,y2); },
+  mbs(){ return MB; },
   exportCode(){ return dnaCode(cleanDNA(dna)); },
   importCode(c){ const g=dnaFromCode(c); if(g){ stable.push(g); saveStable(); } return g; },
   menu(){ menuOpen?closeMenu():openMenu(); },
@@ -1252,6 +1427,8 @@ function boot(){
   const sv=q.get('fresh')?null:loadSave();
   masterSeed=q.get('seed')?(+q.get('seed')>>>0):(sv?sv.seed>>>0:(Math.random()*4294967295)>>>0);
   if(sv){ mass=sv.mass||60; totalEaten=sv.eaten||0; muted=!!sv.mute; dna=cleanDNA(sv.dna);
+    parts=Array.isArray(sv.parts)?sv.parts.slice(0,3).filter(q=>q&&PARTS[q.id])
+      .map(q=>({id:q.id,ang:+q.ang||0})):[];
     document.getElementById('mute').textContent=muted?'∅':'♪';
     document.getElementById('startover').style.display='block';
     document.getElementById('go').textContent=`RESUME — BIOME ${(sv.biome||0)+1}`; }
