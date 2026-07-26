@@ -27,6 +27,12 @@
   #pbar{height:100%;width:0%;background:#3fd8b0;border-radius:3px;transition:width .25s}
   #stagebar{margin-top:4px;font-size:10px;color:#69859a;letter-spacing:.5px}
   #peers{display:none;margin-top:4px;font-size:10.5px;color:#8fd;cursor:pointer;pointer-events:auto}
+  #roomhud{display:flex;gap:4px;margin-top:5px;pointer-events:auto}
+  #roomhud input{background:#0c1620;border:1px solid #25415a;border-radius:6px;color:#cfe;font:inherit;font-size:10.5px;
+    letter-spacing:1.5px;padding:3px 6px;width:88px;min-width:0;text-transform:uppercase}
+  #roomhud input::placeholder{color:#456;letter-spacing:.5px}
+  #roomhud button{background:rgba(12,24,32,.72);color:#9dd;border:1px solid rgba(60,90,120,.4);border-radius:6px;
+    padding:3px 8px;cursor:pointer;font:inherit;font-size:10.5px}
   #hudR{margin-left:auto;display:flex;gap:6px;pointer-events:auto}
   #hudR button{background:rgba(12,24,32,.72);color:#bff;border:1px solid rgba(60,90,120,.4);border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit;font-size:13px}
   #toast{position:fixed;top:24%;left:0;right:0;text-align:center;pointer-events:none;z-index:6}
@@ -93,6 +99,7 @@
     <div id="bname"></div>
     <div id="pwrap"><div id="pbar"></div></div>
     <div id="stagebar"></div>
+    <div id="roomhud"><input id="hudroom" placeholder="room code" maxlength="12" autocomplete="off" spellcheck="false"><button id="hudjoin">⬡ join</button><button id="hudleave" style="display:none" title="leave room">✕</button></div>
     <div id="peers"></div>
   </div>
   <div id="hudR"><button id="dnabtn" title="customize">🧬</button><button id="mute">♪</button><button id="reset">⟳</button></div>
@@ -746,8 +753,19 @@ function jumpToBiome(b){ // multiplayer fast-forward: the room moved on, follow 
 // forward-only ('max'); the ELDER (earliest joinT) replays {seed,biome} so a
 // newcomer can never overwrite an established room. DNA (look/name) travels in
 // a low-rate 'meta' action; 'dna' is the trade channel.
-const NET={on:false,code:null,room:null,selfId:null,peers:new Map(),conv:null,
+const NET={on:false,joining:false,code:null,room:null,selfId:null,peers:new Map(),conv:null,
   sendShip:null,sendCfg:null,sendEvt:null,sendMeta:null,sendDna:null,timer:0,metaTimer:0,joinT:0,offers:[]};
+function netLeave(quiet){
+  if(!NET.on) return;
+  try{ NET.room&&NET.room.leave(); }catch(_){}
+  clearInterval(NET.timer); clearInterval(NET.metaTimer);
+  NET.on=false; NET.room=null; NET.code=null; NET.selfId=null;
+  NET.peers.clear(); NET.conv=null;
+  NET.sendShip=NET.sendCfg=NET.sendEvt=NET.sendMeta=NET.sendDna=null;
+  updatePeersHud(); syncRoomHud();
+  history.replaceState(null,'',location.pathname);
+  if(!quiet) toast('left the room — solo goop');
+}
 function peerColFor(id){ let h=0; for(let i=0;i<id.length;i++) h=(Math.imul(h,31)+id.charCodeAt(i))>>>0;
   return hueRot(gen?gen.shipCol:[.5,.9,.8], 40+(h%280), 1.1, 1.0); }
 function peerCol(p,id){ return p.dna&&p.dna.hue?hueRot(gen.shipCol,p.dna.hue):(p.dna?gen.shipCol:peerColFor(id)); }
@@ -759,9 +777,15 @@ function netMeta(to){ if(NET.on&&NET.sendMeta) try{
   NET.sendMeta({dna,parts:parts.map(p=>({id:p.id,ang:+(p.ang||0).toFixed(2)})),jt:NET.joinT},to); }catch(_){} }
 const num=(v,lo,hi)=>typeof v==='number'&&isFinite(v)?Math.max(lo,Math.min(hi,v)):lo;
 async function netJoin(code){
-  if(NET.on) return true;
   code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);
   if(!code) return false;
+  if(NET.on&&NET.code===code) return true;           // already there
+  if(NET.joining) return false;
+  NET.joining=true;
+  try{ return await _netJoin(code); } finally{ NET.joining=false; syncRoomHud(); }
+}
+async function _netJoin(code){
+  if(NET.on) netLeave(true);                         // switching: leave the old room quietly
   let T;
   try{ T=await import('https://esm.sh/trystero@0.22.0/nostr'); }
   catch(_){ toast('P2P unavailable — playing solo'); return false; }
@@ -840,6 +864,19 @@ document.getElementById('peers').onclick=()=>{ if(!NET.code) return;
   const url=location.origin+location.pathname+'?room='+NET.code;
   try{ navigator.clipboard.writeText(url).then(()=>toast('invite link copied')); }
   catch(_){ toast(url); } };
+// in-game room control: type a code up top to join or switch any time
+function syncRoomHud(){ const inp=document.getElementById('hudroom');
+  if(document.activeElement!==inp) inp.value=NET.code||'';
+  document.getElementById('hudleave').style.display=NET.on?'':'none';
+  document.getElementById('hudjoin').textContent=NET.on?'⬡ switch':'⬡ join'; }
+document.getElementById('hudjoin').onclick=()=>{
+  const inp=document.getElementById('hudroom'), v=inp.value.trim();
+  if(!v){ toast('type a room code first'); return; }
+  netJoin(v).then(ok=>{ if(ok) inp.blur(); syncRoomHud(); }); };
+document.getElementById('hudroom').addEventListener('keydown',e=>{
+  e.stopPropagation();
+  if(e.key==='Enter'){ e.preventDefault(); document.getElementById('hudjoin').onclick(); } });
+document.getElementById('hudleave').onclick=()=>netLeave();
 
 // ---------- input: steer / pinch-zoom / wheel -------------------------------
 const ptrs=new Map();
@@ -885,6 +922,7 @@ addEventListener('wheel',e=>{ if(phase==='intro'||menuOpen) return; e.preventDef
 addEventListener('touchstart',e=>{ if(!(e.target.closest&&e.target.closest('#hudR,#hudL,#intro,#menu'))) e.preventDefault(); },{passive:false});
 addEventListener('contextmenu',e=>e.preventDefault());
 addEventListener('keydown',e=>{ if(menuOpen) return;
+  const tg=e.target; if(tg&&(tg.tagName==='INPUT'||tg.tagName==='TEXTAREA')) return;
   if(e.code==='Space') doPulse();
   if(e.key==='+'||e.key==='=') { setZoom(cam.z*1.15,W/2,H/2); applyBlur(); }
   if(e.key==='-') { setZoom(cam.z/1.15,W/2,H/2); applyBlur(); } });
@@ -1409,6 +1447,7 @@ window.GG={
   seed(v){ masterSeed=v>>>0; enterBiome(0,true); },
   pulse(){ pulseT=-9; doPulse(); },
   join(code){ return netJoin(code); },
+  leave(){ netLeave(); },
   setDna(patch){ dna=cleanDNA({...dna,...patch}); dnaChanged(); return dna; },
   reroll(){ dna.seed=rollSeed(); refreshTR(); return TR.words; },
   givePart(id,ang=0){ if(PARTS[id]) addPart(id,ang); return parts.map(p=>p.id); },
