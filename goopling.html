@@ -379,12 +379,13 @@ function drawTexTiled(ctx,src,scale,z,ox,oy,alpha){
 // ---------- particles: chunk-streamed goop ----------------------------------
 // stride 8: x,y,vx,vy,hx,hy,chunkX,chunkY — chunks seed deterministically from
 // (biomeSeed, chunk coords), so the whole infinite field is shared + reloadable
-const CH=600, ATT=3250, N_CAP=9000, CH_MARGIN=160;
+const CH=600, ATT=3250, N_CAP=9000, CH_MARGIN=200;
 let P=new Float32Array(N_CAP*8), alive=0;
-const loaded=new Set();
+const loaded=new Set(), chunkBirth=new Map();   // birth time -> crossfade-in (no pop)
 function ckey(cx,cy){ return ((cx+32768)&65535)*65536+((cy+32768)&65535); }
-function seedChunk(cx,cy){
+function seedChunk(cx,cy,mature){
   const key=ckey(cx,cy); if(loaded.has(key)) return; loaded.add(key);
+  chunkBirth.set(key, mature?nowS-9:nowS);
   const R=makeRng(hashU(gen.seed^hashU(key)));
   const sc=0.0016, s=(gen.seed%1000)*0.13, x0=cx*CH, y0=cy*CH;
   // density field sampled once on a 9x9 grid, bilinear per attempt (64 fbm, not 3250)
@@ -402,22 +403,47 @@ function seedChunk(cx,cy){
 function ensureChunks(burst){
   if(phase==='clear') return;                       // don't seed next-biome chunks mid-cinematic
   const z=cam.z;
-  const x0=cam.x-W/(2*z)-CH_MARGIN, x1=cam.x+W/(2*z)+CH_MARGIN;
-  const y0=cam.y-H/(2*z)-CH_MARGIN, y1=cam.y+H/(2*z)+CH_MARGIN;
+  let x0=cam.x-W/(2*z)-CH_MARGIN, x1=cam.x+W/(2*z)+CH_MARGIN;
+  let y0=cam.y-H/(2*z)-CH_MARGIN, y1=cam.y+H/(2*z)+CH_MARGIN;
+  // lead the loader in the travel direction so the frontier stays offscreen
+  // (clamped: past ~1.5 chunks of lead the budget can't hold it anyway)
+  const lx=Math.max(-900,Math.min(900,ship.vx*1.2)), ly=Math.max(-900,Math.min(900,ship.vy*1.2));
+  if(lx>0) x1+=lx; else x0+=lx;
+  if(ly>0) y1+=ly; else y0+=ly;
   const keep=new Set();                             // hysteresis: keep one extra ring
   for(let j=Math.floor(y0/CH)-1;j<=Math.floor(y1/CH)+1;j++)
     for(let i=Math.floor(x0/CH)-1;i<=Math.floor(x1/CH)+1;i++) keep.add(ckey(i,j));
   for(let i=0;i<alive;i++){ const o=i*8;            // unload sweep
     if(!keep.has(ckey(P[o+6]|0,P[o+7]|0))){ kill(i); i--; } }
-  for(const k of [...loaded]) if(!keep.has(k)) loaded.delete(k);
+  for(const k of [...loaded]) if(!keep.has(k)){ loaded.delete(k); chunkBirth.delete(k); }
   const want=[];                                    // load nearest-first within budget
   for(let j=Math.floor(y0/CH);j<=Math.floor(y1/CH);j++)
     for(let i=Math.floor(x0/CH);i<=Math.floor(x1/CH);i++)
       if(!loaded.has(ckey(i,j))) want.push([i,j,((i+.5)*CH-ship.x)**2+((j+.5)*CH-ship.y)**2]);
   want.sort((a,b)=>a[2]-b[2]);
+  // pressure valve: when travel wants chunks but the budget is pinned, dump the
+  // hysteresis-ring chunks (outside the load rect = guaranteed offscreen) first
+  if(want.length&&alive>6900){
+    const cx0=Math.floor(x0/CH),cx1=Math.floor(x1/CH),cy0=Math.floor(y0/CH),cy1=Math.floor(y1/CH);
+    const drop=new Set();
+    for(const k of loaded){ const cx=Math.floor(k/65536)-32768, cy=(k%65536)-32768;
+      if(cx<cx0||cx>cx1||cy<cy0||cy>cy1) drop.add(k); }
+    if(alive>7300){ // stage 2: shed trailing-margin chunks (never visible or lead-side ones)
+      const p2=CH*.4;
+      const vx0c=Math.floor((cam.x-W/(2*z)-p2)/CH),vx1c=Math.floor((cam.x+W/(2*z)+p2)/CH);
+      const vy0c=Math.floor((cam.y-H/(2*z)-p2)/CH),vy1c=Math.floor((cam.y+H/(2*z)+p2)/CH);
+      for(const k of loaded){ const cx=Math.floor(k/65536)-32768, cy=(k%65536)-32768;
+        if(cx>=vx0c&&cx<=vx1c&&cy>=vy0c&&cy<=vy1c) continue;
+        const behind=ship.vx*((cx+.5)*CH-cam.x)+ship.vy*((cy+.5)*CH-cam.y)<0;
+        if(behind) drop.add(k); }
+    }
+    if(drop.size){ for(let i=0;i<alive;i++){ const o=i*8;
+        if(drop.has(ckey(P[o+6]|0,P[o+7]|0))){ kill(i); i--; } }
+      for(const k of drop){ loaded.delete(k); chunkBirth.delete(k); } }
+  }
   let seeded=0;
-  const maxSeed=burst?12:2;                         // headroom: a chunk never truncates mid-seed
-  for(const [i,j] of want){ if(alive>7300||seeded>=maxSeed) break; seedChunk(i,j); seeded++; }
+  const maxSeed=burst?12:(want.length>9?6:want.length>5?4:2); // headroom: a chunk never truncates mid-seed
+  for(const [i,j] of want){ if(alive>7300||seeded>=maxSeed) break; seedChunk(i,j,burst); seeded++; }
 }
 function scatterFromHome(){ // spawn-in: puff particles out, they condense back home
   for(let i=0;i<alive;i++){ const o=i*8,a=Math.random()*6.2832,r=120+Math.random()*260;
@@ -442,6 +468,12 @@ function farUpdate(){ // fill missing cells over the view (+pad), bounded per fr
     if(!FAR.cache.has(k)){ FAR.cache.set(k,Math.max(0,Math.min(1,densAt(gx*st,gy*st)))); n++; } }
   if(FAR.cache.size>26000) FAR.cache.clear();
 }
+// young chunks (age < ~0.9s) crossfade: particles ease in while far blobs ease out
+const _youngs=new Map();
+function refreshYoungs(){ _youngs.clear();
+  for(const [k,t] of chunkBirth){ const u=(nowS-t)/.9;
+    if(u>=1){ chunkBirth.delete(k); continue; }
+    _youngs.set(k, u<0?0:u*u*(3-2*u)); } }
 function drawFar(z){ // into the goo canvas, world transform already set
   if(!FAR.cache.size) return;
   const st=FAR.step;
@@ -450,9 +482,13 @@ function drawFar(z){ // into the goo canvas, world transform already set
   for(let gy=gy0;gy<=gy1;gy++) for(let gx=gx0;gx<=gx1;gx++){
     const v=FAR.cache.get(farKey(gx,gy)); if(!v||v<.07) continue;
     const wx=gx*st, wy=gy*st;
-    if(loaded.has(ckey(Math.floor(wx/CH),Math.floor(wy/CH)))) continue;  // particles own it here
+    const ck2=ckey(Math.floor(wx/CH),Math.floor(wy/CH));
+    let fmul=1;
+    if(loaded.has(ck2)){ const ya=_youngs.get(ck2);
+      if(ya===undefined) continue;                   // fully particle-owned
+      fmul=1-ya; }                                   // dissolving under the fading-in particles
     const rr=st*(.5+.72*v);
-    gooX.globalAlpha=.20+.32*v;
+    gooX.globalAlpha=(.20+.32*v)*fmul;
     gooX.drawImage(sprite,wx-rr,wy-rr,rr*2,rr*2);
   }
   gooX.globalAlpha=1;
@@ -572,7 +608,7 @@ let stable=[];
 
 // ---------- biome lifecycle -------------------------------------------------
 function biomeSeed(i){ return hashU((masterSeed>>>0)^Math.imul(i+1,0x9e3779b9)); }
-function freshWorld(scatter){ loaded.clear(); alive=0; ensureAcc=9; ensureChunks(true);
+function freshWorld(scatter){ loaded.clear(); chunkBirth.clear(); alive=0; ensureAcc=9; ensureChunks(true);
   if(scatter) scatterFromHome(); }
 function enterBiome(i,fresh){
   biomeIdx=i; gen=growBiome(biomeSeed(i)); QUOTA=quotaFor(i); farClear();
@@ -771,7 +807,7 @@ document.getElementById('reset').onclick=()=>{ const n=nowS;
 let nowS=0;
 function update(dt){
   nowS+=dt; palPhase+=gen.palDrift*dt; flowTick();
-  ensureAcc+=dt; if(ensureAcc>.25){ ensureAcc=0; ensureChunks(); }
+  ensureAcc+=dt; if(ensureAcc>.16){ ensureAcc=0; ensureChunks(); }
   farUpdate();
   const drag=Math.exp(-4.5*dt);
   const RT=Rtarget(); ship.R+=(RT-ship.R)*Math.min(1,3*dt);
@@ -901,10 +937,19 @@ function render(){
   gooX.fillStyle='#000'; gooX.fillRect(0,0,W,H);
   gooX.globalCompositeOperation='lighter';
   gooX.setTransform(GR*z,0,0,GR*z,GR*ox,GR*oy);
+  refreshYoungs();
   drawFar(z);                                        // endless goop beyond the particle chunks
   const r=SPR, vx0=cam.x-W/(2*z)-r*2, vx1=cam.x+W/(2*z)+r*2, vy0=cam.y-H/(2*z)-r*2, vy1=cam.y+H/(2*z)+r*2;
-  for(let i=0;i<alive;i++){ const o=i*8,x=P[o],y=P[o+1];
-    if(x>vx0&&x<vx1&&y>vy0&&y<vy1) gooX.drawImage(sprite,x-r,y-r); }
+  if(_youngs.size){                                  // some chunks mid-fade: per-particle alpha
+    for(let i=0;i<alive;i++){ const o=i*8,x=P[o],y=P[o+1];
+      if(x<=vx0||x>=vx1||y<=vy0||y>=vy1) continue;
+      const a=_youngs.get(ckey(P[o+6]|0,P[o+7]|0));
+      if(a!==undefined){ gooX.globalAlpha=a; gooX.drawImage(sprite,x-r,y-r); gooX.globalAlpha=1; }
+      else gooX.drawImage(sprite,x-r,y-r); }
+  } else {
+    for(let i=0;i<alive;i++){ const o=i*8,x=P[o],y=P[o+1];
+      if(x>vx0&&x<vx1&&y>vy0&&y<vy1) gooX.drawImage(sprite,x-r,y-r); }
+  }
   // biome texture: mirror-tiled multiply layer riding the camera
   texX.setTransform(TS,0,0,TS,0,0); texX.globalAlpha=1;
   texX.fillStyle='#fff'; texX.fillRect(0,0,W,H);
