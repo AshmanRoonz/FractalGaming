@@ -120,6 +120,7 @@
     <canvas id="dnaprev" title="tap to preview evolutions"></canvas>
     <div id="menuTopR">
       <div class="row"><label>name</label><input id="g_name" type="text" maxlength="14" style="flex:1"></div>
+      <div class="row"><label>lineage</label><span id="traitwords" style="flex:1;color:#8fd;font-size:10.5px;letter-spacing:1px"></span><button id="reroll" title="reroll lineage">🎲</button></div>
       <div class="row"><label>hue</label><input id="g_hue" type="range" min="0" max="359" step="1"><span class="v" id="g_hue_v"></span></div>
       <div class="row"><label>eyes</label><div class="seg" id="g_eyes">
         <button data-n="1">1</button><button data-n="2">2</button><button data-n="3">3</button></div>
@@ -270,16 +271,35 @@ const ABIL={ cilia:{n:'CILIA',d:'feed while moving faster'},
   tent:{n:'TENTACLES',d:'reach out to distant goop'},
   bloom:{n:'BLOOM',d:'total absorption'} };
 const FRACS=[.12,.34,.66,1.05,1.55];
-function defaultDNA(){ return {v:1,name:'GOOPLING',hue:0,eyes:1,pu:.42,cl:1,wb:1,fr:3,gl:0,lo:LOADOUT_ALL.slice()}; }
+function rollSeed(){ return (Math.random()*4294967295)>>>0; }
+function defaultDNA(){ return {v:1,name:'GOOPLING',seed:rollSeed(),hue:0,eyes:1,pu:.42,cl:1,wb:1,fr:3,gl:0,lo:LOADOUT_ALL.slice()}; }
 function cleanDNA(d){
   const b=defaultDNA(); if(!d||typeof d!=='object') return b;
   const num=(v,lo,hi,dv)=>typeof v==='number'&&isFinite(v)?Math.max(lo,Math.min(hi,v)):dv;
   b.name=String(d.name||'GOOPLING').replace(/[^A-Za-z0-9 _\-]/g,'').slice(0,14).trim()||'GOOPLING';
+  b.seed=(typeof d.seed==='number'&&isFinite(d.seed))?(d.seed>>>0):rollSeed();
   b.hue=num(d.hue,0,359,0)|0; b.eyes=num(d.eyes,1,3,1)|0; b.pu=num(d.pu,.25,.6,.42);
   b.cl=num(d.cl,.4,2,1); b.wb=num(d.wb,.3,2,1); b.fr=num(d.fr,0,8,3)|0; b.gl=d.gl?1:0;
   if(Array.isArray(d.lo)&&d.lo.length===5&&d.lo.slice().sort().join()===LOADOUT_ALL.slice().sort().join()) b.lo=d.lo.slice();
   return b;
 }
+// ---- lineage traits: every goopling's seed grows a unique body + playstyle --
+// visual quirks are permanent; stat leanings DEEPEN as it evolves (stage-scaled)
+const TRAIT_WORD={speed:'SWIFT',hunger:'HUNGRY',reach:'FAR-FELT',pull:'MAGNETIC',pulse:'BOOMING',guts:'TOUGH'};
+function deriveTraits(d,st){
+  const R=makeRng((d.seed>>>0)||1), t={};
+  t.lobes=2+R.i(5); t.lobeAmp=R.f(.025,.09); t.phase=R.f(0,6.283);
+  t.spikeN=7+R.i(6); t.tentN=2+R.i(2); t.swirl=R.i(2)?1:-1; t.mott=R.i(6);
+  const pool=['speed','hunger','reach','pull','pulse','guts'];
+  for(let i=pool.length-1;i>0;i--){ const j=R.i(i+1); [pool[i],pool[j]]=[pool[j],pool[i]]; }
+  const mag=[R.f(.10,.20),R.f(.06,.14),0,0,-R.f(.04,.08),-R.f(.05,.10)];
+  const s=.4+.6*Math.min(1,(st||0)/5), m={speed:1,hunger:1,reach:1,pull:1,pulse:1,guts:1};
+  pool.forEach((k,i)=>m[k]=Math.max(.8,Math.min(1.25,1+(mag[i]||0)*s)));
+  t.m=m; t.words=[TRAIT_WORD[pool[0]],TRAIT_WORD[pool[1]]];
+  return t;
+}
+let TR=null; const DEFAULT_TR=deriveTraits({seed:1},5);
+function refreshTR(){ TR=deriveTraits(dna,stage); }
 function dnaCode(d){ return 'GPL1.'+btoa(JSON.stringify(d)); }
 function dnaFromCode(s){ try{ s=String(s).trim(); if(!s.startsWith('GPL1.')) return null;
   return cleanDNA(JSON.parse(atob(s.slice(5)))); }catch(_){ return null; } }
@@ -404,6 +424,40 @@ function scatterFromHome(){ // spawn-in: puff particles out, they condense back 
     P[o]=P[o+4]+Math.cos(a)*r; P[o+1]=P[o+5]+Math.sin(a)*r; P[o+2]=0; P[o+3]=0; } }
 function kill(i){ const a=(--alive)*8,o=i*8; for(let k=0;k<8;k++) P[o+k]=P[a+k]; }
 
+// ---- far-field LOD: beyond the particle chunks, the SAME density field is ----
+// drawn as big soft blobs into the metaball canvas — same blur+contrast fuses
+// them, so zooming way out shows endless goop with no visible streaming edge.
+function densAt(x,y){ const sc=0.0016,s=(gen.seed%1000)*0.13;
+  return (fbm(x*sc+s*10,y*sc-s*7,gen.seed,4)-.42)*2.6; }
+const FAR={step:110,cache:new Map(),budget:220};
+function farKey(gx,gy){ return (gx+65536)*131072+(gy+65536); }
+function farClear(){ FAR.cache.clear(); }
+function farUpdate(){ // fill missing cells over the view (+pad), bounded per frame
+  const z=cam.z,st=FAR.step,pad=st*2;
+  const gx0=Math.floor((cam.x-W/(2*z)-pad)/st), gx1=Math.floor((cam.x+W/(2*z)+pad)/st);
+  const gy0=Math.floor((cam.y-H/(2*z)-pad)/st), gy1=Math.floor((cam.y+H/(2*z)+pad)/st);
+  let n=0;
+  for(let gy=gy0;gy<=gy1&&n<FAR.budget;gy++) for(let gx=gx0;gx<=gx1&&n<FAR.budget;gx++){
+    const k=farKey(gx,gy);
+    if(!FAR.cache.has(k)){ FAR.cache.set(k,Math.max(0,Math.min(1,densAt(gx*st,gy*st)))); n++; } }
+  if(FAR.cache.size>26000) FAR.cache.clear();
+}
+function drawFar(z){ // into the goo canvas, world transform already set
+  if(!FAR.cache.size) return;
+  const st=FAR.step;
+  const gx0=Math.floor((cam.x-W/(2*z))/st)-1, gx1=Math.floor((cam.x+W/(2*z))/st)+1;
+  const gy0=Math.floor((cam.y-H/(2*z))/st)-1, gy1=Math.floor((cam.y+H/(2*z))/st)+1;
+  for(let gy=gy0;gy<=gy1;gy++) for(let gx=gx0;gx<=gx1;gx++){
+    const v=FAR.cache.get(farKey(gx,gy)); if(!v||v<.07) continue;
+    const wx=gx*st, wy=gy*st;
+    if(loaded.has(ckey(Math.floor(wx/CH),Math.floor(wy/CH)))) continue;  // particles own it here
+    const rr=st*(.5+.72*v);
+    gooX.globalAlpha=.20+.32*v;
+    gooX.drawImage(sprite,wx-rr,wy-rr,rr*2,rr*2);
+  }
+  gooX.globalAlpha=1;
+}
+
 // soft particle sprite (fuzzy white dot; crowds SUM into solid density)
 let sprite=null; const SPR=13;
 function makeSprite(){ const r=SPR,s=document.createElement('canvas'); s.width=s.height=r*2;
@@ -459,7 +513,7 @@ let eatCombo=0, comboT=0, ensureAcc=9;
 function quotaFor(b){ return 2800+Math.min(8,b)*400; }
 function Rtarget(){ return Math.min(150, 18+30*Math.sqrt(mass/300)); }
 function checkEvos(){ let n=0; for(const f of FRACS) if(totalEaten>=f*REF) n++;
-  if(n>stage){ stage=n; const a=ABIL[dna.lo[n-1]];
+  if(n>stage){ stage=n; refreshTR(); const a=ABIL[dna.lo[n-1]];
     toast(`<b>EVOLVED — ${a.n}</b><br><span style="font-size:11px;color:#9bc">${a.d}</span>`);
     sndEvolve(); ringFx(ship.x,ship.y,ship.R,ship.R*3.4,myCol(),.8); try{navigator.vibrate&&navigator.vibrate(30);}catch(_){}
     netEvt({t:'evolve',x:ship.x,y:ship.y}); stageHud(); save(); buildLoadoutUI(); } }
@@ -521,7 +575,7 @@ function biomeSeed(i){ return hashU((masterSeed>>>0)^Math.imul(i+1,0x9e3779b9));
 function freshWorld(scatter){ loaded.clear(); alive=0; ensureAcc=9; ensureChunks(true);
   if(scatter) scatterFromHome(); }
 function enterBiome(i,fresh){
-  biomeIdx=i; gen=growBiome(biomeSeed(i)); QUOTA=quotaFor(i);
+  biomeIdx=i; gen=growBiome(biomeSeed(i)); QUOTA=quotaFor(i); farClear();
   gFood=glowSprite(myCol()); gDanger=glowSprite(gen.danger);
   eatenBiome=0; lastPct=-1; flowInit();
   if(fresh){ ship.x=0; ship.y=0; ship.vx=ship.vy=0; cam.x=0; cam.y=0; }
@@ -530,7 +584,7 @@ function enterBiome(i,fresh){
 }
 function startClear(){ phase='clear'; phaseT=nowS; sndClear();
   toast('<b>BIOME CONSUMED</b>'); TEX.beginFade();
-  gen=growBiome(biomeSeed(biomeIdx+1)); }
+  gen=growBiome(biomeSeed(biomeIdx+1)); farClear(); }
 function finishClear(){ biomeIdx++; QUOTA=quotaFor(biomeIdx);
   mass=60+(mass-60)*.35;                            // molt: shed bulk to seed the new biome (evolutions stay)
   gFood=glowSprite(myCol()); gDanger=glowSprite(gen.danger);
@@ -542,7 +596,7 @@ function finishClear(){ biomeIdx++; QUOTA=quotaFor(biomeIdx);
 function jumpToBiome(b){ // multiplayer fast-forward: the room moved on, follow it
   if(b<=biomeIdx) return;
   if(phase==='clear'&&b===biomeIdx+1) return;
-  biomeIdx=b; gen=growBiome(biomeSeed(b)); QUOTA=quotaFor(b);
+  biomeIdx=b; gen=growBiome(biomeSeed(b)); QUOTA=quotaFor(b); farClear();
   mass=60+(mass-60)*.35;                            // molt here too, same as a local transition
   gFood=glowSprite(myCol()); gDanger=glowSprite(gen.danger);
   TEX.beginFade(); TEX.full(gen);
@@ -598,6 +652,7 @@ async function netJoin(code){
     });
     onMeta((d,id)=>{ if(!d||typeof d!=='object') return;
       const p=NET.peers.get(id)||{}; p.dna=cleanDNA(d.dna); p.jt=num(d.jt,0,9e15);
+      p.tr=deriveTraits(p.dna,5);                    // lineage visuals for rendering them
       NET.peers.set(id,p); });
     onCfg((d,id)=>{ if(!d||typeof d!=='object') return;
       if(num(d.jt,0,9e15)>=NET.joinT) return;      // only an elder's replay counts
@@ -696,9 +751,9 @@ addEventListener('keydown',e=>{ if(menuOpen) return;
   if(e.key==='+'||e.key==='=') { setZoom(cam.z*1.15,W/2,H/2); applyBlur(); }
   if(e.key==='-') { setZoom(cam.z/1.15,W/2,H/2); applyBlur(); } });
 function doPulse(){ if(nowS-pulseT<2.2||phase!=='play') return; pulseT=nowS; sndPulse();
-  const PR=ship.R*4.4,PR2=PR*PR;
+  const PR=ship.R*4.4*TR.m.pulse,PR2=PR*PR,PF=2400*TR.m.pulse;
   for(let i=0;i<alive;i++){ const o=i*8,dx=P[o]-ship.x,dy=P[o+1]-ship.y,d2=dx*dx+dy*dy;
-    if(d2<PR2){ const d=Math.sqrt(d2)||1,f=(1-d/PR)*2400/d; P[o+2]+=dx*f*.016; P[o+3]+=dy*f*.016; } }
+    if(d2<PR2){ const d=Math.sqrt(d2)||1,f=(1-d/PR)*PF/d; P[o+2]+=dx*f*.016; P[o+3]+=dy*f*.016; } }
   for(const h of HZ){ const dx=h.x-ship.x,dy=h.y-ship.y,d=Math.hypot(dx,dy)||1;
     if(d<PR){ h.vx+=dx/d*(1-d/PR)*420; h.vy+=dy/d*(1-d/PR)*420; } }
   ringFx(ship.x,ship.y,ship.R*.8,PR,myCol(),.55); netEvt({t:'pulse',x:ship.x,y:ship.y});
@@ -717,9 +772,11 @@ let nowS=0;
 function update(dt){
   nowS+=dt; palPhase+=gen.palDrift*dt; flowTick();
   ensureAcc+=dt; if(ensureAcc>.25){ ensureAcc=0; ensureChunks(); }
+  farUpdate();
   const drag=Math.exp(-4.5*dt);
   const RT=Rtarget(); ship.R+=(RT-ship.R)*Math.min(1,3*dt);
-  if(ship.tx!=null){ ship.vx+=((ship.tx-ship.x)*80-ship.vx*11)*dt; ship.vy+=((ship.ty-ship.y)*80-ship.vy*11)*dt; }
+  const K80=80*TR.m.speed;
+  if(ship.tx!=null){ ship.vx+=((ship.tx-ship.x)*K80-ship.vx*11)*dt; ship.vy+=((ship.ty-ship.y)*K80-ship.vy*11)*dt; }
   else{ flowAt(ship.x,ship.y,_fl); ship.vx+=(_fl[0]*.4-ship.vx*1.4)*dt; ship.vy+=(_fl[1]*.4-ship.vy*1.4)*dt; }
   ship.x+=ship.vx*dt; ship.y+=ship.vy*dt;                          // no walls — the goop goes on forever
   const spd=Math.hypot(ship.vx,ship.vy);
@@ -727,13 +784,13 @@ function update(dt){
   // wake + feeding parameters (the lab's push/swirl, scaled by ship size + speed)
   const R=ship.R, PR=R*1.55, PR2=PR*PR;
   const sSc=Math.pow(R/64,.55)*(.07+.93*Math.min(1,spd/300)); // near-still = permeable membrane (feed), moving = shove
-  const PUSH=1250*sSc, SWIRL=700*sSc, sgn=Math.sign(ship.vx||1);
+  const PUSH=1250*sSc, SWIRL=700*sSc, sgn=Math.sign(ship.vx||1)*TR.swirl;
   const cilia=has('cilia'),vortex=has('vortex'),spikes=has('spikes'),tent=has('tent'),bloom=has('bloom');
-  const eatR=R*1.18+(cilia?R*.22:0), eatR2=eatR*eatR;
+  const eatR=R*1.18*TR.m.reach+(cilia?R*.22:0), eatR2=eatR*eatR;
   const vEat=bloom?1e9:(cilia?400:210);
   const canEat=phase==='play'&&(spd<vEat); feedFlag=canEat;
-  const eatCap=Math.max(1,Math.round((4+stage*4+(bloom?20:0))*dt*60)); // rate is per-second, not per-frame
-  const pullR=R*3.2,pullR2=pullR*pullR,PULL=bloom?900:520;
+  const eatCap=Math.max(1,Math.round((4+stage*4+(bloom?20:0))*dt*60*TR.m.hunger)); // rate is per-second, not per-frame
+  const pullR=R*3.2,pullR2=pullR*pullR,PULL=(bloom?900:520)*TR.m.pull;
   let eats=0;
   const clearing=phase==='clear';
   // friends' wakes: precompute per-peer force params from their telemetry
@@ -741,7 +798,8 @@ function update(dt){
   if(NET.on) for(const p of NET.peers.values()){ if(!p.fresh||p.b!==biomeIdx||!isFinite(p.cx)) continue;
     const pspd=Math.hypot(p.vx||0,p.vy||0);
     const psc=Math.pow((p.R||30)/64,.55)*(.07+.93*Math.min(1,pspd/300));
-    RP.push({x:p.cx,y:p.cy,R:p.R||30,pr2:((p.R||30)*1.55)**2,er2:((p.R||30)*1.18+(p.st>=1?(p.R||30)*.22:0))**2,
+    RP.push({x:p.cx,y:p.cy,R:p.R||30,pr2:((p.R||30)*1.55)**2,
+      er2:((p.R||30)*1.18*(p.tr?p.tr.m.reach:1)+(p.st>=1?(p.R||30)*.22:0))**2,
       push:1250*psc,swirl:700*psc,sgn:Math.sign(p.vx||1),f:p.f&&phase==='play',eats:0,
       cap:Math.max(1,Math.round(8*dt*60))}); }
   for(let i=0;i<alive;i++){
@@ -759,8 +817,8 @@ function update(dt){
       vx+=nx*PUSH*fall*dt; vy+=ny*PUSH*fall*dt;
       vx+=-ny*SWIRL*fall*dt*sgn; vy+=nx*SWIRL*fall*dt*sgn;
     } else if(vortex&&d2<pullR2){
-      const d=Math.sqrt(d2)||1,f=PULL*(1-d/pullR);
-      vx+=(-dx/d*.85-dy/d*.35)*f*dt; vy+=(-dy/d*.85+dx/d*.35)*f*dt;
+      const d=Math.sqrt(d2)||1,f=PULL*(1-d/pullR),sw=TR.swirl;
+      vx+=(-dx/d*.85-dy/d*.35*sw)*f*dt; vy+=(-dy/d*.85+dx/d*.35*sw)*f*dt;
     }
     let dead=false;
     for(let k=0;k<RP.length;k++){ const q=RP[k];
@@ -801,7 +859,7 @@ function update(dt){
         toast('<b>CLOT POPPED</b> +25'); netEvt({t:'pop',x:h.x,y:h.y});
         try{navigator.vibrate&&navigator.vibrate(20);}catch(_){}}
       else if(nowS-invulnT>1.6){ invulnT=nowS; flashT=nowS; sndHurt();
-        mass=Math.max(40,mass*.88-15);
+        mass=Math.max(40,mass-(mass*.12+15)*(2-TR.m.guts));   // TOUGH lineages shrug more off
         const dx=ship.x-h.x,dy=ship.y-h.y,dd=Math.hypot(dx,dy)||1;
         ship.vx+=dx/dd*340; ship.vy+=dy/dd*340;
         ringFx(ship.x,ship.y,ship.R,ship.R*2.6,gen.danger,.6); try{navigator.vibrate&&navigator.vibrate(80);}catch(_){}}
@@ -814,11 +872,11 @@ function update(dt){
   TEX.step(gen,Math.max(2,TEXH/14|0));
 }
 
-// tentacles state
-const tents=[{gx:0,gy:0,x:0,y:0,ok:false,scan:0},{gx:0,gy:0,x:0,y:0,ok:false,scan:0}];
+// tentacles state (lineage decides 2 or 3)
+const tents=[{gx:0,gy:0,x:0,y:0,ok:false,scan:0},{gx:0,gy:0,x:0,y:0,ok:false,scan:0},{gx:0,gy:0,x:0,y:0,ok:false,scan:0}];
 function updateTentacles(dt){
-  const reach=ship.R*4.6;
-  for(let k=0;k<2;k++){ const T=tents[k];
+  const reach=ship.R*4.6*TR.m.reach;
+  for(let k=0;k<TR.tentN;k++){ const T=tents[k];
     if(!T.ok||nowS-T.scan>1.4){ T.scan=nowS; T.ok=false;
       for(let tr=0;tr<14;tr++){ const i=(Math.random()*alive)|0,o=i*8;
         const dx=P[o]-ship.x,dy=P[o+1]-ship.y,d=Math.hypot(dx,dy);
@@ -843,6 +901,7 @@ function render(){
   gooX.fillStyle='#000'; gooX.fillRect(0,0,W,H);
   gooX.globalCompositeOperation='lighter';
   gooX.setTransform(GR*z,0,0,GR*z,GR*ox,GR*oy);
+  drawFar(z);                                        // endless goop beyond the particle chunks
   const r=SPR, vx0=cam.x-W/(2*z)-r*2, vx1=cam.x+W/(2*z)+r*2, vy0=cam.y-H/(2*z)-r*2, vy1=cam.y+H/(2*z)+r*2;
   for(let i=0;i<alive;i++){ const o=i*8,x=P[o],y=P[o+1];
     if(x>vx0&&x<vx1&&y>vy0&&y<vy1) gooX.drawImage(sprite,x-r,y-r); }
@@ -885,10 +944,10 @@ function render(){
   // friends first (under my ship), then me
   if(NET.on) for(const [id,p] of NET.peers){ if(!p.fresh||p.b!==biomeIdx||!isFinite(p.cx)) continue;
     const pd=p.dna||defaultDNA();
-    drawShipAt(x,{x:p.cx,y:p.cy,vx:p.vx||0,vy:p.vy||0,R:p.R||30,st:p.st|0,dna:pd,
+    drawShipAt(x,{x:p.cx,y:p.cy,vx:p.vx||0,vy:p.vy||0,R:p.R||30,st:p.st|0,dna:pd,tr:p.tr||DEFAULT_TR,
       col:peerCol(p,id),inv:false,remote:true,
       hasFn:a=>{const i2=pd.lo.indexOf(a); return i2>=0&&i2<(p.st|0);}}); }
-  drawShipAt(x,{x:ship.x,y:ship.y,vx:ship.vx,vy:ship.vy,R:ship.R,st:stage,dna,col:sc,
+  drawShipAt(x,{x:ship.x,y:ship.y,vx:ship.vx,vy:ship.vy,R:ship.R,st:stage,dna,tr:TR,col:sc,
     inv:nowS-invulnT<1.6&&((nowS*14)|0)%2===0,remote:false,hasFn:has});
   x.globalCompositeOperation='lighter';
   for(let i=rings.length-1;i>=0;i--){ const g0=rings[i],u=(nowS-g0.t)/g0.life;
@@ -929,43 +988,47 @@ function render(){
 }
 function drawShipAt(x,S){
   const spd=Math.hypot(S.vx,S.vy),va=Math.atan2(S.vy,S.vx),R=S.R,sc=S.col,d0=S.dna;
-  const hasA=S.hasFn;
+  const tr=S.tr||DEFAULT_TR, hasA=S.hasFn;
   const cilia=hasA('cilia'),vortex=hasA('vortex'),spikes=hasA('spikes'),tent=hasA('tent'),bloom=hasA('bloom');
   x.save(); x.translate(S.x,S.y); x.rotate(va);
   const sq=Math.min(.16,spd*.0004); x.scale(1+sq,1-sq*.6); x.rotate(-va);
   if(vortex){ x.globalCompositeOperation='lighter';
-    for(let k=0;k<3;k++){ const a0=-nowS*2.2+k*2.1;
+    for(let k=0;k<3;k++){ const a0=-nowS*2.2*tr.swirl+k*2.1;
       x.strokeStyle=css(sc,.14); x.lineWidth=5;
       x.beginPath(); x.arc(0,0,R*(1.35+.4*k),a0,a0+1.9); x.stroke(); }
     x.globalCompositeOperation='source-over'; }
   if(bloom||d0.gl){ x.globalCompositeOperation='lighter'; x.globalAlpha=(bloom?.5+.2*Math.sin(nowS*2.6):.28);
     x.drawImage(glowCache(sc),-R*(bloom?2.6:1.9),-R*(bloom?2.6:1.9),R*(bloom?5.2:3.8),R*(bloom?5.2:3.8));
     x.globalAlpha=1; x.globalCompositeOperation='source-over'; }
-  // membrane: radial fbm wobble, amplitude gene-scaled
+  // membrane: radial fbm wobble + the lineage's lobe harmonic (deepens with stage)
   const K=26,amp=R*.07*d0.wb*(1+.35*Math.sin(nowS*2.1)),tt=nowS*.33;
+  const lf=tr.lobeAmp*(.45+.55*Math.min(1,S.st/5)), ns=(gen.seed^d0.seed)&1023;
   x.beginPath();
   for(let i=0;i<=K;i++){ const a=i/K*6.2832,cx2=Math.cos(a),cy2=Math.sin(a);
-    const n=vn(cx2*1.35+tt+9,cy2*1.35+tt*.8+4,gen.seed&1023);
-    const rr=R*(1+(n-.5)*2*(amp/R));
+    const n=vn(cx2*1.35+tt+9,cy2*1.35+tt*.8+4,ns);
+    const rr=R*(1+(n-.5)*2*(amp/R)+lf*Math.sin(a*tr.lobes+tr.phase));
     const px=cx2*rr,py=cy2*rr; i?x.lineTo(px,py):x.moveTo(px,py); }
   x.closePath();
   x.fillStyle=css(S.inv?gen.danger:sc,S.remote?.22:.30); x.fill();
   x.strokeStyle=css(lit(sc,1.35),S.remote?.6:.85); x.lineWidth=2; x.stroke();
-  // freckles (seeded inner dots)
+  // freckles + lineage mottle (constellation seeded by the goopling's own seed)
   if(d0.fr>0){ x.fillStyle=css(lit(sc,1.25),.5);
-    for(let i=0;i<d0.fr;i++){ const a=jhash(i,3,gen.seed^(d0.hue*7))*6.2832, rr=R*(0.35+jhash(i,9,gen.seed)*0.5);
-      x.beginPath(); x.arc(Math.cos(a)*rr,Math.sin(a)*rr,2+jhash(i,5,7)*2,0,6.2832); x.fill(); } }
+    for(let i=0;i<d0.fr;i++){ const a=jhash(i,3,d0.seed|0)*6.2832, rr=R*(0.35+jhash(i,9,d0.seed|0)*0.5);
+      x.beginPath(); x.arc(Math.cos(a)*rr,Math.sin(a)*rr,2+jhash(i,5,d0.seed|0)*2,0,6.2832); x.fill(); } }
+  if(tr.mott>0){ x.fillStyle=css(lit(sc,.8),.28);
+    for(let i=0;i<tr.mott;i++){ const a=jhash(i,17,d0.seed|0)*6.2832, rr=R*(0.2+jhash(i,23,d0.seed|0)*0.55);
+      x.beginPath(); x.arc(Math.cos(a)*rr,Math.sin(a)*rr,R*(.09+jhash(i,29,d0.seed|0)*.1),0,6.2832); x.fill(); } }
   // cilia fringe (length/density gene-scaled)
   if(cilia){ const nC=Math.min(60,Math.max(8,(R*.55*d0.cl)|0)); x.strokeStyle=css(sc,.55); x.lineWidth=1.4;
     x.beginPath();
-    for(let i=0;i<nC;i++){ const a=i/nC*6.2832,sw=Math.sin(nowS*7+i*1.7)*3.5;
+    for(let i=0;i<nC;i++){ const a=i/nC*6.2832,sw=Math.sin(nowS*7+i*1.7+tr.phase)*3.5;
       const r0=R*1.02,r1=R*1.02+(8+sw)*d0.cl;
       x.moveTo(Math.cos(a)*r0,Math.sin(a)*r0);
       x.lineTo(Math.cos(a+.06)*r1,Math.sin(a+.06)*r1); }
     x.stroke(); }
-  if(spikes){ const cd=(S.remote||S.preview)?1:Math.min(1,(nowS-spikeT)/4),len=4+14*cd;
+  if(spikes){ const cd=(S.remote||S.preview)?1:Math.min(1,(nowS-spikeT)/4),len=4+14*cd,sn=tr.spikeN;
     x.fillStyle=css(lit(sc,1.2),.8);
-    for(let i=0;i<9;i++){ const a=i/9*6.2832+nowS*.45;
+    for(let i=0;i<sn;i++){ const a=i/sn*6.2832+nowS*.45*tr.swirl;
       const bx=Math.cos(a),by=Math.sin(a),px2=-by,py2=bx;
       x.beginPath();
       x.moveTo(bx*(R+2)+px2*4,by*(R+2)+py2*4);
@@ -974,7 +1037,7 @@ function drawShipAt(x,S){
       x.closePath(); x.fill(); } }
   x.restore();
   if(tent&&!S.remote&&!S.preview){ x.strokeStyle=css(sc,.7); x.lineCap='round';
-    for(let k=0;k<2;k++){ const T=tents[k];
+    for(let k=0;k<tr.tentN;k++){ const T=tents[k];
       const a=Math.atan2(T.y-S.y,T.x-S.x);
       const bx=S.x+Math.cos(a)*R*.95,by=S.y+Math.sin(a)*R*.95;
       const mx=(bx+T.x)/2-Math.sin(a)*Math.sin(nowS*3.2+k*2.6)*24;
@@ -982,7 +1045,7 @@ function drawShipAt(x,S){
       x.lineWidth=4; x.beginPath(); x.moveTo(bx,by); x.quadraticCurveTo(mx,my,T.x,T.y); x.stroke();
       x.fillStyle=css(lit(sc,1.3),.9); x.beginPath(); x.arc(T.x,T.y,5,0,6.2832); x.fill(); } }
   else if(tent&&(S.remote||S.preview)){ x.strokeStyle=css(sc,.55); x.lineCap='round'; x.lineWidth=4;
-    for(let k=0;k<2;k++){ const a=va+2.4+k*1.4+Math.sin(nowS*2.5+k)*0.3, len=R*2.1;
+    for(let k=0;k<tr.tentN;k++){ const a=va+2.4+k*1.2+Math.sin(nowS*2.5+k)*0.3, len=R*2.1;
       const bx=S.x+Math.cos(a)*R*.95,by=S.y+Math.sin(a)*R*.95;
       const ex2=S.x+Math.cos(a)*len,ey2=S.y+Math.sin(a)*len;
       const mx=(bx+ex2)/2-Math.sin(a)*Math.sin(nowS*3+k*2)*18, my=(by+ey2)/2+Math.cos(a)*Math.sin(nowS*3+k*2)*18;
@@ -1013,7 +1076,7 @@ function openMenu(){ menuOpen=true; $('menu').style.display='grid'; ship.down=fa
 function closeMenu(){ menuOpen=false; $('menu').style.display='none'; dnaChanged(); }
 $('dnabtn').onclick=()=>menuOpen?closeMenu():openMenu();
 $('closeMenu').onclick=closeMenu;
-function dnaChanged(){ dna=cleanDNA(dna);
+function dnaChanged(){ dna=cleanDNA(dna); refreshTR();
   gFood=glowSprite(myCol()); hudBiome(); stageHud(); save(); netMeta(); }
 function syncMenuUI(){
   $('g_name').value=dna.name;
@@ -1025,6 +1088,8 @@ function syncMenuUI(){
   $('g_glow').classList.toggle('on',!!dna.gl); $('g_glow').style.background=dna.gl?'#1e5c46':'';
   [...$('g_eyes').children].forEach(b=>b.classList.toggle('on',+b.dataset.n===dna.eyes));
   $('saveNm').textContent=dna.name;
+  const t=deriveTraits(dna,stage);
+  $('traitwords').textContent=t.words.join(' · ')+' — deepens as it evolves';
 }
 $('g_name').oninput=e=>{ dna.name=cleanDNA({...dna,name:e.target.value}).name; $('saveNm').textContent=dna.name; };
 $('g_hue').oninput=e=>{ dna.hue=+e.target.value; $('g_hue_v').textContent=dna.hue; gFood=glowSprite(myCol()); hudBiome(); };
@@ -1034,6 +1099,8 @@ $('g_wb').oninput=e=>{ dna.wb=+e.target.value/100; $('g_wb_v').textContent=e.tar
 $('g_fr').oninput=e=>{ dna.fr=+e.target.value; $('g_fr_v').textContent=e.target.value; };
 $('g_glow').onclick=()=>{ dna.gl=dna.gl?0:1; syncMenuUI(); };
 $('g_eyes').onclick=e=>{ const n=+e.target.dataset?.n; if(n){ dna.eyes=n; syncMenuUI(); } };
+$('reroll').onclick=()=>{ dna.seed=rollSeed(); refreshTR(); syncMenuUI();
+  toast(`lineage rerolled — <b>${TR.words.join(' · ')}</b>`); };
 function buildLoadoutUI(){
   const box=$('loadout'); box.innerHTML='';
   dna.lo.forEach((a,i)=>{
@@ -1091,7 +1158,7 @@ prevC.onclick=()=>{ previewStage=previewStage>=5?-1:previewStage+1; };
 function renderPreview(){
   const s=prevC.width, c=prevX; c.setTransform(1,0,0,1,0,0); c.clearRect(0,0,s,s);
   const st=previewStage<0?stage:previewStage;
-  const S={x:s/2,y:s/2+4,vx:20,vy:-6,R:s*.26,st,dna,col:myCol(),inv:false,remote:false,preview:true,
+  const S={x:s/2,y:s/2+4,vx:20,vy:-6,R:s*.26,st,dna,tr:deriveTraits(dna,st),col:myCol(),inv:false,remote:false,preview:true,
     hasFn:a=>{const i=dna.lo.indexOf(a); return i>=0&&i<st;}};
   drawShipAt(c,S);
   c.setTransform(1,0,0,1,0,0); c.fillStyle='rgba(150,200,220,.5)'; c.font=`${s*.075}px ui-monospace,monospace`;
@@ -1112,8 +1179,8 @@ function frame(now){
 
 // ---------- test hooks (BB.tick-style; work with a hidden pane) -------------
 window.GG={
-  get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,stage,biomeIdx,gen,ship,HZ,cam,dna,stable,fps:fpsAvg,
-    chunks:loaded.size, shared:sharedEaten(),net:{on:NET.on,code:NET.code,peers:NET.peers.size,selfId:NET.selfId,offers:NET.offers.length}}; },
+  get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,stage,biomeIdx,gen,ship,HZ,cam,dna,stable,tr:TR,fps:fpsAvg,
+    chunks:loaded.size, far:FAR.cache.size, shared:sharedEaten(),net:{on:NET.on,code:NET.code,peers:NET.peers.size,selfId:NET.selfId,offers:NET.offers.length}}; },
   tick(dt=1/60,n=1){ for(let i=0;i<n;i++) update(dt); render(); },
   pt(x2,y2,down=true){ if(down){ ship.down=true; setTargetScreen(x2,y2,false); } else { ship.down=false; ship.tx=ship.ty=null; } },
   ptWorld(x2,y2){ ship.down=true; ship.tx=x2; ship.ty=y2; },
@@ -1126,6 +1193,7 @@ window.GG={
   pulse(){ pulseT=-9; doPulse(); },
   join(code){ return netJoin(code); },
   setDna(patch){ dna=cleanDNA({...dna,...patch}); dnaChanged(); return dna; },
+  reroll(){ dna.seed=rollSeed(); refreshTR(); return TR.words; },
   exportCode(){ return dnaCode(cleanDNA(dna)); },
   importCode(c){ const g=dnaFromCode(c); if(g){ stable.push(g); saveStable(); } return g; },
   menu(){ menuOpen?closeMenu():openMenu(); },
@@ -1143,6 +1211,7 @@ function boot(){
     document.getElementById('startover').style.display='block';
     document.getElementById('go').textContent=`RESUME — BIOME ${(sv.biome||0)+1}`; }
   let n=0; for(const f of FRACS) if(totalEaten>=f*REF) n++; stage=n;
+  refreshTR();
   resize();
   cam.z=Math.max(zMin,Math.min(zMax,Math.max(.65,Math.min(1.05,Math.min(W,H)/840))));
   enterBiome(sv?sv.biome||0:0,true);
