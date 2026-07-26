@@ -14,24 +14,28 @@ No install, no download, no account required. The whole game runs in your browse
 
 ## What is Last Ship Sailing?
 
-A free zero-gravity 3D ship-combat game, built as a hobby project and made to be played with friends:
+A free zero-gravity 3D ship-combat game, built as a hobby project and made to be played with friends. **Seven ships across three chassis** (Frigate, Corvette, Dreadnought), each with its own 3D model, weapons, ability tree, and shield archetype: PUNCTURE the sniper, SLAYER the duelist, VORTEX the beam corvette, TRACKER the spotter, SYPHON the drainer, PYRO the igniter, and BLASTER the gatling dreadnought.
 
-- **Seven ships across three chassis** (Frigate, Corvette, Dreadnought), each with its own 3D model, weapons, ability tree, and shield archetype: PUNCTURE the sniper, SLAYER the duelist, VORTEX the beam corvette, TRACKER the spotter, SYPHON the drainer, PYRO the igniter, and BLASTER the gatling dreadnought.
-- **Multiplayer deathmatch** over peer-to-peer networking: no game servers, you connect directly through the in-game lobby.
-- **Champion Mode**: bigger arenas, rotating tri-axis stasis fields, contested-charge mechanics.
-- **HOARD**: co-op survival against the leviathans that drift the arena outskirts.
-- **VR support** for Meta Quest headsets; you can fly the ship from the cockpit.
-- Bots to shoot at if nobody else is online, a generative music engine, spatial audio, and terrain that goes all the way down.
+**Five game modes**, all playable solo with bots or together with friends (share a room code, then pick a mode):
+
+- **Campaign Mode**: the story journey. Fight your way across the world leg by leg, through boss portals to the finale. Newest mode and under active construction, which is exactly why it needs testers.
+- **Exhibition Mode (Aegis Ranks)**: patrol the open mossy overworld that serves as the campaign hub. Destroy ships in the hub and its zone-rift caverns to earn XP and climb each ship's Aegis rank ladder, unlocking permanent per-ship upgrades. Progression is separate for every ship.
+- **LSS Mode**: the classic multiplayer PvP deathmatch the game is named for. Last ship sailing wins. Host an open room and fight bots while you wait; challengers drop in and take a bot's seat.
+- **Assault Mode**: one fleet defends the Champion Field, the other storms it. Roles swap every round.
+- **Race Mode**: sprint the track against bots or friends.
+
+Plus: **multiplayer over peer-to-peer networking** (no game servers, you connect directly through the in-game lobby), **VR support** for Meta Quest headsets (you can fly the ship from the cockpit), a generative music engine, spatial audio, and terrain that goes all the way down.
 
 ## What we need tested
 
 Anything you're willing to throw at it helps, but these are the hot spots:
 
-1. **Multiplayer.** Grab a friend (or find one in our Discord) and fight. We need to know how the P2P connection holds up across different regions, networks, and connection qualities. Rubber-banding, desyncs, ghost ships, drops: we want all of it reported.
-2. **Performance on your hardware.** The game is GPU-heavy and I can only test on the machines I own. Whatever you've got (a gaming rig, a five-year-old laptop, integrated graphics), tell us your framerate and where it dips. The hub and first-contact combat are the usual suspects.
-3. **VR.** If you have a Quest, play in VR and tell us what feels right and what makes you want to take the headset off.
-4. **Input.** Keyboard and mouse, gamepad, touch: all supported, all in need of feedback.
-5. **The first five minutes.** If you've never played before, you're the most valuable tester we have. Where did you get confused? What did you click that did nothing? What made you close the tab, if you did?
+1. **Multiplayer.** Grab a friend (or find one in our Discord), share a room code, and try every mode together: LSS deathmatch, Assault, Race, Campaign. We need to know how the P2P connection holds up across different regions, networks, and connection qualities. Rubber-banding, desyncs, ghost ships, drops: we want all of it reported.
+2. **Campaign Mode.** It's the newest and roughest mode. Play it solo and co-op, and tell us where it breaks, where it drags, and where it shines.
+3. **Performance on your hardware.** The game is GPU-heavy and I can only test on the machines I own. Whatever you've got (a gaming rig, a five-year-old laptop, integrated graphics), tell us your framerate and where it dips. The hub and first-contact combat are the usual suspects.
+4. **VR.** If you have a Quest, play in VR and tell us what feels right and what makes you want to take the headset off.
+5. **Input.** Keyboard and mouse, gamepad, touch: all supported, all in need of feedback.
+6. **The first five minutes.** If you've never played before, you're the most valuable tester we have. Where did you get confused? What did you click that did nothing? What made you close the tab, if you did?
 
 ## How to report
 
