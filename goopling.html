@@ -87,6 +87,30 @@
   .strow .nm{flex:1;color:#cfe;letter-spacing:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   #dnacode{width:100%;box-sizing:border-box;margin-top:5px}
   .mrow{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+  /* ---- branch (mutation choice) overlay ---- */
+  #branch{position:fixed;inset:0;display:none;place-items:center;background:rgba(3,6,10,.78);z-index:8;padding:16px}
+  #branch .bpanel{width:min(430px,94vw);text-align:center}
+  #branch h2{margin:0;font-size:19px;color:#7ff0cf;letter-spacing:5px;text-shadow:0 0 20px rgba(80,255,200,.4)}
+  #btier{color:#69859a;font-size:10.5px;letter-spacing:2px;margin:5px 0 3px}
+  #branch .bsub{color:#7d97ab;font-size:11.5px;margin-bottom:14px}
+  .bcards{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+  .bcard{flex:1 1 160px;min-width:150px;background:rgba(10,22,30,.92);border:1px solid rgba(90,180,150,.4);
+    border-radius:12px;padding:16px 12px;cursor:pointer;font:inherit;color:#cfe;transition:transform .12s,border-color .12s}
+  .bcard:hover{border-color:#3fd8b0;transform:translateY(-2px)}
+  .bcard:active{transform:scale(.97)}
+  .bcard .bn{display:block;font-size:14px;color:#8fd;letter-spacing:2px;margin-bottom:6px}
+  .bcard .bd{display:block;font-size:11px;color:#9bc;line-height:1.5}
+  /* ---- tree view in the lab ---- */
+  .trow{display:flex;gap:5px;align-items:stretch;margin:4px 0}
+  .tnum{flex:0 0 14px;color:#456;font-size:10px;display:flex;align-items:center}
+  .topt{flex:1;border:1px solid rgba(80,140,180,.22);border-radius:7px;padding:4px 7px;font-size:10.5px;background:rgba(15,30,40,.4)}
+  .topt .tn{color:#7f96a8;letter-spacing:1px}
+  .topt .td{color:#4c6274;font-size:9.5px}
+  .topt.taken{border-color:rgba(120,255,200,.55);background:rgba(20,60,48,.5)}
+  .topt.taken .tn{color:#8fd}
+  .topt.taken .td{color:#8aa}
+  .topt.lost{opacity:.42}
+  .trow.next .topt{border-color:rgba(255,210,120,.5)}
 </style>
 </head>
 <body>
@@ -112,8 +136,9 @@
     <b>hold &amp; drag</b> — slosh through the goop<br>
     <b>move slowly</b> — feed on it · grow<br>
     <b>pinch / wheel</b> — zoom in &amp; out<br>
+    <b>grow</b> — choose a mutation at each branch<br>
+    <b>wake the core</b> — solve its seal to move on<br>
     <b>microbes bite</b> — double-tap: pulse pops them<br>
-    <b>ride the streams</b> — pop clots for parts<br>
     <b>🧬</b> — customize · save · trade gooplings
   </div><br>
   <div id="roomrow"><input id="roomcode" placeholder="room code" maxlength="12" autocomplete="off" spellcheck="false"><button id="mkroom">✦ new</button></div>
@@ -140,7 +165,7 @@
       <div class="row"><label>freckles</label><input id="g_fr" type="range" min="0" max="8" step="1"><span class="v" id="g_fr_v"></span></div>
     </div>
   </div>
-  <h3>ABILITY ORDER — evolve in this sequence</h3>
+  <h3>MUTATION TREE — one path, chosen branch by branch</h3>
   <div id="loadout"></div>
   <h3>STABLE — saved gooplings</h3>
   <div id="stable"></div>
@@ -153,6 +178,15 @@
   <input id="dnacode" type="text" placeholder="paste a GPL1. dna code here" spellcheck="false">
   <div class="mrow"><button id="importDna">import code</button></div>
   <div id="offers"></div>
+</div></div>
+<div id="branch"><div class="bpanel">
+  <h2>MUTATION</h2>
+  <div id="btier"></div>
+  <div class="bsub">this branch is permanent — the other path closes</div>
+  <div class="bcards">
+    <button class="bcard" id="bc0"><span class="bn"></span><span class="bd"></span></button>
+    <button class="bcard" id="bc1"><span class="bn"></span><span class="bd"></span></button>
+  </div>
 </div></div>
 <div class="fps" id="fps"></div>
 
@@ -274,15 +308,18 @@ function texSample(g,u,v,t,asp){
 }
 
 // ---------- goopling DNA (look + ability order; savable + tradable) ---------
-const LOADOUT_ALL=['cilia','vortex','spikes','tent','bloom'];
-const ABIL={ cilia:{n:'CILIA',d:'feed while moving faster'},
-  vortex:{n:'VORTEX',d:'nearby goop is drawn in'},
-  spikes:{n:'SPIKES',d:'pop clots into nutrients'},
-  tent:{n:'TENTACLES',d:'reach out to distant goop'},
-  bloom:{n:'BLOOM',d:'total absorption'} };
+// ---- the mutation TREE: at every tier you pick ONE of two paths, forever ----
+const TREE=[
+  [{id:'cilia', n:'CILIA',     d:'feed while moving fast'},   {id:'gullet', n:'GULLET',  d:'vast maw — gorge while still'}],
+  [{id:'vortex',n:'VORTEX',    d:'draw nearby goop inward'},   {id:'jet',    n:'JET',     d:'swim fast, slip through goop'}],
+  [{id:'spikes',n:'SPIKES',    d:'burst clots on contact'},    {id:'solvent',n:'SOLVENT', d:'dissolve whatever touches you'}],
+  [{id:'tent',  n:'TENTACLES', d:'reach out to distant goop'}, {id:'mitosis',n:'MITOSIS', d:'bud a feeding satellite'}],
+  [{id:'bloom', n:'BLOOM',     d:'total absorption'},          {id:'nova',   n:'NOVA',    d:'relentless, devastating pulse'}],
+];
+const ABIL={}; for(const _t of TREE) for(const _o of _t) ABIL[_o.id]=_o;
 const FRACS=[.12,.34,.66,1.05,1.55];
 function rollSeed(){ return (Math.random()*4294967295)>>>0; }
-function defaultDNA(){ return {v:1,name:'GOOPLING',seed:rollSeed(),hue:0,eyes:1,pu:.42,cl:1,wb:1,fr:3,gl:0,lo:LOADOUT_ALL.slice()}; }
+function defaultDNA(){ return {v:1,name:'GOOPLING',seed:rollSeed(),hue:0,eyes:1,pu:.42,cl:1,wb:1,fr:3,gl:0,path:[]}; }
 function cleanDNA(d){
   const b=defaultDNA(); if(!d||typeof d!=='object') return b;
   const num=(v,lo,hi,dv)=>typeof v==='number'&&isFinite(v)?Math.max(lo,Math.min(hi,v)):dv;
@@ -290,7 +327,7 @@ function cleanDNA(d){
   b.seed=(typeof d.seed==='number'&&isFinite(d.seed))?(d.seed>>>0):rollSeed();
   b.hue=num(d.hue,0,359,0)|0; b.eyes=num(d.eyes,1,3,1)|0; b.pu=num(d.pu,.25,.6,.42);
   b.cl=num(d.cl,.4,2,1); b.wb=num(d.wb,.3,2,1); b.fr=num(d.fr,0,8,3)|0; b.gl=d.gl?1:0;
-  if(Array.isArray(d.lo)&&d.lo.length===5&&d.lo.slice().sort().join()===LOADOUT_ALL.slice().sort().join()) b.lo=d.lo.slice();
+  if(Array.isArray(d.path)) b.path=d.path.slice(0,5).map(v=>v?1:0);
   return b;
 }
 // ---- lineage traits: every goopling's seed grows a unique body + playstyle --
@@ -312,13 +349,22 @@ let TR=null; const DEFAULT_TR=deriveTraits({seed:1},5);
 function refreshTR(){ TR=deriveTraits(dna,stage);
   if(typeof parts!=='undefined') for(const p of parts){ const def=PARTS[p.id]; if(!def) continue;
     if(def.g==='sail') TR.sail*=1+def.v;
-    else TR.m[def.g]=Math.min(1.6,TR.m[def.g]*(1+def.v)); } }
+    else TR.m[def.g]=Math.min(1.6,TR.m[def.g]*(1+def.v)); }
+  if(has('jet')){ TR.m.speed*=1.35; TR.sail*=1.45; }   // branch abilities lean the body too
+  if(has('gullet')) TR.m.hunger*=1.15;
+  if(has('nova')) TR.m.pulse*=1.5;
+}
 function dnaCode(d){ return 'GPL1.'+btoa(JSON.stringify(d)); }
 function dnaFromCode(s){ try{ s=String(s).trim(); if(!s.startsWith('GPL1.')) return null;
   return cleanDNA(JSON.parse(atob(s.slice(5)))); }catch(_){ return null; } }
 let dna=defaultDNA();
 function myCol(){ return dna.hue?hueRot(gen.shipCol,dna.hue):gen.shipCol; }
-function has(a){ const i=dna.lo.indexOf(a); return i>=0&&i<stage; }
+function abilsOf(d,st){ const out=[]; const p=d.path||[];
+  for(let i=0;i<Math.min(st,p.length,5);i++) out.push(TREE[i][p[i]?1:0].id); return out; }
+function has(a){ const p=dna.path;
+  for(let i=0;i<Math.min(stage,p.length,5);i++) if(TREE[i][p[i]?1:0].id===a) return true;
+  return false; }
+function tiersUnlocked(){ let n=0; for(const f of FRACS) if(totalEaten>=f*REF) n++; return n; }
 
 // ---------- infinite world: camera ------------------------------------------
 // no bounds — deterministic goop chunks stream in around you (same seed => the
@@ -578,13 +624,35 @@ let phase='intro', phaseT=0, invulnT=-9, flashT=-9, pulseT=-9, spikeT=-9, hintT=
 let eatCombo=0, comboT=0, ensureAcc=9;
 function quotaFor(b){ return 2800+Math.min(8,b)*400; }
 function Rtarget(){ return Math.min(150, 18+30*Math.sqrt(mass/300)); }
-function checkEvos(){ let n=0; for(const f of FRACS) if(totalEaten>=f*REF) n++;
-  if(n>stage){ stage=n; refreshTR(); const a=ABIL[dna.lo[n-1]];
+// evolution = a CHOICE. Crossing a threshold opens a branch; the pick is permanent
+// (a traded goopling arrives with its path already chosen — it just comes online).
+let branchOpen=false, branchT=-9, bArmed=-1;
+function checkEvos(){
+  const n=tiersUnlocked(), prev=stage;
+  stage=Math.min(dna.path.length,n,5);
+  if(stage>prev){ refreshTR(); const a=ABIL[abilsOf(dna,stage)[stage-1]];
     toast(`<b>EVOLVED — ${a.n}</b><br><span style="font-size:11px;color:#9bc">${a.d}</span>`);
     sndEvolve(); ringFx(ship.x,ship.y,ship.R,ship.R*3.4,myCol(),.8); try{navigator.vibrate&&navigator.vibrate(30);}catch(_){}
-    netEvt({t:'evolve',x:ship.x,y:ship.y}); stageHud(); save(); buildLoadoutUI(); } }
+    netEvt({t:'evolve',x:ship.x,y:ship.y}); stageHud(); save(); netMeta(); buildTreeUI(); }
+  if(dna.path.length<n&&dna.path.length<5&&!branchOpen&&phase==='play'&&!menuOpen) openBranch();
+}
+function openBranch(){
+  const tier=dna.path.length; if(tier>4) return;
+  branchOpen=true; branchT=nowS; bArmed=-1; ship.down=false; ship.tx=ship.ty=null; ptrs.clear();
+  document.getElementById('btier').textContent=`MUTATION ${tier+1} OF 5`;
+  for(let c=0;c<2;c++){ const o=TREE[tier][c], el=document.getElementById('bc'+c);
+    el.querySelector('.bn').textContent=o.n; el.querySelector('.bd').textContent=o.d; }
+  document.getElementById('branch').style.display='grid';
+  sndBranch();
+}
+function pickBranch(c){
+  if(!branchOpen||nowS-branchT<.45) return; branchOpen=false;
+  document.getElementById('branch').style.display='none';
+  dna.path.push(c?1:0); checkEvos(); syncMenuUI(); buildTreeUI();
+}
 function stageHud(){ let s=''; for(let i=0;i<5;i++) s+=i<stage?'◉ ':'○ ';
-  document.getElementById('stagebar').textContent=s+(stage>0?ABIL[dna.lo[stage-1]].n:'PROTOCELL'); }
+  const ab=abilsOf(dna,stage);
+  document.getElementById('stagebar').textContent=s+(stage>0?ABIL[ab[stage-1]].n:'PROTOCELL'); }
 
 // ---------- hazards (clots drift in a loose ring around you) ----------------
 let HZ=[];
@@ -641,7 +709,7 @@ function updateMicrobes(dt){
     const wantSw=Math.min(14,2+biomeIdx*2), wantSp=biomeIdx>=2?Math.min(4,1+((biomeIdx-2)>>1)):0;
     let sw=0,sp=0; for(const m of MB) m.type?sp++:sw++;
     if(sw<wantSw) spawnMb(0); if(sp<wantSp) spawnMb(1); }
-  const spikes=has('spikes'), bloom=has('bloom');
+  const spikes=has('spikes')||has('solvent'), bloom=has('bloom');
   for(let i=MB.length-1;i>=0;i--){ const m=MB[i];
     const dx=ship.x-m.x, dy=ship.y-m.y, d=Math.hypot(dx,dy)||1;
     if(d>2600){ MB.splice(i,1); continue; }
@@ -670,6 +738,75 @@ function updateMicrobes(dt){
     if(d<ship.R+16){ addPart(u.id, Math.atan2(u.y-ship.y,u.x-ship.x)); PU.splice(i,1); } }
 }
 
+// ---------- THE SEAL: each biome's clearing puzzle ---------------------------
+// Eating the quota only WAKES the biome's core. The core then shows a colour
+// sequence; you must swim through the drifting nodes in that exact order before
+// the core's patience runs out. Order is deterministic per biome (so a whole
+// room sees the same puzzle and can split up); the origin is broadcast so
+// everyone converges on one arena. Get it right -> the core opens -> eat it.
+const SEAL={on:false,open:false,x:0,y:0,seed:0,nodes:[],order:[],idx:0,deadline:0,
+  failT:-9,litT:-9,lastTouch:-9,coreR:52};
+function sealSeed(){ return hashU((gen.seed^0x5EA15EA1)+Math.imul(biomeIdx+1,0x9e3779b9)); }
+function sealReset(){ SEAL.on=false; SEAL.open=false; SEAL.nodes=[]; SEAL.order=[]; SEAL.idx=0; }
+function startSeal(ox,oy,sd,quiet){
+  const R=makeRng(sd>>>0), n=3+Math.min(3,biomeIdx);
+  SEAL.on=true; SEAL.open=false; SEAL.x=ox; SEAL.y=oy; SEAL.seed=sd>>>0;
+  SEAL.nodes=[]; SEAL.idx=0; SEAL.lastTouch=-9;
+  for(let i=0;i<n;i++){ const a=(i/n)*6.2832+R.f(-.5,.5), r=R.f(760,1500);
+    SEAL.nodes.push({x:ox+Math.cos(a)*r, y:oy+Math.sin(a)*r, ox:ox+Math.cos(a)*r, oy:oy+Math.sin(a)*r,
+      hue:(i*360/n+R.f(-14,14)+360)%360, ph:R.f(0,7), r:30, lit:false}); }
+  SEAL.order=SEAL.nodes.map((_,i)=>i);
+  for(let i=SEAL.order.length-1;i>0;i--){ const j=R.i(i+1); const t=SEAL.order[i]; SEAL.order[i]=SEAL.order[j]; SEAL.order[j]=t; }
+  SEAL.deadline=nowS+30+n*8;
+  if(!quiet){ toast('<b>THE CORE WAKES</b><br><span style="font-size:11px;color:#9bc">touch the nodes in the core’s colour order</span>');
+    sndSeal(); }
+  hudBiome();
+}
+function beginSeal(){
+  const sd=sealSeed(), a=Math.random()*6.2832;
+  startSeal(ship.x+Math.cos(a)*260, ship.y+Math.sin(a)*260, sd);
+  netEvt({t:'seal',x:SEAL.x,y:SEAL.y,s:SEAL.seed});
+}
+function sealFail(){ SEAL.failT=nowS; SEAL.idx=0;
+  for(const nd of SEAL.nodes) nd.lit=false;
+  SEAL.deadline=nowS+30+SEAL.nodes.length*8;
+  beep(200,70,.45,'sawtooth',.28); toast('<b>SEQUENCE BROKEN</b>');
+  try{navigator.vibrate&&navigator.vibrate([40,60,40]);}catch(_){} }
+function sealLight(i,remote){
+  const nd=SEAL.nodes[i]; if(!nd||nd.lit) return;
+  nd.lit=true; SEAL.idx++; SEAL.litT=nowS;
+  beep(360*Math.pow(1.18,SEAL.idx),540*Math.pow(1.18,SEAL.idx),.2,'triangle',.2);
+  ringFx(nd.x,nd.y,10,120,hsl2rgb(nd.hue/360,.85,.6),.55);
+  if(!remote) netEvt({t:'node',i,s:SEAL.seed});
+  if(SEAL.idx>=SEAL.order.length){ SEAL.open=true;
+    toast('<b>CORE EXPOSED</b><br><span style="font-size:11px;color:#9bc">consume it to leave this biome</span>');
+    sndSealOpen(); ringFx(SEAL.x,SEAL.y,SEAL.coreR,SEAL.coreR*6,myCol(),1.1); }
+}
+function updateSeal(dt){
+  if(!SEAL.on) return;
+  for(const nd of SEAL.nodes){                       // nodes bob on the current
+    flowAt(nd.x,nd.y,_fl);
+    nd.x+=(_fl[0]*.25+Math.sin(nowS*.6+nd.ph)*9)*dt; nd.y+=(_fl[1]*.25+Math.cos(nowS*.5+nd.ph)*9)*dt;
+    const dx=nd.x-nd.ox,dy=nd.y-nd.oy,d=Math.hypot(dx,dy);
+    if(d>240){ nd.x-=dx/d*(d-240); nd.y-=dy/d*(d-240); }   // tethered near home
+  }
+  if(!SEAL.open){
+    if(nowS>SEAL.deadline){ sealFail(); return; }
+    if(nowS-SEAL.failT>1.1) for(let i=0;i<SEAL.nodes.length;i++){ const nd=SEAL.nodes[i];
+      if(nd.lit) continue;
+      if(Math.hypot(nd.x-ship.x,nd.y-ship.y)<nd.r+ship.R*.9){
+        if(nowS-SEAL.lastTouch<.35) continue; SEAL.lastTouch=nowS;
+        if(SEAL.order[SEAL.idx]===i) sealLight(i);
+        else { sealFail(); netEvt({t:'sealfail',s:SEAL.seed}); }
+        break; } }
+  } else if(Math.hypot(SEAL.x-ship.x,SEAL.y-ship.y)<SEAL.coreR+ship.R*.9){
+    mass+=120; startClear();
+  }
+}
+function sndSeal(){ [0,5,9].forEach((s,i)=>setTimeout(()=>beep(180*Math.pow(2,s/12),182*Math.pow(2,s/12),.5,'sine',.22),i*130)); }
+function sndSealOpen(){ [0,7,12,19].forEach((s,i)=>setTimeout(()=>beep(300*Math.pow(2,s/12),305*Math.pow(2,s/12),.35,'triangle',.2),i*110)); }
+function sndBranch(){ beep(520,780,.3,'sine',.2); setTimeout(()=>beep(780,1040,.25,'triangle',.15),140); }
+
 // ---------- fx pools --------------------------------------------------------
 const streaks=[],rings=[];
 function streakFx(x,y,tx2,ty2){ if(streaks.length<160) streaks.push({x,y,tx:tx2,ty:ty2,t:nowS}); }
@@ -696,13 +833,17 @@ function sndClear(){ beep(240,880,.7,'sine',.2); setTimeout(()=>beep(480,1320,.5
 const toastEl=document.getElementById('toast');
 function toast(html){ const d=document.createElement('div'); d.className='tmsg'; d.innerHTML=html;
   toastEl.appendChild(d); setTimeout(()=>d.remove(),2900); }
-function hudBiome(){ document.getElementById('bname').textContent=`biome ${biomeIdx+1} — ${gen.name}`;
-  document.getElementById('pbar').style.background=css(myCol(),1); }
+function hudBiome(){ document.getElementById('bname').textContent=
+    SEAL.on?(SEAL.open?`biome ${biomeIdx+1} — CORE OPEN`:`biome ${biomeIdx+1} — SEAL ${SEAL.idx}/${SEAL.nodes.length}`)
+           :`biome ${biomeIdx+1} — ${gen.name}`;
+  document.getElementById('pbar').style.background=css(SEAL.on?gen.danger:myCol(),1); }
 let lastPct=-1;
 function sharedEaten(){ let t=eatenBiome;
   for(const p of NET.peers.values()) if(p.fresh&&p.b===biomeIdx) t+=p.e||0; return t; }
-function hudProgress(){ const p=Math.min(100,Math.round(sharedEaten()/QUOTA*100));
-  if(p!==lastPct){ lastPct=p; document.getElementById('pbar').style.width=p+'%'; } }
+function hudProgress(){
+  const p=SEAL.on?(SEAL.open?100:Math.round(SEAL.idx/Math.max(1,SEAL.nodes.length)*100))
+                 :Math.min(100,Math.round(sharedEaten()/QUOTA*100));
+  if(p!==lastPct){ lastPct=p; document.getElementById('pbar').style.width=p+'%'; hudBiome(); } }
 
 // ---------- save: progression + the stable of named gooplings ---------------
 function save(){ try{ localStorage.setItem('goopling_v1',JSON.stringify({seed:masterSeed,biome:biomeIdx,mass,eaten:totalEaten,mute:muted,dna,parts})); }catch(_){} }
@@ -719,7 +860,7 @@ function freshWorld(scatter){ loaded.clear(); chunkBirth.clear(); alive=0; ensur
 function enterBiome(i,fresh){
   biomeIdx=i; gen=growBiome(biomeSeed(i)); QUOTA=quotaFor(i); farClear();
   gFood=glowSprite(myCol()); gDanger=glowSprite(gen.danger);
-  eatenBiome=0; lastPct=-1; flowInit();
+  eatenBiome=0; lastPct=-1; sealReset(); flowInit();
   if(fresh){ ship.x=0; ship.y=0; ship.vx=ship.vy=0; cam.x=0; cam.y=0; }
   freshWorld(false); makeHazards(); hudBiome(); hudProgress(); stageHud();
   document.querySelector('meta[name=theme-color]').content=css(lit(myCol(),.25),1);
@@ -730,7 +871,7 @@ function startClear(){ phase='clear'; phaseT=nowS; sndClear();
 function finishClear(){ biomeIdx++; QUOTA=quotaFor(biomeIdx);
   mass=60+(mass-60)*.35;                            // molt: shed bulk to seed the new biome (evolutions stay)
   gFood=glowSprite(myCol()); gDanger=glowSprite(gen.danger);
-  eatenBiome=0; lastPct=-1; flowInit(); freshWorld(true); makeHazards();
+  eatenBiome=0; lastPct=-1; sealReset(); flowInit(); freshWorld(true); makeHazards();
   hudBiome(); hudProgress();
   toast(`<b>BIOME ${biomeIdx+1}</b> — ${gen.name}<br><span style="font-size:11px;color:#9bc">molted — grow again</span>`);
   phase='spawn'; phaseT=nowS; save();
@@ -742,7 +883,7 @@ function jumpToBiome(b){ // multiplayer fast-forward: the room moved on, follow 
   mass=60+(mass-60)*.35;                            // molt here too, same as a local transition
   gFood=glowSprite(myCol()); gDanger=glowSprite(gen.danger);
   TEX.beginFade(); TEX.full(gen);
-  eatenBiome=0; lastPct=-1; flowInit(); freshWorld(true); makeHazards();
+  eatenBiome=0; lastPct=-1; sealReset(); flowInit(); freshWorld(true); makeHazards();
   hudBiome(); hudProgress(); toast(`<b>BIOME ${biomeIdx+1}</b> — ${gen.name}`);
   if(phase!=='intro'){ phase='spawn'; phaseT=nowS; } save();
 }
@@ -774,7 +915,8 @@ function updatePeersHud(){ const el=document.getElementById('peers'), n=NET.peer
   el.style.display='block'; el.textContent=`⬡ room ${NET.code} · ${n+1} goopling${n?'s':''} — tap to copy invite`; }
 function netEvt(d){ if(NET.on&&NET.sendEvt) try{ NET.sendEvt(d); }catch(_){} }
 function netMeta(to){ if(NET.on&&NET.sendMeta) try{
-  NET.sendMeta({dna,parts:parts.map(p=>({id:p.id,ang:+(p.ang||0).toFixed(2)})),jt:NET.joinT},to); }catch(_){} }
+  NET.sendMeta({dna,abils:abilsOf(dna,stage),
+    parts:parts.map(p=>({id:p.id,ang:+(p.ang||0).toFixed(2)})),jt:NET.joinT},to); }catch(_){} }
 const num=(v,lo,hi)=>typeof v==='number'&&isFinite(v)?Math.max(lo,Math.min(hi,v)):lo;
 async function netJoin(code){
   code=String(code||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);
@@ -815,6 +957,7 @@ async function _netJoin(code){
       p.tr=deriveTraits(p.dna,5);                    // lineage visuals for rendering them
       p.parts=Array.isArray(d.parts)?d.parts.slice(0,3)
         .filter(q=>q&&PARTS[q.id]).map(q=>({id:q.id,ang:num(q.ang,-7,7)})):[];
+      p.abils=Array.isArray(d.abils)?d.abils.slice(0,5).filter(a=>ABIL[a]):abilsOf(p.dna,5);
       NET.peers.set(id,p); });
     onCfg((d,id)=>{ if(!d||typeof d!=='object') return;
       if(num(d.jt,0,9e15)>=NET.joinT) return;      // only an elder's replay counts
@@ -827,6 +970,13 @@ async function _netJoin(code){
       if(d.t==='pulse') ringFx(x,y,20,300,peerCol(p,id),.55);
       else if(d.t==='pop') ringFx(x,y,6,110,gen.danger,.5);
       else if(d.t==='evolve') ringFx(x,y,30,180,peerCol(p,id),.8);
+      // the seal is one shared puzzle: first origin broadcast wins (seed tiebreak),
+      // and anyone lighting a node advances it for the whole room
+      else if(d.t==='seal'){ const sd=num(d.s,0,4294967295)>>>0;
+        if(!SEAL.on||(sd<SEAL.seed&&!SEAL.open)) startSeal(x,y,sd,SEAL.on); }
+      else if(d.t==='node'){ if(SEAL.on&&!SEAL.open&&num(d.s,0,4294967295)>>>0===SEAL.seed){
+        const i=num(d.i,0,7)|0; if(SEAL.order[SEAL.idx]===i) sealLight(i,true); } }
+      else if(d.t==='sealfail'){ if(SEAL.on&&!SEAL.open&&num(d.s,0,4294967295)>>>0===SEAL.seed) sealFail(); }
     });
     onDna((d,id)=>{ if(!d||typeof d!=='object') return;
       const g=cleanDNA(d.dna); const p=NET.peers.get(id);
@@ -889,7 +1039,7 @@ function setTargetScreen(sx,sy,touch){
 function pinchInfo(){ const it=[...ptrs.values()];
   return { d:Math.hypot(it[0].x-it[1].x,it[0].y-it[1].y)||1,
            mx:(it[0].x+it[1].x)/2, my:(it[0].y+it[1].y)/2 }; }
-addEventListener('pointerdown',e=>{ if(phase==='intro'||menuOpen) return;
+addEventListener('pointerdown',e=>{ if(phase==='intro'||menuOpen||branchOpen) return;
   if(e.target.closest&&e.target.closest('#hudR,#hudL,#menu')) return;
   initAudio(); if(AC&&AC.state==='suspended') AC.resume();
   ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY,t:e.pointerType});
@@ -901,7 +1051,7 @@ addEventListener('pointerdown',e=>{ if(phase==='intro'||menuOpen) return;
   const n=nowS;
   if(n-lastTapT<.32 && Math.hypot(e.clientX-lastTapX,e.clientY-lastTapY)<80 && n-pinchEndT>.5) doPulse();
   lastTapT=n; lastTapX=e.clientX; lastTapY=e.clientY; });
-addEventListener('pointermove',e=>{ if(phase==='intro'||menuOpen) return;
+addEventListener('pointermove',e=>{ if(phase==='intro'||menuOpen||branchOpen) return;
   const p=ptrs.get(e.pointerId); if(p){ p.x=e.clientX; p.y=e.clientY; }
   if(ptrs.size>=2&&pinch){ const pi=pinchInfo();
     cam.z=Math.max(zMin,Math.min(zMax,cam.z*pi.d/pinch.d)); pinch.d=pi.d;
@@ -916,18 +1066,22 @@ function dropPtr(e){ ptrs.delete(e.pointerId);
     ship.down=false; ship.tx=ship.ty=null; } }
 addEventListener('pointerup',dropPtr);
 addEventListener('pointercancel',dropPtr);
-addEventListener('wheel',e=>{ if(phase==='intro'||menuOpen) return; e.preventDefault();
+addEventListener('wheel',e=>{ if(phase==='intro'||menuOpen||branchOpen) return; e.preventDefault();
   const z=cam.z*Math.exp(-e.deltaY*0.0016);
   setZoom(z,e.clientX,e.clientY); applyBlur(); },{passive:false});
-addEventListener('touchstart',e=>{ if(!(e.target.closest&&e.target.closest('#hudR,#hudL,#intro,#menu'))) e.preventDefault(); },{passive:false});
+addEventListener('touchstart',e=>{ if(!(e.target.closest&&e.target.closest('#hudR,#hudL,#intro,#menu,#branch'))) e.preventDefault(); },{passive:false});
 addEventListener('contextmenu',e=>e.preventDefault());
-addEventListener('keydown',e=>{ if(menuOpen) return;
+addEventListener('keydown',e=>{ if(menuOpen||branchOpen) return;
   const tg=e.target; if(tg&&(tg.tagName==='INPUT'||tg.tagName==='TEXTAREA')) return;
   if(e.code==='Space') doPulse();
   if(e.key==='+'||e.key==='=') { setZoom(cam.z*1.15,W/2,H/2); applyBlur(); }
   if(e.key==='-') { setZoom(cam.z/1.15,W/2,H/2); applyBlur(); } });
-function doPulse(){ if(nowS-pulseT<2.2||phase!=='play') return; pulseT=nowS; sndPulse();
-  const PR=ship.R*4.4*TR.m.pulse,PR2=PR*PR,PF=2400*TR.m.pulse;
+function doPulse(){ const nova=has('nova');
+  if(nowS-pulseT<(nova?.7:2.2)||phase!=='play') return; pulseT=nowS; sndPulse();
+  const PR=ship.R*(nova?7.9:4.4)*TR.m.pulse,PR2=PR*PR,PF=2400*TR.m.pulse;
+  if(nova) for(const h of HZ){ if(h.dead>0) continue;    // NOVA detonates clots outright
+    if(Math.hypot(h.x-ship.x,h.y-ship.y)<PR){ h.dead=nowS; mass+=25; eatenBiome+=18;
+      sndPop(); ringFx(h.x,h.y,6,h.r*3.2,gen.danger,.5); if(Math.random()<.35) dropPart(h.x,h.y); } }
   for(let i=0;i<alive;i++){ const o=i*8,dx=P[o]-ship.x,dy=P[o+1]-ship.y,d2=dx*dx+dy*dy;
     if(d2<PR2){ const d=Math.sqrt(d2)||1,f=(1-d/PR)*PF/d; P[o+2]+=dx*f*.016; P[o+3]+=dy*f*.016; } }
   for(const h of HZ){ const dx=h.x-ship.x,dy=h.y-ship.y,d=Math.hypot(dx,dy)||1;
@@ -963,13 +1117,14 @@ function update(dt){
   if(!pinch){ cam.x+=(ship.x-cam.x)*Math.min(1,4*dt); cam.y+=(ship.y-cam.y)*Math.min(1,4*dt); }
   // wake + feeding parameters (the lab's push/swirl, scaled by ship size + speed)
   const R=ship.R, PR=R*1.55, PR2=PR*PR;
-  const sSc=Math.pow(R/64,.55)*(.07+.93*Math.min(1,spd/300)); // near-still = permeable membrane (feed), moving = shove
+  const sSc=Math.pow(R/64,.55)*(.07+.93*Math.min(1,spd/300))*(has('jet')?.6:1); // still = permeable (feed), moving = shove; JET slips through
   const PUSH=1250*sSc, SWIRL=700*sSc, sgn=Math.sign(ship.vx||1)*TR.swirl;
   const cilia=has('cilia'),vortex=has('vortex'),spikes=has('spikes'),tent=has('tent'),bloom=has('bloom');
-  const eatR=R*1.18*TR.m.reach+(cilia?R*.22:0), eatR2=eatR*eatR;
-  const vEat=bloom?1e9:(cilia?400:210);
+  const gullet=has('gullet'),solvent=has('solvent');
+  const eatR=R*(gullet?1.55:1.18)*TR.m.reach+(cilia?R*.22:0), eatR2=eatR*eatR;
+  const vEat=bloom?1e9:(cilia?400:(gullet?150:210));
   const canEat=phase==='play'&&(spd<vEat); feedFlag=canEat;
-  const eatCap=Math.max(1,Math.round((4+stage*4+(bloom?20:0))*dt*60*TR.m.hunger)); // rate is per-second, not per-frame
+  const eatCap=Math.max(1,Math.round((4+stage*4+(bloom?20:0))*(gullet?2:1)*dt*60*TR.m.hunger)); // per-second, not per-frame
   const pullR=R*3.2,pullR2=pullR*pullR,PULL=(bloom?900:520)*TR.m.pull;
   let eats=0;
   const clearing=phase==='clear';
@@ -1024,7 +1179,9 @@ function update(dt){
     if(!isFinite(p.cx)){ p.cx=p.x; p.cy=p.y; }
     const k=Math.min(1,10*dt); p.cx+=(p.x-p.cx)*k; p.cy+=(p.y-p.cy)*k; }
   if(tent&&phase==='play') updateTentacles(dt);
+  if(has('mitosis')&&phase==='play') updateBud(dt);
   if(phase==='play') updateMicrobes(dt);
+  if(phase==='play') updateSeal(dt);
   if(phase==='play') for(const h of HZ){
     if(h.dead>0){ if(nowS-h.dead>6){ h.dead=-9; placeHaz(h); } continue; }
     flowAt(h.x,h.y,_fl);
@@ -1035,6 +1192,12 @@ function update(dt){
     if(nowS<hazGraceT) continue;
     const d=Math.hypot(h.x-ship.x,h.y-ship.y);
     if(d<h.r+ship.R*.85){
+      if(solvent){                                     // SOLVENT: no cooldown, but it eats clots slowly
+        h.r-=14*dt; ringFx(h.x,h.y,h.r*.5,h.r*1.4,myCol(),.28);
+        if(h.r<9){ h.dead=nowS; h.r=22+Math.random()*14; sndPop(); mass+=25; eatenBiome+=18;
+          if(Math.random()<.35) dropPart(h.x,h.y); netEvt({t:'pop',x:h.x,y:h.y});
+          toast('<b>CLOT DISSOLVED</b> +25'); }
+        continue; }
       if(spikes&&nowS-spikeT>4){ spikeT=nowS; h.dead=nowS; sndPop();
         mass+=25; eatenBiome+=18; ringFx(h.x,h.y,6,h.r*3.2,gen.danger,.5);
         if(Math.random()<.35) dropPart(h.x,h.y);
@@ -1047,11 +1210,28 @@ function update(dt){
         ringFx(ship.x,ship.y,ship.R,ship.R*2.6,gen.danger,.6); try{navigator.vibrate&&navigator.vibrate(80);}catch(_){}}
     }
   }
-  if(phase==='play'&&sharedEaten()>=QUOTA) startClear();
+  if(phase==='play'&&!SEAL.on&&sharedEaten()>=QUOTA) beginSeal();   // quota only WAKES the core
   if(phase==='clear'&&(alive===0||nowS-phaseT>2.6)){ mass+=Math.min(alive,500)*.3; alive=0; loaded.clear(); finishClear(); }
   if(phase==='spawn'&&nowS-phaseT>1.4) phase='play';
   checkEvos(); hudProgress();
   TEX.step(gen,Math.max(2,TEXH/14|0));
+}
+
+// MITOSIS: a budded satellite that orbits and feeds itself (feeding you)
+const bud={x:0,y:0,a:0,seeded:false};
+function updateBud(dt){
+  if(!bud.seeded){ bud.x=ship.x; bud.y=ship.y; bud.seeded=true; }
+  bud.a+=dt*1.15*TR.swirl;
+  const rr=ship.R*2.5, tx2=ship.x+Math.cos(bud.a)*rr, ty2=ship.y+Math.sin(bud.a)*rr;
+  const k=Math.min(1,5*dt); bud.x+=(tx2-bud.x)*k; bud.y+=(ty2-bud.y)*k;
+  const br=ship.R*.42, br2=(br+16)*(br+16);
+  let got=0;
+  for(let i=0;i<alive&&got<Math.max(1,Math.round(3*dt*60));i++){ const o=i*8;
+    const dx=P[o]-bud.x, dy=P[o+1]-bud.y;
+    if(dx*dx+dy*dy<br2){ kill(i); i--; got++; mass+=1; totalEaten++; eatenBiome++; streakFx(P[o],P[o+1],bud.x,bud.y); } }
+  if(got>0) sndEat();
+  for(let i=MB.length-1;i>=0;i--){ const m=MB[i];    // the bud also nips microbes
+    if(Math.hypot(m.x-bud.x,m.y-bud.y)<m.r+br){ killMb(m,i); break; } }
 }
 
 // tentacles state (lineage decides 2 or 3)
@@ -1170,12 +1350,27 @@ function render(){
     x.strokeStyle=css(sc,.9); x.lineWidth=1.4;
     x.beginPath(); x.arc(u.x,u.y+bob,pr+5+Math.sin(nowS*4)*2,0,6.2832); x.stroke(); }
   x.globalCompositeOperation='source-over';
+  if(SEAL.on&&phase!=='intro') drawSeal(x,vx0,vx1,vy0,vy1);
+  if(has('mitosis')&&bud.seeded&&phase==='play'){     // the budded satellite
+    const br=ship.R*.42;
+    x.globalCompositeOperation='lighter'; x.globalAlpha=.35;
+    x.drawImage(gFood,bud.x-br*2.2,bud.y-br*2.2,br*4.4,br*4.4);
+    x.globalAlpha=1; x.globalCompositeOperation='source-over';
+    x.beginPath();
+    for(let a=0;a<=14;a++){ const an=a/14*6.2832, rr=br*(1+.12*Math.sin(an*3+nowS*3));
+      const px=bud.x+Math.cos(an)*rr,py=bud.y+Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
+    x.closePath(); x.fillStyle=css(sc,.3); x.fill();
+    x.strokeStyle=css(lit(sc,1.35),.8); x.lineWidth=1.8; x.stroke();
+    const ea=Math.atan2(ship.y-bud.y,ship.x-bud.x);
+    x.fillStyle=css(lit(sc,1.5),.9); x.beginPath(); x.arc(bud.x,bud.y,br*.34,0,6.2832); x.fill();
+    x.fillStyle='rgba(8,12,18,.9)'; x.beginPath();
+    x.arc(bud.x+Math.cos(ea)*br*.12,bud.y+Math.sin(ea)*br*.12,br*.16,0,6.2832); x.fill(); }
   // friends first (under my ship), then me
   if(NET.on) for(const [id,p] of NET.peers){ if(!p.fresh||p.b!==biomeIdx||!isFinite(p.cx)) continue;
     const pd=p.dna||defaultDNA();
     drawShipAt(x,{x:p.cx,y:p.cy,vx:p.vx||0,vy:p.vy||0,R:p.R||30,st:p.st|0,dna:pd,tr:p.tr||DEFAULT_TR,
       col:peerCol(p,id),inv:false,remote:true,parts:p.parts||[],
-      hasFn:a=>{const i2=pd.lo.indexOf(a); return i2>=0&&i2<(p.st|0);}}); }
+      hasFn:a=>(p.abils||abilsOf(pd,p.st|0)).includes(a)}); }
   drawShipAt(x,{x:ship.x,y:ship.y,vx:ship.vx,vy:ship.vy,R:ship.R,st:stage,dna,tr:TR,col:sc,parts,
     inv:(nowS-invulnT<1.6||nowS-nibbleT<.2)&&((nowS*14)|0)%2===0,remote:false,hasFn:has});
   x.globalCompositeOperation='lighter';
@@ -1184,28 +1379,16 @@ function render(){
     x.strokeStyle=css(g0.col,.55*(1-u)); x.lineWidth=3*(1-u)+1;
     x.beginPath(); x.arc(g0.x,g0.y,g0.r0+(g0.r1-g0.r0)*u,0,6.2832); x.stroke(); }
   x.globalCompositeOperation='source-over';
-  // screen-space pass: peer names + edge arrows, damage vignette, hint
+  // screen-space pass: markers + edge arrows, damage vignette, hint
   x.setTransform(DPR,0,0,DPR,0,0);
   if(NET.on) for(const [id,p] of NET.peers){ if(!p.fresh||!isFinite(p.cx)) continue;
-    const sx=(p.cx-cam.x)*z+W/2, sy=(p.cy-cam.y)*z+H/2, inset=36;
-    const col=peerCol(p,id), nm=(p.dna&&p.dna.name)||'goopling';
-    if(sx>inset&&sx<W-inset&&sy>inset&&sy<H-inset){
-      x.font='10px ui-monospace,monospace'; x.textAlign='center';
-      x.fillStyle=css(col,.85); x.fillText(nm, sx, sy-(p.R||30)*z-10);
-    } else {                                          // edge arrow pointing at them
-      const dx=sx-W/2, dy=sy-H/2;
-      const t=Math.min(dx!==0?(W/2-inset)/Math.abs(dx):1e9, dy!==0?(H/2-inset)/Math.abs(dy):1e9);
-      const ax=W/2+dx*t, ay=H/2+dy*t, an=Math.atan2(dy,dx);
-      const d=Math.hypot(p.cx-ship.x,p.cy-ship.y);
-      x.save(); x.translate(ax,ay); x.rotate(an);
-      x.fillStyle=css(col,.9); x.beginPath();
-      x.moveTo(13,0); x.lineTo(-7,-8); x.lineTo(-3,0); x.lineTo(-7,8); x.closePath(); x.fill();
-      x.rotate(-an);
-      x.fillStyle=css(col,.8); x.font='9.5px ui-monospace,monospace';
-      x.textAlign=ax>W-90?'right':ax<90?'left':'center';
-      x.fillText(`${nm} · ${d<1000?Math.round(d):(d/1000).toFixed(1)+'k'}`,0,ay>H-60?-16:20);
-      x.restore();
-    } }
+    marker(x,p.cx,p.cy,z,peerCol(p,id),(p.dna&&p.dna.name)||'goopling',(p.R||30)*z+10); }
+  if(SEAL.on){                                        // guide the eye to the puzzle
+    if(!SEAL.open) for(let i=0;i<SEAL.nodes.length;i++){ const nd=SEAL.nodes[i]; if(nd.lit) continue;
+      const isNext=SEAL.order[SEAL.idx]===i;
+      marker(x,nd.x,nd.y,z,hsl2rgb(nd.hue/360,.85,.62),isNext?'NEXT':'',nd.r*z+8,!isNext); }
+    marker(x,SEAL.x,SEAL.y,z,SEAL.open?myCol():gen.danger,SEAL.open?'CORE — OPEN':'CORE',SEAL.coreR*z+10);
+  }
   const fu=(nowS-flashT)/.55;
   if(fu<1){ const g=x.createRadialGradient(W/2,H/2,Math.min(W,H)*.3,W/2,H/2,Math.max(W,H)*.72);
     g.addColorStop(0,'rgba(0,0,0,0)'); g.addColorStop(1,css(dc,.5*(1-fu)));
@@ -1215,12 +1398,94 @@ function render(){
     x.fillText('hold & drag — move slowly to feed · pinch to zoom',ship.x*z+ox,(ship.y+ship.R+26)*z+oy+16); x.globalAlpha=1; }
   if(menuOpen) renderPreview();
 }
+// on-screen label, or an edge arrow when the target is off-view
+function marker(x,wx,wy,z,col,label,lift,faint){
+  const sx=(wx-cam.x)*z+W/2, sy=(wy-cam.y)*z+H/2, inset=36;
+  if(sx>inset&&sx<W-inset&&sy>inset&&sy<H-inset){
+    if(!label) return;
+    x.font='10px ui-monospace,monospace'; x.textAlign='center';
+    x.fillStyle=css(col,faint?.5:.85); x.fillText(label, sx, sy-(lift||14));
+    return; }
+  const dx=sx-W/2, dy=sy-H/2;
+  const t=Math.min(dx!==0?(W/2-inset)/Math.abs(dx):1e9, dy!==0?(H/2-inset)/Math.abs(dy):1e9);
+  const ax=W/2+dx*t, ay=H/2+dy*t, an=Math.atan2(dy,dx);
+  const d=Math.hypot(wx-ship.x,wy-ship.y);
+  x.save(); x.translate(ax,ay); x.rotate(an);
+  x.fillStyle=css(col,faint?.55:.9); x.beginPath();
+  x.moveTo(13,0); x.lineTo(-7,-8); x.lineTo(-3,0); x.lineTo(-7,8); x.closePath(); x.fill();
+  x.rotate(-an);
+  x.fillStyle=css(col,faint?.5:.8); x.font='9.5px ui-monospace,monospace';
+  x.textAlign=ax>W-90?'right':ax<90?'left':'center';
+  x.fillText(`${label?label+' · ':''}${d<1000?Math.round(d):(d/1000).toFixed(1)+'k'}`,0,ay>H-60?-16:20);
+  x.restore();
+}
+function drawSeal(x,vx0,vx1,vy0,vy1){
+  const n=SEAL.nodes.length;
+  for(let i=0;i<n;i++){ const nd=SEAL.nodes[i];
+    if(nd.x<vx0||nd.x>vx1||nd.y<vy0||nd.y>vy1) continue;
+    const col=hsl2rgb(nd.hue/360,.85,.62), isNext=!SEAL.open&&SEAL.order[SEAL.idx]===i;
+    const pu=nd.lit?1:(isNext?.75+.25*Math.sin(nowS*4):.5);
+    x.globalCompositeOperation='lighter'; x.globalAlpha=(nd.lit?.75:.45)*pu;
+    x.drawImage(glowCache(col),nd.x-nd.r*2.6,nd.y-nd.r*2.6,nd.r*5.2,nd.r*5.2);
+    x.globalAlpha=1; x.globalCompositeOperation='source-over';
+    x.beginPath();
+    for(let a=0;a<=18;a++){ const an=a/18*6.2832+nowS*(nd.lit?.5:.15)*TR.swirl;
+      const rr=nd.r*(1+.14*Math.sin(an*4+nowS*2+nd.ph));
+      const px=nd.x+Math.cos(an)*rr,py=nd.y+Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
+    x.closePath();
+    x.fillStyle=css(col,nd.lit?.5:.16); x.fill();
+    x.strokeStyle=css(col,nd.lit?1:.8); x.lineWidth=nd.lit?3:2; x.stroke();
+    if(isNext){ x.strokeStyle=css(col,.55+.35*Math.sin(nowS*5)); x.lineWidth=2;
+      x.beginPath(); x.arc(nd.x,nd.y,nd.r+12+Math.sin(nowS*3)*4,0,6.2832); x.stroke(); }
+    if(nd.lit){ x.fillStyle=css([1,1,1],.9); x.beginPath(); x.arc(nd.x,nd.y,4,0,6.2832); x.fill(); }
+  }
+  // the core: colour-order pips ring a pulsing organ; a depleting arc = its patience
+  const cx2=SEAL.x, cy2=SEAL.y, cr=SEAL.coreR;
+  if(cx2>vx0-cr*3&&cx2<vx1+cr*3&&cy2>vy0-cr*3&&cy2<vy1+cr*3){
+    const open=SEAL.open, base=open?myCol():gen.danger;
+    x.globalCompositeOperation='lighter'; x.globalAlpha=open?.75:.5;
+    x.drawImage(glowCache(base),cx2-cr*3,cy2-cr*3,cr*6,cr*6);
+    x.globalAlpha=1; x.globalCompositeOperation='source-over';
+    const shake=nowS-SEAL.failT<.4?(Math.random()-.5)*7:0;
+    x.save(); x.translate(cx2+shake,cy2+shake);
+    x.beginPath();
+    for(let a=0;a<=30;a++){ const an=a/30*6.2832;
+      const rr=cr*(1+.09*Math.sin(an*5-nowS*1.6)+(open?.06*Math.sin(nowS*4):0));
+      const px=Math.cos(an)*rr,py=Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
+    x.closePath(); x.fillStyle=css(base,open?.42:.22); x.fill();
+    x.strokeStyle=css(lit(base,1.3),.95); x.lineWidth=3; x.stroke();
+    if(!open){                                        // patience arc
+      const u=Math.max(0,Math.min(1,(SEAL.deadline-nowS)/(30+n*8)));
+      x.strokeStyle=css(u<.25?gen.danger:base,.85); x.lineWidth=5;
+      x.beginPath(); x.arc(0,0,cr*1.28,-1.5708,-1.5708+6.2832*u); x.stroke(); }
+    for(let i=0;i<n;i++){                             // the SEQUENCE, read clockwise
+      const a=-1.5708+i/n*6.2832, px=Math.cos(a)*cr*.62, py=Math.sin(a)*cr*.62;
+      const nd=SEAL.nodes[SEAL.order[i]], col=hsl2rgb(nd.hue/360,.85,.62), done=i<SEAL.idx;
+      x.beginPath(); x.arc(px,py,cr*.15,0,6.2832);
+      x.fillStyle=css(col,done?1:.28); x.fill();
+      x.strokeStyle=css(col,done?1:.7); x.lineWidth=2; x.stroke();
+      if(i===SEAL.idx&&!open){ x.strokeStyle=css(col,.5+.5*Math.sin(nowS*6)); x.lineWidth=2;
+        x.beginPath(); x.arc(px,py,cr*.24,0,6.2832); x.stroke(); } }
+    if(open){ x.fillStyle=css(lit(base,1.5),.9); x.beginPath(); x.arc(0,0,cr*.2,0,6.2832); x.fill(); }
+    x.restore();
+  }
+}
 function drawShipAt(x,S){
   const spd=Math.hypot(S.vx,S.vy),va=Math.atan2(S.vy,S.vx),R=S.R,sc=S.col,d0=S.dna;
   const tr=S.tr||DEFAULT_TR, hasA=S.hasFn;
   const cilia=hasA('cilia'),vortex=hasA('vortex'),spikes=hasA('spikes'),tent=hasA('tent'),bloom=hasA('bloom');
+  const gullet=hasA('gullet'),jet=hasA('jet'),solvent=hasA('solvent'),nova=hasA('nova');
   x.save(); x.translate(S.x,S.y); x.rotate(va);
   const sq=Math.min(.16,spd*.0004); x.scale(1+sq,1-sq*.6); x.rotate(-va);
+  if(solvent){ x.globalCompositeOperation='lighter';   // dissolving halo
+    x.strokeStyle=css(sc,.13+.07*Math.sin(nowS*2.2)); x.lineWidth=R*.5;
+    x.beginPath(); x.arc(0,0,R*1.42,0,6.2832); x.stroke();
+    x.globalCompositeOperation='source-over'; }
+  if(nova){ x.globalCompositeOperation='lighter';      // charged ring pips
+    for(let i=0;i<8;i++){ const a=i/8*6.2832+nowS*1.4;
+      x.fillStyle=css(lit(sc,1.5),.5+.3*Math.sin(nowS*5+i));
+      x.beginPath(); x.arc(Math.cos(a)*R*1.5,Math.sin(a)*R*1.5,2.6,0,6.2832); x.fill(); }
+    x.globalCompositeOperation='source-over'; }
   if(vortex){ x.globalCompositeOperation='lighter';
     for(let k=0;k<3;k++){ const a0=-nowS*2.2*tr.swirl+k*2.1;
       x.strokeStyle=css(sc,.14); x.lineWidth=5;
@@ -1255,6 +1520,22 @@ function drawShipAt(x,S){
       x.moveTo(Math.cos(a)*r0,Math.sin(a)*r0);
       x.lineTo(Math.cos(a+.06)*r1,Math.sin(a+.06)*r1); }
     x.stroke(); }
+  if(gullet){ x.save(); x.rotate(va);                  // the maw: a gaping feeding arc up front
+    const gp=.18+.12*Math.sin(nowS*1.8);
+    x.strokeStyle=css(lit(sc,1.4),.75); x.lineWidth=R*.22; x.lineCap='butt';
+    x.beginPath(); x.arc(0,0,R*1.02,-gp*3.4,gp*3.4); x.stroke();
+    x.fillStyle=css([0.03,0.05,0.07],.5);
+    x.beginPath(); x.arc(0,0,R*.96,-gp*3.2,gp*3.2); x.lineTo(0,0); x.closePath(); x.fill();
+    x.restore(); }
+  if(jet){ x.save(); x.rotate(va);                     // swept fins + thrust plume
+    x.fillStyle=css(lit(sc,1.25),.8);
+    for(const s2 of [-1,1]){ x.beginPath();
+      x.moveTo(-R*.15,s2*R*.62); x.lineTo(-R*.95,s2*R*1.22); x.lineTo(-R*.72,s2*R*.42); x.closePath(); x.fill(); }
+    const th=Math.min(1,spd/420);
+    if(th>.05){ x.globalCompositeOperation='lighter'; x.globalAlpha=th*.7;
+      x.drawImage(glowCache(sc),-R*(1.1+th*1.5),-R*.55,R*(1.1+th*1.5),R*1.1);
+      x.globalAlpha=1; x.globalCompositeOperation='source-over'; }
+    x.restore(); }
   if(spikes){ const cd=(S.remote||S.preview)?1:Math.min(1,(nowS-spikeT)/4),len=4+14*cd,sn=tr.spikeN;
     x.fillStyle=css(lit(sc,1.2),.8);
     for(let i=0;i<sn;i++){ const a=i/sn*6.2832+nowS*.45*tr.swirl;
@@ -1325,7 +1606,7 @@ function drawShipAt(x,S){
 let menuOpen=false, previewStage=-1;
 const $=id=>document.getElementById(id);
 function openMenu(){ menuOpen=true; $('menu').style.display='grid'; ship.down=false; ship.tx=ship.ty=null;
-  syncMenuUI(); buildLoadoutUI(); buildStableUI(); buildOffersUI(); }
+  syncMenuUI(); buildTreeUI(); buildStableUI(); buildOffersUI(); }
 function closeMenu(){ menuOpen=false; $('menu').style.display='none'; dnaChanged(); }
 $('dnabtn').onclick=()=>menuOpen?closeMenu():openMenu();
 $('closeMenu').onclick=closeMenu;
@@ -1355,19 +1636,34 @@ $('g_glow').onclick=()=>{ dna.gl=dna.gl?0:1; syncMenuUI(); };
 $('g_eyes').onclick=e=>{ const n=+e.target.dataset?.n; if(n){ dna.eyes=n; syncMenuUI(); } };
 $('reroll').onclick=()=>{ dna.seed=rollSeed(); refreshTR(); syncMenuUI();
   toast(`lineage rerolled — <b>${TR.words.join(' · ')}</b>`); };
-function buildLoadoutUI(){
-  const box=$('loadout'); box.innerHTML='';
-  dna.lo.forEach((a,i)=>{
-    const row=document.createElement('div'); row.className='lorow'+(i<stage?' on':'');
-    row.innerHTML=`<span style="color:#69859a">${i<stage?'◉':'○'}</span><span class="nm">${ABIL[a].n}</span><span class="ds">${ABIL[a].d}</span>`;
-    const up=document.createElement('button'); up.textContent='▲'; up.disabled=i===0;
-    up.onclick=()=>{ [dna.lo[i-1],dna.lo[i]]=[dna.lo[i],dna.lo[i-1]]; buildLoadoutUI(); };
-    const dn=document.createElement('button'); dn.textContent='▼'; dn.disabled=i===4;
-    dn.onclick=()=>{ [dna.lo[i+1],dna.lo[i]]=[dna.lo[i],dna.lo[i+1]]; buildLoadoutUI(); };
-    row.appendChild(up); row.appendChild(dn); box.appendChild(row);
+function buildTreeUI(){
+  const box=$('loadout'); box.innerHTML=''; const p=dna.path, nextTier=p.length;
+  TREE.forEach((tier,i)=>{
+    const row=document.createElement('div'); row.className='trow'+(i===nextTier?' next':'');
+    const num=document.createElement('span'); num.className='tnum';
+    num.textContent=i<p.length?(i<stage?'◉':'◍'):(i===nextTier?'▸':'·');
+    row.appendChild(num);
+    tier.forEach((o,c)=>{
+      const el=document.createElement('div'); el.className='topt';
+      if(i<p.length) el.className+=(p[i]===c?' taken':' lost');
+      el.innerHTML=`<div class="tn">${o.n}</div><div class="td">${o.d}</div>`;
+      row.appendChild(el); });
+    box.appendChild(row);
   });
+  const foot=document.createElement('div'); foot.style.cssText='margin-top:6px;display:flex;gap:6px;align-items:center';
+  const note=document.createElement('span'); note.style.cssText='flex:1;color:#69859a;font-size:10px';
+  note.textContent=p.length>=5?'path complete':(p.length<tiersUnlocked()?'a branch is waiting — close this menu':`next branch at ${Math.round(FRACS[p.length]*REF)} eaten`);
+  const re=document.createElement('button'); re.textContent='🔁 respec'; re.className='warn';
+  re.onclick=()=>{ if(!p.length) return; dna.path=[]; stage=0; refreshTR(); stageHud(); save(); netMeta();
+    buildTreeUI(); syncMenuUI(); toast('<b>PATH DISSOLVED</b> — re-choose each branch'); };
+  foot.appendChild(note); foot.appendChild(re); box.appendChild(foot);
   stageHud();
 }
+// a permanent choice must be a DELIBERATE fresh tap: a finger already held down
+// when the overlay appears (mid-slosh) can never pick, nor can a stray click
+['bc0','bc1'].forEach((id,c)=>{ const el=$(id);
+  el.addEventListener('pointerdown',()=>{ if(nowS-branchT>=.45) bArmed=c; });
+  el.addEventListener('click',()=>{ if(bArmed===c) pickBranch(c); bArmed=-1; }); });
 function buildStableUI(){
   const box=$('stable'); box.innerHTML='';
   if(!stable.length){ box.innerHTML='<div style="color:#456;font-size:11px">no saved gooplings yet</div>'; }
@@ -1376,7 +1672,8 @@ function buildStableUI(){
     const sw=document.createElement('span'); sw.style.cssText='width:12px;height:12px;border-radius:50%;flex:0 0 12px;background:'+css(gen?hueRot(gen.shipCol,g.hue):[.5,.8,.7],1);
     const nm=document.createElement('span'); nm.className='nm'; nm.textContent=g.name;
     const ld=document.createElement('button'); ld.textContent='load';
-    ld.onclick=()=>{ dna=cleanDNA(g); syncMenuUI(); buildLoadoutUI(); dnaChanged(); toast(`<b>${dna.name}</b> loaded`); };
+    ld.onclick=()=>{ dna=cleanDNA(g); stage=Math.min(dna.path.length,tiersUnlocked(),5);
+      syncMenuUI(); buildTreeUI(); dnaChanged(); toast(`<b>${dna.name}</b> loaded`); };
     const cp=document.createElement('button'); cp.textContent='copy';
     cp.onclick=()=>{ try{ navigator.clipboard.writeText(dnaCode(g)).then(()=>toast('DNA code copied')); }catch(_){ toast(dnaCode(g)); } };
     const del=document.createElement('button'); del.textContent='✕'; del.className='warn';
@@ -1413,7 +1710,7 @@ function renderPreview(){
   const s=prevC.width, c=prevX; c.setTransform(1,0,0,1,0,0); c.clearRect(0,0,s,s);
   const st=previewStage<0?stage:previewStage;
   const S={x:s/2,y:s/2+4,vx:20,vy:-6,R:s*.26,st,dna,tr:deriveTraits(dna,st),col:myCol(),inv:false,remote:false,preview:true,parts,
-    hasFn:a=>{const i=dna.lo.indexOf(a); return i>=0&&i<st;}};
+    hasFn:a=>abilsOf(dna,st).includes(a)};
   drawShipAt(c,S);
   c.setTransform(1,0,0,1,0,0); c.fillStyle='rgba(150,200,220,.5)'; c.font=`${s*.075}px ui-monospace,monospace`;
   c.textAlign='center'; c.fillText(previewStage<0?'now':'stage '+st, s/2, s-8);
@@ -1434,7 +1731,9 @@ function frame(now){
 // ---------- test hooks (BB.tick-style; work with a hidden pane) -------------
 window.GG={
   get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,stage,biomeIdx,gen,ship,HZ,cam,dna,stable,tr:TR,fps:fpsAvg,
-    mb:MB.length, pu:PU.length, parts:parts.map(p=>p.id),
+    mb:MB.length, pu:PU.length, parts:parts.map(p=>p.id), abils:abilsOf(dna,stage), path:dna.path.slice(),
+  branchOpen, seal:{on:SEAL.on,open:SEAL.open,idx:SEAL.idx,n:SEAL.nodes.length,
+    order:SEAL.order.slice(),left:+Math.max(0,SEAL.deadline-nowS).toFixed(1),x:Math.round(SEAL.x),y:Math.round(SEAL.y)},
     chunks:loaded.size, far:FAR.cache.size, shared:sharedEaten(),net:{on:NET.on,code:NET.code,peers:NET.peers.size,selfId:NET.selfId,offers:NET.offers.length}}; },
   tick(dt=1/60,n=1){ for(let i=0;i<n;i++) update(dt); render(); },
   pt(x2,y2,down=true){ if(down){ ship.down=true; setTargetScreen(x2,y2,false); } else { ship.down=false; ship.tx=ship.ty=null; } },
@@ -1451,6 +1750,14 @@ window.GG={
   setDna(patch){ dna=cleanDNA({...dna,...patch}); dnaChanged(); return dna; },
   reroll(){ dna.seed=rollSeed(); refreshTR(); return TR.words; },
   givePart(id,ang=0){ if(PARTS[id]) addPart(id,ang); return parts.map(p=>p.id); },
+  pick(c){ branchT=-9; pickBranch(c); return {path:dna.path.slice(),abils:abilsOf(dna,stage),stage}; },
+  respec(){ dna.path=[]; stage=0; refreshTR(); stageHud(); return GG.s.path; },
+  seal(){ return SEAL; },
+  touchNode(k){ const i=SEAL.order[k===undefined?SEAL.idx:k];   // walk into node #k
+    const nd=SEAL.nodes[i]; if(nd){ ship.x=nd.x; ship.y=nd.y; SEAL.lastTouch=-9; update(1/60); } return GG.s.seal; },
+  touchWrong(){ const bad=SEAL.nodes.findIndex((n,i)=>!n.lit&&i!==SEAL.order[SEAL.idx]);
+    if(bad>=0){ ship.x=SEAL.nodes[bad].x; ship.y=SEAL.nodes[bad].y; SEAL.lastTouch=-9; update(1/60); } return GG.s.seal; },
+  touchCore(){ ship.x=SEAL.x; ship.y=SEAL.y; update(1/60); return {phase}; },
   dropAt(x2,y2){ dropPart(x2,y2); },
   mbs(){ return MB; },
   exportCode(){ return dnaCode(cleanDNA(dna)); },
@@ -1471,7 +1778,7 @@ function boot(){
     document.getElementById('mute').textContent=muted?'∅':'♪';
     document.getElementById('startover').style.display='block';
     document.getElementById('go').textContent=`RESUME — BIOME ${(sv.biome||0)+1}`; }
-  let n=0; for(const f of FRACS) if(totalEaten>=f*REF) n++; stage=n;
+  stage=Math.min(dna.path.length,tiersUnlocked(),5);
   refreshTR();
   resize();
   cam.z=Math.max(zMin,Math.min(zMax,Math.max(.65,Math.min(1.05,Math.min(W,H)/840))));
