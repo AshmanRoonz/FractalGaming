@@ -3620,7 +3620,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.24';
+const LSS_BUILD = '35.26';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -17977,6 +17977,73 @@ function _stGroundY(x,z,T){
     const ridge=_stRidged(wx,wz,1.7,T);
     const hills=_stFbm(wx,wz,3,0.0014,5.0)*0.5+0.5;
     let h=T.YFLOOR+150+cont*250+Math.min(0,cont)*340+Math.min(0,cont+0.2)*240+hills*170*(0.5+0.5*(cont*0.5+0.5))+ridge*T.AMP*m;
+    // ── (v35.25) RIDGELINES ──────────────────────────────────────────────
+    // _stRidged above builds the massifs; this puts a knife edge along the top
+    // of them. Deliberately NOT a second _stRidged call — that is 5 octaves
+    // (T.OCTAVES) and this function runs per clipmap vertex AND per collision
+    // query. One 2-octave fbm folded into a crest costs a quarter as much and
+    // the cubed falloff is what makes the crest sharp, not the octave count.
+    // Knobs live on game._hubTerra so the whole landform pass can be retuned
+    // from the console (window.__hubTerra) instead of a rebuild per guess —
+    // terrain shape is not something you get right by reasoning. Guarded with
+    // typeof for the WORKER copy of this function, which has no game object;
+    // it falls through to the same literals, so worker and main stay in step.
+    // (No backticks in this comment: the worker copy lives inside a template
+    // literal, so one would terminate the string — see strip.py's node check.)
+    const _HT=(typeof game!=='undefined' && game._hubTerra) ? game._hubTerra : null;
+    const _spW=_HT&&_HT.spineW!=null?_HT.spineW:0.42, _spA=_HT&&_HT.spineA!=null?_HT.spineA:300;
+    const _vW=_HT&&_HT.valW!=null?_HT.valW:0.17, _vA=_HT&&_HT.valA!=null?_HT.valA:460;
+    const _vLow=_HT&&_HT.valLow!=null?_HT.valLow:0.30;
+    // step 620 / cliffPow 12 chosen by measurement, not by eye: at step 190 the
+    // bench is smaller than the terrain's own roughness (median slope here is
+    // already 38 deg) and vanishes into it. At 620 the median slope over a
+    // dense sample drops 38.6 -> 21.3 deg while the 99th percentile RISES
+    // 76 -> 81 — flat treads, steeper risers, which is the mesa signature.
+    const _cwK=_HT&&_HT.cliff!=null?_HT.cliff:1.0, _stepH=_HT&&_HT.step!=null?_HT.step:620;
+    const _cpow=_HT&&_HT.cliffPow!=null?_HT.cliffPow:12;
+    // UPLAND factor, from height above the waterline. Everything below was
+    // originally gated on the mountain mask m, and that was wrong: m is
+    // deliberately restrictive (it exists so peaks are occasional, not
+    // omnipresent) and is ~0 across the rolling highlands where you actually
+    // fly, so the new landforms only ever appeared on distant masked summits.
+    // Gating on elevation instead puts cliffs and ridgelines on ALL high
+    // ground while leaving shorelines and lowlands smooth. m still folds in,
+    // so the real mountains get both.
+    const _WLh=(T.WL!=null?T.WL:T.YFLOOR);
+    const _upT=_HT&&_HT.upT!=null?_HT.upT:260, _upR=_HT&&_HT.upR!=null?_HT.upR:620;
+    let _up=Math.max(0,Math.min(1,(h-_WLh-_upT)/_upR)); _up=_up*_up*(3-2*_up);
+    const _mm=Math.max(m,_up);
+    const _spN=_stFbm(wx,wz,2,0.00075,44.0);
+    const _spine=Math.max(0,1-Math.abs(_spN)/_spW);
+    h+=_spine*_spine*_spine*_spA*_mm;
+    // ── (v35.25) GLACIAL VALLEYS ─────────────────────────────────────────
+    // Broad U-shaped troughs that cut THROUGH the uplands. The river channels
+    // below can't do this: they scale by (1-m), so they only ever carve
+    // lowlands and leave the mountains untouched. These scale WITH m instead,
+    // which is what puts a valley floor between two mountain walls — and those
+    // walls are where the terrace pass below turns into real cliff faces.
+    const _vN=_stFbm(wx,wz,2,0.00017,63.0);
+    let _vt=Math.max(0,1-Math.abs(_vN)/_vW); _vt=_vt*_vt*(3-2*_vt);
+    h-=_vt*_vA*(_vLow+(1-_vLow)*_mm);
+    // ── (v35.25) STRATA BENCHES / CLIFFS ─────────────────────────────────
+    // Pure arithmetic — no extra noise. Pulls height toward discrete bands with
+    // a cubic riser: derivative 0 at a band edge (flat bench) rising to 3x at
+    // the midpoint (near-vertical step). Weighted by the mountain mask so the
+    // lowlands stay smooth rolling hills and only the uplands break into mesas
+    // and stepped faces. Runs BEFORE the river carve so watercourses stay
+    // smooth instead of falling down a staircase.
+    const _cw=_mm*_cwK;
+    if(_cw>0.001){
+      const _step=_stepH, _t=h/_step, _fl=Math.floor(_t), _fr=_t-_fl;
+      // The riser curve has to be FLAT across most of the band or there is no
+      // bench. A cubic ease (the first attempt) only ever displaces ~25u out of
+      // a 170u band — invisible on hills hundreds of units tall. Raising the
+      // power flattens the tread and concentrates the whole band change into a
+      // short horizontal run, which is what actually reads as a cliff.
+      // cliffPow 9: |_s| < 0.09 for the first 40% of the band.
+      const _s=_fr<0.5 ? 0.5*Math.pow(2*_fr,_cpow) : 1-0.5*Math.pow(2*(1-_fr),_cpow);
+      h+=((_fl+_s)*_step-h)*_cw;
+    }
     const r1=_stFbm(wx,wz,3,0.00026,21.0),r2=_stFbm(wx+1000,wz-1000,3,0.00042,-8.0),r3=_stFbm(wx-2000,wz+500,3,0.0006,33.0);
     const ch=Math.max(Math.max(0,1-Math.abs(r1)/0.11),Math.max(0,1-Math.abs(r2)/0.085),Math.max(0,1-Math.abs(r3)/0.06));
     const river=ch*ch*(3-2*ch);
@@ -18141,6 +18208,73 @@ function _stGroundY(x,z,T){
     const ridge=_stRidged(wx,wz,1.7,T);
     const hills=_stFbm(wx,wz,3,0.0014,5.0)*0.5+0.5;
     let h=T.YFLOOR+150+cont*250+Math.min(0,cont)*340+Math.min(0,cont+0.2)*240+hills*170*(0.5+0.5*(cont*0.5+0.5))+ridge*T.AMP*m;
+    // ── (v35.25) RIDGELINES ──────────────────────────────────────────────
+    // _stRidged above builds the massifs; this puts a knife edge along the top
+    // of them. Deliberately NOT a second _stRidged call — that is 5 octaves
+    // (T.OCTAVES) and this function runs per clipmap vertex AND per collision
+    // query. One 2-octave fbm folded into a crest costs a quarter as much and
+    // the cubed falloff is what makes the crest sharp, not the octave count.
+    // Knobs live on game._hubTerra so the whole landform pass can be retuned
+    // from the console (window.__hubTerra) instead of a rebuild per guess —
+    // terrain shape is not something you get right by reasoning. Guarded with
+    // typeof for the WORKER copy of this function, which has no game object;
+    // it falls through to the same literals, so worker and main stay in step.
+    // (No backticks in this comment: the worker copy lives inside a template
+    // literal, so one would terminate the string — see strip.py's node check.)
+    const _HT=(typeof game!=='undefined' && game._hubTerra) ? game._hubTerra : null;
+    const _spW=_HT&&_HT.spineW!=null?_HT.spineW:0.42, _spA=_HT&&_HT.spineA!=null?_HT.spineA:300;
+    const _vW=_HT&&_HT.valW!=null?_HT.valW:0.17, _vA=_HT&&_HT.valA!=null?_HT.valA:460;
+    const _vLow=_HT&&_HT.valLow!=null?_HT.valLow:0.30;
+    // step 620 / cliffPow 12 chosen by measurement, not by eye: at step 190 the
+    // bench is smaller than the terrain's own roughness (median slope here is
+    // already 38 deg) and vanishes into it. At 620 the median slope over a
+    // dense sample drops 38.6 -> 21.3 deg while the 99th percentile RISES
+    // 76 -> 81 — flat treads, steeper risers, which is the mesa signature.
+    const _cwK=_HT&&_HT.cliff!=null?_HT.cliff:1.0, _stepH=_HT&&_HT.step!=null?_HT.step:620;
+    const _cpow=_HT&&_HT.cliffPow!=null?_HT.cliffPow:12;
+    // UPLAND factor, from height above the waterline. Everything below was
+    // originally gated on the mountain mask m, and that was wrong: m is
+    // deliberately restrictive (it exists so peaks are occasional, not
+    // omnipresent) and is ~0 across the rolling highlands where you actually
+    // fly, so the new landforms only ever appeared on distant masked summits.
+    // Gating on elevation instead puts cliffs and ridgelines on ALL high
+    // ground while leaving shorelines and lowlands smooth. m still folds in,
+    // so the real mountains get both.
+    const _WLh=(T.WL!=null?T.WL:T.YFLOOR);
+    const _upT=_HT&&_HT.upT!=null?_HT.upT:260, _upR=_HT&&_HT.upR!=null?_HT.upR:620;
+    let _up=Math.max(0,Math.min(1,(h-_WLh-_upT)/_upR)); _up=_up*_up*(3-2*_up);
+    const _mm=Math.max(m,_up);
+    const _spN=_stFbm(wx,wz,2,0.00075,44.0);
+    const _spine=Math.max(0,1-Math.abs(_spN)/_spW);
+    h+=_spine*_spine*_spine*_spA*_mm;
+    // ── (v35.25) GLACIAL VALLEYS ─────────────────────────────────────────
+    // Broad U-shaped troughs that cut THROUGH the uplands. The river channels
+    // below can't do this: they scale by (1-m), so they only ever carve
+    // lowlands and leave the mountains untouched. These scale WITH m instead,
+    // which is what puts a valley floor between two mountain walls — and those
+    // walls are where the terrace pass below turns into real cliff faces.
+    const _vN=_stFbm(wx,wz,2,0.00017,63.0);
+    let _vt=Math.max(0,1-Math.abs(_vN)/_vW); _vt=_vt*_vt*(3-2*_vt);
+    h-=_vt*_vA*(_vLow+(1-_vLow)*_mm);
+    // ── (v35.25) STRATA BENCHES / CLIFFS ─────────────────────────────────
+    // Pure arithmetic — no extra noise. Pulls height toward discrete bands with
+    // a cubic riser: derivative 0 at a band edge (flat bench) rising to 3x at
+    // the midpoint (near-vertical step). Weighted by the mountain mask so the
+    // lowlands stay smooth rolling hills and only the uplands break into mesas
+    // and stepped faces. Runs BEFORE the river carve so watercourses stay
+    // smooth instead of falling down a staircase.
+    const _cw=_mm*_cwK;
+    if(_cw>0.001){
+      const _step=_stepH, _t=h/_step, _fl=Math.floor(_t), _fr=_t-_fl;
+      // The riser curve has to be FLAT across most of the band or there is no
+      // bench. A cubic ease (the first attempt) only ever displaces ~25u out of
+      // a 170u band — invisible on hills hundreds of units tall. Raising the
+      // power flattens the tread and concentrates the whole band change into a
+      // short horizontal run, which is what actually reads as a cliff.
+      // cliffPow 9: |_s| < 0.09 for the first 40% of the band.
+      const _s=_fr<0.5 ? 0.5*Math.pow(2*_fr,_cpow) : 1-0.5*Math.pow(2*(1-_fr),_cpow);
+      h+=((_fl+_s)*_step-h)*_cw;
+    }
     const r1=_stFbm(wx,wz,3,0.00026,21.0),r2=_stFbm(wx+1000,wz-1000,3,0.00042,-8.0),r3=_stFbm(wx-2000,wz+500,3,0.0006,33.0);
     const ch=Math.max(Math.max(0,1-Math.abs(r1)/0.11),Math.max(0,1-Math.abs(r2)/0.085),Math.max(0,1-Math.abs(r3)/0.06));
     const river=ch*ch*(3-2*ch);
@@ -18443,8 +18577,28 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uAerial:{value:0.0}, uAerialStart:{value:1200}, uAerialFar:{value:6500}, uAerialColor:{value:new THREE.Color(0xb4c8da)},
                // (v34.66) zero-cost visual pass: strata band strength (0.14 = the
                // pre-pass ground-rock constant, kept for the hub) + fresnel rim.
-               uStrata:{value:0.14}, uRim:{value:0.0} };
+               uStrata:{value:0.14}, uRim:{value:0.0},
+               // (v35.26) GROUND SURFACE PATCHES — breaks up the vast unbroken
+               // green with bare dirt, loose rubble/scree and dark overgrowth.
+               // xyz = dirt / rubble / overgrowth strength; uPatchScale shrinks
+               // or grows the blobs. Purely fragment-side, so it costs no draw
+               // calls at all — which is the budget that actually binds on this
+               // hub. Live: window.__hubGround(dirt, rubble, growth, scale).
+               uPatchMix:{value:new THREE.Vector3(0.85, 0.55, 0.70)}, uPatchScale:{value:1.0} };
 if (typeof window !== 'undefined') {
+
+  // (v35.26) Ground-patch tuner: __hubGround(dirt, rubble, overgrowth, scale).
+  // Any argument may be omitted to leave it alone; no argument reports current.
+  // Uniform writes only, so this takes effect on the very next frame — no
+  // terrain rebake, unlike the __hubTerra landform knobs.
+  window.__hubGround = function (dirt, rubble, growth, scale) {
+    const v = _swU.uPatchMix.value;
+    if (typeof dirt === 'number') v.x = dirt;
+    if (typeof rubble === 'number') v.y = rubble;
+    if (typeof growth === 'number') v.z = growth;
+    if (typeof scale === 'number') _swU.uPatchScale.value = scale;
+    return { dirt: v.x, rubble: v.y, overgrowth: v.z, scale: _swU.uPatchScale.value };
+  };
 
   window.__aerialSet = function (strength, start, far) {
     if (strength != null) _swU.uAerial.value = strength;
@@ -18519,6 +18673,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uDetail = (window.__terrainDetailU || (window.__terrainDetailU = { value: 1.0 }));
     sh.uniforms.uAerial=_swU.uAerial; sh.uniforms.uAerialStart=_swU.uAerialStart; sh.uniforms.uAerialFar=_swU.uAerialFar; sh.uniforms.uAerialColor=_swU.uAerialColor;
     sh.uniforms.uStrata=_swU.uStrata; sh.uniforms.uRim=_swU.uRim;
+    sh.uniforms.uPatchMix=_swU.uPatchMix; sh.uniforms.uPatchScale=_swU.uPatchScale;
     if (!window.__terrainAOU) { var _aoDef=0.55, _satDef=0.40;
       if ((typeof QUALITY!=='undefined' && QUALITY.isPotato && QUALITY.isPotato()) || (typeof _LSS_IS_MOBILE!=='undefined' && _LSS_IS_MOBILE) || (typeof isStandaloneQuest==='function' && isStandaloneQuest())) { _aoDef=0.0; _satDef=0.28; }
       else if (!(typeof QUALITY!=='undefined' && QUALITY.isUltra && QUALITY.isUltra())) { _aoDef=0.40; }
@@ -18554,7 +18709,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
@@ -18562,7 +18717,17 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       +sh.fragmentShader;
     // ground surface: grass on gentle slopes, bare rock on steep faces, snow on peaks, with a mossy mottle
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
-      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(1.0-uStrata*0.57+uStrata*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(1.0-uStrata*0.57+uStrata*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
+      // (v35.26) SURFACE PATCHES. The existing uSat block above is a global
+      // GRADING — it tints everything slightly browner. This is different: it
+      // paints discrete, edged areas of bare dirt, loose rubble and dark
+      // overgrowth, so the green reads as ground with a history rather than one
+      // flat colour. Three decorrelated noise fields (dirt and overgrowth from
+      // opposite ends of one field, rubble from its own so scree does not
+      // always sit next to bare earth). Rubble is slope-biased: it collects on
+      // the steeper grass near rock, the way scree actually does.
+      +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _dirtM=smoothstep(0.16,0.46,_sN)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=vec3(0.32,0.225,0.135)*(0.70+0.66*_grit);\n vec3 _rubC=mix(uColRock,vec3(0.40,0.37,0.33),0.45)*(0.58+0.90*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
+      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float snow=smoothstep(uSnow,uSnow+0.12,th);\n terr=mix(terr,uColSnow,snow*max(fl,0.45));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _snow=smoothstep(uSnow,uSnow+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
@@ -22115,6 +22280,74 @@ function resetSandwichTerrain() {
   game.sandwichChunks = new Map();
   try { _swApplyAtmosphere(); } catch (_) {}
 }
+
+// (v35.25) Live tuner for the hub landform pass in _stGroundY's HUB branch:
+// __hubTerra({valW:0.10, valA:470}) patches and rebakes. Keys: spineW/spineA
+// (ridgeline crest width + height), valW/valA/valLow (glacial valley width,
+// depth, and how much of that depth reaches the lowlands), cliff (strata
+// terrace strength) and step (bench height). __hubTerra() with no argument
+// just reports the current set. Terrain shape is not something you get right
+// by reasoning about the numbers, and a rebuild per guess is ~40s — this makes
+// it a one-second loop. Bake whatever you settle on into the literals.
+// Height probe for tuning: survey the landform over a grid and report how much
+// of it ends up under the waterline. The flooding failure mode is invisible
+// from any single vantage — you have to count it.
+try {
+  window.__hubSurvey = function (knobs, span, stepXZ) {
+    const T = game.sandwichTerrain; if (!T) return null;
+    const was = game._hubTerra;
+    if (knobs !== undefined) game._hubTerra = knobs;
+    const R = span || 24000, S = stepXZ || 600, WL = T.WL;
+    let below = 0, n = 0, min = 1e9, max = -1e9, sum = 0;
+    // Slope matters more than elevation here. Terracing REDISTRIBUTES height
+    // without moving the mean, so elevation stats are blind to it by
+    // construction — the whole point of a cliff is the gradient. Sampled at a
+    // 60u baseline (finer than the survey step) so a bench riser registers.
+    const D = 60, slopes = [];
+    let peak = null, steep = null, steepBest = -1;
+    for (let x = -R; x <= R; x += S) for (let z = -R; z <= R; z += S) {
+      const y = _stGroundY(x, z, T); n++; sum += y;
+      if (y < WL) below++;
+      if (y < min) min = y;
+      if (y > max) { max = y; peak = { x, z, y: Math.round(y) }; }
+      const gx = (_stGroundY(x + D, z, T) - _stGroundY(x - D, z, T)) / (2 * D);
+      const gz = (_stGroundY(x, z + D, T) - _stGroundY(x, z - D, T)) / (2 * D);
+      const sl = Math.atan(Math.hypot(gx, gz)) * 180 / Math.PI;
+      slopes.push(sl);
+      // Steepest point that is ALSO well above water — the steepest cell
+      // overall is usually a lakebed wall, which is useless as a vantage.
+      if (y > WL + 300 && sl > steepBest) { steepBest = sl; steep = { x, z, y: Math.round(y), slope: +sl.toFixed(1) }; }
+    }
+    game._hubTerra = was;
+    slopes.sort((a, b) => a - b);
+    const pc = (p) => +slopes[Math.min(slopes.length - 1, Math.floor(slopes.length * p))].toFixed(1);
+    return { pctUnderwater: +(100 * below / n).toFixed(1), min: Math.round(min),
+             max: Math.round(max), mean: Math.round(sum / n), WL: Math.round(WL), n,
+             slopeDeg: { p50: pc(0.50), p90: pc(0.90), p99: pc(0.99), maxS: pc(1) },
+             pctOver40deg: +(100 * slopes.filter(s => s > 40).length / slopes.length).toFixed(1),
+             peak, steep };
+  };
+} catch (_) {}
+try {
+  window.__hubTerra = function (patch) {
+    if (!patch) return Object.assign({}, game._hubTerra || {});
+    game._hubTerra = Object.assign({}, game._hubTerra || {}, patch);
+    // Full rebake. This is the whole reason the tuner exists, and it is easy to
+    // get wrong: _clipBuild() early-returns once levels exist, and _clipUpdate
+    // only re-bakes a level when its SNAPPED CENTRE moves. With the camera
+    // parked for an A/B, neither fires — so the rings keep their original baked
+    // heights and every comparison silently shows the same terrain. Clearing
+    // cx/cz to the 1e9 "never baked" sentinel is what actually forces the
+    // re-sample on the next _clipUpdate.
+    try { resetSandwichTerrain(); } catch (_) {}
+    try {
+      if (typeof _clipmap !== 'undefined' && _clipmap && _clipmap.levels) {
+        for (const L of _clipmap.levels) { L.cx = 1e9; L.cz = 1e9; }
+      }
+    } catch (_) {}
+    return Object.assign({}, game._hubTerra);
+  };
+} catch (_) {}
 
 // Build/drop chunks around a world position. Cheap; safe to call every frame.
 // (perf 2026-06-12) Allowed-chunk window: terrain only exists inside the
