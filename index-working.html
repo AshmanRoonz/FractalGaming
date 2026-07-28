@@ -2244,7 +2244,10 @@ body.vr-active #camp-video { display: none !important; }
              #discord-identity (the player icon / sign-in pill) and the
              #room-code field in here at runtime. -->
         <div id="lobby-room-box">
-          <div id="lobby-room-box-body" style="display:flex;flex-direction:row;align-items:center;gap:8px;font-family:'Rajdhani','Orbitron',sans-serif;"></div>
+          <!-- (v35.20) Column, not row: _unifyLobbyBox moves this into the
+               centred #lobby-room-hud, where YOUR ROOM / code / player chips /
+               status stack. It was a row back when it lived in the top band. -->
+          <div id="lobby-room-box-body" style="display:flex;flex-direction:column;align-items:flex-start;gap:8px;font-family:'Rajdhani','Orbitron',sans-serif;"></div>
         </div>
 
 
@@ -2894,6 +2897,28 @@ body.vr-active #camp-video { display: none !important; }
 /* Field with CREATE / JOIN stacked underneath it (was side-by-side). */
 #lobby-room-stack { flex: 0 0 auto !important; width: 100%; max-width: 260px; }
 #lobby-room-box #room-code { min-width: 0 !important; max-width: none !important; }
+
+/* (v35.20) CONSOLIDATED ROOM HUD — centred box holding the YOUR ROOM readout
+   and the lobby presence panel, shown only once a room exists. Those were two
+   separate panels in different parts of the menu saying overlapping things.
+   A bordered box is a deliberate exception to the otherwise flat menu: it's a
+   transient state readout, not part of the standing navigation. */
+#lobby-room-hud {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 6; width: min(430px, calc(100vw - 48px));
+  max-height: calc(100vh - 180px); overflow-y: auto; scrollbar-width: none;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 16px 18px;
+  background: rgba(10,16,28,0.86);
+  -webkit-backdrop-filter: blur(12px) saturate(130%);
+          backdrop-filter: blur(12px) saturate(130%);
+  border: 1px solid rgba(255,170,0,0.35); border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.55);
+  font-family: 'Rajdhani','Orbitron',sans-serif;
+}
+#lobby-room-hud::-webkit-scrollbar { display: none; }
+#lobby-room-hud #lobby-panel { order: 1; }
+#lobby-room-hud #lobby-room-box-body { order: 0; display: flex; flex-direction: column; gap: 8px; }
 
 /* THE FIRST-LOAD FRAME FLASH: #lobby-roomcode owns #room-code in the markup and
    renders for a few ms before _unifyLobbyBox lifts the field into
@@ -6191,8 +6216,12 @@ if (typeof window !== 'undefined') window.startElimination = startElimination;
 function _renderEliminationBotsBtn() {
   const btn = document.getElementById('btn-ss-bots');
   if (!btn) return;
-  const isClassic = (typeof LSS === 'undefined' || !LSS.MODE || LSS.MODE === 'classic');
-  const show = !!(typeof net !== 'undefined' && net && net.active) && isClassic;
+  // (v35.20) Mirror the spawnBots gate at round build, which excludes only
+  // campaign and freeflight — so race and assault get the toggle too. Gating
+  // on 'classic' alone hid it in the two modes that also spawn bots.
+  const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
+  const botsApply = (_m !== 'campaign' && _m !== 'freeflight');
+  const show = !!(typeof net !== 'undefined' && net && net.active) && botsApply;
   btn.style.display = show ? '' : 'none';
   if (!show) return;
   const on = !!(net && net.openSolo);
@@ -8323,12 +8352,28 @@ function _unifyLobbyBox() {
   }
   // 3. Hide the now-empty PLAY TOGETHER box.
   if (roomcode) roomcode.style.display = 'none';
-  // 4. (v35.20) The presence panel deliberately STAYS in the content column.
-  // It used to be appended here so the whole thing read as one box, but
-  // #lobby-room-box is now a slim horizontal bar in the top band — a scrolling
-  // player list can't live in it. `panel` is still looked up above because the
-  // browsing/in-room renderers toggle its buttons.
-  void panel;
+  // 4. (v35.20) CONSOLIDATED ROOM HUD. The YOUR ROOM readout (#lobby-room-box-body)
+  // and the lobby presence panel (#lobby-panel) were two separate boxes in
+  // different parts of the menu saying overlapping things. They now share one
+  // centred box that only appears once a room exists (_renderRoomBox toggles it).
+  // Everything above — the room-code field and CREATE / JOIN — stays at the top
+  // of the menu column, because you need those BEFORE there's a room.
+  let hud = document.getElementById('lobby-room-hud');
+  if (!hud) {
+    hud = document.createElement('div');
+    hud.id = 'lobby-room-hud';
+    hud.style.display = 'none';
+    const lob = document.getElementById('lobby');
+    (lob || document.body).appendChild(hud);
+  }
+  if (body) hud.appendChild(body);
+  if (panel) {
+    // Strip its card chrome — the HUD is the box now.
+    panel.style.background = 'transparent'; panel.style.border = 'none';
+    panel.style.padding = '0'; panel.style.margin = '0';
+    panel.style.borderTop = '1px solid rgba(120,200,255,0.16)'; panel.style.paddingTop = '10px';
+    hud.appendChild(panel);
+  }
   _lobbyUnified = true;
 }
 function _renderRoomBox(force) {
@@ -8349,6 +8394,11 @@ function _renderRoomBox(force) {
       _jb.textContent = inRoom ? 'SELECT GAME MODE BELOW' : 'CREATE / JOIN';
       _jb.classList.toggle('lss-room-joined', inRoom);
     }
+  } catch (_) {}
+  // (v35.20) The consolidated room HUD only exists once there's a room.
+  try {
+    const _hud = document.getElementById('lobby-room-hud');
+    if (_hud) _hud.style.display = inRoom ? '' : 'none';
   } catch (_) {}
   const entries = (inRoom && typeof nonJudgePeerEntries === 'function') ? nonJudgePeerEntries() : [];
   let sig = (inRoom ? ('R' + net.roomCode + (net.myReady ? '1' : '0')) : 'N') + '|';
@@ -49685,6 +49735,7 @@ function _setGamepadIndicatorVisible(visible) {
 const _gpCur = {
   el: null, x: -1, y: -1, visible: false, mode: 'focus',
   aPrev: false, consumedA: false, lastT: 0, hoverEl: null,
+  dragEl: null,   // input[type=range] currently being dragged while A is held
 };
 const GP_CURSOR_SPEED = 1000;  // px/sec at full stick deflection
 const GP_CURSOR_DEAD  = 0.20;  // stick deadzone before the cursor moves at all
@@ -49771,9 +49822,50 @@ function _gpCursorSetHover(el) {
   }
 }
 
+// A synthetic click does nothing useful on a range input — the browser only
+// moves the thumb for REAL pointer drags — so set the value from the cursor's
+// x position directly. Settings sliders listen on 'input' (see the sliders
+// forEach in buildSettingsPage), which is what actually applies + saves.
+function _gpSetRangeFromX(el, x) {
+  const r = el.getBoundingClientRect();
+  if (!(r.width > 0)) return;
+  const min = parseFloat(el.min !== '' ? el.min : 0);
+  const max = parseFloat(el.max !== '' ? el.max : 100);
+  const step = parseFloat(el.step) || ((max - min) / 100);
+  let t = (x - r.left) / r.width;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  let v = min + Math.round(((t * (max - min)) / step)) * step;
+  v = Math.max(min, Math.min(max, v));
+  // Snap to the step's precision or 0.0005-step sliders produce float dust
+  // like 0.006500000000000001 in the readout.
+  const dec = (String(step).split('.')[1] || '').length;
+  el.value = dec ? v.toFixed(dec) : String(v);
+}
+// A native <select> popup CANNOT be opened by script — no synthetic event will
+// do it, in any browser. Advancing the option (wrapping) is the workable
+// substitute and matches what the d-pad nav already does via
+// _settingsAdjustFocused. Selects listen on 'change'.
+function _gpCycleSelect(el) {
+  const n = (el.options && el.options.length) || 0;
+  if (!n) return;
+  el.selectedIndex = (el.selectedIndex + 1) % n;
+  try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+  try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
+}
 function _gpCursorClick() {
   const el = document.elementFromPoint(_gpCur.x, _gpCur.y);
   if (!el) return false;
+  const _tag = el.tagName;
+  const _type = String(el.type || '').toLowerCase();
+  if (_tag === 'SELECT') { try { el.focus(); } catch (_) {} _gpCycleSelect(el); return true; }
+  if (_tag === 'INPUT' && _type === 'range') {
+    // Jump to the clicked spot, then hold A to keep sliding (see _gpCursorTick).
+    _gpCur.dragEl = el;
+    try { el.focus(); } catch (_) {}
+    _gpSetRangeFromX(el, _gpCur.x);
+    try { el.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+    return true;
+  }
   _gpCursorEvt(el, 'mousedown');
   _gpCursorEvt(el, 'mouseup');
   _gpCursorEvt(el, 'click');
@@ -49791,7 +49883,9 @@ function _gpCursorTick(gp, menuActive) {
   const xrOn = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   // VR has its own in-headset menu path (_xrHandleSettingsMenuInput + laser),
   // so the flat cursor stays out of the way while presenting.
-  if (!gp || !menuActive || xrOn) { _gpCursorShow(false); _gpCur.aPrev = false; return; }
+  // dragEl cleared on every exit path or a slider stays "grabbed" across a
+  // menu close / unplugged pad and resumes the next time A is held.
+  if (!gp || !menuActive || xrOn) { _gpCursorShow(false); _gpCur.aPrev = false; _gpCur.dragEl = null; return; }
   const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   let dt = (_gpCur.lastT ? (now - _gpCur.lastT) : 16) / 1000;
   _gpCur.lastT = now;
@@ -49827,7 +49921,7 @@ function _gpCursorTick(gp, menuActive) {
     if (sc) sc.scrollTop += (ry < 0 ? -1 : 1) * GP_SCROLL_SPEED * k * k * dt;
   }
 
-  if (!_gpCur.visible) { _gpCur.aPrev = false; return; }
+  if (!_gpCur.visible) { _gpCur.aPrev = false; _gpCur.dragEl = null; return; }
   _gpCur.el.style.transform = 'translate(' + _gpCur.x.toFixed(1) + 'px,' + _gpCur.y.toFixed(1) + 'px)';
   const tgt = document.elementFromPoint(_gpCur.x, _gpCur.y);
   _gpCursorSetHover(tgt);
@@ -49835,7 +49929,20 @@ function _gpCursorTick(gp, menuActive) {
   // Raw button 0 (A). Deliberately NOT the configurable 'dash' binding — the
   // user may have remapped dash to something else entirely.
   const a = !!(gp.buttons && gp.buttons[0] && gp.buttons[0].pressed);
-  if (a && !_gpCur.aPrev) _gpCur.consumedA = _gpCursorClick();
+  if (a && !_gpCur.aPrev) {
+    _gpCur.consumedA = _gpCursorClick();
+  } else if (a && _gpCur.dragEl) {
+    // A held on a slider: keep tracking the pointer so it actually SLIDES
+    // rather than only jumping to wherever it was first clicked.
+    _gpSetRangeFromX(_gpCur.dragEl, _gpCur.x);
+    try { _gpCur.dragEl.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+    _gpCur.consumedA = true;
+  } else if (!a && _gpCur.dragEl) {
+    // Release commits. Sliders apply on 'input', but anything listening for
+    // 'change' (the conventional commit event) gets it here.
+    try { _gpCur.dragEl.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {}
+    _gpCur.dragEl = null;
+  }
   _gpCur.aPrev = a;
 }
 
