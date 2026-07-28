@@ -3620,7 +3620,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.30';
+const LSS_BUILD = '35.29';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -19404,36 +19404,18 @@ function _swFallMatGet() {
     sh.fragmentShader = 'varying vec2 _fuv;\nuniform float uTime;\n' + sh.fragmentShader;
     sh.fragmentShader = sh.fragmentShader.replace('#include <color_fragment>',
       '#include <color_fragment>\n'
-      // (v35.30) EVERYTHING here is expressed in terms of _d, the distance
-      // BELOW THE LIP: 0 at the top of the fall, 1 at the plunge pool.
-      //
-      // The first version used _fuv.y raw and assumed v=0 was the top, the way
-      // image coordinates work. THREE.PlaneGeometry is the opposite — it emits
-      // v=1 at +Y — so all three cues came out inverted at once: the streaks
-      // crawled UPWARD, the heavy white lip sat at the bottom, and the fall
-      // thinned to spray at the top, which is exactly why it looked like water
-      // running up out of nowhere. Deriving _d once and using it everywhere
-      // makes the orientation impossible to get wrong again.
-      + ' float _d=1.0-_fuv.y;\n'
-      // Streaks: a feature sits where (_d - t) is constant, so _d grows with
-      // time and the pattern travels DOWN the sheet. Per-column rate variation
-      // keeps the repeat from being obvious.
-      + ' float _sx=_fuv.x*14.0;\n'
+      // Streaks scroll DOWN and stretch as they fall. Two rates so the sheet
+      // never shows an obvious repeat, plus a horizontal ripple so the edges
+      // are ragged instead of a clean rectangle.
+      + ' float _sx=_fuv.x*14.0, _sy=_fuv.y - uTime*0.85;\n'
       + ' float _s1=fract(sin(floor(_sx)*91.7)*43758.5453);\n'
-      + ' float _sy=_d-uTime*0.85;\n'
       + ' float _st=fract(_sy*(0.6+_s1*0.9)+_s1);\n'
       + ' float _streak=smoothstep(0.0,0.45,_st)*smoothstep(1.0,0.55,_st);\n'
       + ' float _edge=smoothstep(0.0,0.16,_fuv.x)*smoothstep(1.0,0.84,_fuv.x);\n'
-      // Solid, bright and near-opaque at the lip so the fall visibly ISSUES
-      // from the top edge instead of fading in out of thin air; the streak
-      // texture is suppressed there for the same reason.
-      + ' float _lip=1.0-smoothstep(0.0,0.14,_d);\n'
-      // Breaking into spray as it approaches the pool.
-      + ' float _spray=smoothstep(0.62,1.0,_d)*fract(sin(floor(_sx*2.0)*57.3+floor(_sy*6.0))*43758.5453);\n'
-      + ' float _body=(0.35+0.65*_streak)*_edge*(0.62+0.55*(1.0-_d));\n'
-      + ' diffuseColor.a*=clamp(max(_body,_lip*0.95*_edge)+_spray*0.5,0.0,1.0);\n'
-      // Whiten the crest and the spray; the mid-fall keeps the water tint.
-      + ' diffuseColor.rgb=mix(diffuseColor.rgb,vec3(1.0),clamp(_lip*0.55+_spray*0.45,0.0,1.0));\n');
+      // Thicker and whiter at the lip, breaking into spray toward the plunge.
+      + ' float _top=smoothstep(0.0,0.30,1.0-_fuv.y);\n'
+      + ' float _spray=smoothstep(0.55,1.0,_fuv.y)*fract(sin(floor(_sx*2.0)*57.3+floor(_sy*6.0))*43758.5453);\n'
+      + ' diffuseColor.a*=clamp((0.35+0.65*_streak)*_edge*(0.55+0.75*_top)+_spray*0.5,0.0,1.0);\n');
   };
   _swFallMat = m;
   return m;
@@ -19624,33 +19606,15 @@ function _swBuildLandmarks(x0, z0, T) {
           // the ice in narrower ribbons.
           const _wScale = _fedByRiver ? (0.55 + 0.90 * _riv) : 0.45;
           const w = (90 + 150 * _stHash2(cx * 7.1 + 2.0, cz * 9.7 - 6.0)) * _wScale;
-          // (v35.30) The sheet LEANS along the fall line instead of hanging
-          // dead vertical. The lip and the foot are `reach` apart horizontally,
-          // so a vertical plane pinned near the lip left its bottom end
-          // stranded in mid-air well short of the pool (or buried, depending on
-          // the face). Now the quad spans lip -> foot directly: its length is
-          // the true slope distance and it tilts by the same angle as the rock,
-          // so the water stays ON the face the whole way down.
           const topY = fy + 8;
           const botY = Math.max(WL - 20, by);
-          const vRun = Math.max(120, topY - botY);
-          // Horizontal distance actually covered between lip and pool.
-          const hRun = reach * Math.min(1, (topY - botY) / Math.max(1, drop));
-          const slopeLen = Math.hypot(vRun, hRun);
-          const g = new THREE.PlaneGeometry(w, slopeLen, 1, 1);
+          const hgt = Math.max(120, topY - botY);
+          const g = new THREE.PlaneGeometry(w, hgt, 1, 1);
           const mesh = new THREE.Mesh(g, _swFallMatGet());
-          // Midpoint of the lip->foot span, nudged out along the face normal so
-          // it does not z-fight the rock it is running over.
-          const nOut = 22;
-          mesh.position.set(fx + dx * (hRun * 0.5) + dx * nOut,
-                            (topY + botY) * 0.5,
-                            fz + dz * (hRun * 0.5) + dz * nOut);
-          mesh.rotation.order = 'YXZ';
+          // Hang the sheet on the face, just proud of the rock so it does not
+          // z-fight, and turn it to face along the downhill direction.
+          mesh.position.set(fx + dx * 26, (topY + botY) * 0.5, fz + dz * 26);
           mesh.rotation.y = Math.atan2(dx, dz);
-          // Lean the top back into the slope by the fall's own angle. Positive
-          // rotateX tips the plane's +Y (its lip edge, v=1) away from the
-          // viewer and toward the hill.
-          mesh.rotation.x = Math.atan2(hRun, vRun);
           mesh.renderOrder = 3;
           mesh.frustumCulled = true;
           mesh.userData = { isSandwichTerrain: true };
