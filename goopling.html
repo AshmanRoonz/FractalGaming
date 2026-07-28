@@ -137,7 +137,7 @@
     <b>move slowly</b> — feed on it · grow<br>
     <b>pinch / wheel</b> — zoom in &amp; out<br>
     <b>grow</b> — choose a mutation at each branch<br>
-    <b>wake the core</b> — solve its seal to move on<br>
+    <b>wake the core</b> — hunt its spores in order<br>
     <b>microbes bite</b> — double-tap: pulse pops them<br>
     <b>🧬</b> — customize · save · trade gooplings
   </div><br>
@@ -744,8 +744,10 @@ function updateMicrobes(dt){
 
 // ---------- THE SEAL: each biome's clearing puzzle ---------------------------
 // Eating the quota only WAKES the biome's core. The core then shows a colour
-// sequence; you must swim through the drifting nodes in that exact order before
-// the core's patience runs out. Order is deterministic per biome (so a whole
+// sequence and scatters that many SPORES — small living keys that bolt the
+// instant you close in. Hunt them down and eat them in the core's colour order
+// before its patience runs out. They tire (that's your window), the pulse stuns
+// them, and a vortex drags them in. Order is deterministic per biome (so a whole
 // room sees the same puzzle and can split up); the origin is broadcast so
 // everyone converges on one arena. Get it right -> the core opens -> eat it.
 const SEAL={on:false,open:false,x:0,y:0,seed:0,nodes:[],order:[],idx:0,deadline:0,
@@ -758,12 +760,14 @@ function startSeal(ox,oy,sd,quiet){
   SEAL.nodes=[]; SEAL.idx=0; SEAL.lastTouch=-9;
   for(let i=0;i<n;i++){ const a=(i/n)*6.2832+R.f(-.5,.5), r=R.f(760,1500);
     const hue=(i*360/n+R.f(-14,14)+360)%360;
+    // the seal's keys are LIVING: little spores that bolt the moment you close in
     SEAL.nodes.push({x:ox+Math.cos(a)*r, y:oy+Math.sin(a)*r, ox:ox+Math.cos(a)*r, oy:oy+Math.sin(a)*r,
-      hue, col:hsl2rgb(hue/360,.9,.62), ph:R.f(0,7), r:32, lit:false}); }
+      hue, col:hsl2rgb(hue/360,.9,.62), ph:R.f(0,7), r:15, lit:false,
+      vx:0, vy:0, stam:1, jink:R.i(2)?1:-1, jinkT:0, dartT:0, stunT:-9, panic:0}); }
   SEAL.order=SEAL.nodes.map((_,i)=>i);
   for(let i=SEAL.order.length-1;i>0;i--){ const j=R.i(i+1); const t=SEAL.order[i]; SEAL.order[i]=SEAL.order[j]; SEAL.order[j]=t; }
-  SEAL.deadline=nowS+30+n*8;
-  if(!quiet){ toast('<b>THE CORE WAKES</b><br><span style="font-size:11px;color:#9bc">touch the nodes in the core’s colour order</span>');
+  SEAL.deadline=nowS+34+n*10;
+  if(!quiet){ toast('<b>THE CORE WAKES</b><br><span style="font-size:11px;color:#9bc">hunt &amp; eat the spores in the core’s colour order</span>');
     sndSeal(); }
   hudBiome();
 }
@@ -773,15 +777,18 @@ function beginSeal(){
   netEvt({t:'seal',x:SEAL.x,y:SEAL.y,s:SEAL.seed});
 }
 function sealFail(){ SEAL.failT=nowS; SEAL.idx=0;
-  for(const nd of SEAL.nodes) nd.lit=false;
-  SEAL.deadline=nowS+30+SEAL.nodes.length*8;
-  beep(200,70,.45,'sawtooth',.28); toast('<b>SEQUENCE BROKEN</b>');
+  for(const nd of SEAL.nodes){                       // the seal spits the eaten ones back out
+    if(nd.lit){ nd.lit=false; nd.x=nd.ox; nd.y=nd.oy; nd.vx=nd.vy=0; nd.stam=1; nd.stunT=-9;
+      ringFx(nd.x,nd.y,4,90,nd.col,.5); } }
+  SEAL.deadline=nowS+34+SEAL.nodes.length*10;
+  beep(200,70,.45,'sawtooth',.28); toast('<b>SEQUENCE BROKEN</b><br><span style="font-size:11px;color:#9bc">the spores reform</span>');
   try{navigator.vibrate&&navigator.vibrate([40,60,40]);}catch(_){} }
-function sealLight(i,remote){
+function sealLight(i,remote){                        // (consume a spore)
   const nd=SEAL.nodes[i]; if(!nd||nd.lit) return;
   nd.lit=true; SEAL.idx++; SEAL.litT=nowS;
   beep(360*Math.pow(1.18,SEAL.idx),540*Math.pow(1.18,SEAL.idx),.2,'triangle',.2);
-  ringFx(nd.x,nd.y,10,120,nd.col,.55);
+  ringFx(nd.x,nd.y,10,140,nd.col,.55); spawnFood(nd.x,nd.y,14); mass+=8;
+  try{navigator.vibrate&&navigator.vibrate(18);}catch(_){}
   if(!remote) netEvt({t:'node',i,s:SEAL.seed});
   if(SEAL.idx>=SEAL.order.length){ SEAL.open=true;
     toast('<b>CORE EXPOSED</b><br><span style="font-size:11px;color:#9bc">consume it to leave this biome</span>');
@@ -789,24 +796,85 @@ function sealLight(i,remote){
 }
 function updateSeal(dt){
   if(!SEAL.on) return;
-  for(const nd of SEAL.nodes){                       // nodes bob on the current
+  const vortex=has('vortex'), pullR=ship.R*3.2;
+  // they can't outrun a goopling in a straight line, so they DART: a hard 0.3s
+  // burst sideways-away, then a slow recovery. The hunt is reading the dodge and
+  // being where they land — and every dart costs stamina you can drain.
+  // they read your CHARGE, not your distance: the faster you come in, the sooner
+  // they break — and they break sideways, so a straight lunge sails right past
+  const shipSpd=Math.hypot(ship.vx,ship.vy);
+  const fleeR=Math.max(520,ship.R*4.5)+biomeIdx*22+shipSpd*.26;
+  const burst=880+biomeIdx*50, glide=105;
+  for(let i=0;i<SEAL.nodes.length;i++){ const nd=SEAL.nodes[i];
+    if(nd.lit) continue;
+    const dx=nd.x-ship.x, dy=nd.y-ship.y, d=Math.hypot(dx,dy)||1;
+    const isNext=SEAL.order[SEAL.idx]===i;
     flowAt(nd.x,nd.y,_fl);
-    nd.x+=(_fl[0]*.25+Math.sin(nowS*.6+nd.ph)*9)*dt; nd.y+=(_fl[1]*.25+Math.cos(nowS*.5+nd.ph)*9)*dt;
-    const dx=nd.x-nd.ox,dy=nd.y-nd.oy,d=Math.hypot(dx,dy);
-    if(d>240){ nd.x-=dx/d*(d-240); nd.y-=dy/d*(d-240); }   // tethered near home
+    let ax=_fl[0]*.35, ay=_fl[1]*.35;
+    const stunned=nowS<nd.stunT, darting=nowS<nd.jinkT;
+    if(stunned){ nd.vx*=Math.exp(-7*dt); nd.vy*=Math.exp(-7*dt); nd.stam=Math.min(1,nd.stam+dt*.2); nd.panic=1; }
+    else if(darting){ nd.panic=1; }                  // committed mid-burst: no steering, so you can cut it off
+    else {
+      if(d<fleeR){                                   // in range and recovered -> BOLT
+        nd.panic=Math.min(1,nd.panic+dt*3);
+        if(nowS>nd.dartT&&nd.stam>.06){
+          nd.jink=-nd.jink;
+          const nx=dx/d, ny=dy/d;
+          // sidestep ACROSS your charge (matador), falling back to a plain bolt
+          // when you're drifting; picked to the side you're not already covering
+          let sx2=-ny, sy2=nx;
+          if(shipSpd>140){ const cvx=ship.vx/shipSpd, cvy=ship.vy/shipSpd;
+            sx2=-cvy; sy2=cvx; if(sx2*nx+sy2*ny<0){ sx2=-sx2; sy2=-sy2; } }
+          else if(nd.jink<0){ sx2=-sx2; sy2=-sy2; }
+          const lean=Math.min(.85,.35+shipSpd/1600), sw=1-lean;
+          const bx=nx*sw+sx2*lean, by=ny*sw+sy2*lean, bl=Math.hypot(bx,by)||1;
+          const power=burst*(.45+.55*nd.stam);       // exhausted darts are feeble
+          nd.vx=bx/bl*power; nd.vy=by/bl*power;
+          nd.jinkT=nowS+.3; nd.stam=Math.max(0,nd.stam-.19);
+          nd.dartT=nowS+.62+(1-nd.stam)*.75;         // the tireder it gets, the longer it flounders
+          beep(900+Math.random()*260,640,.06,'sine',.05);
+        } else { const nx=dx/d,ny=dy/d; ax+=nx*160; ay+=ny*160; }   // crawling away, spent
+      } else {                                       // calm: drift home, catch its breath
+        nd.panic=Math.max(0,nd.panic-dt*1.5);
+        nd.stam=Math.min(1,nd.stam+dt*.3);
+        ax+=Math.sin(nowS*.9+nd.ph)*26; ay+=Math.cos(nowS*.8+nd.ph)*26;
+        const hx=nd.ox-nd.x, hy=nd.oy-nd.y, hd=Math.hypot(hx,hy);
+        if(hd>60){ ax+=hx/hd*70; ay+=hy/hd*70; }
+      }
+    }
+    if(vortex&&d<pullR&&!darting){ const f=300*(1-d/pullR); ax-=dx/d*f; ay-=dy/d*f; }  // VORTEX hauls them back
+    nd.vx+=ax*dt; nd.vy+=ay*dt;
+    const leash=900, lx=nd.x-nd.ox, ly=nd.y-nd.oy, ld=Math.hypot(lx,ly);
+    if(ld>leash){ nd.vx-=lx/ld*(ld-leash)*.09*dt*60; nd.vy-=ly/ld*(ld-leash)*.09*dt*60; }
+    const vm=stunned?35:(darting?burst:glide+140*nd.stam), vl=Math.hypot(nd.vx,nd.vy);
+    if(vl>vm){ nd.vx*=vm/vl; nd.vy*=vm/vl; }
+    nd.vx*=Math.exp((darting?-.5:-2.4)*dt); nd.vy*=Math.exp((darting?-.5:-2.4)*dt);
+    nd.x+=nd.vx*dt; nd.y+=nd.vy*dt;
+    if(SEAL.open||nowS-SEAL.failT<1.1) continue;
+    // catching: raw speed alone never takes one — while it has breath left it
+    // squirts out of your grasp at the last instant. WEAR IT DOWN (or stun it).
+    const grab=isNext?(nd.r+ship.R*.52):(nd.r*.4+ship.R*.4);
+    if(d<grab){
+      if(nowS-SEAL.lastTouch<.28) continue;
+      if(!stunned&&nd.stam>.12){                     // slips the grab — at a real cost
+        SEAL.lastTouch=nowS;
+        const nx=dx/d, ny=dy/d; let sx2=-ny, sy2=nx;
+        if(shipSpd>140){ const cvx=ship.vx/shipSpd, cvy=ship.vy/shipSpd;
+          sx2=-cvy; sy2=cvx; if(sx2*nx+sy2*ny<0){ sx2=-sx2; sy2=-sy2; } }
+        const bx=nx*.32+sx2, by=ny*.32+sy2, bl=Math.hypot(bx,by)||1;
+        nd.vx=bx/bl*burst*1.15; nd.vy=by/bl*burst*1.15;
+        nd.jinkT=nowS+.32; nd.dartT=nowS+.5; nd.panic=1;
+        nd.stam=Math.max(0,nd.stam-.3);              // ~4 escapes and it's spent
+        ringFx(nd.x,nd.y,nd.r,nd.r*4.5,nd.col,.3);
+        beep(1150,700,.09,'sine',.09);
+        continue; }
+      SEAL.lastTouch=nowS;
+      if(isNext) sealLight(i);
+      else { sealFail(); netEvt({t:'sealfail',s:SEAL.seed}); }
+    }
   }
-  if(!SEAL.open){
-    if(nowS>SEAL.deadline){ sealFail(); return; }
-    if(nowS-SEAL.failT>1.1) for(let i=0;i<SEAL.nodes.length;i++){ const nd=SEAL.nodes[i];
-      if(nd.lit) continue;
-      if(Math.hypot(nd.x-ship.x,nd.y-ship.y)<nd.r+ship.R*.9){
-        if(nowS-SEAL.lastTouch<.35) continue; SEAL.lastTouch=nowS;
-        if(SEAL.order[SEAL.idx]===i) sealLight(i);
-        else { sealFail(); netEvt({t:'sealfail',s:SEAL.seed}); }
-        break; } }
-  } else if(Math.hypot(SEAL.x-ship.x,SEAL.y-ship.y)<SEAL.coreR+ship.R*.9){
-    mass+=120; startClear();
-  }
+  if(!SEAL.open){ if(nowS>SEAL.deadline) sealFail(); }
+  else if(Math.hypot(SEAL.x-ship.x,SEAL.y-ship.y)<SEAL.coreR+ship.R*.9){ mass+=120; startClear(); }
 }
 function sndSeal(){ [0,5,9].forEach((s,i)=>setTimeout(()=>beep(180*Math.pow(2,s/12),182*Math.pow(2,s/12),.5,'sine',.22),i*130)); }
 function sndSealOpen(){ [0,7,12,19].forEach((s,i)=>setTimeout(()=>beep(300*Math.pow(2,s/12),305*Math.pow(2,s/12),.35,'triangle',.2),i*110)); }
@@ -839,7 +907,7 @@ const toastEl=document.getElementById('toast');
 function toast(html){ const d=document.createElement('div'); d.className='tmsg'; d.innerHTML=html;
   toastEl.appendChild(d); setTimeout(()=>d.remove(),2900); }
 function hudBiome(){ document.getElementById('bname').textContent=
-    SEAL.on?(SEAL.open?`biome ${biomeIdx+1} — CORE OPEN`:`biome ${biomeIdx+1} — SEAL ${SEAL.idx}/${SEAL.nodes.length}`)
+    SEAL.on?(SEAL.open?`biome ${biomeIdx+1} — CORE OPEN`:`biome ${biomeIdx+1} — SPORES ${SEAL.idx}/${SEAL.nodes.length}`)
            :`biome ${biomeIdx+1} — ${gen.name}`;
   document.getElementById('pbar').style.background=css(SEAL.on?gen.danger:myCol(),1); }
 let lastPct=-1;
@@ -1093,6 +1161,10 @@ function doPulse(){ const nova=has('nova');
     if(d<PR){ h.vx+=dx/d*(1-d/PR)*420; h.vy+=dy/d*(1-d/PR)*420; } }
   for(let i=MB.length-1;i>=0;i--){ const m=MB[i],d=Math.hypot(m.x-ship.x,m.y-ship.y);
     if(d<PR*.95) killMb(m,i); }                      // the pulse is your weapon vs microbes
+  if(SEAL.on&&!SEAL.open) for(const nd of SEAL.nodes){ if(nd.lit) continue;
+    const d=Math.hypot(nd.x-ship.x,nd.y-ship.y);     // ...and it STUNS the spores: your hunting tool
+    if(d<PR){ nd.stunT=nowS+1.1+(nova?.5:0); nd.panic=1;
+      ringFx(nd.x,nd.y,nd.r,nd.r*3,nd.col,.4); } }
   ringFx(ship.x,ship.y,ship.R*.8,PR,myCol(),.55); netEvt({t:'pulse',x:ship.x,y:ship.y});
   try{navigator.vibrate&&navigator.vibrate(15);}catch(_){}}
 
@@ -1404,7 +1476,7 @@ function render(){
           x.beginPath(); x.moveTo(d2-6,-6); x.lineTo(d2+3,0); x.lineTo(d2-6,6); x.stroke(); }
         x.globalAlpha=1; x.restore();
       }
-      marker(x,nnd.x,nnd.y,z,nnd.col,'NEXT',nnd.r*1.25*z+22,false,true);
+      marker(x,nnd.x,nnd.y,z,nnd.col,nowS<nnd.stunT?'STUNNED — TAKE IT':(nnd.stam<=.12?'EXHAUSTED — TAKE IT':(nnd.stam<.45?'TIRING':'PREY')),Math.max(nnd.r*z,46)+24,false,true);
       marker(x,SEAL.x,SEAL.y,z,gen.danger,'CORE',SEAL.coreR*z+10,true);
     } else marker(x,SEAL.x,SEAL.y,z,myCol(),'CORE — OPEN',SEAL.coreR*z+14,false,true);
   }
@@ -1463,6 +1535,7 @@ function marker(x,wx,wy,z,col,label,lift,faint,big){
 function drawSeal(x,vx0,vx1,vy0,vy1){
   const n=SEAL.nodes.length;
   for(let i=0;i<n;i++){ const nd=SEAL.nodes[i];
+    if(nd.lit) continue;                             // eaten — it lives on as a pip on the core
     if(nd.x<vx0-260||nd.x>vx1+260||nd.y<vy0-260||nd.y>vy1+260) continue;
     const col=nd.col, isNext=!SEAL.open&&SEAL.order[SEAL.idx]===i;
     const rr0=nd.r*(isNext?1.25:1);
@@ -1477,29 +1550,50 @@ function drawSeal(x,vx0,vx1,vy0,vy1){
       for(let k=0;k<2;k++){ const t=((nowS*.85+k*.5)%1);
         x.strokeStyle=css(col,.6*(1-t)); x.lineWidth=(5*(1-t)+2)*zk;
         x.beginPath(); x.arc(nd.x,nd.y,bea*(1.05+t*2.4),0,6.2832); x.stroke(); } }
-    x.globalCompositeOperation='lighter'; x.globalAlpha=nd.lit?.7:(isNext?.85+.15*Math.sin(nowS*4):.4);
+    x.globalCompositeOperation='lighter'; x.globalAlpha=isNext?.85+.15*Math.sin(nowS*4):.4;
     const gs=bea*(isNext?2.6:1.7);
     x.drawImage(glowCache(col),nd.x-gs,nd.y-gs,gs*2,gs*2);
     x.globalAlpha=1; x.globalCompositeOperation='source-over';
-    x.beginPath();
-    for(let a=0;a<=18;a++){ const an=a/18*6.2832+nowS*(nd.lit?.5:.15)*TR.swirl;
-      const rr=rr0*(1+.14*Math.sin(an*4+nowS*2+nd.ph));
-      const px=nd.x+Math.cos(an)*rr,py=nd.y+Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
+    // --- the spore itself: a darting little animal ---
+    const stunned=nowS<nd.stunT, hd=Math.atan2(nd.vy,nd.vx);
+    const spd=Math.hypot(nd.vx,nd.vy), squash=Math.min(.3,spd*.0009);
+    x.save(); x.translate(nd.x,nd.y); x.rotate(hd);
+    x.scale(1+squash,1-squash*.7);
+    const flick=stunned?0:Math.sin(nowS*(14+nd.panic*16)+nd.ph);
+    x.strokeStyle=css(col,.9); x.lineWidth=3*Math.max(1,zk*.5); x.lineCap='round';
+    x.beginPath(); x.moveTo(-rr0*.6,0);              // whipping tail
+    x.quadraticCurveTo(-rr0*1.5,flick*rr0*.75,-rr0*2.3,flick*rr0*1.15); x.stroke();
+    for(const s2 of [-1,1]){ x.beginPath();          // paddling cilia legs
+      x.moveTo(-rr0*.15,s2*rr0*.5);
+      x.lineTo(-rr0*.7+flick*rr0*.25,s2*rr0*1.15); x.stroke(); }
+    x.beginPath();                                   // body
+    for(let a=0;a<=16;a++){ const an=a/16*6.2832;
+      const rr=rr0*(1+.16*Math.sin(an*3+nowS*3+nd.ph))*(an>1.5&&an<4.7?.86:1);
+      const px=Math.cos(an)*rr,py=Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
     x.closePath();
-    x.fillStyle=css(col,nd.lit?.5:(isNext?.42:.16)); x.fill();
-    x.strokeStyle=isNext?'rgba(255,255,255,.95)':css(col,nd.lit?1:.7);
-    x.lineWidth=(isNext?4:(nd.lit?3:2))*Math.max(1,zk*.6); x.stroke();
-    if(isNext){
-      x.strokeStyle=css(col,1); x.lineWidth=2*Math.max(1,zk*.6);  // colour ring inside the white
-      x.beginPath(); x.arc(nd.x,nd.y,rr0*.72,0,6.2832); x.stroke();
-      x.fillStyle='rgba(255,255,255,.95)';            // white-hot core
-      x.beginPath(); x.arc(nd.x,nd.y,Math.max(rr0*.3,5*zk),0,6.2832); x.fill();
-      const ra=nowS*.9;                               // rotating reticle brackets
+    x.fillStyle=css(col,isNext?.55:.3); x.fill();
+    x.strokeStyle=isNext?'rgba(255,255,255,.95)':css(col,.75);
+    x.lineWidth=(isNext?3.4:2)*Math.max(1,zk*.5); x.stroke();
+    const eR=rr0*.36;                                // eye, wide with panic
+    x.fillStyle='rgba(245,250,255,.95)';
+    x.beginPath(); x.arc(rr0*.42,0,eR*(1+nd.panic*.25),0,6.2832); x.fill();
+    x.fillStyle='rgba(8,12,18,.92)';
+    x.beginPath(); x.arc(rr0*.42+eR*.3,0,eR*(stunned?.28:.45),0,6.2832); x.fill();
+    if(stunned){ x.strokeStyle='rgba(255,255,255,.85)'; x.lineWidth=2*Math.max(1,zk*.5);
+      for(let k=0;k<3;k++){ const a=nowS*7+k*2.09;   // dizzy motes
+        x.beginPath(); x.arc(Math.cos(a)*rr0*1.5,Math.sin(a)*rr0*1.5-rr0*.6,1.8*Math.max(1,zk*.5),0,6.2832); x.stroke(); } }
+    x.restore();
+    if(nd.stam<.42&&!stunned){                       // gasping: it's slowing — take it now
+      x.strokeStyle=css([1,.85,.4],.5+.3*Math.sin(nowS*9)); x.lineWidth=2*Math.max(1,zk*.5);
+      x.beginPath(); x.arc(nd.x,nd.y,rr0*1.5,0,6.2832*(1-nd.stam/.42)); x.stroke(); }
+    if(isNext){                                       // hunter's reticle closes on the quarry
+      const ra=nowS*.9, tight=1.5-.25*Math.max(0,1-nd.panic);
       x.strokeStyle='rgba(255,255,255,.9)'; x.lineWidth=4*zk;
       for(let k=0;k<4;k++){ const a0=ra+k*1.5708;
-        x.beginPath(); x.arc(nd.x,nd.y,bea*1.5,a0-.26,a0+.26); x.stroke(); }
+        x.beginPath(); x.arc(nd.x,nd.y,bea*tight,a0-.26,a0+.26); x.stroke(); }
+      x.strokeStyle=css(col,.8); x.lineWidth=2*Math.max(1,zk*.5);
+      x.beginPath(); x.arc(nd.x,nd.y,bea*tight*.62,0,6.2832); x.stroke();
     }
-    if(nd.lit){ x.fillStyle=css([1,1,1],.9); x.beginPath(); x.arc(nd.x,nd.y,4,0,6.2832); x.fill(); }
   }
   // the core: colour-order pips ring a pulsing organ; a depleting arc = its patience
   const cx2=SEAL.x, cy2=SEAL.y, cr=SEAL.coreR;
@@ -1795,7 +1889,10 @@ window.GG={
   get s(){ return {phase,mass,totalEaten,eatenBiome,QUOTA,alive,stage,biomeIdx,gen,ship,HZ,cam,dna,stable,tr:TR,fps:fpsAvg,
     mb:MB.length, pu:PU.length, parts:parts.map(p=>p.id), abils:abilsOf(dna,stage), path:dna.path.slice(),
   branchOpen, seal:{on:SEAL.on,open:SEAL.open,idx:SEAL.idx,n:SEAL.nodes.length,
-    order:SEAL.order.slice(),left:+Math.max(0,SEAL.deadline-nowS).toFixed(1),x:Math.round(SEAL.x),y:Math.round(SEAL.y)},
+    order:SEAL.order.slice(),left:+Math.max(0,SEAL.deadline-nowS).toFixed(1),x:Math.round(SEAL.x),y:Math.round(SEAL.y),
+    spores:SEAL.nodes.map(nd=>({eaten:nd.lit,stam:+nd.stam.toFixed(2),panic:+nd.panic.toFixed(2),
+      stunned:nowS<nd.stunT,spd:Math.round(Math.hypot(nd.vx,nd.vy)),
+      dist:Math.round(Math.hypot(nd.x-ship.x,nd.y-ship.y))}))},
     chunks:loaded.size, far:FAR.cache.size, shared:sharedEaten(),net:{on:NET.on,code:NET.code,peers:NET.peers.size,selfId:NET.selfId,offers:NET.offers.length}}; },
   tick(dt=1/60,n=1){ for(let i=0;i<n;i++) update(dt); render(); },
   pt(x2,y2,down=true){ if(down){ ship.down=true; setTargetScreen(x2,y2,false); } else { ship.down=false; ship.tx=ship.ty=null; } },
@@ -1815,10 +1912,12 @@ window.GG={
   pick(c){ branchT=-9; pickBranch(c); return {path:dna.path.slice(),abils:abilsOf(dna,stage),stage}; },
   respec(){ dna.path=[]; stage=0; refreshTR(); stageHud(); return GG.s.path; },
   seal(){ return SEAL; },
-  touchNode(k){ const i=SEAL.order[k===undefined?SEAL.idx:k];   // walk into node #k
-    const nd=SEAL.nodes[i]; if(nd){ ship.x=nd.x; ship.y=nd.y; SEAL.lastTouch=-9; update(1/60); } return GG.s.seal; },
+  touchNode(k){ const i=SEAL.order[k===undefined?SEAL.idx:k];   // pounce on spore #k
+    const nd=SEAL.nodes[i]; if(nd){ nd.stunT=nowS+2; ship.x=nd.x; ship.y=nd.y; ship.tx=ship.ty=null;
+      ship.vx=ship.vy=0; SEAL.lastTouch=-9; SEAL.failT=-9; update(1/60); } return GG.s.seal; },
   touchWrong(){ const bad=SEAL.nodes.findIndex((n,i)=>!n.lit&&i!==SEAL.order[SEAL.idx]);
-    if(bad>=0){ ship.x=SEAL.nodes[bad].x; ship.y=SEAL.nodes[bad].y; SEAL.lastTouch=-9; update(1/60); } return GG.s.seal; },
+    if(bad>=0){ const nd=SEAL.nodes[bad]; nd.stunT=nowS+2; ship.x=nd.x; ship.y=nd.y; ship.tx=ship.ty=null;
+      ship.vx=ship.vy=0; SEAL.lastTouch=-9; SEAL.failT=-9; update(1/60); } return GG.s.seal; },
   touchCore(){ ship.x=SEAL.x; ship.y=SEAL.y; update(1/60); return {phase}; },
   dropAt(x2,y2){ dropPart(x2,y2); },
   mbs(){ return MB; },
