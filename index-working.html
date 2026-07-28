@@ -16958,6 +16958,18 @@ try {
     stored = 'low';
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
   }
+  // (v35.22) LOW and MEDIUM retired from the picker — migrate anyone parked on
+  // them up to HIGH. Both disable bloom (bloomEnabled() is false for
+  // potato/low/medium), so they cost a large amount of look; and they buy very
+  // little back, because this game is DRAW-CALL bound, not fill bound — the
+  // same reason dropping the render-resolution tier was measured to not move
+  // hub fps at all. On a phone, High measured as good as Low and looks far
+  // better. The levels stay valid in code (plenty of branches read them); they
+  // are just no longer reachable from the UI.
+  if (stored === 'low' || stored === 'medium') {
+    stored = 'high';
+    try { localStorage.setItem('lss_quality', 'high'); } catch (_) {}
+  }
   const valid = ['low', 'medium', 'high', 'ultra', 'mega'];
   if (valid.indexOf(stored) >= 0) {
     QUALITY.level = stored;
@@ -18853,9 +18865,29 @@ function _swTreeGeoGet(){
     // WILLOW (new) : wide low fork + downward gravitropism (force<0) for drooping boughs, small soft leaves.
     { seed:4044, levels:3, children:[6,5,4], angle:{1:62,2:80,3:92}, length:[40,24,17,11], radius:[1.1,0.5,0.3,0.18], sections:[7,6,5,4], segments:[7,5,4,3], start:{1:0.4,2:0.2,3:0.12}, taper:[0.6,0.5,0.6,0.72], twist:[0.1,0.2,0.3,0], gnarliness:[0.04,0.08,0.1,0.12], force:-0.02, leaf:[0.26,0.5,0.22], leaf_count:13, leaf_size:1.5, leaf_start:0.08, leaf_angle:72, leaf_var:0.5 },
   ];
+  // (v35.22) EXTRA SPECIES. These go in the POOL, not into every chunk — see
+  // the per-chunk palette in _swBuildTrees. Because each chunk still draws only
+  // a couple of species, growing the pool costs nothing per frame; it changes
+  // WHICH trees a region has, not how many InstancedMeshes it emits.
+  const extra=[
+    // BIRCH : tall slim white-barked trunk, high sparse crown, fine twigs.
+    { seed:5055, levels:3, children:[5,4,3], angle:{1:44,2:40,3:34}, length:[52,11,6,4], radius:[0.62,0.3,0.2,0.13], sections:[8,5,4,3], segments:[7,5,4,3], start:{1:0.62,2:0.3,3:0.2}, taper:[0.55,0.4,0.5,0.7], twist:[0,0.1,0.2,0], gnarliness:[0.02,0.06,0.08,0.1], force:0.01, bark:[0.82,0.84,0.80], leaf:[0.42,0.62,0.24], leaf_count:9, leaf_size:1.5, leaf_start:0.3, leaf_angle:36, leaf_var:0.5 },
+    // CYPRESS : narrow columnar evergreen, almost no lateral spread.
+    { seed:6066, evergreen:true, levels:2, children:[26,3], angle:{1:78,2:52}, length:[62,12,6], radius:[0.8,0.2,0.12], sections:[9,5,3], segments:[7,4,3], start:{1:0.08,2:0.2}, taper:[0.62,0.8,0.9], twist:[0,0,0], gnarliness:[0.03,0.04,0.05], force:-0.05, leaf:[0.13,0.31,0.17], leaf_count:10, leaf_size:1.4, leaf_start:0.06, leaf_angle:64, leaf_var:0.25 },
+    // ACACIA : bare lower trunk, wide flat-topped umbrella crown.
+    { seed:7077, levels:3, children:[4,6,4], angle:{1:74,2:86,3:88}, length:[44,20,12,7], radius:[1.3,0.55,0.3,0.18], sections:[7,6,4,3], segments:[8,5,4,3], start:{1:0.72,2:0.4,3:0.25}, taper:[0.68,0.45,0.55,0.7], twist:[0.1,0.3,0.2,0], gnarliness:[0.06,0.1,0.12,0.12], force:0.06, leaf:[0.34,0.5,0.20], leaf_count:12, leaf_size:1.7, leaf_start:0.5, leaf_angle:80, leaf_var:0.45 },
+    // SNAG : dead bare trunk, almost no leaves. Breaks up a solid green forest
+    // and reads as age; deliberately very cheap geometry.
+    { seed:8088, levels:2, children:[4,3], angle:{1:58,2:70}, length:[40,14,7], radius:[1.0,0.4,0.2], sections:[6,4,3], segments:[6,4,3], start:{1:0.5,2:0.3}, taper:[0.5,0.4,0.6], twist:[0.2,0.3,0], gnarliness:[0.18,0.24,0.26], force:0.03, bark:[0.34,0.29,0.24], leaf:[0.32,0.28,0.16], leaf_count:2, leaf_size:1.1, leaf_start:0.5, leaf_angle:50, leaf_var:0.8 },
+    // SCRUB : short many-stemmed bush. Fills the gaps between the big species
+    // so forest floors are not bare.
+    { seed:9099, levels:2, children:[9,4], angle:{1:66,2:74}, length:[16,9,5], radius:[0.42,0.22,0.14], sections:[5,4,3], segments:[6,4,3], start:{1:0.16,2:0.2}, taper:[0.6,0.55,0.7], twist:[0.1,0.2,0], gnarliness:[0.1,0.14,0.16], force:0.02, leaf:[0.28,0.48,0.20], leaf_count:11, leaf_size:1.4, leaf_start:0.1, leaf_angle:46, leaf_var:0.6 },
+  ];
   // (v35.12) Three geometry SETS now: std (stock), snow (white canopy + cold
   // bark for the snow sector), shroom (glowing mushrooms for the blue zones).
-  const base=(_full?full:lite);
+  // (v35.22) Pool = the tier's base species PLUS the extras. Mobile/Quest get
+  // a trimmed set of extras so the one-off generation cost stays bounded.
+  const base=(_full?full:lite).concat(_full?extra:extra.slice(0, 2));
   const snowify=(p)=>Object.assign({},p,{seed:(p.seed|0)+7000, leaf:[0.87,0.91,0.97], bark:[0.20,0.16,0.12]});
   _swTreeGeos={
     std: base.map(p=>_swGenTree(p)),
@@ -18937,6 +18969,25 @@ function _swBuildTrees(x0,z0,T){
   // zones, and per-variant buckets were emitting hundreds of 1-instance
   // InstancedMeshes (extra draw calls on the GPU-bound hub).
   const _shroomVi=Math.floor(_stHash2(Math.floor(x0*0.013)+7, Math.floor(z0*0.017)-3)*sets.shroom.length)%sets.shroom.length;
+  // (v35.22) PER-CHUNK SPECIES PALETTE. The species pool is now ~9 deep, but a
+  // chunk still only draws from THREE of them. Without this, every added
+  // species multiplied draw calls: buckets are per (chunk x variant), and the
+  // hub was already emitting ~177 InstancedMeshes for ~360 trees (~2 instances
+  // per draw call). Same reasoning as the v35.12 one-mushroom-per-chunk fix.
+  //
+  // The palette is a pure hash of the chunk origin on a COARSE grid (~6 chunks)
+  // so neighbouring chunks share flora and you get forests of a kind rather
+  // than a fruit-salad of one-of-everything. Deterministic, so a chunk streams
+  // back in with the same species it had.
+  const _stdPal=(function(){
+    const n=sets.std.length;
+    if(n<=3) return null;                       // small pool: use all of it
+    const rx=Math.floor(x0/(_SW_CHUNK*6)), rz=Math.floor(z0/(_SW_CHUNK*6));
+    const a=Math.floor(_stHash2(rx*1.7+11, rz*2.3-5)*n)%n;
+    const b=(a+1+Math.floor(_stHash2(rx*3.1-7, rz*1.3+19)*(n-1)))%n;
+    const c=(b+1+Math.floor(_stHash2(rx*0.9+23, rz*4.1+3)*(n-2)))%n;
+    return [a,b,c===a?((c+1)%n):c];
+  })();
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
     const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=_stGroundYGrid(x,z,T);
     if(T.HUB && _hubCityExcludes(x,z)) continue;
@@ -18970,7 +19021,15 @@ function _swBuildTrees(x0,z0,T){
     }
     if(Math.random() > dens) continue;
     const set=buckets[kind];
-    const vi=(kind==='shroom')?_shroomVi:(Math.floor(_stHash2(Math.floor(x*0.7),Math.floor(z*0.7))*set.length)%set.length);
+    // Per-TREE hash picks within the chunk's palette. Applies to snow as well
+    // as std: the snow set MIRRORS the std pool index-for-index, so the same
+    // palette keeps a region's species identity when it turns wintry — and
+    // without it the snow buckets alone re-introduced the draw-call blow-up
+    // (measured: foliage meshes went 177 -> 203 when only std was palletised).
+    let vi;
+    if(kind==='shroom') vi=_shroomVi;
+    else if(_stdPal) vi=_stdPal[Math.floor(_stHash2(Math.floor(x*0.7),Math.floor(z*0.7))*3)%3];
+    else vi=Math.floor(_stHash2(Math.floor(x*0.7),Math.floor(z*0.7))*set.length)%set.length;
     set[vi].push(x,y,z);
   }
   const meshes=[];
@@ -54731,15 +54790,16 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Preset</label>
         <select id="set-quality" style="flex:1;">
-          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, light particles)</option>
-          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke)</option>
-          <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke)</option>
+          <!-- (v35.22) Low + Medium removed: both kill bloom for almost no
+               framerate back, because the bottleneck is draw calls, not fill.
+               Saved settings on those tiers migrate to High at load. -->
+          <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">If the framerate dips during heavy fights, drop to Medium or Low. If your GPU has headroom, push to Ultra. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">High is the baseline everywhere, phones included — the lower tiers used to sit below it but they disabled bloom for almost no framerate gain, so they were removed. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <div class="setting-row">
         <label>Field of View</label>
@@ -70507,7 +70567,14 @@ const _SOUND_MIN_GAP_VR = {
 const _lastSoundTime = {};
 
 const _AUDIO_VOICE_BUDGET = 16;
-const _AUDIO_VOICE_WINDOW = 0.4;
+// (v35.22) 0.4 -> 0.25. This window is a PROXY for "how many voices are alive
+// at once" — the thing that actually underruns a phone's audio thread. But it
+// counts sound STARTS, so a 60 ms weapon click held a budget slot for 400 ms,
+// roughly 7x longer than it was audible. That made the effective cap a limit
+// on sound RATE (mobile: 10 per 0.4 s = 25/sec across ALL types) rather than
+// on concurrency, and combat starved it constantly. 0.25 is a closer match to
+// real SFX length, so it drops fewer sounds WITHOUT raising true concurrency.
+const _AUDIO_VOICE_WINDOW = 0.25;
 const _audioRecentVoices = [];           
 let _audioStressed = false;
 const _AUDIO_STRESS_RATIO = 0.7;
@@ -70612,7 +70679,19 @@ function _audioUpdateStress(count, budget) {
   else if (_audioStressed && count <= stressOff) _audioStressed = false;
 }
 
-function _audioPeekSoundAllowed(type) {
+// (v35.22) The LOCAL player's own weapon fire is never dropped by the voice
+// budget. Your own gun going quiet mid-burst is the single most noticeable
+// audio failure there is, and on mobile it was happening constantly: the
+// budget there is 10, and EVERY fire_* type is in _AUDIO_SKIPPABLE, so a
+// firefight starved your own shots. It is one emitter and it is already
+// rate-limited by _SOUND_MIN_GAP, so exempting it cannot flood the graph.
+// Remote/AI fire (playSpatialSound) stays skippable — that is where the real
+// pile-up comes from.
+const _AUDIO_OWN_FIRE = {
+  fire_hitscan: 1, fire_minigun: 1, fire_spread: 1, fire_projectile: 1,
+  fire_railgun: 1, fire_salvo: 1, fire_buckshot: 1, fire_leadwall: 1,
+};
+function _audioPeekSoundAllowed(type, own) {
   if (!audio.initialized || !audio.ctx) return false;
   const t = audio.ctx.currentTime;
   _audioPruneRecentVoices(t);
@@ -70623,13 +70702,15 @@ function _audioPeekSoundAllowed(type) {
     const last = _lastSoundTime[type];
     if (last !== undefined && t - last < gap) return false;
   }
-  // Over-budget skip for cosmetic sounds. Critical SFX always play.
+  // Over-budget skip for cosmetic sounds. Critical SFX always play, and so
+  // does the local player's own weapon fire (see _AUDIO_OWN_FIRE).
+  if (own && _AUDIO_OWN_FIRE[type]) return true;
   if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) return false;
   return true;
 }
 
-function _audioReserveSound(type) {
-  if (!_audioPeekSoundAllowed(type)) return false;
+function _audioReserveSound(type, own) {
+  if (!_audioPeekSoundAllowed(type, own)) return false;
   const t = audio.ctx.currentTime;
   const gap = _soundMinGap(type);
   if (gap) _lastSoundTime[type] = t;
@@ -70641,7 +70722,10 @@ function _audioReserveSound(type) {
 function playSound(type) {
   if (!audio.initialized || !audio.ctx) return;
   resumeAudio();
-  if (!_audioReserveSound(type)) return;
+  // playSound is the NON-SPATIAL path, which in practice means "the local
+  // player did this" — remote ships and AI all route through
+  // playSpatialSound. That is what makes it a safe signal for own-fire.
+  if (!_audioReserveSound(type, true)) return;
   _playSoundFromLabRecipe(type);
 }
 
