@@ -41195,9 +41195,9 @@ const _HUD_C = {
   a_08:   'rgba(255,170,0,0.8)',
   a_055:  'rgba(255,170,0,0.55)',
   a_025:  'rgba(255,170,0,0.25)',
-  g_09:   'rgba(100,255,150,0.9)',
-  g_07:   'rgba(100,255,150,0.7)',
-  g_04:   'rgba(100,255,150,0.4)',
+  g_09:   'rgba(46,224,86,0.9)',
+  g_07:   'rgba(46,224,86,0.7)',
+  g_04:   'rgba(46,224,86,0.4)',
   r_09:   'rgba(255,50,30,0.9)',
 };
 
@@ -41235,7 +41235,7 @@ function drawCircumpunctHUD() {
   const cyan = 'rgba(100,200,255,';
   const amber = 'rgba(255,170,0,';
   const red = 'rgba(255,50,30,';
-  const green = 'rgba(100,255,150,';
+  const green = 'rgba(46,224,86,';   // (v35.22) true green, see _HUD_C.g_*
 
   let hCol;
   if (isDoomed) {
@@ -41290,7 +41290,7 @@ function drawCircumpunctHUD() {
     }
   }
 
-  const r1 = 150;
+  const r1 = 172;
   const healthArcStart = Math.PI * 0.65;   
   const healthArcEnd = Math.PI * 2.35;     
   const healthArcSpan = healthArcEnd - healthArcStart;
@@ -41360,28 +41360,41 @@ function drawCircumpunctHUD() {
     ctx.arc(cx, cy, rr - h / 2, pa1, pa0, true);
     ctx.closePath();
   };
+  const arcBar = (r, a0, a1, pct, col, glow, thick, fromEnd) => {
+    const th = thick || 10;
+    _hudArcChipPath(r, a0, a1, th);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    if (pct > 0) {
+      ctx.save();
+      if (glow) { ctx.shadowColor = glow; ctx.shadowBlur = 8; }
+      ctx.strokeStyle = col;
+      ctx.lineWidth = Math.max(2, th - 4);
+      ctx.beginPath();
+      const inset = 2.5 / r;
+      const span = (a1 - a0) - 2 * inset;
+      const lit = span * Math.min(1, pct);
+      if (fromEnd) ctx.arc(cx, cy, r, a1 - inset - lit, a1 - inset);
+      else ctx.arc(cx, cy, r, a0 + inset, a0 + inset + lit);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+
+  const _hn = Math.max(1, segments | 0);
+  const _hchip = 0.85;                         // constant chip arc, radians
+  const _hstart = (healthArcStart + healthArcEnd) * 0.5 - _hchip * _hn * 0.5;
   {
-    const _hn = 16, _hspan = healthArcSpan / _hn, _hgapA = 3 / r1;
+    const _hgapA = 0.055;
     for (let i = 0; i < _hn; i++) {
-      const a0 = healthArcStart + _hspan * i + _hgapA;
-      const a1 = healthArcStart + _hspan * (i + 1) - _hgapA;
-      const on = (i + 0.5) / _hn <= healthPct;
-      _hudArcChipPath(r1, a0, a1, 9);
-      if (on) {
-        ctx.save();
-        ctx.shadowColor = hCol;
-        ctx.shadowBlur = 6 + (1 - healthPct) * 8;
-        ctx.fillStyle = hCol;
-        ctx.fill();
-        ctx.restore();
-      } else {
-        ctx.strokeStyle = _HUD_C.w_015;
-        ctx.lineWidth = 1.2;
-        ctx.stroke();
-      }
+      const a0 = _hstart + _hchip * i + _hgapA;
+      const a1 = _hstart + _hchip * (i + 1) - _hgapA;
+      const fill = Math.max(0, Math.min(1, healthPct * _hn - i));
+      arcBar(r1, a0, a1, fill, hCol, hCol, 10);
     }
   }
-  _hudArcText('HEALTH', r1 + 20, Math.PI * 0.88, true, _HUD_C.w_055, '700 11px Orbitron, Courier New');
+  _hudArcText('HEALTH', r1 - 20, _hstart + 0.22, true, _HUD_C.w_055, '700 11px Orbitron, Courier New');
 
   ctx.fillStyle = _HUD_C.w_06;
   hudFont('13px Courier New');
@@ -41550,12 +41563,11 @@ function drawCircumpunctHUD() {
   }
 
   const r3 = 240;
-  const speedArcStart = Math.PI * 0.55;
+  const speedArcStart = Math.PI * 0.65;
   const speedArcEnd = Math.PI * 0.95;
   const speedSpan = speedArcEnd - speedArcStart;
 
-  _hudArcUnits(r3, speedArcStart, speedArcEnd, 18, speedPct,
-               _HUD_C.a_08, 'rgba(255,190,60,0.12)', 15, 7, 5);
+  arcBar(r3, speedArcStart, speedArcEnd, speedPct, _HUD_C.a_08, _HUD_C.a_08, 10);
 
   const speedAngle = (speedArcStart + speedArcEnd) / 2;
   const speedTx = cx + Math.cos(speedAngle) * (r3 + 22);
@@ -41569,11 +41581,13 @@ function drawCircumpunctHUD() {
   const smartCoreAmmo = player.coreActive && player.loadoutKey === 'BLASTER';
   const ammoPct = (player.weapon.clipSize >= 999 || smartCoreAmmo) ? 1 : player.clipAmmo / player.maxClip;
   const ammoArcStart = Math.PI * 0.05;
-  const ammoArcEnd = Math.PI * 0.45;
+  const ammoArcEnd = Math.PI * 0.35;
   const ammoSpan = ammoArcEnd - ammoArcStart;
 
-  _hudArcUnits(r3, ammoArcStart, ammoArcEnd, 18, ammoPct,
-               player.reloading ? _HUD_C.a_055 : _HUD_C.w_045, _HUD_C.w_008, 15, 7, 0);
+  {
+    const _amCol = player.reloading ? _HUD_C.a_055 : _HUD_C.w_045;
+    arcBar(r3, ammoArcStart, ammoArcEnd, ammoPct, _amCol, _amCol, 10, true);
+  }
 
   const ammoAngle = (ammoArcStart + ammoArcEnd) / 2;
   const ammoTx = cx + Math.cos(ammoAngle) * (r3 + 22);
@@ -41761,9 +41775,9 @@ function drawCircumpunctHUD() {
 
   if (player.loadoutKey === 'PUNCTURE') {
     const chgPct = player.railgunCharge;
-    const chgR = r1 - 25; 
-    const chgStart = Math.PI * 0.85;
-    const chgEnd = Math.PI * 1.15;
+    const chgR = r1 - 25;
+    const chgStart = -Math.PI * 0.65;
+    const chgEnd = -Math.PI * 0.35;
     const chgSpan = chgEnd - chgStart;
     ctx.strokeStyle = 'rgba(255,100,30,0.12)';
     ctx.lineWidth = 6;
@@ -41781,14 +41795,14 @@ function drawCircumpunctHUD() {
     ctx.fillStyle = chgPct >= 1 ? 'rgba(255,80,20,0.9)' : 'rgba(255,120,40,0.5)';
     hudFont('10px Courier New');
     ctx.textAlign = 'center';
-    ctx.fillText(chgPct >= 1 ? 'MAX' : Math.floor(chgPct * 100) + '%', cx, cy + chgR + 16);
+    ctx.fillText(chgPct >= 1 ? 'MAX' : Math.floor(chgPct * 100) + '%', cx, cy - chgR + 20);
   }
 
   if (player.loadoutKey === 'BLASTER' && player.powerShotCharging) {
     const chgPct = player.powerShotCharge;
     const chgR = r1 - 25;
-    const chgStart = Math.PI * 0.85;
-    const chgEnd = Math.PI * 1.15;
+    const chgStart = -Math.PI * 0.65;
+    const chgEnd = -Math.PI * 0.35;
     const chgSpan = chgEnd - chgStart;
     ctx.strokeStyle = 'rgba(255,100,30,0.12)';
     ctx.lineWidth = 6;
@@ -41806,14 +41820,14 @@ function drawCircumpunctHUD() {
     ctx.fillStyle = chgPct >= 1 ? 'rgba(255,80,20,0.9)' : 'rgba(255,120,40,0.5)';
     hudFont('10px Courier New');
     ctx.textAlign = 'center';
-    _hudArcText('PWR', chgR - 16, Math.PI, true, ctx.fillStyle, '700 9px Orbitron, Courier New');
+    _hudArcText('PWR', chgR - 16, -Math.PI * 0.5, false, ctx.fillStyle, '700 9px Orbitron, Courier New');
   }
 
   if (player.loadoutKey === 'VORTEX') {
     const nrgPct = player.vortexEnergy / player.vortexMaxEnergy;
     const nrgR = r1 - 25;
-    const nrgStart = Math.PI * 0.85;
-    const nrgEnd = Math.PI * 1.15;
+    const nrgStart = -Math.PI * 0.65;
+    const nrgEnd = -Math.PI * 0.35;
     const nrgSpan = nrgEnd - nrgStart;
     ctx.strokeStyle = 'rgba(60,180,255,0.12)';
     ctx.lineWidth = 6;
@@ -41831,10 +41845,10 @@ function drawCircumpunctHUD() {
     ctx.fillStyle = nrgPct < 0.2 ? 'rgba(255,60,30,0.8)' : 'rgba(60,180,255,0.5)';
     hudFont('10px Courier New');
     ctx.textAlign = 'center';
-    _hudArcText('NRG ' + (Math.round(nrgPct * 20) * 5) + '%', nrgR - 16, Math.PI, true, ctx.fillStyle, '700 9px Orbitron, Courier New');
+    _hudArcText('NRG ' + (Math.round(nrgPct * 20) * 5) + '%', nrgR - 16, -Math.PI * 0.5, false, ctx.fillStyle, '700 9px Orbitron, Courier New');
   }
 
-  const dashY = cy + r1 + 58;
+  const dashY = cy + r1 + 76;
   ctx.fillStyle = _HUD_C.w_035;
   hudFont('700 9px Orbitron, Courier New');
   ctx.textAlign = 'center';
