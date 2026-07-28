@@ -3405,6 +3405,23 @@ body.vr-active #camp-video { display: none !important; }
   };
 })();
 
+// (v35.20) Landscape lock, shared by the manual FULLSCREEN button and the
+// mobile auto-present one-shot so the two can't disagree. Mobile only.
+// ⚠ Locks and NEVER unlocks — see the v35.06 note on _lssLockLandscape below
+// for why an unlock() must not be added back.
+window.lssGoLandscape = function () {
+  try {
+    // If the mobile check isn't defined yet, do nothing rather than risk
+    // locking a desktop browser.
+    var isMob = (typeof window.lssIsMobileDevice === 'function') ? window.lssIsMobileDevice() : false;
+    if (!isMob) return;
+    if (screen && screen.orientation && screen.orientation.lock) {
+      var lp = screen.orientation.lock('landscape');
+      if (lp && typeof lp.catch === 'function') lp.catch(function () {});
+    }
+  } catch (_) {}
+};
+
 window.lssRequestFullscreen = function () {
   try {
     const el = document.documentElement;
@@ -3415,6 +3432,13 @@ window.lssRequestFullscreen = function () {
     if (!req) return null;
     const p = req.call(el);
     if (p && typeof p.catch === 'function') p.catch(() => {});
+    // (v35.20) Going fullscreen on a phone should also land you in landscape.
+    // Chrome refuses an orientation lock until the element actually IS
+    // fullscreen, so chain off the promise when there is one. Without this the
+    // FULLSCREEN button only locked if it happened to be the very first thing
+    // tapped (i.e. when the auto-present one-shot fired instead).
+    if (p && typeof p.then === 'function') p.then(window.lssGoLandscape, window.lssGoLandscape);
+    else window.lssGoLandscape();
     return p;
   } catch (_) { return null; }
 };
@@ -3504,23 +3528,15 @@ window._lssLockLandscape = function () {};
     if (_presented) return;
     _presented = true;
     try { if (localStorage && localStorage.getItem('lss_no_auto_fs') === '1') return; } catch (_) {}
-    var p = null;
     try {
       if (!(document.fullscreenElement || document.webkitFullscreenElement)) {
-        p = window.lssRequestFullscreen();
+        // lssRequestFullscreen chains the landscape lock itself now.
+        window.lssRequestFullscreen();
+      } else {
+        // Already fullscreen (nothing to request) — still make sure we're landscape.
+        window.lssGoLandscape();
       }
     } catch (_) {}
-    // Chrome requires the element to actually BE fullscreen before it will
-    // honour an orientation lock, so chain off the promise when there is one.
-    var lock = function () {
-      try {
-        if (screen && screen.orientation && screen.orientation.lock) {
-          var lp = screen.orientation.lock('landscape');
-          if (lp && typeof lp.catch === 'function') lp.catch(function () {});
-        }
-      } catch (_) {}
-    };
-    if (p && typeof p.then === 'function') p.then(lock, lock); else lock();
   }
   function _arm() {
     if (!_isMobile()) return;
