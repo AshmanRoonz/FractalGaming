@@ -566,8 +566,12 @@ function glowSprite(rgb){ const r=32,s=document.createElement('canvas'); s.width
 let gFood=null,gDanger=null;
 const _glowCache=new Map();
 function glowCache(rgb){ const k=rgb.map(v=>Math.round(v*40)).join(',');
-  if(!_glowCache.has(k)){ if(_glowCache.size>16) _glowCache.clear(); _glowCache.set(k,glowSprite(rgb)); }
-  return _glowCache.get(k); }
+  let s=_glowCache.get(k);
+  if(!s){ // evict ONE oldest entry — clearing the whole map rebuilt every sprite
+          // per frame once the seal's node hues pushed it over (was ~9ms/frame)
+    if(_glowCache.size>=64) _glowCache.delete(_glowCache.keys().next().value);
+    s=glowSprite(rgb); _glowCache.set(k,s); }
+  return s; }
 
 // ---------- ambient flow (world-anchored curl-noise window that follows you) -
 const FG={cell:130,c:26,r:18,ox:0,oy:0,A:null,B:null,MA:null,per:4.5,ph:-1,t0:0};
@@ -753,8 +757,9 @@ function startSeal(ox,oy,sd,quiet){
   SEAL.on=true; SEAL.open=false; SEAL.x=ox; SEAL.y=oy; SEAL.seed=sd>>>0;
   SEAL.nodes=[]; SEAL.idx=0; SEAL.lastTouch=-9;
   for(let i=0;i<n;i++){ const a=(i/n)*6.2832+R.f(-.5,.5), r=R.f(760,1500);
+    const hue=(i*360/n+R.f(-14,14)+360)%360;
     SEAL.nodes.push({x:ox+Math.cos(a)*r, y:oy+Math.sin(a)*r, ox:ox+Math.cos(a)*r, oy:oy+Math.sin(a)*r,
-      hue:(i*360/n+R.f(-14,14)+360)%360, ph:R.f(0,7), r:30, lit:false}); }
+      hue, col:hsl2rgb(hue/360,.9,.62), ph:R.f(0,7), r:32, lit:false}); }
   SEAL.order=SEAL.nodes.map((_,i)=>i);
   for(let i=SEAL.order.length-1;i>0;i--){ const j=R.i(i+1); const t=SEAL.order[i]; SEAL.order[i]=SEAL.order[j]; SEAL.order[j]=t; }
   SEAL.deadline=nowS+30+n*8;
@@ -776,7 +781,7 @@ function sealLight(i,remote){
   const nd=SEAL.nodes[i]; if(!nd||nd.lit) return;
   nd.lit=true; SEAL.idx++; SEAL.litT=nowS;
   beep(360*Math.pow(1.18,SEAL.idx),540*Math.pow(1.18,SEAL.idx),.2,'triangle',.2);
-  ringFx(nd.x,nd.y,10,120,hsl2rgb(nd.hue/360,.85,.6),.55);
+  ringFx(nd.x,nd.y,10,120,nd.col,.55);
   if(!remote) netEvt({t:'node',i,s:SEAL.seed});
   if(SEAL.idx>=SEAL.order.length){ SEAL.open=true;
     toast('<b>CORE EXPOSED</b><br><span style="font-size:11px;color:#9bc">consume it to leave this biome</span>');
@@ -1384,10 +1389,24 @@ function render(){
   if(NET.on) for(const [id,p] of NET.peers){ if(!p.fresh||!isFinite(p.cx)) continue;
     marker(x,p.cx,p.cy,z,peerCol(p,id),(p.dna&&p.dna.name)||'goopling',(p.R||30)*z+10); }
   if(SEAL.on){                                        // guide the eye to the puzzle
-    if(!SEAL.open) for(let i=0;i<SEAL.nodes.length;i++){ const nd=SEAL.nodes[i]; if(nd.lit) continue;
-      const isNext=SEAL.order[SEAL.idx]===i;
-      marker(x,nd.x,nd.y,z,hsl2rgb(nd.hue/360,.85,.62),isNext?'NEXT':'',nd.r*z+8,!isNext); }
-    marker(x,SEAL.x,SEAL.y,z,SEAL.open?myCol():gen.danger,SEAL.open?'CORE — OPEN':'CORE',SEAL.coreR*z+10);
+    if(!SEAL.open){
+      const ni=SEAL.order[SEAL.idx], nnd=SEAL.nodes[ni];
+      for(let i=0;i<SEAL.nodes.length;i++){ const nd=SEAL.nodes[i]; if(nd.lit||i===ni) continue;
+        marker(x,nd.x,nd.y,z,nd.col,'',nd.r*z+8,true); }
+      if(nnd){                                        // a tether of chevrons from you to the target
+        const col=nnd.col;
+        const sx=(ship.x-cam.x)*z+W/2, sy=(ship.y-cam.y)*z+H/2;
+        const a=Math.atan2((nnd.y-cam.y)*z+H/2-sy,(nnd.x-cam.x)*z+W/2-sx);
+        x.save(); x.translate(sx,sy); x.rotate(a);
+        const st=ship.R*z+16;
+        for(let k=0;k<4;k++){ const ph=((nowS*1.5+k*.25)%1), d2=st+ph*82;
+          x.globalAlpha=(1-ph)*.8; x.strokeStyle=css(col,1); x.lineWidth=3.4; x.lineCap='round';
+          x.beginPath(); x.moveTo(d2-6,-6); x.lineTo(d2+3,0); x.lineTo(d2-6,6); x.stroke(); }
+        x.globalAlpha=1; x.restore();
+      }
+      marker(x,nnd.x,nnd.y,z,nnd.col,'NEXT',nnd.r*1.25*z+22,false,true);
+      marker(x,SEAL.x,SEAL.y,z,gen.danger,'CORE',SEAL.coreR*z+10,true);
+    } else marker(x,SEAL.x,SEAL.y,z,myCol(),'CORE — OPEN',SEAL.coreR*z+14,false,true);
   }
   const fu=(nowS-flashT)/.55;
   if(fu<1){ const g=x.createRadialGradient(W/2,H/2,Math.min(W,H)*.3,W/2,H/2,Math.max(W,H)*.72);
@@ -1398,45 +1417,88 @@ function render(){
     x.fillText('hold & drag — move slowly to feed · pinch to zoom',ship.x*z+ox,(ship.y+ship.R+26)*z+oy+16); x.globalAlpha=1; }
   if(menuOpen) renderPreview();
 }
-// on-screen label, or an edge arrow when the target is off-view
-function marker(x,wx,wy,z,col,label,lift,faint){
-  const sx=(wx-cam.x)*z+W/2, sy=(wy-cam.y)*z+H/2, inset=36;
+// on-screen label, or an edge arrow when the target is off-view.
+// `big` = the one thing the player must find right now: oversized, white-rimmed,
+// pulsing, on its own dark plate so it survives any goop behind it.
+function marker(x,wx,wy,z,col,label,lift,faint,big){
+  const sx=(wx-cam.x)*z+W/2, sy=(wy-cam.y)*z+H/2, inset=big?52:36;
+  const plate=(px,py,txt,fs)=>{ x.font=`${fs}px ui-monospace,monospace`;
+    const w=x.measureText(txt).width+12;
+    x.fillStyle='rgba(2,5,10,.72)';
+    if(x.roundRect){ x.beginPath(); x.roundRect(px-w/2,py-fs-3,w,fs+8,5); x.fill(); }
+    else x.fillRect(px-w/2,py-fs-3,w,fs+8);
+    x.fillStyle=big?'#fff':css(col,.85); x.fillText(txt,px,py); };
   if(sx>inset&&sx<W-inset&&sy>inset&&sy<H-inset){
     if(!label) return;
-    x.font='10px ui-monospace,monospace'; x.textAlign='center';
-    x.fillStyle=css(col,faint?.5:.85); x.fillText(label, sx, sy-(lift||14));
+    x.textAlign='center';
+    if(big){ const pu=.85+.15*Math.sin(nowS*5);
+      x.globalAlpha=pu; plate(sx,sy-(lift||14),label,12); x.globalAlpha=1; }
+    else { x.font='10px ui-monospace,monospace';
+      x.fillStyle=css(col,faint?.5:.85); x.fillText(label, sx, sy-(lift||14)); }
     return; }
   const dx=sx-W/2, dy=sy-H/2;
   const t=Math.min(dx!==0?(W/2-inset)/Math.abs(dx):1e9, dy!==0?(H/2-inset)/Math.abs(dy):1e9);
   const ax=W/2+dx*t, ay=H/2+dy*t, an=Math.atan2(dy,dx);
   const d=Math.hypot(wx-ship.x,wy-ship.y);
   x.save(); x.translate(ax,ay); x.rotate(an);
-  x.fillStyle=css(col,faint?.55:.9); x.beginPath();
-  x.moveTo(13,0); x.lineTo(-7,-8); x.lineTo(-3,0); x.lineTo(-7,8); x.closePath(); x.fill();
+  if(big){ const s=1.55+.18*Math.sin(nowS*5);
+    x.scale(s,s);
+    x.fillStyle='rgba(2,5,10,.7)';                    // dark plate under the head
+    x.beginPath(); x.arc(1,0,13,0,6.2832); x.fill();
+    x.fillStyle=css(col,1); x.strokeStyle='rgba(255,255,255,.95)'; x.lineWidth=2.2;
+    x.beginPath(); x.moveTo(14,0); x.lineTo(-8,-9); x.lineTo(-3.5,0); x.lineTo(-8,9);
+    x.closePath(); x.fill(); x.stroke();
+    x.scale(1/s,1/s); }
+  else { x.fillStyle=css(col,faint?.55:.9); x.beginPath();
+    x.moveTo(13,0); x.lineTo(-7,-8); x.lineTo(-3,0); x.lineTo(-7,8); x.closePath(); x.fill(); }
   x.rotate(-an);
-  x.fillStyle=css(col,faint?.5:.8); x.font='9.5px ui-monospace,monospace';
-  x.textAlign=ax>W-90?'right':ax<90?'left':'center';
-  x.fillText(`${label?label+' · ':''}${d<1000?Math.round(d):(d/1000).toFixed(1)+'k'}`,0,ay>H-60?-16:20);
+  const txt=`${label?label+' · ':''}${d<1000?Math.round(d):(d/1000).toFixed(1)+'k'}`;
+  const ty=ay>H-70?-30:34;
+  if(big){ x.textAlign='center'; plate(0,ty,txt,12); }
+  else { x.fillStyle=css(col,faint?.5:.8); x.font='9.5px ui-monospace,monospace';
+    x.textAlign=ax>W-90?'right':ax<90?'left':'center';
+    x.fillText(txt,0,ay>H-60?-16:20); }
   x.restore();
 }
 function drawSeal(x,vx0,vx1,vy0,vy1){
   const n=SEAL.nodes.length;
   for(let i=0;i<n;i++){ const nd=SEAL.nodes[i];
-    if(nd.x<vx0||nd.x>vx1||nd.y<vy0||nd.y>vy1) continue;
-    const col=hsl2rgb(nd.hue/360,.85,.62), isNext=!SEAL.open&&SEAL.order[SEAL.idx]===i;
-    const pu=nd.lit?1:(isNext?.75+.25*Math.sin(nowS*4):.5);
-    x.globalCompositeOperation='lighter'; x.globalAlpha=(nd.lit?.75:.45)*pu;
-    x.drawImage(glowCache(col),nd.x-nd.r*2.6,nd.y-nd.r*2.6,nd.r*5.2,nd.r*5.2);
+    if(nd.x<vx0-260||nd.x>vx1+260||nd.y<vy0-260||nd.y>vy1+260) continue;
+    const col=nd.col, isNext=!SEAL.open&&SEAL.order[SEAL.idx]===i;
+    const rr0=nd.r*(isNext?1.25:1);
+    // the BEACON has a screen-space floor: zoomed way out the body is only a few
+    // pixels, so its halo/rings/reticle stay big enough to spot from anywhere
+    const zk=1/Math.max(.15,cam.z);
+    const bea=isNext?Math.max(rr0,46*zk):Math.max(rr0,18*zk);
+    // a dark well beneath it: nothing else on screen has this, so it reads over the brightest goop
+    x.fillStyle=`rgba(2,4,8,${isNext?.62:.34})`;
+    x.beginPath(); x.arc(nd.x,nd.y,bea*(isNext?1.9:1.6),0,6.2832); x.fill();
+    if(isNext){                                       // sonar rings racing outward — pure attention
+      for(let k=0;k<2;k++){ const t=((nowS*.85+k*.5)%1);
+        x.strokeStyle=css(col,.6*(1-t)); x.lineWidth=(5*(1-t)+2)*zk;
+        x.beginPath(); x.arc(nd.x,nd.y,bea*(1.05+t*2.4),0,6.2832); x.stroke(); } }
+    x.globalCompositeOperation='lighter'; x.globalAlpha=nd.lit?.7:(isNext?.85+.15*Math.sin(nowS*4):.4);
+    const gs=bea*(isNext?2.6:1.7);
+    x.drawImage(glowCache(col),nd.x-gs,nd.y-gs,gs*2,gs*2);
     x.globalAlpha=1; x.globalCompositeOperation='source-over';
     x.beginPath();
     for(let a=0;a<=18;a++){ const an=a/18*6.2832+nowS*(nd.lit?.5:.15)*TR.swirl;
-      const rr=nd.r*(1+.14*Math.sin(an*4+nowS*2+nd.ph));
+      const rr=rr0*(1+.14*Math.sin(an*4+nowS*2+nd.ph));
       const px=nd.x+Math.cos(an)*rr,py=nd.y+Math.sin(an)*rr; a?x.lineTo(px,py):x.moveTo(px,py); }
     x.closePath();
-    x.fillStyle=css(col,nd.lit?.5:.16); x.fill();
-    x.strokeStyle=css(col,nd.lit?1:.8); x.lineWidth=nd.lit?3:2; x.stroke();
-    if(isNext){ x.strokeStyle=css(col,.55+.35*Math.sin(nowS*5)); x.lineWidth=2;
-      x.beginPath(); x.arc(nd.x,nd.y,nd.r+12+Math.sin(nowS*3)*4,0,6.2832); x.stroke(); }
+    x.fillStyle=css(col,nd.lit?.5:(isNext?.42:.16)); x.fill();
+    x.strokeStyle=isNext?'rgba(255,255,255,.95)':css(col,nd.lit?1:.7);
+    x.lineWidth=(isNext?4:(nd.lit?3:2))*Math.max(1,zk*.6); x.stroke();
+    if(isNext){
+      x.strokeStyle=css(col,1); x.lineWidth=2*Math.max(1,zk*.6);  // colour ring inside the white
+      x.beginPath(); x.arc(nd.x,nd.y,rr0*.72,0,6.2832); x.stroke();
+      x.fillStyle='rgba(255,255,255,.95)';            // white-hot core
+      x.beginPath(); x.arc(nd.x,nd.y,Math.max(rr0*.3,5*zk),0,6.2832); x.fill();
+      const ra=nowS*.9;                               // rotating reticle brackets
+      x.strokeStyle='rgba(255,255,255,.9)'; x.lineWidth=4*zk;
+      for(let k=0;k<4;k++){ const a0=ra+k*1.5708;
+        x.beginPath(); x.arc(nd.x,nd.y,bea*1.5,a0-.26,a0+.26); x.stroke(); }
+    }
     if(nd.lit){ x.fillStyle=css([1,1,1],.9); x.beginPath(); x.arc(nd.x,nd.y,4,0,6.2832); x.fill(); }
   }
   // the core: colour-order pips ring a pulsing organ; a depleting arc = its patience
@@ -1460,7 +1522,7 @@ function drawSeal(x,vx0,vx1,vy0,vy1){
       x.beginPath(); x.arc(0,0,cr*1.28,-1.5708,-1.5708+6.2832*u); x.stroke(); }
     for(let i=0;i<n;i++){                             // the SEQUENCE, read clockwise
       const a=-1.5708+i/n*6.2832, px=Math.cos(a)*cr*.62, py=Math.sin(a)*cr*.62;
-      const nd=SEAL.nodes[SEAL.order[i]], col=hsl2rgb(nd.hue/360,.85,.62), done=i<SEAL.idx;
+      const nd=SEAL.nodes[SEAL.order[i]], col=nd.col, done=i<SEAL.idx;
       x.beginPath(); x.arc(px,py,cr*.15,0,6.2832);
       x.fillStyle=css(col,done?1:.28); x.fill();
       x.strokeStyle=css(col,done?1:.7); x.lineWidth=2; x.stroke();
