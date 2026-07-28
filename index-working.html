@@ -6157,9 +6157,15 @@ function _elimGenCode() {
 // for the session on game.eliminationBots.
 function _elimWantBots() { return game.eliminationBots !== false; }
 function _setEliminationBots(on, broadcast) {
+  // game.eliminationBots is the source of truth and works offline. net.openSolo
+  // is only meaningful INSIDE a room (it's what tells the round build to spawn
+  // bots alongside connected humans); offline the gate takes its !net.active
+  // branch, so setting it there would just be noise.
   game.eliminationBots = !!on;
-  net.openSolo = !!on;
-  net.openSoloHostId = on ? (net.openSoloHostId || net.myPeerId) : null;
+  if (net.active) {
+    net.openSolo = !!on;
+    net.openSoloHostId = on ? (net.openSoloHostId || net.myPeerId) : null;
+  }
   if (broadcast && net.active && net.peers && net.peers.size > 0 && net.sendEvent) {
     try {
       if (on) {
@@ -6217,14 +6223,16 @@ function _renderEliminationBotsBtn() {
   const btn = document.getElementById('btn-ss-bots');
   if (!btn) return;
   // (v35.20) Mirror the spawnBots gate at round build, which excludes only
-  // campaign and freeflight — so race and assault get the toggle too. Gating
-  // on 'classic' alone hid it in the two modes that also spawn bots.
+  // campaign and freeflight — so classic, race and assault all get the toggle.
+  // Deliberately NOT gated on net.active: race and assault run solo when no
+  // room code is entered, and that's exactly where you want to switch bots off.
   const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-  const botsApply = (_m !== 'campaign' && _m !== 'freeflight');
-  const show = !!(typeof net !== 'undefined' && net && net.active) && botsApply;
+  const show = (_m !== 'campaign' && _m !== 'freeflight');
   btn.style.display = show ? '' : 'none';
   if (!show) return;
-  const on = !!(net && net.openSolo);
+  // Read from game.eliminationBots, not net.openSolo — the latter is only set
+  // inside a room. The peer handlers keep the two in step.
+  const on = (game.eliminationBots !== false);
   // Ticked/unticked box so the LABEL can stay "ADD BOTS" in both states —
   // swapping the wording made it ambiguous whether it described the current
   // state or the action.
@@ -6235,7 +6243,9 @@ function _renderEliminationBotsBtn() {
     : 'No bots — only the pilots in your room. Click to add bots.';
 }
 function _toggleEliminationBots() {
-  _setEliminationBots(!(typeof net !== 'undefined' && net && net.openSolo), true);
+  // Flip game.eliminationBots (works offline); _setEliminationBots mirrors it
+  // onto net.openSolo and broadcasts only when we're actually in a room.
+  _setEliminationBots(game.eliminationBots === false, true);
 }
 if (typeof window !== 'undefined') window._toggleEliminationBots = _toggleEliminationBots;
 
@@ -9849,6 +9859,9 @@ function handleNetEvent(evt, fromPeerId) {
     net.openSolo = true;
     net.openSoloHostId = evtHost;
     net.solo = false;
+    // (v35.20) Keep the ADD BOTS toggle's source of truth in step with the host.
+    game.eliminationBots = true;
+    try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
     if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
     // (v32.75) Adopt the host's MODE (race/campaign/classic) so the joiner builds the
     // same world + filters the ship-select carousel to the right maps.
@@ -41732,7 +41745,12 @@ function commitLoadout(key) {
       // Multiplayer is humans only; bots removed. Skip the local bot
       // fleet so the match is just the connected peers. Solo still spawns
       // the full bot fleet as before.
-      if ((!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight'))) spawnBots();
+      // (v35.20) `game.eliminationBots !== false` is the ship-select ADD BOTS
+      // toggle. It has to be checked HERE, not just via net.openSolo, or the
+      // toggle does nothing offline — race and assault both run solo
+      // (net.active false) when no room code is entered, and that branch
+      // spawns bots unconditionally.
+      if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight'))) spawnBots();
       // (v31.20) Bots exist now ; aim the player at the enemy fleet so the
       // spawn-in faces the fight (was facing a default way, had to turn).
       if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
@@ -48623,7 +48641,9 @@ function updateRoundSystem(dt) {
     // few seconds; fresh Bot instances (dead ones stay as corpses in the
     // entity list) arrive at the fleet's CURRENT role-side spawn. Open-solo
     // hosts rebroadcast the roster so joiners see the reinforcements.
-    if (_isAssault() && (!net.active || net.openSolo) && (!net.active || amStasisOwner())) {
+    // (v35.20) Honour the ADD BOTS toggle here too — without it, turning bots
+    // off in assault still trickled fresh ones in every 4 seconds.
+    if (_isAssault() && game.eliminationBots !== false && (!net.active || net.openSolo) && (!net.active || amStasisOwner())) {
       game._asltReinforceT = (game._asltReinforceT || 0) + dt;
       if (game._asltReinforceT >= 4) {
         game._asltReinforceT = 0;
@@ -49045,7 +49065,8 @@ function updateRoundSystem(dt) {
         respawnPlayer();
         
         
-        if ((!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight'))) spawnBots();   
+        // (v35.20) Same ADD BOTS gate as the round-1 build above.
+        if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight'))) spawnBots();
         
         
         if (document.exitPointerLock) {
