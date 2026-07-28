@@ -3620,7 +3620,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.22';
+const LSS_BUILD = '35.24';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -43967,6 +43967,36 @@ function _lssApplyShipRig(dt) {
     game._parYawEff = game._parYaw;
     game._parPitchEff = game._parPitch;
     game._hudTgtX = 0; game._hudTgtY = 0;   // set by the boom block when 3rd person
+
+    // (v35.24) A SECOND, much faster yaw signal, used ONLY by the HUD
+    // perspective rotateY. _parYaw above is deliberately over-smoothed
+    // (rateSpring 3.5, tau ~285ms) because it used to slide the whole HUD
+    // around the screen; reusing it here would put the ~0.4s trailing lag
+    // straight back, just expressed as rotation instead of translation.
+    //
+    // Pitch and bank both have ABSOLUTE signals (player.euler.x, and _tpBank
+    // from lateral velocity) so they respond instantly. Yaw has none — the
+    // chase camera follows the ship's heading exactly, so there is never any
+    // yaw offset to measure. The best available stand-in is the INPUT itself:
+    // input.gpLookX is a stick POSITION, not a derivative, so it carries zero
+    // latency and no event granularity. Mouse has no equivalent (it only ever
+    // reports deltas), so that path falls back to the normalised rate.
+    // Sign is negated to match ryT, since euler.y -= gpLookX.
+    //
+    // Pick the branch by which input is actually DRIVING, not by which device
+    // is plugged in: gating on gpConnected alone meant a resting stick (never
+    // exactly 0 — every pad drifts) pinned the signal to ~0, so anyone flying
+    // on the mouse with a pad merely connected got no ring response at all.
+    // Whichever signal is larger is the one the player is using.
+    const _gpAx = (typeof input !== 'undefined' && input && input.gpConnected)
+      ? Math.max(-1, Math.min(1, -(input.gpLookX || 0))) : 0;
+    const _mAx = Math.max(-1, Math.min(1, ryT / 2.2));
+    const _hyT = (Math.abs(_gpAx) > Math.abs(_mAx)) ? _gpAx : _mAx;
+    // Fast spring (tau ~83ms) — enough to swallow mouse-event granularity,
+    // quick enough that the ring never reads as trailing the stick.
+    const _hk = Math.min(1, _dtc * 12);
+    game._hudYaw = (game._hudYaw || 0) + (_hyT - (game._hudYaw || 0)) * _hk;
+    if (Math.abs(game._hudYaw) < 0.002) game._hudYaw = 0;
   }
   if (player.mesh) {
     player.mesh.position.copy(player.position);
@@ -44037,26 +44067,73 @@ function _lssApplyShipRig(dt) {
       const _k2 = Math.min(1, (dt || 0.016) * (_pP2.spring || 7));
       game._hudParX = (game._hudParX || 0) + ((game._hudTgtX || 0) - (game._hudParX || 0)) * _k2;
       game._hudParY = (game._hudParY || 0) + ((game._hudTgtY || 0) - (game._hudParY || 0)) * _k2;
-      // (v35.22) PARK: once the spring is inside a subpixel of home and the
-      // target is home too, snap to exact 0 and write the DOM ONCE, then stop
-      // touching it. An asymptotic spring never actually reaches 0, so without
-      // this it wrote a fresh transform AND two crosshair margins every frame
-      // forever — and margin writes dirty layout. With gain 0 (the default) the
-      // whole block now costs nothing after the first frame.
-      const _atHome = Math.abs(game._hudParX) < 0.05 && Math.abs(game._hudParY) < 0.05 &&
-                      Math.abs(game._hudTgtX || 0) < 0.05 && Math.abs(game._hudTgtY || 0) < 0.05;
-      if (_atHome && game._hudParked) { game._hudParX = 0; game._hudParY = 0; }
-      else try {
-        if (_atHome) { game._hudParX = 0; game._hudParY = 0; game._hudParked = true; }
-        else game._hudParked = false;
-        if (typeof hudCanvas !== 'undefined' && hudCanvas && hudCanvas.style) {
-          hudCanvas.style.transform = 'translate(' + game._hudParX.toFixed(2) + 'px,' + game._hudParY.toFixed(2) + 'px)';
+      // (v35.22) An asymptotic spring never actually reaches 0, so snap the last
+      // subpixel to exact zero — that lets the write-elision below actually
+      // settle instead of dribbling new values forever.
+      if (Math.abs(game._hudParX) < 0.05) game._hudParX = 0;
+      if (Math.abs(game._hudParY) < 0.05) game._hudParY = 0;
+
+      // ── (v35.23) HUD PERSPECTIVE ──────────────────────────────────────────
+      // The ring stops being a flat sticker and becomes a hoop sitting in the
+      // ship's own plane: laid back by a constant `base` so the circle always
+      // reads as an ellipse in perspective, then pitched and rolled to match
+      // the ship's attitude. The crosshair is a SEPARATE DOM element and is
+      // deliberately left untransformed, so the reticle stays flat and exactly
+      // centred while the ring moves around it.
+      //
+      // Driven by ABSOLUTE attitude (player.euler.x, game._tpBank), never by
+      // the smoothed look RATES that drive the parallax — rate-driven motion is
+      // what made the HUD trail ~0.4s behind the stick and read as input lag in
+      // v35.21. Attitude has zero added latency: _tpBank is the ship's own bank
+      // spring, so the ring rolls exactly in step with the hull, not after it.
+      //
+      // Live tuning: window.__hud3d = {on, persp, base, pitch, bank, yaw, max}.
+      // pitch/bank are multipliers on degrees of attitude; max clamps rotateX.
+      // yaw is DEGREES AT FULL DEFLECTION (it multiplies a -1..1 signal), unlike
+      // pitch/bank which are multipliers on degrees of attitude.
+      const H3 = window.__hud3d || (window.__hud3d = {
+        on: true, persp: 1400, base: 11, pitch: -0.40, bank: 0.55, yaw: 16, max: 24,
+      });
+      let _rx = 0, _ry = 0, _rz = 0;
+      // Third person only. In first person the ring sits against the painted
+      // cockpit frame, and a ring that tilts inside a frame that cannot is the
+      // one place this effect reads as a bug rather than depth.
+      if (H3.on !== false && game.thirdPerson && !_vrNow) {
+        const _dg = 180 / Math.PI;
+        const _mx = (H3.max != null) ? H3.max : 24;
+        _rx = (H3.base || 0) + (player.euler ? player.euler.x : 0) * _dg * (H3.pitch || 0);
+        _rx = Math.max(-_mx, Math.min(_mx, _rx));
+        _rz = Math.max(-_mx, Math.min(_mx, (game._tpBank || 0) * _dg * (H3.bank || 0)));
+        _ry = Math.max(-_mx, Math.min(_mx, (game._hudYaw || 0) * (H3.yaw || 0)));
+      }
+
+      // Build once, write only on change. Covers both the parked case (gain 0,
+      // level flight -> identical string every frame -> zero DOM writes) and
+      // the moving case. The crosshair margins matter most: margin writes dirty
+      // layout, and this block runs every rig frame.
+      let _tf = '';
+      if (game._hudParX || game._hudParY) {
+        _tf = 'translate(' + game._hudParX.toFixed(2) + 'px,' + game._hudParY.toFixed(2) + 'px)';
+      }
+      if (_rx || _ry || _rz) {
+        _tf += (_tf ? ' ' : '') + 'perspective(' + (H3.persp || 1400) + 'px)' +
+               ' rotateX(' + _rx.toFixed(2) + 'deg)' +
+               ' rotateY(' + _ry.toFixed(2) + 'deg)' +
+               ' rotateZ(' + _rz.toFixed(2) + 'deg)';
+      }
+      if (!_tf) _tf = 'none';
+      try {
+        if (_tf !== game._hudTf) {
+          game._hudTf = _tf;
+          if (typeof hudCanvas !== 'undefined' && hudCanvas && hudCanvas.style) hudCanvas.style.transform = _tf;
         }
-        const ch = document.getElementById('crosshair');
-        if (ch) {
-          const _d2 = (_pP2.dot != null) ? _pP2.dot : 0.35;
-          ch.style.marginLeft = (game._hudParX * _d2).toFixed(1) + 'px';
-          ch.style.marginTop = (game._hudParY * _d2).toFixed(1) + 'px';
+        const _d2 = (_pP2.dot != null) ? _pP2.dot : 0.35;
+        const _chx = (game._hudParX * _d2).toFixed(1) + 'px';
+        const _chy = (game._hudParY * _d2).toFixed(1) + 'px';
+        if (_chx !== game._hudChX || _chy !== game._hudChY) {
+          game._hudChX = _chx; game._hudChY = _chy;
+          const ch = document.getElementById('crosshair');
+          if (ch) { ch.style.marginLeft = _chx; ch.style.marginTop = _chy; }
         }
       } catch (_) {}
     }
