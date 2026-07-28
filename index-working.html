@@ -3620,7 +3620,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.20';
+const LSS_BUILD = '35.21';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -19086,6 +19086,45 @@ const _HUB_ZONES = {
   sky: { mossy: 'sky', volcanic: 'diablo', goldmine: 'clouds', crystalcave: 'purple',
          snow: 'ice', rocky: 'blue', brokensim: 'cyberpunk' },
   _cur: 'sky', _skyT: 0, _mossyFog: null,
+  // ── (v35.21) CITY DUSK ─────────────────────────────────────────────────
+  // The megacity sits at r=7500, entirely inside the R0=12000 mossy heartland,
+  // so it was always lit as bright daytime meadow — no amount of neon reads as
+  // cyberpunk under a blue sky on green grass. This is a SECOND radial ramp,
+  // running the opposite way to the sector ramp above: 1 at the city centre,
+  // 0 out past R1. It blends on top of whatever the sector blend produced, so
+  // the two systems compose instead of fighting.
+  // Live-tunable at window.__zones.DUSK (ON/R0/R1 and every colour).
+  // Values below were tuned live against screenshots at 144 fps. First pass was
+  // near-black — the point is DUSK with a violet sky glow (the reference's
+  // "violet = sky glow / mid-distance haze" role), not night. Keep enough
+  // ambient/hemi that the land still reads underneath the neon.
+  DUSK: {
+    ON: true,
+    R0: 9000,          // full dusk at or inside this radius from the city centre
+    R1: 16500,         // untouched daylight at or beyond
+    // R0 must stay >= the city radius (7500) or the skyline vantage only gets a
+    // partial blend while the streets below are fully dark.
+    fog:  0x243258,    // the haze the towers stack into
+    zen:  0x141d3c,    // overhead
+    hor:  0x5b3a86,    // violet horizon glow behind the skyline
+    tint: 0x1a1f2e,    // terrain pulled toward asphalt, not blue-grass
+    tintK: 0.90,       // how far terrain goes toward tint at full dusk
+    fogMul: 1.95,      // thicker haze = more depth separation between towers
+    // Light multipliers at FULL dusk (1.0 = untouched daylight value).
+    // Applied by _hzDuskLights AFTER _wxFrame — see the warning there.
+    // ⚠ amb is >1 ON PURPOSE. Base ambient is ~0.14 (weather-driven), and a
+    // night city needs roughly 0.5 or every unlit surface — the street deck
+    // above all — renders as pure black no matter its albedo. Dimming the key
+    // light is what makes it night; ambient is what keeps it readable.
+    amb: 4.4, key: 0.14, fill: 0.30, rim: 0.40, hemi: 1.00,
+    ambColor: 0x2a3a90,   // blue fill; a neutral one just reads as underexposed day
+    hemiSky: 0x3a4a9a, hemiGnd: 0x141a2e,
+    bloomThreshold: 0.14, // from 0.4 — let the window banks actually bleed
+    bloomStrength: 1.70,  // from 0.6; restored outside the zone (it was
+                          // user-tuned down to kill ship/building halo ghosting)
+    _base: null,       // daylight light intensities, captured while cw === 0
+    _cw: 0,            // last frame's dusk weight, handed to _hzDuskLights
+  },
 };
 if (typeof window !== 'undefined') { window.__zones = _HUB_ZONES; window.__swU = _swU; }
 let _hzCache = null;
@@ -19116,6 +19155,8 @@ function _hzLooks() {
   return _hzCache;
 }
 const _hzW = new Float32Array(8);
+let _hzDuskC = null;   // (v35.21) lazily-built scratch Colors for the dusk blend
+let _hzDuskC2 = null;  // (v35.21) scratch Colors for the dusk LIGHT rig
 const _hzGrass = new THREE.Color(), _hzRock = new THREE.Color(),
       _hzSnow = new THREE.Color(), _hzMoss = new THREE.Color(),
       _hzSky = new THREE.Color(), _hzZen = new THREE.Color(), _hzHor = new THREE.Color();
@@ -19173,7 +19214,33 @@ function _hubZoneTick(px, pz, dt) {
     fogMul += L.fogMul * w; strata += L.strata * w; rim += L.rim * w;
     gold += L.gold * w; crystal += L.crystal * w;
   }
-  if (Z.DBG) Z._dbg = { px: Math.round(px), pz: Math.round(pz), r: Math.round(r), zs: +zs.toFixed(3), w: Array.from(_hzW).map(x => +x.toFixed(3)) };
+  // ── (v35.21) CITY DUSK blend ────────────────────────────────────────────
+  // Applied AFTER the sector accumulation and BEFORE any of the writes below,
+  // so everything downstream (fog, aerial perspective, sky haze, weather dome,
+  // and _hubCityFrame's neon proximity lerp — which rebases on the live zone
+  // fog) picks the dusk values up for free.
+  let cw = 0;
+  {
+    const D = Z.DUSK;
+    if (D && D.ON) {
+      cw = 1 - _hzSmooth(D.R0, D.R1, r);        // 1 at the city, 0 far out
+      if (cw > 0) {
+        if (!_hzDuskC) _hzDuskC = { fog: new THREE.Color(), zen: new THREE.Color(), hor: new THREE.Color(), tint: new THREE.Color() };
+        _hzDuskC.fog.setHex(D.fog); _hzDuskC.zen.setHex(D.zen);
+        _hzDuskC.hor.setHex(D.hor); _hzDuskC.tint.setHex(D.tint);
+        const tk = cw * (D.tintK != null ? D.tintK : 0.86);
+        _hzGrass.lerp(_hzDuskC.tint, tk); _hzRock.lerp(_hzDuskC.tint, tk);
+        _hzSnow.lerp(_hzDuskC.tint, tk);  _hzMoss.lerp(_hzDuskC.tint, tk);
+        _hzSky.lerp(_hzDuskC.fog, cw);
+        _hzZen.lerp(_hzDuskC.zen, cw);
+        _hzHor.lerp(_hzDuskC.hor, cw);
+        fogMul *= (1 + ((D.fogMul != null ? D.fogMul : 1) - 1) * cw);
+      }
+      // Lights are NOT applied here — see _hzDuskLights, called after _wxFrame.
+      D._cw = cw;
+    }
+  }
+  if (Z.DBG) Z._dbg = { px: Math.round(px), pz: Math.round(pz), r: Math.round(r), zs: +zs.toFixed(3), cw: +cw.toFixed(3), w: Array.from(_hzW).map(x => +x.toFixed(3)) };
   _swU.uColGrass.value.copy(_hzGrass); _swU.uColRock.value.copy(_hzRock);
   _swU.uColSnow.value.copy(_hzSnow); _swU.uColMoss.value.copy(_hzMoss);
   _swU.uStrata.value = strata; _swU.uRim.value = rim;
@@ -19214,12 +19281,95 @@ function _hubZoneTick(px, pz, dt) {
   if (Z._skyT > 1.0) {
     Z._skyT = 0;
     const dk = keys[domK];
-    const want = (domW > 0.6 && Z.sky[dk]) ? Z.sky[dk] : (zs < 0.5 ? Z.sky.mossy : null);
+    // (v35.21) Deep in the city dusk the cyberpunk sky wins outright — the
+    // mossy daytime equirect would fight everything the dusk blend just did.
+    const want = (cw > 0.55) ? 'cyberpunk'
+      : ((domW > 0.6 && Z.sky[dk]) ? Z.sky[dk] : (zs < 0.5 ? Z.sky.mossy : null));
     if (want && want !== Z._cur) {
       Z._cur = want;
       try { setSky(want); } catch (_) {}
     }
   }
+}
+
+// (v35.21) Dusk light rig — applied SEPARATELY from _hubZoneTick, and only
+// after _wxFrame has run.
+// ⚠ The weather system rewrites dirLight/ambient intensities EVERY frame from
+// its own sun model, and _wxFrame is called AFTER _hubZoneTick in gameLoop. So
+// scaling the lights inside the zone tick did nothing at all — the key light
+// measured 3.00 with the dusk multiplier asking for 0.16. This has to be the
+// last writer of the frame.
+function _hzDuskLights() {
+  const Z = _HUB_ZONES, D = Z && Z.DUSK;
+  if (!D || !D.ON) return;
+  const cw = D._cw || 0;
+  const mul = (m) => 1 + ((m != null ? m : 1) - 1) * cw;
+  // ── Bloom + ambient COLOUR, the two things that stop a night city reading
+  // as black boxes. Reference numbers from a synthwave city of the same genre:
+  // ambient 0x1b2c80 @ 0.5 and bloom threshold 0 / strength 7. Our ambient was
+  // ~0.04 — roughly 12x too little — which is exactly why the street deck
+  // rendered as featureless black however bright its albedo was. Ambient is
+  // what lifts UNLIT surfaces; only emissive geometry survives without it.
+  // Bloom is scaled rather than set: the global 0.4/0.6 was user-tuned to kill
+  // ship/building halo ghosting, so it must be restored outside the zone.
+  if (!D._fxBase && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
+    D._fxBase = { th: postFX.brightMat.uniforms.threshold.value,
+                  st: postFX.compositeMat.uniforms.bloomStrength.value };
+  }
+  if (D._fxBase && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
+    const F = D._fxBase;
+    postFX.brightMat.uniforms.threshold.value =
+      F.th + ((D.bloomThreshold != null ? D.bloomThreshold : F.th) - F.th) * cw;
+    postFX.compositeMat.uniforms.bloomStrength.value =
+      F.st + ((D.bloomStrength != null ? D.bloomStrength : F.st) - F.st) * cw;
+  }
+  // SENTINEL, not multiply-in-place, and not a one-shot snapshot either.
+  // - Multiplying in place compounds to zero, because _wxFrame only writes
+  //   these on CHANGE, not every frame (measured: all five hit 0.000).
+  // - A snapshot taken only while outside the ramp stays null if you enter the
+  //   zone without ever being outside it (teleport / spawn inside).
+  // So: remember what we last WROTE; if the live value has drifted from that,
+  // someone else (the weather sun model) set it and that is the new daylight
+  // baseline. Works whether weather writes every frame, on change, or never.
+  const L = D._last;
+  if (!D._base || !L ||
+      Math.abs(dirLight.intensity     - L.key)  > 1e-6 ||
+      Math.abs(ambientLight.intensity - L.amb)  > 1e-6 ||
+      Math.abs(hemiLight.intensity    - L.hemi) > 1e-6) {
+    D._base = { amb: ambientLight.intensity, key: dirLight.intensity,
+                fill: dirLight2.intensity, rim: dirLight3.intensity, hemi: hemiLight.intensity,
+                ambC: ambientLight.color.clone(), hSky: hemiLight.color.clone(),
+                hGnd: hemiLight.groundColor.clone() };
+  }
+  const B = D._base;
+  ambientLight.intensity = B.amb  * mul(D.amb);
+  dirLight.intensity     = B.key  * mul(D.key);
+  dirLight2.intensity    = B.fill * mul(D.fill);
+  dirLight3.intensity    = B.rim  * mul(D.rim);
+  hemiLight.intensity    = B.hemi * mul(D.hemi);
+  // Colour the fill light blue, don't just dim it. A neutral ambient at night
+  // reads as underexposed daylight; a blue one reads as night.
+  if (!_hzDuskC2) _hzDuskC2 = { a: new THREE.Color(), s: new THREE.Color(), g: new THREE.Color() };
+  _hzDuskC2.a.setHex(D.ambColor != null ? D.ambColor : 0x2a3a90);
+  _hzDuskC2.s.setHex(D.hemiSky  != null ? D.hemiSky  : 0x3a4a9a);
+  _hzDuskC2.g.setHex(D.hemiGnd  != null ? D.hemiGnd  : 0x141a2e);
+  ambientLight.color.copy(B.ambC).lerp(_hzDuskC2.a, cw);
+  hemiLight.color.copy(B.hSky).lerp(_hzDuskC2.s, cw);
+  hemiLight.groundColor.copy(B.hGnd).lerp(_hzDuskC2.g, cw);
+  D._last = { amb: ambientLight.intensity, key: dirLight.intensity,
+              fill: dirLight2.intensity, rim: dirLight3.intensity, hemi: hemiLight.intensity };
+  // (v35.21) Kill the foliage SELF-GLOW inside the dusk. Hub trees are
+  // emissive (bioluminescent-moss look, emissiveIntensity 0.5), which is a
+  // subtle tint in daylight but reads as "every tree is a lamp" once the
+  // city's boosted bloom is on them. Scaled by cw so the daytime hub is
+  // untouched. The material is SHARED with the hub, hence the base capture.
+  try {
+    const tm = (typeof _swTreeMatGet === 'function') ? _swTreeMatGet() : null;
+    if (tm) {
+      if (tm.userData._hzEmiBase == null) tm.userData._hzEmiBase = tm.emissiveIntensity || 0;
+      tm.emissiveIntensity = tm.userData._hzEmiBase * (1 - cw * 0.94);
+    }
+  } catch (_) {}
 }
 
 // ---- (v34.93) ZONE RIFT CAVERNS ----
@@ -21948,15 +22098,24 @@ const HUB_CITY = {
 
 // cyberpunk palettes — facades stay near-black so the emissive windows / neon
 // strips carry the look. Neon hues: cyan / magenta / amber / violet / lime.
+// (v35.21) Facades pulled WAY down (was 0.18–0.47 mid-grey) and shifted cool.
+// The reference keeps the building mass near-black so the emissive windows are
+// the only bright thing in frame — that value gap IS the look. At mid-grey the
+// mass competed with its own windows and nothing popped.
 const _HC_FACADE = [
-  [0.22, 0.25, 0.33], [0.30, 0.30, 0.39], [0.36, 0.39, 0.47],
-  [0.18, 0.21, 0.27], [0.39, 0.35, 0.31], [0.26, 0.33, 0.35],
+  [0.085, 0.105, 0.155], [0.105, 0.125, 0.180], [0.130, 0.150, 0.205],
+  [0.070, 0.088, 0.135], [0.140, 0.140, 0.165], [0.095, 0.120, 0.150],
 ];
+// (v35.21) Weighted, not uniform. An even pick across five fully-saturated hues
+// (incl. lime) is the other half of the confetti. Ice dominates, rose is the
+// counter-neon, sodium/violet are accents; acid green dropped entirely.
 const _HC_NEON = [
-  [0.10, 1.00, 0.92], [1.00, 0.16, 0.72], [1.00, 0.62, 0.10],
-  [0.55, 0.28, 1.00], [0.30, 1.00, 0.35],
+  [0.18, 0.94, 1.00], [0.18, 0.94, 1.00], [0.18, 0.94, 1.00],
+  [1.00, 0.22, 0.52], [1.00, 0.22, 0.52],
+  [1.00, 0.62, 0.20],
+  [0.55, 0.30, 1.00],
 ];
-const _HC_METAL = [[0.32, 0.34, 0.38], [0.24, 0.26, 0.30], [0.38, 0.36, 0.32]];
+const _HC_METAL = [[0.145, 0.160, 0.190], [0.105, 0.118, 0.145], [0.170, 0.160, 0.145]];
 
 function _hcMulberry32(a) {
   return function () {
@@ -22302,6 +22461,72 @@ function _hubCityBuild(g) {
       return count;
     }
 
+    // (v35.21) SILHOUETTE ARCHETYPES for tall commercial towers.
+    // Every commercial building used to be ONE extruded slab with a flat top —
+    // two art-direction passes both scored geometry 2-3/10 and called the
+    // skyline "a single rounded clump with no roofline rhythm". These are all
+    // still stacked instances in the SAME instanced buffers ('twr'/'cyl'/
+    // 'neon'), so a varied skyline costs no extra draw calls — only a few more
+    // instances. Each stage registers as a collider via solid().
+    const comTower = (px, pz, fw, fd, h, ang, pal, mode, baseY) => {
+      const a = rng();
+      const mast = (mx, my, mz, mr, mh) => {
+        push('cyl', mx, my, mz, mr, mh, mr, 0, pick(_HC_METAL), 0, rng());
+        // pulsing beacon at the tip (mode 2 = pulse in _hcNeonMat)
+        push('neon', mx, my + mh, mz, mr * 2.6, mr * 2.6, mr * 2.6, 0, pick(_HC_NEON), 2, rng());
+      };
+      if (a < 0.26) {
+        // SLAB — the original. Kept, but now the minority.
+        solid('twr', px, baseY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
+        if (rng() < 0.5) mast(px, baseY + h, pz, 7 + rng() * 6, 60 + rng() * 150);
+      } else if (a < 0.56) {
+        // SETBACK ziggurat — 3 stages, each stepping in. The classic
+        // art-deco/megacity profile and the strongest skyline read.
+        let y = baseY, w = fw, d = fd, left = h;
+        for (let s = 0; s < 3 && left > 60; s++) {
+          const sh = (s === 2) ? left : left * (0.40 + rng() * 0.18);
+          solid('twr', px, y, pz, w, sh, d, ang, jit(pal, 0.09 + s * 0.02), mode, rng());
+          y += sh; left -= sh;
+          w *= 0.62 + rng() * 0.14; d *= 0.62 + rng() * 0.14;
+        }
+        if (rng() < 0.55) mast(px, y, pz, 6 + rng() * 5, 80 + rng() * 200);
+      } else if (a < 0.74) {
+        // SPIRE — slim shaft, long tapering crown, always masted. These are
+        // the landmarks that break a flat horizon.
+        const sw = fw * (0.42 + rng() * 0.18), sd = fd * (0.42 + rng() * 0.18);
+        const shaft = h * (0.66 + rng() * 0.12);
+        solid('twr', px, baseY, pz, sw, shaft, sd, ang, jit(pal, 0.09), mode, rng());
+        let y = baseY + shaft, w = sw, d = sd, left = h - shaft;
+        for (let s = 0; s < 3 && left > 40; s++) {
+          const sh = left * 0.42;
+          w *= 0.66; d *= 0.66;
+          solid('twr', px, y, pz, w, sh, d, ang, jit(pal, 0.07), mode, rng());
+          y += sh; left -= sh;
+        }
+        mast(px, y, pz, 5 + rng() * 4, 160 + rng() * 320);
+      } else if (a < 0.88) {
+        // TWIST — stacked stages each rotated, so the facade catches light at
+        // different angles up the height instead of one flat plane.
+        const n = 3 + Math.floor(rng() * 2);
+        let y = baseY, w = fw, d = fd;
+        const twist = (rng() < 0.5 ? -1 : 1) * (0.10 + rng() * 0.10);
+        for (let s = 0; s < n; s++) {
+          const sh = h / n;
+          solid('twr', px, y, pz, w, sh, d, ang + twist * s, jit(pal, 0.09), mode, rng());
+          y += sh; w *= 0.93; d *= 0.93;
+        }
+        if (rng() < 0.4) mast(px, y, pz, 6 + rng() * 5, 70 + rng() * 160);
+      } else {
+        // ROUND — cylindrical shaft + collar. Rare, but a curve among all the
+        // right angles is disproportionately visible.
+        const r = Math.min(fw, fd) * 0.5;
+        push('cyl', px, baseY, pz, r * 2, h, r * 2, 0, jit(pal, 0.09), 0, rng());
+        solids.push({ cx: px, cz: pz, yaw: ang, hw: r, hd: r, y0: baseY, y1: baseY + h });
+        push('cyl', px, baseY + h, pz, r * 1.25, h * 0.06, r * 1.25, 0, jit(pal, 0.12), 0, rng());
+        mast(px, baseY + h + h * 0.06, pz, 6 + rng() * 5, 90 + rng() * 220);
+      }
+    };
+
     // commercial / dense: perimeter slabs around a courtyard garden
     const isCom = type === 'commercial';
     const dep = Math.max(170, Math.min(330, bh * 0.36));
@@ -22329,9 +22554,17 @@ function _hubCityBuild(g) {
               push('cyl', qx, PY, qz, 36, sh + 8, 36, 0, pick(_HC_METAL), 0, rng());
               solids.push({ cx: qx, cz: qz, yaw: ang, hw: 20, hd: 20, y0: PY, y1: PY + sh });
             }
-            solid('twr', px, PY + sh, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
+            if (h > 620) comTower(px, pz, fw, fd, h, ang, pal, mode, PY + sh);
+            else solid('twr', px, PY + sh, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
           } else {
-            solid('twr', px, PY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
+            // Archetypes for anything TALL, commercial or dense. Gating this
+            // on isCom left the street-level canyon — where the player
+            // actually flies — as wall-to-wall identical flat-topped slabs,
+            // because the near blocks are mostly dense housing. Low-rise still
+            // stays slabs: a street of spires reads as noise, and silhouette
+            // variety only pays where it breaks the skyline.
+            if (h > 620) comTower(px, pz, fw, fd, h, ang, pal, mode, PY);
+            else solid('twr', px, PY, pz, fw, h, fd, ang, jit(pal, 0.12), mode, rng());
             doors(px, pz, fw, fd, ang, 1);
           }
           count++;
@@ -22446,9 +22679,16 @@ function _hubCityBuild(g) {
         const n = 0.55 * vn2(x * 0.013, y * 0.013) + 0.3 * vn2(x * 0.041 + 7, y * 0.041 + 3) + 0.15 * vn2(x * 0.11 + 13, y * 0.11 + 9);
         const dry = vn2(x * 0.006 + 31, y * 0.006 + 17);
         let r, g, b;
-        if (n < 0.5) { const t2 = n * 2; r = 41 + 27 * t2; g = 78 + 24 * t2; b = 24 + 33 * t2; }
-        else { const t2 = n * 2 - 1; r = 68 + 42 * t2; g = 102 + 24 * t2; b = 57 + 17 * t2; }
-        if (dry > 0.62) { const k = (dry - 0.62) * 1.3; r += (142 - r) * k; g += (128 - g) * k; b += (84 - b) * k; }
+        // (v35.21) PAVED CONCOURSE, not park turf. Same 3-octave noise (it
+        // gives good organic panel-to-panel variation) remapped onto cool
+        // concrete. A green meadow under a neon skyline was the single most
+        // immersion-breaking thing in every street-level shot.
+        // Deck paving. Retune LIVE with window.__cityFloor(albedo, glow)
+        // rather than editing these — they bake into a canvas at build time.
+        if (n < 0.5) { const t2 = n * 2; r = 52 + 22 * t2; g = 56 + 24 * t2; b = 67 + 28 * t2; }
+        else { const t2 = n * 2 - 1; r = 74 + 26 * t2; g = 80 + 26 * t2; b = 95 + 28 * t2; }
+        // Lighter slab patches instead of dry-grass patches.
+        if (dry > 0.62) { const k = (dry - 0.62) * 1.3; r += (112 - r) * k; g += (118 - g) * k; b += (132 - b) * k; }
         const i4 = (y * CS + x) * 4;
         d8[i4] = r; d8[i4 + 1] = g; d8[i4 + 2] = b; d8[i4 + 3] = 255;
       }
@@ -22463,7 +22703,10 @@ function _hubCityBuild(g) {
   // carved dirt trails along the park bands — a wide dark edge under a lighter
   // worn center reads as a real trodden path — plus trampled plaza clearings
   a2.lineCap = 'round';
-  for (const pass of [[5.0, 'rgba(74,60,38,0.85)'], [3.0, 'rgba(128,106,66,0.9)']]) {
+  // (v35.21) Walkways read as PAVED, not trodden dirt — a dark inlay edge under
+  // a lighter worn centre. These run building-exit to building-exit, which is
+  // the right infrastructure for a city with ships and pedestrians and no cars.
+  for (const pass of [[5.0, 'rgba(44,50,64,0.85)'], [3.0, 'rgba(150,158,180,0.92)']]) {
     a2.lineWidth = pass[0]; a2.strokeStyle = pass[1];
     for (const [x0, z0, x1, z1] of walkSegs) {
       a2.beginPath(); a2.moveTo(toPx(x0), toPz(z0)); a2.lineTo(toPx(x1), toPz(z1)); a2.stroke();
@@ -22471,9 +22714,9 @@ function _hubCityBuild(g) {
   }
   for (const [px, pz, pr] of plazas) {
     const rr2 = pr / (2 * EXT) * CS;
-    a2.fillStyle = 'rgba(122,102,64,0.8)';
+    a2.fillStyle = 'rgba(132,140,160,0.8)';
     a2.beginPath(); a2.arc(toPx(px), toPz(pz), rr2, 0, 6.283); a2.fill();
-    a2.strokeStyle = 'rgba(74,60,38,0.8)'; a2.lineWidth = 2.0;
+    a2.strokeStyle = 'rgba(44,50,64,0.8)'; a2.lineWidth = 2.0;
     a2.beginPath(); a2.arc(toPx(px), toPz(pz), rr2, 0, 6.283); a2.stroke();
   }
   // (v35.13) Contact-shadow pools: a soft dark AO gradient on the ground
@@ -22493,7 +22736,82 @@ function _hubCityBuild(g) {
     a2.beginPath(); a2.arc(bx, bz, br, 0, 6.283); a2.fill();
   }
   a2.globalCompositeOperation = 'source-over';
-  e2.fillStyle = '#000'; e2.fillRect(0, 0, CS, CS);
+
+  // ── (v35.21) EMISSIVE: lit pedestrian walkways + plaza rings ──────────────
+  // This canvas has existed since the ground was written but was only ever
+  // filled black — the emissiveMap was wired up (see _hcMakeMeshes) and then
+  // never drawn to. It is the right layer for this: at night a diffuse ground
+  // needs light ON it to read at all, and guide-lighting along the paths
+  // between building exits is what makes the deck look inhabited rather than
+  // like an empty dark plane.
+  // Base wash, NOT black. A city concourse at night is never unlit — there is
+  // always spill from the towers and the sky. Starting this canvas at black
+  // meant everything except the path strips read as a void, so the deck looked
+  // like glowing lines drawn on nothing.
+  // This wash is what lights the OPEN ground away from any building — the
+  // pools below fall off, so without a floor here the outskirts go black while
+  // the tower bases blow out. Raise this before reaching for the pools.
+  e2.fillStyle = '#1b2635'; e2.fillRect(0, 0, CS, CS);
+  e2.lineCap = 'round';
+  e2.globalCompositeOperation = 'lighter';   // overlapping paths accumulate
+  // Two passes per walkway: a wide dim spill, then a tight bright core — the
+  // same trick the albedo trails use, which reads as a strip light bleeding
+  // onto the paving either side of it.
+  // ⚠ Keep these ALPHAS LOW. This canvas feeds an emissiveMap that is then run
+  // through the city's boosted bloom (strength 1.7): at 0.95 the paths blew out
+  // into what read as laser beams across the deck. Guide lighting should be
+  // just bright enough to trace, never a light source in its own right.
+  for (const pass of [[8.0, 'rgba(26,86,112,0.20)'], [2.6, 'rgba(120,232,255,0.30)']]) {
+    e2.lineWidth = pass[0]; e2.strokeStyle = pass[1];
+    for (const [x0, z0, x1, z1] of walkSegs) {
+      e2.beginPath(); e2.moveTo(toPx(x0), toPz(z0)); e2.lineTo(toPx(x1), toPz(z1)); e2.stroke();
+    }
+  }
+  // Plazas: a warm sodium perimeter ring with a soft pool inside, so the open
+  // spaces read as gathering places rather than gaps in the walkway net.
+  for (const [px, pz, pr] of plazas) {
+    const rr2 = pr / (2 * EXT) * CS;
+    const gP = e2.createRadialGradient(toPx(px), toPz(pz), 0, toPx(px), toPz(pz), rr2);
+    gP.addColorStop(0, 'rgba(90,58,20,0.22)');
+    gP.addColorStop(1, 'rgba(0,0,0,0)');
+    e2.fillStyle = gP;
+    e2.beginPath(); e2.arc(toPx(px), toPz(pz), rr2, 0, 6.283); e2.fill();
+    e2.strokeStyle = 'rgba(255,168,72,0.32)'; e2.lineWidth = 2.6;
+    e2.beginPath(); e2.arc(toPx(px), toPz(pz), rr2 * 0.94, 0, 6.283); e2.stroke();
+  }
+  // LIGHT POOLING: every grounded building throws its window light onto the
+  // concourse around it. This is the thing that makes a night city floor read
+  // as lit rather than as a dark plane with stripes on it — the deck is bright
+  // where the towers are and falls off between them. The pool extends WELL
+  // past the footprint (2.2x) and is tinted per-building from the same
+  // ice/sodium/rose split the facades use, so the ground picks up the colour
+  // of whatever is standing on it.
+  const poolHue = [
+    'rgba(56,150,190,',   // ice
+    'rgba(170,116,44,',   // sodium
+    'rgba(150,52,92,',    // rose
+  ];
+  for (const o of solids) {
+    if (o.y0 > PY + 60) continue;
+    const foot = Math.max(o.hw, o.hd);
+    // WIDE and DIM, not tight and hot. At 2.2x / 0.22-0.52 each building sat
+    // in a bright halo with dark ground between them — the light has to reach
+    // further and land softer so the deck lifts evenly instead of pooling.
+    const br = (foot * 3.4) / (2 * EXT) * CS;
+    if (br < 2.0) continue;
+    // Taller buildings have more lit facade, so they spill further and harder.
+    const tall = Math.min(1, (o.y1 - o.y0) / 1400);
+    const amp = 0.085 + 0.125 * tall;
+    const hs = Math.abs(Math.sin(o.cx * 0.013 + o.cz * 0.017)) ;
+    const hue = poolHue[hs < 0.55 ? 0 : (hs < 0.85 ? 1 : 2)];
+    const gD = e2.createRadialGradient(toPx(o.cx), toPz(o.cz), br * 0.18, toPx(o.cx), toPz(o.cz), br);
+    gD.addColorStop(0, hue + amp.toFixed(3) + ')');
+    gD.addColorStop(0.45, hue + (amp * 0.55).toFixed(3) + ')');
+    gD.addColorStop(1, 'rgba(0,0,0,0)');
+    e2.fillStyle = gD;
+    e2.beginPath(); e2.arc(toPx(o.cx), toPz(o.cz), br, 0, 6.283); e2.fill();
+  }
+  e2.globalCompositeOperation = 'source-over';
 
   // ── collision spatial hash ──
   // cell 256u; each OBB is inserted into every cell its AABB (inflated by the
@@ -22647,8 +22965,20 @@ function _hcTowerMat() {
         lit = clamp(lit + fl - 2.0 * fl * lit, 0.0, 1.0);
         diffuseColor.rgb = mix(vec3(0.018, 0.026, 0.040), vec3(0.045, 0.06, 0.09), step(1.5, hcMode))
                          * (0.75 + 0.5 * hcH21(cell * 3.7 + vec2(hcRnd * 91.0, fc)));
-        float hue = fract(hcRnd * 5.7 + h * 0.12);
-        vec3 wc = hue < 0.40 ? vec3(0.25, 1.0, 0.92) : (hue < 0.75 ? vec3(1.0, 0.72, 0.36) : vec3(1.0, 0.40, 0.78));
+        // (v35.21) Hue is per-TOWER now (hcRnd only). It used to fold in h,
+        // the per-window hash, so cyan/amber/pink alternated WITHIN one facade
+        // NOTE: no backticks in this block - it lives inside a JS template
+        // literal, so a stray backtick terminates the whole GLSL string.
+        // — that is what read as confetti from a distance. Real towers light by
+        // tenancy, one interior colour per building. Weighted so ice dominates,
+        // sodium is the warm minority and rose is a rare accent; per-window
+        // variation is carried by brightness alone (the fract(h*31.7) below).
+        // Split tuned by eye against screenshots: 0.62 ice read as almost
+        // monochrome cyan. Ice still leads, but sodium and rose have to be
+        // present often enough to actually punctuate the skyline.
+        float hue = fract(hcRnd * 5.7);
+        vec3 wc = hue < 0.50 ? vec3(0.18, 0.90, 1.00)
+                : (hue < 0.82 ? vec3(1.00, 0.66, 0.28) : vec3(1.00, 0.22, 0.52));
         float hcSunFace = clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0);
         totalEmissiveRadiance += wc * lit * (0.85 + 0.65 * fract(h * 31.7)) * mix(1.0, 0.22, hcSunFace);
       }
@@ -22658,6 +22988,10 @@ function _hcTowerMat() {
   };
   return mat;
 }
+
+// (v35.21) The asphalt street-deck material that used to live here is gone.
+// It was a CAR city (carriageways, lane centre lines) in a world that only
+// has ships, and it covered the real baked ground. See _hubCityInit.
 
 // additive neon material; mode-2 instances pulse (antenna beacons, ember tips)
 function _hcNeonMat() {
@@ -22753,8 +23087,16 @@ function _hcMakeMeshes(city) {
   const EXT = g.radius * 1.12;
   const gnd = new THREE.Mesh(
     new THREE.CircleGeometry(EXT, 48),
+    // (v35.21) color + emissiveIntensity are the BAKED-IN defaults for the
+    // deck, arrived at by live tuning with window.__cityFloor(albedo, glow).
+    // At the stock 1.0/1.0 the concourse blows out white: the emissive canvas
+    // now carries a base wash over its whole area, and that runs through the
+    // city's boosted bloom (threshold 0.14, strength 1.7). Retune live rather
+    // than editing the canvas values — these two multiply both maps.
     new THREE.MeshLambertMaterial({
       map: albTex, emissive: 0xffffff, emissiveMap: emiTex, transparent: true,
+      color: new THREE.Color(0.85, 0.85, 0.85),
+      emissiveIntensity: 0.22,
       polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
     })
   );
@@ -22780,6 +23122,21 @@ function _hcMakeMeshes(city) {
   gnd.userData.isHubCity = true;
   gnd.receiveShadow = true;
   group.add(gnd);
+  // (v35.21) LIVE floor knobs. The albedo and the walkway/pool glow are baked
+  // into canvases at build time, so they can't be retuned without a rebuild —
+  // but the material multiplies both, which CAN be changed live:
+  //   .color          scales the baked albedo  (how bright the paving reads)
+  //   .emissiveIntensity scales the baked glow (walkways, plaza rings, pools)
+  // Exposed so the look can be dialled in real time instead of through a
+  // rebuild cycle per guess.  window.__cityFloor(albedo, glow)
+  try {
+    window.__cityFloor = function (albedo, glow) {
+      if (typeof albedo === 'number') gnd.material.color.setScalar(albedo);
+      if (typeof glow === 'number') gnd.material.emissiveIntensity = glow;
+      gnd.material.needsUpdate = true;
+      return { albedo: gnd.material.color.r, glow: gnd.material.emissiveIntensity };
+    };
+  } catch (_) {}
 
   // park trees reuse the hub tree geometry + material (identical look).
   // hcShared → their shared assets are NOT disposed with the city.
@@ -23175,7 +23532,10 @@ if (typeof window !== 'undefined') {
   setInterval(() => { try { _aegisMenuRefresh(); } catch (_) {} }, 2500);
 }
 
-function _hcPadSched(pad, i, t) {
+// `lift` = how far this ship's hull hangs below its origin, measured per model
+// at spawn (see _hcTrafficInit). Defaults to the old fixed 56 for any caller
+// that doesn't pass one.
+function _hcPadSched(pad, i, t, lift) {
   const h = _stHash2(i * 7.13, HUB_CITY.genome.seed * 0.001);
   const h2 = _stHash2(i * 3.71, 9.2);
   const period = 90 + h * 80;
@@ -23199,7 +23559,7 @@ const R = HUB_CITY.genome.radius;
   // segments: 0 in-cruise, 1 descend, 2 parked, 3 rise, 4 out-cruise, 5 absent
   // (v34.87b) Rest height: ship models are origin-centered, so parking at the
   // raw pad point sank hulls into pad roofs / the ground (user-sighted).
-  const PK = { x: pad.x, y: pad.y + 56, z: pad.z };
+  const PK = { x: pad.x, y: pad.y + ((typeof lift === 'number' && lift > 0) ? lift : 56), z: pad.z };
   if (ph < 0.10) return { seg: 0, pos: lerp3(FI, AH, ph / 0.10), from: FI, to: AH, fx: FI };
   if (ph < 0.16) return { seg: 1, pos: lerp3(AH, A, (ph - 0.10) / 0.06), from: AH, to: A };
   if (ph < 0.20) return { seg: 1, pos: lerp3(A, PK, (ph - 0.16) / 0.04), from: A, to: PK };
@@ -23317,7 +23677,24 @@ function _hcTrafficInit(city, group) {
         },
       };
       game.entities.push(ent);
-      _HC_TRAF.ships.push({ holder, pad: parkPads[i], idx: i, lastSeg: -1, ent });
+      // (v35.21) PER-MODEL rest height. v34.87b lifted parked ships a FIXED
+      // 56u because origin-centred models sank into the pad — but the six
+      // hoard models differ in size, so the big ones still buried their hulls
+      // in the deck (user-sighted again). Measure the clone's actual bounding
+      // box and lift by its underhang instead of guessing one number for all.
+      // MAX, not replace. Measured underhang for the current six models is
+      // only 24-32u, so deriving the lift purely from the bbox would LOWER
+      // every ship below the existing fixed 56 and risk making the sinking
+      // worse rather than better. Take the larger of the two: the old floor is
+      // preserved, and a model bigger than 56u of underhang now gets the
+      // clearance it actually needs (the pad disc has thickness of its own,
+      // which the bbox knows nothing about).
+      let lift = 56;
+      try {
+        const bb = new THREE.Box3().setFromObject(cl);
+        if (isFinite(bb.min.y)) lift = Math.max(56, -bb.min.y + 24);
+      } catch (_) {}
+      _HC_TRAF.ships.push({ holder, pad: parkPads[i], idx: i, lastSeg: -1, ent, lift });
     }
     _HC_TRAF.ready = true;
   }).catch(() => {});
@@ -23333,12 +23710,25 @@ function _hcTrafficUpdate(dt) {
   const nearCity = ((px - HUB_CITY.x) ** 2 + (pz - HUB_CITY.z) ** 2) < nearR * nearR;
   _HC_TRAF.obbs.length = 0;
   for (const s of _HC_TRAF.ships) {
-    const st = _hcPadSched(s.pad, s.idx, t);
+    const st = _hcPadSched(s.pad, s.idx, t, s.lift);
     // (v34.87) Default the combat entity to its pad every frame — hidden /
     // absent ships otherwise idle at world origin (inside the terrain) and
     // environmental damage executes them. Visible/aggro branches overwrite
     // this with the real position below.
-    if (s.ent && !(s.ent.aggro && s.ent.alive)) s.ent.position.set(s.pad.x, s.pad.y, s.pad.z);
+    if (s.ent && !(s.ent.aggro && s.ent.alive)) {
+      // (v35.21) LIFTED, not the raw pad point. This entity position is what
+      // the HUD callout anchors to, so at raw pad height the FREIGHTER tag
+      // sprouted out of the deck underneath a hull that was parked 56u above.
+      s.ent.position.set(s.pad.x, s.pad.y + (s.lift || 56), s.pad.z);
+      // (v35.21) Assume SUPPRESSED until a visible branch below clears it.
+      // An ABSENT ship (seg 5 — holder hidden, warped out) still had its
+      // entity parked on the pad by the line above, so a callout hovered over
+      // empty ground with no ship under it and read as "a ship in the floor".
+      // _cloaked is the callout's existing suppression hook (see the flat HUD
+      // label path) and it clears _labelSpotTime so the digitise-in animation
+      // replays cleanly on the next arrival.
+      s.ent._cloaked = true;
+    }
     // (v34.87) Destroyed: stay gone until the schedule wraps around to a
     // fresh arrival — then a new calm ship takes over the pad slot.
     if (s.ent && !s.ent.alive) {
@@ -23389,6 +23779,7 @@ function _hcTrafficUpdate(dt) {
         }
       } catch (_) {}
       s.holder.visible = true;
+      if (s.ent) s.ent._cloaked = false;   // visible -> callout allowed
       s.holder.position.copy(e.position);
       s.holder.rotation.y = Math.atan2(dx, dz);
       e._fireT -= dt;
@@ -23428,6 +23819,7 @@ function _hcTrafficUpdate(dt) {
       try { warpOutFx(new THREE.Vector3(st.fx.x, st.fx.y, st.fx.z), 150); } catch (_) {}
     }
     s.holder.visible = true;
+    if (s.ent) s.ent._cloaked = false;   // visible -> callout allowed
     s.holder.position.set(st.pos.x, st.pos.y, st.pos.z);
     if (st.seg === 2) s.holder.rotation.y = st.yaw || 0;
     else if (st.to && st.from) s.holder.rotation.y = Math.atan2(st.to.x - st.from.x, st.to.z - st.from.z);
@@ -23604,6 +23996,13 @@ function _hubCityInit() {
   if (game.hubCity) _hubCityDispose();
   const city = _hubCityBuild(HUB_CITY.genome);
   const made = _hcMakeMeshes(city);
+  // (v35.21) NO extra ground disc here. An earlier pass added an asphalt deck
+  // with a road grid — wrong on both counts. The city ALREADY bakes a proper
+  // ground (albCanvas/emiCanvas: walkway trails along walkSegs, plaza
+  // clearings, and contact-shadow AO under every footprint) and that disc was
+  // simply covering it. It was also a CAR city: this world has ships, not
+  // cars, so carriageways and lane markings made no sense. The ground is now
+  // paved concourse + lit pedestrian walkways, baked below.
   scene.add(made.group);
   game.hubCity = {
     city, group: made.group, lights: made.lights, twrMat: made.twrMat,
@@ -24155,6 +24554,19 @@ function _wxFrame(dt) {
     _WX.bow.position.set(camP.x + bd.x * D, camP.y + bd.y * D, camP.z + bd.z * D);
     _WX.bow.lookAt(camP.x, camP.y, camP.z);
     _WX.bow.scale.setScalar(D * 0.9);
+    // (v35.21) Fade the bow out inside the city dusk. A full-spectrum arc over
+    // a neon skyline fights the palette outright — an art pass flagged it as
+    // the loudest single offender in the stand-off shot. Rainbows are a
+    // daylight phenomenon anyway, so this is physical as well as aesthetic.
+    try {
+      const _dz = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES.DUSK) ? (_HUB_ZONES.DUSK._cw || 0) : 0;
+      const _bm = _WX.bow.material;
+      if (_bm) {
+        if (_bm.userData._bowBaseOp == null) _bm.userData._bowBaseOp = _bm.opacity;
+        _bm.opacity = _bm.userData._bowBaseOp * (1 - _dz);
+        _WX.bow.visible = _bm.opacity > 0.01;
+      }
+    } catch (_) {}
   }
   // clouds wrap around the camera; haze tracks the live fog (city tint bleeds in)
   const cu = _WX.clouds.material.uniforms;
@@ -63128,6 +63540,8 @@ function gameLoop(timestamp) {
           try { _fishSchoolTick(_cdt); } catch (_) {}
           try { _hubCityFrame(_cdt); } catch (_) {}
           try { _wxFrame(_cdt); } catch (_) {}
+          // MUST be after _wxFrame — it owns the sun intensities each frame.
+          try { _hzDuskLights(); } catch (_) {}
         } catch (_) {}
       }
       const _xrActive = !!(renderer && renderer.xr && renderer.xr.isPresenting);
@@ -63352,6 +63766,8 @@ function gameLoop(timestamp) {
       try { _hubZoneTick(_fX, _fZ, dt); } catch (_) {}
       try { _hubCityFrame(dt); } catch (_) {}
       try { _wxFrame(dt); } catch (_) {}
+      // MUST be after _wxFrame — it owns the sun intensities each frame.
+      try { _hzDuskLights(); } catch (_) {}
     } catch (_) {}
   }
   if (_vrThrottleTier < 2 && typeof updateSmokeLights === 'function') updateSmokeLights(dt); 
