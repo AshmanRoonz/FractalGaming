@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.52';
+const LSS_BUILD = '35.51';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -66086,31 +66086,11 @@ function initAudio() {
     // forcing 48k makes the browser resample every output buffer — continuous
     // audio-thread cost + a known underrun/glitch source. Everything downstream
     // reads ctx.sampleRate, so the native rate is safe. Desktop keeps 48k.
-    // (v35.52) MOBILE ASKS FOR 'interactive', NOT A 0.18s BUFFER.
-    //
-    // v32.89 requested an explicit 0.18s buffer on mobile to buy the audio
-    // callback headroom against the "crackle". Measured on a real phone at
-    // v35.51, that request came back as an outputLatency of **0.360 s** —
-    // browsers round up to a whole power-of-two buffer, so asking for 180 ms
-    // bought 360. Desktop, on 'playback', reports 0.048.
-    //
-    // That is the mobile dropout. `ctx.currentTime` only advances one render
-    // quantum at a time, so with a 360 ms block a weapon firing every 250 ms
-    // has consecutive shots scheduled at the SAME currentTime — they pile onto
-    // one another instead of sounding as separate hits — and anything landing
-    // behind the current render position is discarded outright. Exactly "it
-    // doesn't play the sound of every shot".
-    //
-    // 'interactive' is the Web Audio default and asks for the smallest buffer
-    // the device can sustain, which is what a game wants. Overridable at
-    // runtime via __audioLatency() for A/B on a real device, since this is a
-    // per-device trade and the old value was chosen without measuring it.
-    let _latHint = _LSS_IS_MOBILE ? 'interactive' : 'playback';
-    try {
-      const _saved = localStorage.getItem('lss_audio_latency');
-      if (_saved) _latHint = /^[0-9.]+$/.test(_saved) ? parseFloat(_saved) : _saved;
-    } catch (_) {}
-    const _audioOptions = { latencyHint: _latHint };
+    // (v32.89) Mobile gets a BIGGER explicit buffer (0.18s vs the browser's
+    // 'playback' default) so the Web Audio callback has more headroom before it
+    // underruns — this is what absorbs main-thread/HRTF stalls (the crackle).
+    // ~180ms of added SFX latency is the trade ; tunable. Desktop keeps 'playback'.
+    const _audioOptions = { latencyHint: _LSS_IS_MOBILE ? 0.18 : 'playback' };
     if (!_LSS_IS_MOBILE) _audioOptions.sampleRate = 48000;
     try { audio.ctx = new _AC(_audioOptions); }
     catch (_) {
@@ -72491,40 +72471,12 @@ function _adbgTick() {
   const s = __audioStats();
   _adbg.el.textContent =
     'snd/s ' + _adbg.rate.toFixed(1) + '   nodes/s ' + _adbg.nrate.toFixed(0) + '\n' +
-    'ctx ' + s.ctxState + '  out ' + (s.outputLatency != null ? s.outputLatency.toFixed(3) : '?') +
-      '  base ' + (s.baseLatency != null ? s.baseLatency.toFixed(3) : '?') + '\n' +
+    'ctx ' + s.ctxState + '  lat ' + (s.outputLatency != null ? s.outputLatency.toFixed(3) : '?') + '\n' +
     'gate ' + s.gating.mode + '  lean ' + (s.leanMode ? 'Y' : 'n') + '  mob ' + (s.mobile ? 'Y' : 'n') + '\n' +
     'win ' + s.startsInWindow + '/' + s.budget + '  stress ' + (s.stressed ? 'Y' : 'n') + '\n' +
     'drops gap ' + d.droppedByMinGap + '  bud ' + d.droppedByBudget;
 }
-// (v35.52) Latency A/B without a rebuild. The buffer size is a per-device
-// trade — the 0.18 it replaces was picked without ever being measured on a
-// phone — so this persists a choice and applies it on the next boot (an
-// AudioContext's latency is fixed at construction; every node belongs to it,
-// so it cannot be changed live).
-//   __audioLatency()               -> what the context actually got
-//   __audioLatency('interactive')  -> smallest buffer the device can sustain
-//   __audioLatency('playback')     -> browser's power-saving buffer
-//   __audioLatency(0.18)           -> the pre-v35.52 mobile value
-//   __audioLatency(null)           -> clear the override
-function __audioLatency(hint) {
-  let saved = null;
-  try { saved = localStorage.getItem('lss_audio_latency'); } catch (_) {}
-  if (hint === undefined) {
-    return { requested: saved || '(default)',
-             baseLatency: audio.ctx ? audio.ctx.baseLatency : null,
-             outputLatency: audio.ctx ? audio.ctx.outputLatency : null,
-             sampleRate: audio.ctx ? audio.ctx.sampleRate : null };
-  }
-  try {
-    if (hint === null) localStorage.removeItem('lss_audio_latency');
-    else localStorage.setItem('lss_audio_latency', String(hint));
-  } catch (_) { return 'localStorage unavailable'; }
-  return 'saved — RELOAD to apply (latency is fixed when the context is built)';
-}
-
 if (typeof window !== 'undefined') {
-  window.__audioLatency = __audioLatency;
   window.__audioDebug = __audioDebug;
   try {
     if (/[?&]adbg=1/.test(location.search)) {
