@@ -442,6 +442,10 @@ Per-frame match state machine (warmup/countdown/active/round-end), timers, win c
 #### Return to menu — `~L46756`
 **Jump:** `function returnToRootMenu` · `function returnToMainMenu` (~L47030)
 Tear down session, dispose world objects, reset state, restore UI.
+- **`returnToRootMenu(opts)`** is the real teardown (~270 lines): entities, projectiles, stasis fields, world FX, timers, player state, pointer lock, scoreboard. It lands on **ship-select** — that is its "root menu" — and it deliberately does **not** leave the Trystero room. `opts.keepRoom` (v35.50) additionally skips `stopRoomHeartbeat()` + `net.roomCode = null`, the only two things in it that end the room's presence. Called by the matchEnd handler after the 10 s scoreboard, where it keeps its original room-clearing behaviour.
+- **(v35.50) `returnToMainMenu()` no longer reloads the page.** It was `net.room.leave()` + `location.reload()`, which is why stepping back to the menu from ship-select or from settings dumped you out of your lobby — the reload destroys the WebRTC room with everything else. There was never a need for it: the soft path is `returnToRootMenu({keepRoom:true})` (the exact teardown a finished match already runs) then hide `#ship-select` / show `#lobby` (`display:flex`, matching its inline default). Verified: match → menu → match → menu with no reload, world rebuilt each time. `returnToMainMenu({hard:true})` keeps the old leave-and-reload, and is also the automatic fallback if the soft teardown throws — a reload beats a half-torn-down menu.
+- **⚠** Both confirm prompts used to promise "your current room will close". They now name the room you keep. If the soft path is ever reverted, fix the wording back or it lies.
+- **⚠** Two other `location.reload()` sites are correct and must stay: the lobby's explicit **leave-room** button (~L5460) and **WebGL context-loss** recovery (~L14333).
 
 ### ═══ PART 18 — Input, HUD & menus (~47070–53134) ═══
 

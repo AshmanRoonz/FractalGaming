@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.49';
+const LSS_BUILD = '35.50';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -50497,7 +50497,11 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-function returnToRootMenu() {
+// (v35.50) `opts.keepRoom` holds the room open across the teardown. Default
+// false, so the matchEnd caller behaves exactly as before; only the soft
+// exit-to-main-menu path opts in.
+function returnToRootMenu(opts) {
+  const _keepRoom = !!(opts && opts.keepRoom);
   // (campaign) Tear down the active mode first so leaving a campaign session
   // clears its endless / no-timer flags before any later classic/race match.
   try { activeMode().onTeardown(); } catch (_) {}
@@ -50509,8 +50513,13 @@ function returnToRootMenu() {
   try { game._campPicker = false; } catch (_) {}   
   
   
-  if (typeof stopRoomHeartbeat === 'function') stopRoomHeartbeat();
-  if (net) { net.roomCode = null; }
+  // (v35.50) Both of these END the room's presence. Skipped when keepRoom is
+  // set, which is what lets "exit to main menu" drop the match while leaving
+  // you and your peers in the same lobby.
+  if (!_keepRoom) {
+    if (typeof stopRoomHeartbeat === 'function') stopRoomHeartbeat();
+    if (net) { net.roomCode = null; }
+  }
   // (v30.68) Drop any in-flight clip recording (discard, no download).
   try { if (typeof _clipStop === 'function') _clipStop(true); } catch (_) {}
 
@@ -50772,26 +50781,71 @@ function returnToRootMenu() {
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
 
-function returnToMainMenu() {
+// (v35.50) SOFT RETURN — no page reload, so the room survives.
+//
+// This used to be `net.room.leave()` + `location.reload()`, which is why
+// stepping back to the menu from ship-select or from settings dumped you out of
+// whatever lobby you were in: the reload destroys the WebRTC room along with
+// everything else, and rejoining means re-sharing the code.
+//
+// There was never a need to reload. returnToRootMenu() is a complete match
+// teardown that the game already runs every time a match ends — entities,
+// projectiles, stasis fields, world effects, timers, player state, pointer
+// lock, the lot — and it does NOT leave the Trystero room. The only thing it
+// did that we must skip is clearing net.roomCode / stopping the heartbeat,
+// hence the keepRoom flag. So the soft path is: same teardown, then swap
+// ship-select out for #lobby.
+//
+// `opts.hard` keeps the old behaviour for callers that genuinely want a clean
+// slate (leave the room, drop ?room=, reload).
+function returnToMainMenu(opts) {
+  if (opts && opts.hard) {
+    try {
+      // Best-effort: leave the Trystero room cleanly so peers see us drop
+      // immediately rather than waiting for WebRTC timeout.
+      if (typeof net !== 'undefined' && net && net.room && typeof net.room.leave === 'function') {
+        net.room.leave();
+      }
+    } catch (_) {}
+    // Drop the ?room= deep-link param so the reload doesn't immediately
+    // re-join the room we just exited.
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('room')) {
+        url.searchParams.delete('room');
+        window.history.replaceState({}, document.title, url.pathname + (url.search || '') + url.hash);
+      }
+    } catch (_) {}
+    window.location.reload();
+    return;
+  }
+
+  // Tear the match down but hold the room open. If this throws we have a
+  // half-torn-down world, and a reload is a better outcome than a broken menu —
+  // so the fallback is the old hard path rather than swallowing the error.
   try {
-    // Best-effort: leave the Trystero room cleanly so peers see us drop
-    // immediately rather than waiting for WebRTC timeout. The reload
-    // would tear it down anyway, but a clean leave is friendlier.
-    if (typeof net !== 'undefined' && net && net.room && typeof net.room.leave === 'function') {
-      net.room.leave();
-    }
-  } catch (_) {}
-  // Drop the ?room= deep-link param if present so the reload doesn't
-  // immediately re-join the room we just exited.
+    returnToRootMenu({ keepRoom: true });
+  } catch (e) {
+    console.warn('[main-menu] soft teardown failed, falling back to reload', e);
+    return returnToMainMenu({ hard: true });
+  }
+
+  // returnToRootMenu finishes by showing ship-select (that IS its "root menu").
+  // For the main menu we want one step further out, so close it and raise
+  // #lobby. Rebuilding ship-select first is a few wasted ms and much safer than
+  // duplicating 270 lines of teardown to avoid them.
   try {
-    const url = new URL(window.location.href);
-    if (url.searchParams.has('room')) {
-      url.searchParams.delete('room');
-      window.history.replaceState({}, document.title, url.pathname + (url.search || '') + url.hash);
-    }
+    const sel = document.getElementById('ship-select');
+    if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
+    const lob = document.getElementById('lobby');
+    if (lob) lob.style.display = 'flex';        // matches its inline default
   } catch (_) {}
-  window.location.reload();
+
+  // Repaint the room panel so it reflects the room we deliberately kept.
+  try { if (typeof _renderRoomBox === 'function') _renderRoomBox(); } catch (_) {}
+  try { if (typeof _lobbyBroadcastPresence === 'function') _lobbyBroadcastPresence(); } catch (_) {}
 }
+if (typeof window !== 'undefined') window.returnToMainMenu = returnToMainMenu;
 
 // ---- GAMEPAD POLLING ----
 
@@ -55346,7 +55400,11 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   const backBtn = document.getElementById('lobby-back-btn');
   if (backBtn) backBtn.addEventListener('click', () => {
-    const ok = window.confirm('Return to the main menu? Your current room will close.');
+    // (v35.50) No longer closes the room — the return is soft now.
+    const _inRoom = !!(typeof net !== 'undefined' && net && net.roomCode);
+    const ok = window.confirm(_inRoom
+      ? 'Return to the main menu? You will stay in room ' + net.roomCode + '.'
+      : 'Return to the main menu?');
     if (!ok) return;
     try { returnToMainMenu(); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
   });
@@ -58011,7 +58069,12 @@ function buildSettingsPage() {
                          document.getElementById('lobby').style.display !== 'none');
     exitBtn.style.display = lobbyVisible ? 'none' : '';
     exitBtn.addEventListener('click', () => {
-      const ok = window.confirm('Exit to the main menu? Your current match will end.');
+      // (v35.50) The match ends, but the room does not — say so, because the
+      // old wording made people avoid this button to protect their lobby.
+      const _inRoom = !!(typeof net !== 'undefined' && net && net.roomCode);
+      const ok = window.confirm(_inRoom
+        ? 'Exit to the main menu? Your match will end, but you will stay in room ' + net.roomCode + '.'
+        : 'Exit to the main menu? Your current match will end.');
       if (!ok) return;
       try { closeSettings(); } catch (_) {}
       try { returnToMainMenu(); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
