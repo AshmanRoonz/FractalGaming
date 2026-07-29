@@ -3599,7 +3599,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.56';
+const LSS_BUILD = '35.57';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -4020,6 +4020,8 @@ const input = {
     
     openSettings:     17,
     cycleWallPattern: 16,
+    shipPrev: 14,
+    shipNext: 15,
   },
   xrBindings: {
     fire:       'rightTrigger',
@@ -4034,8 +4036,10 @@ const input = {
     moveDown:   'rightStickClick',
     scoreboard: '',                
     menu:       'rightB',          
-    openSettings:     'leftMenu', 
-    cycleWallPattern: '',          
+    openSettings:     'leftMenu',
+    cycleWallPattern: '',
+    shipPrev: '',
+    shipNext: '',
   },
   xrSynth: {
     leftStickAsDpad: true,
@@ -14765,7 +14769,10 @@ function renderFrame() {
       const _hudMesh = _xrEnsureHudMesh();
       if (_hudMesh) _hudMesh.visible = _xrShowHud;
       if (xrAuxMesh) xrAuxMesh.visible = false;
-      if (xrMinimapMesh) xrMinimapMesh.visible = _xrShowHud;  
+      if (xrMinimapMesh) {
+        xrMinimapMesh.visible = _xrShowHud &&
+          !!(typeof window !== 'undefined' && window.__xrSeparateRadar);
+      }
       if (_xrShowHud && renderFrame._xrHudWasVisible !== true) {
         if (typeof drawCircumpunctHUD === 'function') drawCircumpunctHUD();
         if (_xrHudTex) _xrHudTex.needsUpdate = true;
@@ -40980,7 +40987,7 @@ function _xrSynthGamepad() {
     let lx = left.axes[2] || 0, ly = left.axes[3] || 0;
     if (lx === 0 && ly === 0) { lx = left.axes[0] || 0; ly = left.axes[1] || 0; }
     axes[0] = lx; axes[1] = ly;
-    if (xs.leftStickAsDpad) {
+    if (xs.leftStickAsDpad && !(typeof game !== 'undefined' && game && game.state === 'playing')) {
       const T = 0.65;
       if (ly < -T) setBtn(12, true);
       if (ly >  T) setBtn(13, true);
@@ -41386,12 +41393,20 @@ function pollGamepad() {
   input.gpDpadRight = _gpDpadRightBtn || _gpStickRight;
   input.gpDpadLeftBtn  = _gpDpadLeftBtn;
   input.gpDpadRightBtn = _gpDpadRightBtn;
+  const _shipBtn = (act, fallback) => {
+    const idx = (input.gpBindings && input.gpBindings[act] != null) ? input.gpBindings[act] : fallback;
+    if (idx == null || idx < 0) return false;
+    const b = gp.buttons[idx];
+    return !!(b && (b.pressed || b.value > input.triggerThreshold));
+  };
+  const _shipPrevDown = _shipBtn('shipPrev', 14);
+  const _shipNextDown = _shipBtn('shipNext', 15);
   if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game.state === 'playing') {
-    if (_gpDpadLeftBtn && !input._hubShipLPrev) { try { cycleHubShip(-1); } catch (_) {} }
-    else if (_gpDpadRightBtn && !input._hubShipRPrev) { try { cycleHubShip(1); } catch (_) {} }
+    if (_shipPrevDown && !input._hubShipLPrev) { try { cycleHubShip(-1); } catch (_) {} }
+    else if (_shipNextDown && !input._hubShipRPrev) { try { cycleHubShip(1); } catch (_) {} }
   }
-  input._hubShipLPrev = _gpDpadLeftBtn;
-  input._hubShipRPrev = _gpDpadRightBtn;
+  input._hubShipLPrev = _shipPrevDown;
+  input._hubShipRPrev = _shipNextDown;
   input.gpLB = !!(gp.buttons[4] && (gp.buttons[4].pressed || gp.buttons[4].value > input.triggerThreshold));
   input.gpRB = !!(gp.buttons[5] && (gp.buttons[5].pressed || gp.buttons[5].value > input.triggerThreshold));
 
@@ -42050,7 +42065,6 @@ function _hlText(ctx, r, p, str, col) {
 }
 
 function _hlRadar(ctx, r) {
-  if ((typeof isXRPresenting === 'function') && isXRPresenting()) return;
   const ss = (_hlRadar._ss !== undefined) ? _hlRadar._ss
     : (_hlRadar._ss = document.getElementById('ship-select'));
   if (ss && ss.classList.contains('active')) return;
@@ -45153,6 +45167,7 @@ const ACTION_LABELS = {
   ability2: 'Ability 3 (Utility)', core: 'Core Ability',
   moveUp: 'Move Up', moveDown: 'Move Down', scoreboard: 'Scoreboard', menu: 'Menu',
   openSettings: 'Open Settings', cycleWallPattern: 'Cycle Wall Pattern',
+  shipPrev: 'Change Ship (previous)', shipNext: 'Change Ship (next)',
 };
 
 const KB_ACTION_LABELS = {
@@ -46662,6 +46677,8 @@ function buildSettingsPage() {
     menu:       'rightB',
     openSettings:     'leftMenu',
     cycleWallPattern: '',
+    shipPrev: '',
+    shipNext: '',
   };
   const xrBindContainer = overlay.querySelector('#xr-bind-rows');
   if (xrBindContainer) {

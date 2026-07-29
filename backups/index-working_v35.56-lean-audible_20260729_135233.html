@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.57';
+const LSS_BUILD = '35.56';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4184,13 +4184,6 @@ const input = {
     
     openSettings:     17,
     cycleWallPattern: 16,
-    // (v35.57) Hub ship cycling promoted to real bindings. It was reading the
-    // digital D-pad directly, which meant it could not be rebound and — more to
-    // the point — VR had no way to reach it at all, because XR bindings route
-    // action -> gpBindings[action] -> standard button, and there was no action.
-    // 14/15 are D-pad left/right, i.e. exactly what it used to read.
-    shipPrev: 14,
-    shipNext: 15,
   },
   xrBindings: {
     fire:       'rightTrigger',
@@ -4205,13 +4198,8 @@ const input = {
     moveDown:   'rightStickClick',
     scoreboard: '',                
     menu:       'rightB',          
-    openSettings:     'leftMenu',
-    cycleWallPattern: '',
-    // (v35.57) Unbound by default: every comfortable controller button is
-    // already taken, and ship swapping is a hub-only convenience. Assign one in
-    // Settings > VR Controllers - Button Mapping.
-    shipPrev: '',
-    shipNext: '',
+    openSettings:     'leftMenu', 
+    cycleWallPattern: '',          
   },
   // Synthetic-helpers config. The only knob worth keeping is the stick-
   // as-D-pad fallback (XR controllers genuinely have no D-pad hardware).
@@ -17739,14 +17727,7 @@ function renderFrame() {
       const _hudMesh = _xrEnsureHudMesh();
       if (_hudMesh) _hudMesh.visible = _xrShowHud;
       if (xrAuxMesh) xrAuxMesh.visible = false;
-      // (v35.57) The radar is drawn INTO the HUD canvas now (see _hlRadar), and
-      // the HUD mesh above mirrors that canvas — so this standalone plane would
-      // be a second copy. Kept behind a flag rather than deleted; the plane is
-      // bigger and closer than the HUD radar, which some players may prefer.
-      if (xrMinimapMesh) {
-        xrMinimapMesh.visible = _xrShowHud &&
-          !!(typeof window !== 'undefined' && window.__xrSeparateRadar);
-      }
+      if (xrMinimapMesh) xrMinimapMesh.visible = _xrShowHud;  
       if (_xrShowHud && renderFrame._xrHudWasVisible !== true) {
         if (typeof drawCircumpunctHUD === 'function') drawCircumpunctHUD();
         if (_xrHudTex) _xrHudTex.needsUpdate = true;
@@ -50928,13 +50909,7 @@ function _xrSynthGamepad() {
     let lx = left.axes[2] || 0, ly = left.axes[3] || 0;
     if (lx === 0 && ly === 0) { lx = left.axes[0] || 0; ly = left.axes[1] || 0; }
     axes[0] = lx; axes[1] = ly;
-    // (v35.57) NOT DURING GAMEPLAY. The left stick is the STRAFE axis, and
-    // synthesising D-pad presses from it meant a strafe registered as D-pad
-    // left/right — which is what the hub ship-cycle reads, so sidestepping in
-    // the hub swapped your ship. Exactly the v32.99 bug (see the gpDpadLeftBtn
-    // comment), re-entering through the XR synth instead of the stick fallback.
-    // The synth exists for MENU navigation, and menus are never 'playing'.
-    if (xs.leftStickAsDpad && !(typeof game !== 'undefined' && game && game.state === 'playing')) {
+    if (xs.leftStickAsDpad) {
       const T = 0.65;
       if (ly < -T) setBtn(12, true);
       if (ly >  T) setBtn(13, true);
@@ -51452,24 +51427,12 @@ function pollGamepad() {
   // Edge-triggered with its OWN latches (no sharing with the campaign cycle at the gameplay
   // block) ; gated to freeflight + playing. cycleHubShip self-gates on 'freeflight' and
   // cycleCampaignShip on 'campaign', so the two are mutually exclusive — no conflict.
-  // (v35.57) Reads the BOUND buttons now (gpBindings.shipPrev/shipNext, D-pad
-  // 14/15 by default = the old behaviour), so it can be rebound and — the point
-  // of the change — so VR can reach it: XR bindings resolve action ->
-  // gpBindings[action] -> standard button, which requires the action to exist.
-  const _shipBtn = (act, fallback) => {
-    const idx = (input.gpBindings && input.gpBindings[act] != null) ? input.gpBindings[act] : fallback;
-    if (idx == null || idx < 0) return false;
-    const b = gp.buttons[idx];
-    return !!(b && (b.pressed || b.value > input.triggerThreshold));
-  };
-  const _shipPrevDown = _shipBtn('shipPrev', 14);
-  const _shipNextDown = _shipBtn('shipNext', 15);
   if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game.state === 'playing') {
-    if (_shipPrevDown && !input._hubShipLPrev) { try { cycleHubShip(-1); } catch (_) {} }
-    else if (_shipNextDown && !input._hubShipRPrev) { try { cycleHubShip(1); } catch (_) {} }
+    if (_gpDpadLeftBtn && !input._hubShipLPrev) { try { cycleHubShip(-1); } catch (_) {} }
+    else if (_gpDpadRightBtn && !input._hubShipRPrev) { try { cycleHubShip(1); } catch (_) {} }
   }
-  input._hubShipLPrev = _shipPrevDown;
-  input._hubShipRPrev = _shipNextDown;
+  input._hubShipLPrev = _gpDpadLeftBtn;
+  input._hubShipRPrev = _gpDpadRightBtn;
   // LB/RB read directly (buttons 4/5). Used for perk cycling
   // in ship-select; falls through harmlessly elsewhere.
   input.gpLB = !!(gp.buttons[4] && (gp.buttons[4].pressed || gp.buttons[4].value > input.triggerThreshold));
@@ -52438,12 +52401,10 @@ function _hlText(ctx, r, p, str, col) {
 // only changes where that bitmap is presented. The fill and rim came along too,
 // because they were CSS background/border on the element that is now hidden.
 function _hlRadar(ctx, r) {
-  // (v35.57) DRAWS IN VR TOO. v35.45 skipped this while presenting so the
-  // separate xrMinimapMesh plane could own the radar — but the compass rose
-  // around it is not gated, so VR got the rose ringing an empty hole while the
-  // real disc sat on a plane off to the left. Merged: the radar is part of the
-  // HUD everywhere, and the standalone plane is hidden (window.__xrSeparateRadar
-  // = 1 brings it back).
+  // VR mirrors this whole canvas onto a HUD mesh AND carries its own radar
+  // plane textured from #minimap. Blitting in that case would show the radar
+  // twice, so leave the dedicated plane to it.
+  if ((typeof isXRPresenting === 'function') && isXRPresenting()) return;
   // Ship-select hid the old element via `body:has(#ship-select.active)`. The
   // cinematic gate needs no equivalent — it hides #circumpunct-hud outright.
   const ss = (_hlRadar._ss !== undefined) ? _hlRadar._ss
@@ -56489,7 +56450,6 @@ const ACTION_LABELS = {
   ability2: 'Ability 3 (Utility)', core: 'Core Ability',
   moveUp: 'Move Up', moveDown: 'Move Down', scoreboard: 'Scoreboard', menu: 'Menu',
   openSettings: 'Open Settings', cycleWallPattern: 'Cycle Wall Pattern',
-  shipPrev: 'Change Ship (previous)', shipNext: 'Change Ship (next)',
 };
 
 // Keyboard action labels. Subset of gamepad labels because mouse owns
@@ -58141,8 +58101,6 @@ function buildSettingsPage() {
     menu:       'rightB',
     openSettings:     'leftMenu',
     cycleWallPattern: '',
-    shipPrev: '',
-    shipNext: '',
   };
   const xrBindContainer = overlay.querySelector('#xr-bind-rows');
   if (xrBindContainer) {
