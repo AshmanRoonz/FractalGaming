@@ -607,8 +607,12 @@ Web Audio graph (master/sfx/reverb buses, convolvers), ambient bed, env-openness
 
 #### Sound gating: voice budget + playSound — `~L66519`
 **Jump:** `function playSound` (~L66695)
-- **Symbols:** `_SOUND_MIN_GAP`, `_AUDIO_VOICE_BUDGET`, `_audioReserveSound`, `playSound`
+- **Symbols:** `_SOUND_MIN_GAP`, `_AUDIO_VOICE_BUDGET`, `_audioReserveSound`, `playSound`, `_audioSpatialDepth`, `__audioStats`, `__audioDrops`
 - **⚠** Under stress drops `_AUDIO_SKIPPABLE` first; tighter gaps on VR/Quest.
+- **⚠ (v35.47) `playSound` IS NOT the local-player path.** Its comment used to claim "remote ships and AI all route through playSpatialSound", so it hardcoded `own = true`. False: `_playSpatialSoundHRTF` **ends with `playSound(type)`**, as do two fallback branches and `_playSpatialSound51` — every remote/AI sound re-enters `playSound`. It was therefore booking all of them as your own fire, which (a) handed them the `_AUDIO_OWN_FIRE` exemption that exists to protect YOUR gun and (b) stamped the shared `_lastSoundTime[type]`, so another ship firing the same weapon inside its min-gap silenced yours. Ownership is now derived from **`_audioSpatialDepth`**, incremented in `playSpatialSound` around the dispatch (try/finally — a leaked depth marks every later local sound as remote).
+- **⚠ (v35.47)** `_lastSoundTime` is keyed **per origin** (`type` vs `type+' r'`). The gap is a per-emitter rate limit; one shared stamp let any emitter mute any other. It is still checked *before* the own-fire exemption, so a shared key could never be rescued by it.
+- **⚠ The voice budget counts sound STARTS in a 0.25 s window, not live nodes.** One start is typically ~6 oscillators (`triChord` = 2 osc × 3 freqs), so budget 16 measured **76 concurrent sources** on desktop. It is a rate limiter; do not read it as concurrency. Lean mode (all mobile) halves this by skipping chorus + reverb sends.
+- **(v35.47) On-device diagnostics** — `__audioStats()` (ctx state, latency, starts-in-window, budget, lean/stress/mobile flags, compressor reduction) and `__audioDrops(true)` / `__audioDrops()` (per-type tally of played vs dropped-by-gap vs dropped-by-budget). Added because the dropout reports come from phones, which can't be profiled from a desktop session.
 
 #### Spatial audio (HRTF + 5.1 VBAP) — `~L66708`
 **Jump:** `function playSpatialSound` (~L67035)

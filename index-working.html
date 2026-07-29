@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.46';
+const LSS_BUILD = '35.47';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -71937,6 +71937,11 @@ function _runLabTriLayer(layer, atOffsetSec, volMul) {
     layer.envelope || { attack: 0.003, hold: 0, decay: layer.dur });
 }
 
+// (v35.47) Shared noise buffers for the custom lab-noise path. Keyed by
+// sampleRate+length+envelope shape; ~48 entries is far more than the recipe
+// library uses, and a clear() is cheap because a miss only costs one refill.
+const _labNoiseCache = new Map();
+
 function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
   const ctx = audio.ctx;
   const dur = Math.max(0.003, layer.duration);
@@ -71957,13 +71962,26 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
   // Custom path for bandpass / peaking / highpass + reverse envelope.
   // Mirrors playNoiseBurst's routing so the lab-tuned sound lands in the
   // same dry+reverb mix as everything else in the game.
+  // (v35.47) CACHED. This allocated an AudioBuffer and filled it with a fresh
+  // Math.random() per sample on EVERY play — ~14k RNG calls for a 0.3 s layer at
+  // 48 kHz, on the main thread, per layer, per shot. playNoiseBurst two functions
+  // up already shares one buffer (_audioSharedNoiseBuffer); this path just never
+  // did. Keyed by rate+size+shape so the waveform is byte-identical to before on
+  // a hit, and a miss costs exactly what every play used to.
   const bufSize = Math.max(8, Math.floor(ctx.sampleRate * dur));
-  const buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
-  const data = buf.getChannelData(0);
-  if (layer.reverseEnvelope) {
-    for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
-  } else {
-    for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+  const shape = layer.reverseEnvelope ? 'r' : 'd';
+  const key = ctx.sampleRate + ' ' + bufSize + ' ' + shape;
+  let buf = _labNoiseCache.get(key);
+  if (!buf) {
+    if (_labNoiseCache.size > 48) _labNoiseCache.clear();
+    buf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    if (layer.reverseEnvelope) {
+      for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    } else {
+      for (let i = 0; i < bufSize; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+    }
+    _labNoiseCache.set(key, buf);
   }
   const src = ctx.createBufferSource();
   src.buffer = buf;
@@ -72163,14 +72181,78 @@ function _stopRailgunChargeSound(handle) {
       g.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
     } catch (_) {}
   }
-  for (const o of handle.oscs) {
+  for (let i = 0; i < handle.oscs.length; i++) {
+    const o = handle.oscs[i], g = handle.gains[i];
     try { o.stop(now + 0.10); } catch (_) {}
+    // (v35.47) Drop the gain out of the graph once the tone is done. The
+    // oscillator disconnects itself when it ends, but its gain stayed wired to
+    // sfxBus forever — three more every time the railgun was charged, for the
+    // whole match.
+    try {
+      o.addEventListener('ended', () => {
+        try { o.disconnect(); } catch (_) {}
+        try { g.disconnect(); } catch (_) {}
+      });
+    } catch (_) {}
   }
 }
 
 if (typeof window !== 'undefined') {
   window._startRailgunChargeSound = _startRailgunChargeSound;
   window._stopRailgunChargeSound  = _stopRailgunChargeSound;
+}
+
+// (v35.47) Audio diagnostics. The dropout reports are from phones, which can't
+// be profiled from a desktop devtools session, so the numbers have to come off
+// the device itself. __audioDrops() records WHY sounds were refused, by type;
+// __audioStats() reports the state everything else is inferred from.
+//   __audioDrops(true)  -> start recording (and reset)
+//   __audioDrops()      -> read the tally
+const _audioDropLog = { on: false, gap: {}, budget: {}, played: {}, since: 0 };
+function _audioNoteDrop(reason, type) {
+  if (!_audioDropLog.on) return;
+  const b = _audioDropLog[reason];
+  if (b) b[type] = (b[type] || 0) + 1;
+}
+function __audioDrops(start) {
+  if (start) {
+    _audioDropLog.on = true;
+    _audioDropLog.gap = {}; _audioDropLog.budget = {}; _audioDropLog.played = {};
+    _audioDropLog.since = audio.ctx ? audio.ctx.currentTime : 0;
+    return 'recording — call __audioDrops() again to read';
+  }
+  const dur = (audio.ctx ? audio.ctx.currentTime : 0) - _audioDropLog.since;
+  const sum = o => Object.values(o).reduce((a, b) => a + b, 0);
+  return {
+    seconds: +dur.toFixed(1),
+    playedTotal: sum(_audioDropLog.played),
+    droppedByMinGap: sum(_audioDropLog.gap),
+    droppedByBudget: sum(_audioDropLog.budget),
+    byType: { played: _audioDropLog.played, gap: _audioDropLog.gap, budget: _audioDropLog.budget },
+  };
+}
+function __audioStats() {
+  const c = audio.ctx;
+  if (!c) return { error: 'no AudioContext' };
+  return {
+    ctxState: c.state, sampleRate: c.sampleRate,
+    baseLatency: c.baseLatency, outputLatency: c.outputLatency,
+    // The budget counts sound STARTS in a 0.25 s window, NOT live nodes — a
+    // single start can be half a dozen oscillators, so this number is a rate,
+    // not a concurrency figure. Read it with that in mind.
+    startsInWindow: _audioRecentVoices.length,
+    budget: _audioVoiceBudget(),
+    leanMode: _audioLeanMode(),
+    stressed: _audioStressed,
+    mobile: _audioIsMobileDevice(),
+    spatialDepth: _audioSpatialDepth,
+    userVol: Object.assign({}, audio.userVol),
+    compressorReductionDb: audio.masterComp ? +audio.masterComp.reduction.toFixed(2) : null,
+  };
+}
+if (typeof window !== 'undefined') {
+  window.__audioStats = __audioStats;
+  window.__audioDrops = __audioDrops;
 }
 
 function _tickSoundLoop(host, stateKey, dt, interval, soundType) {
@@ -72452,15 +72534,25 @@ function _audioPeekSoundAllowed(type, own) {
   _audioPruneRecentVoices(t);
   const budget = _audioVoiceBudget();
   _audioUpdateStress(_audioRecentVoices.length, budget);
+  // (v35.47) The min-gap is tracked PER ORIGIN. It used to be one stamp per
+  // type shared by you and every other ship, so a bot firing the same weapon
+  // 60 ms before you swallowed your shot — and it happened here, above the
+  // own-fire exemption, so that exemption could never rescue it. The gap exists
+  // to stop ONE emitter machine-gunning the graph, which is a per-emitter
+  // property; remote fire is already thinned by the budget below.
+  const gapKey = own ? type : (type + ' r');
   const gap = _soundMinGap(type);
   if (gap) {
-    const last = _lastSoundTime[type];
-    if (last !== undefined && t - last < gap) return false;
+    const last = _lastSoundTime[gapKey];
+    if (last !== undefined && t - last < gap) { _audioNoteDrop('gap', type); return false; }
   }
   // Over-budget skip for cosmetic sounds. Critical SFX always play, and so
   // does the local player's own weapon fire (see _AUDIO_OWN_FIRE).
-  if (own && _AUDIO_OWN_FIRE[type]) return true;
-  if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) return false;
+  if (own && _AUDIO_OWN_FIRE[type]) { _audioNoteDrop('played', type); return true; }
+  if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) {
+    _audioNoteDrop('budget', type); return false;
+  }
+  _audioNoteDrop('played', type);
   return true;
 }
 
@@ -72468,19 +72560,30 @@ function _audioReserveSound(type, own) {
   if (!_audioPeekSoundAllowed(type, own)) return false;
   const t = audio.ctx.currentTime;
   const gap = _soundMinGap(type);
-  if (gap) _lastSoundTime[type] = t;
+  if (gap) _lastSoundTime[own ? type : (type + ' r')] = t;   // per origin — see _audioPeekSoundAllowed
   _audioRecentVoices.push(t);
   _audioUpdateStress(_audioRecentVoices.length, _audioVoiceBudget());
   return true;
 }
 
+// (v35.47) >0 while we are inside a spatial (remote ship / AI / world) playback.
+// The spatial wrappers all funnel into playSound to do the actual synthesis, so
+// without this counter playSound cannot tell a remote shot from yours.
+let _audioSpatialDepth = 0;
+
 function playSound(type) {
   if (!audio.initialized || !audio.ctx) return;
   resumeAudio();
-  // playSound is the NON-SPATIAL path, which in practice means "the local
-  // player did this" — remote ships and AI all route through
-  // playSpatialSound. That is what makes it a safe signal for own-fire.
-  if (!_audioReserveSound(type, true)) return;
+  // (v35.47) OWN IS DERIVED, NOT ASSUMED. The old comment here claimed "remote
+  // ships and AI all route through playSpatialSound", so playSound could treat
+  // every call as the local player. That was false: _playSpatialSoundHRTF ends
+  // with playSound(type) (and two more fallbacks do the same), so EVERY remote
+  // and AI sound re-entered here and was booked as your own fire. Two things
+  // broke because of it — remote fire took the _AUDIO_OWN_FIRE exemption that
+  // exists to protect YOUR gun, and it stamped _lastSoundTime[type], so another
+  // ship's railgun muted yours for the length of that type's min-gap.
+  const own = (_audioSpatialDepth === 0);
+  if (!_audioReserveSound(type, own)) return;
   _playSoundFromLabRecipe(type);
 }
 
@@ -72819,8 +72922,19 @@ function _playSpatialSound51(type, worldPos, opts) {
 // the system has a multi-channel destination, otherwise the HRTF path.
 function playSpatialSound(type, worldPos, opts) {
   if (typeof _audioPeekSoundAllowed === 'function' && !_audioPeekSoundAllowed(type)) return;
-  if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
-  return _playSpatialSoundHRTF(type, worldPos, opts);
+  // (v35.47) Mark the whole subtree as NOT-own. Both dispatch targets finish by
+  // calling playSound to synthesise, and each has fallback branches that call it
+  // directly too, so the flag has to wrap the dispatch rather than sit at any
+  // one call site. try/finally because the HRTF path can throw on a bad
+  // worldPos — a leaked depth would silently mark every later local sound as
+  // remote, which is the same class of bug in reverse.
+  _audioSpatialDepth++;
+  try {
+    if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
+    return _playSpatialSoundHRTF(type, worldPos, opts);
+  } finally {
+    _audioSpatialDepth--;
+  }
 }
 
 // ============================================================
