@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.48';
+const LSS_BUILD = '35.49';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -72323,6 +72323,7 @@ function __audioStats() {
     // not a concurrency figure. Read it with that in mind.
     startsInWindow: _audioRecentVoices.length,
     budget: _audioVoiceBudget(),
+    gating: __audioGate(),
     leanMode: _audioLeanMode(),
     stressed: _audioStressed,
     mobile: _audioIsMobileDevice(),
@@ -72519,6 +72520,40 @@ const _AUDIO_LEAN_RECIPE_TYPES = {
   sonar_ping_1: 1, sonar_ping_2: 1, sonar_ping_3: 1,
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// (v35.49) SOUND GATING IS OFF BY DEFAULT.
+//
+// The min-gap + voice-budget drop rules were added while chasing "crackling in
+// heavy fights" (see the v31.09 note in _audioVoiceBudget). Measurement in
+// v35.47 did not support that story: 45 s of sustained fire on desktop peaked at
+// 76 concurrent sources with ZERO long tasks, zero clipped samples and no node
+// leak — against a budget nominally capping at 16.
+//
+// What WAS wrong was the v35.47 bug: playSound hardcoded `own = true`, and every
+// remote/AI sound re-enters playSound, so remote fire took the own-fire
+// exemption AND stamped the shared _lastSoundTime. That is what made your own
+// shot vanish. The gating was compensating for it.
+//
+// Note also that the gaps were never binding on weapons: minigun fires every
+// 50 ms against a 40 ms gap, hitscan every 250 ms against 45 ms. The only way a
+// weapon gap ever bit was through that shared stamp.
+//
+//   'off'  (default) no drops at all — every requested sound plays
+//   'soft'           per-emitter min-gap only, no budget drops
+//   'full'           pre-v35.49 behaviour, restores budget drops
+//
+// Bookkeeping (_audioRecentVoices, stress) keeps running in every mode so
+// __audioStats stays truthful about load even when nothing is being dropped.
+// ⚠ Unverified on phones — desktop is where the measurements were taken. If a
+// low-end device underruns in a heavy fight, __audioGate('full') is the revert.
+let _audioGateMode = 'off';
+function __audioGate(mode) {
+  if (mode === 'off' || mode === 'soft' || mode === 'full') _audioGateMode = mode;
+  return { mode: _audioGateMode,
+           meaning: { off: 'no drops', soft: 'per-emitter gap only', full: 'gap + budget drops' }[_audioGateMode] };
+}
+if (typeof window !== 'undefined') window.__audioGate = __audioGate;
+
 function _audioIsQuestVR() {
   return (typeof isXRPresenting === 'function' && isXRPresenting()) &&
          (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
@@ -72544,9 +72579,16 @@ function _audioIsMobileDevice() {
 }
 
 function _audioLeanMode() {
+  // (v35.49) `_audioStressed` only counts when the gating is enabled. It is
+  // derived from the same sliding-window count as the drop rules — i.e. the
+  // same signal the v35.47 measurements did not support — and it does not drop
+  // sounds, it THINS them: no chorus (halves the oscillator count), 2 of 3
+  // chord voices, no reverb sends, noise bursts clamped to 0.10 s. Letting a
+  // busy fight silently trigger that is the same over-correction in a quieter
+  // form. Device tiers below are capability facts, not guesses, so they stay.
   return _audioIsMobileDevice() ||
          _audioQuestCombatMode() ||
-         _audioStressed ||
+         (_audioGateMode !== 'off' && _audioStressed) ||
          (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
 }
 
@@ -72621,7 +72663,11 @@ function _audioPeekSoundAllowed(type, own) {
   // own-fire exemption, so that exemption could never rescue it. The gap exists
   // to stop ONE emitter machine-gunning the graph, which is a per-emitter
   // property; remote fire is already thinned by the budget below.
-  const gapKey = own ? type : (type + ' r');
+  // (v35.49) Everything above is bookkeeping and runs in every mode, so
+  // __audioStats still reports true load with the gating disabled.
+  if (_audioGateMode === 'off') { _audioNoteDrop('played', type); return true; }
+
+  const gapKey = own ? type : (type + '@r');
   const gap = _soundMinGap(type);
   if (gap) {
     const last = _lastSoundTime[gapKey];
@@ -72630,7 +72676,7 @@ function _audioPeekSoundAllowed(type, own) {
   // Over-budget skip for cosmetic sounds. Critical SFX always play, and so
   // does the local player's own weapon fire (see _AUDIO_OWN_FIRE).
   if (own && _AUDIO_OWN_FIRE[type]) { _audioNoteDrop('played', type); return true; }
-  if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) {
+  if (_audioGateMode === 'full' && _audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) {
     _audioNoteDrop('budget', type); return false;
   }
   _audioNoteDrop('played', type);
@@ -72641,7 +72687,7 @@ function _audioReserveSound(type, own) {
   if (!_audioPeekSoundAllowed(type, own)) return false;
   const t = audio.ctx.currentTime;
   const gap = _soundMinGap(type);
-  if (gap) _lastSoundTime[own ? type : (type + ' r')] = t;   // per origin — see _audioPeekSoundAllowed
+  if (gap) _lastSoundTime[own ? type : (type + '@r')] = t;   // per origin — see _audioPeekSoundAllowed
   _audioRecentVoices.push(t);
   _audioUpdateStress(_audioRecentVoices.length, _audioVoiceBudget());
   return true;

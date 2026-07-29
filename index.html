@@ -3599,7 +3599,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.48';
+const LSS_BUILD = '35.49';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -59582,6 +59582,7 @@ function __audioStats() {
     baseLatency: c.baseLatency, outputLatency: c.outputLatency,
     startsInWindow: _audioRecentVoices.length,
     budget: _audioVoiceBudget(),
+    gating: __audioGate(),
     leanMode: _audioLeanMode(),
     stressed: _audioStressed,
     mobile: _audioIsMobileDevice(),
@@ -59731,6 +59732,14 @@ const _AUDIO_LEAN_RECIPE_TYPES = {
   sonar_ping_1: 1, sonar_ping_2: 1, sonar_ping_3: 1,
 };
 
+let _audioGateMode = 'off';
+function __audioGate(mode) {
+  if (mode === 'off' || mode === 'soft' || mode === 'full') _audioGateMode = mode;
+  return { mode: _audioGateMode,
+           meaning: { off: 'no drops', soft: 'per-emitter gap only', full: 'gap + budget drops' }[_audioGateMode] };
+}
+if (typeof window !== 'undefined') window.__audioGate = __audioGate;
+
 function _audioIsQuestVR() {
   return (typeof isXRPresenting === 'function' && isXRPresenting()) &&
          (typeof isStandaloneQuest === 'function' && isStandaloneQuest());
@@ -59754,7 +59763,7 @@ function _audioIsMobileDevice() {
 function _audioLeanMode() {
   return _audioIsMobileDevice() ||
          _audioQuestCombatMode() ||
-         _audioStressed ||
+         (_audioGateMode !== 'off' && _audioStressed) ||
          (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
 }
 
@@ -59802,14 +59811,16 @@ function _audioPeekSoundAllowed(type, own) {
   _audioPruneRecentVoices(t);
   const budget = _audioVoiceBudget();
   _audioUpdateStress(_audioRecentVoices.length, budget);
-  const gapKey = own ? type : (type + ' r');
+  if (_audioGateMode === 'off') { _audioNoteDrop('played', type); return true; }
+
+  const gapKey = own ? type : (type + '@r');
   const gap = _soundMinGap(type);
   if (gap) {
     const last = _lastSoundTime[gapKey];
     if (last !== undefined && t - last < gap) { _audioNoteDrop('gap', type); return false; }
   }
   if (own && _AUDIO_OWN_FIRE[type]) { _audioNoteDrop('played', type); return true; }
-  if (_audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) {
+  if (_audioGateMode === 'full' && _audioRecentVoices.length >= budget && _AUDIO_SKIPPABLE[type]) {
     _audioNoteDrop('budget', type); return false;
   }
   _audioNoteDrop('played', type);
@@ -59820,7 +59831,7 @@ function _audioReserveSound(type, own) {
   if (!_audioPeekSoundAllowed(type, own)) return false;
   const t = audio.ctx.currentTime;
   const gap = _soundMinGap(type);
-  if (gap) _lastSoundTime[own ? type : (type + ' r')] = t;   // per origin — see _audioPeekSoundAllowed
+  if (gap) _lastSoundTime[own ? type : (type + '@r')] = t;   // per origin — see _audioPeekSoundAllowed
   _audioRecentVoices.push(t);
   _audioUpdateStress(_audioRecentVoices.length, _audioVoiceBudget());
   return true;
