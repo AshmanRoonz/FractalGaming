@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.52';
+const LSS_BUILD = '35.56';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4223,6 +4223,10 @@ const input = {
   vrStripFx: false,
   // Top-right FPS readout toggle. Persisted ; updated each gameLoop tick.
   showFps: false,
+  // (v35.55) The six curved captions on the gauge rings — SPEED, NRG, SHIELD,
+  // HEALTH, CORE, AMMO. ON by default. Covers ONLY those: the ability names
+  // riding the cooldown bars are how you tell Q/E/F apart and stay regardless.
+  hudGaugeLabels: true,
   // (v30.68) Round clip recorder (MediaRecorder on the game canvas).
   clipRec: false,
   // Camera field-of-view in flat-screen mode, degrees. Has no visible
@@ -52016,15 +52020,24 @@ try { window.__hudMap = _HM; window.__hudFit = _hmApplyFit; } catch (_) {}
 // number here, change it there too or the next export silently reverts it.
 // ═══════════════════════════════════════════════════════════════════════════
 const _HL = {
-  health:    { a:'mc', x:0, y:0, r:9.9,  kind:'arcbar', seg:5, a0:151.4, a1:388.6, gapDeg:6.3, thick:1.23, col:'#247a37' },
-  shield:    { a:'mc', x:0, y:0, r:11.6, kind:'arcbar', seg:1, a0:202,   a1:338,   gapDeg:0,   thick:1.03, col:'#4fd1ff' },
-  energy:    { a:'mc', x:0, y:0, r:13.1, kind:'arcbar', seg:1, a0:203,   a1:337,               thick:0.56, col:'#4d52ff' },
-  speed:     { a:'mc', x:0, y:0, r:11.2, kind:'ticks',  seg:9,  a0:122, a1:166, rot:30, thick:0.73, tick:4, col:'#941e1e' },
-  ammo:      { a:'mc', x:0, y:0, r:11.2, kind:'ticks',  seg:19, a0:-14, a1:28,  rot:0,  thick:0.25, tick:4, col:'#cfa302', fromEnd:1 },
+  // (v35.53) `lab` / `labAt` = discreet curved caption riding the arc, at labAt
+  // degrees. health, shield, energy and core all CENTRE on 270, so captioning
+  // each at its own midpoint would stack four words up the 12 o'clock sightline
+  // — right where the crosshair is. They are spread along their own sweeps
+  // instead: health and energy on the left flank (3.2 vmin apart radially, so
+  // sharing 205 is fine), shield on the right, core alone at the top since it
+  // is the innermost ring and nothing else is near it.
+  health:    { a:'mc', x:0, y:0, r:9.9,  kind:'arcbar', seg:5, a0:151.4, a1:388.6, gapDeg:6.3, thick:1.23, col:'#247a37', lab:'HEALTH', labAt:205 },
+  shield:    { a:'mc', x:0, y:0, r:11.6, kind:'arcbar', seg:1, a0:202,   a1:338,   gapDeg:0,   thick:1.03, col:'#4fd1ff', lab:'SHIELD', labAt:325 },
+  energy:    { a:'mc', x:0, y:0, r:13.1, kind:'arcbar', seg:1, a0:203,   a1:337,               thick:0.56, col:'#4d52ff', lab:'NRG',    labAt:210 },
+  // Tick strips caption OUTSIDE their tips (r 11.2 + tick 4 = 15.2), clear of
+  // the cooldown ring, which only spans 202..338 and so never reaches them.
+  speed:     { a:'mc', x:0, y:0, r:11.2, kind:'ticks',  seg:9,  a0:122, a1:166, rot:30, thick:0.73, tick:4, col:'#941e1e', lab:'SPEED', labAt:174, labR:16.3 },
+  ammo:      { a:'mc', x:0, y:0, r:11.2, kind:'ticks',  seg:19, a0:-14, a1:28,  rot:0,  thick:0.25, tick:4, col:'#cfa302', fromEnd:1, lab:'AMMO', labAt:7, labR:16.3 },
   // rot 180 swings a0/a1 45..135 round to 225..315 — the core moved from the
   // bottom of the ring to the TOP, and inside the health arc (r 7.5 against
   // health's inner edge at 9.29).
-  core:      { a:'mc', x:0, y:0, r:7.5, kind:'segarc', seg:4, a0:45, a1:135, rot:180, thick:1, col:'#f0ff1f' },
+  core:      { a:'mc', x:0, y:0, r:7.5, kind:'segarc', seg:4, a0:45, a1:135, rot:180, thick:1, col:'#f0ff1f', lab:'CORE', labAt:270 },
   // Lower-left, angled along the ring. rot on a BOX part is a real rotation
   // about its centre, not an angle offset — see _hlPips.
   dash:      { a:'mc', x:-9.7, y:7, w:7, h:1.8, kind:'pips', seg:5, rot:-30, col:'#4fd1ff' },
@@ -52067,6 +52080,19 @@ const _HL_AB = [
   { lab:'ab2', cd:'ab2cd', slot:1 },
   { lab:'ab1', cd:'ab1cd', slot:2 },
 ];
+// (v35.54) Ability names are drawn as CURVED text now, and their angle is taken
+// from the midpoint of their own cooldown arc rather than stored separately.
+// That is the whole point: a curved caption reads as belonging to the bar under
+// it only if it is centred on that bar, and deriving the angle means the two
+// cannot drift. (They had: the `ab*` box positions put ab1 at 214 deg against a
+// bar centred on 223, and ab2 at 323 against 317 — invisible on a straight
+// rotated box, obvious once the text follows the curve.)
+// Radius 16.2 sits 1.1 vmin off the cooldown ring's outer edge (15.1), in from
+// the 17.0-17.3 the boxes used to sit at.
+const _HL_AB_LABEL_R = 16.2;
+// A shade under the 42 deg bar so a long name stays within its own segment
+// (the bars are 42 apart with 5 deg gaps).
+const _HL_AB_LABEL_MAXDEG = 44;
 
 const _HL_D2R = Math.PI / 180;
 
@@ -52243,6 +52269,108 @@ function _hlReticle(ctx, r, col) {
   ctx.restore();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// (v35.53) CURVED GAUGE LABELS — text riding each arc.
+//
+// Placement is ON the arc, not beside it, because there is nowhere beside it to
+// go: the rings are nested 0.57 vmin apart (health outer 10.52 -> shield inner
+// 11.09) and 0.70 (shield -> energy). Nothing legible fits in those gaps.
+//
+// Riding the bar means the text crosses both the lit fill and the empty track,
+// so no single flat colour can hold contrast. Each glyph is therefore stroked
+// in near-black first and filled light second — legible over a bright fill and
+// over bare background alike, at a size small enough to read as etched rather
+// than printed.
+//
+// BAKED TO A SPRITE, one drawImage per label. Per-character save/rotate/fillText
+// every frame was the v34.89 wobble bug: re-rasterising each glyph at a fresh
+// subpixel phase as the HUD shake nudged it made the label appear to shimmer.
+// Cache is keyed on everything that changes the pixels, so it survives until a
+// resize changes vmin.
+const _hlArcTextCache = new Map();
+// `maxDeg` caps the arc the word is allowed to occupy; longer strings shrink to
+// fit rather than overrunning. Ability names come from the loadout and can be
+// any length ("Cluster Missile" is 15 characters), so without this a long one
+// would spill out of its cooldown bar and into the neighbouring one.
+function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
+  if (!str) return;
+  const key = str + '|' + radPx.toFixed(1) + '|' + midDeg.toFixed(1) + '|' + col + '|' +
+              fontPx.toFixed(1) + '|' + (maxDeg || 0);
+  let spr = _hlArcTextCache.get(key);
+  if (!spr) {
+    if (_hlArcTextCache.size > 48) _hlArcTextCache.clear();
+    // Measure first, on a scratch context, so the shrink-to-fit is decided
+    // before the sprite is sized.
+    if (maxDeg) {
+      const m = (_hlArcLabel._m = _hlArcLabel._m || document.createElement('canvas').getContext('2d'));
+      m.font = '700 ' + fontPx.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+      let w = 0;
+      for (let i = 0; i < str.length; i++) w += m.measureText(str[i]).width;
+      w += fontPx * 0.10 * (str.length - 1);
+      const deg = (w / radPx) * 180 / Math.PI;
+      if (deg > maxDeg) fontPx = Math.max(6, fontPx * (maxDeg / deg));
+    }
+    const pad = fontPx * 2;
+    const size = Math.ceil((radPx + pad) * 2);
+    spr = document.createElement('canvas');
+    spr.width = size; spr.height = size;
+    const g = spr.getContext('2d');
+    g.translate(size / 2, size / 2);
+    g.font = '700 ' + fontPx.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.lineJoin = 'round';
+    g.lineWidth = Math.max(1.6, fontPx * 0.34);
+    g.strokeStyle = 'rgba(0,0,0,0.82)';
+    g.fillStyle = col;
+    // Canvas angles put the BOTTOM of the circle at 0..180deg. Text there would
+    // hang upside down, so it is hung under the curve instead (rotate a-90 and
+    // translate +r rather than a+90 / -r).
+    // ⚠ Do NOT also reverse the glyph array. Angle runs leftward along the
+    // bottom of a circle, so negating the per-glyph offset below ALREADY makes
+    // the word read left-to-right; reversing as well double-flips it and you
+    // get DEEPS and OMMA.
+    const flip = (((midDeg % 360) + 360) % 360) < 180;
+    const chars = str.split('');
+    // Per-glyph advance in radians. Measured rather than assumed so wide and
+    // narrow words both stay centred on midDeg.
+    const widths = chars.map(c => g.measureText(c).width);
+    const total = widths.reduce((a, b) => a + b, 0) + fontPx * 0.10 * (chars.length - 1);
+    let walked = -total / 2;
+    for (let i = 0; i < chars.length; i++) {
+      const centreOffset = walked + widths[i] / 2;
+      const a = midDeg * _HL_D2R + (flip ? -centreOffset : centreOffset) / radPx;
+      g.save();
+      g.rotate(a + (flip ? -Math.PI / 2 : Math.PI / 2));
+      g.translate(0, flip ? radPx : -radPx);
+      g.strokeText(chars[i], 0, 0);
+      g.fillText(chars[i], 0, 0);
+      g.restore();
+      walked += widths[i] + fontPx * 0.10;
+    }
+    _hlArcTextCache.set(key, spr);
+  }
+  ctx.drawImage(spr, cx - spr.width / 2, cy - spr.height / 2);
+}
+
+// Draw a part's `lab` along its own arc, at its own radius.
+// `labR` overrides the text radius in vmin. Needed for the tick strips, whose
+// `r` is where the ticks BEGIN — a label there would sit in the tick roots, so
+// speed and ammo put theirs outside the tick tips instead.
+function _hlGaugeLabel(ctx, r, p) {
+  if (!p.lab) return;
+  // (v35.55) Settings > Display > HUD Gauge Labels. Gated HERE rather than at
+  // each call site so it covers exactly the six that go through this helper —
+  // the ability names take the _hlArcLabel path directly and are unaffected.
+  if (typeof input !== 'undefined' && input && input.hudGaugeLabels === false) return;
+  const rad = (p.labR != null) ? p.labR * r.vmin : Math.min(r.w, r.h) / 2;
+  // 0.88 vmin sits deliberately under the ability names (1.0 vmin at 0.95
+  // alpha) so the captions read as secondary, but 0.76 was tested at 1:1 and
+  // came out ~5 px — past discreet into unreadable. Floor at 7 px so it stays
+  // legible on a short viewport.
+  _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab,
+    'rgba(226,244,255,0.72)', Math.max(7, r.vmin * 0.88));
+}
+
 function _hlText(ctx, r, p, str, col) {
   if (!str) return;
   // ⚠ hudFont BEFORE save(). ctx.restore() reverts ctx.font but cannot touch
@@ -52377,9 +52505,11 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   let r = _hlPlace(_HL.health, W, H);
   _hlArcBar(ctx, r, _HL.health, v.healthPct, v.hCol);
+  _hlGaugeLabel(ctx, r, _HL.health);
 
   r = _hlPlace(_HL.shield, W, H);
   _hlArcBar(ctx, r, _HL.shield, v.shieldPct, _HL.shield.col);
+  _hlGaugeLabel(ctx, r, _HL.shield);
 
   // One energy slot serves all three per-loadout meters (vortex energy /
   // railgun charge / power-shot charge). Ships without one draw nothing —
@@ -52387,16 +52517,20 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   if (v.energyPct != null) {
     r = _hlPlace(_HL.energy, W, H);
     _hlArcBar(ctx, r, _HL.energy, v.energyPct, v.energyCol || _HL.energy.col);
+    _hlGaugeLabel(ctx, r, _HL.energy);
   }
 
   r = _hlPlace(_HL.speed, W, H);
   _hlTicks(ctx, r, _HL.speed, v.speedPct, _HL.speed.col);
+  _hlGaugeLabel(ctx, r, _HL.speed);
 
   r = _hlPlace(_HL.ammo, W, H);
   _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col);
+  _hlGaugeLabel(ctx, r, _HL.ammo);
 
   r = _hlPlace(_HL.core, W, H);
   _hlSegArc(ctx, r, _HL.core, v.corePct, v.coreCol || _HL.core.col);
+  _hlGaugeLabel(ctx, r, _HL.core);
 
   r = _hlPlace(_HL.dash, W, H);
   _hlPips(ctx, r, _HL.dash, v.dashN, _HL.dash.col, v.dashMax);
@@ -52414,11 +52548,14 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     const ready = cd <= 0;
     const pct = (active || ready) ? 1 : Math.max(0, Math.min(1, 1 - cd / dur));
     const col = active ? '#ffb020' : _HL[m.cd].col;
-    r = _hlPlace(_HL[m.cd], W, H);
-    _hlArcBar(ctx, r, _HL[m.cd], pct, _hlA(col, ready || active ? 1 : 0.45));
-    r = _hlPlace(_HL[m.lab], W, H);
-    _hlText(ctx, r, _HL[m.lab], String(ab.name || '').toUpperCase(),
-      _hlA(col, ready || active ? 0.95 : 0.45));
+    const cdp = _HL[m.cd];
+    r = _hlPlace(cdp, W, H);
+    _hlArcBar(ctx, r, cdp, pct, _hlA(col, ready || active ? 1 : 0.45));
+    // Curved, centred on THIS bar's own midpoint (see _HL_AB_LABEL_R).
+    _hlArcLabel(ctx, r.cx, r.cy, _HL_AB_LABEL_R * r.vmin,
+      (cdp.a0 + cdp.a1) / 2, String(ab.name || '').toUpperCase(),
+      _hlA(col, ready || active ? 0.95 : 0.45),
+      Math.max(7, r.vmin * 1.0), _HL_AB_LABEL_MAXDEG);
   }
 
   r = _hlPlace(_HL.reticle, W, H);
@@ -56429,6 +56566,7 @@ function _refreshSettingsValues() {
   }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
+  setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   setChk('set-clip-rec', !!input.clipRec);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
@@ -56698,6 +56836,13 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Show FPS Counter</label>
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>HUD Gauge Labels</label>
+        <input type="checkbox" id="set-hud-gauge-labels" ${input.hudGaugeLabels !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">The small curved captions on the rings (SPEED, NRG, SHIELD, HEALTH, CORE, AMMO). Ability names on the cooldown bars are unaffected.</label>
       </div>
       <div class="setting-row">
         <label>Clip Recorder</label>
@@ -57031,6 +57176,18 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Ambient duck on impacts</label>
         <input type="checkbox" id="set-ambient-duck" ${(typeof audio !== 'undefined' && audio.ambientDuckEnabled !== false) ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Audio buffer</label>
+        <select id="set-audio-latency">
+          <option value="">Smallest (default)</option>
+          <option value="0.04">Small</option>
+          <option value="0.08">Medium</option>
+          <option value="0.18">Large</option>
+        </select>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">How much audio the device buffers ahead. Bigger absorbs stalls (less crackling in heavy fights) but delays every sound, and once the buffer is longer than the gap between shots they start collapsing into one another. Phones round the request up, so Large measured 360&nbsp;ms on a real handset. <b>Takes effect on reload.</b></label>
       </div>
     </div>
 
@@ -57808,6 +57965,19 @@ function buildSettingsPage() {
       if (typeof saveSettings === 'function') saveSettings();
     });
   }
+  // (v35.56) Audio buffer size. Deliberately NOT in saveSettings: initAudio
+  // reads this key directly at boot, long before settings load, so it has to
+  // live on its own. Same key __audioLatency() writes.
+  const latEl = overlay.querySelector('#set-audio-latency');
+  if (latEl) {
+    try { latEl.value = localStorage.getItem('lss_audio_latency') || ''; } catch (_) {}
+    latEl.addEventListener('change', () => {
+      try {
+        if (latEl.value) localStorage.setItem('lss_audio_latency', latEl.value);
+        else localStorage.removeItem('lss_audio_latency');
+      } catch (_) {}
+    });
+  }
 
   // v8VR: Ship AI announcer settings wiring.
   // The voice list loads asynchronously on most browsers, so we populate
@@ -58031,6 +58201,11 @@ function buildSettingsPage() {
   const showFpsChk = overlay.querySelector('#set-show-fps');
   if (showFpsChk) showFpsChk.addEventListener('change', () => {
     input.showFps = !!showFpsChk.checked;
+    saveSettings();
+  });
+  const gaugeLabelChk = overlay.querySelector('#set-hud-gauge-labels');
+  if (gaugeLabelChk) gaugeLabelChk.addEventListener('change', () => {
+    input.hudGaugeLabels = !!gaugeLabelChk.checked;
     saveSettings();
   });
   const clipRecChk = overlay.querySelector('#set-clip-rec');
@@ -58727,6 +58902,7 @@ function saveSettings() {
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
+      hudGaugeLabels: input.hudGaugeLabels !== false,
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -60587,6 +60763,9 @@ function loadSettings() {
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
+    // Absent key keeps the `true` default — settings saved before v35.55 have
+    // no entry for this, and those players should still see the captions.
+    if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
     if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
@@ -72209,17 +72388,58 @@ function _playSoundFromLabRecipe(type) {
   const _keep = recipe.layers.map(l =>
     !(typeof l.chance === 'number' && l.chance < 1 && Math.random() > l.chance));
   if (!_keep.some(Boolean)) _keep[0] = true;
-  let leanTri = 0, leanNoise = 0;
+  // (v35.56) LEAN KEEPS THE MOST AUDIBLE LAYER OF EACH KIND, NOT THE FIRST.
+  //
+  // Keeping the first is how PUNCTURE's railgun went silent on phones. Its
+  // layer 0 is a 74/35/82 Hz sub-bass body that ramps down to 20-30 Hz; layer 1,
+  // the one being dropped, carries the 4000/2063/354 Hz crack. A phone speaker
+  // reproduces almost nothing below ~300 Hz, so mobile was keeping the only
+  // layer it physically cannot play. (triChord's own lean then sliced
+  // [74,35,82] to [74,35], removing even the top of it.) The blaster survived
+  // purely by luck of having one layer with 630 Hz in it.
+  //
+  // Audibility is scored as the highest frequency present, because small
+  // speakers roll off at the BOTTOM, not the top; volume breaks ties. Noise
+  // layers carry no freqs, so they score as broadband.
+  const _leanPick = leanRecipe ? Object.create(null) : null;
+  if (leanRecipe) {
+    const _layerVol = l => (l.vol != null ? l.vol : l.volume) || 0;
+    // Pass 1: loudest volume per kind, so the survivor can be levelled against
+    // what it is replacing. Kept separate from the winner search because the
+    // winner object gets replaced as better candidates appear.
+    const maxVol = Object.create(null);
+    for (let i = 0; i < recipe.layers.length; i++) {
+      if (!_keep[i]) continue;
+      const l = recipe.layers[i], v = _layerVol(l);
+      if (maxVol[l.kind] == null || v > maxVol[l.kind]) maxVol[l.kind] = v;
+    }
+    // Pass 2: most audible per kind.
+    for (let i = 0; i < recipe.layers.length; i++) {
+      if (!_keep[i]) continue;
+      const l = recipe.layers[i];
+      let hi = 0;
+      if (Array.isArray(l.freqs)) for (const f of l.freqs) if (f > hi) hi = f;
+      if (l.filterFreq) hi = Math.max(hi, l.filterFreq);
+      if (!hi) hi = 1200;                       // noise: broadband, treat as audible
+      const vol = _layerVol(l);
+      const cur = _leanPick[l.kind];
+      if (!cur || hi > cur.hi || (hi === cur.hi && vol > cur.vol)) {
+        _leanPick[l.kind] = { i: i, hi: hi, vol: vol, maxVol: maxVol[l.kind] };
+      }
+    }
+  }
   for (let _li = 0; _li < recipe.layers.length; _li++) {
     const layer = recipe.layers[_li];
     if (!_keep[_li]) continue;
+    let _leanBoost = 1;
     if (leanRecipe) {
-      if (layer.kind === 'tri') {
-        if (leanTri >= 1) continue;
-        leanTri++;
-      } else if (layer.kind === 'noise') {
-        if (leanNoise >= 1) continue;
-        leanNoise++;
+      const pick = _leanPick[layer.kind];
+      if (pick && pick.i !== _li) continue;
+      // The survivor was mixed to sit alongside the layers just dropped, so on
+      // its own it is under-level. Lift it toward the loudest of its kind,
+      // capped so a quiet detail layer cannot become a shout.
+      if (pick && pick.vol > 0 && pick.maxVol > pick.vol) {
+        _leanBoost = Math.min(1.8, pick.maxVol / pick.vol);
       }
     }
     const baseOffset = layer.startOffset || 0;
@@ -72230,7 +72450,7 @@ function _playSoundFromLabRecipe(type) {
     let cursor = 0;
     for (let r = 0; r < count; r++) {
       const j = _jitterLabLayer(layer);
-      const repeatVolMul = Math.max(0, 1 - r * countDecay) * recipeGain;
+      const repeatVolMul = Math.max(0, 1 - r * countDecay) * recipeGain * _leanBoost;
       if (j.kind === 'tri') _runLabTriLayer(j, baseOffset + cursor, repeatVolMul);
       else if (j.kind === 'noise') _runLabNoiseLayer(j, baseOffset + cursor, repeatVolMul);
       const stepJ = spacing > 0 ? spacing * (1 + (Math.random() - 0.5) * spacingVar) : 0;
