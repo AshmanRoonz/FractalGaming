@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LSS — HUD Map Editor</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#131a22; --panel2:#0e141b; --line:#26333f;
+    --ink:#cfe3f5; --dim:#7e94a8; --accent:#ffb020; --accent2:#4fd1ff;
+    --ok:#2ee056; --bad:#ff5470; --fit:#ff40dc;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.5 "Segoe UI",system-ui,sans-serif;overflow:hidden}
+  #wrap{display:flex;height:100%}
+  #stage{flex:1;position:relative;overflow:hidden;background:
+    repeating-conic-gradient(#141a20 0 25%, #0f151b 0 50%) 0 0/24px 24px}
+  #cv{position:absolute;inset:0}
+  aside{width:346px;flex:none;background:var(--panel);border-left:1px solid var(--line);
+    display:flex;flex-direction:column;overflow:hidden}
+  aside h2{margin:0;padding:9px 12px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);border-bottom:1px solid var(--line);background:var(--panel2)}
+  .sec{padding:9px 12px;border-bottom:1px solid var(--line)}
+  .sec.grow{flex:1;overflow-y:auto;padding:0}
+  label{display:block;color:var(--dim);font-size:11px;letter-spacing:.06em;margin:7px 0 3px}
+  select,input,button{font:inherit;background:var(--panel2);color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:5px 7px;width:100%}
+  button{cursor:pointer;background:#1b2733;transition:background .12s}
+  button:hover{background:#243444}
+  button.pri{background:var(--accent);color:#1a1206;border-color:var(--accent);font-weight:700}
+  button.pri:hover{background:#ffc247}
+  button.fit{background:var(--fit);color:#25061f;border-color:var(--fit);font-weight:700}
+  .row{display:flex;gap:6px}
+  .row>*{flex:1}
+  .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+  .chip{padding:3px 9px;border:1px solid var(--line);border-radius:99px;cursor:pointer;
+    font-size:11px;background:var(--panel2);width:auto;flex:none}
+  .chip.on{background:var(--accent);color:#1a1206;border-color:var(--accent);font-weight:700}
+  ul{list-style:none;margin:0;padding:0}
+  li{padding:6px 12px;border-bottom:1px solid #1b242e;cursor:pointer;display:flex;
+    align-items:center;gap:8px}
+  li:hover{background:#18222c}
+  li.sel{background:#1d2c3a;box-shadow:inset 3px 0 0 var(--accent)}
+  li .t{font-size:9px;letter-spacing:.08em;color:var(--dim);border:1px solid var(--line);
+    border-radius:3px;padding:1px 4px;flex:none;min-width:38px;text-align:center}
+  li .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .placed{color:var(--ok)} .unplaced{color:var(--dim)}
+  .hint{color:var(--dim);font-size:11px;margin-top:5px}
+  #toast{position:absolute;left:50%;top:12px;transform:translateX(-50%);background:#1b2733;
+    border:1px solid var(--accent);color:var(--accent);padding:6px 14px;border-radius:5px;
+    opacity:0;pointer-events:none;transition:opacity .25s;font-size:12px}
+  #toast.on{opacity:1}
+  kbd{background:#1b2733;border:1px solid var(--line);border-bottom-width:2px;border-radius:3px;
+    padding:0 4px;font:11px monospace}
+  .warn{color:var(--bad)}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><canvas id="cv"></canvas><div id="toast"></div></div>
+
+  <aside>
+    <h2>HUD Map Editor</h2>
+
+    <div class="sec">
+      <label>Cockpit frame</label>
+      <select id="frameSel"></select>
+      <label>…or load your own</label>
+      <input type="file" id="frameFile" accept="image/*">
+    </div>
+
+    <div class="sec">
+      <label>Fit box — what stretches to fill the screen</label>
+      <div class="row">
+        <button id="fitAuto" class="fit">Auto-detect</button>
+        <button id="fitDraw">Draw it</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="fitFull">Whole image</button>
+        <button id="fitCopy">Copy to all ships</button>
+      </div>
+      <div class="hint" id="fitInfo">—</div>
+    </div>
+
+    <div class="sec" id="wandSec" style="display:none">
+      <label>Magic wand — tolerance <b id="tolV">28</b></label>
+      <input type="range" id="tol" min="2" max="140" value="28">
+      <div class="chips" id="wandMode"></div>
+      <div class="row" style="margin-top:6px">
+        <button id="wandGrow">Grow 2px</button>
+        <button id="wandSimp">Simplify more</button>
+      </div>
+      <div class="hint" id="wandInfo">Click inside a recess to trace it into a polygon.</div>
+    </div>
+
+    <div class="sec">
+      <label>Draw shape for the selected instrument</label>
+      <div class="chips" id="tools"></div>
+      <div class="row" style="margin-top:7px">
+        <button id="btnAppend">＋ Add to item: OFF</button>
+        <button id="btnUndoShape">Remove last part</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input id="repN" type="number" min="2" max="12" value="5" title="how many copies">
+        <button id="btnRepeatH">Repeat →</button>
+        <button id="btnRepeatV">Repeat ↓</button>
+      </div>
+      <div class="hint"><kbd>drag</kbd> draw · <kbd>Enter</kbd> finish polygon ·
+        <kbd>Esc</kbd> cancel · <kbd>Del</kbd> clear item ·
+        <kbd>Shift</kbd>+draw adds a part · <kbd>[</kbd> <kbd>]</kbd> prev/next ·
+        <kbd>C</kbd> centre on opening</div>
+    </div>
+
+    <div class="sec">
+      <label>Device shape preview</label>
+      <div class="chips" id="aspects"></div>
+      <div class="hint" id="openInfo">—</div>
+    </div>
+
+    <div class="sec grow"><ul id="list"></ul></div>
+
+    <div class="sec">
+      <div class="row">
+        <button id="btnCopy" class="pri">Copy JSON</button>
+        <button id="btnSave">Download</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnReload">Reload from file</button>
+        <button id="btnLoad">Import…</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="btnClear">Clear ship</button>
+      </div>
+      <input type="file" id="jsonFile" accept=".json" style="display:none">
+      <div class="hint" id="stat"></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// LSS HUD MAP EDITOR  —  v2
+//
+// Two jobs:
+//   1. FIT BOX. The frames are authored with transparent space around the art,
+//      and the amount differs per ship (measured: sides ~0-1%, but top 1.6-5.1%
+//      and bottom 4.7-11.7% — Tracker has over double Pyro's). So "stretch the
+//      PNG to the screen" is wrong; what must fill the screen is the box the
+//      artist intends, not the file's bounds. That box is drawn here, per ship.
+//   2. INSTRUMENT SHAPES. Rather than guess what form each gauge should take,
+//      draw it: a polygon, a freehand path, an arc, a circle, a rect or a point.
+//
+// COORDINATE SPACE. Everything is a fraction of the FRAME IMAGE (0..1), origin
+// top-left — including the fit box. The game converts:
+//     screenX = (u - fit.x) / fit.w * viewportW
+//     screenY = (v - fit.y) / fit.h * viewportH
+// so a point inside the fit box lands identically on every device, and the art
+// outside the box bleeds off-screen. Same transform for the frame itself:
+//     background-size:     (100/fit.w)%  (100/fit.h)%
+//     background-position: -(fit.x/fit.w*100)%  -(fit.y/fit.h*100)%   [approx;
+//     the game computes it in px on resize for exactness]
+// ═══════════════════════════════════════════════════════════════════════════
+
+const IMG_W = 1536, IMG_H = 1024;
+const SHIPS = ['Vortex','Pyro','Puncture','Slayer','Tracker','Blaster','Syphon'];
+const framePath = s => `/LSS/frames/${s}/frame_${s.toUpperCase()}.png`;
+
+const ASPECTS = [
+  {k:'21:9', r:21/9,  on:true },
+  {k:'16:9', r:16/9,  on:true },
+  {k:'16:10',r:16/10, on:false},
+  {k:'4:3',  r:4/3,   on:true },
+  {k:'phone',r:19.5/9,on:true },
+];
+
+const ITEMS = [
+  {id:'reticle',     nm:'Reticle / crosshair'},
+  {id:'health',      nm:'Health gauge'},
+  {id:'shield',      nm:'Shield gauge'},
+  {id:'energy',      nm:'Energy / NRG / PWR'},
+  {id:'speed',       nm:'Speed gauge'},
+  {id:'ammo',        nm:'Ammo gauge'},
+  {id:'coreBar',     nm:'Core charge'},
+  {id:'weaponLabel', nm:'Weapon name'},
+  {id:'ability1',    nm:'Ability 1'},
+  {id:'ability2',    nm:'Ability 2'},
+  {id:'ability3',    nm:'Ability 3'},
+  {id:'hull',        nm:'Hull readout'},
+  {id:'aegis',       nm:'Aegis rank + XP'},
+  {id:'dash',        nm:'Dash pips'},
+  {id:'minimap',     nm:'Minimap'},
+  {id:'compass',     nm:'Compass strip'},
+  {id:'killfeed',    nm:'Kill feed'},
+  {id:'objective',   nm:'Objective banner'},
+  {id:'fps',         nm:'FPS counter'},
+];
+
+const TOOLS = ['wand','poly','free','arc','circle','rect','point','move'];
+
+const S = { ship:SHIPS[0], img:null, imgName:'', maps:{}, sel:ITEMS[0].id,
+            tool:'wand', open:null, draft:null, drag:null, fitMode:false,
+            tol:28, wandMode:'luma', lastWand:null, append:false, view:{x:0,y:0,s:1} };
+
+const LS='lss_hud_map_v2';
+const save=()=>{try{localStorage.setItem(LS,JSON.stringify(S.maps));}catch(_){}};
+const loadLS=()=>{try{const j=localStorage.getItem(LS); if(j) S.maps=JSON.parse(j);}catch(_){}};
+function M(){ const m = S.maps[S.ship] ||= {items:{}, fit:null}; m.items ||= {}; return m; }
+
+// ── MULTI-SHAPE ITEMS ──────────────────────────────────────────────────────
+// One instrument can own SEVERAL shapes — dash pips are 5 separate sockets,
+// not one blob, and the same goes for any segmented gauge. Internally every
+// item is an ARRAY. On the way out a single-shape item is written as a bare
+// object so existing files stay valid and readable; only genuinely multi-part
+// items get the {t:'multi', shapes:[...]} wrapper.
+const asArr = v => !v ? [] : (Array.isArray(v) ? v
+                 : (v.t==='multi' && Array.isArray(v.shapes) ? v.shapes : [v]));
+function shapesOf(id){ return asArr(M().items[id]); }
+function setShapes(id, arr){
+  if(!arr || !arr.length) delete M().items[id]; else M().items[id]=arr; }
+function addShape(id, sh){ const a=shapesOf(id); a.push(sh); setShapes(id,a); }
+// Which sub-shape is nearest a point — so move/delete act on the one clicked
+// rather than always the first.
+function nearestShape(id, p){
+  const a=shapesOf(id); let best=-1, bd=1e9;
+  a.forEach((sh,i)=>{ const c=shapeCentre(sh);
+    const d=Math.hypot(c[0]-p[0], c[1]-p[1]); if(d<bd){bd=d; best=i;} });
+  return best;
+}
+function shapeCentre(sh){
+  if(sh.pts && sh.pts.length){ let x=0,y=0; for(const q of sh.pts){x+=q[0];y+=q[1];}
+    return [x/sh.pts.length, y/sh.pts.length]; }
+  return [sh.x, sh.y];
+}
+function translateShape(sh, dx, dy){
+  if(sh.pts) sh.pts=sh.pts.map(q=>[clamp01(q[0]+dx), clamp01(q[1]+dy)]);
+  else { sh.x=clamp01(sh.x+dx); sh.y=clamp01(sh.y+dy); }
+}
+
+const $=id=>document.getElementById(id);
+const clamp01=v=>v<0?0:(v>1?1:v);
+
+// ── view ───────────────────────────────────────────────────────────────────
+const cv=$('cv'), ctx=cv.getContext('2d');
+function fitView(){
+  const st=$('stage'); cv.width=st.clientWidth; cv.height=st.clientHeight;
+  const s=Math.min(cv.width/IMG_W, cv.height/IMG_H)*0.9;
+  S.view={s, x:(cv.width-IMG_W*s)/2, y:(cv.height-IMG_H*s)/2};
+}
+const P2S=p=>({x:S.view.x+p[0]*IMG_W*S.view.s, y:S.view.y+p[1]*IMG_H*S.view.s});
+const S2P=(sx,sy)=>[clamp01((sx-S.view.x)/(IMG_W*S.view.s)),
+                    clamp01((sy-S.view.y)/(IMG_H*S.view.s))];
+
+// ── viewport-opening detection (unchanged, still the best centre finder) ────
+function detectOpening(im){
+  const W=320,H=Math.round(W*im.naturalHeight/im.naturalWidth);
+  const c=document.createElement('canvas'); c.width=W;c.height=H;
+  const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(im,0,0,W,H);
+  let d; try{ d=x.getImageData(0,0,W,H).data; }catch(_){ return null; }
+  const CLEAR=20, seen=new Uint8Array(W*H);
+  let seed=-1;
+  for(let rad=0;rad<Math.min(W,H)/3&&seed<0;rad+=2)
+    for(let a=0;a<360&&seed<0;a+=15){
+      const i=Math.round(W/2+Math.cos(a*Math.PI/180)*rad), j=Math.round(H/2+Math.sin(a*Math.PI/180)*rad);
+      if(i<0||j<0||i>=W||j>=H) continue;
+      if(d[(j*W+i)*4+3]<CLEAR) seed=j*W+i;
+    }
+  if(seed<0) return null;
+  const st=[seed]; seen[seed]=1;
+  let mnX=W,mnY=H,mxX=-1,mxY=-1,n=0;
+  while(st.length){ const p=st.pop(), i=p%W, j=(p-i)/W;
+    if(i<mnX)mnX=i; if(i>mxX)mxX=i; if(j<mnY)mnY=j; if(j>mxY)mxY=j; n++;
+    const push=(q,qi,qj)=>{ if(qi<0||qj<0||qi>=W||qj>=H||seen[q]||d[q*4+3]>=CLEAR) return;
+      seen[q]=1; st.push(q); };
+    push(p-1,i-1,j); push(p+1,i+1,j); push(p-W,i,j-1); push(p+W,i,j+1); }
+  if(n<W*H*0.02) return null;
+  return {cx:(mnX+mxX+1)/2/W, cy:(mnY+mxY+1)/2/H,
+          x:mnX/W, y:mnY/H, w:(mxX-mnX+1)/W, h:(mxY-mnY+1)/H, areaPct:100*n/(W*H)};
+}
+// Opaque CONTENT bounds — the artwork minus its transparent margin. This is
+// the sensible default fit box; the artist can then adjust it.
+function detectContent(im){
+  const W=384,H=Math.round(W*im.naturalHeight/im.naturalWidth);
+  const c=document.createElement('canvas'); c.width=W;c.height=H;
+  const x=c.getContext('2d',{willReadFrequently:true}); x.drawImage(im,0,0,W,H);
+  let d; try{ d=x.getImageData(0,0,W,H).data; }catch(_){ return null; }
+  let mnX=W,mnY=H,mxX=-1,mxY=-1;
+  for(let j=0;j<H;j++)for(let i=0;i<W;i++) if(d[(j*W+i)*4+3]>24){
+    if(i<mnX)mnX=i; if(i>mxX)mxX=i; if(j<mnY)mnY=j; if(j>mxY)mxY=j; }
+  if(mxX<0) return null;
+  return {x:mnX/W, y:mnY/H, w:(mxX-mnX+1)/W, h:(mxY-mnY+1)/H};
+}
+
+// ── MAGIC WAND ─────────────────────────────────────────────────────────────
+// Click inside a recess in the frame art and get a polygon back. Three stages:
+//   1. flood fill from the click over pixels within tolerance of the seed,
+//   2. Moore-neighbour boundary trace around the resulting mask,
+//   3. Ramer-Douglas-Peucker to collapse thousands of boundary pixels into a
+//      handful of vertices you can actually drag.
+//
+// Three match modes, because these frames need different ones in different
+// places: `luma` (brightness only) is the workhorse — the housings are dark
+// insets ringed by bright neon trim, and brightness separates those cleanly
+// regardless of hue. `alpha` finds the transparent viewport opening. `colour`
+// is full RGB distance for when two housings differ by hue but not value.
+const WAND_MODES = ['luma','colour','alpha'];
+let wandCache = null;   // {src, W, H, data}
+
+function wandPixels(img){
+  if (wandCache && wandCache.src === img.src) return wandCache;
+  const W = 768, H = Math.round(W * img.naturalHeight / img.naturalWidth);
+  const c = document.createElement('canvas'); c.width=W; c.height=H;
+  const x = c.getContext('2d',{willReadFrequently:true});
+  x.drawImage(img,0,0,W,H);
+  let data; try{ data = x.getImageData(0,0,W,H).data; }catch(_){ return null; }
+  wandCache = {src:img.src, W, H, data};
+  return wandCache;
+}
+
+function wandSelect(img, u, v, tol, mode){
+  const P = wandPixels(img); if(!P) return null;
+  const {W,H,data} = P;
+  const sx = Math.max(0, Math.min(W-1, Math.round(u*W)));
+  const sy = Math.max(0, Math.min(H-1, Math.round(v*H)));
+  const si = (sy*W+sx)*4;
+  const sr=data[si], sg=data[si+1], sb=data[si+2], sa=data[si+3];
+  const sL = 0.299*sr + 0.587*sg + 0.114*sb;
+
+  const ok = (i)=>{
+    const a=data[i+3];
+    if(mode==='alpha') return Math.abs(a-sa) <= tol*2.2;
+    // A pixel that is basically invisible can't be colour-matched meaningfully.
+    if(a<12 !== sa<12) return false;
+    if(mode==='luma'){
+      const L = 0.299*data[i] + 0.587*data[i+1] + 0.114*data[i+2];
+      return Math.abs(L-sL) <= tol;
+    }
+    const dr=data[i]-sr, dg=data[i+1]-sg, db=data[i+2]-sb;
+    return Math.sqrt(dr*dr+dg*dg+db*db) <= tol*1.75;
+  };
+
+  const mask = new Uint8Array(W*H);
+  const stack = [sy*W+sx];
+  if(!ok(si)) return null;
+  mask[sy*W+sx] = 1;
+  let count = 0;
+  while(stack.length){
+    const p = stack.pop(); count++;
+    const px = p%W, py = (p-px)/W;
+    const tryPush=(q,qx,qy)=>{ if(qx<0||qy<0||qx>=W||qy>=H||mask[q]) return;
+      if(ok(q*4)){ mask[q]=1; stack.push(q); } };
+    tryPush(p-1,px-1,py); tryPush(p+1,px+1,py);
+    tryPush(p-W,px,py-1); tryPush(p+W,px,py+1);
+  }
+  if(count < 12) return null;
+  return {mask, W, H, count};
+}
+
+// Dilate the mask by n pixels — the trim around a recess often eats a pixel or
+// two of the fill, and a slightly grown selection sits better under the art.
+function wandGrow(sel, n){
+  const {W,H} = sel;
+  let m = sel.mask;
+  for(let k=0;k<n;k++){
+    const o = new Uint8Array(m);
+    for(let y=0;y<H;y++) for(let x=0;x<W;x++){
+      if(m[y*W+x]) continue;
+      const i=y*W+x;
+      if((x>0&&m[i-1])||(x<W-1&&m[i+1])||(y>0&&m[i-W])||(y<H-1&&m[i+W])) o[i]=1;
+    }
+    m = o;
+  }
+  return {...sel, mask:m};
+}
+
+// Moore-neighbour boundary following.
+//
+// The subtlety that broke the first version: the neighbour scan must resume
+// from the BACKTRACK direction (where you just came from), rotating clockwise
+// — and after each step the backtrack becomes the reverse of the direction you
+// moved. Getting that index wrong makes the walk step to a neighbour and
+// straight back to the start, which terminates the loop after 3 points no
+// matter how big the region is.
+function traceContour(sel){
+  const {mask,W,H} = sel;
+  let sx=-1, sy=-1;
+  outer: for(let y=0;y<H;y++) for(let x=0;x<W;x++) if(mask[y*W+x]){ sx=x; sy=y; break outer; }
+  if(sx<0) return [];
+  const at=(x,y)=> (x>=0&&y>=0&&x<W&&y<H) ? mask[y*W+x] : 0;
+  // 8 neighbours, clockwise, starting due WEST.
+  const D=[[-1,0],[-1,-1],[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1]];
+  const pts=[[sx,sy]];
+  let cx=sx, cy=sy, back=0;      // scanning found it left-to-right, so we came from the west
+  let firstStep=null;
+  for(let guard=0; guard<W*H*4; guard++){
+    let moved=false;
+    for(let k=1;k<=8;k++){
+      const d=(back+k)%8, nx=cx+D[d][0], ny=cy+D[d][1];
+      if(at(nx,ny)){ back=(d+4)%8; cx=nx; cy=ny; moved=true; break; }
+    }
+    if(!moved) break;                       // isolated pixel
+    if(!firstStep){ firstStep=[cx,cy]; }
+    else if(cx===sx && cy===sy) break;      // closed the loop
+    pts.push([cx,cy]);
+  }
+  return pts;
+}
+
+function perpDist(p,a,b){
+  const dx=b[0]-a[0], dy=b[1]-a[1];
+  const L=Math.hypot(dx,dy); if(L<1e-9) return Math.hypot(p[0]-a[0],p[1]-a[1]);
+  return Math.abs(dy*p[0]-dx*p[1]+b[0]*a[1]-b[1]*a[0])/L;
+}
+function rdp(pts, eps){
+  if(pts.length<3) return pts;
+  let dmax=0, idx=0;
+  for(let i=1;i<pts.length-1;i++){
+    const d=perpDist(pts[i], pts[0], pts[pts.length-1]);
+    if(d>dmax){ dmax=d; idx=i; }
+  }
+  if(dmax>eps) return rdp(pts.slice(0,idx+1),eps).slice(0,-1).concat(rdp(pts.slice(idx),eps));
+  return [pts[0], pts[pts.length-1]];
+}
+// Simplify to a workable vertex count. Starts fine and coarsens until the
+// polygon is draggable — a 3000-point pixel outline is useless to edit.
+function contourToPoly(contour, W, H, target){
+  if(!contour.length) return null;
+  let eps=1.2, out=contour;
+  for(let i=0;i<24;i++){
+    out = rdp(contour, eps);
+    if(out.length <= (target||34)) break;
+    eps *= 1.45;
+  }
+  return out.map(p=>[p[0]/W, p[1]/H]);
+}
+
+// ── drawing ────────────────────────────────────────────────────────────────
+function shapePts(sh){
+  if(sh.t==='poly'||sh.t==='free') return sh.pts;
+  return [[sh.x,sh.y]];
+}
+function drawShape(sh, col, on){
+  ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=on?2.2:1.5;
+  const W=IMG_W*S.view.s, H=IMG_H*S.view.s;
+  if(sh.t==='point'){ const p=P2S([sh.x,sh.y]);
+    ctx.beginPath(); ctx.arc(p.x,p.y,on?7:5,0,7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(p.x,p.y,2,0,7); ctx.fill(); return; }
+  if(sh.t==='rect'){ const a=P2S([sh.x,sh.y]);
+    const w=sh.w*W, h=sh.h*H;
+    ctx.strokeRect(a.x-w/2,a.y-h/2,w,h);
+    ctx.globalAlpha=on?0.14:0.07; ctx.fillRect(a.x-w/2,a.y-h/2,w,h); ctx.globalAlpha=1; return; }
+  if(sh.t==='circle'||sh.t==='arc'){ const a=P2S([sh.x,sh.y]);
+    const r=sh.r*Math.min(W,H);
+    ctx.beginPath();
+    if(sh.t==='circle') ctx.arc(a.x,a.y,r,0,7);
+    else ctx.arc(a.x,a.y,r, sh.a0*Math.PI/180, sh.a1*Math.PI/180);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(a.x,a.y,3,0,7); ctx.fill(); return; }
+  if(sh.t==='poly'||sh.t==='free'){
+    if(!sh.pts||!sh.pts.length) return;
+    ctx.beginPath();
+    sh.pts.forEach((q,i)=>{ const p=P2S(q); i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y); });
+    if(sh.t==='poly') ctx.closePath();
+    ctx.stroke();
+    if(sh.t==='poly'){ ctx.globalAlpha=on?0.13:0.06; ctx.fill(); ctx.globalAlpha=1; }
+    if(on) for(const q of sh.pts){ const p=P2S(q);
+      ctx.beginPath(); ctx.arc(p.x,p.y,2.5,0,7); ctx.fill(); }
+  }
+}
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const vx=S.view.x, vy=S.view.y, W=IMG_W*S.view.s, H=IMG_H*S.view.s;
+  if(S.img) ctx.drawImage(S.img,vx,vy,W,H);
+  else { ctx.fillStyle='#0e141b'; ctx.fillRect(vx,vy,W,H); }
+
+  // image bounds (faint) — the file, not the fit box
+  ctx.strokeStyle='rgba(126,148,168,0.35)'; ctx.lineWidth=1;
+  ctx.strokeRect(vx,vy,W,H);
+
+  // FIT BOX — the region that fills the screen
+  const fit=M().fit;
+  if(fit){
+    ctx.save();
+    // dim everything outside it: that art bleeds off-screen in game
+    ctx.fillStyle='rgba(4,7,10,0.55)';
+    ctx.beginPath(); ctx.rect(vx,vy,W,H);
+    ctx.rect(vx+fit.x*W, vy+fit.y*H, fit.w*W, fit.h*H);
+    ctx.fill('evenodd');
+    ctx.strokeStyle='rgba(255,64,220,0.95)'; ctx.lineWidth=2; ctx.setLineDash([7,4]);
+    ctx.strokeRect(vx+fit.x*W, vy+fit.y*H, fit.w*W, fit.h*H);
+    ctx.setLineDash([]);
+    ctx.fillStyle='rgba(255,64,220,0.95)'; ctx.font='11px monospace'; ctx.textAlign='left';
+    ctx.fillText('FIT BOX → fills the screen', vx+fit.x*W+5, vy+fit.y*H-6);
+    ctx.restore();
+  }
+
+  // detected opening centre
+  if(S.open){ const o=S.open, cxp=vx+o.cx*W, cyp=vy+o.cy*H;
+    ctx.save(); ctx.strokeStyle='rgba(79,209,255,0.85)'; ctx.lineWidth=1.4;
+    ctx.beginPath(); ctx.moveTo(cxp-13,cyp); ctx.lineTo(cxp+13,cyp);
+                     ctx.moveTo(cxp,cyp-13); ctx.lineTo(cxp,cyp+13); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cxp,cyp,8,0,7); ctx.stroke(); ctx.restore(); }
+
+  // placed instruments — each may own several shapes
+  for(const it of ITEMS){ const arr=shapesOf(it.id); if(!arr.length) continue;
+    const on=it.id===S.sel;
+    arr.forEach((sh,i)=>{
+      drawShape(sh, on?'#ffb020':'rgba(46,224,86,0.8)', on);
+      // number the parts when an item has more than one, so it is obvious
+      // which socket you are about to move or delete
+      if(on && arr.length>1){ const c=P2S(shapeCentre(sh));
+        ctx.fillStyle='rgba(10,14,20,0.85)';
+        ctx.beginPath(); ctx.arc(c.x,c.y,8,0,7); ctx.fill();
+        ctx.fillStyle='#ffb020'; ctx.font='bold 10px monospace'; ctx.textAlign='center';
+        ctx.fillText(String(i+1), c.x, c.y+3.5); }
+    });
+    if(on){ const p=P2S(shapeCentre(arr[0]));
+      ctx.fillStyle='#ffb020'; ctx.font='11px sans-serif'; ctx.textAlign='center';
+      ctx.fillText(it.nm + (arr.length>1?`  ×${arr.length}`:''), p.x, p.y-15); } }
+
+  // in-progress draft
+  if(S.draft){ drawShape(S.draft, 'rgba(255,176,32,0.8)', true); }
+}
+
+// ── interaction ────────────────────────────────────────────────────────────
+let polyPts=null;
+cv.addEventListener('pointerdown', e=>{
+  const r=cv.getBoundingClientRect(), p=S2P(e.clientX-r.left, e.clientY-r.top);
+  if(S.fitMode){ S.drag={kind:'fit', a:p}; cv.setPointerCapture(e.pointerId); return; }
+  // Shift is a momentary append, so you can add a part without toggling the mode.
+  S._shift = e.shiftKey;
+  const t=S.tool;
+  if(t==='wand'){ runWand(p); return; }
+  if(t==='poly'){ polyPts=polyPts||[]; polyPts.push(p);
+    S.draft={t:'poly', pts:polyPts.slice()}; draw(); return; }
+  if(t==='free'){ S.drag={kind:'free', pts:[p]}; S.draft={t:'free',pts:[p]};
+    cv.setPointerCapture(e.pointerId); return; }
+  if(t==='move'){ S.drag={kind:'move', a:p}; cv.setPointerCapture(e.pointerId); return; }
+  S.drag={kind:t, a:p}; cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e=>{
+  if(!S.drag) return;
+  const r=cv.getBoundingClientRect(), p=S2P(e.clientX-r.left, e.clientY-r.top);
+  const d=S.drag;
+  if(d.kind==='fit'){ S.draft={t:'rect', x:(d.a[0]+p[0])/2, y:(d.a[1]+p[1])/2,
+      w:Math.abs(p[0]-d.a[0]), h:Math.abs(p[1]-d.a[1])}; }
+  else if(d.kind==='free'){ const L=d.pts[d.pts.length-1];
+    if(Math.hypot(p[0]-L[0],p[1]-L[1])>0.004){ d.pts.push(p); S.draft={t:'free',pts:d.pts.slice()}; } }
+  else if(d.kind==='move'){ const arr=shapesOf(S.sel);
+      if(arr.length){
+        if(d.idx===undefined) d.idx=nearestShape(S.sel, d.a);   // grab the nearest part
+        const dx=p[0]-d.a[0], dy=p[1]-d.a[1]; d.a=p;
+        translateShape(arr[d.idx], dx, dy); setShapes(S.sel, arr); } }
+  else if(d.kind==='rect'){ S.draft={t:'rect', x:(d.a[0]+p[0])/2, y:(d.a[1]+p[1])/2,
+      w:Math.abs(p[0]-d.a[0]), h:Math.abs(p[1]-d.a[1])}; }
+  else if(d.kind==='circle'||d.kind==='arc'){
+    const dx=(p[0]-d.a[0])*IMG_W, dy=(p[1]-d.a[1])*IMG_H;
+    const rr=Math.hypot(dx,dy)/Math.min(IMG_W,IMG_H);
+    S.draft = d.kind==='circle' ? {t:'circle',x:d.a[0],y:d.a[1],r:rr}
+      : {t:'arc',x:d.a[0],y:d.a[1],r:rr,a0:200,a1:340}; }
+  else if(d.kind==='point'){ S.draft={t:'point',x:p[0],y:p[1]}; }
+  draw();
+});
+cv.addEventListener('pointerup', ()=>{
+  const d=S.drag; S.drag=null;
+  if(!d) return;
+  if(d.kind==='fit'){ if(S.draft && S.draft.w>0.02 && S.draft.h>0.02){
+      M().fit={x:S.draft.x-S.draft.w/2, y:S.draft.y-S.draft.h/2, w:S.draft.w, h:S.draft.h};
+      S.fitMode=false; toast('Fit box set'); }
+    S.draft=null; save(); refreshFit(); refreshTools(); draw(); return; }
+  if(d.kind==='move'){ save(); draw(); refreshList(); return; }
+  if(S.draft && S.draft.t!=='poly'){ commitShape(S.draft); S.draft=null; }
+});
+
+// Every path that produces a shape goes through here, so append-mode works
+// uniformly for the wand, the draw tools and the snap helpers.
+function commitShape(sh){
+  if(S.append || S._shift) addShape(S.sel, sh); else setShapes(S.sel, [sh]);
+  S._shift=false; save(); draw(); refreshList();
+}
+addEventListener('keydown', e=>{
+  if(document.activeElement && document.activeElement.tagName==='INPUT') return;
+  const i=ITEMS.findIndex(x=>x.id===S.sel);
+  if(e.key===']'){ S.sel=ITEMS[(i+1)%ITEMS.length].id; polyPts=null; S.draft=null; refreshList(); draw(); }
+  if(e.key==='['){ S.sel=ITEMS[(i-1+ITEMS.length)%ITEMS.length].id; polyPts=null; S.draft=null; refreshList(); draw(); }
+  if(e.key==='Enter' && polyPts && polyPts.length>2){
+    commitShape({t:'poly', pts:polyPts.slice()}); polyPts=null; S.draft=null;
+    toast('Polygon closed'); }
+  if(e.key==='Escape'){ polyPts=null; S.draft=null; S.fitMode=false; refreshTools(); draw(); }
+  if(e.key==='Delete'||e.key==='Backspace'){ delete M().items[S.sel]; save(); draw(); refreshList(); }
+  if((e.key==='c'||e.key==='C') && S.open){
+    commitShape({t:'point', x:S.open.cx, y:S.open.cy});
+    toast('Centred on opening'); }
+});
+cv.addEventListener('dblclick', ()=>{ if(polyPts&&polyPts.length>2){
+  commitShape({t:'poly',pts:polyPts.slice()}); polyPts=null; S.draft=null; } });
+
+// ── panels ─────────────────────────────────────────────────────────────────
+function chips(host,arr,isOn,fn){ host.innerHTML='';
+  arr.forEach(a=>{ const b=document.createElement('button');
+    b.className='chip'+(isOn(a)?' on':''); b.textContent=a.k||a;
+    b.onclick=()=>fn(a); host.appendChild(b); }); }
+function refreshTools(){ chips($('tools'),TOOLS,t=>t===S.tool&&!S.fitMode,
+  t=>{ S.tool=t; S.fitMode=false; polyPts=null; S.draft=null; refreshTools(); draw(); });
+  $('wandSec').style.display = (S.tool==='wand' && !S.fitMode) ? '' : 'none';
+  chips($('wandMode'), WAND_MODES, m=>m===S.wandMode,
+    m=>{ S.wandMode=m; refreshTools(); if(S.lastWand) runWand(S.lastWand.p); }); }
+
+// Run the wand at an image-space point and commit the traced polygon.
+function runWand(p){
+  if(!S.img) return;
+  S.lastWand={p};
+  const t0=performance.now();
+  let sel=wandSelect(S.img, p[0], p[1], S.tol, S.wandMode);
+  if(!sel){ $('wandInfo').innerHTML='<span class="warn">Nothing matched there.</span> '
+    +'Raise the tolerance, or try a different mode.'; toast('No region found'); return; }
+  sel=wandGrow(sel,1);
+  const poly=contourToPoly(traceContour(sel), sel.W, sel.H, 34);
+  if(!poly || poly.length<3){ toast('Could not trace an outline'); return; }
+  commitShape({t:'poly', pts:poly});
+  const pct=(100*sel.count/(sel.W*sel.H)).toFixed(1);
+  $('wandInfo').innerHTML=`Traced <b>${poly.length}</b> points · region ${pct}% of frame `
+    +`· ${Math.round(performance.now()-t0)}ms`;
+}
+function refreshAspects(){ chips($('aspects'),ASPECTS,a=>a.on,
+  a=>{a.on=!a.on; refreshAspects(); refreshFit();}); }
+function refreshFit(){
+  const f=M().fit, el=$('fitInfo');
+  if(!f){ el.innerHTML='<span class="warn">No fit box yet.</span> Auto-detect uses the '
+    +'artwork bounds (ignores the transparent margin).'; return; }
+  const fa=(f.w*IMG_W)/(f.h*IMG_H);
+  const rows=ASPECTS.filter(a=>a.on).map(a=>{
+    const k=a.r/fa; return `${a.k} ×${k.toFixed(2)}`;}).join(' · ');
+  el.innerHTML=`Box ${f.w.toFixed(3)}×${f.h.toFixed(3)} at ${f.x.toFixed(3)},${f.y.toFixed(3)}`
+    +` — aspect ${fa.toFixed(3)}<br>Stretch per device: ${rows}`;
+}
+function refreshList(){
+  const ul=$('list'); ul.innerHTML='';
+  for(const it of ITEMS){ const arr=shapesOf(it.id);
+    const li=document.createElement('li'); if(it.id===S.sel) li.className='sel';
+    const tag = !arr.length ? '—' : (arr.length>1 ? arr[0].t+' ×'+arr.length : arr[0].t);
+    li.innerHTML=`<span class="t">${tag}</span><span class="nm">${it.nm}</span>`
+      +(arr.length?'<span class="placed">●</span>':'<span class="unplaced">○</span>');
+    li.onclick=()=>{ S.sel=it.id; polyPts=null; S.draft=null; refreshList(); draw(); };
+    ul.appendChild(li); }
+  const n=ITEMS.filter(i=>shapesOf(i.id).length).length;
+  $('stat').textContent=`${n}/${ITEMS.length} drawn · ${S.ship}`
+    +(M().fit?' · fit box set':' · NO FIT BOX');
+}
+
+// ── fit box actions ────────────────────────────────────────────────────────
+$('fitAuto').onclick=()=>{ if(!S.img) return;
+  const c=detectContent(S.img); if(!c) return toast('Could not detect content');
+  M().fit=c; save(); refreshFit(); refreshList(); draw(); toast('Fit box = artwork bounds'); };
+$('fitDraw').onclick=()=>{ S.fitMode=true; refreshTools(); toast('Drag a box on the frame'); };
+$('fitFull').onclick=()=>{ M().fit={x:0,y:0,w:1,h:1}; save(); refreshFit(); refreshList(); draw(); };
+$('fitCopy').onclick=()=>{ const f=M().fit; if(!f) return toast('No fit box to copy');
+  for(const s of SHIPS){ S.maps[s] ||= {items:{},fit:null}; S.maps[s].fit={...f}; }
+  save(); toast('Fit box copied to all 7 ships'); };
+
+// ── saved map files ────────────────────────────────────────────────────────
+// Each ship has a seeded map at LSS/frames/mock/<ship>.json. Vortex is the
+// hand-drawn original; the rest were generated from it by re-projecting every
+// shape through fit-box-relative space, so they start in the same ON-SCREEN
+// place and only need nudging to match each frame's own detail.
+const mapPath = s => `/LSS/frames/mock/${s.toLowerCase()}.json`;
+async function loadShipFile(ship, force){
+  if(!force && S.maps[ship] && Object.keys(S.maps[ship].items||{}).length) return false;
+  try{
+    const r=await fetch(mapPath(ship), {cache:'no-store'});
+    if(!r.ok) return false;
+    const j=await r.json();
+    const sd=(j.ships&&(j.ships[ship]||j.ships[Object.keys(j.ships)[0]]))||null;
+    if(!sd) return false;
+    const norm={}; for(const k in (sd.items||{})) norm[k]=asArr(sd.items[k]);
+    S.maps[ship]={fit:sd.fit||null, items:norm};
+    save(); return true;
+  }catch(_){ return false; }
+}
+
+// ── frame loading ──────────────────────────────────────────────────────────
+function loadFrame(src,name){ const im=new Image();
+  im.onload=async()=>{ S.img=im; S.imgName=name; S.open=detectOpening(im);
+    const o=S.open;
+    $('openInfo').innerHTML = o
+      ? `Opening centre <b>${o.cx.toFixed(3)}, ${o.cy.toFixed(3)}</b> — `
+        +`${((o.cy-0.5)*100).toFixed(1)}% off image centre. Press <kbd>C</kbd> to snap.`
+      : 'No viewport opening detected.';
+    const got = await loadShipFile(S.ship);
+    if(got) toast('Loaded '+S.ship.toLowerCase()+'.json');
+    if(!M().fit){ const c=detectContent(im); if(c){ M().fit=c; save(); } }
+    refreshFit(); refreshList(); draw(); };
+  im.onerror=()=>{ S.img=null; toast('Could not load '+src); draw(); };
+  im.src=src; }
+$('frameSel').onchange=e=>{ S.ship=e.target.value; polyPts=null; S.draft=null;
+  loadFrame(framePath(S.ship), S.ship); };
+$('btnReload').onclick=async()=>{
+  const ok=await loadShipFile(S.ship, true);
+  refreshFit(); refreshList(); draw();
+  toast(ok?('Reloaded '+S.ship.toLowerCase()+'.json — local edits discarded')
+          :('No saved '+S.ship.toLowerCase()+'.json found')); };
+$('frameFile').onchange=e=>{ const f=e.target.files[0]; if(f) loadFrame(URL.createObjectURL(f), f.name); };
+
+// ── export ─────────────────────────────────────────────────────────────────
+// onlyShip: emit a single-ship document matching the format of the files in
+// LSS/frames/mock/, so a download round-trips straight back into the folder.
+function exportJSON(onlyShip){
+  const out={
+    _note:'LSS HUD map v2. All coordinates are FRACTIONS OF THE FRAME IMAGE '
+      +'(0..1, origin top-left), INCLUDING the fit box.',
+    _fitBox:'fit is the region of the image that must fill the viewport. The '
+      +'game maps: screenX=(u-fit.x)/fit.w*vw, screenY=(v-fit.y)/fit.h*vh. Art '
+      +'outside the box bleeds off-screen. Frames are authored with uneven '
+      +'transparent margins (top 1.6-5.1%, bottom 4.7-11.7% across the set), '
+      +'which is why this is per-ship and not a constant.',
+    _shapes:'t=point{x,y} | rect{x,y,w,h} centred | circle{x,y,r} | '
+      +'arc{x,y,r,a0,a1} degrees 0=+x clockwise | poly{pts[]} closed | '
+      +'free{pts[]} open path. r is a fraction of min(vw,vh) so gauges stay '
+      +'round; positions follow the stretched art.',
+    frameSize:{w:IMG_W,h:IMG_H}, fitMode:'stretch-to-fitbox',
+    ships:{} };
+  for(const s of (onlyShip?[onlyShip]:SHIPS)){ const m=S.maps[s]; if(!m) continue;
+    const any=m.fit||Object.keys(m.items||{}).length; if(!any) continue;
+    out.ships[s]={fit:m.fit||null, opening:(s===S.ship&&S.open)?
+      {cx:+S.open.cx.toFixed(4),cy:+S.open.cy.toFixed(4)}:undefined, items:{}};
+    for(const it of ITEMS){ const a=asArr(m.items[it.id]); if(!a.length) continue;
+      out.ships[s].items[it.id] = a.length===1 ? a[0] : {t:'multi', shapes:a}; }
+  }
+  return JSON.stringify(out,null,2);
+}
+window.exportJSON=exportJSON;
+$('btnCopy').onclick=async()=>{ try{ await navigator.clipboard.writeText(exportJSON());
+  toast('JSON copied — paste it to Claude'); }catch(_){ toast('Clipboard blocked; Download instead'); } };
+// Saves ONLY the current ship, named <ship>.json, so it drops straight back
+// into LSS/frames/mock/ over the seeded file.
+$('btnSave').onclick=()=>{ const b=new Blob([exportJSON(S.ship)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(b);
+  a.download=S.ship.toLowerCase()+'.json'; a.click();
+  toast('Saved '+S.ship.toLowerCase()+'.json → put it in LSS/frames/mock/'); };
+$('btnLoad').onclick=()=>$('jsonFile').click();
+$('jsonFile').onchange=e=>{ const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader(); rd.onload=()=>{ try{ const j=JSON.parse(rd.result);
+    if(j.ships) for(const s in j.ships){ const src=j.ships[s].items||{}, nm={};
+      for(const k in src) nm[k]=asArr(src[k]);
+      S.maps[s]={fit:j.ships[s].fit||null, items:nm}; }
+    save(); refreshFit(); refreshList(); draw(); toast('Imported'); }
+    catch(err){ toast('Bad JSON: '+err.message); } }; rd.readAsText(f); };
+$('btnClear').onclick=()=>{ if(!confirm('Clear all shapes for '+S.ship+'?')) return;
+  S.maps[S.ship]={items:{},fit:M().fit}; save(); draw(); refreshList(); };
+
+// Tolerance slider re-runs the last wand click live, so you dial it in by
+// watching the outline change rather than guessing a number.
+$('tol').oninput=e=>{ S.tol=+e.target.value; $('tolV').textContent=S.tol;
+  if(S.lastWand) runWand(S.lastWand.p); };
+$('wandGrow').onclick=()=>{ if(!S.lastWand) return toast('Wand-click a region first');
+  const sel=wandGrow(wandSelect(S.img,S.lastWand.p[0],S.lastWand.p[1],S.tol,S.wandMode)||{},3);
+  if(!sel.mask) return toast('No region');
+  const poly=contourToPoly(traceContour(sel), sel.W, sel.H, 34);
+  if(poly){ commitShape({t:'poly',pts:poly}); toast('Grown'); } };
+$('wandSimp').onclick=()=>{ const sh=M().items[S.sel];
+  if(!sh||sh.t!=='poly') return toast('Select a traced polygon first');
+  const W=1000,H=1000;
+  const px=sh.pts.map(p=>[p[0]*W,p[1]*H]);
+  let eps=2, out=px;
+  do{ out=rdp(px,eps); eps*=1.6; } while(out.length>Math.max(6,Math.floor(sh.pts.length*0.6)) && eps<400);
+  sh.pts=out.map(p=>[p[0]/W,p[1]/H]); save(); draw(); refreshList();
+  toast('Simplified to '+sh.pts.length+' points'); };
+
+// ── multi-part controls ────────────────────────────────────────────────────
+function refreshAppend(){
+  $('btnAppend').textContent = '＋ Add to item: ' + (S.append?'ON':'OFF');
+  $('btnAppend').className = S.append ? 'pri' : '';
+}
+$('btnAppend').onclick=()=>{ S.append=!S.append; refreshAppend();
+  toast(S.append?'New shapes ADD to the item':'New shapes REPLACE the item'); };
+$('btnUndoShape').onclick=()=>{ const a=shapesOf(S.sel);
+  if(!a.length) return toast('Nothing to remove');
+  a.pop(); setShapes(S.sel,a); save(); draw(); refreshList();
+  toast(a.length?`${a.length} part(s) left`:'Item cleared'); };
+
+// Repeat the LAST part N times, evenly spaced, starting from where it is.
+// This is the dash-pip case: trace one socket, then stamp the row.
+function repeatShape(axis){
+  const a=shapesOf(S.sel);
+  if(!a.length) return toast('Draw one part first');
+  const n=Math.max(2, Math.min(12, +$('repN').value||5));
+  const src=a[a.length-1];
+  // Step = the part's own size along that axis plus a 60% gap, so copies sit
+  // adjacent rather than overlapping, whatever shape type it is.
+  let w=0.03,h=0.03;
+  if(src.pts && src.pts.length){
+    const xs=src.pts.map(p=>p[0]), ys=src.pts.map(p=>p[1]);
+    w=Math.max(...xs)-Math.min(...xs); h=Math.max(...ys)-Math.min(...ys);
+  } else if(src.w!=null){ w=src.w; h=src.h; }
+  else if(src.r!=null){ w=h=src.r*2*(Math.min(IMG_W,IMG_H)/IMG_W); }
+  const step = (axis==='x' ? w : h) * 1.6;
+  const out=a.slice(0,a.length-1);
+  for(let i=0;i<n;i++){
+    const c=JSON.parse(JSON.stringify(src));
+    translateShape(c, axis==='x'?step*i:0, axis==='y'?step*i:0);
+    out.push(c);
+  }
+  setShapes(S.sel,out); save(); draw(); refreshList();
+  toast(`Repeated to ${n} parts — drag any one to fine-tune`);
+}
+$('btnRepeatH').onclick=()=>repeatShape('x');
+$('btnRepeatV').onclick=()=>repeatShape('y');
+
+let tT; function toast(m){ const t=$('toast'); t.textContent=m; t.classList.add('on');
+  clearTimeout(tT); tT=setTimeout(()=>t.classList.remove('on'),2000); }
+
+loadLS();
+$('frameSel').innerHTML=SHIPS.map(s=>`<option>${s}</option>`).join('');
+refreshTools(); refreshAspects(); refreshAppend(); refreshList();
+addEventListener('resize',()=>{fitView();draw();});
+fitView(); loadFrame(framePath(S.ship), S.ship);
+</script>
+</body>
+</html>

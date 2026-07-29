@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LSS — HUD Design Studio</title>
+<style>
+  :root{--bg:#0a0e13;--panel:#121922;--panel2:#0d131a;--line:#25323e;
+        --ink:#cfe3f5;--dim:#7d93a7;--acc:#ffb020;--acc2:#4fd1ff;--ok:#2ee056;--bad:#ff5470}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.5 "Segoe UI",system-ui,sans-serif;overflow:hidden}
+  #wrap{display:flex;height:100%}
+  #stage{flex:1;position:relative;overflow:hidden;background:#05080b;
+    display:flex;align-items:center;justify-content:center}
+  #cv{box-shadow:0 0 0 1px #223040, 0 12px 40px #000;cursor:crosshair}
+  aside{width:330px;flex:none;background:var(--panel);border-left:1px solid var(--line);
+    display:flex;flex-direction:column;overflow:hidden}
+  h2{margin:0;padding:9px 12px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--acc);border-bottom:1px solid var(--line);background:var(--panel2)}
+  .sec{padding:9px 12px;border-bottom:1px solid var(--line)}
+  .sec.grow{flex:1;overflow-y:auto;padding:0}
+  label{display:block;color:var(--dim);font-size:11px;letter-spacing:.05em;margin:7px 0 3px}
+  select,input,button{font:inherit;background:var(--panel2);color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:4px 7px;width:100%}
+  button{cursor:pointer;background:#1a2531}
+  button:hover{background:#233242}
+  button.pri{background:var(--acc);color:#1a1206;border-color:var(--acc);font-weight:700}
+  .row{display:flex;gap:6px}.row>*{flex:1}
+  .chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+  .chip{padding:3px 8px;border:1px solid var(--line);border-radius:99px;cursor:pointer;
+    font-size:11px;background:var(--panel2);width:auto;flex:none}
+  .chip.on{background:var(--acc);color:#1a1206;border-color:var(--acc);font-weight:700}
+  ul{list-style:none;margin:0;padding:0}
+  li{padding:5px 12px;border-bottom:1px solid #18212b;cursor:pointer;display:flex;
+    gap:7px;align-items:center}
+  li:hover{background:#17212b} li.sel{background:#1c2b39;box-shadow:inset 3px 0 0 var(--acc)}
+  li .k{font-size:9px;color:var(--dim);border:1px solid var(--line);border-radius:3px;
+    padding:0 4px;min-width:46px;text-align:center}
+  li .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  li .off{color:var(--dim)}
+  .grid{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:4px 6px;align-items:center;margin-top:5px}
+  .grid span{color:var(--dim);font-size:11px}
+  .anchor{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;margin-top:5px}
+  .anchor button{padding:6px 0;font-size:10px}
+  .anchor button.on{background:var(--acc2);color:#03212c;border-color:var(--acc2);font-weight:700}
+  .hint{color:var(--dim);font-size:11px;margin-top:5px}
+  kbd{background:#1a2531;border:1px solid var(--line);border-bottom-width:2px;
+    border-radius:3px;padding:0 4px;font:11px monospace}
+  #toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);background:#1a2531;
+    border:1px solid var(--acc);color:var(--acc);padding:6px 13px;border-radius:5px;
+    opacity:0;transition:opacity .25s;pointer-events:none;font-size:12px}
+  #toast.on{opacity:1}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage"><canvas id="cv"></canvas><div id="toast"></div></div>
+  <aside>
+    <h2>HUD Design Studio</h2>
+
+    <div class="sec">
+      <label>Preset</label>
+      <select id="preset"></select>
+      <div class="row" style="margin-top:6px">
+        <button id="applyPreset" class="pri">Load preset</button>
+        <button id="resetOne">Reset part</button>
+      </div>
+    </div>
+
+    <div class="sec">
+      <label>Screen shape</label>
+      <div class="chips" id="aspects"></div>
+      <label>Backdrop <span id="bdName" style="color:var(--ink)"></span></label>
+      <div class="chips" id="backdrops"></div>
+    </div>
+
+    <div class="sec">
+      <label>Live values — drag to see the HUD respond</label>
+      <div class="grid" id="vals"></div>
+    </div>
+
+    <div class="sec grow"><ul id="list"></ul></div>
+
+    <div class="sec" id="props"></div>
+
+    <div class="sec">
+      <div class="row">
+        <button id="copy" class="pri">Copy JSON</button>
+        <button id="dl">Download</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button id="imp">Import…</button>
+        <button id="shot">Save PNG</button>
+      </div>
+      <input type="file" id="impFile" accept=".json" style="display:none">
+      <div class="hint" id="stat"></div>
+    </div>
+  </aside>
+</div>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// LSS HUD DESIGN STUDIO
+//
+// Designs the HUD as a STANDALONE thing — no cockpit frame — so it reads on
+// its own and the frame can later be built around it rather than the HUD being
+// squeezed into whatever recesses the art happens to have.
+//
+// LAYOUT MODEL: anchor + offset, measured in VMIN (1 unit = 1% of the smaller
+// viewport dimension). This is the part that matters. Fractions-of-the-screen
+// break at different aspects — an element 8% from the left edge sits somewhere
+// completely different on 21:9 than on 4:3. Anchoring to the nearest corner or
+// edge and offsetting in vmin keeps every element the same SIZE and the same
+// DISTANCE from its edge on every device, which is what a frameless HUD needs.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ANCHORS = ['tl','tc','tr','ml','mc','mr','bl','bc','br'];
+const KINDS   = ['arcbar','segbar','bar','arc','segarc','ticks','dots','ring','ringdeco',
+                 'bracket','crosslines','wedge','polyframe','pips','text','reticle'];
+
+// The circumpunct family is defined by RADIUS + ANGLES, not a bounding box.
+// Parts using these kinds read p.r (radius, vmin) and p.thick instead of w/h,
+// which is what lets several gauges share one centre at different radii —
+// the concentric-ring look. place() synthesises w/h from r so selection,
+// dragging and the property panel keep working unchanged.
+const CIRCULAR = new Set(['arcbar','arc','segarc','ticks','dots','ring','ringdeco','bracket',
+                          'crosslines','wedge','polyframe']);
+
+// Every instrument the game actually draws.
+const PARTS = [
+  {id:'health',  nm:'Health',        kind:'segbar', val:'health'},
+  {id:'shield',  nm:'Shield',        kind:'segbar', val:'shield'},
+  {id:'energy',  nm:'Energy',        kind:'segbar', val:'energy'},
+  {id:'speed',   nm:'Speed',         kind:'segbar', val:'speed'},
+  {id:'ammo',    nm:'Ammo',          kind:'segbar', val:'ammo'},
+  {id:'core',    nm:'Core charge',   kind:'bar',    val:'core'},
+  {id:'dash',    nm:'Dash pips',     kind:'pips',   val:'dash'},
+  {id:'reticle', nm:'Reticle',       kind:'reticle'},
+  {id:'weapon',  nm:'Weapon name',   kind:'text'},
+  {id:'ab1',     nm:'Ability 1',     kind:'text'},
+  {id:'ab2',     nm:'Ability 2',     kind:'text'},
+  {id:'ab3',     nm:'Ability 3',     kind:'text'},
+  // Cooldown gauges. The labels only say WHAT an ability is; these say whether
+  // it is ready, which is the thing you actually check mid-fight.
+  {id:'ab1cd',   nm:'Ability 1 cooldown', kind:'arcbar', val:'cd1'},
+  {id:'ab2cd',   nm:'Ability 2 cooldown', kind:'arcbar', val:'cd2'},
+  {id:'ab3cd',   nm:'Ability 3 cooldown', kind:'arcbar', val:'cd3'},
+  {id:'hull',    nm:'Hull readout',  kind:'text'},
+  {id:'aegis',   nm:'Aegis rank',    kind:'text'},
+  {id:'minimap', nm:'Minimap',       kind:'ring'},
+  {id:'compass', nm:'Compass',       kind:'bar'},
+  // These three are drawn by the game but had no slot here. They matter for
+  // frame design as much as the gauges: the frame has to leave room for them.
+  {id:'objective',nm:'Objective banner',kind:'text'},
+  {id:'killfeed', nm:'Kill feed',       kind:'text'},
+  {id:'fps',      nm:'FPS counter',     kind:'text'},
+  // Decoration carries no data. A circumpunct is mostly these — the rings and
+  // hatching are what make the live gauges read as instrument rather than
+  // as floating bars.
+  {id:'deco1',   nm:'Deco ring 1',   kind:'ringdeco', deco:1},
+  {id:'deco2',   nm:'Deco ring 2',   kind:'ringdeco', deco:1},
+  {id:'deco3',   nm:'Deco ring 3',   kind:'ringdeco', deco:1},
+  {id:'deco4',   nm:'Deco bracket',  kind:'bracket',  deco:1},
+  {id:'deco5',   nm:'Deco hatch',    kind:'ticks',    deco:1},
+  {id:'deco6',   nm:'Deco cross',    kind:'crosslines',deco:1},
+];
+
+const ASPECTS=[{k:'16:9',r:16/9},{k:'21:9',r:21/9},{k:'16:10',r:16/10},
+               {k:'4:3',r:4/3},{k:'phone',r:19.5/9}];
+const BACKDROPS=['day sky','night city','lava','deep space'];
+
+// ── PRESETS ────────────────────────────────────────────────────────────────
+// Each is a complete layout. They deliberately explore different philosophies
+// rather than being variations of one idea.
+function P(anchor,x,y,w,h,extra){ return Object.assign({a:anchor,x,y,w,h},extra||{}); }
+const PRESETS = {
+'Side rails': {
+  health : P('ml', 5, -8, 3.4, 26, {kind:'segbar',seg:5,dir:'up',  col:'#2ee056'}),
+  shield : P('ml', 10,-8, 3.4, 26, {kind:'segbar',seg:6,dir:'up',  col:'#4fd1ff'}),
+  energy : P('mr',-10,-8, 3.4, 26, {kind:'segbar',seg:6,dir:'up',  col:'#b46bff'}),
+  speed  : P('mr',-5, -8, 3.4, 26, {kind:'segbar',seg:6,dir:'up',  col:'#ffb020'}),
+  ammo   : P('bc', 16,-9, 26, 3.2, {kind:'segbar',seg:8,dir:'right',col:'#e6edf5'}),
+  core   : P('bc',-16,-9, 26, 3.2, {kind:'bar',   dir:'right',      col:'#ffb020'}),
+  dash   : P('bc', 0, -4, 18, 2.6, {kind:'pips',  seg:5,            col:'#4fd1ff'}),
+  reticle: P('mc', 0,  0, 5,  5,   {kind:'reticle',col:'#e6edf5'}),
+  weapon : P('tc', 0,  4, 30, 3,   {kind:'text',  size:2.0, col:'#e6edf5'}),
+  ab1    : P('bl', 5, -16,14, 2.4, {kind:'text',  size:1.4, col:'#2ee056'}),
+  ab2    : P('bl', 5, -12,14, 2.4, {kind:'text',  size:1.4, col:'#2ee056'}),
+  ab3    : P('bl', 5, -8, 14, 2.4, {kind:'text',  size:1.4, col:'#2ee056'}),
+  hull   : P('bc', 0, -14,20, 2.4, {kind:'text',  size:1.5, col:'#9fb6c9'}),
+  aegis  : P('br',-5, -5, 18, 2.2, {kind:'text',  size:1.3, col:'#ffb020'}),
+  minimap: P('tl', 6,  6, 13, 13,  {kind:'ring',  col:'#4fd1ff'}),
+  compass: P('tc', 0, 10, 40, 2.2, {kind:'bar',   dir:'right', col:'#7d93a7'}),
+},
+'Circumpunct': {
+  health : P('mc',0,0, 34,34, {kind:'arc',a0:150,a1:255, col:'#2ee056'}),
+  shield : P('mc',0,0, 38,38, {kind:'arc',a0:200,a1:340, col:'#4fd1ff'}),
+  energy : P('mc',0,0, 30,30, {kind:'arc',a0:250,a1:290, col:'#b46bff'}),
+  speed  : P('mc',0,0, 46,46, {kind:'arc',a0:118,a1:172, col:'#ffb020'}),
+  ammo   : P('mc',0,0, 46,46, {kind:'arc',a0:9,  a1:63,  col:'#e6edf5'}),
+  core   : P('bc',0,-16,22,2.4,{kind:'bar', dir:'right', col:'#ffb020'}),
+  dash   : P('bc',0,-9, 16,2.4,{kind:'pips',seg:5,       col:'#4fd1ff'}),
+  reticle: P('mc',0,0, 5,5,    {kind:'reticle',col:'#e6edf5'}),
+  weapon : P('mc',0,-26,28,3,  {kind:'text',size:1.8,col:'#e6edf5'}),
+  ab1    : P('mc',-24,-10,14,2.2,{kind:'text',size:1.3,col:'#2ee056'}),
+  ab2    : P('mc',24,-10,14,2.2, {kind:'text',size:1.3,col:'#2ee056'}),
+  ab3    : P('mc',0,26, 14,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  hull   : P('mc',0,21, 20,2.4,{kind:'text',size:1.5,col:'#9fb6c9'}),
+  aegis  : P('mc',0,24, 20,2.0,{kind:'text',size:1.2,col:'#ffb020'}),
+  minimap: P('tl',6,6, 13,13,  {kind:'ring',col:'#4fd1ff'}),
+  compass: P('bc',0,-3, 40,2.2,{kind:'bar', dir:'right',col:'#7d93a7'}),
+},
+'Bottom console': {
+  health : P('bl', 6, -6, 20, 3.4, {kind:'segbar',seg:5,dir:'right',col:'#2ee056'}),
+  shield : P('bl', 6, -11,20, 3.4, {kind:'segbar',seg:6,dir:'right',col:'#4fd1ff'}),
+  energy : P('bl', 6, -16,20, 2.6, {kind:'segbar',seg:6,dir:'right',col:'#b46bff'}),
+  speed  : P('br',-6, -6, 20, 3.4, {kind:'segbar',seg:6,dir:'left', col:'#ffb020'}),
+  ammo   : P('br',-6, -11,20, 3.4, {kind:'segbar',seg:8,dir:'left', col:'#e6edf5'}),
+  core   : P('bc', 0, -6, 22, 2.6, {kind:'bar',dir:'right',col:'#ffb020'}),
+  dash   : P('bc', 0, -11,16, 2.4, {kind:'pips',seg:5,col:'#4fd1ff'}),
+  reticle: P('mc', 0, 0,  5, 5,    {kind:'reticle',col:'#e6edf5'}),
+  weapon : P('bc', 0, -16,26, 2.6, {kind:'text',size:1.7,col:'#e6edf5'}),
+  ab1    : P('bc',-14,-20,12,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  ab2    : P('bc', 0, -20,12,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  ab3    : P('bc', 14,-20,12,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  hull   : P('br',-6, -16,18,2.2,  {kind:'text',size:1.4,col:'#9fb6c9'}),
+  aegis  : P('bl', 6, -20,18,2.0,  {kind:'text',size:1.2,col:'#ffb020'}),
+  minimap: P('tr',-6, 6, 13,13,    {kind:'ring',col:'#4fd1ff'}),
+  compass: P('tc', 0, 4, 44,2.2,   {kind:'bar',dir:'right',col:'#7d93a7'}),
+},
+'Corner blocks': {
+  health : P('tl', 5, 5,  18, 2.8, {kind:'segbar',seg:5,dir:'right',col:'#2ee056'}),
+  shield : P('tl', 5, 9,  18, 2.8, {kind:'segbar',seg:6,dir:'right',col:'#4fd1ff'}),
+  energy : P('tl', 5, 13, 18, 2.2, {kind:'segbar',seg:6,dir:'right',col:'#b46bff'}),
+  speed  : P('bl', 5, -9, 18, 2.8, {kind:'segbar',seg:6,dir:'right',col:'#ffb020'}),
+  ammo   : P('br',-5, -9, 18, 2.8, {kind:'segbar',seg:8,dir:'left', col:'#e6edf5'}),
+  core   : P('br',-5, -5, 18, 2.2, {kind:'bar',dir:'left',col:'#ffb020'}),
+  dash   : P('bl', 5, -5, 14, 2.2, {kind:'pips',seg:5,col:'#4fd1ff'}),
+  reticle: P('mc', 0, 0,  5, 5,    {kind:'reticle',col:'#e6edf5'}),
+  weapon : P('tr',-5, 5,  22,2.6,  {kind:'text',size:1.6,col:'#e6edf5'}),
+  ab1    : P('tr',-5, 9,  16,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  ab2    : P('tr',-5, 12, 16,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  ab3    : P('tr',-5, 15, 16,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  hull   : P('tl', 5, 17, 18,2.2,  {kind:'text',size:1.3,col:'#9fb6c9'}),
+  aegis  : P('bc', 0, -4, 20,2.0,  {kind:'text',size:1.2,col:'#ffb020'}),
+  minimap: P('mr',-6, 0,  13,13,   {kind:'ring',col:'#4fd1ff'}),
+  compass: P('tc', 0, 3,  40,2.0,  {kind:'bar',dir:'right',col:'#7d93a7'}),
+},
+'Minimal': {
+  health : P('bc',-13,-5, 22, 1.6, {kind:'segbar',seg:5,dir:'right',col:'#2ee056'}),
+  shield : P('bc',-13,-8, 22, 1.2, {kind:'segbar',seg:6,dir:'right',col:'#4fd1ff'}),
+  energy : P('bc', 13,-8, 22, 1.2, {kind:'segbar',seg:6,dir:'left', col:'#b46bff'}),
+  speed  : P('ml', 4, 0,  1.6,20,  {kind:'segbar',seg:6,dir:'up',   col:'#ffb020'}),
+  ammo   : P('bc', 13,-5, 22, 1.6, {kind:'segbar',seg:8,dir:'left', col:'#e6edf5'}),
+  core   : P('bc', 0, -2, 10, 1.0, {kind:'bar',dir:'right',col:'#ffb020'}),
+  dash   : P('bc', 0, -11,12, 1.6, {kind:'pips',seg:5,col:'#4fd1ff'}),
+  reticle: P('mc', 0, 0,  4, 4,    {kind:'reticle',col:'#e6edf5'}),
+  weapon : P('bc', 0, -14,22, 1.8, {kind:'text',size:1.2,col:'#9fb6c9'}),
+  ab1    : P('br',-4, -10,12,1.6,  {kind:'text',size:1.1,col:'#2ee056'}),
+  ab2    : P('br',-4, -7, 12,1.6,  {kind:'text',size:1.1,col:'#2ee056'}),
+  ab3    : P('br',-4, -4, 12,1.6,  {kind:'text',size:1.1,col:'#2ee056'}),
+  hull   : P('bl', 4, -4, 14,1.6,  {kind:'text',size:1.1,col:'#9fb6c9'}),
+  aegis  : P('tr',-4, 4,  14,1.5,  {kind:'text',size:1.0,col:'#ffb020'}),
+  minimap: P('tl', 4, 4,  10,10,   {kind:'ring',col:'#4fd1ff'}),
+  compass: P('tc', 0, 3,  30,1.5,  {kind:'bar',dir:'right',col:'#7d93a7'}),
+},
+'Chevron': {
+  health : P('bc',-20,-12,16, 3.0, {kind:'segbar',seg:5,dir:'right',col:'#2ee056',rot:-20}),
+  shield : P('bc',-24,-6, 16, 3.0, {kind:'segbar',seg:6,dir:'right',col:'#4fd1ff',rot:-20}),
+  speed  : P('bc', 20,-12,16, 3.0, {kind:'segbar',seg:6,dir:'left', col:'#ffb020',rot:20}),
+  ammo   : P('bc', 24,-6, 16, 3.0, {kind:'segbar',seg:8,dir:'left', col:'#e6edf5',rot:20}),
+  energy : P('bc', 0, -4, 20, 2.0, {kind:'segbar',seg:6,dir:'right',col:'#b46bff'}),
+  core   : P('bc', 0, -8, 14, 1.8, {kind:'bar',dir:'right',col:'#ffb020'}),
+  dash   : P('bc', 0, -16,14, 2.2, {kind:'pips',seg:5,col:'#4fd1ff'}),
+  reticle: P('mc', 0, 0,  5, 5,    {kind:'reticle',col:'#e6edf5'}),
+  weapon : P('tc', 0, 5,  26,2.6,  {kind:'text',size:1.7,col:'#e6edf5'}),
+  ab1    : P('bl', 5, -6, 13,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  ab2    : P('bl', 5, -10,13,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  ab3    : P('bl', 5, -14,13,2.2,  {kind:'text',size:1.3,col:'#2ee056'}),
+  hull   : P('br',-5, -6, 16,2.2,  {kind:'text',size:1.4,col:'#9fb6c9'}),
+  aegis  : P('br',-5, -10,16,2.0,  {kind:'text',size:1.2,col:'#ffb020'}),
+  minimap: P('tl', 5, 5,  12,12,   {kind:'ring',col:'#4fd1ff'}),
+  compass: P('tc', 0, 9,  36,2.0,  {kind:'bar',dir:'right',col:'#7d93a7'}),
+},
+};
+
+// ── CIRCUMPUNCT FAMILY ─────────────────────────────────────────────────────
+// Modelled on the reference sheets: heavy broken arcs, tick combs, chunky
+// dashed rings, crosshair lines through the circle, orbiting accents, hex
+// locks, radar wedges.
+//
+// The gauges share ONE centre at different radii — that concentricity is what
+// makes them read as a single instrument rather than five separate bars. The
+// peripheral text stays anchored to screen EDGES, because a label glued to the
+// ring would crowd the centre of the screen where you are actually aiming.
+const C = (rad, ex) => Object.assign({a:'mc', x:0, y:0, w:rad*2, h:rad*2, r:rad}, ex);
+const CY='#4fd1ff', CY2='#9fe8ff', GRN='#2ee056', AMB='#ffb020', VIO='#b46bff', WHT='#e6edf5';
+
+function cpBase(extra){
+  return Object.assign({
+    reticle: C(3.2,{kind:'reticle',col:'#dff2ff'}),
+    weapon : P('mc',0,-37,32,3,  {kind:'text',size:1.5,col:'#dff2ff'}),
+    ab1    : P('bl',6,-14,15,2.2,{kind:'text',size:1.25,col:GRN}),
+    ab2    : P('bl',6,-10,15,2.2,{kind:'text',size:1.25,col:GRN}),
+    ab3    : P('bl',6,-6, 15,2.2,{kind:'text',size:1.25,col:GRN}),
+    hull   : P('mc',0,33, 22,2.4,{kind:'text',size:1.35,col:'#9fb6c9'}),
+    aegis  : P('br',-6,-6,18,2.0,{kind:'text',size:1.15,col:AMB}),
+    minimap: P('tl',6,6,  12,12, {kind:'ring',col:CY}),
+    compass: P('tc',0,4,  40,2.0,{kind:'bar',dir:'right',col:'#7d93a7'}),
+    dash   : P('mc',0,39, 17,2.2,{kind:'pips',seg:5,col:CY}),
+    core   : C(41,{kind:'segarc',seg:22,a0:118,a1:242,thick:.7,gapDeg:1.2,col:AMB}),
+  }, extra);
+}
+
+Object.assign(PRESETS, {
+// Nested gauges, each its own ring — the clearest read of the family.
+'CP · Concentric': cpBase({
+  health : C(23,{kind:'segarc',seg:5, a0:150,a1:290,thick:2.2,gapDeg:4,col:GRN}),
+  shield : C(28,{kind:'segarc',seg:8, a0:150,a1:290,thick:1.5,gapDeg:3,col:CY}),
+  energy : C(18,{kind:'segarc',seg:6, a0:250,a1:290,thick:1.6,gapDeg:3,col:VIO}),
+  speed  : C(34,{kind:'ticks', seg:38,a0:118,a1:186,thick:.32,tick:2.6,col:AMB}),
+  ammo   : C(34,{kind:'ticks', seg:38,a0:354,a1:422,thick:.32,tick:2.6,col:WHT}),
+  deco1  : C(37,{kind:'ringdeco',seg:3,gapDeg:26,thick:.5,alpha:.45,col:CY}),
+  deco2  : C(14,{kind:'ringdeco',thick:.35,alpha:.35,col:CY}),
+  deco4  : C(45,{kind:'bracket',seg:26,thick:.9,alpha:.6,col:CY}),
+}),
+// Few, heavy, widely-gapped arcs. Bold at a glance, low clutter.
+'CP · Broken arcs': cpBase({
+  health : C(26,{kind:'segarc',seg:3,a0:140,a1:230,thick:3.4,gapDeg:9,col:GRN}),
+  shield : C(26,{kind:'segarc',seg:3,a0:310,a1:400,thick:3.4,gapDeg:9,col:CY}),
+  speed  : C(34,{kind:'segarc',seg:2,a0:120,a1:175,thick:2.6,gapDeg:8,col:AMB}),
+  ammo   : C(34,{kind:'segarc',seg:2,a0:5,  a1:60, thick:2.6,gapDeg:8,col:WHT}),
+  energy : C(19,{kind:'segarc',seg:4,a0:245,a1:295,thick:1.8,gapDeg:5,col:VIO}),
+  deco1  : C(40,{kind:'ringdeco',seg:4,gapDeg:34,thick:.7,alpha:.4,col:CY}),
+  deco6  : C(12,{kind:'crosslines',seg:4,inner:.55,thick:.3,alpha:.5,col:CY}),
+}),
+// Dense analogue comb — the fine-scale instrument look.
+'CP · Hatched dial': cpBase({
+  health : C(24,{kind:'ticks',seg:54,a0:140,a1:290,thick:.34,tick:3.4,col:GRN}),
+  shield : C(30,{kind:'ticks',seg:54,a0:140,a1:290,thick:.34,tick:2.4,col:CY}),
+  speed  : C(36,{kind:'ticks',seg:30,a0:110,a1:180,thick:.34,tick:2.2,col:AMB}),
+  ammo   : C(36,{kind:'ticks',seg:30,a0:0,  a1:70, thick:.34,tick:2.2,col:WHT}),
+  energy : C(17,{kind:'segarc',seg:8,a0:230,a1:310,thick:1.2,gapDeg:2,col:VIO}),
+  deco1  : C(39,{kind:'ringdeco',thick:.4,alpha:.4,col:CY}),
+  deco2  : C(21,{kind:'ringdeco',thick:.3,alpha:.3,col:CY}),
+  deco6  : C(13,{kind:'crosslines',seg:8,inner:.3,thick:.25,alpha:.35,col:CY}),
+}),
+// Chunky dashed outer ring — reads like a gear or turret collar.
+'CP · Cog ring': cpBase({
+  health : C(32,{kind:'segarc',seg:18,a0:150,a1:330,thick:3.0,gapDeg:3.6,col:GRN}),
+  shield : C(25,{kind:'segarc',seg:14,a0:150,a1:330,thick:2.2,gapDeg:3.4,col:CY}),
+  energy : C(18,{kind:'segarc',seg:8, a0:200,a1:340,thick:1.6,gapDeg:3,  col:VIO}),
+  speed  : C(39,{kind:'dots',  seg:26,a0:120,a1:180,thick:.55,col:AMB}),
+  ammo   : C(39,{kind:'dots',  seg:26,a0:0,  a1:60, thick:.55,col:WHT}),
+  deco1  : C(43,{kind:'ringdeco',seg:2,gapDeg:40,thick:.8,alpha:.4,col:CY}),
+  deco2  : C(13,{kind:'ringdeco',thick:.4,alpha:.4,col:CY}),
+}),
+// Two rings plus a small orbiting accent — the lightest of the family.
+'CP · Twin orbit': cpBase({
+  health : C(22,{kind:'segarc',seg:6,a0:120,a1:300,thick:2.0,gapDeg:5,col:GRN}),
+  shield : C(30,{kind:'segarc',seg:6,a0:120,a1:300,thick:1.4,gapDeg:5,col:CY}),
+  energy : C(15,{kind:'wedge', a0:200,a1:340,inner:.6,thick:.3,col:VIO,alpha:.3}),
+  speed  : C(36,{kind:'segarc',seg:1,a0:118,a1:172,thick:2.2,col:AMB}),
+  ammo   : C(36,{kind:'segarc',seg:1,a0:8,  a1:62, thick:2.2,col:WHT}),
+  deco1  : C(34,{kind:'ringdeco',thick:.35,alpha:.35,col:CY}),
+  deco3  : Object.assign(C(4,{kind:'ringdeco',thick:.8,alpha:.9,col:CY2}),{x:26,y:-22}),
+  deco4  : C(42,{kind:'bracket',seg:18,thick:1.0,alpha:.5,col:CY}),
+}),
+// Crosshair-forward. Gauges recede; the aiming furniture leads.
+'CP · Targeting': cpBase({
+  health : C(28,{kind:'segarc',seg:4,a0:160,a1:250,thick:2.4,gapDeg:6,col:GRN}),
+  shield : C(28,{kind:'segarc',seg:4,a0:290,a1:380,thick:2.4,gapDeg:6,col:CY}),
+  energy : C(20,{kind:'segarc',seg:5,a0:250,a1:290,thick:1.5,gapDeg:3,col:VIO}),
+  speed  : C(37,{kind:'ticks',seg:20,a0:125,a1:175,thick:.4,tick:2.4,col:AMB}),
+  ammo   : C(37,{kind:'ticks',seg:20,a0:5,  a1:55, thick:.4,tick:2.4,col:WHT}),
+  deco6  : C(33,{kind:'crosslines',seg:4,inner:.22,thick:.4,alpha:.7,col:CY}),
+  deco4  : C(33,{kind:'bracket',seg:22,thick:1.2,alpha:.85,col:CY}),
+  deco2  : C(10,{kind:'ringdeco',thick:.5,alpha:.5,col:CY}),
+}),
+// Radar sweep. The wedge is decoration; gauges ring it.
+'CP · Radar': cpBase({
+  health : C(33,{kind:'segarc',seg:6,a0:140,a1:300,thick:2.0,gapDeg:4,col:GRN}),
+  shield : C(37,{kind:'segarc',seg:9,a0:140,a1:300,thick:1.2,gapDeg:3,col:CY}),
+  energy : C(28,{kind:'wedge', a0:0,a1:360,inner:.0,thick:.25,col:CY,alpha:.14}),
+  speed  : C(41,{kind:'dots',seg:22,a0:118,a1:176,thick:.5,col:AMB}),
+  ammo   : C(41,{kind:'dots',seg:22,a0:4,  a1:62, thick:.5,col:WHT}),
+  deco1  : C(28,{kind:'ringdeco',thick:.4,alpha:.5,col:CY}),
+  deco6  : C(28,{kind:'crosslines',seg:4,inner:.05,thick:.25,alpha:.3,col:CY}),
+  deco2  : C(14,{kind:'ringdeco',thick:.3,alpha:.35,col:CY}),
+}),
+// Hexagonal lock-on frame instead of a circle.
+'CP · Hex lock': cpBase({
+  health : C(24,{kind:'segarc',seg:5,a0:150,a1:290,thick:2.2,gapDeg:4,col:GRN}),
+  shield : C(29,{kind:'segarc',seg:7,a0:150,a1:290,thick:1.4,gapDeg:3,col:CY}),
+  energy : C(17,{kind:'segarc',seg:6,a0:240,a1:300,thick:1.5,gapDeg:3,col:VIO}),
+  speed  : C(35,{kind:'ticks',seg:26,a0:120,a1:180,thick:.34,tick:2.2,col:AMB}),
+  ammo   : C(35,{kind:'ticks',seg:26,a0:0,  a1:60, thick:.34,tick:2.2,col:WHT}),
+  deco1  : C(40,{kind:'polyframe',seg:6,a0:-90,thick:.8,alpha:.65,col:CY}),
+  deco2  : C(45,{kind:'polyframe',seg:6,a0:-90,thick:.35,alpha:.3,col:CY}),
+  deco4  : C(33,{kind:'bracket',seg:14,thick:.9,alpha:.5,col:CY}),
+}),
+// One gauge per quadrant — maximum separation, easiest to read at a glance.
+'CP · Quadrants': cpBase({
+  health : C(30,{kind:'segarc',seg:5,a0:100,a1:170,thick:3.0,gapDeg:4,col:GRN}),
+  shield : C(30,{kind:'segarc',seg:5,a0:190,a1:260,thick:3.0,gapDeg:4,col:CY}),
+  speed  : C(30,{kind:'segarc',seg:5,a0:280,a1:350,thick:3.0,gapDeg:4,col:AMB}),
+  ammo   : C(30,{kind:'segarc',seg:5,a0:10, a1:80, thick:3.0,gapDeg:4,col:WHT}),
+  energy : C(20,{kind:'segarc',seg:8,a0:0,a1:360,thick:1.2,gapDeg:6,col:VIO}),
+  deco1  : C(36,{kind:'ringdeco',seg:4,gapDeg:22,thick:.5,alpha:.4,col:CY}),
+  deco6  : C(14,{kind:'crosslines',seg:4,a0:45,inner:.4,thick:.3,alpha:.5,col:CY}),
+}),
+// Everything one colour, dense — closest to the reference sheets.
+'CP · Mono cyan': cpBase({
+  health : C(22,{kind:'segarc',seg:6, a0:130,a1:300,thick:2.6,gapDeg:4,col:CY}),
+  shield : C(27,{kind:'segarc',seg:12,a0:130,a1:300,thick:1.3,gapDeg:2.4,col:CY2}),
+  energy : C(16,{kind:'ticks', seg:34,a0:120,a1:310,thick:.3,tick:2.6,col:CY}),
+  speed  : C(33,{kind:'ticks', seg:44,a0:112,a1:186,thick:.3,tick:3.0,col:CY2}),
+  ammo   : C(33,{kind:'segarc',seg:9, a0:352,a1:428,thick:1.6,gapDeg:2.6,col:CY}),
+  deco1  : C(38,{kind:'ringdeco',seg:3,gapDeg:30,thick:.7,alpha:.5,col:CY}),
+  deco2  : C(11,{kind:'ringdeco',thick:.4,alpha:.5,col:CY2}),
+  deco3  : C(44,{kind:'ringdeco',thick:.25,alpha:.25,col:CY}),
+  deco4  : C(41,{kind:'bracket',seg:20,thick:1.1,alpha:.7,col:CY}),
+  deco6  : C(9, {kind:'crosslines',seg:4,inner:.0,thick:.3,alpha:.6,col:CY2}),
+  ab1: P('bl',6,-14,15,2.2,{kind:'text',size:1.25,col:CY2}),
+  ab2: P('bl',6,-10,15,2.2,{kind:'text',size:1.25,col:CY2}),
+  ab3: P('bl',6,-6, 15,2.2,{kind:'text',size:1.25,col:CY2}),
+}),
+});
+
+// ── SHIPPED CIRCUMPUNCT + VARIATIONS ───────────────────────────────────────
+// Measured out of drawCircumpunctHUD rather than eyeballed, and converted from
+// its fixed pixels to vmin at a 1080-tall reference:
+//     health r1 172px = 15.9   shield r2 190px = 17.6
+//     energy   147px  = 13.6   speed/ammo r3 240px = 22.2
+//     hull +196px = 18.1 below centre, aegis +213 = 19.7, dash +248 = 23.0
+// Angles are the game's own canvas degrees (0 = right, clockwise).
+//
+// Two things about the shipped design are worth preserving deliberately:
+// it is COMPACT (max radius 22 vmin, so it never crowds the aim point), and
+// only HEALTH is segmented — shield/speed/ammo/energy are solid arcs, so the
+// one chunked gauge is the one you read fastest under fire.
+const SHIP_R = {health:15.9, shield:17.6, energy:13.6, rail:22.2};
+function shipped(mut){
+  const s = (k)=> (mut && mut.scale ? mut.scale : 1) * SHIP_R[k];
+  const th = (mut && mut.thick ? mut.thick : 1);
+  // Health chips: the game uses _hchip 0.85rad pitch with a 0.055rad inset at
+  // BOTH ends of each chip, so a chip is 42.4 deg of drawn arc on a 48.7 deg
+  // pitch — a 6.3 deg gap. Dividing the span evenly would be visibly wrong.
+  const base = {
+    health : C(s('health'),{kind:'arcbar',seg:5,a0:151.4,a1:388.6,gapDeg:6.3,thick:.93*th,col:GRN}),
+    shield : C(s('shield'),{kind:'arcbar',a0:207,a1:333,           thick:.93*th,col:CY}),
+    // NRG is the one gauge that is NOT an arcBar in game — a plain 6px stroke
+    // over a 0.12-alpha track, no capsule border.
+    energy : C(s('energy'),{kind:'arc',   a0:243,a1:297,           thick:.56*th,col:CY}),
+    speed  : C(s('rail'),  {kind:'arcbar',a0:117,a1:171,           thick:.93*th,col:AMB}),
+    // fromEnd: ammo fills upward from its LOW end so it mirrors speed.
+    ammo   : C(s('rail'),  {kind:'arcbar',a0:9,  a1:63, fromEnd:1, thick:.93*th,col:WHT}),
+    core   : P('mc',0,16.5,12,1.1,{kind:'segbar',seg:10,dir:'right',col:AMB}),
+    dash   : P('mc',0,23.0,13,1.8,{kind:'pips',seg:5,col:CY}),
+    hull   : P('mc',0,18.1,20,1.9,{kind:'text',size:1.15,col:'#9fb6c9'}),
+    aegis  : P('mc',0,20.6,20,1.6,{kind:'text',size:.95,col:AMB}),
+    weapon : P('mc',0,-24, 26,2.2,{kind:'text',size:1.25,col:'#dff2ff'}),
+    ab1    : P('mc',-21,-11,13,1.8,{kind:'text',size:1.0,col:GRN}),
+    ab2    : P('mc', 21,-11,13,1.8,{kind:'text',size:1.0,col:GRN}),
+    ab3    : P('mc', 0, -19,13,1.8,{kind:'text',size:1.0,col:GRN}),
+    reticle: C(2.6,{kind:'reticle',col:'#dff2ff'}),
+    minimap: P('tl',6,6,12,12,{kind:'ring',col:CY}),
+    compass: P('bc',0,-3,38,1.8,{kind:'bar',dir:'right',col:'#7d93a7'}),
+  };
+  return Object.assign(base, (mut && mut.over) || {});
+}
+
+Object.assign(PRESETS, {
+// Faithful reproduction of what is in the game today.
+'CP · Shipped': shipped(),
+
+// Same design, pulled in 15% — opens the centre further for aiming.
+'CP · Shipped tight': shipped({scale:.85}),
+
+// Pushed out 20% — more presence, less clear centre.
+'CP · Shipped wide': shipped({scale:1.2}),
+
+// Heavier strokes. Reads better on small screens and in bright terrain.
+'CP · Shipped bold': shipped({thick:1.8}),
+
+// Every gauge chunked, not just health — matches the segmented-bar look.
+'CP · Shipped segmented': shipped({over:{
+  shield: C(17.6,{kind:'arcbar',seg:8,a0:207,a1:333,thick:.93,gapDeg:3,col:CY}),
+  speed : C(22.2,{kind:'arcbar',seg:4,a0:117,a1:171,thick:.93,gapDeg:3,col:AMB}),
+  ammo  : C(22.2,{kind:'arcbar',seg:4,a0:9,  a1:63, thick:.93,gapDeg:3,fromEnd:1,col:WHT}),
+  energy: C(13.6,{kind:'arcbar',seg:5,a0:243,a1:297,thick:.56,gapDeg:2.5,col:CY}),
+}}),
+
+// Adds fine tick combs outboard of the rails, keeping the gauges as they are.
+'CP · Shipped + hatch': shipped({over:{
+  deco5: C(25.5,{kind:'ticks',seg:26,a0:114,a1:174,thick:.28,tick:1.8,col:AMB}),
+  deco1: C(25.5,{kind:'ticks',seg:26,a0:6,  a1:66, thick:.28,tick:1.8,col:WHT}),
+  deco2: C(19.8,{kind:'ringdeco',seg:3,gapDeg:22,thick:.3,alpha:.35,col:CY}),
+}}),
+
+// Upper half is condition (health+shield), lower half is weapon (speed+ammo).
+// Groups by what you check WHEN, rather than spreading all four evenly.
+'CP · Shipped split': shipped({over:{
+  health: C(15.9,{kind:'arcbar',seg:5,a0:182,a1:268,thick:1.3,gapDeg:3,col:GRN}),
+  shield: C(15.9,{kind:'arcbar',seg:6,a0:272,a1:358,thick:1.3,gapDeg:3,col:CY}),
+  speed : C(15.9,{kind:'arcbar',a0:96, a1:172,thick:1.3,col:AMB}),
+  ammo  : C(15.9,{kind:'arcbar',a0:8,  a1:84, thick:1.3,fromEnd:1,col:WHT}),
+  energy: C(21,  {kind:'arc',   a0:243,a1:297,thick:.56,col:VIO}),
+}}),
+
+// Single-colour treatment of the shipped layout.
+'CP · Shipped mono': shipped({over:{
+  health: C(15.9,{kind:'arcbar',seg:5,a0:151.4,a1:388.6,gapDeg:6.3,thick:.93,col:CY}),
+  shield: C(17.6,{kind:'arcbar',a0:207,a1:333,thick:.93,col:CY2}),
+  speed : C(22.2,{kind:'arcbar',a0:117,a1:171,thick:.93,col:CY}),
+  ammo  : C(22.2,{kind:'arcbar',a0:9,  a1:63, thick:.93,fromEnd:1,col:CY2}),
+  energy: C(13.6,{kind:'arc',   a0:243,a1:297,thick:.56,col:CY}),
+  core  : P('mc',0,16.5,12,1.1,{kind:'segbar',seg:10,dir:'right',col:CY}),
+  dash  : P('mc',0,23.0,13,1.8,{kind:'pips',seg:5,col:CY2}),
+  aegis : P('mc',0,20.6,20,1.6,{kind:'text',size:.95,col:CY}),
+  ab1   : P('mc',-21,-11,13,1.8,{kind:'text',size:1.0,col:CY2}),
+  ab2   : P('mc', 21,-11,13,1.8,{kind:'text',size:1.0,col:CY2}),
+  ab3   : P('mc', 0, -19,13,1.8,{kind:'text',size:1.0,col:CY2}),
+}}),
+
+// Rails swung to the sides so nothing sits below the aim point.
+'CP · Shipped sides': shipped({over:{
+  speed : C(22.2,{kind:'arcbar',a0:150,a1:210,thick:1.1,col:AMB}),
+  ammo  : C(22.2,{kind:'arcbar',a0:330,a1:390,thick:1.1,fromEnd:1,col:WHT}),
+  core  : P('mc',0,-16.5,12,1.1,{kind:'segbar',seg:10,dir:'right',col:AMB}),
+}}),
+});
+
+const V = {health:.82,shield:.64,energy:.45,speed:.58,ammo:.7,core:.35,dash:3,
+           cd1:1,cd2:.45,cd3:0};
+const S = {layout:JSON.parse(JSON.stringify(PRESETS['Side rails'])),
+           sel:'health', aspect:16/9, aspectK:'16:9', bd:'day sky', drag:null};
+
+const $=id=>document.getElementById(id);
+const cv=$('cv'), ctx=cv.getContext('2d');
+
+// ── anchor resolution: the heart of the layout model ───────────────────────
+function place(p, W, H){
+  const vmin=Math.min(W,H)/100;
+  // Circular parts are sized by radius; give them a square box so hit-testing
+  // and the drag handles behave like every other part.
+  const w=(p.r!=null?p.r*2:p.w)*vmin, h=(p.r!=null?p.r*2:p.h)*vmin;
+  const ax=p.a[1], ay=p.a[0];
+  let x = ax==='l' ? 0 : ax==='c' ? W/2 : W;
+  let y = ay==='t' ? 0 : ay==='m' ? H/2 : H;
+  x += p.x*vmin; y += p.y*vmin;
+  return {x:x-w/2, y:y-h/2, w, h, cx:x, cy:y, vmin};
+}
+
+// ── element painters ───────────────────────────────────────────────────────
+function segbar(r,p,pct,ctx){
+  const n=Math.max(1,p.seg||5), dir=p.dir||'right';
+  const vert = dir==='up'||dir==='down';
+  ctx.save();
+  ctx.strokeStyle=p.col; ctx.globalAlpha=.55; ctx.lineWidth=Math.max(1,r.vmin*.18);
+  ctx.strokeRect(r.x,r.y,r.w,r.h); ctx.globalAlpha=1;
+  const pad=Math.max(1,Math.min(r.w,r.h)*.16);
+  const ix=r.x+pad, iy=r.y+pad, iw=r.w-pad*2, ih=r.h-pad*2;
+  const gap=Math.max(1,(vert?ih:iw)*.05);
+  const cell=((vert?ih:iw)-gap*(n-1))/n;
+  ctx.fillStyle=p.col; ctx.shadowColor=p.col; ctx.shadowBlur=r.vmin*.6;
+  for(let i=0;i<n;i++){
+    const f=Math.max(0,Math.min(1,pct*n-i)); if(f<=.001) continue;
+    if(vert){ const y1 = dir==='up' ? iy+ih-i*(cell+gap) : iy+i*(cell+gap)+cell;
+      ctx.fillRect(ix, dir==='up'? y1-cell*f : y1-cell, iw, cell*f); }
+    else { const x0 = dir==='right' ? ix+i*(cell+gap) : ix+iw-i*(cell+gap)-cell*f;
+      ctx.fillRect(x0, iy, cell*f, ih); }
+  }
+  ctx.restore();
+}
+function bar(r,p,pct,ctx){
+  ctx.save();
+  ctx.strokeStyle=p.col; ctx.globalAlpha=.5; ctx.lineWidth=Math.max(1,r.vmin*.15);
+  ctx.strokeRect(r.x,r.y,r.w,r.h); ctx.globalAlpha=1;
+  const pad=Math.max(1,Math.min(r.w,r.h)*.2);
+  ctx.fillStyle=p.col; ctx.shadowColor=p.col; ctx.shadowBlur=r.vmin*.5;
+  const iw=(r.w-pad*2)*pct;
+  ctx.fillRect(p.dir==='left'? r.x+r.w-pad-iw : r.x+pad, r.y+pad, iw, r.h-pad*2);
+  ctx.restore();
+}
+function arcG(r,p,pct,ctx){
+  const rad=Math.min(r.w,r.h)/2, a0=(p.a0||200)*Math.PI/180, a1=(p.a1||340)*Math.PI/180;
+  ctx.save(); ctx.lineCap='butt';
+  ctx.lineWidth=Math.max(2,r.vmin*1.1);
+  ctx.strokeStyle=p.col; ctx.globalAlpha=.22;
+  ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,a0,a1); ctx.stroke();
+  ctx.globalAlpha=1; ctx.shadowColor=p.col; ctx.shadowBlur=r.vmin*.7;
+  ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,a0,a0+(a1-a0)*pct); ctx.stroke();
+  ctx.restore();
+}
+// ── circumpunct primitives ─────────────────────────────────────────────────
+const D2R = Math.PI/180;
+const radOf = (r,p) => (p.r!=null ? p.r*r.vmin : Math.min(r.w,r.h)/2);
+const thickOf = (r,p) => Math.max(1.5,(p.thick!=null?p.thick:1.2)*r.vmin);
+
+// An arc chopped into discrete blocks — the circular twin of the segmented bar.
+// This is the shape that reads as a gauge rather than as decoration.
+function segarc(r,p,pct,ctx){
+  const rad=radOf(r,p), n=Math.max(1,p.seg||8);
+  const a0=(p.a0||200), a1=(p.a1||340), gap=(p.gapDeg!=null?p.gapDeg:2.5);
+  const span=(a1-a0-gap*(n-1))/n;
+  ctx.save(); ctx.lineWidth=thickOf(r,p); ctx.lineCap='butt';
+  for(let i=0;i<n;i++){
+    const s=a0+i*(span+gap), e=s+span;
+    const f=Math.max(0,Math.min(1,pct*n-i));
+    ctx.strokeStyle=p.col; ctx.globalAlpha=.16;
+    ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,s*D2R,e*D2R); ctx.stroke();
+    if(f>.001){ ctx.globalAlpha=1; ctx.shadowColor=p.col; ctx.shadowBlur=r.vmin*.7;
+      ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,s*D2R,(s+(e-s)*f)*D2R); ctx.stroke();
+      ctx.shadowBlur=0; }
+  }
+  ctx.restore();
+}
+// Radial hatching — the dense comb of lines in the reference. Reads as a fine
+// analogue scale next to the chunky segment blocks.
+function ticks(r,p,pct,ctx){
+  const rad=radOf(r,p), n=Math.max(2,p.seg||40);
+  const a0=(p.a0||200), a1=(p.a1||340);
+  const len=(p.tick!=null?p.tick:2.2)*r.vmin;
+  ctx.save(); ctx.lineWidth=Math.max(1,(p.thick!=null?p.thick:.35)*r.vmin);
+  for(let i=0;i<n;i++){
+    const a=(a0+(a1-a0)*(i/(n-1)))*D2R;
+    const lit=(i/(n-1))<=pct;
+    ctx.strokeStyle=p.col; ctx.globalAlpha=lit?1:.18;
+    if(lit){ ctx.shadowColor=p.col; ctx.shadowBlur=r.vmin*.5; }
+    ctx.beginPath();
+    ctx.moveTo(r.cx+Math.cos(a)*rad, r.cy+Math.sin(a)*rad);
+    ctx.lineTo(r.cx+Math.cos(a)*(rad+len), r.cy+Math.sin(a)*(rad+len));
+    ctx.stroke(); ctx.shadowBlur=0;
+  }
+  ctx.restore();
+}
+function dots(r,p,pct,ctx){
+  const rad=radOf(r,p), n=Math.max(2,p.seg||24);
+  const a0=(p.a0||200), a1=(p.a1||340);
+  const dr=Math.max(1,(p.thick!=null?p.thick:.5)*r.vmin);
+  ctx.save();
+  for(let i=0;i<n;i++){
+    const a=(a0+(a1-a0)*(i/(n-1)))*D2R, lit=(i/(n-1))<=pct;
+    ctx.beginPath(); ctx.arc(r.cx+Math.cos(a)*rad, r.cy+Math.sin(a)*rad, dr,0,7);
+    ctx.fillStyle=p.col; ctx.globalAlpha=lit?1:.2;
+    if(lit){ctx.shadowColor=p.col;ctx.shadowBlur=r.vmin*.5;}
+    ctx.fill(); ctx.shadowBlur=0;
+  }
+  ctx.restore();
+}
+// Non-value decoration: a ring, optionally broken into spokes. Carries no data
+// but is most of what makes a circumpunct feel like an instrument.
+function ringdeco(r,p,ctx){
+  const rad=radOf(r,p), n=Math.max(1,p.seg||1);
+  const gap=(p.gapDeg!=null?p.gapDeg:0);
+  ctx.save(); ctx.lineWidth=thickOf(r,p); ctx.strokeStyle=p.col;
+  ctx.globalAlpha=(p.alpha!=null?p.alpha:.5);
+  if(n<=1 && !gap){ ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,0,7); ctx.stroke(); }
+  else { const span=(360-gap*n)/n;
+    for(let i=0;i<n;i++){ const s=(p.a0||0)+i*(span+gap);
+      ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,s*D2R,(s+span)*D2R); ctx.stroke(); } }
+  ctx.restore();
+}
+// Four corner arcs — the targeting-bracket read.
+function bracket(r,p,ctx){
+  const rad=radOf(r,p), span=(p.seg||30);
+  ctx.save(); ctx.lineWidth=thickOf(r,p); ctx.strokeStyle=p.col;
+  ctx.globalAlpha=(p.alpha!=null?p.alpha:.85);
+  [45,135,225,315].forEach(c=>{ ctx.beginPath();
+    ctx.arc(r.cx,r.cy,rad,(c-span/2)*D2R,(c+span/2)*D2R); ctx.stroke(); });
+  ctx.restore();
+}
+
+// EXACT port of the game's arcBar + _hudArcChipPath. This is the house style
+// for every shipped gauge and the thing my first pass missed: each bar is a
+// CAPSULE OUTLINE (the border) stroked at 1.5px, with a narrower fill line
+// running inside it, inset at both ends. A plain arc has no border and reads
+// as a different widget entirely.
+//
+// Thickness here is in vmin and converted back to the game's pixel scale so
+// the 1.5px border and the (thick-4) fill keep their shipped proportions.
+function arcbar(r,p,pct,ctx){
+  const rad=radOf(r,p), n=Math.max(1,p.seg||1);
+  const a0=(p.a0||0), a1=(p.a1!=null?p.a1:360), gap=(p.gapDeg!=null?p.gapDeg:0);
+  const th=Math.max(3,(p.thick!=null?p.thick:.95)*r.vmin);   // capsule height, px
+  const border=Math.max(1,th*0.15);                          // 1.5 of a 10px bar
+  const fillW=Math.max(2,th-th*0.4);                         // th-4 of a 10px bar
+  const span=(a1-a0-gap*(n-1))/n;
+  ctx.save();
+  for(let i=0;i<n;i++){
+    const s=(a0+i*(span+gap))*D2R, e=s+span*D2R;
+    // capsule: outer arc out, inner arc back, closed -> rounded-ish ends
+    ctx.beginPath();
+    ctx.arc(r.cx,r.cy,rad+th/2,s,e);
+    ctx.arc(r.cx,r.cy,rad-th/2,e,s,true);
+    ctx.closePath();
+    ctx.strokeStyle=p.col; ctx.lineWidth=border; ctx.globalAlpha=1; ctx.stroke();
+    // fill, inset from both ends exactly like the game (2.5px at radius r)
+    const f=Math.max(0,Math.min(1,pct*n-i));
+    if(f>0.001){
+      const inset=2.5/rad;
+      const fs=s+inset, fe=e-inset;
+      if(fe>fs){
+        ctx.save();
+        ctx.shadowColor=p.col; ctx.shadowBlur=th*0.8;
+        ctx.strokeStyle=p.col; ctx.lineWidth=fillW;
+        ctx.beginPath();
+        if(p.fromEnd) ctx.arc(r.cx,r.cy,rad,fe-(fe-fs)*f,fe);
+        else          ctx.arc(r.cx,r.cy,rad,fs,fs+(fe-fs)*f);
+        ctx.stroke(); ctx.restore();
+      }
+    }
+  }
+  ctx.restore();
+}
+
+// Crosshair lines running through the ring, with a gap at the centre.
+function crosslines(r,p,ctx){
+  const rad=radOf(r,p), inner=rad*(p.inner!=null?p.inner:.45);
+  const n=Math.max(2,p.seg||4), rot=(p.a0||0);
+  ctx.save(); ctx.strokeStyle=p.col; ctx.globalAlpha=(p.alpha!=null?p.alpha:.75);
+  ctx.lineWidth=Math.max(1,(p.thick!=null?p.thick:.35)*r.vmin);
+  for(let i=0;i<n;i++){ const a=(rot+i*360/n)*D2R;
+    ctx.beginPath();
+    ctx.moveTo(r.cx+Math.cos(a)*inner, r.cy+Math.sin(a)*inner);
+    ctx.lineTo(r.cx+Math.cos(a)*rad,   r.cy+Math.sin(a)*rad);
+    ctx.stroke(); }
+  ctx.restore();
+}
+// Filled sector. Doubles as a radar sweep (decoration) and as a pie gauge.
+function wedge(r,p,pct,ctx){
+  const rad=radOf(r,p), inner=rad*(p.inner!=null?p.inner:0);
+  const a0=(p.a0||0)*D2R, a1=(a0 + ((p.a1!=null?p.a1:360)-(p.a0||0))*pct*D2R);
+  ctx.save(); ctx.fillStyle=p.col; ctx.globalAlpha=(p.alpha!=null?p.alpha:.22);
+  ctx.beginPath(); ctx.arc(r.cx,r.cy,rad,a0,a1);
+  if(inner>0) ctx.arc(r.cx,r.cy,inner,a1,a0,true); else ctx.lineTo(r.cx,r.cy);
+  ctx.closePath(); ctx.fill();
+  ctx.globalAlpha=1; ctx.strokeStyle=p.col;
+  ctx.lineWidth=Math.max(1,(p.thick!=null?p.thick:.3)*r.vmin); ctx.stroke();
+  ctx.restore();
+}
+// N-gon frame — the hexagon lock-on look.
+function polyframe(r,p,ctx){
+  const rad=radOf(r,p), n=Math.max(3,p.seg||6), rot=(p.a0||-90)*D2R;
+  ctx.save(); ctx.strokeStyle=p.col; ctx.globalAlpha=(p.alpha!=null?p.alpha:.7);
+  ctx.lineWidth=thickOf(r,p); ctx.beginPath();
+  for(let i=0;i<=n;i++){ const a=rot+i*2*Math.PI/n;
+    const x=r.cx+Math.cos(a)*rad, y=r.cy+Math.sin(a)*rad;
+    i?ctx.lineTo(x,y):ctx.moveTo(x,y); }
+  ctx.stroke(); ctx.restore();
+}
+
+function ring(r,p,ctx){
+  ctx.save(); ctx.strokeStyle=p.col; ctx.globalAlpha=.75;
+  ctx.lineWidth=Math.max(1,r.vmin*.2);
+  ctx.beginPath(); ctx.arc(r.cx,r.cy,Math.min(r.w,r.h)/2,0,7); ctx.stroke();
+  ctx.globalAlpha=.10; ctx.fillStyle=p.col; ctx.fill();
+  ctx.restore();
+}
+function pips(r,p,n,ctx){
+  const total=Math.max(1,p.seg||5), rad=Math.min(r.h/2, r.w/(total*2.6));
+  const step=r.w/total;
+  ctx.save();
+  for(let i=0;i<total;i++){
+    const x=r.x+step*(i+.5);
+    ctx.beginPath(); ctx.arc(x,r.cy,rad,0,7);
+    ctx.strokeStyle=p.col; ctx.globalAlpha=.6; ctx.lineWidth=Math.max(1,r.vmin*.15);
+    ctx.stroke();
+    if(i<n){ ctx.globalAlpha=1; ctx.fillStyle=p.col;
+      ctx.shadowColor=p.col; ctx.shadowBlur=r.vmin*.5; ctx.fill(); ctx.shadowBlur=0; }
+    ctx.globalAlpha=1;
+  }
+  ctx.restore();
+}
+function textG(r,p,str,ctx){
+  ctx.save(); ctx.fillStyle=p.col;
+  ctx.font=`700 ${(p.size||1.5)*r.vmin}px Orbitron, "Segoe UI", sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.shadowColor='rgba(0,0,0,.8)'; ctx.shadowBlur=3;
+  ctx.fillText(str, r.cx, r.cy);
+  ctx.restore();
+}
+function reticleG(r,p,ctx){
+  ctx.save(); ctx.strokeStyle=p.col; ctx.lineWidth=Math.max(1,r.vmin*.16);
+  const s=Math.min(r.w,r.h)/2;
+  ctx.beginPath();
+  ctx.moveTo(r.cx-s,r.cy); ctx.lineTo(r.cx-s*.35,r.cy);
+  ctx.moveTo(r.cx+s*.35,r.cy); ctx.lineTo(r.cx+s,r.cy);
+  ctx.moveTo(r.cx,r.cy-s); ctx.lineTo(r.cx,r.cy-s*.35);
+  ctx.moveTo(r.cx,r.cy+s*.35); ctx.lineTo(r.cx,r.cy+s);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(r.cx,r.cy,Math.max(1,r.vmin*.2),0,7);
+  ctx.fillStyle=p.col; ctx.fill();
+  ctx.restore();
+}
+
+const LABEL={weapon:'ENERGY BLASTER',ab1:'LASER',ab2:'VORTEX SHIELD',ab3:'PLASMA MINES',
+             hull:'HULL: 10000',aegis:'AEGIS 3 · 220/400'};
+
+function backdrop(W,H){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  if(S.bd==='day sky'){ g.addColorStop(0,'#2f6fc0'); g.addColorStop(.55,'#9fc6e8'); g.addColorStop(.56,'#3f6b3a'); g.addColorStop(1,'#22421f'); }
+  else if(S.bd==='night city'){ g.addColorStop(0,'#05070e'); g.addColorStop(.6,'#0d1430'); g.addColorStop(.61,'#141a24'); g.addColorStop(1,'#05070a'); }
+  else if(S.bd==='lava'){ g.addColorStop(0,'#2a0d06'); g.addColorStop(.55,'#5e1b07'); g.addColorStop(.56,'#8d2a05'); g.addColorStop(1,'#c24a08'); }
+  else { g.addColorStop(0,'#02030a'); g.addColorStop(1,'#0a0616'); }
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  if(S.bd==='night city'){ ctx.fillStyle='rgba(120,220,255,.55)';
+    for(let i=0;i<180;i++){ const x=(i*97)%W, y=H*.62+((i*53)%(H*.3));
+      ctx.fillRect(x,y,2,2); } }
+  if(S.bd==='deep space'){ ctx.fillStyle='rgba(255,255,255,.8)';
+    for(let i=0;i<220;i++) ctx.fillRect((i*131)%W,(i*79)%H,1.4,1.4); }
+}
+
+function draw(){
+  const W=cv.width, H=cv.height;
+  backdrop(W,H);
+  for(const def of PARTS){
+    const p=S.layout[def.id]; if(!p) continue;
+    const r=place(p,W,H);
+    const kind=p.kind||def.kind;
+    const pct=def.val && def.val!=='dash' ? V[def.val] : 1;
+    ctx.save();
+    if(p.rot){ ctx.translate(r.cx,r.cy); ctx.rotate(p.rot*Math.PI/180); ctx.translate(-r.cx,-r.cy); }
+    if(kind==='segbar') segbar(r,p,pct,ctx);
+    else if(kind==='bar') bar(r,p,pct,ctx);
+    else if(kind==='arc') arcG(r,p,pct,ctx);
+    else if(kind==='arcbar') arcbar(r,p,pct,ctx);
+    else if(kind==='segarc') segarc(r,p,pct,ctx);
+    else if(kind==='ticks') ticks(r,p,pct,ctx);
+    else if(kind==='dots') dots(r,p,pct,ctx);
+    else if(kind==='ringdeco') ringdeco(r,p,ctx);
+    else if(kind==='bracket') bracket(r,p,ctx);
+    else if(kind==='crosslines') crosslines(r,p,ctx);
+    else if(kind==='wedge') wedge(r,p,pct,ctx);
+    else if(kind==='polyframe') polyframe(r,p,ctx);
+    else if(kind==='ring') ring(r,p,ctx);
+    else if(kind==='pips') pips(r,p,V.dash,ctx);
+    else if(kind==='reticle') reticleG(r,p,ctx);
+    else textG(r,p,LABEL[def.id]||def.nm.toUpperCase(),ctx);
+    ctx.restore();
+    if(def.id===S.sel){
+      ctx.save(); ctx.strokeStyle='#ffb020'; ctx.setLineDash([4,3]); ctx.lineWidth=1.5;
+      ctx.strokeRect(r.x-3,r.y-3,r.w+6,r.h+6); ctx.setLineDash([]);
+      ctx.fillStyle='#ffb020'; ctx.font='11px monospace'; ctx.textAlign='left';
+      ctx.fillText(def.nm+'  ['+p.a+']', r.x-3, r.y-8); ctx.restore();
+    }
+  }
+}
+
+function fitCanvas(){
+  const st=$('stage'), pad=28;
+  let w=st.clientWidth-pad*2, h=w/S.aspect;
+  if(h>st.clientHeight-pad*2){ h=st.clientHeight-pad*2; w=h*S.aspect; }
+  cv.width=Math.round(w); cv.height=Math.round(h);
+  cv.style.width=w+'px'; cv.style.height=h+'px';
+  draw();
+}
+
+// ── panels ─────────────────────────────────────────────────────────────────
+function chips(host,arr,on,fn){ host.innerHTML='';
+  arr.forEach(a=>{const b=document.createElement('button');
+    b.className='chip'+(on(a)?' on':''); b.textContent=a.k||a; b.onclick=()=>fn(a);
+    host.appendChild(b);}); }
+function refreshList(){
+  const ul=$('list'); ul.innerHTML='';
+  for(const d of PARTS){ const p=S.layout[d.id];
+    const li=document.createElement('li'); if(d.id===S.sel) li.className='sel';
+    li.innerHTML=`<span class="k">${p?(p.kind||d.kind):'—'}</span>`
+      +`<span class="n${p?'':' off'}">${d.nm}</span>`
+      +(p?`<span style="color:var(--dim);font-size:10px">${p.a}</span>`:'');
+    li.onclick=()=>{S.sel=d.id; refreshList(); refreshProps(); draw();};
+    ul.appendChild(li);
+  }
+  $('stat').textContent=`${Object.keys(S.layout).length}/${PARTS.length} parts · ${S.aspectK}`;
+}
+function refreshProps(){
+  const d=PARTS.find(x=>x.id===S.sel), p=S.layout[S.sel], box=$('props');
+  if(!p){ box.innerHTML='<div class="hint">Part not in this preset.</div>'; return; }
+  const kind=p.kind||d.kind, circ=CIRCULAR.has(kind);
+  // Circular parts are radius+angle driven; showing w/h for them would be
+  // meaningless controls that silently do nothing.
+  box.innerHTML=`<label>${d.nm} — anchor</label><div class="anchor" id="anc"></div>
+    <div class="grid">
+      <span>x</span><input id="px" type="number" step="0.5" value="${p.x}">
+      <span>y</span><input id="py" type="number" step="0.5" value="${p.y}">
+      ${circ?`
+      <span>radius</span><input id="prad" type="number" step="0.5" value="${p.r!=null?p.r:20}">
+      <span>thick</span><input id="pth" type="number" step="0.1" value="${p.thick!=null?p.thick:1.2}">
+      <span>from°</span><input id="pa0" type="number" step="5" value="${p.a0!=null?p.a0:0}">
+      <span>to°</span><input id="pa1" type="number" step="5" value="${p.a1!=null?p.a1:360}">
+      <span>gap°</span><input id="pgap" type="number" step="0.5" value="${p.gapDeg!=null?p.gapDeg:0}">
+      <span>tick</span><input id="ptk" type="number" step="0.2" value="${p.tick!=null?p.tick:2.2}">
+      <span>fillEnd</span><input id="pfe" type="number" step="1" min="0" max="1" value="${p.fromEnd?1:0}">
+      `:`
+      <span>w</span><input id="pw" type="number" step="0.5" value="${p.w}">
+      <span>h</span><input id="ph" type="number" step="0.5" value="${p.h}">
+      `}
+      <span>segs</span><input id="ps" type="number" step="1" value="${p.seg||0}">
+      <span>rot</span><input id="pr" type="number" step="5" value="${p.rot||0}">
+      <span>alpha</span><input id="pal" type="number" step="0.05" value="${p.alpha!=null?p.alpha:1}">
+      <span>font</span><input id="pfs" type="number" step="0.1" value="${p.size!=null?p.size:1.4}">
+    </div>
+    <label>style</label><select id="pk"></select>
+    <label>direction</label><select id="pd"></select>
+    <label>colour</label><input id="pc" type="color" value="${p.col||'#ffffff'}">`;
+  const anc=$('anc');
+  ANCHORS.forEach(a=>{const b=document.createElement('button');
+    b.textContent=a.toUpperCase(); if(a===p.a) b.className='on';
+    b.onclick=()=>{p.a=a; refreshProps(); refreshList(); draw();}; anc.appendChild(b);});
+  $('pk').innerHTML=KINDS.map(k=>`<option${(p.kind||d.kind)===k?' selected':''}>${k}</option>`).join('');
+  $('pd').innerHTML=['right','left','up','down'].map(k=>`<option${(p.dir||'right')===k?' selected':''}>${k}</option>`).join('');
+  const bind=(id,key,num)=>{const el=$(id); if(!el) return; el.oninput=()=>{
+    p[key]= num? (parseFloat(el.value)||0) : el.value; draw(); refreshList();};};
+  bind('px','x',1); bind('py','y',1); bind('pw','w',1); bind('ph','h',1);
+  bind('prad','r',1); bind('pth','thick',1); bind('pa0','a0',1); bind('pa1','a1',1);
+  bind('pgap','gapDeg',1); bind('ptk','tick',1); bind('pfe','fromEnd',1); bind('pal','alpha',1); bind('pfs','size',1);
+  bind('ps','seg',1); bind('pr','rot',1); bind('pd','dir'); bind('pc','col');
+  // Switching style must add the fields the new kind needs, or a bar turned
+  // into an arc would have no radius and vanish.
+  $('pk').oninput=()=>{ p.kind=$('pk').value;
+    if(CIRCULAR.has(p.kind) && p.r==null) p.r=Math.max(6,(p.w||20)/2);
+    if(!CIRCULAR.has(p.kind) && p.w==null) { p.w=20; p.h=3; }
+    refreshProps(); draw(); refreshList(); };
+}
+
+// ── drag to move / shift-drag to resize ────────────────────────────────────
+cv.addEventListener('pointerdown',e=>{
+  const r=cv.getBoundingClientRect();
+  const mx=(e.clientX-r.left)*(cv.width/r.width), my=(e.clientY-r.top)*(cv.height/r.height);
+  // pick the part under the cursor, nearest centre wins
+  let best=null,bd=1e9;
+  for(const d of PARTS){ const p=S.layout[d.id]; if(!p) continue;
+    const q=place(p,cv.width,cv.height);
+    if(mx>=q.x-4&&mx<=q.x+q.w+4&&my>=q.y-4&&my<=q.y+q.h+4){
+      const dist=Math.hypot(mx-q.cx,my-q.cy); if(dist<bd){bd=dist;best=d.id;} } }
+  if(!best) return;
+  S.sel=best; refreshList(); refreshProps();
+  S.drag={id:best,mx,my,resize:e.shiftKey,
+          o:Object.assign({},S.layout[best])};
+  cv.setPointerCapture(e.pointerId); draw();
+});
+cv.addEventListener('pointermove',e=>{
+  if(!S.drag) return;
+  const r=cv.getBoundingClientRect();
+  const mx=(e.clientX-r.left)*(cv.width/r.width), my=(e.clientY-r.top)*(cv.height/r.height);
+  const vmin=Math.min(cv.width,cv.height)/100;
+  const dx=(mx-S.drag.mx)/vmin, dy=(my-S.drag.my)/vmin;
+  const p=S.layout[S.drag.id], o=S.drag.o;
+  if(S.drag.resize){ p.w=Math.max(.5,o.w+dx); p.h=Math.max(.5,o.h+dy); }
+  else { p.x=Math.round((o.x+dx)*10)/10; p.y=Math.round((o.y+dy)*10)/10; }
+  draw();
+});
+cv.addEventListener('pointerup',()=>{ if(S.drag){S.drag=null; refreshProps(); refreshList();} });
+
+addEventListener('keydown',e=>{
+  if(document.activeElement && /INPUT|SELECT/.test(document.activeElement.tagName)) return;
+  const p=S.layout[S.sel]; if(!p) return;
+  const step=e.shiftKey?2:0.5;
+  if(e.key==='ArrowLeft'){p.x-=step;draw();e.preventDefault();}
+  if(e.key==='ArrowRight'){p.x+=step;draw();e.preventDefault();}
+  if(e.key==='ArrowUp'){p.y-=step;draw();e.preventDefault();}
+  if(e.key==='ArrowDown'){p.y+=step;draw();e.preventDefault();}
+  const i=PARTS.findIndex(x=>x.id===S.sel);
+  if(e.key===']'){S.sel=PARTS[(i+1)%PARTS.length].id;refreshList();refreshProps();draw();}
+  if(e.key==='['){S.sel=PARTS[(i-1+PARTS.length)%PARTS.length].id;refreshList();refreshProps();draw();}
+});
+
+// ── wiring ─────────────────────────────────────────────────────────────────
+$('preset').innerHTML=Object.keys(PRESETS).map(k=>`<option>${k}</option>`).join('');
+$('applyPreset').onclick=()=>{ S.layout=JSON.parse(JSON.stringify(PRESETS[$('preset').value]));
+  refreshList(); refreshProps(); draw(); toast('Loaded "'+$('preset').value+'"'); };
+$('resetOne').onclick=()=>{ const src=PRESETS[$('preset').value][S.sel];
+  if(!src) return toast('Not in this preset');
+  S.layout[S.sel]=JSON.parse(JSON.stringify(src)); refreshProps(); draw(); };
+
+chips($('aspects'),ASPECTS,a=>a.k===S.aspectK,a=>{S.aspect=a.r;S.aspectK=a.k;
+  chips($('aspects'),ASPECTS,x=>x.k===S.aspectK,arguments.callee); fitCanvas(); refreshList();});
+function reAspect(){ chips($('aspects'),ASPECTS,a=>a.k===S.aspectK,a=>{
+  S.aspect=a.r;S.aspectK=a.k;reAspect();fitCanvas();refreshList();}); }
+reAspect();
+function reBd(){ chips($('backdrops'),BACKDROPS,b=>b===S.bd,b=>{S.bd=b;reBd();draw();});
+  $('bdName').textContent=''; }
+reBd();
+
+const vals=$('vals');
+Object.keys(V).forEach(k=>{
+  const s=document.createElement('span'); s.textContent=k;
+  const i=document.createElement('input'); i.type='range';
+  i.min=0; i.max= k==='dash'?5:1; i.step= k==='dash'?1:0.01; i.value=V[k];
+  i.oninput=()=>{V[k]=parseFloat(i.value); draw();};
+  vals.appendChild(s); vals.appendChild(i);
+});
+
+function exportJSON(){
+  return JSON.stringify({
+    _note:'LSS HUD layout. Units are VMIN: 1 = 1% of min(viewportW, viewportH). '
+      +'Each part anchors to one of 9 screen points (t/m/b + l/c/r) and offsets '
+      +'from it, so every element keeps the same size and the same distance from '
+      +'its edge on any aspect ratio — no frame or fit box needed.',
+    _fields:'a=anchor, x/y=offset vmin, w/h=size vmin, kind, seg=segments, '
+      +'dir=fill direction, rot=degrees, col=colour, size=font vmin, a0/a1=arc degrees',
+    aspectDesignedOn:S.aspectK,
+    parts:S.layout
+  },null,2);
+}
+window.exportJSON=exportJSON;
+$('copy').onclick=async()=>{ try{await navigator.clipboard.writeText(exportJSON());
+  toast('Copied — paste to Claude');}catch(_){toast('Clipboard blocked; use Download');} };
+$('dl').onclick=()=>{const b=new Blob([exportJSON()],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='hud_layout.json';a.click();};
+$('imp').onclick=()=>$('impFile').click();
+$('impFile').onchange=e=>{const f=e.target.files[0];if(!f)return;
+  const r=new FileReader();r.onload=()=>{try{const j=JSON.parse(r.result);
+    if(j.parts){S.layout=j.parts;refreshList();refreshProps();draw();toast('Imported');}}
+    catch(err){toast('Bad JSON');}};r.readAsText(f);};
+$('shot').onclick=()=>{const a=document.createElement('a');
+  a.href=cv.toDataURL('image/png');a.download='hud_'+$('preset').value.replace(/\W+/g,'_')+'.png';a.click();};
+
+let tT;function toast(m){const t=$('toast');t.textContent=m;t.classList.add('on');
+  clearTimeout(tT);tT=setTimeout(()=>t.classList.remove('on'),1900);}
+
+addEventListener('resize',fitCanvas);
+refreshList(); refreshProps(); fitCanvas();
+// If the pane has no layout yet at script time the stage measures 0 and the
+// canvas is left at its 300x150 default until something triggers a resize.
+// Re-fit once a frame has been laid out, and again after fonts settle.
+requestAnimationFrame(fitCanvas);
+setTimeout(fitCanvas, 250);
+</script>
+</body>
+</html>
