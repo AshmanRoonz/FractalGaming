@@ -3599,7 +3599,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.50';
+const LSS_BUILD = '35.51';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -43140,6 +43140,7 @@ function updateHUD() {
     }
   }
   if (_drawHudCanvas) drawCircumpunctHUD();
+  try { if (typeof _adbgTick === 'function') _adbgTick(); } catch (_) {}
   if (_xrHudActive) return;
 
   const corePct = Math.min(100, player.coreMeter);
@@ -59436,9 +59437,14 @@ function _playSoundFromLabRecipe(type) {
   if (!recipe || !Array.isArray(recipe.layers)) return false;
   const recipeGain = (typeof recipe.recipeGain === 'number') ? recipe.recipeGain : 1.0;
   const leanRecipe = !!(typeof _audioLeanMode === 'function' && _audioLeanMode() && _AUDIO_LEAN_RECIPE_TYPES[type]);
+  if (typeof _adbg !== 'undefined') _adbg.req++;
+  const _keep = recipe.layers.map(l =>
+    !(typeof l.chance === 'number' && l.chance < 1 && Math.random() > l.chance));
+  if (!_keep.some(Boolean)) _keep[0] = true;
   let leanTri = 0, leanNoise = 0;
-  for (const layer of recipe.layers) {
-    if (typeof layer.chance === 'number' && layer.chance < 1 && Math.random() > layer.chance) continue;
+  for (let _li = 0; _li < recipe.layers.length; _li++) {
+    const layer = recipe.layers[_li];
+    if (!_keep[_li]) continue;
     if (leanRecipe) {
       if (layer.kind === 'tri') {
         if (leanTri >= 1) continue;
@@ -59624,6 +59630,58 @@ function __audioStats() {
 if (typeof window !== 'undefined') {
   window.__audioStats = __audioStats;
   window.__audioDrops = __audioDrops;
+}
+
+const _adbg = { on: false, el: null, req: 0, nodes: 0, lastT: 0, rate: 0, nrate: 0, wrapped: false };
+function _adbgWrapCtx() {
+  if (_adbg.wrapped || !audio.ctx) return;
+  _adbg.wrapped = true;
+  for (const f of ['createOscillator', 'createBufferSource']) {
+    const orig = audio.ctx[f].bind(audio.ctx);
+    audio.ctx[f] = function () { _adbg.nodes++; return orig.apply(null, arguments); };
+  }
+}
+function __audioDebug(on) {
+  _adbg.on = (on !== false);
+  if (!_adbg.on) { if (_adbg.el) _adbg.el.style.display = 'none'; return 'off'; }
+  _adbgWrapCtx();
+  if (!_adbg.el) {
+    const d = document.createElement('div');
+    d.id = 'lss-adbg';
+    d.style.cssText = 'position:fixed;left:6px;top:6px;z-index:60;pointer-events:none;' +
+      'font:700 11px/1.35 ui-monospace,Consolas,monospace;color:#9fe8ff;' +
+      'background:rgba(6,12,20,0.82);border:1px solid rgba(79,209,255,0.45);' +
+      'border-radius:5px;padding:5px 8px;white-space:pre;text-shadow:0 1px 3px #000;';
+    document.body.appendChild(d);
+    _adbg.el = d;
+  }
+  _adbg.el.style.display = '';
+  return 'on';
+}
+function _adbgTick() {
+  if (!_adbg.on || !_adbg.el || !audio.ctx) return;
+  const t = audio.ctx.currentTime;
+  if (t - _adbg.lastT < 0.25) return;
+  const dt = t - _adbg.lastT || 1;
+  _adbg.rate  = _adbg.req / dt;
+  _adbg.nrate = _adbg.nodes / dt;
+  _adbg.req = 0; _adbg.nodes = 0; _adbg.lastT = t;
+  const d = __audioDrops();
+  const s = __audioStats();
+  _adbg.el.textContent =
+    'snd/s ' + _adbg.rate.toFixed(1) + '   nodes/s ' + _adbg.nrate.toFixed(0) + '\n' +
+    'ctx ' + s.ctxState + '  lat ' + (s.outputLatency != null ? s.outputLatency.toFixed(3) : '?') + '\n' +
+    'gate ' + s.gating.mode + '  lean ' + (s.leanMode ? 'Y' : 'n') + '  mob ' + (s.mobile ? 'Y' : 'n') + '\n' +
+    'win ' + s.startsInWindow + '/' + s.budget + '  stress ' + (s.stressed ? 'Y' : 'n') + '\n' +
+    'drops gap ' + d.droppedByMinGap + '  bud ' + d.droppedByBudget;
+}
+if (typeof window !== 'undefined') {
+  window.__audioDebug = __audioDebug;
+  try {
+    if (/[?&]adbg=1/.test(location.search)) {
+      setTimeout(() => { try { __audioDrops(true); __audioDebug(true); } catch (_) {} }, 1500);
+    }
+  } catch (_) {}
 }
 
 function _tickSoundLoop(host, stateKey, dt, interval, soundType) {
