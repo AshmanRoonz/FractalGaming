@@ -367,11 +367,11 @@ body.vr-active #fps-counter { display: none !important; }
 #weapon-info { display: none; }
 
 
-/* (v35.43) Back to 10px — the v35.40 push to 4.6vmin was only there to clear
-   the compass strip, and in v35.43 the compass moved down above the radar, so
-   top centre is free again. */
+/* (v35.40) Pushed below the layout HUD's compass strip, which now owns
+   1.6..3.4 vmin at top centre. (Hidden in freeflight, so this only matters in
+   the timed modes.) */
 #round-info {
-  position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+  position: fixed; top: 4.6vmin; left: 50%; transform: translateX(-50%);
   z-index: 10; pointer-events: none; color: #fff; text-align: center;
   font-family: 'Rajdhani', sans-serif; font-size: 12px; letter-spacing: 1px;
 }
@@ -1028,30 +1028,18 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 }
 
 
-/* (v35.45) NOT A PAGE ELEMENT ANY MORE. The radar is blitted into the HUD
-   canvas by _hlRadar, so it inherits the shake counter-shift and the
-   third-person parallax transform that the rest of the HUD rides — as a
-   separate `position:fixed` element it sat dead still while the compass rose
-   drawn around it swayed, which pulled the two halves of one instrument apart.
-   This canvas is now purely an offscreen render target for updateMinimap (and
-   for the VR radar plane, which textures it directly). Its backing store and
-   2D context are unaffected by display:none.
-   ⚠ The disc's fill and rim moved into _hlRadar with it — don't restore
-   background/border here expecting to see them. Position and size now come
-   from `minimap` in _HL, not from CSS. */
-#minimap { display: none; }
-
-/* (v35.40) Superseded by the rule above; kept for the record of what the
-   free-standing element used to be. */
+/* (v35.40) Moved to the layout HUD's minimap slot: bottom-centre, circular,
+   12 vmin. The layout anchors it "bc" at y -8, so the disc's centre sits 8 vmin
+   above the bottom edge and its lower rim 2 vmin clear of it. Round, because on
+   a HUD built out of concentric arcs a square radar was the one element that
+   didn't belong. vmin (not px) so it scales with the rest of the cluster. */
 /* (v35.42) Radius 6 -> 11 vmin. The disc had to move UP to grow: its rim was
    already 2 vmin off the bottom, so widening in place would have pushed a third
    of it off-screen. `bottom` is now rim-to-edge = 22 (height) - 16.5 (the
    layout's centre offset) = 5.5vmin, which also opens the gap the aegis rank
-   line sits in. Keep these two numbers agreeing with `minimap` in _HL.
-   (v35.44) bottom 5.5 -> 8vmin (centre offset 19), making room for the compass
-   rose that now rings the disc — its letters reach 13.5 vmin from the centre. */
+   line sits in. Keep these two numbers agreeing with `minimap` in _HL. */
 #minimap {
-  position: fixed; bottom: 8vmin; left: 50%; transform: translateX(-50%);
+  position: fixed; bottom: 5.5vmin; left: 50%; transform: translateX(-50%);
   width: 22vmin; height: 22vmin; border-radius: 50%;
   background: rgba(10,10,20,0.55); border: 1px solid rgba(79,209,255,0.45);
   z-index: 10; pointer-events: none;
@@ -3681,7 +3669,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.45';
+const LSS_BUILD = '35.42';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -51965,18 +51953,8 @@ const _HL = {
   // disc off-screen. The centre moves up instead, which also opens the room the
   // aegis line now sits in. Placed in CSS (it's a DOM canvas) — the entry here
   // is the record of where it lives so the frame design accounts for it.
-  // (v35.44) y -16.5 -> -19, making room for the compass ring around its rim.
-  minimap:   { a:'bc', x:0, y:-19, w:22, h:22,  kind:'ring', col:'#4fd1ff' },
-  // (v35.44) INTEGRATED WITH THE RADAR — concentric with it, not a separate
-  // strip. The radar is world-aligned north-up (`sy = cy + (wz-ccz)*scale`, no
-  // rotation, and north is world -Z exactly as the old ribbon measured it), so
-  // the cardinals belong ON its rim: they label the disc's own axes, and the
-  // heading rides round them. That also means the letters are FIXED and the
-  // MARKER moves — rotating the ring instead would desync it from the map
-  // underneath, which is the whole reason the strip felt bolted on.
-  // Outer radius 13.5 against the disc's 11. `kind:'ring'` is a placeholder for
-  // the studio, which has no compass-rose renderer — same as `minimap`.
-  compass:   { a:'bc', x:0, y:-19, w:27, h:27, kind:'ring', col:'#7d93a7' },
+  minimap:   { a:'bc', x:0, y:-16.5, w:22, h:22,  kind:'ring', col:'#4fd1ff' },
+  compass:   { a:'bc', x:0, y:-97.5, w:38, h:1.8, kind:'bar',  col:'#7d93a7' },
   objective: { a:'tc', x:0, y:9,  w:46, h:2.4, kind:'text', size:1.3, col:'#ffd24d' },
 };
 
@@ -52180,112 +52158,40 @@ function _hlText(ctx, r, p, str, col) {
   ctx.restore();
 }
 
-// (v35.45) The radar, drawn INTO the HUD canvas from the offscreen #minimap
-// bitmap. It used to be a `position:fixed` DOM element, which meant it was the
-// one piece of the HUD that didn't move: the shake counter-shift lives in this
-// canvas's transform and the third-person parallax rides a CSS transform on
-// this canvas's ELEMENT, and a separate fixed element inherits neither. Once
-// the compass rose was drawn around it (v35.44) that was untenable — the rose
-// swayed and the disc under it did not, so a single instrument visibly came
-// apart. Blitting it here gets both motions for free and by construction.
-//
-// updateMinimap still renders to the #minimap canvas exactly as before; this
-// only changes where that bitmap is presented. The fill and rim came along too,
-// because they were CSS background/border on the element that is now hidden.
-function _hlRadar(ctx, r) {
-  // VR mirrors this whole canvas onto a HUD mesh AND carries its own radar
-  // plane textured from #minimap. Blitting in that case would show the radar
-  // twice, so leave the dedicated plane to it.
-  if ((typeof isXRPresenting === 'function') && isXRPresenting()) return;
-  // Ship-select hid the old element via `body:has(#ship-select.active)`. The
-  // cinematic gate needs no equivalent — it hides #circumpunct-hud outright.
-  const ss = (_hlRadar._ss !== undefined) ? _hlRadar._ss
-    : (_hlRadar._ss = document.getElementById('ship-select'));
-  if (ss && ss.classList.contains('active')) return;
-  const src = (typeof _mm !== 'undefined' && _mm) ? _mm.canvas : null;
-  if (!src || !src.width) return;
-
-  const R = Math.min(r.w, r.h) / 2;
-  ctx.save();
-  ctx.beginPath(); ctx.arc(r.cx, r.cy, R, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(10,10,20,0.55)';
-  ctx.fill();
-  ctx.clip();
-  ctx.drawImage(src, r.cx - R, r.cy - R, R * 2, R * 2);
-  ctx.restore();
-  ctx.strokeStyle = 'rgba(79,209,255,0.45)';
-  ctx.lineWidth = Math.max(1, r.vmin * 0.14);
-  ctx.beginPath(); ctx.arc(r.cx, r.cy, R, 0, Math.PI * 2); ctx.stroke();
-}
-
-// (v35.44) COMPASS ROSE ON THE RADAR'S RIM — the two used to be separate
-// instruments stacked on top of each other; this makes them one.
-//
-// The layout places this part CONCENTRIC with `minimap`, so `r.cx/r.cy` is the
-// radar's own centre and the ring lands just outside its 11-vmin disc.
-//
-// ⚠ The letters are FIXED and the heading MARKER moves — not the other way
-// round. `updateMinimap` plots contacts with `sy = cy + (wz - ccz) * scale`,
-// no rotation, so the disc is world-aligned with north (world -Z, the same
-// bearing the old ribbon measured) permanently at the top. Rotating the
-// cardinals would put N somewhere the map underneath doesn't agree with, which
-// is exactly the disconnect that made a separate strip necessary. Fixed
-// cardinals label the DISC'S OWN AXES; the marker answers "where am I facing".
-//
-// Canvas angles: 0 = right (E), 90 = down (S), 270 = up (N). A bearing of
-// `hdg` degrees clockwise from north is therefore `hdg - 90` on the canvas.
+// The compass slot renders the real heading ribbon rather than the studio's
+// placeholder bar — the studio has no way to draw a compass, so `kind:'bar'`
+// there is a stand-in for "a 38-vmin-wide strip lives here".
 function _hlCompass(ctx, r, col) {
   const _cfwd = (_hlCompass._fwd = _hlCompass._fwd || new THREE.Vector3());
   camera.getWorldDirection(_cfwd);
   const hdg = ((Math.atan2(_cfwd.x, -_cfwd.z) * 180 / Math.PI) + 360) % 360;
-  const vm = r.vmin;
-  const R = Math.min(r.w, r.h) / 2;          // 13.5 vmin — the rose's outer edge
-  const rIn = R - 2.3 * vm;                  // 11.2 vmin — just clear of the disc
-  hudFont('700 ' + (vm * 1.15).toFixed(1) + 'px Orbitron, Courier New');   // before save() — see _hlText
+  const ribW = r.w, ribY = r.cy + r.h * 0.5;
+  const pxPerDeg = ribW / 90;
+  const tick = Math.max(3, r.vmin * 0.8);
+  hudFont('700 ' + (r.vmin * 1.05).toFixed(1) + 'px Orbitron, Courier New');   // before save() — see _hlText
   ctx.save();
-
-  // Graduations every 15 deg, long at the eight principal bearings.
-  for (let d = 0; d < 360; d += 15) {
-    const a = (d - 90) * _HL_D2R;
-    const major = d % 45 === 0;
-    ctx.strokeStyle = _hlA(col, major ? 0.8 : 0.32);
-    ctx.lineWidth = major ? Math.max(1, vm * 0.16) : 1;
-    const ca = Math.cos(a), sa = Math.sin(a);
-    const len = major ? 1.2 * vm : 0.65 * vm;
-    ctx.beginPath();
-    ctx.moveTo(r.cx + ca * rIn, r.cy + sa * rIn);
-    ctx.lineTo(r.cx + ca * (rIn + len), r.cy + sa * (rIn + len));
-    ctx.stroke();
+  ctx.beginPath(); ctx.rect(r.x, ribY - tick * 2.4, ribW, tick * 4.2); ctx.clip();
+  ctx.strokeStyle = _hlA(col, 0.55); ctx.lineWidth = 1;
+  ctx.fillStyle = _hlA('#c8e6ff', 0.85);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  const lbls = ['N','NE','E','SE','S','SW','W','NW'];
+  for (let d = -60; d <= 60; d += 5) {
+    const deg = ((Math.round(hdg / 5) * 5 + d) % 360 + 360) % 360;
+    const x = r.cx + ((((deg - hdg + 180) % 360 + 360) % 360) - 180) * pxPerDeg;
+    if (x < r.x || x > r.x + ribW) continue;
+    const mj = deg % 45 === 0;
+    ctx.beginPath(); ctx.moveTo(x, ribY - (mj ? tick : tick * 0.5)); ctx.lineTo(x, ribY); ctx.stroke();
+    if (mj) ctx.fillText(lbls[Math.round(deg / 45) % 8], x, ribY + 2);
   }
-
-  // Cardinals only — NE/SE/SW/NW as well would crowd a 13.5-vmin ring, and
-  // their ticks already mark them. North reads brighter so the disc's
-  // orientation is legible at a glance.
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const rL = rIn + 1.7 * vm;
-  const L = ['N', 'E', 'S', 'W'];
-  for (let i = 0; i < 4; i++) {
-    const a = (i * 90 - 90) * _HL_D2R;
-    ctx.fillStyle = i === 0 ? _hlA('#ebf8ff', 0.95) : _hlA(col, 0.72);
-    ctx.fillText(L[i], r.cx + Math.cos(a) * rL, r.cy + Math.sin(a) * rL);
-  }
-
-  // Heading marker: rides the graduations at the ship's bearing, pointing in
-  // at the disc. Cyan to match the radar rim rather than the rose's slate.
-  const ha = (hdg - 90) * _HL_D2R;
-  ctx.translate(r.cx + Math.cos(ha) * (rIn + 1.25 * vm),
-                r.cy + Math.sin(ha) * (rIn + 1.25 * vm));
-  ctx.rotate(ha);                            // +x now points radially outward
-  ctx.fillStyle = _hlA('#4fd1ff', 0.95);
-  ctx.shadowColor = _hlA('#4fd1ff', 0.9);
-  ctx.shadowBlur = vm * 0.6;
-  ctx.beginPath();
-  ctx.moveTo(-1.15 * vm, 0);
-  ctx.lineTo(0.15 * vm, 0.6 * vm);
-  ctx.lineTo(0.15 * vm, -0.6 * vm);
-  ctx.closePath(); ctx.fill();
-
   ctx.restore();
+  ctx.strokeStyle = _hlA(col, 0.6); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(r.x, ribY); ctx.lineTo(r.x + ribW, ribY); ctx.stroke();
+  ctx.fillStyle = _hlA('#ebf8ff', 0.9);
+  ctx.beginPath();
+  ctx.moveTo(r.cx, ribY - tick * 1.5);
+  ctx.lineTo(r.cx - tick * 0.6, ribY - tick * 2.4);
+  ctx.lineTo(r.cx + tick * 0.6, ribY - tick * 2.4);
+  ctx.closePath(); ctx.fill();
 }
 
 // The whole cluster, one call. `cx/cy` carry the shake counter-shift; everything
@@ -52366,9 +52272,6 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     _hlText(ctx, r, _HL.objective, v.objectiveStr, _HL.objective.col);
   }
 
-  // Radar first, rose over it — they're concentric, so the rose's inner
-  // graduations would be under the disc's rim otherwise.
-  _hlRadar(ctx, _hlPlace(_HL.minimap, W, H));
   if (typeof window === 'undefined' || window.__hudCompass !== false) {
     _hlCompass(ctx, _hlPlace(_HL.compass, W, H), _HL.compass.col);
   }
@@ -54072,9 +53975,15 @@ function updateMinimap() {
     }
   }
 
-  // (v35.43) Map-name label REMOVED from the radar per user. `game.mapWord` is
-  // still maintained (set on level load, preserved across the save/restore in
-  // the map-gen path) — this was just its only reader.
+  // Map word label. (v35.42) 145 -> 136: at y=145 a ~60px-wide name's ends reach
+  // hypot(30, 70) = 76 from centre, just past the 75 clip radius, so the round
+  // radar shaved the first and last few characters off. 136 puts them at 70.
+  if (game.mapWord) {
+    ctx.fillStyle = 'rgba(255,170,0,0.4)';
+    hudFont('8px Courier New');
+    ctx.textAlign = 'center';
+    ctx.fillText(game.mapWord, 75, 136);
+  }
 }
 // (dev) Force a single minimap redraw, bypassing the 20Hz throttle, so the
 // radar can be validated when the render loop is paused (headless/background
