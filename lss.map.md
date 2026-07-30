@@ -439,6 +439,14 @@ Per-frame match state machine (warmup/countdown/active/round-end), timers, win c
 - **Symbols:** `_clip`, `_CLIP_LAYER_IDS`, `_clipCompositeTick`, `_clipStart`/`_clipStop`/`_clipSave`
 - **⚠** NAME COLLISION with the terrain clipmap `_clip*` (~L22110). Different system.
 
+#### VR menus (mirror mesh) — `~L15551`
+**Jump:** `function _xrUpdateMenuMirror` · `let _xrMenuForceHidden` · `function _xrShipSelectVisible`
+The VR menu plane mirrors whichever 2D menu is up, keyed on `#ship-select.active` / `#lobby` visibility.
+- **⚠ (v35.59) A running countdown must NOT hide the menu while ship-select is up.** Between rounds the round system shows ship-select and calls `launchCountdown()` *together* — the countdown **is** the swap window, and `launchCountdown` only paints the digit overlay, it never hides `#ship-select` (`finishLaunch` does, at LAUNCH). Folding `_countdownActive` into `_matchStarting` therefore blanked the VR mirror for exactly the period the player was meant to be choosing, so **VR never got a between-rounds ship pick while flat screen did**. The countdown term now applies only when no ship-select is on screen.
+- **⚠ The "already committed, take the menu away" signal is `_xrMenuForceHidden`, not `_countdownActive`.** `commitLoadout` sets it (ship-select stays `.active` for a moment after — see its own note) and the roundEnd branch explicitly clears it. The VR trigger's confirm gate uses it for the same reason: making the menu visible between rounds is pointless if the trigger still refuses to confirm.
+- `_xrShouldShowGameplayHud` **keeps** its countdown check — between rounds you want the menu mesh, not the gameplay HUD.
+- **⚠ Hard to test headlessly:** the between-rounds branch needs a legitimately won round. Forcing `game.state='roundEnd'` does not reach it even with `roundEndTimerAnchorMs`/`Total` set, so this path was verified by code-read plus a flat-screen no-regression check, **not** observed live or in a headset.
+
 #### Return to menu — `~L46756`
 **Jump:** `function returnToRootMenu` · `function returnToMainMenu` (~L47030)
 Tear down session, dispose world objects, reset state, restore UI.
