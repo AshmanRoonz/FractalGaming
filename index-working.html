@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.67';
+const LSS_BUILD = '35.68';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4217,6 +4217,24 @@ const input = {
   // as-D-pad fallback (XR controllers genuinely have no D-pad hardware).
   xrSynth: {
     leftStickAsDpad: true,
+    // (v35.68) RIGHT stick as a 4-way pad. The right stick is the LOOK axis,
+    // but VR aims with the head (see vrHeadAim), so on a headset it is spare —
+    // which makes it the natural home for the D-pad the hardware lacks. Unlike
+    // the left one this works DURING gameplay too: the left stick is strafe, so
+    // synthesising from it mid-flight re-creates the v32.99/v35.57 bug where
+    // sidestepping swapped your ship. When this is on, gpLookX/Y are zeroed in
+    // VR so the same push cannot also turn you.
+    rightStickAsDpad: true,
+  },
+  // (v35.68) The four directions are bound to ACTIONS, not to button indices.
+  // Going through gpBindings would have meant reusing standard buttons 12-15,
+  // and 12 is already `core` — so right-stick-up would have fired the core.
+  // Empty string = unbound. Valid actions are the keys of _XR_STICK_ACTIONS.
+  xrStickDpad: {
+    up:    'scoreboard',
+    down:  '',
+    left:  'shipPrev',
+    right: 'shipNext',
   },
   vrHeadAim: {
     enabled:     true,
@@ -51607,6 +51625,98 @@ if (typeof window !== 'undefined') window.returnToMainMenu = returnToMainMenu;
 //   left  thumbstick (axes)   -> standard axes 0,1 (move)
 //   right thumbstick (axes)   -> standard axes 2,3 (look)
 //   left  thumbstick deflection -> standard btns 12-15 (D-pad up/down/left/right)
+// (v35.68) Actions the right-stick pad can be bound to. Each is dispatched
+// directly rather than through gpBindings — see the xrStickDpad note in the
+// input defaults for why button indices were the wrong vehicle.
+//   hold : true  = active for as long as the stick is held that way
+//          false = fires once per push (edge-triggered)
+const _XR_STICK_ACTIONS = {
+  '':           { label: 'None',            hold: false, run: () => {} },
+  scoreboard:   { label: 'Scoreboard (hold)', hold: true, run: () => {} },
+  shipPrev:     { label: 'Previous ship',   hold: false, run: () => _xrStickCycleShip(-1) },
+  shipNext:     { label: 'Next ship',       hold: false, run: () => _xrStickCycleShip(1) },
+  mapPrev:      { label: 'Previous map',    hold: false, run: () => { if (typeof cycleMap === 'function') cycleMap(-1); } },
+  mapNext:      { label: 'Next map',        hold: false, run: () => { if (typeof cycleMap === 'function') cycleMap(1); } },
+  thirdPerson:  { label: 'Toggle 3rd person', hold: false, run: () => { try { _toggleThirdPerson(); } catch (_) {} } },
+  openSettings: { label: 'Open settings',   hold: false, run: () => { try { if (settingsOpen) closeSettings(); else { buildSettingsPage(); openSettings(); } } catch (_) {} } },
+  reload:       { label: 'Reload',          hold: false, run: () => { try { reloadWeapon(); } catch (_) {} } },
+};
+// Ship cycling has two homes: the ship-select carousel when that panel is up,
+// and cycleHubShip in free-flight. One entry point so a bound direction does
+// the right thing wherever the player happens to be.
+function _xrStickCycleShip(dir) {
+  const sel = document.getElementById('ship-select');
+  if (sel && sel.classList.contains('active')) {
+    const chips = Array.from(document.querySelectorAll('.ship-chip'));
+    if (!chips.length) return;
+    let i = chips.findIndex(c => c.classList.contains('selected'));
+    i = (i < 0) ? 0 : (i + dir + chips.length) % chips.length;
+    const key = chips[i] && chips[i].dataset && chips[i].dataset.key;
+    if (key && typeof previewLoadout === 'function') previewLoadout(key);
+    return;
+  }
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game.state === 'playing') {
+    try { cycleHubShip(dir); } catch (_) {}
+  }
+}
+// Right-stick 4-way pad. Runs from pollGamepad (not the synth) because the
+// bound actions need game/menu context that the synth deliberately has none of,
+// and because 'scoreboard' is a HOLD, which a synthesised button press can't
+// express through the edge-triggered binding path.
+let _xrStickScoreboardHeld = false;
+// `inject` is the flat-screen test path (window.__xrStick) — it supplies stick
+// values and bypasses the isPresenting gate so the direction resolution and
+// action dispatch can be exercised without a headset. Null in normal play.
+function _xrStickDpadTick(inject) {
+  const on = !!(inject || (renderer && renderer.xr && renderer.xr.isPresenting &&
+                input.xrSynth && input.xrSynth.rightStickAsDpad));
+  if (!on) {
+    input._xrStickPrevDir = '';
+    if (_xrStickScoreboardHeld) { _xrStickScoreboardHeld = false; try { _refreshScoreboardVisibility(); } catch (_) {} }
+    return false;
+  }
+  const rp = xrControllers.rightSrc && xrControllers.rightSrc.gamepad;
+  let rx = 0, ry = 0;
+  if (inject) {
+    rx = inject.x || 0; ry = inject.y || 0;
+  } else if (rp && rp.axes) {
+    rx = rp.axes[2] || 0; ry = rp.axes[3] || 0;
+    if (rx === 0 && ry === 0) { rx = rp.axes[0] || 0; ry = rp.axes[1] || 0; }
+  }
+  // Dominant axis only — a diagonal push must not fire two directions.
+  const T = 0.7;
+  const horiz = Math.abs(rx) > Math.abs(ry);
+  const dir = (horiz && rx < -T) ? 'left' : (horiz && rx > T) ? 'right'
+            : (!horiz && ry < -T) ? 'up'  : (!horiz && ry > T) ? 'down' : '';
+  const map = input.xrStickDpad || {};
+  const spec = _XR_STICK_ACTIONS[map[dir]] || null;
+
+  // Hold actions track the CURRENT direction; edge actions fire on change.
+  const wantSb = !!(spec && spec.hold && map[dir] === 'scoreboard' && game.state === 'playing');
+  if (wantSb !== _xrStickScoreboardHeld) {
+    _xrStickScoreboardHeld = wantSb;
+    try { _refreshScoreboardVisibility(); } catch (_) {}
+  }
+  if (dir && dir !== input._xrStickPrevDir && spec && !spec.hold) {
+    try { spec.run(); } catch (e) { console.warn('[xr-stick] action failed', map[dir], e); }
+  }
+  input._xrStickPrevDir = dir;
+  return true;
+}
+// Flat-screen test hook for the right-stick pad — headset-only otherwise.
+if (typeof window !== 'undefined') {
+  window.__xrStick = {
+    // Drive one tick with synthetic stick values; returns what it resolved to.
+    push(x, y) {
+      _xrStickDpadTick({ x, y });
+      return { dir: input._xrStickPrevDir, bound: (input.xrStickDpad || {})[input._xrStickPrevDir] || '', scoreboardHeld: _xrStickScoreboardHeld };
+    },
+    release() { return this.push(0, 0); },
+    state() { return { prevDir: input._xrStickPrevDir, scoreboardHeld: _xrStickScoreboardHeld, map: input.xrStickDpad, on: !!(input.xrSynth && input.xrSynth.rightStickAsDpad) }; },
+    actions() { return Object.keys(_XR_STICK_ACTIONS); },
+  };
+}
+
 function _xrSynthGamepad() {
   if (typeof renderer === 'undefined' || !renderer.xr || !renderer.xr.isPresenting) return null;
   const left  = xrControllers.leftSrc  && xrControllers.leftSrc.gamepad;
@@ -52080,6 +52190,10 @@ function pollGamepad() {
   input.gpLookX = Math.sign(rawLX) * Math.pow(Math.abs(rawLX), lc);
   input.gpLookY = Math.sign(rawLY) * Math.pow(Math.abs(rawLY), lc);
   if (input.invertLookY) input.gpLookY = -input.gpLookY;
+  // (v35.68) Right stick is the pad in VR, so it must not ALSO steer. Runs the
+  // pad first, then zeroes look — otherwise flicking right to change ship would
+  // yaw you at the same time. Flat screen never reaches this (isPresenting).
+  if (_xrStickDpadTick()) { input.gpLookX = 0; input.gpLookY = 0; }
 
   // Helper to read a bound button
   function gpBtn(actionName) {
@@ -54833,7 +54947,10 @@ function updateMinimap() {
   // frame stays on the canvas between redraws (we don't clear), so the radar
   // remains visible. A radar at 20Hz reads the same as 60Hz at 150px scale.
   const now = (typeof game !== 'undefined' && game.time) || 0;
-  if (_mm.lastTick && now - _mm.lastTick < 0.1) return;   
+  // (v35.68) Interval is set by the caller so VR perf tiers can slow the radar
+  // down instead of switching it off entirely. Defaults to the original 0.1.
+  const _mmInt = (typeof _mm.minInterval === 'number' && _mm.minInterval > 0) ? _mm.minInterval : 0.1;
+  if (_mm.lastTick && now - _mm.lastTick < _mmInt) return;
   _mm.lastTick = now;
 
   ctx.clearRect(0, 0, 150, 150);
@@ -57350,6 +57467,7 @@ function _refreshSettingsValues() {
 
   // VR controller bindings + synth toggles.
   setChk('set-xr-leftstick-dpad', input.xrSynth && input.xrSynth.leftStickAsDpad);
+  setChk('set-xr-rightstick-dpad', input.xrSynth && input.xrSynth.rightStickAsDpad);
   overlay.querySelectorAll('.xr-bind-select').forEach(sel => {
     const action = sel.dataset.action;
     if (!action || !input.xrBindings) return;
@@ -57564,8 +57682,16 @@ function buildSettingsPage() {
         <label style="flex:1;">Pick which XR controller button performs each action. (The Gamepad - Button Mapping section above still applies on a flat-screen Xbox-style controller.)</label>
       </div>
       <div id="xr-bind-rows"></div>
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Left thumbstick acts as D-Pad</label>
+      <div class="setting-row" style="margin-top:10px;">
+        <label>Right thumbstick acts as D-Pad</label>
+        <input type="checkbox" id="set-xr-rightstick-dpad" ${input.xrSynth && input.xrSynth.rightStickAsDpad ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">VR aims with the head, so the right stick (normally look) is free. On, it becomes a 4-way pad and no longer turns you. Works during gameplay &mdash; unlike the left stick, which is strafe and can only do this in menus.</label>
+      </div>
+      <div id="xr-stick-dpad-rows"></div>
+      <div class="setting-row" style="margin-top:10px;">
+        <label>Left thumbstick acts as D-Pad (menus only)</label>
         <input type="checkbox" id="set-xr-leftstick-dpad" ${input.xrSynth && input.xrSynth.leftStickAsDpad ? 'checked' : ''}>
       </div>
       <div class="setting-row" style="margin-top:4px;">
@@ -58929,7 +59055,7 @@ function buildSettingsPage() {
   const xrBindContainer = overlay.querySelector('#xr-bind-rows');
   if (xrBindContainer) {
     if (!input.xrBindings) input.xrBindings = Object.assign({}, XR_DEFAULTS);
-    if (!input.xrSynth)    input.xrSynth    = { leftStickAsDpad: true };
+    if (!input.xrSynth)    input.xrSynth    = { leftStickAsDpad: true, rightStickAsDpad: true };
     for (const [action, label] of Object.entries(ACTION_LABELS)) {
       const row = document.createElement('div');
       row.className = 'setting-row';
@@ -58954,10 +59080,42 @@ function buildSettingsPage() {
     if (lsDpadChk) lsDpadChk.addEventListener('change', () => {
       input.xrSynth.leftStickAsDpad = !!lsDpadChk.checked; saveSettings();
     });
+    const rsDpadChk = overlay.querySelector('#set-xr-rightstick-dpad');
+    if (rsDpadChk) rsDpadChk.addEventListener('change', () => {
+      input.xrSynth.rightStickAsDpad = !!rsDpadChk.checked; saveSettings();
+    });
+    // (v35.68) The four right-stick directions, each a dropdown over
+    // _XR_STICK_ACTIONS. These are the "extra buttons" the pad adds — they bind
+    // to actions directly rather than to standard button indices, because 12-15
+    // are already spoken for (12 is `core`).
+    const stickBox = overlay.querySelector('#xr-stick-dpad-rows');
+    if (stickBox) {
+      if (!input.xrStickDpad) input.xrStickDpad = { up: 'scoreboard', down: '', left: 'shipPrev', right: 'shipNext' };
+      for (const [dir, label] of [['up', 'Right stick UP'], ['down', 'Right stick DOWN'],
+                                  ['left', 'Right stick LEFT'], ['right', 'Right stick RIGHT']]) {
+        const cur = input.xrStickDpad[dir] || '';
+        let opts = '';
+        for (const [val, spec] of Object.entries(_XR_STICK_ACTIONS)) {
+          opts += '<option value="' + val + '"' + (val === cur ? ' selected' : '') + '>' + spec.label + '</option>';
+        }
+        const row = document.createElement('div');
+        row.className = 'setting-row';
+        row.innerHTML = '<label>' + label + '</label>' +
+                        '<select class="xr-stick-select" data-dir="' + dir + '">' + opts + '</select>';
+        stickBox.appendChild(row);
+      }
+      overlay.querySelectorAll('.xr-stick-select').forEach(sel => {
+        sel.addEventListener('change', () => {
+          input.xrStickDpad[sel.dataset.dir] = sel.value || '';
+          saveSettings();
+        });
+      });
+    }
     const xrReset = overlay.querySelector('#xr-reset-defaults');
     if (xrReset) xrReset.addEventListener('click', () => {
       input.xrBindings = Object.assign({}, XR_DEFAULTS);
-      input.xrSynth = { leftStickAsDpad: true };
+      input.xrSynth = { leftStickAsDpad: true, rightStickAsDpad: true };
+      input.xrStickDpad = { up: 'scoreboard', down: '', left: 'shipPrev', right: 'shipNext' };
       saveSettings();
       buildSettingsPage();
       openSettings();
@@ -59733,6 +59891,7 @@ function saveSettings() {
       fireMouseButton: input.fireMouseButton,
       xrBindings: input.xrBindings,
       xrSynth:    input.xrSynth,
+      xrStickDpad: input.xrStickDpad,
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
       vrHudScale: input.vrHudScale,
@@ -61471,7 +61630,11 @@ function loadSettings() {
           if (bd.gpBindings) Object.assign(input.gpBindings || (input.gpBindings = {}), bd.gpBindings);
           if (bd.kbBindings) Object.assign(input.kbBindings || (input.kbBindings = {}), bd.kbBindings);
           if (bd.xrBindings) input.xrBindings = Object.assign({}, bd.xrBindings);
-          if (bd.xrSynth)    input.xrSynth    = Object.assign({}, bd.xrSynth);
+          // MERGE onto the live object rather than replacing it: an imported
+          // profile written before v35.68 has no rightStickAsDpad, and a bare
+          // replace would leave it undefined = pad silently off.
+          if (bd.xrSynth)     Object.assign(input.xrSynth, bd.xrSynth);
+          if (bd.xrStickDpad) Object.assign(input.xrStickDpad, bd.xrStickDpad);
           if (bd.vrHeadAim)  input.vrHeadAim  = Object.assign({}, bd.vrHeadAim);
           if (typeof bd.vrRenderScale === 'number') input.vrRenderScale = bd.vrRenderScale;
           if (typeof bd.vrPerfMode === 'string')    input.vrPerfMode    = bd.vrPerfMode;
@@ -61594,7 +61757,10 @@ function loadSettings() {
       );
       if (looksLikeV2) Object.assign(input.xrBindings, data.xrBindings);
     }
+    // Object.assign, so a pre-v35.68 save (which only has leftStickAsDpad)
+    // leaves rightStickAsDpad at its true default instead of clearing it.
     if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
+    if (data.xrStickDpad) Object.assign(input.xrStickDpad, data.xrStickDpad);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     // Absent key keeps the 1.5 default, so settings saved before v35.64 get the
@@ -66966,16 +67132,29 @@ function gameLoop(timestamp) {
   } catch (_) {}
   updateScreenShake(dt);
   updateDamageIndicators(dt);
-  updateHUD();
-  if (!_xrPresentingForOverlays && _vrPerfTier < 2) updateMinimap();
-  else if (_xrPresentingForOverlays && _vrPerfTier < 2) {
-    // (v33.54) VR minimap: draw to the (hidden) DOM canvas, then re-upload the
-    // worldspace plane's CanvasTexture only when the radar actually redrew
-    // (updateMinimap self-throttles to ~10Hz via _mm.lastTick).
+  // (v35.68) RADAR BEFORE HUD. _hlRadar blits _mm.canvas into the HUD canvas,
+  // so running updateMinimap afterwards meant the HUD always showed the
+  // PREVIOUS radar frame. Harmless at 60fps flat, but in VR the HUD canvas is
+  // itself only redrawn on a cadence, so the staleness compounded.
+  // (v35.68) THE RADAR NOW UPDATES AT EVERY VR PERF TIER.
+  // This was `_vrPerfTier < 2`, so 'Quest Fast' and 'Max FPS' never called
+  // updateMinimap in a session — freezing _mm.canvas at whatever it held when
+  // VR started. Ship-select has no contacts, so what got frozen was an EMPTY
+  // radar, permanently. And because the disc, rim and compass rose are drawn
+  // live by _hlRadar/_hlCompass every frame, the instrument looked perfectly
+  // healthy while never once showing an enemy — exactly the reported symptom.
+  // A 150x150 2D canvas at 3-10Hz is not where VR frame time goes; the tier
+  // now buys a slower refresh rather than a dead instrument.
+  // (v33.54) The worldspace plane's CanvasTexture is re-uploaded only when the
+  // radar actually redrew (updateMinimap self-throttles via _mm.lastTick).
+  {
+    _mm.minInterval = !_xrPresentingForOverlays ? 0.1
+      : (_vrPerfTier >= 3 ? 0.33 : _vrPerfTier >= 2 ? 0.2 : 0.1);
     const _mmPrev = _mm.lastTick;
     updateMinimap();
-    if (_xrMinimapTex && _mm.lastTick !== _mmPrev) _xrMinimapTex.needsUpdate = true;
+    if (_xrPresentingForOverlays && _xrMinimapTex && _mm.lastTick !== _mmPrev) _xrMinimapTex.needsUpdate = true;
   }
+  updateHUD();
   if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
   __pmark('fx+hud+minimap'); 
 
@@ -76090,7 +76269,11 @@ function _refreshScoreboardVisibility() {
   // Force scoreboard visible during the match-end pause so players can see the
   // final kills/damage totals before the root menu returns.
   const forced = (game.state === 'matchEnd');
-  const want = forced || _scoreboardKeyHeld || _scoreboardGpHeld;
+  // (v35.68) _xrStickScoreboardHeld is the VR right-stick pad's hold. It is a
+  // separate flag from _scoreboardGpHeld (Start-hold) so releasing one does not
+  // cancel the other when both happen to be active.
+  const want = forced || _scoreboardKeyHeld || _scoreboardGpHeld ||
+    (typeof _xrStickScoreboardHeld !== 'undefined' && _xrStickScoreboardHeld);
   if (want !== scoreboardVisible) {
     scoreboardVisible = want;
     updateScoreboard();
