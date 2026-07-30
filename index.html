@@ -3599,7 +3599,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.68';
+const LSS_BUILD = '35.69';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -54394,6 +54394,8 @@ function initAudio() {
 
     audio.initialized = true;
 
+    try { setTimeout(() => { try { _audioBakeAll('audio-init'); } catch (_) {} }, 400); } catch (_) {}
+
     const _audioWatchdog = () => {
       if (!audio.ctx) return;
       if (audio.ctx.state === 'suspended' || audio.ctx.state === 'interrupted') {
@@ -54621,14 +54623,25 @@ function _safeOscType(wave) {
   return 'sine';
 }
 
+let _bakeCtx = null, _bakeDest = null;
+function _audioTargetCtx() { return _bakeCtx || audio.ctx; }
+function _audioTargetNow(startOffset) {
+  return (_bakeCtx ? 0 : audio.ctx.currentTime) + (startOffset || 0);
+}
+function _audioDrySink() {
+  if (_bakeDest) return _bakeDest;
+  return audio._spatialSink || audio.dryGain || audio.masterGain;
+}
+
 function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envelope) {
-  const ctx = audio.ctx;
-  const now = ctx.currentTime + (startOffset || 0);
+  const ctx = _audioTargetCtx();
+  const now = _audioTargetNow(startOffset);
   const env = envelope || { attack: 0.003, hold: 0, decay: dur };
   const CHORUS_DETUNE_CENTS = 5;
   const CHORUS_MIX = 0.30;
   const safeWave = _safeOscType(wave);
-  const stressed = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
+  const stressed = _bakeCtx ? false
+    : ((typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed);
   const voiceFreqs = (stressed && freqs.length > 2) ? freqs.slice(0, 2) : freqs;
   voiceFreqs.forEach((freq, i) => {
     const osc = ctx.createOscillator();
@@ -54662,10 +54675,10 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
       chorusGain.connect(gain); 
     }
 
-    const drySink = audio._spatialSink || audio.dryGain || audio.masterGain;
+    const drySink = _audioDrySink();
     gain.connect(drySink);
-    if (!stressed && audio.convolver) gain.connect(audio.convolver);
-    if (!stressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+    if (!_bakeCtx && !stressed && audio.convolver) gain.connect(audio.convolver);
+    if (!_bakeCtx && !stressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
     osc.start(now); osc.stop(now + dur + 0.01);
     if (chorusOsc) { chorusOsc.start(now); chorusOsc.stop(now + dur + 0.01); }
   });
@@ -54673,8 +54686,9 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
 
 function playNoiseBurst(duration, volume, startTime, filterFreq, filterQ) {
   if (!audio.ctx) return;
-  const ctx = audio.ctx;
-  const lean = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
+  const ctx = _audioTargetCtx();
+  const lean = _bakeCtx ? false
+    : ((typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed);
   if (lean) {
     duration = Math.min(duration, 0.10);
     volume *= 0.85;
@@ -54696,10 +54710,10 @@ function playNoiseBurst(duration, volume, startTime, filterFreq, filterQ) {
   } else {
     src.connect(gain);
   }
-  const drySink = audio._spatialSink || audio.dryGain || audio.masterGain;
+  const drySink = _audioDrySink();
   gain.connect(drySink);
-  if (!lean && audio.convolver) gain.connect(audio.convolver);
-  if (!lean && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  if (!_bakeCtx && !lean && audio.convolver) gain.connect(audio.convolver);
+  if (!_bakeCtx && !lean && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
   const maxOffset = Math.max(0, buf.duration - duration - 0.005);
   const offset = maxOffset > 0 ? Math.random() * maxOffset : 0;
   src.start(startTime, offset, duration);
@@ -60079,11 +60093,11 @@ function _runLabTriLayer(layer, atOffsetSec, volMul) {
 const _labNoiseCache = new Map();
 
 function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
-  const ctx = audio.ctx;
+  const ctx = _audioTargetCtx();
   const dur = Math.max(0.003, layer.duration);
   const filterType = layer.filterType || 'lowpass';
-  const startTime = ctx.currentTime + atOffsetSec;
-  if (typeof _audioLeanMode === 'function' && _audioLeanMode()) {
+  const startTime = _audioTargetNow(atOffsetSec);
+  if (!_bakeCtx && typeof _audioLeanMode === 'function' && _audioLeanMode()) {
     playNoiseBurst(Math.min(dur, 0.10), (layer.volume || 0.1) * volMul * 0.85,
       startTime, layer.filterFreq || 2200, Math.min(layer.filterQ || 0.7, 0.8));
     return;
@@ -60133,20 +60147,229 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
     head = f;
   }
   head.connect(gain);
-  const drySink = audio._spatialSink || audio.dryGain || audio.masterGain;
+  const drySink = _audioDrySink();
   gain.connect(drySink);
-  if (!_audioStressed && audio.convolver) gain.connect(audio.convolver);
-  if (!_audioStressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  if (!_bakeCtx && !_audioStressed && audio.convolver) gain.connect(audio.convolver);
+  if (!_bakeCtx && !_audioStressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
   src.start(startTime);
+}
+
+const _AUDIO_BAKE = {
+  on: true,          // window.__sndBake(0) to A/B against live synthesis
+  buf: Object.create(null),
+  ready: false, running: false, done: 0, total: 0, bytes: 0, ms: 0,
+  maxDur: 3.0,       // hard cap; the continuous voices are not recipes anyway
+  batch: 8,          // offline renders in flight at once
+};
+function _audioBakeExtraTakes(sec) {
+  if (sec <= 0.45) return 2;
+  if (sec <= 1.10) return 1;
+  return 0;
+}
+
+function _audioBakeLen(recipe) {
+  let end = 0;
+  for (const l of recipe.layers || []) {
+    const start = l.startOffset || 0;
+    const reps = Math.max(1, Math.floor(l.count || 1));
+    const span = (l.spacing || 0) * (reps - 1) * (1 + (l.spacingVar || 0) * 0.5);
+    const dur = (l.kind === 'noise') ? (l.duration || 0) * (1 + (l.varDur || 0))
+                                     : (l.dur || 0) * (1 + (l.durVar || 0));
+    end = Math.max(end, start + span + dur);
+  }
+  return Math.min(_AUDIO_BAKE.maxDur, Math.max(0.05, end + 0.05));
+}
+
+function _audioBakeTake(type, recipe) {
+  const rate = (audio.ctx && audio.ctx.sampleRate) || 48000;
+  const len = Math.ceil(rate * _audioBakeLen(recipe));
+  let off;
+  try { off = new OfflineAudioContext(1, len, rate); } catch (_) { return Promise.resolve(null); }
+  const prevCtx = _bakeCtx, prevDest = _bakeDest;
+  _bakeCtx = off; _bakeDest = off.destination;
+  try {
+    _playRecipeLayers(type, recipe, false);
+  } catch (e) {
+    _bakeCtx = prevCtx; _bakeDest = prevDest;
+    console.warn('[snd-bake] render failed for', type, e);
+    return Promise.resolve(null);
+  }
+  _bakeCtx = prevCtx; _bakeDest = prevDest;
+  return off.startRendering().then(b => {
+    try {
+      const d = b.getChannelData(0);
+      let peak = 0;
+      for (let i = 0; i < d.length; i++) { const a = d[i] < 0 ? -d[i] : d[i]; if (a > peak) peak = a; }
+      if (peak < 1e-4) return null;
+      const floor = Math.max(1e-4, peak * 0.0015);
+      let end = d.length;
+      while (end > 1 && (d[end - 1] < 0 ? -d[end - 1] : d[end - 1]) < floor) end--;
+      end = Math.min(d.length, end + Math.ceil(b.sampleRate * 0.005));   // 5ms of air
+      if (end < d.length * 0.97) {
+        const t = audio.ctx.createBuffer(1, Math.max(1, end), b.sampleRate);
+        t.getChannelData(0).set(d.subarray(0, end));
+        return t;
+      }
+    } catch (_) {}
+    return b;
+  }).catch(() => null);
+}
+
+function _audioBakeAll(reason) {
+  if (!_AUDIO_BAKE.on || _AUDIO_BAKE.running || !audio.ctx || !audio.labRecipes) return Promise.resolve(false);
+  if (typeof OfflineAudioContext === 'undefined') return Promise.resolve(false);
+  const types = Object.keys(audio.labRecipes);
+  if (!types.length) return Promise.resolve(false);
+
+  const bakeable = types.filter(t => {
+    const r = audio.labRecipes[t];
+    return r && Array.isArray(r.layers) && r.layers.length;
+  });
+  if (!bakeable.length) return Promise.resolve(false);
+
+  _AUDIO_BAKE.running = true;
+  _AUDIO_BAKE.done = 0;
+  _AUDIO_BAKE.bytes = 0;
+  const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+  const next = Object.create(null);
+
+  const runJobs = (jobs) => {
+    let i = 0;
+    const step = () => {
+      if (i >= jobs.length) return Promise.resolve();
+      const slice = jobs.slice(i, i + _AUDIO_BAKE.batch);
+      i += slice.length;
+      return Promise.all(slice.map(type => _audioBakeTake(type, audio.labRecipes[type]).then(b => {
+        if (!b) return;
+        (next[type] || (next[type] = [])).push(b);
+        _AUDIO_BAKE.bytes += b.length * 4;
+        _AUDIO_BAKE.done++;
+      }))).then(step);
+    };
+    return step();
+  };
+
+  return runJobs(bakeable).then(() => {
+    const extra = [];
+    for (const type of bakeable) {
+      const first = next[type] && next[type][0];
+      if (!first) continue;
+      const n = _audioBakeExtraTakes(first.duration);
+      for (let k = 0; k < n; k++) extra.push(type);
+    }
+    return runJobs(extra);
+  }).then(() => {
+    _AUDIO_BAKE.buf = next;
+    _AUDIO_BAKE.ready = true;
+    _AUDIO_BAKE.running = false;
+    _AUDIO_BAKE.ms = Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0);
+    _AUDIO_BAKE.skipped = bakeable.filter(t => !next[t]);
+    console.log('[snd-bake] ' + Object.keys(next).length + '/' + bakeable.length + ' recipes, ' +
+      _AUDIO_BAKE.done + ' takes, ' + (_AUDIO_BAKE.bytes / 1048576).toFixed(1) + ' MB, ' +
+      _AUDIO_BAKE.ms + ' ms (' + (reason || 'init') + ')');
+    return true;
+  });
+}
+
+function _playBakedSound(type) {
+  const takes = _AUDIO_BAKE.buf[type];
+  if (!takes || !takes.length) return false;
+  const ctx = audio.ctx;
+  const src = ctx.createBufferSource();
+  src.buffer = takes[(Math.random() * takes.length) | 0];
+  src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.06;
+  const gain = ctx.createGain();
+  gain.gain.value = 1 + (Math.random() - 0.5) * 0.10;
+  src.connect(gain);
+  gain.connect(_audioDrySink());
+  const lean = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
+  if (!lean && audio.convolver) gain.connect(audio.convolver);
+  if (!lean && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  src.start();
+  return true;
+}
+
+if (typeof window !== 'undefined') {
+  window.__sndBake = function (on) {
+    if (on === 0 || on === false) { _AUDIO_BAKE.on = false; return 'baked playback OFF (live synthesis)'; }
+    _AUDIO_BAKE.on = true;
+    if (!_AUDIO_BAKE.ready) _audioBakeAll('manual');
+    return 'baked playback ON';
+  };
+  window.__sndBakeStats = function () {
+    const types = Object.keys(_AUDIO_BAKE.buf);
+    let secs = 0;
+    for (const t of types) for (const b of _AUDIO_BAKE.buf[t]) secs += b.duration;
+    return {
+      on: _AUDIO_BAKE.on, ready: _AUDIO_BAKE.ready, running: _AUDIO_BAKE.running,
+      recipesBaked: types.length,
+      leftLive: (_AUDIO_BAKE.skipped || []).length,
+      takes: types.reduce((s, t) => s + _AUDIO_BAKE.buf[t].length, 0),
+      megabytes: +(_AUDIO_BAKE.bytes / 1048576).toFixed(2),
+      bakedSeconds: +secs.toFixed(1),
+      bakeMs: _AUDIO_BAKE.ms,
+      skipped: _AUDIO_BAKE.skipped || [],
+    };
+  };
+  window.__sndRebake = function () { _AUDIO_BAKE.ready = false; return _audioBakeAll('manual-rebake'); };
+  window.__sndNodes = function (types, reps) {
+    types = types || ['fire_projectile', 'fire_railgun', 'hit', 'explosion', 'laser_shot'];
+    reps = reps || 20;
+    const ctx = audio.ctx;
+    const names = ['createOscillator', 'createGain', 'createBiquadFilter', 'createBufferSource'];
+    const orig = {}, counts = {};
+    for (const n of names) orig[n] = ctx[n].bind(ctx);
+    const hook = () => {
+      for (const n of names) { counts[n] = 0; ctx[n] = function () { counts[n]++; return orig[n].apply(ctx, arguments); }; }
+    };
+    const unhook = () => { for (const n of names) ctx[n] = orig[n]; };
+    const sum = () => names.reduce((a, n) => a + counts[n], 0);
+    const was = _AUDIO_BAKE.on;
+    const out = { baked: {}, live: {}, saved: {} };
+    for (const mode of ['baked', 'live']) {
+      _AUDIO_BAKE.on = (mode === 'baked');
+      for (const t of types) {
+        hook();
+        for (let i = 0; i < reps; i++) _playSoundFromLabRecipe(t);
+        const n = sum();
+        unhook();
+        out[mode][t] = +(n / reps).toFixed(1);
+      }
+    }
+    _AUDIO_BAKE.on = was;
+    for (const t of types) {
+      out.saved[t] = out.live[t] > 0 ? (100 * (1 - out.baked[t] / out.live[t])).toFixed(0) + '%' : 'n/a';
+    }
+    return out;
+  };
+  window.__sndCompare = function (type) {
+    const recipe = audio.labRecipes && audio.labRecipes[type];
+    if (!recipe) return 'no recipe ' + type;
+    const stat = (b) => {
+      const d = b.getChannelData(0);
+      let peak = 0, sq = 0;
+      for (let i = 0; i < d.length; i++) { const a = d[i] < 0 ? -d[i] : d[i]; if (a > peak) peak = a; sq += d[i] * d[i]; }
+      return { sec: +b.duration.toFixed(3), peak: +peak.toFixed(4), rms: +Math.sqrt(sq / d.length).toFixed(4) };
+    };
+    const takes = (_AUDIO_BAKE.buf[type] || []).map(stat);
+    return _audioBakeTake(type, recipe).then(fresh => ({
+      type, bakedTakes: takes, freshRender: fresh ? stat(fresh) : null,
+    }));
+  };
 }
 
 function _playSoundFromLabRecipe(type) {
   if (!audio.labRecipes) return false;
   const recipe = audio.labRecipes[type];
   if (!recipe || !Array.isArray(recipe.layers)) return false;
-  const recipeGain = (typeof recipe.recipeGain === 'number') ? recipe.recipeGain : 1.0;
-  const leanRecipe = !!(typeof _audioLeanMode === 'function' && _audioLeanMode() && _AUDIO_LEAN_RECIPE_TYPES[type]);
   if (typeof _adbg !== 'undefined') _adbg.req++;
+  if (_AUDIO_BAKE.on && _playBakedSound(type)) return true;
+  return _playRecipeLayers(type, recipe, true);
+}
+
+function _playRecipeLayers(type, recipe, allowLean) {
+  const recipeGain = (typeof recipe.recipeGain === 'number') ? recipe.recipeGain : 1.0;
+  const leanRecipe = !!(allowLean && typeof _audioLeanMode === 'function' && _audioLeanMode() && _AUDIO_LEAN_RECIPE_TYPES[type]);
   const _keep = recipe.layers.map(l =>
     !(typeof l.chance === 'number' && l.chance < 1 && Math.random() > l.chance));
   if (!_keep.some(Boolean)) _keep[0] = true;
@@ -60227,6 +60450,7 @@ function importSoundLabLibrary(cfg, opts) {
   }
   audio.labRecipes = baseMap;
   try { localStorage.setItem('lss_sound_recipes', JSON.stringify({ recipes: Object.values(baseMap) })); } catch(e) {}
+  try { _AUDIO_BAKE.ready = false; _audioBakeAll('import'); } catch (_) {}
   return { ok: true, message: 'Loaded ' + count + ' recipe' + (count === 1 ? '' : 's') + ' (' + Object.keys(baseMap).length + ' total active).' };
 }
 
