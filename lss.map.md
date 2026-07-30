@@ -426,6 +426,8 @@ Central per-frame updater/disposer for the heterogeneous `game.effects` list.
 Largest gameplay block (~4000 lines): activate/execute dispatch, power shot, core, all shield variants, sonar, rocket salvos, fire DOTs, dash.
 - **Symbols:** `activateAbility`, `executeAbility`, `firePowerShot`, `activateCore`, `_makeHullHugShield`, `_spawnThermalShieldFire`, `_spawnSonarPulse`, `_enqueueStaggeredRocketSalvo`, `updateAbilities`, `dash`
 - **⚠** `executeAbility` is a giant switch — shader warmup exists to precompile the materials these spawn.
+- **⚠ (v35.60) The "+2 core for ability use" bonus is paid in `activateAbility`, gated on the activation having COST something** (`isTrapCharges || ability.cooldown > 0`). It used to sit unconditionally at the tail of `executeAbility`, which made it free for the zero-cooldown HOLD abilities — **Vortex Shield, Absorption, Fire Shield**. Those never enter the `ability.cooldown > 0` branch, so no cooldown is set, and a tap-and-release spends almost no energy: tapping Vortex Shield charged the core at +2 per tap, ~50 taps for a full core, with no cooldown and no risk. Cooldown abilities pay with their cooldown, Explosive Gas with a trap charge; a free tap now earns nothing. **If a new ability is ever given `cooldown: 0`, it earns no core by design — decide deliberately, don't "fix" it by moving the grant back.**
+- **⚠** `executeAbility` has exactly ONE caller (`activateAbility`), which is what made moving the grant safe.
 
 #### Round system tick — `~L46029`
 **Jump:** `function updateRoundSystem`

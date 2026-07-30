@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.59';
+const LSS_BUILD = '35.61';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -26152,9 +26152,18 @@ function resolveShipShipCollisions(dt) {
 
   const SHIP_REPULSE_RANGE = 2.2; 
   const SHIP_REPULSE_STRENGTH = 10000;
-  const RAM_DAMAGE_MULT = 0.3; 
-  const DASH_SHOVE_BONUS_MULT = 3.2;   
-  const DASH_RAM_DAMAGE_BONUS = 2.4;   
+  const RAM_DAMAGE_MULT = 0.3;
+  const DASH_SHOVE_BONUS_MULT = 3.2;
+  const DASH_RAM_DAMAGE_BONUS = 2.4;
+  // (v35.61) Credit a ram: damage stat + core, at the same dealt/100 rate every
+  // other player damage uses. Ramming is self-limiting — it needs >80 impact
+  // speed and hurts you back unless you are dashing — so it gets the full rate
+  // rather than the halved one the continuous sources use.
+  const _creditRam = (dealt) => {
+    if (!(dealt > 0)) return;
+    player.damageDealt += dealt;
+    player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+  };
 
   for (let i = 0; i < shipCount; i++) {
     for (let j = i + 1; j < shipCount; j++) {
@@ -26262,12 +26271,17 @@ function resolveShipShipCollisions(dt) {
               }
               // Dash ramming: the dasher takes no damage, target takes full.
               // Friendly-fire ram damage stays disabled (only shove applies).
+              // (v35.61) Ship-on-ship ram now credits the player. It was
+              // throwing the takeDamage return away entirely, so a ram counted
+              // for neither core NOR your damage-dealt stat — the only player
+              // damage in the file that was credited nowhere at all. (The
+              // monster ram pass below did at least book damageDealt.)
               if (a.isPlayer) {
                 if (!player.dashActive && enemyHit) playerTakeDamage(ramDmg, b.bot ? b.bot : 'world', null);
-                if (b.bot && enemyHit) b.bot.takeDamage(ramDmg, 'player');
+                if (b.bot && enemyHit) _creditRam(b.bot.takeDamage(ramDmg, 'player'));
               } else if (b.isPlayer) {
                 if (!player.dashActive && enemyHit) playerTakeDamage(ramDmg, a.bot ? a.bot : 'world', null);
-                if (a.bot && enemyHit) a.bot.takeDamage(ramDmg, 'player');
+                if (a.bot && enemyHit) _creditRam(a.bot.takeDamage(ramDmg, 'player'));
               } else {
                 // Bot vs bot ; only damage if enemy teams.
                 if (enemyHit) {
@@ -26310,7 +26324,7 @@ function resolveShipShipCollisions(dt) {
             let _ramDmg = _sp * RAM_DAMAGE_MULT;
             if (player.dashActive) _ramDmg *= DASH_RAM_DAMAGE_BONUS;
             const _dealt = mon.takeDamage(_ramDmg, 'player', mon.position);
-            if (_dealt > 0) { player.damageDealt += _dealt; showHitMarker(); }
+            if (_dealt > 0) { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); showHitMarker(); }
           }
         }
       }
@@ -45785,6 +45799,20 @@ function activateAbility(slot) {
   // behind the cockpit-frame). No-op when the ability/ship pair isn't
   // registered in _abilityOverlayDescFor.
   try { triggerAbilityOverlay(player.loadoutKey, ability.name); } catch (_) {}
+  // (v35.60) SMALL CORE BONUS FOR ABILITY USE — only when the use COST something.
+  //
+  // This lived at the end of executeAbility and was paid out unconditionally.
+  // The zero-cooldown HOLD abilities (Vortex Shield, Absorption, Fire Shield)
+  // cost nothing to tap: the `ability.cooldown > 0` branch below never runs for
+  // them, and a tap-and-release drains almost no energy. So tapping Vortex
+  // Shield on and off charged the core for free — 50 taps was a full core, with
+  // no cooldown, no meaningful energy spend and no risk taken.
+  //
+  // Cooldown abilities pay with their cooldown and Explosive Gas pays with a
+  // trap charge. A free tap pays nothing, so it now earns nothing.
+  if (isTrapCharges || ability.cooldown > 0) {
+    player.coreMeter = Math.min(100, player.coreMeter + 2);
+  }
   if (isTrapCharges) {
     // Consume a trap charge; start the per-charge regen timer if not already running
     player.trapCharges = Math.max(0, (player.trapCharges || 0) - 1);
@@ -46579,7 +46607,7 @@ function executeAbility(slot, ability) {
               const _mReach = DASH_SWEEP_R + (mon.collisionRadius || 0);
               if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz <= _mReach * _mReach) {
                 const _dealt = mon.takeDamage(500, 'player', mon.position);
-                if (_dealt > 0) { player.damageDealt += _dealt; showHitMarker(); }
+                if (_dealt > 0) { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); showHitMarker(); }
               }
             }
           }
@@ -46744,8 +46772,10 @@ function executeAbility(slot, ability) {
     }
   }
 
-  // Small core bonus for ability use
-  player.coreMeter = Math.min(100, player.coreMeter + 2);
+  // (v35.60) The "+2 core for using an ability" bonus MOVED to activateAbility,
+  // where the activation's cost is known. Granting it here meant it was paid
+  // out even when the activation cost nothing — see the note at the cooldown
+  // branch there.
 }
 
 function firePowerShot() {
@@ -47868,7 +47898,7 @@ function _tickFireDOTs(dt) {
       try {
         const dealt = bot.takeDamage(dps * dt, bot.onFireSource || 'player');
         if (dealt > 0 && bot.onFireSource === 'player' && typeof player !== 'undefined' && player) {
-          player.damageDealt = (player.damageDealt || 0) + dealt;
+          player.damageDealt = (player.damageDealt || 0) + dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         }
       } catch (_) {}
     }
@@ -47919,7 +47949,7 @@ function _tickFireDOTs(dt) {
       try {
         const dealt = mon.takeDamage(dps * dt, mon.onFireSource || 'player', mon.position);
         if (dealt > 0 && mon.onFireSource === 'player' && typeof player !== 'undefined' && player) {
-          player.damageDealt = (player.damageDealt || 0) + dealt;
+          player.damageDealt = (player.damageDealt || 0) + dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         }
       } catch (_) {}
       mon.onFireTimer -= dt;
@@ -47997,7 +48027,18 @@ function _releaseVortexShieldBurst(playBurstSound) {
       const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
       if (facingDot > 0.2) {
         const dealt = bot.takeDamage(stored, 'player');
-        if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
+        // (v35.60) Grant core. This was the ONLY player damage path in the file
+        // that credited damageDealt but not coreMeter, and it is the mechanic by
+        // which Vortex Shield is supposed to earn core — soak incoming fire,
+        // return it on release. Without it the shield earned core from nothing
+        // at all once the free per-tap bonus was removed. `dealt / 100` is the
+        // standard rate for instant damage (Fire Shield's cone uses /200 because
+        // it is continuous DPS).
+        if (dealt > 0) {
+          player.damageDealt += dealt;
+          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+          showHitMarker();
+        }
       }
     }
   }
@@ -48013,7 +48054,11 @@ function _releaseVortexShieldBurst(playBurstSound) {
       const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
       if (facingDot > 0.2) {
         const dealt = mon.takeDamage(stored, 'player', mon.position);
-        if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
+        if (dealt > 0) {
+          player.damageDealt += dealt;
+          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);   // see the ship branch above
+          showHitMarker();
+        }
       }
     }
   }
@@ -48338,7 +48383,7 @@ function updateAbilities(dt) {
             const hitPoint = _abProbeMid.copy(bot.position);
             if (_len > 0.001) hitPoint.addScaledVector(_abTmpD.set(cdx, cdy, cdz), _surfR / _len);
             const dealt = bot.takeDamage(3000 * dt, 'player', hitPoint);
-            if (dealt > 0) { player.damageDealt += dealt; }
+            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
             // 60 ms cadence per ship -> ~16 Hz roar of impact FX. Per-bot
             // timer means each victim gets independent feedback even when
             // the beam sweeps across multiple targets.
@@ -48397,7 +48442,7 @@ function updateAbilities(dt) {
           if (_cdx * _cdx + _cdy * _cdy + _cdz * _cdz < _objR * _objR) {
             const _dealt = obst.takeDamage(2500 * dt);
             if (_dealt > 0) {
-              player.damageDealt += _dealt;
+              player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
             }
             obst._megaLaserFxTimer = (obst._megaLaserFxTimer || 0) - dt;
             if (obst._megaLaserFxTimer <= 0 && _dealt > 0) {
@@ -48428,7 +48473,7 @@ function updateAbilities(dt) {
           const _mR = mon.collisionRadius;
           if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz < _mR * _mR) {
             const _mDealt = mon.takeDamage(2500 * dt, 'player', _abTmpA.set(_mCx, _mCy, _mCz));
-            if (_mDealt > 0) player.damageDealt += _mDealt;
+            if (_mDealt > 0) player.damageDealt += _mDealt; player.coreMeter = Math.min(100, player.coreMeter + _mDealt / 100);
           }
         }
       }
@@ -48491,7 +48536,7 @@ function updateAbilities(dt) {
         const dist = player.position.distanceTo(bot.position);
         if (dist < 500) {
           const dealt = bot.takeDamage(1800 * dt, 'player');
-          if (dealt > 0) player.damageDealt += dealt;
+          if (dealt > 0) player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         }
       }
       // (monster coverage) The 1800 DPS aura also melts leviathans / the boss.
@@ -48501,7 +48546,7 @@ function updateAbilities(dt) {
           if (!mon.alive || !mon.position) continue;
           if (player.position.distanceTo(mon.position) < 500 + (mon.collisionRadius || 0)) {
             const dealt = mon.takeDamage(1800 * dt, 'player', mon.position);
-            if (dealt > 0) player.damageDealt += dealt;
+            if (dealt > 0) player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           }
         }
       }
@@ -48615,7 +48660,7 @@ function updateAbilities(dt) {
           // Only damage if the target is in front of the wall.
           if (wallDist >= nearDist) {
             const dealt = nearest.takeDamage(110 * 1.2, 'player'); 
-            if (dealt > 0) { player.damageDealt += dealt; showHitMarker(); }
+            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
           }
         }
       }
@@ -48659,7 +48704,7 @@ function updateAbilities(dt) {
           const _pz = _tz - eff.direction.z * along;
           if (_px * _px + _py * _py + _pz * _pz < 150 * 150) {
             const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt;
+            if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           }
         }
       }
@@ -48681,7 +48726,7 @@ function updateAbilities(dt) {
           const _mReach = 150 + (mon.collisionRadius || 0);
           if (_mpx * _mpx + _mpy * _mpy + _mpz * _mpz >= _mReach * _mReach) continue;
           const _md = mon.takeDamage(eff.dmgPerSec * dt, eff.owner || 'player', mon.position);
-          if (_md > 0 && eff.owner === 'player' && typeof player !== 'undefined' && player) player.damageDealt += _md;
+          if (_md > 0 && eff.owner === 'player' && typeof player !== 'undefined' && player) player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100);
           mon.onFireTimer = Math.max(mon.onFireTimer || 0, 3.0);
           mon.onFireDps = Math.max(mon.onFireDps || 0, 320);
           mon.onFireSource = (eff.owner === 'player') ? 'player' : null;
@@ -48760,7 +48805,7 @@ function updateAbilities(dt) {
           if (bot.position.distanceTo(eff.position) < eff.radius) {
             // Detonate
             const dealt = bot.takeDamage(eff.dmg, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; showHitMarker(); }
+            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
             spawnExplosion(eff.position, 20);
             // On detonation, the blast also damages any rocks
             // within the wire's radius. Wire is triggered by a bot entering
@@ -48771,7 +48816,7 @@ function updateAbilities(dt) {
                 if (!obst.alive) continue;
                 if (obst.position.distanceTo(eff.position) < eff.radius) {
                   const _dealt = obst.takeDamage(eff.dmg);
-                  if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt;
+                  if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
                 }
               }
             }
@@ -48782,7 +48827,7 @@ function updateAbilities(dt) {
                 if (!_mon.alive || !_mon.mesh) continue;
                 if (_mon.position.distanceTo(eff.position) < eff.radius) {
                   const _md = _mon.takeDamage(eff.dmg, 'player', eff.position);
-                  if (_md > 0 && eff.owner === 'player') player.damageDealt += _md;
+                  if (_md > 0 && eff.owner === 'player') player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100);
                 }
               }
             }
@@ -48805,14 +48850,14 @@ function updateAbilities(dt) {
             if (!_mon.alive || !_mon.mesh) continue;
             if (_mon.position.distanceTo(eff.position) < eff.radius) {
               const _md = _mon.takeDamage(eff.dmg, 'player', eff.position);
-              if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; showHitMarker(); }
+              if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
               spawnExplosion(eff.position, 20);
               if (game.dynamicObjects) {
                 for (const obst of game.dynamicObjects) {
                   if (!obst.alive) continue;
                   if (obst.position.distanceTo(eff.position) < eff.radius) {
                     const _od = obst.takeDamage(eff.dmg);
-                    if (_od > 0 && eff.owner === 'player') player.damageDealt += _od;
+                    if (_od > 0 && eff.owner === 'player') player.damageDealt += _od; player.coreMeter = Math.min(100, player.coreMeter + _od / 100);
                   }
                 }
               }
@@ -48820,7 +48865,7 @@ function updateAbilities(dt) {
                 if (_m2 === _mon || !_m2.alive || !_m2.mesh) continue;
                 if (_m2.position.distanceTo(eff.position) < eff.radius) {
                   const _s = _m2.takeDamage(eff.dmg, 'player', eff.position);
-                  if (_s > 0 && eff.owner === 'player') player.damageDealt += _s;
+                  if (_s > 0 && eff.owner === 'player') player.damageDealt += _s; player.coreMeter = Math.min(100, player.coreMeter + _s / 100);
                 }
               }
               try {
@@ -49075,7 +49120,7 @@ function updateAbilities(dt) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (bot.position.distanceTo(eff.position) < eff.radius) {
             const dealt = bot.takeDamage(eff.igniteDmgPerSec * dt, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt;
+            if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
         }
@@ -49085,7 +49130,7 @@ function updateAbilities(dt) {
               if (!mon.alive || !mon.position) continue;
               if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
                 const dealt = mon.takeDamage(eff.igniteDmgPerSec * dt, eff.owner, mon.position);
-                if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt;
+                if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
                 mon.onFireTimer = Math.max(mon.onFireTimer || 0, 2.0);
                 mon.onFireDps   = Math.max(mon.onFireDps   || 0, eff.igniteDmgPerSec || 200);
                 mon.onFireSource = (eff.owner === 'player') ? 'player' : (eff.owner || 'player');
@@ -49356,7 +49401,7 @@ function updateAbilities(dt) {
         if (!bot.alive || bot.team === eff.team) continue;
         if (bot.position.distanceTo(eff.position) < eff.radius) {
           const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
-          if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; }
+          if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
         }
       }
       // Rocks in the blast zone also take continuous damage.
@@ -49367,7 +49412,7 @@ function updateAbilities(dt) {
           if (!obst.alive) continue;
           if (obst.position.distanceTo(eff.position) < eff.radius) {
             const _dealt = obst.takeDamage(eff.dmgPerSec * dt);
-            if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt;
+            if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
           }
         }
       }
@@ -49379,7 +49424,7 @@ function updateAbilities(dt) {
           if (!mon.alive || !mon.position) continue;
           if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
             const _md = mon.takeDamage(eff.dmgPerSec * dt, eff.owner || 'player', mon.position);
-            if (_md > 0 && eff.owner === 'player') player.damageDealt += _md;
+            if (_md > 0 && eff.owner === 'player') player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100);
           }
         }
       }
