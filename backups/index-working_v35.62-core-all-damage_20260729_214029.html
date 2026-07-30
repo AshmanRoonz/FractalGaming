@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.64';
+const LSS_BUILD = '35.62';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4229,12 +4229,6 @@ const input = {
   // next time the user enters VR. 0.5 is a reasonable battery-saver target
   // on Quest 2 / Quest 3; bump to 1.0+ if your GPU has headroom.
   vrRenderScale: 0.7,
-  // (v35.64) VR-ONLY HUD size multiplier, applied to the xrHudMesh plane
-  // (2.0 x 1.125 m at 2 m forward). Flat screen is untouched — that sizes off
-  // the VMIN layout instead. Default 1.5: the plane was built to roughly match
-  // a desktop window's angular size, which reads small through a headset where
-  // you cannot lean in. Range 0.75..3.0 in the settings slider.
-  vrHudScale: 1.5,
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
@@ -15026,11 +15020,6 @@ function _xrEnsureHudMesh() {
   // Plane sized in meters; 16:9 aspect to roughly match desktop window.
   // 2.0m wide at 2.0m forward of dolly => ~53 deg horizontal FOV, a
   // comfortable non-headlocked HUD distance for VR.
-  // (v35.64) This is the BASE size only. renderFrame multiplies it by
-  // input.vrHudScale (default 1.5) every frame -- matching a desktop window
-  // turned out to read too small through a headset. Scale rather than move it
-  // closer: the 2m focal distance is what keeps it comfortable, and pulling it
-  // in would clip the ship model.
   const geo = new THREE.PlaneGeometry(2.0, 1.125);
   const mat = new THREE.MeshBasicMaterial({
     map: _xrHudTex,
@@ -17778,16 +17767,7 @@ function renderFrame() {
       _xrSyncDollyBeforeRender();
       const _xrShowHud = (typeof _xrShouldShowGameplayHud === 'function') ? _xrShouldShowGameplayHud() : true;
       const _hudMesh = _xrEnsureHudMesh();
-      if (_hudMesh) {
-        _hudMesh.visible = _xrShowHud;
-        // (v35.64) Apply the VR HUD size multiplier here rather than at mesh
-        // creation, so the settings slider takes effect live inside a running
-        // session instead of needing a re-enter. Compare-before-write keeps it
-        // to one float compare per frame.
-        const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-          ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
-        if (_hudMesh.scale.x !== _hs) _hudMesh.scale.setScalar(_hs);
-      }
+      if (_hudMesh) _hudMesh.visible = _xrShowHud;
       if (xrAuxMesh) xrAuxMesh.visible = false;
       // (v35.57) The radar is drawn INTO the HUD canvas now (see _hlRadar), and
       // the HUD mesh above mirrors that canvas — so this standalone plane would
@@ -29681,9 +29661,7 @@ class Projectile {
     // Radius 150 ensures a fast-moving round passing near the cloud edge reliably
     // triggers ignition, even at high frame intervals (Pyro weapon "touch" feel).
     if (this.isFireSource) {
-      // (v35.63) Pass the igniter so the blaze changes hands — see igniteNearbyGas.
-      igniteNearbyGas(this.position, 150, this.owner,
-        this.owner === 'player' ? player.team : this.ownerTeam);
+      igniteNearbyGas(this.position, 150);
     }
 
     // --- Shift trail positions forward and add current pos at head ---
@@ -30344,16 +30322,6 @@ class Projectile {
           player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           showHitMarker();
         }
-        // (v35.63) THERMITE STICKS. It is the one fire that should keep burning
-        // after contact — that is what thermite does — and until now it was the
-        // only Pyro fire source that applied no DOT at all, while the Fire
-        // Shield (which shouldn't) applied a 3 s one. 1.5 s at 150 dps = 225
-        // damage, well under the 320 dps the shield used to leave behind.
-        if (this.isPyroThermite && dealt > 0) {
-          bot.onFireTimer = Math.max(bot.onFireTimer || 0, 1.5);
-          bot.onFireDps   = Math.max(bot.onFireDps   || 0, 150);
-          bot.onFireSource = (this.owner === 'player') ? 'player' : (this.ownerRef || 'bot');
-        }
         if (this.isTrackerMain && falloff > 0.30 && this.owner === 'player' && game && game.state === 'playing') {
           const prevLocks = player.trackerLocks[bot.id] || 0;
           player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
@@ -30412,8 +30380,7 @@ class Projectile {
       }
     }
     // Fire ignites Explosive Gas: thermite splash, firewalls, any fire source
-    igniteNearbyGas(this.position, this.splash, this.owner,
-      this.owner === 'player' ? player.team : this.ownerTeam);
+    igniteNearbyGas(this.position, this.splash);
   }
 
   removeHaze() {
@@ -30553,23 +30520,12 @@ function spawnPyroFlame(pos) {
 // is already burning, a fresh fire-source contact refreshes the burn timer back to
 // its full duration (sustained fire sources, like the Fire Shield held inside
 // the cloud, keep the blaze alive).
-// (v35.63) `igniter` / `igniterTeam` transfer OWNERSHIP of the blaze on first
-// ignition. A cloud that an enemy planted, once lit by you, is your fire: it
-// damages their team, not yours, and the damage credits you. Before this the
-// burn kept the planter's owner/team, so lighting an enemy's gas built them a
-// bonfire that hurt your own side and paid them for it. Only first ignition
-// transfers — a re-contact refreshing an existing burn leaves ownership alone,
-// so a cloud can't ping-pong between sides.
-function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
+function igniteNearbyGas(pos, radius) {
   for (const eff of game.worldEffects) {
     if (eff.type !== 'incendiary_gas') continue;
     const igniteRadius = eff.radius + radius;
     if (pos.distanceToSquared(eff.position) >= igniteRadius * igniteRadius) continue;
     if (!eff.ignited) {
-      if (igniter) {
-        eff.owner = igniter;
-        if (igniterTeam != null) eff.team = igniterTeam;
-      }
       // First ignition: light the cloud, color swap, pop explosion/light.
       // The outer hull is now a ShaderMaterial (no .color property),
       // so we recolor by writing to its uniforms.uColor uniform. Old
@@ -46553,26 +46509,6 @@ function executeAbility(slot, ability) {
     // Goes in the direction you're moving; if stationary, phase in place.
     // Any enemy ship the dash sweeps through is stunned for 1.5s.
     if (ability.name === 'Teleport') {
-      // (v35.63) TELEPORT BREAKS A TETHER ROOT. The root is enforced by
-      // game.playerRootTimer in updatePlayerMovement, and the trap re-zeroes
-      // velocity every frame while eff.triggered — so teleporting used to move
-      // the ship 400 units and leave it just as stuck, which made the escape
-      // ability useless against the one thing it should escape.
-      // The trap is RE-ARMED rather than consumed (its catch is gated on
-      // !eff.triggered): the 400-unit hop normally carries you clear, but fly
-      // back in and it can take you again, so a Puncture's trap isn't wasted.
-      try {
-        game.playerRootTimer = 0;
-        if (game.worldEffects) {
-          for (const _te of game.worldEffects) {
-            if (_te && _te.type === 'tether' && _te.rootTarget === player) {
-              _te.triggered = false;
-              _te.rootTarget = null;
-              _te.rootTimer = 0;
-            }
-          }
-        }
-      } catch (_) {}
       player.phaseInvuln = true;
       // Phasing whoosh + sub doppler for the reality-warp.
       try { playSound('phase_dash'); } catch (_) {}
@@ -47093,7 +47029,7 @@ function activateCore() {
       }
     }
     // Mega Flame Chain ignites any deployed Explosive Gas in radius (TF2 synergy)
-    igniteNearbyGas(player.position, radius, 'player', player.team);
+    igniteNearbyGas(player.position, radius);
     spawnExplosion(player.position, 80);
     triggerScreenShake(8);
     // Three trails of flame radiating outward, 120° apart in the horizontal
@@ -48274,12 +48210,13 @@ function updateAbilities(dt) {
               else playSound('thermal_burn');
             } catch (_) {}
           }
-          // (v35.63) NO LINGERING BURN. The shield used to refresh a 3 s /
-          // 320 dps DOT every frame the target was in the cone, so leaving it
-          // still cost ~960 damage — and since v35.61 made DOTs charge core, it
-          // was also earning core for 3 s after the victim escaped. Per design:
-          // the Fire Shield damages only while the enemy is actually in the
-          // cone. Thermite is the fire that sticks (see splashDamage).
+          // Light the ship on fire. Refresh the burn
+          // timer each frame the bot is in the cone so a long hold means
+          // a long DOT after release. _tickFireDOTs in updateEffects
+          // applies the per-second damage + spawns flames around the bot.
+          bot.onFireTimer = Math.max(bot.onFireTimer || 0, 3.0);
+          bot.onFireDps   = Math.max(bot.onFireDps   || 0, 320);
+          bot.onFireSource = 'player';
         }
       }
       // (v32.4) Fire Shield cone also burns the outskirts monsters (was ships-only).
@@ -48299,7 +48236,9 @@ function updateAbilities(dt) {
           const dmgPerSec = maxDPS * (1 - along01) * (0.5 + 0.5 * (1 - (perpLen / coneR)));
           const dealt = mon.takeDamage(dmgPerSec * dt, 'player', mon.position);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
-          // (v35.63) No lingering burn on monsters either — see the ship branch.
+          mon.onFireTimer = Math.max(mon.onFireTimer || 0, 3.0);
+          mon.onFireDps   = Math.max(mon.onFireDps   || 0, 320);
+          mon.onFireSource = 'player';
         }
       }
       // Fire Shield is a fire source: ignite Explosive Gas anywhere
@@ -48308,8 +48247,8 @@ function updateAbilities(dt) {
       // the player so clouds we are standing in also light up.
       const probeMid = _abProbeMid.copy(player.position).addScaledVector(forward, reach * 0.5);
       const probeRadius = Math.max(reach * 0.5, (baseRadius + tipRadius) * 0.5);
-      igniteNearbyGas(probeMid, probeRadius, 'player', player.team);
-      igniteNearbyGas(player.position, baseRadius, 'player', player.team);
+      igniteNearbyGas(probeMid, probeRadius);
+      igniteNearbyGas(player.position, baseRadius);
     }
     // Fire Shield recharge (ticks every frame, inside or outside the
     // ability-loop body; guarded to only regen when NOT actively held).
@@ -56749,12 +56688,6 @@ function _refreshSettingsValues() {
   if (vrScaleVal && typeof getEffectiveVRRenderScale === 'function') {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
-  {
-    const _hs = (typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
-    setRange('set-vr-hud-scale', null, _hs);
-    const _hv = $('#val-vr-hud-scale');
-    if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
-  }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
@@ -57067,14 +57000,6 @@ function buildSettingsPage() {
         <label>VR Render Scale</label>
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
-      </div>
-      <div class="setting-row">
-        <label>VR HUD Size</label>
-        <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5}">
-        <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2)}x</div>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Scales the HUD plane in VR only; flat screen is unaffected. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
       </div>
       <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
       <div class="setting-row" style="margin-top:6px;">
@@ -58383,18 +58308,6 @@ function buildSettingsPage() {
     } catch (_) {}
   });
 
-  // (v35.64) VR HUD size slider. No re-enter needed — renderFrame reads
-  // input.vrHudScale every frame and writes the mesh scale when it changes.
-  const vrHudScaleSel = overlay.querySelector('#set-vr-hud-scale');
-  const vrHudScaleVal = overlay.querySelector('#val-vr-hud-scale');
-  if (vrHudScaleSel) vrHudScaleSel.addEventListener('input', () => {
-    const v = parseFloat(vrHudScaleSel.value);
-    if (!isFinite(v)) return;
-    input.vrHudScale = v;
-    if (vrHudScaleVal) vrHudScaleVal.textContent = v.toFixed(2) + 'x';
-    saveSettings();
-  });
-
   // VR render scale slider.
   const vrScaleSel = overlay.querySelector('#set-vr-scale');
   const vrScaleVal = overlay.querySelector('#val-vr-scale');
@@ -59112,7 +59025,6 @@ function saveSettings() {
       xrSynth:    input.xrSynth,
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
-      vrHudScale: input.vrHudScale,
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
@@ -60974,9 +60886,6 @@ function loadSettings() {
     if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
-    // Absent key keeps the 1.5 default, so settings saved before v35.64 get the
-    // larger HUD rather than being pinned to the old size by a missing entry.
-    if (typeof data.vrHudScale === 'number') input.vrHudScale = data.vrHudScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;

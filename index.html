@@ -3599,7 +3599,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.61';
+const LSS_BUILD = '35.64';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -4051,6 +4051,7 @@ const input = {
     invertPitch: false,
   },
   vrRenderScale: 0.7,
+  vrHudScale: 1.5,
   vrPerfMode: 'standard',
   vrStripFx: false,
   showFps: false,
@@ -14769,7 +14770,12 @@ function renderFrame() {
       _xrSyncDollyBeforeRender();
       const _xrShowHud = (typeof _xrShouldShowGameplayHud === 'function') ? _xrShouldShowGameplayHud() : true;
       const _hudMesh = _xrEnsureHudMesh();
-      if (_hudMesh) _hudMesh.visible = _xrShowHud;
+      if (_hudMesh) {
+        _hudMesh.visible = _xrShowHud;
+        const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
+          ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+        if (_hudMesh.scale.x !== _hs) _hudMesh.scale.setScalar(_hs);
+      }
       if (xrAuxMesh) xrAuxMesh.visible = false;
       if (xrMinimapMesh) {
         xrMinimapMesh.visible = _xrShowHud &&
@@ -24246,7 +24252,8 @@ class Projectile {
     if (this.mesh) this.mesh.position.copy(this.position);
 
     if (this.isFireSource) {
-      igniteNearbyGas(this.position, 150);
+      igniteNearbyGas(this.position, 150, this.owner,
+        this.owner === 'player' ? player.team : this.ownerTeam);
     }
 
     this.trailTimer += dt;
@@ -24770,6 +24777,11 @@ class Projectile {
           player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           showHitMarker();
         }
+        if (this.isPyroThermite && dealt > 0) {
+          bot.onFireTimer = Math.max(bot.onFireTimer || 0, 1.5);
+          bot.onFireDps   = Math.max(bot.onFireDps   || 0, 150);
+          bot.onFireSource = (this.owner === 'player') ? 'player' : (this.ownerRef || 'bot');
+        }
         if (this.isTrackerMain && falloff > 0.30 && this.owner === 'player' && game && game.state === 'playing') {
           const prevLocks = player.trackerLocks[bot.id] || 0;
           player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
@@ -24820,7 +24832,8 @@ class Projectile {
         }
       }
     }
-    igniteNearbyGas(this.position, this.splash);
+    igniteNearbyGas(this.position, this.splash, this.owner,
+      this.owner === 'player' ? player.team : this.ownerTeam);
   }
 
   removeHaze() {
@@ -24938,12 +24951,16 @@ function spawnPyroFlame(pos) {
   eff.fireMeshes = _spawnFireCloudCluster(pos, { count: 3, radius: 48, alpha: 0.55 });
 }
 
-function igniteNearbyGas(pos, radius) {
+function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
   for (const eff of game.worldEffects) {
     if (eff.type !== 'incendiary_gas') continue;
     const igniteRadius = eff.radius + radius;
     if (pos.distanceToSquared(eff.position) >= igniteRadius * igniteRadius) continue;
     if (!eff.ignited) {
+      if (igniter) {
+        eff.owner = igniter;
+        if (igniterTeam != null) eff.team = igniterTeam;
+      }
       eff.ignited = true;
       eff.igniteTimer = eff.igniteDuration;
       eff.timer = Math.max(eff.timer, eff.igniteDuration);
@@ -37533,6 +37550,18 @@ function executeAbility(slot, ability) {
 
   else if (ability.type === 'utility') {
     if (ability.name === 'Teleport') {
+      try {
+        game.playerRootTimer = 0;
+        if (game.worldEffects) {
+          for (const _te of game.worldEffects) {
+            if (_te && _te.type === 'tether' && _te.rootTarget === player) {
+              _te.triggered = false;
+              _te.rootTarget = null;
+              _te.rootTimer = 0;
+            }
+          }
+        }
+      } catch (_) {}
       player.phaseInvuln = true;
       try { playSound('phase_dash'); } catch (_) {}
       const speed = player.velocity ? player.velocity.length() : 0;
@@ -37966,7 +37995,7 @@ function activateCore() {
         mon.onFireSource = 'player';
       }
     }
-    igniteNearbyGas(player.position, radius);
+    igniteNearbyGas(player.position, radius, 'player', player.team);
     spawnExplosion(player.position, 80);
     triggerScreenShake(8);
     const _flameSpine = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -38945,9 +38974,6 @@ function updateAbilities(dt) {
               else playSound('thermal_burn');
             } catch (_) {}
           }
-          bot.onFireTimer = Math.max(bot.onFireTimer || 0, 3.0);
-          bot.onFireDps   = Math.max(bot.onFireDps   || 0, 320);
-          bot.onFireSource = 'player';
         }
       }
       if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
@@ -38966,15 +38992,12 @@ function updateAbilities(dt) {
           const dmgPerSec = maxDPS * (1 - along01) * (0.5 + 0.5 * (1 - (perpLen / coneR)));
           const dealt = mon.takeDamage(dmgPerSec * dt, 'player', mon.position);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
-          mon.onFireTimer = Math.max(mon.onFireTimer || 0, 3.0);
-          mon.onFireDps   = Math.max(mon.onFireDps   || 0, 320);
-          mon.onFireSource = 'player';
         }
       }
       const probeMid = _abProbeMid.copy(player.position).addScaledVector(forward, reach * 0.5);
       const probeRadius = Math.max(reach * 0.5, (baseRadius + tipRadius) * 0.5);
-      igniteNearbyGas(probeMid, probeRadius);
-      igniteNearbyGas(player.position, baseRadius);
+      igniteNearbyGas(probeMid, probeRadius, 'player', player.team);
+      igniteNearbyGas(player.position, baseRadius, 'player', player.team);
     }
     if (player.loadoutKey === 'PYRO' && !player.abilityActive[i] &&
         player.abilities[i] && player.abilities[i].name === 'Fire Shield' &&
@@ -39142,7 +39165,7 @@ function updateAbilities(dt) {
           const _mR = mon.collisionRadius;
           if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz < _mR * _mR) {
             const _mDealt = mon.takeDamage(2500 * dt, 'player', _abTmpA.set(_mCx, _mCy, _mCz));
-            if (_mDealt > 0) player.damageDealt += _mDealt; player.coreMeter = Math.min(100, player.coreMeter + _mDealt / 100);
+            if (_mDealt > 0) { player.damageDealt += _mDealt; player.coreMeter = Math.min(100, player.coreMeter + _mDealt / 100); }
           }
         }
       }
@@ -39180,7 +39203,7 @@ function updateAbilities(dt) {
         const dist = player.position.distanceTo(bot.position);
         if (dist < 500) {
           const dealt = bot.takeDamage(1800 * dt, 'player');
-          if (dealt > 0) player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
         }
       }
       if (game.monsters) {
@@ -39188,7 +39211,7 @@ function updateAbilities(dt) {
           if (!mon.alive || !mon.position) continue;
           if (player.position.distanceTo(mon.position) < 500 + (mon.collisionRadius || 0)) {
             const dealt = mon.takeDamage(1800 * dt, 'player', mon.position);
-            if (dealt > 0) player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
           }
         }
       }
@@ -39313,7 +39336,7 @@ function updateAbilities(dt) {
           const _pz = _tz - eff.direction.z * along;
           if (_px * _px + _py * _py + _pz * _pz < 150 * 150) {
             const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
           }
         }
       }
@@ -39331,7 +39354,7 @@ function updateAbilities(dt) {
           const _mReach = 150 + (mon.collisionRadius || 0);
           if (_mpx * _mpx + _mpy * _mpy + _mpz * _mpz >= _mReach * _mReach) continue;
           const _md = mon.takeDamage(eff.dmgPerSec * dt, eff.owner || 'player', mon.position);
-          if (_md > 0 && eff.owner === 'player' && typeof player !== 'undefined' && player) player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100);
+          if (_md > 0 && eff.owner === 'player' && typeof player !== 'undefined' && player) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); }
           mon.onFireTimer = Math.max(mon.onFireTimer || 0, 3.0);
           mon.onFireDps = Math.max(mon.onFireDps || 0, 320);
           mon.onFireSource = (eff.owner === 'player') ? 'player' : null;
@@ -39407,7 +39430,7 @@ function updateAbilities(dt) {
                 if (!obst.alive) continue;
                 if (obst.position.distanceTo(eff.position) < eff.radius) {
                   const _dealt = obst.takeDamage(eff.dmg);
-                  if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+                  if (_dealt > 0 && eff.owner === 'player') { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); }
                 }
               }
             }
@@ -39416,7 +39439,7 @@ function updateAbilities(dt) {
                 if (!_mon.alive || !_mon.mesh) continue;
                 if (_mon.position.distanceTo(eff.position) < eff.radius) {
                   const _md = _mon.takeDamage(eff.dmg, 'player', eff.position);
-                  if (_md > 0 && eff.owner === 'player') player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100);
+                  if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); }
                 }
               }
             }
@@ -39440,7 +39463,7 @@ function updateAbilities(dt) {
                   if (!obst.alive) continue;
                   if (obst.position.distanceTo(eff.position) < eff.radius) {
                     const _od = obst.takeDamage(eff.dmg);
-                    if (_od > 0 && eff.owner === 'player') player.damageDealt += _od; player.coreMeter = Math.min(100, player.coreMeter + _od / 100);
+                    if (_od > 0 && eff.owner === 'player') { player.damageDealt += _od; player.coreMeter = Math.min(100, player.coreMeter + _od / 100); }
                   }
                 }
               }
@@ -39448,7 +39471,7 @@ function updateAbilities(dt) {
                 if (_m2 === _mon || !_m2.alive || !_m2.mesh) continue;
                 if (_m2.position.distanceTo(eff.position) < eff.radius) {
                   const _s = _m2.takeDamage(eff.dmg, 'player', eff.position);
-                  if (_s > 0 && eff.owner === 'player') player.damageDealt += _s; player.coreMeter = Math.min(100, player.coreMeter + _s / 100);
+                  if (_s > 0 && eff.owner === 'player') { player.damageDealt += _s; player.coreMeter = Math.min(100, player.coreMeter + _s / 100); }
                 }
               }
               try {
@@ -39636,7 +39659,7 @@ function updateAbilities(dt) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (bot.position.distanceTo(eff.position) < eff.radius) {
             const dealt = bot.takeDamage(eff.igniteDmgPerSec * dt, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
         }
@@ -39645,7 +39668,7 @@ function updateAbilities(dt) {
               if (!mon.alive || !mon.position) continue;
               if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
                 const dealt = mon.takeDamage(eff.igniteDmgPerSec * dt, eff.owner, mon.position);
-                if (dealt > 0 && eff.owner === 'player') player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+                if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
                 mon.onFireTimer = Math.max(mon.onFireTimer || 0, 2.0);
                 mon.onFireDps   = Math.max(mon.onFireDps   || 0, eff.igniteDmgPerSec || 200);
                 mon.onFireSource = (eff.owner === 'player') ? 'player' : (eff.owner || 'player');
@@ -39857,7 +39880,7 @@ function updateAbilities(dt) {
           if (!obst.alive) continue;
           if (obst.position.distanceTo(eff.position) < eff.radius) {
             const _dealt = obst.takeDamage(eff.dmgPerSec * dt);
-            if (_dealt > 0 && eff.owner === 'player') player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+            if (_dealt > 0 && eff.owner === 'player') { player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100); }
           }
         }
       }
@@ -39866,7 +39889,7 @@ function updateAbilities(dt) {
           if (!mon.alive || !mon.position) continue;
           if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
             const _md = mon.takeDamage(eff.dmgPerSec * dt, eff.owner || 'player', mon.position);
-            if (_md > 0 && eff.owner === 'player') player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100);
+            if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); }
           }
         }
       }
@@ -45278,6 +45301,12 @@ function _refreshSettingsValues() {
   if (vrScaleVal && typeof getEffectiveVRRenderScale === 'function') {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
+  {
+    const _hs = (typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+    setRange('set-vr-hud-scale', null, _hs);
+    const _hv = $('#val-vr-hud-scale');
+    if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
+  }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
@@ -45571,6 +45600,14 @@ function buildSettingsPage() {
         <label>VR Render Scale</label>
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
+      </div>
+      <div class="setting-row">
+        <label>VR HUD Size</label>
+        <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5}">
+        <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2)}x</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Scales the HUD plane in VR only; flat screen is unaffected. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
       </div>
       <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
       <div class="setting-row" style="margin-top:6px;">
@@ -46777,6 +46814,16 @@ function buildSettingsPage() {
     } catch (_) {}
   });
 
+  const vrHudScaleSel = overlay.querySelector('#set-vr-hud-scale');
+  const vrHudScaleVal = overlay.querySelector('#val-vr-hud-scale');
+  if (vrHudScaleSel) vrHudScaleSel.addEventListener('input', () => {
+    const v = parseFloat(vrHudScaleSel.value);
+    if (!isFinite(v)) return;
+    input.vrHudScale = v;
+    if (vrHudScaleVal) vrHudScaleVal.textContent = v.toFixed(2) + 'x';
+    saveSettings();
+  });
+
   const vrScaleSel = overlay.querySelector('#set-vr-scale');
   const vrScaleVal = overlay.querySelector('#val-vr-scale');
   if (vrScaleSel) vrScaleSel.addEventListener('input', () => {
@@ -47393,6 +47440,7 @@ function saveSettings() {
       xrSynth:    input.xrSynth,
       vrHeadAim:  input.vrHeadAim,
       vrRenderScale: input.vrRenderScale,
+      vrHudScale: input.vrHudScale,
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
@@ -49196,6 +49244,7 @@ function loadSettings() {
     if (data.xrSynth) Object.assign(input.xrSynth, data.xrSynth);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
+    if (typeof data.vrHudScale === 'number') input.vrHudScale = data.vrHudScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
