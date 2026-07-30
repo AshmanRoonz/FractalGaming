@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.69';
+const LSS_BUILD = '35.70';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -29249,17 +29249,32 @@ class Bot {
       hop.x += (Math.random() - 0.5) * 300;
       hop.y += (Math.random() - 0.5) * 150;
       hop.z += (Math.random() - 0.5) * 300;
-      // (M2) Terrain-safe blink for the campaign hoard : clamp the landing into the
-      // open "crack of sky" so it never teleports into rock (the reason abilities
-      // were disabled). Skip the blink if the crack is too tight to fit. PvP SLAYER
-      // teleport is untouched (campaign + sandwich-terrain gated).
-      if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && game.sandwichTerrain && game.sandwichTerrain.ON && typeof _stGroundYCarved === 'function') {
+      // (M2) Terrain-safe blink : clamp the landing into the open "crack of sky"
+      // so it never teleports into rock (the reason abilities were disabled).
+      // Skip the blink if the crack is too tight to fit.
+      // (v35.70) NO LONGER CAMPAIGN-ONLY. Gated to campaign, a SLAYER bot in the
+      // OVERWORLD blinked into the ground for the same reason the player could —
+      // the hub has no vertical terrain clamp (`FOOT: null`), so nothing undid
+      // it afterwards. Any sandwich terrain now gets the check.
+      if (game.sandwichTerrain && game.sandwichTerrain.ON && typeof _stGroundYCarved === 'function') {
         const _tx = from.x + hop.x, _tz = from.z + hop.z;
         const _fc = _stGroundYCarved(_tx, _tz, game.sandwichTerrain);
         const _cc = _stCeilYCarved(_tx, _tz, game.sandwichTerrain);
-        if (_cc - _fc < 80) { this.abilityCooldowns[2] = 0.5; return; }   
-        const _safe = Math.min(90, (_cc - _fc) * 0.3);
-        hop.y = Math.max(_fc + _safe, Math.min(_cc - _safe, from.y + hop.y)) - from.y;
+        // ⚠ The hub is OPEN-TOP and reports a ceiling that is not above the
+        // floor. Taking that at face value makes `_cc - _fc < 80` true
+        // everywhere and would silently disable the bot blink across the whole
+        // Overworld — so an absent ceiling means floor-only clamping, not "no
+        // room".
+        const _hasCeil = (_cc - _fc) > 80;
+        if (!_hasCeil && !(game.sandwichTerrain._openTop || game.sandwichTerrain.HUB)) {
+          this.abilityCooldowns[2] = 0.5; return;
+        }
+        if (_hasCeil) {
+          const _safe = Math.min(90, (_cc - _fc) * 0.3);
+          hop.y = Math.max(_fc + _safe, Math.min(_cc - _safe, from.y + hop.y)) - from.y;
+        } else {
+          hop.y = Math.max(_fc + 90, from.y + hop.y) - from.y;
+        }
       }
       this.position.add(hop);
       try {
@@ -46458,6 +46473,77 @@ function activateAbility(slot) {
   }
 }
 
+// (v35.70) How far a teleport may travel along `dir` before it would put the
+// ship inside the terrain. Returns `maxLen` when the whole hop is clear.
+//
+// ⚠ This exists because the OVERWORLD has no vertical terrain clamp. The clamp
+// in updatePlayerMovement is gated on `_swT.FOOT`, and `buildLevel` sets
+// `FOOT: _isHubMap ? null : {...}` — the hub streams endlessly so it has no
+// footprint. Everywhere else the per-frame clamp would have undone a bad hop;
+// in the hub nothing did, which is why SLAYER could blink through the ground
+// there and nowhere else.
+//
+// Marching rather than testing only the endpoint: a 400-unit hop across a ridge
+// can start and finish in open air with rock in between, and landing on the far
+// side of a mountain is the same exploit by another route.
+const _TP_CLEAR = 26;      // matches the movement clamp's ground pad
+function _teleportClampLen(from, dir, maxLen) {
+  const T = (typeof game !== 'undefined') ? game.sandwichTerrain : null;
+  if (!T || !T.ON || typeof _stGroundYCarved !== 'function') return maxLen;
+  const STEPS = 10;
+  // If we are ALREADY under the surface, don't trap the player by refusing to
+  // move — a blink is exactly how you would get out. Only block hops that cross
+  // from clear air into rock.
+  //
+  // ⚠ Tested against the RAW ground height, not ground + _TP_CLEAR. Using the
+  // padded height meant that merely flying inside the 26u pad (which is normal
+  // low flight, not being stuck) counted as "already underground" and handed
+  // back an unclamped 400 — measured: 24u of clearance still allowed a full
+  // dive straight through the surface. The escape hatch is for being genuinely
+  // below the terrain, and nothing else.
+  let startBuried;
+  try { startBuried = from.y < _stGroundYCarved(from.x, from.z, T); } catch (_) { return maxLen; }
+  if (startBuried) return maxLen;
+  let lastOk = 0;
+  for (let s = 1; s <= STEPS; s++) {
+    const t = (s / STEPS) * maxLen;
+    const x = from.x + dir.x * t, y = from.y + dir.y * t, z = from.z + dir.z * t;
+    let gy, cy;
+    try {
+      gy = _stGroundYCarved(x, z, T) + _TP_CLEAR;
+      cy = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(x, z, T) - _TP_CLEAR : Infinity;
+    } catch (_) { return maxLen; }
+    // Only treat the ceiling as real when it is actually above the floor —
+    // the open-top hub reports one that isn't.
+    if (y < gy || (cy > gy && y > cy)) break;
+    lastOk = t;
+  }
+  return lastOk;
+}
+
+// Debug hook: ground height under a point, and how far a blink from it would
+// get. Both sides of the clamp are module-scoped, so without this there is no
+// way to check the fix against the real heightfield.
+if (typeof window !== 'undefined') {
+  window.__tpProbe = function (dx, dy, dz, len) {
+    const T = game.sandwichTerrain;
+    const p = player.position;
+    const d = new THREE.Vector3(dx || 0, dy || 0, dz || 0);
+    if (d.lengthSq() < 1e-9) d.set(0, -1, 0);
+    d.normalize();
+    let ground = null;
+    try { ground = _stGroundYCarved(p.x, p.z, T); } catch (_) {}
+    return {
+      playerY: Math.round(p.y),
+      groundY: ground == null ? null : Math.round(ground),
+      clearance: ground == null ? null : Math.round(p.y - ground),
+      dir: [+d.x.toFixed(3), +d.y.toFixed(3), +d.z.toFixed(3)],
+      clampedLen: Math.round(_teleportClampLen(p.clone(), d, len || 400)),
+      requested: len || 400,
+    };
+  };
+}
+
 function executeAbility(slot, ability) {
   const forward = (typeof getPlayerAimForward === 'function')
     ? getPlayerAimForward(new THREE.Vector3())
@@ -47163,10 +47249,29 @@ function executeAbility(slot, ability) {
       const speed = player.velocity ? player.velocity.length() : 0;
       if (speed > 5) {
         // Dash in movement direction
-        const moveDir = player.velocity.clone().normalize();
-        player.phaseInvulnTimer = 0.3; 
+        let moveDir = player.velocity.clone().normalize();
+        player.phaseInvulnTimer = 0.3;
         const dashStart = player.position.clone();
-        const dashLen   = 400;
+        // (v35.70) STOP SHORT OF THE GROUND. This was an unconditional 400-unit
+        // translation with no terrain test, so aiming down put you inside the
+        // heightfield. It only shows in the OVERWORLD because the vertical
+        // terrain clamp in updatePlayerMovement is gated on `_swT.FOOT`, and the
+        // hub map is built with `FOOT: null` (it streams endlessly, so it has no
+        // footprint) — meaning the hub has no ground clamp for the player at all
+        // and nothing was there to undo the hop.
+        let dashLen = _teleportClampLen(dashStart, moveDir, 400);
+        // Blocked almost immediately means you aimed into the ground. Rather
+        // than eat the cooldown for nothing, skim: retry with the vertical
+        // component removed, so the blink carries you ALONG the surface instead
+        // of into it. Only if that is blocked too do you get a short hop.
+        if (dashLen < 80) {
+          const flat = new THREE.Vector3(moveDir.x, 0, moveDir.z);
+          if (flat.lengthSq() > 1e-6) {
+            flat.normalize();
+            const flatLen = _teleportClampLen(dashStart, flat, 400);
+            if (flatLen > dashLen) { moveDir = flat; dashLen = flatLen; }
+          }
+        }
         player.position.add(moveDir.clone().multiplyScalar(dashLen));
         spawnExplosion(player.position.clone().add(moveDir.clone().multiplyScalar(-200)), 15);
         // (v27) Broadcast the dash visual so peers see the cloud trail
