@@ -3681,7 +3681,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.65';
+const LSS_BUILD = '35.66';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -14604,6 +14604,13 @@ function _xrTrustedUnlockMedia() {
 function _xrHandleTrustedMenuActivation() {
   if (!(renderer && renderer.xr && renderer.xr.isPresenting)) return false;
   _xrTrustedUnlockMedia();
+  // (v35.66) The laser pointer gets first refusal. This runs off the SESSION's
+  // selectstart, and _xrPointerSelect runs off the CONTROLLER's selectstart for
+  // the same physical trigger pull — so without this guard, clicking a ship row
+  // in the panel would also run the "confirm = commitLoadout" branch below and
+  // launch the match instead of just changing the selection. Whenever the beam
+  // is on a region, that region is what the trigger means.
+  if (typeof _XR_PTR !== 'undefined' && _XR_PTR && _XR_PTR.hoverId) return false;
   let handled = false;
 
   if (_xrLobbyVisible() && _xrLobbyPressArmed) {
@@ -14739,6 +14746,18 @@ renderer.xr.addEventListener('sessionend', () => {
   if (xrAuxMesh) xrAuxMesh.visible = false;
   if (xrMinimapMesh) xrMinimapMesh.visible = false;
   if (xrMenuMesh) xrMenuMesh.visible = false;
+  // (v35.66) Retire the laser pointer with the session. The controller objects
+  // themselves are three.js-owned and re-bind on the next session; only their
+  // visuals and the stale hover need clearing so nothing hangs in the flat scene.
+  try {
+    if (typeof _XR_PTR !== 'undefined' && _XR_PTR) {
+      for (const b of _XR_PTR.beams) if (b) b.visible = false;
+      if (_XR_PTR.dot) _XR_PTR.dot.visible = false;
+      _XR_PTR.hoverId = null;
+      _XR_PTR.hoverHand = -1;
+    }
+    _XR_HITS.length = 0;
+  } catch (_) {}
   _xrCachedCameraVR = null;
   _xrMenuLastTarget = null;
   // Hand the camera back to the scene root so the flat-screen render
@@ -15226,9 +15245,227 @@ function _xrEnsureMenuMesh() {
   return xrMenuMesh;
 }
 
+// ══ (v35.66) VR LASER POINTER FOR THE MENU PANELS ═══════════════════════════
+//
+// WHY: the VR menus were navigable ONLY by D-pad buttons 12-15. Quest Touch
+// controllers have no D-pad — the xr-standard mapping is trigger/squeeze/
+// thumbstick-press/A/B and four axes, nothing at index 12+ — so on a Quest the
+// panels rendered but literally nothing could move the selection. (v35.20 made
+// the ship-select nav BUTTON-ONLY, dropping the left-stick fallback, to stop
+// the flat-screen virtual cursor fighting it; that is the change that finished
+// off VR nav.) The D-pad path is left intact for gamepads that have one.
+//
+// HOW: point-and-click, the thing every other VR app does. Each controller
+// casts a ray at the menu plane, the hit UV maps back into canvas pixels, and
+// the pixel is tested against hit rects that the DRAW functions record as they
+// paint. Regions and pixels come from the same coordinate space by
+// construction, so the two can never drift out of sync.
+//
+// Trigger handling uses three.js's `selectstart` controller event rather than
+// polling the gamepad: it is the canonical XR select AND it runs inside a real
+// input event, so the user activation is live when a click calls commitLoadout.
+const _XR_HITS = [];
+// Called from the draw functions, in CANVAS pixel coords, right where the
+// matching rectangle is painted. Rebuilt on every repaint (see _xrDrawMenuCanvas).
+function _xrHit(x, y, w, h, id, act) { _XR_HITS.push({ x, y, w, h, id, act }); }
+const _XR_PTR = {
+  ready: false, ctrls: [], beams: [], dot: null,
+  hoverId: null, hoverHand: -1,
+  _o: new THREE.Vector3(), _d: new THREE.Vector3(), _m: new THREE.Matrix4(),
+  _ray: new THREE.Raycaster(),
+};
+function _xrEnsurePointers() {
+  if (_XR_PTR.ready || !renderer || !renderer.xr || typeof renderer.xr.getController !== 'function') return;
+  for (let i = 0; i < 2; i++) {
+    const c = renderer.xr.getController(i);
+    if (!c) continue;
+    // A 1m -Z line scaled per frame to end exactly at the hit point, so the
+    // beam visibly TERMINATES on the panel instead of spearing through it.
+    const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -1)]);
+    const line = new THREE.Line(g, new THREE.LineBasicMaterial({
+      color: 0xffaa44, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false,
+    }));
+    line.renderOrder = 1002;
+    line.frustumCulled = false;
+    line.scale.z = 1.5;
+    line.visible = false;
+    c.add(line);
+    // Controllers MUST hang off xrDolly, not the scene: three.js writes their
+    // pose in reference space, and xrDolly is what carries the ship transform
+    // (same reason xrMenuMesh / xrHudMesh live there).
+    xrDolly.add(c);
+    c.addEventListener('selectstart', () => _xrPointerSelect(i));
+    _XR_PTR.ctrls.push(c);
+    _XR_PTR.beams.push(line);
+  }
+  const dot = new THREE.Mesh(
+    new THREE.RingGeometry(0.007, 0.015, 24),
+    new THREE.MeshBasicMaterial({ color: 0xffd88a, transparent: true, opacity: 0.95, depthTest: false, depthWrite: false, side: THREE.DoubleSide })
+  );
+  dot.renderOrder = 1003;
+  dot.frustumCulled = false;
+  dot.visible = false;
+  xrDolly.add(dot);
+  _XR_PTR.dot = dot;
+  _XR_PTR.ready = _XR_PTR.ctrls.length > 0;
+}
+// Fire whatever this hand is hovering. Only the hand that owns the hover can
+// click it, so two controllers pointing at different rows can't cross-fire.
+function _xrPointerSelect(handIdx) {
+  if (!renderer.xr.isPresenting) return;
+  if (_XR_PTR.hoverHand !== handIdx || !_XR_PTR.hoverId) return;
+  const hit = _XR_HITS.find(h => h.id === _XR_PTR.hoverId);
+  if (!hit || typeof hit.act !== 'function') return;
+  try { if (typeof _xrTrustedUnlockMedia === 'function') _xrTrustedUnlockMedia(); } catch (_) {}
+  try { hit.act(); } catch (e) { console.warn('[vr-pointer] action failed', hit.id, e); }
+  // The D-pad/face-button confirm path shares these menus; suppress it briefly
+  // so one trigger pull can't also be read as a face-button confirm.
+  try { _xrTrustedMenuSuppressUntil = _xrNowMs() + 320; } catch (_) {}
+  // 'mode_switch' is the closest thing the recipe bank has to a UI click —
+  // there is no dedicated ui_click, and inventing one is a sound-lab job.
+  try { if (typeof playSound === 'function') playSound('mode_switch'); } catch (_) {}
+}
+// Per-frame: aim the beams, resolve the hover, park the reticle on the panel.
+// Returns the hovered region id (feeds the repaint signature so the highlight
+// actually redraws).
+function _xrPointerTick() {
+  if (!renderer.xr.isPresenting) {
+    if (_XR_PTR.dot) _XR_PTR.dot.visible = false;
+    for (const b of _XR_PTR.beams) b.visible = false;
+    _XR_PTR.hoverId = null; _XR_PTR.hoverHand = -1;
+    return null;
+  }
+  _xrEnsurePointers();
+  const menu = xrMenuMesh;
+  const live = !!(menu && menu.visible && _XR_HITS.length);
+  let bestId = null, bestHand = -1, bestDist = Infinity, bestPt = null;
+  for (let i = 0; i < _XR_PTR.ctrls.length; i++) {
+    const c = _XR_PTR.ctrls[i], beam = _XR_PTR.beams[i];
+    if (!c || !beam) continue;
+    if (!live || !c.visible) { beam.visible = false; continue; }
+    c.updateMatrixWorld();
+    _XR_PTR._o.setFromMatrixPosition(c.matrixWorld);
+    _XR_PTR._m.identity().extractRotation(c.matrixWorld);
+    _XR_PTR._d.set(0, 0, -1).applyMatrix4(_XR_PTR._m).normalize();
+    _XR_PTR._ray.set(_XR_PTR._o, _XR_PTR._d);
+    const hits = _XR_PTR._ray.intersectObject(menu, false);
+    if (!hits.length || !hits[0].uv) {
+      beam.visible = true;
+      beam.scale.z = 1.5;
+      beam.material.opacity = 0.35;
+      continue;
+    }
+    const h = hits[0];
+    beam.visible = true;
+    beam.scale.z = h.distance;          // stop the beam at the panel
+    beam.material.opacity = 0.9;
+    // UV origin is bottom-left; the canvas is top-left.
+    const px = h.uv.x * _xrMenuCanvas.width;
+    const py = (1 - h.uv.y) * _xrMenuCanvas.height;
+    for (const r of _XR_HITS) {
+      if (px < r.x || px > r.x + r.w || py < r.y || py > r.y + r.h) continue;
+      if (h.distance < bestDist) { bestDist = h.distance; bestId = r.id; bestHand = i; }
+      break;
+    }
+    if (h.distance <= bestDist) bestPt = h.point;
+  }
+  if (_XR_PTR.dot) {
+    if (bestPt && live) {
+      _XR_PTR.dot.visible = true;
+      // The dot lives on xrDolly, the panel's own parent, so a world point has
+      // to come back into dolly space before it can be used as a local one.
+      _XR_PTR.dot.position.copy(xrDolly.worldToLocal(bestPt.clone()));
+      _XR_PTR.dot.quaternion.copy(menu.quaternion);
+      _XR_PTR.dot.translateZ(0.004);   // float just off the panel, no z-fight
+    } else {
+      _XR_PTR.dot.visible = false;
+    }
+  }
+  _XR_PTR.hoverId = bestId;
+  _XR_PTR.hoverHand = bestHand;
+  return bestId;
+}
+// (v35.66) Debug hook. The pointer is otherwise untestable without a headset:
+// everything above is module-scoped, and the whole chain (region rect -> world
+// point -> ray -> UV -> canvas pixel -> region) only runs inside a live XR
+// session. `aimAt` closes that loop on the flat screen — it takes a region by
+// id, aims a ray at the centre of where that region should BE in world space,
+// and reports which region the pointer actually resolves. A UV Y-flip or a
+// stale hit table shows up immediately as a mismatch.
+if (typeof window !== 'undefined') {
+  window.__vrPtr = {
+    paint(mode) { _xrEnsureMenuMesh(); _xrDrawMenuCanvas(mode || 'shipSelect'); return _XR_HITS.map(h => h.id); },
+    hits() { return _XR_HITS.map(h => ({ id: h.id, x: h.x, y: h.y, w: h.w, h: h.h })); },
+    state() { return { hoverId: _XR_PTR.hoverId, hoverHand: _XR_PTR.hoverHand, ready: _XR_PTR.ready, regions: _XR_HITS.length }; },
+    // Canvas pixel -> the point on the menu plane, in WORLD space.
+    pxToWorld(px, py) {
+      const m = _xrEnsureMenuMesh();
+      m.updateMatrixWorld(true);
+      const gp = m.geometry.parameters;
+      const u = px / _xrMenuCanvas.width, v = py / _xrMenuCanvas.height;
+      const lx = (u - 0.5) * gp.width, ly = (0.5 - v) * gp.height;
+      return m.localToWorld(new THREE.Vector3(lx, ly, 0));
+    },
+    // Cast an arbitrary world ray and report what it lands on.
+    aim(ox, oy, oz, dx, dy, dz) {
+      const m = _xrEnsureMenuMesh();
+      m.updateMatrixWorld(true);
+      const r = new THREE.Raycaster(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize());
+      const hs = r.intersectObject(m, false);
+      if (!hs.length || !hs[0].uv) return { hit: false };
+      const px = hs[0].uv.x * _xrMenuCanvas.width;
+      const py = (1 - hs[0].uv.y) * _xrMenuCanvas.height;
+      let id = null;
+      for (const q of _XR_HITS) {
+        if (px < q.x || px > q.x + q.w || py < q.y || py > q.y + q.h) continue;
+        id = q.id; break;
+      }
+      return { hit: true, uv: [hs[0].uv.x, hs[0].uv.y], px, py, dist: hs[0].distance, id };
+    },
+    // Full round trip: region -> its centre in world -> ray -> back to a region.
+    aimAt(id) {
+      const r = _XR_HITS.find(h => h.id === id);
+      if (!r) return { err: 'no region ' + id, have: _XR_HITS.map(h => h.id) };
+      const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      const target = this.pxToWorld(cx, cy);
+      const m = _xrEnsureMenuMesh();
+      // Stand 1.2m in FRONT of the panel (its local +Z) and look at the centre.
+      const origin = m.localToWorld(new THREE.Vector3(0, 0, 1.2));
+      const dir = target.clone().sub(origin);
+      const got = this.aim(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z);
+      return { want: id, got: got.id, match: got.id === id, px: got.px, py: got.py, wantRect: [r.x, r.y, r.w, r.h] };
+    },
+    click(id) {
+      const r = _XR_HITS.find(h => h.id === id);
+      if (!r) return 'no region ' + id;
+      r.act();
+      return 'fired ' + id;
+    },
+    // Park the VR panel canvas on the flat screen so its layout can actually be
+    // looked at without a headset. Pointer-events off — it is a picture, not UI.
+    show(mode) {
+      _xrEnsureMenuMesh();
+      _xrDrawMenuCanvas(mode || 'shipSelect');
+      const c = _xrMenuCanvas;
+      c.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);' +
+        'width:min(92vw,1100px);height:auto;z-index:99999;pointer-events:none;' +
+        'box-shadow:0 0 40px #000;background:#000';
+      if (!c.parentNode) document.body.appendChild(c);
+      return 'showing ' + (mode || 'shipSelect');
+    },
+    hide() { const c = _xrMenuCanvas; if (c.parentNode) c.parentNode.removeChild(c); c.style.cssText = ''; return 'hidden'; },
+    // Force a hover so the highlight can be eyeballed without a controller.
+    hover(id, mode) { _XR_PTR.hoverId = id || null; return this.show(mode); },
+  };
+}
+
 function _xrDrawMenuCanvas(mode) {
   const ctx = _xrMenuCtx;
   const W = _xrMenuCanvas.width, H = _xrMenuCanvas.height;
+  // (v35.66) Hit regions are rebuilt HERE and only here, by the same code that
+  // paints them. Anything drawn without a matching _xrHit is simply not
+  // clickable — there is no second table to keep in step.
+  _XR_HITS.length = 0;
   ctx.clearRect(0, 0, W, H);
   // Background panel + amber border, matching the in-game cockpit aesthetic.
   ctx.fillStyle = 'rgba(10, 6, 30, 0.94)';
@@ -15315,7 +15552,9 @@ function _xrDrawShipSelectContent(ctx, W, H) {
     ? MAP_DATA[game.selectedMap] : null;
 
   _xrText(ctx, 'SHIP SELECT', 70, 82, 'bold 54px Orbitron, sans-serif', '#ffaa44', 'left');
-  _xrText(ctx, 'START launches', W - 70, 82, '26px Orbitron, sans-serif', '#88aacc', 'right');
+  // (v35.66) Was 'START launches' — Quest controllers have no Start button, and
+  // there is a LAUNCH button on the panel now. The stick line is the fallback.
+  _xrText(ctx, 'stick also cycles ships / maps', W - 70, 82, '26px Orbitron, sans-serif', '#88aacc', 'right');
 
   ctx.fillStyle = 'rgba(255,255,255,0.035)';
   ctx.fillRect(48, 116, 340, H - 190);
@@ -15325,22 +15564,26 @@ function _xrDrawShipSelectContent(ctx, W, H) {
 
   const rowH = 74;
   const listStartY = 170;
+  const hov = _XR_PTR.hoverId;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i];
     const loadout = LOADOUTS[key];
     const y = listStartY + i * rowH;
     const isSelected = (key === selectedKey);
-    if (isSelected) {
-      ctx.fillStyle = 'rgba(255, 170, 68, 0.34)';
+    const id = 'ship:' + key;
+    const isHover = (hov === id);
+    if (isSelected || isHover) {
+      ctx.fillStyle = isSelected ? 'rgba(255, 170, 68, 0.34)' : 'rgba(120, 200, 255, 0.20)';
       ctx.fillRect(68, y - 48, 300, rowH - 6);
-      ctx.strokeStyle = '#ffaa44';
+      ctx.strokeStyle = isSelected ? '#ffaa44' : '#7fd0ff';
       ctx.lineWidth = 3;
       ctx.strokeRect(68, y - 48, 300, rowH - 6);
     }
     _xrText(ctx, loadout.name || key, 90, y - 6, 'bold 34px Orbitron, sans-serif',
-      isSelected ? '#ffe8b0' : '#cfe7ff', 'left');
+      isSelected ? '#ffe8b0' : (isHover ? '#eaf7ff' : '#cfe7ff'), 'left');
     _xrText(ctx, loadout.className || '', 90, y + 26, '22px Orbitron, sans-serif',
       isSelected ? '#ffd080' : '#88aacc', 'left');
+    _xrHit(68, y - 48, 300, rowH - 6, id, () => previewLoadout(key));
   }
 
   const detailX = 430;
@@ -15393,16 +15636,51 @@ function _xrDrawShipSelectContent(ctx, W, H) {
       y = _xrWrapText(ctx, selected.core.desc, detailX + 36, y + 34, detailW - 80, 30, 2);
     }
 
+    // (v35.66) PERK and MAP get real < > stepper buttons. These were LB/RB and
+    // the D-pad, neither of which exists on a Quest controller.
     const bottomY = H - 184;
+    const step = (x, y, id, label, act) => {
+      const w = 44, h = 44;
+      const on = (hov === id);
+      ctx.fillStyle = on ? 'rgba(120,200,255,0.30)' : 'rgba(255,255,255,0.07)';
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = on ? '#7fd0ff' : 'rgba(150,190,230,0.45)';
+      ctx.lineWidth = on ? 3 : 2;
+      ctx.strokeRect(x, y, w, h);
+      _xrText(ctx, label, x + w / 2, y + h - 12, 'bold 28px Orbitron, sans-serif', on ? '#eaf7ff' : '#bcd6ee', 'center');
+      _xrHit(x, y, w, h, id, act);
+    };
     if (perk) {
       _xrText(ctx, 'PERK: ' + perk.name, detailX + 36, bottomY, '26px Orbitron, sans-serif', '#ffe0a0', 'left');
     }
+    step(detailX + detailW - 118, bottomY - 34, 'perk:prev', '◀', () => { if (typeof _cyclePerk === 'function') _cyclePerk(-1); });
+    step(detailX + detailW - 64,  bottomY - 34, 'perk:next', '▶', () => { if (typeof _cyclePerk === 'function') _cyclePerk(1); });
+
     const fallbackMapName = (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : 'Default';
     _xrText(ctx, 'MAP: ' + (mapData ? mapData.name : fallbackMapName),
       detailX + 36, bottomY + 40, '24px Orbitron, sans-serif', '#a9d8ff', 'left');
+    step(detailX + detailW - 118, bottomY + 8, 'map:prev', '◀', () => { if (typeof cycleMap === 'function') cycleMap(-1); });
+    step(detailX + detailW - 64,  bottomY + 8, 'map:next', '▶', () => { if (typeof cycleMap === 'function') cycleMap(1); });
   }
 
-  _xrText(ctx, 'UP/DOWN ship    LEFT/RIGHT map    LB/RB perk    A/B/START launch',
+  // LAUNCH. The one control that has to be unmissable, so it gets the full
+  // width of the left column and sits under the ship list.
+  {
+    const bx = 48, bw = 340, bh = 76, by = H - 150;
+    const on = (hov === 'launch');
+    ctx.fillStyle = on ? 'rgba(255, 190, 90, 0.55)' : 'rgba(255, 170, 68, 0.26)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = '#ffaa44';
+    ctx.lineWidth = on ? 5 : 3;
+    ctx.strokeRect(bx, by, bw, bh);
+    _xrText(ctx, 'LAUNCH', bx + bw / 2, by + 52, 'bold 44px Orbitron, sans-serif', on ? '#fff6e0' : '#ffe8b0', 'center');
+    _xrHit(bx, by, bw, bh, 'launch', () => {
+      const k = _xrSelectedLoadoutKey();
+      if (k && LOADOUTS[k]) commitLoadout(k);
+    });
+  }
+
+  _xrText(ctx, 'Point with a controller, pull the trigger to select',
     W / 2, H - 38, '24px Orbitron, sans-serif', '#bbccdd', 'center');
 }
 
@@ -15470,6 +15748,28 @@ function _xrSettingsRows() {
       activate: () => _xrStepVRScale(1),
     },
     {
+      // (v35.66) The v35.64 HUD-size setting existed ONLY in the flat settings
+      // overlay, which you cannot reach from inside a headset — so the one
+      // knob added for VR was the one knob VR could not touch. Same range and
+      // step as the #set-vr-hud-scale slider.
+      label: 'VR HUD Size',
+      value: ((input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2) + 'x',
+      change: (dir) => {
+        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+        input.vrHudScale = Math.max(0.75, Math.min(3, Math.round((cur + dir * 0.05) * 20) / 20));
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+      activate: () => {
+        // Tapping the row cycles 1.0 -> 1.5 -> 2.0 -> 2.5 -> back, so the row
+        // body is useful too rather than a dead zone between the steppers.
+        const steps = [1, 1.5, 2, 2.5];
+        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+        let i = steps.findIndex(s => s > cur + 1e-6);
+        input.vrHudScale = steps[i < 0 ? 0 : i];
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+    },
+    {
       label: 'Strip Rocks, Clouds, Lightning',
       value: (input && input.vrStripFx) ? 'ON' : 'OFF',
       change: _xrToggleVRStripFx,
@@ -15491,7 +15791,7 @@ function _xrSettingsRows() {
     },
     {
       label: 'Close Settings',
-      value: 'Press A',
+      value: 'click or press A',
       activate: () => { if (typeof closeSettings === 'function') closeSettings(); },
     },
   ];
@@ -15502,6 +15802,7 @@ function _xrSettingsSignature() {
     _xrSettingsFocusIdx,
     input && input.vrPerfMode,
     input && input.vrRenderScale,
+    input && input.vrHudScale,
     input && input.vrStripFx,
     input && input.vrHeadAim && input.vrHeadAim.enabled,
   ].join('|');
@@ -15530,24 +15831,54 @@ function _xrHandleSettingsMenuInput(gp) {
 
 function _xrDrawSettingsHint(ctx, W, H) {
   _xrText(ctx, 'VR SETTINGS', 70, 88, 'bold 54px Orbitron, sans-serif', '#ffaa44', 'left');
-  _xrText(ctx, 'START closes', W - 70, 88, '26px Orbitron, sans-serif', '#88aacc', 'right');
+  _xrText(ctx, 'stick also navigates', W - 70, 88, '26px Orbitron, sans-serif', '#88aacc', 'right');
 
   const rows = _xrSettingsRows();
+  const hov = _XR_PTR.hoverId;
   const x = 120, y0 = 170, rowH = 92, w = W - 240;
   for (let i = 0; i < rows.length; i++) {
     const y = y0 + i * rowH;
     const active = i === _xrSettingsFocusIdx;
-    ctx.fillStyle = active ? 'rgba(255, 170, 68, 0.28)' : 'rgba(255,255,255,0.045)';
+    const rowId = 'set:' + i;
+    const onRow = (hov === rowId);
+    ctx.fillStyle = active ? 'rgba(255, 170, 68, 0.28)' : (onRow ? 'rgba(120,200,255,0.18)' : 'rgba(255,255,255,0.045)');
     ctx.fillRect(x, y - 54, w, rowH - 12);
-    ctx.strokeStyle = active ? '#ffaa44' : 'rgba(120,170,220,0.25)';
+    ctx.strokeStyle = active ? '#ffaa44' : (onRow ? '#7fd0ff' : 'rgba(120,170,220,0.25)');
     ctx.lineWidth = active ? 4 : 2;
     ctx.strokeRect(x, y - 54, w, rowH - 12);
     _xrText(ctx, rows[i].label, x + 34, y, 'bold 34px Orbitron, sans-serif',
       active ? '#ffe8b0' : '#d9efff', 'left');
-    _xrText(ctx, rows[i].value, x + w - 34, y, '30px Orbitron, sans-serif',
-      active ? '#ffffff' : '#9fb6cc', 'right');
+    // (v35.66) Adjustable rows get pointer steppers; the value shifts left to
+    // make room. Rows with no `change` (Close Settings) just take a click.
+    if (rows[i].change) {
+      const bw = 48, bh = 48, by = y - 52;
+      const bx1 = x + w - 118, bx2 = x + w - 62;
+      const stepper = (bx, id, label, dir) => {
+        const on = (hov === id);
+        ctx.fillStyle = on ? 'rgba(120,200,255,0.32)' : 'rgba(255,255,255,0.08)';
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.strokeStyle = on ? '#7fd0ff' : 'rgba(150,190,230,0.45)';
+        ctx.lineWidth = on ? 3 : 2;
+        ctx.strokeRect(bx, by, bw, bh);
+        _xrText(ctx, label, bx + bw / 2, by + bh - 14, 'bold 30px Orbitron, sans-serif', on ? '#eaf7ff' : '#bcd6ee', 'center');
+        _xrHit(bx, by, bw, bh, id, () => { _xrSettingsFocusIdx = i; rows[i].change(dir); });
+      };
+      stepper(bx1, 'set:' + i + ':dec', '◀', -1);
+      stepper(bx2, 'set:' + i + ':inc', '▶', 1);
+      _xrText(ctx, rows[i].value, bx1 - 24, y, '28px Orbitron, sans-serif',
+        active ? '#ffffff' : '#9fb6cc', 'right');
+    } else {
+      _xrText(ctx, rows[i].value, x + w - 34, y, '30px Orbitron, sans-serif',
+        active ? '#ffffff' : '#9fb6cc', 'right');
+    }
+    // Row body click = activate. Registered LAST so the steppers above win the
+    // overlap test (_xrPointerTick takes the first region containing the pixel).
+    _xrHit(x, y - 54, w, rowH - 12, rowId, () => {
+      _xrSettingsFocusIdx = i;
+      if (rows[i].activate) rows[i].activate();
+    });
   }
-  _xrText(ctx, 'UP/DOWN select    LEFT/RIGHT adjust    A toggles',
+  _xrText(ctx, 'Point with a controller, pull the trigger to select',
     W / 2, H - 38, '24px Orbitron, sans-serif', '#bbccdd', 'center');
 }
 function _xrDrawLobbyHint(ctx, W, H) {
@@ -15555,12 +15886,27 @@ function _xrDrawLobbyHint(ctx, W, H) {
   ctx.font = 'bold 64px Orbitron, sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText('LAST SHIP SAILING', W / 2, 120);
-  ctx.font = '36px Orbitron, sans-serif';
-  ctx.fillStyle = '#cfe7ff';
-  ctx.fillText('Press any button to begin', W / 2, H / 2);
+  // (v35.66) A real BEGIN target for the laser pointer. "Press any button"
+  // still works (see the lobby branch in pollGamepad) — this just gives the
+  // pointer something to hit, and tells the user the pointer is a thing.
+  const bw = 520, bh = 108, bx = (W - bw) / 2, by = H / 2 - 76;
+  const on = (_XR_PTR.hoverId === 'lobby:begin');
+  ctx.fillStyle = on ? 'rgba(255, 190, 90, 0.55)' : 'rgba(255, 170, 68, 0.24)';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = '#ffaa44';
+  ctx.lineWidth = on ? 5 : 3;
+  ctx.strokeRect(bx, by, bw, bh);
+  _xrText(ctx, 'BEGIN', W / 2, by + 74, 'bold 56px Orbitron, sans-serif', on ? '#fff6e0' : '#ffe8b0', 'center');
+  _xrHit(bx, by, bw, bh, 'lobby:begin', () => {
+    _xrLobbyPressArmed = false;
+    const soloBtn = document.getElementById('btn-solo');
+    if (soloBtn) soloBtn.click();
+  });
   ctx.font = '26px Orbitron, sans-serif';
   ctx.fillStyle = '#88aacc';
-  ctx.fillText('Solo mode launches into ship select', W / 2, H / 2 + 60);
+  ctx.textAlign = 'center';
+  ctx.fillText('Point with a controller and pull the trigger, or press any button',
+    W / 2, by + bh + 54);
 }
 
 let _xrMenuLastMode = null;
@@ -15612,18 +15958,29 @@ function _xrUpdateMenuMirror() {
     mesh.visible = false;
     _xrMenuLastMode = null;
     _xrMenuLastKey = null;
+    // Drop the hit table so a stale region can't be clicked through a hidden
+    // panel, and retire the beams with it.
+    _XR_HITS.length = 0;
+    try { _xrPointerTick(); } catch (_) {}
     return;
   }
   mesh.visible = true;
+  // (v35.66) Aim the laser BEFORE deciding whether to repaint, and fold the
+  // hovered region into the signature — the hover highlight is part of the
+  // painted image, so without this the panel would only redraw when the
+  // selection changed and hover would never show.
+  let hoverId = null;
+  try { hoverId = _xrPointerTick(); } catch (e) { console.warn('[vr-pointer] tick failed', e); }
   // Repaint on mode change, or on ship-select selection change.
   const currentKey = (mode === 'shipSelect')
     ? ((typeof _xrShipMenuSignature === 'function') ? _xrShipMenuSignature() : null)
     : (mode === 'settings' && typeof _xrSettingsSignature === 'function')
       ? _xrSettingsSignature()
       : null;
-  if (mode !== _xrMenuLastMode || currentKey !== _xrMenuLastKey) {
+  const sig = (currentKey == null ? '' : currentKey) + '#' + (hoverId || '');
+  if (mode !== _xrMenuLastMode || sig !== _xrMenuLastKey) {
     _xrMenuLastMode = mode;
-    _xrMenuLastKey = currentKey;
+    _xrMenuLastKey = sig;
     _xrDrawMenuCanvas(mode);
   }
 }
@@ -51867,7 +52224,15 @@ function pollGamepad() {
     const _lgRaw = !!(_gpBtns && _gpBtns[4] && (_gpBtns[4].pressed || _gpBtns[4].value > input.triggerThreshold));
     const _rgRaw = !!(_gpBtns && _gpBtns[5] && (_gpBtns[5].pressed || _gpBtns[5].value > input.triggerThreshold));
     const _menuAnyRaw = _aRaw || _bRaw || _ltRaw || _rtRaw || _lgRaw || _rgRaw;
-    if (_menuAnyRaw && !input.gpMenuFaceAnyPrev) _menuConfirmEdge = true;
+    // (v35.66) THE POINTER OWNS THE TRIGGER WHILE IT IS AIMED AT SOMETHING.
+    // This branch treats any face button / trigger / grip as "confirm = launch",
+    // which would mean every attempt to CLICK a ship row also committed the
+    // loadout and started the match. Relying on _xrPointerSelect's suppress
+    // window is not enough — selectstart is a browser event and can land either
+    // side of pollGamepad in a frame. When a region is hovered, the trigger
+    // means "activate that region" and nothing else.
+    const _ptrOwns = !!(typeof _XR_PTR !== 'undefined' && _XR_PTR && _XR_PTR.hoverId);
+    if (_menuAnyRaw && !input.gpMenuFaceAnyPrev && !_ptrOwns) _menuConfirmEdge = true;
     input.gpMenuFaceAnyPrev = _menuAnyRaw;
   } else {
     input.gpMenuFaceAnyPrev = false;
@@ -51945,22 +52310,43 @@ function pollGamepad() {
     // (v35.20) BUTTON-ONLY d-pad reads. These used to be gpDpadLeft/Right/Up/
     // Down, which fold in the left stick past 0.6 — so simply moving the stick
     // (which now drives the menu cursor) cycled ships and maps underneath you.
+    // (v35.66) VR STICK FALLBACK. Everything below is D-pad buttons 12-15,
+    // which Quest Touch controllers do not have — that is why VR ship-select
+    // was frozen. The laser pointer is the real fix; this is the belt-and-
+    // braces path for when a controller isn't tracked or the beam is off-panel.
+    // Gated on isPresenting so it cannot reintroduce the v35.20 problem it was
+    // removed for (the flat-screen virtual cursor fighting the stick).
+    let _vrNavL = false, _vrNavR = false, _vrNavU = false, _vrNavD = false;
+    if (renderer && renderer.xr && renderer.xr.isPresenting) {
+      const _sx = (gp.axes && gp.axes[0]) || 0, _sy = (gp.axes && gp.axes[1]) || 0;
+      // Dominant-axis only, so a diagonal push doesn't change ship AND map.
+      const _horiz = Math.abs(_sx) > Math.abs(_sy);
+      const _now = (_horiz && _sx < -0.7) ? 'l' : (_horiz && _sx > 0.7) ? 'r'
+                 : (!_horiz && _sy < -0.7) ? 'u' : (!_horiz && _sy > 0.7) ? 'd' : '';
+      if (_now && _now !== input._vrMenuStickPrev) {
+        _vrNavL = _now === 'l'; _vrNavR = _now === 'r';
+        _vrNavU = _now === 'u'; _vrNavD = _now === 'd';
+      }
+      input._vrMenuStickPrev = _now;
+    } else {
+      input._vrMenuStickPrev = '';
+    }
     const entries = Array.from(document.querySelectorAll('.ship-chip'));
     if (entries.length) {
       let idx = entries.findIndex(e => e.classList.contains('selected'));
-      if (input.gpDpadLeftBtn && !input.gpDpadLeftBtnPrev) {
+      if ((input.gpDpadLeftBtn && !input.gpDpadLeftBtnPrev) || _vrNavL) {
         idx = (idx <= 0) ? entries.length - 1 : idx - 1;
         const key = entries[idx] && entries[idx].dataset && entries[idx].dataset.key;
         if (key) previewLoadout(key);
-      } else if (input.gpDpadRightBtn && !input.gpDpadRightBtnPrev) {
+      } else if ((input.gpDpadRightBtn && !input.gpDpadRightBtnPrev) || _vrNavR) {
         idx = (idx < 0 || idx >= entries.length - 1) ? 0 : idx + 1;
         const key = entries[idx] && entries[idx].dataset && entries[idx].dataset.key;
         if (key) previewLoadout(key);
       }
     }
-    if (input.gpDpadUpBtn && !input.gpDpadUpBtnPrev) {
+    if ((input.gpDpadUpBtn && !input.gpDpadUpBtnPrev) || _vrNavU) {
       if (typeof cycleMap === 'function') cycleMap(-1);
-    } else if (input.gpDpadDownBtn && !input.gpDpadDownBtnPrev) {
+    } else if ((input.gpDpadDownBtn && !input.gpDpadDownBtnPrev) || _vrNavD) {
       if (typeof cycleMap === 'function') cycleMap(1);
     }
     // LB/RB cycle the perk picker so gamepad users can pick
