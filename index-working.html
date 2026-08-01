@@ -20422,6 +20422,28 @@ function _swDisposeChunk(c) {
   _swRemoveTrees(c.trees);
 }
 
+// (v35.84) ENDLESS append-tear guard. A chunk baked BEFORE a route append that
+// the new shapes' carve influence touches keeps its stale heightfield and
+// splits at the chunk border — the v35.81 tear class, mid-run flavour: the
+// endless stream window (__endlessView 9 = a chebyshev SQUARE, corners bake
+// out past 11km euclidean) exceeds the 7000u segment-append radius, so chunks
+// ahead of the route end can bake before the segment that carves them exists.
+// Dispose every baked chunk inside the new geometry's influence rect; the
+// budgeted streamer rebakes them (distance-sorted, _SW_BUILD_PER_FRAME) with
+// the carvers present. Those chunks are >=6km out, so the rebake hides in fog.
+function _swInvalidateChunksInRect(minX, maxX, minZ, maxZ) {
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size) return 0;
+  const c0x = Math.floor(minX / _SW_CHUNK), c1x = Math.floor(maxX / _SW_CHUNK);
+  const c0z = Math.floor(minZ / _SW_CHUNK), c1z = Math.floor(maxZ / _SW_CHUNK);
+  let n = 0;
+  for (const [key, c] of chunks) {
+    if (c.cx < c0x || c.cx > c1x || c.cz < c0z || c.cz > c1z) continue;
+    _swDisposeChunk(c); chunks.delete(key); n++;
+  }
+  return n;
+}
+
 // Atmosphere: a hazy biome sky + matched fog so distant peaks fade into the
 // horizon (the Ace look). Saves/restores the original fog + background so the
 // toggle returns the cosmic build untouched.
@@ -26717,6 +26739,10 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   }
   return lim + gBuilt + tBuilt;
 }
+// Debug hook (the __* convention): drive the streamer manually with a chosen
+// budget — headless tests teleport faster than the 2/frame budget streams, so
+// they drain the todo queue between hops (see the v35.84 tear-scan harness).
+if (typeof window !== 'undefined') window.__swStream = updateSandwichStream;
 
 // Called at level build: reset, then synchronously fill the map footprint (plus a
 // ring) so the whole pathway has mountains the instant the round starts.
@@ -64810,9 +64836,12 @@ MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
 // are terrain the moment their chunks stream in). The static rooms/tunnels
 // below are only the carousel preview / non-endless fallback.
 // Invariants (design doc): append when the ship is within 7000u of the route
-// end (> _SW_VIEW streaming radius of 4500u, so those chunks are still
-// unbaked); prune only segments >8000u behind (their chunks already unloaded);
-// keep the active window ~18 segments so _stRouteAt stays cheap.
+// end; prune only segments >8000u behind; keep the active window ~18 segments
+// so _stRouteAt stays cheap. The old "append radius > streaming radius so
+// those chunks are still unbaked" invariant is GONE (v35.84): the endless
+// stream window (__endlessView 9, a chebyshev square) bakes chunks well past
+// 7000u, so _lssEndlessApplySeg now rebakes any baked chunk its new shapes
+// carve (_swInvalidateChunksInRect) instead of relying on append order.
 // ============================================================
 MAP_DATA.endless_caverns = {
   name: 'ENDLESS ; The Long Dark',
@@ -64891,6 +64920,28 @@ function _lssEndlessApplySeg(run, s) {
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
     cyl, sph, spur,
   });
+  // (v35.84) Rebake any already-baked chunk this new geometry carves (the
+  // append-tear guard — see _swInvalidateChunksInRect). Influence is 2D x/z,
+  // reach = shape r + CLEAR_SOFT (_stRouteAt); +90 covers the spur (r 300 can
+  // exceed a narrow lane's 280) and border-vertex sharing. The spur needs no
+  // box of its own: both its endpoints sit inside the union with >= its reach.
+  // Debug: window.__endlessNoRebake = true disables the guard (A/B the tear);
+  // window.__endlessRebaked counts chunks the guard has rebaked this run.
+  try {
+    if (!window.__endlessNoRebake) {
+      const soft = ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
+      const cr = s.r + soft;
+      let minX = Math.min(s.a.x, s.b.x) - cr, maxX = Math.max(s.a.x, s.b.x) + cr;
+      let minZ = Math.min(s.a.z, s.b.z) - cr, maxZ = Math.max(s.a.z, s.b.z) + cr;
+      if (sph) {
+        const rr = sph.r + soft;
+        minX = Math.min(minX, sph.cx - rr); maxX = Math.max(maxX, sph.cx + rr);
+        minZ = Math.min(minZ, sph.cz - rr); maxZ = Math.max(maxZ, sph.cz + rr);
+      }
+      const n = _swInvalidateChunksInRect(minX, maxX, minZ, maxZ);
+      if (n) window.__endlessRebaked = (window.__endlessRebaked || 0) + n;
+    }
+  } catch (_) {}
 }
 
 // Level generator (the shifting_deep pattern): seeds the run state and returns
