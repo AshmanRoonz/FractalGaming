@@ -1,12 +1,18 @@
 # ENDLESS mode — design
 
-> **STATUS (2026-08-01): Stage 1 + lives SHIPPED in v35.71.** Mode button →
-> ship-select with lives-as-difficulty → seeded endless route (append/prune
-> verified live: 126.79 km headless run, window stable at 18 segments) →
-> distance HUD → death spends a life, respawn at last hall → run over + best
-> distance persisted. Solo only. Not yet built: ambush waves (stage 2's
-> director), theme stretches, god rays, water/lava halls. Anchors + traps
-> logged in lss.map.md (PART 2, v35.71 entry).
+> **STATUS (2026-08-01): Stages 1+2+3 SHIPPED (v35.71 + v35.72).** The full
+> loop is in: seeded endless route (126.79 km verified run, 18-segment
+> window), lives-as-difficulty, distance HUD; the ambush director
+> (travel → warning → battle → cleared, waves scale with km, elites every
+> 5th, cleared = hull patch; bots fly the cavern via the straightaway's
+> terrain nav); theme stretches every 9-15k u (biome + atmosphere swap ahead
+> of the ship — the crossfade is spatial); god rays under ceiling cracks in
+> calm biomes; storm stretches (35% of rocky/snow reaches: god rays off,
+> ambient lightning strikes near the lane). All verified by driving the real
+> mode code in-browser; live screenshot shows the HUD at 2.78 km. Solo only.
+> Remaining (stage 3b/4): water/lava hall set-pieces, music sync, boss
+> milestones, co-op (needs the shared rng stream split — see lss.map.md ⚠),
+> daily seed.
 
 > 2026-08-01, from Ashman's brief: "endless caverns, winding, bending, straight
 > aways, openings with water, or lava, or growing things... gas clouds and

@@ -2362,10 +2362,10 @@ body.vr-active #camp-video { display: none !important; }
                   letter-spacing:3px;transition:all 0.2s;font-weight:bold;">
             CAMPAIGN <span style="font-size:10px;letter-spacing:1.5px;color:#8a7fae;font-weight:600;margin-left:10px;opacity:0.9;">(UNDER CONSTRUCTION)</span>
           </button>
+          <button id="btn-endless" onclick="startEndless()" type="button" title="Endless — a cavern without end; fly as far as your lives allow">
+            ENDLESS
+          </button>
           <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
-            <button id="btn-endless" onclick="startEndless()" type="button" title="Endless — a cavern without end; fly as far as your lives allow">
-              ENDLESS
-            </button>
             <button id="btn-freeflight" onclick="startFreeFlight()" type="button" title="Exhibition — patrol the open mossy overworld (the campaign hub)" style="
                     flex:1 1 0;min-height:54px;
                     background:rgba(18,40,26,0.6);border:1px solid rgba(110,220,150,0.45);
@@ -3103,6 +3103,7 @@ body.vr-active #camp-video { display: none !important; }
   background: transparent !important; border: none !important;
 }
 #btn-endless { color: #ff8a5c !important; }
+#lobby-solo-row { flex-direction: column !important; align-items: stretch !important; }
 #btn-endless:hover {
   color: #ffb391 !important; transform: translateX(12px);
   text-shadow: 0 0 24px rgba(255,138,92,0.7);
@@ -3608,7 +3609,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.71';
+const LSS_BUILD = '35.78';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -6124,12 +6125,21 @@ const EndlessMode = {
       for (let i = 0; i < run.segs.length; i++) {
         const s = run.segs[i];
         s.cyl = game.levelCylinders[i] || null;
+        if (s.cyl) s.cyl.w = 0.15;
         if (s.hall) { s.sph = game.levelSpheres[si] || null; si++; }
       }
     } catch (_) {}
     try { run.lives = _endlessLivesFor(typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'); } catch (_) { run.lives = 1; }
     run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
     run.lastHall = { x: 0, y: 80, z: 0 };
+    // (v35.72) Stage 2+3 state: ambush director phase machine (phaseT starts
+    // negative = a grace period before the first travel clock), theme
+    // stretches, god-ray pool.
+    run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
+    run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
+    run.stormy = false; run.boltT = 0;
+    // No rounds in endless: hide the ROUND HUD label for the whole run.
+    try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = 'none'; } catch (_) {}
     this._deathT = 0;
   },
   onWaveStart() {},
@@ -6173,13 +6183,26 @@ const EndlessMode = {
           } catch (_) {}
         } else {
           try {
+            // Capture where you died BEFORE respawnPlayer() teleports you to a
+            // stock spawn point; respawn ON the route just behind that spot
+            // (v35.78) — snapping to the start hall read as 'respawned in the nexus'.
+            const dpx = player.position.x, dpy = player.position.y, dpz = player.position.z;
             if (typeof respawnPlayer === 'function') respawnPlayer();
-            // Continue from the last hall reached; the run and the clock keep going.
-            player.position.set(run.lastHall.x, run.lastHall.y + 60, run.lastHall.z);
+            let ri = 0, rd2 = Infinity;
+            for (let i = 0; i < run.segs.length; i++) {
+              const q = run.segs[i];
+              const mx = (q.a.x + q.b.x) * 0.5 - dpx, my = (q.a.y + q.b.y) * 0.5 - dpy, mz = (q.a.z + q.b.z) * 0.5 - dpz;
+              const d2 = mx * mx + my * my + mz * mz;
+              if (d2 < rd2) { rd2 = d2; ri = i; }
+            }
+            const rs = run.segs[Math.max(0, ri - 1)];
+            let ry = rs.a.y + 120;
+            if (typeof worldSDF === 'function') { for (let up = 0; up < 5 && worldSDF(rs.a.x, ry, rs.a.z) > -60; up++) ry += 260; }
+            player.position.set(rs.a.x, ry, rs.a.z);
             if (player.velocity) player.velocity.set(0, 0, 0);
             player._swYClampCache = null;
             if (player.maxHealth) { player.health = player.maxHealth; player.shield = player.maxShield; }
-            if (window.Overlays && Overlays.banner) Overlays.banner('LIVES ' + run.lives, 'continue from the last hall');
+            if (window.Overlays && Overlays.banner) Overlays.banner('LIVES ' + run.lives, 'back on the route');
           } catch (_) {}
         }
       }
@@ -6199,7 +6222,7 @@ const EndlessMode = {
       let t = ((p.x - s.a.x) * ex + (p.y - s.a.y) * ey + (p.z - s.a.z) * ez) / l2;
       t = t < 0 ? 0 : (t > 1 ? 1 : t);
       const qx = p.x - (s.a.x + ex * t), qy = p.y - (s.a.y + ey * t), qz = p.z - (s.a.z + ez * t);
-      if (qx * qx + qy * qy + qz * qz < 2800 * 2800) { bestK = k; bestT = t; }
+      if (qx * qx + qy * qy + qz * qz < 4200 * 4200) { bestK = k; bestT = t; }
     }
     if (bestK >= 0) {
       const tgt = run.segs[bestK];
@@ -6234,15 +6257,211 @@ const EndlessMode = {
       if (dx * dx + dz * dz < 8000 * 8000) break;
       run.segs.shift();
       if (s0.cyl) { const i = game.levelCylinders.indexOf(s0.cyl); if (i >= 0) game.levelCylinders.splice(i, 1); }
+      if (s0.spur) { const i = game.levelCylinders.indexOf(s0.spur); if (i >= 0) game.levelCylinders.splice(i, 1); }
       if (s0.sph) { const i = game.levelSpheres.indexOf(s0.sph); if (i >= 0) game.levelSpheres.splice(i, 1); }
       pruned = true;
     }
     if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
+    // ---- (v35.72) stage 2 ambush director + stage 3 living world ----
+    try { this._director(dt, run); } catch (_) {}
+    try { this._world(dt, run); } catch (_) {}
     // ---- HUD ----
-    const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives;
+    const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
+                   : run.phase === 'warning' ? ' · AMBUSH INBOUND' : '';
+    const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives + phaseTxt;
     if (txt !== run._hudTxt) { run._hudTxt = txt; try { this._hud().textContent = txt; } catch (_) {} }
   },
+  // ---- (v35.72) Stage 2: the ambush director. travel -> warning -> battle -> cleared.
+  // The travel clock squeezes ~1.2s per km flown (floor 28s); a wave must be
+  // CLEARED before the next clock starts, so fleeing just keeps the pack on you.
+  _director(dt, run) {
+    if (player && player.shipState === 'dead') return;
+    run.phaseT += dt;
+    if (run.phase === 'travel') {
+      const clock = Math.max(28, 58 - (run.dist / 1000) * 1.2);
+      if (run.phaseT >= clock) {
+        run.phase = 'warning'; run.phaseT = 0;
+        try { announcerSay('Warning. Hostile signatures closing.', { key: 'endless_warn', cooldown: 10, priority: true }); } catch (_) {}
+        try { if (window.Overlays && Overlays.banner) Overlays.banner('AMBUSH INBOUND', 'they found you'); } catch (_) {}
+      }
+    } else if (run.phase === 'warning') {
+      if (run.phaseT >= 5) { run.phase = 'battle'; run.phaseT = 0; this._spawnWave(run); }
+    } else if (run.phase === 'battle') {
+      let alive = 0;
+      if (run.waveBots) for (let i = 0; i < run.waveBots.length; i++) { const b = run.waveBots[i]; if (b && b.alive) alive++; }
+      if (!alive) {
+        run.phase = 'cleared'; run.phaseT = 0; run.waveBots = null;
+        try {
+          if (player.maxHealth) player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.35);
+          if (player.maxShield) player.shield = player.maxShield;
+        } catch (_) {}
+        try { announcerSay('Hostiles destroyed. Fly on.', { key: 'endless_clear', cooldown: 10 }); } catch (_) {}
+        try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
+      }
+    } else if (run.phase === 'cleared') {
+      if (run.phaseT >= 3) { run.phase = 'travel'; run.phaseT = 0; }
+    }
+  },
+  _spawnWave(run) {
+    run.waveN++;
+    const n = Math.min(6, 2 + Math.floor(run.dist / 3000));
+    const elite = (run.waveN % 5 === 0);
+    const pool = (game._botShipDeal && game._botShipDeal.enemy) || ['SLAYER', 'PYRO', 'TRACKER'];
+    // Spawn AHEAD on the route (2 segments up), fanned laterally off the lane;
+    // a fan point that lands in rock collapses to the lane centre (carved = open).
+    // Anchor to the ship's ACTUAL position, not the progress marker — a
+    // free-flying player can be ahead of (or off) their scored progress, and
+    // anchoring there used to drop waves right on top of them (v35.77).
+    // Nearest spine segment first, then walk forward to >= 3200u standoff.
+    const pp = player.position;
+    let ni = 0, nd = Infinity;
+    for (let i = 0; i < run.segs.length; i++) {
+      const q = run.segs[i];
+      const mx = (q.a.x + q.b.x) * 0.5 - pp.x, my = (q.a.y + q.b.y) * 0.5 - pp.y, mz = (q.a.z + q.b.z) * 0.5 - pp.z;
+      const d2 = mx * mx + my * my + mz * mz;
+      if (d2 < nd) { nd = d2; ni = i; }
+    }
+    let s = run.segs[Math.min(ni + 1, run.segs.length - 1)];
+    for (let i = Math.min(ni + 1, run.segs.length - 1); i < run.segs.length; i++) {
+      s = run.segs[i];
+      const dx = s.b.x - pp.x, dy = s.b.y - pp.y, dz = s.b.z - pp.z;
+      if (dx * dx + dy * dy + dz * dz >= 3200 * 3200) break;
+    }
+    const ex = s.b.x - s.a.x, ez = s.b.z - s.a.z, el2 = Math.hypot(ex, ez) || 1;
+    const px = -ez / el2, pz = ex / el2;
+    run.waveBots = [];
+    for (let i = 0; i < n; i++) {
+      try {
+        const off = (i - (n - 1) / 2) * 320;
+        let x = s.b.x + px * off, y = s.b.y + 140 + (i % 3) * 90, z = s.b.z + pz * off;
+        if (typeof worldSDF === 'function' && worldSDF(x, y, z) > -60) { x = s.b.x; y = s.b.y + 120; z = s.b.z; }
+        const bot = new Bot(pool[i % pool.length], LSS.TEAM_FLEET_B, 9200 + run.waveN * 16 + i);
+        bot.position.set(x, y, z);
+        if (bot.mesh) bot.mesh.position.copy(bot.position);
+        if (elite && bot.maxHealth) { bot.maxHealth *= 1.6; bot.health = bot.maxHealth; }
+        bot._endlessWave = run.waveN;
+        game.entities.push(bot);
+        run.waveBots.push(bot);
+      } catch (_) {}
+    }
+    try { if (window.Overlays && Overlays.banner) Overlays.banner(elite ? 'ELITE AMBUSH' : 'AMBUSH', n + ' hostiles'); } catch (_) {}
+  },
+  // ---- (v35.72) Stage 3: the living world — theme stretches + god rays ----
+  _world(dt, run) {
+    const T = game.sandwichTerrain;
+    if (!T) return;
+    // Theme stretches: swap the biome for chunks NOT YET baked. The world
+    // changes ahead of you while the old palette recedes behind — the
+    // crossfade is spatial, not temporal — and the atmosphere swaps with it.
+    if (run.dist >= run.nextBiomeAt) {
+      run.nextBiomeAt = run.dist + 9000 + run.gen.rand() * 6000;
+      const order = ['rocky', 'snow', 'volcanic', 'goldmine', 'grassy'];
+      run.biomeIdx = (run.biomeIdx + 1) % order.length;
+      T.biome = order[run.biomeIdx];
+      // (stage 3b) Some rocky/snow stretches roll STORMY: ambient lightning
+      // instead of god rays. Visual-only — no owned light state is touched
+      // (the sentinel rule), so the weather system stays authoritative.
+      run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.rand() < 0.35;
+      try { if (typeof _swApplyAtmosphere === 'function') _swApplyAtmosphere(); } catch (_) {}
+      try { if (window.Overlays && Overlays.banner) Overlays.banner(run.stormy ? 'STORM REACH' : (T.biome.toUpperCase() + ' REACH'), run.stormy ? 'the dark crackles' : 'the cavern changes'); } catch (_) {}
+    }
+    // God rays: pooled additive shafts hung under ceiling cracks (a HIGH carved
+    // ceiling = the pinch crack), calm biomes only, cylindrical-billboarded.
+    const calm = !run.stormy && (T.biome === 'rocky' || T.biome === 'snow' || T.biome === 'goldmine' || T.biome === 'grassy');
+    // (stage 3b) Storm stretches: ambient ceiling-to-floor strikes near the
+    // lane ahead, on the existing lightning pool.
+    if (run.stormy) {
+      run.boltT -= dt;
+      if (run.boltT <= 0) {
+        run.boltT = 2.5 + run.gen.rand() * 4.5;
+        try {
+          let bi = 0;
+          for (let i = 0; i < run.segs.length; i++) if (run.segs[i].gid === run.progGid) { bi = i; break; }
+          const bs = run.segs[Math.min(bi + 1, run.segs.length - 1)];
+          const bt = run.gen.rand();
+          const bx = bs.a.x + (bs.b.x - bs.a.x) * bt + (run.gen.rand() - 0.5) * 900;
+          const bz = bs.a.z + (bs.b.z - bs.a.z) * bt + (run.gen.rand() - 0.5) * 900;
+          const cy = _stCeilYCarved(bx, bz, T), gy = _stGroundYCarved(bx, bz, T);
+          if (cy < 1e8 && cy - gy > 200 && typeof spawnLightningBolt === 'function') {
+            spawnLightningBolt(new THREE.Vector3(bx, cy - 40, bz),
+              new THREE.Vector3(bx + (run.gen.rand() - 0.5) * 300, gy + 30, bz + (run.gen.rand() - 0.5) * 300),
+              0x88bbff, 0.35, 4, 3);
+          }
+        } catch (_) {}
+      }
+    }
+    run.rayT += dt;
+    if (calm && run.rayT >= 1.6) {
+      run.rayT = 0;
+      const rays = this._ensureRays(run);
+      let slot = null;
+      for (let i = 0; i < rays.length; i++) if (rays[i].life <= 0) { slot = rays[i]; break; }
+      if (slot) {
+        let idx = 0;
+        for (let i = 0; i < run.segs.length; i++) if (run.segs[i].gid === run.progGid) { idx = i; break; }
+        const s = run.segs[Math.min(idx + 1 + ((run.gen.rand() * 2) | 0), run.segs.length - 1)];
+        const t = run.gen.rand();
+        const x = s.a.x + (s.b.x - s.a.x) * t + (run.gen.rand() - 0.5) * 600;
+        const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.rand() - 0.5) * 600;
+        try {
+          const cy = _stCeilYCarved(x, z, T);
+          // Half-gap from YCEIL - YMID: the config stores no GAP_HALF field.
+          if (cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
+            slot.life = 9;
+            slot.mesh.position.set(x, cy - 620, z);
+            slot.mesh.rotation.z = (run.gen.rand() - 0.5) * 0.18;
+            slot.mesh.visible = true;
+          }
+        } catch (_) {}
+      }
+    }
+    if (run.rays) {
+      for (let i = 0; i < run.rays.length; i++) {
+        const r = run.rays[i];
+        if (r.life <= 0) { if (r.mesh.visible) r.mesh.visible = false; continue; }
+        r.life -= dt;
+        const a = Math.min(1, Math.min(9 - r.life, r.life) / 2.5);
+        r.mesh.material.opacity = 0.30 * Math.max(0, a) * (calm ? 1 : 0);
+        r.mesh.rotation.y = Math.atan2(camera.position.x - r.mesh.position.x, camera.position.z - r.mesh.position.z);
+      }
+    }
+  },
+  _ensureRays(run) {
+    if (run.rays) return run.rays;
+    const cv = document.createElement('canvas'); cv.width = 64; cv.height = 256;
+    const cx = cv.getContext('2d');
+    const grad = cx.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0, 'rgba(255,255,255,0.85)');
+    grad.addColorStop(0.75, 'rgba(255,255,255,0.22)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    cx.fillStyle = grad; cx.fillRect(0, 0, 64, 256);
+    const side = cx.createLinearGradient(0, 0, 64, 0);
+    side.addColorStop(0, 'rgba(0,0,0,1)'); side.addColorStop(0.25, 'rgba(0,0,0,0)');
+    side.addColorStop(0.75, 'rgba(0,0,0,0)'); side.addColorStop(1, 'rgba(0,0,0,1)');
+    cx.globalCompositeOperation = 'destination-out';
+    cx.fillStyle = side; cx.fillRect(0, 0, 64, 256);
+    const tex = new THREE.CanvasTexture(cv);
+    run.rays = [];
+    for (let i = 0; i < 6; i++) {
+      const m = new THREE.Mesh(
+        new THREE.PlaneGeometry(110, 1500),
+        new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0xcfe4ff }));
+      m.visible = false; m.renderOrder = 2;
+      scene.add(m);
+      run.rays.push({ mesh: m, life: 0 });
+    }
+    return run.rays;
+  },
   onTeardown() {
+    try {
+      const run = game.endlessRun;
+      if (run && run.rays) for (let i = 0; i < run.rays.length; i++) {
+        const r = run.rays[i];
+        try { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh.material.dispose(); } catch (_) {}
+      }
+    } catch (_) {}
+    try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = ''; } catch (_) {}
     try { const el = document.getElementById('endless-hud'); if (el && el.parentNode) el.parentNode.removeChild(el); } catch (_) {}
     try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; } catch (_) {}
   },
@@ -6341,7 +6560,7 @@ if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 // raceNoTimer: no clock, no win-gate); EndlessMode.update owns death and the run.
 function startEndless() {
   LSS.MODE = 'endless';
-  game.testMode = true;
+  game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
   game.selectedMap = 'endless_caverns';
@@ -15813,7 +16032,11 @@ function _stRouteAt(x,z,T){
     const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
     let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
     const cx=c.ax+dx*t,cz=c.az+dz*t,d=Math.hypot(x-cx,z-cz);
-    const e=1-_stSmooth(c.r,c.r+soft,d);
+    // (v35.73) Optional per-cylinder carve WEIGHT (c.w, default 1): a partial
+    // lane keeps the natural ridged relief inside the corridor instead of
+    // flattening it to a constant-profile tube. Endless lanes use ~0.42;
+    // every existing map leaves w unset -> behaviour identical.
+    const e=(1-_stSmooth(c.r,c.r+soft,d))*(c.w!=null?c.w:1);
     if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}
   return {o,ty};
 }
@@ -21714,7 +21937,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
   const chunks = game.sandwichChunks;
   const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
-  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : _SW_VIEW;   
+  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : ((T && T.ENDLESS) ? (window.__endlessView || 9) : _SW_VIEW);   
   
   
   
@@ -23787,7 +24010,8 @@ class Bot {
 
     if ((this.hoardModelKey && LSS.MODE === 'campaign') ||
         (this.hoardModelKey && (this._cavernBot || this._riftGuard)) ||
-        (LSS.MODE === 'race' && game.selectedMap === 'race_straightaway')) _campHoardTerrainNav(this, dt);
+        (LSS.MODE === 'race' && game.selectedMap === 'race_straightaway') ||
+        LSS.MODE === 'endless') _campHoardTerrainNav(this, dt);
 
     const botCollR = this.chassis.hullLength * 0.5;
     const botMoveLen = this.velocity.length() * dt;
@@ -40922,7 +41146,7 @@ function updateRoundSystem(dt) {
     const isResolutionAuthority = !net.active || amStasisOwner();
     const championPending = (game.championResult === 'A' || game.championResult === 'B');
     const _aslt = _isAssault();
-    if (!game.testMode && !(typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') && (endByChampion || (!championPending && ((!_aslt && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
+    if (!game.testMode && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
       let winnerLabel = '';
       let winnerTeam = LSS.TEAM_FLEET_A;
       if (endByChampion) {
@@ -52027,8 +52251,8 @@ function _lssEndlessNextSeg(run) {
   const kindRoll = rand();
   let hall = false;
   g.sinceHall++;
-  if (g.sinceHall >= 4 + Math.floor(rand() * 3)) { hall = true; g.sinceHall = 0; }
-  let turn = (rand() - 0.5) * (kindRoll < 0.45 ? 0.14 : 1.15);
+  if (g.sinceHall >= 2 + Math.floor(rand() * 3)) { hall = true; g.sinceHall = 0; }
+  let turn = (rand() - 0.5) * (kindRoll < 0.45 ? 0.14 : 0.7);
   const distO = Math.hypot(g.x, g.z);
   if (distO > 42000) {
     const home = Math.atan2(-g.x, -g.z);
@@ -52042,22 +52266,44 @@ function _lssEndlessNextSeg(run) {
   const a = { x: g.x, y: g.y, z: g.z };
   g.x += Math.sin(g.heading) * len;
   g.z += Math.cos(g.heading) * len;
+  // (v35.73) More vertical drama + varied lane width: narrow squeezes to
+  // broad galleries instead of one constant-radius hallway.
   g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));
   const b = { x: g.x, y: g.y, z: g.z };
-  return { a, b, r: 400, hall, hallR: hall ? (950 + rand() * 420) : 0, gid: g.nextGid++ };
+  const r = 280 + rand() * 500;
+  const hallR = hall ? (800 + rand() * 800) : 0;
+  // 40% of halls hang OFF the lane (side chamber + spur) — something to
+  // notice and turn into rather than fly straight through.
+  let hp = null;
+  if (hall && rand() < 0.4) {
+    const sgn = rand() < 0.5 ? 1 : -1;
+    const off = 800 + rand() * 700;
+    hp = { x: b.x + Math.cos(g.heading) * off * sgn, y: b.y + (rand() - 0.5) * 200, z: b.z - Math.sin(g.heading) * off * sgn };
+  }
+  return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
 }
 
 // Append one generated segment to the LIVE route arrays (mirrors the shapes
 // buildRoomGraphLevel derives from rooms/tunnels).
 function _lssEndlessApplySeg(run, s) {
-  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r };
+  // w 0.42: partial carve — the lane GUARANTEES passage but keeps the ridged
+  // relief, so the corridor reads as cavern, not subway (v35.73).
+  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r, w: 0.15 };
   game.levelCylinders.push(cyl);
-  let sph = null;
-  if (s.hall) { sph = { cx: s.b.x, cy: s.b.y, cz: s.b.z, r: s.hallR }; game.levelSpheres.push(sph); }
+  let sph = null, spur = null;
+  if (s.hall) {
+    const hc = s.hp || s.b;
+    sph = { cx: hc.x, cy: hc.y, cz: hc.z, r: s.hallR };
+    game.levelSpheres.push(sph);
+    if (s.hp) {
+      spur = { ax: s.b.x, ay: s.b.y, az: s.b.z, bx: hc.x, by: hc.y, bz: hc.z, r: 300 };
+      game.levelCylinders.push(spur);
+    }
+  }
   run.segs.push({
     gid: s.gid, a: s.a, b: s.b, hall: s.hall,
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
-    cyl, sph,
+    cyl, sph, spur,
   });
 }
 
