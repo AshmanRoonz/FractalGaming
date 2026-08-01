@@ -3609,7 +3609,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.84';
+const LSS_BUILD = '35.85';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -4105,9 +4105,10 @@ const net = {
   myPeerId: null,
   peers: new Map(),           
   networkPlayers: [],         
-  openSolo: false,            
-  openSoloHostId: null,       
-  campaign: false,            
+  openSolo: false,
+  openSoloHostId: null,
+  campaign: false,
+  endless: false,             // (v35.85) co-op ENDLESS room (mirrors net.campaign)
   _dropin: null,              
 
   
@@ -5614,8 +5615,9 @@ function _cancelRoomForLocalPlay() {
       net.room = null;
       net.roomId = null;
       net.active = false;
-      net.openSolo = false;       
+      net.openSolo = false;
       net.campaign = false;
+      net.endless = false;
     }
   } catch (_) {}
   try {
@@ -5735,7 +5737,7 @@ function _renderEliminationBotsBtn() {
   const btn = document.getElementById('btn-ss-bots');
   if (!btn) return;
   const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-  const show = (_m !== 'campaign' && _m !== 'freeflight');
+  const show = (_m !== 'campaign' && _m !== 'freeflight' && _m !== 'endless');
   btn.style.display = show ? '' : 'none';
   if (!show) return;
   const on = (game.eliminationBots !== false);
@@ -6149,7 +6151,7 @@ const EndlessMode = {
     if (!run || game.state !== 'playing') return;
     if (run.over) {
       run.overT += dt;
-      if (run.overT > 6 && !run._returned) {
+      if (!(net && net.active && net.endless) && run.overT > 6 && !run._returned) {
         run._returned = true;
         try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {}
       }
@@ -6243,7 +6245,9 @@ const EndlessMode = {
       pruned = true;
     }
     if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
-    try { this._director(dt, run); } catch (_) {}
+    const _ea = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
+    if (_ea) { try { this._director(dt, run); } catch (_) {} }
+    else { try { this._coopPhase(dt, run); } catch (_) {} }
     try { this._world(dt, run); } catch (_) {}
     const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
                    : run.phase === 'warning' ? ' · AMBUSH INBOUND' : '';
@@ -6271,11 +6275,34 @@ const EndlessMode = {
           if (player.maxHealth) player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.35);
           if (player.maxShield) player.shield = player.maxShield;
         } catch (_) {}
+        try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
         try { announcerSay('Hostiles destroyed. Fly on.', { key: 'endless_clear', cooldown: 10 }); } catch (_) {}
         try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
       }
     } else if (run.phase === 'cleared') {
       if (run.phaseT >= 3) { run.phase = 'travel'; run.phaseT = 0; }
+    }
+  },
+  _coopPhase(dt, run) {
+    run.phaseT += dt;
+    let alive = 0;
+    try {
+      for (const e of game.entities) {
+        if (e && (e instanceof Bot) && e.isProxy && e.alive && e.team === LSS.TEAM_FLEET_B) alive++;
+      }
+    } catch (_) {}
+    if (alive && run.phase !== 'battle') {
+      run.phase = 'battle'; run.phaseT = 0; run.waveN++;
+      try { announcerSay('Warning. Hostile signatures closing.', { key: 'endless_warn', cooldown: 10, priority: true }); } catch (_) {}
+      try { if (window.Overlays && Overlays.banner) Overlays.banner('AMBUSH', alive + ' hostiles'); } catch (_) {}
+    } else if (!alive && run.phase === 'battle') {
+      run.phase = 'travel'; run.phaseT = 0;
+      try {
+        if (player.maxHealth) player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.35);
+        if (player.maxShield) player.shield = player.maxShield;
+      } catch (_) {}
+      try { announcerSay('Hostiles destroyed. Fly on.', { key: 'endless_clear', cooldown: 10 }); } catch (_) {}
+      try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
     }
   },
   _spawnWave(run) {
@@ -6314,17 +6341,18 @@ const EndlessMode = {
         run.waveBots.push(bot);
       } catch (_) {}
     }
+    try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
     try { if (window.Overlays && Overlays.banner) Overlays.banner(elite ? 'ELITE AMBUSH' : 'AMBUSH', n + ' hostiles'); } catch (_) {}
   },
   _world(dt, run) {
     const T = game.sandwichTerrain;
     if (!T) return;
     if (run.dist >= run.nextBiomeAt) {
-      run.nextBiomeAt = run.dist + 9000 + run.gen.rand() * 6000;
+      run.nextBiomeAt = run.dist + 9000 + run.gen.cos() * 6000;
       const order = ['rocky', 'snow', 'volcanic', 'goldmine', 'grassy'];
       run.biomeIdx = (run.biomeIdx + 1) % order.length;
       T.biome = order[run.biomeIdx];
-      run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.rand() < 0.35;
+      run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.cos() < 0.35;
       try { if (typeof _swApplyAtmosphere === 'function') _swApplyAtmosphere(); } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner(run.stormy ? 'STORM REACH' : (T.biome.toUpperCase() + ' REACH'), run.stormy ? 'the dark crackles' : 'the cavern changes'); } catch (_) {}
     }
@@ -6332,18 +6360,18 @@ const EndlessMode = {
     if (run.stormy) {
       run.boltT -= dt;
       if (run.boltT <= 0) {
-        run.boltT = 2.5 + run.gen.rand() * 4.5;
+        run.boltT = 2.5 + run.gen.cos() * 4.5;
         try {
           let bi = 0;
           for (let i = 0; i < run.segs.length; i++) if (run.segs[i].gid === run.progGid) { bi = i; break; }
           const bs = run.segs[Math.min(bi + 1, run.segs.length - 1)];
-          const bt = run.gen.rand();
-          const bx = bs.a.x + (bs.b.x - bs.a.x) * bt + (run.gen.rand() - 0.5) * 900;
-          const bz = bs.a.z + (bs.b.z - bs.a.z) * bt + (run.gen.rand() - 0.5) * 900;
+          const bt = run.gen.cos();
+          const bx = bs.a.x + (bs.b.x - bs.a.x) * bt + (run.gen.cos() - 0.5) * 900;
+          const bz = bs.a.z + (bs.b.z - bs.a.z) * bt + (run.gen.cos() - 0.5) * 900;
           const cy = _stCeilYCarved(bx, bz, T), gy = _stGroundYCarved(bx, bz, T);
           if (cy < 1e8 && cy - gy > 200 && typeof spawnLightningBolt === 'function') {
             spawnLightningBolt(new THREE.Vector3(bx, cy - 40, bz),
-              new THREE.Vector3(bx + (run.gen.rand() - 0.5) * 300, gy + 30, bz + (run.gen.rand() - 0.5) * 300),
+              new THREE.Vector3(bx + (run.gen.cos() - 0.5) * 300, gy + 30, bz + (run.gen.cos() - 0.5) * 300),
               0x88bbff, 0.35, 4, 3);
           }
         } catch (_) {}
@@ -6358,16 +6386,16 @@ const EndlessMode = {
       if (slot) {
         let idx = 0;
         for (let i = 0; i < run.segs.length; i++) if (run.segs[i].gid === run.progGid) { idx = i; break; }
-        const s = run.segs[Math.min(idx + 1 + ((run.gen.rand() * 2) | 0), run.segs.length - 1)];
-        const t = run.gen.rand();
-        const x = s.a.x + (s.b.x - s.a.x) * t + (run.gen.rand() - 0.5) * 600;
-        const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.rand() - 0.5) * 600;
+        const s = run.segs[Math.min(idx + 1 + ((run.gen.cos() * 2) | 0), run.segs.length - 1)];
+        const t = run.gen.cos();
+        const x = s.a.x + (s.b.x - s.a.x) * t + (run.gen.cos() - 0.5) * 600;
+        const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.cos() - 0.5) * 600;
         try {
           const cy = _stCeilYCarved(x, z, T);
           if (cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
             slot.life = 9;
             slot.mesh.position.set(x, cy - 620, z);
-            slot.mesh.rotation.z = (run.gen.rand() - 0.5) * 0.18;
+            slot.mesh.rotation.z = (run.gen.cos() - 0.5) * 0.18;
             slot.mesh.visible = true;
           }
         } catch (_) {}
@@ -6421,7 +6449,7 @@ const EndlessMode = {
     } catch (_) {}
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = ''; } catch (_) {}
     try { const el = document.getElementById('endless-hud'); if (el && el.parentNode) el.parentNode.removeChild(el); } catch (_) {}
-    try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; } catch (_) {}
+    try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.endless = false; } catch (_) {}
   },
 };
 const GameModes = { classic: NULL_MODE, race: NULL_MODE, campaign: CampaignMode, freeflight: FreeFlightMode, endless: EndlessMode };
@@ -6519,6 +6547,16 @@ function startEndless() {
   game.raceNoTimer = true;
   game.currentRound = 1;
   game.selectedMap = 'endless_caverns';
+  let _code = '';
+  try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
+  if ((net.active && net.room) || _code) {
+    net.endless = true;
+    _startHostedMode().then(function (ok) {
+      if (!ok) { net.endless = false; _cancelRoomForLocalPlay(); net.active = false; net.solo = true; enterShipSelect(); }
+    });
+    return;
+  }
+  net.endless = false;
   _cancelRoomForLocalPlay();
   net.active = false;
   net.solo = true;
@@ -7116,6 +7154,10 @@ function _applyModeClientSetup(mode) {
   } else if (mode === 'campaign') {
     net.campaign = true;
     try { if (typeof _campInitState === 'function') _campInitState(); } catch (_) {}
+  } else if (mode === 'endless') {
+    net.endless = true;
+    game.testMode = false; game.raceNoTimer = true; game.currentRound = 1;
+    game.selectedMap = 'endless_caverns';
   } else if (mode === 'freeflight') {
     net.freeflight = true;
     try { document.body.classList.add('lss-freeflight'); } catch (_) {}
@@ -7946,6 +7988,7 @@ function applyWorldSync(mapKey, seed) {
 
 function assignTeamFromPeerOrder() {
   if (typeof player === 'undefined' || !net.myPeerId) return;
+  if (net.campaign || net.endless) { player.team = LSS.TEAM_FLEET_A; return; }
   if (net.openSoloHostId) {
     if (net.myPeerId === net.openSoloHostId) { player.team = LSS.TEAM_FLEET_A; return; }
     const others = [net.myPeerId, ...nonJudgePeerIds()].filter(id => id !== net.openSoloHostId).sort();
@@ -7960,6 +8003,7 @@ function assignTeamFromPeerOrder() {
 
 function _teamForPeerId(id) {
   if (!id || typeof net === 'undefined' || !net.myPeerId) return undefined;
+  if (net.campaign || net.endless) return LSS.TEAM_FLEET_A;
   if (net.openSoloHostId) {
     if (id === net.openSoloHostId) return LSS.TEAM_FLEET_A;
     const others = [net.myPeerId, ...nonJudgePeerIds()].filter(x => x !== net.openSoloHostId).sort();
@@ -8724,7 +8768,7 @@ function handleNetEvent(evt, fromPeerId) {
       } catch(_) {}
     }
     if (typeof selectMap === 'function') selectMap(evt.mapKey);
-    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign')) {
+    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign' || evt.mode === 'endless')) {
       LSS.MODE = evt.mode;
       try {
         const btn = document.getElementById('race-mode-toggle');
@@ -8752,11 +8796,11 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
-    if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
+    if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
     return;
   }
   if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
-    if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
+    if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
       for (const r of evt.m) {
         if (!Array.isArray(r) || r.length < 7) continue;
         const b = _botProxyById(r[0]);
@@ -35619,7 +35663,7 @@ function commitLoadout(key) {
       document.getElementById('stasis-warning').style.display = 'none';
       document.getElementById('stasis-vignette').style.display = 'none';
 
-      if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight'))) spawnBots();
+      if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
       if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
     };
     let roundSeed = 1;
@@ -35752,7 +35796,7 @@ const _bfD = new THREE.Vector3();
 
 function _botNetSync(dt) {
   if (!net || !net.active || !net.sendEvent) return;
-  if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
+  if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
   _botNetSync._t = (_botNetSync._t || 0) - dt;
   if (_botNetSync._t > 0) return;
   _botNetSync._t = 0.12;
@@ -35768,7 +35812,7 @@ function _botNetSync(dt) {
 
 function _botSendRoster() {
   if (!net || !net.active || !net.sendEvent) return;
-  if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
+  if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
   const bots = [];
   for (const b of game.entities) {
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
@@ -41357,7 +41401,7 @@ function updateRoundSystem(dt) {
         respawnPlayer();
         
         
-        if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight'))) spawnBots();
+        if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
         
         
         if (document.exitPointerLock) {
@@ -52266,8 +52310,9 @@ function _lssEndlessApplySeg(run, s) {
 
 function _lssGenEndlessLevel(base) {
   const seed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) >>> 0;
-  const rand = mulberry32(seed);
-  const gen = { rand, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  const rand = mulberry32((seed ^ 0x9D2C5680) >>> 0);
+  const cos = mulberry32((seed ^ 0x41C64E6D) >>> 0);
+  const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
   const run = game.endlessRun = {
     gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
     over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',

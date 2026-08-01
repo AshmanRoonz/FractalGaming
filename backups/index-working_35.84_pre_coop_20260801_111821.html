@@ -3691,7 +3691,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.85';
+const LSS_BUILD = '35.84';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4318,10 +4318,9 @@ const net = {
   myPeerId: null,
   peers: new Map(),           
   networkPlayers: [],         
-  openSolo: false,
-  openSoloHostId: null,
-  campaign: false,
-  endless: false,             // (v35.85) co-op ENDLESS room (mirrors net.campaign)
+  openSolo: false,            
+  openSoloHostId: null,       
+  campaign: false,            
   _dropin: null,              
 
   
@@ -6196,9 +6195,8 @@ function _cancelRoomForLocalPlay() {
       net.room = null;
       net.roomId = null;
       net.active = false;
-      net.openSolo = false;
+      net.openSolo = false;       
       net.campaign = false;
-      net.endless = false;
     }
   } catch (_) {}
   try {
@@ -6351,15 +6349,12 @@ if (typeof window !== 'undefined') window.startElimination = startElimination;
 function _renderEliminationBotsBtn() {
   const btn = document.getElementById('btn-ss-bots');
   if (!btn) return;
-  // (v35.20) Mirror the spawnBots gate at round build, which excludes
+  // (v35.20) Mirror the spawnBots gate at round build, which excludes only
   // campaign and freeflight — so classic, race and assault all get the toggle.
   // Deliberately NOT gated on net.active: race and assault run solo when no
   // room code is entered, and that's exactly where you want to switch bots off.
-  // (v35.85) endless excluded too (the spawn gate already was): its ambush
-  // waves ARE the mode, and in co-op the toggle's elim_bots_off would null
-  // openSoloHostId out from under the drop-in machinery.
   const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-  const show = (_m !== 'campaign' && _m !== 'freeflight' && _m !== 'endless');
+  const show = (_m !== 'campaign' && _m !== 'freeflight');
   btn.style.display = show ? '' : 'none';
   if (!show) return;
   // Read from game.eliminationBots, not net.openSolo — the latter is only set
@@ -6958,13 +6953,9 @@ const EndlessMode = {
     const run = game.endlessRun;
     if (!run || game.state !== 'playing') return;
     // Run over: hold the banner beat, then soft-return to ship-select.
-    // (v35.85) CO-OP: no soft-return — the out-of-lives player stays in-world
-    // dead (the existing death flow's cam = spectate) while teammates fly on;
-    // the RUN OVER banner + best-write already fired for them alone. Lives are
-    // PER-PLAYER v1 (team-shared lives/distance = future work, design doc).
     if (run.over) {
       run.overT += dt;
-      if (!(net && net.active && net.endless) && run.overT > 6 && !run._returned) {
+      if (run.overT > 6 && !run._returned) {
         run._returned = true;
         try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {}
       }
@@ -7065,16 +7056,7 @@ const EndlessMode = {
     }
     if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
     // ---- (v35.72) stage 2 ambush director + stage 3 living world ----
-    // (v35.85) CO-OP: ONE authority (amStasisOwner — lowest peerId, the same
-    // tie-break family as open_solo_start) runs the director clock + spawns the
-    // waves; its bots stream to peers via _botNetSync/_botSendRoster (the
-    // campaign gates now include net.endless). Non-authority clients run
-    // _coopPhase instead: phase + banners DERIVED from proxy-bot arrival, no
-    // spawning, no clock. Solo: amStasisOwner() is true when net.active is
-    // false, so this is byte-identical to v35.72 behavior.
-    const _ea = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
-    if (_ea) { try { this._director(dt, run); } catch (_) {} }
-    else { try { this._coopPhase(dt, run); } catch (_) {} }
+    try { this._director(dt, run); } catch (_) {}
     try { this._world(dt, run); } catch (_) {}
     // ---- HUD ----
     const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
@@ -7106,41 +7088,11 @@ const EndlessMode = {
           if (player.maxHealth) player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.35);
           if (player.maxShield) player.shield = player.maxShield;
         } catch (_) {}
-        // (v35.85) Co-op: re-broadcast the (now wave-free) roster so peers'
-        // dead proxies get swept by _botApplyRoster's remove-missing pass.
-        try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
         try { announcerSay('Hostiles destroyed. Fly on.', { key: 'endless_clear', cooldown: 10 }); } catch (_) {}
         try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
       }
     } else if (run.phase === 'cleared') {
       if (run.phaseT >= 3) { run.phase = 'travel'; run.phaseT = 0; }
-    }
-  },
-  // (v35.85) CO-OP, non-authority side of the director: this client never
-  // spawns or ticks the travel clock — the wave arrives as PROXY bots via
-  // bot_roster (Fleet B, isProxy). Phase is DERIVED from proxy liveness so the
-  // HUD + banners + cleared hull-patch still fire here, and a director-shaped
-  // net event is unnecessary (kept simple on purpose; see endless_mode_design.md).
-  _coopPhase(dt, run) {
-    run.phaseT += dt;
-    let alive = 0;
-    try {
-      for (const e of game.entities) {
-        if (e && (e instanceof Bot) && e.isProxy && e.alive && e.team === LSS.TEAM_FLEET_B) alive++;
-      }
-    } catch (_) {}
-    if (alive && run.phase !== 'battle') {
-      run.phase = 'battle'; run.phaseT = 0; run.waveN++;
-      try { announcerSay('Warning. Hostile signatures closing.', { key: 'endless_warn', cooldown: 10, priority: true }); } catch (_) {}
-      try { if (window.Overlays && Overlays.banner) Overlays.banner('AMBUSH', alive + ' hostiles'); } catch (_) {}
-    } else if (!alive && run.phase === 'battle') {
-      run.phase = 'travel'; run.phaseT = 0;
-      try {
-        if (player.maxHealth) player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.35);
-        if (player.maxShield) player.shield = player.maxShield;
-      } catch (_) {}
-      try { announcerSay('Hostiles destroyed. Fly on.', { key: 'endless_clear', cooldown: 10 }); } catch (_) {}
-      try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
     }
   },
   _spawnWave(run) {
@@ -7185,9 +7137,6 @@ const EndlessMode = {
         run.waveBots.push(bot);
       } catch (_) {}
     }
-    // (v35.85) Co-op: the authority just spawned real bots — ship the roster so
-    // peers build their proxies now (state then streams via _botNetSync ~8 Hz).
-    try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
     try { if (window.Overlays && Overlays.banner) Overlays.banner(elite ? 'ELITE AMBUSH' : 'AMBUSH', n + ' hostiles'); } catch (_) {}
   },
   // ---- (v35.72) Stage 3: the living world — theme stretches + god rays ----
@@ -7198,14 +7147,14 @@ const EndlessMode = {
     // changes ahead of you while the old palette recedes behind — the
     // crossfade is spatial, not temporal — and the atmosphere swaps with it.
     if (run.dist >= run.nextBiomeAt) {
-      run.nextBiomeAt = run.dist + 9000 + run.gen.cos() * 6000;
+      run.nextBiomeAt = run.dist + 9000 + run.gen.rand() * 6000;
       const order = ['rocky', 'snow', 'volcanic', 'goldmine', 'grassy'];
       run.biomeIdx = (run.biomeIdx + 1) % order.length;
       T.biome = order[run.biomeIdx];
       // (stage 3b) Some rocky/snow stretches roll STORMY: ambient lightning
       // instead of god rays. Visual-only — no owned light state is touched
       // (the sentinel rule), so the weather system stays authoritative.
-      run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.cos() < 0.35;
+      run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.rand() < 0.35;
       try { if (typeof _swApplyAtmosphere === 'function') _swApplyAtmosphere(); } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner(run.stormy ? 'STORM REACH' : (T.biome.toUpperCase() + ' REACH'), run.stormy ? 'the dark crackles' : 'the cavern changes'); } catch (_) {}
     }
@@ -7217,18 +7166,18 @@ const EndlessMode = {
     if (run.stormy) {
       run.boltT -= dt;
       if (run.boltT <= 0) {
-        run.boltT = 2.5 + run.gen.cos() * 4.5;
+        run.boltT = 2.5 + run.gen.rand() * 4.5;
         try {
           let bi = 0;
           for (let i = 0; i < run.segs.length; i++) if (run.segs[i].gid === run.progGid) { bi = i; break; }
           const bs = run.segs[Math.min(bi + 1, run.segs.length - 1)];
-          const bt = run.gen.cos();
-          const bx = bs.a.x + (bs.b.x - bs.a.x) * bt + (run.gen.cos() - 0.5) * 900;
-          const bz = bs.a.z + (bs.b.z - bs.a.z) * bt + (run.gen.cos() - 0.5) * 900;
+          const bt = run.gen.rand();
+          const bx = bs.a.x + (bs.b.x - bs.a.x) * bt + (run.gen.rand() - 0.5) * 900;
+          const bz = bs.a.z + (bs.b.z - bs.a.z) * bt + (run.gen.rand() - 0.5) * 900;
           const cy = _stCeilYCarved(bx, bz, T), gy = _stGroundYCarved(bx, bz, T);
           if (cy < 1e8 && cy - gy > 200 && typeof spawnLightningBolt === 'function') {
             spawnLightningBolt(new THREE.Vector3(bx, cy - 40, bz),
-              new THREE.Vector3(bx + (run.gen.cos() - 0.5) * 300, gy + 30, bz + (run.gen.cos() - 0.5) * 300),
+              new THREE.Vector3(bx + (run.gen.rand() - 0.5) * 300, gy + 30, bz + (run.gen.rand() - 0.5) * 300),
               0x88bbff, 0.35, 4, 3);
           }
         } catch (_) {}
@@ -7243,17 +7192,17 @@ const EndlessMode = {
       if (slot) {
         let idx = 0;
         for (let i = 0; i < run.segs.length; i++) if (run.segs[i].gid === run.progGid) { idx = i; break; }
-        const s = run.segs[Math.min(idx + 1 + ((run.gen.cos() * 2) | 0), run.segs.length - 1)];
-        const t = run.gen.cos();
-        const x = s.a.x + (s.b.x - s.a.x) * t + (run.gen.cos() - 0.5) * 600;
-        const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.cos() - 0.5) * 600;
+        const s = run.segs[Math.min(idx + 1 + ((run.gen.rand() * 2) | 0), run.segs.length - 1)];
+        const t = run.gen.rand();
+        const x = s.a.x + (s.b.x - s.a.x) * t + (run.gen.rand() - 0.5) * 600;
+        const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.rand() - 0.5) * 600;
         try {
           const cy = _stCeilYCarved(x, z, T);
           // Half-gap from YCEIL - YMID: the config stores no GAP_HALF field.
           if (cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
             slot.life = 9;
             slot.mesh.position.set(x, cy - 620, z);
-            slot.mesh.rotation.z = (run.gen.cos() - 0.5) * 0.18;
+            slot.mesh.rotation.z = (run.gen.rand() - 0.5) * 0.18;
             slot.mesh.visible = true;
           }
         } catch (_) {}
@@ -7307,7 +7256,7 @@ const EndlessMode = {
     } catch (_) {}
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = ''; } catch (_) {}
     try { const el = document.getElementById('endless-hud'); if (el && el.parentNode) el.parentNode.removeChild(el); } catch (_) {}
-    try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.endless = false; } catch (_) {}
+    try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; } catch (_) {}
   },
 };
 const GameModes = { classic: NULL_MODE, race: NULL_MODE, campaign: CampaignMode, freeflight: FreeFlightMode, endless: EndlessMode };
@@ -7421,31 +7370,15 @@ function startFreeFlight() {
 }
 if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 
-// (v35.71) ENDLESS entry. Same endless-session flags as campaign (testMode +
+// (v35.71) ENDLESS entry — solo-only for now (the route generator is seeded so
+// co-op can come later). Same endless-session flags as campaign (testMode +
 // raceNoTimer: no clock, no win-gate); EndlessMode.update owns death and the run.
-// (v35.85) CO-OP: with a live room (or a code typed in #room-code), host the run
-// for the whole room via _startHostedMode — startFreeFlight's pattern — so peers
-// drop into ONE shared cavern on ONE TEAM (FLEET A; see assignTeamFromPeerOrder's
-// co-op-PvE guard). The route is deterministic from net.worldSeed (the ROUTE rng
-// stream is isolated — see _lssGenEndlessLevel); ambush waves are spawned by the
-// amStasisOwner authority and proxied to peers via bot_roster/bot_state.
-// Blank code + no room = solo, byte-identical to v35.71.
 function startEndless() {
   LSS.MODE = 'endless';
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
   game.selectedMap = 'endless_caverns';
-  let _code = '';
-  try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
-  if ((net.active && net.room) || _code) {
-    net.endless = true;
-    _startHostedMode().then(function (ok) {
-      if (!ok) { net.endless = false; _cancelRoomForLocalPlay(); net.active = false; net.solo = true; enterShipSelect(); }
-    });
-    return;
-  }
-  net.endless = false;
   _cancelRoomForLocalPlay();
   net.active = false;
   net.solo = true;
@@ -7467,10 +7400,7 @@ if (typeof window !== 'undefined') window.__endlessTick = function (dt) {
 // HUB as the VORTEX ship in 3rd-person — NO opening cinematic and NO ship-select pick
 // (VORTEX forced) — and sets the narrative journey flags. Runs as LSS.MODE==='freeflight'
 // so FreeFlightMode.update drives the hub (rift loop, no bots, no round-end, endless,
-// preload). The JOURNEY itself is the solo path only — startCampaignJourney's first
-// check routes roomed players (live room OR a #room-code entry) to startCampaign(),
-// the v32.76 hosted co-op campaign (authority PvE + bot_roster proxies), BEFORE any
-// journey cinematics arm. The journey: video1 (mission) -> rift
+// preload). SOLO-ONLY (no room/co-op handshake). The journey: video1 (mission) -> rift
 // appears on its end -> fly in -> per-leg intro videos + boss voice -> ship-select between
 // legs -> FINAL video back in the hub.
 // (v34.22) Shared hub-journey setup : everything EXCEPT the final commitLoadout. Sets
@@ -8203,17 +8133,6 @@ function _applyModeClientSetup(mode) {
     // authoritative (amStasisOwner) and the hoard arrives as proxies via bot_roster.
     net.campaign = true;
     try { if (typeof _campInitState === 'function') _campInitState(); } catch (_) {}
-  } else if (mode === 'endless') {
-    // (v35.85) Co-op ENDLESS JOINER : adopt the endless-session flags + map so the
-    // world builds identically from the shared seed (open_solo_start / dropin_state
-    // set net.worldSeed BEFORE this runs). game.endlessRun itself is built by
-    // _lssGenEndlessLevel during the level build — nothing to construct here.
-    // The ambush director stays authority-only (amStasisOwner) — this client
-    // proxies the wave bots via bot_roster/bot_state and derives its phase
-    // banners from proxy arrival (EndlessMode._coopPhase).
-    net.endless = true;
-    game.testMode = false; game.raceNoTimer = true; game.currentRound = 1;
-    game.selectedMap = 'endless_caverns';
   } else if (mode === 'freeflight') {
     // (v33.23) Drop-in FFA hub JOINER : adopt the hub map + endless flags. Unique FFA team so this
     // client is hostile to every peer (the `bot.team === player.team` gate fails for all of them).
@@ -9343,12 +9262,6 @@ function applyWorldSync(mapKey, seed) {
 
 function assignTeamFromPeerOrder() {
   if (typeof player === 'undefined' || !net.myPeerId) return;
-  // (v35.85) Co-op PvE rooms (campaign / endless): EVERY human flies FLEET A
-  // together — the opposition (hoard / ambush waves) is FLEET B. Must beat the
-  // open-solo challenger rule below, which seats non-hosts on Fleet B: that rule
-  // is what silently made a campaign co-op joiner hostile to the host and
-  // friendly to the hoard ("join the team" was broken at team assignment).
-  if (net.campaign || net.endless) { player.team = LSS.TEAM_FLEET_A; return; }
   // Open-solo rooms: the host holds Fleet A ; challengers fill the enemy
   // fleet first (3 seats), overflow joins Fleet A. Deterministic on every
   // peer: non-host ids sorted.
@@ -9370,8 +9283,6 @@ function assignTeamFromPeerOrder() {
 // card on the correct side BEFORE their loadout broadcast announces a team.
 function _teamForPeerId(id) {
   if (!id || typeof net === 'undefined' || !net.myPeerId) return undefined;
-  // (v35.85) Co-op PvE rooms: everyone is Fleet A (see assignTeamFromPeerOrder).
-  if (net.campaign || net.endless) return LSS.TEAM_FLEET_A;
   if (net.openSoloHostId) {
     if (id === net.openSoloHostId) return LSS.TEAM_FLEET_A;
     const others = [net.myPeerId, ...nonJudgePeerIds()].filter(x => x !== net.openSoloHostId).sort();
@@ -10339,7 +10250,7 @@ function handleNetEvent(evt, fromPeerId) {
     // Apply the broadcast race-mode flag, if present. Falls back to
     // 'classic' so a peer running a stale (no-mode) v12m client doesn't
     // accidentally drag race-mode peers into classic mid-race.
-    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign' || evt.mode === 'endless')) {
+    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign')) {
       LSS.MODE = evt.mode;
       try {
         const btn = document.getElementById('race-mode-toggle');
@@ -10372,11 +10283,11 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
     // (v32.76) Apply when NOT openSolo (existing drop-in) OR when a campaign NON-authority
     // peer (it proxies the host's hoard). The authority owns the real bots, so it skips.
-    if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
+    if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
     return;
   }
   if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
-    if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
+    if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
       for (const r of evt.m) {
         if (!Array.isArray(r) || r.length < 7) continue;
         const b = _botProxyById(r[0]);
@@ -44292,8 +44203,7 @@ function _botNetSync(dt) {
   if (!net || !net.active || !net.sendEvent) return;
   // (v32.76) Broadcast in open-solo (existing) OR a co-op CAMPAIGN room when we're the
   // authority (the host owns + syncs the hoard ; peers proxy it via bot_state).
-  // (v35.85) Co-op ENDLESS rides the same rails: authority owns the ambush wave.
-  if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
+  if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
   _botNetSync._t = (_botNetSync._t || 0) - dt;
   if (_botNetSync._t > 0) return;
   _botNetSync._t = 0.12;
@@ -44309,7 +44219,7 @@ function _botNetSync(dt) {
 
 function _botSendRoster() {
   if (!net || !net.active || !net.sendEvent) return;
-  if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
+  if (net.campaign ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
   const bots = [];
   for (const b of game.entities) {
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
@@ -64947,10 +64857,8 @@ MAP_DATA.endless_caverns = {
   tunnels: [{ r: 400, path: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 9000 }] }],
 };
 
-// One route step. Pure function of the run's dedicated ROUTE rng stream
-// (gen.rand — the ONLY consumer besides the build-time heading draw; cosmetics
-// draw from gen.cos), so a given seed always grows the same cavern on every
-// peer regardless of when each client extends (co-op, v35.85). Bounded wander: beyond 42k
+// One route step. Pure function of the run's seeded rng stream, so a given
+// seed always grows the same cavern (co-op-ready). Bounded wander: beyond 42k
 // from origin the heading steers home, keeping runs inside the freeflight-size
 // 10x arena bound (float32-safe; score is arc length, not displacement).
 function _lssEndlessNextSeg(run) {
@@ -65040,22 +64948,8 @@ function _lssEndlessApplySeg(run, s) {
 // the level whose rooms/tunnels carry the first stretch of route.
 function _lssGenEndlessLevel(base) {
   const seed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) >>> 0;
-  // (v35.85) TWO independent rng streams (the old single run.gen.rand was shared
-  // by route + themes + god rays + storm bolts, so runtime consumption order
-  // diverged the route between co-op clients — the lss.map.md v35.72 ⚠):
-  //  - gen.rand  = the ROUTE stream (seed ^ 0x9D2C5680), consumed ONLY inside
-  //    _lssEndlessNextSeg (+ the one heading draw here at build). Segment N is
-  //    therefore byte-identical on every peer no matter WHEN each client
-  //    extends; halls / side-halls / spurs all derive from it. Extension stays
-  //    position-triggered per client and pruning stays local — safe, because
-  //    regenerating segment N from the isolated stream always yields the same
-  //    bytes.
-  //  - gen.cos   = the COSMETIC stream (seed ^ 0x41C64E6D): theme stretches,
-  //    god rays, storm bolts (EndlessMode._world). Client-local pacing; free to
-  //    diverge between peers without touching the shared geometry.
-  const rand = mulberry32((seed ^ 0x9D2C5680) >>> 0);
-  const cos = mulberry32((seed ^ 0x41C64E6D) >>> 0);
-  const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  const rand = mulberry32(seed);
+  const gen = { rand, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
   const run = game.endlessRun = {
     gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
     over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',

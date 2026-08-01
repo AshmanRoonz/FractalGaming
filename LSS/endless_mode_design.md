@@ -9,10 +9,13 @@
 > of the ship — the crossfade is spatial); god rays under ceiling cracks in
 > calm biomes; storm stretches (35% of rocky/snow reaches: god rays off,
 > ambient lightning strikes near the lane). All verified by driving the real
-> mode code in-browser; live screenshot shows the HUD at 2.78 km. Solo only.
-> Remaining (stage 3b/4): water/lava hall set-pieces, music sync, boss
-> milestones, co-op (needs the shared rng stream split — see lss.map.md ⚠),
-> daily seed.
+> mode code in-browser; live screenshot shows the HUD at 2.78 km.
+> **(v35.85) CO-OP ENTRY SHIPPED** — startEndless hosts the room via
+> _startHostedMode when a room is live or a #room-code is typed (solo path
+> byte-identical otherwise); the shared-rng-stream split landed with it (see
+> "Co-op v1" below). Remaining (stage 3b/4): water/lava hall set-pieces,
+> music sync, boss milestones, daily seed, and the co-op v1 refinements
+> listed below.
 
 > 2026-08-01, from Ashman's brief: "endless caverns, winding, bending, straight
 > aways, openings with water, or lava, or growing things... gas clouds and
@@ -182,9 +185,58 @@ unaffected (it returns before the post chain).
   and emits the first ~6 segments + spawn room.
 - Round system: no round timer, no fleet-wipe end, no scoreboard cycle;
   `updateRoundSystem` gets an endless branch that only watches player death.
-- Netcode: stage 4. Seeded generator + existing wave sync makes co-op
-  endless feasible (Shifting Deep proves peer-identical procedural worlds),
-  but solo ships first.
+- Netcode: stage 4 co-op entry SHIPPED in v35.85 (see "Co-op v1" below);
+  the Shifting Deep peer-identical-world bet paid off — the only extra work
+  was isolating the route rng stream from the cosmetic draws.
+
+## Co-op v1 (v35.85) — what shipped, what's deliberately deferred
+
+Shipped (anchors are `Jump:` greps):
+
+- **Entry** — `startEndless` mirrors `startFreeFlight`: live room or a typed
+  `#room-code` → `net.endless = true` + `_startHostedMode()` (the
+  `open_solo_start` handshake carries `mode:'endless'` + the shared seed);
+  no room and no code = the exact v35.71 solo path. Joiners adopt via the
+  new `'endless'` branch in `_applyModeClientSetup` and the `map_change`
+  mode whitelist; mid-run drop-ins ride `dropin_state` like campaign.
+- **One team** — every human is `TEAM_FLEET_A`
+  (`assignTeamFromPeerOrder` / `_teamForPeerId` early-return for
+  `net.campaign || net.endless`); waves stay `TEAM_FLEET_B`.
+- **Deterministic shared route** — `_lssGenEndlessLevel` seeds TWO
+  mulberry32 streams: `gen.rand` (seed ^ 0x9D2C5680) is consumed ONLY by
+  `_lssEndlessNextSeg`, so segment N is byte-identical on every peer no
+  matter when each client's position-trigger extends; `gen.cos`
+  (seed ^ 0x41C64E6D) feeds themes / god rays / storm bolts and may
+  free-run per client. Extension and pruning stay client-local.
+- **Wave authority** — `amStasisOwner()` (lowest peerId) alone runs
+  `_director` + `_spawnWave`; rosters/state stream over the campaign bot
+  rails (`_botSendRoster` on spawn AND on cleared — the cleared sweep is
+  what removes peers' dead proxies; `_botNetSync` ~8 Hz; the four gates are
+  now `net.campaign || net.endless`). Non-authority clients run
+  `_coopPhase`: battle/travel + banners + the cleared hull-patch derived
+  from proxy liveness — no spawn, no clock, no extra net event.
+- **Distance & lives are PER-PLAYER** — each client scores its own arc
+  length (a pack flying together reads ~the same number); lives come from
+  each player's own difficulty pick; out-of-lives = RUN OVER banner +
+  best-write for that player only, then they SPECTATE via the existing
+  death cam (the 6 s soft-return to menu is solo-only now) while teammates
+  fly on.
+
+Deferred / known v1 seams (refinement candidates, in rough priority):
+
+1. Team-shared lives / team distance (one pooled meter, run ends for all).
+2. Waves anchor to the AUTHORITY's ship; stragglers may see the fight far
+   ahead. (Could anchor to the pack centroid or furthest player.)
+3. A dead (or run-over) authority pauses NEW waves until it respawns or
+   leaves (in-flight bots keep fighting; authority migrates on leave via
+   the amStasisOwner recompute).
+4. Mid-run drop-ins spawn at the cavern mouth and must chase the pack.
+5. `bot_fire` replay suppression keys on `net.openSoloHostId`, which can
+   differ from `amStasisOwner` — the mode-clicking host can miss wave
+   tracer visuals when a joiner has a lower peerId (pre-existing campaign
+   quirk, cosmetic only).
+6. Difficulty is per-player, so lives differ inside one room; adjudicate
+   whether the room should adopt the host's pick.
 
 ## Stages
 
@@ -198,7 +250,8 @@ unaffected (it returns before the post chain).
 3. **The world**: theme scheduler + per-stretch dressing (water/lava/growth
    halls, gas, rocks, storms) + god rays + music sync + float-precision
    decision.
-4. **The flourish**: elite/boss milestones, co-op, leaderboard board page,
+4. **The flourish**: elite/boss milestones, ~~co-op~~ (entry shipped v35.85
+   — see "Co-op v1"; refinements remain), leaderboard board page,
    daily seed ("today's cavern" — everyone runs the same route), Branchwork
    Tier 2 spire props.
 
