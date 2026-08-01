@@ -3691,7 +3691,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.84';
+const LSS_BUILD = '35.81';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -29384,18 +29384,8 @@ class Bot {
       resolveCollision(this.position, this.velocity, botCollR, this);
     }
 
-    // Boundary clamp. (v35.82) Freeflight/endless fly a 10x arena — the player
-    // bound (see the _mvClamp soft/hard edges ~L45647) and the projectile bound
-    // (~L31278) were both already widened, but bots kept the classic ±22.5k box.
-    // The hub zone-rift rings sit at HUB_CITY + 21500u, i.e. |x|/|z| up to
-    // ~32.5k (volcanic / rocky / brokensim), OUTSIDE that box — so rift guards
-    // spawned at those rings were snapped to the box face on their first update
-    // and pinned there (velocity pushes outward toward the player at the ring,
-    // clamp resets position every frame): a motionless line of 4 ships ~10k
-    // from the ring that never "came out". Match the bot bound to the player's.
-    const _bndArena = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless'))
-      ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
-    const s = _bndArena * 0.9;
+    // Boundary clamp
+    const s = LSS.ARENA_SIZE * 0.9;
     this.position.clamp(this._tempVec3a.set(-s,-s,-s), this._tempVec3b.set(s,s,s));
 
     this.mesh.position.copy(this.position);
@@ -52078,10 +52068,6 @@ function returnToRootMenu(opts) {
 //
 // `opts.hard` keeps the old behaviour for callers that genuinely want a clean
 // slate (leave the room, drop ?room=, reload).
-//
-// (v35.83) Owner-directed revert: the soft path glitched in practice, so BOTH
-// user-facing "main menu" buttons (ship-select back + settings exit) now pass
-// {hard:true}. The soft path stays available internally / for future use.
 function returnToMainMenu(opts) {
   if (opts && opts.hard) {
     try {
@@ -55534,19 +55520,6 @@ function updateMinimap() {
     viewExtent = CAMP_RADAR_HALF_SPAN;
     ccx = player.position.x; ccz = player.position.z;
   }
-  // (v35.81) ENDLESS : strictly player-centred with a FIXED range. The endless
-  // route is a pruned ~18-segment window that travels tens of km from the world
-  // origin, so the level-geometry auto-fit above (and the |player|+300 grow)
-  // drift with distance travelled and the ship slid off disc centre. Pin the
-  // world point at disc centre to the ship and map ~2600u of world radius onto
-  // the 68-radius clamp disc (comparable feel to the other maps). The white
-  // triangle then sits at (75,75) forever; terrain/contacts plot relative to
-  // the ship. window.__mmRange (world units at the clamp ring) overrides live.
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && player && player.position) {
-    const _emr = (typeof window !== 'undefined' && typeof window.__mmRange === 'number' && window.__mmRange > 0) ? window.__mmRange : 2600;
-    viewExtent = _emr * (75 / 68);
-    ccx = player.position.x; ccz = player.position.z;
-  }
   const scale = 75 / viewExtent;
   const cx = 75, cy = 75;
   // (v35.79) SHIP-UP RADAR: every world offset is rotated about the disc
@@ -57019,13 +56992,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   const backBtn = document.getElementById('lobby-back-btn');
   if (backBtn) backBtn.addEventListener('click', () => {
-    // (v35.83) Owner-directed revert: the v35.50 soft return glitched, so the
-    // user-facing "main menu" button is a HARD full-page reload again. The
-    // reload closes the room — the prompt must say so or it lies (map PART 17).
-    const ok = window.confirm(
-      'Return to the main menu? The game will reload and your current room will close.');
+    // (v35.50) No longer closes the room — the return is soft now.
+    const _inRoom = !!(typeof net !== 'undefined' && net && net.roomCode);
+    const ok = window.confirm(_inRoom
+      ? 'Return to the main menu? You will stay in room ' + net.roomCode + '.'
+      : 'Return to the main menu?');
     if (!ok) return;
-    try { returnToMainMenu({ hard: true }); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
+    try { returnToMainMenu(); } catch (e) { console.warn('[main-menu] returnToMainMenu failed', e); }
   });
   // Settings button on the main menu (#lobby).
   // Opens the same settings overlay as the in-match Esc key.
@@ -59796,14 +59769,15 @@ function buildSettingsPage() {
                          document.getElementById('lobby').style.display !== 'none');
     exitBtn.style.display = lobbyVisible ? 'none' : '';
     exitBtn.addEventListener('click', () => {
-      // (v35.83) Owner-directed revert: the v35.50 soft return glitched, so
-      // this button is a HARD full-page reload again. The reload closes the
-      // room — the prompt must say so or it lies (map PART 17).
-      const ok = window.confirm(
-        'Exit to the main menu? Your match will end, the game will reload, and your current room will close.');
+      // (v35.50) The match ends, but the room does not — say so, because the
+      // old wording made people avoid this button to protect their lobby.
+      const _inRoom = !!(typeof net !== 'undefined' && net && net.roomCode);
+      const ok = window.confirm(_inRoom
+        ? 'Exit to the main menu? Your match will end, but you will stay in room ' + net.roomCode + '.'
+        : 'Exit to the main menu? Your current match will end.');
       if (!ok) return;
       try { closeSettings(); } catch (_) {}
-      try { returnToMainMenu({ hard: true }); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
+      try { returnToMainMenu(); } catch (e) { console.warn('[exit] returnToMainMenu failed', e); }
     });
   }
 
