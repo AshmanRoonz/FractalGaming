@@ -3691,7 +3691,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.85';
+const LSS_BUILD = '35.88';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -6863,13 +6863,20 @@ const FreeFlightMode = {
       const _c = game.campaign;
       const _roster = (_c && Array.isArray(_c.unlockedLoadouts) && _c.unlockedLoadouts.length) ? _c.unlockedLoadouts : ['VORTEX'];
       const _curKey = (player && player.loadoutKey) ? player.loadoutKey : null;
-      if (!_curKey || _roster.indexOf(_curKey) < 0) {
-        const _forceKey = (_roster.indexOf('VORTEX') >= 0) ? 'VORTEX' : _roster[0];
-        if (_forceKey && typeof LOADOUTS !== 'undefined' && LOADOUTS[_forceKey] && typeof commitLoadout === 'function') {
-          game._liveSwap = true;
-          try { commitLoadout(_forceKey); } catch (_) {}
-          game._liveSwap = false;
-        }
+      // (v35.86) ALWAYS re-commit — even when the hub ship is already campaign-
+      // valid (the old branch only committed on an INVALID ship). The hub applied
+      // Aegis rank buffs on top of chassis stats (maxHealth/maxShield +2500,
+      // maxClip, maxDashes, coreMeter, VORTEX energy pool), this rift entry skips
+      // ship-select, and respawnPlayer never resets the maxes — so a valid-ship
+      // pilot rode Exhibition-only buffs straight into the campaign legs.
+      // LSS.MODE is already 'campaign' here (set above), so commitLoadout lands
+      // chassis-base (+perk) stats and _aegisApply/_aegisShipUpgrades stay inert.
+      const _forceKey = (_curKey && _roster.indexOf(_curKey) >= 0) ? _curKey
+                      : ((_roster.indexOf('VORTEX') >= 0) ? 'VORTEX' : _roster[0]);
+      if (_forceKey && typeof LOADOUTS !== 'undefined' && LOADOUTS[_forceKey] && typeof commitLoadout === 'function') {
+        game._liveSwap = true;
+        try { commitLoadout(_forceKey); } catch (_) {}
+        game._liveSwap = false;
       }
     } catch (_) {}
     game.state = 'roundEnd';
@@ -6936,6 +6943,13 @@ const EndlessMode = {
     run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
     run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
     run.stormy = false; run.boltT = 0;
+    // (v35.87) AEGIS SURGE state + deterministic route BOLTS for the
+    // build-time segments (appended segs get theirs in _lssEndlessApplySeg).
+    // Every peer runs this with the same initial segs, so bolt placement
+    // evaluates against identical carve state (co-op determinism).
+    run.aegis = { lvl: 0, charge: 0, graceT: 0, flashT: 0, bobT: 0,
+                  bolts: 0, kills: 0, seen: {}, baseCh: null, curCh: null };
+    try { if (typeof _lssEndlessBolts === 'function') for (let i = 0; i < run.segs.length; i++) _lssEndlessBolts(run, run.segs[i]); } catch (_) {}
     // No rounds in endless: hide the ROUND HUD label for the whole run.
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = 'none'; } catch (_) {}
     this._deathT = 0;
@@ -6976,6 +6990,9 @@ const EndlessMode = {
       if (this._deathT >= 1.6) {
         this._deathT = 0;
         run.lives--;
+        // (v35.87) Death drops the whole AEGIS SURGE: restore the base chassis
+        // reference BEFORE respawnPlayer reads player.chassis, zero the meter.
+        try { this._aegisSetLvl(run, 0); if (run.aegis) { run.aegis.charge = 0; run.aegis.graceT = 0; run.aegis.seen = {}; } } catch (_) {}
         if (run.lives <= 0) {
           run.over = true; run.overT = 0;
           try { if (window.Overlays && Overlays.banner) Overlays.banner('RUN OVER', (run.dist / 1000).toFixed(2) + ' km'); } catch (_) {}
@@ -7058,6 +7075,7 @@ const EndlessMode = {
       const dx = p.x - s0.b.x, dz = p.z - s0.b.z;
       if (dx * dx + dz * dz < 8000 * 8000) break;
       run.segs.shift();
+      try { if (s0._bolts && typeof _lssEndlessFreeBolts === 'function') _lssEndlessFreeBolts(run, s0); } catch (_) {}
       if (s0.cyl) { const i = game.levelCylinders.indexOf(s0.cyl); if (i >= 0) game.levelCylinders.splice(i, 1); }
       if (s0.spur) { const i = game.levelCylinders.indexOf(s0.spur); if (i >= 0) game.levelCylinders.splice(i, 1); }
       if (s0.sph) { const i = game.levelSpheres.indexOf(s0.sph); if (i >= 0) game.levelSpheres.splice(i, 1); }
@@ -7075,11 +7093,17 @@ const EndlessMode = {
     const _ea = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
     if (_ea) { try { this._director(dt, run); } catch (_) {} }
     else { try { this._coopPhase(dt, run); } catch (_) {} }
+    // (v35.87) AEGIS SURGE: bolts + kill charge + decay + temp buffs.
+    try { this._aegis(dt, run); } catch (_) {}
     try { this._world(dt, run); } catch (_) {}
     // ---- HUD ----
+    const ag = run.aegis;
+    const aegisTxt = (ag && (ag.lvl > 0 || ag.charge > 0.5))
+      ? ' · AEGIS L' + ag.lvl + ' ' + Math.round(ag.charge) + '%' + (ag.flashT > 0 ? ' +' : '')
+      : '';
     const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
                    : run.phase === 'warning' ? ' · AMBUSH INBOUND' : '';
-    const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives + phaseTxt;
+    const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives + aegisTxt + phaseTxt;
     if (txt !== run._hudTxt) { run._hudTxt = txt; try { this._hud().textContent = txt; } catch (_) {} }
   },
   // ---- (v35.72) Stage 2: the ambush director. travel -> warning -> battle -> cleared.
@@ -7142,6 +7166,103 @@ const EndlessMode = {
       try { announcerSay('Hostiles destroyed. Fly on.', { key: 'endless_clear', cooldown: 10 }); } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
     }
+  },
+  // ---- (v35.87) AEGIS SURGE — bolts + kills charge a TEMPORARY aegis ----
+  // Levels 0..5. Charge: route BOLTS (+25, deterministic per segment — see
+  // _lssEndlessBolts; collection is LOCAL v1, each pilot grabs their own) and
+  // wave KILLS (+34, alive->dead transitions among Fleet-B endless hostiles —
+  // real bots AND co-op proxies, so non-authority peers charge too). 12s with
+  // neither = stepwise drain (one level ~4s). Buffs are TEMPORARY multipliers
+  // scaled off the permanent Aegis tree's ceilings (design doc): dmg +6%/lvl
+  // (L5 +30% ~ two 1.15 tree damage nodes compounded, _endlessAegisDmgOut),
+  // speed +4%/lvl via a CLONED chassis (the _campBoostSpeed pattern — the
+  // shared CHASSIS entry is NEVER mutated; the base REFERENCE is restored
+  // exactly on level drop / death / teardown), hull regen 0.3%/lvl of max per
+  // second (the Nano perk is 1%/s for a whole perk slot; shields never regen
+  // naturally in LSS, so hull is the regen buff).
+  _aegis(dt, run) {
+    const a = run.aegis; if (!a) return;
+    if (a.flashT > 0) a.flashT -= dt;
+    const p = player.position;
+    a.bobT += dt;
+    // Bolt spin/bob + collection (~90u).
+    for (let si = 0; si < run.segs.length; si++) {
+      const bl = run.segs[si]._bolts; if (!bl) continue;
+      for (let i = 0; i < bl.length; i++) {
+        const b = bl[i]; if (b.taken || !b.slot) continue;
+        const g = b.slot.grp;
+        g.rotation.y += dt * 1.4;
+        g.position.y = b.y + Math.sin(a.bobT * 1.8 + b.phase) * 14;
+        const dx = p.x - b.x, dy = p.y - g.position.y, dz = p.z - b.z;
+        if (dx * dx + dy * dy + dz * dz < 8100) {
+          b.taken = true; b.slot.inUse = false; g.visible = false; b.slot = null;
+          a.charge += 25; a.graceT = 0; a.flashT = 1.2; a.bolts++;
+          try { if (typeof playSound === 'function') playSound('rearm_reset'); } catch (_) {}
+        }
+      }
+    }
+    // Kill charge: alive->dead transitions. Entries vanishing WITHOUT a dead
+    // tick (prune/teardown/roster sweep) are dropped uncounted — undercount
+    // beats crediting despawns as kills.
+    try {
+      const seen = a.seen, present = {};
+      for (let i = 0; i < game.entities.length; i++) {
+        const e = game.entities[i];
+        if (!e || !(e instanceof Bot) || e.team !== LSS.TEAM_FLEET_B) continue;
+        present[e.id] = 1;
+        if (e.alive) seen[e.id] = 1;
+        else if (seen[e.id]) { delete seen[e.id]; a.charge += 34; a.graceT = 0; a.flashT = 1.2; a.kills++; }
+      }
+      for (const id in seen) if (!present[id]) delete seen[id];
+    } catch (_) {}
+    // Grace, then stepwise drain.
+    a.graceT += dt;
+    if (a.graceT > 12) {
+      a.charge -= 26 * dt;
+      if (a.charge <= 0) {
+        if (a.lvl > 0) { a.charge = 100; this._aegisSetLvl(run, a.lvl - 1); }
+        else a.charge = 0;
+      }
+    }
+    // Level up on a full bar (overflow carries into the next level). Gated on
+    // a FRESH earn (any bolt/kill zeroes graceT above): the drain path parks
+    // charge at 100 when it steps a level down, and without this gate the loop
+    // instantly re-consumed that 100 and leveled straight back up — the meter
+    // pinned at its level with charge 0 forever (found live, v35.87).
+    while (a.charge >= 100 && a.lvl < 5 && a.graceT <= 12) { a.charge -= 100; this._aegisSetLvl(run, a.lvl + 1); }
+    if (a.charge > 100) a.charge = 100;
+    // Regen buff (hull only).
+    if (a.lvl > 0 && player.maxHealth && player.shipState !== 'dead') {
+      player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.003 * a.lvl * dt);
+    }
+  },
+  _aegisSetLvl(run, lvl) {
+    const a = run.aegis; if (!a || lvl === a.lvl) return;
+    const up = lvl > a.lvl;
+    a.lvl = lvl;
+    try {
+      if (lvl > 0) {
+        // (Re)base from the TRUE base: while our clone is installed the stored
+        // base holds; anything else installed meanwhile (commitLoadout, race
+        // copies) becomes the new base. Clone-never-mutate — task-1 rule.
+        const base = (a.curCh && player.chassis === a.curCh && a.baseCh) ? a.baseCh : player.chassis;
+        a.baseCh = base;
+        const m = 1 + 0.04 * lvl;
+        a.curCh = Object.assign({}, base, {
+          flightSpeed: (base.flightSpeed || 300) * m,
+          strafeSpeed: (base.strafeSpeed || 250) * m,
+          verticalSpeed: (base.verticalSpeed || 250) * m,
+        });
+        player.chassis = a.curCh;
+      } else {
+        // Restore the EXACT base reference — but only over our own clone
+        // (never clobber a chassis someone else installed since).
+        if (a.curCh && player.chassis === a.curCh && a.baseCh) player.chassis = a.baseCh;
+        a.curCh = null; a.baseCh = null;
+      }
+    } catch (_) {}
+    if (up) { try { if (typeof playSound === 'function') playSound('upgrade_core'); } catch (_) {} }
+    a.flashT = 1.2;
   },
   _spawnWave(run) {
     run.waveN++;
@@ -7305,6 +7426,19 @@ const EndlessMode = {
         try { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh.material.dispose(); } catch (_) {}
       }
     } catch (_) {}
+    // (v35.87) AEGIS SURGE teardown: exact base-chassis restore + bolt pool.
+    try {
+      const run = game.endlessRun;
+      if (run && run.aegis) this._aegisSetLvl(run, 0);
+      if (run && run._boltPool) {
+        for (let i = 0; i < run._boltPool.length; i++) { try { scene.remove(run._boltPool[i].grp); } catch (_) {} }
+        run._boltPool = null;
+      }
+      if (run && run._boltLib) {
+        try { run._boltLib.geo.dispose(); run._boltLib.coreMat.dispose(); run._boltLib.sprMat.dispose(); } catch (_) {}
+        run._boltLib = null;
+      }
+    } catch (_) {}
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = ''; } catch (_) {}
     try { const el = document.getElementById('endless-hud'); if (el && el.parentNode) el.parentNode.removeChild(el); } catch (_) {}
     try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.endless = false; } catch (_) {}
@@ -7461,6 +7595,30 @@ if (typeof window !== 'undefined') window.__endlessInfo = function () {
 };
 if (typeof window !== 'undefined') window.__endlessTick = function (dt) {
   try { GameModes.endless.update(dt || 0.033); return 'ok'; } catch (e) { return String(e && e.stack || e); }
+};
+// (v35.87) AEGIS SURGE debug view: meter, buff multipliers, live bolt census.
+if (typeof window !== 'undefined') window.__endlessAegis = function () {
+  try {
+    const run = game.endlessRun; if (!run) return null;
+    const a = run.aegis || {};
+    let liveBolts = 0; const firstBolts = [];
+    for (let i = 0; i < run.segs.length; i++) {
+      const bl = run.segs[i]._bolts; if (!bl) continue;
+      for (let j = 0; j < bl.length; j++) if (!bl[j].taken) {
+        liveBolts++;
+        if (firstBolts.length < 5) firstBolts.push([Math.round(bl[j].x), Math.round(bl[j].y), Math.round(bl[j].z)]);
+      }
+    }
+    return {
+      lvl: a.lvl || 0, charge: Math.round(a.charge || 0), graceT: +(a.graceT || 0).toFixed(1),
+      boltsTaken: a.bolts || 0, kills: a.kills || 0, liveBolts, firstBolts,
+      dmgMult: (typeof _endlessAegisDmgOut === 'function') ? +(_endlessAegisDmgOut(1000) / 1000).toFixed(3) : 1,
+      speed: player.chassis && player.chassis.flightSpeed,
+      baseSpeed: a.baseCh ? a.baseCh.flightSpeed : (player.chassis && player.chassis.flightSpeed),
+      chassisIsClone: !!(a.curCh && player.chassis === a.curCh),
+      hp: Math.round(player.health), maxHp: player.maxHealth,
+    };
+  } catch (e) { return String(e && e.stack || e); }
 };
 
 // (campaign-journey) CAMPAIGN button entry. Drops the player straight into the FREE-FLIGHT
@@ -30184,6 +30342,12 @@ class Bot {
 
   takeDamage(amount, attacker, hitPoint) {
     if (!this.alive || this.spawnProtection > 0) return 0;
+    // (v35.87) ENDLESS aegis-surge damage buff. Must run BEFORE the isProxy
+    // route below so a co-op peer's bot_dmg claim carries the multiplier
+    // (the freeflight _aegisDmgOut hook further down never sees proxies).
+    if (attacker === 'player' && typeof _endlessAegisDmgOut === 'function') {
+      try { amount = _endlessAegisDmgOut(amount); } catch (_) {}
+    }
     if (this.isProxy) {
       // Route to the bot authority (open-solo host) like mon_dmg ; HP
       // truth flows back via bot_state snapshots.
@@ -43900,6 +44064,17 @@ function commitLoadout(key) {
   player.doomTimer = 0;
   player.dashCharges = ch.maxDashes;
   player.maxDashes = ch.maxDashes;
+  // (v35.86) Aegis leak guard: the VORTEX energy pool/regen are bumped by the
+  // hub's Aegis rank upgrades (_aegisShipUpgrades: 1400/187.5 at ranks 8/17)
+  // and were the ONLY Aegis-touched fields no chassis reset here restored —
+  // FreeFlightMode.onTeardown restores them on the menu exit, but the hub-rift
+  // entry into campaign never tears freeflight down, so a ranked VORTEX kept
+  // its bigger pool in campaign AND every later classic/endless match of the
+  // page-load. Restore base here so EVERY commit lands chassis-base; in
+  // freeflight _aegisApply re-bumps immediately after commit (buildWorld /
+  // cycleHubShip), so Exhibition is unchanged.
+  player.vortexMaxEnergy = 1000; player.vortexEnergyRegen = 150;
+  if (player.vortexEnergy > player.vortexMaxEnergy) player.vortexEnergy = player.vortexMaxEnergy;
   // Apply the player's selected perk to base stats.
   // Resolve the perk id : ensure it's loaded from localStorage, fall back
   // to the default. Then apply one-shot stat bumps.
@@ -53708,6 +53883,81 @@ function _hlArcBar(ctx, r, p, pct, col) {
   ctx.restore();
 }
 
+// (v35.88) NANO REPAIR overlay on the health ring — draws OVER the arc the
+// health _hlArcBar just drew, at the same radius, walking the same 5-segment
+// geometry (same rot fold, same gapDeg, same 2.5px end inset) so the overlay
+// band lands exactly on the fill line and dies in the same gaps.
+// Two layers, both wired to what the perk ACTUALLY does (_tickPerkEffects nano
+// branch heals player.health directly, over-healing up to overhealMult × max):
+//   1. GREEN build-up — a brighter-green band capping the lit arc, spanning the
+//      health the nanobots have repaired since you last took damage. Tracked
+//      RENDER-SIDE ONLY in _hlNanoSt (display accumulator, zero gameplay): each
+//      HUD frame's positive health delta accrues, any damage resets it. The
+//      per-frame accrual is clamped to half a second of the perk's own regen
+//      rate so a respawn's 0→max jump can't light the whole ring as "repaired".
+//   2. PURPLE overcharge — once player.health exceeds maxHealth, the banked
+//      overheal (health − max, the perk's real accumulator) fills a purple arc
+//      over the green ring, 0..full as the bank runs 1×..overhealMult× hull.
+// Draws between two GLOBAL fractions of the bar rather than from zero — that
+// is the one thing _hlArcBar can't do, hence the dedicated span walker.
+function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
+  if (!(f1 - f0 > 0.002)) return;
+  const rad = Math.min(r.w, r.h) / 2;
+  const n = Math.max(1, p.seg || 1);
+  const rot = p.rot || 0;                          // angle offset — see _hlArcBar
+  const a0 = (p.a0 || 0) + rot, a1 = (p.a1 != null ? p.a1 : 360) + rot;
+  const gap = p.gapDeg != null ? p.gapDeg : 0;
+  const span = (a1 - a0 - gap * (n - 1)) / n;
+  const inset = 2.5 / rad;                         // radians — matches _hlArcBar
+  ctx.save();
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.globalAlpha = alpha;
+  ctx.shadowColor = col; ctx.shadowBlur = lw * 0.9;
+  for (let i = 0; i < n; i++) {
+    const g0 = Math.max(0, Math.min(1, f0 * n - i));
+    const g1 = Math.max(0, Math.min(1, f1 * n - i));
+    if (g1 - g0 <= 0.001) continue;
+    const s = (a0 + i * (span + gap)) * _HL_D2R, e = s + span * _HL_D2R;
+    const fs = s + inset, fe = e - inset;
+    if (fe <= fs) continue;
+    ctx.beginPath();
+    ctx.arc(r.cx, r.cy, rad, fs + (fe - fs) * g0, fs + (fe - fs) * g1);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+const _hlNanoSt = { h: -1, acc: 0 };
+function _hlNanoOverlay(ctx, r, p) {
+  const perk = (typeof PILOT_PERKS !== 'undefined' && player && player.perkId)
+    ? PILOT_PERKS[player.perkId] : null;
+  if (!perk || !perk.regenPerSec || !(player.maxHealth > 0) || player.shipState === 'dead') {
+    _hlNanoSt.h = -1; _hlNanoSt.acc = 0;           // perk off / dead: forget
+    return;
+  }
+  const max = player.maxHealth;
+  const h = Math.max(0, player.health);
+  if (_hlNanoSt.h < 0) _hlNanoSt.h = h;            // first frame with perk on
+  const dh = h - _hlNanoSt.h;
+  if (dh > 0) _hlNanoSt.acc += Math.min(dh, perk.regenPerSec * max * 0.5);
+  else if (dh < 0) _hlNanoSt.acc = 0;              // damage interrupts the build-up
+  _hlNanoSt.h = h;
+  const hFrac = Math.min(1, h / max);
+  if (_hlNanoSt.acc > hFrac * max) _hlNanoSt.acc = hFrac * max;
+  // Same width derivation as _hlArcBar so the layers nest: fill line is
+  // th − 40%; the green band rides at ~55% of that, the purple at full width.
+  const th = Math.max(3, (p.thick != null ? p.thick : 0.95) * r.vmin);
+  const fillW = Math.max(2, th - th * 0.4);
+  const accFrac = _hlNanoSt.acc / max;
+  if (accFrac > 0.002) {
+    _hlNanoSpan(ctx, r, p, hFrac - accFrac, hFrac, '#8dffb0',
+      Math.max(1.5, fillW * 0.55), 0.9);
+  }
+  if ((perk.overhealMult || 1) > 1 && h > max) {
+    const overFrac = Math.min(1, (h - max) / (max * (perk.overhealMult - 1)));
+    _hlNanoSpan(ctx, r, p, 0, overFrac, '#b264ff', fillW, 0.95);
+  }
+}
+
 // Radial tick strip. Ticks stick OUTWARD from the radius by `tick`, so a strip
 // at r 11.2 with tick 4 occupies 11.2..15.2 vmin — that outer number is what the
 // frame has to clear, not the radius.
@@ -54051,6 +54301,9 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   let r = _hlPlace(_HL.health, W, H);
   _hlArcBar(ctx, r, _HL.health, v.healthPct, v.hCol);
+  // (v35.88) Nano Repair perk: repair build-up + purple overcharge layers,
+  // drawn over the arc at the same radius. No-op without the perk.
+  _hlNanoOverlay(ctx, r, _HL.health);
   _hlGaugeLabel(ctx, r, _HL.health);
 
   r = _hlPlace(_HL.shield, W, H);
@@ -65034,6 +65287,99 @@ function _lssEndlessApplySeg(run, s) {
       if (n) window.__endlessRebaked = (window.__endlessRebaked || 0) + n;
     }
   } catch (_) {}
+  // (v35.87) This segment's AEGIS bolts (pure gid hash — co-op deterministic).
+  try { if (typeof _lssEndlessBolts === 'function') _lssEndlessBolts(run, run.segs[run.segs.length - 1]); } catch (_) {}
+}
+
+// ---- (v35.87) AEGIS SURGE route bolts ----
+// Deterministic placement: every draw is a PURE _stHash2-style hash of the
+// segment gid. NOT run.gen.rand (the ROUTE stream — extra draws desync co-op
+// routes, the v35.85 rule) and NOT run.gen.cos either (its cursor free-runs
+// per client, so anything SHARED may not draw from it). A pure gid hash gives
+// every peer identical bolts with zero stream consumption. COLLECTION is
+// local v1 — each pilot collects their own (see endless_mode_design.md).
+function _lssEndlessBoltHash(gid, salt) {
+  const h = Math.sin(gid * 127.1 + salt * 311.7) * 43758.5453;
+  return h - Math.floor(h);
+}
+// Pooled visual: emissive octahedron + additive glow sprite, shared geo/mats.
+function _lssEndlessBoltSlot(run) {
+  if (!run._boltPool) run._boltPool = [];
+  for (let i = 0; i < run._boltPool.length; i++) {
+    const s = run._boltPool[i];
+    if (!s.inUse) { s.inUse = true; s.grp.visible = true; return s; }
+  }
+  if (run._boltPool.length >= 64) return null;   // window ~18 segs x <=3 bolts — never legitimately hit
+  if (!run._boltLib) {
+    run._boltLib = {
+      geo: new THREE.OctahedronGeometry(26),
+      coreMat: new THREE.MeshBasicMaterial({ color: 0x9fe8ff, toneMapped: false }),
+      sprMat: new THREE.SpriteMaterial({
+        map: (typeof _emberFalloffTexture !== 'undefined' ? _emberFalloffTexture : null),
+        color: 0x55bbff, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }),
+    };
+  }
+  const grp = new THREE.Group();
+  grp.add(new THREE.Mesh(run._boltLib.geo, run._boltLib.coreMat));
+  const spr = new THREE.Sprite(run._boltLib.sprMat);
+  spr.scale.set(150, 150, 1);
+  grp.add(spr);
+  scene.add(grp);
+  const slot = { grp, inUse: true };
+  run._boltPool.push(slot);
+  return slot;
+}
+// Place this segment's 1-3 bolts on/near the lane. Lateral offset stays inside
+// ~0.45 lane radius; the VERTICAL clamp against the CARVED ground/ceiling
+// heightfields guarantees open air (sandwich terrain is floor+ceiling only, so
+// a vertically-clear point cannot sit inside rock). The clamp reads the live
+// carve window, but every peer evaluates a given gid at the same route state
+// (build segs at onBuildWorld, appended segs at their own apply) — divergence
+// is bounded to sub-metre joint noise, and collection is local anyway.
+function _lssEndlessBolts(run, seg) {
+  if (seg._bolts || !seg.a || !seg.b) return;
+  const T = game.sandwichTerrain; if (!T || !T.ON) return;
+  const out = seg._bolts = [];
+  const gid = seg.gid;
+  const n = 1 + Math.floor(_lssEndlessBoltHash(gid, 1) * 3);
+  const ex = seg.b.x - seg.a.x, ey = seg.b.y - seg.a.y, ez = seg.b.z - seg.a.z;
+  const eh = Math.hypot(ex, ez) || 1;
+  const px = -ez / eh, pz = ex / eh;
+  const laneR = (seg.cyl && seg.cyl.r) || 400;
+  for (let i = 0; i < n; i++) {
+    const t = 0.2 + 0.6 * _lssEndlessBoltHash(gid, 2 + i * 4);
+    const lat = (_lssEndlessBoltHash(gid, 3 + i * 4) - 0.5) * laneR * 0.9;
+    const x = seg.a.x + ex * t + px * lat;
+    const z = seg.a.z + ez * t + pz * lat;
+    let y = seg.a.y + ey * t + (_lssEndlessBoltHash(gid, 4 + i * 4) - 0.5) * 320;
+    try {
+      const gy = _stGroundYCarved(x, z, T) + 150, cy = _stCeilYCarved(x, z, T) - 150;
+      y = (cy < gy) ? (gy + cy) * 0.5 : Math.max(gy, Math.min(cy, y));
+    } catch (_) {}
+    const slot = _lssEndlessBoltSlot(run);
+    if (!slot) break;
+    slot.grp.position.set(x, y, z);
+    slot.grp.rotation.set(0, _lssEndlessBoltHash(gid, 5 + i * 4) * Math.PI, 0);
+    out.push({ x, y, z, taken: false, slot, phase: _lssEndlessBoltHash(gid, 6 + i * 4) * 6.283 });
+  }
+}
+function _lssEndlessFreeBolts(run, seg) {
+  const bl = seg._bolts; if (!bl) return;
+  for (let i = 0; i < bl.length; i++) {
+    const b = bl[i];
+    if (b.slot) { b.slot.inUse = false; b.slot.grp.visible = false; b.slot = null; }
+  }
+  seg._bolts = null;
+}
+// (v35.87) The aegis-surge outgoing-damage multiplier (+6%/lvl). Called from
+// Bot.takeDamage BEFORE the isProxy route so co-op bot_dmg claims carry it.
+function _endlessAegisDmgOut(amount) {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'endless') return amount;
+  const run = game.endlessRun, a = run && run.aegis;
+  if (!a || !a.lvl) return amount;
+  return amount * (1 + 0.06 * a.lvl);
 }
 
 // Level generator (the shifting_deep pattern): seeds the run state and returns

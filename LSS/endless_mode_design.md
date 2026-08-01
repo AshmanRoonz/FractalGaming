@@ -238,6 +238,70 @@ Deferred / known v1 seams (refinement candidates, in rough priority):
 6. Difficulty is per-player, so lives differ inside one room; adjudicate
    whether the room should adopt the host's pick.
 
+## Aegis Surge (v35.87) — temporary aegis fueled by bolts + kills
+
+The permanent Aegis Ranks are a hub (Exhibition) progression; Endless gets a
+RUN-SCOPED echo of it: a meter that charges from **route bolts** and **wave
+kills**, grants levels 0..5 of temporary buffs, and drains back to nothing
+when you stop feeding it. Momentum made visible — fly aggressively and the
+cavern pays you.
+
+Mechanics (all on `game.endlessRun.aegis`; HUD tag ` · AEGIS Lx NN%` on the
+endless top-center line):
+
+- **Bolts** — 1-3 glowing octahedra per route segment (pooled, additive glow
+  sprite, slow spin + bob), placed by a **pure hash of the segment gid**
+  (`_lssEndlessBolts`, `_stHash2`-style math). Deliberately NOT `gen.rand`
+  (the route stream — extra draws desync co-op routes) and NOT `gen.cos`
+  (its cursor free-runs per client, so shared STATE may not draw from it): a
+  pure gid hash gives every peer identical bolts with zero stream
+  consumption. Lateral spread stays inside ~0.45 lane radius; the vertical
+  clamp against the CARVED ground/ceiling heightfields is what guarantees
+  open air (the terrain is strictly floor+ceiling, so a vertically-clear
+  point cannot be inside rock). Spawned with the initial build and with each
+  append; freed when the route window prunes; +25 charge, `rearm_reset`
+  chirp, HUD flash on collect (~90u).
+- **Kills** — +34 charge per alive→dead transition among Fleet-B endless
+  hostiles, detected by a per-tick liveness diff (real bots AND co-op
+  proxies, so non-authority peers charge from the team's kills too). Bots
+  that vanish without an observed dead tick (prune/roster sweep) are dropped
+  uncounted — undercounting beats crediting despawns.
+- **Meter** — 100 charge per level, overflow carries. 12 s with no bolt/kill
+  starts a stepwise drain (~4 s per level: 26/s, drop parks the bar at 100
+  for the next step down). Death zeroes the whole surge.
+- **Buffs** — temporary multipliers scaled off the permanent tree's
+  ceilings, applied reversibly:
+  - **Damage** +6%/lvl (L5 = +30% ≈ two 1.15 tree damage nodes compounded)
+    via `_endlessAegisDmgOut` in `Bot.takeDamage` — hooked BEFORE the
+    isProxy route so co-op damage claims carry it.
+  - **Speed** +4%/lvl (L5 = +20%, under the hoard's 1.33 precedent) via a
+    CLONED chassis (`_campBoostSpeed` pattern). The base chassis REFERENCE
+    is captured once and restored exactly on level drop / death / teardown;
+    the shared `CHASSIS` entry is never mutated (the task-1 rule).
+  - **Hull regen** 0.3%·lvl of max per second (L5 = 1.5%/s; the Nano perk is
+    1%/s for a whole perk slot). Hull, not shield — LSS shields never regen
+    naturally (the stasis rule).
+
+v1 seams (deliberate):
+
+1. **Collection is local** — each pilot collects their own bolts; no
+   pickup-consumed net event. Two ships can both grab "the same" bolt.
+   (Sharing = a small `bolt_taken` gid+idx event, future work.)
+2. Charge/level are per-player; a straggler charges slower than the pilot in
+   the fight (arguably a feature).
+3. The bolt vertical clamp reads the live carve window; every peer evaluates
+   a given gid at the same route state (build segs at `onBuildWorld`,
+   appends at their own apply) so divergence is bounded to sub-metre joint
+   noise — and collection is local anyway.
+
+Verified live (headless `__endlessTick` + `__endlessAegis()`): identical
+bolt layouts across three boots of one seed; collect → +25/chirp/HUD;
+1000 dmg → 1060 dealt at L1 through the real `takeDamage` path; L2 = speed
+350→378 + 60 hp/s regen on a 10k hull; 15 s idle → stepwise L2→L1→L0 with
+the base chassis reference restored identically (`chassisIsClone:false`,
+speed exactly 350); death resets the surge before respawn; 144 fps, zero
+console errors.
+
 ## Stages
 
 1. **The endless flight** (skeleton): mode button → endless map → seeded
