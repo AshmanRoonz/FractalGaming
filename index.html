@@ -2363,6 +2363,9 @@ body.vr-active #camp-video { display: none !important; }
             CAMPAIGN <span style="font-size:10px;letter-spacing:1.5px;color:#8a7fae;font-weight:600;margin-left:10px;opacity:0.9;">(UNDER CONSTRUCTION)</span>
           </button>
           <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
+            <button id="btn-endless" onclick="startEndless()" type="button" title="Endless — a cavern without end; fly as far as your lives allow">
+              ENDLESS
+            </button>
             <button id="btn-freeflight" onclick="startFreeFlight()" type="button" title="Exhibition — patrol the open mossy overworld (the campaign hub)" style="
                     flex:1 1 0;min-height:54px;
                     background:rgba(18,40,26,0.6);border:1px solid rgba(110,220,150,0.45);
@@ -3053,7 +3056,7 @@ body.vr-active #camp-video { display: none !important; }
 
 /* (v35.20) #lobby-room-join-btn joins this group so CREATE / JOIN reads as one
    of the menu entries rather than a boxed form button. */
-#btn-solo, #btn-campaign, #btn-freeflight, #btn-howto, #btn-join, #btn-race, #btn-assault, #lobby-room-join-btn {
+#btn-solo, #btn-campaign, #btn-endless, #btn-freeflight, #btn-howto, #btn-join, #btn-race, #btn-assault, #lobby-room-join-btn {
   background: transparent !important; border: none !important;
   border-radius: 0 !important; box-shadow: none !important;
   min-height: 0 !important; padding: 7px 0 !important; margin: 0 !important;
@@ -3097,6 +3100,12 @@ body.vr-active #camp-video { display: none !important; }
 #btn-assault:hover {
   color: #ffb347 !important; transform: translateX(12px);
   text-shadow: 0 0 24px rgba(255,138,74,0.7);
+  background: transparent !important; border: none !important;
+}
+#btn-endless { color: #ff8a5c !important; }
+#btn-endless:hover {
+  color: #ffb391 !important; transform: translateX(12px);
+  text-shadow: 0 0 24px rgba(255,138,92,0.7);
   background: transparent !important; border: none !important;
 }
 #btn-freeflight { color: #5fd39a !important; }
@@ -3599,7 +3608,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.70';
+const LSS_BUILD = '35.71';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -6096,7 +6105,149 @@ const FreeFlightMode = {
     this._enteringCampaign = false; this._riftPos = null; this._deathT = 0;
   },
 };
-const GameModes = { classic: NULL_MODE, race: NULL_MODE, campaign: CampaignMode, freeflight: FreeFlightMode };
+// (v35.71) ENDLESS mode — fly a procedurally extending cavern as far as you can.
+// Campaign's endless-session recipe (testMode + raceNoTimer) with a route that
+// appends ahead of the ship and prunes behind it. Lives come from the shared
+// difficulty picker (EASY 3 / MEDIUM 2 / HARD 1); out of lives = run over.
+// Design + anchors: LSS/endless_mode_design.md.
+function _endlessLivesFor(d) { return d === 'easy' ? 3 : d === 'medium' ? 2 : 1; }
+const EndlessMode = {
+  onStart() {},
+  onBuildWorld() {
+    const run = game.endlessRun;
+    if (!run) return;
+    // Wire prune refs for the segments the level build created from our
+    // initial tunnel path: cylinders land in path order, hall spheres in rooms
+    // order after the spawn sphere at [0].
+    try {
+      let si = 1;
+      for (let i = 0; i < run.segs.length; i++) {
+        const s = run.segs[i];
+        s.cyl = game.levelCylinders[i] || null;
+        if (s.hall) { s.sph = game.levelSpheres[si] || null; si++; }
+      }
+    } catch (_) {}
+    try { run.lives = _endlessLivesFor(typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'); } catch (_) { run.lives = 1; }
+    run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
+    run.lastHall = { x: 0, y: 80, z: 0 };
+    this._deathT = 0;
+  },
+  onWaveStart() {},
+  shouldEndRound() { return undefined; },
+  _hud() {
+    let el = document.getElementById('endless-hud');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'endless-hud';
+      el.style.cssText = 'position:fixed;top:44px;left:50%;transform:translateX(-50%);z-index:60;' +
+        'font-family:Orbitron,Rajdhani,sans-serif;font-size:15px;letter-spacing:3px;color:#9fd4ff;' +
+        'text-shadow:0 0 12px rgba(80,160,255,0.5);pointer-events:none;white-space:nowrap;';
+      document.body.appendChild(el);
+    }
+    return el;
+  },
+  update(dt) {
+    const run = game.endlessRun;
+    if (!run || game.state !== 'playing') return;
+    // Run over: hold the banner beat, then soft-return to ship-select.
+    if (run.over) {
+      run.overT += dt;
+      if (run.overT > 6 && !run._returned) {
+        run._returned = true;
+        try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {}
+      }
+      return;
+    }
+    // Death -> spend a life (FreeFlightMode's own-death pattern, plus lives).
+    if (player && player.shipState === 'dead') {
+      this._deathT = (this._deathT || 0) + dt;
+      if (this._deathT >= 1.6) {
+        this._deathT = 0;
+        run.lives--;
+        if (run.lives <= 0) {
+          run.over = true; run.overT = 0;
+          try { if (window.Overlays && Overlays.banner) Overlays.banner('RUN OVER', (run.dist / 1000).toFixed(2) + ' km'); } catch (_) {}
+          try {
+            const best = parseFloat(localStorage.getItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard')) || '0');
+            if (run.dist > best) localStorage.setItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'), String(run.dist));
+          } catch (_) {}
+        } else {
+          try {
+            if (typeof respawnPlayer === 'function') respawnPlayer();
+            // Continue from the last hall reached; the run and the clock keep going.
+            player.position.set(run.lastHall.x, run.lastHall.y + 60, run.lastHall.z);
+            if (player.velocity) player.velocity.set(0, 0, 0);
+            player._swYClampCache = null;
+            if (player.maxHealth) { player.health = player.maxHealth; player.shield = player.maxShield; }
+            if (window.Overlays && Overlays.banner) Overlays.banner('LIVES ' + run.lives, 'continue from the last hall');
+          } catch (_) {}
+        }
+      }
+      return;
+    }
+    this._deathT = 0;
+    // ---- progress along the spine (monotone arc length) ----
+    const p = player.position;
+    let idx = 0;
+    for (let i = 0; i < run.segs.length; i++) { if (run.segs[i].gid === run.progGid) { idx = i; break; } }
+    if (run.progGid < 0) idx = 0;
+    let bestK = -1, bestT = 0;
+    for (let k = idx; k < Math.min(idx + 3, run.segs.length); k++) {
+      const s = run.segs[k];
+      const ex = s.b.x - s.a.x, ey = s.b.y - s.a.y, ez = s.b.z - s.a.z;
+      const l2 = ex * ex + ey * ey + ez * ez || 1;
+      let t = ((p.x - s.a.x) * ex + (p.y - s.a.y) * ey + (p.z - s.a.z) * ez) / l2;
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      const qx = p.x - (s.a.x + ex * t), qy = p.y - (s.a.y + ey * t), qz = p.z - (s.a.z + ez * t);
+      if (qx * qx + qy * qy + qz * qz < 2800 * 2800) { bestK = k; bestT = t; }
+    }
+    if (bestK >= 0) {
+      const tgt = run.segs[bestK];
+      if (run.progGid < 0) { run.progGid = run.segs[0].gid; run.progT = 0; idx = 0; }
+      if (tgt.gid > run.progGid) {
+        for (let k = idx; k < bestK; k++) {
+          const s = run.segs[k];
+          run.dist += (k === idx ? (1 - run.progT) : 1) * s.len;
+          if (s.hall) run.lastHall = { x: s.b.x, y: s.b.y, z: s.b.z };
+        }
+        run.dist += bestT * tgt.len;
+        run.progGid = tgt.gid; run.progT = bestT;
+      } else if (tgt.gid === run.progGid && bestT > run.progT) {
+        run.dist += (bestT - run.progT) * tgt.len;
+        run.progT = bestT;
+      }
+    }
+    // ---- extend ahead / prune behind ----
+    let guard = 0;
+    while (guard < 2 && run.segs.length) {
+      const end = run.segs[run.segs.length - 1].b;
+      const dx = p.x - end.x, dy = p.y - end.y, dz = p.z - end.z;
+      if (dx * dx + dy * dy + dz * dz > 7000 * 7000) break;
+      _lssEndlessApplySeg(run, _lssEndlessNextSeg(run));
+      guard++;
+    }
+    let pruned = false;
+    while (run.segs.length > 18) {
+      const s0 = run.segs[0];
+      if (run.progGid >= 0 && s0.gid >= run.progGid) break;
+      const dx = p.x - s0.b.x, dz = p.z - s0.b.z;
+      if (dx * dx + dz * dz < 8000 * 8000) break;
+      run.segs.shift();
+      if (s0.cyl) { const i = game.levelCylinders.indexOf(s0.cyl); if (i >= 0) game.levelCylinders.splice(i, 1); }
+      if (s0.sph) { const i = game.levelSpheres.indexOf(s0.sph); if (i >= 0) game.levelSpheres.splice(i, 1); }
+      pruned = true;
+    }
+    if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
+    // ---- HUD ----
+    const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives;
+    if (txt !== run._hudTxt) { run._hudTxt = txt; try { this._hud().textContent = txt; } catch (_) {} }
+  },
+  onTeardown() {
+    try { const el = document.getElementById('endless-hud'); if (el && el.parentNode) el.parentNode.removeChild(el); } catch (_) {}
+    try { game.endlessRun = null; game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; } catch (_) {}
+  },
+};
+const GameModes = { classic: NULL_MODE, race: NULL_MODE, campaign: CampaignMode, freeflight: FreeFlightMode, endless: EndlessMode };
 function activeMode() { return GameModes[LSS.MODE] || NULL_MODE; }
 
 function _campInitState() {
@@ -6184,6 +6335,32 @@ function startFreeFlight() {
   enterShipSelect();
 }
 if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
+
+// (v35.71) ENDLESS entry — solo-only for now (the route generator is seeded so
+// co-op can come later). Same endless-session flags as campaign (testMode +
+// raceNoTimer: no clock, no win-gate); EndlessMode.update owns death and the run.
+function startEndless() {
+  LSS.MODE = 'endless';
+  game.testMode = true;
+  game.raceNoTimer = true;
+  game.currentRound = 1;
+  game.selectedMap = 'endless_caverns';
+  _cancelRoomForLocalPlay();
+  net.active = false;
+  net.solo = true;
+  enterShipSelect();
+}
+if (typeof window !== 'undefined') window.startEndless = startEndless;
+// Debug hooks (the __* convention): closure-side view of the endless wiring,
+// and a manual tick so the run logic can be driven headless (the sandbox
+// renderer starves rAF, so gameLoop only ticks sporadically there).
+if (typeof window !== 'undefined') window.__endlessInfo = function () {
+  return { mode: LSS.MODE, hasMode: !!GameModes.endless, isActive: activeMode() === GameModes.endless,
+           run: !!game.endlessRun, state: game.state };
+};
+if (typeof window !== 'undefined') window.__endlessTick = function (dt) {
+  try { GameModes.endless.update(dt || 0.033); return 'ok'; } catch (e) { return String(e && e.stack || e); }
+};
 
 function _campHubSetup() {
   LSS.MODE = 'freeflight';
@@ -6931,8 +7108,12 @@ function _visibleMapKeys() {
   if (LSS.MODE === 'freeflight') {
     return all.filter(k => k.indexOf('hub_') === 0);
   }
+  if (LSS.MODE === 'endless') {
+    return all.filter(k => k.indexOf('endless_') === 0);
+  }
   return all.filter(k => {
-    if (k.indexOf('camp_') === 0) return false;   
+    if (k.indexOf('camp_') === 0) return false;
+    if (k.indexOf('endless_') === 0) return false;   
     if (k.indexOf('hub_') === 0) return false;    
     const isRaceMap = k.startsWith('race_');
     const isAssaultMap = k.startsWith('assault_');
@@ -25095,7 +25276,7 @@ class Projectile {
       }
     }
 
-    const s = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+    const s = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
     if (Math.abs(this.position.x) > s || Math.abs(this.position.y) > s || Math.abs(this.position.z) > s) {
       this.destroy();
     }
@@ -36495,7 +36676,10 @@ function updatePlayerMovement(dt) {
   }
 
   const _swT = game.sandwichTerrain;
-  if (_swT && _swT.ON && _swT.FOOT && typeof _swWallDist === 'function') {
+  if (_swT && _swT.ON && (_swT.FOOT || _swT.ENDLESS) && typeof _swWallDist === 'function') {
+    // (v35.71) ENDLESS has no footprint (unbounded streaming) but MUST keep the
+    // vertical clamp below — that clamp being FOOT-gated is the v35.70 trap.
+    if (_swT.FOOT) {
     const W = _swWallDist();
     const F = _swT.FOOT;
     const minX = F.minX - W, maxX = F.maxX + W;
@@ -36504,6 +36688,7 @@ function updatePlayerMovement(dt) {
     else if (player.position.x > maxX) { player.position.x = maxX; if (player.velocity.x > 0) player.velocity.x = 0; }
     if (player.position.z < minZ)      { player.position.z = minZ; if (player.velocity.z < 0) player.velocity.z = 0; }
     else if (player.position.z > maxZ) { player.position.z = maxZ; if (player.velocity.z > 0) player.velocity.z = 0; }
+    }
     try {
       const _pad = 26;
       let _yc = player._swYClampCache;
@@ -36520,7 +36705,7 @@ function updatePlayerMovement(dt) {
       }
     } catch (_) {}
   }
-  const _arena = (LSS.MODE === 'freeflight') ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+  const _arena = (LSS.MODE === 'freeflight' || LSS.MODE === 'endless') ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
   const s = _arena * 0.9;
   const softEdge = _arena * 0.8;
   if (player.position.x > softEdge)       player.velocity.x -= (player.position.x - softEdge) * 0.5 * dt;
@@ -44615,7 +44800,7 @@ function _setStoredDifficulty(d) {
 function _renderDifficultyPicker() {
   const panel = document.getElementById('ship-preview-difficulty');
   if (!panel) return;
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'campaign') { panel.style.display = 'none'; return; }
+  if (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'endless')) { panel.style.display = 'none'; return; }
   const grid = document.getElementById('diff-grid');
   const desc = document.getElementById('diff-desc');
   if (!grid) return;
@@ -44635,7 +44820,9 @@ function _renderDifficultyPicker() {
     card.addEventListener('click', () => { _setStoredDifficulty(d); _renderDifficultyPicker(); });
     grid.appendChild(card);
   }
-  if (desc) desc.textContent = 'Up to ' + _campSwarmCapFor(cur) + ' enemy ships swarm at once.';
+  if (desc) desc.textContent = (LSS.MODE === 'endless')
+    ? _endlessLivesFor(cur) + (_endlessLivesFor(cur) === 1 ? ' life' : ' lives') + ' for the run. Distance never resets.'
+    : 'Up to ' + _campSwarmCapFor(cur) + ' enemy ships swarm at once.';
 }
 
 function selectLoadout(key) { commitLoadout(key); }
@@ -51804,6 +51991,107 @@ const CAMPAIGN_LEG_MAP = {
   tunnels: [],   
 };
 MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
+
+// ============================================================
+// (v35.71) ENDLESS — The Long Dark. A cavern with no far end: the route is a
+// seeded polyline of lane segments + hall rooms that EndlessMode extends ahead
+// of the ship and prunes behind it at runtime (the carve trio and collision
+// both read game.levelSpheres/levelCylinders per-sample, so appended segments
+// are terrain the moment their chunks stream in). The static rooms/tunnels
+// below are only the carousel preview / non-endless fallback.
+// Invariants (design doc): append when the ship is within 7000u of the route
+// end (> _SW_VIEW streaming radius of 4500u, so those chunks are still
+// unbaked); prune only segments >8000u behind (their chunks already unloaded);
+// keep the active window ~18 segments so _stRouteAt stays cheap.
+// ============================================================
+MAP_DATA.endless_caverns = {
+  name: 'ENDLESS ; The Long Dark',
+  defaultTheme: 'Rocky',
+  description: 'A cavern without end. Fly as far as you can on the lives you chose.',
+  procedural: 'endless',
+  terrain: { wallPinch: 0.24 },
+  palette: [0x1c2434, 0x28324a, 0x1a2030, 0x242c44, 0x202840, 0x182238, 0x2a3448, 0x1e2636],
+  rooms: [
+    { id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 },
+    { id: 'on', team: null, x: 0, y: 0, z: 9000, r: SU * 3.0 },
+  ],
+  tunnels: [{ r: 400, path: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 9000 }] }],
+};
+
+// One route step. Pure function of the run's seeded rng stream, so a given
+// seed always grows the same cavern (co-op-ready). Bounded wander: beyond 42k
+// from origin the heading steers home, keeping runs inside the freeflight-size
+// 10x arena bound (float32-safe; score is arc length, not displacement).
+function _lssEndlessNextSeg(run) {
+  const g = run.gen, rand = g.rand;
+  const kindRoll = rand();
+  let hall = false;
+  g.sinceHall++;
+  if (g.sinceHall >= 4 + Math.floor(rand() * 3)) { hall = true; g.sinceHall = 0; }
+  let turn = (rand() - 0.5) * (kindRoll < 0.45 ? 0.14 : 1.15);
+  const distO = Math.hypot(g.x, g.z);
+  if (distO > 42000) {
+    const home = Math.atan2(-g.x, -g.z);
+    let dh = home - g.heading;
+    while (dh > Math.PI) dh -= 2 * Math.PI;
+    while (dh < -Math.PI) dh += 2 * Math.PI;
+    turn += Math.max(-0.5, Math.min(0.5, dh)) * 0.5;
+  }
+  g.heading += turn;
+  const len = 2200 + rand() * 1400;
+  const a = { x: g.x, y: g.y, z: g.z };
+  g.x += Math.sin(g.heading) * len;
+  g.z += Math.cos(g.heading) * len;
+  g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));
+  const b = { x: g.x, y: g.y, z: g.z };
+  return { a, b, r: 400, hall, hallR: hall ? (950 + rand() * 420) : 0, gid: g.nextGid++ };
+}
+
+// Append one generated segment to the LIVE route arrays (mirrors the shapes
+// buildRoomGraphLevel derives from rooms/tunnels).
+function _lssEndlessApplySeg(run, s) {
+  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r };
+  game.levelCylinders.push(cyl);
+  let sph = null;
+  if (s.hall) { sph = { cx: s.b.x, cy: s.b.y, cz: s.b.z, r: s.hallR }; game.levelSpheres.push(sph); }
+  run.segs.push({
+    gid: s.gid, a: s.a, b: s.b, hall: s.hall,
+    len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
+    cyl, sph,
+  });
+}
+
+// Level generator (the shifting_deep pattern): seeds the run state and returns
+// the level whose rooms/tunnels carry the first stretch of route.
+function _lssGenEndlessLevel(base) {
+  const seed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) >>> 0;
+  const rand = mulberry32(seed);
+  const gen = { rand, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  const run = game.endlessRun = {
+    gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
+    over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',
+  };
+  const nodes = [{ x: 0, y: 0, z: 0 }];
+  const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
+  for (let i = 0; i < 8; i++) {
+    const s = _lssEndlessNextSeg(run);
+    nodes.push(s.b);
+    if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
+    run.segs.push({
+      gid: s.gid, a: s.a, b: s.b, hall: s.hall,
+      len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
+      cyl: null, sph: null,
+    });
+  }
+  return {
+    name: base.name, description: base.description, defaultTheme: base.defaultTheme,
+    // Keep the procedural tag: the sandwich config keys _isEndless off it
+    // (FOOT null + T.ENDLESS), same as shifting_deep keeps its own tag.
+    procedural: 'endless',
+    terrain: base.terrain, palette: base.palette, _biomeOverride: 'rocky',
+    rooms, tunnels: [{ r: 400, path: nodes }],
+  };
+}
 MAP_DATA.camp_grassy      = { ...CAMPAIGN_LEG_MAP, name: 'Verdant Pass',          description: 'Rolling green highlands under an open sky.',                 defaultTheme: 'Grassy',            palette: [0x33571f,0x4d7a33,0x7b7a5a,0x5fae4e,0x3f5e26,0x2c3f18,0x6f6552,0x4d7a33] };
 MAP_DATA.camp_snow        = { ...CAMPAIGN_LEG_MAP, name: 'Frozen Reach',          description: 'Glacial peaks and wind-scoured snowfields.',                defaultTheme: 'Snow',              palette: [0x6f8aa0,0xa9c2d6,0xd8e6f2,0xffffff,0x8fa6bd,0xbcd2e0,0x9fb4c6,0xeaf4ff] };
 MAP_DATA.camp_volcanic    = { ...CAMPAIGN_LEG_MAP, name: 'Molten Core',           description: 'Lava-veined mountains beneath an ash-choked sky.',          defaultTheme: 'Volcanic',          palette: [0xb5391a,0x5a2a22,0x36302e,0x9a9088,0x2a2220,0x6e5a50,0xc04020,0x803020] };
@@ -52078,6 +52366,11 @@ function buildRoomGraphLevel(level) {
     try { level = _lssGenShiftingDeep(MAP_DATA.shifting_deep || level); }
     catch (e) { console.warn('[shifting-deep] generate failed, using static fallback:', e); }
   }
+  // (v35.71) ENDLESS: seed the run + grow the first stretch of route.
+  if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
+    try { level = _lssGenEndlessLevel(MAP_DATA.endless_caverns || level); }
+    catch (e) { console.warn('[endless] generate failed, using static fallback:', e); game.endlessRun = null; }
+  }
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
   game.mapMeshes = [];
   game.levelBoxes = [];
@@ -52215,6 +52508,10 @@ function buildRoomGraphLevel(level) {
     
     
     const _isHubMap = (game.sandwichBiome === 'mossy');
+    // (v35.71) ENDLESS: hub-style unbounded streaming (FOOT null) but with the
+    // ceiling kept (_openTop stays hub-only). T.ENDLESS re-arms the vertical
+    // player clamp that is otherwise gated on FOOT (the v35.70 trap).
+    const _isEndless = !!(level && level.procedural === 'endless');
     const _tOv = (level && level.terrain) ? level.terrain : null;
     let _pillars = null;
     if (_tOv && _tOv.pillars && !_isHubMap) {
@@ -52249,7 +52546,8 @@ function buildRoomGraphLevel(level) {
       CLEAR_SOFT: 120,          
       ARENA_DROP: 640,          
       ARENA_RISE: 760,          
-      FOOT: _isHubMap ? null : { minX:bMinX, maxX:bMaxX, minZ:bMinZ, maxZ:bMaxZ },   
+      FOOT: (_isHubMap || _isEndless) ? null : { minX:bMinX, maxX:bMaxX, minZ:bMinZ, maxZ:bMaxZ },
+      ENDLESS: _isEndless,   
       _openTop: _isHubMap,   
       HUB: _isHubMap,        
       WL: yMid - GAP_HALF - 120,   

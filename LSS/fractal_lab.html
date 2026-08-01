@@ -101,6 +101,9 @@
       <option value="4">Apollonian</option>
       <option value="5">Pseudo-Kleinian</option>
       <option value="6">Mandelbrot Sandwich</option>
+      <option value="7">Gyroid Labyrinth</option>
+      <option value="8">KIFS Cathedral</option>
+      <option value="9">Column Lattice</option>
     </select>
   </div>
   <div class="row"><label>Space</label>
@@ -132,6 +135,33 @@
   <div class="row"><label>Deck thick</label><input id="deckt" type="range" min="5" max="120" step="1"><span class="val" id="deckt-v"></span></div>
   <div class="row"><label>Ledge reach</label><input id="ledge" type="range" min="20" max="900" step="10"><span class="val" id="ledge-v"></span></div>
   <div class="row"><label>Tile</label><input id="tile" type="range" min="0" max="8" step="0.05"><span class="val" id="tile-v"></span></div>
+
+  <h2>LAYER B &middot; COMPOSE</h2>
+  <div class="row"><label>Family B</label>
+    <select id="familyb">
+      <option value="-1">Off</option>
+      <option value="0">Mandelbulb</option>
+      <option value="1">Mandelbox</option>
+      <option value="2">Menger Sponge</option>
+      <option value="3">Sierpinski KIFS</option>
+      <option value="4">Apollonian</option>
+      <option value="5">Pseudo-Kleinian</option>
+      <option value="6">Mandelbrot Sandwich</option>
+      <option value="7">Gyroid Labyrinth</option>
+      <option value="8">KIFS Cathedral</option>
+      <option value="9">Column Lattice</option>
+    </select>
+  </div>
+  <div class="row"><label>Op</label>
+    <select id="opb">
+      <option value="0">Union &mdash; add B as solid</option>
+      <option value="1">Carve &mdash; B drills tunnels</option>
+      <option value="2">Intersect</option>
+    </select>
+  </div>
+  <div class="row"><label>B scale</label><input id="wscaleb" type="range" min="60" max="4000" step="10"><span class="val" id="wscaleb-v"></span></div>
+  <div class="row"><label>B tile</label><input id="tileb" type="range" min="0" max="8" step="0.05"><span class="val" id="tileb-v"></span></div>
+  <div class="row"><label>B shell</label><input id="thickb" type="range" min="0" max="400" step="1"><span class="val" id="thickb-v"></span></div>
 
   <h2>ARENA</h2>
   <div class="row"><label>World scale</label><input id="wscale" type="range" min="200" max="4000" step="10"><span class="val" id="wscale-v"></span></div>
@@ -254,12 +284,30 @@ const P = {
   offX: 0.92, offY: 0.92, offZ: 0.92,
   thickness: 30, slab: 700, tile: 2.0,
   wallUp: 0, inner: 0.35, deckSpacing: 0, deckThick: 25, ledgeReach: 220,
+  // Layer B: a second field composed over the first. This is the concept art's
+  // scale hierarchy — a landmark at one scale, greebling or drilled bores at
+  // another. familyB -1 = off. opB: 0 union (add B as solid), 1 carve (B
+  // drills tunnels through A), 2 intersect. thicknessB > 0 shells B first.
+  // B shares the SHAPE knobs (iters/scale/power/offsets) with A; only scale,
+  // tiling and shell are per-layer. Cost: B on = two DE evals per march step.
+  familyB: -1, opB: 0, worldScaleB: 500, tileB: 0, thicknessB: 0,
   worldScale: 2000, arenaR: 4200, shipR: 14,
   maxSteps: 128, stepScale: 0.80, eps: 0.6, far: 14000, renderScale: 100,
   colA: '#101018', colB: '#8fa0b0', colC: '#ff3060', colF: '#08090f',
   fogDensity: 8.0, glow: 0.5, ao: 1.0, trapGain: 3.0, headlight: 2.0, headFall: 4.0,
   edgeGlow: 0.0,
   shadows: 0, heat: 0, bakeN: 64,
+};
+
+// Baseline for the sticky keys a preset may not mention. Loading a preset (or
+// importing an old JSON) assigns over the CURRENT P, so anything the entry
+// doesn't set leaks from the previous arena — wallUp was already doing this
+// (load Mandelbrot Wall, then Sandwich, and the sandwich stood up as a wall).
+// Reset these before every preset/import assign; visual/march knobs stay
+// sticky on purpose.
+const PRESET_RESET = {
+  wallUp: 0, inner: 0.35, edgeGlow: 0, deckSpacing: 0,
+  familyB: -1, opB: 0, worldScaleB: 500, tileB: 0, thicknessB: 0,
 };
 
 // Every preset here was picked by PROBE SCORE, not by how it looked in a
@@ -316,6 +364,59 @@ const PRESETS = {
     offX:1.2, offY:0.8, offZ:1.2, tile:2.0, worldScale:700, arenaR:4200,
     stepScale:0.8, eps:0.6, fogDensity:6,
     colA:'#0c1408', colB:'#a0d070', colC:'#ff40a0', colF:'#060a06' , trapGain:1.5, glow:0.5, headlight:2.0 },
+  // ---- 2026-08-01 generation: new families + the layer-B compositor ----
+  // All measured at shipR 14, grid 44. Palettes keyed to concept/*.png.
+  // 48% open · median 232u (17x ship) · best room 530u · 99.9% connected.
+  // One labyrinth of the gyroid as rock, the other as your arena — organic,
+  // smooth, everywhere-connected. The teal/magenta reef of concept image 3.
+  'Gyroid Reef': { family:7, space:0, scale:1.2, tile:0, worldScale:2000,
+    arenaR:4200, shipR:14, maxSteps:96, stepScale:0.85, eps:0.6, far:16000,
+    fogDensity:5.5, colA:'#071418', colB:'#158a92', colC:'#ff4fd8', colF:'#0a3038',
+    trapGain:2.2, glow:1.3, ao:1.0, headlight:1.6, headFall:4.5 },
+  // 46% open · median 126u (9x ship) · best room 386u · 97.4% connected.
+  // Octahedral KIFS folded onto a box: towers, arches, vaulted masses, with
+  // deck ledges clinging to the architecture every 900u — the sapphire/gold
+  // cathedral city of concept image 2.
+  'KIFS Cathedral': { family:8, space:0, iters:10, scale:1.85,
+    offX:1.0, offY:1.45, offZ:0.8, tile:2.4, worldScale:2000,
+    deckSpacing:900, deckThick:20, ledgeReach:260,
+    arenaR:4200, shipR:14, maxSteps:128, stepScale:0.7, eps:0.6, far:16000,
+    fogDensity:4.0, colA:'#0a1026', colB:'#4a72d8', colC:'#ffc860', colF:'#111a34',
+    trapGain:0.9, glow:0.9, ao:1.0, headlight:1.8, headFall:3.5 },
+  // 70% open · median 256u (18x ship) · best room 705u · 100% connected.
+  // One colossal sponge (no tiling) — the arena sits in its central hall —
+  // with sparse mini-sponge islands floating as cover (layer B, union).
+  // The vast indigo hall + landmark composition of concept image 1.
+  // Alternate: opB 1, worldScaleB 700, tileB 2 drills the walls porous
+  // instead (77% open · median 378u · best 1638u · 100%).
+  'Menger Monument': { family:2, space:0, iters:4, tile:0, worldScale:5200,
+    familyB:2, opB:0, worldScaleB:700, tileB:4, thicknessB:0,
+    arenaR:4200, shipR:14, maxSteps:128, stepScale:0.8, eps:0.7, far:26000,
+    fogDensity:2.6, colA:'#0c0c1e', colB:'#3f66d4', colC:'#8a5cff', colF:'#191243',
+    trapGain:3.8, glow:1.25, ao:1.0, headlight:1.5, headFall:2.5 },
+  // 64% open · median 98u (7x ship) · best room 254u · 99.4% connected.
+  // A sealed Mandelbox machine-city (4% connected on its own) resurrected by
+  // a gyroid carve: organic bores worm through the ruin and join every room.
+  // The amber-lit techno-ruin warrens of concept image 4.
+  // Readability rule learned from the first render pass: box-fold hyperdetail
+  // lit flat reads as camo mush. This arena is DARK — near-black fog, dark
+  // bronze rock, and a tight bright headlight that reveals amber detail as
+  // you fly. The concept-art pit is lamplit, not skylit.
+  'Machine Warrens': { family:1, space:0, iters:9, scale:-2.0, minR:0.5, fixR:1.0,
+    tile:3.0, worldScale:2000, familyB:7, opB:1, worldScaleB:1600, tileB:0, thicknessB:0,
+    arenaR:4200, shipR:14, maxSteps:112, stepScale:0.65, eps:0.55, far:12000,
+    fogDensity:12.0, colA:'#0a0a0c', colB:'#4a3f30', colC:'#ffb14a', colF:'#07080a',
+    trapGain:0.9, glow:1.5, ao:1.0, headlight:3.0, headFall:8.0 },
+  // 25% open · median 88u (6x ship) · best room 422u · 98.4% connected.
+  // The carved bulb reef with vertical light-wells bored straight down
+  // through it (layer B, column carve) — reef caves that open into shafts.
+  // Denser than the old Bulb Reef (worldScale 1300): coral-cluster tight.
+  'Reef Boreholes': { family:0, space:1, iters:8, power:8, thickness:130,
+    tile:2.0, worldScale:1300, familyB:9, opB:1, worldScaleB:1000, tileB:0,
+    thicknessB:0, inner:0.3,
+    arenaR:4200, shipR:14, maxSteps:128, stepScale:0.6, eps:0.55, far:16000,
+    fogDensity:7.5, colA:'#160820', colB:'#a070d0', colC:'#40e8d0', colF:'#0a0512',
+    trapGain:2.6, glow:1.4, ao:1.0, headlight:2.0, headFall:5.0 },
   // 47% open but only 45% connected — kept as a counter-example: the probe
   // calls it out as a field of sealed bubbles rather than one arena.
   'Apollonian (fragmented)': { family:4, space:1, iters:7, scale:1.2, thickness:80,
@@ -351,8 +452,10 @@ uniform mat4  uViewProj;
 uniform vec2  uRes;
 
 uniform int   uFamily, uSpace, uIters, uMaxSteps, uShadow, uHeat;
+uniform int   uFamilyB, uOpB;
 uniform float uEps, uStepScale, uFar, uArenaR, uThickness, uSlab;
 uniform float uWorldScale, uScale, uPower, uMinR, uFixR, uTile;
+uniform float uWorldScaleB, uTileB, uThicknessB;
 uniform float uWallUp, uInner, uDeckSpacing, uDeckThick, uLedgeReach, uEdgeGlow;
 uniform vec3  uOffset;
 uniform vec3  uColA, uColB, uColC, uFogCol;
@@ -498,34 +601,88 @@ float deMandelbrotSlab(vec3 p) {
   return dSet;
 }
 
+float deGyroid(vec3 p) {
+  // Triply periodic minimal surface. Not a fractal, but the classic flyable
+  // labyrinth: smooth, organic, and both sides of the surface are single
+  // connected mazes. uScale is frequency — scale 1 = one cell per 2 units,
+  // so world cell size = 2 * worldScale / scale. Signed: solid mode keeps one
+  // of the two labyrinths as rock; carved mode shells the surface so both are
+  // flyable with a wall between them.
+  float f = max(abs(uScale), 0.05) * 3.14159265;
+  vec3 q = p * f;
+  float g = dot(sin(q), cos(q.yzx));
+  // The surface IS g = 0, so |g| as a trap is identically zero on every
+  // visible point and the palette collapses to colA. Sample a second gyroid
+  // at an incommensurate frequency instead: flowing bands ALONG the surface.
+  gTrap = abs(dot(sin(q * 3.7), cos(q.yzx * 3.7))); gEsc = 0.0;
+  return g / (f * 1.5);
+}
+
+float deKifs(vec3 p) {
+  // Kaleidoscopic IFS, octahedral fold onto a box primitive — the gothic
+  // cathedral generator: towers, arches, vaulted masses. uScale is the fold
+  // scale (1.15-3), uOffset steers the architecture (tall Y = spires).
+  vec3 z = p; float sc = clamp(abs(uScale), 1.15, 3.0); float s = 1.0;
+  gTrap = 1e9; gEsc = 0.0;
+  for (int i = 0; i < 24; i++) {
+    if (i >= uIters) break;
+    z = abs(z);
+    if (z.x < z.y) z.xy = z.yx;
+    if (z.y < z.z) z.yz = z.zy;
+    if (z.x < z.y) z.xy = z.yx;
+    z = z * sc - uOffset * (sc - 1.0);
+    gTrap = min(gTrap, dot(z, z));
+    s *= sc;
+  }
+  gTrap = sqrt(gTrap);
+  vec3 q = abs(z) - vec3(1.0);
+  return (min(max(q.x, max(q.y, q.z)), 0.0) + length(max(q, 0.0))) / s;
+}
+
+float deColumns(vec3 p) {
+  // Vertical cylinder lattice on a period-2 grid (self-tiling, like the unit
+  // Menger cell). Union layer = pillars / colonnade; carve layer = the
+  // concept art's circular bores drilled down through a ruin. uInner is the
+  // column radius as a fraction of the half-cell.
+  vec2 c = mod(p.xz + 1.0, 2.0) - 1.0;
+  float r = clamp(uInner, 0.05, 0.95);
+  gTrap = length(c); gEsc = 0.0;
+  return length(c) - r;
+}
+
 // ---------- family dispatch + space mode ----------
 
-float deFamily(vec3 wp) {
-  vec3 p = wp / uWorldScale;          // classic parameter ranges, LSS-sized world
+float deFamilyFor(vec3 wp, int fam, float wS, float tile) {
+  vec3 p = wp / wS;                   // classic parameter ranges, LSS-sized world
 
   // Domain repetition. Without it every one of these fractals is a bounded
   // sculpture sitting in an empty arena — the probe scores those 90% open,
   // which is a void with an ornament in it, not a level. Tiling turns the
   // same shape into an endless lattice of rock with tunnels through it,
   // which is the multi-layer labyrinth we are actually after.
-  if (uTile > 0.0) p = mod(p + 0.5 * uTile, uTile) - 0.5 * uTile;
+  if (tile > 0.0) p = mod(p + 0.5 * tile, tile) - 0.5 * tile;
 
   float d;
-  if      (uFamily == 0) d = deMandelbulb(p);
-  else if (uFamily == 1) d = deMandelbox(p);
-  else if (uFamily == 2) d = deMenger(p);
-  else if (uFamily == 3) d = deSierpinski(p);
-  else if (uFamily == 4) d = deApollonian(p);
-  else if (uFamily == 5) d = dePseudoKleinian(p);
-  else                   d = deMandelbrotSlab(p);
+  if      (fam == 0) d = deMandelbulb(p);
+  else if (fam == 1) d = deMandelbox(p);
+  else if (fam == 2) d = deMenger(p);
+  else if (fam == 3) d = deSierpinski(p);
+  else if (fam == 4) d = deApollonian(p);
+  else if (fam == 5) d = dePseudoKleinian(p);
+  else if (fam == 7) d = deGyroid(p);
+  else if (fam == 8) d = deKifs(p);
+  else if (fam == 9) d = deColumns(p);
+  else               d = deMandelbrotSlab(p);
 
   // Repetition breaks the distance guarantee — a copy in the next cell can be
   // nearer than the one we evaluated. Clamping to half a cell makes the march
   // safe again at the cost of a few extra steps near cell boundaries.
-  if (uTile > 0.0) d = min(d, 0.5 * uTile);
+  if (tile > 0.0) d = min(d, 0.5 * tile);
 
-  return d * uWorldScale;
+  return d * wS;
 }
+
+float deFamily(vec3 wp) { return deFamilyFor(wp, uFamily, uWorldScale, uTile); }
 
 // Distance to SOLID. Positive = free space the ship can occupy.
 //
@@ -537,22 +694,40 @@ float deFamily(vec3 wp) {
 // formulation looks like rather than a badly tuned one.
 float map(vec3 p) {
   float raw = deFamily(p);
+  float trapA = gTrap, escA = gEsc;
   float d = raw;
   if (uSpace == 1) d = abs(d) - uThickness;   // carved: shell around the surface
 
   if (uFamily == 6) {
     if (uWallUp > 0.5) d = max(d, abs(p.z) - uSlab);   // cliff of finite depth
     else               d = min(d, uSlab - abs(p.y));   // sandwich floor+ceiling
+  }
 
-    // Ledges. The concept art's horizontal catwalks cling to the cliff rather
-    // than spanning the void, so the deck slabs are intersected with a band
-    // around the fractal surface — outside that band they simply do not exist.
-    if (uDeckSpacing > 0.0) {
-      float sp = uDeckSpacing;
-      float deck = abs(mod(p.y + 0.5 * sp, sp) - 0.5 * sp) - uDeckThick;
-      deck = max(deck, abs(raw) - uLedgeReach);
-      d = min(d, deck);
-    }
+  // Layer B: the scale-hierarchy compositor. Space mode belongs to A (A is
+  // the world); B is a modifier composed over it. Colour follows whichever
+  // surface owns the final distance, so drilled bores and added greebling
+  // read as their own material.
+  if (uFamilyB >= 0) {
+    float dB = deFamilyFor(p, uFamilyB, uWorldScaleB, uTileB);
+    float trapB = gTrap, escB = gEsc;
+    if (uThicknessB > 0.0) dB = abs(dB) - uThicknessB;
+    float dA = d;
+    bool bWins;
+    if      (uOpB == 0) { d = min(dA, dB);  bWins = dB  < dA; }
+    else if (uOpB == 1) { d = max(dA, -dB); bWins = -dB > dA; }
+    else                { d = max(dA, dB);  bWins = dB  > dA; }
+    gTrap = bWins ? trapB : trapA; gEsc = bWins ? escB : escA;
+  } else { gTrap = trapA; gEsc = escA; }
+
+  // Ledges, now for every family. The concept art's horizontal catwalks cling
+  // to the landmark rather than spanning the void, so the deck slabs are
+  // intersected with a band around layer A's surface — outside that band they
+  // simply do not exist.
+  if (uDeckSpacing > 0.0) {
+    float sp = uDeckSpacing;
+    float deck = abs(mod(p.y + 0.5 * sp, sp) - 0.5 * sp) - uDeckThick;
+    deck = max(deck, abs(raw) - uLedgeReach);
+    d = min(d, deck);
   }
   // Arena bound — a hard shell so the ship cannot escape into empty space.
   return min(d, uArenaR - length(p));
@@ -839,43 +1014,102 @@ function deMandelbrotSlabJS(x, y, z0) {
   return 0.5 * r * Math.log(r) / dr;
 }
 
-function deFamilyJS(wx, wy, wz) {
-  const S = P.worldScale;
+function deGyroidJS(x, y, z0) {
+  const f = Math.max(Math.abs(P.scale), 0.05) * 3.14159265;
+  const qx = x * f, qy = y * f, qz = z0 * f;
+  const g = Math.sin(qx) * Math.cos(qy) + Math.sin(qy) * Math.cos(qz) + Math.sin(qz) * Math.cos(qx);
+  const bx = qx * 3.7, by = qy * 3.7, bz = qz * 3.7;
+  jTrap = Math.abs(Math.sin(bx) * Math.cos(by) + Math.sin(by) * Math.cos(bz) + Math.sin(bz) * Math.cos(bx));
+  return g / (f * 1.5);
+}
+
+function deKifsJS(x, y, z0) {
+  let zx = x, zy = y, zz = z0;
+  const sc = Math.min(Math.max(Math.abs(P.scale), 1.15), 3.0);
+  let s = 1.0;
+  jTrap = 1e9;
+  for (let i = 0; i < P.iters; i++) {
+    zx = Math.abs(zx); zy = Math.abs(zy); zz = Math.abs(zz);
+    let t;
+    if (zx < zy) { t = zx; zx = zy; zy = t; }
+    if (zy < zz) { t = zy; zy = zz; zz = t; }
+    if (zx < zy) { t = zx; zx = zy; zy = t; }
+    zx = zx * sc - P.offX * (sc - 1);
+    zy = zy * sc - P.offY * (sc - 1);
+    zz = zz * sc - P.offZ * (sc - 1);
+    const r2 = zx * zx + zy * zy + zz * zz;
+    if (r2 < jTrap) jTrap = r2;
+    s *= sc;
+  }
+  jTrap = Math.sqrt(jTrap);
+  const qx = Math.abs(zx) - 1, qy = Math.abs(zy) - 1, qz = Math.abs(zz) - 1;
+  const inner = Math.min(Math.max(qx, Math.max(qy, qz)), 0);
+  const mx = Math.max(qx, 0), my = Math.max(qy, 0), mz = Math.max(qz, 0);
+  return (inner + Math.hypot(mx, my, mz)) / s;
+}
+
+function deColumnsJS(x, y, z0) {
+  const cx = _mod(x + 1, 2) - 1, cz = _mod(z0 + 1, 2) - 1;
+  const r = Math.min(Math.max(P.inner, 0.05), 0.95);
+  const len = Math.hypot(cx, cz);
+  jTrap = len;
+  return len - r;
+}
+
+function deFamilyForJS(wx, wy, wz, fam, S, T) {
   let x = wx / S, y = wy / S, z = wz / S;
-  const T = P.tile;
   if (T > 0) {
     x = _mod(x + 0.5 * T, T) - 0.5 * T;
     y = _mod(y + 0.5 * T, T) - 0.5 * T;
     z = _mod(z + 0.5 * T, T) - 0.5 * T;
   }
   let d;
-  switch (P.family) {
+  switch (fam) {
     case 0: d = deMandelbulbJS(x, y, z); break;
     case 1: d = deMandelboxJS(x, y, z); break;
     case 2: d = deMengerJS(x, y, z); break;
     case 3: d = deSierpinskiJS(x, y, z); break;
     case 4: d = deApollonianJS(x, y, z); break;
     case 5: d = dePseudoKleinianJS(x, y, z); break;
+    case 7: d = deGyroidJS(x, y, z); break;
+    case 8: d = deKifsJS(x, y, z); break;
+    case 9: d = deColumnsJS(x, y, z); break;
     default: d = deMandelbrotSlabJS(x, y, z); break;
   }
   if (T > 0) d = Math.min(d, 0.5 * T);
   return d * S;
 }
 
+function deFamilyJS(wx, wy, wz) {
+  return deFamilyForJS(wx, wy, wz, P.family, P.worldScale, P.tile);
+}
+
 // Distance to solid. Must match map() in GLSL line for line.
 function mapJS(x, y, z) {
   const raw = deFamilyJS(x, y, z);
+  const trapA = jTrap;
   let d = raw;
   if (P.space === 1) d = Math.abs(d) - P.thickness;
   if (P.family === 6) {
     if (P.wallUp) d = Math.max(d, Math.abs(z) - P.slab);
     else          d = Math.min(d, P.slab - Math.abs(y));
-    if (P.deckSpacing > 0) {
-      const sp = P.deckSpacing;
-      let deck = Math.abs(_mod(y + 0.5 * sp, sp) - 0.5 * sp) - P.deckThick;
-      deck = Math.max(deck, Math.abs(raw) - P.ledgeReach);
-      d = Math.min(d, deck);
-    }
+  }
+  if (P.familyB >= 0) {
+    let dB = deFamilyForJS(x, y, z, P.familyB, P.worldScaleB, P.tileB);
+    const trapB = jTrap;
+    if (P.thicknessB > 0) dB = Math.abs(dB) - P.thicknessB;
+    const dA = d;
+    let bWins;
+    if (P.opB === 0)      { d = Math.min(dA, dB);  bWins = dB  < dA; }
+    else if (P.opB === 1) { d = Math.max(dA, -dB); bWins = -dB > dA; }
+    else                  { d = Math.max(dA, dB);  bWins = dB  > dA; }
+    jTrap = bWins ? trapB : trapA;
+  } else { jTrap = trapA; }
+  if (P.deckSpacing > 0) {
+    const sp = P.deckSpacing;
+    let deck = Math.abs(_mod(y + 0.5 * sp, sp) - 0.5 * sp) - P.deckThick;
+    deck = Math.max(deck, Math.abs(raw) - P.ledgeReach);
+    d = Math.min(d, deck);
   }
   return Math.min(d, P.arenaR - Math.hypot(x, y, z));
 }
@@ -920,6 +1154,8 @@ function initGL() {
       uWorldScale:{value:P.worldScale}, uScale:{value:P.scale}, uPower:{value:P.power},
       uMinR:{value:P.minR}, uFixR:{value:P.fixR}, uTile:{value:P.tile},
       uWallUp:{value:P.wallUp}, uInner:{value:P.inner},
+      uFamilyB:{value:P.familyB}, uOpB:{value:P.opB},
+      uWorldScaleB:{value:P.worldScaleB}, uTileB:{value:P.tileB}, uThicknessB:{value:P.thicknessB},
       uDeckSpacing:{value:P.deckSpacing}, uDeckThick:{value:P.deckThick},
       uLedgeReach:{value:P.ledgeReach}, uEdgeGlow:{value:P.edgeGlow},
       uOffset:{value:new THREE.Vector3(P.offX, P.offY, P.offZ)},
@@ -964,6 +1200,8 @@ function pushUniforms() {
   u.uWorldScale.value = P.worldScale; u.uScale.value = P.scale; u.uPower.value = P.power;
   u.uMinR.value = P.minR; u.uFixR.value = P.fixR; u.uTile.value = P.tile;
   u.uWallUp.value = P.wallUp; u.uInner.value = P.inner;
+  u.uFamilyB.value = P.familyB; u.uOpB.value = P.opB;
+  u.uWorldScaleB.value = P.worldScaleB; u.uTileB.value = P.tileB; u.uThicknessB.value = P.thicknessB;
   u.uDeckSpacing.value = P.deckSpacing; u.uDeckThick.value = P.deckThick;
   u.uLedgeReach.value = P.ledgeReach; u.uEdgeGlow.value = P.edgeGlow;
   u.uOffset.value.set(P.offX, P.offY, P.offZ);
@@ -1371,6 +1609,7 @@ const SLIDERS = [
   ['offx','offX',1,2], ['offy','offY',1,2], ['offz','offZ',1,2],
   ['thick','thickness',1,0], ['slab','slab',1,0], ['tile','tile',1,2], ['inner','inner',1,2], ['deck','deckSpacing',1,0],
   ['deckt','deckThick',1,0], ['ledge','ledgeReach',1,0],
+  ['wscaleb','worldScaleB',1,0], ['tileb','tileB',1,2], ['thickb','thicknessB',1,0],
   ['wscale','worldScale',1,0], ['arena','arenaR',1,0], ['shipr','shipR',1,0],
   ['steps','maxSteps',1,0], ['stepsc','stepScale',1,2], ['eps','eps',1,2],
   ['far','far',1,0], ['rscale','renderScale',1,0],
@@ -1391,6 +1630,8 @@ function syncUI() {
   document.getElementById('family').value = String(P.family);
   document.getElementById('space').value = String(P.space);
   document.getElementById('wallup').value = String(P.wallUp);
+  document.getElementById('familyb').value = String(P.familyB);
+  document.getElementById('opb').value = String(P.opB);
   document.getElementById('b-shadow').className = P.shadows ? 'on' : '';
   document.getElementById('b-heat').className = P.heat ? 'on' : '';
   document.getElementById('b-collide').className = collideOn ? 'on' : 'off';
@@ -1421,6 +1662,12 @@ function initUI() {
   document.getElementById('space').addEventListener('change', (e) => {
     P.space = parseInt(e.target.value, 10); pushUniforms();
   });
+  document.getElementById('familyb').addEventListener('change', (e) => {
+    P.familyB = parseInt(e.target.value, 10); pushUniforms();
+  });
+  document.getElementById('opb').addEventListener('change', (e) => {
+    P.opB = parseInt(e.target.value, 10); pushUniforms();
+  });
 
   const psel = document.getElementById('preset');
   psel.innerHTML = '<option value="">&mdash; preset &mdash;</option>' +
@@ -1428,7 +1675,7 @@ function initUI() {
   psel.addEventListener('change', (e) => {
     const p = PRESETS[e.target.value];
     if (!p) return;
-    Object.assign(P, p);
+    Object.assign(P, PRESET_RESET, p);
     syncUI(); pushUniforms(); probeResult = null; bestRoom = null;
     document.getElementById('probe-body').innerHTML =
       '<span class="dim">preset loaded &mdash; press PROBE ARENA</span>';
@@ -1492,6 +1739,10 @@ function randomize() {
     case 4: P.scale = r(0.7, 1.4); break;
     case 5: P.offX = r(0.78, 1.12); P.offY = r(0.74, 1.10); P.offZ = r(0.78, 1.12); break;
     case 6: P.worldScale = r(1200, 3600); P.slab = r(300, 900); break;
+    case 7: P.scale = r(0.6, 2.6); break;
+    case 8: P.scale = r(1.3, 2.3); P.iters = Math.round(r(7, 14));
+            P.offX = r(0.5, 1.5); P.offY = r(0.8, 1.9); P.offZ = r(0.5, 1.5); break;
+    case 9: P.inner = r(0.15, 0.6); break;
   }
   syncUI(); pushUniforms(); probeResult = null; bestRoom = null;
 }
@@ -1524,7 +1775,9 @@ function importJSON() {
     rd.onload = () => {
       try {
         const j = JSON.parse(rd.result);
-        if (j && j.params) Object.assign(P, j.params);
+        // Reset first: an export from before a knob existed must not inherit
+        // that knob from whatever arena was loaded when you hit IMPORT.
+        if (j && j.params) Object.assign(P, PRESET_RESET, j.params);
         syncUI(); applyRenderScale(); pushUniforms();
         probeResult = null; bestRoom = null;
       } catch (e) { showErr('Import failed: ' + e.message); }

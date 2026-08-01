@@ -300,3 +300,91 @@ measured per open cell; compare medians only at matched grid).
    the deck/ledge feature lives inside the `family == 6` branch of `map()`.
    If the cavern wants catwalks, lifting decks out to all families is a small
    lab change (add to the still-missing list).
+   *(Resolved 2026-08-01: decks now apply to every family — see below.)*
+
+---
+
+# The 2026-08-01 generation: compositor, new families, five arenas
+
+The lab grew the three capabilities the concept-art section called missing,
+then a probe sweep (two rounds, ~35 configurations, shipR 14, grid 44) picked
+five new arenas. Each is a preset; renders are in `concept/` (CPU port of the
+field, validated to ≤5e-5 u against the live lab per arena; shading is an
+approximation of the GLSL, so the live march looks better than these stills).
+
+## Lab upgrades
+
+1. **Layer-B compositor** — the scale-hierarchy machine. A second field with
+   its own `worldScaleB` / `tileB` / optional shell `thicknessB`, composed
+   over layer A by union (add B as solid), carve (B drills tunnels through
+   A), or intersect. Space mode belongs to A; B is a modifier. Colour follows
+   whichever surface owns the final distance. B shares the shape knobs
+   (iters/scale/power/offsets) with A — only scale, tiling and shell are
+   per-layer, which keeps the UI small and occasionally couples usefully
+   (Machine Warrens' gyroid frequency IS its Mandelbox scale). Cost: layer B
+   doubles the DE evaluations per march step.
+2. **Decks for every family** (lifted out of the `family == 6` branch; the
+   ledge band still clings to layer A's surface).
+3. **Three new families.** `Gyroid Labyrinth` (7): triply periodic minimal
+   surface, both sides single connected mazes, `scale` = frequency; not a
+   fractal, but the best connector in the toolbox. `KIFS Cathedral` (8):
+   octahedral fold onto a box primitive — towers, arches, vaults; wildly
+   parameter-sensitive (scale 1.6 at tile 2 is solid rock; scale 2.1 at
+   tile 3 is a sparse spire field; the playable band is narrow). `Column
+   Lattice` (9): vertical cylinders on a period-2 grid, `inner` = radius
+   fraction; pillars as union, circular bores as carve.
+4. **`PRESET_RESET`** — preset loads and imports now reset sticky keys the
+   entry doesn't mention (wallUp, decks, edgeGlow, all layer-B keys). This
+   also fixes a pre-existing bug: loading `Mandelbrot Wall` then `Mandelbrot
+   Sandwich` used to leave the sandwich standing up as a wall.
+
+## The five arenas (probe at shipR 14, grid 44)
+
+| preset | recipe | open | median | best room | connected |
+|---|---|---|---|---|---|
+| Gyroid Reef | gyroid solid, scale 1.2 | 48% | 232 u (17×) | 530 u | 99.9% |
+| KIFS Cathedral | KIFS solid + decks @900 | 46% | 126 u (9×) | 386 u | 97.4% |
+| Menger Monument | one colossal sponge (ws 5200, no tile) ∪ sparse mini-sponge isles (B: ws 700, tile 4) | 70% | 256 u (18×) | 705 u | 100% |
+| Machine Warrens | Mandelbox city (tile 3) − gyroid carve (B: ws 1600) | 64% | 98 u (7×) | 254 u | 99.4% |
+| Reef Boreholes | carved bulb reef (ws 1300) − column bores (B: ws 1000) | 25% | 88 u (6×) | 422 u | 98.4% |
+
+Monument alternate (one knob family): `opB 1, worldScaleB 700, tileB 2`
+drills the walls porous instead of floating isles — 77% open · median 378 u ·
+best 1638 u · 100%.
+
+## What the sweep taught
+
+1. **The carve op is a connectivity machine.** The Mandelbox city probes 25%
+   open but **4% connected** on its own — sealed rooms. One gyroid carve
+   through it: 99% connected. Verified point-wise too: a wall-surface point
+   (d = 0) on a bore axis opens to exactly the bore radius. When a beautiful
+   field fragments, don't tune it — drill it.
+2. **Union greebling chokes; sparse isles don't.** Adding a tiled fine
+   lattice as B everywhere (tileB 2) drops medians below 75 u. The same
+   layer at tileB 4 — islands every 2800 u instead of a fill — keeps the
+   monument's median at 256 u and gives the hall its cover.
+3. **A trap must vary along the surface.** The gyroid's visible surface IS
+   g = 0, so |g| as an orbit trap is identically zero and the palette
+   collapses to colA. Its trap now samples a second gyroid at 3.7× frequency:
+   flowing bands along the walls. (Colour-only; probe re-verified unchanged.)
+4. **Box-fold hyperdetail lit flat reads as camo mush** — the readability
+   trap the concept-art notes predicted. Machine Warrens ships DARK: near-
+   black fog, dark bronze rock, tight bright headlight (the pit is lamplit,
+   not skylit). Room-scale vistas still read poorly there; the arena is
+   built for in-tunnel flying.
+5. **Escape-time interiors are non-negative.** Mandelbox/bulb DEs never go
+   properly negative inside their sets (interior "solid" is d ≈ 0..shipR,
+   not deep negative), so any test of the form `d < -N` silently never fires
+   for those families. Menger/KIFS/gyroid/columns have true signed
+   interiors. (Also: the bulb DE is NaN at the exact origin — 0/0 in acos —
+   pre-existing, measure-zero, probe cell centres never land there.)
+6. **The old sweep table above is stale by one field revision.** Menger
+   Labyrinth measures 36.4% / 97 u / 541 u / 100% at grid 44 today; an
+   independent numpy port of the field reproduces today's numbers exactly,
+   so the drift is between the doc's sweep and the final committed field,
+   not from the 2026-08-01 changes.
+
+Still missing toward the concept art: bridges/catwalks between rooms (the
+probe's room graph could route them), value-structure pass on Warrens'
+lit areas, and the water floor of image 3 (a game-side feature, not a field
+feature).

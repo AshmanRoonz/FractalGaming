@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Branchwork field — cost + lockstep probe</title>
+<style>
+  body { background:#080b12; color:#cfe7ff; font:13px/1.5 'Rajdhani', system-ui, sans-serif; margin:24px; }
+  h1 { font-size:15px; letter-spacing:3px; color:#9fd4ff; font-weight:600; }
+  pre { background:#0d1320; border:1px solid rgba(120,200,255,0.25); border-radius:7px; padding:12px; white-space:pre-wrap; }
+  b { color:#ffaa00; }
+</style>
+</head>
+<body>
+<h1>BRANCHWORK &mdash; TERRAIN FIELD PROBE</h1>
+<p>Measures <code>_stBranchAt</code> against the existing <code>_stPillarAt</code>
+   at real terrain-sampling rates, and emits sample values for lockstep
+   checking against the Python reference.</p>
+<pre id="out">running&hellip;</pre>
+<script>
+// =====================================================================
+// PROPOSED ENGINE FUNCTION — the Branchwork field
+// =====================================================================
+// Same contract as _stPillarAt(x,z,T): a pure function of (x,z) + T.BRANCH,
+// returning how much of a branching spike stands here. Adds a second return
+// (the height fraction that branch wants) the way _stRouteAt returns {o,ty},
+// because the whole point is that a branch tapers in height along its length.
+//
+// Shape: each occupied cell of a coarse grid seeds one tree. A trunk forks
+// into children at shrinking length, thickness and height, and every branch
+// BENDS because its heading drifts by a hashed amount at each sub-segment.
+//
+// SLENDERNESS RULE: half-thickness must stay well under the sub-segment
+// length. Measured the hard way in the Python reference — r0 300 against a
+// 273u sub-segment fused every tree into one lump.
+// =====================================================================
+function _stHash2(x,z){const h=Math.sin(x*127.1+z*311.7)*43758.5453;return h-Math.floor(h);}
+function _stSmooth(e0,e1,x){const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);}
+
+// Scratch stack + segment scratch, module-level so the hot path allocates nothing.
+const _brStack = new Float64Array(8 * 64);
+let   _brRise = 0;
+
+function _stBranchAt(x, z, T) {
+  const B = T.BRANCH; if (!B) { _brRise = 0; return 0; }
+  const cs = B.cell || 4200, ox = B.ox || 0, oz = B.oz || 0;
+  const soft = B.soft || 95, drop = (B.drop != null ? B.drop : 0.26);
+  const jit = (B.jitter != null ? B.jitter : 0.55);
+  const depth = B.depth || 4, subs = B.subs || 4;
+  const lenR = B.lenRatio || 0.58, radR = B.rRatio || 0.62;
+  const spread = B.spread || 0.75, curve = B.curve || 0.38;
+  const riseFall = (B.riseFall != null ? B.riseFall : 0.26);
+  const reach = B.reach || 2100;
+  const ix = Math.floor(x / cs), iz = Math.floor(z / cs);
+  let bw = 0, br = 0;
+
+  for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+    const cxi = ix + di, czi = iz + dj;
+    if (_stHash2(cxi * 26.651 + ox * 0.71, czi * 67.131 + oz * 1.37) < drop) continue;
+    const rx = (cxi + 0.5 + (_stHash2(cxi * 12.9898 + ox, czi * 78.233 + oz) - 0.5) * jit) * cs;
+    const rz = (czi + 0.5 + (_stHash2(cxi * 39.346 + oz, czi * 11.135 + ox) - 0.5) * jit) * cs;
+    // Whole-tree bounding reject: this is what keeps the field affordable —
+    // most of the 9 candidate cells die on one distance test.
+    const ddx = x - rx, ddz = z - rz;
+    if (ddx * ddx + ddz * ddz > (reach + soft) * (reach + soft)) continue;
+
+    let sp = 0;
+    const a0 = _stHash2(cxi * 5.31 + oz * 1.7, czi * 2.17 + ox * 3.1) * 6.2831853;
+    _brStack[0] = rx; _brStack[1] = rz; _brStack[2] = a0; _brStack[3] = (B.len0 || 900);
+    _brStack[4] = (B.r0 || 115); _brStack[5] = 0; _brStack[6] = 1; _brStack[7] = (B.rise0 != null ? B.rise0 : 0.98);
+    sp = 1;
+    // Subtree bound: everything below this branch lies within
+    // L * (1 + lenR + lenR^2 + ...) of its base — true even though branches
+    // bend, since a curve of length L stays inside radius L of its start.
+    const _subBound = 1 / (1 - lenR);
+    while (sp > 0) {
+      sp--;
+      const o = sp * 8;
+      let px = _brStack[o], pz = _brStack[o + 1], ang = _brStack[o + 2];
+      const L = _brStack[o + 3], rad = _brStack[o + 4], d = _brStack[o + 5];
+      const bid = _brStack[o + 6], riseA = _brStack[o + 7];
+      // Hierarchical reject — the whole reason this field is affordable.
+      // Without it every sample near a tree walked all 15 branches (measured
+      // 2.0 us/call, 4.1x the pillar field, 20 ms/chunk).
+      const bdx = x - px, bdz = z - pz;
+      const bnd = L * _subBound + rad + soft;
+      if (bdx * bdx + bdz * bdz > bnd * bnd) continue;
+      const riseB = riseA * (1 - riseFall);
+      const curv = (_stHash2(bid * 7.77 + d * 13.1 + ox, bid * 3.33 + d * 5.7 + oz) - 0.5) * 2 * curve;
+      const subL = L / subs;
+      for (let s = 0; s < subs; s++) {
+        ang += curv;
+        const nx = px + Math.cos(ang) * subL, nz = pz + Math.sin(ang) * subL;
+        const f0 = s / subs, f1 = (s + 1) / subs;
+        const t0 = rad * (1 - 0.34 * f0), t1 = rad * (1 - 0.34 * f1);
+        const h0 = riseA + (riseB - riseA) * f0, h1 = riseA + (riseB - riseA) * f1;
+        const ex = nx - px, ez = nz - pz, l2 = ex * ex + ez * ez;
+        let t = l2 > 0 ? ((x - px) * ex + (z - pz) * ez) / l2 : 0;
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+        const qx = x - (px + ex * t), qz = z - (pz + ez * t);
+        const dist = Math.sqrt(qx * qx + qz * qz);
+        const rr = t0 + (t1 - t0) * t;
+        const w = 1 - _stSmooth(rr, rr + soft, dist);
+        if (w > bw) { bw = w; br = h0 + (h1 - h0) * t; }
+        px = nx; pz = nz;
+      }
+      if (d + 1 < depth && sp + 2 <= 64) {
+        for (let k = 0; k < 2; k++) {
+          const h = _stHash2(bid * 11.3 + k * 4.9 + ox, bid * 6.1 + d * 2.3 + oz);
+          const a2 = ang + (k ? 1 : -1) * spread * (0.55 + 0.9 * h);
+          const q = sp * 8;
+          _brStack[q] = px; _brStack[q + 1] = pz; _brStack[q + 2] = a2;
+          _brStack[q + 3] = L * lenR; _brStack[q + 4] = rad * radR;
+          _brStack[q + 5] = d + 1; _brStack[q + 6] = bid * 2 + k + 1; _brStack[q + 7] = riseB;
+          sp++;
+        }
+      }
+    }
+  }
+  _brRise = br;
+  return bw;
+}
+
+// The shipped pillar field, for a cost baseline.
+function _stPillarAt(x,z,T){
+  const P=T.PILLARS; if(!P) return 0;
+  const cs=P.cell||820, soft=P.soft||160, jit=(P.jitter!=null?P.jitter:0.62);
+  const ix=Math.floor(x/cs), iz=Math.floor(z/cs);
+  let w=0;
+  for(let dj=-1;dj<=1;dj++) for(let di=-1;di<=1;di++){
+    const cxi=ix+di, czi=iz+dj;
+    if(_stHash2(cxi*26.651+P.ox*0.71, czi*67.131+P.oz*1.37) < (P.drop!=null?P.drop:0.2)) continue;
+    const px=(cxi+0.5+(_stHash2(cxi*12.9898+P.ox, czi*78.233+P.oz)-0.5)*jit)*cs;
+    const pz=(czi+0.5+(_stHash2(cxi*39.346+P.oz, czi*11.135+P.ox)-0.5)*jit)*cs;
+    const pr=(P.r||150)*(0.72+0.56*_stHash2(cxi*3.7+P.oz, czi*9.1+P.ox));
+    const d=Math.hypot(x-px,z-pz);
+    const e=1-_stSmooth(pr,pr+soft,d);
+    if(e>w) w=e;
+  }
+  return w;
+}
+
+const B = { cell:4200, drop:0.26, jitter:0.55, depth:4, subs:4, len0:900,
+            lenRatio:0.58, r0:115, rRatio:0.62, soft:95, spread:0.75,
+            curve:0.38, rise0:0.98, riseFall:0.26, reach:2100,
+            ox:1234, oz:5678 };
+const T = { BRANCH: B, PILLARS: { cell:820, r:150, soft:160, jitter:0.62, drop:0.2, ox:11, oz:23 } };
+
+const lines = [];
+// ---- lockstep vs the Python reference ----
+// A grid checksum, not a handful of points: 8 samples was a weak test (7 of
+// them missed every branch). This walks 120x120 points across four cells so
+// trunks, forks, tips and empty ground all contribute.
+let sw = 0, sr = 0, hits = 0, maxw = 0;
+for (let j = 0; j < 120; j++) for (let i = 0; i < 120; i++) {
+  const x = -4000 + i * 100, z = -4000 + j * 100;
+  const w = _stBranchAt(x, z, T);
+  sw += w; sr += _brRise; if (w > 0) hits++; if (w > maxw) maxw = w;
+}
+lines.push('LOCKSTEP CHECKSUM (120x120 grid, step 100u, origin -4000)');
+lines.push('  sum(w)    = ' + sw.toFixed(6));
+lines.push('  sum(rise) = ' + sr.toFixed(6));
+lines.push('  hits      = ' + hits + '   max(w) = ' + maxw.toFixed(6));
+
+// ---- cost ----
+// One terrain chunk bakes (_SW_CELLS+1)^2 = 41^2 = 1681 vertices per shell,
+// and the carve trio calls the field a few times per vertex.
+function bench(fn, n, spread) {
+  // Warm up, then time; sample points walk a realistic chunk-sized patch.
+  for (let i = 0; i < 2000; i++) fn((i % 97) * 23, (i % 89) * 31, T);
+  const t0 = performance.now();
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const x = (i * 37) % spread, z = (i * 61) % spread;
+    acc += fn(x, z, T);
+  }
+  const ms = performance.now() - t0;
+  return { ms, perCall: ms * 1e6 / n, acc };
+}
+const N = 400000;
+const rb = bench(_stBranchAt, N, 30000);
+const rp = bench(_stPillarAt, N, 30000);
+lines.push('');
+lines.push('COST (' + N.toLocaleString() + ' samples each)');
+lines.push('  _stBranchAt : ' + rb.perCall.toFixed(1) + ' ns/call   (' + rb.ms.toFixed(0) + ' ms total)');
+lines.push('  _stPillarAt : ' + rp.perCall.toFixed(1) + ' ns/call   (' + rp.ms.toFixed(0) + ' ms total)');
+lines.push('  ratio       : ' + (rb.perCall / rp.perCall).toFixed(2) + 'x the shipped pillar field');
+
+// Budget in engine terms.
+const VERTS = 41 * 41;            // one shell of one chunk
+const CALLS_PER_VERT = 3;         // carved ground + carved ceil + gap SDF neighbours
+const chunkMs = rb.perCall * VERTS * 2 * CALLS_PER_VERT / 1e6;
+lines.push('');
+lines.push('IN ENGINE TERMS');
+lines.push('  one chunk (2 shells x 41^2 verts x ~3 field calls) : ' + chunkMs.toFixed(1) + ' ms');
+lines.push('  collision at 60fps (1 ship x ~8 SDF probes/frame)  : ' + (rb.perCall * 8 * 60 / 1e6).toFixed(3) + ' ms/s');
+document.getElementById('out').textContent = lines.join('\n');
+</script>
+</body>
+</html>
