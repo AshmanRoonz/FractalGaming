@@ -228,3 +228,75 @@ spent crossing one.
 Ledges are in (`deckSpacing` / `deckThick` / `ledgeReach`): periodic horizontal
 slabs intersected with a band around the fractal surface, so they cling to the
 coastline instead of spanning the void.
+
+---
+
+# The saved cavern: Menger Lace (2026-07-31)
+
+`concept/lss_fractal_cavern_1785553884876.json` — Menger, carved, **iters 5,
+thickness 1**, tile 2 (4000 u cells), worldScale 2000, shipR 8. Registered in
+the lab as the **`Menger Lace Cavern`** preset; probe re-verified from a clean
+load.
+
+What thickness 1 actually is: the iters-5 solid is nothing but ~16 u struts,
+so a ±1 u crust turns every strut into a hollow tube. The arena is lace, not
+rock — vast blue lattice halls with purple crease-glow and mauve fog, and up
+close the small struts read as floating hollow shells. CPU re-renders of the
+exact field (`mapJS` ported to numpy, validated to 3e-5 u against the live
+lab; shading approximated from the GLSL):
+`menger_lace_view1_bestroom.png` · `menger_lace_view2_center.png` ·
+`menger_lace_view3_lattice.png`.
+
+Probe at grid 44, ship radius 8, arena radius 4200 — with a thickness sweep,
+since thickness is the one knob the shipping decision turns on:
+
+| variant | open | median | best room | connected |
+|---|---|---|---|---|
+| **as saved (t=1)** | **58%** | **120 u (15× ship)** | **570 u** | **100%** |
+| t=1 at grid 64 | 57% | 66 u (grid-relative) | 600 u | 100% |
+| t=8 | 50% | 113 u | 563 u | 100% |
+| t=16 | 48% | 108 u | 555 u | 100% |
+| t=24 | 48% | 100 u | 547 u | 100% |
+| t=30 | 44% | 94 u | 541 u | 100% |
+
+It beats every arena in the sweep table above on open volume while keeping
+100% connectivity. The reason is iters 5 vs the Labyrinth's iters 4: one more
+subdivision drills a much richer passage lattice (44% vs 31% open at the same
+t=30). The grid-64 row is the convergence check — the openness is real, not a
+sampling artifact (the median falls at finer grids because median clearance is
+measured per open cell; compare medians only at matched grid).
+
+## Findings that matter before this ships
+
+1. **Raymarch-only as saved.** A 2 u wall cannot be reconstructed by surface
+   nets at any sane grid — reconstruction needs the cell size below about the
+   wall thickness, and 128³ over this arena is 66 u cells. So the t=1 look is
+   the desktop raymarch path only; VR/mobile (which return before the post
+   chain / can't afford a fullscreen march) need the fattened variant, t≈24-30,
+   which bakes fine and still probes 44-48% open / 100% connected. Same field,
+   per-tier thickness — the two variants can coexist and collision stays exact
+   on both (SDF collision is bake-independent).
+2. **Collision margins at t=1.** The lab's discrete center test stops a
+   crossing when `map < shipR`, and the solid band a crossing ship sees is
+   ~2·(thickness + shipR) ≈ 18 u. Per-frame travel beyond that tunnels
+   straight through: ≳1100 u/s at 60 fps, ≳550 u/s at 30 fps. Dash speeds on a
+   30 fps tier will clip through lace walls — those tiers want swept collision
+   or the fat variant (which also fixes it: t=30 gives a ~76 u band).
+3. **Probe blind spot, checked and cleared.** 2 u walls are far below the
+   191 u probe cells, so in principle the flood fill could count space behind
+   a sub-voxel wall as connected. Two reasons it doesn't lie here: the Menger
+   complement (the tunnel system) is genuinely one connected component, and
+   the sealed strut interiors — hollow tubes behind the crust — read ≤ ~7 u
+   clearance < shipR 8, so they are excluded from "open" before the flood
+   fill ever sees them. At shipR ≤ 6 they would start to leak in; keep shipR
+   at 8+ when probing lace variants.
+4. **`edgeGlow` is inert on Menger.** `deMenger` sets `gEsc = 0`, and both
+   escape-driven terms (the depth tint and the coastline filigree) only light
+   escape-time families. The saved `edgeGlow: 3.1` does nothing — the look is
+   entirely trapGain 4.05 + glow 1.46 + fog 6.4 into the mauve `#754871`.
+   Same for the saved `scale`/`power`/`minR`/`fixR`/offsets: inert leftovers,
+   dropped from the preset entry.
+5. **Decks are family-6 only.** The saved `deckSpacing: 700` is inert here —
+   the deck/ledge feature lives inside the `family == 6` branch of `map()`.
+   If the cavern wants catwalks, lifting decks out to all families is a small
+   lab change (add to the still-missing list).
