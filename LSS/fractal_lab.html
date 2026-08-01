@@ -124,6 +124,13 @@
   <div class="row"><label>Offset Z</label><input id="offz" type="range" min="-2" max="2" step="0.01"><span class="val" id="offz-v"></span></div>
   <div class="row"><label>Thickness</label><input id="thick" type="range" min="1" max="400" step="1"><span class="val" id="thick-v"></span></div>
   <div class="row"><label>Slab Y</label><input id="slab" type="range" min="60" max="2500" step="10"><span class="val" id="slab-v"></span></div>
+  <div class="row"><label>Wall / slab</label>
+    <select id="wallup"><option value="0">Sandwich &mdash; floor + ceiling</option><option value="1">Wall &mdash; vertical cliff</option></select>
+  </div>
+  <div class="row"><label>Bulb open</label><input id="inner" type="range" min="0.02" max="1.2" step="0.01"><span class="val" id="inner-v"></span></div>
+  <div class="row"><label>Deck gap</label><input id="deck" type="range" min="0" max="1200" step="10"><span class="val" id="deck-v"></span></div>
+  <div class="row"><label>Deck thick</label><input id="deckt" type="range" min="5" max="120" step="1"><span class="val" id="deckt-v"></span></div>
+  <div class="row"><label>Ledge reach</label><input id="ledge" type="range" min="20" max="900" step="10"><span class="val" id="ledge-v"></span></div>
   <div class="row"><label>Tile</label><input id="tile" type="range" min="0" max="8" step="0.05"><span class="val" id="tile-v"></span></div>
 
   <h2>ARENA</h2>
@@ -148,6 +155,7 @@
   <div class="row"><label>AO</label><input id="ao" type="range" min="0" max="2" step="0.02"><span class="val" id="ao-v"></span></div>
   <div class="row"><label>Headlight</label><input id="head" type="range" min="0" max="4" step="0.05"><span class="val" id="head-v"></span></div>
   <div class="row"><label>Lamp range</label><input id="headf" type="range" min="0.2" max="30" step="0.1"><span class="val" id="headf-v"></span></div>
+  <div class="row"><label>Edge glow</label><input id="edgeg" type="range" min="0" max="6" step="0.05"><span class="val" id="edgeg-v"></span></div>
   <div class="row"><label>Trap gain</label><input id="trapg" type="range" min="0.05" max="12" step="0.05"><span class="val" id="trapg-v"></span></div>
 
   <h2>BAKE TO GEOMETRY</h2>
@@ -245,10 +253,12 @@ const P = {
   iters: 4, scale: 2.0, power: 8.0, minR: 0.5, fixR: 1.0,
   offX: 0.92, offY: 0.92, offZ: 0.92,
   thickness: 30, slab: 700, tile: 2.0,
+  wallUp: 0, inner: 0.35, deckSpacing: 0, deckThick: 25, ledgeReach: 220,
   worldScale: 2000, arenaR: 4200, shipR: 14,
   maxSteps: 128, stepScale: 0.80, eps: 0.6, far: 14000, renderScale: 100,
   colA: '#101018', colB: '#8fa0b0', colC: '#ff3060', colF: '#08090f',
   fogDensity: 8.0, glow: 0.5, ao: 1.0, trapGain: 3.0, headlight: 2.0, headFall: 4.0,
+  edgeGlow: 0.0,
   shadows: 0, heat: 0, bakeN: 64,
 };
 
@@ -271,6 +281,14 @@ const PRESETS = {
   'Mandelbrot Sandwich': { family:6, space:0, iters:16, slab:800, thickness:60,
     tile:0, worldScale:700, arenaR:4200, stepScale:0.8, eps:0.7, fogDensity:5,
     colA:'#0a0e1c', colB:'#d8b070', colC:'#60d0ff', colF:'#070a14' , trapGain:2.5, glow:0.5, headlight:2.0 },
+  // Concept target: the set standing up as a colossal cliff, its bulbs
+  // hollowed into caverns, ledges clinging to the coastline. Probe profile
+  // filled in below once swept.
+  'Mandelbrot Wall': { family:6, space:1, wallUp:1, iters:16, worldScale:700,
+    slab:1200, thickness:50, inner:0.35, deckSpacing:700, deckThick:25,
+    ledgeReach:220, tile:0, arenaR:4200, stepScale:0.7, eps:0.6, fogDensity:5,
+    edgeGlow:2.5, trapGain:2.5, glow:0.5, headlight:2.0,
+    colA:'#0a0e24', colB:'#6a8fd8', colC:'#8a5cff', colF:'#050818' },
   // 43% open · median 100u · best room 380u · 100% connected — airier, fewer walls
   'Menger Open Grid': { family:2, space:0, iters:3, tile:2.0, thickness:60,
     worldScale:1200, arenaR:4200, stepScale:0.85, eps:0.7, fogDensity:6,
@@ -325,6 +343,7 @@ uniform vec2  uRes;
 uniform int   uFamily, uSpace, uIters, uMaxSteps, uShadow, uHeat;
 uniform float uEps, uStepScale, uFar, uArenaR, uThickness, uSlab;
 uniform float uWorldScale, uScale, uPower, uMinR, uFixR, uTile;
+uniform float uWallUp, uInner, uDeckSpacing, uDeckThick, uLedgeReach, uEdgeGlow;
 uniform vec3  uOffset;
 uniform vec3  uColA, uColB, uColC, uFogCol;
 uniform float uFogDensity, uGlow, uAOStr, uTrapGain, uHeadlight, uHeadFall;
@@ -435,10 +454,12 @@ float dePseudoKleinian(vec3 p) {
 }
 
 float deMandelbrotSlab(vec3 p) {
-  // The 2D set's exterior distance estimate, extruded between a floor and a
-  // ceiling. Gives canyon walls in the exact shape of the coastline — which
-  // rhymes with LSS's existing sandwich terrain, just with a fractal outline.
-  vec2 c = p.xz;
+  // The 2D set's exterior distance estimate, extruded along one axis.
+  //   uWallUp = 0 : extruded along Y between a floor and a ceiling, which is
+  //                 LSS's existing sandwich terrain with a fractal outline.
+  //   uWallUp = 1 : extruded along Z, so the set stands up as a colossal cliff
+  //                 face you fly along and its bulbs become caverns.
+  vec2 c = (uWallUp > 0.5) ? p.xy : p.xz;
   vec2 z = vec2(0.0), dz = vec2(0.0);
   float m = 0.0; bool escaped = false;
   gTrap = 1e9; gEsc = 1.0;
@@ -456,7 +477,13 @@ float deMandelbrotSlab(vec3 p) {
     float r = sqrt(m), dr = max(length(dz), 1e-6);
     dSet = 0.5 * r * log(r) / dr;
   } else {
-    dSet = -0.02;                     // inside the set: solid rock
+    // Inside the set the escape-time estimate is meaningless, so the interior
+    // gets a flat value instead. Its MAGNITUDE is the knob that matters: in
+    // carved mode the field becomes abs(d) - thickness, so a large interior
+    // value opens the bulbs up as caverns while a small one fills them in as
+    // rock. It also caps the march step inside a bulb, so it trades interior
+    // openness against steps spent crossing one.
+    dSet = -uInner;
   }
   return dSet;
 }
@@ -499,12 +526,23 @@ float deFamily(vec3 wp) {
 // at 0% navigable volume across all seven families, which is what a broken
 // formulation looks like rather than a badly tuned one.
 float map(vec3 p) {
-  float d = deFamily(p);
+  float raw = deFamily(p);
+  float d = raw;
   if (uSpace == 1) d = abs(d) - uThickness;   // carved: shell around the surface
 
   if (uFamily == 6) {
-    // Sandwich: floor and ceiling are solid too.
-    d = min(d, uSlab - abs(p.y));
+    if (uWallUp > 0.5) d = max(d, abs(p.z) - uSlab);   // cliff of finite depth
+    else               d = min(d, uSlab - abs(p.y));   // sandwich floor+ceiling
+
+    // Ledges. The concept art's horizontal catwalks cling to the cliff rather
+    // than spanning the void, so the deck slabs are intersected with a band
+    // around the fractal surface — outside that band they simply do not exist.
+    if (uDeckSpacing > 0.0) {
+      float sp = uDeckSpacing;
+      float deck = abs(mod(p.y + 0.5 * sp, sp) - 0.5 * sp) - uDeckThick;
+      deck = max(deck, abs(raw) - uLedgeReach);
+      d = min(d, deck);
+    }
   }
   // Arena bound — a hard shell so the ship cannot escape into empty space.
   return min(d, uArenaR - length(p));
@@ -604,6 +642,10 @@ void main() {
     // Emissive veins in the creases — this is what sells "fractal" over "rock".
     // Squared so it stays in the creases instead of tinting every surface.
     col += uColC * pow(1.0 - ao, 2.0) * uGlow * 0.35;
+    // Boundary filigree. Points that escape LATE are the ones hugging the set
+    // boundary, so a high power of the escape fraction lights exactly the
+    // coastline and nothing else — the signature look of the concept art.
+    col += uColC * pow(clamp(escHit, 0.0, 1.0), 8.0) * uEdgeGlow;
 
     // The arena bound is a containment shell, not scenery. Shading it like
     // fractal rock puts a giant smooth ball across half the view; shading it
@@ -766,7 +808,7 @@ function dePseudoKleinianJS(x, y, z0) {
 }
 
 function deMandelbrotSlabJS(x, y, z0) {
-  const cx = x, cy = z0;
+  const cx = x, cy = (P.wallUp ? y : z0);
   let zx = 0, zy = 0, dzx = 0, dzy = 0, m = 0, escaped = false;
   jTrap = 1e9;
   const lim = P.iters * 4;
@@ -782,7 +824,7 @@ function deMandelbrotSlabJS(x, y, z0) {
     if (m > 1024) { escaped = true; break; }
   }
   jTrap = Math.sqrt(Math.min(jTrap, 4)) * 0.5;
-  if (!escaped) return -0.02;
+  if (!escaped) return -P.inner;
   const r = Math.sqrt(m), dr = Math.max(Math.hypot(dzx, dzy), 1e-6);
   return 0.5 * r * Math.log(r) / dr;
 }
@@ -812,9 +854,19 @@ function deFamilyJS(wx, wy, wz) {
 
 // Distance to solid. Must match map() in GLSL line for line.
 function mapJS(x, y, z) {
-  let d = deFamilyJS(x, y, z);
+  const raw = deFamilyJS(x, y, z);
+  let d = raw;
   if (P.space === 1) d = Math.abs(d) - P.thickness;
-  if (P.family === 6) d = Math.min(d, P.slab - Math.abs(y));
+  if (P.family === 6) {
+    if (P.wallUp) d = Math.max(d, Math.abs(z) - P.slab);
+    else          d = Math.min(d, P.slab - Math.abs(y));
+    if (P.deckSpacing > 0) {
+      const sp = P.deckSpacing;
+      let deck = Math.abs(_mod(y + 0.5 * sp, sp) - 0.5 * sp) - P.deckThick;
+      deck = Math.max(deck, Math.abs(raw) - P.ledgeReach);
+      d = Math.min(d, deck);
+    }
+  }
   return Math.min(d, P.arenaR - Math.hypot(x, y, z));
 }
 
@@ -857,6 +909,9 @@ function initGL() {
       uArenaR:{value:P.arenaR}, uThickness:{value:P.thickness}, uSlab:{value:P.slab},
       uWorldScale:{value:P.worldScale}, uScale:{value:P.scale}, uPower:{value:P.power},
       uMinR:{value:P.minR}, uFixR:{value:P.fixR}, uTile:{value:P.tile},
+      uWallUp:{value:P.wallUp}, uInner:{value:P.inner},
+      uDeckSpacing:{value:P.deckSpacing}, uDeckThick:{value:P.deckThick},
+      uLedgeReach:{value:P.ledgeReach}, uEdgeGlow:{value:P.edgeGlow},
       uOffset:{value:new THREE.Vector3(P.offX, P.offY, P.offZ)},
       uColA:{value:new THREE.Color(P.colA)}, uColB:{value:new THREE.Color(P.colB)},
       uColC:{value:new THREE.Color(P.colC)}, uFogCol:{value:new THREE.Color(P.colF)},
@@ -898,6 +953,9 @@ function pushUniforms() {
   u.uArenaR.value = P.arenaR; u.uThickness.value = P.thickness; u.uSlab.value = P.slab;
   u.uWorldScale.value = P.worldScale; u.uScale.value = P.scale; u.uPower.value = P.power;
   u.uMinR.value = P.minR; u.uFixR.value = P.fixR; u.uTile.value = P.tile;
+  u.uWallUp.value = P.wallUp; u.uInner.value = P.inner;
+  u.uDeckSpacing.value = P.deckSpacing; u.uDeckThick.value = P.deckThick;
+  u.uLedgeReach.value = P.ledgeReach; u.uEdgeGlow.value = P.edgeGlow;
   u.uOffset.value.set(P.offX, P.offY, P.offZ);
   u.uColA.value.set(P.colA); u.uColB.value.set(P.colB);
   u.uColC.value.set(P.colC); u.uFogCol.value.set(P.colF);
@@ -1301,12 +1359,13 @@ const SLIDERS = [
   ['iters','iters',1,0], ['scale','scale',1,2], ['power','power',1,2],
   ['minr','minR',1,2], ['fixr','fixR',1,2],
   ['offx','offX',1,2], ['offy','offY',1,2], ['offz','offZ',1,2],
-  ['thick','thickness',1,0], ['slab','slab',1,0], ['tile','tile',1,2],
+  ['thick','thickness',1,0], ['slab','slab',1,0], ['tile','tile',1,2], ['inner','inner',1,2], ['deck','deckSpacing',1,0],
+  ['deckt','deckThick',1,0], ['ledge','ledgeReach',1,0],
   ['wscale','worldScale',1,0], ['arena','arenaR',1,0], ['shipr','shipR',1,0],
   ['steps','maxSteps',1,0], ['stepsc','stepScale',1,2], ['eps','eps',1,2],
   ['far','far',1,0], ['rscale','renderScale',1,0],
   ['bakeN','bakeN',1,0], ['fogd','fogDensity',1,1], ['glow','glow',1,2], ['ao','ao',1,2],
-  ['head','headlight',1,2], ['headf','headFall',1,1], ['trapg','trapGain',1,2],
+  ['head','headlight',1,2], ['headf','headFall',1,1], ['trapg','trapGain',1,2], ['edgeg','edgeGlow',1,2],
 ];
 const COLORS = [['colA','colA'], ['colB','colB'], ['colC','colC'], ['colF','colF']];
 
@@ -1321,6 +1380,7 @@ function syncUI() {
   for (const [id, key] of COLORS) document.getElementById(id).value = P[key];
   document.getElementById('family').value = String(P.family);
   document.getElementById('space').value = String(P.space);
+  document.getElementById('wallup').value = String(P.wallUp);
   document.getElementById('b-shadow').className = P.shadows ? 'on' : '';
   document.getElementById('b-heat').className = P.heat ? 'on' : '';
   document.getElementById('b-collide').className = collideOn ? 'on' : 'off';
@@ -1344,6 +1404,9 @@ function initUI() {
   }
   document.getElementById('family').addEventListener('change', (e) => {
     P.family = parseInt(e.target.value, 10); pushUniforms();
+  });
+  document.getElementById('wallup').addEventListener('change', (e) => {
+    P.wallUp = parseInt(e.target.value, 10); pushUniforms();
   });
   document.getElementById('space').addEventListener('change', (e) => {
     P.space = parseInt(e.target.value, 10); pushUniforms();

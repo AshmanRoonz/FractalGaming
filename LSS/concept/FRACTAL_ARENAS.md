@@ -154,3 +154,77 @@ Framerate numbers from the sandbox are meaningless — it runs SwiftShader
 (software GL) at roughly 25–45 fps for a 480×300 view. Everything visual and
 every probe number in this document is real; the fps readout needs a machine
 with a GPU.
+
+---
+
+# Aiming at the concept art
+
+`LSS/concept/*.png` sets four arena archetypes. Read against what the lab
+produces, the gap is not fractals — it is **composition**.
+
+Every concept image has a deliberate scale hierarchy: one colossal landmark
+form, mid-scale platforms and ledges, then fine greebling; stacked decks with
+openings between them; man-made bridges; and emissive filigree localised to
+the fractal boundary. The lab's `tile` knob does the opposite — it makes the
+same structure everywhere, which is why its output reads as corridors rather
+than as a place.
+
+## Why image 1 (Mandelbrot Wall) first, for LSS specifically
+
+- **Decomposes onto existing systems.** Floor and ceiling are sandwich
+  terrain. Mid-ground ledges and bridges are instanced structures with
+  registered colliders, which is what hub city already does.
+- **Survives VR and mobile.** The VR path returns before the post chain, so
+  anything leaning on a fullscreen raymarch is desktop-only. Image 3 is the
+  most raymarch-dependent of the four, and Mandelbulb bulbs are the worst case
+  to bake to a sane triangle count.
+- **Suits the flight speed.** Probe medians: Mandelbrot layouts 275-380 u
+  (20-27x ship radius), Kleinian 96 u, cathedral corridors tighter still.
+  Recursive architecture at LSS speeds is a wall you hit.
+- **Combat readability.** Dark mass with emissive accents only. Images 2 and 4
+  put high-frequency detail across the whole frame, which is where enemy ships
+  and tracers disappear.
+
+Note the fractal cliff is built as GEOMETRY — collidable field, bakeable to
+triangles — not as a painted shell. The existing `wallPattern` shader would be
+the cheap way to fake the far backdrop, and it is deliberately not used inside
+the playable volume.
+
+## Two findings from building it
+
+**The probe's score does not fit this archetype.** Swept across world scale,
+interior openness, shell thickness, wall depth and iteration count, the wall
+measures 87-97% open at every setting, and the scoring function zeroes all of
+it. That is not a tuning failure: a 2D fractal curve extruded along one axis is
+a *surface*, so it cannot fill volume. Image 1 genuinely is a large open void
+with a colossal fractal wall on one side.
+
+The metric was designed for volume-filling cave arenas and needs a companion
+for open arenas — cover density and wall surface area within engagement range,
+rather than open volume fraction. Until that exists, treat the probe's verdict
+on `Mandelbrot Wall` as not applicable rather than as a failing grade.
+
+**The interior constant is the real knob.** Inside the set the escape-time
+estimate is meaningless, so interior points get a flat value. Its magnitude
+decides whether the bulbs open up as caverns or fill in as rock (in carved mode
+the field is `abs(d) - thickness`), and it also caps the march step inside a
+bulb. `inner` is that parameter; it trades interior openness against steps
+spent crossing one.
+
+## Still missing before this looks like the art
+
+1. **Scale hierarchy** — compose the field as `min()` of several fractals at
+   very different scales instead of one, so there is a landmark, a mid scale
+   and greebling.
+2. **Bridges and catwalks** — thin flat spans are what SDFs are worst at and
+   instanced meshes are best at. The probe already builds a room graph; it can
+   path between rooms and lay bridges along those routes.
+3. **Value structure** — the art is near-black mass with emissive as the only
+   bright thing. The lab's current output is mid-dark everywhere, which is the
+   same mistake the hub city made before its palette pass.
+4. **Vertical framing** — the wall wants the camera flying *along* its face at
+   a standoff, which is a spawn/route question, not a shader one.
+
+Ledges are in (`deckSpacing` / `deckThick` / `ledgeReach`): periodic horizontal
+slabs intersected with a band around the fractal surface, so they cling to the
+coastline instead of spanning the void.
