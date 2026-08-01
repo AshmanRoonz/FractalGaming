@@ -3609,7 +3609,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.78';
+const LSS_BUILD = '35.80';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -6106,20 +6106,12 @@ const FreeFlightMode = {
     this._enteringCampaign = false; this._riftPos = null; this._deathT = 0;
   },
 };
-// (v35.71) ENDLESS mode — fly a procedurally extending cavern as far as you can.
-// Campaign's endless-session recipe (testMode + raceNoTimer) with a route that
-// appends ahead of the ship and prunes behind it. Lives come from the shared
-// difficulty picker (EASY 3 / MEDIUM 2 / HARD 1); out of lives = run over.
-// Design + anchors: LSS/endless_mode_design.md.
 function _endlessLivesFor(d) { return d === 'easy' ? 3 : d === 'medium' ? 2 : 1; }
 const EndlessMode = {
   onStart() {},
   onBuildWorld() {
     const run = game.endlessRun;
     if (!run) return;
-    // Wire prune refs for the segments the level build created from our
-    // initial tunnel path: cylinders land in path order, hall spheres in rooms
-    // order after the spawn sphere at [0].
     try {
       let si = 1;
       for (let i = 0; i < run.segs.length; i++) {
@@ -6132,13 +6124,9 @@ const EndlessMode = {
     try { run.lives = _endlessLivesFor(typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'); } catch (_) { run.lives = 1; }
     run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
     run.lastHall = { x: 0, y: 80, z: 0 };
-    // (v35.72) Stage 2+3 state: ambush director phase machine (phaseT starts
-    // negative = a grace period before the first travel clock), theme
-    // stretches, god-ray pool.
     run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
     run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
     run.stormy = false; run.boltT = 0;
-    // No rounds in endless: hide the ROUND HUD label for the whole run.
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = 'none'; } catch (_) {}
     this._deathT = 0;
   },
@@ -6159,7 +6147,6 @@ const EndlessMode = {
   update(dt) {
     const run = game.endlessRun;
     if (!run || game.state !== 'playing') return;
-    // Run over: hold the banner beat, then soft-return to ship-select.
     if (run.over) {
       run.overT += dt;
       if (run.overT > 6 && !run._returned) {
@@ -6168,7 +6155,6 @@ const EndlessMode = {
       }
       return;
     }
-    // Death -> spend a life (FreeFlightMode's own-death pattern, plus lives).
     if (player && player.shipState === 'dead') {
       this._deathT = (this._deathT || 0) + dt;
       if (this._deathT >= 1.6) {
@@ -6183,9 +6169,6 @@ const EndlessMode = {
           } catch (_) {}
         } else {
           try {
-            // Capture where you died BEFORE respawnPlayer() teleports you to a
-            // stock spawn point; respawn ON the route just behind that spot
-            // (v35.78) — snapping to the start hall read as 'respawned in the nexus'.
             const dpx = player.position.x, dpy = player.position.y, dpz = player.position.z;
             if (typeof respawnPlayer === 'function') respawnPlayer();
             let ri = 0, rd2 = Infinity;
@@ -6209,7 +6192,6 @@ const EndlessMode = {
       return;
     }
     this._deathT = 0;
-    // ---- progress along the spine (monotone arc length) ----
     const p = player.position;
     let idx = 0;
     for (let i = 0; i < run.segs.length; i++) { if (run.segs[i].gid === run.progGid) { idx = i; break; } }
@@ -6240,7 +6222,6 @@ const EndlessMode = {
         run.progT = bestT;
       }
     }
-    // ---- extend ahead / prune behind ----
     let guard = 0;
     while (guard < 2 && run.segs.length) {
       const end = run.segs[run.segs.length - 1].b;
@@ -6262,18 +6243,13 @@ const EndlessMode = {
       pruned = true;
     }
     if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
-    // ---- (v35.72) stage 2 ambush director + stage 3 living world ----
     try { this._director(dt, run); } catch (_) {}
     try { this._world(dt, run); } catch (_) {}
-    // ---- HUD ----
     const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
                    : run.phase === 'warning' ? ' · AMBUSH INBOUND' : '';
     const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives + phaseTxt;
     if (txt !== run._hudTxt) { run._hudTxt = txt; try { this._hud().textContent = txt; } catch (_) {} }
   },
-  // ---- (v35.72) Stage 2: the ambush director. travel -> warning -> battle -> cleared.
-  // The travel clock squeezes ~1.2s per km flown (floor 28s); a wave must be
-  // CLEARED before the next clock starts, so fleeing just keeps the pack on you.
   _director(dt, run) {
     if (player && player.shipState === 'dead') return;
     run.phaseT += dt;
@@ -6307,12 +6283,6 @@ const EndlessMode = {
     const n = Math.min(6, 2 + Math.floor(run.dist / 3000));
     const elite = (run.waveN % 5 === 0);
     const pool = (game._botShipDeal && game._botShipDeal.enemy) || ['SLAYER', 'PYRO', 'TRACKER'];
-    // Spawn AHEAD on the route (2 segments up), fanned laterally off the lane;
-    // a fan point that lands in rock collapses to the lane centre (carved = open).
-    // Anchor to the ship's ACTUAL position, not the progress marker — a
-    // free-flying player can be ahead of (or off) their scored progress, and
-    // anchoring there used to drop waves right on top of them (v35.77).
-    // Nearest spine segment first, then walk forward to >= 3200u standoff.
     const pp = player.position;
     let ni = 0, nd = Infinity;
     for (let i = 0; i < run.segs.length; i++) {
@@ -6346,30 +6316,19 @@ const EndlessMode = {
     }
     try { if (window.Overlays && Overlays.banner) Overlays.banner(elite ? 'ELITE AMBUSH' : 'AMBUSH', n + ' hostiles'); } catch (_) {}
   },
-  // ---- (v35.72) Stage 3: the living world — theme stretches + god rays ----
   _world(dt, run) {
     const T = game.sandwichTerrain;
     if (!T) return;
-    // Theme stretches: swap the biome for chunks NOT YET baked. The world
-    // changes ahead of you while the old palette recedes behind — the
-    // crossfade is spatial, not temporal — and the atmosphere swaps with it.
     if (run.dist >= run.nextBiomeAt) {
       run.nextBiomeAt = run.dist + 9000 + run.gen.rand() * 6000;
       const order = ['rocky', 'snow', 'volcanic', 'goldmine', 'grassy'];
       run.biomeIdx = (run.biomeIdx + 1) % order.length;
       T.biome = order[run.biomeIdx];
-      // (stage 3b) Some rocky/snow stretches roll STORMY: ambient lightning
-      // instead of god rays. Visual-only — no owned light state is touched
-      // (the sentinel rule), so the weather system stays authoritative.
       run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.rand() < 0.35;
       try { if (typeof _swApplyAtmosphere === 'function') _swApplyAtmosphere(); } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner(run.stormy ? 'STORM REACH' : (T.biome.toUpperCase() + ' REACH'), run.stormy ? 'the dark crackles' : 'the cavern changes'); } catch (_) {}
     }
-    // God rays: pooled additive shafts hung under ceiling cracks (a HIGH carved
-    // ceiling = the pinch crack), calm biomes only, cylindrical-billboarded.
     const calm = !run.stormy && (T.biome === 'rocky' || T.biome === 'snow' || T.biome === 'goldmine' || T.biome === 'grassy');
-    // (stage 3b) Storm stretches: ambient ceiling-to-floor strikes near the
-    // lane ahead, on the existing lightning pool.
     if (run.stormy) {
       run.boltT -= dt;
       if (run.boltT <= 0) {
@@ -6405,7 +6364,6 @@ const EndlessMode = {
         const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.rand() - 0.5) * 600;
         try {
           const cy = _stCeilYCarved(x, z, T);
-          // Half-gap from YCEIL - YMID: the config stores no GAP_HALF field.
           if (cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
             slot.life = 9;
             slot.mesh.position.set(x, cy - 620, z);
@@ -6555,9 +6513,6 @@ function startFreeFlight() {
 }
 if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 
-// (v35.71) ENDLESS entry — solo-only for now (the route generator is seeded so
-// co-op can come later). Same endless-session flags as campaign (testMode +
-// raceNoTimer: no clock, no win-gate); EndlessMode.update owns death and the run.
 function startEndless() {
   LSS.MODE = 'endless';
   game.testMode = false;
@@ -6570,9 +6525,6 @@ function startEndless() {
   enterShipSelect();
 }
 if (typeof window !== 'undefined') window.startEndless = startEndless;
-// Debug hooks (the __* convention): closure-side view of the endless wiring,
-// and a manual tick so the run logic can be driven headless (the sandbox
-// renderer starves rAF, so gameLoop only ticks sporadically there).
 if (typeof window !== 'undefined') window.__endlessInfo = function () {
   return { mode: LSS.MODE, hasMode: !!GameModes.endless, isActive: activeMode() === GameModes.endless,
            run: !!game.endlessRun, state: game.state };
@@ -16032,10 +15984,6 @@ function _stRouteAt(x,z,T){
     const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
     let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
     const cx=c.ax+dx*t,cz=c.az+dz*t,d=Math.hypot(x-cx,z-cz);
-    // (v35.73) Optional per-cylinder carve WEIGHT (c.w, default 1): a partial
-    // lane keeps the natural ridged relief inside the corridor instead of
-    // flattening it to a constant-profile tube. Endless lanes use ~0.42;
-    // every existing map leaves w unset -> behaviour identical.
     const e=(1-_stSmooth(c.r,c.r+soft,d))*(c.w!=null?c.w:1);
     if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}
   return {o,ty};
@@ -36901,8 +36849,6 @@ function updatePlayerMovement(dt) {
 
   const _swT = game.sandwichTerrain;
   if (_swT && _swT.ON && (_swT.FOOT || _swT.ENDLESS) && typeof _swWallDist === 'function') {
-    // (v35.71) ENDLESS has no footprint (unbounded streaming) but MUST keep the
-    // vertical clamp below — that clamp being FOOT-gated is the v35.70 trap.
     if (_swT.FOOT) {
     const W = _swWallDist();
     const F = _swT.FOOT;
@@ -43069,7 +43015,7 @@ function _hlCompass(ctx, r, col) {
   ctx.save();
 
   for (let d = 0; d < 360; d += 15) {
-    const a = (d - 90) * _HL_D2R;
+    const a = (d - hdg - 90) * _HL_D2R;
     const major = d % 45 === 0;
     ctx.strokeStyle = _hlA(col, major ? 0.8 : 0.32);
     ctx.lineWidth = major ? Math.max(1, vm * 0.16) : 1;
@@ -43085,12 +43031,12 @@ function _hlCompass(ctx, r, col) {
   const rL = rIn + 1.7 * vm;
   const L = ['N', 'E', 'S', 'W'];
   for (let i = 0; i < 4; i++) {
-    const a = (i * 90 - 90) * _HL_D2R;
+    const a = (i * 90 - hdg - 90) * _HL_D2R;
     ctx.fillStyle = i === 0 ? _hlA('#ebf8ff', 0.95) : _hlA(col, 0.72);
     ctx.fillText(L[i], r.cx + Math.cos(a) * rL, r.cy + Math.sin(a) * rL);
   }
 
-  const ha = (hdg - 90) * _HL_D2R;
+  const ha = -Math.PI / 2;
   ctx.translate(r.cx + Math.cos(ha) * (rIn + 1.25 * vm),
                 r.cy + Math.sin(ha) * (rIn + 1.25 * vm));
   ctx.rotate(ha);                            // +x now points radially outward
@@ -44343,15 +44289,22 @@ function updateMinimap() {
     viewExtent = CAMP_RADAR_HALF_SPAN;
     ccx = player.position.x; ccz = player.position.z;
   }
-  const scale = 75 / viewExtent;   
+  const scale = 75 / viewExtent;
   const cx = 75, cy = 75;
+  _mm.forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  const _mmYaw = Math.atan2(_mm.forward.x, -_mm.forward.z);
+  const _mmCos = Math.cos(_mmYaw), _mmSin = Math.sin(_mmYaw);
+  const _proj = (wx, wz) => {
+    const ox = (wx - ccx) * scale, oz = (wz - ccz) * scale;
+    return { x: cx + ox * _mmCos + oz * _mmSin, y: cy + oz * _mmCos - ox * _mmSin };
+  };
   const _MM_M = 7;
   const _MM_R = 75 - _MM_M;
   const _plot = (wx, wz) => {
-    const sx = cx + (wx - ccx) * scale, sy = cy + (wz - ccz) * scale;
-    const dx = sx - cx, dy = sy - cy;
+    const p = _proj(wx, wz);
+    const dx = p.x - cx, dy = p.y - cy;
     const d = Math.hypot(dx, dy);
-    if (d <= _MM_R) return { x: sx, y: sy, off: false };
+    if (d <= _MM_R) return { x: p.x, y: p.y, off: false };
     const t = _MM_R / (d || 1);
     return { x: cx + dx * t, y: cy + dy * t, off: true };
   };
@@ -44367,30 +44320,25 @@ function updateMinimap() {
   ctx.strokeStyle = 'rgba(60,70,100,0.35)';
   ctx.lineWidth = 2;
   for (const c of cyls) {
-    const x1 = cx + (c.ax - ccx) * scale, y1 = cy + (c.az - ccz) * scale;
-    const x2 = cx + (c.bx - ccx) * scale, y2 = cy + (c.bz - ccz) * scale;
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    const p1 = _proj(c.ax, c.az), p2 = _proj(c.bx, c.bz);
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
   }
 
   ctx.fillStyle = 'rgba(80,80,120,0.2)';
   ctx.strokeStyle = 'rgba(80,90,130,0.4)';
   ctx.lineWidth = 1;
   for (const s of spheres) {
-    const sx = cx + (s.cx - ccx) * scale, sy = cy + (s.cz - ccz) * scale, sr = s.r * scale;
-    ctx.beginPath(); ctx.arc(sx, sy, sr, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    const ps = _proj(s.cx, s.cz), sr = s.r * scale;
+    ctx.beginPath(); ctx.arc(ps.x, ps.y, sr, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   }
 
-  const px = cx + (player.position.x - ccx) * scale;
-  const py = cy + (player.position.z - ccz) * scale;
+  const pp = _proj(player.position.x, player.position.z);
   ctx.fillStyle = '#fff';
-  ctx.fillRect(px - 2, py - 2, 4, 4);
-
-  _mm.forward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
   ctx.beginPath();
-  ctx.moveTo(px, py);
-  ctx.lineTo(px + _mm.forward.x * 15, py + _mm.forward.z * 15);
-  ctx.stroke();
+  ctx.moveTo(pp.x, pp.y - 5);
+  ctx.lineTo(pp.x + 3.5, pp.y + 4);
+  ctx.lineTo(pp.x - 3.5, pp.y + 4);
+  ctx.closePath(); ctx.fill();
 
   const _localTeam = (typeof player !== 'undefined' && player && player.team) || null;
   const FRIEND_COL = '#4fb6ff';
@@ -44421,11 +44369,11 @@ function updateMinimap() {
   if (typeof net !== 'undefined' && net && net.networkPlayers) {
     for (const np of net.networkPlayers) {
       if (!np || !np.alive || !np.position) continue;
-      const bx = cx + (np.position.x - ccx) * scale;
-      const by = cy + (np.position.z - ccz) * scale;
       const isEnemy = (_localTeam == null) || (np.team !== _localTeam);
+      const p = _plot(np.position.x, np.position.z);
+      if (p.off) { _mmArrow(p, isEnemy ? ENEMY_COL : FRIEND_COL); continue; }
       ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
-      ctx.fillRect(bx - 2, by - 2, 3, 3);
+      ctx.fillRect(p.x - 2, p.y - 2, 3, 3);
     }
   }
 
@@ -44453,15 +44401,16 @@ function updateMinimap() {
 
   for (const field of game.stasisFields) {
     if (!field.alive) continue;
-    const fx = cx + (field.position.x - ccx) * scale;
-    const fy = cy + (field.position.z - ccz) * scale;
+    const p = _plot(field.position.x, field.position.z);
     const pulse = 0.5 + Math.sin(game.time * 4) * 0.3;
-    ctx.fillStyle = `rgba(0,200,255,${pulse})`;
+    const fcol = `rgba(0,200,255,${pulse})`;
+    if (p.off) { _mmArrow(p, fcol); continue; }
+    ctx.fillStyle = fcol;
     ctx.beginPath();
-    ctx.moveTo(fx, fy - 4);
-    ctx.lineTo(fx + 3, fy);
-    ctx.lineTo(fx, fy + 4);
-    ctx.lineTo(fx - 3, fy);
+    ctx.moveTo(p.x, p.y - 4);
+    ctx.lineTo(p.x + 3, p.y);
+    ctx.lineTo(p.x, p.y + 4);
+    ctx.lineTo(p.x - 3, p.y);
     ctx.closePath();
     ctx.fill();
   }
@@ -52216,18 +52165,6 @@ const CAMPAIGN_LEG_MAP = {
 };
 MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
 
-// ============================================================
-// (v35.71) ENDLESS — The Long Dark. A cavern with no far end: the route is a
-// seeded polyline of lane segments + hall rooms that EndlessMode extends ahead
-// of the ship and prunes behind it at runtime (the carve trio and collision
-// both read game.levelSpheres/levelCylinders per-sample, so appended segments
-// are terrain the moment their chunks stream in). The static rooms/tunnels
-// below are only the carousel preview / non-endless fallback.
-// Invariants (design doc): append when the ship is within 7000u of the route
-// end (> _SW_VIEW streaming radius of 4500u, so those chunks are still
-// unbaked); prune only segments >8000u behind (their chunks already unloaded);
-// keep the active window ~18 segments so _stRouteAt stays cheap.
-// ============================================================
 MAP_DATA.endless_caverns = {
   name: 'ENDLESS ; The Long Dark',
   defaultTheme: 'Rocky',
@@ -52242,10 +52179,6 @@ MAP_DATA.endless_caverns = {
   tunnels: [{ r: 400, path: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 9000 }] }],
 };
 
-// One route step. Pure function of the run's seeded rng stream, so a given
-// seed always grows the same cavern (co-op-ready). Bounded wander: beyond 42k
-// from origin the heading steers home, keeping runs inside the freeflight-size
-// 10x arena bound (float32-safe; score is arc length, not displacement).
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
   const kindRoll = rand();
@@ -52266,14 +52199,10 @@ function _lssEndlessNextSeg(run) {
   const a = { x: g.x, y: g.y, z: g.z };
   g.x += Math.sin(g.heading) * len;
   g.z += Math.cos(g.heading) * len;
-  // (v35.73) More vertical drama + varied lane width: narrow squeezes to
-  // broad galleries instead of one constant-radius hallway.
   g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));
   const b = { x: g.x, y: g.y, z: g.z };
   const r = 280 + rand() * 500;
   const hallR = hall ? (800 + rand() * 800) : 0;
-  // 40% of halls hang OFF the lane (side chamber + spur) — something to
-  // notice and turn into rather than fly straight through.
   let hp = null;
   if (hall && rand() < 0.4) {
     const sgn = rand() < 0.5 ? 1 : -1;
@@ -52283,11 +52212,7 @@ function _lssEndlessNextSeg(run) {
   return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
 }
 
-// Append one generated segment to the LIVE route arrays (mirrors the shapes
-// buildRoomGraphLevel derives from rooms/tunnels).
 function _lssEndlessApplySeg(run, s) {
-  // w 0.42: partial carve — the lane GUARANTEES passage but keeps the ridged
-  // relief, so the corridor reads as cavern, not subway (v35.73).
   const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r, w: 0.15 };
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
@@ -52307,8 +52232,6 @@ function _lssEndlessApplySeg(run, s) {
   });
 }
 
-// Level generator (the shifting_deep pattern): seeds the run state and returns
-// the level whose rooms/tunnels carry the first stretch of route.
 function _lssGenEndlessLevel(base) {
   const seed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) >>> 0;
   const rand = mulberry32(seed);
@@ -52331,8 +52254,6 @@ function _lssGenEndlessLevel(base) {
   }
   return {
     name: base.name, description: base.description, defaultTheme: base.defaultTheme,
-    // Keep the procedural tag: the sandwich config keys _isEndless off it
-    // (FOOT null + T.ENDLESS), same as shifting_deep keeps its own tag.
     procedural: 'endless',
     terrain: base.terrain, palette: base.palette, _biomeOverride: 'rocky',
     rooms, tunnels: [{ r: 400, path: nodes }],
@@ -52612,7 +52533,6 @@ function buildRoomGraphLevel(level) {
     try { level = _lssGenShiftingDeep(MAP_DATA.shifting_deep || level); }
     catch (e) { console.warn('[shifting-deep] generate failed, using static fallback:', e); }
   }
-  // (v35.71) ENDLESS: seed the run + grow the first stretch of route.
   if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
     try { level = _lssGenEndlessLevel(MAP_DATA.endless_caverns || level); }
     catch (e) { console.warn('[endless] generate failed, using static fallback:', e); game.endlessRun = null; }
@@ -52754,9 +52674,6 @@ function buildRoomGraphLevel(level) {
     
     
     const _isHubMap = (game.sandwichBiome === 'mossy');
-    // (v35.71) ENDLESS: hub-style unbounded streaming (FOOT null) but with the
-    // ceiling kept (_openTop stays hub-only). T.ENDLESS re-arms the vertical
-    // player clamp that is otherwise gated on FOOT (the v35.70 trap).
     const _isEndless = !!(level && level.procedural === 'endless');
     const _tOv = (level && level.terrain) ? level.terrain : null;
     let _pillars = null;
@@ -63702,7 +63619,7 @@ renderer.setAnimationLoop(gameLoop);
     if (inXR) {
       bgActive = false;
       if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
-      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+      try { renderer.setAnimationLoop(null); renderer.setAnimationLoop(gameLoop); } catch (_) {}
       return;                    
     }
     if (document.hidden) {
@@ -63717,13 +63634,13 @@ renderer.setAnimationLoop(gameLoop);
         if (!xrLate) return;
         bgActive = false;
         if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
-        try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+        try { renderer.setAnimationLoop(null); renderer.setAnimationLoop(gameLoop); } catch (_) {}
         console.log('[v26VR] restored animation loop after XR visibility race');
       }, 350);
     } else {
       bgActive = false;
       if (bgWorker) bgWorker.postMessage({ cmd: 'stop' });
-      try { renderer.setAnimationLoop(gameLoop); } catch (_) {}
+      try { renderer.setAnimationLoop(null); renderer.setAnimationLoop(gameLoop); } catch (_) {}
     }
   });
 })();
