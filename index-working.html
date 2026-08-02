@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.99';
+const LSS_BUILD = '36.01';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -10384,7 +10384,14 @@ function handleHitClaim(claim, fromPeerId) {
     let _dmg = claim.damage;
     if (typeof _dmg !== 'number' || !Number.isFinite(_dmg) || _dmg <= 0) return;
     if (_dmg > 5000) _dmg = 5000;
-    playerTakeDamage(_dmg, fakeAttacker);
+    // (v36.00) hitOpts: remote shots land through this claim path with no
+    // local projectile object, so pass the shooter's position + ship color
+    // for the player-impact laser splash + correct-side shield ripple.
+    playerTakeDamage(_dmg, fakeAttacker, null, fakeAttacker ? {
+      splashFrom: fakeAttacker.position,
+      splashColor: (shooterLoadout && typeof chassisFlashColor === 'function')
+        ? chassisFlashColor(shooterLoadout.name) : null,
+    } : null);
   }
 }
 
@@ -30487,7 +30494,11 @@ class Bot {
     }
 
     if (_tgtIsPlayer) {
-      playerTakeDamage(damage, this);
+      // (v36.00) hitOpts: the muzzle position + weapon color drive the
+      // player-impact laser splash + correct-side shield ripple (hitscan has
+      // no projectile object to carry the impact point). fireOrigin is a
+      // scratch vector — playerTakeDamage consumes it synchronously.
+      playerTakeDamage(damage, this, null, { splashFrom: fireOrigin, splashColor: flashColor });
       // TRACKER bot lock-on: hits build lock marks on the player (max 3). The sonar
       // ping is reserved for the player's OWN TRACKER lock progression (hear-when-
       // you-lock), not for enemy lock progression onto you; the on-screen
@@ -30826,6 +30837,9 @@ class Projectile {
     this.spawnOrigin = origin.clone();
     this.fadeInDist = 80;
     this._fadeInDone = false;
+    // (v36.00) Last-applied visibility multiplier (fade-in x camera-proximity
+    // dissolve); update() only rewrites layer opacities when it changes.
+    this._lastVisMul = -1;
     // Visual size multiplier — applied to the core / glow / haze scales
     // each frame on top of the base pulse animation. Default 1.0 = standard
     // projectile size ; ability projectiles can override (e.g. Cluster
@@ -31170,18 +31184,37 @@ class Projectile {
       } else {
         _fadeIn = Math.sqrt(distFromSpawnSq) / this.fadeInDist;
       }
-      if (this.mesh)        this.mesh.material.opacity        = this._baseOpacityCore   * _fadeIn;
+    }
+    // (v36.00) Camera-proximity dissolve: the bolt's visuals fade to zero as
+    // it nears the active camera (incoming face-shots used to cross the near
+    // plane and paint screen-wide streaks — see _lssCamProxFade by
+    // _vxTracerRetract). Combined with the muzzle fade-in into ONE
+    // visibility multiplier, written only when it changes, so the steady
+    // state (both factors 1: the overwhelming majority of live projectiles)
+    // costs a compare per frame and the materials keep their at-spawn
+    // opacities untouched — exactly the old post-fade-in behavior. The trail
+    // RIBBON deliberately gets _fadeIn only: it already carries a superior
+    // per-vertex near-camera fade (NEAR_FADE_* below) that collapses the
+    // near-plane portion without hiding the far part of the streak. All
+    // written materials are per-projectile instances (constructor builds
+    // them fresh per spawn — the intentional no-pooling rule), so
+    // per-instance opacity writes are safe.
+    const _prox = _lssCamProxFade(this.position.x, this.position.y, this.position.z);
+    const _visMul = _fadeIn * _prox;
+    if (_visMul !== this._lastVisMul) {
+      this._lastVisMul = _visMul;
+      if (this.mesh)        this.mesh.material.opacity        = this._baseOpacityCore   * _visMul;
       if (this.glowMesh) {
         const gu = this.glowMesh.material.uniforms;
         if (gu && gu.uBrightness) {
           if (gu._fxBaseBrightness == null) gu._fxBaseBrightness = gu.uBrightness.value;
-          gu.uBrightness.value = gu._fxBaseBrightness * _fadeIn;
+          gu.uBrightness.value = gu._fxBaseBrightness * _visMul;
         } else if (typeof this.glowMesh.material.opacity === 'number') {
-          this.glowMesh.material.opacity = this._baseOpacityGlow * _fadeIn;
+          this.glowMesh.material.opacity = this._baseOpacityGlow * _visMul;
         }
       }
-      if (this.hazeMesh)    this.hazeMesh.material.opacity    = this._baseOpacityHaze   * _fadeIn;
-      if (this.trail)       this.trail.material.opacity       = this._baseOpacityTrail  * _fadeIn;
+      if (this.hazeMesh)    this.hazeMesh.material.opacity    = this._baseOpacityHaze   * _visMul;
+      if (this.trail)       this.trail.material.opacity       = this._baseOpacityTrail  * _visMul;
       if (this.trailRibbon) this.trailRibbon.material.opacity = this._baseOpacityRibbon * _fadeIn;
     }
     // sizeMult is applied to all three layers each frame so heavy ability
@@ -39943,6 +39976,56 @@ function _vxTracerRetract(e, t) {
   e.mesh.scale.z = newLen;
 }
 
+// ---- (v36.00) CAMERA-PROXIMITY DISSOLVE for flying-shot visuals ----
+// Owner complaint: an incoming shot reaching the first-person camera crosses
+// the near plane and its elongated tube visuals paint a screen-wide streak
+// ("a line slashing across the screen when I get hit"). Fix: every
+// flying-shot visual (tracer cylinder stack, glow head, railgun spiral,
+// projectile core/glow/haze + 1px line trail) fades smoothly to zero
+// opacity as it nears the ACTIVE camera: full beyond _dslvFar (55u), zero
+// below _dslvNear (18u), smoothstep between. Works identically in first and
+// third person (distance to `camera`, wherever it sits).
+// Deliberately NOT applied to: muzzle-flash FX (particles/light), beam
+// abilities (vortexLaserBeam etc.), hitscan impact FX, the projectile trail
+// RIBBON (it already has a superior per-vertex near-camera fade — see
+// NEAR_FADE_* in Projectile.update) and the rocket smoke cone (soft cloud,
+// not a line). Material safety: every affected visual clones its
+// _TRACER_*_MAT_PROTO (or builds a fresh / exclusively-held material) at
+// spawn, so per-instance opacity writes are safe — no shared proto is ever
+// mutated here (the warmup pin group uses the protos directly and is never
+// in game.effects).
+// Long segment visuals use closest-point-on-segment distance: an incoming
+// hitscan tracer's MIDPOINT can be 300u away while its near end is at the
+// near plane, so mesh.position alone can never catch the slash.
+// Zero per-frame allocations (scalar math). Live A/B: window.__dslvSet(far, near).
+let _dslvFar = 55, _dslvNear = 18;
+window.__dslvSet = function(far, near) {
+  _dslvFar = (+far > 0) ? +far : 55;
+  _dslvNear = (+near >= 0 && +near < _dslvFar) ? +near : 18;
+};
+function _lssCamProxFade(px, py, pz) {
+  if (typeof camera === 'undefined' || !camera) return 1;
+  const cp = camera.position;
+  const dx = px - cp.x, dy = py - cp.y, dz = pz - cp.z;
+  const d2 = dx * dx + dy * dy + dz * dz;
+  if (d2 >= _dslvFar * _dslvFar) return 1;
+  if (d2 <= _dslvNear * _dslvNear) return 0;
+  const k = (Math.sqrt(d2) - _dslvNear) / (_dslvFar - _dslvNear);
+  return k * k * (3 - 2 * k);
+}
+function _lssCamProxFadeSeg(a, b) {
+  if (typeof camera === 'undefined' || !camera) return 1;
+  const cp = camera.position;
+  const abx = b.x - a.x, aby = b.y - a.y, abz = b.z - a.z;
+  const len2 = abx * abx + aby * aby + abz * abz;
+  let h = 0;
+  if (len2 > 1e-8) {
+    h = ((cp.x - a.x) * abx + (cp.y - a.y) * aby + (cp.z - a.z) * abz) / len2;
+    if (h < 0) h = 0; else if (h > 1) h = 1;
+  }
+  return _lssCamProxFade(a.x + abx * h, a.y + aby * h, a.z + abz * h);
+}
+
 // ---- LIGHTNING BOLT SYSTEM (v16a Phase P) ----
 // Was : chain of pooled cylinder segments (one cylinder per straight piece
 // of a midpoint-jittered path). Read as a hex-prism zigzag stick close-up ;
@@ -40815,7 +40898,10 @@ function _spawnRailgunSpiral(from, to, color) {
   // Lifetime ~0.6s gives a clearly visible trail that persists past the
   // muzzle flash. Per-frame fade case in updateEffects (cubic ease-out)
   // handles the dimming ; disposal case frees both geometry and material.
-  game.effects.push({ mesh, lifetime: 0.6, age: 0, type: 'tracerSpiral' });
+  // (v36.00) _dslvFrom/_dslvTo: cloned endpoints (callers may pass scratch
+  // vectors) for the camera-proximity dissolve's segment distance.
+  game.effects.push({ mesh, lifetime: 0.6, age: 0, type: 'tracerSpiral',
+    _dslvFrom: from.clone(), _dslvTo: to.clone() });
   // Pair with a small white-hot core sliver at the muzzle for the
   // "shot just left the barrel" punch. Reuse the existing tracer core
   // geometry/material proto so this is essentially free.
@@ -40832,7 +40918,11 @@ function _spawnRailgunSpiral(from, to, color) {
     coreMesh.scale.set(1.2, 1.2, coreLen);
     coreMesh.renderOrder = 1;
     scene.add(coreMesh);
-    game.effects.push({ mesh: coreMesh, lifetime: 0.10, age: 0, type: 'tracer' });
+    // (v36.00) _dslv endpoints only (NOT _retract*: this sliver must not
+    // retract) so the dissolve measures the real segment. coreEnd is a
+    // locally-owned clone; from gets cloned since callers may pass scratch.
+    game.effects.push({ mesh: coreMesh, lifetime: 0.10, age: 0, type: 'tracer',
+      _dslvFrom: from.clone(), _dslvTo: coreEnd });
   }
 }
 
@@ -41638,6 +41728,15 @@ function _disposeOrReleaseEffect(e) {
     _lssRetainMat(e.mesh.material);
     return;
   }
+  // (v36.00) Player-impact splash sprites: THREE.Sprite instances share ONE
+  // class-level quad geometry — never dispose it (the default path below
+  // would). Per-spawn additive material is retained/freed; the texture is
+  // the module-level ember canvas and stays alive.
+  if (e.type === 'playerHitSplash') {
+    scene.remove(e.mesh);
+    _lssRetainMat(e.mesh.material);
+    return;
+  }
   // Puncture railgun spiral: per-instance geometry AND material
   // (every shot's helix path is unique). Free both on dispose.
   if (e.type === 'tracerSpiral') {
@@ -42178,14 +42277,29 @@ function updateEffects(dt) {
     // --- Tracers: retract muzzle end + fade ---
     else if (e.type === 'tracer') {
       _vxTracerRetract(e, t);
-      e.mesh.material.opacity = (e.mesh.material.opacity || 0.8) * (1 - t);
+      // (v36.00) The legacy compounding age-fade now compounds on a TRACKED
+      // base value instead of reading material.opacity back, so the
+      // camera-proximity dissolve can multiply on top fresh each frame
+      // (compounding the dissolve factor would slam any near-ish tracer to
+      // zero within a few frames and never let it recover). The (1 - t)
+      // product sequence is byte-identical to the old curve.
+      if (e._dslvBase == null) e._dslvBase = e.mesh.material.opacity || 0.8;
+      e._dslvBase *= (1 - t);
+      const _sa = e._retractFrom || e._dslvFrom, _sb = e._retractTo || e._dslvTo;
+      const _pf = (_sa && _sb) ? _lssCamProxFadeSeg(_sa, _sb)
+        : _lssCamProxFade(e.mesh.position.x, e.mesh.position.y, e.mesh.position.z);
+      e.mesh.material.opacity = e._dslvBase * _pf;
     }
     // (v33.53) End-on tracer glow head : cubic ease-out fade so the incoming
     // bolt blooms bright then dissolves (no retract / no swell ; the round
     // sphere already reads 3D from the camera-facing end-on angle).
+    // (v36.00) x camera-proximity dissolve: the head sits at the IMPACT end,
+    // so a direct face-hit's bloom dissolves with the streak (the new
+    // player-hit splash takes over the impact read); far/whizz-by unchanged.
     else if (e.type === 'tracerGlow') {
       const _gf = 1 - t * t * t;
-      e.mesh.material.opacity = (e._glowOp0 || 0.5) * _gf;
+      e.mesh.material.opacity = (e._glowOp0 || 0.5) * _gf
+        * _lssCamProxFade(e.mesh.position.x, e.mesh.position.y, e.mesh.position.z);
     }
     // --- Lightning tubes (spawnLightningBolt): linear fade from initial opacity.
     // Stores _initialOpacity on first tick so the curve is single-shot rather
@@ -42248,8 +42362,13 @@ function updateEffects(dt) {
       // on top of the geometrically-shrinking cylinder.
       _vxTracerRetract(e, t);
       // Cubic ease-out fade: holds bright briefly, then fades softly
+      // (v36.00) x camera-proximity dissolve (segment distance — see
+      // _lssCamProxFadeSeg): kills the near-plane haze smear on face-hits.
       const fade = 1 - t * t * t;
-      e.mesh.material.opacity = e.initialOpacity * fade;
+      const _tpf = (e._retractFrom && e._retractTo)
+        ? _lssCamProxFadeSeg(e._retractFrom, e._retractTo)
+        : _lssCamProxFade(e.mesh.position.x, e.mesh.position.y, e.mesh.position.z);
+      e.mesh.material.opacity = e.initialOpacity * fade * _tpf;
       // Radial swell only (don't stretch along beam axis): the beam is
       // already oriented down its length; scaling x/y widens the tube.
       const swell = 1 + t * 0.8;
@@ -42263,7 +42382,13 @@ function updateEffects(dt) {
     else if (e.type === 'tracerSpiral') {
       if (e.initialOpacity == null) e.initialOpacity = e.mesh.material.opacity;
       const fade = 1 - t * t * t;
-      e.mesh.material.opacity = e.initialOpacity * fade;
+      // (v36.00) x camera-proximity dissolve. The helix geometry is baked in
+      // world space (mesh sits at origin), so the spawn-stored endpoints
+      // (_dslvFrom/_dslvTo) drive the segment distance — a remote
+      // railgunner's spiral ending at your face dissolves like any tracer.
+      const _spf = (e._dslvFrom && e._dslvTo)
+        ? _lssCamProxFadeSeg(e._dslvFrom, e._dslvTo) : 1;
+      e.mesh.material.opacity = e.initialOpacity * fade * _spf;
     }
     // --- Sparks: fly, drag, shrink, fade ---
     else if (e.type === 'spark' && e.vel) {
@@ -42279,6 +42404,15 @@ function updateEffects(dt) {
       const shimmer = 1 + t * 0.3;
       e.mesh.scale.set(shimmer, shimmer, shimmer);
       e.mesh.material.opacity = 0.6 * (1 - t);
+    }
+    // (v36.00) Player-impact laser splash: fast ease-out bloom (55% -> 130%
+    // of ship scale) + quadratic fade. Sprites always face the camera, so
+    // scale x/y only. See spawnPlayerHitSplash.
+    else if (e.type === 'playerHitSplash') {
+      const _spEase = 1 - Math.pow(1 - t, 3);
+      const _spS = (e.baseScale || 60) * (0.55 + 0.75 * _spEase);
+      e.mesh.scale.set(_spS, _spS, 1);
+      e.mesh.material.opacity = (e._op0 || 0.9) * (1 - t * t);
     }
     // --- Electric smoke around cluster obstacles: slow swell + flicker ---
     else if (e.type === 'electricSmoke') {
@@ -43155,9 +43289,86 @@ function spawnImpactSparks(pos, count) {
     }
   }
 
-  
-  spawnDynamicLight(pos, 0xffffff, 3.0, 200, 0.05);   
-  spawnDynamicLight(pos, 0xffcc44, 2.0, 300, 0.2);    
+
+  spawnDynamicLight(pos, 0xffffff, 3.0, 200, 0.05);
+  spawnDynamicLight(pos, 0xffcc44, 2.0, 300, 0.2);
+}
+
+// ---- (v36.00) PLAYER-IMPACT LASER SPLASH ----
+// The visible "you just got hit" read at the impact point (owner: "a laser
+// splash would be better" than the old near-plane line). Composition: a
+// weapon-colored additive radial flash sprite + a hot white inner flash
+// (both ~ship-scale, ~0.25s, ease-out bloom + fade in the playerHitSplash
+// branch of updateEffects), a spawnImpactSparks burst, and a brief colored
+// point light. Placement: ON the shield-bubble surface (hullLength*0.9 —
+// the same radius playerTakeDamage passes to spawnShieldHit) along the
+// direction the shot came from, so first person reads a windshield splash
+// dead ahead of the hit side, third person reads a hull splash, and both
+// line up with the shield ripple recordShieldHit lights on that side.
+// Material safety / warmup: fresh SpriteMaterial per splash mapped to the
+// module-level _emberFalloffTexture — the exact program signature (textured
+// additive sprite, depthWrite:false) that _warmupCombatShadersBody already
+// compiles for particles/heat trails, so no first-sight hitch and no new
+// warmup entry. Rate-limited (70 ms) so a minigun bot can't strobe a burst
+// per shot; sparks ride the pooled/instanced spark systems. Callers: the
+// projectile/hitscan hit gate inside playerTakeDamage (never DOT ticks /
+// collisions — those pass no projectile and no hitOpts).
+let _lastPlayerSplashT = -1;
+const _splashDirScratch = new THREE.Vector3();
+const _splashPosScratch = new THREE.Vector3();
+function spawnPlayerHitSplash(srcPos, color) {
+  if (!srcPos || player.shipState === 'dead') return;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  const now = (typeof game !== 'undefined' && typeof game.time === 'number') ? game.time : 0;
+  const sinceLast = now - _lastPlayerSplashT;
+  if (sinceLast >= 0 && sinceLast < 0.07 && _lastPlayerSplashT >= 0) return;
+  _lastPlayerSplashT = now;
+  // Impact direction: ship center -> shot source; degenerate (dead-center
+  // projectile position) falls back to camera forward so the splash still
+  // shows dead ahead.
+  let dx = srcPos.x - player.position.x,
+      dy = srcPos.y - player.position.y,
+      dz = srcPos.z - player.position.z;
+  const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (dl > 0.5) { dx /= dl; dy /= dl; dz /= dl; }
+  else if (typeof camera !== 'undefined' && camera) {
+    _splashDirScratch.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    dx = _splashDirScratch.x; dy = _splashDirScratch.y; dz = _splashDirScratch.z;
+  } else { dx = 0; dy = 0; dz = -1; }
+  const hull = (player.chassis && player.chassis.hullLength) ? player.chassis.hullLength : 80;
+  const r = hull * 0.9;
+  _splashPosScratch.set(
+    player.position.x + dx * r,
+    player.position.y + dy * r,
+    player.position.z + dz * r
+  );
+  const col = (color != null) ? color : 0xffaa44;
+  // Outer weapon-colored radial flash.
+  const mat = new THREE.SpriteMaterial({
+    map: _emberFalloffTexture, color: col, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const spr = new THREE.Sprite(mat);
+  spr.position.copy(_splashPosScratch);
+  spr.scale.set(hull * 0.55, hull * 0.55, 1);
+  spr.renderOrder = 2;
+  scene.add(spr);
+  game.effects.push({ mesh: spr, lifetime: 0.25, age: 0, type: 'playerHitSplash',
+    baseScale: hull, _op0: 0.95 });
+  // Hot white inner core: half scale, quicker, sells the "energy splash".
+  const mat2 = new THREE.SpriteMaterial({
+    map: _emberFalloffTexture, color: 0xffffff, transparent: true, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const spr2 = new THREE.Sprite(mat2);
+  spr2.position.copy(_splashPosScratch);
+  spr2.scale.set(hull * 0.25, hull * 0.25, 1);
+  spr2.renderOrder = 2;
+  scene.add(spr2);
+  game.effects.push({ mesh: spr2, lifetime: 0.14, age: 0, type: 'playerHitSplash',
+    baseScale: hull * 0.5, _op0: 0.9 });
+  if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_splashPosScratch, 8);
+  if (typeof spawnDynamicLight === 'function') spawnDynamicLight(_splashPosScratch, col, 2.6, 320, 0.14);
 }
 
 // ---- PLAYER FUNCTIONS ----
@@ -44940,7 +45151,12 @@ function spawnBots() {
   for (const b of game.entities) { if (b.mesh && b.position) b.mesh.position.copy(b.position); }
 }
 
-function playerTakeDamage(amount, attacker, projectile) {
+// (v36.00) hitOpts (optional, 4th arg): { splashFrom: Vector3, splashColor }
+// — lets the two hitscan hit sites (bot direct fire, MP hit-claim) request
+// the player-impact laser splash + correct-side shield ripple without faking
+// a projectile object (a fake {position} would corrupt the Plasma Shield
+// wall-side test below, which needs the real incoming-shot position).
+function playerTakeDamage(amount, attacker, projectile, hitOpts) {
   if (player.shipState === 'dead' || player.spawnProtection > 0) return;
   // Teleport invulnerability (SLAYER)
   if (player.phaseInvuln) return;
@@ -45094,6 +45310,26 @@ function playerTakeDamage(amount, attacker, projectile) {
     }
   }
 
+  // ---- (v36.00) LASER SPLASH on player impact ----
+  // A landed SHOT (projectile direct/splash hit, or a hitscan site passing
+  // hitOpts) reads as a splash on the ship: additive radial flash on the
+  // shield-bubble surface facing the shot + spark burst here, and the shield
+  // ripple below lights the same side. Pairs with the camera-proximity
+  // dissolve: incoming streak dissolves -> splash pops at impact.
+  // Deliberately silent for DOT ticks / collisions / monster zaps (no
+  // projectile object, no hitOpts), so per-frame damage can't strobe it.
+  // Placed after every absorb-shield early-out above so it only fires when
+  // damage actually lands on shield or hull.
+  const _splSrc = (projectile && projectile.position) ? projectile.position
+                : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
+                : null;
+  if (_splSrc && typeof spawnPlayerHitSplash === 'function') {
+    const _splCol = (hitOpts && hitOpts.splashColor != null) ? hitOpts.splashColor
+                  : (projectile && projectile.color != null) ? projectile.color
+                  : null;
+    spawnPlayerHitSplash(_splSrc, _splCol);
+  }
+
   // Screen shake proportional to damage
   const shakeAmt = Math.min(8, amount / 150);
   triggerScreenShake(shakeAmt);
@@ -45120,7 +45356,13 @@ function playerTakeDamage(amount, attacker, projectile) {
     // (most damage paths route through it from many sources), so we
     // derive a direction from the attacker. Falls back to player
     // position if attacker has no .position.
-    const hitPos = (attacker && attacker.position) ? attacker.position : player.position;
+    // (v36.00) Prefer the ACTUAL shot position when we have one — the
+    // projectile's impact point (right at the hull) or a hitscan site's
+    // splashFrom (the muzzle) — so recordShieldHit lights the ripple on the
+    // exact side the shot struck, matching the splash sprite above.
+    const hitPos = (projectile && projectile.position) ? projectile.position
+                 : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
+                 : (attacker && attacker.position)     ? attacker.position : player.position;
     // The player's own shield color (matches their weapon class).
     const ripColor = _shipShieldColor(player.loadoutKey);
     spawnShieldHit(hitPos, player.chassis.hullLength * 0.9, ripColor, player.mesh);
@@ -54206,23 +54448,20 @@ function _hlArcBar(ctx, r, p, pct, col) {
   ctx.restore();
 }
 
-// (v35.88) NANO REPAIR overlay on the health ring — draws OVER the arc the
-// health _hlArcBar just drew, at the same radius, walking the same 5-segment
-// geometry (same rot fold, same gapDeg, same 2.5px end inset) so the overlay
-// band lands exactly on the fill line and dies in the same gaps.
-// Two layers, both wired to what the perk ACTUALLY does (_tickPerkEffects nano
-// branch heals player.health directly, over-healing up to overhealMult × max):
-//   1. GREEN build-up — a brighter-green band capping the lit arc, spanning the
-//      health the nanobots have repaired since you last took damage. Tracked
-//      RENDER-SIDE ONLY in _hlNanoSt (display accumulator, zero gameplay): each
-//      HUD frame's positive health delta accrues, any damage resets it. The
-//      per-frame accrual is clamped to half a second of the perk's own regen
-//      rate so a respawn's 0→max jump can't light the whole ring as "repaired".
-//   2. PURPLE overcharge — once player.health exceeds maxHealth, the banked
-//      overheal (health − max, the perk's real accumulator) fills a purple arc
-//      over the green ring, 0..full as the bank runs 1×..overhealMult× hull.
-// Draws between two GLOBAL fractions of the bar rather than from zero — that
-// is the one thing _hlArcBar can't do, hence the dedicated span walker.
+// (v35.88, amended v36.01) NANO REPAIR overlay on the health ring — draws OVER
+// the arc the health _hlArcBar just drew, at the same radius, walking the same
+// 5-segment geometry (same rot fold, same gapDeg, same 2.5px end inset) so the
+// overlay band lands exactly on the fill line and dies in the same gaps.
+// PURPLE ONLY since v36.01: the v35.88 bright-green "#8dffb0" accrual band that
+// capped the lit arc read as a glitch to the owner — healing gets NO separate
+// highlight, the health arc refilling IS the healing visual (the _hlNanoSt
+// render-side accumulator went with it). What remains is the PURPLE overcharge
+// layer, exactly as shipped in v35.88: once player.health exceeds maxHealth
+// (_tickPerkEffects' nano branch heals player.health directly, over-healing up
+// to overhealMult × max), the banked overheal fills a purple arc over the
+// filled ring, 0..full as the bank runs 1×..overhealMult× hull.
+// The span walker draws between two GLOBAL fractions of the bar — that is the
+// one thing _hlArcBar can't do, which is why it stays a dedicated helper.
 function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
   if (!(f1 - f0 > 0.002)) return;
   const rad = Math.min(r.w, r.h) / 2;
@@ -54249,36 +54488,18 @@ function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
   ctx.restore();
 }
 
-const _hlNanoSt = { h: -1, acc: 0 };
 function _hlNanoOverlay(ctx, r, p) {
   const perk = (typeof PILOT_PERKS !== 'undefined' && player && player.perkId)
     ? PILOT_PERKS[player.perkId] : null;
-  if (!perk || !perk.regenPerSec || !(player.maxHealth > 0) || player.shipState === 'dead') {
-    _hlNanoSt.h = -1; _hlNanoSt.acc = 0;           // perk off / dead: forget
-    return;
-  }
+  if (!perk || !perk.regenPerSec || !(player.maxHealth > 0) || player.shipState === 'dead') return;
   const max = player.maxHealth;
   const h = Math.max(0, player.health);
-  if (_hlNanoSt.h < 0) _hlNanoSt.h = h;            // first frame with perk on
-  const dh = h - _hlNanoSt.h;
-  if (dh > 0) _hlNanoSt.acc += Math.min(dh, perk.regenPerSec * max * 0.5);
-  else if (dh < 0) _hlNanoSt.acc = 0;              // damage interrupts the build-up
-  _hlNanoSt.h = h;
-  const hFrac = Math.min(1, h / max);
-  if (_hlNanoSt.acc > hFrac * max) _hlNanoSt.acc = hFrac * max;
-  // Same width derivation as _hlArcBar so the layers nest: fill line is
-  // th − 40%; the green band rides at ~55% of that, the purple at full width.
+  if (!((perk.overhealMult || 1) > 1 && h > max)) return;
+  // Same width derivation as _hlArcBar so the layers nest: fill line is th − 40%.
   const th = Math.max(3, (p.thick != null ? p.thick : 0.95) * r.vmin);
   const fillW = Math.max(2, th - th * 0.4);
-  const accFrac = _hlNanoSt.acc / max;
-  if (accFrac > 0.002) {
-    _hlNanoSpan(ctx, r, p, hFrac - accFrac, hFrac, '#8dffb0',
-      Math.max(1.5, fillW * 0.55), 0.9);
-  }
-  if ((perk.overhealMult || 1) > 1 && h > max) {
-    const overFrac = Math.min(1, (h - max) / (max * (perk.overhealMult - 1)));
-    _hlNanoSpan(ctx, r, p, 0, overFrac, '#b264ff', fillW, 0.95);
-  }
+  const overFrac = Math.min(1, (h - max) / (max * (perk.overhealMult - 1)));
+  _hlNanoSpan(ctx, r, p, 0, overFrac, '#b264ff', fillW, 0.95);
 }
 
 // Radial tick strip. Ticks stick OUTWARD from the radius by `tick`, so a strip
@@ -56142,23 +56363,20 @@ const _MM_SS = 2;
 const _mm = {
   canvas: null,
   ctx: null,
-  extent: 0,        
-  extentKey: null,  
-  lastTick: 0,      
-  forward: new THREE.Vector3(),  
+  lastTick: 0,
+  forward: new THREE.Vector3(),
 };
 
-// Invalidate the cached map extent. Call after buildLevel() swaps in a new map
-// so the next updateMinimap() recomputes. Cheap no-op if minimap never ran.
-function invalidateMinimapExtent() {
-  _mm.extent = 0;
-  _mm.extentKey = null;
-}
+// (v36.01) NO-OP. The radar is fixed-range player-centred in EVERY mode now
+// (see updateMinimap), so there is no cached auto-fit extent left to
+// invalidate. KEPT because the level builders call it unconditionally on map
+// swap — the calls are harmless inputs to the new path, don't delete them.
+function invalidateMinimapExtent() {}
 
 // (v32.94) Campaign radar = a ship-centered COMBAT-scale follow-cam. This is the
-// world half-span (in units) shown from canvas-center to edge. The classic radar
-// auto-fits the whole map ; a campaign LEG is 36000u long (spawn arena at z=-18000,
-// boss at +18000), so that fit crushes every contact into a dot-pile in the middle.
+// world half-span (in units) shown from canvas-center to edge. A campaign LEG is
+// 36000u long (spawn arena at z=-18000, boss at +18000), so any whole-map fit
+// crushes every contact into a dot-pile in the middle.
 // Combat actually lives within ~3000u (wave spawns) out to ~5500u (the in-fight
 // cutoff), so 6000 frames the live fight around you ; distant arena/boss markers
 // edge-clamp to the rim (never lost). Tunable here — sane band ~5000-7000.
@@ -56206,62 +56424,33 @@ function updateMinimap() {
   ctx.strokeStyle = 'rgba(80,80,120,0.4)';
   ctx.beginPath(); ctx.arc(75, 75, 74.5, 0, Math.PI * 2); ctx.stroke();
 
-  // Auto-fit radar to actual level geometry. This is static per map; compute
-  // it once when the map changes and cache. Key by the array-identity tuple
-  // of the two geometry arrays; buildLevel replaces these wholesale.
+  // Level geometry: rooms/tunnels still plot as terrain blips through _proj
+  // below. buildLevel replaces these arrays wholesale.
   const spheres = game.levelSpheres || [];
   const cyls = game.levelCylinders || [];
-  const key = spheres.length * 131071 + cyls.length;  
-  if (_mm.extent === 0 || _mm.extentKey !== key) {
-    let mapExtent = 1000;
-    for (const s of spheres) {
-      mapExtent = Math.max(mapExtent, Math.abs(s.cx) + s.r, Math.abs(s.cz) + s.r);
-    }
-    for (const c of cyls) {
-      mapExtent = Math.max(mapExtent, Math.abs(c.ax) + c.r, Math.abs(c.bx) + c.r, Math.abs(c.az) + c.r, Math.abs(c.bz) + c.r);
-    }
-    _mm.extent = mapExtent * 1.15;
-    _mm.extentKey = key;
-  }
-  // Dynamic zoom: start from the cached arena fit, then expand so the player
-  // and any live (aggro'd) monster/boss stay framed — the boss rifts in just
-  // outside the carve, and on an open leg the player flies beyond the arena.
-  // This is what lets the radar show the boss + contacts, not just the arena.
-  let viewExtent = _mm.extent;
   const _mons = (typeof game !== 'undefined' && game.monsters) ? game.monsters : null;
-  if (player && player.position) {
-    viewExtent = Math.max(viewExtent, Math.abs(player.position.x) + 300, Math.abs(player.position.z) + 300);
-  }
-  if (_mons) {
-    const _cap = _mm.extent * 2.5;   
-    for (const m of _mons) {
-      if (!m || !m.alive || m.dormant || !m.position) continue;
-      const md = Math.max(Math.abs(m.position.x), Math.abs(m.position.z));
-      if (md < _cap) viewExtent = Math.max(viewExtent, md + 400);
-    }
-  }
-  // (v32.94) Campaign : lock to a fixed combat zoom + re-center on the ship so the
-  // radar follows you and shows the fight (not the whole 36000u leg as a dot-pile).
-  // ccx/ccz are the world point that maps to canvas-center ; 0 (world origin) in
-  // every other mode, so classic / PvP / race are byte-identical.
+  // (v36.01) EVERY mode is strictly player-centred at a FIXED range — the
+  // v35.81 endless pattern promoted to all modes. Since v35.79 the radar is
+  // ship-up ROTATING (rotation about the disc centre in _proj), so the old
+  // world-origin auto-fit that classic/elimination/race/assault still used was
+  // geometrically wrong: the world appeared to orbit a point that isn't you,
+  // and the ship sat off disc centre (owner spotted it in ELIMINATION).
+  // Ranges are world units mapped to the 68-radius clamp ring (the v35.81
+  // semantics): endless keeps 2600, campaign keeps its v32.94 combat span
+  // (CAMP_RADAR_HALF_SPAN at the 75 edge — on-screen unchanged), arena modes
+  // get 3400 (engagements sprawl wider; contacts beyond range render as edge
+  // arrows per v35.79 _mmArrow, so nothing is lost). window.__mmRange (world
+  // units at the clamp ring) overrides ALL modes live. The auto-fit /
+  // extent-grow path is deleted; invalidateMinimapExtent is a kept no-op.
+  const _mode = (typeof LSS !== 'undefined') ? LSS.MODE : null;
+  let _mmR = 3400;
+  if (_mode === 'endless') _mmR = 2600;
+  else if (_mode === 'campaign' && game.campaign) _mmR = CAMP_RADAR_HALF_SPAN * (68 / 75);
+  if (typeof window !== 'undefined' && typeof window.__mmRange === 'number' && window.__mmRange > 0) _mmR = window.__mmRange;
+  const viewExtent = _mmR * (75 / 68);
+  // ccx/ccz = the world point that maps to canvas-centre = the ship, always.
   let ccx = 0, ccz = 0;
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && game.campaign && player && player.position) {
-    viewExtent = CAMP_RADAR_HALF_SPAN;
-    ccx = player.position.x; ccz = player.position.z;
-  }
-  // (v35.81) ENDLESS : strictly player-centred with a FIXED range. The endless
-  // route is a pruned ~18-segment window that travels tens of km from the world
-  // origin, so the level-geometry auto-fit above (and the |player|+300 grow)
-  // drift with distance travelled and the ship slid off disc centre. Pin the
-  // world point at disc centre to the ship and map ~2600u of world radius onto
-  // the 68-radius clamp disc (comparable feel to the other maps). The white
-  // triangle then sits at (75,75) forever; terrain/contacts plot relative to
-  // the ship. window.__mmRange (world units at the clamp ring) overrides live.
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && player && player.position) {
-    const _emr = (typeof window !== 'undefined' && typeof window.__mmRange === 'number' && window.__mmRange > 0) ? window.__mmRange : 2600;
-    viewExtent = _emr * (75 / 68);
-    ccx = player.position.x; ccz = player.position.z;
-  }
+  if (player && player.position) { ccx = player.position.x; ccz = player.position.z; }
   const scale = 75 / viewExtent;
   const cx = 75, cy = 75;
   // (v35.79) SHIP-UP RADAR: every world offset is rotated about the disc
