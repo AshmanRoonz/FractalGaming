@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.99';
+const LSS_BUILD = '35.98';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -75322,7 +75322,6 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
 const _AUDIO_BAKE = {
   on: true,          // window.__sndBake(0) to A/B against live synthesis
   buf: Object.create(null),
-  lastTake: Object.create(null),   // (v35.99) per-type round-robin memory
   ready: false, running: false, done: 0, total: 0, bytes: 0, ms: 0,
   maxDur: 3.0,       // hard cap; the continuous voices are not recipes anyway
   batch: 8,          // offline renders in flight at once
@@ -75334,20 +75333,6 @@ function _audioBakeExtraTakes(sec) {
   if (sec <= 1.10) return 1;
   return 0;
 }
-// (v35.99) COMBAT-HOT TYPES GET 3 TAKES NO MATTER HOW LONG THEY TRIMMED.
-// The length rule above left explosion, fire_projectile, fire_railgun,
-// fire_salvo, rocket_salvo, tracker_rockets and death with exactly ONE take —
-// the loudest, most-overlapped sounds in the game playing a byte-identical
-// waveform every time. Identical copies overlapping sum coherently, which is
-// where the measured 11.9x pre-compressor pile-up came from (see
-// _playBakedSound). Costs ~4 MB over the 17.7 MB budget; the short hot types
-// already have 3 takes and Math.max makes this a no-op for them.
-const _AUDIO_BAKE_HOT = {
-  fire_projectile: 1, fire_railgun: 1, fire_hitscan: 1, fire_minigun: 1,
-  fire_spread: 1, fire_salvo: 1, fire_buckshot: 1, fire_leadwall: 1,
-  explosion: 1, rocket_salvo: 1, tracker_rockets: 1, cluster_missile_fire: 1,
-  death: 1, hit: 1, laser_shot: 1, damage: 1,
-};
 
 // How long a recipe needs, from its own layers. Offline renders are fixed
 // length, so under-sizing this truncates the tail.
@@ -75402,24 +75387,11 @@ function _audioBakeTake(type, recipe) {
       let end = d.length;
       while (end > 1 && (d[end - 1] < 0 ? -d[end - 1] : d[end - 1]) < floor) end--;
       end = Math.min(d.length, end + Math.ceil(b.sampleRate * 0.005));   // 5ms of air
-      let out = b, data = d;
       if (end < d.length * 0.97) {
-        out = audio.ctx.createBuffer(1, Math.max(1, end), b.sampleRate);
-        data = out.getChannelData(0);
-        data.set(d.subarray(0, end));
+        const t = audio.ctx.createBuffer(1, Math.max(1, end), b.sampleRate);
+        t.getChannelData(0).set(d.subarray(0, end));
+        return t;
       }
-      // (v35.99) Raised-cosine edge fades on EVERY take: ~2 ms in, ~6 ms out.
-      // A recipe longer than maxDur is cut off mid-decay by the fixed-length
-      // offline render — laser_core_beam and stun_core_zap were ending at
-      // sample values 0.131 / 0.101, a hard step to silence on every single
-      // playback (__sndTails found them). The fade costs nothing at play time
-      // because it is baked into the buffer.
-      const _sr = out.sampleRate;
-      const nIn = Math.min(data.length, Math.round(_sr * 0.002));
-      for (let i = 0; i < nIn; i++) data[i] *= 0.5 - 0.5 * Math.cos(Math.PI * i / nIn);
-      const nOut = Math.min(data.length, Math.round(_sr * 0.006));
-      for (let i = 0; i < nOut; i++) data[data.length - 1 - i] *= 0.5 - 0.5 * Math.cos(Math.PI * (i + 1) / nOut);
-      return out;
     } catch (_) {}
     return b;
   }).catch(() => null);
@@ -75471,10 +75443,7 @@ function _audioBakeAll(reason) {
     for (const type of bakeable) {
       const first = next[type] && next[type][0];
       if (!first) continue;
-      // (v35.99) Hot combat types floor at 2 extras (3 takes total) so the
-      // round-robin in _playBakedSound always has a different waveform to
-      // rotate to — see _AUDIO_BAKE_HOT.
-      const n = Math.max(_audioBakeExtraTakes(first.duration), _AUDIO_BAKE_HOT[type] ? 2 : 0);
+      const n = _audioBakeExtraTakes(first.duration);
       for (let k = 0; k < n; k++) extra.push(type);
     }
     return runJobs(extra);
@@ -75493,37 +75462,18 @@ function _audioBakeAll(reason) {
 }
 
 // Play a baked take. Two nodes, no automation.
-// (v35.99) DECORRELATION LIVES HERE. Identical buffers overlapping sum
-// coherently (+6 dB per doubling) where live synthesis — fresh jitter every
-// shot — summed like uncorrelated noise. Measured in the 36 s scripted combat
-// scene: with 1-take stacking the pre-compressor SFX sum peaked 11.9x full
-// scale vs 6.9x live, and the master soft-clipper sat pinned at its 0.95
-// ceiling six times as long (41,325 vs 6,844 samples >= 0.90) — that
-// flat-topping IS the "crackling during combat" regression. Three defenses,
-// all riding the same two nodes (zero extra), lean path included:
-//   1. never the same take twice in a row — a same-frame double explosion
-//      gets two different waveforms (see _AUDIO_BAKE_HOT for why every hot
-//      type now has takes to rotate);
-//   2. random polarity — coherent overlap of the same take tends toward
-//      cancellation instead of +6 dB, and a flipped waveform is inaudible
-//      on its own;
-//   3. playbackRate jitter plus a 0.8-1.0 gain roll whose 0.9 mean shaves
-//      ~1 dB off dense stacks.
 function _playBakedSound(type) {
   const takes = _AUDIO_BAKE.buf[type];
   if (!takes || !takes.length) return false;
   const ctx = audio.ctx;
   const src = ctx.createBufferSource();
-  let idx = (Math.random() * takes.length) | 0;
-  if (takes.length > 1 && idx === _AUDIO_BAKE.lastTake[type]) idx = (idx + 1) % takes.length;
-  _AUDIO_BAKE.lastTake[type] = idx;
-  src.buffer = takes[idx];
+  src.buffer = takes[(Math.random() * takes.length) | 0];
   // Continuous wobble ON TOP of the discrete takes, so a repeated weapon never
   // settles into an audible 3-frame loop. Kept small — the takes already carry
   // the recipe's own pitch/duration variation.
   src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.06;
   const gain = ctx.createGain();
-  gain.gain.value = (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.2);
+  gain.gain.value = 1 + (Math.random() - 0.5) * 0.10;
   src.connect(gain);
   gain.connect(_audioDrySink());
   // Reverb at playback, not in the buffer — see the bake note above.
@@ -75606,41 +75556,6 @@ if (typeof window !== 'undefined') {
     return _audioBakeTake(type, recipe).then(fresh => ({
       type, bakedTakes: takes, freshRender: fresh ? stat(fresh) : null,
     }));
-  };
-  // (v35.99) Tail/head/discontinuity audit of every baked take. A take that
-  // ends off-zero steps to silence on EVERY playback — an audible click — so
-  // `tail` is the direct evidence readout for "the bake crackles". `maxJump`
-  // flags in-buffer discontinuities, but read it against the wave type first:
-  // square/saw layers legitimately jump by 2x their amplitude every cycle.
-  window.__sndTails = function (worstN) {
-    const rows = [];
-    for (const t of Object.keys(_AUDIO_BAKE.buf)) {
-      const takes = _AUDIO_BAKE.buf[t];
-      for (let k = 0; k < takes.length; k++) {
-        const b = takes[k], d = b.getChannelData(0);
-        let peak = 0, maxJump = 0, jumpAt = -1;
-        for (let i = 0; i < d.length; i++) {
-          const a = d[i] < 0 ? -d[i] : d[i];
-          if (a > peak) peak = a;
-          if (i > 0) { const j = Math.abs(d[i] - d[i - 1]); if (j > maxJump) { maxJump = j; jumpAt = i; } }
-        }
-        rows.push({ type: t, take: k, sec: +b.duration.toFixed(3), peak: +peak.toFixed(3),
-          head: +Math.abs(d[0]).toFixed(4), tail: +Math.abs(d[d.length - 1]).toFixed(4),
-          maxJump: +maxJump.toFixed(3), jumpAtSec: jumpAt >= 0 ? +(jumpAt / b.sampleRate).toFixed(3) : -1 });
-      }
-    }
-    rows.sort((a, b) => b.tail - a.tail);
-    return rows.slice(0, worstN || 20);
-  };
-  // (v35.99) Deterministic stack test: fire the same recipe n times in ONE
-  // synchronous burst (hidden tabs clamp timers to 1 s, so spacing by
-  // setTimeout is impossible there — same-tick is the worst case anyway).
-  // Pair with the worklet tap / __sndBake(0|1) to measure coherent-summation
-  // peak growth, baked vs live.
-  window.__sndPlay = function (type, n) {
-    n = Math.max(1, n | 0 || 1);
-    for (let i = 0; i < n; i++) { try { _playSoundFromLabRecipe(type); } catch (e) { return String(e); } }
-    return type + ' x' + n;
   };
 }
 
@@ -76295,16 +76210,6 @@ function _audioIsMobileDevice() {
   return _audioMobileCached;
 }
 
-// (v35.99) Desktop-console override for the lean path, because the potato
-// tier is gone and _audioIsMobileDevice() is a capability fact you cannot
-// fake from DevTools. __audioForceLean(1) forces lean, (0) forces full,
-// (null) restores the real detection. Diagnostic only — nothing in the game
-// sets it.
-let _audioForceLean = null;
-if (typeof window !== 'undefined') window.__audioForceLean = function (v) {
-  _audioForceLean = (v == null) ? null : !!v;
-  return 'forceLean=' + _audioForceLean;
-};
 function _audioLeanMode() {
   // (v35.49) `_audioStressed` only counts when the gating is enabled. It is
   // derived from the same sliding-window count as the drop rules — i.e. the
@@ -76313,7 +76218,6 @@ function _audioLeanMode() {
   // chord voices, no reverb sends, noise bursts clamped to 0.10 s. Letting a
   // busy fight silently trigger that is the same over-correction in a quieter
   // form. Device tiers below are capability facts, not guesses, so they stay.
-  if (_audioForceLean !== null) return _audioForceLean;
   return _audioIsMobileDevice() ||
          _audioQuestCombatMode() ||
          (_audioGateMode !== 'off' && _audioStressed) ||

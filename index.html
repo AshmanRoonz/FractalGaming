@@ -3614,7 +3614,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.97';
+const LSS_BUILD = '35.99';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -45829,25 +45829,94 @@ function _isGamePreventKey(key) {
   return false;
 }
 
-function openHowToPlay() {
-  let ov = document.getElementById('howto-overlay');
-  if (ov) { ov.style.display = 'flex'; return; }
-  ov = document.createElement('div');
-  ov.id = 'howto-overlay';
-  ov.style.cssText = 'position:fixed;inset:0;z-index:220;background:rgba(4,4,12,0.96);' +
-    'display:flex;flex-direction:column;align-items:center;overflow:hidden;color:#dde;' +
-    "font-family:'Rajdhani',sans-serif;cursor:default;";
+const _HOWTO_LSKEY = 'lss_howto_scheme';
+function _howtoScheme() {
+  let s = null;
+  try { s = localStorage.getItem(_HOWTO_LSKEY); } catch (_) {}
+  if (s === 'kb' || s === 'gp' || s === 'touch' || s === 'vr') return s;
+  try { if (typeof window.lssIsMobileDevice === 'function' && window.lssIsMobileDevice()) return 'touch'; } catch (_) {}
+  return 'kb';
+}
+function _howtoXrLabel(id) {
+  if (!id) return '';
+  return String(id).replace(/^right/, 'R ').replace(/^left/, 'L ').replace(/([a-z])([A-Z])/g, '$1 $2');
+}
+function _howtoBindLabel(scheme, action) {
+  if (scheme === 'gp') {
+    const b = input.gpBindings || {};
+    const idx = (action in b) ? b[action] : null;
+    if (idx == null || idx === -1) return '';
+    return GAMEPAD_BUTTON_NAMES[idx] || ('Btn ' + idx);
+  }
+  if (scheme === 'vr') {
+    const x = input.xrBindings || {};
+    return _howtoXrLabel(x[action] || '');
+  }
+  if (scheme === 'touch') {
+    const t = {
+      fire: 'RT', altFire: 'LT', dash: 'STICK RIM', reload: 'R',
+      ability0: 'LB', ability1: 'RB', ability2: 'F', core: 'CORE',
+      moveUp: '▲', moveDown: '▼', view: '◳', shipPrev: '⇄', shipNext: '⇄', menu: '⚙',
+    };
+    return t[action] || '';
+  }
+  if (action === 'altFire') return 'Right Click';
+  const kb = input.kbBindings || {};
+  const k = (kb[action] != null && kb[action] !== '') ? kb[action] : KB_DEFAULTS[action];
+  return (k == null || k === '') ? '' : _formatKey(k);
+}
+function _howtoRender(ov) {
+  const scheme = _howtoScheme();
   const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+  const tag = a => { const l = _howtoBindLabel(scheme, a); return l ? esc(l).toUpperCase() : 'UNBOUND'; };
   let h = '<div style="width:100%;max-width:1080px;display:flex;align-items:center;justify-content:space-between;' +
     'padding:14px 22px 10px;flex-shrink:0;border-bottom:1px solid rgba(255,170,0,0.25);">' +
     "<div class='lss-title' style='font-size:22px;letter-spacing:5px;color:#ffaa00;text-shadow:0 0 16px rgba(255,170,0,0.4);'>HOW TO PLAY</div>" +
     '<button id="howto-close" style="background:rgba(40,30,15,0.6);border:1px solid #ffaa00;color:#ffaa00;' +
     "padding:8px 18px;border-radius:6px;font-family:'Rajdhani',sans-serif;font-size:12px;letter-spacing:2px;cursor:pointer;\">CLOSE</button></div>";
-  h += '<div style="width:100%;max-width:1080px;flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 22px 40px;">';
+  h += '<div id="howto-scroll" style="width:100%;max-width:1080px;flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 22px 40px;">';
+  h += '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:8px;">' +
+       "<span class='lss-title' style='font-size:12px;letter-spacing:3px;color:#7cf;'>CONTROL METHOD</span>" +
+       '<select id="howto-scheme" style="background:rgba(15,25,45,0.95);border:1px solid rgba(120,200,255,0.45);color:#cce8ff;' +
+       "font-family:'Rajdhani',sans-serif;font-size:13px;font-weight:bold;letter-spacing:1.5px;padding:6px 10px;border-radius:6px;cursor:pointer;\">";
+  const _schemes = [['kb', 'KEYBOARD &amp; MOUSE'], ['gp', 'GAMEPAD'], ['touch', 'TOUCH'], ['vr', 'VR']];
+  for (const [v, label] of _schemes) {
+    h += '<option value="' + v + '"' + (v === scheme ? ' selected' : '') + '>' + label + '</option>';
+  }
+  h += '</select></div>';
+  h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
+       'Configure your controls and performance in the <span style="color:#ffaa00;">SETTINGS</span> menu before you fly.</div>';
   h += '<div style="font-size:13px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
        'Zero-gravity fleet combat. Destroy the enemy fleet to win the round, or capture the CHAMPION FIELD that appears in the final seconds (crack its shell first). First fleet to 4 rounds takes the match. Leave the arena and the leviathans outside will hunt you.</div>';
-  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>SHIPS</div>";
-  const slotTag = ['Q · OFFENSIVE', 'E · DEFENSIVE', 'F · UTILITY'];
+  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>GAME MODES — GOALS &amp; RULES</div>";
+  const _modes = [
+    ['ELIMINATION', '#7cf',
+     "Round-based team elimination — versus players, bots, or both. Wipe the enemy fleet to take the round, or crack the CHAMPION FIELD's shell and capture it in the final seconds; first fleet to 4 rounds takes the match. Committing your loadout in the hangar is your ready-up — ADD BOTS on the ship screen fills out the fleets."],
+    ['RACE', '#ff9fe0',
+     'Two disciplines. THE STRAIGHTAWAY is an open-cavern point-to-point: line up on the start, find your own line through the mountains, first to capture the finish field wins. POLE POSITION is a ring-gated circuit: clear every ring to unlock the finish, then dive in and take it.'],
+    ['ASSAULT', '#ff8a4a',
+     'Attack and defend the CHAMPION FIELD. Only the attacking fleet can charge it by holding the field — the charge decays when they leave, and the timer running out hands the round to the defenders. Roles swap every round with unlimited respawns; the match is decided on net-capture spread, so out-attack them across the swaps.'],
+    ['CAMPAIGN', '#b98cff',
+     'A solo or co-op journey through themed legs, launched from the overworld hub. Each leg is waves of enemies, then a boss. Difficulty sets how big the swarm gets.'],
+    ['EXHIBITION', '#8fe6a8',
+     'Free flight in the overworld hub — patrol, explore, pick fights on your terms. Destroying ships earns per-ship AEGIS RANKS: permanent progression exclusive to this mode, stacking chassis upgrades as your rank climbs.'],
+    ['ENDLESS', '#ff8a5c',
+     'Fly a cavern with no end, solo or co-op. Difficulty is lives — EASY 3, MEDIUM 2, HARD 1 — and distance is your score; it never resets. Ambush waves strike on a rhythm as the reaches change biome and storms roll in — and living AEGIS BOLTS hide off the main line, granting ranks for the run. They flee when watched.'],
+  ];
+  for (const [nm, col, txt] of _modes) {
+    h += '<div style="border:1px solid rgba(120,200,255,0.2);border-left:3px solid ' + col + ';border-radius:8px;' +
+         'background:rgba(15,20,38,0.5);padding:10px 14px;margin-bottom:8px;">' +
+         "<div class='lss-title' style='font-size:13px;letter-spacing:3px;color:" + col + ";'>" + nm + '</div>' +
+         "<div style='font-size:12px;color:#cdd;line-height:1.55;margin-top:4px;'>" + txt + '</div></div>';
+  }
+  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>SHIPS</div>";
+  const slotTag = [
+    tag('ability0') + ' · OFFENSIVE',
+    tag('ability1') + ' · DEFENSIVE',
+    tag('ability2') + ' · UTILITY',
+  ];
+  const _coreKey = tag('core');
+  const coreTag = (_coreKey === 'CORE') ? 'CORE' : _coreKey + ' · CORE';
   for (const key in LOADOUTS) {
     const L = LOADOUTS[key];
     if (!L || !L.weapon) continue;
@@ -45859,12 +45928,12 @@ function openHowToPlay() {
     h += "<div style='font-size:12px;color:#66bbff;margin-top:6px;letter-spacing:0.6px;'>WEAPON — " + esc(L.weapon.name) +
          ' : ' + esc(L.weapon.damage) + ' dmg, ' + esc(L.weapon.mode) + '</div>';
     (L.abilities || []).forEach((a, i) => {
-      h += "<div style='margin-top:6px;'><span style='color:#8f8;font-size:11px;letter-spacing:1.5px;'>" + slotTag[i] +
+      h += "<div style='margin-top:6px;'><span style='color:#8f8;font-size:11px;letter-spacing:1.5px;'>" + (slotTag[i] || 'ABILITY ' + (i + 1)) +
            " — " + esc(a.name).toUpperCase() + '</span>' +
            "<div style='font-size:12px;color:#cdd;line-height:1.45;'>" + esc(a.desc) + '</div></div>';
     });
     if (L.core) {
-      h += "<div style='margin-top:6px;'><span style='color:#fc6;font-size:11px;letter-spacing:1.5px;'>V · CORE — " +
+      h += "<div style='margin-top:6px;'><span style='color:#fc6;font-size:11px;letter-spacing:1.5px;'>" + coreTag + " — " +
            esc(L.core.name).toUpperCase() + '</span>' +
            "<div style='font-size:12px;color:#cdd;line-height:1.45;'>" + esc(L.core.desc) + '</div></div>';
     }
@@ -45882,15 +45951,100 @@ function openHowToPlay() {
          "<div style='font-size:12px;color:#cdd;line-height:1.45;'>" + esc(P.desc) + '</div></div></div>';
   }
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>CONTROLS</div>";
-  h += '<div style="font-size:12px;color:#cdd;line-height:1.8;">' +
-       'KEYBOARD — WASD move · SPACE/C up/down · mouse aim · LMB fire · RMB zoom · SHIFT dash · Q/E/F abilities · G core · R reload · V view (1st/3rd) · [ / ] cycle ship · ESC settings<br>' +
-       'GAMEPAD — sticks fly/aim · RT fire · LT zoom · A dash · LB/RB/Y abilities · D-pad-Up core · D-pad-Down view · D-pad-L/R cycle ship<br>' +
-       'TOUCH — left stick move (shove past the rim to dash) · right side aim · corner buttons fire/abilities</div>';
+  const rows = [];
+  let ctlNote = '';
+  if (scheme === 'gp') {
+    rows.push(['FLY / AIM', 'LEFT / RIGHT STICKS']);
+    rows.push(['FIRE', tag('fire')]);
+    rows.push(['ZOOM', tag('altFire')]);
+    rows.push(['DASH', tag('dash')]);
+    rows.push(['RELOAD', tag('reload')]);
+    rows.push(['ABILITIES', tag('ability0') + ' / ' + tag('ability1') + ' / ' + tag('ability2')]);
+    rows.push(['CORE', tag('core')]);
+    rows.push(['UP / DOWN', tag('moveUp') + ' / ' + tag('moveDown')]);
+    rows.push(['CYCLE SHIP', tag('shipPrev') + ' / ' + tag('shipNext')]);
+    rows.push(['SCOREBOARD', tag('scoreboard') + ' (HOLD)']);
+    rows.push(['MENU', tag('menu')]);
+  } else if (scheme === 'touch') {
+    rows.push(['MOVE', 'LEFT STICK — SHOVE PAST THE RIM TO DASH']);
+    rows.push(['AIM', 'DRAG THE RIGHT HALF']);
+    rows.push(['FIRE', 'RT']);
+    rows.push(['ZOOM', 'LT']);
+    rows.push(['ABILITIES', 'LB / RB / F']);
+    rows.push(['CORE', 'CORE (TOP CENTRE)']);
+    rows.push(['RELOAD', 'R']);
+    rows.push(['UP / DOWN', '▲ / ▼']);
+    rows.push(['VIEW', '◳']);
+    rows.push(['CYCLE SHIP', '⇄']);
+    rows.push(['FULLSCREEN', '⛶']);
+    rows.push(['SETTINGS', '⚙']);
+    ctlNote = 'The on-screen buttons wear the live weapon and ability names of your ship.';
+  } else if (scheme === 'vr') {
+    rows.push(['FLY', 'LEFT STICK STRAFES — HEAD AIM STEERS']);
+    rows.push(['FIRE', tag('fire')]);
+    rows.push(['ZOOM', tag('altFire')]);
+    rows.push(['DASH', tag('dash')]);
+    rows.push(['RELOAD', tag('reload')]);
+    rows.push(['ABILITIES', tag('ability0') + ' / ' + tag('ability1') + ' / ' + tag('ability2')]);
+    rows.push(['CORE', tag('core')]);
+    rows.push(['UP / DOWN', tag('moveUp') + ' / ' + tag('moveDown')]);
+    rows.push(['MENU', tag('menu')]);
+    rows.push(['SETTINGS', tag('openSettings')]);
+    const sd = input.xrStickDpad || {};
+    const _sdShort = { scoreboard: 'SCOREBOARD', shipPrev: 'SHIP PREV', shipNext: 'SHIP NEXT', menu: 'MENU', core: 'CORE' };
+    const sdParts = [];
+    for (const [dir, act] of [['UP', sd.up], ['DOWN', sd.down], ['LEFT', sd.left], ['RIGHT', sd.right]]) {
+      if (act) sdParts.push(dir + ' = ' + (_sdShort[act] || esc(String(act)).toUpperCase()));
+    }
+    if (sdParts.length) rows.push(['RIGHT STICK FLICK', sdParts.join(' · ')]);
+    ctlNote = 'Menus are point-and-click: aim with either controller, the trigger clicks.';
+  } else {
+    rows.push(['MOVE', tag('forward') + ' ' + tag('left') + ' ' + tag('back') + ' ' + tag('right')]);
+    rows.push(['UP / DOWN', tag('up') + ' / ' + tag('down')]);
+    rows.push(['AIM', 'MOUSE']);
+    rows.push(['FIRE', tag('fire')]);
+    rows.push(['ZOOM', tag('altFire')]);
+    rows.push(['DASH', tag('dash')]);
+    rows.push(['RELOAD', tag('reload')]);
+    rows.push(['ABILITIES', tag('ability0') + ' / ' + tag('ability1') + ' / ' + tag('ability2')]);
+    rows.push(['CORE', tag('core')]);
+    rows.push(['VIEW', tag('view')]);
+    rows.push(['CYCLE SHIP', tag('shipPrev') + ' / ' + tag('shipNext')]);
+    rows.push(['SCOREBOARD', tag('scoreboard') + ' (HOLD)']);
+    rows.push(['SETTINGS', tag('menu')]);
+  }
+  h += '<div style="font-size:12px;line-height:2.1;color:#cdd;">' +
+       rows.map(r =>
+         '<span style="white-space:nowrap;"><span style="color:#66bbff;letter-spacing:1px;">' + r[0] + '</span> ' +
+         '<span style="color:#fff;font-weight:bold;">' + r[1] + '</span></span>'
+       ).join('<span style="color:#456;"> · </span>') + '</div>';
+  if (ctlNote) h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;margin-top:6px;">' + ctlNote + '</div>';
   h += '</div>';
+  const _oldSc = ov.querySelector('#howto-scroll');
+  const _keepScroll = _oldSc ? _oldSc.scrollTop : 0;
   ov.innerHTML = h;
-  document.body.appendChild(ov);
+  const _newSc = ov.querySelector('#howto-scroll');
+  if (_newSc) _newSc.scrollTop = _keepScroll;
   const closeBtn = ov.querySelector('#howto-close');
   if (closeBtn) closeBtn.addEventListener('click', () => { ov.style.display = 'none'; });
+  const schemeSel = ov.querySelector('#howto-scheme');
+  if (schemeSel) schemeSel.addEventListener('change', () => {
+    try { localStorage.setItem(_HOWTO_LSKEY, schemeSel.value); } catch (_) {}
+    _howtoRender(ov);
+  });
+}
+function openHowToPlay() {
+  let ov = document.getElementById('howto-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'howto-overlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:220;background:rgba(4,4,12,0.96);' +
+      'display:flex;flex-direction:column;align-items:center;overflow:hidden;color:#dde;' +
+      "font-family:'Rajdhani',sans-serif;cursor:default;";
+    document.body.appendChild(ov);
+  }
+  _howtoRender(ov);
+  ov.style.display = 'flex';
 }
 try { window.openHowToPlay = openHowToPlay; } catch (_) {}
 
@@ -61325,6 +61479,7 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
 const _AUDIO_BAKE = {
   on: true,          // window.__sndBake(0) to A/B against live synthesis
   buf: Object.create(null),
+  lastTake: Object.create(null),   // (v35.99) per-type round-robin memory
   ready: false, running: false, done: 0, total: 0, bytes: 0, ms: 0,
   maxDur: 3.0,       // hard cap; the continuous voices are not recipes anyway
   batch: 8,          // offline renders in flight at once
@@ -61334,6 +61489,12 @@ function _audioBakeExtraTakes(sec) {
   if (sec <= 1.10) return 1;
   return 0;
 }
+const _AUDIO_BAKE_HOT = {
+  fire_projectile: 1, fire_railgun: 1, fire_hitscan: 1, fire_minigun: 1,
+  fire_spread: 1, fire_salvo: 1, fire_buckshot: 1, fire_leadwall: 1,
+  explosion: 1, rocket_salvo: 1, tracker_rockets: 1, cluster_missile_fire: 1,
+  death: 1, hit: 1, laser_shot: 1, damage: 1,
+};
 
 function _audioBakeLen(recipe) {
   let end = 0;
@@ -61373,11 +61534,18 @@ function _audioBakeTake(type, recipe) {
       let end = d.length;
       while (end > 1 && (d[end - 1] < 0 ? -d[end - 1] : d[end - 1]) < floor) end--;
       end = Math.min(d.length, end + Math.ceil(b.sampleRate * 0.005));   // 5ms of air
+      let out = b, data = d;
       if (end < d.length * 0.97) {
-        const t = audio.ctx.createBuffer(1, Math.max(1, end), b.sampleRate);
-        t.getChannelData(0).set(d.subarray(0, end));
-        return t;
+        out = audio.ctx.createBuffer(1, Math.max(1, end), b.sampleRate);
+        data = out.getChannelData(0);
+        data.set(d.subarray(0, end));
       }
+      const _sr = out.sampleRate;
+      const nIn = Math.min(data.length, Math.round(_sr * 0.002));
+      for (let i = 0; i < nIn; i++) data[i] *= 0.5 - 0.5 * Math.cos(Math.PI * i / nIn);
+      const nOut = Math.min(data.length, Math.round(_sr * 0.006));
+      for (let i = 0; i < nOut; i++) data[data.length - 1 - i] *= 0.5 - 0.5 * Math.cos(Math.PI * (i + 1) / nOut);
+      return out;
     } catch (_) {}
     return b;
   }).catch(() => null);
@@ -61422,7 +61590,7 @@ function _audioBakeAll(reason) {
     for (const type of bakeable) {
       const first = next[type] && next[type][0];
       if (!first) continue;
-      const n = _audioBakeExtraTakes(first.duration);
+      const n = Math.max(_audioBakeExtraTakes(first.duration), _AUDIO_BAKE_HOT[type] ? 2 : 0);
       for (let k = 0; k < n; k++) extra.push(type);
     }
     return runJobs(extra);
@@ -61444,10 +61612,13 @@ function _playBakedSound(type) {
   if (!takes || !takes.length) return false;
   const ctx = audio.ctx;
   const src = ctx.createBufferSource();
-  src.buffer = takes[(Math.random() * takes.length) | 0];
+  let idx = (Math.random() * takes.length) | 0;
+  if (takes.length > 1 && idx === _AUDIO_BAKE.lastTake[type]) idx = (idx + 1) % takes.length;
+  _AUDIO_BAKE.lastTake[type] = idx;
+  src.buffer = takes[idx];
   src.playbackRate.value = 1 + (Math.random() - 0.5) * 0.06;
   const gain = ctx.createGain();
-  gain.gain.value = 1 + (Math.random() - 0.5) * 0.10;
+  gain.gain.value = (Math.random() < 0.5 ? -1 : 1) * (0.8 + Math.random() * 0.2);
   src.connect(gain);
   gain.connect(_audioDrySink());
   const lean = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
@@ -61523,6 +61694,31 @@ if (typeof window !== 'undefined') {
     return _audioBakeTake(type, recipe).then(fresh => ({
       type, bakedTakes: takes, freshRender: fresh ? stat(fresh) : null,
     }));
+  };
+  window.__sndTails = function (worstN) {
+    const rows = [];
+    for (const t of Object.keys(_AUDIO_BAKE.buf)) {
+      const takes = _AUDIO_BAKE.buf[t];
+      for (let k = 0; k < takes.length; k++) {
+        const b = takes[k], d = b.getChannelData(0);
+        let peak = 0, maxJump = 0, jumpAt = -1;
+        for (let i = 0; i < d.length; i++) {
+          const a = d[i] < 0 ? -d[i] : d[i];
+          if (a > peak) peak = a;
+          if (i > 0) { const j = Math.abs(d[i] - d[i - 1]); if (j > maxJump) { maxJump = j; jumpAt = i; } }
+        }
+        rows.push({ type: t, take: k, sec: +b.duration.toFixed(3), peak: +peak.toFixed(3),
+          head: +Math.abs(d[0]).toFixed(4), tail: +Math.abs(d[d.length - 1]).toFixed(4),
+          maxJump: +maxJump.toFixed(3), jumpAtSec: jumpAt >= 0 ? +(jumpAt / b.sampleRate).toFixed(3) : -1 });
+      }
+    }
+    rows.sort((a, b) => b.tail - a.tail);
+    return rows.slice(0, worstN || 20);
+  };
+  window.__sndPlay = function (type, n) {
+    n = Math.max(1, n | 0 || 1);
+    for (let i = 0; i < n; i++) { try { _playSoundFromLabRecipe(type); } catch (e) { return String(e); } }
+    return type + ' x' + n;
   };
 }
 
@@ -61988,7 +62184,13 @@ function _audioIsMobileDevice() {
   return _audioMobileCached;
 }
 
+let _audioForceLean = null;
+if (typeof window !== 'undefined') window.__audioForceLean = function (v) {
+  _audioForceLean = (v == null) ? null : !!v;
+  return 'forceLean=' + _audioForceLean;
+};
 function _audioLeanMode() {
+  if (_audioForceLean !== null) return _audioForceLean;
   return _audioIsMobileDevice() ||
          _audioQuestCombatMode() ||
          (_audioGateMode !== 'off' && _audioStressed) ||
