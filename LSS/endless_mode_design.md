@@ -238,69 +238,142 @@ Deferred / known v1 seams (refinement candidates, in rough priority):
 6. Difficulty is per-player, so lives differ inside one room; adjudicate
    whether the room should adopt the host's pick.
 
-## Aegis Surge (v35.87) — temporary aegis fueled by bolts + kills
+## Aegis Surge (v35.90) — rare hidden bolts grant persistent ranks
 
 The permanent Aegis Ranks are a hub (Exhibition) progression; Endless gets a
-RUN-SCOPED echo of it: a meter that charges from **route bolts** and **wave
-kills**, grants levels 0..5 of temporary buffs, and drains back to nothing
-when you stop feeding it. Momentum made visible — fly aggressively and the
-cavern pays you.
+RUN-SCOPED echo of it. v35.87 shipped a charge meter (bolts + kills in,
+idle-drain out) and it played as a drip feed — "kinda boring" (owner).
+v35.90 redesigned it around scarcity: **bolts are the ONLY source, each bolt
+is a FULL rank, ranks never decay, and the bolts hide off the flight line.**
+A rank is now an exploration find you keep for the whole run.
 
-Mechanics (all on `game.endlessRun.aegis`; HUD tag ` · AEGIS Lx NN%` on the
-endless top-center line):
+Mechanics (all on `game.endlessRun.aegis`; HUD tag ` · AEGIS Lx` on the
+endless top-center line — no % readout, no decay UI; collecting pulses the
+tag bright with a ⚡ for a beat, banner-free):
 
-- **Bolts** — 1-3 glowing octahedra per route segment (pooled, additive glow
-  sprite, slow spin + bob), placed by a **pure hash of the segment gid**
-  (`_lssEndlessBolts`, `_stHash2`-style math). Deliberately NOT `gen.rand`
-  (the route stream — extra draws desync co-op routes) and NOT `gen.cos`
-  (its cursor free-runs per client, so shared STATE may not draw from it): a
-  pure gid hash gives every peer identical bolts with zero stream
-  consumption. Lateral spread stays inside ~0.45 lane radius; the vertical
-  clamp against the CARVED ground/ceiling heightfields is what guarantees
-  open air (the terrain is strictly floor+ceiling, so a vertically-clear
-  point cannot be inside rock). Spawned with the initial build and with each
-  append; freed when the route window prunes; +25 charge, `rearm_reset`
-  chirp, HUD flash on collect (~90u).
-- **Kills** — +34 charge per alive→dead transition among Fleet-B endless
-  hostiles, detected by a per-tick liveness diff (real bots AND co-op
-  proxies, so non-authority peers charge from the team's kills too). Bots
-  that vanish without an observed dead tick (prune/roster sweep) are dropped
-  uncounted — undercounting beats crediting despawns.
-- **Meter** — 100 charge per level, overflow carries. 12 s with no bolt/kill
-  starts a stepwise drain (~4 s per level: 26/s, drop parks the bar at 100
-  for the next step down). Death zeroes the whole surge.
-- **Buffs** — temporary multipliers scaled off the permanent tree's
-  ceilings, applied reversibly:
+- **Bolts are the only charge source.** At most ONE bolt per gated segment;
+  the gate is a pure gid hash passing ~28% of segments (~1 bolt per 3-5
+  segments, measured 4.4 per 20). Collect radius ~120u (they are rarer).
+  Collect = rank up (0..5), `rearm_reset` chirp, a bright `fireball_cyan`
+  burst at the bolt, and the HUD pulse. Beyond L5 extra bolts still
+  chirp/flash (nothing to grant).
+- **Placement is off the main line** (`_lssEndlessBolts`): every draw is a
+  **pure hash of the segment gid** — deliberately NOT `gen.rand` (the route
+  stream — extra draws desync co-op routes) and NOT `gen.cos` (its cursor
+  free-runs per client; nothing SHARED may draw from it). Alcove bolts sit
+  420-1000u lateral of the spine, lifted to 62-92% of the carved gap (high,
+  near the ceiling); segments with a side-hall chamber (`seg.spur`, the 40%
+  off-lane halls) hang the bolt high in the chamber instead, constrained to
+  the chamber's OUTWARD half — the next segment starts at `seg.b` and does
+  not exist yet at placement time, so the constraint (not a check) is what
+  keeps clearance from it deterministic per peer. A ≥420u xz
+  point-to-segment floor is enforced analytically (3D distance ≥ the xz
+  projection's), then the carved ground/ceiling clamp plus a `worldSDF <
+  -60` step-DOWN adjust verifies open air; no air after 6 steps = no bolt on
+  that segment. Measured over 128 segments: min distance-to-spine 437u xz /
+  504u 3D, worst SDF -201, placement byte-identical across boots. Debug:
+  `window.__endlessBoltProbe(x,y,z)` exposes closure `worldSDF` + carved Ys
+  for headless checks; `__endlessAegis()` reports `offSpineMin`.
+- **Ranks NEVER discharge.** No grace timer, no drain, and death does NOT
+  zero: `respawnPlayer` reads `player.chassis` (our installed clone) and
+  never replaces it, so speed/damage/regen ride through the respawn
+  untouched. The surge resets ONLY in `onBuildWorld` (fresh run) and
+  `onTeardown` (exact base-chassis-reference restore + a generic dispose
+  sweep over the bolt material library).
+- **Kills grant nothing.** The per-tick alive→dead liveness diff stays (real
+  bots AND co-op proxies; vanish-without-dead-tick dropped uncounted) but
+  only as wave bookkeeping — `a.kills` for stats, zero charge.
+- **Buffs** — unchanged temporary multipliers scaled off the permanent
+  tree's ceilings, applied reversibly:
   - **Damage** +6%/lvl (L5 = +30% ≈ two 1.15 tree damage nodes compounded)
     via `_endlessAegisDmgOut` in `Bot.takeDamage` — hooked BEFORE the
     isProxy route so co-op damage claims carry it.
   - **Speed** +4%/lvl (L5 = +20%, under the hoard's 1.33 precedent) via a
     CLONED chassis (`_campBoostSpeed` pattern). The base chassis REFERENCE
-    is captured once and restored exactly on level drop / death / teardown;
-    the shared `CHASSIS` entry is never mutated (the task-1 rule).
+    is captured and restored exactly on teardown; the shared `CHASSIS`
+    entry is never mutated (the task-1 rule).
   - **Hull regen** 0.3%·lvl of max per second (L5 = 1.5%/s; the Nano perk is
     1%/s for a whole perk slot). Hull, not shield — LSS shields never regen
     naturally (the stasis rule).
+- **The look** (`_lssEndlessBoltSlot`) — a chaotic, brighter, smaller cousin
+  of the StasisField energy sphere: emissive octahedron core (r22, toneMapped
+  off) whose scale is pulsed by a 3-term incommensurate cosine sum (erratic,
+  not smooth); TWO nested counter-rotating additive shells on the StasisField
+  material family (`_makeFXMaterial('fireball_cyan')` r46 +
+  `plasma_cyan` r64 — layered noise + fresnel; flat additive fallback on
+  potato, the StasisField precedent); the additive halo sprite; and 3 small
+  god-ray shafts EMITTED from the bolt (the `_ensureRays` canvas-gradient
+  technique) 120° apart, leaning 0.55 rad outward, slowly precessing on a
+  rig — deliberately NOT billboarded, the fan guarantees a non-edge-on shaft
+  from any angle. All geometry/materials live once in `run._boltLib`, slots
+  are pooled, zero per-frame allocations. **Mobile** (`_lssEndlessMobile`,
+  v35.89 discipline): core + ONE shell only — no second shell, no sprite, no
+  emitted rays; pool cap stays 24 (desktop 64).
+- **Living motes (v35.91).** "They try to get away when you SEE them" —
+  Weeping-Angel-INVERSE. A bolt flees only while OBSERVED: player within
+  ~1400u AND inside the view cone (dot(camera forward, dirToBolt) > 0.55;
+  one `getWorldDirection` per tick into a per-run reused vector). Fleeing is
+  erratic darting AWAY at 300u/s (base away-vector, vertical damped, plus a
+  3-term incommensurate cosine jitter — chaotic like its pulse),
+  deliberately under base ship speed (350) and NOT rank-scaled, so Aegis
+  speed ranks make later chases easier. Eyes off or out of range → it calms
+  and drifts home at ~90u/s (snaps onto the anchor). The trick this buys:
+  approach obliquely or eyes-off to sneak close, or run it down in a
+  straight chase and corner it on its TETHER — a mote never strays more
+  than 1600u from its gid-hash anchor (mixed-axis slides can overshoot;
+  >1600.5 reverts to the pre-move offset). Every movement step is verified
+  open air: carved-gap height clamp, then a `worldSDF < -60` endpoint check
+  (the placement threshold) with an axis-drop slide on block — hold-height,
+  then vertical-only: deflect along the wall, never a dead stop — and the
+  pre-move offset is the always-valid fallback; dt is clamped to 0.05 so a
+  hitch step cannot tunnel a thin wall. Perf: behavior ticks only for motes
+  within 2500u of the player (distance early-out FIRST — a mote left beyond
+  the gate holds a frozen offset until you return, by design), zero
+  per-frame allocations, and the mobile branch is identical (it is just
+  position math). Collection is unchanged (120u, rank-up) but measured
+  against the mote's CURRENT position; shells/halo/emitted rays ride the
+  moving group automatically. Debug: `window.__endlessMotes()` — anchor,
+  current position, offset length, fleeT, and SDF per live bolt. Verified
+  headless (v35.91): tracked-camera approach → 525u retreat in 2s; camera
+  facing away → offset stays exactly 0; 30s max-pressure chase → tether max
+  exactly 1600.5 with rest-position SDF never above -60 (bobbed worst
+  -47.7), then a cornered collect 0.4s after closing (L1 + clone
+  installed); calm return 525→0 at ~90u/s back onto the anchor; teardown
+  exact-restores base speed 350 with every core mesh gone; 144 fps, zero
+  console errors, mobile-sim slot carries core+one-shell and flees
+  identically.
 
 v1 seams (deliberate):
 
 1. **Collection is local** — each pilot collects their own bolts; no
    pickup-consumed net event. Two ships can both grab "the same" bolt.
    (Sharing = a small `bolt_taken` gid+idx event, future work.)
-2. Charge/level are per-player; a straggler charges slower than the pilot in
-   the fight (arguably a feature).
-3. The bolt vertical clamp reads the live carve window; every peer evaluates
+2. Ranks are per-player; a pilot who explores side-halls out-levels one who
+   flies the spine (that is the point now).
+3. The bolt clearance math reads the live carve window; every peer evaluates
    a given gid at the same route state (build segs at `onBuildWorld`,
    appends at their own apply) so divergence is bounded to sub-metre joint
    noise — and collection is local anyway.
+4. **Mote offsets are per-client** (v35.91): the deterministic gid-hash
+   point is the shared ANCHOR; the runtime flee/return offset is local
+   visual state (each client's own camera decides "observed"). Peers may
+   see "the same" mote a few hundred units apart mid-chase — consistent
+   with local collection (seam 1); shared-flee state would ride the same
+   future `bolt_taken`-style message if sharing ever lands.
 
-Verified live (headless `__endlessTick` + `__endlessAegis()`): identical
-bolt layouts across three boots of one seed; collect → +25/chirp/HUD;
-1000 dmg → 1060 dealt at L1 through the real `takeDamage` path; L2 = speed
-350→378 + 60 hp/s regen on a 10k hull; 15 s idle → stepwise L2→L1→L0 with
-the base chassis reference restored identically (`chassisIsClone:false`,
-speed exactly 350); death resets the surge before respawn; 144 fps, zero
-console errors.
+Verified live (headless `__endlessTick` + `__endlessAegis()` +
+`__endlessBoltProbe`): 28 bolts over 128 segments (1 per 4.6), every bolt
+≥437u xz / ≥504u 3D off-spine and in verified open air (worst SDF -201, all
+at 53-80% of the carved gap height); placement byte-identical across two
+boots of one seed; collect ×3 → L1/L2/L3 with speed 350→364→378→392 and
+dmg ×1.06/1.12/1.18 (rebased, not compounded); death → L3 + the same clone
+reference survive respawn, a life is spent; 60 s idle → no decay, regen
+exactly 90 hp/s at L3 on a 10k hull; six wave kills → `kills:6`, rank
+unchanged; teardown → the exact base reference restored (speed 350) and the
+layered-FX census drops; the full desktop bolt stack costs 10 draw calls at
+point-blank (525 total in-band, 144 fps); mobile-sim slots carry exactly
+core + one shell, the ceiling ray pool never allocates, bolts still
+collect; zero console errors.
 
 ## Stages
 

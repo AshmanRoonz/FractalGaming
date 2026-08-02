@@ -1323,13 +1323,19 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
 }
 
 
+/* (v35.93) Moved OUT of the ring cluster's keep-clear zone (it sat at top:40%,
+   right across the shield arc it was narrating) down to the status band under
+   the cluster, and the redundant charge bar is DELETED — the HUD shield arc
+   already displays the recharge. Styled after #execution-prompt (the game's
+   other transient centred status line). y: the disc-radar spans ~20..42 vmin
+   below centre, so the line sits just under the keep-clear edge (19.6) where
+   only the thin compass rose passes behind it. */
 #stasis-warning {
-  position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%);
-  z-index: 16; pointer-events: none; color: #00ccff; font-size: 16px;
-  font-weight: bold; letter-spacing: 3px; display: none; text-align: center;
+  position: fixed; top: 8vmin; left: 50%; transform: translate(-50%, -50%);
+  z-index: 16; pointer-events: none; color: #00ccff; font-size: 13px;
+  font-weight: bold; letter-spacing: 2px; display: none; text-align: center;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 -1px 2px rgba(0,0,0,0.95), 0 0 6px rgba(0,0,0,0.8), 0 0 10px rgba(0,180,255,0.55);
 }
-#stasis-warning .stasis-bar { width: 200px; height: 6px; background: rgba(0,0,0,0.5); margin: 8px auto 0; border: 1px solid rgba(0,200,255,0.4); }
-#stasis-warning .stasis-fill { height: 100%; background: linear-gradient(90deg, #0088cc, #00ddff); transition: width 0.1s; }
 
 
 #stasis-vignette {
@@ -2067,10 +2073,9 @@ body.vr-active #camp-video { display: none !important; }
 <div id="enemy-healthbars"></div>
 
 
-<div id="stasis-warning">
-  STASIS FIELD: SHIELDS RECHARGING
-  <div class="stasis-bar"><div class="stasis-fill" id="stasis-fill" style="width:0%"></div></div>
-</div>
+<!-- (v35.93) Charge-bar child removed: the HUD shield arc IS the recharge
+     display, the bar said the same thing twice. -->
+<div id="stasis-warning">STASIS FIELD: SHIELDS RECHARGING</div>
 <div id="stasis-vignette"></div>
 <div id="ov-underwater"></div>
 
@@ -3691,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.89';
+const LSS_BUILD = '35.94';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -6943,11 +6948,15 @@ const EndlessMode = {
     run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
     run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
     run.stormy = false; run.boltT = 0;
-    // (v35.87) AEGIS SURGE state + deterministic route BOLTS for the
+    // (v35.90) AEGIS SURGE state + deterministic route BOLTS for the
     // build-time segments (appended segs get theirs in _lssEndlessApplySeg).
     // Every peer runs this with the same initial segs, so bolt placement
     // evaluates against identical carve state (co-op determinism).
-    run.aegis = { lvl: 0, charge: 0, graceT: 0, flashT: 0, bobT: 0,
+    // REDESIGN: bolts are the ONLY charge source and each grants a FULL
+    // rank; ranks NEVER discharge (no grace/drain, no death-zeroing) — the
+    // whole surge resets only here (fresh run) and in onTeardown. The old
+    // charge/graceT meter scaffolding is gone; lvl is the whole economy.
+    run.aegis = { lvl: 0, flashT: 0, bobT: 0,
                   bolts: 0, kills: 0, seen: {}, baseCh: null, curCh: null };
     try { if (typeof _lssEndlessBolts === 'function') for (let i = 0; i < run.segs.length; i++) _lssEndlessBolts(run, run.segs[i]); } catch (_) {}
     // No rounds in endless: hide the ROUND HUD label for the whole run.
@@ -6990,9 +6999,12 @@ const EndlessMode = {
       if (this._deathT >= 1.6) {
         this._deathT = 0;
         run.lives--;
-        // (v35.87) Death drops the whole AEGIS SURGE: restore the base chassis
-        // reference BEFORE respawnPlayer reads player.chassis, zero the meter.
-        try { this._aegisSetLvl(run, 0); if (run.aegis) { run.aegis.charge = 0; run.aegis.graceT = 0; run.aegis.seen = {}; } } catch (_) {}
+        // (v35.90) Ranks PERSIST across deaths (owner redesign — bolts are
+        // rare, losing them to a death felt punitive). The buff clone stays
+        // installed: respawnPlayer reads player.chassis (our clone) and never
+        // replaces it, so speed/regen/damage all survive the respawn. Only
+        // the kill-bookkeeping diff is reset (the dead wave despawns anyway).
+        try { if (run.aegis) run.aegis.seen = {}; } catch (_) {}
         if (run.lives <= 0) {
           run.over = true; run.overT = 0;
           try { if (window.Overlays && Overlays.banner) Overlays.banner('RUN OVER', (run.dist / 1000).toFixed(2) + ' km'); } catch (_) {}
@@ -7093,18 +7105,29 @@ const EndlessMode = {
     const _ea = (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
     if (_ea) { try { this._director(dt, run); } catch (_) {} }
     else { try { this._coopPhase(dt, run); } catch (_) {} }
-    // (v35.87) AEGIS SURGE: bolts + kill charge + decay + temp buffs.
+    // (v35.90) AEGIS SURGE: bolt visuals + collection + persistent-rank buffs.
     try { this._aegis(dt, run); } catch (_) {}
     try { this._world(dt, run); } catch (_) {}
     // ---- HUD ----
+    // (v35.90) Rank only — no % readout, no decay UI. flashT doubles as a
+    // banner-free collect pulse: the tag brightens + gains a ⚡ for a beat.
     const ag = run.aegis;
-    const aegisTxt = (ag && (ag.lvl > 0 || ag.charge > 0.5))
-      ? ' · AEGIS L' + ag.lvl + ' ' + Math.round(ag.charge) + '%' + (ag.flashT > 0 ? ' +' : '')
+    const aegisTxt = (ag && ag.lvl > 0)
+      ? ' · AEGIS L' + ag.lvl + (ag.flashT > 0 ? ' ⚡' : '')
       : '';
     const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
                    : run.phase === 'warning' ? ' · AMBUSH INBOUND' : '';
     const txt = (run.dist / 1000).toFixed(2) + ' km · LIVES ' + run.lives + aegisTxt + phaseTxt;
     if (txt !== run._hudTxt) { run._hudTxt = txt; try { this._hud().textContent = txt; } catch (_) {} }
+    const fl = !!(ag && ag.flashT > 0);
+    if (fl !== run._hudFl) {
+      run._hudFl = fl;
+      try {
+        const el = this._hud();
+        el.style.color = fl ? '#eaffff' : '#9fd4ff';
+        el.style.textShadow = fl ? '0 0 20px rgba(170,240,255,0.95)' : '0 0 12px rgba(80,160,255,0.5)';
+      } catch (_) {}
+    }
   },
   // ---- (v35.72) Stage 2: the ambush director. travel -> warning -> battle -> cleared.
   // The travel clock squeezes ~1.2s per km flown (floor 28s); a wave must be
@@ -7170,76 +7193,148 @@ const EndlessMode = {
       try { if (window.Overlays && Overlays.banner) Overlays.banner('WAVE ' + run.waveN + ' CLEARED', 'hull patched — fly on'); } catch (_) {}
     }
   },
-  // ---- (v35.87) AEGIS SURGE — bolts + kills charge a TEMPORARY aegis ----
-  // Levels 0..5. Charge: route BOLTS (+25, deterministic per segment — see
-  // _lssEndlessBolts; collection is LOCAL v1, each pilot grabs their own) and
-  // wave KILLS (+34, alive->dead transitions among Fleet-B endless hostiles —
-  // real bots AND co-op proxies, so non-authority peers charge too). 12s with
-  // neither = stepwise drain (one level ~4s). Buffs are TEMPORARY multipliers
-  // scaled off the permanent Aegis tree's ceilings (design doc): dmg +6%/lvl
-  // (L5 +30% ~ two 1.15 tree damage nodes compounded, _endlessAegisDmgOut),
+  // ---- (v35.90) AEGIS SURGE — rare route bolts grant PERSISTENT ranks ----
+  // Owner redesign of the v35.87 meter (which was "kinda boring"): BOLTS are
+  // the ONLY charge source and each one grants a FULL rank (0..5); ranks
+  // NEVER discharge — no grace, no drain, no death-zeroing. The surge resets
+  // only in onBuildWorld (fresh run) and onTeardown (exact base-chassis
+  // restore). Bolts are RARE (~1 per 3.6 segments, pure gid-hash gate) and
+  // HIDDEN off the main line (420-1000u lateral / high near the ceiling /
+  // inside side-hall chambers — see _lssEndlessBolts), so a rank is an
+  // exploration find, not a drip feed. Buffs are unchanged TEMP multipliers
+  // scaled off the permanent tree's ceilings (design doc): dmg +6%/lvl
+  // (_endlessAegisDmgOut, hooked BEFORE Bot.takeDamage's isProxy route),
   // speed +4%/lvl via a CLONED chassis (the _campBoostSpeed pattern — the
   // shared CHASSIS entry is NEVER mutated; the base REFERENCE is restored
-  // exactly on level drop / death / teardown), hull regen 0.3%/lvl of max per
-  // second (the Nano perk is 1%/s for a whole perk slot; shields never regen
-  // naturally in LSS, so hull is the regen buff).
+  // exactly on teardown), hull regen 0.3%/lvl of max per second.
+  // The alive->dead kill diff STAYS as wave bookkeeping (a.kills, no charge).
   _aegis(dt, run) {
     const a = run.aegis; if (!a) return;
     if (a.flashT > 0) a.flashT -= dt;
     const p = player.position;
     a.bobT += dt;
-    // Bolt spin/bob + collection (~90u).
+    const tt = a.bobT;
+    // (v35.91) LIVING MOTES — camera forward for the observation cone, ONE
+    // compute per tick, written into a per-run reused vector (zero per-frame
+    // allocations, the v35.89 rule).
+    const fwd = a.fwd || (a.fwd = new THREE.Vector3(0, 0, -1));
+    try { camera.getWorldDirection(fwd); } catch (_) {}
+    const T = game.sandwichTerrain;
+    // Bolt animation + collection (~120u — rarer finds get a wider net).
+    // Chaotic, not smooth: cosine-sum core pulse + counter-rotating shells +
+    // slowly precessing emitted rays (desktop). No per-frame allocations.
+    // (v35.91) LIVING MOTES — Weeping-Angel-INVERSE: a bolt FLEES only while
+    // OBSERVED (player within 1400u AND inside the view cone, dot > 0.55);
+    // eyes off / far away -> it calms and slowly drifts home. So: approach
+    // obliquely or eyes-off to sneak close, or run it down in a straight
+    // chase. The gid-hash ANCHOR (b.x/y/z) never moves — the runtime offset
+    // (b.ox/oy/oz) is per-client VISUAL state riding it (collection is local,
+    // v35.87/90: peers may see the same mote a few hundred u apart mid-chase;
+    // the anchor and the rank grant stay identical). Behavior ticks ONLY
+    // within 2500u (cheap distance early-out FIRST — far motes cost exactly
+    // what v35.90 cost). Flee speed 300u/s sits under base ship 350 and is
+    // deliberately NOT rank-scaled: Aegis speed ranks make later chases
+    // easier. TETHER 1600u max off-anchor. Every step is worldSDF-verified
+    // open air (< -60, the placement threshold) with an axis-drop slide on
+    // block (deflect along the wall, never stop dead) + the carved-gap height
+    // clamp; the pre-move offset is the always-valid fallback. Mobile runs
+    // the identical branch — it is just position math.
     for (let si = 0; si < run.segs.length; si++) {
       const bl = run.segs[si]._bolts; if (!bl) continue;
       for (let i = 0; i < bl.length; i++) {
         const b = bl[i]; if (b.taken || !b.slot) continue;
-        const g = b.slot.grp;
+        const s = b.slot, g = s.grp;
         g.rotation.y += dt * 1.4;
-        g.position.y = b.y + Math.sin(a.bobT * 1.8 + b.phase) * 14;
-        const dx = p.x - b.x, dy = p.y - g.position.y, dz = p.z - b.z;
-        if (dx * dx + dy * dy + dz * dz < 8100) {
-          b.taken = true; b.slot.inUse = false; g.visible = false; b.slot = null;
-          a.charge += 25; a.graceT = 0; a.flashT = 1.2; a.bolts++;
+        let mx = b.x + b.ox, mz = b.z + b.oz;
+        const bdx = mx - p.x, bdy = (b.y + b.oy) - p.y, bdz = mz - p.z;
+        const bd2 = bdx * bdx + bdy * bdy + bdz * bdz;
+        if (bd2 < 6250000) {   // 2500u behavior gate
+          const bd = Math.sqrt(bd2) || 1;
+          let obs = false;
+          if (bd < 1400) obs = (fwd.x * bdx + fwd.y * bdy + fwd.z * bdz) / bd > 0.55;
+          if (obs) b.fleeT = 0.3; else if (b.fleeT > 0) b.fleeT -= dt;
+          const mdt = dt > 0.05 ? 0.05 : dt;   // hitch clamp: a big dt step could tunnel a thin wall
+          let sx = 0, sy = 0, sz = 0, moving = false;
+          if (b.fleeT > 0) {
+            // FLEE: base away-vector (vertical damped) + cosine-sum jitter,
+            // chaotic like its pulse — erratic darting, not a straight line.
+            const vx = bdx / bd + 0.55 * Math.cos(tt * 5.1 + b.phase * 3.7);
+            const vy = bdy / bd * 0.35 + 0.28 * Math.cos(tt * 8.3 + b.phase * 1.9);
+            const vz = bdz / bd + 0.55 * Math.cos(tt * 6.7 + b.phase * 2.9);
+            const st = 300 * mdt / (Math.hypot(vx, vy, vz) || 1);
+            sx = vx * st; sy = vy * st; sz = vz * st; moving = true;
+          } else if (b.ox || b.oy || b.oz) {
+            // CALM: slow drift home (~90u/s), snap at the anchor.
+            const ol = Math.hypot(b.ox, b.oy, b.oz);
+            if (ol < 2) { b.ox = b.oy = b.oz = 0; }
+            else { const st = Math.min(ol, 90 * mdt) / ol; sx = -b.ox * st; sy = -b.oy * st; sz = -b.oz * st; moving = true; }
+          }
+          if (moving) {
+            const pox = b.ox, poy = b.oy, poz = b.oz;   // last known-good (open air + tethered)
+            let nox = b.ox + sx, noy = b.oy + sy, noz = b.oz + sz;
+            const tl = Math.hypot(nox, noy, noz);
+            if (tl > 1600) { const k = 1600 / tl; nox *= k; noy *= k; noz *= k; }   // TETHER
+            const nx = b.x + nox, nz = b.z + noz; let ny = b.y + noy;
+            try {
+              const gy = _stGroundYCarved(nx, nz, T) + 170, cv = _stCeilYCarved(nx, nz, T) - 170;
+              if (cv > gy) ny = ny < gy ? gy : (ny > cv ? cv : ny);   // carved-gap clamp
+              const cy0 = b.y + poy;
+              if (worldSDF(nx, ny, nz) < -60) { b.ox = nox; b.oy = ny - b.y; b.oz = noz; }
+              else if (worldSDF(nx, cy0, nz) < -60) { b.ox = nox; b.oz = noz; }   // slide: hold height
+              else if (worldSDF(mx, ny, mz) < -60) { b.oy = ny - b.y; }           // slide: vertical only
+              // all three blocked -> hold this frame; the jitter re-aims next tick
+              const t2 = Math.hypot(b.ox, b.oy, b.oz);   // mixed-axis slides can overshoot the tether
+              if (t2 > 1600.5) { b.ox = pox; b.oy = poy; b.oz = poz; }
+            } catch (_) { b.ox = pox; b.oy = poy; b.oz = poz; }
+            mx = b.x + b.ox; mz = b.z + b.oz;
+          }
+          g.position.x = mx; g.position.z = mz;
+        }
+        g.position.y = b.y + b.oy + Math.sin(tt * 1.8 + b.phase) * 16;
+        // Erratic flicker: 3-term cosine sum, incommensurate frequencies.
+        const wob = 1 + 0.16 * Math.cos(tt * 7.3 + b.phase)
+                      + 0.11 * Math.cos(tt * 12.7 + b.phase * 2.3)
+                      + 0.06 * Math.cos(tt * 23.1 + b.phase * 4.1);
+        if (s.core) s.core.scale.setScalar(wob);
+        if (s.sh1) { s.sh1.rotation.y += dt * 1.9; s.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + b.phase); }
+        if (s.sh2) { s.sh2.rotation.y -= dt * 2.6; s.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + b.phase); }
+        if (s.rig) { s.rig.rotation.y += dt * 0.45; s.rig.rotation.x = 0.10 * Math.cos(tt * 0.7 + b.phase); }
+        // Collection vs the mote's CURRENT position (shells/rays ride the
+        // moving group automatically — they are its children).
+        const dx = p.x - g.position.x, dy = p.y - g.position.y, dz = p.z - g.position.z;
+        if (dx * dx + dy * dy + dz * dz < 14400) {
+          b.taken = true; s.inUse = false; g.visible = false; b.slot = null;
+          a.bolts++; a.flashT = 1.4;
+          // A full rank per bolt (cap 5 — extra bolts still flash/chirp).
+          if (a.lvl < 5) { try { this._aegisSetLvl(run, a.lvl + 1); } catch (_) {} }
           try { if (typeof playSound === 'function') playSound('rearm_reset'); } catch (_) {}
+          // Collect feedback: a bright cyan burst at the bolt (event-scoped
+          // allocation, not per-frame; spawnFXBurst self-skips on potato).
+          try {
+            if (typeof spawnFXBurst === 'function')
+              spawnFXBurst('fireball_cyan', new THREE.Vector3(g.position.x, g.position.y, g.position.z), 110, 0.55, { startScale: 0.25, endScale: 1.7 });
+          } catch (_) {}
         }
       }
     }
-    // Kill charge: alive->dead transitions. Entries vanishing WITHOUT a dead
-    // tick (prune/teardown/roster sweep) are dropped uncounted — undercount
-    // beats crediting despawns as kills.
+    // Kill bookkeeping: alive->dead transitions among Fleet-B endless
+    // hostiles (real bots AND co-op proxies). NO aegis charge (v35.90 — bolts
+    // are the only source); the diff stays for wave stats (a.kills). Entries
+    // vanishing WITHOUT a dead tick (prune/teardown/roster sweep) are dropped
+    // uncounted — undercount beats crediting despawns as kills.
     try {
-      // (v35.89) perf: `present` was a fresh {} EVERY FRAME — the one true
-      // per-frame allocation in the v35.87 additions (mobile GC churn). Now a
-      // persistent map stamped per frame; membership = stamp equality. Stale
-      // ids linger in _pres unread (~6 per wave, never iterated) — only `seen`
-      // is iterated, and it is still pruned every frame.
+      // (v35.89) perf: persistent stamp map, no per-frame {} allocation.
       const seen = a.seen, present = a._pres || (a._pres = {}), stamp = (a._psn = (a._psn || 0) + 1);
       for (let i = 0; i < game.entities.length; i++) {
         const e = game.entities[i];
         if (!e || !(e instanceof Bot) || e.team !== LSS.TEAM_FLEET_B) continue;
         present[e.id] = stamp;
         if (e.alive) seen[e.id] = 1;
-        else if (seen[e.id]) { delete seen[e.id]; a.charge += 34; a.graceT = 0; a.flashT = 1.2; a.kills++; }
+        else if (seen[e.id]) { delete seen[e.id]; a.kills++; }
       }
       for (const id in seen) if (present[id] !== stamp) delete seen[id];
     } catch (_) {}
-    // Grace, then stepwise drain.
-    a.graceT += dt;
-    if (a.graceT > 12) {
-      a.charge -= 26 * dt;
-      if (a.charge <= 0) {
-        if (a.lvl > 0) { a.charge = 100; this._aegisSetLvl(run, a.lvl - 1); }
-        else a.charge = 0;
-      }
-    }
-    // Level up on a full bar (overflow carries into the next level). Gated on
-    // a FRESH earn (any bolt/kill zeroes graceT above): the drain path parks
-    // charge at 100 when it steps a level down, and without this gate the loop
-    // instantly re-consumed that 100 and leveled straight back up — the meter
-    // pinned at its level with charge 0 forever (found live, v35.87).
-    while (a.charge >= 100 && a.lvl < 5 && a.graceT <= 12) { a.charge -= 100; this._aegisSetLvl(run, a.lvl + 1); }
-    if (a.charge > 100) a.charge = 100;
-    // Regen buff (hull only).
+    // Regen buff (hull only; ranks never decay, so this runs for the run).
     if (a.lvl > 0 && player.maxHealth && player.shipState !== 'dead') {
       player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.003 * a.lvl * dt);
     }
@@ -7438,7 +7533,11 @@ const EndlessMode = {
         try { scene.remove(r.mesh); r.mesh.geometry.dispose(); r.mesh.material.dispose(); } catch (_) {}
       }
     } catch (_) {}
-    // (v35.87) AEGIS SURGE teardown: exact base-chassis restore + bolt pool.
+    // (v35.90) AEGIS SURGE teardown: the ONLY discharge — exact base-chassis
+    // restore (speed clone) via _aegisSetLvl(0), bolt pool removal, and a
+    // generic dispose sweep over every _boltLib entry (geos, core/shell/
+    // sprite/ray materials, the ray canvas texture; the layered-FX shells'
+    // patched dispose also removes them from _ACTIVE_LAYERED_FX).
     try {
       const run = game.endlessRun;
       if (run && run.aegis) this._aegisSetLvl(run, 0);
@@ -7447,7 +7546,7 @@ const EndlessMode = {
         run._boltPool = null;
       }
       if (run && run._boltLib) {
-        try { run._boltLib.geo.dispose(); run._boltLib.coreMat.dispose(); run._boltLib.sprMat.dispose(); } catch (_) {}
+        for (const k in run._boltLib) { const o = run._boltLib[k]; if (o && typeof o.dispose === 'function') { try { o.dispose(); } catch (_) {} } }
         run._boltLib = null;
       }
     } catch (_) {}
@@ -7608,28 +7707,75 @@ if (typeof window !== 'undefined') window.__endlessInfo = function () {
 if (typeof window !== 'undefined') window.__endlessTick = function (dt) {
   try { GameModes.endless.update(dt || 0.033); return 'ok'; } catch (e) { return String(e && e.stack || e); }
 };
-// (v35.87) AEGIS SURGE debug view: meter, buff multipliers, live bolt census.
+// (v35.90) AEGIS SURGE debug view: rank, buff multipliers, live bolt census
+// + per-bolt distance-to-spine (min over the seg window's xz projections —
+// the off-line placement guarantee is >=420u, so offSpineMin < 400 is a bug).
 if (typeof window !== 'undefined') window.__endlessAegis = function () {
   try {
     const run = game.endlessRun; if (!run) return null;
     const a = run.aegis || {};
-    let liveBolts = 0; const firstBolts = [];
+    let liveBolts = 0; const firstBolts = []; let offMin = Infinity;
     for (let i = 0; i < run.segs.length; i++) {
       const bl = run.segs[i]._bolts; if (!bl) continue;
       for (let j = 0; j < bl.length; j++) if (!bl[j].taken) {
+        const b = bl[j];
         liveBolts++;
-        if (firstBolts.length < 5) firstBolts.push([Math.round(bl[j].x), Math.round(bl[j].y), Math.round(bl[j].z)]);
+        if (firstBolts.length < 5) firstBolts.push([Math.round(b.x), Math.round(b.y), Math.round(b.z)]);
+        let dmin = Infinity;
+        for (let k = 0; k < run.segs.length; k++) {
+          const s = run.segs[k];
+          const ex = s.b.x - s.a.x, ez = s.b.z - s.a.z, l2 = ex * ex + ez * ez || 1;
+          let t = ((b.x - s.a.x) * ex + (b.z - s.a.z) * ez) / l2;
+          t = t < 0 ? 0 : (t > 1 ? 1 : t);
+          const qx = b.x - (s.a.x + ex * t), qz = b.z - (s.a.z + ez * t);
+          const d = Math.hypot(qx, qz);
+          if (d < dmin) dmin = d;
+        }
+        if (dmin < offMin) offMin = dmin;
       }
     }
     return {
-      lvl: a.lvl || 0, charge: Math.round(a.charge || 0), graceT: +(a.graceT || 0).toFixed(1),
+      lvl: a.lvl || 0,
       boltsTaken: a.bolts || 0, kills: a.kills || 0, liveBolts, firstBolts,
+      offSpineMin: (offMin === Infinity) ? null : Math.round(offMin),
       dmgMult: (typeof _endlessAegisDmgOut === 'function') ? +(_endlessAegisDmgOut(1000) / 1000).toFixed(3) : 1,
       speed: player.chassis && player.chassis.flightSpeed,
       baseSpeed: a.baseCh ? a.baseCh.flightSpeed : (player.chassis && player.chassis.flightSpeed),
       chassisIsClone: !!(a.curCh && player.chassis === a.curCh),
       hp: Math.round(player.health), maxHp: player.maxHealth,
     };
+  } catch (e) { return String(e && e.stack || e); }
+};
+// (v35.90) Headless clearance probe: worldSDF + carved ground/ceiling are all
+// closure-scoped, so console-side verification (bolt open-air checks) needs
+// this window. SDF < -60 = open air (the placement gate's own threshold).
+if (typeof window !== 'undefined') window.__endlessBoltProbe = function (x, y, z) {
+  try {
+    const T = game.sandwichTerrain;
+    return { sdf: +worldSDF(x, y, z).toFixed(1),
+             gy: Math.round(_stGroundYCarved(x, z, T)), cy: Math.round(_stCeilYCarved(x, z, T)) };
+  } catch (e) { return String(e); }
+};
+// (v35.91) Living-mote census: per live bolt, the gid-hash ANCHOR, the mote's
+// CURRENT group position, the runtime offset length, flee state, and the SDF
+// at the current spot (< -60 = open air). Debug-only (allocates freely).
+if (typeof window !== 'undefined') window.__endlessMotes = function () {
+  try {
+    const run = game.endlessRun; if (!run) return null;
+    const out = [];
+    for (let i = 0; i < run.segs.length; i++) {
+      const bl = run.segs[i]._bolts; if (!bl) continue;
+      for (let j = 0; j < bl.length; j++) {
+        const b = bl[j]; if (b.taken || !b.slot) continue;
+        const g = b.slot.grp;
+        out.push({ ax: Math.round(b.x), ay: Math.round(b.y), az: Math.round(b.z),
+                   x: +g.position.x.toFixed(1), y: +g.position.y.toFixed(1), z: +g.position.z.toFixed(1),
+                   off: +Math.hypot(b.ox || 0, b.oy || 0, b.oz || 0).toFixed(1),
+                   fleeT: +(b.fleeT || 0).toFixed(2),
+                   sdf: +worldSDF(g.position.x, g.position.y, g.position.z).toFixed(1) });
+      }
+    }
+    return out;
   } catch (e) { return String(e && e.stack || e); }
 };
 
@@ -37455,13 +37601,16 @@ function disposeAllDetachedGasPockets() {
 // game.dynamicObjects entries, and are checked in all five player
 // weapon paths (hitscan, spread pellets, projectiles, splash, Mega
 // Laser). Local-sim only ; not synced over the network.
+// (v35.92) ghost: per-creature spectral tint for the hologram treatment —
+// the monster's identity colour pulled toward the pale end so the rim reads
+// ectoplasmic, not painted. Default (no ghost field) is cyan-violet 0x8ad8ff.
 const MONSTER_DEFS = [
-  { key: 'FleshMaw',     gut1: 0xb22436, gut2: 0x7a1020 },
-  { key: 'GraveTitan',   gut1: 0x9a8468, gut2: 0x5a2c20 },
-  { key: 'HallowWalker', gut1: 0xd8cfa8, gut2: 0x86c44a },
-  { key: 'IronBloom',    gut1: 0xb84a2a, gut2: 0x6a4a8a },
-  { key: 'StoneShroud',  gut1: 0x8a8a92, gut2: 0x5a8a4a },
-  { key: 'VoidGazer',    gut1: 0x8a3aca, gut2: 0x2a1a4a },
+  { key: 'FleshMaw',     gut1: 0xb22436, gut2: 0x7a1020, ghost: 0xff7a9a },
+  { key: 'GraveTitan',   gut1: 0x9a8468, gut2: 0x5a2c20, ghost: 0xc9b8ff },
+  { key: 'HallowWalker', gut1: 0xd8cfa8, gut2: 0x86c44a, ghost: 0xa6ffd0 },
+  { key: 'IronBloom',    gut1: 0xb84a2a, gut2: 0x6a4a8a, ghost: 0xffb08a },
+  { key: 'StoneShroud',  gut1: 0x8a8a92, gut2: 0x5a8a4a, ghost: 0x9fd4ff },
+  { key: 'VoidGazer',    gut1: 0x8a3aca, gut2: 0x2a1a4a, ghost: 0xc07aff },
 ];
 
 // (v32.15) Cheap fresnel rim for the unlit full-bright monster materials.
@@ -37517,6 +37666,50 @@ function _addGutsShader(mat, gut1Hex, gut2Hex) {
     );
   };
   mat.customProgramCacheKey = () => 'gutsFlesh';
+  return mat;
+}
+
+// (v35.92) SPECTRAL GHOST monster treatment. Monsters phase through walls by
+// DESIGN, so every monster GLB must read as a ghost/hologram in every mode it
+// appears (hub summons, campaign bosses, any future endless creatures) — the
+// wall-phasing then looks intentional instead of broken. Applied at the single
+// material-prep point (OutskirtsMonster.attachModel), mirroring _addBasicRim's
+// onBeforeCompile pattern on the full-bright MeshBasicMaterial conversion so
+// skinning / map / vertexColors stay intact and one program is shared:
+//   - fresnel-driven opacity: bright rim (~0.9), translucent core (~0.42)
+//   - emissive spectral tint (per-def MONSTER_DEFS.ghost, default cyan-violet)
+//   - ~7 Hz temporal flicker + slow screen-space scanline drift (hologram vibe)
+// Material-level only: no extra passes, no render targets, mobile-safe. The
+// time uniform is ONE shared object ticked once per frame in updateMonsters.
+const _monGhostTimeU = { value: 0 };
+function _addSpectralGhost(mat, tintHex) {
+  if (!mat) return mat;
+  mat.transparent = true;
+  // depthWrite false: hologram x-ray layering (far limbs glow through the
+  // body). Verified against terrain/FX in screenshots — see v35.92 notes.
+  mat.depthWrite = false;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uGhostTint = { value: new THREE.Color(tintHex) };
+    shader.uniforms.uGhostTime = _monGhostTimeU;
+    shader.vertexShader = 'varying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <project_vertex>',
+      '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
+    );
+    shader.fragmentShader = 'uniform vec3 uGhostTint;\nuniform float uGhostTime;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <opaque_fragment>',
+      '#include <opaque_fragment>\n' +
+      '  { vec3 ghN = normalize(vGhN); vec3 ghV = normalize(vGhV);\n' +
+      '    float ghFres = pow(1.0 - clamp(dot(ghN, ghV), 0.0, 1.0), 2.0);\n' +
+      '    float ghFlick = 0.92 + 0.08 * sin(uGhostTime * 44.0) * (0.55 + 0.45 * sin(uGhostTime * 9.7));\n' +
+      '    float ghScan = 0.95 + 0.05 * sin(gl_FragCoord.y * 0.28 - uGhostTime * 14.0);\n' +
+      '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhostTint * 0.55, 0.4);\n' +
+      '    gl_FragColor.rgb += uGhostTint * ghFres * (1.15 + 0.25 * sin(uGhostTime * 38.0));\n' +
+      '    gl_FragColor.a = clamp((0.42 + 0.55 * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+    );
+  };
+  mat.customProgramCacheKey = () => 'spectralGhost';
   return mat;
 }
 
@@ -37799,13 +37992,11 @@ class OutskirtsMonster {
     // they read in the unlit void. MeshBasicMaterial(map) gives the
     // identical full-bright look at a fraction of the fragment cost
     // (this was a measured chunk of the mobile framerate regression).
-    // (v32.15) Per-creature bioluminescent rim color: the monster's own gut
-    // palette, lightened, so each leviathan's silhouette glows in its identity
-    // color. Desktop only ; mobile keeps the pure-flat path the perf pass tuned.
-    const _rimOn  = (typeof _LSS_IS_MOBILE === 'undefined') || !_LSS_IS_MOBILE;
-    const _rimCol = (this.def && this.def.gut1 != null)
-      ? new THREE.Color(this.def.gut1).lerp(new THREE.Color(0xffffff), 0.55).getHex()
-      : 0x9fc8ff;
+    // (v35.92) SPECTRAL GHOST: replaces the old desktop-only _addBasicRim pass.
+    // Applied on ALL tiers (mobile included) — the ghost read IS the creature's
+    // identity now, and the shader is the same cost class as the rim it replaces
+    // (one fresnel + three sins, one shared program via customProgramCacheKey).
+    const _ghCol = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
     obj3d.traverse(node => {
       if (!node.isMesh || !node.material) return;
       const mats = Array.isArray(node.material) ? node.material : [node.material];
@@ -37821,7 +38012,7 @@ class OutskirtsMonster {
             // Untextured part: keep its tint, brightened for the void.
             flat.color.multiplyScalar(0.85);
           }
-          if (_rimOn && typeof _addBasicRim === 'function') _addBasicRim(flat, _rimCol, 0.6);
+          if (typeof _addSpectralGhost === 'function') _addSpectralGhost(flat, _ghCol);
           out.push(flat);
           if (mat.dispose) { try { mat.dispose(); } catch (_) {} }
         } catch (_) { out.push(mat); }
@@ -38394,9 +38585,17 @@ function spawnMonsterGuts(pos, size, def) {
     // Wet-flesh value variation: some chunks darker (organ meat), a few
     // brighter (fresh tears).
     col.multiplyScalar(0.7 + Math.random() * 0.55);
+    // (v35.92) The monsters are spectral ghosts now — wet meat bursting out of
+    // a hologram read absurd, so pull the gib palette toward the def's ghost
+    // tint (minimal change: the guts shader + physics stay untouched) so the
+    // burst reads as the apparition shattering into ectoplasm shards.
+    const _gh = new THREE.Color((def && def.ghost != null) ? def.ghost : 0x8ad8ff);
+    col.lerp(_gh, 0.45);
+    const _sg1 = new THREE.Color(def.gut1).lerp(_gh, 0.5).getHex();
+    const _sg2 = new THREE.Color(def.gut2).lerp(_gh, 0.35).getHex();
     const mat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 1.0 });
     // (v32.69) Wet-flesh shader so the gibs read as guts (skip on potato tier).
-    try { if (typeof QUALITY === 'undefined' || !QUALITY.isPotato || !QUALITY.isPotato()) _addGutsShader(mat, def.gut1, def.gut2); } catch (_) {}
+    try { if (typeof QUALITY === 'undefined' || !QUALITY.isPotato || !QUALITY.isPotato()) _addGutsShader(mat, _sg1, _sg2); } catch (_) {}
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.set(
       pos.x + (Math.random() - 0.5) * size * 0.3,
@@ -39061,6 +39260,10 @@ function updateMonsters(dt) {
     return;
   }
   if (!game.monsters) return;
+  // (v35.92) Shared hologram clock for the spectral-ghost monster shader —
+  // ONE uniform object across every monster material, ticked once per frame
+  // (no per-frame allocation). Wraps at 1h to keep float precision.
+  _monGhostTimeU.value = (_monGhostTimeU.value + Math.min(dt, 0.1)) % 3600;
   // Round reset latch: EVERY round transition passes through 'warmup' —
   // wins, champion captures, and timer draws alike. (The previous trigger
   // keyed off arena geometry, which timer draws never rebuild and which
@@ -64300,13 +64503,9 @@ function updateStasisFields(dt) {
           const startS = field._championChargeStartShield;
           const targetShield = startS + (maxS - startS) * progress;
           if (targetShield > ship.shield) ship.shield = targetShield;
-          // HUD bar for the player; bots have their own UI.
-          if (isPlayer) {
-            const fill = document.getElementById('stasis-fill');
-            if (fill) {
-              fill.style.width = (progress * 100) + '%';
-            }
-          }
+          // (v35.93) The old #stasis-fill bar write is gone — the player's
+          // shield arc on the HUD tracks `progress` (targetShield above), so
+          // the bar was a duplicate display.
           // Win condition: this team's accrued progress is full.
           if (progress >= 1) {
             const team = ship.team;
@@ -64502,7 +64701,6 @@ function updatePlayerStasis(dt) {
   if (game.playerInChampionStasis) return;
 
   game.playerStasisTimer -= dt;
-  const progress = 1 - (game.playerStasisTimer / game.playerStasisDuration);
 
   // Gradually recharge shield over the stasis duration
   const rechargePerSec = player.maxShield / game.playerStasisDuration;
@@ -64511,9 +64709,8 @@ function updatePlayerStasis(dt) {
   // Force immobility (override any movement input)
   player.velocity.set(0, 0, 0);
 
-  // Update HUD progress bar
-  const fill = document.getElementById('stasis-fill');
-  if (fill) fill.style.width = (progress * 100) + '%';
+  // (v35.93) No progress bar here anymore — the HUD shield arc filling back up
+  // IS the recharge display (shield tracks `progress` via rechargePerSec above).
 
   if (game.playerStasisTimer <= 0) {
     // Exit stasis
@@ -65323,74 +65520,199 @@ function _lssEndlessBoltHash(gid, salt) {
   const h = Math.sin(gid * 127.1 + salt * 311.7) * 43758.5453;
   return h - Math.floor(h);
 }
-// Pooled visual: emissive octahedron + additive glow sprite, shared geo/mats.
+// Pooled visual (v35.90 redesign): a chaotic, brighter, smaller cousin of the
+// StasisField energy sphere. Layered: bright emissive octahedron core (scale
+// pulsed by a cosine-sum in _aegis), TWO nested counter-rotating additive
+// shells on the StasisField material family (_makeFXMaterial fireball_cyan /
+// plasma_cyan — layered noise + fresnel; flat additive fallback on potato,
+// the StasisField precedent), the additive halo sprite, and 3 small god-ray
+// shafts EMITTED from the bolt (the EndlessMode._ensureRays canvas-gradient
+// technique) leaning outward at 120° and slowly precessing via the rig.
+// MOBILE (v35.89 discipline): core + ONE shell only — no second shell, no
+// sprite, no rays (additive overdraw is what tile GPUs choke on); pool cap
+// stays 24. ALL geo/mats live in run._boltLib (shared across slots) and are
+// disposed unconditionally in onTeardown; slots only hold meshes.
+function _lssEndlessBoltRayTexture() {
+  const cv = document.createElement('canvas'); cv.width = 32; cv.height = 128;
+  const cx = cv.getContext('2d');
+  const grad = cx.createLinearGradient(0, 128, 0, 0);
+  grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.25)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  cx.fillStyle = grad; cx.fillRect(0, 0, 32, 128);
+  const side = cx.createLinearGradient(0, 0, 32, 0);
+  side.addColorStop(0, 'rgba(0,0,0,1)'); side.addColorStop(0.3, 'rgba(0,0,0,0)');
+  side.addColorStop(0.7, 'rgba(0,0,0,0)'); side.addColorStop(1, 'rgba(0,0,0,1)');
+  cx.globalCompositeOperation = 'destination-out';
+  cx.fillStyle = side; cx.fillRect(0, 0, 32, 128);
+  return new THREE.CanvasTexture(cv);
+}
 function _lssEndlessBoltSlot(run) {
   if (!run._boltPool) run._boltPool = [];
   for (let i = 0; i < run._boltPool.length; i++) {
     const s = run._boltPool[i];
     if (!s.inUse) { s.inUse = true; s.grp.visible = true; return s; }
   }
-  if (run._boltPool.length >= (_lssEndlessMobile() ? 24 : 64)) return null;   // window ~18 segs x <=3 bolts — never legitimately hit on desktop; mobile caps the pool at 24 (v35.89 — far bolts just don't spawn, the near ones still charge the aegis)
+  if (run._boltPool.length >= (_lssEndlessMobile() ? 24 : 64)) return null;   // ~5 live bolts typical at 1-per-3.6-segs in an 18-seg window; caps are pure safety rails (mobile 24, v35.89)
   if (!run._boltLib) {
+    const potato = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    const mkFlat = (col, op) => new THREE.MeshBasicMaterial({
+      color: col, transparent: true, opacity: op,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    let sh1, sh2;
+    if (!potato && typeof _makeFXMaterial === 'function') {
+      sh1 = _makeFXMaterial('fireball_cyan');
+      if (sh1.uniforms && sh1.uniforms.uPosScale) sh1.uniforms.uPosScale.value = 1 / 46;
+      sh1.blending = THREE.AdditiveBlending;
+      if (sh1.userData) sh1.userData._timeOffset = Math.random() * 10;
+      sh2 = _makeFXMaterial('plasma_cyan');
+      if (sh2.uniforms && sh2.uniforms.uPosScale) sh2.uniforms.uPosScale.value = 1 / 64;
+      if (sh2.uniforms && sh2.uniforms.uBrightness) sh2.uniforms.uBrightness.value *= 0.7;
+      sh2.blending = THREE.AdditiveBlending;
+      if (sh2.userData) sh2.userData._timeOffset = Math.random() * 10;
+    } else {
+      sh1 = mkFlat(0x33ccff, 0.5); sh2 = mkFlat(0x2288ff, 0.3);
+    }
     run._boltLib = {
-      geo: new THREE.OctahedronGeometry(26),
-      coreMat: new THREE.MeshBasicMaterial({ color: 0x9fe8ff, toneMapped: false }),
+      geo: new THREE.OctahedronGeometry(22),
+      shGeo1: new THREE.IcosahedronGeometry(46, 1),
+      shGeo2: new THREE.IcosahedronGeometry(64, 1),
+      rayGeo: new THREE.PlaneGeometry(30, 440),
+      rayTex: _lssEndlessBoltRayTexture(),
+      coreMat: new THREE.MeshBasicMaterial({ color: 0xbff2ff, toneMapped: false }),
+      shMat1: sh1,
+      shMat2: sh2,
       sprMat: new THREE.SpriteMaterial({
         map: (typeof _emberFalloffTexture !== 'undefined' ? _emberFalloffTexture : null),
         color: 0x55bbff, transparent: true, opacity: 0.85,
         blending: THREE.AdditiveBlending, depthWrite: false,
       }),
+      rayMat: null,
     };
+    run._boltLib.rayMat = new THREE.MeshBasicMaterial({
+      map: run._boltLib.rayTex, transparent: true, opacity: 0.5,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+      side: THREE.DoubleSide, fog: false, color: 0x9fdcff,
+    });
   }
+  const lib = run._boltLib, mob = _lssEndlessMobile();
   const grp = new THREE.Group();
-  grp.add(new THREE.Mesh(run._boltLib.geo, run._boltLib.coreMat));
-  // (v35.89) The additive halo sprite is desktop-only — additive overdraw is
-  // what tile-based mobile GPUs choke on. The emissive octahedron core stays
-  // everywhere, so mobile bolts are still clearly visible. (sprMat is still
-  // built in _boltLib above: teardown disposes it unconditionally.)
-  if (!_lssEndlessMobile()) {
-    const spr = new THREE.Sprite(run._boltLib.sprMat);
-    spr.scale.set(150, 150, 1);
-    grp.add(spr);
+  const core = new THREE.Mesh(lib.geo, lib.coreMat);
+  core.renderOrder = 1; grp.add(core);
+  const sh1 = new THREE.Mesh(lib.shGeo1, lib.shMat1);
+  sh1.renderOrder = 2; grp.add(sh1);
+  let sh2 = null, spr = null, rig = null;
+  if (!mob) {
+    sh2 = new THREE.Mesh(lib.shGeo2, lib.shMat2);
+    sh2.renderOrder = 2; grp.add(sh2);
+    spr = new THREE.Sprite(lib.sprMat);
+    spr.scale.set(170, 170, 1); grp.add(spr);
+    // Emitted god rays: 3 shafts, 120° apart, leaning ~0.55 rad off vertical
+    // so they radiate up-and-outward; the rig precesses in _aegis. Planes are
+    // NOT billboarded (they'd all face the camera and read as a halo) — the
+    // 120° fan guarantees a non-edge-on shaft from any angle, DoubleSide.
+    rig = new THREE.Group();
+    for (let r = 0; r < 3; r++) {
+      const hold = new THREE.Group();
+      hold.rotation.y = r * 2.0944;
+      hold.rotation.z = 0.55;
+      const m = new THREE.Mesh(lib.rayGeo, lib.rayMat);
+      m.position.y = 190;
+      m.renderOrder = 2;
+      hold.add(m);
+      rig.add(hold);
+    }
+    grp.add(rig);
   }
   scene.add(grp);
-  const slot = { grp, inUse: true };
+  const slot = { grp, core, sh1, sh2, spr, rig, inUse: true };
   run._boltPool.push(slot);
   return slot;
 }
-// Place this segment's 1-3 bolts on/near the lane. Lateral offset stays inside
-// ~0.45 lane radius; the VERTICAL clamp against the CARVED ground/ceiling
-// heightfields guarantees open air (sandwich terrain is floor+ceiling only, so
-// a vertically-clear point cannot sit inside rock). The clamp reads the live
-// carve window, but every peer evaluates a given gid at the same route state
-// (build segs at onBuildWorld, appended segs at their own apply) — divergence
-// is bounded to sub-metre joint noise, and collection is local anyway.
+// (v35.90) RARE + HIDDEN off the main line: a gid-hash gate passes ~28% of
+// segments (~1 bolt per 3.6 segs — each bolt is a FULL rank now), and the
+// bolt sits OFF-lane: >=420u lateral from the spine (up to ~1000u), biased
+// into the side-hall chamber when the segment has one (seg.spur — the 40%
+// off-lane halls) and toward HIGH alcoves near the carved ceiling otherwise.
+// Clearance: xz point-to-segment >=420u is enforced analytically (3D dist to
+// the spine can only be LARGER than the xz projection's), then the carved
+// ground/ceiling clamp + a worldSDF < -60 step-adjust (the respawn-path
+// technique, stepping DOWN from the ceiling) verifies open air; no clear air
+// after 6 steps = skip the bolt (deterministic — every peer evaluates a gid
+// at the same route state, the v35.87 argument). All draws stay PURE gid
+// hashes: NOT run.gen.rand (route stream) and NOT gen.cos (free-running
+// cursor) — the v35.85/87 co-op rules.
 function _lssEndlessBolts(run, seg) {
   if (seg._bolts || !seg.a || !seg.b) return;
   const T = game.sandwichTerrain; if (!T || !T.ON) return;
   const out = seg._bolts = [];
   const gid = seg.gid;
-  const n = 1 + Math.floor(_lssEndlessBoltHash(gid, 1) * 3);
+  if (_lssEndlessBoltHash(gid, 97) >= 0.28) return;   // the rarity gate
   const ex = seg.b.x - seg.a.x, ey = seg.b.y - seg.a.y, ez = seg.b.z - seg.a.z;
   const eh = Math.hypot(ex, ez) || 1;
   const px = -ez / eh, pz = ex / eh;
-  const laneR = (seg.cyl && seg.cyl.r) || 400;
-  for (let i = 0; i < n; i++) {
-    const t = 0.2 + 0.6 * _lssEndlessBoltHash(gid, 2 + i * 4);
-    const lat = (_lssEndlessBoltHash(gid, 3 + i * 4) - 0.5) * laneR * 0.9;
-    const x = seg.a.x + ex * t + px * lat;
-    const z = seg.a.z + ez * t + pz * lat;
-    let y = seg.a.y + ey * t + (_lssEndlessBoltHash(gid, 4 + i * 4) - 0.5) * 320;
-    try {
-      const gy = _stGroundYCarved(x, z, T) + 150, cy = _stCeilYCarved(x, z, T) - 150;
-      y = (cy < gy) ? (gy + cy) * 0.5 : Math.max(gy, Math.min(cy, y));
-    } catch (_) {}
-    const slot = _lssEndlessBoltSlot(run);
-    if (!slot) break;
-    slot.grp.position.set(x, y, z);
-    slot.grp.rotation.set(0, _lssEndlessBoltHash(gid, 5 + i * 4) * Math.PI, 0);
-    out.push({ x, y, z, taken: false, slot, phase: _lssEndlessBoltHash(gid, 6 + i * 4) * 6.283 });
+  let x, y, z, chamber = false;
+  if (seg.spur && seg.sph) {
+    // Side-hall chamber: hang the bolt high in the chamber, on the FAR side
+    // from the lane — visible only to a pilot who actually turns in. The
+    // outward-half constraint (radial off the b->chamber axis, tangential
+    // jitter capped at 0.15r) also keeps it >=~500u from the NEXT segment,
+    // which starts at seg.b and does not exist yet at placement time (so it
+    // cannot be checked directly without breaking per-peer determinism).
+    chamber = true;
+    const sph = seg.sph;
+    const ox = sph.cx - seg.b.x, oz = sph.cz - seg.b.z, ol = Math.hypot(ox, oz) || 1;
+    const ux = ox / ol, uz = oz / ol;
+    const rr = sph.r * (0.15 + 0.3 * _lssEndlessBoltHash(gid, 13));
+    const tj = (_lssEndlessBoltHash(gid, 11) - 0.5) * sph.r * 0.3;
+    x = sph.cx + ux * rr - uz * tj;
+    z = sph.cz + uz * rr + ux * tj;
+    y = sph.cy + sph.r * (0.2 + 0.35 * _lssEndlessBoltHash(gid, 17));
+  } else {
+    // Off-lane alcove: 420-1000u lateral, then lifted toward the ceiling.
+    const t = 0.25 + 0.5 * _lssEndlessBoltHash(gid, 11);
+    const side = _lssEndlessBoltHash(gid, 13) < 0.5 ? -1 : 1;
+    const lat = (420 + 580 * _lssEndlessBoltHash(gid, 17)) * side;
+    x = seg.a.x + ex * t + px * lat;
+    z = seg.a.z + ez * t + pz * lat;
+    y = seg.a.y + ey * t;   // provisional; the ceiling bias below overrides
   }
+  // Enforce >=420u xz clearance from the spine segment (chamber picks can
+  // swing back over the lane on small chambers).
+  {
+    const l2 = ex * ex + ez * ez || 1;
+    let ct = ((x - seg.a.x) * ex + (z - seg.a.z) * ez) / l2;
+    ct = ct < 0 ? 0 : (ct > 1 ? 1 : ct);
+    const qx = x - (seg.a.x + ex * ct), qz = z - (seg.a.z + ez * ct);
+    const d = Math.hypot(qx, qz);
+    if (d < 420) {
+      if (d > 1) { const sc = 460 / d; x = seg.a.x + ex * ct + qx * sc; z = seg.a.z + ez * ct + qz * sc; }
+      else { x += px * 460; z += pz * 460; }
+    }
+  }
+  // Clearance-verified open air: clamp into the carved gap (HIGH bias — the
+  // alcove look), then step DOWN out of any ceiling relief until the SDF
+  // reads open (< -60). Sealed column or no air found = no bolt here.
+  try {
+    const gy = _stGroundYCarved(x, z, T) + 170, cy = _stCeilYCarved(x, z, T) - 170;
+    if (cy < gy) return;
+    if (!chamber) y = gy + (cy - gy) * (0.62 + 0.3 * _lssEndlessBoltHash(gid, 19));
+    y = Math.max(gy, Math.min(cy, y));
+    if (typeof worldSDF === 'function') {
+      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
+      if (worldSDF(x, y, z) > -60) return;
+    }
+  } catch (_) {}
+  const slot = _lssEndlessBoltSlot(run);
+  if (!slot) return;
+  slot.grp.position.set(x, y, z);
+  slot.grp.rotation.set(0, _lssEndlessBoltHash(gid, 23) * Math.PI, 0);
+  // (v35.91) The placed point is the ANCHOR. Living-mote flight (EndlessMode
+  // _aegis) rides a runtime offset ox/oy/oz on top of it — per-client visual
+  // state (collection is local), tethered <=1600u; the anchor stays the
+  // shared deterministic truth. fleeT = seconds of observed-flee left.
+  out.push({ x, y, z, taken: false, slot, phase: _lssEndlessBoltHash(gid, 29) * 6.283, ox: 0, oy: 0, oz: 0, fleeT: 0 });
 }
 function _lssEndlessFreeBolts(run, seg) {
   const bl = seg._bolts; if (!bl) return;
