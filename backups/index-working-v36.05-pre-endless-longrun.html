@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.08';
+const LSS_BUILD = '36.05';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -7074,53 +7074,6 @@ const EndlessMode = {
         run.dist += (bestT - run.progT) * tgt.len;
         run.progT = bestT;
       }
-      run.lostT = 0;
-    } else {
-      // ---- (v36.06) RELOCK — stage 1 of the 45-53km freeze fix ----
-      // The free-path pivot (v35.73) invites flying your own valley line, but
-      // the 3-seg x 4200u scan above loses it exactly where the bounded
-      // wander (>42k from origin) turns the invisible spine home while the
-      // pilot flies on: dist froze, the window never slid again, waves
-      // anchored to the stale knot (offline repro: frozen at 51.56km, wave
-      // anchor 22km away and climbing). After 4s unlocked while moving,
-      // re-scan the WHOLE tracked window FORWARD of the lock (first match =
-      // most conservative rejoin); credit the straight CHORD actually flown
-      // since the lock was lost, capped by the spine arc it skips — monotone
-      // (only ADDs) and honest (never credits unflown spine).
-      const v = player.velocity, spd = v ? Math.hypot(v.x, v.y, v.z) : 0;
-      if (spd > 40) {
-        if (!run.lostT) { run.lostX = p.x; run.lostY = p.y; run.lostZ = p.z; }
-        run.lostT = (run.lostT || 0) + dt;
-      }
-      if (run.lostT > 4) {
-        let wk = -1, wt = 0;
-        for (let k = idx; k < run.segs.length; k++) {
-          const s = run.segs[k];
-          const ex = s.b.x - s.a.x, ey = s.b.y - s.a.y, ez = s.b.z - s.a.z;
-          const l2 = ex * ex + ey * ey + ez * ez || 1;
-          let t = ((p.x - s.a.x) * ex + (p.y - s.a.y) * ey + (p.z - s.a.z) * ez) / l2;
-          t = t < 0 ? 0 : (t > 1 ? 1 : t);
-          const qx = p.x - (s.a.x + ex * t), qy = p.y - (s.a.y + ey * t), qz = p.z - (s.a.z + ez * t);
-          if (qx * qx + qy * qy + qz * qz < 4200 * 4200) {
-            if (k > idx || run.progGid < 0 || (s.gid === run.progGid && t > run.progT)) { wk = k; wt = t; }
-            break;
-          }
-        }
-        if (wk >= 0) {
-          const s = run.segs[wk];
-          if (run.progGid < 0) { run.progGid = s.gid; run.progT = wt; }
-          else {
-            const chord = Math.hypot(p.x - run.lostX, p.y - run.lostY, p.z - run.lostZ);
-            let arc = 0;
-            for (let k2 = idx; k2 < wk; k2++) arc += (k2 === idx ? (1 - run.progT) : 1) * run.segs[k2].len;
-            arc += (wk === idx ? (wt - run.progT) : wt) * s.len;
-            run.dist += Math.min(chord, arc);
-            run.progGid = s.gid; run.progT = wt;
-            if (s.hall) run.lastHall = { x: s.b.x, y: s.b.y, z: s.b.z };
-          }
-          run.lostT = 0;
-        }
-      }
     }
     // ---- extend ahead / prune behind ----
     let guard = 0;
@@ -7145,35 +7098,6 @@ const EndlessMode = {
       pruned = true;
     }
     if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
-    // ---- (v36.06) ROUTE RECOVERY — stage 2: "the cavern finds you" ----
-    // Full divergence (pilot > 5200u from EVERY tracked segment for 5s — the
-    // relock above can no longer help because no tracked segment is in
-    // range; 5200 sits comfortably beyond the 4200 scoring tube, so legit
-    // free-path flying never trips it): re-anchor the route AT the flight
-    // line. dist/aegis/lives all survive; the stale window is freed (bolts,
-    // carve shapes, and the baked chunks those shapes carved — removal is a
-    // heightfield change too, the v35.84 rule) and 8 fresh segments grow from
-    // ~2600u ahead of the ship. SOLO ONLY: a re-anchor derives from local
-    // player position, which would fork the shared deterministic route in
-    // co-op (v35.85); roomed runs keep the old behavior (documented seam,
-    // endless_mode_design.md).
-    if (!(net && net.active && net.endless) && run.segs.length) {
-      let nd2 = Infinity;
-      for (let i = 0; i < run.segs.length; i++) {
-        const s = run.segs[i];
-        const ex = s.b.x - s.a.x, ey = s.b.y - s.a.y, ez = s.b.z - s.a.z;
-        const l2 = ex * ex + ey * ey + ez * ez || 1;
-        let t = ((p.x - s.a.x) * ex + (p.y - s.a.y) * ey + (p.z - s.a.z) * ez) / l2;
-        t = t < 0 ? 0 : (t > 1 ? 1 : t);
-        const qx = p.x - (s.a.x + ex * t), qy = p.y - (s.a.y + ey * t), qz = p.z - (s.a.z + ez * t);
-        const d2 = qx * qx + qy * qy + qz * qz;
-        if (d2 < nd2) nd2 = d2;
-      }
-      if (nd2 > 5200 * 5200) {
-        run.farT = (run.farT || 0) + dt;
-        if (run.farT >= 5) { try { this._reanchor(run); } catch (_) {} }
-      } else run.farT = 0;
-    }
     // ---- (v35.72) stage 2 ambush director + stage 3 living world ----
     // (v35.85) CO-OP: ONE authority (amStasisOwner — lowest peerId, the same
     // tie-break family as open_solo_start) runs the director clock + spawns the
@@ -7209,62 +7133,6 @@ const EndlessMode = {
       } catch (_) {}
     }
   },
-  // ---- (v36.06) Re-anchor the route at the player (stage-2 recovery) ----
-  // Keeps dist/aegis/lives; frees every tracked segment (bolts, carve shapes,
-  // and the baked chunks those shapes carved — _swInvalidateChunksInRect
-  // no-ops far outside the stream square, so only near chunks actually
-  // rebake); restarts the generator on the flight line so the next segments
-  // grow from ~2600u ahead of the ship. gen.nextGid keeps counting (monotone
-  // gid invariant), gen.vis keeps its history (the new route still avoids the
-  // old lanes). Debug: run.reanchors counts fires, __endlessInfo shows it.
-  _reanchor(run) {
-    const p = player.position, g = run.gen;
-    let hd = g.heading;
-    const v = player.velocity;
-    if (v && Math.hypot(v.x, v.z) > 30) hd = Math.atan2(v.x, v.z);
-    else if (run.aegis && run.aegis.fwd && Math.hypot(run.aegis.fwd.x, run.aegis.fwd.z) > 0.2) hd = Math.atan2(run.aegis.fwd.x, run.aegis.fwd.z);
-    const soft = ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
-    for (let i = 0; i < run.segs.length; i++) {
-      const s0 = run.segs[i];
-      try { if (s0._bolts && typeof _lssEndlessFreeBolts === 'function') _lssEndlessFreeBolts(run, s0); } catch (_) {}
-      if (s0.cyl) { const j = game.levelCylinders.indexOf(s0.cyl); if (j >= 0) game.levelCylinders.splice(j, 1); }
-      if (s0.spur) { const j = game.levelCylinders.indexOf(s0.spur); if (j >= 0) game.levelCylinders.splice(j, 1); }
-      if (s0.sph) { const j = game.levelSpheres.indexOf(s0.sph); if (j >= 0) game.levelSpheres.splice(j, 1); }
-      try {
-        if (!window.__endlessNoRebake) {
-          const cr = (s0.cyl ? s0.cyl.r : 400) + soft;
-          let minX = Math.min(s0.a.x, s0.b.x) - cr, maxX = Math.max(s0.a.x, s0.b.x) + cr;
-          let minZ = Math.min(s0.a.z, s0.b.z) - cr, maxZ = Math.max(s0.a.z, s0.b.z) + cr;
-          if (s0.sph) {
-            const rr = s0.sph.r + soft;
-            minX = Math.min(minX, s0.sph.cx - rr); maxX = Math.max(maxX, s0.sph.cx + rr);
-            minZ = Math.min(minZ, s0.sph.cz - rr); maxZ = Math.max(maxZ, s0.sph.cz + rr);
-          }
-          const n = _swInvalidateChunksInRect(minX, maxX, minZ, maxZ);
-          if (n) window.__endlessRebaked = (window.__endlessRebaked || 0) + n;
-        }
-      } catch (_) {}
-    }
-    run.segs.length = 0;
-    // Credit the straight-line CHORD flown since tracking was lost (the km
-    // counter's promise is "how far you flew" — the lost stretch was real
-    // flying). Speed-capped against teleport-class jumps; monotone (only ADDs).
-    if (run.lostT > 0 && isFinite(run.lostX)) {
-      const chord = Math.hypot(p.x - run.lostX, p.y - run.lostY, p.z - run.lostZ);
-      run.dist += Math.min(chord, 600 * run.lostT);
-    }
-    g.x = p.x + Math.sin(hd) * 2600;
-    g.z = p.z + Math.cos(hd) * 2600;
-    g.y = Math.max(-260, Math.min(260, p.y));
-    g.heading = hd; g.sinceHall = 0;
-    for (let i = 0; i < 8; i++) { try { _lssEndlessApplySeg(run, _lssEndlessNextSeg(run)); } catch (_) {} }
-    run.progGid = -1; run.progT = 0; run.lostT = 0; run.farT = 0;
-    run.lastHall = { x: p.x, y: p.y, z: p.z };
-    run.reanchors = (run.reanchors || 0) + 1;
-    try { if (window.Overlays && Overlays.banner) Overlays.banner('THE CAVERN SHIFTS', 'a new route finds you'); } catch (_) {}
-    try { announcerSay('New route plotted.', { key: 'endless_reroute', cooldown: 20 }); } catch (_) {}
-    try { if (typeof invalidateMinimapExtent === 'function') invalidateMinimapExtent(); } catch (_) {}
-  },
   // ---- (v35.72) Stage 2: the ambush director. travel -> warning -> battle -> cleared.
   // The travel clock squeezes ~1.2s per km flown (floor 28s); a wave must be
   // CLEARED before the next clock starts, so fleeing just keeps the pack on you.
@@ -7281,43 +7149,8 @@ const EndlessMode = {
     } else if (run.phase === 'warning') {
       if (run.phaseT >= 5) { run.phase = 'battle'; run.phaseT = 0; this._spawnWave(run); }
     } else if (run.phase === 'battle') {
-      let alive = 0, nearD2 = Infinity;
-      if (run.waveBots) for (let i = 0; i < run.waveBots.length; i++) {
-        const b = run.waveBots[i];
-        if (b && b.alive) {
-          alive++;
-          const dx = b.position.x - player.position.x, dy = b.position.y - player.position.y, dz = b.position.z - player.position.z;
-          const d2 = dx * dx + dy * dy + dz * dz;
-          if (d2 < nearD2) nearD2 = d2;
-        }
-      }
-      // (v36.06) WAVE LOST — a live wave whose EVERY bot is >14km away for
-      // 10s straight can never be cleared (the pre-fix stuck-battle starved
-      // endless of ambushes forever once the route diverged: waves anchored
-      // to the stale window, "no enemies after 53km"). Despawn the stragglers
-      // (roster-sweep pattern: destroy + splice + cloud puff; they vanish
-      // without a dead tick so aegis bookkeeping drops them uncounted) and
-      // return to travel — no clear reward, the next ambush finds you again.
-      if (alive && nearD2 > 14000 * 14000) {
-        run.loseT = (run.loseT || 0) + dt;
-        if (run.loseT >= 10) {
-          run.loseT = 0;
-          for (let i = 0; i < run.waveBots.length; i++) {
-            const b = run.waveBots[i];
-            if (!b || !b.alive) continue;
-            try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', b.position, 60, 0.6, { startScale: 1.0, endScale: 0.2 }); } catch (_) {}
-            try { b.destroy(); } catch (_) {}
-            const j = game.entities.indexOf(b);
-            if (j >= 0) game.entities.splice(j, 1);
-          }
-          run.waveBots = null;
-          run.phase = 'travel'; run.phaseT = 0;
-          try { if (net && net.active && net.endless && typeof _botSendRoster === 'function') _botSendRoster(); } catch (_) {}
-          try { announcerSay('Hostiles lost your trail.', { key: 'endless_lost', cooldown: 10 }); } catch (_) {}
-          try { if (window.Overlays && Overlays.banner) Overlays.banner('TRAIL LOST', 'they cannot find you'); } catch (_) {}
-          return;
-        }
-      } else run.loseT = 0;
+      let alive = 0;
+      if (run.waveBots) for (let i = 0; i < run.waveBots.length; i++) { const b = run.waveBots[i]; if (b && b.alive) alive++; }
       if (!alive) {
         run.phase = 'cleared'; run.phaseT = 0; run.waveBots = null;
         try {
@@ -7515,11 +7348,6 @@ const EndlessMode = {
         else if (seen[e.id]) { delete seen[e.id]; a.kills++; }
       }
       for (const id in seen) if (present[id] !== stamp) delete seen[id];
-      // (v36.06) Long-run hygiene: _pres itself held one key per Fleet-B bot
-      // id EVER seen (ids are fresh per wave — unbounded over a 90km run).
-      // Sweep stale stamps every 512 frames (~8.5s); bounds it at live
-      // entities + a few seconds of churn.
-      if ((stamp & 511) === 0) for (const id in present) if (present[id] !== stamp) delete present[id];
     } catch (_) {}
     // Regen buff (hull only; ranks never decay, so this runs for the run).
     if (a.lvl > 0 && player.maxHealth && player.shipState !== 'dead') {
@@ -7888,25 +7716,8 @@ if (typeof window !== 'undefined') window.startEndless = startEndless;
 // and a manual tick so the run logic can be driven headless (the sandbox
 // renderer starves rAF, so gameLoop only ticks sporadically there).
 if (typeof window !== 'undefined') window.__endlessInfo = function () {
-  const run = game.endlessRun || null;
-  const o = { mode: LSS.MODE, hasMode: !!GameModes.endless, isActive: activeMode() === GameModes.endless,
-              run: !!run, state: game.state };
-  // (v36.06) Long-run telemetry for the headless harness: distance, lock,
-  // window span, recovery timers/counters, phase, and array censuses.
-  if (run) {
-    o.dist = run.dist; o.progGid = run.progGid; o.progT = run.progT;
-    o.segs = run.segs.length;
-    o.gid0 = run.segs.length ? run.segs[0].gid : -1;
-    o.gidN = run.segs.length ? run.segs[run.segs.length - 1].gid : -1;
-    o.lostT = run.lostT || 0; o.farT = run.farT || 0; o.reanchors = run.reanchors || 0;
-    o.phase = run.phase; o.waveN = run.waveN; o.lives = run.lives;
-    o.cyls = game.levelCylinders.length; o.sphs = game.levelSpheres.length;
-    o.ents = game.entities.length;
-    o.chunks = (game.sandwichChunks && game.sandwichChunks.size) || 0;
-    o.rebaked = window.__endlessRebaked || 0;
-    try { o.pres = Object.keys((run.aegis && run.aegis._pres) || {}).length; } catch (_) { o.pres = -1; }
-  }
-  return o;
+  return { mode: LSS.MODE, hasMode: !!GameModes.endless, isActive: activeMode() === GameModes.endless,
+           run: !!game.endlessRun, state: game.state };
 };
 if (typeof window !== 'undefined') window.__endlessTick = function (dt) {
   try { GameModes.endless.update(dt || 0.033); return 'ok'; } catch (e) { return String(e && e.stack || e); }
@@ -25119,11 +24930,10 @@ function _hcTowerMat() {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uHcT = _swU.uTime;
     sh.uniforms.uHcSunV = mat.userData.uHcSunV;
-    sh.uniforms.uHcLodOn = HUB_CITY._uLodOn;
     sh.vertexShader = 'attribute vec3 aSize;\nattribute vec2 aPrm;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
       sh.vertexShader.replace('#include <begin_vertex>',
         '#include <begin_vertex>\n vHcL = position * aSize; vHcN = normal; vHcS = aSize; vHcP = aPrm;');
-    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uHcLodOn;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
+    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
       'float hcH21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n') +
       sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
@@ -25161,30 +24971,6 @@ function _hcTowerMat() {
     if (uu > 4.0 && uu < su - 4.0 && vv > 3.0 && vv < vHcS.y - 4.0) {
       vec2 cell = vec2(floor(uu / cw), floor(vv / chh));
       vec2 f = vec2(fract(uu / cw), fract(vv / chh));
-      // (v36.07) fwidth LOD fade - closes the "city lights flicker from far
-      // away" half of the v36.02 report. The snap killed the ULP hash flips;
-      // this kills the GENUINE aliasing left open there: once one pixel spans
-      // a large fraction of a 26x19u window cell, every sub-pixel camera
-      // rotation re-samples different cells/hashes per pixel and the whole
-      // facade twinkles. hcLodW is 0 until a pixel covers HALF a cell (the
-      // cell renders 2px = Nyquist limit - anything crisper is stable) and 1
-      // once a pixel covers ~1.4 cells (cell < 0.71px = genuinely subpixel),
-      // cross-fading to the stable per-tower aggregate glow added below.
-      // fwidth measures the true pixel footprint so this is fov/resolution
-      // independent. (v36.08) Ramp retuned from the v36.07 (0.35, 1.1):
-      // at the flight fov of 120 that started the fade at ~1.6-2k and washed
-      // the 2.5-4k towers (windows still 1.6-3px tall) into flat glow slabs
-      // - visible as solid cyan sheets from street level. Both builds are
-      // fully saturated at the owner's 15-20k vantage (~2.4-3.5 cells/px),
-      // where the remaining flicker was the NEON strips, not this mask (see
-      // _hcNeonMat). ⚠ Also tried (0.35, 0.65): even worse mid wash, zero
-      // far gain. fwidth on two floats is free; same 144 fps.
-      float hcLodW = smoothstep(0.5, 1.4, max(fwidth(uu) / cw, fwidth(vv) / chh)) * uHcLodOn;
-      float hue = fract(hcRnd * 5.7);
-      vec3 wc = hue < 0.50 ? vec3(0.18, 0.90, 1.00)
-              : (hue < 0.82 ? vec3(1.00, 0.66, 0.28) : vec3(1.00, 0.22, 0.52));
-      float hcSunFace = clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0);
-      float hcSunDim = mix(1.0, 0.22, hcSunFace);
       if (f.x > wx0 && f.x < wx1 && f.y > wy0 && f.y < wy1) {
         // (v36.02) fc rounds to an exact integer: vHcN is the object-space box
         // normal (axis-aligned +/-1 at the verts), so the dot is +/-2/3/5 up to
@@ -25210,21 +24996,11 @@ function _hcTowerMat() {
         // Split tuned by eye against screenshots: 0.62 ice read as almost
         // monochrome cyan. Ice still leads, but sodium and rose have to be
         // present often enough to actually punctuate the skyline.
-        // (v36.07) hue/wc/hcSunFace hoisted above the window-band test so the
-        // LOD aggregate below shares them; values unchanged.
-        totalEmissiveRadiance += wc * lit * (0.85 + 0.65 * fract(h * 31.7)) * hcSunDim * (1.0 - hcLodW);
-      }
-      if (hcLodW > 0.001) {
-        // (v36.07) Stable aggregate glow: window-area fraction x expected lit
-        // fraction x mean per-window brightness (0.85 + 0.65*0.5 = 1.175).
-        // step(h, thr) has mean thr and the whole-floor clustering keeps 76%
-        // of floors, so this is the exact expectation of the branch above -
-        // uniform per tower face, so it CANNOT twinkle under rotation, and
-        // the skyline's aggregate brightness/hue is preserved through the
-        // cross-fade.
-        float hcAvgLit = (0.30 + 0.38 * fract(hcRnd * 7.77)) * 0.76;
-        totalEmissiveRadiance += wc * ((wx1 - wx0) * (wy1 - wy0)) * hcAvgLit
-                               * 1.175 * hcSunDim * hcLodW;
+        float hue = fract(hcRnd * 5.7);
+        vec3 wc = hue < 0.50 ? vec3(0.18, 0.90, 1.00)
+                : (hue < 0.82 ? vec3(1.00, 0.66, 0.28) : vec3(1.00, 0.22, 0.52));
+        float hcSunFace = clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0);
+        totalEmissiveRadiance += wc * lit * (0.85 + 0.65 * fract(h * 31.7)) * mix(1.0, 0.22, hcSunFace);
       }
     }
   }
@@ -25238,17 +25014,6 @@ function _hcTowerMat() {
 // has ships, and it covered the real baked ground. See _hubCityInit.
 
 // additive neon material; mode-2 instances pulse (antenna beacons, ember tips)
-// (v36.07) Subpixel line-AA: the strips are 2-6u thin boxes, so from ~10k+
-// one screen pixel spans several strip widths and MSAA coverage pops between
-// its 4 levels every sub-pixel camera move - the twinkle-map probe showed the
-// residual far-range flicker lived on exactly these vertical edge strips, not
-// the (already faded) window grids. Classic thin-geometry fix: in the vertex
-// shader widen any instance axis that has gone subpixel up to a two-pixel
-// world footprint (v36.08, was 1px - see the hcPx note below) and dim the
-// fragment by the widening ratio (vHcDim), so the strip keeps its integrated
-// energy but always rasterizes wide enough for stable MSAA coverage -
-// popping gone. Near/mid: every axis is >= 2px, widen factor is exactly 1.0,
-// dim is exactly 1.0 - byte-identical look.
 function _hcNeonMat() {
   const mat = new THREE.MeshBasicMaterial({
     color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true,
@@ -25256,34 +25021,11 @@ function _hcNeonMat() {
   });
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uHcT = _swU.uTime;
-    sh.uniforms.uHcPxH = HUB_CITY._uPxH;
-    sh.uniforms.uHcLodOn = HUB_CITY._uLodOn;
-    sh.vertexShader = 'attribute vec2 aPrm;\nuniform float uHcPxH;\nuniform float uHcLodOn;\nvarying vec2 vHcP;\nvarying float vHcDim;\n' +
-      sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
- vHcP = aPrm;
- vHcDim = 1.0;
- #ifdef USE_INSTANCING
- {
-   vec3 hcS = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));
-   float hcD = length((modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz);
-   // world-units-per-pixel at this instance: 2*d*tan(fov/2)/H = 2*d/(P11*H).
-   // (v36.08) Widen target raised 1px -> 2px: a strip rasterized at exactly
-   // 1px still pops between MSAA coverage levels every sub-pixel camera move
-   // (isolation probe: hiding the neon layers collapsed the far twinkle
-   // ev3 1441->163; re-widening to 2px recovers most of that gap, see map).
-   // Nyquist: any feature needs >=2px to sample stably. Near/mid strips are
-   // >=2px on screen already, the clamp floor keeps them at exactly 1.0x -
-   // byte-identical look (verified stacked A/B at the 5k in-city vantage).
-   float hcPx = 4.0 * hcD / (projectionMatrix[1][1] * max(uHcPxH, 1.0));
-   vec3 hcW = clamp(vec3(hcPx) / max(hcS, vec3(1e-3)), vec3(1.0), vec3(48.0));
-   hcW = 1.0 + (hcW - 1.0) * uHcLodOn;
-   transformed *= hcW;
-   vHcDim = 1.0 / (hcW.x * hcW.y * hcW.z);
- }
- #endif`);
-    sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\nvarying float vHcDim;\n' +
+    sh.vertexShader = 'attribute vec2 aPrm;\nvarying vec2 vHcP;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vHcP = aPrm;');
+    sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\n' +
       sh.fragmentShader.replace('#include <opaque_fragment>',
-        'outgoingLight *= vHcDim;\nif (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
+        'if (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
   };
   return mat;
 }
@@ -25292,7 +25034,7 @@ function _hcNeonMat() {
 // scanlines, edge fade, per-instance flicker. Time = shared _swU.uTime.
 function _hcHoloMat() {
   return new THREE.ShaderMaterial({
-    uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn },
+    uniforms: { uHcT: _swU.uTime },
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
     side: THREE.DoubleSide,
     vertexShader: `
@@ -25310,7 +25052,6 @@ function _hcHoloMat() {
       }`,
     fragmentShader: `
       uniform float uHcT;
-      uniform float uHcLodOn;
       varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
@@ -25331,15 +25072,7 @@ function _hcHoloMat() {
         float edge = smoothstep(0.0, 0.06, uv.x) * smoothstep(1.0, 0.94, uv.x)
                    * smoothstep(0.0, 0.08, uv.y) * smoothstep(1.0, 0.92, uv.y);
         float flick = 0.75 + 0.25 * step(0.06, fract(uHcT * (0.7 + rnd) + rnd));
-        // (v36.07) fwidth LOD, same idea as the tower windows: once glyph
-        // cells go subpixel the per-cell hash becomes per-pixel noise under
-        // camera motion. Fade the glyph detail and the 220Hz scanline toward
-        // their stable means (E[glyph]=0.58, inner area 0.532 -> 0.378;
-        // E[scan]=0.82). Whole-panel flick / scroll / edge are kept - they
-        // are deliberate hologram behaviour, not aliasing. Near panels:
-        // hLod = 0, expression identical to before.
-        float hLod = smoothstep(0.5, 1.2, max(fwidth(uv.x * cols), fwidth(uv.y * rows))) * uHcLodOn;
-        float a = mix(0.10 + 0.9 * glyph * inner, 0.378, hLod) * mix(scan, 0.82, hLod) * edge * flick;
+        float a = (0.10 + 0.9 * glyph * inner) * scan * edge * flick;
         gl_FragColor = vec4(vCol * a * 1.6, a * 0.85);
       }`,
   });
@@ -25350,18 +25083,6 @@ function _hcMakeMeshes(city) {
   const group = new THREE.Group();
   group.name = 'hubCity';
   const matte = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  // (v36.07) shared drawing-buffer-height uniform for the neon line-AA;
-  // refreshed each frame in _hubCityFrame so resize/XR stay correct.
-  if (!HUB_CITY._uPxH) HUB_CITY._uPxH = { value: (typeof renderer !== 'undefined' && renderer.drawingBufferHeight) || 900 };
-  // (v36.07) single live kill-switch for ALL the far-flicker LOD work
-  // (tower window fade, neon line-AA, holo glyph fade). 1 = on (shipped),
-  // 0 = bit-exact pre-v36.07 shader paths. Exists so the flicker can be
-  // A/B-measured INSIDE one session - the weather/day cycle changes the
-  // scene enough between page loads that cross-session variance numbers
-  // are not comparable (measured: same build, same vantage, 20 min apart:
-  // 2715 vs 4237 flicker px). Live hook: window.__hcLod(0|1).
-  if (!HUB_CITY._uLodOn) HUB_CITY._uLodOn = { value: 1 };
-  if (typeof window !== 'undefined') window.__hcLod = (v) => { HUB_CITY._uLodOn.value = v ? 1 : 0; return HUB_CITY._uLodOn.value; };
   const twrMat = _hcTowerMat();
   const neonMat = _hcNeonMat();
   const holoMat = _hcHoloMat();
@@ -26531,9 +26252,6 @@ function _hubCityFrame(dt) {
     _hcSunVTmp.set(0.267, 0.802, 0.401).transformDirection(camera.matrixWorldInverse);
     hc.twrMat.userData.uHcSunV.value.copy(_hcSunVTmp);
   }
-  // (v36.07) keep the neon line-AA pixel-height uniform in step with the
-  // real drawing buffer (resize / XR); one float write, no allocation.
-  if (HUB_CITY._uPxH && typeof renderer !== 'undefined') HUB_CITY._uPxH.value = renderer.drawingBufferHeight || HUB_CITY._uPxH.value;
   _hcTrafficUpdate(dt);
   // proximity ambience: fog shifts toward deep neon-night as you approach
   if (hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
@@ -66693,43 +66411,11 @@ function _lssEndlessNextSeg(run) {
     while (dh < -Math.PI) dh += 2 * Math.PI;
     turn += Math.max(-0.5, Math.min(0.5, dh)) * 0.5;
   }
-  // (v36.06) SELF-AVOIDANCE — the bounded wander re-enters its own past lanes
-  // (offline survey: 0 folds in 2685km pre-bias, 39 in 5319km post-bias),
-  // leaving stale carved corridors that bait free-path pilots off the live
-  // spine. Steer the candidate endpoint away from 4.2k-cells the route has
-  // already visited: try the drawn turn first, then fixed deflections toward
-  // the side already being turned. NO extra rand() draws and the visited set
-  // derives purely from route state in gid order, so co-op peers stay
-  // byte-identical (the v35.85 rule). FIFO cap 256 cells (~750km of history).
-  const vis = g.vis || (g.vis = { n: {}, fifo: [], r1: -1, r2: -1, r3: -1 });
-  {
-    const sgn = turn >= 0 ? 1 : -1;
-    let pick = turn;
-    for (let di = 0; di < 5; di++) {
-      const cand = turn + [0, 0.5 * sgn, -0.5 * sgn, 1.0 * sgn, -1.0 * sgn][di];
-      const h2 = g.heading + cand;
-      const ck = (Math.round((g.x + Math.sin(h2) * 2900) / 4200) + 2048) * 4096 +
-                 (Math.round((g.z + Math.cos(h2) * 2900) / 4200) + 2048);
-      if (!vis.n[ck] || ck === vis.r1 || ck === vis.r2 || ck === vis.r3) { pick = cand; break; }
-    }
-    turn = pick;
-  }
   g.heading += turn;
   const len = 2200 + rand() * 1400;
   const a = { x: g.x, y: g.y, z: g.z };
   g.x += Math.sin(g.heading) * len;
   g.z += Math.cos(g.heading) * len;
-  // (v36.06) Record the real endpoint's cell in the visited set (r1..r3 =
-  // the 3 most recent cells, exempt from avoidance — the lane legitimately
-  // continues out of its own tail).
-  {
-    const ck = (Math.round(g.x / 4200) + 2048) * 4096 + (Math.round(g.z / 4200) + 2048);
-    if (ck !== vis.r1) { vis.r3 = vis.r2; vis.r2 = vis.r1; vis.r1 = ck; }
-    if (!vis.n[ck]) {
-      vis.n[ck] = 1; vis.fifo.push(ck);
-      if (vis.fifo.length > 256) delete vis.n[vis.fifo.shift()];
-    }
-  }
   // (v35.73) More vertical drama + varied lane width: narrow squeezes to
   // broad galleries instead of one constant-radius hallway.
   g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));

@@ -114,6 +114,40 @@ Hours-long runs march coordinates into float32-unfriendly territory
 Stage 1-2 simply cap runs well inside safe range (a 50 km run is already a
 long session) and log a `_endlessOriginDebt` metric to decide with data.
 
+**RESOLVED (v36.06): bounded wander stays, and its seam is closed.** The
+shipped 42k home-bias created the first real long-run failure (owner report:
+choppy 45-53km, then no enemies and a frozen km counter): where the bias
+turns the invisible spine home, a free-path pilot flying their own valley
+line diverges past the tracker's 3-seg x 4200u window and NOTHING recovered
+— dist froze forever, waves anchored to the stale window tens of km behind
+(director wedged in `battle`), and the append-rebake churn (the chop) died
+with the extension stall. v36.06 adds the missing recovery ladder, all in
+`EndlessMode.update` / `_lssEndlessNextSeg`:
+
+1. **Relock** (4s unlocked, moving): re-scan the whole tracked window
+   forward; credit the straight chord flown while lost, capped by the
+   skipped spine arc (monotone).
+2. **Re-anchor — "the cavern finds you"** (>5200u from every tracked seg for
+   5s, SOLO only): credit the lost chord (speed-capped), free the stale
+   window (bolts, carve shapes, and their baked chunks via the v35.84
+   invalidation rule), restart the generator ~2600u ahead on the flight
+   heading. dist/aegis/lives survive; gids stay monotone. Co-op seam: a
+   re-anchor derives from local position and would fork the v35.85 shared
+   deterministic route — roomed runs keep the old behavior until a
+   route-authority net event exists (quirk #8 below in spirit).
+3. **Wave lost** (every live wave bot >14km for 10s): despawn stragglers,
+   return to `travel` — ambushes always find you again.
+4. **Self-avoidance** in the generator: candidate endpoints steer away from
+   visited 4.2k-cells (fixed deflections, zero extra rand() draws, visited
+   set derived from route state in gid order — co-op byte-identical).
+
+Proof: headless 95km harness with two deliberate 63-degree strays at bias
+onset — 98.1% of flown arc credited, freeze spans bounded under ~8km with
+the chord landed on recovery, every wave spawn within 5.3km, window/chunk/
+entity censuses flat, run-over path clean at 99.51km. Re-origin shift is
+therefore NOT needed for the currently reachable session lengths; revisit
+only if runs beyond ~150k from origin ever become possible.
+
 ## The theme scheduler
 
 The run is a sequence of **theme stretches**, 8000-15000u each, seeded, with
@@ -547,7 +581,9 @@ already has to lerp.
    assumes on-route.
 2. Ambush trigger: pure time, pure distance, or the blend above (time clock
    squeezed by distance)? The blend punishes neither explorers nor speeders.
-3. Bounded wander vs re-origin for long runs (stage 3 decision; data first).
+3. ~~Bounded wander vs re-origin for long runs~~ — **adjudicated v36.06:
+   bounded wander, with the recovery ladder (relock / re-anchor / wave-lost /
+   self-avoidance) closing its divergence seam. See "Float precision" above.**
 4. Does Endless share the race carousel slot pattern (`endless_` map key) or
    get its own top-level menu entry beside CAMPAIGN? (Design assumes its own
    entry; it's a flagship mode.)

@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.08';
+const LSS_BUILD = '36.07';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -25166,20 +25166,14 @@ function _hcTowerMat() {
       // this kills the GENUINE aliasing left open there: once one pixel spans
       // a large fraction of a 26x19u window cell, every sub-pixel camera
       // rotation re-samples different cells/hashes per pixel and the whole
-      // facade twinkles. hcLodW is 0 until a pixel covers HALF a cell (the
-      // cell renders 2px = Nyquist limit - anything crisper is stable) and 1
-      // once a pixel covers ~1.4 cells (cell < 0.71px = genuinely subpixel),
-      // cross-fading to the stable per-tower aggregate glow added below.
-      // fwidth measures the true pixel footprint so this is fov/resolution
-      // independent. (v36.08) Ramp retuned from the v36.07 (0.35, 1.1):
-      // at the flight fov of 120 that started the fade at ~1.6-2k and washed
-      // the 2.5-4k towers (windows still 1.6-3px tall) into flat glow slabs
-      // - visible as solid cyan sheets from street level. Both builds are
-      // fully saturated at the owner's 15-20k vantage (~2.4-3.5 cells/px),
-      // where the remaining flicker was the NEON strips, not this mask (see
-      // _hcNeonMat). ⚠ Also tried (0.35, 0.65): even worse mid wash, zero
-      // far gain. fwidth on two floats is free; same 144 fps.
-      float hcLodW = smoothstep(0.5, 1.4, max(fwidth(uu) / cw, fwidth(vv) / chh)) * uHcLodOn;
+      // facade twinkles. hcLodW is 0 until a pixel covers ~35% of a cell and
+      // 1 past ~110% - near/mid facades render EXACTLY as before (fade term
+      // is identically 0 there), far facades cross-fade to the stable
+      // per-tower aggregate glow added below. Measured at a 16.5k vantage,
+      // 21-frame rotation sweep: px with luminance range >24/255 in the city
+      // rect 2117 -> (see map entry), micro-rot flips unchanged. fwidth on
+      // two floats is free; same 144 fps.
+      float hcLodW = smoothstep(0.35, 1.1, max(fwidth(uu) / cw, fwidth(vv) / chh)) * uHcLodOn;
       float hue = fract(hcRnd * 5.7);
       vec3 wc = hue < 0.50 ? vec3(0.18, 0.90, 1.00)
               : (hue < 0.82 ? vec3(1.00, 0.66, 0.28) : vec3(1.00, 0.22, 0.52));
@@ -25243,12 +25237,11 @@ function _hcTowerMat() {
 // its 4 levels every sub-pixel camera move - the twinkle-map probe showed the
 // residual far-range flicker lived on exactly these vertical edge strips, not
 // the (already faded) window grids. Classic thin-geometry fix: in the vertex
-// shader widen any instance axis that has gone subpixel up to a two-pixel
-// world footprint (v36.08, was 1px - see the hcPx note below) and dim the
-// fragment by the widening ratio (vHcDim), so the strip keeps its integrated
-// energy but always rasterizes wide enough for stable MSAA coverage -
-// popping gone. Near/mid: every axis is >= 2px, widen factor is exactly 1.0,
-// dim is exactly 1.0 - byte-identical look.
+// shader widen any instance axis that has gone subpixel up to one pixel's
+// world footprint and dim the fragment by the widening ratio (vHcDim), so the
+// strip keeps its integrated energy but always rasterizes >= 1px wide -
+// coverage is stable, popping gone. Near/mid: every axis is >= 1px, widen
+// factor is exactly 1.0, dim is exactly 1.0 - byte-identical look.
 function _hcNeonMat() {
   const mat = new THREE.MeshBasicMaterial({
     color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true,
@@ -25266,15 +25259,8 @@ function _hcNeonMat() {
  {
    vec3 hcS = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));
    float hcD = length((modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz);
-   // world-units-per-pixel at this instance: 2*d*tan(fov/2)/H = 2*d/(P11*H).
-   // (v36.08) Widen target raised 1px -> 2px: a strip rasterized at exactly
-   // 1px still pops between MSAA coverage levels every sub-pixel camera move
-   // (isolation probe: hiding the neon layers collapsed the far twinkle
-   // ev3 1441->163; re-widening to 2px recovers most of that gap, see map).
-   // Nyquist: any feature needs >=2px to sample stably. Near/mid strips are
-   // >=2px on screen already, the clamp floor keeps them at exactly 1.0x -
-   // byte-identical look (verified stacked A/B at the 5k in-city vantage).
-   float hcPx = 4.0 * hcD / (projectionMatrix[1][1] * max(uHcPxH, 1.0));
+   // world-units-per-pixel at this instance: 2*d*tan(fov/2)/H = 2*d/(P11*H)
+   float hcPx = 2.0 * hcD / (projectionMatrix[1][1] * max(uHcPxH, 1.0));
    vec3 hcW = clamp(vec3(hcPx) / max(hcS, vec3(1e-3)), vec3(1.0), vec3(48.0));
    hcW = 1.0 + (hcW - 1.0) * uHcLodOn;
    transformed *= hcW;

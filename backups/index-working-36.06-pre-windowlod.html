@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.08';
+const LSS_BUILD = '36.06';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -25119,11 +25119,10 @@ function _hcTowerMat() {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uHcT = _swU.uTime;
     sh.uniforms.uHcSunV = mat.userData.uHcSunV;
-    sh.uniforms.uHcLodOn = HUB_CITY._uLodOn;
     sh.vertexShader = 'attribute vec3 aSize;\nattribute vec2 aPrm;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
       sh.vertexShader.replace('#include <begin_vertex>',
         '#include <begin_vertex>\n vHcL = position * aSize; vHcN = normal; vHcS = aSize; vHcP = aPrm;');
-    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nuniform float uHcLodOn;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
+    sh.fragmentShader = ('uniform float uHcT;\nuniform vec3 uHcSunV;\nvarying vec3 vHcL;\nvarying vec3 vHcN;\nvarying vec3 vHcS;\nvarying vec2 vHcP;\n' +
       'float hcH21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }\n') +
       sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
@@ -25161,30 +25160,6 @@ function _hcTowerMat() {
     if (uu > 4.0 && uu < su - 4.0 && vv > 3.0 && vv < vHcS.y - 4.0) {
       vec2 cell = vec2(floor(uu / cw), floor(vv / chh));
       vec2 f = vec2(fract(uu / cw), fract(vv / chh));
-      // (v36.07) fwidth LOD fade - closes the "city lights flicker from far
-      // away" half of the v36.02 report. The snap killed the ULP hash flips;
-      // this kills the GENUINE aliasing left open there: once one pixel spans
-      // a large fraction of a 26x19u window cell, every sub-pixel camera
-      // rotation re-samples different cells/hashes per pixel and the whole
-      // facade twinkles. hcLodW is 0 until a pixel covers HALF a cell (the
-      // cell renders 2px = Nyquist limit - anything crisper is stable) and 1
-      // once a pixel covers ~1.4 cells (cell < 0.71px = genuinely subpixel),
-      // cross-fading to the stable per-tower aggregate glow added below.
-      // fwidth measures the true pixel footprint so this is fov/resolution
-      // independent. (v36.08) Ramp retuned from the v36.07 (0.35, 1.1):
-      // at the flight fov of 120 that started the fade at ~1.6-2k and washed
-      // the 2.5-4k towers (windows still 1.6-3px tall) into flat glow slabs
-      // - visible as solid cyan sheets from street level. Both builds are
-      // fully saturated at the owner's 15-20k vantage (~2.4-3.5 cells/px),
-      // where the remaining flicker was the NEON strips, not this mask (see
-      // _hcNeonMat). ⚠ Also tried (0.35, 0.65): even worse mid wash, zero
-      // far gain. fwidth on two floats is free; same 144 fps.
-      float hcLodW = smoothstep(0.5, 1.4, max(fwidth(uu) / cw, fwidth(vv) / chh)) * uHcLodOn;
-      float hue = fract(hcRnd * 5.7);
-      vec3 wc = hue < 0.50 ? vec3(0.18, 0.90, 1.00)
-              : (hue < 0.82 ? vec3(1.00, 0.66, 0.28) : vec3(1.00, 0.22, 0.52));
-      float hcSunFace = clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0);
-      float hcSunDim = mix(1.0, 0.22, hcSunFace);
       if (f.x > wx0 && f.x < wx1 && f.y > wy0 && f.y < wy1) {
         // (v36.02) fc rounds to an exact integer: vHcN is the object-space box
         // normal (axis-aligned +/-1 at the verts), so the dot is +/-2/3/5 up to
@@ -25210,21 +25185,11 @@ function _hcTowerMat() {
         // Split tuned by eye against screenshots: 0.62 ice read as almost
         // monochrome cyan. Ice still leads, but sodium and rose have to be
         // present often enough to actually punctuate the skyline.
-        // (v36.07) hue/wc/hcSunFace hoisted above the window-band test so the
-        // LOD aggregate below shares them; values unchanged.
-        totalEmissiveRadiance += wc * lit * (0.85 + 0.65 * fract(h * 31.7)) * hcSunDim * (1.0 - hcLodW);
-      }
-      if (hcLodW > 0.001) {
-        // (v36.07) Stable aggregate glow: window-area fraction x expected lit
-        // fraction x mean per-window brightness (0.85 + 0.65*0.5 = 1.175).
-        // step(h, thr) has mean thr and the whole-floor clustering keeps 76%
-        // of floors, so this is the exact expectation of the branch above -
-        // uniform per tower face, so it CANNOT twinkle under rotation, and
-        // the skyline's aggregate brightness/hue is preserved through the
-        // cross-fade.
-        float hcAvgLit = (0.30 + 0.38 * fract(hcRnd * 7.77)) * 0.76;
-        totalEmissiveRadiance += wc * ((wx1 - wx0) * (wy1 - wy0)) * hcAvgLit
-                               * 1.175 * hcSunDim * hcLodW;
+        float hue = fract(hcRnd * 5.7);
+        vec3 wc = hue < 0.50 ? vec3(0.18, 0.90, 1.00)
+                : (hue < 0.82 ? vec3(1.00, 0.66, 0.28) : vec3(1.00, 0.22, 0.52));
+        float hcSunFace = clamp(dot(normalize(normal), normalize(uHcSunV)), 0.0, 1.0);
+        totalEmissiveRadiance += wc * lit * (0.85 + 0.65 * fract(h * 31.7)) * mix(1.0, 0.22, hcSunFace);
       }
     }
   }
@@ -25238,17 +25203,6 @@ function _hcTowerMat() {
 // has ships, and it covered the real baked ground. See _hubCityInit.
 
 // additive neon material; mode-2 instances pulse (antenna beacons, ember tips)
-// (v36.07) Subpixel line-AA: the strips are 2-6u thin boxes, so from ~10k+
-// one screen pixel spans several strip widths and MSAA coverage pops between
-// its 4 levels every sub-pixel camera move - the twinkle-map probe showed the
-// residual far-range flicker lived on exactly these vertical edge strips, not
-// the (already faded) window grids. Classic thin-geometry fix: in the vertex
-// shader widen any instance axis that has gone subpixel up to a two-pixel
-// world footprint (v36.08, was 1px - see the hcPx note below) and dim the
-// fragment by the widening ratio (vHcDim), so the strip keeps its integrated
-// energy but always rasterizes wide enough for stable MSAA coverage -
-// popping gone. Near/mid: every axis is >= 2px, widen factor is exactly 1.0,
-// dim is exactly 1.0 - byte-identical look.
 function _hcNeonMat() {
   const mat = new THREE.MeshBasicMaterial({
     color: 0xffffff, blending: THREE.AdditiveBlending, transparent: true,
@@ -25256,34 +25210,11 @@ function _hcNeonMat() {
   });
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uHcT = _swU.uTime;
-    sh.uniforms.uHcPxH = HUB_CITY._uPxH;
-    sh.uniforms.uHcLodOn = HUB_CITY._uLodOn;
-    sh.vertexShader = 'attribute vec2 aPrm;\nuniform float uHcPxH;\nuniform float uHcLodOn;\nvarying vec2 vHcP;\nvarying float vHcDim;\n' +
-      sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
- vHcP = aPrm;
- vHcDim = 1.0;
- #ifdef USE_INSTANCING
- {
-   vec3 hcS = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));
-   float hcD = length((modelViewMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz);
-   // world-units-per-pixel at this instance: 2*d*tan(fov/2)/H = 2*d/(P11*H).
-   // (v36.08) Widen target raised 1px -> 2px: a strip rasterized at exactly
-   // 1px still pops between MSAA coverage levels every sub-pixel camera move
-   // (isolation probe: hiding the neon layers collapsed the far twinkle
-   // ev3 1441->163; re-widening to 2px recovers most of that gap, see map).
-   // Nyquist: any feature needs >=2px to sample stably. Near/mid strips are
-   // >=2px on screen already, the clamp floor keeps them at exactly 1.0x -
-   // byte-identical look (verified stacked A/B at the 5k in-city vantage).
-   float hcPx = 4.0 * hcD / (projectionMatrix[1][1] * max(uHcPxH, 1.0));
-   vec3 hcW = clamp(vec3(hcPx) / max(hcS, vec3(1e-3)), vec3(1.0), vec3(48.0));
-   hcW = 1.0 + (hcW - 1.0) * uHcLodOn;
-   transformed *= hcW;
-   vHcDim = 1.0 / (hcW.x * hcW.y * hcW.z);
- }
- #endif`);
-    sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\nvarying float vHcDim;\n' +
+    sh.vertexShader = 'attribute vec2 aPrm;\nvarying vec2 vHcP;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vHcP = aPrm;');
+    sh.fragmentShader = 'uniform float uHcT;\nvarying vec2 vHcP;\n' +
       sh.fragmentShader.replace('#include <opaque_fragment>',
-        'outgoingLight *= vHcDim;\nif (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
+        'if (vHcP.x > 1.5) { outgoingLight *= 0.2 + 1.7 * step(fract(uHcT * 0.9 + vHcP.y), 0.22); }\n#include <opaque_fragment>');
   };
   return mat;
 }
@@ -25292,7 +25223,7 @@ function _hcNeonMat() {
 // scanlines, edge fade, per-instance flicker. Time = shared _swU.uTime.
 function _hcHoloMat() {
   return new THREE.ShaderMaterial({
-    uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn },
+    uniforms: { uHcT: _swU.uTime },
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
     side: THREE.DoubleSide,
     vertexShader: `
@@ -25310,7 +25241,6 @@ function _hcHoloMat() {
       }`,
     fragmentShader: `
       uniform float uHcT;
-      uniform float uHcLodOn;
       varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
@@ -25331,15 +25261,7 @@ function _hcHoloMat() {
         float edge = smoothstep(0.0, 0.06, uv.x) * smoothstep(1.0, 0.94, uv.x)
                    * smoothstep(0.0, 0.08, uv.y) * smoothstep(1.0, 0.92, uv.y);
         float flick = 0.75 + 0.25 * step(0.06, fract(uHcT * (0.7 + rnd) + rnd));
-        // (v36.07) fwidth LOD, same idea as the tower windows: once glyph
-        // cells go subpixel the per-cell hash becomes per-pixel noise under
-        // camera motion. Fade the glyph detail and the 220Hz scanline toward
-        // their stable means (E[glyph]=0.58, inner area 0.532 -> 0.378;
-        // E[scan]=0.82). Whole-panel flick / scroll / edge are kept - they
-        // are deliberate hologram behaviour, not aliasing. Near panels:
-        // hLod = 0, expression identical to before.
-        float hLod = smoothstep(0.5, 1.2, max(fwidth(uv.x * cols), fwidth(uv.y * rows))) * uHcLodOn;
-        float a = mix(0.10 + 0.9 * glyph * inner, 0.378, hLod) * mix(scan, 0.82, hLod) * edge * flick;
+        float a = (0.10 + 0.9 * glyph * inner) * scan * edge * flick;
         gl_FragColor = vec4(vCol * a * 1.6, a * 0.85);
       }`,
   });
@@ -25350,18 +25272,6 @@ function _hcMakeMeshes(city) {
   const group = new THREE.Group();
   group.name = 'hubCity';
   const matte = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  // (v36.07) shared drawing-buffer-height uniform for the neon line-AA;
-  // refreshed each frame in _hubCityFrame so resize/XR stay correct.
-  if (!HUB_CITY._uPxH) HUB_CITY._uPxH = { value: (typeof renderer !== 'undefined' && renderer.drawingBufferHeight) || 900 };
-  // (v36.07) single live kill-switch for ALL the far-flicker LOD work
-  // (tower window fade, neon line-AA, holo glyph fade). 1 = on (shipped),
-  // 0 = bit-exact pre-v36.07 shader paths. Exists so the flicker can be
-  // A/B-measured INSIDE one session - the weather/day cycle changes the
-  // scene enough between page loads that cross-session variance numbers
-  // are not comparable (measured: same build, same vantage, 20 min apart:
-  // 2715 vs 4237 flicker px). Live hook: window.__hcLod(0|1).
-  if (!HUB_CITY._uLodOn) HUB_CITY._uLodOn = { value: 1 };
-  if (typeof window !== 'undefined') window.__hcLod = (v) => { HUB_CITY._uLodOn.value = v ? 1 : 0; return HUB_CITY._uLodOn.value; };
   const twrMat = _hcTowerMat();
   const neonMat = _hcNeonMat();
   const holoMat = _hcHoloMat();
@@ -26531,9 +26441,6 @@ function _hubCityFrame(dt) {
     _hcSunVTmp.set(0.267, 0.802, 0.401).transformDirection(camera.matrixWorldInverse);
     hc.twrMat.userData.uHcSunV.value.copy(_hcSunVTmp);
   }
-  // (v36.07) keep the neon line-AA pixel-height uniform in step with the
-  // real drawing buffer (resize / XR); one float write, no allocation.
-  if (HUB_CITY._uPxH && typeof renderer !== 'undefined') HUB_CITY._uPxH.value = renderer.drawingBufferHeight || HUB_CITY._uPxH.value;
   _hcTrafficUpdate(dt);
   // proximity ambience: fog shifts toward deep neon-night as you approach
   if (hc.fogBase && scene.fog && scene.fog.color && player && player.position) {
