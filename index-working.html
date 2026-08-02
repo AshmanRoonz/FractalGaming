@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.95';
+const LSS_BUILD = '35.97';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -31670,12 +31670,33 @@ class Projectile {
           if (!mon.alive || !mon.mesh) continue;
           const r = mon.collisionRadius;
           if (this.position.distanceToSquared(mon.position) < r * r) {
+            // (v35.96) Sonar beacon on a leviathan hide: detonate the pulse
+            // there, same as landing on a ship (the beacon used to die as a
+            // dud here) — the pulse's lock-grant loop covers monsters now.
+            if (this.isSonar) {
+              if (typeof _spawnSonarPulse === 'function') _spawnSonarPulse(mon.position, this.owner);
+              this.destroy();
+              return;
+            }
             const dealt = mon.takeDamage(this.damage, 'player', this.position);
             if (dealt > 0) {
               player.damageDealt += dealt;
               player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
               showHitMarker();
               spawnImpactSparks(this.position, 3);
+            }
+            // (v35.96) TRACKER locks work on leviathans: main-gun hits build
+            // the same 3-mark lock as ships, keyed by mon.id ('monN'). Same
+            // isTrackerMain whitelist + playing-state gate as the ship path;
+            // Tracker Rockets / HUD rings resolve monster ids downstream.
+            if (player.loadoutKey === 'TRACKER' && this.isTrackerMain &&
+                game.state === 'playing' && mon.id != null) {
+              const prevLocks = player.trackerLocks[mon.id] || 0;
+              player.trackerLocks[mon.id] = Math.min(3, prevLocks + 1);
+              if (player.trackerLocks[mon.id] > prevLocks) {
+                try { playSound('sonar_ping_' + player.trackerLocks[mon.id]); } catch (_) {}
+              }
+              if (player.trackerLocks[mon.id] >= 3) player.trackerLockedTarget = mon;
             }
             if (this.isCluster) this.spawnClusterChildren();
             this.spawnImpactExplosion(this.position);
@@ -31866,6 +31887,16 @@ class Projectile {
             player.damageDealt += _mdealt;
             player.coreMeter = Math.min(100, player.coreMeter + _mdealt / 100);
             showHitMarker();
+          }
+          // (v35.96) Tracking Bolt splash builds locks on leviathans too,
+          // mirroring the ship splash-lock rule (same falloff floor).
+          if (this.isTrackerMain && _mfall > 0.30 && game && game.state === 'playing' && mon.id != null) {
+            const prevLocks = player.trackerLocks[mon.id] || 0;
+            player.trackerLocks[mon.id] = Math.min(3, prevLocks + 1);
+            if (player.trackerLocks[mon.id] > prevLocks) {
+              try { playSound('sonar_ping_' + player.trackerLocks[mon.id]); } catch (_) {}
+            }
+            if (player.trackerLocks[mon.id] >= 3) player.trackerLockedTarget = mon;
           }
         }
       }
@@ -38126,6 +38157,14 @@ class OutskirtsMonster {
   die(broadcast) {
     if (!this.alive) return;
     this.alive = false;
+    // (v35.96) Drop TRACKER lock bookkeeping on this beast (mirrors Bot.die),
+    // so rockets/rings never chase a corpse.
+    try {
+      if (typeof player !== 'undefined' && player && player.trackerLocks && this.id != null) {
+        delete player.trackerLocks[this.id];
+        if (player.trackerLockedTarget === this) player.trackerLockedTarget = null;
+      }
+    } catch (_) {}
     try { spawnMonsterGuts(this.position, MONSTER_SIZE, this.def); } catch (e) { console.warn('[monsters] guts failed:', e); }
     if (this.mesh) {
       try { scene.remove(this.mesh); } catch (_) {}
@@ -38186,6 +38225,25 @@ class OutskirtsMonster {
         playSound('phase_dash');
       }
     } catch (_) {}
+  }
+
+  // (v35.96) Yaw-first facing with a gentle pitch clamp — the "falling over
+  // backward" fix. mesh.lookAt(prey) aimed the WHOLE body along the 3D line
+  // to the target: prey flying overhead pitched the creature onto its back
+  // (and prey below face-planted it). Face with yaw, lean at most ±0.35 rad
+  // of pitch toward the prey, zero roll so the beast always stays upright
+  // (also rights a body tumbled by the idle-drift rotVel integration).
+  _faceTarget(p) {
+    const dx = p.x - this.position.x;
+    const dy = p.y - this.position.y;
+    const dz = p.z - this.position.z;
+    const dH = Math.sqrt(dx * dx + dz * dz);
+    if (dH + Math.abs(dy) < 1e-4) return;
+    const r = this.mesh.rotation;
+    r.order = 'YXZ';                       // yaw, then clamped pitch
+    r.y = Math.atan2(dx, dz);              // +Z faces the prey (lookAt convention)
+    r.x = Math.max(-0.35, Math.min(0.35, -Math.atan2(dy, Math.max(dH, 1e-4))));
+    r.z = 0;
   }
 
   update(dt) {
@@ -38374,8 +38432,9 @@ class OutskirtsMonster {
     this.position.addScaledVector(this.velocity, dt);
     this.mesh.position.copy(this.position);
     if (chasing) {
-      // Face the prey ; slow menace, no snap.
-      this.mesh.lookAt(tgt.pos);
+      // Face the prey ; slow menace, no snap. (v35.96) Yaw + clamped pitch —
+      // full lookAt tipped the body onto its back under overhead prey.
+      this._faceTarget(tgt.pos);
     } else {
       this.mesh.rotation.x += this.rotVel.x * dt;
       this.mesh.rotation.y += this.rotVel.y * dt;
@@ -38404,7 +38463,7 @@ class OutskirtsMonster {
     this._contactShock();
     this.mesh.position.copy(this.position);
     if (this.aggro && playerFlying && dist < MONSTER_ZAP_RANGE * 3) {
-      this.mesh.lookAt(player.position);
+      this._faceTarget(player.position);   // (v35.96) yaw + clamped pitch
     } else {
       this.mesh.rotation.x += this.rotVel.x * dt;
       this.mesh.rotation.y += this.rotVel.y * dt;
@@ -38490,7 +38549,11 @@ function _initMonsters() {
   ];
   for (let i = 0; i < MONSTER_DEFS.length; i++) {
     const m = new OutskirtsMonster(MONSTER_DEFS[i], faces[i % faces.length]);
-    m.monId = i;   
+    m.monId = i;
+    // (v35.96) Lock-system identity: TRACKER locks key player.trackerLocks by
+    // target id. 'monN' strings can never collide with bot ids (small ints /
+    // 'net_*'), so leviathans share the ships' lock bookkeeping untouched.
+    m.id = 'mon' + i;
     game.monsters.push(m);
   }
   _loadNextMonsterModel();
@@ -39161,7 +39224,8 @@ function _monsterRoundReset() {
     m.health = (typeof MONSTER_HEALTH === 'number') ? MONSTER_HEALTH : m.health;
     m.zapTimer = Math.random() * ((typeof MONSTER_ZAP_EVERY === 'number') ? MONSTER_ZAP_EVERY : 1.25);
     m._tpCd = 10 + Math.random() * 8;
-    m._netX = null;   
+    m._netX = null;
+    if (typeof _monClearLocks === 'function') _monClearLocks(m);   // (v35.96)
   }
 }
 
@@ -39186,6 +39250,19 @@ function _monRecall(m) {
   try { if (typeof m._tpFx === 'function' && m.mesh && m.mesh.visible) m._tpFx(m.position.x, m.position.y, m.position.z); } catch (_) {}
   m.dormant = true; m.aggro = false; m._deAggroT = 0;
   if (m.mesh) m.mesh.visible = false;
+  _monClearLocks(m);
+}
+
+// (v35.96) Forget any TRACKER lock marks on a beast that leaves play
+// (recall / round reset) — a ring pinned to a hidden dormant monster's
+// far-off home position would read as a HUD ghost.
+function _monClearLocks(m) {
+  try {
+    if (typeof player !== 'undefined' && player && player.trackerLocks && m && m.id != null) {
+      delete player.trackerLocks[m.id];
+      if (player.trackerLockedTarget === m) player.trackerLockedTarget = null;
+    }
+  } catch (_) {}
 }
 function _monNearestSeedDist() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player || !player.position) return -1;
@@ -47833,8 +47910,12 @@ function executeAbility(slot, ability) {
       const lockedTargets = [];
       for (const [botId, locks] of Object.entries(player.trackerLocks)) {
         if (locks >= 3) {
-          const bot = game.entities.find(b => b.id == botId && b.alive);
-          if (bot) lockedTargets.push(bot);
+          // (v35.96) Locked ids resolve against ships AND leviathans ('monN'
+          // ids live in game.monsters). Homing only reads .alive/.position,
+          // both of which monsters carry.
+          let tgt = game.entities.find(b => b.id == botId && b.alive);
+          if (!tgt && game.monsters) tgt = game.monsters.find(mn => mn.alive && mn.id != null && mn.id == botId);
+          if (tgt) lockedTargets.push(tgt);
         }
       }
       if (lockedTargets.length === 0) {
@@ -51036,6 +51117,25 @@ function updateAbilities(dt) {
             try { playSound('sonar_ping_' + player.trackerLocks[bot.id]); } catch (_) {}
           }
           if (player.trackerLocks[bot.id] >= 3) player.trackerLockedTarget = bot;
+        }
+        // (v35.96) The detection sphere pings leviathans too: same
+        // one-grant-per-pulse Set keyed by mon.id ('monN', collision-free
+        // with bot ids). Monsters are huge, so count a hit when the wave
+        // reaches their hide (half the collision radius), not their center.
+        if (game.monsters) {
+          for (const mon of game.monsters) {
+            if (!mon.alive || mon.id == null) continue;
+            if (eff.locked.has(mon.id)) continue;
+            const _mr = eff.radius + (mon.collisionRadius || 0) * 0.5;
+            if (eff.position.distanceToSquared(mon.position) >= _mr * _mr) continue;
+            const prevLocks = player.trackerLocks[mon.id] || 0;
+            player.trackerLocks[mon.id] = Math.min(3, prevLocks + 1);
+            eff.locked.add(mon.id);
+            if (player.trackerLocks[mon.id] > prevLocks) {
+              try { playSound('sonar_ping_' + player.trackerLocks[mon.id]); } catch (_) {}
+            }
+            if (player.trackerLocks[mon.id] >= 3) player.trackerLockedTarget = mon;
+          }
         }
       }
     }
@@ -54652,8 +54752,20 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
   if (player.loadoutKey === 'TRACKER') {
     const halfW = W / 2, halfH = H / 2;
     const _tp = (_hudSharedTail._p = _hudSharedTail._p || new THREE.Vector3());
+    // (v35.96) Lock rings draw over MONSTERS too: candidates are enemy ships
+    // plus alive leviathans carrying a lock id — same rings, same lock data.
+    const _lockCands = (_hudSharedTail._c = _hudSharedTail._c || []);
+    _lockCands.length = 0;
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
+      _lockCands.push(bot);
+    }
+    if (game.monsters) {
+      for (const mon of game.monsters) {
+        if (mon.alive && mon.id != null) _lockCands.push(mon);
+      }
+    }
+    for (const bot of _lockCands) {
       const locks = player.trackerLocks[bot.id] || 0;
       if (locks <= 0) continue;
       _tp.copy(bot.position).project(camera);
@@ -55774,8 +55886,19 @@ function drawCircumpunctHUD() {
   if (player.loadoutKey === 'TRACKER') {
     const halfW = W / 2;
     const halfH = H / 2;
+    // (v35.96) Same monster-candidate treatment as the shipping path in
+    // _hudSharedTail (this legacy block stays for the __hudLegacy A/B).
+    const _lockCandsL = [];
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
+      _lockCandsL.push(bot);
+    }
+    if (game.monsters) {
+      for (const mon of game.monsters) {
+        if (mon.alive && mon.id != null) _lockCandsL.push(mon);
+      }
+    }
+    for (const bot of _lockCandsL) {
       const locks = player.trackerLocks[bot.id] || 0;
       if (locks <= 0) continue;
 
