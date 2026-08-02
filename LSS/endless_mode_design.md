@@ -360,6 +360,14 @@ v1 seams (deliberate):
    see "the same" mote a few hundred units apart mid-chase — consistent
    with local collection (seam 1); shared-flee state would ride the same
    future `bolt_taken`-style message if sharing ever lands.
+5. **Monster bounty drops are local per client** (v36.04): every peer runs
+   `OutskirtsMonster.die` (authority + `mon_dead` replay), so each client
+   spawns its OWN bounty bolt at the same corpse — consistent with seam 1
+   (collection was always local). A bounty differs from a route mote in two
+   ways: it never flees (a reward, not prey) and it expires ~45 s
+   uncollected (shrink-out over the last 4 s). Pool guard: a drop is
+   skipped silently unless ≥8 free slots remain under the bolt-pool cap,
+   so bounties can never starve route bolts.
 
 Verified live (headless `__endlessTick` + `__endlessAegis()` +
 `__endlessBoltProbe`): 28 bolts over 128 segments (1 per 4.6), every bolt

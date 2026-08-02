@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.01';
+const LSS_BUILD = '36.05';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4274,6 +4274,10 @@ const input = {
   vrStripFx: false,
   // Top-right FPS readout toggle. Persisted ; updated each gameLoop tick.
   showFps: false,
+  // (v36.03) Under-hull headlight beam (SpotLight at the red/green nav-orb
+  // group, aimed with the nose). ON by default — it is what makes the
+  // zone-rift caverns and the endless deeps readable. Persisted.
+  headlight: true,
   // (v35.55) The six curved captions on the gauge rings — SPEED, NRG, SHIELD,
   // HEALTH, CORE, AMMO. ON by default. Covers ONLY those: the ability names
   // riding the cooldown bars are how you tell Q/E/F apart and stay regardless.
@@ -7239,11 +7243,22 @@ const EndlessMode = {
     // block (deflect along the wall, never stop dead) + the carved-gap height
     // clamp; the pre-move offset is the always-valid fallback. Mobile runs
     // the identical branch — it is just position math.
-    for (let si = 0; si < run.segs.length; si++) {
-      const bl = run.segs[si]._bolts; if (!bl) continue;
+    // (v36.04) si === -1 is the BOUNTY list (monster-drop bolts, run.dropBolts)
+    // — same animation/collect body as route bolts; bounty-only branches key
+    // off b.bounty (no flee) and b.expT (45s expiry, 4s shrink-out).
+    for (let si = -1; si < run.segs.length; si++) {
+      const bl = si < 0 ? run.dropBolts : run.segs[si]._bolts; if (!bl) continue;
       for (let i = 0; i < bl.length; i++) {
         const b = bl[i]; if (b.taken || !b.slot) continue;
         const s = b.slot, g = s.grp;
+        if (b.bounty) {
+          b.expT -= dt;
+          if (b.expT <= 0) {   // uncollected bounty expires: free the slot for route bolts
+            b.taken = true; s.inUse = false; g.visible = false; g.scale.setScalar(1); b.slot = null;
+            continue;
+          }
+          if (b.expT < 4) g.scale.setScalar(0.12 + 0.88 * (b.expT / 4));   // fade-out (slot-acquire resets scale)
+        }
         g.rotation.y += dt * 1.4;
         let mx = b.x + b.ox, mz = b.z + b.oz;
         const bdx = mx - p.x, bdy = (b.y + b.oy) - p.y, bdz = mz - p.z;
@@ -7252,7 +7267,7 @@ const EndlessMode = {
           const bd = Math.sqrt(bd2) || 1;
           let obs = false;
           if (bd < 1400) obs = (fwd.x * bdx + fwd.y * bdy + fwd.z * bdz) / bd > 0.55;
-          if (obs) b.fleeT = 0.3; else if (b.fleeT > 0) b.fleeT -= dt;
+          if (obs && !b.bounty) b.fleeT = 0.3; else if (b.fleeT > 0) b.fleeT -= dt;   // (v36.04) bounties hold still — a reward, not prey
           const mdt = dt > 0.05 ? 0.05 : dt;   // hitch clamp: a big dt step could tunnel a thin wall
           let sx = 0, sy = 0, sz = 0, moving = false;
           if (b.fleeT > 0) {
@@ -7734,9 +7749,16 @@ if (typeof window !== 'undefined') window.__endlessAegis = function () {
         if (dmin < offMin) offMin = dmin;
       }
     }
+    // (v36.04) Bounty census: live monster-drop bolts + per-bolt expiry left.
+    const dropList = run.dropBolts || []; const drops = [];
+    for (let i = 0; i < dropList.length; i++) if (!dropList[i].taken) {
+      const b = dropList[i];
+      drops.push({ x: Math.round(b.x), y: Math.round(b.y), z: Math.round(b.z), expT: +(b.expT || 0).toFixed(1) });
+    }
     return {
       lvl: a.lvl || 0,
       boltsTaken: a.bolts || 0, kills: a.kills || 0, liveBolts, firstBolts,
+      dropBolts: drops.length, drops,
       offSpineMin: (offMin === Infinity) ? null : Math.round(offMin),
       dmgMult: (typeof _endlessAegisDmgOut === 'function') ? +(_endlessAegisDmgOut(1000) / 1000).toFixed(3) : 1,
       speed: player.chassis && player.chassis.flightSpeed,
@@ -18947,6 +18969,12 @@ function _lssHubDirectTonemap() {
 }
 function renderFrame() {
   try { _lssHubDirectTonemap(); } catch (_) {}
+  // (v36.03) Ship engine + headlight lights. Runs in renderFrame (not the
+  // gameLoop playing-path) so every render path — playing, menus, settings,
+  // cinematic — keeps the light poses fresh or fades them out; the function
+  // gates itself on game.state === 'playing'. All ship transforms are final
+  // by the time any render path gets here.
+  try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -24910,6 +24938,16 @@ function _hcTowerMat() {
       sh.fragmentShader.replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
 {
   float hcMode = vHcP.x, hcRnd = vHcP.y;
+  // (v36.02) ULP-STABILIZED hash inputs. hcRnd (and fc below) arrive as
+  // interpolated varyings, so their last mantissa bits wobble with every
+  // camera-matrix change; hcH21 multiplies them into the ~1e5 range where
+  // fract() turns one ULP of wobble into a full hash flip. Measured on the
+  // dev GPU: a 1e-7 rad camera yaw flipped 134,640 px (~12% of the frame) -
+  // whole windows popping on/off every frame in motion, i.e. the community
+  // "buildings are glitching out" report (worse on GPUs with sloppier
+  // interpolators). Snapping to exact 1/4096 steps makes every hash input
+  // bit-identical across frames. Zero look change - same values, minus noise.
+  hcRnd = floor(hcRnd * 4096.0 + 0.5) * (1.0 / 4096.0);
   if (vHcN.y > 0.5) diffuseColor.rgb *= 0.55;
   if (abs(vHcN.y) < 0.5) {
     // (v35.13) Weathering: an irregular dark grime band where the shell
@@ -24934,7 +24972,10 @@ function _hcTowerMat() {
       vec2 cell = vec2(floor(uu / cw), floor(vv / chh));
       vec2 f = vec2(fract(uu / cw), fract(vv / chh));
       if (f.x > wx0 && f.x < wx1 && f.y > wy0 && f.y < wy1) {
-        float fc = dot(vHcN, vec3(2.0, 3.0, 5.0));
+        // (v36.02) fc rounds to an exact integer: vHcN is the object-space box
+        // normal (axis-aligned +/-1 at the verts), so the dot is +/-2/3/5 up to
+        // interpolation wobble - floor(+0.5) removes the wobble (see hcRnd).
+        float fc = floor(dot(vHcN, vec3(2.0, 3.0, 5.0)) + 0.5);
         float h = hcH21(cell + vec2(fc * 17.0, hcRnd * 337.0));
         float lit = step(h, 0.30 + 0.38 * fract(hcRnd * 7.77));
         // (v35.13) whole-floor clustering: ~1 in 4 floors goes dark as a
@@ -25015,17 +25056,22 @@ function _hcHoloMat() {
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
         vec2 uv = vUv2;
-        float rows = 7.0 + floor(vRnd * 5.0);
-        float cols = 9.0 + floor(fract(vRnd * 7.3) * 6.0);
-        float scroll = uHcT * (0.25 + fract(vRnd * 3.7) * 0.5) * (vRnd > 0.5 ? 1.0 : -1.0);
+        // (v36.02) Same ULP stabilization as _hcTowerMat: vRnd is interpolated,
+        // its last bits wobble per camera change, and h21/floor amplify that
+        // into per-frame glyph noise (and even row/col-count flips when
+        // vRnd*5 sits on an integer). Snap once, use the snapped value only.
+        float rnd = floor(vRnd * 4096.0 + 0.5) * (1.0 / 4096.0);
+        float rows = 7.0 + floor(rnd * 5.0);
+        float cols = 9.0 + floor(fract(rnd * 7.3) * 6.0);
+        float scroll = uHcT * (0.25 + fract(rnd * 3.7) * 0.5) * (rnd > 0.5 ? 1.0 : -1.0);
         vec2 cell = vec2(floor(uv.x * cols), floor(uv.y * rows + scroll * rows));
-        float glyph = step(0.42, h21(cell + vec2(floor(uHcT * 1.5) * 0.13, vRnd * 91.0)));
+        float glyph = step(0.42, h21(cell + vec2(floor(uHcT * 1.5) * 0.13, rnd * 91.0)));
         vec2 f = vec2(fract(uv.x * cols), fract(uv.y * rows + scroll * rows));
         float inner = step(0.12, f.x) * step(f.x, 0.88) * step(0.15, f.y) * step(f.y, 0.85);
         float scan = 0.82 + 0.18 * sin(uv.y * 220.0 + uHcT * 6.0);
         float edge = smoothstep(0.0, 0.06, uv.x) * smoothstep(1.0, 0.94, uv.x)
                    * smoothstep(0.0, 0.08, uv.y) * smoothstep(1.0, 0.92, uv.y);
-        float flick = 0.75 + 0.25 * step(0.06, fract(uHcT * (0.7 + vRnd) + vRnd));
+        float flick = 0.75 + 0.25 * step(0.06, fract(uHcT * (0.7 + rnd) + rnd));
         float a = (0.10 + 0.9 * glyph * inner) * scan * edge * flick;
         gl_FragColor = vec4(vCol * a * 1.6, a * 0.85);
       }`,
@@ -32182,6 +32228,220 @@ const dynamicLights = {
   }
 })();
 
+// ---- SHIP LIGHTS: engine glow + under-hull headlight (v36.03) ----
+// Owner report: "engines on the ships do light up, but they don't light up
+// anything around them". Correct — the engine orbs/plumes are additive MESHES;
+// they render bright but emit nothing. These are the REAL lights:
+//   engine  — PointLight riding the player's engine anchor
+//             (userData.engineMesh), tinted from the live engine-glow
+//             material, throttle-ramped like animateShipMesh (0.4..1.2x).
+//   head    — SpotLight mounted at the under-hull red/green nav-orb group
+//             (userData.runningLight), aimed with the nose. Verified live:
+//             player.mesh.getWorldDirection() . cameraForward = 1.000, so
+//             camera forward IS the nose. This directly addresses the v36.02
+//             cavern "black void" diagnosis (down-facing rock gets no sun and
+//             a near-orthogonal blue ambient — a warm player-carried beam is
+//             the designed fix; see lss.map.md PART 10).
+//   traffic — TRAF_N pooled PointLights budgeted to the NEAREST glowing ships
+//             (hub traffic / bots / peers), rescanned at 3 Hz. NEVER one
+//             light per ship: the hub flies ~34 traffic hulls and is
+//             GPU-bound. Slot count is additionally capped per-frame by
+//             getVRLightCap, so VR tiers shed them first.
+// (perf audit note) All scene-graph anchors (engineMesh / runningLight /
+// SpotLight.target) resolve through getWorldPosition into PRE-BUILT scratch;
+// zero per-frame allocations anywhere in _shipLightsFrame.
+//
+// NUM_*_LIGHTS PINNING (see initDynamicLights directly above): every light
+// here is created NOW, scene-resident and permanently visible; intensity 0 is
+// "off". Adding/removing at runtime would relink every lit program mid-play.
+// The SpotLight therefore compiles a NUM_SPOT_LIGHTS=1 loop into lit materials
+// from boot — measured cost on the GPU-bound hub (v36.03, RTX 5050, parked
+// vantage manual-render): skyline 2.68 ms -> 2.66 ms, street 2.58 -> 2.57 ms,
+// 144 fps held. Sub-noise.
+//
+// PHYSICAL LIGHT UNITS: r165 removed useLegacyLights — the renderer is
+// permanently physically-correct, so the default decay=2 is inverse-square
+// (why the old pool lights barely reach past their own hull: i/d^2 at 100u is
+// ~1e-4). These lights use decay=0: flat within range, shaped only by the
+// quartic distance-window — reads like the legacy falloff and keeps intensity
+// values in the sane 1..8 range instead of 1e5 candela.
+const _SHIPL = {
+  engine: null, head: null, traffic: [],
+  // No traffic slots on Quest/mobile: fragment-loop cost scales with pinned
+  // light count and those tiers already run the pool at 4.
+  TRAF_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
+           (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 3,
+  assign: [],          // per-slot assigned entity (null = free)
+  cur: [],             // per-slot smoothed intensity
+  scanT: 0,            // rescan cooldown (s)
+  eCur: 0, hCur: 0,    // smoothed engine/headlight intensities
+  _lastMesh: null,     // engine-color re-sample trigger (mesh swap)
+  _n1: null, _n2: null, _n3: null,  // scan scratch: nearest entities
+  _v: new THREE.Vector3(),
+};
+(function initShipLights() {
+  const S = _SHIPL;
+  S.engine = new THREE.PointLight(0x66d8ff, 0, 700, 0);
+  S.engine.visible = true;   // pinned resident; intensity 0 = off
+  scene.add(S.engine);
+  // Warm white beam, no shadowmap. angle/penumbra/range tuned live v36.03.
+  // ⚠ decay=1 (1/d), NOT 0: with decay 0 one intensity can't serve both a
+  // wall 80u ahead and a vault 1500u out; 1/d with candela-scale intensity
+  // (default 2200 in _shipLightsFrame) gives 11 at 200u, 2.8 at 800u, 1.4 at
+  // 1600u — a natural headlight throw. Verified in the volcanic rift vault:
+  // beam-footprint luminance 13→33.5 avg (68%→45% of pixels under 16/255).
+  S.head = new THREE.SpotLight(0xffe8c4, 0, 2400, 0.5, 0.45, 1);
+  S.head.castShadow = false;
+  S.head.visible = true;
+  scene.add(S.head);
+  scene.add(S.head.target);
+  for (let i = 0; i < S.TRAF_N; i++) {
+    const l = new THREE.PointLight(0x7fd0ff, 0, 620, 0);
+    l.visible = true;
+    scene.add(l);
+    S.traffic.push(l);
+    S.assign.push(null);
+    S.cur.push(0);
+  }
+})();
+// Live hook: window.__headlight(0|1) toggles + persists; no arg reads state.
+window.__headlight = function (v) {
+  if (v !== undefined) {
+    input.headlight = !!(+v);
+    try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
+  }
+  return input.headlight !== false;
+};
+// Sample a ship mesh's live engine-glow tint into a light color. Marker-driven
+// GLBs carry the class color, legacy layouts the team color; hoard hulls have
+// no glow mats and keep the cool-thruster default.
+function _shipLightSampleColor(mesh, light, defHex) {
+  let done = false;
+  const ud = mesh && mesh.userData;
+  const g0 = ud && ud.engineGlows && ud.engineGlows[0];
+  const u = g0 && g0.material && g0.material.uniforms;
+  if (u && u.uBaseColor && u.uBaseColor.value) { light.color.copy(u.uBaseColor.value); done = true; }
+  if (!done) light.color.setHex(defHex);
+}
+function _shipLightsFrame() {
+  const S = _SHIPL;
+  if (!S.engine) return;
+  const T = window.__shipLights;   // live-tune overrides {eI,eR,hI,hR,hA,hP,tI,tR,gate}
+  const dt = Math.min(0.05, (game && game.deltaTime) || 0.016);
+  const k = Math.min(1, dt * 8);   // ~125 ms intensity fade, no pops
+  const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 0;
+  const flying = !!(game && game.state === 'playing' && player && player.mesh &&
+                    player.shipState !== 'dead' && !player.perkCloakActive);
+  // ---- player engine glow ----
+  let eT = 0;
+  if (flying && tier < 3) {
+    const spd = player.velocity ? player.velocity.length() : 0;
+    const mx = (player.chassis && (player.chassis.flightSpeed || player.chassis.maxSpeed)) || 400;
+    const th = Math.min(1, spd / mx);
+    // Idle reads dim, full burn vivid — same ramp philosophy as the orb mats.
+    eT = ((T && T.eI != null) ? T.eI : 2.0) * (0.4 + 0.8 * th) * (tier >= 1 ? 0.6 : 1);
+  }
+  S.eCur += (eT - S.eCur) * k;
+  S.engine.intensity = S.eCur;
+  if (S.eCur > 0.01) {
+    const ud = player.mesh.userData || {};
+    if (S._lastMesh !== player.mesh) {
+      S._lastMesh = player.mesh;
+      _shipLightSampleColor(player.mesh, S.engine, 0x66d8ff);
+    }
+    if (ud.engineMesh) ud.engineMesh.getWorldPosition(S.engine.position);
+    else S.engine.position.copy(player.position);
+    S.engine.distance = (T && T.eR) || 700;
+  } else if (!flying) {
+    S._lastMesh = null;   // drop the ref so a torn-down mesh can GC
+  }
+  // ---- headlight ----
+  // 2200 is candela-scale because the spot runs decay=1 (see initShipLights);
+  // it is NOT comparable to the decay-0 point intensities above.
+  let hT = 0;
+  if (flying && tier < 3 && input.headlight !== false) hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 1 ? 0.7 : 1);
+  S.hCur += (hT - S.hCur) * k;
+  S.head.intensity = S.hCur;
+  if (S.hCur > 0.01) {
+    const ud = player.mesh.userData || {};
+    if (ud.runningLight) ud.runningLight.getWorldPosition(S.head.position);
+    else { S.head.position.copy(player.position); S.head.position.y -= 24; }
+    camera.getWorldDirection(S._v);
+    S.head.target.position.copy(player.position).addScaledVector(S._v, 1600);
+    S.head.distance = (T && T.hR) || 2400;
+    if (T && T.hA != null) S.head.angle = T.hA;
+    if (T && T.hP != null) S.head.penumbra = T.hP;
+  }
+  // ---- nearest-ship engine lights (budgeted, slot-recycled) ----
+  if (!S.TRAF_N) return;
+  const cap = (typeof getVRLightCap === 'function') ? getVRLightCap(S.TRAF_N) : S.TRAF_N;
+  S.scanT -= dt;
+  if (flying && cap > 0 && S.scanT <= 0) {
+    S.scanT = 0.33;
+    const gate = (T && T.gate) || 2400;
+    const g2 = gate * gate;
+    let n1 = null, n2 = null, n3 = null, d1 = g2, d2 = g2, d3 = g2;
+    const pp = player.position;
+    const ents = game.entities;
+    if (ents) {
+      for (let i = 0; i < ents.length; i++) {
+        const e = ents[i];
+        if (!e || !e.alive || !e.mesh || !e.mesh.visible || !e.position) continue;
+        const dx = e.position.x - pp.x, dy = e.position.y - pp.y, dz = e.position.z - pp.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d >= d3) continue;
+        if (d < d1) { n3 = n2; d3 = d2; n2 = n1; d2 = d1; n1 = e; d1 = d; }
+        else if (d < d2) { n3 = n2; d3 = d2; n2 = e; d2 = d; }
+        else { n3 = e; d3 = d; }
+      }
+    }
+    const nps = (typeof net !== 'undefined' && net && net.networkPlayers) ? net.networkPlayers : null;
+    if (nps) {
+      for (let i = 0; i < nps.length; i++) {
+        const e = nps[i];
+        if (!e || !e.alive || !e.mesh || !e.mesh.visible || !e.position) continue;
+        const dx = e.position.x - pp.x, dy = e.position.y - pp.y, dz = e.position.z - pp.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d >= d3) continue;
+        if (d < d1) { n3 = n2; d3 = d2; n2 = n1; d2 = d1; n1 = e; d1 = d; }
+        else if (d < d2) { n3 = n2; d3 = d2; n2 = e; d2 = d; }
+        else { n3 = e; d3 = d; }
+      }
+    }
+    S._n1 = n1; S._n2 = n2; S._n3 = n3;
+    // Reconcile slots with hysteresis: keep a slot whose entity is still in
+    // the new top set, then fill free slots with the unplaced newcomers.
+    for (let i = 0; i < S.TRAF_N; i++) {
+      const a = S.assign[i];
+      if (a && a !== n1 && a !== n2 && a !== n3) S.assign[i] = null;
+    }
+    if (n1 && S.assign.indexOf(n1) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n1; _shipLightSampleColor(n1.mesh, S.traffic[f], 0x7fd0ff); } }
+    if (n2 && S.assign.indexOf(n2) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n2; _shipLightSampleColor(n2.mesh, S.traffic[f], 0x7fd0ff); } }
+    if (n3 && S.assign.indexOf(n3) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n3; _shipLightSampleColor(n3.mesh, S.traffic[f], 0x7fd0ff); } }
+  }
+  for (let i = 0; i < S.TRAF_N; i++) {
+    const l = S.traffic[i];
+    let e = S.assign[i];
+    let tgt = 0;
+    if (!flying || i >= cap || !e || !e.alive || !e.mesh || !e.mesh.visible) { e = null; if (!flying) S.assign[i] = null; }
+    if (e) {
+      const spd = e.velocity ? e.velocity.length() : 0;
+      const mx = (e.chassis && (e.chassis.flightSpeed || e.chassis.maxSpeed)) || 400;
+      const th = Math.min(1, spd / Math.max(1, mx));
+      // Subtle: parked hulls a faint pad glow, movers a clear wash.
+      tgt = ((T && T.tI != null) ? T.tI : 1.3) * (0.35 + 0.65 * th) * (tier >= 1 ? 0.6 : 1);
+    }
+    S.cur[i] += (tgt - S.cur[i]) * k;
+    l.intensity = S.cur[i];
+    if (S.cur[i] > 0.01 && e) {
+      const ud = e.mesh.userData || {};
+      if (ud.engineMesh) ud.engineMesh.getWorldPosition(l.position);
+      else l.position.copy(e.position);
+      l.distance = (T && T.tR) || 620;
+    }
+  }
+}
+
 function spawnDynamicLight(pos, color, intensity, range, duration) {
   const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (tier >= 3) return;
@@ -38199,6 +38459,11 @@ class OutskirtsMonster {
       }
     } catch (_) {}
     try { spawnMonsterGuts(this.position, MONSTER_SIZE, this.def); } catch (e) { console.warn('[monsters] guts failed:', e); }
+    // (v36.04) ENDLESS BOUNTY: a monster kill drops one Aegis bolt at the
+    // corpse (endless-only — the function self-gates on LSS.MODE). Sits here
+    // in die() so it fires on the authority AND on every peer's mon_dead
+    // replay alike (drop is local per client, the v35.87 collection seam).
+    try { if (typeof _lssEndlessDropBolt === 'function') _lssEndlessDropBolt(this.position); } catch (_) {}
     if (this.mesh) {
       try { scene.remove(this.mesh); } catch (_) {}
       // Keep geometry + textures resident: monsters revive at every round
@@ -57859,6 +58124,166 @@ function _howtoBindLabel(scheme, action) {
   const k = (kb[action] != null && kb[action] !== '') ? kb[action] : KB_DEFAULTS[action];
   return (k == null || k === '') ? '' : _formatKey(k);
 }
+// (v36.05) HOW-TO HUD DIAGRAM — a simplified schematic replica of the
+// circumpunct layout HUD drawn as inline SVG. Geometry is read from the LIVE
+// _HL table (1 vmin -> SC svg units, same canvas-degree convention: 270 = up),
+// so the diagram cannot drift from the real cluster. Callout labels sit in the
+// margins with leader lines. Pure presentation — touches no game state.
+function _howtoHudSvg() {
+  const SC = 3.32;                                  // svg units per vmin (frame is 100 vmin tall)
+  const FX = 165, FY = 30, FW = 590, FH = 332;      // the 16:9 "screen" frame
+  const cx = FX + FW / 2, cy = FY + FH / 2;         // the 'mc' anchor
+  const bcY = FY + FH;                              // the 'bc' anchor edge
+  const RD = Math.PI / 180;
+  const px = (r, d) => +(cx + r * SC * Math.cos(d * RD)).toFixed(1);
+  const py = (r, d) => +(cy + r * SC * Math.sin(d * RD)).toFixed(1);
+  function arcPath(r, d0, d1) {
+    return 'M' + px(r, d0) + ' ' + py(r, d0) +
+      ' A' + (r * SC).toFixed(1) + ' ' + (r * SC).toFixed(1) + ' 0 ' +
+      ((d1 - d0) > 180 ? 1 : 0) + ' 1 ' + px(r, d1) + ' ' + py(r, d1);
+  }
+  // arcbar / segarc: `rot` folds into a0/a1 (the v35.41 radial-part rule).
+  function segArc(e, op) {
+    const rot = e.rot || 0;
+    const gap = (e.gapDeg != null) ? e.gapDeg : (e.kind === 'segarc' ? 4 : 0);
+    const a0 = e.a0 + rot, a1 = e.a1 + rot, n = e.seg || 1;
+    const sw = (a1 - a0 - gap * (n - 1)) / n;
+    let s = '';
+    for (let i = 0; i < n; i++) {
+      const b = a0 + i * (sw + gap);
+      s += '<path d="' + arcPath(e.r, b, b + sw) + '" fill="none" stroke="' + e.col +
+           '" stroke-width="' + (e.thick * SC).toFixed(1) + '" stroke-linecap="round" opacity="' + (op || 0.95) + '"/>';
+    }
+    return s;
+  }
+  function tickStrip(e) {
+    const rot = e.rot || 0, a0 = e.a0 + rot, a1 = e.a1 + rot;
+    let s = '';
+    for (let i = 0; i < e.seg; i++) {
+      const d = a0 + (a1 - a0) * (e.seg === 1 ? 0.5 : i / (e.seg - 1));
+      s += '<line x1="' + px(e.r, d) + '" y1="' + py(e.r, d) + '" x2="' + px(e.r + e.tick, d) +
+           '" y2="' + py(e.r + e.tick, d) + '" stroke="' + e.col + '" stroke-width="' +
+           Math.max(1, e.thick * SC).toFixed(1) + '" opacity="0.9"/>';
+    }
+    return s;
+  }
+  // Callout: leader line from (tx,ty) to the label at (x,y). First line bold in
+  // the part's colour, extra lines dim — the game's hint styling.
+  function callout(x, y, tx, ty, col, lines, anchor) {
+    let s = '';
+    if (tx != null) {
+      s += '<line x1="' + tx + '" y1="' + ty + '" x2="' + x + '" y2="' + (y - 4) +
+           '" stroke="rgba(150,180,215,0.28)" stroke-width="1"/>';
+    }
+    for (let i = 0; i < lines.length; i++) {
+      s += '<text x="' + x + '" y="' + (y + i * 11.5) + '" text-anchor="' + (anchor || 'start') +
+           '" font-family="Rajdhani,sans-serif" font-size="' + (i ? 9.5 : 11) + '" letter-spacing="1"' +
+           ' font-weight="' + (i ? 500 : 700) + '" fill="' + (i ? '#8fa3b8' : col) + '">' + lines[i] + '</text>';
+    }
+    return s;
+  }
+  const H = _HL;
+  let g = '<svg viewBox="0 0 920 434" xmlns="http://www.w3.org/2000/svg" role="img" ' +
+          'style="width:100%;min-width:640px;height:auto;display:block;">';
+  // screen frame
+  g += '<rect x="' + FX + '" y="' + FY + '" width="' + FW + '" height="' + FH +
+       '" rx="8" fill="rgba(8,12,24,0.55)" stroke="rgba(120,200,255,0.22)" stroke-width="1.2"/>';
+  // doomed pulse: wide dim red band ON the health radius (under the arcs)
+  g += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (H.health.r * SC).toFixed(1) +
+       '" fill="none" stroke="rgba(255,50,30,0.20)" stroke-width="' + (2.8 * SC).toFixed(1) + '"/>';
+  // rings: health / shield / energy / core, speed + ammo tick strips, cd arcs
+  g += segArc(H.health) + segArc(H.shield) + segArc(H.energy) + segArc(H.core);
+  g += tickStrip(H.speed) + tickStrip(H.ammo);
+  g += segArc(H.ab1cd) + segArc(H.ab3cd) + segArc(H.ab2cd);
+  // curved ability names ride 1.1 vmin outside their own cooldown arc (v35.54)
+  let defs = '<defs>';
+  const _abArcs = [['htp-a1', H.ab1cd], ['htp-a3', H.ab3cd], ['htp-a2', H.ab2cd]];
+  for (const [id, e] of _abArcs) {
+    const mid = (e.a0 + e.a1) / 2;
+    defs += '<path id="' + id + '" d="' + arcPath(16.2, mid - 21, mid + 21) + '" fill="none"/>';
+  }
+  g += defs + '</defs>';
+  for (const [id] of _abArcs) {
+    g += '<text font-family="Rajdhani,sans-serif" font-size="7.5" letter-spacing="1.2" fill="#2ee056" opacity="0.8">' +
+         '<textPath href="#' + id + '" startOffset="50%" text-anchor="middle">ABILITY</textPath></text>';
+  }
+  // dash pips (box part: rot is a real rotation about the box centre)
+  {
+    const d = H.dash, bx = cx + d.x * SC, by = cy + d.y * SC;
+    g += '<g transform="translate(' + bx.toFixed(1) + ' ' + by.toFixed(1) + ') rotate(' + (d.rot || 0) + ')">';
+    const n = 5, span = d.w * SC;
+    for (let i = 0; i < n; i++) {
+      const lit = i < 3;
+      g += '<circle cx="' + (-span / 2 + i * (span / (n - 1))).toFixed(1) + '" cy="0" r="' + (0.55 * SC).toFixed(1) +
+           '" fill="' + (lit ? d.col : 'none') + '" stroke="' + d.col + '" stroke-width="1" opacity="' + (lit ? 0.95 : 0.45) + '"/>';
+    }
+    g += '</g>';
+  }
+  // reticle
+  g += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (H.reticle.r * SC).toFixed(1) +
+       '" fill="none" stroke="#dff2ff" stroke-width="1.3" opacity="0.9"/>' +
+       '<circle cx="' + cx + '" cy="' + cy + '" r="1.6" fill="#dff2ff"/>';
+  // top-centre band: round line, then the stasis / endless line at kill-feed height
+  g += '<text x="' + cx + '" y="' + (FY + 13) + '" text-anchor="middle" font-family="Rajdhani,sans-serif"' +
+       ' font-size="8.5" letter-spacing="1.5" fill="#dde" opacity="0.75">ROUND 2 &#183; 3:41</text>';
+  g += '<text x="' + cx + '" y="' + (FY + 8 * SC + 3).toFixed(1) + '" text-anchor="middle" font-family="Rajdhani,sans-serif"' +
+       ' font-size="9" letter-spacing="1.5" fill="#ffd24d" opacity="0.85">12 480 u &#183; LIVES 2 &#183; AEGIS L3</text>';
+  // kill feed (top right, right-aligned)
+  g += '<text x="' + (FX + FW - 4 * SC).toFixed(1) + '" y="' + (FY + 8 * SC).toFixed(1) + '" text-anchor="end"' +
+       ' font-family="Rajdhani,sans-serif" font-size="8" letter-spacing="0.5" fill="#cdd" opacity="0.7">SLAYER &#10148; VORTEX</text>';
+  // radar disc + spinning compass rose + fixed lubber + ship triangle + contacts
+  {
+    const mm = H.minimap, mx = cx + mm.x * SC, my = bcY + mm.y * SC, mr = (mm.w / 2) * SC;
+    g += '<circle cx="' + mx.toFixed(1) + '" cy="' + my.toFixed(1) + '" r="' + mr.toFixed(1) +
+         '" fill="rgba(8,16,30,0.85)" stroke="#4fd1ff" stroke-width="1.2" opacity="0.95"/>';
+    // rose graduations every 15 deg, cardinals at r 13.5 (they SPIN; lubber is fixed)
+    for (let d = 0; d < 360; d += 15) {
+      const r1 = 11.5 * SC, r2 = 12.4 * SC, ca = Math.cos(d * RD), sa = Math.sin(d * RD);
+      g += '<line x1="' + (mx + r1 * ca).toFixed(1) + '" y1="' + (my + r1 * sa).toFixed(1) +
+           '" x2="' + (mx + r2 * ca).toFixed(1) + '" y2="' + (my + r2 * sa).toFixed(1) +
+           '" stroke="#7d93a7" stroke-width="1" opacity="0.6"/>';
+    }
+    const _cards = [['N', 270], ['E', 0], ['S', 90], ['W', 180]];
+    for (const [ltr, d] of _cards) {
+      g += '<text x="' + (mx + 14.3 * SC * Math.cos(d * RD)).toFixed(1) + '" y="' +
+           (my + 14.3 * SC * Math.sin(d * RD) + 3).toFixed(1) + '" text-anchor="middle"' +
+           ' font-family="Rajdhani,sans-serif" font-size="9" font-weight="700" fill="#7d93a7">' + ltr + '</text>';
+    }
+    // fixed cyan lubber mark at the top of the disc
+    g += '<path d="M' + mx.toFixed(1) + ' ' + (my - mr + 1).toFixed(1) + ' l-4 -7 l8 0 Z" fill="#4fd1ff"/>';
+    // fixed white ship triangle at the centre (always points up: ship-up radar)
+    g += '<path d="M' + mx.toFixed(1) + ' ' + (my - 7).toFixed(1) + ' l-4.5 12 l9 0 Z" fill="#fff"/>';
+    // contacts + one off-radar edge arrow at the 68/75 clamp ring
+    g += '<circle cx="' + (mx + 14).toFixed(1) + '" cy="' + (my - 10).toFixed(1) + '" r="2.2" fill="#ff5544"/>' +
+         '<circle cx="' + (mx - 11).toFixed(1) + '" cy="' + (my + 8).toFixed(1) + '" r="2.2" fill="#6f6"/>';
+    const ed = -35, ex = mx + mr * 0.906 * Math.cos(ed * RD), ey = my + mr * 0.906 * Math.sin(ed * RD);
+    g += '<g transform="translate(' + ex.toFixed(1) + ' ' + ey.toFixed(1) + ') rotate(' + (ed + 90) + ')">' +
+         '<path d="M0 -4.5 L3.8 3.2 L-3.8 3.2 Z" fill="#ff5544"/></g>';
+    // radar callouts, below the frame
+    g += callout(340, 400, mx - mr * 0.7, my + mr * 0.7, '#4fd1ff',
+                 ['RADAR &#8212; SHIP-UP', 'you are the fixed triangle; the world rotates'], 'end');
+    g += callout(580, 400, mx + 12.4 * SC, my + 4, '#7d93a7',
+                 ['SPINNING COMPASS + EDGE ARROWS', 'letter at the top = your heading &#183; rim arrows = off-radar contacts'], 'start');
+  }
+  // cluster callouts — left margin
+  g += callout(155, 78,  px(H.core.r, 250), py(H.core.r, 250), '#f0ff1f', ['CORE &#8212; 4 BLOCKS (TOP)', 'fills to 100% &#183; fires your super'], 'end');
+  g += callout(155, 122, px(H.energy.r, 210), py(H.energy.r, 210), '#4d52ff', ['ENERGY (NRG)', 'ability + afterburner fuel'], 'end');
+  g += callout(155, 162, px(H.health.r, 195), py(H.health.r, 195), '#2f9e47', ['HEALTH ARC', 'hull, in 5 segments'], 'end');
+  g += callout(155, 202, px(12.5, 174), py(12.5, 174), '#c04040', ['SPEED TICKS'], 'end');
+  g += callout(155, 246, cx + H.dash.x * SC - 10, cy + H.dash.y * SC + 4, '#4fd1ff', ['DASH PIPS', 'one pip = one charge'], 'end');
+  g += callout(155, 292, px(H.health.r, 150), py(H.health.r, 150), '#ff5544', ['DOOMED PULSE', 'red band at &#8804;15% hull'], 'end');
+  // cluster callouts — right margin
+  g += callout(765, 82,  px(H.ab2cd.r, 317), py(H.ab2cd.r, 317), '#2ee056', ['ABILITY COOLDOWN ARCS', 'names curve over each bar'], 'start');
+  g += callout(765, 128, px(H.shield.r, 332), py(H.shield.r, 332), '#4fd1ff', ['SHIELD ARC'], 'start');
+  g += callout(765, 168, px(12.5, 7), py(12.5, 7), '#cfa302', ['AMMO TICKS', 'clip &#8212; reload when empty'], 'start');
+  g += callout(765, 212, cx + H.reticle.r * SC + 2, cy, '#dff2ff', ['RETICLE'], 'start');
+  g += callout(765, 52,  FX + FW - 4 * SC - 4, FY + 8 * SC - 4, '#cdd', ['KILL FEED'], 'start');
+  // top band callout
+  g += callout(cx, 14, cx, FY + 8 * SC - 10, '#ffd24d',
+               ['TOP-CENTRE BAND &#8212; round &#183; timer / stasis lock / endless distance &#183; lives'], 'middle');
+  g += '</svg>';
+  return g;
+}
 function _howtoRender(ov) {
   const scheme = _howtoScheme();
   const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
@@ -57900,6 +58325,24 @@ function _howtoRender(ov) {
      'Fly a cavern with no end, solo or co-op. Difficulty is lives — EASY 3, MEDIUM 2, HARD 1 — and distance is your score; it never resets. Ambush waves strike on a rhythm as the reaches change biome and storms roll in — and living AEGIS BOLTS hide off the main line, granting ranks for the run. They flee when watched.'],
   ];
   for (const [nm, col, txt] of _modes) {
+    h += '<div style="border:1px solid rgba(120,200,255,0.2);border-left:3px solid ' + col + ';border-radius:8px;' +
+         'background:rgba(15,20,38,0.5);padding:10px 14px;margin-bottom:8px;">' +
+         "<div class='lss-title' style='font-size:13px;letter-spacing:3px;color:" + col + ";'>" + nm + '</div>' +
+         "<div style='font-size:12px;color:#cdd;line-height:1.55;margin-top:4px;'>" + txt + '</div></div>';
+  }
+  // ---- combat mechanics (v36.05) — rules derived from CODE, not lore:
+  // dash() / updatePlayerMovement (charge regen) / playerTakeDamage (doomed
+  // trigger) / checkExecutions (ram-executes both ways) / updatePlayerStasis
+  // (shield refill + doomed clear) / activateAbility (+2 costed) /
+  // activateCore + Bot.die (+15 kill) are the sources of truth. ----
+  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>COMBAT MECHANICS</div>";
+  const _mechs = [
+    ['DASH &amp; DOOMED STATE', '#4fd1ff',
+     'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
+    ['CORE CHARGING', '#f0ff1f',
+     'The CORE meter is the four-block arc at the top of the ring, charging 0–100 off aggression: damage dealt feeds it steadily (about 1 point per 100 damage), every kill banks +15, every execution +20, and each ability activation that actually costs something — a cooldown or a trap charge — adds +2. Free taps of the hold shields earn nothing. At 100, press CORE to fire your ship’s signature super — a sustained mega-beam, a massive AoE blast, a mega stun bolt, nano-repair swarms: each ship has its own. The meter zeroes on activation and stays empty while the core runs; then the climb starts over.'],
+  ];
+  for (const [nm, col, txt] of _mechs) {
     h += '<div style="border:1px solid rgba(120,200,255,0.2);border-left:3px solid ' + col + ';border-radius:8px;' +
          'background:rgba(15,20,38,0.5);padding:10px 14px;margin-bottom:8px;">' +
          "<div class='lss-title' style='font-size:13px;letter-spacing:3px;color:" + col + ";'>" + nm + '</div>' +
@@ -58018,6 +58461,13 @@ function _howtoRender(ov) {
          '<span style="color:#fff;font-weight:bold;">' + r[1] + '</span></span>'
        ).join('<span style="color:#456;"> · </span>') + '</div>';
   if (ctlNote) h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;margin-top:6px;">' + ctlNote + '</div>';
+  // ---- HUD diagram (v36.05) — schematic replica generated from the live
+  // _HL layout table by _howtoHudSvg(), so it tracks the real geometry. ----
+  h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>THE HUD</div>";
+  h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:8px;">' +
+       'Everything lives on one circumpunct cluster around your reticle, with the radar disc at the bottom of the screen. Drawn from the live HUD layout:</div>';
+  h += '<div style="border:1px solid rgba(120,200,255,0.2);border-radius:8px;background:rgba(10,14,28,0.55);padding:8px;overflow-x:auto;">' +
+       _howtoHudSvg() + '</div>';
   h += '</div>';
   // Swap the content in, keeping the reader's scroll position across a
   // dropdown re-render (innerHTML resets it to 0 otherwise).
@@ -59152,6 +59602,7 @@ function _refreshSettingsValues() {
   }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
+  setChk('set-headlight', input.headlight !== false);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   setChk('set-clip-rec', !!input.clipRec);
 
@@ -59430,6 +59881,13 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Show FPS Counter</label>
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>Ship Headlight</label>
+        <input type="checkbox" id="set-headlight" ${input.headlight !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Under-hull headlight beam aimed with your nose — lights up dark caverns and the endless deeps. Engine-glow lighting is always on.</label>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
@@ -60851,6 +61309,11 @@ function buildSettingsPage() {
     input.showFps = !!showFpsChk.checked;
     saveSettings();
   });
+  const headlightChk = overlay.querySelector('#set-headlight');
+  if (headlightChk) headlightChk.addEventListener('change', () => {
+    input.headlight = !!headlightChk.checked;
+    saveSettings();
+  });
   const gaugeLabelChk = overlay.querySelector('#set-hud-gauge-labels');
   if (gaugeLabelChk) gaugeLabelChk.addEventListener('change', () => {
     input.hudGaugeLabels = !!gaugeLabelChk.checked;
@@ -61551,6 +62014,7 @@ function saveSettings() {
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
+      headlight: input.headlight !== false,
       hudGaugeLabels: input.hudGaugeLabels !== false,
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
@@ -63422,6 +63886,9 @@ function loadSettings() {
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
+    // Absent key keeps the `true` default — settings saved before v36.03 have
+    // no entry and should get the headlight.
+    if (typeof data.headlight === 'boolean') input.headlight = data.headlight;
     // Absent key keeps the `true` default — settings saved before v35.55 have
     // no entry for this, and those players should still see the captions.
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
@@ -66056,7 +66523,7 @@ function _lssEndlessBoltSlot(run) {
   if (!run._boltPool) run._boltPool = [];
   for (let i = 0; i < run._boltPool.length; i++) {
     const s = run._boltPool[i];
-    if (!s.inUse) { s.inUse = true; s.grp.visible = true; return s; }
+    if (!s.inUse) { s.inUse = true; s.grp.visible = true; s.grp.scale.setScalar(1); return s; }   // (v36.04) scale reset: a bounty's expiry fade must not shrink the next bolt in this slot
   }
   if (run._boltPool.length >= (_lssEndlessMobile() ? 24 : 64)) return null;   // ~5 live bolts typical at 1-per-3.6-segs in an 18-seg window; caps are pure safety rails (mobile 24, v35.89)
   if (!run._boltLib) {
@@ -66226,6 +66693,49 @@ function _lssEndlessFreeBolts(run, seg) {
     if (b.slot) { b.slot.inUse = false; b.slot.grp.visible = false; b.slot = null; }
   }
   seg._bolts = null;
+}
+// (v36.04) ENDLESS BOUNTY DROP — a monster killed while LSS.MODE==='endless'
+// drops ONE Aegis bolt at the corpse (owner: "killing monsters should drop
+// bolts"). Hooked from OutskirtsMonster.die, so it fires wherever a monster
+// dies in endless — ambient outskirts beasts and anything summoned alike.
+// Same slot pool + visual + collect (120u, full rank) as route bolts, two
+// deliberate differences: a bounty HOLDS STILL when watched (no living-mote
+// flee — it is a reward, not prey; b.bounty gates the flee arm in _aegis) and
+// it EXPIRES after ~45 s uncollected, shrinking over its last 4 s (motes live
+// forever; bounties are a limited-time claim). Placement reuses the route-bolt
+// clearance recipe (carved-gap clamp + worldSDF < -60 step-DOWN, skip if no
+// air) — corpses usually float in open air so the first probe passes; Math.
+// random is fine here because the drop is LOCAL per client (the v35.87/91
+// collection seam: every peer runs die() via mon_dead, so each client sees
+// its own bounty at the same corpse — one line of co-op truth: drop is local
+// v1). Pool guard: bounties must never starve route bolts — if fewer than 8
+// in-use-free slots would remain under the pool cap, skip the drop silently.
+function _lssEndlessDropBolt(pos) {
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'endless') return;
+  const run = game.endlessRun; if (!run || run.over) return;
+  const T = game.sandwichTerrain; if (!T || !T.ON) return;
+  if (!pos || !isFinite(pos.x) || !isFinite(pos.y) || !isFinite(pos.z)) return;
+  const cap = _lssEndlessMobile() ? 24 : 64;
+  let used = 0;
+  if (run._boltPool) for (let i = 0; i < run._boltPool.length; i++) if (run._boltPool[i].inUse) used++;
+  if (used > cap - 8) return;   // headroom guard: route bolts always find a slot
+  let x = pos.x, y = pos.y, z = pos.z;
+  try {
+    const gy = _stGroundYCarved(x, z, T) + 170, cy = _stCeilYCarved(x, z, T) - 170;
+    if (cy < gy) return;
+    y = Math.max(gy, Math.min(cy, y));
+    if (typeof worldSDF === 'function') {
+      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
+      if (worldSDF(x, y, z) > -60) return;   // sealed column — no bounty here
+    }
+  } catch (_) { return; }
+  const slot = _lssEndlessBoltSlot(run);
+  if (!slot) return;
+  slot.grp.position.set(x, y, z);
+  slot.grp.rotation.set(0, Math.random() * Math.PI, 0);
+  const list = run.dropBolts || (run.dropBolts = []);
+  for (let i = list.length - 1; i >= 0; i--) if (list[i].taken) list.splice(i, 1);   // compact dead entries (event-scoped, not per-frame)
+  list.push({ x, y, z, taken: false, slot, phase: Math.random() * 6.283, ox: 0, oy: 0, oz: 0, fleeT: 0, bounty: true, expT: 45 });
 }
 // (v35.87) The aegis-surge outgoing-damage multiplier (+6%/lvl). Called from
 // Bot.takeDamage BEFORE the isProxy route so co-op bot_dmg claims carry it.
