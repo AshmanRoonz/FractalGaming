@@ -3609,7 +3609,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '35.88';
+const LSS_BUILD = '35.89';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -6296,7 +6296,8 @@ const EndlessMode = {
     run.phaseT += dt;
     let alive = 0;
     try {
-      for (const e of game.entities) {
+      for (let i = 0; i < game.entities.length; i++) {
+        const e = game.entities[i];
         if (e && (e instanceof Bot) && e.isProxy && e.alive && e.team === LSS.TEAM_FLEET_B) alive++;
       }
     } catch (_) {}
@@ -6335,15 +6336,15 @@ const EndlessMode = {
       }
     }
     try {
-      const seen = a.seen, present = {};
+      const seen = a.seen, present = a._pres || (a._pres = {}), stamp = (a._psn = (a._psn || 0) + 1);
       for (let i = 0; i < game.entities.length; i++) {
         const e = game.entities[i];
         if (!e || !(e instanceof Bot) || e.team !== LSS.TEAM_FLEET_B) continue;
-        present[e.id] = 1;
+        present[e.id] = stamp;
         if (e.alive) seen[e.id] = 1;
         else if (seen[e.id]) { delete seen[e.id]; a.charge += 34; a.graceT = 0; a.flashT = 1.2; a.kills++; }
       }
-      for (const id in seen) if (!present[id]) delete seen[id];
+      for (const id in seen) if (present[id] !== stamp) delete seen[id];
     } catch (_) {}
     a.graceT += dt;
     if (a.graceT > 12) {
@@ -6455,7 +6456,7 @@ const EndlessMode = {
       }
     }
     run.rayT += dt;
-    if (calm && run.rayT >= 1.6) {
+    if (calm && run.rayT >= 1.6 && !_lssEndlessMobile()) {
       run.rayT = 0;
       const rays = this._ensureRays(run);
       let slot = null;
@@ -16249,8 +16250,9 @@ function _stGapSDFCarved(px,py,pz,T){
 const _SW_CHUNK = 900;       
 const _SW_CELLS = 40;        
 const _SW_VIEW  = 5;         
-function _swHubView() { return window.__hubView || (((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView   
-const _SW_HUB_VIEW = 11;      
+function _swHubView() { return window.__hubView || (((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
+function _lssEndlessMobile() { return !!window.__endlessMobileSim || (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE; }
+const _SW_HUB_VIEW = 11;
 const _SW_BUILD_PER_FRAME = 2;
 
 const _SW_BIOMES = {
@@ -22054,7 +22056,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
   const chunks = game.sandwichChunks;
   const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
-  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : ((T && T.ENDLESS) ? (window.__endlessView || 9) : _SW_VIEW);   
+  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : ((T && T.ENDLESS) ? (window.__endlessView || (_lssEndlessMobile() ? 6 : 9)) : _SW_VIEW);   // (v35.89) endless view: desktop 9, mobile/Quest 6 (13^2 x2 shells = 338 terrain draws vs 722 — endless draws TWO shells per chunk, so it needs a TIGHTER radius than the hub's 8). window.__endlessView stays the master override for BOTH.
   
   
   
@@ -52493,7 +52495,7 @@ function _lssEndlessBoltSlot(run) {
     const s = run._boltPool[i];
     if (!s.inUse) { s.inUse = true; s.grp.visible = true; return s; }
   }
-  if (run._boltPool.length >= 64) return null;   // window ~18 segs x <=3 bolts — never legitimately hit
+  if (run._boltPool.length >= (_lssEndlessMobile() ? 24 : 64)) return null;   // window ~18 segs x <=3 bolts — never legitimately hit on desktop; mobile caps the pool at 24 (v35.89 — far bolts just don't spawn, the near ones still charge the aegis)
   if (!run._boltLib) {
     run._boltLib = {
       geo: new THREE.OctahedronGeometry(26),
@@ -52507,9 +52509,11 @@ function _lssEndlessBoltSlot(run) {
   }
   const grp = new THREE.Group();
   grp.add(new THREE.Mesh(run._boltLib.geo, run._boltLib.coreMat));
-  const spr = new THREE.Sprite(run._boltLib.sprMat);
-  spr.scale.set(150, 150, 1);
-  grp.add(spr);
+  if (!_lssEndlessMobile()) {
+    const spr = new THREE.Sprite(run._boltLib.sprMat);
+    spr.scale.set(150, 150, 1);
+    grp.add(spr);
+  }
   scene.add(grp);
   const slot = { grp, inUse: true };
   run._boltPool.push(slot);
@@ -54751,7 +54755,7 @@ function gameLoop(timestamp) {
         if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
       } else {   
-        updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') ? 1 : undefined);   
+        updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
       try { _swUpdateHubWater(); } catch (_) {}   
       try { _swRippleTick(dt); } catch (_) {}
