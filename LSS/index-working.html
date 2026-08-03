@@ -1754,7 +1754,20 @@ body.vr-active #camp-video { display: none !important; }
 #lss-loading-overlay {
   display: none;
   position: fixed; inset: 0;
-  background: rgba(2, 4, 12, 0.92);
+  /* (v36.19) OPAQUE, not a 92% scrim. commitLoadout deliberately leaves
+     #ship-select .active underneath this for the whole PREPARING ARENA window
+     (see the note above the `if (!midMatch)` block) and relies on this element
+     to cover it — the author's own comment there says "show the loading overlay
+     OVER ship-select". At 0.92 the remaining 8% composited the entire ship
+     picker through it: title, the CONFIRM button still running its infinite
+     lssConfirmPulse, the stat bars, the MAP panel and the live-rendering GLB
+     preview (_animateShipPreview keeps running while .active). Reported as
+     "you can see the ship selection screen during the loading screen".
+     ⚠ Do NOT "fix" this by hiding #ship-select instead: #ship-select-countdown
+     is a DOM CHILD of it and several modes (race, campaign journey, empty
+     sdfRoomData) reach launchCountdown without the L47213 hide, so the 3-2-1
+     ticker would run inside a hidden parent. */
+  background: #02040c;
   z-index: 9000;
   flex-direction: column;
   align-items: center; justify-content: center;
@@ -3759,7 +3772,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.17';
+const LSS_BUILD = '36.19';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4341,11 +4354,22 @@ const input = {
   // on Quest 2 / Quest 3; bump to 1.0+ if your GPU has headroom.
   vrRenderScale: 0.7,
   // (v35.64) VR-ONLY HUD size multiplier, applied to the xrHudMesh plane
-  // (2.0 x 1.125 m at 2 m forward). Flat screen is untouched — that sizes off
-  // the VMIN layout instead. Default 1.5: the plane was built to roughly match
-  // a desktop window's angular size, which reads small through a headset where
-  // you cannot lean in. Range 0.75..3.0 in the settings slider.
+  // (2.0 x 1.125 m at 2 m forward). Default 1.5: the plane was built to roughly
+  // match a desktop window's angular size, which reads small through a headset
+  // where you cannot lean in. Range 0.75..3.0 in the settings slider.
+  // (v36.19) Flat screen has its own multiplier now — `hudScale` below — applied
+  // inside _hlPlace's vmin. The two never compound: _hlScale() returns 1 while
+  // renderer.xr.isPresenting, because the VR plane is textured from the very
+  // canvas the flat layout draws into.
   vrHudScale: 1.5,
+  // (v36.19) FLAT-SCREEN HUD size multiplier — the VMIN-layout equivalent of
+  // vrHudScale. 1 = the designed layout. Range 0.75..1.75 in the settings
+  // slider: past ~1.8 the gauge cluster reaches the pinned compass rose, and
+  // below ~0.74 the px floors on caption fonts and stroke widths stop tracking.
+  // The radar + compass are EXCLUDED (the owner asked for it, and the rose is
+  // dimensioned off the disc); so are the DOM HUD bits and the cockpit frame art,
+  // which is designed around the layout at 1x.
+  hudScale: 1,
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
@@ -9896,8 +9920,18 @@ function checkAllLoadoutsReady() {
   if (!_localWarmupReady || !_allPeersWarmupReady()) {
     // Update the loading overlay so the user knows we're waiting on peers
     // rather than still compiling locally.
+    // (v36.19) Carry the READY COUNT in the subtext. showShipSelectWaiting()
+    // hides nothing and the ready pips it refreshes live in #teammates-strip —
+    // which is INSIDE #ship-select, i.e. underneath this overlay. That was
+    // legible through the old 92% scrim; now that the overlay is opaque the
+    // subtext is the only readiness feedback multiplayer has left.
     if (_localWarmupReady) {
-      try { showLoadingOverlay('WAITING FOR PEERS', 'syncing match start'); } catch (_) {}
+      let _rdy = 0, _tot = 0;
+      try {
+        for (const [, peer] of nonJudgePeerEntries()) { _tot++; if (peer && peer.warmupReady) _rdy++; }
+      } catch (_) {}
+      const _sub = _tot ? ((_rdy + 1) + '/' + (_tot + 1) + ' ready') : 'syncing match start';
+      try { showLoadingOverlay('WAITING FOR PEERS', _sub); } catch (_) {}
     }
     return;
   }
@@ -34030,77 +34064,27 @@ async function _warmupCombatShadersBody() {
       }
     }
 
-    // (warmup-chunk 2026-05) Yield before the postFX warm pass ; it does
-    // its own render() against a render target which is more GL work for
-    // the driver to chew on.
+    // (warmup-chunk 2026-05) Yield here ; the driver has had a lot of GL work.
     await _warmupYield();
-    // --- postFX shockwave path pre-warm: the composite shader has a runtime
-    // if-branch guarded on shockIntensity > 0.001 that only fires when the
-    // first explosion spawns. Most WebGL drivers keep one program regardless of
-    // uniform values, but some Angle/Intel stacks recompile on first non-zero
-    // uniform or cache the program per-uniform-state. One render with the
-    // branch active guarantees the branch's codegen is resident before combat.
-    if (typeof postFX !== 'undefined' && postFX.compositeMat && postFX.compositeQuad) {
-      try {
-        const u = postFX.compositeMat.uniforms;
-        // Save current state so we don't leak values into the running game.
-        const prev = {
-          shockIntensity: u.shockIntensity.value,
-          shockAge: u.shockAge.value,
-          shockCenter: u.shockCenter.value.clone(),
-          damagePulse: u.damagePulse.value,
-          warpAmount: u.warpAmount.value,
-          doomedWarp: u.doomedWarp.value,
-          killFlash: u.killFlash.value,
-          tScene: u.tScene.value,
-          tBloom: u.tBloom.value,
-        };
-        // Provide placeholder textures so the shader can sample without error.
-        // Use rtBright/rtBlurV as read sources (destination is rtBlurH below;
-        // WebGL rejects reading and writing the same texture in one draw).
-        u.tScene.value = postFX.rtBright.texture;
-        u.tBloom.value = postFX.rtBlurV.texture;
-        u.shockIntensity.value = 0.001;  
-        u.shockAge.value = 0.5;          
-        u.shockCenter.value.set(0.5, 0.5);
-        u.damagePulse.value = 0.001;     
-        u.warpAmount.value = 0.001;
-        u.doomedWarp.value = 0.001;
-        u.killFlash.value = 0.001;
-        // Bring the composite quad briefly visible and render the pass scene
-        // once to the default framebuffer (the result is overwritten on the
-        // next real frame, so it's invisible to the player).
-        const savedVis = {
-          bright: postFX.brightQuad.visible,
-          blur: postFX.blurQuad.visible,
-          comp: postFX.compositeQuad.visible,
-        };
-        postFX.brightQuad.visible = false;
-        postFX.blurQuad.visible = false;
-        postFX.compositeQuad.visible = true;
-        // Render to the scratch rtBlurH target (read sources above are rtBright
-        // and rtBlurV so there's no read/write feedback). We cannot render to
-        // the default framebuffer because the composite pass would flash on
-        // screen during the 10-second launch countdown.
-        const prevTarget = renderer.getRenderTarget();
-        renderer.setRenderTarget(postFX.rtBlurH);
-        renderer.render(postFX.passScene, postFX.quadCamera);
-        renderer.setRenderTarget(prevTarget);
-        // Restore.
-        postFX.brightQuad.visible = savedVis.bright;
-        postFX.blurQuad.visible = savedVis.blur;
-        postFX.compositeQuad.visible = savedVis.comp;
-        u.shockIntensity.value = prev.shockIntensity;
-        u.shockAge.value = prev.shockAge;
-        u.shockCenter.value.copy(prev.shockCenter);
-        u.damagePulse.value = prev.damagePulse;
-        u.warpAmount.value = prev.warpAmount;
-        u.doomedWarp.value = prev.doomedWarp;
-        u.killFlash.value = prev.killFlash;
-        u.tScene.value = prev.tScene;
-        u.tBloom.value = prev.tBloom;
-      } catch (_) {  }
-    }
+    // (v36.19) The postFX shockwave pre-warm that used to live here is DELETED,
+    // and the whole postFX chain is now pinned by `_pinPostFXPrograms()`, called
+    // synchronously from commitLoadout. Two reasons it had to move, both measured:
+    //   1. It rendered the composite into `postFX.rtBlurH`. renderPostFX
+    //      composites ONLY to the default framebuffer (null), so binding a render
+    //      target made three.js strip the tone-mapping chunk and link a SEPARATE
+    //      12,402-char program that no draw in the game will ever use — while the
+    //      real 15,979-char screen variant stayed cold. That dead program is the
+    //      single most expensive link in the game: its first-use validate blocked
+    //      **234.4 ms** in one run, 30.5 ms in another.
+    //   2. Living behind this `await` meant it ran many rAF turns after
+    //      commitLoadout returned. The campaign hub is already `state ===
+    //      'playing'` by then (it is the one route that clears both halves of the
+    //      warmup->playing gate on the first tick), so that 234 ms landed inside
+    //      a live 324.6 ms gameplay frame against a 7.0 ms median.
+    // The shockwave/warp branch coverage it was after is preserved — the new pin
+    // nudges the same uniforms off zero, but against the variant the game draws.
+    // ⚠ If anyone ever adds a path that composites into a render target, it will
+    // link cold on first use and _pinPostFXPrograms needs a fourth draw.
 
     // --- NUM_POINT_LIGHTS is now pinned ---
     // The 8-step incremental compile loop that used to sit here is retired.
@@ -41555,6 +41539,143 @@ function _pinCombatEffectPrograms() {
   }
 }
 
+// ---- (v36.19) POST-PROCESS CHAIN PROGRAM PINS (warmup audit, pass 3) ----
+// Everything above pins SCENE materials. The three full-screen passes of the
+// postFX chain were never pinned at all, in any mode — measured live: the bloom
+// bright-pass (4,484 ch), the separable blur (4,637 ch) and the composite
+// (15,979 ch) all linked lazily on the first full-quality renderPostFX frame of
+// the page. In the campaign hub that frame is a GAMEPLAY frame, and the
+// composite's blocking first-use validate cost 30.5 ms in one run and
+// **234.4 ms** in another, inside a 324.6 ms frame against a 7.0 ms median.
+//
+// WHY THE HUB AND NOT ENDLESS/ASSAULT — the asymmetry that took longest to pin
+// down. The warmup->playing gate needs `warmupTimer <= 0 && !selectActive`.
+// Endless/assault hold BOTH: their warmupTimer never starts ticking, and
+// #ship-select keeps its .active class until finishLaunch. So they sit in
+// 'warmup' for the whole PREPARING ARENA window, every frame of which is a
+// full-quality postFX frame — they linked these same three programs too, just
+// under the overlay where nobody could see the hitch, which is why a probe
+// filtering on 'playing' scored them clean. The brand-new campaign hub is the
+// one route that opens both halves at once: _campHubSetup sets MODE 'freeflight'
+// (which pins warmupTimer to 0 on desktop) AND startCampaignJourney strips
+// #ship-select's .active class before calling commitLoadout. So it reaches
+// 'playing' on the very first tick and pays for all three in open play.
+//
+// ⚠ CALLED SYNCHRONOUSLY FROM commitLoadout, never from the warmup body. That
+// body sits behind six `await _warmupYield()` calls, so its earliest execution
+// is many rAF turns after commitLoadout returns — in the hub the first gameplay
+// frame beats it every time. Synchronous placement is also immune to the
+// hidden-page hole, where _warmupYield falls back to setTimeout while gameLoop
+// skips rendering entirely, so an alt-tabbed warm can finish having rendered
+// nothing at all.
+// ⚠ REAL DRAWS, NOT renderer.compile — the same v34.19 lesson as the boss warm:
+// a compile can be elided where a real render cannot.
+// ⚠ DO NOT touch renderer.toneMapping here. It is ACESFilmic for the whole
+// session, and the composite's SCREEN variant is the one the game draws. Forcing
+// NoToneMapping "for symmetry" pins a 12,402-char variant with no consumer
+// anywhere in the file and leaves the real one cold — which is exactly what the
+// warmup block this replaces did. It bound rtBlurH, a target renderPostFX never
+// composites into, so it paid the single largest link in the game for a program
+// nothing ever used.
+// ⚠ The three materials are module-scope singletons, never reassigned and never
+// disposed (a resize only setSize()s the targets and writes a `resolution`
+// UNIFORM), so the programs survive for the page. Do NOT add a dispose
+// "cleanup" — three.js refcounts programs per material.
+let _postFXPinned = false;
+function _pinPostFXPrograms() {
+  if (_postFXPinned) return;
+  if (typeof renderer === 'undefined' || !renderer) return;
+  if (typeof postFX === 'undefined' || !postFX) return;
+  if (!postFX.passScene || !postFX.quadCamera || !postFX.compositeMat ||
+      !postFX.brightMat || !postFX.blurMat || !postFX.rtScene || !postFX.rtBright ||
+      !postFX.rtBlurH || !postFX.blackTex) return;
+  // XR: renderFrame returns in its XR branch long before renderPostFX, so the
+  // whole chain is dead code in an immersive session — and binding the default
+  // framebuffer while presenting blacks the headset. Memo deliberately NOT set,
+  // so a later flat commit still pins.
+  if (renderer.xr && renderer.xr.isPresenting) return;
+  if (typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) return;
+
+  const bm = postFX.brightMat.uniforms, lm = postFX.blurMat.uniforms, cm = postFX.compositeMat.uniforms;
+  const prevTarget = renderer.getRenderTarget();
+  const sv = { b: postFX.brightQuad.visible, l: postFX.blurQuad.visible, c: postFX.compositeQuad.visible };
+  const sbT = bm.tDiffuse.value;
+  const slT = lm.tDiffuse.value, slD = lm.direction.value.clone();
+  const sc = {
+    tScene: cm.tScene.value, tBloom: cm.tBloom.value,
+    shockCenter: cm.shockCenter.value.clone(), shockAge: cm.shockAge.value,
+    shockIntensity: cm.shockIntensity.value, damagePulse: cm.damagePulse.value,
+    warpAmount: cm.warpAmount.value, doomedWarp: cm.doomedWarp.value,
+    killFlash: cm.killFlash.value, chromAb: cm.chromAb.value,
+    bloomStrength: cm.bloomStrength.value, godrayStrength: cm.godrayStrength.value,
+    vignetteIntensity: cm.vignetteIntensity.value, exposure: cm.exposure.value,
+    gradeSat: cm.gradeSat.value, gradeContrast: cm.gradeContrast.value,
+    gradeWarmth: cm.gradeWarmth.value, gradeLift: cm.gradeLift.value, time: cm.time.value,
+  };
+  try {
+    // 1 + 2 : bloom bright-pass and blur. Gated on postFX.enabled — on the tiers
+    //         where bloom is off, renderPostFX permanently takes its two-pass
+    //         shortcut and these two can never execute, so warming them would be
+    //         pure cost on the weakest hardware. `direction` and `resolution` are
+    //         UNIFORMS, not defines, and rtBlurH/rtBlurV match in size + format,
+    //         so ONE blur draw yields the program both the H and V passes use.
+    if (postFX.enabled !== false) {
+      postFX.brightQuad.visible = true; postFX.blurQuad.visible = false; postFX.compositeQuad.visible = false;
+      bm.tDiffuse.value = postFX.rtScene.texture;
+      renderer.setRenderTarget(postFX.rtBright);
+      renderer.render(postFX.passScene, postFX.quadCamera);
+
+      postFX.brightQuad.visible = false; postFX.blurQuad.visible = true;
+      lm.tDiffuse.value = postFX.rtBright.texture;
+      lm.direction.value.set(1, 0);
+      renderer.setRenderTarget(postFX.rtBlurH);
+      renderer.render(postFX.passScene, postFX.quadCamera);
+    }
+    // 3 : the composite, to the SCREEN — the variant renderPostFX actually draws,
+    //     on every tier (the bloom-off shortcut still composites to null). Black
+    //     in, black out: tScene/tBloom are the 1x1 black texture and the grade is
+    //     at its identity, so the only non-zero term is the ±0.0125 film grain.
+    //     Invisible regardless — this runs inside commitLoadout's synchronous
+    //     task, so no frame is presented before the next full rAF redraws
+    //     everything, and the loading overlay was given .active on the line
+    //     above. The damage/shock uniforms are nudged off zero so the shockwave
+    //     and warp branches actually compile instead of folding away.
+    //     ⚠ Never hide this draw with setScissorTest/colorMask — three caches
+    //     that state and a leaked scissor clips the whole session to one pixel.
+    postFX.brightQuad.visible = false; postFX.blurQuad.visible = false; postFX.compositeQuad.visible = true;
+    cm.tScene.value = postFX.blackTex; cm.tBloom.value = postFX.blackTex;
+    cm.shockIntensity.value = 0.001; cm.shockAge.value = 0.5; cm.shockCenter.value.set(0.5, 0.5);
+    cm.damagePulse.value = 0.001; cm.warpAmount.value = 0.001; cm.doomedWarp.value = 0.001;
+    cm.killFlash.value = 0.001; cm.chromAb.value = 0.0;
+    cm.bloomStrength.value = 0.0; cm.godrayStrength.value = 0.0; cm.vignetteIntensity.value = 0.0;
+    cm.exposure.value = 1.0; cm.gradeSat.value = 1.0; cm.gradeContrast.value = 1.0;
+    cm.gradeWarmth.value = 1.0; cm.gradeLift.value = 0.0; cm.time.value = 0.0;
+    renderer.setRenderTarget(null);
+    renderer.render(postFX.passScene, postFX.quadCamera);
+    _postFXPinned = true;
+  } catch (e) {
+    try { console.warn('[postfx-pin] failed:', e && e.message); } catch (__) {}
+  } finally {
+    // ⚠ finally, NOT catch. The warmup block this replaces kept its restores
+    // inside the try, so a throw at the render left compositeQuad.visible true
+    // and the damage uniforms pinned at 0.001 for the rest of the session,
+    // silently. Do not copy that shape.
+    postFX.brightQuad.visible = sv.b; postFX.blurQuad.visible = sv.l; postFX.compositeQuad.visible = sv.c;
+    bm.tDiffuse.value = sbT;
+    lm.tDiffuse.value = slT; lm.direction.value.copy(slD);
+    cm.tScene.value = sc.tScene; cm.tBloom.value = sc.tBloom;
+    cm.shockCenter.value.copy(sc.shockCenter); cm.shockAge.value = sc.shockAge;
+    cm.shockIntensity.value = sc.shockIntensity; cm.damagePulse.value = sc.damagePulse;
+    cm.warpAmount.value = sc.warpAmount; cm.doomedWarp.value = sc.doomedWarp;
+    cm.killFlash.value = sc.killFlash; cm.chromAb.value = sc.chromAb;
+    cm.bloomStrength.value = sc.bloomStrength; cm.godrayStrength.value = sc.godrayStrength;
+    cm.vignetteIntensity.value = sc.vignetteIntensity; cm.exposure.value = sc.exposure;
+    cm.gradeSat.value = sc.gradeSat; cm.gradeContrast.value = sc.gradeContrast;
+    cm.gradeWarmth.value = sc.gradeWarmth; cm.gradeLift.value = sc.gradeLift; cm.time.value = sc.time;
+    try { renderer.setRenderTarget(prevTarget); } catch (__) {}
+  }
+}
+
 // ---- (v36.17) MODEL-MATERIAL PROGRAM PINS (warmup audit) ----
 // Everything above pins the POOLED effect programs. The materials that are
 // built from a streamed GLB were never covered, because they do not exist
@@ -41568,6 +41689,14 @@ function _pinCombatEffectPrograms() {
 //   2. same, without a map (untextured GLB parts)
 //   3. `_addGutsShader` on a transparent MeshBasic      — the v32.69 death gibs
 //   4. full-bright MeshBasic(map), OPAQUE               — `_champSelfIlluminate`
+// (v36.18) A second pass over the two CAMPAIGN-only GLB paths the v36.17 run
+// never reached (it was endless-only) found one more, and cleared the other:
+//   6. the UNCONVERTED GLB MeshStandardMaterial          — `BossPortal`/`RaceRing`
+//      (cyanring.glb is the one streamed model with no material swap; 99,269
+//       chars, and it linked in the frame the rift first drew: 37.4 vs 7.0 ms)
+//   .. `ChampionShell` was CONFIRMED, not assumed: an assault round spawns the
+//      shell the moment it opens, and a live one on the real Sphere.glb proto
+//      linked 0 programs — its material is exactly pin 4 (verified by cacheKey).
 // None of them can be pinned by reconstructing "a material that looks like
 // it": USE_SKINNING / USE_MAP / OPAQUE are all program-forking parameters and
 // the two onBeforeCompile hooks carry their own customProgramCacheKey. So we
@@ -41643,6 +41772,44 @@ function _buildModelWarmGroup() {
         blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
       })));
     }
+  } catch (_) {}
+  // 6 : (v36.18) the RAW streamed-GLB PBR signature — cyanring.glb, cloned by
+  //     BossPortal (the campaign leg gate AND the hub's campaign rift) and by
+  //     RaceRing (the Pole Position fly-through gates). Every other streamed
+  //     model in the game is converted to full-bright MeshBasic on the way in
+  //     (OutskirtsMonster.attachModel, _champSelfIlluminate) — the ring alone is
+  //     `_cyanRingProto.clone(true)` with NO material swap, so it keeps the GLB's
+  //     MeshStandardMaterial and needs a full `physical` program: 99,269 chars,
+  //     by far the largest in the game. The portal spawns MID-MATCH, so that
+  //     link landed in the first frame that drew the ring (measured: 37.4 ms
+  //     against a 7.0 ms median / 10 ms p99, one dropped frame at 144 Hz,
+  //     exactly as the rift appears).
+  //     cyanring.glb ships ONE material — map + normalMap + emissiveMap +
+  //     roughnessMap + metalnessMap, DoubleSide, opaque, UV channel 0, no
+  //     tangents, no shadow flags — so a hand-built stand-in is exact here in a
+  //     way it never is for the onBeforeCompile materials above. Cross-checked
+  //     rather than assumed: the real clone's program cacheKey and this pin's
+  //     are BYTE-IDENTICAL, in the hub and in assault_causeway alike
+  //     (`physical,STANDARD,,highp,srgb-linear,306,1024,uv,...,3,12,1,0,1,...`).
+  //     ⚠ Two things that look like they should matter and do not, both verified
+  //     on r165 — do not "fix" them: the 1x1 map's colorSpace (sRGB decode is
+  //     done by the texture's internal format, not a #define, so ONE texture
+  //     covers all five slots) and the missing tangent attribute (three derives
+  //     the TBN in-shader when there is none). The env-map field of the key
+  //     (306 = CubeUVReflectionMapping, 1024) comes from `scene.environment`,
+  //     which is why this has to ride the live scene like everything else here.
+  //     NOT mode-gated on purpose: the group is memoized for the page, so a
+  //     "campaign/race only" gate would permanently miss the ring for anyone who
+  //     opened endless first and then walked into the campaign hub.
+  try {
+    const pbrGeo = new THREE.BufferGeometry();
+    pbrGeo.setAttribute('position', new THREE.Float32BufferAttribute([0,0,0, 1,0,0, 0,1,0], 3));
+    pbrGeo.setAttribute('normal',   new THREE.Float32BufferAttribute([0,0,1, 0,0,1, 0,0,1], 3));
+    pbrGeo.setAttribute('uv',       new THREE.Float32BufferAttribute([0,0, 1,0, 0,1], 2));
+    add(new THREE.Mesh(pbrGeo, new THREE.MeshStandardMaterial({
+      map: tex, normalMap: tex, emissiveMap: tex, roughnessMap: tex, metalnessMap: tex,
+      side: THREE.DoubleSide,
+    })));
   } catch (_) {}
   _modelWarmGroup = g;
   return g;
@@ -45976,6 +46143,16 @@ function commitLoadout(key) {
   if (!_localWarmupReady) {
     try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
   }
+
+  // (v36.19) Pin the postFX chain's three programs HERE — synchronously, inside
+  // the click task — not in the async warmup body. See _pinPostFXPrograms for
+  // the audit: the bright-pass, the blur and the composite were never warmed in
+  // any mode, and the campaign hub reaches 'playing' on its first tick, so it
+  // paid the composite's 234 ms first-use validate inside a live gameplay frame.
+  // This runs before ANY gameLoop tick of the new match, in every mode, and one
+  // line below showLoadingOverlay so its (black-in, black-out) screen draw is
+  // behind the overlay as well as behind the next full rAF redraw.
+  try { if (typeof _pinPostFXPrograms === 'function') _pinPostFXPrograms(); } catch (_) {}
 
   const _launchSoloAfterCinematic = () => {
     if (_countdownActive) return;
@@ -51219,608 +51396,33 @@ function _releaseVortexShieldBurst(playBurstSound) {
   player.vortexRecentAbsorb = 0; 
 }
 
-function updateAbilities(dt) {
-  // Drain queued staggered rocket salvos (Rocket Salvo,
-  // Tracker Rockets). One Projectile allocation per frame at most.
-  _drainStaggeredRocketSalvo(dt);
-  // Update shield visuals each frame
-  updateShieldVisuals(dt);
-
-  
-  const holdKey = !input.keys['e'] && !(input.gpAbility1); 
-  for (let i = 0; i < 3; i++) {
-    if (player.abilityActive[i] && player.abilities[i] && _holdAbilityNames.includes(player.abilities[i].name)) {
-      const abName = player.abilities[i].name;
-      if (holdKey) {
-        player.abilityActive[i] = false;
-        // Trigger Vortex Shield burst release on drop
-        if (abName === 'Vortex Shield') _releaseVortexShieldBurst();
-        // Afterburner deactivation
-        if (abName === 'Afterburner') {
-          player.afterburnerActive = false;
-          player.afterburnerSpeedMult = 1.0;
-        }
-      } else if (abName === 'Vortex Shield') {
-        
-        
-        
-        
-        
-        const VORTEX_SHIELD_DRAIN = 250; 
-        
-        
-        
-        
-        
-        const VORTEX_AMP_MAX      = 2.0;  
-        const VORTEX_AMP_MIN_HIT  = 1.1;  
-        const VORTEX_AMP_WINDOW   = 0.45; 
-        const VORTEX_AMP_DMG_FULL = 150;  
-        player.vortexRecentAbsorb = (player.vortexRecentAbsorb || 0) * Math.exp(-dt / VORTEX_AMP_WINDOW);
-        let _vortexAmp = 1.0;
-        if (player.vortexRecentAbsorb > 0) {
-          const _t = Math.min(1, player.vortexRecentAbsorb / VORTEX_AMP_DMG_FULL);
-          _vortexAmp = VORTEX_AMP_MIN_HIT + _t * (VORTEX_AMP_MAX - VORTEX_AMP_MIN_HIT);
-        }
-        player.vortexEnergy = Math.max(0, player.vortexEnergy - VORTEX_SHIELD_DRAIN * _vortexAmp * dt);
-        if (player.vortexEnergy <= 0) {
-          player.abilityActive[i] = false;
-          player.vortexShieldLockout = true;
-          _releaseVortexShieldBurst();
-        }
-      }
-    }
-  }
-  // Clear the Vortex Shield lockout once energy refills to 20% of max.
-  if (player.vortexShieldLockout && player.vortexEnergy >= player.vortexMaxEnergy * 0.20) {
-    player.vortexShieldLockout = false;
-  }
-
-  // Cooldown ticking
-  for (let i = 0; i < 3; i++) {
-    if (player.abilityCooldowns[i] > 0) player.abilityCooldowns[i] = Math.max(0, player.abilityCooldowns[i] - dt);
-    if (player.abilityActive[i] && player.abilityTimers[i] < 999) {
-      player.abilityTimers[i] -= dt;
-      if (player.abilityTimers[i] <= 0) {
-        player.abilityActive[i] = false;
-        // Vortex Shield: release stored damage as burst on deactivation
-        if (player.abilities[i] && player.abilities[i].name === 'Vortex Shield' && player.vortexStored > 0) {
-          _releaseVortexShieldBurst(false);
-        }
-        // Afterburner: deactivate speed boost
-        if (player.abilities[i] && player.abilities[i].name === 'Afterburner') {
-          player.afterburnerActive = false;
-          player.afterburnerSpeedMult = 1.0;
-        }
-      }
-    }
-    // Body Shield: 10s duration timer (expires even if not depleted by damage)
-    if (player.abilityActive[i] && player.abilities[i] && player.abilities[i].name === 'Body Shield' && player.gunShieldHP > 0) {
-      player.gunShieldTimer -= dt;
-      if (player.gunShieldTimer <= 0) {
-        player.gunShieldHP = 0; player.gunShieldTimer = 0;
-        player.abilityActive[i] = false;
-        player.abilityCooldowns[i] = 15;
-      }
-    }
-    // Fire Shield: hold-to-use (max 5s, capped by ability.duration above);
-    // drains shield power over time; absorbs incoming damage (see playerTakeDamage);
-    // burns enemies in a FORWARD CONE about one ship's length long (more damage
-    // up close; tapers to zero at the cone tip). Power regens over 10s when not
-    // held (handled below outside this loop).
-    if (player.abilityActive[i] && player.abilities[i] && player.abilities[i].name === 'Fire Shield') {
-      // Drain power while held: full pool (2500) over 5s = 500/s, so a full
-      // hold-from-max exactly empties the pool in 5s (matches the duration cap).
-      const shieldDrainRate = player.thermalShieldMaxHP / 5;
-      player.thermalShieldHP -= shieldDrainRate * dt;
-      if (player.thermalShieldHP <= 0) {
-        player.thermalShieldHP = 0;
-        player.abilityActive[i] = false;
-        player.abilityTimers[i] = 0;
-        // No fixed cooldown; the 10s recharge IS the cooldown.
-      }
-      const forward = _abForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-      const reach = player.chassis.hullLength * 2.6;
-      const baseRadius = player.chassis.hullLength * 0.75; 
-      const tipRadius  = player.chassis.hullLength * 1.70; 
-      const maxDPS = 4000;
-      for (const bot of game.entities) {
-        if (!bot.alive || bot.team === player.team) continue;
-        const dx = bot.position.x - player.position.x;
-        const dy = bot.position.y - player.position.y;
-        const dz = bot.position.z - player.position.z;
-        const along = dx * forward.x + dy * forward.y + dz * forward.z;
-        if (along < 0 || along > reach) continue; 
-        const px = dx - forward.x * along;
-        const py = dy - forward.y * along;
-        const pz = dz - forward.z * along;
-        const perpLen = Math.sqrt(px * px + py * py + pz * pz);
-        const along01 = along / reach; 
-        const coneR = baseRadius + (tipRadius - baseRadius) * along01;
-        if (perpLen > coneR) continue; 
-        
-        
-        const forwardFall = 1 - along01;
-        const lateralFall = 1 - (perpLen / coneR);
-        const dmgPerSec = maxDPS * forwardFall * (0.5 + 0.5 * lateralFall);
-        const dealt = bot.takeDamage(dmgPerSec * dt, 'player');
-        if (dealt > 0) {
-          player.damageDealt += dealt;
-          player.coreMeter = Math.min(100, player.coreMeter + dealt / 200);
-          // Burn-bite stinger throttled per-bot so a continuous
-          // hold doesn't fire it 60 times a second. ~3 Hz cap = once
-          // every 0.33s while the bot is in the cone.
-          if (bot._thermalBurnSfxTimer == null) bot._thermalBurnSfxTimer = 0;
-          bot._thermalBurnSfxTimer -= dt;
-          if (bot._thermalBurnSfxTimer <= 0) {
-            bot._thermalBurnSfxTimer = 0.33;
-            try {
-              if (typeof playSpatialSound === 'function') playSpatialSound('thermal_burn', bot.position.clone());
-              else playSound('thermal_burn');
-            } catch (_) {}
-          }
-          // (v35.63) NO LINGERING BURN. The shield used to refresh a 3 s /
-          // 320 dps DOT every frame the target was in the cone, so leaving it
-          // still cost ~960 damage — and since v35.61 made DOTs charge core, it
-          // was also earning core for 3 s after the victim escaped. Per design:
-          // the Fire Shield damages only while the enemy is actually in the
-          // cone. Thermite is the fire that sticks (see splashDamage).
-        }
-      }
-      // (v32.4) Fire Shield cone also burns the outskirts monsters (was ships-only).
-      if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
-        for (const mon of game.monsters) {
-          if (!mon.alive || !mon.position) continue;
-          const dx = mon.position.x - player.position.x;
-          const dy = mon.position.y - player.position.y;
-          const dz = mon.position.z - player.position.z;
-          const along = dx * forward.x + dy * forward.y + dz * forward.z;
-          if (along < 0 || along > reach) continue;
-          const px = dx - forward.x * along, py = dy - forward.y * along, pz = dz - forward.z * along;
-          const perpLen = Math.sqrt(px * px + py * py + pz * pz);
-          const along01 = along / reach;
-          const coneR = baseRadius + (tipRadius - baseRadius) * along01 + (mon.collisionRadius || 0);
-          if (perpLen > coneR) continue;
-          const dmgPerSec = maxDPS * (1 - along01) * (0.5 + 0.5 * (1 - (perpLen / coneR)));
-          const dealt = mon.takeDamage(dmgPerSec * dt, 'player', mon.position);
-          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
-          // (v35.63) No lingering burn on monsters either — see the ship branch.
-        }
-      }
-      // Fire Shield is a fire source: ignite Explosive Gas anywhere
-      // inside the burn cone (probe at mid-cone with a generous radius so a
-      // single call covers most of the cone volume), plus a small probe at
-      // the player so clouds we are standing in also light up.
-      const probeMid = _abProbeMid.copy(player.position).addScaledVector(forward, reach * 0.5);
-      const probeRadius = Math.max(reach * 0.5, (baseRadius + tipRadius) * 0.5);
-      igniteNearbyGas(probeMid, probeRadius, 'player', player.team);
-      igniteNearbyGas(player.position, baseRadius, 'player', player.team);
-    }
-    // Fire Shield recharge (ticks every frame, inside or outside the
-    // ability-loop body; guarded to only regen when NOT actively held).
-    // Regen rate: full pool over 10s = 250/s, so empty → full in 10s.
-    if (player.loadoutKey === 'PYRO' && !player.abilityActive[i] &&
-        player.abilities[i] && player.abilities[i].name === 'Fire Shield' &&
-        player.thermalShieldHP < player.thermalShieldMaxHP) {
-      const rechargePerSec = player.thermalShieldMaxHP / 10;
-      player.thermalShieldHP = Math.min(
-        player.thermalShieldMaxHP,
-        player.thermalShieldHP + rechargePerSec * dt
-      );
-    }
-  }
-
-  // Teleport invulnerability timer
-  if (player.phaseInvuln) {
-    player.phaseInvulnTimer -= dt;
-    if (player.phaseInvulnTimer <= 0) player.phaseInvuln = false;
-  }
-
-  // ---- CORE ABILITY TICK EFFECTS ----
-  if (player.coreActive) {
-    player.coreTimer -= dt;
-    const forward = _abTmpB.set(0, 0, -1).applyQuaternion(camera.quaternion);
-    const coreName = player.loadout ? player.loadout.core.name : '';
-
-    // VORTEX Mega Laser: continuous heavy laser. Three layers stack into
-    // one really thick beam: (1) the converging muzzle-tip tracer streaks
-    // ; (2) a fat shader-driven volumetric beam cylinder running from
-    // the player straight to the impact point ; (3) electric arcs cracking
-    // off the beam along its length. The shader cylinder is the bulk of
-    // the visual mass ; the tracers add the from-the-barrels parallax
-    // ; the arcs sell the high-voltage feel.
-    if (coreName === 'Mega Laser') {
-      const range = 3000;
-      const end = _abTmpC.copy(player.position).addScaledVector(forward, range);
-      if (!player._vortexCoreBeam) {
-        // LayeredFX 'core_beam' preset replaces the bespoke vortex
-        // core beam shader. uIntensity is written per frame below.
-        // (v27) Cone geometry instead of cylinder ; tapered toward
-        // the player, wider at impact for a "death ray" silhouette.
-        const beamMat = _makeFXMaterial('core_beam');
-        if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / 95;
-        const beamMesh = new THREE.Mesh(_getVortexCoreBeamConeGeometry(), beamMat);
-        beamMesh.frustumCulled = false; 
-        beamMesh.renderOrder = 2;       
-        scene.add(beamMesh);
-        player._vortexCoreBeam = beamMesh;
-      }
-      const beam = player._vortexCoreBeam;
-      // Beam is a unit cylinder along Y. Center it at the midpoint of
-      // (player -> end), align local +Y with the firing direction, then
-      // scale Y to the full range and X/Z to the beam radius. BEAM_RADIUS
-      // controls the visible thickness ; bumped up for "epic" mass.
-      const BEAM_RADIUS = 95;
-      const mid = _abProbeMid.copy(player.position).addScaledVector(forward, range * 0.5);
-      beam.position.copy(mid);
-      beam.quaternion.setFromUnitVectors(_mvUp, forward);
-      beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
-      beam.visible = true;
-      // LayeredFX 'core_beam' preset ; uTime is auto-ticked by
-      // _layeredFXTick. Drive uIntensity for the breathing pulse.
-      if (beam.material && beam.material.uniforms && beam.material.uniforms.uIntensity) {
-        const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
-        beam.material.uniforms.uIntensity.value = breath;
-      }
-      // Cylinder tracers removed during core. The persistent
-      // shader beam cylinder above carries the main visual ; the painted
-      // gun PNGs (gun_VORTEX.png / gunfire_VORTEX.png alternation, driven
-      // by tickGunLayer) carry the muzzle-flash signal. Spawning per-frame
-      // cylinder tracers stacked past-position ghosts that read as "tracers
-      // dancing around in random spots" when the player rotated during core.
-      // Pulsing the PNG cycle at ~10 Hz gives the firing-rate feel without
-      // any world-space cylinder artifacts.
-      if (!player._laserCorePngPulseTimer) player._laserCorePngPulseTimer = 0;
-      player._laserCorePngPulseTimer -= dt;
-      if (player._laserCorePngPulseTimer <= 0) {
-        player._laserCorePngPulseTimer = 0.10;
-        // muzzleFlashTimer = 0.08 creates a rising edge in tickGunLayer's
-        // shot-detector (timer > lastTimer + 0.001) which advances the gun
-        // PNG cycle one frame. By the next pulse 100 ms later the value has
-        // decayed to 0 (cockpit ticker subtracts 1/60 per frame), so the
-        // next 0.08 write is another rising edge.
-        player.muzzleFlashTimer = 0.08;
-        // Alternate side so the painted guns kick L/R/L/R during the core
-        // (gunRecoilL/R drives the per-side recoil offset for the cockpit PNG gun-cycle).
-        player.muzzleFlashSide = 1 - (player.muzzleFlashSide || 0);
-        if (player.muzzleFlashSide === 0) player.gunRecoilL = 1.0;
-        else                              player.gunRecoilR = 1.0;
-      }
-      // Electric crackle along the beam length. Boosted: more arcs per pulse,
-      // wider lateral jitter, slightly longer reach so the beam feels alive
-      // with discharge ; thicker tube radius for fatter bolts.
-      if (typeof spawnLightningBolt === 'function') {
-        if (!player._laserCoreArcTimer) player._laserCoreArcTimer = 0;
-        player._laserCoreArcTimer -= dt;
-        if (player._laserCoreArcTimer <= 0) {
-          // Spawn 4 arcs per pulse (was 2) at varying scales.
-          for (let a = 0; a < 4; a++) {
-            const t = 0.15 + Math.random() * 0.78;
-            const along = _abTmpA.copy(player.position).addScaledVector(forward, range * t);
-            const reach = 110 + Math.random() * 90; 
-            const tip = _abTmpC.set(
-              along.x + (Math.random() - 0.5) * reach,
-              along.y + (Math.random() - 0.5) * reach,
-              along.z + (Math.random() - 0.5) * reach
-            );
-            spawnLightningBolt(along, tip, 0xeeccff, 0.12, 1, 2.4);
-          }
-          player._laserCoreArcTimer = 0.025 + Math.random() * 0.03;
-        }
-      }
-      for (const bot of game.entities) {
-        if (!bot.alive || bot.team === player.team) continue;
-        const dx = bot.position.x - player.position.x;
-        const dy = bot.position.y - player.position.y;
-        const dz = bot.position.z - player.position.z;
-        const proj = dx * forward.x + dy * forward.y + dz * forward.z;
-        if (proj > 0 && proj < range) {
-          const closest = _abTmpA.copy(player.position).addScaledVector(forward, proj);
-          const cdx = closest.x - bot.position.x;
-          const cdy = closest.y - bot.position.y;
-          const cdz = closest.z - bot.position.z;
-          const hitRadius = bot.chassis.hullLength * 1.2;
-          if (cdx * cdx + cdy * cdy + cdz * cdz < hitRadius * hitRadius) {
-            const hadShield = bot.shield > 0;
-            // Surface hit point so the FX render outside the
-            // ship's mesh instead of being buried inside it.
-            const _surfR = bot.chassis.hullLength * 0.5;
-            const _len = Math.sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
-            const hitPoint = _abProbeMid.copy(bot.position);
-            if (_len > 0.001) hitPoint.addScaledVector(_abTmpD.set(cdx, cdy, cdz), _surfR / _len);
-            const dealt = bot.takeDamage(3000 * dt, 'player', hitPoint);
-            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
-            // 60 ms cadence per ship -> ~16 Hz roar of impact FX. Per-bot
-            // timer means each victim gets independent feedback even when
-            // the beam sweeps across multiple targets.
-            bot._megaLaserFxTimer = (bot._megaLaserFxTimer || 0) - dt;
-            if (bot._megaLaserFxTimer <= 0 && dealt > 0) {
-              bot._megaLaserFxTimer = 0.06;
-              if (typeof spawnHullBurst === 'function') {
-                spawnHullBurst(hitPoint, 0xffffff, 70); 
-                spawnHullBurst(hitPoint, 0xeeccff, 55); 
-              }
-              if (!hadShield && typeof spawnImpactSparks === 'function') {
-                spawnImpactSparks(hitPoint, 8);
-              }
-              if (typeof spawnLightningBolt === 'function') {
-                // One crackle per FX tick (don't multiply by per-frame
-                // rate or the lightning pool gets hammered).
-                const arcEnd = _abTmpA.set(
-                  hitPoint.x + (Math.random() - 0.5) * 70,
-                  hitPoint.y + (Math.random() - 0.5) * 70,
-                  hitPoint.z + (Math.random() - 0.5) * 70
-                );
-                spawnLightningBolt(hitPoint, arcEnd, 0xeeccff, 0.14, 1, 2.0);
-              }
-              spawnDynamicLight(hitPoint, 0xeebbff, 4.0, 600, 0.22);
-            }
-            // Hit marker throttled to ~5 Hz so a sustained beam doesn't
-            // strobe the HUD.
-            bot._megaLaserHitMarkerTimer = (bot._megaLaserHitMarkerTimer || 0) - dt;
-            if (bot._megaLaserHitMarkerTimer <= 0 && dealt > 0) {
-              bot._megaLaserHitMarkerTimer = 0.18;
-              if (typeof showHitMarker === 'function') showHitMarker();
-            }
-          }
-        }
-      }
-      // Mega Laser core also chews through rocks / dynamic
-      // obstacles in its path. Continuous damage like the bot loop above
-      // (2500 dmg/sec via 2500 * dt per frame). FX are throttled per-obstacle
-      // so a sustained beam parked on a single rock doesn't hammer the
-      // explosion / spark pools every frame.
-      if (game.dynamicObjects && game.dynamicObjects.length) {
-        for (const obst of game.dynamicObjects) {
-          if (!obst.alive) continue;
-          const _objDx = obst.position.x - player.position.x;
-          const _objDy = obst.position.y - player.position.y;
-          const _objDz = obst.position.z - player.position.z;
-          const _objProj = _objDx * forward.x + _objDy * forward.y + _objDz * forward.z;
-          if (_objProj <= 0 || _objProj > range) continue;
-          const _objClosestX = player.position.x + forward.x * _objProj;
-          const _objClosestY = player.position.y + forward.y * _objProj;
-          const _objClosestZ = player.position.z + forward.z * _objProj;
-          const _cdx = _objClosestX - obst.position.x;
-          const _cdy = _objClosestY - obst.position.y;
-          const _cdz = _objClosestZ - obst.position.z;
-          const _objR = obst.collisionRadius || 60;
-          if (_cdx * _cdx + _cdy * _cdy + _cdz * _cdz < _objR * _objR) {
-            const _dealt = obst.takeDamage(2500 * dt);
-            if (_dealt > 0) {
-              player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
-            }
-            obst._megaLaserFxTimer = (obst._megaLaserFxTimer || 0) - dt;
-            if (obst._megaLaserFxTimer <= 0 && _dealt > 0) {
-              obst._megaLaserFxTimer = 0.08;
-              const _hitPt = _abTmpA.set(_objClosestX, _objClosestY, _objClosestZ);
-              if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_hitPt, 5);
-              spawnDynamicLight(_hitPt, 0xeebbff, 3.0, 500, 0.20);
-            }
-          }
-        }
-      }
-      // Outskirts monsters: the Mega Laser carves them like the rocks
-      // above (continuous 2500 dmg/sec, FX throttled per-monster).
-      if (game.monsters) {
-        for (const mon of game.monsters) {
-          if (!mon.alive || !mon.mesh) continue;
-          const _mDx = mon.position.x - player.position.x;
-          const _mDy = mon.position.y - player.position.y;
-          const _mDz = mon.position.z - player.position.z;
-          const _mProj = _mDx * forward.x + _mDy * forward.y + _mDz * forward.z;
-          if (_mProj <= 0 || _mProj > range) continue;
-          const _mCx = player.position.x + forward.x * _mProj;
-          const _mCy = player.position.y + forward.y * _mProj;
-          const _mCz = player.position.z + forward.z * _mProj;
-          const _mdx = _mCx - mon.position.x;
-          const _mdy = _mCy - mon.position.y;
-          const _mdz = _mCz - mon.position.z;
-          const _mR = mon.collisionRadius;
-          if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz < _mR * _mR) {
-            const _mDealt = mon.takeDamage(2500 * dt, 'player', _abTmpA.set(_mCx, _mCy, _mCz));
-            if (_mDealt > 0) { player.damageDealt += _mDealt; player.coreMeter = Math.min(100, player.coreMeter + _mDealt / 100); }
-          }
-        }
-      }
-    }
-    // PUNCTURE Mega Barrage: speed boost + rockets every 0.5s
-    else if (coreName === 'Mega Barrage') {
-      // Speed boost
-      const curSpeed = player.velocity.length();
-      if (curSpeed < player.chassis.flightSpeed * 2) {
-        player.velocity.addScaledVector(forward, 200 * dt);
-      }
-      // Fire rockets periodically (Puncture Mega Barrage)
-      if (Math.random() < dt * 3) {
-        // Per-missile audio so the barrage isn't silent
-        // between the activation thrust roar and the impact / explosion
-        // bookends. Short pitch-varied tube thump + whoosh + chirp.
-        try { playSound('barrage_missile_pop'); } catch (_) {}
-        // Alternate L/R painted launcher origin per spawn so the
-        // barrage visibly emerges from both painted pods on core_PUNCTURE.png.
-        // Falls back to player.position if the helper or launcher table
-        // isn't available.
-        let _pbOrigin = player.position;
-        const _pbLaunchers = _PLAYER_LAUNCHER_FRACS.PUNCTURE;
-        if (_pbLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
-          player._megaBarrageLaunchIdx = (player._megaBarrageLaunchIdx || 0) + 1;
-          const _f = _pbLaunchers[player._megaBarrageLaunchIdx % _pbLaunchers.length];
-          _pbOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _pbOrigin;
-        }
-        // (v30.92) Converge on the crosshair point from the pod, then jitter.
-        const vel = _abTmpA.copy(player.position).addScaledVector(forward, 1200).sub(_pbOrigin).normalize();
-        vel.x += (Math.random() - 0.5) * 0.2;
-        vel.y += (Math.random() - 0.5) * 0.2;
-        vel.normalize().multiplyScalar(1200);
-        // Stamp which painted pod fired + when (game.time clock) so the
-        // cockpit overlay flashes the matching corefireL/R frame exactly
-        // on this launch (index 0 = left pod at x 0.37, 1 = right).
-        player._pbMuzzleSide = (player._megaBarrageLaunchIdx || 0) % 2;
-        player._pbMuzzleT = (typeof game !== 'undefined' && game) ? game.time : 0;
-        const proj = new Projectile(_pbOrigin, vel, 200, 100, 'player', LSS.CLASS_COLORS.PUNCTURE);
-        proj.smokeTrail = true;
-        // Lift the impact size past the silent small-explosion tier (12)
-        // so every barrage hit gets the full fireball + spatial boom.
-        // Damage and splash radius unchanged.
-        proj.sizeMult = 2;
-        proj.removeHaze();
-        game.projectiles.push(proj);
-      }
-    }
-    // SLAYER Mega Stun Bolt: two damage sources, both running for the
-    // full 5 s of the core. (1) Lightning AoE : 1800 DPS melee aura
-    // within 500 units of the caster, visualized by a green-lightning
-    // storm worldEffect that follows the caster and crackles bolts out
-    // to the same 500-unit reach (so what you see is the damage zone).
-    // (2) Stun Bolt flurry : projectile bolts firing forward, broadcast
-    // to peers so they can see and dodge them.
-    else if (coreName === 'Mega Stun Bolt') {
-      // Lightning AoE damage (visualized by slayer_core_damage_fx).
-      for (const bot of game.entities) {
-        if (!bot.alive || bot.team === player.team) continue;
-        const dist = player.position.distanceTo(bot.position);
-        if (dist < 500) {
-          const dealt = bot.takeDamage(1800 * dt, 'player');
-          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
-        }
-      }
-      // (monster coverage) The 1800 DPS aura also melts leviathans / the boss.
-      // Caster-local tick (like the bot loop above), so mon.takeDamage self-routes.
-      if (game.monsters) {
-        for (const mon of game.monsters) {
-          if (!mon.alive || !mon.position) continue;
-          if (player.position.distanceTo(mon.position) < 500 + (mon.collisionRadius || 0)) {
-            const dealt = mon.takeDamage(1800 * dt, 'player', mon.position);
-            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
-          }
-        }
-      }
-      // Periodic Stun Bolt flurry. Broadcast each projectile so peers
-      // see (and can dodge) the flying bolts. Fairness-critical.
-      if (Math.random() < dt * 2) {
-        const vel = _abTmpA.copy(forward).multiplyScalar(800);
-        const proj = new Projectile(player.position, vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
-        proj.isArcWave = true;
-        game.projectiles.push(proj);
-        if (typeof broadcastAbilityProjectile === 'function') {
-          broadcastAbilityProjectile(proj);
-        }
-      }
-    }
-    // TRACKER Mega Tracker Rockets: keep spawning remote-guided missiles during duration.
-    // Same quarter-speed as the initial burst so the per-tick spawns
-    // herd cleanly with the rest of the swarm.
-    else if (coreName === 'Mega Tracker Rockets') {
-      if (Math.random() < dt * 10) {
-        const aimDir = _abTmpA.copy(forward);
-        aimDir.x += (Math.random() - 0.5) * 0.25;
-        aimDir.y += (Math.random() - 0.5) * 0.25;
-        aimDir.normalize();
-        const vel = aimDir.multiplyScalar(525);
-        // Alternate left/right painted launcher origin per spawn so
-        // continuous core fire visibly emerges from both pods.
-        let _mtrcOrigin = player.position;
-        const _mtrcLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
-        if (_mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
-          player._megaTrackerLaunchIdx = (player._megaTrackerLaunchIdx || 0) + 1;
-          const _f = _mtrcLaunchers[player._megaTrackerLaunchIdx % _mtrcLaunchers.length];
-          _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrcOrigin;
-        }
-        const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
-        missile.salvoGuided = true;
-        missile.smokeTrail = true;
-        // Mega Tracker Rockets bust rocks on splash impact.
-        missile.bustsRocks = true;
-        missile.removeHaze();
-        game.projectiles.push(missile);
-      }
-    }
-    // BLASTER AI Assist: auto-aim rapid fire at nearest VISIBLE enemy.
-    else if (coreName === 'AI Assist') {
-      // Target + LOS selection cached at 10 Hz: the old per-frame loop
-      // fired an SDF ray per candidate enemy per frame, and a second
-      // full-range ray per shot. 100 ms staleness is invisible at these
-      // engagement ranges.
-      if (!player._aiAssist) player._aiAssist = { bot: null, dist: 0, wallDist: 0, t: -1 };
-      const _aas = player._aiAssist;
-      const _nowAA = (typeof game !== 'undefined' && game.time) || 0;
-      if (_nowAA - _aas.t > 0.1) {
-        _aas.t = _nowAA;
-        _aas.bot = null;
-        let nearDistSel = Infinity;
-        // (v30.91) Front hemisphere only : the aimbot core no longer
-        // snipes enemies BEHIND the ship.
-        const _aaFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-        for (const bot of game.entities) {
-          if (!bot.alive || bot.team === player.team) continue;
-          const dist = player.position.distanceTo(bot.position);
-          if (dist >= 3000 || dist >= nearDistSel) continue;
-          const losDir = _abTmpA.subVectors(bot.position, player.position).normalize();
-          if (losDir.dot(_aaFwd) < 0.05) continue; 
-          
-          
-          const wd = raycastLevel(player.position, losDir, dist + 20, true);
-          if (wd < dist) continue;
-          _aas.bot = bot; nearDistSel = dist; _aas.dist = dist; _aas.wallDist = wd;
-        }
-        // (monster coverage) Leviathans / the boss are valid auto-aim targets
-        // too — they compete for the same nearest slot. The downstream fire
-        // block reads .position/.alive and calls .takeDamage, which a monster
-        // supports (and self-routes the co-op forward).
-        if (game.monsters) {
-          for (const mon of game.monsters) {
-            if (!mon.alive || !mon.position) continue;
-            const dist = player.position.distanceTo(mon.position);
-            if (dist >= 3000 || dist >= nearDistSel) continue;
-            const losDir = _abTmpA.subVectors(mon.position, player.position).normalize();
-            if (losDir.dot(_aaFwd) < 0.05) continue;
-            const wd = raycastLevel(player.position, losDir, dist + 20, true);
-            if (wd < dist) continue;
-            _aas.bot = mon; nearDistSel = dist; _aas.dist = dist; _aas.wallDist = wd;
-          }
-        }
-      }
-      const nearest = (_aas.bot && _aas.bot.alive) ? _aas.bot : null;
-      const nearDist = _aas.dist;
-      if (nearest) {
-        // Auto-aim: fire at nearest visible enemy with perfect accuracy.
-        const toTarget = _abTmpA.subVectors(nearest.position, player.position).normalize();
-        if (Math.random() < dt * 20) { 
-          
-          const wallDist = _aas.wallDist;
-          const end = _abTmpC.copy(player.position).addScaledVector(toTarget, wallDist);
-          // Blaster AI Assist auto-aim shot uses class cyan tint, fired
-          // from the two painted CORE cannons (v30.88).
-          _tracerTipOverride = (typeof _CORE_TIP_FRACS !== 'undefined') ? _CORE_TIP_FRACS.BLASTER : null;
-          try { spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER); }
-          finally { _tracerTipOverride = null; }
-          if (net.active && net.sendEvent) {
-            net.sendEvent({
-              type: 'fire_tracer',
-              ox: player.position.x, oy: player.position.y, oz: player.position.z,
-              ex: end.x, ey: end.y, ez: end.z,
-              color: LSS.CLASS_COLORS.BLASTER,
-            });
-          }
-          // Only damage if the target is in front of the wall.
-          if (wallDist >= nearDist) {
-            const dealt = nearest.takeDamage(110 * 1.2, 'player'); 
-            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
-          }
-        }
-      }
-    }
-
-    if (player.coreTimer <= 0) player.coreActive = false;
-  }
-
-  if (player._vortexCoreBeam) {
-    const _coreName = (player.loadout && player.loadout.core) ? player.loadout.core.name : '';
-    const isFiringLaserCore = player.coreActive && _coreName === 'Mega Laser';
-    if (!isFiringLaserCore) player._vortexCoreBeam.visible = false;
-  }
-
+// (v36.19) WORLD-EFFECT LIFETIME — lifted out of updateAbilities.
+// OWNER BUG: "pyro's fire from the bots doesn't clear if it kills me, i can see
+// it from ghost mode."
+// `game.worldEffects` has exactly ONE per-frame lifetime owner: this loop. It is
+// the only place that does `eff.timer -= dt` for world effects, and the only
+// place that reaches the expire branch that does scene.remove + dispose + pop.
+// It used to sit in the middle of updateAbilities — and gameLoop skips
+// updateAbilities the instant `deathCam.active` flips true. So from the death
+// frame on, every world effect froze with all of its meshes attached, for the
+// rest of the round: the bot's ignited incendiary_gas cloud (igniteDmgPerSec
+// 1500 — the thing that most likely killed you), its damaging firewall, and
+// every new effect any bot spawned while you spectated (Bot.update only gates on
+// game.state === 'playing', not on your being alive), so the arena kept
+// ACCUMULATING immortal fire the longer you watched.
+// The old band-aid `_deathCamTickFire` could never cover a bot: it filtered to
+// `pyro_flame` (needs isPyroThermite, set only on the local player's PYRO shots
+// and on network replay of a remote human) and `explFireCloud`. Bot main-gun
+// fire is hitscan and has no projectile branch at all. playerDie's own sweep
+// filters to `type === 'firewall'` AND a mine predicate that excludes
+// bot-owned damaging walls.
+// ⚠ KEEP THE LOOP VARIABLE NAMED `e` — the tripwire sibling de-dup inside reads
+// it directly (`if (j < e) continue;`); renaming it caused a per-frame
+// ReferenceError once already, and there is a comment in there saying so.
+// ⚠ Called BEFORE the deathCam branch in gameLoop, not after: this block writes
+// player.coreMeter in 13 places and updateAbilities' core-meter freeze/edge
+// detect at its tail must still see those writes in the same order.
+function updateWorldEffects(dt) {
   // ---- WORLD EFFECTS UPDATE (firewalls, trip wires, traps, tethers) ----
   for (let e = game.worldEffects.length - 1; e >= 0; e--) {
     const eff = game.worldEffects[e];
@@ -51951,7 +51553,10 @@ function updateAbilities(dt) {
           if (bot.position.distanceTo(eff.position) < eff.radius) {
             // Detonate
             const dealt = bot.takeDamage(eff.dmg, eff.owner);
-            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
+            // (v36.19) hit marker gated on being alive — this loop now ticks
+            // during the death cam, and a mine you left behind popping a bot
+            // would otherwise flash a hit marker over the DESTROYED overlay.
+            if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); if (player.shipState !== 'dead') showHitMarker(); }
             spawnExplosion(eff.position, 20);
             // On detonation, the blast also damages any rocks
             // within the wire's radius. Wire is triggered by a bot entering
@@ -51996,7 +51601,7 @@ function updateAbilities(dt) {
             if (!_mon.alive || !_mon.mesh) continue;
             if (_mon.position.distanceTo(eff.position) < eff.radius) {
               const _md = _mon.takeDamage(eff.dmg, 'player', eff.position);
-              if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
+              if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); if (player.shipState !== 'dead') showHitMarker(); }
               spawnExplosion(eff.position, 20);
               if (game.dynamicObjects) {
                 for (const obst of game.dynamicObjects) {
@@ -52783,6 +52388,617 @@ function updateAbilities(dt) {
       game.worldEffects.pop();
     }
   }
+}
+
+function updateAbilities(dt) {
+  // Drain queued staggered rocket salvos (Rocket Salvo,
+  // Tracker Rockets). One Projectile allocation per frame at most.
+  _drainStaggeredRocketSalvo(dt);
+  // Update shield visuals each frame
+  updateShieldVisuals(dt);
+
+  
+  const holdKey = !input.keys['e'] && !(input.gpAbility1); 
+  for (let i = 0; i < 3; i++) {
+    if (player.abilityActive[i] && player.abilities[i] && _holdAbilityNames.includes(player.abilities[i].name)) {
+      const abName = player.abilities[i].name;
+      if (holdKey) {
+        player.abilityActive[i] = false;
+        // Trigger Vortex Shield burst release on drop
+        if (abName === 'Vortex Shield') _releaseVortexShieldBurst();
+        // Afterburner deactivation
+        if (abName === 'Afterburner') {
+          player.afterburnerActive = false;
+          player.afterburnerSpeedMult = 1.0;
+        }
+      } else if (abName === 'Vortex Shield') {
+        
+        
+        
+        
+        
+        const VORTEX_SHIELD_DRAIN = 250; 
+        
+        
+        
+        
+        
+        const VORTEX_AMP_MAX      = 2.0;  
+        const VORTEX_AMP_MIN_HIT  = 1.1;  
+        const VORTEX_AMP_WINDOW   = 0.45; 
+        const VORTEX_AMP_DMG_FULL = 150;  
+        player.vortexRecentAbsorb = (player.vortexRecentAbsorb || 0) * Math.exp(-dt / VORTEX_AMP_WINDOW);
+        let _vortexAmp = 1.0;
+        if (player.vortexRecentAbsorb > 0) {
+          const _t = Math.min(1, player.vortexRecentAbsorb / VORTEX_AMP_DMG_FULL);
+          _vortexAmp = VORTEX_AMP_MIN_HIT + _t * (VORTEX_AMP_MAX - VORTEX_AMP_MIN_HIT);
+        }
+        player.vortexEnergy = Math.max(0, player.vortexEnergy - VORTEX_SHIELD_DRAIN * _vortexAmp * dt);
+        if (player.vortexEnergy <= 0) {
+          player.abilityActive[i] = false;
+          player.vortexShieldLockout = true;
+          _releaseVortexShieldBurst();
+        }
+      }
+    }
+  }
+  // Clear the Vortex Shield lockout once energy refills to 20% of max.
+  if (player.vortexShieldLockout && player.vortexEnergy >= player.vortexMaxEnergy * 0.20) {
+    player.vortexShieldLockout = false;
+  }
+
+  // Cooldown ticking
+  for (let i = 0; i < 3; i++) {
+    if (player.abilityCooldowns[i] > 0) player.abilityCooldowns[i] = Math.max(0, player.abilityCooldowns[i] - dt);
+    if (player.abilityActive[i] && player.abilityTimers[i] < 999) {
+      player.abilityTimers[i] -= dt;
+      if (player.abilityTimers[i] <= 0) {
+        player.abilityActive[i] = false;
+        // Vortex Shield: release stored damage as burst on deactivation
+        if (player.abilities[i] && player.abilities[i].name === 'Vortex Shield' && player.vortexStored > 0) {
+          _releaseVortexShieldBurst(false);
+        }
+        // Afterburner: deactivate speed boost
+        if (player.abilities[i] && player.abilities[i].name === 'Afterburner') {
+          player.afterburnerActive = false;
+          player.afterburnerSpeedMult = 1.0;
+        }
+      }
+    }
+    // Body Shield: 10s duration timer (expires even if not depleted by damage)
+    if (player.abilityActive[i] && player.abilities[i] && player.abilities[i].name === 'Body Shield' && player.gunShieldHP > 0) {
+      player.gunShieldTimer -= dt;
+      if (player.gunShieldTimer <= 0) {
+        player.gunShieldHP = 0; player.gunShieldTimer = 0;
+        player.abilityActive[i] = false;
+        player.abilityCooldowns[i] = 15;
+      }
+    }
+    // Fire Shield: hold-to-use (max 5s, capped by ability.duration above);
+    // drains shield power over time; absorbs incoming damage (see playerTakeDamage);
+    // burns enemies in a FORWARD CONE about one ship's length long (more damage
+    // up close; tapers to zero at the cone tip). Power regens over 10s when not
+    // held (handled below outside this loop).
+    if (player.abilityActive[i] && player.abilities[i] && player.abilities[i].name === 'Fire Shield') {
+      // Drain power while held: full pool (2500) over 5s = 500/s, so a full
+      // hold-from-max exactly empties the pool in 5s (matches the duration cap).
+      const shieldDrainRate = player.thermalShieldMaxHP / 5;
+      player.thermalShieldHP -= shieldDrainRate * dt;
+      if (player.thermalShieldHP <= 0) {
+        player.thermalShieldHP = 0;
+        player.abilityActive[i] = false;
+        player.abilityTimers[i] = 0;
+        // No fixed cooldown; the 10s recharge IS the cooldown.
+      }
+      const forward = _abForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      const reach = player.chassis.hullLength * 2.6;
+      const baseRadius = player.chassis.hullLength * 0.75; 
+      const tipRadius  = player.chassis.hullLength * 1.70; 
+      const maxDPS = 4000;
+      for (const bot of game.entities) {
+        if (!bot.alive || bot.team === player.team) continue;
+        const dx = bot.position.x - player.position.x;
+        const dy = bot.position.y - player.position.y;
+        const dz = bot.position.z - player.position.z;
+        const along = dx * forward.x + dy * forward.y + dz * forward.z;
+        if (along < 0 || along > reach) continue; 
+        const px = dx - forward.x * along;
+        const py = dy - forward.y * along;
+        const pz = dz - forward.z * along;
+        const perpLen = Math.sqrt(px * px + py * py + pz * pz);
+        const along01 = along / reach; 
+        const coneR = baseRadius + (tipRadius - baseRadius) * along01;
+        if (perpLen > coneR) continue; 
+        
+        
+        const forwardFall = 1 - along01;
+        const lateralFall = 1 - (perpLen / coneR);
+        const dmgPerSec = maxDPS * forwardFall * (0.5 + 0.5 * lateralFall);
+        const dealt = bot.takeDamage(dmgPerSec * dt, 'player');
+        if (dealt > 0) {
+          player.damageDealt += dealt;
+          player.coreMeter = Math.min(100, player.coreMeter + dealt / 200);
+          // Burn-bite stinger throttled per-bot so a continuous
+          // hold doesn't fire it 60 times a second. ~3 Hz cap = once
+          // every 0.33s while the bot is in the cone.
+          if (bot._thermalBurnSfxTimer == null) bot._thermalBurnSfxTimer = 0;
+          bot._thermalBurnSfxTimer -= dt;
+          if (bot._thermalBurnSfxTimer <= 0) {
+            bot._thermalBurnSfxTimer = 0.33;
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('thermal_burn', bot.position.clone());
+              else playSound('thermal_burn');
+            } catch (_) {}
+          }
+          // (v35.63) NO LINGERING BURN. The shield used to refresh a 3 s /
+          // 320 dps DOT every frame the target was in the cone, so leaving it
+          // still cost ~960 damage — and since v35.61 made DOTs charge core, it
+          // was also earning core for 3 s after the victim escaped. Per design:
+          // the Fire Shield damages only while the enemy is actually in the
+          // cone. Thermite is the fire that sticks (see splashDamage).
+        }
+      }
+      // (v32.4) Fire Shield cone also burns the outskirts monsters (was ships-only).
+      if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.position) continue;
+          const dx = mon.position.x - player.position.x;
+          const dy = mon.position.y - player.position.y;
+          const dz = mon.position.z - player.position.z;
+          const along = dx * forward.x + dy * forward.y + dz * forward.z;
+          if (along < 0 || along > reach) continue;
+          const px = dx - forward.x * along, py = dy - forward.y * along, pz = dz - forward.z * along;
+          const perpLen = Math.sqrt(px * px + py * py + pz * pz);
+          const along01 = along / reach;
+          const coneR = baseRadius + (tipRadius - baseRadius) * along01 + (mon.collisionRadius || 0);
+          if (perpLen > coneR) continue;
+          const dmgPerSec = maxDPS * (1 - along01) * (0.5 + 0.5 * (1 - (perpLen / coneR)));
+          const dealt = mon.takeDamage(dmgPerSec * dt, 'player', mon.position);
+          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
+          // (v35.63) No lingering burn on monsters either — see the ship branch.
+        }
+      }
+      // Fire Shield is a fire source: ignite Explosive Gas anywhere
+      // inside the burn cone (probe at mid-cone with a generous radius so a
+      // single call covers most of the cone volume), plus a small probe at
+      // the player so clouds we are standing in also light up.
+      const probeMid = _abProbeMid.copy(player.position).addScaledVector(forward, reach * 0.5);
+      const probeRadius = Math.max(reach * 0.5, (baseRadius + tipRadius) * 0.5);
+      igniteNearbyGas(probeMid, probeRadius, 'player', player.team);
+      igniteNearbyGas(player.position, baseRadius, 'player', player.team);
+    }
+    // Fire Shield recharge (ticks every frame, inside or outside the
+    // ability-loop body; guarded to only regen when NOT actively held).
+    // Regen rate: full pool over 10s = 250/s, so empty → full in 10s.
+    if (player.loadoutKey === 'PYRO' && !player.abilityActive[i] &&
+        player.abilities[i] && player.abilities[i].name === 'Fire Shield' &&
+        player.thermalShieldHP < player.thermalShieldMaxHP) {
+      const rechargePerSec = player.thermalShieldMaxHP / 10;
+      player.thermalShieldHP = Math.min(
+        player.thermalShieldMaxHP,
+        player.thermalShieldHP + rechargePerSec * dt
+      );
+    }
+  }
+
+  // Teleport invulnerability timer
+  if (player.phaseInvuln) {
+    player.phaseInvulnTimer -= dt;
+    if (player.phaseInvulnTimer <= 0) player.phaseInvuln = false;
+  }
+
+  // ---- CORE ABILITY TICK EFFECTS ----
+  if (player.coreActive) {
+    player.coreTimer -= dt;
+    const forward = _abTmpB.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    const coreName = player.loadout ? player.loadout.core.name : '';
+
+    // VORTEX Mega Laser: continuous heavy laser. Three layers stack into
+    // one really thick beam: (1) the converging muzzle-tip tracer streaks
+    // ; (2) a fat shader-driven volumetric beam cylinder running from
+    // the player straight to the impact point ; (3) electric arcs cracking
+    // off the beam along its length. The shader cylinder is the bulk of
+    // the visual mass ; the tracers add the from-the-barrels parallax
+    // ; the arcs sell the high-voltage feel.
+    if (coreName === 'Mega Laser') {
+      const range = 3000;
+      const end = _abTmpC.copy(player.position).addScaledVector(forward, range);
+      if (!player._vortexCoreBeam) {
+        // LayeredFX 'core_beam' preset replaces the bespoke vortex
+        // core beam shader. uIntensity is written per frame below.
+        // (v27) Cone geometry instead of cylinder ; tapered toward
+        // the player, wider at impact for a "death ray" silhouette.
+        const beamMat = _makeFXMaterial('core_beam');
+        if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / 95;
+        const beamMesh = new THREE.Mesh(_getVortexCoreBeamConeGeometry(), beamMat);
+        beamMesh.frustumCulled = false; 
+        beamMesh.renderOrder = 2;       
+        scene.add(beamMesh);
+        player._vortexCoreBeam = beamMesh;
+      }
+      const beam = player._vortexCoreBeam;
+      // Beam is a unit cylinder along Y. Center it at the midpoint of
+      // (player -> end), align local +Y with the firing direction, then
+      // scale Y to the full range and X/Z to the beam radius. BEAM_RADIUS
+      // controls the visible thickness ; bumped up for "epic" mass.
+      const BEAM_RADIUS = 95;
+      const mid = _abProbeMid.copy(player.position).addScaledVector(forward, range * 0.5);
+      beam.position.copy(mid);
+      beam.quaternion.setFromUnitVectors(_mvUp, forward);
+      beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
+      beam.visible = true;
+      // LayeredFX 'core_beam' preset ; uTime is auto-ticked by
+      // _layeredFXTick. Drive uIntensity for the breathing pulse.
+      if (beam.material && beam.material.uniforms && beam.material.uniforms.uIntensity) {
+        const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
+        beam.material.uniforms.uIntensity.value = breath;
+      }
+      // Cylinder tracers removed during core. The persistent
+      // shader beam cylinder above carries the main visual ; the painted
+      // gun PNGs (gun_VORTEX.png / gunfire_VORTEX.png alternation, driven
+      // by tickGunLayer) carry the muzzle-flash signal. Spawning per-frame
+      // cylinder tracers stacked past-position ghosts that read as "tracers
+      // dancing around in random spots" when the player rotated during core.
+      // Pulsing the PNG cycle at ~10 Hz gives the firing-rate feel without
+      // any world-space cylinder artifacts.
+      if (!player._laserCorePngPulseTimer) player._laserCorePngPulseTimer = 0;
+      player._laserCorePngPulseTimer -= dt;
+      if (player._laserCorePngPulseTimer <= 0) {
+        player._laserCorePngPulseTimer = 0.10;
+        // muzzleFlashTimer = 0.08 creates a rising edge in tickGunLayer's
+        // shot-detector (timer > lastTimer + 0.001) which advances the gun
+        // PNG cycle one frame. By the next pulse 100 ms later the value has
+        // decayed to 0 (cockpit ticker subtracts 1/60 per frame), so the
+        // next 0.08 write is another rising edge.
+        player.muzzleFlashTimer = 0.08;
+        // Alternate side so the painted guns kick L/R/L/R during the core
+        // (gunRecoilL/R drives the per-side recoil offset for the cockpit PNG gun-cycle).
+        player.muzzleFlashSide = 1 - (player.muzzleFlashSide || 0);
+        if (player.muzzleFlashSide === 0) player.gunRecoilL = 1.0;
+        else                              player.gunRecoilR = 1.0;
+      }
+      // Electric crackle along the beam length. Boosted: more arcs per pulse,
+      // wider lateral jitter, slightly longer reach so the beam feels alive
+      // with discharge ; thicker tube radius for fatter bolts.
+      if (typeof spawnLightningBolt === 'function') {
+        if (!player._laserCoreArcTimer) player._laserCoreArcTimer = 0;
+        player._laserCoreArcTimer -= dt;
+        if (player._laserCoreArcTimer <= 0) {
+          // Spawn 4 arcs per pulse (was 2) at varying scales.
+          for (let a = 0; a < 4; a++) {
+            const t = 0.15 + Math.random() * 0.78;
+            const along = _abTmpA.copy(player.position).addScaledVector(forward, range * t);
+            const reach = 110 + Math.random() * 90; 
+            const tip = _abTmpC.set(
+              along.x + (Math.random() - 0.5) * reach,
+              along.y + (Math.random() - 0.5) * reach,
+              along.z + (Math.random() - 0.5) * reach
+            );
+            spawnLightningBolt(along, tip, 0xeeccff, 0.12, 1, 2.4);
+          }
+          player._laserCoreArcTimer = 0.025 + Math.random() * 0.03;
+        }
+      }
+      for (const bot of game.entities) {
+        if (!bot.alive || bot.team === player.team) continue;
+        const dx = bot.position.x - player.position.x;
+        const dy = bot.position.y - player.position.y;
+        const dz = bot.position.z - player.position.z;
+        const proj = dx * forward.x + dy * forward.y + dz * forward.z;
+        if (proj > 0 && proj < range) {
+          const closest = _abTmpA.copy(player.position).addScaledVector(forward, proj);
+          const cdx = closest.x - bot.position.x;
+          const cdy = closest.y - bot.position.y;
+          const cdz = closest.z - bot.position.z;
+          const hitRadius = bot.chassis.hullLength * 1.2;
+          if (cdx * cdx + cdy * cdy + cdz * cdz < hitRadius * hitRadius) {
+            const hadShield = bot.shield > 0;
+            // Surface hit point so the FX render outside the
+            // ship's mesh instead of being buried inside it.
+            const _surfR = bot.chassis.hullLength * 0.5;
+            const _len = Math.sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
+            const hitPoint = _abProbeMid.copy(bot.position);
+            if (_len > 0.001) hitPoint.addScaledVector(_abTmpD.set(cdx, cdy, cdz), _surfR / _len);
+            const dealt = bot.takeDamage(3000 * dt, 'player', hitPoint);
+            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
+            // 60 ms cadence per ship -> ~16 Hz roar of impact FX. Per-bot
+            // timer means each victim gets independent feedback even when
+            // the beam sweeps across multiple targets.
+            bot._megaLaserFxTimer = (bot._megaLaserFxTimer || 0) - dt;
+            if (bot._megaLaserFxTimer <= 0 && dealt > 0) {
+              bot._megaLaserFxTimer = 0.06;
+              if (typeof spawnHullBurst === 'function') {
+                spawnHullBurst(hitPoint, 0xffffff, 70); 
+                spawnHullBurst(hitPoint, 0xeeccff, 55); 
+              }
+              if (!hadShield && typeof spawnImpactSparks === 'function') {
+                spawnImpactSparks(hitPoint, 8);
+              }
+              if (typeof spawnLightningBolt === 'function') {
+                // One crackle per FX tick (don't multiply by per-frame
+                // rate or the lightning pool gets hammered).
+                const arcEnd = _abTmpA.set(
+                  hitPoint.x + (Math.random() - 0.5) * 70,
+                  hitPoint.y + (Math.random() - 0.5) * 70,
+                  hitPoint.z + (Math.random() - 0.5) * 70
+                );
+                spawnLightningBolt(hitPoint, arcEnd, 0xeeccff, 0.14, 1, 2.0);
+              }
+              spawnDynamicLight(hitPoint, 0xeebbff, 4.0, 600, 0.22);
+            }
+            // Hit marker throttled to ~5 Hz so a sustained beam doesn't
+            // strobe the HUD.
+            bot._megaLaserHitMarkerTimer = (bot._megaLaserHitMarkerTimer || 0) - dt;
+            if (bot._megaLaserHitMarkerTimer <= 0 && dealt > 0) {
+              bot._megaLaserHitMarkerTimer = 0.18;
+              if (typeof showHitMarker === 'function') showHitMarker();
+            }
+          }
+        }
+      }
+      // Mega Laser core also chews through rocks / dynamic
+      // obstacles in its path. Continuous damage like the bot loop above
+      // (2500 dmg/sec via 2500 * dt per frame). FX are throttled per-obstacle
+      // so a sustained beam parked on a single rock doesn't hammer the
+      // explosion / spark pools every frame.
+      if (game.dynamicObjects && game.dynamicObjects.length) {
+        for (const obst of game.dynamicObjects) {
+          if (!obst.alive) continue;
+          const _objDx = obst.position.x - player.position.x;
+          const _objDy = obst.position.y - player.position.y;
+          const _objDz = obst.position.z - player.position.z;
+          const _objProj = _objDx * forward.x + _objDy * forward.y + _objDz * forward.z;
+          if (_objProj <= 0 || _objProj > range) continue;
+          const _objClosestX = player.position.x + forward.x * _objProj;
+          const _objClosestY = player.position.y + forward.y * _objProj;
+          const _objClosestZ = player.position.z + forward.z * _objProj;
+          const _cdx = _objClosestX - obst.position.x;
+          const _cdy = _objClosestY - obst.position.y;
+          const _cdz = _objClosestZ - obst.position.z;
+          const _objR = obst.collisionRadius || 60;
+          if (_cdx * _cdx + _cdy * _cdy + _cdz * _cdz < _objR * _objR) {
+            const _dealt = obst.takeDamage(2500 * dt);
+            if (_dealt > 0) {
+              player.damageDealt += _dealt; player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
+            }
+            obst._megaLaserFxTimer = (obst._megaLaserFxTimer || 0) - dt;
+            if (obst._megaLaserFxTimer <= 0 && _dealt > 0) {
+              obst._megaLaserFxTimer = 0.08;
+              const _hitPt = _abTmpA.set(_objClosestX, _objClosestY, _objClosestZ);
+              if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_hitPt, 5);
+              spawnDynamicLight(_hitPt, 0xeebbff, 3.0, 500, 0.20);
+            }
+          }
+        }
+      }
+      // Outskirts monsters: the Mega Laser carves them like the rocks
+      // above (continuous 2500 dmg/sec, FX throttled per-monster).
+      if (game.monsters) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.mesh) continue;
+          const _mDx = mon.position.x - player.position.x;
+          const _mDy = mon.position.y - player.position.y;
+          const _mDz = mon.position.z - player.position.z;
+          const _mProj = _mDx * forward.x + _mDy * forward.y + _mDz * forward.z;
+          if (_mProj <= 0 || _mProj > range) continue;
+          const _mCx = player.position.x + forward.x * _mProj;
+          const _mCy = player.position.y + forward.y * _mProj;
+          const _mCz = player.position.z + forward.z * _mProj;
+          const _mdx = _mCx - mon.position.x;
+          const _mdy = _mCy - mon.position.y;
+          const _mdz = _mCz - mon.position.z;
+          const _mR = mon.collisionRadius;
+          if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz < _mR * _mR) {
+            const _mDealt = mon.takeDamage(2500 * dt, 'player', _abTmpA.set(_mCx, _mCy, _mCz));
+            if (_mDealt > 0) { player.damageDealt += _mDealt; player.coreMeter = Math.min(100, player.coreMeter + _mDealt / 100); }
+          }
+        }
+      }
+    }
+    // PUNCTURE Mega Barrage: speed boost + rockets every 0.5s
+    else if (coreName === 'Mega Barrage') {
+      // Speed boost
+      const curSpeed = player.velocity.length();
+      if (curSpeed < player.chassis.flightSpeed * 2) {
+        player.velocity.addScaledVector(forward, 200 * dt);
+      }
+      // Fire rockets periodically (Puncture Mega Barrage)
+      if (Math.random() < dt * 3) {
+        // Per-missile audio so the barrage isn't silent
+        // between the activation thrust roar and the impact / explosion
+        // bookends. Short pitch-varied tube thump + whoosh + chirp.
+        try { playSound('barrage_missile_pop'); } catch (_) {}
+        // Alternate L/R painted launcher origin per spawn so the
+        // barrage visibly emerges from both painted pods on core_PUNCTURE.png.
+        // Falls back to player.position if the helper or launcher table
+        // isn't available.
+        let _pbOrigin = player.position;
+        const _pbLaunchers = _PLAYER_LAUNCHER_FRACS.PUNCTURE;
+        if (_pbLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+          player._megaBarrageLaunchIdx = (player._megaBarrageLaunchIdx || 0) + 1;
+          const _f = _pbLaunchers[player._megaBarrageLaunchIdx % _pbLaunchers.length];
+          _pbOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _pbOrigin;
+        }
+        // (v30.92) Converge on the crosshair point from the pod, then jitter.
+        const vel = _abTmpA.copy(player.position).addScaledVector(forward, 1200).sub(_pbOrigin).normalize();
+        vel.x += (Math.random() - 0.5) * 0.2;
+        vel.y += (Math.random() - 0.5) * 0.2;
+        vel.normalize().multiplyScalar(1200);
+        // Stamp which painted pod fired + when (game.time clock) so the
+        // cockpit overlay flashes the matching corefireL/R frame exactly
+        // on this launch (index 0 = left pod at x 0.37, 1 = right).
+        player._pbMuzzleSide = (player._megaBarrageLaunchIdx || 0) % 2;
+        player._pbMuzzleT = (typeof game !== 'undefined' && game) ? game.time : 0;
+        const proj = new Projectile(_pbOrigin, vel, 200, 100, 'player', LSS.CLASS_COLORS.PUNCTURE);
+        proj.smokeTrail = true;
+        // Lift the impact size past the silent small-explosion tier (12)
+        // so every barrage hit gets the full fireball + spatial boom.
+        // Damage and splash radius unchanged.
+        proj.sizeMult = 2;
+        proj.removeHaze();
+        game.projectiles.push(proj);
+      }
+    }
+    // SLAYER Mega Stun Bolt: two damage sources, both running for the
+    // full 5 s of the core. (1) Lightning AoE : 1800 DPS melee aura
+    // within 500 units of the caster, visualized by a green-lightning
+    // storm worldEffect that follows the caster and crackles bolts out
+    // to the same 500-unit reach (so what you see is the damage zone).
+    // (2) Stun Bolt flurry : projectile bolts firing forward, broadcast
+    // to peers so they can see and dodge them.
+    else if (coreName === 'Mega Stun Bolt') {
+      // Lightning AoE damage (visualized by slayer_core_damage_fx).
+      for (const bot of game.entities) {
+        if (!bot.alive || bot.team === player.team) continue;
+        const dist = player.position.distanceTo(bot.position);
+        if (dist < 500) {
+          const dealt = bot.takeDamage(1800 * dt, 'player');
+          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
+        }
+      }
+      // (monster coverage) The 1800 DPS aura also melts leviathans / the boss.
+      // Caster-local tick (like the bot loop above), so mon.takeDamage self-routes.
+      if (game.monsters) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.position) continue;
+          if (player.position.distanceTo(mon.position) < 500 + (mon.collisionRadius || 0)) {
+            const dealt = mon.takeDamage(1800 * dt, 'player', mon.position);
+            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
+          }
+        }
+      }
+      // Periodic Stun Bolt flurry. Broadcast each projectile so peers
+      // see (and can dodge) the flying bolts. Fairness-critical.
+      if (Math.random() < dt * 2) {
+        const vel = _abTmpA.copy(forward).multiplyScalar(800);
+        const proj = new Projectile(player.position, vel, 600, 150, 'player', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
+        game.projectiles.push(proj);
+        if (typeof broadcastAbilityProjectile === 'function') {
+          broadcastAbilityProjectile(proj);
+        }
+      }
+    }
+    // TRACKER Mega Tracker Rockets: keep spawning remote-guided missiles during duration.
+    // Same quarter-speed as the initial burst so the per-tick spawns
+    // herd cleanly with the rest of the swarm.
+    else if (coreName === 'Mega Tracker Rockets') {
+      if (Math.random() < dt * 10) {
+        const aimDir = _abTmpA.copy(forward);
+        aimDir.x += (Math.random() - 0.5) * 0.25;
+        aimDir.y += (Math.random() - 0.5) * 0.25;
+        aimDir.normalize();
+        const vel = aimDir.multiplyScalar(525);
+        // Alternate left/right painted launcher origin per spawn so
+        // continuous core fire visibly emerges from both pods.
+        let _mtrcOrigin = player.position;
+        const _mtrcLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
+        if (_mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+          player._megaTrackerLaunchIdx = (player._megaTrackerLaunchIdx || 0) + 1;
+          const _f = _mtrcLaunchers[player._megaTrackerLaunchIdx % _mtrcLaunchers.length];
+          _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrcOrigin;
+        }
+        const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
+        missile.salvoGuided = true;
+        missile.smokeTrail = true;
+        // Mega Tracker Rockets bust rocks on splash impact.
+        missile.bustsRocks = true;
+        missile.removeHaze();
+        game.projectiles.push(missile);
+      }
+    }
+    // BLASTER AI Assist: auto-aim rapid fire at nearest VISIBLE enemy.
+    else if (coreName === 'AI Assist') {
+      // Target + LOS selection cached at 10 Hz: the old per-frame loop
+      // fired an SDF ray per candidate enemy per frame, and a second
+      // full-range ray per shot. 100 ms staleness is invisible at these
+      // engagement ranges.
+      if (!player._aiAssist) player._aiAssist = { bot: null, dist: 0, wallDist: 0, t: -1 };
+      const _aas = player._aiAssist;
+      const _nowAA = (typeof game !== 'undefined' && game.time) || 0;
+      if (_nowAA - _aas.t > 0.1) {
+        _aas.t = _nowAA;
+        _aas.bot = null;
+        let nearDistSel = Infinity;
+        // (v30.91) Front hemisphere only : the aimbot core no longer
+        // snipes enemies BEHIND the ship.
+        const _aaFwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        for (const bot of game.entities) {
+          if (!bot.alive || bot.team === player.team) continue;
+          const dist = player.position.distanceTo(bot.position);
+          if (dist >= 3000 || dist >= nearDistSel) continue;
+          const losDir = _abTmpA.subVectors(bot.position, player.position).normalize();
+          if (losDir.dot(_aaFwd) < 0.05) continue; 
+          
+          
+          const wd = raycastLevel(player.position, losDir, dist + 20, true);
+          if (wd < dist) continue;
+          _aas.bot = bot; nearDistSel = dist; _aas.dist = dist; _aas.wallDist = wd;
+        }
+        // (monster coverage) Leviathans / the boss are valid auto-aim targets
+        // too — they compete for the same nearest slot. The downstream fire
+        // block reads .position/.alive and calls .takeDamage, which a monster
+        // supports (and self-routes the co-op forward).
+        if (game.monsters) {
+          for (const mon of game.monsters) {
+            if (!mon.alive || !mon.position) continue;
+            const dist = player.position.distanceTo(mon.position);
+            if (dist >= 3000 || dist >= nearDistSel) continue;
+            const losDir = _abTmpA.subVectors(mon.position, player.position).normalize();
+            if (losDir.dot(_aaFwd) < 0.05) continue;
+            const wd = raycastLevel(player.position, losDir, dist + 20, true);
+            if (wd < dist) continue;
+            _aas.bot = mon; nearDistSel = dist; _aas.dist = dist; _aas.wallDist = wd;
+          }
+        }
+      }
+      const nearest = (_aas.bot && _aas.bot.alive) ? _aas.bot : null;
+      const nearDist = _aas.dist;
+      if (nearest) {
+        // Auto-aim: fire at nearest visible enemy with perfect accuracy.
+        const toTarget = _abTmpA.subVectors(nearest.position, player.position).normalize();
+        if (Math.random() < dt * 20) { 
+          
+          const wallDist = _aas.wallDist;
+          const end = _abTmpC.copy(player.position).addScaledVector(toTarget, wallDist);
+          // Blaster AI Assist auto-aim shot uses class cyan tint, fired
+          // from the two painted CORE cannons (v30.88).
+          _tracerTipOverride = (typeof _CORE_TIP_FRACS !== 'undefined') ? _CORE_TIP_FRACS.BLASTER : null;
+          try { spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER); }
+          finally { _tracerTipOverride = null; }
+          if (net.active && net.sendEvent) {
+            net.sendEvent({
+              type: 'fire_tracer',
+              ox: player.position.x, oy: player.position.y, oz: player.position.z,
+              ex: end.x, ey: end.y, ez: end.z,
+              color: LSS.CLASS_COLORS.BLASTER,
+            });
+          }
+          // Only damage if the target is in front of the wall.
+          if (wallDist >= nearDist) {
+            const dealt = nearest.takeDamage(110 * 1.2, 'player'); 
+            if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
+          }
+        }
+      }
+    }
+
+    if (player.coreTimer <= 0) player.coreActive = false;
+  }
+
+  if (player._vortexCoreBeam) {
+    const _coreName = (player.loadout && player.loadout.core) ? player.loadout.core.name : '';
+    const isFiringLaserCore = player.coreActive && _coreName === 'Mega Laser';
+    if (!isFiringLaserCore) player._vortexCoreBeam.visible = false;
+  }
+
+  // (v36.19) The WORLD EFFECTS UPDATE loop that used to live here is now
+  // `function updateWorldEffects(dt)`, defined just above this function and
+  // called UNCONDITIONALLY from gameLoop. It owns the lifetime (timer, expiry,
+  // scene.remove + dispose) of every entry in game.worldEffects, and gameLoop
+  // skips updateAbilities entirely while deathCam.active — so leaving it here
+  // froze every bot-spawned fire on screen forever once you died. See the
+  // header comment on updateWorldEffects.
 
   // VORTEX energy regen: always regens, no delay
   if (player.loadoutKey === 'VORTEX') {
@@ -55565,17 +55781,50 @@ function _hlA(hex, a) {
   return (_hlColCache[key] = 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')');
 }
 
+// (v36.19) FLAT-SCREEN HUD SCALER (owner: "do a flat screen HUD scaler, the HUD
+// will scale like the VR mode does (excluding the mini map)"). VR has had one
+// since v35.64 — `input.vrHudScale` multiplies the HUD PLANE's scale in
+// renderFrame. Flat screen had nothing; this is its equivalent, and because
+// every part's size, stroke width, tick length, glow radius, label radius and
+// font size is derived from the `vmin` this function returns, multiplying here
+// is the whole scaler. A w/h-only scale would grow the rings and leave the
+// strokes and captions behind.
+// ⚠ THE VR GATE IS MANDATORY, NOT DEFENSIVE. `_xrEnsureHudMesh` textures the VR
+// HUD plane from the SAME #circumpunct-hud canvas this draws into, and the XR
+// path calls the same drawCircumpunctHUD(). Without the early return a headset
+// would see hudScale × vrHudScale — 2.25× at both defaults.
+function _hlScale() {
+  if (typeof isXRPresenting === 'function' && isXRPresenting()) return 1;
+  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : 1;
+  if (!(s > 0)) return 1;
+  return Math.max(0.75, Math.min(1.75, Math.round(s * 20) / 20));
+}
+
 // Resolve a part to screen pixels. Circular parts are sized from their radius,
 // box parts from w/h; both report a centre so the two kinds place identically.
-function _hlPlace(p, W, H) {
+// (v36.19) `s` overrides the global scale for one part — pass 1 to pin a part at
+// its designed size (the radar + compass do this). The scale is applied to the
+// SIZE unit always, but to the ANCHOR OFFSET only on the axis that is anchored
+// to the SCREEN CENTRE, and that split is deliberate:
+//   · a centre-anchored offset is a radial position INSIDE the gauge cluster
+//     (dash pips at x -9.7 / y 7) and has to ride out with the rings, or the
+//     pips end up sitting on top of the core arc;
+//   · an edge-anchored offset is a standoff FROM that edge (aegis at bc y -3.3,
+//     objective at tc y 9) and has to hold, or aegis marches up into the pinned
+//     compass rose — which is the one relationship its bottom-centre anchor
+//     exists to express.
+// At s = 1 this is byte-identical to the pre-v36.19 output.
+function _hlPlace(p, W, H, s) {
   const vmin = Math.min(W, H) / 100;
-  const w = (p.r != null ? p.r * 2 : p.w) * vmin;
-  const h = (p.r != null ? p.r * 2 : p.h) * vmin;
+  const vs = vmin * (s != null ? s : _hlScale());
+  const w = (p.r != null ? p.r * 2 : p.w) * vs;
+  const h = (p.r != null ? p.r * 2 : p.h) * vs;
   const ax = p.a.charAt(1), ay = p.a.charAt(0);
   let x = ax === 'l' ? 0 : ax === 'c' ? W / 2 : W;
   let y = ay === 't' ? 0 : ay === 'm' ? H / 2 : H;
-  x += p.x * vmin; y += p.y * vmin;
-  return { x: x - w / 2, y: y - h / 2, w: w, h: h, cx: x, cy: y, vmin: vmin };
+  x += p.x * (ax === 'c' ? vs : vmin);
+  y += p.y * (ay === 'm' ? vs : vmin);
+  return { x: x - w / 2, y: y - h / 2, w: w, h: h, cx: x, cy: y, vmin: vs };
 }
 
 // The house style, ported byte-for-byte from the studio: a capsule OUTLINE
@@ -56124,9 +56373,15 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   // Radar first, rose over it — they're concentric, so the rose's inner
   // graduations would be under the disc's rim otherwise.
-  _hlRadar(ctx, _hlPlace(_HL.minimap, W, H));
+  // (v36.19) THE TWO PARTS THE FLAT HUD SCALER EXCLUDES — the explicit `1`.
+  // The owner asked for the minimap to stay out of it, and the compass has to
+  // come with it: they are one instrument, not two. Both are `a:'bc', x:0,
+  // y:-19`, and _hlCompass derives its inner radius as `R - 2.3*vmin` precisely
+  // to clear the radar disc by 0.2 vmin. Scale one and pin the other and the
+  // rose both detaches from the disc and moves its centre.
+  _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
   if (typeof window === 'undefined' || window.__hudCompass !== false) {
-    _hlCompass(ctx, _hlPlace(_HL.compass, W, H), _HL.compass.col);
+    _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
   }
 
   // Opt-in numerals. The layout has no text slot for speed or ammo, so the
@@ -56238,7 +56493,10 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
   // Doomed: a wide red pulse over the health ring. Sits ON the health radius so
   // it reads as that gauge screaming rather than as a separate ring.
   if (isDoomed) {
-    const vmin = Math.min(W, H) / 100;
+    // (v36.19) This is the one place that recomputes vmin itself instead of
+    // taking it off an _hlPlace rect, so it needs the flat HUD scale applied by
+    // hand — otherwise the doom band detaches from the health arc it decorates.
+    const vmin = Math.min(W, H) / 100 * _hlScale();
     ctx.strokeStyle = 'rgba(255,50,30,' + (0.15 + Math.abs(Math.sin(t * 5)) * 0.2).toFixed(3) + ')';
     ctx.lineWidth = vmin * 2.8;
     ctx.beginPath(); ctx.arc(cx, cy, _HL.health.r * vmin, 0, Math.PI * 2); ctx.stroke();
@@ -60806,6 +61064,15 @@ function _refreshSettingsValues() {
   setChk('set-show-fps', input.showFps);
   setChk('set-headlight', input.headlight !== false);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
+  {
+    // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
+    // _settingsBuilt, so without this the slider shows its build-time value
+    // every time the overlay is reopened.
+    const _fs = (typeof input.hudScale === 'number') ? input.hudScale : 1;
+    setRange('set-hud-scale', null, _fs);
+    const _fv = $('#val-hud-scale');
+    if (_fv) _fv.textContent = _fs.toFixed(2) + 'x';
+  }
   setChk('set-clip-rec', !!input.clipRec);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
@@ -61099,6 +61366,14 @@ function buildSettingsPage() {
         <label style="flex:1;">The small curved captions on the rings (SPEED, NRG, SHIELD, HEALTH, CORE, AMMO). Ability names on the cooldown bars are unaffected.</label>
       </div>
       <div class="setting-row">
+        <label>HUD Size</label>
+        <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : 1}">
+        <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : 1).toFixed(2)}x</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
+      </div>
+      <div class="setting-row">
         <label>Clip Recorder</label>
         <input type="checkbox" id="set-clip-rec" ${input.clipRec ? 'checked' : ''}>
       </div>
@@ -61137,7 +61412,7 @@ function buildSettingsPage() {
         <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2)}x</div>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Scales the HUD plane in VR only; flat screen is unaffected. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
+        <label style="flex:1;">Scales the HUD plane in VR only &mdash; flat screen has its own HUD Size slider above, and the two never compound. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
       </div>
       <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
       <div class="setting-row" style="margin-top:6px;">
@@ -62521,6 +62796,25 @@ function buildSettingsPage() {
     input.hudGaugeLabels = !!gaugeLabelChk.checked;
     saveSettings();
   });
+  // (v36.19) Flat HUD size slider. Live like the VR one — drawCircumpunctHUD
+  // reads _hlScale() every repaint, so there is nothing to invalidate except the
+  // curved-label sprite cache, which is keyed on (radiusPx, fontPx). Without the
+  // clear, dragging the slider mints a fresh set of ability/gauge label sprites
+  // at every 0.05 step and only sheds them at its 48-entry wholesale flush.
+  // saveSettings on `change`, not `input`: one localStorage write per drag.
+  const hudScaleSel = overlay.querySelector('#set-hud-scale');
+  const hudScaleVal = overlay.querySelector('#val-hud-scale');
+  if (hudScaleSel) {
+    const _applyHudScale = () => {
+      const v = parseFloat(hudScaleSel.value);
+      if (!isFinite(v)) return;
+      input.hudScale = v;
+      if (hudScaleVal) hudScaleVal.textContent = v.toFixed(2) + 'x';
+      try { _hlArcTextCache.clear(); } catch (_) {}
+    };
+    hudScaleSel.addEventListener('input', _applyHudScale);
+    hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
+  }
   const clipRecChk = overlay.querySelector('#set-clip-rec');
   if (clipRecChk) clipRecChk.addEventListener('change', () => {
     input.clipRec = !!clipRecChk.checked;
@@ -63218,6 +63512,7 @@ function saveSettings() {
       showFps: !!input.showFps,
       headlight: input.headlight !== false,
       hudGaugeLabels: input.hudGaugeLabels !== false,
+      hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -63493,6 +63788,7 @@ const SHIPPED_DEFAULTS = {
   "vrRenderScale": 1,
   "vrPerfMode": "standard",
   "vrStripFx": true,
+  "hudScale": 1,
   "fovDeg": 120,
   "audioMaster": 1,
   "audioSfx": 1.5,
@@ -65094,6 +65390,12 @@ function loadSettings() {
     // Absent key keeps the `true` default — settings saved before v35.55 have
     // no entry for this, and those players should still see the captions.
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
+    // (v36.19) Absent key keeps the 1 default, so every pre-v36.19 save loads at
+    // the designed layout. Clamped on read as well as in _hlScale so a
+    // hand-edited localStorage cannot wedge the HUD off-screen.
+    if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
+      input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
+    }
     if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {
       input.fovDeg = data.fovDeg;
@@ -70778,15 +71080,26 @@ function gameLoop(timestamp) {
 
   // Update systems
   updatePlayerStasis(dt);
+  // (v36.19) World effects age whether you are alive, dead or spectating. This
+  // used to live inside updateAbilities, which the deathCam branch below skips —
+  // so a bot's fire froze on screen the moment it killed you and never expired
+  // (owner report: "i can see it from ghost mode"). It runs BEFORE the branch so
+  // its 13 player.coreMeter writes still land ahead of updateAbilities' core
+  // freeze / edge-detect, exactly as when it was inline. Its own internal guards
+  // (player.shipState !== 'dead' around both playerTakeDamage sites, the tether
+  // root and the sonar lock) already stop a corpse from taking damage.
+  updateWorldEffects(dt);
   if (deathCam.active) {
     updateDeathCam(dt);
-    if (typeof _deathCamTickFire === 'function') _deathCamTickFire(dt);
   } else {
     updatePlayerMovement(dt);
     updateWeapon(dt);
     updateAbilities(dt);
-    if (typeof _tickFireDOTs === 'function') _tickFireDOTs(dt); 
   }
+  // Burn DOTs are seeded BY updateWorldEffects (onFireTimer / onFireDps), so the
+  // consumer has to run on the same schedule — otherwise fire applied on the
+  // death frame stays banked and relights you the instant you respawn.
+  if (typeof _tickFireDOTs === 'function') _tickFireDOTs(dt);
   // Per-frame perk effect ticks. Nano repair regens HP each
   // frame ; Auto cloak counts down its interval and fires its cycle.
   if (player.perkId && player.shipState !== 'dead') {
@@ -80762,35 +81075,16 @@ function _livingTeammates() {
   return out;
 }
 
-function _deathCamTickFire(dt) {
-  // The death-cam path skips updateAbilities, which is where world effects
-  // (pyro fire) normally fade + expire + clean up their meshes. Without this,
-  // the volumetric flame freezes on screen the instant you die. Tick just the
-  // transient fire here so it fades out and removes itself during the death cam.
-  if (typeof game === 'undefined' || !game || !game.worldEffects || typeof scene === 'undefined') return;
-  const we = game.worldEffects;
-  const t2 = (typeof game.time === 'number') ? game.time : 0;
-  for (let e = we.length - 1; e >= 0; e--) {
-    const eff = we[e];
-    if (!eff || (eff.type !== 'pyro_flame' && eff.type !== 'explFireCloud')) continue;
-    eff.timer -= dt;
-    const dur = eff.duration || (eff.type === 'pyro_flame' ? 2.0 : 0.5);
-    const fadeT = Math.max(0, eff.timer / dur);
-    if (eff.fireMeshes) {
-      for (const m of eff.fireMeshes) {
-        if (m && m.material && m.material.uniforms) {
-          if (m.material.uniforms.time) m.material.uniforms.time.value = t2;
-          if (m.material.uniforms.uBaseAlpha) m.material.uniforms.uBaseAlpha.value = (eff.type === 'pyro_flame' ? 0.55 : 0.85) * fadeT * fadeT;
-        }
-      }
-    }
-    if (eff.timer <= 0) {
-      if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
-      we.splice(e, 1);
-    }
-  }
-}
-
+// (v36.19) `_deathCamTickFire` lived here and is DELETED. It was the band-aid
+// for "world effects freeze when you die": the death-cam branch of gameLoop
+// skipped updateAbilities, so it hand-ticked the two fire types the LOCAL player
+// could produce (pyro_flame, explFireCloud) and let everything else freeze. That
+// is why a BOT's fire never cleared — a bot can produce neither type (pyro_flame
+// needs isPyroThermite, set only on the local player's PYRO projectiles and on
+// network replay of a remote human; bot main-gun fire is hitscan with no
+// projectile branch at all). gameLoop now calls updateWorldEffects(dt)
+// unconditionally, which covers every type with the real animation + disposal,
+// so keeping this too would double-tick those timers.
 function startDeathCam(attacker) {
   deathCam.active   = true;
   deathCam.target   = player.position.clone();
@@ -81031,6 +81325,7 @@ document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
   try { updatePlayerMovement = wrap('playerMove', updatePlayerMovement); } catch (_) {}
   try { updateWeapon = wrap('weapon', updateWeapon); } catch (_) {}
   try { updateAbilities = wrap('abilities', updateAbilities); } catch (_) {}
+  try { updateWorldEffects = wrap('worldFX', updateWorldEffects); } catch (_) {}
   try { updateRoundSystem = wrap('roundSys', updateRoundSystem); } catch (_) {}
   try { updateStasisFields = wrap('stasis', updateStasisFields); } catch (_) {}
   try { updateRoomFog = wrap('roomFog', updateRoomFog); } catch (_) {}
