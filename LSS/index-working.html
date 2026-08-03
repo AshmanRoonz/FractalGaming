@@ -3696,7 +3696,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.09';
+const LSS_BUILD = '36.12';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -4057,6 +4057,13 @@ const player = {
   team: LSS.TEAM_FLEET_A,
   health: 0, maxHealth: 0,
   shield: 0, maxShield: 0,
+  // (v36.12) OVERSHIELD: stasis-granted temporary shield layer on top of the
+  // regular shield. Charged by updatePlayerStasis once shield hits max (same
+  // rate, cap 0.5*maxShield), decays ~3% of maxShield/s outside a field
+  // (also in updatePlayerStasis), consumed FIRST in playerTakeDamage
+  // (overShield -> shield -> hull). Local to this client's damage resolution;
+  // broadcast as `os` in tier-1 state for peers (display-only, v1).
+  overShield: 0,
   coreMeter: 0,
   shipState: 'flying',
   doomed: false, doomTimer: 0,
@@ -10041,6 +10048,7 @@ class NetworkPlayer {
     // Update health/shield from network
     this.health = s.hp || this.health;
     this.shield = s.shield || 0;
+    this.overShield = s.os || 0; // (v36.12) mirror of the sender's stasis overshield (display-only)
     this.doomed = s.doomed || false;
     // Mirror per-player stats so scoreboard rows for remote peers
     // show real kill / damage numbers instead of zeros.
@@ -10363,7 +10371,7 @@ const _broadcastState = {
   px: 0, py: 0, pz: 0,
   vx: 0, vy: 0, vz: 0,
   qx: 0, qy: 0, qz: 0, qw: 1,
-  hp: 0, shield: 0,
+  hp: 0, shield: 0, os: 0,
   doomed: false, dead: false,
   kills: 0, damageDealt: 0,
   abilityShield: false,
@@ -10392,6 +10400,10 @@ function broadcastPlayerState(dt) {
   s.qw = Math.round(camera.quaternion.w * 1000) / 1000;
   s.hp = player.health;
   s.shield = player.shield;
+  // (v36.12) Overshield rides the same tier-1 state as shield (display-only on
+  // peers, v1 — damage to a ship is always resolved by that ship's own client,
+  // so the overShield->shield->hull order lives in playerTakeDamage locally).
+  s.os = Math.round(player.overShield || 0);
   s.doomed = player.doomed;
   s.dead = player.shipState === 'dead';
   // Per-player stats so the scoreboard isn't permanently 0 for
@@ -32553,13 +32565,36 @@ const _SHIPL = {
   // light count and those tiers already run the pool at 4.
   TRAF_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
            (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 3,
+  // (v36.10) FAKE-VOLUMETRIC HEADLIGHT CONES (owner: "headlights of other
+  // players and bots should show ... a faint cone in front of the ship if
+  // there's fog to light up"). NOT real lights — an additive gradient CONE
+  // mesh per nearby ship (apex at the under-hull nav-orb, opening out the
+  // nose), so the whole feature is overdraw-only: zero effect on the pinned
+  // NUM_*_LIGHTS loops. CONE_N pool is budgeted to the nearest ships by the
+  // SAME 3 Hz scan that feeds the traffic lights (extended to 6 deep — one
+  // pass, never a second scan). Quest/mobile never build the pool: big
+  // additive DoubleSide fills are pure overdraw on tile GPUs (the v35.89
+  // god-ray rule; those tiers also run TRAF_N = 0 for the same family of
+  // reasons).
+  CONE_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
+           (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 6,
+  cones: [],           // pooled cone meshes (CONE_N)
+  coneAssign: [],      // per-cone assigned entity (null = free)
+  coneCur: [],         // per-cone smoothed opacity
+  coneP: null,         // the player's own cone (third-person only)
+  conePCur: 0,
   assign: [],          // per-slot assigned entity (null = free)
   cur: [],             // per-slot smoothed intensity
   scanT: 0,            // rescan cooldown (s)
   eCur: 0, hCur: 0,    // smoothed engine/headlight intensities
   _lastMesh: null,     // engine-color re-sample trigger (mesh swap)
-  _n1: null, _n2: null, _n3: null,  // scan scratch: nearest entities
+  // 6-deep nearest-ship scan output (v36.10; replaces the old n1..n3
+  // registers). Slot 0..2 feed the traffic PointLights exactly as before,
+  // all 6 feed the cone pool. Fixed arrays, refilled in place at 3 Hz.
+  _top: [null, null, null, null, null, null],
+  _topD: new Float64Array(6),
   _v: new THREE.Vector3(),
+  _d: new THREE.Vector3(),   // cone-forward scratch
 };
 (function initShipLights() {
   const S = _SHIPL;
@@ -32585,7 +32620,85 @@ const _SHIPL = {
     S.assign.push(null);
     S.cur.push(0);
   }
+  // ---- (v36.10) headlight-cone pool ----
+  // Everything here is built ONCE at boot and stays scene-resident for the
+  // app lifetime — the same pinning philosophy as the lights above, except
+  // cones are plain additive MESHES, so `visible = false` is their real
+  // "off" (no shader relink concern) and nothing is ever disposed: no mode
+  // owns any of it, so no per-mode teardown exists or is needed. The only
+  // thing released at runtime is the ENTITY REFS in coneAssign (dropped when
+  // a ship leaves the top set, dies, cloaks or the player stops flying), so
+  // torn-down ship meshes can GC.
+  if (S.CONE_N) {
+    // Unit cone: apex AT THE ORIGIN, opening along +Z to z=1 with base
+    // radius 1. Shape comes from per-frame scale.set(tan(a)*len, tan(a)*len,
+    // len), so beam angle + length are live-tunable with zero geometry
+    // rebuilds. Open-ended (no caps), 20 radial segments — at 0.05..0.10
+    // additive opacity the polygonal silhouette is invisible.
+    const g = new THREE.CylinderGeometry(0.006, 1, 1, 20, 1, true);
+    g.rotateX(-Math.PI / 2);   // cylinder +Y (apex end) -> -Z
+    g.translate(0, 0, 0.5);    // apex to origin, base to z=+1
+    // Soft beam texture, the god-ray/_emberFalloff canvas technique: alpha
+    // hot at the apex, long gentle tail to nothing at the far end. Canvas
+    // row 0 (top) samples at uv.y=1 (CanvasTexture flipY), and the cylinder
+    // TOP ring (our apex after the bake above) carries uv.y=1 — so the
+    // gradient's bright end is the apex. The far end reaching exactly 0
+    // matters: it is what sells "beam fading into the murk" without fog on
+    // the material (fog:false — FogExp2 toward a bright fog color would ADD
+    // light to an additive material with distance, the standard trap).
+    const cv = document.createElement('canvas');
+    cv.width = 16; cv.height = 128;
+    const c2 = cv.getContext('2d');
+    const gr = c2.createLinearGradient(0, 0, 0, 128);
+    gr.addColorStop(0.00, 'rgba(255,255,255,0.85)');
+    gr.addColorStop(0.16, 'rgba(255,255,255,0.45)');
+    gr.addColorStop(0.52, 'rgba(255,255,255,0.14)');
+    gr.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+    c2.fillStyle = gr; c2.fillRect(0, 0, 16, 128);
+    const tex = new THREE.CanvasTexture(cv);
+    // Per-cone MATERIAL (opacity fades independently per slot); one shared
+    // geometry + texture, and all 7 materials compile the same program once.
+    // Warm 0xffe8c4 = the real headlight SpotLight color. depthWrite off
+    // (never occlude anything), depthTest ON (terrain occludes beams behind
+    // walls — additive order-independent otherwise). DoubleSide: front+back
+    // shells sum through the middle, a free 2-layer "thickness" read.
+    const mkCone = () => {
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        map: tex, color: 0xffe8c4, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        side: THREE.DoubleSide, fog: false,
+      }));
+      m.visible = false;
+      m.renderOrder = 2;   // with the god-ray shafts, after world transparents
+      scene.add(m);
+      return m;
+    };
+    for (let i = 0; i < S.CONE_N; i++) {
+      S.cones.push(mkCone());
+      S.coneAssign.push(null);
+      S.coneCur.push(0);
+    }
+    // The player's own beam cone — THIRD PERSON ONLY (in first person it
+    // would wash the whole screen from inside).
+    S.coneP = mkCone();
+  }
 })();
+// Cone-forward axis (unit geometry opens along +Z). Ship noses are mesh
+// world +Z everywhere in LSS: player verified dot=1.000 vs camera forward
+// (v36.03), bots aim via mesh.lookAt ("+Z faces the prey"), hub traffic sets
+// holder.rotation.y = atan2(dx, dz) which points local +Z along travel.
+const _SHIPL_FWD = new THREE.Vector3(0, 0, 1);
+// Insert entity e (squared distance d) into the fixed 6-deep nearest list,
+// keeping ascending order. Dup-guarded: a ship present in BOTH game.entities
+// and net.networkPlayers (drop-in peers are pushed to entities too) would
+// otherwise burn two slots. Module-level function, not a closure — the scan
+// runs at 3 Hz over ~40 ships and must not allocate.
+function _shipScanInsert(top, topD, e, d) {
+  for (let j = 0; j < 6; j++) if (top[j] === e) return;
+  let i = 5;
+  while (i > 0 && topD[i - 1] > d) { top[i] = top[i - 1]; topD[i] = topD[i - 1]; i--; }
+  top[i] = e; topD[i] = d;
+}
 // Live hook: window.__headlight(0|1) toggles + persists; no arg reads state.
 window.__headlight = function (v) {
   if (v !== undefined) {
@@ -32609,6 +32722,7 @@ function _shipLightsFrame() {
   const S = _SHIPL;
   if (!S.engine) return;
   const T = window.__shipLights;   // live-tune overrides {eI,eR,hI,hR,hA,hP,tI,tR,gate}
+  const C = window.__shipCones;    // (v36.10) cone live-tune {on,op,max,len,ang,cap,d0,d1,l0,l1}
   const dt = Math.min(0.05, (game && game.deltaTime) || 0.016);
   const k = Math.min(1, dt * 8);   // ~125 ms intensity fade, no pops
   const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 0;
@@ -32654,15 +32768,27 @@ function _shipLightsFrame() {
     if (T && T.hA != null) S.head.angle = T.hA;
     if (T && T.hP != null) S.head.penumbra = T.hP;
   }
-  // ---- nearest-ship engine lights (budgeted, slot-recycled) ----
-  if (!S.TRAF_N) return;
+  // ---- nearest-ship engine lights + headlight cones (budgeted, slot-recycled) ----
+  if (!S.TRAF_N && !S.CONE_N) return;
   const cap = (typeof getVRLightCap === 'function') ? getVRLightCap(S.TRAF_N) : S.TRAF_N;
+  // (v36.10) Cone budget: desktop (incl. PCVR tier 0) all 6; VR lite
+  // (tier 1) 2 — big additive DoubleSide fills are the one thing a 72 Hz
+  // headset can't afford many of; tier >= 2 sheds them entirely. Same
+  // shedding philosophy as getVRLightCap (which still governs the REAL
+  // lights above) but one notch harsher because this is fillrate, not
+  // fragment-loop cost. Quest/mobile never built the pool (CONE_N = 0).
+  const coneCap = (C && C.cap != null) ? C.cap
+    : (tier >= 2 ? 0 : (tier >= 1 ? 2 : S.CONE_N));
   S.scanT -= dt;
-  if (flying && cap > 0 && S.scanT <= 0) {
+  if (flying && (cap > 0 || coneCap > 0) && S.scanT <= 0) {
     S.scanT = 0.33;
     const gate = (T && T.gate) || 2400;
     const g2 = gate * gate;
-    let n1 = null, n2 = null, n3 = null, d1 = g2, d2 = g2, d3 = g2;
+    // (v36.10) The ONE nearest-ship scan, now 6 deep (was 3 registers): the
+    // traffic lights keep reading slots 0..2 — same top-3, same order, same
+    // strict < gate — and the cone pool reads all 6. In-place fixed arrays.
+    const top = S._top, topD = S._topD;
+    for (let j = 0; j < 6; j++) { top[j] = null; topD[j] = g2; }
     const pp = player.position;
     const ents = game.entities;
     if (ents) {
@@ -32671,10 +32797,7 @@ function _shipLightsFrame() {
         if (!e || !e.alive || !e.mesh || !e.mesh.visible || !e.position) continue;
         const dx = e.position.x - pp.x, dy = e.position.y - pp.y, dz = e.position.z - pp.z;
         const d = dx * dx + dy * dy + dz * dz;
-        if (d >= d3) continue;
-        if (d < d1) { n3 = n2; d3 = d2; n2 = n1; d2 = d1; n1 = e; d1 = d; }
-        else if (d < d2) { n3 = n2; d3 = d2; n2 = e; d2 = d; }
-        else { n3 = e; d3 = d; }
+        if (d < topD[5]) _shipScanInsert(top, topD, e, d);
       }
     }
     const nps = (typeof net !== 'undefined' && net && net.networkPlayers) ? net.networkPlayers : null;
@@ -32684,13 +32807,10 @@ function _shipLightsFrame() {
         if (!e || !e.alive || !e.mesh || !e.mesh.visible || !e.position) continue;
         const dx = e.position.x - pp.x, dy = e.position.y - pp.y, dz = e.position.z - pp.z;
         const d = dx * dx + dy * dy + dz * dz;
-        if (d >= d3) continue;
-        if (d < d1) { n3 = n2; d3 = d2; n2 = n1; d2 = d1; n1 = e; d1 = d; }
-        else if (d < d2) { n3 = n2; d3 = d2; n2 = e; d2 = d; }
-        else { n3 = e; d3 = d; }
+        if (d < topD[5]) _shipScanInsert(top, topD, e, d);
       }
     }
-    S._n1 = n1; S._n2 = n2; S._n3 = n3;
+    const n1 = top[0], n2 = top[1], n3 = top[2];
     // Reconcile slots with hysteresis: keep a slot whose entity is still in
     // the new top set, then fill free slots with the unplaced newcomers.
     for (let i = 0; i < S.TRAF_N; i++) {
@@ -32700,6 +32820,24 @@ function _shipLightsFrame() {
     if (n1 && S.assign.indexOf(n1) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n1; _shipLightSampleColor(n1.mesh, S.traffic[f], 0x7fd0ff); } }
     if (n2 && S.assign.indexOf(n2) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n2; _shipLightSampleColor(n2.mesh, S.traffic[f], 0x7fd0ff); } }
     if (n3 && S.assign.indexOf(n3) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n3; _shipLightSampleColor(n3.mesh, S.traffic[f], 0x7fd0ff); } }
+    // Cone slots: the same reconcile, 6 deep. `top` fills front-to-back so
+    // the first null ends the fill loop.
+    for (let i = 0; i < S.CONE_N; i++) {
+      const a = S.coneAssign[i];
+      if (a) {
+        let keep = false;
+        for (let j = 0; j < 6; j++) if (top[j] === a) { keep = true; break; }
+        if (!keep) S.coneAssign[i] = null;
+      }
+    }
+    for (let j = 0; j < 6; j++) {
+      const e = top[j];
+      if (!e) break;
+      if (S.coneAssign.indexOf(e) >= 0) continue;
+      const f = S.coneAssign.indexOf(null);
+      if (f < 0) break;
+      S.coneAssign[f] = e;
+    }
   }
   for (let i = 0; i < S.TRAF_N; i++) {
     const l = S.traffic[i];
@@ -32720,6 +32858,124 @@ function _shipLightsFrame() {
       if (ud.engineMesh) ud.engineMesh.getWorldPosition(l.position);
       else l.position.copy(e.position);
       l.distance = (T && T.tR) || 620;
+    }
+  }
+  // ---- (v36.10) headlight cones: FOG-GATED fake volumetrics ----
+  if (!S.CONE_N) return;
+  // "A faint cone IF THERE'S FOG TO LIGHT UP" is the spec, so the master
+  // dial is the live atmosphere, two factors multiplied:
+  //   density — scene.fog (FogExp2) density ramped over d0..d1. Endless
+  //     reach fog sits at (0.3e-4 x biome fogMul) ~ 3e-5..3.8e-5, the hub at
+  //     ~8.4e-5 (sqrt(ln10)/hubEdge x zone fogMul), brokensim thins to
+  //     1.2e-5, underwater jumps to 1.8e-3 — the default 1e-5..4e-5 ramp
+  //     spans exactly that band.
+  //   darkness — 1 - luminance(scene.fog.color) ramped over l0..l1. Fog
+  //     color IS "how lit the air already is": bright day haze (hub meadow
+  //     0x9fc8e8 lum .76, snow reach .87) kills the beams, dark air
+  //     (volcanic .19, goldmine .17, crystalcave .10, city dusk 0x243258
+  //     .195, underwater .19) lets them glow. This is what makes the beams
+  //     fade in around the dusk megacity and vanish over the daylight sea
+  //     with zero extra state — both factors ride scene.fog, which the
+  //     zone/weather systems already own (sentinel-safe: we only READ).
+  let visK = 0;
+  if (coneCap > 0) {
+    const f = scene.fog;
+    if (f) {
+      const den = f.isFogExp2 ? f.density : ((f.far > 0) ? 1.3 / f.far : 0);
+      const d0 = (C && C.d0 != null) ? C.d0 : 1e-5;
+      const d1 = (C && C.d1 != null) ? C.d1 : 4e-5;
+      let dk = (den - d0) / Math.max(1e-9, d1 - d0);
+      if (dk < 0) dk = 0; else if (dk > 1) dk = 1;
+      const fc = f.color;
+      const lum = 0.2126 * fc.r + 0.7152 * fc.g + 0.0722 * fc.b;
+      const l0 = (C && C.l0 != null) ? C.l0 : 0.16;
+      const l1 = (C && C.l1 != null) ? C.l1 : 0.50;
+      let lk = 1 - (lum - l0) / Math.max(1e-9, l1 - l0);
+      if (lk < 0) lk = 0; else if (lk > 1) lk = 1;
+      visK = dk * lk;
+    }
+    if (C && C.on != null && !C.on) visK = 0;
+  }
+  // Shape defaults: the cone HALF-angle follows the live SpotLight angle
+  // (0.5 rad) x 0.62 — the beam CORE. The spot runs penumbra 0.45, so its
+  // visually-bright footprint is ~angle x (1 - penumbra/2); drawing the
+  // full 0.5 rad silhouette read as a glowing fan, not a headlight, when
+  // judged live. Length 1150 sits in the 900-1400 band and matches where
+  // the decay-1 beam has fallen to ~2 candela-per-unit.
+  const cAng = (C && C.ang != null) ? C.ang : ((S.head.angle || 0.5) * 0.62);
+  const cLen = (C && C.len != null) ? C.len : 1150;
+  const cR = Math.tan(cAng) * cLen;
+  // 0.16 was calibrated LIVE in a volcanic endless reach (visK 0.61 there →
+  // material opacity ~0.10): the first pass shipped 0.085 and an in-scene
+  // A/B screenshot pair came back pixel-identical — invisible is not
+  // "faint". The 0.12 ceiling keeps the very darkest+densest contexts
+  // (underwater 1.8e-3, full dusk city) from climbing past a whisper.
+  const opBase = (C && C.op != null) ? C.op : 0.16;
+  const opMax = (C && C.max != null) ? C.max : 0.12;
+  const kc = Math.min(1, dt * 5);   // ~250 ms cone fade, slower than lights
+  for (let i = 0; i < S.CONE_N; i++) {
+    const m = S.cones[i];
+    let e = S.coneAssign[i];
+    // Cloak/death gate rides the same checks as the lights: alive false is
+    // death, mesh.visible false is cloak/warp-out for bots AND peers.
+    if (!flying || i >= coneCap || !e || !e.alive || !e.mesh || !e.mesh.visible) {
+      e = null;
+      if (!flying) S.coneAssign[i] = null;   // release refs so meshes can GC
+    }
+    let tgt = 0;
+    if (e && visK > 0.004) {
+      // Throttle ramp like the traffic lights: parked pad ships a whisper,
+      // movers a clear beam.
+      const spd = e.velocity ? e.velocity.length() : 0;
+      const mx = (e.chassis && (e.chassis.flightSpeed || e.chassis.maxSpeed)) || 400;
+      const th = Math.min(1, spd / Math.max(1, mx));
+      tgt = Math.min(opMax, opBase * visK) * (0.45 + 0.55 * th);
+    }
+    S.coneCur[i] += (tgt - S.coneCur[i]) * kc;
+    const o = S.coneCur[i];
+    if (o <= 0.004) { if (m.visible) m.visible = false; continue; }
+    m.visible = true;
+    m.material.opacity = o;
+    // Pose only while the entity is live (fading-out cones keep their last
+    // pose for the ~250 ms tail; the ref may already be released).
+    if (e) {
+      const ud = e.mesh.userData || {};
+      // Apex at the under-hull nav-orb where the player's real SpotLight
+      // mounts; hoard hulls carry no runningLight — hang the apex just
+      // under the hull center like the head fallback does.
+      if (ud.runningLight) ud.runningLight.getWorldPosition(m.position);
+      else { m.position.copy(e.position); m.position.y -= 18; }
+      // Billboard-free: the cone is rotationally symmetric, so aligning
+      // geometry +Z with the ship's world nose axis is the whole job.
+      e.mesh.getWorldDirection(S._d);
+      m.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
+      m.scale.set(cR, cR, cLen);
+    }
+  }
+  // The player's own cone — THIRD PERSON ONLY (first person would fill the
+  // screen from inside the volume), never in XR (headset view is in-cockpit
+  // even when game.thirdPerson is stale-true), and only while the real
+  // headlight is actually on (input.headlight + hCur), so the visible beam
+  // and the painted footprint agree.
+  const mP = S.coneP;
+  if (mP) {
+    let pT = 0;
+    const xr = (typeof isXRPresenting === 'function') && isXRPresenting();
+    if (flying && game.thirdPerson && !xr && input.headlight !== false &&
+        S.hCur > 0.01 && visK > 0.004) pT = Math.min(opMax, opBase * visK);
+    S.conePCur += (pT - S.conePCur) * kc;
+    const o = S.conePCur;
+    if (o <= 0.004) { if (mP.visible) mP.visible = false; }
+    else {
+      mP.visible = true;
+      mP.material.opacity = o;
+      // S.head.position is fresh whenever hCur > 0.01 (set in the headlight
+      // block above); aim with the camera forward exactly like the spot's
+      // target, so cone and lit footprint stay glued.
+      mP.position.copy(S.head.position);
+      camera.getWorldDirection(S._d);
+      mP.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
+      mP.scale.set(cR, cR, cLen);
     }
   }
 }
@@ -45115,6 +45371,7 @@ function commitLoadout(key) {
   player.maxHealth = ch.maxHealth;
   player.shield = ch.maxShield;
   player.maxShield = ch.maxShield;
+  player.overShield = 0; // (v36.12) fresh loadout starts without the stasis bonus layer
   player.coreMeter = 0;
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
@@ -45895,6 +46152,20 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     showDamageIndicator(attacker.position);
   }
 
+  // (v36.12) OVERSHIELD is consumed FIRST: overShield -> shield -> hull.
+  // Sits AFTER every absorb-shield ability early-out above (Body/Fire/Vortex/
+  // Plasma walls still take the hit whole, untouched) and before the regular
+  // shield block, so every damage type that reaches the shield spends the
+  // stasis-banked bonus layer first. White-cyan ripple matches the HUD layer.
+  if (player.overShield > 0) {
+    const _osHitPos = (projectile && projectile.position) ? projectile.position
+                    : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
+                    : (attacker && attacker.position)     ? attacker.position : player.position;
+    spawnShieldHit(_osHitPos, player.chassis.hullLength * 0.9, 0xb8f6ff, player.mesh);
+    if (amount <= player.overShield) { player.overShield -= amount; return; }
+    amount -= player.overShield;
+    player.overShield = 0;
+  }
   if (player.shield > 0) {
     // Shield ripple on hit. The hitPoint is the attacker's position
     // (when known) projected onto the player's shield sphere — the
@@ -45943,9 +46214,14 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
   }
   if (player.health <= 0) playerDie(attacker);
 }
+// (v36.12) Debug/harness export: lets headless tests drive exact damage
+// through the real overShield -> shield -> hull pipeline (same pattern as
+// __endlessInfo/__endlessAegis). Not called by game code.
+window.__playerTakeDamage = playerTakeDamage;
 
 function playerDie(attacker) {
   player.health = 0;
+  player.overShield = 0; // (v36.12) death drops the stasis bonus layer
   player.shipState = 'dead';
   player.doomed = false;
   player.doomTimer = 0;
@@ -46037,6 +46313,7 @@ function respawnPlayer() {
   const ch = player.chassis;
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
+  player.overShield = 0; // (v36.12) respawn starts without the stasis bonus layer
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
   player.doomed = false;
@@ -53243,6 +53520,7 @@ function returnToRootMenu(opts) {
     // only went unnoticed because the old exit path reloaded the page.
     if (player.maxHealth) player.health = player.maxHealth;
     if (player.maxShield) player.shield = player.maxShield;
+    player.overShield = 0; // (v36.12) teardown clears the stasis bonus layer
   }
   // Release pointer lock if combat had it ; otherwise the lobby reads as
   // a frozen view because the cursor's still trapped in the canvas.
@@ -55049,6 +55327,24 @@ function _hlNanoOverlay(ctx, r, p) {
   _hlNanoSpan(ctx, r, p, 0, overFrac, '#b264ff', fillW, 0.95);
 }
 
+// (v36.12) STASIS OVERSHIELD overlay on the SHIELD ring — the exact nano-
+// overcharge pattern one arc out: while player.overShield is banked (stasis
+// charge past shield-full, see updatePlayerStasis), a bright white-cyan band
+// fills over the lit shield arc, 0..full as the bank runs 0..0.5*maxShield.
+// #b8f6ff is deliberately distinct from both shield cyan #4fd1ff and nano
+// purple #b264ff. Same _hlNanoSpan geometry walker, so it lands exactly on
+// the shield fill line and dies in the same gaps. Render-layer only — no
+// layout-file change (v35.88 discipline); VR mirrors this canvas for free.
+function _hlOverShieldOverlay(ctx, r, p) {
+  const os = (typeof player !== 'undefined' && player) ? player.overShield : 0;
+  if (!(os > 0) || !(player.maxShield > 0) || player.shipState === 'dead') return;
+  // Same width derivation as _hlArcBar so the layers nest: fill line is th − 40%.
+  const th = Math.max(3, (p.thick != null ? p.thick : 0.95) * r.vmin);
+  const fillW = Math.max(2, th - th * 0.4);
+  const overFrac = Math.min(1, os / (player.maxShield * 0.5));
+  _hlNanoSpan(ctx, r, p, 0, overFrac, '#b8f6ff', fillW, 0.95);
+}
+
 // Radial tick strip. Ticks stick OUTWARD from the radius by `tick`, so a strip
 // at r 11.2 with tick 4 occupies 11.2..15.2 vmin — that outer number is what the
 // frame has to clear, not the radius.
@@ -55399,6 +55695,9 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   r = _hlPlace(_HL.shield, W, H);
   _hlArcBar(ctx, r, _HL.shield, v.shieldPct, _HL.shield.col);
+  // (v36.12) Stasis overshield: white-cyan overcharge layer over the shield
+  // arc — the nano-overcharge pattern applied one ring out. No-op at 0.
+  _hlOverShieldOverlay(ctx, r, _HL.shield);
   _hlGaugeLabel(ctx, r, _HL.shield);
 
   // One energy slot serves all three per-loadout meters (vortex energy /
@@ -58620,7 +58919,7 @@ function _howtoRender(ov) {
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>COMBAT MECHANICS</div>";
   const _mechs = [
     ['DASH &amp; DOOMED STATE', '#4fd1ff',
-     'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
+     'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. Enter a stasis field with shields already full or partly charged and the leftover charge banks as an OVERSHIELD — a white-cyan band over the shield arc, up to half your max shield — spent before your shields when you next take damage, and slowly bleeding away outside a field. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
     ['CORE CHARGING', '#f0ff1f',
      'The CORE meter is the four-block arc at the top of the ring, charging 0–100 off aggression: damage dealt feeds it steadily (about 1 point per 100 damage), every kill banks +15, every execution +20, and each ability activation that actually costs something — a cooldown or a trap charge — adds +2. Free taps of the hold shields earn nothing. At 100, press CORE to fire your ship’s signature super — a sustained mega-beam, a massive AoE blast, a mega stun bolt, nano-repair swarms: each ship has its own. The meter zeroes on activation and stays empty while the core runs; then the climb starts over.'],
   ];
@@ -65622,9 +65921,12 @@ function updateStasisFields(dt) {
     }
   }
 
-  const _championDue = (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')
+  const _championDue = (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight' || LSS.MODE === 'endless')
     // Campaign NEVER auto-spawns the race/classic champion objective. Its boss
     // (v33.01) Free-flight hub piggybacks on the same skip — no champion field / Sphere in the overworld.
+    // (v36.11) Endless joins the skip: it has no round-win to resolve, so the capture
+    // objective (champion StasisField + ChampionShell) is noise there. The REGULAR
+    // spawnStasisField pickups above are untouched — endless shield refill depends on them.
     // arena + cyan-ring portal (Journey 2.3-2.4) are summoned deliberately.
     // Without this gate the field spawns once raceNoTimer's roundTimer ticks
     // under CHAMPION_TIME (~170s in), and EVERY hoard bot abandons the player to
@@ -65947,7 +66249,17 @@ function enterStasis(field) {
 }
 
 function updatePlayerStasis(dt) {
-  if (!game.playerInStasis) return;
+  if (!game.playerInStasis) {
+    // (v36.12) OVERSHIELD decay outside a stasis field: the bonus layer is
+    // temporary — bleeds off at ~3% of maxShield per second (full 0.5x-cap
+    // bank gone in ~17s). Ticked here because this runs every playing frame
+    // (gameLoop calls it unconditionally); inside a field the charge branch
+    // below owns the value instead.
+    if (player.overShield > 0 && player.maxShield > 0) {
+      player.overShield = Math.max(0, player.overShield - player.maxShield * 0.03 * dt);
+    }
+    return;
+  }
   // Champion stasis is driven by the champion
   // handler in updateStasisFields, not by this auto-decrement. Skip the
   // timer/auto-exit body so the player stays locked until shield-full (win)
@@ -65956,9 +66268,22 @@ function updatePlayerStasis(dt) {
 
   game.playerStasisTimer -= dt;
 
-  // Gradually recharge shield over the stasis duration
+  // Gradually recharge shield over the stasis duration.
+  // (v36.12) OVERSHIELD: once shield hits max, the SAME charge rate keeps
+  // flowing into player.overShield, capped at half the max shield — entering
+  // a field with shields already charged/partly charged banks a temporary
+  // bonus layer instead of wasting the charge (owner feature). Consumed
+  // before shield in playerTakeDamage; decays outside fields (branch above).
   const rechargePerSec = player.maxShield / game.playerStasisDuration;
-  player.shield = Math.min(player.maxShield, player.shield + rechargePerSec * dt);
+  const _charge = rechargePerSec * dt;
+  const _shieldRoom = player.maxShield - player.shield;
+  if (_charge <= _shieldRoom) {
+    player.shield += _charge;
+  } else {
+    player.shield = player.maxShield;
+    const _overCap = player.maxShield * 0.5;
+    player.overShield = Math.min(_overCap, (player.overShield || 0) + (_charge - _shieldRoom));
+  }
 
   // Force immobility (override any movement input)
   player.velocity.set(0, 0, 0);

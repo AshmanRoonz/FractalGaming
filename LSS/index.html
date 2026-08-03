@@ -3614,7 +3614,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.09';
+const LSS_BUILD = '36.12';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -3895,6 +3895,7 @@ const player = {
   team: LSS.TEAM_FLEET_A,
   health: 0, maxHealth: 0,
   shield: 0, maxShield: 0,
+  overShield: 0,
   coreMeter: 0,
   shipState: 'flying',
   doomed: false, doomTimer: 0,
@@ -8488,6 +8489,7 @@ class NetworkPlayer {
 
     this.health = s.hp || this.health;
     this.shield = s.shield || 0;
+    this.overShield = s.os || 0; // (v36.12) mirror of the sender's stasis overshield (display-only)
     this.doomed = s.doomed || false;
     if (typeof s.kills === 'number') this.kills = s.kills;
     if (typeof s.damageDealt === 'number') this.damageDealt = s.damageDealt;
@@ -8753,7 +8755,7 @@ const _broadcastState = {
   px: 0, py: 0, pz: 0,
   vx: 0, vy: 0, vz: 0,
   qx: 0, qy: 0, qz: 0, qw: 1,
-  hp: 0, shield: 0,
+  hp: 0, shield: 0, os: 0,
   doomed: false, dead: false,
   kills: 0, damageDealt: 0,
   abilityShield: false,
@@ -8781,6 +8783,7 @@ function broadcastPlayerState(dt) {
   s.qw = Math.round(camera.quaternion.w * 1000) / 1000;
   s.hp = player.health;
   s.shield = player.shield;
+  s.os = Math.round(player.overShield || 0);
   s.doomed = player.doomed;
   s.dead = player.shipState === 'dead';
   s.kills = player.kills | 0;
@@ -26318,13 +26321,22 @@ const _SHIPL = {
   engine: null, head: null, traffic: [],
   TRAF_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
            (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 3,
+  CONE_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
+           (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 6,
+  cones: [],           // pooled cone meshes (CONE_N)
+  coneAssign: [],      // per-cone assigned entity (null = free)
+  coneCur: [],         // per-cone smoothed opacity
+  coneP: null,         // the player's own cone (third-person only)
+  conePCur: 0,
   assign: [],          // per-slot assigned entity (null = free)
   cur: [],             // per-slot smoothed intensity
   scanT: 0,            // rescan cooldown (s)
   eCur: 0, hCur: 0,    // smoothed engine/headlight intensities
   _lastMesh: null,     // engine-color re-sample trigger (mesh swap)
-  _n1: null, _n2: null, _n3: null,  // scan scratch: nearest entities
+  _top: [null, null, null, null, null, null],
+  _topD: new Float64Array(6),
   _v: new THREE.Vector3(),
+  _d: new THREE.Vector3(),   // cone-forward scratch
 };
 (function initShipLights() {
   const S = _SHIPL;
@@ -26344,7 +26356,46 @@ const _SHIPL = {
     S.assign.push(null);
     S.cur.push(0);
   }
+  if (S.CONE_N) {
+    const g = new THREE.CylinderGeometry(0.006, 1, 1, 20, 1, true);
+    g.rotateX(-Math.PI / 2);   // cylinder +Y (apex end) -> -Z
+    g.translate(0, 0, 0.5);    // apex to origin, base to z=+1
+    const cv = document.createElement('canvas');
+    cv.width = 16; cv.height = 128;
+    const c2 = cv.getContext('2d');
+    const gr = c2.createLinearGradient(0, 0, 0, 128);
+    gr.addColorStop(0.00, 'rgba(255,255,255,0.85)');
+    gr.addColorStop(0.16, 'rgba(255,255,255,0.45)');
+    gr.addColorStop(0.52, 'rgba(255,255,255,0.14)');
+    gr.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+    c2.fillStyle = gr; c2.fillRect(0, 0, 16, 128);
+    const tex = new THREE.CanvasTexture(cv);
+    const mkCone = () => {
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+        map: tex, color: 0xffe8c4, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+        side: THREE.DoubleSide, fog: false,
+      }));
+      m.visible = false;
+      m.renderOrder = 2;   // with the god-ray shafts, after world transparents
+      scene.add(m);
+      return m;
+    };
+    for (let i = 0; i < S.CONE_N; i++) {
+      S.cones.push(mkCone());
+      S.coneAssign.push(null);
+      S.coneCur.push(0);
+    }
+    S.coneP = mkCone();
+  }
 })();
+const _SHIPL_FWD = new THREE.Vector3(0, 0, 1);
+function _shipScanInsert(top, topD, e, d) {
+  for (let j = 0; j < 6; j++) if (top[j] === e) return;
+  let i = 5;
+  while (i > 0 && topD[i - 1] > d) { top[i] = top[i - 1]; topD[i] = topD[i - 1]; i--; }
+  top[i] = e; topD[i] = d;
+}
 window.__headlight = function (v) {
   if (v !== undefined) {
     input.headlight = !!(+v);
@@ -26364,6 +26415,7 @@ function _shipLightsFrame() {
   const S = _SHIPL;
   if (!S.engine) return;
   const T = window.__shipLights;   // live-tune overrides {eI,eR,hI,hR,hA,hP,tI,tR,gate}
+  const C = window.__shipCones;    // (v36.10) cone live-tune {on,op,max,len,ang,cap,d0,d1,l0,l1}
   const dt = Math.min(0.05, (game && game.deltaTime) || 0.016);
   const k = Math.min(1, dt * 8);   // ~125 ms intensity fade, no pops
   const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : 0;
@@ -26404,14 +26456,17 @@ function _shipLightsFrame() {
     if (T && T.hA != null) S.head.angle = T.hA;
     if (T && T.hP != null) S.head.penumbra = T.hP;
   }
-  if (!S.TRAF_N) return;
+  if (!S.TRAF_N && !S.CONE_N) return;
   const cap = (typeof getVRLightCap === 'function') ? getVRLightCap(S.TRAF_N) : S.TRAF_N;
+  const coneCap = (C && C.cap != null) ? C.cap
+    : (tier >= 2 ? 0 : (tier >= 1 ? 2 : S.CONE_N));
   S.scanT -= dt;
-  if (flying && cap > 0 && S.scanT <= 0) {
+  if (flying && (cap > 0 || coneCap > 0) && S.scanT <= 0) {
     S.scanT = 0.33;
     const gate = (T && T.gate) || 2400;
     const g2 = gate * gate;
-    let n1 = null, n2 = null, n3 = null, d1 = g2, d2 = g2, d3 = g2;
+    const top = S._top, topD = S._topD;
+    for (let j = 0; j < 6; j++) { top[j] = null; topD[j] = g2; }
     const pp = player.position;
     const ents = game.entities;
     if (ents) {
@@ -26420,10 +26475,7 @@ function _shipLightsFrame() {
         if (!e || !e.alive || !e.mesh || !e.mesh.visible || !e.position) continue;
         const dx = e.position.x - pp.x, dy = e.position.y - pp.y, dz = e.position.z - pp.z;
         const d = dx * dx + dy * dy + dz * dz;
-        if (d >= d3) continue;
-        if (d < d1) { n3 = n2; d3 = d2; n2 = n1; d2 = d1; n1 = e; d1 = d; }
-        else if (d < d2) { n3 = n2; d3 = d2; n2 = e; d2 = d; }
-        else { n3 = e; d3 = d; }
+        if (d < topD[5]) _shipScanInsert(top, topD, e, d);
       }
     }
     const nps = (typeof net !== 'undefined' && net && net.networkPlayers) ? net.networkPlayers : null;
@@ -26433,13 +26485,10 @@ function _shipLightsFrame() {
         if (!e || !e.alive || !e.mesh || !e.mesh.visible || !e.position) continue;
         const dx = e.position.x - pp.x, dy = e.position.y - pp.y, dz = e.position.z - pp.z;
         const d = dx * dx + dy * dy + dz * dz;
-        if (d >= d3) continue;
-        if (d < d1) { n3 = n2; d3 = d2; n2 = n1; d2 = d1; n1 = e; d1 = d; }
-        else if (d < d2) { n3 = n2; d3 = d2; n2 = e; d2 = d; }
-        else { n3 = e; d3 = d; }
+        if (d < topD[5]) _shipScanInsert(top, topD, e, d);
       }
     }
-    S._n1 = n1; S._n2 = n2; S._n3 = n3;
+    const n1 = top[0], n2 = top[1], n3 = top[2];
     for (let i = 0; i < S.TRAF_N; i++) {
       const a = S.assign[i];
       if (a && a !== n1 && a !== n2 && a !== n3) S.assign[i] = null;
@@ -26447,6 +26496,22 @@ function _shipLightsFrame() {
     if (n1 && S.assign.indexOf(n1) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n1; _shipLightSampleColor(n1.mesh, S.traffic[f], 0x7fd0ff); } }
     if (n2 && S.assign.indexOf(n2) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n2; _shipLightSampleColor(n2.mesh, S.traffic[f], 0x7fd0ff); } }
     if (n3 && S.assign.indexOf(n3) < 0) { const f = S.assign.indexOf(null); if (f >= 0) { S.assign[f] = n3; _shipLightSampleColor(n3.mesh, S.traffic[f], 0x7fd0ff); } }
+    for (let i = 0; i < S.CONE_N; i++) {
+      const a = S.coneAssign[i];
+      if (a) {
+        let keep = false;
+        for (let j = 0; j < 6; j++) if (top[j] === a) { keep = true; break; }
+        if (!keep) S.coneAssign[i] = null;
+      }
+    }
+    for (let j = 0; j < 6; j++) {
+      const e = top[j];
+      if (!e) break;
+      if (S.coneAssign.indexOf(e) >= 0) continue;
+      const f = S.coneAssign.indexOf(null);
+      if (f < 0) break;
+      S.coneAssign[f] = e;
+    }
   }
   for (let i = 0; i < S.TRAF_N; i++) {
     const l = S.traffic[i];
@@ -26466,6 +26531,78 @@ function _shipLightsFrame() {
       if (ud.engineMesh) ud.engineMesh.getWorldPosition(l.position);
       else l.position.copy(e.position);
       l.distance = (T && T.tR) || 620;
+    }
+  }
+  if (!S.CONE_N) return;
+  let visK = 0;
+  if (coneCap > 0) {
+    const f = scene.fog;
+    if (f) {
+      const den = f.isFogExp2 ? f.density : ((f.far > 0) ? 1.3 / f.far : 0);
+      const d0 = (C && C.d0 != null) ? C.d0 : 1e-5;
+      const d1 = (C && C.d1 != null) ? C.d1 : 4e-5;
+      let dk = (den - d0) / Math.max(1e-9, d1 - d0);
+      if (dk < 0) dk = 0; else if (dk > 1) dk = 1;
+      const fc = f.color;
+      const lum = 0.2126 * fc.r + 0.7152 * fc.g + 0.0722 * fc.b;
+      const l0 = (C && C.l0 != null) ? C.l0 : 0.16;
+      const l1 = (C && C.l1 != null) ? C.l1 : 0.50;
+      let lk = 1 - (lum - l0) / Math.max(1e-9, l1 - l0);
+      if (lk < 0) lk = 0; else if (lk > 1) lk = 1;
+      visK = dk * lk;
+    }
+    if (C && C.on != null && !C.on) visK = 0;
+  }
+  const cAng = (C && C.ang != null) ? C.ang : ((S.head.angle || 0.5) * 0.62);
+  const cLen = (C && C.len != null) ? C.len : 1150;
+  const cR = Math.tan(cAng) * cLen;
+  const opBase = (C && C.op != null) ? C.op : 0.16;
+  const opMax = (C && C.max != null) ? C.max : 0.12;
+  const kc = Math.min(1, dt * 5);   // ~250 ms cone fade, slower than lights
+  for (let i = 0; i < S.CONE_N; i++) {
+    const m = S.cones[i];
+    let e = S.coneAssign[i];
+    if (!flying || i >= coneCap || !e || !e.alive || !e.mesh || !e.mesh.visible) {
+      e = null;
+      if (!flying) S.coneAssign[i] = null;   // release refs so meshes can GC
+    }
+    let tgt = 0;
+    if (e && visK > 0.004) {
+      const spd = e.velocity ? e.velocity.length() : 0;
+      const mx = (e.chassis && (e.chassis.flightSpeed || e.chassis.maxSpeed)) || 400;
+      const th = Math.min(1, spd / Math.max(1, mx));
+      tgt = Math.min(opMax, opBase * visK) * (0.45 + 0.55 * th);
+    }
+    S.coneCur[i] += (tgt - S.coneCur[i]) * kc;
+    const o = S.coneCur[i];
+    if (o <= 0.004) { if (m.visible) m.visible = false; continue; }
+    m.visible = true;
+    m.material.opacity = o;
+    if (e) {
+      const ud = e.mesh.userData || {};
+      if (ud.runningLight) ud.runningLight.getWorldPosition(m.position);
+      else { m.position.copy(e.position); m.position.y -= 18; }
+      e.mesh.getWorldDirection(S._d);
+      m.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
+      m.scale.set(cR, cR, cLen);
+    }
+  }
+  const mP = S.coneP;
+  if (mP) {
+    let pT = 0;
+    const xr = (typeof isXRPresenting === 'function') && isXRPresenting();
+    if (flying && game.thirdPerson && !xr && input.headlight !== false &&
+        S.hCur > 0.01 && visK > 0.004) pT = Math.min(opMax, opBase * visK);
+    S.conePCur += (pT - S.conePCur) * kc;
+    const o = S.conePCur;
+    if (o <= 0.004) { if (mP.visible) mP.visible = false; }
+    else {
+      mP.visible = true;
+      mP.material.opacity = o;
+      mP.position.copy(S.head.position);
+      camera.getWorldDirection(S._d);
+      mP.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
+      mP.scale.set(cR, cR, cLen);
     }
   }
 }
@@ -36338,6 +36475,7 @@ function commitLoadout(key) {
   player.maxHealth = ch.maxHealth;
   player.shield = ch.maxShield;
   player.maxShield = ch.maxShield;
+  player.overShield = 0; // (v36.12) fresh loadout starts without the stasis bonus layer
   player.coreMeter = 0;
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
@@ -36894,6 +37032,15 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     showDamageIndicator(attacker.position);
   }
 
+  if (player.overShield > 0) {
+    const _osHitPos = (projectile && projectile.position) ? projectile.position
+                    : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
+                    : (attacker && attacker.position)     ? attacker.position : player.position;
+    spawnShieldHit(_osHitPos, player.chassis.hullLength * 0.9, 0xb8f6ff, player.mesh);
+    if (amount <= player.overShield) { player.overShield -= amount; return; }
+    amount -= player.overShield;
+    player.overShield = 0;
+  }
   if (player.shield > 0) {
     const hitPos = (projectile && projectile.position) ? projectile.position
                  : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
@@ -36924,9 +37071,11 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
   }
   if (player.health <= 0) playerDie(attacker);
 }
+window.__playerTakeDamage = playerTakeDamage;
 
 function playerDie(attacker) {
   player.health = 0;
+  player.overShield = 0; // (v36.12) death drops the stasis bonus layer
   player.shipState = 'dead';
   player.doomed = false;
   player.doomTimer = 0;
@@ -36989,6 +37138,7 @@ function respawnPlayer() {
   const ch = player.chassis;
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
+  player.overShield = 0; // (v36.12) respawn starts without the stasis bonus layer
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
   player.doomed = false;
@@ -42494,6 +42644,7 @@ function returnToRootMenu(opts) {
     player.dashTimer = 0;
     if (player.maxHealth) player.health = player.maxHealth;
     if (player.maxShield) player.shield = player.maxShield;
+    player.overShield = 0; // (v36.12) teardown clears the stasis bonus layer
   }
   if (document.exitPointerLock) {
     try { document.exitPointerLock(); } catch (_) {}
@@ -43779,6 +43930,15 @@ function _hlNanoOverlay(ctx, r, p) {
   _hlNanoSpan(ctx, r, p, 0, overFrac, '#b264ff', fillW, 0.95);
 }
 
+function _hlOverShieldOverlay(ctx, r, p) {
+  const os = (typeof player !== 'undefined' && player) ? player.overShield : 0;
+  if (!(os > 0) || !(player.maxShield > 0) || player.shipState === 'dead') return;
+  const th = Math.max(3, (p.thick != null ? p.thick : 0.95) * r.vmin);
+  const fillW = Math.max(2, th - th * 0.4);
+  const overFrac = Math.min(1, os / (player.maxShield * 0.5));
+  _hlNanoSpan(ctx, r, p, 0, overFrac, '#b8f6ff', fillW, 0.95);
+}
+
 function _hlSegArc(ctx, r, p, pct, col) {
   const rad = Math.min(r.w, r.h) / 2;
   const n = Math.max(1, p.seg || 8);
@@ -44013,6 +44173,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   r = _hlPlace(_HL.shield, W, H);
   _hlArcBar(ctx, r, _HL.shield, v.shieldPct, _HL.shield.col);
+  _hlOverShieldOverlay(ctx, r, _HL.shield);
   _hlGaugeLabel(ctx, r, _HL.shield);
 
   if (v.energyPct != null) {
@@ -46530,7 +46691,7 @@ function _howtoRender(ov) {
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>COMBAT MECHANICS</div>";
   const _mechs = [
     ['DASH &amp; DOOMED STATE', '#4fd1ff',
-     'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
+     'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. Enter a stasis field with shields already full or partly charged and the leftover charge banks as an OVERSHIELD — a white-cyan band over the shield arc, up to half your max shield — spent before your shields when you next take damage, and slowly bleeding away outside a field. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
     ['CORE CHARGING', '#f0ff1f',
      'The CORE meter is the four-block arc at the top of the ring, charging 0–100 off aggression: damage dealt feeds it steadily (about 1 point per 100 damage), every kill banks +15, every execution +20, and each ability activation that actually costs something — a cooldown or a trap charge — adds +2. Free taps of the hold shields earn nothing. At 100, press CORE to fire your ship’s signature super — a sustained mega-beam, a massive AoE blast, a mega stun bolt, nano-repair swarms: each ship has its own. The meter zeroes on activation and stays empty while the core runs; then the climb starts over.'],
   ];
@@ -52648,7 +52809,7 @@ function updateStasisFields(dt) {
     }
   }
 
-  const _championDue = (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')
+  const _championDue = (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight' || LSS.MODE === 'endless')
     ? false
     : (LSS.MODE === 'race')
       ? (game.state === 'playing' && _raceFinishUnlocked())
@@ -52905,13 +53066,26 @@ function enterStasis(field) {
 }
 
 function updatePlayerStasis(dt) {
-  if (!game.playerInStasis) return;
+  if (!game.playerInStasis) {
+    if (player.overShield > 0 && player.maxShield > 0) {
+      player.overShield = Math.max(0, player.overShield - player.maxShield * 0.03 * dt);
+    }
+    return;
+  }
   if (game.playerInChampionStasis) return;
 
   game.playerStasisTimer -= dt;
 
   const rechargePerSec = player.maxShield / game.playerStasisDuration;
-  player.shield = Math.min(player.maxShield, player.shield + rechargePerSec * dt);
+  const _charge = rechargePerSec * dt;
+  const _shieldRoom = player.maxShield - player.shield;
+  if (_charge <= _shieldRoom) {
+    player.shield += _charge;
+  } else {
+    player.shield = player.maxShield;
+    const _overCap = player.maxShield * 0.5;
+    player.overShield = Math.min(_overCap, (player.overShield || 0) + (_charge - _shieldRoom));
+  }
 
   player.velocity.set(0, 0, 0);
 

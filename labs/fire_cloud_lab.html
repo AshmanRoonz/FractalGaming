@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LSS Fire-Cloud Lab</title>
+<style>
+  :root { --bg:#07060a; --panel:#12101a; --ink:#e8e4f0; --dim:#9a93b0; --hot:#ff6a2b; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font:13px/1.4 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif; overflow:hidden; }
+  #app { position:fixed; inset:0; }
+  canvas { display:block; }
+  #panel { position:fixed; top:12px; left:12px; width:300px; max-height:calc(100% - 24px);
+    overflow-y:auto; background:rgba(18,16,26,.92); border:1px solid #2a2640; border-radius:12px;
+    padding:14px 14px 18px; backdrop-filter:blur(6px); box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  #panel h1 { font-size:14px; margin:0 0 2px; letter-spacing:.04em; }
+  #panel h1 b { color:var(--hot); }
+  .sub { color:var(--dim); font-size:11px; margin:0 0 12px; }
+  .row { margin:9px 0; }
+  .row label { display:flex; justify-content:space-between; color:var(--dim); font-size:11px; margin-bottom:3px; }
+  .row label span { color:var(--ink); font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; accent-color:var(--hot); }
+  .colors { display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-top:4px; }
+  .colors div { text-align:center; color:var(--dim); font-size:10px; }
+  .colors input[type=color] { width:100%; height:26px; border:none; border-radius:6px; background:none; cursor:pointer; }
+  .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  button { flex:1; min-width:64px; background:#211d33; color:var(--ink); border:1px solid #352f50;
+    border-radius:8px; padding:6px 8px; cursor:pointer; font-size:11px; }
+  button:hover { border-color:var(--hot); }
+  button.on { background:var(--hot); color:#1a0d05; border-color:var(--hot); font-weight:600; }
+  .hr { height:1px; background:#2a2640; margin:12px 0; }
+  #hud { position:fixed; top:12px; right:12px; text-align:right; color:var(--dim); font-size:11px;
+    background:rgba(18,16,26,.8); border:1px solid #2a2640; border-radius:8px; padding:7px 10px; font-variant-numeric:tabular-nums; }
+  #hud b { color:var(--ink); }
+  #out { white-space:pre; font:11px/1.35 ui-monospace,Menlo,Consolas,monospace; color:#bdb6d0;
+    background:#0c0a12; border:1px solid #2a2640; border-radius:8px; padding:8px; margin-top:8px; max-height:150px; overflow:auto; }
+  .tip { color:var(--dim); font-size:10px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud"><b id="fps">–</b> fps · <b id="calls">–</b> draws · <b id="tris">–</b> tris</div>
+<div id="panel">
+  <h1><b>Fire-Cloud</b> Lab</h1>
+  <p class="sub">Reshaping Pyro's gas-cloud shader into fire. Tune, then port into the game.</p>
+
+  <div class="row">
+    <label>Plume volumes <span id="vCount">5</span></label>
+    <input id="count" type="range" min="1" max="14" step="1" value="5">
+  </div>
+  <div class="row">
+    <label>Radius <span id="vRadius">34</span></label>
+    <input id="radius" type="range" min="8" max="80" step="1" value="34">
+  </div>
+  <div class="row">
+    <label>FBM octaves (cost) <span id="vOct">5</span></label>
+    <input id="oct" type="range" min="1" max="7" step="1" value="5">
+  </div>
+  <div class="row">
+    <label>Noise scale <span id="vScale">2.00</span></label>
+    <input id="scale" type="range" min="0.3" max="2.5" step="0.05" value="2.0">
+  </div>
+  <div class="row">
+    <label>Rise speed <span id="vRise">1.30</span></label>
+    <input id="rise" type="range" min="0" max="3" step="0.05" value="1.3">
+  </div>
+  <div class="row">
+    <label>Wisp / displacement <span id="vDisp">0.55</span></label>
+    <input id="disp" type="range" min="0" max="1.2" step="0.05" value="0.55">
+  </div>
+  <div class="row">
+    <label>Density gain <span id="vGain">1.50</span></label>
+    <input id="gain" type="range" min="0.6" max="2.6" step="0.05" value="1.5">
+  </div>
+  <div class="row">
+    <label>Opacity <span id="vAlpha">0.55</span></label>
+    <input id="alpha" type="range" min="0.1" max="1" step="0.05" value="0.55">
+  </div>
+
+  <div class="hr"></div>
+  <label style="color:var(--dim);font-size:11px;">Fire ramp (cool edge → hot core)</label>
+  <div class="colors">
+    <div>edge<input id="c0" type="color" value="#3a0a02"></div>
+    <div>low<input id="c1" type="color" value="#cc2a00"></div>
+    <div>mid<input id="c2" type="color" value="#ff6a18"></div>
+    <div>core<input id="c3" type="color" value="#ffe39a"></div>
+  </div>
+
+  <div class="btns">
+    <button id="bAdd" class="on">Additive</button>
+    <button id="bNorm">Normal</button>
+  </div>
+  <div class="btns">
+    <button id="pFire" class="on">Fire</button>
+    <button id="pGas">Toxic gas</button>
+    <button id="pEmber">Embers</button>
+  </div>
+
+  <div class="hr"></div>
+  <div class="btns">
+    <button id="bSpin" class="on">Auto-spin</button>
+    <button id="bWire">Wire</button>
+    <button id="bExport">Copy shader</button>
+  </div>
+  <div id="out">tune, then Copy shader →</div>
+  <p class="tip">Drag to orbit · scroll to zoom. The "draws/tris" readout up top is your perf budget — fewer, bigger volumes beat many small ones.</p>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x07060a, 1);
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x07060a, 0.0009);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 4000);
+camera.position.set(0, 40, 165);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 30, 0);
+
+// faint ground for scale
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(400, 48),
+  new THREE.MeshBasicMaterial({ color:0x0d0b14 })
+);
+ground.rotation.x = -Math.PI/2;
+scene.add(ground);
+
+// ---- Fire-cloud shader (gas-cloud FBM reshaped to a fire ramp) ----
+function makeFireCloudMaterial(opts) {
+  return new THREE.ShaderMaterial({
+    transparent:true, depthWrite:false, side:THREE.DoubleSide,
+    blending: opts.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    uniforms:{
+      time:{value:0}, uRadius:{value:opts.radius}, uOctaves:{value:opts.oct},
+      uScale:{value:opts.scale}, uRise:{value:opts.rise}, uDisp:{value:opts.disp},
+      uGain:{value:opts.gain}, uBaseAlpha:{value:opts.alpha},
+      uC0:{value:new THREE.Color(opts.c0)}, uC1:{value:new THREE.Color(opts.c1)},
+      uC2:{value:new THREE.Color(opts.c2)}, uC3:{value:new THREE.Color(opts.c3)},
+    },
+    vertexShader:[
+      'varying vec3 vWorldPos; varying vec3 vNormal;',
+      'uniform float time; uniform float uDisp;',
+      'float vH(vec3 p){ p=fract(p*0.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }',
+      'float vN(vec3 x){ vec3 i=floor(x),f=fract(x); f=f*f*(3.0-2.0*f);',
+      '  return mix(mix(mix(vH(i),vH(i+vec3(1,0,0)),f.x),mix(vH(i+vec3(0,1,0)),vH(i+vec3(1,1,0)),f.x),f.y),',
+      '             mix(mix(vH(i+vec3(0,0,1)),vH(i+vec3(1,0,1)),f.x),mix(vH(i+vec3(0,1,1)),vH(i+vec3(1,1,1)),f.x),f.y),f.z); }',
+      'float vFbm(vec3 p){ float a=0.5,v=0.0; for(int k=0;k<4;k++){ v+=a*vN(p); p*=2.0; a*=0.5; } return v; }',
+      'void main(){',
+      '  vec3 n=normalize(normal); vec3 d=position;',
+      '  if(uDisp>0.0001){',
+      '    vec3 nP=position*1.6+vec3(time*0.3,time*0.5,time*-0.24);',
+      '    float disp=(vFbm(nP)-0.5)*2.0 + max(0.0,n.y)*0.35;', // upward bias: flames reach up
+      '    d=position+n*disp*uDisp*max(length(position),0.01);',
+      '  }',
+      '  vWorldPos=(modelMatrix*vec4(d,1.0)).xyz; vNormal=normalize(normalMatrix*n);',
+      '  gl_Position=projectionMatrix*viewMatrix*modelMatrix*vec4(d,1.0);',
+      '}'
+    ].join('\n'),
+    fragmentShader:[
+      'uniform float time,uRadius,uScale,uRise,uGain,uBaseAlpha; uniform int uOctaves;',
+      'uniform vec3 uC0,uC1,uC2,uC3; varying vec3 vWorldPos; varying vec3 vNormal;',
+      'float h13(vec3 p){ p=fract(p*0.1031); p+=dot(p,p.yzx+33.33); return fract((p.x+p.y)*p.z); }',
+      'float n3(vec3 p){ vec3 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);',
+      '  return mix(mix(mix(h13(i),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),',
+      '             mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z); }',
+      'float fbm(vec3 p,int oct){ float v=0.0,a=0.5; for(int k=0;k<8;k++){ if(k>=oct)break; v+=a*n3(p); p*=2.0; a*=0.5; } return v; }',
+      'void main(){',
+      // adaptive LOD: drop octaves when the camera is close/inside (same idea as the game)
+      '  float camD=distance(cameraPosition,vWorldPos);',
+      '  int oct=uOctaves; if(camD<uRadius*1.5) oct=max(2,uOctaves-3); else if(camD<uRadius*4.0) oct=max(3,uOctaves-1);',
+      '  vec3 rise=vec3(0.0, -time*0.20*uRise, time*0.10);', // noise scrolls up => flames rise
+      '  vec3 q1=vWorldPos*0.018*uScale + rise;',
+      '  vec3 q2=vWorldPos*0.055*uScale + vec3(time*0.10,-time*0.08*uRise,0.0);',
+      '  float v1=smoothstep(0.30,0.80,fbm(q1,oct));',
+      '  float v2=smoothstep(0.35,0.75,fbm(q2,oct));',
+      '  float v=v1*0.72+v2*0.40;',
+      '  float dens=clamp(v*uGain-0.25,0.0,1.0);',
+      '  vec3 vd=normalize(cameraPosition-vWorldPos);',
+      '  float fres=pow(1.0-abs(dot(vNormal,vd)),1.6);',
+      '  dens=clamp(dens*(1.0+fres*0.5),0.0,1.0);',
+      '  if(dens<0.05) discard;',
+      // fire ramp: edge -> low -> mid -> core by density
+      '  vec3 col=mix(uC0,uC1,smoothstep(0.05,0.35,dens));',
+      '  col=mix(col,uC2,smoothstep(0.35,0.65,dens));',
+      '  col=mix(col,uC3,smoothstep(0.70,1.0,dens));',
+      '  col*=(0.7+dens*1.9);',                 // hotter core glows brighter (drives bloom in-game)
+      '  gl_FragColor=vec4(col, dens*uBaseAlpha);',
+      '}'
+    ].join('\n')
+  });
+}
+
+const state = {
+  count:5, radius:34, oct:5, scale:2.0, rise:1.3, disp:0.55, gain:1.5, alpha:0.55,
+  additive:true, c0:'#3a0a02', c1:'#cc2a00', c2:'#ff6a18', c3:'#ffe39a', spin:true, wire:false
+};
+
+let group = new THREE.Group(); scene.add(group);
+const baseGeo = new THREE.SphereGeometry(1, 24, 16);
+
+function rebuild() {
+  group.clear();
+  for (let i=0;i<state.count;i++){
+    const mat = makeFireCloudMaterial(state);
+    mat.wireframe = state.wire;
+    const m = new THREE.Mesh(baseGeo, mat);
+    // stack volumes into a tapering plume that rises
+    const t = i/Math.max(1,state.count-1);
+    const r = state.radius * (1.0 - t*0.55);
+    m.scale.setScalar(r);
+    m.position.set((Math.random()-0.5)*state.radius*0.5, 12 + t*state.radius*2.2, (Math.random()-0.5)*state.radius*0.5);
+    m.userData.spin = (Math.random()-0.5)*0.3;
+    group.add(m);
+  }
+  updateExport();
+}
+function pushUniforms(){
+  group.children.forEach(m=>{
+    const u=m.material.uniforms;
+    u.uRadius.value=state.radius; u.uOctaves.value=state.oct; u.uScale.value=state.scale;
+    u.uRise.value=state.rise; u.uDisp.value=state.disp; u.uGain.value=state.gain; u.uBaseAlpha.value=state.alpha;
+    u.uC0.value.set(state.c0); u.uC1.value.set(state.c1); u.uC2.value.set(state.c2); u.uC3.value.set(state.c3);
+    m.material.blending = state.additive?THREE.AdditiveBlending:THREE.NormalBlending;
+    m.material.wireframe = state.wire;
+    m.material.needsUpdate = true;
+  });
+}
+
+// ---- UI wiring ----
+const bind=(id,key,fmt)=>{ const el=document.getElementById(id), out=document.getElementById('v'+id.charAt(0).toUpperCase()+id.slice(1));
+  const apply=()=>{ state[key]=parseFloat(el.value); if(out)out.textContent=fmt?fmt(state[key]):state[key];
+    if(key==='count'){rebuild();} else pushUniforms(); updateExport(); };
+  el.addEventListener('input',apply); apply();
+};
+bind('count','count'); bind('radius','radius'); bind('oct','oct'); bind('scale','scale',v=>v.toFixed(2));
+bind('rise','rise',v=>v.toFixed(2)); bind('disp','disp',v=>v.toFixed(2)); bind('gain','gain',v=>v.toFixed(2)); bind('alpha','alpha',v=>v.toFixed(2));
+['c0','c1','c2','c3'].forEach(id=>{ const el=document.getElementById(id);
+  el.addEventListener('input',()=>{ state[id]=el.value; pushUniforms(); updateExport(); }); });
+
+const toggle=(id,on,off,setter)=>{ const a=document.getElementById(on),b=document.getElementById(off);
+  a.onclick=()=>{ setter(true); a.classList.add('on'); b.classList.remove('on'); pushUniforms(); updateExport(); };
+  b.onclick=()=>{ setter(false); b.classList.add('on'); a.classList.remove('on'); pushUniforms(); updateExport(); }; };
+toggle('x','bAdd','bNorm',v=>state.additive=v);
+
+document.getElementById('bSpin').onclick=e=>{ state.spin=!state.spin; e.target.classList.toggle('on',state.spin); };
+document.getElementById('bWire').onclick=e=>{ state.wire=!state.wire; e.target.classList.toggle('on',state.wire); pushUniforms(); };
+
+const presets={
+  pFire:{c0:'#3a0a02',c1:'#cc2a00',c2:'#ff6a18',c3:'#ffe39a',rise:1.3,gain:1.5,additive:true,alpha:0.55},
+  pGas:{c0:'#0a1f06',c1:'#3f7a1f',c2:'#8fd23a',c3:'#d8ffae',rise:0.4,gain:1.4,additive:false,alpha:0.6},
+  pEmber:{c0:'#1a0400',c1:'#aa1500',c2:'#ff4400',c3:'#ffd070',rise:2.2,gain:0.9,additive:true,alpha:0.45}
+};
+Object.keys(presets).forEach(id=>{ document.getElementById(id).onclick=()=>{
+  const p=presets[id]; Object.assign(state,p);
+  ['pFire','pGas','pEmber'].forEach(x=>document.getElementById(x).classList.toggle('on',x===id));
+  document.getElementById('bAdd').classList.toggle('on',state.additive);
+  document.getElementById('bNorm').classList.toggle('on',!state.additive);
+  for(const k of ['c0','c1','c2','c3']) document.getElementById(k).value=state[k];
+  document.getElementById('rise').value=state.rise; document.getElementById('vRise').textContent=state.rise.toFixed(2);
+  document.getElementById('gain').value=state.gain; document.getElementById('vGain').textContent=state.gain.toFixed(2);
+  document.getElementById('alpha').value=state.alpha; document.getElementById('vAlpha').textContent=state.alpha.toFixed(2);
+  pushUniforms(); updateExport();
+}; });
+
+function updateExport(){
+  document.getElementById('out').textContent = JSON.stringify({
+    radius:state.radius, octaves:state.oct, scale:+state.scale.toFixed(2), rise:+state.rise.toFixed(2),
+    disp:+state.disp.toFixed(2), gain:+state.gain.toFixed(2), alpha:+state.alpha.toFixed(2),
+    blend: state.additive?'additive':'normal',
+    ramp:[state.c0,state.c1,state.c2,state.c3]
+  }, null, 0).replace(/,/g,',\n ');
+}
+document.getElementById('bExport').onclick=async()=>{
+  try{ await navigator.clipboard.writeText(document.getElementById('out').textContent); document.getElementById('bExport').textContent='Copied!'; setTimeout(()=>document.getElementById('bExport').textContent='Copy shader',1200);}catch(_){}
+};
+
+rebuild();
+
+// ---- loop + HUD ----
+let last=performance.now(), frames=0, hudT=performance.now();
+function loop(now){
+  const dt=(now-last)/1000; last=now;
+  group.children.forEach(m=>{ m.material.uniforms.time.value = now*0.001; if(state.spin) m.rotation.y += m.userData.spin*dt; });
+  if(state.spin) group.rotation.y += dt*0.15;
+  controls.update();
+  try { renderer.render(scene,camera); } catch(err){ if(!loop._e){ console.error('[LAB render]', err); loop._e=1; } }
+  frames++;
+  if(now - hudT > 400){ const fps=Math.round(frames*1000/(now-hudT));
+    document.getElementById('fps').textContent = fps;
+    document.getElementById('calls').textContent = renderer.info.render.calls;
+    document.getElementById('tris').textContent = (renderer.info.render.triangles/1000).toFixed(0)+'k';
+    frames=0; hudT=now; }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+</script>
+</body>
+</html>
