@@ -400,6 +400,56 @@ body.lss-thirdperson #ability-overlay-frame { display: none !important; }
 .team-a { color: #ff6666; border-bottom: 2px solid #ff6666; }
 .team-b { color: #66bb66; border-bottom: 2px solid #66bb66; }
 
+/* (v36.15) CHAMPION CAPTURE BAR — the shared objective readout.
+   POSITION: `top` is not written here; updateHUD pins it to #round-info's
+   measured bottom edge + 8px so it always hangs directly under the round
+   timer. A CSS constant is wrong because #score-display (gap:180px) WRAPS to
+   two lines on narrow viewports and the block grows ~19px taller (measured
+   92px at 964 wide, 111px at 902) — a fixed top lands on top of the scores
+   there. The value below is only the pre-measure default.
+   Z-INDEX 66: above #ov-banner / #ov-countdown (65), which is the whole reason
+   this is not nested inside #round-info (z 10 = its own stacking context).
+   The banner fires on CLAIMING / FIELD BREACH / CLAIM BROKEN — i.e. exactly
+   when the bar matters — and is centred at top:18%, right over it.
+   Vertical clearance: #stasis-warning is centred at 8vmin (~55px here) and
+   the kill feed is right-anchored at 4vmin, while this is a 24vmin strip
+   centred at 50%, so neither can meet it (both verified live).
+   Colours are ABSOLUTE fleet colours (0xff4444 / 0x44bb44, the ship-tint
+   pair) — deliberately NOT the player-relative friend/enemy palette the score
+   line uses, because every pilot must read the SAME bar. */
+#champ-capture {
+  position: fixed; top: 112px; left: 50%; transform: translateX(-50%);
+  width: 24vmin; min-width: 168px; max-width: 300px;
+  display: none; pointer-events: none; z-index: 66;
+}
+#champ-capture-label {
+  font-family: 'Orbitron', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 3px; color: #cbb0ff; opacity: 0.9; margin: 0 0 3px 0;
+  text-shadow: 0 1px 4px rgba(0,0,0,0.9);
+}
+#champ-capture-track {
+  height: 6px; border-radius: 3px; overflow: hidden;
+  background: rgba(8,12,26,0.55);
+  box-shadow: inset 0 0 0 1px rgba(200,215,255,0.22), 0 1px 6px rgba(0,0,0,0.6);
+}
+#champ-capture-fill {
+  height: 100%; width: 0%; border-radius: 3px;
+  background: #aa55ff; box-shadow: 0 0 10px rgba(170,85,255,0.7);
+  /* Width is written in 0.5% steps (updateHUD dirty-check), so a short linear
+     transition is what makes the fill read as continuous instead of stepped. */
+  transition: width 0.12s linear;
+}
+#champ-capture.cc-a #champ-capture-label { color: #ff9090; }
+#champ-capture.cc-a #champ-capture-fill {
+  background: linear-gradient(90deg, #ff8a8a, #ff4444);
+  box-shadow: 0 0 12px rgba(255,68,68,0.8);
+}
+#champ-capture.cc-b #champ-capture-label { color: #8fe08f; }
+#champ-capture.cc-b #champ-capture-fill {
+  background: linear-gradient(90deg, #9be89b, #44bb44);
+  box-shadow: 0 0 12px rgba(68,187,68,0.8);
+}
+
 
 /* (v35.40) Layout HUD slot: anchor "tr", box 26x16 vmin centred at (-17, 16),
    i.e. top edge 8 vmin down and right edge 4 vmin in. */
@@ -1981,6 +2031,19 @@ body.vr-active #camp-video { display: none !important; }
       <div class="team-score team-a">FLEET A: 0</div>
       <div class="team-score team-b">FLEET B: 0</div>
     </div>
+  </div>
+
+  <!-- (v36.15) CHAMPION CAPTURE BAR — hangs directly under the round-timer
+       block. Deliberately a SIBLING of #round-info, not a child: #round-info is
+       a z-index:10 stacking context, so a nested bar could never rise above the
+       transient #ov-banner (z 65) that fires on the exact events the bar
+       narrates (CLAIMING / FIELD BREACH / CLAIM BROKEN) and sits right on top
+       of it. As a sibling it carries its own z-index 66. Its `top` is pinned
+       to #round-info's measured bottom edge by updateHUD (see there for why a
+       constant will not do). -->
+  <div id="champ-capture">
+    <div id="champ-capture-label">CHAMPION</div>
+    <div id="champ-capture-track"><div id="champ-capture-fill"></div></div>
   </div>
 
   <div id="kill-feed"></div>
@@ -3696,7 +3759,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.12';
+const LSS_BUILD = '36.17';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -3739,6 +3802,14 @@ const LSS = {
   ASSAULT_ROUND_TIME: 150,
   ASSAULT_CHARGE_TIME: 6,
   ASSAULT_NET_SPREAD: 2,
+  // (v36.14) Assault respawn cadence. ATTACKERS wait ASSAULT_RESPAWN_DELAY;
+  // DEFENDERS wait that plus ASSAULT_DEFENDER_RESPAWN_EXTRA — killing a
+  // defender is supposed to BUY you a window on the field, and a symmetric
+  // 4s hold never opened one. Applies to the local player (updateRoundSystem's
+  // respawn hold) and to the bot reinforcement cycle (two independent clocks,
+  // one per role) — see updateRoundSystem.
+  ASSAULT_RESPAWN_DELAY: 4,
+  ASSAULT_DEFENDER_RESPAWN_EXTRA: 3,
   SPAWN_PROTECTION: 3, DOOMED_HEALTH_PCT: 0.15, DOOMED_TIMER: 10,
   GRAVITY: 0, ARENA_SIZE: 25000, TICK_RATE: 60,
   // Seconds shown on the in-screen 3-2-1-LAUNCH ticker. The round-system
@@ -7152,6 +7223,26 @@ const EndlessMode = {
       pruned = true;
     }
     if ((guard || pruned) && typeof invalidateMinimapExtent === 'function') { try { invalidateMinimapExtent(); } catch (_) {} }
+    // (v36.13) STASIS PRUNE — retire uncollected shield pickups the route
+    // window has left behind. They spawn in halls AHEAD (_lssEndlessStasisSpot,
+    // capped at 9000u so this threshold always has 2000u of headroom over the
+    // spawn band — a pickup must never be born already-doomed); once the pilot
+    // is 11km past one it is unreachable, and it would squat one of the three
+    // field slots for the rest of the run — the endless flavour of the same
+    // "spawner silently starves" bug this build fixes.
+    // Distance-based rather than seg-tagged ON PURPOSE: it then runs identically
+    // on a co-op client, which receives its fields via stasis_spawn and has no
+    // segment binding at all. Quiet teardown (StasisField.destroy(true)) so a
+    // window slide never fires a phantom pickup burst off-screen;
+    // updateStasisFields splices the dead entry on its next pass.
+    if (game.stasisFields) {
+      for (let i = 0; i < game.stasisFields.length; i++) {
+        const f = game.stasisFields[i];
+        if (!f || !f.alive || f.championMode || !f.position) continue;
+        const fx = f.position.x - p.x, fy = f.position.y - p.y, fz = f.position.z - p.z;
+        if (fx * fx + fy * fy + fz * fz > 11000 * 11000) { try { f.destroy(true); } catch (_) {} }
+      }
+    }
     // ---- (v36.06) ROUTE RECOVERY — stage 2: "the cavern finds you" ----
     // Full divergence (pilot > 5200u from EVERY tracked segment for 5s — the
     // relock above can no longer help because no tracked segment is in
@@ -7994,6 +8085,46 @@ if (typeof window !== 'undefined') window.__endlessMotes = function () {
       }
     }
     return out;
+  } catch (e) { return String(e && e.stack || e); }
+};
+// (v36.13) ENDLESS STASIS census: the live shield pickups (position, distance,
+// and the hall gid whose sphere contains them — null means "not in a hall",
+// which is a placement bug), plus every hall in the current route window with
+// its rarity-gate roll and forward/behind state, plus the shared replenish
+// timer. `spot` re-runs the placement picker against the live fields, so it
+// shows exactly where the NEXT spawn would land (null = no qualifying hall).
+if (typeof window !== 'undefined') window.__endlessStasis = function () {
+  try {
+    const run = game.endlessRun; if (!run) return null;
+    const p = player.position;
+    const alive = game.stasisFields.filter(f => f.alive);
+    const fields = alive.map(f => {
+      let hallGid = null;
+      for (let i = 0; i < run.segs.length; i++) {
+        const s = run.segs[i].sph; if (!s) continue;
+        const dx = f.position.x - s.cx, dy = f.position.y - s.cy, dz = f.position.z - s.cz;
+        if (dx * dx + dy * dy + dz * dz < s.r * s.r) { hallGid = run.segs[i].gid; break; }
+      }
+      return { x: Math.round(f.position.x), y: Math.round(f.position.y), z: Math.round(f.position.z),
+               d: Math.round(f.position.distanceTo(p)), r: f.radius, champ: !!f.championMode, hallGid,
+               sdf: +worldSDF(f.position.x, f.position.y, f.position.z).toFixed(1) };
+    });
+    const halls = [];
+    for (let i = 0; i < run.segs.length; i++) {
+      const seg = run.segs[i]; if (!seg.hall || !seg.sph) continue;
+      halls.push({ gid: seg.gid, r: Math.round(seg.sph.r),
+                   d: Math.round(Math.hypot(seg.sph.cx - p.x, seg.sph.cy - p.y, seg.sph.cz - p.z)),
+                   roll: +_lssEndlessBoltHash(seg.gid, 41).toFixed(3),
+                   ahead: !(run.progGid >= 0 && seg.gid < run.progGid) });
+    }
+    const spot = _lssEndlessStasisSpot(alive);
+    return { mode: LSS.MODE, timer: +game.stasisSpawnTimer.toFixed(1), interval: game.stasisInterval,
+             firstBatch: game.stasisFirstBatch, inStasis: game.playerInStasis,
+             shield: Math.round(player.shield), maxShield: player.maxShield,
+             overShield: Math.round(player.overShield || 0),
+             levelSpheres: game.levelSpheres.length, progGid: run.progGid,
+             fields, halls,
+             spot: spot ? [Math.round(spot.x), Math.round(spot.y), Math.round(spot.z)] : null };
   } catch (e) { return String(e && e.stack || e); }
 };
 
@@ -33531,6 +33662,16 @@ async function _warmupCombatShadersBody() {
 
     scene.add(group);
 
+    // (v36.17 warmup audit) GLB-material program pins — spectral-ghost monsters,
+    // guts gibs, full-bright textured GLB swaps, and the additive beam-cone
+    // family. These ride the rtScene compile+render below (the combat context)
+    // and the frame-yield budget, which is why they live HERE and not only in
+    // _warmRealCombatFX: putting all of it in the countdown pass turned that
+    // frame from 70 ms into 615 ms. See _buildModelWarmGroup for the audit that
+    // found them. The group is pulled back out beside `scene.remove(group)`.
+    let _modelWarm = null;
+    try { _modelWarm = _buildModelWarmGroup(); if (_modelWarm) scene.add(_modelWarm); } catch (_) {}
+
     // --- Explosion / impact mesh pool warmup (Trace 20260420T164534 fix) ---
     // Prime the pool BEFORE renderer.compile(scene, camera) so every pooled
     // (geometry, material) tuple is part of the scene during link-time. The
@@ -33769,6 +33910,7 @@ async function _warmupCombatShadersBody() {
     // batching texture uploads.
     await _warmupYield();
 
+
     // Now strip the warmup meshes ; their job is done. Materials get
     // disposed (the registry self-deregisters in mat.dispose()).
     // Geometries are mostly shared across the layered-FX meshes so we
@@ -33970,6 +34112,9 @@ async function _warmupCombatShadersBody() {
     // never toggles. See the NUM_POINT_LIGHTS PINNING note at initDynamicLights.
 
     scene.remove(group);
+    // (v36.17) …and the GLB-material pins. Materials stay alive on
+    // window.__lssModelWarmMats so the programs keep a refcount.
+    try { if (_modelWarm && _modelWarm.parent) _modelWarm.parent.remove(_modelWarm); } catch (_) {}
     // Dispose every ship warmup mesh's owned materials. buildModelShipMesh /
     // createShipMesh clone materials fresh per mesh, so each of the 14 ghost
     // ships owns its own MeshPhongMaterial instances. The GLB texture maps
@@ -38915,13 +39060,27 @@ class OutskirtsMonster {
     // compileAsync is non-blocking (parallel shader compile) ; initTexture uploads
     // the diffuse maps now. Both best-effort + graphics-neutral (warm only, no
     // look change). The warmup only covers pooled combat-effect shaders, not these.
+    // (v36.17 warmup audit) ⚠ BIND postFX.rtScene FIRST. Combat draws the world
+    // into that HDR target, where three.js strips the tone-mapping chunk and
+    // uses the linear output colorspace ; an UNBOUND compile here links the
+    // tone-mapped SCREEN variant instead — a program combat never uses — and
+    // the real one still had to link inside the first frame a leviathan was
+    // drawn. Measured on the v36.16 build: this call + the _W render below
+    // linked 2 programs in a 26-31 ms gameplay frame, and NEITHER was the one
+    // combat wanted. With the bind (plus the _warmRealCombatFX pin) all three
+    // are cache hits. Same rule as _shaderWarmup / _pinCombatEffectPrograms.
     try {
       if (typeof renderer !== 'undefined' && renderer && typeof camera !== 'undefined' && camera) {
-        if (typeof renderer.compileAsync === 'function') {
-          renderer.compileAsync(group, camera, scene).catch(() => {});
-        } else if (typeof renderer.compile === 'function') {
-          renderer.compile(scene, camera);
-        }
+        const _cprt = renderer.getRenderTarget();
+        const _crt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        try {
+          if (_crt) renderer.setRenderTarget(_crt);
+          if (typeof renderer.compileAsync === 'function') {
+            renderer.compileAsync(group, camera, scene).catch(() => {});
+          } else if (typeof renderer.compile === 'function') {
+            renderer.compile(scene, camera);
+          }
+        } finally { try { renderer.setRenderTarget(_cprt || null); } catch (_) {} }
         if (typeof renderer.initTexture === 'function') {
           group.traverse((n) => {
             if (!n.isMesh || !n.material) return;
@@ -38935,29 +39094,61 @@ class OutskirtsMonster {
     // mesh is hidden, so do a REAL one-shot OFF-SCREEN render of just this creature with frustum
     // culling forced off : a real render LINKS the program AND uploads every texture under true
     // render state, killing the visible-flip stall (the "monster not warmed up" hitch on campaign
-    // boss spawn). Tiny 4x4 target + isolated warm scene ; RT saved/restored (the water-sim
-    // setRenderTarget lesson). Runs during the calm trickle-load. Knob: window.__bossWarm=0 off.
+    // boss spawn). Tiny 4x4 target ; RT saved/restored (the water-sim setRenderTarget lesson).
+    // Runs during the calm trickle-load. Knob: window.__bossWarm=0 off.
+    //
+    // (v36.17 warmup audit) ⚠ RENDER THE LIVE SCENE, NOT A BARE WARM SCENE.
+    // This used to build its own `_W.scene` (one AmbientLight, no fog). Three.js
+    // puts scene.fog AND the per-type LIGHT COUNTS in the program cache key —
+    // even for unlit MeshBasic, where neither appears in the generated GLSL. So
+    // the bare scene asked for a program whose source was byte-identical to the
+    // combat one under a different key (measured: cacheKey light fields
+    // 3/12/1/0/1 live vs 0/0/0/0/0 there), and that bogus link landed in a
+    // 25-31 ms GAMEPLAY frame — the monster GLBs trickle-load after the match
+    // starts. Rendering the real `scene` through a 4x4 camera aimed at this
+    // creature gives the exact combat context (real lights, real fog, render
+    // target = linear + no tone mapping), so it is a pure cache hit against the
+    // _buildModelWarmGroup pins and still forces the real draw that uploads the
+    // GLB's vertex buffers. Cost is one 4x4-viewport scene render, six times per
+    // session. Do NOT "optimise" this back to an isolated scene.
     try {
       if ((typeof window === 'undefined' || window.__bossWarm !== 0) &&
           typeof renderer !== 'undefined' && renderer && typeof THREE !== 'undefined' &&
+          typeof scene !== 'undefined' && scene &&
+          !(renderer.xr && renderer.xr.isPresenting) &&
           !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
         const _W = (window.__campWarm = window.__campWarm || {});
         if (!_W.rt) _W.rt = new THREE.WebGLRenderTarget(4, 4);
-        if (!_W.scene) { _W.scene = new THREE.Scene(); _W.scene.add(new THREE.AmbientLight(0xffffff, 1.0)); }
         if (!_W.cam) _W.cam = new THREE.PerspectiveCamera(60, 1, 1, 1e6);
-        const _pp = group.parent, _pv = group.visible, _prt = renderer.getRenderTarget();
+        const _pv = group.visible, _prt = renderer.getRenderTarget();
         const _fc = [];
         group.traverse((n) => { if (n.isMesh) { _fc.push([n, n.frustumCulled]); n.frustumCulled = false; } });
         group.visible = true;
-        _W.scene.add(group);
-        renderer.setRenderTarget(_W.rt);
-        renderer.render(_W.scene, _W.cam);
-        renderer.setRenderTarget(_prt || null);
-        if (_pp) _pp.add(group); else if (typeof scene !== 'undefined') scene.add(group);
+        _W.cam.position.set(group.position.x, group.position.y, group.position.z + MONSTER_SIZE * 2);
+        _W.cam.lookAt(group.position);
+        _W.cam.updateMatrixWorld();
+        // Two costs a live-scene render would otherwise add, both switched off
+        // for this one 4x4 pass: the hub water Reflector's onBeforeRender (a
+        // full reflection pass — the SAME _reflBenchOff knob the bench uses)
+        // and a redundant shadow-map re-render (autoUpdate only gates the
+        // shadow DRAW ; the shadow light COUNTS that fork the program key are
+        // collected by projectObject either way, so the key still matches).
+        const _pRB = (typeof game !== 'undefined' && game) ? game._reflBenchOff : undefined;
+        const _pSA = renderer.shadowMap ? renderer.shadowMap.autoUpdate : undefined;
+        try {
+          if (typeof game !== 'undefined' && game) game._reflBenchOff = true;
+          if (renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+          renderer.setRenderTarget(_W.rt);
+          renderer.render(scene, _W.cam);
+        } finally {
+          renderer.setRenderTarget(_prt || null);
+          if (typeof game !== 'undefined' && game) game._reflBenchOff = _pRB;
+          if (renderer.shadowMap && _pSA !== undefined) renderer.shadowMap.autoUpdate = _pSA;
+        }
         group.visible = _pv;
         for (const _e of _fc) _e[0].frustumCulled = _e[1];
       }
-    } catch (_) {}
+    } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
   }
 
   takeDamage(dmg, attacker, hitPoint) {
@@ -41364,6 +41555,99 @@ function _pinCombatEffectPrograms() {
   }
 }
 
+// ---- (v36.17) MODEL-MATERIAL PROGRAM PINS (warmup audit) ----
+// Everything above pins the POOLED effect programs. The materials that are
+// built from a streamed GLB were never covered, because they do not exist
+// until their model parses — and the monster GLBs trickle-load DURING the
+// match. Audit method (repeatable, see the map's PART 13 v36.17 entry):
+// hook gl.linkProgram + gl.getProgramInfoLog on renderer.getContext(), then
+// bind postFX.rtScene and call renderer.compile(scene, camera) — every
+// program that links there is one the game would otherwise compile inside a
+// gameplay frame. That probe found four:
+//   1. `_addSpectralGhost` on a SKINNED MeshBasic(map)  — the v35.92 monsters
+//   2. same, without a map (untextured GLB parts)
+//   3. `_addGutsShader` on a transparent MeshBasic      — the v32.69 death gibs
+//   4. full-bright MeshBasic(map), OPAQUE               — `_champSelfIlluminate`
+// None of them can be pinned by reconstructing "a material that looks like
+// it": USE_SKINNING / USE_MAP / OPAQUE are all program-forking parameters and
+// the two onBeforeCompile hooks carry their own customProgramCacheKey. So we
+// build the REAL factories against a 1-bone synthetic SkinnedMesh, in the live
+// round environment, and let _warmRealCombatFX's existing three-context
+// compile+render (tone-mapped screen, untone-mapped screen, postFX.rtScene)
+// link every variant. The materials are page-lifetime protos — disposing them
+// releases the program and puts the hitch straight back (the 2026-06-12
+// releaseProgram lesson at the top of _pinCombatEffectPrograms).
+let _modelWarmGroup = null;
+function _buildModelWarmGroup() {
+  if (_modelWarmGroup) return _modelWarmGroup;
+  const g = new THREE.Group();
+  g.position.set(0, -100000, 0);
+  const keep = (window.__lssModelWarmMats = window.__lssModelWarmMats || []);
+  const add = (o) => { o.frustumCulled = false; g.add(o); if (o.material) keep.push(o.material); };
+  // A 1x1 white texture is enough to set USE_MAP + MAP_UV : the program key
+  // cares that a map EXISTS, not what is in it.
+  const tex = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1, THREE.RGBAFormat);
+  tex.needsUpdate = true;
+  // Minimal skinned triangle: one bone, full weight. r165 puts bone matrices in
+  // a texture, so bone COUNT is not part of the program key — one bone covers
+  // every rigged leviathan.
+  const mkSkinned = (mat) => {
+    const sg = new THREE.BufferGeometry();
+    sg.setAttribute('position',   new THREE.Float32BufferAttribute([0,0,0, 1,0,0, 0,1,0], 3));
+    sg.setAttribute('normal',     new THREE.Float32BufferAttribute([0,0,1, 0,0,1, 0,0,1], 3));
+    sg.setAttribute('uv',         new THREE.Float32BufferAttribute([0,0, 1,0, 0,1], 2));
+    sg.setAttribute('skinIndex',  new THREE.Uint16BufferAttribute([0,0,0,0, 0,0,0,0, 0,0,0,0], 4));
+    sg.setAttribute('skinWeight', new THREE.Float32BufferAttribute([1,0,0,0, 1,0,0,0, 1,0,0,0], 4));
+    const bone = new THREE.Bone();
+    const sm = new THREE.SkinnedMesh(sg, mat);
+    sm.add(bone);
+    sm.bind(new THREE.Skeleton([bone]));
+    return sm;
+  };
+  const potato = !!(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+  // 1 + 2 : spectral-ghost monsters, mapped and unmapped parts. Applied on ALL
+  // tiers (v35.92) so no tier gate here.
+  try {
+    if (typeof _addSpectralGhost === 'function') {
+      add(mkSkinned(_addSpectralGhost(new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff }), 0x8ad8ff)));
+      add(mkSkinned(_addSpectralGhost(new THREE.MeshBasicMaterial({ color: 0x888888 }), 0x8ad8ff)));
+    }
+  } catch (_) {}
+  // 3 : death-gib guts shader. spawnMonsterGuts skips it on potato, so the
+  //     program only needs pinning where it can actually spawn.
+  try {
+    if (!potato && typeof _addGutsShader === 'function') {
+      const gm = _addGutsShader(new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1.0 }), 0xb22436, 0x7a1020);
+      add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), gm));
+    }
+  } catch (_) {}
+  // 4 : the full-bright GLB conversion shared by _champSelfIlluminate (champion
+  //     shell) and any other opaque textured GLB swap. OPAQUE is its own
+  //     program-key layer, so the transparent warmup variants do not cover it.
+  try {
+    add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff })));
+  } catch (_) {}
+  // 5 : the additive BEAM family — v36.10 headlight cones, v35.72 endless god
+  //     rays and the v35.90 Aegis-bolt ray shafts all share ONE signature
+  //     (MeshBasic + map + Additive + depthWrite:false + DoubleSide + fog:false).
+  //     Today it is warm only ACCIDENTALLY, because initShipLights leaves the
+  //     cone pool scene-resident so renderer.compile() reaches it; pin it here
+  //     so deleting or re-gating the cones can never resurrect the hitch.
+  //     Skipped where none of the three exist (Quest / mobile: CONE_N = 0,
+  //     _lssEndlessMobile() kills the god rays, bolts drop their rig).
+  try {
+    const coneN = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.CONE_N : 1;
+    if (coneN) {
+      add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
+        map: tex, color: 0xffe8c4, transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+      })));
+    }
+  } catch (_) {}
+  _modelWarmGroup = g;
+  return g;
+}
+
 let _warmedRound = -1;
 function _warmRealCombatFX() {
   // Pin reconstruction misses the real in-combat programs: LayeredFX / smoke
@@ -41388,6 +41672,11 @@ function _warmRealCombatFX() {
     const V = (x, y, z) => new THREE.Vector3(x, y, z);
     const W = (fn) => { try { fn(); } catch (_) {} };
     const _meshBefore = new Set(); scene.traverse(o => { if (o.isMesh) _meshBefore.add(o); });
+    // (v36.17) GLB-material program pins ride the same three-context
+    // compile+render below. Parked at y=-100000 with frustumCulled off, like
+    // _fxPinGroup ; removed after the render, materials NEVER disposed.
+    let _mwg = null;
+    W(() => { _mwg = _buildModelWarmGroup(); if (_mwg) scene.add(_mwg); });
     W(() => { if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(fp, 40); });
     W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.05, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); } });
     W(() => { if (typeof spawnSupershapeBurst === 'function') spawnSupershapeBurst('fireball', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); });
@@ -41435,6 +41724,10 @@ function _warmRealCombatFX() {
         }
       } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
     });
+    // (v36.17) Pull the GLB-material pins back out of the scene. Their
+    // materials stay alive on window.__lssModelWarmMats for the life of the
+    // page so the programs we just paid for keep a refcount.
+    W(() => { if (_mwg && _mwg.parent) scene.remove(_mwg); });
   } catch (_) {}
 }
 
@@ -44192,7 +44485,12 @@ const _cockpitFrameCache = {};
 
 
 
-const _FRAME_CACHE_BUST = '?v=' + Date.now();
+// (v36.16) Build-stamped, NOT Date.now(). A per-page-load timestamp made every
+// cockpit-frame URL unique, so the browser re-downloaded ~30 MB of frame art on
+// EVERY load and the v36.16 bulk preload could never prime them (its manifest
+// URLs would never match). LSS_BUILD is bumped every iteration, so new art
+// still busts. Must match the `?v=` stamp preloadAllAssets appends.
+const _FRAME_CACHE_BUST = '?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : Date.now());
 const _cockpitFrameInFlight = {}; 
 
 const _framesBaseUrl = (function() {
@@ -45726,6 +46024,20 @@ function commitLoadout(key) {
   if (!_warmupPromise || typeof _warmupPromise.then !== 'function') {
     _warmupPromise = Promise.resolve();
   }
+  // (v36.16) BULK ASSET PRELOAD. Runs in parallel with the shader warmup,
+  // behind the same "PREPARING ARENA" overlay, and the launch waits for BOTH —
+  // so every GLB / frame / track is in the browser cache before the countdown
+  // instead of streaming in mid-match. Idempotent + memoized, so this is a
+  // no-op on every match after the first of a session; it is deliberately NOT
+  // called at page load (the menu must stay instant). See preloadAllAssets.
+  try {
+    if (typeof preloadAllAssets === 'function') {
+      const _assetsP = preloadAllAssets();
+      if (_assetsP && typeof _assetsP.then === 'function') {
+        _warmupPromise = Promise.all([_warmupPromise, _assetsP]).then(() => {});
+      }
+    }
+  } catch (e) { console.warn('[commitLoadout] asset preload kickoff failed:', e); }
   _warmupPromise.then(() => {
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     // Local warmup is done ; mark ourselves ready and notify peers.
@@ -46663,6 +46975,10 @@ function _lssEnsureCinematicStyles() {
     'body.lss-cinematic-active #hud,' +
     'body.lss-cinematic-active #reload-indicator,' +
     'body.lss-cinematic-active #round-info,' +
+    // (v36.15) The champion capture bar used to be a CHILD of #round-info and
+    // got this hide for free; as a sibling (see its CSS for why) it has to be
+    // listed explicitly or it survives the cinematic its neighbours vanish for.
+    'body.lss-cinematic-active #champ-capture,' +
     'body.lss-cinematic-active #kill-feed,' +
     'body.lss-cinematic-active #minimap,' +
     'body.lss-cinematic-active #doomed-warning,' +
@@ -52697,6 +53013,15 @@ function updateRoundSystem(dt) {
           Overlays.banner('DEFEND THE CHAMPION FIELD', 'Hold them off until the clock runs out');
         }
       }
+      // (v36.14) Roles swap here, and the two reinforcement clocks are
+      // compared against role-dependent intervals — zero them at the round
+      // boundary so a defender clock carrying 6s of accumulation doesn't fire
+      // instantly the moment its fleet becomes the (4s) attacker.
+      if (_isAssault()) {
+        game._asltReinforceT = 0;
+        game._asltReinforceTD = 0;
+        game._asltPlayerRespawnT = 0;
+      }
       // (2026-06-12g) The FIGHT-site program pin was removed: it ran a
       // synchronous scene-walking compile at the exact moment the battle
       // opened (the "burst of lag"). The round-transition pin now runs
@@ -52797,10 +53122,26 @@ function updateRoundSystem(dt) {
     // hosts rebroadcast the roster so joiners see the reinforcements.
     // (v35.20) Honour the ADD BOTS toggle here too — without it, turning bots
     // off in assault still trickled fresh ones in every 4 seconds.
+    // (v36.14) The cycle is now PER ROLE: the attacking fleet keeps the old
+    // 4s cadence, the defending fleet waits ASSAULT_DEFENDER_RESPAWN_EXTRA
+    // longer. Two independent clocks (`_asltReinforceT` = attackers,
+    // `_asltReinforceTD` = defenders) rather than one shared timer, so the
+    // two fleets top up out of phase; because roles swap every round, which
+    // INTERVAL each clock is compared against swaps with them (the clocks
+    // themselves stay bound to the role, not the fleet — a role swap just
+    // hands each clock the other cadence, and both are zeroed on round build
+    // anyway, so no cross-round drift).
     if (_isAssault() && game.eliminationBots !== false && (!net.active || net.openSolo) && (!net.active || amStasisOwner())) {
+      const _rAtkFleet = _assaultAttackerFleet();
+      const _rAtkEvery = LSS.ASSAULT_RESPAWN_DELAY;
+      const _rDefEvery = LSS.ASSAULT_RESPAWN_DELAY + LSS.ASSAULT_DEFENDER_RESPAWN_EXTRA;
       game._asltReinforceT = (game._asltReinforceT || 0) + dt;
-      if (game._asltReinforceT >= 4) {
-        game._asltReinforceT = 0;
+      game._asltReinforceTD = (game._asltReinforceTD || 0) + dt;
+      const _rAtkDue = game._asltReinforceT >= _rAtkEvery;
+      const _rDefDue = game._asltReinforceTD >= _rDefEvery;
+      if (_rAtkDue) game._asltReinforceT = 0;
+      if (_rDefDue) game._asltReinforceTD = 0;
+      if (_rAtkDue || _rDefDue) {
         let _needB = 3, _needA = 2;
         if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
           _needB = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
@@ -52809,6 +53150,8 @@ function updateRoundSystem(dt) {
         const _deal = game._botShipDeal || { enemy: ['SLAYER', 'PYRO', 'TRACKER'], friendly: ['VORTEX', 'BLASTER'] };
         let _addedAny = false;
         for (const _fl of [LSS.TEAM_FLEET_B, LSS.TEAM_FLEET_A]) {
+          // Only the fleet whose role-clock fired tops up this pass.
+          if (!((_fl === _rAtkFleet) ? _rAtkDue : _rDefDue)) continue;
           const _want = (_fl === LSS.TEAM_FLEET_B) ? _needB : _needA;
           let _have = 0;
           for (let _bi2 = 0; _bi2 < game.entities.length; _bi2++) {
@@ -52837,10 +53180,17 @@ function updateRoundSystem(dt) {
     // ever wait out the wipe); assault rounds run the full clock, so a dead
     // pilot re-launches after a short hold — at their fleet's CURRENT
     // role-side spawn (respawnPlayer routes through _assaultSpawnSide).
+    // (v36.14) The hold is role-dependent: ASSAULT_RESPAWN_DELAY while your
+    // fleet is ATTACKING, +ASSAULT_DEFENDER_RESPAWN_EXTRA while it is
+    // DEFENDING. Role is read per-frame from _assaultAttackerFleet() (pure
+    // function of currentRound), so a round-boundary role swap is picked up
+    // with no sync and no stored state.
     if (_isAssault()) {
       if (player.shipState === 'dead') {
         game._asltPlayerRespawnT = (game._asltPlayerRespawnT || 0) + dt;
-        if (game._asltPlayerRespawnT >= 4) {
+        const _pHold = LSS.ASSAULT_RESPAWN_DELAY +
+          ((player.team !== _assaultAttackerFleet()) ? LSS.ASSAULT_DEFENDER_RESPAWN_EXTRA : 0);
+        if (game._asltPlayerRespawnT >= _pHold) {
           game._asltPlayerRespawnT = 0;
           try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
         }
@@ -57075,6 +57425,15 @@ function _hudDisplay(el, key, v) {
   _hudLast[key] = v;
   el.style.display = v;
 }
+// (v36.15) Same dirty-check contract as _hudWidth, for the champion capture
+// bar's measured `top` pin. Kept separate rather than generalised to a
+// (prop, value) helper so the hot path stays a straight property write.
+function _hudTop(el, key, v) {
+  if (!el) return;
+  if (_hudLast[key] === v) return;
+  _hudLast[key] = v;
+  el.style.top = v;
+}
 function _hudClass(el, key, v) {
   if (!el) return;
   if (_hudLast[key] === v) return;
@@ -57191,6 +57550,90 @@ function updateHUD() {
     const bColor = (_palKey === 'B') ? FRIEND_HEX : ENEMY_HEX;
     if (teamA) { teamA.style.color = aColor; teamA.style.borderBottomColor = aColor; }
     if (teamB) { teamB.style.color = bColor; teamB.style.borderBottomColor = bColor; }
+  }
+
+  // ---- (v36.15) CHAMPION CAPTURE BAR ----
+  // Owner ask: "when you capture a champion stasis field, there needs to be an
+  // indicator bar that everyone can see equally on their HUD, right under the
+  // timer." Deliberately NOT mode-gated — it keys purely on "is there a live
+  // champion field carrying charge", so classic / elimination / race / assault
+  // all get it, and the modes that never spawn one (campaign, freeflight,
+  // endless since v36.11) simply never see it.
+  //
+  // "EVERYONE SEES IT EQUALLY" — no netcode is added here, and none is needed.
+  // Every peer holds the SAME champion field (owner builds it in
+  // spawnChampionField, receivers mirror it from the `stasis_spawn` event with
+  // champion:true and store it in the same game.championField slot), and every
+  // peer runs the same updateStasisFields charge accumulator over the SAME
+  // replicated cast: the local ship plus game.entities, which holds the bots
+  // (streamed by bot_roster / bot_state) AND every remote human as a
+  // NetworkPlayer (pushed into game.entities by updateNetworkPlayer, position
+  // fed by broadcastPlayerState). So field.teamProgress is each client's own
+  // copy of a value derived from shared inputs — we render that copy, never a
+  // player-relative one. Colours/labels are ABSOLUTE fleet identity for the
+  // same reason (see the friend/enemy palette above, which is NOT reused).
+  //
+  // The value is read from teamProgress rather than the chargeTimer mirror
+  // because chargeTimer goes stale the moment a claim is released: assault
+  // decays the unclaimed attacker's progress (and classic preserves a
+  // shoved-off team's), and that live decay is exactly what the bar should be
+  // showing.
+  const _ccEl = _hudEl('champ-capture');
+  if (_ccEl) {
+    const _cf = game.championField;
+    let _ccFrac = 0, _ccIsA = true;
+    if (_cf && _cf.alive && _cf.teamProgress) {
+      const _pa = _cf.teamProgress[LSS.TEAM_FLEET_A] || 0;
+      const _pb = _cf.teamProgress[LSS.TEAM_FLEET_B] || 0;
+      // Whoever is standing on the dot RIGHT NOW owns the bar — their charge is
+      // the live threat, even when the other fleet is sitting on a bigger
+      // frozen score from an earlier push. Vacated, it falls back to whichever
+      // fleet holds the most preserved progress. Both readings are shared
+      // state (chargingTeam is set from the same claim resolution on every
+      // client), so no two HUDs can disagree about which one is showing.
+      const _act = _cf.chargingTeam;
+      let _lead;
+      if (_act === LSS.TEAM_FLEET_A && _pa > 0)      { _lead = _pa; _ccIsA = true;  }
+      else if (_act === LSS.TEAM_FLEET_B && _pb > 0) { _lead = _pb; _ccIsA = false; }
+      else if (_pa >= _pb)                           { _lead = _pa; _ccIsA = true;  }
+      else                                           { _lead = _pb; _ccIsA = false; }
+      if (_lead > 0) {
+        // Same denominator updateStasisFields resolves the win on, so the bar
+        // hits 100% on precisely the frame the capture lands.
+        const _ccMax = Math.max(0.001, _isAssault() ? LSS.ASSAULT_CHARGE_TIME : LSS.CHAMPION_CHARGE_TIME);
+        _ccFrac = Math.min(1, _lead / _ccMax);
+      }
+    }
+    if (_ccFrac > 0) {
+      // Pin under the round-timer block. Measured ONLY on the hidden->shown
+      // transition and after a viewport change — a getBoundingClientRect every
+      // frame would be a per-frame allocation (DOMRect) for a number that only
+      // moves when the layout does. It can't be a CSS constant either:
+      // #score-display (gap:180px) wraps to two lines on narrow viewports and
+      // the block grows ~19px, which a constant would land right on top of.
+      const _vpKey = innerWidth * 100000 + innerHeight;
+      if (_hudLast['champ-cap:d'] !== 'block' || _hudLast['champ-cap:vp'] !== _vpKey) {
+        _hudLast['champ-cap:vp'] = _vpKey;
+        const _ri = _hudEl('round-info');
+        let _ccTop = 112;
+        if (_ri) {
+          const _rr = _ri.getBoundingClientRect();
+          if (_rr.height > 0) _ccTop = Math.round(_rr.bottom + 8);
+        }
+        _hudTop(_ccEl, 'champ-cap:top', _ccTop + 'px');
+      }
+      _hudDisplay(_ccEl, 'champ-cap:d', 'block');
+      _hudClass(_ccEl, 'champ-cap:c', _ccIsA ? 'cc-a' : 'cc-b');
+      _hudText(_hudEl('champ-capture-label'), 'champ-cap:t',
+        'CHAMPION · ' + (_ccIsA ? 'FLEET A' : 'FLEET B'));
+      // Quantise to 0.5% so a 6s assault hold writes ~1 frame in 4 instead of
+      // every frame (the CSS transition smooths the steps); dirty-checked on
+      // top of that, so an idle/held charge writes nothing at all.
+      _hudWidth(_hudEl('champ-capture-fill'), 'champ-cap:w',
+        (Math.round(_ccFrac * 200) * 0.5) + '%');
+    } else {
+      _hudDisplay(_ccEl, 'champ-cap:d', 'none');
+    }
   }
 
   // Update ability bar
@@ -58424,6 +58867,183 @@ function hideLoadingOverlay() {
   if (ov) ov.classList.remove('active');
 }
 
+// ============================================================================
+// (v36.16) BULK ASSET PRELOAD  —  "download everything once, then stay cached"
+//
+// Every heavy asset the game can ask for (ship + hoard + monster GLBs, the
+// cockpit frame art, map thumbnails, music, announcer voice lines, the portal
+// ring) is fetched up-front behind the EXISTING "PREPARING ARENA" loading
+// overlay, so nothing streams in mid-match. The URL list is NOT a directory
+// listing : `tools/gen_manifest.py` walks the game's own tables (SHIP_MODELS,
+// HOARD_SHIPS, MONSTER_DEFS, _GUN_CYCLE / _ABILITY_OVERLAY_FILES, MAP_DATA
+// thumbs, MUSIC_TRACKS, audio/manifest.json, the _ringBaseUrl literals) and
+// writes asset-manifest.json, so the manifest can only contain URLs the code
+// actually requests. Regenerate it whenever those TABLES change.
+//
+// Where it runs : commitLoadout, alongside warmupCombatShaders — i.e. at MATCH
+// LAUNCH, never at page load. The main menu must stay instant.
+//
+// Caching : we do NOT re-implement a cache. The fetches go through the normal
+// HTTP cache and `_headers` already gives every one of these directories
+// `max-age=604800`, so a second visit is served from disk with no network. The
+// in-page memo (`_assetPreload.promise`) covers the second match of a session.
+//
+// ⚠ The frames/ URLs only stay cached because _FRAME_CACHE_BUST is stamped with
+// LSS_BUILD (v36.16) instead of Date.now(). With a per-load timestamp every
+// frame URL was unique, so preloading them was pointless AND the browser
+// re-downloaded ~30 MB of cockpit art on every single page load.
+// ============================================================================
+const ASSET_MANIFEST_URL = 'asset-manifest.json';
+const ASSET_PRELOAD_CONCURRENCY = 7;
+// Safety valve : a stalled connection must never strand a player on the
+// loading screen forever. When this fires the match starts and the remaining
+// fetches keep running in the background (they still populate the cache).
+const ASSET_PRELOAD_MAX_MS = 180000;
+const _assetPreload = {
+  state: 'idle',
+  total: 0, done: 0, ok: 0, fail: 0,
+  bytes: 0, bytesDone: 0,
+  startedMs: 0, elapsedMs: 0,
+  failures: [],
+  promise: null,
+  timedOut: false,
+};
+if (typeof window !== 'undefined') window.__assetPreload = () => ({
+  state: _assetPreload.state, total: _assetPreload.total, done: _assetPreload.done,
+  ok: _assetPreload.ok, fail: _assetPreload.fail, timedOut: _assetPreload.timedOut,
+  mb: +(_assetPreload.bytesDone / 1048576).toFixed(1),
+  totalMb: +(_assetPreload.bytes / 1048576).toFixed(1),
+  elapsedMs: Math.round(_assetPreload.elapsedMs),
+  failures: _assetPreload.failures.slice(0, 20),
+});
+
+// Data-saver bail (owner-approved mobile exception). Everything still works —
+// assets just load lazily the way they always did.
+function _assetPreloadShouldSkip() {
+  try {
+    const c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    if (c && c.saveData === true) return 'saveData';
+  } catch (_) {}
+  return null;
+}
+
+function _assetPreloadProgressText() {
+  const p = _assetPreload;
+  const pct = p.total ? Math.floor((p.done / p.total) * 100) : 0;
+  const mbDone = (p.bytesDone / 1048576).toFixed(0);
+  const mbAll  = (p.bytes / 1048576).toFixed(0);
+  return p.done + ' / ' + p.total + ' files · ' + pct + '% · ' + mbDone + ' / ' + mbAll + ' MB';
+}
+// Writes straight into the overlay's two text nodes (no re-show : if the
+// overlay isn't up these are harmless no-ops on a hidden element).
+function _assetPreloadPaint(main, sub) {
+  try {
+    const t = document.getElementById('lss-loading-text');
+    if (t && main != null) t.textContent = main;
+    const s = document.getElementById('lss-loading-sub');
+    if (s && sub != null) s.textContent = sub;
+  } catch (_) {}
+}
+
+// Fetch one URL to completion. Resolves either way — a single 404 or a dead
+// CDN must never block the match.
+function _assetPreloadOne(url, bytes) {
+  return fetch(url, { credentials: 'omit', cache: 'default' })
+    .then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      // The body MUST be consumed or the browser may discard the response
+      // without storing it. The buffer is dropped immediately after.
+      return r.arrayBuffer();
+    })
+    .then(buf => {
+      _assetPreload.ok++;
+      _assetPreload.bytesDone += (buf && buf.byteLength) ? buf.byteLength : (bytes || 0);
+    })
+    .catch(err => {
+      _assetPreload.fail++;
+      _assetPreload.bytesDone += bytes || 0;
+      const msg = (err && err.message) ? err.message : String(err);
+      if (_assetPreload.failures.length < 40) _assetPreload.failures.push(url + ' (' + msg + ')');
+      console.warn('[preload] failed:', url, msg);
+    })
+    .then(() => {
+      _assetPreload.done++;
+      if ((_assetPreload.done & 3) === 0 || _assetPreload.done === _assetPreload.total) {
+        _assetPreloadPaint('LOADING ASSETS', _assetPreloadProgressText());
+      }
+    });
+}
+
+// Idempotent : the first call does the work, every later call gets the same
+// promise back (so match #2 of a session costs nothing).
+function preloadAllAssets() {
+  if (_assetPreload.promise) return _assetPreload.promise;
+  const skip = _assetPreloadShouldSkip();
+  if (skip) {
+    console.log('[preload] skipped (' + skip + ') — assets will load on demand');
+    _assetPreload.state = 'skipped';
+    _assetPreload.promise = Promise.resolve();
+    return _assetPreload.promise;
+  }
+  _assetPreload.state = 'loading';
+  _assetPreload.startedMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+
+  const stamp = '?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0');
+  const run = fetch(ASSET_MANIFEST_URL + stamp, { credentials: 'omit', cache: 'default' })
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(man => {
+      const list = (man && Array.isArray(man.files)) ? man.files : [];
+      if (!list.length) throw new Error('manifest has no files');
+      _assetPreload.total = list.length;
+      _assetPreload.bytes = list.reduce((n, e) => n + (e.b || 0), 0);
+      _assetPreloadPaint('LOADING ASSETS', _assetPreloadProgressText());
+      // Bounded concurrency : N workers pulling off one shared cursor.
+      let cursor = 0;
+      const worker = () => {
+        if (cursor >= list.length) return Promise.resolve();
+        const e = list[cursor++];
+        return _assetPreloadOne(e.u + (e.v ? stamp : ''), e.b || 0).then(worker);
+      };
+      const lanes = [];
+      const n = Math.min(ASSET_PRELOAD_CONCURRENCY, list.length);
+      for (let i = 0; i < n; i++) lanes.push(worker());
+      return Promise.all(lanes);
+    })
+    .then(() => { _assetPreload.state = 'done'; })
+    .catch(err => {
+      // No manifest / bad JSON : log and carry on. The game loads assets
+      // lazily exactly as it did before this feature existed.
+      console.warn('[preload] manifest unavailable, falling back to on-demand loading:',
+        (err && err.message) ? err.message : err);
+      _assetPreload.state = 'error';
+    })
+    .then(() => {
+      _assetPreload.elapsedMs = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - _assetPreload.startedMs;
+      if (_assetPreload.state === 'done') {
+        console.log('[preload] ' + _assetPreload.ok + '/' + _assetPreload.total + ' assets in ' +
+          (_assetPreload.elapsedMs / 1000).toFixed(1) + 's (' +
+          (_assetPreload.bytesDone / 1048576).toFixed(1) + ' MB, ' + _assetPreload.fail + ' failed)');
+      }
+      _assetPreloadPaint('PREPARING ARENA', 'compiling shaders');
+    });
+
+  // The gate the launch waits on : whichever of (all fetches, watchdog) lands
+  // first. `run` keeps going after a timeout so the cache still fills.
+  _assetPreload.promise = Promise.race([
+    run,
+    new Promise(res => setTimeout(() => {
+      if (_assetPreload.state === 'loading') {
+        _assetPreload.timedOut = true;
+        console.warn('[preload] watchdog fired at ' + (ASSET_PRELOAD_MAX_MS / 1000) +
+          's with ' + _assetPreload.done + '/' + _assetPreload.total +
+          ' done — launching anyway, rest continues in background');
+      }
+      res();
+    }, ASSET_PRELOAD_MAX_MS)),
+  ]);
+  return _assetPreload.promise;
+}
+
 let _localWarmupReady = false;
 function _markLocalWarmupReady() {
   _localWarmupReady = true;
@@ -58886,7 +59506,8 @@ function _howtoRender(ov) {
   }
   h += '</select></div>';
   h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
-       'Configure your controls and performance in the <span style="color:#ffaa00;">SETTINGS</span> menu before you fly.</div>';
+       'Configure your controls and performance in the <span style="color:#ffaa00;">SETTINGS</span> menu before you fly. ' +
+       'Your first launch downloads every ship, cockpit and soundtrack file up front (the LOADING ASSETS bar) so nothing stutters in mid-flight; after that they stay cached and matches start instantly.</div>';
   h += '<div style="font-size:13px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:14px;">' +
        'Zero-gravity fleet combat. Destroy the enemy fleet to win the round, or capture the CHAMPION FIELD that appears in the final seconds (crack its shell first). First fleet to 4 rounds takes the match. Leave the arena and the leviathans outside will hunt you.</div>';
   // ---- game modes ----
@@ -65537,7 +66158,13 @@ class StasisField {
     }
   }
 
-  destroy() {
+  // (v36.13) `quiet` = tear the field down WITHOUT the pickup celebration
+  // (burst + light flash + sky godray). Used by the ENDLESS route prune, which
+  // retires uncollected pickups 9.5km behind the pilot: those pops would fire
+  // off-screen every time the window slides, reading as phantom collections on
+  // the minimap/audio. Geometry + material disposal is identical either way.
+  // Every pre-existing caller passes nothing -> falsy -> unchanged behavior.
+  destroy(quiet) {
     this.alive = false;
     if (this.group.parent) scene.remove(this.group);
     try {
@@ -65572,6 +66199,7 @@ class StasisField {
     // uses (fireball_purple for champion, fireball_cyan for regular). The
     // legacy stasis_pickup effect tick is bypassed because spawnFXBurst
     // pushes its own fx_burst-typed effect.
+    if (quiet) return;   // (v36.13) endless prune: dispose only, no pickup FX
     const burstRadius = this.championMode ? 75 : 40;
     const burstPreset = this.championMode ? 'fireball_purple' : 'fireball_cyan';
     if (typeof spawnFXBurst === 'function') {
@@ -65814,6 +66442,99 @@ function spawnChampionField() {
   }
 }
 
+// ---- (v36.13) ENDLESS STASIS PLACEMENT ----
+// WHY endless needs its own candidate generator: spawnStasisField's classic
+// route draws candidates from getValidSpawnPoint -> game.corridorPoints, and
+// buildRoomGraphLevel bakes corridorPoints ONCE from the level's initial
+// rooms/tunnels and never extends them. The endless route grows at runtime, so
+// every candidate stays pinned at the cavern mouth tens of km behind the
+// pilot — and once those first hall spheres prune out of game.levelSpheres the
+// `getStasisSphereIndex(pos) >= 0` gate rejects all 50 attempts FOREVER. Net
+// effect before this build: endless had no reachable shield refill at all,
+// while shields never regen naturally (stasis + executions only), so a run was
+// a one-way bleed.
+//
+// The fix is deliberately minimal. Endless HALLS are already registered level
+// spheres (_lssEndlessApplySeg pushes seg.sph into game.levelSpheres), so the
+// EXISTING machinery — the sphere-index gate, the occupied-sphere set, the
+// min-distance rule, the max-3 cap, netId + stasis_spawn broadcast, the
+// enterStasis pickup path — all works unchanged the moment it is handed a
+// hall-centred candidate. Only the candidate generator is swapped.
+//
+// Cadence: a hall hosts a pickup only if its gid passes a rarity gate
+// (~1 in 2.4 halls); the nearest qualifying hall AHEAD of the pilot inside
+// [900, 12000]u wins, and halls that already hold a live field are skipped.
+// With the classic 30s replenish timer and the 3-alive cap that settles at
+// roughly one live pickup per 2-3 halls ahead.
+//
+// Determinism: every offset is a PURE gid hash (_lssEndlessBoltHash) — never
+// run.gen.rand (the shared ROUTE stream, v35.85) and never gen.cos (its cursor
+// free-runs per client, v35.87). The spawn itself is still owner-computed and
+// broadcast, so co-op agreement never DEPENDS on the hash; the hash just means
+// any peer evaluating the same hall lands on the same point.
+function _lssEndlessStasisSpot(aliveFields) {
+  const run = game.endlessRun;
+  if (!run || run.over || !run.segs || !run.segs.length) return null;
+  const T = game.sandwichTerrain; if (!T || !T.ON) return null;
+  const p = (typeof player !== 'undefined') ? player.position : null;
+  if (!p) return null;
+  let best = null, bestD2 = Infinity;
+  for (let i = 0; i < run.segs.length; i++) {
+    const seg = run.segs[i];
+    if (!seg.hall || !seg.sph) continue;
+    // Never behind the pilot's tracked progress — a pickup back down the
+    // cavern is a pickup nobody will ever fly to.
+    if (run.progGid >= 0 && seg.gid < run.progGid) continue;
+    if (_lssEndlessBoltHash(seg.gid, 41) >= 0.42) continue;   // rarity gate, ~1 hall in 2.4
+    const s = seg.sph;
+    const dx = s.cx - p.x, dy = s.cy - p.y, dz = s.cz - p.z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    // Not on top of the pilot (900u) and inside the reachable band (9000u).
+    // The 9000 ceiling is load-bearing, not cosmetic: the route-window prune
+    // in EndlessMode.update retires fields past 11000u, so a wider band here
+    // would let a pickup spawn already-doomed and burn the whole 30s cycle.
+    // Keep SPAWN_MAX < PRUNE_MAX with real headroom (the append horizon is
+    // 7000u, so 9000 still reaches every hall the route has grown).
+    if (d2 < 900 * 900 || d2 > 9000 * 9000) continue;
+    // One pickup per hall: skip a chamber that already holds a live field.
+    // (Cheap containment test instead of getStasisSphereIndex so this works
+    // the same on a co-op client, whose fields arrive by stasis_spawn.)
+    let taken = false;
+    for (let f = 0; f < aliveFields.length; f++) {
+      const q = aliveFields[f].position;
+      const qx = q.x - s.cx, qy = q.y - s.cy, qz = q.z - s.cz;
+      if (qx * qx + qy * qy + qz * qz < s.r * s.r) { taken = true; break; }
+    }
+    if (taken) continue;
+    if (d2 < bestD2) { bestD2 = d2; best = seg; }
+  }
+  if (!best) return null;
+  const sph = best.sph, gid = best.gid;
+  // Off-centre but ON the natural flight line — deliberately the OPPOSITE of
+  // an Aegis mote (v35.90 hides those in high alcoves off-lane). This is the
+  // run's only shield refill; it has to be found, not hunted.
+  const ang = _lssEndlessBoltHash(gid, 43) * 6.283;
+  const rad = sph.r * (0.10 + 0.32 * _lssEndlessBoltHash(gid, 47));
+  const x = sph.cx + Math.cos(ang) * rad;
+  const z = sph.cz + Math.sin(ang) * rad;
+  let y = sph.cy;
+  // Clearance = the _lssEndlessBolts recipe: clamp into the carved gap (LOW-ish
+  // bias, unlike the bolts' ceiling bias), then step DOWN out of any ceiling
+  // relief until the SDF reads open air. Sealed column = skip this cycle; the
+  // 30s replenish timer retries with a different hall.
+  try {
+    const gy = _stGroundYCarved(x, z, T) + 200, cy = _stCeilYCarved(x, z, T) - 200;
+    if (cy < gy) return null;
+    y = gy + (cy - gy) * (0.30 + 0.25 * _lssEndlessBoltHash(gid, 53));
+    y = Math.max(gy, Math.min(cy, y));
+    if (typeof worldSDF === 'function') {
+      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
+      if (worldSDF(x, y, z) > -60) return null;
+    }
+  } catch (_) { return null; }
+  return new THREE.Vector3(x, y, z);
+}
+
 function spawnStasisField() {
   // Only the stasis owner computes spawns; receivers get them via the
   // stasis_spawn event. This is the simplest fix for "every peer ticks their
@@ -65823,6 +66544,21 @@ function spawnStasisField() {
   // Max 3 on the map at once
   const aliveFields = game.stasisFields.filter(f => f.alive);
   if (aliveFields.length >= 3) return;
+
+  // (v36.13) ENDLESS takes the hall-based candidate path — corridorPoints
+  // never leave the cavern mouth there (full rationale on
+  // _lssEndlessStasisSpot). Everything past the position pick (netId,
+  // instantiate, broadcast) is the shared classic path verbatim.
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'endless') {
+    const epos = _lssEndlessStasisSpot(aliveFields);
+    if (!epos) return;   // no qualifying hall ahead right now; retry next interval
+    const eid = ++net.stasisIdCounter;
+    instantiateStasisField(epos, eid);
+    if (net.active && net.sendEvent) {
+      net.sendEvent({ type: 'stasis_spawn', x: epos.x, y: epos.y, z: epos.z, fieldId: eid });
+    }
+    return;
+  }
 
   // Get sphere indices already occupied by existing stasis fields
   const occupiedSpheres = new Set();

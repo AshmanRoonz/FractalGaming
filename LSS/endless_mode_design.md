@@ -417,6 +417,85 @@ point-blank (525 total in-band, 144 fps); mobile-sim slots carry exactly
 core + one shell, the ceiling ray pool never allocates, bolts still
 collect; zero console errors.
 
+## Stasis pickups (v36.13) — the shield refill, in halls
+
+**The bug this closes.** LSS shields never regen naturally: only a stasis
+field or an execution refills them. Endless shipped without a single working
+stasis pickup, so a run was a one-way bleed — the only refill was ramming a
+doomed enemy. v36.11 noticed the spawner was dead in endless but recorded the
+wrong cause ("endless maps have `levelSpheres.length === 0`"). Measured: endless
+has 3 level spheres at build and 4-8 mid-run, because `_lssEndlessApplySeg`
+pushes every hall's `seg.sph` into `game.levelSpheres` exactly like a static
+map's rooms. The real blocker is one layer up — `spawnStasisField` draws its
+candidate positions from `getValidSpawnPoint(null, 80)` → **`game.corridorPoints`**,
+and `buildRoomGraphLevel` bakes that pool ONCE from the level's initial
+rooms/tunnels. The endless route grows at runtime; the pool never does. Every
+candidate stays pinned at the cavern mouth, and once the mouth's spheres prune
+out of `game.levelSpheres` the `getStasisSphereIndex(pos) >= 0` gate rejects all
+50 attempts, forever.
+
+**The fix swaps the candidate generator and nothing else.** `_lssEndlessStasisSpot`
+(above `spawnStasisField`) returns one hall-centred point; the `LSS.MODE ===
+'endless'` branch in `spawnStasisField` feeds it into the same tail the classic
+path uses — `++net.stasisIdCounter`, `instantiateStasisField`, the `stasis_spawn`
+broadcast. The 3-alive cap, the 30s `game.stasisInterval` replenish clock, the
+`enterStasis` → `updatePlayerStasis` charge (so the v36.12 **overshield** spill
+works in endless for free), the bot grab, and the champion skip (v36.11) are all
+untouched.
+
+- **Where.** The nearest **HALL** ahead of the pilot: a route segment with
+  `hall && sph`, `gid >= run.progGid` (never behind the tracked lock), sphere
+  centre 900-9000u away, and no live field already inside that sphere. The orb
+  sits `0.10-0.42 × sph.r` off the hall centre at 30-55% of the carved gap —
+  deliberately ON the natural flight line, the exact inverse of the Aegis mote's
+  high off-lane alcove. Motes are hunted; the shield refill has to be *found*.
+- **How often.** A hall hosts a pickup only if `_lssEndlessBoltHash(gid, 41) <
+  0.42` (measured pass rate 0.427 over 2000 gids) ≈ **one hall in 2.4** ≈ one
+  pickup per ~15km, capped at 3 alive. At cruise that is a refill roughly every
+  40-60s of flying.
+- **Clearance.** The `_lssEndlessBolts` recipe verbatim: clamp into the carved
+  gap (`_stGroundYCarved` + 200 … `_stCeilYCarved` − 200), then step DOWN 230u
+  at a time until `worldSDF < -60`; a sealed column skips the cycle and the 30s
+  clock retries with a different hall.
+- **Determinism.** Every offset is a PURE gid hash — never `run.gen.rand` (the
+  shared ROUTE stream, v35.85) and never `gen.cos` (its cursor free-runs per
+  client, v35.87). Three separate boots of one seed placed hall gid 9's field at
+  exactly (28321, 43, 8295). Co-op agreement does not *depend* on the hash (the
+  authority computes and broadcasts), but any peer evaluating the same hall
+  agrees, which keeps this honest with the rest of the endless placement rules.
+- **Pruning.** A sweep in `EndlessMode.update` (right after the route
+  extend/prune block) quietly destroys any non-champion field more than 11000u
+  from the pilot — otherwise an uncollected pickup squats one of the three slots
+  for the whole run. `StasisField.destroy(quiet)` skips only the pickup burst +
+  light flash + sky godray; disposal is identical and every pre-existing caller
+  passes nothing. The sweep is **distance-based rather than segment-tagged on
+  purpose**: it then runs identically on a co-op client, which receives its
+  fields via `stasis_spawn` and has no segment binding at all.
+- **⚠ Tuning invariant: SPAWN_MAX (9000) must stay well below PRUNE_MAX
+  (11000).** The first cut paired a 12000u spawn band with a 9500u prune, which
+  lets a pickup spawn already-doomed and burn a whole 30s cycle. The route's
+  append horizon is 7000u, so 9000 still reaches every hall the route has grown.
+
+v1 seam (deliberate, same family as the Aegis seams above): **the prune is
+per-client distance**, so two peers more than 11km apart can disagree about whether a far
+pickup still exists. Same LOCAL-view family as bolt motes and monster bounties;
+a `stasis_pickup` event for an already-pruned field simply no-ops on the
+receiver. The *spawn* stays shared (authority-computed + broadcast), so co-op
+pilots race for one orb, not two.
+
+Debug: `window.__endlessStasis()` — live fields with the hall gid whose sphere
+contains them (null = a placement bug) and the SDF at each, every hall in the
+route window with its gate roll and ahead/behind state, the replenish timer,
+shield/overshield, and `spot` = where the NEXT spawn would land.
+
+Verified live (106km headless drive with the replenish timer forced): 7 spawns,
+all with a non-null containing hall gid, all at SDF -300 (open air), spawn
+distance 7479-8654u, `maxAlive` 3 and never above; 6 prunes, all at
+11001-11034u; collect from shield 900 → 4500 then overShield 951, decaying
+3%/maxShield/s outside the field; classic on the same build still places
+pickups in `levelSpheres` 0/2/4 via corridorPoints and still spawns the champion
+field + shell at `roundTimer ≤ 10`; zero console errors.
+
 ## Stages
 
 1. **The endless flight** (skeleton): mode button → endless map → seeded
