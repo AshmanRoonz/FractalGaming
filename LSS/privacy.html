@@ -109,7 +109,7 @@
 <header>
   <div class="tag">Last Ship Sailing</div>
   <h1>Privacy Policy</h1>
-  <div class="meta">Effective: May 2, 2026 ; Version 1.0</div>
+  <div class="meta">Effective: May 3, 2026 ; Version 1.1</div>
 </header>
 
 <main>
@@ -117,7 +117,7 @@
 <p>This Privacy Policy describes how Last Ship Sailing ("LSS," "the Game," "we") handles your data. LSS is a hobby project by Ashman Roonz, hosted at <a href="https://lss.fractalreality.ca">lss.fractalreality.ca</a>.</p>
 
 <div class="callout">
-<strong>The short version:</strong> LSS does not run a database. We do not store your data on any server we operate. The only data we touch is what you explicitly authorize through Discord OAuth, and even that is only used in the moment to render the Game and post your match results to Discord channels you've joined. Discord stores those posts; we do not.
+<strong>The short version:</strong> LSS collects only what Discord OAuth lets us see (your Discord ID, username, display name, and avatar). We store match-result rows in a small Cloudflare D1 (SQLite) database so we can show leaderboards and per-player profiles. We do not collect email, IP addresses, or anything else, and we do not use cookies, analytics, or trackers. You can delete all of your data at any time by hitting the <code>DELETE /me</code> API endpoint or by asking us to do it for you.
 </div>
 
 <h2>1. Data we collect via Discord OAuth</h2>
@@ -148,40 +148,59 @@
 
 <ul>
   <li>Rendering your avatar and display name in the Game's lobby and (planned) in-match HUD elements.</li>
-  <li>Attaching your identity to match results posted to Discord channels in our community server (so leaderboards know who played).</li>
-  <li>Distinguishing your match-result posts from other players' posts during the consensus-validation step that determines whether a match counts.</li>
+  <li>Identifying you in match-result records stored in our database so leaderboards and per-player profiles know who played which match.</li>
+  <li>Validating in our backend Worker that you are a real Discord-authenticated user before accepting your match-result submissions or room heartbeats.</li>
 </ul>
 
 <p>We do not use your data for advertising, profiling, training of AI models, or any commercial purpose. LSS is a non-commercial hobby project.</p>
 
-<h2>3. Where your data is stored</h2>
+<h2>3. What we additionally collect when you play</h2>
 
-<p>This is the unusual part of LSS's privacy story, and it's worth explaining clearly.</p>
+<p>Each time you complete a match, your browser submits the match's result to our backend. The submission includes:</p>
 
-<p><strong>On your device (browser localStorage):</strong> Your Discord OAuth access token and a cached copy of your Discord user object are stored in your browser's localStorage so signin persists across page reloads. This data lives on your machine only. Clearing your browser's site data, or signing out of LSS, removes it.</p>
+<ul>
+  <li>The match's start and end timestamps, the map you played on, and which team won.</li>
+  <li>Each participant's Discord ID, the ship loadout they chose, their team, and their kill / death / damage-dealt / damage-taken / MVP / win-loss numbers.</li>
+  <li>Whether the match was solo (one human vs bots) or multiplayer (two or more humans).</li>
+</ul>
 
-<p><strong>On Discord (channel messages):</strong> Match results posted by LSS appear as messages in Discord channels we operate (e.g. <code>#leaderboards</code>, <code>#match-records</code>). Discord stores those messages indefinitely under its own data policies. To delete them, you can ask a moderator in the LSS Discord server to remove specific posts, or revoke your authorization to delete future posts.</p>
+<p>This data populates per-player career stats and the public leaderboard. Match records are immutable once validated ; we don't track location data, in-game chat (there isn't any), keystroke timing, or anything else beyond the gameplay numbers above.</p>
 
-<p><strong>On Cloudflare Workers (transient relay):</strong> When the Game posts a match result, the request flows through a Cloudflare Worker (<code>lss-discord-proxy.ashroney.workers.dev</code>). The Worker validates your Discord token, sets the post's display avatar/name from your Discord identity, then relays the message to Discord. The Worker does not log requests or persist any user data; it is stateless beyond the encrypted webhook URLs it holds as configuration secrets. Cloudflare may log the request as part of its own infrastructure logging; see Cloudflare's <a href="https://www.cloudflare.com/privacypolicy/">Privacy Policy</a> for what they do with that.</p>
+<h2>4. Where your data is stored</h2>
 
-<p><strong>On any server we operate:</strong> Nothing. We do not run a database, an analytics service, an account system, or any server-side data store. There is no LSS-side record of who you are or what you've done in the Game beyond what lives on your device and on Discord.</p>
+<p>LSS uses a small backend stack hosted entirely on Cloudflare's infrastructure. Three places hold data:</p>
 
-<h2>4. Cookies and similar technologies</h2>
+<p><strong>On your device (browser localStorage):</strong> Your Discord OAuth access token and a cached copy of your Discord user object are stored in your browser's localStorage so signin persists across page reloads. Your in-game settings (volume preferences, control bindings, etc.) also live here. This data lives on your machine only. Clearing your browser's site data, or signing out of LSS, removes it.</p>
 
-<p>LSS does not use cookies. We use browser <code>localStorage</code> to persist your Discord token (described above) and your in-game settings (volume preferences, control bindings, etc.). We do not use third-party analytics, advertising trackers, fingerprinting, or any other tracking mechanism.</p>
+<p><strong>In our Cloudflare D1 database (<code>lss-stats</code>):</strong> Player career rows (one per Discord user) and match records are stored in a small SQLite database hosted by Cloudflare's edge infrastructure. Tables are <code>players</code>, <code>matches</code>, <code>match_participants</code>, <code>player_loadout_stats</code>, and <code>achievements</code>. The data is owned by the developer (Ashman Roonz) ; Cloudflare provides the hosting under their <a href="https://www.cloudflare.com/website-terms/">terms</a>. The database is small (typical free-tier usage), single-region (Cloudflare's nearest data center to North America), and only the LSS Worker has write access via authenticated D1 bindings.</p>
 
-<h2>5. How to delete your data</h2>
+<p><strong>In Cloudflare KV (ephemeral cache):</strong> Two small key-value stores hold short-lived data: room heartbeats (90-second TTL ; expires automatically when a room goes silent) and a top-N leaderboard cache (60-second TTL ; serves repeated leaderboard reads without re-querying D1). KV entries auto-expire ; nothing persists beyond the TTL.</p>
+
+<p><strong>Through our Cloudflare Worker:</strong> Every authenticated API request (match post, leaderboard read, profile fetch, room heartbeat) is validated by a Worker that checks your Discord OAuth token against Discord's <code>/users/@me</code> endpoint. The Worker does not log requests or persist any user data beyond what's described above. Cloudflare may log infrastructure-level metadata as part of running the Worker ; see Cloudflare's <a href="https://www.cloudflare.com/privacypolicy/">Privacy Policy</a> for what they do with that.</p>
+
+<p><strong>On Discord:</strong> If we ever post highlight notifications to a Discord channel for big moments (championship wins, milestones), those posts live on Discord under its own data policies. As of this version, no such posts are sent automatically ; the integration exists but is opt-in for future use.</p>
+
+<p><strong>On any server we directly operate:</strong> Nothing. We don't run a self-hosted server, a VM, a Pi, or anything else. The only infrastructure is Cloudflare's managed services (Workers + D1 + KV) plus GitHub Pages for static hosting.</p>
+
+<h2>5. Cookies and similar technologies</h2>
+
+<p>LSS does not use cookies. We use browser <code>localStorage</code> to persist your Discord token (described above) and your in-game settings (volume preferences, control bindings, etc.). We do not use third-party analytics, advertising trackers, fingerprinting, or any other tracking mechanism. The leaderboard / profile / rooms pages on lss.fractalreality.ca do not run analytics scripts of any kind.</p>
+
+<h2>6. How to delete your data</h2>
 
 <p>You have several straightforward options to remove your data from LSS:</p>
 
 <ul>
-  <li><strong>Sign out</strong> from the LSS lobby. This clears your Discord token and cached identity from your browser's localStorage immediately.</li>
-  <li><strong>Revoke LSS's access</strong> in your Discord account settings, under <em>Advanced → Authorized Apps</em>. This invalidates any token LSS holds for you and prevents future signins until you re-authorize.</li>
+  <li><strong>Hit the deletion API.</strong> While signed in, visit any page on <code>lss.fractalreality.ca</code> and run this in the browser console (F12):
+    <br><code>fetch('https://lss-backend.ashroney.workers.dev/me', { method: 'DELETE', headers: { Authorization: 'Bearer ' + localStorage.getItem('lss_discord_token') } }).then(r =&gt; r.json()).then(console.log)</code>
+    <br>This scrubs your <code>players</code> row, your match-participation records, your per-loadout aggregates, and any achievements from the D1 database. Returns <code>{ ok: true, scrubbed: true }</code>. Match rows themselves remain (they are immutable historical records) but you no longer appear in them.</li>
+  <li><strong>Sign out</strong> from the LSS lobby. This clears your Discord token and cached identity from your browser's localStorage immediately. Does not delete D1 data ; use the API endpoint above for that.</li>
+  <li><strong>Revoke LSS's access</strong> in your Discord account settings, under <em>Advanced → Authorized Apps</em>. This invalidates any token LSS holds for you and prevents future signins until you re-authorize. Does not delete D1 data ; use the API endpoint above.</li>
   <li><strong>Clear your browser site data</strong> for <code>lss.fractalreality.ca</code>. Removes all locally stored LSS data including settings.</li>
-  <li><strong>Delete past match-result posts</strong> by asking a moderator in the LSS Discord server. Since the posts live on Discord, deletion happens through Discord's interface.</li>
+  <li><strong>Email the developer</strong> at <a href="mailto:ashroney@gmail.com">ashroney@gmail.com</a> if any of the above don't work for you, and ask for manual deletion.</li>
 </ul>
 
-<h2>6. Children's privacy</h2>
+<h2>7. Children's privacy</h2>
 
 <p>LSS is not directed at children under 13. You must be at least 13 years old (or the minimum age required by Discord in your jurisdiction, whichever is higher) to use LSS. If we become aware that a user under that age has signed in, we will revoke their access.</p>
 
@@ -214,7 +233,7 @@
 
 <h2>9. International users</h2>
 
-<p>LSS is operated from Canada. By using LSS, you consent to your data being processed in Canada and routed through Cloudflare's global edge network. If you are a resident of the European Union, the United Kingdom, California, or another jurisdiction with specific data-protection laws, you may have additional rights (access, correction, deletion, portability). The minimal-data architecture of LSS makes most of these straightforward to honor; the deletion mechanisms in Section 5 satisfy the typical requests.</p>
+<p>LSS is operated from Canada. By using LSS, you consent to your data being processed in Canada and routed through Cloudflare's global edge network. If you are a resident of the European Union, the United Kingdom, California, or another jurisdiction with specific data-protection laws, you may have additional rights (access, correction, deletion, portability). The minimal-data architecture of LSS makes most of these straightforward to honor ; the deletion mechanisms in Section 6 satisfy the typical requests.</p>
 
 <h2>10. Security</h2>
 
@@ -222,9 +241,10 @@
 
 <ul>
   <li>All connections use HTTPS (provided by Cloudflare and GitHub Pages).</li>
-  <li>The Cloudflare Worker validates Discord tokens before relaying any post.</li>
-  <li>Webhook URLs are stored as encrypted Worker secrets, never embedded in client code.</li>
-  <li>The Game uses Discord's PKCE OAuth flow, which avoids the need for any shared client secret.</li>
+  <li>The Cloudflare Worker validates every authenticated request's Discord token against Discord's <code>/users/@me</code> endpoint before allowing writes to the database.</li>
+  <li>Database write access is gated to the Worker only, via Cloudflare's signed D1 binding ; no direct external access to the database exists.</li>
+  <li>The Game uses Discord's PKCE OAuth flow, which avoids the need for any shared client secret in the browser.</li>
+  <li>Match results require <strong>consensus</strong> from all human participants before being counted toward leaderboards ; reports that disagree are flagged and excluded.</li>
 </ul>
 
 <p>That said, no system is perfectly secure. If you become aware of a security issue with LSS, please report it privately to <a href="mailto:ashroney@gmail.com">ashroney@gmail.com</a> rather than disclosing it publicly.</p>

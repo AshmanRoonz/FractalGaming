@@ -1,9 +1,10 @@
 """Deploy LSS to Cloudflare Pages.
 
-Mirrors the repo into a staging dir (robocopy /MIR = incremental, fast after
-the first run), excluding dev-only weight (.git, .claude worktrees, backups,
-old_versions), then runs `wrangler pages deploy`. Cloudflare dedupes uploads
-by content hash, so only changed files transfer on repeat deploys.
+Mirrors the LSS/ directory (the site root since the v36.09 restructure) into
+a staging dir (robocopy /MIR = incremental, fast after the first run),
+excluding dev-only weight (old_versions, old_plans, __pycache__), then runs
+`wrangler pages deploy`. Cloudflare dedupes uploads by content hash, so only
+changed files transfer on repeat deploys.
 
 Usage:  py -3.11 tools/deploy_cf.py            (deploys)
         py -3.11 tools/deploy_cf.py --stage    (staging copy only, no upload)
@@ -11,6 +12,7 @@ Usage:  py -3.11 tools/deploy_cf.py            (deploys)
 import subprocess, sys, os
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(REPO, "LSS")          # site root: LSS/ is what deploys
 STAGE = os.path.join(os.path.dirname(REPO), "FractalGaming_deploy")
 PROJECT = "lss"
 EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
@@ -26,8 +28,8 @@ def run(cmd, ok_codes=(0,)):
 # robocopy exit codes 0-7 are success variants.
 xd = []
 for d in EXCLUDE_DIRS:
-    xd += ["/XD", os.path.join(REPO, d)]
-run(["robocopy", REPO, STAGE, "/MIR", "/NFL", "/NDL", "/NJH", "/NP"] + xd,
+    xd += ["/XD", os.path.join(SRC, d)]
+run(["robocopy", SRC, STAGE, "/MIR", "/NFL", "/NDL", "/NJH", "/NP"] + xd,
     ok_codes=(0, 1, 2, 3, 4, 5, 6, 7))
 print("staged ->", STAGE)
 

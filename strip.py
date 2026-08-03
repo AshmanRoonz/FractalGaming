@@ -20,8 +20,8 @@ Usage:
 import sys, os, re, subprocess, tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SRC  = os.path.join(ROOT, "index-working.html")
-DST  = os.path.join(ROOT, "index.html")
+SRC  = os.path.join(ROOT, "LSS", "index-working.html")
+DST  = os.path.join(ROOT, "LSS", "index.html")
 
 REGEX_PREV = set("(,=:[!&|?{};<>+-*%^~")   # tokens after which `/` starts a regex
 KEYWORD_PREV = {"return","typeof","instanceof","in","of","case","delete",

@@ -7,7 +7,7 @@ const { execFileSync } = require('child_process');
 
 let anyBad = false;
 for (const file of ['index.html', 'index-working.html']) {
-  const html = fs.readFileSync(path.join(__dirname, file), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'LSS', file), 'utf8');
   const re = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
   let m, n = 0, bad = 0;
   while ((m = re.exec(html)) !== null) {
