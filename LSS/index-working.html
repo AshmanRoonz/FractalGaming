@@ -3772,7 +3772,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.19';
+const LSS_BUILD = '36.20';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
@@ -45753,7 +45753,39 @@ function cycleHubShip(dir) {
   try { if (window.Overlays && Overlays.banner) Overlays.banner('SHIP', (LOADOUTS[nextKey] && LOADOUTS[nextKey].name) || nextKey); } catch (_) {}
 }
 
+// (v36.20) Run `fn` after one PAINTED frame, so an overlay shown just before the
+// call is actually on screen before `fn` blocks the thread.
+// ⚠ TWO rAFs, not one — this is the whole point. A rAF callback runs BEFORE that
+// frame's paint, so `requestAnimationFrame(fn)` would put fn's ~400 ms in front
+// of the very paint we are buying. rAF #1 lands in frame N's pre-paint slot and
+// returns immediately (letting N paint); rAF #2 fires in frame N+1, after N is
+// on screen. This is why `_warmupYield`'s single-rAF shape cannot be reused here
+// — it only needs to flush the driver, not to guarantee a composite.
+// The XR / hidden-page arms fall back to running synchronously, i.e. exactly
+// today's behaviour: window rAF does not fire in an immersive session or a
+// backgrounded tab, and the DOM overlay is not composited into a headset anyway.
+// The setTimeout is a backstop for alt-tabbing between the click and rAF #1,
+// which would otherwise strand the commit forever.
+function _commitDeferOneFrame(fn) {
+  const inXR   = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
+  const hidden = !!(typeof document !== 'undefined' && document.hidden);
+  if (inXR || hidden || typeof requestAnimationFrame !== 'function') { fn(); return; }
+  let done = false;
+  const go = () => { if (done) return; done = true; fn(); };
+  requestAnimationFrame(() => requestAnimationFrame(go));
+  setTimeout(go, 250);
+}
+
 function commitLoadout(key) {
+  // (v36.20) Re-entrancy latch, ABOVE the picker block below so a second call
+  // cannot even mutate LSS.MODE / game.campaign before bailing. The deferred
+  // build opens a one-frame window in which #ship-select is still `.active`, and
+  // the opaque overlay stops the MOUSE confirm listener but NOT pollGamepad —
+  // which is called above every state early-return by design and gates only on
+  // _shipSelectActive. Two commits interleaving two world builds is the worst
+  // failure this change could cause. `_liveSwap` is exempt: it returns long
+  // before the deferral and is how the campaign D-pad cycles ships live.
+  if (_commitPending && !game._liveSwap) return;
   // (v34.22) PICKER CONFIRM ROUTING. When confirming from the campaign ship-select picker,
   // switch mode + flags for the CHOSEN LEVEL *before* _v12mValidate and *before* getNextMap so
   // the build fork constructs the right world. The chosen SHIP is `key` (independent of level).
@@ -46014,6 +46046,7 @@ function commitLoadout(key) {
   // 3-2-1-LAUNCH ticker finishes and the player actually warps into the arena.
   // Pointer lock is also deferred to that moment.
 
+  const _finishCommit = () => {
   if (!midMatch) {
     // Fresh match: full map build, stasis reset, bot spawn, score reset.
     // (campaign) Mode hook : set up the run/scene before the world builds.
@@ -46135,23 +46168,26 @@ function commitLoadout(key) {
   // Refresh the teammates strip so the newly committed ship shows up as YOU's pick.
   updateTeammatesStrip();
 
-  // Show the loading overlay over ship-select while shaders compile.
-  // Skip the overlay if local warmup is already done (subsequent matches
-  // in the same session, or ship-swaps between rounds when warmup has
-  // long since finished) ; the promise will resolve on the next microtask
-  // and a one-frame flash of "PREPARING ARENA" would look weird.
-  if (!_localWarmupReady) {
-    try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
-  }
-
-  // (v36.19) Pin the postFX chain's three programs HERE — synchronously, inside
-  // the click task — not in the async warmup body. See _pinPostFXPrograms for
-  // the audit: the bright-pass, the blur and the composite were never warmed in
-  // any mode, and the campaign hub reaches 'playing' on its first tick, so it
-  // paid the composite's 234 ms first-use validate inside a live gameplay frame.
-  // This runs before ANY gameLoop tick of the new match, in every mode, and one
-  // line below showLoadingOverlay so its (black-in, black-out) screen draw is
-  // behind the overlay as well as behind the next full rAF redraw.
+  // (v36.20) The `if (!_localWarmupReady) showLoadingOverlay(...)` that used to
+  // sit here is GONE — it is hoisted above the deferral, and unconditional. Two
+  // reasons the old gate had to die with the move: it was 127 lines BELOW the
+  // world build it was meant to cover (so it could never paint in time), and its
+  // stated justification — "the promise resolves on the next microtask and a
+  // one-frame flash would look weird" — is simply false. `_localWarmupReady` is
+  // set once and never reset, so on every match after the first of a page load
+  // the gate skipped the overlay entirely while the build still cost a real
+  // ~400 ms. Without the overlay that window is a live, clickable ship picker
+  // that then freezes. It now shows PREPARING ARENA on every match, deliberately.
+  //
+  // (v36.19) Pin the postFX chain's three programs HERE — synchronously, in the
+  // same task as the build — not in the async warmup body. See
+  // _pinPostFXPrograms for the audit: the bright-pass, the blur and the
+  // composite were never warmed in any mode, and the campaign hub reaches
+  // 'playing' on its first tick, so it paid the composite's first-use validate
+  // (measured 454 ms) inside a live gameplay frame. It runs before ANY gameLoop
+  // tick of the new match, in every mode. Its black-in/black-out screen draw is
+  // safe because the overlay is not merely `.active` by now but already PAINTED
+  // (v36.20 deferral) — a strictly stronger guarantee than before.
   try { if (typeof _pinPostFXPrograms === 'function') _pinPostFXPrograms(); } catch (_) {}
 
   const _launchSoloAfterCinematic = () => {
@@ -46252,6 +46288,41 @@ function commitLoadout(key) {
       // Cinematic before the 3-2-1. Solo warmup-failed fallback.
       _launchSoloAfterCinematic();
     }
+  });
+  };
+
+  // (v36.20) THE COMMIT NO LONGER BLOCKS THE FIRST PAINT.
+  // Everything from `if (!midMatch)` down to the warmup promise is wrapped in
+  // `_finishCommit` so it can run one PAINTED frame later. Measured before this:
+  // clicking CONFIRM froze the browser for ~410 ms in two back-to-back long
+  // tasks (203 ms of commitLoadout — 102 ms of it buildRoomGraphLevel — then a
+  // 203 ms first rendered frame of the new world), and because the overlay's
+  // class was set INSIDE task 1, its first paint landed only at ~415 ms. So the
+  // player sat looking at a frozen ship-select for four tenths of a second.
+  // ⚠ Hoisting showLoadingOverlay alone does NOT fix that: a rAF callback runs
+  // BEFORE its frame's paint, so one rAF still puts the block in front of the
+  // paint we are buying. _commitDeferOneFrame uses rAF-inside-rAF for that
+  // reason. This does not make the build faster — it puts it behind a visible
+  // overlay instead of a frozen menu.
+  const _deferrable = !midMatch;
+  if (!_deferrable) { _finishCommit(); return; }   // between-rounds swap stays 100% synchronous
+  _commitPending = true;
+  // Close the map window for the deferred frame: cycleMap/selectMap only guard
+  // on mapCommitLocked || state !== 'select', and game.state stays 'select'
+  // until _finishCommit runs — so an inbound map_change or a D-pad edge could
+  // otherwise rewrite game.selectedMap between _v12mValidate and getNextMap.
+  try { if (net.active) { net.mapCommitLocked = true; _syncMapButtonsDisabled(); } } catch (_) {}
+  // Unconditional now (the old !_localWarmupReady gate is gone): on match 2+ the
+  // build is still a real ~400 ms, so skipping the overlay would show a frame of
+  // live, clickable picker and then freeze with nothing over it.
+  try { showLoadingOverlay('PREPARING ARENA', 'compiling shaders'); } catch (_) {}
+  _commitDeferOneFrame(() => {
+    try { _finishCommit(); }
+    catch (e) {
+      console.warn('[commitLoadout] deferred build failed:', e);
+      try { hideLoadingOverlay(); } catch (_) {}
+    }
+    finally { _commitPending = false; }
   });
 }
 
@@ -55188,7 +55259,18 @@ function pollGamepad() {
   if (_menuConfirmEdge) {
     if (settingsOpen) {
       closeSettings();
-    } else if (_shipSelectActive) {
+    } else if (_shipSelectActive && !_commitPending && game.state === 'select') {
+      // (v36.20) `!_commitPending && game.state === 'select'`. #ship-select keeps
+      // its `.active` class for ~1.9 s after CONFIRM (finishLaunch owns the
+      // hide), so `_shipSelectActive` alone stays true long after the match is
+      // already committed. A real MOUSE re-click is swallowed by the opaque
+      // loading overlay — verified by hit-test: elementFromPoint over the CONFIRM
+      // button returns #lss-loading-overlay during the build — but pollGamepad is
+      // deliberately called ABOVE every state early-return, so Start is NOT
+      // covered by it. `_commitPending` closes the deferral+build window and
+      // `game.state === 'select'` closes the rest (the build sets 'warmup').
+      // ⚠ Both are needed. Measured by mashing CONFIRM 11x through the window:
+      // v36.19 ran ELEVEN full world builds, latch-only ran 5, both gates run 1.
       // Confirm previewed ship; if nothing previewed yet, pick the first entry
       if (_previewedKey && LOADOUTS[_previewedKey]) {
         commitLoadout(_previewedKey);
@@ -55250,7 +55332,15 @@ function pollGamepad() {
   // D-pad/stick LEFT/RIGHT cycles ships and UP/DOWN cycles the map window
   // (they were swapped — stick up/down drove the horizontal carousel).
   // START confirms whatever is currently highlighted (ship + map together).
-  if (_shipSelectActive) {
+  // (v36.20) `!_commitPending` gates the WHOLE nav block during commitLoadout's
+  // deferred frame. This is mandatory, not cosmetic: cycleMap/selectMap guard
+  // only on `net.mapCommitLocked || game.state !== 'select'`, and game.state
+  // stays 'select' until the deferred _finishCommit runs — so a D-pad Up/Down
+  // edge in that window would rewrite game.selectedMap AFTER _v12mValidate
+  // approved it and BEFORE getNextMap reads it, building a map the validator
+  // never saw. LB/RB likewise rewrites player.perkId after the head already
+  // applied that perk's stat bumps.
+  if (_shipSelectActive && !_commitPending && game.state === 'select') {
     // (v35.20) BUTTON-ONLY d-pad reads. These used to be gpDpadLeft/Right/Up/
     // Down, which fold in the left stick past 0.6 — so simply moving the stick
     // (which now drives the menu cursor) cycled ships and maps underneath you.
@@ -59088,6 +59178,10 @@ function updateTeammatesStrip() {
 // explicit abort (round end, lobby exit).
 let _activeLaunchTimers = [];
 let _countdownActive = false;
+// (v36.20) True between CONFIRM and the end of commitLoadout's deferred world
+// build. Read by the latch at the top of commitLoadout and by the two
+// ship-select gamepad gates in pollGamepad.
+let _commitPending = false;
 let _launchCountdownRuntime = null;
 function _clearLaunchCountdown() {
   for (const t of _activeLaunchTimers) clearTimeout(t);
