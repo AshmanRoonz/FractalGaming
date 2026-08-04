@@ -285,12 +285,62 @@ Mechanics (all on `game.endlessRun.aegis`; HUD tag ` · AEGIS Lx` on the
 endless top-center line — no % readout, no decay UI; collecting pulses the
 tag bright with a ⚡ for a beat, banner-free):
 
+**(v36.38) THE CEILING MOVED TO L10, AND A MAX-RANK BOLT STILL PAYS.** The
+v35.90 cap below (L5) was a hard wall: every bolt past it granted nothing and
+said nothing, which owner-tested as a bug ("I got stuck at aegis level 5,
+taking more powerups didn't level me up"). Two changes, both in `_aegis` /
+`_aegisSetLvl` / `_endlessAegisDmgOut`:
+
+1. **The curve is a table (`_EAEGIS_DMG` / `_EAEGIS_SPD` / `_EAEGIS_REG`), and
+   it tapers.** L1-L5 are byte-identical to the flat v35.90 values below, so
+   the shipped early game does not move; L6-L10 shrink each step.
+
+   | rank | dmg | speed (base 350) | hull regen |
+   |---|---|---|---|
+   | 1-5 | ×1.06 … ×1.30 | 364 … 420 | 0.30 … 1.50 %/s |
+   | 6 | ×1.35 | 430.5 | 1.70 %/s |
+   | 7 | ×1.39 | 439.25 | 1.85 %/s |
+   | 8 | ×1.42 | 446.25 | 1.95 %/s |
+   | 9 | ×1.44 | 451.5 | 2.05 %/s |
+   | 10 | ×1.45 | 455 | 2.10 %/s |
+
+   The rails: `_spawnWave` is `n = min(6, 2 + floor(dist/3000))`, so hostile
+   pressure CAPS at 6 ships by 12 km while the route never ends; the whole
+   L6-L10 stretch is worth only +11.5% DPS and +8.3% speed over L5 for five
+   more finds; and speed ×1.30 stays under the hoard bot's shipped 1.33
+   (`_campTuneHoardBot`) — the rail v35.90 already used for L5's 1.20. At
+   ~1 route bolt per 10 km, L10 is a ~100 km run spent off the lane.
+
+2. **A three-step reward ladder, so a bolt is never worthless.** `lvl < 10` →
+   rank up · `lvl = 10 && lives < livesMax` → **+1 LIFE** · `lvl = 10 &&
+   lives = livesMax` → **+250 m** scored distance. The life is the right top
+   prize in a lives-based mode, and the cap keeps the difficulty contract
+   intact: `run.livesMax = 2 × startLives` (EASY 6 / MEDIUM 4 / HARD 2)
+   preserves both the ordering and the ratio, so a HARD run can never become
+   a MEDIUM one. The cap is on the LIVE count rather than on grants, so a
+   max-rank pilot who dies can win a life back — bounded above, and exactly
+   the "exploration converts to survivability" loop the mode wants.
+
+   Feedback is the other half of the fix (silence is what made the wall read
+   as broken): the HUD tag gains ` MAX` at the ceiling and appends the actual
+   payout for a beat (` ⚡ +1 LIFE` / ` ⚡ +250 m`), an `AEGIS OVERFLOW` banner
+   fires, and each branch has its own sound (`round_start` for the life,
+   `upgrade_core` for the distance, `rearm_reset` on every bolt as before).
+
+   Debug: `window.__endlessGrab(n)` teleports onto live bolts in turn and runs
+   the REAL collect body, returning rank / lives / reward / speed / dmg /
+   regen per grab. Verified on a 150 km EASY run: the full 15-bolt ladder
+   walked (L1..L10 with the exact speeds above, then +1 LIFE ×3 to the cap,
+   then +250 m ×2), death kept L10 and the same clone reference, teardown
+   restored the exact base chassis reference (350), zero console errors.
+
 - **Bolts are the only charge source.** At most ONE bolt per gated segment;
   the gate is a pure gid hash passing ~28% of segments (~1 bolt per 3-5
   segments, measured 4.4 per 20). Collect radius ~120u (they are rarer).
-  Collect = rank up (0..5), `rearm_reset` chirp, a bright `fireball_cyan`
-  burst at the bolt, and the HUD pulse. Beyond L5 extra bolts still
-  chirp/flash (nothing to grant).
+  Collect = rank up (0..5 — **raised to 0..10 in v36.38, see above**),
+  `rearm_reset` chirp, a bright `fireball_cyan` burst at the bolt, and the HUD
+  pulse. ~~Beyond L5 extra bolts still chirp/flash (nothing to grant).~~
+  **Superseded v36.38: a bolt at true max pays a life, or distance.**
 - **Placement is off the main line** (`_lssEndlessBolts`): every draw is a
   **pure hash of the segment gid** — deliberately NOT `gen.rand` (the route
   stream — extra draws desync co-op routes) and NOT `gen.cos` (its cursor
