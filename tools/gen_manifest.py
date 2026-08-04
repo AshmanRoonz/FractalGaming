@@ -20,10 +20,19 @@ ORPHAN instead of being shipped to players.
 Deliberately EXCLUDED (owner's call): skybox/ (theme-scoped, loaded on demand),
 campaign_media/, sounds/, walls/, themes/, effects/ (procedural or per-theme).
 
-Cache-busting: entries with "v":1 are fetched by the game as `path?v=<LSS_BUILD>`
-(every GLB, and every frames/ asset since v36.16 — see _FRAME_CACHE_BUST).
-The loader appends the stamp at runtime, so this manifest does NOT need to be
-regenerated on a plain build bump — only when the asset TABLES change.
+GROUP EXCLUSIONS (v36.25, owner's call — see EXCLUDE_GROUPS below). Whole
+groups can be dropped from the preload set without touching the code walk, so
+the "what does the game reference" logic and the "what is worth preloading"
+policy stay separate. Excluded groups are still walked and still reported, they
+just don't ship in the manifest. Pass --all to build the untrimmed set.
+
+Cache-busting: each entry's "v" says WHICH stamp the game appends at runtime.
+    0  none                                    (map_thumbs, music, audio)
+    1  '?v=' + _MODELS_VERSION  (every GLB)    -> _MODEL_CACHE_BUST
+    2  '?v=' + _FRAMES_VERSION  (frames/**)    -> _FRAME_CACHE_BUST
+Both were '?v=' + LSS_BUILD before v36.25, which re-minted ~146 MB of URLs on
+every single build bump. They are ART versions now: this manifest does NOT need
+regenerating on a build bump, only when the asset TABLES change.
 """
 
 import json
@@ -46,6 +55,24 @@ SCAN_DIRS = ['objects', 'ships', 'frames', 'map_thumbs', 'music', 'audio', 'ring
 OWNER_EXTRAS = [
     ('rings/fence.glb', 1, 'rings'),   # owner listed it with cyanring.glb; no code reference found
 ]
+
+# (v36.25) Groups the owner does NOT want bulk-preloaded. They are still walked
+# and still reported ("EXCLUDED" section) — only kept out of the shipped list.
+#   music  5 files / 42.0 MB : <audio> streams these natively, progressively,
+#                              and only one track plays at a time. Downloading
+#                              all five up front buys nothing.
+#   hoard 22 files / 60.4 MB : HOARD enemy ships arrive progressively over a
+#                              run; loadHoardModel() pulls each on first sight.
+# Together they were 102.4 MB of the 193 MB set — more than half the bytes for
+# assets that are either streamed or not needed for minutes.
+#
+# TRADE-OFF, stated plainly: excluding `hoard` means a HOARD-mode enemy type
+# seen for the first time is a cold network fetch instead of a disk-cache hit.
+# That is the owner's call (193 MB up front for every visitor was the bigger
+# problem), and `loadHoardModel` already handles the async arrival — but if
+# HOARD ever reports first-sight stutter, this is the line that caused it.
+# `--all` on the command line overrides this and builds the full set.
+EXCLUDE_GROUPS = {'music', 'hoard'}
 
 
 def read_source():
@@ -87,12 +114,13 @@ def main():
     build_m = re.search(r"const LSS_BUILD\s*=\s*'([^']+)'", src)
     build = build_m.group(1) if build_m else '0'
 
-    # url -> (versioned, group). dict keeps insertion order = manifest order.
+    # url -> (stamp, group). dict keeps insertion order = manifest order.
+    # stamp: 0 none / 1 _MODELS_VERSION / 2 _FRAMES_VERSION (see module docstring).
     refs = {}
 
     def add(url, versioned, group):
         if url not in refs:
-            refs[url] = (1 if versioned else 0, group)
+            refs[url] = (int(versioned), group)
 
     # ---------------------------------------------------------------- ships --
     ship_block = block(src, 'const SHIP_MODELS = {', '};')
@@ -152,16 +180,17 @@ def main():
             for f in re.findall(r"'([^']+\.png)'", chunk):
                 desc_files.setdefault(key, set()).add(f)
 
+    # stamp 2 = _FRAMES_VERSION (_FRAME_CACHE_BUST), NOT the model/build stamp.
     frame_keys = sorted(set(playable) | set(gun_cycle) | set(abil_files) | set(desc_files))
     for key in frame_keys:
         d = key[0] + key[1:].lower()
-        add('frames/%s/frame_%s.png' % (d, key), True, 'frames')
+        add('frames/%s/frame_%s.png' % (d, key), 2, 'frames')
         for sfx in list(gun_cycle.get(key, [])) + list(gun_extra.get(key, [])):
-            add('frames/%s/%s_%s.png' % (d, sfx, key), True, 'frames')
+            add('frames/%s/%s_%s.png' % (d, sfx, key), 2, 'frames')
         for f in list(abil_files.get(key, [])) + sorted(desc_files.get(key, ())):
-            add('frames/%s/%s' % (d, f), True, 'frames')
+            add('frames/%s/%s' % (d, f), 2, 'frames')
         # Mapped-HUD geometry (_hmGet fetches frames/mock/<ship>.json).
-        add('frames/mock/%s.json' % key.lower(), True, 'frames')
+        add('frames/mock/%s.json' % key.lower(), 2, 'frames')
 
     # ----------------------------------------------------------- map thumbs --
     for t in sorted(set(re.findall(r"thumb:\s*'(map_thumbs/[^']+)'", src))):
@@ -190,13 +219,20 @@ def main():
     extra_urls = set(u for u, _, _ in OWNER_EXTRAS)
 
     # ---------------------------------------------------- size + disk check --
+    keep_all = '--all' in sys.argv[1:]
+    excluded = set() if keep_all else EXCLUDE_GROUPS
     files, missing, total = [], [], 0
+    dropped, dropped_bytes = [], 0
     for url, (ver, grp) in refs.items():
         p = os.path.join(LSS, url.replace('/', os.sep))
         if not os.path.exists(p):
             missing.append(url)
             continue
         b = os.path.getsize(p)
+        if grp in excluded:
+            dropped.append((url, b, grp))
+            dropped_bytes += b
+            continue
         total += b
         files.append({'u': url, 'b': b, 'v': ver, 'g': grp})
 
@@ -221,6 +257,7 @@ def main():
         'generatedAt': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'sourceBuild': build,
         'source': src_name,
+        'excludedGroups': sorted(excluded),
         'count': len(files),
         'totalBytes': total,
         'files': files,
@@ -243,6 +280,19 @@ def main():
     for g in sorted(by_group):
         n, b = by_group[g]
         print('    %-11s %3d files  %10s' % (g, n, mb(b)))
+    if dropped:
+        by_ex = {}
+        for _u, b, g in dropped:
+            e = by_ex.setdefault(g, [0, 0])
+            e[0] += 1
+            e[1] += b
+        print('  EXCLUDED (referenced by code, deliberately NOT preloaded — EXCLUDE_GROUPS):')
+        for g in sorted(by_ex):
+            n, b = by_ex[g]
+            print('    %-11s %3d files  %10s' % (g, n, mb(b)))
+        print('    %-11s %3d files  %10s  <-- kept off the wire' % ('TOTAL', len(dropped), mb(dropped_bytes)))
+    elif keep_all:
+        print('  (--all: EXCLUDE_GROUPS ignored, full set written)')
     if playable and sorted(playable) != sorted(loadout_keys):
         print('  ! SHIP_MODELS keys != LOADOUTS keys: %s vs %s'
               % (sorted(playable), sorted(loadout_keys)))

@@ -3791,9 +3791,43 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.24';
+const LSS_BUILD = '36.28';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
+
+// ============================================================================
+// (v36.25) ASSET CONTENT VERSIONS  —  cache-bust stamps, DECOUPLED from LSS_BUILD
+//
+// THE BUG THIS FIXES (owner-flagged). Every heavy binary the game loads carried
+// `?v=<LSS_BUILD>` :
+//     frames/   51 files   30.4 MB   (_FRAME_CACHE_BUST)
+//     ships/     7 files   30.4 MB   ┐
+//     objects/   7 files   21.7 MB   │ five inline `'.glb?v=' + LSS_BUILD`
+//     hoard/    22 files   60.4 MB   │ call sites
+//     rings/     2 files    3.2 MB   ┘
+// LSS_BUILD is bumped EVERY iteration, so every build bump minted 89 brand-new
+// URLs and every returning player re-downloaded ~146 MB of art that had not
+// changed a byte. `_headers` gives those directories `max-age=604800`, which
+// bought us nothing — a busted URL is a cache MISS, not a stale hit.
+//
+// THE RULE. These two constants are the ONLY cache key for that art. Bump
+// _FRAMES_VERSION when a cockpit frame PNG / mock JSON changes ; bump
+// _MODELS_VERSION when a GLB changes. NEVER wire either to LSS_BUILD, and never
+// bump them "to be safe" on a code-only build — that is exactly the bug.
+//
+// ⚠ MUST STAY IN STEP WITH THE PRELOADER. asset-manifest.json tags every entry
+// with which stamp it needs (`v:2` = frames, `v:1` = models, `v:0` = none) and
+// preloadAllAssets appends the matching one. If a stamp here and the stamp the
+// loader appends ever diverge, the preload warms URLs the game never asks for
+// and every player pays the download twice. tools/gen_manifest.py writes the
+// tags; see ASSET PRELOAD (~L59630).
+//
+// Seeded at '36.24' — the build the current art shipped under — so nobody
+// holding a warm cache from v36.24 is forced to re-download on the upgrade.
+// ============================================================================
+const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
+const _MODELS_VERSION = '36.24';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
@@ -6802,7 +6836,15 @@ const CampaignMode = {
           if (!c._advancing && !c._nemesisFleeing && player && player.position &&
               player.position.distanceTo(game.bossPortal.position) < 320) {
             c._advancing = true;
-            try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}   
+            // (v36.27) Leg-to-leg warp (and, at the end of the run, the FINALE
+            // hub-return) — both build a whole new world through the same
+            // roundEnd rebuild, so both are staged. Armed here, above the
+            // applyMapPreset calls in the branches below. `_advToShipSelect`
+            // (the disabled-by-default between-leg picker) never reaches the
+            // roundEnd branch, so the pending flag just goes unread and is
+            // cleared by the next rebuild.
+            try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-leg', 'ENTERING THE NEXT LEG'); } catch (_) {}
+            try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
             try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
             c.sceneIndex = (c.sceneIndex || 0) + 1;
             let _advToShipSelect = false;   
@@ -6843,7 +6885,8 @@ const CampaignMode = {
                   try { if (window.Overlays) Overlays.banner('SIMULATION FREED', 'The trap is broken — back to the overworld'); } catch (_) {}
                   LSS.MODE = 'freeflight';
                   game.selectedMap = 'hub_overworld';
-                  game.testMode = false; game.raceNoTimer = true;   
+                  game.testMode = false; game.raceNoTimer = true;
+                  try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-finale', 'RETURNING TO THE OVERWORLD'); } catch (_) {}
                   try { if (typeof FreeFlightMode !== 'undefined') { FreeFlightMode._enteringCampaign = false; FreeFlightMode._riftPos = null; FreeFlightMode._deathT = 0; } } catch (_) {}
                   try { if (typeof applyMapPreset === 'function') applyMapPreset('Mossy'); } catch (_) {}
                   if (game._campJourney) { game._campFinale = true; game._campFinalVideo = (c.sceneIndex || 0) + 2; game._campRiftArmed = false; }   
@@ -7005,9 +7048,14 @@ const FreeFlightMode = {
   // roundEnd -> warmup rebuild (the same machinery the campaign leg-advance uses), so the
   // world rebuilds into the leg with the player already in flight, behind the warp.
   _enterCampaignFromHub() {
-    if (this._riftConsumed) return;   
+    if (this._riftConsumed) return;
     this._riftConsumed = true;
     this._enteringCampaign = true;
+    // (v36.27) Journey rift -> camp_approach. Staged like every other traverse;
+    // this must precede the applyMapPreset below. v36.21's always-_liveSwap
+    // commit further down is untouched (it is player-side only and stays in this
+    // frame, where the rest of the rift bookkeeping is).
+    try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-rift', 'ENTERING THE RIFT'); } catch (_) {}
     try { const _legs = _campLoadLegs(); if (_legs.indexOf('camp_approach') === -1) { _legs.unshift('camp_approach'); _campSaveLegs(_legs); } } catch (_) {}   
     try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}   
     try { const _w = document.getElementById('ov-warp'); if (_w) { _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel'); } } catch (_) {}
@@ -8313,7 +8361,7 @@ function loadHoardModel(key) {
   const loader = new THREE.GLTFLoader();
   const p = new Promise((resolve) => {
     loader.load(
-      _hoardBaseUrl + key + '.glb?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0'),
+      _hoardBaseUrl + key + '.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
       (gltf) => {
         const proto = gltf.scene;
         try { _applyProceduralShipNormalMap(proto); } catch (_) {}
@@ -11356,7 +11404,11 @@ function handleNetEvent(evt, fromPeerId) {
     // (v32.76) The !c._advancing latch + the state guard make a duplicate camp_state a no-op.
     if (evt.advancing && !c._advancing && game.state !== 'roundEnd') {
       c._advancing = true;
-      try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}   
+      // (v36.27) Peer mirror of the leg advance: same staged rebuild. Each client
+      // runs its own stage, and the countdown is shortened by whatever its own
+      // stage cost, so a slower peer converges on the same wall-clock LAUNCH.
+      try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-leg-net', 'ENTERING THE NEXT LEG'); } catch (_) {}
+      try { if (window.Overlays && Overlays.warp) Overlays.warp(true); } catch (_) {}
       if (typeof _clearBossPortal === 'function') { try { _clearBossPortal(); } catch (_) {} }
       game.state = 'roundEnd';
       if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2);
@@ -21734,9 +21786,18 @@ function _hzSpawnCavernBots() {
   const g = _hzCavernGenome(cv.salt);
   cv.target = g.count;
   cv.doctrineName = g.doctrine.name;
-  const keys = (typeof _campWaveShips === 'function') ? _campWaveShips(3) : [];
-  if (!keys.length) { cv._noSpawn = true; return; }
-  const picks = []; for (let i = 0; i < g.count; i++) picks.push(keys[i % keys.length]);
+  // (v36.28) The picks are normally decided by _hzEnterCavern, two seconds and a
+  // whole staged world-swap earlier, precisely so the loading stage knows which
+  // hoard GLBs to parse + GPU-prime (see _entPrimeHoardKeys). Falling back to
+  // deciding them here keeps every other caller/ordering working unchanged —
+  // _hzCavernGenome is pure on the salt, so the doctrine and count are identical
+  // either way and only the moment _campShipRot advances moves.
+  let picks = (cv._picks && cv._picks.length) ? cv._picks : null;
+  if (!picks) {
+    const keys = (typeof _campWaveShips === 'function') ? _campWaveShips(3) : [];
+    if (!keys.length) { cv._noSpawn = true; return; }
+    picks = []; for (let i = 0; i < g.count; i++) picks.push(keys[i % keys.length]);
+  }
   Promise.all(picks.map(k => loadHoardModel(k))).then((protos) => {
     if (game._cavern !== cv) return;
     let spawnedN = 0;
@@ -21764,6 +21825,10 @@ function _hzSpawnCavernBots() {
 }
 function _hzEnterCavern(p) {
   if (game._cavern || (net && net.active)) return;
+  // (v36.27) Arm the staged world-swap BEFORE applyMapPreset below — see
+  // _rrStagedSwap and the setSandwichBiome note. This is the EXHIBITION rift
+  // portal, i.e. the owner's reported freeze path.
+  try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('zone-rift', 'ENTERING THE DEEP'); } catch (_) {}
   _hzPortalsDispose();
   if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; }
   const salt = (Math.random() * 0xffffffff) >>> 0;
@@ -21772,6 +21837,21 @@ function _hzEnterCavern(p) {
                    _noSpawnT: 0, _arrived: false };
   game._cavernSalt = salt;
   game._cavernBiome = p.biome;
+  // (v36.28) DECIDE THE GARRISON'S SHIPS NOW, not at spawn. _hzSpawnCavernBots
+  // fires on the first `playing` frame after arrival and used to be the one place
+  // in the game that first-touched a GLB in open play — its Promise.all resolved
+  // mid-combat, cloned N hulls and paid parse + geometry/texture upload + the
+  // driver's first-use validate in one frame (measured up to 235.9 ms on a cold
+  // key set). Choosing here hands _rrStagedSwap an exact key list to parse and
+  // prime behind the loading overlay. SPAWN TIMING IS UNCHANGED — only the moment
+  // the ships are *named* moves, and nothing else consumes _campShipRot between
+  // this line and the spawn (the hub's rift guards are the only other consumer
+  // and _hzPortalsFrame stands down the instant game._cavern exists).
+  try {
+    const _g = _hzCavernGenome(salt);
+    const _k = (typeof _campWaveShips === 'function') ? _campWaveShips(3) : [];
+    if (_k.length) { const _p = []; for (let i = 0; i < _g.count; i++) _p.push(_k[i % _k.length]); game._cavern._picks = _p; }
+  } catch (_) {}
   // CRITICAL: buildRoomGraphLevel derives the whole hub-vs-arena param set
   // from game.sandwichBiome ('mossy' => open-top/no-FOOT/no-pinch HUB terrain).
   // The hub leaves it 'mossy'; without this the "cavern" builds with hub
@@ -21788,6 +21868,10 @@ function _hzEnterCavern(p) {
 function _hzReturnToHub() {
   const cv = game._cavern;
   if (!cv) return;
+  // (v36.27) The REVERSE traverse, and the worst frame in the whole game before
+  // this: the hub rebuild (441 chunks + the city + 44 driver program links) ran
+  // in one frame, measured at 1851.3 ms.
+  try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('rift-home', 'RETURNING TO THE OVERWORLD'); } catch (_) {}
   // Kill the in-cavern rift-home ring NOW — it would otherwise linger in the
   // scene across the rebuild and haunt the next cavern as a dead ring.
   try { if (cv.ring) cv.ring.destroy(); } catch (_) {}
@@ -21975,6 +22059,17 @@ if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i
 if (typeof window !== 'undefined') window.__dbg = {
   get player() { return (typeof player !== 'undefined') ? player : null; },
   returnHub: () => _hzReturnToHub(),
+  // (v36.28) Entity-prime audit handles. `models()` is which ship/hoard GLBs are
+  // PARSED right now (the thing that decides whether a spawn costs 14 ms or
+  // 236 ms) ; `waveRot()` reads or sets _campWaveShips' rotation cursor, which is
+  // the only way to stage a deliberately COLD garrison from the console.
+  models: () => { try { return Object.keys(shipModelCache.loaded); } catch (_) { return null; } },
+  waveRot: (v) => {
+    try {
+      if (v != null) { const n = HOARD_SHIPS.length; _campShipRot = ((v % n) + n) % n; }
+      return _campShipRot;
+    } catch (_) { return null; }
+  },
 };
 
 function _swApplyAtmosphere() {
@@ -26766,6 +26861,7 @@ function _hubCityDispose() {
 // called every frame from the hub branch of gameLoop
 function _hubCityFrame(dt) {
   if (!game.hubCity) {
+    if (game._swapStaging) return;   // (v36.27) the staged swap owns the city build
     const T2 = game.sandwichTerrain;
     if (T2 && T2.ON && T2.HUB && T2.biome === 'mossy') { try { _hubCityInit(); } catch (_) {} }
     if (!game.hubCity) return;
@@ -27610,6 +27706,67 @@ function _clipBuild() {
   }
 }
 
+// (v36.27) THE CLIPMAP ENABLE, FACTORED OUT — and sliceable.
+// gameLoop turns the hub clipmap on the first frame after `_clipmap.on` goes
+// false (which initSandwichTerrain does on every hub build, deliberately, so a
+// rebuild can't reuse stale ghost mountains). That block does a FULL bake of
+// every level: _CLIP_LEVELS x (_CLIP_N+1)^2 _stGroundYCarved samples in one go.
+// Measured in the pane on the cavern -> hub return, v36.27 first cut: a single
+// 1170.4 ms frame, LoAF-attributed 1169 ms to the gameLoop callback. On the
+// launch path that cost is inside commitLoadout's already-covered block; on a
+// TRAVERSE it was the largest surviving frame by 6x, so the staged swap drives
+// it itself, one level per frame, via _clipEnableSliced.
+// ⚠ `_clipmap.enabling` makes gameLoop stand down while that runs. Without it
+// gameLoop re-enters every frame (on is still false) and redoes the whole bake.
+function _clipEnableLevel(L, fx, fz) {
+  const _st = 2 * L.spacing;
+  L.cx = Math.round(fx / _st) * _st; L.cz = Math.round(fz / _st) * _st;
+  _clipBakeLevel(L);
+  L.mesh.position.set(L.cx, 0, L.cz);
+  L.mesh.visible = true;
+}
+// Once the rings are live the per-chunk ground shells are redundant geometry
+// z-fighting the clipmap — drop them (this is the launch prebake's "phase A"
+// reason for existing: baking chunks before this point is pure waste).
+function _clipDropChunkGrounds() {
+  if (!game.sandwichChunks) return;
+  for (const _c of game.sandwichChunks.values()) {
+    if (_c.ground) {
+      try { if (_c.ground.parent) scene.remove(_c.ground); if (_c.ground.geometry) _c.ground.geometry.dispose(); } catch (_) {}
+      _c.ground = null;
+    }
+  }
+}
+function _clipEnableNow(fx, fz) {
+  _clipBuild();
+  for (const _L of _clipmap.levels) _clipEnableLevel(_L, fx, fz);
+  _clipmap.on = true;
+  _clipDropChunkGrounds();
+}
+async function _clipEnableSliced(fx, fz) {
+  // ⚠ Clear the claim on the early return too — the caller sets `enabling` long
+  // before this runs (see _rrStagedSwap), and leaving it set would freeze
+  // _clipUpdate for the rest of the stage.
+  if (_clipmap.on || !game._clipWantHub) { _clipmap.enabling = false; return 0; }
+  _clipmap.enabling = true;
+  let n = 0;
+  try {
+    _clipBuild();
+    for (const _L of _clipmap.levels) {
+      _clipEnableLevel(_L, fx, fz); n++;
+      await _warmupYield();
+    }
+    _clipmap.on = true;
+    _clipDropChunkGrounds();
+  } catch (e) {
+    console.warn('[clip] sliced enable failed -> streamer fallback', e);
+    game._clipWantHub = false;
+  } finally {
+    _clipmap.enabling = false;
+  }
+  return n;
+}
+
 // Per-frame follow : snap each level to a multiple of 2x its spacing (coarse verts land on fine
 // vertex lines), re-bake + reposition when the snapped centre changes (usually only L0 moves).
 function _clipUpdate(px, pz) {
@@ -27754,6 +27911,42 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
 // they drain the todo queue between hops (see the v35.84 tear-scan harness).
 if (typeof window !== 'undefined') window.__swStream = updateSandwichStream;
 
+// (v36.26) TIME-SLICED DRAIN — a per-frame streaming budget in MILLISECONDS
+// instead of in chunks, for the two places that are loading rather than flying:
+// the launch prebake (_prebakeWorldForLaunch) and the roundEnd->warmup rebuild
+// (gameLoop's warmup arm).
+// WHY MS AND NOT A CHUNK COUNT. One chunk is not one cost. A hub chunk with the
+// clipmap on is a near-empty record (ground shell suppressed by _clipmap.on,
+// ceiling suppressed for mossy) — hundreds per frame are free. An arena or
+// endless chunk bakes a ground AND a ceiling shell: ~6 ms here, and the v35.89
+// measurement behind the mobile 1/frame budget is 35-70 ms on a phone. A single
+// fixed count is therefore either a starvation budget on the hub or a
+// several-hundred-ms freeze on a phone. First measured attempt at this used a
+// flat 12 chunks/frame and produced six consecutive ~70 ms frames behind the
+// between-rounds ship picker on THIS desktop; the slice below caps that at one
+// overshoot instead.
+// ⚠ THE SLICE IS CHECKED AFTER EACH CALL, so the real bound is `sliceMs + the
+// cost of one call`. That is deliberate and it is what makes the mobile case
+// correct for free: when one chunk already exceeds the slice, the loop runs
+// exactly once and this degenerates to precisely today's 1-chunk/frame mobile
+// budget with no separate device constant to keep in step.
+// `maxCalls` bounds the OTHER end — updateSandwichStream rescans its whole view
+// square and sweeps every live chunk for foliage on every call, so on the hub
+// (where each call is ~free) an unbounded loop would burn the slice on bookkeeping.
+function _swDrainStream(px, pz, sliceMs, maxCalls) {
+  const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const lim = maxCalls || 64;
+  let total = 0;
+  for (let i = 0; i < lim; i++) {
+    const n = updateSandwichStream(px, pz, 1, 1, 1) | 0;
+    if (n <= 0) break;
+    total += n;
+    const t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (t - t0 >= (sliceMs || 12)) break;
+  }
+  return total;
+}
+
 // Called at level build: reset, then synchronously fill the map footprint (plus a
 // ring) so the whole pathway has mountains the instant the round starts.
 function initSandwichTerrain() {
@@ -27785,9 +27978,26 @@ function initSandwichTerrain() {
       }
     }
   } catch (e) { console.warn('[sandwich] init terrain failed:', e); }
-  try { _hubCityInit(); } catch (e) { console.warn('[hubcity] init failed:', e); }
+  // (v36.27) During a staged world-swap the city is built by _rrStagedSwap in a
+  // frame of its own (measured 195.5 ms — the single largest separable slice of
+  // the hub rebuild). _hubCityFrame's lazy re-init is gated on the same flag so
+  // it cannot fire it early in a random gameLoop frame instead.
+  if (!game._swapStaging) { try { _hubCityInit(); } catch (e) { console.warn('[hubcity] init failed:', e); } }
   if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {
     game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';
+    // ⚠ (v36.26) `game._swPreloading` — and with it the v33.47 "confirm ->
+    // loading(preload) -> cinematic -> play" ordering, the 28/14/14 preload
+    // streaming budget in gameLoop and the ENTERING THE OVERWORLD overlay — is
+    // armed ONLY on the !_clipWantHub arm, i.e. MOBILE/Quest. On desktop the hub
+    // clipmap always exists, so this line has never once run there: probed live
+    // at every phase boundary of a desktop hub launch, clipWantHub:true,
+    // swPreloading:false, preLaunchWaiting:false. That is why
+    // _launchSoloAfterCinematic's `MODE==='freeflight' && game._swPreloading`
+    // guard could never fire and 93% of the hub arrived after the cinematic.
+    // The replacement is mode-agnostic and unconditional: see
+    // _prebakeWorldForLaunch, chained onto commitLoadout's warmup promise. This
+    // branch is left intact because the mobile path still uses it and the two
+    // compose (the prebake finds nothing left to build after it, or vice versa).
     if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; }
     // (v34.96) Force a FRESH full clipmap bake for THIS build. A hub rebuild
     // (e.g. returning from a zone-rift cavern) otherwise reuses the previous
@@ -27826,6 +28036,20 @@ if (typeof window !== 'undefined') window.setSandwichTerrain = setSandwichTerrai
 function setSandwichBiome(name) {
   if (!_SW_BIOMES[name]) { console.warn('[sandwich] unknown biome', name, '— options:', Object.keys(_SW_BIOMES).join(', ')); return; }
   game.sandwichBiome = name;
+  // (v36.27) ⚠ WORLD-SWAP TRAVERSE: skip the immediate rebuild.
+  // Every portal traverse (_hzEnterCavern, _hzReturnToHub, _enterCampaignFromHub,
+  // the campaign leg-advance and the finale hub-return) calls applyMapPreset for
+  // the DESTINATION theme and then hands off to the roundEnd -> warmup rebuild
+  // ~2 s later. applyMapPreset lands here, and this line rebuilt `game.currentLevel`
+  // — the level the player is STILL flying — with the destination's biome. That
+  // whole world was then thrown away by the real rebuild two seconds later.
+  // Measured on v36.26 in the pane, hub -> zone-rift cavern: a 317.1 ms frame with
+  // dChunks -415 and dTreeBatches -441, plus a 188.7 ms follow-on frame; hub ->
+  // campaign rift: 344.3 ms, dChunks -414. Both are pure waste and both are frames
+  // the player is flying through. `_swapPending` is set by _beginWorldSwap at each
+  // of those entry points and consumed by updateRoundSystem's roundEnd branch.
+  // The biome write above still lands, so the destination rebuild reads it.
+  if (typeof _swapArmed === 'function' && _swapArmed()) return name;
   try { if (typeof buildRoomGraphLevel === 'function' && game.currentLevel) buildRoomGraphLevel(game.currentLevel); } catch (e) { console.warn(e); }
   return name;
 }
@@ -28630,9 +28854,10 @@ function preloadShipModels() {
   const loader = new THREE.GLTFLoader();
   const jobs = Object.entries(SHIP_MODELS).map(([key, spec]) => new Promise(resolve => {
     loader.load(
-      // Build-stamped: ship model updates (e.g. texture re-optimization)
-      // must bust the browser's disk cache, same as the monster GLBs.
-      _shipsBaseUrl + spec.url + '?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0'),
+      // (v36.25) Art-version stamped, not build-stamped: ship model updates
+      // must bust the disk cache, but a code-only build must NOT — see
+      // ASSET CONTENT VERSIONS (~L3796). Same for the monster/hoard/ring GLBs.
+      _shipsBaseUrl + spec.url + _MODEL_CACHE_BUST,
       gltf => {
         const proto = gltf.scene;
         // Procedural micro-detail normal map. Gives the hull surface
@@ -39696,9 +39921,9 @@ function _loadNextMonsterModel() {
     return;
   }
   loader.load(
-    // Build-stamped URL: model updates ship with a version bump, so the
-    // browser's disk cache can't serve a stale GLB after we re-optimize.
-    MONSTER_BASE_URL + m.def.key + '.glb?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0'),
+    // (v36.25) Art-version stamped (was LSS_BUILD): model updates still bust
+    // the disk cache, a code-only build no longer does.
+    MONSTER_BASE_URL + m.def.key + '.glb' + _MODEL_CACHE_BUST,
     gltf => {
       try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
       // 2.5 s breather between parses spreads the main-thread cost so no
@@ -39862,7 +40087,7 @@ function _preloadChampionShellModel() {
   _champShellLoading = true;
   let loader = null;
   try { loader = new THREE.GLTFLoader(); } catch (_) { _champShellLoading = false; return; }
-  loader.load(MONSTER_BASE_URL + 'Sphere.glb?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0'),
+  loader.load(MONSTER_BASE_URL + 'Sphere.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version
     g => { _champShellProto = g.scene; },
     undefined,
     err => { console.warn('[champ-shell] Sphere.glb load failed:', err && err.message); });
@@ -40084,7 +40309,7 @@ function _preloadCyanRing() {
   _cyanRingLoading = true;
   let loader = null;
   try { loader = new THREE.GLTFLoader(); } catch (_) { _cyanRingLoading = false; return; }
-  loader.load(_ringBaseUrl + 'cyanring.glb?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0'),
+  loader.load(_ringBaseUrl + 'cyanring.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version
     g => { _cyanRingProto = g.scene; },
     undefined,
     err => { _cyanRingLoading = false; console.warn('[portal] cyanring.glb load failed:', err && err.message); });
@@ -41554,6 +41779,7 @@ function _programEnvSig() {
     ].join('|');
   } catch (_) { return null; }   // null NEVER memoizes — the next call re-pins
 }
+let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
 function _pinCombatEffectPrograms() {
   try {
     if (typeof renderer === 'undefined' || !renderer ||
@@ -41641,6 +41867,11 @@ function _pinCombatEffectPrograms() {
         }
       }
     }
+    // (v36.27) BUILD-ONLY mode. _pinCombatEffectProgramsStaged needs the
+    // _fxPinGroup construction above (it is a 130-line one-shot) but does its own
+    // compiles, asynchronously. Nothing else sets this flag and it is always
+    // cleared in the caller's finally.
+    if (_pinBuildOnly) return;
     // (2026-06-12b) Mobile GPUs compile slowly and have no parallel-link
     // luxury; one big synchronous compile at round start stalls the main
     // thread long enough to starve the Web Audio scheduler (audible sound
@@ -41712,6 +41943,100 @@ function _pinCombatEffectPrograms() {
   } catch (_) {
     try { if (_fxPinGroup && _fxPinGroup.parent) _fxPinGroup.parent.remove(_fxPinGroup); } catch (__) {}
     try { if (_modelWarmGroup && _modelWarmGroup.parent === scene) scene.remove(_modelWarmGroup); } catch (__) {}
+  }
+}
+
+// (v36.27) THE SAME PIN, ASYNCHRONOUS — for the staged world-swap traverse only.
+// The desktop body above does three whole-scene renderer.compile() calls back to
+// back. Measured on the cavern -> hub return, in one frame: 216 ms with a warm
+// ANGLE program cache and 906.9 ms with a cold one (identical dProg +28 both
+// times), which made it the largest surviving frame of the traverse.
+// The cost is NOT the compile — it is the blocking LINK_STATUS query, which is
+// exactly what KHR_parallel_shader_compile exists to avoid. `renderer.compileAsync`
+// (present here; three r165, extension confirmed live) queues the same programs
+// and resolves when the driver says they are ready, so the main thread is free in
+// between instead of parked inside getProgramParameter.
+// ⚠ Not used on the launch path. commitLoadout's pin is synchronous by design
+// (see the note above _pinPostFXPrograms about awaits vs. the first hub frame),
+// and this is only correct where a loading screen is already up and something is
+// awaiting the result.
+// ⚠ The render target is bound and unbound INSIDE one tick for the rtScene pass.
+// Holding it across an await breaks the gameLoop frame in between — the same
+// rule _prebakeGpuPrime documents.
+// ⚠ `_pinnedEnvSig` is only written once all three passes land, so a throw
+// mid-way leaves the next caller free to retry (mirrors the mobile branch).
+async function _pinCombatEffectProgramsStaged() {
+  try {
+    if (typeof renderer === 'undefined' || !renderer ||
+        typeof scene === 'undefined' || !scene ||
+        typeof camera === 'undefined' || !camera) return 0;
+    const _sig = _programEnvSig();
+    // ⚠ NO EARLY BAIL ON THE SIGNATURE, unlike the sync body. _programEnvSig
+    // describes the RENDERER environment (fog kind, env map, shadow/tone-mapping
+    // settings, light counts) — none of which a world swap has to change. But the
+    // scene's own MATERIALS are all new: clipmap rings, hub city, water, weather,
+    // the rebuilt terrain. Measured on the cavern -> hub return with the memo
+    // still in place: this returned instantly, and 28 of those hub programs then
+    // linked at their first real draw in a single 960.2 ms gameLoop frame. The
+    // memo is right about the pin GROUP and useless for the live scene, so the
+    // compiles below always run.
+    if (!_fxPinGroup) {
+      _pinBuildOnly = true;
+      try { _pinCombatEffectPrograms(); } finally { _pinBuildOnly = false; }
+    }
+    // three's compileAsync runs compile() SYNCHRONOUSLY and then polls
+    // KHR_parallel_shader_compile for readiness — so the program set is decided
+    // (and the render target + scene contents are read) at call time, and only
+    // the WAIT is deferred.
+    // ⚠ THAT IS WHY THE PIN GROUPS ARE PARENTED ONLY FOR THE CALL, NOT ACROSS
+    // THE AWAIT, and why the render target is unbound the same way. Leaving them
+    // parented is not merely untidy: gameLoop renders in between, and DRAWING the
+    // model-warm group is what triggers the driver's first-use validate for every
+    // one of its programs. Measured, with them left in: a 696.4 ms gameLoop frame
+    // (LoAF: 691 ms in the animation callback, dProg 0 — pure driver validate).
+    // The synchronous body above has always added and removed them inside one
+    // frame, so they are never drawn there either; this keeps that exactly.
+    const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    let _mw = null;
+    try { _mw = (typeof _buildModelWarmGroup === 'function') ? _buildModelWarmGroup() : null; } catch (_) {}
+    const _compile = async (rt) => {
+      let p = null;
+      const _addedMw = !!(_mw && !_mw.parent);
+      try {
+        if (rt) renderer.setRenderTarget(rt);
+        if (_fxPinGroup) scene.add(_fxPinGroup);
+        if (_addedMw) scene.add(_mw);
+        if (typeof renderer.compileAsync === 'function') p = renderer.compileAsync(scene, camera);
+        else renderer.compile(scene, camera);
+      } finally {
+        if (_addedMw) { try { scene.remove(_mw); } catch (_) {} }
+        try { if (_fxPinGroup) scene.remove(_fxPinGroup); } catch (_) {}
+        if (rt) { try { renderer.setRenderTarget(null); } catch (_) {} }
+      }
+      if (p) { try { await p; } catch (_) {} }
+    };
+    try {
+      const _pTM = renderer.toneMapping;
+      const _pNO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+      try { renderer.toneMapping = _pNO; await _compile(null); } catch (_) {}
+      try { renderer.toneMapping = _pTM; } catch (_) {}
+      await _warmupYield();
+      await _compile(null);
+      await _warmupYield();
+      // The gameplay key: everything real is drawn into postFX.rtScene.
+      if (_rt) { await _compile(_rt); await _warmupYield(); }
+    } finally {
+      try { if (_mw && _mw.parent === scene) scene.remove(_mw); } catch (_) {}
+      try { if (_fxPinGroup && _fxPinGroup.parent) _fxPinGroup.parent.remove(_fxPinGroup); } catch (_) {}
+      try { renderer.setRenderTarget(null); } catch (_) {}
+    }
+    _pinnedEnvSig = _sig;
+    return 1;
+  } catch (e) {
+    console.warn('[swap] async program pin failed:', e);
+    try { if (_fxPinGroup && _fxPinGroup.parent) _fxPinGroup.parent.remove(_fxPinGroup); } catch (__) {}
+    try { if (_modelWarmGroup && _modelWarmGroup.parent === scene) scene.remove(_modelWarmGroup); } catch (__) {}
+    return 0;
   }
 }
 
@@ -42094,6 +42419,693 @@ function _warmRealCombatFX() {
     W(() => { if (_mwg && _mwg.parent) scene.remove(_mwg); });
   } catch (_) {}
 }
+
+// ============================================================================
+// (v36.26) WORLD PREBAKE — THE LOADING CONTRACT
+//
+// OWNER'S SPEC, verbatim: "from CONFIRM/launch to the cinematic STARTING is the
+// ONLY loading time. When the cinematic starts, in EVERY mode, loading is DONE —
+// world built, spawn-radius terrain chunks baked, models parsed, GPU uploads
+// primed, shaders linked. Nothing may stream/build/upload after the cinematic
+// begins."
+//
+// WHAT WAS VIOLATING IT (measured on v36.25, RTX 5050 @ 144 Hz, per-frame
+// renderer.info deltas sampled from a rAF that stays ahead of setAnimationLoop):
+//
+//   mode         chunks at cinematic START -> at first `playing` frame -> final
+//   EXHIBITION   30  -> 362 -> 441   (411 of 441 = 93% built AFTER)
+//   ENDLESS      35  -> 361 -> 361   (326 of 361 = 90% built AFTER)
+//   ELIMINATION  35  -> 110 -> 142   (107 of 142 = 75% built AFTER)
+//   EXHIBITION tree batches: 5 at cinematic start, 437 at first playing frame.
+//
+// THREE SEPARATE MECHANISMS PRODUCED THAT:
+//   1. `game._swPreloading` — the v33.47 "confirm -> loading(preload) -> cinematic
+//      -> play" gate — is DEAD CODE ON DESKTOP. initSandwichTerrain only arms it
+//      in the `!game._clipWantHub` arm, and on desktop the hub clipmap always
+//      exists, so `_clipWantHub` is true and `_swPreloading` is never set. Probed
+//      live at every phase boundary: clipWantHub:true, swPreloading:false. So
+//      _launchSoloAfterCinematic's freeflight guard could never fire and the
+//      ENTERING THE OVERWORLD overlay never showed.
+//   2. With that gate dead, the streamer never took its preload budget
+//      (28 chunks / 14 grass / 14 tree batches per frame) — it ran the gameplay
+//      budget instead, which for freeflight is `updateSandwichStream(x, z, 1)`
+//      with gLim/tLim defaulting to 1. ONE chunk and ONE foliage batch per frame.
+//   3. The foliage budget is per-FRAME for a fixed-size job, so world-readiness
+//      scaled with refresh rate. The hub's whole tree build is 320 ms of CPU
+//      (441 batches, mean 0.73 ms, worst 2.1 ms — the game's own _fpData). At
+//      1/frame that is 441 frames: 3.1 s at 144 Hz (which just fits the launch
+//      countdown, so this machine mostly got away with it) but 7.4 s at 60 Hz,
+//      i.e. ~260 batches still building INTO live gameplay. That is the owner's
+//      "still loading stuff after the cinematic".
+//
+// THE FIX IS THIS FUNCTION, and it is deliberately mode-agnostic: it is chained
+// onto the warmup promise in commitLoadout, so EVERY solo mode and every
+// multiplayer peer passes through it before the cinematic can start, instead of
+// freeflight having a bespoke gate that silently did nothing.
+//
+// FOUR PHASES, all behind the already-painted PREPARING ARENA overlay:
+//   A. one rAF turn so gameLoop's own clipmap-enable block runs first. That
+//      block DISPOSES the ground shell of every chunk baked before `_clipmap.on`
+//      flips, so baking ahead of it is pure waste (hub only, but harmless
+//      elsewhere).
+//   B. drive updateSandwichStream to COMPLETION around the spawn point with a
+//      real budget, yielding a frame between passes. "Complete" = two
+//      consecutive passes that build nothing, which is exactly the streamer's
+//      own definition (game._swPreloadZero used the same test).
+//   C. _warmRealCombatFX() — hoisted here from updateRoundSystem, where it fired
+//      at warmupTimer<=2, i.e. AFTER the cinematic. It is signature-memoized, so
+//      the two call sites left behind become no-ops rather than duplicate work.
+//   D. GPU PRIME. Draw the real `scene` with the real `camera` from the spawn
+//      pose, 12 poses covering the full sphere of view, bound to postFX.rtScene.
+//      This is the PART 13 warmup discipline (rule 5 in lss.map.md): the bound
+//      render target, scene.fog and the per-type light counts are all terms of
+//      three's program cache key, so only a render of the LIVE scene into the
+//      gameplay target links the programs gameplay will actually use. The 360
+//      degree sweep is the point — a forward-facing render only uploads the
+//      geometry inside one 90 degree frustum, which is why v36.25 measured a
+//      whole second averaging 34.65 ms/frame of GPU the first time the player
+//      turned around, and a 2243 ms first `playing` frame carrying +22 geometry
+//      uploads and +21 driver program validates in one draw.
+//
+// ⚠ CAPS, because a prebake that hangs is worse than a prebake that misses.
+// _PREBAKE_MAX_MS bounds the whole thing and each phase re-checks it; the
+// terrain loop also has a hard pass ceiling. Blowing a cap logs and launches.
+// ⚠ It NEVER rejects. commitLoadout's launch chain treats a prebake failure the
+// same as a shader-warmup failure: log and launch anyway.
+// ⚠ NOT run for the between-rounds swap (midMatch). There is no loading overlay
+// on that path — the countdown is already running and a 12-pass sweep would be
+// a visible stutter, not hidden loading.
+// Report: window.__prebake() -> the last run's phase timings and counts.
+// ============================================================================
+const _PREBAKE = { on: false, last: null };
+const _PREBAKE_MAX_MS     = 12000;   // hard ceiling for the whole prebake
+const _PREBAKE_SLICE_MS   = 40;      // ms of streaming per yielded frame (see _swDrainStream)
+const _PREBAKE_MAX_CALLS  = 64;      // inner streamer calls per pass
+const _PREBAKE_MAX_PASSES = 900;     // belt: pass ceiling on top of the ms ceiling
+function _pbNow() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
+function _pbSub(txt) {
+  // Sub-line only: the main line stays PREPARING ARENA so this reads as progress
+  // inside the existing screen rather than a second loading screen. showLoadingOverlay
+  // is the v36.24 audio-hold engage point and is idempotent, so calling it here is safe.
+  try { showLoadingOverlay(null, txt); } catch (_) {}
+}
+async function _prebakeWorldForLaunch() {
+  if (_PREBAKE.on) return _PREBAKE.last;
+  _PREBAKE.on = true;
+  game._worldPrebaking = true;
+  const t0 = _pbNow();
+  const _cnt = () => (game.sandwichChunks ? game.sandwichChunks.size : 0);
+  const _tb = () => { let n = 0; if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) if (c.treesBuilt) n++; return n; };
+  const rep = {
+    mode: (typeof LSS !== 'undefined') ? LSS.MODE : '?',
+    map: game.selectedMap, ch0: _cnt(), tb0: _tb(),
+    ch1: 0, tb1: 0, passes: 0, gpuPasses: 0, capped: null, ms: {}, totalMs: 0,
+  };
+  try {
+    // ---- A. let gameLoop take one turn (hub clipmap enable) ----
+    const _tA = _pbNow();
+    await _warmupYield();
+    rep.ms.clip = Math.round(_pbNow() - _tA);
+
+    // ---- B. terrain + foliage to completion around the spawn ----
+    const _tB = _pbNow();
+    const T = game.sandwichTerrain;
+    if (T && T.ON && player && player.position && typeof updateSandwichStream === 'function') {
+      const px = player.position.x, pz = player.position.z;
+      let zero = 0;
+      for (let n = 0; n < _PREBAKE_MAX_PASSES; n++) {
+        let built = 0;
+        try { built = _swDrainStream(px, pz, _PREBAKE_SLICE_MS, _PREBAKE_MAX_CALLS) | 0; }
+        catch (e) { console.warn('[prebake] streamer threw, stopping terrain phase:', e); break; }
+        rep.passes++;
+        if (built <= 0) { if (++zero >= 2) break; } else zero = 0;
+        if (_pbNow() - t0 > _PREBAKE_MAX_MS) { rep.capped = 'terrain'; break; }
+        if ((n & 3) === 0) _pbSub('building the world · ' + _cnt() + ' chunks');
+        await _warmupYield();
+      }
+    }
+    rep.ms.terrain = Math.round(_pbNow() - _tB);
+    rep.ch1 = _cnt(); rep.tb1 = _tb();
+
+    // ---- C. real combat-FX programs, in the finished environment ----
+    const _tC = _pbNow();
+    _pbSub('compiling effects');
+    try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
+    rep.ms.fx = Math.round(_pbNow() - _tC);
+    await _warmupYield();
+
+    // ---- C2. (v36.28) entity models: parse + first-draw everything that can
+    //          SPAWN in this session, so no runtime spawn ever first-touches a
+    //          GLB in a gameplay frame. See _primeEntityModels. ----
+    const _tE = _pbNow();
+    _pbSub('priming ships');
+    try { rep.ent = await _primeEntityModels(_entPrimePlan(), t0, _ENT_PRIME_MAX_MS); } catch (_) {}
+    rep.ms.ent = Math.round(_pbNow() - _tE);
+
+    // ---- D. GPU prime: real scene, real camera, full sphere, rtScene bound ----
+    const _tD = _pbNow();
+    if (_pbNow() - t0 < _PREBAKE_MAX_MS) {
+      _pbSub('priming the GPU');
+      rep.gpuPasses = await _prebakeGpuPrime();
+    } else if (!rep.capped) rep.capped = 'gpu-skipped';
+    rep.ms.gpu = Math.round(_pbNow() - _tD);
+  } catch (e) {
+    console.warn('[prebake] failed (launching anyway):', e);
+    rep.error = String((e && e.message) || e);
+  } finally {
+    _PREBAKE.on = false;
+    game._worldPrebaking = false;
+    rep.totalMs = Math.round(_pbNow() - t0);
+    _PREBAKE.last = rep;
+    console.log('[prebake] ' + rep.mode + '/' + rep.map + ' ' + rep.totalMs + 'ms' +
+      ' chunks ' + rep.ch0 + '->' + rep.ch1 + ' trees ' + rep.tb0 + '->' + rep.tb1 +
+      ' passes=' + rep.passes + ' gpu=' + rep.gpuPasses +
+      ' [' + Object.keys(rep.ms).map(k => k + ' ' + rep.ms[k]).join(', ') + ']' +
+      (rep.capped ? ' CAPPED:' + rep.capped : ''));
+  }
+  return rep;
+}
+if (typeof window !== 'undefined') window.__prebake = () => _PREBAKE.last;
+
+// The sphere sweep. Twelve poses (4 yaws x 3 pitches) at a widened FOV from the
+// spawn point, each rendered into postFX.rtScene. Twelve real draws, not
+// renderer.compile — the v34.19 lesson repeated in _warmRealCombatFX and
+// _pinPostFXPrograms: compile() links the program but only a DRAW uploads the
+// geometry/texture and forces the driver's first-use validate, and that validate
+// is what the profile clocked as a 21.7 ms burst of getProgramParameter across
+// nine frames.
+// ⚠ The camera pose is re-applied on EVERY pass, not once: gameLoop keeps
+// running between the yields below and its warmup branch writes camera.position
+// and camera.quaternion from the player every frame.
+// ⚠ The render target is unbound before every yield so the gameLoop frame in
+// between renders normally.
+async function _prebakeGpuPrime() {
+  if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
+      typeof camera === 'undefined' || !camera || typeof THREE === 'undefined') return 0;
+  if (renderer.xr && renderer.xr.isPresenting) return 0;      // headset owns its own passes
+  const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+  const home = (player && player.position) ? player.position.clone() : camera.position.clone();
+  const pFov = camera.fov, pNear = camera.near, pFar = camera.far;
+  const pPos = camera.position.clone(), pQuat = camera.quaternion.clone();
+  const e = new THREE.Euler(0, 0, 0, 'YXZ');
+  const PITCH = [0, -0.6, 0.6];
+  let passes = 0;
+  try {
+    for (let p = 0; p < PITCH.length; p++) {
+      for (let y = 0; y < 4; y++) {
+        camera.position.copy(home);
+        camera.fov = 130;                       // wide: 4 yaws then cover the ring with overlap
+        camera.near = pNear; camera.far = pFar;
+        e.set(PITCH[p], y * Math.PI * 0.5, 0);
+        camera.quaternion.setFromEuler(e);
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(true);
+        if (rt) renderer.setRenderTarget(rt);
+        renderer.render(scene, camera);
+        passes++;
+      }
+      if (rt) renderer.setRenderTarget(null);
+      await _warmupYield();                     // let the driver flush each ring
+    }
+  } catch (err) {
+    console.warn('[prebake] gpu prime pass failed:', err);
+  } finally {
+    try { renderer.setRenderTarget(null); } catch (_) {}
+    try {
+      camera.position.copy(pPos); camera.quaternion.copy(pQuat);
+      camera.fov = pFov; camera.near = pNear; camera.far = pFar;
+      camera.updateProjectionMatrix(); camera.updateMatrixWorld(true);
+    } catch (_) {}
+  }
+  return passes;
+}
+
+// ============================================================================
+// (v36.28) ENTITY PRIME — the v36.26 contract generalised from TERRAIN to the
+// things that SPAWN.
+//
+// THE SPEC IS UNCHANGED (owner): "when the cinematic starts, in EVERY mode,
+// loading is DONE — world built, chunks baked, MODELS PARSED, GPU uploads
+// primed, shaders linked." v36.26/36.27 delivered the terrain half. The half
+// left behind was every runtime spawn that first-touches a GLB while
+// `game.state === 'playing'` — the cost is identical in kind (main-thread GLTF
+// parse, then geometry + texture upload and the driver's first-use validate at
+// the first real DRAW), it just arrives on a combat frame instead of a terrain
+// one.
+//
+// MEASURED, v36.27, live pane @144 Hz (budget 6.94 ms), worst PLAYING frame of
+// the spawn event:
+//   _hzSpawnCavernBots  (zone-rift garrison)   up to 235.9 ms on a COLD key set
+//   _hzGuardsFrame      (hub rift guards)      same shape, same machinery
+//   EndlessMode._spawnWave, first wave          26.0 ms   (second wave 10.7)
+//   spawnBots / assault champion field          18.9 ms   (the transition frame)
+//   OutskirtsMonster.attachModel, per model     12-20 ms  x6  — NOT fixed, see below
+// The cavern/guard numbers swing enormously with luck, which is the real bug:
+// the hub's own traffic (_hcTrafficInit) happens to parse 14 of the 22 hoard
+// GLBs, so whether a garrison costs 14 ms or 236 ms depends on whether
+// _campWaveShips' rotation landed inside that set. Priming removes the dice.
+//
+// WHAT IT DOES. For a key list decided by _entPrimePlan():
+//   1. loadHoardModel() any GLB not already parsed — awaited, so the parse lands
+//      behind the loading overlay instead of on a combat frame;
+//   2. build the REAL mesh with the REAL factory (createShipMesh ->
+//      buildModelShipMesh, i.e. exactly what `new Bot(...)` builds), add it to
+//      the LIVE scene, render ONE frame into postFX.rtScene, remove it.
+// Step 2 is the whole point and it is the PART 13 rule-5 discipline again: the
+// bound render target, scene.fog and the per-type light counts are all terms of
+// three's program cache key, and only a real DRAW (not renderer.compile) uploads
+// the geometry/textures and forces the driver's first-use validate.
+//
+// ⚠ ADD -> RENDER -> REMOVE INSIDE ONE SYNCHRONOUS BLOCK, never across an await.
+// This is the v36.27 lesson repeated verbatim: leaving a warm group parented lets
+// gameLoop draw it, which both shows the ships on screen and moves the validate
+// back into an ordinary frame (measured there as 696.4 ms).
+// ⚠ `frustumCulled = false` on every child, parked at y = -100000 — the draw must
+// happen, the pixels must not.
+// ⚠ NOTHING IS DISPOSED. The geometry and textures are SHARED with the cached
+// proto (Object3D.clone copies references), so they stay GPU-resident for the
+// page as long as the proto lives; the materials are held in _ENT_PRIME.mats
+// because three refcounts programs per material and a dispose would delete the
+// very program this just linked (the same reason _buildModelWarmGroup keeps
+// window.__lssModelWarmMats).
+// ⚠ PER-KEY MEMO (_ENT_PRIME.keys) — a second traverse in the same page is a
+// no-op, so the cost below is paid once per key per session, not per swap.
+//
+// SCOPE, per mode (see _entPrimeHoardKeys) — this is where the loading-time
+// budget is actually spent, so it is deliberately narrow:
+//   hub_overworld / campaign legs : the whole 22-entry HOARD_SHIPS pool. There is
+//     no smaller honest subset — rift guards take 4 keys, a cavern 3, every
+//     campaign wave 3, all from one walking rotation — and the hub already parses
+//     14 of them for its traffic, so the marginal cost is the other 8.
+//   zone-rift cavern              : EXACTLY game._cavern._picks. The destination
+//     knows its own garrison (v36.28, _hzEnterCavern), so nothing else is parsed.
+//   endless / elimination / race / assault : no hoard ships exist there at all.
+// The playable SHIP_MODELS set (7 keys) is primed everywhere and is nearly free —
+// those GLBs are already parsed by the boot preload, so it is 7 clones + 1 draw.
+//
+// ⚠ FOUND AND DELIBERATELY NOT PRIMED: the six OutskirtsMonster GLBs. They are
+// 20-45 MB each (~190 MB total), stream one at a time starting 6 s into play, and
+// measure 12-20 ms per attach — already under a dropped frame at 144 Hz thanks to
+// v36.17's in-context warm. Parsing 190 MB behind the loading screen would add
+// well over ten seconds to endless/elimination/race for a cost that is currently
+// six sub-33 ms frames spread over 15 s. The trade is not worth it.
+// Report: window.__entPrime().
+// ============================================================================
+const _ENT_PRIME = { keys: new Set(), mats: [], last: null };
+const _ENT_PRIME_MAX_MS = 5000;   // own ceiling, on top of the caller's _PREBAKE_MAX_MS
+const _ENT_PRIME_BATCH  = 4;      // keys parsed+drawn per yielded frame
+const _ENT_PRIME_MAT_CAP = 600;   // belt on the keep-alive array
+
+// The playable hulls a bot dealer can hand out. game._botShipDeal is the actual
+// hand when it exists, but endless deals none until its first wave and the
+// between-round re-deal can move it, so the whole SHIP_MODELS catalog is primed:
+// all seven are already parsed by the boot preload, making this 7 clones.
+function _entPrimeShipKeys() {
+  const out = [];
+  try {
+    const deal = (typeof game !== 'undefined') ? game._botShipDeal : null;
+    if (deal) {
+      for (const k of (deal.enemy || [])) if (k && out.indexOf(k) < 0) out.push(k);
+      for (const k of (deal.friendly || [])) if (k && out.indexOf(k) < 0) out.push(k);
+    }
+    if (typeof SHIP_MODELS !== 'undefined') for (const k in SHIP_MODELS) if (out.indexOf(k) < 0) out.push(k);
+  } catch (_) {}
+  return out;
+}
+
+// The hoard hulls THIS session/level can spawn. See the SCOPE note above.
+function _entPrimeHoardKeys() {
+  const out = [];
+  try {
+    if (typeof HOARD_SHIPS === 'undefined') return out;
+    // A zone-rift cavern names its own garrison at _hzEnterCavern, two seconds
+    // before this runs. Prime that and nothing else.
+    const cv = (typeof game !== 'undefined') ? game._cavern : null;
+    if (cv && cv._picks && cv._picks.length) {
+      for (const k of cv._picks) if (k && out.indexOf(k) < 0) out.push(k);
+      return out;
+    }
+    const map  = (typeof game !== 'undefined') ? (game.selectedMap || '') : '';
+    const mode = (typeof LSS !== 'undefined') ? LSS.MODE : '';
+    if (mode === 'campaign' || /^hub_/.test(map) || /^camp_/.test(map)) {
+      for (const k of HOARD_SHIPS) if (out.indexOf(k) < 0) out.push(k);
+      if (typeof NEMESIS_SHIP === 'string' && out.indexOf(NEMESIS_SHIP) < 0) out.push(NEMESIS_SHIP);
+    }
+  } catch (_) {}
+  return out;
+}
+
+function _entPrimePlan() { return _entPrimeShipKeys().concat(_entPrimeHoardKeys()); }
+
+async function _primeEntityModels(keys, tStart, budgetMs) {
+  const t0 = _pbNow();
+  const rep = { asked: (keys && keys.length) || 0, memo: 0, parsed: 0, drawn: 0, passes: 0, capped: null, ms: 0 };
+  try {
+    if (!keys || !keys.length) return rep;
+    // A/B knob (window.__entPrimeOff = 1) — this is how the before/after numbers
+    // in lss.map.md were taken on ONE build, one seed and one rotation cursor,
+    // rather than across two page loads whose hub genome deals a different
+    // traffic model set and therefore a different set of already-warm keys.
+    if (typeof window !== 'undefined' && window.__entPrimeOff) { rep.capped = 'off'; return rep; }
+    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
+        typeof camera === 'undefined' || !camera || typeof THREE === 'undefined' ||
+        typeof createShipMesh !== 'function' || typeof shipModelCache === 'undefined') return rep;
+    if (renderer.xr && renderer.xr.isPresenting) { rep.capped = 'xr'; return rep; }   // headset owns its own passes
+    const cap = (typeof budgetMs === 'number') ? budgetMs : _ENT_PRIME_MAX_MS;
+    const todo = [];
+    for (const k of keys) {
+      if (!k) continue;
+      if (_ENT_PRIME.keys.has(k)) { rep.memo++; continue; }
+      if (todo.indexOf(k) < 0) todo.push(k);
+    }
+    const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    // Fleet B green: bots wearing a hoard hull are always on Fleet B, and the
+    // team tint is a material COLOR, not a program-key term, so one pass covers
+    // both sides.
+    const teamCol = 0x44bb44;
+    for (let i = 0; i < todo.length; i += _ENT_PRIME_BATCH) {
+      if (_pbNow() - t0 > cap) { rep.capped = 'budget'; break; }
+      if (tStart != null && _pbNow() - tStart > _PREBAKE_MAX_MS) { rep.capped = 'stage'; break; }
+      const batch = todo.slice(i, i + _ENT_PRIME_BATCH);
+      // ---- parse (off-frame; memoized by loadHoardModel / the boot preload) ----
+      const need = [];
+      for (const k of batch) {
+        if (shipModelCache.loaded && shipModelCache.loaded[k]) continue;
+        if (typeof loadHoardModel === 'function' && typeof HOARD_SHIPS !== 'undefined' && HOARD_SHIPS.indexOf(k) >= 0) need.push(k);
+      }
+      if (need.length) {
+        try { await Promise.all(need.map((k) => loadHoardModel(k))); rep.parsed += need.length; } catch (_) {}
+      }
+      // ---- build + draw: ONE synchronous block, add -> render -> remove ----
+      const built = [];
+      try {
+        for (const k of batch) {
+          if (!shipModelCache.loaded || !shipModelCache.loaded[k]) continue;
+          const lo = (typeof LOADOUTS !== 'undefined' && LOADOUTS[k]) ? LOADOUTS[k]
+                   : ((typeof LOADOUTS !== 'undefined') ? LOADOUTS['VORTEX'] : null);
+          const ch = (lo && typeof CHASSIS !== 'undefined') ? CHASSIS[lo.chassis] : null;
+          if (!ch) continue;
+          let m = null;
+          try { m = createShipMesh(ch, teamCol, k); } catch (_) { m = null; }
+          if (!m || (m.userData && m.userData.isProceduralFallback)) continue;
+          m.position.set(0, -100000, 0);
+          m.traverse((o) => {
+            o.frustumCulled = false;
+            if (!o.material) return;
+            const ms = Array.isArray(o.material) ? o.material : [o.material];
+            for (const mm of ms) if (mm && _ENT_PRIME.mats.length < _ENT_PRIME_MAT_CAP) _ENT_PRIME.mats.push(mm);
+          });
+          built.push(m);
+          scene.add(m);
+          _ENT_PRIME.keys.add(k);
+        }
+        if (built.length) {
+          if (rt) renderer.setRenderTarget(rt);
+          renderer.render(scene, camera);
+          rep.drawn += built.length;
+        }
+      } catch (e) {
+        console.warn('[entprime] batch failed:', e);
+      } finally {
+        for (const m of built) { try { scene.remove(m); } catch (_) {} }
+        try { renderer.setRenderTarget(null); } catch (_) {}
+      }
+      rep.passes++;
+      await _warmupYield();
+    }
+  } catch (e) {
+    console.warn('[entprime] failed (launching anyway):', e);
+    rep.error = String((e && e.message) || e);
+  } finally {
+    rep.ms = Math.round(_pbNow() - t0);
+    _ENT_PRIME.last = rep;
+  }
+  return rep;
+}
+if (typeof window !== 'undefined') window.__entPrime = () => ({ last: _ENT_PRIME.last, primed: Array.from(_ENT_PRIME.keys) });
+
+// ============================================================================
+// (v36.27) WORLD-SWAP TRAVERSE — the same loading contract, for the OTHER way a
+// world gets built.
+//
+// THE PATHS. Five call sites hand a whole new world to the engine mid-session,
+// and every one of them does it the same way: set `game.selectedMap`, set
+// `game.state = 'roundEnd'`, anchor a 2 s roundEndTimer, and let
+// updateRoundSystem's roundEnd branch do the rebuild. They are
+//   1. _hzEnterCavern        hub -> zone-rift cavern   (EXHIBITION's rift portal)
+//   2. _hzReturnToHub        cavern -> hub
+//   3. _enterCampaignFromHub hub -> camp_approach      (the journey rift)
+//   4. CampaignMode leg advance + the finale hub-return
+//   5. the co-op peer mirror of (4) (camp_state evt.advancing)
+// So there is exactly ONE place to fix, and fixing it fixes all five.
+//
+// WHAT IT COST BEFORE (v36.26, measured in the pane at 144 Hz, budget 6.94 ms):
+//   hub -> campaign rift : 344.3 ms at roundEnd  +  423.2 ms at the rebuild
+//   hub -> zone cavern   : 317.1 ms (+188.7 ms)  +  265.3 ms
+//   cavern -> hub        : ~0                    +  1851.3 ms   <-- the freeze
+// The 1851 ms one is the owner's Opera "hard freeze, no console": a rebuild of
+// the full hub (441 chunks, the cyberpunk city, +44 driver program links) inside
+// ONE frame, with no loading overlay — just the ov-warp tunnel, which stops
+// animating for two seconds. Chromium survives it as a stall; a browser whose
+// watchdog is less patient with a two-second scripted frame does not.
+//
+// THE FIX, same contract as the launch prebake: nothing streams or uploads after
+// control returns. `_rrStagedSwap` drives the rebuild across frames behind the
+// real loading overlay, and only then starts the countdown:
+//   cover -> world -> hub city -> reset+respawn -> programs -> terrain drain ->
+//   combat FX -> GPU prime -> overlay off -> warp beat -> countdown
+// ⚠ THE COVER PHASE IS NOT OPTIONAL AND TWO rAFs ARE NOT ENOUGH.
+// #lss-loading-overlay is `opacity: 0` + a 0.25 s transition, so .active alone
+// leaves it ~10% opaque — the v36.20 _commitDeferOneFrame trick buys a PAINT,
+// not an opaque one. _swapCoverPainted waits on the computed opacity.
+// ⚠ `game.state` is set to 'warmup' by the caller exactly as before, so nothing
+// downstream sees a novel state. That makes the warmup->playing flip reachable
+// mid-stage (in freeflight/testMode `warmupTimer` is FORCED to 0 every frame and
+// the flip gates only on ship-select being hidden — which it is, until
+// _rrCountdown shows it), so updateRoundSystem's flip carries a `!_swapStaging`
+// guard. Removing that guard drops the player into a half-built world.
+// ⚠ `game._worldPrebaking` is set for the whole stage so gameLoop's own
+// _swDrainStream warmup arm stands down while this owns the streamer — and so
+// the v36.21 launch-stall detector counts a staged swap as "still working".
+// ⚠ The countdown is SHORTENED by the time the stage took, so a traverse still
+// takes the same wall-clock ~12.4 s it did before; loading is moved into the
+// countdown, not added in front of it.
+// Report: window.__swapReport() -> the last traverse's phase timings.
+// ============================================================================
+const _SWAP = { staging: false, last: null };
+const _SWAP_MAX_MS = 12000;   // hard ceiling: a stage that hangs is worse than one that misses
+// Smaller streaming slice than the launch prebake's 40 ms. The launch prebake is
+// racing a cinematic that has not started yet, so it takes the throughput; a
+// traverse is spending countdown time it already had, so it takes the pacing.
+// 40 ms measured as ~50 ms frames here (slice + one chunk of overshoot); 12 ms
+// lands them under 20 and costs no extra wall clock worth measuring.
+const _SWAP_SLICE_MS = 12;
+function _beginWorldSwap(label, title) {
+  // Called by each traverse entry point BEFORE its applyMapPreset, so
+  // setSandwichBiome's rebuild is suppressed (see the note there).
+  if (typeof game === 'undefined') return;
+  game._swapPending = { label: label || 'swap', title: title || 'ENTERING', t: _pbNow() };
+}
+// ⚠ The armed flag must not outlive its own traverse. Every path that arms it
+// reaches the roundEnd rebuild within ~2 s and the rebuild consumes it — except
+// the disabled-by-default between-leg ship-select fork, and any abort (quit to
+// menu, match end). A stale flag would silently no-op the NEXT setSandwichBiome,
+// i.e. cycling a map theme in the menu would stop rebuilding the world. So:
+// readers gate on age, and every fresh-build entry clears it outright.
+function _swapArmed() {
+  const p = (typeof game !== 'undefined') ? game._swapPending : null;
+  if (!p) return null;
+  if (_pbNow() - (p.t || 0) > 8000) { game._swapPending = null; return null; }
+  return p;
+}
+// Sliced version of resetSandwichTerrain's chunk loop. Pops entries out of
+// game.sandwichChunks in ~8 ms slices, yielding between, so the outgoing world's
+// several hundred meshes are freed across frames instead of in the build frame.
+// Safe because gameLoop's streamer stands down for the whole stage (see the
+// `game._swapStaging` arm in the terrain block) — otherwise it would refill the
+// map behind this loop at 1 chunk/frame.
+async function _swapTearDownChunks(t0) {
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size || typeof _swDisposeChunk !== 'function') return 0;
+  let passes = 0;
+  while (chunks.size) {
+    const tS = _pbNow();
+    for (const [k, c] of chunks) {
+      try { _swDisposeChunk(c); } catch (_) {}
+      chunks.delete(k);
+      if (_pbNow() - tS >= 8) break;
+    }
+    passes++;
+    if (_pbNow() - t0 > _SWAP_MAX_MS) break;
+    await _warmupYield();
+  }
+  return passes;
+}
+// Wait until the loading overlay is actually opaque on screen (or give up).
+async function _swapCoverPainted() {
+  const ov = (typeof document !== 'undefined') ? document.getElementById('lss-loading-overlay') : null;
+  const t0 = _pbNow();
+  for (let i = 0; i < 120; i++) {
+    await _warmupYield();
+    if (!ov) break;
+    let op = 1;
+    try { op = parseFloat(getComputedStyle(ov).opacity); } catch (_) { break; }
+    if (!(op < 0.985)) break;
+    if (_pbNow() - t0 > 600) break;      // backstop: XR / hidden tab / reduced motion
+  }
+}
+async function _rrStagedSwap(pending, ph) {
+  const t0 = _pbNow();
+  const _cnt = () => (game.sandwichChunks ? game.sandwichChunks.size : 0);
+  const rep = { label: pending.label, map: game.selectedMap, mode: (typeof LSS !== 'undefined') ? LSS.MODE : '?',
+                ch0: _cnt(), ch1: 0, passes: 0, gpuPasses: 0, capped: null, ms: {}, totalMs: 0, countdown: 0 };
+  _SWAP.staging = true;
+  game._swapStaging = true;
+  game._worldPrebaking = true;
+  // ⚠ Claim the clipmap NOW, not at the clip phase. initSandwichTerrain (inside
+  // ph.world()) sets `_clipmap.on = false`, and gameLoop's enable block fires on
+  // the very next frame — i.e. during one of the yields below — doing the FULL
+  // bake + first-link of every level in one go. Measured at 66 ms with a warm
+  // ANGLE program cache and 1170.4 ms with a cold one, same GL call counts
+  // (compileShader n=56, getProgramParameter n=72) on both. Claiming it up front
+  // is what makes the sliced path deterministic instead of a race.
+  try { _clipmap.enabling = true; } catch (_) {}
+  try {
+    let t = _pbNow();
+    showLoadingOverlay(pending.title, 'building the world');
+    await _swapCoverPainted();
+    rep.ms.cover = Math.round(_pbNow() - t);
+
+    // Dispose the OUTGOING world's chunks in slices before the build, so
+    // resetSandwichTerrain (inside buildRoomGraphLevel) finds an empty map.
+    // The hub is 441 chunks and that teardown alone measured dGeo -294 inside a
+    // 454.9 ms frame.
+    t = _pbNow(); rep.tearPasses = await _swapTearDownChunks(t0); rep.ms.teardown = Math.round(_pbNow() - t);
+
+    t = _pbNow(); ph.world(); rep.ms.world = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    t = _pbNow(); ph.wave(); rep.ms.wave = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    // Hub city: deferred out of initSandwichTerrain, built here on its own frame.
+    t = _pbNow();
+    try { if (typeof _hubCityInit === 'function') _hubCityInit(); } catch (e) { console.warn('[swap] hub city failed:', e); }
+    rep.ms.city = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    t = _pbNow(); ph.reset(); rep.ms.reset = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    // Clipmap AFTER the respawn (it bakes around the player, exactly as
+    // gameLoop's own enable did) and BEFORE any chunk streaming (chunks baked
+    // ahead of `_clipmap.on` have their ground shell thrown away — the launch
+    // prebake's phase A is the same ordering rule).
+    t = _pbNow();
+    if (game._clipWantHub && !_clipmap.on && player && player.position) {
+      try { rep.clipLevels = await _clipEnableSliced(player.position.x, player.position.z); }
+      catch (e) { console.warn('[swap] clipmap enable failed:', e); }
+    } else { try { _clipmap.enabling = false; } catch (_) {} }
+    rep.ms.clip = Math.round(_pbNow() - t);
+
+    t = _pbNow();
+    showLoadingOverlay(null, 'compiling effects');
+    rep.pinAsync = await _pinCombatEffectProgramsStaged();
+    await _warmupYield();
+    // Belt: the sync pin is a memoized no-op once the async one has set the
+    // signature, but if it threw or bailed this is what still guarantees the
+    // programs exist before the countdown — as one big frame under the overlay,
+    // which is strictly the old behaviour and never worse.
+    ph.shaders();
+    rep.ms.shaders = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    // (v36.28) ENTITY PRIME. Placed here, after the world + wave exist and before
+    // the GPU primes, because the destination decides what it can spawn during
+    // ph.world()/ph.wave() — the zone-rift cavern's garrison list in particular is
+    // already on game._cavern by now (_hzEnterCavern). Its own draws are
+    // rtScene-bound, so it does not depend on the primes below.
+    t = _pbNow();
+    try { showLoadingOverlay(null, 'priming ships'); } catch (_) {}
+    try { rep.ent = await _primeEntityModels(_entPrimePlan(), t0, _ENT_PRIME_MAX_MS); } catch (_) {}
+    rep.ms.ent = Math.round(_pbNow() - t);
+
+    // FIRST GPU prime, before the terrain drain. Linking a program is not the
+    // same as validating it: the driver's first-use validate happens at the first
+    // real DRAW, and on the campaign rift that draw was the first ordinary
+    // gameLoop frame after the wave's ships finished loading — one frame, 577
+    // draw calls, 480.8 ms. Twelve deliberate draws across three frames get there
+    // first and pay it in slices. The SECOND prime at the end of the stage is
+    // still the one that matters for terrain, which does not exist yet here.
+    t = _pbNow();
+    if (_pbNow() - t0 < _SWAP_MAX_MS) {
+      try { rep.gpuPasses0 = await _prebakeGpuPrime(); } catch (_) {}
+    }
+    rep.ms.gpu0 = Math.round(_pbNow() - t);
+
+    // Terrain + foliage to completion around the (now respawned) player, on the
+    // prebake's own ms-sliced budget. Same "two zero passes = done" test.
+    t = _pbNow();
+    const T = game.sandwichTerrain;
+    if (T && T.ON && player && player.position && typeof _swDrainStream === 'function') {
+      // ⚠ RE-READ THE SPAWN EVERY PASS, don't capture it once like the launch
+      // prebake does. On the campaign rift the leg's own scene-start moves the
+      // player AFTER respawnPlayer — measured, (0,0) for the first ~1.2 s of the
+      // stage and then (0,-18000) — so a captured centre baked 25 chunks in the
+      // wrong place and the next pass evicted all of them.
+      let zero = 0;
+      for (let n = 0; n < _PREBAKE_MAX_PASSES; n++) {
+        const px = player.position.x, pz = player.position.z;
+        let built = 0;
+        try { built = _swDrainStream(px, pz, _SWAP_SLICE_MS, _PREBAKE_MAX_CALLS) | 0; }
+        catch (e) { console.warn('[swap] streamer threw, stopping terrain phase:', e); break; }
+        rep.passes++;
+        if (built <= 0) { if (++zero >= 2) break; } else zero = 0;
+        if (_pbNow() - t0 > _SWAP_MAX_MS) { rep.capped = 'terrain'; break; }
+        if ((n & 3) === 0) { try { showLoadingOverlay(null, 'building the world · ' + _cnt() + ' chunks'); } catch (_) {} }
+        await _warmupYield();
+      }
+    }
+    rep.ms.terrain = Math.round(_pbNow() - t);
+    rep.ch1 = _cnt();
+
+    t = _pbNow();
+    try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
+    rep.ms.fx = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    t = _pbNow();
+    if (_pbNow() - t0 < _SWAP_MAX_MS) {
+      try { showLoadingOverlay(null, 'priming the GPU'); } catch (_) {}
+      rep.gpuPasses = await _prebakeGpuPrime();
+    } else if (!rep.capped) rep.capped = 'gpu-skipped';
+    rep.ms.gpu = Math.round(_pbNow() - t);
+  } catch (e) {
+    console.warn('[swap] staged rebuild failed (launching anyway):', e);
+    rep.error = String((e && e.message) || e);
+  } finally {
+    // ⚠ EVERYTHING BELOW MUST RUN even on a throw — a traverse that never starts
+    // its countdown is a permanent soft-lock behind the warp tunnel.
+    _SWAP.staging = false;
+    game._swapStaging = false;
+    game._worldPrebaking = false;
+    try { _clipmap.enabling = false; } catch (_) {}   // backstop: never strand gameLoop's enable
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { ph.warpBeat(); } catch (_) {}           // tunnel beat AFTER the cover lifts, so it is seen
+    rep.totalMs = Math.round(_pbNow() - t0);
+    // Spend the stage out of the countdown, not on top of it.
+    const dur = Math.max(4, Math.round(LSS.LAUNCH_COUNTDOWN - rep.totalMs / 1000));
+    rep.countdown = dur;
+    try { _anchorTimer('warmupTimer', dur); } catch (_) {}
+    try { ph.countdown(dur); } catch (e) { console.warn('[swap] countdown failed:', e); }
+    _SWAP.last = rep;
+    console.log('[swap] ' + rep.label + ' -> ' + rep.map + ' ' + rep.totalMs + 'ms chunks ' +
+      rep.ch0 + '->' + rep.ch1 + ' passes=' + rep.passes + ' gpu=' + rep.gpuPasses +
+      ' cd=' + dur + 's [' + Object.keys(rep.ms).map(k => k + ' ' + rep.ms[k]).join(', ') + ']' +
+      (rep.capped ? ' CAPPED:' + rep.capped : ''));
+  }
+}
+if (typeof window !== 'undefined') window.__swapReport = () => _SWAP.last;
 
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
@@ -44852,9 +45864,13 @@ const _cockpitFrameCache = {};
 // (v36.16) Build-stamped, NOT Date.now(). A per-page-load timestamp made every
 // cockpit-frame URL unique, so the browser re-downloaded ~30 MB of frame art on
 // EVERY load and the v36.16 bulk preload could never prime them (its manifest
-// URLs would never match). LSS_BUILD is bumped every iteration, so new art
-// still busts. Must match the `?v=` stamp preloadAllAssets appends.
-const _FRAME_CACHE_BUST = '?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : Date.now());
+// URLs would never match).
+// (v36.25) ...but LSS_BUILD is bumped every iteration, so the SAME 30 MB still
+// re-downloaded on every build — just once per build instead of once per load.
+// The stamp is now _FRAMES_VERSION, an art-content version that only moves when
+// the frame PNGs do. See ASSET CONTENT VERSIONS (~L3796).
+// Must match the stamp preloadAllAssets appends to `v:2` manifest entries.
+const _FRAME_CACHE_BUST = '?v=' + _FRAMES_VERSION;
 const _cockpitFrameInFlight = {}; 
 
 const _framesBaseUrl = (function() {
@@ -45983,6 +46999,17 @@ function commitLoadout(key) {
   // failure this change could cause. `_liveSwap` is exempt: it returns long
   // before the deferral and is how the campaign D-pad cycles ships live.
   if (_commitPending && !game._liveSwap) return;
+  // (v36.27) A fresh-build commit means no portal traverse is in flight, so drop
+  // any armed world-swap flag. Belt to _swapArmed's age gate: this is the path an
+  // aborted traverse always returns through, and applyMapPreset just below (the
+  // campaign-leg branch) is exactly the caller whose rebuild must NOT be
+  // suppressed by a stale flag.
+  // ⚠ EXEMPT `_liveSwap`. It is a player-side ship apply that never touches the
+  // world — and _enterCampaignFromHub makes exactly that call, three lines after
+  // arming the traverse (v35.86's always-re-commit). Clearing here disarmed the
+  // rift: measured, the campaign traverse fell back to the one-frame synchronous
+  // rebuild with no loading overlay while the zone-rift path staged correctly.
+  if (typeof game !== 'undefined' && game._swapPending && !game._swapStaging && !game._liveSwap) game._swapPending = null;
   // (v34.22) PICKER CONFIRM ROUTING. When confirming from the campaign ship-select picker,
   // switch mode + flags for the CHOSEN LEVEL *before* _v12mValidate and *before* getNextMap so
   // the build fork constructs the right world. The chosen SHIP is `key` (independent of level).
@@ -46461,7 +47488,11 @@ function commitLoadout(key) {
       if (net.active || _countdownActive || game.state === 'playing' || game.state === 'select') { _clearLaunchStall(); return; }
       if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _settled = 0; return; }
       if (game.state !== 'warmup' || !player.loadoutKey) { _settled = 0; return; }
-      const _warming = !!(typeof _shaderWarmup !== 'undefined' && _shaderWarmup && _shaderWarmup.promise);
+      // (v36.26) game._worldPrebaking joins the "still legitimately working" set.
+      // The prebake is capped at _PREBAKE_MAX_MS so it cannot hold this off
+      // indefinitely, but a 12 s cold hub build would otherwise look identical to
+      // a wedged launch to a 12 s stall detector.
+      const _warming = !!(typeof _shaderWarmup !== 'undefined' && _shaderWarmup && _shaderWarmup.promise) || !!game._worldPrebaking;
       if (_warming) { _settled = 0; return; }
       if (++_settled < 12) return;
       _clearLaunchStall();
@@ -46490,6 +47521,26 @@ function commitLoadout(key) {
   // Defensive: if warmupCombatShaders ever returned non-thenable, wrap.
   if (!_warmupPromise || typeof _warmupPromise.then !== 'function') {
     _warmupPromise = Promise.resolve();
+  }
+  // (v36.26) THE WORLD PREBAKE IS PART OF THE LAUNCH CHAIN — see
+  // _prebakeWorldForLaunch for the contract, the measurements and the phases.
+  // Chaining it HERE rather than at the two solo call sites below is deliberate:
+  // everything downstream — _markLocalWarmupReady (which is what tells peers we
+  // are ready), showShipSelectWaiting, hideLoadingOverlay and
+  // _launchSoloAfterCinematic — already hangs off this one promise, so solo and
+  // multiplayer both inherit the gate with no new ordering to keep in step.
+  // Both arms of the settle continue into the prebake: a shader-warmup rejection
+  // must not skip the world build, it only means the first impact hits a cold
+  // program. _prebakeWorldForLaunch never rejects, so the .then/.catch pair below
+  // keeps its existing meaning.
+  // ⚠ midMatch never reaches this line by a different route than before — it
+  // reaches it the same way, so it is excluded explicitly: the between-rounds
+  // swap has no loading overlay to hide a prebake behind.
+  if (!midMatch) {
+    _warmupPromise = _warmupPromise.then(
+      () => _prebakeWorldForLaunch(),
+      (e) => { console.warn('[commitLoadout] shader warmup failed, prebaking anyway:', e); return _prebakeWorldForLaunch(); }
+    );
   }
   // (v36.22) THE BULK ASSET PRELOAD IS NO LONGER PART OF THE LAUNCH.
   // v36.16 called preloadAllAssets() here and hung it off this same promise via
@@ -53512,6 +54563,13 @@ function updateRoundSystem(dt) {
     // round environment, so the first-fire shader compiles land behind the
     // countdown instead of stuttering a few seconds into combat. Once-guarded,
     // so only round 1 pays it (programs persist for later rounds).
+    // (v36.26) On the LAUNCH path this is now a signature-memoized no-op: the
+    // prebake runs _warmRealCombatFX before the cinematic (measured 512 ms on a
+    // cold hub, previously paid at warmupTimer<=2 — i.e. after the cinematic —
+    // or, in every testMode/freeflight mode where warmupTimer is forced to 0 and
+    // this branch cannot fire at all, inside the warmup->playing frame itself).
+    // Left in place because the roundEnd->warmup rebuild reaches FIGHT through
+    // here without passing commitLoadout's deferred fork.
     if (prev > 2 && game.warmupTimer <= 2 && typeof _warmRealCombatFX === 'function') {
       try { _warmRealCombatFX(); } catch (_) {}
     }
@@ -53526,7 +54584,14 @@ function updateRoundSystem(dt) {
     // until !selectActive guarantees the LAUNCH tick has already torn
     // down the panel ; the announcement now lands cleanly inside the
     // in-game view.
-    if (game.warmupTimer <= 0 && !selectActive) {
+    // (v36.27) ⚠ `!game._swapStaging` IS LOad-BEARING, not defensive. A staged
+    // world-swap traverse sets state='warmup' up front (so nothing downstream
+    // sees a state it has never seen) and only shows the picker at the very end.
+    // In freeflight/testMode `warmupTimer` is FORCED to 0 every frame ~40 lines
+    // above, and `selectActive` is false for the whole stage — so without this
+    // guard the very first frame of a traverse flips straight to 'playing' and
+    // drops the player into a half-built world.
+    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
       // (v35.06) Orientation unlock removed (locking is gone entirely —
@@ -53758,6 +54823,41 @@ function updateRoundSystem(dt) {
     // block below is testMode-gated off in campaign, so the mode drives its own
     // round-end from here.
     try { activeMode().update(dt); } catch (e) { if (!game._modeUpdateThrew) { game._modeUpdateThrew = true; try { console.warn('[campaign/mode] update threw (logged once):', e); } catch (_) {} } }
+    // ------------------------------------------------------------------
+    // (v36.25) THE GHOST-MATCH FIX  —  a mode hook may end the match MID-TICK.
+    //
+    // EndlessMode.update() calls returnToRootMenu() when the RUN OVER banner
+    // beat expires. That is a full teardown : it empties game.entities, clears
+    // game.testMode, resets LSS.MODE to 'classic' and sets game.state to
+    // 'select'. Then execution came straight back HERE and ran the rest of the
+    // 'playing' branch against the corpse — and every guard that had been
+    // keeping the classic round resolution out of endless was one line stale :
+    //     !game.testMode                 -> true  (just cleared)
+    //     LSS.MODE !== 'endless'         -> true  (just reset to 'classic')
+    //     aliveA === 0 || aliveB === 0   -> true  (aliveA/aliveB were counted
+    //                                      at the top of this branch, and the
+    //                                      pilot is dead / the wave is dead)
+    // ...so classic round-end fired in the SAME frame, overwrote 'select' with
+    // 'roundEnd', and 5 s later the roundEnd branch ran its round-restart world
+    // build : buildRoomGraphLevel + spawnDynamicObjects + spawnOrganics,
+    // SYNCHRONOUSLY, with no loading overlay. Measured 181.7 ms in one frame —
+    // and it did not stop there : warmup -> playing meant a full classic match
+    // was left simulating behind the ship-select menu forever, which is the
+    // ~3x per-frame cost step (3 ms -> 11 ms) that never came back.
+    //
+    // This is phase 1's "one real hitch": 178.5 ms of synchronous frame work a
+    // few seconds after an endless run ended, plus a permanent frame-cost
+    // regression. It is a soft-return bug, not a preload bug.
+    //
+    // The guard is the general form : if the mode hook moved us out of
+    // 'playing', this tick's remaining round logic is about a state that no
+    // longer exists. Campaign/FreeFlight set 'roundEnd' from their own hooks
+    // too (rift entry, hub-zone cavern warp), and this stops those falling
+    // through into a second, classic resolution in the same frame as well.
+    // Normal frames never take this branch — the mode hooks leave the state
+    // alone unless they are deliberately ending something.
+    // ------------------------------------------------------------------
+    if (game.state !== 'playing') return;
     const endByChampion = (game.championResult === 'A' || game.championResult === 'B')
       && (!game.championEndTimer || game.championEndTimer <= 0);
     const endByTimer = !game.raceNoTimer && !game.testMode && game.roundTimer <= 0;
@@ -53948,6 +55048,17 @@ function updateRoundSystem(dt) {
           try { document.exitPointerLock(); } catch (e) {}
         }
       } else {
+        // (v36.27) The rebuild below is split into four ordered closures —
+        // _rrWorld / _rrWarpBeat / _rrShaders / _rrReset / _rrCountdown — with
+        // the code inside each one byte-for-byte what it always was. The
+        // BETWEEN-ROUNDS path still calls them back-to-back in this one frame,
+        // exactly as before. A WORLD-SWAP TRAVERSE (`_swapPending`, set by
+        // _beginWorldSwap at the five portal entry points) instead hands them to
+        // _rrStagedSwap, which drives them across frames behind the loading
+        // overlay and adds the terrain drain + GPU prime before the countdown.
+        // See the _rrStagedSwap header for the measurements and the traps.
+        const _swap = (typeof _swapArmed === 'function') ? _swapArmed() : null;
+        game._swapPending = null;
         game.currentRound++;
         game.state = 'warmup';
         // Reactive band: rolling between rounds, warmup pattern.
@@ -53957,7 +55068,8 @@ function updateRoundSystem(dt) {
         // Round warmup runs through the ship-select screen so the player can
         // swap ships between rounds; matches the visible launch countdown so
         // bots stay holstered until LAUNCH.
-        // Wall-clock-anchored.
+        // Wall-clock-anchored. (A staged swap re-anchors this at the end, to a
+        // countdown shortened by however long the stage took.)
         _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
         // Next map from rotation each round
         const level = getNextMap();
@@ -53971,6 +55083,8 @@ function updateRoundSystem(dt) {
           spawnOrganics(game.sdfRoomData);
         };
         let roundSeed = game.currentRound;
+        // ---- PHASE 1 : the world ----
+        const _rrWorld = () => {
         if ((net.active || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign')) && typeof net.worldSeed === 'number') {
           roundSeed = getRoundSeed(game.currentRound);
           console.log('[v6.7] round', game.currentRound, 'build, worldSeed=', net.worldSeed, 'roundSeed=', roundSeed, 'mapKey=', game.selectedMap);
@@ -53978,14 +55092,29 @@ function updateRoundSystem(dt) {
         } else {
           buildNextRound();
         }
+        };
+        // ---- PHASE 1a : the mode's wave hook ----
         // (campaign) Mode hook : swap the hoard formation / scene theme for the
         // new wave into the freshly rebuilt world (seeded for co-op identity).
+        // (v36.27) Split off the terrain build so a staged swap can put a frame
+        // between them. For a campaign leg this is _campStartScene, and its cost
+        // depends on whether the hoard GLBs are already memory-resident: measured
+        // at 126 ms when they still had to load and 624 ms when v36.22's page-load
+        // preload had them cached and every bot could be cloned synchronously.
+        const _rrWave = () => {
         try { activeMode().onWaveStart(roundSeed); } catch (_) {}
+        // Round-restart owner ships the manifest for this round too.
+        broadcastWorldObjects();
+        };
+        // ---- PHASE 1b : the warp MIDDLE BEAT ----
         // (v32.96) Warp MIDDLE BEAT : the leg just rebuilt this frame (old scene gone,
         // new one fresh), so flash the dark "tunnel" backdrop behind the warp streaks
         // — it eases back to transparent over 1.7s, revealing the arriving leg. Only
         // while a warp is active (.show, set at portal-traverse) ; campaign-only ;
         // per-client (this swap ticks on every client's own loop, no netcode).
+        // (v36.27) On a STAGED swap this fires after the loading cover lifts, not
+        // under it — a 1.7 s ease played behind an opaque overlay is a wasted beat.
+        const _rrWarpBeat = () => {
         try {
           if (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')) {
             const _w = document.getElementById('ov-warp');
@@ -53994,8 +55123,9 @@ function updateRoundSystem(dt) {
             }
           }
         } catch (_) {}
-        // Round-restart owner ships the manifest for this round too.
-        broadcastWorldObjects();
+        };
+        // ---- PHASE 2 : driver programs ----
+        const _rrShaders = () => {
         // (perf 2026-06-12g) Pin combat-effect programs AFTER buildNextRound
         // so the compile sees the NEW level's environment (fog etc.). The
         // pin used to fire before the rebuild (wrong env, wasted) plus again
@@ -54004,6 +55134,9 @@ function updateRoundSystem(dt) {
         // hidden inside the 10s countdown, and the FIGHT site is gone.
         if (typeof _pinCombatEffectPrograms === 'function') _pinCombatEffectPrograms();
         try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
+        };
+        // ---- PHASE 3 : entity reset + respawn ----
+        const _rrReset = () => {
         // Reset stasis fields
         game.stasisFields.forEach(f => { if (f.alive) f.destroy(); });
         game.stasisFields = [];
@@ -54119,12 +55252,14 @@ function updateRoundSystem(dt) {
         player.coreActive = false;
         player.coreTimer = 0;
         respawnPlayer();
-        
-        
+
+
         // (v35.20) Same ADD BOTS gate as the round-1 build above.
         if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
-        
-        
+
+        };
+        // ---- PHASE 4 : picker + launch countdown ----
+        const _rrCountdown = (_dur) => {
         if (document.exitPointerLock) {
           try { document.exitPointerLock(); } catch (e) {}
         }
@@ -54138,7 +55273,19 @@ function updateRoundSystem(dt) {
         try { _xrMenuForceHidden = false; } catch (_) {}
         buildShipSelect();
         updateTeammatesStrip();
-        launchCountdown();
+        launchCountdown(_dur);
+        };
+        // ---- run them ----
+        if (_swap && typeof _rrStagedSwap === 'function') {
+          // Staged across frames behind the loading overlay. Fire-and-forget: it
+          // never rejects and its own finally starts the countdown.
+          _rrStagedSwap(_swap, { world: _rrWorld, wave: _rrWave, warpBeat: _rrWarpBeat,
+                                 shaders: _rrShaders, reset: _rrReset, countdown: _rrCountdown });
+        } else {
+          // Between-rounds: identical to every version before v36.27 — all of it
+          // in this one frame, in this order.
+          _rrWorld(); _rrWave(); _rrWarpBeat(); _rrShaders(); _rrReset(); _rrCountdown();
+        }
       }
     }
   } else if (game.state === 'matchEnd') {
@@ -59621,13 +60768,30 @@ if (typeof window !== 'undefined') {
 // falling through to the one-hour catch-all). The in-page memo
 // (`_assetPreload.promise`) covers everything after the first call of a load.
 //
-// ⚠ The frames/ URLs only stay cached because _FRAME_CACHE_BUST is stamped with
-// LSS_BUILD (v36.16) instead of Date.now(). With a per-load timestamp every
-// frame URL was unique, so preloading them was pointless AND the browser
-// re-downloaded ~30 MB of cockpit art on every single page load.
+// ⚠ THE STAMPS MUST MATCH THE RUNTIME URLS EXACTLY or the preload warms URLs
+// nobody asks for. Each manifest entry carries which stamp it needs :
+//     v:0  no stamp        (map_thumbs, music, audio)
+//     v:1  _MODEL_CACHE_BUST  = '?v=' + _MODELS_VERSION   (every GLB)
+//     v:2  _FRAME_CACHE_BUST  = '?v=' + _FRAMES_VERSION   (frames/**)
+// Both versions are ART versions now (v36.25) — see ASSET CONTENT VERSIONS
+// (~L3796). Before that they were LSS_BUILD, so every build bump re-downloaded
+// ~146 MB for every returning player. tools/gen_manifest.py writes the tags.
+//
+// (v36.25) SUSPENDED WHILE PLAYING. Phase-1 profiling could not measure any
+// frame-time cost from this preloader — 60 s of endless with 109 MB genuinely
+// transferring at a throttled 12 Mbps had p99 17.7 ms, statistically identical
+// to the same build with the preload switched off. But that harness runs on
+// localhost with no socket/TLS work and cannot see the GPU at all, so "no
+// measurable cost" is not "no cost". Seven fetch lanes competing with a live
+// match for a real connection is a risk with no upside : the whole point of
+// preloading is to use the time the player is NOT in a match. `_assetPreloadGate`
+// parks the lanes at a file boundary whenever a match is up and resumes them at
+// the menu. See _assetPreloadBusy.
 // ============================================================================
 const ASSET_MANIFEST_URL = 'asset-manifest.json';
 const ASSET_PRELOAD_CONCURRENCY = 7;
+// How often a parked lane re-checks whether the match is over.
+const ASSET_PRELOAD_RESUME_POLL_MS = 1500;
 // (v36.22) Now that nothing awaits this promise, the watchdog is purely a
 // reporting boundary : it flips `timedOut` and logs so window.__assetPreload()
 // tells the truth about a wedged connection. The fetches keep running either
@@ -59645,10 +60809,12 @@ const _assetPreload = {
   failures: [],
   promise: null,
   timedOut: false,
+  pauses: 0,                       // (v36.25) how many times a match parked the lanes
 };
 if (typeof window !== 'undefined') window.__assetPreload = () => ({
   state: _assetPreload.state, total: _assetPreload.total, done: _assetPreload.done,
   ok: _assetPreload.ok, fail: _assetPreload.fail, timedOut: _assetPreload.timedOut,
+  pauses: _assetPreload.pauses,
   mb: +(_assetPreload.bytesDone / 1048576).toFixed(1),
   totalMb: +(_assetPreload.bytes / 1048576).toFixed(1),
   elapsedMs: Math.round(_assetPreload.elapsedMs),
@@ -59710,6 +60876,56 @@ function _assetPreloadPaint(label, pct, detail) {
   } catch (_) {}
 }
 
+// ---------------------------------------------------------------------------
+// (v36.25) SUSPEND WHILE PLAYING.
+// `busy` is deliberately conservative — anything that is not "sitting in a
+// menu" counts. `#lss-loading-overlay.active` is the same single source of
+// truth the audio hold uses (see LOADING-SCREEN AUDIO HOLD ~L59511), so
+// PREPARING ARENA / WAITING FOR PEERS / ENTERING THE OVERWORLD are all covered
+// without adding a second thing to keep in step. game.state is 'select' in the
+// lobby and 'warmup' / 'playing' / 'roundEnd' / 'matchEnd' in a match.
+// ---------------------------------------------------------------------------
+function _assetPreloadBusy() {
+  try {
+    const ov = document.getElementById('lss-loading-overlay');
+    if (ov && ov.classList.contains('active')) return true;
+  } catch (_) {}
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    return game.state !== 'select';
+  } catch (_) { return false; }
+}
+// Resolves immediately at the menu ; otherwise parks until the match ends. The
+// lanes only ever check this BETWEEN files, so a fetch already in flight is
+// never abandoned (abandoning it would waste the bytes and lose the cache fill).
+function _assetPreloadGate() {
+  if (!_assetPreloadBusy()) {
+    if (_assetPreload.state === 'paused') {
+      _assetPreload.state = 'loading';
+      console.log('[preload] resumed at ' + _assetPreload.done + '/' + _assetPreload.total);
+    }
+    return Promise.resolve();
+  }
+  if (_assetPreload.state === 'loading') {
+    _assetPreload.state = 'paused';
+    _assetPreload.pauses++;
+    console.log('[preload] paused for the match at ' + _assetPreload.done + '/' + _assetPreload.total);
+    _assetPreloadHintHide(false);
+  }
+  return new Promise(res => {
+    const poll = () => {
+      if (!_assetPreloadBusy()) {
+        if (_assetPreload.state === 'paused') {
+          _assetPreload.state = 'loading';
+          console.log('[preload] resumed at ' + _assetPreload.done + '/' + _assetPreload.total);
+        }
+        res();
+      } else setTimeout(poll, ASSET_PRELOAD_RESUME_POLL_MS);
+    };
+    setTimeout(poll, ASSET_PRELOAD_RESUME_POLL_MS);
+  });
+}
+
 // Fetch one URL to completion. Resolves either way — a single 404 or a dead
 // CDN must never block the match.
 function _assetPreloadOne(url, bytes) {
@@ -59717,12 +60933,28 @@ function _assetPreloadOne(url, bytes) {
     .then(r => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       // The body MUST be consumed or the browser may discard the response
-      // without storing it. The buffer is dropped immediately after.
-      return r.arrayBuffer();
+      // without storing it.
+      // (v36.25) DRAIN THE STREAM, don't materialize it. `r.arrayBuffer()`
+      // allocated one contiguous buffer per file — up to 14 MB for the biggest
+      // GLB — purely to throw it away on the next line. Reading the body
+      // reader and dropping each ~64 KB chunk consumes the response just as
+      // completely (same cache behaviour) with a flat, tiny heap footprint.
+      // Falls back to arrayBuffer() if the engine has no streaming body.
+      if (!r.body || typeof r.body.getReader !== 'function') {
+        return r.arrayBuffer().then(b => (b && b.byteLength) || 0);
+      }
+      const rd = r.body.getReader();
+      let n = 0;
+      const pump = () => rd.read().then(({ done, value }) => {
+        if (done) return n;
+        n += (value && value.length) || 0;
+        return pump();
+      });
+      return pump();
     })
-    .then(buf => {
+    .then(n => {
       _assetPreload.ok++;
-      _assetPreload.bytesDone += (buf && buf.byteLength) ? buf.byteLength : (bytes || 0);
+      _assetPreload.bytesDone += n || bytes || 0;
     })
     .catch(err => {
       _assetPreload.fail++;
@@ -59754,7 +60986,10 @@ function preloadAllAssets() {
   _assetPreload.state = 'loading';
   _assetPreload.startedMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
 
+  // The MANIFEST itself is build-stamped (it changes with the asset tables, and
+  // it is 12 KB). The ASSETS are art-version-stamped — see the header above.
   const stamp = '?v=' + (typeof LSS_BUILD === 'string' ? LSS_BUILD : '0');
+  const _stampFor = (e) => (e.v === 2 ? _FRAME_CACHE_BUST : e.v ? _MODEL_CACHE_BUST : '');
   const run = fetch(ASSET_MANIFEST_URL + stamp, { credentials: 'omit', cache: 'default' })
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(man => {
@@ -59766,11 +61001,17 @@ function preloadAllAssets() {
       // line that says "0 / 0" would be worse than no line at all.
       _assetPreloadPaint('CACHING ASSETS · 0%', 0, _assetPreloadProgressText());
       // Bounded concurrency : N workers pulling off one shared cursor.
+      // (v36.25) Each lane checks _assetPreloadGate() BEFORE claiming its next
+      // file, so a match start parks all 7 of them within one file instead of
+      // racing the game for the connection.
       let cursor = 0;
       const worker = () => {
         if (cursor >= list.length) return Promise.resolve();
-        const e = list[cursor++];
-        return _assetPreloadOne(e.u + (e.v ? stamp : ''), e.b || 0).then(worker);
+        return _assetPreloadGate().then(() => {
+          if (cursor >= list.length) return;
+          const e = list[cursor++];
+          return _assetPreloadOne(e.u + _stampFor(e), e.b || 0).then(worker);
+        });
       };
       const lanes = [];
       const n = Math.min(ASSET_PRELOAD_CONCURRENCY, list.length);
@@ -59808,17 +61049,24 @@ function preloadAllAssets() {
   // reporting boundary. `run` keeps going after the watchdog so the cache
   // still fills. Kept as a race so window.__assetPreload().timedOut stays
   // meaningful and a wedged connection is visible in the console.
+  // (v36.25) The watchdog RE-ARMS while the preload is parked for a match —
+  // otherwise a 4-minute match would report a "wedged connection" that is
+  // actually the suspend working exactly as designed.
   _assetPreload.promise = Promise.race([
     run,
-    new Promise(res => setTimeout(() => {
-      if (_assetPreload.state === 'loading') {
-        _assetPreload.timedOut = true;
-        console.warn('[preload] watchdog fired at ' + (ASSET_PRELOAD_MAX_MS / 1000) +
-          's with ' + _assetPreload.done + '/' + _assetPreload.total +
-          ' done — nothing is blocked on it, rest continues in background');
-      }
-      res();
-    }, ASSET_PRELOAD_MAX_MS)),
+    new Promise(res => {
+      const check = () => {
+        if (_assetPreload.state === 'paused') { setTimeout(check, ASSET_PRELOAD_MAX_MS); return; }
+        if (_assetPreload.state === 'loading') {
+          _assetPreload.timedOut = true;
+          console.warn('[preload] watchdog fired at ' + (ASSET_PRELOAD_MAX_MS / 1000) +
+            's with ' + _assetPreload.done + '/' + _assetPreload.total +
+            ' done — nothing is blocked on it, rest continues in background');
+        }
+        res();
+      };
+      setTimeout(check, ASSET_PRELOAD_MAX_MS);
+    }),
   ]);
   return _assetPreload.promise;
 }
@@ -71697,9 +72945,9 @@ function gameLoop(timestamp) {
       const _fX = _cineActive ? camera.position.x : player.position.x;
       const _fZ = _cineActive ? camera.position.z : player.position.z;
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
-      if (game._clipWantHub) {   
+      if (game._clipWantHub && !_clipmap.enabling) {   // (v36.27) enabling: _clipEnableSliced owns it
         if (!_clipmap.on) {
-          try { _clipBuild(); for (const _L of _clipmap.levels) { const _st = 2 * _L.spacing; _L.cx = Math.round(_fX / _st) * _st; _L.cz = Math.round(_fZ / _st) * _st; _clipBakeLevel(_L); _L.mesh.position.set(_L.cx, 0, _L.cz); _L.mesh.visible = true; } _clipmap.on = true; if (game.sandwichChunks) for (const _c of game.sandwichChunks.values()) { if (_c.ground) { try { if (_c.ground.parent) scene.remove(_c.ground); if (_c.ground.geometry) _c.ground.geometry.dispose(); } catch (_) {} _c.ground = null; } } } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }   
+          try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
         } else { try { _clipUpdate(_fX, _fZ); } catch (_) {} }
       }
       if (game._swPreloading) {
@@ -71708,7 +72956,33 @@ function gameLoop(timestamp) {
         game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
         if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
-      } else {   
+      } else if (game._swapStaging) {
+        // (v36.27) A staged world-swap traverse owns the streamer end to end: it
+        // tears the outgoing chunks down in slices, builds, enables the clipmap
+        // and then drains to completion, all in a fixed order. A background
+        // 1-chunk/frame trickle here refills the map behind the teardown loop.
+      } else if (game.state === 'warmup' && !game._worldPrebaking) {
+        // (v36.26) WARMUP IS LOADING TIME, NOT FLIGHT TIME — so it gets a loading
+        // budget. The launch path is already covered by _prebakeWorldForLaunch
+        // (which owns the streamer while game._worldPrebaking is set, hence the
+        // exclusion), but the OTHER way a world gets swapped is the roundEnd ->
+        // warmup rebuild in updateRoundSystem: every round 2+, every campaign leg,
+        // and the hub ZONE-RIFT traverse (_hzEnterCavern / _hzReturnToHub set
+        // state='roundEnd' with a 2 s timer, and the rebuild lands in that branch).
+        // Those all ran the GAMEPLAY budget below — 1 chunk/frame in freeflight —
+        // through a countdown in which the ship cannot move and the picker is up.
+        // Measured on v36.25, hub -> cavern rift: warmup at t=52394, `playing` at
+        // t=62387, i.e. 10 s of the world still arriving, and it kept arriving
+        // into live flight. The ship is parked for the whole countdown, so the
+        // todo list is bounded by the view radius and this drains in ~16 frames
+        // and then costs nothing.
+        // The budget is 12 ms of WALL CLOCK, not a chunk count — see _swDrainStream
+        // for why (and for why that needs no mobile special-case). Measured on the
+        // round-2 rebuild of an elimination match, hourglass: 110 chunks complete
+        // 0.5 s after warmup began, and round 2 then played 15 s with p99 8.9 ms
+        // and zero frames over 16 ms.
+        _swDrainStream(_fX, _fZ, 12, 64);
+      } else {
         updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
       try { _swUpdateHubWater(); } catch (_) {}   
