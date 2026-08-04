@@ -52,8 +52,16 @@ SCAN_DIRS = ['objects', 'ships', 'frames', 'map_thumbs', 'music', 'audio', 'ring
 # Owner-named extras: files the owner explicitly wants preloaded even though the
 # code-reference walk does not find them. Each one is reported in the orphan
 # section too, so the discrepancy stays visible.
+#
+# (v36.29) rings/fence.glb REMOVED from this list. Resource Timing on the live
+# pane confirmed it downloaded on every visit (fence.glb 1647K) while a
+# full-text grep of index-working.html finds ZERO references to it — no
+# _ringBaseUrl literal, no table entry, nothing. It was pure preload cost. The
+# FILE is still on disk (rebuilt by tools/compress_glb.mjs like everything
+# else), so wiring it up later is a one-line change; it just isn't downloaded
+# by people who will never see it. Restore by un-commenting the line below.
 OWNER_EXTRAS = [
-    ('rings/fence.glb', 1, 'rings'),   # owner listed it with cyanring.glb; no code reference found
+    # ('rings/fence.glb', 1, 'rings'),   # owner listed it with cyanring.glb; no code reference found
 ]
 
 # (v36.25) Groups the owner does NOT want bulk-preloaded. They are still walked
