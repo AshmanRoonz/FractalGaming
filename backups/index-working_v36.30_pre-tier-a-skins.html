@@ -914,23 +914,6 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   line-height: 1.3; min-height: 15px; padding: 0 2px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 92vw;
 }
-/* (v36.31) Skin cards ARE .perk-card (background / border / radius / hover /
-   .selected all inherited) — this only overrides the box, because seven of them
-   at the shared 96px min-width would be 720px and they have to share a rail
-   with the three difficulty cards. The name lives in the tooltip + #skin-desc;
-   the swatch is the information. */
-.skin-card {
-  min-width: 0 !important; width: 34px; padding: 5px 4px 4px;
-  gap: 0; justify-content: center;
-}
-.skin-sw {
-  display: block; width: 22px; height: 15px; border-radius: 3px;
-  border: 1px solid rgba(255,255,255,0.22);
-  /* Sheen so a flat hex still reads as a painted panel rather than a color box,
-     and so near-black VOLCANIC keeps a visible edge on the dark card face. */
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.30), inset 0 -2px 3px rgba(0,0,0,0.45);
-}
-.skin-card.selected .skin-sw { border-color: rgba(255,210,110,0.9); }
 #ship-preview-empty {
   color: #555; font-size: 14px; letter-spacing: 2px; text-align: center;
   padding: 60px 0; margin: auto;
@@ -2993,12 +2976,6 @@ body.vr-active #camp-video { display: none !important; }
   .ship-chip .sc-class { display: none !important; }
   .perk-card { min-width: 72px !important; padding: 4px 8px 3px !important; }
   .perk-card-icon { font-size: 14px !important; }
-  /* (v36.31) ⚠ This block is LATER in the sheet than the base .skin-card rule
-     and `.perk-card`/`.skin-card` have EQUAL specificity — so without restating
-     it here the `min-width: 72px !important` two lines up would win and the
-     seven swatch cards would blow the rail out to ~600px. */
-  .skin-card { min-width: 0 !important; width: 28px !important; padding: 4px 3px 3px !important; }
-  .skin-sw { width: 18px !important; height: 12px !important; }
   #perks-desc, #diff-desc, #skin-desc { display: none !important; }
   /* (v36.30) The skin slot compacts with the rest of the rail. min-height is
      what reserves the empty phase-1 box, so it has to shrink here too or the
@@ -3631,9 +3608,9 @@ body.vr-active #camp-video { display: none !important; }
         <div id="diff-grid"></div>
         <div id="diff-desc"></div>
       </div>
-      <!-- (v36.31) SKIN THEME — _renderSkinPicker fills #skin-grid with seven
-           .perk-card.skin-card swatches (one per SHIP_SKINS entry) and writes
-           the hovered/selected name+blurb into #skin-desc. No mode gate. -->
+      <!-- (v36.30) SKIN THEME slot — phase 1 builds the container only;
+           #skin-grid is filled in phase 2 (same .perk-card vocabulary as
+           #diff-grid / #perks-grid, so no new card CSS will be needed). -->
       <div id="ship-preview-skin">
         <div class="perks-label">SKIN THEME</div>
         <div id="skin-grid"></div>
@@ -3987,7 +3964,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.34';
+const LSS_BUILD = '36.30';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 
@@ -4271,118 +4248,6 @@ const PILOT_PERKS = {
 // Default perk if the player hasn't picked one yet (or localStorage missing).
 const PILOT_PERK_DEFAULT = 'shield';
 
-// ---- SHIP SKINS (v36.31) ----
-// A skin is a TABLE OF MATERIAL PARAMETERS, not an asset. buildModelShipMesh
-// rebuilds every hull material from scratch and copies only the GLB's baseColor
-// map, so re-tinting/re-finishing a hull costs nothing but a few uniform writes
-// at mesh-build time — see _applyShipSkin (PART 11) for the single apply path.
-//
-// Every field here is a MeshStandardMaterial UNIFORM (color / emissive /
-// metalness / roughness / envMapIntensity). ⚠ That is deliberate and
-// load-bearing: none of them appear in three.js' program cache key, so a skin
-// can NEVER fork a shader program and can never reintroduce the combat
-// first-sight hitch (critical rule 5). Anything that WOULD fork the key — an
-// extra texture slot, onBeforeCompile fresnel, switching to MeshPhysical for
-// sheen/iridescence — is out of scope for that reason.
-//
-//   tint            multiplied over the material's factory color (which is the
-//                   GLB's own color, itself multiplied over the baseColor map).
-//                   Multiply can only darken a white base, so a skin can tint
-//                   and deepen but never blow a hull out to pure white.
-//   emissive        ADDED to the factory emissive (which carries the faint
-//                   team-color hint in game and the dark-plate lift in the
-//                   ship-select preview), with emissiveIntensity pinned to 1 so
-//                   the value below is the whole story. This is the readability
-//                   floor: it is what stops a dark skin from vanishing into the
-//                   cavern black. Keep every one of them non-zero.
-//   swatch          UI-only CSS color for the picker card.
-//
-// `factory` is special-cased (restore: true): it puts every material back to the
-// exact snapshot taken before any skin was applied, so FACTORY is pixel-identical
-// to the pre-v36.31 look on both the in-world ship and the preview — which have
-// DIFFERENT baselines, and that is precisely why factory restores rather than
-// re-specifying numbers.
-const SHIP_SKINS = {
-  factory: {
-    id: 'factory', name: 'FACTORY', swatch: '#8e99ad', restore: true,
-    desc: 'Standard fleet issue. Untinted hull, matte service finish.',
-  },
-  // hue = degrees rotated about the grey axis (relative to the hull's own art,
-  // so multi-toned ships keep their internal contrast); sat = saturation
-  // multiplier (<1 mutes, 0 = greyscale); mul = flat brightness scale.
-  bone: {
-    id: 'bone', name: 'BONE WHITE', swatch: '#ddd8cc',
-    desc: 'Bleached ceramic plating. High roughness keeps it off-white, never glare.',
-    hue: 42, hueMix: 1.0, sat: 0.13, mul: 1.16, metalness: 0.06, roughness: 0.74,
-    envMapIntensity: 0.28, emissive: 0x000000,
-  },
-  volcanic: {
-    id: 'volcanic', name: 'VOLCANIC BLACK', swatch: '#2f3238',
-    desc: 'Scorched basalt hull with an ember glow in the seams.',
-    hue: 18, hueMix: 1.0, sat: 0.10, mul: 0.44, metalness: 0.62, roughness: 0.40,
-    envMapIntensity: 0.55, emissive: 0x170601,
-  },
-  chrome: {
-    id: 'chrome', name: 'CHROME', swatch: '#cfd8e6',
-    desc: 'Mirror-polished alloy. Drinks the environment light.',
-    hue: 205, hueMix: 1.0, sat: 0.07, mul: 1.08, metalness: 0.95, roughness: 0.13,
-    envMapIntensity: 1.30, emissive: 0x0c1420,
-  },
-  copper: {
-    id: 'copper', name: 'OXIDISED COPPER', swatch: '#9c7048',
-    desc: 'Beaten copper plate gone green in the shadows.',
-    hue: 24, hueMix: 0.92, sat: 0.55, mul: 0.94, metalness: 0.85, roughness: 0.46,
-    envMapIntensity: 0.62, emissive: 0x000000,
-  },
-  signal: {
-    id: 'signal', name: 'SIGNAL ORANGE', swatch: '#d8813c',
-    desc: 'Rescue-orange livery. Impossible to lose in a dogfight.',
-    hue: 28, hueMix: 1.0, sat: 0.72, mul: 1.04, metalness: 0.14, roughness: 0.52,
-    envMapIntensity: 0.30, emissive: 0x000000,
-  },
-  void: {
-    id: 'void', name: 'VOID PURPLE', swatch: '#6f5cc4',
-    desc: 'Deep violet composite lit from inside.',
-    hue: 268, hueMix: 0.92, sat: 0.48, mul: 0.88, metalness: 0.50, roughness: 0.32,
-    envMapIntensity: 0.72, emissive: 0x0c0320,
-  },
-};
-// Live tuning while iterating with the owner in the preview: no reload needed.
-//   window.__skinTune('copper', { hue: 40, sat: 0.5, mul: 0.9 })
-//   window.__skinTune()  -> dump the current table
-if (typeof window !== 'undefined') window.__skinTune = function (id, patch) {
-  if (!id) return JSON.parse(JSON.stringify(SHIP_SKINS));
-  const sk = SHIP_SKINS[id];
-  if (!sk) return 'no such skin: ' + id;
-  Object.assign(sk, patch || {});
-  try {
-    if (typeof _renderSkinPicker === 'function') _renderSkinPicker();
-    const cur = _getStoredSkinId();
-    if (typeof _shipPreviewRoot !== 'undefined' && _shipPreviewRoot) _applyShipSkin(_shipPreviewRoot, cur);
-    if (typeof player !== 'undefined' && player && player.mesh) _applyShipSkin(player.mesh, cur);
-  } catch (e) { return 'applied to table, re-render failed: ' + e.message; }
-  return sk;
-};
-const SHIP_SKIN_DEFAULT = 'factory';
-// ONE stored skin id, GLOBAL across all 7 hulls (key: 'lss_ship_skin').
-// Deliberate, and matching the pilot-perk / campaign-difficulty single-key
-// pattern next door: a skin is the pilot's LIVERY — an identity you keep as you
-// cycle hulls in ship-select or hot-swap ships mid-campaign — not a property of
-// the chassis. Per-ship storage would also mean the ship you just picked
-// silently changes color on you, and would need 7 keys plus a migration.
-function _getStoredSkinId() {
-  try {
-    const s = localStorage.getItem('lss_ship_skin');
-    if (s && SHIP_SKINS[s]) return s;
-  } catch (_) {}
-  return SHIP_SKIN_DEFAULT;
-}
-function _setStoredSkinId(id) {
-  if (!SHIP_SKINS[id]) return;
-  try { localStorage.setItem('lss_ship_skin', id); } catch (_) {}
-  if (typeof player !== 'undefined' && player) player.skinId = id;
-}
-
 const LOADOUTS = {
   VORTEX: {
     name: 'VORTEX', className: 'Corvette Beam', chassis: 'CORVETTE',
@@ -4542,10 +4407,6 @@ const game = {
 
 const player = {
   loadout: null, loadoutKey: null,
-  // (v36.31) Chosen hull livery (SHIP_SKINS id). commitLoadout pulls it from
-  // localStorage, hands it to createShipMesh and broadcasts it with the loadout;
-  // swapToModelMeshWhenReady reads it off the owner on the GLB swap-in.
-  skinId: SHIP_SKIN_DEFAULT,
   chassis: null,
   team: LSS.TEAM_FLEET_A,
   health: 0, maxHealth: 0,
@@ -6526,10 +6387,6 @@ async function joinRoom() {
         }
         peer.loadoutKey = data.loadoutKey;
         peer.team = data.team;
-        // (v36.31) Remember the peer's livery. May be undefined (older build,
-        // or a peer who never opened the picker) — updateNetworkPlayer hands it
-        // straight to _shipSkinDef, which resolves anything unknown to FACTORY.
-        peer.skinId = data.skinId;
         // Capture peer's Discord identity if they sent it ; lets
         // the lobby chips show their avatar + display name instead of
         // generic "PEER" text. May be undefined if the peer isn't
@@ -6594,9 +6451,6 @@ async function joinRoom() {
           loadoutKey: player.loadoutKey,
           team: player.team,
           peerId: net.myPeerId,
-          // (v36.31) Same livery field as the commit-time broadcast, so a peer
-          // who joins AFTER we committed still builds our ship skinned.
-          skinId: player.skinId || SHIP_SKIN_DEFAULT,
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
@@ -10602,7 +10456,7 @@ function showShipSelectWaiting() {
 const _npFlipY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 const _npMeshTgt = new THREE.Quaternion();
 class NetworkPlayer {
-  constructor(peerId, loadoutKey, team, skinId) {
+  constructor(peerId, loadoutKey, team) {
     const loadout = LOADOUTS[loadoutKey];
     if (!loadout) return;
     const chassisData = CHASSIS[loadout.chassis];
@@ -10610,10 +10464,6 @@ class NetworkPlayer {
     this.peerId = peerId;
     this.id = 'net_' + peerId;
     this.loadoutKey = loadoutKey;
-    // (v36.31) Peer livery, normalized through _shipSkinDef so a missing /
-    // unknown / hostile id can never reach the material code — it becomes
-    // FACTORY here and stays that way for the GLB swap-in below.
-    this.skinId = _shipSkinDef(skinId).id;
     this.loadout = loadout;
     this.chassis = chassisData;
     this.team = team;
@@ -10643,9 +10493,9 @@ class NetworkPlayer {
     this._cloaked = false;
 
     const teamColor = team === LSS.TEAM_FLEET_A ? 0xff4444 : 0x44bb44;
-    this.mesh = createShipMesh(chassisData, teamColor, loadoutKey, this.skinId);
+    this.mesh = createShipMesh(chassisData, teamColor, loadoutKey);
     this.mesh.position.copy(this.position);
-    this.mesh.userData.bot = this;
+    this.mesh.userData.bot = this; 
     scene.add(this.mesh);
     swapToModelMeshWhenReady(this, teamColor);
 
@@ -10993,7 +10843,7 @@ function updateNetworkPlayer(peerId, data) {
   }
 
   // Create new NetworkPlayer
-  const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId);
+  const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B);
   peer.networkPlayer = np;
   net.networkPlayers.push(np);
   game.entities.push(np);
@@ -29417,10 +29267,6 @@ function _applyShipPreviewModel(key) {
     } catch (_) {}
     s.modelByKey[key] = modelRoot;
   }
-  // (v36.31) Livery. Applied on EVERY show, not just on first build, because
-  // modelByKey caches the per-ship root for the session: cycling ships would
-  // otherwise hand back whatever skin that root wore last time.
-  try { _applyShipSkin(modelRoot, _getStoredSkinId()); } catch (_) {}
   // Fit camera dolly to the model's bbox so small ships don't look tiny and
   // large ships don't clip. We aim 3/4 down-angled for a good silhouette.
   const box = new THREE.Box3().setFromObject(modelRoot);
@@ -29436,16 +29282,6 @@ function _applyShipPreviewModel(key) {
   s.yaw = 0; 
   s.scene.add(modelRoot);
   s.model = modelRoot;
-}
-
-// (v36.31) Live re-skin of whatever hull is currently on the preview stage.
-// Called by the SKIN THEME picker on click, so the change is visible on the
-// rotating hero the same frame — no rebuild, no re-dolly, no reset of the yaw
-// the player may have dragged to.
-function setShipPreviewSkin(skinId) {
-  const s = _shipPreview3D;
-  if (!s || !s.model) return;
-  try { _applyShipSkin(s.model, skinId); } catch (_) {}
 }
 
 function _animateShipPreview() {
@@ -29662,251 +29498,7 @@ function shipMuzzleWorld(mesh, shot, out) {
   return out.set(0, 0, 0);
 }
 
-// ---- SHIP SKINS: the single apply path (v36.31) ----
-// Table lives beside CHASSIS/LOADOUTS (see SHIP_SKINS ~L4252). EVERY place a
-// player-visible ship is built routes through _applyShipSkin so there is one
-// source of truth: buildModelShipMesh (in-world player, third person, bots,
-// peers), _applyShipPreviewModel (the rotating ship-select hero) and
-// setShipPreviewSkin (live re-skin while the preview is on screen).
-//
-// ⚠ bakeShipThumbnails is DELIBERATELY NOT on that list. Its clones SHARE
-// materials with the cached GLB prototype (see the leak-fix note in that
-// function) — skinning there would mutate the prototype and poison every ship
-// built afterwards, of every skin, for the rest of the session.
-function _shipSkinDef(id) {
-  return (id && SHIP_SKINS[id]) ? SHIP_SKINS[id] : SHIP_SKINS[SHIP_SKIN_DEFAULT];
-}
-// HULL materials only — never the FX. We use the SAME markers the rest of the
-// file already uses to tell hull from FX: buildModelShipMesh publishes
-// userData.hullMats (opaque, non-additive; the list animateShipMesh dims on the
-// doomed state), and for roots that don't have it (the preview's material
-// clones) we fall back to the same test it used to build the list — an OPAQUE
-// MeshStandardMaterial. Engine discs/plumes are ShaderMaterial, panel glow and
-// running lights are MeshBasicMaterial, and the shield is a ShaderMaterial on a
-// mesh named 'shield', so all of them fail `isMeshStandardMaterial` and are
-// excluded even before the explicit name/flag skips below.
-function _shipSkinHullMats(root, out) {
-  out = out || [];
-  if (root && root.userData && Array.isArray(root.userData.hullMats)) {
-    for (const m of root.userData.hullMats) {
-      if (m && m.isMeshStandardMaterial && out.indexOf(m) < 0) out.push(m);
-    }
-    return out;
-  }
-  if (!root || !root.traverse) return out;
-  root.traverse(n => {
-    if (!n.isMesh || !n.material) return;
-    if (n.name === 'shield') return;
-    if (n.userData && (n.userData.isPlume || n.userData.isRunningLight)) return;
-    const mats = Array.isArray(n.material) ? n.material : [n.material];
-    for (const m of mats) {
-      if (!m || !m.isMeshStandardMaterial) continue;
-      if (m.transparent) continue;
-      if (out.indexOf(m) < 0) out.push(m);
-    }
-  });
-  return out;
-}
-const _skinTintScratch = new THREE.Color();
-const _skinEmScratch   = new THREE.Color();
-// (v36.32) HUE-ROTATION SKINS — replaces v36.31's colour MULTIPLY.
-// Multiplying the hull colour by a saturated tint crushes the painted art's
-// tonal range: panel lines, weathering and shading all collapse toward one
-// candy hue (owner's read: "quite saturated"; chrome escaped it only because
-// it is near-achromatic and lets metalness carry the look). Rotating HUE about
-// the LUMINANCE axis instead preserves the texture's own saturation and value
-// structure, so the hull stays the same authored art in a different colour
-// family — and an explicit saturation dial addresses "too loud" directly.
-// ⚠ ONE shader variant, patched onto every hull material at BUILD time
-// (factory included, hue 0 / sat 1), driven by UNIFORMS. That is what keeps
-// skin switching free: writing uSkinHue/uSkinSat never recompiles, so the
-// "NO m.needsUpdate" rule below still holds for every swap. The single
-// per-material compile rides the ship build, which the v36.26/36.28 prime pass
-// already renders during loading.
-// ⚠ ABSOLUTE hue, not a relative rotation. The first cut rotated hue BY a
-// fixed angle, which shifts from whatever art the hull already has — VORTEX is
-// blue-purple, so "OXIDISED COPPER" (+26 deg) rendered GREEN. A named livery
-// has to look the same on all 7 hulls, so we round-trip through HSV and SET the
-// hue toward a target, keeping the texture's own saturation and value (its
-// panel lines, weathering and shading all survive). uSkinMix < 1 blends toward
-// the target instead of forcing it, which preserves multi-toned art.
-const _SKIN_HUE_PARS = [
-  'uniform float uSkinHue;',   // target hue, 0..1
-  'uniform float uSkinMix;',   // 0 = keep original hue, 1 = force the target
-  'uniform float uSkinSat;',   // saturation multiplier
-  'vec3 lssSkinHue(vec3 c, float th, float mixAmt, float s){',
-  '  float mx = max(c.r, max(c.g, c.b));',
-  '  float mn = min(c.r, min(c.g, c.b));',
-  '  float d = mx - mn;',
-  '  float h = 0.0;',
-  '  if (d > 1e-5) {',
-  '    if (mx == c.r)      h = mod((c.g - c.b) / d, 6.0);',
-  '    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;',
-  '    else                h = (c.r - c.g) / d + 4.0;',
-  '    h /= 6.0;',
-  '  }',
-  '  float sat = (mx <= 0.0) ? 0.0 : d / mx;',
-  '  float val = mx;',
-  // Shortest path around the hue wheel, so a blend never sweeps the spectrum.
-  '  float dh = th - h; dh -= floor(dh + 0.5);',
-  '  h = fract(h + dh * mixAmt);',
-  '  sat = clamp(sat * s, 0.0, 1.0);',
-  '  vec3 p = abs(fract(vec3(h) + vec3(1.0, 0.6666666, 0.3333333)) * 6.0 - 3.0);',
-  '  return val * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), sat);',
-  '}',
-].join('\n');
-
-function _skinPatchHueShader(m) {
-  const ud = m.userData || (m.userData = {});
-  if (ud._skinHueU) return ud._skinHueU;
-  const u = { uSkinHue: { value: 0 }, uSkinMix: { value: 0 }, uSkinSat: { value: 1 } };
-  ud._skinHueU = u;
-  const prevOBC = m.onBeforeCompile;
-  m.onBeforeCompile = function (shader, renderer) {
-    if (prevOBC) { try { prevOBC.call(this, shader, renderer); } catch (_) {} }
-    shader.uniforms.uSkinHue = u.uSkinHue;
-    shader.uniforms.uSkinMix = u.uSkinMix;
-    shader.uniforms.uSkinSat = u.uSkinSat;
-    shader.fragmentShader = shader.fragmentShader
-      .replace('void main() {', _SKIN_HUE_PARS + '\nvoid main() {')
-      // After map_fragment so it acts on the SAMPLED texture, not just the
-      // flat material colour — that is the whole point.
-      .replace('#include <map_fragment>',
-        '#include <map_fragment>\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat);');
-  };
-  const prevKey = m.customProgramCacheKey;
-  m.customProgramCacheKey = function () {
-    return 'lssSkinHue|' + (prevKey ? prevKey.call(this) : '');
-  };
-  m.needsUpdate = true;
-  return u;
-}
-
-function _applyShipSkin(root, skinId) {
-  if (!root) return null;
-  const sk = _shipSkinDef(skinId);
-  let mats;
-  try { mats = _shipSkinHullMats(root); } catch (_) { return null; }
-  for (let i = 0; i < mats.length; i++) {
-    const m = mats[i];
-    const ud = m.userData || (m.userData = {});
-    // Snapshot the FACTORY state once per material, the first time this
-    // material is ever skinned. This is what makes 'factory' an exact restore
-    // on both baselines (the in-world build's normalized 0.20/0.60/team-tint
-    // emissive, and the preview clone's authored glTF values + dark-plate lift)
-    // without either one having to hard-code the other's numbers.
-    if (!ud._skinBase) {
-      ud._skinBase = {
-        color: m.color ? m.color.clone() : new THREE.Color(0xffffff),
-        emissive: m.emissive ? m.emissive.clone() : new THREE.Color(0x000000),
-        emissiveIntensity: (m.emissiveIntensity != null) ? m.emissiveIntensity : 1,
-        metalness: (m.metalness != null) ? m.metalness : 0.5,
-        roughness: (m.roughness != null) ? m.roughness : 0.5,
-        envMapIntensity: (m.envMapIntensity != null) ? m.envMapIntensity : 1,
-      };
-    }
-    const b = ud._skinBase;
-    const hu = _skinPatchHueShader(m);
-    if (sk.restore) {
-      hu.uSkinHue.value = 0; hu.uSkinMix.value = 0; hu.uSkinSat.value = 1;
-      if (m.color) m.color.copy(b.color);
-      if (m.emissive) m.emissive.copy(b.emissive);
-      m.emissiveIntensity = b.emissiveIntensity;
-      m.metalness = b.metalness;
-      m.roughness = b.roughness;
-      m.envMapIntensity = b.envMapIntensity;
-    } else {
-      // Hue/sat ride the shader; `mul` is only an overall darken/lighten so a
-      // skin can read as black basalt or bleached ceramic without a tint cast.
-      hu.uSkinHue.value = ((sk.hue || 0) % 360) / 360;
-      hu.uSkinMix.value = (sk.hueMix != null) ? sk.hueMix : 1;
-      hu.uSkinSat.value = (sk.sat != null) ? sk.sat : 1;
-      if (m.color) {
-        m.color.copy(b.color);
-        if (sk.mul != null && sk.mul !== 1) m.color.multiplyScalar(sk.mul);
-      }
-      // emissive = skin floor + the factory emissive term, so the team-color
-      // hint (in game) and the dark-plate lift (in the preview) both survive.
-      // Intensity is pinned to 1 so the table value is the final value.
-      if (m.emissive) {
-        m.emissive.setHex(sk.emissive)
-          .add(_skinEmScratch.copy(b.emissive).multiplyScalar(b.emissiveIntensity));
-      }
-      m.emissiveIntensity = 1.0;
-      m.metalness = sk.metalness;
-      m.roughness = sk.roughness;
-      m.envMapIntensity = sk.envMapIntensity;
-    }
-    // ⚠ _dimHullMat (doomed-state dimming) latches _baseHullColor /
-    // _baseEmissiveI on its FIRST call and thereafter writes
-    // base*dim every frame — so a skin applied after it latched would be
-    // stomped back to the old color on the very next frame. Dropping the latch
-    // makes it re-snapshot the freshly skinned (full-brightness) values.
-    if (ud._baseHullColor !== undefined) { delete ud._baseHullColor; delete ud._baseEmissiveI; }
-    // ⚠ NO m.needsUpdate = true. Every field written above is a uniform; setting
-    // needsUpdate would force a program RECOMPILE per ship build — exactly the
-    // kind of first-sight hitch critical rule 5 exists to prevent.
-  }
-  if (!root.userData) root.userData = {};
-  root.userData.skinId = sk.id;
-  return sk;
-}
-
-// (v36.31) Skin probe — the only way to inspect this from outside, since
-// everything lives inside _bootLSS. Read-only unless you pass {set}/{ship}.
-//   window.__skinProbe()                        -> stored id + live hull params
-//   window.__skinProbe({ set: 'chrome' })       -> pick a skin (as a click would)
-//   window.__skinProbe({ ship: 'PYRO' })        -> preview a hull
-//   window.__skinProbe({ peer: 'volcanic' })    -> build a REAL NetworkPlayer
-//        through updateNetworkPlayer (the remote-player path, minus the wire),
-//        report its hull params, then tear it back down.
-if (typeof window !== 'undefined') window.__skinProbe = function (opt) {
-  opt = opt || {};
-  const out = {};
-  try {
-    if (opt.set) { _setStoredSkinId(opt.set); if (typeof _renderSkinPicker === 'function') _renderSkinPicker(); }
-    if (opt.ship && typeof previewLoadout === 'function') previewLoadout(opt.ship);
-    const dump = (root) => {
-      if (!root) return null;
-      const mats = _shipSkinHullMats(root);
-      if (!mats.length) return { n: 0 };
-      const m = mats[0];
-      return {
-        n: mats.length,
-        color: '#' + m.color.getHexString(),
-        emissive: '#' + m.emissive.getHexString(),
-        emissiveIntensity: m.emissiveIntensity,
-        metalness: +m.metalness.toFixed(3),
-        roughness: +m.roughness.toFixed(3),
-        envMapIntensity: +(m.envMapIntensity != null ? m.envMapIntensity : -1).toFixed(3),
-        skinId: (root.userData && root.userData.skinId) || null,
-      };
-    };
-    out.stored = _getStoredSkinId();
-    out.playerSkinId = (typeof player !== 'undefined' && player) ? player.skinId : null;
-    out.previewKey = (_shipPreview3D && _shipPreview3D.lastKey) || null;
-    out.preview = dump(_shipPreview3D && _shipPreview3D.model);
-    out.playerShip = dump((typeof player !== 'undefined' && player) ? player.mesh : null);
-    if (opt.peer) {
-      const pid = '__skinprobe__';
-      net.peers.set(pid, { state: null, lastUpdate: 0, interpT: 0, loadoutKey: null, team: null, networkPlayer: null });
-      updateNetworkPlayer(pid, { loadoutKey: opt.peerShip || 'BLASTER', team: LSS.TEAM_FLEET_B, skinId: opt.peer });
-      const peer = net.peers.get(pid);
-      const np = peer && peer.networkPlayer;
-      out.peer = dump(np && np.mesh);
-      out.peerSkinId = np ? np.skinId : null;
-      if (np) {
-        try { np.destroy(); } catch (_) {}
-        let i = net.networkPlayers.indexOf(np); if (i >= 0) net.networkPlayers.splice(i, 1);
-        i = game.entities.indexOf(np); if (i >= 0) game.entities.splice(i, 1);
-      }
-      net.peers.delete(pid);
-    }
-  } catch (e) { out.error = (e && e.message) || String(e); }
-  return out;
-};
-
-function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
+function buildModelShipMesh(chassisData, teamColor, loadoutKey) {
   const group = new THREE.Group();
   const proto = shipModelCache.loaded[loadoutKey];
   const teamCol = new THREE.Color(teamColor);
@@ -30126,11 +29718,6 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   group.userData = Object.assign(prevUD, { engineMesh, shieldMesh: shield, engineGlows, enginePlumes, barrelMeshes, panelGlowMat, engineGlowMat, isModelShip: true });
   // Half-red half-green tail running light, fixed pi-radius across all ships.
   _addShipRunningLight(group, chassisData.hullWidth, chassisData.hullHeight, chassisData.hullLength);
-  // (v36.31) Livery. Runs LAST so userData.hullMats is already published (the
-  // helper prefers that list) and so nothing built after it can re-write the
-  // hull params. FACTORY restores the exact values set above, so an unskinned
-  // ship is byte-identical to pre-v36.31.
-  try { _applyShipSkin(group, skinId); } catch (_) {}
   return group;
 }
 
@@ -30213,10 +29800,7 @@ function swapToModelMeshWhenReady(owner, teamColor) {
     const botRef = oldMesh.userData && oldMesh.userData.bot;
     // (leak fix 2026-06-12) Dispose the replaced group, don't just unlink it.
     _disposeShipGroup(oldMesh);
-    // (v36.31) Carry the owner's livery across the GLB swap-in. This is the
-    // path a cold-start player/peer actually takes (placeholder -> real model),
-    // so without it the skin would only ever appear on warm rebuilds.
-    owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey, owner.skinId);
+    owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey);
     owner.mesh.position.copy(pos);
     owner.mesh.quaternion.copy(quat);
     owner.mesh.visible = visible;
@@ -30225,10 +29809,7 @@ function swapToModelMeshWhenReady(owner, teamColor) {
   });
 }
 
-// (v36.31) `skinId` is optional everywhere: omitted / unknown / stale ids all
-// resolve to FACTORY inside _shipSkinDef, so no call site can throw and bots,
-// hub traffic and the warmup ghosts keep the stock hull by simply not passing one.
-function createShipMesh(chassisData, teamColor, loadoutKey, skinId) {
+function createShipMesh(chassisData, teamColor, loadoutKey) {
   // GLB-only ship build path. The procedural fallback was
   // removed (~16KB) ; every playable ship has a GLB in SHIP_MODELS, so the
   // fallback only ever ran during cold-start while GLBs were still
@@ -30238,7 +29819,7 @@ function createShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   // fixing in the catalog ; we log it and still spawn invisible so the
   // game keeps running.
   if (loadoutKey && shipModelCache.loaded[loadoutKey]) {
-    return buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId);
+    return buildModelShipMesh(chassisData, teamColor, loadoutKey);
   }
   const haveSpec = !!(loadoutKey && typeof SHIP_MODELS !== 'undefined' && SHIP_MODELS[loadoutKey]);
   if (!haveSpec) {
@@ -47854,12 +47435,7 @@ function commitLoadout(key) {
   if (player.thermalShieldRing) { scene.remove(player.thermalShieldRing); player.thermalShieldRing = null; }
 
   if (player.mesh) scene.remove(player.mesh);
-  // (v36.31) Re-read the stored livery at every commit — the player may have
-  // changed it in the picker since the last launch, and this is also the path
-  // a between-rounds ship swap and the campaign D-pad hot-swap take. Set BEFORE
-  // the build so swapToModelMeshWhenReady's cold-start upgrade sees it too.
-  player.skinId = _getStoredSkinId();
-  player.mesh = createShipMesh(ch, 0xff4444, key, player.skinId);
+  player.mesh = createShipMesh(ch, 0xff4444, key);
   player.mesh.visible = false;
   scene.add(player.mesh);
   swapToModelMeshWhenReady(player, 0xff4444);
@@ -48024,10 +47600,6 @@ function commitLoadout(key) {
       loadoutKey: player.loadoutKey,
       team: player.team,
       peerId: net.myPeerId,
-      // (v36.31) Livery rides the loadout commit — which IS the ready signal —
-      // so peers build our ship in the right colors on the first try instead of
-      // popping from factory to skinned. An old build simply ignores the field.
-      skinId: player.skinId || SHIP_SKIN_DEFAULT,
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -60856,10 +60428,6 @@ function previewLoadout(key) {
   // (v32.94) Campaign-only Easy/Medium/Hard swarm-difficulty picker (self-hides
   // outside campaign select).
   _renderDifficultyPicker();
-  // (v36.31) Hull livery picker. No mode gate — every mode gets skins. It sits
-  // beside difficulty in #ss-options-row and re-renders per previewed ship only
-  // so the selected card can't drift out of sync; the skin itself is global.
-  _renderSkinPicker();
 
   const confirmBtn = document.getElementById('ship-preview-confirm');
   if (confirmBtn) {
@@ -61047,52 +60615,6 @@ function _renderDifficultyPicker() {
   if (desc) desc.textContent = (LSS.MODE === 'endless')
     ? _endlessLivesFor(cur) + (_endlessLivesFor(cur) === 1 ? ' life' : ' lives') + ' for the run. Distance never resets.'
     : 'Up to ' + _campSwarmCapFor(cur) + ' enemy ships swarm at once.';
-}
-
-// (v36.31) SKIN THEME picker — 7 liveries, one global choice (see SHIP_SKINS
-// ~L4252 for why it is global rather than per-hull). Same .perk-card shell as
-// the perk / difficulty cards so the three rails read as one control language;
-// .skin-card only narrows the box (7 cards have to share a rail with the
-// difficulty picker) and swaps the icon glyph for a color chip.
-// The click path is deliberately CHEAP: store the id, repaint the 7 cards, and
-// re-skin the model already on the preview stage. No mesh rebuild, so the hero
-// keeps its dolly and whatever yaw the player dragged it to.
-function _renderSkinPicker() {
-  const panel = document.getElementById('ship-preview-skin');
-  const grid = document.getElementById('skin-grid');
-  const desc = document.getElementById('skin-desc');
-  if (!panel || !grid) return;
-  panel.style.display = 'flex';
-  const curId = _getStoredSkinId();
-  if (typeof player !== 'undefined' && player) player.skinId = curId;
-  grid.innerHTML = '';
-  for (const [id, sk] of Object.entries(SHIP_SKINS)) {
-    const card = document.createElement('div');
-    card.className = 'perk-card skin-card' + (id === curId ? ' selected' : '');
-    card.dataset.skinId = id;
-    // The name is only visible on the desc line / tooltip: at 7 cards there is
-    // no rail width for 7 labels, and the swatch is the actual information.
-    card.title = sk.name + ' — ' + sk.desc;
-    card.innerHTML = '<span class="skin-sw" style="background:' + sk.swatch + ';"></span>';
-    card.addEventListener('click', () => {
-      _setStoredSkinId(id);
-      _renderSkinPicker();
-      try { setShipPreviewSkin(id); } catch (_) {}
-    });
-    card.addEventListener('mouseenter', () => {
-      if (desc) desc.textContent = sk.name + ' — ' + sk.desc;
-    });
-    card.addEventListener('mouseleave', () => {
-      const c = SHIP_SKINS[_getStoredSkinId()];
-      if (desc && c) desc.textContent = c.name + ' — ' + c.desc;
-    });
-    grid.appendChild(card);
-  }
-  const cur = SHIP_SKINS[curId];
-  if (desc && cur) desc.textContent = cur.name + ' — ' + cur.desc;
-  // Keep the rotating hero honest even when the picker is re-rendered for a
-  // reason other than a click (ship change, re-entering ship select).
-  try { setShipPreviewSkin(curId); } catch (_) {}
 }
 
 // Legacy entry point: anywhere still calling selectLoadout(key) jumps straight to
