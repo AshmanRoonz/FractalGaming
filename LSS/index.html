@@ -3229,6 +3229,22 @@ body.vr-active #camp-video { display: none !important; }
      so the push only happens in the two modes that actually show the box. */
   #ship-select.ss-diff-on #ss-right-col { top: 168px !important; }
   #ship-preview-info, #map-select { max-height: none !important; }
+  /* (v36.40) ⚠ flex-shrink:0 is load-bearing, exactly as in the landscape-phone
+     block below. The ≤1200 block gives this `height: 68px !important` and nothing
+     else; height alone loses to the flex shrink coming from #map-select /
+     #map-window, so at 890x760 the thumbnail measured **153.2 x 1.6 px** — a
+     1.6px sliver where the map preview should be. `flex: 0 0 68px` pins the same
+     68px the ≤1200 block already asked for as the flex BASIS as well.
+     ⚠ AND THE DESCRIPTION HAS TO GO WITH IT, measured at 890x760: #map-window is
+     110px tall here, and pinning the thumbnail back to its real 68px leaves 42px
+     for a 23.2px name AND a 50.4px description — so the description overflowed
+     the framed box by ~23px and painted over the carousel arrows. That is only
+     visible once the thumbnail is no longer a 1.6px sliver, i.e. it is this pin's
+     own fallout, not a pre-existing bug. Same trade the landscape-phone block
+     already makes, for the same reason. With it hidden: 68 + 6 + 23.2 = 97.2
+     inside 110. */
+  #map-window-preview { flex: 0 0 68px !important; }
+  #map-window-desc { display: none !important; }
   /* The right column is TOP-anchored at this breakpoint, so the bottom edge is
      entirely free — the rails span the full width. */
   #ss-rails { left: 12px !important; right: 12px !important; bottom: 10px !important; }
@@ -4123,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.39';
+const LSS_BUILD = '36.40';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 
@@ -32945,7 +32961,7 @@ class OutskirtsMonster {
   }
 }
 
-function _initMonsters() {
+function _initMonsters(skipLoad) {
   game.monsters = [];
   const faces = [
     new THREE.Vector3( 1, 0, 0), new THREE.Vector3(-1, 0, 0),
@@ -32958,6 +32974,7 @@ function _initMonsters() {
     m.id = 'mon' + i;
     game.monsters.push(m);
   }
+  if (skipLoad) return;
   _loadNextMonsterModel();
   _preloadChampionShellModel();
 }
@@ -32985,26 +33002,35 @@ function _monStripRootMotion(clip) {
   } catch (_) { return clip; }
 }
 
+function _loadMonsterModelInto(m) {
+  return new Promise((resolve) => {
+    if (!m) { resolve(false); return; }
+    let loader = null;
+    try { loader = new THREE.GLTFLoader(); } catch (e) {
+      console.warn('[monsters] GLTFLoader unavailable:', e);
+      resolve(false); return;
+    }
+    loader.load(
+      MONSTER_BASE_URL + m.def.key + '.glb' + _MODEL_CACHE_BUST,
+      gltf => {
+        try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
+        resolve(true);
+      },
+      undefined,
+      err => {
+        console.warn('[monsters] load failed:', m.def.key, err && err.message);
+        resolve(false);
+      }
+    );
+  });
+}
+
 function _loadNextMonsterModel() {
   if (!game.monsters || _monsterLoadIdx >= game.monsters.length) return;
   const m = game.monsters[_monsterLoadIdx++];
-  let loader = null;
-  try { loader = new THREE.GLTFLoader(); } catch (e) {
-    console.warn('[monsters] GLTFLoader unavailable:', e);
-    return;
-  }
-  loader.load(
-    MONSTER_BASE_URL + m.def.key + '.glb' + _MODEL_CACHE_BUST,
-    gltf => {
-      try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
-      setTimeout(_loadNextMonsterModel, 2500);
-    },
-    undefined,
-    err => {
-      console.warn('[monsters] load failed:', m.def.key, err && err.message);
-      setTimeout(_loadNextMonsterModel, 400);
-    }
-  );
+  _loadMonsterModelInto(m).then((ok) => {
+    setTimeout(_loadNextMonsterModel, ok ? 2500 : 400);
+  });
 }
 
 function _makeGutGeometry(seed) {
@@ -33125,15 +33151,21 @@ function _disposeMeshTreeDeep(root, fullAssets) {
   } catch (_) {}
 }
 
+let _champShellPromise = null;
 function _preloadChampionShellModel() {
-  if (_champShellProto || _champShellLoading) return;
+  if (_champShellProto) return Promise.resolve(_champShellProto);
+  if (_champShellPromise) return _champShellPromise;
+  if (_champShellLoading) return Promise.resolve(null);
   _champShellLoading = true;
   let loader = null;
-  try { loader = new THREE.GLTFLoader(); } catch (_) { _champShellLoading = false; return; }
-  loader.load(MONSTER_BASE_URL + 'Sphere.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version
-    g => { _champShellProto = g.scene; },
-    undefined,
-    err => { console.warn('[champ-shell] Sphere.glb load failed:', err && err.message); });
+  try { loader = new THREE.GLTFLoader(); } catch (_) { _champShellLoading = false; return Promise.resolve(null); }
+  _champShellPromise = new Promise((resolve) => {
+    loader.load(MONSTER_BASE_URL + 'Sphere.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version
+      g => { _champShellProto = g.scene; resolve(g.scene); },
+      undefined,
+      err => { console.warn('[champ-shell] Sphere.glb load failed:', err && err.message); resolve(null); });
+  });
+  return _champShellPromise;
 }
 
 function _champSelfIlluminate(obj3d) {
@@ -34901,6 +34933,11 @@ async function _prebakeWorldForLaunch() {
     try { rep.ent = await _primeEntityModels(_entPrimePlan(), t0, _ENT_PRIME_MAX_MS); } catch (_) {}
     rep.ms.ent = Math.round(_pbNow() - _tE);
 
+    const _tM = _pbNow();
+    _pbSub('waking the leviathans');
+    try { rep.mon = await _primeMonsterModels(t0, _MON_PRIME_MAX_MS); } catch (_) {}
+    rep.ms.mon = Math.round(_pbNow() - _tM);
+
     const _tD = _pbNow();
     if (_pbNow() - t0 < _PREBAKE_MAX_MS) {
       _pbSub('priming the GPU');
@@ -35083,6 +35120,62 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
 }
 if (typeof window !== 'undefined') window.__entPrime = () => ({ last: _ENT_PRIME.last, primed: Array.from(_ENT_PRIME.keys) });
 
+const _MON_PRIME = { last: null };
+const _MON_PRIME_MAX_MS = 4000;   // own ceiling, on top of the caller's _PREBAKE_MAX_MS
+function _monPrimeWanted() {
+  try {
+    if (typeof window !== 'undefined' && window.__monPrimeOff) return false;
+    if (typeof game === 'undefined' || !game) return false;
+    if (typeof MONSTER_DEFS === 'undefined' || typeof OutskirtsMonster === 'undefined') return false;
+    if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return false;
+    if (typeof scene === 'undefined' || !scene) return false;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
+    if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return false;
+    if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return false;
+  } catch (_) { return false; }
+  return true;
+}
+async function _primeMonsterModels(tStart, budgetMs) {
+  const t0 = _pbNow();
+  const rep = { asked: 0, loaded: 0, attached: 0, champ: false, capped: null, ms: 0 };
+  try {
+    if (_monstersInit) { rep.capped = 'memo'; return rep; }
+    if (!_monPrimeWanted()) { rep.capped = 'mode'; return rep; }
+    const cap = (typeof budgetMs === 'number') ? budgetMs : _MON_PRIME_MAX_MS;
+    _monstersInit = true;
+    try { _initMonsters(true); } catch (e) { console.warn('[monprime] init failed:', e); rep.error = String((e && e.message) || e); return rep; }
+    rep.asked = game.monsters ? game.monsters.length : 0;
+    let champP = null;
+    try { champP = _preloadChampionShellModel(); } catch (_) {}
+    while (_monsterLoadIdx < (game.monsters ? game.monsters.length : 0)) {
+      if (_pbNow() - t0 > cap) { rep.capped = 'budget'; break; }
+      if (tStart != null && _pbNow() - tStart > _PREBAKE_MAX_MS) { rep.capped = 'stage'; break; }
+      const m = game.monsters[_monsterLoadIdx++];
+      let ok = false;
+      try { ok = await _loadMonsterModelInto(m); } catch (_) { ok = false; }
+      if (ok) { rep.loaded++; if (m && m.mesh) rep.attached++; }
+      await _warmupYield();
+    }
+    if (champP) {
+      try { rep.champ = !!(await champP); } catch (_) {}
+    }
+  } catch (e) {
+    console.warn('[monprime] failed (launching anyway):', e);
+    rep.error = String((e && e.message) || e);
+  } finally {
+    try {
+      if (_monstersInit && game.monsters && _monsterLoadIdx < game.monsters.length) {
+        rep.trickled = game.monsters.length - _monsterLoadIdx;
+        setTimeout(_loadNextMonsterModel, 2500);
+      }
+    } catch (_) {}
+    rep.ms = Math.round(_pbNow() - t0);
+    _MON_PRIME.last = rep;
+  }
+  return rep;
+}
+if (typeof window !== 'undefined') window.__monPrime = () => _MON_PRIME.last;
+
 const _SWAP = { staging: false, last: null };
 const _SWAP_MAX_MS = 12000;   // hard ceiling: a stage that hangs is worse than one that misses
 const _SWAP_SLICE_MS = 12;
@@ -35177,6 +35270,11 @@ async function _rrStagedSwap(pending, ph) {
     rep.ms.ent = Math.round(_pbNow() - t);
 
     t = _pbNow();
+    try { showLoadingOverlay(null, 'waking the leviathans'); } catch (_) {}
+    try { rep.mon = await _primeMonsterModels(t0, _MON_PRIME_MAX_MS); } catch (_) {}
+    rep.ms.mon = Math.round(_pbNow() - t);
+
+    t = _pbNow();
     if (_pbNow() - t0 < _SWAP_MAX_MS) {
       try { rep.gpuPasses0 = await _prebakeGpuPrime(); } catch (_) {}
     }
@@ -35235,6 +35333,68 @@ async function _rrStagedSwap(pending, ph) {
   }
 }
 if (typeof window !== 'undefined') window.__swapReport = () => _SWAP.last;
+
+const _RRSTAGE = { staging: false, last: null };
+const _RR_STAGE_MAX_MS = 3500;   // hard ceiling: must finish well inside the picker window
+const _RR_SLICE_MS     = 8;      // terrain slice (smaller than the swap's 12: this runs under a LIVE picker)
+async function _rrStagedRound(ph) {
+  const t0 = _pbNow();
+  const _cnt = () => (game.sandwichChunks ? game.sandwichChunks.size : 0);
+  const rep = { round: game.currentRound, map: game.selectedMap,
+                mode: (typeof LSS !== 'undefined') ? LSS.MODE : '?',
+                ch0: _cnt(), ch1: 0, passes: 0, capped: null, ms: {}, totalMs: 0 };
+  _RRSTAGE.staging = true;
+  game._rrStaging = true;
+  game._worldPrebaking = true;
+  try {
+    let t = _pbNow();
+    ph.countdown();
+    rep.ms.picker = Math.round(_pbNow() - t);
+    await _warmupYield();
+    await _warmupYield();
+
+    t = _pbNow(); ph.world();   rep.ms.world = Math.round(_pbNow() - t);
+    rep.build = game._rrBuildMs || null;
+    await _warmupYield();
+
+    t = _pbNow(); ph.wave(); ph.warpBeat(); rep.ms.wave = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    t = _pbNow(); ph.shaders(); rep.ms.shaders = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    t = _pbNow(); ph.reset(); ph.roster(); rep.ms.reset = Math.round(_pbNow() - t);
+    await _warmupYield();
+
+    t = _pbNow();
+    const T = game.sandwichTerrain;
+    if (T && T.ON && player && player.position && typeof _swDrainStream === 'function') {
+      let zero = 0;
+      for (let n = 0; n < _PREBAKE_MAX_PASSES; n++) {
+        const px = player.position.x, pz = player.position.z;
+        let built = 0;
+        try { built = _swDrainStream(px, pz, _RR_SLICE_MS, _PREBAKE_MAX_CALLS) | 0; }
+        catch (e) { console.warn('[rrstage] streamer threw, stopping terrain phase:', e); break; }
+        rep.passes++;
+        if (built <= 0) { if (++zero >= 2) break; } else zero = 0;
+        if (_pbNow() - t0 > _RR_STAGE_MAX_MS) { rep.capped = 'terrain'; break; }
+        await _warmupYield();
+      }
+    }
+    rep.ms.terrain = Math.round(_pbNow() - t);
+    rep.ch1 = _cnt();
+  } catch (e) {
+    console.warn('[rrstage] staged round rebuild failed:', e);
+    rep.error = String((e && e.message) || e);
+  } finally {
+    _RRSTAGE.staging = false;
+    game._rrStaging = false;
+    game._worldPrebaking = false;
+    rep.totalMs = Math.round(_pbNow() - t0);
+    _RRSTAGE.last = rep;
+  }
+}
+if (typeof window !== 'undefined') window.__rrStage = () => _RRSTAGE.last;
 
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
@@ -43909,7 +44069,7 @@ function updateRoundSystem(dt) {
     if (prev > 2 && game.warmupTimer <= 2 && typeof _warmRealCombatFX === 'function') {
       try { _warmRealCombatFX(); } catch (_) {}
     }
-    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging) {
+    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging && !game._rrStaging) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
       try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}   
@@ -44196,9 +44356,16 @@ function updateRoundSystem(dt) {
         _anchorTimer('warmupTimer', LSS.LAUNCH_COUNTDOWN);
         const level = getNextMap();
         const buildNextRound = () => {
+          const _tB0 = _pbNow();
           buildRoomGraphLevel(level);
+          const _tB1 = _pbNow();
           spawnDynamicObjects(game.sdfRoomData);
+          const _tB2 = _pbNow();
           spawnOrganics(game.sdfRoomData);
+          try {
+            game._rrBuildMs = { lvl: Math.round(_tB1 - _tB0), dyn: Math.round(_tB2 - _tB1),
+                                org: Math.round(_pbNow() - _tB2) };
+          } catch (_) {}
         };
         let roundSeed = game.currentRound;
         const _rrWorld = () => {
@@ -44325,6 +44492,9 @@ function updateRoundSystem(dt) {
         if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
 
         };
+        const _rrRoster = () => {
+        try { updateTeammatesStrip(); } catch (_) {}
+        };
         const _rrCountdown = (_dur) => {
         if (document.exitPointerLock) {
           try { document.exitPointerLock(); } catch (e) {}
@@ -44342,6 +44512,11 @@ function updateRoundSystem(dt) {
         if (_swap && typeof _rrStagedSwap === 'function') {
           _rrStagedSwap(_swap, { world: _rrWorld, wave: _rrWave, warpBeat: _rrWarpBeat,
                                  shaders: _rrShaders, reset: _rrReset, countdown: _rrCountdown });
+        } else if (typeof _rrStagedRound === 'function' &&
+                   !(typeof window !== 'undefined' && window.__rrStageOff)) {
+          _rrStagedRound({ world: _rrWorld, wave: _rrWave, warpBeat: _rrWarpBeat,
+                           shaders: _rrShaders, reset: _rrReset, roster: _rrRoster,
+                           countdown: _rrCountdown });
         } else {
           _rrWorld(); _rrWave(); _rrWarpBeat(); _rrShaders(); _rrReset(); _rrCountdown();
         }
@@ -58677,7 +58852,7 @@ function gameLoop(timestamp) {
         game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
         if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
-      } else if (game._swapStaging) {
+      } else if (game._swapStaging || game._rrStaging) {
       } else if (game.state === 'warmup' && !game._worldPrebaking) {
         _swDrainStream(_fX, _fZ, 12, 64);
       } else {

@@ -3229,22 +3229,6 @@ body.vr-active #camp-video { display: none !important; }
      so the push only happens in the two modes that actually show the box. */
   #ship-select.ss-diff-on #ss-right-col { top: 168px !important; }
   #ship-preview-info, #map-select { max-height: none !important; }
-  /* (v36.40) ⚠ flex-shrink:0 is load-bearing, exactly as in the landscape-phone
-     block below. The ≤1200 block gives this `height: 68px !important` and nothing
-     else; height alone loses to the flex shrink coming from #map-select /
-     #map-window, so at 890x760 the thumbnail measured **153.2 x 1.6 px** — a
-     1.6px sliver where the map preview should be. `flex: 0 0 68px` pins the same
-     68px the ≤1200 block already asked for as the flex BASIS as well.
-     ⚠ AND THE DESCRIPTION HAS TO GO WITH IT, measured at 890x760: #map-window is
-     110px tall here, and pinning the thumbnail back to its real 68px leaves 42px
-     for a 23.2px name AND a 50.4px description — so the description overflowed
-     the framed box by ~23px and painted over the carousel arrows. That is only
-     visible once the thumbnail is no longer a 1.6px sliver, i.e. it is this pin's
-     own fallout, not a pre-existing bug. Same trade the landscape-phone block
-     already makes, for the same reason. With it hidden: 68 + 6 + 23.2 = 97.2
-     inside 110. */
-  #map-window-preview { flex: 0 0 68px !important; }
-  #map-window-desc { display: none !important; }
   /* The right column is TOP-anchored at this breakpoint, so the bottom edge is
      entirely free — the rails span the full width. */
   #ss-rails { left: 12px !important; right: 12px !important; bottom: 10px !important; }
@@ -4213,7 +4197,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.40';
+const LSS_BUILD = '36.39';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 
@@ -41337,11 +41321,7 @@ class OutskirtsMonster {
   }
 }
 
-// (v36.40) `skipLoad` is the LOADING-TIME entry: _primeMonsterModels builds the
-// six creatures during the prebake and then awaits each GLB itself, so the
-// trickle-loader (and the champion-shell preload it kicks) must not also start.
-// Every other caller passes nothing and behaves exactly as before.
-function _initMonsters(skipLoad) {
+function _initMonsters() {
   game.monsters = [];
   const faces = [
     new THREE.Vector3( 1, 0, 0), new THREE.Vector3(-1, 0, 0),
@@ -41357,7 +41337,6 @@ function _initMonsters(skipLoad) {
     m.id = 'mon' + i;
     game.monsters.push(m);
   }
-  if (skipLoad) return;
   _loadNextMonsterModel();
   // Warm the Champion Shell model too, so the sphere doesn't hitch-parse
   // 28 MB the moment the champion field spawns mid-combat.
@@ -41393,45 +41372,30 @@ function _monStripRootMotion(clip) {
   } catch (_) { return clip; }
 }
 
-// (v36.40) The load+attach for ONE creature, as a promise. Extracted verbatim
-// out of _loadNextMonsterModel so the prebake can AWAIT the six of them behind
-// the loading overlay instead of watching them land on combat frames; the
-// trickle-loader below is unchanged in behaviour and just chains onto this.
-// Never rejects — a failed model resolves false and the caller moves on.
-function _loadMonsterModelInto(m) {
-  return new Promise((resolve) => {
-    if (!m) { resolve(false); return; }
-    let loader = null;
-    try { loader = new THREE.GLTFLoader(); } catch (e) {
-      console.warn('[monsters] GLTFLoader unavailable:', e);
-      resolve(false); return;
-    }
-    loader.load(
-      // (v36.25) Art-version stamped (was LSS_BUILD): model updates still bust
-      // the disk cache, a code-only build no longer does.
-      MONSTER_BASE_URL + m.def.key + '.glb' + _MODEL_CACHE_BUST,
-      gltf => {
-        try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
-        resolve(true);
-      },
-      undefined,
-      err => {
-        console.warn('[monsters] load failed:', m.def.key, err && err.message);
-        resolve(false);
-      }
-    );
-  });
-}
-
 function _loadNextMonsterModel() {
   if (!game.monsters || _monsterLoadIdx >= game.monsters.length) return;
   const m = game.monsters[_monsterLoadIdx++];
-  _loadMonsterModelInto(m).then((ok) => {
-    // 2.5 s breather between parses spreads the main-thread cost so no
-    // single second eats more than one model's decode. (A failed load retries
-    // the NEXT model sooner — the 400 ms arm of the old error callback.)
-    setTimeout(_loadNextMonsterModel, ok ? 2500 : 400);
-  });
+  let loader = null;
+  try { loader = new THREE.GLTFLoader(); } catch (e) {
+    console.warn('[monsters] GLTFLoader unavailable:', e);
+    return;
+  }
+  loader.load(
+    // (v36.25) Art-version stamped (was LSS_BUILD): model updates still bust
+    // the disk cache, a code-only build no longer does.
+    MONSTER_BASE_URL + m.def.key + '.glb' + _MODEL_CACHE_BUST,
+    gltf => {
+      try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
+      // 2.5 s breather between parses spreads the main-thread cost so no
+      // single second eats more than one model's decode.
+      setTimeout(_loadNextMonsterModel, 2500);
+    },
+    undefined,
+    err => {
+      console.warn('[monsters] load failed:', m.def.key, err && err.message);
+      setTimeout(_loadNextMonsterModel, 400);
+    }
+  );
 }
 
 // Procedural guts. Gib geometry is generated fresh per gib: an icosahedron
@@ -41578,26 +41542,15 @@ function _disposeMeshTreeDeep(root, fullAssets) {
   } catch (_) {}
 }
 
-// (v36.40) Returns a promise so the prebake can await the Sphere.glb PARSE
-// (measured with the six monster attaches as part of the same +6 s cluster).
-// Memoized on _champShellPromise: every existing fire-and-forget caller keeps
-// its old shape (the return value was never read), and a second call while the
-// first is in flight now joins it instead of being dropped.
-let _champShellPromise = null;
 function _preloadChampionShellModel() {
-  if (_champShellProto) return Promise.resolve(_champShellProto);
-  if (_champShellPromise) return _champShellPromise;
-  if (_champShellLoading) return Promise.resolve(null);
+  if (_champShellProto || _champShellLoading) return;
   _champShellLoading = true;
   let loader = null;
-  try { loader = new THREE.GLTFLoader(); } catch (_) { _champShellLoading = false; return Promise.resolve(null); }
-  _champShellPromise = new Promise((resolve) => {
-    loader.load(MONSTER_BASE_URL + 'Sphere.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version
-      g => { _champShellProto = g.scene; resolve(g.scene); },
-      undefined,
-      err => { console.warn('[champ-shell] Sphere.glb load failed:', err && err.message); resolve(null); });
-  });
-  return _champShellPromise;
+  try { loader = new THREE.GLTFLoader(); } catch (_) { _champShellLoading = false; return; }
+  loader.load(MONSTER_BASE_URL + 'Sphere.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version
+    g => { _champShellProto = g.scene; },
+    undefined,
+    err => { console.warn('[champ-shell] Sphere.glb load failed:', err && err.message); });
 }
 
 function _champSelfIlluminate(obj3d) {
@@ -44069,13 +44022,6 @@ async function _prebakeWorldForLaunch() {
     try { rep.ent = await _primeEntityModels(_entPrimePlan(), t0, _ENT_PRIME_MAX_MS); } catch (_) {}
     rep.ms.ent = Math.round(_pbNow() - _tE);
 
-    // ---- C3. (v36.40) the six leviathan GLBs + the champion shell, for the
-    //          modes that spawn them. See _primeMonsterModels. ----
-    const _tM = _pbNow();
-    _pbSub('waking the leviathans');
-    try { rep.mon = await _primeMonsterModels(t0, _MON_PRIME_MAX_MS); } catch (_) {}
-    rep.ms.mon = Math.round(_pbNow() - _tM);
-
     // ---- D. GPU prime: real scene, real camera, full sphere, rtScene bound ----
     const _tD = _pbNow();
     if (_pbNow() - t0 < _PREBAKE_MAX_MS) {
@@ -44173,7 +44119,7 @@ async function _prebakeGpuPrime() {
 //   _hzGuardsFrame      (hub rift guards)      same shape, same machinery
 //   EndlessMode._spawnWave, first wave          26.0 ms   (second wave 10.7)
 //   spawnBots / assault champion field          18.9 ms   (the transition frame)
-//   OutskirtsMonster.attachModel, per model     12-20 ms  x6  — v36.40, see below
+//   OutskirtsMonster.attachModel, per model     12-20 ms  x6  — NOT fixed, see below
 // The cavern/guard numbers swing enormously with luck, which is the real bug:
 // the hub's own traffic (_hcTrafficInit) happens to parse 14 of the 22 hoard
 // GLBs, so whether a garrison costs 14 ms or 236 ms depends on whether
@@ -44217,13 +44163,21 @@ async function _prebakeGpuPrime() {
 // The playable SHIP_MODELS set (7 keys) is primed everywhere and is nearly free —
 // those GLBs are already parsed by the boot preload, so it is 7 clones + 1 draw.
 //
-// (v36.40) ⚠ THE SIX OutskirtsMonster GLBs ARE NOW PRIMED TOO, but by a separate
-// pass — see `_primeMonsterModels` directly below. They are not ships: they do
-// not go through createShipMesh, they carry their own warm (attachModel), and
-// they are mode-gated differently, so folding them into the loop above would
-// have meant special-casing every step of it. v36.28 excluded them on a size
-// figure that v36.29 measured as wrong by ~27x, and v36.39 measured the six
-// attach frames as the ONLY frames over 16 ms in a whole endless or race run.
+// ⚠ FOUND AND DELIBERATELY NOT PRIMED: the six OutskirtsMonster GLBs. They
+// stream one at a time starting 6 s into play and measure 12-20 ms per attach —
+// already under a dropped frame at 144 Hz thanks to v36.17's in-context warm.
+//
+// (v36.29) ⚠ THE SIZE FIGURE THAT USED TO JUSTIFY THIS WAS WRONG. It read
+// "20-45 MB each (~190 MB total)" and concluded that priming them would add "well
+// over ten seconds" to loading. Measured from disk: they were 2.57-4.13 MB each,
+// 20.18 MB TOTAL — off by ~9.5x. After compression they are 0.70-1.51 MB each,
+// 7.03 MB total, and the whole six-model set parses in ~125 ms (measured through
+// the real r165 loader). So the stated reason for not priming them no longer
+// holds: it would cost roughly an eighth of a second, not ten seconds.
+// The behaviour is UNCHANGED here on purpose — the current trickle already keeps
+// every attach under a dropped frame, so there is no bug to fix, and moving 125 ms
+// into the loading screen is a loading-time policy call for the owner, not a
+// side effect of an asset pass. Flagged so the next person decides on real numbers.
 // Report: window.__entPrime().
 // ============================================================================
 const _ENT_PRIME = { keys: new Set(), mats: [], last: null };
@@ -44358,116 +44312,6 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
   return rep;
 }
 if (typeof window !== 'undefined') window.__entPrime = () => ({ last: _ENT_PRIME.last, primed: Array.from(_ENT_PRIME.keys) });
-
-// ============================================================================
-// (v36.40) MONSTER PRIME — the six OutskirtsMonster GLBs, moved into loading.
-//
-// WHAT v36.28 LEFT BEHIND AND v36.29 RE-COSTED. The entity prime above covers
-// every ship that can spawn; the six leviathan GLBs were deliberately excluded
-// on a size figure ("20-45 MB each, ~190 MB, well over ten seconds") that
-// v36.29 measured as wrong by ~27x. They are 7.03 MB on disk after the
-// compression pass and the whole set parses in ~125 ms.
-//
-// MEASURED, v36.39, live pane @144 Hz (budget 6.94 ms), classic/hourglass:
-// `OutskirtsMonster.attachModel` fires at +2.3/4.9/7.5/10.1/12.6/15.2 s after
-// the round opens (the 6 s `_delayT` gate, then a 2.5 s breather per model) and
-// costs 16.6 / 27.5 / 20.7 / 21.7 / 26.5 / 16.6 ms — ~130 ms of main thread
-// total. In ENDLESS and RACE those six frames are the ONLY frames over 16 ms in
-// an entire run. No shader work is involved (renderer.info.programs is
-// unchanged across all six: the spectral-ghost program is already warm from
-// v36.17's in-context warm) — it is the 1024² RGBA texture + 1.5-3.2 MB of
-// vertex buffers each, uploaded at attachModel's own 4x4 first draw.
-//
-// WHAT THIS DOES. Exactly what the deferred init inside updateMonsters does, but
-// during the prebake instead of six seconds into combat: build the six
-// OutskirtsMonster objects (`_initMonsters(true)` — the `skipLoad` arm, so the
-// trickle-loader does not also start), then AWAIT `_loadMonsterModelInto` for
-// each one, yielding a frame between. attachModel is unchanged and still does
-// its own rtScene-bound compile + live-scene 4x4 draw, so the warm context rule
-// (PART 13 rule 5) is inherited rather than re-implemented. `_monstersInit` is
-// set up front, so updateMonsters' deferred-init branch simply never fires.
-//
-// ⚠ GATED TO THE MODES THAT ACTUALLY SPAWN THEM — the same three early-outs
-// updateMonsters itself takes, and no more (verified: potato quality,
-// LSS.MODE 'freeflight' and 'assault' are the complete list; mobile/Quest tiers
-// other than potato DO run monsters). Priming in the hub would buy nothing and
-// cost the hub's loading screen ~200 ms.
-// ⚠ BUDGETED. `_MON_PRIME_MAX_MS` on top of the caller's `_PREBAKE_MAX_MS`, and
-// the loop re-checks both between models. Blowing either cap leaves
-// `_monsterLoadIdx` where it is and kicks `_loadNextMonsterModel()`, so a cold
-// cache degrades to exactly today's trickle for whatever is left.
-// ⚠ ONCE PER PAGE. `_monstersInit` is never cleared, so round 2+, every staged
-// world swap and every later match are memo no-ops.
-// ⚠ The creatures are therefore in the scene from the countdown rather than
-// arriving at +6 s. They spawn dormant in the OUTSKIRTS (past the carve's
-// bounding shell, `_rehome`), so this is not a visible change from inside the
-// arena — and `updateMonsters`' `_homeKey` check re-anchors them for the round's
-// real geometry exactly as it always did.
-// Report: window.__monPrime() · A/B knob: window.__monPrimeOff = 1.
-// ============================================================================
-const _MON_PRIME = { last: null };
-const _MON_PRIME_MAX_MS = 4000;   // own ceiling, on top of the caller's _PREBAKE_MAX_MS
-function _monPrimeWanted() {
-  try {
-    if (typeof window !== 'undefined' && window.__monPrimeOff) return false;
-    if (typeof game === 'undefined' || !game) return false;
-    if (typeof MONSTER_DEFS === 'undefined' || typeof OutskirtsMonster === 'undefined') return false;
-    if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return false;
-    if (typeof scene === 'undefined' || !scene) return false;
-    // The three early-outs updateMonsters takes before it would ever init.
-    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
-    if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return false;
-    // XR owns its own budget (same rule as _primeEntityModels).
-    if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return false;
-  } catch (_) { return false; }
-  return true;
-}
-async function _primeMonsterModels(tStart, budgetMs) {
-  const t0 = _pbNow();
-  const rep = { asked: 0, loaded: 0, attached: 0, champ: false, capped: null, ms: 0 };
-  try {
-    if (_monstersInit) { rep.capped = 'memo'; return rep; }
-    if (!_monPrimeWanted()) { rep.capped = 'mode'; return rep; }
-    const cap = (typeof budgetMs === 'number') ? budgetMs : _MON_PRIME_MAX_MS;
-    // Claim the init BEFORE the first await: updateMonsters runs on every frame
-    // this yields, and a second _initMonsters would drop the objects this loop
-    // is holding and leave two half-loaded packs fighting over game.monsters.
-    _monstersInit = true;
-    try { _initMonsters(true); } catch (e) { console.warn('[monprime] init failed:', e); rep.error = String((e && e.message) || e); return rep; }
-    rep.asked = game.monsters ? game.monsters.length : 0;
-    // The champion shell rides along: it is the fourth GLB of the same +6 s
-    // cluster (_initMonsters kicks it) and its parse is the same kind of cost.
-    let champP = null;
-    try { champP = _preloadChampionShellModel(); } catch (_) {}
-    while (_monsterLoadIdx < (game.monsters ? game.monsters.length : 0)) {
-      if (_pbNow() - t0 > cap) { rep.capped = 'budget'; break; }
-      if (tStart != null && _pbNow() - tStart > _PREBAKE_MAX_MS) { rep.capped = 'stage'; break; }
-      const m = game.monsters[_monsterLoadIdx++];
-      let ok = false;
-      try { ok = await _loadMonsterModelInto(m); } catch (_) { ok = false; }
-      if (ok) { rep.loaded++; if (m && m.mesh) rep.attached++; }
-      await _warmupYield();
-    }
-    if (champP) {
-      try { rep.champ = !!(await champP); } catch (_) {}
-    }
-  } catch (e) {
-    console.warn('[monprime] failed (launching anyway):', e);
-    rep.error = String((e && e.message) || e);
-  } finally {
-    // Whatever the budget did not reach falls back to the pre-v36.40 trickle.
-    try {
-      if (_monstersInit && game.monsters && _monsterLoadIdx < game.monsters.length) {
-        rep.trickled = game.monsters.length - _monsterLoadIdx;
-        setTimeout(_loadNextMonsterModel, 2500);
-      }
-    } catch (_) {}
-    rep.ms = Math.round(_pbNow() - t0);
-    _MON_PRIME.last = rep;
-  }
-  return rep;
-}
-if (typeof window !== 'undefined') window.__monPrime = () => _MON_PRIME.last;
 
 // ============================================================================
 // (v36.27) WORLD-SWAP TRAVERSE — the same loading contract, for the OTHER way a
@@ -44655,15 +44499,6 @@ async function _rrStagedSwap(pending, ph) {
     try { rep.ent = await _primeEntityModels(_entPrimePlan(), t0, _ENT_PRIME_MAX_MS); } catch (_) {}
     rep.ms.ent = Math.round(_pbNow() - t);
 
-    // (v36.40) MONSTER PRIME. Same placement rule as the entity prime: after the
-    // destination's world + wave exist (a traverse can change LSS.MODE, and
-    // _monPrimeWanted reads it) and before the GPU primes. A memo no-op on every
-    // traverse after the first, since _monstersInit is never cleared.
-    t = _pbNow();
-    try { showLoadingOverlay(null, 'waking the leviathans'); } catch (_) {}
-    try { rep.mon = await _primeMonsterModels(t0, _MON_PRIME_MAX_MS); } catch (_) {}
-    rep.ms.mon = Math.round(_pbNow() - t);
-
     // FIRST GPU prime, before the terrain drain. Linking a program is not the
     // same as validating it: the driver's first-use validate happens at the first
     // real DRAW, and on the campaign rift that draw was the first ordinary
@@ -44740,141 +44575,6 @@ async function _rrStagedSwap(pending, ph) {
   }
 }
 if (typeof window !== 'undefined') window.__swapReport = () => _SWAP.last;
-
-// ============================================================================
-// (v36.40) BETWEEN-ROUNDS STAGED REBUILD — the same v36.27 treatment for the
-// rebuild that happens MOST OFTEN.
-//
-// THE PROBLEM. `_rrStagedSwap` above covers the five PORTAL traverses. The
-// ordinary round transition — every round of every elimination, race and assault
-// match — still ran `_rrWorld(); _rrWave(); _rrWarpBeat(); _rrShaders();
-// _rrReset(); _rrCountdown();` back to back in ONE frame. Measured v36.39 in the
-// pane at 144 Hz (budget 6.94 ms), classic/hourglass, four consecutive
-// transitions: **163.8 / 165.7 / 178.6 / 181.1 ms**, moving 2.9-4.0 MB through
-// 409-663 bufferData calls. Race measured 223 ms. It repeats every round, so
-// cumulatively it is the worst repeated stall in the game.
-//
-// WHAT IS *NOT* THE PROBLEM, measured. The ~40 consecutive 15-25 ms frames that
-// follow the stall are v36.26's `_swDrainStream(_fX, _fZ, 12, 64)` warmup arm in
-// gameLoop doing exactly what it was built to do — a 12 ms wall-clock slice per
-// frame, ~0.5 s of it, behind the picker. They are loading frames, not gameplay
-// frames, and they were left alone.
-//
-// THE FIX: the PICKER IS THE COVER. `#ship-select` is a full-screen
-// rgba(5,5,15,0.95) panel that is going to be up for the next ~6 s anyway, and
-// `_rrCountdown` — the closure that raises it — has NO dependency on the rebuild:
-// `getNextMap()` is pure and `game.selectedMap` is already final before any of
-// these closures run, so the map window shows the right arena either way. So the
-// order becomes: raise the picker FIRST, let it paint, then run the same five
-// closures in the same order one frame apart behind it, then drain the terrain.
-//
-// ⚠ THE v36.36 ROUND CADENCE IS UNTOUCHED BY CONSTRUCTION. `warmupTimer` is
-// anchored by the caller before any of this, and `ph.countdown()` — which is what
-// calls `launchCountdown(_rrPickSecs)` — runs in the SAME frame it always did,
-// as the FIRST thing rather than the last. Nothing here passes an explicit `_dur`
-// (that is the traverse path's business), so the picker still gets its 6 s, the
-// arena still gets its 3-2-1, FIGHT still lands at t=10 s.
-// ⚠ `updateTeammatesStrip` is the ONE thing in `_rrCountdown` that reads state
-// the rebuild produces (`spawnBots()` refills game.entities). It still runs where
-// it always did — and `ph.roster()` runs it AGAIN after `ph.reset()`, which is
-// what keeps the fleet strip correct now that the picker goes up first.
-// ⚠ THE FLAG IS `game._rrStaging`, NOT `game._swapStaging`, and that is not
-// cosmetic. It does the same two jobs (stand gameLoop's streamer down, and stop
-// the warmup->playing flip landing mid-rebuild in the modes where `warmupTimer`
-// is forced to 0 every frame) but it must NOT be the traverse flag, because two
-// other readers mean the opposite thing by it:
-//   · `_betweenRoundsPick()` returns FALSE while `_swapStaging` is set — a
-//     traverse has no picker up yet. Here the picker IS up, and turning that
-//     predicate off for the first ~800 ms of the swap window would send a chip
-//     click down the LAUNCH path instead of staging it (v36.36's whole feature).
-//   · `initSandwichTerrain` skips `_hubCityInit()` when `_swapStaging` is set,
-//     because `_rrStagedSwap` builds the city itself on its own frame. This
-//     stage does not, so borrowing that flag would silently drop the city from
-//     any hub-map round rebuild.
-// `game._worldPrebaking` is set alongside it, as the honest "the world is still
-// being prepared" signal (and so gameLoop's own warmup drain arm stands down
-// even if these branches are ever reordered).
-// ⚠ CAPPED at `_RR_STAGE_MAX_MS`, comfortably inside the 6 s picker window, and
-// the flags are cleared in a `finally` — a stage that hangs past `finishLaunch`
-// would be a soft-lock, so it degrades to gameLoop's own drain instead.
-// ⚠ NO LOADING OVERLAY. Between rounds there has never been one and adding one
-// would be a visible product change (v36.36 bug 3 is specifically about the
-// picker staying on screen through this window).
-// Report: window.__rrStage() — incl. `build`, the three-way split of the world
-// phase (buildRoomGraphLevel / spawnDynamicObjects / spawnOrganics).
-// A/B knob: window.__rrStageOff = 1 restores the one-frame path.
-// ============================================================================
-const _RRSTAGE = { staging: false, last: null };
-const _RR_STAGE_MAX_MS = 3500;   // hard ceiling: must finish well inside the picker window
-const _RR_SLICE_MS     = 8;      // terrain slice (smaller than the swap's 12: this runs under a LIVE picker)
-async function _rrStagedRound(ph) {
-  const t0 = _pbNow();
-  const _cnt = () => (game.sandwichChunks ? game.sandwichChunks.size : 0);
-  const rep = { round: game.currentRound, map: game.selectedMap,
-                mode: (typeof LSS !== 'undefined') ? LSS.MODE : '?',
-                ch0: _cnt(), ch1: 0, passes: 0, capped: null, ms: {}, totalMs: 0 };
-  _RRSTAGE.staging = true;
-  game._rrStaging = true;
-  game._worldPrebaking = true;
-  try {
-    // ---- PHASE 0 : raise the cover (same frame the old code raised it LAST) ----
-    let t = _pbNow();
-    ph.countdown();
-    rep.ms.picker = Math.round(_pbNow() - t);
-    // Two turns, not one: a rAF callback runs BEFORE its frame's paint, so one
-    // yield would put the build in front of the very paint we are buying. Same
-    // reasoning as _commitDeferOneFrame. (#ship-select goes display:none ->
-    // flex, which paints at full opacity with no transition to wait on, so this
-    // needs no _swapCoverPainted equivalent.)
-    await _warmupYield();
-    await _warmupYield();
-
-    t = _pbNow(); ph.world();   rep.ms.world = Math.round(_pbNow() - t);
-    rep.build = game._rrBuildMs || null;
-    await _warmupYield();
-
-    t = _pbNow(); ph.wave(); ph.warpBeat(); rep.ms.wave = Math.round(_pbNow() - t);
-    await _warmupYield();
-
-    t = _pbNow(); ph.shaders(); rep.ms.shaders = Math.round(_pbNow() - t);
-    await _warmupYield();
-
-    t = _pbNow(); ph.reset(); ph.roster(); rep.ms.reset = Math.round(_pbNow() - t);
-    await _warmupYield();
-
-    // ---- terrain to completion, on the prebake's ms-sliced budget ----
-    t = _pbNow();
-    const T = game.sandwichTerrain;
-    if (T && T.ON && player && player.position && typeof _swDrainStream === 'function') {
-      let zero = 0;
-      for (let n = 0; n < _PREBAKE_MAX_PASSES; n++) {
-        const px = player.position.x, pz = player.position.z;
-        let built = 0;
-        try { built = _swDrainStream(px, pz, _RR_SLICE_MS, _PREBAKE_MAX_CALLS) | 0; }
-        catch (e) { console.warn('[rrstage] streamer threw, stopping terrain phase:', e); break; }
-        rep.passes++;
-        if (built <= 0) { if (++zero >= 2) break; } else zero = 0;
-        if (_pbNow() - t0 > _RR_STAGE_MAX_MS) { rep.capped = 'terrain'; break; }
-        await _warmupYield();
-      }
-    }
-    rep.ms.terrain = Math.round(_pbNow() - t);
-    rep.ch1 = _cnt();
-  } catch (e) {
-    console.warn('[rrstage] staged round rebuild failed:', e);
-    rep.error = String((e && e.message) || e);
-  } finally {
-    // ⚠ MUST run on a throw. A stage that leaves _rrStaging set never lets the
-    // round start, and one that leaves the world half-built is still better off
-    // handing the streamer back to gameLoop's own warmup arm.
-    _RRSTAGE.staging = false;
-    game._rrStaging = false;
-    game._worldPrebaking = false;
-    rep.totalMs = Math.round(_pbNow() - t0);
-    _RRSTAGE.last = rep;
-  }
-}
-if (typeof window !== 'undefined') window.__rrStage = () => _RRSTAGE.last;
 
 function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof camera === 'undefined' || !player || !player.position) return null;
@@ -56389,12 +56089,7 @@ function updateRoundSystem(dt) {
     // above, and `selectActive` is false for the whole stage — so without this
     // guard the very first frame of a traverse flips straight to 'playing' and
     // drops the player into a half-built world.
-    // (v36.40) `!game._rrStaging` is the same guard for the between-rounds staged
-    // rebuild (_rrStagedRound). It raises the picker first, so `selectActive`
-    // normally covers this — but freeflight/testMode force `warmupTimer` to 0
-    // every frame, and a mode that reaches here without the picker (or with it
-    // hidden early) would otherwise flip to 'playing' with the arena half-built.
-    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging && !game._rrStaging) {
+    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
       // (v35.06) Orientation unlock removed (locking is gone entirely —
@@ -56888,21 +56583,10 @@ function updateRoundSystem(dt) {
         // without this, every round past 1 diverges across peers because
         // buildRoomGraphLevel / spawnDynamicObjects / spawnOrganics all call
         // Math.random and the round-end path here was missing the wrapper.
-        // (v36.40) The three calls are timed individually and reported through
-        // window.__rrStage().build — this is the whole of `_rrStagedRound`'s
-        // remaining big frame, and knowing which third owns it is the difference
-        // between fixing it and guessing. Three _pbNow() calls per ROUND.
         const buildNextRound = () => {
-          const _tB0 = _pbNow();
           buildRoomGraphLevel(level);
-          const _tB1 = _pbNow();
           spawnDynamicObjects(game.sdfRoomData);
-          const _tB2 = _pbNow();
           spawnOrganics(game.sdfRoomData);
-          try {
-            game._rrBuildMs = { lvl: Math.round(_tB1 - _tB0), dyn: Math.round(_tB2 - _tB1),
-                                org: Math.round(_pbNow() - _tB2) };
-          } catch (_) {}
         };
         let roundSeed = game.currentRound;
         // ---- PHASE 1 : the world ----
@@ -57080,15 +56764,6 @@ function updateRoundSystem(dt) {
         if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
 
         };
-        // ---- PHASE 3a : fleet strip refresh ----
-        // (v36.40) `_rrCountdown` still calls updateTeammatesStrip where it always
-        // did — this is the SECOND call, made by _rrStagedRound once ph.reset() has
-        // re-run spawnBots(), because that path raises the picker BEFORE the
-        // rebuild. Idempotent (the strip is rebuilt from scratch each time), and
-        // the traverse path never calls it, so _rrStagedSwap is untouched.
-        const _rrRoster = () => {
-        try { updateTeammatesStrip(); } catch (_) {}
-        };
         // ---- PHASE 4 : picker + launch countdown ----
         const _rrCountdown = (_dur) => {
         if (document.exitPointerLock) {
@@ -57129,20 +56804,9 @@ function updateRoundSystem(dt) {
           // never rejects and its own finally starts the countdown.
           _rrStagedSwap(_swap, { world: _rrWorld, wave: _rrWave, warpBeat: _rrWarpBeat,
                                  shaders: _rrShaders, reset: _rrReset, countdown: _rrCountdown });
-        } else if (typeof _rrStagedRound === 'function' &&
-                   !(typeof window !== 'undefined' && window.__rrStageOff)) {
-          // (v36.40) Between-rounds: the picker goes up FIRST and the same five
-          // closures run one frame apart behind it. Fire-and-forget — it never
-          // rejects, and the countdown it raises is the first thing it does, so
-          // there is no path where the round fails to start. See _rrStagedRound.
-          _rrStagedRound({ world: _rrWorld, wave: _rrWave, warpBeat: _rrWarpBeat,
-                           shaders: _rrShaders, reset: _rrReset, roster: _rrRoster,
-                           countdown: _rrCountdown });
         } else {
-          // Belt, and the A/B arm (`window.__rrStageOff = 1`): all of it in this
-          // one frame, in this order — identical to every version before v36.40.
-          // This is how the before/after numbers in lss.map.md were taken on ONE
-          // page, one seed and one map rotation cursor.
+          // Between-rounds: identical to every version before v36.27 — all of it
+          // in this one frame, in this order.
           _rrWorld(); _rrWave(); _rrWarpBeat(); _rrShaders(); _rrReset(); _rrCountdown();
         }
       }
@@ -75210,13 +74874,11 @@ function gameLoop(timestamp) {
         game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
         if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
-      } else if (game._swapStaging || game._rrStaging) {
+      } else if (game._swapStaging) {
         // (v36.27) A staged world-swap traverse owns the streamer end to end: it
         // tears the outgoing chunks down in slices, builds, enables the clipmap
         // and then drains to completion, all in a fixed order. A background
         // 1-chunk/frame trickle here refills the map behind the teardown loop.
-        // (v36.40) `_rrStaging` is the between-rounds sibling (_rrStagedRound):
-        // same rule, its own flag — see the header there for why they are two.
       } else if (game.state === 'warmup' && !game._worldPrebaking) {
         // (v36.26) WARMUP IS LOADING TIME, NOT FLIGHT TIME — so it gets a loading
         // budget. The launch path is already covered by _prebakeWorldForLaunch
