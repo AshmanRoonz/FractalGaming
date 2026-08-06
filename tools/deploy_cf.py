@@ -17,6 +17,14 @@ STAGE = os.path.join(os.path.dirname(REPO), "FractalGaming_deploy")
 PROJECT = "lss"
 EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
                 "__pycache__", "node_modules"]
+# Dev-only files that live in LSS/ but have no business on the live site.
+# index-working.html is the commented SOURCE (4.2 MB) that strip.py turns into
+# the shipped index.html; lss.map.md is the internal architecture map. Together
+# they were 4.6 MB of every upload — and on the v36.48 deploy the run died with
+# ECONNRESET three times in a row, always at 389/392, i.e. on exactly the
+# changed big files. Dropping these more than halves the changed-byte payload.
+# (/MIR means robocopy also DELETES them from the staging dir on the next run.)
+EXCLUDE_FILES = ["index-working.html", "lss.map.md"]
 
 def run(cmd, ok_codes=(0,)):
     print(">", " ".join(cmd))
@@ -29,8 +37,20 @@ def run(cmd, ok_codes=(0,)):
 xd = []
 for d in EXCLUDE_DIRS:
     xd += ["/XD", os.path.join(SRC, d)]
-run(["robocopy", SRC, STAGE, "/MIR", "/NFL", "/NDL", "/NJH", "/NP"] + xd,
+xf = []
+for f in EXCLUDE_FILES:
+    xf += ["/XF", os.path.join(SRC, f)]
+run(["robocopy", SRC, STAGE, "/MIR", "/NFL", "/NDL", "/NJH", "/NP"] + xd + xf,
     ok_codes=(0, 1, 2, 3, 4, 5, 6, 7))
+# ⚠ /MIR does NOT purge these. Its purge only removes dest files that are ABSENT
+# from source; an /XF file is present-but-skipped, so a copy left over from an
+# earlier deploy would sit in the staging dir forever and keep getting uploaded.
+# Delete them explicitly.
+for f in EXCLUDE_FILES:
+    p = os.path.join(STAGE, f)
+    if os.path.exists(p):
+        os.remove(p)
+        print("purged from staging:", f)
 print("staged ->", STAGE)
 
 if "--stage" not in sys.argv:
